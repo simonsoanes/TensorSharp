@@ -160,6 +160,97 @@ namespace TensorSharp.Server.RequestParsers
         }
 
         /// <summary>
+        /// Parse the Responses API <c>input</c> field, which is either a plain
+        /// string (shorthand for a single user turn) or an array of message
+        /// items: <c>{role, content: string | [{type:"input_text"|"output_text", text} |
+        /// {type:"input_image", image_url}]}</c>. An optional <c>instructions</c>
+        /// string is prepended as a system message, matching how the real API
+        /// folds it into the model's system prompt.
+        /// </summary>
+        public static List<ChatMessage> ParseResponsesInput(JsonElement inputEl, string instructions, string uploadDir)
+        {
+            var messages = new List<ChatMessage>();
+
+            if (!string.IsNullOrEmpty(instructions))
+                messages.Add(new ChatMessage { Role = "system", Content = instructions });
+
+            if (inputEl.ValueKind == JsonValueKind.String)
+            {
+                messages.Add(new ChatMessage { Role = "user", Content = inputEl.GetString() ?? "" });
+                return messages;
+            }
+
+            if (inputEl.ValueKind != JsonValueKind.Array)
+                return messages;
+
+            foreach (var itemEl in inputEl.EnumerateArray())
+            {
+                // Only message-shaped items are supported; other item types
+                // (function_call, function_call_output, reasoning, ...) are
+                // ignored for this MVP surface.
+                string itemType = itemEl.TryGetProperty("type", out var t) ? t.GetString() : "message";
+                if (itemType != "message")
+                    continue;
+
+                var msg = new ChatMessage
+                {
+                    Role = itemEl.TryGetProperty("role", out var r) ? r.GetString() : "user",
+                };
+
+                if (!itemEl.TryGetProperty("content", out var contentEl))
+                {
+                    messages.Add(msg);
+                    continue;
+                }
+
+                if (contentEl.ValueKind == JsonValueKind.String)
+                {
+                    msg.Content = contentEl.GetString();
+                    messages.Add(msg);
+                    continue;
+                }
+
+                if (contentEl.ValueKind == JsonValueKind.Array)
+                {
+                    var textParts = new List<string>();
+                    msg.ImagePaths = new List<string>();
+
+                    foreach (var part in contentEl.EnumerateArray())
+                    {
+                        string partType = part.TryGetProperty("type", out var pt) ? pt.GetString() : "";
+                        if ((partType == "input_text" || partType == "output_text") &&
+                            part.TryGetProperty("text", out var txt))
+                        {
+                            textParts.Add(txt.GetString());
+                        }
+                        else if (partType == "input_image")
+                        {
+                            string url = part.TryGetProperty("image_url", out var u)
+                                ? (u.ValueKind == JsonValueKind.String ? u.GetString() : null)
+                                : null;
+                            if (!string.IsNullOrEmpty(url) && url.StartsWith("data:"))
+                            {
+                                int commaIdx = url.IndexOf(',');
+                                if (commaIdx > 0)
+                                {
+                                    string b64 = url.Substring(commaIdx + 1);
+                                    msg.ImagePaths.Add(WriteBase64Image(b64, uploadDir));
+                                }
+                            }
+                        }
+                    }
+
+                    msg.Content = string.Join("\n", textParts);
+                    if (msg.ImagePaths.Count == 0) msg.ImagePaths = null;
+                }
+
+                messages.Add(msg);
+            }
+
+            return messages;
+        }
+
+        /// <summary>
         /// Decode the top-level <c>"images"</c> base64 array used by Ollama's
         /// <c>/api/generate</c>. Returns null when no images are present so the
         /// downstream code path can short-circuit cleanly.

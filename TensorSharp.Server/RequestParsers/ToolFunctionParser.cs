@@ -60,6 +60,29 @@ namespace TensorSharp.Server.RequestParsers
             return tools.Count > 0 ? tools : null;
         }
 
+        /// <summary>
+        /// Parse the Responses API's flat <c>tools</c> shape: each entry is
+        /// <c>{type:"function", name, description, parameters}</c> directly
+        /// (no nested <c>"function"</c> wrapper like Chat Completions uses).
+        /// </summary>
+        public static List<ToolFunction> ParseOpenAIResponses(JsonElement body)
+        {
+            if (!body.TryGetProperty("tools", out var toolsEl) || toolsEl.ValueKind != JsonValueKind.Array)
+                return null;
+
+            var tools = new List<ToolFunction>();
+            foreach (var toolEl in toolsEl.EnumerateArray())
+            {
+                string type = toolEl.TryGetProperty("type", out var t) ? t.GetString() : "function";
+                if (type != "function") continue;
+
+                var tf = ParseFunction(toolEl);
+                if (tf != null)
+                    tools.Add(tf);
+            }
+            return tools.Count > 0 ? tools : null;
+        }
+
         private static ToolFunction ParseFunction(JsonElement fnEl)
         {
             var tf = new ToolFunction

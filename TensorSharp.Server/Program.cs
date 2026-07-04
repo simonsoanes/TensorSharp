@@ -24,6 +24,7 @@ using TensorSharp.Server.Endpoints;
 using TensorSharp.Server.Hosting;
 using TensorSharp.Server.Logging;
 using TensorSharp.Server.ProtocolAdapters;
+using TensorSharp.Server.Responses;
 
 const string ListenAddress = "http://0.0.0.0:5000";
 const long MaxRequestBodyBytes = 500L * 1024L * 1024L;
@@ -130,6 +131,8 @@ builder.Services.AddTensorSharpRequestLogging(options =>
 builder.Services.AddSingleton<WebUiAdapter>();
 builder.Services.AddSingleton<OllamaAdapter>();
 builder.Services.AddSingleton<OpenAIChatAdapter>();
+builder.Services.AddSingleton<IResponsesStore, InMemoryResponsesStore>();
+builder.Services.AddSingleton<OpenAIResponsesAdapter>();
 
 WebRootSetup.Resolve(builder.Environment, baseDirectory);
 
