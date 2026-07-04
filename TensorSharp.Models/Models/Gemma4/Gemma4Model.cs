@@ -156,6 +156,15 @@ namespace TensorSharp.Models
         private static readonly bool s_MoeModelDecodeEnabled =
             Environment.GetEnvironmentVariable("TS_GEMMA4_MOE_MODEL_DECODE") != "0";
 
+        // Escape hatch: route block-quantized (Q8_0 / Q4_0) dense prefill through the
+        // fused whole-model verify kernel (the only path that supports a block-
+        // quantized cache; the per-op fallback throws). Set
+        // TS_G4_FUSED_PREFILL_DISABLE_BLOCKQUANT=1 to restore the historical gate
+        // that disabled fused prefill for block-quantized caches (which left them
+        // with no working multi-token prefill route at all).
+        private static readonly bool TS_G4_FUSED_PREFILL_DISABLE_BLOCKQUANT =
+            Environment.GetEnvironmentVariable("TS_G4_FUSED_PREFILL_DISABLE_BLOCKQUANT") == "1";
+
         // Flash attention for the global-layer chunk-2+ (linear-cache) prefill path
         // on GGML backends, replacing the materialized [numHeads, seqLen, kvLen]
         // score-matrix path. TS_GEMMA4_FLASH_GLOBAL=0 forces the legacy materialized
@@ -178,6 +187,16 @@ namespace TensorSharp.Models
         // verify-kernel issue degrades to the per-op verify without killing decode.
         private bool _moeModelVerifyDisabled;
         private Gemma4MoELayerDecodeArgs[] _moeVerifyArgs;
+        // Max tokens per native MoE verify call (ubatch). The whole-prompt verify graph's
+        // O(N) working set spills VRAM on the near-full 26B GPU past ~3k tokens, so
+        // TryFusedMoEModelVerify sub-chunks long prompts into <= this many tokens (each a
+        // separate bounded graph; start_pos>0 chunks use the kernel's swaPrev/global paths).
+        // 1024 keeps each verify graph's gallocr ~1 GB (the expert FFN [*,8,M] + the
+        // wide global qDim dominate; 2048 peaked ~1.3 GB and partially spilled with the
+        // 1.2 GB mmproj resident). At 1024: 4k prefill 2170 t/s, 8k 1413 (~llama).
+        // TS_G4_MOE_VERIFY_CHUNK overrides.
+        private static readonly int _moeVerifySubChunk =
+            int.TryParse(Environment.GetEnvironmentVariable("TS_G4_MOE_VERIFY_CHUNK"), out int v) && v > 0 ? v : 1024;
         private bool _kvCacheHostDirty;
         private Gemma4DecodeArrays _decodeArrays;
 
@@ -618,6 +637,21 @@ namespace TensorSharp.Models
         // because they wrap circularly within _slidingWindow and never need
         // more storage. Donor-shared layers track their donor — we only
         // resize each underlying cache once and update the alias entries.
+        /// <summary>Pre-size the grow-on-demand global KV cache to the whole prompt at
+        /// the start of a fresh prefill. At start_pos == 0 the cache holds no committed
+        /// K/V, so growing to the final size copies nothing (free) — this eliminates the
+        /// incremental doubling grows during the prefill, each of which re-copied and
+        /// device↔host round-tripped the whole global cache (a measured ~7% at 64k).
+        /// Only on GGML GPU (where the round-trip exists); clamped to the model context.</summary>
+        public override void PrepareForPrefill(int totalPromptTokens)
+        {
+            if (totalPromptTokens <= 0 || _kvCacheK == null) return;
+            if (_backend != BackendType.GgmlCuda && _backend != BackendType.GgmlMetal) return;
+            int target = Math.Min(totalPromptTokens, _maxContextLength);
+            if (target > _kvCacheGlobalCapacity)
+                EnsureCacheCapacity(target);
+        }
+
         private void EnsureCacheCapacity(int requiredSeqLen)
         {
             if (requiredSeqLen <= _kvCacheGlobalCapacity)
@@ -1074,15 +1108,26 @@ namespace TensorSharp.Models
                 _pendingAudioEmbeddingsList.Clear();
             }
 
-            Tensor perLayerInputs = null;
-            long pPle = s_DecodeProfileEnabled && seqLen == 1 ? Stopwatch.GetTimestamp() : 0;
-            if (_pleDim > 0)
-                perLayerInputs = ComputePLE(tokens, hidden, seqLen);
-            if (s_DecodeProfileEnabled && seqLen == 1) ProfMark(ref _profPleTicks, pPle, perLayerInputs);
-
             // Whole-model multi-token prefill (one fused GGML graph for all
             // layers, activations device-resident) — see CanUseWholeModelPrefillVerify.
             bool useWholeModelPrefill = CanUseWholeModelPrefillVerify(startPos, seqLen, exceptPositions);
+
+            // When the dense verify will run and can gather PLE in-kernel, skip the
+            // C# ComputePLE (its on-device gather + the device->host->device shuffle
+            // of the gathered per-layer embeddings); the verify graph reproduces the
+            // full PLE (get_rows + hidden projection + norm + combine) on-device. On a
+            // verify bail we lazily recompute PLE in the per-op fallback below (rare).
+            // Restricted to text prefill (exceptPositions == null): the multimodal
+            // path keeps the byte-validated upload path until it is validated too.
+            bool pleInKernel = useWholeModelPrefill && _pleDim > 0
+                && exceptPositions == null && CanGatherPleInKernel();
+
+            Tensor perLayerInputs = null;
+            long pPle = s_DecodeProfileEnabled && seqLen == 1 ? Stopwatch.GetTimestamp() : 0;
+            if (_pleDim > 0 && !pleInKernel)
+                perLayerInputs = ComputePLE(tokens, hidden, seqLen);
+            if (s_DecodeProfileEnabled && seqLen == 1) ProfMark(ref _profPleTicks, pPle, perLayerInputs);
+
             // The all-MoE sibling (e.g. 26B-A4B) routes through the fused MoE verify
             // kernel; see CanUseWholeModelMoEPrefillVerify. Mutually exclusive with
             // the dense path above (one is dense-only, the other all-MoE).
@@ -1142,7 +1187,7 @@ namespace TensorSharp.Models
                 _linearTicks += Stopwatch.GetTimestamp() - tFused;
                 _kvCacheHostDirty = true;
             }
-            else if (useWholeModelPrefill && NativeGemma4ModelVerify(hidden, startPos, seqLen, perLayerInputs, exceptPositions))
+            else if (useWholeModelPrefill && NativeGemma4ModelVerify(hidden, startPos, seqLen, perLayerInputs, exceptPositions, pleInKernel ? tokens : null))
             {
                 // hidden now holds the layer-stack output [hiddenSize, seqLen];
                 // the kernel wrote the KV cache for all seqLen tokens on-device.
@@ -1176,6 +1221,13 @@ namespace TensorSharp.Models
                 // restore it before the per-op path reads the cache from host memory.
                 if (useWholeModelPrefill || useWholeModelMoEPrefill || useFusedMoEDecode)
                     EnsureKvCacheHostSynchronized();
+
+                // The dense verify bailed after we skipped ComputePLE for the
+                // in-kernel gather (rare) — compute the PLE now so the per-op path
+                // below has it. Only fires in that case: otherwise perLayerInputs was
+                // already computed (or _pleDim == 0).
+                if (perLayerInputs == null && _pleDim > 0)
+                    perLayerInputs = ComputePLE(tokens, hidden, seqLen);
 
                 // Save donor SWA layer's freshly-computed K/V so KV-shared SWA
                 // layers can attend to the *full* chunk's K/V instead of the
@@ -2628,7 +2680,7 @@ namespace TensorSharp.Models
         /// e.g. total length exceeds the SWA window so the circular cache has wrapped.
         /// </summary>
         private unsafe bool NativeGemma4ModelVerify(Tensor hidden, int startPos, int n, Tensor perLayerInputs,
-            HashSet<int> exceptPositions = null)
+            HashSet<int> exceptPositions = null, int[] pleTokenIds = null)
         {
             if (_decodeArrays == null) return false;
             var a = _decodeArrays;
@@ -2654,7 +2706,49 @@ namespace TensorSharp.Models
                 freqFactorsLen = (int)freqTensor.ElementCount();
             }
 
-            IntPtr pleDataPtr = perLayerInputs != null ? (IntPtr)GetFloatPtr(perLayerInputs) : IntPtr.Zero;
+            // In-kernel PLE gather: pass the resident quantized per_layer_token_embd
+            // table + the chunk's token ids so the verify graph gathers the PLE
+            // on-device (ggml_get_rows), avoiding the device->host->device round-trip
+            // of the ~88 MB gathered PLE that GetFloatPtr(perLayerInputs) forces.
+            IntPtr pleDataPtr = IntPtr.Zero;
+            IntPtr pleTableData = IntPtr.Zero;
+            int pleTableType = 0;
+            long pleTableNe0 = 0, pleTableNe1 = 0, pleTableBytes = 0;
+            int[] pleIds = null;
+            IntPtr pleProjWData = IntPtr.Zero;
+            int pleProjWType = 0;
+            long pleProjWNe0 = 0, pleProjWNe1 = 0, pleProjWBytes = 0;
+            IntPtr pleProjNormData = IntPtr.Zero;
+            if (pleTokenIds != null && _pleDim > 0
+                && _quantWeights.TryGetValue("per_layer_token_embd.weight", out var pleQw))
+            {
+                pleTableData = pleQw.CacheKey;
+                pleTableType = (int)pleQw.GgmlType;
+                pleTableNe0 = pleQw.Ne0;
+                pleTableNe1 = pleQw.Ne1;
+                pleTableBytes = pleQw.RawBytes;
+                pleIds = pleTokenIds;
+
+                // Hidden-projection component (matches ComputePLE): pass the quantized
+                // per_layer_model_proj + F32 per_layer_proj_norm so the verify computes
+                // rmsnorm((hidden @ proj)/sqrt(hidden)) and combines with the token emb.
+                // CanGatherPleInKernel guarantees these are present in this form, or
+                // that no projection exists (token-embedding-only PLE).
+                if (_quantWeights.TryGetValue("per_layer_model_proj.weight", out var projQw)
+                    && _weights.TryGetValue("per_layer_proj_norm.weight", out var projNormW))
+                {
+                    pleProjWData = projQw.CacheKey;
+                    pleProjWType = (int)projQw.GgmlType;
+                    pleProjWNe0 = projQw.Ne0;
+                    pleProjWNe1 = projQw.Ne1;
+                    pleProjWBytes = projQw.RawBytes;
+                    pleProjNormData = (IntPtr)GetFloatPtr(projNormW);
+                }
+            }
+            else if (perLayerInputs != null)
+            {
+                pleDataPtr = (IntPtr)GetFloatPtr(perLayerInputs);
+            }
 
             return GgmlBasicOps.Gemma4ModelVerify(
                 (IntPtr)hiddenPtr, Config.HiddenSize, Config.NumLayers, n,
@@ -2678,7 +2772,9 @@ namespace TensorSharp.Models
                 a.PleGate, a.PleGateType, a.PleGateNe0, a.PleGateNe1, a.PleGateBytes,
                 a.PleProj, a.PleProjType, a.PleProjNe0, a.PleProjNe1, a.PleProjBytes,
                 a.PlePostNorm,
-                isExcept);
+                isExcept,
+                pleTableData, pleTableType, pleTableNe0, pleTableNe1, pleTableBytes, pleIds,
+                pleProjWData, pleProjWType, pleProjWNe0, pleProjWNe1, pleProjWBytes, pleProjNormData);
         }
 
         // Gates the whole-model multi-token prefill path. Default on; set
@@ -2691,6 +2787,48 @@ namespace TensorSharp.Models
         // TS_G4_MM_PREFILL=0 to keep multimodal on the per-op path for A/B.
         private static readonly bool s_wholeModelMMPrefillEnabled =
             Environment.GetEnvironmentVariable("TS_G4_MM_PREFILL") != "0";
+
+        // Allow the whole-model verify kernel to serve SWA-wrapped chunks at
+        // start_pos>0 via its in-kernel swaPrev gather (the previous window is read
+        // from the rolling cache before this chunk overwrites it, then prepended to
+        // the fresh chunk). This keeps long / multi-turn prefill on the fast 1-graph
+        // on-device path instead of the per-op chunked tail, and reads block-quant
+        // (q4_0/q8_0) caches natively via flash_attn_ext. Default on; set
+        // TS_G4_VERIFY_SWAPREV=0 to force the per-op path for the wrapped tail.
+        private static readonly bool s_verifySwaPrevEnabled =
+            Environment.GetEnvironmentVariable("TS_G4_VERIFY_SWAPREV") != "0";
+
+        // Gather the per-layer embeddings (PLE) INSIDE the fused verify graph via
+        // ggml_get_rows on the resident quantized per_layer_token_embd table, instead
+        // of computing them in C# (on-device get_rows) and shuttling the ~88 MB result
+        // device->host (GetFloatPtr sync) then host->device (kernel upload) every
+        // chunk. Default on; set TS_G4_PLE_IN_KERNEL=0 to revert to the uploaded path.
+        private static readonly bool s_pleInKernelEnabled =
+            Environment.GetEnvironmentVariable("TS_G4_PLE_IN_KERNEL") != "0";
+
+        /// <summary>Whether the in-kernel PLE gather is usable this run: GGML backend,
+        /// a quantized per_layer_token_embd table whose type ggml's get_rows supports
+        /// on the active device (else it would crash — see the q6_K get_rows issue), and
+        /// — if a hidden-projection component exists — the projection is a quantized
+        /// weight (reproducible by the in-kernel mul_mat) with its F32 norm present.
+        /// When the projection is not in that form we fall back to C# ComputePLE so the
+        /// result stays byte-exact.</summary>
+        private bool CanGatherPleInKernel()
+        {
+            if (!s_pleInKernelEnabled || !IsGgmlBackend || _pleDim <= 0) return false;
+            if (!_quantWeights.TryGetValue("per_layer_token_embd.weight", out var tok)
+                || !CanUseGgmlQuantizedGetRows(tok.GgmlType))
+                return false;
+            bool hasProj = _quantWeights.ContainsKey("per_layer_model_proj.weight")
+                           || _weights.ContainsKey("per_layer_model_proj.weight");
+            if (hasProj)
+            {
+                // Only the quantized-proj + F32-norm form is wired in-kernel.
+                if (!_quantWeights.ContainsKey("per_layer_model_proj.weight")) return false;
+                if (!_weights.ContainsKey("per_layer_proj_norm.weight")) return false;
+            }
+            return true;
+        }
 
         /// <summary>
         /// Whether a dense Gemma 4 prefill chunk can run through the fused
@@ -2721,25 +2859,36 @@ namespace TensorSharp.Models
             // Later-turn multimodal chunks (startPos>0) keep the per-op path.
             if (exceptPositions != null && (!s_wholeModelMMPrefillEnabled || startPos != 0)) return false;
             if (_decodeArrays == null || !_canUseFusedFullModelDecode) return false; // dense only (no MoE)
-            if (_kvCacheDtype.IsBlockQuantized()) return false;
+            // Block-quantized (Q8_0 / Q4_0) caches REQUIRE this fused verify path:
+            // the per-op TransformerBlock fallback walks the cache as a flat F32/F16
+            // buffer and throws on block-quantized layouts. The verify kernel writes
+            // and reads K/V exclusively through ggml ops (ggml_cpy into the typed
+            // cache + flash_attn_ext), which handle Q8_0/Q4_0 natively, so it is the
+            // path that makes a block-quantized KV cache usable for multi-token
+            // prefill (decode already uses the fused seqLen==1 kernel). Previously
+            // gated off here, which left block-quantized prefill with no working
+            // route and surfaced as the "requires fused native kernels" throw.
+            if (TS_G4_FUSED_PREFILL_DISABLE_BLOCKQUANT && _kvCacheDtype.IsBlockQuantized()) return false;
 
             long totalSeqLen = (long)startPos + seqLen;
-            // The kernel's fresh-K/V SWA path attends over the whole chunk's fresh
-            // K/V (a sliding-window mask, correct for any N) at start_pos==0 — for
-            // both non-shared layers (their own K/V) and shared (KV-donor) SWA
-            // layers (the donor's retained fresh K/V). The start_pos==0 restriction
-            // holds because only then is the fresh chunk the entire history; chunked
-            // / multi-turn prefill past the window falls back to the per-op path.
-            bool swaFreshOk = startPos == 0;
+            // The kernel's SWA paths attend the whole chunk's K/V with a sliding-window
+            // mask, correct for any N: at start_pos==0 over the FRESH chunk (swaFresh);
+            // at start_pos>0 over [prev window ++ fresh chunk] where the prev window is
+            // gathered in-kernel from the rolling cache before this chunk overwrites it
+            // (swaPrev). Both cover non-shared (own K/V) and shared (KV-donor) SWA
+            // layers. swaPrev requires the kill-switch on; without it, start_pos>0
+            // SWA-wrapped chunks fall back to the per-op path.
+            bool swaWrapOk = startPos == 0 || s_verifySwaPrevEnabled;
             var a = _decodeArrays;
             for (int l = 0; l < Config.NumLayers; l++)
             {
                 if (totalSeqLen <= a.CacheSize[l]) continue;       // no wrap / fits
                 bool isLocal = a.IsLocal[l] != 0;
-                if (!isLocal || !swaFreshOk) return false;         // would overflow global / wrap SWA past chunk
-                // Shared SWA layer: the kernel attends the donor's fresh full K/V,
-                // which only exists when the donor is a non-shared layer (computes
-                // its own K/V). A donor that is itself shared is unsupported here.
+                if (!isLocal || !swaWrapOk) return false;          // global overflow, or SWA wrap with swaPrev disabled
+                // Shared SWA layer: the kernel attends the donor's fresh full K/V (and,
+                // at start_pos>0, the donor's retained prev window), which only exist
+                // when the donor is a non-shared layer (computes its own K/V). A donor
+                // that is itself shared is unsupported here.
                 int src = a.KvSource[l];
                 if (src != l && a.KvSource[src] != src) return false;
             }
@@ -2794,13 +2943,16 @@ namespace TensorSharp.Models
             // layers (_kvDonorMap.Count == 0), so there is no swaFreshShared case. Chunked
             // / multi-turn SWA overflow (startPos>0) still falls back to the per-op path.
             long totalSeqLen = (long)startPos + seqLen;
-            bool swaFreshOk = startPos == 0;
             var a = _decodeArrays;
             for (int l = 0; l < Config.NumLayers; l++)
             {
                 if (totalSeqLen <= a.CacheSize[l]) continue;        // fits / no wrap
                 bool isLocal = a.IsLocal[l] != 0;
-                if (!isLocal || !swaFreshOk) return false;          // global overflow / wrapped SWA past chunk
+                // Global (linear-cache) overflow can't be served. SWA (local) overflow is
+                // served by the kernel at start_pos==0 (swaFresh) AND start_pos>0 (swaPrev,
+                // gathers the previous window from the rolling cache) — see
+                // TryFusedMoEModelVerify (which sub-chunks long prompts into bounded calls).
+                if (!isLocal) return false;
             }
             return true;
         }
@@ -3127,18 +3279,40 @@ namespace TensorSharp.Models
                 }
             }
 
-            bool ok;
-            try
+            // Process the prompt in bounded sub-chunks (ubatches). The whole-prompt
+            // verify graph's O(N) intermediates (residual stream + per-layer FFN/expert
+            // tensors) sum to ~2.4 GB at N=8192 and spill into WDDM shared memory on the
+            // near-full 26B GPU (14.2 GB resident) — the 4k/8k prefill cliff. Splitting
+            // into <= _moeVerifySubChunk-token calls keeps each graph's gallocr peak
+            // small (~0.8 GB at 2048) and reused across calls, mirroring llama.cpp's
+            // n_ubatch. Sub-chunks at start_pos>0 attend prior keys via the cache
+            // (global, linear) / the in-kernel prev-window gather (SWA, swaPrev), so the
+            // result is byte-identical to one big call. The hidden buffer is [n, H]
+            // row-major, so sub-chunk t starts at hidden + off*H floats.
+            int subMax = _moeVerifySubChunk;
+            int H = Config.HiddenSize;
+            for (int off = 0; off < n; )
             {
-                ok = GgmlBasicOps.Gemma4MoEModelVerify(_moeVerifyArgs, layerCount, hiddenPtr, Config.HiddenSize, startPos, n);
+                int sub = Math.Min(subMax, n - off);
+                IntPtr subHidden = hiddenPtr + (nint)off * H * sizeof(float);
+                bool ok;
+                try
+                {
+                    ok = GgmlBasicOps.Gemma4MoEModelVerify(_moeVerifyArgs, layerCount, subHidden, H, startPos + off, sub);
+                }
+                catch (Exception ex)
+                {
+                    System.Console.WriteLine($"[gemma4] fused MoE model verify disabled after error: {ex.Message}");
+                    _moeModelVerifyDisabled = true;
+                    return false;
+                }
+                // A mid-prompt decline (e.g. unsupported flash geometry) is deterministic
+                // per layer geometry, so it fails on the first sub-chunk before any cache
+                // write; if it ever declines later the per-op fallback re-processes the
+                // whole chunk from startPos (idempotent cache rewrite), so this is safe.
+                if (!ok) return false;
+                off += sub;
             }
-            catch (Exception ex)
-            {
-                System.Console.WriteLine($"[gemma4] fused MoE model verify disabled after error: {ex.Message}");
-                _moeModelVerifyDisabled = true;
-                return false;
-            }
-            if (!ok) return false;   // kernel declined (e.g. global cache too small): per-op fallback
             _kvCacheHostDirty = true;
             return true;
         }
@@ -3577,18 +3751,26 @@ namespace TensorSharp.Models
         private Tensor TransformerBlock(Tensor hidden, int layer, int seqLen, int startPos,
             bool isShared, Tensor perLayerInput, HashSet<int> exceptPositions = null)
         {
-            // The C# managed prefill / decode path reads and writes the cache as a
-            // flat F32 (or F16) buffer. Block-quantized layouts (Q8_0) cannot be
-            // walked with raw pointer arithmetic, so we surface a clear error
-            // here rather than letting downstream pointer math silently corrupt
-            // the cache. Users should pick --kv-cache-dtype f16 for multimodal
-            // prompts or any setup that disables the native fused kernels.
-            if (_kvCacheDtype.IsBlockQuantized())
+            // Block-quantized (Q4_0 / Q8_0) caches cannot be walked as a flat F32/F16
+            // buffer. Multi-token text prefill (seqLen > 1, no multimodal spans) is
+            // supported: the cache is read by dequantizing into F32 (ExpandKVHeads /
+            // BuildSwaPrevWindow) and written by quantizing fresh K/V back into the
+            // block layout (CopyToCache[Circular]), so chunked long-prompt prefill
+            // works for block-quant exactly as it does for F16. The remaining managed
+            // entry points still lack that handling, so surface a clear error rather
+            // than corrupting the cache:
+            //   * seqLen == 1  : the non-fused per-op decode fallback (the fused
+            //                    full-model decode normally serves block-quant decode).
+            //   * exceptPositions != null : multimodal soft-token injection, whose
+            //                    bidirectional-span attention path reads the cache
+            //                    through code that has no block-quant branch.
+            // Both are reachable only when the native fused kernels are unavailable;
+            // pick --kv-cache-dtype f16 for those configurations.
+            if (_kvCacheDtype.IsBlockQuantized() && (seqLen == 1 || exceptPositions != null))
                 throw new InvalidOperationException(
-                    $"Q8_0 KV cache requires the fused native attention kernels. " +
-                    $"This call path (multimodal injection / fused-prefill bailout / non-fused decode) " +
-                    $"falls back to the C# managed attention helpers which only support F32/F16. " +
-                    $"Use --kv-cache-dtype f16 for this configuration.");
+                    $"{_kvCacheDtype.ToShortString()} KV cache requires the fused native attention kernels for this " +
+                    $"call path (multimodal injection / non-fused decode), which falls back to the C# managed " +
+                    $"attention helpers that only support F32/F16. Use --kv-cache-dtype f16 for this configuration.");
 
             string prefix = $"blk.{layer}";
 
@@ -6369,6 +6551,56 @@ namespace TensorSharp.Models
                 return result;
             }
 
+            // Block-quantized cache (Q4_0 / Q8_0 via --kv-cache-dtype). The native
+            // fused-layer prefill kernel (TSGgml_Gemma4LayerPrefill) reads/writes the
+            // typed circular cache through ggml ops, but the SWA prev-window it
+            // attends to is handed in as a contiguous F32 buffer. So we dequantize
+            // the live window out of the block-quantized cache here rather than
+            // memcpy raw bytes. Each (head, slot) row is headDim elements = a whole
+            // number of quant blocks (headDim % 32 == 0 for Gemma), so a contiguous
+            // run of slots dequantizes in one pass. Same wrap handling as F32/F16.
+            if (cache.ElementType == DType.Q4_0 || cache.ElementType == DType.Q8_0)
+            {
+                cache.Storage.EnsureHostReadable();
+                int ggmlType = _kvCacheDtype.GgmlType();
+                long rowBytes = ManagedQuantizedOps.RowSize(ggmlType, headDim);
+                long cacheBaseAddr = (long)TensorComputePrimitives.GetStoragePointer(cache);
+                long dstBaseAddr = (long)GetFloatPtr(result);
+                int firstSlotQ = firstSlot;
+                int prevWindowLenQ = prevWindowLen;
+                int cacheSizeQ = cacheSize;
+                int headDimQ = headDim;
+                int ggmlTypeQ = ggmlType;
+                long rowBytesQ = rowBytes;
+                void DequantOneHead(int h)
+                {
+                    byte* cacheHead = (byte*)cacheBaseAddr + (long)h * cacheSizeQ * rowBytesQ;
+                    float* dstHead = (float*)dstBaseAddr + (long)h * prevWindowLenQ * headDimQ;
+                    if (firstSlotQ + prevWindowLenQ <= cacheSizeQ)
+                    {
+                        ManagedQuantizedOps.DequantizeRowToFloat32(ggmlTypeQ,
+                            (IntPtr)(cacheHead + (long)firstSlotQ * rowBytesQ),
+                            dstHead, (long)prevWindowLenQ * headDimQ);
+                    }
+                    else
+                    {
+                        int tailLen = cacheSizeQ - firstSlotQ;
+                        ManagedQuantizedOps.DequantizeRowToFloat32(ggmlTypeQ,
+                            (IntPtr)(cacheHead + (long)firstSlotQ * rowBytesQ),
+                            dstHead, (long)tailLen * headDimQ);
+                        int headLen = prevWindowLenQ - tailLen;
+                        ManagedQuantizedOps.DequantizeRowToFloat32(ggmlTypeQ,
+                            (IntPtr)cacheHead,
+                            dstHead + (long)tailLen * headDimQ, (long)headLen * headDimQ);
+                    }
+                }
+                if (kvHeads >= 4)
+                    System.Threading.Tasks.Parallel.For(0, kvHeads, DequantOneHead);
+                else
+                    for (int h = 0; h < kvHeads; h++) DequantOneHead(h);
+                return result;
+            }
+
             float* cachePtr = GetFloatPtr(cache);
             float* dstPtr = GetFloatPtr(result);
             long headBytes = (long)headDim * sizeof(float);
@@ -6531,6 +6763,40 @@ namespace TensorSharp.Models
                         }
                     }
                 }
+                InvalidateTensorDeviceCache(cache);
+                return;
+            }
+
+            // Block-quantized circular cache (Q4_0 / Q8_0 via --kv-cache-dtype): quantize
+            // each fresh (head, position) row into its rolling slot. Mirrors the F16 path
+            // but writes block layout; ggml's native decode kernels dequantize it back.
+            if (cache.ElementType == DType.Q4_0 || cache.ElementType == DType.Q8_0)
+            {
+                cache.Storage.EnsureHostReadable();
+                int ggmlTypeQ = GgmlTypeForCacheDType(cache.ElementType);
+                long rowBytesQ = ManagedQuantizedOps.RowSize(ggmlTypeQ, headDim);
+                long srcAddrQ = (long)GetFloatPtr(src);
+                long dstAddrQ = (long)TensorComputePrimitives.GetStoragePointer(cache);
+                int totalWorkQ = seqLen * numHeads;
+                int seqLenQ = seqLen, cacheSizeQ = cacheSize, headDimQ = headDim;
+                int startPosQ = startPos, numHeadsQ = numHeads, ggmlTypeQL = ggmlTypeQ;
+                long rowBytesQL = rowBytesQ;
+                void QuantizeOneRow(int idx)
+                {
+                    int s = idx / numHeadsQ;
+                    int h = idx % numHeadsQ;
+                    int cacheIdx = (startPosQ + s) % cacheSizeQ;
+                    float* srcRow = (float*)srcAddrQ + (long)h * seqLenQ * headDimQ + (long)s * headDimQ;
+                    byte* dstRow = (byte*)dstAddrQ + (long)h * cacheSizeQ * rowBytesQL + (long)cacheIdx * rowBytesQL;
+                    ManagedQuantizedOps.QuantizeRowFromFloat32(ggmlTypeQL, srcRow, (IntPtr)dstRow, headDimQ);
+                }
+                // Parallelize only when the chunk does not wrap the rolling window;
+                // a wrapping chunk (seqLen > cacheSize) aliases slots, so keep the
+                // writes ordered (last-writer-wins, matching the scalar F16 path).
+                if (totalWorkQ >= 64 && seqLen <= cacheSize)
+                    System.Threading.Tasks.Parallel.For(0, totalWorkQ, QuantizeOneRow);
+                else
+                    for (int idx = 0; idx < totalWorkQ; idx++) QuantizeOneRow(idx);
                 InvalidateTensorDeviceCache(cache);
                 return;
             }

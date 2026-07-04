@@ -73,13 +73,15 @@ echo "用一句话解释 Mixture-of-Experts。" > prompt.txt
 | Mistral 3 | [Mistral-Small-3.1-24B](https://huggingface.co/bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF) | ✅ / — / — | — | — | [mistral3](docs/models/mistral3_zh-cn.md) |
 | Gemma 3 | [gemma-3-4b-it](https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf) | ✅ / — / — | — | — | [gemma3](docs/models/gemma3_zh-cn.md) |
 | DiffusionGemma | diffusion-gemma GGUF | — / — / — | — | — | [diffusiongemma](docs/models/diffusiongemma_zh-cn.md) |
+| Qwen-Image-Edit | qwen-image-edit GGUF（MMDiT + VAE + Qwen2.5-VL） | 🖼️ 图像→图像 | — | — | [qwenimage](docs/models/qwenimage_zh-cn.md) |
 
 ## 亮点功能
 
-- **prefill 与首 token 延迟快于 llama.cpp** —— 纯 .NET 引擎，在相同 GGUF 文件、相同 GPU 上*全面*超越手工优化的 C++ `llama.cpp` 的 prefill（几何平均 **1.18×–1.88×**），同时 decode 保持持平。Gemma 4 26B-A4B MoE 领跑，达 **1.88× prefill / 1.69× TTFT**；结构化输出（JSON）prefill 高达 **5.89×**，多轮对话首 token 最高早 **1.93×**。→ [对比 llama.cpp 的同台评测](#对比-llamacpp-的同台评测引擎对比)
+- **与 llama.cpp 互有胜负——用纯 .NET 做到** —— 在相同 GGUF 文件、相同 GPU 上同台较量，TensorSharp 在关键负载上追平乃至超越手工优化的 C++ `llama.cpp`：Gemma 4 26B-A4B MoE 的 prefill 快 **1.32×**、首 token 早 **1.30×**（几何平均；单场景最高 **1.70× / 1.65×**），Gemma 4 12B 在**每个 decode 场景**上打平或获胜（几何平均 **1.17×**），流式工具调用轮次 decode 最高快 **2.37×**，Gemma 4 E4B 上结构化输出（JSON）decode 流速快 **7.7×**（405 vs 52 tok/s）。→ [对比 llama.cpp 的同台评测](#对比-llamacpp-的同台评测引擎对比)
 - **连续批处理 & 分页 KV 缓存** —— vLLM 风格的分页 KV 池，支持基于内容哈希的前缀共享与迭代级调度器，服务端默认启用。→ [深入文档](docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING_zh-cn.md)
 - **MTP / NextN 投机解码** —— 多 token 预测草稿头加速单序列 decode：Qwen 3.6（NextN 块内嵌在主干 GGUF 中）与 Gemma 4（独立的 `gemma4-assistant` 草稿 GGUF）。草稿头每步提议若干 token，主干用一次批量前向验证，二者均由该请求自己的采样器驱动。通过 `--mtp-spec` 启用（Gemma 4 还需 `--mtp-draft-model`）。→ [投机解码](#mtp--nextn-投机解码)
 - **DiffusionGemma 文本扩散** —— 基于 Gemma-4 派生 MoE backbone 的分块 EntropyBound 去噪生成，提供 CLI 扩散参数与 Web UI 实时去噪预览。→ [DiffusionGemma 卡片](docs/models/diffusiongemma_zh-cn.md)
+- **Qwen-Image-Edit 图像编辑** —— 提示词 + 输入图像 → 编辑后的图像，驱动 60 块 MMDiT 扩散 Transformer，配以 Qwen-Image VAE 与 Qwen2.5-VL-7B 文本编码器。CUDA 图捕获的整 DiT 前向、FlowMatch-Euler true-CFG 去噪，以及 Web UI 实时去噪预览。→ [Qwen-Image-Edit 卡片](docs/models/qwenimage_zh-cn.md)
 - **多模态** —— 图像 / 视频 / 音频输入（Gemma 4）；图像输入（Gemma 3、Qwen 3.5-family、Mistral 3、Nemotron-H Omni）。→ [多模态支持](#多模态支持)
 - **工具调用 / 函数调用** —— 三种 API 风格均支持多轮工具调用，输出解析与架构无关。→ [工具调用](#工具调用--函数调用)
 - **思维链 / 推理模式** —— Qwen 3、Qwen 3.5/3.6-family、Gemma 4、GPT OSS、Nemotron-H 支持结构化思维链。→ [思维链模式](#思维链--推理模式)
@@ -100,7 +102,6 @@ echo "用一句话解释 Mixture-of-Experts。" > prompt.txt
 | [HTTP API](#http-api) | 使用 Ollama 兼容、OpenAI 兼容或 Web UI SSE 端点 |
 | [按模型架构卡片](docs/models/README_zh-cn.md) | 阅读单个架构的端到端文档（来源、前向计算图、组件、参数，以及 TensorSharp 如何实现并优化 prefill 与 decode） |
 | [分页注意力 & 连续批处理](docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING_zh-cn.md) | 了解 vLLM 风格的分页 KV 缓存、前缀共享与迭代级调度器 |
-| [推理基准矩阵](docs/inference_benchmark_matrix_zh-cn.md) | 在文本 / 多模态负载与 KV cache dtype 上对比 TensorSharp、llama.cpp 与 Ollama |
 | [环境变量功能矩阵](docs/env_var_feature_matrix_zh-cn.md) | 查看高影响运行时开关会影响哪些模型、后端与提示类型 |
 | [测试 / 基准矩阵运行器](TensorSharp.TestMatrix/README_zh-cn.md) | 扫描 model × backend × feature × env-var 组合并生成回归报告 |
 | [服务端 API 示例](TensorSharp.Server/API_EXAMPLES_zh-cn.md) | 复制完整的 curl 与 Python 示例 |
@@ -110,8 +111,8 @@ echo "用一句话解释 Mixture-of-Experts。" > prompt.txt
 
 | 范围 | 状态 |
 |---|---|
-| 模型家族 | Gemma 3/4、DiffusionGemma、Qwen 3、Qwen 3.5/3.6-family GGUF（`qwen35`、`qwen35moe`、`qwen3next`）、GPT OSS、Nemotron-H（含 Nemotron 3 Nano Omni）、Mistral 3 |
-| 推理宿主 | CLI、交互式 REPL、ASP.NET Core Web UI、Ollama 风格 API、OpenAI Chat Completions 风格 API。DiffusionGemma 当前走 CLI 扩散运行模式与 Web UI 去噪流。 |
+| 模型家族 | Gemma 3/4、DiffusionGemma、Qwen 3、Qwen 3.5/3.6-family GGUF（`qwen35`、`qwen35moe`、`qwen3next`）、GPT OSS、Nemotron-H（含 Nemotron 3 Nano Omni）、Mistral 3。图像编辑通过 Qwen-Image-Edit（`qwen_image` MMDiT）。 |
+| 推理宿主 | CLI、交互式 REPL、ASP.NET Core Web UI、Ollama 风格 API、OpenAI Chat Completions 风格 API。DiffusionGemma 当前走 CLI 扩散运行模式与 Web UI 去噪流；Qwen-Image-Edit 走 CLI 图像编辑模式与 Web UI 图像编辑流程。 |
 | 后端 | 纯 C# CPU、Direct CUDA/cuBLAS（`cuda`）、MLX Metal（`mlx`）、GGML CPU、GGML Metal、GGML CUDA |
 | 多模态 | Gemma 4 支持图像/视频/音频；Gemma 3、Qwen 3.5-family、Mistral 3、Nemotron-H Omni 支持图像输入 |
 | 连续批处理 | vLLM 风格的分页 KV 缓存、跨请求基于内容哈希的前缀共享、迭代级调度器（默认启用，可通过 `--no-continuous-batching` 关闭） |
@@ -122,7 +123,7 @@ echo "用一句话解释 Mixture-of-Experts。" > prompt.txt
 
 ## 功能特性
 
-- **多架构支持** —— Gemma 4、Gemma 3、DiffusionGemma、Qwen 3、Qwen 3.5/3.6-family、GPT OSS、Nemotron-H、Mistral 3
+- **多架构支持** —— Gemma 4、Gemma 3、DiffusionGemma、Qwen 3、Qwen 3.5/3.6-family、GPT OSS、Nemotron-H、Mistral 3，以及 Qwen-Image-Edit（图像编辑）
 - **多模态推理** —— 图像、视频和音频输入（Gemma 4）；图像输入（Gemma 3 / Qwen 3.5-family / Mistral 3 / Nemotron-H Omni）
 - **思维链 / 推理模式** —— 通过 `<think>` / `<|channel>thought` / `<|channel>analysis` 标签输出结构化的思维链推理（Qwen 3、Qwen 3.5/3.6-family、Gemma 4、GPT OSS、Nemotron-H）
 - **工具调用 / 函数调用** —— 模型可调用用户定义的工具；所有三种 API 风格均支持多轮工具调用对话
@@ -139,11 +140,12 @@ echo "用一句话解释 Mixture-of-Experts。" > prompt.txt
 - **批处理** —— 控制台应用支持 JSONL 输入，并内置用于测量 prefill / decode 吞吐的推理基准
 - **流式输出** —— 按 token 输出（Web 通过 SSE，控制台通过 stdout），并支持中断/停止正在生成的请求
 - **文本扩散生成** —— DiffusionGemma 使用 EntropyBound 迭代去噪采样器，而不是自回归 `Forward()`。CLI 提供 `--diffusion-steps`、`--diffusion-seed` 与 `--diffusion-blocks`；Web UI 使用整条消息 `replace` 事件展示实时去噪预览，并通过 `DiffusionBatchScheduler` 批处理并发扩散请求。
+- **图像编辑（Qwen-Image-Edit）** —— 提示词加输入图像生成编辑后的图像。所加载的 `qwen_image` GGUF 是 MMDiT 扩散 Transformer；TensorSharp 在其旁解析两个伴随 GGUF——Qwen-Image VAE（图像 ↔ 16 通道潜变量）与 Qwen2.5-VL-7B 文本编码器（提示词 → 3584 维条件，可选通过 `mmproj` 做视觉接地）。流水线对参考图做 VAE 编码、构建文本（及可选图像）条件、运行带参考潜变量拼接的 FlowMatch-Euler true-CFG 去噪循环，再 VAE 解码回像素。整个 60 块 DiT 前向被 CUDA 图捕获（`TSGgml_QwenImageForward`），flash 注意力默认开启，目标面积按设备 VRAM 预算自动钳制。可选的 Lightning 蒸馏 LoRA（`--qwen-image-lora` / `TS_QWEN_IMAGE_LORA`，`.safetensors`）会在加载时合并进 DiT 权重，将去噪步数缩减为该 LoRA 的步数（例如 4 或 8），并把 CFG 切换为 1.0（无负向分支）。可从 C# 通过 `QwenImageModel.EditImage(prompt, RgbImage, QwenImageParams)` 驱动，从 CLI 图像编辑模式（`--image`、`--prompt`、`--cfg`、`--diffusion-steps`、`--diffusion-seed`）驱动，以及从带实时去噪预览的 Web UI 驱动。→ [Qwen-Image-Edit 卡片](docs/models/qwenimage_zh-cn.md)
 - **混合 SSM-Transformer** —— Nemotron-H 在单个模型中混合 Mamba2 SSM 层、纯注意力层和 MoE FFN 层；Mamba2 步现在同时提供单序列原生内核与批处理原生内核（`TSGgml_NemotronMamba2BatchedStepF32`，NEON SIMD + GCD 并行）。
 - **混合注意力-递归网络** —— Qwen 3.5/3.6-family 在同一模型中混合全注意力层与 GatedDeltaNet 递归层；批处理路径下递归运行状态保存在每槽位的递归状态池中
 - **专家混合（MoE）** —— 支持 Gemma 4 MoE 变体（例如 gemma-4-26B-A4B）、GPT OSS MoE（例如 gpt-oss-20b）、Qwen 3.5/3.6-family MoE（`qwen35moe` / `qwen3next` 变体，例如 Qwen3.5-35B-A3B）以及 Nemotron-H MoE FFN 层
 - **批量 GPU MoE** —— Qwen 3.5/3.6-family 与 Nemotron-H 在 decode 时通过单次融合的 GGML 计算图调度处理所有被选中的专家（Qwen 3.5-family 还包括可选的 shared expert 与残差加法），消除每个专家的 CPU-GPU 往返
-- **KV 缓存编解码器** —— 通过 `IKvBlockCodec` 接口插件化；内置的 TurboQuant（Q4 / Q8）编解码器可在分页块上启用，由 `--paged-kv-quant-bits` 控制
+- **KV 缓存编解码器** —— 通过 `IKvBlockCodec` 接口插件化；内置的 TurboQuant（2-bit 仿射 / Q4 / Q8）编解码器可在分页块上启用，由 `--paged-kv-quant-bits` 控制（2-bit 档位在 fp32 块上可达约 10 倍压缩，面向超长上下文）
 - **消息编辑** —— 在 Web 聊天界面中编辑或删除历史消息，并从该位置重新生成回复
 - **文本/图像/音频/视频上传** —— Web 界面支持最大 500 MB 的文件上传，对超大文本会按 token 预算自动截断
 - **每轮可观测性** —— 结构化日志会完整保留用户输入与模型原始输出（包括 `<think>` 思维链和最终结果），并记录 KV 缓存命中率。同样的命中率指标通过所有 API 透出：Ollama 的 `prompt_cache_hit_tokens` / `prompt_cache_hit_ratio`、OpenAI 的 `usage.prompt_tokens_details.cached_tokens`，以及 Web UI SSE `done` 事件中的 `promptTokens` / `kvReusedTokens` / `kvReusePercent`
@@ -160,6 +162,7 @@ echo "用一句话解释 Mixture-of-Experts。" > prompt.txt
 | Nemotron-H | `nemotron_h`, `nemotron_h_moe` | Nemotron-H-8B、Nemotron-H-47B（混合 SSM-Transformer，MoE）、Nemotron 3 Nano Omni（图像） | 图像（Omni） | 支持 | 支持 | — | [nemotron_zh-cn.md](docs/models/nemotron_zh-cn.md) |
 | Mistral 3 | `mistral3` | Mistral-Small-3.1-24B-Instruct | 图像 | 不支持 | 不支持 | — | [mistral3_zh-cn.md](docs/models/mistral3_zh-cn.md) |
 | DiffusionGemma | `diffusion-gemma`, `diffusion_gemma` | diffusion-gemma 文本扩散 GGUF | 仅文本 | 不支持 | 不支持 | — | [diffusiongemma_zh-cn.md](docs/models/diffusiongemma_zh-cn.md) |
+| Qwen-Image-Edit | `qwen_image` | qwen-image-edit MMDiT GGUF（+ VAE 与 Qwen2.5-VL 伴随文件） | 图像编辑（图像+文本 → 图像） | 不支持 | 不支持 | — | [qwenimage_zh-cn.md](docs/models/qwenimage_zh-cn.md) |
 
 各架构的端到端文档见[按模型架构卡片](docs/models/README_zh-cn.md)（来源、前向计算图、组件、参数、权重命名，以及 TensorSharp 如何实现并优化 prefill 与 decode）。
 
@@ -183,6 +186,7 @@ TensorSharp 使用 GGUF 格式模型文件。以下是各架构对应的 Hugging
 | Mistral 3 | Mistral-Small-3.1-24B-Instruct | [bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF](https://huggingface.co/bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF) |
 | Mistral 3 | mistral3-mmproj（Pixtral 视觉投影器） | [bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF](https://huggingface.co/bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF) |
 | DiffusionGemma | diffusion-gemma 文本扩散 GGUF | 使用 `general.architecture` 为 `diffusion-gemma` 或 `diffusion_gemma` 的 GGUF 文件 |
+| Qwen-Image-Edit | Qwen-Image-Edit MMDiT（`qwen_image`） | `general.architecture` 为 `qwen_image` 的 DiT GGUF，外加同目录下的 Qwen-Image VAE 与 Qwen2.5-VL-7B 文本编码器 GGUF（或通过 `TS_QWEN_IMAGE_VAE` / `TS_QWEN_IMAGE_TE` / `TS_QWEN_IMAGE_MMPROJ` 指定）。VAE 可为原始 `.safetensors`。还可通过 `--qwen-image-lora` / `TS_QWEN_IMAGE_LORA` 额外加载一个 Lightning 蒸馏 LoRA。 |
 
 ## 计算后端
 
@@ -206,12 +210,12 @@ TensorSharp/
 │   ├── PagedKvCacheManager.cs   # 单会话分页 KV 管理（块分配、前缀复用）
 │   ├── PagedKvBlockStore.cs     # 带可选 SSD 溢出的 RAM/磁盘分级分页块存储
 │   ├── SsdKvBlockTier.cs        # 分页块的 SSD 冷层
-│   ├── TurboQuantKvCodec.cs     # 实现 IKvBlockCodec 的量化 KV 块编解码器（Q4 / Q8）
+│   ├── TurboQuantKvCodec.cs     # 实现 IKvBlockCodec 的量化 KV 块编解码器（2-bit / Q4 / Q8）
 │   ├── PrefillChunking.cs       # SWA / 超长 prompt 使用的分块 prefill 辅助
 │   ├── KvBlockHash.cs           # 内容寻址的块哈希，用于跨请求前缀复用
 │   └── Logging/                 # JSON-line 文件日志器 + 每轮遥测
 ├── TensorSharp.Models/          # 模型架构实现与多模态编码/注入
-│   ├── Models/<Family>/         # 每个架构一个目录（DiffusionGemma、Gemma3、Gemma4、GptOss、Mistral3、Nemotron、Qwen3、Qwen35）
+│   ├── Models/<Family>/         # 每个架构一个目录（DiffusionGemma、Gemma3、Gemma4、GptOss、Mistral3、Nemotron、Qwen3、Qwen35、QwenImage）
 │   │   ├── <Family>Model.cs                # 旧的单序列 ModelBase 实现
 │   │   └── <Family>Model.BatchedForward.cs # IBatchedPagedModel.ForwardBatch —— 批处理/分页路径（Mistral3、Gemma4、GptOss、Qwen35、Nemotron、Qwen3）
 │   ├── Paged/                   # 张量侧的分页注意力辅助（TensorPagedAttention）
@@ -233,6 +237,7 @@ TensorSharp/
 │   ├── ggml_ops_mamba2.cpp                # Nemotron Mamba2 内核（按序列 + 批处理 SIMD）
 │   ├── ggml_ops_paged_attention.cpp       # 分页注意力原生内核（驱动 ggml_flash_attn_ext + sinks 变体）
 │   ├── ggml_ops_diffusion.cpp             # DiffusionGemma 融合 decode-layer / 整模型 / lm-head 内核
+│   ├── ggml_ops_qwen_image.cpp            # Qwen-Image-Edit MMDiT 整模型前向（CUDA 图捕获）+ CFG-batched 内核
 │   ├── ggml_ops_training.cpp              # 仅训练用内核（运行时不使用）
 │   └── tests/                              # 原生单元 + 烟雾测试
 ├── TensorSharp.Server/          # Web 聊天 + API 服务（ASP.NET Core）
@@ -267,10 +272,8 @@ TensorSharp/
 ├── docs/                        # 开发者参考文档
 │   ├── models/                  # 按模型架构卡片（每个模型一份 .md，中英双语）
 │   ├── PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md  # 分页 KV 缓存、前缀共享、调度器、按模型批处理状态
-│   ├── env_var_feature_matrix.md  # TestMatrix 使用的运行时开关 × 模型/后端/功能覆盖矩阵
-│   └── inference_benchmark_matrix.md  # 跨引擎吞吐矩阵（TensorSharp vs llama.cpp vs Ollama）
+│   └── env_var_feature_matrix.md  # TestMatrix 使用的运行时开关 × 模型/后端/功能覆盖矩阵
 ├── benchmarks/                  # 可重现的基准脚本
-│   └── inference_matrix/        # 驱动脚本、modelfiles、prompts、每格原始 JSON 结果
 └── ExternalProjects/            # ggml/ 在构建时从 github.com/ggml-org/ggml 克隆（不纳入版本控制）
 ```
 
@@ -453,6 +456,13 @@ cd TensorSharp.Cli/bin
 ./TensorSharp.Cli --model <diffusion-gemma.gguf> --input prompt.txt --backend ggml_metal \
     --max-tokens 256 --diffusion-steps 48 --diffusion-seed 0
 
+# Qwen-Image-Edit 图像编辑（提示词 + 输入图像 -> 编辑后的图像）
+# VAE + Qwen2.5-VL 文本编码器伴随文件会在 DiT GGUF 旁解析
+# （或用 --qwen-image-vae / --qwen-image-vl / --qwen-image-mmproj 指定）。
+./TensorSharp.Cli --model <qwen-image-edit-DiT.gguf> --image input.png \
+    --prompt "Make the sky a dramatic sunset." --output edited.png \
+    --backend ggml_cuda --diffusion-steps 30 --cfg 2.5 --diffusion-seed 0
+
 # 思维链 / 推理模式
 ./TensorSharp.Cli --model <model.gguf> --input prompt.txt --backend ggml_metal --think
 
@@ -504,7 +514,7 @@ cd TensorSharp.Cli/bin
 | `--mmproj <path>` | 多模态投影器 GGUF 文件路径 |
 | `--max-tokens <N>` | 最大生成 token 数（默认：100） |
 | `--backend <type>` | 计算后端：`cpu`、`cuda`、`mlx`、`ggml_cpu`、`ggml_metal` 或 `ggml_cuda` |
-| `--kv-cache-dtype <type>` | KV 缓存精度：`f32`（默认）、`f16` 或 `q8_0`。量化 / 半精度 KV 缓存以微小数值漂移换取内存节省；详见 [`docs/inference_benchmark_matrix_zh-cn.md`](docs/inference_benchmark_matrix_zh-cn.md)。 |
+| `--kv-cache-dtype <type>` | KV 缓存精度：`f32`（默认）、`f16`、`q8_0` 或 `q4_0`。量化 / 半精度 KV 缓存以微小数值漂移换取内存节省；`q4_0`（约 0.56 字节/元素，约为 f32 的 1/7）是最激进的档位，面向 KV 缓存占主导内存的超长（128K–256K）上下文。块量化缓存（`q8_0`/`q4_0`）需要原生 GGML flash 路径。 |
 | `--interactive` / `-i` | 进入交互式 REPL 聊天会话（逐轮输入/输出），支持 KV 缓存复用、斜杠命令、运行时热切换 模型/后端/投影器、文件附件（图像、音频、视频、文本）以及实时调整采样参数。完整命令列表见下文「**交互式 REPL 命令**」一节 |
 | `--system <text>` | 用于初始化交互式会话的系统提示词（在 REPL 中可用 `/system` 覆盖） |
 | `--system-file <path>` | 从 UTF-8 文本文件读取初始系统提示词（`--system` 的替代写法） |
@@ -531,9 +541,17 @@ cd TensorSharp.Cli/bin
 | `--test-chunked-prefill` | 运行分块 prefill 正确性检查（对比分块与非分块 logits） |
 | `--correct-prefill <N>` | `--test-chunked-prefill` 使用的 prompt 长度 |
 | `--correct-decode <N>` | `--test-chunked-prefill` 使用的 decode 长度 |
-| `--diffusion-steps <N>` | DiffusionGemma 每个 block 的去噪步数（默认：48） |
+| `--diffusion-steps <N>` | DiffusionGemma 每个 block 的去噪步数（默认：48）。对 Qwen-Image-Edit 则是 FlowMatch-Euler 步数——省略时自动选择（30，或已加载 Lightning LoRA 的步数）。 |
 | `--diffusion-seed <N>` | DiffusionGemma 确定性采样种子（默认：0） |
 | `--diffusion-blocks <N>` | DiffusionGemma block-autoregressive canvas 数量。`0` 表示根据 `--max-tokens` 与模型 canvas 长度推导。 |
+| `--image <path>` | Qwen-Image-Edit 的输入图像（也是多模态聊天的图像输入）。在 `qwen_image` DiT GGUF 上触发图像编辑模式所必需。 |
+| `--prompt <text>` | Qwen-Image-Edit 编辑指令（省略时回退到 `--input` 文件内容）。 |
+| `--output <path>` | Qwen-Image-Edit 输出 PNG 路径（默认：`edited.png`）。 |
+| `--cfg <F>` | Qwen-Image-Edit true-CFG 引导尺度（`<= 1` 关闭负向分支）。省略时自动选择：2.5（Qwen-Image-Edit-2511 的推荐值；4.0 会过度引导并扭曲人脸），加载 Lightning LoRA 时为 1.0。步数与种子复用 `--diffusion-steps` / `--diffusion-seed`。 |
+| `--qwen-image-vae <path>` | 覆盖解析到的 Qwen-Image VAE 伴随文件（`.gguf` 或 `.safetensors`）。 |
+| `--qwen-image-vl <path>` | 覆盖解析到的 Qwen2.5-VL-7B 文本编码器 GGUF。 |
+| `--qwen-image-mmproj <path>` | 覆盖解析到的 Qwen2.5-VL mmproj（视觉接地）GGUF。 |
+| `--qwen-image-lora <path>` | Qwen-Image-Edit 的 Lightning 蒸馏 LoRA（`.safetensors`），在加载时合并进 DiT。自动推导步数（例如 4 或 8）并把 CFG 切换为 1.0。环境变量：`TS_QWEN_IMAGE_LORA`。 |
 | `--test` | 运行内置的分词器、Qwen3 聊天模板与 ollama 对比测试 |
 | `--test-templates <dir>` | 对 `<dir>` 下的每个 *.gguf 校验硬编码模板与 GGUF Jinja2 模板的一致性 |
 | `--log-level <lvl>` | 控制台与文件日志级别：`trace`、`debug`、`info`、`warning`、`error`、`critical`、`off` |
@@ -674,7 +692,7 @@ cd TensorSharp.Server/bin
 | `--paged-kv-ram-mb <N>` | 旧的独立分页 KV RAM 层上限。 |
 | `--paged-kv-ssd-dir <dir>` | 旧的独立分页 KV SSD 冷层目录。 |
 | `--paged-kv-ssd-mb <N>` | 旧的独立分页 KV SSD 上限。 |
-| `--paged-kv-quant-bits <0\|4\|8>` | 旧的独立分页 KV 块量化（TurboQuantKvCodec）。 |
+| `--paged-kv-quant-bits <0\|2\|4\|8>` | 旧的独立分页 KV 块量化（TurboQuantKvCodec；`2` = 仿射 min+scale，`4`/`8` = 对称）。 |
 
 请求 JSON 中的字段（如 `temperature`、`top_p`、`top_k`、`min_p`、
 `repeat_penalty`、`presence_penalty`、`frequency_penalty`、`seed`、
@@ -716,11 +734,13 @@ cd TensorSharp.Server/bin
 | `TS_KV_CACHE_MAX_RAM_MB` | 旧的独立分页 KV RAM 层上限。 |
 | `TS_KV_CACHE_SSD_DIR` | 旧的独立分页 KV SSD 冷层目录。 |
 | `TS_KV_CACHE_MAX_SSD_MB` | 旧的独立分页 KV SSD 上限。 |
-| `TS_KV_PAGED_QUANT_BITS` | 旧的独立分页 KV 块量化位数（`0` = 透传，`4`，或 `8`）。 |
+| `TS_KV_PAGED_QUANT_BITS` | 旧的独立分页 KV 块量化位数（`0` = 透传，`2` = 仿射，`4`，或 `8`）。 |
 | `TS_SCHED_DISABLE_BATCHED` | `1` 会即使模型实现了 `IBatchedPagedModel`，也强制回退到按序列 KV 交换。CLI 快捷方式是 `--no-continuous-batching`。 |
 | `TS_SCHED_MAX_BATCHED_TOKENS` | 调度器每步 token 预算（默认：`4096`）。 |
 | `TS_SCHED_MAX_RUNNING_SEQS` | 同时在执行的最大序列数（默认：`16`）。 |
-| `TS_SCHED_PREFILL_CHUNK` | 每步最大 prefill token 数（默认：`1024`）。 |
+| `TS_SCHED_PREFILL_CHUNK` | 多个请求争用时每步最大 prefill token 数（默认：`1024`）。 |
+| `TS_SCHED_SOLO_PREFILL_CHUNK` | SOLO（无争用）prompt 全新部分（start_pos = 0）的 prefill 分块大小——单个无争用请求会以大分块走融合 prefill 路径（默认：`8192`）。 |
+| `TS_SCHED_SOLO_TAIL_PREFILL_CHUNK` | SOLO prompt 在首个 solo 分块之后尾部（start_pos > 0）的 prefill 分块大小（默认：`2048`）。 |
 | `TS_SCHED_NUM_BLOCKS` | 引擎块池的物理块数（默认：`256`）。 |
 | `TS_SCHED_BLOCK_SIZE` | 引擎侧每块的 token 数（默认：`256`）。 |
 | `TS_SCHED_PREFIX_CACHE` | `0` 关闭跨请求的块级哈希前缀共享。 |
@@ -789,9 +809,9 @@ cd TensorSharp.Server/bin
 | 连续批处理引擎（`InferenceEngine` + 调度器） | 在 `TensorSharp.Server` 中默认启用 | `TS_SCHED_DISABLE_BATCHED=1` 强制按序列回退 | `--no-continuous-batching` / `--continuous-batching` |
 | 旧的按会话分页 KV 管理器 | 已从服务端请求路径移除 | `TS_KV_PAGED_CACHE`（`0` / `1`）、`TS_KV_BLOCK_SIZE` 仅为兼容 / 独立测试保留 | `--paged-kv` / `--no-paged-kv`、`--paged-kv-block-size N` |
 | 旧的分页 KV SSD 冷层溢出 | 关闭 | `TS_KV_CACHE_MAX_RAM_MB`、`TS_KV_CACHE_SSD_DIR`、`TS_KV_CACHE_MAX_SSD_MB` | `--paged-kv-ram-mb`、`--paged-kv-ssd-dir`、`--paged-kv-ssd-mb` |
-| 旧的分页 KV 块量化（TurboQuantKvCodec） | 关闭（`0` = 透传） | `TS_KV_PAGED_QUANT_BITS`（`0` / `4` / `8`） | `--paged-kv-quant-bits` |
+| 旧的分页 KV 块量化（TurboQuantKvCodec） | 关闭（`0` = 透传） | `TS_KV_PAGED_QUANT_BITS`（`0` / `2` / `4` / `8`） | `--paged-kv-quant-bits` |
 | 跨请求的块级哈希前缀共享 | 启用 | `TS_SCHED_PREFIX_CACHE=0` 关闭 | — |
-| 调度器调优（每步 token 预算、最大同时序列数、prefill 分块、块池大小、decode quantum） | 引擎默认 | `TS_SCHED_MAX_BATCHED_TOKENS`、`TS_SCHED_MAX_RUNNING_SEQS`、`TS_SCHED_PREFILL_CHUNK`、`TS_SCHED_NUM_BLOCKS`、`TS_SCHED_BLOCK_SIZE`、`TS_SCHED_DECODE_QUANTUM` | — |
+| 调度器调优（每步 token 预算、最大同时序列数、prefill 分块、块池大小、decode quantum） | 引擎默认 | `TS_SCHED_MAX_BATCHED_TOKENS`、`TS_SCHED_MAX_RUNNING_SEQS`、`TS_SCHED_PREFILL_CHUNK`、`TS_SCHED_SOLO_PREFILL_CHUNK`、`TS_SCHED_SOLO_TAIL_PREFILL_CHUNK`、`TS_SCHED_NUM_BLOCKS`、`TS_SCHED_BLOCK_SIZE`、`TS_SCHED_DECODE_QUANTUM` | — |
 
 #### 按模型的批处理 / 分页前向（`IBatchedPagedModel.ForwardBatch`）
 
@@ -1094,9 +1114,9 @@ TensorSharp 采用分层系统结构：
 
 1. **TensorSharp.Core** 提供核心 `Tensor` 类型、存储抽象和可扩展的操作注册表（`Ops`）。CPU 实现使用 `System.Numerics.Vectors` 进行 SIMD 加速。
 
-2. **TensorSharp.Runtime** 负责运行时契约与通用服务：GGUF 解析、分词（SentencePiece / BPE）、聊天模板渲染、可配置 token 采样、输出解析、分页 KV 缓存（`Runtime/Paged/*`）、连续批处理调度器 / 引擎（`Runtime/Scheduling/*`）、`IKvBlockCodec` 接口及其 `TurboQuantKvCodec` Q4/Q8 实现，以及 `IModelArchitecture`、`IBatchedPagedModel`、`IPromptRenderer`、`IOutputProtocolParser`、`IMultimodalInjector`、`IKVCachePolicy`、`IBackendExecutionPlan` 等抽象。
+2. **TensorSharp.Runtime** 负责运行时契约与通用服务：GGUF 解析、分词（SentencePiece / BPE）、聊天模板渲染、可配置 token 采样、输出解析、分页 KV 缓存（`Runtime/Paged/*`）、连续批处理调度器 / 引擎（`Runtime/Scheduling/*`）、`IKvBlockCodec` 接口及其 `TurboQuantKvCodec` 2-bit / Q4 / Q8 实现，以及 `IModelArchitecture`、`IBatchedPagedModel`、`IPromptRenderer`、`IOutputProtocolParser`、`IMultimodalInjector`、`IKVCachePolicy`、`IBackendExecutionPlan` 等抽象。
 
-3. **TensorSharp.Models** 实现 `ModelBase` 以及各具体模型架构和多模态辅助组件（Gemma 3/4、DiffusionGemma、Qwen 3/3.5、GPT OSS、Nemotron-H、Mistral 3）。自回归架构提供旧的单序列前向，多数架构还提供面向连续批处理的 `IBatchedPagedModel.ForwardBatch` 实现（`<Family>Model.BatchedForward.cs`）。DiffusionGemma 刻意不同：它不支持 `Forward()`，生成必须通过 `DiffusionGemmaSampler` 在固定长度 canvas 上迭代去噪。模型通过 `ModelBase.Create()` 加载，并依据 GGUF 元数据自动识别架构。
+3. **TensorSharp.Models** 实现 `ModelBase` 以及各具体模型架构和多模态辅助组件（Gemma 3/4、DiffusionGemma、Qwen 3/3.5、GPT OSS、Nemotron-H、Mistral 3、Qwen-Image-Edit）。自回归架构提供旧的单序列前向，多数架构还提供面向连续批处理的 `IBatchedPagedModel.ForwardBatch` 实现（`<Family>Model.BatchedForward.cs`）。DiffusionGemma 刻意不同：它不支持 `Forward()`，生成必须通过 `DiffusionGemmaSampler` 在固定长度 canvas 上迭代去噪。Qwen-Image-Edit（`QwenImageModel`）同样非自回归：`Forward()` 抛异常，图像编辑通过 `EditImage()` 进行，由它编排 MMDiT 扩散 Transformer、Qwen-Image VAE 与 Qwen2.5-VL 文本编码器。模型通过 `ModelBase.Create()` 加载，并依据 GGUF 元数据自动识别架构。
 
 4. **TensorSharp.Backends.GGML** 通过原生 C++ 桥接库（`libGgmlOps` / `GgmlOps.dll`）注册同名操作的加速实现，并链接 [ggml](https://github.com/ggml-org/ggml)。在 macOS 上可提供 Metal GPU 计算，在 Windows/Linux 上可启用面向 NVIDIA GPU 的 GGML CUDA。除原生量化 matmul（Q4_K_M、Q8_0 等，无需反量化到 FP32）外，还提供分页注意力（`TSGgml_PagedAttentionForward`，含 / 不含注意力 sinks 两种版本）以及架构特定的批处理内核（Mamba2、GatedDeltaNet）。
 
@@ -1146,35 +1166,31 @@ TensorSharp 采用分层系统结构：
 - **有界池保留量**：集成 GPU / CPU 内存池现在将单个保留块上限设为 64 MB，整池上限设为 32 块。结合 mmap 后的权重，可在快速复用短生命中间张量的同时限制峰值常驻内存。
 - **高内存效率模型加载**：大张量直接流式加载到原生内存，避免中间托管分配。F32 权重与 norm 仍按需加载；量化权重在受支持的后端上通过 mmap 方式绑定。
 - **可选 SSD 溢出的分页 KV 块池**：`PagedKvBlockStore` 保留了 RAM / SSD 分层块存储能力（`TS_KV_CACHE_MAX_RAM_MB`、`TS_KV_CACHE_SSD_DIR`、`TS_KV_CACHE_MAX_SSD_MB`），主要服务独立分页 KV 组件与后续扩展；服务端请求路径的活跃块由每个引擎的 `BlockPool` 统一管理。
-- **KV 块编解码器**：`TurboQuantKvCodec`（Q4 或 Q8）可压缩分页块，以微小精度成本换取每块带宽与内存占用减半 / 减为四分之一。带递归状态的模型会自动回退到 passthrough。
+- **KV 块编解码器**：`TurboQuantKvCodec`（2-bit 仿射、Q4 或 Q8）可压缩分页块，以精度换取更小的每块带宽与内存占用——大致减半（Q8）、减为四分之一（Q4）或约十分之一（2-bit，fp32 块）。2-bit 档位使用每组仿射 min+scale（即 llama.cpp Q2_K 背后的 block-min 思路），让四个码值覆盖该组的实际取值范围；它面向超长上下文的远端前缀复用，此时注意力权重远大于量化噪声。带递归状态的模型会自动回退到 passthrough。
 
 ## 性能数据
 
 ### 对比 llama.cpp 的同台评测（引擎对比）
 
-纯 .NET 引擎与手工优化的 C++ `llama.cpp` 正面较量：**相同的 GGUF 文件、相同的 NVIDIA RTX 3080 Laptop GPU（16 GB）、统一的 OpenAI `/v1/chat/completions` 接口**，覆盖文本、多轮、结构化输出（JSON）等场景。下表为 **在相同 GGML CUDA 后端上，TensorSharp 相对 llama.cpp 的几何平均加速比**（单流、贪心采样、关闭 MTP）。**> 1.0× 表示 TensorSharp 更快**（decode / prefill）或延迟更低（TTFT）。每个场景的完整表格见 [`docs/engine_comparison_report.md`](docs/engine_comparison_report.md)。
+纯 .NET 引擎与手工优化的 C++ `llama.cpp` 正面较量：**相同的 GGUF 文件、相同的 NVIDIA RTX 3080 Laptop GPU（16 GB）、统一的 OpenAI `/v1/chat/completions` 接口**，覆盖长短文本、多轮、工具调用、结构化输出（JSON）等场景。下表为 **在相同 GGML CUDA 后端上，TensorSharp 相对 llama.cpp 的几何平均加速比**（单流、贪心采样、关闭 MTP）。**> 1.0× 表示 TensorSharp 更快**（decode / prefill）或延迟更低（TTFT）。每个场景的完整表格见 [`docs/engine_comparison_report.md`](docs/engine_comparison_report.md)。
 
 | 模型 | decode | prefill | TTFT |
 |---|---:|---:|---:|
-| Gemma 4 26B-A4B it（QAT UD-Q4_K_XL，**MoE**） | 0.92× | **1.88×** | **1.69×** |
-| Gemma 4 12B it（QAT UD-Q4_K_XL，dense） | 0.93× | **1.23×** | **1.10×** |
-| Gemma 4 E4B it（Q8_0，dense 多模态） | 0.95× | **1.21×** | **1.07×** |
-| Qwen 3.6 35B-A3B（UD-IQ2_XXS，MoE） | 0.94× | **1.18×** | 0.95× |
+| Gemma 4 E4B it（Q8_0，dense 多模态） | **1.46×** | 0.83× | 0.82× |
+| Gemma 4 12B it（QAT UD-Q4_K_XL，dense） | **1.17×** | 1.01× | 0.99× |
+| Gemma 4 26B-A4B it（QAT UD-Q4_K_XL，**MoE**） | 0.96× | **1.32×** | **1.30×** |
+| Qwen 3.6 35B-A3B（UD-IQ2_XXS，MoE） | 0.92× | 0.99× | 0.97× |
 
 TensorSharp 明显领先的地方：
 
-- **prefill 全模型领先。** TensorSharp 在所有受测模型上的 prefill 都快于 llama.cpp——几何平均从 **1.18×（Qwen 3.6）到 1.88×（26B-A4B MoE）**，得益于基于 verify 的整模型 prefill 以及融合的 FFN / attention 内核。首 token 延迟随之下降，四个模型中有三个更低（MoE 旗舰最高 **1.69×**）。
-- **MoE 旗舰领跑。** 在 Gemma 4 26B-A4B 上，常驻捕获式 CUDA 图 MoE decode 加上基于 verify 的整模型 prefill，带来 **1.88× prefill / 1.69× TTFT** 的几何平均加速，同时 decode 持平——这些胜势叠加在有竞争力的 token 生成之上。
-- **结构化输出（JSON 模式）尤为亮眼。** 受约束的 JSON prefill 在 26B-A4B 上快 **5.89×**（354.7 vs 60.2 tok/s），首 token 早 **3.34×**（234 ms vs 781 ms）；12B prefill 为 **1.89×**，E4B 为 **1.52×**。JSON 模式下 decode 甚至在 E4B（**1.10×**）与 Qwen 3.6（**1.07×**）上也领先。
-- **多轮对话——真正的聊天机器人负载。** 基于内容哈希的分页 KV 前缀复用让后续轮次更快返回：26B-A4B 上 prefill / TTFT 为 **1.87× / 1.93×**，12B 上为 **1.55× / 1.60×**。
-- **短提示首 token 响应迅速。** E4B 处理短提示时首 token 早 **1.75×**（125 ms vs 219 ms），prefill 快 **1.62×**；Qwen 3.6 短提示 prefill 快 **1.59×**（123.2 vs 77.4 tok/s）。
-- **Qwen 3.6 IQ2_XXS 现已具备竞争力。** 这一激进量化的 35B-A3B MoE 达到近乎持平的 decode（0.94×）与 prefill 领先（1.18×）——已从昔日的短板中恢复。
+- **MoE 旗舰包揽 prefill 与首 token 延迟。** 在 Gemma 4 26B-A4B 上，基于 verify 的整模型 prefill 在**每个场景**都快于 llama.cpp——短提示最高 **1.59×**、JSON 模式最高 **1.70×**——首 token 也在每个场景都更早到达，最高早 **1.65×**。几何平均：**1.32× prefill / 1.30× TTFT**。
+- **dense 12B 的 decode 从不落败。** Gemma 4 12B 在**全部五个场景**的 decode 上打平或胜过 llama.cpp（几何平均 **1.17×**），其中流式工具调用轮次 decode 快 **2.05×**（81.0 vs 39.5 tok/s）。
+- **结构化输出（JSON 模式）在 E4B 上尤为亮眼。** 受约束的 JSON decode 流速达 **405 tok/s vs 52**——**7.73×**——把 E4B 的 decode 几何平均整体拉高到 **1.46×**。
+- **MoE 旗舰上的工具调用飞快。** 26B-A4B 的 function-call decode 快 **2.37×**（174.3 vs 73.4 tok/s），同时首 token 延迟也更低。
+- **E4B 在每个文本场景的 prefill 都领先。** 短提示 **1.22×**、多轮对话 **1.16×**、工具调用 **1.12×**、长上下文 **1.08×**——首 token 最高早 **1.20×** 到达。
+- **即便在极限量化下也保持持平。** 激进量化的 IQ2_XXS Qwen 3.6 35B-A3B MoE 的 decode 差距在约 8% 以内（0.92×），prefill 持平（0.99×）——纯 .NET 引擎在 2-bit 权重上与手工优化的 C++ 并驾齐驱。
 
-decode 在 dense 与 MoE 模型上均基本持平（0.92–0.95×），因此 prefill、TTFT 与结构化输出上的胜势是叠加在有竞争力的 token 生成之上。剩余低于 1.0× 的项——主要是长上下文 dense prefill——仍是正在优化的目标，而非最终结果。胜负各项的完整数据见[完整报告](docs/engine_comparison_report.md)。
-
-### 跨引擎推理矩阵
-
-在相同磁盘 GGUF 文件上对 TensorSharp、llama.cpp 与 Ollama 做苹果对苹果的对比（当前覆盖 Gemma 4 E4B Q8_0，包含文本 / 合成 prefill / 图像 / 音频 / 视频任务，并对 `f32`、`f16`、`q8_0` 三种 KV cache dtype 做扫描），见 [`docs/inference_benchmark_matrix_zh-cn.md`](docs/inference_benchmark_matrix_zh-cn.md)。驱动脚本位于 `benchmarks/inference_matrix/scripts/`；运行矩阵后，每格原始 JSON 会生成到 `benchmarks/inference_matrix/results/`。
+在这些亮点单元之外，decode 与 llama.cpp 的差距在几个百分点以内，因此 prefill、TTFT、工具调用与结构化输出上的胜势是叠加在有竞争力的 token 生成之上。剩余低于 1.0× 的项——主要是 26B-A4B 纯文本 decode 与 E4B JSON 模式 prefill——仍是正在优化的目标，而非最终结果。胜负各项的完整数据见[完整报告](docs/engine_comparison_report.md)。
 
 ## 测试
 

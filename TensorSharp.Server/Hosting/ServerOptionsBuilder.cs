@@ -160,6 +160,33 @@ namespace TensorSharp.Server.Hosting
         }
 
         /// <summary>
+        /// Translate <c>--kv-cache-dtype &lt;f32|f16|q8_0|q4_0&gt;</c> into the
+        /// process-wide <see cref="TensorSharp.Models.KvCacheDtypeConfig"/> so the
+        /// startup model picks it up at <c>InitKVCache</c>. Overrides any value
+        /// already applied from the <c>KV_CACHE_DTYPE</c> env var. Block-quantized
+        /// caches (q8_0 / q4_0) require the fused native decode path the scheduler
+        /// uses. Returns true when the flag was present.
+        /// </summary>
+        public static bool ApplyKvCacheDtypeCliFlag(string[] args)
+        {
+            if (args == null || args.Length == 0)
+                return false;
+
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (TryReadOption(args, ref i, "--kv-cache-dtype", out string dtypeOpt))
+                {
+                    if (!TensorSharp.Models.KvCacheDtypeConfig.TryParse(dtypeOpt, out var dtype))
+                        throw new ArgumentException(
+                            $"Unknown --kv-cache-dtype value '{dtypeOpt}'. Valid: f32, f16, q8_0, q4_0.");
+                    TensorSharp.Models.KvCacheDtypeConfig.Set(dtype);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
         /// Translate <c>--mtp-spec</c> / <c>--no-mtp-spec</c> /
         /// <c>--mtp-draft N</c> / <c>--mtp-pmin X</c> into the <c>TS_MTP_*</c>
         /// env vars read by <c>SchedulerConfig.FromEnvironment</c> when the
@@ -341,6 +368,16 @@ namespace TensorSharp.Server.Hosting
                     changed = true;
                     continue;
                 }
+                if (TryReadOption(args, ref i, "--qwen-image-lora", out string loraOpt))
+                {
+                    // DiT LoRA (e.g. a lightx2v Lightning step-distillation checkpoint),
+                    // merged into the quantized weights at model load. A Lightning LoRA
+                    // also switches the sampling defaults (its step count, cfg 1.0,
+                    // fixed timestep shift 3).
+                    SetQwenImageCompanionEnv("--qwen-image-lora", "TS_QWEN_IMAGE_LORA", loraOpt);
+                    changed = true;
+                    continue;
+                }
             }
             return changed;
         }
@@ -510,6 +547,13 @@ namespace TensorSharp.Server.Hosting
                 {
                     continue;
                 }
+                // --kv-cache-dtype is consumed by ApplyKvCacheDtypeCliFlag(args)
+                // in a separate earlier pass; skip it (and its value) here so it
+                // doesn't trip the unknown-arg trap below.
+                if (TryReadOption(args, ref i, "--kv-cache-dtype", out _))
+                {
+                    continue;
+                }
                 // MTP speculative-decoding flags are consumed by
                 // ApplyMtpSpeculativeCliFlags(args) in a separate earlier pass.
                 // Recognise + skip them here so they don't trip the
@@ -531,7 +575,8 @@ namespace TensorSharp.Server.Hosting
                 // unknown-arg trap below.
                 if (TryReadOption(args, ref i, "--qwen-image-vae", out _)
                     || TryReadOption(args, ref i, "--qwen-image-vl", out _)
-                    || TryReadOption(args, ref i, "--qwen-image-mmproj", out _))
+                    || TryReadOption(args, ref i, "--qwen-image-mmproj", out _)
+                    || TryReadOption(args, ref i, "--qwen-image-lora", out _))
                 {
                     continue;
                 }
@@ -574,7 +619,8 @@ namespace TensorSharp.Server.Hosting
                 "--continuous-batching", "--no-continuous-batching",
                 "--paged-batching", "--no-paged-batching",
                 "--mtp-spec", "--no-mtp-spec", "--mtp-draft", "--mtp-pmin", "--mtp-draft-model",
-                "--qwen-image-vae", "--qwen-image-vl", "--qwen-image-mmproj",
+                "--qwen-image-vae", "--qwen-image-vl", "--qwen-image-mmproj", "--qwen-image-lora",
+                "--kv-cache-dtype",
             };
             string best = null;
             int bestDist = int.MaxValue;

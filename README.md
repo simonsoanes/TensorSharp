@@ -73,13 +73,15 @@ These architectures are implemented and exercised by the test/benchmark matrix. 
 | Mistral 3 | [Mistral-Small-3.1-24B](https://huggingface.co/bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF) | ✅ / — / — | — | — | [mistral3.md](docs/models/mistral3.md) |
 | Gemma 3 | [gemma-3-4b-it](https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf) | ✅ / — / — | — | — | [gemma3.md](docs/models/gemma3.md) |
 | DiffusionGemma | diffusion-gemma GGUFs | — / — / — | — | — | [diffusiongemma.md](docs/models/diffusiongemma.md) |
+| Qwen-Image-Edit | qwen-image-edit GGUFs (MMDiT + VAE + Qwen2.5-VL) | 🖼️ image→image | — | — | [qwenimage.md](docs/models/qwenimage.md) |
 
 ## Highlights
 
-- **Faster prefill & time-to-first-token than llama.cpp** — a pure-.NET engine that *out-prefills* the hand-tuned C++ `llama.cpp` on **every** tested model, on identical GGUF files and the same GPU (prefill geomean **1.18×–1.88×**), with decode held at parity. The Gemma 4 26B-A4B MoE leads at **1.88× prefill / 1.69× TTFT**; structured-output (JSON) prefill hits **5.89×** and multi-turn chat lands first tokens **up to 1.93× sooner**. → [Head-to-head vs llama.cpp](#head-to-head-vs-llamacpp-engine-comparison)
+- **Trades wins with llama.cpp — from pure .NET** — head-to-head on identical GGUF files and the same GPU, TensorSharp matches or beats the hand-tuned C++ `llama.cpp` on the workloads that matter: the Gemma 4 26B-A4B MoE prefills **1.32×** faster and lands first tokens **1.30×** sooner (geomean; up to **1.70× / 1.65×** per scenario), Gemma 4 12B wins or ties **every decode scenario** (geomean **1.17×**), streamed tool-call turns decode up to **2.37×** faster, and structured-output (JSON) decode on Gemma 4 E4B streams **7.7×** faster (405 vs 52 tok/s). → [Head-to-head vs llama.cpp](#head-to-head-vs-llamacpp-engine-comparison)
 - **Continuous batching & paged KV cache** — vLLM-style paged KV pool with block-hash prefix sharing and an iteration-level scheduler, on by default in the server. → [deep dive](docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md)
 - **MTP / NextN speculative decoding** — multi-token-prediction draft heads accelerate solo decode on Qwen 3.6 (NextN block embedded in the trunk GGUF) and Gemma 4 (separate `gemma4-assistant` draft GGUF). The draft proposes several tokens per step and the trunk verifies them in one batched forward, with the request's own sampler driving both. Opt in with `--mtp-spec` (+ `--mtp-draft-model` for Gemma 4). → [Speculative decoding](#mtp--nextn-speculative-decoding)
 - **DiffusionGemma text diffusion** — block-wise EntropyBound denoising over a Gemma-4-derived MoE backbone, with CLI generation flags and a Web UI denoising preview stream. → [DiffusionGemma card](docs/models/diffusiongemma.md)
+- **Qwen-Image-Edit image editing** — prompt + input image → edited image, driving the 60-block MMDiT diffusion transformer with a Qwen-Image VAE and a Qwen2.5-VL-7B text encoder. CUDA-graph-captured whole-DiT forward, FlowMatch-Euler true-CFG denoise, and live denoising previews in the Web UI. → [Qwen-Image-Edit card](docs/models/qwenimage.md)
 - **Multimodal** — image / video / audio inputs (Gemma 4); image inputs for Gemma 3, Qwen 3.5-family, Mistral 3, and Nemotron-H Omni. → [Multimodal Support](#multimodal-support)
 - **Tool calling / function calling** — multi-turn tool calls across all three API styles, with architecture-agnostic output parsing. → [Tool Calling](#tool-calling--function-calling)
 - **Thinking / reasoning mode** — structured chain-of-thought for Qwen 3, Qwen 3.5/3.6-family, Gemma 4, GPT OSS, and Nemotron-H. → [Thinking Mode](#thinking--reasoning-mode)
@@ -100,7 +102,6 @@ Everything below is detailed reference. New here? The five sections above are al
 | [HTTP APIs](#http-apis) | Use the Ollama-compatible, OpenAI-compatible, or Web UI SSE endpoints |
 | [Per-model architecture cards](docs/models/README.md) | Read end-to-end documentation of one architecture (origin, forward graph, components, parameters, and how TensorSharp implements / optimizes prefill and decode) |
 | [Paged attention & continuous batching](docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md) | Understand the vLLM-style paged KV cache, prefix sharing, and iteration-level scheduler |
-| [Inference benchmark matrix](docs/inference_benchmark_matrix.md) | Compare TensorSharp against llama.cpp and Ollama across text / multimodal workloads, with KV-cache dtype sweeps |
 | [Environment variable feature matrix](docs/env_var_feature_matrix.md) | See which high-impact runtime flags affect which models, backends, and prompt types |
 | [Test/benchmark matrix runner](TensorSharp.TestMatrix/README.md) | Sweep model × backend × feature × env-var cells and generate regression reports |
 | [Server API examples](TensorSharp.Server/API_EXAMPLES.md) | Copy complete curl and Python examples for the server surface |
@@ -110,8 +111,8 @@ Everything below is detailed reference. New here? The five sections above are al
 
 | Area | Status |
 |---|---|
-| Model families | Gemma 3/4, DiffusionGemma, Qwen 3, Qwen 3.5/3.6-family GGUFs (`qwen35`, `qwen35moe`, `qwen3next`), GPT OSS, Nemotron-H (incl. Nemotron 3 Nano Omni), and Mistral 3 |
-| Inference hosts | CLI, interactive REPL, ASP.NET Core web UI, Ollama-style API, OpenAI Chat Completions-style API. DiffusionGemma currently uses the CLI diffusion run mode and Web UI denoising stream. |
+| Model families | Gemma 3/4, DiffusionGemma, Qwen 3, Qwen 3.5/3.6-family GGUFs (`qwen35`, `qwen35moe`, `qwen3next`), GPT OSS, Nemotron-H (incl. Nemotron 3 Nano Omni), and Mistral 3. Image editing via Qwen-Image-Edit (`qwen_image` MMDiT). |
+| Inference hosts | CLI, interactive REPL, ASP.NET Core web UI, Ollama-style API, OpenAI Chat Completions-style API. DiffusionGemma currently uses the CLI diffusion run mode and Web UI denoising stream; Qwen-Image-Edit runs via the CLI image-edit mode and the Web UI image-edit flow. |
 | Backends | Pure C# CPU, direct CUDA/cuBLAS (`cuda`), MLX Metal (`mlx`), GGML CPU, GGML Metal, GGML CUDA |
 | Multimodal | Gemma 4 image/video/audio; Gemma 3, Qwen 3.5-family, Mistral 3, and Nemotron-H Omni image input |
 | Continuous batching | vLLM-style paged KV cache, block-hash prefix sharing across requests, iteration-level scheduler (enabled by default; opt-out via `--no-continuous-batching`) |
@@ -122,7 +123,7 @@ Everything below is detailed reference. New here? The five sections above are al
 
 ## Features
 
-- **Multi-architecture support** -- Gemma 4, Gemma 3, DiffusionGemma, Qwen 3, Qwen 3.5/3.6-family, GPT OSS, Nemotron-H, Mistral 3
+- **Multi-architecture support** -- Gemma 4, Gemma 3, DiffusionGemma, Qwen 3, Qwen 3.5/3.6-family, GPT OSS, Nemotron-H, Mistral 3, and Qwen-Image-Edit (image editing)
 - **Multimodal inference** -- image, video, and audio inputs (Gemma 4); images for Gemma 3 / Qwen 3.5-family / Mistral 3 / Nemotron-H Omni
 - **Thinking / reasoning mode** -- structured chain-of-thought output with `<think>` / `<|channel>thought` / `<|channel>analysis` tags (Qwen 3, Qwen 3.5/3.6-family, Gemma 4, GPT OSS, Nemotron-H)
 - **Tool calling / function calling** -- models can invoke user-defined tools; multi-turn tool-call conversations supported across all three API styles
@@ -139,11 +140,12 @@ Everything below is detailed reference. New here? The five sections above are al
 - **Batch processing** -- JSONL input support in the console application, plus a built-in inference benchmark for prefill/decode throughput
 - **Streaming** -- token-by-token output via SSE (web) or stdout (console), with abort/stop support for in-flight generations
 - **Text-diffusion generation** -- DiffusionGemma uses an iterative EntropyBound denoising sampler instead of autoregressive `Forward()`. The CLI exposes `--diffusion-steps`, `--diffusion-seed`, and `--diffusion-blocks`; the Web UI streams whole-message `replace` events for live denoising previews and batches concurrent diffusion requests through `DiffusionBatchScheduler`.
+- **Image editing (Qwen-Image-Edit)** -- a prompt plus an input image produces an edited image. The loaded `qwen_image` GGUF is the MMDiT diffusion transformer; TensorSharp resolves two companion GGUFs alongside it — the Qwen-Image VAE (image ↔ 16-channel latent) and the Qwen2.5-VL-7B text encoder (prompt → 3584-dim conditioning, optional vision grounding via an `mmproj`). The pipeline VAE-encodes the reference, builds text (and optional image) conditioning, runs a FlowMatch-Euler true-CFG denoise loop with reference-latent concatenation, then VAE-decodes back to pixels. The whole 60-block DiT forward is CUDA-graph-captured (`TSGgml_QwenImageForward`), flash-attention is on by default, and the target area is auto-clamped to the device VRAM budget. An optional Lightning distillation LoRA (`--qwen-image-lora` / `TS_QWEN_IMAGE_LORA`, `.safetensors`) merges into the DiT weights at load time, cutting the denoise to the LoRA's step count (e.g. 4 or 8) and switching CFG to 1.0 (no negative pass). Driven from C# via `QwenImageModel.EditImage(prompt, RgbImage, QwenImageParams)`, from the CLI image-edit mode (`--image`, `--prompt`, `--cfg`, `--diffusion-steps`, `--diffusion-seed`), and from the Web UI with live denoising previews. → [Qwen-Image-Edit card](docs/models/qwenimage.md)
 - **Hybrid SSM-Transformer** -- Nemotron-H mixes Mamba2 SSM layers, attention-only layers, and MoE FFN layers in a single model. The Mamba2 step has both a per-sequence native kernel and a batched native kernel (`TSGgml_NemotronMamba2BatchedStepF32`, NEON SIMD + GCD parallelism) used by the batched path.
 - **Hybrid Attention-Recurrent** -- Qwen 3.5/3.6-family models mix full-attention layers with GatedDeltaNet recurrent layers; the batched path keeps recurrent running state in a per-slot recurrent-state pool
 - **Mixture of Experts** -- Gemma 4 MoE variants (e.g. gemma-4-26B-A4B), GPT OSS MoE (e.g. gpt-oss-20b), Qwen 3.5/3.6-family MoE (`qwen35moe` / `qwen3next` variants such as Qwen3.5-35B-A3B), and Nemotron-H MoE FFN layers
 - **Batched GPU MoE** -- a single fused GGML graph dispatch handles all selected experts (plus the optional shared expert and residual add) for Qwen 3.5/3.6-family and Nemotron-H decode, eliminating per-expert round-trips
-- **KV cache codecs** -- pluggable codec interface (`IKvBlockCodec`) with a built-in TurboQuant (Q4 / Q8) compressed codec for paged blocks, configurable via `--paged-kv-quant-bits`
+- **KV cache codecs** -- pluggable codec interface (`IKvBlockCodec`) with a built-in TurboQuant (2-bit affine / Q4 / Q8) compressed codec for paged blocks, configurable via `--paged-kv-quant-bits` (the 2-bit tier reaches ~10x on fp32 blocks for very long contexts)
 - **Message editing** -- edit or delete previous messages in the web chat UI and regenerate from that point
 - **Text/Image/Audio/Video uploads** -- the web UI accepts file uploads up to 500 MB, with automatic token-budget-aware truncation for large text files
 - **Per-turn observability** -- structured logs capture the full user input and the full raw assistant output (both `<think>` reasoning and the final result) plus the KV cache hit ratio. The same cache-hit stats are surfaced through every API: `prompt_cache_hit_tokens` / `prompt_cache_hit_ratio` (Ollama), `usage.prompt_tokens_details.cached_tokens` (OpenAI), and `promptTokens` / `kvReusedTokens` / `kvReusePercent` in the Web UI SSE `done` event
@@ -160,6 +162,7 @@ Everything below is detailed reference. New here? The five sections above are al
 | Nemotron-H | `nemotron_h`, `nemotron_h_moe` | Nemotron-H-8B, Nemotron-H-47B (Hybrid SSM-Transformer, MoE), Nemotron 3 Nano Omni (image) | Image (Omni) | Yes | Yes | — | [nemotron.md](docs/models/nemotron.md) |
 | Mistral 3 | `mistral3` | Mistral-Small-3.1-24B-Instruct | Image | No | No | — | [mistral3.md](docs/models/mistral3.md) |
 | DiffusionGemma | `diffusion-gemma`, `diffusion_gemma` | diffusion-gemma text-diffusion GGUFs | Text only | No | No | — | [diffusiongemma.md](docs/models/diffusiongemma.md) |
+| Qwen-Image-Edit | `qwen_image` | qwen-image-edit MMDiT GGUFs (+ VAE & Qwen2.5-VL companions) | Image edit (image+text → image) | No | No | — | [qwenimage.md](docs/models/qwenimage.md) |
 
 See the [per-model architecture cards](docs/models/README.md) for end-to-end documentation of each architecture (origin, forward graph, components, parameters, weight naming, and how TensorSharp implements / optimizes prefill and decode).
 
@@ -183,6 +186,7 @@ TensorSharp loads models in GGUF format. Below are Hugging Face links where you 
 | Mistral 3 | Mistral-Small-3.1-24B-Instruct | [bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF](https://huggingface.co/bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF) |
 | Mistral 3 | mistral3-mmproj (Pixtral vision projector) | [bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF](https://huggingface.co/bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF) |
 | DiffusionGemma | diffusion-gemma text-diffusion GGUFs | Use GGUF files whose `general.architecture` is `diffusion-gemma` or `diffusion_gemma` |
+| Qwen-Image-Edit | Qwen-Image-Edit MMDiT (`qwen_image`) | DiT GGUF whose `general.architecture` is `qwen_image`, plus a Qwen-Image VAE and a Qwen2.5-VL-7B text-encoder GGUF in the same directory (or via `TS_QWEN_IMAGE_VAE` / `TS_QWEN_IMAGE_TE` / `TS_QWEN_IMAGE_MMPROJ`). The VAE may be the original `.safetensors`. Optionally add a Lightning distillation LoRA via `--qwen-image-lora` / `TS_QWEN_IMAGE_LORA`. |
 
 ## Compute Backends
 
@@ -206,12 +210,12 @@ TensorSharp/
 │   ├── PagedKvCacheManager.cs   # Per-session paged KV manager (block allocation, prefix reuse)
 │   ├── PagedKvBlockStore.cs     # On-disk / RAM-tiered paged block storage with optional SSD spillover
 │   ├── SsdKvBlockTier.cs        # SSD-backed cold tier for paged blocks
-│   ├── TurboQuantKvCodec.cs     # Quantized KV block codec (Q4 / Q8) implementing IKvBlockCodec
+│   ├── TurboQuantKvCodec.cs     # Quantized KV block codec (2-bit / Q4 / Q8) implementing IKvBlockCodec
 │   ├── PrefillChunking.cs       # Chunked-prefill helper used by SWA / very long prompts
 │   ├── KvBlockHash.cs           # Content-addressed block hash for prefix-cache sharing
 │   └── Logging/                 # JSON-line file logger + per-turn telemetry
 ├── TensorSharp.Models/          # Model architectures and multimodal encoders/injectors
-│   ├── Models/<Family>/         # One folder per architecture (DiffusionGemma, Gemma3, Gemma4, GptOss, Mistral3, Nemotron, Qwen3, Qwen35)
+│   ├── Models/<Family>/         # One folder per architecture (DiffusionGemma, Gemma3, Gemma4, GptOss, Mistral3, Nemotron, Qwen3, Qwen35, QwenImage)
 │   │   ├── <Family>Model.cs                # Legacy per-sequence ModelBase implementation
 │   │   └── <Family>Model.BatchedForward.cs # IBatchedPagedModel.ForwardBatch — batched/paged path (Mistral3, Gemma4, GptOss, Qwen35, Nemotron, Qwen3)
 │   ├── Paged/                   # Tensor-side paged-attention helpers (TensorPagedAttention)
@@ -233,6 +237,7 @@ TensorSharp/
 │   ├── ggml_ops_mamba2.cpp                # Nemotron Mamba2 kernels (per-seq + batched SIMD)
 │   ├── ggml_ops_paged_attention.cpp       # Paged-attention native kernel (drives ggml_flash_attn_ext + sinks variant)
 │   ├── ggml_ops_diffusion.cpp             # DiffusionGemma fused decode-layer / whole-model / lm-head kernels
+│   ├── ggml_ops_qwen_image.cpp            # Qwen-Image-Edit MMDiT whole-model forward (CUDA-graph-captured) + CFG-batched kernels
 │   ├── ggml_ops_training.cpp              # Training-only kernels (unused at runtime)
 │   └── tests/                              # Native unit + smoke tests
 ├── TensorSharp.Server/          # Web chatbot + API server (ASP.NET Core)
@@ -267,10 +272,8 @@ TensorSharp/
 ├── docs/                        # Developer reference
 │   ├── models/                  # Per-model architecture cards (one .md per model, EN + 中文)
 │   ├── PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md  # Paged KV cache, prefix sharing, scheduler, per-model batched-forward status
-│   ├── env_var_feature_matrix.md  # Runtime flag × model/backend/feature coverage for TestMatrix
-│   └── inference_benchmark_matrix.md  # Cross-engine throughput matrix (TensorSharp vs llama.cpp vs Ollama)
+│   └── env_var_feature_matrix.md  # Runtime flag × model/backend/feature coverage for TestMatrix
 ├── benchmarks/                  # Reproducible benchmark harnesses
-│   └── inference_matrix/        # Driver scripts, modelfiles, prompts, and per-cell raw JSON results
 └── ExternalProjects/            # ggml/ is cloned from github.com/ggml-org/ggml at build time (not committed)
 ```
 
@@ -467,6 +470,13 @@ cd TensorSharp.Cli/bin
 ./TensorSharp.Cli --model <diffusion-gemma.gguf> --input prompt.txt --backend ggml_metal \
     --max-tokens 256 --diffusion-steps 48 --diffusion-seed 0
 
+# Qwen-Image-Edit image editing (prompt + input image -> edited image)
+# The VAE + Qwen2.5-VL text-encoder companions are resolved next to the DiT GGUF
+# (or set --qwen-image-vae / --qwen-image-vl / --qwen-image-mmproj).
+./TensorSharp.Cli --model <qwen-image-edit-DiT.gguf> --image input.png \
+    --prompt "Make the sky a dramatic sunset." --output edited.png \
+    --backend ggml_cuda --diffusion-steps 30 --cfg 2.5 --diffusion-seed 0
+
 # Thinking / reasoning mode
 ./TensorSharp.Cli --model <model.gguf> --input prompt.txt --backend ggml_metal --think
 
@@ -518,7 +528,7 @@ cd TensorSharp.Cli/bin
 | `--mmproj <path>` | Path to the multimodal projector GGUF file |
 | `--max-tokens <N>` | Maximum tokens to generate (default: 100) |
 | `--backend <type>` | Compute backend: `cpu`, `cuda`, `mlx`, `ggml_cpu`, `ggml_metal`, or `ggml_cuda` |
-| `--kv-cache-dtype <type>` | KV cache precision: `f32` (default), `f16`, or `q8_0`. Quantized / half-precision KV caches reduce memory at the cost of small numerical drift; benchmarks live in [`docs/inference_benchmark_matrix.md`](docs/inference_benchmark_matrix.md). |
+| `--kv-cache-dtype <type>` | KV cache precision: `f32` (default), `f16`, `q8_0`, or `q4_0`. Half-precision / quantized KV caches reduce memory at the cost of small numerical drift; `q4_0` (~0.56 bytes/elem, ~1/7 of f32) is the most aggressive tier for very long (128K–256K) contexts where the KV cache dominates memory. Block-quantized caches (`q8_0`/`q4_0`) require the native GGML flash path. |
 | `--interactive` / `-i` | Start an interactive REPL chat session (turn-by-turn input/output) with KV cache reuse, slash commands, hot-swappable model/backend/projector, file attachments (image, audio, video, text) and live sampling tuning. See the **Interactive REPL commands** section below for the full list. |
 | `--system <text>` | System prompt to seed the interactive session (overridden inside the REPL by `/system`) |
 | `--system-file <path>` | Read the initial system prompt from a UTF-8 text file (alternative to `--system`) |
@@ -545,9 +555,17 @@ cd TensorSharp.Cli/bin
 | `--test-chunked-prefill` | Run the chunked-prefill correctness check (compares chunked vs non-chunked logits) |
 | `--correct-prefill <N>` | Prompt length used by `--test-chunked-prefill` |
 | `--correct-decode <N>` | Decode length used by `--test-chunked-prefill` |
-| `--diffusion-steps <N>` | DiffusionGemma denoising steps per block (default: 48) |
+| `--diffusion-steps <N>` | DiffusionGemma denoising steps per block (default: 48). For Qwen-Image-Edit, the FlowMatch-Euler step count — omit for auto (30, or the step count of a loaded Lightning LoRA). |
 | `--diffusion-seed <N>` | DiffusionGemma deterministic sampler seed (default: 0) |
 | `--diffusion-blocks <N>` | DiffusionGemma block-autoregressive canvas count. `0` derives the count from `--max-tokens` and the model canvas length. |
+| `--image <path>` | Input image for Qwen-Image-Edit (also the image input for multimodal chat). Required to trigger image-edit mode on a `qwen_image` DiT GGUF. |
+| `--prompt <text>` | Qwen-Image-Edit edit instruction (falls back to `--input` file contents if omitted). |
+| `--output <path>` | Qwen-Image-Edit output PNG path (default: `edited.png`). |
+| `--cfg <F>` | Qwen-Image-Edit true-CFG guidance scale (`<= 1` disables the negative pass). Omit for auto: 2.5 (the Qwen-Image-Edit-2511 recommendation; 4.0 over-guides and distorts faces), or 1.0 when a Lightning LoRA is loaded. Shares `--diffusion-steps` / `--diffusion-seed` for step count and seed. |
+| `--qwen-image-vae <path>` | Override the resolved Qwen-Image VAE companion (`.gguf` or `.safetensors`). |
+| `--qwen-image-vl <path>` | Override the resolved Qwen2.5-VL-7B text-encoder GGUF. |
+| `--qwen-image-mmproj <path>` | Override the resolved Qwen2.5-VL mmproj (vision grounding) GGUF. |
+| `--qwen-image-lora <path>` | Qwen-Image-Edit Lightning distillation LoRA (`.safetensors`), merged into the DiT at load time. Auto-derives the step count (e.g. 4 or 8) and switches CFG to 1.0. Env: `TS_QWEN_IMAGE_LORA`. |
 | `--test` | Run built-in tokenizer + Qwen3 chat-template + ollama-comparison tests |
 | `--test-templates <dir>` | Validate hardcoded chat templates against GGUF Jinja2 templates for every *.gguf in `<dir>` |
 | `--log-level <lvl>` | Console + file logger level: `trace`, `debug`, `info`, `warning`, `error`, `critical`, `off` |
@@ -689,7 +707,7 @@ Use `--model` to choose the hosted GGUF file and `--mmproj` to choose the hosted
 | `--paged-kv-ram-mb <N>` | Legacy standalone paged-KV RAM-tier cap. |
 | `--paged-kv-ssd-dir <dir>` | Legacy standalone paged-KV SSD cold-tier directory. |
 | `--paged-kv-ssd-mb <N>` | Legacy standalone paged-KV SSD cap. |
-| `--paged-kv-quant-bits <0\|4\|8>` | Legacy standalone paged-KV block quantization (TurboQuantKvCodec). |
+| `--paged-kv-quant-bits <0\|2\|4\|8>` | Legacy standalone paged-KV block quantization (TurboQuantKvCodec; `2` = affine min+scale, `4`/`8` = symmetric). |
 
 Per-request fields in the chat / generate JSON payloads (e.g. `temperature`,
 `top_p`, `top_k`, `min_p`, `repeat_penalty`, `presence_penalty`,
@@ -731,11 +749,13 @@ These can be set with either the `--paged-kv*` / `--continuous-batching` CLI fla
 | `TS_KV_CACHE_MAX_RAM_MB` | Legacy standalone paged-KV RAM-tier cap. |
 | `TS_KV_CACHE_SSD_DIR` | Legacy standalone paged-KV SSD cold-tier directory. |
 | `TS_KV_CACHE_MAX_SSD_MB` | Legacy standalone paged-KV SSD cap. |
-| `TS_KV_PAGED_QUANT_BITS` | Legacy standalone paged-KV block quantization bits (`0` = passthrough, `4`, or `8`). |
+| `TS_KV_PAGED_QUANT_BITS` | Legacy standalone paged-KV block quantization bits (`0` = passthrough, `2` = affine, `4`, or `8`). |
 | `TS_SCHED_DISABLE_BATCHED` | `1` forces the per-sequence KV-swap fallback even when a model implements `IBatchedPagedModel`. The CLI shortcut is `--no-continuous-batching`. |
 | `TS_SCHED_MAX_BATCHED_TOKENS` | Scheduler per-step token budget (default: `4096`). |
 | `TS_SCHED_MAX_RUNNING_SEQS` | Maximum in-flight sequences (default: `16`). |
-| `TS_SCHED_PREFILL_CHUNK` | Maximum prefill tokens per step (default: `1024`). |
+| `TS_SCHED_PREFILL_CHUNK` | Maximum prefill tokens per step when requests contend (default: `1024`). |
+| `TS_SCHED_SOLO_PREFILL_CHUNK` | Prefill chunk size for the fresh (start_pos = 0) part of a SOLO prompt — one uncontended request gets big fused-prefill chunks (default: `8192`). |
+| `TS_SCHED_SOLO_TAIL_PREFILL_CHUNK` | Prefill chunk size for the tail (start_pos > 0) of a SOLO prompt beyond the first solo chunk (default: `2048`). |
 | `TS_SCHED_NUM_BLOCKS` | Physical blocks in the engine block pool (default: `256`). |
 | `TS_SCHED_BLOCK_SIZE` | Tokens per block on the engine side (default: `256`). |
 | `TS_SCHED_PREFIX_CACHE` | `0` disables block-hash prefix sharing across requests. |
@@ -804,9 +824,9 @@ Quick reference for which environment variables (and matching CLI flags) gate ea
 | Continuous-batching engine (`InferenceEngine` + scheduler) | ON in `TensorSharp.Server` | `TS_SCHED_DISABLE_BATCHED=1` to force per-seq fallback | `--no-continuous-batching` / `--continuous-batching` |
 | Legacy per-session paged-KV manager | removed from Server request path | `TS_KV_PAGED_CACHE` (`0` / `1`), `TS_KV_BLOCK_SIZE` retained for compatibility / standalone tests | `--paged-kv` / `--no-paged-kv`, `--paged-kv-block-size N` |
 | Legacy paged-KV SSD spillover (standalone manager) | OFF | `TS_KV_CACHE_MAX_RAM_MB`, `TS_KV_CACHE_SSD_DIR`, `TS_KV_CACHE_MAX_SSD_MB` | `--paged-kv-ram-mb`, `--paged-kv-ssd-dir`, `--paged-kv-ssd-mb` |
-| Legacy paged-KV block quantization (standalone manager) | OFF (`0` = passthrough) | `TS_KV_PAGED_QUANT_BITS` (`0` / `4` / `8`) | `--paged-kv-quant-bits` |
+| Legacy paged-KV block quantization (standalone manager) | OFF (`0` = passthrough) | `TS_KV_PAGED_QUANT_BITS` (`0` / `2` / `4` / `8`) | `--paged-kv-quant-bits` |
 | Block-hash prefix sharing across requests | ON | `TS_SCHED_PREFIX_CACHE=0` to disable | — |
-| Scheduler tunables (per-step token budget, max in-flight seqs, prefill chunk, block pool size, decode quantum) | engine defaults | `TS_SCHED_MAX_BATCHED_TOKENS`, `TS_SCHED_MAX_RUNNING_SEQS`, `TS_SCHED_PREFILL_CHUNK`, `TS_SCHED_NUM_BLOCKS`, `TS_SCHED_BLOCK_SIZE`, `TS_SCHED_DECODE_QUANTUM` | — |
+| Scheduler tunables (per-step token budget, max in-flight seqs, prefill chunks, block pool size, decode quantum) | engine defaults | `TS_SCHED_MAX_BATCHED_TOKENS`, `TS_SCHED_MAX_RUNNING_SEQS`, `TS_SCHED_PREFILL_CHUNK`, `TS_SCHED_SOLO_PREFILL_CHUNK`, `TS_SCHED_SOLO_TAIL_PREFILL_CHUNK`, `TS_SCHED_NUM_BLOCKS`, `TS_SCHED_BLOCK_SIZE`, `TS_SCHED_DECODE_QUANTUM` | — |
 
 #### Per-model batched / paged forward (`IBatchedPagedModel.ForwardBatch`)
 
@@ -1114,9 +1134,9 @@ TensorSharp is structured as a layered system:
 
 1. **TensorSharp.Core** provides the core `Tensor` type, storage abstraction, and the extensible operation registry (`Ops`). CPU implementations use `System.Numerics.Vectors` for SIMD acceleration.
 
-2. **TensorSharp.Runtime** owns runtime-facing contracts and services: GGUF parsing, tokenization (SentencePiece / BPE), chat template rendering, configurable token sampling, output parsing, paged KV cache (`Runtime/Paged/*`), the continuous-batching scheduler / engine (`Runtime/Scheduling/*`), the `IKvBlockCodec` interface plus the `TurboQuantKvCodec` Q4/Q8 implementation, and reusable contracts such as `IModelArchitecture`, `IBatchedPagedModel`, `IPromptRenderer`, `IOutputProtocolParser`, `IMultimodalInjector`, `IKVCachePolicy`, and `IBackendExecutionPlan`.
+2. **TensorSharp.Runtime** owns runtime-facing contracts and services: GGUF parsing, tokenization (SentencePiece / BPE), chat template rendering, configurable token sampling, output parsing, paged KV cache (`Runtime/Paged/*`), the continuous-batching scheduler / engine (`Runtime/Scheduling/*`), the `IKvBlockCodec` interface plus the `TurboQuantKvCodec` 2-bit / Q4 / Q8 implementation, and reusable contracts such as `IModelArchitecture`, `IBatchedPagedModel`, `IPromptRenderer`, `IOutputProtocolParser`, `IMultimodalInjector`, `IKVCachePolicy`, and `IBackendExecutionPlan`.
 
-3. **TensorSharp.Models** implements `ModelBase` plus the concrete architectures and multimodal helpers (Gemma 3/4, DiffusionGemma, Qwen 3/3.5, GPT OSS, Nemotron-H, Mistral 3). Autoregressive architectures ship the legacy per-sequence forward, and most also expose an `IBatchedPagedModel.ForwardBatch` implementation (`<Family>Model.BatchedForward.cs`) for continuous batching. DiffusionGemma is intentionally different: `Forward()` is unsupported, and generation goes through `DiffusionGemmaSampler` over fixed-length denoising canvases. Models are loaded via `ModelBase.Create()` which auto-detects the architecture from GGUF metadata.
+3. **TensorSharp.Models** implements `ModelBase` plus the concrete architectures and multimodal helpers (Gemma 3/4, DiffusionGemma, Qwen 3/3.5, GPT OSS, Nemotron-H, Mistral 3, Qwen-Image-Edit). Autoregressive architectures ship the legacy per-sequence forward, and most also expose an `IBatchedPagedModel.ForwardBatch` implementation (`<Family>Model.BatchedForward.cs`) for continuous batching. DiffusionGemma is intentionally different: `Forward()` is unsupported, and generation goes through `DiffusionGemmaSampler` over fixed-length denoising canvases. Qwen-Image-Edit (`QwenImageModel`) is likewise not autoregressive — `Forward()` throws and image editing runs through `EditImage()`, which orchestrates the MMDiT diffusion transformer, the Qwen-Image VAE, and the Qwen2.5-VL text encoder. Models are loaded via `ModelBase.Create()` which auto-detects the architecture from GGUF metadata.
 
 4. **TensorSharp.Backends.GGML** registers accelerated implementations of the same operations via a native C++ bridge (`libGgmlOps` / `GgmlOps.dll`) that links against [ggml](https://github.com/ggml-org/ggml). On macOS this provides Metal GPU compute, and on Windows/Linux it can expose GGML CUDA for NVIDIA GPUs. Operations include native quantized matmul (Q4_K_M, Q8_0, etc.) without dequantizing to FP32, plus paged-attention (`TSGgml_PagedAttentionForward`, with and without attention sinks) and architecture-specific batched kernels (Mamba2, GatedDeltaNet).
 
@@ -1169,35 +1189,31 @@ the fused path engages.
 - **Bounded pool retention**: the integrated-GPU / CPU memory pool now caps individual retained blocks at 64 MB and the total pool at 32 blocks. Combined with mmap-backed weights, this keeps short-lived intermediate tensors recycled fast while bounding the peak resident set.
 - **Memory-efficient model loading**: large tensors are streamed directly to native memory without intermediate managed allocations. F32 weights and norms still load on demand; quantized weights are mmap-backed when supported by the backend.
 - **Paged KV block pool with optional SSD spillover**: paged KV blocks live in a per-engine `BlockPool` with LRU eviction; the `PagedKvBlockStore` keeps a configurable RAM cap (`TS_KV_CACHE_MAX_RAM_MB`) and spills cold blocks into an SSD tier (`TS_KV_CACHE_SSD_DIR`) up to `TS_KV_CACHE_MAX_SSD_MB`. Block content-hashes are kept in a global index so prefix matches are reused across sessions and requests without rematerialising the K/V.
-- **KV block codecs**: blocks can be optionally compressed in-place with `TurboQuantKvCodec` (Q4 or Q8) via `--paged-kv-quant-bits`, trading a small accuracy cost for half / quarter the per-block bandwidth and memory footprint. Recurrent-state models fall back to passthrough automatically.
+- **KV block codecs**: blocks can be optionally compressed in-place with `TurboQuantKvCodec` (2-bit affine, Q4, or Q8) via `--paged-kv-quant-bits`, trading accuracy for a smaller per-block bandwidth and memory footprint — roughly half (Q8), a quarter (Q4), or a tenth (2-bit, fp32 blocks). The 2-bit tier uses an affine per-group min+scale (the block-min idea behind llama.cpp's Q2_K) so its four codes span the group's actual range; it is intended for long-context far-prefix reuse where attention weights dwarf the quantization noise. Recurrent-state models fall back to passthrough automatically.
 
 ## Benchmarks
 
 ### Head-to-head vs llama.cpp (engine comparison)
 
-A pure-.NET engine going toe-to-toe with the hand-tuned C++ `llama.cpp` on **identical GGUF files, the same NVIDIA RTX 3080 Laptop GPU (16 GB), and one uniform OpenAI `/v1/chat/completions` surface** — across text, multi-turn, and structured-output (JSON) scenarios. The numbers below are the **geomean speedup of TensorSharp over llama.cpp on the same GGML CUDA backend** (single-stream, greedy, MTP off). **> 1.0× means TensorSharp is faster** (decode / prefill) or lower-latency (TTFT). The full per-scenario tables are in [`docs/engine_comparison_report.md`](docs/engine_comparison_report.md).
+A pure-.NET engine going toe-to-toe with the hand-tuned C++ `llama.cpp` on **identical GGUF files, the same NVIDIA RTX 3080 Laptop GPU (16 GB), and one uniform OpenAI `/v1/chat/completions` surface** — across short/long text, multi-turn, tool-calling, and structured-output (JSON) scenarios. The numbers below are the **geomean speedup of TensorSharp over llama.cpp on the same GGML CUDA backend** (single-stream, greedy, MTP off). **> 1.0× means TensorSharp is faster** (decode / prefill) or lower-latency (TTFT). The full per-scenario tables are in [`docs/engine_comparison_report.md`](docs/engine_comparison_report.md).
 
 | Model | decode | prefill | TTFT |
 |---|---:|---:|---:|
-| Gemma 4 26B-A4B it (QAT UD-Q4_K_XL, **MoE**) | 0.92× | **1.88×** | **1.69×** |
-| Gemma 4 12B it (QAT UD-Q4_K_XL, dense) | 0.93× | **1.23×** | **1.10×** |
-| Gemma 4 E4B it (Q8_0, dense multimodal) | 0.95× | **1.21×** | **1.07×** |
-| Qwen 3.6 35B-A3B (UD-IQ2_XXS, MoE) | 0.94× | **1.18×** | 0.95× |
+| Gemma 4 E4B it (Q8_0, dense multimodal) | **1.46×** | 0.83× | 0.82× |
+| Gemma 4 12B it (QAT UD-Q4_K_XL, dense) | **1.17×** | 1.01× | 0.99× |
+| Gemma 4 26B-A4B it (QAT UD-Q4_K_XL, **MoE**) | 0.96× | **1.32×** | **1.30×** |
+| Qwen 3.6 35B-A3B (UD-IQ2_XXS, MoE) | 0.92× | 0.99× | 0.97× |
 
 Where TensorSharp pulls clearly ahead:
 
-- **Prefill wins on every model.** TensorSharp out-prefills llama.cpp across the board — geomean **1.18× (Qwen 3.6) → 1.88× (26B-A4B MoE)** — on the strength of verify-based whole-model prefill plus fused FFN / attention kernels. Time-to-first-token follows, dropping on three of four models (up to **1.69×** lower on the MoE flagship).
-- **The MoE flagship leads.** On Gemma 4 26B-A4B the persistent captured-CUDA-graph MoE decode plus verify-based whole-model prefill deliver **1.88× prefill / 1.69× TTFT** geomean with decode at parity — wins stacked on top of competitive token generation.
-- **Structured output (JSON mode) is a standout.** Constrained-JSON prefill runs **5.89×** faster on 26B-A4B (354.7 vs 60.2 tok/s) with first token **3.34× sooner** (234 ms vs 781 ms); 12B prefill is **1.89×** and E4B **1.52×**. JSON-mode decode even wins on E4B (**1.10×**) and Qwen 3.6 (**1.07×**).
-- **Multi-turn chat — the real chatbot workload.** Content-hashed paged-KV prefix reuse makes follow-up turns land far sooner: prefill / TTFT of **1.87× / 1.93×** on 26B-A4B and **1.55× / 1.60×** on 12B versus llama.cpp.
-- **Snappy first token on short prompts.** E4B returns a short prompt's first token **1.75× sooner** (125 ms vs 219 ms) and prefills it **1.62×** faster; Qwen 3.6 prefills short prompts **1.59×** faster (123.2 vs 77.4 tok/s).
-- **Qwen 3.6 IQ2_XXS is competitive now.** The aggressively quantized 35B-A3B MoE reaches near-parity decode (0.94×) and a prefill win (1.18×) — recovered from being the weak spot it once was.
+- **The MoE flagship owns prefill and first-token latency.** On Gemma 4 26B-A4B, verify-based whole-model prefill beats llama.cpp in **every scenario** — up to **1.59×** on short prompts and **1.70×** in JSON mode — and the first token lands sooner in every scenario too, up to **1.65×**. Geomean: **1.32× prefill / 1.30× TTFT**.
+- **Dense 12B decode never loses.** Gemma 4 12B wins or ties llama.cpp on decode in **all five scenarios** (geomean **1.17×**), with streamed tool-call turns decoding **2.05×** faster (81.0 vs 39.5 tok/s).
+- **Structured output (JSON mode) is a standout on E4B.** Constrained-JSON decode streams **405 tok/s vs 52** — **7.73×** — lifting E4B's overall decode geomean to **1.46×**.
+- **Tool-calling turns fly on the MoE flagship.** Function-call decode on 26B-A4B runs **2.37×** faster (174.3 vs 73.4 tok/s), with a lower time-to-first-token on top.
+- **E4B out-prefills llama.cpp on every text scenario.** Short prompts **1.22×**, multi-turn chat **1.16×**, tool-call **1.12×**, long context **1.08×** — with first tokens landing up to **1.20×** sooner.
+- **Parity even at extreme quantization.** The aggressively quantized IQ2_XXS Qwen 3.6 35B-A3B MoE holds decode within ~8% (0.92×) and prefill at parity (0.99×) — a pure-.NET engine keeping pace with hand-tuned C++ on 2-bit weights.
 
-Decode sits at parity across both dense and MoE models (0.92–0.95×), so the prefill, TTFT, and structured-output wins come on top of competitive token generation. The remaining sub-1.0× cells — chiefly long-context dense prefill — are active optimization targets rather than finished results. Every cell, wins and gaps alike, is in the [full report](docs/engine_comparison_report.md).
-
-### Cross-engine inference matrix
-
-For an apples-to-apples comparison of TensorSharp, llama.cpp, and Ollama on the same on-disk GGUF files (Gemma 4 E4B Q8_0 today, with text / synthetic prefill / image / audio / video tasks and KV-cache dtype sweeps for `f32`, `f16`, and `q8_0`), see [`docs/inference_benchmark_matrix.md`](docs/inference_benchmark_matrix.md). The driver scripts are in `benchmarks/inference_matrix/scripts/`; per-cell raw JSON outputs are generated under `benchmarks/inference_matrix/results/` when you run the matrix.
+Outside these standout cells, decode sits within a few percent of llama.cpp, so the prefill, TTFT, tool-call, and structured-output wins come on top of competitive token generation. The remaining sub-1.0× cells — chiefly 26B-A4B plain-text decode and E4B JSON-mode prefill — are active optimization targets rather than finished results. Every cell, wins and gaps alike, is in the [full report](docs/engine_comparison_report.md).
 
 ## Testing
 

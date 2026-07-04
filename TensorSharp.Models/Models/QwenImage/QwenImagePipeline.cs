@@ -26,6 +26,9 @@ namespace TensorSharp.Models.QwenImage
             2.8184f,1.4541f,2.3275f,2.6558f,1.2196f,1.7708f,2.6052f,2.0743f,
             3.2687f,2.1526f,2.8652f,1.5579f,1.6382f,1.1253f,2.8251f,1.916f };
         private const int C = QwenImageModel.VaeLatentChannels; // 16
+        // Qwen-Image's native training/inference resolution (diffusers/sd.cpp size the edit to
+        // ~1 MP). The VRAM area clamp targets this as the high-quality ceiling.
+        private const long QwenImageNativeArea = 1024L * 1024;
 
         private readonly QwenImageModel _model;
         private QwenImageVae _vae;
@@ -61,6 +64,19 @@ namespace TensorSharp.Models.QwenImage
             var phase = System.Diagnostics.Stopwatch.StartNew();
             void Phase(string n) { Console.WriteLine($"  [pipe-timing] {n}: {phase.Elapsed.TotalMilliseconds:F0}ms"); phase.Restart(); }
 
+            // 0. resolve auto sampling params. A Lightning step-distillation LoRA
+            // (TS_QWEN_IMAGE_LORA, merged into the DiT at load) changes the sampling regime:
+            // its trained step count, cfg 1.0 (no negative pass — the distillation bakes the
+            // guidance in), and a FIXED timestep shift of 3 (lightx2v sets base_shift =
+            // max_shift = log 3; the dynamic resolution shift would walk a different sigma
+            // schedule than the distillation targets). Explicit caller values still win.
+            int lightning = QwenImageDiT.LoraPath != null ? QwenImageLoraTable.ParseLightningSteps(QwenImageDiT.LoraPath) : 0;
+            int steps = p.Steps > 0 ? p.Steps : (lightning > 0 ? lightning : 30);
+            float cfgScale = p.CfgScale > 0f ? p.CfgScale : (lightning > 0 ? 1f : 2.5f);
+            float? muOverride = lightning > 0 ? MathF.Log(3f) : null;
+            if (lightning > 0)
+                Console.WriteLine($"  [pipe] Lightning LoRA active: steps={steps} cfg={cfgScale} shift=3 (fixed)");
+
             _conditionImage = input;   // vision grounding uses the original (resized to 384^2 internally)
             // 1. preprocess (aspect-preserving, dims multiple of 16). Clamp the target area
             // to what the DiT attention will fit in device VRAM (avoids the 16 GB OOM/shared-
@@ -79,7 +95,7 @@ namespace TensorSharp.Models.QwenImage
 
             // 3. text conditioning (prompt + negative for CFG)
             float[] cond = EncodePrompt(prompt, out int txtSeq);
-            bool doCfg = p.CfgScale > 1f;
+            bool doCfg = cfgScale > 1f;
             float[] negCond = null; int negTxt = 0;
             if (doCfg) negCond = EncodePrompt(p.NegativePrompt ?? " ", out negTxt);
             Phase($"text encode (txtSeq={txtSeq})");
@@ -108,7 +124,7 @@ namespace TensorSharp.Models.QwenImage
             DitRope ropeNeg = doCfg ? DitRope.Build(imgShapes, negTxt) : null;
 
             // 5. scheduler
-            var sched = new QwenImageScheduler(p.Steps, seq);
+            var sched = new QwenImageScheduler(steps, seq, muOverride);
 
             // 6. denoise loop
             var imgTokens = new float[(long)imgSeq * 64];
@@ -123,22 +139,33 @@ namespace TensorSharp.Models.QwenImage
                 Console.WriteLine($"  [pipe] CFG-batch disabled: {imgSeq + Math.Max(txtSeq, negTxt)} tokens > {Dit.CfgBatchMaxTokens} budget (set TS_QWEN_DIT_CFG_BATCH_MAXTOK or a smaller area).");
 
             Dit.ResetCache(sched.Steps);   // First-Block-Cache: fresh state per generation
+            // Whole-step cache (EasyCache port, see QwenImageStepCache): skips the ENTIRE
+            // DiT forward (both CFG branches) on low-change steps. Default cache mode;
+            // TS_QWEN_DIT_CACHE_MODE selects easycache/fbc/both/off.
+            var stepCache = new QwenImageStepCache(sched.Steps);
             for (int step = 0; step < sched.Steps; step++)
             {
                 Array.Copy(latents, 0, imgTokens, 0, (long)seq * 64);             // gen part = current latents
                 float t01 = sched.Sigmas[step];   // FlowMatch: timestep == sigma
                 var v = new float[(long)seq * 64];
+                float[] velNeg = doCfg ? new float[(long)seq * 64] : null;
 
-                if (useCfgBatch)
+                if (stepCache.TrySkip(step, latents, v, velNeg))
+                {
+                    // Both branches reconstructed from the cached (output - input) diffs;
+                    // no device work this step.
+                    if (doCfg) TrueCfg(v, velNeg, seq, cfgScale);
+                }
+                else if (useCfgBatch)
                 {
                     // CFG-batched: both branches in one launch-amortized fused pass (halves the
                     // per-block GPU sync + weight upload that starve the launch-bound DiT).
                     var (vc, vn) = Dit.PredictCfg(imgTokens, imgSeq, cond, txtSeq, rope, negCond, negTxt, ropeNeg,
                         t01, modulateIndex, step, sched.Steps, seq);
                     Array.Copy(vc, 0, v, 0, v.Length);
-                    var velNeg = new float[(long)seq * 64];
                     Array.Copy(vn, 0, velNeg, 0, velNeg.Length);
-                    TrueCfg(v, velNeg, seq, p.CfgScale);
+                    stepCache.AfterCompute(step, latents, v, velNeg);
+                    TrueCfg(v, velNeg, seq, cfgScale);
                 }
                 else
                 {
@@ -149,10 +176,16 @@ namespace TensorSharp.Models.QwenImage
 
                     if (doCfg)
                     {
-                        float[] velNeg = Dit.Predict(imgTokens, imgSeq, negCond, negTxt, t01, modulateIndex, ropeNeg,
+                        float[] velFull = Dit.Predict(imgTokens, imgSeq, negCond, negTxt, t01, modulateIndex, ropeNeg,
                             stepIndex: step, totalSteps: sched.Steps, cfgBranch: 1, genTokens: seq);
+                        Array.Copy(velFull, 0, velNeg, 0, velNeg.Length);
+                        stepCache.AfterCompute(step, latents, v, velNeg);
                         // true-CFG: comb = neg + scale*(cond-neg), then renorm to cond norm (per token row)
-                        TrueCfg(v, velNeg, seq, p.CfgScale);
+                        TrueCfg(v, velNeg, seq, cfgScale);
+                    }
+                    else
+                    {
+                        stepCache.AfterCompute(step, latents, v, null);
                     }
                 }
                 sched.Step(latents, v, step);
@@ -160,8 +193,27 @@ namespace TensorSharp.Models.QwenImage
                     Console.WriteLine($"  [pipe] step {step + 1}/{sched.Steps} sigma={t01:F3} vel {QwenImageDiT.Stat(v, v.Length)} | latent {QwenImageDiT.Stat(latents, latents.Length)}");
                 else
                     Console.Write($"\r  denoise step {step + 1}/{sched.Steps}   ");
+
+                // Live progress: a tick every step (so the UI never looks stuck) plus a decoded
+                // preview of the current latent on evenly-spaced steps. Previews are decoded at
+                // reduced resolution (cheap vs the full final decode, and keeps VRAM in budget
+                // while the DiT weights are still resident). The final step is skipped here — the
+                // caller renders the full-resolution result below.
+                if (p.OnStep != null)
+                {
+                    int interval = p.PreviewCount > 0 ? Math.Max(1, sched.Steps / p.PreviewCount) : 0;
+                    bool emit = interval > 0 && step < sched.Steps - 1 && (step + 1) % interval == 0;
+                    RgbImage preview = null;
+                    if (emit)
+                    {
+                        try { preview = DecodePreview(latents, Hl, Wl); }
+                        catch (Exception ex) { Console.WriteLine($"  [pipe] preview decode skipped: {ex.Message}"); }
+                    }
+                    p.OnStep(step + 1, sched.Steps, preview);
+                }
             }
             Console.WriteLine();
+            if (stepCache.Enabled) Console.WriteLine($"  [pipe] DiT step-cache: {stepCache.Stats()}");
             if (Dit.CacheEnabled) Console.WriteLine($"  [pipe] DiT cache: {Dit.CacheStats()}");
             Phase($"denoise ({sched.Steps} steps)");
 
@@ -182,17 +234,61 @@ namespace TensorSharp.Models.QwenImage
             return result;
         }
 
+        // Decode a low-resolution RGB preview of the current (partially denoised) latent for live
+        // UI feedback. The latent is spatially average-pooled before the VAE decode so the preview
+        // costs a fraction of the full decode (and its conv/im2col scratch stays small enough to fit
+        // alongside the still-resident DiT weights). `packed` is the evolving [seq,64] latent.
+        private RgbImage DecodePreview(float[] packed, int Hl, int Wl)
+        {
+            float[] lat = Unpack(packed, Hl, Wl);          // [C, Hl, Wl]
+            DenormalizeLatent(lat, Hl, Wl);
+            // Pool so the largest latent dim is ~48 (=> ~384 px preview), capping cost at any output
+            // resolution; never below a 2x2 grid (the VAE conv stack needs a few cells).
+            int f = Math.Max(1, (Math.Max(Hl, Wl) + 47) / 48);
+            if (f > 1 && Hl / f >= 2 && Wl / f >= 2)
+            {
+                float[] small = DownsampleLatent(lat, Hl, Wl, f, out int Hs, out int Ws);
+                return Vae.Decode(new VaeLatent(C, Hs, Ws, small));
+            }
+            return Vae.Decode(new VaeLatent(C, Hl, Wl, lat));
+        }
+
+        // Average-pool each latent channel by an integer factor (drops a partial trailing row/col).
+        private static float[] DownsampleLatent(float[] lat, int H, int W, int f, out int Ho, out int Wo)
+        {
+            Ho = H / f; Wo = W / f;
+            int hw = H * W, hwo = Ho * Wo;
+            var outp = new float[(long)C * hwo];
+            float inv = 1f / (f * f);
+            for (int c = 0; c < C; c++)
+                for (int hi = 0; hi < Ho; hi++)
+                    for (int wi = 0; wi < Wo; wi++)
+                    {
+                        float sum = 0f;
+                        for (int dh = 0; dh < f; dh++)
+                            for (int dw = 0; dw < f; dw++)
+                                sum += lat[(long)c * hw + (hi * f + dh) * W + (wi * f + dw)];
+                        outp[(long)c * hwo + hi * Wo + wi] = sum * inv;
+                    }
+            return outp;
+        }
+
         private float[] EncodePrompt(string prompt, out int condSeq)
         {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            void Sub(string n) { Console.WriteLine($"  [pipe-timing]   te.{n}: {sw.Elapsed.TotalMilliseconds:F0}ms"); sw.Restart(); }
+
             int[] tokens;
             ImageCond imgCond = null;
             if (UseVision && _conditionImage != null)
             {
                 string templated = QwenImagePrompt.BuildWithImage(prompt);
                 int[] baseTokens = Te.Tokenizer.Encode(templated, addSpecial: false).ToArray();
+                Sub("load+tokenize");
                 float[] pv = QwenImageVisionProcessor.Preprocess(_conditionImage, out int gridH, out int gridW);
                 int n = (gridH / 2) * (gridW / 2);
                 float[] embeds = Vision.Encode(pv, gridH, gridW);    // [n, 3584]
+                Sub($"vision({gridH}x{gridW})");
                 tokens = ExpandImagePad(baseTokens, QwenImagePrompt.ImagePadTokenId, n, out int imgStart);
                 if (imgStart >= 0)
                     imgCond = new ImageCond { Start = imgStart, Count = n, GridH = gridH, GridW = gridW, Embeds = embeds };
@@ -200,9 +296,11 @@ namespace TensorSharp.Models.QwenImage
             else
             {
                 tokens = Te.Tokenizer.Encode(QwenImagePrompt.Build(prompt), addSpecial: false).ToArray();
+                Sub("load+tokenize");
             }
 
             float[] full = Te.EncodeHidden(tokens, imgCond);   // [seq, 3584]
+            Sub($"llm({tokens.Length}tok)");
             int seq = tokens.Length;
             int hidden = Te.HiddenSize;
             int drop = Math.Min(QwenImagePrompt.DropIdx, seq - 1);
@@ -337,14 +435,19 @@ namespace TensorSharp.Models.QwenImage
             long maxArea;
             if (nativeFlash)
             {
-                // Flash removes the DiT scores, but the GPU VAE conv's im2col scratch grows
-                // with the output area (it peaked ~15.9 GB encoding a full 1 MP image on 16 GB)
-                // and is the real high-res limit. Keep a conservative linear budget so the
-                // default never oversubscribes VRAM (push higher with explicit --width/--height).
-                const long reserve = 6L * 1024 * 1024 * 1024;
-                const long perToken = 1700L * 1024;             // ~1.7 MB/token (VAE im2col-dominated)
-                long maxT = Math.Max(256, (budget - reserve) / perToken);
-                maxArea = (maxT - 400) * 128;
+                // The VAE conv im2col is now band-tiled (VaeReferenceMath.TryGpuConv2dMaybeTiled —
+                // bounded), and the DiT runs O(n) flash attention — including under CUDA-graph
+                // capture (launch_fattn serves its scratch from a capture-stable arena), so the
+                // captured whole-model fast path now covers the full resolution range. The
+                // remaining limit is SPEED: the per-step cost still grows ~quadratically with the
+                // token count, so keep a VRAM-scaled default (~0.65 MP on 16 GB) that balances
+                // face quality vs denoise time; explicit --width/--height bypasses it for full
+                // 1 MP (best faces, slower).
+                const long ditReserve = 8L * 1024 * 1024 * 1024;       // resident DiT weights + working set
+                const int heads = QwenImageModel.DitNumHeads;          // 24
+                long scoresBudget = Math.Max(512L * 1024 * 1024, budget - ditReserve);
+                double maxT = Math.Sqrt(scoresBudget / (8.0 * heads));
+                maxArea = Math.Min((long)Math.Max(256, maxT - 400) * 128, QwenImageNativeArea);
             }
             else
             {

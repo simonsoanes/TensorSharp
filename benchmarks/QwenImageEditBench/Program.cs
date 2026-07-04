@@ -27,7 +27,10 @@ internal static class Program
             case "dit-mlp-verify": return DitMlpVerify(args);
             case "dit-block-verify": return DitBlockVerify(args);
             case "dit-cfg-verify": return DitCfgVerify(args);
+            case "dit-forward": return DitForward(args);
             case "edit": return Edit(args);
+            case "edit2": return Edit2(args);
+            case "conv-tile-test": return ConvTileTest(args);
             default: Usage(); return 1;
         }
     }
@@ -41,6 +44,22 @@ internal static class Program
         Console.WriteLine("  edit <dit.gguf> <in.png> \"<prompt>\" <out.png> [steps] [cfg] [area]");
     }
 
+    // Verify the band-tiled VAE conv (TryGpuConv2dMaybeTiled) == the un-tiled conv.
+    private static int ConvTileTest(string[] args)
+    {
+        var backend = (Environment.GetEnvironmentVariable("TS_QWEN_BACKEND") ?? "ggml_cpu") switch
+        {
+            "ggml_cuda" => TensorSharp.GGML.GgmlBackendType.Cuda,
+            "ggml_metal" => TensorSharp.GGML.GgmlBackendType.Metal,
+            _ => TensorSharp.GGML.GgmlBackendType.Cpu,
+        };
+        TensorSharp.GGML.GgmlBasicOps.EnsureBackendAvailable(backend);
+        double worst = VaeReferenceMath.ConvTileSelfTest();
+        bool ok = worst < 1e-4;
+        Console.WriteLine($"CONV-TILE-TEST: worst relL2={worst:E3} -> {(ok ? "PASS" : "FAIL")}");
+        return ok ? 0 : 2;
+    }
+
     private static int Edit(string[] args)
     {
         string dit = args.Length > 1 ? args[1] : "C:/Works/models/qwen-image-edit-2511-Q4_0.gguf";
@@ -50,6 +69,8 @@ internal static class Program
         int steps = args.Length > 5 ? int.Parse(args[5]) : 8;
         float cfg = args.Length > 6 ? float.Parse(args[6]) : 4.0f;
         long area = args.Length > 7 ? long.Parse(args[7]) : 256L * 256;
+        int w = args.Length > 8 ? int.Parse(args[8]) : 0;   // explicit width (bypasses VRAM area clamp)
+        int h = args.Length > 9 ? int.Parse(args[9]) : 0;   // explicit height
 
         Environment.SetEnvironmentVariable("MAX_CONTEXT", "4096");
         var backend = (Environment.GetEnvironmentVariable("TS_QWEN_BACKEND") ?? "ggml_cpu") switch
@@ -65,13 +86,179 @@ internal static class Program
         try
         {
             var input = ImageIO.Load(inPath);
-            var p = new QwenImageParams { Steps = steps, CfgScale = cfg, TargetArea = area, Seed = 42 };
+            var p = new QwenImageParams { Steps = steps, CfgScale = cfg, TargetArea = area, Seed = 42, Width = w, Height = h };
             var sw = Stopwatch.StartNew();
             var outImg = model.EditImage(prompt, input, p);
             double ms = sw.Elapsed.TotalMilliseconds;
             ImageIO.SavePng(outPath, outImg);
             Console.WriteLine($"edit {outImg.Width}x{outImg.Height} steps={steps} cfg={cfg} -> {outPath}  ({ms / 1000:F1}s, {ms / steps:F0}ms/step)");
             return 0;
+        }
+        finally { model.Dispose(); }
+    }
+
+    // Isolated DiT-forward perf bench: drive QwenImageDiT.Predict directly at a target
+    // token count (no VAE / text-encoder), so a denoise forward can be A/B'd in seconds.
+    //   dit-forward <dit.gguf> <hp> <wp> <txtSeq> <iters> [cfgPairs]
+    // imgSeq = 2*hp*wp (generated + reference). 576x432 -> hp=36 wp=27 -> imgSeq=1944.
+    private static int DitForward(string[] args)
+    {
+        string dit = args.Length > 1 ? args[1] : "C:/Works/models/qwen-image-edit-2511-Q2_K.gguf";
+        int hp = args.Length > 2 ? int.Parse(args[2]) : 36;
+        int wp = args.Length > 3 ? int.Parse(args[3]) : 27;
+        int txtSeq = args.Length > 4 ? int.Parse(args[4]) : 284;
+        int iters = args.Length > 5 ? int.Parse(args[5]) : 6;
+        bool cfgPairs = args.Length > 6 && args[6] == "cfg";
+        int negTxt = txtSeq - 5 > 0 ? txtSeq - 5 : txtSeq;     // different len, like a real neg prompt
+
+        Environment.SetEnvironmentVariable("MAX_CONTEXT", "4096");
+        var backend = (Environment.GetEnvironmentVariable("TS_QWEN_BACKEND") ?? "ggml_cuda") switch
+        {
+            "ggml_cuda" => BackendType.GgmlCuda,
+            "ggml_metal" => BackendType.GgmlMetal,
+            "cuda" => BackendType.Cuda,
+            _ => BackendType.GgmlCpu,
+        };
+        int seq = hp * wp, imgSeq = 2 * seq;
+        Console.WriteLine($"[dit-forward] backend={backend} hp={hp} wp={wp} imgSeq={imgSeq} txtSeq={txtSeq} iters={iters} cfgPairs={cfgPairs}");
+
+        var enc = new TensorSharp.Models.QwenImage.QwenImageDiT(dit, backend);
+        try
+        {
+            var rng = new Random(5);
+            float[] img = Rand(rng, imgSeq * 64, 0.5f);
+            float[] cond = Rand(rng, txtSeq * 3584, 0.5f);
+            float[] negCond = Rand(rng, negTxt * 3584, 0.5f);
+            var modIndex = new int[imgSeq];
+            for (int i = seq; i < imgSeq; i++) modIndex[i] = 1;
+            var shapes = new (int f, int h, int w)[] { (1, hp, wp), (1, hp, wp) };
+            var rope = TensorSharp.Models.QwenImage.DitRope.Build(shapes, txtSeq);
+            var ropeNeg = TensorSharp.Models.QwenImage.DitRope.Build(shapes, negTxt);
+
+            Func<float[]> one = () =>
+            {
+                if (cfgPairs && enc.UseCfgBatch && (imgSeq + Math.Max(txtSeq, negTxt)) <= enc.CfgBatchMaxTokens)
+                {
+                    var (vc, vn) = enc.PredictCfg(img, imgSeq, cond, txtSeq, rope, negCond, negTxt, ropeNeg, 0.5f, modIndex, -1, 0, seq);
+                    return vc;
+                }
+                else
+                {
+                    float[] v = enc.Predict(img, imgSeq, cond, txtSeq, 0.5f, modIndex, rope);
+                    if (cfgPairs) enc.Predict(img, imgSeq, negCond, negTxt, 0.5f, modIndex, ropeNeg);
+                    return v;
+                }
+            };
+
+            // Correctness alongside perf: inputs are identical every call, so every velocity
+            // must be finite and IDENTICAL across calls — replay corruption (the historical
+            // flash-under-capture NaN appeared from the first captured replay on) shows up as
+            // NaN or iteration-to-iteration drift here.
+            int nanTotal = 0;
+            double driftMax = 0;
+            float[] first = null;
+            Func<float[], string> check = v =>
+            {
+                int nan = 0;
+                for (int i = 0; i < v.Length; i++) if (float.IsNaN(v[i]) || float.IsInfinity(v[i])) nan++;
+                nanTotal += nan;
+                double d = 0;
+                if (first == null) first = (float[])v.Clone();
+                else for (int i = 0; i < v.Length; i++) d = Math.Max(d, Math.Abs(v[i] - first[i]));
+                driftMax = Math.Max(driftMax, d);
+                return $"nan={nan} maxdiff-vs-first={d:E2}";
+            };
+
+            // warmup (cold graph build + capture)
+            var wsw = Stopwatch.StartNew(); var v0 = one(); Console.WriteLine($"  warmup1: {wsw.Elapsed.TotalMilliseconds:F0}ms  {check(v0)}");
+            wsw.Restart(); var v1 = one(); Console.WriteLine($"  warmup2: {wsw.Elapsed.TotalMilliseconds:F0}ms  {check(v1)}");
+
+            var times = new double[iters];
+            for (int i = 0; i < iters; i++)
+            {
+                var sw = Stopwatch.StartNew();
+                float[] v = one();
+                times[i] = sw.Elapsed.TotalMilliseconds;
+                Console.WriteLine($"  iter{i}: {times[i]:F0}ms  {check(v)}");
+            }
+            Array.Sort(times);
+            double median = times[iters / 2], min = times[0];
+            double sum = 0; foreach (var t in times) sum += t;
+            Console.WriteLine($"  per-forward{(cfgPairs ? "-pair" : "")}: median={median:F0}ms min={min:F0}ms mean={sum / iters:F0}ms  (all: {string.Join(",", Array.ConvertAll(times, t => t.ToString("F0")))})");
+
+            // Cross-process reference compare: TS_QIBENCH_DUMP=<path> writes the first velocity;
+            // TS_QIBENCH_REF=<path> compares against a previously dumped one (e.g. captured-flash
+            // vs TS_QWEN_DIT_WHOLE_CAPTURE=0 / TS_QWEN_DIT_FLASH=0 references).
+            string dump = Environment.GetEnvironmentVariable("TS_QIBENCH_DUMP");
+            string refp = Environment.GetEnvironmentVariable("TS_QIBENCH_REF");
+            if (dump != null)
+            {
+                var bytes = new byte[first.Length * 4];
+                Buffer.BlockCopy(first, 0, bytes, 0, bytes.Length);
+                File.WriteAllBytes(dump, bytes);
+                Console.WriteLine($"  dumped velocity -> {dump}");
+            }
+            if (refp != null && File.Exists(refp))
+            {
+                var bytes = File.ReadAllBytes(refp);
+                var rf = new float[bytes.Length / 4];
+                Buffer.BlockCopy(bytes, 0, rf, 0, bytes.Length);
+                Console.WriteLine($"  vs-ref: cosine={Cosine(first, rf):F6} relL2={RelL2(first, rf):E3}");
+            }
+
+            bool pass = nanTotal == 0 && driftMax == 0;
+            Console.WriteLine(pass ? "DIT-FORWARD: PASS (finite, replay-stable)"
+                                   : $"DIT-FORWARD: FAIL (nan={nanTotal} driftMax={driftMax:E2})");
+            return pass ? 0 : 2;
+        }
+        finally { enc.Dispose(); }
+    }
+
+    // Run TWO edits on the SAME model instance (pipeline persists) to exercise the server's
+    // cross-request path: per-edit FreeEncoders -> global cache clear -> capture-ring reset ->
+    // next edit rebinds the DiT weights + rebuilds/recaptures. Verifies edit #2 doesn't crash
+    // or corrupt (NaN/black) after the ring was reset.
+    private static int Edit2(string[] args)
+    {
+        string dit = args.Length > 1 ? args[1] : "C:/Works/models/qwen-image-edit-2511-Q2_K.gguf";
+        string inPath = args.Length > 2 ? args[2] : "C:/Works/test.jpg";
+        string prompt = args.Length > 3 ? args[3] : "Change the background to a sunny beach.";
+        string outBase = args.Length > 4 ? args[4] : "C:/Works/TensorSharp/tools/_edit2";
+        int steps = args.Length > 5 ? int.Parse(args[5]) : 4;
+        float cfg = args.Length > 6 ? float.Parse(args[6]) : 4.0f;
+        long area = args.Length > 7 ? long.Parse(args[7]) : 256L * 256;
+
+        Environment.SetEnvironmentVariable("MAX_CONTEXT", "4096");
+        var backend = (Environment.GetEnvironmentVariable("TS_QWEN_BACKEND") ?? "ggml_cuda") switch
+        {
+            "ggml_cuda" => BackendType.GgmlCuda,
+            "ggml_metal" => BackendType.GgmlMetal,
+            _ => BackendType.GgmlCpu,
+        };
+        var model = (TensorSharp.Models.QwenImage.QwenImageModel)TensorSharp.Models.ModelBase.Create(dit, backend);
+        try
+        {
+            var input = ImageIO.Load(inPath);
+            int rc = 0;
+            for (int e = 1; e <= 2; e++)
+            {
+                var p = new QwenImageParams { Steps = steps, CfgScale = cfg, TargetArea = area, Seed = 42 };
+                var sw = Stopwatch.StartNew();
+                var outImg = model.EditImage(prompt, input, p);
+                double ms = sw.Elapsed.TotalMilliseconds;
+                string outPath = $"{outBase}_{e}.png";
+                ImageIO.SavePng(outPath, outImg);
+                // sanity: non-degenerate image (real content, not black/NaN)
+                double sum = 0, sq = 0; int n = outImg.Pixels.Length;
+                bool finite = true;
+                for (int i = 0; i < n; i++) { float v = outImg.Pixels[i]; if (float.IsNaN(v) || float.IsInfinity(v)) finite = false; sum += v; sq += (double)v * v; }
+                double mean = sum / n, std = Math.Sqrt(sq / n - mean * mean);
+                bool ok = finite && std > 0.02;
+                Console.WriteLine($"edit#{e} {outImg.Width}x{outImg.Height} {ms / 1000:F1}s mean={mean:F3} std={std:F3} finite={finite} -> {(ok ? "OK" : "DEGENERATE")} ({outPath})");
+                if (!ok) rc = 2;
+            }
+            Console.WriteLine(rc == 0 ? "EDIT2: PASS (cross-edit reset+rebuild works)" : "EDIT2: FAIL");
+            return rc;
         }
         finally { model.Dispose(); }
     }
@@ -425,9 +612,17 @@ internal static class Program
     private static string VaePath() =>
         Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_VAE") ?? "C:/Works/models/qwen_image_vae.gguf";
 
-    private static (VaeWeights w, GgufFile g) OpenVae()
+    private static (VaeWeights w, IDisposable g) OpenVae()
     {
-        var g = new GgufFile(VaePath());
+        // Accept both the converted F32 GGUF and the original .safetensors (BF16->F32
+        // upcast on read) — the same sources QwenImageVae itself resolves.
+        string path = VaePath();
+        if (path.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
+        {
+            var st = new TensorSharp.Runtime.SafetensorsFile(path);
+            return (VaeWeights.Load(st), st);
+        }
+        var g = new GgufFile(path);
         return (VaeWeights.Load(g), g);
     }
 
@@ -480,6 +675,19 @@ internal static class Program
         string outPath = args.Length > 2 ? args[2] : "C:/Works/TensorSharp/tools/_vae_rt.png";
         int size = args.Length > 3 ? int.Parse(args[3]) : 128;
         var img = ImageIO.ResizeToArea(ImageIO.Load(imgPath), (long)size * size);
+
+        // vae-roundtrip drives the static math directly (no QwenImageVae ctor to init the
+        // backend), so honor TS_QWEN_BACKEND for device-conv/fused-graph perf runs.
+        if (TensorSharp.Models.QwenImage.VaeReferenceMath.UseGpuConv)
+        {
+            var be = (Environment.GetEnvironmentVariable("TS_QWEN_BACKEND") ?? "ggml_cpu") switch
+            {
+                "ggml_cuda" => TensorSharp.GGML.GgmlBackendType.Cuda,
+                "ggml_metal" => TensorSharp.GGML.GgmlBackendType.Metal,
+                _ => TensorSharp.GGML.GgmlBackendType.Cpu,
+            };
+            TensorSharp.GGML.GgmlBasicOps.EnsureBackendAvailable(be);
+        }
 
         var (w, g) = OpenVae();
         try

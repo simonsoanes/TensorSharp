@@ -381,6 +381,16 @@ public struct QImgAttnW
     public int Type;
     public long Ne0, Ne1, Bytes;
     public IntPtr B;
+    // Optional runtime LoRA side-path: y = W·x + b + LoraScale * B·(A·x), computed in
+    // F32 next to the quantized base matmul (a LoRA merged into 2-bit weights is
+    // swallowed by requantization noise — the deltas are far below the quant step).
+    // LoraA = [rank, ne0] row-major F32 (lora_down), LoraB = [ne1, rank] row-major F32
+    // (lora_up); both must be STABLE allocations (resident-cached by pointer).
+    // Zero/default = no LoRA. Currently honored by the whole-model forward path.
+    public IntPtr LoraA;
+    public IntPtr LoraB;
+    public long LoraRank;
+    public float LoraScale;
 }
 
 // Descriptor for the fused Qwen-Image DiT joint-attention sub-layer
@@ -413,6 +423,67 @@ public struct Conv2dArgs
     public int StructBytes;
 }
 
+// One op of the fused whole-VAE graph (TSGgml_QwenVaeRun). MUST match native TSGVaeOp.
+// Kinds: 0 conv, 1 channel-RMS-norm (*gamma at W), 2 silu, 3 nearest-upsample x2,
+// 4 save (slots[Dst] = slots[Src], alias), 5 add (slots[Dst] = slots[Src] + slots[Aux]),
+// 6 spatial single-head attention (slots[Src] = qkv [W,H,3C], Oc = C).
+[StructLayout(LayoutKind.Sequential)]
+public struct QwenVaeOp
+{
+    public int Kind;
+    public int W, B;                       // weight / bias table indices (-1 = none)
+    public int Oc, Ic, Kh, Kw;
+    public int Sh, Sw, Pt, Pb, Pl, Pr;
+    public int Src, Dst, Aux;
+}
+
+// Stable F32 host pointer for a fused-VAE weight. MUST match native TSGVaeWeightRef.
+[StructLayout(LayoutKind.Sequential)]
+public struct QwenVaeWeightRef
+{
+    public IntPtr Data;
+    public long Bytes;
+}
+
+// Descriptor for the whole fused VAE encode/decode graph (TSGgml_QwenVaeRun).
+// MUST match native TSGgmlQwenVaeDesc exactly.
+[StructLayout(LayoutKind.Sequential)]
+public struct QwenVaeArgs
+{
+    public IntPtr Input; public int InW, InH, InC;
+    public IntPtr Output; public long OutLen;
+    public IntPtr Ops; public int NumOps;
+    public IntPtr Weights; public int NumWeights;
+    public int StructBytes;
+}
+
+// One layer of the fused conditioning-encoder trunk (TSGgml_QwenTeTrunk).
+// MUST match native TSGTeLayerW. MaskKind: 0 full, 1 causal, 2 uploaded window mask.
+[StructLayout(LayoutKind.Sequential)]
+public struct QwenTeLayerW
+{
+    public IntPtr Ln1, Ln2;                              // [hidden] F32 (stable ptrs)
+    public QImgAttnW Q, K, V, O, Gate, Up, Down;         // .B = optional F32 bias
+    public int MaskKind;
+    public int Pad;
+}
+
+// Descriptor for the fused transformer trunk (TSGgml_QwenTeTrunk): the Qwen2.5-VL
+// text-encoder LLM (GQA, causal) and vision tower (MHA, window masks) run their
+// whole layer stack as ONE graph. MUST match native TSGgmlQwenTeTrunkDesc.
+[StructLayout(LayoutKind.Sequential)]
+public struct QwenTeTrunkArgs
+{
+    public IntPtr X;                 // [hidden, seq] F32 input states
+    public IntPtr Out;               // [hidden, seq] F32 output (post final norm)
+    public IntPtr CosF, SinF;        // [head_dim, seq] F32 rotate-half tables
+    public IntPtr WinMask;           // [seq, seq] F32 additive window mask (or zero)
+    public IntPtr FinalNorm;         // [hidden] F32 (or zero = skip)
+    public IntPtr Layers; public int NumLayers;
+    public int StructBytes, Hidden, Heads, KvHeads, HeadDim, Seq;
+    public float Eps;
+}
+
 // Descriptor for the whole fused DiT block (attn + both MLP streams in one graph)
 // (TSGgml_QwenImageBlock). MUST match native TSGgmlQwenImageBlockDesc exactly.
 [StructLayout(LayoutKind.Sequential)]
@@ -427,6 +498,31 @@ public struct QwenImageBlockArgs
     public IntPtr NormQ, NormK, NormAq, NormAk;
     public QImgAttnW INet0, INet2, TNet0, TNet2;       // mlp weights (+bias in .B)
     public int StructBytes, Dim, Heads, HeadDim, Ff, ImgSeq, TxtSeq;
+    public float Eps;
+}
+
+// Per-block weight set for the whole-DiT forward (TSGgml_QwenImageForward).
+// MUST match native TSGImgBlockW exactly.
+[StructLayout(LayoutKind.Sequential)]
+public struct QImgBlockW
+{
+    public QImgAttnW ImgMod, TxtMod;                   // [dim, 6*dim] (+bias)
+    public QImgAttnW ToQ, ToK, ToV, ToOut;
+    public QImgAttnW AddQ, AddK, AddV, ToAddOut;
+    public IntPtr NormQ, NormK, NormAq, NormAk;        // [head_dim] f32
+    public QImgAttnW INet0, INet2, TNet0, TNet2;       // mlp (+bias in .B)
+}
+
+// Descriptor for the 60-block DiT body in one resident-weight graph
+// (TSGgml_QwenImageForward). Img/Txt are the post-prelude residual streams (in/out),
+// so the C# img_in/txt_in/norm_out/proj_out stay shared with the per-block path.
+// MUST match native TSGgmlQwenImageForwardDesc exactly.
+[StructLayout(LayoutKind.Sequential)]
+public struct QwenImageForwardArgs
+{
+    public IntPtr Img, Txt, Temb, ImgCos, ImgSin, TxtCos, TxtSin, ModulateIndex;
+    public IntPtr Blocks;                              // -> QImgBlockW[NumLayers]
+    public int StructBytes, Dim, Heads, HeadDim, Ff, ImgSeq, TxtSeq, NumLayers;
     public float Eps;
 }
 
@@ -1387,7 +1483,13 @@ internal enum GgmlIndexReductionOp
             IntPtr[] pleGateArr, int[] pleGateTypeArr, long[] pleGateNe0Arr, long[] pleGateNe1Arr, long[] pleGateBytesArr,
             IntPtr[] pleProjArr, int[] pleProjTypeArr, long[] pleProjNe0Arr, long[] pleProjNe1Arr, long[] pleProjBytesArr,
             IntPtr[] plePostNormArr,
-            byte[] isExceptArr);
+            byte[] isExceptArr,
+            IntPtr pleTokenEmbdData, int pleTokenEmbdType,
+            long pleTokenEmbdNe0, long pleTokenEmbdNe1, long pleTokenEmbdBytes,
+            int[] pleTokenIds,
+            IntPtr pleProjWData, int pleProjWType,
+            long pleProjWNe0, long pleProjWNe1, long pleProjWBytes,
+            IntPtr pleProjNormData);
 
         [DllImport(DllName, CallingConvention = CallingConventionType)]
         private static extern int TSGgml_Gemma4DraftStep(
@@ -1507,6 +1609,18 @@ internal enum GgmlIndexReductionOp
             int r = TSGgml_QwenImageBlockCfg(in condDesc, in negDesc);
             if (r == 0)
                 Console.Error.WriteLine($"[qwen-image-block-cfg FAIL] {GetLastErrorMessage("(no native error)")}");
+            return r != 0;
+        }
+
+        [DllImport(DllName, CallingConvention = CallingConventionType)]
+        private static extern int TSGgml_QwenImageForward(in QwenImageForwardArgs desc);
+
+        // Whole 60-block DiT forward in one resident-weight graph (in-graph modulation).
+        public static bool TryQwenImageForward(in QwenImageForwardArgs desc)
+        {
+            int r = TSGgml_QwenImageForward(in desc);
+            if (r == 0)
+                Console.Error.WriteLine($"[qwen-image-forward FAIL] {GetLastErrorMessage("(no native error)")}");
             return r != 0;
         }
 
@@ -1812,7 +1926,8 @@ internal enum GgmlIndexReductionOp
             int normTopk, float expertWeightsScale,
             IntPtr logits, int vocabSize,
             IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNorm, IntPtr normedOut, int nLogitRows);
+            IntPtr finalNorm, IntPtr normedOut, int nLogitRows,
+            int[] mropePos, int[] mropeSections);
 
         public static bool Qwen35ModelVerify(
             Qwen35LayerDecodeArgs[] layers, int numLayers,
@@ -1825,7 +1940,8 @@ internal enum GgmlIndexReductionOp
             int normTopk, float expertWeightsScale,
             IntPtr logits, int vocabSize,
             IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNorm, IntPtr normedOut, int nLogitRows)
+            IntPtr finalNorm, IntPtr normedOut, int nLogitRows,
+            int[] mropePos = null, int[] mropeSections = null)
         {
             return TSGgml_Qwen35ModelVerify(
                 layers, numLayers, hidden, hiddenSize, startPos, numTokens,
@@ -1837,7 +1953,7 @@ internal enum GgmlIndexReductionOp
                 normTopk, expertWeightsScale,
                 logits, vocabSize,
                 lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes,
-                finalNorm, normedOut, nLogitRows) != 0;
+                finalNorm, normedOut, nLogitRows, mropePos, mropeSections) != 0;
         }
 
         [DllImport(DllName, CallingConvention = CallingConventionType)]
@@ -2065,6 +2181,25 @@ internal enum GgmlIndexReductionOp
 
         [DllImport(DllName, CallingConvention = CallingConventionType)]
         private static extern int TSGgml_DequantizeToF32(int ggmlType, IntPtr src, long numElements, IntPtr dst);
+
+        [DllImport(DllName, CallingConvention = CallingConventionType)]
+        private static extern int TSGgml_ApplyLoraDelta(IntPtr w, int ggmlType, long ne0, long ne1,
+            IntPtr up, IntPtr down, int rank, float scale, int nThreads);
+
+        [DllImport(DllName, CallingConvention = CallingConventionType)]
+        private static extern int TSGgml_QwenVaeRun(in QwenVaeArgs args);
+
+        /// <summary>Run a whole VAE encode/decode op-list as ONE device graph (see QwenVaeArgs).
+        /// Returns false when the backend can't run it (caller falls back to the per-conv path).</summary>
+        internal static bool TryQwenVaeRun(in QwenVaeArgs args) => TSGgml_QwenVaeRun(in args) != 0;
+
+        [DllImport(DllName, CallingConvention = CallingConventionType)]
+        private static extern int TSGgml_QwenTeTrunk(in QwenTeTrunkArgs args);
+
+        /// <summary>Run a whole conditioning-encoder transformer trunk as ONE device graph
+        /// (see QwenTeTrunkArgs). Returns false when the backend can't run it (caller falls
+        /// back to the per-op path).</summary>
+        internal static bool TryQwenTeTrunk(in QwenTeTrunkArgs args) => TSGgml_QwenTeTrunk(in args) != 0;
 
         [DllImport(DllName, CallingConvention = CallingConventionType)]
         private static extern int TSGgml_CopyF32(
@@ -3343,7 +3478,13 @@ internal enum GgmlIndexReductionOp
             IntPtr[] pleGateArr, int[] pleGateTypeArr, long[] pleGateNe0Arr, long[] pleGateNe1Arr, long[] pleGateBytesArr,
             IntPtr[] pleProjArr, int[] pleProjTypeArr, long[] pleProjNe0Arr, long[] pleProjNe1Arr, long[] pleProjBytesArr,
             IntPtr[] plePostNormArr,
-            byte[] isExceptArr = null)
+            byte[] isExceptArr = null,
+            IntPtr pleTokenEmbdData = default, int pleTokenEmbdType = 0,
+            long pleTokenEmbdNe0 = 0, long pleTokenEmbdNe1 = 0, long pleTokenEmbdBytes = 0,
+            int[] pleTokenIds = null,
+            IntPtr pleProjWData = default, int pleProjWType = 0,
+            long pleProjWNe0 = 0, long pleProjWNe1 = 0, long pleProjWBytes = 0,
+            IntPtr pleProjNormData = default)
         {
             int r = TSGgml_Gemma4ModelVerify(
                 hiddenData, hiddenSize, numLayers, numTokens,
@@ -3367,7 +3508,13 @@ internal enum GgmlIndexReductionOp
                 pleGateArr, pleGateTypeArr, pleGateNe0Arr, pleGateNe1Arr, pleGateBytesArr,
                 pleProjArr, pleProjTypeArr, pleProjNe0Arr, pleProjNe1Arr, pleProjBytesArr,
                 plePostNormArr,
-                isExceptArr);
+                isExceptArr,
+                pleTokenEmbdData, pleTokenEmbdType,
+                pleTokenEmbdNe0, pleTokenEmbdNe1, pleTokenEmbdBytes,
+                pleTokenIds,
+                pleProjWData, pleProjWType,
+                pleProjWNe0, pleProjWNe1, pleProjWBytes,
+                pleProjNormData);
             if (r == 0 && Environment.GetEnvironmentVariable("TS_GGML_FUSED_DEBUG") == "1")
                 Console.Error.WriteLine($"[gemma4-verify FAIL] {GetLastErrorMessage("(no native error)")}");
             return r != 0;
@@ -3763,6 +3910,24 @@ internal enum GgmlIndexReductionOp
                 {
                     hDst.Free();
                 }
+            }
+        }
+
+        /// <summary>
+        /// Merge a LoRA delta into a (possibly quantized) weight IN PLACE:
+        /// W[r,:] += scale * up[r,:] · down (dequantize row -> add -> requantize to the
+        /// same type, the stable-diffusion.cpp apply path). <paramref name="w"/> points at
+        /// the ggml row-major weight [ne1 x ne0]; up is [ne1, rank], down is [rank, ne0].
+        /// Returns 0 on success; negative = validation/type error (weight untouched).
+        /// </summary>
+        public static unsafe int ApplyLoraDelta(IntPtr w, int ggmlType, long ne0, long ne1,
+            float[] up, float[] down, int rank, float scale, int nThreads = 0)
+        {
+            if (w == IntPtr.Zero || up == null || down == null) return -1;
+            if (up.LongLength < ne1 * rank || down.LongLength < (long)rank * ne0) return -1;
+            fixed (float* pu = up, pd = down)
+            {
+                return TSGgml_ApplyLoraDelta(w, ggmlType, ne0, ne1, (IntPtr)pu, (IntPtr)pd, rank, scale, nThreads);
             }
         }
 
