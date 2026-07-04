@@ -26,6 +26,10 @@ namespace TensorSharp.Server.Endpoints
                 (HttpContext ctx, OpenAIChatAdapter adapter) => adapter.ChatCompletionsAsync(ctx));
             endpoints.MapGet("/v1/models",
                 (OpenAIChatAdapter adapter) => adapter.ListModels());
+            endpoints.MapPost("/v1/responses",
+                (HttpContext ctx, OpenAIResponsesAdapter adapter) => adapter.CreateResponseAsync(ctx));
+            endpoints.MapGet("/v1/responses/{id}",
+                (HttpContext ctx, OpenAIResponsesAdapter adapter, string id) => adapter.GetResponseAsync(ctx, id));
             return endpoints;
         }
     }

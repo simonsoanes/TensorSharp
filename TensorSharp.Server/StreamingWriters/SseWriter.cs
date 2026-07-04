@@ -69,5 +69,24 @@ namespace TensorSharp.Server.StreamingWriters
         {
             return response.WriteAsync("data: [DONE]\n\n", cancellationToken);
         }
+
+        /// <summary>
+        /// Serialise <paramref name="payload"/> as a named SSE event (an
+        /// <c>event: &lt;name&gt;</c> line followed by <c>data:</c>), matching the
+        /// Responses API's typed event stream. Unlike chat-completions chunks,
+        /// each event here carries an explicit type both in the SSE frame and
+        /// in the JSON body's own <c>type</c> field.
+        /// </summary>
+        public static async Task WriteNamedEventAsync(
+            HttpResponse response,
+            string eventName,
+            object payload,
+            CancellationToken cancellationToken,
+            JsonSerializerOptions jsonOptions = null)
+        {
+            string json = JsonSerializer.Serialize(payload, jsonOptions);
+            await response.WriteAsync($"event: {eventName}\ndata: {json}\n\n", cancellationToken);
+            await response.Body.FlushAsync(cancellationToken);
+        }
     }
 }

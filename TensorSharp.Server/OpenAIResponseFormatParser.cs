@@ -27,15 +27,43 @@ namespace TensorSharp.Server
                 return true;
             }
 
-            if (responseFormatEl.ValueKind != JsonValueKind.Object)
+            return TryParseFormatElement(responseFormatEl, "response_format", out format, out error);
+        }
+
+        /// <summary>
+        /// Responses API equivalent of <see cref="TryParse"/>: the same
+        /// <c>{type, json_schema}</c> shape lives under <c>text.format</c>
+        /// instead of a top-level <c>response_format</c>.
+        /// </summary>
+        public static bool TryParseResponsesText(JsonElement body, out StructuredOutputFormat format, out string error)
+        {
+            format = null;
+            error = null;
+
+            if (!body.TryGetProperty("text", out var textEl) || textEl.ValueKind != JsonValueKind.Object ||
+                !textEl.TryGetProperty("format", out var formatEl) ||
+                formatEl.ValueKind == JsonValueKind.Null || formatEl.ValueKind == JsonValueKind.Undefined)
             {
-                error = "response_format must be an object.";
+                return true;
+            }
+
+            return TryParseFormatElement(formatEl, "text.format", out format, out error);
+        }
+
+        private static bool TryParseFormatElement(JsonElement formatEl, string fieldName, out StructuredOutputFormat format, out string error)
+        {
+            format = null;
+            error = null;
+
+            if (formatEl.ValueKind != JsonValueKind.Object)
+            {
+                error = $"{fieldName} must be an object.";
                 return false;
             }
 
-            if (!responseFormatEl.TryGetProperty("type", out var typeEl) || typeEl.ValueKind != JsonValueKind.String)
+            if (!formatEl.TryGetProperty("type", out var typeEl) || typeEl.ValueKind != JsonValueKind.String)
             {
-                error = "response_format.type is required.";
+                error = $"{fieldName}.type is required.";
                 return false;
             }
 
@@ -50,10 +78,10 @@ namespace TensorSharp.Server
                     return true;
 
                 case "json_schema":
-                    return TryParseJsonSchema(responseFormatEl, out format, out error);
+                    return TryParseJsonSchema(formatEl, out format, out error);
 
                 default:
-                    error = $"Unsupported response_format.type '{type}'.";
+                    error = $"Unsupported {fieldName}.type '{type}'.";
                     return false;
             }
         }
