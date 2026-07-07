@@ -3419,8 +3419,7 @@ namespace TensorSharp.Models
                 bool integratedGpu = IsIntegratedGgmlGpu();
                 if (integratedGpu)
                 {
-                    Console.WriteLine(
-                        "  Integrated GPU detected: using a lightweight startup warmup (skipping the full multi-token prefill warmup, which is far too slow on unified-memory GPUs). Large prompts will still be slow here; use a discrete GPU (e.g. --gpu-device <dGPU index>) for full performance.");
+                    Console.WriteLine(BuildIntegratedGpuWarning());
                 }
                 // Native CUDA models whose weights are mostly a CUDA-unsupported quant
                 // type never become GPU-resident: their matmuls dequantize on the CPU,
@@ -3507,6 +3506,63 @@ namespace TensorSharp.Models
                 return false;
             try { return GgmlBasicOps.IsActiveDeviceIntegrated(); }
             catch { return false; }
+        }
+
+        /// <summary>
+        /// Builds the prominent startup banner shown when inference is running on an
+        /// integrated, unified-memory GPU. A 27B model on an Intel UHD iGPU decodes at
+        /// ~0.7 tok/s (measured, and identical to llama.cpp on the same device) versus
+        /// ~15 tok/s on a discrete RTX 3080 — a ~20x gap that is purely hardware, not a
+        /// software regression. The single-line notice this replaces was easy to miss in
+        /// the startup log, so operators kept running large models on the iGPU by mistake.
+        /// On ggml_vulkan (multiple adapters are enumerable) the banner names the selected
+        /// adapter and lists every other device with the exact <c>--gpu-device N</c> flag to
+        /// switch to it. Enumeration failures / single-device hosts (e.g. Tegra via
+        /// ggml_cuda) fall back to the generic guidance.
+        /// </summary>
+        private string BuildIntegratedGpuWarning()
+        {
+            const string sep = "  ==============================================================================";
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine(sep);
+            sb.AppendLine("  PERFORMANCE WARNING: inference is running on an INTEGRATED GPU.");
+            sb.AppendLine("  Integrated (unified-memory) GPUs are memory-bandwidth bound: large models run");
+            sb.AppendLine("  roughly an order of magnitude slower here than on a discrete GPU, and often");
+            sb.AppendLine("  slower than the CPU backend. This is a hardware limit, not a TensorSharp issue.");
+
+            bool namedAlternative = false;
+            if (_backend == BackendType.GgmlVulkan)
+            {
+                try
+                {
+                    int selected = 0;
+                    string sel = Environment.GetEnvironmentVariable(GgmlBasicOps.VulkanDeviceEnvVar);
+                    if (!string.IsNullOrEmpty(sel) && int.TryParse(sel, out int s) && s >= 0)
+                        selected = s;
+
+                    int count = GgmlBasicOps.GetVulkanDeviceCount();
+                    if (count > 0 && selected < count)
+                        sb.AppendLine($"  Selected:  --gpu-device {selected}   {GgmlBasicOps.GetVulkanDeviceDescription(selected)}");
+
+                    var others = new System.Collections.Generic.List<string>();
+                    for (int i = 0; i < count; i++)
+                    {
+                        if (i == selected) continue;
+                        others.Add($"    --gpu-device {i}   {GgmlBasicOps.GetVulkanDeviceDescription(i)}");
+                    }
+                    if (others.Count > 0)
+                    {
+                        sb.AppendLine("  For full performance re-run against a discrete GPU (see --list-gpus):");
+                        foreach (var o in others) sb.AppendLine(o);
+                        namedAlternative = true;
+                    }
+                }
+                catch { /* enumeration unavailable — fall through to generic guidance */ }
+            }
+            if (!namedAlternative)
+                sb.AppendLine("  For full performance use a discrete GPU (--gpu-device <index>, see --list-gpus), or --backend ggml_cpu.");
+            sb.Append(sep);
+            return sb.ToString();
         }
 
         /// <summary>

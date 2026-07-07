@@ -161,7 +161,12 @@ if (!legacyOnly && !engineOnly)
     Console.WriteLine();
     Console.WriteLine("==== Correctness (batched fused vs legacy ForwardRefill) ====");
     bool allMatch = true;
-    foreach (int len in new[] { 17, 64, 200, 777, 2500 })
+    // 6000/10000 exceed the SWA window + a single prefill chunk, so chunks past
+    // the first attend the previous window via the in-kernel swaPrev gather -
+    // this is what validates the whole-model verify swaPrev path against the
+    // engine (batched) path end-to-end. Override the set via TS_PREFILL_CORR_LENS.
+    int[] corrLens = EnvIntList("TS_PREFILL_CORR_LENS", new[] { 17, 64, 200, 777, 2500, 6000, 10000 });
+    foreach (int len in corrLens)
     {
         int[] cp = MakePrompt(len, 31 + len);
         model.ResetKVCache();

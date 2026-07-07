@@ -79,6 +79,7 @@ namespace TensorSharp.Cli
 
             string modelPath = null;
             string inputFile = null;
+            string pdfPath = null;
             string outputFile = null;
             string imagePath = null;
             string audioPath = null;
@@ -149,6 +150,7 @@ namespace TensorSharp.Cli
                 {
                     case "--model": modelPath = args[++i]; break;
                     case "--input": inputFile = args[++i]; break;
+                    case "--pdf": pdfPath = args[++i]; break;
                     case "--input-jsonl": inputJsonl = args[++i]; break;
                     case "--output": outputFile = args[++i]; break;
                     case "--image": imagePath = args[++i]; break;
@@ -321,6 +323,7 @@ namespace TensorSharp.Cli
                 _log.LogError(LogEventIds.CliFailed,
                 "Model file not found: {ModelPath}", modelPath ?? "(none)");
                 Console.Error.WriteLine("Usage: TensorSharp.Cli --model <path.gguf> [--input <input.txt>] " +
+                    "[--pdf <document.pdf>] " +
                     "[--input-jsonl <requests.jsonl>] [--image <image.png>] [--output <output.txt>] " +
                     "[--prompt <text>] [--cfg F] [--diffusion-steps N] [--diffusion-seed N] " +
                     "[--qwen-image-vae <vae.gguf>] [--qwen-image-vl <qwen2.5-vl.gguf>] [--qwen-image-mmproj <mmproj.gguf>] [--qwen-image-lora <lora.safetensors>] " +
@@ -585,6 +588,108 @@ namespace TensorSharp.Cli
                     "No input file specified; using default prompt: \"{Prompt}\"", rawText);
             }
 
+            // PDF document input. A born-digital PDF has a selectable text layer: extract
+            // it and inline it into the user message so the model reasons over it through
+            // the normal (already optimized) prefill path (text truncated to the token
+            // budget). A scanned / image-only PDF has NO text layer, so instead we recover
+            // its page images and feed them to a vision model (mirroring the video -> frames
+            // path); if no vision model is loaded we fail with a clear, actionable message
+            // rather than silently sending an empty document. When --input is also given it
+            // becomes the instruction over the document; otherwise a default is used.
+            List<string> pdfPageImages = null;
+            if (pdfPath != null)
+            {
+                if (!File.Exists(pdfPath))
+                {
+                    _log.LogError(LogEventIds.CliFailed, "PDF file not found: {PdfPath}", pdfPath);
+                    return;
+                }
+
+                var pdfSw = Stopwatch.StartNew();
+                TensorSharp.Models.PdfTextResult pdf;
+                try
+                {
+                    pdf = TensorSharp.Models.PdfTextExtractor.ExtractFromFile(pdfPath, ResolvePdfMaxPages());
+                }
+                catch (Exception ex)
+                {
+                    _log.LogError(LogEventIds.CliFailed, ex,
+                        "Failed to extract text from PDF {PdfPath}: {Error}", pdfPath, ex.Message);
+                    Console.Error.WriteLine("Could not read the PDF: " + ex.Message);
+                    return;
+                }
+                pdfSw.Stop();
+                string pdfName = Path.GetFileName(pdfPath);
+
+                if (!pdf.LooksTextless)
+                {
+                    // Born-digital PDF: inline the extracted text.
+                    string docText = TruncatePdfTextToContext(
+                        model, pdf.Text, out bool pdfTruncated, out int docTokens, out int keptTokens);
+
+                    string instruction = hasUserInput
+                        ? rawText
+                        : "Please analyze the attached PDF document and summarize its content.";
+                    rawText = $"[File: {pdfName}]\n{docText}\n[End of file]\n\n{instruction}";
+
+                    _log.LogInformation(LogEventIds.UploadReceived,
+                        "PDF input (text): {PdfPath} pages={Pages} extractedPages={ExtractedPages} docTokens={DocTokens} keptTokens={KeptTokens} truncated={Truncated} extractMs={ExtractMs:F1}",
+                        pdfPath, pdf.PageCount, pdf.ExtractedPageCount, docTokens, keptTokens, pdfTruncated,
+                        pdfSw.Elapsed.TotalMilliseconds);
+                    Console.WriteLine($"Loaded PDF: {pdfName} ({pdf.ExtractedPageCount}/{pdf.PageCount} pages, {keptTokens} tokens" +
+                        (pdfTruncated ? $", truncated from {docTokens})" : ")"));
+                }
+                else
+                {
+                    // Scanned / image-only PDF: needs a vision model to read the page images.
+                    bool visionAvailable = mmProjPath != null || model.HasVisionEncoder();
+                    if (!visionAvailable)
+                    {
+                        _log.LogError(LogEventIds.CliFailed,
+                            "PDF has no text layer and no vision model is loaded: {PdfPath} pages={Pages}",
+                            pdfPath, pdf.PageCount);
+                        Console.Error.WriteLine(
+                            $"PDF \"{pdfName}\" has no selectable text (it appears to be scanned or image-only). " +
+                            "Re-run with a vision-capable model and its projector, e.g. --mmproj <projector.gguf>, " +
+                            "so its pages can be read as images.");
+                        return;
+                    }
+
+                    string pdfImgDir = Path.Combine(Path.GetTempPath(), $"pdfimg_{Guid.NewGuid():N}");
+                    TensorSharp.Models.PdfImageResult imgRes;
+                    try
+                    {
+                        imgRes = TensorSharp.Models.PdfPageImageExtractor.ExtractPageImages(
+                            pdfPath, pdfImgDir, ResolvePdfMaxPages(), pdfName);
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogError(LogEventIds.CliFailed, ex,
+                            "Failed to extract page images from PDF {PdfPath}: {Error}", pdfPath, ex.Message);
+                        Console.Error.WriteLine("Could not read the PDF: " + ex.Message);
+                        return;
+                    }
+
+                    if (imgRes.ImagePaths.Count == 0)
+                    {
+                        _log.LogError(LogEventIds.CliFailed,
+                            "PDF yielded neither text nor images: {PdfPath}", pdfPath);
+                        Console.Error.WriteLine($"Could not extract any text or images from \"{pdfName}\".");
+                        return;
+                    }
+
+                    pdfPageImages = new List<string>(imgRes.ImagePaths);
+                    if (!hasUserInput)
+                        rawText = "Please analyze and interpret the attached document pages.";
+
+                    _log.LogInformation(LogEventIds.UploadReceived,
+                        "PDF input (images): {PdfPath} pages={Pages} images={Images} extractMs={ExtractMs:F1}",
+                        pdfPath, pdf.PageCount, imgRes.ImagePaths.Count, pdfSw.Elapsed.TotalMilliseconds);
+                    Console.WriteLine($"Loaded PDF as images: {pdfName} " +
+                        $"({imgRes.ExtractedPageCount}/{pdf.PageCount} pages -> {imgRes.ImagePaths.Count} image(s) for the vision model)");
+                }
+            }
+
             // DiffusionGemma uses an iterative denoising sampler rather than autoregressive decode.
             if (model is DiffusionGemmaModel diffusionModel)
             {
@@ -641,6 +746,12 @@ namespace TensorSharp.Cli
                     "Audio input: {AudioPath} ({Bytes})",
                     audioPath, LoggingExtensions.FormatBytes(new FileInfo(audioPath).Length));
             }
+
+            // A scanned / image-only PDF was recovered as page images above; attach them as
+            // image inputs so the vision model reads the document. Page images take
+            // precedence over any --image/--video (combining those with --pdf is unusual).
+            if (pdfPageImages != null && pdfPageImages.Count > 0)
+                imagePaths = pdfPageImages;
 
             if (dumpPrompt)
             {
@@ -1119,6 +1230,53 @@ namespace TensorSharp.Cli
                 return null;
             var list = arr.EnumerateArray().Select(e => e.GetString()).Where(s => s != null).ToList();
             return list.Count > 0 ? list : null;
+        }
+
+        /// <summary>
+        /// Optional cap on the number of PDF pages read, from the <c>TS_PDF_MAX_PAGES</c>
+        /// environment variable. Returns 0 (all pages) when unset or invalid.
+        /// </summary>
+        static int ResolvePdfMaxPages()
+        {
+            string raw = Environment.GetEnvironmentVariable("TS_PDF_MAX_PAGES");
+            if (!string.IsNullOrWhiteSpace(raw) && int.TryParse(raw, out int v) && v > 0)
+                return v;
+            return 0;
+        }
+
+        /// <summary>
+        /// Truncates extracted PDF text to half the model's context window (mirroring the
+        /// server's upload policy) so a large document can't overflow the KV cache. Falls
+        /// back to returning the text unchanged when no tokenizer / context length is
+        /// available. Reports the original and kept token counts via out-parameters.
+        /// </summary>
+        static string TruncatePdfTextToContext(
+            ModelBase model, string text, out bool truncated, out int originalTokens, out int keptTokens)
+        {
+            truncated = false;
+            originalTokens = 0;
+            keptTokens = 0;
+            if (string.IsNullOrEmpty(text))
+                return text ?? string.Empty;
+
+            var tokenizer = model?.Tokenizer;
+            int ctx = model?.MaxContextLength ?? 0;
+            if (tokenizer == null || ctx <= 0)
+                return text;
+
+            int tokenLimit = Math.Max(1, ctx / 2);
+            var tokens = tokenizer.Encode(text, addSpecial: false);
+            originalTokens = tokens.Count;
+            if (tokens.Count <= tokenLimit)
+            {
+                keptTokens = tokens.Count;
+                return text;
+            }
+
+            truncated = true;
+            string kept = tokenizer.Decode(tokens.GetRange(0, tokenLimit));
+            keptTokens = tokenizer.Encode(kept, addSpecial: false).Count;
+            return kept;
         }
 
         static SamplingConfig ParseSamplingFromJson(JsonElement root, SamplingConfig fallback)

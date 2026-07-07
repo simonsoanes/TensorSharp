@@ -879,7 +879,7 @@ button.primary:hover { background: var(--accent-hover); }
         </div>
       </div>
     </div>
-    <input type="file" id="file-input" accept="image/*,video/*,audio/*,.heic,.heif,.txt,.csv,.json,.xml,.md,.log,.py,.js,.ts,.cs,.java,.cpp,.c,.h,.html,.css,.yaml,.yml,.toml,.ini,.cfg,.sh,.bat,.ps1,.rb,.go,.rs,.swift,.kt,.sql,.r,.m,.tex,.rtf" onchange="handleFileSelect(event)">
+    <input type="file" id="file-input" accept="image/*,video/*,audio/*,.pdf,.heic,.heif,.txt,.csv,.json,.xml,.md,.log,.py,.js,.ts,.cs,.java,.cpp,.c,.h,.html,.css,.yaml,.yml,.toml,.ini,.cfg,.sh,.bat,.ps1,.rb,.go,.rs,.swift,.kt,.sql,.r,.m,.tex,.rtf" onchange="handleFileSelect(event)">
   </div>
 </div>
 
@@ -1077,6 +1077,12 @@ async function handleFileSelect(event) {
     if (data.ok) {
       pendingAttachments.push(data);
       renderAttachments();
+      if (data.warning) {
+        alert(data.warning);
+      } else if (data.renderedAsImages && data.frameUrls) {
+        // A scanned / image-only PDF was recovered as page images for a vision model.
+        // No blocking alert needed; the chip shows the page count.
+      }
       if (data.truncated) {
         let detail = 'Only the first portion of the file will be sent to the model.';
         if (data.truncateUnit === 'tokens' && data.truncateLimit && data.modelContextLimit) {
@@ -1104,6 +1110,7 @@ function renderAttachments() {
     else if (att.mediaType === 'video') icon = '&#x1F3AC;';
     else if (att.mediaType === 'audio') icon = '&#x1F3B5;';
     else if (att.mediaType === 'text') icon = '&#x1F4DD;';
+    else if (att.mediaType === 'pdf') icon = '&#x1F4C4;';
     chip.innerHTML = `${icon} ${att.fileName} <span class="remove" onclick="removeAttachment(${idx})">&times;</span>`;
     attachmentsDiv.appendChild(chip);
   });
@@ -1144,6 +1151,15 @@ async function sendMessage() {
     } else if (att.mediaType === 'text' && att.textContent) {
       textParts.push(`[File: ${att.fileName}]\n${att.textContent}\n[End of file]`);
       if (att.path) textFilePaths.push(att.path);
+    } else if (att.mediaType === 'pdf') {
+      if (att.textContent) {
+        // Born-digital PDF: inline the extracted text.
+        textParts.push(`[File: ${att.fileName}]\n${att.textContent}\n[End of file]`);
+        if (att.path) textFilePaths.push(att.path);
+      } else if (att.framePaths && att.framePaths.length) {
+        // Scanned / image-only PDF: send its page images to the vision model.
+        att.framePaths.forEach(f => imagePaths.push(f));
+      }
     }
   });
 
@@ -1543,6 +1559,7 @@ function describeAttachments() {
   if (types.includes('video')) return 'What is happening in this video?';
   if (types.includes('audio')) return 'Listen to this audio and describe what you hear.';
   if (types.includes('image')) return 'What is in this image?';
+  if (types.includes('pdf')) return 'Please analyze the attached PDF document and summarize its content.';
   if (types.includes('text')) return 'Please analyze the attached text file and summarize its content.';
   return 'Describe the attached file.';
 }
@@ -1562,6 +1579,14 @@ function addUserBubble(text, attachments, historyIdx) {
       mediaHtml += `<div class="media-preview"><div class="audio-label">&#x1F3B5; ${escapeHtml(att.fileName || '')}</div></div>`;
     } else if (att.mediaType === 'text') {
       mediaHtml += `<div class="media-preview"><div class="audio-label">&#x1F4DD; ${escapeHtml(att.fileName || '')}</div></div>`;
+    } else if (att.mediaType === 'pdf') {
+      if (att.renderedAsImages && att.frameUrls && att.frameUrls.length) {
+        const n = att.frameUrls.length;
+        mediaHtml += `<div class="media-preview"><img src="${escapeHtml(att.frameUrls[0])}" alt="pdf page"></div>`;
+        mediaHtml += `<div class="audio-label">&#x1F4C4; ${escapeHtml(att.fileName || '')} (${n} page image${n > 1 ? 's' : ''})</div>`;
+      } else {
+        mediaHtml += `<div class="media-preview"><div class="audio-label">&#x1F4C4; ${escapeHtml(att.fileName || '')}</div></div>`;
+      }
     }
   });
 

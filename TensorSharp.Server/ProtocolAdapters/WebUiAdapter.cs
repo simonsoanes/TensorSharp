@@ -299,6 +299,141 @@ namespace TensorSharp.Server.ProtocolAdapters
                 });
             }
 
+            if (mediaType == "pdf")
+            {
+                // PDFs are a document modality. First try the cheap text path: extract the
+                // text layer and hand it back with the same contract as a plain-text upload,
+                // so the Web UI inlines it into the message and the normal prefill path runs
+                // it. A scanned / image-only PDF has no text layer, so we fall back to
+                // recovering its page images and letting a vision model read them (mirroring
+                // the video -> frames path) — or, if no vision model is loaded, we tell the
+                // user exactly why the document can't be read instead of silently dropping it.
+                PdfTextResult pdf;
+                try
+                {
+                    pdf = await Task.Run(() => PdfTextExtractor.ExtractFromFile(savePath, ResolvePdfMaxPages()));
+                }
+                catch (Exception ex)
+                {
+                    uploadLogger.LogWarning(LogEventIds.UploadRejected,
+                        "PDF text extraction failed: name={FileName} savedPath={SavedPath} error={Error}",
+                        file.FileName, savePath, ex.Message);
+                    return Results.BadRequest(new { ok = false, error = "Could not read the PDF: " + ex.Message });
+                }
+
+                if (!pdf.LooksTextless)
+                {
+                    var prepared = TextUploadHelper.PrepareTextContent(
+                        pdf.Text,
+                        _svc.Model?.Tokenizer,
+                        _svc.Model?.MaxContextLength ?? 0,
+                        _options.MaxTextFileChars);
+
+                    uploadLogger.LogInformation(LogEventIds.UploadReceived,
+                        "PDF text extracted: name={FileName} pages={Pages} extractedPages={ExtractedPages} chars={Chars} truncated={Truncated}",
+                        file.FileName, pdf.PageCount, pdf.ExtractedPageCount, prepared.TextContent?.Length ?? 0, prepared.Truncated);
+
+                    return Results.Json(new
+                    {
+                        ok = true,
+                        path = savePath,
+                        url = uploadUrl,
+                        mediaType,
+                        fileName = file.FileName,
+                        renderedAsImages = false,
+                        pageCount = pdf.PageCount,
+                        extractedPageCount = pdf.ExtractedPageCount,
+                        textContent = prepared.TextContent,
+                        truncated = prepared.Truncated,
+                        truncateLimit = prepared.TruncateLimit,
+                        truncateUnit = prepared.TruncateUnit,
+                        modelContextLimit = prepared.ModelContextLimit,
+                        originalTokenCount = prepared.OriginalTokenCount,
+                        returnedTokenCount = prepared.ReturnedTokenCount,
+                    });
+                }
+
+                // Scanned / image-only PDF (no selectable text layer).
+                bool visionLoaded = _svc.LoadedMmProjName != null || (_svc.Model?.HasVisionEncoder() ?? false);
+                if (!visionLoaded)
+                {
+                    uploadLogger.LogWarning(LogEventIds.UploadReceived,
+                        "PDF has no text layer and no vision model is loaded: name={FileName} pages={Pages}",
+                        file.FileName, pdf.PageCount);
+                    return Results.Json(new
+                    {
+                        ok = true,
+                        path = savePath,
+                        url = uploadUrl,
+                        mediaType,
+                        fileName = file.FileName,
+                        renderedAsImages = false,
+                        needsVision = true,
+                        pageCount = pdf.PageCount,
+                        textContent = "",
+                        warning = $"\"{file.FileName}\" has no selectable text — it looks scanned or image-only. " +
+                                  "To analyze it, run the server with a vision-capable model and its projector (--mmproj <projector.gguf>).",
+                    });
+                }
+
+                PdfImageResult pdfImages;
+                try
+                {
+                    pdfImages = await Task.Run(() => PdfPageImageExtractor.ExtractPageImages(
+                        savePath, _options.UploadDirectory, ResolvePdfMaxPages(),
+                        Path.GetFileNameWithoutExtension(safeFileName)));
+                }
+                catch (Exception ex)
+                {
+                    uploadLogger.LogWarning(LogEventIds.UploadRejected,
+                        "PDF page-image extraction failed: name={FileName} savedPath={SavedPath} error={Error}",
+                        file.FileName, savePath, ex.Message);
+                    return Results.BadRequest(new { ok = false, error = "Could not read the PDF: " + ex.Message });
+                }
+
+                if (pdfImages.ImagePaths.Count == 0)
+                {
+                    uploadLogger.LogWarning(LogEventIds.UploadReceived,
+                        "PDF yielded neither text nor images: name={FileName} pages={Pages}", file.FileName, pdf.PageCount);
+                    return Results.Json(new
+                    {
+                        ok = true,
+                        path = savePath,
+                        url = uploadUrl,
+                        mediaType,
+                        fileName = file.FileName,
+                        renderedAsImages = false,
+                        pageCount = pdf.PageCount,
+                        textContent = "",
+                        warning = $"Could not extract any text or images from \"{file.FileName}\".",
+                    });
+                }
+
+                var framePaths = pdfImages.ImagePaths.ToList();
+                var frameNames = framePaths.Select(Path.GetFileName).ToList();
+                var frameUrls = frameNames.Select(BuildUploadUrl).ToList();
+
+                uploadLogger.LogInformation(LogEventIds.UploadReceived,
+                    "PDF rendered as page images: name={FileName} pages={Pages} images={Images}",
+                    file.FileName, pdf.PageCount, framePaths.Count);
+
+                return Results.Json(new
+                {
+                    ok = true,
+                    path = savePath,
+                    url = uploadUrl,
+                    mediaType,
+                    fileName = file.FileName,
+                    renderedAsImages = true,
+                    pageCount = pdf.PageCount,
+                    extractedPageCount = pdfImages.ExtractedPageCount,
+                    frames = frameNames,
+                    frameUrls,
+                    framePaths,
+                    note = $"This PDF has no selectable text; {framePaths.Count} page image(s) were attached for the vision model to read.",
+                });
+            }
+
             return Results.Json(new { ok = true, path = savePath, url = uploadUrl, mediaType, fileName = file.FileName });
         }
 
@@ -539,12 +674,27 @@ namespace TensorSharp.Server.ProtocolAdapters
             return "/uploads/" + Uri.EscapeDataString(fileName);
         }
 
+        /// <summary>
+        /// Optional cap on the number of PDF pages read during upload, from the
+        /// <c>TS_PDF_MAX_PAGES</c> environment variable. Returns <c>0</c> (all pages)
+        /// when unset or invalid; the extracted text is separately truncated to the
+        /// model's token budget before it reaches the model.
+        /// </summary>
+        private static int ResolvePdfMaxPages()
+        {
+            string raw = Environment.GetEnvironmentVariable("TS_PDF_MAX_PAGES");
+            if (!string.IsNullOrWhiteSpace(raw) && int.TryParse(raw, out int v) && v > 0)
+                return v;
+            return 0;
+        }
+
         private static string ClassifyExtension(string ext) => ext switch
         {
             ".png" or ".jpg" or ".jpeg" or ".gif" or ".webp" or ".bmp"
                 or ".heic" or ".heif" => "image",
             ".mp4" or ".mov" or ".avi" or ".mkv" or ".webm" => "video",
             ".mp3" or ".wav" or ".ogg" or ".flac" or ".m4a" => "audio",
+            ".pdf" => "pdf",
             ".txt" or ".csv" or ".json" or ".xml" or ".md" or ".log"
                 or ".py" or ".js" or ".ts" or ".cs" or ".java" or ".cpp" or ".c" or ".h"
                 or ".html" or ".css" or ".yaml" or ".yml" or ".toml" or ".ini" or ".cfg"

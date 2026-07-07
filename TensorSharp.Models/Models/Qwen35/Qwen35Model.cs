@@ -1269,14 +1269,21 @@ namespace TensorSharp.Models
         }
 
         // Chunk size for ForwardRefill: long prompts are processed in this-many-token
-        // chunks so the per-layer attention-score allocation stays bounded.
-        // Override with TS_PREFILL_CHUNK when tuning.
-        private static int ResolvePrefillChunkSize()
+        // chunks so the per-layer attention-score allocation stays bounded. Because a
+        // chunk runs as ONE fused-verify graph, the chunk size is also that graph's
+        // width, which bounds the MoE activation peak. Override with TS_PREFILL_CHUNK.
+        private int ResolvePrefillChunkSize()
         {
             string env = Environment.GetEnvironmentVariable("TS_PREFILL_CHUNK");
             if (!string.IsNullOrEmpty(env) && int.TryParse(env, out int v) && v > 0)
                 return v;
-            return 2048;
+            // Vulkan VRAM cliff: a fused-verify graph wider than ~768 tokens pushes the
+            // MoE activation peak past a 16 GB card's VRAM, and WDDM then PERMANENTLY
+            // demotes the reuse-gallocr to shared system memory -> pp2048 collapses from
+            // ~360 to ~18 tok/s (measured). 768 keeps the peak device-resident and holds
+            // across context lengths (the KV cache grows separately). CUDA (cuBLAS/MMQ,
+            // no WDDM demotion) keeps the larger 2048 chunk for fewer chunk boundaries.
+            return _backend == BackendType.GgmlVulkan ? 768 : 2048;
         }
 
         // Gates the whole-model fused prefill path (TSGgml_Qwen35ModelVerify, one
@@ -1296,7 +1303,14 @@ namespace TensorSharp.Models
         private bool CanUsePrefillVerify(int startPos, int seqLen)
         {
             if (!_prefillVerifyEnabled || _fvUnsupported) return false;
-            if (_backend != BackendType.GgmlCuda || seqLen <= 1) return false;
+            // Fused whole-model verify prefill runs on ggml_cuda AND ggml_vulkan (both
+            // implement the ops the graph needs — set_rows, mul_mat_id, gated_delta_net,
+            // ssm_scan/conv). Vulkan was previously gated out here, so Vulkan silently
+            // fell back to the per-op layer loop (pp512 ~20 tok/s vs ~300+ fused); the
+            // low-level TryFullModelVerify already permits Vulkan. Metal stays out
+            // (ggml_metal_op_set_rows SEGFAULTs — same reason it is non-persist decode).
+            if ((_backend != BackendType.GgmlCuda && _backend != BackendType.GgmlVulkan) || seqLen <= 1)
+                return false;
             if (_visionEmbeddingsList.Count > 0 || _pendingMRoPEPositions != null) return false;
             if (_headKDim != _headVDim) return false;
             return true;
