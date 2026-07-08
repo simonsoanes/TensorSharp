@@ -1209,7 +1209,13 @@ namespace TensorSharp.Models
                         _fdLayers, n,
                         (IntPtr)GetFloatPtr(hidden), Config.HiddenSize, position,
                         Config.NumHeads, Config.NumKVHeads, headDim, cacheSize,
-                        headDim, 2, kvCacheType,
+                        // rope_n_dims: this model uses partial rotary (rope.dimension_count,
+                        // e.g. 64 of the 256-dim head). Passing headDim here rotated ALL 256
+                        // dims with a wrong frequency schedule — self-consistent within the
+                        // fused graph but MISMATCHED against the KV cache that prefill fills
+                        // with the correct n_rot, so decode-token attention drifted and the
+                        // output degenerated into repetition after a few hundred tokens.
+                        _ropeDimCount > 0 ? _ropeDimCount : headDim, 2, kvCacheType,
                         _convKernel, _headKDim, _headVDim, _numKHeads, _numVHeads,
                         Config.Eps, Config.RopeBase, 1.0f / Config.RopeScale,
                         _numExperts, _numExpertsUsed, _expertFfnLength, _sharedExpertFfnLength,
@@ -1503,7 +1509,9 @@ namespace TensorSharp.Models
                     _fvLayers, n,
                     (IntPtr)(GetFloatPtr(hidden) + (long)rowOffset * Config.HiddenSize), Config.HiddenSize, startPos, seqLen,
                     Config.NumHeads, Config.NumKVHeads, headDim, cacheSize,
-                    headDim, 2, kvCacheType,
+                    // rope_n_dims: partial rotary (rope.dimension_count, e.g. 64 of 256).
+                    // Must match the decode path and the KV cache; see TryFullModelDecode.
+                    _ropeDimCount > 0 ? _ropeDimCount : headDim, 2, kvCacheType,
                     _convKernel, _headKDim, _headVDim, _numKHeads, _numVHeads,
                     Config.Eps, Config.RopeBase, 1.0f / Config.RopeScale,
                     _numExperts, _numExpertsUsed, _expertFfnLength, _sharedExpertFfnLength,
