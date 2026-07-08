@@ -335,7 +335,11 @@ namespace TensorSharp.Models
                 ok2 = GgmlBasicOps.Qwen35ModelDecodeBatched(
                     _bfdLayers, n, (IntPtr)hiddenPtr, Config.HiddenSize, numTokens, numSeqs,
                     (IntPtr)posPtr, (IntPtr)slotPtr, (IntPtr)gidxPtr, (IntPtr)slPtr, padKv, totalSlots,
-                    Config.NumHeads, Config.NumKVHeads, headDim, headDim, 2, kvCacheType,
+                    // rope_n_dims must be the model's partial-rotary width (rope.dimension_count,
+                    // 64 of the 256-dim head), NOT headDim — passing headDim rotates all dims with
+                    // the wrong frequencies and mismatches the KV cache, degenerating output. See
+                    // TryFullModelDecode.
+                    Config.NumHeads, Config.NumKVHeads, headDim, _ropeDimCount > 0 ? _ropeDimCount : headDim, 2, kvCacheType,
                     _convKernel, _headKDim, _headVDim, _numKHeads, _numVHeads,
                     Config.Eps, Config.RopeBase, 1.0f / Config.RopeScale,
                     _numExperts, _numExpertsUsed, _expertFfnLength, _sharedExpertFfnLength,
