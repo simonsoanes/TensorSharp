@@ -547,16 +547,24 @@ ggml_tensor* qi_mod_norm(ggml_context* ctx, ggml_tensor* x, ggml_tensor* scale1,
 // DiT's GELU / attention outputs reach thousands). Scaling the activation by 1/K
 // before the matmul (and the result by K) keeps that FP16 sum in range; q8_1 is
 // scale-invariant in precision (the per-block scale adapts), so this is exact.
+//
+// `prescale = false` skips both passes for projections whose input is a LayerNorm
+// output with AdaLN scale/shift applied: those stay O(10) per element while the q8_1
+// block sum only overflows past ~2000 per element, so the guard is dead weight there
+// (two full-tensor bandwidth passes around each of 8 of the 12 matmuls per block).
+// The unbounded inputs — attention output (to_out/to_add_out) and the GELU hidden
+// state (mlp net.2) — keep the guard.
 constexpr float QI_MM_SCALE = 1024.0f;
-ggml_tensor* qi_mm(ggml_context* ctx, ggml_tensor* w, ggml_tensor* x)
+ggml_tensor* qi_mm(ggml_context* ctx, ggml_tensor* w, ggml_tensor* x, bool prescale = true)
 {
+    if (!prescale) return ggml_mul_mat(ctx, w, x);
     ggml_tensor* xs = ggml_scale(ctx, x, 1.0f / QI_MM_SCALE);
     return ggml_scale(ctx, ggml_mul_mat(ctx, w, xs), QI_MM_SCALE);
 }
 
-ggml_tensor* qi_lin_bias(ggml_context* ctx, ggml_tensor* w, ggml_tensor* x, ggml_tensor* b)
+ggml_tensor* qi_lin_bias(ggml_context* ctx, ggml_tensor* w, ggml_tensor* x, ggml_tensor* b, bool prescale = true)
 {
-    ggml_tensor* o = qi_mm(ctx, w, x);
+    ggml_tensor* o = qi_mm(ctx, w, x, prescale);
     return b ? ggml_add(ctx, o, b) : o;
 }
 
@@ -571,12 +579,16 @@ struct QiLora
 // y = W·x (+bias) + scale * B·(A·x). The LoRA matmuls run in F32 (cuBLAS SGEMM):
 // no activation quantization (so no q8_1 block-sum overflow) and no F16 cast of the
 // unbounded DiT activations (which reach ~1e8 by the late blocks).
-ggml_tensor* qi_lin_lora(ggml_context* ctx, ggml_tensor* w, ggml_tensor* x, ggml_tensor* b, const QiLora& lo)
+ggml_tensor* qi_lin_lora(ggml_context* ctx, ggml_tensor* w, ggml_tensor* x, ggml_tensor* b, const QiLora& lo,
+                         bool prescale = true)
 {
-    ggml_tensor* o = qi_lin_bias(ctx, w, x, b);
+    ggml_tensor* o = qi_lin_bias(ctx, w, x, b, prescale);
     if (lo.a == nullptr || lo.b == nullptr) return o;
     ggml_tensor* h = ggml_mul_mat(ctx, lo.a, x);                       // [rank, seq]
-    ggml_tensor* d = ggml_scale(ctx, ggml_mul_mat(ctx, lo.b, h), lo.scale);
+    ggml_tensor* d = ggml_mul_mat(ctx, lo.b, h);
+    // The loader folds alpha/rank*multiplier into B, so scale is normally 1 here;
+    // keep the node for callers that pass an unfolded factor.
+    if (lo.scale != 1.0f) d = ggml_scale(ctx, d, lo.scale);
     return ggml_add(ctx, o, d);
 }
 
@@ -589,16 +601,35 @@ ggml_tensor* qi_qk_norm(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, int h
 }
 
 // interleaved RoPE: x [head_dim, heads, seq]; cos/sin [head_dim, seq] (duplicated per pair).
+//
+// The output uses a HALF-SPLIT (NeoX-style) channel layout per head — [e'_0..e'_63,
+// o'_0..o'_63] instead of the reference's interleaved [e'_0, o'_0, e'_1, o'_1, ...] —
+// where (e'_i, o'_i) = (e_i*c_i - o_i*s_i, o_i*c_i + e_i*s_i). RoPE'd q/k feed ONLY
+// q·k dot products (flash or QK^T), which are invariant under any fixed channel
+// permutation applied to both q and k, so this layout change never reaches an output.
+//
+// Why not the straightforward interleaved rot = concat(-odd, even, dim0): those
+// concat operands are 4-D [1, hd/2, heads, seq], and ggml-cuda's concat launches one
+// kernel per ne3 slice — ~5.4k tiny launches per rope call, ~650k per DiT forward
+// (60% of all launches, and it starves CUDA-graph capture). The half-split form only
+// needs a 3-D dim0 concat (ne3 == 1): a single launch.
 ggml_tensor* qi_rope(ggml_context* ctx, ggml_tensor* x, ggml_tensor* cosf, ggml_tensor* sinf, int head_dim, int heads, int seq)
 {
-    ggml_tensor* x4 = ggml_reshape_4d(ctx, x, 2, head_dim / 2, heads, seq);
-    ggml_tensor* even = ggml_view_4d(ctx, x4, 1, head_dim / 2, heads, seq, x4->nb[1], x4->nb[2], x4->nb[3], 0);
-    ggml_tensor* odd  = ggml_view_4d(ctx, x4, 1, head_dim / 2, heads, seq, x4->nb[1], x4->nb[2], x4->nb[3], x4->nb[0]);
-    ggml_tensor* rot4 = ggml_concat(ctx, ggml_neg(ctx, ggml_cont(ctx, odd)), ggml_cont(ctx, even), 0);
-    ggml_tensor* rot  = ggml_reshape_3d(ctx, rot4, head_dim, heads, seq);
-    ggml_tensor* cos3 = ggml_reshape_3d(ctx, cosf, head_dim, 1, seq);
-    ggml_tensor* sin3 = ggml_reshape_3d(ctx, sinf, head_dim, 1, seq);
-    return ggml_add(ctx, ggml_mul(ctx, x, cos3), ggml_mul(ctx, rot, sin3));
+    const int half = head_dim / 2;
+    ggml_tensor* x4 = ggml_reshape_4d(ctx, x, 2, half, heads, seq);
+    ggml_tensor* even = ggml_view_4d(ctx, x4, 1, half, heads, seq, x4->nb[1], x4->nb[2], x4->nb[3], 0);
+    ggml_tensor* odd  = ggml_view_4d(ctx, x4, 1, half, heads, seq, x4->nb[1], x4->nb[2], x4->nb[3], x4->nb[0]);
+    // The tables duplicate each pair value (cos[2i] == cos[2i+1] == c_i): strided
+    // lane-0 views give the per-pair half tables [1, half, 1, seq] without a copy.
+    ggml_tensor* cosh = ggml_view_4d(ctx, cosf, 1, half, 1, seq,
+                                     2 * cosf->nb[0], cosf->nb[1], cosf->nb[1], 0);
+    ggml_tensor* sinh = ggml_view_4d(ctx, sinf, 1, half, 1, seq,
+                                     2 * sinf->nb[0], sinf->nb[1], sinf->nb[1], 0);
+    ggml_tensor* ep = ggml_sub(ctx, ggml_mul(ctx, even, cosh), ggml_mul(ctx, odd, sinh));
+    ggml_tensor* op = ggml_add(ctx, ggml_mul(ctx, odd, cosh), ggml_mul(ctx, even, sinh));
+    ggml_tensor* ep3 = ggml_reshape_3d(ctx, ep, half, heads, seq);
+    ggml_tensor* op3 = ggml_reshape_3d(ctx, op, half, heads, seq);
+    return ggml_concat(ctx, ep3, op3, 0);   // 3-D dim0 concat: one kernel
 }
 
 } // namespace
@@ -867,12 +898,12 @@ TSG_EXPORT int TSGgml_QwenImageJointAttn(const TSGgmlQwenImageJointAttnDesc* d)
         ggml_tensor* txtMod = qi_mod_norm(ctx, txt_t, t_s1, t_sh, eps);
 
         // --- projections + reshape to heads ---
-        ggml_tensor* iq = ggml_reshape_3d(ctx, qi_lin_bias(ctx, toQw, imgMod, toQb), hd, heads, iseq);
-        ggml_tensor* ik = ggml_reshape_3d(ctx, qi_lin_bias(ctx, toKw, imgMod, toKb), hd, heads, iseq);
-        ggml_tensor* iv = ggml_reshape_3d(ctx, qi_lin_bias(ctx, toVw, imgMod, toVb), hd, heads, iseq);
-        ggml_tensor* tq = ggml_reshape_3d(ctx, qi_lin_bias(ctx, aQw, txtMod, aQb), hd, heads, tseq);
-        ggml_tensor* tk = ggml_reshape_3d(ctx, qi_lin_bias(ctx, aKw, txtMod, aKb), hd, heads, tseq);
-        ggml_tensor* tv = ggml_reshape_3d(ctx, qi_lin_bias(ctx, aVw, txtMod, aVb), hd, heads, tseq);
+        ggml_tensor* iq = ggml_reshape_3d(ctx, qi_lin_bias(ctx, toQw, imgMod, toQb, false), hd, heads, iseq);
+        ggml_tensor* ik = ggml_reshape_3d(ctx, qi_lin_bias(ctx, toKw, imgMod, toKb, false), hd, heads, iseq);
+        ggml_tensor* iv = ggml_reshape_3d(ctx, qi_lin_bias(ctx, toVw, imgMod, toVb, false), hd, heads, iseq);
+        ggml_tensor* tq = ggml_reshape_3d(ctx, qi_lin_bias(ctx, aQw, txtMod, aQb, false), hd, heads, tseq);
+        ggml_tensor* tk = ggml_reshape_3d(ctx, qi_lin_bias(ctx, aKw, txtMod, aKb, false), hd, heads, tseq);
+        ggml_tensor* tv = ggml_reshape_3d(ctx, qi_lin_bias(ctx, aVw, txtMod, aVb, false), hd, heads, tseq);
 
         // --- QK norm + RoPE ---
         iq = qi_rope(ctx, qi_qk_norm(ctx, iq, nQ, hd, heads, iseq, eps), i_cos, i_sin, hd, heads, iseq);
@@ -1061,7 +1092,13 @@ ggml_tensor* qi_attention(ggml_context* ctx, ggml_tensor* q_attn, ggml_tensor* k
         ggml_tensor* ks = ggml_scale(ctx, kpad, 1.0f / QI_FA_SCALE);
         ggml_tensor* vs = ggml_scale(ctx, vpad, 1.0f / QI_FA_SCALE);
         ggml_tensor* faop = ggml_flash_attn_ext(ctx, q_attn, ks, vs, mask, scale * QI_FA_SCALE, 0.0f, 0.0f); // [hd, heads, total]
-        ggml_flash_attn_ext_set_prec(faop, GGML_PREC_F32);
+        // F32 accumulation by default. TS_QWEN_DIT_FLASH_F16ACC=1 keeps the kernel's
+        // native F16 accumulators (full-rate tensor cores on consumer Ampere+ — the
+        // F32-forced kernel runs at half throughput). The 1/QI_FA_SCALE pre-scaling
+        // already bounds K/V into F16-safe range, and softmax·V is a convex combination
+        // (|out| <= max|V/S|), so F16 accumulation cannot overflow there.
+        static const bool f16acc = []{ const char* e = std::getenv("TS_QWEN_DIT_FLASH_F16ACC"); return e != nullptr && e[0] == '1'; }();
+        if (!f16acc) ggml_flash_attn_ext_set_prec(faop, GGML_PREC_F32);
         // Only take the flash path if the active backend actually supports this op on
         // this GPU — else an unsupported op runs anyway and crashes (illegal access).
         // The decode/verify kernels guard the same way and fall back to materialized.
@@ -1097,12 +1134,12 @@ void qi_build_attn(ggml_context* ctx, const QiBlockTensors& t,
     ggml_tensor* imgMod = qi_mod_norm(ctx, t.img, t.i_s1a, t.i_sha, eps);
     ggml_tensor* txtMod = qi_mod_norm(ctx, t.txt, t.t_s1a, t.t_sha, eps);
 
-    ggml_tensor* iq = ggml_reshape_3d(ctx, qi_lin_bias(ctx, t.toQw, imgMod, t.toQb), hd, heads, iseq);
-    ggml_tensor* ik = ggml_reshape_3d(ctx, qi_lin_bias(ctx, t.toKw, imgMod, t.toKb), hd, heads, iseq);
-    ggml_tensor* iv = ggml_reshape_3d(ctx, qi_lin_bias(ctx, t.toVw, imgMod, t.toVb), hd, heads, iseq);
-    ggml_tensor* tq = ggml_reshape_3d(ctx, qi_lin_bias(ctx, t.aQw, txtMod, t.aQb), hd, heads, tseq);
-    ggml_tensor* tk = ggml_reshape_3d(ctx, qi_lin_bias(ctx, t.aKw, txtMod, t.aKb), hd, heads, tseq);
-    ggml_tensor* tv = ggml_reshape_3d(ctx, qi_lin_bias(ctx, t.aVw, txtMod, t.aVb), hd, heads, tseq);
+    ggml_tensor* iq = ggml_reshape_3d(ctx, qi_lin_bias(ctx, t.toQw, imgMod, t.toQb, false), hd, heads, iseq);
+    ggml_tensor* ik = ggml_reshape_3d(ctx, qi_lin_bias(ctx, t.toKw, imgMod, t.toKb, false), hd, heads, iseq);
+    ggml_tensor* iv = ggml_reshape_3d(ctx, qi_lin_bias(ctx, t.toVw, imgMod, t.toVb, false), hd, heads, iseq);
+    ggml_tensor* tq = ggml_reshape_3d(ctx, qi_lin_bias(ctx, t.aQw, txtMod, t.aQb, false), hd, heads, tseq);
+    ggml_tensor* tk = ggml_reshape_3d(ctx, qi_lin_bias(ctx, t.aKw, txtMod, t.aKb, false), hd, heads, tseq);
+    ggml_tensor* tv = ggml_reshape_3d(ctx, qi_lin_bias(ctx, t.aVw, txtMod, t.aVb, false), hd, heads, tseq);
 
     iq = qi_rope(ctx, qi_qk_norm(ctx, iq, t.nQ, hd, heads, iseq, eps), t.i_cos, t.i_sin, hd, heads, iseq);
     ik = qi_rope(ctx, qi_qk_norm(ctx, ik, t.nK, hd, heads, iseq, eps), t.i_cos, t.i_sin, hd, heads, iseq);
@@ -1133,10 +1170,10 @@ ggml_tensor* qi_build_mlp(ggml_context* ctx, ggml_tensor* x, ggml_tensor* s1, gg
                           ggml_tensor* n0w, ggml_tensor* n0b, ggml_tensor* n2w, ggml_tensor* n2b, float eps)
 {
     ggml_tensor* mod = qi_mod_norm(ctx, x, s1, sh, eps);
-    ggml_tensor* h = qi_mm(ctx, n0w, mod);
+    ggml_tensor* h = qi_mm(ctx, n0w, mod, /*prescale=*/false);   // post-norm input: bounded
     if (n0b) h = ggml_add(ctx, h, n0b);
     h = ggml_gelu(ctx, h);
-    ggml_tensor* mlp = qi_mm(ctx, n2w, h);
+    ggml_tensor* mlp = qi_mm(ctx, n2w, h);                       // GELU output: unbounded, keep guard
     if (n2b) mlp = ggml_add(ctx, mlp, n2b);
     return ggml_add(ctx, x, ggml_mul(ctx, mlp, g));
 }
@@ -2096,7 +2133,7 @@ ggml_tensor* qi_build_mlp_raw(ggml_context* ctx, ggml_tensor* x, ggml_tensor* sc
                               const QiLora& lo0 = {}, const QiLora& lo2 = {})
 {
     ggml_tensor* mod = qi_mod_norm_raw(ctx, x, scale, shift, eps);
-    ggml_tensor* h = qi_lin_lora(ctx, n0w, mod, n0b, lo0);
+    ggml_tensor* h = qi_lin_lora(ctx, n0w, mod, n0b, lo0, /*prescale=*/false);   // post-norm input: bounded
     h = ggml_gelu(ctx, h);
     ggml_tensor* mlp = qi_lin_lora(ctx, n2w, h, n2b, lo2);
     return ggml_add(ctx, x, ggml_mul(ctx, mlp, gate));
@@ -2148,12 +2185,12 @@ void qi_full_block(ggml_context* ctx, const QiFullBlockW& w, ggml_tensor* silu_t
     ggml_tensor* imgMod = qi_mod_norm_raw(ctx, img, iScA, iShA, eps);
     ggml_tensor* txtMod = qi_mod_norm_raw(ctx, txt, tScA, tShA, eps);
 
-    ggml_tensor* iq = ggml_reshape_3d(ctx, qi_lin_lora(ctx, w.toQw, imgMod, w.toQb, w.lToQ), hd, heads, iseq);
-    ggml_tensor* ik = ggml_reshape_3d(ctx, qi_lin_lora(ctx, w.toKw, imgMod, w.toKb, w.lToK), hd, heads, iseq);
-    ggml_tensor* iv = ggml_reshape_3d(ctx, qi_lin_lora(ctx, w.toVw, imgMod, w.toVb, w.lToV), hd, heads, iseq);
-    ggml_tensor* tq = ggml_reshape_3d(ctx, qi_lin_lora(ctx, w.aQw, txtMod, w.aQb, w.lAQ), hd, heads, tseq);
-    ggml_tensor* tk = ggml_reshape_3d(ctx, qi_lin_lora(ctx, w.aKw, txtMod, w.aKb, w.lAK), hd, heads, tseq);
-    ggml_tensor* tv = ggml_reshape_3d(ctx, qi_lin_lora(ctx, w.aVw, txtMod, w.aVb, w.lAV), hd, heads, tseq);
+    ggml_tensor* iq = ggml_reshape_3d(ctx, qi_lin_lora(ctx, w.toQw, imgMod, w.toQb, w.lToQ, false), hd, heads, iseq);
+    ggml_tensor* ik = ggml_reshape_3d(ctx, qi_lin_lora(ctx, w.toKw, imgMod, w.toKb, w.lToK, false), hd, heads, iseq);
+    ggml_tensor* iv = ggml_reshape_3d(ctx, qi_lin_lora(ctx, w.toVw, imgMod, w.toVb, w.lToV, false), hd, heads, iseq);
+    ggml_tensor* tq = ggml_reshape_3d(ctx, qi_lin_lora(ctx, w.aQw, txtMod, w.aQb, w.lAQ, false), hd, heads, tseq);
+    ggml_tensor* tk = ggml_reshape_3d(ctx, qi_lin_lora(ctx, w.aKw, txtMod, w.aKb, w.lAK, false), hd, heads, tseq);
+    ggml_tensor* tv = ggml_reshape_3d(ctx, qi_lin_lora(ctx, w.aVw, txtMod, w.aVb, w.lAV, false), hd, heads, tseq);
 
     iq = qi_rope(ctx, qi_qk_norm(ctx, iq, w.nQ, hd, heads, iseq, eps), iCos, iSin, hd, heads, iseq);
     ik = qi_rope(ctx, qi_qk_norm(ctx, ik, w.nK, hd, heads, iseq, eps), iCos, iSin, hd, heads, iseq);

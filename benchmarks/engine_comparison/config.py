@@ -124,6 +124,12 @@ LLAMA_SERVER_EXE = (
     or Path(r"C:/Works/llama.cpp/build-cuda/bin/Release/llama-server.exe"))
 LLAMA_PORT = int(_env_or("BENCH_LLAMA_PORT", _paths.get("llama_port", 5001)))
 
+# stable-diffusion.cpp CLI (image-edit / diffusion scenarios; run per-request,
+# no server to keep alive).
+SDCPP_EXE = (
+    _path(_paths.get("sdcpp_exe"), "BENCH_SDCPP_EXE")
+    or Path(r"C:/Works/stable-diffusion.cpp/build/bin/Release/sd-cli.exe"))
+
 # vLLM is connect-only (we never launch it): point this at a running
 # OpenAI-compatible vLLM endpoint. When unreachable, every vLLM cell is
 # recorded as skipped(engine unavailable) rather than failing the run.
@@ -151,6 +157,11 @@ class ModelSpec:
     size_class: str                   # small | medium | large
     is_diffusion: bool = False
     diffusion_steps: int = 32
+    # Image-editing diffusion pipeline (Qwen-Image-Edit): `gguf` is the DiT and
+    # `components` holds the companion weights (vae / llm text-encoder /
+    # mmproj vision tower / lora), each resolved like any other path entry.
+    is_image_edit: bool = False
+    components: dict = field(default_factory=dict)
     # MTP / NextN speculative decoding (TensorSharp only).
     mtp_supported: bool = False       # model ships a draft head we can engage
     mtp_draft: Optional[Path] = None  # separate draft GGUF (Gemma 4); None = embedded (Qwen 3.6)
@@ -183,6 +194,8 @@ def _build_models(cfg: dict) -> dict:
             size_class=m.get("size_class", "medium"),
             is_diffusion=is_diffusion,
             diffusion_steps=int(steps),
+            is_image_edit=bool(m.get("is_image_edit", False)),
+            components={k: _path(v) for k, v in (m.get("components") or {}).items()},
             mtp_supported=bool(m.get("mtp_supported", False)),
             mtp_draft=_path(m.get("mtp_draft")),
         )
@@ -198,10 +211,13 @@ MODELS: dict = _build_models(_CFG)
 @dataclass
 class ScenarioSpec:
     short_id: str
-    kind: str                 # text | multi_turn | function_call | json_mode | image | audio | video
+    kind: str                 # text | multi_turn | function_call | json_mode | image | audio | video | image_edit
     description: str
     modality: Optional[str] = None    # required model modality, if any
     max_tokens: int = 128
+    # image_edit scenarios: the edit request every engine must run identically
+    # (prompt / steps / cfg / seed / target_area pixel budget).
+    edit: dict = field(default_factory=dict)
 
     @property
     def is_text_only(self) -> bool:
@@ -217,6 +233,7 @@ def _build_scenarios(cfg: dict) -> dict:
             description=s.get("description", ""),
             modality=s.get("modality"),
             max_tokens=int(s.get("max_tokens", 128)),
+            edit=dict(s.get("edit") or {}),
         )
     return out
 
@@ -314,6 +331,13 @@ class BackendSpec:
     # vLLM is connect-only: nothing is launched, this flag just says the
     # external endpoint's numbers belong in this backend's column.
     vllm: bool = False
+    # stable-diffusion.cpp mapping (CLI, image-edit scenarios only). Present
+    # sub-object = the engine can run this backend; `exe` overrides the global
+    # paths.sdcpp_exe (e.g. a Vulkan sd-cli build).
+    sdcpp_enabled: bool = False
+    sdcpp_exe: Optional[Path] = None
+    sdcpp_extra_args: tuple = ()
+    sdcpp_env: dict = field(default_factory=dict)
 
 
 def _build_backend(bid: str, b: dict) -> BackendSpec:
@@ -325,6 +349,9 @@ def _build_backend(bid: str, b: dict) -> BackendSpec:
     if isinstance(llama, (int, float)):      # shorthand: "llamacpp": 999  (the -ngl value)
         llama = {"ngl": int(llama)}
     llama = llama or {}
+    sdcpp = b.get("sdcpp")
+    if sdcpp is True:                        # shorthand: "sdcpp": true
+        sdcpp = {}
     return BackendSpec(
         backend_id=bid,
         display=b.get("display", bid),
@@ -338,6 +365,10 @@ def _build_backend(bid: str, b: dict) -> BackendSpec:
         llama_extra_args=tuple(str(a) for a in llama.get("extra_args", [])),
         llama_env={str(k): str(v) for k, v in (llama.get("env") or {}).items()},
         vllm=bool(b.get("vllm", False)),
+        sdcpp_enabled=sdcpp is not None,
+        sdcpp_exe=_path((sdcpp or {}).get("exe")),
+        sdcpp_extra_args=tuple(str(a) for a in (sdcpp or {}).get("extra_args", [])),
+        sdcpp_env={str(k): str(v) for k, v in ((sdcpp or {}).get("env") or {}).items()},
     )
 
 
@@ -407,6 +438,14 @@ def llama_server_exe_for(backend: str) -> Path:
     return exe or LLAMA_SERVER_EXE
 
 
+def sdcpp_exe_for(backend: str) -> Path:
+    """The sd-cli binary for a backend: its per-backend build when configured,
+    else the global paths.sdcpp_exe."""
+    spec = BACKENDS.get(backend)
+    exe = spec.sdcpp_exe if spec is not None else None
+    return exe or SDCPP_EXE
+
+
 # llama.cpp server launch options.
 _llama = _CFG.get("llama", {}) or {}
 LLAMA_CONTEXT_SIZE = int(_llama.get("context_size", 8192))
@@ -462,6 +501,19 @@ def applies(engine: str, backend: str, model: ModelSpec,
         return False, f"{b.backend_id} has no llama.cpp launch mapping"
     if engine == "vllm" and not b.vllm:
         return False, f"vLLM endpoint is not comparable on the {b.backend_id} backend"
+    if engine == "sdcpp" and not b.sdcpp_enabled:
+        return False, f"{b.backend_id} has no stable-diffusion.cpp launch mapping"
+
+    # Image editing (stable-diffusion engines): the image_edit scenario runs only
+    # on the engines with an image-edit pipeline (TensorSharp's Qwen-Image-Edit
+    # server path and the stable-diffusion.cpp CLI), and an image-edit model runs
+    # nothing else. sd.cpp conversely has no LLM/chat path at all.
+    if scenario.kind == "image_edit" and engine not in ("tensorsharp", "sdcpp"):
+        return False, f"{eng.display} has no image-edit pipeline"
+    if engine == "sdcpp" and scenario.kind != "image_edit":
+        return False, "stable-diffusion.cpp only runs image_edit scenarios"
+    if model.is_image_edit and scenario.kind != "image_edit":
+        return False, "image-edit model only runs the image_edit scenario"
 
     # MTP / NextN speculative decoding is a TensorSharp feature (Qwen 3.6's
     # embedded NextN block, or a Gemma 4 gemma4-assistant draft GGUF). When MTP

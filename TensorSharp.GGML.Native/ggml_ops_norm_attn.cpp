@@ -2411,10 +2411,19 @@ namespace
             ggml_free(s.ctx); s.ctx = nullptr; s.ctx_mem.reset(); return false;
         }
 
+        // The kv_zero_covered_from tracking below relies on the K/V padding
+        // region [kv_len, kv_bucket) starting out zero, but backend buffers
+        // are NOT zero-initialised (CPU is _aligned_malloc/posix_memalign,
+        // CUDA is cudaMalloc). Uncleared garbage there can contain NaN/Inf
+        // bit patterns, and 0 * NaN = NaN leaks through the masked
+        // softmax -> V matmul into the attention output. Clear once per
+        // session build; steady-state calls are unaffected.
+        ggml_backend_buffer_clear(s.buffer, 0);
+
         s.num_q = num_q; s.kv_bucket = kv_bucket; s.num_heads = num_heads;
         s.num_kv_heads = num_kv_heads; s.head_dim = head_dim;
         s.scale_bits = prefill_float_bits(scale); s.kv_f16 = kv_f16;
-        s.kv_zero_covered_from = 0; // backend buffer starts zero-initialised
+        s.kv_zero_covered_from = 0; // buffer explicitly cleared above
         s.valid = true;
         return true;
     }
@@ -2647,6 +2656,20 @@ namespace
         return 1;
     }
 } // anonymous namespace
+
+namespace tsg
+{
+    // Frees the calling thread's cached prefill-attention sessions. Called
+    // from TSGgml_Shutdown so the sessions' backend (CUDA) buffers are
+    // released while the driver is still alive; otherwise the thread_local
+    // destructors run during CRT teardown, after CUDA driver shutdown, and
+    // ggml aborts with "CUDA error: driver shutting down" on process exit.
+    void free_prefill_attn_sessions()
+    {
+        for (auto& s : g_prefill_attn_cache)
+            s.destroy();
+    }
+}
 
 // ============================================================================
 // Fused prefill attention: Q*K^T → causal mask → softmax → *V as one GGML

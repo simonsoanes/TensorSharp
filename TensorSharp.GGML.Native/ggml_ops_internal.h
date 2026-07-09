@@ -530,6 +530,10 @@ namespace tsg
     bool alloc_graph_reuse_gallocr(ggml_cgraph* graph);
     // Free the cached reuse gallocr (called from TSGgml_Shutdown / backend reset).
     void free_reuse_gallocr();
+    // Free the calling thread's cached prefill-attention sessions (defined in
+    // ggml_ops_norm_attn.cpp; called from TSGgml_Shutdown so their CUDA
+    // buffers are released before driver teardown).
+    void free_prefill_attn_sessions();
 
     // --- Size / layout queries ---
 

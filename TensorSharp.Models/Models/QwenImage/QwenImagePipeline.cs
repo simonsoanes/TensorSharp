@@ -61,6 +61,34 @@ namespace TensorSharp.Models.QwenImage
 
         public RgbImage Edit(string prompt, RgbImage input, QwenImageParams p)
         {
+            try
+            {
+                return EditCore(prompt, input, p);
+            }
+            finally
+            {
+                // Hand back ALL device residency at request end (DiT weights + LoRA +
+                // captured graphs + reuse gallocr + VAE uploads, ~10 GB on CUDA). The
+                // captured DiT graph cannot survive into the next request anyway — the
+                // next FreeEncoders' global cache clear resets it — but if it lingers
+                // here, the next request's text-encoder upload + compute run against
+                // ~10 GB of dead residency and spill into shared memory (measured
+                // te.llm 1.1s -> 8.3s on a 16 GB card). Runs in a finally because a
+                // cancelled stream (client disconnect throws OperationCanceledException
+                // out of OnStep mid-denoise) or a decode failure must not strand that
+                // residency either — both native frees are idempotent no-ops when
+                // nothing is held. CUDA only: Metal's unified memory can't spill this
+                // way, so keeping residency there is strictly better.
+                if (_model.Backend is BackendType.GgmlCuda)
+                {
+                    GgmlBasicOps.ReleaseReuseComputeBuffers();
+                    GgmlBasicOps.ClearHostBufferCache();
+                }
+            }
+        }
+
+        private RgbImage EditCore(string prompt, RgbImage input, QwenImageParams p)
+        {
             var phase = System.Diagnostics.Stopwatch.StartNew();
             void Phase(string n) { Console.WriteLine($"  [pipe-timing] {n}: {phase.Elapsed.TotalMilliseconds:F0}ms"); phase.Restart(); }
 
@@ -201,7 +229,12 @@ namespace TensorSharp.Models.QwenImage
                 // caller renders the full-resolution result below.
                 if (p.OnStep != null)
                 {
-                    int interval = p.PreviewCount > 0 ? Math.Max(1, sched.Steps / p.PreviewCount) : 0;
+                    // Ceiling division over PreviewCount+1 spaces the previews evenly across the
+                    // loop while never emitting more than PreviewCount of them: floor division
+                    // degenerates to interval=1 whenever Steps < 2*PreviewCount (14 decodes for
+                    // steps=15, budget 8) and to interval=Steps for tiny runs (steps=2 with
+                    // PreviewCount=1 emitted nothing).
+                    int interval = p.PreviewCount > 0 ? Math.Max(1, (sched.Steps + p.PreviewCount) / (p.PreviewCount + 1)) : 0;
                     bool emit = interval > 0 && step < sched.Steps - 1 && (step + 1) % interval == 0;
                     RgbImage preview = null;
                     if (emit)

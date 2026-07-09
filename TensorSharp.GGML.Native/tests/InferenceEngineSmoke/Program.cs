@@ -38,6 +38,16 @@ if (logits.Length != model.Config.VocabSize)
 }
 
 int topToken = model.SampleGreedy(logits);
+
+// Bit-level logits fingerprint so runs are comparable across configurations
+// (e.g. native vs managed GGML op routing).
+uint hash = 2166136261;
+foreach (float v in logits)
+{
+    uint bits = BitConverter.SingleToUInt32Bits(v);
+    hash = (hash ^ bits) * 16777619;
+}
+
 Console.WriteLine(
-    $"InferenceEngineSmoke passed ({backend}) - vocab={model.Config.VocabSize}, tokens={tokenIds.Count}, topToken={topToken}");
+    $"InferenceEngineSmoke passed ({backend}) - vocab={model.Config.VocabSize}, tokens={tokenIds.Count}, topToken={topToken}, logitsHash=0x{hash:X8}");
 return 0;

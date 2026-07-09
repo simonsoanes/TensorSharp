@@ -586,7 +586,11 @@ namespace TensorSharp.Server.ProtocolAdapters
             // The edit worker pushes frames into this channel; the SSE loop drains it. The callback
             // never blocks on the network (unbounded TryWrite) so it can't stall the denoise.
             var channel = Channel.CreateUnbounded<EditFrame>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
-            int previewCount = Math.Clamp(steps - 1, 0, 8);
+            // steps == 0 means "auto": the pipeline resolves the real count only later (e.g. a
+            // Lightning LoRA's trained step count), so request the full preview budget and let
+            // the pipeline's interval math fit it to the resolved steps. Clamping against the
+            // raw 0 here disabled previews entirely for auto-step requests (the Web UI default).
+            int previewCount = steps > 0 ? Math.Clamp(steps - 1, 0, 8) : 8;
 
             var editTask = Task.Run(() =>
             {
@@ -606,11 +610,19 @@ namespace TensorSharp.Server.ProtocolAdapters
                             OnStep = (step, total, preview) =>
                             {
                                 if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
-                                byte[] png = preview != null ? TensorSharp.Models.QwenImage.ImageIO.EncodePng(preview) : null;
+                                // Preview encoding is best-effort: a failure here must degrade to a
+                                // plain progress tick (like the pipeline's own preview-decode guard),
+                                // not abort a nearly-finished edit.
+                                byte[] png = null;
+                                if (preview != null)
+                                {
+                                    try { png = TensorSharp.Models.QwenImage.ImageIO.EncodePng(preview); }
+                                    catch (Exception ex) { logger.LogWarning(LogEventIds.ChatFailed, ex, "Preview PNG encode failed; sending progress tick only"); }
+                                }
                                 channel.Writer.TryWrite(new EditFrame
                                 {
                                     Step = step, Total = total, Png = png,
-                                    Width = preview?.Width ?? 0, Height = preview?.Height ?? 0,
+                                    Width = png != null ? preview.Width : 0, Height = png != null ? preview.Height : 0,
                                 });
                             },
                         };
