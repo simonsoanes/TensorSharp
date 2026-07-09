@@ -9,6 +9,7 @@
     "tensorsharp_port": 5000,
     "llama_server_exe": "C:/Works/llama.cpp/build-cuda/bin/Release/llama-server.exe",
     "llama_port": 5001,
+    "sdcpp_exe": {"path": "C:/Works/stable-diffusion.cpp/build/bin/Release/sd-cli.exe", "env": "BENCH_SDCPP_EXE"},
     "vllm_base_url": "http://127.0.0.1:8000",
     "media": {
       "image": "C:/Works/test.jpg",
@@ -68,6 +69,21 @@
       "mtp_supported": true,
       "mtp_draft": null
     },
+    "qwen-image-edit": {
+      "display": "Qwen-Image-Edit 2511 (Q2_K DiT + Lightning 4-step LoRA)",
+      "family": "qwenimage",
+      "gguf": {"path": "${model_root}/qwen-image-edit-2511-Q2_K.gguf", "env": "BENCH_QWEN_IMAGE_DIT"},
+      "mmproj": null,
+      "modalities": ["image_edit"],
+      "size_class": "large",
+      "is_image_edit": true,
+      "components": {
+        "vae": {"path": "${model_root}/Qwen_Image-VAE.safetensors", "env": "BENCH_QWEN_IMAGE_VAE"},
+        "llm": {"path": "${model_root}/Qwen2.5-VL-7B-Instruct-UD-IQ2_XXS.gguf", "env": "BENCH_QWEN_IMAGE_VL"},
+        "mmproj": {"path": "${model_root}/Qwen2.5-VL-7B-mmproj-BF16.gguf", "env": "BENCH_QWEN_IMAGE_MMPROJ"},
+        "lora": {"path": "${model_root}/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors", "env": "BENCH_QWEN_IMAGE_LORA"}
+      }
+    },
     "diffusiongemma": {
       "display": "DiffusionGemma 26B-A4B it (Q3_K_M, text-diffusion)",
       "family": "diffusiongemma",
@@ -91,6 +107,18 @@
     "image": {"kind": "image", "description": "Image understanding (test.jpg)", "modality": "image", "max_tokens": 1280},
     "audio": {"kind": "audio", "description": "Audio understanding (~45 s speech)", "modality": "audio", "max_tokens": 1280},
     "video": {"kind": "video", "description": "Video understanding (sampled frames)", "modality": "video", "max_tokens": 1280},
+    "image_edit": {
+      "kind": "image_edit",
+      "description": "Stable-diffusion image editing (Qwen-Image-Edit 2511, Lightning 4-step, cfg 1): same input image, prompt, resolution, steps and seed for every engine",
+      "modality": "image_edit",
+      "edit": {
+        "prompt": "Change the background to a sunny beach.",
+        "steps": 4,
+        "cfg": 1.0,
+        "seed": 42,
+        "target_area": 653312
+      }
+    },
 
     "prefill_2k": {"kind": "text", "description": "Prefill throughput @ ~2k prompt tokens (sliced from prefill_corpus.txt)", "max_tokens": 8},
     "prefill_4k": {"kind": "text", "description": "Prefill throughput @ ~4k prompt tokens (sliced from prefill_corpus.txt)", "max_tokens": 8},
@@ -104,7 +132,8 @@
   "engines": {
     "tensorsharp": {"display": "TensorSharp", "transport": "server", "backends": ["gpu", "cpu"]},
     "llamacpp": {"display": "llama.cpp", "transport": "server", "backends": ["gpu", "cpu"]},
-    "vllm": {"display": "vLLM", "transport": "connect", "backends": ["gpu"]}
+    "vllm": {"display": "vLLM", "transport": "connect", "backends": ["gpu"]},
+    "sdcpp": {"display": "stable-diffusion.cpp", "transport": "cli", "backends": ["gpu"]}
   },
 
   "backends": {
@@ -115,7 +144,8 @@
       "aliases": ["gpu"],
       "tensorsharp": {"backend": "ggml_cuda"},
       "llamacpp": {"ngl": 999},
-      "vllm": true
+      "vllm": true,
+      "sdcpp": {"extra_args": ["--diffusion-fa", "--offload-to-cpu"]}
     },
     "ggml_vulkan": {
       "display": "Vulkan",
@@ -161,9 +191,9 @@
   "ready_timeout_s": {"small": 600, "medium": 900, "large": 1200},
 
   "defaults": {
-    "engines": ["tensorsharp", "llamacpp", "vllm"],
-    "models": ["gemma4-e4b", "gemma4-12b", "gemma4-26b-a4b", "qwen36-35b-a3b", "qwen36-35b-a3b-q4", "diffusiongemma"],
-    "scenarios": ["text_short", "text_long", "multi_turn", "function_call", "json_mode", "image", "audio", "video"],
+    "engines": ["tensorsharp", "llamacpp", "vllm", "sdcpp"],
+    "models": ["gemma4-e4b", "gemma4-12b", "gemma4-26b-a4b", "qwen36-35b-a3b", "qwen36-35b-a3b-q4", "diffusiongemma", "qwen-image-edit"],
+    "scenarios": ["text_short", "text_long", "multi_turn", "function_call", "json_mode", "image", "audio", "video", "image_edit"],
     "backends": ["ggml_cuda", "cpu"],
     "mtp_modes": [false],
     "concurrency": [1],

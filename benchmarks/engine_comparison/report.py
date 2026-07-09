@@ -331,6 +331,102 @@ def concurrency_section(rows: list) -> str:
     return "\n".join(lines)
 
 
+def _is_image_edit_scenario(scenario_id: str) -> bool:
+    try:
+        return config.SCENARIOS[scenario_id].kind == "image_edit"
+    except KeyError:
+        return False
+
+
+# (record key, table label). All values are engine-reported pipeline-phase
+# timings in ms, rendered in seconds.
+_EDIT_COLS = (
+    ("edit_total_ms", "total (warm)"),
+    ("edit_per_step_ms", "per step"),
+    ("edit_sampling_ms", "sampling"),
+    ("edit_text_encode_ms", "text encode"),
+    ("edit_vae_encode_ms", "VAE encode"),
+    ("edit_vae_decode_ms", "VAE decode"),
+    ("edit_first_total_ms", "first request (cold)"),
+)
+
+
+def _edit_cell(rec, key) -> str:
+    if rec is None:
+        return "n/a"
+    if rec.get("status") == "skipped":
+        return "—"
+    if rec.get("status") != "ok":
+        return "fail"
+    v = float(rec.get(key, 0.0) or 0.0)
+    return f"{v / 1000.0:.2f} s" if v > 0 else "—"
+
+
+def image_edit_section(rows: list) -> str:
+    """Image-editing (stable-diffusion) results: one table per
+    (model, scenario, backend) with engines as rows and pipeline phases as
+    columns, plus a TensorSharp-vs-reference speedup line. All timings are the
+    engines' own pipeline timers (weight-file load excluded on both sides)."""
+    recs = [r for r in rows
+            if _is_image_edit_scenario(r.get("scenario", ""))
+            and not r.get("mtp", False)
+            and int(r.get("concurrency", 1) or 1) == 1]
+    if not recs:
+        return "_No image-edit cells were run (see the `image_edit` scenario)._"
+
+    groups: dict = {}
+    for r in recs:
+        groups.setdefault((r["model"], r["scenario"], r["backend"]), {})[r["engine"]] = r
+
+    eng_order = list(config.ENGINES.keys())
+    out = []
+    for (model_id, scenario_id, backend), by_eng in sorted(groups.items()):
+        model = config.MODELS.get(model_id)
+        spec = config.BACKENDS.get(backend)
+        ok = {e: r for e, r in by_eng.items() if r.get("status") == "ok"}
+        if not ok and all(r.get("status") == "skipped" for r in by_eng.values()):
+            continue                      # fully gated cell group (e.g. cpu backend)
+        rep = next(iter(ok.values()), None)
+        dims = (f", {rep['edit_width']}x{rep['edit_height']}, {rep.get('steps', 0)} steps"
+                if rep and rep.get("edit_width") else "")
+        title = model.display if model else model_id
+        out.append(f"### {title} — `{scenario_id}` on "
+                   f"{spec.display if spec else backend}{dims}\n")
+
+        head = "| Engine | " + " | ".join(lbl for _, lbl in _EDIT_COLS) + " |"
+        sep = "|---|" + "|".join(["---:"] * len(_EDIT_COLS)) + "|"
+        lines = [head, sep]
+        engines_here = sorted(by_eng, key=lambda e: (eng_order.index(e)
+                                                     if e in eng_order else len(eng_order), e))
+        for e in engines_here:
+            r = by_eng[e]
+            eng = config.ENGINES.get(e)
+            cells = [_edit_cell(r, k) for k, _ in _EDIT_COLS]
+            lines.append(f"| {eng.display if eng else e} | " + " | ".join(cells) + " |")
+        out.append("\n".join(lines))
+        out.append("")
+
+        ts = ok.get("tensorsharp")
+        for ref_eng in ("sdcpp", "llamacpp"):
+            ref = ok.get(ref_eng)
+            if not (ts and ref):
+                continue
+            ratios = []
+            for key, lbl in _EDIT_COLS:
+                if key == "edit_first_total_ms":
+                    continue              # no cold/warm distinction for a CLI engine
+                a = float(ts.get(key, 0.0) or 0.0)
+                b = float(ref.get(key, 0.0) or 0.0)
+                if a > 0 and b > 0:
+                    ratios.append(f"{lbl} **{b / a:.2f}×**")
+            if ratios:
+                ref_disp = config.ENGINES[ref_eng].display
+                out.append(f"**TensorSharp vs {ref_disp}** (ratio = {ref_disp} time / "
+                           f"TensorSharp time; > 1.0× = TensorSharp faster): "
+                           + ", ".join(ratios) + "\n")
+    return "\n".join(out) if out else "_No image-edit cells were run._"
+
+
 def tool_summary(rows: list) -> str:
     fc = [r for r in rows if r["scenario"] == "function_call" and r["status"] == "ok"]
     if not fc:
@@ -404,6 +500,8 @@ def main():
         if model_id not in data:
             continue
         model = config.MODELS[model_id]
+        if model.is_image_edit:
+            continue    # no token metrics; rendered in the image-editing section
         scen_map = data[model_id]
         cols = _present_columns({model_id: scen_map})
         if not cols:
@@ -433,6 +531,18 @@ def main():
             out.append(ratio_table(scen_map, pairs, "ttft_ms", higher_is_better=False))
             out.append("")
 
+    out.append("## Image editing (stable-diffusion)\n")
+    out.append("Same input image, prompt, resolution, step count, cfg and seed for every "
+               "engine. Timings are each engine's **own pipeline timers** (TensorSharp's "
+               "`[pipe-timing]` phases + server `elapsedSeconds`; sd.cpp's phase logs + "
+               "`generate_image` total), so weight-file loading and HTTP/process overhead "
+               "are excluded on both sides. `total (warm)` is the steady-state request on "
+               "an already-running server; `first request (cold)` additionally pays "
+               "TensorSharp's per-request DiT rebuild + graph capture on a fresh server "
+               "(a CLI engine has no such distinction). Lower is better.\n")
+    out.append(image_edit_section(rows))
+    out.append("")
+
     out.append("## MTP / NextN speculative decoding (on vs off)\n")
     out.append("Single-stream decode tok/s with MTP/NextN speculative decoding off vs on "
                "(TensorSharp only). Speedup `< 1.0×` means speculation cost more than it "
@@ -460,7 +570,10 @@ def main():
     fields = ["engine", "backend", "model", "scenario", "mtp", "concurrency",
               "status", "detail", "prompt_tokens", "completion_tokens", "ttft_ms",
               "prefill_tps", "decode_tps", "aggregate_decode_tps", "requests_ok",
-              "total_wall_ms", "finish_reason", "tool_call_ok"]
+              "total_wall_ms", "finish_reason", "tool_call_ok",
+              "steps", "edit_total_ms", "edit_first_total_ms", "edit_text_encode_ms",
+              "edit_vae_encode_ms", "edit_sampling_ms", "edit_per_step_ms",
+              "edit_vae_decode_ms", "edit_width", "edit_height", "edit_image"]
     with open(CSV_PATH, "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
         w.writeheader()

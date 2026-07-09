@@ -55,6 +55,22 @@ class BenchResult:
     concurrency: int = 1                     # parallel identical requests at this cell
     aggregate_decode_tps: float = 0.0        # system-wide decode tok/s across all parallel seqs
     requests_ok: int = 0                     # successful requests out of `concurrency`
+    # Image-edit (stable-diffusion) cells: per-phase pipeline timings in ms, all
+    # from each engine's OWN pipeline timers (so HTTP/process overhead is out).
+    # `edit_total_ms` is the WARM request (weights already served once);
+    # `edit_first_total_ms` is the cold first request on a fresh server (0 for a
+    # CLI engine, where every run is by definition cold and load is excluded).
+    steps: int = 0
+    edit_total_ms: float = 0.0
+    edit_first_total_ms: float = 0.0
+    edit_text_encode_ms: float = 0.0
+    edit_vae_encode_ms: float = 0.0
+    edit_sampling_ms: float = 0.0
+    edit_per_step_ms: float = 0.0
+    edit_vae_decode_ms: float = 0.0
+    edit_width: int = 0
+    edit_height: int = 0
+    edit_image: str = ""                     # saved output image (for visual verification)
 
     @property
     def ok(self) -> bool:
@@ -476,11 +492,19 @@ class TensorSharpServer(ServerHandle):
                 f"if it will not die (stuck in a GPU-driver call), reboot.")
         cmd = ["dotnet", str(config.TENSORSHARP_SERVER_DLL),
                "--model", str(self.model.gguf),
-               "--backend", spec.ts_backend,
-               "--max-tokens", str(self.max_tokens)]
+               "--backend", spec.ts_backend]
         cmd += [str(a) for a in spec.ts_extra_args]
-        if self.model.mmproj is not None and self.model.mmproj.exists():
-            cmd += ["--mmproj", str(self.model.mmproj)]
+        if self.model.is_image_edit:
+            # Qwen-Image-Edit: the DiT is --model; companions ride dedicated flags.
+            comp = self.model.components
+            for flag, key in (("--qwen-image-vae", "vae"), ("--qwen-image-vl", "llm"),
+                              ("--qwen-image-mmproj", "mmproj"), ("--qwen-image-lora", "lora")):
+                if comp.get(key) is not None:
+                    cmd += [flag, str(comp[key])]
+        else:
+            cmd += ["--max-tokens", str(self.max_tokens)]
+            if self.model.mmproj is not None and self.model.mmproj.exists():
+                cmd += ["--mmproj", str(self.model.mmproj)]
         # MTP / NextN speculative decoding: --mtp-spec engages it; Gemma 4 also
         # needs a separate draft GGUF (Qwen 3.6 embeds NextN in the trunk).
         if self.mtp:
@@ -566,6 +590,29 @@ class VllmConnector(ServerHandle):
         pass
 
 
+# ---------------------------------------------------------------------------
+# stable-diffusion.cpp CLI (image-edit scenarios; one process per request)
+# ---------------------------------------------------------------------------
+class SdCppCli(ServerHandle):
+    """No server to keep alive: sd-cli runs once per edit request. This handle
+    only carries the binary path + log file through the group lifecycle."""
+
+    def __init__(self, model: config.ModelSpec, backend: str, log_path: Path):
+        super().__init__("", 0, log_path)
+        self.model = model
+        self.backend = backend
+        self.exe = config.sdcpp_exe_for(backend)
+
+    def start(self):
+        pass
+
+    def wait_ready(self, timeout_s: float) -> bool:
+        return self.exe.exists()
+
+    def stop(self):
+        pass
+
+
 def make_server(engine: str, model: config.ModelSpec, backend: str,
                 log_path: Path, max_tokens: int = config.SERVER_MAX_TOKENS,
                 mtp: bool = False) -> ServerHandle:
@@ -575,6 +622,8 @@ def make_server(engine: str, model: config.ModelSpec, backend: str,
         return LlamaCppServer(model, backend, log_path)
     if engine == "vllm":
         return VllmConnector(model, backend, log_path)
+    if engine == "sdcpp":
+        return SdCppCli(model, backend, log_path)
     raise ValueError(f"unknown engine {engine}")
 
 
@@ -584,3 +633,269 @@ def served_model_name(engine: str, server: ServerHandle, model: config.ModelSpec
     if engine == "vllm" and getattr(server, "_served_name", None):
         return server._served_name
     return model.gguf.name
+
+
+# ---------------------------------------------------------------------------
+# Image-edit (stable-diffusion) benchmark runner
+# ---------------------------------------------------------------------------
+# Both engines edit the SAME pre-resized image at the SAME resolution with the
+# same prompt / steps / cfg / seed, and every reported phase timing comes from
+# the engine's OWN pipeline timers (TensorSharp's `[pipe-timing]` stdout lines +
+# the /api/image-edit `elapsedSeconds`; sd.cpp's `... completed, taking Xs`
+# log lines + `generate_image completed in Xs`), so model-load and HTTP/process
+# overhead are excluded on both sides.
+import math
+import re
+
+# TensorSharp pipeline phase lines, e.g.
+#   [pipe-timing] VAE encode (928x704): 1234ms
+#   [pipe-timing] text encode (txtSeq=285): 5678ms      (covers cond + neg)
+#   [pipe-timing]   te.llm: 901ms                        (sub-timing; skipped)
+#   [pipe-timing] denoise (4 steps): 27000ms
+#   [pipe-timing] VAE decode: 1500ms
+_TS_PIPE_RE = re.compile(r"\[pipe-timing\]\s+(\S[^:\r\n]*):\s+([\d.]+)ms")
+
+# sd.cpp phase lines (LOG_INFO from src/stable-diffusion.cpp).
+_SD_RES = {
+    "edit_text_encode_ms": re.compile(r"get_learned_condition completed, taking ([\d.]+)s"),
+    "edit_sampling_ms": re.compile(r"sampling completed, taking ([\d.]+)s"),
+    "edit_vae_decode_ms": re.compile(r"decode_first_stage completed, taking ([\d.]+)s"),
+    "edit_total_ms": re.compile(r"generate_image completed in ([\d.]+)s"),
+}
+# encode_first_stage is logged in ms on the edit-reference path and in seconds
+# on other paths; accept both (summed — one line per reference image).
+_SD_ENC_RE = re.compile(r"encode_first_stage completed, taking ([\d.]+)\s*(ms|s)\b")
+
+
+def prepare_edit_image(target_area: int, out_dir: Path) -> tuple[Path, int, int]:
+    """Resize the benchmark image to the exact dims TensorSharp's
+    ImageIO.ResizeToArea picks for `target_area` (aspect-preserving, dims floored
+    to a multiple of 16) and save it as PNG. TensorSharp is then sent
+    targetArea=w*h (its own resize becomes an identity) and sd.cpp is launched
+    with -W w -H h, so both engines process identical pixels at identical
+    resolution."""
+    import cv2
+    src = str(config.MEDIA_IMAGE)
+    img = cv2.imread(src)
+    if img is None:
+        raise RuntimeError(f"could not read benchmark image: {src}")
+    ih, iw = img.shape[:2]
+    ar = iw / ih
+    h = round(math.sqrt(target_area / ar))
+    w = round(h * ar)
+    w = max(16, (w // 16) * 16)
+    h = max(16, (h // 16) * 16)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"edit_input_{w}x{h}.png"
+    if not out.exists():
+        resized = cv2.resize(img, (w, h), interpolation=cv2.INTER_LANCZOS4)
+        if not cv2.imwrite(str(out), resized):
+            raise RuntimeError(f"could not write {out}")
+    return out, w, h
+
+
+def _read_log_from(path: Path, offset: int) -> tuple[str, int]:
+    """Text decoded from `path` starting at byte `offset`, plus the new offset."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(offset)
+            data = fh.read()
+        return data.decode("utf-8", errors="replace"), offset + len(data)
+    except OSError:
+        return "", offset
+
+
+def _log_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _parse_ts_pipe_timings(chunk: str) -> dict:
+    out: dict = {}
+    for name, ms in _TS_PIPE_RE.findall(chunk):
+        name = name.strip()
+        v = float(ms)
+        if name.startswith("te."):
+            continue                      # text-encode sub-timings
+        if name.startswith("VAE encode"):
+            out["edit_vae_encode_ms"] = out.get("edit_vae_encode_ms", 0.0) + v
+        elif name.startswith("text encode"):
+            out["edit_text_encode_ms"] = out.get("edit_text_encode_ms", 0.0) + v
+        elif name.startswith("denoise"):
+            out["edit_sampling_ms"] = v
+            m = re.search(r"denoise \((\d+) steps\)", name)
+            if m:
+                out["steps"] = int(m.group(1))
+        elif name.startswith("VAE decode"):
+            out["edit_vae_decode_ms"] = v
+    return out
+
+
+def _parse_sdcpp_timings(chunk: str) -> dict:
+    out: dict = {}
+    for key, rx in _SD_RES.items():
+        vals = [float(x) for x in rx.findall(chunk)]
+        if vals:
+            out[key] = sum(vals) * 1000.0
+    enc = 0.0
+    for val, unit in _SD_ENC_RE.findall(chunk):
+        enc += float(val) * (1.0 if unit == "ms" else 1000.0)
+    if enc:
+        out["edit_vae_encode_ms"] = enc
+    return out
+
+
+def _ts_edit_once(server: ServerHandle, image_path: Path, edit: dict,
+                  target_area: int, timeout_s: float) -> tuple[dict, float, dict]:
+    """One /api/image-edit request. Returns (response json, client wall ms,
+    pipe timings parsed from the server log lines this request produced)."""
+    log_off = _log_size(server.log_path)
+    url = server.base_url.rstrip("/") + "/api/image-edit"
+    data = {
+        "prompt": str(edit.get("prompt", "")),
+        "steps": str(int(edit.get("steps", 0))),
+        "cfg": str(float(edit.get("cfg", 0.0))),
+        "seed": str(int(edit.get("seed", 0))),
+        "targetArea": str(int(target_area)),
+    }
+    t0 = time.monotonic()
+    with open(image_path, "rb") as fh:
+        resp = requests.post(url, data=data,
+                             files={"image": (image_path.name, fh, "image/png")},
+                             timeout=(30, timeout_s))
+    wall_ms = (time.monotonic() - t0) * 1000.0
+    resp.raise_for_status()
+    body = resp.json()
+    if not body.get("ok"):
+        raise RuntimeError(f"image edit failed: {body.get('error') or body}")
+    # The pipeline's [pipe-timing] stdout lines can trail the HTTP response by a
+    # flush; re-read briefly until they show up.
+    timings = {}
+    for _ in range(6):
+        chunk, _ = _read_log_from(server.log_path, log_off)
+        timings = _parse_ts_pipe_timings(chunk)
+        if timings.get("edit_vae_decode_ms"):
+            break
+        time.sleep(0.5)
+    return body, wall_ms, timings
+
+
+def _run_image_edit_tensorsharp(server: ServerHandle, edit: dict, image_path: Path,
+                                w: int, h: int, out_image: Path,
+                                timeout_s: float) -> dict:
+    # Request 1 (cold): pays the per-request DiT rebuild + graph capture on a
+    # fresh server. Request 2 (warm): the steady-state number a user sees on
+    # every subsequent edit — the headline, comparable with sd.cpp's
+    # generate_image (which likewise excludes weight-file load).
+    cold, _, _ = _ts_edit_once(server, image_path, edit, w * h, timeout_s)
+    warm, warm_wall, phases = _ts_edit_once(server, image_path, edit, w * h, timeout_s)
+
+    m = dict(phases)
+    m["edit_total_ms"] = float(warm.get("elapsedSeconds", 0.0)) * 1000.0
+    m["edit_first_total_ms"] = float(cold.get("elapsedSeconds", 0.0)) * 1000.0
+    m["total_wall_ms"] = warm_wall
+    m["edit_width"] = int(warm.get("width", 0))
+    m["edit_height"] = int(warm.get("height", 0))
+    if m["edit_width"] != w or m["edit_height"] != h:
+        m["note"] = f"engine resized to {m['edit_width']}x{m['edit_height']} (asked {w}x{h})"
+
+    # Fetch the result PNG for visual verification.
+    try:
+        url = server.base_url.rstrip("/") + warm.get("url", "")
+        r = requests.get(url, timeout=120)
+        r.raise_for_status()
+        out_image.parent.mkdir(parents=True, exist_ok=True)
+        out_image.write_bytes(r.content)
+        m["edit_image"] = str(out_image)
+    except Exception as ex:
+        m["note"] = (m.get("note", "") + f" output fetch failed: {ex}").strip()
+    return m
+
+
+def _run_image_edit_sdcpp(server: SdCppCli, model: config.ModelSpec, edit: dict,
+                          image_path: Path, w: int, h: int, out_image: Path,
+                          timeout_s: float) -> dict:
+    spec = config.BACKENDS[server.backend]
+    comp = model.components
+    prompt = str(edit.get("prompt", ""))
+    lora = comp.get("lora")
+
+    cmd = [str(server.exe),
+           "--diffusion-model", str(model.gguf),
+           "--vae", str(comp["vae"]),
+           "--llm", str(comp["llm"])]
+    if comp.get("mmproj") is not None:
+        cmd += ["--llm_vision", str(comp["mmproj"])]
+    if lora is not None:
+        # sd.cpp applies LoRA via the webui prompt tag, resolved in --lora-model-dir.
+        cmd += ["--lora-model-dir", str(lora.parent)]
+        prompt += f"<lora:{lora.stem}:1>"
+    cmd += ["-r", str(image_path),
+            "-p", prompt,
+            "--steps", str(int(edit.get("steps", 4))),
+            "--cfg-scale", str(float(edit.get("cfg", 1.0))),
+            "--seed", str(int(edit.get("seed", 42))),
+            "--sampling-method", "euler",
+            "--flow-shift", "3",
+            # Qwen-Image-Edit 2511 conditioning fix (see sd.cpp docs/qwen_image_edit.md).
+            "--model-args", "qwen_image_zero_cond_t=true",
+            "-W", str(w), "-H", str(h),
+            "-o", str(out_image),
+            "-v"]
+    cmd += [str(a) for a in spec.sdcpp_extra_args]
+
+    env = os.environ.copy()
+    env.update(spec.sdcpp_env)
+    out_image.parent.mkdir(parents=True, exist_ok=True)
+    server.log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_off = _log_size(server.log_path)
+    t0 = time.monotonic()
+    with open(server.log_path, "a", encoding="utf-8", errors="replace") as log_fh:
+        log_fh.write("CMD: " + " ".join(cmd) + "\n\n")
+        log_fh.flush()
+        proc = subprocess.run(cmd, stdout=log_fh, stderr=subprocess.STDOUT,
+                              env=env, cwd=str(server.exe.parent), timeout=timeout_s)
+    wall_ms = (time.monotonic() - t0) * 1000.0
+    chunk, _ = _read_log_from(server.log_path, log_off)
+    if proc.returncode != 0:
+        tail = "\n".join(chunk.splitlines()[-15:])
+        raise RuntimeError(f"sd-cli exited with {proc.returncode}; log tail:\n{tail}")
+
+    m = _parse_sdcpp_timings(chunk)
+    if not m.get("edit_total_ms"):
+        tail = "\n".join(chunk.splitlines()[-15:])
+        raise RuntimeError(f"sd-cli produced no generate_image timing; log tail:\n{tail}")
+    m["total_wall_ms"] = wall_ms          # whole process incl. weight load
+    m["edit_first_total_ms"] = 0.0        # CLI: no warm/cold distinction
+    m["edit_width"], m["edit_height"] = w, h
+    if out_image.exists():
+        m["edit_image"] = str(out_image)
+    else:
+        m["note"] = f"output image not found: {out_image}"
+    return m
+
+
+def run_image_edit(engine_id: str, server: ServerHandle, model: config.ModelSpec,
+                   scenario, backend: str, results_dir: Path, cell_name: str,
+                   timeout_s: float = 1800.0) -> dict:
+    """Run one image-edit cell and return a metrics dict whose keys mirror the
+    BenchResult `edit_*` fields (plus `steps`, `total_wall_ms`, optional `note`)."""
+    edit = dict(scenario.edit or {})
+    target_area = int(edit.get("target_area", 653312))
+    images_dir = results_dir / "images"
+    image_path, w, h = prepare_edit_image(target_area, images_dir)
+    out_image = images_dir / f"{cell_name}.png"
+
+    if engine_id == "tensorsharp":
+        m = _run_image_edit_tensorsharp(server, edit, image_path, w, h, out_image, timeout_s)
+    elif engine_id == "sdcpp":
+        m = _run_image_edit_sdcpp(server, model, edit, image_path, w, h, out_image, timeout_s)
+    else:
+        raise ValueError(f"engine {engine_id} has no image-edit runner")
+
+    m.setdefault("steps", int(edit.get("steps", 0)))
+    if m.get("edit_sampling_ms") and m.get("steps"):
+        m["edit_per_step_ms"] = m["edit_sampling_ms"] / m["steps"]
+    return m
