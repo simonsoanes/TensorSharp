@@ -1806,6 +1806,18 @@ TSG_EXPORT int TSGgml_IsBackendAvailable(int backendType)
     return ensure_backend(backendType) ? 1 : 0;
 }
 
+// Hands the process-wide backend singleton to the managed op layer
+// (TensorSharp.Backends.GGML/Interop/GgmlManagedRuntime.cs) so managed-built
+// ggml graphs run on the same backend instance (same CUDA context / Metal
+// queue) as the remaining native kernels while the migration is in flight.
+TSG_EXPORT void* TSGgml_GetBackendHandle(int backendType)
+{
+    clear_last_error();
+    if (!ensure_backend(backendType))
+        return nullptr;
+    return g_backend;
+}
+
 // Selects which Vulkan device ggml-vulkan initializes on (multi-GPU hosts, e.g.
 // an iGPU next to a discrete GPU). Must be called before the first GGML op /
 // TSGgml_IsBackendAvailable; once the backend singleton exists the device can
@@ -1966,6 +1978,10 @@ TSG_EXPORT void TSGgml_Shutdown()
     // they were allocated from is torn down.
     free_reuse_compute_buffer();
     free_reuse_gallocr();
+    // Release the calling thread's cached prefill-attention sessions while the
+    // CUDA driver is still alive; leaving them to thread_local destructors
+    // aborts the process on exit ("CUDA error: driver shutting down").
+    free_prefill_attn_sessions();
 
     if (g_backend != nullptr)
     {

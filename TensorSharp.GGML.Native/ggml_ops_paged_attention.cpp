@@ -48,7 +48,7 @@ namespace
 {
     constexpr int k_default_alignment = 256; // matches ggml flash-attn pad multiple
 
-    // Same predicate as ggml_ops_transformer.cpp's flash_attn_requires_masked_padding.
+    // Same predicate as ggml_ops_transformer_common.h's flash_attn_requires_masked_padding.
     // Duplicated here to keep this translation unit self-contained.
     inline bool paged_flash_attn_requires_masked_padding(int head_dim)
     {

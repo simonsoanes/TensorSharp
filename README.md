@@ -233,7 +233,15 @@ TensorSharp/
 │   ├── ggml_ops_matmul.cpp                # GEMM / quantized matmul
 │   ├── ggml_ops_fused.cpp                 # Cross-cutting fused per-layer kernels
 │   ├── ggml_ops_norm_attn.cpp             # Norm + attention fusions
-│   ├── ggml_ops_transformer.cpp           # Full-layer fused transformer kernels (decode + prefill)
+│   ├── ggml_ops_transformer.cpp           # Generic fused transformer layer/model decode + flash-attn decode
+│   ├── ggml_ops_transformer_common.h      # Shared transformer helpers + C# layer-descriptor structs
+│   ├── ggml_ops_transformer_prefill.cpp   # Fused layer prefill (Gemma 4, GPT-OSS, Qwen 3.5)
+│   ├── ggml_ops_qwen35_decode.cpp         # Qwen 3.5/3.6 fused decode (layer, whole-model, batched)
+│   ├── ggml_ops_qwen35_verify.cpp         # Qwen 3.5/3.6 fused multi-token verify
+│   ├── ggml_ops_gemma4_decode.cpp         # Gemma 4 dense whole-model decode (CUDA-graph persisted)
+│   ├── ggml_ops_gemma4_batched.cpp        # Gemma 4 dense + MoE token-batched decode
+│   ├── ggml_ops_gemma4_verify.cpp         # Gemma 4 dense verify + MTP draft step
+│   ├── ggml_ops_gemma4_moe.cpp            # Gemma 4 MoE layer/whole-model decode + verify
 │   ├── ggml_ops_moe.cpp                   # Mixture-of-Experts forward / fused router
 │   ├── ggml_ops_gated_delta_net.cpp       # Qwen 3.5/3.6 GatedDeltaNet kernels (per-seq + batched)
 │   ├── ggml_ops_mamba2.cpp                # Nemotron Mamba2 kernels (per-seq + batched SIMD)

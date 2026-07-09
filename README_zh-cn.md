@@ -233,7 +233,15 @@ TensorSharp/
 │   ├── ggml_ops_matmul.cpp                # GEMM / 量化 matmul
 │   ├── ggml_ops_fused.cpp                 # 跨域融合的每层内核
 │   ├── ggml_ops_norm_attn.cpp             # Norm + 注意力融合
-│   ├── ggml_ops_transformer.cpp           # 完整层的融合 Transformer 内核（decode + prefill）
+│   ├── ggml_ops_transformer.cpp           # 通用融合 Transformer 层/整模型 decode 与 flash-attn decode
+│   ├── ggml_ops_transformer_common.h      # 共享的 Transformer 辅助函数与 C# 层描述符结构体
+│   ├── ggml_ops_transformer_prefill.cpp   # 融合层 prefill（Gemma 4、GPT-OSS、Qwen 3.5）
+│   ├── ggml_ops_qwen35_decode.cpp         # Qwen 3.5/3.6 融合 decode（单层、整模型、批量）
+│   ├── ggml_ops_qwen35_verify.cpp         # Qwen 3.5/3.6 融合多 token verify
+│   ├── ggml_ops_gemma4_decode.cpp         # Gemma 4 稠密整模型 decode（CUDA graph 持久化）
+│   ├── ggml_ops_gemma4_batched.cpp        # Gemma 4 稠密 + MoE 按 token 批量 decode
+│   ├── ggml_ops_gemma4_verify.cpp         # Gemma 4 稠密 verify + MTP 草稿步
+│   ├── ggml_ops_gemma4_moe.cpp            # Gemma 4 MoE 层/整模型 decode 与 verify
 │   ├── ggml_ops_moe.cpp                   # 专家混合前向 / 融合路由
 │   ├── ggml_ops_gated_delta_net.cpp       # Qwen 3.5/3.6 GatedDeltaNet 内核（按序列 + 批处理）
 │   ├── ggml_ops_mamba2.cpp                # Nemotron Mamba2 内核（按序列 + 批处理 SIMD）

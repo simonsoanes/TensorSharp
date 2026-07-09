@@ -174,6 +174,13 @@ set(TSG_GGMLOPS_SOURCES
     ggml_ops_training.cpp
     ggml_ops_fused.cpp
     ggml_ops_transformer.cpp
+    ggml_ops_transformer_prefill.cpp
+    ggml_ops_qwen35_decode.cpp
+    ggml_ops_qwen35_verify.cpp
+    ggml_ops_gemma4_decode.cpp
+    ggml_ops_gemma4_batched.cpp
+    ggml_ops_gemma4_verify.cpp
+    ggml_ops_gemma4_moe.cpp
     ggml_ops_diffusion.cpp
     ggml_ops_qwen_image.cpp
     ggml_ops_gated_delta_net.cpp
@@ -188,6 +195,14 @@ if (TENSORSHARP_GGML_NATIVE_ENABLE_CUDA)
 endif()
 
 add_library(GgmlOps SHARED ${TSG_GGMLOPS_SOURCES})
+
+if (WIN32)
+    # Re-export the statically-linked ggml C API so the managed layer
+    # (TensorSharp.Backends.GGML/Interop/GgmlApi.cs) can P/Invoke it directly.
+    # On Linux/macOS the symbols are already visible (default ELF/Mach-O
+    # visibility); Windows needs the explicit .def export list.
+    target_sources(GgmlOps PRIVATE ggml_api_exports.def)
+endif()
 
 if (TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN)
     target_compile_definitions(GgmlOps PRIVATE TSG_GGML_USE_VULKAN=1)
