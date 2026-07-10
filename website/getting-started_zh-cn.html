@@ -16,12 +16,12 @@
 <main class="content" id="content">
   <div class="breadcrumb"><a href="index_zh-cn.html">首页</a> › 快速开始</div>
   <h1>快速开始</h1>
-  <p class="lede">从一台空机器到流式回复。原生 GGML 库会在首次构建时自动编译，因此唯一需要手动安装的是 .NET SDK（如需加速，再加上 GPU 工具链）。</p>
+  <p class="lede">从源码 checkout 到已验证的 CLI 回复或本地 API。快速上手在原生 GGML 后端上运行 Gemma 4 E4B；无法构建原生代码时，仍可使用托管 CPU 路径（无需 CMake 或 GPU 工具链）。</p>
 
   <h2 id="prerequisites">1 · 环境要求</h2>
   <ul>
     <li><a href="https://dotnet.microsoft.com/download/dotnet/10.0" target="_blank" rel="noopener"><strong>.NET 10 SDK</strong></a> —— 必需。</li>
-    <li><strong><code>git</code> + 网络访问</strong> —— 首次构建时，原生构建会把 ggml 源码从 <a href="https://github.com/ggml-org/ggml" target="_blank" rel="noopener">github.com/ggml-org/ggml</a> 克隆到 <code>ExternalProjects/ggml/</code>。设置 <code>TENSORSHARP_GGML_NO_UPDATE=1</code> 可在离线重建时跳过网络更新。</li>
+    <li><strong><code>git</code>、<code>curl</code> 与网络访问</strong> —— 用于克隆 TensorSharp 与下载模型。完整原生构建还会把 <a href="https://github.com/ggml-org/ggml" target="_blank" rel="noopener">ggml</a> 克隆到 <code>ExternalProjects/ggml/</code>；之后可设置 <code>TENSORSHARP_GGML_NO_UPDATE=1</code> 跳过网络更新。</li>
     <li><strong>一个 GGUF 模型文件</strong> —— 例如来自 <a href="https://huggingface.co" target="_blank" rel="noopener">Hugging Face</a>。见<a href="models_zh-cn.html#downloads">模型下载</a>。</li>
   </ul>
   <h4>各平台工具链（仅 GPU 加速需要）</h4>
@@ -33,16 +33,20 @@
       <tr><td><strong>Windows</strong></td><td><code>ggml_cuda</code> / <code>cuda</code></td><td>CMake 3.20+、Visual Studio 2022 C++ 构建工具、NVIDIA 驱动 + CUDA Toolkit 12.x（含 cuBLAS）。</td></tr>
       <tr><td><strong>Linux</strong></td><td><code>ggml_cuda</code> / <code>cuda</code></td><td>CMake 3.20+、NVIDIA 驱动 + CUDA Toolkit 12.x（含 cuBLAS）。</td></tr>
       <tr><td><strong>Windows / Linux</strong>（任何 Vulkan GPU）</td><td><code>ggml_vulkan</code></td><td>当主机存在 Vulkan 运行时（loader 已安装）时自动启用；用 <code>--no-vulkan</code>（或 <code>TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=OFF</code>）退出。Windows 上未安装 SDK 时会自动准备便携 Vulkan 工具链；Linux 上请安装如 <code>libvulkan-dev glslc spirv-headers</code>。运行时需要 Vulkan 1.3 驱动。</td></tr>
-      <tr><td>任意（仅 CPU）</td><td><code>cpu</code> / <code>ggml_cpu</code></td><td>除 .NET SDK 外无需任何东西。</td></tr>
+      <tr><td>任意（仅 CPU）</td><td><code>cpu</code></td><td>除 .NET SDK 外无需任何东西。<code>ggml_cpu</code> 更快，但属于原生构建。</td></tr>
     </tbody>
   </table>
   </div>
 
-  <h2 id="build">2 · 构建</h2>
-  <p>克隆并构建整个解决方案。首次构建还会编译原生 GGML 桥接（可能需要一段时间，尤其是 CUDA —— 后续构建很快）。</p>
+  <h2 id="build">2 · 克隆并选择构建路径</h2>
   <pre data-lang="bash"><code>git clone https://github.com/zhongkaifu/TensorSharp.git
-cd TensorSharp
-dotnet build TensorSharp.slnx -c Release</code></pre>
+cd TensorSharp</code></pre>
+  <h3>托管 CPU 路径（无需原生工具链）</h3>
+  <p>若要跳过所有原生构建，请同时传入两个跳过属性并使用托管 <code>cpu</code> 后端；首次运行自动 restore 并构建托管项目。</p>
+  <pre data-lang="bash"><code>-p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true -- --backend cpu</code></pre>
+  <h3>完整原生 / GPU 路径</h3>
+  <p>需要 GGML CPU、Metal、CUDA、Vulkan 或 MLX 时构建整个解决方案。首次构建会编译原生桥接，可能需要数分钟；后续为增量构建。</p>
+  <pre data-lang="bash"><code>dotnet build TensorSharp.slnx -c Release</code></pre>
   <p>或只构建其中一个应用：</p>
   <pre data-lang="bash"><code># 控制台应用
 dotnet build TensorSharp.Cli/TensorSharp.Cli.csproj -c Release
@@ -50,38 +54,31 @@ dotnet build TensorSharp.Cli/TensorSharp.Cli.csproj -c Release
 # Web 应用
 dotnet build TensorSharp.Server/TensorSharp.Server.csproj -c Release</code></pre>
   <p>CLI 二进制位于 <code>TensorSharp.Cli/bin/...</code>，服务器位于 <code>TensorSharp.Server/bin/...</code>。如需启用 CUDA 或 Vulkan 的原生构建、手动原生构建或 MLX，见<a href="backends_zh-cn.html#native-build">构建原生库</a>。</p>
-  <div class="callout tip"><div class="ic">📦</div><p>不想从源码构建？<strong>Release Binaries</strong> 工作流会发布自包含归档（Windows/Linux CPU 与 CUDA、macOS arm64），其中已捆绑 .NET 10 运行时与原生库 —— 无需另行安装即可运行。见<a href="backends_zh-cn.html#native-build">后端</a>。</p></div>
+  <div class="callout warn"><div class="ic">📦</div><p><strong>当前发行状态：</strong><a href="https://github.com/zhongkaifu/TensorSharp/releases/tag/v3.0.5.0" target="_blank" rel="noopener">v3.0.5.0</a> 没有上传 CLI/server 应用归档，因此现在请从源码构建。仓库中虽有 Release Binaries 工作流，但不要自行拼接归档 URL；只有在 <a href="https://github.com/zhongkaifu/TensorSharp/releases" target="_blank" rel="noopener">Releases 页面</a>明确列出后才使用。</p></div>
 
   <h2 id="download">3 · 下载模型</h2>
-  <p>TensorSharp 加载 <a href="glossary_zh-cn.html#terms">GGUF</a> 格式的模型。一个轻量、经过充分测试的起点是 <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener">ggml-org/gemma-4-E4B-it-GGUF</a> 中的 <strong>Gemma-4-E4B (Q8_0)</strong>。选择适合你硬件的量化 —— 低内存用 <code>Q4_K_M</code>，更高质量用 <code>Q8_0</code>。完整列表见<a href="models_zh-cn.html#downloads">模型</a>页。</p>
-  <div class="callout note"><div class="ic">🧩</div><p>对于多模态模型，还需下载匹配的<strong>投影器</strong>（mmproj）文件。如果把它放在模型旁并使用可识别的名称（如 <code>gemma-4-mmproj-F16.gguf</code>），会被自动检测。</p></div>
+  <p>快速上手请从公开的 <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener">ggml-org/gemma-4-E4B-it-GGUF</a> 仓库下载推荐的、经基准验证的 <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/gemma-4-E4B-it-Q8_0.gguf" target="_blank" rel="noopener">gemma-4-E4B-it-Q8_0.gguf（7.48 GiB）</a>。同一仓库还提供更省内存的 <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/gemma-4-E4B-it-Q4_K_M.gguf" target="_blank" rel="noopener">gemma-4-E4B-it-Q4_K_M.gguf</a>，更多选项见<a href="models_zh-cn.html#downloads">模型</a>页。</p>
+  <pre data-lang="bash"><code>curl --create-dirs --fail -L "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" -o models/gemma-4-E4B-it-Q8_0.gguf</code></pre>
+  <div class="callout note"><div class="ic">🧩</div><p>多模态模型还需下载匹配的<strong>投影器</strong>（mmproj），并用 <code>--mmproj</code> 传入精确路径。服务端不会自动检测投影器，CLI 也只识别少数旧文件名；显式路径最可靠。</p></div>
+
+  <h3 id="e4b-fast-lane">Gemma 4 E4B 后端与平台说明</h3>
+  <p>下一节的首次运行命令面向 Linux + NVIDIA。Windows + NVIDIA 请先在 PowerShell 中设置 <code>$env:TENSORSHARP_GGML_NATIVE_ENABLE_CUDA='ON'</code>，再运行不带 Bash 赋值前缀的相同命令。Apple Silicon 请省略 CUDA 环境变量并改用 <code>ggml_metal</code>。Windows/Linux 上使用 Vulkan 时，请设置 <code>TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON</code>（PowerShell：<code>$env:TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN='ON'</code>）并使用 <code>ggml_vulkan</code>。没有 GPU 时使用 <code>ggml_cpu</code>（原生 CPU 内核）。纯文本不需要投影器；图像、视频或音频输入需从同一仓库下载 <code>mmproj-gemma-4-E4B-it-Q8_0.gguf</code>，并添加 <code>--mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf</code>。</p>
 
   <h2 id="first-run">4 · 首次运行</h2>
-  <p>根据你的硬件选择 <a href="backends_zh-cn.html#table"><code>--backend</code></a>。每个后端都产生正确输出；它们只在速度上不同。</p>
+  <p>一次性提示词通过 <code>--input</code> 从<em>文件</em>读取；<code>--prompt</code> 仅用于 Qwen-Image-Edit。CLI 默认使用 <code>ggml_cpu</code>、贪心解码和 100 个生成 token。环境变量赋值用于启用 CUDA 原生构建；首次运行会编译它，可能需要数分钟，后续为增量构建。</p>
 
   <h3>方式 A —— 一次性生成（CLI）</h3>
-  <pre data-lang="bash"><code>echo "用一句话解释专家混合（MoE）。" > prompt.txt
-
-# macOS（Apple Silicon）
-./TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --backend ggml_metal
-
-# Windows / Linux + NVIDIA
-./TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --backend ggml_cuda
-
-# Windows / Linux + AMD / Intel / NVIDIA（GGML Vulkan；存在 Vulkan 运行时时自动构建启用）
-./TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --backend ggml_vulkan
-
-# 可移植 / 调试（无 GPU）
-./TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --backend cpu</code></pre>
+  <pre data-lang="bash"><code>echo "简短回答：TensorSharp 是什么？" &gt; prompt.txt
+TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Cli -c Release -p:TensorSharpSkipMlxNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 128 --backend ggml_cuda</code></pre>
 
   <h3>方式 B —— 交互式聊天（REPL）</h3>
-  <pre data-lang="bash"><code>./TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf -i --backend ggml_metal</code></pre>
+  <pre data-lang="bash"><code>dotnet run --project TensorSharp.Cli -c Release --no-build -- --model models/gemma-4-E4B-it-Q8_0.gguf -i --max-tokens 128 --backend ggml_cuda</code></pre>
   <p>逐轮输入消息；用 <a href="cli_zh-cn.html#repl">斜杠命令</a>（如 <code>/reset</code>、<code>/think on</code> 或 <code>/image photo.png</code>）控制会话。</p>
 
   <h3>方式 C —— 浏览器 UI + HTTP API（服务器）</h3>
-  <pre data-lang="bash"><code>./TensorSharp.Server --model gemma-4-E4B-it-Q8_0.gguf --backend ggml_metal
-# 打开 http://localhost:5000</code></pre>
-  <p>它在同一端口上同时提供聊天 UI <em>与</em><a href="http-api_zh-cn.html">兼容 Ollama 和 OpenAI</a> 的端点。</p>
+  <pre data-lang="bash"><code>TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Server -c Release -p:TensorSharpSkipMlxNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --max-tokens 128
+# 打开 http://localhost:5000/index.html</code></pre>
+  <p><code>http://localhost:5000/</code> 返回健康状态；浏览器聊天位于 <code>/index.html</code>。<a href="http-api_zh-cn.html">兼容 Ollama 和 OpenAI</a> 的端点使用同一个固定端口。</p>
 
   <h2 id="next">下一步去哪</h2>
   <div class="card-grid">

@@ -17,9 +17,52 @@
 | 批处理 / 分页前向 | **默认启用** —— 设置 `TS_NEMOTRON_BATCHED=0` 可强制走旧的按序列 KV-swap 路径用于 A/B 对比。每槽位 Mamba2 conv + SSM 状态池，注意力层使用分页 K/V。可选的原生批处理 Mamba2 步内核（`TS_NEMOTRON_MAMBA2_BATCHED_NATIVE=1`）。详见 §11。 |
 | 输出解析器 | `Qwen3OutputParser` |
 
+## 下载
+
+已验证的 GGUF 下载指引：
+
+| 模型 | HF 仓库 | 推荐文件 | mmproj |
+|---|---|---|---|
+| Nemotron-H-8B-Reasoning-128K | [bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF](https://huggingface.co/bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF) | `nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf`（4.983 GB）或 `nvidia_Nemotron-H-8B-Reasoning-128K-Q8_0.gguf`（8.620 GB） | —（仅文本） |
+| Nemotron-H-47B-Reasoning-128K | [bartowski/nvidia_Nemotron-H-47B-Reasoning-128K-GGUF](https://huggingface.co/bartowski/nvidia_Nemotron-H-47B-Reasoning-128K-GGUF) | `nvidia_Nemotron-H-47B-Reasoning-128K-Q4_K_M.gguf`（28.188 GB） | —（仅文本） |
+| Nemotron 3 Nano Omni 30B-A3B | [unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF](https://huggingface.co/unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF) | `NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf`（23.927 GB） | `mmproj-BF16.gguf`（1.590 GB；同仓库）—— **图像输入必需** |
+
+Omni 的 `mmproj` 只启用**图像输入**。音频文件会被预处理（log-mel）用于校验，
+但真正的音频推理需要 Parakeet 音频 mmproj，而这些 GGUF 发行版并未附带
+（见 §4.6）。
+
+这些转换仓库将 NVIDIA 对应的 Nemotron 仓库标记为上游。上游模型卡使用
+NVIDIA 特定条款（`other`）；两个 bartowski 转换仓库未声明许可证。再分发前请阅读 NVIDIA 基础模型条款。
+
+命令行下载（每个文件一行；需要先 `pip install -U huggingface_hub`）：
+
+```bash
+python -m pip install -U huggingface_hub
+hf download bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --local-dir models
+hf download bartowski/nvidia_Nemotron-H-47B-Reasoning-128K-GGUF nvidia_Nemotron-H-47B-Reasoning-128K-Q4_K_M.gguf --local-dir models
+hf download unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf --local-dir models
+hf download unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF mmproj-BF16.gguf --local-dir models
+```
+
+CLI 单次推理（只给 `--image` 而不给 `--input` 时会使用默认的描述图片提示词；
+CLI 采样默认为 greedy，`--max-tokens` 默认为 100）：
+
+```bash
+dotnet run --project TensorSharp.Cli -c Release -- --model models/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf \
+  --mmproj models/mmproj-BF16.gguf \
+  --image photo.png --max-tokens 512 --backend ggml_cuda
+```
+
+服务端（聊天 Web UI 以及 OpenAI/Ollama 兼容 API，位于 `http://localhost:5000`）：
+
+```bash
+dotnet run --project TensorSharp.Server -c Release -- --model models/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf \
+  --mmproj models/mmproj-BF16.gguf --backend ggml_cuda --max-tokens 4096
+```
+
 ## 1. 来源与目标
 
-Nemotron-H 是 NVIDIA 的混合 **Mamba2 + Transformer** 系列。同一套 backbone 同时覆盖密集 `nemotron_h` 系（如 Nemotron-H-8B / 47B）与 MoE `nemotron_h_moe` 系。Omni 发布（Nemotron 3 Nano Omni）额外携带 RADIO / v2_vl 视觉编码器与 Parakeet 音频前端。
+Nemotron-H 是 NVIDIA 的混合 **Mamba2 + Transformer** 系列。同一套 backbone 同时覆盖密集 `nemotron_h` 系（如 Nemotron-H-8B / 47B）与 MoE `nemotron_h_moe` 系。Omni 发布（Nemotron 3 Nano Omni）额外携带 RADIO / v2_vl 视觉编码器（通过 `mmproj` 提供）。TensorSharp 还为 Omni 系实现了 Parakeet 风格的音频预处理器，但真正的音频推理需要一个公开 GGUF 并未附带的 Parakeet 音频 mmproj（见 §4.6）—— 图像是唯一实际可用的额外模态。
 
 它的核心特征：
 

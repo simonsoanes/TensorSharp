@@ -16,7 +16,7 @@
 <main class="content" id="content">
   <div class="breadcrumb"><a href="index.html">Home</a> › HTTP API</div>
   <h1>HTTP API (Ollama / OpenAI)</h1>
-  <p class="lede"><code>TensorSharp.Server</code> exposes three API styles plus utilities, all on <code>http://localhost:5000</code>. Existing Ollama and OpenAI clients work unchanged — just point them at the local base URL.</p>
+  <p class="lede"><code>TensorSharp.Server</code> exposes focused Ollama- and OpenAI-compatible subsets plus its Web UI protocol, all on <code>http://localhost:5000</code>. OpenAI Chat Completions clients can use the <code>/v1</code> base URL; Ollama chat clients need the non-standard <code>/api/chat/ollama</code> path.</p>
 
   <div class="table-scroll">
   <table>
@@ -24,12 +24,21 @@
     <tbody>
       <tr><td><strong>Ollama-compatible</strong></td><td><code>/api/generate</code>, <code>/api/chat/ollama</code>, <code>/api/tags</code>, <code>/api/show</code></td></tr>
       <tr><td><strong>OpenAI-compatible</strong></td><td><code>/v1/chat/completions</code>, <code>/v1/models</code></td></tr>
-      <tr><td><strong>Web UI (SSE)</strong></td><td><code>/api/chat</code>, <code>/api/sessions</code>, <code>/api/models</code>, <code>/api/upload</code></td></tr>
+      <tr><td><strong>Web UI (SSE)</strong></td><td><code>/api/chat</code>, <code>/api/sessions</code>, <code>/api/models</code>, <code>/api/upload</code>, <code>/api/image-edit</code>, <code>/api/image-edit/stream</code></td></tr>
       <tr><td><strong>Utilities</strong></td><td><code>/api/version</code>, <code>/api/queue/status</code></td></tr>
     </tbody>
   </table>
   </div>
-  <div class="callout note"><div class="ic">📌</div><p>Requests must name the hosted GGUF file (or its basename). The server hosts one model selected with <code>--model</code>; see <a href="server.html">Server &amp; Web UI</a>.</p></div>
+  <div class="callout warn"><div class="ic">⚠️</div><p><strong>Ollama chat path:</strong> the Ollama-compatible chat endpoint is <code>POST /api/chat/ollama</code> — <em>not</em> <code>/api/chat</code>, which is the Web UI's SSE endpoint. <code>/api/generate</code>, <code>/api/tags</code>, <code>/api/show</code>, and <code>/api/version</code> are at their standard Ollama paths.</p></div>
+  <div class="callout note"><div class="ic">📌</div><p>Start with a required <code>--model</code> and an explicit <code>--mmproj</code> when vision/audio needs one. Requests must name that startup GGUF file or its basename. <code>/api/models/load</code> only reloads the same startup model/projector; it cannot load an arbitrary path or add a model to a model-less process. When a request omits <code>max_tokens</code> / <code>num_predict</code>, the Ollama and OpenAI compat endpoints default to <strong>200</strong> tokens (the Web UI uses <code>--max-tokens</code>, default 20000). See the <a href="server.html#start">copy/paste server quickstart</a>.</p></div>
+  <div class="callout warn"><div class="ic">🔒</div><p>The server has no API-key authentication or built-in TLS and listens on <code>0.0.0.0:5000</code>. Use it on a trusted network or put an authenticating TLS reverse proxy in front of it.</p></div>
+
+  <h2 id="quick-call">Quick call after the server starts</h2>
+  <p>The server quickstart hosts <code>gemma-4-E4B-it-Q8_0.gguf</code>. Copy this into a second terminal:</p>
+  <pre data-lang="bash"><code>curl -s http://localhost:5000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemma-4-E4B-it-Q8_0.gguf","messages":[{"role":"user","content":"Reply with one short hello."}],"max_tokens":32}'</code></pre>
+  <p>The browser UI is <a href="http://localhost:5000/index.html"><code>http://localhost:5000/index.html</code></a>; <code>GET /</code> is the plain liveness response.</p>
 
   <h2 id="ollama">1 · Ollama-compatible API</h2>
 
@@ -244,18 +253,25 @@ curl -N -X POST http://localhost:5000/api/chat \
   <pre data-lang="text"><code>data: {"done":true,"tokenCount":187,"elapsed":2.143,"tokPerSec":87.23,"promptTokens":512,"kvReusedTokens":420,"kvReusePercent":82.0}</code></pre>
   <p>Event fields include <code>token</code> (content), <code>thinking</code> (reasoning chunk), <code>tool_calls</code>, <code>replace</code>/<code>diffusionStep</code> (DiffusionGemma previews), and the terminal <code>done</code> summary.</p>
 
+  <h3 id="upload">Uploads (<code>/api/upload</code>)</h3>
+  <p><code>POST /api/upload</code> takes a multipart form (first file used) and returns the stored path/URL plus per-type metadata; <code>/api/chat</code> messages then reference the returned server paths (<code>imagePaths</code>, <code>audioPaths</code>, …). Accepted types: <strong>images</strong> (<code>.png .jpg .jpeg .gif .webp .bmp .heic .heif</code>), <strong>video</strong> (<code>.mp4 .mov .avi .mkv .webm</code> — frames extracted at <code>VIDEO_SAMPLE_FPS</code>), <strong>audio</strong> (<code>.mp3 .wav .ogg .flac .m4a</code>), <strong>PDF</strong>, and <strong>text/code</strong> files (returned as <code>textContent</code> with token-budget truncation). Born-digital PDFs return extracted <code>textContent</code>; scanned PDFs return page images like video frames when a vision model is hosted (otherwise a <code>needsVision</code> warning). <code>TS_PDF_MAX_PAGES</code> caps the pages read (default: all).</p>
+
+  <h3 id="imageedit-api">Image editing (<code>/api/image-edit</code> · <code>/api/image-edit/stream</code>)</h3>
+  <p>Available when the hosted model is a <code>qwen_image</code> DiT. <code>POST /api/image-edit</code> runs one edit — multipart (<code>image</code> file + <code>prompt</code>, optional <code>steps</code>, <code>cfg</code>, <code>seed</code>) or JSON <code>{"imagePath": "...", "prompt": "...", "steps": 0, "cfg": 0, "seed": 0}</code> where <code>imagePath</code> must reference a file in the upload directory and <code>steps</code>/<code>cfg</code> of <code>0</code> mean auto — and returns <code>{ ok, url, width, height, elapsedSeconds }</code> with the PNG served under <code>/uploads/</code>. <code>POST /api/image-edit/stream</code> takes the same JSON body but streams SSE denoising progress: per-step frames <code>{"imageEdit": true, "step": i, "total": N, "image": "data:image/png;base64,..."}</code> (up to 8 evenly spaced previews), then a final <code>{"done": true, "url": "...", "width": ..., "height": ..., "elapsedSeconds": ...}</code>. Edits are serialized process-wide.</p>
+
   <h2 id="sampling">6 · Sampling parameters</h2>
   <h4>Ollama-style (inside the <code>options</code> object)</h4>
+  <p>The defaults shown apply when a request omits the field — they are the server-wide defaults, configurable via server flags / <code>TENSORSHARP_*</code> env vars (see <a href="server.html#options">Server options</a>).</p>
   <div class="table-scroll">
   <table>
     <thead><tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
     <tbody>
       <tr><td><code>num_predict</code></td><td>int</td><td>200</td><td>Maximum tokens to generate</td></tr>
-      <tr><td><code>temperature</code></td><td>float</td><td>0</td><td>Sampling temperature (0 = greedy)</td></tr>
-      <tr><td><code>top_k</code></td><td>int</td><td>0</td><td>Top-K filtering (0 = disabled)</td></tr>
-      <tr><td><code>top_p</code></td><td>float</td><td>1.0</td><td>Nucleus sampling threshold</td></tr>
+      <tr><td><code>temperature</code></td><td>float</td><td>0.8</td><td>Sampling temperature (0 = greedy)</td></tr>
+      <tr><td><code>top_k</code></td><td>int</td><td>40</td><td>Top-K filtering (0 = disabled)</td></tr>
+      <tr><td><code>top_p</code></td><td>float</td><td>0.9</td><td>Nucleus sampling threshold (1.0 = disabled)</td></tr>
       <tr><td><code>min_p</code></td><td>float</td><td>0</td><td>Minimum probability filtering</td></tr>
-      <tr><td><code>repeat_penalty</code></td><td>float</td><td>1.0</td><td>Repetition penalty</td></tr>
+      <tr><td><code>repeat_penalty</code></td><td>float</td><td>1.1</td><td>Repetition penalty (1.0 = none)</td></tr>
       <tr><td><code>presence_penalty</code> / <code>frequency_penalty</code></td><td>float</td><td>0</td><td>Presence / frequency penalties</td></tr>
       <tr><td><code>seed</code></td><td>int</td><td>-1</td><td>Random seed (-1 = random)</td></tr>
       <tr><td><code>stop</code></td><td>array</td><td>null</td><td>Stop sequences</td></tr>
@@ -263,7 +279,7 @@ curl -N -X POST http://localhost:5000/api/chat \
   </table>
   </div>
   <h4>OpenAI-style (top-level)</h4>
-  <p><code>max_tokens</code>, <code>temperature</code>, <code>top_p</code>, <code>presence_penalty</code>, <code>frequency_penalty</code>, <code>seed</code>, <code>stop</code>, and <code>response_format</code> (<code>text</code> / <code>json_object</code> / <code>json_schema</code>).</p>
+  <p><code>max_tokens</code> (default 200 when omitted), <code>temperature</code>, <code>top_p</code>, <code>presence_penalty</code>, <code>frequency_penalty</code>, <code>seed</code>, <code>stop</code> (string or array), and <code>response_format</code> (<code>text</code> / <code>json_object</code> / <code>json_schema</code>). Note: <code>top_k</code>, <code>min_p</code>, and <code>repetition_penalty</code> are <em>not</em> parsed on the OpenAI surface — the server-wide defaults apply for those.</p>
 
   <h2 id="python">7 · Python client examples</h2>
   <h4>Using <code>requests</code> (Ollama-style)</h4>

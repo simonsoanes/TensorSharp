@@ -13,8 +13,42 @@
 | Thinking / tools | Not supported |
 | Generation mode | Block text diffusion, not autoregressive token decode |
 | CLI support | `TensorSharp.Cli` detects `DiffusionGemmaModel` and uses diffusion run mode |
-| Server support | Web UI chat stream with live denoising previews; Ollama/OpenAI compatibility paths remain autoregressive chat paths |
+| Server support | Web UI chat stream with live denoising previews; Ollama/OpenAI compatibility endpoints use append-oriented response shapes and return the final text only (no denoising previews) |
 | Continuous batching | Dedicated [`DiffusionBatchScheduler`](../../TensorSharp.Server/DiffusionBatchScheduler.cs), admitted at block boundaries |
+
+## Downloads
+
+Verified GGUF pointers:
+
+| Model | HF repo | Recommended file | Notes |
+|---|---|---|---|
+| diffusiongemma-26B-A4B-it | [unsloth/diffusiongemma-26B-A4B-it-GGUF](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF) | `diffusiongemma-26B-A4B-it-Q4_K_M.gguf` (16.807 GB); also `Q5_K_M`, `Q6_K`, `Q8_0`, `BF16` | GGUF `general.architecture` = `diffusion-gemma`. Official upstream weights: [google/diffusiongemma-26B-A4B-it](https://huggingface.co/google/diffusiongemma-26B-A4B-it) |
+
+`Q4_K_M` is the smallest published quant. No companion files are needed
+(text only — no mmproj).
+
+Command-line download (one line per file; requires `pip install -U huggingface_hub`):
+
+```bash
+python -m pip install -U huggingface_hub
+hf download unsloth/diffusiongemma-26B-A4B-it-GGUF diffusiongemma-26B-A4B-it-Q4_K_M.gguf --local-dir models
+```
+
+CLI diffusion mode (auto-dispatched from the model's architecture — no mode
+flag; the prompt comes from a file via `--input`):
+
+```bash
+dotnet run --project TensorSharp.Cli -c Release -- --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --input prompt.txt \
+  --backend ggml_cuda --max-tokens 256 --diffusion-steps 48 --diffusion-seed 0 --diffusion-blocks 1
+```
+
+Server (the Web UI at `http://localhost:5000/index.html` streams live denoising previews —
+each step repaints the whole message via `replace` SSE frames; the Ollama/OpenAI
+compatibility endpoints return the final text only):
+
+```bash
+dotnet run --project TensorSharp.Server -c Release -- --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --backend ggml_cuda
+```
 
 ## 1. Origin and intent
 
@@ -83,7 +117,7 @@ CPU path.
 The CLI maps this through:
 
 ```bash
-./TensorSharp.Cli --model diffusion-gemma.gguf --input prompt.txt --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --input prompt.txt --backend ggml_metal \
   --max-tokens 256 --diffusion-steps 48 --diffusion-seed 0 --diffusion-blocks 1
 ```
 

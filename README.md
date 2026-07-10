@@ -10,42 +10,86 @@ Native .NET LLM inference engine for GGUF models, including autoregressive LLMs 
 
 ## Quick Start
 
-Zero to a streaming reply in about 30 seconds (after the model download).
+Quick start in ~30 seconds on the verified native GGML fast path — Gemma 4 E4B. That covers copying and starting the commands; the model download and first .NET restore/build take longer and depend on your connection and machine.
 
-**1. Prerequisites** — [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0), `git`, and (optionally) a GPU toolchain: NVIDIA → CUDA Toolkit 12.x; Apple Silicon → Xcode command-line tools (Metal is built in). Full list in [Prerequisites](#prerequisites).
+Prerequisites: [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0), `git`, and `curl`, plus the toolchain for your selected GPU backend. Confirm that `dotnet --version` starts with `10.`. See [Prerequisites](#prerequisites).
 
-**2. Clone & build** — the native GGML library is compiled automatically on the first build.
+Gemma 4 E4B Q8_0 is the project's exercised dense multimodal Gemma 4 tier. On native GGML backends, its Per-Layer Embeddings (PLE) and shared-KV layout stay eligible for the fused whole-model prefill/verify and single-graph decode paths; the server also selects that fused per-sequence path automatically for a single active request. The recommended public file is [`gemma-4-E4B-it-Q8_0.gguf`](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/gemma-4-E4B-it-Q8_0.gguf) (8,031,240,160 bytes / 7.48 GiB). The text-only commands below exercise that fused path; the same model adds thinking, tools, and optional-projector image/video/audio support.
+
+Run the block for your platform. Text-only inference does not need a projector.
+
+### Windows + NVIDIA (PowerShell)
+
+```powershell
+git clone https://github.com/zhongkaifu/TensorSharp.git
+Set-Location TensorSharp
+New-Item -ItemType Directory -Force models | Out-Null
+curl.exe -L --fail "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" -o models\gemma-4-E4B-it-Q8_0.gguf
+'Answer in one short sentence: what is TensorSharp?' | Set-Content prompt.txt
+$env:TENSORSHARP_GGML_NATIVE_ENABLE_CUDA = 'ON'
+dotnet run --project TensorSharp.Cli -c Release -p:TensorSharpSkipMlxNative=true -- --model models\gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 128 --backend ggml_cuda
+```
+
+### macOS (Apple Silicon)
 
 ```bash
 git clone https://github.com/zhongkaifu/TensorSharp.git
 cd TensorSharp
-dotnet build TensorSharp.slnx -c Release
+mkdir -p models
+curl -L --fail "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" -o models/gemma-4-E4B-it-Q8_0.gguf
+printf '%s\n' 'Answer in one short sentence: what is TensorSharp?' > prompt.txt
+dotnet run --project TensorSharp.Cli -c Release -p:TensorSharpSkipMlxNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 128 --backend ggml_metal
 ```
 
-**3. Download a model** — a small, well-tested starting point is Gemma-4-E4B (Q8_0) from [ggml-org/gemma-4-E4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF). More options in [Verified Models](#verified-models).
-
-**4. Run it** — choose the `--backend` for your hardware (see [Pick a Backend](#pick-a-backend)):
+### Linux + NVIDIA
 
 ```bash
-# One-shot generation
-echo "Explain mixture-of-experts in one sentence." > prompt.txt
-
-./TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --backend ggml_metal   # macOS
-./TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --backend ggml_cuda    # Windows/Linux + NVIDIA
-./TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --backend cpu          # portable / debugging
-
-# Interactive chat (REPL)
-./TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf -i --backend ggml_metal
+git clone https://github.com/zhongkaifu/TensorSharp.git
+cd TensorSharp
+mkdir -p models
+curl -L --fail "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" -o models/gemma-4-E4B-it-Q8_0.gguf
+printf '%s\n' 'Answer in one short sentence: what is TensorSharp?' > prompt.txt
+TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Cli -c Release -p:TensorSharpSkipMlxNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 128 --backend ggml_cuda
 ```
 
-Prefer a browser UI plus HTTP APIs? Start the server instead:
+On a supported Windows/Linux AMD, Intel, or NVIDIA Vulkan device, enable the native build with `$env:TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN = 'ON'` in PowerShell or by prefixing the Bash command with `TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON`, then use `--backend ggml_vulkan`; see [Prerequisites](#prerequisites) for the required SDK/runtime. To host the same verified E4B path in the Web UI and APIs, run the command for your platform.
+
+Windows + NVIDIA (PowerShell):
+
+```powershell
+$env:TENSORSHARP_GGML_NATIVE_ENABLE_CUDA = 'ON'
+dotnet run --project TensorSharp.Server -c Release -p:TensorSharpSkipMlxNative=true -- --model models\gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --max-tokens 512
+```
+
+macOS (Apple Silicon):
 
 ```bash
-./TensorSharp.Server --model gemma-4-E4B-it-Q8_0.gguf --backend ggml_metal
-# open http://localhost:5000 — also serves Ollama- and OpenAI-compatible endpoints
+dotnet run --project TensorSharp.Server -c Release -p:TensorSharpSkipMlxNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_metal --max-tokens 512
 ```
 
-The CLI binary lands in `TensorSharp.Cli/bin/...` and the server in `TensorSharp.Server/bin/...` after the build. Full options: [CLI usage](#console-application) · [Server usage](#web-application).
+Linux + NVIDIA:
+
+```bash
+TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Server -c Release -p:TensorSharpSkipMlxNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --max-tokens 512
+```
+
+Then open <http://localhost:5000/index.html> (`GET /` is the liveness response), or verify the hosted E4B model from a second terminal:
+
+```bash
+curl -s http://localhost:5000/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"gemma-4-E4B-it-Q8_0.gguf","messages":[{"role":"user","content":"Say hello in five words."}],"max_tokens":32,"stream":false}'
+```
+
+Windows PowerShell:
+
+```powershell
+curl.exe -s http://localhost:5000/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"gemma-4-E4B-it-Q8_0.gguf","messages":[{"role":"user","content":"Say hello in five words."}],"max_tokens":32,"stream":false}'
+```
+
+The server binds `0.0.0.0:5000` and has no built-in authentication or TLS. Keep port 5000 behind a firewall, or use an authenticated HTTPS reverse proxy for remote access.
+
+For image, video, or audio input, the recommended public companion is [`mmproj-gemma-4-E4B-it-Q8_0.gguf`](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/mmproj-gemma-4-E4B-it-Q8_0.gguf); download it and append `--mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf`. The verified claim concerns the E4B Q8_0 architecture/tensor-layout path, while ggml-org supplies the recommended public artifacts. See the [Gemma 4 architecture card](docs/models/gemma4.md) for details and the [engine comparison report](docs/engine_comparison_report.md) for measured E4B Q8_0 runs.
+
+The commands above run the normal GGML native build (with CUDA requested explicitly in the NVIDIA examples) and skip the unrelated MLX native build. You can instead configure the native backend once, run `dotnet build TensorSharp.slnx -c Release`, then invoke the built app from `TensorSharp.Cli/bin/` or `TensorSharp.Server/bin/`. The CLI reads one-shot prompts from `--input`, samples greedily by default, and generates 100 tokens unless `--max-tokens` is set. Full options: [CLI usage](#console-application) · [Server usage](#web-application).
 
 ## Pick a Backend
 
@@ -71,18 +115,18 @@ These architectures are implemented and exercised by the test/benchmark matrix. 
 | Qwen 3 | [Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B-GGUF) | — / — / — | ✅ | ✅ | [qwen3.md](docs/models/qwen3.md) |
 | GPT OSS | [gpt-oss-20b](https://huggingface.co/ggml-org/gpt-oss-20b-GGUF) (MoE) | — / — / — | ✅ | ✅ | [gptoss.md](docs/models/gptoss.md) |
 | Nemotron-H | [Nemotron-H-8B](https://huggingface.co/bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF) (also 47B, Omni) | ✅ (Omni) / — / — | ✅ | ✅ | [nemotron.md](docs/models/nemotron.md) |
-| Mistral 3 | [Mistral-Small-3.1-24B](https://huggingface.co/bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF) | ✅ / — / — | — | — | [mistral3.md](docs/models/mistral3.md) |
-| Gemma 3 | [gemma-3-4b-it](https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf) | ✅ / — / — | — | — | [gemma3.md](docs/models/gemma3.md) |
-| DiffusionGemma | diffusion-gemma GGUFs | — / — / — | — | — | [diffusiongemma.md](docs/models/diffusiongemma.md) |
-| Qwen-Image-Edit | qwen-image-edit GGUFs (MMDiT + VAE + Qwen2.5-VL) | 🖼️ image→image | — | — | [qwenimage.md](docs/models/qwenimage.md) |
+| Mistral 3 | [Mistral-Small-3.1-24B](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF) | ✅ / — / — | — | — | [mistral3.md](docs/models/mistral3.md) |
+| Gemma 3 | [gemma-3-4b-it](https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF) (the official [google QAT repo](https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf) is gated: HF login + Gemma license) | ✅ / — / — | — | — | [gemma3.md](docs/models/gemma3.md) |
+| DiffusionGemma | [diffusiongemma-26B-A4B-it](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF) | — / — / — | — | — | [diffusiongemma.md](docs/models/diffusiongemma.md) |
+| Qwen-Image-Edit | [Qwen-Image-Edit-2511](https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF) (MMDiT + VAE + Qwen2.5-VL companions) | 🖼️ image→image | — | — | [qwenimage.md](docs/models/qwenimage.md) |
 
 ## Highlights
 
-- **Trades wins with llama.cpp — from pure .NET** — head-to-head on identical GGUF files and the same GPU, TensorSharp matches or beats the hand-tuned C++ `llama.cpp` on the workloads that matter: the Gemma 4 26B-A4B MoE prefills **1.32×** faster and lands first tokens **1.30×** sooner (geomean; up to **1.70× / 1.65×** per scenario), Gemma 4 12B wins or ties **every decode scenario** (geomean **1.17×**), streamed tool-call turns decode up to **2.37×** faster, and structured-output (JSON) decode on Gemma 4 E4B streams **7.7×** faster (405 vs 52 tok/s). → [Head-to-head vs llama.cpp](#head-to-head-vs-llamacpp-engine-comparison)
+- **Trades wins with llama.cpp — from pure .NET** — head-to-head on identical GGUF files and the same GPU, TensorSharp matches or beats the hand-tuned C++ `llama.cpp` on the workloads that matter. In the project's GGML CUDA comparison run (reproducible via [`benchmarks/engine_comparison`](benchmarks/engine_comparison)): the Gemma 4 26B-A4B MoE prefills **1.32×** faster and lands first tokens **1.30×** sooner (geomean; up to **1.70× / 1.65×** per scenario), Gemma 4 12B wins or ties **every decode scenario** (geomean **1.17×**), streamed tool-call turns decode up to **2.37×** faster, and structured-output (JSON) decode on Gemma 4 E4B streams **7.7×** faster (405 vs 52 tok/s). → [Head-to-head vs llama.cpp](#head-to-head-vs-llamacpp-engine-comparison)
 - **Continuous batching & paged KV cache** — vLLM-style paged KV pool with block-hash prefix sharing and an iteration-level scheduler, on by default in the server. → [deep dive](docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md)
-- **MTP / NextN speculative decoding** — multi-token-prediction draft heads accelerate solo decode on Qwen 3.6 (NextN block embedded in the trunk GGUF) and Gemma 4 (separate `gemma4-assistant` draft GGUF). The draft proposes several tokens per step and the trunk verifies them in one batched forward, with the request's own sampler driving both. Opt in with `--mtp-spec` (+ `--mtp-draft-model` for Gemma 4). → [Speculative decoding](#mtp--nextn-speculative-decoding)
+- **MTP / NextN speculative decoding** — multi-token-prediction draft heads accelerate solo decode on Qwen 3.6 (NextN block embedded in the trunk GGUF) and Gemma 4 (separate `gemma4-assistant` draft GGUF). The draft proposes several tokens per step and the trunk verifies them in one batched forward, with the request's own sampler driving both. Opt in with the server's `--mtp-spec` flag (+ `--mtp-draft-model` for Gemma 4); the CLI has no MTP flags (use the `TS_MTP_*` env vars). → [Speculative decoding](#mtp--nextn-speculative-decoding)
 - **DiffusionGemma text diffusion** — block-wise EntropyBound denoising over a Gemma-4-derived MoE backbone, with CLI generation flags and a Web UI denoising preview stream. → [DiffusionGemma card](docs/models/diffusiongemma.md)
-- **Qwen-Image-Edit image editing** — prompt + input image → edited image, driving the 60-block MMDiT diffusion transformer with a Qwen-Image VAE and a Qwen2.5-VL-7B text encoder. CUDA-graph-captured whole-DiT forward, FlowMatch-Euler true-CFG denoise, and live denoising previews in the Web UI. → [Qwen-Image-Edit card](docs/models/qwenimage.md)
+- **Qwen-Image-Edit image editing** — prompt + input image → edited image, driving the 60-block MMDiT diffusion transformer with a Qwen-Image VAE and a Qwen2.5-VL-7B text encoder. CUDA-graph-captured whole-DiT forward, FlowMatch-Euler true-CFG denoise, and live denoising previews in the Web UI. On the CUDA image-edit benchmark it beats stable-diffusion.cpp: a warm 4-step Lightning edit completes in **40.44 s vs 48.16 s** (~**1.19×** faster). → [Qwen-Image-Edit card](docs/models/qwenimage.md)
 - **Multimodal** — image / video / audio inputs (Gemma 4); image inputs for Gemma 3, Qwen 3.5-family, Mistral 3, and Nemotron-H Omni. → [Multimodal Support](#multimodal-support)
 - **Tool calling / function calling** — multi-turn tool calls across all three API styles, with architecture-agnostic output parsing. → [Tool Calling](#tool-calling--function-calling)
 - **Thinking / reasoning mode** — structured chain-of-thought for Qwen 3, Qwen 3.5/3.6-family, Gemma 4, GPT OSS, and Nemotron-H. → [Thinking Mode](#thinking--reasoning-mode)
@@ -115,9 +159,9 @@ Everything below is detailed reference. New here? The five sections above are al
 | Model families | Gemma 3/4, DiffusionGemma, Qwen 3, Qwen 3.5/3.6-family GGUFs (`qwen35`, `qwen35moe`, `qwen3next`), GPT OSS, Nemotron-H (incl. Nemotron 3 Nano Omni), and Mistral 3. Image editing via Qwen-Image-Edit (`qwen_image` MMDiT). |
 | Inference hosts | CLI, interactive REPL, ASP.NET Core web UI, Ollama-style API, OpenAI Chat Completions-style API. DiffusionGemma currently uses the CLI diffusion run mode and Web UI denoising stream; Qwen-Image-Edit runs via the CLI image-edit mode and the Web UI image-edit flow. |
 | Backends | Pure C# CPU, direct CUDA/cuBLAS (`cuda`), MLX Metal (`mlx`), GGML CPU, GGML Metal, GGML CUDA, GGML Vulkan |
-| Multimodal | Gemma 4 image/video/audio; Gemma 3, Qwen 3.5-family, Mistral 3, and Nemotron-H Omni image input |
+| Multimodal | Gemma 4 image/video/audio; Gemma 3, Qwen 3.5-family, Mistral 3, and Nemotron-H Omni image input. PDF documents via Web UI upload and CLI `--pdf`: born-digital PDFs are text-extracted for any model, scanned PDFs become page images for vision-capable models |
 | Continuous batching | vLLM-style paged KV cache, block-hash prefix sharing across requests, iteration-level scheduler (enabled by default; opt-out via `--no-continuous-batching`) |
-| Speculative decoding | MTP / NextN draft heads for solo decode on Qwen 3.6 (embedded NextN) and Gemma 4 (separate `gemma4-assistant` draft GGUF); off by default, opt-in via `--mtp-spec` (+ `--mtp-draft-model` for Gemma 4). Profitable on ggml backends and the pure-C# `cuda` backend; CPU / MLX stay on standard decode. |
+| Speculative decoding | MTP / NextN draft heads for solo decode on Qwen 3.6 (embedded NextN) and Gemma 4 (separate `gemma4-assistant` draft GGUF); off by default, opt-in via the server's `--mtp-spec` (+ `--mtp-draft-model` for Gemma 4; CLI runs use the `TS_MTP_*` env vars). Profitable on ggml backends and the pure-C# `cuda` backend; CPU / MLX stay on standard decode. |
 | Server model scope | One explicitly hosted GGUF via `--model`; optional explicit projector via `--mmproj`; no directory scanning |
 | Observability | Structured per-turn logs, queue status, and KV-cache reuse metrics across Web UI, Ollama, and OpenAI response shapes |
 | Test/eval harness | `TensorSharp.TestMatrix` sweeps supported hosts across model, backend, feature, and env-var cells, then compares against per-host baselines |
@@ -132,8 +176,8 @@ Everything below is detailed reference. New here? The five sections above are al
 - **GPU-accelerated** -- GGML Metal on macOS, GGML CUDA on Windows/Linux with NVIDIA GPUs, GGML Vulkan on Windows/Linux with AMD/Intel/NVIDIA GPUs, a direct CUDA/cuBLAS backend with PTX kernels, and an MLX backend for Apple Silicon (mlx-c / Metal), all with CPU fallbacks for unsupported ops
 - **Optimized pure C# CPU backend** -- managed GEMM fast paths plus fused SIMD kernels for RMSNorm, RoPE, softmax, fused activations, and other inference hot paths
 - **Continuous batching & paged KV cache** -- vLLM-style block-paged KV pool with block-hash prefix sharing across requests, iteration-level scheduler that admits / preempts sequences mid-batch, optional SSD-backed tier for very large KV working sets, and a native fused paged-attention kernel (`TSGgml_PagedAttentionForward`) that drives `ggml_flash_attn_ext` on Metal/CUDA/Vulkan. Enabled by default in `TensorSharp.Server`; opt-out with `--no-continuous-batching`. See [docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md](docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md).
-- **MTP / NextN speculative decoding** -- multi-token-prediction draft heads accelerate solo (non-concurrent) decode. Qwen 3.6 ships its NextN block fused into the trunk GGUF; Gemma 4 loads a separate EAGLE-style `gemma4-assistant` draft GGUF via `--mtp-draft-model` whose draft layers attend the target's own KV cache. The draft proposes up to `--mtp-draft` tokens per step (kept while draft confidence ≥ `--mtp-pmin`) and the trunk verifies them in a single batched forward; the request's own sampler — penalties included — drives both drafting and verification, so output is identical to standard decode. Opt in with `--mtp-spec` (off by default). On ggml backends fused multi-token-verify / draft-step kernels make it a clear win; the pure-C# `cuda` backend runs a fully GPU-resident per-op verify/draft and is also a win. CPU / MLX stay on standard decode. Env: `TS_MTP_*` (shared) and `TS_GMTP_*` (Gemma 4 tuning).
-- **Batched / parallel inference** -- `IBatchedPagedModel.ForwardBatch` implementations for Mistral 3, Gemma 4, GPT OSS, Qwen 3, Qwen 3.5/3.6-family, and Nemotron-H all run by default and pack N sequences into a single forward pass with paged K/V scatter and per-sequence attention via the native kernel. Each model exposes a `TS_<FAMILY>_BATCHED=0` escape hatch (e.g. `TS_GEMMA4_BATCHED=0`, `TS_QWEN35_BATCHED=0`, `TS_GPTOSS_BATCHED=0`, `TS_NEMOTRON_BATCHED=0`) to fall back to the per-sequence KV-swap path for A/B comparison or regression isolation.
+- **MTP / NextN speculative decoding** -- multi-token-prediction draft heads accelerate solo (non-concurrent) decode. Qwen 3.6 ships its NextN block fused into the trunk GGUF; Gemma 4 loads a separate EAGLE-style `gemma4-assistant` draft GGUF via `--mtp-draft-model` whose draft layers attend the target's own KV cache. The draft proposes up to `--mtp-draft` tokens per step (kept while draft confidence ≥ `--mtp-pmin`) and the trunk verifies them in a single batched forward; the request's own sampler — penalties included — drives both drafting and verification, so output is identical to standard decode. Opt in with the server's `--mtp-spec` flag (off by default; `TensorSharp.Cli` has no MTP flags — set the `TS_MTP_*` env vars there). On ggml backends fused multi-token-verify / draft-step kernels make it a clear win; the pure-C# `cuda` backend runs a fully GPU-resident per-op verify/draft and is also a win. CPU / MLX stay on standard decode. Env: `TS_MTP_*` (shared) and `TS_GMTP_*` (Gemma 4 tuning).
+- **Batched / parallel inference** -- `IBatchedPagedModel.ForwardBatch` implementations for Mistral 3, Gemma 4, GPT OSS, Qwen 3, Qwen 3.5/3.6-family, and Nemotron-H all run by default and pack N sequences into a single forward pass with paged K/V scatter and per-sequence attention via the native kernel. Gemma 4, Qwen 3.5/3.6, GPT OSS, and Nemotron-H expose a per-family `TS_<FAMILY>_BATCHED=0` escape hatch (`TS_GEMMA4_BATCHED=0`, `TS_QWEN35_BATCHED=0`, `TS_GPTOSS_BATCHED=0`, `TS_NEMOTRON_BATCHED=0`) to fall back to the per-sequence KV-swap path for A/B comparison or regression isolation; Qwen 3 and Mistral 3 have no per-family switch — use the global `TS_SCHED_DISABLE_BATCHED=1`.
 - **Ollama & OpenAI API compatibility** -- drop-in replacement endpoints for existing tooling
 - **Configurable sampling** -- temperature, top-k, top-p, min-p, repetition/presence/frequency penalties, seed, stop sequences
 - **Chat templates** -- auto-loaded from GGUF metadata (Jinja2), with hardcoded fallbacks per architecture
@@ -146,9 +190,9 @@ Everything below is detailed reference. New here? The five sections above are al
 - **Hybrid Attention-Recurrent** -- Qwen 3.5/3.6-family models mix full-attention layers with GatedDeltaNet recurrent layers; the batched path keeps recurrent running state in a per-slot recurrent-state pool
 - **Mixture of Experts** -- Gemma 4 MoE variants (e.g. gemma-4-26B-A4B), GPT OSS MoE (e.g. gpt-oss-20b), Qwen 3.5/3.6-family MoE (`qwen35moe` / `qwen3next` variants such as Qwen3.5-35B-A3B), and Nemotron-H MoE FFN layers
 - **Batched GPU MoE** -- a single fused GGML graph dispatch handles all selected experts (plus the optional shared expert and residual add) for Qwen 3.5/3.6-family and Nemotron-H decode, eliminating per-expert round-trips
-- **KV cache codecs** -- pluggable codec interface (`IKvBlockCodec`) with a built-in TurboQuant (2-bit affine / Q4 / Q8) compressed codec for paged blocks, configurable via `--paged-kv-quant-bits` (the 2-bit tier reaches ~10x on fp32 blocks for very long contexts)
+- **KV cache codecs** -- pluggable codec interface (`IKvBlockCodec`) with a built-in TurboQuant (2-bit affine / Q4 / Q8) compressed codec for paged blocks. The CLI accepts all four `--paged-kv-quant-bits 0|2|4|8` values; the server's legacy standalone flag accepts `0|4|8`, while `TS_KV_PAGED_QUANT_BITS=2` selects the 2-bit codec directly. The 2-bit tier reaches ~10x compression on fp32 blocks for very long contexts.
 - **Message editing** -- edit or delete previous messages in the web chat UI and regenerate from that point
-- **Text/Image/Audio/Video uploads** -- the web UI accepts file uploads up to 500 MB, with automatic token-budget-aware truncation for large text files
+- **Text/Image/Audio/Video/PDF uploads** -- the web UI accepts file uploads up to 500 MB, with automatic token-budget-aware truncation for large text files. Born-digital PDFs have their text layer extracted and inlined into the prompt (token-budget truncated; cap pages with `TS_PDF_MAX_PAGES`); scanned PDFs are rendered to page images for vision-capable models. The CLI accepts a PDF in one-shot mode via `--pdf <file>`
 - **Per-turn observability** -- structured logs capture the full user input and the full raw assistant output (both `<think>` reasoning and the final result) plus the KV cache hit ratio. The same cache-hit stats are surfaced through every API: `prompt_cache_hit_tokens` / `prompt_cache_hit_ratio` (Ollama), `usage.prompt_tokens_details.cached_tokens` (OpenAI), and `promptTokens` / `kvReusedTokens` / `kvReusePercent` in the Web UI SSE `done` event
 
 ## Supported Model Architectures
@@ -169,25 +213,145 @@ See the [per-model architecture cards](docs/models/README.md) for end-to-end doc
 
 ## Model Downloads (GGUF)
 
-TensorSharp loads models in GGUF format. Below are Hugging Face links where you can download GGUF files for each supported architecture. Pick a quantization that fits your hardware (Q4_K_M for low memory, Q8_0 for higher quality, etc.).
+TensorSharp loads models in GGUF format. Below are verified Hugging Face repos for every supported architecture, including the multimodal-projector (mmproj) and MTP-draft companion files each family uses. Pick a quantization that fits your hardware (Q4_K_M / UD-Q4_K_XL for low memory, Q8_0 for higher quality, etc.).
 
 | Architecture | Model | GGUF Download |
 |---|---|---|
-| Gemma 4 | gemma-4-E4B-it | [ggml-org/gemma-4-E4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF) |
-| Gemma 4 | gemma-4-31B-it | [ggml-org/gemma-4-31B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-31B-it-GGUF) |
-| Gemma 4 | gemma-4-26B-A4B-it (MoE) | [ggml-org/gemma-4-26B-A4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF) |
-| Gemma 4 | gemma-4-mmproj (multimodal projector) | Included in the GGUF repos above |
-| Gemma 3 | gemma-3-4b-it | [google/gemma-3-4b-it-qat-q4_0-gguf](https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf) |
-| Qwen 3 | Qwen3-4B | [Qwen/Qwen3-4B-GGUF](https://huggingface.co/Qwen/Qwen3-4B-GGUF) |
-| Qwen 3.5 / 3.6 family | Qwen3.5-9B | [unsloth/Qwen3.5-9B-GGUF](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) |
-| Qwen 3.5 / 3.6 family | Qwen3.5-35B-A3B | [ggml-org/Qwen3.5-35B-A3B-GGUF](https://huggingface.co/ggml-org/Qwen3.5-35B-A3B-GGUF) |
-| GPT OSS | gpt-oss-20b (MoE) | [ggml-org/gpt-oss-20b-GGUF](https://huggingface.co/ggml-org/gpt-oss-20b-GGUF) |
+| Gemma 4 verified native tier | gemma-4-E4B-it Q8_0 | [ggml-org/gemma-4-E4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF) — recommended public artifact `gemma-4-E4B-it-Q8_0.gguf`; lower-memory Q4_K_M is also available; mmproj `mmproj-gemma-4-E4B-it-Q8_0.gguf` is in the same repo |
+| Gemma 4 | gemma-4-12B-it (QAT) | [unsloth/gemma-4-12B-it-qat-GGUF](https://huggingface.co/unsloth/gemma-4-12B-it-qat-GGUF) — mmproj `mmproj-BF16.gguf` and MTP draft `mtp-gemma-4-12B-it.gguf` in the same repo |
+| Gemma 4 | gemma-4-26B-A4B-it (MoE, QAT) | [unsloth/gemma-4-26B-A4B-it-qat-GGUF](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF) — mmproj `mmproj-BF16.gguf` and MTP draft `mtp-gemma-4-26B-A4B-it.gguf` in the same repo |
+| Gemma 4 | gemma-4-26B-A4B-it (MoE) | [ggml-org/gemma-4-26B-A4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF) — mmproj files in the same repo |
+| Gemma 4 | gemma-4-31B-it | [ggml-org/gemma-4-31B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-31B-it-GGUF) — mmproj files in the same repo |
+| Gemma 4 | `gemma4-assistant` MTP drafts | [AtomicChat/gemma-4-E4B-it-assistant-GGUF](https://huggingface.co/AtomicChat/gemma-4-E4B-it-assistant-GGUF) (E4B) and [AtomicChat/gemma-4-26B-A4B-it-assistant-GGUF](https://huggingface.co/AtomicChat/gemma-4-26B-A4B-it-assistant-GGUF) (26B-A4B) — load via the server's `--mtp-spec --mtp-draft-model`; pair each draft with its matching target size |
+| Gemma 3 | gemma-3-4b-it | [ggml-org/gemma-3-4b-it-GGUF](https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF) — mmproj `mmproj-model-f16.gguf` in the same repo. The official QAT repo [google/gemma-3-4b-it-qat-q4_0-gguf](https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf) is gated (requires HF login + accepting Google's Gemma license) |
+| Qwen 3 | Qwen3-4B | [Qwen/Qwen3-4B-GGUF](https://huggingface.co/Qwen/Qwen3-4B-GGUF) (text only — no companion files) |
+| Qwen 3.5 / 3.6 family | Qwen3.5-9B | [unsloth/Qwen3.5-9B-GGUF](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) — mmproj `mmproj-F16.gguf` in the same repo |
+| Qwen 3.5 / 3.6 family | Qwen3.5-35B-A3B (MoE) | [ggml-org/Qwen3.5-35B-A3B-GGUF](https://huggingface.co/ggml-org/Qwen3.5-35B-A3B-GGUF) — mmproj `mmproj-Qwen3.5-35B-A3B-Q8_0.gguf` in the same repo |
+| Qwen 3.5 / 3.6 family | Qwen3.6-35B-A3B (MoE, embedded NextN MTP) | [unsloth/Qwen3.6-35B-A3B-MTP-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF) — these GGUFs retain the NextN block for the server's `--mtp-spec`; mmproj `mmproj-F16.gguf` in the same repo. The base repo [unsloth/Qwen3.6-35B-A3B-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) ships the same file names with NextN stripped — those load fine but silently fall back to standard decode |
+| GPT OSS | gpt-oss-20b (MoE) | [ggml-org/gpt-oss-20b-GGUF](https://huggingface.co/ggml-org/gpt-oss-20b-GGUF) (`gpt-oss-20b-mxfp4.gguf`, text only) |
 | Nemotron-H | Nemotron-H-8B-Reasoning-128K | [bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF](https://huggingface.co/bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF) |
 | Nemotron-H | Nemotron-H-47B-Reasoning-128K | [bartowski/nvidia_Nemotron-H-47B-Reasoning-128K-GGUF](https://huggingface.co/bartowski/nvidia_Nemotron-H-47B-Reasoning-128K-GGUF) |
-| Mistral 3 | Mistral-Small-3.1-24B-Instruct | [bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF](https://huggingface.co/bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF) |
-| Mistral 3 | mistral3-mmproj (Pixtral vision projector) | [bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF](https://huggingface.co/bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF) |
-| DiffusionGemma | diffusion-gemma text-diffusion GGUFs | Use GGUF files whose `general.architecture` is `diffusion-gemma` or `diffusion_gemma` |
-| Qwen-Image-Edit | Qwen-Image-Edit MMDiT (`qwen_image`) | DiT GGUF whose `general.architecture` is `qwen_image`, plus a Qwen-Image VAE and a Qwen2.5-VL-7B text-encoder GGUF in the same directory (or via `TS_QWEN_IMAGE_VAE` / `TS_QWEN_IMAGE_TE` / `TS_QWEN_IMAGE_MMPROJ`). The VAE may be the original `.safetensors`. Optionally add a Lightning distillation LoRA via `--qwen-image-lora` / `TS_QWEN_IMAGE_LORA`. |
+| Nemotron-H | Nemotron 3 Nano Omni 30B-A3B (image-capable) | [unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF](https://huggingface.co/unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF) — mmproj `mmproj-BF16.gguf` (same repo) is required for image input. Audio is preprocessed only: real audio inference needs a Parakeet audio mmproj these GGUFs do not ship |
+| Mistral 3 | Mistral-Small-3.1-24B-Instruct-2503 | [bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF) — Pixtral mmproj `mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf` in the same repo |
+| DiffusionGemma | diffusiongemma-26B-A4B-it | [unsloth/diffusiongemma-26B-A4B-it-GGUF](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF) (`general.architecture` = `diffusion-gemma`) |
+| Qwen-Image-Edit | MMDiT DiT (the `--model` GGUF) | [unsloth/Qwen-Image-Edit-2511-GGUF](https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF) (e.g. `qwen-image-edit-2511-Q4_K_M.gguf`; `general.architecture` = `qwen_image`) |
+| Qwen-Image-Edit | Qwen-Image VAE (required) | `VAE/Qwen_Image-VAE.safetensors` from [QuantStack/Qwen-Image-Edit-GGUF](https://huggingface.co/QuantStack/Qwen-Image-Edit-GGUF) — place next to the DiT or point `--qwen-image-vae` / `TS_QWEN_IMAGE_VAE` at it (the `.safetensors` VAE loads directly) |
+| Qwen-Image-Edit | Qwen2.5-VL-7B text encoder (required) | [unsloth/Qwen2.5-VL-7B-Instruct-GGUF](https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF) — place next to the DiT or set `--qwen-image-vl` / `TS_QWEN_IMAGE_TE` |
+| Qwen-Image-Edit | Vision mmproj (optional) | `mmproj-BF16.gguf` from [unsloth/Qwen2.5-VL-7B-Instruct-GGUF](https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF) — image-grounded conditioning via `--qwen-image-mmproj` / `TS_QWEN_IMAGE_MMPROJ` |
+| Qwen-Image-Edit | Lightning LoRA (optional, 4/8-step) | [lightx2v/Qwen-Image-Edit-2511-Lightning](https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning) (`Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors`) — `--qwen-image-lora` / `TS_QWEN_IMAGE_LORA`; auto-switches to the LoRA's step count and CFG 1.0 |
+
+### Download & Run — per-model quick reference
+
+The `hf download` commands below need the Hugging Face CLI (`pip install -U huggingface_hub`) and drop every file into `./models`. Reminders that apply to all blocks: the CLI reads its one-shot prompt from a **file** via `--input` (`--prompt` is exclusively the Qwen-Image-Edit edit instruction), samples **greedily** by default, and generates only 100 tokens unless you raise `--max-tokens`; the server always listens on **http://localhost:5000**. Swap `--backend ggml_cuda` for the backend that fits your hardware (see [Pick a Backend](#pick-a-backend)). Create a prompt file first:
+
+```bash
+echo "Give me three facts about the Moon." > prompt.txt
+```
+
+**Gemma 4** — text + image/video/audio, thinking, tools, MTP ([ggml-org/gemma-4-E4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF))
+
+```bash
+hf download ggml-org/gemma-4-E4B-it-GGUF gemma-4-E4B-it-Q8_0.gguf --local-dir models
+hf download ggml-org/gemma-4-E4B-it-GGUF mmproj-gemma-4-E4B-it-Q8_0.gguf --local-dir models
+hf download AtomicChat/gemma-4-E4B-it-assistant-GGUF gemma-4-E4B-it-assistant.Q8_0.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf --mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gemma-4-E4B-it-Q8_0.gguf --mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --mtp-spec --mtp-draft-model models/gemma-4-E4B-it-assistant.Q8_0.gguf
+```
+
+(The third download and the `--mtp-spec --mtp-draft-model` pair are optional — they enable MTP speculative decoding, a server-only feature.)
+
+**Gemma 3** — text + image ([ggml-org/gemma-3-4b-it-GGUF](https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF); the official [google/gemma-3-4b-it-qat-q4_0-gguf](https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf) is gated: HF login + Gemma license)
+
+```bash
+hf download ggml-org/gemma-3-4b-it-GGUF gemma-3-4b-it-Q4_K_M.gguf --local-dir models
+hf download ggml-org/gemma-3-4b-it-GGUF mmproj-model-f16.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-3-4b-it-Q4_K_M.gguf --mmproj models/mmproj-model-f16.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gemma-3-4b-it-Q4_K_M.gguf --mmproj models/mmproj-model-f16.gguf --backend ggml_cuda
+```
+
+**Qwen 3** — text, thinking, tools ([Qwen/Qwen3-4B-GGUF](https://huggingface.co/Qwen/Qwen3-4B-GGUF))
+
+```bash
+hf download Qwen/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Qwen3-4B-Q4_K_M.gguf --input prompt.txt --max-tokens 300 --think --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3-4B-Q4_K_M.gguf --backend ggml_cuda
+```
+
+**Qwen 3.5 / 3.6 family** — text + image, thinking, tools, NextN MTP on 3.6 ([unsloth/Qwen3.5-9B-GGUF](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF))
+
+```bash
+hf download unsloth/Qwen3.5-9B-GGUF Qwen3.5-9B-UD-Q4_K_XL.gguf --local-dir models
+hf download unsloth/Qwen3.5-9B-GGUF mmproj-F16.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf --backend ggml_cuda
+```
+
+Qwen 3.6 NextN speculative decoding (server-only; download from the **-MTP-** repo — base-repo GGUFs strip the NextN block and silently fall back to standard decode):
+
+```bash
+hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --local-dir models
+
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda --mtp-spec
+```
+
+**GPT OSS** — text, thinking (always on), tools ([ggml-org/gpt-oss-20b-GGUF](https://huggingface.co/ggml-org/gpt-oss-20b-GGUF))
+
+```bash
+hf download ggml-org/gpt-oss-20b-GGUF gpt-oss-20b-mxfp4.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gpt-oss-20b-mxfp4.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gpt-oss-20b-mxfp4.gguf --backend ggml_cuda
+```
+
+**Nemotron-H** — text, thinking, tools; image on the Omni distribution ([bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF](https://huggingface.co/bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF))
+
+```bash
+hf download bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --backend ggml_cuda
+```
+
+For image input use the Omni distribution instead: `NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf` + `mmproj-BF16.gguf` from [unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF](https://huggingface.co/unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF). Audio is not functional (it needs a Parakeet audio mmproj the GGUFs do not ship).
+
+**Mistral 3** — text + image (Pixtral) ([bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF))
+
+```bash
+hf download bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf --local-dir models
+hf download bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf --mmproj models/mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf --mmproj models/mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --backend ggml_cuda
+```
+
+**DiffusionGemma** — block text-diffusion ([unsloth/diffusiongemma-26B-A4B-it-GGUF](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF))
+
+```bash
+hf download unsloth/diffusiongemma-26B-A4B-it-GGUF diffusiongemma-26B-A4B-it-Q4_K_M.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --input prompt.txt --max-tokens 256 --diffusion-steps 48 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --backend ggml_cuda
+```
+
+(The Web UI streams live denoising previews for DiffusionGemma; the compat APIs return the final text.)
+
+**Qwen-Image-Edit** — image + prompt → edited image; needs the DiT + VAE + text encoder, Lightning LoRA optional ([unsloth/Qwen-Image-Edit-2511-GGUF](https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF))
+
+```bash
+hf download unsloth/Qwen-Image-Edit-2511-GGUF qwen-image-edit-2511-Q4_K_M.gguf --local-dir models
+hf download QuantStack/Qwen-Image-Edit-GGUF VAE/Qwen_Image-VAE.safetensors --local-dir models
+hf download unsloth/Qwen2.5-VL-7B-Instruct-GGUF Qwen2.5-VL-7B-Instruct-UD-IQ2_XXS.gguf --local-dir models
+hf download lightx2v/Qwen-Image-Edit-2511-Lightning Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/qwen-image-edit-2511-Q4_K_M.gguf --image input.png --prompt "Make the sky a dramatic sunset." --output edited.png --qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors --qwen-image-vl models/Qwen2.5-VL-7B-Instruct-UD-IQ2_XXS.gguf --qwen-image-lora models/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/qwen-image-edit-2511-Q4_K_M.gguf --qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors --qwen-image-vl models/Qwen2.5-VL-7B-Instruct-UD-IQ2_XXS.gguf --qwen-image-lora models/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors --backend ggml_cuda
+```
+
+(In the Web UI, attach an image and type the edit instruction. The Lightning LoRA download and `--qwen-image-lora` flag are optional — they cut the denoise to 4 steps at CFG 1.0.)
 
 ## Compute Backends
 
@@ -287,9 +451,9 @@ TensorSharp/
 └── ExternalProjects/            # ggml/ is cloned from github.com/ggml-org/ggml at build time (not committed)
 ```
 
-## NuGet Packages
+## Project / NuGet Package Boundaries
 
-The repository is now split along package boundaries so consumers can depend on only the layers they actually need.
+The repository is split along package boundaries so consumers can depend on only the layers they actually need. These are buildable package projects and IDs, but the current Runtime/Models/Backends/CLI/Server packages are **not published on NuGet.org**. Use project references from a source checkout for now; do not copy `dotnet add package TensorSharp.Models` examples until a matching version appears on [NuGet.org](https://www.nuget.org/profiles/TensorSharp).
 
 | Project | NuGet package | Public namespace | Responsibility |
 |---|---|---|---|
@@ -312,13 +476,13 @@ pwsh ./eng/verify-packages.ps1
 
 The verifier runs `dotnet pack` for the public packages above and fails if an internal dependency such as `AdvUtils` leaks into the `.nuspec`, or if a TensorSharp package depends on a layer outside this table.
 
-### Publishing a release
+### Publishing a package release (maintainers)
 
-Publishing is automated by the [`Publish NuGet`](.github/workflows/publish-nuget.yml) GitHub Actions workflow. Push a version tag and the workflow packs all of the public packages above and pushes them to **NuGet.org** and the repository's **GitHub Packages** feed:
+The [`Publish NuGet`](.github/workflows/publish-nuget.yml) workflow is configured to pack the public projects above on a version tag. A NuGet.org push occurs only when the repository has a valid `NUGET_API_KEY`; otherwise that step is skipped. This describes the release process, not current package availability:
 
 ```bash
-git tag v2.8.6      # tag drives the package version (v2.8.6 -> 2.8.6)
-git push origin v2.8.6
+git tag vX.Y.Z.W      # the tag drives package version X.Y.Z.W
+git push origin vX.Y.Z.W
 ```
 
 - The tag (with the leading `v` stripped) overrides `TensorSharpVersion` for every package, so all packages ship with a single coordinated version. You do not need to edit `Directory.Build.props` first.
@@ -326,9 +490,11 @@ git push origin v2.8.6
 - Configure a `NUGET_API_KEY` repository secret for the NuGet.org push. If it is missing, the NuGet.org step is skipped with a warning and only the GitHub Packages push (which uses the built-in `GITHUB_TOKEN`) runs.
 - To rehearse without publishing, run the workflow manually (`workflow_dispatch`) with a `version` input and `dry_run` checked — it packs, verifies, and uploads the `.nupkg` files as a build artifact without pushing.
 
-### Platform binary releases
+### Platform binary release status
 
-Alongside the managed NuGet packages, the [`Release Binaries`](.github/workflows/release-binaries.yml) workflow builds self-contained, ready-to-run archives of **TensorSharp.Server** and **TensorSharp.Cli** for each platform and attaches them to the GitHub Release for the tag. Each archive bundles the .NET 10 runtime and the platform's native libraries, so it runs without a separate .NET install or native build:
+The [`Release Binaries`](.github/workflows/release-binaries.yml) workflow is intended to build self-contained archives of **TensorSharp.Server** and **TensorSharp.Cli** with the .NET 10 runtime and native libraries. However, the current latest release, [v3.0.5.0](https://github.com/zhongkaifu/TensorSharp/releases/tag/v3.0.5.0), has **no uploaded application archives** (only GitHub's automatic source downloads), so users must currently build from source. Do not construct an archive URL from the names below without first confirming that the file is listed on the [Releases page](https://github.com/zhongkaifu/TensorSharp/releases).
+
+When a release workflow completes successfully, its intended archive matrix is:
 
 | Archive suffix | Native backend(s) bundled | Format |
 |---|---|---|
@@ -338,7 +504,7 @@ Alongside the managed NuGet packages, the [`Release Binaries`](.github/workflows
 | `linux-x64-cuda` | GGML CUDA + pure-C# CUDA (PTX) + CUDA 12.x runtime | `.tar.gz` |
 | `osx-arm64` | GGML Metal + MLX | `.tar.gz` |
 
-- Pushing a `v*` tag builds the archives and publishes the Release automatically — both this and the NuGet workflow trigger on the same tag.
+- Pushing a `v*` tag triggers the archive and NuGet workflows; publication is conditional on every required job succeeding.
 - The `-cuda` archives bundle the CUDA runtime libraries (`cudart` / `cublas` / `cublasLt`) but still require an NVIDIA GPU and a compatible driver at run time; the `-cpu` archives run anywhere. The macOS archive requires Apple Silicon.
 - To rehearse, run the workflow manually (`workflow_dispatch`) with a `version` input — it builds every platform and creates a **draft** Release. Override the target GPU architectures for the CUDA build with the `cuda_arch` input.
 
@@ -454,75 +620,80 @@ The script writes the resulting libraries (`libmlxc.dylib`, `libmlx.dylib`, and 
 ### Console Application
 
 ```bash
-cd TensorSharp.Cli/bin
-
 # Text inference
-./TensorSharp.Cli --model <model.gguf> --input prompt.txt --output result.txt \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --output result.txt \
     --max-tokens 200 --backend ggml_metal
 
 # Text inference on Windows/Linux + NVIDIA GPU
-./TensorSharp.Cli --model <model.gguf> --input prompt.txt --output result.txt \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --output result.txt \
     --max-tokens 200 --backend ggml_cuda
 
 # Interactive turn-by-turn chat (REPL) with KV cache reuse and slash commands
-./TensorSharp.Cli --model <model.gguf> --backend ggml_metal --interactive
-./TensorSharp.Cli --model <model.gguf> --backend ggml_metal -i \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal --interactive
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal -i \
     --system "You are a terse assistant." --temperature 0.7 --top-p 0.9 --think
 
 # Image inference (Gemma 3/4, Qwen 3.5-family)
-./TensorSharp.Cli --model <model.gguf> --image photo.png --backend ggml_metal
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --image photo.png --backend ggml_metal
 
 # Video inference (Gemma 4)
-./TensorSharp.Cli --model <model.gguf> --video clip.mp4 --backend ggml_metal
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --video clip.mp4 --backend ggml_metal
 
 # Audio inference (Gemma 4)
-./TensorSharp.Cli --model <model.gguf> --audio speech.wav --backend ggml_metal
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --audio speech.wav --backend ggml_metal
+
+# PDF document input: born-digital PDFs are text-extracted and inlined into the
+# prompt; scanned PDFs become page images and need a vision model (--mmproj or a
+# built-in vision encoder). --input provides the instruction over the document.
+echo "Summarize the key findings of this paper." > question.txt
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --pdf paper.pdf --input question.txt \
+    --max-tokens 300 --backend ggml_metal
 
 # DiffusionGemma text-diffusion generation
-./TensorSharp.Cli --model <diffusion-gemma.gguf> --input prompt.txt --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <diffusion-gemma.gguf> --input prompt.txt --backend ggml_metal \
     --max-tokens 256 --diffusion-steps 48 --diffusion-seed 0
 
 # Qwen-Image-Edit image editing (prompt + input image -> edited image)
 # The VAE + Qwen2.5-VL text-encoder companions are resolved next to the DiT GGUF
 # (or set --qwen-image-vae / --qwen-image-vl / --qwen-image-mmproj).
-./TensorSharp.Cli --model <qwen-image-edit-DiT.gguf> --image input.png \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <qwen-image-edit-DiT.gguf> --image input.png \
     --prompt "Make the sky a dramatic sunset." --output edited.png \
     --backend ggml_cuda --diffusion-steps 30 --cfg 2.5 --diffusion-seed 0
 
 # Thinking / reasoning mode
-./TensorSharp.Cli --model <model.gguf> --input prompt.txt --backend ggml_metal --think
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal --think
 
 # Tool calling
-./TensorSharp.Cli --model <model.gguf> --input prompt.txt --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal \
     --tools tools.json
 
 # With sampling parameters
-./TensorSharp.Cli --model <model.gguf> --input prompt.txt --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal \
     --temperature 0.7 --top-p 0.9 --top-k 40 --repeat-penalty 1.2 --seed 42
 
 # Batch processing (JSONL)
-./TensorSharp.Cli --model <model.gguf> --input-jsonl requests.jsonl \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input-jsonl requests.jsonl \
     --output results.txt --backend ggml_metal
 
 # Multi-turn chat simulation with KV-cache reuse (mirrors the web UI behavior)
-./TensorSharp.Cli --model <model.gguf> --multi-turn-jsonl chat.jsonl \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --multi-turn-jsonl chat.jsonl \
     --backend ggml_metal --max-tokens 200
 
 # Throughput benchmark: best-of-N prefill and decode timing
-./TensorSharp.Cli --model <model.gguf> --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal \
     --benchmark --bench-prefill 256 --bench-decode 128 --bench-runs 3
 
 # KV-cache reuse benchmark: measure prefill speedup across multiple chat turns
 # (compares with-cache vs forced-reset prefill latency for an 8-turn conversation)
-./TensorSharp.Cli --model <model.gguf> --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal \
     --bench-kvcache --bench-kv-turns 4 --max-tokens 64
 
 # Inspect the rendered prompt and tokenization without running inference
-./TensorSharp.Cli --model <model.gguf> --input prompt.txt --dump-prompt
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --dump-prompt
 
 # Compare hardcoded fallback templates against GGUF Jinja2 templates for every
 # *.gguf file in a directory (useful when adding new architectures)
-./TensorSharp.Cli --test-templates ~/models
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --test-templates ~/models
 ```
 
 **Command-line options:**
@@ -537,12 +708,13 @@ cd TensorSharp.Cli/bin
 | `--image <path>` | Image file for vision inference |
 | `--video <path>` | Video file for video inference |
 | `--audio <path>` | Audio file (WAV, MP3, OGG) for audio inference |
+| `--pdf <path>` | PDF document input (one-shot mode). Born-digital PDFs have their text layer extracted and inlined into the prompt (token-budget truncated; page cap via `TS_PDF_MAX_PAGES`); scanned PDFs are rasterized to page images and require a vision model (`--mmproj` or a built-in vision encoder). `--input` text becomes the instruction over the document. |
 | `--mmproj <path>` | Path to the multimodal projector GGUF file |
 | `--max-tokens <N>` | Maximum tokens to generate (default: 100) |
 | `--backend <type>` | Compute backend: `cpu`, `cuda`, `mlx`, `ggml_cpu`, `ggml_metal`, `ggml_cuda`, or `ggml_vulkan` |
 | `--gpu-device <N>` | Vulkan device index for the `ggml_vulkan` backend on multi-GPU hosts (e.g. an integrated Intel GPU next to a discrete NVIDIA one). Defaults to device 0; use `--list-gpus` to see the indices. Also settable via the `TS_GGML_VULKAN_DEVICE` env var. |
 | `--list-gpus` | List the Vulkan devices ggml-vulkan can see (index + adapter name) and exit |
-| `--kv-cache-dtype <type>` | KV cache precision: `f32` (default), `f16`, `q8_0`, or `q4_0`. Half-precision / quantized KV caches reduce memory at the cost of small numerical drift; `q4_0` (~0.56 bytes/elem, ~1/7 of f32) is the most aggressive tier for very long (128K–256K) contexts where the KV cache dominates memory. Block-quantized caches (`q8_0`/`q4_0`) require the native GGML flash path. |
+| `--kv-cache-dtype <type>` | KV cache precision: `f32`, `f16`, `q8_0`, or `q4_0` (default: auto — the backend/model pick; env `KV_CACHE_DTYPE`). Half-precision / quantized KV caches reduce memory at the cost of small numerical drift; `q4_0` (~0.56 bytes/elem, ~1/7 of f32) is the most aggressive tier for very long (128K–256K) contexts where the KV cache dominates memory. Block-quantized caches (`q8_0`/`q4_0`) require the native GGML flash path. |
 | `--interactive` / `-i` | Start an interactive REPL chat session (turn-by-turn input/output) with KV cache reuse, slash commands, hot-swappable model/backend/projector, file attachments (image, audio, video, text) and live sampling tuning. See the **Interactive REPL commands** section below for the full list. |
 | `--system <text>` | System prompt to seed the interactive session (overridden inside the REPL by `/system`) |
 | `--system-file <path>` | Read the initial system prompt from a UTF-8 text file (alternative to `--system`) |
@@ -587,7 +759,7 @@ cd TensorSharp.Cli/bin
 | `--log-file <0\|1>` | Disable (`0`) or enable (`1`) the file logger (default: enabled) |
 | `--log-console <0\|1>` | Disable (`0`) or enable (`1`) the console logger (default: enabled) |
 
-The multimodal projector file is auto-detected if placed alongside the model file with a recognized name (e.g., `gemma-4-mmproj-F16.gguf`).
+The CLI recognizes a small set of legacy projector filenames beside the model, but current repositories often use different names. Pass the downloaded file explicitly with `--mmproj` for reliable multimodal runs. `TensorSharp.Server` never auto-detects the projector.
 
 **JSONL input format:**
 
@@ -657,27 +829,27 @@ Quoted paths (single or double quotes) are accepted, so drag-and-drop from a fil
 
 ### Web Application
 
-```bash
-cd TensorSharp.Server/bin
+Run these commands from the repository root after building:
 
+```bash
 # Start the server with the exact hosted model
-./TensorSharp.Server --model ./models/model.gguf --backend ggml_metal
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf --backend ggml_metal
 
 # Linux + NVIDIA GPU
-./TensorSharp.Server --model ./models/model.gguf --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf --backend ggml_cuda
 
 # Multimodal models: host an explicit projector too
-./TensorSharp.Server --model ./models/model.gguf --mmproj ./models/mmproj.gguf --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf --mmproj ./models/mmproj.gguf --backend ggml_cuda
 
 # Configure server-wide default sampling parameters
 # (used whenever a request does not override the value itself)
-./TensorSharp.Server --model ./models/model.gguf --backend ggml_metal \
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf --backend ggml_metal \
     --temperature 0.7 --top-p 0.9 --top-k 40 --repeat-penalty 1.1 \
     --presence-penalty 0.0 --frequency-penalty 0.0 --seed 42 \
     --stop "</s>" --stop "<|endoftext|>"
 ```
 
-Open `http://localhost:5000` in your browser. The web interface supports:
+Open `http://localhost:5000/index.html` in your browser (`GET /` is the liveness endpoint). The web interface supports:
 
 - Multi-turn chat conversations
 - Per-tab chat sessions: each browser tab owns its own tracked conversation history; KV blocks are owned by the inference engine
@@ -696,7 +868,7 @@ Use `--model` to choose the hosted GGUF file and `--mmproj` to choose the hosted
 
 **Server command-line options:**
 
-Running `TensorSharp.Server` with no arguments prints the full parameter reference (description, default, and an example per option) and exits; `--help` does the same. Pass at least one option to start the server — e.g. `--backend ggml_cpu` starts it with no hosted model so one can be loaded later from the web UI.
+Running `TensorSharp.Server` with no arguments prints the full parameter reference (description, default, and an example per option) and exits; `--help` does the same. Pass `--model` at startup for inference. Other options can start a model-less status process, but `/api/models/load` cannot select a GGUF that was not supplied at startup.
 
 | Option | Description |
 |---|---|
@@ -728,7 +900,7 @@ Running `TensorSharp.Server` with no arguments prints the full parameter referen
 | `--paged-kv-ram-mb <N>` | Legacy standalone paged-KV RAM-tier cap. |
 | `--paged-kv-ssd-dir <dir>` | Legacy standalone paged-KV SSD cold-tier directory. |
 | `--paged-kv-ssd-mb <N>` | Legacy standalone paged-KV SSD cap. |
-| `--paged-kv-quant-bits <0\|2\|4\|8>` | Legacy standalone paged-KV block quantization (TurboQuantKvCodec; `2` = affine min+scale, `4`/`8` = symmetric). |
+| `--paged-kv-quant-bits <0\|4\|8>` | Legacy standalone paged-KV block quantization accepted by the server (`4`/`8` = symmetric). The runtime env var also accepts `2` for affine min+scale, and the CLI accepts `0\|2\|4\|8`. |
 
 Per-request fields in the chat / generate JSON payloads (e.g. `temperature`,
 `top_p`, `top_k`, `min_p`, `repeat_penalty`, `presence_penalty`,
@@ -776,7 +948,6 @@ These can be set with either the `--paged-kv*` / `--continuous-batching` CLI fla
 | `TS_SCHED_MAX_RUNNING_SEQS` | Maximum in-flight sequences (default: `16`). |
 | `TS_SCHED_PREFILL_CHUNK` | Maximum prefill tokens per step when requests contend (default: `1024`). |
 | `TS_SCHED_SOLO_PREFILL_CHUNK` | Prefill chunk size for the fresh (start_pos = 0) part of a SOLO prompt — one uncontended request gets big fused-prefill chunks (default: `8192`). |
-| `TS_SCHED_SOLO_TAIL_PREFILL_CHUNK` | Prefill chunk size for the tail (start_pos > 0) of a SOLO prompt beyond the first solo chunk (default: `2048`). |
 | `TS_SCHED_NUM_BLOCKS` | Physical blocks in the engine block pool (default: `256`). |
 | `TS_SCHED_BLOCK_SIZE` | Tokens per block on the engine side (default: `256`). |
 | `TS_SCHED_PREFIX_CACHE` | `0` disables block-hash prefix sharing across requests. |
@@ -847,7 +1018,7 @@ Quick reference for which environment variables (and matching CLI flags) gate ea
 | Legacy paged-KV SSD spillover (standalone manager) | OFF | `TS_KV_CACHE_MAX_RAM_MB`, `TS_KV_CACHE_SSD_DIR`, `TS_KV_CACHE_MAX_SSD_MB` | `--paged-kv-ram-mb`, `--paged-kv-ssd-dir`, `--paged-kv-ssd-mb` |
 | Legacy paged-KV block quantization (standalone manager) | OFF (`0` = passthrough) | `TS_KV_PAGED_QUANT_BITS` (`0` / `2` / `4` / `8`) | `--paged-kv-quant-bits` |
 | Block-hash prefix sharing across requests | ON | `TS_SCHED_PREFIX_CACHE=0` to disable | — |
-| Scheduler tunables (per-step token budget, max in-flight seqs, prefill chunks, block pool size, decode quantum) | engine defaults | `TS_SCHED_MAX_BATCHED_TOKENS`, `TS_SCHED_MAX_RUNNING_SEQS`, `TS_SCHED_PREFILL_CHUNK`, `TS_SCHED_SOLO_PREFILL_CHUNK`, `TS_SCHED_SOLO_TAIL_PREFILL_CHUNK`, `TS_SCHED_NUM_BLOCKS`, `TS_SCHED_BLOCK_SIZE`, `TS_SCHED_DECODE_QUANTUM` | — |
+| Scheduler tunables (per-step token budget, max in-flight seqs, prefill chunks, block pool size, decode quantum) | engine defaults | `TS_SCHED_MAX_BATCHED_TOKENS`, `TS_SCHED_MAX_RUNNING_SEQS`, `TS_SCHED_PREFILL_CHUNK`, `TS_SCHED_SOLO_PREFILL_CHUNK`, `TS_SCHED_NUM_BLOCKS`, `TS_SCHED_BLOCK_SIZE`, `TS_SCHED_DECODE_QUANTUM` | — |
 
 #### Per-model batched / paged forward (`IBatchedPagedModel.ForwardBatch`)
 
@@ -1083,13 +1254,13 @@ Some architectures ship a **multi-token-prediction (MTP / NextN) draft head** th
 Speculative decoding is **off by default**. Enable it on the server with `--mtp-spec` (env `TS_MTP_SPEC=1`):
 
 ```bash
-# Qwen 3.6 — the NextN block is embedded in the trunk GGUF, no extra file needed
-./TensorSharp.Server --model Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf --backend ggml_cuda \
+# Qwen 3.6 — use the -MTP- repository GGUF so the embedded NextN block is retained
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda \
     --mtp-spec --mtp-draft 8 --mtp-pmin 0.75
 
 # Gemma 4 — load the separate gemma4-assistant draft GGUF that matches the target
-./TensorSharp.Server --model gemma-4-12B-it-Q4_K_M.gguf --backend ggml_cuda \
-    --mtp-spec --mtp-draft-model gemma-4-12B-assistant-Q8_0.gguf
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda \
+    --mtp-spec --mtp-draft-model models/gemma-4-E4B-it-assistant.Q8_0.gguf
 ```
 
 **Two draft-head shapes:**
@@ -1123,7 +1294,7 @@ The output parser (`OutputParser.cs`) automatically extracts tool calls from the
 
 ### Gemma 4
 
-Gemma 4 models support image, video, and audio inputs. Place the multimodal projector (`gemma-4-mmproj-F16.gguf`) in the same directory as the model file for automatic loading.
+Gemma 4 models support image, video, and audio inputs. For the E4B example above, pass the repository's `mmproj-gemma-4-E4B-it-Q8_0.gguf` explicitly with `--mmproj` (use the projector matching other target sizes).
 
 - **Images:** PNG, JPEG, HEIC/HEIF
 - **Video:** MP4 (time-based extraction at 1 fps using OpenCV; tune with `VIDEO_SAMPLE_FPS` / `VIDEO_MAX_FRAMES`)
@@ -1131,15 +1302,15 @@ Gemma 4 models support image, video, and audio inputs. Place the multimodal proj
 
 ### Gemma 3
 
-Gemma 3 supports PNG, JPEG, and HEIC/HEIF image inputs. Place its multimodal projector (`mmproj-gemma3-4b-f16.gguf`) next to the model file for automatic loading.
+Gemma 3 supports PNG, JPEG, and HEIC/HEIF image inputs. The non-gated example above uses `mmproj-model-f16.gguf`; pass it explicitly with `--mmproj`.
 
 ### Qwen 3.5 / 3.6 family
 
-All Qwen 3.5/3.6-family variants (`qwen35`, `qwen35moe`, and `qwen3next`) load through the same `Qwen35Model` implementation. Image inputs are supported via the dynamic-resolution `Qwen35VisionEncoder`; place the projector (`Qwen3.5-mmproj-F16.gguf`) next to the model GGUF for automatic loading. The MoE variants (e.g. Qwen3.5-35B-A3B and Qwen3.6-35B-A3B GGUFs that report the same architecture keys) additionally enable a fused `MoEExpertsSwiGLUResidual` GGML kernel during decode that runs all selected experts, the optional shared expert, and the residual add in a single GPU graph dispatch.
+All Qwen 3.5/3.6-family variants (`qwen35`, `qwen35moe`, and `qwen3next`) load through the same `Qwen35Model` implementation. Image inputs are supported via the dynamic-resolution `Qwen35VisionEncoder`; pass the selected repository's projector explicitly (for the 9B and Qwen 3.6 examples, `mmproj-F16.gguf`). The MoE variants (e.g. Qwen3.5-35B-A3B and Qwen3.6-35B-A3B GGUFs that report the same architecture keys) additionally enable a fused `MoEExpertsSwiGLUResidual` GGML kernel during decode that runs all selected experts, the optional shared expert, and the residual add in a single GPU graph dispatch.
 
 ### Mistral 3
 
-Mistral 3 supports image inputs via the Pixtral vision encoder. Place the multimodal projector (`mistral3-mmproj.gguf`) in the same directory as the model file for automatic loading.
+Mistral 3 supports image inputs via the Pixtral vision encoder. The example repository uses `mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf`; pass it explicitly with `--mmproj`.
 
 - **Images:** PNG, JPEG, HEIC/HEIF
 

@@ -23,15 +23,15 @@
   <table>
     <thead><tr><th>架构</th><th>GGUF 架构键</th><th>示例模型</th><th>多模态</th><th>思考</th><th>工具</th><th>MTP 推测</th></tr></thead>
     <tbody>
-      <tr><td><strong>Gemma 4</strong></td><td><code>gemma4</code></td><td>gemma-4-E4B、31B、26B-A4B (MoE)</td><td>图像、视频、音频</td><td class="yes">是</td><td class="yes">是</td><td class="yes">是（独立草稿）</td></tr>
+      <tr><td><strong>Gemma 4</strong></td><td><code>gemma4</code></td><td>gemma-4-E4B、12B、31B、26B-A4B (MoE)</td><td>图像、视频、音频</td><td class="yes">是</td><td class="yes">是</td><td class="yes">是（独立草稿）</td></tr>
       <tr><td><strong>Gemma 3</strong></td><td><code>gemma3</code></td><td>gemma-3-4b</td><td>图像</td><td class="no">否</td><td class="no">否</td><td class="no">—</td></tr>
       <tr><td><strong>Qwen 3</strong></td><td><code>qwen3</code></td><td>Qwen3-4B</td><td>仅文本</td><td class="yes">是</td><td class="yes">是</td><td class="no">—</td></tr>
-      <tr><td><strong>Qwen 3.5 / 3.6</strong></td><td><code>qwen35</code>、<code>qwen35moe</code>、<code>qwen3next</code></td><td>Qwen3.5-9B、Qwen3.5/3.6-35B-A3B (MoE)</td><td>图像</td><td class="yes">是</td><td class="yes">是</td><td class="yes">3.6 支持（内嵌 NextN）</td></tr>
+      <tr><td><strong>Qwen 3.5 / 3.6</strong></td><td><code>qwen35</code>、<code>qwen35moe</code>、<code>qwen3next</code></td><td>Qwen3.5-9B、Qwen3.5/3.6-35B-A3B (MoE)</td><td>图像</td><td class="yes">是</td><td class="yes">是</td><td class="yes">3.6 支持（内嵌 NextN——仅限保留 NextN 块的 GGUF，例如 <code>-MTP-</code> 仓库）</td></tr>
       <tr><td><strong>GPT OSS</strong></td><td><code>gptoss</code>、<code>gpt-oss</code></td><td>gpt-oss-20b (MoE)</td><td>仅文本</td><td class="yes">是（始终）</td><td class="yes">是</td><td class="no">—</td></tr>
       <tr><td><strong>Nemotron-H</strong></td><td><code>nemotron_h</code>、<code>nemotron_h_moe</code></td><td>Nemotron-H-8B、47B、Nemotron 3 Nano Omni</td><td>图像（Omni）</td><td class="yes">是</td><td class="yes">是</td><td class="no">—</td></tr>
       <tr><td><strong>Mistral 3</strong></td><td><code>mistral3</code></td><td>Mistral-Small-3.1-24B-Instruct</td><td>图像</td><td class="no">否</td><td class="no">否</td><td class="no">—</td></tr>
       <tr><td><strong>DiffusionGemma</strong></td><td><code>diffusion-gemma</code>、<code>diffusion_gemma</code></td><td>diffusion-gemma 文本扩散 GGUF</td><td>仅文本</td><td class="no">否</td><td class="no">否</td><td class="no">—</td></tr>
-      <tr><td><strong>Qwen-Image-Edit</strong></td><td><code>qwen_image</code></td><td>qwen-image-edit MMDiT（+ VAE 与 Qwen2.5-VL 伴随文件）</td><td>图像编辑（图像+文本 → 图像）</td><td class="no">否</td><td class="no">否</td><td class="no">—</td></tr>
+      <tr><td><strong>Qwen-Image-Edit</strong></td><td><code>qwen_image</code>、<code>qwen-image</code></td><td>qwen-image-edit MMDiT（+ VAE 与 Qwen2.5-VL 伴随文件）</td><td>图像编辑（图像+文本 → 图像）</td><td class="no">否</td><td class="no">否</td><td class="no">—</td></tr>
     </tbody>
   </table>
   </div>
@@ -42,36 +42,139 @@
   <table>
     <thead><tr><th>架构</th><th>模型</th><th>下载</th></tr></thead>
     <tbody>
-      <tr><td>Gemma 4</td><td>gemma-4-E4B-it</td><td><a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener">ggml-org/gemma-4-E4B-it-GGUF</a></td></tr>
+      <tr><td>Gemma 4</td><td>gemma-4-E4B-it</td><td><a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener">ggml-org/gemma-4-E4B-it-GGUF</a>；已验证 E4B Q8_0 原生 GGML 规格推荐使用公开文件 <code>gemma-4-E4B-it-Q8_0.gguf</code>；多模态投影器为同仓库的 <code>mmproj-gemma-4-E4B-it-Q8_0.gguf</code></td></tr>
+      <tr><td>Gemma 4</td><td>gemma-4-12B-it（QAT）</td><td><a href="https://huggingface.co/unsloth/gemma-4-12B-it-qat-GGUF" target="_blank" rel="noopener">unsloth/gemma-4-12B-it-qat-GGUF</a>；同仓库 <code>mmproj-BF16.gguf</code> 与 <code>mtp-gemma-4-12B-it.gguf</code></td></tr>
       <tr><td>Gemma 4</td><td>gemma-4-31B-it</td><td><a href="https://huggingface.co/ggml-org/gemma-4-31B-it-GGUF" target="_blank" rel="noopener">ggml-org/gemma-4-31B-it-GGUF</a></td></tr>
       <tr><td>Gemma 4</td><td>gemma-4-26B-A4B-it (MoE)</td><td><a href="https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF" target="_blank" rel="noopener">ggml-org/gemma-4-26B-A4B-it-GGUF</a></td></tr>
-      <tr><td>Gemma 3</td><td>gemma-3-4b-it</td><td><a href="https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf" target="_blank" rel="noopener">google/gemma-3-4b-it-qat-q4_0-gguf</a></td></tr>
-      <tr><td>Qwen 3</td><td>Qwen3-4B</td><td><a href="https://huggingface.co/Qwen/Qwen3-4B-GGUF" target="_blank" rel="noopener">Qwen/Qwen3-4B-GGUF</a></td></tr>
+      <tr><td>Gemma 4</td><td>gemma-4-26B-A4B-it（MoE，QAT）</td><td><a href="https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF" target="_blank" rel="noopener">unsloth/gemma-4-26B-A4B-it-qat-GGUF</a>；同仓库 <code>mmproj-BF16.gguf</code> 与 MTP draft；另有 <a href="https://huggingface.co/AtomicChat/gemma-4-26B-A4B-it-assistant-GGUF" target="_blank" rel="noopener">AtomicChat assistant</a></td></tr>
+      <tr><td>Gemma 3</td><td>gemma-3-4b-it</td><td><a href="https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF" target="_blank" rel="noopener">非 gated ggml-org 仓库</a>；<code>Q4_K_M</code> 约 2.32 GiB，mmproj 为 <code>mmproj-model-f16.gguf</code>。<a href="https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf" target="_blank" rel="noopener">Google QAT 仓库</a>需要登录并接受许可证</td></tr>
+      <tr><td>Gemma 3</td><td>gemma-3-4b-it（官方 QAT）</td><td><a href="https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf" target="_blank" rel="noopener">google/gemma-3-4b-it-qat-q4_0-gguf</a>；<code>mmproj-model-f16-4B.gguf</code>；⚠️ 需要 Hugging Face 登录并接受 Google Gemma 许可证</td></tr>
+      <tr><td>Qwen 3</td><td>Qwen3-4B</td><td><a href="https://huggingface.co/Qwen/Qwen3-4B-GGUF" target="_blank" rel="noopener">Qwen/Qwen3-4B-GGUF</a>；<code>Qwen3-4B-Q4_K_M.gguf</code> 约 2.33 GiB</td></tr>
       <tr><td>Qwen 3.5 / 3.6</td><td>Qwen3.5-9B</td><td><a href="https://huggingface.co/unsloth/Qwen3.5-9B-GGUF" target="_blank" rel="noopener">unsloth/Qwen3.5-9B-GGUF</a></td></tr>
       <tr><td>Qwen 3.5 / 3.6</td><td>Qwen3.5-35B-A3B (MoE)</td><td><a href="https://huggingface.co/ggml-org/Qwen3.5-35B-A3B-GGUF" target="_blank" rel="noopener">ggml-org/Qwen3.5-35B-A3B-GGUF</a></td></tr>
+      <tr><td>Qwen 3.6</td><td>Qwen3.6-35B-A3B NextN MTP</td><td><a href="https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF" target="_blank" rel="noopener">unsloth/Qwen3.6-35B-A3B-MTP-GGUF</a>；<code>UD-Q4_K_M</code> 约 21.11 GiB。基础仓库 GGUF 会剥离 NextN 块</td></tr>
       <tr><td>GPT OSS</td><td>gpt-oss-20b (MoE)</td><td><a href="https://huggingface.co/ggml-org/gpt-oss-20b-GGUF" target="_blank" rel="noopener">ggml-org/gpt-oss-20b-GGUF</a></td></tr>
       <tr><td>Nemotron-H</td><td>Nemotron-H-8B-Reasoning-128K</td><td><a href="https://huggingface.co/bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF" target="_blank" rel="noopener">bartowski/nvidia_Nemotron-H-8B-…</a></td></tr>
       <tr><td>Nemotron-H</td><td>Nemotron-H-47B-Reasoning-128K</td><td><a href="https://huggingface.co/bartowski/nvidia_Nemotron-H-47B-Reasoning-128K-GGUF" target="_blank" rel="noopener">bartowski/nvidia_Nemotron-H-47B-…</a></td></tr>
-      <tr><td>Mistral 3</td><td>Mistral-Small-3.1-24B-Instruct</td><td><a href="https://huggingface.co/bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF" target="_blank" rel="noopener">bartowski/Mistral-Small-3.1-24B-…</a></td></tr>
+      <tr><td>Nemotron-H</td><td>Nemotron 3 Nano Omni 30B-A3B（图像）</td><td><a href="https://huggingface.co/unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF" target="_blank" rel="noopener">unsloth/NVIDIA-Nemotron-3-Nano-Omni-…</a>；图像输入需要同仓库 <code>mmproj-BF16.gguf</code>；未附真实音频推理所需的 Parakeet mmproj</td></tr>
+      <tr><td>Mistral 3</td><td>Mistral-Small-3.1-24B-Instruct</td><td><a href="https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF" target="_blank" rel="noopener">bartowski/mistralai_Mistral-Small-3.1-24B-…</a>；Q4_K_M 约 13.35 GiB；同仓库 Pixtral mmproj</td></tr>
+      <tr><td>DiffusionGemma</td><td>diffusiongemma-26B-A4B-it</td><td><a href="https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF" target="_blank" rel="noopener">unsloth/diffusiongemma-26B-A4B-it-GGUF</a>；Q4_K_M 约 15.65 GiB</td></tr>
+      <tr><td>Qwen-Image-Edit</td><td>2511 MMDiT（<code>--model</code>）</td><td><a href="https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF" target="_blank" rel="noopener">unsloth/Qwen-Image-Edit-2511-GGUF</a>；<code>qwen-image-edit-2511-Q4_K_M.gguf</code> 约 12.34 GiB</td></tr>
+      <tr><td>Qwen-Image-Edit</td><td>Qwen-Image VAE（必需）</td><td><a href="https://huggingface.co/QuantStack/Qwen-Image-Edit-GGUF" target="_blank" rel="noopener">QuantStack/Qwen-Image-Edit-GGUF</a> 中的 <code>VAE/Qwen_Image-VAE.safetensors</code>；通过 <code>--qwen-image-vae</code> 指定</td></tr>
+      <tr><td>Qwen-Image-Edit</td><td>Qwen2.5-VL-7B 文本编码器（必需）</td><td><a href="https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF" target="_blank" rel="noopener">unsloth/Qwen2.5-VL-7B-Instruct-GGUF</a>；可选视觉投影器为同仓库 <code>mmproj-BF16.gguf</code></td></tr>
+      <tr><td>Qwen-Image-Edit</td><td>Lightning LoRA（可选，4/8 步）</td><td><a href="https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning" target="_blank" rel="noopener">lightx2v/Qwen-Image-Edit-2511-Lightning</a>；如 <code>Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors</code></td></tr>
     </tbody>
   </table>
   </div>
-  <div class="callout note"><div class="ic">🧩</div><p>多模态模型需要<strong>投影器（mmproj）</strong>文件。Gemma 4 / Gemma 3 / Qwen 3.5 / Mistral 3 的投影器随上面的仓库一起或在旁提供；把投影器放在模型旁并使用可识别的名称即可自动加载，或用 <code>--mmproj</code> 显式传入。</p></div>
+  <div class="callout note"><div class="ic">🧩</div><p>多模态模型需要<strong>投影器（mmproj）</strong>文件。请下载匹配文件并显式传入 <code>--mmproj</code>；服务端不会自动检测，CLI 也只识别少数旧文件名。</p></div>
+
+  <h2 id="download-run">下载并运行</h2>
+  <p>第一个代码块是已验证的 Gemma 4 E4B 快速上手。所有代码块都使用 Hugging Face CLI（<code>pip install -U huggingface_hub</code>）；其后的各家族代码块假定已完成完整源码构建。从仓库根目录运行；先把问题写入 <code>prompt.txt</code>，并按硬件把 <code>ggml_cuda</code> 换成 <code>ggml_metal</code>、<code>ggml_vulkan</code> 或 <code>ggml_cpu</code>。</p>
+
+  <h3 id="gemma4-fast-lane">约 30 秒快速上手：Gemma 4 E4B Q8_0（原生 GGML）</h3>
+  <p>复制并运行这些命令约需 30 秒；7.48 GiB 的模型下载与首次 restore/构建耗时更长，取决于网络与机器。仓库基准已经验证 TensorSharp 的 E4B Q8_0 家族与执行路径；链接的公开 <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener">ggml-org 仓库</a>是推荐下载源。下面的代码块面向 Linux + NVIDIA：</p>
+  <pre data-lang="bash"><code>hf download ggml-org/gemma-4-E4B-it-GGUF gemma-4-E4B-it-Q8_0.gguf --local-dir models
+TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet build TensorSharp.slnx -c Release -p:TensorSharpSkipMlxNative=true
+echo "请说明本地推理的价值。" &gt; prompt.txt
+
+# 纯文本不需要 mmproj。
+dotnet run --project TensorSharp.Cli -c Release --no-build -- --model models/gemma-4-E4B-it-Q8_0.gguf \
+    --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet run --project TensorSharp.Server -c Release --no-build -- --model models/gemma-4-E4B-it-Q8_0.gguf \
+    --backend ggml_cuda</code></pre>
+  <p>Apple Silicon 请省略 CUDA 环境变量并使用 <code>ggml_metal</code>；受支持的 Windows/Linux Vulkan GPU 请改为请求 <code>TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON</code> 并使用 <code>ggml_vulkan</code>。图像、视频或音频输入还需运行 <code>hf download ggml-org/gemma-4-E4B-it-GGUF mmproj-gemma-4-E4B-it-Q8_0.gguf --local-dir models</code>，并传入 <code>--mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf</code>。服务端的浏览器界面位于 <code>http://localhost:5000/index.html</code>。Windows PowerShell 与完整平台语法见<a href="getting-started_zh-cn.html#e4b-fast-lane">快速开始</a>。</p>
+
+  <h3>Gemma 3（文本 + 图像）</h3>
+  <pre data-lang="bash"><code>hf download ggml-org/gemma-3-4b-it-GGUF gemma-3-4b-it-Q4_K_M.gguf --local-dir models
+hf download ggml-org/gemma-3-4b-it-GGUF mmproj-model-f16.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-3-4b-it-Q4_K_M.gguf --mmproj models/mmproj-model-f16.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gemma-3-4b-it-Q4_K_M.gguf --mmproj models/mmproj-model-f16.gguf --backend ggml_cuda</code></pre>
+
+  <h3>Qwen 3（文本、思维链、工具）</h3>
+  <pre data-lang="bash"><code>hf download Qwen/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Qwen3-4B-Q4_K_M.gguf --input prompt.txt --think --max-tokens 400 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3-4B-Q4_K_M.gguf --backend ggml_cuda</code></pre>
+
+  <h3>Qwen 3.5 / 3.6（文本 + 图像、思维链、工具；3.6 支持 NextN MTP）</h3>
+  <pre data-lang="bash"><code>hf download unsloth/Qwen3.5-9B-GGUF Qwen3.5-9B-UD-Q4_K_XL.gguf --local-dir models
+hf download unsloth/Qwen3.5-9B-GGUF mmproj-F16.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf \
+    --image photo.png --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf --backend ggml_cuda</code></pre>
+  <p>Qwen 3.6 NextN 必须从保留该块的 <code>-MTP-</code> 仓库下载，并在<em>服务端</em>加入 <code>--mtp-spec</code>；基础仓库 GGUF 会剥离 NextN 块并回退到标准解码：</p>
+  <pre data-lang="bash"><code>hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --local-dir models
+
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda --mtp-spec</code></pre>
+
+  <h3>GPT OSS（文本、始终思考、工具）</h3>
+  <pre data-lang="bash"><code>hf download ggml-org/gpt-oss-20b-GGUF gpt-oss-20b-mxfp4.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gpt-oss-20b-mxfp4.gguf --input prompt.txt --max-tokens 400 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gpt-oss-20b-mxfp4.gguf --backend ggml_cuda</code></pre>
+
+  <h3>Nemotron-H（文本；Omni 分发支持图像）</h3>
+  <pre data-lang="bash"><code>hf download bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --input prompt.txt \
+    --think --max-tokens 400 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --backend ggml_cuda</code></pre>
+  <p>图像输入请改用上表 Nemotron 3 Nano Omni GGUF 与 <code>mmproj-BF16.gguf</code>。当前 GGUF 分发未附真实音频推理所需的 Parakeet audio mmproj。</p>
+
+  <h3>Mistral 3（文本 + 图像）</h3>
+  <pre data-lang="bash"><code>hf download bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf --local-dir models
+hf download bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf \
+    --mmproj models/mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf \
+    --image photo.png --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf \
+    --mmproj models/mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --backend ggml_cuda</code></pre>
+
+  <h3>DiffusionGemma（分块文本扩散）</h3>
+  <pre data-lang="bash"><code>hf download unsloth/diffusiongemma-26B-A4B-it-GGUF diffusiongemma-26B-A4B-it-Q4_K_M.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --input prompt.txt \
+    --max-tokens 256 --diffusion-steps 48 --diffusion-seed 0 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --backend ggml_cuda</code></pre>
+
+  <h3>Qwen-Image-Edit（图像 + 提示词 → 编辑后的图像）</h3>
+  <pre data-lang="bash"><code>hf download unsloth/Qwen-Image-Edit-2511-GGUF qwen-image-edit-2511-Q4_K_M.gguf --local-dir models
+hf download QuantStack/Qwen-Image-Edit-GGUF VAE/Qwen_Image-VAE.safetensors --local-dir models
+hf download unsloth/Qwen2.5-VL-7B-Instruct-GGUF Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf --local-dir models
+hf download unsloth/Qwen2.5-VL-7B-Instruct-GGUF mmproj-BF16.gguf --local-dir models
+hf download lightx2v/Qwen-Image-Edit-2511-Lightning Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/qwen-image-edit-2511-Q4_K_M.gguf --image input.png \
+    --prompt "把天空改成壮丽的日落。" --output edited.png \
+    --qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors \
+    --qwen-image-vl models/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf \
+    --qwen-image-mmproj models/mmproj-BF16.gguf \
+    --qwen-image-lora models/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors \
+    --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/qwen-image-edit-2511-Q4_K_M.gguf \
+    --qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors \
+    --qwen-image-vl models/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf \
+    --qwen-image-mmproj models/mmproj-BF16.gguf \
+    --qwen-image-lora models/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors \
+    --backend ggml_cuda</code></pre>
 
   <h2 id="multimodal">多模态支持</h2>
   <div class="table-scroll">
   <table>
     <thead><tr><th>家族</th><th>输入</th><th>说明</th></tr></thead>
     <tbody>
-      <tr><td>Gemma 4</td><td>图像 · 视频 · 音频</td><td>图像 PNG/JPEG/HEIC；视频 MP4（经 OpenCV 以 1 fps 采样）；音频 WAV 16 kHz 单声道 / MP3 / OGG。投影器：<code>gemma-4-mmproj-F16.gguf</code>。</td></tr>
-      <tr><td>Gemma 3</td><td>图像</td><td>PNG / JPEG / HEIC。投影器：<code>mmproj-gemma3-4b-f16.gguf</code>。</td></tr>
-      <tr><td>Qwen 3.5 / 3.6</td><td>图像</td><td>动态分辨率视觉编码器。投影器：<code>Qwen3.5-mmproj-F16.gguf</code>。</td></tr>
-      <tr><td>Mistral 3</td><td>图像</td><td>Pixtral 视觉编码器。投影器：<code>mistral3-mmproj.gguf</code>。</td></tr>
-      <tr><td>Nemotron-H (Omni)</td><td>图像</td><td>RADIO / v2_vl ViT 编码器。传入匹配的 <code>--mmproj</code>；图像 token 在 <code>&lt;image&gt;</code> 占位处展开。</td></tr>
+      <tr><td>Gemma 4</td><td>图像 · 视频 · 音频</td><td>图像 PNG/JPEG/HEIC；视频 MP4（经 OpenCV 以 1 fps 采样）；音频 WAV 16 kHz 单声道 / MP3 / OGG。E4B 投影器：<code>mmproj-gemma-4-E4B-it-Q8_0.gguf</code>。</td></tr>
+      <tr><td>Gemma 3</td><td>图像</td><td>PNG / JPEG / HEIC。非 gated 4B 投影器：<code>mmproj-model-f16.gguf</code>。</td></tr>
+      <tr><td>Qwen 3.5 / 3.6</td><td>图像</td><td>动态分辨率视觉编码器；9B / 3.6 仓库使用 <code>mmproj-F16.gguf</code>。</td></tr>
+      <tr><td>Mistral 3</td><td>图像</td><td>Pixtral 视觉编码器。投影器：<code>mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf</code>。</td></tr>
+      <tr><td>Nemotron-H (Omni)</td><td>图像</td><td>RADIO / v2_vl ViT 编码器。传入匹配的 <code>--mmproj</code>；图像 token 在 <code>&lt;image&gt;</code> 占位处展开。当前 GGUF 分发未附真实音频推理需要的 Parakeet mmproj。</td></tr>
     </tbody>
   </table>
   </div>
-  <p>通过 <a href="cli_zh-cn.html#examples">CLI</a>（<code>--image</code>、<code>--video</code>、<code>--audio</code>）、<a href="server_zh-cn.html#webui">Web UI</a> 上传，或 <a href="http-api_zh-cn.html">HTTP API</a>（Ollama 用 base64 <code>images</code> 数组，OpenAI 用 <code>image_url</code> data URI）发送图像/音频/视频。</p>
+  <p>通过 <a href="cli_zh-cn.html#examples">CLI</a>（<code>--image</code>、<code>--video</code>、<code>--audio</code>、<code>--pdf</code>）、<a href="server_zh-cn.html#webui">Web UI</a> 上传，或 <a href="http-api_zh-cn.html">HTTP API</a>（Ollama 用 base64 <code>images</code> 数组，OpenAI 用 <code>image_url</code> data URI）发送文件。数字版 PDF 会提取文本；扫描版 PDF 会转换为页面图像并需要视觉模型。</p>
 
   <h2 id="imageedit">图像编辑（Qwen-Image-Edit）</h2>
   <p>Qwen-Image-Edit 接收<strong>提示词 + 一张输入图像</strong>并返回编辑后的图像——这是与上面文本 LLM 不同的输出模态。所加载的 <code>qwen_image</code> GGUF 仅是 MMDiT（多模态扩散 Transformer）；TensorSharp 会在其旁解析两个伴随 GGUF：</p>

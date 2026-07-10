@@ -11,13 +11,100 @@
 | 音频编码器 | [`Gemma4AudioEncoder`](../../TensorSharp.Models/Models/Gemma4/Gemma4AudioEncoder.cs)（USM 风格 chunked transformer） |
 | 音频前端 | [`Gemma4AudioPreprocessor`](../../TensorSharp.Models/Models/Gemma4/Gemma4AudioPreprocessor.cs)（16 kHz 单声道 → 128 bin log-mel） |
 | 图像处理器 | [`Gemma4ImageProcessor`](../../TensorSharp.Models/Models/Gemma4/Gemma4ImageProcessor.cs) |
-| 示例模型 | gemma-4-E4B（8B 等效）、gemma-4-31B、gemma-4-26B-A4B（MoE） |
+| 示例模型 | gemma-4-E4B（8B 等效）、gemma-4-12B、gemma-4-31B、gemma-4-26B-A4B（MoE） |
 | 模态 | 文本、图像、视频（帧栈）、音频 |
 | 思维链模式 | 是（`<\|channel>thought ... <channel\|>`） |
 | 工具调用 | 是（`<\|tool_call>call:name{...}<tool_call\|>`） |
 | 批处理 / 分页前向 | **默认启用** —— `IBatchedPagedModel.ForwardBatch` 处理双 head_dim、KV donor 共享、PLE 注入、SWA + 全局混合的分页 K/V 缓冲。设置 `TS_GEMMA4_BATCHED=0` 可强制回退到旧单序列 KV 交换路径。详见 §11。 |
-| MTP 投机解码 | 可选 —— 通过 `--mtp-draft-model`（`TS_MTP_DRAFT_MODEL`）加载独立的 `gemma4-assistant` EAGLE 风格草稿 GGUF，并用 `--mtp-spec` 启用。在 ggml 后端与纯 C# `cuda` 后端上有收益。详见 §12。 |
+| MTP 投机解码 | 可选 —— 通过服务端的 `--mtp-draft-model`（`TS_MTP_DRAFT_MODEL`）加载独立的 `gemma4-assistant` EAGLE 风格草稿 GGUF，并用 `--mtp-spec` 启用（两者均为 `TensorSharp.Server` 标志；CLI 没有 MTP 标志）。在 ggml 后端与纯 C# `cuda` 后端上有收益。详见 §12。 |
 | 输出解析器 | `Gemma4OutputParser` |
+
+## 下载
+
+已验证的 GGUF 下载指引：
+
+| 模型 | HF 仓库 | 推荐文件 | mmproj（图像 / 视频 / 音频） | MTP 草稿 |
+|---|---|---|---|---|
+| gemma-4-E4B-it | [ggml-org/gemma-4-E4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF) | `gemma-4-E4B-it-Q8_0.gguf`（8.031 GB；另有 `gemma-4-E4B-it-Q4_K_M.gguf`，5.335 GB） | `mmproj-gemma-4-E4B-it-Q8_0.gguf`（0.560 GB；同仓库；备选：[unsloth/gemma-4-E4B-it-GGUF](https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF) 中的 `mmproj-F16.gguf`，0.990 GB） | 来自 [AtomicChat/gemma-4-E4B-it-assistant-GGUF](https://huggingface.co/AtomicChat/gemma-4-E4B-it-assistant-GGUF) 的 `gemma-4-E4B-it-assistant.Q8_0.gguf`（0.100 GB） |
+| gemma-4-12B-it（QAT） | [unsloth/gemma-4-12B-it-qat-GGUF](https://huggingface.co/unsloth/gemma-4-12B-it-qat-GGUF) | `gemma-4-12B-it-qat-UD-Q4_K_XL.gguf`（6.716 GB） | `mmproj-BF16.gguf`（0.175 GB；同仓库） | `mtp-gemma-4-12B-it.gguf`（0.254 GB；同仓库根目录；量化变体位于 `MTP/` 下） |
+| gemma-4-26B-A4B-it（MoE，QAT） | [unsloth/gemma-4-26B-A4B-it-qat-GGUF](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF) | `gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf`（14.249 GB） | `mmproj-BF16.gguf`（1.195 GB；同仓库） | `mtp-gemma-4-26B-A4B-it.gguf`（0.252 GB；同仓库），或来自 [AtomicChat/gemma-4-26B-A4B-it-assistant-GGUF](https://huggingface.co/AtomicChat/gemma-4-26B-A4B-it-assistant-GGUF) 的 `gemma-4-26B-A4B-it-assistant.Q8_0.gguf`（0.462 GB） |
+| gemma-4-26B-A4B-it（MoE） | [ggml-org/gemma-4-26B-A4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF) | `gemma-4-26B-A4B-it-Q4_K_M.gguf`（16.796 GB）或 `gemma-4-26B-A4B-it-Q8_0.gguf`（26.860 GB） | `mmproj-gemma-4-26B-A4B-it-Q8_0.gguf`（0.806 GB）/ `mmproj-gemma-4-26B-A4B-it-bf16.gguf`（1.195 GB） | 与 QAT 行相同的草稿 |
+| gemma-4-31B-it | [ggml-org/gemma-4-31B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-31B-it-GGUF) | `gemma-4-31B-it-Q4_K_M.gguf`（18.687 GB）或 `gemma-4-31B-it-Q8_0.gguf`（32.636 GB） | `mmproj-gemma-4-31B-it-Q8_0.gguf`（0.810 GB）/ `mmproj-gemma-4-31B-it-bf16.gguf`（1.201 GB） | — |
+
+Hugging Face 元数据将上述每一行标记为派生自对应的 Google Gemma 4 基础模型。
+部分转换仓库的模型卡未声明许可证；可匿名下载不等于重新授权，
+再分发前请同时阅读基础模型与转换仓库的条款。
+
+MTP 草稿头以独立的 `gemma4-assistant` GGUF 发布，其 backbone 维度必须等于
+目标模型的 hidden size —— 请始终按相同规格配对草稿与目标（E4B 草稿 ↔ E4B 目标、
+12B ↔ 12B、26B-A4B ↔ 26B-A4B）。草稿不匹配会在服务端启动时快速失败（§12.2）。
+
+命令行下载（每个文件一行；需要先 `pip install -U huggingface_hub`）：
+
+```bash
+python -m pip install -U huggingface_hub
+hf download ggml-org/gemma-4-E4B-it-GGUF gemma-4-E4B-it-Q8_0.gguf --local-dir models
+hf download ggml-org/gemma-4-E4B-it-GGUF mmproj-gemma-4-E4B-it-Q8_0.gguf --local-dir models
+hf download unsloth/gemma-4-12B-it-qat-GGUF gemma-4-12B-it-qat-UD-Q4_K_XL.gguf --local-dir models
+hf download unsloth/gemma-4-12B-it-qat-GGUF mtp-gemma-4-12B-it.gguf --local-dir models
+```
+
+### 已验证的 Gemma 4 E4B 原生 GGML 快速路径
+
+这是 TensorSharp 的快速开始路径。已验证的是 E4B Q8_0
+家族与执行路径：模型推荐使用公开的
+[`ggml-org/gemma-4-E4B-it-GGUF`](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF)
+文件，完成正常原生构建后选择原生 GGML GPU 后端。这里不声称基准输入对应某个公开文件的
+特定校验和。下面的可复制命令面向 Linux + NVIDIA；其他平台的后端选择见代码块之后。
+
+```bash
+python -m pip install -U huggingface_hub
+hf download ggml-org/gemma-4-E4B-it-GGUF gemma-4-E4B-it-Q8_0.gguf --local-dir models
+TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet build TensorSharp.slnx -c Release -p:TensorSharpSkipMlxNative=true
+printf '%s\n' '用一句简短的话回答：TensorSharp 是什么？' > prompt.txt
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
+  --input prompt.txt --max-tokens 64 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
+  --backend ggml_cuda --max-tokens 128
+```
+
+Windows/Linux + NVIDIA 使用 `ggml_cuda`；Apple Silicon 使用 `ggml_metal`；
+Windows/Linux 上带 Vulkan 驱动的 AMD、Intel 或 NVIDIA GPU 使用 `ggml_vulkan`。
+纯文本请求不需要 `mmproj-gemma-4-E4B-it-Q8_0.gguf`；图像、视频或音频输入需要从
+同一仓库下载它，并通过 `--mmproj` 传入。
+
+快速路径的依据来自三处相互独立的路由事实：
+
+- 多 token prefill / verify 使用融合整模型 `NativeGemma4ModelVerify` 图，其中包含
+  E 系列的内核内 PLE gather 与共享 KV donor 处理。
+- 稠密模型的单 token decode 通过一次 GGML 图派发在
+  `NativeGemma4ModelDecode` 中执行完整 transformer。
+- 只有一个调度序列时，默认的 `TS_BATCHED_N1_FAST_PATH=1` 会选择线性
+  `Forward()` 路径，从而进入融合整模型 decode，而不是通用批处理逐算子路径。
+
+实测与路由说明见[引擎对比报告](../engine_comparison_report.md)、
+[E4B prefill 性能记录](../perf/gemma4-prefill-cuda-graph-design.md)与
+[N=1 调度器文档](../PAGED_ATTENTION_AND_CONTINUOUS_BATCHING_zh-cn.md)。
+
+多模态 CLI 单次推理（文本提示词通过 `--input` 从文件读取；只给 `--image` 而不给
+`--input` 时会使用默认的描述图片提示词；CLI 采样默认为 greedy，
+`--max-tokens` 默认为 100）：
+
+```bash
+dotnet run --project TensorSharp.Cli -c Release -- --model models/gemma-4-E4B-it-Q8_0.gguf \
+  --mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf \
+  --image photo.png --max-tokens 512 --backend ggml_cuda
+```
+
+带 MTP 投机解码的服务端（`--mtp-spec` / `--mtp-draft-model` 仅是
+`TensorSharp.Server` 的标志 —— `TensorSharp.Cli` 没有 MTP 标志）：
+
+```bash
+dotnet run --project TensorSharp.Server -c Release -- --model models/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf \
+  --backend ggml_cuda --mtp-spec --mtp-draft-model models/mtp-gemma-4-12B-it.gguf
+```
+
+然后打开 `http://localhost:5000` 使用聊天 UI。
 
 ## 1. 来源与目标
 
@@ -133,7 +220,7 @@ residual += combined
 ### 3.3 Decode vs prefill
 
 - **Decode**（`seqLen == 1`）在 GGML 后端、所有层均为密集且权重均量化时：单次原生调用（`Gemma4ModelDecode`）一次 GPU 图调度处理整套堆栈，包含 PLE、per-layer head 维、环形 SWA cache、per-layer scalar。
-- **Prefill**（`seqLen > 1`）：每个符合条件的密集层走融合 per-layer GGML 图（`Gemma4LayerPrefill`）。MoE / KV 共享 / 当前 chunk 中有 PLE 注入的层回退到逐算子托管路径。长 prompt 切成 `min(2 × slidingWindow, 2048)` 的块，控制 SWA 层 score 张量的大小。
+- **Prefill**（`seqLen > 1`）：符合条件的稠密模型优先使用融合整模型 verify 图，其中包含 E 系列 PLE 与共享 KV donor 层。该入口不可用时，符合条件的稠密、非共享、无 PLE 层仍可走 per-layer `Gemma4LayerPrefill` 图，其余层回退逐算子路径；长 prompt 会分块以控制 SWA score 张量。
 
 ## 4. 组件细节
 
@@ -309,9 +396,9 @@ rope_freqs.weight                          # 比例频率因子
 
 ### 整模型单图 prefill（`NativeGemma4ModelVerify`）
 
-在 ggml 后端上，普通的多 token prefill 由 MTP 验证所用的同一个融合整模型内核（§12）来执行：所有层在单次 GGML 图派发中完成，激活值常驻设备，而不是每层一张图。`CanUseWholeModelPrefillVerify()` 决定是否走该路径——仅限密集模型；多模态 chunk 在 `startPos == 0` 时可通过内核的双向 span mask 走该路径（`TS_G4_MM_PREFILL=0` 让多模态退回逐算子路径）。`startPos > 0` 的 SWA 包裹 chunk 通过内核内的 swaPrev gather 留在融合路径上（`TS_G4_VERIFY_SWAPREV=0` 关闭）。全 MoE 变体（例如 26B-A4B）有对应的融合路径：`CanUseWholeModelMoEPrefillVerify()` / `TryFusedMoEModelVerify()`。设 `TS_G4_WHOLE_PREFILL=0` 可强制走逐算子分块路径做 A/B。注意，块量化（`q8_0` / `q4_0`）KV cache 的多 token prefill *必须*走该路径——逐算子回退无法遍历块量化的 cache 布局。
+在 ggml 后端上，普通的多 token prefill 由 MTP 验证所用的同一个融合整模型内核（§12）来执行：所有层在单次 GGML 图派发中完成，激活值常驻设备，而不是每层一张图。`CanUseWholeModelPrefillVerify()` 决定是否走该路径——仅限密集模型，包括 E 系列的内核内 PLE 与共享 KV donor 层；多模态 chunk 在 `startPos == 0` 时可通过内核的双向 span mask 走该路径（`TS_G4_MM_PREFILL=0` 让多模态退回逐算子路径）。`startPos > 0` 的 SWA 包裹 chunk 通过内核内的 swaPrev gather 留在融合路径上（`TS_G4_VERIFY_SWAPREV=0` 关闭）。全 MoE 变体（例如 26B-A4B）有对应的融合路径：`CanUseWholeModelMoEPrefillVerify()` / `TryFusedMoEModelVerify()`。设 `TS_G4_WHOLE_PREFILL=0` 可强制走逐算子分块路径做 A/B。注意，块量化（`q8_0` / `q4_0`）KV cache 的多 token prefill *必须*走该路径——逐算子回退无法遍历块量化的 cache 布局。
 
-调度器会把 solo（无争用）prompt 以大分块喂给该路径：全新分块上限由 `TS_SCHED_SOLO_PREFILL_CHUNK`（默认 8192）控制，尾部分块由 `TS_SCHED_SOLO_TAIL_PREFILL_CHUNK`（默认 2048）控制。实测设计见 [`docs/perf/gemma4-prefill-cuda-graph-design.md`](../perf/gemma4-prefill-cuda-graph-design.md)。
+调度器会把 solo（无争用）prompt 以大分块喂给该路径，分块上限由 `TS_SCHED_SOLO_PREFILL_CHUNK`（默认 8192）控制。实测设计见 [`docs/perf/gemma4-prefill-cuda-graph-design.md`](../perf/gemma4-prefill-cuda-graph-design.md)。
 
 ### 内核内 PLE gather
 

@@ -16,6 +16,66 @@
 | Server support | Web UI image-edit flow: `POST /api/image-edit` and `POST /api/image-edit/stream` (SSE with live denoising previews) |
 | Continuous batching | None — image edits are serialized (the diffusion nets are not thread-safe); concurrent requests run one at a time |
 
+## Downloads
+
+Image editing needs a **four-component set**. The DiT GGUF is the `--model`; the
+companions auto-resolve from the same directory, or can be pointed at explicitly
+with `--qwen-image-vae` / `--qwen-image-vl` / `--qwen-image-mmproj` /
+`--qwen-image-lora` (CLI and server) — equivalently the `TS_QWEN_IMAGE_VAE` /
+`TS_QWEN_IMAGE_TE` / `TS_QWEN_IMAGE_MMPROJ` / `TS_QWEN_IMAGE_LORA` env vars:
+
+| Component | HF repo | File |
+|---|---|---|
+| MMDiT DiT (the `--model` GGUF) | [unsloth/Qwen-Image-Edit-2511-GGUF](https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF) | `qwen-image-edit-2511-Q4_K_M.gguf` (13.245 GB); `qwen-image-edit-2511-Q2_K.gguf` (7.468 GB) is the smallest published option and fits 16 GB VRAM |
+| Qwen-Image VAE | [QuantStack/Qwen-Image-Edit-GGUF](https://huggingface.co/QuantStack/Qwen-Image-Edit-GGUF) | `VAE/Qwen_Image-VAE.safetensors` (0.254 GB) |
+| Qwen2.5-VL-7B text encoder | [unsloth/Qwen2.5-VL-7B-Instruct-GGUF](https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF) | `Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf` (4.683 GB), or `Qwen2.5-VL-7B-Instruct-UD-IQ2_XXS.gguf` (2.398 GB) for low VRAM |
+| Vision projector (optional — image-grounded conditioning) | same repo | `mmproj-BF16.gguf` (1.354 GB) |
+| Lightning LoRA (optional — 4/8-step editing) | [lightx2v/Qwen-Image-Edit-2511-Lightning](https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning) | `Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors` (0.850 GB) |
+
+All conversion cards above identify official Qwen base models and declare
+Apache-2.0. The DiT and Lightning files derive from
+[Qwen/Qwen-Image-Edit-2511](https://huggingface.co/Qwen/Qwen-Image-Edit-2511).
+
+```bash
+python -m pip install -U huggingface_hub
+hf download unsloth/Qwen-Image-Edit-2511-GGUF qwen-image-edit-2511-Q4_K_M.gguf --local-dir models
+hf download QuantStack/Qwen-Image-Edit-GGUF VAE/Qwen_Image-VAE.safetensors --local-dir models
+hf download unsloth/Qwen2.5-VL-7B-Instruct-GGUF Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf --local-dir models
+hf download unsloth/Qwen2.5-VL-7B-Instruct-GGUF mmproj-BF16.gguf --local-dir models
+hf download lightx2v/Qwen-Image-Edit-2511-Lightning Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors --local-dir models
+```
+
+`hf download` keeps the repo's `VAE/` subfolder — move `Qwen_Image-VAE.safetensors`
+up next to the DiT GGUF (auto-resolution scans the DiT's directory for that exact
+file name), or pass `--qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors`.
+
+CLI edit (image-edit mode engages automatically when `--model` is a `qwen_image`
+GGUF; `--image` is required and the edit instruction goes in `--prompt`):
+
+```bash
+dotnet run --project TensorSharp.Cli -c Release -- \
+  --model models/qwen-image-edit-2511-Q4_K_M.gguf --backend ggml_cuda \
+  --qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors \
+  --qwen-image-vl models/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf \
+  --image input.png --prompt "Replace the sky with a golden sunset" \
+  --output edited.png --cfg 2.5 --diffusion-steps 30
+```
+
+(Leave `--cfg` / `--diffusion-steps` off for auto: 30 steps / cfg 2.5, or the
+Lightning LoRA's trained step count / cfg 1.0 when one is loaded via
+`--qwen-image-lora`.)
+
+Server (the Web UI at `http://localhost:5000/index.html` routes image + prompt to
+`POST /api/image-edit/stream` — attach an image and type the edit instruction):
+
+```bash
+dotnet run --project TensorSharp.Server -c Release -- \
+  --model models/qwen-image-edit-2511-Q4_K_M.gguf --backend ggml_cuda \
+  --qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors \
+  --qwen-image-vl models/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf \
+  --qwen-image-lora models/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors
+```
+
 ## 1. Origin and intent
 
 Qwen-Image-Edit is an instruction-driven image editor. Unlike the autoregressive
@@ -185,6 +245,11 @@ into the token sequence so the edit is grounded on the original image.
   seams — only the transient im2col is bounded). This lets the area clamp target
   the model's **native ~1 MP**, which materially improves face/fine detail.
 
+Head-to-head: on the project's CUDA `image_edit` benchmark scenario (reproducible
+via [`benchmarks/engine_comparison`](../../benchmarks/engine_comparison); 4-step
+Lightning edit at 544×1184), TensorSharp completes a warm edit in **40.44 s** vs
+stable-diffusion.cpp's 48.16 s (~1.19× faster); the cold first request is 54.11 s.
+
 Important toggles:
 
 | Variable | Effect |
@@ -223,7 +288,10 @@ over:
 - `POST /api/image-edit` runs a single edit and returns the output image.
 - `POST /api/image-edit/stream` streams SSE frames: progress ticks plus
   throttled decoded previews (`{ imageEdit: true, step, total, image, width,
-  height }`), then a final full-resolution image before `done`.
+  height }`), then a final full-resolution image before `done`. Previews also
+  work when the request leaves the step count at auto (0) — up to 8 evenly
+  spaced preview frames; a failed preview encode degrades to a progress-only
+  tick instead of aborting the edit.
 - Edits are serialized behind a shared lock (the diffusion nets are not
   thread-safe), so concurrent requests run one at a time.
 - The Ollama / OpenAI chat adapters are autoregressive and do not expose image

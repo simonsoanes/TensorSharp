@@ -51,7 +51,7 @@
   <p>不需要。TensorSharp 可在普通 CPU 上运行（<code>--backend cpu</code> 或更快的 <code>ggml_cpu</code>）。GPU —— NVIDIA（CUDA）、任何支持 Vulkan 的 AMD/Intel/NVIDIA GPU，或 Apple Silicon（Metal/MLX）—— 会让生成显著更快，尤其是更大的模型。见<a href="backends_zh-cn.html">后端</a>。</p>
 
   <h3>我该从哪个模型开始？</h3>
-  <p><strong>Gemma-4-E4B (Q8_0)</strong> 是一个轻量、经过充分测试的起点。要更低内存，选 <code>Q4_K_M</code> 量化；要更高质量，选更大的模型或 <code>Q8_0</code>。见<a href="models_zh-cn.html#downloads">模型下载</a>。</p>
+  <p>建议从 <strong>Gemma 4 E4B Q8_0</strong>（推荐公开文件为 7.48 GiB）开始 —— 它是 TensorSharp 原生 GGML 快路径上经过验证的快速上手模型，支持思维链、工具调用，以及需要可选投影器的图像/视频/音频输入。内存占用更低的小型入门模型是 <strong>Qwen3-4B Q4_K_M</strong>（2.33 GiB）。见 <a href="getting-started_zh-cn.html#e4b-fast-lane">E4B 快路径</a>或<a href="models_zh-cn.html#downloads">模型下载</a>。</p>
 
   <h3>我的数据私密吗？</h3>
   <p>是的 —— 推理完全在你的机器上进行。提示词、文档与图像不会发送到任何外部服务。这正是各组织选择本地推理的主要原因。见<a href="overview_zh-cn.html#business">商业价值</a>。</p>
@@ -74,7 +74,7 @@
   <p>没有按 token 计费 —— 你在自己掌控的硬件上运行开放模型。成本是硬件以及运行它的电费。见<a href="overview_zh-cn.html#business">商业价值</a>。</p>
 
   <h3>支持哪些平台？</h3>
-  <p>Windows、Linux 与 macOS（Apple Silicon），基于 .NET 10。已为 Windows/Linux（CPU 与 CUDA）与 macOS arm64 发布预构建的自包含二进制。见<a href="getting-started_zh-cn.html">快速开始</a>与<a href="backends_zh-cn.html#binaries">平台二进制</a>。</p>
+  <p>支持基于 .NET 10 的 Windows、Linux 与 macOS（Apple Silicon）。目前请从源码构建：最新 v3.0.5.0 没有上传应用归档。仓库已有跨平台发行工作流，因此在假定预构建文件存在前，请先检查 <a href="https://github.com/zhongkaifu/TensorSharp/releases" target="_blank" rel="noopener">Releases 页面</a>。见<a href="getting-started_zh-cn.html">快速开始</a>与<a href="backends_zh-cn.html#binaries">平台二进制状态</a>。</p>
 
   <h3>它的许可证是什么？</h3>
   <p>TensorSharp 由 Zhongkai Fu 编写，并按仓库 <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/LICENSE" target="_blank" rel="noopener">LICENSE</a> 文件中的许可证（BSD-3-Clause）分发。你下载的每个模型都有其发布者各自的独立许可证 —— 请查看 Hugging Face 上的模型卡。</p>

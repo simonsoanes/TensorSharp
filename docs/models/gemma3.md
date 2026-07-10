@@ -16,6 +16,45 @@
 | Batched / paged forward | Not implemented. Runs through the per-sequence KV-swap fallback inside `BatchExecutor` when the continuous-batching engine is active. See §11. |
 | Output parser | `PassthroughOutputParser` |
 
+## Downloads
+
+Verified GGUF pointers:
+
+| Model | HF repo | Recommended file | mmproj |
+|---|---|---|---|
+| gemma-3-4b-it (official QAT) | [google/gemma-3-4b-it-qat-q4_0-gguf](https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf) | `gemma-3-4b-it-q4_0.gguf` (3.155 GB) | `mmproj-model-f16-4B.gguf` (0.851 GB; same repo) |
+| gemma-3-4b-it (non-gated alternative) | [ggml-org/gemma-3-4b-it-GGUF](https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF) | `gemma-3-4b-it-Q4_K_M.gguf` (2.490 GB) or `gemma-3-4b-it-Q8_0.gguf` (4.130 GB) | `mmproj-model-f16.gguf` (0.851 GB; same repo) |
+
+The official `google/...` repo is **gated**: downloading its files requires a
+Hugging Face login and accepting Google's Gemma license. The `ggml-org` repo
+downloads anonymously, but the weights remain derived from Gemma and its model
+card declares the Gemma license.
+
+Command-line download (one line per file; requires `pip install -U huggingface_hub`):
+
+```bash
+python -m pip install -U huggingface_hub
+hf download ggml-org/gemma-3-4b-it-GGUF gemma-3-4b-it-Q4_K_M.gguf --local-dir models
+hf download ggml-org/gemma-3-4b-it-GGUF mmproj-model-f16.gguf --local-dir models
+```
+
+CLI one-shot (the text prompt comes from a file via `--input`; with `--image`
+and no `--input` a default describe-the-image prompt is used; CLI sampling
+defaults to greedy and `--max-tokens` defaults to 100):
+
+```bash
+dotnet run --project TensorSharp.Cli -c Release -- --model models/gemma-3-4b-it-Q4_K_M.gguf \
+  --mmproj models/mmproj-model-f16.gguf \
+  --image photo.png --max-tokens 300 --backend ggml_cpu
+```
+
+Server (chat Web UI plus OpenAI/Ollama-compatible APIs on `http://localhost:5000`):
+
+```bash
+dotnet run --project TensorSharp.Server -c Release -- --model models/gemma-3-4b-it-Q4_K_M.gguf \
+  --mmproj models/mmproj-model-f16.gguf --backend ggml_cuda --max-tokens 4096
+```
+
 ## 1. Origin and intent
 
 Gemma 3 is Google's third-generation open-weights LLM family, distilled from

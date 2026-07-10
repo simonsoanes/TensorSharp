@@ -41,19 +41,30 @@ Each card follows the same shape so you can diff architectures cleanly:
 12. **Optimization opportunities** — work that has not been done yet but that
     we know would unlock more performance or capability.
 
+## Verified start lane
+
+The verified native GGML family/path tier is Gemma 4 E4B Q8_0; the
+recommended public artifact is
+[ggml-org/gemma-4-E4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF).
+Run it on `ggml_cuda`, `ggml_metal`, or `ggml_vulkan`; this lane exercises
+fused native kernels. See the
+[Gemma 4 card](gemma4.md#verified-gemma-4-e4b-native-ggml-fast-path).
+Its matching `mmproj` is optional for text and required for image, video, or
+audio input.
+
 ## Implementation matrix
 
-| Architecture | Card | Source class | GGUF keys | Modalities | Reasoning | Tools | Batched / paged forward | Notable acceleration |
-|---|---|---|---|---|---|---|---|---|
-| Gemma 3 | [gemma3.md](gemma3.md) | `Gemma3Model` | `gemma3` | Text, image | No | No | No (legacy per-seq) | Alternating SWA / global attention, GeGLU FFN, QK-norm, V-norm |
-| Gemma 4 | [gemma4.md](gemma4.md) | `Gemma4Model` | `gemma4` | Text, image, video, audio | Yes | Yes | **Default** (toggle off with `TS_GEMMA4_BATCHED=0`) | Single-graph fused decode (all layers in one GGML dispatch), fused per-layer prefill, chunked prefill, circular SWA cache, PLE, KV sharing, MoE variants. Batched path matches legacy logits within FP noise (`Gemma4BatchedForwardTests`); reaches ~1.5× legacy at batch=8 and ~1.6× at 4×800-token prompts. |
-| DiffusionGemma | [diffusiongemma.md](diffusiongemma.md) | `DiffusionGemmaModel` + `DiffusionGemmaSampler` | `diffusion-gemma`, `diffusion_gemma` | Text | No | No | Separate Web UI `DiffusionBatchScheduler`; not an autoregressive `IBatchedPagedModel` path | EntropyBound block denoising over `[prompt | canvas]`, prompt-KV caching on GPU backends, self-conditioning, fused GGML whole-model diffusion decode and fused lm-head tail |
-| Qwen-Image-Edit | [qwenimage.md](qwenimage.md) | `QwenImageModel` (+ `QwenImagePipeline`) | `qwen_image` | Image edit (image+text → image) | No | No | None — `Forward()` throws; editing runs through `EditImage()` and edits are serialized | 60-block MMDiT diffusion (FlowMatch-Euler, true-CFG, reference-latent concat), CUDA-graph-captured whole-DiT forward, default flash attention, CFG-batching, First-Block-Cache, fused Qwen2.5-VL vision encoder, VRAM-aware area clamp |
-| Qwen 3 | [qwen3.md](qwen3.md) | `Qwen3Model` | `qwen3` | Text | Yes | Yes | Reference port (`Qwen3Model.BatchedForward.cs`) — exercised by `Qwen3BatchedForwardTests` when a base-Qwen3 GGUF is provided | Native whole-model decode with pre-resolved weight pointers |
-| Qwen 3.5 / 3.6 family | [qwen35.md](qwen35.md) | `Qwen35Model` | `qwen35`, `qwen35moe`, `qwen3next` | Text, image | Yes | Yes | **Default** (toggle off with `TS_QWEN35_BATCHED=0` or `--no-continuous-batching`). Per-slot recurrent-state pool + optional native GatedDeltaNet kernel (`TS_QWEN35_BATCHED_GDN_NATIVE=1`) | Hybrid FullAttention + GatedDeltaNet recurrent, fused attention layer decode, fused prefill attention, fused output-projection + FFN, fused output-projection + norm + router, batched MoE (routed + shared + residual in a single kernel), fused vision encoder blocks |
-| GPT OSS | [gptoss.md](gptoss.md) | `GptOssModel` | `gptoss`, `gpt-oss` | Text | Yes (always) | Yes | **Default** (toggle off with `TS_GPTOSS_BATCHED=0`). Per-head attention sinks via `TSGgml_PagedAttentionForwardWithSinks` (or `TS_GPTOSS_PAGED_ATTN_MANAGED=1` for the C# fallback). 100% greedy match vs legacy in `GptOssBatchedCorrectnessTests`. | Stacked MoE prefill kernel (mul_mat_id + add_id + swiglu_oai), attention sinks, MXFP4 expert weights |
-| Nemotron-H | [nemotron.md](nemotron.md) | `NemotronModel` | `nemotron_h`, `nemotron_h_moe` | Text, image (Omni-class) | Yes | Yes | **Default** (toggle off with `TS_NEMOTRON_BATCHED=0`). Per-slot Mamba2 conv + SSM state pool; optional native batched Mamba2 step (`TS_NEMOTRON_MAMBA2_BATCHED_NATIVE=1`). 100% greedy match vs legacy; up to 3.95× tps at batch=3 on Apple M4 Pro. | Mamba2 + attention + MoE FFN hybrid stack, batched GPU MoE, optional Parakeet audio frontend, RADIO/v2_vl image encoder |
-| Mistral 3 | [mistral3.md](mistral3.md) | `Mistral3Model` | `mistral3` | Text, image | No | No | **Default** — reference IBatchedPagedModel implementation. End-to-end validated on Ministral-3-14B; native paged-attention kernel is ~21% faster than the legacy per-seq path on long context. | YaRN-corrected RoPE with position-dependent Q scaling, fused QKV / gate_up, Pixtral vision encoder |
+| Architecture | Card | Verified download (HF) | Source class | GGUF keys | Modalities | Reasoning | Tools | Batched / paged forward | Notable acceleration |
+|---|---|---|---|---|---|---|---|---|---|
+| Gemma 3 | [gemma3.md](gemma3.md) | [ggml-org/gemma-3-4b-it-GGUF](https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF) | `Gemma3Model` | `gemma3` | Text, image | No | No | No (legacy per-seq) | Alternating SWA / global attention, GeGLU FFN, QK-norm, V-norm |
+| Gemma 4 | [gemma4.md](gemma4.md) | E4B Q8_0 is the verified native-GGML family/path tier; [ggml-org/gemma-4-E4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF) is the recommended public artifact | `Gemma4Model` | `gemma4` (`gemma4-assistant` / `gemma4_assistant` load only as the MTP draft) | Text, image, video, audio | Yes | Yes | **Default** (toggle off with `TS_GEMMA4_BATCHED=0`) | Single-graph fused decode (all layers in one GGML dispatch), fused whole-model prefill/verify with in-kernel PLE + shared-KV handling, chunked prefill, circular SWA cache, and MoE variants. Batched path matches legacy logits within FP noise (`Gemma4BatchedForwardTests`); reaches ~1.5× legacy at batch=8 and ~1.6× at 4×800-token prompts. |
+| DiffusionGemma | [diffusiongemma.md](diffusiongemma.md) | [unsloth/diffusiongemma-26B-A4B-it-GGUF](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF) | `DiffusionGemmaModel` + `DiffusionGemmaSampler` | `diffusion-gemma`, `diffusion_gemma` | Text | No | No | Separate Web UI `DiffusionBatchScheduler`; not an autoregressive `IBatchedPagedModel` path | EntropyBound block denoising over `[prompt \| canvas]`, prompt-KV caching on GPU backends, self-conditioning, fused GGML whole-model diffusion decode and fused lm-head tail |
+| Qwen-Image-Edit | [qwenimage.md](qwenimage.md) | [unsloth/Qwen-Image-Edit-2511-GGUF](https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF) (DiT; VAE / text-encoder companions in the card) | `QwenImageModel` (+ `QwenImagePipeline`) | `qwen_image`, `qwen-image` | Image edit (image+text → image) | No | No | None — `Forward()` throws; editing runs through `EditImage()` and edits are serialized | 60-block MMDiT diffusion (FlowMatch-Euler, true-CFG, reference-latent concat), CUDA-graph-captured whole-DiT forward, default flash attention, CFG-batching, First-Block-Cache, fused Qwen2.5-VL vision encoder, VRAM-aware area clamp |
+| Qwen 3 | [qwen3.md](qwen3.md) | [Qwen/Qwen3-4B-GGUF](https://huggingface.co/Qwen/Qwen3-4B-GGUF) | `Qwen3Model` | `qwen3` | Text | Yes | Yes | Reference port (`Qwen3Model.BatchedForward.cs`) — exercised by `Qwen3BatchedForwardTests` when a base-Qwen3 GGUF is provided | Native whole-model decode with pre-resolved weight pointers |
+| Qwen 3.5 / 3.6 family | [qwen35.md](qwen35.md) | [unsloth/Qwen3.5-9B-GGUF](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF); NextN MTP: [unsloth/Qwen3.6-35B-A3B-MTP-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF) (base-repo Qwen3.6 GGUFs strip the NextN block and silently fall back to standard decode) | `Qwen35Model` | `qwen35`, `qwen35moe`, `qwen3next` | Text, image | Yes | Yes | **Default** (toggle off with `TS_QWEN35_BATCHED=0` or `--no-continuous-batching`). Per-slot recurrent-state pool + optional native GatedDeltaNet kernel (`TS_QWEN35_BATCHED_GDN_NATIVE=1`) | Hybrid FullAttention + GatedDeltaNet recurrent, fused attention layer decode, fused prefill attention, fused output-projection + FFN, fused output-projection + norm + router, batched MoE (routed + shared + residual in a single kernel), fused vision encoder blocks |
+| GPT OSS | [gptoss.md](gptoss.md) | [ggml-org/gpt-oss-20b-GGUF](https://huggingface.co/ggml-org/gpt-oss-20b-GGUF) | `GptOssModel` | `gptoss`, `gpt-oss` | Text | Yes (always) | Yes | **Default** (toggle off with `TS_GPTOSS_BATCHED=0`). Per-head attention sinks via `TSGgml_PagedAttentionForwardWithSinks` (or `TS_GPTOSS_PAGED_ATTN_MANAGED=1` for the C# fallback). 100% greedy match vs legacy in `GptOssBatchedCorrectnessTests`. | Stacked MoE prefill kernel (mul_mat_id + add_id + swiglu_oai), attention sinks, MXFP4 expert weights |
+| Nemotron-H | [nemotron.md](nemotron.md) | [bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF](https://huggingface.co/bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF); Omni: [unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF](https://huggingface.co/unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF) (+ `mmproj-BF16.gguf` for image) | `NemotronModel` | `nemotron_h`, `nemotron_h_moe` | Text, image (Omni-class) | Yes | Yes | **Default** (toggle off with `TS_NEMOTRON_BATCHED=0`). Per-slot Mamba2 conv + SSM state pool; optional native batched Mamba2 step (`TS_NEMOTRON_MAMBA2_BATCHED_NATIVE=1`). 100% greedy match vs legacy; up to 3.95× tps at batch=3 on Apple M4 Pro. | Mamba2 + attention + MoE FFN hybrid stack, batched GPU MoE, RADIO/v2_vl image encoder, Parakeet audio preprocessor (audio inference needs a Parakeet mmproj the GGUF distributions do not ship) |
+| Mistral 3 | [mistral3.md](mistral3.md) | [bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF) | `Mistral3Model` | `mistral3` | Text, image | No | No | **Default** — reference IBatchedPagedModel implementation. End-to-end validated on Ministral-3-14B; native paged-attention kernel is ~21% faster than the legacy per-seq path on long context. | YaRN-corrected RoPE with position-dependent Q scaling, fused QKV / gate_up, Pixtral vision encoder |
 
 ## Backend notes
 
@@ -95,7 +106,8 @@ README.
 Solo (non-concurrent) sequences on architectures that ship a multi-token-prediction
 draft head — Qwen 3.6 (embedded NextN block) and Gemma 4 (separate `gemma4-assistant`
 draft GGUF) — can additionally run lossless MTP speculative decoding through the same
-engine (`--mtp-spec`). The shared draft / verify / rollback core is
+engine (`--mtp-spec` — a `TensorSharp.Server` flag; the CLI has no MTP flags, only the
+`TS_MTP_*` env vars). The shared draft / verify / rollback core is
 `MtpSpeculativeExecution`; per-architecture mechanics are in the Qwen 3.5/3.6 (§12)
 and Gemma 4 (§12) cards.
 
@@ -103,7 +115,7 @@ and Gemma 4 (§12) cards.
 
 | Feature | Gemma 3 | Gemma 4 | DiffusionGemma | Qwen 3 | Qwen 3.5 / 3.6 family | GPT OSS | Nemotron-H | Mistral 3 |
 |---|---|---|---|---|---|---|---|---|
-| Layer type | Dense | Dense / MoE | Gemma-4-derived MoE encoder/decoder | Dense | Hybrid (Attn + Recurrent) ± MoE | MoE | Hybrid (Mamba2 + Attn + MoE FFN) | Dense |
+| Layer type | Dense | Dense / MoE | Gemma-4-derived MoE encoder/decoder | Dense | Hybrid (Attn + Recurrent) ± MoE | MoE | Hybrid (Mamba2 + Attn + FFN, dense or MoE) | Dense |
 | Attention | SWA + Global | SWA + Global | Region-aware prompt/canvas attention | Full GQA | Full GQA + Sigmoid Gate | Full + Sinks | Full GQA (no RoPE) | Full GQA |
 | FFN activation | GeGLU | GeGLU | Dense GeGLU + top-8 MoE | SwiGLU | SwiGLU | SiLUAlphaLimit (clamped GLU) | ReLU² | SwiGLU |
 | RoPE variant | NeoX (dual base) | NeoX + proportional / partial | NeoX, local/global bases | NeoX | NeoX / MRoPE | NeoX + YaRN | None | GPT-J + YaRN |
@@ -120,7 +132,7 @@ and Gemma 4 (§12) cards.
 | Latent bottleneck FFN | No | No | No | No | No | No | Yes (optional) | No |
 | Position-dependent Q scaling | No | No | No | No | No | No | No | Yes (with YaRN) |
 | Vision | Yes | Yes | No | No | Yes | No | Yes (Omni) | Yes (Pixtral) |
-| Audio | No | Yes | No | No | No | No | Yes (Parakeet, when mmproj present) | No |
+| Audio | No | Yes | No | No | No | No | No — image-only Omni (Parakeet log-mel preprocessing exists, but inference needs an audio mmproj that is not shipped) | No |
 | Video | No | Yes | No | No | No | No | No | No |
 | Thinking | No | Yes | No | Yes | Yes | Yes (always) | Yes | No |
 | Tool calling | No | Yes | No | Yes | Yes | Yes | Yes | No |

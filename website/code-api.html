@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>C# Library / Code — TensorSharp Wiki</title>
-  <meta name="description" content="Embed TensorSharp in your .NET application: NuGet packages, loading a model with ModelBase.Create, a decode loop, and SamplingConfig.">
+  <meta name="description" content="Embed TensorSharp from source in your .NET application: project references, ModelBase.Create, a correct prefill/decode loop, and SamplingConfig.">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
   <script>try{var t=localStorage.getItem('ts-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.classList.toggle('dark',t==='dark');}catch(e){}</script>
@@ -16,10 +16,10 @@
 <main class="content" id="content">
   <div class="breadcrumb"><a href="index.html">Home</a> › C# Library / Code</div>
   <h1>Using TensorSharp from C#</h1>
-  <p class="lede">TensorSharp is a real .NET library, not just a binary. Reference the NuGet packages and drive inference directly from your own code — useful when you want inference inside an existing service without an HTTP hop.</p>
+  <p class="lede">TensorSharp is a real .NET library, not just an executable. Reference its projects from a source checkout and drive inference directly from your own code when you do not want an HTTP hop.</p>
 
-  <h2 id="packages">NuGet packages</h2>
-  <p>The repository is split along package boundaries so consumers depend on only the layers they need.</p>
+  <h2 id="packages">Project and package boundaries</h2>
+  <p>The repository is split along publishable package boundaries. The names below are project/package IDs, but the current Runtime/Models/Backends/CLI/Server packages are <strong>not available on NuGet.org</strong>.</p>
   <div class="table-scroll">
   <table>
     <thead><tr><th>Package</th><th>Namespace</th><th>Responsibility</th></tr></thead>
@@ -35,10 +35,9 @@
     </tbody>
   </table>
   </div>
-  <p>For a typical embedding scenario you reference <code>TensorSharp.Models</code> (which pulls in <code>Core</code> + <code>Runtime</code>) and the backend package for your hardware (e.g. <code>TensorSharp.Backends.GGML</code>).</p>
-  <pre data-lang="bash"><code>dotnet add package TensorSharp.Models
-dotnet add package TensorSharp.Backends.GGML</code></pre>
-  <div class="callout note"><div class="ic">📦</div><p>The NuGet packages are <strong>managed-only</strong> — the native GGML/CUDA/MLX libraries are not embedded. Build them once (see <a href="backends.html#native-build">Backends</a>) or use a self-contained platform binary, and make sure the native library is discoverable at run time.</p></div>
+  <p>For a typical embedding scenario, reference <code>TensorSharp.Models.csproj</code>; it already references Core, Runtime, and the backend projects. From a sibling application beside the TensorSharp checkout:</p>
+  <pre data-lang="bash"><code>dotnet add reference ../TensorSharp/TensorSharp.Models/TensorSharp.Models.csproj</code></pre>
+  <div class="callout warn"><div class="ic">📦</div><p>Do not use <code>dotnet add package TensorSharp.Models</code> yet: no current package with that ID is published on NuGet.org. Source builds compile native GGML/MLX by default; for managed-CPU development pass <code>-p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true</code>, or build the native libraries described under <a href="backends.html#native-build">Backends</a>.</p></div>
 
   <h2 id="quickstart">Minimal example — load, generate, decode</h2>
   <p>Every model is loaded the same way: <code>ModelBase.Create()</code> reads the GGUF metadata and instantiates the right architecture. From there you tokenize, run forward passes, sample, and decode.</p>
@@ -48,8 +47,9 @@ using System.Linq;
 using TensorSharp.Models;
 using TensorSharp.Runtime;
 
-// 1. Load any GGUF model — the architecture is auto-detected from metadata.
-using var model = ModelBase.Create("Qwen3-4B-Q8_0.gguf", BackendType.GgmlCuda);
+// 1. Load any supported GGUF — the architecture is detected from metadata.
+//    Pick the BackendType your build supports: GgmlCuda, GgmlMetal, GgmlVulkan, or GgmlCpu.
+using var model = ModelBase.Create("gemma-4-E4B-it-Q8_0.gguf", BackendType.GgmlCuda);
 
 // 2. Configure sampling (defaults match Ollama: temp 0.8, top_k 40, top_p 0.9).
 var sampling = new SamplingConfig { Temperature = 0.7f, TopP = 0.9f, TopK = 40 };
@@ -60,17 +60,20 @@ var tokens = model.Tokenizer
     .ToList();
 var generated = new List&lt;int&gt;();
 
-// 4. Autoregressive decode loop.
+// 4. Prefill the complete prompt once.
+float[] logits = model.Forward(tokens.ToArray());
+
+// 5. Decode one new token at a time. Forward() owns the KV-cache position,
+// so after prefill pass only the newly sampled token, not the full history.
 for (int step = 0; step &lt; 200; step++)
 {
-    float[] logits = model.Forward(tokens.ToArray());     // logits for the next token
     int next = model.Sample(logits, sampling, generated); // applies penalties + sampling
     if (model.Tokenizer.IsEos(next)) break;
     generated.Add(next);
-    tokens.Add(next);
+    logits = model.Forward(new[] { next });
 }
 
-// 5. Detokenize the result.
+// 6. Detokenize the result.
 Console.WriteLine(model.Tokenizer.Decode(generated));</code></pre>
   <p>For greedy/deterministic decoding, call <code>model.SampleGreedy(logits)</code> instead of <code>Sample</code>.</p>
 

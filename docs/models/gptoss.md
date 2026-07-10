@@ -14,6 +14,36 @@
 | Batched / paged forward | **Default ON** — set `TS_GPTOSS_BATCHED=0` to force the legacy per-sequence KV-swap path for A/B comparison. Per-layer paged K/V plus attention sinks via native `TSGgml_PagedAttentionForwardWithSinks` (or managed C# fallback via `TS_GPTOSS_PAGED_ATTN_MANAGED=1`). See §11. |
 | Output parser | `HarmonyOutputParser` (always required) |
 
+## Downloads
+
+Verified GGUF pointer:
+
+| Model | HF repo | Recommended file | Notes |
+|---|---|---|---|
+| gpt-oss-20b (MoE) | [ggml-org/gpt-oss-20b-GGUF](https://huggingface.co/ggml-org/gpt-oss-20b-GGUF) | `gpt-oss-20b-mxfp4.gguf` (12.110 GB) | Native MXFP4 expert quantization; text only. Thinking is always on (Harmony analysis channel) and tool calling is supported. Official upstream: [openai/gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b) (Apache-2.0). |
+
+Command-line download (one line per file; requires `pip install -U huggingface_hub`):
+
+```bash
+python -m pip install -U huggingface_hub
+hf download ggml-org/gpt-oss-20b-GGUF gpt-oss-20b-mxfp4.gguf --local-dir models
+```
+
+CLI one-shot (the text prompt comes from a file via `--input`; CLI sampling
+defaults to greedy and `--max-tokens` defaults to 100):
+
+```bash
+dotnet run --project TensorSharp.Cli -c Release -- --model models/gpt-oss-20b-mxfp4.gguf \
+  --input prompt.txt --max-tokens 512 --backend ggml_cuda
+```
+
+Server (Web UI + OpenAI/Ollama-compatible APIs on `http://localhost:5000`):
+
+```bash
+dotnet run --project TensorSharp.Server -c Release -- --model models/gpt-oss-20b-mxfp4.gguf \
+  --backend ggml_cuda --max-tokens 4096
+```
+
 ## 1. Origin and intent
 
 GPT OSS is OpenAI's open-weights MoE family. Several design choices set it

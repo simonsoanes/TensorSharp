@@ -34,8 +34,8 @@ ConsoleBanner.Print(showSarah);
 
 // Informational invocations print and exit before the web host is built. A
 // bare `TensorSharp.Server` shows the usage page instead of silently starting
-// a model-less server; passing any option (e.g. --backend ggml_cpu) still
-// starts headless for operators who load models from the web UI.
+// a model-less server. Passing another option can still start a status-only
+// process, but inference requires --model at startup.
 if (args.Length == 0 || ServerUsage.IsHelpRequested(args))
 {
     ServerUsage.PrintUsage(Console.Out);
@@ -163,10 +163,9 @@ if (qwenImageFlagsApplied)
 StartupBanner.EmitBackendFallback(startupLogger, hostingOptions, configuredBackendInput);
 
 app.UseTensorSharpRequestLogging();
-// Rewrite "/" to "/index.html" so the bare root serves the chat UI (the
-// MapGet("/") health route below would otherwise win). UseDefaultFiles is a
-// no-op when wwwroot/index.html is absent, so headless/text-only deployments
-// still get the plain-text liveness string at "/".
+// Serve the bundled static UI at /index.html. The explicit GET / endpoint
+// remains the plain liveness response; headless deployments can still start
+// when no wwwroot content is present.
 app.UseDefaultFiles();
 app.UseStaticFiles();
 app.UseStaticFiles(new StaticFileOptions

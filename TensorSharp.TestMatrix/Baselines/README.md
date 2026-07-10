@@ -20,6 +20,10 @@ automatically (see `BaselineStore.DefaultHostLabel`):
 Override with `--baseline <path>` to point at a specific file (useful for
 A/B comparisons against a captured run from a different commit).
 
+> Note: no per-host baseline file is currently committed in this directory.
+> Until one is captured with `--update-baseline`, the runner logs "no baseline
+> found" and regression analysis reports every cell as *untracked* (not gated).
+
 ## What's stored
 
 Each entry records only what's needed for regression detection — not the full

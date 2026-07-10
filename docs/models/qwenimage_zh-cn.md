@@ -16,6 +16,61 @@
 | 服务器支持 | Web UI 图像编辑流程：`POST /api/image-edit` 与 `POST /api/image-edit/stream`（SSE，含实时去噪预览） |
 | 连续批处理 | 无——图像编辑串行执行（扩散网络非线程安全），并发请求逐个处理 |
 
+## 下载
+
+图像编辑需要一套**四组件**文件。DiT GGUF 即 `--model`；伴随文件从同一目录自动
+解析，也可以用 `--qwen-image-vae` / `--qwen-image-vl` / `--qwen-image-mmproj` /
+`--qwen-image-lora`（CLI 与服务器）显式指定——等价的环境变量为
+`TS_QWEN_IMAGE_VAE` / `TS_QWEN_IMAGE_TE` / `TS_QWEN_IMAGE_MMPROJ` /
+`TS_QWEN_IMAGE_LORA`：
+
+| 组件 | HF 仓库 | 文件 |
+|---|---|---|
+| MMDiT DiT（即 `--model` GGUF） | [unsloth/Qwen-Image-Edit-2511-GGUF](https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF) | `qwen-image-edit-2511-Q4_K_M.gguf`（提供 Q2_K…Q8_0 量化阶梯；`Q2_K` 可放进 16 GB VRAM） |
+| Qwen-Image VAE | [QuantStack/Qwen-Image-Edit-GGUF](https://huggingface.co/QuantStack/Qwen-Image-Edit-GGUF) | `VAE/Qwen_Image-VAE.safetensors`（254 MB） |
+| Qwen2.5-VL-7B 文本编码器 | [unsloth/Qwen2.5-VL-7B-Instruct-GGUF](https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF) | `Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf`（低 VRAM 可用 `UD-IQ2_XXS`） |
+| 视觉投影器（可选——图像接地条件） | 同一仓库 | `mmproj-BF16.gguf` |
+| Lightning LoRA（可选——4/8 步编辑） | [lightx2v/Qwen-Image-Edit-2511-Lightning](https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning) | `Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors` |
+
+```bash
+# needs: pip install -U huggingface_hub
+hf download unsloth/Qwen-Image-Edit-2511-GGUF qwen-image-edit-2511-Q4_K_M.gguf --local-dir models
+hf download QuantStack/Qwen-Image-Edit-GGUF VAE/Qwen_Image-VAE.safetensors --local-dir models
+hf download unsloth/Qwen2.5-VL-7B-Instruct-GGUF Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf --local-dir models
+hf download unsloth/Qwen2.5-VL-7B-Instruct-GGUF mmproj-BF16.gguf --local-dir models
+hf download lightx2v/Qwen-Image-Edit-2511-Lightning Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors --local-dir models
+```
+
+`hf download` 会保留仓库中的 `VAE/` 子目录——请把 `Qwen_Image-VAE.safetensors`
+移到 DiT GGUF 旁边（自动解析在 DiT 所在目录中查找这个确切文件名），或改用
+`--qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors` 指定。
+
+CLI 编辑（当 `--model` 是 `qwen_image` GGUF 时自动进入图像编辑模式；`--image`
+必填，编辑指令写在 `--prompt` 中）：
+
+```bash
+dotnet run --project TensorSharp.Cli -c Release -- \
+  --model models/qwen-image-edit-2511-Q4_K_M.gguf --backend ggml_cuda \
+  --qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors \
+  --qwen-image-vl models/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf \
+  --image input.png --prompt "Replace the sky with a golden sunset" \
+  --output edited.png --cfg 2.5 --diffusion-steps 30
+```
+
+（不传 `--cfg` / `--diffusion-steps` 则走自动：30 步 / cfg 2.5；通过
+`--qwen-image-lora` 加载 Lightning LoRA 时为其训练步数 / cfg 1.0。）
+
+服务器（`http://localhost:5000/index.html` 的 Web UI 会把图像 + 提示词路由到
+`POST /api/image-edit/stream`——附上一张图片并输入编辑指令即可）：
+
+```bash
+dotnet run --project TensorSharp.Server -c Release -- \
+  --model models/qwen-image-edit-2511-Q4_K_M.gguf --backend ggml_cuda \
+  --qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors \
+  --qwen-image-vl models/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf \
+  --qwen-image-lora models/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors
+```
+
 ## 1. 来源与意图
 
 Qwen-Image-Edit 是一个指令驱动的图像编辑器。与自回归 LLM 不同，所加载的
@@ -159,6 +214,12 @@ token 序列，使编辑接地于原图。
   补零的输入切片上重跑同一卷积，结果**逐位一致**（无拼缝——只有临时 im2col 被限界），
   使面积钳制可达模型**原生 ~1 MP**，显著改善面部 / 细节。
 
+对比测试：在本项目的 CUDA `image_edit` 基准场景上（可通过
+[`benchmarks/engine_comparison`](../../benchmarks/engine_comparison) 复现；
+544×1184 分辨率的 4 步 Lightning 编辑），TensorSharp 完成一次热编辑耗时
+**40.44 s**，stable-diffusion.cpp 为 48.16 s（快约 1.19×）；冷启动首个请求为
+54.11 s。
+
 重要开关：
 
 | 变量 | 效果 |
@@ -196,7 +257,8 @@ token 序列，使编辑接地于原图。
 - `POST /api/image-edit` 运行单次编辑并返回输出图像。
 - `POST /api/image-edit/stream` 流式发送 SSE 帧：进度滴答加上节流的解码预览
   （`{ imageEdit: true, step, total, image, width, height }`），随后在 `done`
-  之前发送最终的全分辨率图像。
+  之前发送最终的全分辨率图像。请求把步数留为自动（0）时预览同样可用——最多
+  输出 8 帧均匀分布的预览；预览编码失败会降级为仅进度的滴答，而不会中止编辑。
 - 编辑在共享锁后串行执行（扩散网络非线程安全），因此并发请求逐个运行。
 - Ollama / OpenAI 聊天适配器是自回归的，不暴露图像编辑。
 
