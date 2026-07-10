@@ -11,7 +11,7 @@ prefill** scenarios, on any **compute backend** declared in the config's
 It also benchmarks the **stable-diffusion image-editing engine**
 (Qwen-Image-Edit) — TensorSharp's `/api/image-edit` pipeline vs the
 **stable-diffusion.cpp** CLI on the same weights, image, prompt, resolution,
-steps and seed; see [Image editing](#image-editing-stable-diffusion-image_edit).
+steps and seed; see [Image editing](#image-editing--stable-diffusion-image_edit).
 
 Model families under test: **Gemma 4** (`gemma4-e4b` dense multimodal Q8_0 from
 `models/`, plus `gemma4-12b` dense + `gemma4-26b-a4b` MoE, both QAT UD-Q4_K_XL
@@ -71,7 +71,7 @@ concurrency levels, max-tokens, warmup count, server max-tokens headroom).
 Values resolve with this precedence (highest first):
 
 1. **Command-line flags** to `run_matrix.py` / `report.py` (e.g. `--models`, `--scenarios`, `--max-tokens`).
-2. **Environment variables** — host paths only, for retargeting without editing the file (`BENCH_MODEL_ROOT`, `BENCH_TS_SERVER_DLL`, `BENCH_LLAMA_SERVER`, `BENCH_VLLM_URL`, `BENCH_IMAGE`, `BENCH_AUDIO`, `BENCH_VIDEO`, `BENCH_RESULTS`, `DIFFUSION_STEPS`, ...).
+2. **Environment variables** — host paths only, for retargeting without editing the file (`BENCH_MODEL_ROOT`, `BENCH_TS_SERVER_DLL`, `BENCH_LLAMA_SERVER`, `BENCH_VLLM_URL`, `BENCH_SDCPP_EXE`, `BENCH_IMAGE`, `BENCH_AUDIO`, `BENCH_VIDEO`, `BENCH_RESULTS`, `BENCH_QWEN_IMAGE_DIT` / `BENCH_QWEN_IMAGE_VAE` / `BENCH_QWEN_IMAGE_VL` / `BENCH_QWEN_IMAGE_MMPROJ` / `BENCH_QWEN_IMAGE_LORA` (image-edit components), `DIFFUSION_STEPS`, ...).
 3. **`benchmark_config.json`** (or the file named by `--config PATH` / `BENCH_CONFIG`).
 4. Built-in fallbacks in `config.py`.
 
@@ -215,7 +215,10 @@ form still load unchanged, and result files from old runs (backend ids `gpu` /
 Benchmarks **with and without** TensorSharp's multi-token-prediction draft head.
 Each mode relaunches the server (it is a load-time flag): `on` adds `--mtp-spec`,
 and for Gemma 4 also `--mtp-draft-model <draft.gguf>` (Qwen 3.6 embeds its NextN
-block in the trunk, so no extra file is needed). MTP is a TensorSharp feature —
+block in the trunk, so no extra file is needed — but only GGUFs from the
+`unsloth/Qwen3.6-35B-A3B-MTP-GGUF` repo retain that block; base-repo Qwen3.6
+GGUFs with the same file names strip it and the server silently falls back to
+standard decode, making the `on` and `off` cells measure the same thing). MTP is a TensorSharp feature —
 `on` cells for llama.cpp / vLLM and for the diffusion model are recorded as
 skipped. Gemma 4 drafts are target-paired (an E4B `gemma4-assistant` draft for
 `gemma4-e4b`, a 12B draft for `gemma4-12b`, a 26B-A4B draft for
@@ -372,6 +375,10 @@ Result files keep their historical names for the baseline (`mtp` off,
   address is hard-coded), and `wait_ready` aborts with a diagnosis when the
   port's owner is not the process it launched.
 - `docs/engine_comparison_report.md` and `results/results.csv` from `report.py`.
+
+The `results/` directory (per-cell JSONs, logs, images, CSV) is generated
+locally by each run and is **not committed** to the repository — the committed
+artifact is the generated `docs/engine_comparison_report.md`.
 
 ## Scenario / engine coverage notes
 

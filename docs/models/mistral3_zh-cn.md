@@ -16,6 +16,43 @@
 | 批处理 / 分页前向 | **默认启用** —— `IBatchedPagedModel.ForwardBatch` 的参考实现。已在 Ministral-3-14B 上完成端到端验证；原生分页注意力内核在长上下文下比旧路径快约 21%。详见 §11。 |
 | 输出解析器 | `PassthroughOutputParser` |
 
+## 下载
+
+已验证的 GGUF 下载指引（Pixtral `mmproj` 位于同一仓库）：
+
+| 模型 | HF 仓库 | 推荐文件 | Pixtral mmproj |
+|---|---|---|---|
+| Mistral-Small-3.1-24B-Instruct-2503 | [bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF) | `mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf`（14.334 GB）或 `mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q8_0.gguf`（25.055 GB） | `mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf`（0.878 GB；同仓库） |
+
+转换仓库将 [mistralai/Mistral-Small-3.1-24B-Instruct-2503](https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503)
+标记为官方上游；两个模型卡都声明 Apache-2.0。
+
+命令行下载（每个文件一行；需要先 `pip install -U huggingface_hub`）：
+
+```bash
+python -m pip install -U huggingface_hub
+hf download bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf --local-dir models
+hf download bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --local-dir models
+```
+
+CLI 单次推理带图像（Pixtral 视觉需要 `--mmproj`；只给 `--image` 而不给
+`--input` 时会使用默认的描述图片提示词；CLI 采样默认为 greedy，
+`--max-tokens` 默认为 100）：
+
+```bash
+dotnet run --project TensorSharp.Cli -c Release -- --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf \
+  --mmproj models/mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf \
+  --image photo.png --max-tokens 512 --backend ggml_cuda
+```
+
+服务端（聊天 Web UI 以及 OpenAI/Ollama 兼容 API，位于 `http://localhost:5000`）：
+
+```bash
+dotnet run --project TensorSharp.Server -c Release -- --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf \
+  --mmproj models/mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf \
+  --backend ggml_cuda --max-tokens 4096
+```
+
 ## 1. 来源与目标
 
 Mistral 3 是 Mistral 第三代 LLaMA 风格密集 transformer，带两个显著扩展：

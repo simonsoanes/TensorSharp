@@ -14,6 +14,36 @@
 | 批处理 / 分页前向 | **默认启用** —— 设置 `TS_GPTOSS_BATCHED=0` 可强制走旧的按序列 KV-swap 路径用于 A/B 对比。每层分页 K/V，注意力 sinks 通过原生 `TSGgml_PagedAttentionForwardWithSinks`（或托管 C# 回退 `TS_GPTOSS_PAGED_ATTN_MANAGED=1`）。详见 §11。 |
 | 输出解析器 | `HarmonyOutputParser`（始终启用） |
 
+## 下载
+
+已验证的 GGUF 下载指引：
+
+| 模型 | HF 仓库 | 推荐文件 | 说明 |
+|---|---|---|---|
+| gpt-oss-20b（MoE） | [ggml-org/gpt-oss-20b-GGUF](https://huggingface.co/ggml-org/gpt-oss-20b-GGUF) | `gpt-oss-20b-mxfp4.gguf`（12.110 GB） | 原生 MXFP4 expert 量化；仅文本。思维链始终开启（Harmony analysis channel），支持工具调用。官方上游：[openai/gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b)（Apache-2.0）。 |
+
+命令行下载（每个文件一行；需要先 `pip install -U huggingface_hub`）：
+
+```bash
+python -m pip install -U huggingface_hub
+hf download ggml-org/gpt-oss-20b-GGUF gpt-oss-20b-mxfp4.gguf --local-dir models
+```
+
+CLI 单次推理（文本提示词通过 `--input` 从文件读取；CLI 采样默认为 greedy，
+`--max-tokens` 默认为 100）：
+
+```bash
+dotnet run --project TensorSharp.Cli -c Release -- --model models/gpt-oss-20b-mxfp4.gguf \
+  --input prompt.txt --max-tokens 512 --backend ggml_cuda
+```
+
+服务端（聊天 Web UI 以及 OpenAI/Ollama 兼容 API，位于 `http://localhost:5000`）：
+
+```bash
+dotnet run --project TensorSharp.Server -c Release -- --model models/gpt-oss-20b-mxfp4.gguf \
+  --backend ggml_cuda --max-tokens 4096
+```
+
 ## 1. 来源与目标
 
 GPT OSS 是 OpenAI 的开放权重 MoE 系列。它有几个让它在 TensorSharp 中显得与众不同的设计：

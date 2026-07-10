@@ -16,6 +16,44 @@
 | 批处理 / 分页前向 | 未实现。当连续批处理引擎激活时，Gemma 3 走 `BatchExecutor` 的按序列 KV 交换回退路径。详见 §11。 |
 | 输出解析器 | `PassthroughOutputParser` |
 
+## 下载
+
+已验证的 GGUF 下载指引：
+
+| 模型 | HF 仓库 | 推荐文件 | mmproj |
+|---|---|---|---|
+| gemma-3-4b-it（官方 QAT） | [google/gemma-3-4b-it-qat-q4_0-gguf](https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf) | `gemma-3-4b-it-q4_0.gguf`（3.155 GB） | `mmproj-model-f16-4B.gguf`（0.851 GB；同仓库） |
+| gemma-3-4b-it（非受限备选） | [ggml-org/gemma-3-4b-it-GGUF](https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF) | `gemma-3-4b-it-Q4_K_M.gguf`（2.490 GB）或 `gemma-3-4b-it-Q8_0.gguf`（4.130 GB） | `mmproj-model-f16.gguf`（0.851 GB；同仓库） |
+
+官方 `google/...` 仓库是**受限（gated）**的：下载其文件需要登录 Hugging Face
+并接受 Google 的 Gemma 许可协议。`ggml-org` 仓库可匿名下载，
+但权重仍派生自 Gemma，其模型卡声明为 Gemma 许可证。
+
+命令行下载（每个文件一行；需要先 `pip install -U huggingface_hub`）：
+
+```bash
+python -m pip install -U huggingface_hub
+hf download ggml-org/gemma-3-4b-it-GGUF gemma-3-4b-it-Q4_K_M.gguf --local-dir models
+hf download ggml-org/gemma-3-4b-it-GGUF mmproj-model-f16.gguf --local-dir models
+```
+
+CLI 单次推理（文本提示词通过 `--input` 从文件读取；只给 `--image` 而不给
+`--input` 时会使用默认的描述图片提示词；CLI 采样默认为 greedy，
+`--max-tokens` 默认为 100）：
+
+```bash
+dotnet run --project TensorSharp.Cli -c Release -- --model models/gemma-3-4b-it-Q4_K_M.gguf \
+  --mmproj models/mmproj-model-f16.gguf \
+  --image photo.png --max-tokens 300 --backend ggml_cpu
+```
+
+服务端（聊天 Web UI 以及 OpenAI/Ollama 兼容 API，位于 `http://localhost:5000`）：
+
+```bash
+dotnet run --project TensorSharp.Server -c Release -- --model models/gemma-3-4b-it-Q4_K_M.gguf \
+  --mmproj models/mmproj-model-f16.gguf --backend ggml_cuda --max-tokens 4096
+```
+
 ## 1. 来源与目标
 
 Gemma 3 是 Google 第三代开源 LLM，从更大的 Gemini 系蒸馏而来。架构上的关键决定是：

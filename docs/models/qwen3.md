@@ -14,6 +14,66 @@
 | Batched / paged forward | Reference port — first model in TensorSharp to implement `IBatchedPagedModel.ForwardBatch`. Template for Mistral 3 / Gemma 4 / Qwen 3.5 / Nemotron-H batched ports. See §11. |
 | Output parser | `Qwen3OutputParser` |
 
+## Downloads
+
+Verified public GGUF sources (text-only — no companion files needed; sizes are
+rounded from Hugging Face file metadata):
+
+| Model | HF repo | Recommended file | Intended use |
+|---|---|---|---|
+| Qwen3-4B | [Qwen/Qwen3-4B-GGUF](https://huggingface.co/Qwen/Qwen3-4B-GGUF) | `Qwen3-4B-Q4_K_M.gguf` (2.497 GB) or `Qwen3-4B-Q8_0.gguf` (4.280 GB) | Smallest recommended text / thinking / tools starter |
+
+For the fastest verified way to run TensorSharp end to end, follow the README
+[Quick Start](../../README.md#quick-start) (Gemma 4 E4B).
+
+### Verified Gemma 4 E4B native GGML fast path
+
+To exercise the native fast path, use the verified E4B Q8_0
+family/path tier and the recommended public ggml-org artifact, then perform a
+normal native build. This does not assert that a particular public-file
+checksum was the benchmark input. The block below is for Linux + NVIDIA; for
+Apple Silicon omit the CUDA environment assignment and use `ggml_metal`, or
+request Vulkan explicitly and use `ggml_vulkan` on a capable GPU:
+
+```bash
+python -m pip install -U huggingface_hub
+hf download ggml-org/gemma-4-E4B-it-GGUF gemma-4-E4B-it-Q8_0.gguf --local-dir models
+TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet build TensorSharp.slnx -c Release -p:TensorSharpSkipMlxNative=true
+printf '%s\n' 'Answer in one sentence: what is TensorSharp?' > prompt.txt
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
+  --input prompt.txt --max-tokens 64 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
+  --backend ggml_cuda --max-tokens 128
+```
+
+The projector is optional for text-only requests. Download
+`mmproj-gemma-4-E4B-it-Q8_0.gguf` from the same repository and pass it with
+`--mmproj` for image, video, or audio input. Fast-path routing and its evidence
+are documented in the
+[Gemma 4 card](gemma4.md#verified-gemma-4-e4b-native-ggml-fast-path).
+
+To download the Qwen3-4B starter:
+
+```bash
+python -m pip install -U huggingface_hub
+hf download Qwen/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf --local-dir models
+```
+
+CLI one-shot (the text prompt comes from a file via `--input`; default sampling
+is greedy, default backend is `ggml_cpu`, and the default `--max-tokens` is 100 —
+raise it for real answers):
+
+```bash
+printf '%s\n' 'Why is the sky blue?' > prompt.txt
+dotnet run --project TensorSharp.Cli -c Release -- --model models/Qwen3-4B-Q4_K_M.gguf --input prompt.txt --max-tokens 512
+```
+
+Server (Web UI + OpenAI/Ollama-compatible APIs on `http://localhost:5000`):
+
+```bash
+dotnet run --project TensorSharp.Server -c Release -- --model models/Qwen3-4B-Q4_K_M.gguf --backend ggml_cuda --max-tokens 4096
+```
+
 ## 1. Origin and intent
 
 Qwen 3 is the dense-only baseline transformer in the Alibaba Qwen line and the

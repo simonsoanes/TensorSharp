@@ -38,15 +38,16 @@
   <div class="callout tip"><div class="ic">🎯</div><p>Because the request's own sampler — temperature, top-k/p, and all penalties — drives <em>both</em> the draft and the verify, the output is <strong>identical to standard decode</strong>. Speculation only changes how many forward passes it takes to produce the same tokens.</p></div>
   <p>It is off by default. Enable it on the server with <code>--mtp-spec</code> (env <code>TS_MTP_SPEC=1</code>):</p>
   <pre data-lang="bash"><code># Qwen 3.6 — the NextN block is embedded in the trunk GGUF, no extra file needed
-./TensorSharp.Server --model Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf --backend ggml_cuda \
+# (use a GGUF from unsloth/Qwen3.6-35B-A3B-MTP-GGUF; base-repo exports strip the NextN block)
+dotnet run --project TensorSharp.Server -c Release --no-build -- --model Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf --backend ggml_cuda \
     --mtp-spec --mtp-draft 8 --mtp-pmin 0.75
 
 # Gemma 4 — load the separate gemma4-assistant draft GGUF that matches the target
-./TensorSharp.Server --model gemma-4-12B-it-Q4_K_M.gguf --backend ggml_cuda \
-    --mtp-spec --mtp-draft-model gemma-4-12B-assistant-Q8_0.gguf</code></pre>
+dotnet run --project TensorSharp.Server -c Release --no-build -- --model gemma-4-12B-it-qat-UD-Q4_K_XL.gguf --backend ggml_cuda \
+    --mtp-spec --mtp-draft-model mtp-gemma-4-12B-it.gguf</code></pre>
   <h4>Two draft-head shapes</h4>
   <ul>
-    <li><strong>Qwen 3.6 (embedded NextN)</strong> — the GGUF carries one extra decoder block plus the NextN projection/norm tensors. No separate file; <code>--mtp-draft-model</code> is ignored. The GatedDeltaNet trunk state is snapshotted so a partially-rejected verify batch can roll back.</li>
+    <li><strong>Qwen 3.6 (embedded NextN)</strong> — the GGUF carries one extra decoder block plus the NextN projection/norm tensors. No separate file; <code>--mtp-draft-model</code> is ignored. Note that only GGUFs that retain the NextN tensors carry it — the <a href="https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF" target="_blank" rel="noopener">unsloth/Qwen3.6-35B-A3B-MTP-GGUF</a> repo keeps them, while base-repo Qwen3.6 exports strip the block and silently fall back to standard decode. The GatedDeltaNet trunk state is snapshotted so a partially-rejected verify batch can roll back.</li>
     <li><strong>Gemma 4 (separate <code>gemma4-assistant</code> GGUF)</strong> — an EAGLE-style recurrent drafter loaded with <code>--mtp-draft-model</code>. It holds no K/V of its own: every draft layer queries the target model's existing per-layer KV cache. The draft's hidden size must match the target (pair the 12B target with its 12B draft). A mismatched or incomplete draft <strong>fails fast at startup</strong> with a remediation hint.</li>
   </ul>
   <h4>Where it's profitable</h4>
@@ -72,16 +73,20 @@
 
   <h2 id="perf">Performance optimizations</h2>
   <p>A cross-architecture summary; each per-model card in <code>docs/models/</code> walks through the same kernels with the exact GGML graph dispatched.</p>
+  <div class="callout tip"><div class="ic">⚡</div><p><strong>Verified Gemma 4 E4B Q8_0 fast path:</strong> repository benchmarks verify the native-GGML E4B Q8_0 family and execution path on GPU backends. Use <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener"><code>ggml-org/gemma-4-E4B-it-GGUF</code></a> as the recommended public artifact.</p></div>
   <ul>
-    <li><strong>Fused GPU decode</strong> (Gemma 4) — all transformer layers in a single GGML graph dispatch, cutting CPU↔GPU round-trips from hundreds per token to one (~2.6× over per-op dispatch).</li>
-    <li><strong>Fused GPU prefill</strong> (Gemma 4) — dense layers run the whole block (norms, QKV, RoPE, attention, FFN, residuals) as one dispatch per layer during prefill.</li>
-    <li><strong>Chunked prefill</strong> (Gemma 4) — long prompts are split into bounded chunks to avoid O(n²) attention score tensors for sliding-window layers. A solo (uncontended) request gets a split chunk size: the fresh <code>start_pos = 0</code> chunk runs through the fused whole-graph path at <code>TS_SCHED_SOLO_PREFILL_CHUNK</code> (default 8192), the remaining tail at <code>TS_SCHED_SOLO_TAIL_PREFILL_CHUNK</code> (default 2048).</li>
+    <li><strong>Single-graph GPU decode</strong> (Gemma 4 dense, including E4B) — all transformer layers run in one GGML graph dispatch, cutting CPU↔GPU round-trips from hundreds per token to one (~2.6× over per-op dispatch).</li>
+    <li><strong>Fused prefill / verify with E4B semantics</strong> — the native whole-model path carries per-layer embeddings (PLE) and shared-KV donor mapping through E4B prefill/verify instead of falling back to hundreds of per-op submissions.</li>
+    <li><strong>Automatic scheduler N=1 fast path</strong> — when only one sequence is scheduled, the server automatically uses Gemma 4's fused per-sequence forward rather than paying the fully batched path's fixed overhead.</li>
+    <li><strong>Chunked prefill</strong> (Gemma 4) — long prompts are split into bounded chunks to avoid O(n²) attention score tensors for sliding-window layers. A solo (uncontended) request runs through the fused whole-graph path with one larger cap, <code>TS_SCHED_SOLO_PREFILL_CHUNK</code> (default 8192); under contention the chunk size drops to <code>TS_SCHED_PREFILL_CHUNK</code> (default 1024).</li>
     <li><strong>Fused Qwen 3.5/3.6 attention &amp; FFN</strong> — single-graph fused attention-layer decode, fused prefill attention, fused out-proj + FFN, and fused vision encoder blocks (~15 ops → 2).</li>
+    <li><strong>Fused QK-Norm + RoPE</strong> (Qwen 3.5/3.6, direct CUDA) — a single CUDA kernel applies QK-Norm and NeoX RoPE in the text-only prefill path on the <code>cuda</code> backend. Default on; disable with <code>TS_FUSED_QKNORM_ROPE=0</code>.</li>
     <li><strong>Native quantized compute</strong> — Q4_K_M, Q6_K, Q8_0, IQ2_XXS, MXFP4 used directly in matmul without expanding to FP32; a batched <code>AddmmQuantBatch</code> handles multiple sub-weight matmuls in one dispatch.</li>
     <li><strong>Batched GPU MoE</strong> — all selected experts (plus the optional shared expert and residual add) collapse into a single GGML graph dispatch per MoE layer.</li>
     <li><strong>KV-cache prefix reuse</strong> — multi-turn conversations reuse the longest matching token prefix; sliding-window models back off truncation by the window size.</li>
     <li><strong>Kernel warmup</strong> — both CLI and server run a tiny forward pass at startup to pre-compile GPU kernels and warm the pool, avoiding cold-start latency.</li>
   </ul>
+  <p><em>Experimental:</em> <code>TS_GGML_MANAGED_OPS=1</code> opts in to an in-progress managed C# port of the GGML ops (the managed graphs share the same backend instance and CUDA context as the remaining native kernels). Default off.</p>
 
   <h2 id="memory">Memory optimizations</h2>
   <ul>

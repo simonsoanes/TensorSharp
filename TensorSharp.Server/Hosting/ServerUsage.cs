@@ -86,13 +86,13 @@ namespace TensorSharp.Server.Hosting
             ("Model", new[]
             {
                 new OptionHelp("--model <path>",
-                    "GGUF model to host at startup. Default: none — pass any other option (e.g. --backend) to start " +
-                    "without a model and load one later from the web UI or /api/models/load.",
-                    "--model C:\\models\\Qwen3.5-9B-Q8_0.gguf"),
+                    "GGUF model to host at startup. Required for inference. Other options can start a model-less " +
+                    "status process, but /api/models/load cannot select a GGUF that was not supplied at startup.",
+                    "--model C:\\models\\gemma-4-E4B-it-Q8_0.gguf"),
                 new OptionHelp("--mmproj <path|none>",
                     "Multimodal projector GGUF. A bare filename is resolved next to the model; 'none' disables it. " +
-                    "Requires --model. Default: auto-detect next to the model.",
-                    "--mmproj gemma-4-E4B-mmproj-F16.gguf"),
+                    "Requires --model. Default: none — pass the matching projector explicitly.",
+                    "--mmproj mmproj-gemma-4-E4B-it-Q8_0.gguf"),
             }),
             ("Compute backend", new[]
             {
@@ -242,9 +242,9 @@ namespace TensorSharp.Server.Hosting
 
             writer.WriteLine();
             writer.WriteLine("Examples:");
-            writer.WriteLine("  TensorSharp.Server --model C:\\models\\gemma-4-E4B-it-Q8_0.gguf --backend ggml_vulkan --gpu-device 1");
-            writer.WriteLine("  TensorSharp.Server --model model.gguf --mmproj mmproj.gguf --backend ggml_cuda --max-tokens 4096");
-            writer.WriteLine("  TensorSharp.Server --backend ggml_cpu    (start with no model; load one from the web UI)");
+            writer.WriteLine("  TensorSharp.Server --model C:\\models\\gemma-4-E4B-it-Q8_0.gguf --backend ggml_cpu");
+            writer.WriteLine("  TensorSharp.Server --model gemma-4-E4B-it-Q8_0.gguf --mmproj mmproj-gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda");
+            writer.WriteLine("  TensorSharp.Server --backend ggml_cpu    (model-less status process; inference unavailable)");
             writer.WriteLine();
             writer.WriteLine("Logging env vars: TENSORSHARP_LOG_LEVEL (Information), TENSORSHARP_LOG_DIR (./logs),");
             writer.WriteLine("TENSORSHARP_LOG_FILE=0 disables file logging.");

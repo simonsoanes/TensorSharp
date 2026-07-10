@@ -28,15 +28,15 @@
     </div>
     <div class="hero-art" aria-hidden="true">
       <div><span class="c-cm"># 一次性生成</span></div>
-      <div>./TensorSharp.Cli \</div>
+      <div>dotnet run --project TensorSharp.Cli -- \</div>
       <div>&nbsp;&nbsp;--model <span class="c-st">gemma-4-E4B-it-Q8_0.gguf</span> \</div>
       <div>&nbsp;&nbsp;--input prompt.txt \</div>
       <div>&nbsp;&nbsp;--backend <span class="c-ac">ggml_cuda</span></div>
       <div>&nbsp;</div>
       <div><span class="c-cm"># 或启动兼容 OpenAI 的 API 服务</span></div>
-      <div>./TensorSharp.Server \</div>
-      <div>&nbsp;&nbsp;--model <span class="c-st">model.gguf</span> --backend <span class="c-ac">ggml_metal</span></div>
-      <div><span class="c-cm"># → http://localhost:5000</span></div>
+      <div>dotnet run --project TensorSharp.Server -- \</div>
+      <div>&nbsp;&nbsp;--model <span class="c-st">model.gguf</span> --backend <span class="c-ac">cpu</span></div>
+      <div><span class="c-cm"># → http://localhost:5000/index.html</span></div>
     </div>
   </section>
 
@@ -54,38 +54,36 @@
     <a class="card" href="glossary_zh-cn.html"><div class="ic">📖</div><h3>术语表与 FAQ</h3><p>初识大模型？这里有通俗的定义和常见问题。</p></a>
   </div>
 
-  <h2 id="quickstart">约 30 秒快速开始</h2>
-  <p>装好 <a href="getting-started_zh-cn.html#prerequisites">.NET 10 SDK</a> 后，只需四条命令即可得到流式回复（模型下载时间另计）。</p>
+  <h2 id="quickstart">约 30 秒快速上手</h2>
+  <p>安装 <a href="getting-started_zh-cn.html#prerequisites">.NET 10 SDK</a>、<code>git</code> 与 <code>curl</code> 后，这条路径在原生 GGML 后端上运行经基准验证的 <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener">Gemma 4 E4B Q8_0</a> 模型。复制命令约需 30 秒；7.48 GiB 的模型下载与首次 restore/构建耗时更久，取决于网络与机器。下面的代码块面向 Linux + NVIDIA —— 其他后端见<a href="#quickstart-e4b">下文</a>。Windows PowerShell 请用 <code>curl.exe</code>。</p>
   <ol class="steps">
     <li>
-      <h3>克隆并构建</h3>
-      <p>首次构建时会自动编译原生 GGML 库。</p>
+      <h3>克隆</h3>
+      <p>下方第一次 <code>dotnet run</code> 会 restore 项目并编译原生 GGML CUDA 后端；首次构建可能需要数分钟。</p>
       <pre data-lang="bash"><code>git clone https://github.com/zhongkaifu/TensorSharp.git
-cd TensorSharp
-dotnet build TensorSharp.slnx -c Release</code></pre>
+cd TensorSharp</code></pre>
     </li>
     <li>
       <h3>下载模型</h3>
-      <p>一个轻量、经过充分测试的起点是 Hugging Face 上的 <strong>Gemma-4-E4B (Q8_0)</strong>。更多见<a href="models_zh-cn.html#downloads">模型下载</a>。</p>
+      <p>推荐文件是 <code>gemma-4-E4B-it-Q8_0.gguf</code>（7.48 GiB）；同一仓库还提供更省内存的 <code>gemma-4-E4B-it-Q4_K_M.gguf</code>。</p>
+      <pre data-lang="bash"><code>curl --create-dirs --fail -L "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" -o models/gemma-4-E4B-it-Q8_0.gguf</code></pre>
     </li>
     <li>
       <h3>运行它</h3>
-      <p>根据你的硬件选择 <a href="backends_zh-cn.html#table"><code>--backend</code></a>。</p>
-      <pre data-lang="bash"><code>echo "用一句话解释专家混合（MoE）。" > prompt.txt
-
-# macOS（Apple Silicon）
-./TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --backend ggml_metal
-
-# Windows / Linux + NVIDIA
-./TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --backend ggml_cuda</code></pre>
+      <p>环境变量赋值用于启用 CUDA 原生构建。E4B 还支持思考（<code>--think</code>）与工具调用（<code>--tools</code>）。</p>
+      <pre data-lang="bash"><code>echo "简短回答：TensorSharp 是什么？" &gt; prompt.txt
+TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Cli -c Release -p:TensorSharpSkipMlxNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 128 --backend ggml_cuda</code></pre>
     </li>
     <li>
       <h3>想要 UI + API？</h3>
-      <p>启动服务器并打开浏览器聊天 —— 它同时提供兼容性接口。</p>
-      <pre data-lang="bash"><code>./TensorSharp.Server --model gemma-4-E4B-it-Q8_0.gguf --backend ggml_metal
-# 打开 http://localhost:5000</code></pre>
+      <p>用同一模型启动服务端。<code>/</code> 是健康检查，浏览器聊天位于 <code>/index.html</code>。</p>
+      <pre data-lang="bash"><code>TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Server -c Release -p:TensorSharpSkipMlxNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --max-tokens 128
+# 打开 http://localhost:5000/index.html</code></pre>
     </li>
   </ol>
+
+  <h3 id="quickstart-e4b">其他后端与多模态</h3>
+  <p>Apple Silicon 请省略 CUDA 环境变量并使用 <code>ggml_metal</code>；受支持的 Windows/Linux Vulkan GPU 请改为请求 <code>TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON</code> 并使用 <code>ggml_vulkan</code>；没有 GPU 时使用 <code>ggml_cpu</code>（原生 CPU 内核，无需 GPU 工具链）。纯文本推理只需要模型 GGUF；图像、视频或音频输入还需下载匹配的 <code>mmproj-gemma-4-E4B-it-Q8_0.gguf</code>，并通过 <code>--mmproj</code> 传入。Windows PowerShell 与完整平台语法见 <a href="getting-started_zh-cn.html#e4b-fast-lane">E4B 快路径说明</a>。</p>
 
   <h2 id="why">为什么选择 TensorSharp？</h2>
   <div class="card-grid">
@@ -93,9 +91,9 @@ dotnet build TensorSharp.slnx -c Release</code></pre>
     <div class="card"><div class="ic">💸</div><h3>没有按 token 账单</h3><p>硬件允许多少就跑多少 —— 成本可预测，没有计量 API。</p></div>
     <div class="card"><div class="ic">🔁</div><h3>即插即用兼容</h3><p>支持 Ollama 与 OpenAI 协议，现有工具与 SDK 直接可用。</p></div>
     <div class="card"><div class="ic">🖥️</div><h3>随处可运行</h3><p>NVIDIA (CUDA)、AMD / Intel / NVIDIA (Vulkan)、Apple Silicon (Metal/MLX) 或纯 CPU —— 均带自动回退。</p></div>
-    <div class="card"><div class="ic">🧠</div><h3>现代模型支持</h3><p>Gemma、Qwen、GPT-OSS、Nemotron-H、Mistral，外加视觉、音频、推理与工具调用。</p></div>
+    <div class="card"><div class="ic">🧠</div><h3>现代模型支持</h3><p>Gemma、Qwen、GPT-OSS、Nemotron-H、Mistral，外加视觉、音频、PDF 文档、推理与工具调用。</p></div>
     <div class="card"><div class="ic">⚙️</div><h3>用 .NET 构建</h3><p>原生 C# 引擎，可嵌入你的应用，而不只是一个黑盒二进制。</p></div>
-    <a class="card" href="benchmarks_zh-cn.html#head-to-head"><div class="ic">🏁</div><h3>对比 llama.cpp 的基准</h3><p>在相同 GGUF 文件与相同 GPU 上与 C++ 引擎互有胜负：26B-A4B MoE 的 prefill 快 1.32×、首 token 早 1.30×，12B 在每个 decode 场景上打平或获胜（1.17×），E4B 上 JSON 模式 decode 流速快 7.7×。</p></a>
+    <a class="card" href="benchmarks_zh-cn.html#head-to-head"><div class="ic">🏁</div><h3>对比 llama.cpp 的基准</h3><p>在相同 GGUF 文件与相同 GPU 上与 C++ 引擎互有胜负 —— 在本项目的 GGML CUDA 对比运行中（可通过 <code>benchmarks/engine_comparison</code> 复现）：26B-A4B MoE 的 prefill 快 1.32×、首 token 早 1.30×，12B 在每个 decode 场景上打平或获胜（1.17×），E4B 上 JSON 模式 decode 流速快 7.7×。Qwen-Image-Edit 也胜过 stable-diffusion.cpp（CUDA 上预热后的编辑快约 1.19×）。</p></a>
   </div>
 
   <h2 id="audience">这是为谁准备的？</h2>

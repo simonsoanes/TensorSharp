@@ -16,6 +16,43 @@
 | Batched / paged forward | **Default** — reference `IBatchedPagedModel.ForwardBatch`. Verified end-to-end on Ministral-3-14B; native paged-attention kernel ~21% faster than legacy on long context. See §11. |
 | Output parser | `PassthroughOutputParser` |
 
+## Downloads
+
+Verified GGUF pointer (the Pixtral `mmproj` lives in the same repo):
+
+| Model | HF repo | Recommended file | Pixtral mmproj |
+|---|---|---|---|
+| Mistral-Small-3.1-24B-Instruct-2503 | [bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF) | `mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf` (14.334 GB) or `mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q8_0.gguf` (25.055 GB) | `mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf` (0.878 GB; same repo) |
+
+The conversion identifies [mistralai/Mistral-Small-3.1-24B-Instruct-2503](https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503)
+as its official upstream; both model cards declare Apache-2.0.
+
+Command-line download (one line per file; requires `pip install -U huggingface_hub`):
+
+```bash
+python -m pip install -U huggingface_hub
+hf download bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf --local-dir models
+hf download bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --local-dir models
+```
+
+CLI one-shot with an image (Pixtral vision needs `--mmproj`; with `--image`
+and no `--input` a default describe-the-image prompt is used; CLI sampling
+defaults to greedy and `--max-tokens` defaults to 100):
+
+```bash
+dotnet run --project TensorSharp.Cli -c Release -- --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf \
+  --mmproj models/mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf \
+  --image photo.png --max-tokens 512 --backend ggml_cuda
+```
+
+Server (Web UI + OpenAI/Ollama-compatible APIs on `http://localhost:5000`):
+
+```bash
+dotnet run --project TensorSharp.Server -c Release -- --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf \
+  --mmproj models/mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf \
+  --backend ggml_cuda --max-tokens 4096
+```
+
 ## 1. Origin and intent
 
 Mistral 3 is Mistral's third-generation LLaMA-style dense transformer with two

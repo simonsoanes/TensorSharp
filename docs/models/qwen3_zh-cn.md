@@ -14,6 +14,61 @@
 | 批处理 / 分页前向 | 参考移植 —— TensorSharp 中第一个实现 `IBatchedPagedModel.ForwardBatch` 的模型。Mistral 3 / Gemma 4 / Qwen 3.5 / Nemotron-H 的批处理移植都以它为模板。详见 §11。 |
 | 输出解析器 | `Qwen3OutputParser` |
 
+## 下载
+
+已验证的公开 GGUF 来源（纯文本 —— 无需伴随文件；
+大小由 Hugging Face 文件元数据取整）：
+
+| 模型 | HF 仓库 | 推荐文件 | 用途 |
+|---|---|---|---|
+| Qwen3-4B | [Qwen/Qwen3-4B-GGUF](https://huggingface.co/Qwen/Qwen3-4B-GGUF) | `Qwen3-4B-Q4_K_M.gguf`（2.497 GB）或 `Qwen3-4B-Q8_0.gguf`（4.280 GB） | 推荐的最小文本 / 思考 / 工具入门模型 |
+
+想以最快的已验证方式完整跑通 TensorSharp，请按 README
+[快速开始](../../README_zh-cn.md#快速开始)（Gemma 4 E4B）操作。
+
+### 已验证的 Gemma 4 E4B 原生 GGML 快速路径
+
+要实际执行原生快速路径，请使用已验证的 E4B Q8_0 家族 / 路径层级与推荐的公开
+ggml-org 文件，并完成正常原生构建；这里不声称基准输入对应某个公开文件的特定校验和。
+下面的代码块面向 Linux + NVIDIA。Apple Silicon 请省略 CUDA 环境变量并改用
+`ggml_metal`；支持 Vulkan 的 GPU 请显式请求 Vulkan 构建并改用 `ggml_vulkan`：
+
+```bash
+python -m pip install -U huggingface_hub
+hf download ggml-org/gemma-4-E4B-it-GGUF gemma-4-E4B-it-Q8_0.gguf --local-dir models
+TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet build TensorSharp.slnx -c Release -p:TensorSharpSkipMlxNative=true
+printf '%s\n' '用一句话回答：TensorSharp 是什么？' > prompt.txt
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
+  --input prompt.txt --max-tokens 64 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
+  --backend ggml_cuda --max-tokens 128
+```
+
+纯文本请求不需要投影器。图像、视频或音频输入需要从同一仓库下载
+`mmproj-gemma-4-E4B-it-Q8_0.gguf`，并通过 `--mmproj` 传入。快速路径路由及其依据见
+[Gemma 4 卡片](gemma4_zh-cn.md#已验证的-gemma-4-e4b-原生-ggml-快速路径)。
+
+下载 Qwen3-4B 入门模型：
+
+```bash
+python -m pip install -U huggingface_hub
+hf download Qwen/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf --local-dir models
+```
+
+CLI 单次推理（文本提示词通过 `--input` 从文件读取；采样默认为 greedy，后端默认
+为 `ggml_cpu`，`--max-tokens` 默认为 100 —— 实际问答请调大）：
+
+```bash
+printf '%s\n' '为什么天空是蓝色的？' > prompt.txt
+dotnet run --project TensorSharp.Cli -c Release -- --model models/Qwen3-4B-Q4_K_M.gguf --input prompt.txt --max-tokens 512
+```
+
+服务端（Web UI + OpenAI / Ollama 兼容 API，位于 `http://localhost:5000`）：
+
+```bash
+dotnet run --project TensorSharp.Server -c Release -- --model models/Qwen3-4B-Q4_K_M.gguf --backend ggml_cuda --max-tokens 4096
+```
+
 ## 1. 来源与目标
 
 Qwen 3 是阿里 Qwen 系中纯密集型基线 transformer，也是 TensorSharp 中最简洁的「全功能」架构。它有两层意义：

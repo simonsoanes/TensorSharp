@@ -19,39 +19,55 @@
   <p class="lede"><code>TensorSharp.Server</code> 是一个 ASP.NET Core 应用，托管单个 GGUF 模型，并在同一端口上暴露浏览器聊天 UI 以及兼容 Ollama 和 OpenAI 的 REST API。连续批处理引擎负责并发。</p>
 
   <h2 id="start">启动服务器</h2>
-  <pre data-lang="bash"><code>cd TensorSharp.Server/bin
+  <h3 id="e4b-fast-lane">约 30 秒快速开始（Gemma 4 E4B）</h3>
+  <p>安装 <a href="https://dotnet.microsoft.com/download/dotnet/10.0" target="_blank" rel="noopener">.NET 10 SDK</a>、Git、CMake 与 <code>curl</code>，然后在终端粘贴下面的命令。复制并运行这些命令约需 30 秒；7.48 GiB 的模型下载与首次还原/构建耗时更长，取决于网络速度与机器性能。它会通过原生 GGML 桥接托管仓库基准已验证的 Gemma 4 E4B Q8_0，使用推荐的公开 <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener"><code>ggml-org</code> 文件</a>。下面的代码块面向 Linux + NVIDIA（CUDA 构建还需要 CUDA Toolkit）：</p>
+  <pre data-lang="bash"><code>git clone https://github.com/zhongkaifu/TensorSharp.git
+cd TensorSharp
+TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet build TensorSharp.slnx -c Release -p:TensorSharpSkipMlxNative=true
+curl --create-dirs --fail -L "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" -o models/gemma-4-E4B-it-Q8_0.gguf
+dotnet run --project TensorSharp.Server -c Release --no-build -- --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda</code></pre>
+  <p>Apple Silicon 请省略 CUDA 环境变量并使用 <code>ggml_metal</code>；受支持的 Windows/Linux Vulkan GPU 请改为请求 <code>TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON</code> 并使用 <code>ggml_vulkan</code>；没有受支持的 GPU 时可省略该环境变量并使用 <code>ggml_cpu</code>。占用内存更低的 <code>gemma-4-E4B-it-Q4_K_M.gguf</code> 位于同一仓库。纯文本不需要投影器；图像、视频或音频还需匹配的 <code>mmproj-gemma-4-E4B-it-Q8_0.gguf</code>，并通过 <code>--mmproj</code> 传入。Windows PowerShell 与完整平台语法见<a href="getting-started_zh-cn.html#e4b-fast-lane">快速开始</a>。</p>
+  <p>在第二个终端中验证 OpenAI 兼容端点：</p>
+  <pre data-lang="bash"><code>curl -s http://localhost:5000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemma-4-E4B-it-Q8_0.gguf","messages":[{"role":"user","content":"Reply with one short hello."}],"max_tokens":32}'</code></pre>
+  <p>API 基址是 <strong><code>http://localhost:5000</code></strong>。内置聊天 UI 位于 <strong><a href="http://localhost:5000/index.html"><code>http://localhost:5000/index.html</code></a></strong>；<code>GET /</code> 是存活检查接口，返回 <code>"TensorSharp.Server is running"</code>。</p>
+  <div class="callout note"><div class="ic">📌</div><p>推理必须在启动时传入 <code>--model</code>。服务器只托管启动时指定的 GGUF，以及可选且必须显式传入的 <code>--mmproj</code>；它不会扫描模型目录或自动探测投影器。<code>/api/models/load</code> 只能用其他受支持后端重新加载同一启动组合。无模型进程不能在运行时选择 GGUF。监听地址固定为 <code>http://0.0.0.0:5000</code>，没有端口参数。</p></div>
+  <div class="callout warn"><div class="ic">🔐</div><p>服务端没有内置 API Key 身份验证或 TLS，并监听所有网络接口。本机使用时请依靠主机防火墙；需要远程访问时应置于带身份验证的 HTTPS 反向代理之后，不要把 5000 端口直接暴露给不可信网络。</p></div>
 
-# 用确切的托管模型启动服务器
-./TensorSharp.Server --model ./models/model.gguf --backend ggml_metal
+  <h3>已构建的源码目录</h3>
+  <p>构建完成后，从仓库根目录运行这些命令。它们会调用 <code>TensorSharp.Server/bin/TensorSharp.Server.dll</code>；该输出目录也包含复制好的原生库与 <code>wwwroot/</code>。当前 <code>v3.0.5.0</code> GitHub Release 没有附带二进制压缩包。</p>
+  <pre data-lang="bash"><code># Apple Silicon / Metal
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf --backend ggml_metal
 
-# Linux + NVIDIA GPU
-./TensorSharp.Server --model ./models/model.gguf --backend ggml_cuda
+# NVIDIA / GGML CUDA
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf --backend ggml_cuda
 
-# 任意 Vulkan GPU（AMD / Intel / NVIDIA）—— 多 GPU 主机上可选择设备
-./TensorSharp.Server --list-gpus
-./TensorSharp.Server --model ./models/model.gguf --backend ggml_vulkan --gpu-device 1
+# AMD、Intel 或 NVIDIA / Vulkan；先查看设备索引
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --list-gpus
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf --backend ggml_vulkan --gpu-device 1
 
-# 多模态模型：同时托管显式投影器
-./TensorSharp.Server --model ./models/model.gguf --mmproj ./models/mmproj.gguf --backend ggml_cuda</code></pre>
-  <p>服务器在 <strong><code>http://localhost:5000</code></strong> 启动。用浏览器打开它即可使用聊天 UI，或将 HTTP 客户端指向<a href="http-api_zh-cn.html">兼容端点</a>。</p>
-  <div class="callout note"><div class="ic">📌</div><p>服务器仅托管由 <code>--model</code> 选定的一个 GGUF（以及可选的 <code>--mmproj</code> 投影器）。它<em>不</em>扫描模型目录；请求必须指明该托管文件或其基名。</p></div>
+# 多模态：投影器始终显式指定
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf --mmproj ./models/mmproj.gguf --backend ggml_cuda</code></pre>
 
   <h3>服务器级默认采样</h3>
   <p>默认值会填补请求未提供的任何字段；逐请求的值始终优先。</p>
-  <pre data-lang="bash"><code>./TensorSharp.Server --model ./models/model.gguf --backend ggml_metal \
+  <pre data-lang="bash"><code>dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf --backend ggml_metal \
     --temperature 0.7 --top-p 0.9 --top-k 40 --repeat-penalty 1.1 \
     --presence-penalty 0.0 --frequency-penalty 0.0 --seed 42 \
     --stop "&lt;/s&gt;" --stop "&lt;|endoftext|&gt;"</code></pre>
 
   <h2 id="webui">Web UI 功能</h2>
-  <p>打开 <code>http://localhost:5000</code>。浏览器界面支持：</p>
+  <p>打开 <code>http://localhost:5000/index.html</code>。浏览器界面支持：</p>
   <ul>
     <li>多轮对话，带流式 token 生成（SSE）。</li>
-    <li>每标签页独立的聊天会话 —— 每个浏览器标签拥有自己的跟踪历史与 KV 缓存。</li>
-    <li>用于多模态推理的图像、视频与音频上传（最大 500 MB）。</li>
+    <li>每标签页独立的聊天会话 —— 每个标签页拥有自己的跟踪对话历史；请求 KV 块与前缀复用由推理引擎管理。</li>
+    <li>用于多模态推理的图像、视频、音频、PDF 与文本 / 代码上传（最大 500 MB）。</li>
+    <li>PDF 文档：原生数字 PDF 会抽取文本层并内联到提示词（按 token 预算截断）；扫描 PDF 在视觉模型上回退为逐页图像（<code>TS_PDF_MAX_PAGES</code> 限制读取页数）。</li>
     <li>思考 / 推理模式开关，以及带函数定义的工具调用。</li>
     <li>消息编辑与删除，并可从对话中任意位置重新生成。</li>
     <li>当托管 <code>diffusion-gemma</code> GGUF 时，提供 DiffusionGemma 去噪预览（每步替换整条助手消息，最后定稿）。</li>
+    <li>托管 <code>qwen_image</code> DiT 时提供 Qwen-Image-Edit：上传图像并输入编辑指令后，最多 8 帧实时去噪预览会原位刷新，最终 PNG 提供下载链接。</li>
     <li>自由滚动 —— 在新 token 流式输出时阅读较早的回复；自动滚动会在回到底部时恢复。</li>
   </ul>
 
@@ -61,22 +77,25 @@
     <thead><tr><th>选项</th><th>说明</th></tr></thead>
     <tbody>
       <tr><td><code>--model &lt;path&gt;</code></td><td>要托管的 GGUF 文件（推理必需）。</td></tr>
-      <tr><td><code>--mmproj &lt;path&gt;</code></td><td>多模态投影器 GGUF（传 <code>none</code> 可禁用）。需要 <code>--model</code>。</td></tr>
+      <tr><td><code>--mmproj &lt;path&gt;</code></td><td>显式多模态投影器 GGUF；只写文件名时相对于模型目录解析（传 <code>none</code> 可禁用）。需要 <code>--model</code>；不会自动扫描投影器。</td></tr>
       <tr><td><code>--backend &lt;type&gt;</code></td><td>默认后端：<code>cpu</code>、<code>cuda</code>、<code>mlx</code>、<code>ggml_cpu</code>、<code>ggml_metal</code>、<code>ggml_cuda</code>、<code>ggml_vulkan</code>。</td></tr>
       <tr><td><code>--gpu-device &lt;N&gt;</code></td><td><code>ggml_vulkan</code> 后端在多 GPU 主机上使用的 Vulkan 设备索引（默认：0；环境变量 <code>TS_GGML_VULKAN_DEVICE</code>）。</td></tr>
       <tr><td><code>--list-gpus</code></td><td>列出 ggml-vulkan 可见的 Vulkan 设备（索引 + 显卡名称）后退出。</td></tr>
-      <tr><td><code>--help</code></td><td>打印完整参数说明后退出 —— 不带任何参数启动服务时也会显示；传入至少一个参数（如 <code>--backend ggml_cpu</code>）即可无模型启动，之后在 Web UI 中加载模型。</td></tr>
-      <tr><td><code>--max-tokens &lt;N&gt;</code></td><td>请求未指定时的默认生成上限（默认：<code>20000</code>）。</td></tr>
-      <tr><td><code>--temperature / --top-k / --top-p / --min-p</code></td><td>请求未提供时的默认采样值。</td></tr>
-      <tr><td><code>--repeat-penalty / --presence-penalty / --frequency-penalty / --seed</code></td><td>默认惩罚与随机种子。</td></tr>
+      <tr><td><code>--help</code></td><td>打印完整参数说明后退出；不带任何参数时也会显示。推理始终需要启动参数 <code>--model</code>。</td></tr>
+      <tr><td><code>--max-tokens &lt;N&gt;</code></td><td>Web UI 请求未指定时的默认生成上限（默认：<code>20000</code>）；Ollama/OpenAI 兼容端点省略请求级上限时使用 <code>200</code>。</td></tr>
+      <tr><td><code>--temperature / --top-k / --top-p / --min-p</code></td><td>请求未提供时的默认采样值（默认 <code>0.8</code> / <code>40</code> / <code>0.9</code> / <code>0</code>）。</td></tr>
+      <tr><td><code>--repeat-penalty / --presence-penalty / --frequency-penalty / --seed</code></td><td>默认惩罚与随机种子（默认 <code>1.1</code> / <code>0</code> / <code>0</code> / <code>-1</code>）。</td></tr>
       <tr><td><code>--stop &lt;string&gt;</code></td><td>默认停止序列（可重复）。逐请求的 <code>stop</code> 会替换该列表。</td></tr>
       <tr><td><code>--continuous-batching</code> / <code>--no-continuous-batching</code></td><td>启用（默认）或禁用迭代级分页批处理。别名：<code>--paged-batching</code>。</td></tr>
-      <tr><td><code>--mtp-spec</code> / <code>--no-mtp-spec</code></td><td>启用 / 禁用 NextN / MTP 推测解码（默认关闭）。→ <a href="advanced_zh-cn.html#mtp">MTP</a></td></tr>
+      <tr><td><code>--mtp-spec</code> / <code>--no-mtp-spec</code></td><td>启用 / 禁用 NextN / MTP 推测解码（默认关闭）；只在模型确实带有 MTP/NextN 草稿头时生效。→ <a href="advanced_zh-cn.html#mtp">MTP</a></td></tr>
       <tr><td><code>--mtp-draft &lt;N&gt;</code></td><td>每个推测步草拟的最大 token 数（默认 <code>8</code>）。</td></tr>
       <tr><td><code>--mtp-pmin &lt;f&gt;</code></td><td>保留某 token 所需的草稿头最低置信度（默认 <code>0.75</code>）。</td></tr>
-      <tr><td><code>--mtp-draft-model &lt;path&gt;</code></td><td>独立的 MTP 草稿 GGUF（Gemma 4 的 <code>gemma4-assistant</code>）；Qwen 3.6 会忽略。</td></tr>
+      <tr><td><code>--mtp-draft-model &lt;path&gt;</code></td><td>独立的 MTP 草稿 GGUF（Gemma 4 的 <code>gemma4-assistant</code>）。Qwen 3.6 的 NextN 位于主 GGUF 中，不需要此参数；显式草稿无法激活时启动会失败。</td></tr>
       <tr><td><code>--prefill-chunk-size &lt;N&gt;</code></td><td>每个调度步的最大 prefill token 数（设置 <code>TS_SCHED_PREFILL_CHUNK</code>）。</td></tr>
-      <tr><td><code>--kv-cache-dtype &lt;type&gt;</code></td><td>KV 缓存精度：<code>f32</code>（默认）、<code>f16</code>、<code>q8_0</code> 或 <code>q4_0</code>（环境变量 <code>KV_CACHE_DTYPE</code>；<code>q4_0</code> 面向 128K–256K 超长上下文）。</td></tr>
+      <tr><td><code>--kv-cache-dtype &lt;type&gt;</code></td><td>KV 缓存精度：<code>f32</code>、<code>f16</code>、<code>q8_0</code> 或 <code>q4_0</code>（默认自动，由后端 / 模型选择；环境变量 <code>KV_CACHE_DTYPE</code>）。</td></tr>
+      <tr><td><code>--paged-kv</code> / <code>--no-paged-kv</code></td><td>独立 <code>PagedKvCacheManager</code> 的旧兼容开关，不在当前服务请求路径上；活跃请求 KV 由引擎管理。</td></tr>
+      <tr><td><code>--paged-kv-block-size / --paged-kv-ram-mb / --paged-kv-ssd-dir / --paged-kv-ssd-mb</code></td><td>旧的独立 paged-KV 调参。当前服务请求请使用下方 <code>TS_SCHED_*</code> 引擎设置。</td></tr>
+      <tr><td><code>--paged-kv-quant-bits &lt;b&gt;</code></td><td>旧的独立 TurboQuant 设置；服务端参数接受 <code>0</code>、<code>4</code> 或 <code>8</code>（运行时环境变量与 CLI 还接受 <code>2</code>）。</td></tr>
       <tr><td><code>--qwen-image-vae / --qwen-image-vl / --qwen-image-mmproj &lt;path&gt;</code></td><td>覆盖解析到的 Qwen-Image-Edit 伴随 GGUF（VAE / Qwen2.5-VL 文本编码器 / mmproj）。</td></tr>
       <tr><td><code>--qwen-image-lora &lt;path&gt;</code></td><td>Qwen-Image-Edit Lightning 蒸馏 LoRA（<code>.safetensors</code>），合并进 DiT；自动推导去噪步数，并将 CFG 切换为 1.0。</td></tr>
     </tbody>
@@ -92,7 +111,10 @@
       <tr><td><code>BACKEND</code></td><td>未传 <code>--backend</code> 时的默认后端（默认：macOS 上为 <code>ggml_metal</code>，其他平台为 <code>ggml_cpu</code>）。</td></tr>
       <tr><td><code>MAX_TOKENS</code></td><td>默认最大生成长度（默认：<code>20000</code>）。</td></tr>
       <tr><td><code>MAX_TEXT_FILE_CHARS</code></td><td>截断纯文本上传的字符上限（默认：<code>8000</code>）。</td></tr>
+      <tr><td><code>TS_PDF_MAX_PAGES</code></td><td>上传 PDF 时读取的页数上限，文本提取与页面图像渲染均遵循（默认：<code>0</code> = 全部页面；CLI <code>--pdf</code> 同样遵循）。</td></tr>
       <tr><td><code>VIDEO_SAMPLE_FPS</code> / <code>VIDEO_MAX_FRAMES</code></td><td>每秒视频采样的帧数 / 可选的抽帧上限。</td></tr>
+      <tr><td><code>TS_FUSED_QKNORM_ROPE</code></td><td>Direct <code>cuda</code> 后端上 Qwen 3.5/3.6 文本 prefill 的融合 QK-Norm + RoPE CUDA 内核（默认开启；<code>0</code> 关闭）。</td></tr>
+      <tr><td><code>TS_GGML_MANAGED_OPS</code></td><td><strong>实验性：</strong><code>1</code> 选择 GGML 算子的托管 C# 移植（默认关闭，使用原生路径）。</td></tr>
       <tr><td><code>TENSORSHARP_TEMPERATURE</code>、<code>…_TOP_K</code>、<code>…_TOP_P</code>、<code>…_MIN_P</code></td><td>当参数与请求体都未设置时的默认采样值。</td></tr>
       <tr><td><code>TENSORSHARP_REPEAT_PENALTY</code>、<code>…_PRESENCE_PENALTY</code>、<code>…_FREQUENCY_PENALTY</code>、<code>…_SEED</code></td><td>默认惩罚与随机种子。</td></tr>
       <tr><td><code>TENSORSHARP_LOG_LEVEL</code> / <code>…_LOG_DIR</code> / <code>…_LOG_FILE</code></td><td>日志级别、目录与文件开关（CLI 同样遵循）。</td></tr>
@@ -112,8 +134,7 @@
       <tr><td><code>TS_SCHED_MAX_BATCHED_TOKENS</code></td><td>每步 token 预算（默认 <code>4096</code>）。</td></tr>
       <tr><td><code>TS_SCHED_MAX_RUNNING_SEQS</code></td><td>最大在飞序列数（默认 <code>16</code>）。</td></tr>
       <tr><td><code>TS_SCHED_PREFILL_CHUNK</code></td><td>每步最大 prefill token 数（默认 <code>1024</code>）。</td></tr>
-      <tr><td><code>TS_SCHED_SOLO_PREFILL_CHUNK</code></td><td>独占 / 无竞争请求全新 <code>start_pos = 0</code> 阶段的 prefill 分块（默认 <code>8192</code>）。</td></tr>
-      <tr><td><code>TS_SCHED_SOLO_TAIL_PREFILL_CHUNK</code></td><td>独占提示词的尾部分块（默认 <code>2048</code>）。</td></tr>
+      <tr><td><code>TS_SCHED_SOLO_PREFILL_CHUNK</code></td><td>系统中最多一个序列时的 prefill 分块大小，会限制所有独占 prefill 分块（默认 <code>8192</code>）。</td></tr>
       <tr><td><code>TS_SCHED_DECODE_QUANTUM</code></td><td>切换序列前的 decode token 数（默认 <code>256</code> = 块大小）。</td></tr>
       <tr><td><code>TS_SCHED_NUM_BLOCKS</code> / <code>TS_SCHED_BLOCK_SIZE</code></td><td>引擎池中的物理块数（默认 <code>256</code>） / 每块 token 数（默认 <code>256</code>）。</td></tr>
       <tr><td><code>TS_SCHED_PREFIX_CACHE</code></td><td><code>0</code> 禁用跨请求的块哈希前缀共享。</td></tr>

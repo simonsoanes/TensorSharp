@@ -2,7 +2,7 @@
 
 [English](example_api_thinking_tools.md) | [中文](example_api_thinking_tools_zh-cn.md)
 
-这些示例覆盖当前 CLI 以及两个服务端兼容 API 的思维链/工具调用能力。命令片段默认使用 `ggml_metal`；请根据机器替换为 `mlx`、`cuda`、`ggml_cuda`、`ggml_vulkan`、`ggml_cpu` 或 `cpu`。
+这些示例覆盖当前 CLI 以及两个服务端兼容 API 的思维链/工具调用能力。请在仓库根目录使用 .NET 10 SDK 运行源码命令。常规原生构建还需要 Git、网络访问、CMake 与 C++ 工具链；请根据机器把 `ggml_metal` 替换为 `mlx`、`cuda`、`ggml_cuda`、`ggml_vulkan`、`ggml_cpu` 或 `cpu`。
 
 | 架构 | 思维链 | 工具调用 | 说明 |
 |---|---|---|---|
@@ -14,20 +14,68 @@
 | DiffusionGemma | 不支持 | 不支持 | 使用 `--diffusion-steps` 等独立文本扩散生成参数，不属于思维链 / 工具调用模板 |
 | Gemma 3 / Mistral 3 | 不支持 | 不支持 | 在 TensorSharp 中支持多模态，但不支持思维链/工具调用 |
 
+## Gemma 4 E4B 准备工作
+
+已验证的模型是 [gemma-4-E4B-it-Q8_0.gguf](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true)（7.48 GiB），来自 [ggml-org/gemma-4-E4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF)；同一仓库还提供更省内存的 `gemma-4-E4B-it-Q4_K_M.gguf`。纯文本不需要 mmproj 文件。命令本身几秒就能复制运行，但模型下载与首次 restore/原生构建耗时更长，取决于网络速度和机器性能。整体准备步骤请参见根目录[快速开始章节](../../README_zh-cn.md#快速开始)以及详细的 [Gemma 4 卡片](../../docs/models/gemma4_zh-cn.md#已验证的-gemma-4-e4b-原生-ggml-快速路径)。
+
+macOS / Linux：
+
+```bash
+mkdir -p models
+curl --fail --location \
+  --output models/gemma-4-E4B-it-Q8_0.gguf \
+  "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true"
+
+export TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON  # Linux NVIDIA；macOS 上请省略此行并改用 --backend ggml_metal
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj \
+  -p:TensorSharpSkipMlxNative=true -- \
+  --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda \
+  --max-tokens 32
+```
+
+Windows PowerShell：
+
+```powershell
+New-Item -ItemType Directory -Force models | Out-Null
+curl.exe --fail --location `
+  --output models\gemma-4-E4B-it-Q8_0.gguf `
+  "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true"
+
+$env:TENSORSHARP_GGML_NATIVE_ENABLE_CUDA = 'ON'
+dotnet run --project TensorSharp.Cli\TensorSharp.Cli.csproj `
+  -p:TensorSharpSkipMlxNative=true -- `
+  --model models\gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda `
+  --max-tokens 32
+```
+
+在 AMD/Intel GPU 上，请设置 `TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON` 并使用 `--backend ggml_vulkan`；没有 GPU 时使用 `--backend ggml_cpu`，无需设置环境变量。
+
+未指定 `--input` 时，CLI 会使用 `What is 1+1?`。自定义的单次文本提示词必须保存到文件，并通过 `--input <file>` 传入；`--prompt` 仅用于 Qwen-Image-Edit。默认值为 `--max-tokens 100` 和 `--backend ggml_cpu`。CLI 没有完整的 `--help` 页面，而且目前会忽略未知参数，因此请准确复制参数名。
+
 ## 控制台应用
+
+以下示例使用同一个已下载模型与原生 GGML 路径，完成上面的准备工作后，每条命令都可从仓库根目录复制运行。示例展示的是 Linux/Windows NVIDIA 形式；请根据机器把 `--backend ggml_cuda`（及其环境变量）替换为 `ggml_metal`、`ggml_vulkan` 或 `ggml_cpu`。
 
 ### 思维链模式
 
 通过 `--think` 启用思维链。模型会先输出推理过程，再给出最终答案。
 
 ```bash
+export TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON
+
 # 基础思维链模式
-./TensorSharp.Cli --model model.gguf --backend ggml_metal \
-  --input testdata/input_thinking.txt --think --max-tokens 500
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj \
+  -p:TensorSharpSkipMlxNative=true -- \
+  --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda \
+  --input TensorSharp.Cli/testdata/input_thinking.txt \
+  --think --max-tokens 500
 
 # 带采样参数的思维链模式
-./TensorSharp.Cli --model model.gguf --backend ggml_metal \
-  --input testdata/input_thinking.txt --think --max-tokens 500 \
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj \
+  -p:TensorSharpSkipMlxNative=true -- \
+  --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda \
+  --input TensorSharp.Cli/testdata/input_thinking.txt \
+  --think --max-tokens 500 \
   --temperature 0.6 --top-p 0.95
 ```
 
@@ -36,20 +84,28 @@
 通过 `--tools <file.json>` 提供工具定义。模型会输出结构化的工具调用。
 
 ```bash
+export TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON
+
 # 天气工具调用
-./TensorSharp.Cli --model model.gguf --backend ggml_metal \
-  --input testdata/input_tool_call.txt \
-  --tools testdata/tools_weather.json --max-tokens 300
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj \
+  -p:TensorSharpSkipMlxNative=true -- \
+  --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda \
+  --input TensorSharp.Cli/testdata/input_tool_call.txt \
+  --tools TensorSharp.Cli/testdata/tools_weather.json --max-tokens 300
 
 # 计算器工具调用
-./TensorSharp.Cli --model model.gguf --backend ggml_metal \
-  --input testdata/input_tool_calc.txt \
-  --tools testdata/tools_calculator.json --max-tokens 300
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj \
+  -p:TensorSharpSkipMlxNative=true -- \
+  --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda \
+  --input TensorSharp.Cli/testdata/input_tool_calc.txt \
+  --tools TensorSharp.Cli/testdata/tools_calculator.json --max-tokens 300
 
 # 思维链 + 工具组合
-./TensorSharp.Cli --model model.gguf --backend ggml_metal \
-  --input testdata/input_tool_call.txt \
-  --tools testdata/tools_weather.json --think --max-tokens 500
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj \
+  -p:TensorSharpSkipMlxNative=true -- \
+  --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda \
+  --input TensorSharp.Cli/testdata/input_tool_call.txt \
+  --tools TensorSharp.Cli/testdata/tools_weather.json --think --max-tokens 500
 ```
 
 ### 工具定义格式

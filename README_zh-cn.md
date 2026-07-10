@@ -10,42 +10,86 @@
 
 ## 快速开始
 
-下载模型后，大约 30 秒即可看到流式输出。
+在已验证的 GGML 原生快路径 —— Gemma 4 E4B 上，约 30 秒即可快速开始。这指的是复制并启动这些命令的时间；模型下载以及首次 .NET restore/build 耗时更长，取决于网络和机器。
 
-**1. 前置要求** —— [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)、`git`，以及（可选）GPU 工具链：NVIDIA → CUDA Toolkit 12.x；Apple Silicon → Xcode 命令行工具（Metal 已内置）。完整列表见 [前置要求](#前置要求)。
+前置要求：[.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)、`git`、`curl`，以及所选 GPU 后端对应的工具链。先确认 `dotnet --version` 以 `10.` 开头。详情见[前置要求](#前置要求)。
 
-**2. 克隆并构建** —— 首次构建会自动编译原生 GGML 库。
+Gemma 4 E4B Q8_0 是本项目实际测试的稠密多模态 Gemma 4 规格。在 GGML 原生后端上，它的 Per-Layer Embeddings（PLE）和共享 KV 布局仍能进入融合整模型 prefill/verify 与单图 decode 路径；服务端只有一个活跃请求时，也会自动选择这条融合的逐序列路径。推荐的公开文件是 [`gemma-4-E4B-it-Q8_0.gguf`](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/gemma-4-E4B-it-Q8_0.gguf)（8,031,240,160 字节 / 7.48 GiB）。下面的纯文本命令会走这条融合路径；同一模型还支持思维链、工具调用，以及需要可选投影器的图像/视频/音频输入。
+
+运行适合当前平台的命令。纯文本推理不需要投影器。
+
+### Windows + NVIDIA（PowerShell）
+
+```powershell
+git clone https://github.com/zhongkaifu/TensorSharp.git
+Set-Location TensorSharp
+New-Item -ItemType Directory -Force models | Out-Null
+curl.exe -L --fail "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" -o models\gemma-4-E4B-it-Q8_0.gguf
+'用一句简短的话回答：TensorSharp 是什么？' | Set-Content prompt.txt
+$env:TENSORSHARP_GGML_NATIVE_ENABLE_CUDA = 'ON'
+dotnet run --project TensorSharp.Cli -c Release -p:TensorSharpSkipMlxNative=true -- --model models\gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 128 --backend ggml_cuda
+```
+
+### macOS（Apple Silicon）
 
 ```bash
 git clone https://github.com/zhongkaifu/TensorSharp.git
 cd TensorSharp
-dotnet build TensorSharp.slnx -c Release
+mkdir -p models
+curl -L --fail "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" -o models/gemma-4-E4B-it-Q8_0.gguf
+printf '%s\n' '用一句简短的话回答：TensorSharp 是什么？' > prompt.txt
+dotnet run --project TensorSharp.Cli -c Release -p:TensorSharpSkipMlxNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 128 --backend ggml_metal
 ```
 
-**3. 下载模型** —— 推荐从体积小、测试充分的 Gemma-4-E4B（Q8_0）开始：[ggml-org/gemma-4-E4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF)。更多选择见 [已验证模型](#已验证模型)。
-
-**4. 运行** —— 按你的硬件选择 `--backend`（参见 [选择后端](#选择后端)）：
+### Linux + NVIDIA
 
 ```bash
-# 单次生成
-echo "用一句话解释 Mixture-of-Experts。" > prompt.txt
-
-./TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --backend ggml_metal   # macOS
-./TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --backend ggml_cuda    # Windows/Linux + NVIDIA
-./TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --backend cpu          # 可移植 / 调试
-
-# 交互式聊天（REPL）
-./TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf -i --backend ggml_metal
+git clone https://github.com/zhongkaifu/TensorSharp.git
+cd TensorSharp
+mkdir -p models
+curl -L --fail "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" -o models/gemma-4-E4B-it-Q8_0.gguf
+printf '%s\n' '用一句简短的话回答：TensorSharp 是什么？' > prompt.txt
+TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Cli -c Release -p:TensorSharpSkipMlxNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 128 --backend ggml_cuda
 ```
 
-想要浏览器界面和 HTTP API？改为启动服务端：
+在受支持的 Windows/Linux AMD、Intel 或 NVIDIA Vulkan 设备上，请在 PowerShell 中设置 `$env:TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN = 'ON'`，或在 Bash 命令前加 `TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON`，再使用 `--backend ggml_vulkan`；所需 SDK/运行时见[前置要求](#前置要求)。要通过 Web UI 与 API 承载同一条已验证 E4B 路径，请运行适合当前平台的命令。
+
+Windows + NVIDIA（PowerShell）：
+
+```powershell
+$env:TENSORSHARP_GGML_NATIVE_ENABLE_CUDA = 'ON'
+dotnet run --project TensorSharp.Server -c Release -p:TensorSharpSkipMlxNative=true -- --model models\gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --max-tokens 512
+```
+
+macOS（Apple Silicon）：
 
 ```bash
-./TensorSharp.Server --model gemma-4-E4B-it-Q8_0.gguf --backend ggml_metal
-# 打开 http://localhost:5000 —— 同时提供 Ollama 与 OpenAI 兼容端点
+dotnet run --project TensorSharp.Server -c Release -p:TensorSharpSkipMlxNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_metal --max-tokens 512
 ```
 
-构建完成后，CLI 可执行文件位于 `TensorSharp.Cli/bin/...`，服务端位于 `TensorSharp.Server/bin/...`。完整参数：[CLI 用法](#控制台应用) · [服务端用法](#web-应用)。
+Linux + NVIDIA：
+
+```bash
+TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Server -c Release -p:TensorSharpSkipMlxNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --max-tokens 512
+```
+
+然后打开 <http://localhost:5000/index.html>（`GET /` 为存活探测响应），或从第二个终端验证已承载的 E4B 模型：
+
+```bash
+curl -s http://localhost:5000/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"gemma-4-E4B-it-Q8_0.gguf","messages":[{"role":"user","content":"用五个字问好。"}],"max_tokens":32,"stream":false}'
+```
+
+Windows PowerShell：
+
+```powershell
+curl.exe -s http://localhost:5000/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"gemma-4-E4B-it-Q8_0.gguf","messages":[{"role":"user","content":"用五个字问好。"}],"max_tokens":32,"stream":false}'
+```
+
+服务端监听 `0.0.0.0:5000`，且没有内置身份验证或 TLS。请把 5000 端口置于防火墙之后；远程访问应使用带身份验证的 HTTPS 反向代理。
+
+如需图像、视频或音频输入，推荐的公开配套文件是 [`mmproj-gemma-4-E4B-it-Q8_0.gguf`](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/mmproj-gemma-4-E4B-it-Q8_0.gguf)；下载后追加 `--mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf`。这里的验证声明针对 E4B Q8_0 的架构/张量布局路径，ggml-org 则提供推荐的公开文件。详情见 [Gemma 4 架构卡片](docs/models/gemma4_zh-cn.md)，E4B Q8_0 的实测运行结果见[引擎对比报告](docs/engine_comparison_report.md)。
+
+上面的命令运行正常的 GGML 原生构建（NVIDIA 示例会显式请求 CUDA），并跳过无关的 MLX 原生构建。也可以先配置一次原生后端，再运行 `dotnet build TensorSharp.slnx -c Release`，随后从 `TensorSharp.Cli/bin/` 或 `TensorSharp.Server/bin/` 启动构建产物。CLI 的单次提示通过 `--input` 文件读取，默认贪心采样；未设置 `--max-tokens` 时生成 100 个 token。完整参数：[CLI 用法](#控制台应用) · [服务端用法](#web-应用)。
 
 ## 选择后端
 
@@ -71,10 +115,10 @@ echo "用一句话解释 Mixture-of-Experts。" > prompt.txt
 | Qwen 3 | [Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B-GGUF) | — / — / — | ✅ | ✅ | [qwen3](docs/models/qwen3_zh-cn.md) |
 | GPT OSS | [gpt-oss-20b](https://huggingface.co/ggml-org/gpt-oss-20b-GGUF)（MoE） | — / — / — | ✅ | ✅ | [gptoss](docs/models/gptoss_zh-cn.md) |
 | Nemotron-H | [Nemotron-H-8B](https://huggingface.co/bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF)（另有 47B、Omni） | ✅（Omni） / — / — | ✅ | ✅ | [nemotron](docs/models/nemotron_zh-cn.md) |
-| Mistral 3 | [Mistral-Small-3.1-24B](https://huggingface.co/bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF) | ✅ / — / — | — | — | [mistral3](docs/models/mistral3_zh-cn.md) |
-| Gemma 3 | [gemma-3-4b-it](https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf) | ✅ / — / — | — | — | [gemma3](docs/models/gemma3_zh-cn.md) |
-| DiffusionGemma | diffusion-gemma GGUF | — / — / — | — | — | [diffusiongemma](docs/models/diffusiongemma_zh-cn.md) |
-| Qwen-Image-Edit | qwen-image-edit GGUF（MMDiT + VAE + Qwen2.5-VL） | 🖼️ 图像→图像 | — | — | [qwenimage](docs/models/qwenimage_zh-cn.md) |
+| Mistral 3 | [Mistral-Small-3.1-24B](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF) | ✅ / — / — | — | — | [mistral3](docs/models/mistral3_zh-cn.md) |
+| Gemma 3 | [gemma-3-4b-it](https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF)（官方 [Google QAT 仓库](https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf)需登录并接受许可证） | ✅ / — / — | — | — | [gemma3](docs/models/gemma3_zh-cn.md) |
+| DiffusionGemma | [diffusiongemma-26B-A4B-it](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF) | — / — / — | — | — | [diffusiongemma](docs/models/diffusiongemma_zh-cn.md) |
+| Qwen-Image-Edit | [Qwen-Image-Edit-2511](https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF)（MMDiT + VAE + Qwen2.5-VL） | 🖼️ 图像→图像 | — | — | [qwenimage](docs/models/qwenimage_zh-cn.md) |
 
 ## 亮点功能
 
@@ -115,9 +159,9 @@ echo "用一句话解释 Mixture-of-Experts。" > prompt.txt
 | 模型家族 | Gemma 3/4、DiffusionGemma、Qwen 3、Qwen 3.5/3.6-family GGUF（`qwen35`、`qwen35moe`、`qwen3next`）、GPT OSS、Nemotron-H（含 Nemotron 3 Nano Omni）、Mistral 3。图像编辑通过 Qwen-Image-Edit（`qwen_image` MMDiT）。 |
 | 推理宿主 | CLI、交互式 REPL、ASP.NET Core Web UI、Ollama 风格 API、OpenAI Chat Completions 风格 API。DiffusionGemma 当前走 CLI 扩散运行模式与 Web UI 去噪流；Qwen-Image-Edit 走 CLI 图像编辑模式与 Web UI 图像编辑流程。 |
 | 后端 | 纯 C# CPU、Direct CUDA/cuBLAS（`cuda`）、MLX Metal（`mlx`）、GGML CPU、GGML Metal、GGML CUDA、GGML Vulkan |
-| 多模态 | Gemma 4 支持图像/视频/音频；Gemma 3、Qwen 3.5-family、Mistral 3、Nemotron-H Omni 支持图像输入 |
+| 多模态 | Gemma 4 支持图像/视频/音频；Gemma 3、Qwen 3.5-family、Mistral 3、Nemotron-H Omni 支持图像输入。Web UI 上传与 CLI `--pdf` 支持 PDF：数字版提取文本，扫描版转为视觉模型的页面图像 |
 | 连续批处理 | vLLM 风格的分页 KV 缓存、跨请求基于内容哈希的前缀共享、迭代级调度器（默认启用，可通过 `--no-continuous-batching` 关闭） |
-| 投机解码 | MTP / NextN 草稿头用于单序列 decode：Qwen 3.6（内嵌 NextN）与 Gemma 4（独立 `gemma4-assistant` 草稿 GGUF）；默认关闭，通过 `--mtp-spec` 启用（Gemma 4 还需 `--mtp-draft-model`）。在 ggml 后端与纯 C# `cuda` 后端上有收益；CPU / MLX 走标准 decode。 |
+| 投机解码 | MTP / NextN 草稿头用于单序列 decode：Qwen 3.6（内嵌 NextN）与 Gemma 4（独立 `gemma4-assistant` 草稿 GGUF）；默认关闭，服务端通过 `--mtp-spec` 启用（Gemma 4 还需 `--mtp-draft-model`），CLI 使用 `TS_MTP_*` 环境变量。在 ggml 后端与纯 C# `cuda` 后端上有收益；CPU / MLX 走标准 decode。 |
 | 服务端模型范围 | 通过 `--model` 显式托管单个 GGUF；可通过 `--mmproj` 显式指定投影器；不再扫描目录 |
 | 可观测性 | 结构化每轮日志、队列状态，以及 Web UI / Ollama / OpenAI 响应中的 KV 缓存复用指标 |
 | 测试 / 评测 | `TensorSharp.TestMatrix` 可按模型、后端、功能与环境变量组合做矩阵扫描，并与每类主机的基线做回归对比 |
@@ -132,8 +176,8 @@ echo "用一句话解释 Mixture-of-Experts。" > prompt.txt
 - **GPU 加速** —— 通过 GGML 支持 Apple Metal（macOS）、GGML CUDA（Windows/Linux + NVIDIA）和 GGML Vulkan（Windows/Linux + AMD/Intel/NVIDIA），并提供 Direct CUDA/cuBLAS 后端（含 PTX 内核与未覆盖算子的 CPU 回退），以及面向 Apple Silicon 的 MLX 后端（mlx-c / Metal）
 - **优化后的纯 C# CPU 后端** —— 为 GEMM、RMSNorm、RoPE、softmax、融合激活等推理热点路径提供托管快速路径和 SIMD 内核
 - **连续批处理 & 分页 KV 缓存** —— vLLM 风格的分页 KV 块池，跨请求的块级哈希前缀共享，迭代级调度器（可在批内动态加入/抢占序列），可选的 SSD 冷层用于超大 KV 工作集，原生融合分页注意力内核（`TSGgml_PagedAttentionForward`，在 Metal/CUDA/Vulkan 上驱动 `ggml_flash_attn_ext`）。`TensorSharp.Server` 默认启用，可用 `--no-continuous-batching` 关闭。详见 [docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING_zh-cn.md](docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING_zh-cn.md)。
-- **MTP / NextN 投机解码** —— 多 token 预测草稿头加速单序列（无并发）decode。Qwen 3.6 将 NextN 块内嵌在主干 GGUF 中；Gemma 4 通过 `--mtp-draft-model` 加载独立的 EAGLE 风格 `gemma4-assistant` 草稿 GGUF，其草稿层读取目标模型自身的 KV 缓存。草稿头每步最多提议 `--mtp-draft` 个 token（草稿置信度 ≥ `--mtp-pmin` 时保留），主干用一次批量前向完成验证；起草与验证均由该请求自己的采样器（含惩罚项）驱动，因此输出与标准 decode 完全一致。通过 `--mtp-spec` 启用（默认关闭）。ggml 后端有融合的多 token 验证 / 草稿步内核，是明确收益；纯 C# `cuda` 后端运行完全驻留 GPU 的逐算子验证 / 草稿，同样有收益；CPU / MLX 保持标准 decode。环境变量：`TS_MTP_*`（通用）与 `TS_GMTP_*`（Gemma 4 调优）。
-- **批处理 / 并行推理** —— 已为 Mistral 3、Gemma 4、GPT OSS、Qwen 3、Qwen 3.5/3.6-family、Nemotron-H 全部默认启用 `IBatchedPagedModel.ForwardBatch`，能在一次前向传播中打包 N 个序列，使用 `slotMapping` 进行分页 K/V 写入，并通过原生内核做按序列注意力。每个模型都提供 `TS_<FAMILY>_BATCHED=0` 兜底开关（如 `TS_GEMMA4_BATCHED=0`、`TS_QWEN35_BATCHED=0`、`TS_GPTOSS_BATCHED=0`、`TS_NEMOTRON_BATCHED=0`），可强制回到按序列 KV-swap 路径用于 A/B 对比或回归排查。
+- **MTP / NextN 投机解码** —— 多 token 预测草稿头加速单序列（无并发）decode。Qwen 3.6 将 NextN 块内嵌在主干 GGUF 中；Gemma 4 通过 `--mtp-draft-model` 加载独立的 EAGLE 风格 `gemma4-assistant` 草稿 GGUF，其草稿层读取目标模型自身的 KV 缓存。草稿头每步最多提议 `--mtp-draft` 个 token（草稿置信度 ≥ `--mtp-pmin` 时保留），主干用一次批量前向完成验证；起草与验证均由该请求自己的采样器（含惩罚项）驱动，因此输出与标准 decode 完全一致。服务端通过 `--mtp-spec` 启用（默认关闭）；CLI 没有 MTP 参数，需设置 `TS_MTP_*` 环境变量。ggml 后端有融合的多 token 验证 / 草稿步内核，是明确收益；纯 C# `cuda` 后端运行完全驻留 GPU 的逐算子验证 / 草稿，同样有收益；CPU / MLX 保持标准 decode。环境变量：`TS_MTP_*`（通用）与 `TS_GMTP_*`（Gemma 4 调优）。
+- **批处理 / 并行推理** —— 已为 Mistral 3、Gemma 4、GPT OSS、Qwen 3、Qwen 3.5/3.6-family、Nemotron-H 默认启用 `IBatchedPagedModel.ForwardBatch`，能在一次前向传播中打包 N 个序列，使用 `slotMapping` 进行分页 K/V 写入，并通过原生内核做按序列注意力。Gemma 4、Qwen 3.5/3.6、GPT OSS 与 Nemotron-H 提供各自的 `TS_<FAMILY>_BATCHED=0` 兜底开关；Qwen 3 与 Mistral 3 没有家族专属开关，请用全局 `TS_SCHED_DISABLE_BATCHED=1` 强制回到按序列 KV-swap 路径。
 - **兼容 Ollama 与 OpenAI API** —— 可作为现有工具链的即插即用替代端点
 - **可配置采样** —— temperature、top-k、top-p、min-p、重复/存在/频率惩罚、seed、停止序列
 - **聊天模板** —— 从 GGUF 元数据自动加载（Jinja2），并为不同架构提供硬编码回退模板
@@ -146,7 +190,7 @@ echo "用一句话解释 Mixture-of-Experts。" > prompt.txt
 - **混合注意力-递归网络** —— Qwen 3.5/3.6-family 在同一模型中混合全注意力层与 GatedDeltaNet 递归层；批处理路径下递归运行状态保存在每槽位的递归状态池中
 - **专家混合（MoE）** —— 支持 Gemma 4 MoE 变体（例如 gemma-4-26B-A4B）、GPT OSS MoE（例如 gpt-oss-20b）、Qwen 3.5/3.6-family MoE（`qwen35moe` / `qwen3next` 变体，例如 Qwen3.5-35B-A3B）以及 Nemotron-H MoE FFN 层
 - **批量 GPU MoE** —— Qwen 3.5/3.6-family 与 Nemotron-H 在 decode 时通过单次融合的 GGML 计算图调度处理所有被选中的专家（Qwen 3.5-family 还包括可选的 shared expert 与残差加法），消除每个专家的 CPU-GPU 往返
-- **KV 缓存编解码器** —— 通过 `IKvBlockCodec` 接口插件化；内置的 TurboQuant（2-bit 仿射 / Q4 / Q8）编解码器可在分页块上启用，由 `--paged-kv-quant-bits` 控制（2-bit 档位在 fp32 块上可达约 10 倍压缩，面向超长上下文）
+- **KV 缓存编解码器** —— 通过 `IKvBlockCodec` 接口插件化；内置 TurboQuant（2-bit 仿射 / Q4 / Q8）分页块压缩。CLI 的 `--paged-kv-quant-bits` 接受 `0|2|4|8`；服务端旧式独立分页参数接受 `0|4|8`，也可直接用 `TS_KV_PAGED_QUANT_BITS=2` 选择 2-bit 编解码器。2-bit 档位在 fp32 块上可达约 10 倍压缩，面向超长上下文。
 - **消息编辑** —— 在 Web 聊天界面中编辑或删除历史消息，并从该位置重新生成回复
 - **文本/图像/音频/视频上传** —— Web 界面支持最大 500 MB 的文件上传，对超大文本会按 token 预算自动截断
 - **每轮可观测性** —— 结构化日志会完整保留用户输入与模型原始输出（包括 `<think>` 思维链和最终结果），并记录 KV 缓存命中率。同样的命中率指标通过所有 API 透出：Ollama 的 `prompt_cache_hit_tokens` / `prompt_cache_hit_ratio`、OpenAI 的 `usage.prompt_tokens_details.cached_tokens`，以及 Web UI SSE `done` 事件中的 `promptTokens` / `kvReusedTokens` / `kvReusePercent`
@@ -169,25 +213,123 @@ echo "用一句话解释 Mixture-of-Experts。" > prompt.txt
 
 ## 模型下载（GGUF）
 
-TensorSharp 使用 GGUF 格式模型文件。以下是各架构对应的 Hugging Face 下载链接。请根据硬件条件选择合适的量化版本（Q4_K_M 适合低内存，Q8_0 适合更高质量等）。
+TensorSharp 使用 GGUF 格式模型文件。以下是各架构对应的已核对 Hugging Face 下载入口与伴随文件。请根据硬件条件选择合适的量化版本（Q4_K_M / UD-Q4_K_XL 适合低内存，Q8_0 适合更高质量等）。
 
 | 架构 | 模型 | GGUF 下载 |
 |---|---|---|
-| Gemma 4 | gemma-4-E4B-it | [ggml-org/gemma-4-E4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF) |
-| Gemma 4 | gemma-4-31B-it | [ggml-org/gemma-4-31B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-31B-it-GGUF) |
-| Gemma 4 | gemma-4-26B-A4B-it（MoE） | [ggml-org/gemma-4-26B-A4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF) |
-| Gemma 4 | gemma-4-mmproj（多模态投影器） | 包含在上述 GGUF 仓库中 |
-| Gemma 3 | gemma-3-4b-it | [google/gemma-3-4b-it-qat-q4_0-gguf](https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf) |
-| Qwen 3 | Qwen3-4B | [Qwen/Qwen3-4B-GGUF](https://huggingface.co/Qwen/Qwen3-4B-GGUF) |
-| Qwen 3.5 / 3.6 family | Qwen3.5-9B | [unsloth/Qwen3.5-9B-GGUF](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) |
-| Qwen 3.5 / 3.6 family | Qwen3.5-35B-A3B | [ggml-org/Qwen3.5-35B-A3B-GGUF](https://huggingface.co/ggml-org/Qwen3.5-35B-A3B-GGUF) |
-| GPT OSS | gpt-oss-20b（MoE） | [ggml-org/gpt-oss-20b-GGUF](https://huggingface.co/ggml-org/gpt-oss-20b-GGUF) |
-| Nemotron-H | Nemotron-H-8B-Reasoning-128K | [bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF](https://huggingface.co/bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF) |
-| Nemotron-H | Nemotron-H-47B-Reasoning-128K | [bartowski/nvidia_Nemotron-H-47B-Reasoning-128K-GGUF](https://huggingface.co/bartowski/nvidia_Nemotron-H-47B-Reasoning-128K-GGUF) |
-| Mistral 3 | Mistral-Small-3.1-24B-Instruct | [bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF](https://huggingface.co/bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF) |
-| Mistral 3 | mistral3-mmproj（Pixtral 视觉投影器） | [bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF](https://huggingface.co/bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF) |
-| DiffusionGemma | diffusion-gemma 文本扩散 GGUF | 使用 `general.architecture` 为 `diffusion-gemma` 或 `diffusion_gemma` 的 GGUF 文件 |
-| Qwen-Image-Edit | Qwen-Image-Edit MMDiT（`qwen_image`） | `general.architecture` 为 `qwen_image` 的 DiT GGUF，外加同目录下的 Qwen-Image VAE 与 Qwen2.5-VL-7B 文本编码器 GGUF（或通过 `TS_QWEN_IMAGE_VAE` / `TS_QWEN_IMAGE_TE` / `TS_QWEN_IMAGE_MMPROJ` 指定）。VAE 可为原始 `.safetensors`。还可通过 `--qwen-image-lora` / `TS_QWEN_IMAGE_LORA` 额外加载一个 Lightning 蒸馏 LoRA。 |
+| Gemma 4 已验证原生规格 | gemma-4-E4B-it Q8_0 | [ggml-org/gemma-4-E4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF)；推荐公开文件为 `gemma-4-E4B-it-Q8_0.gguf`，另有低内存 Q4_K_M；同仓库投影器为 `mmproj-gemma-4-E4B-it-Q8_0.gguf` |
+| Gemma 4 | 12B / 26B-A4B QAT | [unsloth/gemma-4-12B-it-qat-GGUF](https://huggingface.co/unsloth/gemma-4-12B-it-qat-GGUF) / [unsloth/gemma-4-26B-A4B-it-qat-GGUF](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF)；同仓库含 `mmproj-BF16.gguf` 与匹配的 MTP draft |
+| Gemma 4 | 31B / 26B-A4B | [ggml-org/gemma-4-31B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-31B-it-GGUF) / [ggml-org/gemma-4-26B-A4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF)；同仓库含 mmproj |
+| Gemma 4 | E4B / 26B-A4B MTP draft | [AtomicChat E4B assistant](https://huggingface.co/AtomicChat/gemma-4-E4B-it-assistant-GGUF) / [AtomicChat 26B assistant](https://huggingface.co/AtomicChat/gemma-4-26B-A4B-it-assistant-GGUF)；仅与匹配尺寸的目标配对 |
+| Gemma 3 | gemma-3-4b-it | 非 gated 的 [ggml-org/gemma-3-4b-it-GGUF](https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF)，投影器 `mmproj-model-f16.gguf`；官方 [Google QAT 仓库](https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf)需要登录并接受许可证 |
+| Qwen 3 | Qwen3-4B | [Qwen/Qwen3-4B-GGUF](https://huggingface.co/Qwen/Qwen3-4B-GGUF)，如 `Qwen3-4B-Q4_K_M.gguf` |
+| Qwen 3.5 | Qwen3.5-9B | [unsloth/Qwen3.5-9B-GGUF](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF)，投影器 `mmproj-F16.gguf` |
+| Qwen 3.5 | Qwen3.5-35B-A3B | [ggml-org/Qwen3.5-35B-A3B-GGUF](https://huggingface.co/ggml-org/Qwen3.5-35B-A3B-GGUF)，投影器 `mmproj-Qwen3.5-35B-A3B-Q8_0.gguf` |
+| Qwen 3.6 | Qwen3.6-35B-A3B（保留 NextN） | [unsloth/Qwen3.6-35B-A3B-MTP-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF)，投影器 `mmproj-F16.gguf`；基础仓库会剥离 NextN 块 |
+| GPT OSS | gpt-oss-20b（MoE） | [ggml-org/gpt-oss-20b-GGUF](https://huggingface.co/ggml-org/gpt-oss-20b-GGUF)，文件 `gpt-oss-20b-mxfp4.gguf` |
+| Nemotron-H | Nemotron-H-8B / 47B Reasoning | [8B](https://huggingface.co/bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF) / [47B](https://huggingface.co/bartowski/nvidia_Nemotron-H-47B-Reasoning-128K-GGUF) |
+| Nemotron-H | Nemotron 3 Nano Omni 30B-A3B | [unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF](https://huggingface.co/unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF)，图像输入需 `mmproj-BF16.gguf`；仓库未附真实音频推理需要的 Parakeet mmproj |
+| Mistral 3 | Mistral-Small-3.1-24B-Instruct | [bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF)，Pixtral 投影器 `mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf` |
+| DiffusionGemma | diffusiongemma-26B-A4B-it | [unsloth/diffusiongemma-26B-A4B-it-GGUF](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF)，如 `diffusiongemma-26B-A4B-it-Q4_K_M.gguf` |
+| Qwen-Image-Edit | MMDiT DiT（必需） | [unsloth/Qwen-Image-Edit-2511-GGUF](https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF)，如 `qwen-image-edit-2511-Q4_K_M.gguf` |
+| Qwen-Image-Edit | VAE + Qwen2.5-VL（必需） | [QuantStack VAE](https://huggingface.co/QuantStack/Qwen-Image-Edit-GGUF) 中的 `VAE/Qwen_Image-VAE.safetensors` + [unsloth/Qwen2.5-VL-7B-Instruct-GGUF](https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF) |
+| Qwen-Image-Edit | Lightning LoRA（可选） | [lightx2v/Qwen-Image-Edit-2511-Lightning](https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning)，如 4-step `.safetensors`；通过 `--qwen-image-lora` 加载 |
+
+### 按模型下载并运行
+
+以下命令从仓库根目录运行；先执行 `dotnet build TensorSharp.slnx -c Release`。`hf` 来自 Hugging Face CLI（`pip install -U huggingface_hub`）。单次文本提示词必须通过 `--input` 文件传入，`--prompt` 仅用于 Qwen-Image-Edit。按硬件把示例的 `ggml_cuda` 换成 `ggml_metal`、`ggml_vulkan` 或 `ggml_cpu`。
+
+```bash
+echo "列出三条关于月球的事实。" > prompt.txt
+```
+
+**Gemma 4**（文本 + 图像/视频/音频、思维链、工具、可选 MTP）：
+
+```bash
+hf download ggml-org/gemma-4-E4B-it-GGUF gemma-4-E4B-it-Q8_0.gguf --local-dir models
+hf download ggml-org/gemma-4-E4B-it-GGUF mmproj-gemma-4-E4B-it-Q8_0.gguf --local-dir models
+hf download AtomicChat/gemma-4-E4B-it-assistant-GGUF gemma-4-E4B-it-assistant.Q8_0.gguf --local-dir models
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf --mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gemma-4-E4B-it-Q8_0.gguf --mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --mtp-spec --mtp-draft-model models/gemma-4-E4B-it-assistant.Q8_0.gguf
+```
+
+第三个下载与两项 MTP 参数可省略。
+
+**Gemma 3**（文本 + 图像；下方非 gated 仓库）：
+
+```bash
+hf download ggml-org/gemma-3-4b-it-GGUF gemma-3-4b-it-Q4_K_M.gguf --local-dir models
+hf download ggml-org/gemma-3-4b-it-GGUF mmproj-model-f16.gguf --local-dir models
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-3-4b-it-Q4_K_M.gguf --mmproj models/mmproj-model-f16.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gemma-3-4b-it-Q4_K_M.gguf --mmproj models/mmproj-model-f16.gguf --backend ggml_cuda
+```
+
+**Qwen 3**（文本、思维链、工具）：
+
+```bash
+hf download Qwen/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf --local-dir models
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Qwen3-4B-Q4_K_M.gguf --input prompt.txt --think --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3-4B-Q4_K_M.gguf --backend ggml_cuda
+```
+
+**Qwen 3.5 / 3.6**（图像、思维链、工具；3.6 可用 NextN）：
+
+```bash
+hf download unsloth/Qwen3.5-9B-GGUF Qwen3.5-9B-UD-Q4_K_XL.gguf --local-dir models
+hf download unsloth/Qwen3.5-9B-GGUF mmproj-F16.gguf --local-dir models
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf --backend ggml_cuda
+
+# 3.6 必须从保留 NextN 块的 -MTP- 仓库下载
+hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --local-dir models
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda --mtp-spec
+```
+
+**GPT OSS**（文本、始终思考、工具）：
+
+```bash
+hf download ggml-org/gpt-oss-20b-GGUF gpt-oss-20b-mxfp4.gguf --local-dir models
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gpt-oss-20b-mxfp4.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gpt-oss-20b-mxfp4.gguf --backend ggml_cuda
+```
+
+**Nemotron-H**（文本、思维链、工具）：
+
+```bash
+hf download bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --local-dir models
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --backend ggml_cuda
+```
+
+Omni 图像版本需另下同仓库 `mmproj-BF16.gguf`；当前发行版没有真实音频推理所需的 Parakeet audio mmproj。
+
+**Mistral 3**（文本 + 图像）：
+
+```bash
+hf download bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf --local-dir models
+hf download bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --local-dir models
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf --mmproj models/mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf --mmproj models/mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --backend ggml_cuda
+```
+
+**DiffusionGemma**（块文本扩散）：
+
+```bash
+hf download unsloth/diffusiongemma-26B-A4B-it-GGUF diffusiongemma-26B-A4B-it-Q4_K_M.gguf --local-dir models
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --input prompt.txt --max-tokens 256 --diffusion-steps 48 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --backend ggml_cuda
+```
+
+**Qwen-Image-Edit**（DiT + VAE + 文本编码器；Lightning LoRA 可选）：
+
+```bash
+hf download unsloth/Qwen-Image-Edit-2511-GGUF qwen-image-edit-2511-Q4_K_M.gguf --local-dir models
+hf download QuantStack/Qwen-Image-Edit-GGUF VAE/Qwen_Image-VAE.safetensors --local-dir models
+hf download unsloth/Qwen2.5-VL-7B-Instruct-GGUF Qwen2.5-VL-7B-Instruct-UD-IQ2_XXS.gguf --local-dir models
+hf download lightx2v/Qwen-Image-Edit-2511-Lightning Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors --local-dir models
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/qwen-image-edit-2511-Q4_K_M.gguf --image input.png --prompt "把天空改成壮丽的日落。" --output edited.png --qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors --qwen-image-vl models/Qwen2.5-VL-7B-Instruct-UD-IQ2_XXS.gguf --qwen-image-lora models/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/qwen-image-edit-2511-Q4_K_M.gguf --qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors --qwen-image-vl models/Qwen2.5-VL-7B-Instruct-UD-IQ2_XXS.gguf --qwen-image-lora models/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors --backend ggml_cuda
+```
 
 ## 计算后端
 
@@ -287,9 +429,9 @@ TensorSharp/
 └── ExternalProjects/            # ggml/ 在构建时从 github.com/ggml-org/ggml 克隆（不纳入版本控制）
 ```
 
-## NuGet 包分层
+## 项目 / NuGet 包分层
 
-现在仓库按包边界拆成独立层，使用者可以只引用真正需要的部分。
+仓库按包边界拆成独立层，使用者可以只引用真正需要的部分。这些是可构建的包项目与包 ID，但当前 Runtime/Models/Backends/CLI/Server 包**尚未发布到 NuGet.org**。目前请从源码 checkout 使用项目引用；在 [NuGet.org](https://www.nuget.org/profiles/TensorSharp) 出现匹配版本之前，不要照抄 `dotnet add package TensorSharp.Models` 一类命令。
 
 | 项目 | NuGet 包 | 对外 namespace | 职责 |
 |---|---|---|---|
@@ -312,9 +454,11 @@ pwsh ./eng/verify-packages.ps1
 
 该验证会对上表 7 个公开包运行 `dotnet pack`，并在 `AdvUtils` 等内部依赖泄漏到 `.nuspec`，或 TensorSharp 包依赖了上表之外的分层时失败。
 
-### 平台二进制发行包
+### 平台二进制发行状态
 
-除了托管 NuGet 包之外，[`Release Binaries`](.github/workflows/release-binaries.yml) 工作流会为每个平台构建 **TensorSharp.Server** 与 **TensorSharp.Cli** 的自包含、开箱即用归档，并附加到该标签对应的 GitHub Release。每个归档都内置 .NET 10 运行时及该平台的原生库，因此无需单独安装 .NET 或自行构建原生库即可运行：
+[`Release Binaries`](.github/workflows/release-binaries.yml) 工作流的目标是为 **TensorSharp.Server** 与 **TensorSharp.Cli** 构建包含 .NET 10 运行时及原生库的自包含归档。但是，当前最新的 [v3.0.5.0](https://github.com/zhongkaifu/TensorSharp/releases/tag/v3.0.5.0) **没有上传应用归档**（只有 GitHub 自动生成的源码下载），因此用户目前必须从源码构建。除非先在 [Releases 页面](https://github.com/zhongkaifu/TensorSharp/releases)确认文件确实存在，否则不要根据下方名称自行拼接下载 URL。
+
+发行工作流成功完成后，计划生成的归档矩阵如下：
 
 | 归档后缀 | 内置的原生后端 | 格式 |
 |---|---|---|
@@ -324,7 +468,7 @@ pwsh ./eng/verify-packages.ps1
 | `linux-x64-cuda` | GGML CUDA + 纯 C# CUDA（PTX）+ CUDA 12.x 运行时 | `.tar.gz` |
 | `osx-arm64` | GGML Metal + MLX | `.tar.gz` |
 
-- 推送 `v*` 标签即会构建这些归档并自动发布 Release——它与 NuGet 工作流由同一个标签触发。
+- 推送 `v*` 标签会触发归档与 NuGet 工作流；只有所需 job 全部成功后才会发布产物。
 - `-cuda` 归档已内置 CUDA 运行时库（`cudart` / `cublas` / `cublasLt`），但运行时仍需 NVIDIA GPU 与兼容驱动；`-cpu` 归档可在任意机器运行。macOS 归档需 Apple Silicon。
 - 如需预演，可手动触发该工作流（`workflow_dispatch`）并填写 `version` 输入——它会构建全部平台并创建**草稿** Release。可用 `cuda_arch` 输入覆盖 CUDA 构建的目标 GPU 架构。
 
@@ -440,75 +584,73 @@ bash TensorSharp.Backends.MLX/build-native-macos.sh
 ### 控制台应用
 
 ```bash
-cd TensorSharp.Cli/bin
-
 # 文本推理
-./TensorSharp.Cli --model <model.gguf> --input prompt.txt --output result.txt \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --output result.txt \
     --max-tokens 200 --backend ggml_metal
 
 # Windows/Linux + NVIDIA GPU 文本推理
-./TensorSharp.Cli --model <model.gguf> --input prompt.txt --output result.txt \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --output result.txt \
     --max-tokens 200 --backend ggml_cuda
 
 # 交互式逐轮对话（REPL），支持 KV 缓存复用与斜杠命令
-./TensorSharp.Cli --model <model.gguf> --backend ggml_metal --interactive
-./TensorSharp.Cli --model <model.gguf> --backend ggml_metal -i \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal --interactive
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal -i \
     --system "你是一名简洁的助手。" --temperature 0.7 --top-p 0.9 --think
 
 # 图像推理（Gemma 3/4，Qwen 3.5-family）
-./TensorSharp.Cli --model <model.gguf> --image photo.png --backend ggml_metal
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --image photo.png --backend ggml_metal
 
 # 视频推理（Gemma 4）
-./TensorSharp.Cli --model <model.gguf> --video clip.mp4 --backend ggml_metal
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --video clip.mp4 --backend ggml_metal
 
 # 音频推理（Gemma 4）
-./TensorSharp.Cli --model <model.gguf> --audio speech.wav --backend ggml_metal
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --audio speech.wav --backend ggml_metal
 
 # DiffusionGemma 文本扩散生成
-./TensorSharp.Cli --model <diffusion-gemma.gguf> --input prompt.txt --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <diffusion-gemma.gguf> --input prompt.txt --backend ggml_metal \
     --max-tokens 256 --diffusion-steps 48 --diffusion-seed 0
 
 # Qwen-Image-Edit 图像编辑（提示词 + 输入图像 -> 编辑后的图像）
 # VAE + Qwen2.5-VL 文本编码器伴随文件会在 DiT GGUF 旁解析
 # （或用 --qwen-image-vae / --qwen-image-vl / --qwen-image-mmproj 指定）。
-./TensorSharp.Cli --model <qwen-image-edit-DiT.gguf> --image input.png \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <qwen-image-edit-DiT.gguf> --image input.png \
     --prompt "Make the sky a dramatic sunset." --output edited.png \
     --backend ggml_cuda --diffusion-steps 30 --cfg 2.5 --diffusion-seed 0
 
 # 思维链 / 推理模式
-./TensorSharp.Cli --model <model.gguf> --input prompt.txt --backend ggml_metal --think
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal --think
 
 # 工具调用
-./TensorSharp.Cli --model <model.gguf> --input prompt.txt --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal \
     --tools tools.json
 
 # 使用采样参数
-./TensorSharp.Cli --model <model.gguf> --input prompt.txt --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal \
     --temperature 0.7 --top-p 0.9 --top-k 40 --repeat-penalty 1.2 --seed 42
 
 # 批处理（JSONL）
-./TensorSharp.Cli --model <model.gguf> --input-jsonl requests.jsonl \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input-jsonl requests.jsonl \
     --output results.txt --backend ggml_metal
 
 # 多轮对话模拟（含 KV 缓存复用，模拟 Web UI 行为）
-./TensorSharp.Cli --model <model.gguf> --multi-turn-jsonl chat.jsonl \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --multi-turn-jsonl chat.jsonl \
     --backend ggml_metal --max-tokens 200
 
 # 吞吐基准测试：N 次最优运行的 prefill 和 decode 计时
-./TensorSharp.Cli --model <model.gguf> --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal \
     --benchmark --bench-prefill 256 --bench-decode 128 --bench-runs 3
 
 # KV 缓存复用基准：在多轮对话中比较启用与禁用缓存的 prefill 时延
 # （以一个 8 轮的对话为例，对比有缓存与强制重置的 prefill 延迟差异）
-./TensorSharp.Cli --model <model.gguf> --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal \
     --bench-kvcache --bench-kv-turns 4 --max-tokens 64
 
 # 仅查看渲染后的 prompt 和分词结果（不运行推理）
-./TensorSharp.Cli --model <model.gguf> --input prompt.txt --dump-prompt
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --dump-prompt
 
 # 对目录下每个 *.gguf 文件，对比硬编码回退模板与 GGUF 内置 Jinja2 模板
 # （在适配新架构时尤其有用）
-./TensorSharp.Cli --test-templates ~/models
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --test-templates ~/models
 ```
 
 **命令行参数：**
@@ -573,7 +715,7 @@ cd TensorSharp.Cli/bin
 | `--log-file <0\|1>` | 关闭（`0`）或开启（`1`）文件日志（默认：开启） |
 | `--log-console <0\|1>` | 关闭（`0`）或开启（`1`）控制台日志（默认：开启） |
 
-如果把多模态投影器文件放在模型文件同目录并使用可识别命名（例如 `gemma-4-mmproj-F16.gguf`），系统会自动检测。
+CLI 只会自动识别少数旧式投影器文件名，而当前模型仓库经常使用不同名称。多模态运行请用 `--mmproj` 显式传入已下载文件；`TensorSharp.Server` 从不自动检测投影器。
 
 **JSONL 输入格式：**
 
@@ -643,26 +785,26 @@ cd TensorSharp.Cli/bin
 
 ### Web 应用
 
-```bash
-cd TensorSharp.Server/bin
+在构建完成后，从仓库根目录运行：
 
+```bash
 # 通过 --model 指定要托管的模型
-./TensorSharp.Server --model ./models/model.gguf --backend ggml_metal
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf --backend ggml_metal
 
 # Linux + NVIDIA GPU
-./TensorSharp.Server --model ./models/model.gguf --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf --backend ggml_cuda
 
 # 多模态模型：同时显式指定投影器
-./TensorSharp.Server --model ./models/model.gguf --mmproj ./models/mmproj.gguf --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf --mmproj ./models/mmproj.gguf --backend ggml_cuda
 
 # 配置服务端默认采样参数（仅在请求未自行覆盖时生效）
-./TensorSharp.Server --model ./models/model.gguf --backend ggml_metal \
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf --backend ggml_metal \
     --temperature 0.7 --top-p 0.9 --top-k 40 --repeat-penalty 1.1 \
     --presence-penalty 0.0 --frequency-penalty 0.0 --seed 42 \
     --stop "</s>" --stop "<|endoftext|>"
 ```
 
-在浏览器中打开 `http://localhost:5000`。Web 界面支持：
+在浏览器中打开 `http://localhost:5000/index.html`（`GET /` 是存活检查接口）。Web 界面支持：
 
 - 多轮聊天
 - 每个浏览器 Tab 独立的会话：每个 Tab 拥有自己的对话历史；KV block 由推理引擎统一管理
@@ -681,7 +823,7 @@ cd TensorSharp.Server/bin
 
 **服务命令行参数：**
 
-不带任何参数运行 `TensorSharp.Server` 会打印完整的参数说明（每个参数的描述、默认值和示例）后退出；`--help` 效果相同。传入至少一个参数即可启动服务 —— 例如 `--backend ggml_cpu` 会以无模型方式启动，之后可在 Web UI 中加载模型。
+不带任何参数运行 `TensorSharp.Server` 会打印完整的参数说明（每个参数的描述、默认值和示例）后退出；`--help` 效果相同。推理必须在启动时传入 `--model`。其他参数可以启动无模型的状态进程，但 `/api/models/load` 不能选择启动时未提供的 GGUF。
 
 | 参数 | 说明 |
 |---|---|
@@ -713,7 +855,7 @@ cd TensorSharp.Server/bin
 | `--paged-kv-ram-mb <N>` | 旧的独立分页 KV RAM 层上限。 |
 | `--paged-kv-ssd-dir <dir>` | 旧的独立分页 KV SSD 冷层目录。 |
 | `--paged-kv-ssd-mb <N>` | 旧的独立分页 KV SSD 上限。 |
-| `--paged-kv-quant-bits <0\|2\|4\|8>` | 旧的独立分页 KV 块量化（TurboQuantKvCodec；`2` = 仿射 min+scale，`4`/`8` = 对称）。 |
+| `--paged-kv-quant-bits <0\|4\|8>` | 服务端接受的旧式独立分页 KV 块量化（`4`/`8` = 对称）。运行时环境变量还接受仿射 min+scale 的 `2`，CLI 则接受 `0\|2\|4\|8`。 |
 
 请求 JSON 中的字段（如 `temperature`、`top_p`、`top_k`、`min_p`、
 `repeat_penalty`、`presence_penalty`、`frequency_penalty`、`seed`、
@@ -761,7 +903,6 @@ cd TensorSharp.Server/bin
 | `TS_SCHED_MAX_RUNNING_SEQS` | 同时在执行的最大序列数（默认：`16`）。 |
 | `TS_SCHED_PREFILL_CHUNK` | 多个请求争用时每步最大 prefill token 数（默认：`1024`）。 |
 | `TS_SCHED_SOLO_PREFILL_CHUNK` | SOLO（无争用）prompt 全新部分（start_pos = 0）的 prefill 分块大小——单个无争用请求会以大分块走融合 prefill 路径（默认：`8192`）。 |
-| `TS_SCHED_SOLO_TAIL_PREFILL_CHUNK` | SOLO prompt 在首个 solo 分块之后尾部（start_pos > 0）的 prefill 分块大小（默认：`2048`）。 |
 | `TS_SCHED_NUM_BLOCKS` | 引擎块池的物理块数（默认：`256`）。 |
 | `TS_SCHED_BLOCK_SIZE` | 引擎侧每块的 token 数（默认：`256`）。 |
 | `TS_SCHED_PREFIX_CACHE` | `0` 关闭跨请求的块级哈希前缀共享。 |
@@ -832,7 +973,7 @@ cd TensorSharp.Server/bin
 | 旧的分页 KV SSD 冷层溢出 | 关闭 | `TS_KV_CACHE_MAX_RAM_MB`、`TS_KV_CACHE_SSD_DIR`、`TS_KV_CACHE_MAX_SSD_MB` | `--paged-kv-ram-mb`、`--paged-kv-ssd-dir`、`--paged-kv-ssd-mb` |
 | 旧的分页 KV 块量化（TurboQuantKvCodec） | 关闭（`0` = 透传） | `TS_KV_PAGED_QUANT_BITS`（`0` / `2` / `4` / `8`） | `--paged-kv-quant-bits` |
 | 跨请求的块级哈希前缀共享 | 启用 | `TS_SCHED_PREFIX_CACHE=0` 关闭 | — |
-| 调度器调优（每步 token 预算、最大同时序列数、prefill 分块、块池大小、decode quantum） | 引擎默认 | `TS_SCHED_MAX_BATCHED_TOKENS`、`TS_SCHED_MAX_RUNNING_SEQS`、`TS_SCHED_PREFILL_CHUNK`、`TS_SCHED_SOLO_PREFILL_CHUNK`、`TS_SCHED_SOLO_TAIL_PREFILL_CHUNK`、`TS_SCHED_NUM_BLOCKS`、`TS_SCHED_BLOCK_SIZE`、`TS_SCHED_DECODE_QUANTUM` | — |
+| 调度器调优（每步 token 预算、最大同时序列数、prefill 分块、块池大小、decode quantum） | 引擎默认 | `TS_SCHED_MAX_BATCHED_TOKENS`、`TS_SCHED_MAX_RUNNING_SEQS`、`TS_SCHED_PREFILL_CHUNK`、`TS_SCHED_SOLO_PREFILL_CHUNK`、`TS_SCHED_NUM_BLOCKS`、`TS_SCHED_BLOCK_SIZE`、`TS_SCHED_DECODE_QUANTUM` | — |
 
 #### 按模型的批处理 / 分页前向（`IBatchedPagedModel.ForwardBatch`）
 
@@ -1063,13 +1204,13 @@ curl http://localhost:5000/api/queue/status
 投机解码**默认关闭**。在服务端通过 `--mtp-spec`（环境变量 `TS_MTP_SPEC=1`）启用：
 
 ```bash
-# Qwen 3.6 —— NextN 块内嵌在主干 GGUF 中，无需额外文件
-./TensorSharp.Server --model Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf --backend ggml_cuda \
+# Qwen 3.6 —— 使用 -MTP- 仓库 GGUF，确保主干保留内嵌 NextN 块
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda \
     --mtp-spec --mtp-draft 8 --mtp-pmin 0.75
 
 # Gemma 4 —— 加载与目标匹配的独立 gemma4-assistant 草稿 GGUF
-./TensorSharp.Server --model gemma-4-12B-it-Q4_K_M.gguf --backend ggml_cuda \
-    --mtp-spec --mtp-draft-model gemma-4-12B-assistant-Q8_0.gguf
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda \
+    --mtp-spec --mtp-draft-model models/gemma-4-E4B-it-assistant.Q8_0.gguf
 ```
 
 **两种草稿头形态：**
@@ -1103,7 +1244,7 @@ curl http://localhost:5000/api/queue/status
 
 ### Gemma 4
 
-Gemma 4 模型支持图像、视频和音频输入。将多模态投影器（`gemma-4-mmproj-F16.gguf`）放在与模型文件相同目录即可自动加载。
+Gemma 4 模型支持图像、视频和音频输入。上文 E4B 示例使用同仓库的 `mmproj-gemma-4-E4B-it-Q8_0.gguf`；请通过 `--mmproj` 显式传入（其他目标尺寸使用各自匹配的投影器）。
 
 - **图像：** PNG、JPEG、HEIC/HEIF
 - **视频：** MP4（使用 OpenCV 以 1 fps 基于时间抽帧；可通过 `VIDEO_SAMPLE_FPS` / `VIDEO_MAX_FRAMES` 调整）
@@ -1111,15 +1252,15 @@ Gemma 4 模型支持图像、视频和音频输入。将多模态投影器（`ge
 
 ### Gemma 3
 
-Gemma 3 支持 PNG、JPEG 与 HEIC/HEIF 图像输入。将其多模态投影器（`mmproj-gemma3-4b-f16.gguf`）放在模型文件相同目录即可自动加载。
+Gemma 3 支持 PNG、JPEG 与 HEIC/HEIF 图像输入。上文非 gated 示例使用 `mmproj-model-f16.gguf`；请通过 `--mmproj` 显式传入。
 
 ### Qwen 3.5 / 3.6 family
 
-所有 Qwen 3.5/3.6-family 变体（`qwen35`、`qwen35moe` 与 `qwen3next`）共用同一个 `Qwen35Model` 实现。图像输入通过支持动态分辨率的 `Qwen35VisionEncoder` 处理；将投影器（`Qwen3.5-mmproj-F16.gguf`）放到模型 GGUF 同一目录下即可自动加载。MoE 变体（例如 Qwen3.5-35B-A3B，以及使用同一架构标识的 Qwen3.6-35B-A3B GGUF）在 decode 时还会启用融合的 `MoEExpertsSwiGLUResidual` GGML 内核，将所有被选中的专家、可选的 shared expert 与残差加法合并到一次 GPU 计算图调度中执行。
+所有 Qwen 3.5/3.6-family 变体（`qwen35`、`qwen35moe` 与 `qwen3next`）共用同一个 `Qwen35Model` 实现。图像输入通过支持动态分辨率的 `Qwen35VisionEncoder` 处理；请显式传入所选仓库的投影器（上文 9B 与 Qwen 3.6 示例均为 `mmproj-F16.gguf`）。MoE 变体（例如 Qwen3.5-35B-A3B，以及使用同一架构标识的 Qwen3.6-35B-A3B GGUF）在 decode 时还会启用融合的 `MoEExpertsSwiGLUResidual` GGML 内核，将所有被选中的专家、可选的 shared expert 与残差加法合并到一次 GPU 计算图调度中执行。
 
 ### Mistral 3
 
-Mistral 3 通过 Pixtral 视觉编码器支持图像输入。将多模态投影器（`mistral3-mmproj.gguf`）放在与模型文件相同目录即可自动加载。
+Mistral 3 通过 Pixtral 视觉编码器支持图像输入。示例仓库使用 `mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf`；请通过 `--mmproj` 显式传入。
 
 - **图像：** PNG、JPEG、HEIC/HEIF
 

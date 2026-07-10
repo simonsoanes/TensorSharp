@@ -17,13 +17,61 @@
 | Batched / paged forward | **Default ON** — set `TS_NEMOTRON_BATCHED=0` to force the legacy per-sequence KV-swap path for A/B comparison. Per-slot Mamba2 conv + SSM state pool, paged K/V for attention layers. Optional native batched Mamba2 step kernel (`TS_NEMOTRON_MAMBA2_BATCHED_NATIVE=1`). See §11. |
 | Output parser | `Qwen3OutputParser` |
 
+## Downloads
+
+Verified GGUF pointers:
+
+| Model | HF repo | Recommended file | mmproj |
+|---|---|---|---|
+| Nemotron-H-8B-Reasoning-128K | [bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF](https://huggingface.co/bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF) | `nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf` (4.983 GB) or `nvidia_Nemotron-H-8B-Reasoning-128K-Q8_0.gguf` (8.620 GB) | — (text only) |
+| Nemotron-H-47B-Reasoning-128K | [bartowski/nvidia_Nemotron-H-47B-Reasoning-128K-GGUF](https://huggingface.co/bartowski/nvidia_Nemotron-H-47B-Reasoning-128K-GGUF) | `nvidia_Nemotron-H-47B-Reasoning-128K-Q4_K_M.gguf` (28.188 GB) | — (text only) |
+| Nemotron 3 Nano Omni 30B-A3B | [unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF](https://huggingface.co/unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF) | `NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf` (23.927 GB) | `mmproj-BF16.gguf` (1.590 GB; same repo) — **required for image input** |
+
+The Omni `mmproj` enables **image input only**. Audio files are preprocessed
+(log-mel) for verification, but real audio inference needs a Parakeet audio
+mmproj that these GGUF distributions do not ship (see §4.6).
+
+These conversions identify NVIDIA's corresponding Nemotron repositories as
+their upstream bases. The upstream cards use NVIDIA-specific (`other`) terms;
+the two bartowski conversion cards do not declare a license. Review the NVIDIA
+base-model terms before redistribution.
+
+Command-line download (one line per file; requires `pip install -U huggingface_hub`):
+
+```bash
+python -m pip install -U huggingface_hub
+hf download bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --local-dir models
+hf download bartowski/nvidia_Nemotron-H-47B-Reasoning-128K-GGUF nvidia_Nemotron-H-47B-Reasoning-128K-Q4_K_M.gguf --local-dir models
+hf download unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf --local-dir models
+hf download unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF mmproj-BF16.gguf --local-dir models
+```
+
+CLI one-shot (with `--image` and no `--input` a default describe-the-image
+prompt is used; CLI sampling defaults to greedy and `--max-tokens` defaults
+to 100):
+
+```bash
+dotnet run --project TensorSharp.Cli -c Release -- --model models/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf \
+  --mmproj models/mmproj-BF16.gguf \
+  --image photo.png --max-tokens 512 --backend ggml_cuda
+```
+
+Server (Web UI + OpenAI/Ollama-compatible APIs on `http://localhost:5000`):
+
+```bash
+dotnet run --project TensorSharp.Server -c Release -- --model models/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf \
+  --mmproj models/mmproj-BF16.gguf --backend ggml_cuda --max-tokens 4096
+```
+
 ## 1. Origin and intent
 
 Nemotron-H is NVIDIA's hybrid **Mamba2 + Transformer** family. The same
 backbone covers the dense `nemotron_h` line (e.g. Nemotron-H-8B / 47B) and the
 MoE `nemotron_h_moe` line. The Omni distribution (Nemotron 3 Nano Omni)
-additionally ships a RADIO / v2_vl vision encoder and a Parakeet audio
-frontend.
+additionally ships a RADIO / v2_vl vision encoder (via `mmproj`). TensorSharp
+also implements a Parakeet-style audio preprocessor for the Omni line, but
+real audio inference needs a Parakeet audio mmproj that the public GGUFs do
+not ship (see §4.6) — image is the only functional extra modality.
 
 The defining traits are:
 

@@ -18,98 +18,141 @@
   <h1>Command Line (CLI)</h1>
   <p class="lede"><code>TensorSharp.Cli</code> is the console host for local prompts, multimodal experiments, prompt inspection, JSONL batch workflows, the interactive REPL, and built-in benchmarks. The binary lands in <code>TensorSharp.Cli/bin/...</code> after the build.</p>
 
-  <h2 id="examples">Examples</h2>
-  <pre data-lang="bash"><code>cd TensorSharp.Cli/bin
+  <h2 id="quickstart">Quick start in ~30 seconds</h2>
+  <p>Start at the TensorSharp repository root with the <strong>.NET 10 SDK</strong> installed. The verified quick start builds the native GGML backend and runs the repository's benchmark-verified <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener"><code>gemma-4-E4B-it-Q8_0.gguf</code></a> (7.48 GiB). The commands take about 30 seconds to copy and run; the model download and the first restore/build take longer and depend on your connection and machine. A native source build also needs Git, network access, CMake, and a working C++ toolchain.</p>
+  <h3>Linux + NVIDIA</h3>
+  <pre data-lang="bash"><code>TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet build TensorSharp.slnx -c Release -p:TensorSharpSkipMlxNative=true
+curl --create-dirs --fail -L "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" -o models/gemma-4-E4B-it-Q8_0.gguf
+echo "Explain local inference in one paragraph." &gt; prompt.txt
+dotnet run --project TensorSharp.Cli -c Release --no-build -- --model models/gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 128 --backend ggml_cuda</code></pre>
+  <h3>Windows PowerShell + NVIDIA</h3>
+  <pre data-lang="powershell"><code>$env:TENSORSHARP_GGML_NATIVE_ENABLE_CUDA = 'ON'
+dotnet build TensorSharp.slnx -c Release -p:TensorSharpSkipMlxNative=true
+curl.exe --create-dirs --fail -L "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" -o models\gemma-4-E4B-it-Q8_0.gguf
+Set-Content prompt.txt "Explain local inference in one paragraph."
+dotnet run --project TensorSharp.Cli -c Release --no-build -- --model models\gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 128 --backend ggml_cuda</code></pre>
+  <p>Omit <code>--input</code> and the CLI falls back to its built-in <code>What is 1+1?</code> prompt; for your own one-shot text prompt, save the text to a file and pass <code>--input</code>. <code>--prompt</code> is only the Qwen-Image-Edit instruction.</p>
 
-# Text inference (macOS)
-./TensorSharp.Cli --model &lt;model.gguf&gt; --input prompt.txt --output result.txt \
+  <h2 id="e4b-fast-lane">Gemma 4 E4B on other native backends</h2>
+  <p>On Apple Silicon, omit the CUDA environment assignment and use <code>ggml_metal</code>; on a supported Windows/Linux Vulkan GPU, request <code>TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON</code> instead and use <code>ggml_vulkan</code>; <code>ggml_cpu</code> runs the native CPU kernels and needs no GPU. The lower-memory <code>gemma-4-E4B-it-Q4_K_M.gguf</code> is in the same repository. Text needs no <code>mmproj</code>. Add the matching <code>mmproj-gemma-4-E4B-it-Q8_0.gguf</code> with <code>--mmproj</code> only for image, video, or audio input. See <a href="getting-started.html#e4b-fast-lane">Getting Started</a> for full platform syntax.</p>
+
+  <h2 id="examples">Examples</h2>
+  <p>Run these source commands from the repository root. Replace the sample paths and choose a native backend that your build supports.</p>
+  <pre data-lang="bash"><code># Text inference (macOS)
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --input prompt.txt --output result.txt \
     --max-tokens 200 --backend ggml_metal
 
 # Text inference on Windows/Linux + NVIDIA GPU
-./TensorSharp.Cli --model &lt;model.gguf&gt; --input prompt.txt --output result.txt \
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --input prompt.txt --output result.txt \
     --max-tokens 200 --backend ggml_cuda
 
 # Text inference on any Vulkan GPU (AMD / Intel / NVIDIA)
-./TensorSharp.Cli --model &lt;model.gguf&gt; --input prompt.txt --output result.txt \
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --input prompt.txt --output result.txt \
     --max-tokens 200 --backend ggml_vulkan
 
 # Multi-GPU host: list the visible Vulkan devices, then pick one by index
-./TensorSharp.Cli --list-gpus
-./TensorSharp.Cli --model &lt;model.gguf&gt; --input prompt.txt \
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- --list-gpus
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --input prompt.txt --max-tokens 200 \
     --backend ggml_vulkan --gpu-device 1
 
 # Interactive turn-by-turn chat (REPL) with KV-cache reuse and slash commands
-./TensorSharp.Cli --model &lt;model.gguf&gt; --backend ggml_metal --interactive
-./TensorSharp.Cli --model &lt;model.gguf&gt; --backend ggml_metal -i \
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --backend ggml_metal --interactive
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --backend ggml_metal -i \
     --system "You are a terse assistant." --temperature 0.7 --top-p 0.9 --think</code></pre>
 
   <h3>Multimodal</h3>
   <pre data-lang="bash"><code># Image inference (Gemma 3/4, Qwen 3.5-family)
-./TensorSharp.Cli --model &lt;model.gguf&gt; --image photo.png --backend ggml_metal
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --image photo.png --max-tokens 200 --backend ggml_metal
 
 # Video inference (Gemma 4)
-./TensorSharp.Cli --model &lt;model.gguf&gt; --video clip.mp4 --backend ggml_metal
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --video clip.mp4 --max-tokens 200 --backend ggml_metal
 
 # Audio inference (Gemma 4)
-./TensorSharp.Cli --model &lt;model.gguf&gt; --audio speech.wav --backend ggml_metal</code></pre>
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --audio speech.wav --max-tokens 200 --backend ggml_metal
+
+# PDF document Q&amp;A (--input holds the question; scanned/image-only PDFs
+# need a vision model + --mmproj, born-digital PDFs work with any model)
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --pdf report.pdf --input question.txt \
+    --max-tokens 400 --backend ggml_metal</code></pre>
 
   <h3>Reasoning, tools &amp; sampling</h3>
   <pre data-lang="bash"><code># Thinking / reasoning mode
-./TensorSharp.Cli --model &lt;model.gguf&gt; --input prompt.txt --backend ggml_metal --think
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --input prompt.txt --max-tokens 400 --backend ggml_metal --think
 
 # Tool calling
-./TensorSharp.Cli --model &lt;model.gguf&gt; --input prompt.txt --backend ggml_metal \
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --input prompt.txt --max-tokens 300 --backend ggml_metal \
     --tools tools.json
 
-# With sampling parameters
-./TensorSharp.Cli --model &lt;model.gguf&gt; --input prompt.txt --backend ggml_metal \
+# With sampling parameters (the CLI defaults to greedy decoding)
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --input prompt.txt --max-tokens 200 --backend ggml_metal \
     --temperature 0.7 --top-p 0.9 --top-k 40 --repeat-penalty 1.2 --seed 42</code></pre>
 
   <h3 id="imageedit">Image editing (Qwen-Image-Edit)</h3>
   <pre data-lang="bash"><code># Prompt + input image -> edited image. The VAE + Qwen2.5-VL text-encoder
 # companions are resolved next to the DiT GGUF (or pass --qwen-image-vae /
 # --qwen-image-vl / --qwen-image-mmproj).
-./TensorSharp.Cli --model &lt;qwen-image-edit-DiT.gguf&gt; --image input.png \
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;qwen-image-edit-DiT.gguf&gt; --image input.png \
     --prompt "Make the sky a dramatic sunset." --output edited.png \
     --backend ggml_cuda --diffusion-steps 30 --cfg 2.5 --diffusion-seed 0</code></pre>
 
   <h3 id="diffusion">DiffusionGemma &amp; inspection</h3>
   <pre data-lang="bash"><code># DiffusionGemma text-diffusion generation
-./TensorSharp.Cli --model &lt;diffusion-gemma.gguf&gt; --input prompt.txt --backend ggml_metal \
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;diffusion-gemma.gguf&gt; --input prompt.txt --backend ggml_metal \
     --max-tokens 256 --diffusion-steps 48 --diffusion-seed 0
 
 # Inspect the rendered prompt and tokenization without running inference
-./TensorSharp.Cli --model &lt;model.gguf&gt; --input prompt.txt --dump-prompt</code></pre>
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --input prompt.txt --dump-prompt</code></pre>
 
   <h3 id="jsonl">Batch &amp; benchmarks</h3>
   <pre data-lang="bash"><code># Batch processing (JSONL)
-./TensorSharp.Cli --model &lt;model.gguf&gt; --input-jsonl requests.jsonl \
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --input-jsonl requests.jsonl \
     --output results.txt --backend ggml_metal
 
 # Multi-turn chat simulation with KV-cache reuse (mirrors the web UI behavior)
-./TensorSharp.Cli --model &lt;model.gguf&gt; --multi-turn-jsonl chat.jsonl \
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --multi-turn-jsonl chat.jsonl \
     --backend ggml_metal --max-tokens 200
 
 # Throughput benchmark: best-of-N prefill and decode timing
-./TensorSharp.Cli --model &lt;model.gguf&gt; --backend ggml_metal \
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --backend ggml_metal \
     --benchmark --bench-prefill 256 --bench-decode 128 --bench-runs 3</code></pre>
   <p>The JSONL format is one JSON object per line:</p>
   <pre data-lang="json"><code>{"id": "q1", "messages": [{"role": "user", "content": "What is 2+3?"}], "max_tokens": 50}
 {"id": "q2", "messages": [{"role": "user", "content": "Write a haiku."}], "max_tokens": 100, "temperature": 0.8}</code></pre>
 
   <h2 id="options">Command-line options</h2>
+  <p>The CLI does not currently provide a complete <code>--help</code> screen: the usage synopsis is printed when no valid model path is available. Unknown arguments are ignored, so copy option names carefully—a misspelling may otherwise appear to succeed.</p>
   <h4>Input / output</h4>
   <div class="table-scroll">
   <table>
     <thead><tr><th>Option</th><th>Description</th></tr></thead>
     <tbody>
       <tr><td><code>--model &lt;path&gt;</code></td><td>Path to a GGUF model file (required).</td></tr>
-      <tr><td><code>--input &lt;path&gt;</code></td><td>Text file containing the user prompt.</td></tr>
+      <tr><td><code>--input &lt;path&gt;</code></td><td>Text file containing the user prompt. One-shot text prompts always come from a file — <code>--prompt</code> is reserved for the Qwen-Image-Edit edit instruction.</td></tr>
+      <tr><td><code>--pdf &lt;path&gt;</code></td><td>PDF document input (one-shot mode). Born-digital PDFs are inlined as extracted text (token-budget truncated); scanned/image-only PDFs are rasterized to page images and require a vision model + <code>--mmproj</code>. <code>--input</code> becomes the question about the document; <code>TS_PDF_MAX_PAGES</code> caps the pages read (default: all).</td></tr>
       <tr><td><code>--input-jsonl &lt;path&gt;</code></td><td>JSONL file with batch requests (one JSON per line).</td></tr>
       <tr><td><code>--multi-turn-jsonl &lt;path&gt;</code></td><td>JSONL file for multi-turn chat simulation with KV-cache reuse.</td></tr>
       <tr><td><code>--output &lt;path&gt;</code></td><td>Write generated text to this file.</td></tr>
-      <tr><td><code>--image / --video / --audio &lt;path&gt;</code></td><td>Media file for vision / video / audio inference.</td></tr>
-      <tr><td><code>--mmproj &lt;path&gt;</code></td><td>Path to the multimodal projector GGUF file (auto-detected if placed beside the model).</td></tr>
+      <tr><td><code>--image / --video / --audio &lt;path&gt;</code></td><td>Media file for vision / video / audio inference (audio needs Gemma 4's audio encoder).</td></tr>
+      <tr><td><code>--mmproj &lt;path&gt;</code></td><td>Path to the multimodal projector GGUF. Pass it explicitly: auto-detection recognizes only a small set of legacy companion filenames.</td></tr>
     </tbody>
   </table>
   </div>
@@ -119,12 +162,12 @@
     <thead><tr><th>Option</th><th>Description</th></tr></thead>
     <tbody>
       <tr><td><code>--max-tokens &lt;N&gt;</code></td><td>Maximum tokens to generate (default: 100).</td></tr>
-      <tr><td><code>--backend &lt;type&gt;</code></td><td>Compute backend: <code>cpu</code>, <code>cuda</code>, <code>mlx</code>, <code>ggml_cpu</code>, <code>ggml_metal</code>, <code>ggml_cuda</code>, <code>ggml_vulkan</code>.</td></tr>
+      <tr><td><code>--backend &lt;type&gt;</code></td><td>Compute backend: <code>cpu</code>, <code>cuda</code>, <code>mlx</code>, <code>ggml_cpu</code>, <code>ggml_metal</code>, <code>ggml_cuda</code>, <code>ggml_vulkan</code> (default: <code>ggml_cpu</code>).</td></tr>
       <tr><td><code>--gpu-device &lt;N&gt;</code></td><td>Vulkan device index for the <code>ggml_vulkan</code> backend on multi-GPU hosts (default: 0; env <code>TS_GGML_VULKAN_DEVICE</code>).</td></tr>
       <tr><td><code>--list-gpus</code></td><td>List the Vulkan devices ggml-vulkan can see (index + adapter name) and exit.</td></tr>
-      <tr><td><code>--kv-cache-dtype &lt;type&gt;</code></td><td>KV cache precision: <code>f32</code> (default), <code>f16</code>, <code>q8_0</code>, or <code>q4_0</code>. The block-quantized tiers require the native GGML flash-attention path; <code>q4_0</code> (~1/7 the f32 footprint) targets very long 128K–256K contexts.</td></tr>
+      <tr><td><code>--kv-cache-dtype &lt;type&gt;</code></td><td>KV cache precision: <code>f32</code>, <code>f16</code>, <code>q8_0</code>, or <code>q4_0</code> (default: auto — the backend/model pick; overrides the <code>KV_CACHE_DTYPE</code> env var). The block-quantized tiers require the native GGML flash-attention path; <code>q4_0</code> (~1/7 the f32 footprint) targets very long 128K–256K contexts.</td></tr>
       <tr><td><code>--interactive</code> / <code>-i</code></td><td>Start the interactive REPL (see below).</td></tr>
-      <tr><td><code>--system &lt;text&gt;</code> / <code>--system-file &lt;path&gt;</code></td><td>Seed the session's system prompt from text or a file.</td></tr>
+      <tr><td><code>--system &lt;text&gt;</code> / <code>--system-file &lt;path&gt;</code></td><td>Seed the session's system prompt from text or a file. Only the interactive REPL and DiffusionGemma diffusion mode use it — plain one-shot text mode ignores the system prompt.</td></tr>
       <tr><td><code>--think</code></td><td>Enable thinking / reasoning mode (chain-of-thought).</td></tr>
       <tr><td><code>--tools &lt;path&gt;</code></td><td>JSON file with tool / function definitions.</td></tr>
       <tr><td><code>--dump-prompt</code></td><td>Render the prompt + tokenization and exit (no generation).</td></tr>
@@ -132,17 +175,18 @@
   </table>
   </div>
   <h4>Sampling</h4>
+  <p>The CLI defaults to <strong>greedy decoding</strong>: temperature <code>0</code>, top-k <code>0</code>, top-p <code>1.0</code>, min-p <code>0</code>, penalties off, seed <code>-1</code> (unlike the server, whose defaults match Ollama). Pass the flags below to opt into sampling; they also carry into the interactive REPL.</p>
   <div class="table-scroll">
   <table>
     <thead><tr><th>Option</th><th>Description</th></tr></thead>
     <tbody>
-      <tr><td><code>--temperature &lt;f&gt;</code></td><td>Sampling temperature (0 = greedy).</td></tr>
-      <tr><td><code>--top-k &lt;N&gt;</code></td><td>Top-K filtering (0 = disabled).</td></tr>
-      <tr><td><code>--top-p &lt;f&gt;</code></td><td>Nucleus sampling threshold (1.0 = disabled).</td></tr>
-      <tr><td><code>--min-p &lt;f&gt;</code></td><td>Minimum probability filtering (0 = disabled).</td></tr>
-      <tr><td><code>--repeat-penalty &lt;f&gt;</code></td><td>Repetition penalty (1.0 = none).</td></tr>
-      <tr><td><code>--presence-penalty &lt;f&gt;</code> / <code>--frequency-penalty &lt;f&gt;</code></td><td>Presence / frequency penalties (0 = disabled).</td></tr>
-      <tr><td><code>--seed &lt;N&gt;</code></td><td>Random seed (-1 = non-deterministic).</td></tr>
+      <tr><td><code>--temperature &lt;f&gt;</code></td><td>Sampling temperature (default 0 = greedy).</td></tr>
+      <tr><td><code>--top-k &lt;N&gt;</code></td><td>Top-K filtering (default 0 = disabled).</td></tr>
+      <tr><td><code>--top-p &lt;f&gt;</code></td><td>Nucleus sampling threshold (default 1.0 = disabled).</td></tr>
+      <tr><td><code>--min-p &lt;f&gt;</code></td><td>Minimum probability filtering (default 0 = disabled).</td></tr>
+      <tr><td><code>--repeat-penalty &lt;f&gt;</code></td><td>Repetition penalty (default 1.0 = none).</td></tr>
+      <tr><td><code>--presence-penalty &lt;f&gt;</code> / <code>--frequency-penalty &lt;f&gt;</code></td><td>Presence / frequency penalties (default 0 = disabled).</td></tr>
+      <tr><td><code>--seed &lt;N&gt;</code></td><td>Random seed (default -1 = non-deterministic).</td></tr>
       <tr><td><code>--stop &lt;string&gt;</code></td><td>Stop sequence (can be repeated).</td></tr>
     </tbody>
   </table>
@@ -180,8 +224,8 @@
       <tr><td><code>/help</code>, <code>/?</code></td><td>Show all interactive commands.</td></tr>
       <tr><td><code>/exit</code>, <code>/quit</code></td><td>Leave the session.</td></tr>
       <tr><td><code>/reset</code>, <code>/new</code></td><td>Clear conversation history and KV cache.</td></tr>
-      <tr><td><code>/history</code> · <code>/save &lt;file&gt;</code></td><td>Print / append the transcript.</td></tr>
-      <tr><td><code>/system &lt;text&gt;</code></td><td>Set the system prompt (resets KV cache).</td></tr>
+      <tr><td><code>/history</code> · <code>/save &lt;file&gt;</code></td><td>Print the conversation / write the transcript to a file.</td></tr>
+      <tr><td><code>/system &lt;text&gt;</code></td><td>Set the system prompt (an empty argument clears it).</td></tr>
       <tr><td><code>/think on|off</code> · <code>/multiline on|off</code></td><td>Toggle reasoning mode / multi-line input.</td></tr>
     </tbody>
   </table>

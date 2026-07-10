@@ -11,13 +11,107 @@
 | Audio encoder | [`Gemma4AudioEncoder`](../../TensorSharp.Models/Models/Gemma4/Gemma4AudioEncoder.cs) (USM-style chunked transformer) |
 | Audio frontend | [`Gemma4AudioPreprocessor`](../../TensorSharp.Models/Models/Gemma4/Gemma4AudioPreprocessor.cs) (16 kHz mono → 128-bin log-mel) |
 | Image processor | [`Gemma4ImageProcessor`](../../TensorSharp.Models/Models/Gemma4/Gemma4ImageProcessor.cs) |
-| Example models | gemma-4-E4B (8B effective), gemma-4-31B, gemma-4-26B-A4B (MoE) |
+| Example models | gemma-4-E4B (8B effective), gemma-4-12B, gemma-4-31B, gemma-4-26B-A4B (MoE) |
 | Modalities | Text, image, video (frame stack), audio |
 | Thinking mode | Yes (`<\|channel>thought ... <channel\|>`) |
 | Tool calling | Yes (`<\|tool_call>call:name{...}<tool_call\|>`) |
 | Batched / paged forward | **Default-on** — `IBatchedPagedModel.ForwardBatch` with per-layer paged K/V (handles dual head dims, KV donor sharing, PLE injection, SWA + global mix). Set `TS_GEMMA4_BATCHED=0` to force the legacy per-seq KV-swap path. See §11. |
-| MTP speculative decoding | Optional — loads a separate `gemma4-assistant` EAGLE-style draft GGUF via `--mtp-draft-model` (`TS_MTP_DRAFT_MODEL`) and engages with `--mtp-spec`. Profitable on ggml backends and the pure-C# `cuda` backend. See §12. |
+| MTP speculative decoding | Optional — loads a separate `gemma4-assistant` EAGLE-style draft GGUF via the server's `--mtp-draft-model` (`TS_MTP_DRAFT_MODEL`) and engages with `--mtp-spec` (`TensorSharp.Server` flags; the CLI has no MTP flags). Profitable on ggml backends and the pure-C# `cuda` backend. See §12. |
 | Output parser | `Gemma4OutputParser` |
+
+## Downloads
+
+Verified GGUF pointers:
+
+| Model | HF repo | Recommended file | mmproj (image / video / audio) | MTP draft |
+|---|---|---|---|---|
+| gemma-4-E4B-it | [ggml-org/gemma-4-E4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF) | `gemma-4-E4B-it-Q8_0.gguf` (8.031 GB; also `gemma-4-E4B-it-Q4_K_M.gguf`, 5.335 GB) | `mmproj-gemma-4-E4B-it-Q8_0.gguf` (0.560 GB; same repo; alt: `mmproj-F16.gguf`, 0.990 GB, in [unsloth/gemma-4-E4B-it-GGUF](https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF)) | `gemma-4-E4B-it-assistant.Q8_0.gguf` (0.100 GB) from [AtomicChat/gemma-4-E4B-it-assistant-GGUF](https://huggingface.co/AtomicChat/gemma-4-E4B-it-assistant-GGUF) |
+| gemma-4-12B-it (QAT) | [unsloth/gemma-4-12B-it-qat-GGUF](https://huggingface.co/unsloth/gemma-4-12B-it-qat-GGUF) | `gemma-4-12B-it-qat-UD-Q4_K_XL.gguf` (6.716 GB) | `mmproj-BF16.gguf` (0.175 GB; same repo) | `mtp-gemma-4-12B-it.gguf` (0.254 GB; same repo root; quantized variants under `MTP/`) |
+| gemma-4-26B-A4B-it (MoE, QAT) | [unsloth/gemma-4-26B-A4B-it-qat-GGUF](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF) | `gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf` (14.249 GB) | `mmproj-BF16.gguf` (1.195 GB; same repo) | `mtp-gemma-4-26B-A4B-it.gguf` (0.252 GB; same repo), or `gemma-4-26B-A4B-it-assistant.Q8_0.gguf` (0.462 GB) from [AtomicChat/gemma-4-26B-A4B-it-assistant-GGUF](https://huggingface.co/AtomicChat/gemma-4-26B-A4B-it-assistant-GGUF) |
+| gemma-4-26B-A4B-it (MoE) | [ggml-org/gemma-4-26B-A4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF) | `gemma-4-26B-A4B-it-Q4_K_M.gguf` (16.796 GB) or `gemma-4-26B-A4B-it-Q8_0.gguf` (26.860 GB) | `mmproj-gemma-4-26B-A4B-it-Q8_0.gguf` (0.806 GB) / `mmproj-gemma-4-26B-A4B-it-bf16.gguf` (1.195 GB) | same drafts as the QAT row |
+| gemma-4-31B-it | [ggml-org/gemma-4-31B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-31B-it-GGUF) | `gemma-4-31B-it-Q4_K_M.gguf` (18.687 GB) or `gemma-4-31B-it-Q8_0.gguf` (32.636 GB) | `mmproj-gemma-4-31B-it-Q8_0.gguf` (0.810 GB) / `mmproj-gemma-4-31B-it-bf16.gguf` (1.201 GB) | — |
+
+Hugging Face identifies every row above as derived from the matching Google
+Gemma 4 base model. Some conversion cards do not declare a license; anonymous
+download does not replace the upstream model terms, so review the linked base
+model and conversion card before redistribution.
+
+The MTP draft head ships as a separate `gemma4-assistant` GGUF whose backbone
+dimension must equal the target's hidden size — always pair draft and target
+from the same size (E4B draft ↔ E4B target, 12B ↔ 12B, 26B-A4B ↔ 26B-A4B).
+A mismatched draft fails fast at server startup (§12.2).
+
+Command-line download (one line per file; requires `pip install -U huggingface_hub`):
+
+```bash
+python -m pip install -U huggingface_hub
+hf download ggml-org/gemma-4-E4B-it-GGUF gemma-4-E4B-it-Q8_0.gguf --local-dir models
+hf download ggml-org/gemma-4-E4B-it-GGUF mmproj-gemma-4-E4B-it-Q8_0.gguf --local-dir models
+hf download unsloth/gemma-4-12B-it-qat-GGUF gemma-4-12B-it-qat-UD-Q4_K_XL.gguf --local-dir models
+hf download unsloth/gemma-4-12B-it-qat-GGUF mtp-gemma-4-12B-it.gguf --local-dir models
+```
+
+### Verified Gemma 4 E4B native GGML fast path
+
+This is TensorSharp's verified quick-start lane. The E4B Q8_0 family/path
+uses the public
+[`ggml-org/gemma-4-E4B-it-GGUF`](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF)
+artifact, a normal native build, and a native GGML GPU backend. Verification is
+at the E4B Q8_0 family/path level; it does not assert that a particular public
+file checksum was the benchmark input. This copy/paste block is for
+Linux + NVIDIA; platform-specific backend choices follow it.
+
+```bash
+python -m pip install -U huggingface_hub
+hf download ggml-org/gemma-4-E4B-it-GGUF gemma-4-E4B-it-Q8_0.gguf --local-dir models
+TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet build TensorSharp.slnx -c Release -p:TensorSharpSkipMlxNative=true
+printf '%s\n' 'Answer in one short sentence: what is TensorSharp?' > prompt.txt
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
+  --input prompt.txt --max-tokens 64 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
+  --backend ggml_cuda --max-tokens 128
+```
+
+Use `ggml_cuda` on Windows/Linux with NVIDIA, `ggml_metal` on Apple Silicon,
+or `ggml_vulkan` on Windows/Linux with a Vulkan-capable AMD, Intel, or NVIDIA
+GPU. The matching `mmproj-gemma-4-E4B-it-Q8_0.gguf` is optional for text-only
+requests; download it from the same repository and pass `--mmproj` for image,
+video, or audio input.
+
+The fast-path claim is backed by three independent routing details:
+
+- Multi-token prefill/verify runs through the fused whole-model
+  `NativeGemma4ModelVerify` graph, including E-series in-kernel PLE gathering
+  and shared-KV donor handling.
+- Single-token dense decode runs the complete transformer through
+  `NativeGemma4ModelDecode` in one GGML graph dispatch.
+- With one scheduled sequence, the default `TS_BATCHED_N1_FAST_PATH=1`
+  scheduler route selects the linear `Forward()` path that reaches that fused
+  whole-model decode instead of the general batched per-op route.
+
+See the [engine-comparison report](../engine_comparison_report.md), the measured
+[E4B prefill performance record](../perf/gemma4-prefill-cuda-graph-design.md),
+and the [N=1 scheduler documentation](../PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md).
+
+Multimodal CLI one-shot (the text prompt comes from a file via `--input`; with
+`--image` and no `--input` a default describe-the-image prompt is used; CLI
+sampling defaults to greedy and `--max-tokens` defaults to 100):
+
+```bash
+dotnet run --project TensorSharp.Cli -c Release -- --model models/gemma-4-E4B-it-Q8_0.gguf \
+  --mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf \
+  --image photo.png --max-tokens 512 --backend ggml_cuda
+```
+
+Server with MTP speculative decoding (`--mtp-spec` / `--mtp-draft-model` are
+`TensorSharp.Server` flags only — `TensorSharp.Cli` has no MTP flags):
+
+```bash
+dotnet run --project TensorSharp.Server -c Release -- --model models/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf \
+  --backend ggml_cuda --mtp-spec --mtp-draft-model models/mtp-gemma-4-12B-it.gguf
+```
+
+Then open `http://localhost:5000` for the chat UI.
 
 ## 1. Origin and intent
 
@@ -150,10 +244,11 @@ residual += combined
   weights quantized: a single native call (`Gemma4ModelDecode`) processes the
   whole stack, including PLE, per-layer head dims, circular SWA caches, and
   per-layer scalars in one GPU graph dispatch.
-- **Prefill** (`seqLen > 1`): each eligible dense layer is fused into a single
-  per-layer GGML graph (`Gemma4LayerPrefill`). MoE / KV-shared / PLE layers
-  fall back to the per-op managed path. Long prompts are chunked into
-  `min(2 × slidingWindow, 2048)` to bound the score tensor for SWA layers.
+- **Prefill** (`seqLen > 1`): eligible dense models first use the fused
+  whole-model verify graph, including E-series PLE and shared-KV donor layers.
+  If that gate is unavailable, each eligible dense, non-shared, non-PLE layer
+  can still use the per-layer `Gemma4LayerPrefill` graph; remaining layers use
+  the per-op path. Long prompts are chunked to bound SWA score tensors.
 
 ## 4. Components in detail
 
@@ -387,20 +482,20 @@ On ggml backends, ordinary multi-token prefill is served by the same fused
 whole-model kernel that MTP verification uses (§12): all layers run in a
 single GGML graph dispatch with activations device-resident, instead of one
 graph per layer. `CanUseWholeModelPrefillVerify()` gates the path — dense
-models only, with multimodal chunks eligible at `startPos == 0` via the
-kernel's bidirectional-span mask (`TS_G4_MM_PREFILL=0` reverts multimodal to
-the per-op path). SWA-wrapped chunks at `startPos > 0` stay on the fused path
-through the kernel's in-kernel swaPrev gather (`TS_G4_VERIFY_SWAPREV=0`
-disables). All-MoE variants (e.g. 26B-A4B) have a sibling fused path,
+models only, including E-series in-kernel PLE and shared-KV donor layers, with
+multimodal chunks eligible at `startPos == 0` via the kernel's
+bidirectional-span mask (`TS_G4_MM_PREFILL=0` reverts multimodal to the per-op
+path). SWA-wrapped chunks at `startPos > 0` stay on the fused path through the
+kernel's in-kernel swaPrev gather (`TS_G4_VERIFY_SWAPREV=0` disables).
+All-MoE variants (e.g. 26B-A4B) have a sibling fused path,
 `CanUseWholeModelMoEPrefillVerify()` / `TryFusedMoEModelVerify()`. Set
 `TS_G4_WHOLE_PREFILL=0` to force the per-op chunked path for A/B. Note that
 block-quantized (`q8_0` / `q4_0`) KV caches *require* this path for
 multi-token prefill — the per-op fallback cannot walk block-quantized cache
 layouts.
 
-The scheduler feeds a solo (uncontended) prompt to this path in big chunks:
-the fresh chunk is capped by `TS_SCHED_SOLO_PREFILL_CHUNK` (default 8192) and
-the tail chunks by `TS_SCHED_SOLO_TAIL_PREFILL_CHUNK` (default 2048). See
+The scheduler feeds a solo (uncontended) prompt to this path in big chunks
+capped by `TS_SCHED_SOLO_PREFILL_CHUNK` (default 8192). See
 [`docs/perf/gemma4-prefill-cuda-graph-design.md`](../perf/gemma4-prefill-cuda-graph-design.md)
 for the measured design.
 

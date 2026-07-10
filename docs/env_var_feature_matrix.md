@@ -46,14 +46,14 @@ results as part of the standard matrix.
 | `TS_NEMOTRON_BATCHED` | Nemotron-H | Batched paged forward vs per-sequence fallback | ON | `0`, `1` | yes |
 | `TS_GEMMA4_BATCHED` | Gemma 4 | Batched paged forward vs per-sequence fallback | ON | `0`, `1` | yes |
 | `TS_NEMOTRON_MAMBA2_BATCHED_NATIVE` | Nemotron-H | Native batched Mamba2 step | OFF | `0`, `1` | no |
-| `TS_BATCHED_N1_FAST_PATH` | all | Routes eligible N=1 steps through the batched scheduler | OFF | `0`, `1` | yes |
+| `TS_BATCHED_N1_FAST_PATH` | all | Fused N=1 fast-path decode for solo sequences; `0` forces those steps onto the fully-batched path | ON | `0`, `1` | yes |
 | `TS_SCHED_DISABLE_BATCHED` | all | Global per-sequence KV-swap fallback | OFF | `0`, `1` | yes |
 
 ## KV Cache / Context
 
 | Env var | Applies to | Feature impact | Runtime baseline | Sweep values | Swept by default |
 |---|---|---|---|---|---|
-| `KV_CACHE_DTYPE` | all | KV cache element type | `f32` | `f32`, `f16`, `q8_0` (runtime also accepts `q4_0`, not swept) | yes |
+| `KV_CACHE_DTYPE` | all | KV cache element type | auto (model-aligned: `f16` when the model's weights are below F32, else `f32`) | `f32`, `f16`, `q8_0` (runtime also accepts `q4_0`, not swept) | yes |
 | `TS_KV_PAGED_QUANT_BITS` | all | TurboQuant paged-KV block codec | off (`0`) | `0`, `4`, `8` | yes |
 | `MAX_CONTEXT` | long text / uploaded text | Hard context cap | model default | `4096`, `8192`, `16384` | yes |
 
@@ -63,7 +63,7 @@ results as part of the standard matrix.
 |---|---|---|---|---|---|
 | `TS_PREFILL_CHUNK` | swept on GPT OSS, Qwen 3.5 / 3.6 family long-context features; honored at runtime by Gemma 4, Nemotron-H, Mistral 3, and Qwen 3 as well | Chunked prefill block size | architecture default | `256`, `512`, `1024` | yes |
 | `GDN_DISABLE_CHUNKED_PREFILL` | `qwen3next` | Disable GDN chunked prefill | OFF | `0`, `1` | no |
-| `TS_GGML_ASYNC_COMPUTE` | GGML backends | Async compute submission | OFF | `0`, `1` | yes |
+| `TS_GGML_ASYNC_COMPUTE` | GGML backends | Async compute submission | ON on `ggml_metal` (`0` disables), OFF on other GGML backends | `0`, `1` | yes |
 
 ## Multimodal
 
@@ -123,6 +123,19 @@ server CLI flags.
 | `TS_GMTP_NO_FUSED` | Gemma 4 on ggml backends | Disable fused multi-token-verify / draft-step kernels (per-op fallback) | OFF | not registered | no |
 | `TS_GMTP_NO_FAST_ROLLBACK` | Gemma 4 | Restore kept-prefix rollback instead of dense fast rollback on partial accept | OFF | not registered | no |
 | `TS_GMTP_BATCHED_TRUNK` | Gemma 4 | Run the verify trunk through the batched paged path instead of the linear trunk | OFF | not registered | no |
+
+## Out-of-Matrix General Runtime Knobs
+
+These variables are real runtime knobs, but they are not registered in
+`EnvVarMatrix.All` today and are not swept by the default TestMatrix config.
+
+| Env var | Applies to | Feature impact | Runtime baseline | Sweep values | Swept by default |
+|---|---|---|---|---|---|
+| `TS_PDF_MAX_PAGES` | PDF document input (CLI `--pdf`, server `/api/upload`) | Cap on the number of PDF pages read for text extraction and page-image rendering | `0` (all pages) | not registered | no |
+| `TS_FUSED_QKNORM_ROPE` | Qwen 3.5 / 3.6 text-only prefill on the direct `cuda` backend | Fused QK-Norm + NeoX-RoPE CUDA kernel; `0` falls back to separate norm + RoPE ops (multimodal MRoPE and other backends always use the separate path) | ON | not registered | no |
+| `TS_GGML_MANAGED_OPS` | GGML backends | **Experimental**: `1` routes ported ops through the managed C# GGML graph builders instead of the legacy native `TSGgml_*` kernels | OFF | not registered | no |
+| `TS_PREFILL_ATTN_CACHE` | managed GGML ops path (`TS_GGML_MANAGED_OPS=1`) | Prefill-attention session cache; `0` disables | ON | not registered | no |
+| `TS_PREFILL_ATTN_FLASH` | managed GGML ops path (`TS_GGML_MANAGED_OPS=1`) | Flash path for large-kvLen prefill attention; `0` reverts to the non-flash path | ON | not registered | no |
 
 ## Feature Coverage
 
