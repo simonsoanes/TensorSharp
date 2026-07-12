@@ -82,6 +82,7 @@ namespace TensorSharp.Cli
             string pdfPath = null;
             string outputFile = null;
             string imagePath = null;
+            var imagePathList = new List<string>();   // every --image in order (multi-image edit)
             string audioPath = null;
             string videoPath = null;
             string mmProjPath = null;
@@ -128,6 +129,7 @@ namespace TensorSharp.Cli
             // DiffusionGemma sampler knobs (used only for the diffusion-gemma architecture).
             int diffusionSteps = 48;
             int diffusionSeed = 0;
+            int imageWidth = 0, imageHeight = 0;   // explicit Qwen-Image-Edit output size (0 = auto/VRAM-clamped)
             int diffusionBlocks = 0;   // 0 => derive from --max-tokens and canvas_length
             // Qwen-Image-Edit knobs.
             string editPrompt = null;
@@ -141,6 +143,7 @@ namespace TensorSharp.Cli
             string qwenImageVlPath = null;
             string qwenImageMmprojPath = null;
             string qwenImageLoraPath = null;
+            bool offloadCpu = false;
 
             var samplingConfig = SamplingConfig.Greedy;
 
@@ -153,13 +156,14 @@ namespace TensorSharp.Cli
                     case "--pdf": pdfPath = args[++i]; break;
                     case "--input-jsonl": inputJsonl = args[++i]; break;
                     case "--output": outputFile = args[++i]; break;
-                    case "--image": imagePath = args[++i]; break;
+                    case "--image": imagePath = args[++i]; imagePathList.Add(imagePath); break;
                     case "--prompt": editPrompt = args[++i]; break;
                     case "--cfg": cfgScale = float.Parse(args[++i]); cfgScaleSet = true; break;
                     case "--qwen-image-vae": qwenImageVaePath = args[++i]; break;
                     case "--qwen-image-vl": qwenImageVlPath = args[++i]; break;
                     case "--qwen-image-mmproj": qwenImageMmprojPath = args[++i]; break;
                     case "--qwen-image-lora": qwenImageLoraPath = args[++i]; break;
+                    case "--offload-cpu": offloadCpu = true; break;
                     case "--audio": audioPath = args[++i]; break;
                     case "--video": videoPath = args[++i]; break;
                     case "--mmproj": mmProjPath = args[++i]; break;
@@ -243,6 +247,8 @@ namespace TensorSharp.Cli
                     case "--warmup-runs": warmupInferenceRuns = int.Parse(args[++i]); break;
                     case "--diffusion-steps": diffusionSteps = int.Parse(args[++i]); diffusionStepsSet = true; break;
                     case "--diffusion-seed": diffusionSeed = int.Parse(args[++i]); break;
+                    case "--width": imageWidth = int.Parse(args[++i]); break;
+                    case "--height": imageHeight = int.Parse(args[++i]); break;
                     case "--diffusion-blocks": diffusionBlocks = int.Parse(args[++i]); break;
                     case "--kv-cache-dtype":
                         {
@@ -326,7 +332,7 @@ namespace TensorSharp.Cli
                     "[--pdf <document.pdf>] " +
                     "[--input-jsonl <requests.jsonl>] [--image <image.png>] [--output <output.txt>] " +
                     "[--prompt <text>] [--cfg F] [--diffusion-steps N] [--diffusion-seed N] " +
-                    "[--qwen-image-vae <vae.gguf>] [--qwen-image-vl <qwen2.5-vl.gguf>] [--qwen-image-mmproj <mmproj.gguf>] [--qwen-image-lora <lora.safetensors>] " +
+                    "[--qwen-image-vae <vae.gguf>] [--qwen-image-vl <qwen2.5-vl.gguf>] [--qwen-image-mmproj <mmproj.gguf>] [--qwen-image-lora <lora.safetensors>] [--offload-cpu] " +
                     "[--max-tokens N] [--test] [--backend cpu|cuda|mlx|ggml_cpu|ggml_metal|ggml_cuda|ggml_vulkan] " +
                     "[--gpu-device N] [--list-gpus] " +
                     "[--interactive] [--system <text>] [--system-file <path>] " +
@@ -385,6 +391,10 @@ namespace TensorSharp.Cli
             ApplyQwenImageCompanionOverride("--qwen-image-vl", "TS_QWEN_IMAGE_TE", qwenImageVlPath);
             ApplyQwenImageCompanionOverride("--qwen-image-mmproj", "TS_QWEN_IMAGE_MMPROJ", qwenImageMmprojPath);
             ApplyQwenImageCompanionOverride("--qwen-image-lora", "TS_QWEN_IMAGE_LORA", qwenImageLoraPath);
+            // sd.cpp --offload-to-cpu equivalent: force DiT weight streaming from RAM (the
+            // pipeline also auto-engages it when the target resolution needs the VRAM).
+            if (offloadCpu)
+                Environment.SetEnvironmentVariable("TS_QWEN_IMAGE_OFFLOAD_CPU", "1");
 
             string requestedDtype = KvCacheDtypeConfig.IsExplicitlySet
                 ? KvCacheDtypeConfig.Current.ToShortString()
@@ -401,18 +411,21 @@ namespace TensorSharp.Cli
                 model.MaxContextLength, model.KvCacheDtype.ToShortString(),
                 modelLoadSw.Elapsed.TotalMilliseconds);
 
-            // Qwen-Image-Edit: prompt + input image -> modified image (no autoregressive path).
+            // Qwen-Image-Edit: prompt + input image(s) -> modified image (no autoregressive path).
+            // Repeat --image for multi-image edits (e.g. --image model.png --image dress.png);
+            // the first image drives the output geometry, the prompt can reference each as
+            // "Picture 1", "Picture 2", ... in listed order.
             if (model is TensorSharp.Models.QwenImage.QwenImageModel qwenImageModel)
             {
-                if (imagePath == null)
+                if (imagePathList.Count == 0)
                 {
-                    Console.Error.WriteLine("Qwen-Image-Edit requires --image <input.png>. Optionally --prompt, --output, --diffusion-steps, --cfg, --diffusion-seed.");
+                    Console.Error.WriteLine("Qwen-Image-Edit requires --image <input.png> (repeatable for multi-image edits). Optionally --prompt, --output, --diffusion-steps, --cfg, --diffusion-seed.");
                     return;
                 }
                 string prompt = editPrompt
                     ?? (inputFile != null && File.Exists(inputFile) ? File.ReadAllText(inputFile).Trim() : "");
                 string outPath = outputFile ?? "edited.png";
-                RunImageEdit(qwenImageModel, imagePath, prompt, outPath, diffusionStepsSet ? diffusionSteps : 0, cfgScaleSet ? cfgScale : 0f, diffusionSeed);
+                RunImageEdit(qwenImageModel, imagePathList, prompt, outPath, diffusionStepsSet ? diffusionSteps : 0, cfgScaleSet ? cfgScale : 0f, diffusionSeed, imageWidth, imageHeight);
                 return;
             }
 
@@ -1313,27 +1326,38 @@ namespace TensorSharp.Cli
         }
 
         static void RunImageEdit(TensorSharp.Models.QwenImage.QwenImageModel model,
-            string imagePath, string prompt, string outputPath, int steps, float cfgScale, int seed)
+            IReadOnlyList<string> imagePaths, string prompt, string outputPath, int steps, float cfgScale, int seed,
+            int width = 0, int height = 0)
         {
-            if (!File.Exists(imagePath))
+            foreach (var path in imagePaths)
             {
-                Console.Error.WriteLine($"Input image not found: {imagePath}");
-                return;
+                if (!File.Exists(path))
+                {
+                    Console.Error.WriteLine($"Input image not found: {path}");
+                    return;
+                }
             }
             Console.WriteLine($"=== Qwen-Image-Edit ===");
-            Console.WriteLine($"  input  : {imagePath}");
+            for (int i = 0; i < imagePaths.Count; i++)
+                Console.WriteLine($"  input{(imagePaths.Count > 1 ? $" {i + 1}" : "  ")}: {imagePaths[i]}");
             Console.WriteLine($"  prompt : {prompt}");
             Console.WriteLine($"  steps={steps} cfg={cfgScale} seed={seed} -> {outputPath}");
 
-            var input = TensorSharp.Models.QwenImage.ImageIO.Load(imagePath);
+            var inputs = new List<TensorSharp.Models.QwenImage.RgbImage>();
+            foreach (var path in imagePaths)
+                inputs.Add(TensorSharp.Models.QwenImage.ImageIO.Load(path));
             var p = new TensorSharp.Models.QwenImage.QwenImageParams
             {
                 Steps = steps,
                 CfgScale = cfgScale,
                 Seed = seed,
+                Width = width,
+                Height = height,
             };
+            if (width > 0 && height > 0)
+                Console.WriteLine($"  explicit output size {width}x{height} (bypasses the VRAM area clamp)");
             var sw = Stopwatch.StartNew();
-            var output = model.EditImage(prompt, input, p);
+            var output = model.EditImage(prompt, inputs, p);
             sw.Stop();
             TensorSharp.Models.QwenImage.ImageIO.SavePng(outputPath, output);
             Console.WriteLine($"Saved {output.Width}x{output.Height} edited image to {outputPath} " +

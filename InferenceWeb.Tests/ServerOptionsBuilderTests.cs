@@ -427,6 +427,7 @@ public class ServerOptionsBuilderTests : IDisposable
             "--continuous-batching", "--prefill-chunk-size",
             "--mtp-spec", "--mtp-draft", "--mtp-pmin", "--mtp-draft-model",
             "--qwen-image-vae", "--qwen-image-vl", "--qwen-image-mmproj", "--qwen-image-lora",
+            "--offload-cpu",
             "--help",
         };
         foreach (string flag in flags)
@@ -454,6 +455,17 @@ public class ServerOptionsBuilderTests : IDisposable
         _env.Set("TS_SCHED_PREFILL_CHUNK", null);
         var options = ServerOptionsBuilder.Build(new[] { "--prefill-chunk-size", "256" }, _baseDir);
         Assert.NotNull(options);
+    }
+
+    [Fact]
+    public void ApplyQwenImageCompanionCliFlags_OffloadCpu_SetsEnvAndDoesNotTripUnknownArgTrap()
+    {
+        _env.Set("TS_QWEN_IMAGE_OFFLOAD_CPU", null);
+        bool applied = ServerOptionsBuilder.ApplyQwenImageCompanionCliFlags(new[] { "--offload-cpu" });
+        Assert.True(applied);
+        Assert.Equal("1", Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_OFFLOAD_CPU"));
+        // The boolean flag has no value; the main parser must skip it, not abort.
+        Assert.NotNull(ServerOptionsBuilder.Build(new[] { "--offload-cpu" }, _baseDir));
     }
 
     // ----- MTP speculative-decoding CLI flags -----

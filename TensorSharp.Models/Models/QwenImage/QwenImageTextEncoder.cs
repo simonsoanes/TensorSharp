@@ -67,32 +67,39 @@ namespace TensorSharp.Models.QwenImage
         private static readonly int[] MRopeSection = { 16, 24, 24 };   // sums to head_dim/2 = 64
 
         /// <summary>Text-only conditioning (M-RoPE degenerates to 1D RoPE).</summary>
-        public float[] EncodeHidden(int[] tokens) => EncodeHidden(tokens, null);
+        public float[] EncodeHidden(int[] tokens) => EncodeHidden(tokens, (ImageCond[])null);
+
+        /// <summary>Single-image convenience overload.</summary>
+        public float[] EncodeHidden(int[] tokens, ImageCond img) =>
+            EncodeHidden(tokens, img != null ? new[] { img } : null);
 
         /// <summary>
-        /// Image-grounded conditioning: <paramref name="img"/> (if non-null) replaces the
-        /// <c>&lt;|image_pad|&gt;</c> token embeddings with the vision encoder's merged embeds and
-        /// applies 3D M-RoPE positions for the image span.
+        /// Image-grounded conditioning: each <paramref name="imgs"/> entry (ordered by
+        /// <see cref="ImageCond.Start"/>, non-overlapping) replaces its <c>&lt;|image_pad|&gt;</c>
+        /// span's token embeddings with the vision encoder's merged embeds and applies 3D
+        /// M-RoPE positions for that span (Qwen2.5-VL <c>get_rope_index</c> semantics).
         /// </summary>
-        public unsafe float[] EncodeHidden(int[] tokens, ImageCond img)
+        public unsafe float[] EncodeHidden(int[] tokens, ImageCond[] imgs)
         {
             int seq = tokens.Length;
-            _mropePos = BuildPositions(tokens.Length, img);
+            if (imgs != null && imgs.Length == 0) imgs = null;
+            _mropePos = BuildPositions(tokens.Length, imgs);
 
             // Fused whole-trunk path (TSGgml_QwenTeTrunk): all layers in ONE device graph
             // instead of ~10 host round-trips per layer. Falls back to the per-op loop below.
-            if (TryFusedEncode(tokens, img, out float[] fusedOut))
+            if (TryFusedEncode(tokens, imgs, out float[] fusedOut))
                 return fusedOut;
 
             Tensor hidden = Embedding(tokens);             // [seq, hidden]
-            if (img != null)
+            if (imgs != null)
             {
                 // overwrite the image-pad rows with the merged vision embeddings
                 float* hp = GetFloatPtr(hidden);
                 int H = Config.HiddenSize;
-                for (int i = 0; i < img.Count; i++)
-                    fixed (float* src = &img.Embeds[(long)i * H])
-                        Buffer.MemoryCopy(src, hp + (long)(img.Start + i) * H, (long)H * 4, (long)H * 4);
+                foreach (var img in imgs)
+                    for (int i = 0; i < img.Count; i++)
+                        fixed (float* src = &img.Embeds[(long)i * H])
+                            Buffer.MemoryCopy(src, hp + (long)(img.Start + i) * H, (long)H * 4, (long)H * 4);
                 InvalidateTensorDeviceCache(hidden);
             }
 
@@ -120,16 +127,16 @@ namespace TensorSharp.Models.QwenImage
         }
 
         // get_rope_index: text tokens get sequential positions (all 3 equal); image tokens get
-        // (t=cur, h=cur+row, w=cur+col) over the llm grid; after image, cur += max(llm_h,llm_w).
-        private int[] BuildPositions(int seq, ImageCond img)
+        // (t=cur, h=cur+row, w=cur+col) over the llm grid; after each image, cur += max(llm_h,llm_w).
+        internal static int[] BuildPositions(int seq, ImageCond[] imgs)
         {
             var pos = new int[3 * seq];   // [t(0..seq), h(seq..2seq), w(2seq..3seq)]
-            int cur = 0, s = 0;
-            int imgStart = img?.Start ?? -1, imgEnd = img != null ? img.Start + img.Count : -1;
+            int cur = 0, s = 0, next = 0;
             while (s < seq)
             {
-                if (img != null && s == imgStart)
+                if (imgs != null && next < imgs.Length && s == imgs[next].Start)
                 {
+                    var img = imgs[next]; next++;
                     int lh = img.GridH / 2, lw = img.GridW / 2;
                     for (int r = 0; r < lh; r++)
                         for (int c = 0; c < lw; c++)
@@ -292,7 +299,7 @@ namespace TensorSharp.Models.QwenImage
         private IntPtr _fusedFinalNorm;
         private bool _fusedFailed;
 
-        private unsafe bool TryFusedEncode(int[] tokens, ImageCond img, out float[] result)
+        private unsafe bool TryFusedEncode(int[] tokens, ImageCond[] imgs, out float[] result)
         {
             result = null;
             if (!FusedTrunkOn || !IsGgmlBackend || _fusedFailed) return false;
@@ -304,9 +311,10 @@ namespace TensorSharp.Models.QwenImage
             Tensor emb = Embedding(tokens);
             float[] x = TensorToHostFloat(emb, (long)seq * H);
             emb.Dispose();
-            if (img != null)
-                for (int i = 0; i < img.Count; i++)
-                    Array.Copy(img.Embeds, (long)i * H, x, (long)(img.Start + i) * H, H);
+            if (imgs != null)
+                foreach (var img in imgs)
+                    for (int i = 0; i < img.Count; i++)
+                        Array.Copy(img.Embeds, (long)i * H, x, (long)(img.Start + i) * H, H);
 
             // rotate-half M-RoPE tables [seq, head_dim] (duplicated halves), from the same
             // 3D positions/sections as ApplyMRoPE.

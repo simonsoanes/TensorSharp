@@ -8,12 +8,12 @@
 |---|---|
 | GGUF architecture key | `qwen_image` (the MMDiT diffusion transformer) |
 | Source class | [`QwenImageModel`](../../TensorSharp.Models/Models/QwenImage/QwenImageModel.cs) (+ internal [`QwenImagePipeline`](../../TensorSharp.Models/Models/QwenImage/QwenImagePipeline.cs)) |
-| Task | Image editing — prompt + input image → edited image |
-| Modalities | Image in + text in → image out |
+| Task | Image editing — prompt + input image(s) → edited image |
+| Modalities | Image(s) in + text in → image out (multi-image composition à la `QwenImageEditPlusPipeline`: "Picture 1", "Picture 2", ...) |
 | Thinking / tools | Not applicable |
 | Generation mode | FlowMatch-Euler diffusion denoise (true-CFG), **not** autoregressive token decode |
-| CLI support | `TensorSharp.Cli` detects `QwenImageModel` and runs image-edit mode (`--image`, `--prompt`, `--output`, `--cfg`, `--diffusion-steps`, `--diffusion-seed`) |
-| Server support | Web UI image-edit flow: `POST /api/image-edit` and `POST /api/image-edit/stream` (SSE with live denoising previews) |
+| CLI support | `TensorSharp.Cli` detects `QwenImageModel` and runs image-edit mode (`--image` repeatable for multi-image edits, `--prompt`, `--output`, `--cfg`, `--diffusion-steps`, `--diffusion-seed`, `--width`/`--height` to force the output size, `--offload-cpu` to always stream DiT weights from RAM) |
+| Server support | Web UI image-edit flow: `POST /api/image-edit` and `POST /api/image-edit/stream` (SSE with live denoising previews); both accept multiple images (multipart `image` parts / JSON `imagePaths[]`). Startup `--width`/`--height` set a fixed output size for every edit (per-request sizes still override). |
 | Continuous batching | None — image edits are serialized (the diffusion nets are not thread-safe); concurrent requests run one at a time |
 
 ## Downloads
@@ -28,7 +28,7 @@ with `--qwen-image-vae` / `--qwen-image-vl` / `--qwen-image-mmproj` /
 |---|---|---|
 | MMDiT DiT (the `--model` GGUF) | [unsloth/Qwen-Image-Edit-2511-GGUF](https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF) | `qwen-image-edit-2511-Q4_K_M.gguf` (13.245 GB); `qwen-image-edit-2511-Q2_K.gguf` (7.468 GB) is the smallest published option and fits 16 GB VRAM |
 | Qwen-Image VAE | [QuantStack/Qwen-Image-Edit-GGUF](https://huggingface.co/QuantStack/Qwen-Image-Edit-GGUF) | `VAE/Qwen_Image-VAE.safetensors` (0.254 GB) |
-| Qwen2.5-VL-7B text encoder | [unsloth/Qwen2.5-VL-7B-Instruct-GGUF](https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF) | `Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf` (4.683 GB), or `Qwen2.5-VL-7B-Instruct-UD-IQ2_XXS.gguf` (2.398 GB) for low VRAM |
+| Qwen2.5-VL-7B text encoder | [unsloth/Qwen2.5-VL-7B-Instruct-GGUF](https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF) | **`Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf` (4.683 GB) — strongly recommended.** The text/vision encoders are **freed before the denoise loop**, so they never compete with the DiT for VRAM: a bigger TE quant costs *nothing* at denoise time but drives the whole edit's fidelity. A ~2-bit `…-UD-IQ2_XXS.gguf` (2.398 GB) markedly softens faces and lowers overall quality — avoid it even on low-VRAM cards. Auto-resolution now prefers the **highest-quality** VL GGUF present. |
 | Vision projector (optional — image-grounded conditioning) | same repo | `mmproj-BF16.gguf` (1.354 GB) |
 | Lightning LoRA (optional — 4/8-step editing) | [lightx2v/Qwen-Image-Edit-2511-Lightning](https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning) | `Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors` (0.850 GB) |
 
@@ -64,6 +64,19 @@ dotnet run --project TensorSharp.Cli -c Release -- \
 (Leave `--cfg` / `--diffusion-steps` off for auto: 30 steps / cfg 2.5, or the
 Lightning LoRA's trained step count / cfg 1.0 when one is loaded via
 `--qwen-image-lora`.)
+
+**Multi-image editing** — repeat `--image` to compose several inputs; the first
+image drives the output geometry and each image becomes a "Picture N" reference
+(in listed order) that the prompt can point at:
+
+```bash
+dotnet run --project TensorSharp.Cli -c Release -- \
+  --model models/qwen-image-edit-2511-Q4_K_M.gguf --backend ggml_cuda \
+  --qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors \
+  --qwen-image-vl models/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf \
+  --image model-photo.heic --image dress.png \
+  --prompt "请为模特换上图中的衣服" --output edited.png
+```
 
 Server (the Web UI at `http://localhost:5000/index.html` routes image + prompt to
 `POST /api/image-edit/stream` — attach an image and type the edit instruction):
@@ -101,14 +114,16 @@ through [`EditImage()`](../../TensorSharp.Models/Models/QwenImage/QwenImageModel
 orchestrates the full edit:
 
 ```text
-input image
-  -> preprocess (aspect-preserving; dims multiple of 16; area clamped to VRAM budget, up to native ~1 MP)
-  -> VAE encode -> normalize (diffusers latents mean/std) -> pack [refSeq, 64]
-  -> text conditioning: Qwen2.5-VL encode(prompt [+ vision-grounded image tokens])
-       (+ negative prompt when CfgScale > 1, for true-CFG)
+input image(s)   [first image drives the output geometry]
+  -> preprocess (aspect-preserving; dims multiple of 16; area clamped to VRAM budget, up to native ~1 MP;
+     extra reference images keep their own aspect at min(native, output area))
+  -> VAE encode each -> normalize (diffusers latents mean/std) -> pack [refSeq_i, 64]
+  -> text conditioning: Qwen2.5-VL encode(prompt [+ "Picture N" vision-grounded tokens per image])
+       (+ negative prompt when CfgScale > 1, for true-CFG; vision embeds cached across both passes)
   -> free text + vision encoders (reclaim VRAM for the DiT)
   -> noise latents (seeded Gaussian) packed to [genSeq, 64]
-  -> concatenate [generated | reference] tokens (modulateIndex marks the ref half)
+  -> concatenate [generated | ref 1 | ref 2 | ...] tokens (modulateIndex marks all ref tokens;
+     DiT RoPE gives each stream its own frame index 0,1,2,... with centered spatial grids)
   -> FlowMatch-Euler scheduler (timestep == sigma), First-Block-Cache reset
   -> for each step:
        DiT velocity prediction (cond) [+ neg -> true-CFG combine + per-row renorm]
@@ -189,23 +204,28 @@ into the token sequence so the edit is grounded on the original image.
   and the fixed timestep shift 3 the distillation was trained with — cutting the
   default 60 DiT forwards to 4–8. Explicit `steps`/`cfg` still win;
   `TS_QWEN_IMAGE_LORA_SCALE` adjusts the LoRA multiplier (default 1.0). The
-  side-path is implemented in the whole-model forward (the default CUDA path); a
-  fallback to the per-block/managed paths logs a warning that the LoRA is not
-  applied there.
-- **Whole-step denoise cache (EasyCache)** — the default cache mode, ported from
-  stable-diffusion.cpp's `easycache.hpp`. It predicts each step's output change
+  side-path is implemented in the whole-model forward (the default CUDA path)
+  **and** the fused per-block kernels — the path CPU offload streams through —
+  so Lightning keeps working at offloaded high resolutions; only the 3-call /
+  managed fallbacks drop the LoRA (and log/throw accordingly).
+- **Whole-step denoise cache (EasyCache)** — **opt-in** port of
+  stable-diffusion.cpp's `easycache.hpp` (sd.cpp also ships it strictly opt-in
+  via `--cache-mode`). It predicts each step's output change
   from the measured input-latent change (times an empirically tracked
   input→output transformation rate) and, while the accumulated prediction stays
   below a threshold, skips the **entire DiT forward for both CFG branches**,
   reconstructing each branch's velocity as `input + cached(output − input)`.
   The first ~15% and last ~5% of steps always compute. Typically skips 40–55%
-  of steps at the default threshold with a perceptually equivalent result.
-  Knobs: `TS_QWEN_DIT_CACHE_MODE` (`easycache`/`fbc`/`both`/`off`),
+  of steps at the default threshold (a 30-step run computes only ~19), which
+  measurably softens fine detail (faces) on edit workloads — hence **off by
+  default**: quality is the default, speed is the opt-in
+  (`TS_QWEN_DIT_CACHE_MODE=easycache`).
+  Knobs: `TS_QWEN_DIT_CACHE_MODE` (`off` default /`easycache`/`fbc`/`both`),
   `TS_QWEN_DIT_EASYCACHE_THRESHOLD` (default 0.2 — lower = closer to no-cache),
   `TS_QWEN_DIT_EASYCACHE_START`/`_END` (window fractions, 0.15/0.95),
   `TS_QWEN_DIT_CACHE_DEBUG=1` (per-step decision trace).
-- **First-Block-Cache** across denoise steps (reset per generation); the previous
-  default, now selected with `TS_QWEN_DIT_CACHE_MODE=fbc`. It always computes
+- **First-Block-Cache** across denoise steps (reset per generation); selected
+  with `TS_QWEN_DIT_CACHE_MODE=fbc`. It always computes
   block 0 per branch and skips blocks 1..59 on low-change steps — strictly less
   saving than the whole-step cache, but its decision uses the actual block-0
   residual rather than a prediction.
@@ -220,10 +240,33 @@ into the token sequence so the edit is grounded on the original image.
   oracles (`te-verify` cosine 0.9989, `vis-verify` 0.9994 — both ≥ the per-op
   path's own scores). Falls back to the per-op path when the backend can't run
   it; `TS_QWEN_TE_FUSED=0` disables both.
-- **VRAM budgeting**: the text + vision encoders are freed after conditioning so
-  the DiT (and its attention scratch) own the working set; the target output
-  area is auto-clamped to fit device VRAM unless `Width`/`Height` are pinned, and
-  the persistent reuse `gallocr` is handed back before the final VAE decode.
+- **VRAM budgeting + CPU offload**: the text + vision encoders are freed after
+  conditioning so the DiT (and its attention scratch) own the working set, and the
+  persistent reuse `gallocr` is handed back before the final VAE decode. The auto
+  output size is **quality-first**: it targets the model's native ~1 MP training
+  resolution (what diffusers `QwenImageEditPlusPipeline` and sd.cpp render — the
+  old default scaled the area down by step/reference count as a speed budget,
+  which rendered a 30-step 2-image edit at ~0.4 MP with visibly soft faces).
+  When that resolution does not fit beside the resident DiT weights, **CPU
+  offload** (the sd.cpp `--offload-to-cpu` equivalent) engages automatically:
+  the resident whole-model graph is bypassed and the 60 blocks run as a few
+  **chunked whole-model graphs** (`TS_QWEN_DIT_OFFLOAD_CHUNK` blocks each,
+  default 10) whose weights live in per-call input slots of the shared reuse
+  `gallocr` — the buffer is re-planned chunk over chunk, so VRAM holds only ONE
+  chunk's weights at a time while the AdaLN modulation stays in-graph (no
+  host-expanded per-block modulation uploads). A device-copy residency budget
+  keeps in VRAM whatever fits *after* the activations are budgeted (the flash
+  masks first, then weights — the more VRAM, the less PCIe traffic, degrading
+  gracefully to full streaming). Measured on a 16 GB RTX 3080 Laptop at a
+  912×1136 2-image edit (12.7k tokens): ~19 s per forward / ~41 s per true-CFG
+  step — on par with sd.cpp's `--offload-to-cpu` — and it is the difference
+  between a ~0.4 MP and a native ~1 MP edit on that card. `--offload-cpu`
+  (`TS_QWEN_IMAGE_OFFLOAD_CPU=1`) forces it always on;
+  `TS_QWEN_IMAGE_OFFLOAD_CPU=0` restores the old clamp-resolution behavior.
+  `--width`/`--height` are still capped at the hardware memory ceiling (offload
+  raises that ceiling) — an oversized request (e.g. 2048×2048 on a 16 GB card)
+  is clamped down to the largest size that fits, with a warning, rather than
+  OOMing into a garbled/noise result.
 - **Fused whole-VAE graph** (`TSGgml_QwenVaeRun`, default on): the entire VAE
   encode/decode runs as ONE device-resident ggml graph — the C# side emits a flat
   op list mirroring the verified `VaeReferenceMath` topology, features stay on the
@@ -256,13 +299,18 @@ Important toggles:
 |---|---|
 | `TS_QWEN_IMAGE_VAE` / `TS_QWEN_IMAGE_TE` / `TS_QWEN_IMAGE_MMPROJ` | Override the resolved companion GGUFs (the CLI exposes these as `--qwen-image-vae` / `--qwen-image-vl` / `--qwen-image-mmproj`) |
 | `TS_QWEN_IMAGE_NO_VISION=1` | Skip vision grounding (faster, ungrounded text-only conditioning) |
+| `TS_QWEN_IMAGE_REF_AREA` | Reference-latent area in pixels for `inputs[1..]` — the detail source the DiT copies faces/textures from. Default (CUDA): the native ~1 MP with each ref's own aspect, **independent of the output size** (diffusers Edit Plus `VAE_IMAGE_SIZE`; the old rule shrank refs with a smaller output, silently discarding input detail). Clamped to [65536, 4 MP]; above ~1 MP keeps more input detail but is outside the training distribution, and every ref costs area/256 attention tokens |
+| `TS_QWEN_IMAGE_VISION_MIN_PIXELS` / `TS_QWEN_IMAGE_VISION_MAX_PIXELS` | Vision-tower condition-image pixel band (defaults 384², 560² — the Qwen-Image-Edit-2511 reference sizing): images keep their OWN resolution snapped to /28 inside the band, one Lanczos resample from the original. The old flow squashed every input to exactly 384² and re-upscaled it to the processor minimum — two resamples and ≤ half the pixels for high-res inputs |
 | `TS_QWEN_IMAGE_LORA` | DiT LoRA safetensors applied as a runtime F32 side-path (CLI/server: `--qwen-image-lora`); a Lightning checkpoint also switches the sampling defaults (its steps, cfg 1.0, fixed shift 3) |
 | `TS_QWEN_IMAGE_LORA_SCALE` | LoRA multiplier (default 1.0; 0 = structurally on but zero effect) |
-| `TS_QWEN_IMAGE_MAX_AREA` | Override the Metal default target-area clamp |
+| `TS_QWEN_IMAGE_FLOW_SHIFT` | FlowMatch time shift for the base (non-Lightning) path. Default **3** — the Qwen-Image-Edit value (matches stable-diffusion.cpp `default_flow_shift=3`); a lower shift under-noises the trajectory and softens the edit. Set `<= 0` for the old diffusers *dynamic* resolution-dependent shift. Lightning always pins shift 3. |
+| `TS_QWEN_IMAGE_MAX_AREA` | Cap the auto target area (Metal speed clamp; on CUDA an optional smaller-than-native quality/speed trade) |
+| `TS_QWEN_IMAGE_OFFLOAD_CPU` | CPU offload (CLI/server: `--offload-cpu`): `1` always streams the DiT weights from RAM; `0` never (clamps resolution instead); unset = **auto** (engages exactly when the target resolution doesn't fit beside the resident weights) |
+| `TS_QWEN_DIT_OFFLOAD_CHUNK` | Blocks per chunked whole-model graph on the offload path (default 10; smaller = less VRAM for weight slots, more chunk-boundary PCIe) |
 | `TS_QWEN_DIT_WHOLE_CAPTURE=0` | Disable the CUDA-graph-captured whole-DiT forward |
 | `TS_QWEN_DIT_FLASH=0` | Force the explicit-scores attention path (tighter quadratic VRAM budget) |
 | `TS_QWEN_DIT_CFG_BATCH_MAXTOK` | Token budget under which CFG-batching stays enabled |
-| `TS_QWEN_DIT_CACHE_MODE` | Denoise cache: `easycache` (default, whole-step skip), `fbc` (First-Block-Cache), `both`, `off` |
+| `TS_QWEN_DIT_CACHE_MODE` | Denoise cache: `off` (**default** — quality first, like sd.cpp), `easycache` (whole-step skip), `fbc` (First-Block-Cache), `both` |
 | `TS_QWEN_DIT_EASYCACHE_THRESHOLD` | EasyCache accumulated-change threshold (default 0.2; lower = closer to no-cache, higher = more skips) |
 | `TS_QWEN_DIT_CACHE=0` | Legacy master switch — disables all denoise caching |
 | `TS_QIMG_DEBUG=1` | Per-step velocity / latent statistics |
@@ -286,6 +334,9 @@ When the Web UI hosts a `qwen_image` DiT GGUF, the upload + edit endpoints take
 over:
 
 - `POST /api/image-edit` runs a single edit and returns the output image.
+  Multipart: one or more `image` file parts + `prompt`/`steps`/`cfg`/`seed`/
+  `targetArea` fields. JSON: `{ imagePaths: [...], prompt, ... }` (or legacy
+  single `imagePath`), where paths come from `POST /api/upload`.
 - `POST /api/image-edit/stream` streams SSE frames: progress ticks plus
   throttled decoded previews (`{ imageEdit: true, step, total, image, width,
   height }`), then a final full-resolution image before `done`. Previews also

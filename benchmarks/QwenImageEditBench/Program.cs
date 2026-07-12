@@ -578,7 +578,7 @@ internal static class Program
             string t0 = TensorSharp.Models.QwenImage.QwenImagePrompt.Build(prompt);
             int[] tok0 = te.Tokenizer.Encode(t0, addSpecial: false).ToArray();
             // image template (base, single image_pad)
-            string t1 = TensorSharp.Models.QwenImage.QwenImagePrompt.BuildWithImage(prompt);
+            string t1 = TensorSharp.Models.QwenImage.QwenImagePrompt.BuildWithImages(prompt, 1);
             int[] tok1 = te.Tokenizer.Encode(t1, addSpecial: false).ToArray();
             int padIdx = Array.IndexOf(tok1, TensorSharp.Models.QwenImage.QwenImagePrompt.ImagePadTokenId);
             Console.WriteLine($"text-only tokens={tok0.Length}  (HF gave 77 for the beach prompt)");

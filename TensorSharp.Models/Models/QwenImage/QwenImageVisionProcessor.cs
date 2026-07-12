@@ -9,42 +9,60 @@ using System;
 namespace TensorSharp.Models.QwenImage
 {
     /// <summary>
-    /// Qwen2.5-VL image preprocessing for the text-encoder vision tower: resize the
-    /// condition image to ~384² area, smart-resize to a multiple of 28 (patch*merge),
+    /// Qwen2.5-VL image preprocessing for the text-encoder vision tower: smart-resize the
+    /// condition image into the Edit-Plus pixel band (multiple of 28 = patch*merge),
     /// CLIP-normalize, and patchify into <c>[gridH*gridW, 1176]</c> in the merge-grouped,
     /// <c>[c,t,ph,pw]</c> layout the encoder expects (matches the transformers processor).
+    ///
+    /// Sizing follows the Qwen-Image-Edit-2511 reference (stable-diffusion.cpp's
+    /// QwenImageEditPlusPipeline conditioner): the image KEEPS its own resolution snapped
+    /// to /28 while inside the [384², 560²] pixel band, and is only downscaled above the
+    /// max / upscaled below the min — one Lanczos resample from the ORIGINAL image. The
+    /// previous flow squashed every input to exactly 384² and then re-upscaled it to the
+    /// processor's min-pixels bound: two resamples and ≤ half the pixels the reference
+    /// engines give the vision tower for high-resolution inputs, visibly costing
+    /// face/body detail in the conditioning. TS_QWEN_IMAGE_VISION_MIN_PIXELS /
+    /// TS_QWEN_IMAGE_VISION_MAX_PIXELS override the band.
     /// </summary>
     internal static class QwenImageVisionProcessor
     {
         private const int Patch = 14, Merge = 2, Factor = 28;     // patch*merge
-        private const long MinPixels = 256L * 28 * 28, MaxPixels = 512L * 28 * 28;
-        private const long ConditionArea = 384L * 384;
+        private const long DefaultMinPixels = 384L * 384, DefaultMaxPixels = 560L * 560;
         private static readonly float[] Mean = { 0.48145467f, 0.45782751f, 0.40821072f };
         private static readonly float[] Std = { 0.26862955f, 0.26130259f, 0.27577710f };
 
+        private static long EnvPixels(string name, long dflt)
+        {
+            var v = Environment.GetEnvironmentVariable(name);
+            return v != null && long.TryParse(v, out var p) && p >= Factor * Factor ? p : dflt;
+        }
+        internal static long MinPixels => EnvPixels("TS_QWEN_IMAGE_VISION_MIN_PIXELS", DefaultMinPixels);
+        internal static long MaxPixels => Math.Max(MinPixels, EnvPixels("TS_QWEN_IMAGE_VISION_MAX_PIXELS", DefaultMaxPixels));
+
         public static float[] Preprocess(RgbImage input, out int gridH, out int gridW)
         {
-            RgbImage cond = ImageIO.ResizeToArea(input, ConditionArea, multiple: 1);
-            (int hb, int wb) = SmartResize(cond.Height, cond.Width);
-            RgbImage img = ImageIO.Resize(cond, wb, hb);
+            (int hb, int wb) = SmartResize(input.Height, input.Width);
+            RgbImage img = ImageIO.Resize(input, wb, hb);
             gridH = hb / Patch; gridW = wb / Patch;
             return Patchify(img, gridH, gridW);
         }
 
-        private static (int, int) SmartResize(int h, int w)
+        // transformers Qwen2-VL smart_resize with the Edit-Plus [min,max] pixel band.
+        internal static (int hBar, int wBar) SmartResize(int h, int w)
         {
+            long minPx = MinPixels, maxPx = MaxPixels;
             int hb = Math.Max(Factor, (int)Math.Round((double)h / Factor) * Factor);
             int wb = Math.Max(Factor, (int)Math.Round((double)w / Factor) * Factor);
             long pixels = (long)hb * wb;
-            if (pixels > MaxPixels)
+            if (pixels > maxPx)
             {
-                double beta = Math.Sqrt((double)h * w / MaxPixels);
+                double beta = Math.Sqrt((double)h * w / maxPx);
                 hb = (int)(Math.Floor(h / beta / Factor) * Factor);
                 wb = (int)(Math.Floor(w / beta / Factor) * Factor);
             }
-            else if (pixels < MinPixels)
+            else if (pixels < minPx)
             {
-                double beta = Math.Sqrt((double)MinPixels / ((double)h * w));
+                double beta = Math.Sqrt((double)minPx / ((double)h * w));
                 hb = (int)(Math.Ceiling(h * beta / Factor) * Factor);
                 wb = (int)(Math.Ceiling(w * beta / Factor) * Factor);
             }

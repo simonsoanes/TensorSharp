@@ -1648,6 +1648,15 @@ internal enum GgmlIndexReductionOp
         }
 
         [DllImport(DllName, CallingConvention = CallingConventionType)]
+        private static extern void TSGgml_QwenImageSetOffload(int on);
+
+        // CPU-offload mode for the Qwen-Image DiT kernels: disables the persistent /
+        // CUDA-graph-captured entries (whose one-time resident weight upload is their
+        // whole point) so the non-persist reuse-gallocr path streams the weights per
+        // call. Set per request by the pipeline with the device-copy residency budget.
+        public static void QwenImageSetOffload(bool on) => TSGgml_QwenImageSetOffload(on ? 1 : 0);
+
+        [DllImport(DllName, CallingConvention = CallingConventionType)]
         private static extern int TSGgml_Conv2d(in Conv2dArgs desc);
 
         public static bool TryConv2d(in Conv2dArgs desc)

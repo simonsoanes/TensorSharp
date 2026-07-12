@@ -879,7 +879,7 @@ button.primary:hover { background: var(--accent-hover); }
         </div>
       </div>
     </div>
-    <input type="file" id="file-input" accept="image/*,video/*,audio/*,.pdf,.heic,.heif,.txt,.csv,.json,.xml,.md,.log,.py,.js,.ts,.cs,.java,.cpp,.c,.h,.html,.css,.yaml,.yml,.toml,.ini,.cfg,.sh,.bat,.ps1,.rb,.go,.rs,.swift,.kt,.sql,.r,.m,.tex,.rtf" onchange="handleFileSelect(event)">
+    <input type="file" id="file-input" multiple accept="image/*,video/*,audio/*,.pdf,.heic,.heif,.txt,.csv,.json,.xml,.md,.log,.py,.js,.ts,.cs,.java,.cpp,.c,.h,.html,.css,.yaml,.yml,.toml,.ini,.cfg,.sh,.bat,.ps1,.rb,.go,.rs,.swift,.kt,.sql,.r,.m,.tex,.rtf" onchange="handleFileSelect(event)">
   </div>
 </div>
 
@@ -1064,10 +1064,17 @@ async function clearChat() {
 }
 
 async function handleFileSelect(event) {
-  const file = event.target.files[0];
-  if (!file) return;
+  const files = Array.from(event.target.files);
+  if (files.length === 0) return;
   event.target.value = '';
+  // Upload sequentially so pendingAttachments keeps the user's selection order
+  // (the order defines "Picture 1", "Picture 2", ... for multi-image edits).
+  for (const file of files) {
+    await uploadOneFile(file);
+  }
+}
 
+async function uploadOneFile(file) {
   const formData = new FormData();
   formData.append('file', file);
 
@@ -1102,16 +1109,24 @@ async function handleFileSelect(event) {
 
 function renderAttachments() {
   attachmentsDiv.innerHTML = '';
+  let imageNum = 0;
+  const totalImages = pendingAttachments.filter(a => a.mediaType === 'image').length;
   pendingAttachments.forEach((att, idx) => {
     const chip = document.createElement('div');
     chip.className = 'attachment-chip';
     let icon = '&#x1F4C4;';
-    if (att.mediaType === 'image') icon = '&#x1F5BC;';
+    let label = att.fileName;
+    if (att.mediaType === 'image') {
+      icon = '&#x1F5BC;';
+      // With several images attached, show the "Picture N" order the edit prompt can reference.
+      imageNum++;
+      if (totalImages > 1) label = `${imageNum}⃣ ${att.fileName}`;
+    }
     else if (att.mediaType === 'video') icon = '&#x1F3AC;';
     else if (att.mediaType === 'audio') icon = '&#x1F3B5;';
     else if (att.mediaType === 'text') icon = '&#x1F4DD;';
     else if (att.mediaType === 'pdf') icon = '&#x1F4C4;';
-    chip.innerHTML = `${icon} ${att.fileName} <span class="remove" onclick="removeAttachment(${idx})">&times;</span>`;
+    chip.innerHTML = `${icon} ${label} <span class="remove" onclick="removeAttachment(${idx})">&times;</span>`;
     attachmentsDiv.appendChild(chip);
   });
 }
@@ -1213,7 +1228,7 @@ async function runImageEdit(userMsg, bubbleText, statsDiv, queueDiv) {
     const res = await fetch('/api/image-edit/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ imagePath: userMsg.imagePaths[0], prompt: userMsg.content || '' }),
+      body: JSON.stringify({ imagePaths: userMsg.imagePaths, prompt: userMsg.content || '' }),
       signal: currentAbortController.signal
     });
     if (!res.ok) {
@@ -1632,6 +1647,8 @@ function escapeHtml(str) {
 }
 
 function uploadUrlForAttachment(att) {
+  // Formats the browser can't render (HEIC/HEIF) get a server-generated PNG preview.
+  if (att && att.previewUrl) return att.previewUrl;
   if (att && att.url) return att.url;
   const raw = String((att && (att.path || att.fileName)) || '');
   if (!raw) return '';

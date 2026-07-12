@@ -211,6 +211,12 @@ namespace TensorSharp.Server.Hosting
                     "DiT LoRA (e.g. a Lightning step-distillation checkpoint); also switches sampling defaults. " +
                     "Default: none.",
                     "--qwen-image-lora Qwen-Image-Edit-Lightning-8steps.safetensors"),
+                new OptionHelp("--offload-cpu",
+                    "Stream the DiT weights from RAM instead of holding them resident in VRAM " +
+                    "(sd.cpp --offload-to-cpu equivalent): slower per step, but the freed VRAM lets " +
+                    "native ~1 MP edits run on small cards. Default: auto (engages only when the " +
+                    "target resolution does not fit beside the resident weights).",
+                    "--offload-cpu"),
             }),
             ("Help", new[]
             {

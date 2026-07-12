@@ -74,22 +74,47 @@ namespace TensorSharp.Models.QwenImage
         /// and the scheduler's fixed timestep shift.</summary>
         internal int LightningSteps { get; }
 
+        /// <summary>
+        /// CPU offload (sd.cpp <c>--offload-to-cpu</c> equivalent): stream the DiT weights from
+        /// RAM per block instead of holding them resident in VRAM, so the attention working set
+        /// gets the memory — the enabler for native ~1 MP edits on VRAM-limited cards. Set per
+        /// request by the pipeline (auto when the target resolution doesn't fit beside resident
+        /// weights; forced via TS_QWEN_IMAGE_OFFLOAD_CPU=1 / --offload-cpu). Disables the
+        /// resident-weight whole-model graph; the per-block kernels stream the weights, and the
+        /// pipeline caps the device-copy residency budget for the denoise.
+        /// </summary>
+        internal bool OffloadCpu { get; set; } =
+            Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_OFFLOAD_CPU") == "1";
+
         // Unmanaged F32 LoRA factors (stable pointers — resident-cached by the native
         // side like the GGUF weights). Freed on Dispose AFTER the base dispose has
         // cleared the native caches that reference them.
         private readonly QwenImageLoraTable _loraTable;
         internal bool LoraActive => _loraTable != null;
 
-        // The runtime LoRA side-path is implemented in the whole-model forward kernel
-        // (the default CUDA path). If the forward falls back to the per-block or managed
-        // paths, the LoRA silently wouldn't apply — surface that loudly (once).
+        // The runtime LoRA side-path is implemented in the whole-model forward kernel AND the
+        // fused per-block kernels (TSGgml_QwenImageBlock / TSGgml_QwenImageBlockCfg — the path
+        // CPU offload streams through). If the forward falls further back to the 3-call or
+        // managed paths, the LoRA silently wouldn't apply. For a Lightning step-distillation
+        // LoRA that is fatal: a 4/8-step schedule running the UN-distilled base model produces
+        // pure noise (not just lower quality) with no error. Fail loud there instead of emitting
+        // garbage; for a non-distillation LoRA a dropped side-path still yields a valid
+        // (un-styled) image, so warn once and continue.
         private bool _loraSkipWarned;
         private void WarnLoraSkipped()
         {
-            if (!LoraActive || _loraSkipWarned) return;
+            if (!LoraActive) return;
+            if (LightningSteps > 0)
+                throw new InvalidOperationException(
+                    "Qwen-Image Lightning LoRA requires the whole-model or fused per-block CUDA " +
+                    "forward, but this request fell back to a path without the LoRA side-path " +
+                    "(TS_QWEN_DIT_FUSED_BLOCK=0, TS_QWEN_DIT_NATIVE=0, or a non-CUDA backend). " +
+                    "The few-step Lightning schedule would produce a broken (un-distilled, " +
+                    "noise-like) image on it. Re-enable the fused native path.");
+            if (_loraSkipWarned) return;
             _loraSkipWarned = true;
-            Console.WriteLine("  [lora] WARNING: forward is not using the whole-model graph — " +
-                              "the runtime LoRA is NOT applied on this path (per-block/managed fallback).");
+            Console.WriteLine("  [lora] WARNING: forward is not using the whole-model or fused " +
+                              "per-block graph — the runtime LoRA is NOT applied on this path.");
         }
 
         public override void Dispose()
@@ -181,7 +206,15 @@ namespace TensorSharp.Models.QwenImage
                         if (swW != null) { swW.Stop(); Console.WriteLine($"  [dit-timing] whole-model {NumLayers - start}-block graph imgSeq={imgSeq} txtSeq={txtSeq}: {swW.Elapsed.TotalMilliseconds:F0}ms"); }
                         if (ok) return;
                     }
-                    WarnLoraSkipped();
+                    // Offload: a few chunked whole-model graphs (in-graph modulation, weights
+                    // streamed into reuse-gallocr slots) — far cheaper than the per-block loop's
+                    // host-expanded modulation uploads. Falls back internally per chunk.
+                    if (OffloadCpu &&
+                        TryOffloadChunkedBlocks(imgHost, imgSeq, txtHost, txtSeq, temb, modulateIndex, rope, start))
+                        return;
+                    // The fused per-block kernel carries the LoRA side-path (offload streams
+                    // through it); only the 3-call fallback drops the LoRA.
+                    if (!FusedBlockOn) WarnLoraSkipped();
                     for (int layer = start; layer < NumLayers; layer++)
                         RunNativeLayer(layer, imgHost, imgSeq, txtHost, txtSeq, temb, modulateIndex, rope);
                 }

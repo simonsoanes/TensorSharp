@@ -434,6 +434,44 @@ namespace TensorSharp.Server.ProtocolAdapters
                 });
             }
 
+            // HEIC/HEIF images (e.g. iPhone photos): the server-side pipelines decode them
+            // fine (Magick.NET), but no mainstream browser renders them in <img> — and the
+            // default static-file content-type provider doesn't even serve the extension —
+            // so the chat bubble showed a blank/broken preview. Convert a lightweight PNG
+            // preview at upload time; the Web UI displays previewUrl while path (the
+            // original file, full fidelity) is what the edit/vision pipelines consume.
+            if (mediaType == "image" && ext is ".heic" or ".heif")
+            {
+                try
+                {
+                    string previewName = Path.GetFileNameWithoutExtension(safeFileName) + "-preview.png";
+                    string previewPath = Path.Combine(_options.UploadDirectory, previewName);
+                    await Task.Run(() =>
+                    {
+                        var img = TensorSharp.Models.QwenImage.ImageIO.Load(savePath);
+                        const long previewArea = 768L * 768;   // plenty for the ~300 px bubble preview
+                        if ((long)img.Width * img.Height > previewArea)
+                            img = TensorSharp.Models.QwenImage.ImageIO.ResizeToArea(img, previewArea, multiple: 1);
+                        TensorSharp.Models.QwenImage.ImageIO.SavePng(previewPath, img);
+                    });
+                    return Results.Json(new
+                    {
+                        ok = true,
+                        path = savePath,
+                        url = uploadUrl,
+                        previewUrl = BuildUploadUrl(previewName),
+                        mediaType,
+                        fileName = file.FileName,
+                    });
+                }
+                catch (Exception ex)
+                {
+                    uploadLogger.LogWarning(LogEventIds.UploadReceived,
+                        "HEIC preview conversion failed for {FileName}: {Error} (chat preview will be blank; the edit itself is unaffected)",
+                        file.FileName, ex.Message);
+                }
+            }
+
             return Results.Json(new { ok = true, path = savePath, url = uploadUrl, mediaType, fileName = file.FileName });
         }
 
@@ -442,9 +480,11 @@ namespace TensorSharp.Server.ProtocolAdapters
         private static readonly object _imageEditLock = new();
 
         /// <summary>
-        /// <c>POST /api/image-edit</c> — multipart form with an <c>image</c> file and a
+        /// <c>POST /api/image-edit</c> — multipart form with one or more <c>image</c> files and a
         /// <c>prompt</c> (plus optional <c>steps</c>, <c>cfg</c>, <c>seed</c>). Runs the loaded
-        /// Qwen-Image-Edit model and returns a downloadable URL to the generated PNG.
+        /// Qwen-Image-Edit model and returns a downloadable URL to the generated PNG. With
+        /// multiple images the first drives the output geometry and the prompt can reference
+        /// them as "Picture 1", "Picture 2", ... in upload order.
         /// </summary>
         public async Task<IResult> ImageEditAsync(HttpRequest req)
         {
@@ -453,49 +493,51 @@ namespace TensorSharp.Server.ProtocolAdapters
                 return Results.BadRequest(new { error = "The loaded model is not a Qwen-Image-Edit model." });
 
             string prompt; int steps; float cfg; long seed; long targetArea = 0;
-            byte[] imageBytes;
+            var imageBytesList = new List<byte[]>();
 
             if (req.HasFormContentType)
             {
-                // Multipart: image file + fields (direct API use).
+                // Multipart: image file(s) + fields (direct API use). All parts named 'image'
+                // (or every file part when none is) are taken in order.
                 var form = await req.ReadFormAsync();
-                var file = form.Files.GetFile("image") ?? form.Files.FirstOrDefault();
-                if (file == null)
+                var files = form.Files.GetFiles("image");
+                var fileList = files.Count > 0 ? files : form.Files;
+                if (fileList.Count == 0)
                     return Results.BadRequest(new { error = "No image uploaded (field 'image')." });
                 prompt = form["prompt"].ToString();
                 steps = int.TryParse(form["steps"], out int s) ? s : 0;   // 0 = auto (30, or the Lightning LoRA's step count)
                 cfg = float.TryParse(form["cfg"], out float c) ? c : 0f;  // 0 = auto (2.5, or 1.0 with a Lightning LoRA)
                 seed = long.TryParse(form["seed"], out long sd) ? sd : 0;
                 if (long.TryParse(form["targetArea"], out long taf) && taf > 0) targetArea = taf;
-                using var ms = new MemoryStream();
-                await file.CopyToAsync(ms);
-                imageBytes = ms.ToArray();
+                foreach (var file in fileList)
+                {
+                    using var ms = new MemoryStream();
+                    await file.CopyToAsync(ms);
+                    imageBytesList.Add(ms.ToArray());
+                }
             }
             else
             {
-                // JSON: { imagePath (server path from /api/upload), prompt, steps, cfg, seed } (Web UI).
+                // JSON: { imagePaths[] or imagePath (server paths from /api/upload), prompt, steps, cfg, seed } (Web UI).
                 var body = await System.Text.Json.JsonDocument.ParseAsync(req.Body);
                 var root = body.RootElement;
-                string imagePath = root.TryGetProperty("imagePath", out var ip) ? ip.GetString() : null;
                 prompt = root.TryGetProperty("prompt", out var pr) ? pr.GetString() ?? "" : "";
                 steps = root.TryGetProperty("steps", out var st) && st.TryGetInt32(out int si) ? si : 0;   // 0 = auto
                 cfg = root.TryGetProperty("cfg", out var cf) && cf.TryGetSingle(out float cv) ? cv : 0f;  // 0 = auto
                 seed = root.TryGetProperty("seed", out var se) && se.TryGetInt64(out long sv) ? sv : 0;
                 if (root.TryGetProperty("targetArea", out var ta) && ta.TryGetInt64(out long tav) && tav > 0)
                     targetArea = tav;
-                // Constrain reads to the upload directory.
-                string full = imagePath == null ? null : Path.GetFullPath(imagePath);
-                string uploadRoot = Path.GetFullPath(_options.UploadDirectory);
-                if (full == null || !full.StartsWith(uploadRoot, StringComparison.OrdinalIgnoreCase) || !File.Exists(full))
-                    return Results.BadRequest(new { error = "imagePath must reference a previously uploaded file." });
-                imageBytes = await File.ReadAllBytesAsync(full);
+                string error = await ReadUploadedImagesAsync(root, imageBytesList, CancellationToken.None);
+                if (error != null)
+                    return Results.BadRequest(new { error });
             }
 
             string outName = $"edit-{Guid.NewGuid():N}.png";
             string outPath = Path.Combine(_options.UploadDirectory, outName);
 
             logger.LogInformation(LogEventIds.UploadReceived,
-                "Image edit: prompt='{Prompt}' steps={Steps} cfg={Cfg} bytes={Bytes}", prompt, steps, cfg, imageBytes.Length);
+                "Image edit: prompt='{Prompt}' steps={Steps} cfg={Cfg} images={Count} bytes={Bytes}",
+                prompt, steps, cfg, imageBytesList.Count, imageBytesList.Sum(b => (long)b.Length));
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
             (int w, int h) = await Task.Run(() =>
@@ -503,10 +545,10 @@ namespace TensorSharp.Server.ProtocolAdapters
                 // The model is not thread-safe; serialize edit requests.
                 lock (_imageEditLock)
                 {
-                    var input = TensorSharp.Models.QwenImage.ImageIO.Decode(imageBytes);
+                    var inputs = imageBytesList.ConvertAll(TensorSharp.Models.QwenImage.ImageIO.Decode);
                     var p = new TensorSharp.Models.QwenImage.QwenImageParams { Steps = steps, CfgScale = cfg, Seed = seed };
                     if (targetArea > 0) p.TargetArea = targetArea;
-                    var output = editModel.EditImage(prompt, input, p);
+                    var output = editModel.EditImage(prompt, inputs, p);
                     TensorSharp.Models.QwenImage.ImageIO.SavePng(outPath, output);
                     return (output.Width, output.Height);
                 }
@@ -517,6 +559,34 @@ namespace TensorSharp.Server.ProtocolAdapters
             logger.LogInformation(LogEventIds.UploadReceived,
                 "Image edit done: {W}x{H} -> {Url} ({Sec:F1}s)", w, h, url, sw.Elapsed.TotalSeconds);
             return Results.Json(new { ok = true, url, width = w, height = h, elapsedSeconds = sw.Elapsed.TotalSeconds });
+        }
+
+        /// <summary>
+        /// Read the referenced upload(s) from a JSON edit request into <paramref name="images"/>:
+        /// <c>imagePaths</c> (array, multi-image) or legacy <c>imagePath</c> (single). Every path
+        /// must resolve inside the upload directory. Returns an error message, or null on success.
+        /// </summary>
+        private async Task<string> ReadUploadedImagesAsync(JsonElement root, List<byte[]> images, CancellationToken ct)
+        {
+            var paths = new List<string>();
+            if (root.TryGetProperty("imagePaths", out var ips) && ips.ValueKind == JsonValueKind.Array)
+                foreach (var el in ips.EnumerateArray())
+                    if (el.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(el.GetString()))
+                        paths.Add(el.GetString());
+            if (paths.Count == 0 && root.TryGetProperty("imagePath", out var ip) && ip.ValueKind == JsonValueKind.String)
+                paths.Add(ip.GetString());
+            if (paths.Count == 0)
+                return "imagePath (or imagePaths) must reference a previously uploaded file.";
+
+            string uploadRoot = Path.GetFullPath(_options.UploadDirectory);
+            foreach (var path in paths)
+            {
+                string full = path == null ? null : Path.GetFullPath(path);
+                if (full == null || !full.StartsWith(uploadRoot, StringComparison.OrdinalIgnoreCase) || !File.Exists(full))
+                    return "imagePath must reference a previously uploaded file.";
+                images.Add(await File.ReadAllBytesAsync(full, ct));
+            }
+            return null;
         }
 
         // A live denoising frame surfaced from the edit worker to the SSE writer: a progress tick
@@ -551,26 +621,24 @@ namespace TensorSharp.Server.ProtocolAdapters
             }
 
             // Parse the Web UI JSON body (mirrors the JSON branch of ImageEditAsync).
-            string prompt; int steps; float cfg; long seed; long targetArea = 0; byte[] imageBytes;
+            string prompt; int steps; float cfg; long seed; long targetArea = 0;
+            var imageBytesList = new List<byte[]>();
             try
             {
                 var body = await JsonDocument.ParseAsync(ctx.Request.Body, cancellationToken: ct);
                 var root = body.RootElement;
-                string imagePath = root.TryGetProperty("imagePath", out var ip) ? ip.GetString() : null;
                 prompt = root.TryGetProperty("prompt", out var pr) ? pr.GetString() ?? "" : "";
                 steps = root.TryGetProperty("steps", out var st) && st.TryGetInt32(out int si) ? si : 0;   // 0 = auto
                 cfg = root.TryGetProperty("cfg", out var cf) && cf.TryGetSingle(out float cv) ? cv : 0f;  // 0 = auto
                 seed = root.TryGetProperty("seed", out var se) && se.TryGetInt64(out long sv) ? sv : 0;
                 if (root.TryGetProperty("targetArea", out var ta) && ta.TryGetInt64(out long tav) && tav > 0)
                     targetArea = tav;
-                string full = imagePath == null ? null : Path.GetFullPath(imagePath);
-                string uploadRoot = Path.GetFullPath(_options.UploadDirectory);
-                if (full == null || !full.StartsWith(uploadRoot, StringComparison.OrdinalIgnoreCase) || !File.Exists(full))
+                string error = await ReadUploadedImagesAsync(root, imageBytesList, ct);
+                if (error != null)
                 {
-                    await SseWriter.WriteEventAsync(ctx.Response, new { done = true, error = "imagePath must reference a previously uploaded file." }, ct);
+                    await SseWriter.WriteEventAsync(ctx.Response, new { done = true, error }, ct);
                     return;
                 }
-                imageBytes = await File.ReadAllBytesAsync(full, ct);
             }
             catch (Exception ex)
             {
@@ -581,7 +649,8 @@ namespace TensorSharp.Server.ProtocolAdapters
             string outName = $"edit-{Guid.NewGuid():N}.png";
             string outPath = Path.Combine(_options.UploadDirectory, outName);
             logger.LogInformation(LogEventIds.UploadReceived,
-                "Image edit (stream): prompt='{Prompt}' steps={Steps} cfg={Cfg} bytes={Bytes}", prompt, steps, cfg, imageBytes.Length);
+                "Image edit (stream): prompt='{Prompt}' steps={Steps} cfg={Cfg} images={Count} bytes={Bytes}",
+                prompt, steps, cfg, imageBytesList.Count, imageBytesList.Sum(b => (long)b.Length));
 
             // The edit worker pushes frames into this channel; the SSE loop drains it. The callback
             // never blocks on the network (unbounded TryWrite) so it can't stall the denoise.
@@ -600,7 +669,7 @@ namespace TensorSharp.Server.ProtocolAdapters
                     // The model is not thread-safe; serialize edit requests (shared with ImageEditAsync).
                     lock (_imageEditLock)
                     {
-                        var input = TensorSharp.Models.QwenImage.ImageIO.Decode(imageBytes);
+                        var inputs = imageBytesList.ConvertAll(TensorSharp.Models.QwenImage.ImageIO.Decode);
                         var p = new TensorSharp.Models.QwenImage.QwenImageParams
                         {
                             Steps = steps,
@@ -627,7 +696,7 @@ namespace TensorSharp.Server.ProtocolAdapters
                             },
                         };
                         if (targetArea > 0) p.TargetArea = targetArea;
-                        var output = editModel.EditImage(prompt, input, p);
+                        var output = editModel.EditImage(prompt, inputs, p);
                         TensorSharp.Models.QwenImage.ImageIO.SavePng(outPath, output);
                         channel.Writer.TryWrite(new EditFrame
                         {
