@@ -28,8 +28,16 @@ namespace TensorSharp.Models.QwenImage
 {
     internal sealed partial class QwenImageDiT
     {
+        // Whole-DiT single-graph forward. On CUDA the persistent CUDA-graph capture inside
+        // TSGgml_QwenImageForward removes the per-op launch overhead; on Metal the SAME
+        // export takes the non-persistent branch (one graph build + one graph_compute + one
+        // synchronous readback, weights resident-cached by their GGUF pointer). Enabling it
+        // on Metal replaces the 60 per-block dispatches — each with a full img/txt residual
+        // host round-trip + device sync that leaves the GPU idle between blocks — with a
+        // single pipelined submission (stable-diffusion.cpp's QwenImageModel::forward_orig
+        // model). Metal never offloads (unified memory), so OffloadCpu is always false here.
         internal bool WholeModelOn =>
-            NativeBlockOn && _backend == BackendType.GgmlCuda && !OffloadCpu &&
+            NativeBlockOn && (_backend == BackendType.GgmlCuda || _backend == BackendType.GgmlMetal) && !OffloadCpu &&
             Environment.GetEnvironmentVariable("TS_QWEN_DIT_WHOLE") != "0";
 
         // CPU-offload fast path: run the 60 blocks as a FEW chunked whole-model graphs

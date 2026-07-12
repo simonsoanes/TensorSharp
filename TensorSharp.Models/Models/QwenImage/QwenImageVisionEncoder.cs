@@ -189,7 +189,7 @@ namespace TensorSharp.Models.QwenImage
             long n = info.NumElements;
             byte[] raw = _gguf.ReadTensorData(info);
             var dst = new float[n];
-            GgmlGgufTensorDequant.DequantizeToFloat32((int)info.Type, raw, 0, dst, 0, n);
+            NativeDequant.DequantizeToFloat32((int)info.Type, raw, 0, dst, 0, n);
             return dst;
         }
 
@@ -445,7 +445,7 @@ namespace TensorSharp.Models.QwenImage
             long n = info.NumElements;
             var host = new float[n];
             byte[] raw = _gguf.ReadTensorData(info);
-            GgmlGgufTensorDequant.DequantizeToFloat32((int)info.Type, raw, 0, host, 0, n);
+            NativeDequant.DequantizeToFloat32((int)info.Type, raw, 0, host, 0, n);
             IntPtr p = Marshal.AllocHGlobal((IntPtr)(n * sizeof(float)));
             Marshal.Copy(host, 0, p, (int)n);
             _fusedAllocs.Add(p);

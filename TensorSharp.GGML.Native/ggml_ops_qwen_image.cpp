@@ -576,19 +576,32 @@ struct QiLora
     float scale = 0.0f;
 };
 
-// y = W·x (+bias) + scale * B·(A·x). The LoRA matmuls run in F32 (cuBLAS SGEMM):
-// no activation quantization (so no q8_1 block-sum overflow) and no F16 cast of the
-// unbounded DiT activations (which reach ~1e8 by the late blocks).
+// y = W·x (+bias) + scale * B·(A·x). The LoRA down-projection A·x must ride the SAME
+// overflow-safe prescale as the base matmul (qi_mm): the Metal mul_mm kernel loads its
+// src1 (the activation x) into threadgroup tiles as F16 (kernel_mul_mm_f32_f32 uses a
+// half src1 type — see ggml-metal.metal), so the unbounded DiT activations (attention
+// output to_out/to_add_out, GELU hidden mlp net.2, reaching ~1e7 in the late blocks)
+// overflow F16 to +inf and the LoRA delta becomes NaN — corrupting the WHOLE forward
+// from the first step (all-black edit output). The base weight matmul dodges this by
+// scaling x down by 1/QI_MM_SCALE first (prescale=true), so do the identical linear
+// rescale here (fold the 1/K into the LoRA down input and the K back into the delta).
+// CPU/CUDA compute A·x in full F32 and are unaffected, which is why this only bit the
+// Metal per-block path (WholeModelOn is CUDA-only, so Metal runs the fused per-block
+// kernel whose LoRA side-path hits this). prescale=false inputs are post-norm-bounded
+// (~O(10)) and never overflow, so they skip the rescale exactly as the base matmul does.
 ggml_tensor* qi_lin_lora(ggml_context* ctx, ggml_tensor* w, ggml_tensor* x, ggml_tensor* b, const QiLora& lo,
                          bool prescale = true)
 {
     ggml_tensor* o = qi_lin_bias(ctx, w, x, b, prescale);
     if (lo.a == nullptr || lo.b == nullptr) return o;
-    ggml_tensor* h = ggml_mul_mat(ctx, lo.a, x);                       // [rank, seq]
+    ggml_tensor* lx = x;
+    // The loader folds alpha/rank*multiplier into B, so scale is normally 1 here; the
+    // overflow prescale multiplies K back in. Both fold into one post-matmul ggml_scale.
+    float post = lo.scale;
+    if (prescale) { lx = ggml_scale(ctx, x, 1.0f / QI_MM_SCALE); post *= QI_MM_SCALE; }
+    ggml_tensor* h = ggml_mul_mat(ctx, lo.a, lx);                      // [rank, seq]
     ggml_tensor* d = ggml_mul_mat(ctx, lo.b, h);
-    // The loader folds alpha/rank*multiplier into B, so scale is normally 1 here;
-    // keep the node for callers that pass an unfolded factor.
-    if (lo.scale != 1.0f) d = ggml_scale(ctx, d, lo.scale);
+    if (post != 1.0f) d = ggml_scale(ctx, d, post);
     return ggml_add(ctx, o, d);
 }
 
@@ -1096,6 +1109,23 @@ ggml_tensor* qi_attention(ggml_context* ctx, ggml_tensor* q_attn, ggml_tensor* k
         constexpr float QI_FA_SCALE = 16.0f;
         ggml_tensor* ks = ggml_scale(ctx, kpad, 1.0f / QI_FA_SCALE);
         ggml_tensor* vs = ggml_scale(ctx, vpad, 1.0f / QI_FA_SCALE);
+        // On Metal, hand flash_attn_ext F16 K/V so it selects the fast
+        // kernel_flash_attn_ext_f16 (half the K/V read bandwidth — attention is ~30% of the
+        // DiT forward at ~0.6 MP, and the F32-K/V Metal kernel path is markedly slower).
+        // stable-diffusion.cpp casts K/V to F16 for exactly this reason. The 1/QI_FA_SCALE
+        // prescale above already bounds K/V into F16 range (no overflow), scores accumulate
+        // in F32 (set_prec below), and softmax·V is a convex combination — so the only
+        // precision change is representing the already-scaled K/V in F16, which the model
+        // (bf16-native) tolerates (verified: velocity cosine ~1.0). NOT on CUDA: the
+        // MMA/wmma kernels size their dst workspace for F32 K/V and a pre-cast writes OOB
+        // (illegal access) — that backend keeps the F32 K/V path. TS_QWEN_DIT_FLASH_F16KV=0
+        // forces the old F32-K/V behavior on Metal.
+        static const bool f16kv = []{ const char* e = std::getenv("TS_QWEN_DIT_FLASH_F16KV"); return e == nullptr || e[0] != '0'; }();
+        if (f16kv && g_backend_type == BACKEND_TYPE_METAL)
+        {
+            ks = ggml_cast(ctx, ks, GGML_TYPE_F16);
+            vs = ggml_cast(ctx, vs, GGML_TYPE_F16);
+        }
         ggml_tensor* faop = ggml_flash_attn_ext(ctx, q_attn, ks, vs, mask, scale * QI_FA_SCALE, 0.0f, 0.0f); // [hd, heads, total]
         // F32 accumulation by default. TS_QWEN_DIT_FLASH_F16ACC=1 keeps the kernel's
         // native F16 accumulators (full-rate tensor cores on consumer Ampere+ — the
@@ -2736,8 +2766,9 @@ TSG_EXPORT int TSGgml_QwenImageForward(const TSGgmlQwenImageForwardDesc* d)
         // Context sized for the whole 60-block graph's tensor headers + node list.
         // ~200 ops/block (heavy: interleaved RoPE + per-chunk cont); size generously so
         // ggml_new_graph_custom never asserts n_nodes < size, and give the ctx enough
-        // header space for ~one tensor per node plus the leaves.
-        const std::size_t nodes = static_cast<std::size_t>(nl) * 384 + 2048;
+        // header space for ~one tensor per node plus the leaves. +LoRA: up to 12x4 extra
+        // ops/block (down/up matmul + prescale + rescale + add), matching qi_fwd_build_graph.
+        const std::size_t nodes = static_cast<std::size_t>(nl) * 448 + 2048;
         const std::size_t meta = ggml_tensor_overhead() * (nodes + 1024)
                                  + ggml_graph_overhead_custom(nodes, false) + (8u << 20);
         ggml_init_params ip{ meta, nullptr, true };
@@ -2766,6 +2797,17 @@ TSG_EXPORT int TSGgml_QwenImageForward(const TSGgmlQwenImageForwardDesc* d)
             wt = ggml_new_tensor_2d(ctx, static_cast<ggml_type>(s.type), s.ne0, s.ne1);
             bt = s.b ? ggml_new_tensor_1d(ctx, GGML_TYPE_F32, blen) : nullptr;
         };
+        // Runtime LoRA pair (see qi_fwd_build_graph): A [ne0(in), rank], B [rank, ne1(out)],
+        // both F32. Without this the non-persistent whole-model path (the CUDA fallback when
+        // the captured graph is disabled or the shape is too big for VRAM capture) would
+        // silently drop the LoRA side-path — a Lightning step-distillation LoRA then runs its
+        // few-step schedule on the un-distilled base and produces a broken result.
+        auto declL = [&](const TSGImgAttnW& s, QiLora& lo) {
+            if (s.lora_a == nullptr || s.lora_b == nullptr || s.lora_rank <= 0) return;
+            lo.a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, s.ne0, s.lora_rank);
+            lo.b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, s.lora_rank, s.ne1);
+            lo.scale = s.lora_scale;
+        };
 
         // ---- per-block weight leaves ----
         std::vector<QiFullBlockW> bw(nl);
@@ -2785,6 +2827,9 @@ TSG_EXPORT int TSGgml_QwenImageForward(const TSGgmlQwenImageForwardDesc* d)
             b.nAK = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hd);
             declW(s.i_net0, b.iN0w, b.iN0b, ff); declW(s.i_net2, b.iN2w, b.iN2b, dim);
             declW(s.t_net0, b.tN0w, b.tN0b, ff); declW(s.t_net2, b.tN2w, b.tN2b, dim);
+            declL(s.to_q, b.lToQ); declL(s.to_k, b.lToK); declL(s.to_v, b.lToV); declL(s.to_out, b.lToO);
+            declL(s.add_q, b.lAQ); declL(s.add_k, b.lAK); declL(s.add_v, b.lAV); declL(s.to_add_out, b.lAO);
+            declL(s.i_net0, b.lIN0); declL(s.i_net2, b.lIN2); declL(s.t_net0, b.lTN0); declL(s.t_net2, b.lTN2);
         }
 
         // ---- build the graph: silu(temb), then the 60 double-stream blocks ----
@@ -2851,6 +2896,14 @@ TSG_EXPORT int TSGgml_QwenImageForward(const TSGgmlQwenImageForwardDesc* d)
         auto bind1 = [&](ggml_tensor* tt, void* dd, int len) {
             bind(tt, dd, static_cast<std::size_t>(len) * sizeof(float));
         };
+        // LoRA A/B host buffers are stable unmanaged allocations (owned by the C# DiT for
+        // the process lifetime), so they take the same resident-cacheable-or-gallocr path
+        // as the GGUF weights.
+        auto bindL = [&](const QiLora& lo, const TSGImgAttnW& s) {
+            if (lo.a == nullptr) return;
+            bind(lo.a, s.lora_a, static_cast<std::size_t>(s.ne0) * s.lora_rank * sizeof(float));
+            bind(lo.b, s.lora_b, static_cast<std::size_t>(s.lora_rank) * s.ne1 * sizeof(float));
+        };
         for (int l = 0; l < nl; l++)
         {
             const TSGImgBlockW& s = d->blocks[l];
@@ -2865,6 +2918,9 @@ TSG_EXPORT int TSGgml_QwenImageForward(const TSGgmlQwenImageForwardDesc* d)
             bind1(b.nAQ, s.norm_aq, hd); bind1(b.nAK, s.norm_ak, hd);
             bindW(b.iN0w, b.iN0b, s.i_net0, ff); bindW(b.iN2w, b.iN2b, s.i_net2, dim);
             bindW(b.tN0w, b.tN0b, s.t_net0, ff); bindW(b.tN2w, b.tN2b, s.t_net2, dim);
+            bindL(b.lToQ, s.to_q); bindL(b.lToK, s.to_k); bindL(b.lToV, s.to_v); bindL(b.lToO, s.to_out);
+            bindL(b.lAQ, s.add_q); bindL(b.lAK, s.add_k); bindL(b.lAV, s.add_v); bindL(b.lAO, s.to_add_out);
+            bindL(b.lIN0, s.i_net0); bindL(b.lIN2, s.i_net2); bindL(b.lTN0, s.t_net0); bindL(b.lTN2, s.t_net2);
         }
 
         // ---- mark per-call inputs, gallocr-pack the rest ----

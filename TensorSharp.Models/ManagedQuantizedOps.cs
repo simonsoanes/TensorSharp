@@ -76,10 +76,15 @@ namespace TensorSharp.Models
                 GgmlTensorType.Q5_1 => true,
                 GgmlTensorType.Q8_0 => true,
                 GgmlTensorType.Q8_1 => true,
+                GgmlTensorType.Q2_K => true,
+                GgmlTensorType.Q3_K => true,
                 GgmlTensorType.Q4_K => true,
                 GgmlTensorType.Q5_K => true,
                 GgmlTensorType.Q6_K => true,
                 GgmlTensorType.IQ4_NL => true,
+                GgmlTensorType.IQ2_XXS => true,
+                GgmlTensorType.IQ2_S => true,
+                GgmlTensorType.IQ3_S => true,
                 GgmlTensorType.MXFP4 => true,
                 _ => false,
             };
@@ -529,6 +534,12 @@ namespace TensorSharp.Models
                 case GgmlTensorType.Q8_1:
                     DequantizeQ81(src, dst, numElements);
                     return;
+                case GgmlTensorType.Q2_K:
+                    DequantizeQ2K(src, dst, numElements);
+                    return;
+                case GgmlTensorType.Q3_K:
+                    DequantizeQ3K(src, dst, numElements);
+                    return;
                 case GgmlTensorType.Q4_K:
                     DequantizeQ4K(src, dst, numElements);
                     return;
@@ -540,6 +551,15 @@ namespace TensorSharp.Models
                     return;
                 case GgmlTensorType.IQ4_NL:
                     DequantizeIq4Nl(src, dst, numElements);
+                    return;
+                case GgmlTensorType.IQ2_XXS:
+                    DequantizeIq2Xxs(src, dst, numElements);
+                    return;
+                case GgmlTensorType.IQ2_S:
+                    DequantizeIq2S(src, dst, numElements);
+                    return;
+                case GgmlTensorType.IQ3_S:
+                    DequantizeIq3S(src, dst, numElements);
                     return;
                 case GgmlTensorType.MXFP4:
                     DequantizeMxfp4(src, dst, numElements);
@@ -835,6 +855,236 @@ namespace TensorSharp.Models
                     ql += 64;
                     qh += 32;
                     scales += 8;
+                }
+            }
+        }
+
+        // Q2_K: 16 sub-blocks of 16. Ported verbatim from ggml dequantize_row_q2_K.
+        // block layout: scales[16] | qs[64] | d(fp16) | dmin(fp16) = 84 bytes.
+        private static unsafe void DequantizeQ2K(byte* src, float* dst, long numElements)
+        {
+            if (numElements % QK_K != 0)
+                throw new NotSupportedException($"Q2_K requires {QK_K}-element alignment, got {numElements}.");
+
+            int blockBytes = QK_K / 16 + QK_K / 4 + 2 + 2;   // 16 + 64 + 2 + 2 = 84
+            int nb = (int)(numElements / QK_K);
+            for (int i = 0; i < nb; i++)
+            {
+                byte* block = src + i * blockBytes;
+                byte* scales = block;                 // [16]
+                byte* q = block + QK_K / 16;           // qs [64]
+                float d = HalfToSingle(ReadUInt16(block + QK_K / 16 + QK_K / 4));       // +80
+                float min = HalfToSingle(ReadUInt16(block + QK_K / 16 + QK_K / 4 + 2)); // +82
+                float* y = dst + i * QK_K;
+
+                int si = 0;
+                for (int n = 0; n < QK_K; n += 128)
+                {
+                    int shift = 0;
+                    for (int j = 0; j < 4; ++j)
+                    {
+                        byte sc = scales[si++];
+                        float dl = d * (sc & 0xF), ml = min * (sc >> 4);
+                        for (int l = 0; l < 16; ++l) *y++ = dl * ((sbyte)((q[l] >> shift) & 3)) - ml;
+
+                        sc = scales[si++];
+                        dl = d * (sc & 0xF); ml = min * (sc >> 4);
+                        for (int l = 0; l < 16; ++l) *y++ = dl * ((sbyte)((q[l + 16] >> shift) & 3)) - ml;
+
+                        shift += 2;
+                    }
+                    q += 32;
+                }
+            }
+        }
+
+        // Q3_K: 16 sub-blocks of 16, 6-bit scales packed in 12 bytes, high bit in hmask.
+        // Ported verbatim from ggml dequantize_row_q3_K.
+        // block layout: hmask[32] | qs[64] | scales[12] | d(fp16) = 110 bytes.
+        private static unsafe void DequantizeQ3K(byte* src, float* dst, long numElements)
+        {
+            if (numElements % QK_K != 0)
+                throw new NotSupportedException($"Q3_K requires {QK_K}-element alignment, got {numElements}.");
+
+            const uint kmask1 = 0x03030303, kmask2 = 0x0f0f0f0f;
+            int blockBytes = QK_K / 8 + QK_K / 4 + 12 + 2;   // 32 + 64 + 12 + 2 = 110
+            int nb = (int)(numElements / QK_K);
+            uint* aux = stackalloc uint[4];
+            sbyte* scales = (sbyte*)aux;
+            for (int i = 0; i < nb; i++)
+            {
+                byte* block = src + i * blockBytes;
+                byte* hm = block;                     // hmask [32]
+                byte* q = block + QK_K / 8;           // qs [64]
+                byte* sc = block + QK_K / 8 + QK_K / 4;   // scales [12]
+                float dAll = HalfToSingle(ReadUInt16(sc + 12));   // d at +108
+
+                aux[0] = ReadUInt32(sc + 0);
+                aux[1] = ReadUInt32(sc + 4);
+                aux[2] = ReadUInt32(sc + 8);
+                uint tmp = aux[2];
+                aux[2] = ((aux[0] >> 4) & kmask2) | (((tmp >> 4) & kmask1) << 4);
+                aux[3] = ((aux[1] >> 4) & kmask2) | (((tmp >> 6) & kmask1) << 4);
+                aux[0] = (aux[0] & kmask2) | (((tmp >> 0) & kmask1) << 4);
+                aux[1] = (aux[1] & kmask2) | (((tmp >> 2) & kmask1) << 4);
+
+                float* y = dst + i * QK_K;
+                int si = 0; byte m = 1; byte* qq = q;
+                for (int n = 0; n < QK_K; n += 128)
+                {
+                    int shift = 0;
+                    for (int j = 0; j < 4; ++j)
+                    {
+                        float dl = dAll * (scales[si++] - 32);
+                        for (int l = 0; l < 16; ++l)
+                            *y++ = dl * ((sbyte)((qq[l] >> shift) & 3) - ((hm[l] & m) != 0 ? 0 : 4));
+
+                        dl = dAll * (scales[si++] - 32);
+                        for (int l = 0; l < 16; ++l)
+                            *y++ = dl * ((sbyte)((qq[l + 16] >> shift) & 3) - ((hm[l + 16] & m) != 0 ? 0 : 4));
+
+                        shift += 2; m <<= 1;
+                    }
+                    qq += 32;
+                }
+            }
+        }
+
+        // IQ2_XXS: 2.0625 bpw codebook quant. Ported verbatim from ggml dequantize_row_iq2_xxs.
+        // block layout: d(fp16) | qs[32] (uint16) = 66 bytes. grid/sign tables in IQuantGrids.
+        private static unsafe void DequantizeIq2Xxs(byte* src, float* dst, long numElements)
+        {
+            if (numElements % QK_K != 0)
+                throw new NotSupportedException($"IQ2_XXS requires {QK_K}-element alignment, got {numElements}.");
+
+            int blockBytes = 2 + (QK_K / 8) * 2;   // 2 + 32*2 = 66
+            int nb = (int)(numElements / QK_K);
+            fixed (ulong* grid = IQuantGrids.iq2xxs_grid)
+            fixed (byte* ksigns = IQuantGrids.ksigns_iq2xs)
+            fixed (byte* kmask = IQuantGrids.kmask_iq2xs)
+            {
+                uint* aux32 = stackalloc uint[2];
+                byte* aux8 = (byte*)aux32;
+                for (int i = 0; i < nb; i++)
+                {
+                    byte* block = src + i * blockBytes;
+                    float d = HalfToSingle(ReadUInt16(block));
+                    byte* qs = block + 2;
+                    float* y = dst + i * QK_K;
+                    for (int ib32 = 0; ib32 < QK_K / 32; ++ib32)
+                    {
+                        byte* p = qs + 8 * ib32;   // 4 uint16 = 8 bytes per ib32
+                        aux32[0] = ReadUInt32(p);
+                        aux32[1] = ReadUInt32(p + 4);
+                        float db = d * (0.5f + (aux32[1] >> 28)) * 0.25f;
+                        for (int l = 0; l < 4; ++l)
+                        {
+                            byte* g = (byte*)(grid + aux8[l]);
+                            byte signs = ksigns[(aux32[1] >> (7 * l)) & 127];
+                            for (int j = 0; j < 8; ++j)
+                                y[j] = db * g[j] * ((signs & kmask[j]) != 0 ? -1f : 1f);
+                            y += 8;
+                        }
+                    }
+                }
+            }
+        }
+
+        // IQ2_S: 2.5625 bpw codebook quant. Ported verbatim from ggml dequantize_row_iq2_s.
+        // block layout: d(fp16) | qs[64] | qh[8] | scales[8] = 82 bytes; signs are qs[32..63].
+        private static unsafe void DequantizeIq2S(byte* src, float* dst, long numElements)
+        {
+            if (numElements % QK_K != 0)
+                throw new NotSupportedException($"IQ2_S requires {QK_K}-element alignment, got {numElements}.");
+
+            int blockBytes = 2 + QK_K / 4 + QK_K / 32 + QK_K / 32;   // 2 + 64 + 8 + 8 = 82
+            int nb = (int)(numElements / QK_K);
+            fixed (ulong* grid = IQuantGrids.iq2s_grid)
+            fixed (byte* kmask = IQuantGrids.kmask_iq2xs)
+            {
+                for (int i = 0; i < nb; i++)
+                {
+                    byte* block = src + i * blockBytes;
+                    float d = HalfToSingle(ReadUInt16(block));
+                    byte* qs = block + 2;                  // [64]
+                    byte* qh = qs + QK_K / 4;              // [8]
+                    byte* scales = qh + QK_K / 32;         // [8]
+                    byte* signs = qs + QK_K / 8;           // qs + 32
+                    float* y = dst + i * QK_K;
+                    byte* qsp = qs, signsp = signs;
+                    for (int ib32 = 0; ib32 < QK_K / 32; ++ib32)
+                    {
+                        float db0 = d * (0.5f + (scales[ib32] & 0xf)) * 0.25f;
+                        float db1 = d * (0.5f + (scales[ib32] >> 4)) * 0.25f;
+                        for (int l = 0; l < 4; ++l)
+                        {
+                            float dl = l < 2 ? db0 : db1;
+                            int idx = qsp[l] | ((qh[ib32] << (8 - 2 * l)) & 0x300);
+                            byte* g = (byte*)(grid + idx);
+                            byte sgn = signsp[l];
+                            for (int j = 0; j < 8; ++j)
+                                y[j] = dl * g[j] * ((sgn & kmask[j]) != 0 ? -1f : 1f);
+                            y += 8;
+                        }
+                        qsp += 4; signsp += 4;
+                    }
+                }
+            }
+        }
+
+        // IQ3_S: codebook quant, 4-byte grid entries. Ported verbatim from ggml dequantize_row_iq3_s.
+        // block layout: d(fp16) | qs[64] | qh[8] | signs[32] | scales[4] = 110 bytes.
+        private static unsafe void DequantizeIq3S(byte* src, float* dst, long numElements)
+        {
+            if (numElements % QK_K != 0)
+                throw new NotSupportedException($"IQ3_S requires {QK_K}-element alignment, got {numElements}.");
+
+            int blockBytes = 2 + QK_K / 4 + QK_K / 32 + QK_K / 8 + QK_K / 64;   // 2+64+8+32+4 = 110
+            int nb = (int)(numElements / QK_K);
+            fixed (uint* grid = IQuantGrids.iq3s_grid)
+            fixed (byte* kmask = IQuantGrids.kmask_iq2xs)
+            {
+                for (int i = 0; i < nb; i++)
+                {
+                    byte* block = src + i * blockBytes;
+                    float d = HalfToSingle(ReadUInt16(block));
+                    byte* qs = block + 2;                  // [64]
+                    byte* qh = qs + QK_K / 4;              // [8]
+                    byte* signs = qh + QK_K / 32;          // [32]
+                    byte* scales = signs + QK_K / 8;       // [4]
+                    float* y = dst + i * QK_K;
+                    byte* qsp = qs, qhp = qh, signsp = signs;
+                    for (int ib32 = 0; ib32 < QK_K / 32; ib32 += 2)
+                    {
+                        float db1 = d * (1 + 2 * (scales[ib32 / 2] & 0xf));
+                        float db2 = d * (1 + 2 * (scales[ib32 / 2] >> 4));
+                        for (int l = 0; l < 4; ++l)
+                        {
+                            byte* g1 = (byte*)(grid + (qsp[2 * l + 0] | ((qhp[0] << (8 - 2 * l)) & 256)));
+                            byte* g2 = (byte*)(grid + (qsp[2 * l + 1] | ((qhp[0] << (7 - 2 * l)) & 256)));
+                            byte sgn = signsp[l];
+                            for (int j = 0; j < 4; ++j)
+                            {
+                                y[j + 0] = db1 * g1[j] * ((sgn & kmask[j + 0]) != 0 ? -1f : 1f);
+                                y[j + 4] = db1 * g2[j] * ((sgn & kmask[j + 4]) != 0 ? -1f : 1f);
+                            }
+                            y += 8;
+                        }
+                        qsp += 8; signsp += 4;
+                        for (int l = 0; l < 4; ++l)
+                        {
+                            byte* g1 = (byte*)(grid + (qsp[2 * l + 0] | ((qhp[1] << (8 - 2 * l)) & 256)));
+                            byte* g2 = (byte*)(grid + (qsp[2 * l + 1] | ((qhp[1] << (7 - 2 * l)) & 256)));
+                            byte sgn = signsp[l];
+                            for (int j = 0; j < 4; ++j)
+                            {
+                                y[j + 0] = db2 * g1[j] * ((sgn & kmask[j + 0]) != 0 ? -1f : 1f);
+                                y[j + 4] = db2 * g2[j] * ((sgn & kmask[j + 4]) != 0 ? -1f : 1f);
+                            }
+                            y += 8;
+                        }
+                        qhp += 2; qsp += 8; signsp += 4;
+                    }
                 }
             }
         }

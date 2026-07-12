@@ -15,6 +15,7 @@
 // activation tensors, the same pattern as QwenImageTextEncoder.
 // ============================================================================
 using System;
+using System.Numerics.Tensors;
 using System.Threading.Tasks;
 using TensorSharp.Core;
 using TensorSharp.Runtime;
@@ -262,7 +263,9 @@ namespace TensorSharp.Models.QwenImage
             }
             else
             {
-                WarnLoraSkipped();
+                // Pure-C# managed path: Block()->JointAttention/GeGluMlp->LinearBias applies the
+                // runtime LoRA side-path per covered projection (see AddLoraDelta), so the
+                // Lightning LoRA IS honored here — no WarnLoraSkipped().
                 for (int layer = 0; layer < NumLayers; layer++)
                 {
                     Block(ref img, ref txt, temb, imgSeq, txtSeq, layer, modulateIndex, rope);
@@ -414,7 +417,47 @@ namespace TensorSharp.Models.QwenImage
                 int dim = Math.Min(outDim, (int)bias.ElementCount());
                 Parallel.For(0, rows, s => { float* row = r + (long)s * outDim; for (int d = 0; d < dim; d++) row[d] += bp[d]; });
             }
+            AddLoraDelta(result, input, weightName);
             return result;
+        }
+
+        // Runtime LoRA side-path for the managed (pure-C#) DiT forward, mirroring the native
+        // qi_lin_lora: y += scale * B·(A·x) where A=[rank,in] (lora_down), B=[out,rank] (lora_up,
+        // scale folded in). Uses the ORIGINAL input x (the base matmul's overflow prescale is
+        // linear and fully cancels in A·x, so no prescale is applied here). Only the ~720
+        // LoRA-covered projections (attn q/k/v/out, add_q/k/v, to_add_out, img/txt GEGLU MLPs)
+        // have a table entry; every other LinearBias (img_in/txt_in/proj_out/time_embed/norm_out)
+        // returns immediately. This is what makes the few-step Lightning LoRA usable on CPU.
+        private unsafe void AddLoraDelta(Tensor result, Tensor input, string weightName)
+        {
+            if (_loraTable == null || !_loraTable.TryGet(weightName, out var e)) return;
+            int rows = (int)input.Sizes[0];
+            int inDim = (int)e.In, rank = (int)e.Rank, outDim = (int)e.Out;
+            if ((int)input.Sizes[1] != inDim || (int)result.Sizes[1] != outDim || rows == 0) return;
+
+            float* xp = GetFloatPtr(input);
+            float* rp = GetFloatPtr(result);
+            float* A = (float*)e.A;       // [rank, in] row-major (lora_down)
+            float* B = (float*)e.B;       // [out, rank] row-major (lora_up, scale folded)
+            float scale = e.Scale;        // 1.0 when the loader folded alpha/rank into B
+            Parallel.For(0, rows, s =>
+            {
+                float* xr = xp + (long)s * inDim;
+                float* rr = rp + (long)s * outDim;
+                float* h = stackalloc float[rank];       // A·x, rank is small (LoRA rank ~16-64)
+                for (int r = 0; r < rank; r++)
+                    h[r] = TensorPrimitives.Dot(
+                        new ReadOnlySpan<float>(A + (long)r * inDim, inDim),
+                        new ReadOnlySpan<float>(xr, inDim));
+                for (int o = 0; o < outDim; o++)
+                {
+                    float* Bo = B + (long)o * rank;
+                    float acc = 0f;
+                    for (int r = 0; r < rank; r++) acc += Bo[r] * h[r];
+                    rr[o] += scale * acc;
+                }
+            });
+            InvalidateTensorDeviceCache(result);
         }
 
         // ggml quantizes activations on-the-fly to q8_1, whose per-block sum is stored in
