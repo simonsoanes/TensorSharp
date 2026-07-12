@@ -408,8 +408,44 @@ namespace TensorSharp.Server.Hosting
                     changed = true;
                     continue;
                 }
+                // Fixed output size for every edit (bypasses the auto VRAM area clamp, but is still
+                // capped at the hardware memory ceiling so an oversized request can't OOM into
+                // garbage). Read by QwenImagePipeline as TS_QWEN_IMAGE_WIDTH/HEIGHT. Per-request
+                // sizes from the Web UI / API still override this default.
+                if (TryReadOption(args, ref i, "--width", out string widthOpt))
+                {
+                    SetQwenImageSizeEnv("--width", "TS_QWEN_IMAGE_WIDTH", widthOpt);
+                    changed = true;
+                    continue;
+                }
+                if (TryReadOption(args, ref i, "--height", out string heightOpt))
+                {
+                    SetQwenImageSizeEnv("--height", "TS_QWEN_IMAGE_HEIGHT", heightOpt);
+                    changed = true;
+                    continue;
+                }
+                // CPU offload (sd.cpp --offload-to-cpu equivalent): stream the DiT weights
+                // from RAM per block instead of holding them resident in VRAM, so high
+                // (native ~1 MP) resolutions fit on VRAM-limited cards. Without the flag the
+                // pipeline engages offload automatically only when the target resolution
+                // does not fit beside the resident weights; the flag forces it always on.
+                if (string.Equals(args[i], "--offload-cpu", StringComparison.OrdinalIgnoreCase))
+                {
+                    Environment.SetEnvironmentVariable("TS_QWEN_IMAGE_OFFLOAD_CPU", "1");
+                    changed = true;
+                    continue;
+                }
             }
             return changed;
+        }
+
+        private static void SetQwenImageSizeEnv(string flag, string envVar, string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                throw new ArgumentException($"Missing value for option '{flag}'.");
+            if (!int.TryParse(value, out int px) || px <= 0)
+                throw new ArgumentException($"Option '{flag}' needs a positive integer (pixels), got '{value}'.");
+            Environment.SetEnvironmentVariable(envVar, px.ToString());
         }
 
         private static void SetQwenImageCompanionEnv(string flag, string envVar, string path)
@@ -625,9 +661,15 @@ namespace TensorSharp.Server.Hosting
                 if (TryReadOption(args, ref i, "--qwen-image-vae", out _)
                     || TryReadOption(args, ref i, "--qwen-image-vl", out _)
                     || TryReadOption(args, ref i, "--qwen-image-mmproj", out _)
-                    || TryReadOption(args, ref i, "--qwen-image-lora", out _))
+                    || TryReadOption(args, ref i, "--qwen-image-lora", out _)
+                    || TryReadOption(args, ref i, "--width", out _)
+                    || TryReadOption(args, ref i, "--height", out _))
                 {
                     continue;
+                }
+                if (string.Equals(args[i], "--offload-cpu", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;   // consumed by ApplyQwenImageCompanionCliFlags (boolean flag)
                 }
 
                 // Anything else that starts with `--` is an unknown flag and we
@@ -669,6 +711,7 @@ namespace TensorSharp.Server.Hosting
                 "--paged-batching", "--no-paged-batching", "--prefill-chunk-size",
                 "--mtp-spec", "--no-mtp-spec", "--mtp-draft", "--mtp-pmin", "--mtp-draft-model",
                 "--qwen-image-vae", "--qwen-image-vl", "--qwen-image-mmproj", "--qwen-image-lora",
+                "--offload-cpu",
                 "--kv-cache-dtype", "--gpu-device", "--list-gpus", "--help",
             };
             string best = null;

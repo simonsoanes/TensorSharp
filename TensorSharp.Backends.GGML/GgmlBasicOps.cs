@@ -1659,6 +1659,11 @@ namespace TensorSharp.GGML
             return GgmlNative.TryQwenImageForward(in args);
         }
 
+        /// <summary>CPU-offload mode for the Qwen-Image DiT kernels: disables the persistent /
+        /// CUDA-graph-captured entries so the non-persist reuse-gallocr path streams the weights
+        /// from RAM per call. Set per request together with <see cref="SetDeviceCopyBudget"/>.</summary>
+        public static void QwenImageSetOffload(bool on) => GgmlNative.QwenImageSetOffload(on);
+
         /// <summary>Single 2D convolution on the active GGML device (ggml_conv_2d). Used to move the
         /// Qwen-Image VAE conv stack off the CPU. Layouts match VaeReferenceMath (no transposes).</summary>
         public static bool TryConv2d(in Conv2dArgs args)

@@ -94,9 +94,7 @@ namespace TensorSharp.Models.QwenImage
 
             string dir = Path.GetDirectoryName(Path.GetFullPath(ggufPath)) ?? ".";
             _vaePath = ResolveVaeCompanion(dir);
-            _tePath = ResolveCompanion("TS_QWEN_IMAGE_TE", dir,
-                "Qwen2.5-VL-7B-Instruct-UD-IQ2_XXS.gguf",
-                n => (n.Contains("qwen2.5-vl") || n.Contains("qwen2_5_vl")) && !n.Contains("mmproj") && n.EndsWith(".gguf"));
+            _tePath = ResolveTeCompanion(dir);
             _mmprojPath = ResolveCompanionOptional("TS_QWEN_IMAGE_MMPROJ", dir,
                 n => n.Contains("mmproj") && (n.Contains("qwen2") || n.Contains("qwen-image")) && n.EndsWith(".gguf"));
 
@@ -138,6 +136,52 @@ namespace TensorSharp.Models.QwenImage
             return null;
         }
 
+        /// <summary>
+        /// Resolve the Qwen2.5-VL text encoder. Unlike the DiT, the text/vision encoders are
+        /// FREED before the denoise loop (see <see cref="QwenImagePipeline"/>), so they never
+        /// compete with the DiT for VRAM — a higher-quality (larger) TE quant costs nothing at
+        /// denoise time but materially improves the prompt/image conditioning that drives the
+        /// whole edit. A ~2-bit TE (IQ2_XXS) produces markedly softer faces and lower overall
+        /// fidelity than Q4_K_M+ for the same DiT/steps/seed. So, absent an explicit
+        /// <c>TS_QWEN_IMAGE_TE</c>, prefer the HIGHEST-quality VL GGUF present (largest file =
+        /// higher bpw for the same 7B model) rather than the smallest, and warn on a very-low-bit
+        /// pick so the user knows a better one would help at no denoise-VRAM cost.
+        /// </summary>
+        private static string ResolveTeCompanion(string dir)
+        {
+            string env = Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_TE");
+            if (!string.IsNullOrWhiteSpace(env) && File.Exists(env)) { WarnLowBitTe(env); return env; }
+            if (!Directory.Exists(dir)) return null;
+
+            string best = null; long bestSize = -1;
+            foreach (var f in Directory.EnumerateFiles(dir, "*.gguf"))
+            {
+                string n = Path.GetFileName(f).ToLowerInvariant();
+                bool isTe = (n.Contains("qwen2.5-vl") || n.Contains("qwen2_5_vl") || n.Contains("qwen-image-te"))
+                            && !n.Contains("mmproj");
+                if (!isTe) continue;
+                long size = new FileInfo(f).Length;
+                if (size > bestSize) { bestSize = size; best = f; }   // largest = best quant (TE is freed pre-denoise)
+            }
+            if (best != null) WarnLowBitTe(best);
+            return best;
+        }
+
+        // Warn when the chosen text encoder is an extremely low-bit quant (IQ1/IQ2 ~1-2 bpw):
+        // these gut the Qwen2.5-VL conditioning and are the single biggest quality regression for
+        // Qwen-Image-Edit. The encoders are freed before the DiT denoise, so a bigger quant is
+        // effectively free VRAM-wise — steer users toward Q4_K_M+.
+        private static void WarnLowBitTe(string tePath)
+        {
+            string n = Path.GetFileName(tePath).ToLowerInvariant();
+            if (n.Contains("iq1") || n.Contains("iq2") || n.Contains("q2_k"))
+                Console.WriteLine(
+                    $"  [warn] text encoder '{Path.GetFileName(tePath)}' is a very low-bit quant — it severely " +
+                    "degrades prompt/image conditioning (soft faces, low fidelity). The text encoder is freed " +
+                    "before the denoise loop, so a Q4_K_M (or higher) VL GGUF improves quality at NO extra " +
+                    "denoise VRAM. Pass --qwen-image-vl <better>.gguf or set TS_QWEN_IMAGE_TE.");
+        }
+
         private static string ResolveCompanion(string envVar, string dir, string preferred, Func<string, bool> match)
         {
             string env = Environment.GetEnvironmentVariable(envVar);
@@ -172,6 +216,20 @@ namespace TensorSharp.Models.QwenImage
         {
             var pipeline = GetPipeline();
             return pipeline.Edit(prompt, input, p ?? new QwenImageParams());
+        }
+
+        /// <summary>
+        /// Multi-image edit ("Picture 1..N" grounding + one reference-latent stream per input;
+        /// diffusers <c>QwenImageEditPlusPipeline</c> semantics). <paramref name="inputs"/>[0]
+        /// drives the output geometry; e.g. inputs = [model photo, garment photo] with a
+        /// "dress the model in the garment" prompt.
+        /// </summary>
+        public RgbImage EditImage(string prompt, System.Collections.Generic.IReadOnlyList<RgbImage> inputs, QwenImageParams p)
+        {
+            if (inputs == null || inputs.Count == 0)
+                throw new ArgumentException("At least one input image is required.", nameof(inputs));
+            var pipeline = GetPipeline();
+            return pipeline.Edit(prompt, System.Linq.Enumerable.ToArray(inputs), p ?? new QwenImageParams());
         }
 
         private QwenImagePipeline _pipeline;

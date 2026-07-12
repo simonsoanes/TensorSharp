@@ -28,9 +28,68 @@ namespace TensorSharp.Models.QwenImage
 {
     internal sealed partial class QwenImageDiT
     {
+        // Whole-DiT single-graph forward. On CUDA the persistent CUDA-graph capture inside
+        // TSGgml_QwenImageForward removes the per-op launch overhead; on Metal the SAME
+        // export takes the non-persistent branch (one graph build + one graph_compute + one
+        // synchronous readback, weights resident-cached by their GGUF pointer). Enabling it
+        // on Metal replaces the 60 per-block dispatches — each with a full img/txt residual
+        // host round-trip + device sync that leaves the GPU idle between blocks — with a
+        // single pipelined submission (stable-diffusion.cpp's QwenImageModel::forward_orig
+        // model). Metal never offloads (unified memory), so OffloadCpu is always false here.
         internal bool WholeModelOn =>
-            NativeBlockOn && _backend == BackendType.GgmlCuda &&
+            NativeBlockOn && (_backend == BackendType.GgmlCuda || _backend == BackendType.GgmlMetal) && !OffloadCpu &&
             Environment.GetEnvironmentVariable("TS_QWEN_DIT_WHOLE") != "0";
+
+        // CPU-offload fast path: run the 60 blocks as a FEW chunked whole-model graphs
+        // (weights as per-call input slots in the shared reuse gallocr) instead of the
+        // 60-dispatch per-block loop. Same in-graph AdaLN modulation as the resident
+        // whole-model graph, so it eliminates the per-block host modulation expansion
+        // (PrecomputeMod: ~6 x [seq,3072] arrays per stream per block, ~1 GB of PCIe
+        // per block at 1 MP) and the per-block ModParams matmuls — the dominant cost
+        // of the old offload path (measured ~75 s/step at 12.7k tokens; the chunked
+        // path uploads only chunk weights + the img/txt streams per chunk boundary).
+        // VRAM holds one chunk's weight slots (~totalWeights/numChunks) because the
+        // reuse gallocr's buffer is re-planned (and thus re-used) chunk over chunk.
+        internal static int OffloadChunkBlocks
+        {
+            get
+            {
+                var v = Environment.GetEnvironmentVariable("TS_QWEN_DIT_OFFLOAD_CHUNK");
+                return v != null && int.TryParse(v, out var n) && n > 0 ? Math.Min(n, NumLayers) : 10;
+            }
+        }
+
+        // Run blocks [start, NumLayers) in offload mode via chunked whole-model graphs.
+        // Chunks that fail fall back to the per-block loop FROM THE FAILED CHUNK on
+        // (earlier chunks already updated imgHost/txtHost in place). Returns true when
+        // the layer range was fully applied by either route.
+        private bool TryOffloadChunkedBlocks(float[] imgHost, int imgSeq, float[] txtHost, int txtSeq,
+            Tensor temb, int[] modulateIndex, DitRope rope, int start)
+        {
+            if (_backend != BackendType.GgmlCuda) return false;
+            int chunk = OffloadChunkBlocks;
+            for (int s = start; s < NumLayers; s += chunk)
+            {
+                int count = Math.Min(chunk, NumLayers - s);
+                var sw = TimingOn ? System.Diagnostics.Stopwatch.StartNew() : null;
+                bool ok = TryWholeBlocks(imgHost, imgSeq, txtHost, txtSeq, temb, modulateIndex, rope, s, count);
+                if (sw != null)
+                {
+                    sw.Stop();
+                    Console.WriteLine($"  [dit-timing] offload chunk blocks {s}..{s + count - 1} imgSeq={imgSeq}: {sw.Elapsed.TotalMilliseconds:F0}ms{(ok ? "" : " (FAILED -> per-block)")}");
+                }
+                if (!ok)
+                {
+                    // Finish the remaining layers on the per-block streaming path rather
+                    // than corrupting the half-updated residual streams.
+                    if (!FusedBlockOn) WarnLoraSkipped();
+                    for (int layer = s; layer < NumLayers; layer++)
+                        RunNativeLayer(layer, imgHost, imgSeq, txtHost, txtSeq, temb, modulateIndex, rope);
+                    return true;
+                }
+            }
+            return true;
+        }
 
         // Run transformer blocks [layerStart, layerStart+layerCount) in ONE resident-weight
         // graph (in-graph AdaLN modulation, no per-block host-modulation upload + sync).

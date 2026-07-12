@@ -56,14 +56,28 @@ namespace TensorSharp.Models.QwenImage
             _model.MmprojPath != null &&
             Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_NO_VISION") != "1";
 
-        // The reference (condition) image carried into Edit so EncodePrompt can ground on it.
-        private RgbImage _conditionImage;
+        // The reference (condition) images carried into Edit so EncodePrompt can ground on them,
+        // plus the per-request vision-tower outputs (cached so the negative-prompt CFG pass does
+        // not re-encode the same images through the vision encoder).
+        private RgbImage[] _conditionImages;
+        private (int gridH, int gridW, float[] embeds)[] _visionCache;
+        // Whether this request installed a device-copy residency cap (CPU offload); reset in
+        // the Edit finally so a later non-offload request gets full residency back.
+        private bool _offloadBudgetSet;
 
-        public RgbImage Edit(string prompt, RgbImage input, QwenImageParams p)
+        public RgbImage Edit(string prompt, RgbImage input, QwenImageParams p) =>
+            Edit(prompt, new[] { input }, p);
+
+        /// <summary>
+        /// Multi-image edit: <paramref name="inputs"/>[0] drives the output geometry; every
+        /// input becomes a "Picture N" vision grounding + a VAE reference-latent stream the
+        /// DiT attends to (diffusers <c>QwenImageEditPlusPipeline</c> semantics).
+        /// </summary>
+        public RgbImage Edit(string prompt, RgbImage[] inputs, QwenImageParams p)
         {
             try
             {
-                return EditCore(prompt, input, p);
+                return EditCore(prompt, inputs, p);
             }
             finally
             {
@@ -84,11 +98,20 @@ namespace TensorSharp.Models.QwenImage
                     GgmlBasicOps.ReleaseReuseComputeBuffers();
                     GgmlBasicOps.ClearHostBufferCache();
                 }
+                // Lift the offload residency cap so the next (possibly non-offload) request
+                // binds weights resident again at full speed.
+                if (_offloadBudgetSet)
+                {
+                    GgmlBasicOps.SetDeviceCopyBudget(0);
+                    _offloadBudgetSet = false;
+                }
             }
         }
 
-        private RgbImage EditCore(string prompt, RgbImage input, QwenImageParams p)
+        private RgbImage EditCore(string prompt, RgbImage[] inputs, QwenImageParams p)
         {
+            if (inputs == null || inputs.Length == 0)
+                throw new ArgumentException("Qwen-Image-Edit needs at least one input image.", nameof(inputs));
             var phase = System.Diagnostics.Stopwatch.StartNew();
             void Phase(string n) { Console.WriteLine($"  [pipe-timing] {n}: {phase.Elapsed.TotalMilliseconds:F0}ms"); phase.Restart(); }
 
@@ -101,24 +124,133 @@ namespace TensorSharp.Models.QwenImage
             int lightning = QwenImageDiT.LoraPath != null ? QwenImageLoraTable.ParseLightningSteps(QwenImageDiT.LoraPath) : 0;
             int steps = p.Steps > 0 ? p.Steps : (lightning > 0 ? lightning : 30);
             float cfgScale = p.CfgScale > 0f ? p.CfgScale : (lightning > 0 ? 1f : 2.5f);
-            float? muOverride = lightning > 0 ? MathF.Log(3f) : null;
+            // Flow shift for the FlowMatch sigma schedule. Qwen-Image-Edit uses a FIXED shift of
+            // 3: stable-diffusion.cpp sets default_flow_shift = 3 for every qwen_image version (its
+            // docs use --flow-shift 3), and the Lightning distillation is trained at shift 3. The
+            // diffusers *dynamic* resolution-dependent shift (calculate_shift) walks a much lower
+            // effective shift (~1.8 at a ~0.4 MP edit) that under-noises the early trajectory and
+            // visibly softens / degrades the edit — the "low quality without LoRA" the user hit.
+            // Lightning always pins shift 3; the base path defaults to 3 too, overridable via
+            // TS_QWEN_IMAGE_FLOW_SHIFT (<= 0 selects the old diffusers dynamic shift).
+            float? muOverride;
             if (lightning > 0)
+            {
+                muOverride = MathF.Log(3f);
                 Console.WriteLine($"  [pipe] Lightning LoRA active: steps={steps} cfg={cfgScale} shift=3 (fixed)");
+            }
+            else
+            {
+                float flowShift = 3f;
+                var fsEnv = Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_FLOW_SHIFT");
+                if (fsEnv != null && float.TryParse(fsEnv, System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out var fsv))
+                    flowShift = fsv;
+                muOverride = flowShift > 0f ? MathF.Log(flowShift) : (float?)null;
+                Console.WriteLine($"  [pipe] flow shift={(flowShift > 0f ? flowShift.ToString("0.##") : "dynamic")} steps={steps} cfg={cfgScale}");
+            }
 
-            _conditionImage = input;   // vision grounding uses the original (resized to 384^2 internally)
-            // 1. preprocess (aspect-preserving, dims multiple of 16). Clamp the target area
-            // to what the DiT attention will fit in device VRAM (avoids the 16 GB OOM/shared-
-            // VRAM spill at 1 MP) unless the caller pinned explicit Width/Height.
-            long area = (p.Width > 0 && p.Height > 0) ? p.TargetArea : ClampAreaToVram(p.TargetArea);
-            RgbImage img = (p.Width > 0 && p.Height > 0) ? ImageIO.Resize(input, p.Width, p.Height)
-                                                         : ImageIO.ResizeToArea(input, area);
+            _conditionImages = inputs;   // vision grounding uses the originals (resized to 384^2 internally)
+            _visionCache = null;         // fresh per request (images differ between requests)
+            // 1. preprocess (aspect-preserving, dims multiple of 16). The FIRST image drives the
+            // output geometry (diffusers/sd.cpp Edit Plus semantics). Clamp the target area to
+            // what the DiT attention will fit in device VRAM — with N reference streams the
+            // token count grows ~(N+1)x, so the clamp accounts for the image count.
+            // Explicit output size: from the params, or a server-global default set by the
+            // server's --width/--height (TS_QWEN_IMAGE_WIDTH/HEIGHT). Snap to a /16 multiple
+            // (VAE 8x downsample * 2x2 DiT patch).
+            int reqW = p.Width, reqH = p.Height;
+            if ((reqW <= 0 || reqH <= 0) &&
+                int.TryParse(Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_WIDTH"), out int envW) && envW > 0 &&
+                int.TryParse(Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_HEIGHT"), out int envH) && envH > 0)
+            {
+                reqW = envW; reqH = envH;
+            }
 
-            // 2. VAE encode reference -> normalize -> pack
-            VaeLatent refLat = Vae.Encode(img);
-            Phase($"VAE encode ({img.Width}x{img.Height})");
-            int Hl = refLat.Height, Wl = refLat.Width;          // latent dims (H/8)
-            NormalizeLatent(refLat.Data, Hl, Wl);
-            float[] refPacked = Pack(refLat.Data, Hl, Wl);       // [refSeq, 64]
+            // CPU offload (sd.cpp --offload-to-cpu equivalent): stream the DiT weights from RAM
+            // per block instead of holding ~7-9 GB resident in VRAM, freeing that VRAM for the
+            // attention working set — the difference between a ~0.4 MP and a native ~1 MP edit
+            // on a 16 GB card. TS_QWEN_IMAGE_OFFLOAD_CPU / --offload-cpu: "1" always streams,
+            // "0" never (the resolution is clamped to the resident-weight ceiling instead),
+            // unset = AUTO (engage exactly when the target resolution does not fit beside the
+            // resident weights — quality wins over the streaming slowdown).
+            string offloadEnv = Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_OFFLOAD_CPU");
+            bool offloadAllowed = offloadEnv != "0" && _model.Backend == BackendType.GgmlCuda;
+            bool offload = offloadEnv == "1" && _model.Backend == BackendType.GgmlCuda;
+            bool doCfgPass = cfgScale > 1f;
+            // Reference-latent area (inputs[1..]): the detail source the DiT copies faces /
+            // textures from. 0 = couple to the output area (legacy rule, kept for Metal/CPU
+            // where the extra ref tokens have no offload path to absorb them).
+            long refAreaPref = ResolveRefArea(_model.Backend);
+            long refAreaForCeiling = refAreaPref > 0 ? refAreaPref : QwenImageNativeArea;
+
+            long area;
+            RgbImage img;
+            if (reqW > 0 && reqH > 0)
+            {
+                reqW = Math.Max(16, reqW / 16 * 16);
+                reqH = Math.Max(16, reqH / 16 * 16);
+                // Honour the explicit size but never exceed the HARD VRAM ceiling — above it the DiT
+                // OOMs and spills into GARBAGE (noise) output rather than erroring, which is what a
+                // request like 2048x2048 on a 16 GB card would produce. When the size doesn't fit
+                // beside the resident weights, stream the weights from RAM (offload) before giving
+                // up resolution; only past the offload ceiling is the size actually clamped.
+                long safe = MaxSafeArea(inputs.Length, doCfgPass, offload, refAreaForCeiling);
+                if ((long)reqW * reqH > safe && offloadAllowed && !offload)
+                {
+                    offload = true;
+                    safe = MaxSafeArea(inputs.Length, doCfgPass, offload: true, refAreaForCeiling);
+                }
+                if ((long)reqW * reqH > safe)
+                {
+                    double s = Math.Sqrt((double)safe / ((double)reqW * reqH));
+                    int cw = Math.Max(16, (int)Math.Round(reqW * s / 16.0) * 16);
+                    int ch = Math.Max(16, (int)Math.Round(reqH * s / 16.0) * 16);
+                    Console.WriteLine($"  [pipe] requested output {reqW}x{reqH} ({(long)reqW * reqH} px) exceeds the " +
+                        $"~{safe} px VRAM ceiling for {inputs.Length} input image(s) on this GPU; clamping to {cw}x{ch} " +
+                        "to avoid an out-of-memory garbled result (use a smaller size, fewer input images, or more VRAM).");
+                    reqW = cw; reqH = ch;
+                }
+                img = ImageIO.Resize(inputs[0], reqW, reqH);
+                area = (long)reqW * reqH;
+            }
+            else
+            {
+                area = ResolveAutoArea(p.TargetArea, inputs.Length, steps, doCfgPass, offloadAllowed, ref offload, refAreaForCeiling);
+                img = ImageIO.ResizeToArea(inputs[0], area);
+            }
+            Dit.OffloadCpu = offload;
+            if (_model.Backend == BackendType.GgmlCuda)
+                GgmlBasicOps.QwenImageSetOffload(offload);   // native: skip captured entries; stream weights
+            if (offload)
+                Console.WriteLine("  [pipe] CPU offload: DiT weights stream from RAM (VRAM goes to the " +
+                                  "attention working set). Slower per step, but keeps the full target resolution.");
+
+            // 2. VAE encode each reference -> normalize -> pack. The first reference is encoded
+            // at the output geometry (its RoPE grid then aligns 1:1 with the generated tokens,
+            // which helps unchanged regions reconstruct); additional references keep their own
+            // aspect ratio at the REFERENCE area — the model's native ~1 MP by default
+            // (diffusers Edit Plus VAE_IMAGE_SIZE), deliberately NOT scaled down by a smaller
+            // output: this latent is where the DiT copies face/body detail from, so shrinking
+            // it with the output silently threw that detail away. TS_QWEN_IMAGE_REF_AREA
+            // overrides — each ref costs area/256 attention tokens.
+            int Hl = 0, Wl = 0;                                  // gen latent dims (from inputs[0])
+            var refPacked = new float[inputs.Length][];
+            var refShapes = new (int f, int h, int w)[inputs.Length];
+            long refArea = refAreaPref > 0 ? refAreaPref : Math.Min(QwenImageNativeArea, (long)img.Width * img.Height);
+            var refLog = new System.Text.StringBuilder();
+            for (int i = 0; i < inputs.Length; i++)
+            {
+                RgbImage r = i == 0 ? img : ImageIO.ResizeToArea(inputs[i], refArea);
+                VaeLatent lat = Vae.Encode(r);
+                NormalizeLatent(lat.Data, lat.Height, lat.Width);
+                refPacked[i] = Pack(lat.Data, lat.Height, lat.Width);   // [refSeq_i, 64]
+                refShapes[i] = (1, lat.Height / 2, lat.Width / 2);
+                if (i == 0) { Hl = lat.Height; Wl = lat.Width; }
+                if (refLog.Length > 0) refLog.Append(", ");
+                refLog.Append($"[{i}] {inputs[i].Width}x{inputs[i].Height} -> {r.Width}x{r.Height}{(i == 0 ? " (output geometry)" : "")}");
+            }
+            Console.WriteLine($"  [pipe] reference latents: {refLog} (ref area {refArea} px; TS_QWEN_IMAGE_REF_AREA overrides)");
+            Phase($"VAE encode ({string.Join(", ", Array.ConvertAll(refShapes, s => $"{s.w * 16}x{s.h * 16}"))})");
             int hp = Hl / 2, wp = Wl / 2, seq = hp * wp;
 
             // 3. text conditioning (prompt + negative for CFG)
@@ -126,6 +258,7 @@ namespace TensorSharp.Models.QwenImage
             bool doCfg = cfgScale > 1f;
             float[] negCond = null; int negTxt = 0;
             if (doCfg) negCond = EncodePrompt(p.NegativePrompt ?? " ", out negTxt);
+            _visionCache = null;   // release the per-request vision embeds
             Phase($"text encode (txtSeq={txtSeq})");
 
             // The text + vision encoders are finished for this request. On CUDA they hold
@@ -136,18 +269,38 @@ namespace TensorSharp.Models.QwenImage
             // the next Edit. Keep the VAE (small, needed again for the final decode).
             FreeEncoders();
 
+            // CPU offload: cap the resident device-copy set for the denoise. New weight
+            // uploads past the budget are DENIED residency and stream through the per-graph
+            // upload path instead (sd.cpp --offload-to-cpu semantics: keep in VRAM what fits
+            // after the activations are budgeted, stream the rest from RAM every forward).
+            // Set AFTER FreeEncoders so the text-encoder pass ran at full speed and its
+            // residency is already cleared; the Edit finally lifts the cap again.
+            if (Dit.OffloadCpu)
+            {
+                int refTokens = 0;
+                foreach (var s in refShapes) refTokens += s.h * s.w;
+                long resBudget = OffloadResidencyBudget(seq + refTokens + Math.Max(txtSeq, negTxt));
+                GgmlBasicOps.SetDeviceCopyBudget(resBudget);
+                _offloadBudgetSet = true;
+                Console.WriteLine($"  [pipe] offload: resident weight budget {resBudget >> 20} MiB; the rest streams from RAM per step.");
+            }
+
             // 4. noise latents (packed) + reference concatenation layout
             var rng = new GaussianRng(p.Seed);
             float[] noise = new float[(long)C * Hl * Wl];
             for (long i = 0; i < noise.Length; i++) noise[i] = rng.Next();
             float[] latents = Pack(noise, Hl, Wl);               // [seq, 64], evolves
 
-            int imgSeq = seq + seq;                              // gen + ref
+            int refSeqTotal = 0;
+            foreach (var s in refShapes) refSeqTotal += s.h * s.w;
+            int imgSeq = seq + refSeqTotal;                      // gen + all refs
             var modulateIndex = new int[imgSeq];
             for (int i = seq; i < imgSeq; i++) modulateIndex[i] = 1;
 
-            // img_shapes: generated then reference (both same grid here)
-            var imgShapes = new (int f, int h, int w)[] { (1, hp, wp), (1, hp, wp) };
+            // img_shapes: generated then each reference (frame index 0, 1, 2, ... in DitRope)
+            var imgShapes = new (int f, int h, int w)[1 + refShapes.Length];
+            imgShapes[0] = (1, hp, wp);
+            Array.Copy(refShapes, 0, imgShapes, 1, refShapes.Length);
             DitRope rope = DitRope.Build(imgShapes, txtSeq);
             DitRope ropeNeg = doCfg ? DitRope.Build(imgShapes, negTxt) : null;
 
@@ -156,7 +309,8 @@ namespace TensorSharp.Models.QwenImage
 
             // 6. denoise loop
             var imgTokens = new float[(long)imgSeq * 64];
-            Array.Copy(refPacked, 0, imgTokens, (long)seq * 64, (long)seq * 64);  // ref part fixed
+            long refOff = (long)seq * 64;                        // ref parts fixed for the whole loop
+            foreach (var rp in refPacked) { Array.Copy(rp, 0, imgTokens, refOff, rp.Length); refOff += rp.Length; }
             // CFG-batching (both branches in one captured dispatch) is a large win where the
             // combined block fits VRAM, but at very large token counts it falls back to a
             // non-persist path that holds both branches at once and can oversubscribe VRAM.
@@ -168,8 +322,8 @@ namespace TensorSharp.Models.QwenImage
 
             Dit.ResetCache(sched.Steps);   // First-Block-Cache: fresh state per generation
             // Whole-step cache (EasyCache port, see QwenImageStepCache): skips the ENTIRE
-            // DiT forward (both CFG branches) on low-change steps. Default cache mode;
-            // TS_QWEN_DIT_CACHE_MODE selects easycache/fbc/both/off.
+            // DiT forward (both CFG branches) on low-change steps. OFF by default (quality
+            // first, like sd.cpp); TS_QWEN_DIT_CACHE_MODE=easycache/fbc/both opts in.
             var stepCache = new QwenImageStepCache(sched.Steps);
             for (int step = 0; step < sched.Steps; step++)
             {
@@ -312,19 +466,38 @@ namespace TensorSharp.Models.QwenImage
             void Sub(string n) { Console.WriteLine($"  [pipe-timing]   te.{n}: {sw.Elapsed.TotalMilliseconds:F0}ms"); sw.Restart(); }
 
             int[] tokens;
-            ImageCond imgCond = null;
-            if (UseVision && _conditionImage != null)
+            ImageCond[] imgConds = null;
+            if (UseVision && _conditionImages != null && _conditionImages.Length > 0)
             {
-                string templated = QwenImagePrompt.BuildWithImage(prompt);
+                int nImg = _conditionImages.Length;
+                string templated = QwenImagePrompt.BuildWithImages(prompt, nImg);
                 int[] baseTokens = Te.Tokenizer.Encode(templated, addSpecial: false).ToArray();
                 Sub("load+tokenize");
-                float[] pv = QwenImageVisionProcessor.Preprocess(_conditionImage, out int gridH, out int gridW);
-                int n = (gridH / 2) * (gridW / 2);
-                float[] embeds = Vision.Encode(pv, gridH, gridW);    // [n, 3584]
-                Sub($"vision({gridH}x{gridW})");
-                tokens = ExpandImagePad(baseTokens, QwenImagePrompt.ImagePadTokenId, n, out int imgStart);
-                if (imgStart >= 0)
-                    imgCond = new ImageCond { Start = imgStart, Count = n, GridH = gridH, GridW = gridW, Embeds = embeds };
+                // Vision-encode each image once per request (the negative-CFG pass reuses the cache).
+                if (_visionCache == null)
+                {
+                    _visionCache = new (int, int, float[])[nImg];
+                    for (int i = 0; i < nImg; i++)
+                    {
+                        float[] pv = QwenImageVisionProcessor.Preprocess(_conditionImages[i], out int gh, out int gw);
+                        _visionCache[i] = (gh, gw, Vision.Encode(pv, gh, gw));    // [n_i, 3584]
+                        Sub($"vision[{i}]({gh}x{gw})");
+                    }
+                }
+                var counts = new int[nImg];
+                for (int i = 0; i < nImg; i++)
+                    counts[i] = (_visionCache[i].gridH / 2) * (_visionCache[i].gridW / 2);
+                tokens = ExpandImagePads(baseTokens, QwenImagePrompt.ImagePadTokenId, counts, out int[] starts);
+                var conds = new System.Collections.Generic.List<ImageCond>(nImg);
+                for (int i = 0; i < nImg; i++)
+                    if (starts[i] >= 0)
+                        conds.Add(new ImageCond
+                        {
+                            Start = starts[i], Count = counts[i],
+                            GridH = _visionCache[i].gridH, GridW = _visionCache[i].gridW,
+                            Embeds = _visionCache[i].embeds,
+                        });
+                if (conds.Count > 0) imgConds = conds.ToArray();
             }
             else
             {
@@ -332,7 +505,7 @@ namespace TensorSharp.Models.QwenImage
                 Sub("load+tokenize");
             }
 
-            float[] full = Te.EncodeHidden(tokens, imgCond);   // [seq, 3584]
+            float[] full = Te.EncodeHidden(tokens, imgConds);   // [seq, 3584]
             Sub($"llm({tokens.Length}tok)");
             int seq = tokens.Length;
             int hidden = Te.HiddenSize;
@@ -343,17 +516,28 @@ namespace TensorSharp.Models.QwenImage
             return cond;
         }
 
-        // Replace the single <|image_pad|> placeholder with `n` copies (one per merged vision patch).
-        private static int[] ExpandImagePad(int[] tokens, int padId, int n, out int start)
+        // Replace the k-th <|image_pad|> placeholder with counts[k] copies (one per merged vision
+        // patch of image k); starts[k] receives that span's index in the EXPANDED token array
+        // (-1 if the template had fewer placeholders than images — should not happen).
+        internal static int[] ExpandImagePads(int[] tokens, int padId, int[] counts, out int[] starts)
         {
-            int idx = Array.IndexOf(tokens, padId);
-            start = idx;
-            if (idx < 0) return tokens;
-            var outp = new int[tokens.Length - 1 + n];
-            Array.Copy(tokens, 0, outp, 0, idx);
-            for (int i = 0; i < n; i++) outp[idx + i] = padId;
-            Array.Copy(tokens, idx + 1, outp, idx + n, tokens.Length - idx - 1);
-            return outp;
+            starts = new int[counts.Length];
+            int total = tokens.Length;
+            foreach (int c in counts) total += c - 1;
+            var outp = new System.Collections.Generic.List<int>(total);
+            int k = 0;
+            foreach (int t in tokens)
+            {
+                if (t == padId && k < counts.Length)
+                {
+                    starts[k] = outp.Count;
+                    for (int j = 0; j < counts[k]; j++) outp.Add(padId);
+                    k++;
+                }
+                else outp.Add(t);
+            }
+            for (; k < counts.Length; k++) starts[k] = -1;
+            return outp.ToArray();
         }
 
         // true-CFG over packed velocity rows [seq, 64]
@@ -424,23 +608,31 @@ namespace TensorSharp.Models.QwenImage
                     lat[(long)c * hw + i] = lat[(long)c * hw + i] * LatentsStd[c] + LatentsMean[c];
         }
 
-        // Clamp the output area so the DiT's O(n^2) attention scratch fits device VRAM.
-        // Peak DiT VRAM ~= reserve (weights/VAE/activations) + 2*T^2*heads*4 bytes
-        // (attention scores + probs), where total tokens T ~= area/128 + txt. Solve for
-        // the largest area whose scores fit the remaining budget. Only relevant on the
-        // GGML CUDA backend; a no-op elsewhere or when the request already fits.
-        private long ClampAreaToVram(long requestedArea)
+        // Resolve the AUTO output area (no explicit --width/--height): QUALITY-FIRST. The target
+        // is the full requested area (default: the model's native ~1 MP training resolution —
+        // what diffusers QwenImageEditPlusPipeline and sd.cpp render), limited only by the hard
+        // VRAM ceiling; when the target does not fit beside the resident DiT weights and offload
+        // is allowed, the weights are streamed from RAM (offload=true on return) instead of
+        // giving up resolution. The previous behavior scaled the area down by step count and
+        // reference count as a SPEED budget — a 30-step 2-image edit rendered at ~0.4 MP with
+        // visibly soft, low-resolution faces; speed is now the opt-in (smaller --width/--height
+        // or TS_QWEN_IMAGE_MAX_AREA), not the default.
+        private long ResolveAutoArea(long requestedArea, int imageCount, int steps, bool doCfg,
+            bool offloadAllowed, ref bool offload, long refArea)
         {
-            // Metal: the default never clamped here, so a 1 MP request ran the full 60-block
-            // Q4_K_M DiT at imgSeq~8112 for 30 steps x 2 CFG (~tens of minutes) — the "stuck"
-            // the user hit. The gallocr scratch fix makes 1 MP fit memory-wise, but it is still
-            // slow, so default to a faster area on Metal (overridable via TS_QWEN_IMAGE_MAX_AREA
-            // or explicit --width/--height, which bypasses this clamp entirely).
+            // Metal: no weight-streaming path; keep the established speed budget (a 1 MP
+            // 30-step x 2-CFG run is tens of minutes there). TS_QWEN_IMAGE_MAX_AREA or an
+            // explicit --width/--height still raise it.
             if (_model.Backend == BackendType.GgmlMetal)
             {
-                long cap = 512L * 1024;   // ~0.5 MP: good quality/speed balance on a 19 GB M4 Pro
+                const int baselineSteps = 12;
+                double stepScale = Math.Sqrt((double)baselineSteps / Math.Max(1, steps));
+                int streams = imageCount + 1;
+                long cap = 512L * 1024;   // ~0.5 MP baseline (30-step) on a 19 GB M4 Pro
                 var env = Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_MAX_AREA");
                 if (env != null && long.TryParse(env, out var e) && e > 0) cap = e;
+                cap = (long)(cap * stepScale) * 2 / streams;  // step-scaled; total DiT work ~constant as refs are added
+                cap = Math.Min(Math.Max(cap, 256L * 1024), QwenImageNativeArea);
                 if (requestedArea > cap)
                 {
                     Console.WriteLine($"  [pipe] target area {requestedArea} clamped to {cap} px on Metal " +
@@ -450,54 +642,145 @@ namespace TensorSharp.Models.QwenImage
                 return requestedArea;
             }
             if (_model.Backend != BackendType.GgmlCuda) return requestedArea;
-            if (!GgmlBasicOps.TryGetDeviceMemoryInfo(out _, out long total) || total <= 0) return requestedArea;
 
-            // Flash-attention (native default) never materializes the [total,total] scores,
-            // so the DiT memory grows ~linearly with the token count instead of O(n^2). Use
-            // a much looser linear budget there; only the explicit-scores path needs the
-            // tight quadratic clamp.
-            // Flash is default-on now that the ggml-cuda flash path is fixed (see
-            // qi_flash_enabled): O(n) attention memory, so the looser linear VRAM budget
-            // applies (higher resolution fits). TS_QWEN_DIT_FLASH=0 forces the
-            // explicit-scores path with its tighter quadratic budget.
+            // Optional hard cap for users who WANT a faster/smaller default than native.
+            long target = Math.Min(requestedArea > 0 ? requestedArea : QwenImageNativeArea, QwenImageNativeArea);
+            var capEnv = Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_MAX_AREA");
+            if (capEnv != null && long.TryParse(capEnv, out var capV) && capV > 0)
+                target = Math.Min(target, capV);
+
+            long safe = MaxSafeArea(imageCount, doCfg, offload, refArea);
+            if (target > safe && offloadAllowed && !offload)
+            {
+                offload = true;   // stream weights rather than shrink the image
+                safe = MaxSafeArea(imageCount, doCfg, offload: true, refArea);
+            }
+            if (target > safe)
+            {
+                Console.WriteLine($"  [pipe] target area {target} clamped to {safe} px to fit VRAM " +
+                                  "(fewer input images, a smaller TS_QWEN_IMAGE_REF_AREA, or more VRAM raise the ceiling).");
+                return safe;
+            }
+            return target;
+        }
+
+        /// <summary>
+        /// Reference-latent area for the extra input images (<c>inputs[1..]</c>). Default on
+        /// CUDA: the model's native ~1 MP with each ref's own aspect (diffusers Edit Plus
+        /// <c>VAE_IMAGE_SIZE</c>) — independent of the output size, because this latent is the
+        /// detail source the DiT copies faces/textures from. Returns 0 on the other backends
+        /// (= couple to the output area, the legacy rule; no offload path there to absorb the
+        /// extra tokens). TS_QWEN_IMAGE_REF_AREA (pixels, clamped to [65536, 4 MP]) overrides
+        /// on every backend — values above native ~1 MP keep more input detail but are outside
+        /// the training distribution and cost area/256 attention tokens per reference.
+        /// </summary>
+        internal static long ResolveRefArea(BackendType backend)
+        {
+            var v = Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_REF_AREA");
+            if (v != null && long.TryParse(v, out var a) && a > 0)
+                return Math.Clamp(a, 65536, 4L * 1024 * 1024);
+            return backend == BackendType.GgmlCuda ? QwenImageNativeArea : 0;
+        }
+
+        /// <summary>
+        /// The HARD VRAM ceiling for the output area, given the input-image count and whether a
+        /// negative-CFG branch runs. Below this the DiT working set fits device memory; ABOVE it
+        /// the persistent whole-model capture OOMs and its non-persist fallback spills into garbage
+        /// output — so even an explicit --width/--height is capped here (only the softer auto SPEED
+        /// default is bypassed, never this). <see cref="long.MaxValue"/> = no known limit (non-CUDA
+        /// backend, or the device memory couldn't be queried). Calibrated + margined on the 16 GB
+        /// target box (Q2_K DiT 7.1 GB + Lightning LoRA side-path 1.6 GB resident): a single-branch
+        /// 2-image edit VERIFIED to fit ~0.6 MP (~7.7k tokens) and to OOM near ~0.9 MP (~10.9k).
+        /// With <paramref name="offload"/> the DiT weights stream from RAM per block (nothing
+        /// resident but one block's weights + the packed scratch), so nearly the whole budget goes
+        /// to activations and the ceiling reaches the model's native ~1 MP on far smaller cards.
+        /// <paramref name="refArea"/> is the FIXED per-reference latent area (see
+        /// <see cref="ResolveRefArea"/>): each of the <paramref name="imageCount"/> references
+        /// costs refArea/256 joint-attention tokens regardless of the output size, so the
+        /// ceiling this returns is for the GENERATED stream only.
+        /// </summary>
+        internal long MaxSafeArea(int imageCount, bool doCfg, bool offload = false, long refArea = QwenImageNativeArea)
+        {
+            int txtEst = 400 + 250 * (imageCount - 1);
+            long refTok = (long)imageCount * (refArea / 256);
+            if (_model.Backend == BackendType.GgmlMetal) return QwenImageNativeArea;
+            if (_model.Backend != BackendType.GgmlCuda) return long.MaxValue;
+            if (!GgmlBasicOps.TryGetDeviceMemoryInfo(out _, out long total) || total <= 0) return long.MaxValue;
+
+            long budget = (long)(total * 0.85);
+            const int heads = QwenImageModel.DitNumHeads;   // 24
+            // Flash attention (native default) never materializes the [T,T] scores, so its memory
+            // is ~LINEAR in the total joint-attention token count; only the explicit-scores path
+            // (TS_QWEN_DIT_FLASH=0) needs the tighter quadratic bound.
             bool nativeFlash =
                 Environment.GetEnvironmentVariable("TS_QWEN_DIT_NATIVE") != "0" &&
                 Environment.GetEnvironmentVariable("TS_QWEN_DIT_FLASH") != "0";
-
-            long budget = (long)(total * 0.85);
-            long maxArea;
+            if (nativeFlash && offload)
+            {
+                // Weight streaming: resident is one chunk's weight slots + the device-copy
+                // allowance (see OffloadResidencyBudget) + runtime overhead — reserve 3 GiB for
+                // all of it. Activations use the same ~700 KiB/token envelope as the whole-model
+                // graph (chunked graphs pack tighter through the reuse gallocr, so this stays
+                // conservative); the CFG branches run as two sequential forwards over the SAME
+                // reused scratch, so the bound is branch-count independent.
+                const long GiB = 1L << 30;
+                long actBudget = Math.Max(GiB, budget - 3L * GiB);
+                long memTokens = actBudget / (700L * 1024);
+                return Math.Min(Math.Max(256, memTokens - txtEst - refTok) * 256, QwenImageNativeArea);
+            }
             if (nativeFlash)
             {
-                // The VAE conv im2col is now band-tiled (VaeReferenceMath.TryGpuConv2dMaybeTiled —
-                // bounded), and the DiT runs O(n) flash attention — including under CUDA-graph
-                // capture (launch_fattn serves its scratch from a capture-stable arena), so the
-                // captured whole-model fast path now covers the full resolution range. The
-                // remaining limit is SPEED: the per-step cost still grows ~quadratically with the
-                // token count, so keep a VRAM-scaled default (~0.65 MP on 16 GB) that balances
-                // face quality vs denoise time; explicit --width/--height bypasses it for full
-                // 1 MP (best faces, slower).
-                const long ditReserve = 8L * 1024 * 1024 * 1024;       // resident DiT weights + working set
-                const int heads = QwenImageModel.DitNumHeads;          // 24
-                long scoresBudget = Math.Max(512L * 1024 * 1024, budget - ditReserve);
-                double maxT = Math.Sqrt(scoresBudget / (8.0 * heads));
-                maxArea = Math.Min((long)Math.Max(256, maxT - 400) * 128, QwenImageNativeArea);
+                const long GiB = 1L << 30;
+                // Resident set = the DiT weights (actual GGUF size — a Q4_K_M is 13.2 GB where
+                // the Q2_K this was first calibrated on is 7.1 GB) + the F32-expanded LoRA
+                // factors (~1.6 GB for the Lightning checkpoints).
+                long ditBytes = 71L * GiB / 10;
+                try { ditBytes = new System.IO.FileInfo(_model.DitGgufPath).Length; } catch { /* keep estimate */ }
+                long residentBytes = ditBytes + (QwenImageDiT.LoraPath != null ? 16L * GiB / 10 : 0);
+                if (!doCfg)
+                {
+                    // Single CFG branch (Lightning few-step, or caller cfg<=1): the whole-model
+                    // capture holds ONE branch's activations, ~linear in the token count. ~700 KiB
+                    // per joint-attention token (measured, margined).
+                    long actBudget = Math.Max(GiB, budget - residentBytes);
+                    long memTokens = actBudget / (700L * 1024);
+                    return Math.Min(Math.Max(256, memTokens - txtEst - refTok) * 256, QwenImageNativeArea);
+                }
+                // Two CFG branches (or the CFG-batched fused pass) roughly double the live
+                // activation set; keep the proven-conservative quadratic-scores bound (this path's
+                // high-resolution memory envelope is not empirically calibrated).
+                long cfgScores = Math.Max(512L * 1024 * 1024, budget - 8L * GiB);
+                double cfgMaxT = Math.Sqrt(cfgScores / (8.0 * heads));
+                return Math.Min((long)Math.Max(256, cfgMaxT - txtEst - refTok) * 256, QwenImageNativeArea);
             }
-            else
-            {
-                const long reserve = 12L * 1024 * 1024 * 1024;  // explicit-scores path (16 GB-calibrated: 512^2 fits ~11.6 GB clean)
-                const int heads = QwenImageModel.DitNumHeads;   // 24
-                long scoresBudget = Math.Max(512L * 1024 * 1024, budget - reserve);
-                double maxT = Math.Sqrt(scoresBudget / (8.0 * heads));   // 2*T^2*heads*4 <= scoresBudget
-                maxArea = (long)Math.Max(256, maxT - 400) * 128;
-            }
+            const long reserve = 12L * 1024 * 1024 * 1024;  // explicit-scores path (16 GB-calibrated)
+            long scoresBudget = Math.Max(512L * 1024 * 1024, budget - reserve);
+            double maxT = Math.Sqrt(scoresBudget / (8.0 * heads));   // 2*T^2*heads*4 <= scoresBudget
+            return (long)Math.Max(256, maxT - txtEst - refTok) * 256;
+        }
 
-            if (requestedArea > maxArea)
-            {
-                Console.WriteLine($"  [pipe] target area {requestedArea} exceeds the {total / 1024 / 1024} MiB VRAM budget; " +
-                                  $"clamping to {maxArea} px (set explicit --width/--height to override).");
-                return maxArea;
-            }
-            return requestedArea;
+        /// <summary>
+        /// How many bytes of device-resident weight copies to ALLOW during an offloaded denoise:
+        /// current free VRAM minus the activation working set for <paramref name="totalTokens"/>
+        /// joint-attention tokens (~700 KiB/token, the whole-model-graph envelope) minus fixed
+        /// headroom for the streaming slots + runtime. Weights that fit the allowance stay
+        /// resident (uploaded once); the rest streams from RAM every forward — the more VRAM,
+        /// the less PCIe traffic, degrading gracefully down to full streaming. The floor covers
+        /// the two flash-attention masks (cond + neg totals; each a padded SQUARE F16, ~350 MB
+        /// at 1 MP) that the chunked offload forward binds resident FIRST — re-uploading those
+        /// per chunk would dwarf the weight traffic they replace.
+        /// </summary>
+        private static long OffloadResidencyBudget(int totalTokens)
+        {
+            const long MiB = 1L << 20;
+            // Two padded square F16 masks (cond/neg branch token totals differ).
+            long pad = (totalTokens + 255) / 256 * 256 + 256;
+            long maskFloor = 2 * pad * pad * 2 + 64 * MiB;
+            if (!GgmlBasicOps.TryGetDeviceMemoryInfo(out long free, out long total) || free <= 0)
+                return Math.Max(512 * MiB, maskFloor);
+            long activations = (long)totalTokens * 700 * 1024;
+            long headroom = 1536 * MiB;
+            return Math.Max(maskFloor, free - activations - headroom);
         }
 
         // Release the text + vision encoders (reclaim their CUDA VRAM mid-request); the

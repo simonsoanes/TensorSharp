@@ -168,10 +168,18 @@ app.UseTensorSharpRequestLogging();
 // when no wwwroot content is present.
 app.UseDefaultFiles();
 app.UseStaticFiles();
+// The default content-type provider has no HEIC/HEIF mapping, so uploaded iPhone
+// photos 404'd under /uploads (browsers can't render HEIC in <img> anyway — the
+// Web UI displays the server-generated PNG previewUrl — but the original should
+// at least stay downloadable).
+var uploadContentTypes = new Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider();
+uploadContentTypes.Mappings[".heic"] = "image/heic";
+uploadContentTypes.Mappings[".heif"] = "image/heif";
 app.UseStaticFiles(new StaticFileOptions
 {
     FileProvider = new PhysicalFileProvider(hostingOptions.UploadDirectory),
     RequestPath = "/uploads",
+    ContentTypeProvider = uploadContentTypes,
 });
 
 app.MapHealthEndpoints(app.Environment);

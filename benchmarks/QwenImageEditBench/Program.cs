@@ -29,8 +29,11 @@ internal static class Program
             case "dit-cfg-verify": return DitCfgVerify(args);
             case "dit-forward": return DitForward(args);
             case "edit": return Edit(args);
+            case "editn": return EditN(args);
             case "edit2": return Edit2(args);
             case "conv-tile-test": return ConvTileTest(args);
+            case "dequant-verify": return DequantVerify(args);
+            case "quant-matmul-bench": return QuantMatMulBench(args);
             default: Usage(); return 1;
         }
     }
@@ -58,6 +61,141 @@ internal static class Program
         bool ok = worst < 1e-4;
         Console.WriteLine($"CONV-TILE-TEST: worst relL2={worst:E3} -> {(ok ? "PASS" : "FAIL")}");
         return ok ? 0 : 2;
+    }
+
+    // Verify the pure-C# managed dequant is BIT-EXACT vs the native ggml dequant for every
+    // quantized tensor in the given GGUF(s). This is the correctness gate for the newly-ported
+    // Q2_K/Q3_K/IQ2_XXS/IQ2_S/IQ3_S managed dequant.
+    //   dequant-verify <gguf1> [gguf2 ...]
+    private static int DequantVerify(string[] args)
+    {
+        if (args.Length < 2) { Console.WriteLine("dequant-verify <gguf1> [gguf2 ...]"); return 1; }
+        var perType = new System.Collections.Generic.Dictionary<int, (int tensors, long elems, double maxAbs, int mism)>();
+        int totalTensors = 0, failTensors = 0;
+        for (int a = 1; a < args.Length; a++)
+        {
+            using var gguf = new TensorSharp.Runtime.GgufFile(args[a]);
+            Console.WriteLine($"== {Path.GetFileName(args[a])} ==");
+            foreach (var kv in gguf.Tensors)
+            {
+                var info = kv.Value;
+                int type = (int)info.Type;
+                // only quantized types (skip F32/F16/BF16/int — those are trivially managed already)
+                if (!TensorSharp.Models.ManagedQuantizedOps.SupportsCpuQuantizedStorage((TensorSharp.Runtime.GgmlTensorType)type))
+                    continue;
+                long n = info.NumElements;
+                if (n % 256 != 0 && (type == 10 || type == 11 || type >= 12)) { /* still fine for 32-blk */ }
+                byte[] raw = gguf.ReadTensorData(info);
+                var nativeOut = new float[n];
+                var managedOut = new float[n];
+                try
+                {
+                    TensorSharp.GGML.GgmlGgufTensorDequant.DequantizeToFloat32(type, raw, 0, nativeOut, 0, n);
+                }
+                catch (Exception ex) { Console.WriteLine($"  [skip native] {info.Name} type={(TensorSharp.Runtime.GgmlTensorType)type}: {ex.Message}"); continue; }
+                TensorSharp.Models.ManagedQuantizedOps.DequantizeToFloat32(type, raw, 0, managedOut, 0, n);
+                double maxAbs = 0; int mism = 0;
+                for (long i = 0; i < n; i++)
+                {
+                    float a1 = nativeOut[i], b1 = managedOut[i];
+                    if (BitConverter.SingleToInt32Bits(a1) != BitConverter.SingleToInt32Bits(b1))
+                    {
+                        double da = Math.Abs((double)a1 - b1);
+                        if (da > maxAbs) maxAbs = da;
+                        mism++;
+                    }
+                }
+                totalTensors++;
+                var cur = perType.TryGetValue(type, out var e) ? e : (0, 0L, 0.0, 0);
+                perType[type] = (cur.Item1 + 1, cur.Item2 + n, Math.Max(cur.Item3, maxAbs), cur.Item4 + mism);
+                if (mism > 0) { failTensors++; if (failTensors <= 5) Console.WriteLine($"  MISMATCH {info.Name} type={(TensorSharp.Runtime.GgmlTensorType)type} n={n} mismatches={mism} maxAbs={maxAbs:E3}"); }
+            }
+        }
+        Console.WriteLine("--- per-type summary (managed vs native, bit-exact) ---");
+        foreach (var kv in perType)
+            Console.WriteLine($"  {(TensorSharp.Runtime.GgmlTensorType)kv.Key,-8} tensors={kv.Value.tensors} elems={kv.Value.elems} bitMismatchMaxAbs={kv.Value.maxAbs:E3} mismatchElems={kv.Value.mism}");
+        bool pass = failTensors == 0;
+        Console.WriteLine(pass ? $"DEQUANT-VERIFY: PASS ({totalTensors} tensors bit-exact)" : $"DEQUANT-VERIFY: FAIL ({failTensors}/{totalTensors} tensors differ)");
+        return pass ? 0 : 2;
+    }
+
+    // Isolated perf + correctness harness for the pure-C# quantized linear
+    // (ModelBase.DequantMatMulColumns): loads real DiT weights, times a [seqLen x inDim] x
+    // W^T matmul across cores, and verifies the result vs a naive scalar dequant+dot reference.
+    //   quant-matmul-bench <dit.gguf> [seqLen] [iters]
+    private static unsafe int QuantMatMulBench(string[] args)
+    {
+        string dit = args.Length > 1 ? args[1] : "C:/Works/models/qwen-image-edit-2511-Q2_K.gguf";
+        int seqLen = args.Length > 2 ? int.Parse(args[2]) : 701;
+        int iters = args.Length > 3 ? int.Parse(args[3]) : 5;
+        // Force the pure-C# managed dequant path (as BackendType.Cpu would).
+        TensorSharp.Models.NativeDequant.PreferManaged = true;
+
+        int blk = args.Length > 4 ? int.Parse(args[4]) : 30;   // most mid blocks are Q2_K
+        string[] weights =
+        {
+            $"transformer_blocks.{blk}.attn.to_q.weight",         // 3072x3072
+            $"transformer_blocks.{blk}.img_mlp.net.0.proj.weight",// 3072x12288
+            $"transformer_blocks.{blk}.img_mlp.net.2.weight",     // 12288x3072
+        };
+        using var gguf = new TensorSharp.Runtime.GgufFile(dit);
+        var rng = new Random(7);
+        bool allOk = true;
+        foreach (var wname in weights)
+        {
+            if (!gguf.Tensors.TryGetValue(wname, out var info)) { Console.WriteLine($"  [skip] {wname} not found"); continue; }
+            gguf.TryGetTensorDataPointer(info, out IntPtr wp);
+            int inDim = (int)info.Shape[0], outDim = (int)info.Shape[1];
+            var type = info.Type;
+            long rowBytes = TensorSharp.Models.ManagedQuantizedOps.RowSize((int)type, inDim);
+
+            var act = new float[(long)seqLen * inDim];
+            for (long i = 0; i < act.Length; i++) act[i] = (float)(rng.NextDouble() * 2 - 1);
+            var outp = new float[(long)seqLen * outDim];
+
+            double best = double.MaxValue;
+            var actH = System.Runtime.InteropServices.GCHandle.Alloc(act, System.Runtime.InteropServices.GCHandleType.Pinned);
+            var outH = System.Runtime.InteropServices.GCHandle.Alloc(outp, System.Runtime.InteropServices.GCHandleType.Pinned);
+            try
+            {
+                byte* wbase = (byte*)wp;
+                float* actp = (float*)actH.AddrOfPinnedObject();
+                float* outpp = (float*)outH.AddrOfPinnedObject();
+                void Run() => System.Threading.Tasks.Parallel.For(0, outDim,
+                    () => new float[inDim],
+                    (col, _, w) => { fixed (float* wsc = w) { TensorSharp.Models.ModelBase.DequantMatMulColumns((int)type, wbase, rowBytes, inDim, outDim, actp, inDim, seqLen, outpp, outDim, col, col + 1, wsc); } return w; },
+                    _ => { });
+                Run(); // warmup
+                for (int it = 0; it < iters; it++)
+                {
+                    var sw = Stopwatch.StartNew();
+                    Run();
+                    best = Math.Min(best, sw.Elapsed.TotalMilliseconds);
+                }
+            }
+            finally { actH.Free(); outH.Free(); }
+
+            // reference: dequant full weight once, naive scalar dot on a sample of (row,col)
+            var wref = new float[(long)outDim * inDim];
+            byte[] raw = gguf.ReadTensorData(info);
+            TensorSharp.Models.ManagedQuantizedOps.DequantizeToFloat32((int)type, raw, 0, wref, 0, (long)outDim * inDim);
+            double maxRel = 0;
+            var scols = new[] { 0, outDim / 2, outDim - 1 };
+            var srows = new[] { 0, seqLen / 2, seqLen - 1 };
+            foreach (int s in srows) foreach (int o in scols)
+            {
+                double refv = 0; for (int k = 0; k < inDim; k++) refv += (double)act[(long)s * inDim + k] * wref[(long)o * inDim + k];
+                double got = outp[(long)s * outDim + o];
+                double rel = Math.Abs(got - refv) / (Math.Abs(refv) + 1e-6);
+                maxRel = Math.Max(maxRel, rel);
+            }
+            double gflops = 2.0 * seqLen * inDim * outDim / (best / 1000.0) / 1e9;
+            bool ok = maxRel < 1e-3;
+            allOk &= ok;
+            Console.WriteLine($"  {wname,-46} {type,-6} [{seqLen}x{inDim}]x[{outDim}x{inDim}]^T  best={best,7:F1}ms  {gflops,6:F1} GFLOP/s  maxRel={maxRel:E2} {(ok ? "OK" : "MISMATCH")}");
+        }
+        Console.WriteLine(allOk ? "QUANT-MATMUL-BENCH: PASS" : "QUANT-MATMUL-BENCH: FAIL");
+        return allOk ? 0 : 2;
     }
 
     private static int Edit(string[] args)
@@ -93,6 +231,49 @@ internal static class Program
             ImageIO.SavePng(outPath, outImg);
             Console.WriteLine($"edit {outImg.Width}x{outImg.Height} steps={steps} cfg={cfg} -> {outPath}  ({ms / 1000:F1}s, {ms / steps:F0}ms/step)");
             return 0;
+        }
+        finally { model.Dispose(); }
+    }
+
+    // Multi-image edit (diffusers QwenImageEditPlusPipeline semantics): inputs[0] drives the
+    // output geometry, every input becomes a reference stream + "Picture N" vision grounding.
+    // This is the user's "dress the model (img2) in the garment (img1)" path.
+    //   editn <dit.gguf> <out.png> "<prompt>" <steps> <cfg> <area> <img1> <img2> [img3...]
+    private static int EditN(string[] args)
+    {
+        if (args.Length < 8) { Console.WriteLine("editn <dit> <out.png> \"<prompt>\" <steps> <cfg> <area> <img1> <img2> [...]"); return 1; }
+        string dit = args[1], outPath = args[2], prompt = args[3];
+        int steps = int.Parse(args[4]);
+        float cfg = float.Parse(args[5]);
+        long area = long.Parse(args[6]);
+        var inputs = new System.Collections.Generic.List<RgbImage>();
+        for (int i = 7; i < args.Length; i++) inputs.Add(ImageIO.Load(args[i]));
+
+        Environment.SetEnvironmentVariable("MAX_CONTEXT", "4096");
+        var backend = (Environment.GetEnvironmentVariable("TS_QWEN_BACKEND") ?? "ggml_cpu") switch
+        {
+            "ggml_cuda" => BackendType.GgmlCuda,
+            "ggml_metal" => BackendType.GgmlMetal,
+            "cuda" => BackendType.Cuda,
+            "cpu" => BackendType.Cpu,
+            _ => BackendType.GgmlCpu,
+        };
+        Console.WriteLine($"[bench] backend={backend} inputs={inputs.Count}");
+        var model = (TensorSharp.Models.QwenImage.QwenImageModel)TensorSharp.Models.ModelBase.Create(dit, backend);
+        try
+        {
+            var p = new QwenImageParams { Steps = steps, CfgScale = cfg, TargetArea = area, Seed = 42 };
+            var sw = Stopwatch.StartNew();
+            var outImg = model.EditImage(prompt, inputs, p);
+            double ms = sw.Elapsed.TotalMilliseconds;
+            ImageIO.SavePng(outPath, outImg);
+            // degenerate-output guard (black/NaN): std must be non-trivial and all pixels finite.
+            double sum = 0, sq = 0; int n = outImg.Pixels.Length; bool finite = true;
+            for (int i = 0; i < n; i++) { float v = outImg.Pixels[i]; if (float.IsNaN(v) || float.IsInfinity(v)) finite = false; sum += v; sq += (double)v * v; }
+            double mean = sum / n, std = Math.Sqrt(sq / n - mean * mean);
+            bool ok = finite && std > 0.02;
+            Console.WriteLine($"editn {outImg.Width}x{outImg.Height} steps={steps} cfg={cfg} {ms / 1000:F1}s mean={mean:F3} std={std:F3} finite={finite} -> {(ok ? "OK" : "DEGENERATE(black/NaN)")} ({outPath})");
+            return ok ? 0 : 2;
         }
         finally { model.Dispose(); }
     }
@@ -578,7 +759,7 @@ internal static class Program
             string t0 = TensorSharp.Models.QwenImage.QwenImagePrompt.Build(prompt);
             int[] tok0 = te.Tokenizer.Encode(t0, addSpecial: false).ToArray();
             // image template (base, single image_pad)
-            string t1 = TensorSharp.Models.QwenImage.QwenImagePrompt.BuildWithImage(prompt);
+            string t1 = TensorSharp.Models.QwenImage.QwenImagePrompt.BuildWithImages(prompt, 1);
             int[] tok1 = te.Tokenizer.Encode(t1, addSpecial: false).ToArray();
             int padIdx = Array.IndexOf(tok1, TensorSharp.Models.QwenImage.QwenImagePrompt.ImagePadTokenId);
             Console.WriteLine($"text-only tokens={tok0.Length}  (HF gave 77 for the beach prompt)");

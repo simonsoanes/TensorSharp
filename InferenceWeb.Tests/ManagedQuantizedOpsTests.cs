@@ -10,22 +10,25 @@ public class ManagedQuantizedOpsTests
     [Fact]
     public void ShouldStoreWeightQuantized_UsesManagedCpuSupportMatrix()
     {
-        var supported = new GgufTensorInfo
+        GgufTensorInfo Weight(GgmlTensorType type) => new GgufTensorInfo
         {
             Name = "blk.0.attn_q.weight",
             Shape = new ulong[] { 256, 128 },
-            Type = GgmlTensorType.Q4_K,
+            Type = type,
         };
 
-        var unsupported = new GgufTensorInfo
-        {
-            Name = "blk.0.attn_q.weight",
-            Shape = new ulong[] { 256, 128 },
-            Type = GgmlTensorType.IQ2_XXS,
-        };
+        // Managed CPU quantized storage now covers the K-quants AND the i-quants used by
+        // Qwen-Image-Edit (Q2_K/Q3_K DiT, IQ2_XXS/IQ2_S/IQ3_S text encoder) — these must be
+        // stored quantized (and matmul'd via the managed path), not dequantized to F32 at load.
+        foreach (var t in new[]
+                 {
+                     GgmlTensorType.Q4_K, GgmlTensorType.Q2_K, GgmlTensorType.Q3_K,
+                     GgmlTensorType.IQ2_XXS, GgmlTensorType.IQ2_S, GgmlTensorType.IQ3_S,
+                 })
+            Assert.True(ModelBase.ShouldStoreWeightQuantized(BackendType.Cpu, Weight(t)), $"{t} should be CPU-quantized");
 
-        Assert.True(ModelBase.ShouldStoreWeightQuantized(BackendType.Cpu, supported));
-        Assert.False(ModelBase.ShouldStoreWeightQuantized(BackendType.Cpu, unsupported));
+        // A type the managed backend still does not implement stays out of the matrix.
+        Assert.False(ModelBase.ShouldStoreWeightQuantized(BackendType.Cpu, Weight(GgmlTensorType.IQ1_S)));
     }
 
     [Fact]
