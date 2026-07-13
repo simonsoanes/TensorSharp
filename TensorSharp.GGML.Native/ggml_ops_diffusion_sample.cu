@@ -35,6 +35,7 @@
 
 #include <cfloat>
 #include <cstdint>
+#include <cstdio>
 #include <map>
 #include <mutex>
 
