@@ -1,11 +1,10 @@
-// Microbenchmark for the pure-C# managed quantized matmul (ManagedQuantizedOps).
+﻿// Microbenchmark for the pure-C# managed quantized matmul (ManagedQuantizedOps).
 // Measures effective weight-read bandwidth (GB/s) per quant type for the
 // decode-shaped matmul (rowCount=1) and a small prefill batch (rowCount=4),
 // and checks every result against the dequantize-then-dot reference.
 //
 //   dotnet run -c Release --project benchmarks/CpuQuantBench            # all quants
 //   dotnet run -c Release --project benchmarks/CpuQuantBench q4k        # one quant
-//   TENSORSHARP_CPU_NO_SIMD_KQUANT=1 dotnet run -c Release ... q4k      # scalar A/B
 //
 // Decode tok/s for a model is ~ (bytes read per token) / (GB/s here), so the
 // GB/s number is the lever this backend optimises.
@@ -121,10 +120,7 @@ var quants = new (string name, GgmlTensorType type)[]
 string filter = args.Length > 0 ? args[0].ToLowerInvariant() : null;
 int inDim = 4096, outDim = 4096, iters = 200;
 
-bool noK = Environment.GetEnvironmentVariable("TENSORSHARP_CPU_NO_SIMD_KQUANT") == "1";
-bool noQ40 = Environment.GetEnvironmentVariable("TENSORSHARP_CPU_NO_SIMD_Q40") == "1";
-Console.WriteLine($"cores={Environment.ProcessorCount}  matmul={inDim}x{outDim}  " +
-    $"NO_SIMD_KQUANT={noK} NO_SIMD_Q40={noQ40}");
+Console.WriteLine($"cores={Environment.ProcessorCount}  matmul={inDim}x{outDim}");
 Console.WriteLine($"{"quant",-6} {"rows",4}  {"GB/s",8}  {"ms/call",9}  {"relErr",9}");
 foreach (var (name, type) in quants)
 {

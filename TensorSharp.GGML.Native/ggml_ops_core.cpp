@@ -153,94 +153,10 @@ namespace tsg
              std::strcmp(value, "ON") == 0);
     }
 
-    static bool ggml_debug_logging_enabled()
-    {
-        return is_truthy_env(std::getenv("TENSORSHARP_GGML_DEBUG"));
-    }
-
-#if defined(_WIN32)
-    // Crash triage aid: with TS_GGML_VEH_DEBUG=1 a vectored exception handler
-    // prints the faulting module + offset of any access violation to stderr
-    // before the process dies. .NET's managed stack trace only shows the
-    // TSGgml_* entry point; this tells you whether the fault is inside
-    // GgmlOps.dll, a GPU driver DLL, or the runtime. First-chance handler,
-    // EXCEPTION_CONTINUE_SEARCH: the CLR's own AV-based null-ref machinery
-    // still works (those prints are recognizable by their coreclr/jit module).
-    static LONG WINAPI tsg_veh_log_access_violation(PEXCEPTION_POINTERS info)
-    {
-        if (info != nullptr && info->ExceptionRecord != nullptr &&
-            info->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION)
-        {
-            void* ip = info->ExceptionRecord->ExceptionAddress;
-            const ULONG_PTR is_write = info->ExceptionRecord->NumberParameters > 1
-                ? info->ExceptionRecord->ExceptionInformation[0] : 0;
-            const ULONG_PTR target = info->ExceptionRecord->NumberParameters > 1
-                ? info->ExceptionRecord->ExceptionInformation[1] : 0;
-            HMODULE mod = nullptr;
-            char mod_name[MAX_PATH] = { 0 };
-            if (GetModuleHandleExA(
-                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                    reinterpret_cast<LPCSTR>(ip), &mod) && mod != nullptr)
-            {
-                GetModuleFileNameA(mod, mod_name, MAX_PATH);
-            }
-            std::fprintf(stderr, "[tsg-veh] ACCESS_VIOLATION ip=%p (%s+0x%llx) %s addr=%p\n",
-                ip,
-                mod_name[0] != '\0' ? mod_name : "(jit/unknown)",
-                mod != nullptr
-                    ? static_cast<unsigned long long>(
-                        reinterpret_cast<char*>(ip) - reinterpret_cast<char*>(mod))
-                    : 0ULL,
-                is_write ? "writing" : "reading",
-                reinterpret_cast<void*>(target));
-
-            // Poor-man's backtrace: scan the faulting thread's stack for
-            // quadwords that land inside a loaded module and print module+offset.
-            // No frame pointers / PDBs needed; noisy but enough to identify the
-            // native caller chain of a memcpy fault.
-            if (info->ContextRecord != nullptr)
-            {
-                const ULONG_PTR* sp = reinterpret_cast<const ULONG_PTR*>(info->ContextRecord->Rsp);
-                int printed = 0;
-                for (int slot = 0; slot < 256 && printed < 12; ++slot)
-                {
-                    ULONG_PTR value = 0;
-                    __try { value = sp[slot]; }
-                    __except (EXCEPTION_EXECUTE_HANDLER) { break; }
-                    if (value < 0x10000)
-                        continue;
-                    HMODULE frame_mod = nullptr;
-                    if (!GetModuleHandleExA(
-                            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCSTR>(value), &frame_mod) || frame_mod == nullptr)
-                        continue;
-                    char frame_name[MAX_PATH] = { 0 };
-                    GetModuleFileNameA(frame_mod, frame_name, MAX_PATH);
-                    std::fprintf(stderr, "[tsg-veh]   stack[%3d] %s+0x%llx\n", slot,
-                        frame_name,
-                        static_cast<unsigned long long>(
-                            value - reinterpret_cast<ULONG_PTR>(frame_mod)));
-                    ++printed;
-                }
-            }
-            std::fflush(stderr);
-        }
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-#endif
-
-    static void install_crash_triage_handler_if_requested()
-    {
-#if defined(_WIN32)
-        if (is_truthy_env(std::getenv("TS_GGML_VEH_DEBUG")))
-            AddVectoredExceptionHandler(1, tsg_veh_log_access_violation);
-#endif
-    }
-
     static void filtered_ggml_log(enum ggml_log_level level, const char* text, void* user_data)
     {
         (void) user_data;
-        if (level == GGML_LOG_LEVEL_DEBUG && !ggml_debug_logging_enabled())
+        if (level == GGML_LOG_LEVEL_DEBUG)
             return;
         std::fputs(text, stderr);
         std::fflush(stderr);
@@ -349,7 +265,6 @@ namespace tsg
     {
         clear_last_error();
         configure_ggml_logging();
-        install_crash_triage_handler_if_requested();
         g_backend = create_backend_instance(g_backend_type);
         if (g_backend == nullptr)
             return;
@@ -1009,8 +924,6 @@ namespace tsg
 
         const bool use_device_copy = prefers_device_local_cache(dev) && !unified_weight;
 
-        static const bool s_bind_debug = is_truthy_env(std::getenv("TS_GGML_BIND_DEBUG"));
-
         {
             std::lock_guard<std::mutex> lock(g_preloaded_buffer_cache_mutex);
             auto it = g_preloaded_buffer_cache.find(data);
@@ -1024,26 +937,8 @@ namespace tsg
                     out_addr = ggml_backend_buffer_get_base(out_buffer);
                     return true;
                 }
-                if (s_bind_debug)
-                {
-                    std::fprintf(stderr,
-                        "[bind-debug] preload entry REJECTED key=%p bytes=%zu(entry %zu) required=%zu buffer=%zu type=%s ne=[%lld,%lld]\n",
-                        data, bytes, it->second.bytes, required_size, it->second.buffer_size,
-                        ggml_type_name(tensor->type),
-                        (long long)tensor->ne[0], (long long)tensor->ne[1]);
-                    std::fflush(stderr);
-                }
                 ggml_backend_buffer_free(it->second.buffer);
                 g_preloaded_buffer_cache.erase(it);
-            }
-            else if (s_bind_debug && bytes >= 4096)
-            {
-                std::fprintf(stderr,
-                    "[bind-debug] preload MISS key=%p bytes=%zu type=%s ne=[%lld,%lld] map_size=%zu\n",
-                    data, bytes, ggml_type_name(tensor->type),
-                    (long long)tensor->ne[0], (long long)tensor->ne[1],
-                    g_preloaded_buffer_cache.size());
-                std::fflush(stderr);
             }
         }
 
@@ -1197,18 +1092,6 @@ namespace tsg
         // ggml_gallocr_alloc_graph reuses the existing buffer when the new graph
         // fits and grows (reallocates) it only when a larger graph appears.
         bool ok = ggml_gallocr_alloc_graph(g_reuse_gallocr, graph);
-        static const bool s_memlog = std::getenv("TS_GMTP_MEMLOG") != nullptr;
-        if (ok && s_memlog)
-        {
-            static std::size_t s_last = 0;
-            std::size_t sz = ggml_gallocr_get_buffer_size(g_reuse_gallocr, 0);
-            if (sz != s_last)
-            {
-                fprintf(stderr, "[memlog] reuse_gallocr size %zu -> %zu MB\n",
-                        s_last / 1024 / 1024, sz / 1024 / 1024);
-                s_last = sz;
-            }
-        }
         return ok;
     }
 
@@ -1266,9 +1149,6 @@ namespace tsg
             alloc_size = ((alloc_size + slab - 1) / slab) * slab;
             if (alloc_size > max_size) alloc_size = max_size; // never exceed a single buffer
             if (alloc_size < needed) alloc_size = needed;
-            if (std::getenv("TS_GMTP_MEMLOG") != nullptr)
-                fprintf(stderr, "[memlog] reuse_compute_buf grow %zu -> %zu MB (needed %zu MB)\n",
-                        g_reuse_compute_size / 1024 / 1024, alloc_size / 1024 / 1024, needed / 1024 / 1024);
             if (g_reuse_compute_buf != nullptr)
                 ggml_backend_buffer_free(g_reuse_compute_buf);
             g_reuse_compute_buf = ggml_backend_buft_alloc_buffer(buft, alloc_size);
@@ -1804,18 +1684,6 @@ TSG_EXPORT int TSGgml_IsBackendAvailable(int backendType)
 {
     clear_last_error();
     return ensure_backend(backendType) ? 1 : 0;
-}
-
-// Hands the process-wide backend singleton to the managed op layer
-// (TensorSharp.Backends.GGML/Interop/GgmlManagedRuntime.cs) so managed-built
-// ggml graphs run on the same backend instance (same CUDA context / Metal
-// queue) as the remaining native kernels while the migration is in flight.
-TSG_EXPORT void* TSGgml_GetBackendHandle(int backendType)
-{
-    clear_last_error();
-    if (!ensure_backend(backendType))
-        return nullptr;
-    return g_backend;
 }
 
 // Selects which Vulkan device ggml-vulkan initializes on (multi-GPU hosts, e.g.

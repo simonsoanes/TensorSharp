@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -71,13 +71,7 @@ namespace TensorSharp.Models.QwenImage
             for (int s = start; s < NumLayers; s += chunk)
             {
                 int count = Math.Min(chunk, NumLayers - s);
-                var sw = TimingOn ? System.Diagnostics.Stopwatch.StartNew() : null;
                 bool ok = TryWholeBlocks(imgHost, imgSeq, txtHost, txtSeq, temb, modulateIndex, rope, s, count);
-                if (sw != null)
-                {
-                    sw.Stop();
-                    Console.WriteLine($"  [dit-timing] offload chunk blocks {s}..{s + count - 1} imgSeq={imgSeq}: {sw.Elapsed.TotalMilliseconds:F0}ms{(ok ? "" : " (FAILED -> per-block)")}");
-                }
                 if (!ok)
                 {
                     // Finish the remaining layers on the per-block streaming path rather

@@ -94,15 +94,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelVerify(
         if (!ensure_backend())
             return 0;
 
-        // TS_G4_VERIFY_TIMING=1: print a per-call phase breakdown (build / bind /
-        // alloc / upload / compute / download) so prefill overhead outside the
-        // GPU kernels is visible. Mirrors TS_GEMMA4_FD_TIMING on the decode path.
-        static const bool g4v_timing = std::getenv("TS_G4_VERIFY_TIMING") != nullptr;
-        using vt_clock = std::chrono::steady_clock;
-        const auto vt0 = vt_clock::now();
-        auto vt_ms = [](vt_clock::time_point a, vt_clock::time_point b)
-            { return std::chrono::duration<double, std::milli>(b - a).count(); };
-        vt_clock::time_point vt_built{}, vt_bound{}, vt_alloced{}, vt_uploaded{}, vt_computed{};
 
         const int N = num_tokens;
         const int totalSeqLen = start_pos + N;
@@ -824,7 +815,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelVerify(
         const int swa_tiles = (swa_tiled && NQ > swa_tile) ? ((NQ + swa_tile - 1) / swa_tile) : 1;
         // +16/layer headroom for swaPrev (gather view+cpy, concat, optional dtype cpy).
         const std::size_t graph_size = static_cast<std::size_t>(num_layers) * (208 + static_cast<std::size_t>(swa_tiles) * 8) + 512;
-        if (g4v_timing) vt_built = vt_clock::now();
         ggml_cgraph* graph = ggml_new_graph_custom(ctx, graph_size, false);
         // swaPrev gathers MUST be expanded (and thus scheduled) before the cache
         // writes: the gather reads the rolling window the write then overwrites, so
@@ -850,8 +840,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelVerify(
         std::vector<BufferHandle> ephemeral_bufs;
         // g4v-timing attribution: where bind time goes (cache lookups vs
         // tensor_alloc vs fallthrough), and how many tensors were re-uploaded.
-        double vtb_lookup_ms = 0.0, vtb_talloc_ms = 0.0;
-        int vtb_hits = 0, vtb_misses = 0;
         auto bind_or_mark = [&](ggml_tensor* t, void* data, std::size_t bytes, bool cacheable,
                                 enum ggml_backend_buffer_usage usage = GGML_BACKEND_BUFFER_USAGE_WEIGHTS) {
             if (t == nullptr || data == nullptr) return;
@@ -862,14 +850,10 @@ TSG_EXPORT int TSGgml_Gemma4ModelVerify(
             if (cacheable && bytes >= 512)
             {
                 ggml_backend_buffer_t buf = nullptr; void* addr = nullptr; bool needs_upload = false;
-                const auto tl0 = g4v_timing ? vt_clock::now() : vt_clock::time_point{};
                 bool got = try_get_cacheable_tensor_buffer(g_backend, dev, t, data, bytes, buf, addr, needs_upload, usage);
-                const auto tl1 = g4v_timing ? vt_clock::now() : vt_clock::time_point{};
-                if (g4v_timing) vtb_lookup_ms += vt_ms(tl0, tl1);
                 if (got)
                 {
                     ggml_status st = ggml_backend_tensor_alloc(buf, t, addr);
-                    if (g4v_timing) { vtb_talloc_ms += vt_ms(tl1, vt_clock::now()); vtb_hits++; }
                     if (st == GGML_STATUS_SUCCESS) { if (needs_upload) upload_list.push_back({t, data, bytes}); return; }
                     invalidate_cached_buffer(data);
                 }
@@ -884,7 +868,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelVerify(
                     if (st == GGML_STATUS_SUCCESS) return;
                 }
             }
-            if (g4v_timing) vtb_misses++;
             upload_list.push_back({t, data, bytes});
         };
 
@@ -936,7 +919,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelVerify(
                     static_cast<std::size_t>(ple_dim) * sizeof(float), true);
         }
 
-        if (g4v_timing) vt_bound = vt_clock::now();
 
         // Allocation strategy. Small N (MTP speculative verify, N<=16) keeps the
         // bump allocator (alloc_ctx_tensors_reuse: each tensor its own slot, stable
@@ -967,26 +949,9 @@ TSG_EXPORT int TSGgml_Gemma4ModelVerify(
             }
         }
 
-        if (g4v_timing) vt_alloced = vt_clock::now();
 
         host_read_barrier();
 
-        if (g4v_timing)
-        {
-            static std::atomic<int> s_uplist_dump{0};
-            if (s_uplist_dump.fetch_add(1) == 1)   // second call = steady state
-            {
-                std::size_t tot = 0;
-                for (auto& u : upload_list) tot += u.bytes;
-                fprintf(stderr, "[g4v-uplist] %zu tensors, %zu bytes total:\n", upload_list.size(), tot);
-                for (auto& u : upload_list)
-                    fprintf(stderr, "  %s type=%s ne=[%lld,%lld,%lld] bytes=%zu\n",
-                        u.tensor->name[0] ? u.tensor->name : "(unnamed)",
-                        ggml_type_name(u.tensor->type),
-                        (long long)u.tensor->ne[0], (long long)u.tensor->ne[1], (long long)u.tensor->ne[2], u.bytes);
-                fflush(stderr);
-            }
-        }
 
         for (auto& u : upload_list)
             ggml_backend_tensor_set(u.tensor, u.data, 0, u.bytes);
@@ -1063,7 +1028,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelVerify(
             }
         }
 
-        if (g4v_timing) vt_uploaded = vt_clock::now();
 
         ggml_status status = ggml_backend_graph_compute(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
@@ -1072,23 +1036,9 @@ TSG_EXPORT int TSGgml_Gemma4ModelVerify(
             return 0;
         }
 
-        if (g4v_timing) vt_computed = vt_clock::now();
 
         finalize_compute_with_download(hidden_out, hidden_data, static_cast<std::size_t>(hidden_size) * N * sizeof(float));
 
-        if (g4v_timing)
-        {
-            const auto vt_done = vt_clock::now();
-            fprintf(stderr,
-                "[g4v-timing] N=%d start=%d nodes=%d build=%.1f bind=%.1f (lookup=%.1f talloc=%.1f hits=%d miss=%d uplist=%zu) alloc=%.1f upload=%.1f compute=%.1f download=%.1f total=%.1f ms\n",
-                N, start_pos, ggml_graph_n_nodes(graph),
-                vt_ms(vt0, vt_built), vt_ms(vt_built, vt_bound),
-                vtb_lookup_ms, vtb_talloc_ms, vtb_hits, vtb_misses, upload_list.size(),
-                vt_ms(vt_bound, vt_alloced),
-                vt_ms(vt_alloced, vt_uploaded), vt_ms(vt_uploaded, vt_computed),
-                vt_ms(vt_computed, vt_done), vt_ms(vt0, vt_done));
-            fflush(stderr);
-        }
 
         // If this call allocated a per-call backend buffer (the reuse-buffer
         // fallback), drain the queued async download before BufferHandle frees

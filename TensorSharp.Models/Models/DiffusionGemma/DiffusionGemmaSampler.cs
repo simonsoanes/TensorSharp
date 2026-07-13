@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -169,7 +169,6 @@ namespace TensorSharp.Models
             float prevTempInv = 1f;
             int held = 0;
             bool finished = false;
-            bool stepTime = Environment.GetEnvironmentVariable("DIFFUSION_STEPTIME") == "1";
 
             for (int curStep = S; curStep >= 1 && !finished && !ct.IsCancellationRequested; curStep--)
             {
@@ -189,11 +188,8 @@ namespace TensorSharp.Models
                         dArg, entropy, dSamp, topTok[dbuf], topPrb[dbuf]);
                     if (ok)
                     {
-                        long _sw0 = Stopwatch.GetTimestamp();
                         finished = DenoiseStepFromDevice(dArg, entropy, dSamp, renoise, p,
                             currentCanvas, argmaxCanvas, prevArgmax, ref held, order);
-                        if (stepTime)
-                            Console.Error.WriteLine($"[sampler] DenoiseStepFromDevice {(Stopwatch.GetTimestamp() - _sw0) * 1000.0 / Stopwatch.Frequency:F2} ms");
                         dbuf ^= 1;
                         prevTempInv = tempInv;
                         stepCallback?.Invoke(stepIdx, S, (int[])argmaxCanvas.Clone());
@@ -216,11 +212,8 @@ namespace TensorSharp.Models
                 }
 
                 // per-position sampling + accept + renoise + adaptive-stop (shared with the batched path)
-                long _sw1 = Stopwatch.GetTimestamp();
                 finished = DenoiseStep(logits, tempInv, rng, p, currentCanvas, argmaxCanvas, prevArgmax,
                     ref held, entropy, denoiser, order, u, renoise);
-                if (stepTime)
-                    Console.Error.WriteLine($"[sampler] DenoiseStep {(Stopwatch.GetTimestamp() - _sw1) * 1000.0 / Stopwatch.Frequency:F1} ms");
                 prevTempInv = tempInv;
 
                 // hand this step's logits to the next step's self-conditioning (no copy; see scBuffer note)

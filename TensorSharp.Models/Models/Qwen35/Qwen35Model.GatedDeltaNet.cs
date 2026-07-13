@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -102,7 +102,6 @@ namespace TensorSharp.Models
         // the chunked path. Falls back transparently on any unsupported geometry.
         private static readonly bool _useFusedRecPrefill =
             !string.Equals(Environment.GetEnvironmentVariable("TS_QWEN35_FUSED_REC_PREFILL"), "0", StringComparison.Ordinal);
-        private bool _recPrefillUnsupported;
         private float[] _recPrefillConvIn;  // reusable [convDim * qkvDim] ring->time-major conv state
         private float[] _recPrefillConvOut; // reusable [convDim * qkvDim] post-window conv state download
 
@@ -639,7 +638,7 @@ namespace TensorSharp.Models
         /// </summary>
         private unsafe bool TryFusedRecLayerPrefill(Tensor hidden, int layer, int seqLen)
         {
-            if (!_useFusedRecPrefill || _recPrefillUnsupported) return false;
+            if (!_useFusedRecPrefill) return false;
             // ggml_cuda AND ggml_metal: the native kernel is backend-agnostic
             // (ggml_ssm_conv + ggml_gated_delta_net + ggml_cpy, NO ggml_set_rows)
             // and allocates a dedicated per-graph buffer (ggml_backend_alloc_ctx_tensors,
@@ -732,7 +731,6 @@ namespace TensorSharp.Models
         private Tensor RecurrentBlock(Tensor hidden, int layer, int seqLen, int startPos)
         {
             bool isMoeLayer = _isMoeLayer != null && _isMoeLayer[layer];
-            bool profilePrefill = _profilePrefillStages && seqLen > 1;
 
             // ---- Path A: Fused dense FFN (non-MoE layers) ----
             bool canFuseDenseFFN = IsGgmlBackend && !isMoeLayer
@@ -745,7 +743,6 @@ namespace TensorSharp.Models
                     residual: null, skipOutputProj: true);
                 if (gated != null)
                 {
-                    long ffnStart = profilePrefill ? Stopwatch.GetTimestamp() : 0;
                     int intermSize = Config.IntermediateSize;
                     int halfDim = intermSize > 0 ? intermSize : (int)(_ffnGateUpQW[layer].Ne1 / 2);
 
@@ -766,7 +763,6 @@ namespace TensorSharp.Models
                                 halfDim);
                             _linearTicks += Stopwatch.GetTimestamp() - t0;
                             gated.Dispose();
-                            if (profilePrefill) _prefillRecFfnTicks += Stopwatch.GetTimestamp() - ffnStart;
                             return hidden;
                         }
                         catch { /* fall through */ }
@@ -787,10 +783,8 @@ namespace TensorSharp.Models
                 {
                     // GDN returned null (fused residual add already done).
                 }
-                long ffnStart2 = profilePrefill ? Stopwatch.GetTimestamp() : 0;
                 Tensor ffnOut = FFNCachedFused(hidden, _postAttnNormW[layer], layer, seqLen);
                 if (ffnOut != null) { Ops.Add(hidden, hidden, ffnOut); ffnOut.Dispose(); }
-                if (profilePrefill) _prefillRecFfnTicks += Stopwatch.GetTimestamp() - ffnStart2;
                 return hidden;
             }
 
@@ -887,7 +881,6 @@ namespace TensorSharp.Models
                 }
             }
 
-            long ffnStartC = profilePrefill ? Stopwatch.GetTimestamp() : 0;
             Tensor ffnOutC;
             if (isMoeLayer)
             {
@@ -911,7 +904,6 @@ namespace TensorSharp.Models
                 ffnOutC = FFNCachedFused(hidden, _postAttnNormW[layer], layer, seqLen);
             }
             if (ffnOutC != null) { Ops.Add(hidden, hidden, ffnOutC); ffnOutC.Dispose(); }
-            if (profilePrefill) _prefillRecFfnTicks += Stopwatch.GetTimestamp() - ffnStartC;
             return hidden;
         }
 
@@ -1572,8 +1564,6 @@ namespace TensorSharp.Models
             Tensor residual = null, bool skipOutputProj = false)
         {
             long t0 = Stopwatch.GetTimestamp();
-            bool profilePrefill = _profilePrefillStages && seqLen > 1;
-            long stageStart = profilePrefill ? t0 : 0;
             int qkvDim = _headKDim * _numKHeads * 2 + _headVDim * _numVHeads;
             int qkDim = _headKDim * _numKHeads;
             int vDim = _headVDim * _numVHeads;
@@ -1605,7 +1595,6 @@ namespace TensorSharp.Models
                 packedInput = LinearForwardCached(normedInput, _ssmInProjQW[layer], _ssmInProjF32[layer]);
             }
 
-            if (profilePrefill) { long now = Stopwatch.GetTimestamp(); _prefillRecInputProjTicks += now - stageStart; stageStart = now; }
 
             Tensor qkvRaw = null;
             Tensor zRaw = null;
@@ -1833,7 +1822,6 @@ namespace TensorSharp.Models
 
                 InvalidateTensorDeviceCache(gated);
             }
-            if (profilePrefill) { long now = Stopwatch.GetTimestamp(); _prefillRecCoreTicks += now - stageStart; stageStart = now; }
 
             // When skipOutputProj is set, return the raw gated output so the caller
             // can fuse output_proj + FFN into a single GPU dispatch.
@@ -1843,7 +1831,6 @@ namespace TensorSharp.Models
                 normedInput?.Dispose();
                 if (ownsPackedInput) packedInput?.Dispose();
                 qkvRaw?.Dispose(); zRaw?.Dispose(); betaRaw?.Dispose(); alphaRaw?.Dispose();
-                if (profilePrefill) _prefillRecOutputTicks += Stopwatch.GetTimestamp() - stageStart;
                 _attnTicks += Stopwatch.GetTimestamp() - t0;
                 return gatedOut;
             }
@@ -1876,7 +1863,6 @@ namespace TensorSharp.Models
             betaRaw?.Dispose();
             alphaRaw?.Dispose();
 
-            if (profilePrefill) _prefillRecOutputTicks += Stopwatch.GetTimestamp() - stageStart;
             _attnTicks += Stopwatch.GetTimestamp() - t0;
             return fusedAdd ? null : output;
         }

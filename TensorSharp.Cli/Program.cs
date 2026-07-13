@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -1939,20 +1939,8 @@ namespace TensorSharp.Cli
 
             model.ResetKVCache();
 
-            bool tokenByToken = Environment.GetEnvironmentVariable("TOKEN_BY_TOKEN") == "1";
-            float[] logits;
             var prefillSw = Stopwatch.StartNew();
-            if (tokenByToken)
-            {
-                _log.LogInformation(LogEventIds.HostConfiguration, "TOKEN_BY_TOKEN prefill mode enabled");
-                logits = null;
-                for (int i = 0; i < inputTokens.Count; i++)
-                    logits = model.Forward(new[] { inputTokens[i] });
-            }
-            else
-            {
-                logits = model.Forward(inputTokens.ToArray());
-            }
+            float[] logits = model.Forward(inputTokens.ToArray());
             prefillSw.Stop();
             double prefillMs = prefillSw.Elapsed.TotalMilliseconds;
             double prefillTps = inputTokens.Count > 0 && prefillMs > 0

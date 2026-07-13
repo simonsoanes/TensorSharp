@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -70,11 +70,6 @@ namespace TensorSharp.Models.QwenImage
                 return v != null && int.TryParse(v, out var n) && n > 0 ? n : 1536;
             }
         }
-
-        // Per-step DiT block-loop wall-time print (isolates the DiT forward from the
-        // fixed VAE/text-encoder cost). TS_QWEN_DIT_TIMING=1.
-        internal static readonly bool TimingOn =
-            Environment.GetEnvironmentVariable("TS_QWEN_DIT_TIMING") == "1";
 
         // Raw GGUF weight (+optional bias) descriptor for the native kernels. When a
         // runtime LoRA is loaded and covers this weight, the descriptor also carries the

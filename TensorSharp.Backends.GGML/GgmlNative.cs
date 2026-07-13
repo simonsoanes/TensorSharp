@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -1580,8 +1580,6 @@ internal enum GgmlIndexReductionOp
                 hdArr, kvHeadsArr, isLocalArr, ropeBaseArr, ropeDimsArr,
                 donorKArr, donorVArr, donorCacheSizeArr,
                 logitsOut, hOut);
-            if (r == 0 && Environment.GetEnvironmentVariable("TS_GGML_FUSED_DEBUG") == "1")
-                Console.Error.WriteLine($"[gemma4-draft FAIL] {GetLastErrorMessage("(no native error)")}");
             return r != 0;
         }
 
@@ -1672,8 +1670,6 @@ internal enum GgmlIndexReductionOp
         public static bool TryDiffusionDecodeLayer(in DiffusionDecodeLayerArgs desc)
         {
             int r = TSGgml_DiffusionDecodeLayer(in desc);
-            if (r == 0 && Environment.GetEnvironmentVariable("DIFFUSION_FUSED_DEBUG") == "1")
-                Console.Error.WriteLine($"[fused-decode FAIL] {GetLastErrorMessage("(no native error)")}");
             return r != 0;
         }
 
@@ -1693,8 +1689,6 @@ internal enum GgmlIndexReductionOp
         {
             int r = TSGgml_DiffusionLmHead(hidden, hiddenSize, canvasLen, outputNormW,
                 lmHeadW, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, logitsOut, vocab, eps, finalLogitSoftcap);
-            if (r == 0 && Environment.GetEnvironmentVariable("DIFFUSION_FUSED_DEBUG") == "1")
-                Console.Error.WriteLine($"[fused-lmhead FAIL] {GetLastErrorMessage("(no native error)")}");
             return r != 0;
         }
 
@@ -1723,8 +1717,6 @@ internal enum GgmlIndexReductionOp
             int r = TSGgml_DiffusionLmHeadSample(hidden, hiddenSize, canvasLen, outputNormW,
                 lmHeadW, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, vocab, eps, finalLogitSoftcap,
                 invTemp, uHost, topK, argmaxOut, entropyOut, sampledOut, topTokensOut, topProbsOut);
-            if (r == 0 && Environment.GetEnvironmentVariable("DIFFUSION_FUSED_DEBUG") == "1")
-                Console.Error.WriteLine($"[fused-lmhead-sample FAIL] {GetLastErrorMessage("(no native error)")}");
             return r != 0;
         }
 
@@ -1747,8 +1739,6 @@ internal enum GgmlIndexReductionOp
         {
             int r = TSGgml_DiffusionModelDecode(layers, numLayers, hidden, hiddenSize, canvasLen, promptLen,
                 outputNormW, lmHeadW, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, logitsOut, vocab, finalLogitSoftcap);
-            if (r == 0 && Environment.GetEnvironmentVariable("DIFFUSION_FUSED_DEBUG") == "1")
-                Console.Error.WriteLine($"[fused-model FAIL] {GetLastErrorMessage("(no native error)")}");
             return r != 0;
         }
 
@@ -1802,8 +1792,6 @@ internal enum GgmlIndexReductionOp
             int rc = TSGgml_Gemma4MoEModelDecodeBatched(layers, numLayers, nSeqs, hidden,
                 kCacheArr, vCacheArr, positions, logits, vocabSize,
                 lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm, logitSoftcap);
-            if (rc == 0 && Environment.GetEnvironmentVariable("TS_BATCHED_FUSED_DEBUG") == "1")
-                Console.Error.WriteLine($"[g4moe-batched-native FAIL] {GetLastErrorMessage("(no native error)")}");
             return rc != 0;
         }
 
@@ -2415,8 +2403,6 @@ internal enum GgmlIndexReductionOp
                     };
                     throw new InvalidOperationException($"Failed to initialize {backendName}. {GetBackendAvailabilityHint(backendType)}");
                 }
-
-                Interlocked.CompareExchange(ref s_initializedBackendType, (int)backendType, 0);
             }
             catch (DllNotFoundException ex)
             {
@@ -2427,24 +2413,6 @@ internal enum GgmlIndexReductionOp
                 throw new InvalidOperationException("The native GGML bridge is out of date. Rebuild `TensorSharp.GGML.Native`.", ex);
             }
         }
-
-        // Which backend type the process-wide native singleton was initialized
-        // with (0 when no GgmlContext has been created yet). Consumed by the
-        // managed op layer so it can attach to the same backend instance.
-        private static int s_initializedBackendType;
-
-        internal static int InitializedBackendType => s_initializedBackendType;
-
-        // Fetches the native layer's process-wide ggml_backend_t so managed op
-        // implementations run their graphs on the same backend instance as the
-        // remaining native kernels (see Interop/GgmlManagedRuntime.cs).
-        internal static IntPtr GetBackendHandle(int backendType)
-        {
-            return TSGgml_GetBackendHandle(backendType);
-        }
-
-        [DllImport(DllName, CallingConvention = CallingConventionType)]
-        private static extern IntPtr TSGgml_GetBackendHandle(int backendType);
 
         public static bool CanInitialize(GgmlBackendType backendType)
         {
@@ -2570,23 +2538,11 @@ internal enum GgmlIndexReductionOp
 
         public static void Addmm(GgmlTensorView2D result, GgmlTensorView2D src, GgmlTensorView2D m1, GgmlTensorView2D m2, float beta, float alpha)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.AddmmF32(result, src, m1, m2, beta, alpha), "addmm");
-                return;
-            }
-
             CheckResult(TSGgml_AddmmF32(result, src, m1, m2, beta, alpha), "addmm");
         }
 
         public static void AddmmQuant(GgmlTensorView2D result, GgmlTensorView2D m1, IntPtr m2Data, int m2GgmlType, long m2Ne0, long m2Ne1, long m2RawBytes)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.AddmmQuantF32(result, m1, m2Data, m2GgmlType, m2Ne0, m2Ne1, m2RawBytes), "addmm_quant");
-                return;
-            }
-
             CheckResult(TSGgml_AddmmQuantF32(result, m1, m2Data, m2GgmlType, m2Ne0, m2Ne1, m2RawBytes), "addmm_quant");
         }
 
@@ -2758,8 +2714,6 @@ internal enum GgmlIndexReductionOp
                 outNe0, outNe1, outBytes, outBDim,
                 upNe0, upNe1, upBytes, upBDim,
                 downNe0, downNe1, downBytes, downBDim);
-            if (rc == 0 && Environment.GetEnvironmentVariable("TS_VBENCH_DIAG") == "1")
-                Console.Error.WriteLine($"\n[diag] Qwen35VisionEncoder native FAIL: {GetLastErrorMessage("(no native error)")}");
             return rc != 0;
         }
 
@@ -2797,12 +2751,6 @@ internal enum GgmlIndexReductionOp
 
         public static void GetRowsQuant(GgmlTensorView2D result, IntPtr srcData, int srcGgmlType, long srcNe0, long srcNe1, long srcRawBytes, GgmlContiguousTensor indices)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.GetRowsQuantF32(result, srcData, srcGgmlType, srcNe0, srcNe1, srcRawBytes, indices), "get_rows_quant");
-                return;
-            }
-
             CheckResult(TSGgml_GetRowsQuantF32(result, srcData, srcGgmlType, srcNe0, srcNe1, srcRawBytes, indices), "get_rows_quant");
         }
 
@@ -2866,78 +2814,36 @@ internal enum GgmlIndexReductionOp
         public static void AddmmQuantBatch(GgmlTensorView2D result, GgmlTensorView2D m1, IntPtr m2Data, int m2GgmlType, long m2Ne0, long m2RawBytes,
             int batchCount, long[] weightOffsets, long[] weightNe1Arr)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.AddmmQuantBatchF32(result, m1, m2Data, m2GgmlType, m2Ne0, m2RawBytes, batchCount, weightOffsets, weightNe1Arr), "addmm_quant_batch");
-                return;
-            }
-
             CheckResult(TSGgml_AddmmQuantBatchF32(result, m1, m2Data, m2GgmlType, m2Ne0, m2RawBytes, batchCount, weightOffsets, weightNe1Arr), "addmm_quant_batch");
         }
 
         public static void AddmmBatch(GgmlTensorView3D result, GgmlTensorView3D src, GgmlTensorView3D m1, GgmlTensorView3D m2, float beta, float alpha)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.AddmmBatchF32(result, src, m1, m2, beta, alpha), "addmmbatch");
-                return;
-            }
-
             CheckResult(TSGgml_AddmmBatchF32(result, src, m1, m2, beta, alpha), "addmmbatch");
         }
 
         public static void MulMatId(GgmlTensorView3D result, GgmlTensorView3D expertWeights, GgmlTensorView3D input, GgmlContiguousTensor ids, int idsRows, int idsCols)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.MulMatIdF32(result, expertWeights, input, ids, idsRows, idsCols), "mulmatid");
-                return;
-            }
-
             CheckResult(TSGgml_MulMatIdF32(result, expertWeights, input, ids, idsRows, idsCols), "mulmatid");
         }
 
         public static void AddId(GgmlTensorView3D result, GgmlTensorView3D src, GgmlTensorView2D bias, GgmlContiguousTensor ids, int idsRows, int idsCols)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.AddIdF32(result, src, bias, ids, idsRows, idsCols), "addid");
-                return;
-            }
-
             CheckResult(TSGgml_AddIdF32(result, src, bias, ids, idsRows, idsCols), "addid");
         }
 
         public static void ReduceLastDim(GgmlReductionOp op, GgmlTensorView4D result, GgmlTensorView4D src)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.ReduceLastDimF32((int)op, result, src), op.ToString());
-                return;
-            }
-
             CheckResult(TSGgml_ReduceLastDimF32((int)op, result, src), op.ToString());
         }
 
         public static void IndexReduction(GgmlIndexReductionOp op, GgmlTensorView4D result, GgmlTensorView4D src)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.IndexReductionF32((int)op, result, src), op.ToString());
-                return;
-            }
-
             CheckResult(TSGgml_IndexReductionF32((int)op, result, src), op.ToString());
         }
 
         public static void Softmax(GgmlTensorView4D result, GgmlTensorView4D src)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.SoftmaxF32(result, src), "softmax");
-                return;
-            }
-
             CheckResult(TSGgml_SoftmaxF32(result, src), "softmax");
         }
 
@@ -2962,12 +2868,6 @@ internal enum GgmlIndexReductionOp
             int slidingWindow,
             float scale)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.AttentionSoftmaxWithSinksF32(scores, sinksData, numHeads, seqLen, kvLen, maskStartPos, slidingWindow, scale), "attention_softmax_with_sinks");
-                return;
-            }
-
             CheckResult(TSGgml_AttentionSoftmaxWithSinksF32(
                 scores, sinksData, numHeads, seqLen, kvLen,
                 maskStartPos, slidingWindow, scale),
@@ -3041,46 +2941,22 @@ internal enum GgmlIndexReductionOp
 
         public static void ScaledDotProductAttention(GgmlTensorView4D result, GgmlTensorView4D query, GgmlTensorView4D key, GgmlTensorView4D value, GgmlTensorView4D mask, bool hasMask, float scale)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.ScaledDotProductAttentionF32(result, query, key, value, mask, hasMask, scale), "scaled_dot_product_attention");
-                return;
-            }
-
             CheckResult(TSGgml_ScaledDotProductAttentionF32(result, query, key, value, mask, hasMask ? 1 : 0, scale), "scaled_dot_product_attention");
         }
 
         public static void SoftmaxGrad(GgmlTensorView4D result, GgmlTensorView4D adj, GgmlTensorView4D val, bool addGrad)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.SoftmaxGradF32(result, adj, val, addGrad), "softmaxgrad");
-                return;
-            }
-
             CheckResult(TSGgml_SoftmaxGradF32(result, adj, val, addGrad ? 1 : 0), "softmaxgrad");
         }
 
         public static float CrossEntropyLoss(GgmlTensorView4D probs, GgmlContiguousTensor targetIndices, float smooth, float labelSmooth)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.CrossEntropyLossF32(out float managedLoss, probs, targetIndices, smooth, labelSmooth), "crossentropyloss");
-                return managedLoss;
-            }
-
             CheckResult(TSGgml_CrossEntropyLossF32(out float lossValue, probs, targetIndices, smooth, labelSmooth), "crossentropyloss");
             return lossValue;
         }
 
         public static void CrossEntropyLossBackward(GgmlTensorView4D grad, GgmlTensorView4D probs, GgmlContiguousTensor targetIndices, float lossGradient, float smooth, float labelSmooth, bool addGrad)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.CrossEntropyLossBackwardF32(grad, probs, targetIndices, lossGradient, smooth, labelSmooth, addGrad), "crossentropyloss_backward");
-                return;
-            }
-
             CheckResult(TSGgml_CrossEntropyLossBackwardF32(grad, probs, targetIndices, lossGradient, smooth, labelSmooth, addGrad ? 1 : 0), "crossentropyloss_backward");
         }
 
@@ -3098,155 +2974,71 @@ internal enum GgmlIndexReductionOp
             int iter,
             float eps)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.AdamF32(weight, gradient, v, m, gradNormFactor, stepSize, clipValue, regc, decayRateV, decayRateM, iter, eps), "adam");
-                return;
-            }
-
             CheckResult(TSGgml_AdamF32(weight, gradient, v, m, gradNormFactor, stepSize, clipValue, regc, decayRateV, decayRateM, iter, eps), "adam");
         }
 
         public static void Copy(GgmlTensorView4D result, GgmlTensorView4D src)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.CopyF32(result, src), "copy");
-                return;
-            }
-
             CheckResult(TSGgml_CopyF32(result, src), "copy");
         }
 
         public static void Unary(GgmlUnaryOp op, GgmlTensorView4D result, GgmlTensorView4D src)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.UnaryF32((int)op, result, src), op.ToString());
-                return;
-            }
-
             CheckResult(TSGgml_UnaryF32((int)op, result, src), op.ToString());
         }
 
         public static void BinaryTensor(GgmlBinaryTensorOp op, GgmlTensorView4D result, GgmlTensorView4D lhs, GgmlTensorView4D rhs)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.BinaryTensorF32((int)op, result, lhs, rhs), op.ToString());
-                return;
-            }
-
             CheckResult(TSGgml_BinaryTensorF32((int)op, result, lhs, rhs), op.ToString());
         }
 
         public static void FusedActMul(GgmlFusedActMulOp op, GgmlTensorView4D result, GgmlTensorView4D a, GgmlTensorView4D b)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.FusedActMulF32((int)op, result, a, b), op.ToString());
-                return;
-            }
-
             CheckResult(TSGgml_FusedActMulF32((int)op, result, a, b), op.ToString());
         }
 
         public static void FusedActMulSplit(GgmlFusedActMulOp op, GgmlTensorView2D result, GgmlTensorView2D gateUp, int halfDim)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.FusedActMulSplitF32((int)op, result, gateUp, halfDim), op.ToString() + "Split");
-                return;
-            }
-
             CheckResult(TSGgml_FusedActMulSplitF32((int)op, result, gateUp, halfDim), op.ToString() + "Split");
         }
 
         public static void BinaryScalar(GgmlBinaryScalarOp op, GgmlTensorView4D result, GgmlTensorView4D src, float scalar)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.BinaryScalarF32((int)op, result, src, scalar), op.ToString());
-                return;
-            }
-
             CheckResult(TSGgml_BinaryScalarF32((int)op, result, src, scalar), op.ToString());
         }
 
         public static void ActivationGrad(GgmlActivationGradOp op, GgmlTensorView4D result, GgmlTensorView4D src, GgmlTensorView4D grad, GgmlTensorView4D accumulation, bool hasAccumulation)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.ActivationGradF32((int)op, result, src, grad, accumulation, hasAccumulation), $"{op}Grad");
-                return;
-            }
-
             CheckResult(TSGgml_ActivationGradF32((int)op, result, src, grad, accumulation, hasAccumulation ? 1 : 0), $"{op}Grad");
         }
 
         public static void Norm(GgmlNormOp op, GgmlTensorView4D result, GgmlTensorView4D src, GgmlTensorView4D gamma, GgmlTensorView4D beta, bool hasBeta, float eps)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.NormF32((int)op, result, src, gamma, beta, hasBeta, eps), op.ToString());
-                return;
-            }
-
             CheckResult(TSGgml_NormF32((int)op, result, src, gamma, beta, hasBeta ? 1 : 0, eps), op.ToString());
         }
 
         public static void NormGrad(GgmlNormOp op, GgmlTensorView4D result, GgmlTensorView4D gradGamma, GgmlTensorView4D gradBeta, GgmlTensorView4D adj, GgmlTensorView4D x, GgmlTensorView4D gamma, bool hasGradBeta, float eps)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.NormGradF32((int)op, result, gradGamma, gradBeta, adj, x, gamma, hasGradBeta, eps), $"{op}Grad");
-                return;
-            }
-
             CheckResult(TSGgml_NormGradF32((int)op, result, gradGamma, gradBeta, adj, x, gamma, hasGradBeta ? 1 : 0, eps), $"{op}Grad");
         }
 
         public static void IndexSelect(GgmlTensorView2D result, GgmlTensorView2D src, GgmlContiguousTensor indices, bool addToResult)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.IndexSelectF32(result, src, indices, addToResult), "indexselect");
-                return;
-            }
-
             CheckResult(TSGgml_IndexSelectF32(result, src, indices, addToResult ? 1 : 0), "indexselect");
         }
 
         public static void IndexSelectGrad(GgmlTensorView2D grad, GgmlTensorView2D adj, GgmlContiguousTensor indices)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.IndexSelectGradF32(grad, adj, indices), "indexselectgrad");
-                return;
-            }
-
             CheckResult(TSGgml_IndexSelectGradF32(grad, adj, indices), "indexselectgrad");
         }
 
         public static void RoPE(GgmlTensorView4D result, GgmlTensorView4D src, int seqLen, int rowOffset)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.RoPEF32(result, src, seqLen, rowOffset, false, false), "rope");
-                return;
-            }
-
             CheckResult(TSGgml_RoPEF32(result, src, seqLen, rowOffset, 0, 0), "rope");
         }
 
         public static void RoPEGrad(GgmlTensorView4D result, GgmlTensorView4D adj, int seqLen, int rowOffset)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.RoPEF32(result, adj, seqLen, rowOffset, true, true), "ropegrad");
-                return;
-            }
-
             CheckResult(TSGgml_RoPEF32(result, adj, seqLen, rowOffset, 1, 1), "ropegrad");
         }
 
@@ -3266,12 +3058,6 @@ internal enum GgmlIndexReductionOp
             bool addToResult,
             bool invertPositions)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.RoPEExF32(result, src, positions, ropeDim, mode, originalContextLength, freqBase, freqScale, extFactor, attnFactor, betaFast, betaSlow, addToResult, invertPositions), "rope_ex");
-                return;
-            }
-
             CheckResult(
                 TSGgml_RoPEExF32(
                     result,
@@ -3306,12 +3092,6 @@ internal enum GgmlIndexReductionOp
             float betaFast,
             float betaSlow)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.RoPEMRoPEF32(result, src, positions, ropeDim, mode, sect0, sect1, sect2, sect3, originalContextLength, freqBase, freqScale, extFactor, attnFactor, betaFast, betaSlow), "rope_mrope");
-                return;
-            }
-
             CheckResult(
                 TSGgml_RoPEMRoPEF32(
                     result, src, positions,
@@ -3342,12 +3122,6 @@ internal enum GgmlIndexReductionOp
             IntPtr freqFactors,
             int freqFactorsLen)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.RoPEExFreqFactorsF32(result, src, positions, ropeDim, mode, originalContextLength, freqBase, freqScale, extFactor, attnFactor, betaFast, betaSlow, addToResult, invertPositions, freqFactors, freqFactorsLen), "rope_ex_ff");
-                return;
-            }
-
             CheckResult(
                 TSGgml_RoPEExFreqFactorsF32(
                     result,
@@ -3414,12 +3188,6 @@ internal enum GgmlIndexReductionOp
             int maskStartPos, int slidingWindow,
             float scale, int inputFormat = 0)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.FusedPrefillAttentionF32(qData, kData, vData, outData, numHeads, numKvHeads, headDim, seqLen, kvLen, maskStartPos, slidingWindow, scale, inputFormat), "fused_prefill_attention");
-                return;
-            }
-
             CheckResult(TSGgml_FusedPrefillAttentionF32(
                 qData, kData, vData, outData,
                 numHeads, numKvHeads, headDim,
@@ -3433,12 +3201,6 @@ internal enum GgmlIndexReductionOp
             int seqLen, int kvLen, int kvCacheLen,
             int maskStartPos, int slidingWindow, float scale)
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.Check(GgmlManagedOps.FusedPrefillAttentionF16KV(qData, kData, vData, outData, numHeads, numKvHeads, headDim, seqLen, kvLen, kvCacheLen, maskStartPos, slidingWindow, scale), "fused_prefill_attention_f16kv");
-                return;
-            }
-
             CheckResult(TSGgml_FusedPrefillAttentionF16KV(
                 qData, kData, vData, outData,
                 numHeads, numKvHeads, headDim,
@@ -3825,8 +3587,6 @@ internal enum GgmlIndexReductionOp
                 logitsData, vocabSize,
                 lmHeadData, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes,
                 finalNormData, logitSoftcap);
-            if (rc == 0 && Environment.GetEnvironmentVariable("TS_BATCHED_FUSED_DEBUG") == "1")
-                Console.Error.WriteLine($"[g4-batched-native FAIL] {GetLastErrorMessage("(no native error)")}");
             return rc != 0;
         }
 
@@ -3893,8 +3653,6 @@ internal enum GgmlIndexReductionOp
                 pleProjWData, pleProjWType,
                 pleProjWNe0, pleProjWNe1, pleProjWBytes,
                 pleProjNormData);
-            if (r == 0 && Environment.GetEnvironmentVariable("TS_GGML_FUSED_DEBUG") == "1")
-                Console.Error.WriteLine($"[gemma4-verify FAIL] {GetLastErrorMessage("(no native error)")}");
             return r != 0;
         }
 
@@ -4074,8 +3832,6 @@ internal enum GgmlIndexReductionOp
         public static void ClearHostBufferCache()
         {
             TSGgml_ClearHostBufferCache();
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-                TensorSharp.GGML.Interop.GgmlManagedWeightCache.Clear();
         }
 
         /// <summary>
@@ -4088,11 +3844,6 @@ internal enum GgmlIndexReductionOp
         /// </summary>
         public static void Shutdown()
         {
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-            {
-                GgmlManagedOps.FreePrefillSessions();
-                TensorSharp.GGML.Interop.GgmlManagedWeightCache.Clear();
-            }
             TSGgml_Shutdown();
         }
 
@@ -4110,8 +3861,6 @@ internal enum GgmlIndexReductionOp
             if (ptr != IntPtr.Zero)
             {
                 TSGgml_InvalidateHostBuffer(ptr);
-                if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-                    TensorSharp.GGML.Interop.GgmlManagedWeightCache.Invalidate(ptr);
             }
         }
 
@@ -4194,14 +3943,6 @@ internal enum GgmlIndexReductionOp
             if (cacheKey == IntPtr.Zero || hostData == IntPtr.Zero || rawBytes <= 0)
                 throw new ArgumentException("PreloadQuantizedWeight requires valid cache key, host data, and size.");
 
-            // NOTE: preload deliberately stays on the NATIVE cache even when
-            // managed ops are enabled. Its consumers are the fused decode /
-            // prefill kernels, which are still native and bind preloaded
-            // weights through the native cache; models release the host copy
-            // after a successful preload, so a preload that lands only in the
-            // managed cache leaves the native kernels dereferencing freed
-            // memory. Route this to GgmlManagedWeightCache.PreloadQuantizedWeight
-            // once the fused kernels are ported.
             int result = TSGgml_PreloadQuantizedWeight(cacheKey, hostData, ggmlType, ne0, ne1, rawBytes);
             CheckResult(result, "preload_quantized_weight");
             return result != 2;
@@ -4251,8 +3992,6 @@ internal enum GgmlIndexReductionOp
         public static void SetDeviceCopyBudget(long bytes)
         {
             TSGgml_SetDeviceCopyBudget(bytes > 0 ? bytes : 0);
-            if (TensorSharp.GGML.Interop.GgmlManagedRuntime.OpsEnabled)
-                TensorSharp.GGML.Interop.GgmlManagedWeightCache.SetDeviceCopyBudget(bytes > 0 ? bytes : 0);
         }
 
         /// <summary>

@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -327,50 +327,13 @@ namespace TensorSharp.Models
         public Qwen35VisionEncoder VisionEncoder { get; private set; }
         private List<(Tensor embeddings, int position)> _visionEmbeddingsList = new();
 
-        // Detailed prefill-only profiling counters. Set the QWEN35_PREFILL_PROFILE
-        // environment variable to "1" to populate these so PrintTimingStats prints a
-        // fine-grained breakdown of where the prefill seconds go. Off by default to
-        // avoid the timer overhead in normal runs.
-        private static readonly bool _profilePrefillStages =
-            string.Equals(Environment.GetEnvironmentVariable("QWEN35_PREFILL_PROFILE"), "1", StringComparison.Ordinal);
-
-        // QWEN35_DECODE_PROFILE=1: bucket the per-decode-token time into
-        // attention/MoE/norm/lm-head/sync so we can attack the dominant
-        // bucket. Adds a Stopwatch.GetTimestamp per layer; ~0.05 ╬╝s each,
-        // negligible at decode rates.
-        private static readonly bool _profileDecodeStages =
-            string.Equals(Environment.GetEnvironmentVariable("QWEN35_DECODE_PROFILE"), "1", StringComparison.Ordinal);
-
         // Set QWEN35_DISABLE_FUSED_FFN=1 to disable the fully fused dense FFN graph
         // dispatch in FFNCachedFused (useful for A/B benchmarking against the legacy
         // 3-dispatch path: FusedRmsNormMatMul + SiLUMul + FusedMatMulQuantAdd).
         private static readonly bool _useFusedFfnPrefill =
             !string.Equals(Environment.GetEnvironmentVariable("QWEN35_DISABLE_FUSED_FFN"), "1", StringComparison.Ordinal);
-        private long _decodeAttnBlockTicks;
-        private long _decodeRecBlockTicks;
-        private long _decodeForwardCount;
-        private long _prefillEmbedTicks;
-        private long _prefillAttnBlockTicks;
-        private long _prefillRecBlockTicks;
-        private long _prefillFinalLmHeadTicks;
-        private long _prefillAttnQkvTicks;
-        private long _prefillAttnDeinterleaveTicks;
-        private long _prefillAttnQknormTicks;
-        private long _prefillAttnRopeTicks;
-        private long _prefillAttnReshapeTicks;
-        private long _prefillAttnCacheCopyTicks;
-        private long _prefillAttnExpandKvTicks;
-        private long _prefillAttnComputeTicks;
-        private long _prefillAttnGateTicks;
-        private long _prefillAttnOutputTicks;
-        private long _prefillAttnFfnTicks;
-        private long _prefillRecInputProjTicks;
-        private long _prefillRecCoreTicks;
-        private long _prefillRecOutputTicks;
-        private long _prefillRecFfnTicks;
         private long _mlxEvalBoundaryTicks;
         private long _mlxCacheEvalTicks;
-        private int _prefillTokenCount;
 
         public Qwen35Model(string ggufPath, BackendType backend)
             : base(ggufPath, backend)
@@ -1020,13 +983,6 @@ namespace TensorSharp.Models
             ResetGdnTimingCounters();
             _forwardSw.Reset();
 
-            _prefillEmbedTicks = _prefillAttnBlockTicks = _prefillRecBlockTicks = _prefillFinalLmHeadTicks = 0;
-            _prefillAttnQkvTicks = _prefillAttnDeinterleaveTicks = _prefillAttnQknormTicks = 0;
-            _prefillAttnRopeTicks = _prefillAttnReshapeTicks = _prefillAttnCacheCopyTicks = 0;
-            _prefillAttnExpandKvTicks = _prefillAttnComputeTicks = _prefillAttnGateTicks = 0;
-            _prefillAttnOutputTicks = _prefillAttnFfnTicks = 0;
-            _prefillRecInputProjTicks = _prefillRecCoreTicks = _prefillRecOutputTicks = _prefillRecFfnTicks = 0;
-            _prefillTokenCount = 0;
         }
 
         public override bool SupportsKVCacheTruncation => false;
@@ -1353,16 +1309,11 @@ namespace TensorSharp.Models
             int seqLen = tokens.Length;
             int startPos = _cacheSeqLen;
             EnsureCacheCapacity(startPos + seqLen);
-            bool profilePrefill = _profilePrefillStages && seqLen > 1;
-            if (profilePrefill)
-                _prefillTokenCount += seqLen;
 
             long t1 = Stopwatch.GetTimestamp();
             Tensor hidden = Embedding(tokens);
             long embEnd = Stopwatch.GetTimestamp();
             _embTicks += embEnd - t1;
-            if (profilePrefill)
-                _prefillEmbedTicks += embEnd - t1;
 
             // Whole-model fused prefill chunk (same path as Forward, but the logits
             // are discarded ÔÇö this is an interior chunk). KV + GDN state are written
@@ -1385,18 +1336,11 @@ namespace TensorSharp.Models
 
             for (int layer = 0; layer < Config.NumLayers; layer++)
             {
-                long blkStart = profilePrefill ? Stopwatch.GetTimestamp() : 0;
                 if (_isRecurrent[layer])
                     hidden = RecurrentBlock(hidden, layer, seqLen, startPos);
                 else
                     hidden = AttentionBlock(hidden, layer, seqLen, startPos);
                 TryEvaluateMlxLayerBoundary(hidden, layer, seqLen);
-                if (profilePrefill)
-                {
-                    long elapsed = Stopwatch.GetTimestamp() - blkStart;
-                    if (_isRecurrent[layer]) _prefillRecBlockTicks += elapsed;
-                    else _prefillAttnBlockTicks += elapsed;
-                }
             }
 
             hidden.Dispose();
@@ -1410,16 +1354,11 @@ namespace TensorSharp.Models
             int seqLen = tokens.Length;
             int startPos = _cacheSeqLen;
             EnsureCacheCapacity(startPos + seqLen);
-            bool profilePrefill = _profilePrefillStages && seqLen > 1;
-            if (profilePrefill)
-                _prefillTokenCount += seqLen;
 
             long t1 = Stopwatch.GetTimestamp();
             Tensor hidden = Embedding(tokens);
             long embEnd = Stopwatch.GetTimestamp();
             _embTicks += embEnd - t1;
-            if (profilePrefill)
-                _prefillEmbedTicks += embEnd - t1;
 
             // Inject any vision embeddings queued for this Forward call. The
             // queued positions are already expressed relative to the current
@@ -1433,9 +1372,6 @@ namespace TensorSharp.Models
             if (_visionEmbeddingsList.Count > 0)
                 InjectVisionEmbeddings(hidden, seqLen);
 
-            bool profileDecode = _profileDecodeStages && seqLen == 1;
-            if (profileDecode)
-                _decodeForwardCount++;
 
             // Fast path: run the whole hybrid transformer (incl. final-norm + lm_head)
             // as one fused, CUDA-graph-captured GGML graph that outputs LOGITS
@@ -1481,24 +1417,11 @@ namespace TensorSharp.Models
             InvalidateFullDecodeState();
             for (int layer = 0; layer < Config.NumLayers; layer++)
             {
-                long blkStart = (profilePrefill || profileDecode) ? Stopwatch.GetTimestamp() : 0;
                 if (_isRecurrent[layer])
                     hidden = RecurrentBlock(hidden, layer, seqLen, startPos);
                 else
                     hidden = AttentionBlock(hidden, layer, seqLen, startPos);
                 TryEvaluateMlxLayerBoundary(hidden, layer, seqLen);
-                if (profilePrefill)
-                {
-                    long elapsed = Stopwatch.GetTimestamp() - blkStart;
-                    if (_isRecurrent[layer]) _prefillRecBlockTicks += elapsed;
-                    else _prefillAttnBlockTicks += elapsed;
-                }
-                else if (profileDecode)
-                {
-                    long elapsed = Stopwatch.GetTimestamp() - blkStart;
-                    if (_isRecurrent[layer]) _decodeRecBlockTicks += elapsed;
-                    else _decodeAttnBlockTicks += elapsed;
-                }
             }
             }
 
@@ -1534,8 +1457,6 @@ namespace TensorSharp.Models
                 MlxFusedOps.TryEvaluate(logitsTensor);
             long lmHeadEnd = Stopwatch.GetTimestamp();
             _lmHeadTicks += lmHeadEnd - t2;
-            if (profilePrefill)
-                _prefillFinalLmHeadTicks += lmHeadEnd - t2;
 
             long t3 = Stopwatch.GetTimestamp();
             if (_logitsBuffer == null || _logitsBuffer.Length != Config.VocabSize)
@@ -1844,8 +1765,6 @@ namespace TensorSharp.Models
             else
                 attnOut = FullAttention(hidden, _attnNormW[layer], layer, seqLen, startPos, residual: hidden);
 
-            bool profilePrefill = _profilePrefillStages && seqLen > 1;
-            long ffnStart = profilePrefill ? Stopwatch.GetTimestamp() : 0;
 
             if (canFuseAttnOutFFN && attnOut != null)
             {
@@ -1870,8 +1789,6 @@ namespace TensorSharp.Models
                             halfDim);
                         _linearTicks += Stopwatch.GetTimestamp() - t0;
                         attnOut.Dispose();
-                        if (profilePrefill)
-                            _prefillAttnFfnTicks += Stopwatch.GetTimestamp() - ffnStart;
                         return hidden;
                     }
                     catch { /* fall through */ }
@@ -1930,8 +1847,6 @@ namespace TensorSharp.Models
                 ffnOut.Dispose();
             }
 
-            if (profilePrefill)
-                _prefillAttnFfnTicks += Stopwatch.GetTimestamp() - ffnStart;
 
             return hidden;
         }
@@ -1945,8 +1860,6 @@ namespace TensorSharp.Models
             int qFullDim = numHeads * headDim * 2;
             int kvDim = numKVHeads * headDim;
             int totalSeqLen = startPos + seqLen;
-            bool profilePrefill = _profilePrefillStages && seqLen > 1;
-            long stageStart = profilePrefill ? Stopwatch.GetTimestamp() : 0;
 
             // Fused norm + QKV when the fused-QKV weight is available; otherwise we have to
             // produce the normalized input separately for the three independent projections.
@@ -2011,13 +1924,11 @@ namespace TensorSharp.Models
                 vTensor = LinearForwardCached(normedInput, _attnVQW[layer], _attnVF32[layer]);
             }
             normedInput?.Dispose();
-            if (profilePrefill) { long now = Stopwatch.GetTimestamp(); _prefillAttnQkvTicks += now - stageStart; stageStart = now; }
 
             Tensor qTensor, gateTensor;
             bool ownsQGateBuffers;
             DeinterleaveQGate(qFull, seqLen, numHeads, headDim, out qTensor, out gateTensor, out ownsQGateBuffers);
             qFull.Dispose();
-            if (profilePrefill) { long now = Stopwatch.GetTimestamp(); _prefillAttnDeinterleaveTicks += now - stageStart; stageStart = now; }
 
             // Fused QK-RMSNorm + NeoX RoPE path: on CUDA backend without MRoPE,
             // fuse the per-head RMSNorm and RoPE into a single kernel per Q/K tensor.
@@ -2057,7 +1968,6 @@ namespace TensorSharp.Models
                 // Separate RMSNorm + RoPE path (non-CUDA or fused fallback).
                 qTensor = ApplyQKNormCached(qTensor, _attnQNormW[layer], numHeads, seqLen);
                 kTensor = ApplyQKNormCached(kTensor, _attnKNormW[layer], numKVHeads, seqLen);
-                if (profilePrefill) { long now = Stopwatch.GetTimestamp(); _prefillAttnQknormTicks += now - stageStart; stageStart = now; }
 
                 if (useMRoPE)
                 {
@@ -2082,7 +1992,6 @@ namespace TensorSharp.Models
                     kTensor = ApplyRoPEPrefill(kTensor, numKVHeads, seqLen, startPos);
                 }
             }
-            if (profilePrefill) { long now = Stopwatch.GetTimestamp(); _prefillAttnRopeTicks += now - stageStart; stageStart = now; }
 
             long t0 = Stopwatch.GetTimestamp();
 
@@ -2171,12 +2080,10 @@ namespace TensorSharp.Models
             }
             else
             {
-                if (profilePrefill) { long now = Stopwatch.GetTimestamp(); _prefillAttnReshapeTicks += now - stageStart; stageStart = now; }
 
                 Tensor kHeads = ReshapeToHeads(kTensor, numKVHeads, seqLen, headDim);
                 Tensor vHeads = ReshapeToHeads(vTensor, numKVHeads, seqLen, headDim);
 
-                if (profilePrefill) { long now2 = Stopwatch.GetTimestamp(); _prefillAttnExpandKvTicks += now2 - stageStart; stageStart = now2; }
 
                 // Fused GPU attention: Q*K^T ÔåÆ causal mask ÔåÆ softmax ÔåÆ *V in one
                 // GGML graph dispatch, eliminating ExpandKVHeads + 5 separate ops.
@@ -2277,7 +2184,6 @@ namespace TensorSharp.Models
                     CopyToCache(_kvCacheK[layer], kHeads, startPos, seqLen);
                     CopyToCache(_kvCacheV[layer], vHeads, startPos, seqLen);
                 }
-                if (profilePrefill) { long now = Stopwatch.GetTimestamp(); _prefillAttnCacheCopyTicks += now - stageStart; stageStart = now; }
 
                 if (!usedFusedAttn && IsGgmlBackend && canFuseContinuation)
                 {
@@ -2403,7 +2309,6 @@ namespace TensorSharp.Models
                     attnOutput = ReshapeFromHeads(attnOut, numHeads, seqLen, headDim);
                     attnOut.Dispose();
                 }
-                if (profilePrefill) { long now = Stopwatch.GetTimestamp(); _prefillAttnComputeTicks += now - stageStart; stageStart = now; }
             }
 
             // Decode hot path: do the sigmoid-gated mix on CPU. The data is tiny
@@ -2416,7 +2321,6 @@ namespace TensorSharp.Models
                 ApplySigmoidGate(attnOutput, gateTensor);
             if (ownsQGateBuffers)
                 gateTensor.Dispose();
-            if (profilePrefill) { long now = Stopwatch.GetTimestamp(); _prefillAttnGateTicks += now - stageStart; stageStart = now; }
 
             _attnTicks += Stopwatch.GetTimestamp() - t0;
 
@@ -2427,7 +2331,6 @@ namespace TensorSharp.Models
             if (skipOutputProj)
             {
                 Tensor rawOut = ownsAttnOutput ? attnOutput : Ops.NewContiguous(attnOutput);
-                if (profilePrefill) _prefillAttnOutputTicks += Stopwatch.GetTimestamp() - stageStart;
                 _attnTicks += Stopwatch.GetTimestamp() - t0;
                 return rawOut;
             }
@@ -2443,14 +2346,12 @@ namespace TensorSharp.Models
             {
                 if (ownsAttnOutput)
                     attnOutput.Dispose();
-                if (profilePrefill) _prefillAttnOutputTicks += Stopwatch.GetTimestamp() - stageStart;
                 return null;
             }
 
             Tensor output = LinearForwardCached(attnOutput, _attnOutputQW[layer], _attnOutputF32[layer]);
             if (ownsAttnOutput)
                 attnOutput.Dispose();
-            if (profilePrefill) _prefillAttnOutputTicks += Stopwatch.GetTimestamp() - stageStart;
             return output;
         }
 
@@ -4305,11 +4206,9 @@ namespace TensorSharp.Models
                     gateBias: null, upBias: null, downBias: null,
                     activation: GgmlBasicOps.MoEActivation.SwiGLUSplit);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 output.Dispose();
-                if (string.Equals(Environment.GetEnvironmentVariable("TS_QWEN35_MOE_DEBUG"), "1", StringComparison.Ordinal))
-                    Console.Error.WriteLine($"[qwen35-moe] stacked MoE failed layer {layer}: {ex.Message}");
                 return null;
             }
 
@@ -5089,73 +4988,6 @@ namespace TensorSharp.Models
                 Console.WriteLine($"  (MLX cache eval: {ms:F0} ms, interval={MlxEvalEveryNLayers})");
             }
             PrintGdnTimingStats();
-            PrintPrefillStageStats();
-            PrintDecodeStageStats();
-        }
-
-        private void PrintDecodeStageStats()
-        {
-            if (!_profileDecodeStages || _decodeForwardCount == 0)
-                return;
-            double msPerTick = 1000.0 / Stopwatch.Frequency;
-            double attnMs = _decodeAttnBlockTicks * msPerTick;
-            double recMs = _decodeRecBlockTicks * msPerTick;
-            double cnt = _decodeForwardCount;
-            Console.WriteLine($"Decode stage breakdown ({_decodeForwardCount} decode forwards):");
-            Console.WriteLine($"  Attention blocks: {attnMs:F0} ms total ({attnMs / cnt:F2} ms/token)");
-            Console.WriteLine($"  Recurrent blocks: {recMs:F0} ms total ({recMs / cnt:F2} ms/token)");
-        }
-
-        private void PrintPrefillStageStats()
-        {
-            if (!_profilePrefillStages || _prefillTokenCount == 0)
-                return;
-
-            double msPerTick = 1000.0 / Stopwatch.Frequency;
-            double embMs = _prefillEmbedTicks * msPerTick;
-            double attnMs = _prefillAttnBlockTicks * msPerTick;
-            double recMs = _prefillRecBlockTicks * msPerTick;
-            double lmHeadMs = _prefillFinalLmHeadTicks * msPerTick;
-
-            double attnQkvMs = _prefillAttnQkvTicks * msPerTick;
-            double attnDeintMs = _prefillAttnDeinterleaveTicks * msPerTick;
-            double attnQknMs = _prefillAttnQknormTicks * msPerTick;
-            double attnRopeMs = _prefillAttnRopeTicks * msPerTick;
-            double attnReshapeMs = _prefillAttnReshapeTicks * msPerTick;
-            double attnCacheCopyMs = _prefillAttnCacheCopyTicks * msPerTick;
-            double attnExpandKvMs = _prefillAttnExpandKvTicks * msPerTick;
-            double attnComputeMs = _prefillAttnComputeTicks * msPerTick;
-            double attnGateMs = _prefillAttnGateTicks * msPerTick;
-            double attnOutputMs = _prefillAttnOutputTicks * msPerTick;
-            double attnFfnMs = _prefillAttnFfnTicks * msPerTick;
-
-            double recInputMs = _prefillRecInputProjTicks * msPerTick;
-            double recCoreMs = _prefillRecCoreTicks * msPerTick;
-            double recOutputMs = _prefillRecOutputTicks * msPerTick;
-            double recFfnMs = _prefillRecFfnTicks * msPerTick;
-
-            double total = embMs + attnMs + recMs + lmHeadMs;
-
-            Console.WriteLine($"Prefill profile ({_prefillTokenCount} tokens, {total:F0} ms total):");
-            Console.WriteLine($"  Embedding:                  {embMs,8:F0} ms ({100 * embMs / total,5:F1}%)");
-            Console.WriteLine($"  Attention block (8 layers): {attnMs,8:F0} ms ({100 * attnMs / total,5:F1}%)");
-            Console.WriteLine($"    QKV proj:                 {attnQkvMs,8:F0} ms");
-            Console.WriteLine($"    Deinterleave Q/gate:      {attnDeintMs,8:F0} ms");
-            Console.WriteLine($"    QK-norm:                  {attnQknMs,8:F0} ms");
-            Console.WriteLine($"    RoPE (Q+K):               {attnRopeMs,8:F0} ms");
-            Console.WriteLine($"    Reshape to heads:         {attnReshapeMs,8:F0} ms");
-            Console.WriteLine($"    Cache copy (K,V):         {attnCacheCopyMs,8:F0} ms");
-            Console.WriteLine($"    Expand KV heads:          {attnExpandKvMs,8:F0} ms");
-            Console.WriteLine($"    Attention compute:        {attnComputeMs,8:F0} ms (QK^T + softmax + V)");
-            Console.WriteLine($"    Sigmoid gate:             {attnGateMs,8:F0} ms");
-            Console.WriteLine($"    Output proj:              {attnOutputMs,8:F0} ms");
-            Console.WriteLine($"    FFN (norm+gate_up+down):  {attnFfnMs,8:F0} ms");
-            Console.WriteLine($"  Recurrent block (24 layers):{recMs,8:F0} ms ({100 * recMs / total,5:F1}%)");
-            Console.WriteLine($"    Input proj (norm+pack):   {recInputMs,8:F0} ms");
-            Console.WriteLine($"    GDN core (conv+chunked):  {recCoreMs,8:F0} ms");
-            Console.WriteLine($"    Output proj:              {recOutputMs,8:F0} ms");
-            Console.WriteLine($"    FFN (norm+gate_up+down):  {recFfnMs,8:F0} ms");
-            Console.WriteLine($"  Final norm + LM head:       {lmHeadMs,8:F0} ms ({100 * lmHeadMs / total,5:F1}%)");
         }
 
         public override void Dispose()

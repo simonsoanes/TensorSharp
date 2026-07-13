@@ -1317,14 +1317,12 @@ namespace TensorSharp.Models
                 // zero-copy wrappers (CreateIq4XsRawWeight etc.) need this
                 // explicit mlock too. Opt out via TS_MLX_MLOCK_GGUF=0.
                 bool locked = _gguf.TryLockMappedRegion();
-                if (locked && !string.Equals(
-                    Environment.GetEnvironmentVariable("TS_MLX_LOG_MEMORY_POLICY"), "0", StringComparison.Ordinal))
+                if (locked)
                 {
                     Console.WriteLine(
                         "  GGUF mmap pinned via mlock (model weights stay resident; set TS_MLX_MLOCK_GGUF=0 to disable).");
                 }
-                else if (!locked && !string.Equals(
-                    Environment.GetEnvironmentVariable("TS_MLX_LOG_MEMORY_POLICY"), "0", StringComparison.Ordinal))
+                else
                 {
                     Console.WriteLine(
                         $"  GGUF mlock failed (errno={_gguf.LastLockError}); inference may swap under memory pressure. " +

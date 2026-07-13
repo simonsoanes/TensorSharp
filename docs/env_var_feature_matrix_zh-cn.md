@@ -96,7 +96,6 @@ TestMatrix 配置中 sweep。
 | `DIFFUSION_DEVICE_COPY_BUDGET_MB` | ggml_cuda 上的 DiffusionGemma | 模型放不进 VRAM 时 device-copy 缓存的上限（prompt K/V、mask、激活） | `768` | 未注册 | 否 |
 | `DIFFUSION_SEGMENTED_DECODE` | ggml_cuda 上的 DiffusionGemma | 强制开启（`1`）/关闭（`0`）逐层融合 decode；模型放不进 VRAM 时自动启用 | 自动 | 未注册 | 否 |
 | `DIFFUSION_PIN_STREAMED` | ggml_cuda 上的 DiffusionGemma | 把流式（非常驻）权重复制到页锁定内存以 DMA 速度上传（消耗 RAM） | 关闭 | 未注册 | 否 |
-| `DIFFUSION_PROFILE` / `DIFFUSION_STEPTIME` / `DIFFUSION_FUSED_DEBUG` | DiffusionGemma | 开发用计时与融合 kernel 调试诊断 | 关闭 | 未注册 | 否 |
 
 ## 矩阵外的 MTP / 投机解码变量
 
@@ -125,9 +124,6 @@ TestMatrix 配置中 sweep。
 |---|---|---|---|---|---|
 | `TS_PDF_MAX_PAGES` | PDF 文档输入（CLI `--pdf`、服务端 `/api/upload`） | 文本提取与页面图像渲染读取的 PDF 页数上限 | `0`（全部页面） | 未注册 | 否 |
 | `TS_FUSED_QKNORM_ROPE` | 直连 `cuda` 后端上的 Qwen 3.5 / 3.6 纯文本 prefill | 融合 QK-Norm + NeoX-RoPE CUDA 内核；`0` 回退到分离的 norm + RoPE 算子（多模态 MRoPE 与其他后端始终走分离路径） | 启用 | 未注册 | 否 |
-| `TS_GGML_MANAGED_OPS` | GGML 后端 | **实验性**：`1` 让已移植算子走托管 C# GGML 图构建器，而非旧的原生 `TSGgml_*` 内核 | 关闭 | 未注册 | 否 |
-| `TS_PREFILL_ATTN_CACHE` | 托管 GGML 算子路径（`TS_GGML_MANAGED_OPS=1`） | prefill 注意力会话缓存；`0` 关闭 | 启用 | 未注册 | 否 |
-| `TS_PREFILL_ATTN_FLASH` | 托管 GGML 算子路径（`TS_GGML_MANAGED_OPS=1`） | 大 kvLen prefill 注意力的 flash 路径；`0` 回退到非 flash 路径 | 启用 | 未注册 | 否 |
 
 ## 功能覆盖
 

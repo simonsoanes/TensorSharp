@@ -2229,30 +2229,6 @@ TSG_EXPORT int TSGgml_RoPEMRoPEF32(
 // ============================================================================
 namespace
 {
-    inline bool prefill_attn_cache_enabled()
-    {
-        static const bool enabled = []{
-            const char* e = std::getenv("TS_PREFILL_ATTN_CACHE");
-            return !(e != nullptr && std::strcmp(e, "0") == 0);
-        }();
-        return enabled;
-    }
-
-    // The non-cached (large-kvLen) prefill path streams K/V through
-    // ggml_flash_attn_ext instead of materializing the [kvLen, seqLen, numHeads]
-    // scores + softmax tensors. That O(N^2) materialization OOMs on long prompts
-    // (a 32K-token global window alone needs multiple GB just for scores+probs)
-    // and is also the slower, numerically-fragile path for multi-token Q. Flash
-    // is on by default; TS_PREFILL_ATTN_FLASH=0 reverts to the materialized graph.
-    inline bool prefill_attn_flash_enabled()
-    {
-        static const bool enabled = []{
-            const char* e = std::getenv("TS_PREFILL_ATTN_FLASH");
-            return !(e != nullptr && std::strcmp(e, "0") == 0);
-        }();
-        return enabled;
-    }
-
     inline std::uint32_t prefill_float_bits(float v)
     {
         std::uint32_t b;
@@ -2704,7 +2680,7 @@ TSG_EXPORT int TSGgml_FusedPrefillAttentionF32(
 
         // Session-cached fast path (head-first only): reuse the graph + backend
         // buffer across the hundreds of per-layer/per-chunk prefill calls.
-        if (inputFormat == 0 && prefill_attn_cache_enabled()
+        if (inputFormat == 0
             && prefill_should_cache(prefill_kv_bucket(kvLen), seqLen, numHeads))
         {
             return fused_prefill_attn_cached(
@@ -2716,7 +2692,7 @@ TSG_EXPORT int TSGgml_FusedPrefillAttentionF32(
         // Large-kvLen head-first path: flash attention streams K/V instead of
         // materializing the O(N^2) scores+softmax that OOMs on long prompts. The
         // flat (inputFormat==1) layout stays on the materialized graph below.
-        if (inputFormat == 0 && prefill_attn_flash_enabled())
+        if (inputFormat == 0)
         {
             int fr = fused_prefill_attn_flash(
                 q_data, k_data, v_data, out_data,
@@ -2934,8 +2910,7 @@ TSG_EXPORT int TSGgml_FusedPrefillAttentionF16KV(
         }
 
         // Session-cached fast path: reuse the graph + backend buffer across calls.
-        if (prefill_attn_cache_enabled()
-            && prefill_should_cache(prefill_kv_bucket(kvLen), seqLen, numHeads))
+        if (prefill_should_cache(prefill_kv_bucket(kvLen), seqLen, numHeads))
         {
             return fused_prefill_attn_cached(
                 q_data, k_data, v_data, out_data,
@@ -2946,7 +2921,6 @@ TSG_EXPORT int TSGgml_FusedPrefillAttentionF16KV(
         // Large-kvLen path: flash attention streams K/V instead of materializing
         // the O(N^2) scores+softmax that OOMs on long prompts. Falls through to the
         // materialized graph below only if the backend has no flash kernel here.
-        if (prefill_attn_flash_enabled())
         {
             int fr = fused_prefill_attn_flash(
                 q_data, k_data, v_data, out_data,

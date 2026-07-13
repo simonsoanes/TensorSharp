@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
@@ -4732,10 +4732,8 @@ if (kind == 0) {
                     {
                         return Iq4XsMatmul4ColsSimd(input, rawWeight, inDim, outDim);
                     }
-                    catch (Exception ex)
+                    catch (Exception)
                     {
-                        if (string.Equals(Environment.GetEnvironmentVariable("TS_MLX_IQ4XS_MATMUL4_DEBUG"), "1", StringComparison.Ordinal))
-                            Console.WriteLine($"[MLX] IQ4_XS simd_sum 4-column matmul disabled for this call: {ex.Message}");
                         // Fall through to legacy kernel.
                     }
                 }
@@ -4744,10 +4742,8 @@ if (kind == 0) {
                 {
                     return Iq4XsMatmul4Cols(input, rawWeight, inDim, outDim);
                 }
-                catch (Exception ex)
+                catch (Exception)
                 {
-                    if (string.Equals(Environment.GetEnvironmentVariable("TS_MLX_IQ4XS_MATMUL4_DEBUG"), "1", StringComparison.Ordinal))
-                        Console.WriteLine($"[MLX] IQ4_XS 4-column matmul disabled for this call: {ex.Message}");
                 }
             }
 
@@ -4757,10 +4753,8 @@ if (kind == 0) {
                 {
                     return Iq4XsMatmulRows2Cols(input, rawWeight, rows, inDim, outDim);
                 }
-                catch (Exception ex)
+                catch (Exception)
                 {
-                    if (string.Equals(Environment.GetEnvironmentVariable("TS_MLX_IQ4XS_BATCHED_COLS_DEBUG"), "1", StringComparison.Ordinal))
-                        Console.WriteLine($"[MLX] IQ4_XS 2-column batched matmul disabled for this call: {ex.Message}");
                 }
             }
 
@@ -5792,10 +5786,8 @@ if (kind == 0) {
                 {
                     return Q5KMatmul4Cols(input, rawWeight, inDim, outDim);
                 }
-                catch (Exception ex)
+                catch (Exception)
                 {
-                    if (string.Equals(Environment.GetEnvironmentVariable("TS_MLX_Q5K_MATMUL4_DEBUG"), "1", StringComparison.Ordinal))
-                        Console.WriteLine($"[MLX] Q5_K 4-column matmul disabled for this call: {ex.Message}");
                 }
             }
 
@@ -5820,10 +5812,8 @@ if (kind == 0) {
                 {
                     return Q6KMatmul4Cols(input, rawWeight, inDim, outDim);
                 }
-                catch (Exception ex)
+                catch (Exception)
                 {
-                    if (string.Equals(Environment.GetEnvironmentVariable("TS_MLX_Q6K_MATMUL4_DEBUG"), "1", StringComparison.Ordinal))
-                        Console.WriteLine($"[MLX] Q6_K 4-column matmul disabled for this call: {ex.Message}");
                 }
             }
 
@@ -8315,12 +8305,9 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
             nuint limitBytes = checked((nuint)limitMb * 1024u * 1024u);
             Check(mlx_set_cache_limit(ref previous, limitBytes), "setting MLX cache limit");
 
-            if (!string.Equals(Environment.GetEnvironmentVariable("TS_MLX_LOG_MEMORY_POLICY"), "0", StringComparison.Ordinal))
-            {
-                Console.WriteLine(
-                    $"  MLX cache limit: {limitBytes / 1024 / 1024} MB " +
-                    $"(previous {previous / 1024 / 1024} MB; set TS_MLX_CACHE_LIMIT_MB=0 to use MLX default)");
-            }
+            Console.WriteLine(
+                $"  MLX cache limit: {limitBytes / 1024 / 1024} MB " +
+                $"(previous {previous / 1024 / 1024} MB; set TS_MLX_CACHE_LIMIT_MB=0 to use MLX default)");
         }
 
         private static void ConfigureWiredLimit()
@@ -8367,12 +8354,9 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                     int rc = mlx_set_wired_limit(ref previous, limitBytes);
                     if (rc == 0)
                     {
-                        if (!string.Equals(Environment.GetEnvironmentVariable("TS_MLX_LOG_MEMORY_POLICY"), "0", StringComparison.Ordinal))
-                        {
-                            Console.WriteLine(
-                                $"  MLX wired limit: {attempted} MB " +
-                                $"(previous {previous / 1024 / 1024} MB; set TS_MLX_WIRED_LIMIT_MB=0 to disable)");
-                        }
+                        Console.WriteLine(
+                            $"  MLX wired limit: {attempted} MB " +
+                            $"(previous {previous / 1024 / 1024} MB; set TS_MLX_WIRED_LIMIT_MB=0 to disable)");
                         return;
                     }
                     _ = TakeCapturedError();
@@ -8427,12 +8411,9 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                     return;
                 }
 
-                if (!string.Equals(Environment.GetEnvironmentVariable("TS_MLX_LOG_MEMORY_POLICY"), "0", StringComparison.Ordinal))
-                {
-                    Console.WriteLine(
-                        $"  MLX memory limit: {limitBytes / 1024 / 1024} MB " +
-                        $"(previous {previous / 1024 / 1024} MB)");
-                }
+                Console.WriteLine(
+                    $"  MLX memory limit: {limitBytes / 1024 / 1024} MB " +
+                    $"(previous {previous / 1024 / 1024} MB)");
             }
             catch (EntryPointNotFoundException)
             {

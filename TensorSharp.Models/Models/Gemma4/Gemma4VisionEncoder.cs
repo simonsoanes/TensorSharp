@@ -190,22 +190,14 @@ namespace TensorSharp.Models
             int headDim = _hiddenSize / _numHeads;
             Rope2DCache ropeCache = GetOrCreateRopeCache(patchesX, patchesY, headDim);
 
-            bool vtime = Environment.GetEnvironmentVariable("TS_VTIME") == "1";
-            double msPerTick = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
 
             var hidden = PatchEmbed(pixelValues, imgWidth, imgHeight, patchesX, patchesY);
             AddPositionEmbedding2D(hidden, ropeCache, numPatches);
-            long tPatch = System.Diagnostics.Stopwatch.GetTimestamp();
 
             for (int i = 0; i < _blockCount; i++)
             {
-                if (!vtime) Console.Write($"\r  Vision encoder block {i + 1}/{_blockCount}...");
-                long tb0 = vtime ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+                Console.Write($"\r  Vision encoder block {i + 1}/{_blockCount}...");
                 hidden = EncoderBlock(hidden, i, numPatches, headDim, ropeCache);
-                if (vtime)
-                    Console.WriteLine($"  [gemma4v] block {i}: " +
-                        $"{(System.Diagnostics.Stopwatch.GetTimestamp() - tb0) * msPerTick:F1}ms");
                 // Yield the GPU compute lock between encoder blocks so the
                 // engine worker can run an inference step. Without this,
                 // a single image encode (16–32 blocks, 100ms–2s+ total)
@@ -216,17 +208,11 @@ namespace TensorSharp.Models
                 // running outside a GpuComputeLock scope.
                 _hostModel?.YieldGpuComputeLock();
             }
-            if (!vtime) Console.WriteLine(" done");
-            long tBlocks = System.Diagnostics.Stopwatch.GetTimestamp();
+            Console.WriteLine(" done");
 
             var projected = PoolAndProject(hidden, patchesX, patchesY, numPatches);
             hidden.Dispose();
-            long tProj = System.Diagnostics.Stopwatch.GetTimestamp();
 
-            if (vtime)
-                Console.WriteLine($"  [gemma4v] patchEmbed+pos={ (tPatch - t0) * msPerTick:F0}ms " +
-                    $"blocks={ (tBlocks - tPatch) * msPerTick:F0}ms proj={ (tProj - tBlocks) * msPerTick:F0}ms " +
-                    $"({numPatches} patches, {_blockCount} blocks)");
 
             return projected;
         }

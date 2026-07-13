@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -224,17 +224,9 @@ namespace TensorSharp.Models
                 _pendingVisionEmbeddingsList.Clear();
             }
 
-            bool dumpLayers = Environment.GetEnvironmentVariable("DUMP_LAYERS") == "1";
-            if (seqLen > 1 && Environment.GetEnvironmentVariable("TEST_MATMUL") == "1")
-            {
-                TestMatmulPrecision(hidden, seqLen);
-            }
-
             for (int l = 0; l < Config.NumLayers; l++)
             {
                 hidden = TransformerBlock(hidden, l, seqLen, startPos);
-                if (dumpLayers)
-                    DumpHiddenState(hidden, seqLen, l);
             }
 
             Tensor normed = RMSNormOp(hidden, "output_norm.weight");
@@ -637,67 +629,6 @@ namespace TensorSharp.Models
                 }
                 InvalidateTensorDeviceCache(scores);
             }
-        }
-
-        private unsafe void TestMatmulPrecision(Tensor hidden, int seqLen)
-        {
-            int dim = Config.HiddenSize;
-            Console.WriteLine($"=== Precision test: seqLen={seqLen}, dim={dim} ===");
-
-            // Test RMSNorm: batch vs single row
-            string normWeight = "blk.0.attn_norm.weight";
-            using var batchNorm = RMSNormOp(hidden, normWeight);
-
-            using var lastRow = hidden.Narrow(0, seqLen - 1, 1);
-            using var lastRowContig = Ops.NewContiguous(lastRow);
-            using var singleNorm = RMSNormOp(lastRowContig, normWeight);
-
-            CompareRows(batchNorm, singleNorm, seqLen - 1, dim, "RMSNorm");
-
-            // Test Linear on RMSNorm output
-            string qWeight = "blk.0.attn_q.weight";
-            using var batchQ = LinearForward(batchNorm, qWeight);
-            using var singleQ = LinearForward(singleNorm, qWeight);
-            int qDim = (int)batchQ.Sizes[1];
-            CompareRows(batchQ, singleQ, seqLen - 1, qDim, "Linear(Q)");
-        }
-
-        private unsafe void CompareRows(Tensor batch, Tensor single, int rowIdx, int dim, string label)
-        {
-            float* batchPtr = GetFloatPtr(batch);
-            float* singlePtr = GetFloatPtr(single);
-            float* batchRow = batchPtr + rowIdx * dim;
-
-            float maxDiff = 0;
-            double sumDiff = 0;
-            int diffCount = 0;
-            for (int d = 0; d < dim; d++)
-            {
-                float diff = MathF.Abs(batchRow[d] - singlePtr[d]);
-                if (diff > 0) { diffCount++; sumDiff += diff; }
-                if (diff > maxDiff) maxDiff = diff;
-            }
-            Console.WriteLine($"  {label} row[{rowIdx}]: maxDiff={maxDiff:E6}, avgDiff={sumDiff / dim:E6}, nonZero={diffCount}/{dim}");
-            Console.Write($"    batch: ");
-            for (int i = 0; i < 5; i++) Console.Write($"{batchRow[i]:F8} ");
-            Console.Write($"\n    single: ");
-            for (int i = 0; i < 5; i++) Console.Write($"{singlePtr[i]:F8} ");
-            Console.WriteLine();
-        }
-
-        private unsafe void DumpHiddenState(Tensor hidden, int seqLen, int layer)
-        {
-            float* ptr = GetFloatPtr(hidden);
-            int lastPos = seqLen - 1;
-            int dim = Config.HiddenSize;
-            float* row = ptr + lastPos * dim;
-            Console.Write($"  L{layer:D2} pos{lastPos}: ");
-            for (int i = 0; i < 5; i++)
-                Console.Write($"{row[i]:F6} ");
-            float sum = 0;
-            for (int i = 0; i < dim; i++)
-                sum += row[i] * row[i];
-            Console.WriteLine($" norm={MathF.Sqrt(sum):F6}");
         }
 
         public override void Dispose()

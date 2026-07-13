@@ -109,20 +109,14 @@ namespace TensorSharp.Models
             int patchesPerSide = _imageSize / _patchSize;
             int headDim = _hiddenSize / _numHeads;
 
-            bool debug = Environment.GetEnvironmentVariable("DUMP_VISION") == "1";
-
             var hidden = PatchEmbed(pixelValues, patchesPerSide);
-            if (debug) DumpTensor(hidden, "After PatchEmbed", numPatches);
 
             AddPositionEmbedding(hidden);
-            if (debug) DumpTensor(hidden, "After PosEmbed", numPatches);
 
             for (int i = 0; i < _blockCount; i++)
             {
                 Console.Write($"\r  Vision encoder block {i + 1}/{_blockCount}...");
                 hidden = EncoderBlock(hidden, i, numPatches, headDim);
-                if (debug && (i == 0 || i == _blockCount - 1))
-                    DumpTensor(hidden, $"After block {i}", numPatches);
                 // Yield GpuComputeLock between encoder blocks (see
                 // Gemma4VisionEncoder).
                 _hostModel?.YieldGpuComputeLock();
@@ -131,11 +125,9 @@ namespace TensorSharp.Models
 
             var postNormed = LayerNormOp(hidden, "v.post_ln.weight", "v.post_ln.bias");
             hidden.Dispose();
-            if (debug) DumpTensor(postNormed, "After PostLN", numPatches);
 
             var projected = MultiModalProject(postNormed, patchesPerSide, numPatches);
             postNormed.Dispose();
-            if (debug) DumpTensor(projected, "Final projected", (int)projected.Sizes[0]);
 
             return projected;
         }
@@ -372,22 +364,6 @@ namespace TensorSharp.Models
         private Tensor RMSNormOp(Tensor input, string weightName)
         {
             return Ops.RMSNorm(null, input, _weights[weightName], null, _eps);
-        }
-
-        private unsafe void DumpTensor(Tensor t, string label, int numRows)
-        {
-            float* ptr = GetFloatPtr(t);
-            int dim = (int)t.Sizes[1];
-            Console.Write($"\n  {label} [{numRows}x{dim}]: row0=[");
-            for (int i = 0; i < Math.Min(5, dim); i++)
-                Console.Write($"{ptr[i]:F6}{(i < 4 ? ", " : "")}");
-            Console.Write($"] last_row=[");
-            float* lastRow = ptr + (numRows - 1) * dim;
-            for (int i = 0; i < Math.Min(5, dim); i++)
-                Console.Write($"{lastRow[i]:F6}{(i < 4 ? ", " : "")}");
-            float norm0 = 0, normLast = 0;
-            for (int i = 0; i < dim; i++) { norm0 += ptr[i] * ptr[i]; normLast += lastRow[i] * lastRow[i]; }
-            Console.WriteLine($"] norm0={MathF.Sqrt(norm0):F4} normLast={MathF.Sqrt(normLast):F4}");
         }
 
         private static unsafe float* GetFloatPtr(Tensor t) =>

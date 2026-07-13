@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -964,48 +964,6 @@ namespace TensorSharp.Models
             return ForwardCore(tokens);
         }
 
-        // Per-section decode profiler: gated by TS_MLX_DECODE_PROFILE=1.
-        // Each section is followed by a forced MLX eval so the wall-clock
-        // tick range reflects GPU work, not just dispatch overhead. The
-        // forced eval breaks MLX's normal pipelining, so this is a profiling
-        // mode only ÔÇö turn off for steady-state perf measurement.
-        private static readonly bool s_DecodeProfileEnabled =
-            string.Equals(Environment.GetEnvironmentVariable("TS_MLX_DECODE_PROFILE"), "1", StringComparison.Ordinal);
-        private long _profEmbedTicks, _profPleTicks, _profLayerTicks, _profFinalNormTicks, _profLmHeadTicks, _profSoftcapTicks, _profLogitsCopyTicks;
-        private long _profAttnSdpaTicks, _profAttnOutTicks, _profFfnTicks, _profPleInjectTicks;
-        private int _profDecodeCalls;
-
-        private void ProfMark(ref long counter, long since, Tensor syncTensor)
-        {
-            if (!s_DecodeProfileEnabled || _backend != BackendType.Mlx) return;
-            if (syncTensor != null) MlxFusedOps.TryEvaluate(syncTensor);
-            counter += Stopwatch.GetTimestamp() - since;
-        }
-
-        public override void PrintTimingStats()
-        {
-            base.PrintTimingStats();
-            DumpDecodeProfile();
-        }
-
-        public void DumpDecodeProfile()
-        {
-            if (!s_DecodeProfileEnabled || _profDecodeCalls == 0) return;
-            double inv = 1000.0 / Stopwatch.Frequency / _profDecodeCalls;
-            Console.WriteLine($"=== MLX decode profile ({_profDecodeCalls} decode calls) ===");
-            Console.WriteLine($"  embed       : {_profEmbedTicks * inv:F3} ms/tok");
-            Console.WriteLine($"  PLE compute : {_profPleTicks * inv:F3} ms/tok");
-            Console.WriteLine($"  per-layer   : {_profLayerTicks * inv:F3} ms/tok");
-            Console.WriteLine($"    attn SDPA : {_profAttnSdpaTicks * inv:F3} ms/tok");
-            Console.WriteLine($"    attn out  : {_profAttnOutTicks * inv:F3} ms/tok  (output proj + post-attn-norm+add)");
-            Console.WriteLine($"    FFN       : {_profFfnTicks * inv:F3} ms/tok  (gate_up+gelu+down + post-ffn-norm+add)");
-            Console.WriteLine($"    PLE inject: {_profPleInjectTicks * inv:F3} ms/tok");
-            Console.WriteLine($"  final norm  : {_profFinalNormTicks * inv:F3} ms/tok");
-            Console.WriteLine($"  LM head     : {_profLmHeadTicks * inv:F3} ms/tok");
-            Console.WriteLine($"  softcap     : {_profSoftcapTicks * inv:F3} ms/tok");
-            Console.WriteLine($"  logits copy : {_profLogitsCopyTicks * inv:F3} ms/tok  (forced sync to host)");
-        }
-
         private float[] ForwardCore(int[] tokens)
         {
             _forwardSw.Start();
@@ -1019,14 +977,10 @@ namespace TensorSharp.Models
 
             EnsureCacheCapacity(startPos + seqLen);
 
-            // Optional tensor-level diag. Forces the non-fused per-op layer
-            // path so legacy and batched share the same code shape.
-            bool _g4DumpDiag = System.Environment.GetEnvironmentVariable("TS_GEMMA4_DIAG") == "1";
             // The tests' batched-vs-legacy comparison sets TS_GEMMA4_FORCE_UNFUSED=1
             // to make the legacy path fully deterministic (no fused layer prefill,
-            // no fused decode) without enabling the verbose per-layer checksum
-            // prints from TS_GEMMA4_DIAG.
-            bool _g4ForceUnfused = _g4DumpDiag ||
+            // no fused decode).
+            bool _g4ForceUnfused =
                 System.Environment.GetEnvironmentVariable("TS_GEMMA4_FORCE_UNFUSED") == "1";
             if (_g4ForceUnfused)
             {
@@ -1035,14 +989,11 @@ namespace TensorSharp.Models
             }
 
             long t0 = Stopwatch.GetTimestamp();
-            long pStart = s_DecodeProfileEnabled && seqLen == 1 ? Stopwatch.GetTimestamp() : 0;
             Tensor hidden = Embedding(tokens);
             _embTicks += Stopwatch.GetTimestamp() - t0;
 
             ScaleEmbedding(hidden);
-            if (s_DecodeProfileEnabled && seqLen == 1) ProfMark(ref _profEmbedTicks, pStart, hidden);
 
-            if (_g4DumpDiag) System.Console.WriteLine($"[g4-legacy ] after-embed: {DiagChecksum(hidden, "embed")}");
 
             HashSet<int> exceptPositions = null;
 
@@ -1096,10 +1047,8 @@ namespace TensorSharp.Models
                 && exceptPositions == null && CanGatherPleInKernel();
 
             Tensor perLayerInputs = null;
-            long pPle = s_DecodeProfileEnabled && seqLen == 1 ? Stopwatch.GetTimestamp() : 0;
             if (_pleDim > 0 && !pleInKernel && !pleInKernelDecode)
                 perLayerInputs = ComputePLE(tokens, hidden, seqLen);
-            if (s_DecodeProfileEnabled && seqLen == 1) ProfMark(ref _profPleTicks, pPle, perLayerInputs);
 
             // The all-MoE sibling (e.g. 26B-A4B) routes through the fused MoE verify
             // kernel; see CanUseWholeModelMoEPrefillVerify. Mutually exclusive with
@@ -1136,7 +1085,6 @@ namespace TensorSharp.Models
             if (!useFusedDecode && !useFusedMoEDecode && !useWholeModelPrefill && !useWholeModelMoEPrefill)
                 EnsureKvCacheHostSynchronized();
 
-            long pLayers = s_DecodeProfileEnabled && seqLen == 1 ? Stopwatch.GetTimestamp() : 0;
 
             bool decodeFolded = false;
             if (useFusedDecode)
@@ -1214,8 +1162,6 @@ namespace TensorSharp.Models
                 // donor's TransformerBlock will populate it on its way out.
                 bool useFusedLayerPrefill = Environment.GetEnvironmentVariable("TS_FUSED_LAYER_PREFILL") != "0";
                 bool useFusedLayerGraph = CanUseFusedLayerGraph(seqLen, exceptPositions, useFusedLayerPrefill);
-                if (_g4DumpDiag || System.Environment.GetEnvironmentVariable("TS_GEMMA4_PATH_TRACE") == "1")
-                    System.Console.WriteLine($"[g4-legacy ] path: useFusedLayerPrefill={useFusedLayerPrefill} useFusedLayerGraph={useFusedLayerGraph} TS_FUSED_LAYER_PREFILL={Environment.GetEnvironmentVariable("TS_FUSED_LAYER_PREFILL")}");
 
                 if (_swaKVDonorLayers.Count > 0 && (seqLen > 1 || useFusedLayerGraph))
                     _prefillSWAKV = new Dictionary<int, (Tensor, Tensor)>();
@@ -1233,7 +1179,6 @@ namespace TensorSharp.Models
                 // layers see the full chunk's K/V rather than a partial rolling
                 // cache. Real-world prompts get a 45-50% speedup (chunked) over
                 // the per-op C# path. Set TS_FUSED_LAYER_PREFILL=0 to disable.
-                int _fusedHits = 0, _nonFusedHits = 0;
                 for (int l = 0; l < Config.NumLayers; l++)
                 {
                     Tensor perLayerInput = null;
@@ -1253,7 +1198,6 @@ namespace TensorSharp.Models
                     {
                         if (TryFusedLayerPrefill(hidden, l, seqLen, startPos, perLayerInput))
                         {
-                            _fusedHits++;
                             perLayerInput?.Dispose();
                             continue;
                         }
@@ -1269,17 +1213,13 @@ namespace TensorSharp.Models
                         && exceptPositions == null && _moeFusedDecodeEnabled
                         && TryFusedMoELayerDecode(hidden, l, startPos))
                     {
-                        _fusedHits++;
-                        if (_g4DumpDiag) System.Console.WriteLine($"[g4-legacy ] after-layer-{l}: {DiagChecksum(hidden, $"L{l}")}");
                         continue;
                     }
 
-                    _nonFusedHits++;
                     hidden = TransformerBlock(hidden, l, seqLen, startPos, isShared, perLayerInput, exceptPositions);
                     TryEvaluateMlxLayerBoundary(hidden, l, seqLen);
                     perLayerInput?.Dispose();
-                    if (_g4DumpDiag) System.Console.WriteLine($"[g4-legacy ] after-layer-{l}: {DiagChecksum(hidden, $"L{l}")}");
-                    else if (_g4ForceUnfused)
+                    if (_g4ForceUnfused)
                     {
                         // Force a CPU read between layers when the test-only
                         // FORCE_UNFUSED mode is on. Metal queues ops async by
@@ -1292,8 +1232,6 @@ namespace TensorSharp.Models
                         _ = hidden.GetElementsAsFloat(1);
                     }
                 }
-                if (_g4DumpDiag || System.Environment.GetEnvironmentVariable("TS_GEMMA4_PATH_TRACE") == "1")
-                    System.Console.WriteLine($"[g4-legacy ] _fusedHits={_fusedHits} _nonFusedHits={_nonFusedHits}");
 
                 if (_prefillSWAKV != null)
                 {
@@ -1307,7 +1245,6 @@ namespace TensorSharp.Models
                 DisposeSwaPrevWindows();
             }
 
-            if (s_DecodeProfileEnabled && seqLen == 1) ProfMark(ref _profLayerTicks, pLayers, hidden);
 
             perLayerInputs?.Dispose();
 
@@ -1316,14 +1253,12 @@ namespace TensorSharp.Models
                 // The fused decode graph folded final-norm + lm_head + softcap and
                 // wrote the logits straight into _logitsBuffer; skip the C# tail.
                 hidden.Dispose();
-                if (s_DecodeProfileEnabled && seqLen == 1) _profDecodeCalls++;
                 _cacheSeqLen += seqLen;
                 _forwardCount++;
                 _forwardSw.Stop();
                 return _logitsBuffer;
             }
 
-            long pFinalNorm = s_DecodeProfileEnabled && seqLen == 1 ? Stopwatch.GetTimestamp() : 0;
 
             Tensor lastHidden;
             if (seqLen > 1)
@@ -1339,23 +1274,17 @@ namespace TensorSharp.Models
                 hidden.Dispose();
                 lastHidden = normed;
             }
-            if (s_DecodeProfileEnabled && seqLen == 1) ProfMark(ref _profFinalNormTicks, pFinalNorm, lastHidden);
 
             t0 = Stopwatch.GetTimestamp();
-            long pLmHead = s_DecodeProfileEnabled && seqLen == 1 ? Stopwatch.GetTimestamp() : 0;
             string outputWeight = _hasTiedOutput ? "token_embd.weight" : "output.weight";
             Tensor logitsTensor = LinearForward(lastHidden, outputWeight);
             _lmHeadTicks += Stopwatch.GetTimestamp() - t0;
             lastHidden.Dispose();
-            if (s_DecodeProfileEnabled && seqLen == 1) ProfMark(ref _profLmHeadTicks, pLmHead, logitsTensor);
 
-            long pSoftcap = s_DecodeProfileEnabled && seqLen == 1 ? Stopwatch.GetTimestamp() : 0;
             if (_finalLogitSoftcap > 0f)
                 ApplyLogitSoftcap(logitsTensor);
-            if (s_DecodeProfileEnabled && seqLen == 1) ProfMark(ref _profSoftcapTicks, pSoftcap, logitsTensor);
 
             t0 = Stopwatch.GetTimestamp();
-            long pCopy = s_DecodeProfileEnabled && seqLen == 1 ? Stopwatch.GetTimestamp() : 0;
             if (_logitsBuffer == null || _logitsBuffer.Length != Config.VocabSize)
                 _logitsBuffer = new float[Config.VocabSize];
 
@@ -1367,11 +1296,6 @@ namespace TensorSharp.Models
             }
             logitsTensor.Dispose();
             _logitsCopyTicks += Stopwatch.GetTimestamp() - t0;
-            if (s_DecodeProfileEnabled && seqLen == 1)
-            {
-                _profLogitsCopyTicks += Stopwatch.GetTimestamp() - pCopy;
-                _profDecodeCalls++;
-            }
 
             _cacheSeqLen += seqLen;
             _forwardCount++;
@@ -1745,7 +1669,6 @@ namespace TensorSharp.Models
 
             int startPos = _cacheSeqLen;
             bool useFusedDecode = seqLen == 1 && _canUseFusedFullModelDecode;
-            bool _g4DumpDiag = false; // PrefillWithoutLogits doesn't dump diag
 
             EnsureCacheCapacity(startPos + seqLen);
 
@@ -1862,7 +1785,6 @@ namespace TensorSharp.Models
                     hidden = TransformerBlock(hidden, l, seqLen, startPos, isShared, perLayerInput, exceptPositions);
                     TryEvaluateMlxLayerBoundary(hidden, l, seqLen);
                     perLayerInput?.Dispose();
-                    if (_g4DumpDiag) System.Console.WriteLine($"[g4-legacy ] after-layer-{l}: {DiagChecksum(hidden, $"L{l}")}");
                 }
 
                 if (_prefillSWAKV != null)
@@ -1888,28 +1810,6 @@ namespace TensorSharp.Models
         {
             float scale = MathF.Sqrt(Config.HiddenSize);
             Ops.Mul(hidden, hidden, scale);
-        }
-
-        // Diagnostic-only: per-tensor checksum for tensor-level diff between
-        // legacy and batched forward paths. Enable via TS_GEMMA4_DIAG=1.
-        // Sample the LAST token's state since the LM head reads from there.
-        internal static string DiagChecksum(Tensor t, string label)
-        {
-            int total = (int)t.ElementCount();
-            int hidden = t.DimensionCount >= 2 ? (int)t.Sizes[t.DimensionCount - 1] : total;
-            int numRows = total / hidden;
-            // Sample last row + first row to catch divergence anywhere.
-            float[] data = t.GetElementsAsFloat(total);
-            double sumFirst = 0, sumLast = 0, absFirst = 0, absLast = 0;
-            for (int i = 0; i < hidden; i++) {
-                sumFirst += data[i];
-                absFirst += Math.Abs(data[i]);
-                int lastIdx = (numRows - 1) * hidden + i;
-                sumLast += data[lastIdx];
-                absLast += Math.Abs(data[lastIdx]);
-            }
-            int lastTokOff = (numRows - 1) * hidden;
-            return $"{label}: rows={numRows} hidden={hidden} | tok0 sum={sumFirst:F3} abs={absFirst:F3} first3=[{data[0]:F3},{data[1]:F3},{data[2]:F3}] | tokN sum={sumLast:F3} abs={absLast:F3} first3=[{data[lastTokOff]:F3},{data[lastTokOff+1]:F3},{data[lastTokOff+2]:F3}]";
         }
 
         private void ApplyLogitSoftcap(Tensor logits)
@@ -2483,27 +2383,13 @@ namespace TensorSharp.Models
         /// On success writes each sequence's logits into <paramref name="outLogits"/>
         /// and advances its holder length.
         /// </summary>
-        private static readonly bool s_batchedFusedDebug =
-            Environment.GetEnvironmentVariable("TS_BATCHED_FUSED_DEBUG") == "1";
-        private static readonly bool s_batchedFusedTiming =
-            Environment.GetEnvironmentVariable("TS_BATCHED_FUSED_TIMING") == "1";
-        private bool _batchedFusedLoggedOnce;
-        // Per-phase timing accumulators (TS_BATCHED_FUSED_TIMING=1).
-        private double _btKcacheMs, _btEmbedMs, _btNativeMs, _btDistMs; private int _btCalls;
-        private void BatchedDbg(string msg)
-        {
-            if (!s_batchedFusedDebug) return;
-            if (_batchedFusedLoggedOnce && !msg.StartsWith("FAIL")) return;
-            Console.Error.WriteLine($"[g4-batched] {msg}");
-        }
-
         public unsafe bool TryForwardBatchedFusedDecode(
             IReadOnlyList<string> requestIds, int[] tokens, int[] positions, float[][] outLogits)
         {
             // ---- gates (any failure => round-robin fallback) ----
-            if (!IsGgmlBackend) { BatchedDbg("FAIL gate not-ggml"); return false; }
-            if (_decodeArrays == null || _fusedHolders == null) { BatchedDbg($"FAIL gate decodeArrays={_decodeArrays!=null} holders={_fusedHolders!=null}"); return false; }
-            if (_pleDim != 0 || _kvDonorMap.Count != 0) { BatchedDbg($"FAIL gate pleDim={_pleDim} donors={_kvDonorMap.Count}"); return false; }
+            if (!IsGgmlBackend) return false;
+            if (_decodeArrays == null || _fusedHolders == null) return false;
+            if (_pleDim != 0 || _kvDonorMap.Count != 0) return false;
 
             // MoE vs dense: an all-MoE model (e.g. 26B-A4B) routes through the MoE
             // batched kernel; otherwise the dense one. Prime the lazy MoE flag.
@@ -2518,7 +2404,7 @@ namespace TensorSharp.Models
                         && _pleDim == 0 && _kvDonorMap.Count == 0
                         && !_kvCacheDtype.IsBlockQuantized() && AllLayersMoE();
                 }
-                if (!_canUseFusedMoEModelDecode) { BatchedDbg("FAIL gate MoE not fusable"); return false; }
+                if (!_canUseFusedMoEModelDecode) return false;
                 // The MoE batched-decode kernel (TSGgml_Gemma4MoEModelDecodeBatched)
                 // is functionally CORRECT (coherent output; it diverges from the
                 // single-stream greedy reference only via benign batched-vs-single FP
@@ -2537,18 +2423,18 @@ namespace TensorSharp.Models
                 // OFF by default (round-robin is correct + faster here); opt in with
                 // TS_BATCHED_FUSED_MOE=1 (e.g. on a higher-VRAM GPU).
                 if (Environment.GetEnvironmentVariable("TS_BATCHED_FUSED_MOE") != "1")
-                { BatchedDbg("MoE batched gated off (TS_BATCHED_FUSED_MOE!=1)"); return false; }
+                return false;
             }
-            else if (!_canUseFusedFullModelDecode) { BatchedDbg($"FAIL gate fusedFull={_canUseFusedFullModelDecode}"); return false; }
+            else if (!_canUseFusedFullModelDecode) return false;
 
             int N = requestIds.Count;
-            if (N < 2 || tokens.Length != N || positions.Length != N) { BatchedDbg($"FAIL gate N={N}"); return false; }
+            if (N < 2 || tokens.Length != N || positions.Length != N) return false;
 
             // Folded quantized lm_head (this kernel requires the fold).
-            if (!_fdFoldLmHead) { BatchedDbg("FAIL gate fdFoldLmHead=false"); return false; }
-            if (!_weights.TryGetValue("output_norm.weight", out var finalNormT)) { BatchedDbg("FAIL gate no output_norm"); return false; }
+            if (!_fdFoldLmHead) return false;
+            if (!_weights.TryGetValue("output_norm.weight", out var finalNormT)) return false;
             if (!_quantWeights.TryGetValue(_hasTiedOutput ? "token_embd.weight" : "output.weight", out var lmqw))
-                { BatchedDbg("FAIL gate no quant lm_head"); return false; }
+                return false;
 
             int numLayers = Config.NumLayers;
             var holders = new Gemma4KvCacheHolder[N];
@@ -2564,8 +2450,8 @@ namespace TensorSharp.Models
                 var hz = holders[s].Sizes;
                 for (int l = 0; l < numLayers; l++)
                 {
-                    if (hz[l] != cacheSize[l]) { BatchedDbg($"FAIL gate non-uniform cache seq{s} l{l} {hz[l]}!={cacheSize[l]}"); return false; }
-                    if (positions[s] + 1 > cacheSize[l]) { BatchedDbg($"FAIL gate wrap seq{s} pos{positions[s]} l{l} csz{cacheSize[l]}"); return false; }
+                    if (hz[l] != cacheSize[l]) return false;
+                    if (positions[s] + 1 > cacheSize[l]) return false;
                 }
             }
 
@@ -2586,7 +2472,6 @@ namespace TensorSharp.Models
             var tokSorted = new int[N];
             for (int s = 0; s < N; s++) { posSorted[s] = positions[order[s]]; tokSorted[s] = tokens[order[s]]; }
 
-            var _bsw = s_batchedFusedTiming ? Stopwatch.StartNew() : null;
 
             // Per-(layer,seq) KV cache device pointers: [layer * N + seq], canonical order.
             var kCache = new IntPtr[numLayers * N];
@@ -2598,7 +2483,6 @@ namespace TensorSharp.Models
                     kCache[l * N + s] = TensorComputePrimitives.GetStoragePointer(h.K[l]);
                     vCache[l * N + s] = TensorComputePrimitives.GetStoragePointer(h.V[l]);
                 }
-            if (_bsw != null) { _btKcacheMs += _bsw.Elapsed.TotalMilliseconds; _bsw.Restart(); }
 
             IntPtr freqFactorsPtr = IntPtr.Zero;
             int freqFactorsLen = 0;
@@ -2616,7 +2500,6 @@ namespace TensorSharp.Models
             int vocab = Config.VocabSize;
             float[] logitsBuf = new float[(long)vocab * N];
             IntPtr finalNormPtr = (IntPtr)GetFloatPtr(finalNormT);
-            if (_bsw != null) { _btEmbedMs += _bsw.Elapsed.TotalMilliseconds; _bsw.Restart(); }
 
             // MoE: build/refresh the per-layer descriptor array (weights; the
             // desc's hidden/k_cache/position fields are ignored by the batched
@@ -2626,7 +2509,7 @@ namespace TensorSharp.Models
                 _moeModelArgs ??= new Gemma4MoELayerDecodeArgs[numLayers];
                 for (int l = 0; l < numLayers; l++)
                     if (!TryBuildMoELayerArgs(l, (IntPtr)hiddenPtr, 0, out _moeModelArgs[l]))
-                    { BatchedDbg($"FAIL MoE layer args l={l}"); return false; }
+                    return false;
             }
 
             bool ok;
@@ -2668,8 +2551,7 @@ namespace TensorSharp.Models
                 }
             }
 
-            if (!ok) { BatchedDbg("FAIL native kernel declined"); return false; }
-            if (_bsw != null) { _btNativeMs += _bsw.Elapsed.TotalMilliseconds; _bsw.Restart(); }
+            if (!ok) return false;
 
             // Distribute per-seq logits (un-permute) and advance each holder.
             for (int s = 0; s < N; s++)
@@ -2679,14 +2561,6 @@ namespace TensorSharp.Models
                 outLogits[order[s]] = dst;
                 holders[order[s]].SeqLen = posSorted[s] + 1;
             }
-            if (_bsw != null)
-            {
-                _btDistMs += _bsw.Elapsed.TotalMilliseconds;
-                if (++_btCalls % 64 == 0)
-                    Console.Error.WriteLine($"[g4-batched-timing] N={N} avg ms/call over {_btCalls}: kcache={_btKcacheMs/_btCalls:F3} embed={_btEmbedMs/_btCalls:F3} native={_btNativeMs/_btCalls:F3} dist={_btDistMs/_btCalls:F3}");
-            }
-            BatchedDbg($"OK batched decode N={N} pos0={posSorted[0]}");
-            _batchedFusedLoggedOnce = true;
             return true;
         }
 
@@ -3756,28 +3630,14 @@ namespace TensorSharp.Models
 
             string prefix = $"blk.{layer}";
 
-            bool prof = s_DecodeProfileEnabled && seqLen == 1;
-            long pAttnPre = prof ? Stopwatch.GetTimestamp() : 0;
 
             using var attnNormed = RMSNormOp(hidden, $"{prefix}.attn_norm.weight");
 
             var attnOut = Attention(attnNormed, layer, prefix, seqLen, startPos, isShared, exceptPositions);
 
-            // When the test-only TS_GEMMA4_DIAG mode is on, force a CPU read
-            // here. Metal queues ops async; without flushing, parallel
-            // reductions in RMSNorm/softmax can give bit-different results
-            // run-to-run, breaking the batched-vs-legacy comparison. The
-            // returned byte is discarded; only the implicit download barrier
-            // matters.
-            bool _diagSync = seqLen > 1 &&
-                System.Environment.GetEnvironmentVariable("TS_GEMMA4_DIAG") == "1";
-            if (_diagSync) _ = attnOut.GetElementsAsFloat(1);
-            if (prof) ProfMark(ref _profAttnSdpaTicks, pAttnPre, attnOut);
-
             // Fold post-attention RMSNorm + residual add into one MLX Metal
             // kernel. This mirrors the GGML fused graph shape and avoids one
             // intermediate tensor / graph node chain per layer.
-            long pAttnOut = prof ? Stopwatch.GetTimestamp() : 0;
             if (TryRmsNormAddInPlaceMlx(hidden, attnOut, $"{prefix}.post_attention_norm.weight"))
             {
                 attnOut.Dispose();
@@ -3786,12 +3646,9 @@ namespace TensorSharp.Models
             else
             {
                 Ops.RMSNorm(attnOut, attnOut, _weights[$"{prefix}.post_attention_norm.weight"], null, Config.Eps);
-                if (_diagSync) _ = attnOut.GetElementsAsFloat(1);
                 Ops.Add(attnOut, attnOut, hidden);
                 hidden.Dispose();
             }
-            if (_diagSync) _ = attnOut.GetElementsAsFloat(1);
-            if (prof) ProfMark(ref _profAttnOutTicks, pAttnOut, attnOut);
 
             Tensor result;
 
@@ -3844,7 +3701,6 @@ namespace TensorSharp.Models
                 if (!_weights.ContainsKey(postFfnNormKey))
                     postFfnNormKey = $"{prefix}.ffn_post_norm.weight";
 
-                long pFfn = prof ? Stopwatch.GetTimestamp() : 0;
 
                 // Single-closure FFN: pre-norm + gate_up matmul + GeluMulSplit
                 // + down matmul + post-norm + residual add all in one
@@ -3880,7 +3736,6 @@ namespace TensorSharp.Models
                 {
                     var ffnOut = FFNGeluWithOptionalNorm(attnOut, $"{prefix}.ffn_norm.weight",
                         $"{prefix}.ffn_gate_up.weight", $"{prefix}.ffn_down.weight", seqLen);
-                    if (_diagSync) _ = ffnOut.GetElementsAsFloat(1);
 
                     if (!TryRmsNormAddInPlaceMlx(attnOut, ffnOut, postFfnNormKey))
                     {
@@ -3890,11 +3745,8 @@ namespace TensorSharp.Models
                     ffnOut.Dispose();
                 }
                 result = attnOut;
-                if (_diagSync) _ = result.GetElementsAsFloat(1);
-                if (prof) ProfMark(ref _profFfnTicks, pFfn, result);
             }
 
-            long pPleInject = prof ? Stopwatch.GetTimestamp() : 0;
 
             // PLE injection
             if (perLayerInput != null &&
@@ -3934,14 +3786,12 @@ namespace TensorSharp.Models
                     gate = LinearForward(result, $"{prefix}.inp_gate.weight");
                     if (gate != null)
                     {
-                        if (_diagSync) _ = gate.GetElementsAsFloat(1);
                         Ops.GELUMul(gate, gate, perLayerInput);
                     }
                 }
 
                 if (gate != null)
                 {
-                    if (_diagSync) _ = gate.GetElementsAsFloat(1);
                     using var pleProj = LinearForward(gate, $"{prefix}.proj.weight");
                     gate.Dispose();
                     if (pleProj != null)
@@ -3956,7 +3806,6 @@ namespace TensorSharp.Models
                 }
               }
             }
-            if (prof) ProfMark(ref _profPleInjectTicks, pPleInject, result);
 
             float scalar = _layerScalars[layer];
             if (scalar != 1f)
@@ -6280,12 +6129,9 @@ namespace TensorSharp.Models
 
         // Decode attention parallelises across query heads only when there is
         // enough work to amortise the fork/join (long context); short-context
-        // decode is dominated by the matmuls and stays serial. Set
-        // TS_CPU_NO_PAR_ATTN=1 to force the serial path (A/B / correctness).
-        private static readonly bool s_noParallelHeads =
-            string.Equals(Environment.GetEnvironmentVariable("TS_CPU_NO_PAR_ATTN"), "1", StringComparison.Ordinal);
+        // decode is dominated by the matmuls and stays serial.
         private static bool ShouldParallelizeHeads(int numHeads, int attendLen) =>
-            !s_noParallelHeads && numHeads > 1 && attendLen >= 128 && Environment.ProcessorCount > 1;
+            numHeads > 1 && attendLen >= 128 && Environment.ProcessorCount > 1;
 
         private unsafe void AttentionDecodeWithWindowF16(Tensor q, Tensor kCache, Tensor vCache,
             Tensor result, int numHeads, int numKVHeads, int keyDim, int valDim,

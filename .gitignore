@@ -59,3 +59,10 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# IDE/build caches
+*.csproj.lscache
+
+# Benchmark tooling artifacts
+benchmarks/engine_comparison/__pycache__/
+benchmarks/engine_comparison/results/

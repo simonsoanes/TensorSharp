@@ -1,4 +1,4 @@
-// Standalone prefill (time-to-first-token) benchmark for the batched paged
+﻿// Standalone prefill (time-to-first-token) benchmark for the batched paged
 // attention path. Measures how long the engine takes to process a prompt of N
 // tokens through ForwardBatch before emitting the first decode token — i.e. the
 // prefill latency that dominates TTFT. Runs single-sequence and concurrent
@@ -229,15 +229,7 @@ foreach (int len in lens)
     }
     model.ResetKVCache();
     double ms = Median(samples);
-    string argmaxNote = "";
-    if (Environment.GetEnvironmentVariable("TS_PREFILL_DUMP_ARGMAX") == "1")
-    {
-        model.ResetKVCache();
-        float[] lg = model.ForwardRefill(MakePrompt(len, 99999));
-        argmaxNote = $"  argmax={Argmax(lg)}";
-        model.ResetKVCache();
-    }
-    Console.WriteLine($"{len,8} {ms,10:F1} {len / (ms / 1000.0),10:F0}{argmaxNote}");
+    Console.WriteLine($"{len,8} {ms,10:F1} {len / (ms / 1000.0),10:F0}");
 }
 } // !engineOnly (legacy section)
 

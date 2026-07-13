@@ -133,7 +133,6 @@
       <tr><td><code>TS_QWEN_DIT_CACHE / TS_QWEN_DIT_CACHE_MODE</code></td><td>Whole-DiT-step cache: <code>0</code> disables / mode <code>easycache</code>, <code>fbc</code>, <code>both</code>, <code>off</code>.</td></tr>
       <tr><td><code>TS_GGML_VULKAN_DEVICE</code></td><td>Vulkan device index for <code>ggml_vulkan</code> (= <code>--gpu-device</code>).</td></tr>
       <tr><td><code>TS_FUSED_QKNORM_ROPE</code></td><td><code>0</code> disables the fused QK-Norm + RoPE CUDA kernel in Qwen 3.5/3.6 text prefill on the direct <code>cuda</code> backend (default on).</td></tr>
-      <tr><td><code>TS_GGML_MANAGED_OPS</code></td><td><code>1</code> opts in to the <em>experimental</em> managed C# port of the GGML ops (default off).</td></tr>
       <tr><td><code>TS_JSON_FORCE_OPEN</code></td><td><code>0</code> disables the structured-output first-token <code>{</code> constraint (on by default for <code>json_object</code> / <code>json_schema</code>).</td></tr>
       <tr><td><code>TS_MLX_* </code></td><td>MLX backend tuning: pipelined decode, mlock GGUF, fused KV write, batched MoE decode, memory caps.</td></tr>
       <tr><td><code>TENSORSHARP_MLX_LIBRARY / _LIBRARY_DIR</code></td><td>Override the search path for <code>libmlxc</code>.</td></tr>
