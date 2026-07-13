@@ -85,7 +85,6 @@ dotnet run --project TensorSharp.Server -c Release --no-build -- --model gemma-4
     <li><strong>KV 缓存前缀复用</strong> —— 多轮对话复用最长匹配 token 前缀；滑动窗口模型按窗口大小回退截断。</li>
     <li><strong>内核预热</strong> —— CLI 与服务器都在启动时运行一次很小的前向，以预编译 GPU 内核并预热内存池，避免冷启动延迟。</li>
   </ul>
-  <p><em>实验功能：</em><code>TS_GGML_MANAGED_OPS=1</code> 可选择性启用开发中的 GGML 算子托管 C# 移植；默认关闭。</p>
 
   <h2 id="memory">内存优化</h2>
   <ul>

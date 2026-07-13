@@ -175,7 +175,6 @@ Diffusion 专属元数据：
 | `DIFFUSION_DEVICE_COPY_BUDGET_MB` | ggml_cuda：模型放不进 VRAM 时 device-copy 缓存上限，默认 768 |
 | `DIFFUSION_SEGMENTED_DECODE` | ggml_cuda：强制开启/关闭逐层融合 decode（`1`/`0`，放不进 VRAM 时自动启用） |
 | `DIFFUSION_PIN_STREAMED=1` | ggml_cuda：把流式权重复制到页锁定内存以 DMA 速度上传（消耗 RAM） |
-| `DIFFUSION_PROFILE=1` / `DIFFUSION_STEPTIME=1` / `DIFFUSION_FUSED_DEBUG=1` | 开发用计时与融合 kernel 调试诊断 |
 
 ## 6. 服务端行为
 

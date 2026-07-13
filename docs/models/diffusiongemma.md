@@ -186,7 +186,6 @@ Important toggles:
 | `DIFFUSION_DEVICE_COPY_BUDGET_MB` | ggml_cuda: device-copy cache cap when the model spills VRAM, default 768 |
 | `DIFFUSION_SEGMENTED_DECODE` | ggml_cuda: force per-layer fused decode `1`/`0` (auto when the model spills VRAM) |
 | `DIFFUSION_PIN_STREAMED=1` | ggml_cuda: page-locked copies of streamed weights for DMA uploads (costs RAM) |
-| `DIFFUSION_PROFILE=1` / `DIFFUSION_STEPTIME=1` / `DIFFUSION_FUSED_DEBUG=1` | Development timing and fused-kernel debug diagnostics |
 
 ## 6. Server behavior
 

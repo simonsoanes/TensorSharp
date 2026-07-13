@@ -200,8 +200,7 @@ token 序列，使编辑接地于原图。
   提速需显式选择（`TS_QWEN_DIT_CACHE_MODE=easycache`）。
   开关：`TS_QWEN_DIT_CACHE_MODE`（默认 `off` /`easycache`/`fbc`/`both`）、
   `TS_QWEN_DIT_EASYCACHE_THRESHOLD`（默认 0.2——越低越接近无缓存）、
-  `TS_QWEN_DIT_EASYCACHE_START`/`_END`（窗口比例，0.15/0.95）、
-  `TS_QWEN_DIT_CACHE_DEBUG=1`（每步决策日志）。
+  `TS_QWEN_DIT_EASYCACHE_START`/`_END`（窗口比例，0.15/0.95）。
 - 跨去噪步的 **First-Block-Cache**（每次生成复位）；用
   `TS_QWEN_DIT_CACHE_MODE=fbc` 选择。它每分支总是计算 block 0，在低变化步跳过
   blocks 1..59——节省严格少于整步缓存，但其决策基于真实的 block-0 残差而非预测。
@@ -272,7 +271,6 @@ token 序列，使编辑接地于原图。
 | `TS_QWEN_DIT_CACHE_MODE` | 去噪缓存：`off`（**默认**——质量优先，与 sd.cpp 一致）、`easycache`（整步跳过）、`fbc`（First-Block-Cache）、`both` |
 | `TS_QWEN_DIT_EASYCACHE_THRESHOLD` | EasyCache 累计变化阈值（默认 0.2；越低越接近无缓存，越高跳过越多） |
 | `TS_QWEN_DIT_CACHE=0` | 旧版总开关——禁用所有去噪缓存 |
-| `TS_QIMG_DEBUG=1` | 每步速度 / 潜变量统计 |
 
 ## 6. 生成参数（`QwenImageParams`）
 

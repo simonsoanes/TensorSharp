@@ -966,7 +966,6 @@ These can be set with either the `--paged-kv*` / `--continuous-batching` CLI fla
 | `TS_MLX_BATCHED_MOE_DECODE` | `1` (default) collapses K per-expert decode dispatches to one batched dispatch per (gate/up/down) kind for Qwen 3.5/3.6 MoE. Set to `0` on memory-constrained machines (saves ~weight-doubling overhead from the stacked weight slabs). |
 | `TS_MLX_MOE_FUSED_GATE_UP_SILU` | `1` (default) fuses gate matmul + up matmul + SiLUMul into one Metal kernel for batched MoE decode. Set to `0` to A/B against the legacy 3-dispatch path. |
 | `TS_MLX_DEVICE_ROUTER` | `1` (default) keeps MoE router top-K + softmax on device to skip ~60 host syncs/token on Qwen 3.6-35B-A3B. Set to `0` to disable; the code also falls back automatically when prerequisites are missing. |
-| `TS_MLX_LOG_MEMORY_POLICY` | `1` (default) prints once-per-load MLX memory-policy lines (wired limit, GGUF mlock status, allocator caps). Set to `0` to silence. |
 | `TS_MLX_MEMORY_LIMIT_MB` / `TS_MLX_CACHE_LIMIT_MB` / `TS_MLX_WIRED_LIMIT_MB` | Override the MLX allocator hard cap / unused-buffer cache cap / wired-buffer residency cap (megabytes). Defaults are derived from the host's unified-memory capacity. |
 | `TS_MLX_EVAL_EVERY_N_LAYERS` / `TS_MLX_GEMMA4_EVAL_EVERY_N_LAYERS` | Periodic `mlx_async_eval` cadence during decode to overlap GPU work with host queueing. Gemma 4 defaults to every 4 layers via `TS_MLX_GEMMA4_EVAL_EVERY_N_LAYERS`; Qwen 3 / Qwen 3.5 / Nemotron-H default to every 16 layers via `TS_MLX_EVAL_EVERY_N_LAYERS`. Set to `0` to disable where supported. |
 | `TENSORSHARP_MLX_LIBRARY` / `TENSORSHARP_MLX_LIBRARY_DIR` | Override the search path for `libmlxc` when using `--backend mlx`. |
@@ -996,7 +995,6 @@ These gate the optional multi-token-prediction speculative decode path (see [MTP
 | `DIFFUSION_NO_FUSED_LMHEAD_TAIL` | Set to `1` to disable the fused output-norm + lm-head + softcap tail. |
 | `DIFFUSION_BATCHED_FORWARD` | Set to `1` to use true batched `DecodeCanvasBatched` for active diffusion canvases; default time-slices the faster fused single-canvas path. |
 | `DIFFUSION_LMHEAD_BATCH_CAP_MB` | Memory cap for batched diffusion lm-head logits before falling back to per-sequence lm-head (default: `300`). |
-| `DIFFUSION_PROFILE` / `DIFFUSION_STEPTIME` / `DIFFUSION_FUSED_DEBUG` | Development diagnostics for per-section diffusion timing and fused-kernel debug logging. |
 
 Sampling parameter precedence (highest wins):
 
@@ -1059,7 +1057,6 @@ Quick reference for which environment variables (and matching CLI flags) gate ea
 | MLX on-device MoE router top-K + softmax | ON when prerequisites are met | `TS_MLX_DEVICE_ROUTER=0` disables | — |
 | MLX layer-boundary `async_eval` cadence | Gemma 4: every 4 layers; Qwen / Nemotron: every 16 layers | `TS_MLX_GEMMA4_EVAL_EVERY_N_LAYERS=N` or `TS_MLX_EVAL_EVERY_N_LAYERS=N` (`0` = disabled where supported) | — |
 | MLX allocator caps (memory / cache / wired buffer) | host-derived | `TS_MLX_MEMORY_LIMIT_MB`, `TS_MLX_CACHE_LIMIT_MB`, `TS_MLX_WIRED_LIMIT_MB` | — |
-| MLX one-line memory-policy banners at load | ON | `TS_MLX_LOG_MEMORY_POLICY=0` to silence | — |
 
 #### Sampling defaults (server-only)
 

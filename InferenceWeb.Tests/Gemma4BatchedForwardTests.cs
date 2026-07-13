@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -56,13 +56,12 @@ public class Gemma4BatchedForwardTests
             const int blockSize = 16;
 
             // Disable the fused-prefill kernel AND the fused decode path so the
-            // legacy comparison is apples-to-apples with batched. TS_GEMMA4_DIAG=1
-            // additionally forces a CPU sync at every intermediate tensor in the
-            // legacy TransformerBlock - that determinism is what makes the
-            // batched-vs-legacy comparison reproducible run-to-run. The diag
-            // prints are verbose but they only fire on this opt-in test.
+            // legacy comparison is apples-to-apples with batched.
+            // TS_GEMMA4_FORCE_UNFUSED=1 also forces a CPU sync after every layer
+            // in the legacy TransformerBlock - that determinism is what makes the
+            // batched-vs-legacy comparison reproducible run-to-run.
             Environment.SetEnvironmentVariable("TS_FUSED_LAYER_PREFILL", "0");
-            Environment.SetEnvironmentVariable("TS_GEMMA4_DIAG", "1");
+            Environment.SetEnvironmentVariable("TS_GEMMA4_FORCE_UNFUSED", "1");
 
             model.ResetKVCache();
             var legacyLogits = model.Forward(prompt);

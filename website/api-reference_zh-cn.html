@@ -133,7 +133,6 @@
       <tr><td><code>TS_QWEN_DIT_CACHE / TS_QWEN_DIT_CACHE_MODE</code></td><td>整步 DiT 缓存：<code>0</code> 禁用 / 模式 <code>easycache</code>、<code>fbc</code>、<code>both</code>、<code>off</code>。</td></tr>
       <tr><td><code>TS_GGML_VULKAN_DEVICE</code></td><td><code>ggml_vulkan</code> 使用的 Vulkan 设备索引（= <code>--gpu-device</code>）。</td></tr>
       <tr><td><code>TS_FUSED_QKNORM_ROPE</code></td><td><code>0</code> 禁用 direct <code>cuda</code> 后端中 Qwen 3.5/3.6 文本 prefill 的融合 QK-Norm + RoPE kernel（默认开启）。</td></tr>
-      <tr><td><code>TS_GGML_MANAGED_OPS</code></td><td><code>1</code> 选择性启用实验中的 GGML 算子托管 C# 移植（默认关闭）。</td></tr>
       <tr><td><code>TS_JSON_FORCE_OPEN</code></td><td><code>0</code> 关闭结构化输出的首 token <code>{</code> 约束（<code>json_object</code> / <code>json_schema</code> 默认开启）。</td></tr>
       <tr><td><code>TS_MLX_* </code></td><td>MLX 后端调参：流水线 decode、mlock GGUF、融合 KV 写、批量 MoE decode、内存上限。</td></tr>
       <tr><td><code>TENSORSHARP_MLX_LIBRARY / _LIBRARY_DIR</code></td><td>覆盖 <code>libmlxc</code> 的搜索路径。</td></tr>

@@ -114,7 +114,6 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf
       <tr><td><code>TS_PDF_MAX_PAGES</code></td><td>上传 PDF 时读取的页数上限，文本提取与页面图像渲染均遵循（默认：<code>0</code> = 全部页面；CLI <code>--pdf</code> 同样遵循）。</td></tr>
       <tr><td><code>VIDEO_SAMPLE_FPS</code> / <code>VIDEO_MAX_FRAMES</code></td><td>每秒视频采样的帧数 / 可选的抽帧上限。</td></tr>
       <tr><td><code>TS_FUSED_QKNORM_ROPE</code></td><td>Direct <code>cuda</code> 后端上 Qwen 3.5/3.6 文本 prefill 的融合 QK-Norm + RoPE CUDA 内核（默认开启；<code>0</code> 关闭）。</td></tr>
-      <tr><td><code>TS_GGML_MANAGED_OPS</code></td><td><strong>实验性：</strong><code>1</code> 选择 GGML 算子的托管 C# 移植（默认关闭，使用原生路径）。</td></tr>
       <tr><td><code>TENSORSHARP_TEMPERATURE</code>、<code>…_TOP_K</code>、<code>…_TOP_P</code>、<code>…_MIN_P</code></td><td>当参数与请求体都未设置时的默认采样值。</td></tr>
       <tr><td><code>TENSORSHARP_REPEAT_PENALTY</code>、<code>…_PRESENCE_PENALTY</code>、<code>…_FREQUENCY_PENALTY</code>、<code>…_SEED</code></td><td>默认惩罚与随机种子。</td></tr>
       <tr><td><code>TENSORSHARP_LOG_LEVEL</code> / <code>…_LOG_DIR</code> / <code>…_LOG_FILE</code></td><td>日志级别、目录与文件开关（CLI 同样遵循）。</td></tr>

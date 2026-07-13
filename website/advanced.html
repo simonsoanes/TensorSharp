@@ -86,7 +86,6 @@ dotnet run --project TensorSharp.Server -c Release --no-build -- --model gemma-4
     <li><strong>KV-cache prefix reuse</strong> — multi-turn conversations reuse the longest matching token prefix; sliding-window models back off truncation by the window size.</li>
     <li><strong>Kernel warmup</strong> — both CLI and server run a tiny forward pass at startup to pre-compile GPU kernels and warm the pool, avoiding cold-start latency.</li>
   </ul>
-  <p><em>Experimental:</em> <code>TS_GGML_MANAGED_OPS=1</code> opts in to an in-progress managed C# port of the GGML ops (the managed graphs share the same backend instance and CUDA context as the remaining native kernels). Default off.</p>
 
   <h2 id="memory">Memory optimizations</h2>
   <ul>

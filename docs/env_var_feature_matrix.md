@@ -101,7 +101,6 @@ These variables are real runtime knobs, but they are not registered in
 | `DIFFUSION_DEVICE_COPY_BUDGET_MB` | DiffusionGemma on ggml_cuda | Device-copy cache cap when the model does not fit VRAM (prompt K/V, masks, activations) | `768` | not registered | no |
 | `DIFFUSION_SEGMENTED_DECODE` | DiffusionGemma on ggml_cuda | Force per-layer fused decode on (`1`) / off (`0`); auto-selected when the model does not fit VRAM | auto | not registered | no |
 | `DIFFUSION_PIN_STREAMED` | DiffusionGemma on ggml_cuda | Re-home streamed (non-resident) weights into page-locked copies for DMA-speed uploads (costs RAM) | OFF | not registered | no |
-| `DIFFUSION_PROFILE` / `DIFFUSION_STEPTIME` / `DIFFUSION_FUSED_DEBUG` | DiffusionGemma | Development timing and fused-kernel debug diagnostics | OFF | not registered | no |
 
 ## Out-of-Matrix MTP / Speculative-Decoding Knobs
 
@@ -133,9 +132,6 @@ These variables are real runtime knobs, but they are not registered in
 |---|---|---|---|---|---|
 | `TS_PDF_MAX_PAGES` | PDF document input (CLI `--pdf`, server `/api/upload`) | Cap on the number of PDF pages read for text extraction and page-image rendering | `0` (all pages) | not registered | no |
 | `TS_FUSED_QKNORM_ROPE` | Qwen 3.5 / 3.6 text-only prefill on the direct `cuda` backend | Fused QK-Norm + NeoX-RoPE CUDA kernel; `0` falls back to separate norm + RoPE ops (multimodal MRoPE and other backends always use the separate path) | ON | not registered | no |
-| `TS_GGML_MANAGED_OPS` | GGML backends | **Experimental**: `1` routes ported ops through the managed C# GGML graph builders instead of the legacy native `TSGgml_*` kernels | OFF | not registered | no |
-| `TS_PREFILL_ATTN_CACHE` | managed GGML ops path (`TS_GGML_MANAGED_OPS=1`) | Prefill-attention session cache; `0` disables | ON | not registered | no |
-| `TS_PREFILL_ATTN_FLASH` | managed GGML ops path (`TS_GGML_MANAGED_OPS=1`) | Flash path for large-kvLen prefill attention; `0` reverts to the non-flash path | ON | not registered | no |
 
 ## Feature Coverage
 

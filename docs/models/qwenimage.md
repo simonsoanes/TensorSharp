@@ -222,8 +222,7 @@ into the token sequence so the edit is grounded on the original image.
   (`TS_QWEN_DIT_CACHE_MODE=easycache`).
   Knobs: `TS_QWEN_DIT_CACHE_MODE` (`off` default /`easycache`/`fbc`/`both`),
   `TS_QWEN_DIT_EASYCACHE_THRESHOLD` (default 0.2 — lower = closer to no-cache),
-  `TS_QWEN_DIT_EASYCACHE_START`/`_END` (window fractions, 0.15/0.95),
-  `TS_QWEN_DIT_CACHE_DEBUG=1` (per-step decision trace).
+  `TS_QWEN_DIT_EASYCACHE_START`/`_END` (window fractions, 0.15/0.95).
 - **First-Block-Cache** across denoise steps (reset per generation); selected
   with `TS_QWEN_DIT_CACHE_MODE=fbc`. It always computes
   block 0 per branch and skips blocks 1..59 on low-change steps — strictly less
@@ -313,7 +312,6 @@ Important toggles:
 | `TS_QWEN_DIT_CACHE_MODE` | Denoise cache: `off` (**default** — quality first, like sd.cpp), `easycache` (whole-step skip), `fbc` (First-Block-Cache), `both` |
 | `TS_QWEN_DIT_EASYCACHE_THRESHOLD` | EasyCache accumulated-change threshold (default 0.2; lower = closer to no-cache, higher = more skips) |
 | `TS_QWEN_DIT_CACHE=0` | Legacy master switch — disables all denoise caching |
-| `TS_QIMG_DEBUG=1` | Per-step velocity / latent statistics |
 
 ## 6. Generation parameters (`QwenImageParams`)
 
