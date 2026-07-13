@@ -557,7 +557,6 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecode(
         const int out_count = fold ? vocab_size : H;
 
         // ===== Persist / CUDA-graph capture setup (mirrors dense g_g4dc) =====
-        static const bool g4moe_timing = std::getenv("TS_GEMMA4_FD_TIMING") != nullptr;
         static const bool g4moe_persist = []{ const char* e = std::getenv("TS_GEMMA4_FD_PERSIST"); return e == nullptr || e[0] != '0'; }();
 
         std::vector<int> pwindow(num_layers, 0);          // padded window length per layer
@@ -603,7 +602,6 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecode(
             dc->layer_window == pwindow &&
             dc->folded == fold && dc->out_count == out_count)
         {
-            auto t_start = std::chrono::high_resolution_clock::now();
             host_read_barrier();
             // Async per-token input refresh (stream-ordered ahead of the captured
             // replay below); see the dense TSGgml_Gemma4ModelDecode reuse path for
@@ -622,7 +620,6 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecode(
                     decode_input_set_async(dc->attn_mask[l], md.data(), md.size() * sizeof(ggml_fp16_t));
                 }
             }
-            auto t_setup = std::chrono::high_resolution_clock::now();
             ggml_status st = ggml_backend_graph_compute(g_backend, dc->graph);
             if (st != GGML_STATUS_SUCCESS)
             {
@@ -630,18 +627,9 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecode(
                 dc->reset();
                 return 0;
             }
-            auto t_compute = std::chrono::high_resolution_clock::now();
             void* reuse_out = dc->folded ? logits_data : hidden_data;
             finalize_compute_with_download(dc->hidden_out, reuse_out, static_cast<std::size_t>(dc->out_count) * sizeof(float));
             host_read_barrier();
-            if (g4moe_timing)
-            {
-                auto t_end = std::chrono::high_resolution_clock::now();
-                auto ms = [](auto a, auto b){ return std::chrono::duration<double, std::milli>(b - a).count(); };
-                fprintf(stderr, "[g4moe-fd] REUSE setup=%.2f compute=%.2f download=%.2f total=%.2f ms\n",
-                    ms(t_start, t_setup), ms(t_setup, t_compute), ms(t_compute, t_end), ms(t_start, t_end));
-                fflush(stderr);
-            }
             return 1;
         }
         // Miss -> claim this request's slot to (re)build into (when persistable).

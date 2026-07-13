@@ -527,7 +527,6 @@ namespace
         const int conv_dim = 2 * key_dim + value_dim;
         const int head_tile = (num_k_heads > 0) ? (num_v_heads / num_k_heads) : 1;
 
-        static const bool fd_timing = std::getenv("TS_QWEN35_FD_TIMING") != nullptr;
         // Persistent decode graph: default ON; TS_QWEN35_FD_PERSIST=0 disables.
         // Persist mode uses ggml_set_rows (KV write) + a fixed-topology graph that is
         // built once and REPLAYED each token (upload 4 dynamic inputs + graph_compute,
@@ -582,7 +581,6 @@ namespace
         const bool fold = logits_data != nullptr && lm_head_data != nullptr &&
                           final_norm_data != nullptr && vocab_size > 0;
 
-        auto t_start = std::chrono::high_resolution_clock::now();
 
         // ===== Persist reuse fast-path: replay THIS request's captured graph =====
         // find() already matched (sig_disc, sig_kcache0); check the finer shape here.
@@ -600,7 +598,6 @@ namespace
             std::vector<ggml_fp16_t> mask_data;
             fill_flash_attn_mask(mask_data, attnKvLen, totalSeqLen);
             ggml_backend_tensor_set(dc->attn_mask, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
-            auto t_setup = std::chrono::high_resolution_clock::now();
             ggml_status st = ggml_backend_graph_compute(g_backend, dc->graph);
             if (st != GGML_STATUS_SUCCESS)
             {
@@ -608,18 +605,9 @@ namespace
                 dc->reset();
                 return 0;
             }
-            auto t_compute = std::chrono::high_resolution_clock::now();
             void* out_data = dc->folded ? logits_data : hidden_data;
             finalize_compute_with_download(dc->hidden_out, out_data, static_cast<std::size_t>(dc->out_count) * sizeof(float));
             host_read_barrier();
-            if (fd_timing)
-            {
-                auto t_end = std::chrono::high_resolution_clock::now();
-                auto ms = [](auto a, auto b){ return std::chrono::duration<double, std::milli>(b - a).count(); };
-                fprintf(stderr, "[fd-timing] REUSE setup=%.2f compute=%.2f download=%.2f total=%.2f ms\n",
-                    ms(t_start, t_setup), ms(t_setup, t_compute), ms(t_compute, t_end), ms(t_start, t_end));
-                fflush(stderr);
-            }
             return 1;
         }
         // Miss -> (re)build into this request's slot (reset in place / evict LRU).
@@ -1104,7 +1092,6 @@ namespace
 
         const std::size_t convStateBytes = static_cast<std::size_t>(convDim) * conv_dim * sizeof(float);
         const std::size_t deltaStateBytes = static_cast<std::size_t>(head_k_dim) * head_v_dim * num_v_heads * sizeof(float);
-        int state_uploads = 0;
         for (int l = 0; l < num_layers; l++)
         {
             const TSGgmlQwen35LayerDesc& d = layers[l];
@@ -1158,10 +1145,8 @@ namespace
                 // (cacheable COMPUTE buffer, updated in-place each token); the C#
                 // seed path invalidates these on (re)seed so the host state is
                 // re-uploaded. Mirrors the KV-cache binding.
-                size_t ul_before = upload_list.size();
                 bind_or_mark(t.conv_state_in, d.conv_state_in, convStateBytes, true, GGML_BACKEND_BUFFER_USAGE_COMPUTE);
                 bind_or_mark(t.delta_state_in, d.delta_state_in, deltaStateBytes, true, GGML_BACKEND_BUFFER_USAGE_COMPUTE);
-                state_uploads += (int)(upload_list.size() - ul_before);
             }
         }
         if (fold)
@@ -1254,7 +1239,6 @@ namespace
             ggml_backend_tensor_set(shared_attn_mask, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
         }
 
-        auto t_setup = std::chrono::high_resolution_clock::now();
 
         ggml_status status = ggml_backend_graph_compute(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
@@ -1263,7 +1247,6 @@ namespace
             if (persist) { ggml_backend_buffer_free(persist_buf); ggml_free(ctx); }
             return 0;
         }
-        auto t_compute = std::chrono::high_resolution_clock::now();
 
         // GDN state is device-resident (updated in-place). Download either the
         // folded logits or the bare hidden state.
@@ -1291,14 +1274,6 @@ namespace
             dcb->folded = fold;
             dcb->out_count = out_count;
             dcb->valid = true;
-        }
-        if (fd_timing)
-        {
-            auto t_end = std::chrono::high_resolution_clock::now();
-            auto ms = [](auto a, auto b){ return std::chrono::duration<double, std::milli>(b - a).count(); };
-            fprintf(stderr, "[fd-timing] %s setup=%.1f compute=%.1f download=%.1f total=%.1f ms (upload_list=%zu state_uploads=%d nodes=%d)\n",
-                persist ? "BUILD" : "", ms(t_start, t_setup), ms(t_setup, t_compute), ms(t_compute, t_end), ms(t_start, t_end), upload_list.size(), state_uploads, ggml_graph_n_nodes(graph));
-            fflush(stderr);
         }
         clear_last_error();
         return 1;
@@ -1331,8 +1306,6 @@ TSG_EXPORT int TSGgml_Qwen35ModelDecode(
             logits_data, vocab_size,
             lm_head_data, lm_head_type, lm_head_ne0, lm_head_ne1, lm_head_bytes,
             final_norm_data);
-        if (r == 0 && std::getenv("TS_QWEN35_FD_TIMING") != nullptr)
-            fprintf(stderr, "[fd-err] %s\n", g_last_error.c_str());
         return r;
     }
     catch (const std::exception& ex)
@@ -2063,8 +2036,6 @@ TSG_EXPORT int TSGgml_Qwen35ModelDecodeBatched(
             eps, rope_base, rope_freq_scale,
             num_experts, num_experts_used, expert_ff, shared_ff,
             norm_topk, expert_weights_scale);
-        if (r == 0 && std::getenv("TS_QWEN35_FD_TIMING") != nullptr)
-            fprintf(stderr, "[fd-batched-err] %s\n", g_last_error.c_str());
         return r;
     }
     catch (const std::exception& ex) { set_last_error(ex.what()); return 0; }

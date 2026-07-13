@@ -157,7 +157,6 @@ namespace
         // skips the lm_head matmul over the first N-1 tokens. <=0 or >=N => all N.
         const int n_logits = (n_logit_rows > 0 && n_logit_rows < N) ? n_logit_rows : N;
 
-        static const bool fv_timing = std::getenv("TS_Q35_VERIFY_TIMING") != nullptr;
         // Persistent per-(N,window) graph cache (build amortization + CUDA-graph
         // capture). DEFAULT ON: the earlier reuse access-violation (0xC0000005) was the
         // 3D N-row set_rows (heads in ne2) faulting on cgraph reuse; replacing it with a
@@ -178,7 +177,6 @@ namespace
         // MTP verify (n_logits == N) keeps the persist+capture fast-replay reuse.
         // MRoPE calls are prefill-only; keep them off the persist cache too.
         const bool fv_persist = fv_persist_cfg && (n_logits >= N) && !use_mrope;
-        auto t_start = std::chrono::high_resolution_clock::now();
 
         const std::size_t convStateBytes = static_cast<std::size_t>(convDim) * conv_dim * sizeof(float);
         const std::size_t deltaStateBytes = static_cast<std::size_t>(head_k_dim) * head_v_dim * num_v_heads * sizeof(float);
@@ -245,9 +243,7 @@ namespace
                         gi++;
                     }
                 }
-                auto t_su = std::chrono::high_resolution_clock::now();
                 if (ggml_backend_graph_compute(g_backend, c.graph) != GGML_STATUS_SUCCESS) { c.reset(); break; }
-                auto t_cu = std::chrono::high_resolution_clock::now();
                 if (!resident_state)
                 {
                     int gi = 0;
@@ -264,14 +260,6 @@ namespace
                 finalize_compute_with_download(c.logits_out, logits_data, static_cast<std::size_t>(vocab_size) * n_logits * sizeof(float));
                 host_read_barrier();
                 c.lru = ++g_q35vc_clock;
-                if (fv_timing)
-                {
-                    auto t_end = std::chrono::high_resolution_clock::now();
-                    auto ms = [](auto a, auto b){ return std::chrono::duration<double, std::milli>(b - a).count(); };
-                    fprintf(stderr, "[fv-timing] REUSE N=%d setup=%.2f compute=%.2f total=%.2f ms\n",
-                        N, ms(t_start, t_su), ms(t_su, t_cu), ms(t_start, t_end));
-                    fflush(stderr);
-                }
                 clear_last_error();
                 return 1;
             }
@@ -834,14 +822,12 @@ namespace
             }
         }
 
-        auto t_setup = std::chrono::high_resolution_clock::now();
         ggml_status status = ggml_backend_graph_compute(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("Qwen3.5 model verify: graph execution failed.");
             return 0;
         }
-        auto t_compute = std::chrono::high_resolution_clock::now();
 
         // Download the post-window GDN state (per recurrent layer) + outputs. Resident
         // mode skips the state download (it stays device-resident, updated in-place).
@@ -862,14 +848,6 @@ namespace
         finalize_compute_with_download(logits_out_t, logits_data, static_cast<std::size_t>(vocab_size) * n_logits * sizeof(float));
         host_read_barrier();
 
-        if (fv_timing)
-        {
-            auto t_end = std::chrono::high_resolution_clock::now();
-            auto ms = [](auto a, auto b){ return std::chrono::duration<double, std::milli>(b - a).count(); };
-            fprintf(stderr, "[fv-timing] BUILD N=%d setup=%.1f compute=%.1f download=%.1f total=%.1f ms\n",
-                N, ms(t_start, t_setup), ms(t_setup, t_compute), ms(t_compute, t_end), ms(t_start, t_end));
-            fflush(stderr);
-        }
 
         // Persist: keep ctx/graph/buffer alive + record tensor handles so later steps
         // of the same (N, window) shape just upload inputs + replay (capturable).
@@ -940,8 +918,6 @@ TSG_EXPORT int TSGgml_Qwen35ModelVerify(
             logits_data, vocab_size,
             lm_head_data, lm_head_type, lm_head_ne0, lm_head_ne1, lm_head_bytes,
             final_norm_data, normed_out, n_logit_rows, mrope_pos, mrope_sections);
-        if (r == 0 && std::getenv("TS_Q35_VERIFY_TIMING") != nullptr)
-            fprintf(stderr, "[fv-err] %s\n", g_last_error.c_str());
         return r;
     }
     catch (const std::exception& ex) { set_last_error(ex.what()); return 0; }

@@ -266,7 +266,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecode(
         // layer's PADDED attention window, its valid (unmasked) length, and the KV
         // write row, then either replay the cached graph or fall through to build
         // a fresh persistent one.
-        static const bool g4_fd_timing = std::getenv("TS_GEMMA4_FD_TIMING") != nullptr;
         static const bool g4_persist = []{ const char* e = std::getenv("TS_GEMMA4_FD_PERSIST"); return e == nullptr || e[0] != '0'; }();
 
         std::vector<int> pwindow(num_layers, 0);          // padded window length per layer
@@ -321,7 +320,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecode(
             dc->layer_window == pwindow &&
             dc->folded == fold && dc->out_count == (fold ? vocab_size : hidden_size))
         {
-            auto t_start = std::chrono::high_resolution_clock::now();
             host_read_barrier();
             // Per-token input refresh. These ~N*2 small host->device copies feed the
             // captured graph's INPUT tensors; they are not graph nodes. Issue them
@@ -350,7 +348,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecode(
                     decode_input_set_async(dc->attn_mask[l], md.data(), md.size() * sizeof(ggml_fp16_t));
                 }
             }
-            auto t_setup = std::chrono::high_resolution_clock::now();
             ggml_status st = ggml_backend_graph_compute(g_backend, dc->graph);
             if (st != GGML_STATUS_SUCCESS)
             {
@@ -358,18 +355,9 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecode(
                 dc->reset();
                 return 0;
             }
-            auto t_compute = std::chrono::high_resolution_clock::now();
             void* out_data = dc->folded ? logits_data : hidden_data;
             finalize_compute_with_download(dc->hidden_out, out_data, static_cast<std::size_t>(dc->out_count) * sizeof(float));
             host_read_barrier();
-            if (g4_fd_timing)
-            {
-                auto t_end = std::chrono::high_resolution_clock::now();
-                auto ms = [](auto a, auto b){ return std::chrono::duration<double, std::milli>(b - a).count(); };
-                fprintf(stderr, "[g4-fd] REUSE setup=%.2f compute=%.2f download=%.2f total=%.2f ms\n",
-                    ms(t_start, t_setup), ms(t_setup, t_compute), ms(t_compute, t_end), ms(t_start, t_end));
-                fflush(stderr);
-            }
             clear_last_error();
             return 1;
         }
@@ -382,7 +370,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecode(
             else             g_g4dc_pool.drop(g4_sig, g4_kc0);
         }
 
-        auto t_build_start = std::chrono::high_resolution_clock::now();
 
         // Create GGML context. Persist mode uses a raw no_alloc ctx kept alive in
         // g_g4dc (stable tensor addresses for capture); legacy uses the pool.
@@ -426,15 +413,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecode(
         ggml_tensor* ple_model_proj_norm_t = nullptr;
         if (ple_gather)
         {
-            static std::atomic<int> s_ple_dbg_once{0};
-            if (g4_fd_timing && s_ple_dbg_once.fetch_add(1) == 0)
-            {
-                fprintf(stderr, "[g4-fd] ple_gather dims: table ne0=%lld ne1=%lld type=%d, proj ne0=%lld ne1=%lld type=%d, num_layers=%d ple_dim=%d total=%d hidden=%d token=%d\n",
-                    (long long)ple_token_embd_ne0, (long long)ple_token_embd_ne1, ple_token_embd_type,
-                    (long long)ple_model_proj_ne0, (long long)ple_model_proj_ne1, ple_model_proj_type,
-                    num_layers, ple_dim, total_ple_dim, hidden_size, ple_token_id);
-                fflush(stderr);
-            }
             ple_table_t = ggml_new_tensor_2d(ctx, static_cast<ggml_type>(ple_token_embd_type),
                 ple_token_embd_ne0, ple_token_embd_ne1);
             ple_ids_t = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
@@ -829,7 +807,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecode(
         }
         ggml_build_forward_expand(graph, out_hidden);
 
-        auto t_graph_done = std::chrono::high_resolution_clock::now();
 
         // Bind weight data
         ggml_backend_dev_t dev = ggml_backend_get_device(g_backend);
@@ -930,7 +907,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecode(
                 bind_or_mark(ple_model_proj_norm_t, const_cast<void*>(static_cast<const void*>(ple_model_proj_norm_data)), static_cast<std::size_t>(ple_dim) * sizeof(float), true);
         }
 
-        auto t_bind_done = std::chrono::high_resolution_clock::now();
 
         // Allocate backend buffer. Reuse a persistent compute buffer across
         // decode steps instead of allocating a fresh one every token (llama.cpp
@@ -961,7 +937,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecode(
             }
         }
 
-        auto t_alloc_done = std::chrono::high_resolution_clock::now();
 
         // Drain pending async work before CPU memcpys from C# tensor buffers.
         host_read_barrier();
@@ -1005,7 +980,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecode(
             }
         }
 
-        auto t_upload_done = std::chrono::high_resolution_clock::now();
 
         // Execute single graph
         ggml_status status = ggml_backend_graph_compute(g_backend, graph);
@@ -1016,21 +990,7 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecode(
             return 0;
         }
 
-        auto t_compute_done = std::chrono::high_resolution_clock::now();
 
-        static const bool g4_ple_debug = std::getenv("TS_G4_PLE_DEBUG") != nullptr;
-        if (g4_ple_debug && ple_input != nullptr)
-        {
-            std::vector<float> dbg(static_cast<std::size_t>(total_ple_dim));
-            ggml_backend_synchronize(g_backend);
-            ggml_backend_tensor_get(ple_input, dbg.data(), 0, dbg.size() * sizeof(float));
-            double sum = 0; for (float v : dbg) sum += v;
-            fprintf(stderr, "[g4-ple] mode=%s pos=%d tok=%d nodes=%d first=[%.6f %.6f %.6f %.6f %.6f %.6f] sum=%.4f l1=[%.6f %.6f] l41=[%.6f %.6f]\n",
-                ple_gather ? "gather" : "upload", position, ple_token_id, ggml_graph_n_nodes(graph),
-                dbg[0], dbg[1], dbg[2], dbg[3], dbg[4], dbg[5], sum,
-                dbg[256], dbg[257], dbg[41*256], dbg[41*256+1]);
-            fflush(stderr);
-        }
 
         // Download hidden state (async blit on Metal in async mode), or the
         // folded logits[vocab] when the lm_head was folded into the graph.
@@ -1065,18 +1025,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecode(
             g4dc->folded = fold;
             g4dc->out_count = g4_out_count;
             g4dc->valid = true;
-        }
-        if (g4_fd_timing)
-        {
-            auto t_end = std::chrono::high_resolution_clock::now();
-            auto ms = [](auto a, auto b){ return std::chrono::duration<double, std::milli>(b - a).count(); };
-            fprintf(stderr, "[g4-fd] BUILD total=%.2f ms (persist=%d upload_list=%zu graph=%.2f bind=%.2f alloc=%.2f upload=%.2f compute=%.2f download=%.2f)\n",
-                ms(t_build_start, t_end), can_persist ? 1 : 0, upload_list.size(),
-                ms(t_build_start, t_graph_done), ms(t_graph_done, t_bind_done),
-                ms(t_bind_done, t_alloc_done),
-                ms(t_alloc_done, t_upload_done), ms(t_upload_done, t_compute_done),
-                ms(t_compute_done, t_end));
-            fflush(stderr);
         }
 
         clear_last_error();

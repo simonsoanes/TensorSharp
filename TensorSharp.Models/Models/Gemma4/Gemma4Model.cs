@@ -6129,12 +6129,9 @@ namespace TensorSharp.Models
 
         // Decode attention parallelises across query heads only when there is
         // enough work to amortise the fork/join (long context); short-context
-        // decode is dominated by the matmuls and stays serial. Set
-        // TS_CPU_NO_PAR_ATTN=1 to force the serial path (A/B / correctness).
-        private static readonly bool s_noParallelHeads =
-            string.Equals(Environment.GetEnvironmentVariable("TS_CPU_NO_PAR_ATTN"), "1", StringComparison.Ordinal);
+        // decode is dominated by the matmuls and stays serial.
         private static bool ShouldParallelizeHeads(int numHeads, int attendLen) =>
-            !s_noParallelHeads && numHeads > 1 && attendLen >= 128 && Environment.ProcessorCount > 1;
+            numHeads > 1 && attendLen >= 128 && Environment.ProcessorCount > 1;
 
         private unsafe void AttentionDecodeWithWindowF16(Tensor q, Tensor kCache, Tensor vCache,
             Tensor result, int numHeads, int numKVHeads, int keyDim, int valDim,

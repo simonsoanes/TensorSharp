@@ -180,7 +180,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatched(
 
         // Persist (CUDA-graph capture) gate: identical to the single-stream
         // g_g4dc. Capturable when on CUDA and TS_GEMMA4_FD_PERSIST != 0.
-        static const bool g4b_timing = std::getenv("TS_GEMMA4_FD_TIMING") != nullptr;
         static const bool g4b_persist = []{ const char* e = std::getenv("TS_GEMMA4_FD_PERSIST"); return e == nullptr || e[0] != '0'; }();
         bool can_persist = g4b_persist && g_backend_type == BACKEND_TYPE_CUDA;
 
@@ -259,7 +258,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatched(
             }
             finalize_compute_with_download(dc->logits_out, logits_data, static_cast<std::size_t>(vocab_size) * n_seqs * sizeof(float));
             host_read_barrier();
-            if (g4b_timing) { fprintf(stderr, "[g4-batched] replay N=%d\n", n_seqs); fflush(stderr); }
             clear_last_error();
             return 1;
         }
@@ -652,7 +650,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatched(
             e.sig_disc = sig_disc; e.sig_kc = sig_kc;
             e.num_layers = num_layers; e.hidden_size = hidden_size; e.n_seqs = n_seqs; e.vocab = vocab_size;
             e.valid = true;
-            if (g4b_timing) { fprintf(stderr, "[g4-batched] BUILT persist N=%d win0=%d\n", n_seqs, winvec.empty()?0:winvec[0]); fflush(stderr); }
         }
         clear_last_error();
         return 1;
@@ -713,7 +710,6 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecodeBatched(
         int maxTotal = 0;
         for (int s = 0; s < n_seqs; s++) maxTotal = std::max(maxTotal, positions[s] + 1);
 
-        static const bool g4mb_timing = std::getenv("TS_GEMMA4_FD_TIMING") != nullptr;
         static const bool g4mb_persist = []{ const char* e = std::getenv("TS_GEMMA4_FD_PERSIST"); return e == nullptr || e[0] != '0'; }();
         bool can_persist = g4mb_persist && g_backend_type == BACKEND_TYPE_CUDA;
         auto roundup_stride = [](int v){ return ((v + kG4BatchPersistKvStride - 1) / kG4BatchPersistKvStride) * kG4BatchPersistKvStride; };
@@ -773,7 +769,6 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecodeBatched(
             { set_last_error("Gemma4 MoE batched decode: replay failed."); dc->reset(); return 0; }
             finalize_compute_with_download(dc->logits_out, logits_data, static_cast<std::size_t>(vocab_size) * n_seqs * sizeof(float));
             host_read_barrier();
-            if (g4mb_timing) { fprintf(stderr, "[g4moe-batched] replay N=%d\n", n_seqs); fflush(stderr); }
             clear_last_error();
             return 1;
         }
@@ -1092,7 +1087,6 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecodeBatched(
             e.layer_window = winvec; e.sig_disc = sig_disc; e.sig_kc = sig_kc;
             e.num_layers = num_layers; e.hidden_size = H; e.n_seqs = n_seqs; e.vocab = vocab_size;
             e.valid = true;
-            if (g4mb_timing) { fprintf(stderr, "[g4moe-batched] BUILT persist N=%d win0=%d\n", n_seqs, winvec.empty()?0:winvec[0]); fflush(stderr); }
         }
         clear_last_error();
         return 1;

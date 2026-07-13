@@ -1298,30 +1298,13 @@ namespace TensorSharp.Models
             return maxAbs;
         }
 
-        // A/B knob: TENSORSHARP_CPU_NO_SIMD_Q40=1 forces the scalar Q4_0 dot
-        // (to measure the SIMD speedup / fall back if a SIMD bug is suspected).
-        private static readonly bool s_scalarQ40 =
-            string.Equals(Environment.GetEnvironmentVariable("TENSORSHARP_CPU_NO_SIMD_Q40"), "1", StringComparison.Ordinal);
-
-        // A/B knob: TENSORSHARP_CPU_NO_SIMD_KQUANT=1 forces the scalar K-quant
-        // dots (Q4_K/Q5_K/Q6_K) so the SIMD speedup can be measured and a
-        // suspected SIMD bug bypassed without rebuilding.
-        private static readonly bool s_scalarKQuant =
-            string.Equals(Environment.GetEnvironmentVariable("TENSORSHARP_CPU_NO_SIMD_KQUANT"), "1", StringComparison.Ordinal);
-
-        // Diagnostic: lets benchmarks confirm which K-quant dot path is live.
-        internal static bool ScalarKQuantForced => s_scalarKQuant;
-        internal static bool Avx2Available => Avx2.IsSupported;
 
         private static unsafe float VecDotQ4_0Q8_0(byte* q4, byte* q8, int blockCount)
         {
-            if (!s_scalarQ40)
-            {
-                if (Avx512F.IsSupported && Avx512BW.IsSupported)
-                    return VecDotQ4_0Q8_0Avx512(q4, q8, blockCount);
-                if (Avx2.IsSupported)
-                    return VecDotQ4_0Q8_0Avx2(q4, q8, blockCount);
-            }
+            if (Avx512F.IsSupported && Avx512BW.IsSupported)
+                return VecDotQ4_0Q8_0Avx512(q4, q8, blockCount);
+            if (Avx2.IsSupported)
+                return VecDotQ4_0Q8_0Avx2(q4, q8, blockCount);
 
             float sum = 0.0f;
             for (int block = 0; block < blockCount; block++)
@@ -1614,7 +1597,7 @@ namespace TensorSharp.Models
 
         private static unsafe float VecDotQ4_KQ8_K(byte* q4k, byte* q8k, int superBlockCount)
         {
-            if (!s_scalarKQuant && Avx2.IsSupported)
+            if (Avx2.IsSupported)
                 return VecDotQ4_KQ8_KAvx2(q4k, q8k, superBlockCount);
 
             return VecDotQ4_KQ8_KScalar(q4k, q8k, superBlockCount);
@@ -1717,7 +1700,7 @@ namespace TensorSharp.Models
 
         private static unsafe float VecDotQ5_KQ8_K(byte* q5k, byte* q8k, int superBlockCount)
         {
-            if (!s_scalarKQuant && Avx2.IsSupported)
+            if (Avx2.IsSupported)
                 return VecDotQ5_KQ8_KAvx2(q5k, q8k, superBlockCount);
 
             return VecDotQ5_KQ8_KScalar(q5k, q8k, superBlockCount);
@@ -1832,13 +1815,10 @@ namespace TensorSharp.Models
 
         private static unsafe float VecDotQ6_KQ8_K(byte* q6k, byte* q8k, int superBlockCount)
         {
-            if (!s_scalarKQuant)
-            {
-                if (Avx2.IsSupported)
-                    return VecDotQ6_KQ8_KAvx2(q6k, q8k, superBlockCount);
-                if (Ssse3.IsSupported)
-                    return VecDotQ6_KQ8_KSse(q6k, q8k, superBlockCount);
-            }
+            if (Avx2.IsSupported)
+                return VecDotQ6_KQ8_KAvx2(q6k, q8k, superBlockCount);
+            if (Ssse3.IsSupported)
+                return VecDotQ6_KQ8_KSse(q6k, q8k, superBlockCount);
 
             return VecDotQ6_KQ8_KScalar(q6k, q8k, superBlockCount);
         }
