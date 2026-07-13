@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -147,22 +147,18 @@ namespace TensorSharp.Models
             int headDim = _hiddenSize / _numHeads;
             int halfDim = headDim / 2;
 
-            bool debug = Environment.GetEnvironmentVariable("DUMP_VISION") == "1";
 
             // 1. Patch embedding (Conv2D, raster order)
             long t0 = Stopwatch.GetTimestamp();
             var hidden = PatchEmbed(pixelValues, resizedH, resizedW, gridH, gridW);
             long patchEmbedTicks = Stopwatch.GetTimestamp() - t0;
-            if (debug) DumpTensor(hidden, "After PatchEmbed (raster)", numPatches);
 
             // 2. Position embedding (bilinear interpolation, raster order)
             AddPositionEmbedding(hidden, gridH, gridW);
-            if (debug) DumpTensor(hidden, "After PosEmbed (raster)", numPatches);
 
             // 3. Reorder from raster to block order
             var blockOrdered = ReorderToBlockOrder(hidden, gridH, gridW);
             hidden.Dispose();
-            if (debug) DumpTensor(blockOrdered, "After BlockReorder", numPatches);
 
             // 4. Build block-order grid coordinate arrays for RoPE
             RopeCache ropeCache = GetOrCreateRopeCache(gridH, gridW, numPatches, halfDim);
@@ -186,8 +182,6 @@ namespace TensorSharp.Models
                     Console.Write($"\r  Vision encoder block {i + 1}/{_blockCount}...");
                     blockOrdered = EncoderBlock(blockOrdered, i, numPatches, headDim, halfDim,
                         ropeCache.CosTable, ropeCache.SinTable);
-                    if (debug && (i == 0 || i == _blockCount - 1))
-                        DumpTensor(blockOrdered, $"After block {i}", numPatches);
                     // Flush MLX's lazy graph at every block boundary. Without this
                     // the [numHeads, numPatches, numPatches] attention-scores
                     // intermediate (~340 MB at 768x768, multiple GB for larger
@@ -210,7 +204,6 @@ namespace TensorSharp.Models
             // 6. Post-LayerNorm
             var postNormed = LayerNormOp(blockOrdered, "v.post_ln.weight", "v.post_ln.bias");
             blockOrdered.Dispose();
-            if (debug) DumpTensor(postNormed, "After PostLN", numPatches);
 
             // 7. Spatial merge + projection
             long projStart = Stopwatch.GetTimestamp();
@@ -227,7 +220,6 @@ namespace TensorSharp.Models
 
             var projected = LinearForwardWithBias(fc1, "mm.2.weight", "mm.2.bias");
             long projTicks = Stopwatch.GetTimestamp() - projStart;
-            if (debug) DumpTensor(projected, "Final projected", mergedPatches);
 
             double msPerTick = 1000.0 / Stopwatch.Frequency;
             double totalMs = (Stopwatch.GetTimestamp() - encodeStart) * msPerTick;
@@ -473,10 +465,8 @@ namespace TensorSharp.Models
                     _hostModel?.YieldGpuComputeLock();
                 return ok;
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                if (Environment.GetEnvironmentVariable("TS_VBENCH_DIAG") == "1")
-                    Console.Error.WriteLine($"\n[diag] WholeEncoderFused FELL BACK: {ex.GetType().Name}: {ex.Message}");
                 return false;
             }
         }
@@ -807,22 +797,6 @@ namespace TensorSharp.Models
         {
             _weights.TryGetValue(biasName, out var bias);
             return Ops.LayerNorm(null, input, _weights[weightName], bias, _eps);
-        }
-
-        private unsafe void DumpTensor(Tensor t, string label, int numRows)
-        {
-            float* ptr = GetFloatPtr(t);
-            int dim = (int)t.Sizes[1];
-            Console.Write($"\n  {label} [{numRows}x{dim}]: row0=[");
-            for (int i = 0; i < Math.Min(5, dim); i++)
-                Console.Write($"{ptr[i]:F6}{(i < 4 ? ", " : "")}");
-            Console.Write($"] last_row=[");
-            float* lastRow = ptr + (numRows - 1) * dim;
-            for (int i = 0; i < Math.Min(5, dim); i++)
-                Console.Write($"{lastRow[i]:F6}{(i < 4 ? ", " : "")}");
-            float norm0 = 0, normLast = 0;
-            for (int i = 0; i < dim; i++) { norm0 += ptr[i] * ptr[i]; normLast += lastRow[i] * lastRow[i]; }
-            Console.WriteLine($"] norm0={MathF.Sqrt(norm0):F4} normLast={MathF.Sqrt(normLast):F4}");
         }
 
         private static unsafe float* GetFloatPtr(Tensor t) =>

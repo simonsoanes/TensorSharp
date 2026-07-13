@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -371,10 +371,7 @@ namespace TensorSharp.Models.QwenImage
                     }
                 }
                 sched.Step(latents, v, step);
-                if (Environment.GetEnvironmentVariable("TS_QIMG_DEBUG") == "1")
-                    Console.WriteLine($"  [pipe] step {step + 1}/{sched.Steps} sigma={t01:F3} vel {QwenImageDiT.Stat(v, v.Length)} | latent {QwenImageDiT.Stat(latents, latents.Length)}");
-                else
-                    Console.Write($"\r  denoise step {step + 1}/{sched.Steps}   ");
+                Console.Write($"\r  denoise step {step + 1}/{sched.Steps}   ");
 
                 // Live progress: a tick every step (so the UI never looks stuck) plus a decoded
                 // preview of the current latent on evenly-spaced steps. Previews are decoded at

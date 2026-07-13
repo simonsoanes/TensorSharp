@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -79,10 +79,6 @@ namespace TensorSharp.Models.QwenImage
         private static readonly int MaxContinuousSkip =
             EnvInt("TS_QWEN_DIT_CACHE_MAXSKIP", 3);
 
-        // Per-step relative-L1 / decision trace for tuning the threshold.
-        private static readonly bool CacheDebug =
-            Environment.GetEnvironmentVariable("TS_QWEN_DIT_CACHE_DEBUG") == "1";
-
         private static float EnvFloat(string name, float dflt)
         {
             var v = Environment.GetEnvironmentVariable(name);
@@ -129,19 +125,15 @@ namespace TensorSharp.Models.QwenImage
                 state.RemainingResidual == null ||
                 state.ContinuousCached >= MaxContinuousSkip;
 
-            float relDbg = -1f;
             if (!mustCompute)
             {
-                float rel = relDbg = RelL1(firstResidualGen, state.PrevFirstResidual);
+                float rel = RelL1(firstResidualGen, state.PrevFirstResidual);
                 if (rel < CacheThreshold)
                 {
-                    if (CacheDebug) Console.WriteLine($"  [dit-cache] step {stepIndex} branch={(state == _cache[0] ? 0 : 1)} relL1={rel:F4} < {CacheThreshold:F3} -> SKIP");
                     state.ContinuousCached++;   // cache hit: keep the baseline anchored
                     return true;
                 }
             }
-            if (CacheDebug && stepIndex > 0)
-                Console.WriteLine($"  [dit-cache] step {stepIndex} branch={(state == _cache[0] ? 0 : 1)} relL1={relDbg:F4} (thr {CacheThreshold:F3}) -> compute{(mustCompute ? " (forced)" : "")}");
 
             // Compute path: re-anchor the baseline to this step's first-block residual.
             state.PrevFirstResidual = firstResidualGen;

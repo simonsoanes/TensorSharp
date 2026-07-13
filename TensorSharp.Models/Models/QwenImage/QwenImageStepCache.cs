@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -77,9 +77,6 @@ namespace TensorSharp.Models.QwenImage
         private static readonly float EndPercent =
             EnvFloat("TS_QWEN_DIT_EASYCACHE_END", 0.95f);
 
-        private static readonly bool Debug =
-            Environment.GetEnvironmentVariable("TS_QWEN_DIT_CACHE_DEBUG") == "1";
-
         // Below this step count the cache stays off: few-step (Lightning-distilled)
         // schedules give every step a large, deliberate role — approximating one skips
         // a meaningful fraction of the whole trajectory for almost no time saved.
@@ -128,7 +125,6 @@ namespace TensorSharp.Models.QwenImage
             if (!active || _prevInput == null || _prevOutput == null || _diffCond == null ||
                 (vNeg != null && _diffNeg == null) || _prevInput.Length != input.Length)
             {
-                if (Debug && _enabled) Console.WriteLine($"  [step-cache] step {step}: compute ({(active ? "no prior state" : "outside window")})");
                 return false;
             }
 
@@ -144,18 +140,12 @@ namespace TensorSharp.Models.QwenImage
                 _cumulativeChange += predicted;
                 if (_cumulativeChange < Threshold)
                 {
-                    if (Debug) Console.WriteLine($"  [step-cache] step {step}: SKIP (cum predicted change {_cumulativeChange:F4} < {Threshold:F3})");
                     Apply(_diffCond, input, vCond);
                     if (vNeg != null) Apply(_diffNeg, input, vNeg);
                     _skipped++;
                     return true;
                 }
-                if (Debug) Console.WriteLine($"  [step-cache] step {step}: compute (cum predicted change {_cumulativeChange:F4} >= {Threshold:F3})");
                 _cumulativeChange = 0f;
-            }
-            else if (Debug)
-            {
-                Console.WriteLine($"  [step-cache] step {step}: compute (rate not established)");
             }
             return false;
         }

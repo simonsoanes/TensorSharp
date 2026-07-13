@@ -21,18 +21,6 @@ namespace TensorSharp.Models
 {
     internal static class ManagedQuantizedOps
     {
-        // Diagnostic: env-gated wall-time + byte accounting for the managed
-        // quantized matmul (the dominant decode cost). Enabled by
-        // TS_CPU_MATMUL_PROFILE=1; read/reset via the public helpers below.
-        internal static readonly bool MatmulProfileEnabled =
-            string.Equals(Environment.GetEnvironmentVariable("TS_CPU_MATMUL_PROFILE"), "1", StringComparison.Ordinal);
-        private static long s_matmulTicks;
-        private static long s_matmulBytes;
-        private static long s_matmulCalls;
-        internal static void ResetMatmulProfile() { s_matmulTicks = 0; s_matmulBytes = 0; s_matmulCalls = 0; }
-        internal static (double ms, double gib, long calls) ReadMatmulProfile() =>
-            (s_matmulTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency, s_matmulBytes / (1024.0 * 1024 * 1024), s_matmulCalls);
-
         private const int QK4_0 = 32;
         private const int QK4_1 = 32;
         private const int QK5_0 = 32;
@@ -337,8 +325,6 @@ namespace TensorSharp.Models
                         }
                     }
 
-                    long profStart = MatmulProfileEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
-
                     bool useParallel = outDim >= 128 && (long)rowCount * outDim >= 512 && Environment.ProcessorCount > 1;
                     if (useParallel)
                     {
@@ -347,13 +333,6 @@ namespace TensorSharp.Models
                     else
                     {
                         ComputeColumnRange(0, outDim);
-                    }
-
-                    if (MatmulProfileEnabled)
-                    {
-                        System.Threading.Interlocked.Add(ref s_matmulTicks, System.Diagnostics.Stopwatch.GetTimestamp() - profStart);
-                        System.Threading.Interlocked.Add(ref s_matmulBytes, (long)outDim * weightRowBytes);
-                        System.Threading.Interlocked.Increment(ref s_matmulCalls);
                     }
                 }
             }

@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -170,8 +170,6 @@ namespace TensorSharp.Models
             Tensor hiddenStates = Embedding(flatTokens);
             ScaleEmbedding(hiddenStates);
 
-            bool dumpDiag = Environment.GetEnvironmentVariable("TS_GEMMA4_DIAG") == "1";
-            if (dumpDiag) Console.WriteLine($"[g4-batched] after-embed: {TensorChecksum(hiddenStates, "embed")}");
 
             // PLE: compute once, slice per layer.
             Tensor perLayerInputs = null;
@@ -364,7 +362,6 @@ namespace TensorSharp.Models
                     Ops.Mul(residual, residual, _layerScalars[layer]);
 
                 hiddenStates = residual;
-                if (dumpDiag) Console.WriteLine($"[g4-batched] after-layer-{layer}: {TensorChecksum(hiddenStates, $"L{layer}")}");
             }
 
             // Final norm + LM head.
@@ -474,9 +471,6 @@ namespace TensorSharp.Models
             }
             return data;
         }
-
-        private static string TensorChecksum(Tensor t, string label)
-            => DiagChecksum(t, label);
 
         private Tensor BuildRoPEPositionsTensor(int[] tokenPositions, int numHeads)
         {

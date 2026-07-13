@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using TensorSharp.Core;
 
 namespace TensorSharp.MLX
@@ -1013,10 +1013,8 @@ namespace TensorSharp.MLX
                         length = nextLength;
                         return true;
                     }
-                    catch (Exception ex)
+                    catch (Exception)
                     {
-                        if (string.Equals(Environment.GetEnvironmentVariable("TS_MLX_GDN_NATIVE_DEBUG"), "1", StringComparison.Ordinal))
-                            Console.WriteLine($"[MLX] Native Qwen35 GDN disabled for this call: {ex.Message}");
                         return false;
                     }
                     finally
@@ -1324,10 +1322,8 @@ namespace TensorSharp.MLX
                     nextDelta = default;
                     return true;
                 }
-                catch (Exception ex)
+                catch (Exception)
                 {
-                    if (string.Equals(Environment.GetEnvironmentVariable("TS_MLX_GDN_NATIVE_DEBUG"), "1", StringComparison.Ordinal))
-                        Console.WriteLine($"[MLX] Packed native Qwen35 GDN disabled for this call: {ex.Message}");
                     return false;
                 }
                 finally
@@ -1560,10 +1556,8 @@ namespace TensorSharp.MLX
                             nextDelta = default;
                             return true;
                         }
-                        catch (Exception ex)
+                        catch (Exception)
                         {
-                            if (string.Equals(Environment.GetEnvironmentVariable("TS_MLX_GDN_NATIVE_DEBUG"), "1", StringComparison.Ordinal))
-                                Console.WriteLine($"[MLX] Packed Qwen35 GDN kernels disabled for this call: {ex.Message}");
                             MlxNative.FreeArray(q);
                             MlxNative.FreeArray(k);
                             MlxNative.FreeArray(v);

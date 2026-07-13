@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -135,14 +135,6 @@ namespace TensorSharp.Models.QwenImage
         protected override bool ShouldPreloadCudaQuantWeightToDevice(string weightName)
             => !NativeBlockOn;
 
-        private static readonly bool DebugOn = Environment.GetEnvironmentVariable("TS_QIMG_DEBUG") == "1";
-        private unsafe void Dbg(string name, Tensor t)
-        {
-            if (!DebugOn) return;
-            int n = (int)t.ElementCount();
-            var h = TensorToHost(t, n);
-            Console.WriteLine($"  [dit] {name,-12} {Stat(h, n)}");
-        }
         internal static string Stat(float[] a, int n)
         {
             double mn = double.MaxValue, mx = double.MinValue, sum = 0; int nan = 0;
@@ -180,7 +172,6 @@ namespace TensorSharp.Models.QwenImage
             // time_text_embed: sinusoidal(256) -> linear_1 -> SiLU -> linear_2  => temb[2,3072] (t and 0)
             Tensor temb = TimeEmbed(timestep01);   // [2, 3072]
 
-            var blkSw = TimingOn ? System.Diagnostics.Stopwatch.StartNew() : null;
             if (NativeBlockOn)
             {
                 // Stage 7: run all 60 blocks via the fused native kernels on host arrays
@@ -202,9 +193,7 @@ namespace TensorSharp.Models.QwenImage
                 {
                     if (WholeModelOn)
                     {
-                        var swW = TimingOn ? System.Diagnostics.Stopwatch.StartNew() : null;
                         bool ok = TryWholeBlocks(imgHost, imgSeq, txtHost, txtSeq, temb, modulateIndex, rope, start, NumLayers - start);
-                        if (swW != null) { swW.Stop(); Console.WriteLine($"  [dit-timing] whole-model {NumLayers - start}-block graph imgSeq={imgSeq} txtSeq={txtSeq}: {swW.Elapsed.TotalMilliseconds:F0}ms"); }
                         if (ok) return;
                     }
                     // Offload: a few chunked whole-model graphs (in-graph modulation, weights
@@ -269,14 +258,7 @@ namespace TensorSharp.Models.QwenImage
                 for (int layer = 0; layer < NumLayers; layer++)
                 {
                     Block(ref img, ref txt, temb, imgSeq, txtSeq, layer, modulateIndex, rope);
-                    if (DebugOn) Dbg($"img@blk{layer}", img);
                 }
-            }
-            if (blkSw != null)
-            {
-                blkSw.Stop();
-                string mode = NativeBlockOn ? (FusedBlockOn ? "fused" : "3-call") : "managed";
-                Console.WriteLine($"  [dit-timing] {mode} {NumLayers}-block loop imgSeq={imgSeq} txtSeq={txtSeq}: {blkSw.Elapsed.TotalMilliseconds:F0}ms");
             }
             temb.Dispose();
             txt.Dispose();
@@ -286,7 +268,6 @@ namespace TensorSharp.Models.QwenImage
             Tensor outT = LinearBias(normed, "proj_out.weight", "proj_out.bias"); normed.Dispose();
             float[] velocity = TensorToHost(outT, (long)imgSeq * InCh);
             outT.Dispose();
-            if (DebugOn) { var st = Stat(velocity, velocity.Length); Console.WriteLine($"  [dit] velocity {st}"); }
             return velocity;
         }
 
