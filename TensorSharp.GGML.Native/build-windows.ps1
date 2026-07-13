@@ -113,12 +113,21 @@ function Get-DefaultVisualStudioGenerator {
         return ""
     }
 
-    $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($installPath)) {
+    $installationVersion = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationVersion
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($installationVersion)) {
         return ""
     }
 
-    return "Visual Studio 17 2022"
+    # Map the installed VS major version to its CMake generator name; a
+    # hardcoded generator breaks on machines that only carry a different VS
+    # (e.g. GitHub's windows-latest image now ships Visual Studio 2026 only).
+    switch (("$installationVersion".Trim() -split '\.')[0]) {
+        "16" { return "Visual Studio 16 2019" }
+        "17" { return "Visual Studio 17 2022" }
+        "18" { return "Visual Studio 18 2026" }
+        # Unknown/newer VS: return nothing and let CMake pick its own default.
+        default { return "" }
+    }
 }
 
 for ($i = 0; $i -lt $RemainingArgs.Length; $i++) {

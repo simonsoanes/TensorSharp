@@ -88,7 +88,11 @@
       <Output TaskParameter="ConsoleOutput" PropertyName="_ClExeDir" />
     </Exec>
     <PropertyGroup Condition="'$(_CompilerBinDir)' == '' And '$(_ClExeDir)' != ''">
-      <_ClExeDirClean>$(_ClExeDir.Trim().TrimEnd('\'))</_ClExeDirClean>
+      <!-- vswhere prints one line per installed MSVC toolset and Exec joins them
+           with ';', which nvcc would reject as a single bogus compiler-bindir
+           path. Keep only the first (oldest) toolset: nvcc caps the host cl
+           version it accepts, so the oldest installed toolset is the safest. -->
+      <_ClExeDirClean>$(_ClExeDir.Split(';')[0].Trim().TrimEnd('\'))</_ClExeDirClean>
       <_CompilerBinDir>--compiler-bindir=&quot;$(_ClExeDirClean)&quot;</_CompilerBinDir>
     </PropertyGroup>
     <MakeDir Condition="'$(_NvccExitCode)' == '0'" Directories="$(PtxOutputDir);$(CudaPtxStampDir)" />

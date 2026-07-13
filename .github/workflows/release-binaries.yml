@@ -108,6 +108,24 @@ jobs:
           # network installer; full toolkit so the ggml CUDA backend links
           # cuBLAS and the runtime libs are present to bundle.
           method: "network"
+          # On Linux, install only cuda-toolkit-12-6: the default `cuda`
+          # metapackage also pulls in the NVIDIA driver + DKMS packages, whose
+          # kernel-module build fails on GitHub runners — and a build machine
+          # doesn't need the driver. On Windows keep the full default install.
+          sub-packages: ${{ runner.os == 'Linux' && '["toolkit"]' || '[]' }}
+
+      - name: Set up MSVC environment (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          # Pin the v143 (VS2022) toolset. windows-latest now ships Visual
+          # Studio 2026, whose default v145 (MSVC 14.5x) toolset is rejected by
+          # CUDA 12.6 nvcc as a host compiler; 14.44 is the newest toolset CUDA
+          # 12.6 accepts and is installed on the image alongside VS2026. This
+          # also sets VCToolsInstallDir, which the TensorSharp.Backends.Cuda
+          # PTX compile uses to point nvcc at the right cl.exe.
+          toolset: "14.44"
 
       - name: Resolve version
         id: ver
@@ -134,8 +152,24 @@ jobs:
           # second is incremental.
           TENSORSHARP_GGML_NATIVE_ENABLE_CUDA: ${{ matrix.cuda && 'ON' || 'OFF' }}
           TENSORSHARP_GGML_NATIVE_CUDA_ARCHITECTURES: ${{ matrix.cuda && (github.event.inputs.cuda_arch || '75-real;86-real;89-real;90-real;90-virtual') || '' }}
+          # Keep the ggml-vulkan backend out of the release archives (the
+          # Windows runners have vulkan-1.dll, so the build script would
+          # otherwise auto-enable it): a Vulkan-linked GgmlOps.dll hard-imports
+          # vulkan-1.dll, which machines without GPU drivers (bare servers/VMs)
+          # don't have — the whole native library would then fail to load. The
+          # archives are documented as CPU / CPU+CUDA builds.
+          TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN: "OFF"
         run: |
           set -euo pipefail
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # Build the GGML native library with Ninja + the vcvars environment
+            # from the MSVC setup step. The VS2026-only image has no VS2022
+            # instance for CMake's "Visual Studio 17 2022" generator, and a VS
+            # generator CUDA build would additionally need CUDA's MSBuild
+            # integration for VS2026, which CUDA 12.6 predates. Ninja drives
+            # cl.exe/nvcc directly and needs neither.
+            export CMAKE_GENERATOR=Ninja
+          fi
           V="${{ steps.ver.outputs.version }}"
           for app in Server Cli; do
             lc=$(echo "$app" | tr '[:upper:]' '[:lower:]')

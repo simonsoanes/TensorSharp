@@ -201,7 +201,31 @@ if (WIN32)
     # (TensorSharp.Backends.GGML/Interop/GgmlApi.cs) can P/Invoke it directly.
     # On Linux/macOS the symbols are already visible (default ELF/Mach-O
     # visibility); Windows needs the explicit .def export list.
-    target_sources(GgmlOps PRIVATE ggml_api_exports.def)
+    #
+    # A .def entry forces the linker to resolve the symbol, so the CUDA/Vulkan
+    # re-exports must be stripped when the corresponding backend is not being
+    # built or the link fails with LNK2001 unresolved externals. The managed
+    # layer probes these entry points at run time and tolerates their absence,
+    # matching the Linux/macOS builds where disabled-backend symbols are simply
+    # not present.
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/ggml_api_exports.def" TSG_DEF_CONTENT)
+    if (NOT TENSORSHARP_GGML_NATIVE_ENABLE_CUDA)
+        string(REGEX REPLACE "[ \t]+ggml_backend_(cuda_[A-Za-z0-9_]+|is_cuda)\r?\n" "" TSG_DEF_CONTENT "${TSG_DEF_CONTENT}")
+    endif()
+    if (NOT TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN)
+        string(REGEX REPLACE "[ \t]+ggml_backend_(vk_[A-Za-z0-9_]+|is_vk)\r?\n" "" TSG_DEF_CONTENT "${TSG_DEF_CONTENT}")
+    endif()
+    set(TSG_DEF_FILE "${CMAKE_CURRENT_BINARY_DIR}/ggml_api_exports.def")
+    # Only rewrite on change so incremental builds don't relink GgmlOps.
+    set(TSG_DEF_OLD_CONTENT "")
+    if (EXISTS "${TSG_DEF_FILE}")
+        file(READ "${TSG_DEF_FILE}" TSG_DEF_OLD_CONTENT)
+    endif()
+    if (NOT TSG_DEF_CONTENT STREQUAL TSG_DEF_OLD_CONTENT)
+        file(WRITE "${TSG_DEF_FILE}" "${TSG_DEF_CONTENT}")
+    endif()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ggml_api_exports.def)
+    target_sources(GgmlOps PRIVATE "${TSG_DEF_FILE}")
 endif()
 
 if (TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN)

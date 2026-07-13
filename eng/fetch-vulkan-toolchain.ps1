@@ -87,24 +87,52 @@ if (-not (Test-Path (Join-Path $SpirvInstallDir "share\cmake\SPIRV-Headers\SPIRV
 $ShadercDir = Join-Path $ToolchainDir "shaderc"
 if (-not (Test-Path (Join-Path $ShadercDir "bin\glslc.exe"))) {
     # The badge HTML is a meta-refresh redirect to the latest continuous build's
-    # install.zip; extract the target URL from it.
+    # install archive; extract the target URL from it. The advertised file name
+    # has changed over time (install.zip, then install.tgz) and has been seen
+    # naming an extension that does not actually exist in the bucket while a
+    # sibling archive does, so try the advertised URL first and then the known
+    # sibling names.
     $badgeUrl = "https://storage.googleapis.com/shaderc/badges/build_link_windows_vs2022_amd64_release.html"
     $badge = (Invoke-WebRequest -UseBasicParsing -Uri $badgeUrl).Content
-    if ($badge -notmatch 'url=(https://[^"'']+install\.zip)') {
+    if ($badge -notmatch 'url=(https://[^"'']+/install\.[a-z0-9.]+)') {
         throw "Could not resolve the shaderc prebuilt download URL from $badgeUrl"
     }
-    $zipUrl = $Matches[1]
-    $zipPath = Join-Path $ToolchainDir "shaderc-install.zip"
-    Write-Host "vulkan-toolchain: downloading glslc from $zipUrl"
-    Invoke-WebRequest -UseBasicParsing -Uri $zipUrl -OutFile $zipPath
+    $advertisedUrl = $Matches[1]
+    $buildDirUrl = $advertisedUrl.Substring(0, $advertisedUrl.LastIndexOf('/'))
+    $candidateUrls = @($advertisedUrl, "$buildDirUrl/install.zip", "$buildDirUrl/install.tgz") | Select-Object -Unique
+    $archivePath = $null
+    foreach ($candidateUrl in $candidateUrls) {
+        $ext = if ($candidateUrl.EndsWith(".zip")) { "zip" } else { "tgz" }
+        $tryPath = Join-Path $ToolchainDir "shaderc-install.$ext"
+        try {
+            Write-Host "vulkan-toolchain: downloading glslc from $candidateUrl"
+            Invoke-WebRequest -UseBasicParsing -Uri $candidateUrl -OutFile $tryPath
+            $archivePath = $tryPath
+            $archiveExt = $ext
+            break
+        }
+        catch {
+            Write-Host "vulkan-toolchain: $candidateUrl not available: $($_.Exception.Message)"
+        }
+    }
+    if ($null -eq $archivePath) {
+        throw "Could not download the shaderc prebuilt from any of: $($candidateUrls -join ', ')"
+    }
     $extractDir = Join-Path $ToolchainDir "shaderc-extract"
     if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
-    Expand-Archive -Path $zipPath -DestinationPath $extractDir
+    if ($archiveExt -eq "zip") {
+        Expand-Archive -Path $archivePath -DestinationPath $extractDir
+    }
+    else {
+        New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+        tar -xzf $archivePath -C $extractDir
+        if ($LASTEXITCODE -ne 0) { throw "Extracting $archivePath failed with exit code $LASTEXITCODE" }
+    }
     if (Test-Path $ShadercDir) { Remove-Item -Recurse -Force $ShadercDir }
-    # The zip contains a single top-level "install" folder with bin/lib/include.
+    # The archive contains a single top-level "install" folder with bin/lib/include.
     Move-Item (Join-Path $extractDir "install") $ShadercDir
     Remove-Item -Recurse -Force $extractDir
-    Remove-Item -Force $zipPath
+    Remove-Item -Force $archivePath
 }
 
 # --- 4. vulkan-1.lib import library ------------------------------------------
