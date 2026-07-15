@@ -44,6 +44,16 @@ ratio is `—` when either side has no usable (`ok`) cell, and a reference colum
 is dropped entirely when that engine produced nothing comparable for the model
 (e.g. an unreachable vLLM endpoint).
 
+Beyond speed, `report.py` also compares **output quality**: both engines decode
+the same GGUF greedily (`temperature=0`), so their outputs should agree closely.
+The report's *Output quality* section scores each overlapping
+TensorSharp-vs-llama.cpp cell with a whitespace-normalized text-similarity
+ratio (1.00 = identical), checks the structural scenarios (valid JSON object in
+`json_mode`, tool call emitted in `function_call`), and appends side-by-side
+output excerpts, lowest agreement first. The full generated text is captured
+per cell (`output_text`, capped at 8k chars) so the comparison works offline
+from the result JSONs alone.
+
 ## Files
 
 | File | Role |
@@ -56,6 +66,8 @@ is dropped entirely when that engine produced nothing comparable for the model
 | `report.py` | aggregates `results/*.json` → `docs/engine_comparison_report.md` + `results/results.csv` |
 | `assets/` | long-context prompt (`long_text.txt`), prefill corpus (`prefill_corpus.txt`), `tools/weather.json` |
 | `benchmark_config_prefill.json` | **prefill-only** variant — the same long-prompt sweep (2k/4k/8k/16k/32k/64k/128k tokens) but with the multimodal / diffusion scenarios and models stripped out, for a focused prefill run; select with `--config` |
+| `benchmark_config_ci.json` | **CI** variant used by `.github/workflows/test-matrix.yml` — TensorSharp vs llama.cpp only, `ggml_cuda` only, text + prefill scenarios; each model entry carries an `_hf` Hugging Face repo pointer its files are downloaded from |
+| `download_models.py` | downloads the selected models' files from their `_hf` repo pointers into the paths the config resolves them to (skips files already present) |
 
 ## Configuration
 
@@ -379,6 +391,63 @@ Result files keep their historical names for the baseline (`mtp` off,
 The `results/` directory (per-cell JSONs, logs, images, CSV) is generated
 locally by each run and is **not committed** to the repository — the committed
 artifact is the generated `docs/engine_comparison_report.md`.
+
+## CI (GitHub Actions)
+
+`.github/workflows/test-matrix.yml` runs this harness on the self-hosted
+`tensorsharp-cuda` runner in two profiles: a trimmed **smoke** profile on every
+pull request (`gemma4-12b` only; `text_short`, `function_call`, `json_mode`,
+`prefill_4k`; report posted as a PR comment), and the **full** CI set on
+demand via `workflow_dispatch` (inputs select a custom subset) plus a weekly
+schedule. Each run:
+
+1. builds TensorSharp (native GGML CUDA library + `TensorSharp.Server`),
+2. clones and builds **llama.cpp** (CUDA, `llama-server`; pick the ref with the
+   `llama_ref` input),
+3. downloads the benchmark models from their Hugging Face pointers via
+   `download_models.py` (the `_hf` fields in `benchmark_config_ci.json`),
+4. runs `run_matrix.py --config benchmark_config_ci.json` (TensorSharp vs
+   llama.cpp on `ggml_cuda`, text + prefill scenarios), and
+5. generates the combined **performance + output-quality** report with
+   `report.py`, uploads it (plus the per-cell JSONs/logs) as artifacts, and
+   renders it into the job summary.
+
+llama.cpp sources/build and the downloaded models live in a persistent
+directory on the runner (`$HOME/tensorsharp-bench`, overridable with the
+`BENCH_HOME` repository variable), so repeat runs only pay incremental costs.
+The run fails if any benchmark cell reports `fail` or nothing ran `ok`.
+
+### Verifying the macOS / MLX path
+
+The CI workflow is CUDA-only, but `benchmark_config_ci.json` also registers
+the `ggml_metal` and `mlx` backends, so the same config verifies the macOS
+path on an Apple Silicon host (llama.cpp has no MLX backend — the
+apples-to-apples reference on that host is llama.cpp on `ggml_metal`, and the
+`mlx` column is TensorSharp-only):
+
+```bash
+# One-time host setup: native libs + server + a Metal llama-server build
+bash TensorSharp.GGML.Native/build-macos.sh
+bash TensorSharp.Backends.MLX/build-native-macos.sh
+dotnet build TensorSharp.Server/TensorSharp.Server.csproj -c Release
+git clone https://github.com/ggml-org/llama.cpp ~/tensorsharp-bench/llama.cpp
+cmake -S ~/tensorsharp-bench/llama.cpp -B ~/tensorsharp-bench/llama.cpp/build \
+    -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF -DLLAMA_BUILD_SERVER=ON
+cmake --build ~/tensorsharp-bench/llama.cpp/build --config Release --target llama-server -j
+
+# Models, benchmark, report — same pipeline as CI
+cd benchmarks/engine_comparison
+export BENCH_MODEL_ROOT=~/tensorsharp-bench/models
+export BENCH_LLAMA_SERVER=~/tensorsharp-bench/llama.cpp/build/bin/llama-server
+python3 download_models.py --config benchmark_config_ci.json --models gemma4-12b
+python3 run_matrix.py --config benchmark_config_ci.json \
+    --backends ggml_metal,mlx --models gemma4-12b
+python3 report.py --config benchmark_config_ci.json
+```
+
+To run it as a CI job instead, add a second job on the old
+`[self-hosted, tensorsharp-mlx]` runner label with the build steps above and
+`--backends ggml_metal,mlx` on the `run_matrix.py` line.
 
 ## Scenario / engine coverage notes
 

@@ -50,6 +50,10 @@ class BenchResult:
     finish_reason: str = ""
     tool_call_ok: Optional[bool] = None     # function_call scenario correctness
     output_preview: str = ""
+    # Full generated text (capped) so cross-engine output quality can be
+    # compared offline from the result JSONs alone (see report.py's
+    # output-quality section). The preview above stays for humans skimming.
+    output_text: str = ""
     # Extra benchmark axes.
     mtp: bool = False                        # MTP/NextN speculative decoding engaged
     concurrency: int = 1                     # parallel identical requests at this cell
@@ -405,7 +409,27 @@ class ServerHandle:
         silent_but_open = 0
         while time.monotonic() < deadline:
             if self.proc is not None and self.proc.poll() is not None:
-                return False  # process exited before becoming ready
+                # Process exited before becoming ready. Surface WHY: the exit
+                # code alone diagnoses the common Windows failure where the
+                # server binary can't even start. A silent instant exit with an
+                # empty log is the signature of a DLL load failure — most often
+                # an NTSTATUS in the 0xC0000xxx range, e.g. 0xC0000139
+                # (ENTRYPOINT_NOT_FOUND) / 0xC0000135 (DLL_NOT_FOUND), which
+                # means the binary is ABI-mismatched against the ggml/llama DLLs
+                # beside it (rebuild it) or a dependency DLL is missing.
+                rc = self.proc.returncode
+                code = rc & 0xFFFFFFFF if rc is not None else None  # NTSTATUS is unsigned
+                self.ready_hint = f"process exited early with code {rc}"
+                if code is not None:
+                    self.ready_hint += f" (0x{code:08X})"
+                    if 0xC0000000 <= code <= 0xCFFFFFFF:
+                        self.ready_hint += (
+                            " — this is a Windows load-time failure (missing or "
+                            "ABI-mismatched dependency DLL). Rebuild the server so it "
+                            "matches the ggml/llama DLLs beside it. ")
+                    else:
+                        self.ready_hint += ". "
+                return False
             try:
                 r = requests.get(url, timeout=3)
                 if r.status_code == 200:

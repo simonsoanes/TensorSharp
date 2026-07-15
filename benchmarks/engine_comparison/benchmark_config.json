@@ -69,6 +69,16 @@
       "mtp_supported": true,
       "mtp_draft": null
     },
+    "qwen36-27b": {
+      "display": "Qwen 3.6 27B (UD-IQ2_XXS, dense)",
+      "family": "qwen36",
+      "gguf": "${model_root}/Qwen3.6-27B-UD-IQ2_XXS.gguf",
+      "mmproj": "${model_root}/Qwen3.6-27B-mmproj-F16.gguf",
+      "modalities": ["text", "image"],
+      "size_class": "large",
+      "mtp_supported": true,
+      "mtp_draft": null
+    },
     "qwen-image-edit": {
       "display": "Qwen-Image-Edit 2511 (Q2_K DiT + Lightning 4-step LoRA)",
       "family": "qwenimage",

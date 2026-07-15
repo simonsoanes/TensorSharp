@@ -159,6 +159,9 @@ public class Qwen36MtpTests
         _output.WriteLine($"[mtp-bench] speedup: {specTps / baseTps:F2}x | acceptance {spec.AcceptanceRate:P0} " +
             $"({spec.TokensAccepted}/{spec.TokensDrafted}), verifySteps={spec.VerifySteps}, " +
             $"plainSteps={spec.PlainSteps}, rollbacks={spec.RollbackSteps}");
+        var st = spec.Stats;
+        _output.WriteLine($"[mtp-bench] phases(ms): draft={st.DraftMs:F0} verify={st.VerifyMs:F0} " +
+            $"snapshot={st.SnapshotMs:F0} rollback={st.RollbackMs:F0} catchup={st.CatchUpMs:F0} plain={st.PlainMs:F0}");
         _output.WriteLine($"[mtp-bench] baseline: \"{Trim(model.Tokenizer.Decode(baseline))}\"");
         _output.WriteLine($"[mtp-bench] spec:     \"{Trim(model.Tokenizer.Decode(specTokens))}\"");
     }
