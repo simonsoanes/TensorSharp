@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import difflib
 import json
 import math
 import os
@@ -427,6 +428,138 @@ def image_edit_section(rows: list) -> str:
     return "\n".join(out) if out else "_No image-edit cells were run._"
 
 
+# ---------------------------------------------------------------------------
+# Output quality — cross-engine agreement on identical greedy requests
+# ---------------------------------------------------------------------------
+def _rec_output_text(rec) -> str:
+    """Full captured output when available (new results), else the 300-char
+    preview (older result files)."""
+    if not rec:
+        return ""
+    return str(rec.get("output_text") or rec.get("output_preview") or "")
+
+
+def _norm_ws(s: str) -> str:
+    return " ".join((s or "").split())
+
+
+def _json_valid(text: str):
+    """Whether the output parses as JSON (directly, or the first-{ .. last-}
+    slice, tolerating prose/fences around the object)."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    candidates = [t]
+    if "{" in t and "}" in t:
+        candidates.append(t[t.find("{"): t.rfind("}") + 1])
+    for cand in candidates:
+        try:
+            json.loads(cand)
+            return True
+        except Exception:
+            pass
+    return False
+
+
+def _similarity_verdict(r: float) -> str:
+    if r >= 0.90:
+        return "high agreement"
+    if r >= 0.75:
+        return "moderate"
+    if r >= 0.50:
+        return "low"
+    return "diverged"
+
+
+def _mark(v) -> str:
+    return "yes" if v else ("no" if v is False else "?")
+
+
+def quality_section(data: dict) -> str:
+    """Output-quality comparison of TensorSharp vs llama.cpp on the same
+    backend. Both engines decode the same GGUF greedily (temperature=0), so
+    their outputs should agree closely; low text similarity or a failed
+    structural check (valid JSON in json_mode, tool call emitted in
+    function_call) flags a quality problem on one side. Prefill scenarios are
+    excluded (their 8-token outputs carry no quality signal)."""
+    ref_engine = "llamacpp"
+    rows = []       # (model_id, backend, scenario, ts_rec, ref_rec, sim)
+    for model_id in config.MODELS:
+        scen_map = data.get(model_id)
+        if not scen_map:
+            continue
+        for scenario_id in _scenario_rows(scen_map):
+            if scenario_id.startswith("prefill_") or _is_image_edit_scenario(scenario_id):
+                continue
+            col_map = scen_map[scenario_id]
+            backends = sorted({b for (_, b) in col_map})
+            for backend in backends:
+                ts = col_map.get(("tensorsharp", backend))
+                ref = col_map.get((ref_engine, backend))
+                if not ts or not ref or ts.get("status") != "ok" or ref.get("status") != "ok":
+                    continue
+                a, b = _norm_ws(_rec_output_text(ts)), _norm_ws(_rec_output_text(ref))
+                # A correct function_call answer often carries no text content
+                # (tool_calls only) — keep the row for its structural check and
+                # render the similarity as `—`.
+                sim = difflib.SequenceMatcher(None, a, b).ratio() if a and b else None
+                try:
+                    kind = config.SCENARIOS[scenario_id].kind
+                except KeyError:
+                    kind = ""
+                if sim is None and kind not in ("json_mode", "function_call"):
+                    continue
+                rows.append((model_id, backend, scenario_id, ts, ref, sim))
+    if not rows:
+        return "_No overlapping ok cells with captured output to compare._"
+
+    out = ["| Model | Backend | Scenario | similarity | verdict | tokens (TS / ref) | "
+           "finish (TS / ref) | checks |",
+           "|---|---|---|---:|---|---|---|---|"]
+    for model_id, backend, scenario_id, ts, ref, sim in rows:
+        kind = ""
+        try:
+            kind = config.SCENARIOS[scenario_id].kind
+        except KeyError:
+            pass
+        if kind == "json_mode":
+            checks = (f"json valid: TS {_mark(_json_valid(_rec_output_text(ts)))} / "
+                      f"ref {_mark(_json_valid(_rec_output_text(ref)))}")
+        elif kind == "function_call":
+            checks = (f"tool call: TS {_mark(ts.get('tool_call_ok'))} / "
+                      f"ref {_mark(ref.get('tool_call_ok'))}")
+        else:
+            checks = "—"
+        spec = config.BACKENDS.get(backend)
+        sim_s = f"{sim:.2f}" if sim is not None else "—"
+        verdict = _similarity_verdict(sim) if sim is not None else "—"
+        out.append(f"| {model_id} | {spec.display if spec else backend} | {scenario_id} | "
+                   f"{sim_s} | {verdict} | "
+                   f"{ts.get('completion_tokens', 0)} / {ref.get('completion_tokens', 0)} | "
+                   f"{ts.get('finish_reason', '') or '—'} / {ref.get('finish_reason', '') or '—'} | "
+                   f"{checks} |")
+
+    sims = [sim for *_, sim in rows if sim is not None]
+    if sims:
+        out.append("")
+        out.append(f"Mean similarity across {len(sims)} compared cells: "
+                   f"**{sum(sims) / len(sims):.2f}** "
+                   f"(min {min(sims):.2f}, max {max(sims):.2f}).")
+
+    # Side-by-side excerpts for eyeballing, lowest-agreement cells first.
+    out.append("")
+    with_text = [r for r in rows if r[5] is not None]
+    for model_id, backend, scenario_id, ts, ref, sim in sorted(with_text, key=lambda r: r[5]):
+        ts_txt = _rec_output_text(ts)[:600] or "(empty)"
+        ref_txt = _rec_output_text(ref)[:600] or "(empty)"
+        out.append(f"<details><summary>{model_id} · {backend} · {scenario_id} "
+                   f"(similarity {sim:.2f})</summary>\n")
+        out.append(f"**TensorSharp**\n\n```\n{ts_txt}\n```\n")
+        out.append(f"**llama.cpp**\n\n```\n{ref_txt}\n```\n")
+        out.append("</details>")
+    return "\n".join(out)
+
+
 def tool_summary(rows: list) -> str:
     fc = [r for r in rows if r["scenario"] == "function_call" and r["status"] == "ok"]
     if not fc:
@@ -530,6 +663,17 @@ def main():
             out.append("_Time to first token (latency; > 1.0× = TensorSharp lower)_\n")
             out.append(ratio_table(scen_map, pairs, "ttft_ms", higher_is_better=False))
             out.append("")
+
+    out.append("## Output quality — TensorSharp vs llama.cpp\n")
+    out.append("Both engines decode the **same GGUF greedily** (temperature=0) on the same "
+               "backend, so their outputs should agree closely. `similarity` is a "
+               "whitespace-normalized SequenceMatcher ratio between the two outputs "
+               "(1.00 = identical); low similarity, an invalid JSON object in `json_mode`, "
+               "or a missing tool call in `function_call` flags an output-quality problem "
+               "on one side. Prefill scenarios (8-token outputs) are excluded. "
+               "Side-by-side excerpts follow the table, lowest agreement first.\n")
+    out.append(quality_section(data))
+    out.append("")
 
     out.append("## Image editing (stable-diffusion)\n")
     out.append("Same input image, prompt, resolution, step count, cfg and seed for every "

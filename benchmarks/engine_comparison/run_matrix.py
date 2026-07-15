@@ -176,6 +176,7 @@ def _run_cell(server, engine_id, backend, model, scenario_id, max_tokens,
     res.total_wall_ms = round(m["total_wall_ms"], 1)
     res.finish_reason = m["finish_reason"]
     res.output_preview = (m.get("output_text") or "")[:300]
+    res.output_text = (m.get("output_text") or "")[:8000]
     if concurrency > 1 and res.requests_ok < concurrency:
         res.detail = f"{res.requests_ok}/{concurrency} parallel requests ok"
     checker = req.get("checker")

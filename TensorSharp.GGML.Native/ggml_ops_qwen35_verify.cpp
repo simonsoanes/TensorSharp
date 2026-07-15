@@ -9,7 +9,9 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 #include "ggml_ops_internal.h"
 #include "ggml_ops_transformer_common.h"
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 
 using namespace tsg;
@@ -38,15 +40,25 @@ using namespace tsg;
 namespace
 {
     // Persistent verify-graph cache (multi-entry, keyed by N + window stride). With
-    // TS_Q35_VERIFY_PERSIST (default ON) the per-(N,window) graph is built ONCE in a
-    // raw ggml ctx with ggml_backend_alloc_ctx_tensors (each tensor its own slot =
-    // stable addresses), so subsequent verify steps of the same shape only upload the
-    // per-call inputs (hidden / pos / kv_index / mask / GDN state) + recompute -> the
+    // TS_Q35_VERIFY_PERSIST (default ON) the per-(N,window) graph is built ONCE and
+    // reused, so subsequent verify steps of the same shape only upload the per-call
+    // inputs (hidden / pos / kv_index / mask / GDN state) + recompute -> the
     // ~150-580 ms C++ build is amortized AND ggml-cuda can CUDA-graph-capture the
     // replay. Multi-entry because spec alternates N=draft+1 (speculative) and
     // N=accepted+1 (rollback re-forward); a single entry would evict + rebuild every
-    // call. Small GDN weights (dt_bias/ssm_a/...) get their own stable alloc_ctx slot
-    // uploaded once, so they don't go stale on reuse (the gallocr-recycle bug).
+    // call.
+    //
+    // Each entry's activations live in a PRIVATE gallocr (lifetime-packed) that is
+    // planned exactly ONCE and never re-reserved, so node addresses stay stable for
+    // graph reuse / CUDA capture — same stability as the previous every-tensor-its-
+    // own-slot alloc_ctx_tensors layout, at a fraction of the VRAM. Own-slot layouts
+    // measured 0.5 GB (N=1) to 1.8 GB (N=20) PER ENTRY on Qwen3.6-27B: the dominant
+    // cost was 48 GDN layers x ~3.2 MB delta-state in/out slots duplicated into
+    // every entry, which the 16-slot cache turned into multi-GB VRAM growth during
+    // ordinary MTP decoding. The GDN state slices now live in ONE shared device
+    // buffer (g_q35v_state, below) bound into every entry's graph, and gallocr
+    // packing recycles the per-layer intermediates, so an N<=9 verify entry costs
+    // ~10-30 MB.
     struct Q35VerifyCache
     {
         bool valid = false;
@@ -63,6 +75,7 @@ namespace
         ggml_tensor* logits_out = nullptr;
         ggml_tensor* normed_out = nullptr;
         std::vector<ggml_tensor*> conv_in, delta_in, conv_out, delta_out;
+        std::size_t buffer_bytes = 0;
         std::uint64_t lru = 0;
         void reset()
         {
@@ -72,10 +85,111 @@ namespace
             hidden_t = pos_t = kv_index = mask_t = logits_out = normed_out = nullptr;
             conv_in.clear(); delta_in.clear(); conv_out.clear(); delta_out.clear();
             n = window = num_layers = out_vocab = n_logits = 0; has_normed = false; sig = nullptr;
+            buffer_bytes = 0;
         }
     };
     Q35VerifyCache g_q35vc[16];
     std::uint64_t g_q35vc_clock = 0;
+
+    // Total-VRAM budget for the resident persist verify graphs. Each entry is a
+    // whole-model graph in its own alloc_ctx buffer (own slots, needed for CUDA-graph
+    // capture), sized ~0.2 GB (N=1) to ~0.8 GB (N=maxDraft+1). Without a cap, a
+    // session that exercises many draft lengths (plain N=1, speculative N=draft+1,
+    // and every rollback N=accepted+1) could resident-cache all ~9 shapes and add
+    // several GB on top of the weights + KV cache — re-overcommitting a 16 GB card.
+    // When a new entry would push the cached total past this budget, the least-
+    // recently-used entries are evicted (their buffers freed) first. Default 1.5 GB
+    // keeps the two hottest shapes (N=1 and the current draft N) plus a rollback or
+    // two resident; TS_Q35_VERIFY_CACHE_BUDGET_MB overrides (0 = unbounded/legacy).
+    std::int64_t q35_verify_cache_budget_bytes()
+    {
+        static const std::int64_t budget = []{
+            const char* e = std::getenv("TS_Q35_VERIFY_CACHE_BUDGET_MB");
+            std::int64_t mb = 1536;
+            if (e != nullptr && *e != '\0') { char* end = nullptr; long v = std::strtol(e, &end, 10); if (end != e && v >= 0) mb = v; }
+            return mb * 1024 * 1024;
+        }();
+        return budget;
+    }
+
+    std::int64_t q35_verify_cache_resident_bytes()
+    {
+        std::int64_t total = 0;
+        for (const auto& c : g_q35vc)
+            if (c.valid) total += static_cast<std::int64_t>(c.buffer_bytes);
+        return total;
+    }
+
+    // Free LRU entries until the cached total (including `incoming` about-to-be-added
+    // bytes) fits the budget. `keep` is a just-populated slot that must not be evicted.
+    void q35_verify_cache_evict_to_budget(std::size_t incoming, const Q35VerifyCache* keep)
+    {
+        const std::int64_t budget = q35_verify_cache_budget_bytes();
+        if (budget <= 0) return;
+        while (q35_verify_cache_resident_bytes() + static_cast<std::int64_t>(incoming) > budget)
+        {
+            Q35VerifyCache* victim = nullptr;
+            for (auto& c : g_q35vc)
+            {
+                if (!c.valid || &c == keep) continue;
+                if (victim == nullptr || c.lru < victim->lru) victim = &c;
+            }
+            if (victim == nullptr) break; // nothing else evictable
+            victim->reset();
+        }
+    }
+
+    // Shared device buffer holding the verify's per-GDN-layer state slices (delta
+    // in/out + conv in/out windows), mirroring llama.cpp's dedicated recurrent-state
+    // (RS) buffer. Host-mode verify uploads the current state into the *_in slices
+    // before each compute and downloads the post-window state from the *_out slices
+    // after, so sharing them across every cached graph (and the non-persist prefill
+    // path) is safe — and it keeps the ~300 MB of state out of each entry's
+    // activation buffer AND out of the reuse gallocr. Deliberately NOT part of the
+    // host-buffer cache: the C# side invalidates the decode's host-keyed state
+    // bindings around every verify for cache coherence, which would free a shared
+    // cacheable buffer out from under the cached (possibly CUDA-captured) graphs that
+    // pin it. Freed only on backend swap; contents are re-uploaded every call, so
+    // staleness is impossible.
+    ggml_backend_buffer_t g_q35v_state_buf = nullptr;
+    std::size_t g_q35v_state_buf_size = 0;
+    ggml_backend_t g_q35v_state_backend = nullptr;
+
+    // Ensure the shared GDN state buffer covers `needed` bytes. Any resize would
+    // move slices pinned by cached graphs, so the caller must reset the verify
+    // cache before growing (only happens on a model-shape change).
+    bool ensure_q35v_state_buf(std::size_t needed)
+    {
+        if (g_q35v_state_backend != g_backend)
+        {
+            // Backend swapped (model reload): the old backend already freed its
+            // buffers on teardown, so drop the stale handle rather than freeing
+            // through it.
+            g_q35v_state_buf = nullptr;
+            g_q35v_state_buf_size = 0;
+            g_q35v_state_backend = g_backend;
+        }
+        if (g_q35v_state_buf != nullptr && g_q35v_state_buf_size >= needed)
+            return true;
+        for (auto& c : g_q35vc) c.reset();
+        if (g_q35v_state_buf != nullptr)
+        {
+            ggml_backend_buffer_free(g_q35v_state_buf);
+            g_q35v_state_buf = nullptr;
+            g_q35v_state_buf_size = 0;
+        }
+        ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(g_backend);
+        if (buft == nullptr)
+            return false;
+        g_q35v_state_buf = ggml_backend_buft_alloc_buffer(buft, needed);
+        if (g_q35v_state_buf == nullptr)
+            return false;
+        ggml_backend_buffer_set_usage(g_q35v_state_buf, GGML_BACKEND_BUFFER_USAGE_COMPUTE);
+        g_q35v_state_buf_size = needed;
+        if (vram_log_enabled())
+            vram_log("q35-verify-state-buf", static_cast<std::int64_t>(needed));
+        return true;
+    }
 
     void fill_verify_causal_mask(std::vector<ggml_fp16_t>& mask, int window, int n, int start_pos, int total_len)
     {
@@ -135,7 +249,6 @@ namespace
         const int key_dim = head_k_dim * num_k_heads;
         const int value_dim = head_v_dim * num_v_heads;
         const int conv_dim = 2 * key_dim + value_dim;
-        const int head_tile = (num_k_heads > 0) ? (num_v_heads / num_k_heads) : 1;
         const ggml_type kvType = static_cast<ggml_type>(kv_cache_type);
         if (convDim <= 0 || totalSeqLen > cache_size)
         {
@@ -176,7 +289,14 @@ namespace
         // graph on the VRAM-tight 35B that thrashes WDDM paging (N=512) or OOMs (N>=1024).
         // MTP verify (n_logits == N) keeps the persist+capture fast-replay reuse.
         // MRoPE calls are prefill-only; keep them off the persist cache too.
-        const bool fv_persist = fv_persist_cfg && (n_logits >= N) && !use_mrope;
+        // The single-layer MTP DRAFT (num_layers == 1) reuses this kernel, but its
+        // tiny folded-lm_head graph HANGS on CUDA-graph capture REPLAY (deadlocks the
+        // stream on the 3rd invocation — the first true replay). Force the draft onto
+        // the non-persist path (fresh graph + gallocr lifetime-packing, no capture):
+        // still ONE fused graph per draft (vs the op-by-op block), just rebuilt each
+        // call — for a 1-layer graph the build is cheap. The trunk verify
+        // (num_layers > 1) keeps its persist+capture fast replay.
+        const bool fv_persist = fv_persist_cfg && (n_logits >= N) && !use_mrope && num_layers > 1;
 
         const std::size_t convStateBytes = static_cast<std::size_t>(convDim) * conv_dim * sizeof(float);
         const std::size_t deltaStateBytes = static_cast<std::size_t>(head_k_dim) * head_v_dim * num_v_heads * sizeof(float);
@@ -195,13 +315,25 @@ namespace
         // uploading + downloading it every call (~60 MB delta + 3 MB conv). The state
         // persists across verify/plain steps exactly like the captured decode's; the C#
         // snapshots it (drain) only before a draft-verify for rollback.
+        // Device-resident in-place GDN update requires the OWN-SLOT persist path
+        // (like TSGgml_Qwen35ModelDecode, which uses the identical in-place cpy). On
+        // the NON-persist (prefill / rollback re-forward) path activations are packed
+        // by a lifetime gallocr, and the in-place cpy into a bound external state
+        // buffer aliases/faults (ggml_cuda_cpy invalid-argument). Prefill is rare and
+        // cheap, so it keeps host mode; the frequent MTP verify + plain steps
+        // (fv_persist == true) get resident. The C# caller mirrors this gate (it only
+        // points conv_in == conv_out for all-row / single-token calls), so both sides
+        // agree on which calls are resident.
         bool resident_state = false;
-        for (int l = 0; l < num_layers; l++)
+        if (fv_persist)
         {
-            if (layers[l].is_recurrent != 0)
+            for (int l = 0; l < num_layers; l++)
             {
-                resident_state = (layers[l].conv_state_in == layers[l].conv_state_out) && layers[l].conv_state_in != nullptr;
-                break;
+                if (layers[l].is_recurrent != 0)
+                {
+                    resident_state = (layers[l].conv_state_in == layers[l].conv_state_out) && layers[l].conv_state_in != nullptr;
+                    break;
+                }
             }
         }
 
@@ -322,6 +454,46 @@ namespace
         };
         std::vector<LayerTensors> lt(num_layers);
 
+        // Host-mode GDN state slices live in the shared device state buffer (see
+        // g_q35v_state_buf): per recurrent layer a delta in + delta out slice and a
+        // conv in + conv out slice. Bound at tensor-creation time so neither the
+        // per-entry gallocr nor the reuse gallocr ever carries the ~300 MB of state.
+        // The state is NOT updated in place — the graph reads *_state_in (uploaded
+        // each call) and writes *_state_out (downloaded each call), matching the
+        // original separate-in/out host semantics. (In-place on an input that is
+        // ALSO re-uploaded each call breaks ggml-cuda's CUDA-graph capture on the
+        // persist replay path — the resident path can do in-place only because it
+        // never re-uploads.)
+        std::size_t state_align = 256;
+        std::size_t state_stride = 0;
+        std::uint8_t* state_base = nullptr;
+        std::size_t delta_slice_bytes = 0;
+        std::size_t conv_slice_bytes = 0;
+        if (!resident_state)
+        {
+            int gdn_count = 0;
+            for (int l = 0; l < num_layers; l++)
+                if (layers[l].is_recurrent != 0) gdn_count++;
+            if (gdn_count > 0)
+            {
+                ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(g_backend);
+                if (buft != nullptr)
+                    state_align = std::max<std::size_t>(state_align, ggml_backend_buft_get_alignment(buft));
+                auto align_up = [&](std::size_t v) { return (v + state_align - 1) / state_align * state_align; };
+                delta_slice_bytes = align_up(deltaStateBytes);
+                conv_slice_bytes = align_up(convStateBytes);
+                state_stride = 2 * delta_slice_bytes + 2 * conv_slice_bytes;
+                if (!ensure_q35v_state_buf(static_cast<std::size_t>(gdn_count) * state_stride))
+                {
+                    set_last_error("Qwen3.5 model verify: failed to allocate the shared GDN state buffer.");
+                    if (fv_persist) ggml_free(ctx);
+                    return 0;
+                }
+                state_base = static_cast<std::uint8_t*>(ggml_backend_buffer_get_base(g_q35v_state_buf));
+            }
+        }
+
+        int state_slot = 0;
         for (int l = 0; l < num_layers; l++)
         {
             const TSGgmlQwen35LayerDesc& d = layers[l];
@@ -366,11 +538,30 @@ namespace
                 }
                 else
                 {
-                    t.conv_state_out = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, convDim, conv_dim);
+                    // Host mode: bind the four state tensors (delta in/out + conv
+                    // in/out) into per-slot slices of the shared state buffer. The
+                    // graph reads *_state_in (uploaded each call) and writes
+                    // *_state_out (downloaded each call) — no in-place, so the
+                    // persist replay's CUDA-graph capture stays valid.
+                    std::uint8_t* slice = state_base + static_cast<std::size_t>(state_slot) * state_stride;
                     t.delta_state_out = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_k_dim, head_v_dim, num_v_heads);
-                    // Per-call GDN state inputs: preserved (set_input) + uploaded each call.
+                    t.conv_state_out = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, convDim, conv_dim);
+                    if (ggml_backend_tensor_alloc(g_q35v_state_buf, t.delta_state_in, slice) != GGML_STATUS_SUCCESS ||
+                        ggml_backend_tensor_alloc(g_q35v_state_buf, t.delta_state_out, slice + delta_slice_bytes) != GGML_STATUS_SUCCESS ||
+                        ggml_backend_tensor_alloc(g_q35v_state_buf, t.conv_state_in, slice + 2 * delta_slice_bytes) != GGML_STATUS_SUCCESS ||
+                        ggml_backend_tensor_alloc(g_q35v_state_buf, t.conv_state_out, slice + 2 * delta_slice_bytes + conv_slice_bytes) != GGML_STATUS_SUCCESS)
+                    {
+                        set_last_error("Qwen3.5 model verify: failed to bind GDN state slices.");
+                        if (fv_persist) ggml_free(ctx);
+                        return 0;
+                    }
+                    // Preserved per-call inputs (uploaded each call). The flag is
+                    // metadata only here — the tensors already have a buffer, so
+                    // gallocr skips them — but it keeps parity with the original
+                    // set_input semantics the CUDA-graph replay was validated under.
                     ggml_set_input(t.conv_state_in);
                     ggml_set_input(t.delta_state_in);
+                    state_slot++;
                 }
             }
             if (d.is_moe == 0)
@@ -392,8 +583,18 @@ namespace
         }
 
         // --- build the chained graph over N tokens ---
-        std::vector<ggml_tensor*> state_writes;
-        std::vector<ggml_tensor*> kv_writes;   // per-head 2D set_rows results (all attn layers)
+        // The graph is created BEFORE the layer loop and each layer's KV writes +
+        // GDN state writes are expanded AS THE LAYER IS BUILT (llama.cpp's build
+        // order). Expanding them after the whole loop (the previous layout) placed
+        // every state-write cpy at the END of the node order, so the gallocr had
+        // to keep each GDN layer's gated_delta_net output AND conv concat input
+        // alive across the entire remainder of the graph — for a 2048-token, 48-
+        // recurrent-layer prefill that inflated the reuse gallocr to 7.9 GB.
+        // Expanded per layer, the allocator recycles them layer-by-layer.
+        // Per-head set_rows adds ~2*num_kv_heads nodes per attention layer, so size
+        // the graph generously to avoid GGML_ASSERT(n_nodes < size).
+        const std::size_t graph_size = static_cast<std::size_t>(num_layers) * (260 + 2 * num_kv_heads) + 1024;
+        ggml_cgraph* graph = ggml_new_graph_custom(ctx, graph_size, false);
         ggml_tensor* hidden = hidden_t;
         for (int l = 0; l < num_layers; l++)
         {
@@ -476,8 +677,8 @@ namespace
                         k_fresh->nb[1], static_cast<std::size_t>(h) * k_fresh->nb[2]);
                     ggml_tensor* v_src_h = ggml_view_2d(ctx, v_fresh, head_dim, N,
                         v_fresh->nb[1], static_cast<std::size_t>(h) * v_fresh->nb[2]);
-                    kv_writes.push_back(ggml_set_rows(ctx, k_dst_h, k_src_h, kv_index));
-                    kv_writes.push_back(ggml_set_rows(ctx, v_dst_h, v_src_h, kv_index));
+                    ggml_build_forward_expand(graph, ggml_set_rows(ctx, k_dst_h, k_src_h, kv_index));
+                    ggml_build_forward_expand(graph, ggml_set_rows(ctx, v_dst_h, v_src_h, kv_index));
                 }
 
                 // Attend over the fixed window [0, window) (now holds the N fresh rows);
@@ -524,28 +725,32 @@ namespace
                 g_all = ggml_mul(ctx, g_all, t.ssm_a_w); // [num_v_heads, N]
 
                 // conv over the N new timesteps prepended with the conv ring state.
-                ggml_tensor* qkv_T = ggml_cont(ctx, ggml_transpose(ctx, qkv_mixed));  // [N, conv_dim]
-                ggml_tensor* conv_input = ggml_concat(ctx, t.conv_state_in, qkv_T, 0); // [convDim+N, conv_dim]
+                // Concat straight from the non-contiguous transpose view — ggml_concat
+                // materializes a contiguous result for ssm_conv, so the separate
+                // transpose-cont copy (cpy_scalar_transpose) is redundant (llama.cpp's
+                // build_conv_state concats the transposed view the same way).
+                ggml_tensor* conv_input = ggml_concat(ctx, t.conv_state_in, ggml_transpose(ctx, qkv_mixed), 0); // [convDim+N, conv_dim]
                 ggml_tensor* conv_out = ggml_silu(ctx, ggml_ssm_conv(ctx, conv_input, t.conv1d_w)); // [conv_dim, N]
                 // new conv state = the last convDim timesteps (rows [N, N+convDim)).
                 ggml_tensor* new_conv = ggml_cont(ctx, ggml_view_2d(ctx, conv_input, convDim, conv_dim, conv_input->nb[1], static_cast<std::size_t>(N) * conv_input->nb[0]));
                 // Resident: write the post-window conv state IN-PLACE to conv_state_in
-                // (the device-resident buffer); host mode: to the separate out tensor.
+                // (the device-resident buffer); host mode: to the shared-state-buffer
+                // out slice.
                 t.conv_state_out = ggml_cpy(ctx, new_conv, resident_state ? t.conv_state_in : t.conv_state_out);
 
                 ggml_tensor* q_part = ggml_cont(ctx, ggml_view_2d(ctx, conv_out, key_dim, N, conv_out->nb[1], 0));
                 ggml_tensor* k_part = ggml_cont(ctx, ggml_view_2d(ctx, conv_out, key_dim, N, conv_out->nb[1], static_cast<std::size_t>(key_dim) * sizeof(float)));
                 ggml_tensor* v_part = ggml_cont(ctx, ggml_view_2d(ctx, conv_out, value_dim, N, conv_out->nb[1], static_cast<std::size_t>(2 * key_dim) * sizeof(float)));
 
-                // l2-norm over head_k_dim, then tile q/k from num_k_heads -> num_v_heads.
+                // l2-norm over head_k_dim. q/k keep num_k_heads heads: the fused
+                // gated_delta_net kernel broadcasts each v-head h to k-head (h % num_k_heads)
+                // internally (kernel iq1 = h_idx % neqk1, neqk1 = q->ne[1]), so pre-tiling
+                // q/k up to num_v_heads via concat+cont (~2% of prefill, 4 concats/layer)
+                // is redundant — llama.cpp's fused GDN path passes the un-tiled q/k too.
                 ggml_tensor* q_hn = ggml_l2_norm(ctx, ggml_reshape_2d(ctx, q_part, head_k_dim, num_k_heads * N), eps);
                 ggml_tensor* k_hn = ggml_l2_norm(ctx, ggml_reshape_2d(ctx, k_part, head_k_dim, num_k_heads * N), eps);
-                ggml_tensor* q_3d = ggml_reshape_3d(ctx, q_hn, head_k_dim, num_k_heads, N);
-                ggml_tensor* k_3d = ggml_reshape_3d(ctx, k_hn, head_k_dim, num_k_heads, N);
-                ggml_tensor* q_tl = q_3d; ggml_tensor* k_tl = k_3d;
-                for (int r = 1; r < head_tile; r++) { q_tl = ggml_concat(ctx, q_tl, q_3d, 1); k_tl = ggml_concat(ctx, k_tl, k_3d, 1); }
-                ggml_tensor* q4 = ggml_reshape_4d(ctx, ggml_cont(ctx, q_tl), head_k_dim, num_v_heads, N, 1);
-                ggml_tensor* k4 = ggml_reshape_4d(ctx, ggml_cont(ctx, k_tl), head_k_dim, num_v_heads, N, 1);
+                ggml_tensor* q4 = ggml_reshape_4d(ctx, q_hn, head_k_dim, num_k_heads, N, 1);
+                ggml_tensor* k4 = ggml_reshape_4d(ctx, k_hn, head_k_dim, num_k_heads, N, 1);
                 ggml_tensor* v4 = ggml_reshape_4d(ctx, v_part, head_v_dim, num_v_heads, N, 1);
                 ggml_tensor* g4 = ggml_reshape_4d(ctx, ggml_cont(ctx, g_all), 1, num_v_heads, N, 1);
                 ggml_tensor* beta4 = ggml_reshape_4d(ctx, ggml_cont(ctx, beta_all), 1, num_v_heads, N, 1);
@@ -565,7 +770,9 @@ namespace
                     ggml_row_size(gdn->type, head_k_dim * head_v_dim * num_v_heads),
                     ggml_row_size(gdn->type, value_dim) * static_cast<std::size_t>(N));
                 // Resident: write the post-window delta state IN-PLACE to delta_state_in
-                // (state4 aliases it); host mode: to the separate out tensor.
+                // (state4 aliases it). Host mode: write to the separate delta_state_out
+                // slice (downloaded after compute) — NOT in-place, so the persist
+                // replay's captured CUDA graph stays valid across re-uploads.
                 t.delta_state_out = ggml_cpy(ctx, new_state, resident_state ? state4 : t.delta_state_out);
 
                 // gated RMSNorm with z, per token: rms_norm(out) * ssm_norm * silu(z).
@@ -577,8 +784,10 @@ namespace
                 ggml_tensor* gated_flat = ggml_reshape_2d(ctx, gated, value_dim, N);
                 block_out = ggml_mul_mat(ctx, t.ssm_out_w, gated_flat); // [H, N]
 
-                state_writes.push_back(t.conv_state_out);
-                state_writes.push_back(t.delta_state_out);
+                ggml_set_output(t.conv_state_out);
+                ggml_set_output(t.delta_state_out);
+                ggml_build_forward_expand(graph, t.conv_state_out);
+                ggml_build_forward_expand(graph, t.delta_state_out);
             }
 
             ggml_tensor* residual1 = ggml_add(ctx, hidden, block_out); // [H, N]
@@ -588,11 +797,13 @@ namespace
             ggml_tensor* ffn_out;
             if (d.is_moe == 0)
             {
-                const std::int64_t ffDense = d.ff_dense;
                 ggml_tensor* gu = ggml_mul_mat(ctx, t.gu_w, ffn_normed); // [2*ffDense, N]
-                ggml_tensor* g_part = ggml_cont(ctx, ggml_view_2d(ctx, gu, ffDense, N, gu->nb[1], 0));
-                ggml_tensor* u_part = ggml_cont(ctx, ggml_view_2d(ctx, gu, ffDense, N, gu->nb[1], static_cast<std::size_t>(ffDense) * sizeof(float)));
-                ggml_tensor* act = ggml_mul(ctx, ggml_silu(ctx, g_part), u_part);
+                // Fused SwiGLU over the packed [gate|up] matmul output: silu(gate)*up
+                // in one gated kernel. Avoids materializing the two halves via cont
+                // (strided view -> contiguous, 2x ~ffDense*N) plus a standalone silu and
+                // a separate mul — the split path was ~1GB extra VRAM traffic per dense
+                // FFN layer. gu is laid out gate-first, matching ggml_swiglu (swapped=false).
+                ggml_tensor* act = ggml_swiglu(ctx, gu); // [ffDense, N]
                 ffn_out = ggml_mul_mat(ctx, t.down_w, act); // [H, N]
             }
             else
@@ -662,17 +873,6 @@ namespace
         ggml_tensor* logits_cpy = ggml_cpy(ctx, logits, logits_out_t);
         ggml_set_output(logits_cpy);
 
-        // Per-head set_rows adds ~2*num_kv_heads nodes per attention layer, so size
-        // the graph generously to avoid GGML_ASSERT(n_nodes < size).
-        const std::size_t graph_size = static_cast<std::size_t>(num_layers) * (260 + 2 * num_kv_heads) + 1024;
-        ggml_cgraph* graph = ggml_new_graph_custom(ctx, graph_size, false);
-        for (ggml_tensor* w : kv_writes)
-            ggml_build_forward_expand(graph, w);
-        for (ggml_tensor* w : state_writes)
-        {
-            ggml_set_output(w);
-            ggml_build_forward_expand(graph, w);
-        }
         if (normed_cpy != nullptr)
             ggml_build_forward_expand(graph, normed_cpy);
         ggml_build_forward_expand(graph, logits_cpy);
@@ -764,15 +964,23 @@ namespace
                     bind_or_mark(t.conv_state_in, d.conv_state_in, convStateBytes, true, GGML_BACKEND_BUFFER_USAGE_COMPUTE);
                     bind_or_mark(t.delta_state_in, d.delta_state_in, deltaStateBytes, true, GGML_BACKEND_BUFFER_USAGE_COMPUTE);
                 }
-                // else: conv_state_in / delta_state_in are per-call set_input inputs,
-                // uploaded each call below.
+                // else: conv/delta state tensors are pre-bound into the shared
+                // g_q35v_state_buf slices at creation time and uploaded each call below.
             }
         }
         bind_or_mark(lm_head_t, const_cast<void*>(lm_head_data), static_cast<std::size_t>(lm_head_bytes), true);
         bind_or_mark(final_norm_t, const_cast<void*>(final_norm_data), static_cast<std::size_t>(H) * sizeof(float), true);
 
         // Persist: give every still-unbound tensor (intermediates, inputs, outputs,
-        // small weights) its OWN stable slot via alloc_ctx_tensors -> reuse/capture.
+        // small weights) its OWN stable slot via alloc_ctx_tensors. Own slots (no
+        // lifetime packing / buffer aliasing) are REQUIRED for ggml-cuda's CUDA-graph
+        // capture to replay correctly — a private lifetime-packed gallocr produced a
+        // ~20x smaller buffer but the captured graph's replay read stale aliased
+        // slots and the trunk output degraded to garbage after the first verify.
+        // The bulk of the old per-entry VRAM was the GDN state (delta in/out + conv
+        // in/out, ~300 MB for 48 recurrent layers), which now lives in the ONE shared
+        // g_q35v_state_buf (pre-bound above), so each entry's own-slot buffer is only
+        // its activations + I/O — small for the N<=9 verify shapes MTP decode uses.
         ggml_backend_buffer_t persist_buf = nullptr;
         if (fv_persist)
         {
@@ -783,6 +991,12 @@ namespace
                 ggml_free(ctx);
                 return 0;
             }
+            if (vram_log_enabled())
+            {
+                char tag[96];
+                std::snprintf(tag, sizeof(tag), "q35-verify-persist(N=%d,w=%d)", N, window);
+                vram_log(tag, static_cast<std::int64_t>(ggml_backend_buffer_get_size(persist_buf)));
+            }
         }
         else if (!alloc_graph_reuse_gallocr(graph))
         {
@@ -791,6 +1005,12 @@ namespace
             {
                 set_last_error("Qwen3.5 model verify: failed to allocate backend buffer.");
                 return 0;
+            }
+            if (vram_log_enabled())
+            {
+                char tag[96];
+                std::snprintf(tag, sizeof(tag), "q35-verify-ctx(N=%d,w=%d)", N, window);
+                vram_log(tag, static_cast<std::int64_t>(ggml_backend_buffer_get_size(buffer.value)));
             }
         }
 
@@ -822,11 +1042,26 @@ namespace
             }
         }
 
+        if (vram_log_enabled())
+        {
+            char tag[96];
+            std::snprintf(tag, sizeof(tag), "q35-verify-compute-begin(N=%d)", N);
+            vram_log(tag, 0);
+        }
         ggml_status status = ggml_backend_graph_compute(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
+            if (persist_buf != nullptr) ggml_backend_buffer_free(persist_buf);
+            if (fv_persist) ggml_free(ctx);
             set_last_error("Qwen3.5 model verify: graph execution failed.");
             return 0;
+        }
+        if (vram_log_enabled())
+        {
+            ggml_backend_synchronize(g_backend);
+            char tag[96];
+            std::snprintf(tag, sizeof(tag), "q35-verify-compute-end(N=%d)", N);
+            vram_log(tag, 0);
         }
 
         // Download the post-window GDN state (per recurrent layer) + outputs. Resident
@@ -867,6 +1102,7 @@ namespace
             slot->n_logits = n_logits;
             slot->has_normed = (normed_out != nullptr);
             slot->ctx = ctx; slot->buffer = persist_buf; slot->graph = graph;
+            slot->buffer_bytes = persist_buf != nullptr ? ggml_backend_buffer_get_size(persist_buf) : 0;
             slot->hidden_t = hidden_t; slot->pos_t = pos_tensor;
             slot->kv_index = kv_index; slot->mask_t = attn_mask;
             slot->logits_out = logits_out_t; slot->normed_out = normed_out_t;
@@ -880,6 +1116,9 @@ namespace
                 slot->delta_out.push_back(lt[l].delta_state_out);
             }
             slot->lru = ++g_q35vc_clock;
+            // Bound the resident persist-graph total: evict LRU entries (never the one
+            // just built) so the cache never re-overcommits VRAM across many N shapes.
+            q35_verify_cache_evict_to_budget(0, slot);
         }
         clear_last_error();
         return 1;

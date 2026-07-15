@@ -1113,6 +1113,18 @@ namespace TensorSharp.Models
                 if (!ShouldPreloadCudaQuantWeightToDevice(weightName))
                     continue;
 
+                // llama.cpp keeps token_embd on the host (its CPU_Mapped model
+                // buffer): embedding lookup is a row gather, and when the quant
+                // type has no device get_rows kernel Embedding() always serves it
+                // from the retained host copy, so a device copy would be pure
+                // VRAM waste (521 MB for Qwen3.6-27B's 248320x5120 Q3_K table).
+                // Tied-output models matmul against token_embd through its device
+                // cache key, so the skip requires a separate output.weight.
+                if (string.Equals(weightName, "token_embd.weight", StringComparison.Ordinal)
+                    && !CanUseGgmlQuantizedGetRows(qw.GgmlType)
+                    && (_quantWeights.ContainsKey("output.weight") || _weights.ContainsKey("output.weight")))
+                    continue;
+
                 IntPtr cacheKey = qw.EnsureDeviceCacheKey();
                 if (!GgmlBasicOps.PreloadQuantizedWeight(cacheKey, qw.Data, qw.GgmlType, qw.Ne0, qw.Ne1, qw.RawBytes))
                 {

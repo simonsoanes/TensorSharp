@@ -484,6 +484,18 @@ namespace tsg
     void set_last_error(const std::string& message);
     void clear_last_error();
 
+    // --- VRAM allocation diagnostics (TS_GGML_LOG_VRAM=1) ---
+    //
+    // Logs each device-buffer allocation with a tag plus the device's current
+    // free/total memory so operators (and CI) can attribute VRAM growth to the
+    // subsystem that caused it: weight preload, per-tensor device copies (KV
+    // cache / activations), the reuse gallocr, persistent decode/verify graph
+    // buffers, and graph-compute pool growth (visible as the free-memory delta
+    // between the *-begin / *-end markers). Zero overhead when the env var is
+    // unset (single static bool check).
+    bool vram_log_enabled();
+    void vram_log(const char* tag, std::int64_t bytes);
+
     // --- Backend management ---
 
     ggml_backend_t create_backend_instance(int backend_type);

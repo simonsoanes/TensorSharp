@@ -1237,8 +1237,12 @@ namespace TensorSharp.Models
             // MoE activation peak past a 16 GB card's VRAM, and WDDM then PERMANENTLY
             // demotes the reuse-gallocr to shared system memory -> pp2048 collapses from
             // ~360 to ~18 tok/s (measured). 768 keeps the peak device-resident and holds
-            // across context lengths (the KV cache grows separately). CUDA (cuBLAS/MMQ,
-            // no WDDM demotion) keeps the larger 2048 chunk for fewer chunk boundaries.
+            // across context lengths (the KV cache grows separately). A FIXED 768 also
+            // keeps every full chunk on ONE verify graph shape, so the ggml-vulkan
+            // pipelines the startup warmup compiles are REUSED across all prompts/scenarios
+            // (a variable/larger chunk makes each prompt length a fresh shape whose pipeline
+            // + graph is built cold inside the measured TTFT — measured to REGRESS
+            // multi-prompt Vulkan runs). CUDA (cuBLAS/MMQ, no WDDM demotion) keeps 2048.
             return _backend == BackendType.GgmlVulkan ? 768 : 2048;
         }
 

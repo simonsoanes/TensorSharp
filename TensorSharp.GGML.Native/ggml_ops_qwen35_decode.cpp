@@ -525,7 +525,6 @@ namespace
         const int key_dim = head_k_dim * num_k_heads;
         const int value_dim = head_v_dim * num_v_heads;
         const int conv_dim = 2 * key_dim + value_dim;
-        const int head_tile = (num_k_heads > 0) ? (num_v_heads / num_k_heads) : 1;
 
         // Persistent decode graph: default ON; TS_QWEN35_FD_PERSIST=0 disables.
         // Persist mode uses ggml_set_rows (KV write) + a fixed-topology graph that is
@@ -889,9 +888,10 @@ namespace
                 g = ggml_mul(ctx, g, t.ssm_a_w);                                             // * (-exp(A_log))
                 g = ggml_reshape_4d(ctx, g, 1, num_v_heads, 1, 1);
 
-                // conv over the host ring state + the new mixed input
-                ggml_tensor* qkv_T = ggml_cont(ctx, ggml_transpose(ctx, qkv_mixed));          // [1, conv_dim]
-                ggml_tensor* conv_input = ggml_concat(ctx, t.conv_state_in, qkv_T, 0);        // [convDim+1, conv_dim]
+                // conv over the host ring state + the new mixed input. Concat straight
+                // from the non-contiguous transpose view (ggml_concat writes a contiguous
+                // result for ssm_conv) — drops a redundant transpose-cont copy.
+                ggml_tensor* conv_input = ggml_concat(ctx, t.conv_state_in, ggml_transpose(ctx, qkv_mixed), 0); // [convDim+1, conv_dim]
                 ggml_tensor* conv_out = ggml_ssm_conv(ctx, conv_input, t.conv1d_w);           // [conv_dim, 1]
                 conv_out = ggml_silu(ctx, conv_out);
                 ggml_tensor* conv_out_1d = ggml_reshape_1d(ctx, conv_out, conv_dim);
@@ -913,17 +913,12 @@ namespace
                 q_c = ggml_l2_norm(ctx, q_c, eps);
                 k_c = ggml_l2_norm(ctx, k_c, eps);
 
-                // tile q/k from num_k_heads to num_v_heads (h -> h % num_k_heads)
-                ggml_tensor* q_t = q_c;
-                ggml_tensor* k_t = k_c;
-                for (int r = 1; r < head_tile; r++)
-                {
-                    q_t = ggml_concat(ctx, q_t, q_c, 1);
-                    k_t = ggml_concat(ctx, k_t, k_c, 1);
-                }
-
-                ggml_tensor* q4 = ggml_reshape_4d(ctx, ggml_cont(ctx, q_t), head_k_dim, num_v_heads, 1, 1);
-                ggml_tensor* k4 = ggml_reshape_4d(ctx, ggml_cont(ctx, k_t), head_k_dim, num_v_heads, 1, 1);
+                // q/k keep num_k_heads heads: the fused gated_delta_net kernel broadcasts
+                // each v-head h to k-head (h % num_k_heads) internally, so the explicit
+                // concat-tiling to num_v_heads is redundant (matches the verify/prefill path
+                // and llama.cpp's fused GDN). Fewer op dispatches (helps Vulkan decode).
+                ggml_tensor* q4 = ggml_reshape_4d(ctx, q_c, head_k_dim, num_k_heads, 1, 1);
+                ggml_tensor* k4 = ggml_reshape_4d(ctx, k_c, head_k_dim, num_k_heads, 1, 1);
                 ggml_tensor* v4 = ggml_reshape_4d(ctx, v_c, head_v_dim, num_v_heads, 1, 1);
                 ggml_tensor* state4 = ggml_reshape_4d(ctx, t.delta_state_in, head_k_dim, head_v_dim, num_v_heads, 1);
 
@@ -958,13 +953,12 @@ namespace
             ggml_tensor* ffn_down;
             if (d.is_moe == 0)
             {
-                // dense SwiGLU
-                const std::int64_t ffDense = d.ff_dense;
-                ggml_tensor* gu_flat = ggml_reshape_1d(ctx, ggml_mul_mat(ctx, t.gu_w, ffn_normed_2d), 2 * ffDense);
-                ggml_tensor* g_part = ggml_view_1d(ctx, gu_flat, ffDense, 0);
-                ggml_tensor* u_part = ggml_view_1d(ctx, gu_flat, ffDense, static_cast<std::size_t>(ffDense) * sizeof(float));
-                ggml_tensor* act = ggml_mul(ctx, ggml_silu(ctx, ggml_cont(ctx, g_part)), u_part);
-                ggml_tensor* act_2d = ggml_reshape_2d(ctx, act, ffDense, 1);
+                // dense SwiGLU: fused silu(gate)*up over the packed [gate|up] matmul
+                // output (gate-first, matching ggml_swiglu swapped=false). One gated
+                // kernel instead of a cont + standalone silu + separate mul — fewer op
+                // dispatches, which matters most on backends without graph capture (Vulkan).
+                ggml_tensor* gu = ggml_mul_mat(ctx, t.gu_w, ffn_normed_2d); // [2*ffDense, 1]
+                ggml_tensor* act_2d = ggml_swiglu(ctx, gu);                 // [ffDense, 1]
                 ffn_down = ggml_reshape_1d(ctx, ggml_mul_mat(ctx, t.down_w, act_2d), H);
             }
             else
@@ -1168,6 +1162,8 @@ namespace
                 ggml_free(ctx);
                 return 0;
             }
+            if (vram_log_enabled())
+                vram_log("q35-decode-persist", static_cast<std::int64_t>(ggml_backend_buffer_get_size(persist_buf)));
         }
         else
         {
@@ -1938,6 +1934,8 @@ namespace
                 ggml_free(ctx);
                 return 0;
             }
+            if (vram_log_enabled())
+                vram_log("q35-batched-decode-persist", static_cast<std::int64_t>(ggml_backend_buffer_get_size(persist_buf)));
         }
         else if (!alloc_graph_reuse_gallocr(graph))
         {
@@ -1947,6 +1945,8 @@ namespace
                 set_last_error("Qwen3.5 batched decode: failed to allocate backend buffer.");
                 return 0;
             }
+            if (vram_log_enabled())
+                vram_log("q35-batched-decode-ctx", static_cast<std::int64_t>(ggml_backend_buffer_get_size(buffer.value)));
         }
 
         host_read_barrier();

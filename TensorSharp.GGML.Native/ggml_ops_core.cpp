@@ -179,6 +179,34 @@ namespace tsg
         g_last_error.clear();
     }
 
+    // --- VRAM allocation diagnostics (TS_GGML_LOG_VRAM=1) ---
+
+    bool vram_log_enabled()
+    {
+        static const bool enabled = []{
+            const char* e = std::getenv("TS_GGML_LOG_VRAM");
+            return e != nullptr && e[0] == '1';
+        }();
+        return enabled;
+    }
+
+    void vram_log(const char* tag, std::int64_t bytes)
+    {
+        if (!vram_log_enabled())
+            return;
+        std::size_t free_b = 0, total_b = 0;
+        if (g_backend != nullptr)
+        {
+            ggml_backend_dev_t dev = ggml_backend_get_device(g_backend);
+            if (dev != nullptr)
+                ggml_backend_dev_memory(dev, &free_b, &total_b);
+        }
+        std::fprintf(stderr, "[TSVRAM] %-32s %9.1f MB | dev free %9.1f / %9.1f MB\n",
+            tag, bytes / (1024.0 * 1024.0),
+            free_b / (1024.0 * 1024.0), total_b / (1024.0 * 1024.0));
+        std::fflush(stderr);
+    }
+
     // --- Backend management ---
 
     ggml_backend_t create_backend_instance(int backend_type)
@@ -1000,6 +1028,13 @@ namespace tsg
                 CachedBufferMode::DeviceCopy
             };
             g_device_copy_resident_bytes += static_cast<std::int64_t>(ggml_backend_buffer_get_size(out_buffer));
+            if (vram_log_enabled())
+            {
+                char tag[96];
+                std::snprintf(tag, sizeof(tag), "devcopy(total=%.1fMB)",
+                    g_device_copy_resident_bytes / (1024.0 * 1024.0));
+                vram_log(tag, static_cast<std::int64_t>(ggml_backend_buffer_get_size(out_buffer)));
+            }
             return true;
         }
 
@@ -1092,6 +1127,16 @@ namespace tsg
         // ggml_gallocr_alloc_graph reuses the existing buffer when the new graph
         // fits and grows (reallocates) it only when a larger graph appears.
         bool ok = ggml_gallocr_alloc_graph(g_reuse_gallocr, graph);
+        if (ok && vram_log_enabled())
+        {
+            static std::size_t s_last_size = 0;
+            const std::size_t size = ggml_gallocr_get_buffer_size(g_reuse_gallocr, 0);
+            if (size != s_last_size)
+            {
+                s_last_size = size;
+                vram_log("reuse-gallocr(grew)", static_cast<std::int64_t>(size));
+            }
+        }
         return ok;
     }
 
@@ -1159,6 +1204,8 @@ namespace tsg
             }
             g_reuse_compute_size = alloc_size;
             ggml_backend_buffer_set_usage(g_reuse_compute_buf, GGML_BACKEND_BUFFER_USAGE_COMPUTE);
+            if (vram_log_enabled())
+                vram_log("reuse-compute-buf(grew)", static_cast<std::int64_t>(alloc_size));
         }
 
         // Re-pack this graph's unallocated tensors into the cached buffer. Mirrors
@@ -2205,6 +2252,16 @@ TSG_EXPORT int TSGgml_PreloadQuantizedWeight(
                 ggml_backend_buffer_get_size(buffer),
                 CachedBufferMode::DeviceCopy
             };
+        }
+
+        if (vram_log_enabled())
+        {
+            static std::atomic<std::int64_t> s_preload_total{0};
+            const std::int64_t total = s_preload_total.fetch_add(
+                static_cast<std::int64_t>(alloc_size)) + static_cast<std::int64_t>(alloc_size);
+            char tag[96];
+            std::snprintf(tag, sizeof(tag), "preload-weight(total=%.1fMB)", total / (1024.0 * 1024.0));
+            vram_log(tag, static_cast<std::int64_t>(alloc_size));
         }
 
         clear_last_error();

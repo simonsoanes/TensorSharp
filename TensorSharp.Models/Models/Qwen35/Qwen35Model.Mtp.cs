@@ -117,8 +117,26 @@ namespace TensorSharp.Models
         private unsafe Tensor MtpForwardCore(int[] tokens, float[] hRows, int startPos)
         {
             int n = tokens.Length;
-            int hidden = Config.HiddenSize;
             EnsureCacheCapacity(startPos + n);
+
+            Tensor x = MtpProjectInput(tokens, hRows);
+
+            // Full decoder block (attention + FFN/MoE with residuals); reuses the
+            // trunk machinery — the MTP layer's weights/KV live at _mtpLayerIdx.
+            x = AttentionBlock(x, _mtpLayerIdx, n, startPos);
+            return x;
+        }
+
+        /// <summary>
+        /// Projects (token, hPrev) pairs into the MTP block's input space:
+        /// enorm(embed) and hnorm(hPrev) are concatenated and passed through
+        /// eh_proj, yielding x [n, hidden] (llama.cpp graph_mtp's eh_proj output).
+        /// Shared by the op-by-op and fused draft paths.
+        /// </summary>
+        private unsafe Tensor MtpProjectInput(int[] tokens, float[] hRows)
+        {
+            int n = tokens.Length;
+            int hidden = Config.HiddenSize;
 
             Tensor emb = MtpEmbedding(tokens);
             Tensor eNorm = RMSNormOpCached(emb, _mtpEnormW);
@@ -148,10 +166,6 @@ namespace TensorSharp.Models
 
             Tensor x = LinearForwardCached(cat, _mtpEhProjQW, _mtpEhProjF32);
             cat.Dispose();
-
-            // Full decoder block (attention + FFN/MoE with residuals); reuses the
-            // trunk machinery — the MTP layer's weights/KV live at _mtpLayerIdx.
-            x = AttentionBlock(x, _mtpLayerIdx, n, startPos);
             return x;
         }
 
@@ -166,8 +180,21 @@ namespace TensorSharp.Models
             if (!HasMtp)
                 throw new InvalidOperationException("Model has no NextN/MTP draft block.");
             EnterSpecSession();
+            EnsureCacheCapacity(pos + 1);
 
-            Tensor x = MtpForwardCore(new[] { token }, hPrev, pos);
+            Tensor x = MtpProjectInput(new[] { token }, hPrev);
+
+            // Fast path: run the MTP block + shared-head norm + LM head as ONE fused,
+            // CUDA-graph-captured graph (llama.cpp's graph_mtp), mirroring the trunk's
+            // fused verify. ~14 ms op-by-op -> ~1-2 ms captured. Falls through to the
+            // op-by-op block on any unsupported shape/backend.
+            if (TryFusedMtpBlock(x, pos, 1, hOut, logitsOut, nLogitRows: 1))
+            {
+                x.Dispose();
+                return;
+            }
+
+            x = AttentionBlock(x, _mtpLayerIdx, 1, pos);
 
             Tensor headNorm = _mtpHeadNormW ?? _finalNormW;
             Tensor hn = RMSNormOpCached(x, headNorm);
@@ -200,12 +227,28 @@ namespace TensorSharp.Models
         /// exact trunk hidden states. Logits are not needed — only the KV side
         /// effects matter.
         /// </summary>
+        private float[] _mtpCatchupLogits;
+
         public void MtpCatchUp(int[] tokens, float[] hRows, int startPos)
         {
             if (!HasMtp)
                 throw new InvalidOperationException("Model has no NextN/MTP draft block.");
             EnterSpecSession();
-            Tensor x = MtpForwardCore(tokens, hRows, startPos);
+            EnsureCacheCapacity(startPos + tokens.Length);
+
+            Tensor x = MtpProjectInput(tokens, hRows);
+
+            // Fused block (same captured/one-shot graph as the draft). Catch-up only
+            // needs the MTP block's KV side effects — request a single logit row
+            // (minimal lm_head) and no hidden capture. Falls back to op-by-op.
+            _mtpCatchupLogits ??= new float[Config.VocabSize];
+            if (TryFusedMtpBlock(x, startPos, tokens.Length, null, _mtpCatchupLogits, nLogitRows: 1))
+            {
+                x.Dispose();
+                return;
+            }
+
+            x = AttentionBlock(x, _mtpLayerIdx, tokens.Length, startPos);
             x.Dispose();
         }
 
@@ -327,33 +370,46 @@ namespace TensorSharp.Models
         }
 
         private float[] _fvLogitsAllBuf;
+        private float[] _fvLogitsLastBuf;
 
-        /// <summary>Fused trunk verify fast path for <see cref="SpecForward"/>: the
-        /// kernel always produces all-N logit rows, so route them to logitsOut
-        /// directly when the caller wants all rows, else stage in a reusable buffer
-        /// and copy the last row. Returns false (op-by-op fallback) when disabled or
-        /// the kernel declines the shape.</summary>
+        /// <summary>Fused trunk verify fast path for <see cref="SpecForward"/>: route
+        /// all-N logit rows to logitsOut directly when the caller wants all rows
+        /// (the true MTP verify batch, N &lt;= maxDraft+1). Last-row-only callers
+        /// (prompt prefill chunks, rollback catch-up re-forwards) ask the kernel for
+        /// ONE logit row (nLogitRows: 1): computing lm_head over every prompt row
+        /// wastes vocab*N floats of device + host memory (248320-vocab * 2048-token
+        /// chunk = 2 GB), and — because n_logits == N is also the kernel's persist-
+        /// graph trigger — it used to leave a multi-GB persistent verify graph cached
+        /// PER PROMPT LENGTH. Returns false (op-by-op fallback) when disabled or the
+        /// kernel declines the shape.</summary>
         private bool TryFusedVerifyTrunk(Tensor hidden, int startPos, int seqLen,
             float[] hAllOut, float[] logitsOut, bool allLogitsRows)
         {
             if (!_fusedVerifyEnabled)
                 return false;
             int vocab = Config.VocabSize;
-            float[] allLogits;
-            if (allLogitsRows && logitsOut != null && logitsOut.Length >= (long)seqLen * vocab)
+            if (allLogitsRows)
             {
-                allLogits = logitsOut;
+                float[] allLogits;
+                if (logitsOut != null && logitsOut.Length >= (long)seqLen * vocab)
+                {
+                    allLogits = logitsOut;
+                }
+                else
+                {
+                    if (_fvLogitsAllBuf == null || _fvLogitsAllBuf.Length < (long)seqLen * vocab)
+                        _fvLogitsAllBuf = new float[(long)seqLen * vocab];
+                    allLogits = _fvLogitsAllBuf;
+                }
+                return TryFullModelVerify(hidden, startPos, seqLen, hAllOut, allLogits);
             }
-            else
-            {
-                if (_fvLogitsAllBuf == null || _fvLogitsAllBuf.Length < (long)seqLen * vocab)
-                    _fvLogitsAllBuf = new float[(long)seqLen * vocab];
-                allLogits = _fvLogitsAllBuf;
-            }
-            if (!TryFullModelVerify(hidden, startPos, seqLen, hAllOut, allLogits))
+
+            if (_fvLogitsLastBuf == null || _fvLogitsLastBuf.Length < vocab)
+                _fvLogitsLastBuf = new float[vocab];
+            if (!TryFullModelVerify(hidden, startPos, seqLen, hAllOut, _fvLogitsLastBuf, nLogitRows: 1))
                 return false;
-            if (!allLogitsRows && logitsOut != null)
-                Array.Copy(allLogits, (long)(seqLen - 1) * vocab, logitsOut, 0, vocab);
+            if (logitsOut != null)
+                Array.Copy(_fvLogitsLastBuf, 0, logitsOut, 0, vocab);
             return true;
         }
 
