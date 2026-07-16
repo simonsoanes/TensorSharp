@@ -122,11 +122,11 @@ These architectures are implemented and exercised by the test/benchmark matrix. 
 
 ## Highlights
 
-- **Trades wins with llama.cpp — from pure .NET** — head-to-head on identical GGUF files and the same GPU, TensorSharp matches or beats the hand-tuned C++ `llama.cpp` on the workloads that matter. In the project's GGML CUDA comparison run (reproducible via [`benchmarks/engine_comparison`](benchmarks/engine_comparison)): the Gemma 4 26B-A4B MoE prefills **1.32×** faster and lands first tokens **1.30×** sooner (geomean; up to **1.70× / 1.65×** per scenario), Gemma 4 12B wins or ties **every decode scenario** (geomean **1.17×**), streamed tool-call turns decode up to **2.37×** faster, and structured-output (JSON) decode on Gemma 4 E4B streams **7.7×** faster (405 vs 52 tok/s). → [Head-to-head vs llama.cpp](#head-to-head-vs-llamacpp-engine-comparison)
+- **Trades wins with llama.cpp — from pure .NET** — head-to-head on identical GGUF files and the same GPU, TensorSharp matches or beats the hand-tuned C++ `llama.cpp` on the workloads that matter. In the current engine-comparison run (both engines on their GGML CUDA and Vulkan builds, reproducible via [`benchmarks/engine_comparison`](benchmarks/engine_comparison)): Gemma 4 E4B and the 2-bit Qwen 3.6 35B-A3B MoE prefill **1.28×** faster on CUDA with first tokens **1.27×** sooner (multi-turn prompts up to **1.49×**), Gemma 4 12B decodes **1.21×** faster on Vulkan (up to **1.32×** on long context), and CUDA decode holds parity or better on three of four models (up to **1.07×** geomean on Qwen 3.6 27B). → [Head-to-head vs llama.cpp](#head-to-head-vs-llamacpp-engine-comparison)
 - **Continuous batching & paged KV cache** — vLLM-style paged KV pool with block-hash prefix sharing and an iteration-level scheduler, on by default in the server. → [deep dive](docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md)
 - **MTP / NextN speculative decoding** — multi-token-prediction draft heads accelerate solo decode on Qwen 3.6 (NextN block embedded in the trunk GGUF) and Gemma 4 (separate `gemma4-assistant` draft GGUF). The draft proposes several tokens per step and the trunk verifies them in one batched forward, with the request's own sampler driving both. Opt in with the server's `--mtp-spec` flag (+ `--mtp-draft-model` for Gemma 4); the CLI has no MTP flags (use the `TS_MTP_*` env vars). → [Speculative decoding](#mtp--nextn-speculative-decoding)
 - **DiffusionGemma text diffusion** — block-wise EntropyBound denoising over a Gemma-4-derived MoE backbone, with CLI generation flags and a Web UI denoising preview stream. → [DiffusionGemma card](docs/models/diffusiongemma.md)
-- **Qwen-Image-Edit image editing** — prompt + input image → edited image, driving the 60-block MMDiT diffusion transformer with a Qwen-Image VAE and a Qwen2.5-VL-7B text encoder. CUDA-graph-captured whole-DiT forward, FlowMatch-Euler true-CFG denoise, and live denoising previews in the Web UI. On the CUDA image-edit benchmark it beats stable-diffusion.cpp: a warm 4-step Lightning edit completes in **40.44 s vs 48.16 s** (~**1.19×** faster). → [Qwen-Image-Edit card](docs/models/qwenimage.md)
+- **Qwen-Image-Edit image editing** — prompt + input image → edited image, driving the 60-block MMDiT diffusion transformer with a Qwen-Image VAE and a Qwen2.5-VL-7B text encoder. CUDA-graph-captured whole-DiT forward, FlowMatch-Euler true-CFG denoise, and live denoising previews in the Web UI. In an earlier run of the CUDA image-edit benchmark it beat stable-diffusion.cpp: a warm 4-step Lightning edit in **40.44 s vs 48.16 s** (~**1.19×** faster). → [Qwen-Image-Edit card](docs/models/qwenimage.md)
 - **Multimodal** — image / video / audio inputs (Gemma 4); image inputs for Gemma 3, Qwen 3.5-family, Mistral 3, and Nemotron-H Omni. → [Multimodal Support](#multimodal-support)
 - **Tool calling / function calling** — multi-turn tool calls across all three API styles, with architecture-agnostic output parsing. → [Tool Calling](#tool-calling--function-calling)
 - **Thinking / reasoning mode** — structured chain-of-thought for Qwen 3, Qwen 3.5/3.6-family, Gemma 4, GPT OSS, and Nemotron-H. → [Thinking Mode](#thinking--reasoning-mode)
@@ -1385,27 +1385,28 @@ the fused path engages.
 
 ### Head-to-head vs llama.cpp (engine comparison)
 
-A pure-.NET engine going toe-to-toe with the hand-tuned C++ `llama.cpp` on **identical GGUF files, the same NVIDIA RTX 3080 Laptop GPU (16 GB), and one uniform OpenAI `/v1/chat/completions` surface** — across short/long text, multi-turn, tool-calling, and structured-output (JSON) scenarios. The numbers below are the **geomean speedup of TensorSharp over llama.cpp on the same GGML CUDA backend** (single-stream, greedy, MTP off). **> 1.0× means TensorSharp is faster** (decode / prefill) or lower-latency (TTFT). The full per-scenario tables are in [`docs/engine_comparison_report.md`](docs/engine_comparison_report.md).
+A pure-.NET engine going toe-to-toe with the hand-tuned C++ `llama.cpp` on **identical GGUF files, the same NVIDIA RTX 3080 Laptop GPU (16 GB), and one uniform OpenAI `/v1/chat/completions` surface** — short-prompt, long-context, and multi-turn chat scenarios, with **both engines measured on their GGML CUDA and GGML Vulkan builds**. The numbers below are the **geomean speedup of TensorSharp over llama.cpp on the same backend** (single-stream, greedy, MTP off). **> 1.0× means TensorSharp is faster** (decode / prefill) or lower-latency (TTFT). The full per-scenario tables are in [`docs/engine_comparison_report.md`](docs/engine_comparison_report.md).
 
-| Model | decode | prefill | TTFT |
-|---|---:|---:|---:|
-| Gemma 4 E4B it (Q8_0, dense multimodal) | **1.46×** | 0.83× | 0.82× |
-| Gemma 4 12B it (QAT UD-Q4_K_XL, dense) | **1.17×** | 1.01× | 0.99× |
-| Gemma 4 26B-A4B it (QAT UD-Q4_K_XL, **MoE**) | 0.96× | **1.32×** | **1.30×** |
-| Qwen 3.6 35B-A3B (UD-IQ2_XXS, MoE) | 0.92× | 0.99× | 0.97× |
+| Model | Backend | decode | prefill | TTFT |
+|---|---|---:|---:|---:|
+| Gemma 4 E4B it (Q8_0, dense multimodal) | CUDA | 1.02× | **1.28×** | **1.27×** |
+| Gemma 4 E4B it (Q8_0, dense multimodal) | Vulkan | 1.00× | 1.05× | 1.03× |
+| Gemma 4 12B it (QAT UD-Q4_K_XL, dense) | CUDA | 1.04× | **1.17×** | **1.16×** |
+| Gemma 4 12B it (QAT UD-Q4_K_XL, dense) | Vulkan | **1.21×** | 1.04× | 1.03× |
+| Qwen 3.6 35B-A3B (UD-IQ2_XXS, MoE) | CUDA | 0.98× | **1.28×** | **1.27×** |
+| Qwen 3.6 35B-A3B (UD-IQ2_XXS, MoE) | Vulkan | 0.87× | 1.04× | 1.03× |
+| Qwen 3.6 27B (UD-IQ2_XXS, dense) | CUDA | **1.07×** | 0.96× | 0.95× |
+| Qwen 3.6 27B (UD-IQ2_XXS, dense) | Vulkan | 1.02× | 0.85× | 0.84× |
 
 Where TensorSharp pulls clearly ahead:
 
-- **The MoE flagship owns prefill and first-token latency.** On Gemma 4 26B-A4B, verify-based whole-model prefill beats llama.cpp in **every scenario** — up to **1.59×** on short prompts and **1.70×** in JSON mode — and the first token lands sooner in every scenario too, up to **1.65×**. Geomean: **1.32× prefill / 1.30× TTFT**.
-- **Dense 12B decode never loses.** Gemma 4 12B wins or ties llama.cpp on decode in **all five scenarios** (geomean **1.17×**), with streamed tool-call turns decoding **2.05×** faster (81.0 vs 39.5 tok/s).
-- **Structured output (JSON mode) is a standout on E4B.** Constrained-JSON decode streams **405 tok/s vs 52** — **7.73×** — lifting E4B's overall decode geomean to **1.46×**.
-- **Tool-calling turns fly on the MoE flagship.** Function-call decode on 26B-A4B runs **2.37×** faster (174.3 vs 73.4 tok/s), with a lower time-to-first-token on top.
-- **E4B out-prefills llama.cpp on every text scenario.** Short prompts **1.22×**, multi-turn chat **1.16×**, tool-call **1.12×**, long context **1.08×** — with first tokens landing up to **1.20×** sooner.
-- **Parity even at extreme quantization.** The aggressively quantized IQ2_XXS Qwen 3.6 35B-A3B MoE holds decode within ~8% (0.92×) and prefill at parity (0.99×) — a pure-.NET engine keeping pace with hand-tuned C++ on 2-bit weights.
+- **CUDA prefill and first-token latency.** Gemma 4 E4B prefills **1.28×** faster on geomean (up to **1.39×** on short prompts), and the 2-bit Qwen 3.6 35B-A3B MoE matches it at **1.28× prefill / 1.27× TTFT** (up to **1.49×** on multi-turn prompts).
+- **Multi-turn prefill wins on every model on CUDA.** Follow-up turns prefill 1.27× (E4B), **1.39×** (12B), **1.49×** (35B-A3B), and 1.11× (27B) faster, so the first token of the next reply lands up to **1.47×** sooner.
+- **Decode holds parity or better on CUDA.** E4B 1.02×, 12B 1.04×, 27B **1.07×** — with long-context decode winning up to **1.12×** (27B) — and the 35B-A3B MoE within 2% (0.98×).
+- **Vulkan decode on the dense 12B is a clear win.** Geomean **1.21×**, up to **1.32×** on long context, with prefill and TTFT also at or above parity.
+- **Parity even at extreme quantization.** On aggressively quantized IQ2_XXS (2-bit) weights, the dense 27B decodes **1.07×** (CUDA) / 1.02× (Vulkan) faster and the 35B-A3B MoE out-prefills llama.cpp by **1.28×** — a pure-.NET engine keeping pace with hand-tuned C++.
 
-**GGML Vulkan backend** — the vendor-neutral GPU path was benchmarked the same way (same host, both engines on their Vulkan builds, Gemma 4 E4B + 12B). Text-scenario decode sits within a few percent of llama.cpp (0.91–1.02× per scenario, with 12B tool-call turns decoding **1.96×** faster), and text prefill reaches parity on short prompts, JSON mode, and multi-turn chat (up to **1.20×**). The sub-1.0× prefill geomeans (0.68× E4B / 0.70× 12B) are dominated by the image/audio prefill path, which is not yet optimized on Vulkan. Per-scenario tables are in the report's Vulkan section.
-
-Outside these standout cells, decode sits within a few percent of llama.cpp, so the prefill, TTFT, tool-call, and structured-output wins come on top of competitive token generation. The remaining sub-1.0× cells — chiefly 26B-A4B plain-text decode and E4B JSON-mode prefill — are active optimization targets rather than finished results. Every cell, wins and gaps alike, is in the [full report](docs/engine_comparison_report.md).
+The remaining sub-1.0× cells — chiefly Qwen 3.6 35B-A3B decode on Vulkan (0.87×), Qwen 3.6 27B dense prefill (0.96× CUDA / 0.85× Vulkan), and E4B long-prompt prefill on Vulkan (0.71×) — are active optimization targets rather than finished results. The harness also has tool-calling, structured-output (JSON), image-edit (vs `stable-diffusion.cpp`), MTP on/off, and parallel-request scenarios you can run on your own hardware via [`benchmarks/engine_comparison`](benchmarks/engine_comparison). Every cell of the current run, wins and gaps alike, is in the [full report](docs/engine_comparison_report.md).
 
 ## Testing
 

@@ -246,11 +246,11 @@ token 序列，使编辑接地于原图。
   补零的输入切片上重跑同一卷积，结果**逐位一致**（无拼缝——只有临时 im2col 被限界），
   使面积钳制可达模型**原生 ~1 MP**，显著改善面部 / 细节。
 
-对比测试：在本项目的 CUDA `image_edit` 基准场景上（可通过
+对比测试：在本项目 CUDA `image_edit` 基准场景较早的一次运行中（可通过
 [`benchmarks/engine_comparison`](../../benchmarks/engine_comparison) 复现；
 544×1184 分辨率的 4 步 Lightning 编辑），TensorSharp 完成一次热编辑耗时
 **40.44 s**，stable-diffusion.cpp 为 48.16 s（快约 1.19×）；冷启动首个请求为
-54.11 s。
+54.11 s。当前签入的引擎对比报告只覆盖文本场景。
 
 重要开关：
 
