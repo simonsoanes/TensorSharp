@@ -287,10 +287,12 @@ into the token sequence so the edit is grounded on the original image.
   seams — only the transient im2col is bounded). This lets the area clamp target
   the model's **native ~1 MP**, which materially improves face/fine detail.
 
-Head-to-head: on the project's CUDA `image_edit` benchmark scenario (reproducible
-via [`benchmarks/engine_comparison`](../../benchmarks/engine_comparison); 4-step
-Lightning edit at 544×1184), TensorSharp completes a warm edit in **40.44 s** vs
-stable-diffusion.cpp's 48.16 s (~1.19× faster); the cold first request is 54.11 s.
+Head-to-head: in an earlier run of the project's CUDA `image_edit` benchmark
+scenario (reproducible via
+[`benchmarks/engine_comparison`](../../benchmarks/engine_comparison); 4-step
+Lightning edit at 544×1184), TensorSharp completed a warm edit in **40.44 s** vs
+stable-diffusion.cpp's 48.16 s (~1.19× faster); the cold first request was 54.11 s.
+The current checked-in engine-comparison report covers the text scenarios only.
 
 Important toggles:
 
