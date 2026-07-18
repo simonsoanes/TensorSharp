@@ -1,0 +1,24 @@
+{
+  // Qwen-Rapid NSFW v9.0 (Q2_K, ~7.4 GB) — a Qwen-Image-Edit DiT variant
+  // distilled for fast few-step image edits. It reuses the shared Qwen_Image
+  // VAE at the models root and its own abliterated Qwen2.5-VL text encoder +
+  // vision projector (both under ${modelRoot}/imgedit).
+  //   TensorSharp.Cli --config config/qwen-image-rapid-nsfw.json \
+  //     --image input.png --prompt "..." --output edited.png
+  //   TensorSharp.Server --config config/qwen-image-rapid-nsfw.json
+  //
+  // This is a "rapid" (few-step) build, so it needs no Lightning LoRA. Tune
+  // steps/cfg per run on the CLI: --diffusion-steps N --cfg F --diffusion-seed N.
+  "variables": {
+    "modelRoot": "C:/Works/models",
+    "imgedit": "C:/Works/models/imgedit"
+  },
+
+  "backend": "ggml_cuda",
+  "offload-cpu": true,
+
+  "model": "${imgedit}/qwen-rapid-nsfw-v9.0-Q2_K.gguf",
+  "qwen-image-vae": "${modelRoot}/Qwen_Image-VAE.safetensors",
+  "qwen-image-vl": "${imgedit}/Qwen2.5-VL-7B-Instruct-abliterated.Q4_K_M.gguf",
+  "qwen-image-mmproj": "${imgedit}/Qwen2.5-VL-7B-Instruct-abliterated.mmproj-Q8_0.gguf"
+}

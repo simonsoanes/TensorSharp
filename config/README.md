@@ -110,3 +110,46 @@ are reused afterward. If you already have a file at that `path`, it is used as-i
 
 `server-basic.json` uses the standard `gemma-4-E4B-it` build — point its `path` at
 your own file to host a different variant.
+
+## Ready-made configs for the local models in `C:/Works/models`
+
+One config per runnable model, with its companions (vision projector, image-edit
+VAE / text encoder, MTP draft head, LoRA) already wired in. Each points at the
+existing local file, so no download happens — just run it. Every file works with
+**both** hosts (only host-recognized keys are used):
+
+```bash
+TensorSharp.Cli    --config config/qwen3.5-9b-q8.json --input prompt.txt
+TensorSharp.Server --config config/gemma-4-26b-a4b.json
+```
+
+| File | Model | Kind |
+|------|-------|------|
+| [`qwen3.5-9b-q8.json`](qwen3.5-9b-q8.json) | Qwen3.5-9B (Q8_0) | Text LLM |
+| [`qwen3.5-9b-iq4_xs.json`](qwen3.5-9b-iq4_xs.json) | Qwen3.5-9B (IQ4_XS) | Text LLM, smaller quant |
+| [`qwen3.5-9b-uncensored-q8.json`](qwen3.5-9b-uncensored-q8.json) | Qwen3.5-9B Uncensored (Q8_0) | Text LLM |
+| [`qwen3.6-27b.json`](qwen3.6-27b.json) | Qwen3.6-27B + vision | Multimodal LLM |
+| [`qwen3.6-35b-a3b.json`](qwen3.6-35b-a3b.json) | Qwen3.6-35B-A3B (MoE) + vision | Multimodal MoE LLM |
+| [`gemma-4-e4b.json`](gemma-4-e4b.json) | Gemma-4 E4B + vision + MTP draft | Multimodal LLM |
+| [`gemma-4-12b.json`](gemma-4-12b.json) | Gemma-4 12B (QAT) + vision + MTP draft | Multimodal LLM |
+| [`gemma-4-26b-a4b.json`](gemma-4-26b-a4b.json) | Gemma-4 26B-A4B (MoE) + vision + MTP draft | Multimodal MoE LLM |
+| [`gpt-oss-20b.json`](gpt-oss-20b.json) | gpt-oss-20b (Q8_0) | Text reasoning LLM |
+| [`diffusiongemma-26b-a4b-q4.json`](diffusiongemma-26b-a4b-q4.json) | DiffusionGemma 26B-A4B (Q4_K_M) | Text diffusion (CLI) |
+| [`diffusiongemma-26b-a4b-q3.json`](diffusiongemma-26b-a4b-q3.json) | DiffusionGemma 26B-A4B (Q3_K_M) | Text diffusion (CLI), smaller |
+| [`qwen-image-edit-2511.json`](qwen-image-edit-2511.json) | Qwen-Image-Edit 2511 + VAE/TE/mmproj + Lightning LoRA | Image edit |
+| [`qwen-image-rapid-nsfw.json`](qwen-image-rapid-nsfw.json) | Qwen-Rapid v9.0 DiT + VAE/TE/mmproj | Image edit (few-step) |
+
+Notes:
+
+- **Multimodal** configs load a vision projector, so add `--image photo.png` to ask
+  about a picture.
+- **MTP speculative decoding** (Gemma configs) is a **server** feature — the draft
+  head is wired via `mtp-draft-model`; the CLI ignores it. It is lossless. For
+  Qwen3.6 the draft head is embedded in the trunk, so just add `"mtp-spec": true`.
+- **Image-edit** configs run the DiT pipeline: `--image in.png --prompt "…" --output
+  out.png`. Per-edit `--diffusion-steps` / `--cfg` / `--diffusion-seed` are CLI flags.
+- **DiffusionGemma** uses the CLI's iterative denoising path; tune it with
+  `--diffusion-steps` / `--diffusion-seed` on the command line.
+- To make any of these auto-download on another machine, turn a `"model": "…path…"`
+  string into an object: `{ "path": "…", "urls": ["https://…"] }` (see the examples
+  above).

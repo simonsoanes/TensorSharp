@@ -1,0 +1,31 @@
+{
+  // Qwen3.6-35B-A3B (UD-IQ2_XXS) — Mixture-of-Experts multimodal LLM (~11.8 GB,
+  // ~3B active params) plus its vision projector. Trunk + mmproj are co-located
+  // under ${modelRoot}/mtp.
+  // Run with:
+  //   TensorSharp.Cli    --config config/qwen3.6-35b-a3b.json --image photo.png
+  //   TensorSharp.Server --config config/qwen3.6-35b-a3b.json
+  "variables": {
+    "modelRoot": "C:/Works/models",
+    "root": "C:/Works/models/mtp"
+  },
+
+  "backend": "ggml_cuda",
+  "max-tokens": 4096,
+  "continuous-batching": true,
+
+  "temperature": 0.7,
+  "top-k": 20,
+  "top-p": 0.8,
+  "min-p": 0,
+
+  "model": "${root}/Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf",
+  "mmproj": "${root}/Qwen3.6-35B-A3B-mmproj-BF16.gguf"
+
+  // MTP speculative decoding: Qwen3.6 embeds its NextN draft head in the trunk
+  // GGUF (no separate draft file). Enable it (server only) with:
+  //   "mtp-spec": true
+  //
+  // A second, slightly smaller build of this model lives at the models root:
+  //   ${modelRoot}/Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf  (+ Qwen3.6-35B-A3B-mmproj-F16.gguf)
+}
