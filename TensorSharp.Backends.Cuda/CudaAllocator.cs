@@ -21,6 +21,11 @@ namespace TensorSharp.Cuda
             bool poolEnabled = !string.Equals(Environment.GetEnvironmentVariable("TENSORSHARP_CUDA_POOL"), "0", StringComparison.Ordinal);
             long maxCachedBytes = ReadPoolLimit("TENSORSHARP_CUDA_POOL_MAX_MB", 512L) * 1024L * 1024L;
             long maxCachedBlockBytes = ReadPoolLimit("TENSORSHARP_CUDA_POOL_MAX_BLOCK_MB", 256L) * 1024L * 1024L;
+            // Budget for the global large-block cache (prefill-sized activations;
+            // see CudaDeviceMemoryPool). Big enough that a 2048-token prefill
+            // chunk's transients all pool, which also keeps CUDA-graph captures
+            // of the prefill loop allocation-free.
+            long largeCachedBytes = ReadPoolLimit("TENSORSHARP_CUDA_POOL_LARGE_MB", 1024L) * 1024L * 1024L;
 
             CudaContext context = null;
             CudaStream stream = null;
@@ -56,7 +61,8 @@ namespace TensorSharp.Cuda
                 maxCachedBlockBytes,
                 poolEnabled,
                 backingAllocate: AllocateDeviceMemory,
-                backingFree: FreeDeviceMemory);
+                backingFree: FreeDeviceMemory,
+                largeCachedBytesCap: largeCachedBytes);
         }
 
         public BlasEnum BlasEnum => BlasEnum.CUDA;
@@ -79,12 +85,33 @@ namespace TensorSharp.Cuda
         internal IntPtr RentDeviceMemory(long requestedBytes, out long allocationBytes)
         {
             ThrowIfDisposed();
-            return pool.Rent(requestedBytes, out allocationBytes);
+            IntPtr ptr = pool.Rent(requestedBytes, out allocationBytes);
+            CudaGraphCapture.OnRent(this, ptr, allocationBytes);
+            return ptr;
         }
 
         internal void ReturnDeviceMemory(IntPtr ptr, long allocationBytes)
         {
+            if (CudaGraphCapture.IsCapturing(this))
+            {
+                // While a graph capture is active the captured kernels reference
+                // this block: pooling keeps it reachable for the capture owner
+                // (it is tracked and stolen at capture end); a cuMemFree would
+                // leave the graph pointing at freed memory, so those returns are
+                // quarantined by the capture context instead.
+                bool pooled = pool.TryReturnToPool(ptr, allocationBytes);
+                if (!CudaGraphCapture.InterceptReturn(this, ptr, allocationBytes, wouldPool: pooled) && !pooled)
+                    pool.Return(ptr, allocationBytes);
+                return;
+            }
             pool.Return(ptr, allocationBytes);
+        }
+
+        /// <summary>Remove a specific free block from the pool so a cached CUDA
+        /// graph can own it (see <see cref="CudaPrefillGraphCache"/>).</summary>
+        internal bool TryStealPooledBlock(IntPtr ptr, long allocationBytes)
+        {
+            return pool.TrySteal(ptr, allocationBytes);
         }
 
         private IntPtr AllocateDeviceMemory(long allocationBytes)

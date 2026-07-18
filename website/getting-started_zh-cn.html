@@ -80,6 +80,8 @@ TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Cli -c R
 # 打开 http://localhost:5000/index.html</code></pre>
   <p><code>http://localhost:5000/</code> 返回健康状态；浏览器聊天位于 <code>/index.html</code>。<a href="http-api_zh-cn.html">兼容 Ollama 和 OpenAI</a> 的端点使用同一个固定端口。</p>
 
+  <div class="callout tip"><div class="ic">✅</div><p><strong>省去冗长的命令行。</strong> 把参数写进一个 JSON 文件，用 <code>--config config/server-basic.json</code>（或 <code>config/cli-basic.json</code>）传入。配置项甚至可以在首次运行时自动下载模型，因此全新机器无需手动下载。仓库的 <code>config/</code> 目录提供了开箱即用的示例。→ <a href="server_zh-cn.html#config">配置文件</a></p></div>
+
   <h2 id="next">下一步去哪</h2>
   <div class="card-grid">
     <a class="card" href="backends_zh-cn.html"><div class="ic">🖥️</div><h3>选择后端</h3><p>把 <code>--backend</code> 匹配到你的硬件。</p></a>

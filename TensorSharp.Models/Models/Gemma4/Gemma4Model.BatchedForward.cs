@@ -52,6 +52,29 @@ namespace TensorSharp.Models
         private int _g4PagedBlockSize;
         private int[] _g4PagedKvDimPerLayer; // num_kv_heads * head_dim per layer
 
+        /// <summary>Declared availability of the batched path (see
+        /// <see cref="IBatchedPagedModel.BatchedForwardAvailable"/>). Mirrors
+        /// the STATIC gates <see cref="ForwardBatch"/> enforces with
+        /// NotSupportedException - the TS_GEMMA4_BATCHED opt-out, MoE layers
+        /// (the batched kernels can't run them), and a block-quantized (Q8_0)
+        /// KV cache - so <c>ExecutionPlanner</c> routes around the batched
+        /// path up front. The per-request multimodal-pending gate stays
+        /// dynamic inside ForwardBatch.</summary>
+        public bool BatchedForwardAvailable
+        {
+            get
+            {
+                string optOut = Environment.GetEnvironmentVariable("TS_GEMMA4_BATCHED");
+                if (string.Equals(optOut, "0", StringComparison.Ordinal) ||
+                    string.Equals(optOut, "false", StringComparison.OrdinalIgnoreCase))
+                    return false;
+                if (_kvCacheDtype.IsBlockQuantized()) return false;
+                for (int l = 0; l < Config.NumLayers; l++)
+                    if (HasMoE(l)) return false;
+                return true;
+            }
+        }
+
         public IReadOnlyList<float[]> ForwardBatch(BatchedForwardContext ctx)
         {
             if (ctx == null) throw new ArgumentNullException(nameof(ctx));

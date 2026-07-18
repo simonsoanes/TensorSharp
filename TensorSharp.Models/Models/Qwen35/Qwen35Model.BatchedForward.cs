@@ -103,6 +103,13 @@ namespace TensorSharp.Models
         // with what ForwardBatch will actually accept.
         public bool SupportsBatchedMultimodal => IsBatchedPathEnabled();
 
+        /// <summary>Declared availability of the batched path (see
+        /// <see cref="IBatchedPagedModel.BatchedForwardAvailable"/>): follows
+        /// the <c>TS_QWEN35_BATCHED</c> / <c>--no-continuous-batching</c>
+        /// opt-out so <c>ExecutionPlanner</c> routes to the per-seq fallback
+        /// up front instead of via a NotSupportedException round trip.</summary>
+        public bool BatchedForwardAvailable => IsBatchedPathEnabled();
+
         // ====================================================================
         // N=1 fast path (BatchExecutor): when only ONE sequence is scheduled,
         // serve it through the per-seq Forward path (= the fused, CUDA-graph

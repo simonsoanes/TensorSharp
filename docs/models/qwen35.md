@@ -777,7 +777,7 @@ draft window and `--mtp-pmin` (default `0.75`) is the minimum draft confidence t
 keep a token. On `ggml_cuda`, the GDN chunked-prefill kernel also speeds the
 speculative verify: measured on Qwen3.6-27B IQ2_XXS it cut MTP speculative-verify
 decode from 217 to 174 ms/token (see §8, `GDN_CHUNK_PREFILL_MIN_SEQ_LEN`). See the
-[README MTP section](../../README.md#mtp--nextn-speculative-decoding) for the full
+[MTP / speculative decoding](../../FEATURES.md#mtp--nextn-speculative-decoding) for the full
 flag list.
 
 ## 13. Output parser and chat template

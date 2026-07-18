@@ -1,0 +1,23 @@
+{
+  // Minimal TensorSharp.Cli configuration.
+  // Run with:  TensorSharp.Cli --config config/cli-basic.json
+  // Any option you also pass on the command line overrides the value here,
+  // e.g.  TensorSharp.Cli --config config/cli-basic.json --max-tokens 512
+  //
+  // The model auto-downloads into ${modelRoot} on the first run (real, ungated
+  // GGUF, ~8.9 GB) and is reused on every later run.
+  "variables": {
+    "modelRoot": "C:/Works/models",
+    "hf": "https://huggingface.co"
+  },
+
+  "backend": "ggml_cuda",
+  "max-tokens": 256,
+  "temperature": 0.7,
+  "top-p": 0.9,
+
+  "model": {
+    "path": "${modelRoot}/Qwen3.5-9B-Q8_0.gguf",
+    "urls": [ "${hf}/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q8_0.gguf" ]
+  }
+}

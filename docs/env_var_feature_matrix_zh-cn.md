@@ -42,7 +42,16 @@ DiffusionGemma 当前不属于已注册的 TestMatrix 功能目录：还没有 d
 | `TS_GEMMA4_BATCHED` | Gemma 4 | 批处理分页前向 vs 按序列回退 | 启用 | `0`, `1` | 是 |
 | `TS_NEMOTRON_MAMBA2_BATCHED_NATIVE` | Nemotron-H | 原生批处理 Mamba2 step | 关闭 | `0`, `1` | 否 |
 | `TS_BATCHED_N1_FAST_PATH` | 全部 | solo 序列走融合 N=1 快速路径 decode；`0` 强制这些步骤走完全批处理路径 | 启用 | `0`, `1` | 是 |
+| `TS_PER_SEQ_FUSED` | fused 能力模型（Gemma 4、Qwen 3.5/3.6） | 并发（N>=2）序列走 per-request 融合 Forward；`0` 强制逐算子批处理分页路径 | 启用 | `0`, `1` | 否 |
+| `TS_BATCHED_FUSED_DECODE` | fused 能力模型 | per-seq fused 路径内的真正 token 批量融合 decode（一张图跑全部 N 个序列） | 关闭 | `0`, `1` | 否 |
+| `TS_RETAINED_FUSED_CACHE` | fused 能力的滑窗模型（Gemma 4） | 保留已完成 fused KV holder 用于跨请求前缀复用 | 启用 | `0`, `1` | 否 |
+| `TS_RETAINED_FUSED_CACHE_MAX` | fused 能力的滑窗模型 | 保留 fused holder 的 LRU 预算（限 VRAM） | `4` | 不适用 | 否 |
 | `TS_SCHED_DISABLE_BATCHED` | 全部 | 全局按序列 KV-swap 回退 | 关闭 | `0`, `1` | 是 |
+
+本节所有 executor 级开关都通过 `ExecutionOptions.FromEnvironment()` 统一读取，
+由 `ExecutionPlanner` 消费（见 `docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING_zh-cn.md`
+的"执行规划"一节）；按模型的 `TS_*_BATCHED` opt-out 则体现为模型声明的
+`BatchedForwardAvailable` 能力。
 
 ## KV Cache / 上下文
 
@@ -124,6 +133,21 @@ TestMatrix 配置中 sweep。
 |---|---|---|---|---|---|
 | `TS_PDF_MAX_PAGES` | PDF 文档输入（CLI `--pdf`、服务端 `/api/upload`） | 文本提取与页面图像渲染读取的 PDF 页数上限 | `0`（全部页面） | 未注册 | 否 |
 | `TS_FUSED_QKNORM_ROPE` | 直连 `cuda` 后端上的 Qwen 3.5 / 3.6 纯文本 prefill | 融合 QK-Norm + NeoX-RoPE CUDA 内核；`0` 回退到分离的 norm + RoPE 算子（多模态 MRoPE 与其他后端始终走分离路径） | 启用 | 未注册 | 否 |
+| `TS_CUDA_QMM_F16GEMM` | 直连 `cuda` 后端，激活行数 ≥ `TS_CUDA_QMM_F16GEMM_MIN_ROWS` 的量化矩阵乘 | 将权重一次性反量化为 F16 并走张量核心 cuBLAS GEMM（ggml 风格的 prefill 路线），替代分块量化内核；`0` 回退到量化内核 | 启用 | 未注册 | 否 |
+| `TS_CUDA_QMM_F16GEMM_MIN_ROWS` | 直连 `cuda` 后端 | F16 GEMM 路线的激活行数阈值 | `32` | 未注册 | 否 |
+| `TS_CUDA_QMM_F16GEMM_MAX_MB` | 直连 `cuda` 后端 | F16 权重暂存区上限（MB）；超过上限的权重（如 LM head）继续使用量化内核 | `768` | 未注册 | 否 |
+| `TS_CUDA_Q80_VEC` | 直连 `cuda` 后端，Q8_0 单行（decode）矩阵乘 | 对 q8_1 量化后的激活行执行每 warp 一列的 dp4a 矩阵-向量乘（类似 ggml `mul_mat_vec_q`）；`0` 回退到精确 FP32 反量化内核 | 启用 | 未注册 | 否 |
+| `TS_CUDA_Q80_VEC_MIN_OUT` | 直连 `cuda` 后端 | Q8_0 dp4a 矩阵-向量乘的最小输出宽度（诊断开关） | `0` | 未注册 | 否 |
+| `TS_CUDA_Q80_MMQ` | 直连 `cuda` 后端，激活行数在 32..`TS_CUDA_Q80_MMQ_MAX_ROWS` 的 Q8_0 矩阵乘 | 直接在原始 Q8_0 块上执行 int8 张量核心 GEMM（mma.m16n8k32，ggml MMQ 风格），替代反量化+cuBLAS F16 路线；`0` 回退到 F16 GEMM | 启用 | 未注册 | 否 |
+| `TS_CUDA_Q80_MMQ_MAX_ROWS` | 直连 `cuda` 后端 | 行数超过该阈值后 F16 GEMM 路线更优（MMQ 的权重扫描次数随 ceil(rows/128) 增长） | `512` | 未注册 | 否 |
+| `TS_CUDA_Q80_MMQ2` | 直连 `cuda` 后端 | MMQ GEMM 的 cp.async 暂存变体（拆分的 q8_1 激活暂存 + 原始权重窗口以 cp.async 异步拷贝到共享内存；在 inDim % 256 == 0 时启用，结果逐位一致，prefill 约快 18%）；`0` 固定使用寄存器预取的 MMQ 内核 | 启用 | 未注册 | 否 |
+| `TS_CUDA_GDN_PREFILL_SPLIT` | 直连 `cuda` 后端上的 Qwen 3.5 / 3.6 GDN prefill | 三阶段无同步 GDN prefill（并行卷积/归一化 → 寄存器驻留行扫描 → 并行 RMS+门控）；`0` 固定使用旧的单内核逐 token 路径 | 启用（seqLen ≥ 8 且 headKDim = 128） | 未注册 | 否 |
+| `TS_CUDA_PREFILL_GRAPH` | 直连 `cuda` 后端上的 Qwen 3.5 / 3.6 纯文本多 token prefill | 在同一 (seqLen, startPos, 缓存标识) 形状第二次运行时把逐算子 prefill 层循环捕获为 CUDA graph，之后以单次 `cuGraphLaunch` 重放（结果逐位一致；捕获失败时自动回退普通路径）；`0` 关闭全部 CUDA graph 捕获（包括 decode graph） | 启用 | 未注册 | 否 |
+| `TS_CUDA_DECODE_GRAPH` | 直连 `cuda` 后端上的 Qwen 3.5 / 3.6 纯文本 decode | 把逐算子 decode 步骤（seqLen = 1）捕获为 CUDA graph 并逐 token 重放；位置相关的值（注意力长度、KV 写入槽位、GDN 卷积环索引、RoPE 位置）由内核从一块以锁页主机内存刷新的设备参数块中读取，因此在 KV 缓存扩容之前一个 graph 可服务所有位置（结果逐位一致；捕获失败时自动回退普通路径）；`0` 关闭 | 启用 | 未注册 | 否 |
+| `TS_CUDA_PREFILL_GRAPH_MAX` | 直连 `cuda` 后端 | 缓存的 prefill + decode graph 数量（LRU 淘汰；每个 graph 固定持有其捕获时使用的内存池块） | `4` | 未注册 | 否 |
+| `TS_CUDA_PREFILL_GRAPH_LOG` | 直连 `cuda` 后端 | 打印 graph 捕获/重放/中止事件（`1`） | 关闭 | 未注册 | 否 |
+| `TENSORSHARP_CUDA_POOL_LARGE_MB` | 直连 `cuda` 后端 | 全局大块（≥ 2 MB）显存缓存预算；让 prefill 级激活保持池化，避免每层重复 cuMemAlloc/cuMemFree | `1024` | 未注册 | 否 |
+| `TS_CUDA_PROFILE` | 直连 `cuda` 后端 | 退出时打印 CPU 回退算子与主机↔设备同步计数（`1`），含调用点归因（`2`） | 关闭 | 未注册 | 否 |
 
 ## 功能覆盖
 

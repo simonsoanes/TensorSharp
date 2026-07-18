@@ -52,6 +52,20 @@ namespace TensorSharp.Cuda
 
         private static object Invoke(string opName, object[] args, out Dictionary<Tensor, Tensor> mappedTensors)
         {
+            long t0 = CudaProfileCounters.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            try
+            {
+                return InvokeCore(opName, args, out mappedTensors);
+            }
+            finally
+            {
+                if (CudaProfileCounters.Enabled)
+                    CudaProfileCounters.RecordFallback(opName, System.Diagnostics.Stopwatch.GetTimestamp() - t0);
+            }
+        }
+
+        private static object InvokeCore(string opName, object[] args, out Dictionary<Tensor, Tensor> mappedTensors)
+        {
             mappedTensors = new Dictionary<Tensor, Tensor>(ReferenceEqualityComparer.Instance);
             object[] cpuArgs = new object[args.Length];
 

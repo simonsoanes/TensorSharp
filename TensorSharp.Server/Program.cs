@@ -29,6 +29,22 @@ const string ListenAddress = "http://0.0.0.0:5000";
 const long MaxRequestBodyBytes = 500L * 1024L * 1024L;
 
 Console.OutputEncoding = System.Text.Encoding.UTF8;
+
+// Merge in options from a --config <file.json> before anything reads argv.
+// File-derived tokens are spliced in ahead of the real command line, so any
+// option also passed on the command line overrides the file (every option
+// pass below is last-one-wins). The --config flag itself is stripped here.
+try
+{
+    args = ConfigFileArgs.Expand(args);
+}
+catch (Exception ex) when (ex is ArgumentException or FileNotFoundException)
+{
+    Console.Error.WriteLine("Configuration error: " + ex.Message);
+    Environment.ExitCode = 1;
+    return;
+}
+
 bool showSarah = Array.Exists(args, a => a == "--xzf");
 ConsoleBanner.Print(showSarah);
 

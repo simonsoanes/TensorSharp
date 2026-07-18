@@ -47,7 +47,17 @@ results as part of the standard matrix.
 | `TS_GEMMA4_BATCHED` | Gemma 4 | Batched paged forward vs per-sequence fallback | ON | `0`, `1` | yes |
 | `TS_NEMOTRON_MAMBA2_BATCHED_NATIVE` | Nemotron-H | Native batched Mamba2 step | OFF | `0`, `1` | no |
 | `TS_BATCHED_N1_FAST_PATH` | all | Fused N=1 fast-path decode for solo sequences; `0` forces those steps onto the fully-batched path | ON | `0`, `1` | yes |
+| `TS_PER_SEQ_FUSED` | fused-capable models (Gemma 4, Qwen 3.5/3.6) | Per-request fused Forward for concurrent (N>=2) sequences; `0` forces the op-by-op batched paged path | ON | `0`, `1` | no |
+| `TS_BATCHED_FUSED_DECODE` | fused-capable models | True token-batched fused decode inside the per-seq fused path (one graph for all N) | OFF | `0`, `1` | no |
+| `TS_RETAINED_FUSED_CACHE` | fused-capable sliding-window models (Gemma 4) | Retain finished fused KV holders for cross-request prefix reuse | ON | `0`, `1` | no |
+| `TS_RETAINED_FUSED_CACHE_MAX` | fused-capable sliding-window models | LRU budget of retained fused holders (VRAM cap) | `4` | n/a | no |
 | `TS_SCHED_DISABLE_BATCHED` | all | Global per-sequence KV-swap fallback | OFF | `0`, `1` | yes |
+
+All executor-level switches in this section are read through
+`ExecutionOptions.FromEnvironment()` and consumed by `ExecutionPlanner`
+(see `docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md`, "Execution Planning");
+per-model `TS_*_BATCHED` opt-outs surface as the model's declared
+`BatchedForwardAvailable` capability.
 
 ## KV Cache / Context
 
@@ -132,6 +142,21 @@ These variables are real runtime knobs, but they are not registered in
 |---|---|---|---|---|---|
 | `TS_PDF_MAX_PAGES` | PDF document input (CLI `--pdf`, server `/api/upload`) | Cap on the number of PDF pages read for text extraction and page-image rendering | `0` (all pages) | not registered | no |
 | `TS_FUSED_QKNORM_ROPE` | Qwen 3.5 / 3.6 text-only prefill on the direct `cuda` backend | Fused QK-Norm + NeoX-RoPE CUDA kernel; `0` falls back to separate norm + RoPE ops (multimodal MRoPE and other backends always use the separate path) | ON | not registered | no |
+| `TS_CUDA_QMM_F16GEMM` | direct `cuda` backend, quantized matmuls with ≥ `TS_CUDA_QMM_F16GEMM_MIN_ROWS` activation rows | Dequantize the weight once to F16 and run a tensor-core cuBLAS GEMM (ggml-style prefill route) instead of the block-tile quant kernels; `0` reverts to the quant kernels | ON | not registered | no |
+| `TS_CUDA_QMM_F16GEMM_MIN_ROWS` | direct `cuda` backend | Activation-row threshold for the F16 GEMM route | `32` | not registered | no |
+| `TS_CUDA_QMM_F16GEMM_MAX_MB` | direct `cuda` backend | F16 weight-scratch cap in MB; weights above it (e.g. the LM head) keep the quant kernels | `768` | not registered | no |
+| `TS_CUDA_Q80_VEC` | direct `cuda` backend, Q8_0 single-row (decode) matmuls | Warp-per-column dp4a matvec over a q8_1-quantized activation row (like ggml `mul_mat_vec_q`); `0` reverts to the exact FP32 dequant kernel | ON | not registered | no |
+| `TS_CUDA_Q80_VEC_MIN_OUT` | direct `cuda` backend | Minimum output width for the Q8_0 dp4a matvec (diagnostic gate) | `0` | not registered | no |
+| `TS_CUDA_Q80_MMQ` | direct `cuda` backend, Q8_0 matmuls with 32..`TS_CUDA_Q80_MMQ_MAX_ROWS` activation rows | Direct int8 tensor-core GEMM over raw Q8_0 blocks (mma.m16n8k32, ggml MMQ-style) instead of the dequant+cuBLAS F16 route; `0` reverts to F16 GEMM | ON | not registered | no |
+| `TS_CUDA_Q80_MMQ_MAX_ROWS` | direct `cuda` backend | Row-count crossover above which the F16 GEMM route wins (MMQ weight sweeps grow as ceil(rows/128)) | `512` | not registered | no |
+| `TS_CUDA_Q80_MMQ2` | direct `cuda` backend | cp.async staging variant of the MMQ GEMM (split q8_1 activation scratch + raw weight windows async-copied to shared; taken when inDim % 256 == 0, bit-identical results, ~18% faster prefill); `0` pins the register-prefetch MMQ kernel | ON | not registered | no |
+| `TS_CUDA_GDN_PREFILL_SPLIT` | Qwen 3.5 / 3.6 GDN prefill on the direct `cuda` backend | 3-phase sync-free GDN prefill (parallel conv/norm → register-resident row scan → parallel RMS+gate); `0` pins the legacy single-kernel sequential walk | ON (seqLen ≥ 8, headKDim = 128) | not registered | no |
+| `TS_CUDA_PREFILL_GRAPH` | Qwen 3.5 / 3.6 text-only multi-token prefill on the direct `cuda` backend | Capture the per-op prefill layer loop as a CUDA graph on the second run of a (seqLen, startPos, cache-identity) shape and replay it in one `cuGraphLaunch` afterwards (bit-identical results; falls back plainly on any capture failure); `0` disables ALL cuda graph capture, including decode graphs | ON | not registered | no |
+| `TS_CUDA_DECODE_GRAPH` | Qwen 3.5 / 3.6 text-only decode on the direct `cuda` backend | Capture the per-op decode step (seqLen = 1) as a CUDA graph and replay it every token; position-dependent values (attention length, KV write slot, GDN conv ring index, RoPE position) are re-read from a pinned-host-backed device parameter block, so one graph serves all positions until the KV cache grows (bit-identical results; falls back plainly on any capture failure); `0` disables | ON | not registered | no |
+| `TS_CUDA_PREFILL_GRAPH_MAX` | direct `cuda` backend | Cached prefill + decode graphs kept (LRU-evicted; each pins its captured working-set pool blocks) | `4` | not registered | no |
+| `TS_CUDA_PREFILL_GRAPH_LOG` | direct `cuda` backend | Log graph capture/replay/abort events (`1`) | OFF | not registered | no |
+| `TENSORSHARP_CUDA_POOL_LARGE_MB` | direct `cuda` backend | Budget for the global large-block (≥ 2 MB) device-memory cache; keeps prefill-sized activations pooled instead of re-issuing cuMemAlloc/cuMemFree per layer | `1024` | not registered | no |
+| `TS_CUDA_PROFILE` | direct `cuda` backend | Print CPU-fallback op and host↔device sync counters at exit (`1`), with call-site attribution (`2`) | OFF | not registered | no |
 
 ## Feature Coverage
 

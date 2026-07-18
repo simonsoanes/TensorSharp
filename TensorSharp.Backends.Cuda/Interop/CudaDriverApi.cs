@@ -52,6 +52,16 @@ namespace TensorSharp.Cuda.Interop
         [DllImport(LibName, EntryPoint = "cuMemFree_v2")]
         public static extern int cuMemFree(IntPtr devicePtr);
 
+        /// <summary>Page-locked (pinned) host allocation. A captured HtoD memcpy
+        /// node whose source is pinned host memory re-reads the buffer on every
+        /// graph launch, which is how decode-graph replays receive per-token
+        /// parameters (see CudaDecodeDynParams).</summary>
+        [DllImport(LibName, EntryPoint = "cuMemHostAlloc")]
+        public static extern int cuMemHostAlloc(out IntPtr hostPtr, UIntPtr byteSize, uint flags);
+
+        [DllImport(LibName, EntryPoint = "cuMemFreeHost")]
+        public static extern int cuMemFreeHost(IntPtr hostPtr);
+
         [DllImport(LibName, EntryPoint = "cuMemcpyHtoD_v2")]
         public static extern int cuMemcpyHtoD(IntPtr dstDevice, IntPtr srcHost, UIntPtr byteCount);
 
@@ -81,6 +91,13 @@ namespace TensorSharp.Cuda.Interop
 
         [DllImport(LibName)]
         public static extern int cuModuleUnload(IntPtr module);
+
+        [DllImport(LibName)]
+        public static extern int cuFuncSetAttribute(IntPtr function, int attribute, int value);
+
+        // CUfunction_attribute: opt-in cap for dynamic shared memory per block
+        // (default launches are limited to 48 KB without it).
+        public const int CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8;
 
         [DllImport(LibName)]
         public static extern int cuLaunchKernel(
@@ -126,6 +143,10 @@ namespace TensorSharp.Cuda.Interop
 
         // CUstreamCaptureMode: 0 = GLOBAL, 1 = THREAD_LOCAL, 2 = RELAXED.
         public const int CU_STREAM_CAPTURE_MODE_THREAD_LOCAL = 1;
+        // Relaxed capture permits API calls that are unsafe-by-default during
+        // capture (notably cuMemAlloc for pool misses); the capture owner takes
+        // responsibility for the referenced memory's lifetime.
+        public const int CU_STREAM_CAPTURE_MODE_RELAXED = 2;
 
         [DllImport(LibName)]
         public static extern int cuGetErrorString(int error, out IntPtr str);

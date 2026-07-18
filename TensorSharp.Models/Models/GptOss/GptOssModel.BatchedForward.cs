@@ -61,6 +61,13 @@ namespace TensorSharp.Models
         // batched models.
         public bool SupportsBatchedMultimodal => GptOssBatchedOptIn();
 
+        /// <summary>Declared availability of the batched path (see
+        /// <see cref="IBatchedPagedModel.BatchedForwardAvailable"/>): follows
+        /// the <c>TS_GPTOSS_BATCHED</c> opt-out so <c>ExecutionPlanner</c>
+        /// routes to the per-seq fallback up front instead of via a
+        /// NotSupportedException round trip.</summary>
+        public bool BatchedForwardAvailable => GptOssBatchedOptIn();
+
         // Per-layer paged K/V buffers (vLLM block layout:
         // [numBlocks * blockSize * numKvHeads * headDim] per layer).
         private float[][] _gptOssPagedK;

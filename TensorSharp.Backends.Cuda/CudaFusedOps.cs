@@ -151,6 +151,30 @@ namespace TensorSharp.Cuda
             return CudaKernelOps.TrySliceColumns(result, src, colOffset, width);
         }
 
+        public static bool TryDeinterleaveQGate(Tensor q, Tensor gate, Tensor src, int rows, int numHeads, int headDim)
+        {
+            return CudaKernelOps.TryDeinterleaveQGate(q, gate, src, rows, numHeads, headDim);
+        }
+
+        /// <summary>Device buffer address of a CUDA tensor's storage (0 for other
+        /// backends). Used as an identity component in CUDA-graph cache keys: a
+        /// reallocated KV cache yields a new pointer, so stale graphs never hit.</summary>
+        public static System.IntPtr GetDevicePointer(Tensor tensor)
+        {
+            return tensor?.Storage is CudaStorage storage ? storage.DeviceBuffer : System.IntPtr.Zero;
+        }
+
+        /// <summary>Force a host-dirty CUDA tensor's contents onto the device NOW.
+        /// Used to pre-warm inputs before a CUDA-graph capture so no host-to-device
+        /// copy (whose host pointer would be baked into the graph) lands inside it.</summary>
+        public static bool TryEnsureDeviceResident(Tensor tensor)
+        {
+            if (tensor?.Storage is not CudaStorage storage)
+                return false;
+            storage.EnsureDeviceCurrent();
+            return true;
+        }
+
         public static bool TryGqaDecodeAttention(
             Tensor result,
             Tensor query,
@@ -327,6 +351,32 @@ namespace TensorSharp.Cuda
         public static bool TryCopyHeadFirstToCache(Tensor cache, Tensor src, int startPos, int seqLen, int cacheSize, bool circular)
         {
             return CudaKernelOps.TryCopyHeadFirstToCache(cache, src, startPos, seqLen, cacheSize, circular);
+        }
+
+        /// <summary>
+        /// Enqueues the kernel that refreshes the two cached RoPE position
+        /// tensors from <paramref name="dynParams"/>'s device block. Called
+        /// inside a decode-graph capture (see CudaDecodeDynParams).
+        /// </summary>
+        public static bool TryFillRopePositions(Tensor posQ, Tensor posK, CudaDecodeDynParams dynParams)
+        {
+            if (dynParams == null || !dynParams.IsValid)
+                return false;
+            return CudaKernelOps.TryFillRopePositions(posQ, posK, dynParams.DevicePtr);
+        }
+
+        /// <summary>
+        /// Flags a tensor's device copy as authoritative (host mirror stale).
+        /// Needed after a CUDA-graph replay rewrote it without going through
+        /// the C# launchers; a later host read would otherwise trust a clean
+        /// host mirror and return stale data.
+        /// </summary>
+        public static bool TryMarkDeviceModified(Tensor tensor)
+        {
+            if (tensor?.Storage is not CudaStorage storage)
+                return false;
+            storage.MarkDeviceModified();
+            return true;
         }
 
         public static bool TryGatherCircularHeadFirst(Tensor result, Tensor cache, int startPos, int seqLen, int cacheSize)

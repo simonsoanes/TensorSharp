@@ -218,6 +218,18 @@ namespace TensorSharp.Server.Hosting
                     "target resolution does not fit beside the resident weights).",
                     "--offload-cpu"),
             }),
+            ("Configuration file", new[]
+            {
+                new OptionHelp("--config <path>",
+                    "Read options from a JSON file whose keys are the same long option names listed here (with or " +
+                    "without the leading --). Anything also passed on the command line overrides the file; when the " +
+                    "flag is repeated, later files win over earlier ones. String/number values map to '--key value', " +
+                    "true maps to the bare '--key' switch, and an array maps to a repeated flag (e.g. \"stop\": [..]). " +
+                    "A \"variables\" object lets values share ${name} references; a file option may instead be an " +
+                    "object { \"path\": \"...\", \"urls\": [ \"...\" ] } that auto-downloads on first run. See the " +
+                    "config/ folder and config/README.md for examples.",
+                    "--config server.json --backend ggml_cuda"),
+            }),
             ("Help", new[]
             {
                 new OptionHelp("--help",
@@ -251,6 +263,8 @@ namespace TensorSharp.Server.Hosting
             writer.WriteLine("  TensorSharp.Server --model C:\\models\\gemma-4-E4B-it-Q8_0.gguf --backend ggml_cpu");
             writer.WriteLine("  TensorSharp.Server --model gemma-4-E4B-it-Q8_0.gguf --mmproj mmproj-gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda");
             writer.WriteLine("  TensorSharp.Server --backend ggml_cpu    (model-less status process; inference unavailable)");
+            writer.WriteLine("  TensorSharp.Server --config server.json    (read options from a file)");
+            writer.WriteLine("  TensorSharp.Server --config server.json --backend ggml_cuda    (file, but override the backend)");
             writer.WriteLine();
             writer.WriteLine("Logging env vars: TENSORSHARP_LOG_LEVEL (Information), TENSORSHARP_LOG_DIR (./logs),");
             writer.WriteLine("TENSORSHARP_LOG_FILE=0 disables file logging.");

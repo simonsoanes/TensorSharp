@@ -223,10 +223,64 @@ namespace TensorSharp.Cuda
 
         public static bool TryBinaryActivation(Tensor result, Tensor lhs, Tensor rhs, CudaBinaryActivationOp op)
         {
-            if (!TryGetContiguousFloat(result, out CudaStorage resultStorage, out IntPtr resultPtr, out int count) ||
-                !TryGetContiguousFloat(lhs, out CudaStorage lhsStorage, out IntPtr lhsPtr, out int lhsCount) ||
-                !TryGetContiguousFloat(rhs, out CudaStorage rhsStorage, out IntPtr rhsPtr, out int rhsCount) ||
-                count != lhsCount || count != rhsCount)
+            if (TryGetContiguousFloat(result, out CudaStorage resultStorage, out IntPtr resultPtr, out int count) &&
+                TryGetContiguousFloat(lhs, out CudaStorage lhsStorage, out IntPtr lhsPtr, out int lhsCount) &&
+                TryGetContiguousFloat(rhs, out CudaStorage rhsStorage, out IntPtr rhsPtr, out int rhsCount) &&
+                count == lhsCount && count == rhsCount)
+            {
+                CudaAllocator allocator = resultStorage.AllocatorImpl;
+                if (!TryGetKernels(allocator, out CudaKernels kernels))
+                    return false;
+
+                lhsStorage.EnsureDeviceCurrent();
+                rhsStorage.EnsureDeviceCurrent();
+                allocator.Context.MakeCurrent();
+                kernels.LaunchBinaryActivationF32(lhsPtr, rhsPtr, resultPtr, count, (int)op, allocator.Stream.Handle);
+                resultStorage.MarkDeviceModified();
+                return true;
+            }
+
+            return TryBinaryActivationStrided(result, lhs, rhs, op);
+        }
+
+        // Device-side deinterleave of a fused Q+gate projection (src rows are
+        // num_heads blocks of [q(head_dim) | gate(head_dim)], possibly a Narrow'd
+        // slice of a wider fused-QKV row). Writes dense q/gate without the CPU
+        // round trip the host deinterleave forces on every attention layer.
+        public static bool TryDeinterleaveQGate(Tensor q, Tensor gate, Tensor src, int rows, int numHeads, int headDim)
+        {
+            long perRow = (long)numHeads * headDim;
+            if (!TryGetContiguousFloat(q, out CudaStorage qStorage, out IntPtr qPtr, out int qCount) ||
+                !TryGetContiguousFloat(gate, out CudaStorage gateStorage, out IntPtr gatePtr, out int gateCount) ||
+                !TryGetRowStridedFloat(src, out CudaStorage srcStorage, out IntPtr srcPtr, out int srcRows, out int srcCols, out long srcStride) ||
+                qCount != gateCount || qCount != checked(rows * perRow) ||
+                srcRows != rows || srcCols != checked((int)(perRow * 2)))
+            {
+                return false;
+            }
+
+            CudaAllocator allocator = qStorage.AllocatorImpl;
+            if (!TryGetKernels(allocator, out CudaKernels kernels))
+                return false;
+
+            srcStorage.EnsureDeviceCurrent();
+            allocator.Context.MakeCurrent();
+            kernels.LaunchDeinterleaveQGateF32(srcPtr, qPtr, gatePtr, rows, numHeads, headDim, srcStride, allocator.Stream.Handle);
+            qStorage.MarkDeviceModified();
+            gateStorage.MarkDeviceModified();
+            return true;
+        }
+
+        // Row-strided variant: any operand may be a padded-row 2D view (e.g. the
+        // gate/up halves Narrow'd out of a fused gate+up projection). Without this,
+        // prefill-sized SwiGLU activations dropped to the CPU fallback, whose full
+        // device->host->device round trip dominated direct-CUDA prefill time.
+        private static bool TryBinaryActivationStrided(Tensor result, Tensor lhs, Tensor rhs, CudaBinaryActivationOp op)
+        {
+            if (!TryGetRowStridedFloat(result, out CudaStorage resultStorage, out IntPtr resultPtr, out int rows, out int cols, out long outStride) ||
+                !TryGetRowStridedFloat(lhs, out CudaStorage lhsStorage, out IntPtr lhsPtr, out int lhsRows, out int lhsCols, out long lhsStride) ||
+                !TryGetRowStridedFloat(rhs, out CudaStorage rhsStorage, out IntPtr rhsPtr, out int rhsRows, out int rhsCols, out long rhsStride) ||
+                rows != lhsRows || rows != rhsRows || cols != lhsCols || cols != rhsCols)
             {
                 return false;
             }
@@ -238,7 +292,8 @@ namespace TensorSharp.Cuda
             lhsStorage.EnsureDeviceCurrent();
             rhsStorage.EnsureDeviceCurrent();
             allocator.Context.MakeCurrent();
-            kernels.LaunchBinaryActivationF32(lhsPtr, rhsPtr, resultPtr, count, (int)op, allocator.Stream.Handle);
+            kernels.LaunchBinaryActivationStridedF32(
+                lhsPtr, rhsPtr, resultPtr, rows, cols, lhsStride, rhsStride, outStride, (int)op, allocator.Stream.Handle);
             resultStorage.MarkDeviceModified();
             return true;
         }
@@ -1093,6 +1148,7 @@ namespace TensorSharp.Cuda
             keyStorage.EnsureDeviceCurrent();
             valueStorage.EnsureDeviceCurrent();
             allocator.Context.MakeCurrent();
+            IntPtr dyn = CudaDecodeDynParams.ActiveDevicePtr;
             if (TryLaunchPartitionedGqaDecodeAttention(
                     kernels,
                     allocator,
@@ -1110,7 +1166,8 @@ namespace TensorSharp.Cuda
                     circular,
                     scale,
                     hasSinks: 0,
-                    keyIsHalf))
+                    keyIsHalf,
+                    dyn))
             {
                 resultStorage.MarkDeviceModified();
                 return true;
@@ -1118,6 +1175,18 @@ namespace TensorSharp.Cuda
 
             if (attendLen > DecodeAttentionSingleBlockMaxTokens)
                 return false;
+
+            // Decode-graph capture: the single-block kernel reads attend_len from
+            // the dyn block on replay, so the scores[] shared buffer must be sized
+            // for the largest length the graph may see. Past the partition
+            // threshold the plain path routes to the partitioned kernels, so the
+            // captured entry expires there and gets re-captured on that route.
+            int smemTokens = 0;
+            if (dyn != IntPtr.Zero)
+            {
+                smemTokens = Math.Min(DecodeAttentionPartitionThreshold, cacheSize);
+                CudaDecodeDynParams.LimitCaptureAttendLen(smemTokens);
+            }
 
             if (keyIsHalf)
             {
@@ -1134,7 +1203,9 @@ namespace TensorSharp.Cuda
                     cacheSize,
                     circular ? 1 : 0,
                     scale,
-                    allocator.Stream.Handle);
+                    allocator.Stream.Handle,
+                    dyn,
+                    smemTokens);
             }
             else
             {
@@ -1151,7 +1222,9 @@ namespace TensorSharp.Cuda
                     cacheSize,
                     circular ? 1 : 0,
                     scale,
-                    allocator.Stream.Handle);
+                    allocator.Stream.Handle,
+                    dyn,
+                    smemTokens);
             }
             resultStorage.MarkDeviceModified();
             return true;
@@ -1174,12 +1247,20 @@ namespace TensorSharp.Cuda
             bool circular,
             float scale,
             int hasSinks,
-            bool keyIsHalf)
+            bool keyIsHalf,
+            IntPtr dyn = default)
         {
             if (attendLen <= DecodeAttentionPartitionThreshold)
                 return false;
 
-            int numPartitions = (attendLen + DecodeAttentionPartitionSize - 1) / DecodeAttentionPartitionSize;
+            // Decode-graph capture: the partition grid and scratch are baked into
+            // the graph, so size them for the cache CAPACITY and let the kernels
+            // read the live attend_len from the dyn block. Partitions past the
+            // live length write (max=-inf, sum=0) rows the reduce kernel skips,
+            // which keeps the result bit-identical to the exact-partition launch.
+            int numPartitions = dyn != IntPtr.Zero
+                ? (cacheSize + DecodeAttentionPartitionSize - 1) / DecodeAttentionPartitionSize
+                : (attendLen + DecodeAttentionPartitionSize - 1) / DecodeAttentionPartitionSize;
             using var partial = new Tensor(allocator, DType.Float32, numQHeads, numPartitions, headDim + 2);
             if (!TryGetContiguousFloat(partial, out _, out IntPtr partialPtr, out _))
                 return false;
@@ -1203,7 +1284,8 @@ namespace TensorSharp.Cuda
                     hasSinks,
                     numPartitions,
                     DecodeAttentionPartitionSize,
-                    allocator.Stream.Handle);
+                    allocator.Stream.Handle,
+                    dyn);
             }
             else
             {
@@ -1224,7 +1306,8 @@ namespace TensorSharp.Cuda
                     hasSinks,
                     numPartitions,
                     DecodeAttentionPartitionSize,
-                    allocator.Stream.Handle);
+                    allocator.Stream.Handle,
+                    dyn);
             }
 
             kernels.LaunchGqaDecodeAttentionPartitionReduceF32(
@@ -1366,6 +1449,9 @@ namespace TensorSharp.Cuda
 
             srcStorage.EnsureDeviceCurrent();
             allocator.Context.MakeCurrent();
+            // Decode-graph capture: the single-token append re-reads its write
+            // position from the dyn block on every replay.
+            IntPtr dyn = seqLen == 1 && !circular ? CudaDecodeDynParams.ActiveDevicePtr : IntPtr.Zero;
             if (cacheIsHalf)
             {
                 kernels.LaunchCopyHeadFirstToCacheF16(
@@ -1377,7 +1463,8 @@ namespace TensorSharp.Cuda
                     startPos,
                     cacheSize,
                     circular ? 1 : 0,
-                    allocator.Stream.Handle);
+                    allocator.Stream.Handle,
+                    dyn);
             }
             else
             {
@@ -1390,7 +1477,8 @@ namespace TensorSharp.Cuda
                     startPos,
                     cacheSize,
                     circular ? 1 : 0,
-                    allocator.Stream.Handle);
+                    allocator.Stream.Handle,
+                    dyn);
             }
             cacheStorage.MarkDeviceModified();
             return true;
@@ -1652,6 +1740,37 @@ namespace TensorSharp.Cuda
             return true;
         }
 
+        /// <summary>
+        /// Refreshes the two cached RoPE position tensors from the decode-graph
+        /// dyn block (dyn[3]) on device. Launched INSIDE a decode-graph capture
+        /// so every replay RoPEs with the current token's position.
+        /// </summary>
+        public static bool TryFillRopePositions(Tensor posQ, Tensor posK, IntPtr dynParams)
+        {
+            if (dynParams == IntPtr.Zero ||
+                !TryGetContiguous(posQ, out CudaStorage qStorage, out IntPtr qPtr, out long qCount) ||
+                !TryGetContiguous(posK, out CudaStorage kStorage, out IntPtr kPtr, out long kCount) ||
+                posQ.ElementType != DType.Int32 ||
+                posK.ElementType != DType.Int32 ||
+                qCount <= 0 || kCount <= 0)
+            {
+                return false;
+            }
+
+            CudaAllocator allocator = qStorage.AllocatorImpl;
+            if (!TryGetKernels(allocator, out CudaKernels kernels))
+                return false;
+
+            qStorage.EnsureDeviceCurrent();
+            kStorage.EnsureDeviceCurrent();
+            allocator.Context.MakeCurrent();
+            kernels.LaunchFillRopePositionsI32(
+                qPtr, checked((int)qCount), kPtr, checked((int)kCount), dynParams, allocator.Stream.Handle);
+            qStorage.MarkDeviceModified();
+            kStorage.MarkDeviceModified();
+            return true;
+        }
+
         public static bool TryIndexSelect(Tensor result, Tensor src, Tensor indices, bool isAdd)
         {
             if (!TryGetContiguousRows(result, out CudaStorage resultStorage, out IntPtr resultPtr, out int rows, out int cols) ||
@@ -1810,6 +1929,13 @@ namespace TensorSharp.Cuda
             float eps)
         {
             int convDim = convKernel - 1;
+            // The packed kernel stages the whole per-head state in dynamic shared
+            // memory; bail (host fallback) for geometries beyond the sm cap.
+            if (headKDim > 0 && headVDim > 0 &&
+                (2L * headKDim + headVDim + (long)headVDim * headKDim) * sizeof(float) > CudaKernels.GdnPackedMaxSharedBytes)
+            {
+                return false;
+            }
             if (!TryGetContiguousFloat(result, out CudaStorage resultStorage, out IntPtr resultPtr, out int resultCount) ||
                 !TryGetContiguousFloat(packed, out CudaStorage packedStorage, out IntPtr packedPtr, out int packedCount) ||
                 !TryGetContiguousFloat(convState, out CudaStorage convStateStorage, out IntPtr convStatePtr, out int convStateCount) ||
@@ -1871,6 +1997,10 @@ namespace TensorSharp.Cuda
             ssmNormStorage.EnsureDeviceCurrent();
 
             allocator.Context.MakeCurrent();
+            // Decode-graph capture: the single-token step re-reads the conv ring
+            // write index from the dyn block on every replay (it advances mod
+            // convDim each token).
+            IntPtr dyn = seqLen == 1 ? CudaDecodeDynParams.ActiveDevicePtr : IntPtr.Zero;
             kernels.LaunchQwen35GatedDeltaNetPackedF32(
                 packedPtr,
                 convStatePtr,
@@ -1892,7 +2022,8 @@ namespace TensorSharp.Cuda
                 convKernel,
                 convWriteIdx,
                 eps,
-                allocator.Stream.Handle);
+                allocator.Stream.Handle,
+                dyn);
             resultStorage.MarkDeviceModified();
             convStateStorage.MarkDeviceModified();
             ssmStateStorage.MarkDeviceModified();
@@ -2091,6 +2222,59 @@ namespace TensorSharp.Cuda
             rows = 0;
             cols = 0;
             return false;
+        }
+
+        // Accepts a float32 tensor that collapses to a 2D row-major view whose rows
+        // may be padded: sizes [.., rows, cols] with unit stride on the last dim and
+        // a fixed row pitch. Contiguous tensors qualify with rowStride == cols.
+        internal static bool TryGetRowStridedFloat(
+            Tensor tensor, out CudaStorage storage, out IntPtr ptr,
+            out int rows, out int cols, out long rowStride)
+        {
+            storage = tensor?.Storage as CudaStorage;
+            rows = 0;
+            cols = 0;
+            rowStride = 0;
+            ptr = IntPtr.Zero;
+            if (storage == null || tensor.ElementType != DType.Float32 || tensor.DimensionCount < 1)
+                return false;
+
+            int dims = tensor.DimensionCount;
+            ReadOnlySpan<long> sizes = tensor.Sizes;
+            ReadOnlySpan<long> strides = tensor.Strides;
+            if (strides[dims - 1] != 1 || sizes[dims - 1] > int.MaxValue)
+                return false;
+
+            cols = (int)sizes[dims - 1];
+            if (cols <= 0)
+                return false;
+
+            long rowCount = 1;
+            long pitch = cols;
+            for (int d = dims - 2; d >= 0; d--)
+            {
+                if (sizes[d] == 1)
+                    continue;
+                if (d == dims - 2)
+                {
+                    pitch = strides[d];
+                    if (pitch < cols)
+                        return false;
+                }
+                else if (strides[d] != checked(pitch * rowCount))
+                {
+                    return false; // outer dims must tile the row-strided plane densely
+                }
+                rowCount = checked(rowCount * sizes[d]);
+            }
+
+            if (rowCount > int.MaxValue || checked(rowCount * cols) > int.MaxValue)
+                return false;
+
+            rows = (int)rowCount;
+            rowStride = pitch;
+            ptr = storage.DevicePtrAtElement(tensor.StorageOffset);
+            return true;
         }
 
         internal static bool TryGetContiguous(Tensor tensor, out CudaStorage storage, out IntPtr ptr, out long count)

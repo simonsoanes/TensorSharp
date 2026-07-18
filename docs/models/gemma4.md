@@ -770,7 +770,7 @@ The 26B-A4B MoE target additionally required a load-time OOM fix on `ggml_cuda`
 (skipping the per-expert device preload) before MTP speculation became a net win.
 
 Opt-in / opt-out and tuning use the shared `--mtp-spec` / `--mtp-draft` /
-`--mtp-pmin` flags; see the [README MTP section](../../README.md#mtp--nextn-speculative-decoding).
+`--mtp-pmin` flags; see the [MTP / speculative decoding](../../FEATURES.md#mtp--nextn-speculative-decoding).
 
 ## 13. Output parser and chat template
 

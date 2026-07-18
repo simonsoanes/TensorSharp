@@ -428,6 +428,7 @@ public class ServerOptionsBuilderTests : IDisposable
             "--mtp-spec", "--mtp-draft", "--mtp-pmin", "--mtp-draft-model",
             "--qwen-image-vae", "--qwen-image-vl", "--qwen-image-mmproj", "--qwen-image-lora",
             "--offload-cpu",
+            "--config",
             "--help",
         };
         foreach (string flag in flags)
