@@ -1,0 +1,19 @@
+{
+  // gpt-oss-20b (Q8_0) — open-weight reasoning LLM (~12 GB), text only.
+  // Run with:
+  //   TensorSharp.Cli    --config config/gpt-oss-20b.json --input prompt.txt
+  //   TensorSharp.Server --config config/gpt-oss-20b.json
+  "variables": {
+    "modelRoot": "C:/Works/models"
+  },
+
+  "backend": "ggml_cuda",
+  "max-tokens": 4096,
+  "continuous-batching": true,
+
+  // gpt-oss is tuned for temperature 1.0 with top-p 1.0.
+  "temperature": 1.0,
+  "top-p": 1.0,
+
+  "model": "${modelRoot}/gpt-oss-20b-Q8_0.gguf"
+}

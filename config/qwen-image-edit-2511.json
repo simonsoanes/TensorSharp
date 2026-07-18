@@ -1,0 +1,31 @@
+{
+  // Qwen-Image-Edit 2511 (Q4_K_M DiT, ~13.2 GB) — image editing: an input
+  // image + a text prompt -> an edited image. The DiT needs three companions
+  // (a VAE, the Qwen2.5-VL text encoder, and its vision projector), plus an
+  // optional Lightning LoRA for fast few-step edits. All files are local, under
+  // ${modelRoot}. Runs on both the CLI and the Server (Web UI image-edit):
+  //   TensorSharp.Cli --config config/qwen-image-edit-2511.json \
+  //     --image input.png --prompt "make the sky purple" --output edited.png
+  //   TensorSharp.Server --config config/qwen-image-edit-2511.json
+  //
+  // Per-edit sampler knobs are CLI flags (not in this file): --diffusion-steps,
+  // --cfg, --diffusion-seed, --width, --height. With the Lightning LoRA merged
+  // the sampler auto-selects its fast few-step schedule.
+  "variables": {
+    "modelRoot": "C:/Works/models"
+  },
+
+  "backend": "ggml_cuda",
+  // Stream DiT weights from RAM so native-resolution edits fit on VRAM-limited
+  // cards. Drop this if you have plenty of VRAM and want maximum speed.
+  "offload-cpu": true,
+
+  "model": "${modelRoot}/qwen-image-edit-2511-Q4_K_M.gguf",
+  "qwen-image-vae": "${modelRoot}/Qwen_Image-VAE.safetensors",
+  "qwen-image-vl": "${modelRoot}/qwen-image-te-Qwen2.5-VL-7B-Q4_K_M.gguf",
+  "qwen-image-mmproj": "${modelRoot}/Qwen2.5-VL-7B-mmproj-BF16.gguf",
+
+  // Lightning step-distillation LoRA (8 steps). Swap in the 4steps file for an
+  // even faster, slightly lower-quality edit.
+  "qwen-image-lora": "${modelRoot}/Qwen-Image-Edit-2511-Lightning-8steps-V1.0-bf16.safetensors"
+}
