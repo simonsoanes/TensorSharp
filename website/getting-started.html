@@ -80,6 +80,8 @@ TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Cli -c R
 # open http://localhost:5000/index.html</code></pre>
   <p>The health response is at <code>http://localhost:5000/</code>; the browser chat is at <code>/index.html</code>. The <a href="http-api.html">Ollama- and OpenAI-compatible</a> endpoints use the same fixed port.</p>
 
+  <div class="callout tip"><div class="ic">✅</div><p><strong>Skip the long command lines.</strong> Put your options in a JSON file and pass <code>--config config/server-basic.json</code> (or <code>config/cli-basic.json</code>). A config entry can even auto-download the model on first run, so a fresh machine needs no manual download step. The repository's <code>config/</code> folder ships ready-to-run examples. → <a href="server.html#config">Configuration file</a></p></div>
+
   <h2 id="next">Where to go next</h2>
   <div class="card-grid">
     <a class="card" href="backends.html"><div class="ic">🖥️</div><h3>Pick a backend</h3><p>Match <code>--backend</code> to your hardware.</p></a>

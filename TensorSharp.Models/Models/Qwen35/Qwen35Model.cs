@@ -1276,6 +1276,313 @@ namespace TensorSharp.Models
             return true;
         }
 
+        // Cached CUDA graphs of the per-op prefill layer loop (direct cuda backend
+        // only). One instantiated graph per (seqLen, startPos, KV-buffer identity,
+        // conv-ring phase); replay collapses the loop's ~900 kernel dispatches into
+        // a single cuGraphLaunch. See CudaPrefillGraphCache for the capture rules.
+        private CudaPrefillGraphCache _cudaPrefillGraphs;
+        private CudaDecodeDynParams _cudaDecodeDynParams;
+
+        private Tensor RunPerOpLayerLoop(Tensor hidden, int seqLen, int startPos)
+        {
+            for (int layer = 0; layer < Config.NumLayers; layer++)
+            {
+                if (_isRecurrent[layer])
+                    hidden = RecurrentBlock(hidden, layer, seqLen, startPos);
+                else
+                    hidden = AttentionBlock(hidden, layer, seqLen, startPos);
+                TryEvaluateMlxLayerBoundary(hidden, layer, seqLen);
+            }
+            return hidden;
+        }
+
+        /// <summary>
+        /// Runs the per-op transformer layer loop, using a cached CUDA graph when
+        /// one exists for this exact shape/position/cache identity. Ownership
+        /// contract matches the plain loop: consumes <paramref name="hidden"/> and
+        /// returns the tensor holding the final hidden states (caller disposes).
+        /// Text-only multi-token prefill on the direct cuda backend only; every
+        /// other case runs the loop directly.
+        /// </summary>
+        private Tensor RunCudaPrefillLayerLoop(Tensor hidden, int seqLen, int startPos)
+        {
+            bool graphable = _backend == BackendType.Cuda
+                && _pendingMRoPEPositions == null && _visionEmbeddingsList.Count == 0
+                && _kvCacheK != null && _isRecurrent != null;
+            if (graphable && seqLen == 1 && CudaPrefillGraphCache.DecodeEnabled)
+                return RunCudaDecodeLayerLoop(hidden, startPos);
+            if (!graphable || seqLen <= 1 || !CudaPrefillGraphCache.Enabled)
+            {
+                return RunPerOpLayerLoop(hidden, seqLen, startPos);
+            }
+
+            _cudaPrefillGraphs ??= new CudaPrefillGraphCache(_allocator);
+            CudaPrefillGraphCache graphs = _cudaPrefillGraphs;
+            if (!graphs.IsUsable)
+                return RunPerOpLayerLoop(hidden, seqLen, startPos);
+
+            // Everything a captured kernel bakes in must be part of the key:
+            // shape, positions (RoPE + attention windows), the KV/state buffer
+            // identity (a grown cache means new pointers) and the GDN conv ring
+            // phase (a kernel parameter).
+            int firstAttn = -1, firstRec = -1;
+            for (int l = 0; l < Config.NumLayers; l++)
+            {
+                if (_isRecurrent[l]) { if (firstRec < 0) firstRec = l; }
+                else if (firstAttn < 0) firstAttn = l;
+            }
+            long kvPtr = firstAttn >= 0 && _kvCacheK[firstAttn] != null
+                ? CudaFusedOps.GetDevicePointer(_kvCacheK[firstAttn]).ToInt64() : 0;
+            long statePtr = firstRec >= 0 && _deltaStateTensor?[firstRec] != null
+                ? CudaFusedOps.GetDevicePointer(_deltaStateTensor[firstRec]).ToInt64() : 0;
+            int convPhase = firstRec >= 0 && _convStateWriteIdx != null ? _convStateWriteIdx[firstRec] : 0;
+            string key = $"{seqLen}|{startPos}|{kvPtr:x}|{statePtr:x}|{convPhase}";
+
+            if (graphs.TryGetReplayInput(key, out Tensor pinned))
+            {
+                Ops.Copy(pinned, hidden);
+                hidden.Dispose();
+                graphs.Replay(key);
+                MarkCudaGraphStateModified();
+                return pinned;
+            }
+
+            if (!graphs.ShouldCapture(key))
+                return RunPerOpLayerLoop(hidden, seqLen, startPos);
+
+            // Pre-warm the RoPE position tensors so their host->device upload
+            // happens before capture (a captured upload would bake the host
+            // pointer into the graph; these tensors are pinned by the entry).
+            Tensor posQ = EnsureRoPEPositions(startPos, seqLen, Config.NumHeads);
+            Tensor posK = EnsureRoPEPositions(startPos, seqLen, Config.NumKVHeads);
+            CudaFusedOps.TryEnsureDeviceResident(posQ);
+            CudaFusedOps.TryEnsureDeviceResident(posK);
+
+            // The captured loop must run on a stable input buffer the graph owns.
+            Tensor pinnedIn = new Tensor(_allocator, DType.Float32, hidden.Sizes);
+            Ops.Copy(pinnedIn, hidden);
+            hidden.Dispose();
+
+            if (!graphs.BeginCapture(key))
+                return RunPerOpLayerLoop(pinnedIn, seqLen, startPos);
+
+            bool captured = false;
+            try
+            {
+                Tensor result = RunPerOpLayerLoop(pinnedIn, seqLen, startPos);
+                if (ReferenceEquals(result, pinnedIn))
+                    captured = graphs.EndCaptureAndLaunch(key, pinnedIn, new[] { posQ, posK });
+                else
+                    graphs.AbortCapture(key);
+            }
+            catch (CudaGraphCaptureAbortedException ex)
+            {
+                graphs.AbortCapture(key, ex.Message);
+            }
+            catch (TensorSharp.Cuda.Interop.CudaException ex)
+            {
+                graphs.AbortCapture(key, ex.ToString());
+            }
+            catch
+            {
+                graphs.AbortCapture(key);
+                throw;
+            }
+
+            if (!captured)
+            {
+                // Nothing executed during the failed capture; run the loop for real.
+                return RunPerOpLayerLoop(pinnedIn, seqLen, startPos);
+            }
+            return pinnedIn;
+        }
+
+        /// <summary>
+        /// CUDA-graph capture/replay of the per-op DECODE step (seqLen == 1).
+        /// Unlike prefill, the position-dependent values (attention length, KV
+        /// write position, GDN conv ring index, RoPE position) change every
+        /// token, so they are NOT part of the key: the captured kernels re-read
+        /// them from a small device block whose refresh (pinned host -> device
+        /// memcpy) is the graph's leading node. A replay is then: copy the
+        /// embedding row into the pinned input, rewrite 4 pinned ints, one
+        /// cuGraphLaunch. The key carries only buffer identities: a grown KV
+        /// cache (new pointers, new baked grids) captures a fresh graph.
+        /// </summary>
+        private Tensor RunCudaDecodeLayerLoop(Tensor hidden, int startPos)
+        {
+            _cudaPrefillGraphs ??= new CudaPrefillGraphCache(_allocator);
+            CudaPrefillGraphCache graphs = _cudaPrefillGraphs;
+            if (!graphs.IsUsable)
+                return RunPerOpLayerLoop(hidden, 1, startPos);
+
+            _cudaDecodeDynParams ??= new CudaDecodeDynParams(_allocator);
+            CudaDecodeDynParams dyn = _cudaDecodeDynParams;
+            if (!dyn.IsValid)
+                return RunPerOpLayerLoop(hidden, 1, startPos);
+
+            int firstAttn = -1, firstRec = -1;
+            for (int l = 0; l < Config.NumLayers; l++)
+            {
+                if (_isRecurrent[l]) { if (firstRec < 0) firstRec = l; }
+                else if (firstAttn < 0) firstAttn = l;
+            }
+            long kvPtr = firstAttn >= 0 && _kvCacheK[firstAttn] != null
+                ? CudaFusedOps.GetDevicePointer(_kvCacheK[firstAttn]).ToInt64() : 0;
+            long statePtr = firstRec >= 0 && _deltaStateTensor?[firstRec] != null
+                ? CudaFusedOps.GetDevicePointer(_deltaStateTensor[firstRec]).ToInt64() : 0;
+            long convPtr = firstRec >= 0 && _cudaGdnConvStateTensor?[firstRec] != null
+                ? CudaFusedOps.GetDevicePointer(_cudaGdnConvStateTensor[firstRec]).ToInt64() : 0;
+            string key = $"dec|{kvPtr:x}|{statePtr:x}|{convPtr:x}|{_kvCacheCapacity}";
+
+            int attendLen = startPos + 1;
+            int convDim = _convKernel - 1;
+            // All recurrent layers advance their ring index together (single
+            // stream), so the first one represents them all; the kernels read
+            // the live value from the dyn block on replay.
+            int convPhase = firstRec >= 0 && _convStateWriteIdx != null ? _convStateWriteIdx[firstRec] : 0;
+
+            if (graphs.TryGetReplayInput(key, attendLen, out Tensor pinned))
+            {
+                // The graph reads the KV/state buffers in place; re-upload
+                // anything a host-side path dirtied since the last device pass.
+                EnsureDecodeGraphInputsResident();
+                Ops.Copy(pinned, hidden);
+                hidden.Dispose();
+                dyn.Write(attendLen, startPos, convPhase, startPos);
+                graphs.Replay(key);
+                // Mirror the C# bookkeeping the plain loop would have done.
+                AdvanceGdnConvPhases(convDim);
+                MarkCudaGraphStateModified();
+                _cachedRoPEPosStartPos = -1; // device content now diverges from the host cache key
+                return pinned;
+            }
+
+            if (!graphs.ShouldCapture(key))
+                return RunPerOpLayerLoop(hidden, 1, startPos);
+
+            // Pre-warm the RoPE position tensors so their host->device upload
+            // happens before capture; the in-graph fill kernel refreshes their
+            // CONTENT from the dyn block on every replay.
+            Tensor posQ = EnsureRoPEPositions(startPos, 1, Config.NumHeads);
+            Tensor posK = EnsureRoPEPositions(startPos, 1, Config.NumKVHeads);
+            CudaFusedOps.TryEnsureDeviceResident(posQ);
+            CudaFusedOps.TryEnsureDeviceResident(posK);
+
+            Tensor pinnedIn = new Tensor(_allocator, DType.Float32, hidden.Sizes);
+            Ops.Copy(pinnedIn, hidden);
+            hidden.Dispose();
+
+            dyn.Write(attendLen, startPos, convPhase, startPos);
+            if (!graphs.BeginCapture(key))
+                return RunPerOpLayerLoop(pinnedIn, 1, startPos);
+
+            bool captured = false;
+            try
+            {
+                dyn.EnqueueUpload();
+                dyn.Activate();
+                if (!CudaFusedOps.TryFillRopePositions(posQ, posK, dyn))
+                    throw new CudaGraphCaptureAbortedException("RoPE position fill kernel unavailable.");
+                Tensor result = RunPerOpLayerLoop(pinnedIn, 1, startPos);
+                CudaDecodeDynParams.Deactivate();
+                if (ReferenceEquals(result, pinnedIn))
+                    captured = graphs.EndCaptureAndLaunch(key, pinnedIn, new[] { posQ, posK },
+                        CudaDecodeDynParams.CaptureMaxAttendLen);
+                else
+                    graphs.AbortCapture(key);
+            }
+            catch (CudaGraphCaptureAbortedException ex)
+            {
+                graphs.AbortCapture(key, ex.Message);
+            }
+            catch (TensorSharp.Cuda.Interop.CudaException ex)
+            {
+                graphs.AbortCapture(key, ex.ToString());
+            }
+            catch
+            {
+                graphs.AbortCapture(key);
+                throw;
+            }
+            finally
+            {
+                CudaDecodeDynParams.Deactivate();
+            }
+
+            if (!captured)
+            {
+                // Nothing executed during the failed capture; run the loop for real.
+                return RunPerOpLayerLoop(pinnedIn, 1, startPos);
+            }
+            _cachedRoPEPosStartPos = -1;
+            return pinnedIn;
+        }
+
+        /// <summary>Mirrors the per-layer conv ring advance the plain loop's
+        /// TryRunCudaNativeGdnPacked does, for decode-graph replays (the C#
+        /// loop does not run, but the captured kernel advanced the device ring).</summary>
+        private void AdvanceGdnConvPhases(int convDim)
+        {
+            if (convDim <= 0 || _convStateWriteIdx == null || _isRecurrent == null)
+                return;
+            for (int l = 0; l < Config.NumLayers; l++)
+            {
+                if (_isRecurrent[l])
+                    _convStateWriteIdx[l] = (_convStateWriteIdx[l] + 1) % convDim;
+            }
+        }
+
+        /// <summary>Re-uploads any decode-graph input buffer (KV caches, GDN
+        /// conv/delta state) whose authoritative copy a host-side path dirtied;
+        /// a replayed graph reads the device buffers directly and would
+        /// otherwise see stale state. No-ops when everything is device-clean.</summary>
+        private void EnsureDecodeGraphInputsResident()
+        {
+            for (int l = 0; l < Config.NumLayers; l++)
+            {
+                if (_isRecurrent[l])
+                {
+                    if (_cudaGdnConvStateTensor?[l] != null)
+                        CudaFusedOps.TryEnsureDeviceResident(_cudaGdnConvStateTensor[l]);
+                    if (_deltaStateTensor?[l] != null)
+                        CudaFusedOps.TryEnsureDeviceResident(_deltaStateTensor[l]);
+                }
+                else
+                {
+                    if (_kvCacheK?[l] != null)
+                        CudaFusedOps.TryEnsureDeviceResident(_kvCacheK[l]);
+                    if (_kvCacheV?[l] != null)
+                        CudaFusedOps.TryEnsureDeviceResident(_kvCacheV[l]);
+                }
+            }
+        }
+
+        /// <summary>The inverse bookkeeping after a graph REPLAY: the graph
+        /// rewrote the KV caches and recurrent state on device without going
+        /// through the C# launchers, so their host mirrors are stale. Flag it,
+        /// or a later host read (state serialization, CPU fallback) would
+        /// return pre-replay data.</summary>
+        private void MarkCudaGraphStateModified()
+        {
+            for (int l = 0; l < Config.NumLayers; l++)
+            {
+                if (_isRecurrent[l])
+                {
+                    if (_cudaGdnConvStateTensor?[l] != null)
+                        CudaFusedOps.TryMarkDeviceModified(_cudaGdnConvStateTensor[l]);
+                    if (_deltaStateTensor?[l] != null)
+                        CudaFusedOps.TryMarkDeviceModified(_deltaStateTensor[l]);
+                }
+                else
+                {
+                    if (_kvCacheK?[l] != null)
+                        CudaFusedOps.TryMarkDeviceModified(_kvCacheK[l]);
+                    if (_kvCacheV?[l] != null)
+                        CudaFusedOps.TryMarkDeviceModified(_kvCacheV[l]);
+                }
+            }
+        }
+
         public override float[] ForwardRefill(int[] tokens)
         {
             // Prefill runs the recurrent state on the host; re-seed the fused
@@ -1338,14 +1645,7 @@ namespace TensorSharp.Models
                 }
             }
 
-            for (int layer = 0; layer < Config.NumLayers; layer++)
-            {
-                if (_isRecurrent[layer])
-                    hidden = RecurrentBlock(hidden, layer, seqLen, startPos);
-                else
-                    hidden = AttentionBlock(hidden, layer, seqLen, startPos);
-                TryEvaluateMlxLayerBoundary(hidden, layer, seqLen);
-            }
+            hidden = RunCudaPrefillLayerLoop(hidden, seqLen, startPos);
 
             hidden.Dispose();
             _cacheSeqLen += seqLen;
@@ -1419,14 +1719,7 @@ namespace TensorSharp.Models
             // Per-op path runs the recurrent state on the host, so the fused
             // decode's device-resident GDN state must be re-seeded next time.
             InvalidateFullDecodeState();
-            for (int layer = 0; layer < Config.NumLayers; layer++)
-            {
-                if (_isRecurrent[layer])
-                    hidden = RecurrentBlock(hidden, layer, seqLen, startPos);
-                else
-                    hidden = AttentionBlock(hidden, layer, seqLen, startPos);
-                TryEvaluateMlxLayerBoundary(hidden, layer, seqLen);
-            }
+            hidden = RunCudaPrefillLayerLoop(hidden, seqLen, startPos);
             }
 
             // Pick out the last token's hidden state BEFORE the final norm so we can
@@ -2455,6 +2748,16 @@ namespace TensorSharp.Models
                 ownsBuffers = true;
             }
 
+            // Direct-CUDA: deinterleave on the device. The host path below forces a
+            // full DtoH sync of the fused QKV buffer per attention layer (draining
+            // the async pipeline) and re-uploads q/gate afterwards; measured as the
+            // dominant per-layer stall for both prefill chunks and decode tokens.
+            if (_backend == BackendType.Cuda
+                && CudaFusedOps.TryDeinterleaveQGate(qTensor, gateTensor, qFull, seqLen, numHeads, headDim))
+            {
+                return;
+            }
+
             float* src = GetFloatPtr(qFull);
             float* qDst = GetFloatPtr(qTensor);
             float* gDst = GetFloatPtr(gateTensor);
@@ -2629,7 +2932,7 @@ namespace TensorSharp.Models
                 uView.Dispose();
                 gate = gView;
             }
-            else if ((IsGgmlBackend || _backend == BackendType.Mlx) && ownsGateUp)
+            else if ((IsGgmlBackend || _backend == BackendType.Mlx || _backend == BackendType.Cuda) && ownsGateUp)
             {
                 // Fused split path: silu(gate_up[:, :H]) * gate_up[:, H:] without the
                 // two large contiguous half-copies used by the legacy split path.
@@ -3168,18 +3471,33 @@ namespace TensorSharp.Models
         private Tensor EnsureRoPEPositions(int startPos, int seqLen, int numHeads)
         {
             int totalRows = seqLen * numHeads;
+            bool isQ = numHeads == Config.NumHeads;
             if (_cachedRoPEPosSeqLen == seqLen && _cachedRoPEPosStartPos == startPos)
             {
-                bool isQ = numHeads == Config.NumHeads;
                 Tensor cached = isQ ? _cachedRoPEPosQ : _cachedRoPEPosK;
                 if (cached != null && (int)cached.Sizes[0] == totalRows)
                     return cached;
+            }
+            else
+            {
+                _cachedRoPEPosQ?.Dispose();
+                _cachedRoPEPosK?.Dispose();
+                _cachedRoPEPosQ = null;
+                _cachedRoPEPosK = null;
+                _cachedRoPEPosSeqLen = seqLen;
+                _cachedRoPEPosStartPos = startPos;
             }
             int[] positions = new int[totalRows];
             for (int s = 0; s < seqLen; s++)
                 for (int h = 0; h < numHeads; h++)
                     positions[s * numHeads + h] = startPos + s;
-            return CreateIntTensor(positions, totalRows);
+            // Cache the tensor (it used to be recreated per attention layer): the
+            // CUDA-graph prefill capture pre-warms these two tensors so their
+            // host->device upload never lands inside a captured graph.
+            Tensor created = CreateIntTensor(positions, totalRows);
+            if (isQ) _cachedRoPEPosQ = created;
+            else _cachedRoPEPosK = created;
+            return created;
         }
 
         /// <summary>Set the per-axis (T,H,W) positions for the next prefill
@@ -4996,6 +5314,13 @@ namespace TensorSharp.Models
 
         public override void Dispose()
         {
+            // Cached CUDA prefill graphs own pool blocks + pinned tensors; free
+            // them before the tensors/caches they reference are torn down.
+            _cudaPrefillGraphs?.Dispose();
+            _cudaPrefillGraphs = null;
+            _cudaDecodeDynParams?.Dispose();
+            _cudaDecodeDynParams = null;
+
             VisionEncoder?.Dispose();
             foreach (var (visionEmbeddings, _) in _visionEmbeddingsList)
                 visionEmbeddings?.Dispose();

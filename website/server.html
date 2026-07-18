@@ -71,6 +71,25 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf
     <li>Free scrolling — read earlier replies while new tokens stream; auto-scroll resumes at the bottom.</li>
   </ul>
 
+  <h2 id="config">Configuration file (<code>--config</code>)</h2>
+  <p>Instead of a long command line, pass a JSON file with <code>--config</code>. The <a href="cli.html">CLI</a> reads the same format. <strong>Command-line options always win</strong>—file values are applied first, then anything you also pass on the command line overrides them, so one file can be reused across hosts while you override just what differs. Repeat <code>--config</code> to layer files (later files win). Comments and trailing commas are allowed.</p>
+  <pre data-lang="bash"><code># Read all options from a file; override just the backend for this host
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --config config/server-basic.json
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --config config/server-basic.json --backend ggml_cpu</code></pre>
+  <p>Keys are the same long option names below (with or without the leading <code>--</code>). A string/number becomes <code>--key value</code>, <code>true</code> becomes the bare switch <code>--key</code>, and an array becomes a repeated flag (e.g. <code>"stop": ["&lt;/s&gt;", "&lt;|eot|&gt;"]</code>).</p>
+  <p><strong>Variables.</strong> Define shared values once under <code>"variables"</code> and reference them with <code>${name}</code> in any string value (an undefined name falls back to an environment variable of the same name). Declare as many roots as you need — models in different folders each get their own.</p>
+  <p><strong>Auto-download.</strong> Any file option can be an object with a local <code>path</code> and one or more <code>urls</code>. If <code>path</code> is missing it downloads from the first working URL (mirrors tried in order), saves it there, and reuses it next time; progress prints to stderr, and an optional <code>sha256</code> verifies the file.</p>
+  <pre data-lang="json"><code>{
+  "variables": { "modelRoot": "C:/models", "repo": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main" },
+  "backend": "ggml_cuda",
+  "max-tokens": 4096,
+  "continuous-batching": true,
+  "stop": ["&lt;/s&gt;", "&lt;|eot|&gt;"],
+  "model":  { "path": "${modelRoot}/gemma-4-E4B-it-Q8_0.gguf", "urls": [ "${repo}/gemma-4-E4B-it-Q8_0.gguf" ] },
+  "mmproj": { "path": "${modelRoot}/gemma-4-E4B-mmproj-F16.gguf", "urls": [ "${repo}/mmproj-F16.gguf" ] }
+}</code></pre>
+  <p>Ready-to-use examples live in the repository's <code>config/</code> folder (<code>cli-basic.json</code>, <code>server-basic.json</code>, <code>variables.json</code>, <code>auto-download.json</code>, <code>qwen-image-edit.json</code>) — each uses real, public, ungated URLs, so it works on a fresh machine. See <code>config/README.md</code> for the full reference.</p>
+
   <h2 id="options">Server options</h2>
   <div class="table-scroll">
   <table>
@@ -82,6 +101,7 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf
       <tr><td><code>--gpu-device &lt;N&gt;</code></td><td>Vulkan device index for the <code>ggml_vulkan</code> backend on multi-GPU hosts (default: 0; env <code>TS_GGML_VULKAN_DEVICE</code>).</td></tr>
       <tr><td><code>--list-gpus</code></td><td>List the Vulkan devices ggml-vulkan can see (index + adapter name) and exit.</td></tr>
       <tr><td><code>--help</code></td><td>Print the full parameter reference and exit; it is also shown when no arguments are supplied. Inference always requires a startup <code>--model</code>.</td></tr>
+      <tr><td><code>--config &lt;path&gt;</code></td><td>Read options from a JSON <a href="#config">config file</a> (command-line options override it). Supports <code>${variables}</code> and auto-downloading models via <code>{ "path": ..., "urls": [...] }</code>. Repeatable.</td></tr>
       <tr><td><code>--max-tokens &lt;N&gt;</code></td><td>Default generation limit when a request omits it (default: <code>20000</code> for the Web UI; the Ollama/OpenAI compat endpoints fall back to <code>200</code> when the request omits it).</td></tr>
       <tr><td><code>--temperature / --top-k / --top-p / --min-p</code></td><td>Default sampling values when a request does not provide them (defaults: <code>0.8</code> / <code>40</code> / <code>0.9</code> / <code>0</code>).</td></tr>
       <tr><td><code>--repeat-penalty / --presence-penalty / --frequency-penalty / --seed</code></td><td>Default penalties and seed (defaults: <code>1.1</code> / <code>0</code> / <code>0</code> / <code>-1</code>).</td></tr>

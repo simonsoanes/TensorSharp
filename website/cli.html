@@ -138,6 +138,26 @@ dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
   <pre data-lang="json"><code>{"id": "q1", "messages": [{"role": "user", "content": "What is 2+3?"}], "max_tokens": 50}
 {"id": "q2", "messages": [{"role": "user", "content": "Write a haiku."}], "max_tokens": 100, "temperature": 0.8}</code></pre>
 
+  <h2 id="config">Configuration file (<code>--config</code>)</h2>
+  <p>Instead of a long command line, pass a JSON file with <code>--config</code>. The <a href="server.html">server</a> reads the same format. <strong>Command-line options always win</strong>—file values are applied first, then anything you also pass on the command line overrides them, so one file can be reused across machines while you override just what differs. Repeat <code>--config</code> to layer files (later files win). Comments and trailing commas are allowed.</p>
+  <pre data-lang="bash"><code># Use the file, but override the backend for this run
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --config config/cli-basic.json --backend ggml_cpu</code></pre>
+  <p>Keys are the same long option names below (with or without the leading <code>--</code>). A string/number becomes <code>--key value</code>, <code>true</code> becomes the bare switch <code>--key</code>, and an array becomes a repeated flag.</p>
+  <p><strong>Variables.</strong> Define shared values once under <code>"variables"</code> and reference them with <code>${name}</code> in any string value (an undefined name falls back to an environment variable of the same name). Declare as many roots as you need.</p>
+  <p><strong>Auto-download.</strong> Any file option can be an object with a local <code>path</code> and one or more <code>urls</code>. If <code>path</code> is missing it downloads from the first working URL (mirrors tried in order), saves it there, and reuses it next time; progress prints to stderr, and an optional <code>sha256</code> verifies the file.</p>
+  <pre data-lang="json"><code>{
+  "variables": { "modelRoot": "C:/models", "hf": "https://huggingface.co" },
+  "backend": "ggml_cuda",
+  "max-tokens": 256,
+  "temperature": 0.7,
+  "model": {
+    "path": "${modelRoot}/Qwen3.5-9B-Q8_0.gguf",
+    "urls": [ "${hf}/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q8_0.gguf" ]
+  }
+}</code></pre>
+  <p>Ready-to-use examples live in the repository's <code>config/</code> folder (<code>cli-basic.json</code>, <code>server-basic.json</code>, <code>variables.json</code>, <code>auto-download.json</code>, <code>qwen-image-edit.json</code>) — each uses real, public, ungated URLs, so it works on a fresh machine. See <code>config/README.md</code> for the full reference.</p>
+
   <h2 id="options">Command-line options</h2>
   <p>The CLI does not currently provide a complete <code>--help</code> screen: the usage synopsis is printed when no valid model path is available. Unknown arguments are ignored, so copy option names carefully—a misspelling may otherwise appear to succeed.</p>
   <h4>Input / output</h4>
@@ -171,6 +191,7 @@ dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
       <tr><td><code>--think</code></td><td>Enable thinking / reasoning mode (chain-of-thought).</td></tr>
       <tr><td><code>--tools &lt;path&gt;</code></td><td>JSON file with tool / function definitions.</td></tr>
       <tr><td><code>--dump-prompt</code></td><td>Render the prompt + tokenization and exit (no generation).</td></tr>
+      <tr><td><code>--config &lt;path&gt;</code></td><td>Read options from a JSON <a href="#config">config file</a> (command-line options override it). Supports <code>${variables}</code> and auto-downloading models. Repeatable.</td></tr>
     </tbody>
   </table>
   </div>

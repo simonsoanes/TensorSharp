@@ -168,13 +168,18 @@ namespace TensorSharp.Runtime.Scheduling
         public IModelArchitecture Model => _model;
         public SequenceState CurrentOwner => _currentOwner;
 
-        /// <summary>Execute one scheduler step. When the underlying model
-        /// implements <see cref="IBatchedPagedModel"/> all scheduled sequences
-        /// are packed into a single <see cref="BatchedForwardContext"/> and
-        /// dispatched through <see cref="IBatchedPagedModel.ForwardBatch"/> -
-        /// this is the vLLM-style "one kernel many sequences" path. Otherwise
-        /// the executor falls back to per-sequence forward with KV-state
-        /// swap (the path that ships today).
+        /// <summary>Execute one scheduler step. Path selection is centralised
+        /// in <see cref="ExecutionPlanner"/>: the executor snapshots the
+        /// model's <see cref="ExecutionCapabilities"/>, the operator's
+        /// <see cref="ExecutionOptions"/> (TS_* overrides) and this step's
+        /// <see cref="ExecutionStepFeatures"/>, and the planner returns an
+        /// <see cref="ExecutionPlan"/> — an ordered candidate chain plus the
+        /// reasons rejected paths were rejected. The executor then runs the
+        /// first candidate that accepts the step; declinable candidates
+        /// (MTP arming/continuity, linear→paged migration, a model refusing a
+        /// specific batch) fall through to the next entry in the chain, whose
+        /// last entry (<see cref="ExecutionPathKind.PerSequence"/>) never
+        /// declines.
         ///
         /// Set <c>TS_SCHED_DISABLE_BATCHED=1</c> to force the per-sequence
         /// fallback even when the model declares <see cref="IBatchedPagedModel"/>.
@@ -207,214 +212,221 @@ namespace TensorSharp.Runtime.Scheduling
                     _ownerForwardedTokens = 0;
                 }
 
-                bool batchedEnabled = !IsBatchedPathDisabled();
+                // Centralised path selection: snapshot what the loaded
+                // model+backend can do (ExecutionCapabilities), what the
+                // operator overrode (ExecutionOptions, the TS_* switches) and
+                // what this step's requests need (ExecutionStepFeatures), then
+                // ask the planner for the candidate chain. All the "which
+                // path?" logic lives in ExecutionPlanner.PlanStep; this method
+                // only executes the plan. Options/capabilities are snapshotted
+                // per step because several are env-var backed and tests toggle
+                // them at runtime.
+                var options = ExecutionOptions.FromEnvironment();
+                var caps = ExecutionCapabilities.FromModel(_model);
+                var features = ComputeStepFeatures(output, caps);
+                var plan = ExecutionPlanner.PlanStep(caps, options, _scheduler.Config, features);
 
-                // Split this step's work into:
-                //   - multimodalWork: seqs whose injector bucket still has
-                //     pending embeddings. These MUST go through per-sequence
-                //     forward so the model can inject vision/audio
-                //     embeddings at the right per-chunk positions (the
-                //     batched paged kernel has no hook for this).
-                //   - textWork: everything else; runs through the batched
-                //     paged path for full continuous-batching throughput.
-                // We route the two subsets separately rather than dragging
-                // healthy text seqs onto the per-seq swap path just because
-                // one image request happened to land in the same step -
-                // legacy per-seq with concurrent multi-seq scheduling
-                // produces garbled output on Gemma 4 (EnsureOwnership's
-                // byte-level state swap doesn't isolate cleanly across
-                // multi-seq iteration), so isolating multimodal here keeps
-                // text correctness intact.
-                // Models that handle multimodal in batched mode (e.g. Qwen3.5
-                // Phase 4) declare SupportsBatchedMultimodal=true and run the
-                // whole batch ÔÇö multimodal + text ÔÇö through ForwardBatch in
-                // one shot. Other models still get the multimodal/text split
-                // so per-seq Forward handles their vision-encoded sequences.
-                bool batchedModalSafe = _model is IBatchedPagedModel mmCheck && mmCheck.SupportsBatchedMultimodal;
-                var (multimodalWork, textWork) = batchedModalSafe
-                    ? (new List<ScheduledSequenceWork>(), new List<ScheduledSequenceWork>(output.ScheduledWork))
-                    : SplitMultimodalWork(output);
+                if (plan.MtpUnprofitable)
+                    WarnMtpUnprofitableOnce();
+                LogPlanTransition(plan);
 
-                // NextN/MTP speculative decoding. Models whose batched paged
-                // path can serve the speculative trunk (paged KV + per-slot
-                // recurrent state) run spec directly on that path ÔÇö the same
-                // kernels as the non-speculative batched baseline, no
-                // linear-cache detour, composing with prefix caching and
-                // concurrency transitions. When the handler declines (multi-
-                // sequence step, disarmed context, prefix-reused admission)
-                // the normal paths below serve the step. Models without
-                // batched-trunk support fall back to the per-sequence
-                // linear-cache route, which MUST run before the fused/batched
-                // dispatch or speculation never engages.
-                var mtpBatched = TryExecuteStepMtpBatchedTrunk(output);
-                if (mtpBatched != null)
-                    return mtpBatched;
-                if (ShouldRouteMtpSpeculative(output))
-                    return ExecuteStepPerSequence(output);
-
-                // Per-sequence fused decode: for models that expose a fast fused
-                // single-graph Forward backed by per-request KV caches, serve
-                // concurrent (N>=2) sequences by running each through its own
-                // fused Forward rather than the op-by-op batched paged path. The
-                // batched path issues ~20 Metal-queue-draining dispatches per
-                // layer, starving the GPU (~30% utilisation) so that aggregate
-                // throughput at N=2 collapses below the single-stream rate; the
-                // fused per-sequence path keeps the GPU saturated (one fused
-                // decode graph per token per sequence).
-                //
-                // Multimodal sequences are handled by this path too: because
-                // each request owns an isolated KV cache (no cross-sequence
-                // byte-level swap), the per-seq Forward injects this request's
-                // bucketed vision/audio embeddings into its own cache without
-                // colliding with concurrent text sequences ÔÇö the very isolation
-                // the legacy multimodal/text split worked around on the swap
-                // path. Routing everything through the fused path also avoids a
-                // KV-storage split (fused sequences keep K/V in their linear
-                // per-request cache, never the paged buffers the batched path
-                // reads), which is what corrupted concurrent image+text output.
-                if (batchedEnabled
-                    && _model is IBatchedPagedModel fusedModel
-                    && fusedModel.SupportsPerSequenceFusedForward
-                    && IsPerSeqFusedEnabled()
-                    && ShouldUsePerSeqFused(fusedModel, output))
+                for (int i = 0; i < plan.Candidates.Count; i++)
                 {
-                    return ExecuteStepPerSequenceFused(fusedModel, output);
-                }
-
-                if (batchedEnabled && _model is IBatchedPagedModel batched && textWork.Count > 0 && multimodalWork.Count > 0)
-                {
-                    // Mixed batch (only reachable when the model declines batched
-                    // multimodal): run each subset on its preferred path.
-                    // The multimodal per-seq pass below may extract the current
-                    // owner's linear K/V into pool blocks via EnsureOwnership
-                    // before the text batched pass reads paged storage; if the
-                    // owner's state was only ever in linear cache (came from the
-                    // N=1 fast path), the batched pass would then attend to
-                    // zeros for that owner. Migrate it up-front to keep the
-                    // batched read consistent with where its K/V history lives.
-                    TryMigrateOwnerToPagedIfNeeded(batched);
-                    var results = new List<SequenceStepResult>(output.ScheduledWork.Count);
-                    results.AddRange(ExecuteStepPerSequence(MakeSubOutput(multimodalWork)));
-                    try
+                    if (i > 0)
                     {
-                        results.AddRange(ExecuteStepBatched(batched, MakeSubOutput(textWork)));
-                        foreach (var work in textWork)
-                            work.Sequence.KvStateInPagedStorage = true;
+                        _logger.LogDebug(
+                            "BatchExecutor: {Declined} declined this step; falling back to {Next}.",
+                            plan.Candidates[i - 1], plan.Candidates[i]);
                     }
-                    catch (NotSupportedException)
-                    {
-                        results.AddRange(ExecuteStepPerSequence(MakeSubOutput(textWork)));
-                    }
-                    return results;
-                }
-
-                if (batchedEnabled && _model is IBatchedPagedModel batched2 && multimodalWork.Count == 0 && output.ScheduledWork.Count > 0)
-                {
-                    // N=1 fast path: when there's only one scheduled sequence
-                    // and the model has a fused single-pass decode kernel
-                    // (e.g. Gemma 4's NativeGemma4ModelDecode), the per-seq
-                    // Forward path is dramatically faster than the batched
-                    // op-by-op path ÔÇö ForwardBatch makes ~10 Ops.* dispatches
-                    // per layer ├ù 42 layers = ~420 kernel dispatches per token,
-                    // while Forward submits the whole 42-layer decode as a
-                    // single ggml graph compute. Profiling shows a ~4x speedup
-                    // (Ôëê21 tok/s vs Ôëê5 tok/s for Gemma 4 E4B Q8_0 on Metal).
-                    //
-                    // Safety: Forward writes K/V into the model's LINEAR cache,
-                    // while ForwardBatch reads from PAGED buffers. When a
-                    // second concurrent request arrives mid-decode, the
-                    // scheduler emits both sequences in one step (N=2) which
-                    // falls through to ExecuteStepBatched - and the first
-                    // sequence's prior K/V is absent from paged storage,
-                    // producing a token-repeat loop. We avoid that two ways:
-                    //   1. Skip the fast path for sequences that have already
-                    //      committed state to paged storage
-                    //      (KvStateInPagedStorage), since Forward would attend
-                    //      against an empty linear cache.
-                    //   2. Restrict the fast path to models that implement
-                    //      TryMigrateLinearKVToPaged, so the upcoming N=2
-                    //      transition can copy the linear state across before
-                    //      the batched kernel reads it.
-                    //
-                    // Gate: SupportsKVStateSnapshot is only relevant when
-                    // ExecuteStepPerSequence has to *swap* ownership (i.e.
-                    // the scheduled sequence isn't the current owner). For
-                    // an in-progress single-seq decode the owner IS the
-                    // scheduled sequence, so no swap happens and the
-                    // snapshot capability is irrelevant.
-                    //
-                    // Disable entirely with TS_BATCHED_N1_FAST_PATH=0 if you
-                    // need to A/B against the batched-only path.
-                    if (IsBatchedN1FastPathEnabled()
-                        && output.ScheduledWork.Count == 1
-                        && batched2.SupportsLinearKVMigration)
-                    {
-                        var only = output.ScheduledWork[0].Sequence;
-                        bool noSwapNeeded =
-                            _currentOwner == null
-                            || ReferenceEquals(_currentOwner, only);
-                        bool sequenceStillInLinearCache = !only.KvStateInPagedStorage;
-                        if ((noSwapNeeded || _model.SupportsKVStateSnapshot)
-                            && sequenceStillInLinearCache)
-                        {
-                            return ExecuteStepPerSequence(output);
-                        }
-                    }
-
-                    // Before dispatching through ForwardBatch, make sure any
-                    // sequence whose K/V history only lives in the linear
-                    // cache (because it was being served by the N=1 fast
-                    // path, or by a previous step that fell through from a
-                    // model whose ForwardBatch threw NotSupported) is
-                    // migrated into paged storage. Without this the
-                    // batched paged-attention kernel would read zeros for
-                    // the owner's prior positions and the sequence would
-                    // emit a token-repeat loop.
-                    if (!TryMigrateOwnerToPagedIfNeeded(batched2))
-                    {
-                        // Two reasons we'd land here:
-                        //   1. Model exposes SupportsLinearKVMigration but
-                        //      TryMigrateLinearKVToPaged returned false for
-                        //      this owner (e.g. a transient layout edge
-                        //      case). Worth flagging so we can diagnose.
-                        //   2. Model doesn't expose migration at all and an
-                        //      owner accumulated linear-only state because
-                        //      its ForwardBatch keeps throwing NotSupported
-                        //      (e.g. a model whose batched path is gated off
-                        //      via env var so every step is served by the
-                        //      per-seq fallback anyway). This is expected,
-                        //      not a failure ÔÇö silently route to per-seq.
-                        // In both cases the batched path would corrupt this
-                        // owner; serve via per-seq where the linear cache
-                        // is still authoritative.
-                        if (batched2.SupportsLinearKVMigration)
-                        {
-                            _logger.LogWarning(
-                                "BatchExecutor: linearÔåÆpaged migration failed for {RequestId}; falling back to per-seq path.",
-                                _currentOwner?.RequestId);
-                        }
-                        return ExecuteStepPerSequence(output);
-                    }
-
-                    try
-                    {
-                        var results = ExecuteStepBatched(batched2, output);
-                        // Any sequence that just ran through the batched
-                        // path now has its K/V in paged storage; sticky-
-                        // mark it so future steps don't try to send it back
-                        // through the linear-cache-only N=1 fast path.
-                        foreach (var work in output.ScheduledWork)
-                            work.Sequence.KvStateInPagedStorage = true;
+                    var results = TryExecutePath(plan.Candidates[i], output, options);
+                    if (results != null)
                         return results;
-                    }
-                    catch (NotSupportedException)
-                    {
-                        // The model declared support but bailed for this specific
-                        // batch. Fall through to the per-sequence swap path.
-                    }
                 }
+
+                // Unreachable: the planner always terminates the chain with a
+                // path that cannot decline (PerSequence). Kept as a hard
+                // fallback so a planner bug degrades to correctness, not loss.
                 return ExecuteStepPerSequence(output);
             }
+        }
+
+        /// <summary>Request-side features of this step (the planner input that
+        /// changes per step, as opposed to the model capabilities and operator
+        /// overrides).</summary>
+        private ExecutionStepFeatures ComputeStepFeatures(SchedulerOutput output, ExecutionCapabilities caps)
+        {
+            int count = output.ScheduledWork.Count;
+            var injector = _model.MultimodalInjector;
+            int multimodalPending = 0;
+            if (injector != null)
+            {
+                foreach (var work in output.ScheduledWork)
+                {
+                    if (injector.HasPendingEmbeddings(work.Sequence.RequestId))
+                        multimodalPending++;
+                }
+            }
+
+            bool soloMm = false, soloPaged = false, soloFused = false, soloSwap = false;
+            if (count == 1)
+            {
+                var solo = output.ScheduledWork[0].Sequence;
+                soloMm = injector != null && injector.HasPendingEmbeddings(solo.RequestId);
+                soloPaged = solo.KvStateInPagedStorage;
+                soloFused = caps.SupportsPerSequenceFusedForward
+                    && _model is IBatchedPagedModel fused
+                    && fused.HasFusedSequenceCache(solo.RequestId);
+                soloSwap = _currentOwner != null && !ReferenceEquals(_currentOwner, solo);
+            }
+
+            return new ExecutionStepFeatures
+            {
+                SequenceCount = count,
+                MultimodalPendingCount = multimodalPending,
+                SoloHasPendingMultimodal = soloMm,
+                SoloKvInPagedStorage = soloPaged,
+                SoloHasFusedCache = soloFused,
+                SoloRequiresOwnershipSwap = soloSwap,
+            };
+        }
+
+        /// <summary>Dispatch one plan candidate. Returns null when a declinable
+        /// candidate passes on the step (the caller then tries the next
+        /// candidate in the plan's chain).</summary>
+        private List<SequenceStepResult> TryExecutePath(
+            ExecutionPathKind path, SchedulerOutput output, ExecutionOptions options)
+        {
+            switch (path)
+            {
+                case ExecutionPathKind.MtpBatchedTrunk:
+                    // Declinable: the arming/continuity gate lives in the handler.
+                    return TryExecuteStepMtpBatchedTrunk(output);
+
+                case ExecutionPathKind.MtpPerSequence:
+                case ExecutionPathKind.SingleSequenceFused:
+                case ExecutionPathKind.PerSequence:
+                    // All three run the per-sequence executor; the plan kinds
+                    // differ only in WHY the route was chosen (linear-trunk
+                    // speculation, N=1 fused fast path, universal fallback),
+                    // which the plan log already records.
+                    return ExecuteStepPerSequence(output);
+
+                case ExecutionPathKind.PerSequenceFused:
+                    return ExecuteStepPerSequenceFused((IBatchedPagedModel)_model, output, options);
+
+                case ExecutionPathKind.MixedMultimodalSplit:
+                    return ExecuteStepMixedMultimodalSplit((IBatchedPagedModel)_model, output);
+
+                case ExecutionPathKind.BatchedPaged:
+                    return TryExecuteStepBatchedPaged((IBatchedPagedModel)_model, output);
+
+                default:
+                    throw new InvalidOperationException($"Unknown execution path: {path}");
+            }
+        }
+
+        /// <summary>Mixed step (model without batched multimodal support):
+        /// multimodal sequences run per-sequence so the model can inject
+        /// vision/audio embeddings at the right per-chunk positions; text
+        /// sequences run through the batched paged path for full
+        /// continuous-batching throughput. Routing the two subsets separately
+        /// keeps healthy text sequences off the per-seq swap path (which
+        /// produces garbled output under concurrent multi-seq iteration on
+        /// e.g. Gemma 4).</summary>
+        private List<SequenceStepResult> ExecuteStepMixedMultimodalSplit(
+            IBatchedPagedModel batched, SchedulerOutput output)
+        {
+            var (multimodalWork, textWork) = SplitMultimodalWork(output);
+
+            // The multimodal per-seq pass below may extract the current
+            // owner's linear K/V into pool blocks via EnsureOwnership before
+            // the text batched pass reads paged storage; if the owner's state
+            // was only ever in linear cache (came from the N=1 fast path), the
+            // batched pass would then attend to zeros for that owner. Migrate
+            // it up-front to keep the batched read consistent with where its
+            // K/V history lives.
+            TryMigrateOwnerToPagedIfNeeded(batched);
+            var results = new List<SequenceStepResult>(output.ScheduledWork.Count);
+            results.AddRange(ExecuteStepPerSequence(MakeSubOutput(multimodalWork)));
+            try
+            {
+                results.AddRange(ExecuteStepBatched(batched, MakeSubOutput(textWork)));
+                foreach (var work in textWork)
+                    work.Sequence.KvStateInPagedStorage = true;
+            }
+            catch (NotSupportedException ex)
+            {
+                _logger.LogDebug(ex,
+                    "BatchExecutor: model declined the text subset of a mixed batch; serving it per-sequence.");
+                results.AddRange(ExecuteStepPerSequence(MakeSubOutput(textWork)));
+            }
+            return results;
+        }
+
+        /// <summary>Batched paged dispatch (vLLM-style ForwardBatch). Returns
+        /// null (declining the step to the plan's next candidate) when the
+        /// owner's linear-to-paged migration fails or the model refuses this
+        /// specific batch with NotSupportedException.</summary>
+        private List<SequenceStepResult> TryExecuteStepBatchedPaged(
+            IBatchedPagedModel batched, SchedulerOutput output)
+        {
+            // Before dispatching through ForwardBatch, make sure any sequence
+            // whose K/V history only lives in the linear cache (because it was
+            // being served by the N=1 fast path, or by a previous step that
+            // fell back to per-seq) is migrated into paged storage. Without
+            // this the batched paged-attention kernel would read zeros for the
+            // owner's prior positions and the sequence would emit a
+            // token-repeat loop.
+            if (!TryMigrateOwnerToPagedIfNeeded(batched))
+            {
+                // Migration was needed but couldn't proceed: either the model
+                // supports migration and it failed for this owner (worth
+                // flagging so we can diagnose), or the model never exposed
+                // migration and the owner accumulated linear-only state
+                // (expected, not a failure; serve via per-seq where the linear
+                // cache is still authoritative).
+                if (batched.SupportsLinearKVMigration)
+                {
+                    _logger.LogWarning(
+                        "BatchExecutor: linear-to-paged migration failed for {RequestId}; falling back to per-seq path.",
+                        _currentOwner?.RequestId);
+                }
+                return null;
+            }
+
+            try
+            {
+                var results = ExecuteStepBatched(batched, output);
+                // Any sequence that just ran through the batched path now has
+                // its K/V in paged storage; sticky-mark it so future steps
+                // don't try to send it back through the linear-cache-only N=1
+                // fast path.
+                foreach (var work in output.ScheduledWork)
+                    work.Sequence.KvStateInPagedStorage = true;
+                return results;
+            }
+            catch (NotSupportedException ex)
+            {
+                // The model declared support but bailed for this specific
+                // batch. Decline to the plan's next candidate (per-seq swap).
+                _logger.LogDebug(ex, "BatchExecutor: ForwardBatch declined the batch; falling back.");
+                return null;
+            }
+        }
+
+        // Last logged plan description; plans are re-logged only when the
+        // decision (selected path, fallback chain, or rejection reasons)
+        // actually changes, so steady-state decode stays quiet while
+        // concurrency/feature transitions leave an audit trail.
+        private string _lastPlanDescription;
+
+        private void LogPlanTransition(ExecutionPlan plan)
+        {
+            if (!_logger.IsEnabled(LogLevel.Information)) return;
+            string desc = plan.Describe();
+            if (string.Equals(desc, _lastPlanDescription, StringComparison.Ordinal)) return;
+            _lastPlanDescription = desc;
+            _logger.LogInformation("BatchExecutor execution plan: {Plan}", desc);
         }
 
         /// <summary>Migrate the current owner's K/V state from the legacy
@@ -454,55 +466,6 @@ namespace TensorSharp.Runtime.Scheduling
             return false;
         }
 
-        /// <summary>True when this step should be served by the per-sequence
-        /// path so MTP speculative decoding can engage (or keep a sequence
-        /// that already lives in the linear cache on a correct path).
-        /// Speculation itself additionally requires an armed context ÔÇö a
-        /// routed sequence that can't arm (e.g. prefix-cache reuse skipped the
-        /// full prefill) simply runs plain per-seq decode.</summary>
-        private bool ShouldRouteMtpSpeculative(SchedulerOutput output)
-        {
-            if (!_scheduler.Config.MtpSpeculativeEnabled) return false;
-            if (_model is not IMtpSpeculativeModel spec || !spec.HasMtp) return false;
-            // Speculation is net-negative when the model can't drive its
-            // accelerated MTP path on the current backend (the per-op verify/draft
-            // fallback doesn't amortize the trunk over the draft window). Serve the
-            // fast standard decode instead, with a single operator-facing notice.
-            if (!spec.MtpSpeculationProfitable)
-            {
-                WarnMtpUnprofitableOnce();
-                return false;
-            }
-            // Batched-trunk-capable models never take the per-sequence
-            // detour: when TryExecuteStepMtpBatchedTrunk declines, the normal
-            // batched path serves the step (faster and keeps the sequence's
-            // K/V in paged storage).
-            if (spec is IMtpBatchedSpeculativeModel bm && bm.SupportsBatchedSpecTrunk) return false;
-            if (output.ScheduledWork.Count != 1) return false;
-
-            var seq = output.ScheduledWork[0].Sequence;
-            // A sequence whose K/V history lives in the model's paged storage
-            // can't run on the per-seq path (Forward would attend against an
-            // empty linear cache); keep it on the batched path.
-            if (seq.KvStateInPagedStorage) return false;
-            // Multimodal prefill needs Forward's embedding-inject hook, which
-            // SpecForward doesn't have.
-            if (_model.MultimodalInjector != null
-                && _model.MultimodalInjector.HasPendingEmbeddings(seq.RequestId))
-            {
-                return false;
-            }
-            // A sequence living in a per-request fused cache must stay fused ÔÇö
-            // its tail K/V isn't reconstructable from the shared caches.
-            if (_model is IBatchedPagedModel fused
-                && fused.SupportsPerSequenceFusedForward
-                && fused.HasFusedSequenceCache(seq.RequestId))
-            {
-                return false;
-            }
-            return true;
-        }
-
         private void WarnMtpUnprofitableOnce()
         {
             if (_mtpUnprofitableWarned) return;
@@ -512,25 +475,6 @@ namespace TensorSharp.Runtime.Scheduling
                 "on this backend the standard decode path is already faster than speculative " +
                 "decode (its multi-token verify/draft runs op-by-op and cannot amortize a cheap, " +
                 "fused/captured decode). Serving the fast standard decode instead ÔÇö no action needed.");
-        }
-
-        private static bool IsBatchedN1FastPathEnabled()
-        {
-            // Default ON. The bug that previously made this dangerous (a
-            // second concurrent request corrupting the first's output via
-            // paged-vs-linear KV-cache divergence) is now handled by the
-            // linearÔåÆpaged migration at the N=1ÔåÆbatched transition, gated
-            // on IBatchedPagedModel.SupportsLinearKVMigration. Disable via
-            // TS_BATCHED_N1_FAST_PATH=0 to A/B the fully-batched path.
-            string raw = Environment.GetEnvironmentVariable("TS_BATCHED_N1_FAST_PATH");
-            if (string.IsNullOrEmpty(raw)) return true;
-            return raw != "0" && !string.Equals(raw, "false", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static bool IsBatchedPathDisabled()
-        {
-            string raw = Environment.GetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED");
-            return !string.IsNullOrEmpty(raw) && raw != "0" && raw.ToLowerInvariant() != "false";
         }
 
         private (List<ScheduledSequenceWork> multimodal, List<ScheduledSequenceWork> text) SplitMultimodalWork(SchedulerOutput output)
@@ -678,40 +622,6 @@ namespace TensorSharp.Runtime.Scheduling
             return results;
         }
 
-        private static bool IsPerSeqFusedEnabled()
-        {
-            // Default ON. Set TS_PER_SEQ_FUSED=0 to force concurrent requests
-            // back onto the op-by-op batched paged path (A/B / debugging).
-            string raw = Environment.GetEnvironmentVariable("TS_PER_SEQ_FUSED");
-            if (string.IsNullOrEmpty(raw)) return true;
-            return raw != "0" && !string.Equals(raw, "false", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static bool IsBatchedFusedDecodeEnabled()
-        {
-            // Default OFF (v1, correctness-first). Set TS_BATCHED_FUSED_DECODE=1 to
-            // route concurrent (N>=2) decode steps through the model's true
-            // token-batched fused decode (one graph for all N) instead of the
-            // round-robin per-seq forwards.
-            string raw = Environment.GetEnvironmentVariable("TS_BATCHED_FUSED_DECODE");
-            return raw == "1" || string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static bool ShouldUsePerSeqFused(IBatchedPagedModel fused, SchedulerOutput output)
-        {
-            int count = output.ScheduledWork.Count;
-            if (count == 0) return false;
-            if (count >= 2) return true;
-            // Single scheduled sequence: keep it on the fused path only if it
-            // already owns a per-request fused cache. Such a sequence cannot
-            // drop back to the single-stream/batched path because its tail K/V
-            // lives only in its per-request linear cache (not reconstructable
-            // from paged storage). A never-fused single sequence falls through
-            // to the existing N==1 fast path (which keeps prefix-cache reuse
-            // and live-cache continuation).
-            return fused.HasFusedSequenceCache(output.ScheduledWork[0].Sequence.RequestId);
-        }
-
         /// <summary>Run every scheduled sequence through the model's fused
         /// single-graph <see cref="IModelArchitecture.Forward"/> with its own
         /// per-request KV cache (bound via
@@ -727,7 +637,8 @@ namespace TensorSharp.Runtime.Scheduling
         /// the path does not itself CAPTURE blocks back into the shared pool
         /// (a concurrent request never writes the shared block storage), so it
         /// can't corrupt blocks shared via copy-on-write.</summary>
-        private List<SequenceStepResult> ExecuteStepPerSequenceFused(IBatchedPagedModel fused, SchedulerOutput output)
+        private List<SequenceStepResult> ExecuteStepPerSequenceFused(
+            IBatchedPagedModel fused, SchedulerOutput output, ExecutionOptions options)
         {
             int n = output.ScheduledWork.Count;
             var results = new List<SequenceStepResult>(n);
@@ -758,7 +669,7 @@ namespace TensorSharp.Runtime.Scheduling
             // supports it, decode all N tokens in ONE fused graph (weights loaded
             // once) instead of N serial per-seq forwards. Falls through to the
             // round-robin loop below when the model declines this batch.
-            if (IsBatchedFusedDecodeEnabled() && n >= 2)
+            if (options.BatchedFusedDecodeEnabled && n >= 2)
             {
                 bool allDecode = true;
                 foreach (var work in output.ScheduledWork)
@@ -1167,39 +1078,23 @@ namespace TensorSharp.Runtime.Scheduling
         /// trunk passes through <c>SpecForwardBatched</c> ÔÇö the same kernels
         /// the non-speculative batched baseline uses, with the sequence's K/V
         /// in paged storage throughout (prefix caching and concurrency
-        /// transitions compose). Returns null when this step should be served
-        /// by the normal paths (speculation disabled/unsupported, multi-
-        /// sequence step, multimodal pending, disarmed context, prefix-reused
-        /// admission); the normal batched path then drops any stale context.
+        /// transitions compose). Static routing gates live in
+        /// <see cref="ExecutionPlanner"/>; this handler returns null only when
+        /// the speculative context can't arm or lost continuity (disarmed
+        /// context, prefix-reused admission), and the plan's next candidate
+        /// then serves the step and drops any stale context.
         /// </summary>
         private List<SequenceStepResult> TryExecuteStepMtpBatchedTrunk(SchedulerOutput output)
         {
-            if (!_scheduler.Config.MtpSpeculativeEnabled)
-                return null;
-            if (_model is not IMtpBatchedSpeculativeModel spec || !spec.SupportsBatchedSpecTrunk || !spec.HasMtp)
-                return null;
-            if (!spec.MtpSpeculationProfitable)
-            {
-                WarnMtpUnprofitableOnce();
-                return null;
-            }
-            if (output.ScheduledWork.Count != 1)
+            // Static routing gates (speculation requested, batched-trunk
+            // capability, profitability, solo step, no pending multimodal, not
+            // fused-resident) are enforced by ExecutionPlanner before this
+            // path becomes a plan candidate; only the DYNAMIC arming and
+            // continuity checks below stay here.
+            if (_model is not IMtpBatchedSpeculativeModel spec)
                 return null;
             var work = output.ScheduledWork[0];
             var seq = work.Sequence;
-            if (_model.MultimodalInjector != null
-                && _model.MultimodalInjector.HasPendingEmbeddings(seq.RequestId))
-            {
-                return null;
-            }
-            // A sequence living in a per-request fused cache must stay fused ÔÇö
-            // its tail K/V isn't reconstructable from paged storage.
-            if (_model is IBatchedPagedModel fused
-                && fused.SupportsPerSequenceFusedForward
-                && fused.HasFusedSequenceCache(seq.RequestId))
-            {
-                return null;
-            }
 
             int prevComputed = seq.NumComputedTokens;
 
@@ -1449,27 +1344,6 @@ namespace TensorSharp.Runtime.Scheduling
             return true;
         }
 
-        private static bool IsRetainedFusedCacheEnabled()
-        {
-            // Default ON. Kill-switch for A/B or to cap VRAM use. The retained
-            // holders pin one full KV cache each (same size as a concurrent
-            // request's holder), so the budget below bounds the extra VRAM.
-            string raw = Environment.GetEnvironmentVariable("TS_RETAINED_FUSED_CACHE");
-            if (string.IsNullOrEmpty(raw)) return true;
-            return raw != "0" && !string.Equals(raw, "false", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static int RetainedFusedCacheBudget()
-        {
-            // How many finished fused holders to keep alive for cross-request
-            // prefix reuse. Each pins a full per-request KV cache, so keep it
-            // small (VRAM). Tune with TS_RETAINED_FUSED_CACHE_MAX.
-            string raw = Environment.GetEnvironmentVariable("TS_RETAINED_FUSED_CACHE_MAX");
-            if (!string.IsNullOrEmpty(raw) && int.TryParse(raw, out int n) && n >= 0)
-                return n;
-            return 4;
-        }
-
         /// <summary>True when the loaded model serves concurrent decode through
         /// per-request fused holders AND caps pooled prefix reuse (sliding-window /
         /// circular cache). Only such models need retained-fused continuation ÔÇö an
@@ -1480,7 +1354,7 @@ namespace TensorSharp.Runtime.Scheduling
         /// from the pool either, so enabling it would need its own correctness pass on
         /// GDN-state reuse ÔÇö a follow-up, not part of this fix.</summary>
         private bool ModelUsesRetainableFusedCache()
-            => IsRetainedFusedCacheEnabled()
+            => ExecutionOptions.FromEnvironment().RetainedFusedCacheEnabled
             && _model is IBatchedPagedModel f
             && f.SupportsPerSequenceFusedForward
             && _model.MaxReusablePrefixTokens != int.MaxValue;
@@ -1608,7 +1482,7 @@ namespace TensorSharp.Runtime.Scheduling
             _retainedFused.AddLast(new RetainedFusedCache { RequestId = requestId, Tokens = tokens });
 
             // Evict oldest holders beyond the budget (frees their VRAM).
-            int budget = RetainedFusedCacheBudget();
+            int budget = ExecutionOptions.FromEnvironment().RetainedFusedCacheBudget;
             while (_retainedFused.Count > budget)
             {
                 var victim = _retainedFused.First.Value;
@@ -1899,15 +1773,30 @@ namespace TensorSharp.Runtime.Scheduling
         };
     }
 
-    /// <summary>Future hook for true batched paged attention - opt-in marker
-    /// for models that have a native paged forward kernel taking a batch
-    /// metadata struct. Today nothing implements this; <see cref="BatchExecutor"/>
-    /// falls back to per-sequence swap.</summary>
+    /// <summary>Opt-in contract for true batched paged attention: models with
+    /// a native paged forward kernel taking a batch metadata struct (Gemma 4,
+    /// Qwen 3/3.5, Nemotron-H, GptOss, Mistral 3). Path selection against this
+    /// contract is centralised in <see cref="ExecutionPlanner"/>, which reads
+    /// the declared capability getters below (via
+    /// <see cref="ExecutionCapabilities.FromModel"/>) instead of probing
+    /// behaviour through exceptions.</summary>
     public interface IBatchedPagedModel
     {
         /// <summary>Drive a single batched forward pass given the scheduler's
         /// per-step metadata. Returns per-sequence logits.</summary>
         IReadOnlyList<float[]> ForwardBatch(BatchedForwardContext ctx);
+
+        /// <summary>Master availability switch for this model's batched path.
+        /// False when a per-model opt-out (e.g. <c>TS_QWEN35_BATCHED=0</c>,
+        /// <c>TS_GPTOSS_BATCHED=0</c>) or a static limitation (e.g. Gemma 4
+        /// with MoE layers or a block-quantized KV cache) makes
+        /// <see cref="ForwardBatch"/> unusable, so <see cref="ExecutionPlanner"/>
+        /// routes around the batched path up front instead of relying on a
+        /// NotSupportedException fallback. <c>ForwardBatch</c> may still throw
+        /// NotSupportedException for a specific batch it cannot serve (the
+        /// executor treats that as a decline); this getter covers the
+        /// model-static part of that decision. Default true.</summary>
+        bool BatchedForwardAvailable => true;
 
         /// <summary>True iff <c>ForwardBatch</c> handles multimodal
         /// (vision/audio embeddings + MRoPE positions) for batched

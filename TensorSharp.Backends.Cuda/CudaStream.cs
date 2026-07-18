@@ -26,6 +26,11 @@ namespace TensorSharp.Cuda
             if (stream == IntPtr.Zero)
                 throw new ObjectDisposedException(nameof(CudaStream));
 
+            // A synchronize on a stream that is capturing a CUDA graph means some
+            // op needs device data on the host mid-capture; that cannot be part of
+            // a graph. Abort the capture (the site catches this, re-runs plainly).
+            CudaGraphCapture.OnStreamSynchronize(stream);
+
             CudaDriverApi.cuStreamSynchronize(stream).ThrowOnError();
         }
 

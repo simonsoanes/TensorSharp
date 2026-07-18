@@ -16,7 +16,7 @@ compatibility shim for queue-status/event shapes.
 | Scheduler | `ContinuousBatchScheduler` admits waiting requests, preempts running work when block pressure requires it, applies a per-step token budget, and shares full prefix blocks by hash. |
 | KV storage | `BlockPool`, `BlockTable`, `PagedKvStorage`, and `BlockHashIndex` hold fixed-size physical blocks with ref counts, LRU free ordering, and content-addressed lookup. |
 | Batched execution | Models that implement `IBatchedPagedModel.ForwardBatch` pack all scheduled sequences into one model call with explicit `positions`, `slotMapping`, `queryStartLoc`, and per-sequence block tables. |
-| Fallback execution | Models or feature combinations that cannot run batched throw `NotSupportedException`; `BatchExecutor` falls back to the isolated per-sequence KV-swap path inside the same engine. |
+| Fallback execution | Path selection is centralized in `ExecutionPlanner`: model+backend capabilities (`ExecutionCapabilities`), operator overrides (`ExecutionOptions`), and per-step request features produce an `ExecutionPlan` (selected path, fallback chain, rejection reasons). A model may still decline a specific batch with `NotSupportedException`; the step then falls to the plan's next candidate, ending in the per-sequence KV-swap path. |
 | Native attention | `TSGgml_PagedAttentionForward` gathers paged K/V in C++ and dispatches `ggml_flash_attn_ext`; GPT OSS uses `TSGgml_PagedAttentionForwardWithSinks`. |
 | Speculative decoding | Optional MTP / NextN draft heads accelerate solo (non-concurrent) sequences. `BatchExecutor` drives the shared `MtpSpeculativeExecution` draft / verify / rollback core for models that implement `IMtpBatchedSpeculativeModel` (Qwen 3.6 embedded NextN; Gemma 4 separate `gemma4-assistant` draft GGUF). Off by default; server `--mtp-spec`. See [Speculative decoding (MTP / NextN)](#speculative-decoding-mtp--nextn). |
 | Queue API | `InferenceQueue` is a no-op shim. `/api/queue/status` and queue-position event shapes are retained for clients that expect the fields, not because requests are serialized there. |
@@ -70,7 +70,10 @@ BlockPool + PagedKvStorage + BlockHashIndex
 | `TensorPagedAttention` | `TensorSharp.Models/Paged/TensorPagedAttention.cs` | Tensor-op paged attention fallback. |
 | `SequenceState` | `TensorSharp.Runtime/Scheduling/SequenceState.cs` | Mutable per-request status, tokens, blocks, logits, and sampling state. |
 | `ContinuousBatchScheduler` | `TensorSharp.Runtime/Scheduling/ContinuousBatchScheduler.cs` | Iteration-level scheduler with prefix caching and preemption. |
-| `BatchExecutor` | `TensorSharp.Runtime/Scheduling/BatchExecutor.cs` | Executes scheduled work, samples, and captures KV blocks. |
+| `BatchExecutor` | `TensorSharp.Runtime/Scheduling/BatchExecutor.cs` | Executes the planned step, samples, and captures KV blocks. |
+| `ExecutionPlanner` | `TensorSharp.Runtime/Scheduling/ExecutionPlanner.cs` | Pure-function path selection: capabilities + options + step features → `ExecutionPlan`. |
+| `ExecutionCapabilities` | `TensorSharp.Runtime/Scheduling/ExecutionCapabilities.cs` | Declared capability snapshot of the loaded model × backend combination. |
+| `ExecutionOptions` | `TensorSharp.Runtime/Scheduling/ExecutionOptions.cs` | Structured snapshot of the executor-level `TS_*` overrides (single place that reads them). |
 | `InferenceEngine` | `TensorSharp.Runtime/Scheduling/InferenceEngine.cs` | Worker loop and public submit/abort surface. |
 | `InferenceEngineHost` | `TensorSharp.Server/InferenceEngineHost.cs` | Server-side per-model engine singleton. |
 
@@ -82,7 +85,7 @@ BlockPool + PagedKvStorage + BlockHashIndex
 4. The engine worker asks `ContinuousBatchScheduler` for the next step.
 5. The scheduler admits waiting sequences while token and sequence budgets allow. Before allocating new blocks, it looks up full prompt blocks in `BlockHashIndex` and adopts shared blocks on a hit.
 6. If the pool is under pressure, the scheduler can preempt lower-priority running sequences, commit their full blocks, free the remainder, and requeue them.
-7. `BatchExecutor` executes the scheduled step. It uses `ForwardBatch` when the model and feature combination support it, otherwise it uses the per-sequence KV-swap fallback.
+7. `BatchExecutor` executes the scheduled step. It asks `ExecutionPlanner` for the step's `ExecutionPlan` and runs the first candidate path that accepts the step (see [Execution Planning](#execution-planning-capability-model)).
 8. The engine emits sampled tokens to the request handle, checks EOS / max-tokens / abort state, and releases blocks for completed sequences.
 
 Prefix adoption is capped so at least one prompt token still runs through the
@@ -107,6 +110,57 @@ The model batches embedding, projections, norms, FFN/MoE, and final logits over
 the concatenated token axis. It scatters fresh K/V into paged buffers using
 `SlotMapping`, then reads the per-sequence block tables during attention. It
 returns one logits array per sequence, in the same order as `ctx.Sequences`.
+
+## Execution Planning (Capability Model)
+
+The number of path combinations (batched / fallback, fused / op-by-op,
+multimodal / text, speculative / standard, per-model opt-outs, `TS_*`
+overrides) grew past what ad-hoc `if` chains could keep reviewable, so path
+selection is a single pure function:
+
+```text
+ExecutionCapabilities (model × backend, declared)
+        +
+ExecutionOptions      (operator TS_* overrides, read in one place)
+        +
+SchedulerConfig       (engine config, e.g. --mtp-spec)
+        +
+ExecutionStepFeatures (this step's requests: N, multimodal pending,
+        |              KV residency, fused-cache residency, swap needs)
+        v
+ExecutionPlanner.PlanStep(...)
+        |
+        v
+ExecutionPlan
+  - Selected path + ordered fallback chain
+  - Rejections: every plausible path that was not taken, with the reason
+```
+
+Key points:
+
+- **Declared capabilities, not exception probing.** Models declare what they
+  can run via `IBatchedPagedModel` getters (`BatchedForwardAvailable`,
+  `SupportsBatchedMultimodal`, `SupportsPerSequenceFusedForward`,
+  `SupportsLinearKVMigration`, …) and the MTP interfaces
+  (`HasMtp`, `MtpSpeculationProfitable`, `SupportsBatchedSpecTrunk`).
+  `ExecutionCapabilities.FromModel` snapshots them per step. A per-model
+  opt-out such as `TS_QWEN35_BATCHED=0` now surfaces through
+  `BatchedForwardAvailable=false` so the planner routes around the batched
+  path up front; `ForwardBatch` throwing `NotSupportedException` remains only
+  as a per-batch decline, not the routing mechanism.
+- **Plan candidates are ordered and safe.** Declinable candidates
+  (`MtpBatchedTrunk` arming/continuity, `BatchedPaged` migration/refusal)
+  fall through to the next entry; every plan ends in a path that cannot
+  decline. `ExecutionPlannerTests` sweeps the capability/feature space to
+  assert this invariant.
+- **Observability.** `InferenceEngine` logs a one-time capability report at
+  startup (which paths are statically available and why the others are not).
+  `BatchExecutor` logs the plan — selected path, fallback chain, rejection
+  reasons — whenever the decision changes (e.g. a concurrency transition),
+  so "why did this request not take the fast path?" is a logged fact.
+- **Path kinds** (`ExecutionPathKind`): `MtpBatchedTrunk`, `MtpPerSequence`,
+  `PerSequenceFused`, `MixedMultimodalSplit`, `SingleSequenceFused` (the N=1
+  fast path), `BatchedPaged`, `PerSequence`.
 
 ## Execution Paths
 
@@ -208,6 +262,10 @@ fails fast at server startup (`MtpStartupValidation`).
 | `TS_SCHED_PREFIX_CACHE` | `1` | Set `0` to disable block-hash prefix reuse. |
 | `TS_SCHED_DECODE_QUANTUM` | `256` | Number of decode tokens before a sequence switch is allowed in fallback-heavy execution. |
 | `TS_BATCHED_N1_FAST_PATH` | `1` | Solo single-sequence steps use the fused N=1 fast-path decode; set `0` to force those steps onto the fully-batched path (A/B testing). |
+| `TS_PER_SEQ_FUSED` | `1` | Concurrent (N≥2) sequences on fused-capable models run per-request fused Forward; set `0` to force the op-by-op batched paged path (A/B testing). |
+| `TS_BATCHED_FUSED_DECODE` | `0` | `1` enables true token-batched fused decode inside the per-sequence fused path (one graph decodes all N sequences). |
+| `TS_RETAINED_FUSED_CACHE` | `1` | Retain finished fused-path KV holders for cross-request prefix reuse; `0` disables (VRAM cap / A/B). |
+| `TS_RETAINED_FUSED_CACHE_MAX` | `4` | LRU budget of retained fused holders (each pins one per-request KV cache). |
 | `TS_KV_PAGED_QUANT_BITS` | `0` | Optional TurboQuant codec bits for paged KV blocks (`2`, `4`, or `8`); recurrent-state models may fall back to passthrough. |
 | `TS_MTP_SPEC` | `0` | `1` enables MTP / NextN speculative decoding for solo sequences (server `--mtp-spec`). |
 | `TS_MTP_DRAFT` | `8` | Max tokens drafted per speculative step (server `--mtp-draft`). |

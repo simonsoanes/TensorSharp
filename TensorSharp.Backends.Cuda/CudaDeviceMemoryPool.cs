@@ -48,6 +48,19 @@ namespace TensorSharp.Cuda
         private readonly Func<long, IntPtr> backingAllocate;
         private readonly Action<IntPtr> backingFree;
 
+        // Large transient blocks (prefill-sized activations) are pooled globally
+        // instead of per shard: the per-shard byte cap (maxCachedBytes / shards)
+        // is far below a single multi-MB activation, so without this every
+        // prefill layer re-issued cuMemAlloc/cuMemFree for its big activations —
+        // steady-state launch-path churn, and a capture-breaking allocation when
+        // the loop runs under CUDA-graph capture. Rare + low-frequency, so one
+        // global lock is fine.
+        private const long LargeBlockThreshold = 2L << 20;
+        private readonly object largeSync = new object();
+        private readonly Dictionary<long, Stack<IntPtr>> largePool = new Dictionary<long, Stack<IntPtr>>();
+        private readonly long largeCap;
+        private long largeCachedBytes;
+
         // Each thread is pinned to one shard for the life of the thread. Reading a
         // [ThreadStatic] is a couple of nanoseconds — far cheaper than
         // Thread.GetCurrentProcessorId() — and gives perfect locality: a tensor
@@ -64,11 +77,13 @@ namespace TensorSharp.Cuda
             bool enabled,
             Func<long, IntPtr> backingAllocate,
             Action<IntPtr> backingFree,
-            int shardCount = 0)
+            int shardCount = 0,
+            long largeCachedBytesCap = 0)
         {
             this.maxCachedBytes = maxCachedBytes;
             this.maxCachedBlockBytes = maxCachedBlockBytes;
             this.enabled = enabled;
+            largeCap = largeCachedBytesCap > 0 ? largeCachedBytesCap : maxCachedBytes;
             this.backingAllocate = backingAllocate ?? throw new ArgumentNullException(nameof(backingAllocate));
             this.backingFree = backingFree ?? throw new ArgumentNullException(nameof(backingFree));
 
@@ -102,6 +117,21 @@ namespace TensorSharp.Cuda
         {
             allocationBytes = RoundAllocationSize(Math.Max(requestedBytes, 1));
 
+            if (enabled && allocationBytes >= LargeBlockThreshold)
+            {
+                lock (largeSync)
+                {
+                    if (largePool.TryGetValue(allocationBytes, out Stack<IntPtr> largeStack) && largeStack.Count > 0)
+                    {
+                        IntPtr pooled = largeStack.Pop();
+                        largeCachedBytes -= allocationBytes;
+                        return pooled;
+                    }
+                }
+
+                return backingAllocate(allocationBytes);
+            }
+
             if (enabled)
             {
                 Shard shard = CurrentShard();
@@ -126,40 +156,153 @@ namespace TensorSharp.Cuda
 
         public void Return(IntPtr ptr, long allocationBytes)
         {
-            if (ptr == IntPtr.Zero)
+            if (TryReturnToPool(ptr, allocationBytes))
                 return;
 
-            if (enabled && allocationBytes > 0 && allocationBytes <= maxCachedBlockBytes)
-            {
-                Shard shard = CurrentShard();
-                lock (shard.Sync)
-                {
-                    if (shard.CachedBytes + allocationBytes <= perShardCap)
-                    {
-                        if (!shard.Pool.TryGetValue(allocationBytes, out Stack<IntPtr> stack))
-                        {
-                            stack = new Stack<IntPtr>();
-                            shard.Pool[allocationBytes] = stack;
-                        }
+            backingFree(ptr);
+        }
 
-                        stack.Push(ptr);
-                        shard.CachedBytes += allocationBytes;
-                        if (shard.CachedBytes > shard.PeakCachedBytes)
-                            shard.PeakCachedBytes = shard.CachedBytes;
-                        shard.ReturnedToPoolCount++;
-                        return;
+        /// <summary>
+        /// Like <see cref="Return"/> but never falls back to the backing free:
+        /// returns false when the block cannot be pooled (over the block-size or
+        /// shard cap, or pooling disabled) so the caller can decide its fate.
+        /// Used during CUDA graph capture, where blocks referenced by the graph
+        /// must never be cuMemFree'd.
+        /// </summary>
+        public bool TryReturnToPool(IntPtr ptr, long allocationBytes)
+        {
+            if (ptr == IntPtr.Zero)
+                return true;
+
+            if (!enabled || allocationBytes <= 0)
+                return false;
+
+            if (allocationBytes >= LargeBlockThreshold)
+            {
+                lock (largeSync)
+                {
+                    if (largeCachedBytes + allocationBytes > largeCap)
+                        return false;
+
+                    if (!largePool.TryGetValue(allocationBytes, out Stack<IntPtr> largeStack))
+                    {
+                        largeStack = new Stack<IntPtr>();
+                        largePool[allocationBytes] = largeStack;
                     }
 
-                    shard.FreedCount++;
+                    largeStack.Push(ptr);
+                    largeCachedBytes += allocationBytes;
+                    return true;
                 }
             }
 
-            backingFree(ptr);
+            if (allocationBytes > maxCachedBlockBytes)
+                return false;
+
+            Shard shard = CurrentShard();
+            lock (shard.Sync)
+            {
+                if (shard.CachedBytes + allocationBytes > perShardCap)
+                    return false;
+
+                if (!shard.Pool.TryGetValue(allocationBytes, out Stack<IntPtr> stack))
+                {
+                    stack = new Stack<IntPtr>();
+                    shard.Pool[allocationBytes] = stack;
+                }
+
+                stack.Push(ptr);
+                shard.CachedBytes += allocationBytes;
+                if (shard.CachedBytes > shard.PeakCachedBytes)
+                    shard.PeakCachedBytes = shard.CachedBytes;
+                shard.ReturnedToPoolCount++;
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Remove a specific free block from whichever shard holds it. Returns
+        /// false when the block is not currently pooled (still live, or already
+        /// freed). Used when a cached CUDA graph takes ownership of the blocks
+        /// its captured kernels reference.
+        /// </summary>
+        public bool TrySteal(IntPtr ptr, long allocationBytes)
+        {
+            if (ptr == IntPtr.Zero)
+                return false;
+
+            if (allocationBytes >= LargeBlockThreshold)
+            {
+                lock (largeSync)
+                {
+                    if (largePool.TryGetValue(allocationBytes, out Stack<IntPtr> largeStack)
+                        && largeStack.Count > 0 && largeStack.Contains(ptr))
+                    {
+                        var keptLarge = new Stack<IntPtr>();
+                        bool removedLarge = false;
+                        while (largeStack.Count > 0)
+                        {
+                            IntPtr candidate = largeStack.Pop();
+                            if (!removedLarge && candidate == ptr)
+                            {
+                                removedLarge = true;
+                                continue;
+                            }
+                            keptLarge.Push(candidate);
+                        }
+                        while (keptLarge.Count > 0)
+                            largeStack.Push(keptLarge.Pop());
+                        if (removedLarge)
+                        {
+                            largeCachedBytes -= allocationBytes;
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+
+            foreach (Shard shard in shards)
+            {
+                lock (shard.Sync)
+                {
+                    if (!shard.Pool.TryGetValue(allocationBytes, out Stack<IntPtr> stack) || stack.Count == 0)
+                        continue;
+                    if (!stack.Contains(ptr))
+                        continue;
+
+                    var kept = new Stack<IntPtr>();
+                    bool removed = false;
+                    while (stack.Count > 0)
+                    {
+                        IntPtr candidate = stack.Pop();
+                        if (!removed && candidate == ptr)
+                        {
+                            removed = true;
+                            continue;
+                        }
+                        kept.Push(candidate);
+                    }
+                    // Preserve original ordering (kept is reversed by the pops).
+                    while (kept.Count > 0)
+                        stack.Push(kept.Pop());
+
+                    if (removed)
+                    {
+                        shard.CachedBytes -= allocationBytes;
+                        return true;
+                    }
+                }
+            }
+
+            return false;
         }
 
         public CudaAllocatorStats GetStats()
         {
             long hit = 0, miss = 0, returned = 0, freed = 0, cached = 0, peak = 0;
+            lock (largeSync)
+                cached += largeCachedBytes;
             foreach (Shard shard in shards)
             {
                 lock (shard.Sync)
@@ -195,6 +338,21 @@ namespace TensorSharp.Cuda
         /// </summary>
         public void DrainAndFree()
         {
+            lock (largeSync)
+            {
+                foreach (Stack<IntPtr> stack in largePool.Values)
+                {
+                    while (stack.Count > 0)
+                    {
+                        IntPtr ptr = stack.Pop();
+                        if (ptr != IntPtr.Zero)
+                            backingFree(ptr);
+                    }
+                }
+                largePool.Clear();
+                largeCachedBytes = 0;
+            }
+
             foreach (Shard shard in shards)
             {
                 lock (shard.Sync)

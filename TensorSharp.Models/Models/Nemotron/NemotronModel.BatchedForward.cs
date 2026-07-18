@@ -74,6 +74,13 @@ namespace TensorSharp.Models
         // pending embeddings), matching the Mistral 3 batched stance.
         public bool SupportsBatchedMultimodal => NemoBatchedOptIn();
 
+        /// <summary>Declared availability of the batched path (see
+        /// <see cref="IBatchedPagedModel.BatchedForwardAvailable"/>): follows
+        /// the <c>TS_NEMO_BATCHED</c> opt-out so <c>ExecutionPlanner</c>
+        /// routes to the per-seq fallback up front instead of via a
+        /// NotSupportedException round trip.</summary>
+        public bool BatchedForwardAvailable => NemoBatchedOptIn();
+
         // ----- Phase 2: per-layer paged K/V + per-slot Mamba2 state pool -----
         //
         // Nemotron-H is hybrid; attention layers and Mamba2 layers each need a

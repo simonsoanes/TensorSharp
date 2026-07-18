@@ -34,6 +34,22 @@ namespace TensorSharp.Cli
         static void Main(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;
+
+            // Merge in options from a --config <file.json> before anything reads
+            // argv. File-derived tokens are spliced in ahead of the real
+            // command line, so any option also passed on the command line
+            // overrides the file (both here and in MainCore parse last-wins).
+            try
+            {
+                args = ConfigFileArgs.Expand(args);
+            }
+            catch (Exception ex) when (ex is ArgumentException or FileNotFoundException)
+            {
+                Console.Error.WriteLine("Configuration error: " + ex.Message);
+                Environment.ExitCode = 1;
+                return;
+            }
+
             bool showSarah = Array.Exists(args, a => a == "--xzf");
             ConsoleBanner.Print(showSarah);
 
@@ -341,7 +357,12 @@ namespace TensorSharp.Cli
                     "[--seed N] [--stop <text>] [--think] [--warmup-runs N] " +
                     "[--paged-kv | --no-paged-kv] [--paged-kv-block-size N] [--paged-kv-ram-mb N] " +
                     "[--paged-kv-ssd-dir <path>] [--paged-kv-ssd-mb N] [--paged-kv-quant-bits 0|2|4|8] " +
+                    "[--config <config.json>] " +
                     "[--log-level info|debug|trace] [--log-dir <path>] [--log-file off] [--log-console off]");
+                Console.Error.WriteLine(
+                    "  --config reads options from a JSON file (command-line options override it). The file supports " +
+                    "${variables} and auto-downloading models via { \"path\": ..., \"urls\": [...] }. " +
+                    "See the config/ folder and config/README.md for examples.");
                 return;
             }
 

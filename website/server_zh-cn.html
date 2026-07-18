@@ -71,6 +71,25 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf
     <li>自由滚动 —— 在新 token 流式输出时阅读较早的回复；自动滚动会在回到底部时恢复。</li>
   </ul>
 
+  <h2 id="config">配置文件（<code>--config</code>）</h2>
+  <p>可以用 <code>--config</code> 传入一个 JSON 文件，取代冗长的命令行；<a href="cli_zh-cn.html">CLI</a> 读取相同格式。<strong>命令行参数始终优先</strong>——先应用文件中的值，命令行上再次给出的参数会覆盖它们，因此可以在多台主机上复用同一个文件，只覆盖需要变化的部分。<code>--config</code> 可重复以叠加多个文件（后者优先）。允许注释与尾随逗号。</p>
+  <pre data-lang="bash"><code># 从文件读取全部参数；本次仅覆盖后端
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --config config/server-basic.json
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --config config/server-basic.json --backend ggml_cpu</code></pre>
+  <p>键名与下方长选项名相同（可带或不带前缀 <code>--</code>）。字符串/数字展开为 <code>--key value</code>，<code>true</code> 展开为裸开关 <code>--key</code>，数组展开为重复的标志（如 <code>"stop": ["&lt;/s&gt;", "&lt;|eot|&gt;"]</code>）。</p>
+  <p><strong>变量。</strong> 在 <code>"variables"</code> 中定义一次共享值，用 <code>${name}</code> 在任意字符串值中引用（未定义的名称回退到同名环境变量）。可以定义任意多个根路径——位于不同目录的模型各用一个。</p>
+  <p><strong>自动下载。</strong> 任何文件参数都可以写成带本地 <code>path</code> 与一个或多个 <code>urls</code> 的对象。若 <code>path</code> 不存在，则从第一个可用 URL 下载（镜像按顺序尝试），保存到该路径，之后复用；进度打印到 stderr，可选的 <code>sha256</code> 用于校验。</p>
+  <pre data-lang="json"><code>{
+  "variables": { "modelRoot": "C:/models", "repo": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main" },
+  "backend": "ggml_cuda",
+  "max-tokens": 4096,
+  "continuous-batching": true,
+  "stop": ["&lt;/s&gt;", "&lt;|eot|&gt;"],
+  "model":  { "path": "${modelRoot}/gemma-4-E4B-it-Q8_0.gguf", "urls": [ "${repo}/gemma-4-E4B-it-Q8_0.gguf" ] },
+  "mmproj": { "path": "${modelRoot}/gemma-4-E4B-mmproj-F16.gguf", "urls": [ "${repo}/mmproj-F16.gguf" ] }
+}</code></pre>
+  <p>开箱即用的示例见仓库 <code>config/</code> 目录（<code>cli-basic.json</code>、<code>server-basic.json</code>、<code>variables.json</code>、<code>auto-download.json</code>、<code>qwen-image-edit.json</code>）——每个都使用真实、公开、无需授权的 URL，因此在全新机器上也能直接运行。完整说明见 <code>config/README.md</code>。</p>
+
   <h2 id="options">服务器选项</h2>
   <div class="table-scroll">
   <table>
@@ -82,6 +101,7 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf
       <tr><td><code>--gpu-device &lt;N&gt;</code></td><td><code>ggml_vulkan</code> 后端在多 GPU 主机上使用的 Vulkan 设备索引（默认：0；环境变量 <code>TS_GGML_VULKAN_DEVICE</code>）。</td></tr>
       <tr><td><code>--list-gpus</code></td><td>列出 ggml-vulkan 可见的 Vulkan 设备（索引 + 显卡名称）后退出。</td></tr>
       <tr><td><code>--help</code></td><td>打印完整参数说明后退出；不带任何参数时也会显示。推理始终需要启动参数 <code>--model</code>。</td></tr>
+      <tr><td><code>--config &lt;path&gt;</code></td><td>从 JSON <a href="#config">配置文件</a>读取参数（命令行参数会覆盖它）。支持 <code>${变量}</code> 与通过 <code>{ "path": ..., "urls": [...] }</code> 自动下载模型。可重复。</td></tr>
       <tr><td><code>--max-tokens &lt;N&gt;</code></td><td>Web UI 请求未指定时的默认生成上限（默认：<code>20000</code>）；Ollama/OpenAI 兼容端点省略请求级上限时使用 <code>200</code>。</td></tr>
       <tr><td><code>--temperature / --top-k / --top-p / --min-p</code></td><td>请求未提供时的默认采样值（默认 <code>0.8</code> / <code>40</code> / <code>0.9</code> / <code>0</code>）。</td></tr>
       <tr><td><code>--repeat-penalty / --presence-penalty / --frequency-penalty / --seed</code></td><td>默认惩罚与随机种子（默认 <code>1.1</code> / <code>0</code> / <code>0</code> / <code>-1</code>）。</td></tr>

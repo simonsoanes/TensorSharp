@@ -45,10 +45,23 @@ namespace TensorSharp.Cuda
 
                 if (hostBuffer != IntPtr.Zero)
                 {
-                    NativeMemory.AlignedFree(hostBuffer.ToPointer());
+                    // If a CUDA graph capture is active, a captured HtoD copy may
+                    // reference this host mirror; donate it to the capture owner
+                    // (freed when the cached graph is evicted) instead of freeing.
+                    CudaGraphCapture.OnHostBufferOrphaned(AllocatorImpl, hostBuffer, out bool donated);
+                    if (!donated)
+                        NativeMemory.AlignedFree(hostBuffer.ToPointer());
                     hostBuffer = IntPtr.Zero;
                 }
             }
+        }
+
+        /// <summary>Free a host mirror previously donated to a CUDA graph cache
+        /// entry by <see cref="Destroy"/> during capture.</summary>
+        internal static void FreeDonatedHostBuffer(IntPtr hostBuffer)
+        {
+            if (hostBuffer != IntPtr.Zero)
+                NativeMemory.AlignedFree(hostBuffer.ToPointer());
         }
 
         public override string LocationDescription()
@@ -87,6 +100,8 @@ namespace TensorSharp.Cuda
                 if (!hostDirty)
                     return;
 
+                CudaGraphCapture.OnCapturedHostUpload(AllocatorImpl, ByteLength);
+                long t0 = CudaProfileCounters.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 AllocatorImpl.Context.MakeCurrent();
                 CudaDriverApi.cuMemcpyHtoDAsync(
                     deviceBuffer,
@@ -95,6 +110,8 @@ namespace TensorSharp.Cuda
                     AllocatorImpl.Stream.Handle).ThrowOnError();
                 hostDirty = false;
                 deviceDirty = false;
+                if (CudaProfileCounters.Enabled)
+                    CudaProfileCounters.RecordSync("HtoD(async)", ByteLength, System.Diagnostics.Stopwatch.GetTimestamp() - t0);
             }
         }
 
@@ -116,6 +133,7 @@ namespace TensorSharp.Cuda
                 if (!deviceDirty)
                     return;
 
+                long t0 = CudaProfileCounters.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 EnsureHostBuffer();
                 AllocatorImpl.Context.MakeCurrent();
                 CudaDriverApi.cuMemcpyDtoHAsync(
@@ -126,6 +144,8 @@ namespace TensorSharp.Cuda
                 AllocatorImpl.Stream.Synchronize();
                 deviceDirty = false;
                 hostDirty = false;
+                if (CudaProfileCounters.Enabled)
+                    CudaProfileCounters.RecordSync("DtoH(sync)", ByteLength, System.Diagnostics.Stopwatch.GetTimestamp() - t0);
             }
         }
 

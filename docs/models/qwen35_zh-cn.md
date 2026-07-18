@@ -592,7 +592,7 @@ llama.cpp 的 `graph_mtp` 与 vLLM 的 `Qwen3_5MultiTokenPredictor`。
 `--mtp-pmin`（默认 `0.75`）是保留 token 所需的最低草稿置信度。在 `ggml_cuda` 上，GDN 分块
 prefill 内核也会加速投机验证：在 Qwen3.6-27B IQ2_XXS 上实测把 MTP 投机验证 decode 从
 217 ms/token 降到 174 ms/token（见 §8，`GDN_CHUNK_PREFILL_MIN_SEQ_LEN`）。完整参数列表见
-[README MTP 章节](../../README_zh-cn.md#mtp--nextn-投机解码)。
+[MTP / 投机解码](../../FEATURES_zh-cn.md#mtp--nextn-投机解码)。
 
 ## 13. 输出解析器与聊天模板
 

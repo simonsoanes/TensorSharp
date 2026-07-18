@@ -1,0 +1,35 @@
+{
+  // Demonstrates variables + auto-download. Define a shared value once under
+  // "variables" and reference it with ${name} anywhere in a string value —
+  // including inside a download "path"/"urls". A ${name} that is not defined
+  // here falls back to an environment variable of the same name, and a variable
+  // may reference another variable.
+  //
+  // Here "gemmaBase" and "repo" are reused for the model, its vision projector,
+  // and its MTP speculative-decoding draft head — three related files that each
+  // auto-download into ${modelRoot} on the first run and are reused afterward.
+  "variables": {
+    "modelRoot": "C:/Works/models",
+    "gemmaBase": "${modelRoot}/gemma-4-26B-A4B",
+    "repo": "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF/resolve/main"
+  },
+
+  "backend": "ggml_cuda",
+  "max-tokens": 4096,
+
+  "model": {
+    "path": "${gemmaBase}-it-qat-UD-Q4_K_XL.gguf",
+    "urls": [ "${repo}/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf" ]
+  },
+  "mmproj": {
+    "path": "${gemmaBase}-mmproj-BF16.gguf",
+    "urls": [ "${repo}/mmproj-BF16.gguf" ]
+  },
+
+  // MTP speculative decoding: Gemma-4's draft head ships as its own GGUF.
+  "mtp-spec": true,
+  "mtp-draft-model": {
+    "path": "${gemmaBase}-it-Q4_0-MTP.gguf",
+    "urls": [ "${repo}/MTP/mtp-gemma-4-26B-A4B-it-Q4_0.gguf" ]
+  }
+}

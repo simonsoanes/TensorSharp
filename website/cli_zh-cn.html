@@ -138,6 +138,26 @@ dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
   <pre data-lang="json"><code>{"id": "q1", "messages": [{"role": "user", "content": "What is 2+3?"}], "max_tokens": 50}
 {"id": "q2", "messages": [{"role": "user", "content": "Write a haiku."}], "max_tokens": 100, "temperature": 0.8}</code></pre>
 
+  <h2 id="config">配置文件（<code>--config</code>）</h2>
+  <p>可以用 <code>--config</code> 传入一个 JSON 文件，取代冗长的命令行；<a href="server_zh-cn.html">服务端</a>读取相同格式。<strong>命令行参数始终优先</strong>——先应用文件中的值，命令行上再次给出的参数会覆盖它们，因此可以在多台机器上复用同一个文件，只覆盖需要变化的部分。<code>--config</code> 可重复以叠加多个文件（后者优先）。允许注释与尾随逗号。</p>
+  <pre data-lang="bash"><code># 使用该文件，但本次运行覆盖后端
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --config config/cli-basic.json --backend ggml_cpu</code></pre>
+  <p>键名与下方长选项名相同（可带或不带前缀 <code>--</code>）。字符串/数字展开为 <code>--key value</code>，<code>true</code> 展开为裸开关 <code>--key</code>，数组展开为重复的标志。</p>
+  <p><strong>变量。</strong> 在 <code>"variables"</code> 中定义一次共享值，用 <code>${name}</code> 在任意字符串值中引用（未定义的名称回退到同名环境变量）。可以定义任意多个根路径。</p>
+  <p><strong>自动下载。</strong> 任何文件参数都可以写成带本地 <code>path</code> 与一个或多个 <code>urls</code> 的对象。若 <code>path</code> 不存在，则从第一个可用 URL 下载（镜像按顺序尝试），保存到该路径，之后复用；进度打印到 stderr，可选的 <code>sha256</code> 用于校验。</p>
+  <pre data-lang="json"><code>{
+  "variables": { "modelRoot": "C:/models", "hf": "https://huggingface.co" },
+  "backend": "ggml_cuda",
+  "max-tokens": 256,
+  "temperature": 0.7,
+  "model": {
+    "path": "${modelRoot}/Qwen3.5-9B-Q8_0.gguf",
+    "urls": [ "${hf}/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q8_0.gguf" ]
+  }
+}</code></pre>
+  <p>开箱即用的示例见仓库 <code>config/</code> 目录（<code>cli-basic.json</code>、<code>server-basic.json</code>、<code>variables.json</code>、<code>auto-download.json</code>、<code>qwen-image-edit.json</code>）——每个都使用真实、公开、无需授权的 URL，因此在全新机器上也能直接运行。完整说明见 <code>config/README.md</code>。</p>
+
   <h2 id="options">命令行选项</h2>
   <p>CLI 目前没有完整的 <code>--help</code> 页面；找不到有效模型路径时才会打印用法概要。未知参数会被忽略，因此请准确复制选项名，否则拼写错误也可能看起来执行成功。</p>
   <h4>输入 / 输出</h4>
@@ -171,6 +191,7 @@ dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
       <tr><td><code>--think</code></td><td>启用思考 / 推理模式（思维链）。</td></tr>
       <tr><td><code>--tools &lt;path&gt;</code></td><td>含工具 / 函数定义的 JSON 文件。</td></tr>
       <tr><td><code>--dump-prompt</code></td><td>渲染提示词 + 分词后退出（不生成）。</td></tr>
+      <tr><td><code>--config &lt;path&gt;</code></td><td>从 JSON <a href="#config">配置文件</a>读取参数（命令行参数会覆盖它）。支持 <code>${变量}</code> 与模型自动下载。可重复。</td></tr>
     </tbody>
   </table>
   </div>

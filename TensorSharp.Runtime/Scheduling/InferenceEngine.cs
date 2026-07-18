@@ -69,6 +69,19 @@ namespace TensorSharp.Runtime.Scheduling
                 _executor.ComputeFusedContinuationLcp,
                 _executor.TryAdoptFusedContinuation);
 
+            // One-time capability report: which execution paths are statically
+            // available for this model+backend under the current configuration,
+            // and why the unavailable ones are unavailable. Per-step routing
+            // (selected path, fallback chain, rejection reasons) is logged by
+            // BatchExecutor whenever the plan changes.
+            _logger.LogInformation(
+                "InferenceEngine[{Arch}] execution capability report:\n{Report}",
+                model.Config?.Architecture ?? "model",
+                ExecutionPlanner.BuildCapabilityReport(
+                    ExecutionCapabilities.FromModel(model),
+                    ExecutionOptions.FromEnvironment(),
+                    cfg));
+
             _worker = new Thread(WorkerLoop)
             {
                 IsBackground = true,

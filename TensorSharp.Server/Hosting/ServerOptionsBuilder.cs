@@ -713,6 +713,7 @@ namespace TensorSharp.Server.Hosting
                 "--qwen-image-vae", "--qwen-image-vl", "--qwen-image-mmproj", "--qwen-image-lora",
                 "--offload-cpu",
                 "--kv-cache-dtype", "--gpu-device", "--list-gpus", "--help",
+                "--config",
             };
             string best = null;
             int bestDist = int.MaxValue;

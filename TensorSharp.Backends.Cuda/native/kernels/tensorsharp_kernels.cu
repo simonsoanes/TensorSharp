@@ -26,6 +26,17 @@
 #define GGML_IQ4_XS 23
 #define TS_QK8_1 32
 
+// Decode-graph dynamic parameter block (device int32[4], see CudaDecodeDynParams):
+// dyn[0] = attend_len (kv length), dyn[1] = kv cache write position,
+// dyn[2] = GDN conv ring write index, dyn[3] = RoPE position.
+// A captured CUDA graph bakes scalar kernel arguments, so kernels on the
+// per-token decode path re-read the position-dependent ones from this device
+// block (refreshed each replay by a captured pinned-host->device memcpy node).
+#define TS_DYN_ATTEND_LEN 0
+#define TS_DYN_KV_WRITE_POS 1
+#define TS_DYN_CONV_WRITE_IDX 2
+#define TS_DYN_ROPE_POS 3
+
 // IQ4_XS / IQ4_NL non-linear 4-bit codebook (ggml kvalues_iq4nl). Each 4-bit
 // index maps to one of these 16 reconstruction levels; the per-sub-block scale
 // multiplies the looked-up level. Matches ManagedQuantizedOps.Iq4NlValues so the
@@ -677,6 +688,80 @@ extern "C" __global__ void ts_binary_activation_f32(const float* a, const float*
         output[i] = x * (1.0f / (1.0f + expf(-y)));
 }
 
+// Dequantize a whole quantized weight [out_dim, in_dim] to f16 row-major. Feeds
+// the tensor-core cuBLAS GEMM used for large-row prefill matmuls: the weight is
+// read ONCE here instead of rows/tile times by the block-tile quant kernels.
+extern "C" __global__ void ts_dequant_weight_f16(
+    const uint8_t* weights, half* output, int type, int in_dim, long long total)
+{
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total)
+        return;
+    int row = (int)(i / in_dim);
+    int col = (int)(i - (long long)row * in_dim);
+    const uint8_t* wrow = weights + (size_t)row * qrow_bytes(type, in_dim);
+    output[i] = __float2half(qvalue_at(wrow, type, col));
+}
+
+extern "C" __global__ void ts_convert_f32_f16(const float* src, half* dst, long long count)
+{
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < count)
+        dst[i] = __float2half(src[i]);
+}
+
+// Deinterleave a fused Q+gate projection: src rows hold num_heads blocks of
+// [q(head_dim) | gate(head_dim)]; q/gate receive the de-interleaved halves as
+// dense [rows, num_heads*head_dim]. src_row_stride supports reading a Narrow'd
+// column slice out of a wider fused QKV row (decode reuses the packed buffer).
+extern "C" __global__ void ts_deinterleave_qgate_f32(
+    const float* src, float* q, float* gate,
+    int rows, int num_heads, int head_dim, long long src_row_stride)
+{
+    int per_row = num_heads * head_dim;
+    int count = rows * per_row;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count)
+        return;
+
+    int row = i / per_row;
+    int rem = i - row * per_row;
+    int h = rem / head_dim;
+    int d = rem - h * head_dim;
+    const float* s = src + (size_t)row * src_row_stride + (size_t)h * head_dim * 2;
+    q[i] = s[d];
+    gate[i] = s[d + head_dim];
+}
+
+// Row-strided binary activation: same math as ts_binary_activation_f32 but each
+// operand is a 2D row-major view whose rows may be padded (e.g. Narrow'd halves
+// of a fused gate+up projection). Keeps strided SwiGLU/GeGLU activations on the
+// device instead of falling back to the (element-wise, synchronizing) CPU path.
+extern "C" __global__ void ts_binary_activation_strided_f32(
+    const float* a, const float* b, float* output,
+    int rows, int cols,
+    long long a_row_stride, long long b_row_stride, long long out_row_stride,
+    int op)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int count = rows * cols;
+    if (i >= count)
+        return;
+
+    int row = i / cols;
+    int col = i - row * cols;
+    float x = a[(size_t)row * a_row_stride + col];
+    float y = b[(size_t)row * b_row_stride + col];
+    float value;
+    if (op == 0)
+        value = silu(x) * y;
+    else if (op == 1)
+        value = gelu(x) * y;
+    else
+        value = x * (1.0f / (1.0f + expf(-y)));
+    output[(size_t)row * out_row_stride + col] = value;
+}
+
 extern "C" __global__ void ts_add_bias_rows_f32(float* tensor, const float* bias, int rows, int cols, int bias_cols)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -791,32 +876,33 @@ extern "C" __global__ void ts_qwen35_gdn_packed_f32(
     int head_v_dim,
     int conv_kernel,
     int conv_write_idx,
-    float eps)
+    float eps,
+    const int* dyn)
 {
     int h = blockIdx.x;
     if (h >= num_v_heads)
         return;
+    if (dyn)
+        conv_write_idx = dyn[TS_DYN_CONV_WRITE_IDX];
 
-    // Row block: each block processes one (head, row_group) pair.
-    // Instead of one block walking all head_v_dim rows sequentially,
-    // launch ceil(head_v_dim / num_warps) blocks per head.
+    // ONE block per head. The head's recurrent state is staged into shared memory
+    // once, the whole sequence recurs on-chip, and the final state is written back
+    // once. This removes the per-token global read+write of the full state (the
+    // dominant GDN prefill traffic) AND the earlier multi-block-per-head layout,
+    // whose per-block whole-state decay and partially-filled core[] were racy for
+    // head_v_dim > num_warps.
     int tid = threadIdx.x;
     int nthreads = blockDim.x;
     int lane = tid & 31;
     int warp = tid >> 5;
     int num_warps = nthreads >> 5;
-    int row_base = blockIdx.y * num_warps;
-    if (row_base >= head_v_dim)
-        return;
 
-    // The delta-net rows of a head are mutually independent: row r reads and writes
-    // only state_head[r, :]. The shared inputs (the normalized conv outputs q/k and
-    // the per-head scalars) are computed once, then every row is processed by its own
-    // warp in parallel.
+    // Dynamic shared layout: q | k | core | state[head_v_dim * head_k_dim].
     extern __shared__ float scratch[];
     float* q = scratch;
     float* k = q + head_k_dim;
     float* core = k + head_k_dim;
+    float* state = core + head_v_dim;
 
     __shared__ float q_scale;
     __shared__ float k_scale;
@@ -832,8 +918,12 @@ extern "C" __global__ void ts_qwen35_gdn_packed_f32(
     int beta_offset = qkv_dim + v_dim + h;
     int alpha_offset = qkv_dim + v_dim + num_v_heads + h;
     int state_per_head = head_v_dim * head_k_dim;
-    float* state_head = ssm_state + (size_t)h * state_per_head;
+    float* state_global = ssm_state + (size_t)h * state_per_head;
     float q_head_scale = rsqrtf((float)head_v_dim);
+
+    for (int i = tid; i < state_per_head; i += nthreads)
+        state[i] = state_global[i];
+    __syncthreads();
 
     for (int s = 0; s < seq_len; s++)
     {
@@ -868,7 +958,7 @@ extern "C" __global__ void ts_qwen35_gdn_packed_f32(
         }
         __syncthreads();
 
-        // Normalize the shared q/k and decay the recurrent state in place.
+        // Normalize the shared q/k and decay the (shared-resident) state in place.
         float state_scale = expf(gate_h);
         for (int d = tid; d < head_k_dim; d += nthreads)
         {
@@ -876,17 +966,15 @@ extern "C" __global__ void ts_qwen35_gdn_packed_f32(
             k[d] *= k_scale;
         }
         for (int i = tid; i < state_per_head; i += nthreads)
-            state_head[i] *= state_scale;
+            state[i] *= state_scale;
         __syncthreads();
 
-        // One row per warp: kv = <state_row, k>, rank-1 update, core = <state_row, q>.
-        // Each block owns num_warps consecutive rows; row_base = blockIdx.y * num_warps.
-        // All lanes share the same row, so __shfl broadcasts/reductions are warp-safe.
+        // Rows are mutually independent; each warp walks rows warp, warp+num_warps, ...
+        // kv = <state_row, k>, rank-1 update, core = <state_row, q>.
         float beta = beta_h;
-        int row = row_base + warp;
-        if (row < head_v_dim)
+        for (int row = warp; row < head_v_dim; row += num_warps)
         {
-            float* state_row = state_head + (size_t)row * head_k_dim;
+            float* state_row = state + (size_t)row * head_k_dim;
             float kv_mem = 0.0f;
             for (int d = lane; d < head_k_dim; d += 32)
                 kv_mem += state_row[d] * k[d];
@@ -930,6 +1018,223 @@ extern "C" __global__ void ts_qwen35_gdn_packed_f32(
         }
         __syncthreads();
     }
+
+    for (int i = tid; i < state_per_head; i += nthreads)
+        state_global[i] = state[i];
+}
+
+// ====================================================================
+// Split GDN prefill (3 sync-free phases). The single-kernel path above walks
+// the sequence with ~7 block-wide barriers per token and only num_v_heads
+// blocks in flight, so a 255-token prefill is latency-bound (~5 ms/layer).
+// The delta-net rows of a head are mutually independent across the WHOLE
+// sequence; only the shared conv/norm inputs (parallel over tokens) and the
+// output RMS (parallel over tokens) couple rows. Phases:
+//   conv:  per (token, head) warp - causal conv + L2-normalized q/k, v,
+//          gate/beta scalars -> scratch  [fully parallel]
+//   scan:  per warp: 4 state rows register-resident across the whole window,
+//          sequential over tokens but NO block synchronization; writes the
+//          un-normalized core outputs  [num_v_heads*head_v_dim/4 warps]
+//   out:   per (token, head) warp - RMS over core, ssm_norm & silu(z) gate
+//          [fully parallel]
+// Requires head_k_dim == 128 (state row = 4 regs/lane) and head_v_dim % 32
+// == 0; the host falls back to the single-kernel path otherwise.
+// ====================================================================
+extern "C" __global__ void ts_qwen35_gdn_prefill_conv_f32(
+    const float* packed,
+    const float* conv_state,
+    const float* conv_w,
+    const float* dt_bias,
+    const float* a_log,
+    float* scr,           // [num_v_heads][win_len][2*head_k + head_v + 2]
+    int win_start,
+    int win_len,
+    int seq_len,
+    int packed_dim,
+    int qkv_dim,
+    int qk_dim,
+    int v_dim,
+    int num_k_heads,
+    int num_v_heads,
+    int head_k_dim,
+    int head_v_dim,
+    int conv_kernel,
+    int conv_write_idx,
+    float eps)
+{
+    int wid = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    int lane = threadIdx.x & 31;
+    if (wid >= win_len * num_v_heads)
+        return;
+    int h = wid % num_v_heads;
+    int sl = wid / num_v_heads;
+    int s = win_start + sl;
+
+    int src_h = h % num_k_heads;
+    int q_offset = src_h * head_k_dim;
+    int k_offset = qk_dim + src_h * head_k_dim;
+    int v_offset = 2 * qk_dim + h * head_v_dim;
+    int beta_offset = qkv_dim + v_dim + h;
+    int alpha_offset = qkv_dim + v_dim + num_v_heads + h;
+
+    int stride = 2 * head_k_dim + head_v_dim + 2;
+    float* dst = scr + ((size_t)h * win_len + sl) * stride;
+
+    // Causal conv + L2 norm for q/k (head_k_dim <= 128 -> up to 4 dims/lane).
+    float qv[4], kv[4];
+    float q_sum = 0.0f, k_sum = 0.0f;
+    int nj = head_k_dim >> 5;
+#pragma unroll
+    for (int j = 0; j < 4; j++)
+    {
+        if (j < nj)
+        {
+            int d = lane + (j << 5);
+            qv[j] = qwen35_gdn_conv_channel(
+                packed, conv_state, conv_w, s, q_offset + d,
+                seq_len, packed_dim, qkv_dim, conv_kernel, conv_write_idx);
+            kv[j] = qwen35_gdn_conv_channel(
+                packed, conv_state, conv_w, s, k_offset + d,
+                seq_len, packed_dim, qkv_dim, conv_kernel, conv_write_idx);
+            q_sum += qv[j] * qv[j];
+            k_sum += kv[j] * kv[j];
+        }
+    }
+    q_sum = warp_allreduce_sum(q_sum);
+    k_sum = warp_allreduce_sum(k_sum);
+    float q_scale = rsqrtf(q_sum + eps) * rsqrtf((float)head_v_dim);
+    float k_scale = rsqrtf(k_sum + eps);
+#pragma unroll
+    for (int j = 0; j < 4; j++)
+    {
+        if (j < nj)
+        {
+            int d = lane + (j << 5);
+            dst[d] = qv[j] * q_scale;
+            dst[head_k_dim + d] = kv[j] * k_scale;
+        }
+    }
+
+    for (int d = lane; d < head_v_dim; d += 32)
+        dst[2 * head_k_dim + d] = qwen35_gdn_conv_channel(
+            packed, conv_state, conv_w, s, v_offset + d,
+            seq_len, packed_dim, qkv_dim, conv_kernel, conv_write_idx);
+
+    if (lane == 0)
+    {
+        const float* prow = packed + (size_t)s * packed_dim;
+        dst[2 * head_k_dim + head_v_dim] =
+            softplus_f32(prow[alpha_offset] + dt_bias[h]) * a_log[h];
+        dst[2 * head_k_dim + head_v_dim + 1] = sigmoid_f32(prow[beta_offset]);
+    }
+}
+
+extern "C" __global__ void ts_qwen35_gdn_prefill_scan_f32(
+    const float* scr,     // phase-conv output
+    float* ssm_state,     // [num_v_heads][head_v_dim][head_k_dim]
+    float* core,          // [num_v_heads][win_len][head_v_dim]
+    int win_len,
+    int num_v_heads,
+    int head_k_dim,       // must be 128
+    int head_v_dim)
+{
+    int h = blockIdx.x;
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+    int rowsPerBlock = (blockDim.x >> 5) * 4;
+    int r0 = blockIdx.y * rowsPerBlock + warp * 4;
+    if (h >= num_v_heads || r0 >= head_v_dim)
+        return;
+
+    int stride = 2 * head_k_dim + head_v_dim + 2;
+    const float* base = scr + (size_t)h * win_len * stride;
+    float* state_head = ssm_state + (size_t)h * head_v_dim * head_k_dim;
+    float* core_head = core + (size_t)h * win_len * head_v_dim;
+
+    int nrows = head_v_dim - r0;
+    if (nrows > 4) nrows = 4;
+
+    // Register-resident state rows: st[ri][j] = state[r0+ri][lane + 32j].
+    float st[4][4];
+#pragma unroll
+    for (int ri = 0; ri < 4; ri++)
+#pragma unroll
+        for (int j = 0; j < 4; j++)
+            st[ri][j] = (ri < nrows)
+                ? state_head[(size_t)(r0 + ri) * head_k_dim + lane + (j << 5)] : 0.0f;
+
+    for (int s = 0; s < win_len; s++)
+    {
+        const float* row = base + (size_t)s * stride;
+        float q0 = row[lane], q1 = row[lane + 32], q2 = row[lane + 64], q3 = row[lane + 96];
+        float k0 = row[head_k_dim + lane], k1 = row[head_k_dim + lane + 32];
+        float k2 = row[head_k_dim + lane + 64], k3 = row[head_k_dim + lane + 96];
+        float decay = expf(row[2 * head_k_dim + head_v_dim]);
+        float beta = row[2 * head_k_dim + head_v_dim + 1];
+
+#pragma unroll
+        for (int ri = 0; ri < 4; ri++)
+        {
+            if (ri >= nrows)
+                break;
+            st[ri][0] *= decay; st[ri][1] *= decay; st[ri][2] *= decay; st[ri][3] *= decay;
+            float kvdot = st[ri][0] * k0 + st[ri][1] * k1 + st[ri][2] * k2 + st[ri][3] * k3;
+            kvdot = warp_allreduce_sum(kvdot);
+            float vr = row[2 * head_k_dim + r0 + ri];
+            float delta = (vr - kvdot) * beta;
+            st[ri][0] += k0 * delta; st[ri][1] += k1 * delta;
+            st[ri][2] += k2 * delta; st[ri][3] += k3 * delta;
+            float cv = st[ri][0] * q0 + st[ri][1] * q1 + st[ri][2] * q2 + st[ri][3] * q3;
+            cv = warp_allreduce_sum(cv);
+            if (lane == 0)
+                core_head[(size_t)s * head_v_dim + r0 + ri] = cv;
+        }
+    }
+
+#pragma unroll
+    for (int ri = 0; ri < 4; ri++)
+#pragma unroll
+        for (int j = 0; j < 4; j++)
+            if (ri < nrows)
+                state_head[(size_t)(r0 + ri) * head_k_dim + lane + (j << 5)] = st[ri][j];
+}
+
+extern "C" __global__ void ts_qwen35_gdn_prefill_out_f32(
+    const float* core,
+    const float* packed,
+    const float* ssm_norm,
+    float* output,        // [seq_len][v_dim]
+    int win_start,
+    int win_len,
+    int packed_dim,
+    int qkv_dim,
+    int v_dim,
+    int num_v_heads,
+    int head_v_dim,
+    float eps)
+{
+    int wid = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    int lane = threadIdx.x & 31;
+    if (wid >= win_len * num_v_heads)
+        return;
+    int h = wid % num_v_heads;
+    int sl = wid / num_v_heads;
+
+    const float* ch = core + ((size_t)h * win_len + sl) * head_v_dim;
+    float sum_sq = 0.0f;
+    for (int r = lane; r < head_v_dim; r += 32)
+    {
+        float c = ch[r];
+        sum_sq += c * c;
+    }
+    sum_sq = warp_allreduce_sum(sum_sq);
+    float rms_inv = rsqrtf(sum_sq / (float)head_v_dim + eps);
+
+    int s = win_start + sl;
+    const float* prow = packed + (size_t)s * packed_dim;
+    float* orow = output + (size_t)s * v_dim + h * head_v_dim;
+    for (int r = lane; r < head_v_dim; r += 32)
+        orow[r] = ch[r] * rms_inv * ssm_norm[r] * silu(prow[qkv_dim + h * head_v_dim + r]);
 }
 
 extern "C" __global__ void ts_qwen35_gdn_update_conv_state_f32(
@@ -939,13 +1244,16 @@ extern "C" __global__ void ts_qwen35_gdn_update_conv_state_f32(
     int packed_dim,
     int qkv_dim,
     int conv_dim,
-    int conv_write_idx)
+    int conv_write_idx,
+    const int* dyn)
 {
     int tail = seq_len < conv_dim ? seq_len : conv_dim;
     int total = tail * qkv_dim;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= total)
         return;
+    if (dyn)
+        conv_write_idx = dyn[TS_DYN_CONV_WRITE_IDX];
 
     int t = i / qkv_dim;
     int ch = i - t * qkv_dim;
@@ -1729,11 +2037,14 @@ extern "C" __global__ void ts_gqa_decode_attention_f32(
     int attend_len,
     int cache_size,
     int circular,
-    float scale)
+    float scale,
+    const int* dyn)
 {
     int q_head = blockIdx.x;
     if (q_head >= num_q_heads)
         return;
+    if (dyn)
+        attend_len = dyn[TS_DYN_ATTEND_LEN];
 
     int group_size = num_q_heads / num_kv_heads;
     int kv_head = q_head / group_size;
@@ -1808,11 +2119,14 @@ extern "C" __global__ void ts_gqa_decode_attention_f16(
     int attend_len,
     int cache_size,
     int circular,
-    float scale)
+    float scale,
+    const int* dyn)
 {
     int q_head = blockIdx.x;
     if (q_head >= num_q_heads)
         return;
+    if (dyn)
+        attend_len = dyn[TS_DYN_ATTEND_LEN];
 
     int group_size = num_q_heads / num_kv_heads;
     int kv_head = q_head / group_size;
@@ -1905,12 +2219,15 @@ __device__ __forceinline__ void ts_gqa_decode_attention_partition_impl(
     int has_sinks,
     int num_partitions,
     int partition_size,
+    const int* dyn,
     float* scores)
 {
     int q_head = blockIdx.x;
     int partition = blockIdx.y;
     if (q_head >= num_q_heads || partition >= num_partitions)
         return;
+    if (dyn)
+        attend_len = dyn[TS_DYN_ATTEND_LEN];
 
     int part_start = partition * partition_size;
     int part_len = attend_len - part_start;
@@ -2002,14 +2319,15 @@ extern "C" __global__ void ts_gqa_decode_attention_partition_f32(
     float scale,
     int has_sinks,
     int num_partitions,
-    int partition_size)
+    int partition_size,
+    const int* dyn)
 {
     extern __shared__ float scores[];
     ts_gqa_decode_attention_partition_impl<float>(
         query, key_cache, value_cache, sinks, partial,
         num_q_heads, num_kv_heads, head_dim,
         attend_start, attend_len, cache_size, circular, scale,
-        has_sinks, num_partitions, partition_size, scores);
+        has_sinks, num_partitions, partition_size, dyn, scores);
 }
 
 extern "C" __global__ void ts_gqa_decode_attention_partition_f16(
@@ -2028,14 +2346,15 @@ extern "C" __global__ void ts_gqa_decode_attention_partition_f16(
     float scale,
     int has_sinks,
     int num_partitions,
-    int partition_size)
+    int partition_size,
+    const int* dyn)
 {
     extern __shared__ float scores[];
     ts_gqa_decode_attention_partition_impl<half>(
         query, key_cache, value_cache, sinks, partial,
         num_q_heads, num_kv_heads, head_dim,
         attend_start, attend_len, cache_size, circular, scale,
-        has_sinks, num_partitions, partition_size, scores);
+        has_sinks, num_partitions, partition_size, dyn, scores);
 }
 
 extern "C" __global__ void ts_gqa_decode_attention_partition_reduce_f32(
@@ -2160,12 +2479,15 @@ extern "C" __global__ void ts_copy_head_first_to_cache_f32(
     int head_dim,
     int start_pos,
     int cache_size,
-    int circular)
+    int circular,
+    const int* dyn)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = num_heads * seq_len * head_dim;
     if (idx >= total)
         return;
+    if (dyn)
+        start_pos = dyn[TS_DYN_KV_WRITE_POS];
 
     int d = idx % head_dim;
     int tmp = idx / head_dim;
@@ -2183,12 +2505,15 @@ extern "C" __global__ void ts_copy_head_first_to_cache_f16(
     int head_dim,
     int start_pos,
     int cache_size,
-    int circular)
+    int circular,
+    const int* dyn)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = num_heads * seq_len * head_dim;
     if (idx >= total)
         return;
+    if (dyn)
+        start_pos = dyn[TS_DYN_KV_WRITE_POS];
 
     int d = idx % head_dim;
     int tmp = idx / head_dim;
@@ -2196,6 +2521,24 @@ extern "C" __global__ void ts_copy_head_first_to_cache_f16(
     int head = tmp / seq_len;
     int cache_pos = circular ? ((start_pos + seq) % cache_size) : (start_pos + seq);
     cache[((size_t)head * cache_size + cache_pos) * head_dim + d] = __float2half_rn(source[idx]);
+}
+
+// Refreshes the cached RoPE position tensors (one row per head, single-token
+// decode) from the decode-graph dynamic parameter block. Captured at the top
+// of a decode graph so every replay RoPEs with the current position.
+extern "C" __global__ void ts_fill_rope_positions_i32(
+    int* pos_q,
+    int q_rows,
+    int* pos_k,
+    int k_rows,
+    const int* dyn)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int pos = dyn[TS_DYN_ROPE_POS];
+    if (idx < q_rows)
+        pos_q[idx] = pos;
+    if (idx < k_rows)
+        pos_k[idx] = pos;
 }
 
 extern "C" __global__ void ts_gather_circular_head_first_f32(
@@ -3156,6 +3499,67 @@ extern "C" __global__ void ts_quantize_q8_1_rows_f32(
     quantize_q8_1_block(input + (size_t)r * in_dim + (size_t)qb * TS_QK8_1, out + idx);
 }
 
+// Split-layout q8_1 row quantization for the MMQ cp.async staging path: the qs
+// bytes land in a dense [rows][in_dim] int8 array (rows are 16-byte aligned
+// whenever in_dim % 16 == 0, so the GEMM can stage activation windows with
+// single 16-byte copies instead of four 4-byte loads from the 36-byte-strided
+// interleaved blocks) and the per-block scale in a separate float array.
+// The scale is round-tripped through half precision so both the quantized
+// values and the effective scales are bit-identical to
+// ts_quantize_q8_1_rows_f32 (which stores d as half): the GEMM result must not
+// depend on which scratch layout staged it.
+extern "C" __global__ void ts_quantize_q8_1_split_rows_f32(
+    const float* input,
+    int8_t* qs_out,
+    float* d_out,
+    int in_dim,
+    int rows)
+{
+    int q8_blocks = in_dim / TS_QK8_1;
+    long total = (long)rows * q8_blocks;
+    long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total)
+        return;
+    int r = (int)(idx / q8_blocks);
+    int qb = (int)(idx - (long)r * q8_blocks);
+    // The mmq2 route guarantees in_dim % 256 == 0, so every block's floats and
+    // qs bytes are 16-byte aligned: read 8 float4s, write 2 int4s (the scalar
+    // per-byte form of this kernel measured ~7x slower - 8% of prefill GPU).
+    const float4* x4 = reinterpret_cast<const float4*>(
+        input + (size_t)r * in_dim + (size_t)qb * TS_QK8_1);
+
+    float4 v[8];
+    float amax = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 8; i++)
+    {
+        v[i] = x4[i];
+        amax = fmaxf(amax, fabsf(v[i].x));
+        amax = fmaxf(amax, fabsf(v[i].y));
+        amax = fmaxf(amax, fabsf(v[i].z));
+        amax = fmaxf(amax, fabsf(v[i].w));
+    }
+
+    float d = amax > 0.0f ? amax / 127.0f : 0.0f;
+    float id = d > 0.0f ? 1.0f / d : 0.0f;
+
+    int packed[8];
+#pragma unroll
+    for (int i = 0; i < 8; i++)
+    {
+        int q0 = max(-127, min(127, (int)rintf(v[i].x * id)));
+        int q1 = max(-127, min(127, (int)rintf(v[i].y * id)));
+        int q2 = max(-127, min(127, (int)rintf(v[i].z * id)));
+        int q3 = max(-127, min(127, (int)rintf(v[i].w * id)));
+        packed[i] = (q0 & 0xFF) | ((q1 & 0xFF) << 8) | ((q2 & 0xFF) << 16) | (q3 << 24);
+    }
+
+    int4* qs4 = reinterpret_cast<int4*>(qs_out + (size_t)r * in_dim + (size_t)qb * TS_QK8_1);
+    qs4[0] = make_int4(packed[0], packed[1], packed[2], packed[3]);
+    qs4[1] = make_int4(packed[4], packed[5], packed[6], packed[7]);
+    d_out[idx] = __half2float(__float2half_rn(d));
+}
+
 // Block-tile dp4a (int8-MMA) Q8_0 GEMM ÔÇö the fast multi-row path for the MTP verify
 // window (rows 2-8). The scalar block-reduce kernels above are compute-bound on the
 // big FFN matmuls (measured ~78% of verify GPU time). This kernel:
@@ -3274,6 +3678,538 @@ extern "C" __global__ void ts_quant_matmul_q8_0_dp4a_f32(
             }
         }
     }
+}
+
+// MMQ-style Q8_0 GEMM for prefill-sized row counts: reads the quantized weight
+// DIRECTLY (no f16 dequant round trip) with int8 tensor-core mma.m16n8k32.
+// One CTA (8 warps) computes a TS_MMQ_M x TS_MMQ_N output tile; TS_MMQ_KSTEP
+// Q8 blocks (k = 32 each) are staged in shared memory per iteration. Because a
+// k32 mma step spans exactly one Q8_0/q8_1 block, the int32 dot per block is
+// exact and the (d_w * d_act) scale is applied per block in registers - the
+// same numerics as the dp4a path / ggml's MMQ. Weight DRAM traffic is
+// ceil(rows / TS_MMQ_M) sweeps (vs ~3 effective sweeps for dequant+cuBLAS and
+// rows/4 for the dp4a tile kernel).
+#define TS_MMQ_M 128
+#define TS_MMQ_N 64
+#define TS_MMQ_NFRAG (TS_MMQ_N / 8)
+#define TS_MMQ_KSTEP 4
+#define TS_MMQ_KPAD 4   // smem row padding (bytes) to break bank conflicts
+#define TS_MMQ_THREADS 256
+// Best measured configuration: 2 CTAs/SM with the next k-step's WEIGHT bytes
+// prefetched into registers during the mma phase. Variants tried and rejected:
+// 256-row/512-thread CTA (single resident CTA exposes staging latency),
+// KSTEP=2 cp.async double buffering (per-column window-offset math and 2x
+// barrier count cost more than the async staging saved).
+extern "C" __global__ void __launch_bounds__(TS_MMQ_THREADS, 2) ts_quant_matmul_q8_0_mmq_f32(
+    const uint8_t* weights,
+    const ts_block_q8_1* xq,
+    float* output,
+    int in_dim,
+    int out_dim,
+    int rows)
+{
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+    int n0 = blockIdx.x * TS_MMQ_N;
+    int m0 = blockIdx.y * TS_MMQ_M;
+    if (n0 >= out_dim || m0 >= rows)
+        return;
+
+    int q8_blocks = in_dim / 32;
+    int row_bytes = q8_blocks * 34;
+
+    __shared__ int8_t smA[TS_MMQ_M][TS_MMQ_KSTEP * 32 + TS_MMQ_KPAD];
+    __shared__ int8_t smB[TS_MMQ_N][TS_MMQ_KSTEP * 32 + TS_MMQ_KPAD];
+    __shared__ float  smDa[TS_MMQ_M][TS_MMQ_KSTEP];
+    __shared__ float  smDw[TS_MMQ_N][TS_MMQ_KSTEP];
+
+    int tid = threadIdx.x;
+    int lane = tid & 31;
+    int warp = tid >> 5;
+    int g = lane >> 2;      // fragment group id (0..7)
+    int tig = lane & 3;     // thread id in group (0..3)
+    int warp_m = warp * 16; // this warp's row offset inside the CTA tile
+
+    // Each warp owns a 16-row strip and sweeps all TS_MMQ_NFRAG n8 fragments,
+    // so the staged A tile is reused across the CTA's 64 output columns
+    // (an 8-wide CTA re-staged the whole activation slice out_dim/8 times,
+    // which made L2 activation traffic dominate the weight traffic).
+    float fc[TS_MMQ_NFRAG][4];
+#pragma unroll
+    for (int nf = 0; nf < TS_MMQ_NFRAG; nf++)
+    {
+        fc[nf][0] = 0.0f; fc[nf][1] = 0.0f; fc[nf][2] = 0.0f; fc[nf][3] = 0.0f;
+    }
+
+    // Software pipeline: each iteration PREFETCHES the next k-step's WEIGHT
+    // bytes (the only DRAM-resident stream) into registers, runs the mma phase
+    // on the smem staged by the previous iteration, then stages the next
+    // activation tile directly (activations are small and L2-resident across
+    // the many n-CTAs that share them) and commits the weight registers.
+    // Without pipelining the staging loads' DRAM latency was fully exposed
+    // between the __syncthreads pairs (measured ~55 GB/s effective).
+    //
+    // Per-thread staging slices (blockDim = 256):
+    //   A: TS_MMQ_M*KSTEP*2 = 1024 16-byte units -> 4 units/thread
+    //   B: TS_MMQ_N*KSTEP*2 = 512 units          -> 2 units/thread
+    //   scales: 512 dAct (2/thread) + 256 dW (1/thread)
+    int pfB[2][4];
+    float pfDw;
+
+    auto prefetchB = [&](int b0)
+    {
+#pragma unroll
+        for (int i = 0; i < 2; i++)
+        {
+            int u = tid + (i << 8);
+            int c = u >> 3;
+            int rem = u & 7;
+            int kb = rem >> 1;
+            int hs = rem & 1;
+            int col = n0 + c;
+            int gb = b0 + kb;
+            if (col < out_dim && gb < q8_blocks)
+            {
+                const uint8_t* wblk = weights + (size_t)col * row_bytes + (size_t)gb * 34;
+                pfB[i][0] = get_int_b2(wblk + 2, hs * 4 + 0);
+                pfB[i][1] = get_int_b2(wblk + 2, hs * 4 + 1);
+                pfB[i][2] = get_int_b2(wblk + 2, hs * 4 + 2);
+                pfB[i][3] = get_int_b2(wblk + 2, hs * 4 + 3);
+            }
+            else
+            {
+                pfB[i][0] = 0; pfB[i][1] = 0; pfB[i][2] = 0; pfB[i][3] = 0;
+            }
+        }
+        {
+            int c = tid >> 2;
+            int kb = tid & 3;
+            int col = n0 + c;
+            int gb = b0 + kb;
+            pfDw = (col < out_dim && gb < q8_blocks)
+                ? __half2float(*reinterpret_cast<const half*>(
+                      weights + (size_t)col * row_bytes + (size_t)gb * 34)) : 0.0f;
+        }
+    };
+
+    auto stageA = [&](int b0)
+    {
+#pragma unroll
+        for (int i = 0; i < 4; i++)
+        {
+            int u = tid + (i << 8);
+            int r = u >> 3;
+            int rem = u & 7;
+            int kb = rem >> 1;
+            int hs = rem & 1;
+            int gr = m0 + r;
+            int gb = b0 + kb;
+            int* dst = reinterpret_cast<int*>(&smA[r][kb * 32 + hs * 16]);
+            if (gr < rows && gb < q8_blocks)
+            {
+                // qs sits at +4 of the 36-byte q8_1 block: 4-byte aligned.
+                const int* src = reinterpret_cast<const int*>(
+                    xq[(size_t)gr * q8_blocks + gb].qs) + hs * 4;
+                dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = src[3];
+            }
+            else
+            {
+                dst[0] = 0; dst[1] = 0; dst[2] = 0; dst[3] = 0;
+            }
+        }
+#pragma unroll
+        for (int i = 0; i < 2; i++)
+        {
+            int u = tid + (i << 8);
+            int r = u >> 2;
+            int kb = u & 3;
+            int gr = m0 + r;
+            int gb = b0 + kb;
+            smDa[r][kb] = (gr < rows && gb < q8_blocks)
+                ? __half2float(xq[(size_t)gr * q8_blocks + gb].d) : 0.0f;
+        }
+    };
+
+    auto commitB = [&]()
+    {
+#pragma unroll
+        for (int i = 0; i < 2; i++)
+        {
+            int u = tid + (i << 8);
+            int c = u >> 3;
+            int rem = u & 7;
+            int kb = rem >> 1;
+            int hs = rem & 1;
+            int* dst = reinterpret_cast<int*>(&smB[c][kb * 32 + hs * 16]);
+            dst[0] = pfB[i][0]; dst[1] = pfB[i][1]; dst[2] = pfB[i][2]; dst[3] = pfB[i][3];
+        }
+        smDw[tid >> 2][tid & 3] = pfDw;
+    };
+
+    prefetchB(0);
+    stageA(0);
+    commitB();
+    __syncthreads();
+
+    for (int b0 = 0; b0 < q8_blocks; b0 += TS_MMQ_KSTEP)
+    {
+        bool hasNext = b0 + TS_MMQ_KSTEP < q8_blocks;
+        if (hasNext)
+            prefetchB(b0 + TS_MMQ_KSTEP);
+
+        // ---- per staged block: load A frags once, mma across all n8 frags ----
+#pragma unroll
+        for (int kb = 0; kb < TS_MMQ_KSTEP; kb++)
+        {
+            int a0 = *reinterpret_cast<const int*>(&smA[warp_m + g][kb * 32 + 4 * tig]);
+            int a1 = *reinterpret_cast<const int*>(&smA[warp_m + g + 8][kb * 32 + 4 * tig]);
+            int a2 = *reinterpret_cast<const int*>(&smA[warp_m + g][kb * 32 + 16 + 4 * tig]);
+            int a3 = *reinterpret_cast<const int*>(&smA[warp_m + g + 8][kb * 32 + 16 + 4 * tig]);
+            float daLo = smDa[warp_m + g][kb];
+            float daHi = smDa[warp_m + g + 8][kb];
+
+#pragma unroll
+            for (int nf = 0; nf < TS_MMQ_NFRAG; nf++)
+            {
+                int b0r = *reinterpret_cast<const int*>(&smB[nf * 8 + g][kb * 32 + 4 * tig]);
+                int b1r = *reinterpret_cast<const int*>(&smB[nf * 8 + g][kb * 32 + 16 + 4 * tig]);
+
+                int c0 = 0, c1 = 0, c2 = 0, c3 = 0;
+                asm volatile(
+                    "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
+                    "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+                    : "+r"(c0), "+r"(c1), "+r"(c2), "+r"(c3)
+                    : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0r), "r"(b1r));
+
+                float dw0 = smDw[nf * 8 + 2 * tig][kb];
+                float dw1 = smDw[nf * 8 + 2 * tig + 1][kb];
+                fc[nf][0] += (float)c0 * dw0 * daLo;
+                fc[nf][1] += (float)c1 * dw1 * daLo;
+                fc[nf][2] += (float)c2 * dw0 * daHi;
+                fc[nf][3] += (float)c3 * dw1 * daHi;
+            }
+        }
+        __syncthreads();
+        if (hasNext)
+        {
+            stageA(b0 + TS_MMQ_KSTEP);
+            commitB();
+            __syncthreads();
+        }
+    }
+
+    // ---- bounds-checked store (c0/c1 -> row g, c2/c3 -> row g+8) ----
+    int out_r0 = m0 + warp_m + g;
+    int out_r1 = out_r0 + 8;
+#pragma unroll
+    for (int nf = 0; nf < TS_MMQ_NFRAG; nf++)
+    {
+        int out_c0 = n0 + nf * 8 + 2 * tig;
+        int out_c1 = out_c0 + 1;
+        if (out_r0 < rows)
+        {
+            if (out_c0 < out_dim) output[(size_t)out_r0 * out_dim + out_c0] = fc[nf][0];
+            if (out_c1 < out_dim) output[(size_t)out_r0 * out_dim + out_c1] = fc[nf][1];
+        }
+        if (out_r1 < rows)
+        {
+            if (out_c0 < out_dim) output[(size_t)out_r1 * out_dim + out_c0] = fc[nf][2];
+            if (out_c1 < out_dim) output[(size_t)out_r1 * out_dim + out_c1] = fc[nf][3];
+        }
+    }
+#else
+    (void)weights; (void)xq; (void)output; (void)in_dim; (void)out_dim; (void)rows;
+#endif
+}
+
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+// Ampere cp.async helpers (global -> shared without a register round trip).
+__device__ __forceinline__ void ts_cp_async16(void* smem_dst, const void* gmem_src)
+{
+    unsigned s = (unsigned)__cvta_generic_to_shared(smem_dst);
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(s), "l"(gmem_src));
+}
+__device__ __forceinline__ void ts_cp_async8(void* smem_dst, const void* gmem_src)
+{
+    unsigned s = (unsigned)__cvta_generic_to_shared(smem_dst);
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 8;\n" :: "r"(s), "l"(gmem_src));
+}
+__device__ __forceinline__ void ts_cp_async_commit()
+{
+    asm volatile("cp.async.commit_group;\n" ::);
+}
+__device__ __forceinline__ void ts_cp_async_wait_all()
+{
+    asm volatile("cp.async.wait_group 0;\n" ::);
+}
+#endif
+
+// cp.async variant of the MMQ kernel, for in_dim % 256 == 0 (every real model
+// dim). Identical math and accumulation order to ts_quant_matmul_q8_0_mmq_f32
+// (bit-identical results); only the staging differs:
+//   * WEIGHT windows are copied RAW into a double-buffered shared staging area
+//     by 16-byte cp.async chunks issued BEFORE the mma phase, replacing the
+//     register prefetch's ~24 two-byte loads per thread per k-step with ~2.25
+//     async copies. in_dim % 256 == 0 makes row_bytes % 16 == 0, so a window's
+//     16-byte alignment phase pa = (b0*34) & 15 is the SAME for every column
+//     (the per-column offset math that sank the first cp.async attempt is gone)
+//     and q8_blocks % TS_MMQ_KSTEP == 0 removes the k-tail entirely.
+//   * ACTIVATIONS come from the SPLIT q8_1 scratch (dense qs rows + separate
+//     float scales, see ts_quantize_q8_1_split_rows_f32), staged with 16-byte
+//     loads instead of four 4-byte loads per unit.
+// The mma phase reads weight qs straight from the raw staging bytes: qs of
+// block kb sits at pa + kb*34 + 2, which is int-aligned for odd kb and
+// half-aligned for even kb (34 = 2 mod 4), so even-kb fragments assemble from
+// two u16 shared loads. dW is register-prefetched from global (one half per
+// thread per window) and committed to shared floats, exactly like before.
+#define TS_MMQ2_BSTRIDE (TS_MMQ_KSTEP * 34 + 8)      // 144: window bytes rounded up to 16
+#define TS_MMQ2_BCHUNKS (TS_MMQ2_BSTRIDE / 16)       // 9 cp.async chunks per column window
+extern "C" __global__ void __launch_bounds__(TS_MMQ_THREADS, 2) ts_quant_matmul_q8_0_mmq2_f32(
+    const uint8_t* weights,
+    const int8_t* xq_qs,
+    const float* xq_d,
+    float* output,
+    int in_dim,
+    int out_dim,
+    int rows)
+{
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+    int n0 = blockIdx.x * TS_MMQ_N;
+    int m0 = blockIdx.y * TS_MMQ_M;
+    if (n0 >= out_dim || m0 >= rows || (in_dim & 255) != 0)
+        return;
+
+    int q8_blocks = in_dim / 32;
+    int row_bytes = q8_blocks * 34;   // % 16 == 0 because in_dim % 256 == 0
+
+    // smA stride 144 (= KSTEP*32 + 16): 16-byte aligned rows for int4 staging
+    // stores; mma-phase bank pattern (4g + tig) stays conflict-free like the
+    // interleaved kernel's stride-132 layout.
+    __shared__ __align__(16) int8_t  smA[TS_MMQ_M][TS_MMQ_KSTEP * 32 + 16];
+    __shared__ __align__(16) uint8_t smBraw[2][TS_MMQ_N][TS_MMQ2_BSTRIDE];
+    __shared__ float   smDa[TS_MMQ_M][TS_MMQ_KSTEP];
+    __shared__ float   smDw[TS_MMQ_N][TS_MMQ_KSTEP];
+
+    int tid = threadIdx.x;
+    int lane = tid & 31;
+    int warp = tid >> 5;
+    int g = lane >> 2;
+    int tig = lane & 3;
+    int warp_m = warp * 16;
+
+    float fc[TS_MMQ_NFRAG][4];
+#pragma unroll
+    for (int nf = 0; nf < TS_MMQ_NFRAG; nf++)
+    {
+        fc[nf][0] = 0.0f; fc[nf][1] = 0.0f; fc[nf][2] = 0.0f; fc[nf][3] = 0.0f;
+    }
+
+    float pfDw;
+
+    // Issue the raw weight window [col*row_bytes + b0*34 - pa, +TS_MMQ2_BSTRIDE)
+    // for every CTA column as 16-byte cp.async chunks (the final chunk carries
+    // up to 8 slack bytes; the weight allocation is padded by 16 bytes so it
+    // never crosses the end), and register-prefetch this window's dW halves.
+    auto issueB = [&](int buf, int b0)
+    {
+        int pa = (b0 * 34) & 15;
+        const uint8_t* wbase = weights + (size_t)b0 * 34 - pa;
+#pragma unroll
+        for (int i = 0; i < 3; i++)
+        {
+            int u = tid + (i << 8);
+            if (u < TS_MMQ_N * TS_MMQ2_BCHUNKS)
+            {
+                int c = u / TS_MMQ2_BCHUNKS;
+                int ch = u - c * TS_MMQ2_BCHUNKS;
+                int col = n0 + c;
+                if (col < out_dim)
+                    ts_cp_async16(&smBraw[buf][c][ch * 16], wbase + (size_t)col * row_bytes + (size_t)ch * 16);
+            }
+        }
+        {
+            int c = tid >> 2;
+            int kb = tid & 3;
+            int col = n0 + c;
+            pfDw = col < out_dim
+                ? __half2float(*reinterpret_cast<const half*>(
+                      weights + (size_t)col * row_bytes + (size_t)(b0 + kb) * 34))
+                : 0.0f;
+        }
+    };
+
+    // Activations: 16-byte units straight out of the dense split-qs rows
+    // (per thread: 4 int4 loads + stores vs the interleaved layout's 16+16).
+    // Synchronous on purpose: an async A stage was measured SLOWER (extra
+    // register spill and nothing to overlap the wait with; A is L2-resident).
+    auto stageA = [&](int b0)
+    {
+#pragma unroll
+        for (int i = 0; i < 4; i++)
+        {
+            int u = tid + (i << 8);
+            int r = u >> 3;
+            int off = (u & 7) << 4;
+            int gr = m0 + r;
+            int4* dst = reinterpret_cast<int4*>(&smA[r][off]);
+            *dst = gr < rows
+                ? *reinterpret_cast<const int4*>(xq_qs + (size_t)gr * in_dim + (size_t)b0 * 32 + off)
+                : make_int4(0, 0, 0, 0);
+        }
+#pragma unroll
+        for (int i = 0; i < 2; i++)
+        {
+            int u = tid + (i << 8);
+            int r = u >> 2;
+            int kb = u & 3;
+            int gr = m0 + r;
+            smDa[r][kb] = gr < rows ? xq_d[(size_t)gr * q8_blocks + b0 + kb] : 0.0f;
+        }
+    };
+
+    auto commitDw = [&]()
+    {
+        smDw[tid >> 2][tid & 3] = pfDw;
+    };
+
+    issueB(0, 0);
+    stageA(0);
+    commitDw();
+    ts_cp_async_commit();
+    ts_cp_async_wait_all();
+    __syncthreads();
+
+    int cur = 0;
+    for (int b0 = 0; b0 < q8_blocks; b0 += TS_MMQ_KSTEP)
+    {
+        bool hasNext = b0 + TS_MMQ_KSTEP < q8_blocks;
+        if (hasNext)
+        {
+            issueB(cur ^ 1, b0 + TS_MMQ_KSTEP);   // overlaps the mma phase below
+            ts_cp_async_commit();
+        }
+
+        int pa = (b0 * 34) & 15;                  // uniform across columns
+#pragma unroll
+        for (int kb = 0; kb < TS_MMQ_KSTEP; kb++)
+        {
+            int a0 = *reinterpret_cast<const int*>(&smA[warp_m + g][kb * 32 + 4 * tig]);
+            int a1 = *reinterpret_cast<const int*>(&smA[warp_m + g + 8][kb * 32 + 4 * tig]);
+            int a2 = *reinterpret_cast<const int*>(&smA[warp_m + g][kb * 32 + 16 + 4 * tig]);
+            int a3 = *reinterpret_cast<const int*>(&smA[warp_m + g + 8][kb * 32 + 16 + 4 * tig]);
+            float daLo = smDa[warp_m + g][kb];
+            float daHi = smDa[warp_m + g + 8][kb];
+
+#pragma unroll
+            for (int nf = 0; nf < TS_MMQ_NFRAG; nf++)
+            {
+                const uint8_t* bp = &smBraw[cur][nf * 8 + g][pa + kb * 34 + 2 + 4 * tig];
+                int b0r, b1r;
+                if ((kb & 1) != 0)
+                {
+                    // qs offset pa + kb*34 + 2 is 0 mod 4 for odd kb.
+                    b0r = *reinterpret_cast<const int*>(bp);
+                    b1r = *reinterpret_cast<const int*>(bp + 16);
+                }
+                else
+                {
+                    // ... and 2 mod 4 for even kb: assemble from u16 pairs.
+                    const uint16_t* hp = reinterpret_cast<const uint16_t*>(bp);
+                    b0r = (int)hp[0] | ((int)hp[1] << 16);
+                    b1r = (int)hp[8] | ((int)hp[9] << 16);
+                }
+
+                int c0 = 0, c1 = 0, c2 = 0, c3 = 0;
+                asm volatile(
+                    "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
+                    "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+                    : "+r"(c0), "+r"(c1), "+r"(c2), "+r"(c3)
+                    : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0r), "r"(b1r));
+
+                float dw0 = smDw[nf * 8 + 2 * tig][kb];
+                float dw1 = smDw[nf * 8 + 2 * tig + 1][kb];
+                fc[nf][0] += (float)c0 * dw0 * daLo;
+                fc[nf][1] += (float)c1 * dw1 * daLo;
+                fc[nf][2] += (float)c2 * dw0 * daHi;
+                fc[nf][3] += (float)c3 * dw1 * daHi;
+            }
+        }
+        __syncthreads();
+        if (hasNext)
+        {
+            stageA(b0 + TS_MMQ_KSTEP);
+            commitDw();
+            ts_cp_async_commit();
+            ts_cp_async_wait_all();
+            __syncthreads();
+            cur ^= 1;
+        }
+    }
+
+    int out_r0 = m0 + warp_m + g;
+    int out_r1 = out_r0 + 8;
+#pragma unroll
+    for (int nf = 0; nf < TS_MMQ_NFRAG; nf++)
+    {
+        int out_c0 = n0 + nf * 8 + 2 * tig;
+        int out_c1 = out_c0 + 1;
+        if (out_r0 < rows)
+        {
+            if (out_c0 < out_dim) output[(size_t)out_r0 * out_dim + out_c0] = fc[nf][0];
+            if (out_c1 < out_dim) output[(size_t)out_r0 * out_dim + out_c1] = fc[nf][1];
+        }
+        if (out_r1 < rows)
+        {
+            if (out_c0 < out_dim) output[(size_t)out_r1 * out_dim + out_c0] = fc[nf][2];
+            if (out_c1 < out_dim) output[(size_t)out_r1 * out_dim + out_c1] = fc[nf][3];
+        }
+    }
+#else
+    (void)weights; (void)xq_qs; (void)xq_d; (void)output; (void)in_dim; (void)out_dim; (void)rows;
+#endif
+}
+
+// Single-row (decode) Q8_0 matvec: one WARP per output column, q8_1-quantized
+// activation row (xq), dp4a int8 dot (mirrors ggml's mul_mat_vec_q). Each lane
+// owns whole 32-element blocks (34 B of weights loaded as one half + 8 aligned
+// uint16-pair ints), so the warp streams the weight row with far fewer load
+// instructions than the per-byte scalar kernel and no block-wide reductions.
+// The int32 dot within a block is exact; only the activation's q8_1 round-trip
+// differs from the f32 path (same tradeoff ggml makes).
+extern "C" __global__ void ts_quant_matmul_q8_0_vec_f32(
+    const uint8_t* weights,
+    const ts_block_q8_1* xq,
+    float* output,
+    int in_dim,
+    int out_dim)
+{
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+    int warps_per_block = blockDim.x >> 5;
+    int col = blockIdx.x * warps_per_block + warp;
+    if (col >= out_dim)
+        return;
+
+    int q8_blocks = in_dim / 32;
+    const uint8_t* w_row = weights + (size_t)col * (size_t)q8_blocks * 34;
+
+    float acc = 0.0f;
+    for (int ib = lane; ib < q8_blocks; ib += 32)
+    {
+        const uint8_t* wblk = w_row + (size_t)ib * 34;
+        float dw = __half2float(*reinterpret_cast<const half*>(wblk));
+        const ts_block_q8_1* ablk = &xq[ib];
+        float dact = __half2float(ablk->d);
+        int s = 0;
+#pragma unroll
+        for (int g = 0; g < 8; g++)
+            s = dp4a_i8(get_int_b2(wblk + 2, g), get_int_b4(ablk->qs, g), s);
+        acc += dw * dact * (float)s;
+    }
+
+    for (int off = 16; off > 0; off >>= 1)
+        acc += __shfl_down_sync(0xFFFFFFFF, acc, off);
+    if (lane == 0)
+        output[col] = acc;
 }
 
 // dp4a (int8) Q4_0 GEMM ÔÇö the fast path for BOTH single-token decode (rows == 1)
@@ -3576,9 +4512,14 @@ extern "C" __global__ void ts_qk_norm_rope_neox_f32(
     float* cos_table = smem + cols;
     float* sin_table = smem + cols + rope_half;
     int pos = positions[row];
+    // Frequencies follow the rotated span (rope_dims = 2 * rope_half), NOT the
+    // full head width: models with partial RoPE (rope_dims < headDim, e.g.
+    // Qwen3.5's hybrid attention heads) scale the exponent by rope_dims. Using
+    // cols here compressed every frequency, which mis-rotated positions and
+    // degraded generations progressively with context depth.
     for (int j = tid; j < rope_half; j += num_threads)
     {
-        float theta = (float)pos * powf(rope_base, -2.0f * (float)j / (float)cols);
+        float theta = (float)pos * powf(rope_base, -2.0f * (float)j / (float)(2 * rope_half));
         float angle = theta * rope_freq_scale;
         cos_table[j] = cosf(angle);
         sin_table[j] = sinf(angle);
@@ -3689,14 +4630,16 @@ extern "C" __global__ void ts_qwen35_gdn_fused_f32(
     if (h >= num_v_heads)
         return;
 
+    // ONE block per head (launcher passes gridDim.y == 1): the per-block
+    // whole-state decay below and the block-wide core[] reduction are only
+    // correct when a single block owns the head, so rows are covered by
+    // striding warps instead of blockIdx.y tiles (the old multi-block layout
+    // raced the decay and read a partially-filled core[]).
     int tid = threadIdx.x;
     int nthreads = blockDim.x;
     int lane = tid & 31;
     int warp = tid >> 5;
     int num_warps = nthreads >> 5;
-    int row_base = blockIdx.y * num_warps;
-    if (row_base >= head_v_dim)
-        return;
 
     extern __shared__ float scratch[];
     float* q = scratch;
@@ -3764,8 +4707,7 @@ extern "C" __global__ void ts_qwen35_gdn_fused_f32(
         __syncthreads();
 
         float bval = beta_h;
-        int row = row_base + warp;
-        if (row < head_v_dim)
+        for (int row = warp; row < head_v_dim; row += num_warps)
         {
             float* state_row = state_head + (size_t)row * head_k_dim;
             float kv_mem = 0.0f;
