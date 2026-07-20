@@ -3335,8 +3335,43 @@ namespace TensorSharp.Models
         {
             if (!IsGgmlBackend || tensor == null)
                 return;
-                
+
             GgmlBasicOps.SyncHostBuffer(GetStorageBasePtr(tensor), tensor.Storage.ByteLength);
+        }
+
+        /// <summary>
+        /// Drop THIS model's device-resident weight copies while keeping the model itself
+        /// usable: the GGUF mmap, the parsed weight table and the tokenizer all stay, so the
+        /// next forward re-uploads from host memory instead of re-reading and re-parsing the
+        /// file. The device cache is keyed by host pointer, so releasing entry-by-entry touches
+        /// only this model — unlike <see cref="GgmlBasicOps.ClearHostBufferCache"/> (which
+        /// <see cref="Dispose"/> calls), a process-global wipe that would also evict every
+        /// OTHER live model's weights.
+        ///
+        /// Use this to hand VRAM back between phases of a multi-model pipeline. Disposing the
+        /// model is the wrong tool there: it frees ~nothing extra on a file-backed model (the
+        /// weights are mmap pages, not owned buffers) and costs a full reload next time.
+        /// </summary>
+        public void ReleaseGgmlDeviceResidency()
+        {
+            if (!IsGgmlBackend)
+                return;
+
+            foreach (Tensor t in _weights.Values)
+            {
+                if (t != null)
+                    GgmlBasicOps.InvalidateHostBuffer(GetStoragePtr(t));
+            }
+            foreach (QuantizedWeight qw in _quantWeights.Values)
+            {
+                if (qw != null && qw.Data != IntPtr.Zero)
+                    GgmlBasicOps.InvalidateHostBuffer(qw.Data);
+            }
+            foreach (StackedExpertWeights stacked in _stackedExpertWeights.Values)
+            {
+                if (stacked != null && stacked.Data != IntPtr.Zero)
+                    GgmlBasicOps.InvalidateHostBuffer(stacked.Data);
+            }
         }
 
         public abstract float[] Forward(int[] tokens);

@@ -203,7 +203,7 @@ The repository is split along package boundaries so consumers can depend on only
 
 | Project | NuGet package | Public namespace | Responsibility |
 |---|---|---|---|
-| `TensorSharp.Core` | `TensorSharp.Core` | `TensorSharp` | Tensor primitives, ops, allocators, storage, and device abstraction |
+| `TensorSharp.Core` | `TensorSharp.Tensors` | `TensorSharp` | Tensor primitives, ops, allocators, storage, and device abstraction |
 | `TensorSharp.Runtime` | `TensorSharp.Runtime` | `TensorSharp.Runtime` | GGUF parsing, tokenizers, prompt rendering, sampling, output protocol parsing, paged KV cache, continuous-batching scheduler |
 | `TensorSharp.Models` | `TensorSharp.Models` | `TensorSharp.Models` | `ModelBase`, architecture implementations, multimodal encoders, batched / paged forward passes, and model-side execution helpers |
 | `TensorSharp.Backends.GGML` | `TensorSharp.Backends.GGML` | `TensorSharp.GGML` | GGML-backed execution and native interop |
@@ -213,6 +213,8 @@ The repository is split along package boundaries so consumers can depend on only
 | `TensorSharp.Cli` | `TensorSharp.Cli` | `TensorSharp.Cli` | Console host and debugging / batch tooling |
 
 This split keeps engine users off the web stack, keeps API-layer changes from leaking into core/runtime packages, and makes future benchmark or eval-harness projects easier to publish independently.
+
+> **Note:** the core layer ships as **`TensorSharp.Tensors`**, not `TensorSharp.Core`. The `TensorSharp.Core` id on NuGet.org is registered to an unrelated, abandoned project (all versions unlisted, source repo deleted), so pushing to it returns 403. Only the NuGet id differs — the project, assembly, and `TensorSharp` namespace are unchanged, so `using` statements are unaffected and only the `dotnet add package` line differs.
 
 Validate package metadata and README dependency boundaries before publishing:
 
@@ -224,7 +226,7 @@ The verifier runs `dotnet pack` for the public packages above and fails if an in
 
 ### Publishing a package release (maintainers)
 
-The [`Publish NuGet`](.github/workflows/publish-nuget.yml) workflow is configured to pack the public projects above on a version tag. A NuGet.org push occurs only when the repository has a valid `NUGET_API_KEY`; otherwise that step is skipped. This describes the release process, not current package availability:
+The [`Publish NuGet`](.github/workflows/publish-nuget.yml) workflow packs the public projects above on a version tag and pushes them to NuGet.org and GitHub Packages. This describes the release process, not current package availability:
 
 ```bash
 git tag vX.Y.Z.W      # the tag drives package version X.Y.Z.W
@@ -233,7 +235,9 @@ git push origin vX.Y.Z.W
 
 - The tag (with the leading `v` stripped) overrides `TensorSharpVersion` for every package, so all packages ship with a single coordinated version. You do not need to edit `Directory.Build.props` first.
 - Packing is managed-only — the native GGML/CUDA/MLX libraries are not embedded in the packages — so the workflow runs on a stock runner with `eng/verify-packages.ps1 -SkipNativeBuild` (which also sets `TensorSharpSkipGgmlNative=true` / `TensorSharpSkipMlxNative=true`).
-- Configure a `NUGET_API_KEY` repository secret for the NuGet.org push. If it is missing, the NuGet.org step is skipped with a warning and only the GitHub Packages push (which uses the built-in `GITHUB_TOKEN`) runs.
+- NuGet.org publishing uses [Trusted Publishing](https://learn.microsoft.com/en-us/nuget/nuget-org/trusted-publishing) (OIDC) — there is no API key secret to manage. `NuGet/login@v1` exchanges the job's GitHub OIDC token for a key valid for one hour. The policy on nuget.org pins the repository owner, repository, workflow **file name** (`publish-nuget.yml`), and the `production` environment, so renaming this workflow file, or removing `environment: production` from the job, breaks publishing until the policy is updated to match.
+- Packages are pushed individually rather than by glob: a package id owned by a different NuGet.org account returns 403, which `--skip-duplicate` does *not* absorb, so the run reports exactly which packages were rejected instead of stopping at the first one.
+- Packages ship with Source Link and a companion `.snupkg` symbol package. `ContinuousIntegrationBuild` is set only under GitHub Actions, so local packs keep their normal source paths.
 - To rehearse without publishing, run the workflow manually (`workflow_dispatch`) with a `version` input and `dry_run` checked — it packs, verifies, and uploads the `.nupkg` files as a build artifact without pushing.
 
 ### Platform binary release status

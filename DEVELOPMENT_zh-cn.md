@@ -203,7 +203,7 @@ TensorSharp/
 
 | 项目 | NuGet 包 | 对外 namespace | 职责 |
 |---|---|---|---|
-| `TensorSharp.Core` | `TensorSharp.Core` | `TensorSharp` | Tensor 原语、Ops、分配器、存储与设备抽象 |
+| `TensorSharp.Core` | `TensorSharp.Tensors` | `TensorSharp` | Tensor 原语、Ops、分配器、存储与设备抽象 |
 | `TensorSharp.Runtime` | `TensorSharp.Runtime` | `TensorSharp.Runtime` | GGUF 解析、分词器、Prompt 渲染、采样、输出协议解析、分页 KV 缓存、连续批处理调度器 |
 | `TensorSharp.Models` | `TensorSharp.Models` | `TensorSharp.Models` | `ModelBase`、各模型架构、多模态编码器、批处理 / 分页前向、模型侧执行辅助 |
 | `TensorSharp.Backends.GGML` | `TensorSharp.Backends.GGML` | `TensorSharp.GGML` | GGML 执行后端与原生互操作 |
@@ -213,6 +213,8 @@ TensorSharp/
 | `TensorSharp.Cli` | `TensorSharp.Cli` | `TensorSharp.Cli` | 控制台宿主、调试工具与 JSONL 批处理 |
 
 这样的拆分让引擎使用者不必带上 Web 依赖，也能把 API 层改动和核心运行时隔离开，并让后续 benchmark / eval harness 更容易独立发布。
+
+> **注意：** 核心层发布的包名是 **`TensorSharp.Tensors`**，不是 `TensorSharp.Core`。NuGet.org 上的 `TensorSharp.Core` 包 ID 属于另一个已废弃的无关项目（所有版本均已 unlist，源码仓库已删除），推送到该 ID 会返回 403。差异仅限于 NuGet 包名——项目名、程序集名与 `TensorSharp` namespace 均保持不变，因此 `using` 语句不受影响，只有 `dotnet add package` 命令行不同。
 
 发布前可验证包元数据与 README 依赖边界：
 
