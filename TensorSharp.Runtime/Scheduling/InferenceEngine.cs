@@ -53,10 +53,12 @@ namespace TensorSharp.Runtime.Scheduling
             _logger = logger ?? NullLogger.Instance;
 
             long blockBytes = ComputeBlockByteSize(model, cfg.BlockSize);
-            _pool = new BlockPool(cfg.NumBlocks, cfg.BlockSize, blockBytes);
+            int numBlocks = ResolveEffectiveNumBlocks(model, cfg, _logger);
+            _pool = new BlockPool(numBlocks, cfg.BlockSize, blockBytes);
             _scheduler = new ContinuousBatchScheduler(cfg, _pool, model.KVStateFingerprint ?? string.Empty, logger,
                 supportsCrossSequenceKvReuse: model.SupportsCrossSequenceKvReuse,
-                maxReusablePrefixTokens: model.MaxReusablePrefixTokens);
+                maxReusablePrefixTokens: model.MaxReusablePrefixTokens,
+                requiresPerBlockCapture: model.RequiresPerBlockCapture);
             _executor = new BatchExecutor(model, _pool, _scheduler, logger);
             // Let the scheduler plan same-session live-cache continuations through the
             // executor (which owns the model's live KV-cache state).
@@ -168,12 +170,30 @@ namespace TensorSharp.Runtime.Scheduling
                 try
                 {
                     output = _scheduler.Schedule();
-                    if (output.IsEmpty && _scheduler.RunningCount == 0)
-                        continue;
                 }
                 catch (Exception ex)
                 {
                     FailStepSequences(ex, output, "scheduler");
+                    continue;
+                }
+
+                if (output.IsEmpty)
+                {
+                    // A preemption may have happened while trying to make room.
+                    // Release its model-owned state even though no forward pass
+                    // was produced this iteration.
+                    NotifyReleasedSequences(output);
+
+                    // A non-empty running set cannot become schedulable without
+                    // completing a step or freeing blocks. If Schedule returned
+                    // no work, neither can happen: continuing would busy-spin the
+                    // worker forever with an open client stream and an idle GPU.
+                    // Schedule may need more than one pass to preempt enough
+                    // small victims for a large allocation. A preemption is
+                    // real progress even if this pass produced no forward work.
+                    if (_scheduler.RunningCount > 0
+                        && output.PreemptedRequestIds.Count == 0)
+                        FailStalledSequences();
                     continue;
                 }
 
@@ -217,6 +237,55 @@ namespace TensorSharp.Runtime.Scheduling
                 foreach (var id in output.PreemptedRequestIds)
                     NotifyReleasedSequence(batched, id, seen);
             }
+        }
+
+        /// <summary>Fail running requests after the scheduler reports no work.
+        /// This is an invariant guard for an exhausted fixed-size KV pool: it
+        /// converts an otherwise permanent empty-plan spin into a clear error and
+        /// releases the blocks so waiting requests can continue.</summary>
+        private void FailStalledSequences()
+        {
+            var stalled = _scheduler.GetRunningSequencesSnapshot();
+            if (stalled.Count == 0) return;
+
+            var ex = new InvalidOperationException(
+                "KV cache capacity exceeded: no running sequence can make progress " +
+                "within the configured KV block pool. Shorten the prompt or generated " +
+                "output, or enlarge the pool with TS_SCHED_NUM_BLOCKS.");
+
+            _logger.LogError(
+                "Scheduler stalled: failing {Count} running request(s) because the KV " +
+                "pool is exhausted ({Free}/{Total} blocks free).",
+                stalled.Count, _pool.NumFreeBlocks, _pool.NumBlocks);
+
+            var released = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var seq in stalled)
+            {
+                if (seq == null) continue;
+
+                try
+                {
+                    if (_scheduler.NotifyError(seq, ex))
+                        released.Add(seq.RequestId);
+                }
+                catch (Exception cleanupEx)
+                {
+                    _logger.LogError(
+                        cleanupEx,
+                        "Failed to release scheduler state for stalled sequence {RequestId}",
+                        seq.RequestId);
+                    released.Add(seq.RequestId);
+                }
+
+                if (_handles.TryRemove(seq.RequestId, out var handle))
+                {
+                    LogMtpStatsIfAny(seq);
+                    handle.CompleteWithError(ex);
+                    Interlocked.Increment(ref _totalCompleted);
+                }
+            }
+
+            NotifyReleasedSequences(released);
         }
 
         private void FailStepSequences(Exception ex, SchedulerOutput output, string phase)
@@ -480,6 +549,46 @@ namespace TensorSharp.Runtime.Scheduling
             if (!model.SupportsKVStateSnapshot) return 0;
             long size = model.ComputeKVBlockByteSize(blockSize);
             return Math.Max(size, 0);
+        }
+
+        /// <summary>Resolve the physical block-table capacity. By default it is
+        /// large enough for one full model context; only metadata is allocated up
+        /// front and the comparatively large snapshot slabs remain lazy. An
+        /// explicit TS_SCHED_NUM_BLOCKS value is a hard operator limit.</summary>
+        private static int ResolveEffectiveNumBlocks(
+            IModelArchitecture model,
+            SchedulerConfig cfg,
+            ILogger logger)
+        {
+            int numBlocks = cfg.NumBlocks;
+            string rawOverride = Environment.GetEnvironmentVariable("TS_SCHED_NUM_BLOCKS");
+            bool explicitOverride = int.TryParse(rawOverride, out int overrideBlocks)
+                && overrideBlocks > 0;
+            if (explicitOverride || cfg.BlockSize <= 0)
+                return numBlocks;
+
+            int contextLength = model.MaxContextLength;
+            if (contextLength <= 0)
+                return numBlocks;
+
+            long neededLong = ((long)contextLength + cfg.BlockSize - 1) / cfg.BlockSize;
+            if (neededLong > int.MaxValue)
+                throw new InvalidOperationException(
+                    $"Model context {contextLength} requires too many KV blocks " +
+                    $"at block size {cfg.BlockSize}.");
+
+            int neededBlocks = (int)neededLong;
+            if (neededBlocks > numBlocks)
+            {
+                logger?.LogInformation(
+                    "Sizing KV block pool to model context: {ContextTokens} tokens -> " +
+                    "{Blocks} blocks of {BlockSize} (configured default was {ConfiguredBlocks}). " +
+                    "Set TS_SCHED_NUM_BLOCKS to impose an explicit hard limit.",
+                    contextLength, neededBlocks, cfg.BlockSize, numBlocks);
+                numBlocks = neededBlocks;
+            }
+
+            return numBlocks;
         }
 
         private struct EngineCommand

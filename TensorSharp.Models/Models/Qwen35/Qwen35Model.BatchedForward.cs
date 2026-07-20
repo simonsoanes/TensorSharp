@@ -175,6 +175,7 @@ namespace TensorSharp.Models
             // Drain device-resident GDN state to the host buffers if the fused N=1
             // decode left it on the device (so we read the LATEST recurrent state).
             DrainFusedDecodeStateForMigration();
+            EnsureKvCacheHostSynchronized();
 
             var kvBuf = new byte[(long)numKVHeads * cacheLen * headDim * 8]; // sized for F64 worst case
             for (int l = 0; l < numLayers; l++)

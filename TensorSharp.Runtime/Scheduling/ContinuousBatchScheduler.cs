@@ -39,6 +39,12 @@ namespace TensorSharp.Runtime.Scheduling
         // circular-cache snapshot can only be faithfully restored within one window.
         private readonly int _maxReusablePrefixTokens;
 
+        // Hybrid recurrent models can only snapshot their running state at an
+        // actual Forward boundary. Large fused prefill chunks still capture the
+        // attention bytes for every covered block, but only the boundary block
+        // is a valid prefix endpoint.
+        private readonly bool _requiresPerBlockCapture;
+
         // Live-cache continuation hooks (wired by the engine to the executor). The
         // first computes how many leading prompt tokens can be served by continuing
         // the model's live KV cache (beyond the pooled-snapshot cap); the second
@@ -70,13 +76,18 @@ namespace TensorSharp.Runtime.Scheduling
             string modelFingerprint,
             ILogger logger = null,
             bool supportsCrossSequenceKvReuse = true,
-            int maxReusablePrefixTokens = int.MaxValue)
+            int maxReusablePrefixTokens = int.MaxValue,
+            bool requiresPerBlockCapture = false)
         {
             _cfg = cfg ?? throw new ArgumentNullException(nameof(cfg));
             _pool = pool ?? throw new ArgumentNullException(nameof(pool));
             _fingerprint = modelFingerprint ?? string.Empty;
             _crossSeqKvReuse = supportsCrossSequenceKvReuse;
             _maxReusablePrefixTokens = maxReusablePrefixTokens <= 0 ? int.MaxValue : maxReusablePrefixTokens;
+            // Per-boundary alignment only serves pooled prefix checkpoints.
+            // If cross-sequence reuse is disabled, those checkpoints are never
+            // consumed and splitting the prefill merely costs throughput.
+            _requiresPerBlockCapture = requiresPerBlockCapture && supportsCrossSequenceKvReuse;
         }
 
         /// <summary>Whether cross-sequence prefix-cache reuse is enabled for this
@@ -109,6 +120,11 @@ namespace TensorSharp.Runtime.Scheduling
         public BlockPool Pool => _pool;
         public SchedulerConfig Config => _cfg;
 
+        /// <summary>Whether this scheduler can actually publish reusable prefix
+        /// blocks. The executor uses it to avoid extracting KV snapshots when
+        /// prefix caching is disabled or unsafe for the loaded model.</summary>
+        public bool PrefixCachingEnabled => PrefixCachingActive;
+
         /// <summary>Snapshot all requests currently owned by the scheduler.
         /// Used by the engine's failure path when scheduling itself throws and
         /// no per-step <see cref="SchedulerOutput"/> is available.</summary>
@@ -132,6 +148,20 @@ namespace TensorSharp.Runtime.Scheduling
             return result;
         }
 
+        /// <summary>Snapshot the currently-running sequences in fairness order.
+        /// Used by the engine only after an empty schedule proves that none of
+        /// them can make forward progress.</summary>
+        public List<SequenceState> GetRunningSequencesSnapshot()
+        {
+            var result = new List<SequenceState>(_runningOrder.Count);
+            foreach (var seq in _runningOrder)
+            {
+                if (seq == null || seq.Status.IsFinished()) continue;
+                result.Add(seq);
+            }
+            return result;
+        }
+
         /// <summary>Submit a sequence. It enters the waiting queue; the next
         /// <see cref="Schedule"/> call will try to admit it.</summary>
         public void Submit(SequenceState seq)
@@ -139,6 +169,26 @@ namespace TensorSharp.Runtime.Scheduling
             if (seq == null) throw new ArgumentNullException(nameof(seq));
             if (_waitingIndex.ContainsKey(seq.RequestId) || _running.ContainsKey(seq.RequestId))
                 throw new InvalidOperationException($"Sequence {seq.RequestId} is already submitted.");
+
+            // A single request can eventually reclaim blocks from other requests
+            // through preemption, but it can never exceed the pool's physical
+            // capacity. Reject an impossible reservation before spending time on
+            // a partial prefill that is guaranteed to stall at the boundary.
+            long capacityTokens = (long)_pool.NumBlocks * _cfg.BlockSize;
+            long requestedTokens = (long)seq.PromptTokens.Count + seq.MaxNewTokens;
+            if (requestedTokens > capacityTokens)
+            {
+                var ex = new InvalidOperationException(
+                    $"KV cache capacity exceeded for request {seq.RequestId}: prompt " +
+                    $"({seq.PromptTokens.Count} tokens) plus max output ({seq.MaxNewTokens} " +
+                    $"tokens) requires {requestedTokens} token slots, but the configured " +
+                    $"KV block pool holds {capacityTokens}. Shorten the request or enlarge " +
+                    $"TS_SCHED_NUM_BLOCKS.");
+                seq.Status = SequenceStatus.FinishedError;
+                seq.FinishReason = "error";
+                seq.Error = ex;
+                throw ex;
+            }
 
             var node = _waiting.AddLast(seq);
             _waitingIndex[seq.RequestId] = node;
@@ -198,6 +248,8 @@ namespace TensorSharp.Runtime.Scheduling
                     ? Math.Min(promptUncomputed, prefillCap)
                     : 1; // decode step
                 want = Math.Min(want, tokenBudget);
+                if (isPrefill)
+                    want = AlignRecurrentPrefillBoundary(seq, want, promptUncomputed);
                 if (want <= 0) break;
 
                 // Allocate any blocks needed to host these tokens.
@@ -230,7 +282,7 @@ namespace TensorSharp.Runtime.Scheduling
                 // freed and need a fresh re-prefill, no shortcut).
                 bool plannedLiveContinuation = false;
                 bool plannedFusedContinuation = false;
-                if (seq.BlockTable.NumBlocks == 0 && PrefixCachingActive)
+                if (seq.BlockTable.NumBlocks == 0 && _cfg.EnablePrefixCaching)
                 {
                     // Live-cache continuation: when this is the SOLE sequence about to
                     // run (nothing else running or already scheduled this step), the
@@ -267,7 +319,9 @@ namespace TensorSharp.Runtime.Scheduling
                             plannedFusedContinuation = true;
                     }
 
-                    if (!plannedLiveContinuation && !plannedFusedContinuation)
+                    if (!plannedLiveContinuation
+                        && !plannedFusedContinuation
+                        && PrefixCachingActive)
                         AdoptPrefixBlocksCapped(seq);
                 }
 
@@ -281,6 +335,7 @@ namespace TensorSharp.Runtime.Scheduling
 
                 int want = Math.Min(promptUncomputed, prefillCap);
                 want = Math.Min(want, tokenBudget);
+                want = AlignRecurrentPrefillBoundary(seq, want, promptUncomputed);
                 if (want <= 0) break;
 
                 if (!TryEnsureBlocksForStep(seq, want))
@@ -398,6 +453,34 @@ namespace TensorSharp.Runtime.Scheduling
             return true;
         }
 
+        /// <summary>
+        /// Keep large fused chunks for throughput, but split the final prompt
+        /// chunk at the preceding block boundary.  That produces a recent exact
+        /// recurrent checkpoint (and, for a block-aligned prompt, leaves its last
+        /// block for a separate forward because prefix adoption must retain one
+        /// token for fresh logits).
+        /// </summary>
+        private int AlignRecurrentPrefillBoundary(
+            SequenceState seq,
+            int want,
+            int promptUncomputed)
+        {
+            if (!_requiresPerBlockCapture || want <= 0)
+                return want;
+
+            int end = seq.NumComputedTokens + want;
+            int tail = end % _cfg.BlockSize;
+            bool reachesPromptEnd = want >= promptUncomputed;
+            if (reachesPromptEnd && tail == 0)
+                tail = _cfg.BlockSize;
+
+            if (tail == 0)
+                return want;
+
+            int aligned = want - tail;
+            return aligned > 0 ? aligned : want;
+        }
+
         /// <summary>Preempt the lowest-priority running sequence (other than
         /// <paramref name="needyForBlocks"/>) and free its blocks, then retry
         /// allocation. Returns true if successful.</summary>
@@ -466,14 +549,27 @@ namespace TensorSharp.Runtime.Scheduling
                 maxAdoptableTokens = Math.Min(maxAdoptableTokens, _maxReusablePrefixTokens);
             int maxAdoptableBlocks = maxAdoptableTokens / _cfg.BlockSize;
 
-            int adopted = 0;
+            var matching = new List<KvBlock>();
+            int lastRestorable = -1;
             for (int i = 0; i < hashes.Count && i < maxAdoptableBlocks; i++)
             {
                 if (!_pool.TryFindByHash(hashes[i], out var block))
                     break;
-                _pool.Touch(block);
-                seq.BlockTable.AppendBlock(block);
-                adopted++;
+                matching.Add(block);
+                if (block.IsRestorablePrefixEnd)
+                    lastRestorable = i;
+            }
+
+            // Interior blocks from one large recurrent prefill carry correct
+            // attention slices but the chunk-end recurrent state. They are safe
+            // only when followed by a real checkpoint, whose injection overwrites
+            // that transient state. Backtrack to the newest such endpoint before
+            // changing refcounts or the sequence block table.
+            int adopted = lastRestorable + 1;
+            for (int i = 0; i < adopted; i++)
+            {
+                _pool.Touch(matching[i]);
+                seq.BlockTable.AppendBlock(matching[i]);
             }
 
             int adoptedTokens = adopted * _cfg.BlockSize;
@@ -501,6 +597,11 @@ namespace TensorSharp.Runtime.Scheduling
             {
                 var block = seq.BlockTable.Blocks[b];
                 if (block.ContentHash != null) continue;
+                // The recurrent batched-paged path keeps state in model-owned
+                // slot pools and does not populate PagedKvStorage. Only blocks
+                // explicitly extracted by CaptureNewlyFullBlocks are portable.
+                if (_requiresPerBlockCapture && block.Used != _cfg.BlockSize)
+                    continue;
                 _pool.RegisterFullBlock(block, hashes[b], _cfg.BlockSize);
             }
         }

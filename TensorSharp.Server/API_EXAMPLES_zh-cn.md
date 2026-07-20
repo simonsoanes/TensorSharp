@@ -743,9 +743,10 @@ curl -X POST http://localhost:5000/api/upload -F "file=@report.pdf"
 **PDF 文档**采用两段式处理：
 
 - **原生数字 PDF**（含可选中的文本层）：文本被抽取后放入 `textContent` 返回，
-  并携带 `renderedAsImages: false`、`pageCount`、`extractedPageCount` 以及与文
-  本上传相同的截断元数据（内容按模型上下文长度的一半（以 token 计）截断）。按
-  内置 UI 的方式把它内联到聊天消息中：
+  并携带 `renderedAsImages: false`、`pageCount`、`extractedPageCount`。提取的
+  文本会完整返回；最终渲染的提示词会根据已加载模型的实际上下文窗口进行检查。
+  提取文本的 `truncated` 始终为 `false`。旧版截断/计数字段仍以可空兼容字段
+  保留；上传阶段不再仅为填充这些字段而分词。按内置 UI 的方式把它内联到聊天消息中：
 
 ```bash
 curl -N -X POST http://localhost:5000/api/chat \
@@ -753,7 +754,8 @@ curl -N -X POST http://localhost:5000/api/chat \
   -d '{
     "messages": [{
       "role": "user",
-      "content": "[File: report.pdf]\n<textContent from the upload response>\n[End of file]\nPlease analyze the attached PDF document and summarize its content."
+      "content": "[File: report.pdf]\n<textContent from the upload response>\n[End of file]\nPlease analyze the attached PDF document and summarize its content.",
+      "textFilePaths": ["<上传响应中的 path>"]
     }],
     "maxTokens": 500
   }'

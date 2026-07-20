@@ -52,6 +52,13 @@ namespace TensorSharp.Runtime
         public float RepetitionPenalty { get; set; } = 1.1f;
 
         /// <summary>
+        /// Number of most-recent generated tokens considered by repetition,
+        /// presence, and frequency penalties. Default 64 matches llama.cpp and
+        /// Ollama. 0 disables history penalties; -1 considers the full history.
+        /// </summary>
+        public int PenaltyLastN { get; set; } = 64;
+
+        /// <summary>
         /// Additive penalty based on whether a token has appeared at all.
         /// 0.0 = disabled. Positive values discourage repeated topics.
         /// Typical range: 0.0 - 2.0.
@@ -141,6 +148,7 @@ namespace TensorSharp.Runtime
                 TopP = TopP,
                 MinP = MinP,
                 RepetitionPenalty = RepetitionPenalty,
+                PenaltyLastN = PenaltyLastN,
                 PresencePenalty = PresencePenalty,
                 FrequencyPenalty = FrequencyPenalty,
                 Seed = Seed,

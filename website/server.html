@@ -63,7 +63,7 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf
     <li>Multi-turn chat conversations with streaming token generation (SSE).</li>
     <li>Per-tab chat sessions — each tab owns tracked conversation history; request KV blocks and prefix reuse are owned by the inference engine.</li>
     <li>Image, video, audio, PDF, and text/code uploads for multimodal inference (up to 500 MB).</li>
-    <li>PDF documents: born-digital PDFs have their text layer extracted and inlined into the prompt (token-budget truncated); scanned PDFs fall back to page images for vision-capable models (<code>TS_PDF_MAX_PAGES</code> caps the pages read).</li>
+    <li>PDF documents: born-digital PDFs have their complete text layer extracted and inlined into the prompt; scanned PDFs fall back to page images for vision-capable models (<code>TS_PDF_MAX_PAGES</code> caps the pages read). The final rendered prompt is checked against the model's actual context window.</li>
     <li>Thinking / reasoning mode toggle and tool calling with function definitions.</li>
     <li>Message editing and deletion with regeneration from any point in the conversation.</li>
     <li>DiffusionGemma denoising previews when a <code>diffusion-gemma</code> GGUF is hosted (the whole assistant message is replaced on each step, then finalized).</li>
@@ -130,7 +130,6 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --config config/server-basi
     <tbody>
       <tr><td><code>BACKEND</code></td><td>Default backend when <code>--backend</code> is not passed (default: <code>ggml_metal</code> on macOS, <code>ggml_cpu</code> elsewhere).</td></tr>
       <tr><td><code>MAX_TOKENS</code></td><td>Default max generation length (default: <code>20000</code>).</td></tr>
-      <tr><td><code>MAX_TEXT_FILE_CHARS</code></td><td>Character cap for truncating plain-text uploads (default: <code>8000</code>).</td></tr>
       <tr><td><code>TS_PDF_MAX_PAGES</code></td><td>Cap on PDF pages read during upload — text extraction and page-image rendering (default: <code>0</code> = all pages; also honored by the CLI's <code>--pdf</code>).</td></tr>
       <tr><td><code>VIDEO_SAMPLE_FPS</code> / <code>VIDEO_MAX_FRAMES</code></td><td>Frames sampled per second of video / optional upper bound on extracted frames.</td></tr>
       <tr><td><code>TS_FUSED_QKNORM_ROPE</code></td><td>Fused QK-Norm + RoPE CUDA kernel for Qwen 3.5/3.6 text prefill on the direct <code>cuda</code> backend (default on; <code>0</code> disables).</td></tr>

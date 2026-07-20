@@ -448,10 +448,13 @@ namespace TensorSharp.Runtime.Scheduling
         /// or worth logging (real migration failure).</summary>
         private bool TryMigrateOwnerToPagedIfNeeded(IBatchedPagedModel batched)
         {
-            if (_currentOwner == null
-                || _ownerTokensInModel <= 0
-                || _currentOwner.KvStateInPagedStorage)
+            if (_currentOwner == null || _ownerTokensInModel <= 0)
             {
+                return true;
+            }
+            if (_currentOwner.KvStateInPagedStorage)
+            {
+                ClearLinearOwner();
                 return true;
             }
             if (!batched.SupportsLinearKVMigration)
@@ -461,9 +464,18 @@ namespace TensorSharp.Runtime.Scheduling
             if (batched.TryMigrateLinearKVToPaged(_currentOwner, _blockSize))
             {
                 _currentOwner.KvStateInPagedStorage = true;
+                ClearLinearOwner();
                 return true;
             }
             return false;
+        }
+
+        private void ClearLinearOwner()
+        {
+            _currentOwner = null;
+            _ownerTokensInModel = 0;
+            _ownerForwardedTokens = 0;
+            _liveCacheValid = false;
         }
 
         private void WarnMtpUnprofitableOnce()
@@ -501,14 +513,6 @@ namespace TensorSharp.Runtime.Scheduling
 
         private List<SequenceStepResult> ExecuteStepBatched(IBatchedPagedModel batched, SchedulerOutput output)
         {
-            // The batched paged path manages K/V in paged storage (slot mapping),
-            // not the single live linear cache the continuation fast-path tracks.
-            // Drop any live-cache claim so a follow-up can't continue from stale state.
-            _liveCacheValid = false;
-            // Batched steps clobber the linear-cache world the speculative
-            // context depends on (e.g. per-slot GDN state swaps model-level
-            // references), so speculation must re-arm from a fresh prefill.
-            _mtpCtx = null;
             int numSeqs = output.ScheduledWork.Count;
             var ctx = new BatchedForwardContext
             {
@@ -582,6 +586,13 @@ namespace TensorSharp.Runtime.Scheduling
                 throw new InvalidOperationException(
                     $"ForwardBatch returned {perSeqLogits?.Count ?? -1} results for {numSeqs} sequences.");
 
+            // Only invalidate linear state after ForwardBatch ACCEPTS the
+            // batch. A model may decline with NotSupportedException and fall
+            // back to the per-sequence path; invalidating before that call
+            // destroys a planned live-cache continuation on the fallback.
+            _liveCacheValid = false;
+            _mtpCtx = null;
+
             // Update per-sequence state and assemble results.
             var results = new List<SequenceStepResult>(numSeqs);
             for (int s = 0; s < numSeqs; s++)
@@ -651,7 +662,14 @@ namespace TensorSharp.Runtime.Scheduling
             if (_currentOwner != null)
             {
                 if (_currentOwner.Status == SequenceStatus.Running)
+                {
+                    // N=1 forwards borrow the model-owned logits buffer. The
+                    // next request's Forward may overwrite it before this owner
+                    // resumes, so detach it once at the ownership transition.
+                    if (_currentOwner.LastLogits != null)
+                        _currentOwner.LastLogits = (float[])_currentOwner.LastLogits.Clone();
                     fused.AdoptPrimaryCacheToFused(_currentOwner.RequestId);
+                }
                 _currentOwner = null;
                 _ownerTokensInModel = 0;
                 _ownerForwardedTokens = 0;
@@ -1292,13 +1310,13 @@ namespace TensorSharp.Runtime.Scheduling
         {
             if (seq == null || !_liveCacheValid || _liveCacheSeq == null || _liveCacheLen <= 0)
                 return 0;
-            if (!_model.SupportsKVStateSnapshot || !_model.SupportsCrossSequenceKvReuse)
-                return 0;
-
-            // Only worth it for capped models: an uncapped model already reuses the
-            // full prefix through the pool (which also caches blocks for concurrent
-            // sequences), so live continuation would add cost without benefit.
-            int cap = _model.MaxReusablePrefixTokens;
+            // Only worth it when the pooled path cannot already reuse the full
+            // prefix. Models that opt out of cross-sequence snapshots have an
+            // effective pooled cap of zero, but continuing their still-live
+            // primary cache is safe and avoids a complete re-prefill.
+            int cap = _model.SupportsCrossSequenceKvReuse
+                ? _model.MaxReusablePrefixTokens
+                : 0;
             if (cap == int.MaxValue)
                 return 0;
 
@@ -1586,6 +1604,19 @@ namespace TensorSharp.Runtime.Scheduling
 
         private int[] BuildPrefillChunk(SequenceState seq, ScheduledSequenceWork work)
         {
+            if (seq.NumComputedTokens == 0)
+            {
+                // Reserve the prompt plus its declared generation budget in a
+                // single model-specific allocation. Hybrid models with large
+                // attention caches can otherwise cross a power-of-two boundary
+                // during decode and perform a multi-gigabyte grow/copy mid-stream.
+                long requested = (long)seq.PromptTokens.Count + seq.MaxNewTokens;
+                int maxContext = _model.MaxContextLength;
+                if (maxContext > 0)
+                    requested = Math.Min(requested, maxContext);
+                _model.PrepareForPrefill((int)Math.Min(requested, int.MaxValue));
+            }
+
             int want = work.NumScheduledTokens;
             int[] buf = new int[want];
             for (int i = 0; i < want; i++)
@@ -1606,7 +1637,7 @@ namespace TensorSharp.Runtime.Scheduling
         /// Called when swapping out.</summary>
         private void ExtractAllBlocks(SequenceState seq, int tokensInModel)
         {
-            if (!_model.SupportsKVStateSnapshot) return;
+            if (!_model.SupportsKVStateSnapshot || !_model.SupportsCrossSequenceKvReuse) return;
             if (tokensInModel <= 0) return;
 
             int blocks = seq.BlockTable.NumBlocks;
@@ -1616,6 +1647,14 @@ namespace TensorSharp.Runtime.Scheduling
                 if (startToken >= tokensInModel) break;
                 int tokensInBlock = Math.Min(_blockSize, tokensInModel - startToken);
                 var block = seq.BlockTable.Blocks[b];
+
+                // A recurrent full block was captured at the exact Forward
+                // boundary where it first became available. Re-extracting it on
+                // a later owner swap would overwrite that checkpoint with the
+                // owner's current (later) recurrent state. The trailing partial
+                // block is still refreshed because its endpoint is current.
+                if (_model.RequiresPerBlockCapture && block.Used == tokensInBlock)
+                    continue;
 
                 long expectedBytes = _model.ComputeKVBlockByteSize(tokensInBlock);
                 if (expectedBytes <= 0) break;
@@ -1650,7 +1689,7 @@ namespace TensorSharp.Runtime.Scheduling
         /// fresh KV state. Called when swapping in.</summary>
         private void InjectAllBlocks(SequenceState seq, int tokensToInject)
         {
-            if (!_model.SupportsKVStateSnapshot) return;
+            if (!_model.SupportsKVStateSnapshot || !_model.SupportsCrossSequenceKvReuse) return;
             if (tokensToInject <= 0) return;
 
             int blocks = seq.BlockTable.NumBlocks;
@@ -1688,7 +1727,10 @@ namespace TensorSharp.Runtime.Scheduling
         /// for prefix sharing.</summary>
         private int CaptureNewlyFullBlocks(SequenceState seq)
         {
-            if (!_model.SupportsKVStateSnapshot) return 0;
+            if (!_model.SupportsKVStateSnapshot
+                || !_model.SupportsCrossSequenceKvReuse
+                || !_scheduler.PrefixCachingEnabled)
+                return 0;
 
             int fullBlocksNow = seq.NumComputedTokens / _blockSize;
             int captured = 0;
@@ -1706,6 +1748,8 @@ namespace TensorSharp.Runtime.Scheduling
                     break;
                 dst.CopyTo(_pool.Storage.GetSpan(block.Id));
                 block.Used = _blockSize;
+                block.IsRestorablePrefixEnd = !_model.RequiresPerBlockCapture
+                    || (b == fullBlocksNow - 1 && seq.NumComputedTokens % _blockSize == 0);
                 captured++;
                 if (b < previouslyFull) previouslyFull = b;
             }

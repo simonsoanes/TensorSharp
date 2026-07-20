@@ -624,8 +624,8 @@ namespace TensorSharp.Cli
 
             // PDF document input. A born-digital PDF has a selectable text layer: extract
             // it and inline it into the user message so the model reasons over it through
-            // the normal (already optimized) prefill path (text truncated to the token
-            // budget). A scanned / image-only PDF has NO text layer, so instead we recover
+            // the normal (already optimized) prefill path, preserving every extracted
+            // page. A scanned / image-only PDF has NO text layer, so instead we recover
             // its page images and feed them to a vision model (mirroring the video -> frames
             // path); if no vision model is loaded we fail with a clear, actionable message
             // rather than silently sending an empty document. When --input is also given it
@@ -658,8 +658,8 @@ namespace TensorSharp.Cli
                 if (!pdf.LooksTextless)
                 {
                     // Born-digital PDF: inline the extracted text.
-                    string docText = TruncatePdfTextToContext(
-                        model, pdf.Text, out bool pdfTruncated, out int docTokens, out int keptTokens);
+                    string docText = pdf.Text ?? string.Empty;
+                    bool allPagesExtracted = pdf.ExtractedPageCount == pdf.PageCount;
 
                     string instruction = hasUserInput
                         ? rawText
@@ -667,11 +667,20 @@ namespace TensorSharp.Cli
                     rawText = $"[File: {pdfName}]\n{docText}\n[End of file]\n\n{instruction}";
 
                     _log.LogInformation(LogEventIds.UploadReceived,
-                        "PDF input (text): {PdfPath} pages={Pages} extractedPages={ExtractedPages} docTokens={DocTokens} keptTokens={KeptTokens} truncated={Truncated} extractMs={ExtractMs:F1}",
-                        pdfPath, pdf.PageCount, pdf.ExtractedPageCount, docTokens, keptTokens, pdfTruncated,
+                        "PDF input (untruncated text): {PdfPath} pages={Pages} extractedPages={ExtractedPages} complete={Complete} chars={Chars} extractMs={ExtractMs:F1}",
+                        pdfPath, pdf.PageCount, pdf.ExtractedPageCount, allPagesExtracted, docText.Length,
                         pdfSw.Elapsed.TotalMilliseconds);
-                    Console.WriteLine($"Loaded PDF: {pdfName} ({pdf.ExtractedPageCount}/{pdf.PageCount} pages, {keptTokens} tokens" +
-                        (pdfTruncated ? $", truncated from {docTokens})" : ")"));
+                    if (allPagesExtracted)
+                    {
+                        Console.WriteLine(
+                            $"Loaded PDF in full: {pdfName} ({pdf.ExtractedPageCount}/{pdf.PageCount} pages, {docText.Length} chars)");
+                    }
+                    else
+                    {
+                        Console.Error.WriteLine(
+                            $"Warning: only {pdf.ExtractedPageCount}/{pdf.PageCount} PDF pages could be read; " +
+                            "the extracted pages were preserved without token truncation.");
+                    }
                 }
                 else
                 {
@@ -841,14 +850,16 @@ namespace TensorSharp.Cli
                     w + 1, warmupInferenceRuns, warmupDecodeTokens);
                 _ = RunInference(model, rawText, imagePaths, warmupDecodeTokens, audioPaths,
                     isVideo: videoPath != null, samplingConfig: samplingConfig,
-                    enableThinking: enableThinking, tools: tools, silent: true);
+                    enableThinking: enableThinking, tools: tools, silent: true,
+                    preserveAllInput: pdfPath != null);
                 model.ResetKVCache();
                 model.ResetForwardTiming();
             }
 
             string result = RunInference(model, rawText, imagePaths, maxTokens, audioPaths,
                 isVideo: videoPath != null, samplingConfig: samplingConfig,
-                enableThinking: enableThinking, tools: tools);
+                enableThinking: enableThinking, tools: tools,
+                preserveAllInput: pdfPath != null);
 
             _log.LogInformation(LogEventIds.ChatCompleted,
                 "cli.inference.complete chars={Chars} preview=\"{Preview}\"",
@@ -1278,41 +1289,6 @@ namespace TensorSharp.Cli
             return 0;
         }
 
-        /// <summary>
-        /// Truncates extracted PDF text to half the model's context window (mirroring the
-        /// server's upload policy) so a large document can't overflow the KV cache. Falls
-        /// back to returning the text unchanged when no tokenizer / context length is
-        /// available. Reports the original and kept token counts via out-parameters.
-        /// </summary>
-        static string TruncatePdfTextToContext(
-            ModelBase model, string text, out bool truncated, out int originalTokens, out int keptTokens)
-        {
-            truncated = false;
-            originalTokens = 0;
-            keptTokens = 0;
-            if (string.IsNullOrEmpty(text))
-                return text ?? string.Empty;
-
-            var tokenizer = model?.Tokenizer;
-            int ctx = model?.MaxContextLength ?? 0;
-            if (tokenizer == null || ctx <= 0)
-                return text;
-
-            int tokenLimit = Math.Max(1, ctx / 2);
-            var tokens = tokenizer.Encode(text, addSpecial: false);
-            originalTokens = tokens.Count;
-            if (tokens.Count <= tokenLimit)
-            {
-                keptTokens = tokens.Count;
-                return text;
-            }
-
-            truncated = true;
-            string kept = tokenizer.Decode(tokens.GetRange(0, tokenLimit));
-            keptTokens = tokenizer.Encode(kept, addSpecial: false).Count;
-            return kept;
-        }
-
         static SamplingConfig ParseSamplingFromJson(JsonElement root, SamplingConfig fallback)
         {
             bool hasAny = false;
@@ -1443,7 +1419,8 @@ namespace TensorSharp.Cli
 
         static string RunInference(ModelBase model, string rawText, List<string> imagePaths, int maxTokens,
             List<string> audioPaths = null, bool isVideo = false, SamplingConfig samplingConfig = null,
-            bool enableThinking = false, List<ToolFunction> tools = null, bool silent = false)
+            bool enableThinking = false, List<ToolFunction> tools = null, bool silent = false,
+            bool preserveAllInput = false)
         {
             var messages = new List<ChatMessage>
             {
@@ -1957,6 +1934,17 @@ namespace TensorSharp.Cli
                 inputTokens.Count,
                 string.Join(", ", inputTokens.Take(30)),
                 inputTokens.Count > 30 ? $"... ({inputTokens.Count} total)" : string.Empty);
+
+            int modelContextLimit = model.MaxContextLength;
+            if (preserveAllInput && modelContextLimit > 0 &&
+                (long)inputTokens.Count + maxTokens > modelContextLimit)
+            {
+                throw new InvalidOperationException(
+                    $"The complete PDF requires {inputTokens.Count} prompt tokens plus a " +
+                    $"{maxTokens}-token generation reserve, but the loaded model supports " +
+                    $"{modelContextLimit} context tokens. No document content was truncated. " +
+                    "Reduce --max-tokens, use a shorter PDF, or choose a model with a larger context window.");
+            }
 
             model.ResetKVCache();
 

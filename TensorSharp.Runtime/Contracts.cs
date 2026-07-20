@@ -87,14 +87,15 @@ namespace TensorSharp.Runtime
 
         /// <summary>
         /// Hint, issued once at the first chunk of a fresh prefill (start_pos == 0),
-        /// that the whole prompt will be <paramref name="totalPromptTokens"/> long.
+        /// that the request may need <paramref name="requiredContextTokens"/> slots
+        /// for its prompt plus declared generation budget.
         /// A model with a grow-on-demand KV cache can allocate it to the final size
         /// up front — at start_pos == 0 there is no committed K/V to copy, so the
         /// grow is essentially free, whereas incremental doubling during the prefill
         /// re-copies (and device↔host round-trips) the whole cache several times.
         /// Default no-op.
         /// </summary>
-        void PrepareForPrefill(int totalPromptTokens) { }
+        void PrepareForPrefill(int requiredContextTokens) { }
 
         /// <summary>
         /// Stable identifier tying snapshots to a specific (model, layer count, head

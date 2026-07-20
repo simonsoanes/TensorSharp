@@ -166,13 +166,13 @@ TensorSharp/
 │   ├── ModelLifecycleService.cs # 模型加载/释放与后端选择（CPU / CUDA / MLX / GGML CPU/Metal/CUDA/Vulkan）
 │   ├── InferenceEngineHost.cs   # DI 注册的单模型 InferenceEngine 单例（连续批处理入口）
 │   ├── ChatGenerationPipeline.cs # Prompt 渲染，将请求提交到 InferenceEngine，流式返回 token，处理 stop
-│   ├── InferenceTelemetry.cs    # Prompt/eval 计时、TTFT、tokens/sec、完整输入/输出日志
+│   ├── InferenceTelemetry.cs    # Prompt/eval 计时、TTFT、tokens/sec、有界输入摘要与输出日志
 │   ├── ChatHistoryPreparer.cs   # 历史归一化、raw token 拼接、多模态顺序辅助
 │   ├── ChatSession.cs           # 单会话历史跟踪与 assistant raw token
 │   ├── SessionManager.cs        # 线程安全的会话注册（默认会话 + 每个 UI Tab 的会话）
 │   ├── InferenceQueue.cs        # 向后兼容的队列状态接口（并发由引擎本身处理）
 │   ├── BackendCatalog.cs        # 可用计算后端的发现（CPU / CUDA / MLX / GGML*）
-│   ├── TextUploadHelper.cs      # 按 token 预算截断的文本上传辅助
+│   ├── TextUploadHelper.cs      # 无损文本上传归一化辅助
 │   ├── WebUiChatPolicy.cs       # Web UI 聊天请求合法性校验
 │   ├── OpenAIResponseFormatParser.cs  # OpenAI response_format（json_object / json_schema）解析
 │   ├── Hosting/                 # 启动期相关：选项装配（ServerOptionsBuilder）、后端选择、日志、wwwroot 解析、paged-KV / 连续批处理 CLI 翻译

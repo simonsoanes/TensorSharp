@@ -69,12 +69,13 @@ namespace TensorSharp.Server.Hosting
             // so log scrapers can pull individual values.
             var sampling = options.DefaultSamplingConfig;
             logger.LogInformation(LogEventIds.HostConfiguration,
-                "Default sampling: temperature={Temperature} topK={TopK} topP={TopP} minP={MinP} repeatPenalty={RepeatPenalty} presencePenalty={PresencePenalty} frequencyPenalty={FrequencyPenalty} seed={Seed} stopSequences={StopSequences}",
+                "Default sampling: temperature={Temperature} topK={TopK} topP={TopP} minP={MinP} repeatPenalty={RepeatPenalty} repeatLastN={RepeatLastN} presencePenalty={PresencePenalty} frequencyPenalty={FrequencyPenalty} seed={Seed} stopSequences={StopSequences}",
                 sampling.Temperature.ToString("0.###", CultureInfo.InvariantCulture),
                 sampling.TopK,
                 sampling.TopP.ToString("0.###", CultureInfo.InvariantCulture),
                 sampling.MinP.ToString("0.###", CultureInfo.InvariantCulture),
                 sampling.RepetitionPenalty.ToString("0.###", CultureInfo.InvariantCulture),
+                sampling.PenaltyLastN,
                 sampling.PresencePenalty.ToString("0.###", CultureInfo.InvariantCulture),
                 sampling.FrequencyPenalty.ToString("0.###", CultureInfo.InvariantCulture),
                 sampling.Seed,

@@ -116,10 +116,16 @@ namespace TensorSharp.Runtime.Scheduling
                 }
             }
 
-            // ---- Per-sequence fused decode (N>=2, or a fused-resident solo) ----
+            // ---- Per-sequence fused decode (N>=2, a fused-resident solo, or
+            // a solo request that must take ownership from another live
+            // sequence). The last case moves the prior primary cache into a
+            // per-request holder instead of serializing a potentially enormous
+            // hybrid recurrent state through managed paged slabs.
             if (batchedEnabled && batchedImpl && caps.SupportsPerSequenceFusedForward)
             {
-                bool wanted = features.SequenceCount >= 2 || fusedResident;
+                bool wanted = features.SequenceCount >= 2
+                    || fusedResident
+                    || features.SoloRequiresOwnershipSwap;
                 if (!wanted)
                 {
                     // Solo never-fused sequences intentionally fall through to
@@ -161,9 +167,11 @@ namespace TensorSharp.Runtime.Scheduling
                     else if (features.SoloKvInPagedStorage)
                         rejections.Add(new ExecutionPathRejection(
                             ExecutionPathKind.SingleSequenceFused, "sequence K/V already committed to paged storage"));
-                    else if (features.SoloRequiresOwnershipSwap && !caps.SupportsKvStateSnapshot)
+                    else if (features.SoloRequiresOwnershipSwap
+                        && (!caps.SupportsKvStateSnapshot || !caps.SupportsCrossSequenceKvReuse))
                         rejections.Add(new ExecutionPathRejection(
-                            ExecutionPathKind.SingleSequenceFused, "ownership swap required but model lacks KV snapshot"));
+                            ExecutionPathKind.SingleSequenceFused,
+                            "ownership swap required but model lacks a reusable KV snapshot"));
                     else
                     {
                         candidates.Add(ExecutionPathKind.SingleSequenceFused); // terminal

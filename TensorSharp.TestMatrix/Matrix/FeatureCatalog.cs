@@ -127,7 +127,7 @@ public static class FeatureCatalog
     public static readonly FeatureSpec UploadedText = ShortText with
     {
         Id = "uploaded_text",
-        DisplayName = "Uploaded text file (large, truncated)",
+        DisplayName = "Uploaded text file",
         PromptFile = "prompts/upload_text.txt",
         Kind = FeatureKind.UploadedText,
         // Log analysis; both bullets must surface the ERROR line. We assert

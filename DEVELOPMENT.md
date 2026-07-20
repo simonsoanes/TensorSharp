@@ -166,13 +166,13 @@ TensorSharp/
 │   ├── ModelLifecycleService.cs # Model load/dispose and backend selection (CPU / CUDA / MLX / GGML CPU/Metal/CUDA/Vulkan)
 │   ├── InferenceEngineHost.cs   # DI-registered per-model InferenceEngine singleton (continuous batching entry point)
 │   ├── ChatGenerationPipeline.cs # Prompt rendering, submits to InferenceEngine, streams tokens, stop handling
-│   ├── InferenceTelemetry.cs    # Prompt/eval timing, TTFT, tokens/sec, full input/output logs
+│   ├── InferenceTelemetry.cs    # Prompt/eval timing, TTFT, tokens/sec, bounded input summaries + output logs
 │   ├── ChatHistoryPreparer.cs   # History normalization, raw-token splice helpers, multimodal order helpers
 │   ├── ChatSession.cs           # Per-conversation tracked history + raw assistant tokens
 │   ├── SessionManager.cs        # Thread-safe session registry (default + per-tab sessions)
 │   ├── InferenceQueue.cs        # Backward-compatible queue-status surface (engine itself handles concurrency)
 │   ├── BackendCatalog.cs        # Discovery of available compute backends (CPU / CUDA / MLX / GGML*)
-│   ├── TextUploadHelper.cs      # Token-budget-aware text-file truncation
+│   ├── TextUploadHelper.cs      # Lossless text-upload normalization
 │   ├── WebUiChatPolicy.cs       # Web UI chat request validation
 │   ├── OpenAIResponseFormatParser.cs  # OpenAI response_format (json_object / json_schema) parsing
 │   ├── Hosting/                 # Startup-time concerns: options builder (ServerOptionsBuilder), backend resolution, logging, web root, paged-KV / continuous-batching CLI translation

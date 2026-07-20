@@ -48,6 +48,15 @@ namespace TensorSharp.Runtime.Paged
         /// Only full blocks (Used==blockSize) can be hashed into the prefix cache.</summary>
         public int Used { get; internal set; }
 
+        /// <summary>
+        /// Whether restoring the block chain through this block reconstructs the
+        /// model at this exact prefix end.  Attention-only snapshots are valid at
+        /// every block.  Hybrid recurrent models may capture several attention
+        /// slices after one large fused prefill; only the final block at that
+        /// forward boundary contains the matching recurrent-state checkpoint.
+        /// </summary>
+        public bool IsRestorablePrefixEnd { get; internal set; }
+
         /// <summary>Doubly-linked-list pointers for the free queue. Maintained by
         /// <see cref="FreeBlockQueue"/>. When the block is allocated both pointers
         /// are null.</summary>
@@ -60,13 +69,14 @@ namespace TensorSharp.Runtime.Paged
             RefCount = 0;
             ContentHash = null;
             Used = 0;
+            IsRestorablePrefixEnd = true;
         }
 
         /// <summary>True when the block is in the free queue.</summary>
         public bool IsFree => RefCount == 0;
 
         public override string ToString()
-            => $"KvBlock(id={Id}, refs={RefCount}, used={Used}, hash={(ContentHash.HasValue ? "yes" : "no")})";
+            => $"KvBlock(id={Id}, refs={RefCount}, used={Used}, restorable={IsRestorablePrefixEnd}, hash={(ContentHash.HasValue ? "yes" : "no")})";
     }
 
     /// <summary>

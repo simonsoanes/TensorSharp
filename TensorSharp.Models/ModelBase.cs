@@ -449,7 +449,7 @@ namespace TensorSharp.Models
 
         /// <summary>Prefill-length hint (see <see cref="IModelArchitecture.PrepareForPrefill"/>).
         /// Default no-op; models with a grow-on-demand KV cache override to pre-size it.</summary>
-        public virtual void PrepareForPrefill(int totalPromptTokens) { }
+        public virtual void PrepareForPrefill(int requiredContextTokens) { }
 
         // Timing
         protected long _linearTicks;
@@ -774,6 +774,94 @@ namespace TensorSharp.Models
                 && chatTemplate.Contains("bos_token", StringComparison.Ordinal);
         }
 
+        // llama.cpp's vocabulary loader treats these control-token spellings as
+        // end-of-generation even when a GGUF converter only records one of them
+        // in tokenizer.ggml.eos_token_id.  Qwen3.5 is a concrete example: its
+        // metadata names <|im_end|>, while <|endoftext|> is also a valid EOG.
+        private static readonly HashSet<string> TextualEogTokens = new(StringComparer.Ordinal)
+        {
+            "<|eot_id|>",
+            "<|im_end|>",
+            "<|end|>",
+            "<|return|>",
+            "<|call|>",
+            "<|flush|>",
+            "<|calls|>",
+            "<end_of_turn>",
+            "<|endoftext|>",
+            "</s>",
+            "<|eom_id|>",
+            "<EOT>",
+            "_<EOT>",
+            "[EOT]",
+            "[EOS]",
+            "<|end_of_text|>",
+            "<end_of_utterance>",
+            "<eos>",
+            "<turn|>",
+            "<|tool_response>",
+            "<｜end▁of▁sentence｜>",
+        };
+
+        /// <summary>
+        /// Augment the GGUF EOS list with llama-compatible, text-discovered EOG
+        /// controls. Public for tokenizer regression tests.
+        /// </summary>
+        public static int[] ResolveEogTokenIds(
+            IReadOnlyList<string> vocabTokens,
+            int eosId,
+            IEnumerable<int>? extraEosIds = null)
+        {
+            var ids = new HashSet<int>();
+            if (eosId >= 0 && eosId < vocabTokens.Count)
+                ids.Add(eosId);
+            if (extraEosIds != null)
+            {
+                foreach (int id in extraEosIds)
+                    if (id >= 0 && id < vocabTokens.Count)
+                        ids.Add(id);
+            }
+
+            for (int id = 0; id < vocabTokens.Count; id++)
+            {
+                if (TextualEogTokens.Contains(vocabTokens[id]))
+                    ids.Add(id);
+            }
+
+            // Match llama.cpp's tokenizer-specific EOG workarounds. Harmony
+            // and Solar use <|end|> as a structural marker rather than a stop;
+            // Gemma4/PaddleOCR similarly use </s> as ordinary vocabulary when
+            // the tool-response control token is present.
+            int endId = -1;
+            int slashSId = -1;
+            bool hasReturn = false;
+            bool hasCall = false;
+            bool hasFlush = false;
+            bool hasToolResponse = false;
+            foreach (int id in ids)
+            {
+                switch (vocabTokens[id])
+                {
+                    case "<|return|>": hasReturn = true; break;
+                    case "<|call|>":
+                    case "<|calls|>": hasCall = true; break;
+                    case "<|flush|>": hasFlush = true; break;
+                    case "<|end|>": endId = id; break;
+                    case "<|tool_response>": hasToolResponse = true; break;
+                    case "</s>": slashSId = id; break;
+                }
+            }
+            if (endId >= 0 && ((hasReturn && hasCall) || (hasCall && hasFlush)))
+                ids.Remove(endId);
+            if (slashSId >= 0 && hasToolResponse)
+                ids.Remove(slashSId);
+
+            var result = new int[ids.Count];
+            ids.CopyTo(result);
+            Array.Sort(result);
+            return result;
+        }
+
         protected void ParseTokenizer()
         {
             var vocabTokens = _gguf.GetStringArray("tokenizer.ggml.tokens");
@@ -793,22 +881,8 @@ namespace TensorSharp.Models
                     "enabling BOS so the prompt starts with exactly one BOS.");
             }
 
-            var eosIds = new List<int> { eosId };
             var extraEos = _gguf.GetInt32Array("tokenizer.ggml.eos_token_ids");
-            if (extraEos != null)
-                eosIds.AddRange(extraEos);
-
-            // gpt-oss / Harmony terminates a tool call with <|call|> rather than
-            // the configured eos (<|return|>). The GGUF only lists <|return|> as
-            // eos, so without this the model would not stop after emitting a tool
-            // call and the call could never be parsed. Add <|call|> as a stop token.
-            string arch = _gguf.GetString("general.architecture", "");
-            if (arch == "gptoss" || arch == "gpt-oss")
-            {
-                int callId = Array.IndexOf(vocabTokens, "<|call|>");
-                if (callId >= 0 && !eosIds.Contains(callId))
-                    eosIds.Add(callId);
-            }
+            var eosIds = new List<int>(ResolveEogTokenIds(vocabTokens, eosId, extraEos));
 
             string tokenizerModel = _gguf.GetString("tokenizer.ggml.model", "gpt2");
 

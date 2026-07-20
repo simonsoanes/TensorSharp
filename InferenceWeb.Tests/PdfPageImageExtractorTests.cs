@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.IO.Compression;
 using TensorSharp.Models;
+using TensorSharp.Server.ProtocolAdapters;
 using UglyToad.PdfPig.Content;
 using UglyToad.PdfPig.Core;
 using UglyToad.PdfPig.Fonts.Standard14Fonts;
@@ -11,6 +12,17 @@ namespace InferenceWeb.Tests;
 
 public class PdfPageImageExtractorTests
 {
+    [Fact]
+    public void IncompletePageImageWarning_IsNullOnlyWhenEveryPageIsAvailable()
+    {
+        Assert.Null(WebUiAdapter.BuildIncompletePdfImageWarning(134, 134));
+
+        string warning = WebUiAdapter.BuildIncompletePdfImageWarning(133, 134);
+        Assert.Contains("133 of 134", warning);
+        Assert.Contains("will not be sent", warning);
+        Assert.Contains("TS_PDF_MAX_PAGES", warning);
+    }
+
     // Builds an image-only PDF: N pages, each holding one embedded PNG and no text — the
     // shape of a scanned document or a slide deck exported as page images.
     private static byte[] BuildImageOnlyPdf(int pages, int w = 96, int h = 64)

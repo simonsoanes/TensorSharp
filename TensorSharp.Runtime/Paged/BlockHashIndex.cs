@@ -28,7 +28,18 @@ namespace TensorSharp.Runtime.Paged
 
         public void Register(KvBlockHash hash, KvBlock block)
         {
-            _index.TryAdd(hash, block);
+            if (_index.TryGetValue(hash, out KvBlock existing))
+            {
+                // For hybrid recurrent snapshots, two identical token blocks can
+                // differ in whether their bundled recurrent state belongs to the
+                // block endpoint.  Prefer the usable checkpoint over an interior
+                // block captured at a later fused-prefill boundary.
+                if (!existing.IsRestorablePrefixEnd && block.IsRestorablePrefixEnd)
+                    _index[hash] = block;
+                return;
+            }
+
+            _index.Add(hash, block);
         }
 
         public bool TryGet(KvBlockHash hash, out KvBlock block)
@@ -36,9 +47,13 @@ namespace TensorSharp.Runtime.Paged
             return _index.TryGetValue(hash, out block);
         }
 
-        public void Unregister(KvBlockHash hash)
+        public void Unregister(KvBlockHash hash, KvBlock block)
         {
-            _index.Remove(hash);
+            // A later valid checkpoint may have replaced a redundant invalid
+            // mapping for the same hash.  Evicting the redundant physical block
+            // must not remove that preferred mapping.
+            if (_index.TryGetValue(hash, out KvBlock current) && ReferenceEquals(current, block))
+                _index.Remove(hash);
         }
 
         public void Clear()
