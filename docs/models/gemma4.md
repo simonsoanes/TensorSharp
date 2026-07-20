@@ -2,6 +2,8 @@
 
 [← back to model index](README.md)
 
+> **Looking for the guided, from-scratch journey?** Zhongkai Fu's [From Tensors to Tokens](../BOOK.md) uses Gemma 4 E4B to connect tensor foundations, multimodal model execution, and a complete TensorSharp inference application. [View the paperback on Amazon](https://www.amazon.com/dp/B0H9P44QZZ).
+
 | Property | Value |
 |---|---|
 | Provider | Google |
