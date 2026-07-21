@@ -259,4 +259,46 @@ public class ResponsesApiTests
         var store = new InMemoryResponsesStore();
         Assert.False(store.TryGet("does_not_exist", out _));
     }
+
+    [Fact]
+    public void InMemoryResponsesStore_EntryOlderThanTtl_ExpiresAndIsNotReturned()
+    {
+        using var store = new InMemoryResponsesStore(maxEntries: 100, ttl: TimeSpan.FromMilliseconds(1));
+        store.Store(new StoredResponse { Id = "resp_1", Json = "{}" });
+
+        // MemoryCache expires entries lazily (on the next access after the clock
+        // passes the absolute expiration), so poll briefly rather than assuming
+        // a fixed delay is always enough on a loaded CI box.
+        bool expired = SpinWaitUntil(() => !store.TryGet("resp_1", out _), TimeSpan.FromSeconds(2));
+        Assert.True(expired, "expected the entry to expire once its TTL elapsed");
+    }
+
+    [Fact]
+    public void InMemoryResponsesStore_OverMaxEntries_EvictsUnderPressure()
+    {
+        using var store = new InMemoryResponsesStore(maxEntries: 2, ttl: TimeSpan.FromMinutes(30));
+        store.Store(new StoredResponse { Id = "resp_1", Json = "{}" });
+        store.Store(new StoredResponse { Id = "resp_2", Json = "{}" });
+        store.Store(new StoredResponse { Id = "resp_3", Json = "{}" });
+
+        // MemoryCache's size-limit eviction runs on a compaction pass rather than
+        // synchronously on the Set() call that exceeds the limit, so poll instead
+        // of asserting immediately after the third Store().
+        bool evicted = SpinWaitUntil(() =>
+            !(store.TryGet("resp_1", out _) && store.TryGet("resp_2", out _) && store.TryGet("resp_3", out _)),
+            TimeSpan.FromSeconds(2));
+        Assert.True(evicted, "expected at least one entry to be evicted once the store exceeded its max size");
+    }
+
+    private static bool SpinWaitUntil(Func<bool> condition, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (condition())
+                return true;
+            System.Threading.Thread.Sleep(10);
+        }
+        return condition();
+    }
 }
