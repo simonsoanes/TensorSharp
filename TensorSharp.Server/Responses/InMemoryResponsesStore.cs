@@ -6,6 +6,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
 using System;
+using System.Globalization;
 using Microsoft.Extensions.Caching.Memory;
 
 namespace TensorSharp.Server.Responses
@@ -61,14 +62,18 @@ namespace TensorSharp.Server.Responses
 
         private static int ResolveMaxEntries()
         {
-            string raw = Environment.GetEnvironmentVariable("TS_RESPONSES_STORE_MAX_ENTRIES");
-            return int.TryParse(raw, out int n) && n > 0 ? n : DefaultMaxEntries;
+            string raw = Environment.GetEnvironmentVariable("TS_RESPONSES_STORE_MAX_ENTRIES")?.Trim();
+            return int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int n) && n > 0
+                ? n
+                : DefaultMaxEntries;
         }
 
         private static TimeSpan ResolveTtl()
         {
-            string raw = Environment.GetEnvironmentVariable("TS_RESPONSES_STORE_TTL_MINUTES");
-            return double.TryParse(raw, out double minutes) && minutes > 0 ? TimeSpan.FromMinutes(minutes) : DefaultTtl;
+            string raw = Environment.GetEnvironmentVariable("TS_RESPONSES_STORE_TTL_MINUTES")?.Trim();
+            return double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out double minutes) && minutes > 0
+                ? TimeSpan.FromMinutes(minutes)
+                : DefaultTtl;
         }
     }
 }

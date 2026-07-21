@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Text.Json;
 using TensorSharp.Models;
@@ -200,6 +201,44 @@ public class ResponsesApiTests
         Assert.Contains("text.format.type", error);
     }
 
+    [Fact]
+    public void TryParseResponsesText_JsonSchemaMissingName_ErrorUsesTextFormatPrefixNotResponseFormat()
+    {
+        const string body = """
+        {
+          "text": {
+            "format": { "type": "json_schema", "schema": { "type": "object" } }
+          }
+        }
+        """;
+        using var doc = JsonDocument.Parse(body);
+        bool ok = OpenAIResponseFormatParser.TryParseResponsesText(doc.RootElement, out var format, out var error);
+
+        Assert.False(ok);
+        Assert.Null(format);
+        Assert.StartsWith("text.format.json_schema.name", error);
+        Assert.DoesNotContain("response_format", error);
+    }
+
+    [Fact]
+    public void TryParse_ChatCompletions_JsonSchemaMissingName_StillUsesResponseFormatPrefix()
+    {
+        const string body = """
+        {
+          "response_format": {
+            "type": "json_schema",
+            "json_schema": { "schema": { "type": "object" } }
+          }
+        }
+        """;
+        using var doc = JsonDocument.Parse(body);
+        bool ok = OpenAIResponseFormatParser.TryParse(doc.RootElement, out var format, out var error);
+
+        Assert.False(ok);
+        Assert.Null(format);
+        Assert.StartsWith("response_format.json_schema.name", error);
+    }
+
     // ---- OpenAIResponsesFactory ---------------------------------------------
 
     [Fact]
@@ -288,6 +327,64 @@ public class ResponsesApiTests
             !(store.TryGet("resp_1", out _) && store.TryGet("resp_2", out _) && store.TryGet("resp_3", out _)),
             TimeSpan.FromSeconds(2));
         Assert.True(evicted, "expected at least one entry to be evicted once the store exceeded its max size");
+    }
+
+    [Fact]
+    public void InMemoryResponsesStore_MaxEntriesEnvVar_IsTrimmedBeforeParsing()
+    {
+        WithEnvVar("TS_RESPONSES_STORE_MAX_ENTRIES", " 2 ", () =>
+        {
+            using var store = new InMemoryResponsesStore();
+            store.Store(new StoredResponse { Id = "resp_1", Json = "{}" });
+            store.Store(new StoredResponse { Id = "resp_2", Json = "{}" });
+            store.Store(new StoredResponse { Id = "resp_3", Json = "{}" });
+
+            // If the padded value fell back to the 1000-entry default (i.e. trimming
+            // was missing), nothing would ever be evicted here.
+            bool evicted = SpinWaitUntil(() =>
+                !(store.TryGet("resp_1", out _) && store.TryGet("resp_2", out _) && store.TryGet("resp_3", out _)),
+                TimeSpan.FromSeconds(2));
+            Assert.True(evicted, "expected the trimmed max-entries env var to be honoured");
+        });
+    }
+
+    [Fact]
+    public void InMemoryResponsesStore_TtlEnvVar_ParsedWithInvariantCultureRegardlessOfCurrentCulture()
+    {
+        var previousCulture = System.Threading.Thread.CurrentThread.CurrentCulture;
+        System.Threading.Thread.CurrentThread.CurrentCulture = CultureInfo.GetCultureInfo("de-DE");
+        try
+        {
+            // "0.02" (a period) is only valid under InvariantCulture; under de-DE,
+            // '.' is a group separator, so a culture-sensitive parse would silently
+            // fall back to the 60-minute default instead of expiring almost immediately.
+            WithEnvVar("TS_RESPONSES_STORE_TTL_MINUTES", "  0.02  ", () =>
+            {
+                using var store = new InMemoryResponsesStore();
+                store.Store(new StoredResponse { Id = "resp_1", Json = "{}" });
+
+                bool expired = SpinWaitUntil(() => !store.TryGet("resp_1", out _), TimeSpan.FromSeconds(3));
+                Assert.True(expired, "expected the invariant-culture-parsed TTL (~1.2s) to be honoured");
+            });
+        }
+        finally
+        {
+            System.Threading.Thread.CurrentThread.CurrentCulture = previousCulture;
+        }
+    }
+
+    private static void WithEnvVar(string name, string value, Action action)
+    {
+        string previous = Environment.GetEnvironmentVariable(name);
+        Environment.SetEnvironmentVariable(name, value);
+        try
+        {
+            action();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(name, previous);
+        }
     }
 
     private static bool SpinWaitUntil(Func<bool> condition, TimeSpan timeout)
