@@ -1,0 +1,94 @@
+using System;
+using System.Linq;
+
+namespace TensorSharp.Cuda
+{
+    /// <summary>
+    /// Coordinates tensor-parallel execution across multiple CUDA GPUs within a
+    /// single process. Owns one <see cref="CudaAllocator"/> per GPU and a
+    /// <see cref="CudaP2PCommunicator"/> for collective operations.
+    ///
+    /// Usage: create with the desired TP degree (number of GPUs), then use
+    /// <see cref="AllReduce"/> at row-parallel boundaries and
+    /// <see cref="GetAllocator"/> to place per-rank tensors.
+    /// </summary>
+    public sealed class TensorParallelGroup : IDisposable
+    {
+        private readonly CudaAllocator[] _allocators;
+        private readonly CudaP2PCommunicator _communicator;
+        private bool _disposed;
+
+        public TensorParallelGroup(int degree)
+        {
+            if (degree < 1)
+                throw new ArgumentOutOfRangeException(nameof(degree), "TP degree must be >= 1.");
+
+            int deviceCount = CudaDevice.GetDeviceCount();
+            if (degree > deviceCount)
+                throw new InvalidOperationException(
+                    $"Requested TP degree {degree} but only {deviceCount} CUDA device(s) available.");
+
+            Degree = degree;
+            _allocators = new CudaAllocator[degree];
+
+            try
+            {
+                for (int i = 0; i < degree; i++)
+                    _allocators[i] = new CudaAllocator(i);
+
+                if (degree > 1)
+                    _communicator = new CudaP2PCommunicator(_allocators);
+            }
+            catch
+            {
+                for (int i = 0; i < degree; i++)
+                    _allocators[i]?.Dispose();
+                throw;
+            }
+
+            Console.WriteLine($"Tensor parallelism: {degree} GPUs " +
+                $"({string.Join(", ", System.Linq.Enumerable.Range(0, degree).Select(i => CudaDevice.GetDevice(i).Name))})");
+        }
+
+        /// <summary>Number of GPUs in this parallel group.</summary>
+        public int Degree { get; }
+
+        /// <summary>True when TP is active (degree > 1).</summary>
+        public bool IsActive => Degree > 1;
+
+        public CudaAllocator GetAllocator(int rank)
+        {
+            if ((uint)rank >= (uint)Degree)
+                throw new ArgumentOutOfRangeException(nameof(rank));
+            return _allocators[rank];
+        }
+
+        /// <summary>
+        /// In-place AllReduce (element-wise sum) across all GPUs.
+        /// tensors[i] must be a F32 tensor on GPU i, all the same shape.
+        /// After this call every tensor holds the global sum.
+        /// </summary>
+        public void AllReduce(Tensor[] tensors)
+        {
+            if (!IsActive) return;
+            _communicator.AllReduce(tensors);
+        }
+
+        /// <summary>Synchronize all GPU streams.</summary>
+        public void Synchronize()
+        {
+            for (int i = 0; i < Degree; i++)
+                _allocators[i].Synchronize();
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+
+            _communicator?.Dispose();
+            for (int i = 0; i < Degree; i++)
+                _allocators[i]?.Dispose();
+        }
+    }
+}

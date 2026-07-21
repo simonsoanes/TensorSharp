@@ -295,7 +295,7 @@ namespace TensorSharp.Models
             _pendingAudioEmbeddingsList.Add((embeddings, insertPosition));
         }
 
-        public Gemma4Model(string ggufPath, BackendType backend) : base(ggufPath, backend)
+        public Gemma4Model(string ggufPath, BackendType backend, int tpDegree = 1) : base(ggufPath, backend, tpDegree)
         {
             Config = new ModelConfig { Architecture = _gguf.GetString("general.architecture") };
             ParseBaseConfig();
@@ -392,13 +392,29 @@ namespace TensorSharp.Models
             FuseGateUpWeights();
             FuseExpertGateUpWeights();
             CacheMoEStackedWeights();
-            PrepareCudaQuantizedWeightsForInference();
+
+            if (IsTensorParallel)
+            {
+                ValidateGemma4TpConstraints();
+                ShardGemma4WeightsForTP();
+                PrepareCudaQuantizedWeightsForInferenceTP();
+            }
+            else
+            {
+                PrepareCudaQuantizedWeightsForInference();
+            }
+
             PrecomputeRoPE();
             int maxContextLength = ResolveConfiguredContextLength();
             int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
             if (initialCacheLength < maxContextLength)
                 Console.WriteLine($"Initial {_backend} KV cache allocation: {initialCacheLength} tokens for global layers (grows on demand up to {maxContextLength}).");
-            InitKVCache(initialCacheLength, maxContextLength);
+
+            if (IsTensorParallel)
+                InitGemma4TpKVCache(initialCacheLength, maxContextLength);
+            else
+                InitKVCache(initialCacheLength, maxContextLength);
+
             BuildGemma4DecodeArrays();
         }
 
@@ -952,6 +968,9 @@ namespace TensorSharp.Models
 
         public override float[] Forward(int[] tokens)
         {
+            if (IsTensorParallel)
+                return ForwardTP(tokens);
+
             // On MLX, every public op routes through MlxWorker.Shared.Invoke
             // which costs ~25┬Ás per round-trip. Decode dispatches ~600 MLX
             // calls per token across 42 layers, so the per-call hand-off
@@ -6680,6 +6699,7 @@ namespace TensorSharp.Models
                 emb?.Dispose();
             _pendingAudioEmbeddingsList.Clear();
             DisposeSwaPrevWindows();
+            DisposeGemma4TpState();
             // Free any per-request fused-decode cache holders before tearing
             // down the active cache (the active holder's arrays ARE _kvCacheK and
             // are disposed by the loop below).

@@ -301,8 +301,8 @@ namespace TensorSharp.Models
             }
         }
 
-        public NemotronModel(string ggufPath, BackendType backend)
-            : base(ggufPath, backend)
+        public NemotronModel(string ggufPath, BackendType backend, int tpDegree = 1)
+            : base(ggufPath, backend, tpDegree)
         {
             string arch = _gguf.GetString("general.architecture") ?? "nemotron_h";
             Config = new ModelConfig { Architecture = arch };
@@ -395,13 +395,28 @@ namespace TensorSharp.Models
             if (_numExperts == 0)
                 FuseFFNWeights();
             FuseQKVWeights();
-            PrepareCudaQuantizedWeightsForInference();
+
+            if (IsTensorParallel)
+            {
+                ValidateNemotronTpConstraints();
+                ShardNemotronWeightsForTP();
+                PrepareCudaQuantizedWeightsForInferenceTP();
+            }
+            else
+            {
+                PrepareCudaQuantizedWeightsForInference();
+            }
 
             int maxContextLength = ResolveConfiguredContextLength();
             int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
             if (initialCacheLength < maxContextLength)
                 Console.WriteLine($"Initial {_backend} KV cache allocation: {initialCacheLength} tokens (grows on demand up to {maxContextLength}).");
-            InitCaches(initialCacheLength, maxContextLength);
+
+            if (IsTensorParallel)
+                InitNemotronTpCaches(initialCacheLength, maxContextLength);
+            else
+                InitCaches(initialCacheLength, maxContextLength);
+
             InitMamba2Buffers();
             InitLayerInfo();
             CacheMamba2ConvWeights();
@@ -1299,6 +1314,9 @@ namespace TensorSharp.Models
 
         public override float[] Forward(int[] tokens)
         {
+            if (IsTensorParallel)
+                return ForwardTP(tokens);
+
             _forwardSw.Start();
             int seqLen = tokens.Length;
             int startPos = _cacheSeqLen;
@@ -3130,6 +3148,7 @@ namespace TensorSharp.Models
                 foreach (var t in _kvCacheK) t?.Dispose();
             if (_kvCacheV != null)
                 foreach (var t in _kvCacheV) t?.Dispose();
+            DisposeNemotronTpState();
             DisposeTensorArray(_mamba2NativeDecodeProjected);
             DisposeTensorArray(_mamba2NativeDecodeHidden);
             if (IsGgmlBackend)

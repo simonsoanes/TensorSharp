@@ -140,6 +140,7 @@ namespace TensorSharp.Cli
             // GgmlNative reads when the ggml_vulkan backend initializes.
             int? gpuDeviceOverride = null;
             bool listGpus = false;
+            int tpDegree = 1;
             string systemPrompt = null;
             int warmupInferenceRuns = 0;
             // DiffusionGemma sampler knobs (used only for the diffusion-gemma architecture).
@@ -186,6 +187,7 @@ namespace TensorSharp.Cli
                     case "--max-tokens": maxTokens = int.Parse(args[++i]); break;
                     case "--test": runTest = true; break;
                     case "--backend": backendStr = args[++i].ToLowerInvariant(); break;
+                    case "--tp": tpDegree = int.Parse(args[++i]); break;
                     case "--gpu-device":
                     {
                         string gpuStr = args[++i];
@@ -424,7 +426,7 @@ namespace TensorSharp.Cli
                 "Loading model {ModelFile} on backend {Backend} kvCacheDtype={KvCacheDtype} (path={ModelPath})",
                 Path.GetFileName(modelPath), backend, requestedDtype, modelPath);
             var modelLoadSw = Stopwatch.StartNew();
-            using var model = ModelBase.Create(modelPath, backend);
+            using var model = ModelBase.Create(modelPath, backend, tpDegree);
             modelLoadSw.Stop();
             _log.LogInformation(LogEventIds.ModelLoadCompleted,
                 "Loaded model {ModelFile} architecture={Architecture} contextLength={ContextLength} kvCacheDtype={KvCacheDtype} elapsedMs={ElapsedMs:F1}",

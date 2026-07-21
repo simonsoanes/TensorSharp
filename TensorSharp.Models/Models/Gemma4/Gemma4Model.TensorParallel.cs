@@ -1,0 +1,896 @@
+// https://github.com/zhongkaifu/TensorSharp
+//
+// This file is part of TensorSharp.
+//
+// TensorSharp is licensed under the BSD-3-Clause license found in the LICENSE file in the root directory of this source tree.
+//
+// TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
+//
+// ============================================================================
+// Gemma4Model.TensorParallel.cs
+//
+// Tensor-parallel forward pass for Gemma 4. Extends the Gemma 3 TP pattern
+// (Megatron-LM column/row parallelism) with:
+//   - Fused QKV projection (attn_qkv.weight)
+//   - Per-layer head dimensions (local SWA vs global)
+//   - Per-layer KV head counts
+//   - MoE layers: tensor-parallel experts (1/tp slice of every expert)
+//   - Dense + MoE FFN in the same MoE layer
+//   - Shared KV layers (KV donor map)
+// ============================================================================
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using TensorSharp;
+using TensorSharp.Cuda;
+
+namespace TensorSharp.Models
+{
+    public partial class Gemma4Model
+    {
+        // Per-GPU KV caches: [layer][rank]. Only populated when TP is active.
+        private Tensor[][] _tpKvCacheK;
+        private Tensor[][] _tpKvCacheV;
+        private int _tpKvCacheCapacity;
+
+        // ====================================================================
+        // TP constraint validation
+        // ====================================================================
+
+        private void ValidateGemma4TpConstraints()
+        {
+            int tp = TpDegree;
+            var errors = new List<string>();
+
+            if (Config.NumHeads % tp != 0)
+                errors.Add($"Attention heads ({Config.NumHeads}) not divisible by TP degree ({tp})");
+            if (Config.NumKVHeads % tp != 0)
+                errors.Add($"Local KV heads ({Config.NumKVHeads}) not divisible by TP degree ({tp})");
+            if (_numGlobalKVHeads % tp != 0)
+                errors.Add($"Global KV heads ({_numGlobalKVHeads}) not divisible by TP degree ({tp})");
+
+            // Check per-layer head dims are divisible
+            for (int l = 0; l < Config.NumLayers; l++)
+            {
+                int kvHeads = KVHeadsForLayer(l);
+                if (kvHeads % tp != 0)
+                {
+                    errors.Add($"Layer {l} KV heads ({kvHeads}) not divisible by TP degree ({tp})");
+                    break;
+                }
+            }
+
+            if (_numExperts > 0)
+            {
+                // Check expert FFN dims from weight shapes
+                for (int l = 0; l < Config.NumLayers; l++)
+                {
+                    if (!HasMoE(l)) continue;
+                    string gateKey = $"blk.{l}.ffn_gate_exps.0.weight";
+                    if (_quantWeights.TryGetValue(gateKey, out var qw) && qw.Ne1 % tp != 0)
+                    {
+                        errors.Add($"Layer {l} expert FFN ({qw.Ne1}) not divisible by TP degree ({tp})");
+                        break;
+                    }
+                    if (_weights.TryGetValue(gateKey, out var w) && w.Sizes[0] % tp != 0)
+                    {
+                        errors.Add($"Layer {l} expert FFN ({w.Sizes[0]}) not divisible by TP degree ({tp})");
+                        break;
+                    }
+                }
+            }
+
+            if (_backend != BackendType.Cuda)
+                errors.Add($"TP requires CUDA backend, got {_backend}");
+
+            if (errors.Count > 0)
+                throw new InvalidOperationException(
+                    $"Gemma4 TP validation failed:\n  " + string.Join("\n  ", errors));
+
+            Console.WriteLine($"  TP constraints validated: tp={tp}, " +
+                $"Heads={Config.NumHeads}, KVHeads local={Config.NumKVHeads}/global={_numGlobalKVHeads}");
+        }
+
+        // ====================================================================
+        // Weight sharding
+        // ====================================================================
+
+        private void ShardGemma4WeightsForTP()
+        {
+            // Attention: fused QKV (column) + output (row)
+            ShardWeightsForTensorParallelism(
+                columnParallelPatterns: new[] { "attn_qkv.weight" },
+                rowParallelPatterns: new[] { "attn_output.weight" });
+
+            // Dense FFN: gate_up (column) + down (row)
+            ShardWeightsForTensorParallelism(
+                columnParallelPatterns: new[] { "ffn_gate_up.weight" },
+                rowParallelPatterns: new[] { "ffn_down.weight" });
+
+            // MoE expert weights: tensor-parallel experts
+            if (_numExperts > 0)
+                ShardGemma4MoeWeightsForTP();
+
+            Console.WriteLine($"  Gemma4 TP weight sharding complete ({TpDegree} GPUs).");
+        }
+
+        private void ShardGemma4MoeWeightsForTP()
+        {
+            int tp = TpDegree;
+
+            for (int layer = 0; layer < Config.NumLayers; layer++)
+            {
+                if (!HasMoE(layer))
+                    continue;
+
+                string prefix = $"blk.{layer}.";
+
+                // Router weight: replicated (stays in _weights)
+
+                // Expert weights: column-parallel for gate/up, row-parallel for down
+                for (int e = 0; e < _numExperts; e++)
+                {
+                    // Check for fused gate_up first, then separate
+                    string fusedGateUpKey = prefix + $"ffn_gate_up_exps.{e}.weight";
+                    if (_weights.ContainsKey(fusedGateUpKey) || _quantWeights.ContainsKey(fusedGateUpKey))
+                    {
+                        ShardExpertColumnParallel(fusedGateUpKey);
+                    }
+                    else
+                    {
+                        ShardExpertColumnParallel(prefix + $"ffn_gate_exps.{e}.weight");
+                        ShardExpertColumnParallel(prefix + $"ffn_up_exps.{e}.weight");
+                    }
+                    ShardExpertRowParallel(prefix + $"ffn_down_exps.{e}.weight");
+                }
+            }
+        }
+
+        private void ShardExpertColumnParallel(string weightName)
+        {
+            int tp = TpDegree;
+
+            if (_quantWeights.TryGetValue(weightName, out var qw))
+            {
+                long rowsPerShard = qw.Ne1 / tp;
+                long rowBytes = NativeDequant.RowSize(qw.GgmlType, qw.Ne0);
+                long bytesPerShard = rowsPerShard * rowBytes;
+
+                var shards = new QuantizedWeight[tp];
+                for (int r = 0; r < tp; r++)
+                {
+                    IntPtr shardPtr = IntPtr.Add(qw.Data, (int)(r * bytesPerShard));
+                    shards[r] = QuantizedWeight.CreateExternalView(
+                        shardPtr, bytesPerShard, qw.GgmlType, qw.Ne0, rowsPerShard, qw);
+                }
+
+                _tpQuantWeights[weightName] = shards;
+                _quantWeights.Remove(weightName);
+                qw.Dispose();
+            }
+            else if (_weights.TryGetValue(weightName, out var w))
+            {
+                long shardSize = w.Sizes[0] / tp;
+                var shards = new Tensor[tp];
+                for (int r = 0; r < tp; r++)
+                {
+                    var view = w.Narrow(0, r * shardSize, shardSize);
+                    shards[r] = Ops.NewContiguous(view);
+                    view.Dispose();
+                }
+
+                _tpWeights[weightName] = shards;
+                _weights.Remove(weightName);
+                w.Dispose();
+            }
+        }
+
+        private void ShardExpertRowParallel(string weightName)
+        {
+            int tp = TpDegree;
+
+            if (_quantWeights.TryGetValue(weightName, out var qw))
+            {
+                var type = (GgmlTensorType)qw.GgmlType;
+                long blockSize = GgufFile.GetBlockSize(type);
+                long typeSize = GgufFile.GetTypeSize(type);
+                long blocksPerRow = qw.Ne0 / blockSize;
+                long blocksPerShard = blocksPerRow / tp;
+                long ne0PerShard = blocksPerShard * blockSize;
+                long srcRowBytes = NativeDequant.RowSize(qw.GgmlType, qw.Ne0);
+                long dstRowBytes = (ne0PerShard / blockSize) * typeSize;
+                long totalBytesPerShard = qw.Ne1 * dstRowBytes;
+                long blockBytesPerShard = blocksPerShard * typeSize;
+
+                var shards = new QuantizedWeight[tp];
+                for (int r = 0; r < tp; r++)
+                {
+                    IntPtr shardPtr = QuantizedWeight.AllocateBuffer(totalBytesPerShard);
+                    unsafe
+                    {
+                        byte* src = (byte*)qw.Data.ToPointer();
+                        byte* dst = (byte*)shardPtr.ToPointer();
+                        long srcBlockOffset = r * blocksPerShard * typeSize;
+                        for (long row = 0; row < qw.Ne1; row++)
+                        {
+                            Buffer.MemoryCopy(
+                                src + row * srcRowBytes + srcBlockOffset,
+                                dst + row * dstRowBytes,
+                                dstRowBytes, blockBytesPerShard);
+                        }
+                    }
+                    shards[r] = new QuantizedWeight(shardPtr, totalBytesPerShard,
+                        qw.GgmlType, ne0PerShard, qw.Ne1);
+                }
+
+                _tpQuantWeights[weightName] = shards;
+                _quantWeights.Remove(weightName);
+                qw.Dispose();
+            }
+            else if (_weights.TryGetValue(weightName, out var w))
+            {
+                long shardSize = w.Sizes[1] / tp;
+                var shards = new Tensor[tp];
+                for (int r = 0; r < tp; r++)
+                {
+                    var view = w.Narrow(1, r * shardSize, shardSize);
+                    shards[r] = Ops.NewContiguous(view);
+                    view.Dispose();
+                }
+
+                _tpWeights[weightName] = shards;
+                _weights.Remove(weightName);
+                w.Dispose();
+            }
+        }
+
+        // ====================================================================
+        // TP KV cache initialization
+        // ====================================================================
+
+        private void InitGemma4TpKVCache(int initialSeqLen, int maxSeqLen)
+        {
+            int tp = TpDegree;
+            DType kvDtype = _kvCacheDtype.ToDType();
+
+            _maxContextLength = maxSeqLen;
+            _tpKvCacheCapacity = initialSeqLen;
+            _tpKvCacheK = new Tensor[Config.NumLayers][];
+            _tpKvCacheV = new Tensor[Config.NumLayers][];
+
+            for (int l = 0; l < Config.NumLayers; l++)
+            {
+                int kvHeads = KVHeadsForLayer(l);
+                int kvHeadsPerGpu = kvHeads / tp;
+                int headDim = HeadDimForLayer(l);
+                int cacheLen = IsLocalLayer(l) ? Math.Min(_slidingWindow, initialSeqLen) : initialSeqLen;
+
+                _tpKvCacheK[l] = new Tensor[tp];
+                _tpKvCacheV[l] = new Tensor[tp];
+                for (int r = 0; r < tp; r++)
+                {
+                    var alloc = _tpGroup.GetAllocator(r);
+                    _tpKvCacheK[l][r] = new Tensor(alloc, kvDtype, kvHeadsPerGpu, cacheLen, headDim);
+                    _tpKvCacheV[l][r] = new Tensor(alloc, kvDtype, kvHeadsPerGpu, cacheLen, headDim);
+                    InitializeCacheTensor(_tpKvCacheK[l][r]);
+                    InitializeCacheTensor(_tpKvCacheV[l][r]);
+                }
+            }
+
+            Console.WriteLine($"  Gemma4 TP KV cache initialized: {tp} GPUs, " +
+                $"local KV/GPU={Config.NumKVHeads / tp}, global KV/GPU={_numGlobalKVHeads / tp}");
+        }
+
+        private void EnsureGemma4TpCacheCapacity(int requiredSeqLen)
+        {
+            if (requiredSeqLen <= _tpKvCacheCapacity)
+                return;
+            if (requiredSeqLen > _maxContextLength)
+                throw new InvalidOperationException(
+                    $"Requested sequence length {requiredSeqLen} exceeds configured max context {_maxContextLength}.");
+
+            int newCapacity = Math.Max(_tpKvCacheCapacity, 1);
+            while (newCapacity < requiredSeqLen)
+                newCapacity = Math.Min(_maxContextLength, newCapacity * 2);
+
+            int tp = TpDegree;
+            DType kvDtype = _kvCacheDtype.ToDType();
+
+            for (int l = 0; l < Config.NumLayers; l++)
+            {
+                if (IsLocalLayer(l))
+                    continue; // SWA layers never grow
+
+                int kvHeads = KVHeadsForLayer(l);
+                int kvHeadsPerGpu = kvHeads / tp;
+                int headDim = HeadDimForLayer(l);
+
+                for (int r = 0; r < tp; r++)
+                {
+                    var alloc = _tpGroup.GetAllocator(r);
+                    var newK = new Tensor(alloc, kvDtype, kvHeadsPerGpu, newCapacity, headDim);
+                    var newV = new Tensor(alloc, kvDtype, kvHeadsPerGpu, newCapacity, headDim);
+                    InitializeCacheTensor(newK);
+                    InitializeCacheTensor(newV);
+
+                    if (_cacheSeqLen > 0)
+                    {
+                        using var srcK = _tpKvCacheK[l][r].Narrow(1, 0, _cacheSeqLen);
+                        using var dstK = newK.Narrow(1, 0, _cacheSeqLen);
+                        Ops.Copy(dstK, srcK);
+
+                        using var srcV = _tpKvCacheV[l][r].Narrow(1, 0, _cacheSeqLen);
+                        using var dstV = newV.Narrow(1, 0, _cacheSeqLen);
+                        Ops.Copy(dstV, srcV);
+                    }
+
+                    _tpKvCacheK[l][r].Dispose();
+                    _tpKvCacheV[l][r].Dispose();
+                    _tpKvCacheK[l][r] = newK;
+                    _tpKvCacheV[l][r] = newV;
+                }
+            }
+
+            _tpKvCacheCapacity = newCapacity;
+            Console.WriteLine($"Expanded Gemma4 TP cache to {newCapacity} tokens ({tp} GPUs).");
+        }
+
+        // ====================================================================
+        // TP forward pass
+        // ====================================================================
+
+        private float[] ForwardTP(int[] tokens)
+        {
+            _forwardSw.Start();
+            int seqLen = tokens.Length;
+            int startPos = _cacheSeqLen;
+            int tp = TpDegree;
+            EnsureGemma4TpCacheCapacity(startPos + seqLen);
+
+            long t1 = Stopwatch.GetTimestamp();
+            Tensor hidden0 = Embedding(tokens);
+            _embTicks += Stopwatch.GetTimestamp() - t1;
+
+            // Gemma4 scales embeddings by sqrt(hidden_size).
+            ScaleEmbedding(hidden0);
+
+            // Broadcast embedding to all GPUs.
+            Tensor[] hidden = BroadcastTensorToAllRanks(hidden0);
+
+            for (int layer = 0; layer < Config.NumLayers; layer++)
+            {
+                hidden = Gemma4TransformerBlockTP(hidden, layer, seqLen, startPos);
+            }
+
+            // Final norm + LM head on GPU 0 only.
+            Tensor normed = RMSNormOp(hidden[0], "output_norm.weight");
+            for (int r = 0; r < tp; r++)
+                hidden[r].Dispose();
+
+            Tensor lastHidden;
+            if (seqLen > 1)
+            {
+                using var narrowed = normed.Narrow(0, seqLen - 1, 1);
+                lastHidden = Ops.NewContiguous(narrowed);
+            }
+            else
+            {
+                lastHidden = normed.CopyRef();
+            }
+            normed.Dispose();
+
+            long t2 = Stopwatch.GetTimestamp();
+            string outputWeight = _hasTiedOutput ? "token_embd.weight" : "output.weight";
+            Tensor logitsTensor = LinearForward(lastHidden, outputWeight);
+            _lmHeadTicks += Stopwatch.GetTimestamp() - t2;
+            lastHidden.Dispose();
+
+            if (_finalLogitSoftcap > 0f)
+                ApplyLogitSoftcap(logitsTensor);
+
+            long t3 = Stopwatch.GetTimestamp();
+            if (_logitsBuffer == null || _logitsBuffer.Length != Config.VocabSize)
+                _logitsBuffer = new float[Config.VocabSize];
+            _logitsBuffer = TensorToFloatArray(logitsTensor);
+            _logitsCopyTicks += Stopwatch.GetTimestamp() - t3;
+            logitsTensor.Dispose();
+
+            _cacheSeqLen += seqLen;
+            _forwardCount++;
+            _forwardSw.Stop();
+            return _logitsBuffer;
+        }
+
+        private Tensor[] Gemma4TransformerBlockTP(Tensor[] hidden, int layer, int seqLen, int startPos)
+        {
+            string prefix = $"blk.{layer}";
+            int tp = TpDegree;
+            bool isLocal = IsLocalLayer(layer);
+            int headDim = HeadDimForLayer(layer);
+            int numKVHeads = KVHeadsForLayer(layer);
+            int numHeadsPerGpu = Config.NumHeads / tp;
+            int numKVHeadsPerGpu = numKVHeads / tp;
+
+            // 1. Pre-attention norm (replicated).
+            Tensor[] normed = TpRMSNorm(hidden, $"{prefix}.attn_norm.weight");
+
+            // 2. Column-parallel fused QKV projection.
+            Tensor[] qkvFused = TpColumnParallelLinear(normed[0], $"{prefix}.attn_qkv.weight");
+            for (int r = 0; r < tp; r++)
+                normed[r].Dispose();
+
+            // 3. Per-GPU attention.
+            Tensor[] attnOut = Gemma4AttentionTP(qkvFused, layer, seqLen, startPos,
+                isLocal, headDim, numHeadsPerGpu, numKVHeadsPerGpu);
+
+            // 4. Row-parallel output projection + AllReduce.
+            Tensor reducedAttn = TpRowParallelLinear(attnOut, $"{prefix}.attn_output.weight");
+            for (int r = 0; r < tp; r++)
+                attnOut[r].Dispose();
+
+            // 5. Broadcast + post-attention norm + residual.
+            Tensor[] attnReplicated = BroadcastTensorToAllRanks(reducedAttn);
+            Tensor[] postAttnNormed = TpRMSNorm(attnReplicated, $"{prefix}.post_attention_norm.weight");
+            for (int r = 1; r < tp; r++)
+                attnReplicated[r].Dispose();
+            reducedAttn.Dispose();
+
+            TpResidualAdd(postAttnNormed, hidden);
+            for (int r = 0; r < tp; r++)
+                hidden[r].Dispose();
+
+            // 6. FFN (dense or MoE).
+            if (HasMoE(layer))
+                return Gemma4MoEBlockTP(postAttnNormed, layer, seqLen, prefix);
+            else
+                return Gemma4DenseFFNBlockTP(postAttnNormed, layer, seqLen, prefix);
+        }
+
+        private Tensor[] Gemma4AttentionTP(Tensor[] qkvFused, int layer, int seqLen, int startPos,
+            bool isLocal, int headDim, int numHeadsPerGpu, int numKVHeadsPerGpu)
+        {
+            int tp = TpDegree;
+            int qDimPerGpu = numHeadsPerGpu * headDim;
+            int kDimPerGpu = numKVHeadsPerGpu * headDim;
+            int totalSeqLen = startPos + seqLen;
+            string prefix = $"blk.{layer}";
+            float ropeBase = isLocal ? _ropeLocalBase : _ropeGlobalBase;
+
+            var results = new Tensor[tp];
+
+            for (int r = 0; r < tp; r++)
+            {
+                var alloc = _tpGroup.GetAllocator(r);
+
+                // Split Q, K, V from fused QKV output.
+                Tensor qTensor, kTensor, vTensor;
+                if (seqLen == 1)
+                {
+                    qTensor = qkvFused[r].Narrow(1, 0, qDimPerGpu);
+                    kTensor = qkvFused[r].Narrow(1, qDimPerGpu, kDimPerGpu);
+                    vTensor = qkvFused[r].Narrow(1, qDimPerGpu + kDimPerGpu, kDimPerGpu);
+                    qkvFused[r].Dispose();
+                }
+                else
+                {
+                    using (var qView = qkvFused[r].Narrow(1, 0, qDimPerGpu))
+                        qTensor = Ops.NewContiguous(qView);
+                    using (var kView = qkvFused[r].Narrow(1, qDimPerGpu, kDimPerGpu))
+                        kTensor = Ops.NewContiguous(kView);
+                    using (var vView = qkvFused[r].Narrow(1, qDimPerGpu + kDimPerGpu, kDimPerGpu))
+                        vTensor = Ops.NewContiguous(vView);
+                    qkvFused[r].Dispose();
+                }
+
+                // QK norm (per-GPU, replicated weights).
+                qTensor = ApplyGemma4QKNormTP(qTensor, $"{prefix}.attn_q_norm.weight", numHeadsPerGpu, headDim, seqLen, r);
+                kTensor = ApplyGemma4QKNormTP(kTensor, $"{prefix}.attn_k_norm.weight", numKVHeadsPerGpu, headDim, seqLen, r);
+
+                // RoPE.
+                qTensor = ApplyGemma4RoPETP(qTensor, numHeadsPerGpu, headDim, seqLen, startPos, ropeBase);
+                kTensor = ApplyGemma4RoPETP(kTensor, numKVHeadsPerGpu, headDim, seqLen, startPos, ropeBase);
+
+                // Q scaling: multiply by 1/sqrt(headDim).
+                float qScale = 1f / MathF.Sqrt(headDim);
+                Ops.Mul(qTensor, qTensor, qScale);
+
+                if (seqLen == 1)
+                {
+                    // Decode: copy K/V to per-GPU cache, run attention.
+                    CopyToCacheDecode(_tpKvCacheK[layer][r], kTensor, _tpKvCacheV[layer][r], vTensor,
+                        numKVHeadsPerGpu, headDim, startPos);
+                    kTensor.Dispose();
+                    vTensor.Dispose();
+
+                    int attendLen = isLocal ? Math.Min(totalSeqLen, _slidingWindow) : totalSeqLen;
+                    int attendStart = totalSeqLen - attendLen;
+
+                    var attnResult = new Tensor(alloc, DType.Float32, 1, numHeadsPerGpu * headDim);
+                    AttentionDecodeWithWindow(qTensor, _tpKvCacheK[layer][r], _tpKvCacheV[layer][r], attnResult,
+                        numHeadsPerGpu, numKVHeadsPerGpu, headDim, headDim,
+                        attendStart, totalSeqLen, 1f);
+                    qTensor.Dispose();
+
+                    results[r] = attnResult;
+                }
+                else
+                {
+                    // Prefill path.
+                    Tensor qHeads = ReshapeToHeads(qTensor, numHeadsPerGpu, seqLen, headDim);
+                    qTensor.Dispose();
+                    Tensor kHeads = ReshapeToHeads(kTensor, numKVHeadsPerGpu, seqLen, headDim);
+                    kTensor.Dispose();
+                    Tensor vHeads = ReshapeToHeads(vTensor, numKVHeadsPerGpu, seqLen, headDim);
+                    vTensor.Dispose();
+
+                    CopyToCache(_tpKvCacheK[layer][r], kHeads, startPos, seqLen);
+                    CopyToCache(_tpKvCacheV[layer][r], vHeads, startPos, seqLen);
+                    kHeads.Dispose();
+                    vHeads.Dispose();
+
+                    int groupSize = numHeadsPerGpu / numKVHeadsPerGpu;
+                    Tensor kExpanded = ExpandKVHeads(_tpKvCacheK[layer][r], groupSize, totalSeqLen);
+                    Tensor vExpanded = ExpandKVHeads(_tpKvCacheV[layer][r], groupSize, totalSeqLen);
+
+                    using var kT = kExpanded.Transpose(1, 2);
+                    var scores = new Tensor(alloc, DType.Float32, numHeadsPerGpu, seqLen, totalSeqLen);
+                    Ops.AddmmBatch(scores, 0, scores, 1f, qHeads, kT);
+                    qHeads.Dispose();
+                    kExpanded.Dispose();
+
+                    int windowSize = isLocal ? _slidingWindow : 0;
+                    ApplyCausalMask(scores, seqLen, totalSeqLen, windowSize);
+                    Ops.Softmax(scores, scores);
+
+                    var attnOutTensor = new Tensor(alloc, DType.Float32, numHeadsPerGpu, seqLen, headDim);
+                    Ops.AddmmBatch(attnOutTensor, 0, attnOutTensor, 1.0f, scores, vExpanded);
+                    scores.Dispose();
+                    vExpanded.Dispose();
+
+                    Tensor flatOutput = ReshapeFromHeads(attnOutTensor, numHeadsPerGpu, seqLen, headDim);
+                    attnOutTensor.Dispose();
+
+                    results[r] = flatOutput;
+                }
+            }
+
+            return results;
+        }
+
+        private Tensor ApplyGemma4QKNormTP(Tensor data, string weightName, int numHeads, int headDim, int seqLen, int rank)
+        {
+            var alpha = _weights[weightName];
+            Tensor alphaLocal = ReplicateTensorToRank(alpha, rank);
+
+            if (seqLen == 1)
+            {
+                RMSNormInPlace(data, alphaLocal, numHeads, headDim, Config.Eps);
+                if (!ReferenceEquals(alphaLocal, alpha)) alphaLocal.Dispose();
+                return data;
+            }
+
+            using var reshaped = data.View(seqLen * numHeads, headDim);
+            Tensor normed = Ops.RMSNorm(null, reshaped, alphaLocal, null, Config.Eps);
+            data.Dispose();
+            if (!ReferenceEquals(alphaLocal, alpha)) alphaLocal.Dispose();
+
+            Tensor result = normed.View(seqLen, numHeads * headDim);
+            normed.Dispose();
+            return result;
+        }
+
+        private Tensor ApplyGemma4RoPETP(Tensor data, int numHeads, int headDim, int seqLen, int startPos,
+            float ropeBase)
+        {
+            return ApplyRoPEPrefill(data, numHeads, headDim, seqLen, startPos, ropeBase);
+        }
+
+        // ====================================================================
+        // Dense FFN block under TP
+        // ====================================================================
+
+        private Tensor[] Gemma4DenseFFNBlockTP(Tensor[] hidden, int layer, int seqLen, string prefix)
+        {
+            int tp = TpDegree;
+
+            // 1. Pre-FFN norm (replicated).
+            Tensor[] ffnNormed = TpRMSNorm(hidden, $"{prefix}.ffn_norm.weight");
+
+            // 2. Column-parallel gate/up projection.
+            Tensor[] gateUp = TpColumnParallelLinear(ffnNormed[0], $"{prefix}.ffn_gate_up.weight");
+            for (int r = 0; r < tp; r++)
+                ffnNormed[r].Dispose();
+
+            // 3. Per-GPU GELU·mul (GeGLU activation).
+            int halfDim = (int)(gateUp[0].Sizes[1] / 2);
+            Tensor[] gateResults = new Tensor[tp];
+            for (int r = 0; r < tp; r++)
+            {
+                Tensor gate, up;
+                if (seqLen == 1)
+                {
+                    gate = gateUp[r].Narrow(1, 0, halfDim);
+                    up = gateUp[r].Narrow(1, halfDim, halfDim);
+                }
+                else
+                {
+                    using var gView = gateUp[r].Narrow(1, 0, halfDim);
+                    gate = Ops.NewContiguous(gView);
+                    using var uView = gateUp[r].Narrow(1, halfDim, halfDim);
+                    up = Ops.NewContiguous(uView);
+                }
+                gateUp[r].Dispose();
+
+                Ops.GELUMul(gate, gate, up);
+                up.Dispose();
+                gateResults[r] = gate;
+            }
+
+            // 4. Row-parallel down projection + AllReduce.
+            Tensor ffnOut = TpRowParallelLinear(gateResults, $"{prefix}.ffn_down.weight");
+            for (int r = 0; r < tp; r++)
+                gateResults[r].Dispose();
+
+            // 5. Broadcast + post-FFN norm + residual.
+            Tensor[] ffnReplicated = BroadcastTensorToAllRanks(ffnOut);
+            string postFfnNormKey = $"{prefix}.post_ffw_norm.weight";
+            if (!_weights.ContainsKey(postFfnNormKey))
+                postFfnNormKey = $"{prefix}.ffn_post_norm.weight";
+            Tensor[] postFfnNormed = TpRMSNorm(ffnReplicated, postFfnNormKey);
+            for (int r = 1; r < tp; r++)
+                ffnReplicated[r].Dispose();
+            ffnOut.Dispose();
+
+            TpResidualAdd(hidden, postFfnNormed);
+            for (int r = 0; r < tp; r++)
+                postFfnNormed[r].Dispose();
+
+            return hidden;
+        }
+
+        // ====================================================================
+        // MoE block under TP
+        // ====================================================================
+
+        private Tensor[] Gemma4MoEBlockTP(Tensor[] hidden, int layer, int seqLen, string prefix)
+        {
+            int tp = TpDegree;
+            int hiddenSize = Config.HiddenSize;
+
+            // Gemma4 MoE layers have BOTH a dense FFN and MoE FFN.
+            // Step 1: Dense FFN (gate_up + GELU + down) with post_ffw_norm_1
+            Tensor[] ffnNormed = TpRMSNorm(hidden, $"{prefix}.ffn_norm.weight");
+            Tensor[] gateUp = TpColumnParallelLinear(ffnNormed[0], $"{prefix}.ffn_gate_up.weight");
+            for (int r = 0; r < tp; r++)
+                ffnNormed[r].Dispose();
+
+            int halfDim = (int)(gateUp[0].Sizes[1] / 2);
+            Tensor[] denseResults = new Tensor[tp];
+            for (int r = 0; r < tp; r++)
+            {
+                Tensor gate, up;
+                if (seqLen == 1)
+                {
+                    gate = gateUp[r].Narrow(1, 0, halfDim);
+                    up = gateUp[r].Narrow(1, halfDim, halfDim);
+                }
+                else
+                {
+                    using var gView = gateUp[r].Narrow(1, 0, halfDim);
+                    gate = Ops.NewContiguous(gView);
+                    using var uView = gateUp[r].Narrow(1, halfDim, halfDim);
+                    up = Ops.NewContiguous(uView);
+                }
+                gateUp[r].Dispose();
+                Ops.GELUMul(gate, gate, up);
+                up.Dispose();
+                denseResults[r] = gate;
+            }
+
+            Tensor denseFFNOut = TpRowParallelLinear(denseResults, $"{prefix}.ffn_down.weight");
+            for (int r = 0; r < tp; r++)
+                denseResults[r].Dispose();
+
+            // Apply post_ffw_norm_1 to dense FFN output
+            Tensor[] denseReplicated = BroadcastTensorToAllRanks(denseFFNOut);
+            string postNorm1Key = $"{prefix}.post_ffw_norm_1.weight";
+            if (!_weights.ContainsKey(postNorm1Key))
+                postNorm1Key = $"{prefix}.ffn_post_norm_1.weight";
+            Tensor[] denseNormed = TpRMSNorm(denseReplicated, postNorm1Key);
+            for (int r = 1; r < tp; r++)
+                denseReplicated[r].Dispose();
+            denseFFNOut.Dispose();
+
+            // Step 2: MoE FFN (tensor-parallel experts)
+            // Router is replicated — every rank computes identical routing.
+            var moeResults = new Tensor[tp];
+            for (int r = 0; r < tp; r++)
+            {
+                var alloc = _tpGroup.GetAllocator(r);
+                var localInput = denseNormed[r]; // Use post-norm-1 output as MoE input
+
+                // Router logits (replicated weight).
+                Tensor routerLogits = LinearForward(localInput, $"{prefix}.ffn_gate_inp.weight");
+                float[] routePtr = TensorToFloatArray(routerLogits);
+                routerLogits.Dispose();
+
+                // Top-K selection.
+                var (topExperts, routeWeights) = SelectGemma4TopKExperts(routePtr);
+
+                // Accumulate expert outputs.
+                var output = new Tensor(alloc, DType.Float32, seqLen, hiddenSize);
+                Ops.Fill(output, 0f);
+
+                for (int k = 0; k < _numExpertsUsed; k++)
+                {
+                    int expertIdx = topExperts[k];
+                    float weight = routeWeights[k];
+
+                    // Check for fused gate_up first
+                    string fusedGateUpKey = prefix + $"ffn_gate_up_exps.{expertIdx}.weight";
+                    Tensor gateOut;
+                    if (_tpQuantWeights.ContainsKey(fusedGateUpKey) || _tpWeights.ContainsKey(fusedGateUpKey))
+                    {
+                        Tensor fusedOut = TpExpertLinear(localInput, fusedGateUpKey, r, seqLen);
+                        int expertHalf = (int)(fusedOut.Sizes[1] / 2);
+                        Tensor gatePart, upPart;
+                        if (seqLen == 1)
+                        {
+                            gatePart = fusedOut.Narrow(1, 0, expertHalf);
+                            upPart = fusedOut.Narrow(1, expertHalf, expertHalf);
+                        }
+                        else
+                        {
+                            using var gView = fusedOut.Narrow(1, 0, expertHalf);
+                            gatePart = Ops.NewContiguous(gView);
+                            using var uView = fusedOut.Narrow(1, expertHalf, expertHalf);
+                            upPart = Ops.NewContiguous(uView);
+                        }
+                        fusedOut.Dispose();
+                        Ops.GELUMul(gatePart, gatePart, upPart);
+                        upPart.Dispose();
+                        gateOut = gatePart;
+                    }
+                    else
+                    {
+                        string gateKey = prefix + $"ffn_gate_exps.{expertIdx}.weight";
+                        string upKey = prefix + $"ffn_up_exps.{expertIdx}.weight";
+                        Tensor g = TpExpertLinear(localInput, gateKey, r, seqLen);
+                        Tensor u = TpExpertLinear(localInput, upKey, r, seqLen);
+                        Ops.GELUMul(g, g, u);
+                        u.Dispose();
+                        gateOut = g;
+                    }
+
+                    string downKey = prefix + $"ffn_down_exps.{expertIdx}.weight";
+                    Tensor downOut = TpExpertLinear(gateOut, downKey, r, seqLen);
+                    gateOut.Dispose();
+
+                    // Apply per-expert scale if present
+                    float expertScale = GetGemma4ExpertScale(layer, expertIdx);
+                    Ops.Mul(downOut, downOut, weight * expertScale);
+                    Ops.Add(output, output, downOut);
+                    downOut.Dispose();
+                }
+
+                moeResults[r] = output;
+            }
+
+            for (int r = 0; r < tp; r++)
+                denseNormed[r].Dispose();
+
+            // AllReduce MoE results.
+            _tpGroup.AllReduce(moeResults);
+
+            // Apply post_ffw_norm_2 to MoE output
+            string postNorm2Key = $"{prefix}.post_ffw_norm_2.weight";
+            if (!_weights.ContainsKey(postNorm2Key))
+                postNorm2Key = $"{prefix}.ffn_post_norm_2.weight";
+            Tensor[] moeNormed = TpRMSNorm(moeResults, postNorm2Key);
+            for (int r = 1; r < tp; r++)
+                moeResults[r].Dispose();
+
+            // Add dense FFN (post-norm-1) + MoE (post-norm-2)
+            TpResidualAdd(denseNormed, moeNormed);
+            for (int r = 0; r < tp; r++)
+                moeNormed[r].Dispose();
+
+            // Apply final post_ffw_norm + residual to original hidden
+            string postFfnNormKey = $"{prefix}.post_ffw_norm.weight";
+            if (!_weights.ContainsKey(postFfnNormKey))
+                postFfnNormKey = $"{prefix}.ffn_post_norm.weight";
+
+            // denseNormed now holds (dense + moe), apply final norm
+            Tensor[] finalNormed = TpRMSNorm(denseNormed, postFfnNormKey);
+            TpResidualAdd(hidden, finalNormed);
+            for (int r = 0; r < tp; r++)
+            {
+                finalNormed[r].Dispose();
+                denseNormed[r].Dispose();
+            }
+
+            return hidden;
+        }
+
+        private Tensor TpExpertLinear(Tensor input, string weightName, int rank, int seqLen)
+        {
+            var alloc = _tpGroup.GetAllocator(rank);
+
+            if (_tpQuantWeights.TryGetValue(weightName, out var qShards))
+            {
+                var qw = qShards[rank];
+                int outDim = (int)qw.Ne1;
+                var result = new Tensor(alloc, DType.Float32, seqLen, outDim);
+                AddmmQuantManaged(result, ReplicateTensorToRank(input, rank), qw);
+                return result;
+            }
+            else if (_tpWeights.TryGetValue(weightName, out var wShards))
+            {
+                var w = wShards[rank];
+                int outDim = (int)w.Sizes[0];
+                var result = new Tensor(alloc, DType.Float32, seqLen, outDim);
+                using var wT = w.Transpose();
+                var localInput = ReplicateTensorToRank(input, rank);
+                Ops.Addmm(result, 0, result, 1.0f, localInput, wT);
+                if (!ReferenceEquals(localInput, input)) localInput.Dispose();
+                return result;
+            }
+
+            throw new KeyNotFoundException($"TP expert weight '{weightName}' not found.");
+        }
+
+        private (int[] experts, float[] weights) SelectGemma4TopKExperts(float[] routerLogits)
+        {
+            int numExperts = routerLogits.Length;
+            var indices = new int[numExperts];
+            for (int i = 0; i < numExperts; i++) indices[i] = i;
+            Array.Sort(indices, (a, b) => routerLogits[b].CompareTo(routerLogits[a]));
+
+            var topExperts = new int[_numExpertsUsed];
+            var topWeights = new float[_numExpertsUsed];
+            float sum = 0;
+            for (int k = 0; k < _numExpertsUsed; k++)
+            {
+                topExperts[k] = indices[k];
+                topWeights[k] = routerLogits[indices[k]];
+                sum += topWeights[k];
+            }
+
+            if (sum > 0)
+                for (int k = 0; k < _numExpertsUsed; k++)
+                    topWeights[k] /= sum;
+
+            return (topExperts, topWeights);
+        }
+
+        private float GetGemma4ExpertScale(int layer, int expertIdx)
+        {
+            if (_layerPerExpertScale != null && _layerPerExpertScale[layer] != null
+                && expertIdx < _layerPerExpertScale[layer].Length)
+                return _layerPerExpertScale[layer][expertIdx];
+            return 1.0f;
+        }
+
+        // ====================================================================
+        // TP-aware Dispose
+        // ====================================================================
+
+        private void DisposeGemma4TpState()
+        {
+            if (_tpKvCacheK != null)
+            {
+                for (int l = 0; l < _tpKvCacheK.Length; l++)
+                {
+                    if (_tpKvCacheK[l] == null) continue;
+                    for (int r = 0; r < _tpKvCacheK[l].Length; r++)
+                    {
+                        _tpKvCacheK[l][r]?.Dispose();
+                        _tpKvCacheV[l][r]?.Dispose();
+                    }
+                }
+            }
+        }
+    }
+}

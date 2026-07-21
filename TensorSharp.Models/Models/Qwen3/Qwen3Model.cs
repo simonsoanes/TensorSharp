@@ -41,8 +41,8 @@ namespace TensorSharp.Models
         private bool _canUseNativeLayerDecode;
         private bool _kvCacheHostDirty;
 
-        public Qwen3Model(string ggufPath, BackendType backend)
-            : base(ggufPath, backend)
+        public Qwen3Model(string ggufPath, BackendType backend, int tpDegree = 1)
+            : base(ggufPath, backend, tpDegree)
         {
             string arch = _gguf.GetString("general.architecture") ?? "qwen3";
             Config = new ModelConfig { Architecture = arch };
@@ -59,12 +59,27 @@ namespace TensorSharp.Models
             LoadWeights();
             FuseQKVWeights();
             FuseGateUpWeights();
-            PrepareCudaQuantizedWeightsForInference();
+
+            if (IsTensorParallel)
+            {
+                ShardQwen3WeightsForTP();
+                PrepareCudaQuantizedWeightsForInferenceTP();
+            }
+            else
+            {
+                PrepareCudaQuantizedWeightsForInference();
+            }
+
             int maxContextLength = ResolveConfiguredContextLength();
             int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
             if (initialCacheLength < maxContextLength)
                 Console.WriteLine($"Initial {_backend} KV cache allocation: {initialCacheLength} tokens (grows on demand up to {maxContextLength}).");
-            InitKVCache(initialCacheLength, maxContextLength);
+
+            if (IsTensorParallel)
+                InitTpKVCache(initialCacheLength, maxContextLength);
+            else
+                InitKVCache(initialCacheLength, maxContextLength);
+
             PrecomputeConstants();
             BuildModelDecodeArrays();
             DetermineNativeLayerDecodeAvailability();
@@ -280,6 +295,9 @@ namespace TensorSharp.Models
 
         public override float[] Forward(int[] tokens)
         {
+            if (IsTensorParallel)
+                return ForwardTP(tokens);
+
             _forwardSw.Start();
             int seqLen = tokens.Length;
             int startPos = _cacheSeqLen;
@@ -841,6 +859,13 @@ namespace TensorSharp.Models
                 foreach (var t in _kvCacheK) t?.Dispose();
             if (_kvCacheV != null)
                 foreach (var t in _kvCacheV) t?.Dispose();
+
+            if (_tpKvCacheK != null)
+                foreach (var layer in _tpKvCacheK)
+                    foreach (var t in layer) t?.Dispose();
+            if (_tpKvCacheV != null)
+                foreach (var layer in _tpKvCacheV)
+                    foreach (var t in layer) t?.Dispose();
 
             base.Dispose();
         }

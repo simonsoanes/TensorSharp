@@ -162,8 +162,8 @@ namespace TensorSharp.Models
         private float[][] _layerDownBiasStacked;    // shape [hidden_dim * num_experts] per layer
         private int _layerStackedReady;             // 1 once InitMoeStackedWeights has run
 
-        public GptOssModel(string ggufPath, BackendType backend)
-            : base(ggufPath, backend)
+        public GptOssModel(string ggufPath, BackendType backend, int tpDegree = 1)
+            : base(ggufPath, backend, tpDegree)
         {
             string arch = _gguf.GetString("general.architecture") ?? "gpt-oss";
             Config = new ModelConfig { Architecture = arch };
@@ -196,12 +196,28 @@ namespace TensorSharp.Models
             float[][] preFuseUpBias = SnapshotPerExpertBiases("ffn_up_exps", _expertFfnLength);
             FuseExpertGateUpWeights();
             FuseQKVWeights();
-            PrepareCudaQuantizedWeightsForInference();
+
+            if (IsTensorParallel)
+            {
+                ValidateGptOssTpConstraints();
+                ShardGptOssWeightsForTP();
+                PrepareCudaQuantizedWeightsForInferenceTP();
+            }
+            else
+            {
+                PrepareCudaQuantizedWeightsForInference();
+            }
+
             int maxContextLength = ResolveConfiguredContextLength();
             int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
             if (initialCacheLength < maxContextLength)
                 Console.WriteLine($"Initial {_backend} KV cache allocation: {initialCacheLength} tokens (grows on demand up to {maxContextLength}).");
-            InitKVCache(initialCacheLength, maxContextLength);
+
+            if (IsTensorParallel)
+                InitGptOssTpKVCache(initialCacheLength, maxContextLength);
+            else
+                InitKVCache(initialCacheLength, maxContextLength);
+
             PrecomputeConstants();
             InitMoeStackedWeights(preFuseGateBias, preFuseUpBias);
         }
@@ -759,6 +775,9 @@ namespace TensorSharp.Models
 
         public override float[] Forward(int[] tokens)
         {
+            if (IsTensorParallel)
+                return ForwardTP(tokens);
+
             // Long prompts (seqLen > the fused-attention cap) are chunked so the
             // attention always runs on the fused on-device kernel rather than the
             // per-op host path that builds an O(seqLen^2) scores tensor per layer
@@ -1943,6 +1962,7 @@ namespace TensorSharp.Models
                 foreach (var t in _kvCacheK) t?.Dispose();
             if (_kvCacheV != null)
                 foreach (var t in _kvCacheV) t?.Dispose();
+            DisposeGptOssTpState();
             if (_layerSinksMlx != null)
                 foreach (var t in _layerSinksMlx) t?.Dispose();
             if (_sinksHandles != null)

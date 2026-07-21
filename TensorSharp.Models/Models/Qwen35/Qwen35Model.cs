@@ -335,8 +335,8 @@ namespace TensorSharp.Models
         private long _mlxEvalBoundaryTicks;
         private long _mlxCacheEvalTicks;
 
-        public Qwen35Model(string ggufPath, BackendType backend)
-            : base(ggufPath, backend)
+        public Qwen35Model(string ggufPath, BackendType backend, int tpDegree = 1)
+            : base(ggufPath, backend, tpDegree)
         {
             string arch = _gguf.GetString("general.architecture") ?? "qwen35";
             Config = new ModelConfig { Architecture = arch };
@@ -429,12 +429,28 @@ namespace TensorSharp.Models
             DetectMoeLayers();
             BuildLayerKeys();
             InitMoeBuffers();
-            PrepareCudaQuantizedWeightsForInference();
+
+            if (IsTensorParallel)
+            {
+                ValidateTpConstraints();
+                ShardQwen35WeightsForTP();
+                PrepareCudaQuantizedWeightsForInferenceTP();
+            }
+            else
+            {
+                PrepareCudaQuantizedWeightsForInference();
+            }
+
             int maxContextLength = ResolveConfiguredContextLength();
             int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
             if (initialCacheLength < maxContextLength)
                 Console.WriteLine($"Initial {_backend} KV cache allocation: {initialCacheLength} tokens (grows on demand up to {maxContextLength}).");
-            InitCaches(initialCacheLength, maxContextLength);
+
+            if (IsTensorParallel)
+                InitTpCaches(initialCacheLength, maxContextLength);
+            else
+                InitCaches(initialCacheLength, maxContextLength);
+
             PrecomputeRoPE();
             InitGDNBuffers();
             CacheRecurrentWeights();
@@ -959,6 +975,16 @@ namespace TensorSharp.Models
 
         public override void ResetKVCache()
         {
+            if (IsTensorParallel)
+            {
+                ResetTpKVCache();
+                _cacheSeqLen = 0;
+                _linearTicks = _attnTicks = _normTicks = _embTicks = _lmHeadTicks = _logitsCopyTicks = 0;
+                _forwardCount = 0;
+                _forwardSw.Reset();
+                return;
+            }
+
             for (int l = 0; l < TotalLayerCount; l++)
             {
                 if (!_isRecurrent[l])
@@ -1654,6 +1680,9 @@ namespace TensorSharp.Models
 
         public override float[] Forward(int[] tokens)
         {
+            if (IsTensorParallel)
+                return ForwardTP(tokens);
+
             _forwardSw.Start();
             int seqLen = tokens.Length;
             int startPos = _cacheSeqLen;
@@ -5339,6 +5368,7 @@ namespace TensorSharp.Models
                 foreach (var cache in _mlxAttentionCache) cache?.Dispose();
 
             DisposeGdnState();
+            DisposeTpState();
 
             _moeTokenInput?.Dispose();
             _moeGateBuf?.Dispose();
