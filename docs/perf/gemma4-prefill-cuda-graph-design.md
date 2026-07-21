@@ -96,7 +96,7 @@ From `ExternalProjects/ggml/src/ggml-cuda/ggml-cuda.cu`:
 - `ggml_cuda_graph_update_required` reports a change if node count, or any node's op / shape
   (`ne`) / strides (`nb`) / **data pointer** differ from the last capture.
 
-`TSGgml_Gemma4ModelVerify` today (`ggml_ops_transformer.cpp` ~6144):
+`TSGgml_Gemma4ModelVerify` today (`ggml_ops_gemma4_verify.cpp`; before the 2026-07 file split, `ggml_ops_transformer.cpp` ~6144):
 
 1. **Builds a fresh `ggml_context` + `ggml_new_graph_custom` every chunk.** → `nodes[0]` is a new
    pointer each call → new (empty) cache entry → **warmup never completes.** *(Primary blocker.)*
@@ -283,8 +283,9 @@ kill-switch.
 
 ## 10. Key code touchpoints
 
-- `TensorSharp.GGML.Native/ggml_ops_transformer.cpp` — `TSGgml_Gemma4ModelVerify` (build/mask/
-  KV-write/compute), `get_causal_mask`, `flash_attn_kv_length`.
+- `TensorSharp.GGML.Native/ggml_ops_gemma4_verify.cpp` — `TSGgml_Gemma4ModelVerify` (build/mask/
+  KV-write/compute), `get_causal_mask`; `flash_attn_kv_length` lives in
+  `ggml_ops_transformer_common.h`.
 - `TensorSharp.Models/Models/Gemma4/Gemma4Model.cs` — `CanUseWholeModelPrefillVerify`,
   `NativeGemma4ModelVerify` marshalling, `EnsureCacheCapacity` (R3), decode-graph cache pattern
   to mirror (`Gemma4ResetDecodeCache`).

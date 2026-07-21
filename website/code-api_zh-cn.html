@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>C# 库 / 代码 — TensorSharp 维基</title>
-  <meta name="description" content="将 TensorSharp 嵌入你的 .NET 应用：NuGet 包、用 ModelBase.Create 加载模型、解码循环与 SamplingConfig。">
+  <meta name="description" content="从源码将 TensorSharp 嵌入 .NET 应用：项目引用、ModelBase.Create、正确的 prefill/decode 循环与 SamplingConfig。">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
   <script>try{var t=localStorage.getItem('ts-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.classList.toggle('dark',t==='dark');}catch(e){}</script>
@@ -16,10 +16,10 @@
 <main class="content" id="content">
   <div class="breadcrumb"><a href="index_zh-cn.html">首页</a> › C# 库 / 代码</div>
   <h1>从 C# 使用 TensorSharp</h1>
-  <p class="lede">TensorSharp 是一个真正的 .NET 库，而不仅是一个二进制。引用 NuGet 包，直接从你自己的代码驱动推理 —— 当你想在现有服务内进行推理、又不想经过 HTTP 跳转时非常有用。</p>
+  <p class="lede">TensorSharp 是一个真正的 .NET 库，而不只是可执行文件。从源码 checkout 引用其项目，即可在不经过 HTTP 的情况下从自己的代码驱动推理。</p>
 
-  <h2 id="packages">NuGet 包</h2>
-  <p>仓库按包边界拆分，使用者只依赖自己需要的层。</p>
+  <h2 id="packages">项目与包边界</h2>
+  <p>仓库按可发布包边界拆分。下方名称是项目/包 ID，但当前 Runtime/Models/Backends/CLI/Server 包<strong>尚未发布到 NuGet.org</strong>。</p>
   <div class="table-scroll">
   <table>
     <thead><tr><th>包</th><th>命名空间</th><th>职责</th></tr></thead>
@@ -35,10 +35,9 @@
     </tbody>
   </table>
   </div>
-  <p>对于典型的嵌入场景，你引用 <code>TensorSharp.Models</code>（它会拉入 <code>Core</code> + <code>Runtime</code>）以及面向你硬件的后端包（如 <code>TensorSharp.Backends.GGML</code>）。</p>
-  <pre data-lang="bash"><code>dotnet add package TensorSharp.Models
-dotnet add package TensorSharp.Backends.GGML</code></pre>
-  <div class="callout note"><div class="ic">📦</div><p>NuGet 包是<strong>仅托管</strong>的 —— 原生 GGML/CUDA/MLX 库并未内嵌。请先构建它们一次（见<a href="backends_zh-cn.html#native-build">后端</a>）或使用自包含平台二进制，并确保运行时能找到原生库。</p></div>
+  <p>典型嵌入场景只需引用 <code>TensorSharp.Models.csproj</code>；它已引用 Core、Runtime 与各后端项目。若你的应用与 TensorSharp checkout 同级：</p>
+  <pre data-lang="bash"><code>dotnet add reference ../TensorSharp/TensorSharp.Models/TensorSharp.Models.csproj</code></pre>
+  <div class="callout warn"><div class="ic">📦</div><p>目前不要运行 <code>dotnet add package TensorSharp.Models</code>：NuGet.org 上没有该 ID 的当前包。源码构建默认编译原生 GGML/MLX；开发托管 CPU 路径时传入 <code>-p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true</code>，或按<a href="backends_zh-cn.html#native-build">后端</a>页面构建原生库。</p></div>
 
   <h2 id="quickstart">最小示例 —— 加载、生成、解码</h2>
   <p>每个模型都以相同方式加载：<code>ModelBase.Create()</code> 读取 GGUF 元数据并实例化正确的架构。从这里开始你做分词、运行前向、采样并解码。</p>
@@ -48,8 +47,9 @@ using System.Linq;
 using TensorSharp.Models;
 using TensorSharp.Runtime;
 
-// 1. 加载任意 GGUF 模型 —— 架构从元数据自动识别。
-using var model = ModelBase.Create("Qwen3-4B-Q8_0.gguf", BackendType.GgmlCuda);
+// 1. 加载任意受支持的 GGUF —— 架构从元数据自动识别。
+//    按你的构建选择 BackendType：GgmlCuda、GgmlMetal、GgmlVulkan 或 GgmlCpu。
+using var model = ModelBase.Create("gemma-4-E4B-it-Q8_0.gguf", BackendType.GgmlCuda);
 
 // 2. 配置采样（默认值与 Ollama 一致：temp 0.8、top_k 40、top_p 0.9）。
 var sampling = new SamplingConfig { Temperature = 0.7f, TopP = 0.9f, TopK = 40 };
@@ -60,17 +60,20 @@ var tokens = model.Tokenizer
     .ToList();
 var generated = new List&lt;int&gt;();
 
-// 4. 自回归解码循环。
+// 4. 完整提示词只 prefill 一次。
+float[] logits = model.Forward(tokens.ToArray());
+
+// 5. 每次只 decode 一个新 token。Forward() 自己维护 KV-cache 位置，
+// prefill 后只传刚采样出的 token，不要重复传完整历史。
 for (int step = 0; step &lt; 200; step++)
 {
-    float[] logits = model.Forward(tokens.ToArray());     // 下一个 token 的 logits
     int next = model.Sample(logits, sampling, generated); // 应用惩罚 + 采样
     if (model.Tokenizer.IsEos(next)) break;
     generated.Add(next);
-    tokens.Add(next);
+    logits = model.Forward(new[] { next });
 }
 
-// 5. 反分词得到结果。
+// 6. 反分词得到结果。
 Console.WriteLine(model.Tokenizer.Decode(generated));</code></pre>
   <p>要做贪心/确定性解码，请调用 <code>model.SampleGreedy(logits)</code> 而非 <code>Sample</code>。</p>
 
@@ -84,7 +87,7 @@ int topToken = model.SampleGreedy(logits);
 Console.WriteLine($"vocab={model.Config.VocabSize}, tokens={tokenIds.Count}, topToken={topToken}");</code></pre>
 
   <h2 id="diffusion">DiffusionGemma — 文本扩散</h2>
-  <p>DiffusionGemma 是<strong>块文本扩散</strong>模型，而非自回归模型。<code>ModelBase.Create()</code> 仍可加载它（GGUF 架构为 <code>diffusion-gemma</code> / <code>diffusion_gemma</code>）并返回 <code>DiffusionGemmaModel</code>，但其 <code>Forward(int[])</code> 会故意抛出异常——生成需通过 <code>DiffusionGemmaSampler</code>，它在 <code>[prompt | canvas]</code> 序列上对定长的 <em>canvas</em> 块迭代去噪。架构详见 <a href="models.html#table">DiffusionGemma 模型卡</a>。</p>
+  <p>DiffusionGemma 是<strong>块文本扩散</strong>模型，而非自回归模型。<code>ModelBase.Create()</code> 仍可加载它（GGUF 架构为 <code>diffusion-gemma</code> / <code>diffusion_gemma</code>）并返回 <code>DiffusionGemmaModel</code>，但其 <code>Forward(int[])</code> 会故意抛出异常——生成需通过 <code>DiffusionGemmaSampler</code>，它在 <code>[prompt | canvas]</code> 序列上对定长的 <em>canvas</em> 块迭代去噪。架构详见 <a href="models_zh-cn.html#table">DiffusionGemma 模型卡</a>。</p>
   <pre data-lang="csharp"><code>using TensorSharp.Models;
 using TensorSharp.Models.DiffusionGemma;
 using TensorSharp.Runtime;
@@ -145,7 +148,7 @@ RgbImage output = model.EditImage("Make the sky a dramatic sunset.", input, p);
 ImageIO.SavePng("edited.png", output);
 Console.WriteLine($"Saved {output.Width}x{output.Height} edited image.");</code></pre>
   <p>若要做实时 UI，设置 <code>p.OnStep = (step, total, preview) =&gt; { … }</code> 与 <code>p.PreviewCount</code>，即可在节流的步上收到部分去噪潜变量解码出的 RGB 预览。<code>RgbImage</code> 暴露 <code>Width</code>、<code>Height</code> 与平面/交错的 <code>Pixels</code> 缓冲；<code>ImageIO</code> 提供 <code>Load</code>、<code>Decode(byte[])</code>、<code>EncodePng</code>、<code>SavePng</code> 及缩放辅助。</p>
-  <div class="callout warn"><div class="ic">🖼️</div><p>图像编辑计算量大：每个去噪步都要跑完整的 60 块 MMDiT（开启 CFG 时跑两遍）。请使用 CUDA 或 Metal 的 GGML 后端做实用的全质量编辑；除非你固定 <code>Width</code>/<code>Height</code>，否则流水线会按设备 VRAM 预算自动钳制目标面积。伴随 GGUF 布局见<a href="models.html#table">模型卡</a>。</p></div>
+  <div class="callout warn"><div class="ic">🖼️</div><p>图像编辑计算量大：每个去噪步都要跑完整的 60 块 MMDiT（开启 CFG 时跑两遍）。请使用 CUDA 或 Metal 的 GGML 后端做实用的全质量编辑；除非你固定 <code>Width</code>/<code>Height</code>，否则流水线会按设备 VRAM 预算自动钳制目标面积。伴随 GGUF 布局见<a href="models_zh-cn.html#table">模型卡</a>。</p></div>
 
   <h2 id="sampling">SamplingConfig</h2>
   <p>采样旋钮与 CLI 参数及 API 选项一一对应。默认值与 Ollama 一致。</p>
@@ -173,7 +176,7 @@ Console.WriteLine($"Saved {output.Width}x{output.Height} edited image.");</code>
     <thead><tr><th>类型</th><th>角色</th></tr></thead>
     <tbody>
       <tr><td><code>ModelBase</code></td><td>每个架构的抽象基类。<code>Create(path, backend)</code>、<code>Forward(int[])</code>、<code>Sample(...)</code>、<code>SampleGreedy(...)</code>，外加 <code>Config</code> 与 <code>Tokenizer</code>。</td></tr>
-      <tr><td><code>BackendType</code></td><td>枚举：<code>Cpu</code>、<code>GgmlCpu</code>、<code>GgmlMetal</code>、<code>GgmlCuda</code>、<code>Cuda</code>、<code>Mlx</code>。</td></tr>
+      <tr><td><code>BackendType</code></td><td>枚举：<code>Cpu</code>、<code>GgmlCpu</code>、<code>GgmlMetal</code>、<code>GgmlCuda</code>、<code>GgmlVulkan</code>、<code>Cuda</code>、<code>Mlx</code>。</td></tr>
       <tr><td><code>SamplingConfig</code></td><td>采样配置（见上表）。</td></tr>
       <tr><td><code>ITokenizer</code></td><td><code>Encode(text, addSpecial)</code>、<code>Decode(ids)</code>、<code>IsEos(id)</code>、<code>EosTokenIds</code>（BPE 与 SentencePiece 实现）。</td></tr>
       <tr><td><code>ModelConfig</code></td><td>架构元数据：<code>VocabSize</code>、上下文长度等。</td></tr>

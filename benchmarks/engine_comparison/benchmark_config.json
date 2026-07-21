@@ -1,5 +1,5 @@
 {
-  "_comment": "Central configuration for the cross-engine inference benchmark. EVERY setting (host paths, model / scenario / engine / backend registries, and run defaults) lives here rather than in code. Edit this file to retarget the harness; override individual selections at run time with run_matrix.py command-line flags (CLI > env > this file > built-in fallback). Pick a different file with --config PATH or the BENCH_CONFIG env var. Path strings may use ${repo_root}, ${here}, ${model_root}, ${gemma4_qat_dir} placeholders. A path may also be written as {\"path\": \"...\", \"env\": \"BENCH_X\"} so the named environment variable can override it for host retargeting. The long-prompt PREFILL sweep (prefill_2k / 4k / 8k / 16k / 32k / 64k / 128k) is part of this matrix: each prefill scenario slices assets/prefill_corpus.txt to a target token budget (scenarios._prefill) and is timed by TTFT (max_tokens=8); run_matrix.py auto-raises llama.cpp's context to fit whichever prefill lengths are selected (the long-context 32k/64k/128k lengths are registered but not in the default selection). For a prefill-only run that excludes the multimodal/diffusion scenarios, use --config benchmark_config_prefill.json instead.",
+  "_comment": "Central configuration for the cross-engine inference benchmark. EVERY setting (host paths, model / scenario / engine / backend registries, and run defaults) lives here rather than in code. Edit this file to retarget the harness; override individual selections at run time with run_matrix.py command-line flags (CLI > env > this file > built-in fallback). Pick a different file with --config PATH or the BENCH_CONFIG env var. Path strings may use ${repo_root}, ${here}, ${model_root}, ${gemma4_qat_dir} placeholders. A path may also be written as {\"path\": \"...\", \"env\": \"BENCH_X\"} so the named environment variable can override it for host retargeting. The `backends` section is a registry of concrete compute backends (ggml_cuda / ggml_vulkan / ggml_metal / ggml_cpu / cpu / ...); pick which to run with --backends or defaults.backends (see the registry's own _comment for the entry format; the legacy list+maps form from older configs is still accepted). The long-prompt PREFILL sweep (prefill_2k / 4k / 8k / 16k / 32k / 64k / 128k) is part of this matrix: each prefill scenario slices assets/prefill_corpus.txt to a target token budget (scenarios._prefill) and is timed by TTFT (max_tokens=8); run_matrix.py auto-raises llama.cpp's context to fit whichever prefill lengths are selected (the long-context 32k/64k/128k lengths are registered but not in the default selection). For a prefill-only run that excludes the multimodal/diffusion scenarios, use --config benchmark_config_prefill.json instead.",
 
   "paths": {
     "model_root": "C:/Works/models",
@@ -9,6 +9,7 @@
     "tensorsharp_port": 5000,
     "llama_server_exe": "C:/Works/llama.cpp/build-cuda/bin/Release/llama-server.exe",
     "llama_port": 5001,
+    "sdcpp_exe": {"path": "C:/Works/stable-diffusion.cpp/build/bin/Release/sd-cli.exe", "env": "BENCH_SDCPP_EXE"},
     "vllm_base_url": "http://127.0.0.1:8000",
     "media": {
       "image": "C:/Works/test.jpg",
@@ -68,6 +69,31 @@
       "mtp_supported": true,
       "mtp_draft": null
     },
+    "qwen36-27b": {
+      "display": "Qwen 3.6 27B (UD-IQ2_XXS, dense)",
+      "family": "qwen36",
+      "gguf": "${model_root}/Qwen3.6-27B-UD-IQ2_XXS.gguf",
+      "mmproj": "${model_root}/Qwen3.6-27B-mmproj-F16.gguf",
+      "modalities": ["text", "image"],
+      "size_class": "large",
+      "mtp_supported": true,
+      "mtp_draft": null
+    },
+    "qwen-image-edit": {
+      "display": "Qwen-Image-Edit 2511 (Q2_K DiT + Lightning 4-step LoRA)",
+      "family": "qwenimage",
+      "gguf": {"path": "${model_root}/qwen-image-edit-2511-Q2_K.gguf", "env": "BENCH_QWEN_IMAGE_DIT"},
+      "mmproj": null,
+      "modalities": ["image_edit"],
+      "size_class": "large",
+      "is_image_edit": true,
+      "components": {
+        "vae": {"path": "${model_root}/Qwen_Image-VAE.safetensors", "env": "BENCH_QWEN_IMAGE_VAE"},
+        "llm": {"path": "${model_root}/Qwen2.5-VL-7B-Instruct-UD-IQ2_XXS.gguf", "env": "BENCH_QWEN_IMAGE_VL"},
+        "mmproj": {"path": "${model_root}/Qwen2.5-VL-7B-mmproj-BF16.gguf", "env": "BENCH_QWEN_IMAGE_MMPROJ"},
+        "lora": {"path": "${model_root}/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors", "env": "BENCH_QWEN_IMAGE_LORA"}
+      }
+    },
     "diffusiongemma": {
       "display": "DiffusionGemma 26B-A4B it (Q3_K_M, text-diffusion)",
       "family": "diffusiongemma",
@@ -91,6 +117,18 @@
     "image": {"kind": "image", "description": "Image understanding (test.jpg)", "modality": "image", "max_tokens": 1280},
     "audio": {"kind": "audio", "description": "Audio understanding (~45 s speech)", "modality": "audio", "max_tokens": 1280},
     "video": {"kind": "video", "description": "Video understanding (sampled frames)", "modality": "video", "max_tokens": 1280},
+    "image_edit": {
+      "kind": "image_edit",
+      "description": "Stable-diffusion image editing (Qwen-Image-Edit 2511, Lightning 4-step, cfg 1): same input image, prompt, resolution, steps and seed for every engine",
+      "modality": "image_edit",
+      "edit": {
+        "prompt": "Change the background to a sunny beach.",
+        "steps": 4,
+        "cfg": 1.0,
+        "seed": 42,
+        "target_area": 653312
+      }
+    },
 
     "prefill_2k": {"kind": "text", "description": "Prefill throughput @ ~2k prompt tokens (sliced from prefill_corpus.txt)", "max_tokens": 8},
     "prefill_4k": {"kind": "text", "description": "Prefill throughput @ ~4k prompt tokens (sliced from prefill_corpus.txt)", "max_tokens": 8},
@@ -104,14 +142,55 @@
   "engines": {
     "tensorsharp": {"display": "TensorSharp", "transport": "server", "backends": ["gpu", "cpu"]},
     "llamacpp": {"display": "llama.cpp", "transport": "server", "backends": ["gpu", "cpu"]},
-    "vllm": {"display": "vLLM", "transport": "connect", "backends": ["gpu"]}
+    "vllm": {"display": "vLLM", "transport": "connect", "backends": ["gpu"]},
+    "sdcpp": {"display": "stable-diffusion.cpp", "transport": "cli", "backends": ["gpu"]}
   },
 
-  "backends": ["gpu", "cpu"],
-
-  "maps": {
-    "tensorsharp_backend": {"gpu": "ggml_cuda", "cpu": "cpu"},
-    "llama_ngl": {"gpu": 999, "cpu": 0}
+  "backends": {
+    "_comment": "Backend registry: one entry per concrete compute backend selectable with --backends (each becomes a report column). `kind` (gpu|cpu) drives generic gating (large models skip cpu-kind; engines.*.backends may list ids and/or kinds). Per-engine sub-objects say how that engine launches on the backend — omit the sub-object and the engine's cells are recorded as skipped. tensorsharp: {backend: --backend value, extra_args: [...], env: {...}}; llamacpp: {ngl: -ngl value, server_exe: per-backend llama-server build (path/env form supported; falls back to paths.llama_server_exe), extra_args, env}; vllm: true marks the column the external vLLM endpoint is comparable on. `aliases` lets old names keep working (legacy `gpu`). NOTE: TensorSharp.Server silently falls back to the first available backend when the requested one is not supported by the build/host — check results/logs/*.log if numbers look implausible.",
+    "ggml_cuda": {
+      "display": "CUDA",
+      "kind": "gpu",
+      "aliases": ["gpu"],
+      "tensorsharp": {"backend": "ggml_cuda"},
+      "llamacpp": {"ngl": 999},
+      "vllm": true,
+      "sdcpp": {"extra_args": ["--diffusion-fa", "--offload-to-cpu"]}
+    },
+    "ggml_vulkan": {
+      "display": "Vulkan",
+      "kind": "gpu",
+      "tensorsharp": {"backend": "ggml_vulkan"},
+      "llamacpp": {"ngl": 999, "server_exe": {"path": "C:/Works/llama.cpp/build-vulkan/bin/Release/llama-server.exe", "env": "BENCH_LLAMA_SERVER_VULKAN"}, "extra_args": ["--device", "Vulkan0"]}
+    },
+    "ggml_metal": {
+      "display": "Metal",
+      "kind": "gpu",
+      "tensorsharp": {"backend": "ggml_metal"},
+      "llamacpp": {"ngl": 999, "server_exe": {"path": null, "env": "BENCH_LLAMA_SERVER_METAL"}}
+    },
+    "cuda": {
+      "display": "Direct CUDA",
+      "kind": "gpu",
+      "tensorsharp": {"backend": "cuda"}
+    },
+    "mlx": {
+      "display": "MLX Metal",
+      "kind": "gpu",
+      "tensorsharp": {"backend": "mlx"}
+    },
+    "ggml_cpu": {
+      "display": "GGML CPU",
+      "kind": "cpu",
+      "tensorsharp": {"backend": "ggml_cpu"},
+      "llamacpp": {"ngl": 0}
+    },
+    "cpu": {
+      "display": "C# CPU",
+      "kind": "cpu",
+      "tensorsharp": {"backend": "cpu"},
+      "llamacpp": {"ngl": 0}
+    }
   },
 
   "llama": {
@@ -122,10 +201,10 @@
   "ready_timeout_s": {"small": 600, "medium": 900, "large": 1200},
 
   "defaults": {
-    "engines": ["tensorsharp", "llamacpp", "vllm"],
-    "models": ["gemma4-e4b", "gemma4-12b", "gemma4-26b-a4b", "qwen36-35b-a3b", "qwen36-35b-a3b-q4", "diffusiongemma"],
-    "scenarios": ["text_short", "text_long", "multi_turn", "function_call", "json_mode", "image", "audio", "video"],
-    "backends": ["gpu", "cpu"],
+    "engines": ["tensorsharp", "llamacpp", "vllm", "sdcpp"],
+    "models": ["gemma4-e4b", "gemma4-12b", "gemma4-26b-a4b", "qwen36-35b-a3b", "qwen36-35b-a3b-q4", "diffusiongemma", "qwen-image-edit"],
+    "scenarios": ["text_short", "text_long", "multi_turn", "function_call", "json_mode", "image", "audio", "video", "image_edit"],
+    "backends": ["ggml_cuda", "cpu"],
     "mtp_modes": [false],
     "concurrency": [1],
     "max_tokens": 128,

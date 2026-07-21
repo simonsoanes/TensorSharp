@@ -2,9 +2,19 @@ cmake_minimum_required(VERSION 3.20)
 project(GgmlOps LANGUAGES C CXX)
 option(TENSORSHARP_GGML_NATIVE_BUILD_TESTS "Build TensorSharp GGML native regression tests" OFF)
 option(TENSORSHARP_GGML_NATIVE_ENABLE_CUDA "Enable the ggml-cuda backend when building on Windows or Linux" OFF)
+option(TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN "Enable the ggml-vulkan backend when building on Windows or Linux" OFF)
+# Cache marker maintained by build-windows.ps1 / build-linux.sh: ON when the
+# ENABLE_VULKAN value came from an explicit user choice (flag or env var) rather
+# than auto-detection, so later script runs keep honoring the explicit choice
+# while auto-detected defaults are re-evaluated. Not read by the build itself.
+option(TENSORSHARP_GGML_NATIVE_VULKAN_EXPLICIT "The Vulkan on/off choice was made explicitly (build-script cache marker)" OFF)
 
 if (TENSORSHARP_GGML_NATIVE_ENABLE_CUDA AND APPLE)
     message(FATAL_ERROR "TENSORSHARP_GGML_NATIVE_ENABLE_CUDA is supported on Windows and Linux only.")
+endif()
+
+if (TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN AND APPLE)
+    message(FATAL_ERROR "TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN is supported on Windows and Linux only (Metal is the GPU backend on macOS).")
 endif()
 
 if (APPLE)
@@ -102,7 +112,59 @@ if (TENSORSHARP_GGML_NATIVE_ENABLE_CUDA)
     set(GGML_CUDA_COMPRESSION_MODE "speed" CACHE STRING "" FORCE)
 endif()
 
-add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../ExternalProjects/ggml" ggml-build)
+if (TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN)
+    # ggml-vulkan needs the Vulkan headers + loader import library and the glslc
+    # shader compiler (find_package(Vulkan COMPONENTS glslc) inside ggml), plus
+    # the SPIRV-Headers CMake package. With a LunarG Vulkan SDK installed
+    # (VULKAN_SDK env var) all of these are found automatically; otherwise
+    # build-windows.ps1 provisions a portable toolchain under
+    # ExternalProjects/vulkan-toolchain (see eng/fetch-vulkan-toolchain.ps1) and
+    # passes Vulkan_INCLUDE_DIR / Vulkan_LIBRARY / Vulkan_GLSLC_EXECUTABLE /
+    # SPIRV-Headers_DIR explicitly.
+    set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+endif()
+
+# The binary-dir name is deliberately terse ("g", not "ggml-build"): ggml-vulkan's
+# vulkan-shaders-gen ExternalProject nests
+#   <bindir>/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build
+# under it, and MSBuild's file tracker (.tlog) breaks CMake try-compiles once that
+# inner binary dir exceeds ~137 characters ("CL.exe could not be run:
+# DirectoryNotFoundException ... cmTC_*.tlog"). Every character saved here buys
+# headroom for repos cloned into deeper paths.
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../ExternalProjects/ggml" g)
+
+if (TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN AND TARGET ggml-vulkan)
+    # ggml-vulkan.cpp includes <spirv/unified1/spirv.hpp>, but upstream's CMake
+    # only *checks* that the SPIRV-Headers package exists — it assumes the header
+    # is reachable through the Vulkan SDK's Include directory (LunarG layout) or
+    # a system include path (Linux distro packages). With the portable toolchain
+    # (bare Vulkan-Headers checkout) neither holds, so link the imported
+    # SPIRV-Headers interface target onto ggml-vulkan to add its include dir.
+    # Scoped to the one target (not include_directories) so the CUDA/CPU targets'
+    # command lines — and therefore their incremental-build state — are untouched.
+    find_package(SPIRV-Headers CONFIG QUIET)
+    if (TARGET SPIRV-Headers::SPIRV-Headers)
+        target_link_libraries(ggml-vulkan PRIVATE SPIRV-Headers::SPIRV-Headers)
+    endif()
+endif()
+
+if (TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN)
+    # Guard against the MSBuild path-length limit described above: the deepest
+    # path the vulkan-shaders-gen ExternalProject configure creates is
+    #   <bindir>/g/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-XXXXXX/cmTC_XXXXX.dir/Debug/cmTC_XXXXX.tlog/...
+    # which fails opaquely once the inner binary dir passes ~137 characters.
+    # 74 = "/g/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build".
+    string(LENGTH "${CMAKE_BINARY_DIR}" TSG_BINARY_DIR_LEN)
+    math(EXPR TSG_VK_SHADERS_GEN_DIR_LEN "${TSG_BINARY_DIR_LEN} + 74")
+    if (CMAKE_GENERATOR MATCHES "Visual Studio" AND TSG_VK_SHADERS_GEN_DIR_LEN GREATER 137)
+        message(FATAL_ERROR
+            "TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN: the build directory path is too long "
+            "(${TSG_BINARY_DIR_LEN} chars). ggml-vulkan's shader-generator sub-build would "
+            "exceed the MSBuild file-tracker path limit and fail with a cryptic "
+            "'CL.exe could not be run: DirectoryNotFoundException (...cmTC_*.tlog)' error. "
+            "Clone the repository into a shorter path (e.g. C:/Works/TensorSharp) or use the Ninja generator.")
+    endif()
+endif()
 
 set(TSG_GGMLOPS_SOURCES
     ggml_ops_core.cpp
@@ -112,6 +174,13 @@ set(TSG_GGMLOPS_SOURCES
     ggml_ops_training.cpp
     ggml_ops_fused.cpp
     ggml_ops_transformer.cpp
+    ggml_ops_transformer_prefill.cpp
+    ggml_ops_qwen35_decode.cpp
+    ggml_ops_qwen35_verify.cpp
+    ggml_ops_gemma4_decode.cpp
+    ggml_ops_gemma4_batched.cpp
+    ggml_ops_gemma4_verify.cpp
+    ggml_ops_gemma4_moe.cpp
     ggml_ops_diffusion.cpp
     ggml_ops_qwen_image.cpp
     ggml_ops_gated_delta_net.cpp
@@ -126,6 +195,42 @@ if (TENSORSHARP_GGML_NATIVE_ENABLE_CUDA)
 endif()
 
 add_library(GgmlOps SHARED ${TSG_GGMLOPS_SOURCES})
+
+if (WIN32)
+    # Re-export the statically-linked ggml C API so the managed layer
+    # (TensorSharp.Backends.GGML/Interop/GgmlApi.cs) can P/Invoke it directly.
+    # On Linux/macOS the symbols are already visible (default ELF/Mach-O
+    # visibility); Windows needs the explicit .def export list.
+    #
+    # A .def entry forces the linker to resolve the symbol, so the CUDA/Vulkan
+    # re-exports must be stripped when the corresponding backend is not being
+    # built or the link fails with LNK2001 unresolved externals. The managed
+    # layer probes these entry points at run time and tolerates their absence,
+    # matching the Linux/macOS builds where disabled-backend symbols are simply
+    # not present.
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/ggml_api_exports.def" TSG_DEF_CONTENT)
+    if (NOT TENSORSHARP_GGML_NATIVE_ENABLE_CUDA)
+        string(REGEX REPLACE "[ \t]+ggml_backend_(cuda_[A-Za-z0-9_]+|is_cuda)\r?\n" "" TSG_DEF_CONTENT "${TSG_DEF_CONTENT}")
+    endif()
+    if (NOT TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN)
+        string(REGEX REPLACE "[ \t]+ggml_backend_(vk_[A-Za-z0-9_]+|is_vk)\r?\n" "" TSG_DEF_CONTENT "${TSG_DEF_CONTENT}")
+    endif()
+    set(TSG_DEF_FILE "${CMAKE_CURRENT_BINARY_DIR}/ggml_api_exports.def")
+    # Only rewrite on change so incremental builds don't relink GgmlOps.
+    set(TSG_DEF_OLD_CONTENT "")
+    if (EXISTS "${TSG_DEF_FILE}")
+        file(READ "${TSG_DEF_FILE}" TSG_DEF_OLD_CONTENT)
+    endif()
+    if (NOT TSG_DEF_CONTENT STREQUAL TSG_DEF_OLD_CONTENT)
+        file(WRITE "${TSG_DEF_FILE}" "${TSG_DEF_CONTENT}")
+    endif()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ggml_api_exports.def)
+    target_sources(GgmlOps PRIVATE "${TSG_DEF_FILE}")
+endif()
+
+if (TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN)
+    target_compile_definitions(GgmlOps PRIVATE TSG_GGML_USE_VULKAN=1)
+endif()
 
 if (TENSORSHARP_GGML_NATIVE_ENABLE_CUDA)
     target_compile_definitions(GgmlOps PRIVATE TSG_GGML_USE_CUDA=1)

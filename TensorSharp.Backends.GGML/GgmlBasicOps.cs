@@ -1314,9 +1314,14 @@ namespace TensorSharp.GGML
             GgmlNative.AddmmQuantBatch(resultView, m1View, weightData, ggmlType, ne0, rawBytes, batchCount, weightOffsets, weightNe1Arr);
         }
 
-        public static void PreloadQuantizedWeight(IntPtr cacheKey, IntPtr hostData, int ggmlType, long ne0, long ne1, long rawBytes)
+        /// <summary>
+        /// See <see cref="GgmlNative.PreloadQuantizedWeight"/>: returns false when
+        /// the weight exceeds the device's single-buffer size limit and must stay
+        /// host-resident; throws on any other native failure.
+        /// </summary>
+        public static bool PreloadQuantizedWeight(IntPtr cacheKey, IntPtr hostData, int ggmlType, long ne0, long ne1, long rawBytes)
         {
-            GgmlNative.PreloadQuantizedWeight(cacheKey, hostData, ggmlType, ne0, ne1, rawBytes);
+            return GgmlNative.PreloadQuantizedWeight(cacheKey, hostData, ggmlType, ne0, ne1, rawBytes);
         }
 
         public static void RegisterOffloadable(IntPtr key) => GgmlNative.RegisterOffloadable(key);
@@ -1337,12 +1342,20 @@ namespace TensorSharp.GGML
         public static void InvalidateHostBuffer(IntPtr ptr) => GgmlNative.InvalidateHostBuffer(ptr);
         public static long DeviceCopyCacheResidentBytes() => GgmlNative.DeviceCopyCacheResidentBytes();
         public static bool TryGetBackendMemory(out long freeBytes, out long totalBytes) => GgmlNative.TryGetBackendMemory(out freeBytes, out totalBytes);
+        /// <summary>True if the active GGML backend device is an integrated GPU (unified-memory iGPU).</summary>
+        public static bool IsActiveDeviceIntegrated() => GgmlNative.IsActiveDeviceIntegrated();
         public static void SyncHostBuffer(IntPtr ptr, long byteCount) => GgmlNative.SyncHostBuffer(ptr, byteCount);
         public static void SetAsyncCompute(bool enabled) => GgmlNative.SetAsyncCompute(enabled);
         public static bool GetAsyncCompute() => GgmlNative.GetAsyncCompute();
         public static void HostReadBarrier() => GgmlNative.HostReadBarrier();
         public static bool CanInitializeBackend(GgmlBackendType backendType) => GgmlNative.CanInitialize(backendType);
         public static void EnsureBackendAvailable(GgmlBackendType backendType) => GgmlNative.EnsureAvailable(backendType);
+
+        /// <summary>Env var (read at Vulkan backend init) selecting the Vulkan device index.</summary>
+        public const string VulkanDeviceEnvVar = GgmlNative.VulkanDeviceEnvVar;
+        public static void SetVulkanDeviceIndex(int deviceIndex) => GgmlNative.SetVulkanDeviceIndex(deviceIndex);
+        public static int GetVulkanDeviceCount() => GgmlNative.GetVulkanDeviceCount();
+        public static string GetVulkanDeviceDescription(int deviceIndex) => GgmlNative.GetVulkanDeviceDescription(deviceIndex);
 
         public static void TransformerModelDecode(
             IntPtr hiddenData, int hiddenSize, int numLayers,
@@ -1645,6 +1658,11 @@ namespace TensorSharp.GGML
         {
             return GgmlNative.TryQwenImageForward(in args);
         }
+
+        /// <summary>CPU-offload mode for the Qwen-Image DiT kernels: disables the persistent /
+        /// CUDA-graph-captured entries so the non-persist reuse-gallocr path streams the weights
+        /// from RAM per call. Set per request together with <see cref="SetDeviceCopyBudget"/>.</summary>
+        public static void QwenImageSetOffload(bool on) => GgmlNative.QwenImageSetOffload(on);
 
         /// <summary>Single 2D convolution on the active GGML device (ggml_conv_2d). Used to move the
         /// Qwen-Image VAE conv stack off the CPU. Layouts match VaeReferenceMath (no transposes).</summary>
@@ -2467,7 +2485,13 @@ namespace TensorSharp.GGML
             IntPtr[] vArr = null, int[] vTypeArr = null, long[] vNe0Arr = null, long[] vNe1Arr = null, long[] vBytesArr = null,
             IntPtr logitsData = default, int vocabSize = 0,
             IntPtr lmHeadData = default, int lmHeadType = 0, long lmHeadNe0 = 0, long lmHeadNe1 = 0, long lmHeadBytes = 0,
-            IntPtr finalNormData = default, float logitSoftcap = 0f)
+            IntPtr finalNormData = default, float logitSoftcap = 0f,
+            IntPtr pleTokenEmbdData = default, int pleTokenEmbdType = 0,
+            long pleTokenEmbdNe0 = 0, long pleTokenEmbdNe1 = 0, long pleTokenEmbdBytes = 0,
+            int pleTokenId = -1,
+            IntPtr pleModelProjData = default, int pleModelProjType = 0,
+            long pleModelProjNe0 = 0, long pleModelProjNe1 = 0, long pleModelProjBytes = 0,
+            IntPtr pleModelProjNormData = default)
         {
             GgmlNative.Gemma4ModelDecode(
                 hiddenData, hiddenSize, numLayers,
@@ -2494,7 +2518,13 @@ namespace TensorSharp.GGML
                 vArr, vTypeArr, vNe0Arr, vNe1Arr, vBytesArr,
                 logitsData, vocabSize,
                 lmHeadData, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes,
-                finalNormData, logitSoftcap);
+                finalNormData, logitSoftcap,
+                pleTokenEmbdData, pleTokenEmbdType,
+                pleTokenEmbdNe0, pleTokenEmbdNe1, pleTokenEmbdBytes,
+                pleTokenId,
+                pleModelProjData, pleModelProjType,
+                pleModelProjNe0, pleModelProjNe1, pleModelProjBytes,
+                pleModelProjNormData);
         }
 
         /// <summary>True token-batched dense decode (N concurrent sequences in one

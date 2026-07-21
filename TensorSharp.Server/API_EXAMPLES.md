@@ -1,4 +1,4 @@
-﻿# TensorSharp.Server API Examples
+# TensorSharp.Server API Examples
 
 [English](API_EXAMPLES.md) | [中文](API_EXAMPLES_zh-cn.md)
 
@@ -6,53 +6,111 @@ TensorSharp.Server provides three API styles plus a few utility endpoints:
 
 - **Ollama-compatible** (`/api/generate`, `/api/chat/ollama`, `/api/tags`, `/api/show`)
 - **OpenAI-compatible** (`/v1/chat/completions`, `/v1/models`)
-- **Web UI** (`/api/chat`, `/api/sessions`, `/api/models`, `/api/models/load`, `/api/upload`)
+- **Web UI** (`/api/chat`, `/api/sessions`, `/api/models`, `/api/models/load`, `/api/upload`, `/api/image-edit`, `/api/image-edit/stream`)
 - **Utilities** (`/api/version`, `/api/queue/status`)
 
-Start the server with the exact hosted model via `--model` and, when needed, the exact projector via `--mmproj`. The Web UI and compatibility endpoints expose only that hosted model; `/api/models/load` can reload it, but it does not switch to arbitrary files at runtime.
+Start the server with the exact hosted model via `--model` and, when needed, the exact projector via `--mmproj`. The projector is **not auto-detected** by `TensorSharp.Server`. The Web UI and compatibility endpoints expose only that startup model/projector pair; `/api/models/load` can reload the same pair on a supported backend, but it cannot choose a model on a model-less server or switch to another file at runtime.
 
 ## Current Contract
 
 | Area | Contract |
 |---|---|
 | Hosted models | One GGUF file, selected with `--model`; requests must name that hosted file or its basename |
-| Projectors | Optional single projector, selected with `--mmproj`; used for multimodal-capable models |
-| Backends | `mlx`, `cuda`, `ggml_metal`, `ggml_cuda`, `ggml_cpu`, `cpu`; `/api/models` reports which are available on the host |
+| Projectors | Optional single projector, selected explicitly with `--mmproj`; used for multimodal-capable models |
+| Backends | `mlx`, `cuda`, `ggml_metal`, `ggml_cuda`, `ggml_vulkan`, `ggml_cpu`, `cpu`; `/api/models` reports which are available on the host |
 | Concurrency | Autoregressive chat uses the continuous-batching engine. The legacy queue API remains for status/compatibility fields; DiffusionGemma Web UI requests use a separate block-boundary diffusion scheduler. |
 | Generation modes | Autoregressive models stream appended token chunks. DiffusionGemma returns final text on append-only compatibility endpoints and exposes live whole-message denoising previews on Web UI `/api/chat`. |
 | Sessions | Web UI uses per-tab sessions; Ollama/OpenAI compatibility endpoints share the default session |
-| Structured outputs | OpenAI `response_format` supports `text`, `json_object`, and `json_schema`; `json_schema` cannot be combined with `think` or `tools` |
+| Uploads | `/api/upload` accepts image / video / audio / text / **PDF** files; born-digital PDFs return extracted text, scanned PDFs return page images for vision-capable models (`TS_PDF_MAX_PAGES` caps pages read) |
+| Image editing | Qwen-Image-Edit (`qwen_image`) models are served through `/api/image-edit` and `/api/image-edit/stream`, not the chat endpoints |
+| Structured outputs | OpenAI `response_format` supports `text`, `json_object`, and `json_schema`; `response_format` (`json_object` / `json_schema`) cannot be combined with `think` or `tools` |
+
+> **Network safety:** the server listens on `0.0.0.0:5000` and has no API-key
+> authentication or built-in TLS. Keep it on a trusted network or place an
+> authenticating TLS reverse proxy in front of it.
 
 ## Starting the Server
 
+### Quick start in ~30 seconds
+
+The verified fast path hosts Gemma 4 E4B Q8_0 on a native GGML backend. The commands below take about 30 seconds to copy and run; the 7.48 GiB model download and the first restore/build take longer and depend on the network connection and machine. Besides the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0), Git, and `curl`, this path needs the normal native GGML build prerequisites for the chosen backend. The model is the recommended public artifact from [ggml-org/gemma-4-E4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF); a lower-memory `gemma-4-E4B-it-Q4_K_M.gguf` is in the same repository. The copy/paste block below is for Linux + NVIDIA; platform-specific backend choices follow it:
+
+```bash
+git clone https://github.com/zhongkaifu/TensorSharp.git
+cd TensorSharp
+mkdir -p models
+curl -L --fail "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" \
+  -o models/gemma-4-E4B-it-Q8_0.gguf
+TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Server -c Release \
+  -p:TensorSharpSkipMlxNative=true -- \
+  --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --max-tokens 128
+```
+
+Use `ggml_cuda` on Windows/Linux with NVIDIA, `ggml_metal` on Apple Silicon,
+`ggml_vulkan` (set `TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON` instead) on
+Windows/Linux with a Vulkan-capable AMD, Intel, or NVIDIA GPU, or `ggml_cpu`
+when no GPU is available. The verification claim covers the E4B Q8_0
+family/path; it does not claim that a specific public-file checksum was the
+benchmark input.
+
+For text-only API calls, no projector is needed. For image, video, or audio,
+also download `mmproj-gemma-4-E4B-it-Q8_0.gguf` from the same repository and
+restart with `--mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf`.
+
+In a second terminal:
+
+```bash
+curl -s http://localhost:5000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemma-4-E4B-it-Q8_0.gguf","messages":[{"role":"user","content":"Reply with one short hello."}],"max_tokens":32}'
+```
+
+Open the bundled UI at **<http://localhost:5000/index.html>**. `GET /` is the liveness endpoint and returns `"TensorSharp.Server is running"`.
+
+### Already-built or extracted application folder
+
+Run the commands below from the repository root after building; they invoke `TensorSharp.Server/bin/TensorSharp.Server.dll`, whose folder also contains the copied native libraries and `wwwroot/`. There are currently no binary assets attached to the `v3.0.5.0` GitHub release, so do not present a release-archive command as available until an archive is actually published.
+
 ```bash
 # Text-only model
-./TensorSharp.Server --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend ggml_metal
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend ggml_metal
 
 # Windows/Linux + NVIDIA, direct CUDA/cuBLAS backend
-./TensorSharp.Server --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend cuda
 
 # Windows/Linux + NVIDIA, GGML CUDA backend
-./TensorSharp.Server --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend ggml_cuda
+
+# Windows/Linux + AMD/Intel/NVIDIA GPU, GGML Vulkan backend (pick the device on multi-GPU hosts with --gpu-device; see --list-gpus)
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend ggml_vulkan --gpu-device 0
 
 # Apple Silicon, MLX backend
-./TensorSharp.Server --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend mlx
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend mlx
 
 # Multimodal model (explicit projector)
-./TensorSharp.Server --model ~/work/model/gemma-4-E4B-it-Q8_0.gguf \
-    --mmproj ~/work/model/gemma-4-mmproj-F16.gguf --backend ggml_metal
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/gemma-4-E4B-it-Q8_0.gguf \
+    --mmproj ~/work/model/mmproj-gemma-4-E4B-it-Q8_0.gguf --backend ggml_metal
 
 # DiffusionGemma text-diffusion model
 DIFFUSION_STEPS=48 DIFFUSION_MAX_BATCH=2 \
-  ./TensorSharp.Server --model ~/work/model/diffusion-gemma.gguf --backend ggml_metal
+  dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --backend ggml_metal
 
-# Override default request budget (used when a request omits max_tokens / num_predict)
-./TensorSharp.Server --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend ggml_metal --max-tokens 4096
+# Override the Web UI default token budget (default 20000). The Ollama/OpenAI
+# compatibility endpoints instead default to 200 when a request omits
+# max_tokens / num_predict — set the value per request there.
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend ggml_metal --max-tokens 4096
 ```
 
-The server starts on `http://localhost:5000`. The current binary passes a fixed
+The API starts on `http://localhost:5000`; the Web UI is
+`http://localhost:5000/index.html`. The current binary passes a fixed
 `http://0.0.0.0:5000` listen address to ASP.NET Core; the Docker Space files
 patch that constant to `7860` during image build.
+
+`--model` is required for inference. Starting with only `--backend` produces a
+model-less status server, but `/api/models/load` cannot select a file that was
+not supplied at startup. For multimodal inference, always pass the projector
+explicitly with `--mmproj`; a bare projector filename is resolved next to the
+model.
 
 Backend quick reference:
 
@@ -64,6 +122,7 @@ Backend quick reference:
 | `ggml_cpu` | Native GGML CPU backend |
 | `ggml_metal` | GGML Metal backend for macOS |
 | `ggml_cuda` | GGML CUDA backend for NVIDIA GPUs |
+| `ggml_vulkan` | GGML Vulkan backend for AMD / Intel / NVIDIA GPUs (vendor-neutral; requires a native build with Vulkan enabled) |
 
 ---
 
@@ -161,7 +220,7 @@ The final `done` chunk also carries the same `prompt_cache_hit_tokens` /
 Images are sent as base64-encoded bytes in the `images` array:
 
 ```bash
-IMG_B64=$(base64 < photo.png)
+IMG_B64=$(base64 < photo.png | tr -d '\n')
 curl -X POST http://localhost:5000/api/generate \
   -H "Content-Type: application/json" \
   -d "{
@@ -246,7 +305,7 @@ curl -X POST http://localhost:5000/api/chat/ollama \
 ### Chat with Image (multimodal)
 
 ```bash
-IMG_B64=$(base64 < photo.png)
+IMG_B64=$(base64 < photo.png | tr -d '\n')
 curl -X POST http://localhost:5000/api/chat/ollama \
   -H "Content-Type: application/json" \
   -d "{
@@ -517,7 +576,7 @@ Response:
 ### Chat Completions with Image (multimodal, OpenAI format)
 
 ```bash
-IMG_B64=$(base64 < photo.png)
+IMG_B64=$(base64 < photo.png | tr -d '\n')
 curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d "{
@@ -591,14 +650,14 @@ Append the assistant `tool_calls` plus a follow-up `{"role": "tool", "tool_call_
 # because the continuous-batching engine, not InferenceQueue, owns concurrency
 curl http://localhost:5000/api/queue/status
 
-# Server version
+# Legacy Ollama protocol version (hard-coded to 0.1.0; not the TensorSharp release version)
 curl http://localhost:5000/api/version
 
 # Hosted model + supported backends + default settings
 curl http://localhost:5000/api/models
 ```
 
-`/api/models` returns the single hosted GGUF (and projector if any), the loaded backend name, the list of available backends, the resolved architecture, and the configured default `max_tokens`. The model entry in `/api/tags`, `/v1/models`, and `/api/show` always reports the file actually launched with `--model`. If a CUDA backend is missing from `supportedBackends`, the host did not detect a usable NVIDIA driver/device or GGML CUDA initialization path at startup; the direct `cuda` backend still needs cuBLAS discoverable when inference runs. If `mlx` is missing, the host did not detect a usable Apple Silicon MLX runtime.
+`/api/models` returns the single hosted GGUF (and projector if any), the loaded backend name, the list of available backends, the resolved architecture, and the configured default `max_tokens`. The model entry in `/api/tags`, `/v1/models`, and `/api/show` always reports the file actually launched with `--model`. If a CUDA backend is missing from `supportedBackends`, the host did not detect a usable NVIDIA driver/device or GGML CUDA initialization path at startup; the direct `cuda` backend still needs cuBLAS discoverable when inference runs. If `ggml_vulkan` is missing, the native GGML bridge was not built with Vulkan enabled or no Vulkan 1.3 device/driver was found. If `mlx` is missing, the host did not detect a usable Apple Silicon MLX runtime.
 
 ---
 
@@ -616,26 +675,27 @@ endpoints keep their append-oriented response shapes and receive only final text
 
 The Web UI flow is session-scoped: every browser tab creates its own session at
 load time and attaches the `sessionId` to every `/api/chat` request, so each
-tab gets an isolated KV cache. The Ollama and OpenAI-compatible endpoints
-share a built-in `__default__` session that lives for the lifetime of the
-server.
+tab gets isolated tracked conversation history. Request KV blocks and prefix
+reuse are owned by the inference engine. The Ollama and OpenAI-compatible
+endpoints share the service's intrinsic compatibility history.
 
 ```bash
 # Create a fresh session (returns its id; only the Web UI flow needs this)
 curl -X POST http://localhost:5000/api/sessions
 # {"sessionId":"a3b1c2..."}
 
-# Dispose a session and release its KV cache state. The default session
-# (__default__) cannot be removed; the call returns 404 if the id is unknown.
+# Dispose a session and clear its tracked history. Engine request KV blocks are
+# released independently. The default session (__default__) cannot be removed;
+# the call returns 404 if the id is unknown.
 curl -X DELETE http://localhost:5000/api/sessions/a3b1c2...
 ```
 
-Reusing the same `sessionId` across `/api/chat` requests lets the server
-splice prior assistant tokens directly into the KV cache prefix on the next
+Reusing the same `sessionId` across `/api/chat` requests preserves tracked
+history and lets the engine reuse matching prompt-prefix blocks on the next
 turn (the `kvReusedTokens` / `kvReusePercent` fields on the terminal SSE frame
-report how much was reused). Pass `sessionId: null` to fall back to the shared
-`__default__` session, or pass `newChat: true` to force a server-side cache
-reset on the next request without disposing the session.
+report how much was reused). Omit `sessionId` or pass `null` to use the shared
+`__default__` Web UI session. Pass `newChat: true` to clear tracked history
+before the next request without disposing the session.
 
 ### Streaming Chat
 
@@ -680,6 +740,91 @@ Use `kvReusedTokens` / `kvReusePercent` in the same way as the Ollama
 fields - they all measure the same thing (prompt tokens served straight from
 the prior turn's KV cache) for the corresponding session.
 
+### File Uploads (`/api/upload`) — images, video, audio, text, PDF
+
+```bash
+# Upload a file (multipart form; the first file in the form is used)
+curl -X POST http://localhost:5000/api/upload -F "file=@report.pdf"
+```
+
+Every response carries `ok, path, url, mediaType, fileName`; the media type is
+classified by file extension (image / video / audio / pdf / text). The client
+then references the stored server `path` in the next `/api/chat` request —
+images via `imagePaths`, extracted video frames via `isVideo: true` +
+`imagePaths`, audio via `audioPaths`, and text content by inlining the returned
+`textContent` into the message.
+
+**PDF documents** get a two-stage treatment:
+
+- **Born-digital PDF** (has a selectable text layer): the text is extracted and
+  returned in `textContent`, with `renderedAsImages: false`, `pageCount`,
+  `extractedPageCount`, and the same truncation metadata as text uploads
+  (content is truncated to half the model's context length in tokens). Inline
+  it into the chat message the way the bundled UI does:
+
+```bash
+curl -N -X POST http://localhost:5000/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{
+      "role": "user",
+      "content": "[File: report.pdf]\n<textContent from the upload response>\n[End of file]\nPlease analyze the attached PDF document and summarize its content."
+    }],
+    "maxTokens": 500
+  }'
+```
+
+- **Scanned / image-only PDF**: if a vision-capable model is loaded (`--mmproj`
+  present or the model has a built-in vision encoder), pages are rendered to
+  images and returned like video frames (`renderedAsImages: true`, `frames[]`,
+  `frameUrls[]`, `framePaths[]`); pass the `framePaths` as `imagePaths` on the
+  next `/api/chat` request. Without a vision model the response instead carries
+  `needsVision: true` plus a `warning` asking for a restart with a
+  vision-capable model.
+
+Set the `TS_PDF_MAX_PAGES` environment variable to cap the number of PDF pages
+read (default `0` = all pages).
+
+### Image Editing (`/api/image-edit`, Qwen-Image-Edit)
+
+When the hosted `--model` is a Qwen-Image-Edit DiT GGUF (architecture
+`qwen_image`), image+prompt turns go to the image-edit endpoints instead of
+`/api/chat`:
+
+```bash
+# One-shot edit (multipart). steps=0 / cfg=0 mean auto
+# (30 steps / cfg 2.5, or the Lightning LoRA's step count / cfg 1.0).
+curl -X POST http://localhost:5000/api/image-edit \
+  -F "image=@photo.png" \
+  -F "prompt=Replace the background with a sunny beach" \
+  -F "steps=0" -F "cfg=0" -F "seed=42"
+```
+
+Response:
+
+```json
+{"ok": true, "url": "/uploads/edit-<guid>.png", "width": 1184, "height": 544, "elapsedSeconds": 40.4}
+```
+
+A JSON body `{ "imagePath": "<server path from /api/upload>", "prompt": "...",
+"steps": 0, "cfg": 0, "seed": 42 }` is also accepted (`imagePath` must
+reference a previously uploaded file inside the upload directory). The
+streaming variant emits SSE progress with live denoising previews:
+
+```bash
+curl -N -X POST http://localhost:5000/api/image-edit/stream \
+  -H "Content-Type: application/json" \
+  -d '{"imagePath": "<path from /api/upload>", "prompt": "Replace the background with a sunny beach", "seed": 42}'
+```
+
+Per-step events look like
+`{"imageEdit": true, "step": 2, "total": 4, "image": "data:image/png;base64,...", "width": 1184, "height": 544}`
+(the `image` preview snapshot appears on throttled steps, up to 8 per edit),
+followed by a final
+`{"done": true, "url": "/uploads/edit-<guid>.png", "width": 1184, "height": 544, "elapsedSeconds": 40.4}`.
+Requests against a model that is not Qwen-Image-Edit return 400; concurrent
+edits are serialized by a process-wide lock.
+
 ---
 
 ## 4. Sampling Options
@@ -689,28 +834,39 @@ the prior turn's KV cache) for the corresponding session.
 | Parameter          | Type    | Default | Description                            |
 | ------------------ | ------- | ------- | -------------------------------------- |
 | `num_predict`      | int     | 200     | Maximum tokens to generate             |
-| `temperature`      | float   | 0       | Sampling temperature (0 = greedy)      |
-| `top_k`            | int     | 0       | Top-K filtering (0 = disabled)         |
-| `top_p`            | float   | 1.0     | Nucleus sampling threshold             |
+| `temperature`      | float   | 0.8     | Sampling temperature (0 = greedy)      |
+| `top_k`            | int     | 40      | Top-K filtering (0 = disabled)         |
+| `top_p`            | float   | 0.9     | Nucleus sampling threshold             |
 | `min_p`            | float   | 0       | Minimum probability filtering          |
-| `repeat_penalty`   | float   | 1.0     | Repetition penalty                     |
+| `repeat_penalty`   | float   | 1.1     | Repetition penalty (1.0 = none)        |
 | `presence_penalty` | float   | 0       | Presence penalty                       |
 | `frequency_penalty`| float   | 0       | Frequency penalty                      |
 | `seed`             | int     | -1      | Random seed (-1 = random)              |
 | `stop`             | array   | null    | Stop sequences                         |
+
+The defaults are the server's configured sampling defaults (Ollama-compatible).
+They can be changed at startup with the matching server flags (`--temperature`,
+`--top-k`, `--top-p`, `--min-p`, `--repeat-penalty`, `--presence-penalty`,
+`--frequency-penalty`, `--seed`) or `TENSORSHARP_*` environment variables;
+per-request values always win.
 
 ### OpenAI-style options (top-level)
 
 | Parameter           | Type        | Default | Description                        |
 | ------------------- | ----------- | ------- | ---------------------------------- |
 | `max_tokens`        | int         | 200     | Maximum tokens to generate         |
-| `temperature`       | float       | 0       | Sampling temperature               |
-| `top_p`             | float       | 1.0     | Nucleus sampling threshold         |
+| `temperature`       | float       | 0.8     | Sampling temperature               |
+| `top_p`             | float       | 0.9     | Nucleus sampling threshold         |
 | `presence_penalty`  | float       | 0       | Presence penalty                   |
 | `frequency_penalty` | float       | 0       | Frequency penalty                  |
 | `seed`              | int         | -1      | Random seed                        |
 | `stop`              | string/array| null    | Stop sequences                     |
 | `response_format`   | object      | null    | `text`, `json_object`, or `json_schema` |
+| `think`             | bool        | false   | Non-standard extension: enables thinking/reasoning parsing (returned/streamed as `reasoning_content`) |
+
+`top_k`, `min_p`, and `repetition_penalty` are **not parsed** on the OpenAI
+surface — the server's configured defaults apply for those. Use the Ollama or
+Web UI endpoints if a request needs to set them per call.
 
 ---
 
@@ -836,7 +992,8 @@ print()
 
 Notes:
 
-- `response_format.type = "json_schema"` currently cannot be combined with `tools` or `think`.
+- `response_format` (`json_object` or `json_schema`) currently cannot be combined with `tools` or `think` (HTTP `400`).
+- `json_object` / `json_schema` requests constrain the **first sampled token** to a `{`-opening candidate (the same effect llama.cpp gets from its JSON grammar), so chatty models cannot emit prose before the object and streamed time-to-first-token reflects prefill latency instead of suppressed preamble. Subsequent tokens sample normally. Set `TS_JSON_FORCE_OPEN=0` to disable.
 - Streaming `json_object` requests stream the JSON object token-by-token (code fences and stray tags are stripped on the fly), so time-to-first-token reflects prefill latency. Streaming `json_schema` (strict) requests are still buffered and schema-normalized before the single chunk is emitted. Set `TS_STRUCTURED_STREAM_BUFFER=1` to force the legacy buffer-everything behavior for both. Non-streaming requests are always normalized.
 - Invalid schemas return HTTP `400`; non-streaming / `json_schema` responses that still fail validation return HTTP `422` (a `json_object` stream that has already started cannot change its status code).
 

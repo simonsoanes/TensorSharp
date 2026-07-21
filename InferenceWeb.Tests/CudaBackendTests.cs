@@ -434,6 +434,436 @@ public class CudaBackendTests
     }
 
     [Fact]
+    public void CudaQwen35GatedDeltaNetPacked_ProductionHeadDims_MatchesCpuReference()
+    {
+        if (!CudaBackend.IsAvailable())
+            return;
+
+        // Production-shaped geometry (Qwen3.5-9B: headKDim = headVDim = 128).
+        // headVDim > the kernel's warp count used to route through a multi-block-
+        // per-head layout whose whole-state decay raced between blocks; this test
+        // pins the single-block kernel (with >48 KB dynamic shared) to the CPU
+        // reference at real head sizes.
+        const int seqLen = 8;
+        const int numKHeads = 2;
+        const int numVHeads = 4;
+        const int headKDim = 128;
+        const int headVDim = 128;
+        const int convKernel = 4;
+        const int convWriteIdx = 2;
+        const float eps = 1e-5f;
+
+        int qkDim = numKHeads * headKDim;
+        int vDim = numVHeads * headVDim;
+        int qkvDim = 2 * qkDim + vDim;
+        int packedDim = qkvDim + vDim + 2 * numVHeads;
+        int convDim = convKernel - 1;
+
+        float[] packed = MakePattern(seqLen * packedDim, 0.011f, -0.006f);
+        float[] convState = MakePattern(convDim * qkvDim, 0.017f, 0.004f);
+        float[] ssmState = MakePattern(numVHeads * headVDim * headKDim, 0.009f, -0.005f);
+        float[] convWeight = MakePattern(qkvDim * convKernel, 0.021f, 0.008f);
+        float[] dtBias = MakePattern(numVHeads, 0.03f, -0.01f);
+        float[] aLog = new float[numVHeads];
+        float[] ssmNorm = new float[headVDim];
+        for (int i = 0; i < numVHeads; i++)
+            aLog[i] = -0.05f - i * 0.01f;
+        for (int i = 0; i < headVDim; i++)
+            ssmNorm[i] = 0.8f + (i % 16) * 0.02f;
+
+        float[] expectedConv = (float[])convState.Clone();
+        float[] expectedState = (float[])ssmState.Clone();
+        float[] expected = Qwen35GdnPackedReference(
+            packed, expectedConv, expectedState, convWeight, dtBias, aLog, ssmNorm,
+            seqLen, packedDim, qkvDim, qkDim, vDim,
+            numKHeads, numVHeads, headKDim, headVDim,
+            convKernel, convWriteIdx, eps);
+
+        using var allocator = new CudaAllocator();
+        using var packedTensor = new Tensor(allocator, DType.Float32, seqLen, packedDim);
+        using var convTensor = new Tensor(allocator, DType.Float32, convDim, qkvDim);
+        using var stateTensor = new Tensor(allocator, DType.Float32, numVHeads, headVDim, headKDim);
+        using var convWeightTensor = new Tensor(allocator, DType.Float32, qkvDim, convKernel);
+        using var dtBiasTensor = new Tensor(allocator, DType.Float32, numVHeads);
+        using var aLogTensor = new Tensor(allocator, DType.Float32, numVHeads);
+        using var ssmNormTensor = new Tensor(allocator, DType.Float32, headVDim);
+        using var output = new Tensor(allocator, DType.Float32, seqLen, vDim);
+
+        packedTensor.SetElementsAsFloat(packed);
+        convTensor.SetElementsAsFloat(convState);
+        stateTensor.SetElementsAsFloat(ssmState);
+        convWeightTensor.SetElementsAsFloat(convWeight);
+        dtBiasTensor.SetElementsAsFloat(dtBias);
+        aLogTensor.SetElementsAsFloat(aLog);
+        ssmNormTensor.SetElementsAsFloat(ssmNorm);
+
+        Assert.True(CudaFusedOps.TryQwen35GatedDeltaNetPacked(
+            output, packedTensor, convTensor, stateTensor,
+            convWeightTensor, dtBiasTensor, aLogTensor, ssmNormTensor,
+            seqLen, packedDim, qkvDim, qkDim, vDim,
+            numKHeads, numVHeads, headKDim, headVDim,
+            convKernel, convWriteIdx, eps));
+
+        AssertClose(expected, output.GetElementsAsFloat(seqLen * vDim), 5e-4f);
+        AssertClose(expectedState, stateTensor.GetElementsAsFloat(expectedState.Length), 5e-4f);
+        AssertClose(expectedConv, convTensor.GetElementsAsFloat(expectedConv.Length), 1e-6f);
+    }
+
+    [Fact]
+    public void CudaFusedQKNormRopeNeox_PartialRopeDims_MatchesNormThenRopeReference()
+    {
+        if (!CudaBackend.IsAvailable())
+            return;
+
+        // Qwen3.5 attention geometry: headDim 256, partial RoPE (ropeDim 64 < headDim),
+        // large base. The fused kernel used to derive frequencies from headDim instead
+        // of ropeDim, mis-rotating every position on partial-RoPE models.
+        const int seqLen = 3;
+        const int numHeads = 2;
+        const int headDim = 256;
+        const int ropeDim = 64;
+        const int startPos = 5;
+        const float eps = 1e-6f;
+        const float ropeBase = 10000000f;
+        const float freqScale = 1.0f;
+        int rows = seqLen * numHeads;
+
+        float[,] data = new float[rows, headDim];
+        float[] alpha = new float[headDim];
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < headDim; c++)
+                data[r, c] = MathF.Sin((r + 1) * (c + 3) * 0.013f);
+        for (int c = 0; c < headDim; c++)
+            alpha[c] = 0.9f + (c % 8) * 0.03f;
+
+        int[] positions = new int[rows];
+        for (int s = 0; s < seqLen; s++)
+            for (int h = 0; h < numHeads; h++)
+                positions[s * numHeads + h] = startPos + s;
+
+        // Reference: RMSNorm per row, then NeoX rotation of the first ropeDim dims
+        // with theta_i = pos * base^(-2i/ropeDim) * freqScale.
+        float[] expected = new float[rows * headDim];
+        for (int r = 0; r < rows; r++)
+        {
+            double sumSq = 0;
+            for (int c = 0; c < headDim; c++)
+                sumSq += (double)data[r, c] * data[r, c];
+            float invRms = 1.0f / MathF.Sqrt((float)(sumSq / headDim) + eps);
+            float[] normed = new float[headDim];
+            for (int c = 0; c < headDim; c++)
+                normed[c] = data[r, c] * invRms * alpha[c];
+
+            int half = ropeDim / 2;
+            for (int i = 0; i < half; i++)
+            {
+                float theta = positions[r] * MathF.Pow(ropeBase, -2.0f * i / ropeDim) * freqScale;
+                float c0 = MathF.Cos(theta);
+                float s0 = MathF.Sin(theta);
+                float x0 = normed[i];
+                float x1 = normed[i + half];
+                normed[i] = x0 * c0 - x1 * s0;
+                normed[i + half] = x0 * s0 + x1 * c0;
+            }
+            for (int c = 0; c < headDim; c++)
+                expected[r * headDim + c] = normed[c];
+        }
+
+        using var allocator = new CudaAllocator();
+        using var dataTensor = Tensor.FromArray(allocator, data);
+        using var alphaTensor = new Tensor(allocator, DType.Float32, headDim);
+        using var posTensor = new Tensor(allocator, DType.Int32, rows);
+        alphaTensor.SetElementsAsFloat(alpha);
+        posTensor.SetElementsAsInt(positions);
+
+        Assert.True(CudaFusedOps.TryQKNormRopeNeox(
+            dataTensor, alphaTensor, posTensor,
+            rows, headDim, ropeDim / 2, eps, ropeBase, freqScale));
+
+        AssertClose(expected, dataTensor.GetElementsAsFloat(rows * headDim), 2e-4f);
+    }
+
+    [Fact]
+    public void CudaPrefillGraphCache_CaptureReplayAndAbort_BehaveCorrectly()
+    {
+        if (!CudaBackend.IsAvailable())
+            return;
+
+        using var allocator = new CudaAllocator();
+        using var cache = new CudaPrefillGraphCache(allocator);
+        if (!cache.IsUsable)
+            return; // TS_CUDA_PREFILL_GRAPH=0
+
+        const int n = 4096;
+        float[] weightVals = new float[n];
+        for (int i = 0; i < n; i++)
+            weightVals[i] = 1.0f + (i % 7) * 0.25f;
+        using var weight = new Tensor(allocator, DType.Float32, 1, n);
+        weight.SetElementsAsFloat(weightVals);
+
+        // The "layer loop": two in-place device kernels on the pinned input.
+        void RunOps(Tensor x)
+        {
+            Ops.Mul(x, x, weight);
+            Ops.Add(x, x, 3.0f);
+        }
+
+        float[] Expected(float[] src)
+        {
+            float[] e = new float[n];
+            for (int i = 0; i < n; i++)
+                e[i] = src[i] * weightVals[i] + 3.0f;
+            return e;
+        }
+
+        float[] MakeInput(int salt)
+        {
+            float[] v = new float[n];
+            for (int i = 0; i < n; i++)
+                v[i] = MathF.Sin((i + salt) * 0.013f);
+            return v;
+        }
+
+        const string key = "test|shape";
+
+        // First sighting: second-use policy declines and marks the key seen.
+        Assert.False(cache.ShouldCapture(key));
+        Assert.False(cache.TryGetReplayInput(key, out _));
+
+        // Second sighting: capture, then the launch executes this run's work.
+        Assert.True(cache.ShouldCapture(key));
+        float[] in1 = MakeInput(1);
+        using (var pinned = new Tensor(allocator, DType.Float32, 1, n))
+        {
+            pinned.SetElementsAsFloat(in1);
+            CudaFusedOps.TryEnsureDeviceResident(pinned);
+            Assert.True(cache.BeginCapture(key));
+            RunOps(pinned);
+            Assert.True(cache.EndCaptureAndLaunch(key, pinned, null));
+            AssertClose(Expected(in1), pinned.GetElementsAsFloat(n), 1e-4f);
+        }
+
+        // Replay with DIFFERENT input contents through the pinned buffer.
+        float[] in2 = MakeInput(2);
+        Assert.True(cache.TryGetReplayInput(key, out Tensor replayInput));
+        using (replayInput)
+        using (var fresh = new Tensor(allocator, DType.Float32, 1, n))
+        {
+            fresh.SetElementsAsFloat(in2);
+            CudaFusedOps.TryEnsureDeviceResident(fresh);
+            Ops.Copy(replayInput, fresh);
+            cache.Replay(key);
+            AssertClose(Expected(in2), replayInput.GetElementsAsFloat(n), 1e-4f);
+        }
+
+        // Abort path: a host read (stream sync) during capture must throw; the
+        // abort blacklists the key and later runs never capture again.
+        const string abortKey = "test|abort";
+        Assert.False(cache.ShouldCapture(abortKey));
+        Assert.True(cache.ShouldCapture(abortKey));
+        using (var pinned = new Tensor(allocator, DType.Float32, 1, n))
+        {
+            pinned.SetElementsAsFloat(in1);
+            CudaFusedOps.TryEnsureDeviceResident(pinned);
+            Assert.True(cache.BeginCapture(abortKey));
+            bool aborted = false;
+            try
+            {
+                RunOps(pinned);
+                pinned.GetElementsAsFloat(1); // host read -> sync -> abort
+            }
+            catch (CudaGraphCaptureAbortedException)
+            {
+                aborted = true;
+                cache.AbortCapture(abortKey);
+            }
+            Assert.True(aborted);
+
+            // Nothing executed during the aborted capture; a plain re-run works.
+            RunOps(pinned);
+            AssertClose(Expected(in1), pinned.GetElementsAsFloat(n), 1e-4f);
+        }
+        Assert.False(cache.ShouldCapture(abortKey)); // blacklisted
+    }
+
+    /// <summary>
+    /// The decode-graph contract: a captured graph's leading node copies the
+    /// PINNED host parameter block to a device block, and the position-dependent
+    /// kernels re-read it there. Rewriting the pinned ints and relaunching must
+    /// therefore steer the SAME graph to a new RoPE position and a new KV write
+    /// slot. Also checks the MaxAttendLen entry expiry used by the single-block
+    /// attention route.
+    /// </summary>
+    [Fact]
+    public void CudaDecodeDynParams_GraphReplay_ReadsFreshValues()
+    {
+        if (!CudaBackend.IsAvailable())
+            return;
+
+        using var allocator = new CudaAllocator();
+        using var cache = new CudaPrefillGraphCache(allocator);
+        if (!cache.IsUsable)
+            return; // TS_CUDA_PREFILL_GRAPH=0
+
+        using var dyn = new CudaDecodeDynParams(allocator);
+        Assert.True(dyn.IsValid);
+
+        const int numHeads = 2, headDim = 4, cacheSize = 16;
+        using var posQ = new Tensor(allocator, DType.Int32, 8);
+        using var posK = new Tensor(allocator, DType.Int32, 4);
+        posQ.SetElementsAsInt(new int[8]);
+        posK.SetElementsAsInt(new int[4]);
+
+        using var kvCache = new Tensor(allocator, DType.Float32, numHeads, cacheSize, headDim);
+        Ops.Fill(kvCache, 0.0f);
+        float[] srcVals1 = { 1, 2, 3, 4, 5, 6, 7, 8 };
+        using var src = new Tensor(allocator, DType.Float32, numHeads, 1, headDim);
+        src.SetElementsAsFloat(srcVals1);
+        using var pinnedIn = new Tensor(allocator, DType.Float32, 1, headDim);
+        pinnedIn.SetElementsAsFloat(new float[headDim]);
+        foreach (var t in new[] { posQ, posK, kvCache, src, pinnedIn })
+            CudaFusedOps.TryEnsureDeviceResident(t);
+
+        const string key = "dec|test";
+        Assert.False(cache.ShouldCapture(key)); // first sighting: seen-once
+        Assert.True(cache.ShouldCapture(key));
+
+        dyn.Write(attendLen: 1, kvWritePos: 3, convWriteIdx: 0, ropePos: 7);
+        Assert.True(cache.BeginCapture(key));
+        bool captured = false;
+        try
+        {
+            dyn.EnqueueUpload();
+            dyn.Activate();
+            Assert.True(CudaFusedOps.TryFillRopePositions(posQ, posK, dyn));
+            // seqLen==1 non-circular append picks up the ambient dyn pointer.
+            Assert.True(CudaFusedOps.TryCopyHeadFirstToCache(kvCache, src, 3, 1, cacheSize, false));
+            CudaDecodeDynParams.Deactivate();
+            captured = cache.EndCaptureAndLaunch(key, pinnedIn, null, maxAttendLen: 4);
+        }
+        finally
+        {
+            CudaDecodeDynParams.Deactivate();
+        }
+        Assert.True(captured);
+
+        float[] CacheRow(float[] vals, int head, int slot)
+        {
+            int start = (head * cacheSize + slot) * headDim;
+            return vals[start..(start + headDim)];
+        }
+
+        // First launch used the captured values: positions=7, write slot 3.
+        Assert.All(posQ.GetElementsAsInt(8), p => Assert.Equal(7, p));
+        Assert.All(posK.GetElementsAsInt(4), p => Assert.Equal(7, p));
+        float[] cacheVals = kvCache.GetElementsAsFloat(numHeads * cacheSize * headDim);
+        AssertClose(new float[] { 1, 2, 3, 4 }, CacheRow(cacheVals, 0, 3), 1e-6f);
+        AssertClose(new float[] { 5, 6, 7, 8 }, CacheRow(cacheVals, 1, 3), 1e-6f);
+
+        // Replay with fresh pinned values and fresh source content: the same
+        // graph must write the NEW rows at the NEW slot with the NEW position.
+        float[] srcVals2 = { 10, 20, 30, 40, 50, 60, 70, 80 };
+        src.SetElementsAsFloat(srcVals2);
+        CudaFusedOps.TryEnsureDeviceResident(src);
+        dyn.Write(attendLen: 2, kvWritePos: 5, convWriteIdx: 1, ropePos: 9);
+        Assert.True(cache.TryGetReplayInput(key, 2, out Tensor replayInput));
+        replayInput.Dispose();
+        cache.Replay(key);
+        // The graph rewrote these on device; flag it like the model wrapper
+        // does (posQ/posK were not passed as keepAlive here).
+        CudaFusedOps.TryMarkDeviceModified(posQ);
+        CudaFusedOps.TryMarkDeviceModified(posK);
+        CudaFusedOps.TryMarkDeviceModified(kvCache);
+
+        Assert.All(posQ.GetElementsAsInt(8), p => Assert.Equal(9, p));
+        Assert.All(posK.GetElementsAsInt(4), p => Assert.Equal(9, p));
+        cacheVals = kvCache.GetElementsAsFloat(numHeads * cacheSize * headDim);
+        AssertClose(new float[] { 10, 20, 30, 40 }, CacheRow(cacheVals, 0, 5), 1e-6f);
+        AssertClose(new float[] { 50, 60, 70, 80 }, CacheRow(cacheVals, 1, 5), 1e-6f);
+        // The slot written by the first launch is untouched.
+        AssertClose(new float[] { 1, 2, 3, 4 }, CacheRow(cacheVals, 0, 3), 1e-6f);
+
+        // Entry expiry: attendLen beyond the captured MaxAttendLen (4) disposes
+        // the entry, and the key immediately re-qualifies for capture.
+        Assert.False(cache.TryGetReplayInput(key, 5, out _));
+        Assert.True(cache.ShouldCapture(key));
+    }
+
+    /// <summary>
+    /// The dyn block must override the baked scalar attention length on both
+    /// decode-attention routes: single-block (shared memory sized to a ceiling)
+    /// and partitioned (grid/scratch sized to cache capacity, reduce skipping
+    /// empty partitions). Results must be bit-identical to a plain launch with
+    /// the same effective length.
+    /// </summary>
+    [Fact]
+    public void CudaGqaDecodeAttention_DynAttendLen_MatchesPlainLaunch()
+    {
+        if (!CudaBackend.IsAvailable())
+            return;
+
+        using var allocator = new CudaAllocator();
+        using var dyn = new CudaDecodeDynParams(allocator);
+        Assert.True(dyn.IsValid);
+
+        const int numQHeads = 4, numKVHeads = 2, headDim = 32;
+        var rng = new Random(123);
+
+        void FillRandom(Tensor t, int count)
+        {
+            float[] v = new float[count];
+            for (int i = 0; i < count; i++)
+                v[i] = (float)(rng.NextDouble() * 2.0 - 1.0);
+            t.SetElementsAsFloat(v);
+            CudaFusedOps.TryEnsureDeviceResident(t);
+        }
+
+        void RunCase(int cacheSize, int scalarLen, int dynLen)
+        {
+            using var query = new Tensor(allocator, DType.Float32, 1, numQHeads * headDim);
+            using var kCache = new Tensor(allocator, DType.Float32, numKVHeads, cacheSize, headDim);
+            using var vCache = new Tensor(allocator, DType.Float32, numKVHeads, cacheSize, headDim);
+            using var outDyn = new Tensor(allocator, DType.Float32, 1, numQHeads * headDim);
+            using var outRef = new Tensor(allocator, DType.Float32, 1, numQHeads * headDim);
+            FillRandom(query, numQHeads * headDim);
+            FillRandom(kCache, numKVHeads * cacheSize * headDim);
+            FillRandom(vCache, numKVHeads * cacheSize * headDim);
+
+            // Dyn launch: the scalar length picks the route; the kernel must use
+            // the dyn value. Upload is stream-ordered ahead of the kernel.
+            dyn.Write(dynLen, 0, 0, 0);
+            dyn.EnqueueUpload();
+            dyn.Activate();
+            try
+            {
+                Assert.True(CudaFusedOps.TryGqaDecodeAttention(
+                    outDyn, query, kCache, vCache,
+                    numQHeads, numKVHeads, headDim, 0, scalarLen, cacheSize, false, 0.125f));
+            }
+            finally
+            {
+                CudaDecodeDynParams.Deactivate();
+            }
+
+            // Reference: plain launch with the effective length baked in.
+            Assert.True(CudaFusedOps.TryGqaDecodeAttention(
+                outRef, query, kCache, vCache,
+                numQHeads, numKVHeads, headDim, 0, dynLen, cacheSize, false, 0.125f));
+
+            float[] got = outDyn.GetElementsAsFloat(numQHeads * headDim);
+            float[] expected = outRef.GetElementsAsFloat(numQHeads * headDim);
+            for (int i = 0; i < expected.Length; i++)
+                Assert.Equal(expected[i], got[i]); // bit-exact
+        }
+
+        // Single-block route (scalarLen <= partition threshold).
+        RunCase(cacheSize: 64, scalarLen: 48, dynLen: 17);
+        // Partitioned route (scalarLen > 2048): capacity-sized grid, dyn length
+        // shorter than the captured one, non-multiple of the partition size.
+        RunCase(cacheSize: 6144, scalarLen: 3000, dynLen: 2500);
+    }
+
+    [Fact]
     public void CudaRoPE_MatchesReference()
     {
         if (!CudaBackend.IsAvailable())
@@ -485,7 +915,9 @@ public class CudaBackendTests
             using var input = Tensor.FromArray(allocator, CreateQuantInput());
             using var output = new Tensor(allocator, DType.Float32, 2, 3);
 
-            Assert.True(CudaQuantizedOps.TryAddmmQuantizedToFloat32(output, input, host, host, 8, 32, 3, weights.Length));
+            // q8Kernel: 3 pins the exact FP32 dequant kernel (the int8 dp4a/vec paths
+            // are validated separately against the looser q8_1 tolerance).
+            Assert.True(CudaQuantizedOps.TryAddmmQuantizedToFloat32(output, input, host, host, 8, 32, 3, weights.Length, q8Kernel: 3));
             AssertClose(
                 new[] { 528f, -528f, 61f, 11440f, -11440f, 1022f },
                 output.GetElementsAsFloat(6),
@@ -529,7 +961,7 @@ public class CudaBackendTests
 
         using var input = Tensor.FromArray(allocator, CreateQuantInput());
         using var output = new Tensor(allocator, DType.Float32, 2, 2);
-        Assert.True(CudaQuantizedOps.TryAddmmQuantizedToFloat32(output, input, cacheKey, IntPtr.Zero, 8, 32, 2, weights.Length));
+        Assert.True(CudaQuantizedOps.TryAddmmQuantizedToFloat32(output, input, cacheKey, IntPtr.Zero, 8, 32, 2, weights.Length, q8Kernel: 3));
         AssertClose(new[] { 528f, -528f, 11440f, -11440f }, output.GetElementsAsFloat(4), 1e-3f);
 
         using var indices = Tensor.FromArray(allocator, new int[] { 1, 0 });
@@ -567,7 +999,7 @@ public class CudaBackendTests
             using var inputTensor = Tensor.FromArray(allocator, input);
             using var output = new Tensor(allocator, DType.Float32, rows, outDim);
 
-            Assert.True(CudaQuantizedOps.TryAddmmQuantizedToFloat32(output, inputTensor, host, host, 8, inDim, outDim, weights.Length));
+            Assert.True(CudaQuantizedOps.TryAddmmQuantizedToFloat32(output, inputTensor, host, host, 8, inDim, outDim, weights.Length, q8Kernel: 3));
 
             float[] expected = DequantizedMatmulQ80(weights, outDim, inDim, input, rows);
             AssertClose(expected, output.GetElementsAsFloat(rows * outDim), 1e-3f);
@@ -576,6 +1008,157 @@ public class CudaBackendTests
         }
         finally
         {
+            Marshal.FreeHGlobal(host);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)] // warp-per-column dp4a matvec (decode)
+    [InlineData(3)] // block-tile dp4a GEMM (verify window)
+    public void CudaQuantizedMatmul_Q8_0Dp4aMatchesDequantizedReference(int rows)
+    {
+        if (!CudaBackend.IsAvailable())
+            return;
+
+        const int inDim = 96;
+        const int outDim = 9;
+        byte[] weights = CreateQ8_0Rows(outDim, inDim, (r, c) => (sbyte)(((r + 2) * (c - 11)) % 63), r => 0.125f + r * 0.0625f);
+        float[,] input = new float[rows, inDim];
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < inDim; c++)
+                input[r, c] = MathF.Cos((r + 2) * (c + 1) * 0.029f) * 0.5f;
+
+        bool savedVec = CudaQuantizedOps.Q80VecDp4aEnabled;
+        CudaQuantizedOps.Q80VecDp4aEnabled = true;
+        IntPtr host = Marshal.AllocHGlobal(weights.Length);
+        try
+        {
+            Marshal.Copy(weights, 0, host, weights.Length);
+            using var allocator = new CudaAllocator();
+            using var inputTensor = Tensor.FromArray(allocator, input);
+            using var output = new Tensor(allocator, DType.Float32, rows, outDim);
+
+            Assert.True(CudaQuantizedOps.TryAddmmQuantizedToFloat32(output, inputTensor, host, host, 8, inDim, outDim, weights.Length, q8Kernel: 1));
+
+            float[] expected = DequantizedMatmulQ80(weights, outDim, inDim, input, rows);
+            float[] actual = output.GetElementsAsFloat(rows * outDim);
+            // 8-bit activation quantization tolerance, same rationale as the Q4_0
+            // dp4a test: ~1/127 relative per element with partial cancellation.
+            float maxAbs = 1e-6f;
+            foreach (float e in expected) maxAbs = MathF.Max(maxAbs, MathF.Abs(e));
+            AssertClose(expected, actual, 0.04f * maxAbs);
+
+            CudaQuantizedOps.ReleaseQuantizedWeight(allocator, host);
+        }
+        finally
+        {
+            CudaQuantizedOps.Q80VecDp4aEnabled = savedVec;
+            Marshal.FreeHGlobal(host);
+        }
+    }
+
+    [Fact]
+    public void CudaQuantizedMatmul_Q8_0MmqPrefillRows_MatchesDequantizedReference()
+    {
+        if (!CudaBackend.IsAvailable())
+            return;
+
+        // rows >= 32 auto-routes to the int8 tensor-core MMQ GEMM (mma.m16n8k32).
+        // Odd sizes exercise the M/N tail handling; K = 96 exercises the k-step tail.
+        const int inDim = 96;
+        const int outDim = 70;
+        const int rows = 40;
+        byte[] weights = CreateQ8_0Rows(outDim, inDim, (r, c) => (sbyte)(((r + 5) * (c - 13)) % 63), r => 0.0625f + (r % 7) * 0.03125f);
+        float[,] input = new float[rows, inDim];
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < inDim; c++)
+                input[r, c] = MathF.Sin((r + 3) * (c + 2) * 0.021f) * 0.6f;
+
+        bool savedMmq = CudaQuantizedOps.Q80MmqEnabled;
+        CudaQuantizedOps.Q80MmqEnabled = true;
+        IntPtr host = Marshal.AllocHGlobal(weights.Length);
+        try
+        {
+            Marshal.Copy(weights, 0, host, weights.Length);
+            using var allocator = new CudaAllocator();
+            using var inputTensor = Tensor.FromArray(allocator, input);
+            using var output = new Tensor(allocator, DType.Float32, rows, outDim);
+
+            Assert.True(CudaQuantizedOps.TryAddmmQuantizedToFloat32(output, inputTensor, host, host, 8, inDim, outDim, weights.Length));
+
+            float[] expected = DequantizedMatmulQ80(weights, outDim, inDim, input, rows);
+            float[] actual = output.GetElementsAsFloat(rows * outDim);
+            // Same q8_1 activation-quantization tolerance as the dp4a tests.
+            float maxAbs = 1e-6f;
+            foreach (float e in expected) maxAbs = MathF.Max(maxAbs, MathF.Abs(e));
+            AssertClose(expected, actual, 0.04f * maxAbs);
+
+            CudaQuantizedOps.ReleaseQuantizedWeight(allocator, host);
+        }
+        finally
+        {
+            CudaQuantizedOps.Q80MmqEnabled = savedMmq;
+            Marshal.FreeHGlobal(host);
+        }
+    }
+
+    /// <summary>
+    /// The cp.async MMQ variant (split q8_1 scratch, raw weight windows staged
+    /// async; taken when inDim % 256 == 0) must be BIT-identical to the base
+    /// register-prefetch MMQ kernel: same int8 dots, same scale rounding, same
+    /// accumulation order - only the staging differs. Odd out_dim/rows cover
+    /// the N/M tails (including unstaged garbage rows zeroed by their scales).
+    /// </summary>
+    [Fact]
+    public void CudaQuantizedMatmul_Q8_0Mmq2CpAsync_BitMatchesBaseMmq()
+    {
+        if (!CudaBackend.IsAvailable())
+            return;
+
+        const int inDim = 512;
+        const int outDim = 70;
+        const int rows = 41;
+        byte[] weights = CreateQ8_0Rows(outDim, inDim, (r, c) => (sbyte)(((r + 7) * (c - 29)) % 61), r => 0.03125f + (r % 5) * 0.015625f);
+        float[,] input = new float[rows, inDim];
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < inDim; c++)
+                input[r, c] = MathF.Sin((r + 11) * (c + 3) * 0.0137f) * 0.8f;
+
+        bool savedMmq = CudaQuantizedOps.Q80MmqEnabled;
+        bool savedMmq2 = CudaQuantizedOps.Q80Mmq2Enabled;
+        CudaQuantizedOps.Q80MmqEnabled = true;
+        IntPtr host = Marshal.AllocHGlobal(weights.Length);
+        try
+        {
+            Marshal.Copy(weights, 0, host, weights.Length);
+            using var allocator = new CudaAllocator();
+            using var inputTensor = Tensor.FromArray(allocator, input);
+            using var outBase = new Tensor(allocator, DType.Float32, rows, outDim);
+            using var outAsync = new Tensor(allocator, DType.Float32, rows, outDim);
+
+            CudaQuantizedOps.Q80Mmq2Enabled = false;
+            Assert.True(CudaQuantizedOps.TryAddmmQuantizedToFloat32(outBase, inputTensor, host, host, 8, inDim, outDim, weights.Length));
+
+            CudaQuantizedOps.Q80Mmq2Enabled = true;
+            Assert.True(CudaQuantizedOps.TryAddmmQuantizedToFloat32(outAsync, inputTensor, host, host, 8, inDim, outDim, weights.Length));
+
+            float[] baseVals = outBase.GetElementsAsFloat(rows * outDim);
+            float[] asyncVals = outAsync.GetElementsAsFloat(rows * outDim);
+            for (int i = 0; i < baseVals.Length; i++)
+                Assert.Equal(baseVals[i], asyncVals[i]); // bit-exact
+
+            // And both stay within the q8_1 activation tolerance of the reference.
+            float[] expected = DequantizedMatmulQ80(weights, outDim, inDim, input, rows);
+            float maxAbs = 1e-6f;
+            foreach (float e in expected) maxAbs = MathF.Max(maxAbs, MathF.Abs(e));
+            AssertClose(expected, asyncVals, 0.04f * maxAbs);
+
+            CudaQuantizedOps.ReleaseQuantizedWeight(allocator, host);
+        }
+        finally
+        {
+            CudaQuantizedOps.Q80MmqEnabled = savedMmq;
+            CudaQuantizedOps.Q80Mmq2Enabled = savedMmq2;
             Marshal.FreeHGlobal(host);
         }
     }
@@ -881,6 +1464,117 @@ public class CudaBackendTests
         {
             Marshal.FreeHGlobal(host);
         }
+    }
+
+    [Fact]
+    public void CudaQuantizedMatmulAndRows_IQ4XSMatchNativeReferenceAfterHostRelease()
+    {
+        if (!CudaBackend.IsAvailable())
+            return;
+
+        // IQ4_XS (ggml type 23) is a mixed-quant staple (e.g. Qwen3.5-9B-IQ4_XS).
+        // Before device residency was wired in, its weights stayed host-backed and
+        // the matmul dequantized on the CPU. This exercises the device-resident
+        // path (dequant on-GPU via qvalue_at) against the ggml dequant reference.
+        const int rows = 3;
+        const int inDim = 512;   // multiple of the 256-element IQ4_XS super-block
+        const int outDim = 5;
+        byte[] weights = CreateIq4XsRows(outDim, inDim);
+        float[,] input = new float[rows, inDim];
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < inDim; c++)
+                input[r, c] = MathF.Sin((r + 1) * (c + 1) * 0.011f) + MathF.Cos((r + 2) * (c + 3) * 0.005f) * 0.3f;
+
+        IntPtr host = Marshal.AllocHGlobal(weights.Length);
+        IntPtr cacheKey = new(0x767000 + (int)GgmlTensorType.IQ4_XS);
+        try
+        {
+            Marshal.Copy(weights, 0, host, weights.Length);
+            using var allocator = new CudaAllocator();
+            CudaQuantizedOps.PreloadQuantizedWeight(allocator, cacheKey, host, (int)GgmlTensorType.IQ4_XS, inDim, outDim, weights.Length);
+
+            try
+            {
+                using var inputTensor = Tensor.FromArray(allocator, input);
+                using var output = new Tensor(allocator, DType.Float32, rows, outDim);
+                Assert.True(CudaQuantizedOps.TryAddmmQuantizedToFloat32(
+                    output,
+                    inputTensor,
+                    cacheKey,
+                    IntPtr.Zero,
+                    (int)GgmlTensorType.IQ4_XS,
+                    inDim,
+                    outDim,
+                    weights.Length));
+
+                float[] expected = DequantizedMatmulNative(weights, GgmlTensorType.IQ4_XS, outDim, inDim, input);
+                // Both sides accumulate in FP32; the only divergence is summation order,
+                // so scale the tolerance by the result magnitude (IQ4_XS levels reach
+                // ~127, so raw sums can be large).
+                float maxAbs = 0f;
+                foreach (float e in expected)
+                    maxAbs = MathF.Max(maxAbs, MathF.Abs(e));
+                AssertClose(expected, output.GetElementsAsFloat(rows * outDim), MathF.Max(5e-2f, maxAbs * 3e-4f));
+
+                int[] selected = { 4, 1, 3 };
+                using var indices = Tensor.FromArray(allocator, selected);
+                using var rowOutput = new Tensor(allocator, DType.Float32, selected.Length, inDim);
+                Assert.True(CudaQuantizedOps.TryGetRowsQuantizedToFloat32(
+                    rowOutput,
+                    cacheKey,
+                    IntPtr.Zero,
+                    (int)GgmlTensorType.IQ4_XS,
+                    inDim,
+                    outDim,
+                    weights.Length,
+                    indices));
+
+                // getrows is a pure dequant (no accumulation) so it should match the
+                // reference to a couple of ULPs even at the largest magnitudes.
+                float[] expectedRows = DequantizeNativeRows(weights, GgmlTensorType.IQ4_XS, inDim, selected);
+                float maxRowAbs = 0f;
+                foreach (float e in expectedRows)
+                    maxRowAbs = MathF.Max(maxRowAbs, MathF.Abs(e));
+                AssertClose(expectedRows, rowOutput.GetElementsAsFloat(selected.Length * inDim), MathF.Max(5e-3f, maxRowAbs * 1e-5f));
+            }
+            finally
+            {
+                CudaQuantizedOps.ReleaseQuantizedWeight(allocator, cacheKey);
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(host);
+        }
+    }
+
+    // Builds a byte-valid IQ4_XS weight buffer (any bit pattern is a legal block).
+    // block_iq4_xs = d(half) @0, scales_h(uint16) @2, scales_l[4] @4, qs[128] @8 => 136 bytes / 256 elems.
+    private static byte[] CreateIq4XsRows(int rows, int cols)
+    {
+        const int blockSize = 256;
+        const int blockBytes = 136;
+        Assert.Equal(0, cols % blockSize);
+        int blocksPerRow = cols / blockSize;
+        byte[] raw = new byte[rows * blocksPerRow * blockBytes];
+        for (int r = 0; r < rows; r++)
+        {
+            for (int b = 0; b < blocksPerRow; b++)
+            {
+                int offset = (r * blocksPerRow + b) * blockBytes;
+                WriteHalf(raw, offset, 0.0078125f + r * 0.001953125f + b * 0.0009765625f);
+                // scales_h (2 bytes) + scales_l (4 bytes) + qs (128 bytes): a varied,
+                // deterministic pattern covering the full 4-/6-bit ranges.
+                raw[offset + 2] = (byte)((r * 13 + b * 7 + 3) & 0xFF);
+                raw[offset + 3] = (byte)((r * 5 + b * 11 + 9) & 0xFF);
+                for (int i = 0; i < 4; i++)
+                    raw[offset + 4 + i] = (byte)((r * 17 + b * 3 + i * 23 + 5) & 0xFF);
+                for (int i = 0; i < 128; i++)
+                    raw[offset + 8 + i] = (byte)((r * 29 + b * 17 + i * 11 + 7) & 0xFF);
+            }
+        }
+
+        return raw;
     }
 
     [Fact]

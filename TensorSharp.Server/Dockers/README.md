@@ -53,9 +53,11 @@ git push
 
 ## Space `README.md` template
 
-Put this at the top of the Space's `README.md`. The app serves the chat UI at
-`/`, so both the direct Space URL (`https://<user>-<space>.hf.space`) and the
-embedded iframe open straight into the UI — no `base_path` override is needed.
+Put this at the top of the Space's `README.md`. In the current server contract,
+`GET /` is the liveness endpoint and the chat UI is `/index.html`. Use
+`https://<user>-<space>.hf.space/index.html` as the direct UI link. Do not claim
+that the bare Space root opens the UI; it returns
+`"TensorSharp.Server is running"`.
 
 ```yaml
 ---
@@ -90,16 +92,24 @@ secrets → Build args**, or build locally:
 
 ```bash
 docker build -f Dockerfile \
-  --build-arg MODEL_URL=https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf \
-  --build-arg MODEL_FILE=Qwen3-1.7B-Q4_K_M.gguf \
+  --build-arg 'MODEL_URL=https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_K_M.gguf?download=true' \
+  --build-arg MODEL_FILE=gemma-4-E4B-it-Q4_K_M.gguf \
+  --build-arg MMPROJ_FILE= \
   -t tensorsharp-server .
 ```
 
+This hosts the verified gemma-4-E4B-it at the size-friendly Q4_K_M quantization
+([model repo](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF)); for higher
+quality, the same repo's `gemma-4-E4B-it-Q8_0.gguf` (7.48 GiB) works too.
+The empty `MMPROJ_FILE` makes this a text-only build; the server never
+auto-detects a general multimodal projector. For vision input, point
+`MMPROJ_URL`/`MMPROJ_FILE` at the repo's `mmproj-gemma-4-E4B-it-Q8_0.gguf`.
+
 Model sizing guidance:
 
-| Model | Size (Q4_K_M) | Notes |
+| Model | Download size | Notes |
 |---|---|---|
-| Qwen3-1.7B | ~1.1 GB | Fastest; best for a snappy `cpu-basic` demo |
+| Qwen3-1.7B Q4_K_M | ~1.1 GB | Smallest listed option; fast download, suitable for `cpu-basic` |
 | Qwen3-4B | ~2.5 GB | Good quality/speed balance on CPU |
 | **gemma-4-E2B-it (abliterated, QAT)** (default) | ~3.4 GB | Multimodal; decodes acceptably on CPU |
 | gemma-4-12B-it (abliterated) | ~7.4 GB | Higher quality; slow to decode on CPU — prefer `cpu-upgrade` |
@@ -113,14 +123,13 @@ bridge with `bash build-linux.sh --cuda`, and run with `--backend ggml_cuda`.
 For a DiffusionGemma GGUF, also leave `MMPROJ_FILE` empty; the Web UI exposes
 live denoising previews while the compatibility APIs return final text.
 
-## Troubleshooting: Space shows "TensorSharp.Server is running"
+## Space root shows "TensorSharp.Server is running"
 
-The app serves the chat UI at `/` (Program.cs calls `app.UseDefaultFiles()`, so
-`/` is rewritten to `/index.html` before the plain-text health route runs). If
-the Space root still shows the health string, it is running an **older image
-built before this change** — re-copy the current `Dockerfile_CPU.txt` to the
-Space's `Dockerfile` and trigger a rebuild (Settings → **Factory rebuild**). The
-fix takes effect once the new image is built; no `base_path` override is needed.
+That is the expected current behavior: `GET /` is the liveness route. Open
+`/index.html` for the UI, for example
+`https://<user>-<space>.hf.space/index.html`. Static image/CSS paths also work
+when the app is launched from the published application directory, as both
+Dockerfiles do.
 
 Also note `GET /api/chat` returns 404 in a browser because it is a **POST**-only
 endpoint — the web UI calls it with POST; it is not a deployment error.
@@ -131,8 +140,11 @@ endpoint — the web UI calls it with POST; it is not a deployment error.
 docker build -f TensorSharp.Server/Dockers/Dockerfile_CPU.txt -t tensorsharp-server .
 docker run --rm -p 7860:7860 tensorsharp-server
 # open http://localhost:7860/index.html
-# OpenAI-compatible:  POST http://localhost:7860/v1/chat/completions
-# Ollama-compatible:  POST http://localhost:7860/api/chat/ollama
+
+# Use the exact MODEL_FILE configured at image build time.
+curl -s http://localhost:7860/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Huihui-gemma-4-E2B-it-qat-q4_0-unquantized-abliterated-Q4_K","messages":[{"role":"user","content":"Reply with one short hello."}],"max_tokens":32}'
 ```
 
 First boot loads the model and warms up kernels before serving; allow a minute
@@ -160,7 +172,8 @@ NVIDIA path).
    creates the UID‑1000 user Spaces run as, downloads the model, and launches
    with `--backend ggml_cuda`.
 
-The port rewrite to 7860 and the chat UI at `/` work exactly as in the CPU file.
+The port rewrite to 7860 and the chat UI at `/index.html` work exactly as in the
+CPU file; `/` remains the liveness endpoint.
 
 ## CUDA architectures (build host has no GPU)
 

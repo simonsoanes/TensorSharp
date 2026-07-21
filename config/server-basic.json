@@ -1,0 +1,33 @@
+{
+  // Minimal TensorSharp.Server configuration.
+  // Run with:  TensorSharp.Server --config config/server-basic.json
+  // Command-line options still win, so you can reuse this file across hosts and
+  // override just the backend:
+  //   TensorSharp.Server --config config/server-basic.json --backend ggml_cpu
+  //
+  // Hosts a multimodal Gemma-4 E4B (model + matching vision projector). Both
+  // auto-download into ${modelRoot} on the first run (real, ungated GGUFs) and
+  // are reused afterward. This is the standard -it build; point "path" at your
+  // own file to host a different variant.
+  "variables": {
+    "modelRoot": "C:/models",
+    "repo": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main"
+  },
+
+  "backend": "ggml_cuda",
+  "max-tokens": 4096,
+  "temperature": 0.8,
+  "top-k": 40,
+  "top-p": 0.95,
+  "continuous-batching": true,
+  "stop": ["</s>", "<|eot|>"],
+
+  "model": {
+    "path": "${modelRoot}/gemma-4-E4B-it-Q8_0.gguf",
+    "urls": [ "${repo}/gemma-4-E4B-it-Q8_0.gguf" ]
+  },
+  "mmproj": {
+    "path": "${modelRoot}/gemma-4-E4B-mmproj-F16.gguf",
+    "urls": [ "${repo}/mmproj-F16.gguf" ]
+  }
+}

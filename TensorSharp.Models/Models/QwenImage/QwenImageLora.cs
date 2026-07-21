@@ -114,14 +114,22 @@ namespace TensorSharp.Models.QwenImage
                 float scale = multiplier;
                 if (p.alpha != null) scale *= lora.ReadFloat32(p.alpha)[0] / rank;
 
+                // Fold the scalar into the up-projection factor once here: the native side
+                // path then computes y += B·(A·x) directly, with no per-forward ggml_scale
+                // pass over the [out, seq] delta (that pass cost 12 full-tensor kernels per
+                // block, ~0.25s/forward on a 60-block Lightning LoRA at DiT resolution).
+                float[] up = lora.ReadFloat32(p.up);
+                if (scale != 1f)
+                    for (long i = 0; i < up.LongLength; i++) up[i] *= scale;
+
                 entries[baseKey + ".weight"] = new Entry
                 {
                     A = ToUnmanaged(lora.ReadFloat32(p.down)),
-                    B = ToUnmanaged(lora.ReadFloat32(p.up)),
+                    B = ToUnmanaged(up),
                     Rank = rank,
                     In = nIn,
                     Out = nOut,
-                    Scale = scale,
+                    Scale = 1f,
                 };
                 bytes += (rank * nIn + nOut * rank) * 4;
             }

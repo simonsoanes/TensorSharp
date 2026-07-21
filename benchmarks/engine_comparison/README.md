@@ -4,11 +4,19 @@ Automated, repeatable benchmark that compares **TensorSharp**, **llama.cpp** and
 **vLLM** on the *same* GGUF files, the *same* host, through one uniform OpenAI
 `/v1/chat/completions` surface — across **text, image, audio, video,
 single-turn, multi-turn, function-call, structured-output and long-prompt
-prefill** scenarios on **GPU and CPU** backends.
+prefill** scenarios, on any **compute backend** declared in the config's
+`backends` registry (`ggml_cuda`, `ggml_vulkan`, `ggml_metal`, `ggml_cpu`,
+`cpu`, …) — pick with `--backends`.
+
+It also benchmarks the **stable-diffusion image-editing engine**
+(Qwen-Image-Edit) — TensorSharp's `/api/image-edit` pipeline vs the
+**stable-diffusion.cpp** CLI on the same weights, image, prompt, resolution,
+steps and seed; see [Image editing](#image-editing--stable-diffusion-image_edit).
 
 Model families under test: **Gemma 4** (`gemma4-e4b` dense multimodal Q8_0 from
 `models/`, plus `gemma4-12b` dense + `gemma4-26b-a4b` MoE, both QAT UD-Q4_K_XL
-from `models/gemma_mtp/qat/`), **Qwen 3.6**, **DiffusionGemma**.
+from `models/gemma_mtp/qat/`), **Qwen 3.6**, **DiffusionGemma**,
+**Qwen-Image-Edit 2511** (Q2_K DiT + Lightning 4-step LoRA).
 
 ## Why an OpenAI-HTTP harness
 
@@ -36,6 +44,16 @@ ratio is `—` when either side has no usable (`ok`) cell, and a reference colum
 is dropped entirely when that engine produced nothing comparable for the model
 (e.g. an unreachable vLLM endpoint).
 
+Beyond speed, `report.py` also compares **output quality**: both engines decode
+the same GGUF greedily (`temperature=0`), so their outputs should agree closely.
+The report's *Output quality* section scores each overlapping
+TensorSharp-vs-llama.cpp cell with a whitespace-normalized text-similarity
+ratio (1.00 = identical), checks the structural scenarios (valid JSON object in
+`json_mode`, tool call emitted in `function_call`), and appends side-by-side
+output excerpts, lowest agreement first. The full generated text is captured
+per cell (`output_text`, capped at 8k chars) so the comparison works offline
+from the result JSONs alone.
+
 ## Files
 
 | File | Role |
@@ -48,21 +66,24 @@ is dropped entirely when that engine produced nothing comparable for the model
 | `report.py` | aggregates `results/*.json` → `docs/engine_comparison_report.md` + `results/results.csv` |
 | `assets/` | long-context prompt (`long_text.txt`), prefill corpus (`prefill_corpus.txt`), `tools/weather.json` |
 | `benchmark_config_prefill.json` | **prefill-only** variant — the same long-prompt sweep (2k/4k/8k/16k/32k/64k/128k tokens) but with the multimodal / diffusion scenarios and models stripped out, for a focused prefill run; select with `--config` |
+| `benchmark_config_ci.json` | **CI** variant used by `.github/workflows/test-matrix.yml` — TensorSharp vs llama.cpp only, `ggml_cuda` only, text + prefill scenarios; each model entry carries an `_hf` Hugging Face repo pointer its files are downloaded from |
+| `download_models.py` | downloads the selected models' files from their `_hf` repo pointers into the paths the config resolves them to (skips files already present) |
 
 ## Configuration
 
 Every setting lives in **`benchmark_config.json`** — nothing is hardcoded in the
-Python. It holds the host paths (`paths`), the model / scenario / engine
-registries (`models`, `scenarios`, `engines`), the abstract→engine backend maps
-(`maps`), the llama-server launch options (`llama`), per-size-class readiness
-timeouts (`ready_timeout_s`), and the run defaults (`defaults`: which engines /
-models / scenarios / backends to run, MTP modes, concurrency levels, max-tokens,
-warmup count, server max-tokens headroom).
+Python. It holds the host paths (`paths`), the model / scenario / engine /
+backend registries (`models`, `scenarios`, `engines`, `backends` — see
+[Choosing compute backends](#choosing-compute-backends---backends) for the
+backend entry format), the llama-server launch options (`llama`),
+per-size-class readiness timeouts (`ready_timeout_s`), and the run defaults
+(`defaults`: which engines / models / scenarios / backends to run, MTP modes,
+concurrency levels, max-tokens, warmup count, server max-tokens headroom).
 
 Values resolve with this precedence (highest first):
 
 1. **Command-line flags** to `run_matrix.py` / `report.py` (e.g. `--models`, `--scenarios`, `--max-tokens`).
-2. **Environment variables** — host paths only, for retargeting without editing the file (`BENCH_MODEL_ROOT`, `BENCH_TS_SERVER_DLL`, `BENCH_LLAMA_SERVER`, `BENCH_VLLM_URL`, `BENCH_IMAGE`, `BENCH_AUDIO`, `BENCH_VIDEO`, `BENCH_RESULTS`, `DIFFUSION_STEPS`, ...).
+2. **Environment variables** — host paths only, for retargeting without editing the file (`BENCH_MODEL_ROOT`, `BENCH_TS_SERVER_DLL`, `BENCH_LLAMA_SERVER`, `BENCH_VLLM_URL`, `BENCH_SDCPP_EXE`, `BENCH_IMAGE`, `BENCH_AUDIO`, `BENCH_VIDEO`, `BENCH_RESULTS`, `BENCH_QWEN_IMAGE_DIT` / `BENCH_QWEN_IMAGE_VAE` / `BENCH_QWEN_IMAGE_VL` / `BENCH_QWEN_IMAGE_MMPROJ` / `BENCH_QWEN_IMAGE_LORA` (image-edit components), `DIFFUSION_STEPS`, ...).
 3. **`benchmark_config.json`** (or the file named by `--config PATH` / `BENCH_CONFIG`).
 4. Built-in fallbacks in `config.py`.
 
@@ -77,7 +98,14 @@ it. Point the harness at an alternate settings file with `--config other.json`
 - **Python 3.10+** with `requests`, `opencv-python` (video frame sampling). Both already present on the dev box.
 - **TensorSharp.Server** built: `TensorSharp.Server/bin/TensorSharp.Server.dll` (run with `dotnet`). Build with `dotnet build TensorSharp.Server -c Release` if missing/stale.
 - **llama.cpp** server binary at `C:/Works/llama.cpp/build-cuda/bin/Release/llama-server.exe` (CUDA build).
+  Non-CUDA backend columns use per-backend builds declared in the `backends` registry
+  (e.g. a Vulkan build at `build-vulkan/.../llama-server.exe`, overridable via
+  `BENCH_LLAMA_SERVER_VULKAN`); a missing build just records that column's llama.cpp cells as skipped.
 - **vLLM** (optional): start an OpenAI server yourself and point the harness at it; otherwise vLLM cells record `skipped (engine unavailable)`.
+- **stable-diffusion.cpp** (image-edit scenario): `sd-cli.exe` at
+  `C:/Works/stable-diffusion.cpp/build/bin/Release/sd-cli.exe` (CUDA build;
+  override via `paths.sdcpp_exe` / `BENCH_SDCPP_EXE`). Missing binary just
+  records the `sdcpp` cells as skipped.
 - Models under `C:/Works/models` and media at `C:/Works/{test.jpg,obama_first_45_secs.mp3,concert.mp4}`.
 
 All of these paths default to the values in `benchmark_config.json` (`paths`
@@ -90,20 +118,25 @@ environment variables listed under [Configuration](#configuration) above.
 cd benchmarks/engine_comparison
 
 # Smoke test: one cheap cell, end to end
-python run_matrix.py --engines tensorsharp --backends gpu \
+python run_matrix.py --engines tensorsharp --backends ggml_cuda \
     --models gemma4-12b --scenarios text_short,multi_turn
+
+# Same model across several compute backends (one report column per backend)
+python run_matrix.py --engines tensorsharp,llamacpp \
+    --backends ggml_cuda,ggml_vulkan,ggml_cpu,cpu \
+    --models gemma4-12b --scenarios text_short
 
 # Full matrix (engines auto-skip when a binary / endpoint is missing,
 # CPU auto-skips the large MoE models, diffusion auto-restricts to text)
-python run_matrix.py --engines tensorsharp,llamacpp,vllm --backends gpu,cpu \
+python run_matrix.py --engines tensorsharp,llamacpp,vllm --backends ggml_cuda,cpu \
     --models gemma4-12b,gemma4-26b-a4b,qwen36-35b-a3b,diffusiongemma
 
 # MTP / NextN speculative decoding, on vs off (TensorSharp), single stream
-python run_matrix.py --engines tensorsharp --backends gpu \
+python run_matrix.py --engines tensorsharp --backends ggml_cuda \
     --models qwen36-35b-a3b,gemma4-12b --scenarios text_short --mtp off,on
 
 # Parallel-request scaling — aggregate decode throughput under load
-python run_matrix.py --engines tensorsharp,llamacpp --backends gpu \
+python run_matrix.py --engines tensorsharp,llamacpp --backends ggml_cuda \
     --models gemma4-12b --scenarios text_short --concurrency 1,4,8
 
 # Use an alternate settings file (e.g. a second host)
@@ -122,12 +155,82 @@ Useful flags: `--config <file>` (pick the settings file), `--engines`,
 `--max-tokens N`, `--warmup N` (0 disables), `--skip-existing` (reuse prior `ok`
 cells), `--results <dir>`. `report.py` accepts `--config` and `--results`.
 
+### Choosing compute backends (`--backends`)
+
+The backend axis is a **registry** in the config's `backends` section: one
+entry per concrete compute backend, each becoming its own column in the report.
+The default registry declares:
+
+| id | kind | TensorSharp | llama.cpp | vLLM |
+|---|---|---|---|---|
+| `ggml_cuda` (alias `gpu`) | gpu | `--backend ggml_cuda` | CUDA build, `-ngl 999` | compared here |
+| `ggml_vulkan` | gpu | `--backend ggml_vulkan` | Vulkan build (`BENCH_LLAMA_SERVER_VULKAN`), `-ngl 999` | — |
+| `ggml_metal` | gpu | `--backend ggml_metal` | Metal build (`BENCH_LLAMA_SERVER_METAL`), `-ngl 999` | — |
+| `cuda` | gpu | `--backend cuda` (direct cuBLAS) | — | — |
+| `mlx` | gpu | `--backend mlx` (macOS) | — | — |
+| `ggml_cpu` | cpu | `--backend ggml_cpu` | `-ngl 0` | — |
+| `cpu` | cpu | `--backend cpu` (pure C#) | `-ngl 0` | — |
+
+Select any subset with `--backends ggml_cuda,ggml_vulkan,...` (or
+`defaults.backends` in the config); the legacy alias `gpu` still resolves to
+`ggml_cuda`, and unknown ids fail fast with the list of available ones. An
+engine with no launch mapping for a backend (e.g. llama.cpp on `mlx`) records
+its cells as `skipped`, and `cpu`-kind backends auto-skip `large` models.
+
+The `ggml_vulkan` column needs a Vulkan build of llama-server (the CUDA build
+cannot run Vulkan). It can be built without installing the LunarG SDK by
+reusing TensorSharp's portable Vulkan toolchain
+(`ExternalProjects/vulkan-toolchain`, provisioned by
+`eng/fetch-vulkan-toolchain.ps1`):
+
+```powershell
+$TC = "C:/Works/TensorSharp/ExternalProjects/vulkan-toolchain"
+cmake -S C:/Works/llama.cpp -B C:/Works/llama.cpp/build-vulkan -G "Visual Studio 17 2022" -A x64 `
+    -DGGML_VULKAN=ON -DLLAMA_CURL=OFF -DLLAMA_BUILD_SERVER=ON `
+    -DVulkan_INCLUDE_DIR="$TC/Vulkan-Headers/include" `
+    -DVulkan_LIBRARY="$TC/loader/vulkan-1.lib" `
+    -DVulkan_GLSLC_EXECUTABLE="$TC/shaderc/bin/glslc.exe" `
+    -DSPIRV-Headers_DIR="$TC/spirv-headers-install/share/cmake/SPIRV-Headers" `
+    -DCMAKE_CXX_FLAGS="-DWIN32 -D_WINDOWS -W3 -GR -EHsc -I$TC/spirv-headers-install/include"
+cmake --build C:/Works/llama.cpp/build-vulkan --config Release --target llama-server -j 16
+```
+
+(The `CMAKE_CXX_FLAGS` include is needed because llama.cpp's
+`find_package(SPIRV-Headers)` only checks that the package exists — it assumes
+`spirv/unified1/spirv.hpp` is reachable through the Vulkan SDK include dir,
+which the portable toolchain keeps in a separate install tree. The dash-style
+MSVC flags are deliberate: they also work when the command is pasted into Git
+Bash, where `/D...`-style flags get mangled into paths by MSYS conversion.)
+
+Each registry entry says how every engine launches on that backend:
+`tensorsharp: {backend, extra_args, env}` (e.g. `"extra_args": ["--gpu-device", "1"]`
+or `"env": {"TS_GGML_VULKAN_DEVICE": "1"}` to pick the Vulkan GPU),
+`llamacpp: {ngl, server_exe, extra_args, env}` — `server_exe` points at a
+per-backend llama-server build (Vulkan/Metal builds live in separate llama.cpp
+build trees; the `{"path", "env"}` form makes it host-overridable) and falls
+back to `paths.llama_server_exe` — and `vllm: true` marks the single column the
+external vLLM endpoint's numbers are comparable on. Add a new backend by adding
+an entry; nothing in the Python needs to change.
+
+Two caveats: **TensorSharp.Server silently falls back** to the first available
+backend when the requested one isn't supported by the build/host (check
+`results/logs/*.log` — the startup banner names the backend actually used — if
+numbers look implausible), and llama.cpp's `cpu` and `ggml_cpu` cells are the
+same engine configuration (`-ngl 0`), since llama.cpp has no pure-C# analogue.
+
+Older configs using the legacy `"backends": ["gpu", "cpu"]` list + `maps`
+form still load unchanged, and result files from old runs (backend ids `gpu` /
+`cpu` in their names) still render in reports alongside new ids.
+
 ### MTP / NextN speculative decoding (`--mtp off | on | off,on`)
 
 Benchmarks **with and without** TensorSharp's multi-token-prediction draft head.
 Each mode relaunches the server (it is a load-time flag): `on` adds `--mtp-spec`,
 and for Gemma 4 also `--mtp-draft-model <draft.gguf>` (Qwen 3.6 embeds its NextN
-block in the trunk, so no extra file is needed). MTP is a TensorSharp feature —
+block in the trunk, so no extra file is needed — but only GGUFs from the
+`unsloth/Qwen3.6-35B-A3B-MTP-GGUF` repo retain that block; base-repo Qwen3.6
+GGUFs with the same file names strip it and the server silently falls back to
+standard decode, making the `on` and `off` cells measure the same thing). MTP is a TensorSharp feature —
 `on` cells for llama.cpp / vLLM and for the diffusion model are recorded as
 skipped. Gemma 4 drafts are target-paired (an E4B `gemma4-assistant` draft for
 `gemma4-e4b`, a 12B draft for `gemma4-12b`, a 26B-A4B draft for
@@ -202,6 +305,53 @@ Add lengths by naming them: `--scenarios prefill_1k,prefill_32k` works without a
 config edit (`prefill_<N>` / `prefill_<N>k` is parsed generically); the driver
 auto-raises llama.cpp's context to fit, so no `llama.context_size` edit is needed.
 
+### Image editing / stable diffusion (`image_edit`)
+
+The `image_edit` scenario benchmarks the **stable-diffusion image-editing
+engine** — TensorSharp's Qwen-Image-Edit pipeline against the
+**stable-diffusion.cpp** CLI (`sdcpp` engine) — on the *same* weights and the
+*same* task:
+
+- **Same everything**: the benchmark image (`paths.media.image`) is pre-resized
+  once to the exact dims TensorSharp's `ResizeToArea` picks for the scenario's
+  `edit.target_area` (aspect-preserving, multiple of 16) and saved as PNG; both
+  engines then edit those identical pixels at that identical resolution
+  (TensorSharp via `targetArea`, sd.cpp via `-W/-H`), with the same prompt,
+  steps, cfg and seed from the scenario's `edit` block.
+- **TensorSharp** runs as a server (launched with `--model <dit.gguf>
+  --qwen-image-vae/-vl/-mmproj/-lora …` from the model's `components`) and is
+  driven through multipart `POST /api/image-edit`. Each cell sends **two**
+  requests: the *cold* first request (pays the per-request DiT rebuild + graph
+  capture on a fresh server → `edit_first_total_ms`) and the *warm* steady-state
+  request (the headline `edit_total_ms`).
+- **stable-diffusion.cpp** runs one `sd-cli` process per cell
+  (`--diffusion-model … --vae … --llm … --llm_vision … --model-args
+  qwen_image_zero_cond_t=true --sampling-method euler --flow-shift 3`, LoRA via
+  the `<lora:…:1>` prompt tag; per-backend `extra_args` such as
+  `--diffusion-fa` come from the `backends.*.sdcpp` registry entry).
+- **Metrics are each engine's own pipeline timers**, so weight-file loading and
+  HTTP/process overhead are excluded on both sides: TensorSharp's
+  `[pipe-timing]` phases + the server's `elapsedSeconds`; sd.cpp's
+  `get_learned_condition` / `sampling` / `encode_first_stage` /
+  `decode_first_stage` phase logs + its `generate_image` total. Recorded per
+  cell: `edit_total_ms`, `edit_first_total_ms`, `edit_text_encode_ms`,
+  `edit_vae_encode_ms`, `edit_sampling_ms`, `edit_per_step_ms`,
+  `edit_vae_decode_ms`, output resolution, and the output image itself
+  (`results/images/…png`, for visual verification).
+
+Applicability gating keeps the matrix clean: `image_edit` only runs on
+TensorSharp + sd.cpp with the image-edit model, the image-edit model runs no
+other scenario, `sdcpp` runs no other scenario, MTP and `--concurrency > 1` are
+recorded as skips, and `report.py` renders these cells in their own **Image
+editing (stable-diffusion)** section (phase table + TensorSharp-vs-sd.cpp
+speedups) instead of the token-throughput tables.
+
+```bash
+# Just the image-edit comparison
+python run_matrix.py --engines tensorsharp,sdcpp --backends ggml_cuda \
+    --models qwen-image-edit --scenarios image_edit
+```
+
 ### Parallel requests (`--concurrency 1,4,8`)
 
 Fires N identical requests at the *same* server at once (the server's continuous
@@ -227,7 +377,77 @@ Result files keep their historical names for the baseline (`mtp` off,
   baseline (MTP off, single request) keeps the suffix-free name.
 - `results/logs/{engine}__{backend}__{model}.log` — captured server stdout/stderr
   (the first place to look when a group reports `fail`).
+- **Stuck/leftover servers**: a crashed or interrupted run can leave a server
+  process squatting its port — in the worst case unkillable (a thread stuck in
+  a GPU-driver call survives `taskkill /F` until reboot) while the kernel still
+  accepts TCP connects into its dead listen backlog, which looks like an
+  endless "server not ready" wait. The harness defends itself: llama-server is
+  auto-launched on the next free port when its configured port is taken, the
+  TensorSharp group fails fast with the squatter's PID (its 0.0.0.0:5000 listen
+  address is hard-coded), and `wait_ready` aborts with a diagnosis when the
+  port's owner is not the process it launched.
 - `docs/engine_comparison_report.md` and `results/results.csv` from `report.py`.
+
+The `results/` directory (per-cell JSONs, logs, images, CSV) is generated
+locally by each run and is **not committed** to the repository — the committed
+artifact is the generated `docs/engine_comparison_report.md`.
+
+## CI (GitHub Actions)
+
+`.github/workflows/test-matrix.yml` runs this harness on the self-hosted
+`tensorsharp-cuda` runner in two profiles: a trimmed **smoke** profile on every
+pull request (`gemma4-12b` only; `text_short`, `function_call`, `json_mode`,
+`prefill_4k`; report posted as a PR comment), and the **full** CI set on
+demand via `workflow_dispatch` (inputs select a custom subset) plus a weekly
+schedule. Each run:
+
+1. builds TensorSharp (native GGML CUDA library + `TensorSharp.Server`),
+2. clones and builds **llama.cpp** (CUDA, `llama-server`; pick the ref with the
+   `llama_ref` input),
+3. downloads the benchmark models from their Hugging Face pointers via
+   `download_models.py` (the `_hf` fields in `benchmark_config_ci.json`),
+4. runs `run_matrix.py --config benchmark_config_ci.json` (TensorSharp vs
+   llama.cpp on `ggml_cuda`, text + prefill scenarios), and
+5. generates the combined **performance + output-quality** report with
+   `report.py`, uploads it (plus the per-cell JSONs/logs) as artifacts, and
+   renders it into the job summary.
+
+llama.cpp sources/build and the downloaded models live in a persistent
+directory on the runner (`$HOME/tensorsharp-bench`, overridable with the
+`BENCH_HOME` repository variable), so repeat runs only pay incremental costs.
+The run fails if any benchmark cell reports `fail` or nothing ran `ok`.
+
+### Verifying the macOS / MLX path
+
+The CI workflow is CUDA-only, but `benchmark_config_ci.json` also registers
+the `ggml_metal` and `mlx` backends, so the same config verifies the macOS
+path on an Apple Silicon host (llama.cpp has no MLX backend — the
+apples-to-apples reference on that host is llama.cpp on `ggml_metal`, and the
+`mlx` column is TensorSharp-only):
+
+```bash
+# One-time host setup: native libs + server + a Metal llama-server build
+bash TensorSharp.GGML.Native/build-macos.sh
+bash TensorSharp.Backends.MLX/build-native-macos.sh
+dotnet build TensorSharp.Server/TensorSharp.Server.csproj -c Release
+git clone https://github.com/ggml-org/llama.cpp ~/tensorsharp-bench/llama.cpp
+cmake -S ~/tensorsharp-bench/llama.cpp -B ~/tensorsharp-bench/llama.cpp/build \
+    -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF -DLLAMA_BUILD_SERVER=ON
+cmake --build ~/tensorsharp-bench/llama.cpp/build --config Release --target llama-server -j
+
+# Models, benchmark, report — same pipeline as CI
+cd benchmarks/engine_comparison
+export BENCH_MODEL_ROOT=~/tensorsharp-bench/models
+export BENCH_LLAMA_SERVER=~/tensorsharp-bench/llama.cpp/build/bin/llama-server
+python3 download_models.py --config benchmark_config_ci.json --models gemma4-12b
+python3 run_matrix.py --config benchmark_config_ci.json \
+    --backends ggml_metal,mlx --models gemma4-12b
+python3 report.py --config benchmark_config_ci.json
+```
+
+To run it as a CI job instead, add a second job on the old
+`[self-hosted, tensorsharp-mlx]` runner label with the build steps above and
+`--backends ggml_metal,mlx` on the `run_matrix.py` line.
 
 ## Scenario / engine coverage notes
 
@@ -238,7 +458,8 @@ Result files keep their historical names for the baseline (`mtp` off,
   only on text / multi-turn scenarios.
 - **Video** is sampled into frames and sent as an image sequence; only
   TensorSharp consumes it (llama.cpp has no video path).
-- **CPU** runs are restricted to small/medium models; the 35B MoE is GPU-only.
+- **CPU-kind backends** (`ggml_cpu`, `cpu`) are restricted to small/medium
+  models; the 35B MoE is GPU-only.
 - **MTP** (`--mtp on`) only applies to TensorSharp on models that ship a draft
   head (Qwen 3.6 embedded NextN; Gemma 4 with its paired `--mtp-draft-model`);
   every other engine/model `on` cell is recorded as skipped.

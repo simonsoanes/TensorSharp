@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -103,6 +103,13 @@ namespace TensorSharp.Models
         // with what ForwardBatch will actually accept.
         public bool SupportsBatchedMultimodal => IsBatchedPathEnabled();
 
+        /// <summary>Declared availability of the batched path (see
+        /// <see cref="IBatchedPagedModel.BatchedForwardAvailable"/>): follows
+        /// the <c>TS_QWEN35_BATCHED</c> / <c>--no-continuous-batching</c>
+        /// opt-out so <c>ExecutionPlanner</c> routes to the per-seq fallback
+        /// up front instead of via a NotSupportedException round trip.</summary>
+        public bool BatchedForwardAvailable => IsBatchedPathEnabled();
+
         // ====================================================================
         // N=1 fast path (BatchExecutor): when only ONE sequence is scheduled,
         // serve it through the per-seq Forward path (= the fused, CUDA-graph
@@ -137,10 +144,8 @@ namespace TensorSharp.Models
             if (string.Equals(Environment.GetEnvironmentVariable("TS_QWEN35_MIGRATE"), "0", StringComparison.Ordinal))
                 return false;
             try { return MigrateLinearToPaged(owner, blockSize); }
-            catch (Exception ex)
+            catch (Exception)
             {
-                if (string.Equals(Environment.GetEnvironmentVariable("TS_QWEN35_MOE_DEBUG"), "1", StringComparison.Ordinal))
-                    Console.Error.WriteLine($"[qwen35-migrate] failed: {ex.Message}");
                 return false;
             }
         }
@@ -265,17 +270,6 @@ namespace TensorSharp.Models
             int numSeqs = ctx.Sequences.Count;
             if (numSeqs == 0) return Array.Empty<float[]>();
 
-            bool diagDispatch = _backend == BackendType.Mlx
-                && Environment.GetEnvironmentVariable("TS_DIAG_DISPATCH") == "1";
-            long dispatchBefore = diagDispatch ? TensorSharp.MLX.MlxWorker.DispatchCount : 0;
-            long queueBefore = diagDispatch ? TensorSharp.MLX.MlxWorker.QueueCount : 0;
-            long fwdStart = diagDispatch ? Stopwatch.GetTimestamp() : 0;
-            // Note: diagDispatch is for development only — the
-            // MlxWorker.DispatchCount / QueueCount counters use
-            // Interlocked.Increment on every Invoke/Dispatch even when
-            // the env-var is unset, which adds ~1-2 ns per call. For
-            // 14k calls/token that's 30 microseconds — fine for
-            // measurement, but consider compiling them out for prod.
 
             if (!IsBatchedPathEnabled())
             {
@@ -696,18 +690,6 @@ namespace TensorSharp.Models
                 perSeq[s] = slice;
             }
 
-            if (diagDispatch)
-            {
-                long totalDelta = TensorSharp.MLX.MlxWorker.DispatchCount - dispatchBefore;
-                long queueDelta = TensorSharp.MLX.MlxWorker.QueueCount - queueBefore;
-                long elapsedMs = (Stopwatch.GetTimestamp() - fwdStart) * 1000 / Stopwatch.Frequency;
-                try
-                {
-                    System.IO.File.AppendAllText("/tmp/ts_dispatch_diag.txt",
-                        $"[batch] seqs={numSeqs} tokens={numTokens} total_calls={totalDelta} queue_calls={queueDelta} inline={totalDelta - queueDelta} ms={elapsedMs}\n");
-                }
-                catch { }
-            }
             return perSeq;
         }
 

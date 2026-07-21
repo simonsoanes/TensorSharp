@@ -22,6 +22,7 @@
   <div class="card-grid">
     <div class="card"><div class="ic">🧠</div><h3>多架构</h3><p>Gemma 4 / 3、Qwen 3 / 3.5 / 3.6、GPT OSS、Nemotron-H、Mistral 3、DiffusionGemma、Qwen-Image-Edit。</p></div>
     <div class="card"><div class="ic">🖼️</div><h3>多模态</h3><p>图像、视频与音频输入（Gemma 4）；多个其他模型支持图像输入。</p></div>
+    <div class="card"><div class="ic">📄</div><h3>PDF 文档</h3><p>在 Web UI 上传 PDF，或在 CLI 传 <code>--pdf</code> —— 文本型 PDF 直接内联，扫描页则交给视觉模型。</p></div>
     <div class="card"><div class="ic">🎨</div><h3>图像编辑</h3><p>Qwen-Image-Edit 将提示词 + 输入图像转为编辑后的图像（MMDiT 扩散）。</p></div>
     <div class="card"><div class="ic">💭</div><h3>思考模式</h3><p>结构化的思维链，与可见答案分离。</p></div>
     <div class="card"><div class="ic">🛠️</div><h3>工具调用</h3><p>跨三种 API 风格的多轮函数调用。</p></div>
@@ -35,6 +36,7 @@
   <ul>
     <li><strong>多架构支持</strong> —— Gemma 4、Gemma 3、DiffusionGemma、Qwen 3、Qwen 3.5/3.6-family、GPT OSS、Nemotron-H、Mistral 3、Qwen-Image-Edit。→ <a href="models_zh-cn.html#table">支持的模型</a></li>
     <li><strong>多模态推理</strong> —— Gemma 4 支持图像、视频与音频输入；Gemma 3、Qwen 3.5-family、Mistral 3 与 Nemotron-H Omni 支持图像。→ <a href="models_zh-cn.html#multimodal">多模态</a></li>
+    <li><strong>PDF 文档输入</strong> —— 原生数字（born-digital）PDF 会提取文本层并内联进提示词（按 token 预算截断）；扫描版 PDF 则回退为页面图像，交给具备视觉能力的模型。可通过 Web UI 上传使用，也可用 CLI 一次性生成的 <code>--pdf</code> 参数；用 <code>TS_PDF_MAX_PAGES</code> 限制读取的页数（默认：全部）。→ <a href="server_zh-cn.html#webui">Web UI</a></li>
     <li><strong>专家混合（MoE）</strong> —— Gemma 4 MoE（如 26B-A4B）、GPT OSS MoE（gpt-oss-20b）、Qwen 3.5/3.6 MoE（35B-A3B）以及 Nemotron-H MoE FFN 层，配以融合的批量 GPU MoE 调度。</li>
     <li><strong>混合 SSM-Transformer</strong> —— Nemotron-H 在一个模型中混合 Mamba2 SSM 层、注意力层与 MoE FFN。</li>
     <li><strong>混合注意力-循环</strong> —— Qwen 3.5/3.6-family 将全注意力层与 GatedDeltaNet 循环层混合。</li>
@@ -54,8 +56,8 @@
 
   <h2 id="performance">性能与扩展</h2>
   <ul>
-    <li><strong>与 llama.cpp 同台较量、互有胜负</strong> —— 在相同 GGUF 文件与相同 GPU 上，这个纯 .NET 引擎在关键负载上追平乃至超越手工优化的 C++ <code>llama.cpp</code>：Gemma 4 26B-A4B MoE 的 prefill 快 1.32×、首 token 早 1.30×（单场景最高 1.70× / 1.65×），Gemma 4 12B 在每个 decode 场景上打平或获胜（几何平均 1.17×），流式工具调用轮次 decode 最高快 2.37×，E4B 上结构化输出（JSON）decode 流速快 7.7×。→ <a href="benchmarks_zh-cn.html#head-to-head">同台基准测试</a></li>
-    <li><strong>GPU 加速</strong> —— GGML Metal（macOS）、GGML CUDA（Windows/Linux + NVIDIA）、直接 CUDA/cuBLAS 后端，以及面向 Apple Silicon 的 MLX 后端 —— 均带 CPU 回退。→ <a href="backends_zh-cn.html">后端</a></li>
+    <li><strong>与 llama.cpp 同台较量、互有胜负</strong> —— 在相同 GGUF 文件与相同 GPU 上，这个纯 .NET 引擎在关键负载上追平乃至超越手工优化的 C++ <code>llama.cpp</code>。在当前的对比运行中（短提示 / 长上下文 / 多轮文本场景，两个引擎均分别在 GGML CUDA 与 Vulkan 构建上测量，可通过 <code>benchmarks/engine_comparison</code> 复现）：Gemma 4 E4B 与 2-bit 量化的 Qwen 3.6 35B-A3B MoE 在 CUDA 上 prefill 快 1.28×、首 token 早 1.27×（多轮提示最高 1.49×），Gemma 4 12B 在 Vulkan 上 decode 快 1.21×（长上下文最高 1.32×），四个模型中有三个的 CUDA decode 持平或更快（Qwen 3.6 27B 几何平均最高 1.07×）。较早的一次 CUDA <code>image_edit</code> 运行还测得 TensorSharp 的 Qwen-Image-Edit 完成一次预热后的编辑用时 40.44 s，而 stable-diffusion.cpp 为 48.16 s（快约 1.19×）。→ <a href="benchmarks_zh-cn.html#head-to-head">同台基准测试</a></li>
+    <li><strong>GPU 加速</strong> —— GGML Metal（macOS）、GGML CUDA（Windows/Linux + NVIDIA）、GGML Vulkan（Windows/Linux + AMD/Intel/NVIDIA）、直接 CUDA/cuBLAS 后端，以及面向 Apple Silicon 的 MLX 后端 —— 均带 CPU 回退。→ <a href="backends_zh-cn.html">后端</a></li>
     <li><strong>连续批处理与分页 KV 缓存</strong> —— 块分页 KV 池、块哈希前缀共享、可在批中接纳 / 抢占序列的迭代级调度器、可选 SSD 后备层，以及原生融合分页注意力内核。→ <a href="advanced_zh-cn.html#continuous-batching">深入了解</a></li>
     <li><strong>批量 / 并行推理</strong> —— 将 N 个序列打包进一次前向，配以分页 K/V 散写（Mistral 3、Gemma 4、GPT OSS、Qwen 3 / 3.5 / 3.6、Nemotron-H）。</li>
     <li><strong>MTP / NextN 推测解码</strong> —— 多 token 预测草稿头加速单序列解码；因请求自身的采样器同时驱动草稿与验证，故无损。→ <a href="advanced_zh-cn.html#mtp">推测解码</a></li>
@@ -67,10 +69,10 @@
   <h2 id="interfaces">接口与集成</h2>
   <ul>
     <li><strong>Ollama 与 OpenAI API 兼容</strong> —— 面向现有工具的即插即用替代端点。→ <a href="http-api_zh-cn.html">HTTP API</a></li>
-    <li><strong>浏览器聊天 UI</strong> —— 多轮对话、最大 500 MB 文件上传、思考开关、工具调用、消息编辑与实时流式。→ <a href="server_zh-cn.html#webui">Web UI</a></li>
+    <li><strong>浏览器聊天 UI</strong> —— 多轮对话、最大 500 MB 文件上传（图像、视频、音频、PDF、文本/代码）、思考开关、工具调用、消息编辑与实时流式。→ <a href="server_zh-cn.html#webui">Web UI</a></li>
     <li><strong>交互式 REPL</strong> —— 逐轮控制台聊天，带斜杠命令、可热切换的模型 / 后端 / 投影器，以及实时采样调参。→ <a href="cli_zh-cn.html#repl">REPL</a></li>
     <li><strong>批处理</strong> —— 控制台应用的 JSONL 输入，外加内置的 prefill/decode 基准测试。</li>
-    <li><strong>NuGet 包</strong> —— 只依赖你需要的层，将推理嵌入你自己的 .NET 应用。→ <a href="code-api_zh-cn.html">C# 库</a></li>
+    <li><strong>源码项目嵌入</strong> —— 只引用需要的层，将推理嵌入自己的 .NET 应用。当前 Runtime/Models/Backends 包尚未发布到 NuGet.org。→ <a href="code-api_zh-cn.html">C# 库</a></li>
     <li><strong>逐轮可观测性</strong> —— 完整输入/输出的结构化日志，外加 KV 缓存命中率，并通过每个 API 暴露（<code>prompt_cache_hit_*</code>、<code>cached_tokens</code>、<code>kvReused*</code>）。</li>
   </ul>
 

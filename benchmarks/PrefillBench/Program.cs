@@ -1,4 +1,4 @@
-// Standalone prefill (time-to-first-token) benchmark for the batched paged
+﻿// Standalone prefill (time-to-first-token) benchmark for the batched paged
 // attention path. Measures how long the engine takes to process a prompt of N
 // tokens through ForwardBatch before emitting the first decode token — i.e. the
 // prefill latency that dominates TTFT. Runs single-sequence and concurrent
@@ -51,6 +51,7 @@ string modelPath = Environment.GetEnvironmentVariable("TS_PREFILL_MODEL")
 BackendType backend = (Environment.GetEnvironmentVariable("TS_PREFILL_BACKEND") ?? "ggml_cuda").ToLowerInvariant() switch
 {
     "ggml_cuda" => BackendType.GgmlCuda,
+    "ggml_vulkan" => BackendType.GgmlVulkan,
     "ggml_cpu" => BackendType.GgmlCpu,
     "cpu" => BackendType.Cpu,
     "cuda" => BackendType.Cuda,
@@ -160,7 +161,12 @@ if (!legacyOnly && !engineOnly)
     Console.WriteLine();
     Console.WriteLine("==== Correctness (batched fused vs legacy ForwardRefill) ====");
     bool allMatch = true;
-    foreach (int len in new[] { 17, 64, 200, 777, 2500 })
+    // 6000/10000 exceed the SWA window + a single prefill chunk, so chunks past
+    // the first attend the previous window via the in-kernel swaPrev gather -
+    // this is what validates the whole-model verify swaPrev path against the
+    // engine (batched) path end-to-end. Override the set via TS_PREFILL_CORR_LENS.
+    int[] corrLens = EnvIntList("TS_PREFILL_CORR_LENS", new[] { 17, 64, 200, 777, 2500, 6000, 10000 });
+    foreach (int len in corrLens)
     {
         int[] cp = MakePrompt(len, 31 + len);
         model.ResetKVCache();
@@ -223,15 +229,7 @@ foreach (int len in lens)
     }
     model.ResetKVCache();
     double ms = Median(samples);
-    string argmaxNote = "";
-    if (Environment.GetEnvironmentVariable("TS_PREFILL_DUMP_ARGMAX") == "1")
-    {
-        model.ResetKVCache();
-        float[] lg = model.ForwardRefill(MakePrompt(len, 99999));
-        argmaxNote = $"  argmax={Argmax(lg)}";
-        model.ResetKVCache();
-    }
-    Console.WriteLine($"{len,8} {ms,10:F1} {len / (ms / 1000.0),10:F0}{argmaxNote}");
+    Console.WriteLine($"{len,8} {ms,10:F1} {len / (ms / 1000.0),10:F0}");
 }
 } // !engineOnly (legacy section)
 

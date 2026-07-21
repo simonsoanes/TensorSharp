@@ -8,18 +8,23 @@ namespace TensorSharp.Models.QwenImage
 {
     /// <summary>
     /// The Qwen-Image-Edit-2511 prompt template + the template-prefix drop count, matching
-    /// diffusers <c>QwenImageEditPlusPipeline</c>. Text-only for now (Stage 2/3); the image
-    /// template (<c>Picture N: &lt;|vision_start|&gt;…</c>) is added with vision grounding (Stage 4).
+    /// diffusers <c>QwenImageEditPlusPipeline</c>. With vision grounding each input image
+    /// contributes a <c>Picture N: &lt;|vision_start|&gt;&lt;|image_pad|&gt;&lt;|vision_end|&gt;</c>
+    /// prefix (1-based, in input order) whose pad expands to one token per merged vision patch.
     /// </summary>
     internal static class QwenImagePrompt
     {
         public const int DropIdx = 64;
         public const int ImagePadTokenId = 151655;   // <|image_pad|>
-        // Single image template; the <|image_pad|> is expanded to one token per merged vision patch.
-        public const string ImageTemplate = "Picture 1: <|vision_start|><|image_pad|><|vision_end|>";
 
-        public static string BuildWithImage(string prompt) =>
-            string.Format(Template, ImageTemplate + (prompt ?? string.Empty));
+        public static string BuildWithImages(string prompt, int imageCount)
+        {
+            var sb = new System.Text.StringBuilder();
+            for (int i = 1; i <= imageCount; i++)
+                sb.Append($"Picture {i}: <|vision_start|><|image_pad|><|vision_end|>");
+            sb.Append(prompt ?? string.Empty);
+            return string.Format(Template, sb.ToString());
+        }
 
         private const string Template =
             "<|im_start|>system\nDescribe the key features of the input image (color, shape, " +

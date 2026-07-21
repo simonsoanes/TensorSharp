@@ -2,7 +2,7 @@
 
 [English](example_api_thinking_tools.md) | [中文](example_api_thinking_tools_zh-cn.md)
 
-These examples cover the current thinking/tool-call surface for the CLI and the two server compatibility APIs. The command snippets use `ggml_metal`; replace it with `mlx`, `cuda`, `ggml_cuda`, `ggml_cpu`, or `cpu` to match your machine.
+These examples cover the current thinking/tool-call surface for the CLI and the two server compatibility APIs. Run source commands from the repository root with the .NET 10 SDK. A normal native build also needs Git, network access, CMake, and a C++ toolchain; replace `ggml_metal` with `mlx`, `cuda`, `ggml_cuda`, `ggml_vulkan`, `ggml_cpu`, or `cpu` to match your machine.
 
 | Architecture | Thinking | Tool calls | Notes |
 |---|---|---|---|
@@ -14,20 +14,68 @@ These examples cover the current thinking/tool-call surface for the CLI and the 
 | DiffusionGemma | No | No | Uses separate text-diffusion generation flags such as `--diffusion-steps`; not a thinking/tool-call template |
 | Gemma 3 / Mistral 3 | No | No | Multimodal-capable, but not thinking/tool-call capable in TensorSharp |
 
+## Gemma 4 E4B Setup
+
+The verified model is [gemma-4-E4B-it-Q8_0.gguf](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true) (7.48 GiB) from [ggml-org/gemma-4-E4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF); a lower-memory `gemma-4-E4B-it-Q4_K_M.gguf` is in the same repository. Text-only use does not need the mmproj file. The commands take seconds to copy and run, but the model download and the first restore/native build take longer and depend on your connection and machine. For the broader setup, see the root [fast-start section](../../README.md#quick-start) and the detailed [Gemma 4 card](../../docs/models/gemma4.md#verified-gemma-4-e4b-native-ggml-fast-path).
+
+macOS / Linux:
+
+```bash
+mkdir -p models
+curl --fail --location \
+  --output models/gemma-4-E4B-it-Q8_0.gguf \
+  "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true"
+
+export TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON  # Linux NVIDIA; on macOS omit this and use --backend ggml_metal
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj \
+  -p:TensorSharpSkipMlxNative=true -- \
+  --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda \
+  --max-tokens 32
+```
+
+Windows PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force models | Out-Null
+curl.exe --fail --location `
+  --output models\gemma-4-E4B-it-Q8_0.gguf `
+  "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true"
+
+$env:TENSORSHARP_GGML_NATIVE_ENABLE_CUDA = 'ON'
+dotnet run --project TensorSharp.Cli\TensorSharp.Cli.csproj `
+  -p:TensorSharpSkipMlxNative=true -- `
+  --model models\gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda `
+  --max-tokens 32
+```
+
+On AMD/Intel GPUs, set `TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON` and use `--backend ggml_vulkan`; without a GPU, use `--backend ggml_cpu` with no environment variable.
+
+With no `--input`, the CLI uses `What is 1+1?`. A custom one-shot text prompt must be saved to a file and passed with `--input <file>`; `--prompt` is only for Qwen-Image-Edit. The defaults are `--max-tokens 100` and `--backend ggml_cpu`. There is no complete `--help` screen, and unknown arguments are currently ignored, so copy flag names exactly.
+
 ## Console Application
+
+The examples below use the same downloaded model and native GGML path, so each command can be copied from the repository root after the setup above. They show the Linux/Windows NVIDIA form; swap `--backend ggml_cuda` (and its environment variable) for `ggml_metal`, `ggml_vulkan`, or `ggml_cpu` to match your machine.
 
 ### Thinking Mode
 
 Enable thinking mode with `--think`. The model will show its reasoning process before giving the final answer.
 
 ```bash
+export TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON
+
 # Basic thinking mode
-./TensorSharp.Cli --model model.gguf --backend ggml_metal \
-  --input testdata/input_thinking.txt --think --max-tokens 500
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj \
+  -p:TensorSharpSkipMlxNative=true -- \
+  --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda \
+  --input TensorSharp.Cli/testdata/input_thinking.txt \
+  --think --max-tokens 500
 
 # Thinking mode with sampling
-./TensorSharp.Cli --model model.gguf --backend ggml_metal \
-  --input testdata/input_thinking.txt --think --max-tokens 500 \
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj \
+  -p:TensorSharpSkipMlxNative=true -- \
+  --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda \
+  --input TensorSharp.Cli/testdata/input_thinking.txt \
+  --think --max-tokens 500 \
   --temperature 0.6 --top-p 0.95
 ```
 
@@ -36,20 +84,28 @@ Enable thinking mode with `--think`. The model will show its reasoning process b
 Provide tool definitions via `--tools <file.json>`. The model will output structured tool calls.
 
 ```bash
+export TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON
+
 # Weather tool call
-./TensorSharp.Cli --model model.gguf --backend ggml_metal \
-  --input testdata/input_tool_call.txt \
-  --tools testdata/tools_weather.json --max-tokens 300
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj \
+  -p:TensorSharpSkipMlxNative=true -- \
+  --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda \
+  --input TensorSharp.Cli/testdata/input_tool_call.txt \
+  --tools TensorSharp.Cli/testdata/tools_weather.json --max-tokens 300
 
 # Calculator tool call
-./TensorSharp.Cli --model model.gguf --backend ggml_metal \
-  --input testdata/input_tool_calc.txt \
-  --tools testdata/tools_calculator.json --max-tokens 300
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj \
+  -p:TensorSharpSkipMlxNative=true -- \
+  --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda \
+  --input TensorSharp.Cli/testdata/input_tool_calc.txt \
+  --tools TensorSharp.Cli/testdata/tools_calculator.json --max-tokens 300
 
 # Combined: thinking + tools
-./TensorSharp.Cli --model model.gguf --backend ggml_metal \
-  --input testdata/input_tool_call.txt \
-  --tools testdata/tools_weather.json --think --max-tokens 500
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj \
+  -p:TensorSharpSkipMlxNative=true -- \
+  --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda \
+  --input TensorSharp.Cli/testdata/input_tool_call.txt \
+  --tools TensorSharp.Cli/testdata/tools_weather.json --think --max-tokens 500
 ```
 
 ### Tool Definition Format

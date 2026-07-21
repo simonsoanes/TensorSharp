@@ -7,7 +7,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <IsPackable>false</IsPackable>
     <AssemblyName>CpuQuantBench</AssemblyName>
-    <Description>Microbenchmark for the pure-C# managed quantized matmul (ManagedQuantizedOps): per-quant GB/s + correctness vs the dequantize-then-dot reference. A/B the SIMD kernels with TENSORSHARP_CPU_NO_SIMD_KQUANT / TENSORSHARP_CPU_NO_SIMD_Q40.</Description>
+    <Description>Microbenchmark for the pure-C# managed quantized matmul (ManagedQuantizedOps): per-quant GB/s + correctness vs the dequantize-then-dot reference.</Description>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\TensorSharp.Models\TensorSharp.Models.csproj" />

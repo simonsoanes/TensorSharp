@@ -35,6 +35,7 @@
 
 #include <cfloat>
 #include <cstdint>
+#include <cstdio>
 #include <map>
 #include <mutex>
 
@@ -340,22 +341,11 @@ extern "C" bool tsg_cuda_diffusion_sample(
     if (cudaMemcpyAsync(s.u, u_host, (size_t) n_rows * sizeof(float), cudaMemcpyHostToDevice, 0) != cudaSuccess)
         return false;
 
-    const bool timing = getenv("DIFFUSION_SAMPLE_TIMING") != nullptr;
-    cudaEvent_t t0{}, t1{};
-    if (timing) { cudaEventCreate(&t0); cudaEventCreate(&t1); cudaEventRecord(t0, 0); }
-
     diffusion_sample_kernel<<<n_rows, kThreads, 0, 0>>>(
         (const float *) logits_dev, s.u, s.argmax, s.entropy, s.sampled,
         kEff > 0 ? s.toptk : nullptr, kEff > 0 ? s.topp : nullptr,
         n_vocab, inv_temp, softcap, kEff);
     if (cudaGetLastError() != cudaSuccess) return false;
-    if (timing) {
-        cudaEventRecord(t1, 0);
-        cudaEventSynchronize(t1);
-        float ms = 0.0f; cudaEventElapsedTime(&ms, t0, t1);
-        fprintf(stderr, "[dg-sample-kernel] %.2f ms (rows=%d vocab=%d K=%d)\n", ms, n_rows, n_vocab, kEff);
-        cudaEventDestroy(t0); cudaEventDestroy(t1);
-    }
 
     cudaMemcpyAsync(argmax_host,  s.argmax,  (size_t) n_rows * sizeof(int),   cudaMemcpyDeviceToHost, 0);
     cudaMemcpyAsync(entropy_host, s.entropy, (size_t) n_rows * sizeof(float), cudaMemcpyDeviceToHost, 0);

@@ -9,13 +9,60 @@
 | Source class | [`Qwen35Model`](../../TensorSharp.Models/Models/Qwen35/Qwen35Model.cs) (legacy per-seq) + partial in [`Qwen35Model.GatedDeltaNet.cs`](../../TensorSharp.Models/Models/Qwen35/Qwen35Model.GatedDeltaNet.cs) + [`Qwen35Model.BatchedForward.cs`](../../TensorSharp.Models/Models/Qwen35/Qwen35Model.BatchedForward.cs) (`IBatchedPagedModel`) |
 | Vision encoder | [`Qwen35VisionEncoder`](../../TensorSharp.Models/Models/Qwen35/Qwen35VisionEncoder.cs) |
 | Image processor | [`Qwen35ImageProcessor`](../../TensorSharp.Models/Models/Qwen35/ImageProcessor.cs) |
-| Example models | Qwen3.5-9B (dense hybrid), Qwen3.5-32B, Qwen3.5-35B-A3B / Qwen3.6-35B-A3B (MoE-family) |
+| Example models | Qwen3.5-9B (dense hybrid), Qwen3.5-35B-A3B / Qwen3.6-35B-A3B (MoE-family), Qwen3.6-27B (dense) |
 | Modalities | Text, image |
 | Thinking mode | Yes (`<think> ... </think>`) |
 | Tool calling | Yes (`<tool_call>{...}</tool_call>`) |
 | Batched / paged forward | **Default ON** — set `TS_QWEN35_BATCHED=0` (or `--no-continuous-batching`) to force the legacy per-sequence KV-swap path for A/B comparison. Includes a per-slot GatedDeltaNet recurrent-state pool and optional native batched GDN kernel (`TS_QWEN35_BATCHED_GDN_NATIVE=1`). See §11. |
-| MTP speculative decoding | Qwen 3.6 — NextN draft block embedded in the trunk GGUF (no separate file); engage with `--mtp-spec`. GDN recurrent-state snapshot/rollback on partial accept. Profitable on ggml backends and the pure-C# `cuda` backend. See §12. |
+| MTP speculative decoding | Qwen 3.6 — NextN draft block embedded in the trunk GGUF (no separate file; MTP-retaining GGUFs only, see [Downloads](#downloads)); engage with the server flag `--mtp-spec`. GDN recurrent-state snapshot/rollback on partial accept. Engages for solo (non-concurrent) sequences whenever the GGUF retains the NextN block. See §12. |
 | Output parser | `Qwen35OutputParser` (inherits `Qwen3OutputParser`) |
+
+## Downloads
+
+Verified GGUF sources (one folder per model below — the 9B and 3.6 repos both
+name their projector `mmproj-F16.gguf`, so they must not share a directory):
+
+| Model | HF repo | Recommended file | Vision projector |
+|---|---|---|---|
+| Qwen3.5-9B (dense hybrid) | [unsloth/Qwen3.5-9B-GGUF](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) | `Qwen3.5-9B-UD-Q4_K_XL.gguf` (5.966 GB) or `Qwen3.5-9B-Q8_0.gguf` (9.528 GB) | `mmproj-F16.gguf` (0.918 GB) |
+| Qwen3.5-35B-A3B (MoE) | [ggml-org/Qwen3.5-35B-A3B-GGUF](https://huggingface.co/ggml-org/Qwen3.5-35B-A3B-GGUF) | `Qwen3.5-35B-A3B-Q8_0.gguf` (36.903 GB) | `mmproj-Qwen3.5-35B-A3B-Q8_0.gguf` (0.614 GB) |
+| Qwen3.6-35B-A3B with NextN / MTP (MoE) | [unsloth/Qwen3.6-35B-A3B-MTP-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF) | `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` (22.663 GB) or `Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf` (11.819 GB) | `mmproj-F16.gguf` (0.899 GB) |
+
+> **Qwen 3.6 MTP:** the NextN draft block (GGUF metadata key
+> `nextn_predict_layers`) is retained **only** in the GGUFs from
+> `unsloth/Qwen3.6-35B-A3B-MTP-GGUF`. The base-repo
+> [unsloth/Qwen3.6-35B-A3B-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF)
+> files (same file names) strip it — on those, `--mtp-spec` silently falls back
+> to standard decode.
+
+The conversion cards identify the corresponding official Qwen repositories as
+their base models; those upstream cards declare Apache-2.0.
+
+```bash
+python -m pip install -U huggingface_hub
+hf download unsloth/Qwen3.5-9B-GGUF Qwen3.5-9B-UD-Q4_K_XL.gguf --local-dir models/qwen3.5-9b
+hf download unsloth/Qwen3.5-9B-GGUF mmproj-F16.gguf --local-dir models/qwen3.5-9b
+hf download ggml-org/Qwen3.5-35B-A3B-GGUF Qwen3.5-35B-A3B-Q8_0.gguf --local-dir models/qwen3.5-35b-a3b
+hf download ggml-org/Qwen3.5-35B-A3B-GGUF mmproj-Qwen3.5-35B-A3B-Q8_0.gguf --local-dir models/qwen3.5-35b-a3b
+hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --local-dir models/qwen3.6-35b-a3b-mtp
+hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF mmproj-F16.gguf --local-dir models/qwen3.6-35b-a3b-mtp
+```
+
+CLI one-shot (the text prompt comes from a file via `--input`; default sampling
+is greedy and the default `--max-tokens` is 100 — raise it for real answers):
+
+```bash
+printf '%s\n' 'Describe this image.' > prompt.txt
+dotnet run --project TensorSharp.Cli -c Release -- --model models/qwen3.5-9b/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/qwen3.5-9b/mmproj-F16.gguf --input prompt.txt --image photo.png --max-tokens 512
+```
+
+Server MTP demo (`--mtp-spec` and the other `--mtp-*` flags exist **only on
+TensorSharp.Server** — `TensorSharp.Cli` has no MTP flags; on the CLI, MTP is
+reachable only via the `TS_MTP_*` env vars):
+
+```bash
+dotnet run --project TensorSharp.Server -c Release -- --model models/qwen3.6-35b-a3b-mtp/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda --mtp-spec
+```
 
 ## 1. Origin and intent
 
@@ -397,6 +444,13 @@ RMSNorm is invariant to row order, so the reshaped view is valid for both Q
 and K. This avoids one tensor allocation and one `Ops.CopyTo` per Q/K per
 layer.
 
+### Fused QK-Norm + RoPE (direct CUDA)
+
+On the direct `cuda` backend, the text-only prefill path fuses the per-head QK
+RMSNorm and NeoX RoPE into one CUDA kernel (`ts_qk_norm_rope_neox_f32`). Default
+on; set `TS_FUSED_QKNORM_ROPE=0` to fall back to separate Norm + RoPE ops
+(multimodal MRoPE and non-CUDA backends always use the separate path).
+
 ### RoPE position tensor caching
 
 `_cachedRoPEPosQ` / `_cachedRoPEPosK` tensors are regenerated only when
@@ -670,14 +724,19 @@ before the per-layer loop, exactly as in the legacy forward.
 
 ## 12. MTP / NextN speculative decoding (Qwen 3.6)
 
-Qwen 3.6 GGUFs ship a **NextN / multi-token-prediction (MTP) draft block** that
+Qwen 3.6 GGUFs can ship a **NextN / multi-token-prediction (MTP) draft block** that
 `TensorSharp.Server` uses for lossless speculative decoding on solo (non-concurrent)
-sequences. Source:
+sequences. Of the public conversions, only
+[unsloth/Qwen3.6-35B-A3B-MTP-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF)
+retains the block (see [Downloads](#downloads)); GGUFs without it silently serve
+standard decode. Source:
 [`Qwen35Model.Mtp.cs`](../../TensorSharp.Models/Models/Qwen35/Qwen35Model.Mtp.cs),
 driven through the shared
 [`MtpSpeculativeExecution`](../../TensorSharp.Runtime/Scheduling/MtpSpeculativeExecution.cs)
 draft / verify / rollback core. Unlike Gemma 4, no separate draft GGUF is needed —
-the block is embedded in the trunk file, so `--mtp-draft-model` is ignored.
+the block is embedded in the trunk file, so `--mtp-draft-model` is not used
+(explicitly passing one that cannot be activated on the startup model is a
+fail-fast startup error).
 
 ### 12.1 Embedded NextN block
 
@@ -709,14 +768,16 @@ On the CUDA backend the snapshot is taken device-side to avoid host round-trips.
 
 ### 12.3 Profitability and tuning
 
-Speculation is off by default; enable with `--mtp-spec` (env `TS_MTP_SPEC=1`). It
-engages where it pays off — ggml backends and the pure-C# `cuda` backend — and
-otherwise the engine serves standard decode. `--mtp-draft` (default `8`) bounds the
+Speculation is off by default; enable with the **server** flag `--mtp-spec` (env
+`TS_MTP_SPEC=1`; `TensorSharp.Cli` has no MTP flags). It
+engages on solo (non-concurrent) sequences whenever the loaded GGUF retains the
+NextN block; on GGUFs without it the engine silently serves standard decode.
+`--mtp-draft` (default `8`) bounds the
 draft window and `--mtp-pmin` (default `0.75`) is the minimum draft confidence to
 keep a token. On `ggml_cuda`, the GDN chunked-prefill kernel also speeds the
 speculative verify: measured on Qwen3.6-27B IQ2_XXS it cut MTP speculative-verify
 decode from 217 to 174 ms/token (see §8, `GDN_CHUNK_PREFILL_MIN_SEQ_LEN`). See the
-[README MTP section](../../README.md#mtp--nextn-speculative-decoding) for the full
+[MTP / speculative decoding](../../FEATURES.md#mtp--nextn-speculative-decoding) for the full
 flag list.
 
 ## 13. Output parser and chat template

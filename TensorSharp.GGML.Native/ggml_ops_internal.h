@@ -251,6 +251,7 @@ namespace tsg
     constexpr int BACKEND_TYPE_METAL = 1;
     constexpr int BACKEND_TYPE_CPU = 2;
     constexpr int BACKEND_TYPE_CUDA = 3;
+    constexpr int BACKEND_TYPE_VULKAN = 4;
 
     // --- Async dispatch state ---
     //
@@ -483,6 +484,18 @@ namespace tsg
     void set_last_error(const std::string& message);
     void clear_last_error();
 
+    // --- VRAM allocation diagnostics (TS_GGML_LOG_VRAM=1) ---
+    //
+    // Logs each device-buffer allocation with a tag plus the device's current
+    // free/total memory so operators (and CI) can attribute VRAM growth to the
+    // subsystem that caused it: weight preload, per-tensor device copies (KV
+    // cache / activations), the reuse gallocr, persistent decode/verify graph
+    // buffers, and graph-compute pool growth (visible as the free-memory delta
+    // between the *-begin / *-end markers). Zero overhead when the env var is
+    // unset (single static bool check).
+    bool vram_log_enabled();
+    void vram_log(const char* tag, std::int64_t bytes);
+
     // --- Backend management ---
 
     ggml_backend_t create_backend_instance(int backend_type);
@@ -491,6 +504,21 @@ namespace tsg
     bool ensure_backend();
     bool can_initialize_backend(int backend_type);
     bool backend_supports_op(ggml_tensor* op);
+
+    // Memoized static device properties. ggml_backend_dev_get_props also
+    // refreshes free/total device memory, which some backends answer with an
+    // expensive query — ggml-vulkan on Windows re-enumerates the physical
+    // devices and reads the WDDM memory budget, ~4 ms per call. The binding
+    // predicates (prefers_device_local_cache / host_ptr_buffer_capable) run
+    // hundreds of times per decode-graph build, which turned that into
+    // ~1.5 s/token on Vulkan. They only need the type/caps fields, which are
+    // immutable per device, so cache those once.
+    struct DeviceStaticProps
+    {
+        enum ggml_backend_dev_type type;
+        bool buffer_from_host_ptr;
+    };
+    DeviceStaticProps get_device_static_props(ggml_backend_dev_t dev);
 
     // Allocate the unallocated (compute/intermediate) tensors of `ctx` into a
     // persistent, reusable backend buffer instead of freshly allocating a new
@@ -514,6 +542,10 @@ namespace tsg
     bool alloc_graph_reuse_gallocr(ggml_cgraph* graph);
     // Free the cached reuse gallocr (called from TSGgml_Shutdown / backend reset).
     void free_reuse_gallocr();
+    // Free the calling thread's cached prefill-attention sessions (defined in
+    // ggml_ops_norm_attn.cpp; called from TSGgml_Shutdown so their CUDA
+    // buffers are released before driver teardown).
+    void free_prefill_attn_sessions();
 
     // --- Size / layout queries ---
 

@@ -11,6 +11,7 @@
 using System;
 using System.IO;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.FileProviders;
 
 namespace TensorSharp.Server.Hosting
 {
@@ -40,6 +41,12 @@ namespace TensorSharp.Server.Hosting
 
             environment.WebRootPath = webRoot;
             Directory.CreateDirectory(webRoot);
+            // WebApplication.CreateBuilder initializes WebRootFileProvider from
+            // the original content root. Updating WebRootPath afterwards is not
+            // enough: UseStaticFiles() keeps the old (often null) provider and
+            // /index.html returns 404 when the built DLL is launched from the
+            // repository root. Point the provider at the resolved directory too.
+            environment.WebRootFileProvider = new PhysicalFileProvider(webRoot);
         }
     }
 }

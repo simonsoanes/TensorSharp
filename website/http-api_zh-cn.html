@@ -16,7 +16,7 @@
 <main class="content" id="content">
   <div class="breadcrumb"><a href="index_zh-cn.html">首页</a> › HTTP API</div>
   <h1>HTTP API (Ollama / OpenAI)</h1>
-  <p class="lede"><code>TensorSharp.Server</code> 暴露三种 API 风格以及若干工具端点，全部在 <code>http://localhost:5000</code> 上。现有 Ollama 与 OpenAI 客户端无需改动即可使用 —— 只要把它们指向本地基址。</p>
+  <p class="lede"><code>TensorSharp.Server</code> 暴露聚焦的 Ollama / OpenAI 兼容子集以及 Web UI 协议，全部位于 <code>http://localhost:5000</code>。OpenAI Chat Completions 客户端可使用 <code>/v1</code> 基址；Ollama 聊天客户端必须改用非标准路径 <code>/api/chat/ollama</code>。</p>
 
   <div class="table-scroll">
   <table>
@@ -24,12 +24,21 @@
     <tbody>
       <tr><td><strong>兼容 Ollama</strong></td><td><code>/api/generate</code>、<code>/api/chat/ollama</code>、<code>/api/tags</code>、<code>/api/show</code></td></tr>
       <tr><td><strong>兼容 OpenAI</strong></td><td><code>/v1/chat/completions</code>、<code>/v1/models</code></td></tr>
-      <tr><td><strong>Web UI (SSE)</strong></td><td><code>/api/chat</code>、<code>/api/sessions</code>、<code>/api/models</code>、<code>/api/upload</code></td></tr>
+      <tr><td><strong>Web UI (SSE)</strong></td><td><code>/api/chat</code>、<code>/api/sessions</code>、<code>/api/models</code>、<code>/api/models/load</code>、<code>/api/upload</code>、<code>/api/image-edit</code>、<code>/api/image-edit/stream</code></td></tr>
       <tr><td><strong>工具端点</strong></td><td><code>/api/version</code>、<code>/api/queue/status</code></td></tr>
     </tbody>
   </table>
   </div>
-  <div class="callout note"><div class="ic">📌</div><p>请求必须指明托管的 GGUF 文件（或其基名）。服务器托管由 <code>--model</code> 选定的一个模型；见<a href="server_zh-cn.html">服务器与 Web UI</a>。</p></div>
+  <div class="callout warn"><div class="ic">⚠️</div><p><strong>Ollama 聊天路径：</strong>兼容 Ollama 的聊天端点是 <code>POST /api/chat/ollama</code>，<em>不是</em> <code>/api/chat</code>；后者是 Web UI 的 SSE 端点。<code>/api/generate</code>、<code>/api/tags</code>、<code>/api/show</code> 与 <code>/api/version</code> 使用标准 Ollama 路径。</p></div>
+  <div class="callout note"><div class="ic">📌</div><p>启动时必须传入 <code>--model</code>；视觉 / 音频需要投影器时还要显式传入 <code>--mmproj</code>。请求必须指明该启动 GGUF 文件或其基名。<code>/api/models/load</code> 只能重新加载同一启动模型 / 投影器，不能加载任意路径，也不能给无模型进程添加模型。Ollama / OpenAI 兼容端点省略 <code>max_tokens</code> / <code>num_predict</code> 时默认生成 <strong>200</strong> token（Web UI 使用 <code>--max-tokens</code>，默认 20000）。见<a href="server_zh-cn.html#start">可复制粘贴的服务器快速开始</a>。</p></div>
+  <div class="callout warn"><div class="ic">🔒</div><p>服务没有 API Key 身份验证或内置 TLS，并监听 <code>0.0.0.0:5000</code>。只应在可信网络中使用，或在前方部署带身份验证与 TLS 的反向代理。</p></div>
+
+  <h2 id="quick-call">服务启动后的快速调用</h2>
+  <p>服务器快速开始托管 <code>gemma-4-E4B-it-Q8_0.gguf</code>。在第二个终端中粘贴：</p>
+  <pre data-lang="bash"><code>curl -s http://localhost:5000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemma-4-E4B-it-Q8_0.gguf","messages":[{"role":"user","content":"Reply with one short hello."}],"max_tokens":32}'</code></pre>
+  <p>浏览器 UI 位于 <a href="http://localhost:5000/index.html"><code>http://localhost:5000/index.html</code></a>；<code>GET /</code> 返回纯文本存活检查。</p>
 
   <h2 id="ollama">1 · 兼容 Ollama 的 API</h2>
 
@@ -201,7 +210,7 @@ curl -X POST http://localhost:5000/v1/chat/completions \
   <p>续接循环：把助手的 <code>tool_calls</code> 与一条携带函数结果的 <code>{"role": "tool", "tool_call_id": "...", "content": "..."}</code> 消息追加进去，再次调用该端点。（Ollama 端点使用同样的流程，配以一条 <code>role: "tool"</code> 消息。）</p>
 
   <h2 id="structured">4 · 结构化输出（JSON schema）</h2>
-  <p>OpenAI 的 <code>response_format</code> 接受 <code>text</code>、<code>json_object</code> 与经过校验的 <code>json_schema</code>。服务器会注入严格的 JSON 指令，并在返回前校验输出。</p>
+  <p>OpenAI 的 <code>response_format</code> 接受 <code>text</code>、<code>json_object</code> 与经过校验的 <code>json_schema</code>。服务器会注入严格的 JSON 指令，并在返回前校验输出。JSON 请求还会把<strong>首个采样 token</strong> 约束为以 <code>{</code> 开头的候选，使爱闲聊的模型无法在 JSON 对象前输出散文，流式首 token 时延因此反映 prefill 延迟（<code>TS_JSON_FORCE_OPEN=0</code> 可关闭）。</p>
   <pre data-lang="bash"><code>curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
@@ -244,18 +253,25 @@ curl -N -X POST http://localhost:5000/api/chat \
   <pre data-lang="text"><code>data: {"done":true,"tokenCount":187,"elapsed":2.143,"tokPerSec":87.23,"promptTokens":512,"kvReusedTokens":420,"kvReusePercent":82.0}</code></pre>
   <p>事件字段包括 <code>token</code>（内容）、<code>thinking</code>（推理块）、<code>tool_calls</code>、<code>replace</code>/<code>diffusionStep</code>（DiffusionGemma 预览）以及终止的 <code>done</code> 摘要。</p>
 
+  <h3 id="upload">文件上传（<code>/api/upload</code>）</h3>
+  <p><code>POST /api/upload</code> 接收 multipart 表单（使用第一个文件），返回存储路径 / URL 与该类型的元数据；随后由 <code>/api/chat</code> 消息引用返回的服务端路径（<code>imagePaths</code>、<code>audioPaths</code> 等）。接受的类型包括：<strong>图像</strong>（<code>.png .jpg .jpeg .gif .webp .bmp .heic .heif</code>）、<strong>视频</strong>（<code>.mp4 .mov .avi .mkv .webm</code>，按 <code>VIDEO_SAMPLE_FPS</code> 抽帧）、<strong>音频</strong>（<code>.mp3 .wav .ogg .flac .m4a</code>）、<strong>PDF</strong> 与<strong>文本 / 代码</strong>文件（以 <code>textContent</code> 返回并按 token 预算截断）。数字版 PDF 返回提取的 <code>textContent</code>；扫描版 PDF 在托管视觉模型时像视频一样返回页面图像，否则给出 <code>needsVision</code> 警告。<code>TS_PDF_MAX_PAGES</code> 限制读取页数（默认全部）。</p>
+
+  <h3 id="imageedit-api">图像编辑（<code>/api/image-edit</code> · <code>/api/image-edit/stream</code>）</h3>
+  <p>托管模型为 <code>qwen_image</code> DiT 时可用。<code>POST /api/image-edit</code> 执行一次编辑：可提交 multipart（<code>image</code> 文件 + <code>prompt</code>，以及可选 <code>steps</code>、<code>cfg</code>、<code>seed</code>），也可提交 JSON <code>{"imagePath": "...", "prompt": "...", "steps": 0, "cfg": 0, "seed": 0}</code>；其中 <code>imagePath</code> 必须指向上传目录中的文件，<code>steps</code> / <code>cfg</code> 为 <code>0</code> 表示自动。响应为 <code>{ ok, url, width, height, elapsedSeconds }</code>，PNG 从 <code>/uploads/</code> 提供。<code>POST /api/image-edit/stream</code> 接收相同 JSON，但以 SSE 流式返回去噪进度：每步帧为 <code>{"imageEdit": true, "step": i, "total": N, "image": "data:image/png;base64,..."}</code>（最多 8 张均匀预览），最后返回 <code>{"done": true, "url": "...", "width": ..., "height": ..., "elapsedSeconds": ...}</code>。整个进程中的编辑请求串行执行。</p>
+
   <h2 id="sampling">6 · 采样参数</h2>
   <h4>Ollama 风格（在 <code>options</code> 对象内）</h4>
+  <p>下表默认值用于请求省略字段时，可通过服务端参数 / <code>TENSORSHARP_*</code> 环境变量配置（见<a href="server_zh-cn.html#options">服务端参数</a>）。</p>
   <div class="table-scroll">
   <table>
     <thead><tr><th>参数</th><th>类型</th><th>默认</th><th>说明</th></tr></thead>
     <tbody>
       <tr><td><code>num_predict</code></td><td>int</td><td>200</td><td>最大生成 token 数</td></tr>
-      <tr><td><code>temperature</code></td><td>float</td><td>0</td><td>采样温度（0 = 贪心）</td></tr>
-      <tr><td><code>top_k</code></td><td>int</td><td>0</td><td>Top-K 过滤（0 = 禁用）</td></tr>
-      <tr><td><code>top_p</code></td><td>float</td><td>1.0</td><td>核采样阈值</td></tr>
+      <tr><td><code>temperature</code></td><td>float</td><td>0.8</td><td>采样温度（0 = 贪心）</td></tr>
+      <tr><td><code>top_k</code></td><td>int</td><td>40</td><td>Top-K 过滤（0 = 禁用）</td></tr>
+      <tr><td><code>top_p</code></td><td>float</td><td>0.9</td><td>核采样阈值（1.0 = 禁用）</td></tr>
       <tr><td><code>min_p</code></td><td>float</td><td>0</td><td>最小概率过滤</td></tr>
-      <tr><td><code>repeat_penalty</code></td><td>float</td><td>1.0</td><td>重复惩罚</td></tr>
+      <tr><td><code>repeat_penalty</code></td><td>float</td><td>1.1</td><td>重复惩罚（1.0 = 无）</td></tr>
       <tr><td><code>presence_penalty</code> / <code>frequency_penalty</code></td><td>float</td><td>0</td><td>存在 / 频率惩罚</td></tr>
       <tr><td><code>seed</code></td><td>int</td><td>-1</td><td>随机种子（-1 = 随机）</td></tr>
       <tr><td><code>stop</code></td><td>array</td><td>null</td><td>停止序列</td></tr>
@@ -263,7 +279,7 @@ curl -N -X POST http://localhost:5000/api/chat \
   </table>
   </div>
   <h4>OpenAI 风格（顶层）</h4>
-  <p><code>max_tokens</code>、<code>temperature</code>、<code>top_p</code>、<code>presence_penalty</code>、<code>frequency_penalty</code>、<code>seed</code>、<code>stop</code>，以及 <code>response_format</code>（<code>text</code> / <code>json_object</code> / <code>json_schema</code>）。</p>
+  <p><code>max_tokens</code>（省略时默认 200）、<code>temperature</code>、<code>top_p</code>、<code>presence_penalty</code>、<code>frequency_penalty</code>、<code>seed</code>、<code>stop</code>（字符串或数组），以及 <code>response_format</code>（<code>text</code> / <code>json_object</code> / <code>json_schema</code>）。注意：OpenAI 接口不解析 <code>top_k</code>、<code>min_p</code> 与 <code>repetition_penalty</code>；这些字段使用服务端默认值。</p>
 
   <h2 id="python">7 · Python 客户端示例</h2>
   <h4>使用 <code>requests</code>（Ollama 风格）</h4>

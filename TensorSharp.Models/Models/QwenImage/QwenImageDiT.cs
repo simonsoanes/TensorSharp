@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -15,6 +15,7 @@
 // activation tensors, the same pattern as QwenImageTextEncoder.
 // ============================================================================
 using System;
+using System.Numerics.Tensors;
 using System.Threading.Tasks;
 using TensorSharp.Core;
 using TensorSharp.Runtime;
@@ -74,22 +75,47 @@ namespace TensorSharp.Models.QwenImage
         /// and the scheduler's fixed timestep shift.</summary>
         internal int LightningSteps { get; }
 
+        /// <summary>
+        /// CPU offload (sd.cpp <c>--offload-to-cpu</c> equivalent): stream the DiT weights from
+        /// RAM per block instead of holding them resident in VRAM, so the attention working set
+        /// gets the memory — the enabler for native ~1 MP edits on VRAM-limited cards. Set per
+        /// request by the pipeline (auto when the target resolution doesn't fit beside resident
+        /// weights; forced via TS_QWEN_IMAGE_OFFLOAD_CPU=1 / --offload-cpu). Disables the
+        /// resident-weight whole-model graph; the per-block kernels stream the weights, and the
+        /// pipeline caps the device-copy residency budget for the denoise.
+        /// </summary>
+        internal bool OffloadCpu { get; set; } =
+            Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_OFFLOAD_CPU") == "1";
+
         // Unmanaged F32 LoRA factors (stable pointers — resident-cached by the native
         // side like the GGUF weights). Freed on Dispose AFTER the base dispose has
         // cleared the native caches that reference them.
         private readonly QwenImageLoraTable _loraTable;
         internal bool LoraActive => _loraTable != null;
 
-        // The runtime LoRA side-path is implemented in the whole-model forward kernel
-        // (the default CUDA path). If the forward falls back to the per-block or managed
-        // paths, the LoRA silently wouldn't apply — surface that loudly (once).
+        // The runtime LoRA side-path is implemented in the whole-model forward kernel AND the
+        // fused per-block kernels (TSGgml_QwenImageBlock / TSGgml_QwenImageBlockCfg — the path
+        // CPU offload streams through). If the forward falls further back to the 3-call or
+        // managed paths, the LoRA silently wouldn't apply. For a Lightning step-distillation
+        // LoRA that is fatal: a 4/8-step schedule running the UN-distilled base model produces
+        // pure noise (not just lower quality) with no error. Fail loud there instead of emitting
+        // garbage; for a non-distillation LoRA a dropped side-path still yields a valid
+        // (un-styled) image, so warn once and continue.
         private bool _loraSkipWarned;
         private void WarnLoraSkipped()
         {
-            if (!LoraActive || _loraSkipWarned) return;
+            if (!LoraActive) return;
+            if (LightningSteps > 0)
+                throw new InvalidOperationException(
+                    "Qwen-Image Lightning LoRA requires the whole-model or fused per-block CUDA " +
+                    "forward, but this request fell back to a path without the LoRA side-path " +
+                    "(TS_QWEN_DIT_FUSED_BLOCK=0, TS_QWEN_DIT_NATIVE=0, or a non-CUDA backend). " +
+                    "The few-step Lightning schedule would produce a broken (un-distilled, " +
+                    "noise-like) image on it. Re-enable the fused native path.");
+            if (_loraSkipWarned) return;
             _loraSkipWarned = true;
-            Console.WriteLine("  [lora] WARNING: forward is not using the whole-model graph — " +
-                              "the runtime LoRA is NOT applied on this path (per-block/managed fallback).");
+            Console.WriteLine("  [lora] WARNING: forward is not using the whole-model or fused " +
+                              "per-block graph — the runtime LoRA is NOT applied on this path.");
         }
 
         public override void Dispose()
@@ -109,14 +135,6 @@ namespace TensorSharp.Models.QwenImage
         protected override bool ShouldPreloadCudaQuantWeightToDevice(string weightName)
             => !NativeBlockOn;
 
-        private static readonly bool DebugOn = Environment.GetEnvironmentVariable("TS_QIMG_DEBUG") == "1";
-        private unsafe void Dbg(string name, Tensor t)
-        {
-            if (!DebugOn) return;
-            int n = (int)t.ElementCount();
-            var h = TensorToHost(t, n);
-            Console.WriteLine($"  [dit] {name,-12} {Stat(h, n)}");
-        }
         internal static string Stat(float[] a, int n)
         {
             double mn = double.MaxValue, mx = double.MinValue, sum = 0; int nan = 0;
@@ -154,7 +172,6 @@ namespace TensorSharp.Models.QwenImage
             // time_text_embed: sinusoidal(256) -> linear_1 -> SiLU -> linear_2  => temb[2,3072] (t and 0)
             Tensor temb = TimeEmbed(timestep01);   // [2, 3072]
 
-            var blkSw = TimingOn ? System.Diagnostics.Stopwatch.StartNew() : null;
             if (NativeBlockOn)
             {
                 // Stage 7: run all 60 blocks via the fused native kernels on host arrays
@@ -176,12 +193,18 @@ namespace TensorSharp.Models.QwenImage
                 {
                     if (WholeModelOn)
                     {
-                        var swW = TimingOn ? System.Diagnostics.Stopwatch.StartNew() : null;
                         bool ok = TryWholeBlocks(imgHost, imgSeq, txtHost, txtSeq, temb, modulateIndex, rope, start, NumLayers - start);
-                        if (swW != null) { swW.Stop(); Console.WriteLine($"  [dit-timing] whole-model {NumLayers - start}-block graph imgSeq={imgSeq} txtSeq={txtSeq}: {swW.Elapsed.TotalMilliseconds:F0}ms"); }
                         if (ok) return;
                     }
-                    WarnLoraSkipped();
+                    // Offload: a few chunked whole-model graphs (in-graph modulation, weights
+                    // streamed into reuse-gallocr slots) — far cheaper than the per-block loop's
+                    // host-expanded modulation uploads. Falls back internally per chunk.
+                    if (OffloadCpu &&
+                        TryOffloadChunkedBlocks(imgHost, imgSeq, txtHost, txtSeq, temb, modulateIndex, rope, start))
+                        return;
+                    // The fused per-block kernel carries the LoRA side-path (offload streams
+                    // through it); only the 3-call fallback drops the LoRA.
+                    if (!FusedBlockOn) WarnLoraSkipped();
                     for (int layer = start; layer < NumLayers; layer++)
                         RunNativeLayer(layer, imgHost, imgSeq, txtHost, txtSeq, temb, modulateIndex, rope);
                 }
@@ -229,18 +252,13 @@ namespace TensorSharp.Models.QwenImage
             }
             else
             {
-                WarnLoraSkipped();
+                // Pure-C# managed path: Block()->JointAttention/GeGluMlp->LinearBias applies the
+                // runtime LoRA side-path per covered projection (see AddLoraDelta), so the
+                // Lightning LoRA IS honored here — no WarnLoraSkipped().
                 for (int layer = 0; layer < NumLayers; layer++)
                 {
                     Block(ref img, ref txt, temb, imgSeq, txtSeq, layer, modulateIndex, rope);
-                    if (DebugOn) Dbg($"img@blk{layer}", img);
                 }
-            }
-            if (blkSw != null)
-            {
-                blkSw.Stop();
-                string mode = NativeBlockOn ? (FusedBlockOn ? "fused" : "3-call") : "managed";
-                Console.WriteLine($"  [dit-timing] {mode} {NumLayers}-block loop imgSeq={imgSeq} txtSeq={txtSeq}: {blkSw.Elapsed.TotalMilliseconds:F0}ms");
             }
             temb.Dispose();
             txt.Dispose();
@@ -250,7 +268,6 @@ namespace TensorSharp.Models.QwenImage
             Tensor outT = LinearBias(normed, "proj_out.weight", "proj_out.bias"); normed.Dispose();
             float[] velocity = TensorToHost(outT, (long)imgSeq * InCh);
             outT.Dispose();
-            if (DebugOn) { var st = Stat(velocity, velocity.Length); Console.WriteLine($"  [dit] velocity {st}"); }
             return velocity;
         }
 
@@ -381,7 +398,47 @@ namespace TensorSharp.Models.QwenImage
                 int dim = Math.Min(outDim, (int)bias.ElementCount());
                 Parallel.For(0, rows, s => { float* row = r + (long)s * outDim; for (int d = 0; d < dim; d++) row[d] += bp[d]; });
             }
+            AddLoraDelta(result, input, weightName);
             return result;
+        }
+
+        // Runtime LoRA side-path for the managed (pure-C#) DiT forward, mirroring the native
+        // qi_lin_lora: y += scale * B·(A·x) where A=[rank,in] (lora_down), B=[out,rank] (lora_up,
+        // scale folded in). Uses the ORIGINAL input x (the base matmul's overflow prescale is
+        // linear and fully cancels in A·x, so no prescale is applied here). Only the ~720
+        // LoRA-covered projections (attn q/k/v/out, add_q/k/v, to_add_out, img/txt GEGLU MLPs)
+        // have a table entry; every other LinearBias (img_in/txt_in/proj_out/time_embed/norm_out)
+        // returns immediately. This is what makes the few-step Lightning LoRA usable on CPU.
+        private unsafe void AddLoraDelta(Tensor result, Tensor input, string weightName)
+        {
+            if (_loraTable == null || !_loraTable.TryGet(weightName, out var e)) return;
+            int rows = (int)input.Sizes[0];
+            int inDim = (int)e.In, rank = (int)e.Rank, outDim = (int)e.Out;
+            if ((int)input.Sizes[1] != inDim || (int)result.Sizes[1] != outDim || rows == 0) return;
+
+            float* xp = GetFloatPtr(input);
+            float* rp = GetFloatPtr(result);
+            float* A = (float*)e.A;       // [rank, in] row-major (lora_down)
+            float* B = (float*)e.B;       // [out, rank] row-major (lora_up, scale folded)
+            float scale = e.Scale;        // 1.0 when the loader folded alpha/rank into B
+            Parallel.For(0, rows, s =>
+            {
+                float* xr = xp + (long)s * inDim;
+                float* rr = rp + (long)s * outDim;
+                float* h = stackalloc float[rank];       // A·x, rank is small (LoRA rank ~16-64)
+                for (int r = 0; r < rank; r++)
+                    h[r] = TensorPrimitives.Dot(
+                        new ReadOnlySpan<float>(A + (long)r * inDim, inDim),
+                        new ReadOnlySpan<float>(xr, inDim));
+                for (int o = 0; o < outDim; o++)
+                {
+                    float* Bo = B + (long)o * rank;
+                    float acc = 0f;
+                    for (int r = 0; r < rank; r++) acc += Bo[r] * h[r];
+                    rr[o] += scale * acc;
+                }
+            });
+            InvalidateTensorDeviceCache(result);
         }
 
         // ggml quantizes activations on-the-fly to q8_1, whose per-block sum is stored in

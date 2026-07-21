@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -23,6 +23,7 @@ public enum GgmlBackendType
     Metal = 1,
     Cpu = 2,
     Cuda = 3,
+    Vulkan = 4,
 }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -604,6 +605,13 @@ internal enum GgmlIndexReductionOp
             NativeLibrary.SetDllImportResolver(typeof(GgmlNative).Assembly, ImportResolver);
         }
 
+        // Forces this type's static constructor so the assembly-wide DllImport
+        // resolver is registered before other classes (e.g. Interop.GgmlApi)
+        // issue their first P/Invoke into the GgmlOps module.
+        internal static void EnsureImportResolverRegistered()
+        {
+        }
+
         [DllImport(DllName, CallingConvention = CallingConventionType)]
         private static extern IntPtr TSGgml_GetLastError();
 
@@ -615,6 +623,15 @@ internal enum GgmlIndexReductionOp
 
         [DllImport(DllName, CallingConvention = CallingConventionType)]
         private static extern int TSGgml_IsBackendAvailable(int backendType);
+
+        [DllImport(DllName, CallingConvention = CallingConventionType)]
+        private static extern int TSGgml_SetVulkanDeviceIndex(int deviceIndex);
+
+        [DllImport(DllName, CallingConvention = CallingConventionType)]
+        private static extern int TSGgml_GetVulkanDeviceCount();
+
+        [DllImport(DllName, CallingConvention = CallingConventionType)]
+        private static extern int TSGgml_GetVulkanDeviceDescription(int deviceIndex, byte[] description, int descriptionSize);
 
         [DllImport(DllName, CallingConvention = CallingConventionType)]
         private static extern int TSGgml_AddmmF32(
@@ -1432,7 +1449,13 @@ internal enum GgmlIndexReductionOp
             IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr,
             IntPtr logitsData, int vocabSize,
             IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNormData, float logitSoftcap);
+            IntPtr finalNormData, float logitSoftcap,
+            IntPtr pleTokenEmbdData, int pleTokenEmbdType,
+            long pleTokenEmbdNe0, long pleTokenEmbdNe1, long pleTokenEmbdBytes,
+            int pleTokenId,
+            IntPtr pleModelProjData, int pleModelProjType,
+            long pleModelProjNe0, long pleModelProjNe1, long pleModelProjBytes,
+            IntPtr pleModelProjNormData);
 
         [DllImport(DllName, CallingConvention = CallingConventionType)]
         private static extern int TSGgml_Gemma4ModelDecodeBatched(
@@ -1557,8 +1580,6 @@ internal enum GgmlIndexReductionOp
                 hdArr, kvHeadsArr, isLocalArr, ropeBaseArr, ropeDimsArr,
                 donorKArr, donorVArr, donorCacheSizeArr,
                 logitsOut, hOut);
-            if (r == 0 && Environment.GetEnvironmentVariable("TS_GGML_FUSED_DEBUG") == "1")
-                Console.Error.WriteLine($"[gemma4-draft FAIL] {GetLastErrorMessage("(no native error)")}");
             return r != 0;
         }
 
@@ -1625,6 +1646,15 @@ internal enum GgmlIndexReductionOp
         }
 
         [DllImport(DllName, CallingConvention = CallingConventionType)]
+        private static extern void TSGgml_QwenImageSetOffload(int on);
+
+        // CPU-offload mode for the Qwen-Image DiT kernels: disables the persistent /
+        // CUDA-graph-captured entries (whose one-time resident weight upload is their
+        // whole point) so the non-persist reuse-gallocr path streams the weights per
+        // call. Set per request by the pipeline with the device-copy residency budget.
+        public static void QwenImageSetOffload(bool on) => TSGgml_QwenImageSetOffload(on ? 1 : 0);
+
+        [DllImport(DllName, CallingConvention = CallingConventionType)]
         private static extern int TSGgml_Conv2d(in Conv2dArgs desc);
 
         public static bool TryConv2d(in Conv2dArgs desc)
@@ -1640,8 +1670,6 @@ internal enum GgmlIndexReductionOp
         public static bool TryDiffusionDecodeLayer(in DiffusionDecodeLayerArgs desc)
         {
             int r = TSGgml_DiffusionDecodeLayer(in desc);
-            if (r == 0 && Environment.GetEnvironmentVariable("DIFFUSION_FUSED_DEBUG") == "1")
-                Console.Error.WriteLine($"[fused-decode FAIL] {GetLastErrorMessage("(no native error)")}");
             return r != 0;
         }
 
@@ -1661,8 +1689,6 @@ internal enum GgmlIndexReductionOp
         {
             int r = TSGgml_DiffusionLmHead(hidden, hiddenSize, canvasLen, outputNormW,
                 lmHeadW, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, logitsOut, vocab, eps, finalLogitSoftcap);
-            if (r == 0 && Environment.GetEnvironmentVariable("DIFFUSION_FUSED_DEBUG") == "1")
-                Console.Error.WriteLine($"[fused-lmhead FAIL] {GetLastErrorMessage("(no native error)")}");
             return r != 0;
         }
 
@@ -1691,8 +1717,6 @@ internal enum GgmlIndexReductionOp
             int r = TSGgml_DiffusionLmHeadSample(hidden, hiddenSize, canvasLen, outputNormW,
                 lmHeadW, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, vocab, eps, finalLogitSoftcap,
                 invTemp, uHost, topK, argmaxOut, entropyOut, sampledOut, topTokensOut, topProbsOut);
-            if (r == 0 && Environment.GetEnvironmentVariable("DIFFUSION_FUSED_DEBUG") == "1")
-                Console.Error.WriteLine($"[fused-lmhead-sample FAIL] {GetLastErrorMessage("(no native error)")}");
             return r != 0;
         }
 
@@ -1715,8 +1739,6 @@ internal enum GgmlIndexReductionOp
         {
             int r = TSGgml_DiffusionModelDecode(layers, numLayers, hidden, hiddenSize, canvasLen, promptLen,
                 outputNormW, lmHeadW, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, logitsOut, vocab, finalLogitSoftcap);
-            if (r == 0 && Environment.GetEnvironmentVariable("DIFFUSION_FUSED_DEBUG") == "1")
-                Console.Error.WriteLine($"[fused-model FAIL] {GetLastErrorMessage("(no native error)")}");
             return r != 0;
         }
 
@@ -1770,8 +1792,6 @@ internal enum GgmlIndexReductionOp
             int rc = TSGgml_Gemma4MoEModelDecodeBatched(layers, numLayers, nSeqs, hidden,
                 kCacheArr, vCacheArr, positions, logits, vocabSize,
                 lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm, logitSoftcap);
-            if (rc == 0 && Environment.GetEnvironmentVariable("TS_BATCHED_FUSED_DEBUG") == "1")
-                Console.Error.WriteLine($"[g4moe-batched-native FAIL] {GetLastErrorMessage("(no native error)")}");
             return rc != 0;
         }
 
@@ -2138,6 +2158,9 @@ internal enum GgmlIndexReductionOp
         [DllImport(DllName, CallingConvention = CallingConventionType)]
         private static extern int TSGgml_GetBackendMemory(out long freeBytes, out long totalBytes);
 
+        [DllImport(DllName, CallingConvention = CallingConventionType)]
+        private static extern int TSGgml_IsActiveDeviceIntegrated();
+
         // Async dispatch (deferred ggml_backend_synchronize). When enabled, per-op
         // kernels return without waiting on the Metal command buffer; subsequent ops
         // chain through the Metal command queue, and host-side reads must call
@@ -2357,6 +2380,16 @@ internal enum GgmlIndexReductionOp
                 throw new PlatformNotSupportedException("The GGML CUDA backend is supported on Windows and Linux only.");
             }
 
+            if (backendType == GgmlBackendType.Vulkan && !IsVulkanPlatformSupported())
+            {
+                throw new PlatformNotSupportedException("The GGML Vulkan backend is supported on Windows and Linux only.");
+            }
+
+            if (backendType == GgmlBackendType.Vulkan)
+            {
+                ApplyVulkanDeviceFromEnvironment();
+            }
+
             try
             {
                 if (TSGgml_IsBackendAvailable((int)backendType) == 0)
@@ -2365,6 +2398,7 @@ internal enum GgmlIndexReductionOp
                     {
                         GgmlBackendType.Metal => "ggml-metal",
                         GgmlBackendType.Cuda => "ggml-cuda",
+                        GgmlBackendType.Vulkan => "ggml-vulkan",
                         _ => "ggml-cpu",
                     };
                     throw new InvalidOperationException($"Failed to initialize {backendName}. {GetBackendAvailabilityHint(backendType)}");
@@ -2392,6 +2426,11 @@ internal enum GgmlIndexReductionOp
                 return false;
             }
 
+            if (backendType == GgmlBackendType.Vulkan && !IsVulkanPlatformSupported())
+            {
+                return false;
+            }
+
             try
             {
                 return TSGgml_CanInitializeBackend((int)backendType) != 0;
@@ -2404,6 +2443,97 @@ internal enum GgmlIndexReductionOp
             {
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Environment variable holding the Vulkan device index for the GGML Vulkan
+        /// backend (multi-GPU hosts, e.g. an integrated GPU next to a discrete one).
+        /// Read from managed code when the Vulkan backend initializes — the native
+        /// bridge cannot see env vars set after process start on Windows (the CRT
+        /// snapshots the environment), so the value is pushed down via
+        /// <see cref="SetVulkanDeviceIndex"/> instead.
+        /// </summary>
+        public const string VulkanDeviceEnvVar = "TS_GGML_VULKAN_DEVICE";
+
+        /// <summary>
+        /// Selects which Vulkan device the GGML Vulkan backend initializes on.
+        /// Must be called before the backend first initializes; the device cannot
+        /// change afterwards.
+        /// </summary>
+        public static void SetVulkanDeviceIndex(int deviceIndex)
+        {
+            try
+            {
+                if (TSGgml_SetVulkanDeviceIndex(deviceIndex) == 0)
+                {
+                    throw new InvalidOperationException(
+                        GetLastErrorMessage($"Failed to select Vulkan device {deviceIndex}."));
+                }
+            }
+            catch (EntryPointNotFoundException ex)
+            {
+                // Older native bridges hardcode device 0, so requesting it is a no-op.
+                if (deviceIndex == 0)
+                    return;
+                throw new InvalidOperationException(
+                    "The native GGML bridge is out of date and does not support Vulkan device selection. Rebuild `TensorSharp.GGML.Native`.", ex);
+            }
+        }
+
+        /// <summary>Number of Vulkan devices visible to ggml-vulkan, or 0 when the build has no Vulkan support.</summary>
+        public static int GetVulkanDeviceCount()
+        {
+            try
+            {
+                return Math.Max(0, TSGgml_GetVulkanDeviceCount());
+            }
+            catch (DllNotFoundException)
+            {
+                return 0;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                return 0;
+            }
+        }
+
+        /// <summary>Human-readable description of a Vulkan device (adapter name), or null when unavailable.</summary>
+        public static string GetVulkanDeviceDescription(int deviceIndex)
+        {
+            byte[] buffer = new byte[256];
+            try
+            {
+                if (TSGgml_GetVulkanDeviceDescription(deviceIndex, buffer, buffer.Length) == 0)
+                    return null;
+            }
+            catch (DllNotFoundException)
+            {
+                return null;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                return null;
+            }
+
+            int length = Array.IndexOf(buffer, (byte)0);
+            if (length < 0)
+                length = buffer.Length;
+            return length == 0 ? null : System.Text.Encoding.UTF8.GetString(buffer, 0, length);
+        }
+
+        private static void ApplyVulkanDeviceFromEnvironment()
+        {
+            string raw = Environment.GetEnvironmentVariable(VulkanDeviceEnvVar);
+            if (string.IsNullOrWhiteSpace(raw))
+                return;
+
+            if (!int.TryParse(raw, out int deviceIndex) || deviceIndex < 0)
+            {
+                throw new InvalidOperationException(
+                    $"Invalid {VulkanDeviceEnvVar} value '{raw}'. Expected a non-negative Vulkan device index.");
+            }
+
+            SetVulkanDeviceIndex(deviceIndex);
         }
 
         public static void Addmm(GgmlTensorView2D result, GgmlTensorView2D src, GgmlTensorView2D m1, GgmlTensorView2D m2, float beta, float alpha)
@@ -2584,8 +2714,6 @@ internal enum GgmlIndexReductionOp
                 outNe0, outNe1, outBytes, outBDim,
                 upNe0, upNe1, upBytes, upBDim,
                 downNe0, downNe1, downBytes, downBDim);
-            if (rc == 0 && Environment.GetEnvironmentVariable("TS_VBENCH_DIAG") == "1")
-                Console.Error.WriteLine($"\n[diag] Qwen35VisionEncoder native FAIL: {GetLastErrorMessage("(no native error)")}");
             return rc != 0;
         }
 
@@ -3368,7 +3496,13 @@ internal enum GgmlIndexReductionOp
             IntPtr[] vArr = null, int[] vTypeArr = null, long[] vNe0Arr = null, long[] vNe1Arr = null, long[] vBytesArr = null,
             IntPtr logitsData = default, int vocabSize = 0,
             IntPtr lmHeadData = default, int lmHeadType = 0, long lmHeadNe0 = 0, long lmHeadNe1 = 0, long lmHeadBytes = 0,
-            IntPtr finalNormData = default, float logitSoftcap = 0f)
+            IntPtr finalNormData = default, float logitSoftcap = 0f,
+            IntPtr pleTokenEmbdData = default, int pleTokenEmbdType = 0,
+            long pleTokenEmbdNe0 = 0, long pleTokenEmbdNe1 = 0, long pleTokenEmbdBytes = 0,
+            int pleTokenId = -1,
+            IntPtr pleModelProjData = default, int pleModelProjType = 0,
+            long pleModelProjNe0 = 0, long pleModelProjNe1 = 0, long pleModelProjBytes = 0,
+            IntPtr pleModelProjNormData = default)
         {
             CheckResult(TSGgml_Gemma4ModelDecode(
                 hiddenData, hiddenSize, numLayers,
@@ -3395,7 +3529,13 @@ internal enum GgmlIndexReductionOp
                 vArr, vTypeArr, vNe0Arr, vNe1Arr, vBytesArr,
                 logitsData, vocabSize,
                 lmHeadData, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes,
-                finalNormData, logitSoftcap), "gemma4_model_decode");
+                finalNormData, logitSoftcap,
+                pleTokenEmbdData, pleTokenEmbdType,
+                pleTokenEmbdNe0, pleTokenEmbdNe1, pleTokenEmbdBytes,
+                pleTokenId,
+                pleModelProjData, pleModelProjType,
+                pleModelProjNe0, pleModelProjNe1, pleModelProjBytes,
+                pleModelProjNormData), "gemma4_model_decode");
         }
 
         /// <summary>True token-batched dense decode: N concurrent sequences, one
@@ -3447,8 +3587,6 @@ internal enum GgmlIndexReductionOp
                 logitsData, vocabSize,
                 lmHeadData, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes,
                 finalNormData, logitSoftcap);
-            if (rc == 0 && Environment.GetEnvironmentVariable("TS_BATCHED_FUSED_DEBUG") == "1")
-                Console.Error.WriteLine($"[g4-batched-native FAIL] {GetLastErrorMessage("(no native error)")}");
             return rc != 0;
         }
 
@@ -3515,8 +3653,6 @@ internal enum GgmlIndexReductionOp
                 pleProjWData, pleProjWType,
                 pleProjWNe0, pleProjWNe1, pleProjWBytes,
                 pleProjNormData);
-            if (r == 0 && Environment.GetEnvironmentVariable("TS_GGML_FUSED_DEBUG") == "1")
-                Console.Error.WriteLine($"[gemma4-verify FAIL] {GetLastErrorMessage("(no native error)")}");
             return r != 0;
         }
 
@@ -3723,7 +3859,9 @@ internal enum GgmlIndexReductionOp
         public static void InvalidateHostBuffer(IntPtr ptr)
         {
             if (ptr != IntPtr.Zero)
+            {
                 TSGgml_InvalidateHostBuffer(ptr);
+            }
         }
 
         /// <summary>Diagnostic: total bytes of device-local COPY buffers resident in the GGML
@@ -3736,6 +3874,18 @@ internal enum GgmlIndexReductionOp
         /// so (total - free) is the bytes currently resident. Returns false if unavailable.</summary>
         public static bool TryGetBackendMemory(out long freeBytes, out long totalBytes)
             => TSGgml_GetBackendMemory(out freeBytes, out totalBytes) != 0;
+
+        /// <summary>True if the active GGML backend device is an integrated GPU
+        /// (unified-memory iGPU, e.g. Intel UHD / AMD APU via ggml-vulkan). Such
+        /// devices are memory-bandwidth bound; callers use this to skip heavy
+        /// startup warmup that would otherwise take minutes. Returns false when the
+        /// backend is unavailable or the query is not supported.</summary>
+        public static bool IsActiveDeviceIntegrated()
+        {
+            try { return TSGgml_IsActiveDeviceIntegrated() != 0; }
+            catch (EntryPointNotFoundException) { return false; }
+            catch (DllNotFoundException) { return false; }
+        }
 
         public static void SyncHostBuffer(IntPtr ptr, long byteCount)
         {
@@ -3780,12 +3930,22 @@ internal enum GgmlIndexReductionOp
             TSGgml_HostReadBarrier();
         }
 
-        public static void PreloadQuantizedWeight(IntPtr cacheKey, IntPtr hostData, int ggmlType, long ne0, long ne1, long rawBytes)
+        /// <summary>
+        /// Preload a quantized weight into a device-resident buffer keyed by
+        /// <paramref name="cacheKey"/>. Returns true when the weight is (now)
+        /// device-resident; false when the device cannot hold it in a single
+        /// backend buffer (e.g. ggml-vulkan's per-buffer maxBufferSize cap) —
+        /// the caller must keep the host copy and use its host fallback path.
+        /// Throws on any other native failure.
+        /// </summary>
+        public static bool PreloadQuantizedWeight(IntPtr cacheKey, IntPtr hostData, int ggmlType, long ne0, long ne1, long rawBytes)
         {
             if (cacheKey == IntPtr.Zero || hostData == IntPtr.Zero || rawBytes <= 0)
                 throw new ArgumentException("PreloadQuantizedWeight requires valid cache key, host data, and size.");
 
-            CheckResult(TSGgml_PreloadQuantizedWeight(cacheKey, hostData, ggmlType, ne0, ne1, rawBytes), "preload_quantized_weight");
+            int result = TSGgml_PreloadQuantizedWeight(cacheKey, hostData, ggmlType, ne0, ne1, rawBytes);
+            CheckResult(result, "preload_quantized_weight");
+            return result != 2;
         }
 
         /// <summary>
@@ -4030,6 +4190,13 @@ internal enum GgmlIndexReductionOp
             return OperatingSystem.IsWindows() || OperatingSystem.IsLinux();
         }
 
+        private static bool IsVulkanPlatformSupported()
+        {
+            // Metal is the GPU backend on macOS; ggml-vulkan is built for
+            // Windows and Linux only (see TensorSharp.GGML.Native/CMakeLists.txt).
+            return OperatingSystem.IsWindows() || OperatingSystem.IsLinux();
+        }
+
         private static void EnsureWindowsNativeDependencySearchPaths()
         {
             if (!OperatingSystem.IsWindows())
@@ -4110,6 +4277,32 @@ internal enum GgmlIndexReductionOp
 
                 if (backendMessage.Contains("not available in this build", StringComparison.OrdinalIgnoreCase))
                     return $"{backendMessage} {rebuildHint}";
+            }
+
+            if (backendType == GgmlBackendType.Vulkan && IsVulkanPlatformSupported())
+            {
+                string rebuildHint = OperatingSystem.IsWindows()
+                    ? "Rebuild the native GGML bridge with Vulkan enabled, for example: `powershell -ExecutionPolicy Bypass -File TensorSharp.GGML.Native/build-windows.ps1 --vulkan` or `set TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON` before `dotnet build`."
+                    : "Rebuild the native GGML bridge with Vulkan enabled, for example: `bash TensorSharp.GGML.Native/build-linux.sh --vulkan` or `TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON dotnet build`.";
+
+                if (string.IsNullOrWhiteSpace(backendMessage))
+                    return rebuildHint;
+
+                if (backendMessage.Contains("not available in this build", StringComparison.OrdinalIgnoreCase))
+                    return $"{backendMessage} {rebuildHint}";
+
+                // The backend is compiled in but device enumeration came back empty.
+                // ggml-vulkan only auto-selects GPU devices; software rasterizers
+                // (llvmpipe/lavapipe) are skipped unless forced. The common trap is
+                // WSL: NVIDIA ships no Vulkan ICD for WSL guests and Ubuntu's mesa
+                // has no dzn driver, so no GPU Vulkan device exists inside WSL even
+                // though the host GPU supports Vulkan.
+                if (backendMessage.Contains("No Vulkan device", StringComparison.OrdinalIgnoreCase))
+                    return backendMessage +
+                        " Install a GPU driver with Vulkan support. ggml-vulkan only auto-selects GPU devices;" +
+                        " a software rasterizer (e.g. llvmpipe) is used only when forced with GGML_VK_VISIBLE_DEVICES=0." +
+                        " Note: inside WSL no NVIDIA Vulkan device is exposed — run the server on the Windows host" +
+                        " (or a Linux host with native GPU drivers) to use ggml_vulkan on the GPU.";
             }
 
             return backendMessage;

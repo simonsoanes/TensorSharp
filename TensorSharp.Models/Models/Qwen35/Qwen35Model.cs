@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -156,7 +156,7 @@ namespace TensorSharp.Models
         // _moeBatchedDown: [K, hidden]
         // _moeBatchedExpertIndices: [K] int32 (device-side topK)
         // _moeBatchedRouteWeights: [1, K] float32 (device-side routing
-        //     weights — used as the LHS of the final matmul that turns
+        //     weights ÔÇö used as the LHS of the final matmul that turns
         //     [K, hidden] expert outputs into a single [1, hidden]).
         // All allocated lazily on first use; reused across all calls.
         private Tensor _moeBatchedGate;
@@ -205,7 +205,7 @@ namespace TensorSharp.Models
             // The fused per-layer attention decode kernel folds 6 small
             // CPU-side ops into a single Metal graph dispatch. omlx/vllm
             // both use the equivalent (mx.fast.scaled_dot_product_attention)
-            // unconditionally — the per-call setup cost is amortised even
+            // unconditionally ÔÇö the per-call setup cost is amortised even
             // at small KV lengths once the rest of the model is on-device.
             return 1;
         }
@@ -216,7 +216,7 @@ namespace TensorSharp.Models
             if (!string.IsNullOrWhiteSpace(env) && int.TryParse(env, out int v) && v > 0)
                 return v;
             // Always prefer the Metal flash-attention kernel for MLX
-            // decode — see omlx/mlx-lm which dispatches
+            // decode ÔÇö see omlx/mlx-lm which dispatches
             // mx.fast.scaled_dot_product_attention for every step.
             return 1;
         }
@@ -316,9 +316,9 @@ namespace TensorSharp.Models
         // the start of each call; missing/null means use plain scalar RoPE.
         // Per-pair modality assignment (which (T,H,W) axis drives which rotary
         // pair) is precomputed once in PrecomputeMRoPEInterleavedIds from
-        // _mropeSections — vLLM mrope_interleaved.py's get_mrope_interleaved_id_list.
+        // _mropeSections ÔÇö vLLM mrope_interleaved.py's get_mrope_interleaved_id_list.
         private int[] _pendingMRoPEPositions;
-        private int[] _mropeInterleavedIds; // length rotary_dim/2; values ∈ {0=T,1=H,2=W}
+        private int[] _mropeInterleavedIds; // length rotary_dim/2; values Ôêê {0=T,1=H,2=W}
 
         // (GDN scratch buffers, chunked-prefill staging, and timing counters live in
         // Qwen35Model.GatedDeltaNet.cs.)
@@ -327,50 +327,13 @@ namespace TensorSharp.Models
         public Qwen35VisionEncoder VisionEncoder { get; private set; }
         private List<(Tensor embeddings, int position)> _visionEmbeddingsList = new();
 
-        // Detailed prefill-only profiling counters. Set the QWEN35_PREFILL_PROFILE
-        // environment variable to "1" to populate these so PrintTimingStats prints a
-        // fine-grained breakdown of where the prefill seconds go. Off by default to
-        // avoid the timer overhead in normal runs.
-        private static readonly bool _profilePrefillStages =
-            string.Equals(Environment.GetEnvironmentVariable("QWEN35_PREFILL_PROFILE"), "1", StringComparison.Ordinal);
-
-        // QWEN35_DECODE_PROFILE=1: bucket the per-decode-token time into
-        // attention/MoE/norm/lm-head/sync so we can attack the dominant
-        // bucket. Adds a Stopwatch.GetTimestamp per layer; ~0.05 μs each,
-        // negligible at decode rates.
-        private static readonly bool _profileDecodeStages =
-            string.Equals(Environment.GetEnvironmentVariable("QWEN35_DECODE_PROFILE"), "1", StringComparison.Ordinal);
-
         // Set QWEN35_DISABLE_FUSED_FFN=1 to disable the fully fused dense FFN graph
         // dispatch in FFNCachedFused (useful for A/B benchmarking against the legacy
         // 3-dispatch path: FusedRmsNormMatMul + SiLUMul + FusedMatMulQuantAdd).
         private static readonly bool _useFusedFfnPrefill =
             !string.Equals(Environment.GetEnvironmentVariable("QWEN35_DISABLE_FUSED_FFN"), "1", StringComparison.Ordinal);
-        private long _decodeAttnBlockTicks;
-        private long _decodeRecBlockTicks;
-        private long _decodeForwardCount;
-        private long _prefillEmbedTicks;
-        private long _prefillAttnBlockTicks;
-        private long _prefillRecBlockTicks;
-        private long _prefillFinalLmHeadTicks;
-        private long _prefillAttnQkvTicks;
-        private long _prefillAttnDeinterleaveTicks;
-        private long _prefillAttnQknormTicks;
-        private long _prefillAttnRopeTicks;
-        private long _prefillAttnReshapeTicks;
-        private long _prefillAttnCacheCopyTicks;
-        private long _prefillAttnExpandKvTicks;
-        private long _prefillAttnComputeTicks;
-        private long _prefillAttnGateTicks;
-        private long _prefillAttnOutputTicks;
-        private long _prefillAttnFfnTicks;
-        private long _prefillRecInputProjTicks;
-        private long _prefillRecCoreTicks;
-        private long _prefillRecOutputTicks;
-        private long _prefillRecFfnTicks;
         private long _mlxEvalBoundaryTicks;
         private long _mlxCacheEvalTicks;
-        private int _prefillTokenCount;
 
         public Qwen35Model(string ggufPath, BackendType backend)
             : base(ggufPath, backend)
@@ -417,7 +380,7 @@ namespace TensorSharp.Models
 
             // Determine which layers are recurrent (GatedDeltaNet) vs full-attention.
             // Prefer an explicit GGUF `layer_types` array if present (vLLM reads
-            // `config.layer_types[i]` ∈ {"linear_attention","full_attention"} at
+            // `config.layer_types[i]` Ôêê {"linear_attention","full_attention"} at
             // qwen3_5.py:230; future fine-tunes can ship a non-default pattern).
             // Fall back to the period-`full_attention_interval` pattern that stock
             // 27B/35B-A3B GGUFs use (no layer_types array shipped).
@@ -487,7 +450,7 @@ namespace TensorSharp.Models
                     continue;
 
                 string prefix = $"blk.{layer}.";
-                if (TryFuseWeights(prefix + "attn_qkv.weight",
+                if (TryFuseWeights(prefix + "attn_qkv.weight", keepSources: false,
                     prefix + "attn_q.weight",
                     prefix + "attn_k.weight",
                     prefix + "attn_v.weight"))
@@ -509,7 +472,7 @@ namespace TensorSharp.Models
                     continue;
 
                 string prefix = $"blk.{layer}.";
-                if (TryFuseWeights(prefix + "ssm_in_proj.weight",
+                if (TryFuseWeights(prefix + "ssm_in_proj.weight", keepSources: true,
                     prefix + "attn_qkv.weight",
                     prefix + "attn_gate.weight",
                     prefix + "ssm_beta.weight",
@@ -523,7 +486,7 @@ namespace TensorSharp.Models
                 Console.WriteLine($"  Fused projections: {fused} recurrent input packs");
         }
 
-        private unsafe bool TryFuseWeights(string fusedName, params string[] weightNames)
+        private unsafe bool TryFuseWeights(string fusedName, bool keepSources, params string[] weightNames)
         {
             if (weightNames == null || weightNames.Length < 2)
                 return false;
@@ -558,14 +521,16 @@ namespace TensorSharp.Models
                     return false;
 
                 _quantWeights[fusedName] = fusedWeight;
-                for (int i = 0; i < weightNames.Length; i++)
+                if (!keepSources)
                 {
-                    var name = weightNames[i];
-                    var qw = quantWeights[i];
-                    _quantWeights.Remove(name);
-                    qw.Dispose();
+                    for (int i = 0; i < weightNames.Length; i++)
+                    {
+                        var name = weightNames[i];
+                        var qw = quantWeights[i];
+                        _quantWeights.Remove(name);
+                        qw.Dispose();
+                    }
                 }
-
                 return true;
             }
 
@@ -983,7 +948,7 @@ namespace TensorSharp.Models
         /// On <c>ggml_cuda</c> the MoE decode/prefill read the experts exclusively
         /// through the per-layer STACKED expert device buffer (one device copy per
         /// <c>*_exps</c> tensor, cached on first use). Preloading each per-expert
-        /// split view as well would put a SECOND full copy of every expert in VRAM —
+        /// split view as well would put a SECOND full copy of every expert in VRAM ÔÇö
         /// for the 35B-A3B that is an extra ~10 GB, which overflows the 16 GB card
         /// into shared GPU memory (WDDM paging) and tanks decode speed. Skip the
         /// per-expert members; their host views stay mapped so the rare per-op
@@ -1018,13 +983,6 @@ namespace TensorSharp.Models
             ResetGdnTimingCounters();
             _forwardSw.Reset();
 
-            _prefillEmbedTicks = _prefillAttnBlockTicks = _prefillRecBlockTicks = _prefillFinalLmHeadTicks = 0;
-            _prefillAttnQkvTicks = _prefillAttnDeinterleaveTicks = _prefillAttnQknormTicks = 0;
-            _prefillAttnRopeTicks = _prefillAttnReshapeTicks = _prefillAttnCacheCopyTicks = 0;
-            _prefillAttnExpandKvTicks = _prefillAttnComputeTicks = _prefillAttnGateTicks = 0;
-            _prefillAttnOutputTicks = _prefillAttnFfnTicks = 0;
-            _prefillRecInputProjTicks = _prefillRecCoreTicks = _prefillRecOutputTicks = _prefillRecFfnTicks = 0;
-            _prefillTokenCount = 0;
         }
 
         public override bool SupportsKVCacheTruncation => false;
@@ -1267,32 +1225,25 @@ namespace TensorSharp.Models
         }
 
         // Chunk size for ForwardRefill: long prompts are processed in this-many-token
-        // chunks so the per-layer attention-score allocation stays bounded.
-        // Override with TS_PREFILL_CHUNK when tuning.
-        private static int ResolvePrefillChunkSize()
+        // chunks so the per-layer attention-score allocation stays bounded. Because a
+        // chunk runs as ONE fused-verify graph, the chunk size is also that graph's
+        // width, which bounds the MoE activation peak. Override with TS_PREFILL_CHUNK.
+        private int ResolvePrefillChunkSize()
         {
             string env = Environment.GetEnvironmentVariable("TS_PREFILL_CHUNK");
             if (!string.IsNullOrEmpty(env) && int.TryParse(env, out int v) && v > 0)
                 return v;
-            return 2048;
-        }
-
-        // Micro-batch cap for the whole-model fused prefill (TSGgml_Qwen35ModelVerify),
-        // the analogue of llama.cpp's n_ubatch. The verify graph's activation scratch
-        // costs ~1.8 MB per prompt token on the 35B-A3B, and it lands in the shared
-        // reuse gallocr, which only ever GROWS (it lives for the backend's lifetime).
-        // One long prompt fed as a single graph (e.g. 3.2k tokens -> 5.7 GB scratch)
-        // pushes total VRAM past the card and WDDM demotes resident buffers to shared
-        // system memory — permanently, so EVERY later prefill and decode runs partly
-        // over PCIe (~3.5x collapse across the whole server until restart). Splitting
-        // prefill into sub-chunks bounds the scratch at the ubatch peak instead of
-        // scaling with prompt length. 0 disables the cap.
-        private static int ResolvePrefillVerifyUbatch()
-        {
-            string env = Environment.GetEnvironmentVariable("TS_QWEN35_PREFILL_UBATCH");
-            if (!string.IsNullOrEmpty(env) && int.TryParse(env, out int v) && v >= 0)
-                return v;
-            return 1024;
+            // Vulkan VRAM cliff: a fused-verify graph wider than ~768 tokens pushes the
+            // MoE activation peak past a 16 GB card's VRAM, and WDDM then PERMANENTLY
+            // demotes the reuse-gallocr to shared system memory -> pp2048 collapses from
+            // ~360 to ~18 tok/s (measured). 768 keeps the peak device-resident and holds
+            // across context lengths (the KV cache grows separately). A FIXED 768 also
+            // keeps every full chunk on ONE verify graph shape, so the ggml-vulkan
+            // pipelines the startup warmup compiles are REUSED across all prompts/scenarios
+            // (a variable/larger chunk makes each prompt length a fresh shape whose pipeline
+            // + graph is built cold inside the measured TTFT — measured to REGRESS
+            // multi-prompt Vulkan runs). CUDA (cuBLAS/MMQ, no WDDM demotion) keeps 2048.
+            return _backend == BackendType.GgmlVulkan ? 768 : 2048;
         }
 
         // Gates the whole-model fused prefill path (TSGgml_Qwen35ModelVerify, one
@@ -1307,25 +1258,329 @@ namespace TensorSharp.Models
         /// (start_pos..+N) and a pure causal mask, so it is correct only when there
         /// are no multimodal spans / custom MRoPE positions. Capacity (start_pos +
         /// seqLen &lt;= cacheSize) and weight/shape support are re-checked inside
-        /// <see cref="TryFullModelVerify"/>, which bails (→ per-op fallback) otherwise.
+        /// <see cref="TryFullModelVerify"/>, which bails (ÔåÆ per-op fallback) otherwise.
         /// </summary>
         private bool CanUsePrefillVerify(int startPos, int seqLen)
         {
             if (!_prefillVerifyEnabled || _fvUnsupported) return false;
-            if (_backend != BackendType.GgmlCuda || seqLen <= 1) return false;
-            // Vision embeddings must already be injected into the hidden tensor
-            // (Forward injects before the verify branch and clears the list).
-            if (_visionEmbeddingsList.Count > 0) return false;
-            // Multimodal prompts are supported: per-axis MRoPE positions route the
-            // kernel's RoPE through ggml_rope_multi (interleaved MRoPE) using the
-            // GGUF's mrope sections. Bail only when the positions/sections can't
-            // drive that path (per-op ApplyMRoPEPrefill handles those).
-            if (_pendingMRoPEPositions != null
-                && (_mropeSections == null || _mropeSections.Length < 4
-                    || _pendingMRoPEPositions.Length < 3 * seqLen))
+            // Fused whole-model verify prefill runs on ggml_cuda AND ggml_vulkan (both
+            // implement the ops the graph needs — set_rows, mul_mat_id, gated_delta_net,
+            // ssm_scan/conv). Vulkan was previously gated out here, so Vulkan silently
+            // fell back to the per-op layer loop (pp512 ~20 tok/s vs ~300+ fused); the
+            // low-level TryFullModelVerify already permits Vulkan. Metal stays out
+            // (ggml_metal_op_set_rows SEGFAULTs — same reason it is non-persist decode).
+            if ((_backend != BackendType.GgmlCuda && _backend != BackendType.GgmlVulkan) || seqLen <= 1)
                 return false;
+            if (_visionEmbeddingsList.Count > 0 || _pendingMRoPEPositions != null) return false;
             if (_headKDim != _headVDim) return false;
             return true;
+        }
+
+        // Cached CUDA graphs of the per-op prefill layer loop (direct cuda backend
+        // only). One instantiated graph per (seqLen, startPos, KV-buffer identity,
+        // conv-ring phase); replay collapses the loop's ~900 kernel dispatches into
+        // a single cuGraphLaunch. See CudaPrefillGraphCache for the capture rules.
+        private CudaPrefillGraphCache _cudaPrefillGraphs;
+        private CudaDecodeDynParams _cudaDecodeDynParams;
+
+        private Tensor RunPerOpLayerLoop(Tensor hidden, int seqLen, int startPos)
+        {
+            for (int layer = 0; layer < Config.NumLayers; layer++)
+            {
+                if (_isRecurrent[layer])
+                    hidden = RecurrentBlock(hidden, layer, seqLen, startPos);
+                else
+                    hidden = AttentionBlock(hidden, layer, seqLen, startPos);
+                TryEvaluateMlxLayerBoundary(hidden, layer, seqLen);
+            }
+            return hidden;
+        }
+
+        /// <summary>
+        /// Runs the per-op transformer layer loop, using a cached CUDA graph when
+        /// one exists for this exact shape/position/cache identity. Ownership
+        /// contract matches the plain loop: consumes <paramref name="hidden"/> and
+        /// returns the tensor holding the final hidden states (caller disposes).
+        /// Text-only multi-token prefill on the direct cuda backend only; every
+        /// other case runs the loop directly.
+        /// </summary>
+        private Tensor RunCudaPrefillLayerLoop(Tensor hidden, int seqLen, int startPos)
+        {
+            bool graphable = _backend == BackendType.Cuda
+                && _pendingMRoPEPositions == null && _visionEmbeddingsList.Count == 0
+                && _kvCacheK != null && _isRecurrent != null;
+            if (graphable && seqLen == 1 && CudaPrefillGraphCache.DecodeEnabled)
+                return RunCudaDecodeLayerLoop(hidden, startPos);
+            if (!graphable || seqLen <= 1 || !CudaPrefillGraphCache.Enabled)
+            {
+                return RunPerOpLayerLoop(hidden, seqLen, startPos);
+            }
+
+            _cudaPrefillGraphs ??= new CudaPrefillGraphCache(_allocator);
+            CudaPrefillGraphCache graphs = _cudaPrefillGraphs;
+            if (!graphs.IsUsable)
+                return RunPerOpLayerLoop(hidden, seqLen, startPos);
+
+            // Everything a captured kernel bakes in must be part of the key:
+            // shape, positions (RoPE + attention windows), the KV/state buffer
+            // identity (a grown cache means new pointers) and the GDN conv ring
+            // phase (a kernel parameter).
+            int firstAttn = -1, firstRec = -1;
+            for (int l = 0; l < Config.NumLayers; l++)
+            {
+                if (_isRecurrent[l]) { if (firstRec < 0) firstRec = l; }
+                else if (firstAttn < 0) firstAttn = l;
+            }
+            long kvPtr = firstAttn >= 0 && _kvCacheK[firstAttn] != null
+                ? CudaFusedOps.GetDevicePointer(_kvCacheK[firstAttn]).ToInt64() : 0;
+            long statePtr = firstRec >= 0 && _deltaStateTensor?[firstRec] != null
+                ? CudaFusedOps.GetDevicePointer(_deltaStateTensor[firstRec]).ToInt64() : 0;
+            int convPhase = firstRec >= 0 && _convStateWriteIdx != null ? _convStateWriteIdx[firstRec] : 0;
+            string key = $"{seqLen}|{startPos}|{kvPtr:x}|{statePtr:x}|{convPhase}";
+
+            if (graphs.TryGetReplayInput(key, out Tensor pinned))
+            {
+                Ops.Copy(pinned, hidden);
+                hidden.Dispose();
+                graphs.Replay(key);
+                MarkCudaGraphStateModified();
+                return pinned;
+            }
+
+            if (!graphs.ShouldCapture(key))
+                return RunPerOpLayerLoop(hidden, seqLen, startPos);
+
+            // Pre-warm the RoPE position tensors so their host->device upload
+            // happens before capture (a captured upload would bake the host
+            // pointer into the graph; these tensors are pinned by the entry).
+            Tensor posQ = EnsureRoPEPositions(startPos, seqLen, Config.NumHeads);
+            Tensor posK = EnsureRoPEPositions(startPos, seqLen, Config.NumKVHeads);
+            CudaFusedOps.TryEnsureDeviceResident(posQ);
+            CudaFusedOps.TryEnsureDeviceResident(posK);
+
+            // The captured loop must run on a stable input buffer the graph owns.
+            Tensor pinnedIn = new Tensor(_allocator, DType.Float32, hidden.Sizes);
+            Ops.Copy(pinnedIn, hidden);
+            hidden.Dispose();
+
+            if (!graphs.BeginCapture(key))
+                return RunPerOpLayerLoop(pinnedIn, seqLen, startPos);
+
+            bool captured = false;
+            try
+            {
+                Tensor result = RunPerOpLayerLoop(pinnedIn, seqLen, startPos);
+                if (ReferenceEquals(result, pinnedIn))
+                    captured = graphs.EndCaptureAndLaunch(key, pinnedIn, new[] { posQ, posK });
+                else
+                    graphs.AbortCapture(key);
+            }
+            catch (CudaGraphCaptureAbortedException ex)
+            {
+                graphs.AbortCapture(key, ex.Message);
+            }
+            catch (TensorSharp.Cuda.Interop.CudaException ex)
+            {
+                graphs.AbortCapture(key, ex.ToString());
+            }
+            catch
+            {
+                graphs.AbortCapture(key);
+                throw;
+            }
+
+            if (!captured)
+            {
+                // Nothing executed during the failed capture; run the loop for real.
+                return RunPerOpLayerLoop(pinnedIn, seqLen, startPos);
+            }
+            return pinnedIn;
+        }
+
+        /// <summary>
+        /// CUDA-graph capture/replay of the per-op DECODE step (seqLen == 1).
+        /// Unlike prefill, the position-dependent values (attention length, KV
+        /// write position, GDN conv ring index, RoPE position) change every
+        /// token, so they are NOT part of the key: the captured kernels re-read
+        /// them from a small device block whose refresh (pinned host -> device
+        /// memcpy) is the graph's leading node. A replay is then: copy the
+        /// embedding row into the pinned input, rewrite 4 pinned ints, one
+        /// cuGraphLaunch. The key carries only buffer identities: a grown KV
+        /// cache (new pointers, new baked grids) captures a fresh graph.
+        /// </summary>
+        private Tensor RunCudaDecodeLayerLoop(Tensor hidden, int startPos)
+        {
+            _cudaPrefillGraphs ??= new CudaPrefillGraphCache(_allocator);
+            CudaPrefillGraphCache graphs = _cudaPrefillGraphs;
+            if (!graphs.IsUsable)
+                return RunPerOpLayerLoop(hidden, 1, startPos);
+
+            _cudaDecodeDynParams ??= new CudaDecodeDynParams(_allocator);
+            CudaDecodeDynParams dyn = _cudaDecodeDynParams;
+            if (!dyn.IsValid)
+                return RunPerOpLayerLoop(hidden, 1, startPos);
+
+            int firstAttn = -1, firstRec = -1;
+            for (int l = 0; l < Config.NumLayers; l++)
+            {
+                if (_isRecurrent[l]) { if (firstRec < 0) firstRec = l; }
+                else if (firstAttn < 0) firstAttn = l;
+            }
+            long kvPtr = firstAttn >= 0 && _kvCacheK[firstAttn] != null
+                ? CudaFusedOps.GetDevicePointer(_kvCacheK[firstAttn]).ToInt64() : 0;
+            long statePtr = firstRec >= 0 && _deltaStateTensor?[firstRec] != null
+                ? CudaFusedOps.GetDevicePointer(_deltaStateTensor[firstRec]).ToInt64() : 0;
+            long convPtr = firstRec >= 0 && _cudaGdnConvStateTensor?[firstRec] != null
+                ? CudaFusedOps.GetDevicePointer(_cudaGdnConvStateTensor[firstRec]).ToInt64() : 0;
+            string key = $"dec|{kvPtr:x}|{statePtr:x}|{convPtr:x}|{_kvCacheCapacity}";
+
+            int attendLen = startPos + 1;
+            int convDim = _convKernel - 1;
+            // All recurrent layers advance their ring index together (single
+            // stream), so the first one represents them all; the kernels read
+            // the live value from the dyn block on replay.
+            int convPhase = firstRec >= 0 && _convStateWriteIdx != null ? _convStateWriteIdx[firstRec] : 0;
+
+            if (graphs.TryGetReplayInput(key, attendLen, out Tensor pinned))
+            {
+                // The graph reads the KV/state buffers in place; re-upload
+                // anything a host-side path dirtied since the last device pass.
+                EnsureDecodeGraphInputsResident();
+                Ops.Copy(pinned, hidden);
+                hidden.Dispose();
+                dyn.Write(attendLen, startPos, convPhase, startPos);
+                graphs.Replay(key);
+                // Mirror the C# bookkeeping the plain loop would have done.
+                AdvanceGdnConvPhases(convDim);
+                MarkCudaGraphStateModified();
+                _cachedRoPEPosStartPos = -1; // device content now diverges from the host cache key
+                return pinned;
+            }
+
+            if (!graphs.ShouldCapture(key))
+                return RunPerOpLayerLoop(hidden, 1, startPos);
+
+            // Pre-warm the RoPE position tensors so their host->device upload
+            // happens before capture; the in-graph fill kernel refreshes their
+            // CONTENT from the dyn block on every replay.
+            Tensor posQ = EnsureRoPEPositions(startPos, 1, Config.NumHeads);
+            Tensor posK = EnsureRoPEPositions(startPos, 1, Config.NumKVHeads);
+            CudaFusedOps.TryEnsureDeviceResident(posQ);
+            CudaFusedOps.TryEnsureDeviceResident(posK);
+
+            Tensor pinnedIn = new Tensor(_allocator, DType.Float32, hidden.Sizes);
+            Ops.Copy(pinnedIn, hidden);
+            hidden.Dispose();
+
+            dyn.Write(attendLen, startPos, convPhase, startPos);
+            if (!graphs.BeginCapture(key))
+                return RunPerOpLayerLoop(pinnedIn, 1, startPos);
+
+            bool captured = false;
+            try
+            {
+                dyn.EnqueueUpload();
+                dyn.Activate();
+                if (!CudaFusedOps.TryFillRopePositions(posQ, posK, dyn))
+                    throw new CudaGraphCaptureAbortedException("RoPE position fill kernel unavailable.");
+                Tensor result = RunPerOpLayerLoop(pinnedIn, 1, startPos);
+                CudaDecodeDynParams.Deactivate();
+                if (ReferenceEquals(result, pinnedIn))
+                    captured = graphs.EndCaptureAndLaunch(key, pinnedIn, new[] { posQ, posK },
+                        CudaDecodeDynParams.CaptureMaxAttendLen);
+                else
+                    graphs.AbortCapture(key);
+            }
+            catch (CudaGraphCaptureAbortedException ex)
+            {
+                graphs.AbortCapture(key, ex.Message);
+            }
+            catch (TensorSharp.Cuda.Interop.CudaException ex)
+            {
+                graphs.AbortCapture(key, ex.ToString());
+            }
+            catch
+            {
+                graphs.AbortCapture(key);
+                throw;
+            }
+            finally
+            {
+                CudaDecodeDynParams.Deactivate();
+            }
+
+            if (!captured)
+            {
+                // Nothing executed during the failed capture; run the loop for real.
+                return RunPerOpLayerLoop(pinnedIn, 1, startPos);
+            }
+            _cachedRoPEPosStartPos = -1;
+            return pinnedIn;
+        }
+
+        /// <summary>Mirrors the per-layer conv ring advance the plain loop's
+        /// TryRunCudaNativeGdnPacked does, for decode-graph replays (the C#
+        /// loop does not run, but the captured kernel advanced the device ring).</summary>
+        private void AdvanceGdnConvPhases(int convDim)
+        {
+            if (convDim <= 0 || _convStateWriteIdx == null || _isRecurrent == null)
+                return;
+            for (int l = 0; l < Config.NumLayers; l++)
+            {
+                if (_isRecurrent[l])
+                    _convStateWriteIdx[l] = (_convStateWriteIdx[l] + 1) % convDim;
+            }
+        }
+
+        /// <summary>Re-uploads any decode-graph input buffer (KV caches, GDN
+        /// conv/delta state) whose authoritative copy a host-side path dirtied;
+        /// a replayed graph reads the device buffers directly and would
+        /// otherwise see stale state. No-ops when everything is device-clean.</summary>
+        private void EnsureDecodeGraphInputsResident()
+        {
+            for (int l = 0; l < Config.NumLayers; l++)
+            {
+                if (_isRecurrent[l])
+                {
+                    if (_cudaGdnConvStateTensor?[l] != null)
+                        CudaFusedOps.TryEnsureDeviceResident(_cudaGdnConvStateTensor[l]);
+                    if (_deltaStateTensor?[l] != null)
+                        CudaFusedOps.TryEnsureDeviceResident(_deltaStateTensor[l]);
+                }
+                else
+                {
+                    if (_kvCacheK?[l] != null)
+                        CudaFusedOps.TryEnsureDeviceResident(_kvCacheK[l]);
+                    if (_kvCacheV?[l] != null)
+                        CudaFusedOps.TryEnsureDeviceResident(_kvCacheV[l]);
+                }
+            }
+        }
+
+        /// <summary>The inverse bookkeeping after a graph REPLAY: the graph
+        /// rewrote the KV caches and recurrent state on device without going
+        /// through the C# launchers, so their host mirrors are stale. Flag it,
+        /// or a later host read (state serialization, CPU fallback) would
+        /// return pre-replay data.</summary>
+        private void MarkCudaGraphStateModified()
+        {
+            for (int l = 0; l < Config.NumLayers; l++)
+            {
+                if (_isRecurrent[l])
+                {
+                    if (_cudaGdnConvStateTensor?[l] != null)
+                        CudaFusedOps.TryMarkDeviceModified(_cudaGdnConvStateTensor[l]);
+                    if (_deltaStateTensor?[l] != null)
+                        CudaFusedOps.TryMarkDeviceModified(_deltaStateTensor[l]);
+                }
+                else
+                {
+                    if (_kvCacheK?[l] != null)
+                        CudaFusedOps.TryMarkDeviceModified(_kvCacheK[l]);
+                    if (_kvCacheV?[l] != null)
+                        CudaFusedOps.TryMarkDeviceModified(_kvCacheV[l]);
+                }
+            }
         }
 
         public override float[] ForwardRefill(int[] tokens)
@@ -1365,19 +1620,14 @@ namespace TensorSharp.Models
             int seqLen = tokens.Length;
             int startPos = _cacheSeqLen;
             EnsureCacheCapacity(startPos + seqLen);
-            bool profilePrefill = _profilePrefillStages && seqLen > 1;
-            if (profilePrefill)
-                _prefillTokenCount += seqLen;
 
             long t1 = Stopwatch.GetTimestamp();
             Tensor hidden = Embedding(tokens);
             long embEnd = Stopwatch.GetTimestamp();
             _embTicks += embEnd - t1;
-            if (profilePrefill)
-                _prefillEmbedTicks += embEnd - t1;
 
             // Whole-model fused prefill chunk (same path as Forward, but the logits
-            // are discarded — this is an interior chunk). KV + GDN state are written
+            // are discarded ÔÇö this is an interior chunk). KV + GDN state are written
             // on-device; the next chunk / decode reads the committed state. Carries
             // across chunks exactly like the per-op loop (the kernel attends over the
             // full [0, startPos+seqLen) cache and reads the committed GDN ring).
@@ -1385,7 +1635,7 @@ namespace TensorSharp.Models
             {
                 if (_logitsBuffer == null || _logitsBuffer.Length != Config.VocabSize)
                     _logitsBuffer = new float[Config.VocabSize];
-                if (TryFullModelVerifyPrefill(hidden, startPos, seqLen, _logitsBuffer))
+                if (TryFullModelVerify(hidden, startPos, seqLen, normedOut: null, logitsOut: _logitsBuffer, nLogitRows: 1))
                 {
                     hidden.Dispose();
                     _cacheSeqLen += seqLen;
@@ -1395,21 +1645,7 @@ namespace TensorSharp.Models
                 }
             }
 
-            for (int layer = 0; layer < Config.NumLayers; layer++)
-            {
-                long blkStart = profilePrefill ? Stopwatch.GetTimestamp() : 0;
-                if (_isRecurrent[layer])
-                    hidden = RecurrentBlock(hidden, layer, seqLen, startPos);
-                else
-                    hidden = AttentionBlock(hidden, layer, seqLen, startPos);
-                TryEvaluateMlxLayerBoundary(hidden, layer, seqLen);
-                if (profilePrefill)
-                {
-                    long elapsed = Stopwatch.GetTimestamp() - blkStart;
-                    if (_isRecurrent[layer]) _prefillRecBlockTicks += elapsed;
-                    else _prefillAttnBlockTicks += elapsed;
-                }
-            }
+            hidden = RunCudaPrefillLayerLoop(hidden, seqLen, startPos);
 
             hidden.Dispose();
             _cacheSeqLen += seqLen;
@@ -1422,16 +1658,11 @@ namespace TensorSharp.Models
             int seqLen = tokens.Length;
             int startPos = _cacheSeqLen;
             EnsureCacheCapacity(startPos + seqLen);
-            bool profilePrefill = _profilePrefillStages && seqLen > 1;
-            if (profilePrefill)
-                _prefillTokenCount += seqLen;
 
             long t1 = Stopwatch.GetTimestamp();
             Tensor hidden = Embedding(tokens);
             long embEnd = Stopwatch.GetTimestamp();
             _embTicks += embEnd - t1;
-            if (profilePrefill)
-                _prefillEmbedTicks += embEnd - t1;
 
             // Inject any vision embeddings queued for this Forward call. The
             // queued positions are already expressed relative to the current
@@ -1445,9 +1676,6 @@ namespace TensorSharp.Models
             if (_visionEmbeddingsList.Count > 0)
                 InjectVisionEmbeddings(hidden, seqLen);
 
-            bool profileDecode = _profileDecodeStages && seqLen == 1;
-            if (profileDecode)
-                _decodeForwardCount++;
 
             // Fast path: run the whole hybrid transformer (incl. final-norm + lm_head)
             // as one fused, CUDA-graph-captured GGML graph that outputs LOGITS
@@ -1470,11 +1698,11 @@ namespace TensorSharp.Models
             // MoE + final-norm + last-token lm_head) for all N prompt tokens as ONE
             // fused GGML graph (TSGgml_Qwen35ModelVerify with nLogitRows=1), writing
             // KV + GDN state on-device. This replaces the per-layer dispatch loop
-            // whose host round-trip per op keeps the GPU mostly idle — the dominant
+            // whose host round-trip per op keeps the GPU mostly idle ÔÇö the dominant
             // CUDA prefill cost. Mirrors Gemma4's whole-model prefill-verify routing.
             // Text-only (no multimodal MRoPE); long prompts chunk via ForwardRefill.
             if (seqLen > 1 && CanUsePrefillVerify(startPos, seqLen)
-                && TryFullModelVerifyPrefill(hidden, startPos, seqLen, _logitsBuffer))
+                && TryFullModelVerify(hidden, startPos, seqLen, normedOut: null, logitsOut: _logitsBuffer, nLogitRows: 1))
             {
                 // _logitsBuffer holds the LAST token's logits; KV + GDN state were
                 // committed (host ring) by the kernel. Re-seed the device-resident
@@ -1491,27 +1719,7 @@ namespace TensorSharp.Models
             // Per-op path runs the recurrent state on the host, so the fused
             // decode's device-resident GDN state must be re-seeded next time.
             InvalidateFullDecodeState();
-            for (int layer = 0; layer < Config.NumLayers; layer++)
-            {
-                long blkStart = (profilePrefill || profileDecode) ? Stopwatch.GetTimestamp() : 0;
-                if (_isRecurrent[layer])
-                    hidden = RecurrentBlock(hidden, layer, seqLen, startPos);
-                else
-                    hidden = AttentionBlock(hidden, layer, seqLen, startPos);
-                TryEvaluateMlxLayerBoundary(hidden, layer, seqLen);
-                if (profilePrefill)
-                {
-                    long elapsed = Stopwatch.GetTimestamp() - blkStart;
-                    if (_isRecurrent[layer]) _prefillRecBlockTicks += elapsed;
-                    else _prefillAttnBlockTicks += elapsed;
-                }
-                else if (profileDecode)
-                {
-                    long elapsed = Stopwatch.GetTimestamp() - blkStart;
-                    if (_isRecurrent[layer]) _decodeRecBlockTicks += elapsed;
-                    else _decodeAttnBlockTicks += elapsed;
-                }
-            }
+            hidden = RunCudaPrefillLayerLoop(hidden, seqLen, startPos);
             }
 
             // Pick out the last token's hidden state BEFORE the final norm so we can
@@ -1546,8 +1754,6 @@ namespace TensorSharp.Models
                 MlxFusedOps.TryEvaluate(logitsTensor);
             long lmHeadEnd = Stopwatch.GetTimestamp();
             _lmHeadTicks += lmHeadEnd - t2;
-            if (profilePrefill)
-                _prefillFinalLmHeadTicks += lmHeadEnd - t2;
 
             long t3 = Stopwatch.GetTimestamp();
             if (_logitsBuffer == null || _logitsBuffer.Length != Config.VocabSize)
@@ -1585,7 +1791,7 @@ namespace TensorSharp.Models
         // Standard Forward(int[] tokens) issues all 60 layers + the LM head
         // and then host-syncs the 200K-float logits tensor before returning.
         // The sync drains all queued MLX kernels, costing ~8 ms/token on MLX
-        // (Qwen3.6-35B-A3B IQ2_XXS) — pure GPU-idle wait from the host's
+        // (Qwen3.6-35B-A3B IQ2_XXS) ÔÇö pure GPU-idle wait from the host's
         // perspective.
         //
         // The pipelined API lets the CLI inference loop kick off forward N+1
@@ -1657,7 +1863,7 @@ namespace TensorSharp.Models
             lastNormed.Dispose();
             _lmHeadTicks += Stopwatch.GetTimestamp() - lmT0;
 
-            // Device argmax → [1] int32. Falls back to host argmax if MLX
+            // Device argmax ÔåÆ [1] int32. Falls back to host argmax if MLX
             // path fails (e.g. non-MLX backend or unsupported dtype).
             var deviceToken = new Tensor(_allocator, DType.Int32, 1);
             if (!MlxFusedOps.TryArgMaxLastAxis(deviceToken, logitsTensor))
@@ -1736,7 +1942,7 @@ namespace TensorSharp.Models
             }
 
             // F32 token_embd path: use Ops.IndexSelect if supported on MLX.
-            // Most quantized models won't hit this — left as a TODO so we
+            // Most quantized models won't hit this ÔÇö left as a TODO so we
             // fall back to host path until/unless someone tests it.
             return false;
         }
@@ -1856,8 +2062,6 @@ namespace TensorSharp.Models
             else
                 attnOut = FullAttention(hidden, _attnNormW[layer], layer, seqLen, startPos, residual: hidden);
 
-            bool profilePrefill = _profilePrefillStages && seqLen > 1;
-            long ffnStart = profilePrefill ? Stopwatch.GetTimestamp() : 0;
 
             if (canFuseAttnOutFFN && attnOut != null)
             {
@@ -1882,8 +2086,6 @@ namespace TensorSharp.Models
                             halfDim);
                         _linearTicks += Stopwatch.GetTimestamp() - t0;
                         attnOut.Dispose();
-                        if (profilePrefill)
-                            _prefillAttnFfnTicks += Stopwatch.GetTimestamp() - ffnStart;
                         return hidden;
                     }
                     catch { /* fall through */ }
@@ -1942,8 +2144,6 @@ namespace TensorSharp.Models
                 ffnOut.Dispose();
             }
 
-            if (profilePrefill)
-                _prefillAttnFfnTicks += Stopwatch.GetTimestamp() - ffnStart;
 
             return hidden;
         }
@@ -1957,8 +2157,6 @@ namespace TensorSharp.Models
             int qFullDim = numHeads * headDim * 2;
             int kvDim = numKVHeads * headDim;
             int totalSeqLen = startPos + seqLen;
-            bool profilePrefill = _profilePrefillStages && seqLen > 1;
-            long stageStart = profilePrefill ? Stopwatch.GetTimestamp() : 0;
 
             // Fused norm + QKV when the fused-QKV weight is available; otherwise we have to
             // produce the normalized input separately for the three independent projections.
@@ -2023,50 +2221,74 @@ namespace TensorSharp.Models
                 vTensor = LinearForwardCached(normedInput, _attnVQW[layer], _attnVF32[layer]);
             }
             normedInput?.Dispose();
-            if (profilePrefill) { long now = Stopwatch.GetTimestamp(); _prefillAttnQkvTicks += now - stageStart; stageStart = now; }
 
             Tensor qTensor, gateTensor;
             bool ownsQGateBuffers;
             DeinterleaveQGate(qFull, seqLen, numHeads, headDim, out qTensor, out gateTensor, out ownsQGateBuffers);
             qFull.Dispose();
-            if (profilePrefill) { long now = Stopwatch.GetTimestamp(); _prefillAttnDeinterleaveTicks += now - stageStart; stageStart = now; }
 
-            qTensor = ApplyQKNormCached(qTensor, _attnQNormW[layer], numHeads, seqLen);
-            kTensor = ApplyQKNormCached(kTensor, _attnKNormW[layer], numKVHeads, seqLen);
-            if (profilePrefill) { long now = Stopwatch.GetTimestamp(); _prefillAttnQknormTicks += now - stageStart; stageStart = now; }
-
-            // RoPE - decode path applies Q and K together so the cos/sin table is computed once.
-            // If the multimodal injector has staged per-axis MRoPE positions for
-            // this prefill (vision prompt on Qwen3.5), route through ApplyMRoPEPrefill
-            // so image-region rotary dims get the right (T,H,W) angle interleaving.
-            // Text-only prompts and post-image decode tokens use the scalar path.
+            // Fused QK-RMSNorm + NeoX RoPE path: on CUDA backend without MRoPE,
+            // fuse the per-head RMSNorm and RoPE into a single kernel per Q/K tensor.
+            // This eliminates 2-4 separate kernel launches (2x RMSNorm + 2x RoPE)
+            // and the intermediate global memory writes of the normalized tensors.
             bool useMRoPE = _pendingMRoPEPositions != null && _pendingMRoPEPositions.Length >= 3 * seqLen;
-            if (useMRoPE)
+            bool fusedNormRopeApplied = false;
+            // TS_FUSED_QKNORM_ROPE=0 disables the fused path. Default: ON (lookup-table optimized).
+            bool fusedEnabled = !string.Equals(Environment.GetEnvironmentVariable("TS_FUSED_QKNORM_ROPE"), "0", StringComparison.Ordinal);
+            if (fusedEnabled && _backend == BackendType.Cuda && !useMRoPE)
             {
-                qTensor = ApplyMRoPEPrefill(qTensor, numHeads, seqLen, _pendingMRoPEPositions);
-                kTensor = ApplyMRoPEPrefill(kTensor, numKVHeads, seqLen, _pendingMRoPEPositions);
+                int ropeDim = _ropeDimCount > 0 ? _ropeDimCount : headDim;
+                int ropeHalf = ropeDim / 2;
+                int qRows = seqLen * numHeads;
+                int kRows = seqLen * numKVHeads;
+
+                Tensor qPosTensor = EnsureRoPEPositions(startPos, seqLen, numHeads);
+                Tensor kPosTensor = numHeads == numKVHeads
+                    ? qPosTensor
+                    : EnsureRoPEPositions(startPos, seqLen, numKVHeads);
+
+                bool qOk = CudaFusedOps.TryQKNormRopeNeox(
+                    qTensor, _attnQNormW[layer], qPosTensor,
+                    qRows, headDim, ropeHalf, Config.Eps,
+                    Config.RopeBase, 1.0f / Config.RopeScale);
+
+                bool kOk = qOk && CudaFusedOps.TryQKNormRopeNeox(
+                    kTensor, _attnKNormW[layer], kPosTensor,
+                    kRows, headDim, ropeHalf, Config.Eps,
+                    Config.RopeBase, 1.0f / Config.RopeScale);
+
+                fusedNormRopeApplied = qOk && kOk;
             }
-            else if (seqLen == 1)
+
+            if (!fusedNormRopeApplied)
             {
-                // The in-place CPU RoPE reads Q/K to the host (a draining sync on
-                // MLX/CUDA). Those backends use the on-device prefill RoPE instead so
-                // the whole attention block stays resident on the GPU.
-                if (_backend == BackendType.Mlx || _backend == BackendType.Cuda)
+                // Separate RMSNorm + RoPE path (non-CUDA or fused fallback).
+                qTensor = ApplyQKNormCached(qTensor, _attnQNormW[layer], numHeads, seqLen);
+                kTensor = ApplyQKNormCached(kTensor, _attnKNormW[layer], numKVHeads, seqLen);
+
+                if (useMRoPE)
+                {
+                    qTensor = ApplyMRoPEPrefill(qTensor, numHeads, seqLen, _pendingMRoPEPositions);
+                    kTensor = ApplyMRoPEPrefill(kTensor, numKVHeads, seqLen, _pendingMRoPEPositions);
+                }
+                else if (seqLen == 1)
+                {
+                    if (_backend == BackendType.Mlx || _backend == BackendType.Cuda)
+                    {
+                        qTensor = ApplyRoPEPrefill(qTensor, numHeads, seqLen, startPos);
+                        kTensor = ApplyRoPEPrefill(kTensor, numKVHeads, seqLen, startPos);
+                    }
+                    else
+                    {
+                        ApplyRoPEDecodeQKInPlace(qTensor, kTensor, numHeads, numKVHeads, startPos);
+                    }
+                }
+                else
                 {
                     qTensor = ApplyRoPEPrefill(qTensor, numHeads, seqLen, startPos);
                     kTensor = ApplyRoPEPrefill(kTensor, numKVHeads, seqLen, startPos);
                 }
-                else
-                {
-                    ApplyRoPEDecodeQKInPlace(qTensor, kTensor, numHeads, numKVHeads, startPos);
-                }
             }
-            else
-            {
-                qTensor = ApplyRoPEPrefill(qTensor, numHeads, seqLen, startPos);
-                kTensor = ApplyRoPEPrefill(kTensor, numKVHeads, seqLen, startPos);
-            }
-            if (profilePrefill) { long now = Stopwatch.GetTimestamp(); _prefillAttnRopeTicks += now - stageStart; stageStart = now; }
 
             long t0 = Stopwatch.GetTimestamp();
 
@@ -2136,7 +2358,7 @@ namespace TensorSharp.Models
                     // the (head-first) KV cache in place. The legacy AttentionDecodePureCS
                     // path copies the whole allocated cache to the host every layer (a 4 MB
                     // DtoH that drains the pipeline 16x per token) and computes attention on
-                    // the CPU — by far the dominant per-token stall on the cuda backend.
+                    // the CPU ÔÇö by far the dominant per-token stall on the cuda backend.
                     bool cudaAttn = _backend == BackendType.Cuda &&
                         CudaFusedOps.TryGqaDecodeAttention(
                             attnOutput, qTensor, _kvCacheK[layer], _kvCacheV[layer],
@@ -2155,14 +2377,12 @@ namespace TensorSharp.Models
             }
             else
             {
-                if (profilePrefill) { long now = Stopwatch.GetTimestamp(); _prefillAttnReshapeTicks += now - stageStart; stageStart = now; }
 
                 Tensor kHeads = ReshapeToHeads(kTensor, numKVHeads, seqLen, headDim);
                 Tensor vHeads = ReshapeToHeads(vTensor, numKVHeads, seqLen, headDim);
 
-                if (profilePrefill) { long now2 = Stopwatch.GetTimestamp(); _prefillAttnExpandKvTicks += now2 - stageStart; stageStart = now2; }
 
-                // Fused GPU attention: Q*K^T → causal mask → softmax → *V in one
+                // Fused GPU attention: Q*K^T ÔåÆ causal mask ÔåÆ softmax ÔåÆ *V in one
                 // GGML graph dispatch, eliminating ExpandKVHeads + 5 separate ops.
                 //
                 // FusedPrefillAttention is F32-only on the native side. The continuation
@@ -2261,7 +2481,6 @@ namespace TensorSharp.Models
                     CopyToCache(_kvCacheK[layer], kHeads, startPos, seqLen);
                     CopyToCache(_kvCacheV[layer], vHeads, startPos, seqLen);
                 }
-                if (profilePrefill) { long now = Stopwatch.GetTimestamp(); _prefillAttnCacheCopyTicks += now - stageStart; stageStart = now; }
 
                 if (!usedFusedAttn && IsGgmlBackend && canFuseContinuation)
                 {
@@ -2387,7 +2606,6 @@ namespace TensorSharp.Models
                     attnOutput = ReshapeFromHeads(attnOut, numHeads, seqLen, headDim);
                     attnOut.Dispose();
                 }
-                if (profilePrefill) { long now = Stopwatch.GetTimestamp(); _prefillAttnComputeTicks += now - stageStart; stageStart = now; }
             }
 
             // Decode hot path: do the sigmoid-gated mix on CPU. The data is tiny
@@ -2400,7 +2618,6 @@ namespace TensorSharp.Models
                 ApplySigmoidGate(attnOutput, gateTensor);
             if (ownsQGateBuffers)
                 gateTensor.Dispose();
-            if (profilePrefill) { long now = Stopwatch.GetTimestamp(); _prefillAttnGateTicks += now - stageStart; stageStart = now; }
 
             _attnTicks += Stopwatch.GetTimestamp() - t0;
 
@@ -2411,7 +2628,6 @@ namespace TensorSharp.Models
             if (skipOutputProj)
             {
                 Tensor rawOut = ownsAttnOutput ? attnOutput : Ops.NewContiguous(attnOutput);
-                if (profilePrefill) _prefillAttnOutputTicks += Stopwatch.GetTimestamp() - stageStart;
                 _attnTicks += Stopwatch.GetTimestamp() - t0;
                 return rawOut;
             }
@@ -2427,14 +2643,12 @@ namespace TensorSharp.Models
             {
                 if (ownsAttnOutput)
                     attnOutput.Dispose();
-                if (profilePrefill) _prefillAttnOutputTicks += Stopwatch.GetTimestamp() - stageStart;
                 return null;
             }
 
             Tensor output = LinearForwardCached(attnOutput, _attnOutputQW[layer], _attnOutputF32[layer]);
             if (ownsAttnOutput)
                 attnOutput.Dispose();
-            if (profilePrefill) _prefillAttnOutputTicks += Stopwatch.GetTimestamp() - stageStart;
             return output;
         }
 
@@ -2532,6 +2746,16 @@ namespace TensorSharp.Models
                 qTensor = new Tensor(_allocator, DType.Float32, seqLen, totalPerToken);
                 gateTensor = new Tensor(_allocator, DType.Float32, seqLen, totalPerToken);
                 ownsBuffers = true;
+            }
+
+            // Direct-CUDA: deinterleave on the device. The host path below forces a
+            // full DtoH sync of the fused QKV buffer per attention layer (draining
+            // the async pipeline) and re-uploads q/gate afterwards; measured as the
+            // dominant per-layer stall for both prefill chunks and decode tokens.
+            if (_backend == BackendType.Cuda
+                && CudaFusedOps.TryDeinterleaveQGate(qTensor, gateTensor, qFull, seqLen, numHeads, headDim))
+            {
+                return;
             }
 
             float* src = GetFloatPtr(qFull);
@@ -2708,7 +2932,7 @@ namespace TensorSharp.Models
                 uView.Dispose();
                 gate = gView;
             }
-            else if ((IsGgmlBackend || _backend == BackendType.Mlx) && ownsGateUp)
+            else if ((IsGgmlBackend || _backend == BackendType.Mlx || _backend == BackendType.Cuda) && ownsGateUp)
             {
                 // Fused split path: silu(gate_up[:, :H]) * gate_up[:, H:] without the
                 // two large contiguous half-copies used by the legacy split path.
@@ -2975,7 +3199,7 @@ namespace TensorSharp.Models
             if (hidden == null || hidden.DimensionCount != 2 || hidden.ElementType != DType.Float32)
                 return false;
 
-            // Skip gated-delta-net (recurrent) layers — they go through their
+            // Skip gated-delta-net (recurrent) layers ÔÇö they go through their
             // own kernel path entirely.
             if (_isRecurrent != null && _isRecurrent[layer]) return false;
 
@@ -3108,7 +3332,7 @@ namespace TensorSharp.Models
 
             // Decode (seqLen==1): the CPU path is faster per call for tiny
             // tensors, but on MLX every GetFloatPtr forces an mlx_eval +
-            // device→host copy. With 4 syncs/attn-layer × 60 layers that's a
+            // deviceÔåÆhost copy. With 4 syncs/attn-layer ├ù 60 layers that's a
             // lot of round trips, so stay on device for MLX. Other backends
             // keep the CPU SIMD fast path which saves 2 GPU dispatches.
             // CPU SIMD norm avoids a GPU dispatch for tiny decode tensors, but on
@@ -3238,6 +3462,44 @@ namespace TensorSharp.Models
             return data;
         }
 
+        /// <summary>
+        /// Returns a cached int32 position tensor [seqLen * numHeads] for the CUDA
+        /// fused QK-RMSNorm + RoPE kernel.  Positions are laid out as
+        /// [startPos, startPos, ..., startPos+1, startPos+1, ...] ÔÇö each position
+        /// repeated numHeads times so row r maps to position startPos + (r / numHeads).
+        /// </summary>
+        private Tensor EnsureRoPEPositions(int startPos, int seqLen, int numHeads)
+        {
+            int totalRows = seqLen * numHeads;
+            bool isQ = numHeads == Config.NumHeads;
+            if (_cachedRoPEPosSeqLen == seqLen && _cachedRoPEPosStartPos == startPos)
+            {
+                Tensor cached = isQ ? _cachedRoPEPosQ : _cachedRoPEPosK;
+                if (cached != null && (int)cached.Sizes[0] == totalRows)
+                    return cached;
+            }
+            else
+            {
+                _cachedRoPEPosQ?.Dispose();
+                _cachedRoPEPosK?.Dispose();
+                _cachedRoPEPosQ = null;
+                _cachedRoPEPosK = null;
+                _cachedRoPEPosSeqLen = seqLen;
+                _cachedRoPEPosStartPos = startPos;
+            }
+            int[] positions = new int[totalRows];
+            for (int s = 0; s < seqLen; s++)
+                for (int h = 0; h < numHeads; h++)
+                    positions[s * numHeads + h] = startPos + s;
+            // Cache the tensor (it used to be recreated per attention layer): the
+            // CUDA-graph prefill capture pre-warms these two tensors so their
+            // host->device upload never lands inside a captured graph.
+            Tensor created = CreateIntTensor(positions, totalRows);
+            if (isQ) _cachedRoPEPosQ = created;
+            else _cachedRoPEPosK = created;
+            return created;
+        }
+
         /// <summary>Set the per-axis (T,H,W) positions for the next prefill
         /// call. Length must equal 3 * seqLen of the upcoming Forward(). Called
         /// by ModelMultimodalInjector.QueuePromptEmbeddingsForSlice when an
@@ -3250,7 +3512,7 @@ namespace TensorSharp.Models
         /// <summary>Build the per-pair modality assignment from `_mropeSections`
         /// using vLLM's get_mrope_interleaved_id_list algorithm (see
         /// mrope_interleaved.py:138-185). Result: int[rotary_dim/2] where
-        /// each entry ∈ {0=T, 1=H, 2=W}. Called lazily on first MRoPE-prefill.</summary>
+        /// each entry Ôêê {0=T, 1=H, 2=W}. Called lazily on first MRoPE-prefill.</summary>
         private void PrecomputeMRoPEInterleavedIds()
         {
             int ropeDim = _ropeDimCount > 0 ? _ropeDimCount : Config.HeadDim;
@@ -3750,8 +4012,8 @@ namespace TensorSharp.Models
             // Batched per-layer expert dispatch. Uploads routedTokenRows /
             // routedWeights once, gathers all routes into a single
             // [totalRoutes, hidden] tensor, then narrow-views that buffer
-            // per expert. Per-expert work reduces to: narrow → matmul
-            // (gate/up) → SiLUMul → matmul (down) → scatter-add with
+            // per expert. Per-expert work reduces to: narrow ÔåÆ matmul
+            // (gate/up) ÔåÆ SiLUMul ÔåÆ matmul (down) ÔåÆ scatter-add with
             // narrow-views of the layer-wide indices/weights tensors.
             // Each narrow is a free view (shares storage, just adjusts
             // offset/sizes).
@@ -3920,13 +4182,13 @@ namespace TensorSharp.Models
             // ggml_mul_mat_id dispatch per projection against the DEVICE-RESIDENT
             // stacked expert weights (GgmlBasicOps.MoEFFNPrefill), instead of the
             // per-expert ExpertLinearForwardAlloc loop below. That loop re-streams
-            // each selected expert's quantized weight from host every step — and
+            // each selected expert's quantized weight from host every step ÔÇö and
             // the stacked-MoE VRAM fix (ShouldPreloadCudaQuantWeightToDevice)
             // deliberately makes per-expert weights NON-resident, so on ggml_cuda
             // it is catastrophically slow (the N>=2 batched decode "deadlock":
             // ~K*3*numLayers host->device weight uploads per token). The stacked
             // weights ARE device-resident, so this dispatch amortizes the weight
-            // read across all tokens — the vLLM-style batched MoE. Handles decode
+            // read across all tokens ÔÇö the vLLM-style batched MoE. Handles decode
             // (seqLen==1/N) and prefill chunks uniformly.
             if (IsGgmlBackend
                 && _layerStackedGate != null && _layerStackedGate[layer] != null
@@ -3999,7 +4261,7 @@ namespace TensorSharp.Models
 
             // For the mlxDecodeOnDevice path we already zeroed `output` on
             // device above; re-syncing it to host here would force a
-            // device→host copy and discard that work. Likewise `input` only
+            // deviceÔåÆhost copy and discard that work. Likewise `input` only
             // needs a host pointer if a downstream code path (shared expert
             // gate scalar / legacy outRow accumulate) actually reads it.
             float* inputPtr = null;
@@ -4034,7 +4296,7 @@ namespace TensorSharp.Models
 
             // Prefill batched-by-expert path: group tokens by expert assignment
             // and run batched matmuls instead of per-token dispatches.
-            // Converts seqLen*numExpertsUsed individual matmuls → numExperts batched matmuls.
+            // Converts seqLen*numExpertsUsed individual matmuls ÔåÆ numExperts batched matmuls.
             if (seqLen > 1 && _expertGateQW != null && _expertGateQW[layer] != null)
             {
                 // 1. Route all tokens and group by expert
@@ -4067,7 +4329,7 @@ namespace TensorSharp.Models
                         Buffer.MemoryCopy(inputPtr + (long)batch[b].tokenIdx * hiddenSize,
                             batchPtr + (long)b * hiddenSize, rowBytes, rowBytes);
 
-                    // Batched expert FFN: gate → up → SiLU*up → down
+                    // Batched expert FFN: gate ÔåÆ up ÔåÆ SiLU*up ÔåÆ down
                     Tensor gate = ExpertLinearForwardAlloc(batchInput, layer, e, kind: 0);
                     Tensor up = ExpertLinearForwardAlloc(batchInput, layer, e, kind: 1);
                     batchInput.Dispose();
@@ -4231,7 +4493,7 @@ namespace TensorSharp.Models
             // where gate/up are IQ2_XXS but down is IQ2_S) are fully supported. The
             // old all-types-must-match guard forced every such model onto the
             // per-expert ExpertLinearForwardAlloc loop, which re-streams every routed
-            // expert's NON-resident quantized weight from host each forward — the
+            // expert's NON-resident quantized weight from host each forward ÔÇö the
             // dominant (~18 s/forward, seqLen-independent) prefill cost on ggml_cuda.
             if (gateW.PerExpertNe0 != hiddenSize || upW.PerExpertNe0 != hiddenSize
                 || upW.PerExpertNe1 != intermediate
@@ -4266,11 +4528,9 @@ namespace TensorSharp.Models
                     gateBias: null, upBias: null, downBias: null,
                     activation: GgmlBasicOps.MoEActivation.SwiGLUSplit);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 output.Dispose();
-                if (string.Equals(Environment.GetEnvironmentVariable("TS_QWEN35_MOE_DEBUG"), "1", StringComparison.Ordinal))
-                    Console.Error.WriteLine($"[qwen35-moe] stacked MoE failed layer {layer}: {ex.Message}");
                 return null;
             }
 
@@ -4325,8 +4585,8 @@ namespace TensorSharp.Models
         // MLX-only decode helper: keep all expert accumulation on the GPU.
         // The legacy RunMoEExpertsReused path issues 3 matmuls + SiLUMul per
         // expert and then calls GetFloatPtr+VecScaleAdd, which forces an
-        // mlx_eval+device→host sync after every expert. With 8 active
-        // experts × 60 MoE layers that's ~480 round trips per decode token.
+        // mlx_eval+deviceÔåÆhost sync after every expert. With 8 active
+        // experts ├ù 60 MoE layers that's ~480 round trips per decode token.
         //
         // Two on-device variants:
         //  - Batched: a single custom Metal kernel processes all K active
@@ -4334,7 +4594,7 @@ namespace TensorSharp.Models
         //    dispatch each. Requires a per-quant-type batched MoE kernel
         //    (currently only IQ2_XXS). Saves K-1 dispatches per matmul:
         //    on Qwen3.5 with K=8 that's ~21 dispatches saved per MoE
-        //    layer (was 24 individual matmuls + 8 SiLUMul + 8 AddScaled →
+        //    layer (was 24 individual matmuls + 8 SiLUMul + 8 AddScaled ÔåÆ
         //    now 3 batched matmuls + 1 SiLUMul + 1 routeW@down matmul).
         //  - Sequential (fallback): per-expert matmul loop with the
         //    fused AddScaled accumulator. Used when no batched kernel
@@ -4364,12 +4624,12 @@ namespace TensorSharp.Models
 
         // Decode-only MoEForward that does the routing on-device. Skips
         // the per-MoE-layer host sync on routerLogits/routerData by:
-        //   1. Running the top-K + softmax of routerLogits on device →
+        //   1. Running the top-K + softmax of routerLogits on device ÔåÆ
         //      _moeBatchedExpertIndices [K] int32, _moeBatchedRouteWeights
         //      [1, K] float32.
         //   2. Running the batched MoE matmul using those device tensors.
         //   3. Adding the shared expert contribution if applicable
-        //      (no host-side gate scalar — only used when there's no
+        //      (no host-side gate scalar ÔÇö only used when there's no
         //      shared-expert gate, asserted by the caller).
         // Returns null on precondition failure so the caller can fall
         // through to the host-routing path.
@@ -4441,7 +4701,7 @@ namespace TensorSharp.Models
                     return null;
                 }
 
-                // 5. Shared expert add (no host scalar — the gate-less
+                // 5. Shared expert add (no host scalar ÔÇö the gate-less
                 //    path just adds the full shared down).
                 if (sharedDownAll != null)
                 {
@@ -4569,7 +4829,7 @@ namespace TensorSharp.Models
                 }
                 if (!fusedOk)
                 {
-                    // 1. Batched gate matmul: [1, hidden] @ stackedGate → [K, intermediate]
+                    // 1. Batched gate matmul: [1, hidden] @ stackedGate ÔåÆ [K, intermediate]
                     if (!MlxQuantizedOps.TryMoeMatmulBatched(
                             _moeBatchedGate, tokenInput, _moeBatchedExpertIndices,
                             gateW.Data, gateW.Data, gateW.GgmlType,
@@ -4577,7 +4837,7 @@ namespace TensorSharp.Models
                             sharedInput: true))
                         return false;
 
-                    // 2. Batched up matmul: same input → [K, intermediate]
+                    // 2. Batched up matmul: same input ÔåÆ [K, intermediate]
                     if (!MlxQuantizedOps.TryMoeMatmulBatched(
                             _moeBatchedUp, tokenInput, _moeBatchedExpertIndices,
                             upW.Data, upW.Data, upW.GgmlType,
@@ -4589,7 +4849,7 @@ namespace TensorSharp.Models
                     Ops.SiLUMul(_moeBatchedGate, _moeBatchedGate, _moeBatchedUp);
                 }
 
-                // 4. Batched down matmul: [K, intermediate] @ stackedDown → [K, hidden]
+                // 4. Batched down matmul: [K, intermediate] @ stackedDown ÔåÆ [K, hidden]
                 if (!MlxQuantizedOps.TryMoeMatmulBatched(
                         _moeBatchedDown, _moeBatchedGate, _moeBatchedExpertIndices,
                         downW.Data, downW.Data, downW.GgmlType,
@@ -4613,7 +4873,7 @@ namespace TensorSharp.Models
         // mlx_compile path enabled this is ONE fused Metal kernel via
         // MlxFusedOps.TryAddScaledInPlace; otherwise we fall back to
         // mulv + addt (2 kernels). The fallback variant is destructive on
-        // `src` — _moeDownBuf is rewritten next iteration by the next
+        // `src` ÔÇö _moeDownBuf is rewritten next iteration by the next
         // expert's down matmul anyway, so this is safe in the decode loop.
         private void AddScaledTensorMlx(Tensor output, Tensor src, float scalar)
         {
@@ -5050,77 +5310,17 @@ namespace TensorSharp.Models
                 Console.WriteLine($"  (MLX cache eval: {ms:F0} ms, interval={MlxEvalEveryNLayers})");
             }
             PrintGdnTimingStats();
-            PrintPrefillStageStats();
-            PrintDecodeStageStats();
-        }
-
-        private void PrintDecodeStageStats()
-        {
-            if (!_profileDecodeStages || _decodeForwardCount == 0)
-                return;
-            double msPerTick = 1000.0 / Stopwatch.Frequency;
-            double attnMs = _decodeAttnBlockTicks * msPerTick;
-            double recMs = _decodeRecBlockTicks * msPerTick;
-            double cnt = _decodeForwardCount;
-            Console.WriteLine($"Decode stage breakdown ({_decodeForwardCount} decode forwards):");
-            Console.WriteLine($"  Attention blocks: {attnMs:F0} ms total ({attnMs / cnt:F2} ms/token)");
-            Console.WriteLine($"  Recurrent blocks: {recMs:F0} ms total ({recMs / cnt:F2} ms/token)");
-        }
-
-        private void PrintPrefillStageStats()
-        {
-            if (!_profilePrefillStages || _prefillTokenCount == 0)
-                return;
-
-            double msPerTick = 1000.0 / Stopwatch.Frequency;
-            double embMs = _prefillEmbedTicks * msPerTick;
-            double attnMs = _prefillAttnBlockTicks * msPerTick;
-            double recMs = _prefillRecBlockTicks * msPerTick;
-            double lmHeadMs = _prefillFinalLmHeadTicks * msPerTick;
-
-            double attnQkvMs = _prefillAttnQkvTicks * msPerTick;
-            double attnDeintMs = _prefillAttnDeinterleaveTicks * msPerTick;
-            double attnQknMs = _prefillAttnQknormTicks * msPerTick;
-            double attnRopeMs = _prefillAttnRopeTicks * msPerTick;
-            double attnReshapeMs = _prefillAttnReshapeTicks * msPerTick;
-            double attnCacheCopyMs = _prefillAttnCacheCopyTicks * msPerTick;
-            double attnExpandKvMs = _prefillAttnExpandKvTicks * msPerTick;
-            double attnComputeMs = _prefillAttnComputeTicks * msPerTick;
-            double attnGateMs = _prefillAttnGateTicks * msPerTick;
-            double attnOutputMs = _prefillAttnOutputTicks * msPerTick;
-            double attnFfnMs = _prefillAttnFfnTicks * msPerTick;
-
-            double recInputMs = _prefillRecInputProjTicks * msPerTick;
-            double recCoreMs = _prefillRecCoreTicks * msPerTick;
-            double recOutputMs = _prefillRecOutputTicks * msPerTick;
-            double recFfnMs = _prefillRecFfnTicks * msPerTick;
-
-            double total = embMs + attnMs + recMs + lmHeadMs;
-
-            Console.WriteLine($"Prefill profile ({_prefillTokenCount} tokens, {total:F0} ms total):");
-            Console.WriteLine($"  Embedding:                  {embMs,8:F0} ms ({100 * embMs / total,5:F1}%)");
-            Console.WriteLine($"  Attention block (8 layers): {attnMs,8:F0} ms ({100 * attnMs / total,5:F1}%)");
-            Console.WriteLine($"    QKV proj:                 {attnQkvMs,8:F0} ms");
-            Console.WriteLine($"    Deinterleave Q/gate:      {attnDeintMs,8:F0} ms");
-            Console.WriteLine($"    QK-norm:                  {attnQknMs,8:F0} ms");
-            Console.WriteLine($"    RoPE (Q+K):               {attnRopeMs,8:F0} ms");
-            Console.WriteLine($"    Reshape to heads:         {attnReshapeMs,8:F0} ms");
-            Console.WriteLine($"    Cache copy (K,V):         {attnCacheCopyMs,8:F0} ms");
-            Console.WriteLine($"    Expand KV heads:          {attnExpandKvMs,8:F0} ms");
-            Console.WriteLine($"    Attention compute:        {attnComputeMs,8:F0} ms (QK^T + softmax + V)");
-            Console.WriteLine($"    Sigmoid gate:             {attnGateMs,8:F0} ms");
-            Console.WriteLine($"    Output proj:              {attnOutputMs,8:F0} ms");
-            Console.WriteLine($"    FFN (norm+gate_up+down):  {attnFfnMs,8:F0} ms");
-            Console.WriteLine($"  Recurrent block (24 layers):{recMs,8:F0} ms ({100 * recMs / total,5:F1}%)");
-            Console.WriteLine($"    Input proj (norm+pack):   {recInputMs,8:F0} ms");
-            Console.WriteLine($"    GDN core (conv+chunked):  {recCoreMs,8:F0} ms");
-            Console.WriteLine($"    Output proj:              {recOutputMs,8:F0} ms");
-            Console.WriteLine($"    FFN (norm+gate_up+down):  {recFfnMs,8:F0} ms");
-            Console.WriteLine($"  Final norm + LM head:       {lmHeadMs,8:F0} ms ({100 * lmHeadMs / total,5:F1}%)");
         }
 
         public override void Dispose()
         {
+            // Cached CUDA prefill graphs own pool blocks + pinned tensors; free
+            // them before the tensors/caches they reference are torn down.
+            _cudaPrefillGraphs?.Dispose();
+            _cudaPrefillGraphs = null;
+            _cudaDecodeDynParams?.Dispose();
+            _cudaDecodeDynParams = null;
+
             VisionEncoder?.Dispose();
             foreach (var (visionEmbeddings, _) in _visionEmbeddingsList)
                 visionEmbeddings?.Dispose();

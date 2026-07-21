@@ -14,8 +14,23 @@ namespace TensorSharp.Models
 {
     internal static class NativeDequant
     {
+        // When true (set by the pure-C# CPU backend, see ModelBase ctor), route every dequant
+        // through the managed implementation for types it supports — the CPU backend must not
+        // call into native ggml at all. The managed dequant is bit-exact vs native (verified),
+        // so this is behaviour-preserving; it is only enabled for BackendType.Cpu so GGML/CUDA
+        // backends keep their native load-time dequant.
+        internal static bool PreferManaged;
+
+        private static bool UseManaged(int ggmlType)
+            => PreferManaged && ManagedQuantizedOps.SupportsDequantization((GgmlTensorType)ggmlType);
+
         public static void DequantizeToFloat32(int ggmlType, byte[] src, int srcOffset, float[] dst, int dstOffset, long numElements)
         {
+            if (UseManaged(ggmlType))
+            {
+                ManagedQuantizedOps.DequantizeToFloat32(ggmlType, src, srcOffset, dst, dstOffset, numElements);
+                return;
+            }
             try
             {
                 GgmlGgufTensorDequant.DequantizeToFloat32(ggmlType, src, srcOffset, dst, dstOffset, numElements);
@@ -28,6 +43,11 @@ namespace TensorSharp.Models
 
         public static void DequantizeToFloat32(int ggmlType, IntPtr src, float[] dst, int dstOffset, long numElements)
         {
+            if (UseManaged(ggmlType))
+            {
+                ManagedQuantizedOps.DequantizeToFloat32(ggmlType, src, dst, dstOffset, numElements);
+                return;
+            }
             try
             {
                 GgmlGgufTensorDequant.DequantizeToFloat32(ggmlType, src, dst, dstOffset, numElements);
@@ -40,6 +60,11 @@ namespace TensorSharp.Models
 
         public static void DequantizeToFloat32Native(int ggmlType, IntPtr src, IntPtr dst, long numElements)
         {
+            if (UseManaged(ggmlType))
+            {
+                ManagedQuantizedOps.DequantizeToFloat32Native(ggmlType, src, dst, numElements);
+                return;
+            }
             try
             {
                 GgmlGgufTensorDequant.DequantizeToFloat32Native(ggmlType, src, dst, numElements);
@@ -52,6 +77,8 @@ namespace TensorSharp.Models
 
         public static long RowSize(int ggmlType, long ne)
         {
+            if (UseManaged(ggmlType))
+                return ManagedQuantizedOps.RowSize(ggmlType, ne);
             try
             {
                 return GgmlGgufTensorDequant.GetRowSizeBytes(ggmlType, ne);

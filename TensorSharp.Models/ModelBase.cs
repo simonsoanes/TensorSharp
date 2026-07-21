@@ -41,6 +41,16 @@ namespace TensorSharp.Models
         public bool HasHostData => _data != IntPtr.Zero;
         public bool HasExternalHostView => _data != IntPtr.Zero && !_ownsBuffer && _ownerToken != null;
 
+        /// <summary>
+        /// True when the active device could not hold this weight in a single
+        /// backend buffer (e.g. ggml-vulkan rejects any buffer above the driver's
+        /// maxBufferSize; WSL's dzn layer caps it under 3 GB), so the device
+        /// preload was skipped and the host copy retained. Consumers must serve
+        /// this weight through their host-gather/dequant fallback instead of
+        /// device-side lookups keyed by <see cref="CacheKey"/>.
+        /// </summary>
+        public bool DevicePreloadTooLarge { get; private set; }
+
         public QuantizedWeight(byte[] raw, int ggmlType, long ne0, long ne1)
         {
             GgmlType = ggmlType;
@@ -166,10 +176,35 @@ namespace TensorSharp.Models
             if (_ownsCacheKeyHandle)
                 return CacheKey;
 
+            // Once flagged too-large the cache key must stay the host data
+            // pointer: no device-resident entry exists for this weight, and a
+            // native cache miss on an opaque GCHandle key would dereference it
+            // as if it were weight bytes.
+            if (DevicePreloadTooLarge)
+                return CacheKey;
+
             _cacheKeyHandle = GCHandle.Alloc(this, GCHandleType.Normal);
             CacheKey = GCHandle.ToIntPtr(_cacheKeyHandle);
             _ownsCacheKeyHandle = true;
             return CacheKey;
+        }
+
+        /// <summary>
+        /// Record that the device preload was skipped because this weight exceeds
+        /// the device's single-buffer size limit. Frees any GCHandle-based device
+        /// cache key and restores <see cref="CacheKey"/> to the host data pointer,
+        /// so a native call that still receives the key resolves through the
+        /// host-pointer path instead of dereferencing an opaque GCHandle.
+        /// </summary>
+        public void MarkDevicePreloadTooLarge()
+        {
+            DevicePreloadTooLarge = true;
+            if (_ownsCacheKeyHandle)
+            {
+                _cacheKeyHandle.Free();
+                _ownsCacheKeyHandle = false;
+            }
+            CacheKey = _data;
         }
 
         public void ReleaseHostData()
@@ -427,6 +462,11 @@ namespace TensorSharp.Models
         protected ModelBase(string ggufPath, BackendType backend)
         {
             _backend = backend;
+            // The pure-C# CPU backend must never touch native (ggml P/Invoke) dequant — route
+            // every dequant/row-size through the managed implementation (bit-exact vs native,
+            // verified). Other backends keep native dequant (faster load; their runtime quant
+            // ops go through GgmlBasicOps, not NativeDequant). One model/backend at a time.
+            NativeDequant.PreferManaged = backend == BackendType.Cpu;
             ExecutionPlan = new BackendExecutionPlan(backend);
             MultimodalInjector = new ModelMultimodalInjector(this);
             switch (backend)
@@ -441,6 +481,10 @@ namespace TensorSharp.Models
                     break;
                 case BackendType.GgmlCuda:
                     _ggmlContext = new GgmlContext(new[] { 0 }, GgmlBackendType.Cuda);
+                    _allocator = new GgmlAllocator(_ggmlContext, 0);
+                    break;
+                case BackendType.GgmlVulkan:
+                    _ggmlContext = new GgmlContext(new[] { 0 }, GgmlBackendType.Vulkan);
                     _allocator = new GgmlAllocator(_ggmlContext, 0);
                     break;
                 case BackendType.Cuda:
@@ -473,6 +517,7 @@ namespace TensorSharp.Models
                 BackendType.GgmlCpu => GgmlBackendType.Cpu,
                 BackendType.GgmlMetal => GgmlBackendType.Metal,
                 BackendType.GgmlCuda => GgmlBackendType.Cuda,
+                BackendType.GgmlVulkan => GgmlBackendType.Vulkan,
                 _ => throw new InvalidOperationException($"No GGML backend is associated with {_backend}."),
             };
             GgmlBasicOps.EnsureBackendAvailable(backendType);
@@ -537,6 +582,7 @@ namespace TensorSharp.Models
                 backend == BackendType.Cuda ||
                 backend == BackendType.Mlx ||
                 backend == BackendType.GgmlCuda ||
+                backend == BackendType.GgmlVulkan ||
                 backend == BackendType.GgmlMetal;
             if (isGpuBackend &&
                 string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("MAX_CONTEXT")))
@@ -571,12 +617,19 @@ namespace TensorSharp.Models
             return requestedContextLength;
         }
 
+        // GgmlVulkan follows GgmlCuda here: the fused prefill/decode paths mask or
+        // overwrite every cache position they read, so zero-filling 100s of MB of
+        // host KV arrays on every request reset is pure waste.
         protected bool ShouldZeroFillCacheTensors =>
-            _backend != BackendType.GgmlCuda && _backend != BackendType.Mlx;
+            _backend != BackendType.GgmlCuda && _backend != BackendType.Mlx &&
+            _backend != BackendType.GgmlVulkan;
 
         protected void InitializeCacheTensor(Tensor tensor)
         {
-            if (tensor != null && ShouldZeroFillCacheTensors)
+            // First allocation still zero-fills on every backend that keeps a host
+            // copy (including Vulkan): the fused kernels' flash-padding may read
+            // never-written cache rows, which must be finite.
+            if (tensor != null && (ShouldZeroFillCacheTensors || _backend == BackendType.GgmlVulkan))
                 Ops.Fill(tensor, 0f);
         }
 
@@ -588,7 +641,16 @@ namespace TensorSharp.Models
             if (ShouldZeroFillCacheTensors)
                 Ops.Fill(tensor, 0f);
 
-            InvalidateTensorDeviceCache(tensor);
+            // On GgmlVulkan keep the resident device copy VALID across resets: the
+            // host copy was not touched above, so host and device stay consistent
+            // (both hold the previous request's bytes — semantically "empty"
+            // because _cacheSeqLen gates every read, exactly like GgmlCuda which
+            // has never zero-filled). Invalidation here caused every new request's
+            // first prefill to free + reallocate + re-upload the ENTIRE KV cache
+            // (~470 MB / ~170 ms per request on gemma4-12B over PCIe), which was
+            // the dominant server-TTFT overhead on the Vulkan backend.
+            if (_backend != BackendType.GgmlVulkan)
+                InvalidateTensorDeviceCache(tensor);
         }
 
         internal static int ResolveConfiguredContextLength(
@@ -845,6 +907,7 @@ namespace TensorSharp.Models
         /// </summary>
         protected bool CanUseFileMappedQuantizedWeights
             => _backend == BackendType.GgmlCuda
+            || _backend == BackendType.GgmlVulkan
             || _backend == BackendType.Cuda
             || _backend == BackendType.Mlx
             || _backend == BackendType.GgmlMetal
@@ -1014,7 +1077,11 @@ namespace TensorSharp.Models
                 return;
             }
 
-            if (_backend != BackendType.GgmlCuda || _cudaQuantWeightsPrepared || _quantWeights.Count == 0)
+            // GgmlCuda and GgmlVulkan share this path: the preload below goes through
+            // the backend-agnostic GGML device buffer API (TSGgml_PreloadQuantizedWeight),
+            // which gives both discrete-GPU backends device-resident weights.
+            if ((_backend != BackendType.GgmlCuda && _backend != BackendType.GgmlVulkan) ||
+                _cudaQuantWeightsPrepared || _quantWeights.Count == 0)
                 return;
 
             EnsureQuantBackendAvailable();
@@ -1046,8 +1113,31 @@ namespace TensorSharp.Models
                 if (!ShouldPreloadCudaQuantWeightToDevice(weightName))
                     continue;
 
+                // llama.cpp keeps token_embd on the host (its CPU_Mapped model
+                // buffer): embedding lookup is a row gather, and when the quant
+                // type has no device get_rows kernel Embedding() always serves it
+                // from the retained host copy, so a device copy would be pure
+                // VRAM waste (521 MB for Qwen3.6-27B's 248320x5120 Q3_K table).
+                // Tied-output models matmul against token_embd through its device
+                // cache key, so the skip requires a separate output.weight.
+                if (string.Equals(weightName, "token_embd.weight", StringComparison.Ordinal)
+                    && !CanUseGgmlQuantizedGetRows(qw.GgmlType)
+                    && (_quantWeights.ContainsKey("output.weight") || _weights.ContainsKey("output.weight")))
+                    continue;
+
                 IntPtr cacheKey = qw.EnsureDeviceCacheKey();
-                GgmlBasicOps.PreloadQuantizedWeight(cacheKey, qw.Data, qw.GgmlType, qw.Ne0, qw.Ne1, qw.RawBytes);
+                if (!GgmlBasicOps.PreloadQuantizedWeight(cacheKey, qw.Data, qw.GgmlType, qw.Ne0, qw.Ne1, qw.RawBytes))
+                {
+                    // The device cannot hold this weight in a single backend buffer
+                    // (e.g. ggml-vulkan's per-buffer maxBufferSize cap; WSL's dzn
+                    // Vulkan layer caps it under 3 GB, below Gemma E4B's ~2.9 GB
+                    // Q8_0 per_layer_token_embd). Keep the host copy and let the
+                    // model's host-gather fallbacks serve it.
+                    qw.MarkDevicePreloadTooLarge();
+                    Console.WriteLine(
+                        $"  {weightName}: {qw.RawBytes / 1024 / 1024} MB exceeds the {_backend} device's single-buffer limit; keeping host copy (device lookups fall back to host).");
+                    continue;
+                }
                 preloadedBytes += qw.RawBytes;
                 preloadedCount++;
 
@@ -1066,7 +1156,7 @@ namespace TensorSharp.Models
             _cudaQuantWeightsPrepared = true;
 
             if (preloadedCount > 0)
-                Console.WriteLine($"  CUDA resident quantized weights: {preloadedBytes / 1024 / 1024} MB across {preloadedCount} tensors");
+                Console.WriteLine($"  Device-resident quantized weights: {preloadedBytes / 1024 / 1024} MB across {preloadedCount} tensors");
         }
 
         private void PrepareMlxQuantizedWeightsForInference()
@@ -1239,14 +1329,12 @@ namespace TensorSharp.Models
                 // zero-copy wrappers (CreateIq4XsRawWeight etc.) need this
                 // explicit mlock too. Opt out via TS_MLX_MLOCK_GGUF=0.
                 bool locked = _gguf.TryLockMappedRegion();
-                if (locked && !string.Equals(
-                    Environment.GetEnvironmentVariable("TS_MLX_LOG_MEMORY_POLICY"), "0", StringComparison.Ordinal))
+                if (locked)
                 {
                     Console.WriteLine(
                         "  GGUF mmap pinned via mlock (model weights stay resident; set TS_MLX_MLOCK_GGUF=0 to disable).");
                 }
-                else if (!locked && !string.Equals(
-                    Environment.GetEnvironmentVariable("TS_MLX_LOG_MEMORY_POLICY"), "0", StringComparison.Ordinal))
+                else
                 {
                     Console.WriteLine(
                         $"  GGUF mlock failed (errno={_gguf.LastLockError}); inference may swap under memory pressure. " +
@@ -1390,9 +1478,18 @@ namespace TensorSharp.Models
                 Console.WriteLine($"  Direct CUDA resident quantized weights: {preloadedBytes / 1024 / 1024} MB across {preloadedCount} tensors (host copies released)");
         }
 
+        // TS_GGML_RETAIN_HOST_WEIGHTS=1 keeps every quantized weight's host copy
+        // alive after the device preload instead of releasing it. Costs the model's
+        // full host footprint in RAM; diagnostic/workaround knob for any native
+        // path that still reads weight bytes through the original host pointer
+        // after preload (symptom: memcpy access violation on first forward).
+        private static readonly bool s_retainAllHostQuantWeights =
+            Environment.GetEnvironmentVariable("TS_GGML_RETAIN_HOST_WEIGHTS") == "1";
+
         private static bool ShouldRetainCudaHostQuantWeight(string weightName)
         {
-            return string.Equals(weightName, "token_embd.weight", StringComparison.Ordinal) ||
+            return s_retainAllHostQuantWeights ||
+                string.Equals(weightName, "token_embd.weight", StringComparison.Ordinal) ||
                 string.Equals(weightName, "per_layer_token_embd.weight", StringComparison.Ordinal);
         }
 
@@ -1598,8 +1695,9 @@ namespace TensorSharp.Models
 
                     // A direct host dequant is faster for single-token decode, and it is
                     // also the compatibility path for CUDA quant types whose get_rows
-                    // kernel is not implemented upstream.
-                    if ((tokens.Length == 1 || !canUseGgmlLookup) && qw.HasHostData)
+                    // kernel is not implemented upstream, and for a table too large to
+                    // be device-resident (DevicePreloadTooLarge).
+                    if ((tokens.Length == 1 || !canUseGgmlLookup || qw.DevicePreloadTooLarge) && qw.HasHostData)
                     {
                         var result = new Tensor(_allocator, DType.Float32, tokens.Length, dim);
                         PopulateQuantizedRows(result, qw, tokens);
@@ -1793,92 +1891,83 @@ namespace TensorSharp.Models
                 return;
             }
 
-            void RunRange(int start, int end, float* sums)
-            {
-                float[] rowScratch = null;
-                float* rowScratchPtr = null;
-                GCHandle rowScratchHandle = default;
-                bool useNativeRowFallback = !ManagedQuantizedOps.SupportsDequantization((GgmlTensorType)weight.GgmlType);
-                if (useNativeRowFallback)
-                {
-                    rowScratch = ArrayPool<float>.Shared.Rent(inDim);
-                    rowScratchHandle = GCHandle.Alloc(rowScratch, GCHandleType.Pinned);
-                    rowScratchPtr = (float*)rowScratchHandle.AddrOfPinnedObject();
-                }
-
-                try
-                {
-                for (int col = start; col < end; col++)
-                {
-                    byte* rowPtr = weightBase + (long)col * rowBytes;
-                    if (useNativeRowFallback)
-                    {
-                        NativeDequant.DequantizeToFloat32Native(
-                            weight.GgmlType,
-                            (IntPtr)rowPtr,
-                            (IntPtr)rowScratchPtr,
-                            inDim);
-
-                        for (int row = 0; row < seqLen; row++)
-                            sums[row] = VecDot(inputPtr + (long)row * inDim, rowScratchPtr, inDim);
-                    }
-                    else
-                    {
-                        ManagedQuantizedOps.DotRowBatchToFloat32(
-                            weight.GgmlType,
-                            (IntPtr)rowPtr,
-                            inputPtr,
-                            inDim,
-                            seqLen,
-                            inDim,
-                            sums);
-                    }
-
-                    for (int row = 0; row < seqLen; row++)
-                    {
-                        resultPtr[(long)row * outDim + col] = sums[row];
-                    }
-                }
-                }
-                finally
-                {
-                    if (rowScratchHandle.IsAllocated)
-                        rowScratchHandle.Free();
-                    if (rowScratch != null)
-                        ArrayPool<float>.Shared.Return(rowScratch);
-                }
-            }
+            // Dequantize each weight row (one output column) to F32 ONCE into a thread-local
+            // scratch that stays hot in L1, then dot it with every activation row. VecDot4
+            // computes four activation rows per pass, keeping the weight-row vector loads in
+            // registers (~4x fewer loads of the weight than four sequential VecDots) — the same
+            // register-blocking the GQA-decode attention uses. This replaces the previous
+            // per-256-element chunked path (~seqLen*inDim/256 tiny TensorPrimitives.Dot calls per
+            // column) with seqLen/4 full-length dots, which is markedly faster for the DiT's large
+            // (3072/12288-wide) quantized projections. Dequant uses the managed path on the pure-C#
+            // CPU backend (NativeDequant.PreferManaged); native only for a non-CPU device fallback.
+            void RunRange(int start, int end, float* w)
+                => DequantMatMulColumns(weight.GgmlType, weightBase, rowBytes, inDim, outDim,
+                    inputPtr, inDim, seqLen, resultPtr, outDim, start, end, w);
 
             bool useParallel = outDim >= 128 && seqLen * outDim >= 512 && Environment.ProcessorCount > 1;
             if (!useParallel)
             {
-                float[] sumsArr = ArrayPool<float>.Shared.Rent(seqLen);
+                float[] wArr = ArrayPool<float>.Shared.Rent(inDim);
                 try
                 {
-                    fixed (float* sums = sumsArr)
+                    fixed (float* w = wArr)
                     {
-                        RunRange(0, outDim, sums);
+                        RunRange(0, outDim, w);
                     }
                 }
                 finally
                 {
-                    ArrayPool<float>.Shared.Return(sumsArr);
+                    ArrayPool<float>.Shared.Return(wArr);
                 }
 
                 return;
             }
 
             Parallel.For(0, outDim,
-                () => ArrayPool<float>.Shared.Rent(seqLen),
-                (col, _, sumsArr) =>
+                () => ArrayPool<float>.Shared.Rent(inDim),
+                (col, _, wArr) =>
                 {
-                    fixed (float* sums = sumsArr)
+                    fixed (float* w = wArr)
                     {
-                        RunRange(col, col + 1, sums);
+                        RunRange(col, col + 1, w);
                     }
-                    return sumsArr;
+                    return wArr;
                 },
-                sumsArr => ArrayPool<float>.Shared.Return(sumsArr));
+                wArr => ArrayPool<float>.Shared.Return(wArr));
+        }
+
+        // Core of the pure-C# quantized linear (shared by AddmmQuantManaged and the
+        // quant-matmul benchmark/self-test): for each output column in [startCol,endCol),
+        // dequantize its weight row into <paramref name="wScratch"/> (inDim floats, hot in L1)
+        // and dot it with every activation row using register-blocked VecDot4. Dequant honours
+        // NativeDequant.PreferManaged (managed on the pure-C# CPU backend).
+        internal static unsafe void DequantMatMulColumns(
+            int ggmlType, byte* weightBase, long rowBytes, int inDim, int outDim,
+            float* inputPtr, int inputRowStride, int seqLen, float* resultPtr, int outputRowStride,
+            int startCol, int endCol, float* wScratch)
+        {
+            for (int col = startCol; col < endCol; col++)
+            {
+                byte* rowPtr = weightBase + (long)col * rowBytes;
+                NativeDequant.DequantizeToFloat32Native(ggmlType, (IntPtr)rowPtr, (IntPtr)wScratch, inDim);
+
+                int row = 0;
+                for (; row + 4 <= seqLen; row += 4)
+                {
+                    VecDot4(
+                        inputPtr + (long)row * inputRowStride,
+                        inputPtr + (long)(row + 1) * inputRowStride,
+                        inputPtr + (long)(row + 2) * inputRowStride,
+                        inputPtr + (long)(row + 3) * inputRowStride,
+                        wScratch, inDim, out float r0, out float r1, out float r2, out float r3);
+                    resultPtr[(long)row * outputRowStride + col] = r0;
+                    resultPtr[(long)(row + 1) * outputRowStride + col] = r1;
+                    resultPtr[(long)(row + 2) * outputRowStride + col] = r2;
+                    resultPtr[(long)(row + 3) * outputRowStride + col] = r3;
+                }
+                for (; row < seqLen; row++)
+                    resultPtr[(long)row * outputRowStride + col] = VecDot(inputPtr + (long)row * inputRowStride, wScratch, inDim);
+            }
         }
 
         #region SIMD Helpers
@@ -3324,8 +3413,57 @@ namespace TensorSharp.Models
                 // gallocr on roomy GPUs); a larger value does NOT reliably help a
                 // near-full GPU because the legacy ForwardRefill warmup graph sizes
                 // the reused gallocr differently than the engine prefill graph.
-                bool conservativeWarmup = _backend == BackendType.Mlx || _backend == BackendType.Cpu;
-                int warmupLength = conservativeWarmup ? 32 : 1024;
+                // Integrated GPUs (unified-memory iGPUs: Intel UHD / AMD APU via
+                // ggml-vulkan, Tegra via ggml-cuda) are memory-bandwidth bound and
+                // run the fused multi-token prefill an order of magnitude slower than
+                // a discrete GPU. A 2048-token verify-prefill warmup there takes
+                // MINUTES (measured ~6+ min on Intel UHD with Qwen3.6-27B), during
+                // which the server prints "Startup model loaded" then appears hung
+                // before it ever starts listening. They also get no CUDA-graph
+                // capture benefit from the long warmup. Treat them like MLX/CPU: a
+                // short warmup that still primes the fused-verify graph once, cheaply.
+                bool integratedGpu = IsIntegratedGgmlGpu();
+                if (integratedGpu)
+                {
+                    Console.WriteLine(BuildIntegratedGpuWarning());
+                }
+                // Native CUDA models whose weights are mostly a CUDA-unsupported quant
+                // type never become GPU-resident: their matmuls dequantize on the CPU,
+                // and a 2048-token prefill warmup then pegs every core for MINUTES while
+                // the server prints "Startup model loaded" and looks hung (observed on a
+                // Qwen3.5-9B IQ4_XS build before IQ4_XS residency was added). Detect that
+                // up front and use the short warmup instead so startup stays responsive;
+                // the inference itself is still slow, so point the operator at a
+                // supported quant / backend.
+                double hostBackedFrac = HostBackedQuantWeightFraction();
+                bool mostlyHostBacked = hostBackedFrac >= 0.5;
+                if (mostlyHostBacked)
+                {
+                    Console.WriteLine(
+                        $"  {hostBackedFrac * 100:F0}% of quantized weights use a CUDA-unsupported quant type and stay host-backed (CPU matmul); using a lightweight startup warmup. Inference will be slow — prefer a quant the direct CUDA backend supports (Q4_0/Q4_K/Q5_K/Q6_K/Q8_0/IQ2/IQ3/IQ4_XS) or run with --backend ggml_cuda.");
+                }
+                // The long (2048-token) warmup only pays off on backends that BUILD
+                // AND CAPTURE a fused whole-model prefill graph and pre-grow its
+                // gallocr on the first prompt (ggml_cuda / ggml_vulkan). The native
+                // CUDA backend has no captured verify prefill (CanUsePrefillVerify is
+                // GGML-only), so a 2048-token warmup there only runs the per-op prefill
+                // once at full cost — on a hybrid GatedDeltaNet model that is tens of
+                // seconds to minutes — with no lasting benefit, and the server looks
+                // hung after "Startup model loaded". A short warmup still JITs the
+                // prefill kernels and primes the captured DECODE graph (via the
+                // 1-token Forward above) cheaply; the first real large prompt only
+                // pays a one-time activation-scratch growth.
+                bool nativeCudaNoCapturedPrefill = _backend == BackendType.Cuda;
+                bool conservativeWarmup = _backend == BackendType.Mlx || _backend == BackendType.Cpu
+                    || integratedGpu || mostlyHostBacked || nativeCudaNoCapturedPrefill;
+                // 2048 matches ComputePrefillChunkSize, so the warmup runs ONE
+                // fused verify chunk at the largest legacy-chunk shape: the shared
+                // reuse-gallocr is pre-grown (and its device memory first-touched)
+                // for every prompt up to 2048 tokens, which covers typical chat
+                // prompts. Measured on gemma4-12B/Vulkan: first ~2k-token request
+                // was ~300-500 ms slower than warm (gallocr growth + residency)
+                // with the old 1024 warmup; with 2048 it starts warm.
+                int warmupLength = conservativeWarmup ? 32 : 2048;
                 {
                     string wl = Environment.GetEnvironmentVariable("TS_PREFILL_WARMUP_LEN");
                     if (!string.IsNullOrEmpty(wl) && int.TryParse(wl, out int wlv) && wlv >= 2)
@@ -3358,6 +3496,103 @@ namespace TensorSharp.Models
 
         public virtual void WarmUpMultimodalKernels()
         {
+        }
+
+        /// <summary>
+        /// True when the active GGML device (ggml_cuda / ggml_vulkan) is an
+        /// integrated, unified-memory GPU (Intel UHD / AMD APU / Tegra). Such
+        /// devices are memory-bandwidth bound and cannot afford the heavy
+        /// multi-token prefill warmup; startup warmup falls back to the short
+        /// conservative path for them. Only ggml backends are queried; every other
+        /// backend (and any query failure) reports false.
+        /// </summary>
+        private bool IsIntegratedGgmlGpu()
+        {
+            if (_backend != BackendType.GgmlCuda && _backend != BackendType.GgmlVulkan)
+                return false;
+            try { return GgmlBasicOps.IsActiveDeviceIntegrated(); }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// Builds the prominent startup banner shown when inference is running on an
+        /// integrated, unified-memory GPU. A 27B model on an Intel UHD iGPU decodes at
+        /// ~0.7 tok/s (measured, and identical to llama.cpp on the same device) versus
+        /// ~15 tok/s on a discrete RTX 3080 — a ~20x gap that is purely hardware, not a
+        /// software regression. The single-line notice this replaces was easy to miss in
+        /// the startup log, so operators kept running large models on the iGPU by mistake.
+        /// On ggml_vulkan (multiple adapters are enumerable) the banner names the selected
+        /// adapter and lists every other device with the exact <c>--gpu-device N</c> flag to
+        /// switch to it. Enumeration failures / single-device hosts (e.g. Tegra via
+        /// ggml_cuda) fall back to the generic guidance.
+        /// </summary>
+        private string BuildIntegratedGpuWarning()
+        {
+            const string sep = "  ==============================================================================";
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine(sep);
+            sb.AppendLine("  PERFORMANCE WARNING: inference is running on an INTEGRATED GPU.");
+            sb.AppendLine("  Integrated (unified-memory) GPUs are memory-bandwidth bound: large models run");
+            sb.AppendLine("  roughly an order of magnitude slower here than on a discrete GPU, and often");
+            sb.AppendLine("  slower than the CPU backend. This is a hardware limit, not a TensorSharp issue.");
+
+            bool namedAlternative = false;
+            if (_backend == BackendType.GgmlVulkan)
+            {
+                try
+                {
+                    int selected = 0;
+                    string sel = Environment.GetEnvironmentVariable(GgmlBasicOps.VulkanDeviceEnvVar);
+                    if (!string.IsNullOrEmpty(sel) && int.TryParse(sel, out int s) && s >= 0)
+                        selected = s;
+
+                    int count = GgmlBasicOps.GetVulkanDeviceCount();
+                    if (count > 0 && selected < count)
+                        sb.AppendLine($"  Selected:  --gpu-device {selected}   {GgmlBasicOps.GetVulkanDeviceDescription(selected)}");
+
+                    var others = new System.Collections.Generic.List<string>();
+                    for (int i = 0; i < count; i++)
+                    {
+                        if (i == selected) continue;
+                        others.Add($"    --gpu-device {i}   {GgmlBasicOps.GetVulkanDeviceDescription(i)}");
+                    }
+                    if (others.Count > 0)
+                    {
+                        sb.AppendLine("  For full performance re-run against a discrete GPU (see --list-gpus):");
+                        foreach (var o in others) sb.AppendLine(o);
+                        namedAlternative = true;
+                    }
+                }
+                catch { /* enumeration unavailable — fall through to generic guidance */ }
+            }
+            if (!namedAlternative)
+                sb.AppendLine("  For full performance use a discrete GPU (--gpu-device <index>, see --list-gpus), or --backend ggml_cpu.");
+            sb.Append(sep);
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Fraction (0..1) of quantized weight bytes whose quant type the direct
+        /// CUDA backend cannot make GPU-resident (<see cref="CudaQuantizedOps.SupportsQuantizedType"/>).
+        /// Such weights stay host-backed and their matmuls dequantize on the CPU, so a
+        /// large fraction means a multi-token prefill (including the startup warmup)
+        /// runs CPU-bound. Only the native <see cref="BackendType.Cuda"/> backend is
+        /// evaluated (GGML backends upload weights to the device themselves); every
+        /// other backend reports 0. Computed from the quant TYPE, not the live
+        /// host-data flag, so it is unaffected by TS_GGML_RETAIN_HOST_WEIGHTS.
+        /// </summary>
+        private double HostBackedQuantWeightFraction()
+        {
+            if (_backend != BackendType.Cuda || _quantWeights.Count == 0)
+                return 0.0;
+            long total = 0, hostBacked = 0;
+            foreach (QuantizedWeight qw in _quantWeights.Values)
+            {
+                total += qw.RawBytes;
+                if (!CudaQuantizedOps.SupportsQuantizedType(qw.GgmlType))
+                    hostBacked += qw.RawBytes;
+            }
+            return total > 0 ? (double)hostBacked / total : 0.0;
         }
 
         private static bool IsMlxKernelWarmupEnabled()

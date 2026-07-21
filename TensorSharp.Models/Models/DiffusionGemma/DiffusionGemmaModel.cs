@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -156,14 +156,8 @@ namespace TensorSharp.Models
 
         // timing
         private readonly Stopwatch _swForward = new();
-        private long _tEmbed, _tAttn, _tMoe, _tDense, _tLmHead, _tSc, _tRope, _tMoeRoute, _tMoeFfn;
+        private long _tEmbed, _tAttn, _tMoe, _tDense, _tLmHead, _tSc, _tMoeRoute, _tMoeFfn;
         private long _tScTopK, _tScDevice;   // self-conditioning split: host top-K vs on-device gather+MLP
-        // When set (DIFFUSION_PROFILE=1) each timed section is drained before its timer stops so the
-        // per-section attribution is accurate (otherwise async GGML/Metal work inflates the section that
-        // happens to force the next host read).
-        private readonly bool _profile = Environment.GetEnvironmentVariable("DIFFUSION_PROFILE") == "1";
-        private readonly bool _stepTime = Environment.GetEnvironmentVariable("DIFFUSION_STEPTIME") == "1";
-        private long _stepT0;
         // Fused decode-layer kernel: whole layer (attention + dense + MoE) in one GGML graph dispatch.
         // Correct (output matches the per-op path) but per-LAYER fusion alone doesn't speed up the decode
         // because `hidden` still round-trips host memory between layers, serialising them. The model-wide
@@ -218,7 +212,6 @@ namespace TensorSharp.Models
         // GB model. Tunable via DIFFUSION_LMHEAD_BATCH_CAP_MB.
         private static readonly long LmHeadBatchByteCap =
             (long)(int.TryParse(Environment.GetEnvironmentVariable("DIFFUSION_LMHEAD_BATCH_CAP_MB"), out int capMb) && capMb > 0 ? capMb : 300) * 1024 * 1024;
-        private void ProfSync(Tensor t) { if (_profile && t != null) _ = t.GetElementsAsFloat(1); }
 
         public int CanvasLength => _canvasLength;
         public int MaskTokenId => _maskTokenId;
@@ -465,10 +458,13 @@ namespace TensorSharp.Models
                 {
                     try
                     {
-                        GgmlBasicOps.PreloadQuantizedWeight(w.key, w.host, w.type, w.ne0, w.ne1, w.bytes);
-                        preloadedBytes += w.bytes;
-                        preloadedCount++;
-                        continue;
+                        if (GgmlBasicOps.PreloadQuantizedWeight(w.key, w.host, w.type, w.ne0, w.ne1, w.bytes))
+                        {
+                            preloadedBytes += w.bytes;
+                            preloadedCount++;
+                            continue;
+                        }
+                        // false: exceeds the device's single-buffer size limit; stream it per step.
                     }
                     catch (Exception)
                     {
@@ -671,7 +667,6 @@ namespace TensorSharp.Models
             Ops.RMSNorm(attnOut, attnOut, _weights[$"{prefix}.post_attention_norm.weight"], null, eps);
             Ops.Add(attnOut, attnOut, hidden);
             hidden.Dispose();
-            ProfSync(attnOut);
             _tAttn += Stopwatch.GetTimestamp() - ts;
 
             attnOut = FeedForward(attnOut, layer, prefix, N);
@@ -689,7 +684,6 @@ namespace TensorSharp.Models
             long ts = Stopwatch.GetTimestamp();
             Tensor mlpOut = DenseMlp(attnOut, prefix, N);
             Ops.RMSNorm(mlpOut, mlpOut, _weights[$"{prefix}.post_ffw_norm_1.weight"], null, eps);
-            ProfSync(mlpOut);
             _tDense += Stopwatch.GetTimestamp() - ts;
 
             ts = Stopwatch.GetTimestamp();
@@ -698,7 +692,6 @@ namespace TensorSharp.Models
                 Ops.RMSNorm(moeOut, moeOut, _weights[$"{prefix}.post_ffw_norm_2.weight"], null, eps);
                 Ops.Add(mlpOut, mlpOut, moeOut);
             }
-            ProfSync(mlpOut);
             _tMoe += Stopwatch.GetTimestamp() - ts;
 
             Ops.RMSNorm(mlpOut, mlpOut, _weights[$"{prefix}.post_ffw_norm.weight"], null, eps);
@@ -1028,9 +1021,7 @@ namespace TensorSharp.Models
                 throw new InvalidOperationException("Prompt-KV caching is not enabled for this backend.");
 
             AllocPromptStore();
-            long pt0 = Stopwatch.GetTimestamp();
             _promptLen = PrefillPromptInto(promptTokens, _promptK, _promptV);
-            if (_stepTime) { _ = _promptK[Config.NumLayers - 1].GetElementsAsFloat(1); long now = Stopwatch.GetTimestamp(); double ms = (now - pt0) * 1000.0 / Stopwatch.Frequency; Console.Error.WriteLine($"[prefill] {_promptLen} tokens in {ms:F1} ms = {_promptLen * 1000.0 / ms:F1} tok/s"); }
         }
 
         /// <summary>Core prompt prefill: run the prompt through every layer once and store each layer's
@@ -1092,7 +1083,6 @@ namespace TensorSharp.Models
         private unsafe float[] DecodeCanvasCore(Tensor[] pk, Tensor[] pv, int P,
             int[] canvasTokens, float[] scPrevLogits, float scUse, float prevTempInv)
         {
-            _stepT0 = Stopwatch.GetTimestamp();
             _swForward.Start();
             int C = canvasTokens.Length;
             int D = Config.HiddenSize;
@@ -1115,7 +1105,6 @@ namespace TensorSharp.Models
             // Fast path: all transformer layers (attention + dense + MoE) in one fused GGML graph with the
             // canvas hidden staying on-device across all layers (the throughput win). C# does the lm_head tail.
             bool fusedLayers = false;
-            long tLayers0 = Stopwatch.GetTimestamp();
             if (IsGgmlBackend && _fusedDecodeEnabled && _fusedDecodeOk)
             {
                 bool ok = _segmentedDecode
@@ -1124,7 +1113,6 @@ namespace TensorSharp.Models
                 if (ok) fusedLayers = true;
                 else _fusedDecodeOk = false;
             }
-            long tLayers1 = Stopwatch.GetTimestamp();
 
             for (int l = 0; !fusedLayers && l < Config.NumLayers; l++)
             {
@@ -1167,12 +1155,6 @@ namespace TensorSharp.Models
                 {
                     hidden.Dispose();
                     _swForward.Stop();
-                    if (_stepTime)
-                    {
-                        long now = Stopwatch.GetTimestamp();
-                        double f = 1000.0 / Stopwatch.Frequency;
-                        Console.Error.WriteLine($"[decode] {(now - _stepT0) * f:F1} ms (layers={(tLayers1 - tLayers0) * f:F1} lmhead={(now - tLayers1) * f:F1})");
-                    }
                     return flLogits;
                 }
                 _fusedLmHeadTailOk = false;
@@ -1195,7 +1177,6 @@ namespace TensorSharp.Models
             float[] result = ReadbackLogits(logits, C * Config.VocabSize);
             logits.Dispose();
             _swForward.Stop();
-            if (_stepTime) { long now = Stopwatch.GetTimestamp(); Console.Error.WriteLine($"[decode] {(now - _stepT0) * 1000.0 / Stopwatch.Frequency:F1} ms"); }
 
             return result;
         }
@@ -1232,7 +1213,6 @@ namespace TensorSharp.Models
             // device sampling needs the fused/segmented layer path (keeps hidden on-device for the tail)
             if (!(IsGgmlBackend && _fusedDecodeEnabled && _fusedDecodeOk)) return false;
 
-            _stepT0 = Stopwatch.GetTimestamp();
             _swForward.Start();
             int C = canvasTokens.Length;
             int D = Config.HiddenSize;
@@ -1252,24 +1232,16 @@ namespace TensorSharp.Models
             Ops.RMSNorm(hidden, hidden, GetOnes(D), null, eps);
             _tEmbed += Stopwatch.GetTimestamp() - ts;
 
-            long tLayers0 = Stopwatch.GetTimestamp();
             bool ok = _segmentedDecode
                 ? TryFusedModelLayersSegmented(hidden, C, P, pk, pv)
                 : TryFusedModelLayers(hidden, C, P, pk, pv);
             if (!ok) { _fusedDecodeOk = false; hidden.Dispose(); _swForward.Stop(); return false; }
-            long tLayers1 = Stopwatch.GetTimestamp();
 
             bool sampled = TryFusedLmHeadSampleTail(hidden, C, tempInv, u, K,
                 argmaxOut, entropyOut, sampledOut, topTokensOut, topProbsOut);
             hidden.Dispose();
             _swForward.Stop();
             if (!sampled) { _deviceSampleOk = false; return false; }
-            if (_stepTime)
-            {
-                long now = Stopwatch.GetTimestamp();
-                double f = 1000.0 / Stopwatch.Frequency;
-                Console.Error.WriteLine($"[decode-sampled] {(now - _stepT0) * f:F1} ms (layers={(tLayers1 - tLayers0) * f:F1} lmhead+sample={(now - tLayers1) * f:F1})");
-            }
             return true;
         }
 
@@ -1955,7 +1927,6 @@ namespace TensorSharp.Models
             long tf = Stopwatch.GetTimestamp();
             if (_fusedMoeAvailable && TryFusedMoE(moeInput, output, selectedExperts, routingWeights, layer, N, D))
             {
-                ProfSync(output);
                 _tMoeFfn += Stopwatch.GetTimestamp() - tf;
                 return output;
             }
@@ -2456,7 +2427,6 @@ namespace TensorSharp.Models
                 Ops.GELUMul(gate, gate, up);
             Tensor sig = LinearForward(gate, "self_cond_down.weight");
             gate.Dispose();
-            if (_profile) ProfSync(sig);
             _tScDevice += Stopwatch.GetTimestamp() - _scT1;
             return sig;
         }

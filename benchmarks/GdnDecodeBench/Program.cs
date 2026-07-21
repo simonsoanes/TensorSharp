@@ -27,6 +27,7 @@ string modelPath = Environment.GetEnvironmentVariable("TS_MTP_MODEL")
 BackendType backend = (Environment.GetEnvironmentVariable("TS_MTP_BACKEND") ?? "cuda").ToLowerInvariant() switch
 {
     "ggml_cuda" => BackendType.GgmlCuda,
+    "ggml_vulkan" => BackendType.GgmlVulkan,
     "ggml_cpu" => BackendType.GgmlCpu,
     "cpu" => BackendType.Cpu,
     _ => BackendType.Cuda,
@@ -54,6 +55,34 @@ int[] tokens = model.Tokenizer.Encode(prompt, addSpecial: false).ToArray();
 model.ResetKVCache();
 model.ForwardRefill(tokens);
 model.Forward(new[] { tokens[^1] });
+
+if (mode is "prefill")
+{
+    // Long-prompt prefill / TTFT bench. Build an N-token prompt (repeat the base
+    // prompt tokens to the target length) and time ForwardRefill. Isolates the
+    // prefill path (fused whole-model verify vs per-layer+op-by-op fallback).
+    int targetLen = EnvInt("TS_PREFILL_LEN", 2048);
+    var big = new int[targetLen];
+    for (int i = 0; i < targetLen; i++) big[i] = tokens[i % tokens.Length];
+    // Warmup at a small length so kernels/graphs are primed.
+    model.ResetKVCache();
+    model.ForwardRefill(new[] { big[0], big[1], big[2], big[3] });
+    int reps = EnvInt("TS_PREFILL_REPS", 3);
+    double best = double.MaxValue, sum = 0;
+    for (int r = 0; r < reps; r++)
+    {
+        model.ResetKVCache();
+        var sw = Stopwatch.StartNew();
+        float[] logits = model.ForwardRefill(big);
+        sw.Stop();
+        double ms = sw.Elapsed.TotalMilliseconds;
+        best = Math.Min(best, ms); sum += ms;
+        int amax = Argmax(logits);
+        Console.WriteLine($"[gdn-bench] prefill N={targetLen} rep{r}: {ms:F1} ms ({targetLen / (ms / 1000.0):F0} tok/s) lastArgmax={amax}");
+    }
+    Console.WriteLine($"[gdn-bench] prefill N={targetLen}: best={best:F1}ms ({targetLen / (best / 1000.0):F0} tok/s) avg={sum / reps:F1}ms");
+    return;
+}
 
 if (mode is "matmul")
 {

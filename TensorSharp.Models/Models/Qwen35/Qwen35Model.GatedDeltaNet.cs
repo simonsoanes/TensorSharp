@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -102,7 +102,6 @@ namespace TensorSharp.Models
         // the chunked path. Falls back transparently on any unsupported geometry.
         private static readonly bool _useFusedRecPrefill =
             !string.Equals(Environment.GetEnvironmentVariable("TS_QWEN35_FUSED_REC_PREFILL"), "0", StringComparison.Ordinal);
-        private bool _recPrefillUnsupported;
         private float[] _recPrefillConvIn;  // reusable [convDim * qkvDim] ring->time-major conv state
         private float[] _recPrefillConvOut; // reusable [convDim * qkvDim] post-window conv state download
 
@@ -639,7 +638,7 @@ namespace TensorSharp.Models
         /// </summary>
         private unsafe bool TryFusedRecLayerPrefill(Tensor hidden, int layer, int seqLen)
         {
-            if (!_useFusedRecPrefill || _recPrefillUnsupported) return false;
+            if (!_useFusedRecPrefill) return false;
             // ggml_cuda AND ggml_metal: the native kernel is backend-agnostic
             // (ggml_ssm_conv + ggml_gated_delta_net + ggml_cpy, NO ggml_set_rows)
             // and allocates a dedicated per-graph buffer (ggml_backend_alloc_ctx_tensors,
@@ -647,7 +646,7 @@ namespace TensorSharp.Models
             // mis-aliasing trap. On Metal this replaces the chunked path's per-GDN-layer
             // HOST round-trip (Conv1D + SiLU + packing on the CPU, then upload
             // Q/K/V/Z/alpha/beta) with one device-resident graph per layer.
-            if (_backend != BackendType.GgmlCuda && _backend != BackendType.GgmlMetal) return false;
+            if (_backend != BackendType.GgmlCuda && _backend != BackendType.GgmlVulkan && _backend != BackendType.GgmlMetal) return false;
             if (hidden == null || hidden.DimensionCount != 2 || hidden.ElementType != DType.Float32) return false;
             if (hidden.Sizes[0] != seqLen || hidden.Sizes[1] != Config.HiddenSize) return false;
             if (_headKDim != _headVDim) return false; // gated_delta_net path assumes shared head dim
@@ -732,7 +731,6 @@ namespace TensorSharp.Models
         private Tensor RecurrentBlock(Tensor hidden, int layer, int seqLen, int startPos)
         {
             bool isMoeLayer = _isMoeLayer != null && _isMoeLayer[layer];
-            bool profilePrefill = _profilePrefillStages && seqLen > 1;
 
             // ---- Path A: Fused dense FFN (non-MoE layers) ----
             bool canFuseDenseFFN = IsGgmlBackend && !isMoeLayer
@@ -745,7 +743,6 @@ namespace TensorSharp.Models
                     residual: null, skipOutputProj: true);
                 if (gated != null)
                 {
-                    long ffnStart = profilePrefill ? Stopwatch.GetTimestamp() : 0;
                     int intermSize = Config.IntermediateSize;
                     int halfDim = intermSize > 0 ? intermSize : (int)(_ffnGateUpQW[layer].Ne1 / 2);
 
@@ -766,7 +763,6 @@ namespace TensorSharp.Models
                                 halfDim);
                             _linearTicks += Stopwatch.GetTimestamp() - t0;
                             gated.Dispose();
-                            if (profilePrefill) _prefillRecFfnTicks += Stopwatch.GetTimestamp() - ffnStart;
                             return hidden;
                         }
                         catch { /* fall through */ }
@@ -787,10 +783,8 @@ namespace TensorSharp.Models
                 {
                     // GDN returned null (fused residual add already done).
                 }
-                long ffnStart2 = profilePrefill ? Stopwatch.GetTimestamp() : 0;
                 Tensor ffnOut = FFNCachedFused(hidden, _postAttnNormW[layer], layer, seqLen);
                 if (ffnOut != null) { Ops.Add(hidden, hidden, ffnOut); ffnOut.Dispose(); }
-                if (profilePrefill) _prefillRecFfnTicks += Stopwatch.GetTimestamp() - ffnStart2;
                 return hidden;
             }
 
@@ -887,7 +881,6 @@ namespace TensorSharp.Models
                 }
             }
 
-            long ffnStartC = profilePrefill ? Stopwatch.GetTimestamp() : 0;
             Tensor ffnOutC;
             if (isMoeLayer)
             {
@@ -911,7 +904,6 @@ namespace TensorSharp.Models
                 ffnOutC = FFNCachedFused(hidden, _postAttnNormW[layer], layer, seqLen);
             }
             if (ffnOutC != null) { Ops.Add(hidden, hidden, ffnOutC); ffnOutC.Dispose(); }
-            if (profilePrefill) _prefillRecFfnTicks += Stopwatch.GetTimestamp() - ffnStartC;
             return hidden;
         }
 
@@ -947,9 +939,12 @@ namespace TensorSharp.Models
             _bfdPoolSeeded = false;
             if (_backend == BackendType.GgmlCuda)
                 GgmlBasicOps.Qwen35ResetBatchedDecodeCache();
-            // The persistent (CUDA-graph-captured) decode graph pins the GDN
-            // conv/delta device-buffer addresses; a re-seed can move them, so drop
-            // the cached graph too. No-op when persist mode is off.
+            // The persistent decode graph (CUDA-graph-captured on CUDA, replayed on
+            // Vulkan) pins the GDN conv/delta device-buffer addresses AND holds the
+            // last-seeded GDN state device-resident; the persist replay fast-path does
+            // NOT re-run the bind loop, so once the host state changes (prefill / per-op
+            // recurrence advanced it) the cached graph must be dropped or it replays
+            // stale state. Drop it on both persist backends. No-op when persist is off.
             //
             // NOTE: the fused VERIFY cache is NOT reset here. InvalidateFullDecodeState
             // runs on every EnterSpecSession (i.e. every spec step), but the verify
@@ -957,7 +952,7 @@ namespace TensorSharp.Models
             // (ResetKVCache / EnsureCacheCapacity grow) — it uploads fresh GDN state
             // each call, so a per-step reset would defeat the whole cache. Those two
             // call sites reset it explicitly via InvalidateVerifyCache().
-            if (_backend == BackendType.GgmlCuda)
+            if (_backend == BackendType.GgmlCuda || _backend == BackendType.GgmlVulkan)
                 GgmlBasicOps.Qwen35ResetDecodeCache();
         }
 
@@ -1001,14 +996,19 @@ namespace TensorSharp.Models
             // Fold final-norm + lm_head into the graph requires both present.
             if ((_lmHeadQW == null && _lmHeadF32 == null) || _finalNormW == null)
                 return false;
-            // The whole-model single-graph decode now runs on BOTH ggml_cuda (with a
-            // persistent CUDA-graph-captured replay) AND ggml_metal (non-persist: cpy
-            // KV write + reused gallocr; the native kernel forces non-persist when the
-            // backend is Metal). On Metal this collapses the ~145 op-by-op graph_compute
-            // submits/token (the dispatch-overhead ceiling, ~6.9 tok/s) into ONE graph,
-            // with the GDN recurrence + MoE top-K routing fully in-graph (no host drain).
+            // The whole-model single-graph decode now runs on ggml_cuda + ggml_vulkan
+            // (persistent replay: build the fixed-topology graph once, replay it each
+            // token via set_rows KV write — CUDA also captures a CUDA graph) AND
+            // ggml_metal (non-persist: cpy KV write + per-call scratch buffer, since
+            // ggml_metal_op_set_rows SEGFAULTs). All three collapse the ~145 op-by-op
+            // graph_compute submits/token — the dispatch ceiling that leaves the GPU
+            // ~10% utilized — into ONE graph, with the GDN recurrence + MoE top-K
+            // routing fully in-graph (no host drain). ggml-vulkan v0.15.3 implements
+            // every op the graph needs (gated_delta_net / ssm_conv / ssm_scan /
+            // argsort-top_k / mul_mat_id + set_rows), matching llama.cpp Vulkan decode.
             if (!_fullDecodeEnabled || _fdUnsupported || _fdSpecSessionActive
-                || (_backend != BackendType.GgmlCuda && _backend != BackendType.GgmlMetal))
+                || (_backend != BackendType.GgmlCuda && _backend != BackendType.GgmlMetal
+                    && _backend != BackendType.GgmlVulkan))
                 return false;
             if (hidden == null || hidden.DimensionCount != 2 || hidden.Sizes[0] != 1
                 || hidden.ElementType != DType.Float32)
@@ -1201,7 +1201,13 @@ namespace TensorSharp.Models
                         _fdLayers, n,
                         (IntPtr)GetFloatPtr(hidden), Config.HiddenSize, position,
                         Config.NumHeads, Config.NumKVHeads, headDim, cacheSize,
-                        headDim, 2, kvCacheType,
+                        // rope_n_dims: this model uses partial rotary (rope.dimension_count,
+                        // e.g. 64 of the 256-dim head). Passing headDim here rotated ALL 256
+                        // dims with a wrong frequency schedule — self-consistent within the
+                        // fused graph but MISMATCHED against the KV cache that prefill fills
+                        // with the correct n_rot, so decode-token attention drifted and the
+                        // output degenerated into repetition after a few hundred tokens.
+                        _ropeDimCount > 0 ? _ropeDimCount : headDim, 2, kvCacheType,
                         _convKernel, _headKDim, _headVDim, _numKHeads, _numVHeads,
                         Config.Eps, Config.RopeBase, 1.0f / Config.RopeScale,
                         _numExperts, _numExpertsUsed, _expertFfnLength, _sharedExpertFfnLength,
@@ -1255,65 +1261,41 @@ namespace TensorSharp.Models
         private IntPtr _fvConvOut;   // unmanaged, same size (post-window state)
         private bool _fvUnsupported;
 
-        // Device-resident verify GDN state (TS_QWEN35_VERIFY_RESIDENT=1, default OFF):
-        // the verify keeps conv (_fvConvIn) + delta (_deltaStateTensor) device-resident
-        // (cacheable, updated in-place) and does NOT re-upload them every call (only the
-        // first/invalidated seed). It still drains them back to the host AFTER each call
-        // so the snapshot/rollback + any op-by-op fallback see the current state, which
-        // keeps the existing host snapshot path correct (no rollback changes). Net: skips
-        // the ~60 MB delta UPLOAD per call. _fvStateResident latches the seed; reset on
-        // KV reset/grow (InvalidateVerifyCache).
+        // Device-resident verify GDN state (TS_QWEN35_VERIFY_RESIDENT=1, default OFF).
+        // KNOWN-BROKEN, kept off — do not enable without the redesign below. Intent:
+        // keep delta (_deltaStateTensor) device-resident so the verify skips the ~150 MB
+        // delta host round-trip. Two entanglements make it unsafe as-is:
+        //   1. Delta is bound cacheable by its HOST ptr (GetFloatPtr). The verify runs at
+        //      several N shapes (variable draft length), and the host-keyed cacheable
+        //      mirror is re-created PER SHAPE -> divergent device buffers + a freed buffer
+        //      -> ggml_cuda_cpy "invalid argument" crash at longer generations (passes at
+        //      ~16 tokens, faults by ~128). The KV cache avoids this by binding via its
+        //      DEVICE ptr (GetStoragePointer); delta must do the same.
+        //   2. On ggml_cuda the snapshot uses the HOST path (CopyGdnStateOut ->
+        //      EnsureHostReadable), so making the verify device-resident just moves the
+        //      151 MB transfer into the snapshot phase (net ~half saved, ~break-even).
+        // The clean fix is to move GDN snapshot/rollback DEVICE-SIDE natively (per-prefix
+        // gated_delta_net state snapshots, K=N), eliminating both the verify transfer AND
+        // the host snapshot. See memory qwen35-mtp-spec-perf. _fvStateResident latches the
+        // seed; reset on KV reset/grow (InvalidateVerifyCache).
         private static readonly bool _fvResidentEnabled =
             string.Equals(Environment.GetEnvironmentVariable("TS_QWEN35_VERIFY_RESIDENT"), "1", StringComparison.Ordinal);
         private bool _fvStateResident;
 
-        /// <summary>Prefill through the whole-model fused verify with the working
-        /// set bounded to TS_QWEN35_PREFILL_UBATCH-token sub-chunks (llama.cpp's
-        /// n_ubatch analogue). The verify graph's activation scratch costs ~1.8 MB
-        /// per prompt token on the 35B-A3B and lands in the shared reuse gallocr,
-        /// which only ever GROWS — one whole-prompt graph (e.g. 3.2k tokens →
-        /// 5.7 GB) pushes total VRAM past the card and WDDM permanently demotes
-        /// resident buffers to shared system memory, collapsing every later
-        /// prefill AND decode ~3.5x until restart. Sub-chunks keep the peak at the
-        /// ubatch size; the kernel's KV append + GDN host-ring round-trip already
-        /// carry state across calls (same mechanism as the chunked ForwardRefill).
-        /// Multimodal rows work too: vision embeddings are already injected into
-        /// <paramref name="hidden"/> and MRoPE positions are sliced per sub-chunk
-        /// via <paramref name="rowOffset"/>.</summary>
-        internal bool TryFullModelVerifyPrefill(Tensor hidden, int startPos, int seqLen, float[] logitsOut)
-        {
-            int ubatch = ResolvePrefillVerifyUbatch();
-            if (ubatch <= 0 || seqLen <= ubatch)
-                return TryFullModelVerify(hidden, startPos, seqLen, normedOut: null, logitsOut: logitsOut, nLogitRows: 1);
-            for (int off = 0; off < seqLen; off += ubatch)
-            {
-                int n = Math.Min(ubatch, seqLen - off);
-                if (!TryFullModelVerify(hidden, startPos + off, n, normedOut: null, logitsOut: logitsOut, nLogitRows: 1, rowOffset: off))
-                {
-                    // First sub-chunk failed before any state advanced: clean per-op
-                    // fallback. A later sub-chunk failing would leave KV/GDN state
-                    // partially advanced — the per-op fallback would double-process
-                    // the leading rows, so surface it instead of corrupting output.
-                    if (off == 0) return false;
-                    throw new InvalidOperationException(
-                        $"Qwen3.5 fused prefill failed mid-prompt (offset {off}/{seqLen}); " +
-                        "cannot fall back to the per-op path without corrupting KV/GDN state.");
-                }
-            }
-            return true;
-        }
-
         internal unsafe bool TryFullModelVerify(Tensor hidden, int startPos, int seqLen, float[] normedOut, float[] logitsOut, int nLogitRows = -1, int rowOffset = 0)
         {
-            // CUDA-only: the whole-model verify graph uses ggml_set_rows KV writes +
-            // a persistent reuse gallocr. On Metal a cpy-based non-persist variant
-            // hit a VRAM wall (fresh alloc OOMs the 40-layer MoE graph) AND a
-            // gallocr "tensor buffer not set" assert (the lifetime-packing does not
-            // compose with the cpy-into-cacheable-cache write) — see the deferred
-            // OPT-1 design notes. Metal prefill instead uses the per-GDN-layer
-            // device-resident fused prefill (TryFusedRecLayerPrefill, now enabled
-            // on Metal) plus op-by-op attention.
-            if (!_fusedVerifyEnabled || _fvUnsupported || _backend != BackendType.GgmlCuda)
+            // CUDA + Vulkan: the whole-model verify graph writes KV via ggml_set_rows
+            // (per-head 2D shape, a Vulkan-supported op in ggml v0.15.3) and, for
+            // PREFILL (n_logits < N), allocates activations through the reuse gallocr
+            // (lifetime-packing, backend-agnostic). This collapses the per-GDN-layer +
+            // op-by-op attention prefill (≈22 tok/s / 23 s for a 512-tok prompt on
+            // Vulkan) into ONE graph for the whole prompt. Metal stays OFF: an older
+            // cpy-based variant hit a VRAM wall + a gallocr "tensor buffer not set"
+            // assert on Metal (and ggml_metal_op_set_rows SEGFAULTs), so Metal prefill
+            // keeps the per-GDN-layer device-resident fused prefill (TryFusedRecLayerPrefill)
+            // plus op-by-op attention.
+            if (!_fusedVerifyEnabled || _fvUnsupported
+                || (_backend != BackendType.GgmlCuda && _backend != BackendType.GgmlVulkan))
                 return false;
             if (seqLen < 1 || hidden == null)
                 return false;
@@ -1387,6 +1369,15 @@ namespace TensorSharp.Models
                 _fvConvOut = Marshal.AllocHGlobal(Math.Max(1, gdnCount) * convBlock * sizeof(float));
                 _fvLayers = new Qwen35LayerDecodeArgs[n];
             }
+
+            // Device-resident GDN state only on calls the native runs on its own-slot
+            // persist path (n_logits >= N): all-row MTP verify (nLogitRows <= 0) and
+            // single-token plain/decode (nLogitRows >= seqLen). Prefill / rollback
+            // re-forwards (0 < nLogitRows < seqLen) take the native non-persist path,
+            // whose in-place GDN cpy faults, so they stay in host mode here too. This
+            // predicate must match the native fv_persist gate exactly (see
+            // TSGgml_Qwen35ModelVerify) so both sides agree per call.
+            bool residentThisCall = _fvResidentEnabled && !(nLogitRows > 0 && nLogitRows < seqLen);
 
             float* convInBase = (float*)_fvConvIn;
             float* convOutBase = (float*)_fvConvOut;
@@ -1473,7 +1464,7 @@ namespace TensorSharp.Models
                     // Resident: the device buffer persists across calls, so only seed
                     // (convert ring -> ggml + invalidate so the cacheable bind re-uploads)
                     // on the first call / after an invalidation. Host mode seeds every call.
-                    if (!_fvResidentEnabled || !_fvStateResident)
+                    if (!residentThisCall || !_fvStateResident)
                     {
                         float[] ring = _convState[l];
                         int w = _convStateWriteIdx[l];
@@ -1490,7 +1481,7 @@ namespace TensorSharp.Models
                     a.ConvStateIn = (IntPtr)convIn;
                     // Resident: conv_in == conv_out signals the native to keep the state
                     // device-resident (in-place); host mode uses a separate out buffer.
-                    a.ConvStateOut = _fvResidentEnabled ? (IntPtr)convIn : (IntPtr)convOut;
+                    a.ConvStateOut = residentThisCall ? (IntPtr)convIn : (IntPtr)convOut;
                     a.DeltaStateIn = deltaPtr;
                     a.DeltaStateOut = deltaPtr;   // in-place: overwritten with the post-window state
                 }
@@ -1528,7 +1519,9 @@ namespace TensorSharp.Models
                     _fvLayers, n,
                     (IntPtr)(GetFloatPtr(hidden) + (long)rowOffset * Config.HiddenSize), Config.HiddenSize, startPos, seqLen,
                     Config.NumHeads, Config.NumKVHeads, headDim, cacheSize,
-                    headDim, 2, kvCacheType,
+                    // rope_n_dims: partial rotary (rope.dimension_count, e.g. 64 of 256).
+                    // Must match the decode path and the KV cache; see TryFullModelDecode.
+                    _ropeDimCount > 0 ? _ropeDimCount : headDim, 2, kvCacheType,
                     _convKernel, _headKDim, _headVDim, _numKHeads, _numVHeads,
                     Config.Eps, Config.RopeBase, 1.0f / Config.RopeScale,
                     _numExperts, _numExpertsUsed, _expertFfnLength, _sharedExpertFfnLength,
@@ -1555,11 +1548,11 @@ namespace TensorSharp.Models
             for (int l = 0; l < n; l++)
             {
                 if (!_isRecurrent[l]) continue;
-                float* convSrc = _fvResidentEnabled
+                float* convSrc = residentThisCall
                     ? convInBase + (long)_fvGdnSlot[l] * convBlock
                     : convOutBase + (long)_fvGdnSlot[l] * convBlock;
                 IntPtr deltaPtr = (IntPtr)GetFloatPtr(_deltaStateTensor[l]);
-                if (_fvResidentEnabled)
+                if (residentThisCall)
                 {
                     GgmlBasicOps.SyncHostBuffer((IntPtr)convSrc, (long)convBlock * sizeof(float));
                     GgmlBasicOps.SyncHostBuffer(deltaPtr, _deltaStateTensor[l].Storage.ByteLength);
@@ -1573,10 +1566,175 @@ namespace TensorSharp.Models
                         ring[dstBase + ch] = convSrc[ch * convDim + t];
                 }
                 _convStateWriteIdx[l] = 0;
-                if (!_fvResidentEnabled)
+                if (!residentThisCall)
                     GgmlBasicOps.InvalidateHostBuffer(deltaPtr);
             }
-            _fvStateResident = true;
+            // Latch resident-seeded state only for resident calls. A host-mode call
+            // (prefill / rollback) updates the host mirror but NOT the resident device
+            // buffer, so the next resident call must re-seed it (guarded by this flag).
+            _fvStateResident = residentThisCall;
+            return true;
+        }
+
+        // Reusable single-layer descriptor for the fused MTP draft block.
+        private Qwen35LayerDecodeArgs[] _mtpDraftLayer;
+
+        /// <summary>
+        /// Fused single-block MTP DRAFT head (llama.cpp graph_mtp parity): runs the
+        /// MTP decoder block (attention + FFN) + shared-head norm + LM head over the
+        /// eh_proj-projected input <paramref name="x"/> ([seqLen, hidden]) as ONE
+        /// GGML graph — the num_layers=1 case of the fused verify kernel, pointed at
+        /// the MTP attention layer at <see cref="_mtpLayerIdx"/> with the shared-head
+        /// norm folded in as the final norm. Persist+capture applies (N=1, n_logits=N),
+        /// so warm draft steps replay a captured CUDA graph (~1-2 ms) instead of the
+        /// op-by-op block (~14 ms). Writes per-row logits (logitsOut) and the
+        /// post-head-norm hidden (normedOut, the chained draft hidden). Returns false
+        /// so the caller falls back to op-by-op AttentionBlock + head on any
+        /// unsupported shape/backend.
+        /// </summary>
+        // Kill-switch for the fused MTP draft/catch-up block (TS_MTP_FUSED_DRAFT=0
+        // falls back to the op-by-op MTP decoder block). Default ON.
+        private static readonly bool _mtpFusedDraftEnabled =
+            !string.Equals(Environment.GetEnvironmentVariable("TS_MTP_FUSED_DRAFT"), "0", StringComparison.Ordinal);
+
+        internal unsafe bool TryFusedMtpBlock(Tensor x, int startPos, int seqLen,
+            float[] normedOut, float[] logitsOut, int nLogitRows)
+        {
+            if (!_mtpFusedDraftEnabled)
+                return false;
+            if (!_fusedVerifyEnabled || _fvUnsupported
+                || (_backend != BackendType.GgmlCuda && _backend != BackendType.GgmlVulkan))
+                return false;
+            if (!HasMtp || x == null || seqLen < 1)
+                return false;
+            int mtp = _mtpLayerIdx;
+            if (mtp < 0 || _isRecurrent[mtp])     // the MTP block is a full-attention layer
+                return false;
+            if (_headKDim != _headVDim)            // kernel asserts S_k == S_v
+                return false;
+            int headDim = Config.HeadDim;
+            int effLogitRows = (nLogitRows > 0 && nLogitRows < seqLen) ? nLogitRows : seqLen;
+            if (logitsOut == null || logitsOut.Length < (long)Config.VocabSize * effLogitRows)
+                return false;
+            if (_kvCacheK[mtp] == null || _kvCacheV[mtp] == null)
+                return false;
+            int cacheSize = (int)_kvCacheK[mtp].Sizes[1];
+            int kvCacheType = _kvCacheK[mtp].ElementType == DType.Float16 ? 1 : 0;
+            if (cacheSize <= 0 || startPos + seqLen > cacheSize)
+                return false;
+
+            // Head weights/norm: nextn.shared_head_head / shared_head_norm when the
+            // GGUF ships them, otherwise the trunk LM head / output_norm.
+            bool hasOwnHead = _mtpHeadQW != null || _mtpHeadF32 != null;
+            Tensor headNormW = _mtpHeadNormW ?? _finalNormW;
+            if ((!hasOwnHead && _lmHeadQW == null && _lmHeadF32 == null) || headNormW == null)
+                return false;
+
+            var a = default(Qwen35LayerDecodeArgs);
+            if (!TryFillMtpDraftLayerArgs(mtp, ref a))
+                return false;
+            _mtpDraftLayer ??= new Qwen35LayerDecodeArgs[1];
+            _mtpDraftLayer[0] = a;
+
+            var lmh = hasOwnHead ? ResolveW(_mtpHeadQW, _mtpHeadF32) : ResolveW(_lmHeadQW, _lmHeadF32);
+            IntPtr finalNormPtr = (IntPtr)GetFloatPtr(headNormW);
+            bool ok;
+            fixed (float* lp = logitsOut)
+            fixed (float* np = normedOut)
+            {
+                ok = GgmlBasicOps.Qwen35ModelVerify(
+                    _mtpDraftLayer, 1,
+                    (IntPtr)GetFloatPtr(x), Config.HiddenSize, startPos, seqLen,
+                    Config.NumHeads, Config.NumKVHeads, headDim, cacheSize,
+                    _ropeDimCount > 0 ? _ropeDimCount : headDim, 2, kvCacheType,
+                    _convKernel, _headKDim, _headVDim, _numKHeads, _numVHeads,
+                    Config.Eps, Config.RopeBase, 1.0f / Config.RopeScale,
+                    _numExperts, _numExpertsUsed, _expertFfnLength, _sharedExpertFfnLength,
+                    _normTopKProb ? 1 : 0, 1.0f,
+                    (IntPtr)lp, Config.VocabSize,
+                    lmh.ptr, lmh.type, lmh.ne0, lmh.ne1, lmh.bytes,
+                    finalNormPtr, normedOut != null ? (IntPtr)np : IntPtr.Zero, nLogitRows,
+                    null, null);
+            }
+            return ok;
+        }
+
+        /// <summary>Fills a single Qwen35LayerDecodeArgs for the MTP attention layer
+        /// (attention + dense/MoE FFN; no GDN). Returns false (caller falls back to
+        /// op-by-op) if any required weight is missing. Does NOT set _fvUnsupported —
+        /// a missing MTP weight must not disable the trunk verify path.</summary>
+        private unsafe bool TryFillMtpDraftLayerArgs(int l, ref Qwen35LayerDecodeArgs a)
+        {
+            static bool HasW(QuantizedWeight q, Tensor f) => q != null || f != null;
+            if (_attnNormW[l] == null || _postAttnNormW[l] == null)
+                return false;
+            a.StructBytes = Marshal.SizeOf<Qwen35LayerDecodeArgs>();
+            a.AttnNormW = (IntPtr)GetFloatPtr(_attnNormW[l]);
+            a.PostAttnNormW = (IntPtr)GetFloatPtr(_postAttnNormW[l]);
+            a.IsRecurrent = 0;
+            bool isMoe = _isMoeLayer != null && _isMoeLayer[l];
+            a.IsMoe = isMoe ? 1 : 0;
+
+            if (!isMoe)
+            {
+                if (!HasW(_ffnGateUpQW[l], _ffnGateUpF32[l]) || !HasW(_ffnDownQW[l], _ffnDownF32[l]))
+                    return false;
+                var gu = ResolveW(_ffnGateUpQW[l], _ffnGateUpF32[l]);
+                var dn = ResolveW(_ffnDownQW[l], _ffnDownF32[l]);
+                a.GuW = gu.ptr; a.GuType = gu.type; a.GuNe0 = gu.ne0; a.GuNe1 = gu.ne1; a.GuBytes = gu.bytes;
+                a.DownW = dn.ptr; a.DownType = dn.type; a.DownNe0 = dn.ne0; a.DownNe1 = dn.ne1; a.DownBytes = dn.bytes;
+                a.FfDense = (int)(gu.ne1 / 2);
+            }
+            else
+            {
+                if (!((_ffnGateInpQW[l] != null || _ffnGateInpF32[l] != null)
+                      && _layerStackedGate[l] != null && _layerStackedUp[l] != null && _layerStackedDown[l] != null
+                      && HasW(_ffnGateShexpQW[l], _ffnGateShexpF32[l]) && HasW(_ffnUpShexpQW[l], _ffnUpShexpF32[l])
+                      && HasW(_ffnDownShexpQW[l], _ffnDownShexpF32[l]) && _ffnGateInpShexpVec[l] != null))
+                    return false;
+                var gi = ResolveW(_ffnGateInpQW[l], _ffnGateInpF32[l]);
+                a.GateInpW = gi.ptr; a.GateInpType = gi.type; a.GateInpNe0 = gi.ne0; a.GateInpNe1 = gi.ne1; a.GateInpBytes = gi.bytes;
+                var sg = _layerStackedGate[l]; var su = _layerStackedUp[l]; var sd = _layerStackedDown[l];
+                a.GateExps = sg.Data; a.GateExpsType = sg.GgmlType; a.GateExpsBytes = sg.TotalRawBytes;
+                a.UpExps = su.Data; a.UpExpsType = su.GgmlType; a.UpExpsBytes = su.TotalRawBytes;
+                a.DownExps = sd.Data; a.DownExpsType = sd.GgmlType; a.DownExpsBytes = sd.TotalRawBytes;
+                var shg = ResolveW(_ffnGateShexpQW[l], _ffnGateShexpF32[l]);
+                var shu = ResolveW(_ffnUpShexpQW[l], _ffnUpShexpF32[l]);
+                var shd = ResolveW(_ffnDownShexpQW[l], _ffnDownShexpF32[l]);
+                a.ShexpGateW = shg.ptr; a.ShexpGateType = shg.type; a.ShexpGateNe0 = shg.ne0; a.ShexpGateNe1 = shg.ne1; a.ShexpGateBytes = shg.bytes;
+                a.ShexpUpW = shu.ptr; a.ShexpUpType = shu.type; a.ShexpUpNe0 = shu.ne0; a.ShexpUpNe1 = shu.ne1; a.ShexpUpBytes = shu.bytes;
+                a.ShexpDownW = shd.ptr; a.ShexpDownType = shd.type; a.ShexpDownNe0 = shd.ne0; a.ShexpDownNe1 = shd.ne1; a.ShexpDownBytes = shd.bytes;
+                a.ShexpGateInpW = (IntPtr)GetFloatPtr(_ffnGateInpShexpVec[l]);
+            }
+
+            if (!HasW(_attnOutputQW[l], _attnOutputF32[l]) || _attnQNormW[l] == null || _attnKNormW[l] == null)
+                return false;
+            var o = ResolveW(_attnOutputQW[l], _attnOutputF32[l]);
+            a.OW = o.ptr; a.OType = o.type; a.ONe0 = o.ne0; a.ONe1 = o.ne1; a.OBytes = o.bytes;
+            if (_attnQkvQW[l] != null || _attnQkvF32[l] != null)
+            {
+                var qkv = ResolveW(_attnQkvQW[l], _attnQkvF32[l]);
+                a.QkvW = qkv.ptr; a.QkvType = qkv.type; a.QkvNe0 = qkv.ne0; a.QkvNe1 = qkv.ne1; a.QkvBytes = qkv.bytes;
+                a.SeparateQkv = 0;
+            }
+            else if (HasW(_attnQQW[l], _attnQF32[l]) && HasW(_attnKQW[l], _attnKF32[l]) && HasW(_attnVQW[l], _attnVF32[l]))
+            {
+                var q = ResolveW(_attnQQW[l], _attnQF32[l]);
+                var k = ResolveW(_attnKQW[l], _attnKF32[l]);
+                var v = ResolveW(_attnVQW[l], _attnVF32[l]);
+                a.QkvW = q.ptr; a.QkvType = q.type; a.QkvNe0 = q.ne0; a.QkvNe1 = q.ne1; a.QkvBytes = q.bytes;
+                a.KW = k.ptr; a.KType = k.type; a.KNe0 = k.ne0; a.KNe1 = k.ne1; a.KBytes = k.bytes;
+                a.VW = v.ptr; a.VType = v.type; a.VNe0 = v.ne0; a.VNe1 = v.ne1; a.VBytes = v.bytes;
+                a.SeparateQkv = 1;
+            }
+            else
+            {
+                return false;
+            }
+            a.QNormW = (IntPtr)GetFloatPtr(_attnQNormW[l]);
+            a.KNormW = (IntPtr)GetFloatPtr(_attnKNormW[l]);
+            a.KCache = TensorComputePrimitives.GetStoragePointer(_kvCacheK[l]);
+            a.VCache = TensorComputePrimitives.GetStoragePointer(_kvCacheV[l]);
             return true;
         }
 
@@ -1589,8 +1747,6 @@ namespace TensorSharp.Models
             Tensor residual = null, bool skipOutputProj = false)
         {
             long t0 = Stopwatch.GetTimestamp();
-            bool profilePrefill = _profilePrefillStages && seqLen > 1;
-            long stageStart = profilePrefill ? t0 : 0;
             int qkvDim = _headKDim * _numKHeads * 2 + _headVDim * _numVHeads;
             int qkDim = _headKDim * _numKHeads;
             int vDim = _headVDim * _numVHeads;
@@ -1622,7 +1778,6 @@ namespace TensorSharp.Models
                 packedInput = LinearForwardCached(normedInput, _ssmInProjQW[layer], _ssmInProjF32[layer]);
             }
 
-            if (profilePrefill) { long now = Stopwatch.GetTimestamp(); _prefillRecInputProjTicks += now - stageStart; stageStart = now; }
 
             Tensor qkvRaw = null;
             Tensor zRaw = null;
@@ -1850,7 +2005,6 @@ namespace TensorSharp.Models
 
                 InvalidateTensorDeviceCache(gated);
             }
-            if (profilePrefill) { long now = Stopwatch.GetTimestamp(); _prefillRecCoreTicks += now - stageStart; stageStart = now; }
 
             // When skipOutputProj is set, return the raw gated output so the caller
             // can fuse output_proj + FFN into a single GPU dispatch.
@@ -1860,7 +2014,6 @@ namespace TensorSharp.Models
                 normedInput?.Dispose();
                 if (ownsPackedInput) packedInput?.Dispose();
                 qkvRaw?.Dispose(); zRaw?.Dispose(); betaRaw?.Dispose(); alphaRaw?.Dispose();
-                if (profilePrefill) _prefillRecOutputTicks += Stopwatch.GetTimestamp() - stageStart;
                 _attnTicks += Stopwatch.GetTimestamp() - t0;
                 return gatedOut;
             }
@@ -1893,7 +2046,6 @@ namespace TensorSharp.Models
             betaRaw?.Dispose();
             alphaRaw?.Dispose();
 
-            if (profilePrefill) _prefillRecOutputTicks += Stopwatch.GetTimestamp() - stageStart;
             _attnTicks += Stopwatch.GetTimestamp() - t0;
             return fusedAdd ? null : output;
         }

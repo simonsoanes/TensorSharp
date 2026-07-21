@@ -14,8 +14,18 @@
 #include <unistd.h>
 #endif
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 #if defined(GGML_USE_CUDA)
 #include "ggml-cuda.h"
+#endif
+
+#if defined(GGML_USE_VULKAN)
+#include "ggml-vulkan.h"
 #endif
 
 #include <cstdio>
@@ -102,6 +112,12 @@ namespace tsg
     std::once_flag g_backend_init_once;
     ggml_backend_t g_backend = nullptr;
     int g_backend_type = 0;
+    // Vulkan device index requested via TSGgml_SetVulkanDeviceIndex. Must be set
+    // before the first backend init (create_backend_instance runs once under
+    // g_backend_init_once); later calls with a different index fail. Indices are
+    // positions in ggml-vulkan's enumeration order (after any
+    // GGML_VK_VISIBLE_DEVICES filtering applied at process launch).
+    std::atomic<int> g_vulkan_device_index{0};
 
     std::mutex g_host_buffer_cache_mutex;
     std::unordered_map<void*, CachedHostBuffer> g_host_buffer_cache;
@@ -137,15 +153,10 @@ namespace tsg
              std::strcmp(value, "ON") == 0);
     }
 
-    static bool ggml_debug_logging_enabled()
-    {
-        return is_truthy_env(std::getenv("TENSORSHARP_GGML_DEBUG"));
-    }
-
     static void filtered_ggml_log(enum ggml_log_level level, const char* text, void* user_data)
     {
         (void) user_data;
-        if (level == GGML_LOG_LEVEL_DEBUG && !ggml_debug_logging_enabled())
+        if (level == GGML_LOG_LEVEL_DEBUG)
             return;
         std::fputs(text, stderr);
         std::fflush(stderr);
@@ -166,6 +177,34 @@ namespace tsg
     void clear_last_error()
     {
         g_last_error.clear();
+    }
+
+    // --- VRAM allocation diagnostics (TS_GGML_LOG_VRAM=1) ---
+
+    bool vram_log_enabled()
+    {
+        static const bool enabled = []{
+            const char* e = std::getenv("TS_GGML_LOG_VRAM");
+            return e != nullptr && e[0] == '1';
+        }();
+        return enabled;
+    }
+
+    void vram_log(const char* tag, std::int64_t bytes)
+    {
+        if (!vram_log_enabled())
+            return;
+        std::size_t free_b = 0, total_b = 0;
+        if (g_backend != nullptr)
+        {
+            ggml_backend_dev_t dev = ggml_backend_get_device(g_backend);
+            if (dev != nullptr)
+                ggml_backend_dev_memory(dev, &free_b, &total_b);
+        }
+        std::fprintf(stderr, "[TSVRAM] %-32s %9.1f MB | dev free %9.1f / %9.1f MB\n",
+            tag, bytes / (1024.0 * 1024.0),
+            free_b / (1024.0 * 1024.0), total_b / (1024.0 * 1024.0));
+        std::fflush(stderr);
     }
 
     // --- Backend management ---
@@ -213,6 +252,39 @@ namespace tsg
 #endif
         }
 
+        if (backend_type == BACKEND_TYPE_VULKAN)
+        {
+#if defined(GGML_USE_VULKAN)
+            // Init by the Vulkan-specific API rather than dev_by_type(GPU): when
+            // several GPU backends are compiled into one binary (CUDA + Vulkan),
+            // dev_by_type returns the first registered GPU device, which is
+            // ggml-cuda's. The CUDA branch above keeps that behaviour; here the
+            // Vulkan device must be picked explicitly.
+            const int device_count = ggml_backend_vk_get_device_count();
+            if (device_count <= 0)
+            {
+                set_last_error("No Vulkan device is available for ggml-vulkan.");
+                return nullptr;
+            }
+
+            const int device_index = g_vulkan_device_index.load(std::memory_order_acquire);
+            if (device_index < 0 || device_index >= device_count)
+            {
+                set_last_error("Vulkan device index " + std::to_string(device_index) +
+                    " is out of range: " + std::to_string(device_count) + " Vulkan device(s) available.");
+                return nullptr;
+            }
+
+            ggml_backend_t backend = ggml_backend_vk_init(static_cast<size_t>(device_index));
+            if (backend == nullptr)
+                set_last_error("ggml-vulkan backend initialization failed.");
+            return backend;
+#else
+            set_last_error("The ggml-vulkan backend is not available in this build.");
+            return nullptr;
+#endif
+        }
+
         set_last_error("Unknown GGML backend type requested.");
         return nullptr;
     }
@@ -231,7 +303,8 @@ namespace tsg
     {
         if (backend_type != BACKEND_TYPE_METAL &&
             backend_type != BACKEND_TYPE_CPU &&
-            backend_type != BACKEND_TYPE_CUDA)
+            backend_type != BACKEND_TYPE_CUDA &&
+            backend_type != BACKEND_TYPE_VULKAN)
         {
             set_last_error("Invalid GGML backend type.");
             return false;
@@ -283,6 +356,16 @@ namespace tsg
             return true;
 #else
             set_last_error("The ggml-cuda backend is not available in this build.");
+            return false;
+#endif
+        }
+
+        if (backend_type == BACKEND_TYPE_VULKAN)
+        {
+#if defined(GGML_USE_VULKAN)
+            return true;
+#else
+            set_last_error("The ggml-vulkan backend is not available in this build.");
             return false;
 #endif
         }
@@ -567,12 +650,25 @@ namespace tsg
         return 16384;
     }
 
+    DeviceStaticProps get_device_static_props(ggml_backend_dev_t dev)
+    {
+        static std::mutex s_mutex;
+        static std::unordered_map<ggml_backend_dev_t, DeviceStaticProps> s_cache;
+        std::lock_guard<std::mutex> lock(s_mutex);
+        auto it = s_cache.find(dev);
+        if (it != s_cache.end())
+            return it->second;
+        ggml_backend_dev_props props;
+        ggml_backend_dev_get_props(dev, &props);
+        DeviceStaticProps s{ props.type, props.caps.buffer_from_host_ptr };
+        s_cache.emplace(dev, s);
+        return s;
+    }
+
     bool prefers_device_local_cache(ggml_backend_dev_t dev)
     {
         if (dev == nullptr)
             return false;
-        ggml_backend_dev_props props;
-        ggml_backend_dev_get_props(dev, &props);
         // Upstream ggml's ggml_backend_dev_props has no `integrated` field (that was an
         // ollama-fork extension). On the backends we use the field was effectively always
         // 0 anyway -- the Metal backend reports type=GPU and never set it -- so the
@@ -587,7 +683,18 @@ namespace tsg
         // handled separately and ARE wrapped zero-copy on Metal -- see the
         // unified-memory weight branch in try_get_cacheable_tensor_buffer,
         // which is where the model-weight memory duplication is avoided.
-        return props.type == GGML_BACKEND_DEVICE_TYPE_GPU;
+        //
+        // Integrated GPUs count as GPUs here. Upstream ggml now reports them as
+        // GGML_BACKEND_DEVICE_TYPE_IGPU (ggml-vulkan for iGPUs behind e.g.
+        // --gpu-device, ggml-cuda for Tegra). Excluding IGPU broke the preload
+        // contract: TSGgml_PreloadQuantizedWeight early-returns success when
+        // this predicate is false WITHOUT caching anything, the managed side
+        // then releases the host weight copies, and the first forward's cache
+        // miss dereferenced the opaque GCHandle cache key as if it were weight
+        // bytes -> access violation on Intel iGPUs (their UMA device buffers
+        // work exactly like discrete ones for our binding purposes).
+        const enum ggml_backend_dev_type type = get_device_static_props(dev).type;
+        return type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU;
     }
 
     // Capability-only test: can this host pointer be wrapped as a device-visible
@@ -600,9 +707,7 @@ namespace tsg
     {
         if (dev == nullptr || ptr == nullptr || size == 0)
             return false;
-        ggml_backend_dev_props props;
-        ggml_backend_dev_get_props(dev, &props);
-        if (!props.caps.buffer_from_host_ptr)
+        if (!get_device_static_props(dev).buffer_from_host_ptr)
             return false;
         const std::size_t alignment = get_host_ptr_alignment(backend, dev);
         return is_pointer_aligned(ptr, alignment);
@@ -923,6 +1028,13 @@ namespace tsg
                 CachedBufferMode::DeviceCopy
             };
             g_device_copy_resident_bytes += static_cast<std::int64_t>(ggml_backend_buffer_get_size(out_buffer));
+            if (vram_log_enabled())
+            {
+                char tag[96];
+                std::snprintf(tag, sizeof(tag), "devcopy(total=%.1fMB)",
+                    g_device_copy_resident_bytes / (1024.0 * 1024.0));
+                vram_log(tag, static_cast<std::int64_t>(ggml_backend_buffer_get_size(out_buffer)));
+            }
             return true;
         }
 
@@ -1015,16 +1127,14 @@ namespace tsg
         // ggml_gallocr_alloc_graph reuses the existing buffer when the new graph
         // fits and grows (reallocates) it only when a larger graph appears.
         bool ok = ggml_gallocr_alloc_graph(g_reuse_gallocr, graph);
-        static const bool s_memlog = std::getenv("TS_GMTP_MEMLOG") != nullptr;
-        if (ok && s_memlog)
+        if (ok && vram_log_enabled())
         {
-            static std::size_t s_last = 0;
-            std::size_t sz = ggml_gallocr_get_buffer_size(g_reuse_gallocr, 0);
-            if (sz != s_last)
+            static std::size_t s_last_size = 0;
+            const std::size_t size = ggml_gallocr_get_buffer_size(g_reuse_gallocr, 0);
+            if (size != s_last_size)
             {
-                fprintf(stderr, "[memlog] reuse_gallocr size %zu -> %zu MB\n",
-                        s_last / 1024 / 1024, sz / 1024 / 1024);
-                s_last = sz;
+                s_last_size = size;
+                vram_log("reuse-gallocr(grew)", static_cast<std::int64_t>(size));
             }
         }
         return ok;
@@ -1084,9 +1194,6 @@ namespace tsg
             alloc_size = ((alloc_size + slab - 1) / slab) * slab;
             if (alloc_size > max_size) alloc_size = max_size; // never exceed a single buffer
             if (alloc_size < needed) alloc_size = needed;
-            if (std::getenv("TS_GMTP_MEMLOG") != nullptr)
-                fprintf(stderr, "[memlog] reuse_compute_buf grow %zu -> %zu MB (needed %zu MB)\n",
-                        g_reuse_compute_size / 1024 / 1024, alloc_size / 1024 / 1024, needed / 1024 / 1024);
             if (g_reuse_compute_buf != nullptr)
                 ggml_backend_buffer_free(g_reuse_compute_buf);
             g_reuse_compute_buf = ggml_backend_buft_alloc_buffer(buft, alloc_size);
@@ -1097,6 +1204,8 @@ namespace tsg
             }
             g_reuse_compute_size = alloc_size;
             ggml_backend_buffer_set_usage(g_reuse_compute_buf, GGML_BACKEND_BUFFER_USAGE_COMPUTE);
+            if (vram_log_enabled())
+                vram_log("reuse-compute-buf(grew)", static_cast<std::int64_t>(alloc_size));
         }
 
         // Re-pack this graph's unallocated tensors into the cached buffer. Mirrors
@@ -1624,6 +1733,66 @@ TSG_EXPORT int TSGgml_IsBackendAvailable(int backendType)
     return ensure_backend(backendType) ? 1 : 0;
 }
 
+// Selects which Vulkan device ggml-vulkan initializes on (multi-GPU hosts, e.g.
+// an iGPU next to a discrete GPU). Must be called before the first GGML op /
+// TSGgml_IsBackendAvailable; once the backend singleton exists the device can
+// no longer change, so a differing late call fails instead of silently
+// binding to the wrong GPU.
+TSG_EXPORT int TSGgml_SetVulkanDeviceIndex(int deviceIndex)
+{
+    clear_last_error();
+    if (deviceIndex < 0)
+    {
+        set_last_error("Vulkan device index must be non-negative.");
+        return 0;
+    }
+
+    if (g_backend != nullptr &&
+        g_backend_type == BACKEND_TYPE_VULKAN &&
+        g_vulkan_device_index.load(std::memory_order_acquire) != deviceIndex)
+    {
+        set_last_error("The ggml-vulkan backend was already initialized on a different device.");
+        return 0;
+    }
+
+    g_vulkan_device_index.store(deviceIndex, std::memory_order_release);
+    return 1;
+}
+
+TSG_EXPORT int TSGgml_GetVulkanDeviceCount()
+{
+    clear_last_error();
+#if defined(GGML_USE_VULKAN)
+    return ggml_backend_vk_get_device_count();
+#else
+    set_last_error("The ggml-vulkan backend is not available in this build.");
+    return 0;
+#endif
+}
+
+TSG_EXPORT int TSGgml_GetVulkanDeviceDescription(int deviceIndex, char* description, int descriptionSize)
+{
+    clear_last_error();
+    if (description == nullptr || descriptionSize <= 0)
+    {
+        set_last_error("Invalid description buffer.");
+        return 0;
+    }
+#if defined(GGML_USE_VULKAN)
+    if (deviceIndex < 0 || deviceIndex >= ggml_backend_vk_get_device_count())
+    {
+        set_last_error("Vulkan device index " + std::to_string(deviceIndex) + " is out of range.");
+        return 0;
+    }
+    ggml_backend_vk_get_device_description(deviceIndex, description, static_cast<size_t>(descriptionSize));
+    return 1;
+#else
+    (void) deviceIndex;
+    set_last_error("The ggml-vulkan backend is not available in this build.");
+    return 0;
+#endif
+}
+
 TSG_EXPORT void* TSGgml_AlignedAlloc(size_t size)
 {
     if (size == 0)
@@ -1724,6 +1893,10 @@ TSG_EXPORT void TSGgml_Shutdown()
     // they were allocated from is torn down.
     free_reuse_compute_buffer();
     free_reuse_gallocr();
+    // Release the calling thread's cached prefill-attention sessions while the
+    // CUDA driver is still alive; leaving them to thread_local destructors
+    // aborts the process on exit ("CUDA error: driver shutting down").
+    free_prefill_attn_sessions();
 
     if (g_backend != nullptr)
     {
@@ -1908,6 +2081,22 @@ TSG_EXPORT int TSGgml_GetBackendMemory(int64_t* free_bytes, int64_t* total_bytes
     return 1;
 }
 
+// Returns 1 if the active backend's device is an integrated GPU (unified-memory
+// iGPU: Intel UHD / AMD APU via ggml-vulkan, Tegra via ggml-cuda), else 0. ggml
+// reports these as GGML_BACKEND_DEVICE_TYPE_IGPU (see ggml-vulkan device_type()).
+// The managed startup warmup uses this to skip the heavy multi-token prefill
+// warmup on memory-bandwidth-bound integrated GPUs, where a 2048-token fused
+// prefill takes minutes and makes the server look hung during initialization.
+TSG_EXPORT int TSGgml_IsActiveDeviceIntegrated()
+{
+    if (!ensure_backend() || g_backend == nullptr)
+        return 0;
+    ggml_backend_dev_t dev = ggml_backend_get_device(g_backend);
+    if (dev == nullptr)
+        return 0;
+    return get_device_static_props(dev).type == GGML_BACKEND_DEVICE_TYPE_IGPU ? 1 : 0;
+}
+
 // Toggle the lazy-sync code path on the per-op kernels. When enabled, ops that
 // wrote their result to host-mapped memory (zero-copy) on the Metal backend skip
 // the trailing ggml_backend_synchronize so the next op's command buffer can be
@@ -2018,6 +2207,20 @@ TSG_EXPORT int TSGgml_PreloadQuantizedWeight(
         ggml_backend_buffer_t buffer = ggml_backend_buft_alloc_buffer(buft, alloc_size);
         if (buffer == nullptr)
         {
+            // A ggml tensor must live in ONE backend buffer, and some devices cap
+            // a single buffer well below total VRAM (ggml-vulkan rejects anything
+            // above the driver's maxBufferSize; WSL's dzn layer caps it under
+            // 3 GB, which e.g. Gemma E4B's Q8_0 per_layer_token_embd exceeds).
+            // When the failed request is larger than the buffer type's advertised
+            // max size, report "too large to preload" (2) so the managed side
+            // keeps the host copy and serves the weight through its host-gather
+            // fallback instead of failing the whole model load. Failures at or
+            // below the advertised max stay hard errors (genuine OOM).
+            if (alloc_size > ggml_backend_buft_get_max_size(buft))
+            {
+                clear_last_error();
+                return 2;
+            }
             set_last_error("Failed to allocate GGML backend buffer for quantized weight preload.");
             return 0;
         }
@@ -2049,6 +2252,16 @@ TSG_EXPORT int TSGgml_PreloadQuantizedWeight(
                 ggml_backend_buffer_get_size(buffer),
                 CachedBufferMode::DeviceCopy
             };
+        }
+
+        if (vram_log_enabled())
+        {
+            static std::atomic<std::int64_t> s_preload_total{0};
+            const std::int64_t total = s_preload_total.fetch_add(
+                static_cast<std::int64_t>(alloc_size)) + static_cast<std::int64_t>(alloc_size);
+            char tag[96];
+            std::snprintf(tag, sizeof(tag), "preload-weight(total=%.1fMB)", total / (1024.0 * 1024.0));
+            vram_log(tag, static_cast<std::int64_t>(alloc_size));
         }
 
         clear_last_error();

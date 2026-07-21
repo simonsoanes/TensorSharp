@@ -13,8 +13,41 @@
 | 思维链 / 工具调用 | 不支持 |
 | 生成方式 | 分块文本扩散，不是自回归 token decode |
 | CLI 支持 | `TensorSharp.Cli` 检测到 `DiffusionGemmaModel` 后进入 diffusion 运行模式 |
-| 服务端支持 | Web UI chat stream 带实时去噪预览；Ollama/OpenAI 兼容路径仍是自回归 chat 路径 |
+| 服务端支持 | Web UI chat stream 带实时去噪预览；Ollama/OpenAI 兼容端点使用 append-oriented 响应形状，只返回最终文本（没有去噪预览） |
 | 连续批处理 | 独立的 [`DiffusionBatchScheduler`](../../TensorSharp.Server/DiffusionBatchScheduler.cs)，在 block 边界接纳请求 |
+
+## 下载
+
+已验证的 GGUF 下载指引：
+
+| 模型 | HF 仓库 | 推荐文件 | 备注 |
+|---|---|---|---|
+| diffusiongemma-26B-A4B-it | [unsloth/diffusiongemma-26B-A4B-it-GGUF](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF) | `diffusiongemma-26B-A4B-it-Q4_K_M.gguf`（16.807 GB）；另有 `Q5_K_M`、`Q6_K`、`Q8_0`、`BF16` | GGUF `general.architecture` = `diffusion-gemma`。官方上游权重：[google/diffusiongemma-26B-A4B-it](https://huggingface.co/google/diffusiongemma-26B-A4B-it) |
+
+`Q4_K_M` 是已发布的最小量化版本。不需要任何配套文件
+（纯文本模型 —— 没有 mmproj）。
+
+命令行下载（每个文件一行；需要先 `pip install -U huggingface_hub`）：
+
+```bash
+python -m pip install -U huggingface_hub
+hf download unsloth/diffusiongemma-26B-A4B-it-GGUF diffusiongemma-26B-A4B-it-Q4_K_M.gguf --local-dir models
+```
+
+CLI diffusion 模式（根据模型架构自动分发 —— 无需模式标志；提示词通过
+`--input` 从文件读取）：
+
+```bash
+dotnet run --project TensorSharp.Cli -c Release -- --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --input prompt.txt \
+  --backend ggml_cuda --max-tokens 256 --diffusion-steps 48 --diffusion-seed 0 --diffusion-blocks 1
+```
+
+服务端（`http://localhost:5000/index.html` 的 Web UI 会流式展示实时去噪预览 ——
+每一步通过 `replace` SSE 帧重绘整条消息；Ollama/OpenAI 兼容端点只返回最终文本）：
+
+```bash
+dotnet run --project TensorSharp.Server -c Release -- --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --backend ggml_cuda
+```
 
 ## 1. 来源与目标
 
@@ -76,7 +109,7 @@ Prompt-KV 缓存在 device-glue 后端启用；纯 CPU 路径会使用统一 for
 CLI 对应：
 
 ```bash
-./TensorSharp.Cli --model diffusion-gemma.gguf --input prompt.txt --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --input prompt.txt --backend ggml_metal \
   --max-tokens 256 --diffusion-steps 48 --diffusion-seed 0 --diffusion-blocks 1
 ```
 
@@ -142,7 +175,6 @@ Diffusion 专属元数据：
 | `DIFFUSION_DEVICE_COPY_BUDGET_MB` | ggml_cuda：模型放不进 VRAM 时 device-copy 缓存上限，默认 768 |
 | `DIFFUSION_SEGMENTED_DECODE` | ggml_cuda：强制开启/关闭逐层融合 decode（`1`/`0`，放不进 VRAM 时自动启用） |
 | `DIFFUSION_PIN_STREAMED=1` | ggml_cuda：把流式权重复制到页锁定内存以 DMA 速度上传（消耗 RAM） |
-| `DIFFUSION_PROFILE=1` / `DIFFUSION_STEPTIME=1` / `DIFFUSION_FUSED_DEBUG=1` | 开发用计时与融合 kernel 调试诊断 |
 
 ## 6. 服务端行为
 

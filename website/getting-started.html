@@ -16,12 +16,12 @@
 <main class="content" id="content">
   <div class="breadcrumb"><a href="index.html">Home</a> › Getting Started</div>
   <h1>Getting Started</h1>
-  <p class="lede">From an empty machine to a streaming reply. The native GGML library compiles automatically on the first build, so the only manual install is the .NET SDK (plus a GPU toolchain if you want acceleration).</p>
+  <p class="lede">From a source checkout to a verified CLI reply or local API. The quick start runs Gemma 4 E4B on a native GGML backend; a managed CPU path (no CMake or GPU toolchain) remains available when you cannot build native code.</p>
 
   <h2 id="prerequisites">1 · Prerequisites</h2>
   <ul>
     <li><a href="https://dotnet.microsoft.com/download/dotnet/10.0" target="_blank" rel="noopener"><strong>.NET 10 SDK</strong></a> — required.</li>
-    <li><strong><code>git</code> + network access</strong> — the native build clones the ggml sources from <a href="https://github.com/ggml-org/ggml" target="_blank" rel="noopener">github.com/ggml-org/ggml</a> into <code>ExternalProjects/ggml/</code> on the first build. Set <code>TENSORSHARP_GGML_NO_UPDATE=1</code> to skip the network update on offline rebuilds.</li>
+    <li><strong><code>git</code>, <code>curl</code>, and network access</strong> — used to clone TensorSharp and download a model. A full native build also clones <a href="https://github.com/ggml-org/ggml" target="_blank" rel="noopener">ggml</a> into <code>ExternalProjects/ggml/</code>; set <code>TENSORSHARP_GGML_NO_UPDATE=1</code> to skip later network updates.</li>
     <li><strong>A GGUF model file</strong> — e.g. from <a href="https://huggingface.co" target="_blank" rel="noopener">Hugging Face</a>. See <a href="models.html#downloads">Model downloads</a>.</li>
   </ul>
   <h4>Per-platform toolchains (only for GPU acceleration)</h4>
@@ -32,52 +32,55 @@
       <tr><td><strong>macOS</strong> (Metal)</td><td><code>ggml_metal</code> / <code>mlx</code></td><td>CMake 3.20+ and Xcode command-line tools. MLX additionally builds <code>libmlxc</code>.</td></tr>
       <tr><td><strong>Windows</strong></td><td><code>ggml_cuda</code> / <code>cuda</code></td><td>CMake 3.20+, Visual Studio 2022 C++ build tools, NVIDIA driver + CUDA Toolkit 12.x (with cuBLAS).</td></tr>
       <tr><td><strong>Linux</strong></td><td><code>ggml_cuda</code> / <code>cuda</code></td><td>CMake 3.20+, NVIDIA driver + CUDA Toolkit 12.x (with cuBLAS).</td></tr>
-      <tr><td>Any (CPU only)</td><td><code>cpu</code> / <code>ggml_cpu</code></td><td>Nothing beyond the .NET SDK.</td></tr>
+      <tr><td><strong>Windows / Linux</strong> (any Vulkan GPU)</td><td><code>ggml_vulkan</code></td><td>Enabled automatically when the machine has a Vulkan runtime (loader installed); opt out with <code>--no-vulkan</code> (or <code>TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=OFF</code>). Windows auto-provisions a portable Vulkan toolchain when no SDK is installed; on Linux install e.g. <code>libvulkan-dev glslc spirv-headers</code>. Needs a Vulkan 1.3 driver at run time.</td></tr>
+      <tr><td>Any (CPU only)</td><td><code>cpu</code></td><td>Nothing beyond the .NET SDK. <code>ggml_cpu</code> is faster but is a native build.</td></tr>
     </tbody>
   </table>
   </div>
 
-  <h2 id="build">2 · Build</h2>
-  <p>Clone and build the whole solution. The first build also compiles the native GGML bridge (this can take a while, especially for CUDA — subsequent builds are fast).</p>
+  <h2 id="build">2 · Clone and choose a build path</h2>
   <pre data-lang="bash"><code>git clone https://github.com/zhongkaifu/TensorSharp.git
-cd TensorSharp
-dotnet build TensorSharp.slnx -c Release</code></pre>
+cd TensorSharp</code></pre>
+  <h3>Managed-CPU path (no native toolchain)</h3>
+  <p>To skip every native build, pass both skip properties and use the managed <code>cpu</code> backend. The first run restores and builds the managed projects automatically.</p>
+  <pre data-lang="bash"><code>-p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true -- --backend cpu</code></pre>
+  <h3>Full native / GPU path</h3>
+  <p>Build the whole solution when you want GGML CPU, Metal, CUDA, Vulkan, or MLX. The first build compiles the native bridge and can take several minutes; subsequent builds are incremental.</p>
+  <pre data-lang="bash"><code>dotnet build TensorSharp.slnx -c Release</code></pre>
   <p>Or build just one application:</p>
   <pre data-lang="bash"><code># Console application
 dotnet build TensorSharp.Cli/TensorSharp.Cli.csproj -c Release
 
 # Web application
 dotnet build TensorSharp.Server/TensorSharp.Server.csproj -c Release</code></pre>
-  <p>The CLI binary lands in <code>TensorSharp.Cli/bin/...</code> and the server in <code>TensorSharp.Server/bin/...</code>. For a CUDA-enabled native build, manual native builds, or MLX, see <a href="backends.html#native-build">Building the native libraries</a>.</p>
-  <div class="callout tip"><div class="ic">📦</div><p>Prefer not to build from source? The <strong>Release Binaries</strong> workflow publishes self-contained archives (Windows/Linux CPU &amp; CUDA, macOS arm64) that bundle the .NET 10 runtime and native libraries — they run with no separate install. See <a href="backends.html#native-build">Backends</a>.</p></div>
+  <p>The CLI binary lands in <code>TensorSharp.Cli/bin/...</code> and the server in <code>TensorSharp.Server/bin/...</code>. For a CUDA- or Vulkan-enabled native build, manual native builds, or MLX, see <a href="backends.html#native-build">Building the native libraries</a>.</p>
+  <div class="callout warn"><div class="ic">📦</div><p><strong>Current release status:</strong> <a href="https://github.com/zhongkaifu/TensorSharp/releases/tag/v3.0.5.0" target="_blank" rel="noopener">v3.0.5.0</a> has no uploaded CLI/server archives, so build from source today. The repository contains a Release Binaries workflow, but do not invent an archive URL—use one only when it is visibly listed on the <a href="https://github.com/zhongkaifu/TensorSharp/releases" target="_blank" rel="noopener">Releases page</a>.</p></div>
 
   <h2 id="download">3 · Download a model</h2>
-  <p>TensorSharp loads models in <a href="glossary.html#terms">GGUF</a> format. A small, well-tested starting point is <strong>Gemma-4-E4B (Q8_0)</strong> from <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener">ggml-org/gemma-4-E4B-it-GGUF</a>. Pick a quantization that fits your hardware — <code>Q4_K_M</code> for low memory, <code>Q8_0</code> for higher quality. The full list is on the <a href="models.html#downloads">Models</a> page.</p>
-  <div class="callout note"><div class="ic">🧩</div><p>For multimodal models, also download the matching <strong>projector</strong> (mmproj) file. If you place it next to the model with a recognized name (e.g. <code>gemma-4-mmproj-F16.gguf</code>), it is auto-detected.</p></div>
+  <p>For the quick start, download the recommended benchmark-verified <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/gemma-4-E4B-it-Q8_0.gguf" target="_blank" rel="noopener">gemma-4-E4B-it-Q8_0.gguf file (7.48 GiB)</a> from the public <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener">ggml-org/gemma-4-E4B-it-GGUF</a> repository. The lower-memory <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/gemma-4-E4B-it-Q4_K_M.gguf" target="_blank" rel="noopener">gemma-4-E4B-it-Q4_K_M.gguf</a> lives in the same repository, and the <a href="models.html#downloads">Models</a> page lists other options.</p>
+  <pre data-lang="bash"><code>curl --create-dirs --fail -L "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" -o models/gemma-4-E4B-it-Q8_0.gguf</code></pre>
+  <div class="callout note"><div class="ic">🧩</div><p>For multimodal models, download the matching <strong>projector</strong> (mmproj) and pass its exact path with <code>--mmproj</code>. The server does not auto-detect a projector, and CLI auto-detection recognizes only a few legacy filenames; explicit paths are reliable.</p></div>
+
+  <h3 id="e4b-fast-lane">Gemma 4 E4B backend and platform notes</h3>
+  <p>The first-run commands below are for Linux + NVIDIA. On Windows + NVIDIA, set <code>$env:TENSORSHARP_GGML_NATIVE_ENABLE_CUDA='ON'</code> in PowerShell, then run the same commands without the Bash assignment prefix. On Apple Silicon, omit the CUDA environment assignment and use <code>ggml_metal</code>. For Vulkan on Windows/Linux, set <code>TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON</code> (PowerShell: <code>$env:TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN='ON'</code>) and use <code>ggml_vulkan</code>. Without a GPU, use <code>ggml_cpu</code> (native CPU kernels). Text needs no projector. For image, video, or audio, download <code>mmproj-gemma-4-E4B-it-Q8_0.gguf</code> from the same repository and add <code>--mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf</code>.</p>
 
   <h2 id="first-run">4 · First run</h2>
-  <p>Choose the <a href="backends.html#table"><code>--backend</code></a> for your hardware. Every backend produces correct output; they differ only in speed.</p>
+  <p>The one-shot prompt comes from a <em>file</em> via <code>--input</code>; <code>--prompt</code> is reserved for Qwen-Image-Edit. The CLI defaults to <code>ggml_cpu</code>, greedy decoding, and 100 generated tokens. The environment assignment enables the CUDA native build; the first run compiles it and can take several minutes, later runs are incremental.</p>
 
   <h3>Option A — one-shot generation (CLI)</h3>
-  <pre data-lang="bash"><code>echo "Explain mixture-of-experts in one sentence." > prompt.txt
-
-# macOS (Apple Silicon)
-./TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --backend ggml_metal
-
-# Windows / Linux + NVIDIA
-./TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --backend ggml_cuda
-
-# Portable / debugging (no GPU)
-./TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --backend cpu</code></pre>
+  <pre data-lang="bash"><code>echo "What is TensorSharp? Answer briefly." &gt; prompt.txt
+TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Cli -c Release -p:TensorSharpSkipMlxNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 128 --backend ggml_cuda</code></pre>
 
   <h3>Option B — interactive chat (REPL)</h3>
-  <pre data-lang="bash"><code>./TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf -i --backend ggml_metal</code></pre>
+  <pre data-lang="bash"><code>dotnet run --project TensorSharp.Cli -c Release --no-build -- --model models/gemma-4-E4B-it-Q8_0.gguf -i --max-tokens 128 --backend ggml_cuda</code></pre>
   <p>Type messages turn-by-turn; drive the session with <a href="cli.html#repl">slash commands</a> like <code>/reset</code>, <code>/think on</code>, or <code>/image photo.png</code>.</p>
 
   <h3>Option C — browser UI + HTTP APIs (server)</h3>
-  <pre data-lang="bash"><code>./TensorSharp.Server --model gemma-4-E4B-it-Q8_0.gguf --backend ggml_metal
-# open http://localhost:5000</code></pre>
-  <p>This serves the chat UI <em>and</em> the <a href="http-api.html">Ollama- and OpenAI-compatible</a> endpoints on the same port.</p>
+  <pre data-lang="bash"><code>TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Server -c Release -p:TensorSharpSkipMlxNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --max-tokens 128
+# open http://localhost:5000/index.html</code></pre>
+  <p>The health response is at <code>http://localhost:5000/</code>; the browser chat is at <code>/index.html</code>. The <a href="http-api.html">Ollama- and OpenAI-compatible</a> endpoints use the same fixed port.</p>
+
+  <div class="callout tip"><div class="ic">✅</div><p><strong>Skip the long command lines.</strong> Put your options in a JSON file and pass <code>--config config/server-basic.json</code> (or <code>config/cli-basic.json</code>). A config entry can even auto-download the model on first run, so a fresh machine needs no manual download step. The repository's <code>config/</code> folder ships ready-to-run examples. → <a href="server.html#config">Configuration file</a></p></div>
 
   <h2 id="next">Where to go next</h2>
   <div class="card-grid">

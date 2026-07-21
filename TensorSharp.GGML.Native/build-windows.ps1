@@ -8,6 +8,7 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BuildDir = Join-Path $ScriptDir "build-windows"
 $EnableCuda = $env:TENSORSHARP_GGML_NATIVE_ENABLE_CUDA
+$EnableVulkan = $env:TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN
 $BuildTests = if ([string]::IsNullOrWhiteSpace($env:TENSORSHARP_GGML_NATIVE_BUILD_TESTS)) { "OFF" } else { $env:TENSORSHARP_GGML_NATIVE_BUILD_TESTS }
 $CudaArchitectures = $env:TENSORSHARP_GGML_NATIVE_CUDA_ARCHITECTURES
 $BuildParallelLevel = if ([string]::IsNullOrWhiteSpace($env:TENSORSHARP_GGML_NATIVE_BUILD_PARALLEL_LEVEL)) { $env:CMAKE_BUILD_PARALLEL_LEVEL } else { $env:TENSORSHARP_GGML_NATIVE_BUILD_PARALLEL_LEVEL }
@@ -43,13 +44,13 @@ function Test-CudaToolkit {
     return $false
 }
 
-function Read-CachedCudaSetting {
+function Read-CachedBackendSetting([string] $CacheVariable) {
     $cacheFile = Join-Path $BuildDir "CMakeCache.txt"
     if (-not (Test-Path $cacheFile)) {
         return ""
     }
 
-    $line = Select-String -Path $cacheFile -Pattern '^TENSORSHARP_GGML_NATIVE_ENABLE_CUDA:BOOL=' | Select-Object -First 1
+    $line = Select-String -Path $cacheFile -Pattern "^$([regex]::Escape($CacheVariable)):BOOL=" | Select-Object -First 1
     if ($null -eq $line) {
         return ""
     }
@@ -112,12 +113,21 @@ function Get-DefaultVisualStudioGenerator {
         return ""
     }
 
-    $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($installPath)) {
+    $installationVersion = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationVersion
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($installationVersion)) {
         return ""
     }
 
-    return "Visual Studio 17 2022"
+    # Map the installed VS major version to its CMake generator name; a
+    # hardcoded generator breaks on machines that only carry a different VS
+    # (e.g. GitHub's windows-latest image now ships Visual Studio 2026 only).
+    switch (("$installationVersion".Trim() -split '\.')[0]) {
+        "16" { return "Visual Studio 16 2019" }
+        "17" { return "Visual Studio 17 2022" }
+        "18" { return "Visual Studio 18 2026" }
+        # Unknown/newer VS: return nothing and let CMake pick its own default.
+        default { return "" }
+    }
 }
 
 for ($i = 0; $i -lt $RemainingArgs.Length; $i++) {
@@ -130,6 +140,14 @@ for ($i = 0; $i -lt $RemainingArgs.Length; $i++) {
         }
         '^--no-cuda$' {
             $EnableCuda = "OFF"
+            continue
+        }
+        '^--vulkan$' {
+            $EnableVulkan = "ON"
+            continue
+        }
+        '^--no-vulkan$' {
+            $EnableVulkan = "OFF"
             continue
         }
         '^--tests$' {
@@ -191,13 +209,70 @@ for ($i = 0; $i -lt $RemainingArgs.Length; $i++) {
 
 $EnableCuda = Normalize-Bool $EnableCuda
 if ([string]::IsNullOrWhiteSpace($EnableCuda)) {
-    $EnableCuda = Read-CachedCudaSetting
+    $EnableCuda = Read-CachedBackendSetting "TENSORSHARP_GGML_NATIVE_ENABLE_CUDA"
 }
 if ([string]::IsNullOrWhiteSpace($EnableCuda) -and (Test-CudaToolkit)) {
     $EnableCuda = "ON"
 }
 if ([string]::IsNullOrWhiteSpace($EnableCuda)) {
     $EnableCuda = "OFF"
+}
+
+# Vulkan: an explicit choice (--vulkan/--no-vulkan or
+# TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN) wins and sticks via the CMake cache;
+# TENSORSHARP_GGML_NATIVE_VULKAN_EXPLICIT records that the cached value was
+# explicit, so an auto-detected default never becomes sticky. Otherwise the
+# backend is auto-enabled when the machine supports Vulkan (the runtime
+# vulkan-1.dll that ships with every recent GPU driver is present) and the
+# build toolchain (headers, loader import lib, glslc, SPIRV-Headers) is
+# downloaded automatically by eng/fetch-vulkan-toolchain.ps1 when missing. An
+# auto-enable whose toolchain cannot be provisioned (e.g. no network) degrades
+# to a warning and builds without Vulkan; an explicit --vulkan makes it fatal.
+$VulkanExplicit = "OFF"
+$EnableVulkan = Normalize-Bool $EnableVulkan
+if (-not [string]::IsNullOrWhiteSpace($EnableVulkan)) {
+    $VulkanExplicit = "ON"
+}
+elseif ((Read-CachedBackendSetting "TENSORSHARP_GGML_NATIVE_VULKAN_EXPLICIT") -eq "ON") {
+    $EnableVulkan = Read-CachedBackendSetting "TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN"
+    if (-not [string]::IsNullOrWhiteSpace($EnableVulkan)) {
+        $VulkanExplicit = "ON"
+    }
+}
+if ([string]::IsNullOrWhiteSpace($EnableVulkan)) {
+    $EnableVulkan = if (Test-Path (Join-Path $env:SystemRoot "System32\vulkan-1.dll")) { "ON" } else { "OFF" }
+}
+
+$VulkanCMakeArgs = New-Object System.Collections.Generic.List[string]
+if ($EnableVulkan -eq "ON") {
+    try {
+        # Ensure the Vulkan build toolchain (headers, loader import lib, glslc,
+        # SPIRV-Headers) is available. With a LunarG SDK installed the script is a
+        # no-op and FindVulkan discovers everything through VULKAN_SDK; otherwise it
+        # provisions a portable toolchain that is passed to CMake explicitly below.
+        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $ScriptDir "..\eng\fetch-vulkan-toolchain.ps1")
+        if ($LASTEXITCODE -ne 0) { throw "fetch-vulkan-toolchain.ps1 failed with exit code $LASTEXITCODE" }
+
+        $VulkanSdk = $env:VULKAN_SDK
+        $HasFullSdk = -not [string]::IsNullOrWhiteSpace($VulkanSdk) -and
+            (Test-Path (Join-Path $VulkanSdk "Include\vulkan\vulkan.h")) -and
+            (Test-Path (Join-Path $VulkanSdk "Lib\vulkan-1.lib")) -and
+            (Test-Path (Join-Path $VulkanSdk "Bin\glslc.exe"))
+        if (-not $HasFullSdk) {
+            $ToolchainDir = (Resolve-Path (Join-Path $ScriptDir "..\ExternalProjects\vulkan-toolchain")).Path
+            $VulkanCMakeArgs.Add("-DVulkan_INCLUDE_DIR=$(Join-Path $ToolchainDir 'Vulkan-Headers\include')")
+            $VulkanCMakeArgs.Add("-DVulkan_LIBRARY=$(Join-Path $ToolchainDir 'loader\vulkan-1.lib')")
+            $VulkanCMakeArgs.Add("-DVulkan_GLSLC_EXECUTABLE=$(Join-Path $ToolchainDir 'shaderc\bin\glslc.exe')")
+            $VulkanCMakeArgs.Add("-DSPIRV-Headers_DIR=$(Join-Path $ToolchainDir 'spirv-headers-install\share\cmake\SPIRV-Headers')")
+        }
+    }
+    catch {
+        if ($VulkanExplicit -eq "ON") { throw }
+        Write-Warning ("This machine supports Vulkan but the ggml-vulkan build toolchain could not be provisioned: " +
+            "$($_.Exception.Message) Building without the ggml-vulkan backend; pass --vulkan to make this an error.")
+        $EnableVulkan = "OFF"
+        $VulkanCMakeArgs.Clear()
+    }
 }
 
 if ($EnableCuda -eq "ON" -and [string]::IsNullOrWhiteSpace($CudaArchitectures) -and -not $UserSetCudaArchitectures) {
@@ -242,13 +317,16 @@ if (-not $UserSetPlatform -and [string]::IsNullOrWhiteSpace($env:CMAKE_GENERATOR
     $GeneratorArgs.Add("x64")
 }
 
-Write-Host "Configuring TensorSharp.GGML.Native (CUDA=$EnableCuda, CUDA_ARCHITECTURES=$CudaArchSummary, TESTS=$BuildTests, PARALLEL=$BuildParallelLevel)"
+Write-Host "Configuring TensorSharp.GGML.Native (CUDA=$EnableCuda, CUDA_ARCHITECTURES=$CudaArchSummary, VULKAN=$EnableVulkan, TESTS=$BuildTests, PARALLEL=$BuildParallelLevel)"
 
 $CMakeArgs = @(
     "-DCMAKE_BUILD_TYPE=Release",
     "-DTENSORSHARP_GGML_NATIVE_ENABLE_CUDA=$EnableCuda",
+    "-DTENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=$EnableVulkan",
+    "-DTENSORSHARP_GGML_NATIVE_VULKAN_EXPLICIT=$VulkanExplicit",
     "-DTENSORSHARP_GGML_NATIVE_BUILD_TESTS=$BuildTests"
 )
+$CMakeArgs += $VulkanCMakeArgs
 
 if ($EnableCuda -eq "ON" -and -not [string]::IsNullOrWhiteSpace($CudaArchitectures) -and -not $UserSetCudaArchitectures) {
     $CMakeArgs += "-DCMAKE_CUDA_ARCHITECTURES=$CudaArchitectures"

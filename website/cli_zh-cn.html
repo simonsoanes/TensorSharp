@@ -18,89 +18,161 @@
   <h1>命令行 (CLI)</h1>
   <p class="lede"><code>TensorSharp.Cli</code> 是用于本地提示词、多模态实验、提示词检查、JSONL 批处理工作流、交互式 REPL 与内置基准测试的控制台宿主。构建后二进制位于 <code>TensorSharp.Cli/bin/...</code>。</p>
 
-  <h2 id="examples">示例</h2>
-  <pre data-lang="bash"><code>cd TensorSharp.Cli/bin
+  <h2 id="quickstart">约 30 秒快速开始</h2>
+  <p>请在 TensorSharp 仓库根目录执行，并先安装 <strong>.NET 10 SDK</strong>。已验证的快速开始会构建原生 GGML 后端，并运行仓库基准已验证的 <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener"><code>gemma-4-E4B-it-Q8_0.gguf</code></a>（7.48 GiB）。复制并运行这些命令约需 30 秒；模型下载与首次 restore/构建耗时更长，取决于网络速度与机器性能。原生源码构建还需要 Git、网络访问、CMake 与可用的 C++ 工具链。</p>
+  <h3>Linux + NVIDIA</h3>
+  <pre data-lang="bash"><code>TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet build TensorSharp.slnx -c Release -p:TensorSharpSkipMlxNative=true
+curl --create-dirs --fail -L "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" -o models/gemma-4-E4B-it-Q8_0.gguf
+echo "请用一段话说明本地推理。" &gt; prompt.txt
+dotnet run --project TensorSharp.Cli -c Release --no-build -- --model models/gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 128 --backend ggml_cuda</code></pre>
+  <h3>Windows PowerShell + NVIDIA</h3>
+  <pre data-lang="powershell"><code>$env:TENSORSHARP_GGML_NATIVE_ENABLE_CUDA = 'ON'
+dotnet build TensorSharp.slnx -c Release -p:TensorSharpSkipMlxNative=true
+curl.exe --create-dirs --fail -L "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" -o models\gemma-4-E4B-it-Q8_0.gguf
+Set-Content -Encoding utf8 prompt.txt "请用一段话说明本地推理。"
+dotnet run --project TensorSharp.Cli -c Release --no-build -- --model models\gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 128 --backend ggml_cuda</code></pre>
+  <p>省略 <code>--input</code> 时，CLI 会退回内置的 <code>What is 1+1?</code> 提示词；若要进行自定义的单次文本推理，请把提示词保存到文件并通过 <code>--input</code> 传入。<code>--prompt</code> 仅用于 Qwen-Image-Edit 的编辑指令。</p>
 
-# 文本推理（macOS）
-./TensorSharp.Cli --model &lt;model.gguf&gt; --input prompt.txt --output result.txt \
+  <h2 id="e4b-fast-lane">在其他原生后端上运行 Gemma 4 E4B</h2>
+  <p>Apple Silicon 请省略 CUDA 环境变量并使用 <code>ggml_metal</code>；受支持的 Windows/Linux Vulkan GPU 请改为请求 <code>TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON</code> 并使用 <code>ggml_vulkan</code>；<code>ggml_cpu</code> 运行原生 CPU 内核，无需 GPU。同一仓库还提供内存占用更低的 <code>gemma-4-E4B-it-Q4_K_M.gguf</code>。纯文本不需要 <code>mmproj</code>；只有图像、视频或音频输入才需要通过 <code>--mmproj</code> 添加匹配的 <code>mmproj-gemma-4-E4B-it-Q8_0.gguf</code>。完整平台语法见<a href="getting-started_zh-cn.html#e4b-fast-lane">快速开始</a>。</p>
+
+  <h2 id="examples">示例</h2>
+  <p>请在仓库根目录运行这些源码命令。替换示例路径，并选择构建所支持的原生后端。</p>
+  <pre data-lang="bash"><code># 文本推理（macOS）
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --input prompt.txt --output result.txt \
     --max-tokens 200 --backend ggml_metal
 
 # Windows/Linux + NVIDIA GPU 上的文本推理
-./TensorSharp.Cli --model &lt;model.gguf&gt; --input prompt.txt --output result.txt \
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --input prompt.txt --output result.txt \
     --max-tokens 200 --backend ggml_cuda
 
+# 在任意 Vulkan GPU（AMD / Intel / NVIDIA）上的文本推理
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --input prompt.txt --output result.txt \
+    --max-tokens 200 --backend ggml_vulkan
+
+# 多 GPU 主机：先列出可见的 Vulkan 设备，再按索引选择
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- --list-gpus
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --input prompt.txt --max-tokens 200 \
+    --backend ggml_vulkan --gpu-device 1
+
 # 交互式逐轮聊天（REPL），带 KV 缓存复用与斜杠命令
-./TensorSharp.Cli --model &lt;model.gguf&gt; --backend ggml_metal --interactive
-./TensorSharp.Cli --model &lt;model.gguf&gt; --backend ggml_metal -i \
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --backend ggml_metal --interactive
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --backend ggml_metal -i \
     --system "You are a terse assistant." --temperature 0.7 --top-p 0.9 --think</code></pre>
 
   <h3>多模态</h3>
   <pre data-lang="bash"><code># 图像推理（Gemma 3/4、Qwen 3.5-family）
-./TensorSharp.Cli --model &lt;model.gguf&gt; --image photo.png --backend ggml_metal
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --image photo.png --max-tokens 200 --backend ggml_metal
 
 # 视频推理（Gemma 4）
-./TensorSharp.Cli --model &lt;model.gguf&gt; --video clip.mp4 --backend ggml_metal
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --video clip.mp4 --max-tokens 200 --backend ggml_metal
 
 # 音频推理（Gemma 4）
-./TensorSharp.Cli --model &lt;model.gguf&gt; --audio speech.wav --backend ggml_metal</code></pre>
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --audio speech.wav --max-tokens 200 --backend ggml_metal
+
+# PDF 文档问答（--input 是问题；扫描件/纯图像 PDF 需要视觉模型 +
+# --mmproj，含文本的 PDF 可使用任意模型）
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --pdf report.pdf --input question.txt \
+    --max-tokens 400 --backend ggml_metal</code></pre>
 
   <h3>推理、工具与采样</h3>
   <pre data-lang="bash"><code># 思考 / 推理模式
-./TensorSharp.Cli --model &lt;model.gguf&gt; --input prompt.txt --backend ggml_metal --think
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --input prompt.txt --max-tokens 400 --backend ggml_metal --think
 
 # 工具调用
-./TensorSharp.Cli --model &lt;model.gguf&gt; --input prompt.txt --backend ggml_metal \
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --input prompt.txt --max-tokens 300 --backend ggml_metal \
     --tools tools.json
 
-# 带采样参数
-./TensorSharp.Cli --model &lt;model.gguf&gt; --input prompt.txt --backend ggml_metal \
+# 带采样参数（CLI 默认为贪心解码）
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --input prompt.txt --max-tokens 200 --backend ggml_metal \
     --temperature 0.7 --top-p 0.9 --top-k 40 --repeat-penalty 1.2 --seed 42</code></pre>
 
   <h3 id="imageedit">图像编辑（Qwen-Image-Edit）</h3>
   <pre data-lang="bash"><code># 提示词 + 输入图像 -> 编辑后的图像。VAE + Qwen2.5-VL 文本编码器伴随文件
 # 会在 DiT GGUF 旁解析（或用 --qwen-image-vae / --qwen-image-vl /
 # --qwen-image-mmproj 指定）。
-./TensorSharp.Cli --model &lt;qwen-image-edit-DiT.gguf&gt; --image input.png \
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;qwen-image-edit-DiT.gguf&gt; --image input.png \
     --prompt "Make the sky a dramatic sunset." --output edited.png \
     --backend ggml_cuda --diffusion-steps 30 --cfg 2.5 --diffusion-seed 0</code></pre>
 
   <h3 id="diffusion">DiffusionGemma 与检查</h3>
   <pre data-lang="bash"><code># DiffusionGemma 文本扩散生成
-./TensorSharp.Cli --model &lt;diffusion-gemma.gguf&gt; --input prompt.txt --backend ggml_metal \
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;diffusion-gemma.gguf&gt; --input prompt.txt --backend ggml_metal \
     --max-tokens 256 --diffusion-steps 48 --diffusion-seed 0
 
 # 检查渲染后的提示词与分词，但不运行推理
-./TensorSharp.Cli --model &lt;model.gguf&gt; --input prompt.txt --dump-prompt</code></pre>
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --input prompt.txt --dump-prompt</code></pre>
 
   <h3 id="jsonl">批处理与基准测试</h3>
   <pre data-lang="bash"><code># 批处理（JSONL）
-./TensorSharp.Cli --model &lt;model.gguf&gt; --input-jsonl requests.jsonl \
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --input-jsonl requests.jsonl \
     --output results.txt --backend ggml_metal
 
 # 带 KV 缓存复用的多轮对话模拟（与 Web UI 行为一致）
-./TensorSharp.Cli --model &lt;model.gguf&gt; --multi-turn-jsonl chat.jsonl \
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --multi-turn-jsonl chat.jsonl \
     --backend ggml_metal --max-tokens 200
 
 # 吞吐基准：best-of-N 的 prefill 与 decode 计时
-./TensorSharp.Cli --model &lt;model.gguf&gt; --backend ggml_metal \
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --backend ggml_metal \
     --benchmark --bench-prefill 256 --bench-decode 128 --bench-runs 3</code></pre>
   <p>JSONL 格式为每行一个 JSON 对象：</p>
   <pre data-lang="json"><code>{"id": "q1", "messages": [{"role": "user", "content": "What is 2+3?"}], "max_tokens": 50}
 {"id": "q2", "messages": [{"role": "user", "content": "Write a haiku."}], "max_tokens": 100, "temperature": 0.8}</code></pre>
 
+  <h2 id="config">配置文件（<code>--config</code>）</h2>
+  <p>可以用 <code>--config</code> 传入一个 JSON 文件，取代冗长的命令行；<a href="server_zh-cn.html">服务端</a>读取相同格式。<strong>命令行参数始终优先</strong>——先应用文件中的值，命令行上再次给出的参数会覆盖它们，因此可以在多台机器上复用同一个文件，只覆盖需要变化的部分。<code>--config</code> 可重复以叠加多个文件（后者优先）。允许注释与尾随逗号。</p>
+  <pre data-lang="bash"><code># 使用该文件，但本次运行覆盖后端
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --config config/cli-basic.json --backend ggml_cpu</code></pre>
+  <p>键名与下方长选项名相同（可带或不带前缀 <code>--</code>）。字符串/数字展开为 <code>--key value</code>，<code>true</code> 展开为裸开关 <code>--key</code>，数组展开为重复的标志。</p>
+  <p><strong>变量。</strong> 在 <code>"variables"</code> 中定义一次共享值，用 <code>${name}</code> 在任意字符串值中引用（未定义的名称回退到同名环境变量）。可以定义任意多个根路径。</p>
+  <p><strong>自动下载。</strong> 任何文件参数都可以写成带本地 <code>path</code> 与一个或多个 <code>urls</code> 的对象。若 <code>path</code> 不存在，则从第一个可用 URL 下载（镜像按顺序尝试），保存到该路径，之后复用；进度打印到 stderr，可选的 <code>sha256</code> 用于校验。</p>
+  <pre data-lang="json"><code>{
+  "variables": { "modelRoot": "C:/models", "hf": "https://huggingface.co" },
+  "backend": "ggml_cuda",
+  "max-tokens": 256,
+  "temperature": 0.7,
+  "model": {
+    "path": "${modelRoot}/Qwen3.5-9B-Q8_0.gguf",
+    "urls": [ "${hf}/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q8_0.gguf" ]
+  }
+}</code></pre>
+  <p>开箱即用的示例见仓库 <code>config/</code> 目录（<code>cli-basic.json</code>、<code>server-basic.json</code>、<code>variables.json</code>、<code>auto-download.json</code>、<code>qwen-image-edit.json</code>）——每个都使用真实、公开、无需授权的 URL，因此在全新机器上也能直接运行。完整说明见 <code>config/README.md</code>。</p>
+
   <h2 id="options">命令行选项</h2>
+  <p>CLI 目前没有完整的 <code>--help</code> 页面；找不到有效模型路径时才会打印用法概要。未知参数会被忽略，因此请准确复制选项名，否则拼写错误也可能看起来执行成功。</p>
   <h4>输入 / 输出</h4>
   <div class="table-scroll">
   <table>
     <thead><tr><th>选项</th><th>说明</th></tr></thead>
     <tbody>
       <tr><td><code>--model &lt;path&gt;</code></td><td>GGUF 模型文件路径（必需）。</td></tr>
-      <tr><td><code>--input &lt;path&gt;</code></td><td>包含用户提示词的文本文件。</td></tr>
+      <tr><td><code>--input &lt;path&gt;</code></td><td>包含用户提示词的文本文件。单次文本提示词只能来自文件；<code>--prompt</code> 保留用于 Qwen-Image-Edit 的编辑指令。</td></tr>
+      <tr><td><code>--pdf &lt;path&gt;</code></td><td>单次模式的 PDF 文档输入。含文本的 PDF 会提取文本并按 token 预算截断；扫描件/纯图像 PDF 会光栅化为页面图像，并需要视觉模型 + <code>--mmproj</code>。<code>--input</code> 变为针对文档的问题；<code>TS_PDF_MAX_PAGES</code> 限制读取页数（默认：全部）。</td></tr>
       <tr><td><code>--input-jsonl &lt;path&gt;</code></td><td>含批量请求的 JSONL 文件（每行一个 JSON）。</td></tr>
       <tr><td><code>--multi-turn-jsonl &lt;path&gt;</code></td><td>用于带 KV 缓存复用的多轮对话模拟的 JSONL 文件。</td></tr>
       <tr><td><code>--output &lt;path&gt;</code></td><td>将生成文本写入此文件。</td></tr>
-      <tr><td><code>--image / --video / --audio &lt;path&gt;</code></td><td>用于视觉 / 视频 / 音频推理的媒体文件。</td></tr>
-      <tr><td><code>--mmproj &lt;path&gt;</code></td><td>多模态投影器 GGUF 文件路径（放在模型旁则自动检测）。</td></tr>
+      <tr><td><code>--image / --video / --audio &lt;path&gt;</code></td><td>用于视觉 / 视频 / 音频推理的媒体文件（音频需要 Gemma 4 的音频编码器）。</td></tr>
+      <tr><td><code>--mmproj &lt;path&gt;</code></td><td>多模态投影器 GGUF 路径。建议显式传入；自动检测只识别少数旧式伴随文件名。</td></tr>
     </tbody>
   </table>
   </div>
@@ -110,28 +182,32 @@
     <thead><tr><th>选项</th><th>说明</th></tr></thead>
     <tbody>
       <tr><td><code>--max-tokens &lt;N&gt;</code></td><td>最大生成 token 数（默认：100）。</td></tr>
-      <tr><td><code>--backend &lt;type&gt;</code></td><td>计算后端：<code>cpu</code>、<code>cuda</code>、<code>mlx</code>、<code>ggml_cpu</code>、<code>ggml_metal</code>、<code>ggml_cuda</code>。</td></tr>
-      <tr><td><code>--kv-cache-dtype &lt;type&gt;</code></td><td>KV 缓存精度：<code>f32</code>（默认）、<code>f16</code>、<code>q8_0</code> 或 <code>q4_0</code>。块量化档位需要原生 GGML flash-attention 路径；<code>q4_0</code>（约为 f32 占用的 1/7）面向 128K–256K 的超长上下文。</td></tr>
+      <tr><td><code>--backend &lt;type&gt;</code></td><td>计算后端：<code>cpu</code>、<code>cuda</code>、<code>mlx</code>、<code>ggml_cpu</code>、<code>ggml_metal</code>、<code>ggml_cuda</code>、<code>ggml_vulkan</code>（默认：<code>ggml_cpu</code>）。</td></tr>
+      <tr><td><code>--gpu-device &lt;N&gt;</code></td><td><code>ggml_vulkan</code> 后端在多 GPU 主机上使用的 Vulkan 设备索引（默认：0；环境变量 <code>TS_GGML_VULKAN_DEVICE</code>）。</td></tr>
+      <tr><td><code>--list-gpus</code></td><td>列出 ggml-vulkan 可见的 Vulkan 设备（索引 + 显卡名称）后退出。</td></tr>
+      <tr><td><code>--kv-cache-dtype &lt;type&gt;</code></td><td>KV 缓存精度：<code>f32</code>、<code>f16</code>、<code>q8_0</code> 或 <code>q4_0</code>（默认：自动，由后端/模型选择；覆盖 <code>KV_CACHE_DTYPE</code> 环境变量）。块量化档位需要原生 GGML flash-attention 路径；<code>q4_0</code>（约为 f32 占用的 1/7）面向 128K–256K 的超长上下文。</td></tr>
       <tr><td><code>--interactive</code> / <code>-i</code></td><td>启动交互式 REPL（见下文）。</td></tr>
-      <tr><td><code>--system &lt;text&gt;</code> / <code>--system-file &lt;path&gt;</code></td><td>从文本或文件设定会话的系统提示。</td></tr>
+      <tr><td><code>--system &lt;text&gt;</code> / <code>--system-file &lt;path&gt;</code></td><td>从文本或文件设定会话的系统提示。仅交互式 REPL 与 DiffusionGemma 扩散模式使用它；普通单次文本模式会忽略系统提示。</td></tr>
       <tr><td><code>--think</code></td><td>启用思考 / 推理模式（思维链）。</td></tr>
       <tr><td><code>--tools &lt;path&gt;</code></td><td>含工具 / 函数定义的 JSON 文件。</td></tr>
       <tr><td><code>--dump-prompt</code></td><td>渲染提示词 + 分词后退出（不生成）。</td></tr>
+      <tr><td><code>--config &lt;path&gt;</code></td><td>从 JSON <a href="#config">配置文件</a>读取参数（命令行参数会覆盖它）。支持 <code>${变量}</code> 与模型自动下载。可重复。</td></tr>
     </tbody>
   </table>
   </div>
   <h4>采样</h4>
+  <p>CLI 默认为<strong>贪心解码</strong>：temperature <code>0</code>、top-k <code>0</code>、top-p <code>1.0</code>、min-p <code>0</code>、关闭惩罚、seed <code>-1</code>（与默认值匹配 Ollama 的服务端不同）。传入以下参数可启用采样；这些参数也会带入交互式 REPL。</p>
   <div class="table-scroll">
   <table>
     <thead><tr><th>选项</th><th>说明</th></tr></thead>
     <tbody>
-      <tr><td><code>--temperature &lt;f&gt;</code></td><td>采样温度（0 = 贪心）。</td></tr>
-      <tr><td><code>--top-k &lt;N&gt;</code></td><td>Top-K 过滤（0 = 禁用）。</td></tr>
-      <tr><td><code>--top-p &lt;f&gt;</code></td><td>核采样阈值（1.0 = 禁用）。</td></tr>
-      <tr><td><code>--min-p &lt;f&gt;</code></td><td>最小概率过滤（0 = 禁用）。</td></tr>
-      <tr><td><code>--repeat-penalty &lt;f&gt;</code></td><td>重复惩罚（1.0 = 无）。</td></tr>
-      <tr><td><code>--presence-penalty &lt;f&gt;</code> / <code>--frequency-penalty &lt;f&gt;</code></td><td>存在 / 频率惩罚（0 = 禁用）。</td></tr>
-      <tr><td><code>--seed &lt;N&gt;</code></td><td>随机种子（-1 = 非确定性）。</td></tr>
+      <tr><td><code>--temperature &lt;f&gt;</code></td><td>采样温度（默认 0 = 贪心）。</td></tr>
+      <tr><td><code>--top-k &lt;N&gt;</code></td><td>Top-K 过滤（默认 0 = 禁用）。</td></tr>
+      <tr><td><code>--top-p &lt;f&gt;</code></td><td>核采样阈值（默认 1.0 = 禁用）。</td></tr>
+      <tr><td><code>--min-p &lt;f&gt;</code></td><td>最小概率过滤（默认 0 = 禁用）。</td></tr>
+      <tr><td><code>--repeat-penalty &lt;f&gt;</code></td><td>重复惩罚（默认 1.0 = 无）。</td></tr>
+      <tr><td><code>--presence-penalty &lt;f&gt;</code> / <code>--frequency-penalty &lt;f&gt;</code></td><td>存在 / 频率惩罚（默认 0 = 禁用）。</td></tr>
+      <tr><td><code>--seed &lt;N&gt;</code></td><td>随机种子（默认 -1 = 非确定性）。</td></tr>
       <tr><td><code>--stop &lt;string&gt;</code></td><td>停止序列（可重复）。</td></tr>
     </tbody>
   </table>
@@ -160,7 +236,7 @@
   <p class="page-foot-note">完整参考（含 <code>--test</code>、<code>--test-templates</code> 与分块 prefill 正确性检查）见 <a href="api-reference_zh-cn.html#cli-flags">API 参考</a> 页。</p>
 
   <h2 id="repl">交互式 REPL 命令</h2>
-  <p>用 <code>--interactive</code> / <code>-i</code> 启动。任何不以 <code>/</code> 开头的内容都是一轮用户输入；输入 <code>/help</code> 查看列表。提示头显示当前模型、后端、架构、上下文长度、投影器、对话深度与待发送附件。生成时按 <kbd>Ctrl+C</kbd> 中断；在提示符处按则退出。</p>
+  <p>用 <code>--interactive</code> / <code>-i</code> 启动。任何不以 <code>/</code> 开头的内容都是一轮用户输入；输入 <code>/help</code> 查看列表。提示头显示当前模型、后端、架构、上下文长度、投影器、对话深度与待发送附件。生成时按 <kbd>Ctrl+C</kbd> 中断；在提示符处按 <kbd>Ctrl+C</kbd> 退出。</p>
   <h4>对话</h4>
   <div class="table-scroll">
   <table>
@@ -169,8 +245,8 @@
       <tr><td><code>/help</code>、<code>/?</code></td><td>显示所有交互命令。</td></tr>
       <tr><td><code>/exit</code>、<code>/quit</code></td><td>离开会话。</td></tr>
       <tr><td><code>/reset</code>、<code>/new</code></td><td>清空对话历史与 KV 缓存。</td></tr>
-      <tr><td><code>/history</code> · <code>/save &lt;file&gt;</code></td><td>打印 / 追加记录。</td></tr>
-      <tr><td><code>/system &lt;text&gt;</code></td><td>设置系统提示（重置 KV 缓存）。</td></tr>
+      <tr><td><code>/history</code> · <code>/save &lt;file&gt;</code></td><td>打印对话 / 将记录写入文件。</td></tr>
+      <tr><td><code>/system &lt;text&gt;</code></td><td>设置系统提示（空参数会清除它）。</td></tr>
       <tr><td><code>/think on|off</code> · <code>/multiline on|off</code></td><td>切换推理模式 / 多行输入。</td></tr>
     </tbody>
   </table>

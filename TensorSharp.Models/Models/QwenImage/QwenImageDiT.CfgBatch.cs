@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -52,7 +52,6 @@ namespace TensorSharp.Models.QwenImage
 
             Tensor temb = TimeEmbed(timestep01);   // [2, 3072] (shared)
 
-            var blkSw = TimingOn ? System.Diagnostics.Stopwatch.StartNew() : null;
             bool cacheActive = CacheEnabled && stepIndex >= 0 && totalSteps > 1;
             if (!cacheActive)
             {
@@ -99,11 +98,6 @@ namespace TensorSharp.Models.QwenImage
                 else { var rem = stateC.RemainingResidual ?? new float[imgLen]; for (long i = 0; i < imgLen; i++) rem[i] = imgHostC[i] - after0C[i]; stateC.RemainingResidual = rem; _cacheComputed++; }
                 if (useN) { var rem = stateN.RemainingResidual; for (long i = 0; i < imgLen; i++) imgHostN[i] += rem[i]; _cacheSkipped++; }
                 else { var rem = stateN.RemainingResidual ?? new float[imgLen]; for (long i = 0; i < imgLen; i++) rem[i] = imgHostN[i] - after0N[i]; stateN.RemainingResidual = rem; _cacheComputed++; }
-            }
-            if (blkSw != null)
-            {
-                blkSw.Stop();
-                Console.WriteLine($"  [dit-timing] cfg-batched {NumLayers}-block loop imgSeq={imgSeq} txtSeq={txtSeqC}/{txtSeqN}: {blkSw.Elapsed.TotalMilliseconds:F0}ms");
             }
             temb.Dispose();
 

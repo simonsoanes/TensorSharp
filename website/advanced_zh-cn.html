@@ -37,16 +37,16 @@
   <p>部分架构自带一个<strong>多 token 预测（MTP / NextN）草稿头</strong>，让服务器可为单序列（非并发）运行<em>无损</em>推测解码。草稿廉价地提出若干未来 token，主干在一次批量前向中验证全部，被接受的 token 一步提交。</p>
   <div class="callout tip"><div class="ic">🎯</div><p>由于请求自身的采样器 —— 温度、top-k/p 与全部惩罚 —— <em>同时</em>驱动草稿与验证，输出<strong>与标准解码完全一致</strong>。推测只改变产生相同 token 所需的前向次数。</p></div>
   <p>它默认关闭。在服务器上用 <code>--mtp-spec</code>（环境变量 <code>TS_MTP_SPEC=1</code>）启用：</p>
-  <pre data-lang="bash"><code># Qwen 3.6 —— NextN 块内嵌在主干 GGUF 中，无需额外文件
-./TensorSharp.Server --model Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf --backend ggml_cuda \
+  <pre data-lang="bash"><code># Qwen 3.6 —— 必须使用保留 NextN 块的 -MTP- 仓库 GGUF；基础仓库导出会剥离该块
+dotnet run --project TensorSharp.Server -c Release --no-build -- --model Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf --backend ggml_cuda \
     --mtp-spec --mtp-draft 8 --mtp-pmin 0.75
 
 # Gemma 4 —— 加载与目标匹配的独立 gemma4-assistant 草稿 GGUF
-./TensorSharp.Server --model gemma-4-12B-it-Q4_K_M.gguf --backend ggml_cuda \
-    --mtp-spec --mtp-draft-model gemma-4-12B-assistant-Q8_0.gguf</code></pre>
+dotnet run --project TensorSharp.Server -c Release --no-build -- --model gemma-4-12B-it-qat-UD-Q4_K_XL.gguf --backend ggml_cuda \
+    --mtp-spec --mtp-draft-model mtp-gemma-4-12B-it.gguf</code></pre>
   <h4>两种草稿头形态</h4>
   <ul>
-    <li><strong>Qwen 3.6（内嵌 NextN）</strong> —— GGUF 携带一个额外解码块以及 NextN 投影/归一化张量。无需独立文件；<code>--mtp-draft-model</code> 会被忽略。GatedDeltaNet 主干状态会被快照，以便部分被拒绝的验证批可回滚。</li>
+    <li><strong>Qwen 3.6（内嵌 NextN）</strong> —— GGUF 携带一个额外解码块以及 NextN 投影/归一化张量。无需独立文件；<code>--mtp-draft-model</code> 会被忽略。只有 <a href="https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF" target="_blank" rel="noopener">unsloth/Qwen3.6-35B-A3B-MTP-GGUF</a> 一类保留 NextN 张量的导出才具备该块；基础仓库导出会剥离它并静默回退到标准 decode。GatedDeltaNet 主干状态会被快照，以便部分被拒绝的验证批可回滚。</li>
     <li><strong>Gemma 4（独立 <code>gemma4-assistant</code> GGUF）</strong> —— 一个 EAGLE 式循环草稿器，用 <code>--mtp-draft-model</code> 加载。它自身不持有 K/V：每个草稿层都查询目标模型已有的逐层 KV 缓存。草稿的隐藏维度必须与目标一致（把 12B 目标与其 12B 草稿配对）。不匹配或不完整的草稿会在<strong>启动时立即失败</strong>并给出修复提示。</li>
   </ul>
   <h4>何处有收益</h4>
@@ -72,11 +72,14 @@
 
   <h2 id="perf">性能优化</h2>
   <p>这是跨架构的概要；<code>docs/models/</code> 中每个模型卡都会以确切分派的 GGML 图逐一讲解相同内核。</p>
+  <div class="callout tip"><div class="ic">⚡</div><p><strong>已验证的 Gemma 4 E4B Q8_0 快路径：</strong>仓库基准已在 GPU 后端上验证原生 GGML 的 E4B Q8_0 家族与执行路径。推荐从公开的 <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener"><code>ggml-org/gemma-4-E4B-it-GGUF</code></a> 下载。</p></div>
   <ul>
-    <li><strong>融合 GPU decode</strong>（Gemma 4）—— 所有 transformer 层在一次 GGML 图分派中完成，把每 token 的 CPU↔GPU 往返从数百次降到一次（相对逐 op 分派约 2.6×）。</li>
-    <li><strong>融合 GPU prefill</strong>（Gemma 4）—— 在 prefill 期间，dense 层每层一次分派完成整块（归一化、QKV、RoPE、注意力、FFN、残差）。</li>
-    <li><strong>分块 prefill</strong>（Gemma 4）—— 长提示被切成有界块，避免滑动窗口层产生 O(n²) 的注意力分数张量。独占（无竞争）请求采用拆分的分块大小：全新的 <code>start_pos = 0</code> 分块以 <code>TS_SCHED_SOLO_PREFILL_CHUNK</code>（默认 8192）走融合整图路径，其余尾部按 <code>TS_SCHED_SOLO_TAIL_PREFILL_CHUNK</code>（默认 2048）处理。</li>
+    <li><strong>单图 GPU decode</strong>（Gemma 4 dense，包括 E4B）—— 所有 transformer 层在一次 GGML 图分派中完成，把每 token 的 CPU↔GPU 往返从数百次降到一次（相对逐 op 分派约 2.6×）。</li>
+    <li><strong>保留 E4B 语义的融合 prefill / verify</strong> —— 原生整模型路径会在 E4B prefill/verify 中携带逐层嵌入（PLE）与共享 KV donor 映射，而不会回退到数百次逐 op 提交。</li>
+    <li><strong>调度器自动 N=1 快路径</strong> —— 只有一个序列被调度时，服务器会自动使用 Gemma 4 的融合逐序列 forward，避免完全批处理路径的固定开销。</li>
+    <li><strong>分块 prefill</strong>（Gemma 4）—— 长提示被切成有界块，避免滑动窗口层产生 O(n²) 的注意力分数张量。独占（无竞争）请求按 <code>TS_SCHED_SOLO_PREFILL_CHUNK</code>（默认 8192）走融合整图路径；有竞争时降至 <code>TS_SCHED_PREFILL_CHUNK</code>（默认 1024）。</li>
     <li><strong>融合 Qwen 3.5/3.6 注意力与 FFN</strong> —— 单图融合注意力层 decode、融合 prefill 注意力、融合 out-proj + FFN，以及融合视觉编码器块（约 15 op → 2）。</li>
+    <li><strong>融合 QK-Norm + RoPE</strong>（Qwen 3.5/3.6，direct CUDA）—— <code>cuda</code> 后端在纯文本 prefill 路径用单个 CUDA kernel 完成 QK-Norm 与 NeoX RoPE。默认开启；用 <code>TS_FUSED_QKNORM_ROPE=0</code> 禁用。</li>
     <li><strong>原生量化计算</strong> —— Q4_K_M、Q6_K、Q8_0、IQ2_XXS、MXFP4 直接用于 matmul 而不展开为 FP32；批量 <code>AddmmQuantBatch</code> 在一次分派中处理多个子权重 matmul。</li>
     <li><strong>批量 GPU MoE</strong> —— 所有被选专家（加上可选的共享专家与残差相加）在每个 MoE 层折叠为一次 GGML 图分派。</li>
     <li><strong>KV 缓存前缀复用</strong> —— 多轮对话复用最长匹配 token 前缀；滑动窗口模型按窗口大小回退截断。</li>

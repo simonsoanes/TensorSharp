@@ -17,7 +17,7 @@ affect — keep them in sync when you add a new flag.
 | Axis | Values |
 |---|---|
 | **Models** | Auto-discovered GGUFs in `/Users/ZhongkaiFu/work/model` (configurable); explicit overrides also supported. DiffusionGemma is not auto-classified as a first-class matrix family yet; use an explicit config entry before experimenting with it. |
-| **Backends** | `cpu`, `ggml_cpu`, `ggml_metal`, `ggml_cuda`, `cuda`, `mlx` (host-availability filtered) |
+| **Backends** | `cpu`, `ggml_cpu`, `ggml_metal`, `ggml_cuda`, `ggml_vulkan`, `cuda`, `mlx` (host-availability filtered). `ggml_vulkan` is registered but not in the config's `default_backends` sweep — include it explicitly with `--backends ggml_vulkan`. |
 | **Features / prompt types** | Autoregressive CLI features: synthetic prefill (512, 2048), synthetic decode (128), short text, long text, uploaded text, multi-turn chat, function/tool calling, thinking mode, image, audio, video. There is no dedicated diffusion feature yet. |
 | **Env-var sweeps** | Baseline cells plus the curated high-impact flags selected by `default_env_vars` in [`Defaults/matrix-config.json`](Defaults/matrix-config.json). The registered superset lives in `EnvVarMatrix.All`; DiffusionGemma `DIFFUSION_*` knobs are currently out of matrix and not scrubbed/swept by default. See the [matrix doc](../docs/env_var_feature_matrix.md). |
 
@@ -91,7 +91,7 @@ Per-model overrides look like this:
             "family": "gemma4",
             "display_name": "Gemma 4 E4B Q8_0",
             "gguf": "gemma-4-E4B-it-Q8_0.gguf",
-            "mmproj": "gemma-4-mmproj-F16.gguf",
+            "mmproj": "mmproj-gemma-4-E4B-it-Q8_0.gguf",
             "supports_image": true,
             "supports_audio": true,
             "supports_video": true,

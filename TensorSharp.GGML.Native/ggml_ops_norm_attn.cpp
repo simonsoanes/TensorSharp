@@ -134,48 +134,16 @@ namespace {
             return 0;
         }
 
-        ggml_tensor* value_tensor = make_norm_tensor(context.value, op, contiguous_src, eps);
-        if (value_tensor == nullptr)
-        {
-            if (g_last_error.empty())
-            {
-                set_last_error("Failed to create ggml norm node.");
-            }
-            return 0;
-        }
-
-        value_tensor = ggml_mul(context.value, value_tensor, contiguous_gamma);
-        if (value_tensor == nullptr)
-        {
-            set_last_error("Failed to create ggml norm scale node.");
-            return 0;
-        }
-
+        ggml_tensor* contiguous_beta = nullptr;
         if (has_beta)
         {
-            ggml_tensor* contiguous_beta = ggml_cont(context.value, beta_binding.tensor);
+            contiguous_beta = ggml_cont(context.value, beta_binding.tensor);
             if (contiguous_beta == nullptr)
             {
                 set_last_error("Failed to create ggml contiguous beta tensor.");
                 return 0;
             }
-
-            value_tensor = ggml_add(context.value, value_tensor, contiguous_beta);
-            if (value_tensor == nullptr)
-            {
-                set_last_error("Failed to create ggml norm bias node.");
-                return 0;
-            }
         }
-
-        ggml_tensor* output_tensor = ggml_cpy(context.value, value_tensor, result_binding.tensor);
-        if (output_tensor == nullptr)
-        {
-            set_last_error("Failed to create ggml norm output copy node.");
-            return 0;
-        }
-
-        ggml_set_output(output_tensor);
 
         ggml_cgraph* graph = ggml_new_graph(context.value);
         if (graph == nullptr)
@@ -184,7 +152,95 @@ namespace {
             return 0;
         }
 
-        ggml_build_forward_expand(graph, output_tensor);
+        // Builds norm(src_part) * gamma (+ beta) copied into dst_part and adds
+        // the chain to the graph.
+        auto build_norm_chain = [&](ggml_tensor* src_part, ggml_tensor* dst_part) -> bool {
+            ggml_tensor* value_tensor = make_norm_tensor(context.value, op, src_part, eps);
+            if (value_tensor == nullptr)
+            {
+                if (g_last_error.empty())
+                {
+                    set_last_error("Failed to create ggml norm node.");
+                }
+                return false;
+            }
+
+            value_tensor = ggml_mul(context.value, value_tensor, contiguous_gamma);
+            if (value_tensor == nullptr)
+            {
+                set_last_error("Failed to create ggml norm scale node.");
+                return false;
+            }
+
+            if (has_beta)
+            {
+                value_tensor = ggml_add(context.value, value_tensor, contiguous_beta);
+                if (value_tensor == nullptr)
+                {
+                    set_last_error("Failed to create ggml norm bias node.");
+                    return false;
+                }
+            }
+
+            ggml_tensor* output_tensor = ggml_cpy(context.value, value_tensor, dst_part);
+            if (output_tensor == nullptr)
+            {
+                set_last_error("Failed to create ggml norm output copy node.");
+                return false;
+            }
+
+            ggml_set_output(output_tensor);
+            ggml_build_forward_expand(graph, output_tensor);
+            return true;
+        };
+
+        // ggml-vulkan dispatches the row-wise norm family with one workgroup per
+        // dim-1 row (GGML_OP_RMS_NORM uses {ne01, ne02, ne03} verbatim), and
+        // Vulkan only guarantees 65535 workgroups per dispatch dimension. WSL's
+        // dzn layer and Intel iGPUs report exactly that minimum, and e.g. the
+        // Gemma E4B PLE projection norm (seqLen*42 rows) exceeds it for chunks
+        // over ~1560 tokens, tripping a GGML_ASSERT. Split row-heavy 2D norms
+        // into <=32768-row sub-norms inside the same graph; backends with larger
+        // dispatch limits are indifferent to the few extra nodes.
+        const int64_t kMaxNormRowsPerOp = 32768;
+        ggml_tensor* result_tensor = result_binding.tensor;
+        const bool split_rows =
+            contiguous_src->ne[1] > kMaxNormRowsPerOp &&
+            contiguous_src->ne[2] == 1 && contiguous_src->ne[3] == 1 &&
+            result_tensor->ne[2] == 1 && result_tensor->ne[3] == 1 &&
+            result_tensor->ne[0] == contiguous_src->ne[0] &&
+            result_tensor->ne[1] == contiguous_src->ne[1];
+
+        if (!split_rows)
+        {
+            if (!build_norm_chain(contiguous_src, result_tensor))
+                return 0;
+        }
+        else
+        {
+            const int64_t total_rows = contiguous_src->ne[1];
+            for (int64_t row0 = 0; row0 < total_rows; row0 += kMaxNormRowsPerOp)
+            {
+                const int64_t chunk_rows = std::min<int64_t>(kMaxNormRowsPerOp, total_rows - row0);
+                ggml_tensor* src_part = ggml_view_2d(
+                    context.value, contiguous_src,
+                    contiguous_src->ne[0], chunk_rows,
+                    contiguous_src->nb[1],
+                    static_cast<std::size_t>(row0) * contiguous_src->nb[1]);
+                ggml_tensor* dst_part = ggml_view_2d(
+                    context.value, result_tensor,
+                    result_tensor->ne[0], chunk_rows,
+                    result_tensor->nb[1],
+                    static_cast<std::size_t>(row0) * result_tensor->nb[1]);
+                if (src_part == nullptr || dst_part == nullptr)
+                {
+                    set_last_error("Failed to create ggml norm row-chunk views.");
+                    return 0;
+                }
+                if (!build_norm_chain(src_part, dst_part))
+                    return 0;
+            }
+        }
 
         BufferHandle buffer(ggml_backend_alloc_ctx_tensors(context.value, g_backend));
         if (buffer.value == nullptr)
@@ -2173,30 +2229,6 @@ TSG_EXPORT int TSGgml_RoPEMRoPEF32(
 // ============================================================================
 namespace
 {
-    inline bool prefill_attn_cache_enabled()
-    {
-        static const bool enabled = []{
-            const char* e = std::getenv("TS_PREFILL_ATTN_CACHE");
-            return !(e != nullptr && std::strcmp(e, "0") == 0);
-        }();
-        return enabled;
-    }
-
-    // The non-cached (large-kvLen) prefill path streams K/V through
-    // ggml_flash_attn_ext instead of materializing the [kvLen, seqLen, numHeads]
-    // scores + softmax tensors. That O(N^2) materialization OOMs on long prompts
-    // (a 32K-token global window alone needs multiple GB just for scores+probs)
-    // and is also the slower, numerically-fragile path for multi-token Q. Flash
-    // is on by default; TS_PREFILL_ATTN_FLASH=0 reverts to the materialized graph.
-    inline bool prefill_attn_flash_enabled()
-    {
-        static const bool enabled = []{
-            const char* e = std::getenv("TS_PREFILL_ATTN_FLASH");
-            return !(e != nullptr && std::strcmp(e, "0") == 0);
-        }();
-        return enabled;
-    }
-
     inline std::uint32_t prefill_float_bits(float v)
     {
         std::uint32_t b;
@@ -2355,10 +2387,19 @@ namespace
             ggml_free(s.ctx); s.ctx = nullptr; s.ctx_mem.reset(); return false;
         }
 
+        // The kv_zero_covered_from tracking below relies on the K/V padding
+        // region [kv_len, kv_bucket) starting out zero, but backend buffers
+        // are NOT zero-initialised (CPU is _aligned_malloc/posix_memalign,
+        // CUDA is cudaMalloc). Uncleared garbage there can contain NaN/Inf
+        // bit patterns, and 0 * NaN = NaN leaks through the masked
+        // softmax -> V matmul into the attention output. Clear once per
+        // session build; steady-state calls are unaffected.
+        ggml_backend_buffer_clear(s.buffer, 0);
+
         s.num_q = num_q; s.kv_bucket = kv_bucket; s.num_heads = num_heads;
         s.num_kv_heads = num_kv_heads; s.head_dim = head_dim;
         s.scale_bits = prefill_float_bits(scale); s.kv_f16 = kv_f16;
-        s.kv_zero_covered_from = 0; // backend buffer starts zero-initialised
+        s.kv_zero_covered_from = 0; // buffer explicitly cleared above
         s.valid = true;
         return true;
     }
@@ -2592,6 +2633,20 @@ namespace
     }
 } // anonymous namespace
 
+namespace tsg
+{
+    // Frees the calling thread's cached prefill-attention sessions. Called
+    // from TSGgml_Shutdown so the sessions' backend (CUDA) buffers are
+    // released while the driver is still alive; otherwise the thread_local
+    // destructors run during CRT teardown, after CUDA driver shutdown, and
+    // ggml aborts with "CUDA error: driver shutting down" on process exit.
+    void free_prefill_attn_sessions()
+    {
+        for (auto& s : g_prefill_attn_cache)
+            s.destroy();
+    }
+}
+
 // ============================================================================
 // Fused prefill attention: Q*K^T → causal mask → softmax → *V as one GGML
 // graph. Eliminates ~5 separate C# → GGML round trips per layer.
@@ -2625,7 +2680,7 @@ TSG_EXPORT int TSGgml_FusedPrefillAttentionF32(
 
         // Session-cached fast path (head-first only): reuse the graph + backend
         // buffer across the hundreds of per-layer/per-chunk prefill calls.
-        if (inputFormat == 0 && prefill_attn_cache_enabled()
+        if (inputFormat == 0
             && prefill_should_cache(prefill_kv_bucket(kvLen), seqLen, numHeads))
         {
             return fused_prefill_attn_cached(
@@ -2637,7 +2692,7 @@ TSG_EXPORT int TSGgml_FusedPrefillAttentionF32(
         // Large-kvLen head-first path: flash attention streams K/V instead of
         // materializing the O(N^2) scores+softmax that OOMs on long prompts. The
         // flat (inputFormat==1) layout stays on the materialized graph below.
-        if (inputFormat == 0 && prefill_attn_flash_enabled())
+        if (inputFormat == 0)
         {
             int fr = fused_prefill_attn_flash(
                 q_data, k_data, v_data, out_data,
@@ -2855,8 +2910,7 @@ TSG_EXPORT int TSGgml_FusedPrefillAttentionF16KV(
         }
 
         // Session-cached fast path: reuse the graph + backend buffer across calls.
-        if (prefill_attn_cache_enabled()
-            && prefill_should_cache(prefill_kv_bucket(kvLen), seqLen, numHeads))
+        if (prefill_should_cache(prefill_kv_bucket(kvLen), seqLen, numHeads))
         {
             return fused_prefill_attn_cached(
                 q_data, k_data, v_data, out_data,
@@ -2867,7 +2921,6 @@ TSG_EXPORT int TSGgml_FusedPrefillAttentionF16KV(
         // Large-kvLen path: flash attention streams K/V instead of materializing
         // the O(N^2) scores+softmax that OOMs on long prompts. Falls through to the
         // materialized graph below only if the backend has no flash kernel here.
-        if (prefill_attn_flash_enabled())
         {
             int fr = fused_prefill_attn_flash(
                 q_data, k_data, v_data, out_data,

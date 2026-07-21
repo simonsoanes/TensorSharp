@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -52,6 +52,29 @@ namespace TensorSharp.Models
         private int _g4PagedBlockSize;
         private int[] _g4PagedKvDimPerLayer; // num_kv_heads * head_dim per layer
 
+        /// <summary>Declared availability of the batched path (see
+        /// <see cref="IBatchedPagedModel.BatchedForwardAvailable"/>). Mirrors
+        /// the STATIC gates <see cref="ForwardBatch"/> enforces with
+        /// NotSupportedException - the TS_GEMMA4_BATCHED opt-out, MoE layers
+        /// (the batched kernels can't run them), and a block-quantized (Q8_0)
+        /// KV cache - so <c>ExecutionPlanner</c> routes around the batched
+        /// path up front. The per-request multimodal-pending gate stays
+        /// dynamic inside ForwardBatch.</summary>
+        public bool BatchedForwardAvailable
+        {
+            get
+            {
+                string optOut = Environment.GetEnvironmentVariable("TS_GEMMA4_BATCHED");
+                if (string.Equals(optOut, "0", StringComparison.Ordinal) ||
+                    string.Equals(optOut, "false", StringComparison.OrdinalIgnoreCase))
+                    return false;
+                if (_kvCacheDtype.IsBlockQuantized()) return false;
+                for (int l = 0; l < Config.NumLayers; l++)
+                    if (HasMoE(l)) return false;
+                return true;
+            }
+        }
+
         public IReadOnlyList<float[]> ForwardBatch(BatchedForwardContext ctx)
         {
             if (ctx == null) throw new ArgumentNullException(nameof(ctx));
@@ -76,7 +99,7 @@ namespace TensorSharp.Models
             // baked into the persistent CUDA-graph-captured single-token decode
             // graph. Drop it so the next per-seq fused Forward rebuilds + recaptures
             // against the current pool state (see Gemma4ResetDecodeCache).
-            if (_backend == BackendType.GgmlCuda)
+            if (_backend == BackendType.GgmlCuda || _backend == BackendType.GgmlVulkan)
             {
                 GgmlBasicOps.Gemma4ResetDecodeCache();
                 GgmlBasicOps.Gemma4ResetBatchedDecodeCache();
@@ -170,8 +193,6 @@ namespace TensorSharp.Models
             Tensor hiddenStates = Embedding(flatTokens);
             ScaleEmbedding(hiddenStates);
 
-            bool dumpDiag = Environment.GetEnvironmentVariable("TS_GEMMA4_DIAG") == "1";
-            if (dumpDiag) Console.WriteLine($"[g4-batched] after-embed: {TensorChecksum(hiddenStates, "embed")}");
 
             // PLE: compute once, slice per layer.
             Tensor perLayerInputs = null;
@@ -364,7 +385,6 @@ namespace TensorSharp.Models
                     Ops.Mul(residual, residual, _layerScalars[layer]);
 
                 hiddenStates = residual;
-                if (dumpDiag) Console.WriteLine($"[g4-batched] after-layer-{layer}: {TensorChecksum(hiddenStates, $"L{layer}")}");
             }
 
             // Final norm + LM head.
@@ -474,9 +494,6 @@ namespace TensorSharp.Models
             }
             return data;
         }
-
-        private static string TensorChecksum(Tensor t, string label)
-            => DiagChecksum(t, label);
 
         private Tensor BuildRoPEPositionsTensor(int[] tokenPositions, int numHeads)
         {

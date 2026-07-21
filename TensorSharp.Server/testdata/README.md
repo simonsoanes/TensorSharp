@@ -22,17 +22,44 @@ The scripts auto-detect the loaded model architecture and skip thinking or tool-
 
 ## Quick Start
 
-1. Start TensorSharp.Server:
+1. From a checkout root, download the recommended public Gemma 4 E4B model and
+   start TensorSharp.Server on the verified native GGML fast path, using the
+   E4B Q8_0 family from the
+   [ggml-org repository](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF).
+   This needs the .NET 10 SDK, Git, and Python (for the `hf` download CLI).
+   Copying and running the commands takes about 30 seconds; downloading the
+   7.48 GiB model and the first restore and native build take longer and depend
+   on the network connection and machine. This copy/paste block is for
+   Linux + NVIDIA; other backend choices follow it:
 
 ```bash
-./TensorSharp.Server --model ~/models/model.gguf --backend ggml_metal
+python -m pip install -U huggingface_hub
+hf download ggml-org/gemma-4-E4B-it-GGUF gemma-4-E4B-it-Q8_0.gguf --local-dir models
+TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet build TensorSharp.slnx -c Release -p:TensorSharpSkipMlxNative=true
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll \
+  --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --max-tokens 128
 ```
 
-Use `--backend cuda` or `--backend ggml_cuda` on Windows/Linux NVIDIA machines, `--backend ggml_metal` or `--backend mlx` on macOS, or `--backend ggml_cpu` / `--backend cpu` for CPU runs.
+Use `ggml_cuda` on Windows/Linux with NVIDIA, `ggml_metal` on Apple Silicon,
+or `ggml_vulkan` on Windows/Linux with a Vulkan-capable AMD, Intel, or NVIDIA
+GPU. The verified statement is scoped to the E4B Q8_0 family/path; no exact
+public-file SHA is claimed as the benchmark input.
+
+The projector is optional for the text-only checks. Image, video, or audio
+checks require `mmproj-gemma-4-E4B-it-Q8_0.gguf` from the same repository and
+`--mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf` on server startup.
+
+Use `--backend cuda` or `--backend ggml_cuda` on Windows/Linux NVIDIA machines, `--backend ggml_vulkan` on Windows/Linux AMD/Intel/NVIDIA GPUs (Vulkan-enabled native build), `--backend ggml_metal` or `--backend mlx` on macOS, or `--backend ggml_cpu` / `--backend cpu` for CPU runs.
+
+The server must always be started with `--model`; a model-less server cannot
+select a GGUF through `/api/models/load`. Multimodal test runs must also pass the
+projector explicitly with `--mmproj`.
 
 2. Run either suite:
 
 ```bash
+cd TensorSharp.Server/testdata
+
 # Bash suite (requires curl + jq)
 bash test_multiturn.sh
 
@@ -58,7 +85,7 @@ python3 test_multiturn.py
   Gemma 4, Qwen 3, Qwen 3.5, GPT OSS, and Nemotron-H
 - Tool-calling tests run only on architectures that currently support tool calling in TensorSharp:
   Gemma 4, Qwen 3, Qwen 3.5, and Nemotron-H
-- GPT OSS thinking is exercised, but GPT OSS tool-call checks are currently skipped by these scripts even though the general parser/API surface supports Harmony tool-call framing.
+- GPT OSS thinking is exercised, but GPT OSS tool-call checks are currently skipped by these scripts: the scripts' capability gate (`_detect_capabilities` in `test_multiturn.py`) still reports `tools=False` for `gptoss`, which is stale relative to the server — the Harmony output parser does support tool calling (commentary-channel `to=functions.NAME` calls), so skipped here does not mean unsupported.
 
 Unsupported architectures are reported as `SKIP`, not `FAIL`.
 
@@ -83,6 +110,7 @@ Unsupported architectures are reported as `SKIP`, not `FAIL`.
 - Structured outputs follow the Chat Completions `response_format` contract. `json_schema` requests combined with `tools` or `think` are expected to return HTTP `400`.
 - The Ollama and OpenAI compatibility projects continue to evolve. These scripts are aligned with the server's current contract plus the current documented behavior around thinking, tool calling, and structured outputs.
 - DiffusionGemma can return final text through append-oriented compatibility endpoints, but only Web UI `/api/chat` exposes the live denoising `replace` frames.
+- The browser UI is at `http://localhost:5000/index.html`; `GET /` is the liveness endpoint.
 
 ## Usage
 

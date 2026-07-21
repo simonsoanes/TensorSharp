@@ -1,0 +1,18 @@
+{
+  // DiffusionGemma 26B-A4B (Q4_K_M, ~16.8 GB) — a text-diffusion model that
+  // denoises the whole answer iteratively instead of decoding left-to-right.
+  // It runs through the CLI's diffusion path (not the autoregressive server
+  // engine), so drive it with the CLI:
+  //   TensorSharp.Cli --config config/diffusiongemma-26b-a4b-q4.json --input prompt.txt
+  // Diffusion sampler knobs are CLI flags (kept out of this file so it stays
+  // server-safe); tune them per run, e.g.:
+  //   --diffusion-steps 48 --diffusion-seed 0 --max-tokens 256
+  "variables": {
+    "modelRoot": "C:/Works/models"
+  },
+
+  "backend": "ggml_cuda",
+  "max-tokens": 256,
+
+  "model": "${modelRoot}/diffusiongemma-26B-A4B-it-Q4_K_M.gguf"
+}

@@ -57,6 +57,18 @@ namespace TensorSharp.Runtime.Scheduling
         public int MaxNewTokens { get; }
         public SamplingConfig SamplingConfig { get; }
 
+        /// <summary>Cached sampler instance for this sequence. Avoids per-token
+        /// <c>new TokenSampler()</c> allocations (~3 MB LOH at 262K vocab).
+        /// Lazily initialized from <see cref="SamplingConfig"/>.</summary>
+        internal TokenSampler CachedSampler { get; private set; }
+
+        internal TokenSampler GetOrCreateSampler()
+        {
+            if (CachedSampler == null)
+                CachedSampler = new TokenSampler(SamplingConfig);
+            return CachedSampler;
+        }
+
         /// <summary>Sticky reference the caller can use to associate a session,
         /// HTTP request, or telemetry context with this sequence.</summary>
         public object UserTag { get; }

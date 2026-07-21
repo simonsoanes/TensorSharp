@@ -23,15 +23,15 @@
   <table>
     <thead><tr><th>Architecture</th><th>GGUF arch keys</th><th>Example models</th><th>Multimodal</th><th>Thinking</th><th>Tools</th><th>MTP spec</th></tr></thead>
     <tbody>
-      <tr><td><strong>Gemma 4</strong></td><td><code>gemma4</code></td><td>gemma-4-E4B, 31B, 26B-A4B (MoE)</td><td>Image, Video, Audio</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes (separate draft)</td></tr>
+      <tr><td><strong>Gemma 4</strong></td><td><code>gemma4</code></td><td>gemma-4-E4B, 12B, 31B, 26B-A4B (MoE)</td><td>Image, Video, Audio</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes (separate draft)</td></tr>
       <tr><td><strong>Gemma 3</strong></td><td><code>gemma3</code></td><td>gemma-3-4b</td><td>Image</td><td class="no">No</td><td class="no">No</td><td class="no">—</td></tr>
       <tr><td><strong>Qwen 3</strong></td><td><code>qwen3</code></td><td>Qwen3-4B</td><td>Text only</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="no">—</td></tr>
-      <tr><td><strong>Qwen 3.5 / 3.6</strong></td><td><code>qwen35</code>, <code>qwen35moe</code>, <code>qwen3next</code></td><td>Qwen3.5-9B, Qwen3.5/3.6-35B-A3B (MoE)</td><td>Image</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes on 3.6 (embedded NextN)</td></tr>
+      <tr><td><strong>Qwen 3.5 / 3.6</strong></td><td><code>qwen35</code>, <code>qwen35moe</code>, <code>qwen3next</code></td><td>Qwen3.5-9B, Qwen3.5/3.6-35B-A3B (MoE)</td><td>Image</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes on 3.6 (embedded NextN — only in GGUFs that retain the NextN block, e.g. the <code>-MTP-</code> repos)</td></tr>
       <tr><td><strong>GPT OSS</strong></td><td><code>gptoss</code>, <code>gpt-oss</code></td><td>gpt-oss-20b (MoE)</td><td>Text only</td><td class="yes">Yes (always)</td><td class="yes">Yes</td><td class="no">—</td></tr>
       <tr><td><strong>Nemotron-H</strong></td><td><code>nemotron_h</code>, <code>nemotron_h_moe</code></td><td>Nemotron-H-8B, 47B, Nemotron 3 Nano Omni</td><td>Image (Omni)</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="no">—</td></tr>
       <tr><td><strong>Mistral 3</strong></td><td><code>mistral3</code></td><td>Mistral-Small-3.1-24B-Instruct</td><td>Image</td><td class="no">No</td><td class="no">No</td><td class="no">—</td></tr>
       <tr><td><strong>DiffusionGemma</strong></td><td><code>diffusion-gemma</code>, <code>diffusion_gemma</code></td><td>diffusion-gemma text-diffusion GGUFs</td><td>Text only</td><td class="no">No</td><td class="no">No</td><td class="no">—</td></tr>
-      <tr><td><strong>Qwen-Image-Edit</strong></td><td><code>qwen_image</code></td><td>qwen-image-edit MMDiT (+ VAE &amp; Qwen2.5-VL companions)</td><td>Image edit (image+text → image)</td><td class="no">No</td><td class="no">No</td><td class="no">—</td></tr>
+      <tr><td><strong>Qwen-Image-Edit</strong></td><td><code>qwen_image</code>, <code>qwen-image</code></td><td>qwen-image-edit MMDiT (+ VAE &amp; Qwen2.5-VL companions)</td><td>Image edit (image+text → image)</td><td class="no">No</td><td class="no">No</td><td class="no">—</td></tr>
     </tbody>
   </table>
   </div>
@@ -40,38 +40,141 @@
   <h2 id="downloads">Model downloads (GGUF)</h2>
   <div class="table-scroll">
   <table>
-    <thead><tr><th>Architecture</th><th>Model</th><th>Download</th></tr></thead>
+    <thead><tr><th>Architecture</th><th>Model</th><th>Download</th><th>Companion files (mmproj / MTP draft)</th></tr></thead>
     <tbody>
-      <tr><td>Gemma 4</td><td>gemma-4-E4B-it</td><td><a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener">ggml-org/gemma-4-E4B-it-GGUF</a></td></tr>
-      <tr><td>Gemma 4</td><td>gemma-4-31B-it</td><td><a href="https://huggingface.co/ggml-org/gemma-4-31B-it-GGUF" target="_blank" rel="noopener">ggml-org/gemma-4-31B-it-GGUF</a></td></tr>
-      <tr><td>Gemma 4</td><td>gemma-4-26B-A4B-it (MoE)</td><td><a href="https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF" target="_blank" rel="noopener">ggml-org/gemma-4-26B-A4B-it-GGUF</a></td></tr>
-      <tr><td>Gemma 3</td><td>gemma-3-4b-it</td><td><a href="https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf" target="_blank" rel="noopener">google/gemma-3-4b-it-qat-q4_0-gguf</a></td></tr>
-      <tr><td>Qwen 3</td><td>Qwen3-4B</td><td><a href="https://huggingface.co/Qwen/Qwen3-4B-GGUF" target="_blank" rel="noopener">Qwen/Qwen3-4B-GGUF</a></td></tr>
-      <tr><td>Qwen 3.5 / 3.6</td><td>Qwen3.5-9B</td><td><a href="https://huggingface.co/unsloth/Qwen3.5-9B-GGUF" target="_blank" rel="noopener">unsloth/Qwen3.5-9B-GGUF</a></td></tr>
-      <tr><td>Qwen 3.5 / 3.6</td><td>Qwen3.5-35B-A3B (MoE)</td><td><a href="https://huggingface.co/ggml-org/Qwen3.5-35B-A3B-GGUF" target="_blank" rel="noopener">ggml-org/Qwen3.5-35B-A3B-GGUF</a></td></tr>
-      <tr><td>GPT OSS</td><td>gpt-oss-20b (MoE)</td><td><a href="https://huggingface.co/ggml-org/gpt-oss-20b-GGUF" target="_blank" rel="noopener">ggml-org/gpt-oss-20b-GGUF</a></td></tr>
-      <tr><td>Nemotron-H</td><td>Nemotron-H-8B-Reasoning-128K</td><td><a href="https://huggingface.co/bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF" target="_blank" rel="noopener">bartowski/nvidia_Nemotron-H-8B-…</a></td></tr>
-      <tr><td>Nemotron-H</td><td>Nemotron-H-47B-Reasoning-128K</td><td><a href="https://huggingface.co/bartowski/nvidia_Nemotron-H-47B-Reasoning-128K-GGUF" target="_blank" rel="noopener">bartowski/nvidia_Nemotron-H-47B-…</a></td></tr>
-      <tr><td>Mistral 3</td><td>Mistral-Small-3.1-24B-Instruct</td><td><a href="https://huggingface.co/bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF" target="_blank" rel="noopener">bartowski/Mistral-Small-3.1-24B-…</a></td></tr>
+      <tr><td>Gemma 4</td><td>gemma-4-E4B-it</td><td><a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener">ggml-org/gemma-4-E4B-it-GGUF</a></td><td>Recommended public artifact for the verified E4B Q8_0 native-GGML tier: <code>gemma-4-E4B-it-Q8_0.gguf</code>. Modalities: <code>mmproj-gemma-4-E4B-it-Q8_0.gguf</code> (same repo). MTP draft: <a href="https://huggingface.co/AtomicChat/gemma-4-E4B-it-assistant-GGUF" target="_blank" rel="noopener">AtomicChat/gemma-4-E4B-it-assistant-GGUF</a></td></tr>
+      <tr><td>Gemma 4</td><td>gemma-4-12B-it (QAT)</td><td><a href="https://huggingface.co/unsloth/gemma-4-12B-it-qat-GGUF" target="_blank" rel="noopener">unsloth/gemma-4-12B-it-qat-GGUF</a></td><td>mmproj: <code>mmproj-BF16.gguf</code>; MTP draft: <code>mtp-gemma-4-12B-it.gguf</code> (both in the same repo)</td></tr>
+      <tr><td>Gemma 4</td><td>gemma-4-31B-it</td><td><a href="https://huggingface.co/ggml-org/gemma-4-31B-it-GGUF" target="_blank" rel="noopener">ggml-org/gemma-4-31B-it-GGUF</a></td><td>mmproj: <code>mmproj-gemma-4-31B-it-Q8_0.gguf</code> (same repo)</td></tr>
+      <tr><td>Gemma 4</td><td>gemma-4-26B-A4B-it (MoE)</td><td><a href="https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF" target="_blank" rel="noopener">ggml-org/gemma-4-26B-A4B-it-GGUF</a></td><td>mmproj: <code>mmproj-gemma-4-26B-A4B-it-Q8_0.gguf</code> (same repo)</td></tr>
+      <tr><td>Gemma 4</td><td>gemma-4-26B-A4B-it (MoE, QAT)</td><td><a href="https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF" target="_blank" rel="noopener">unsloth/gemma-4-26B-A4B-it-qat-GGUF</a></td><td>mmproj: <code>mmproj-BF16.gguf</code>; MTP draft: <code>mtp-gemma-4-26B-A4B-it.gguf</code> (same repo). Alt draft: <a href="https://huggingface.co/AtomicChat/gemma-4-26B-A4B-it-assistant-GGUF" target="_blank" rel="noopener">AtomicChat/gemma-4-26B-A4B-it-assistant-GGUF</a> — pair drafts only with the matching target size</td></tr>
+      <tr><td>Gemma 3</td><td>gemma-3-4b-it (QAT, official)</td><td><a href="https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf" target="_blank" rel="noopener">google/gemma-3-4b-it-qat-q4_0-gguf</a></td><td>mmproj: <code>mmproj-model-f16-4B.gguf</code> (same repo). ⚠️ <strong>Gated</strong>: downloads require a Hugging Face login + accepting Google's Gemma license</td></tr>
+      <tr><td>Gemma 3</td><td>gemma-3-4b-it (non-gated alternative)</td><td><a href="https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF" target="_blank" rel="noopener">ggml-org/gemma-3-4b-it-GGUF</a></td><td>mmproj: <code>mmproj-model-f16.gguf</code> (same repo)</td></tr>
+      <tr><td>Qwen 3</td><td>Qwen3-4B</td><td><a href="https://huggingface.co/Qwen/Qwen3-4B-GGUF" target="_blank" rel="noopener">Qwen/Qwen3-4B-GGUF</a></td><td>— (text only)</td></tr>
+      <tr><td>Qwen 3.5 / 3.6</td><td>Qwen3.5-9B</td><td><a href="https://huggingface.co/unsloth/Qwen3.5-9B-GGUF" target="_blank" rel="noopener">unsloth/Qwen3.5-9B-GGUF</a></td><td>mmproj: <code>mmproj-F16.gguf</code> (same repo)</td></tr>
+      <tr><td>Qwen 3.5 / 3.6</td><td>Qwen3.5-35B-A3B (MoE)</td><td><a href="https://huggingface.co/ggml-org/Qwen3.5-35B-A3B-GGUF" target="_blank" rel="noopener">ggml-org/Qwen3.5-35B-A3B-GGUF</a></td><td>mmproj: <code>mmproj-Qwen3.5-35B-A3B-Q8_0.gguf</code> (same repo)</td></tr>
+      <tr><td>Qwen 3.5 / 3.6</td><td>Qwen3.6-35B-A3B (MoE, NextN MTP)</td><td><a href="https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF" target="_blank" rel="noopener">unsloth/Qwen3.6-35B-A3B-MTP-GGUF</a></td><td>mmproj: <code>mmproj-F16.gguf</code> (same repo). These GGUFs retain the embedded NextN block for <code>--mtp-spec</code>; the base-repo GGUFs (<a href="https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF" target="_blank" rel="noopener">unsloth/Qwen3.6-35B-A3B-GGUF</a>) strip it and silently fall back to standard decode</td></tr>
+      <tr><td>GPT OSS</td><td>gpt-oss-20b (MoE)</td><td><a href="https://huggingface.co/ggml-org/gpt-oss-20b-GGUF" target="_blank" rel="noopener">ggml-org/gpt-oss-20b-GGUF</a></td><td>— (text only)</td></tr>
+      <tr><td>Nemotron-H</td><td>Nemotron-H-8B-Reasoning-128K</td><td><a href="https://huggingface.co/bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF" target="_blank" rel="noopener">bartowski/nvidia_Nemotron-H-8B-…</a></td><td>— (text only)</td></tr>
+      <tr><td>Nemotron-H</td><td>Nemotron-H-47B-Reasoning-128K</td><td><a href="https://huggingface.co/bartowski/nvidia_Nemotron-H-47B-Reasoning-128K-GGUF" target="_blank" rel="noopener">bartowski/nvidia_Nemotron-H-47B-…</a></td><td>— (text only)</td></tr>
+      <tr><td>Nemotron-H</td><td>Nemotron 3 Nano Omni 30B-A3B (image)</td><td><a href="https://huggingface.co/unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF" target="_blank" rel="noopener">unsloth/NVIDIA-Nemotron-3-Nano-Omni-…</a></td><td>mmproj: <code>mmproj-BF16.gguf</code> (same repo) — required for image input. Audio is not functional: it needs a Parakeet audio mmproj that this distribution does not ship</td></tr>
+      <tr><td>Mistral 3</td><td>Mistral-Small-3.1-24B-Instruct</td><td><a href="https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF" target="_blank" rel="noopener">bartowski/mistralai_Mistral-Small-3.1-24B-…</a></td><td>Pixtral mmproj: <code>mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf</code> (same repo)</td></tr>
+      <tr><td>DiffusionGemma</td><td>diffusiongemma-26B-A4B-it</td><td><a href="https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF" target="_blank" rel="noopener">unsloth/diffusiongemma-26B-A4B-it-GGUF</a></td><td>—</td></tr>
+      <tr><td>Qwen-Image-Edit</td><td>MMDiT DiT (the <code>--model</code> GGUF)</td><td><a href="https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF" target="_blank" rel="noopener">unsloth/Qwen-Image-Edit-2511-GGUF</a></td><td>e.g. <code>qwen-image-edit-2511-Q4_K_M.gguf</code></td></tr>
+      <tr><td>Qwen-Image-Edit</td><td>Qwen-Image VAE (required)</td><td><a href="https://huggingface.co/QuantStack/Qwen-Image-Edit-GGUF" target="_blank" rel="noopener">QuantStack/Qwen-Image-Edit-GGUF</a></td><td><code>VAE/Qwen_Image-VAE.safetensors</code> — place next to the DiT or pass <code>--qwen-image-vae</code></td></tr>
+      <tr><td>Qwen-Image-Edit</td><td>Qwen2.5-VL-7B text encoder (required)</td><td><a href="https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF" target="_blank" rel="noopener">unsloth/Qwen2.5-VL-7B-Instruct-GGUF</a></td><td>Optional vision mmproj: <code>mmproj-BF16.gguf</code> (same repo) for image-grounded edits</td></tr>
+      <tr><td>Qwen-Image-Edit</td><td>Lightning LoRA (optional, 4/8-step)</td><td><a href="https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning" target="_blank" rel="noopener">lightx2v/Qwen-Image-Edit-2511-Lightning</a></td><td><code>Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors</code> via <code>--qwen-image-lora</code></td></tr>
     </tbody>
   </table>
   </div>
-  <div class="callout note"><div class="ic">🧩</div><p>Multimodal models need a <strong>projector (mmproj)</strong> file. The Gemma 4 / Gemma 3 / Qwen 3.5 / Mistral 3 projectors ship in or alongside the repos above; place the projector next to the model with a recognized name for auto-loading, or pass it explicitly with <code>--mmproj</code>.</p></div>
+  <div class="callout note"><div class="ic">🧩</div><p>Multimodal models need a <strong>projector (mmproj)</strong> file. Download the matching file and pass its exact path with <code>--mmproj</code>. The server never auto-detects it, and CLI auto-detection recognizes only a small set of legacy filenames.</p></div>
+
+  <h2 id="download-run">Download &amp; run, per family</h2>
+  <p>The first block is the verified Gemma 4 E4B quick start. All blocks use the Hugging Face CLI (<code>pip install -U huggingface_hub</code>); the per-family blocks after the first assume a full source build from the repository root. One-shot CLI text prompts are read from a file via <code>--input</code> (put your question in <code>prompt.txt</code> first — <code>--prompt</code> is reserved for Qwen-Image-Edit). Swap <code>--backend</code> for <code>ggml_metal</code> / <code>ggml_vulkan</code> / <code>ggml_cpu</code> to match your hardware (the CLI default is <code>ggml_cpu</code>).</p>
+
+  <h3 id="gemma4-fast-lane">Quick start in ~30 seconds — Gemma 4 E4B Q8_0 (native GGML)</h3>
+  <p>Copying and running the commands takes about 30 seconds; the 7.48 GiB download and the first restore/build take longer and depend on your connection and machine. Repository benchmarks verify TensorSharp's E4B Q8_0 family and execution path; the linked <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener">ggml-org repository</a> is the recommended public source. This block is for Linux + NVIDIA:</p>
+  <pre data-lang="bash"><code>hf download ggml-org/gemma-4-E4B-it-GGUF gemma-4-E4B-it-Q8_0.gguf --local-dir models
+TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet build TensorSharp.slnx -c Release -p:TensorSharpSkipMlxNative=true
+echo "Explain why local inference is useful." &gt; prompt.txt
+
+# Text needs no mmproj.
+dotnet run --project TensorSharp.Cli -c Release --no-build -- --model models/gemma-4-E4B-it-Q8_0.gguf \
+    --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet run --project TensorSharp.Server -c Release --no-build -- --model models/gemma-4-E4B-it-Q8_0.gguf \
+    --backend ggml_cuda</code></pre>
+  <p>On Apple Silicon, omit the CUDA environment assignment and use <code>ggml_metal</code>; on a supported Windows/Linux Vulkan GPU, request <code>TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON</code> instead and use <code>ggml_vulkan</code>. For image, video, or audio input, also run <code>hf download ggml-org/gemma-4-E4B-it-GGUF mmproj-gemma-4-E4B-it-Q8_0.gguf --local-dir models</code> and pass <code>--mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf</code>. The server's browser UI is <code>http://localhost:5000/index.html</code>. See <a href="getting-started.html#e4b-fast-lane">Getting Started</a> for Windows PowerShell and full platform syntax.</p>
+
+  <h3>Gemma 3 (text + image)</h3>
+  <pre data-lang="bash"><code>hf download ggml-org/gemma-3-4b-it-GGUF gemma-3-4b-it-Q4_K_M.gguf --local-dir models
+hf download ggml-org/gemma-3-4b-it-GGUF mmproj-model-f16.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-3-4b-it-Q4_K_M.gguf --mmproj models/mmproj-model-f16.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gemma-3-4b-it-Q4_K_M.gguf --mmproj models/mmproj-model-f16.gguf --backend ggml_cuda</code></pre>
+
+  <h3>Qwen 3 (text, thinking, tools)</h3>
+  <pre data-lang="bash"><code>hf download Qwen/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Qwen3-4B-Q4_K_M.gguf --input prompt.txt --think --max-tokens 400 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3-4B-Q4_K_M.gguf --backend ggml_cuda</code></pre>
+
+  <h3>Qwen 3.5 / 3.6 (text + image, thinking, tools, NextN MTP on 3.6)</h3>
+  <pre data-lang="bash"><code>hf download unsloth/Qwen3.5-9B-GGUF Qwen3.5-9B-UD-Q4_K_XL.gguf --local-dir models
+hf download unsloth/Qwen3.5-9B-GGUF mmproj-F16.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf \
+    --image photo.png --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf --backend ggml_cuda</code></pre>
+  <p>For Qwen 3.6 NextN speculative decoding, download the trunk from the <code>-MTP-</code> repo (the base repo's GGUFs strip the NextN block and silently fall back to standard decode) and start the <em>server</em> with <code>--mtp-spec</code> — the MTP flags exist only on <code>TensorSharp.Server</code>:</p>
+  <pre data-lang="bash"><code>hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --local-dir models
+
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda --mtp-spec</code></pre>
+
+  <h3>GPT OSS (text, thinking always on, tools)</h3>
+  <pre data-lang="bash"><code>hf download ggml-org/gpt-oss-20b-GGUF gpt-oss-20b-mxfp4.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gpt-oss-20b-mxfp4.gguf --input prompt.txt --max-tokens 400 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gpt-oss-20b-mxfp4.gguf --backend ggml_cuda</code></pre>
+
+  <h3>Nemotron-H (text; image on the Omni distribution)</h3>
+  <pre data-lang="bash"><code>hf download bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --input prompt.txt \
+    --think --max-tokens 400 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --backend ggml_cuda</code></pre>
+  <p>For image input use the Nemotron 3 Nano Omni GGUF with its <code>mmproj-BF16.gguf</code> (table above). Audio inference is not functional — the required Parakeet audio mmproj is not shipped with the GGUF distribution.</p>
+
+  <h3>Mistral 3 (text + image)</h3>
+  <pre data-lang="bash"><code>hf download bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf --local-dir models
+hf download bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf \
+    --mmproj models/mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf \
+    --image photo.png --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf \
+    --mmproj models/mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --backend ggml_cuda</code></pre>
+
+  <h3>DiffusionGemma (block text diffusion)</h3>
+  <pre data-lang="bash"><code>hf download unsloth/diffusiongemma-26B-A4B-it-GGUF diffusiongemma-26B-A4B-it-Q4_K_M.gguf --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --input prompt.txt \
+    --max-tokens 256 --diffusion-steps 48 --diffusion-seed 0 --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --backend ggml_cuda</code></pre>
+
+  <h3>Qwen-Image-Edit (image + prompt → edited image)</h3>
+  <pre data-lang="bash"><code>hf download unsloth/Qwen-Image-Edit-2511-GGUF qwen-image-edit-2511-Q4_K_M.gguf --local-dir models
+hf download QuantStack/Qwen-Image-Edit-GGUF VAE/Qwen_Image-VAE.safetensors --local-dir models
+hf download unsloth/Qwen2.5-VL-7B-Instruct-GGUF Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf --local-dir models
+hf download unsloth/Qwen2.5-VL-7B-Instruct-GGUF mmproj-BF16.gguf --local-dir models
+hf download lightx2v/Qwen-Image-Edit-2511-Lightning Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors --local-dir models
+
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/qwen-image-edit-2511-Q4_K_M.gguf --image input.png \
+    --prompt "Make the sky a dramatic sunset." --output edited.png \
+    --qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors \
+    --qwen-image-vl models/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf \
+    --qwen-image-mmproj models/mmproj-BF16.gguf \
+    --qwen-image-lora models/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors \
+    --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/qwen-image-edit-2511-Q4_K_M.gguf \
+    --qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors \
+    --qwen-image-vl models/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf \
+    --qwen-image-mmproj models/mmproj-BF16.gguf \
+    --qwen-image-lora models/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors \
+    --backend ggml_cuda</code></pre>
 
   <h2 id="multimodal">Multimodal support</h2>
   <div class="table-scroll">
   <table>
     <thead><tr><th>Family</th><th>Inputs</th><th>Notes</th></tr></thead>
     <tbody>
-      <tr><td>Gemma 4</td><td>Image · Video · Audio</td><td>Images PNG/JPEG/HEIC; Video MP4 (1 fps via OpenCV); Audio WAV 16 kHz mono / MP3 / OGG. Projector: <code>gemma-4-mmproj-F16.gguf</code>.</td></tr>
-      <tr><td>Gemma 3</td><td>Image</td><td>PNG / JPEG / HEIC. Projector: <code>mmproj-gemma3-4b-f16.gguf</code>.</td></tr>
-      <tr><td>Qwen 3.5 / 3.6</td><td>Image</td><td>Dynamic-resolution vision encoder. Projector: <code>Qwen3.5-mmproj-F16.gguf</code>.</td></tr>
-      <tr><td>Mistral 3</td><td>Image</td><td>Pixtral vision encoder. Projector: <code>mistral3-mmproj.gguf</code>.</td></tr>
-      <tr><td>Nemotron-H (Omni)</td><td>Image</td><td>RADIO / v2_vl ViT encoder. Pass the matching <code>--mmproj</code>; image tokens expand at <code>&lt;image&gt;</code> placeholders.</td></tr>
+      <tr><td>Gemma 4</td><td>Image · Video · Audio</td><td>Images PNG/JPEG/HEIC; Video MP4 (1 fps via OpenCV); Audio WAV 16 kHz mono / MP3 / OGG. E4B projector: <code>mmproj-gemma-4-E4B-it-Q8_0.gguf</code>.</td></tr>
+      <tr><td>Gemma 3</td><td>Image</td><td>PNG / JPEG / HEIC. Non-gated 4B projector: <code>mmproj-model-f16.gguf</code>.</td></tr>
+      <tr><td>Qwen 3.5 / 3.6</td><td>Image</td><td>Dynamic-resolution vision encoder. The 9B / 3.6 repositories use <code>mmproj-F16.gguf</code>.</td></tr>
+      <tr><td>Mistral 3</td><td>Image</td><td>Pixtral vision encoder. Projector: <code>mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf</code>.</td></tr>
+      <tr><td>Nemotron-H (Omni)</td><td>Image</td><td>RADIO / v2_vl ViT encoder. Pass the matching <code>--mmproj</code>; image tokens expand at <code>&lt;image&gt;</code> placeholders. Audio is preprocessed only — real audio inference needs a Parakeet audio mmproj that the GGUF distribution does not ship.</td></tr>
     </tbody>
   </table>
   </div>
-  <p>Send images/audio/video via the <a href="cli.html#examples">CLI</a> (<code>--image</code>, <code>--video</code>, <code>--audio</code>), the <a href="server.html#webui">Web UI</a> uploads, or the <a href="http-api.html">HTTP API</a> (base64 <code>images</code> array for Ollama, <code>image_url</code> data URI for OpenAI).</p>
+  <p>Send images/audio/video via the <a href="cli.html#examples">CLI</a> (<code>--image</code>, <code>--video</code>, <code>--audio</code>), the <a href="server.html#webui">Web UI</a> uploads, or the <a href="http-api.html">HTTP API</a> (base64 <code>images</code> array for Ollama, <code>image_url</code> data URI for OpenAI). <strong>PDF documents</strong> are supported too — born-digital PDFs have their text layer extracted and inlined into the prompt (token-budget truncated); scanned PDFs fall back to page images for vision-capable models — via the CLI's <code>--pdf</code> flag (one-shot mode) or the Web UI upload (<code>TS_PDF_MAX_PAGES</code> caps the page count; default: all pages).</p>
 
   <h2 id="imageedit">Image editing (Qwen-Image-Edit)</h2>
   <p>Qwen-Image-Edit takes a <strong>prompt + an input image</strong> and returns an edited image — a different output modality from the text LLMs above. The loaded <code>qwen_image</code> GGUF is only the MMDiT (multimodal diffusion transformer); TensorSharp resolves two companion GGUFs alongside it:</p>

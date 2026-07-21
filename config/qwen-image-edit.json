@@ -1,0 +1,43 @@
+{
+  // Qwen-Image-Edit (2511). Hosts a DiT plus three companions (a VAE, the
+  // Qwen2.5-VL text encoder, and its vision projector) and a Lightning LoRA
+  // (step-distillation for fast, few-step edits). Every file auto-downloads
+  // (real, ungated URLs) into ${root} on the first run and is reused afterward.
+  //
+  // These files are co-located, so a single ${root} suffices. If your models
+  // live in different folders, declare one variable per folder — e.g.
+  //   "variables": { "ditRoot": "C:/models/qwen-image-edit", "companionRoot": "C:/Works/models" }
+  // — and reference each below (see the multiple-roots note in README.md).
+  "variables": {
+    "root": "C:/Works/models"
+  },
+
+  "backend": "ggml_cuda",
+  "offload-cpu": true,
+
+  "model": {
+    "path": "${root}/qwen-image-edit-2511-Q4_K_M.gguf",
+    "urls": [ "https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF/resolve/main/qwen-image-edit-2511-Q4_K_M.gguf" ]
+  },
+
+  "qwen-image-vae": {
+    "path": "${root}/Qwen_Image-VAE.safetensors",
+    "urls": [ "https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors" ]
+  },
+  "qwen-image-vl": {
+    "path": "${root}/qwen-image-te-Qwen2.5-VL-7B-Q4_K_M.gguf",
+    "urls": [ "https://huggingface.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf" ]
+  },
+  "qwen-image-mmproj": {
+    "path": "${root}/Qwen2.5-VL-7B-mmproj-BF16.gguf",
+    "urls": [ "https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/mmproj-BF16.gguf" ]
+  },
+
+  // Lightning step-distillation LoRA (8 steps). Merged into the DiT at load; it
+  // also switches the sampler to its fast few-step schedule. Use the 4steps file
+  // for an even faster (slightly lower quality) edit.
+  "qwen-image-lora": {
+    "path": "${root}/Qwen-Image-Edit-2511-Lightning-8steps-V1.0-bf16.safetensors",
+    "urls": [ "https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning/resolve/main/Qwen-Image-Edit-2511-Lightning-8steps-V1.0-bf16.safetensors" ]
+  }
+}

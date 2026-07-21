@@ -4,9 +4,11 @@ Cross-engine inference benchmark driver.
 
 Compares TensorSharp, llama.cpp and vLLM on the same GGUF files across text /
 image / audio / video / single-turn / multi-turn / function-call / structured
-scenarios on GPU and CPU backends. One server instance is launched per
-(engine, backend, model) group, all of that group's scenarios run against it,
-then it is torn down — so per-scenario timings exclude model-load cost.
+scenarios, on any compute backend declared in the config's `backends` registry
+(e.g. ggml_cuda, ggml_vulkan, ggml_metal, ggml_cpu, cpu). One server instance
+is launched per (engine, backend, model) group, all of that group's scenarios
+run against it, then it is torn down — so per-scenario timings exclude
+model-load cost.
 
 Each cell writes one JSON file to the results directory:
     results/{engine}__{backend}__{model}__{scenario}.json
@@ -21,8 +23,14 @@ invocations are unchanged:
 Examples
 --------
 # Smoke test one cheap cell
-python run_matrix.py --engines tensorsharp --backends gpu \
+python run_matrix.py --engines tensorsharp --backends ggml_cuda \
     --models gemma4-12b --scenarios text_short,multi_turn
+
+# Same model on several backends (any id from the config's `backends` registry;
+# the legacy aliases gpu / cpu still resolve)
+python run_matrix.py --engines tensorsharp,llamacpp \
+    --backends ggml_cuda,ggml_vulkan,ggml_cpu,cpu \
+    --models gemma4-12b --scenarios text_short
 
 # MTP on vs off (TensorSharp), single-stream
 python run_matrix.py --engines tensorsharp --backends gpu \
@@ -87,11 +95,42 @@ def _write(results_dir: Path, res: engines.BenchResult):
 
 
 def _run_cell(server, engine_id, backend, model, scenario_id, max_tokens,
-              mtp=False, concurrency=1) -> engines.BenchResult:
+              mtp=False, concurrency=1, results_dir=None) -> engines.BenchResult:
     res = engines.BenchResult(engine=engine_id, backend=backend,
                               model=model.short_id, scenario=scenario_id,
                               mtp=mtp, concurrency=concurrency)
     sc = config.SCENARIOS[scenario_id]
+
+    # Image-edit (stable-diffusion) cells run through their own engine-native
+    # runner (multipart /api/image-edit for TensorSharp, one sd-cli process for
+    # sd.cpp) — there is no OpenAI-chat surface or token stream to measure.
+    if sc.kind == "image_edit":
+        if concurrency > 1:
+            res.status = "skipped"
+            res.detail = "image edit is single-stream (one edit saturates the GPU)"
+            return res
+        cell_name = f"{engine_id}__{backend}__{model.short_id}__{scenario_id}"
+        try:
+            m = engines.run_image_edit(engine_id, server, model, sc, backend,
+                                       results_dir, cell_name)
+        except Exception as ex:
+            res.status = "fail"
+            res.detail = f"edit error: {ex}"
+            return res
+        res.status = "ok"
+        res.requests_ok = 1
+        res.steps = int(m.get("steps", 0))
+        for k in ("edit_total_ms", "edit_first_total_ms", "edit_text_encode_ms",
+                  "edit_vae_encode_ms", "edit_sampling_ms", "edit_per_step_ms",
+                  "edit_vae_decode_ms"):
+            setattr(res, k, round(float(m.get(k, 0.0) or 0.0), 1))
+        res.edit_width = int(m.get("edit_width", 0))
+        res.edit_height = int(m.get("edit_height", 0))
+        res.edit_image = str(m.get("edit_image", ""))
+        res.total_wall_ms = round(float(m.get("total_wall_ms", 0.0) or 0.0), 1)
+        res.detail = str(m.get("note", ""))
+        return res
+
     try:
         req = scen.build_request(scenario_id, engine_id, model)
     except Exception as ex:  # asset / decode error
@@ -137,6 +176,7 @@ def _run_cell(server, engine_id, backend, model, scenario_id, max_tokens,
     res.total_wall_ms = round(m["total_wall_ms"], 1)
     res.finish_reason = m["finish_reason"]
     res.output_preview = (m.get("output_text") or "")[:300]
+    res.output_text = (m.get("output_text") or "")[:8000]
     if concurrency > 1 and res.requests_ok < concurrency:
         res.detail = f"{res.requests_ok}/{concurrency} parallel requests ok"
     checker = req.get("checker")
@@ -149,6 +189,10 @@ def _run_cell(server, engine_id, backend, model, scenario_id, max_tokens,
 
 
 def _warmup(server, engine_id, model):
+    # Image-edit models have no chat surface; the image_edit cell itself runs a
+    # cold + warm request pair instead (and reports both).
+    if model.is_image_edit:
+        return
     try:
         engines.run_openai_chat(
             server.base_url, engines.served_model_name(engine_id, server, model),
@@ -224,7 +268,9 @@ def main():
     ap.add_argument("--engines", default=None,
                     help=f"comma list (default from config: {','.join(config.DEFAULT_ENGINES)})")
     ap.add_argument("--backends", default=None,
-                    help=f"comma list (default from config: {','.join(config.BACKENDS)})")
+                    help=f"comma list of backend ids from the config's `backends` registry "
+                         f"(available: {','.join(config.BACKENDS)}; "
+                         f"default: {','.join(config.DEFAULT_BACKENDS)})")
     ap.add_argument("--models", default=None,
                     help=f"comma list (default from config: {','.join(config.DEFAULT_MODELS)})")
     ap.add_argument("--scenarios", default=None,
@@ -245,7 +291,14 @@ def main():
     args = ap.parse_args()
 
     engine_ids = _csv(args.engines) or list(config.DEFAULT_ENGINES)
-    backend_ids = _csv(args.backends) or list(config.BACKENDS)
+    backend_ids = []
+    for b in (_csv(args.backends) or list(config.DEFAULT_BACKENDS)):
+        rid = config.resolve_backend(b)
+        if rid is None:
+            raise SystemExit(f"--backends: unknown backend '{b}' "
+                             f"(available: {', '.join(config.BACKENDS)})")
+        if rid not in backend_ids:
+            backend_ids.append(rid)
     model_ids = _csv(args.models) or list(config.DEFAULT_MODELS)
     scenario_ids = _csv(args.scenarios) or list(config.DEFAULT_SCENARIOS)
     mtp_modes = _parse_mtp(args.mtp) if args.mtp else list(config.DEFAULT_MTP_MODES)
@@ -331,8 +384,17 @@ def main():
             missing = f"model file not found: {model.gguf}"
         elif engine_id == "tensorsharp" and not config.TENSORSHARP_SERVER_DLL.exists():
             missing = f"TensorSharp.Server.dll not found: {config.TENSORSHARP_SERVER_DLL}"
-        elif engine_id == "llamacpp" and not config.LLAMA_SERVER_EXE.exists():
-            missing = f"llama-server.exe not found: {config.LLAMA_SERVER_EXE}"
+        elif engine_id == "llamacpp" and not config.llama_server_exe_for(backend).exists():
+            missing = (f"llama-server for backend '{backend}' not found: "
+                       f"{config.llama_server_exe_for(backend)}")
+        elif engine_id == "sdcpp" and not config.sdcpp_exe_for(backend).exists():
+            missing = (f"sd-cli for backend '{backend}' not found: "
+                       f"{config.sdcpp_exe_for(backend)}")
+        if missing is None and model.components:
+            for cname, cpath in model.components.items():
+                if cpath is not None and not cpath.exists():
+                    missing = f"model component '{cname}' not found: {cpath}"
+                    break
         if missing:
             print(f"    SKIP group: {missing}")
             for c in cells:
@@ -352,7 +414,19 @@ def main():
                                      max_tokens=config.SERVER_MAX_TOKENS, mtp=mtp)
 
         t0 = time.monotonic()
-        server.start()
+        try:
+            server.start()
+        except Exception as ex:
+            detail = f"server launch failed: {ex}"
+            print(f"    FAIL group: {detail}")
+            for c in cells:
+                for conc in concurrency_levels:
+                    _write(results_dir, engines.BenchResult(
+                        engine=engine_id, backend=backend, model=model_id,
+                        scenario=c[3], status="fail", detail=detail,
+                        mtp=mtp, concurrency=conc))
+            server.stop()
+            continue
         timeout = config.READY_TIMEOUT_S[model.size_class]
         ready = server.wait_ready(timeout)
         load_s = time.monotonic() - t0
@@ -360,7 +434,8 @@ def main():
             status = "skipped" if engine_id == "vllm" else "fail"
             detail = (f"engine unavailable at {server.base_url}"
                       if engine_id == "vllm"
-                      else f"server not ready in {timeout:.0f}s; log tail:\n{server.tail_log()}")
+                      else f"server not ready in {load_s:.0f}s; {server.ready_hint}"
+                           f"log tail:\n{server.tail_log()}")
             print(f"    {status.upper()} group: server not ready ({load_s:.0f}s)")
             for c in cells:
                 for conc in concurrency_levels:
@@ -391,9 +466,20 @@ def main():
                         pass
                 t = time.monotonic()
                 res = _run_cell(server, engine_id, backend, model, scenario_id,
-                                max_tokens, mtp=mtp, concurrency=conc)
+                                max_tokens, mtp=mtp, concurrency=conc,
+                                results_dir=results_dir)
                 _write(results_dir, res)
                 wall = time.monotonic() - t
+                if config.SCENARIOS[scenario_id].kind == "image_edit":
+                    first = (f"  first={res.edit_first_total_ms / 1000:5.1f}s"
+                             if res.edit_first_total_ms > 0 else "")
+                    print(f"    {scenario_id:14s} c={conc:<3d} {res.status:7s}  "
+                          f"total={res.edit_total_ms / 1000:6.1f}s  "
+                          f"step={res.edit_per_step_ms / 1000:5.2f}s  "
+                          f"vae_dec={res.edit_vae_decode_ms / 1000:5.2f}s{first}  "
+                          f"{res.edit_width}x{res.edit_height}  wall={wall:5.1f}s  {res.detail[:60]}",
+                          flush=True)
+                    continue
                 extra = ""
                 if res.tool_call_ok is not None:
                     extra += f"  tool_ok={res.tool_call_ok}"

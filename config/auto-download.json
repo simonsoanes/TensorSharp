@@ -1,0 +1,33 @@
+{
+  // Demonstrates auto-download. A file option can be an object with a local
+  // "path" and one or more "urls". On startup:
+  //   - if "path" already exists, it is used as-is (no network access);
+  //   - otherwise the file is downloaded from the first working URL, saved to
+  //     "path", and reused on every later run.
+  // List several mirrors under "urls" for automatic fallback: if the first URL
+  // fails, the next one is tried. A relative "path" is resolved next to this
+  // config file. An optional "sha256" verifies the download.
+  //
+  // The URLs below are REAL, public, ungated GGUFs (Qwen3-0.6B, ~640 MB Q8_0),
+  // so this file works as-is:
+  //   TensorSharp.Server --config config/auto-download.json --backend ggml_cuda
+  // downloads the model into C:\Works\models on the first run and reuses the
+  // local copy afterward.
+  "variables": {
+    "modelRoot": "C:/Works/models",
+    "hf": "https://huggingface.co"
+  },
+
+  "backend": "ggml_cuda",
+  "max-tokens": 4096,
+
+  "model": {
+    "path": "${modelRoot}/Qwen3-0.6B-Q8_0.gguf",
+    "urls": [
+      "${hf}/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf",
+      "${hf}/ggml-org/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"
+    ]
+    // Optional integrity check for a freshly downloaded file:
+    // "sha256": "0123456789abcdef..."
+  }
+}

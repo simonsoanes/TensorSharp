@@ -879,7 +879,7 @@ button.primary:hover { background: var(--accent-hover); }
         </div>
       </div>
     </div>
-    <input type="file" id="file-input" accept="image/*,video/*,audio/*,.heic,.heif,.txt,.csv,.json,.xml,.md,.log,.py,.js,.ts,.cs,.java,.cpp,.c,.h,.html,.css,.yaml,.yml,.toml,.ini,.cfg,.sh,.bat,.ps1,.rb,.go,.rs,.swift,.kt,.sql,.r,.m,.tex,.rtf" onchange="handleFileSelect(event)">
+    <input type="file" id="file-input" multiple accept="image/*,video/*,audio/*,.pdf,.heic,.heif,.txt,.csv,.json,.xml,.md,.log,.py,.js,.ts,.cs,.java,.cpp,.c,.h,.html,.css,.yaml,.yml,.toml,.ini,.cfg,.sh,.bat,.ps1,.rb,.go,.rs,.swift,.kt,.sql,.r,.m,.tex,.rtf" onchange="handleFileSelect(event)">
   </div>
 </div>
 
@@ -1064,10 +1064,17 @@ async function clearChat() {
 }
 
 async function handleFileSelect(event) {
-  const file = event.target.files[0];
-  if (!file) return;
+  const files = Array.from(event.target.files);
+  if (files.length === 0) return;
   event.target.value = '';
+  // Upload sequentially so pendingAttachments keeps the user's selection order
+  // (the order defines "Picture 1", "Picture 2", ... for multi-image edits).
+  for (const file of files) {
+    await uploadOneFile(file);
+  }
+}
 
+async function uploadOneFile(file) {
   const formData = new FormData();
   formData.append('file', file);
 
@@ -1077,6 +1084,12 @@ async function handleFileSelect(event) {
     if (data.ok) {
       pendingAttachments.push(data);
       renderAttachments();
+      if (data.warning) {
+        alert(data.warning);
+      } else if (data.renderedAsImages && data.frameUrls) {
+        // A scanned / image-only PDF was recovered as page images for a vision model.
+        // No blocking alert needed; the chip shows the page count.
+      }
       if (data.truncated) {
         let detail = 'Only the first portion of the file will be sent to the model.';
         if (data.truncateUnit === 'tokens' && data.truncateLimit && data.modelContextLimit) {
@@ -1096,15 +1109,24 @@ async function handleFileSelect(event) {
 
 function renderAttachments() {
   attachmentsDiv.innerHTML = '';
+  let imageNum = 0;
+  const totalImages = pendingAttachments.filter(a => a.mediaType === 'image').length;
   pendingAttachments.forEach((att, idx) => {
     const chip = document.createElement('div');
     chip.className = 'attachment-chip';
     let icon = '&#x1F4C4;';
-    if (att.mediaType === 'image') icon = '&#x1F5BC;';
+    let label = att.fileName;
+    if (att.mediaType === 'image') {
+      icon = '&#x1F5BC;';
+      // With several images attached, show the "Picture N" order the edit prompt can reference.
+      imageNum++;
+      if (totalImages > 1) label = `${imageNum}⃣ ${att.fileName}`;
+    }
     else if (att.mediaType === 'video') icon = '&#x1F3AC;';
     else if (att.mediaType === 'audio') icon = '&#x1F3B5;';
     else if (att.mediaType === 'text') icon = '&#x1F4DD;';
-    chip.innerHTML = `${icon} ${att.fileName} <span class="remove" onclick="removeAttachment(${idx})">&times;</span>`;
+    else if (att.mediaType === 'pdf') icon = '&#x1F4C4;';
+    chip.innerHTML = `${icon} ${label} <span class="remove" onclick="removeAttachment(${idx})">&times;</span>`;
     attachmentsDiv.appendChild(chip);
   });
 }
@@ -1144,6 +1166,15 @@ async function sendMessage() {
     } else if (att.mediaType === 'text' && att.textContent) {
       textParts.push(`[File: ${att.fileName}]\n${att.textContent}\n[End of file]`);
       if (att.path) textFilePaths.push(att.path);
+    } else if (att.mediaType === 'pdf') {
+      if (att.textContent) {
+        // Born-digital PDF: inline the extracted text.
+        textParts.push(`[File: ${att.fileName}]\n${att.textContent}\n[End of file]`);
+        if (att.path) textFilePaths.push(att.path);
+      } else if (att.framePaths && att.framePaths.length) {
+        // Scanned / image-only PDF: send its page images to the vision model.
+        att.framePaths.forEach(f => imagePaths.push(f));
+      }
     }
   });
 
@@ -1197,7 +1228,7 @@ async function runImageEdit(userMsg, bubbleText, statsDiv, queueDiv) {
     const res = await fetch('/api/image-edit/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ imagePath: userMsg.imagePaths[0], prompt: userMsg.content || '' }),
+      body: JSON.stringify({ imagePaths: userMsg.imagePaths, prompt: userMsg.content || '' }),
       signal: currentAbortController.signal
     });
     if (!res.ok) {
@@ -1543,6 +1574,7 @@ function describeAttachments() {
   if (types.includes('video')) return 'What is happening in this video?';
   if (types.includes('audio')) return 'Listen to this audio and describe what you hear.';
   if (types.includes('image')) return 'What is in this image?';
+  if (types.includes('pdf')) return 'Please analyze the attached PDF document and summarize its content.';
   if (types.includes('text')) return 'Please analyze the attached text file and summarize its content.';
   return 'Describe the attached file.';
 }
@@ -1562,6 +1594,14 @@ function addUserBubble(text, attachments, historyIdx) {
       mediaHtml += `<div class="media-preview"><div class="audio-label">&#x1F3B5; ${escapeHtml(att.fileName || '')}</div></div>`;
     } else if (att.mediaType === 'text') {
       mediaHtml += `<div class="media-preview"><div class="audio-label">&#x1F4DD; ${escapeHtml(att.fileName || '')}</div></div>`;
+    } else if (att.mediaType === 'pdf') {
+      if (att.renderedAsImages && att.frameUrls && att.frameUrls.length) {
+        const n = att.frameUrls.length;
+        mediaHtml += `<div class="media-preview"><img src="${escapeHtml(att.frameUrls[0])}" alt="pdf page"></div>`;
+        mediaHtml += `<div class="audio-label">&#x1F4C4; ${escapeHtml(att.fileName || '')} (${n} page image${n > 1 ? 's' : ''})</div>`;
+      } else {
+        mediaHtml += `<div class="media-preview"><div class="audio-label">&#x1F4C4; ${escapeHtml(att.fileName || '')}</div></div>`;
+      }
     }
   });
 
@@ -1607,6 +1647,8 @@ function escapeHtml(str) {
 }
 
 function uploadUrlForAttachment(att) {
+  // Formats the browser can't render (HEIC/HEIF) get a server-generated PNG preview.
+  if (att && att.previewUrl) return att.previewUrl;
   if (att && att.url) return att.url;
   const raw = String((att && (att.path || att.fileName)) || '');
   if (!raw) return '';

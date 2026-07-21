@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -27,8 +27,9 @@
 // WHOLE forward for BOTH CFG branches — no block-0 probe, no prelude/postlude,
 // no device work at all on a skipped step — and its decision costs one host
 // pass over the [seq,64] latent (~1 MB). On a compute-bound GPU (the DiT
-// forward saturates the power limit) skipping forwards outright is the only
-// remaining large lever, which is why this is the default cache mode.
+// forward saturates the power limit) skipping forwards outright is the largest
+// remaining speed lever — but it approximates the skipped steps, so (like
+// sd.cpp's --cache-mode) it is OPT-IN: quality is the default.
 //
 // The error is bounded the same way as the reference: the accumulator carries
 // across consecutive skips, so drift forces a real compute; the first
@@ -47,15 +48,21 @@ namespace TensorSharp.Models.QwenImage
     internal sealed class QwenImageStepCache
     {
         // Cache-mode selection shared with the First-Block-Cache:
-        //   easycache (default) - this whole-step cache, FBC off
+        //   off (default)       - no caching: every step runs the full DiT forward
+        //   easycache           - this whole-step cache, FBC off
         //   fbc                 - the block-level First-Block-Cache only
         //   both                - stack them (more speed, compounding approximation)
-        //   off                 - no caching
         // TS_QWEN_DIT_CACHE=0 (legacy knob) still disables everything.
+        //
+        // Default OFF: step caching reconstructs skipped steps from stale diffs, which
+        // visibly softens fine detail (faces) on edit workloads — a 30-step run was
+        // observed computing only ~19 of its steps. stable-diffusion.cpp ships EasyCache
+        // strictly opt-in (--cache-mode easycache) for the same reason; quality is the
+        // default here and speed is the opt-in (TS_QWEN_DIT_CACHE_MODE=easycache).
         internal static string Mode =>
             Environment.GetEnvironmentVariable("TS_QWEN_DIT_CACHE") == "0"
                 ? "off"
-                : (Environment.GetEnvironmentVariable("TS_QWEN_DIT_CACHE_MODE") ?? "easycache").ToLowerInvariant();
+                : (Environment.GetEnvironmentVariable("TS_QWEN_DIT_CACHE_MODE") ?? "off").ToLowerInvariant();
 
         // Accumulated-predicted-change threshold below which a step is skipped.
         // sd.cpp's default (0.2). Lower = fewer skips / closer to no-cache.
@@ -69,9 +76,6 @@ namespace TensorSharp.Models.QwenImage
         // detail refinement). sd.cpp default 0.95.
         private static readonly float EndPercent =
             EnvFloat("TS_QWEN_DIT_EASYCACHE_END", 0.95f);
-
-        private static readonly bool Debug =
-            Environment.GetEnvironmentVariable("TS_QWEN_DIT_CACHE_DEBUG") == "1";
 
         // Below this step count the cache stays off: few-step (Lightning-distilled)
         // schedules give every step a large, deliberate role — approximating one skips
@@ -121,7 +125,6 @@ namespace TensorSharp.Models.QwenImage
             if (!active || _prevInput == null || _prevOutput == null || _diffCond == null ||
                 (vNeg != null && _diffNeg == null) || _prevInput.Length != input.Length)
             {
-                if (Debug && _enabled) Console.WriteLine($"  [step-cache] step {step}: compute ({(active ? "no prior state" : "outside window")})");
                 return false;
             }
 
@@ -137,18 +140,12 @@ namespace TensorSharp.Models.QwenImage
                 _cumulativeChange += predicted;
                 if (_cumulativeChange < Threshold)
                 {
-                    if (Debug) Console.WriteLine($"  [step-cache] step {step}: SKIP (cum predicted change {_cumulativeChange:F4} < {Threshold:F3})");
                     Apply(_diffCond, input, vCond);
                     if (vNeg != null) Apply(_diffNeg, input, vNeg);
                     _skipped++;
                     return true;
                 }
-                if (Debug) Console.WriteLine($"  [step-cache] step {step}: compute (cum predicted change {_cumulativeChange:F4} >= {Threshold:F3})");
                 _cumulativeChange = 0f;
-            }
-            else if (Debug)
-            {
-                Console.WriteLine($"  [step-cache] step {step}: compute (rate not established)");
             }
             return false;
         }

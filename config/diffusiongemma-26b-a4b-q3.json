@@ -1,0 +1,15 @@
+{
+  // DiffusionGemma 26B-A4B (Q3_K_M, ~13.3 GB) — smaller quant of the
+  // text-diffusion model in diffusiongemma-26b-a4b-q4.json, for tighter VRAM.
+  // Drive it with the CLI diffusion path:
+  //   TensorSharp.Cli --config config/diffusiongemma-26b-a4b-q3.json --input prompt.txt \
+  //     --diffusion-steps 48 --diffusion-seed 0 --max-tokens 256
+  "variables": {
+    "root": "C:/Works/models/q3"
+  },
+
+  "backend": "ggml_cuda",
+  "max-tokens": 256,
+
+  "model": "${root}/diffusiongemma-26B-A4B-it-Q3_K_M.gguf"
+}

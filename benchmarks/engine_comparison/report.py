@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import difflib
 import json
 import math
 import os
@@ -38,28 +39,30 @@ RESULTS_DIR = config.RESULTS_DIR
 REPORT_PATH = config.REPO_ROOT / "docs" / "engine_comparison_report.md"
 CSV_PATH = RESULTS_DIR / "results.csv"
 
-# Column order: engine x backend.
-COLUMNS = [
-    ("tensorsharp", "gpu"), ("tensorsharp", "cpu"),
-    ("llamacpp", "gpu"), ("llamacpp", "cpu"),
-    ("vllm", "gpu"),
-]
-COL_LABEL = {
-    ("tensorsharp", "gpu"): "TensorSharp · GPU",
-    ("tensorsharp", "cpu"): "TensorSharp · CPU",
-    ("llamacpp", "gpu"): "llama.cpp · GPU",
-    ("llamacpp", "cpu"): "llama.cpp · CPU",
-    ("vllm", "gpu"): "vLLM · GPU",
-}
+# Columns are (engine, backend) pairs discovered in the results, ordered by the
+# config registries (engine outer, backend inner). Results may contain backend
+# ids that are not in the current config (e.g. the legacy abstract gpu / cpu
+# ids from an older run); those sort after the registry ids and are labeled by
+# their raw id.
+def _order_key(col) -> tuple:
+    eng_order = list(config.ENGINES.keys())
+    b_order = list(config.BACKENDS.keys())
+    e, b = col
+    return (eng_order.index(e) if e in eng_order else len(eng_order),
+            b_order.index(b) if b in b_order else len(b_order), str(e), str(b))
 
-# Performance-ratio comparisons: TensorSharp (numerator) vs a reference engine on
-# the *same* backend, so the columns stay apples-to-apples. A ratio > 1.0×
+
+def _col_label(col) -> str:
+    e, b = col
+    eng = config.ENGINES.get(e)
+    spec = config.BACKENDS.get(b)
+    return f"{eng.display if eng else e} · {spec.display if spec else b}"
+
+
+# Performance-ratio comparisons: TensorSharp (numerator) vs a reference engine
+# on the *same* backend, so the columns stay apples-to-apples. A ratio > 1.0×
 # means TensorSharp is faster (for throughput metrics) / lower-latency (TTFT).
-RATIO_PAIRS = [
-    (("tensorsharp", "gpu"), ("llamacpp", "gpu"), "vs llama.cpp · GPU"),
-    (("tensorsharp", "cpu"), ("llamacpp", "cpu"), "vs llama.cpp · CPU"),
-    (("tensorsharp", "gpu"), ("vllm", "gpu"), "vs vLLM · GPU"),
-]
+_RATIO_REF_ENGINES = ("llamacpp", "vllm")
 
 
 def load_all() -> dict:
@@ -102,7 +105,7 @@ def _present_columns(data: dict) -> list:
     for scen_map in data.values():
         for col_map in scen_map.values():
             seen.update(col_map.keys())
-    return [c for c in COLUMNS if c in seen]
+    return sorted(seen, key=_order_key)
 
 
 def _scenario_rows(scen_map: dict) -> list:
@@ -116,7 +119,7 @@ def _scenario_rows(scen_map: dict) -> list:
 
 
 def metric_table(scen_map: dict, cols: list, metric: str) -> str:
-    head = "| Scenario | " + " | ".join(COL_LABEL[c] for c in cols) + " |"
+    head = "| Scenario | " + " | ".join(_col_label(c) for c in cols) + " |"
     sep = "|---|" + "|".join(["---:"] * len(cols)) + "|"
     rows = [head, sep]
     for scenario_id in _scenario_rows(scen_map):
@@ -163,14 +166,23 @@ _RATIO_METRICS = (("decode_tps", True), ("prefill_tps", True), ("ttft_ms", False
 
 def _present_ratio_pairs(scen_map: dict) -> list:
     """Ratio pairs that yield at least one real number for this model — i.e. some
-    scenario where both TensorSharp and the reference actually ran. Drops e.g. an
-    all-`—` vLLM column when that endpoint never produced a comparable cell."""
+    scenario where both TensorSharp and the reference actually ran on the same
+    backend. Built from whatever backends appear in the data, so new backend ids
+    (ggml_vulkan, ...) get their own comparison columns automatically; drops e.g.
+    an all-`—` vLLM column when that endpoint never produced a comparable cell."""
+    cols = set()
+    for col_map in scen_map.values():
+        cols.update(col_map.keys())
     out = []
-    for ts, ref, lbl in RATIO_PAIRS:
-        if any(_ratio_val(col_map.get(ts), col_map.get(ref), m, hib) > 0
-               for col_map in scen_map.values()
-               for m, hib in _RATIO_METRICS):
-            out.append((ts, ref, lbl))
+    for ts in sorted((c for c in cols if c[0] == "tensorsharp"), key=_order_key):
+        for ref_eng in _RATIO_REF_ENGINES:
+            ref = (ref_eng, ts[1])
+            if ref not in cols:
+                continue
+            if any(_ratio_val(col_map.get(ts), col_map.get(ref), m, hib) > 0
+                   for col_map in scen_map.values()
+                   for m, hib in _RATIO_METRICS):
+                out.append((ts, ref, f"vs {_col_label(ref)}"))
     return out
 
 
@@ -233,10 +245,11 @@ def versions_block() -> str:
     ts_rev = _try(["git", "-C", str(config.REPO_ROOT), "rev-parse", "--short", "HEAD"])
     dotnet_v = _try(["dotnet", "--version"])
     gpu = _try(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"])
+    ts_backends = " / ".join(b.ts_backend for b in config.BACKENDS.values() if b.ts_backend)
     return (
         "| Component | Version / detail |\n"
         "|---|---|\n"
-        f"| TensorSharp | git `{ts_rev}`, .NET {dotnet_v} (backends: ggml_cuda / ggml_cpu) |\n"
+        f"| TensorSharp | git `{ts_rev}`, .NET {dotnet_v} (backends: {ts_backends}) |\n"
         f"| llama.cpp | `{config.LLAMA_SERVER_EXE}` |\n"
         f"| vLLM | endpoint `{config.VLLM_BASE_URL}` (connect-only) |\n"
         f"| GPU | {gpu or 'unknown'} |\n"
@@ -319,6 +332,234 @@ def concurrency_section(rows: list) -> str:
     return "\n".join(lines)
 
 
+def _is_image_edit_scenario(scenario_id: str) -> bool:
+    try:
+        return config.SCENARIOS[scenario_id].kind == "image_edit"
+    except KeyError:
+        return False
+
+
+# (record key, table label). All values are engine-reported pipeline-phase
+# timings in ms, rendered in seconds.
+_EDIT_COLS = (
+    ("edit_total_ms", "total (warm)"),
+    ("edit_per_step_ms", "per step"),
+    ("edit_sampling_ms", "sampling"),
+    ("edit_text_encode_ms", "text encode"),
+    ("edit_vae_encode_ms", "VAE encode"),
+    ("edit_vae_decode_ms", "VAE decode"),
+    ("edit_first_total_ms", "first request (cold)"),
+)
+
+
+def _edit_cell(rec, key) -> str:
+    if rec is None:
+        return "n/a"
+    if rec.get("status") == "skipped":
+        return "—"
+    if rec.get("status") != "ok":
+        return "fail"
+    v = float(rec.get(key, 0.0) or 0.0)
+    return f"{v / 1000.0:.2f} s" if v > 0 else "—"
+
+
+def image_edit_section(rows: list) -> str:
+    """Image-editing (stable-diffusion) results: one table per
+    (model, scenario, backend) with engines as rows and pipeline phases as
+    columns, plus a TensorSharp-vs-reference speedup line. All timings are the
+    engines' own pipeline timers (weight-file load excluded on both sides)."""
+    recs = [r for r in rows
+            if _is_image_edit_scenario(r.get("scenario", ""))
+            and not r.get("mtp", False)
+            and int(r.get("concurrency", 1) or 1) == 1]
+    if not recs:
+        return "_No image-edit cells were run (see the `image_edit` scenario)._"
+
+    groups: dict = {}
+    for r in recs:
+        groups.setdefault((r["model"], r["scenario"], r["backend"]), {})[r["engine"]] = r
+
+    eng_order = list(config.ENGINES.keys())
+    out = []
+    for (model_id, scenario_id, backend), by_eng in sorted(groups.items()):
+        model = config.MODELS.get(model_id)
+        spec = config.BACKENDS.get(backend)
+        ok = {e: r for e, r in by_eng.items() if r.get("status") == "ok"}
+        if not ok and all(r.get("status") == "skipped" for r in by_eng.values()):
+            continue                      # fully gated cell group (e.g. cpu backend)
+        rep = next(iter(ok.values()), None)
+        dims = (f", {rep['edit_width']}x{rep['edit_height']}, {rep.get('steps', 0)} steps"
+                if rep and rep.get("edit_width") else "")
+        title = model.display if model else model_id
+        out.append(f"### {title} — `{scenario_id}` on "
+                   f"{spec.display if spec else backend}{dims}\n")
+
+        head = "| Engine | " + " | ".join(lbl for _, lbl in _EDIT_COLS) + " |"
+        sep = "|---|" + "|".join(["---:"] * len(_EDIT_COLS)) + "|"
+        lines = [head, sep]
+        engines_here = sorted(by_eng, key=lambda e: (eng_order.index(e)
+                                                     if e in eng_order else len(eng_order), e))
+        for e in engines_here:
+            r = by_eng[e]
+            eng = config.ENGINES.get(e)
+            cells = [_edit_cell(r, k) for k, _ in _EDIT_COLS]
+            lines.append(f"| {eng.display if eng else e} | " + " | ".join(cells) + " |")
+        out.append("\n".join(lines))
+        out.append("")
+
+        ts = ok.get("tensorsharp")
+        for ref_eng in ("sdcpp", "llamacpp"):
+            ref = ok.get(ref_eng)
+            if not (ts and ref):
+                continue
+            ratios = []
+            for key, lbl in _EDIT_COLS:
+                if key == "edit_first_total_ms":
+                    continue              # no cold/warm distinction for a CLI engine
+                a = float(ts.get(key, 0.0) or 0.0)
+                b = float(ref.get(key, 0.0) or 0.0)
+                if a > 0 and b > 0:
+                    ratios.append(f"{lbl} **{b / a:.2f}×**")
+            if ratios:
+                ref_disp = config.ENGINES[ref_eng].display
+                out.append(f"**TensorSharp vs {ref_disp}** (ratio = {ref_disp} time / "
+                           f"TensorSharp time; > 1.0× = TensorSharp faster): "
+                           + ", ".join(ratios) + "\n")
+    return "\n".join(out) if out else "_No image-edit cells were run._"
+
+
+# ---------------------------------------------------------------------------
+# Output quality — cross-engine agreement on identical greedy requests
+# ---------------------------------------------------------------------------
+def _rec_output_text(rec) -> str:
+    """Full captured output when available (new results), else the 300-char
+    preview (older result files)."""
+    if not rec:
+        return ""
+    return str(rec.get("output_text") or rec.get("output_preview") or "")
+
+
+def _norm_ws(s: str) -> str:
+    return " ".join((s or "").split())
+
+
+def _json_valid(text: str):
+    """Whether the output parses as JSON (directly, or the first-{ .. last-}
+    slice, tolerating prose/fences around the object)."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    candidates = [t]
+    if "{" in t and "}" in t:
+        candidates.append(t[t.find("{"): t.rfind("}") + 1])
+    for cand in candidates:
+        try:
+            json.loads(cand)
+            return True
+        except Exception:
+            pass
+    return False
+
+
+def _similarity_verdict(r: float) -> str:
+    if r >= 0.90:
+        return "high agreement"
+    if r >= 0.75:
+        return "moderate"
+    if r >= 0.50:
+        return "low"
+    return "diverged"
+
+
+def _mark(v) -> str:
+    return "yes" if v else ("no" if v is False else "?")
+
+
+def quality_section(data: dict) -> str:
+    """Output-quality comparison of TensorSharp vs llama.cpp on the same
+    backend. Both engines decode the same GGUF greedily (temperature=0), so
+    their outputs should agree closely; low text similarity or a failed
+    structural check (valid JSON in json_mode, tool call emitted in
+    function_call) flags a quality problem on one side. Prefill scenarios are
+    excluded (their 8-token outputs carry no quality signal)."""
+    ref_engine = "llamacpp"
+    rows = []       # (model_id, backend, scenario, ts_rec, ref_rec, sim)
+    for model_id in config.MODELS:
+        scen_map = data.get(model_id)
+        if not scen_map:
+            continue
+        for scenario_id in _scenario_rows(scen_map):
+            if scenario_id.startswith("prefill_") or _is_image_edit_scenario(scenario_id):
+                continue
+            col_map = scen_map[scenario_id]
+            backends = sorted({b for (_, b) in col_map})
+            for backend in backends:
+                ts = col_map.get(("tensorsharp", backend))
+                ref = col_map.get((ref_engine, backend))
+                if not ts or not ref or ts.get("status") != "ok" or ref.get("status") != "ok":
+                    continue
+                a, b = _norm_ws(_rec_output_text(ts)), _norm_ws(_rec_output_text(ref))
+                # A correct function_call answer often carries no text content
+                # (tool_calls only) — keep the row for its structural check and
+                # render the similarity as `—`.
+                sim = difflib.SequenceMatcher(None, a, b).ratio() if a and b else None
+                try:
+                    kind = config.SCENARIOS[scenario_id].kind
+                except KeyError:
+                    kind = ""
+                if sim is None and kind not in ("json_mode", "function_call"):
+                    continue
+                rows.append((model_id, backend, scenario_id, ts, ref, sim))
+    if not rows:
+        return "_No overlapping ok cells with captured output to compare._"
+
+    out = ["| Model | Backend | Scenario | similarity | verdict | tokens (TS / ref) | "
+           "finish (TS / ref) | checks |",
+           "|---|---|---|---:|---|---|---|---|"]
+    for model_id, backend, scenario_id, ts, ref, sim in rows:
+        kind = ""
+        try:
+            kind = config.SCENARIOS[scenario_id].kind
+        except KeyError:
+            pass
+        if kind == "json_mode":
+            checks = (f"json valid: TS {_mark(_json_valid(_rec_output_text(ts)))} / "
+                      f"ref {_mark(_json_valid(_rec_output_text(ref)))}")
+        elif kind == "function_call":
+            checks = (f"tool call: TS {_mark(ts.get('tool_call_ok'))} / "
+                      f"ref {_mark(ref.get('tool_call_ok'))}")
+        else:
+            checks = "—"
+        spec = config.BACKENDS.get(backend)
+        sim_s = f"{sim:.2f}" if sim is not None else "—"
+        verdict = _similarity_verdict(sim) if sim is not None else "—"
+        out.append(f"| {model_id} | {spec.display if spec else backend} | {scenario_id} | "
+                   f"{sim_s} | {verdict} | "
+                   f"{ts.get('completion_tokens', 0)} / {ref.get('completion_tokens', 0)} | "
+                   f"{ts.get('finish_reason', '') or '—'} / {ref.get('finish_reason', '') or '—'} | "
+                   f"{checks} |")
+
+    sims = [sim for *_, sim in rows if sim is not None]
+    if sims:
+        out.append("")
+        out.append(f"Mean similarity across {len(sims)} compared cells: "
+                   f"**{sum(sims) / len(sims):.2f}** "
+                   f"(min {min(sims):.2f}, max {max(sims):.2f}).")
+
+    # Side-by-side excerpts for eyeballing, lowest-agreement cells first.
+    out.append("")
+    with_text = [r for r in rows if r[5] is not None]
+    for model_id, backend, scenario_id, ts, ref, sim in sorted(with_text, key=lambda r: r[5]):
+        ts_txt = _rec_output_text(ts)[:600] or "(empty)"
+        ref_txt = _rec_output_text(ref)[:600] or "(empty)"
+        out.append(f"<details><summary>{model_id} · {backend} · {scenario_id} "
+                   f"(similarity {sim:.2f})</summary>\n")
+        out.append(f"**TensorSharp**\n\n```\n{ts_txt}\n```\n")
+        out.append(f"**llama.cpp**\n\n```\n{ref_txt}\n```\n")
+        out.append("</details>")
+    return "\n".join(out)
+
+
 def tool_summary(rows: list) -> str:
     fc = [r for r in rows if r["scenario"] == "function_call" and r["status"] == "ok"]
     if not fc:
@@ -356,7 +597,8 @@ def main():
     out.append("# Engine comparison benchmark — TensorSharp vs llama.cpp vs vLLM\n")
     out.append("Same GGUF files, same host, one uniform OpenAI `/v1/chat/completions` "
                "surface, across text / image / audio / video / single-turn / multi-turn / "
-               "function-call / structured-output scenarios on GPU and CPU backends.\n")
+               "function-call / structured-output scenarios on the selected compute "
+               "backends (ggml_cuda / ggml_vulkan / ggml_metal / ggml_cpu / cpu / ...).\n")
     out.append("Numbers are tokens/second (higher is better). `—` = not applicable / skipped, "
                "`fail` = errored at runtime, `n/a` = combination never attempted.\n")
 
@@ -391,6 +633,8 @@ def main():
         if model_id not in data:
             continue
         model = config.MODELS[model_id]
+        if model.is_image_edit:
+            continue    # no token metrics; rendered in the image-editing section
         scen_map = data[model_id]
         cols = _present_columns({model_id: scen_map})
         if not cols:
@@ -420,6 +664,29 @@ def main():
             out.append(ratio_table(scen_map, pairs, "ttft_ms", higher_is_better=False))
             out.append("")
 
+    out.append("## Output quality — TensorSharp vs llama.cpp\n")
+    out.append("Both engines decode the **same GGUF greedily** (temperature=0) on the same "
+               "backend, so their outputs should agree closely. `similarity` is a "
+               "whitespace-normalized SequenceMatcher ratio between the two outputs "
+               "(1.00 = identical); low similarity, an invalid JSON object in `json_mode`, "
+               "or a missing tool call in `function_call` flags an output-quality problem "
+               "on one side. Prefill scenarios (8-token outputs) are excluded. "
+               "Side-by-side excerpts follow the table, lowest agreement first.\n")
+    out.append(quality_section(data))
+    out.append("")
+
+    out.append("## Image editing (stable-diffusion)\n")
+    out.append("Same input image, prompt, resolution, step count, cfg and seed for every "
+               "engine. Timings are each engine's **own pipeline timers** (TensorSharp's "
+               "`[pipe-timing]` phases + server `elapsedSeconds`; sd.cpp's phase logs + "
+               "`generate_image` total), so weight-file loading and HTTP/process overhead "
+               "are excluded on both sides. `total (warm)` is the steady-state request on "
+               "an already-running server; `first request (cold)` additionally pays "
+               "TensorSharp's per-request DiT rebuild + graph capture on a fresh server "
+               "(a CLI engine has no such distinction). Lower is better.\n")
+    out.append(image_edit_section(rows))
+    out.append("")
+
     out.append("## MTP / NextN speculative decoding (on vs off)\n")
     out.append("Single-stream decode tok/s with MTP/NextN speculative decoding off vs on "
                "(TensorSharp only). Speedup `< 1.0×` means speculation cost more than it "
@@ -447,7 +714,10 @@ def main():
     fields = ["engine", "backend", "model", "scenario", "mtp", "concurrency",
               "status", "detail", "prompt_tokens", "completion_tokens", "ttft_ms",
               "prefill_tps", "decode_tps", "aggregate_decode_tps", "requests_ok",
-              "total_wall_ms", "finish_reason", "tool_call_ok"]
+              "total_wall_ms", "finish_reason", "tool_call_ok",
+              "steps", "edit_total_ms", "edit_first_total_ms", "edit_text_encode_ms",
+              "edit_vae_encode_ms", "edit_sampling_ms", "edit_per_step_ms",
+              "edit_vae_decode_ms", "edit_width", "edit_height", "edit_image"]
     with open(CSV_PATH, "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
         w.writeheader()

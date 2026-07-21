@@ -3,7 +3,7 @@
 // (O(N * kvLen) CPU work that blocks the GPU) + the H2D upload with a tiny CUDA
 // kernel that writes the F16 mask straight into its device buffer.
 //
-// The pattern EXACTLY mirrors the host fill in ggml_ops_transformer.cpp's
+// The pattern EXACTLY mirrors the host fill in ggml_ops_gemma4_verify.cpp's
 // get_causal_mask (non-bidirectional / text path):
 //   threshold = nPast + qi
 //   lo = max(window > 0 ? threshold - window + 1 : 0, 0)

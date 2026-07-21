@@ -1,0 +1,28 @@
+{
+  // Gemma-4 E4B (uncensored, Q8_0) — compact multimodal LLM (~8 GB) with its
+  // vision projector, and its MTP "assistant" draft head wired up for
+  // speculative decoding (server only).
+  // Run with:
+  //   TensorSharp.Cli    --config config/gemma-4-e4b.json --image photo.png
+  //   TensorSharp.Server --config config/gemma-4-e4b.json
+  "variables": {
+    "modelRoot": "C:/Works/models"
+  },
+
+  "backend": "ggml_cuda",
+  "max-tokens": 4096,
+  "continuous-batching": true,
+
+  // Gemma's recommended sampling.
+  "temperature": 1.0,
+  "top-k": 64,
+  "top-p": 0.95,
+
+  "model": "${modelRoot}/gemma-4-E4B-it-uncensored-Q8_0.gguf",
+  "mmproj": "${modelRoot}/gemma-4-E4B-mmproj-F16.gguf",
+
+  // MTP speculative decoding (server only): Gemma-4's draft head ships as its
+  // own GGUF. Lossless — the verify step guarantees identical output.
+  "mtp-spec": true,
+  "mtp-draft-model": "${modelRoot}/gemma-4-E4B-it-assistant.Q8_0.gguf"
+}
