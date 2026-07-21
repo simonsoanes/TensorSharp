@@ -88,9 +88,22 @@ namespace TensorSharp.Server.ProtocolAdapters
                 ? instrProp.GetString()
                 : null;
 
-            bool stream = body.TryGetProperty("stream", out var streamProp) && streamProp.GetBoolean();
+            bool stream = body.TryGetProperty("stream", out var streamProp) && streamProp.ValueKind == JsonValueKind.True;
             bool store = !body.TryGetProperty("store", out var storeProp) || storeProp.ValueKind != JsonValueKind.False;
-            int maxOutputTokens = body.TryGetProperty("max_output_tokens", out var motProp) ? motProp.GetInt32() : 200;
+
+            int maxOutputTokens = 200;
+            if (body.TryGetProperty("max_output_tokens", out var motProp) &&
+                motProp.ValueKind != JsonValueKind.Null && motProp.ValueKind != JsonValueKind.Undefined)
+            {
+                if (motProp.ValueKind != JsonValueKind.Number || !motProp.TryGetInt32(out maxOutputTokens))
+                {
+                    logger.LogWarning(LogEventIds.HttpRequestRejected,
+                        "/v1/responses rejected: max_output_tokens must be an integer (model={Model})", modelName);
+                    await WriteErrorAsync(ctx, 400, "max_output_tokens must be an integer");
+                    return;
+                }
+            }
+
             var samplingConfig = SamplingConfigParser.ParseOpenAI(body, _options.DefaultSamplingConfig);
             var messages = ChatMessageParser.ParseResponsesInput(inputEl, instructions, _options.UploadDirectory);
             var tools = ToolFunctionParser.ParseOpenAIResponses(body);

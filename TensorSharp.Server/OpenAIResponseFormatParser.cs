@@ -78,7 +78,7 @@ namespace TensorSharp.Server
                     return true;
 
                 case "json_schema":
-                    return TryParseJsonSchema(formatEl, out format, out error);
+                    return TryParseJsonSchema(formatEl, fieldName, out format, out error);
 
                 default:
                     error = $"Unsupported {fieldName}.type '{type}'.";
@@ -86,7 +86,7 @@ namespace TensorSharp.Server
             }
         }
 
-        private static bool TryParseJsonSchema(JsonElement responseFormatEl, out StructuredOutputFormat format, out string error)
+        private static bool TryParseJsonSchema(JsonElement responseFormatEl, string fieldName, out StructuredOutputFormat format, out string error)
         {
             format = null;
             error = null;
@@ -96,7 +96,7 @@ namespace TensorSharp.Server
             {
                 if (nestedSchemaEl.ValueKind != JsonValueKind.Object)
                 {
-                    error = "response_format.json_schema must be an object.";
+                    error = $"{fieldName}.json_schema must be an object.";
                     return false;
                 }
 
@@ -106,13 +106,13 @@ namespace TensorSharp.Server
             if (!schemaWrapper.TryGetProperty("name", out var nameEl) || nameEl.ValueKind != JsonValueKind.String ||
                 string.IsNullOrWhiteSpace(nameEl.GetString()))
             {
-                error = "response_format.json_schema.name is required.";
+                error = $"{fieldName}.json_schema.name is required.";
                 return false;
             }
 
             if (!schemaWrapper.TryGetProperty("schema", out var schemaEl) || schemaEl.ValueKind != JsonValueKind.Object)
             {
-                error = "response_format.json_schema.schema must be an object.";
+                error = $"{fieldName}.json_schema.schema must be an object.";
                 return false;
             }
 
