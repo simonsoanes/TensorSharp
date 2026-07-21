@@ -26,7 +26,6 @@ namespace TensorSharp.Server.Hosting
     internal static class ServerOptionsBuilder
     {
         private const int DefaultWebMaxTokensFallback = 20000;
-        private const int DefaultMaxTextFileChars = 8000;
 
         public static ServerHostingOptions Build(string[] args, string baseDirectory)
         {
@@ -57,15 +56,6 @@ namespace TensorSharp.Server.Hosting
                     ? envMaxTokens
                     : DefaultWebMaxTokensFallback);
 
-            int maxTextFileChars = DefaultMaxTextFileChars;
-            string maxTextEnv = Environment.GetEnvironmentVariable("MAX_TEXT_FILE_CHARS");
-            if (!string.IsNullOrEmpty(maxTextEnv) &&
-                int.TryParse(maxTextEnv, out int envMaxTextChars) &&
-                envMaxTextChars > 0)
-            {
-                maxTextFileChars = envMaxTextChars;
-            }
-
             string uploadDirectory = Path.Combine(baseDirectory, "uploads");
             Directory.CreateDirectory(uploadDirectory);
 
@@ -86,7 +76,6 @@ namespace TensorSharp.Server.Hosting
                 defaultBackend,
                 supportedBackends,
                 defaultWebMaxTokens,
-                maxTextFileChars,
                 uploadDirectory,
                 logDirectory,
                 fileLoggingEnabled,
@@ -471,6 +460,7 @@ namespace TensorSharp.Server.Hosting
             public float? TopP;
             public float? MinP;
             public float? RepetitionPenalty;
+            public int? PenaltyLastN;
             public float? PresencePenalty;
             public float? FrequencyPenalty;
             public int? Seed;
@@ -546,6 +536,12 @@ namespace TensorSharp.Server.Hosting
                 if (TryReadOption(args, ref i, "--repeat-penalty", out string repPenOption))
                 {
                     configuredSampling.RepetitionPenalty = ParseFloat("--repeat-penalty", repPenOption);
+                    continue;
+                }
+
+                if (TryReadOption(args, ref i, "--repeat-last-n", out string repeatLastNOption))
+                {
+                    configuredSampling.PenaltyLastN = ParseInt("--repeat-last-n", repeatLastNOption);
                     continue;
                 }
 
@@ -702,7 +698,7 @@ namespace TensorSharp.Server.Hosting
             {
                 "--model", "--mmproj", "--backend", "--max-tokens",
                 "--temperature", "--top-k", "--top-p", "--min-p",
-                "--repeat-penalty", "--presence-penalty", "--frequency-penalty",
+                "--repeat-penalty", "--repeat-last-n", "--presence-penalty", "--frequency-penalty",
                 "--seed", "--stop",
                 "--paged-kv", "--paged-kv-cache", "--no-paged-kv", "--no-paged-kv-cache",
                 "--paged-kv-block-size", "--paged-kv-ram-mb",
@@ -783,6 +779,9 @@ namespace TensorSharp.Server.Hosting
 
             if (overrides.RepetitionPenalty.HasValue) resolved.RepetitionPenalty = overrides.RepetitionPenalty.Value;
             else if (TryReadEnvFloat("TENSORSHARP_REPEAT_PENALTY", out float envRep)) resolved.RepetitionPenalty = envRep;
+
+            if (overrides.PenaltyLastN.HasValue) resolved.PenaltyLastN = overrides.PenaltyLastN.Value;
+            else if (TryReadEnvInt("TENSORSHARP_REPEAT_LAST_N", out int envLastN)) resolved.PenaltyLastN = envLastN;
 
             if (overrides.PresencePenalty.HasValue) resolved.PresencePenalty = overrides.PresencePenalty.Value;
             else if (TryReadEnvFloat("TENSORSHARP_PRESENCE_PENALTY", out float envPres)) resolved.PresencePenalty = envPres;

@@ -6,6 +6,10 @@ window.SEARCH_INDEX = [
   { t: "Other backends and multimodal", p: "Home", u: "index.html#quickstart-e4b", s: "Run Gemma 4 E4B on ggml_metal, ggml_vulkan, or ggml_cpu, and add the mmproj projector for image, video, or audio.", k: "gemma4 gemma 4 e4b q8 native ggml metal vulkan cpu mmproj projector multimodal" },
   { t: "Who is TensorSharp for", p: "Home", u: "index.html#audience", s: "Value for developers, managers, CTOs, students, and businesses adopting local LLM inference.", k: "audience business value executive sales marketing students" },
 
+  { t: "From Tensors to Tokens — the TensorSharp book", p: "Book", u: "book.html", s: "Build a multimodal LLM inference engine from scratch in C#/.NET with TensorSharp and Gemma 4 E4B.", k: "book paperback amazon zhongkai fu read purchase learn guide tutorial" },
+  { t: "Inside the book", p: "Book", u: "book.html#inside", s: "Tensor storage, GGUF, quantization, tokenization, transformer execution, multimodal projection, sampling, streaming, and production optimizations.", k: "chapters topics contents tensor strides allocator operator cpu accelerator paged kv continuous batching speculative decoding" },
+  { t: "Read the book with the repository", p: "Book", u: "book.html#read-with-repo", s: "Pair the guided narrative with TensorSharp source, quick starts, model cards, APIs, and performance documentation.", k: "companion source code github documentation gemma4 implementation" },
+
   { t: "Overview & Architecture", p: "Overview", u: "overview.html#architecture", s: "Layered system: Core tensors, Runtime, Models, Backends, Server, CLI.", k: "design layers stack how it works" },
   { t: "Project structure", p: "Overview", u: "overview.html#structure", s: "Repository layout and the role of each project/package.", k: "folders directories modules" },
   { t: "Current status & capabilities", p: "Overview", u: "overview.html#status", s: "Model families, inference hosts, backends, multimodal, batching, and observability.", k: "support matrix maturity" },

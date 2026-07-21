@@ -82,6 +82,7 @@ namespace TensorSharp.Runtime.Paged
                 EvictHashIfPresent(block);
                 block.RefCount = 1;
                 block.Used = 0;
+                block.IsRestorablePrefixEnd = true;
                 result[i] = block;
             }
             return result;
@@ -120,10 +121,16 @@ namespace TensorSharp.Runtime.Paged
         /// <summary>Promote a block from "being written" to "full and hashed".
         /// Called by the executor at every block boundary during prefill / decode.
         /// </summary>
-        public void RegisterFullBlock(KvBlock block, KvBlockHash hash, int used)
+        public void RegisterFullBlock(
+            KvBlock block,
+            KvBlockHash hash,
+            int used,
+            bool? isRestorablePrefixEnd = null)
         {
             block.Used = used;
             block.ContentHash = hash;
+            if (isRestorablePrefixEnd.HasValue)
+                block.IsRestorablePrefixEnd = isRestorablePrefixEnd.Value;
             _hashIndex.Register(hash, block);
         }
 
@@ -141,8 +148,9 @@ namespace TensorSharp.Runtime.Paged
         {
             if (block.ContentHash is KvBlockHash hash)
             {
-                _hashIndex.Unregister(hash);
+                _hashIndex.Unregister(hash, block);
                 block.ContentHash = null;
+                block.IsRestorablePrefixEnd = true;
                 // Drop the slab too - the new owner will rewrite it on first
                 // capture, and keeping the stale bytes alive wastes memory.
                 _storage.ReleaseSlab(block.Id);

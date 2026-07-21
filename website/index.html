@@ -23,6 +23,7 @@
       <div class="btn-row">
         <a class="btn" href="getting-started.html">Get started →</a>
         <a class="btn secondary" href="overview.html">What is TensorSharp?</a>
+        <a class="btn secondary" href="https://www.amazon.com/dp/B0H9P44QZZ" target="_blank" rel="noopener">Read the book ↗</a>
         <a class="btn secondary" href="https://github.com/zhongkaifu/TensorSharp" target="_blank" rel="noopener">GitHub ↗</a>
       </div>
     </div>
@@ -41,6 +42,23 @@
   </section>
 
   <p>Everything runs on <strong>your own hardware</strong>: your laptop, workstation, or server. No data leaves the machine, there are no per-token fees, and the same engine powers a quick command-line test, a shared internal chatbot, and a production REST endpoint. This wiki is the complete guide — pick a starting point below or use <kbd>/</kbd> to search.</p>
+
+  <section class="book-spotlight" aria-labelledby="book-spotlight-title">
+    <a class="book-cover-link" href="https://www.amazon.com/dp/B0H9P44QZZ" target="_blank" rel="noopener">
+      <img class="book-cover" src="assets/from-tensors-to-tokens-cover.jpg" alt="Cover of From Tensors to Tokens by Zhongkai Fu" width="1000" height="1430" loading="lazy">
+    </a>
+    <div>
+      <p class="book-kicker">The TensorSharp book · Now available</p>
+      <h2 id="book-spotlight-title">From Tensors to Tokens</h2>
+      <p><strong>Want to understand the engine, not just run it?</strong> Follow the full path from tensor layouts to streamed multimodal tokens as you build, verify, and optimize a modern C#/.NET inference engine with TensorSharp and Gemma 4 E4B.</p>
+      <div class="book-points" aria-label="Book topics"><span>From-scratch C#</span><span>Gemma 4 E4B</span><span>Text · image · video · audio</span><span>Correctness to performance</span></div>
+      <div class="btn-row">
+        <a class="btn" href="https://www.amazon.com/dp/B0H9P44QZZ" target="_blank" rel="noopener">View on Amazon ↗</a>
+        <a class="btn secondary" href="book.html">See what you'll learn →</a>
+      </div>
+      <p class="book-meta">By <strong>Zhongkai Fu</strong> · Paperback · 128 pages</p>
+    </div>
+  </section>
 
   <h2 id="explore">Explore the wiki</h2>
   <div class="card-grid">
@@ -99,7 +117,7 @@ TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Cli -c R
   <h2 id="audience">Who is this for?</h2>
   <p>TensorSharp serves a wide range of visitors. Here is the fastest path for each.</p>
   <div class="audience">
-    <div class="a"><h4>Beginners &amp; students</h4><p>Start with the <a href="glossary.html">Glossary &amp; FAQ</a>, then <a href="getting-started.html">Getting Started</a>.</p></div>
+    <div class="a"><h4>Beginners &amp; students</h4><p>Start with the <a href="book.html">guided book</a> or <a href="glossary.html">Glossary &amp; FAQ</a>, then try <a href="getting-started.html">Getting Started</a>.</p></div>
     <div class="a"><h4>Developers</h4><p>Jump to the <a href="http-api.html">HTTP API</a>, <a href="code-api.html">C# Library</a>, and <a href="api-reference.html">API Reference</a>.</p></div>
     <div class="a"><h4>Senior / principal engineers</h4><p>Read <a href="advanced.html">Advanced Features</a> — paged KV, continuous batching, speculative decoding.</p></div>
     <div class="a"><h4>Managers, CTOs &amp; CEOs</h4><p>See the <a href="overview.html#business">business value</a> and <a href="overview.html#status">capability matrix</a>.</p></div>

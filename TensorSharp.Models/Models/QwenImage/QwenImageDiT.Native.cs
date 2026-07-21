@@ -79,8 +79,8 @@ namespace TensorSharp.Models.QwenImage
             var info = DitGgufLocal.Tensors[weightName];
             DitGgufLocal.TryGetTensorDataPointer(info, out IntPtr wp);
             IntPtr bp = IntPtr.Zero;
-            if (biasName != null && DitGgufLocal.Tensors.TryGetValue(biasName, out var binfo))
-                DitGgufLocal.TryGetTensorDataPointer(binfo, out bp);
+            if (biasName != null && DitGgufLocal.Tensors.ContainsKey(biasName))
+                bp = F32Ptr(biasName);
             long ne0 = (long)info.Shape[0];
             long ne1 = info.Shape.Length > 1 ? (long)info.Shape[1] : 1;
             var w = new QImgAttnW
@@ -106,10 +106,79 @@ namespace TensorSharp.Models.QwenImage
             return w;
         }
 
-        private IntPtr GgufF32Ptr(string name)
+        private IntPtr GgufF32Ptr(string name) => F32Ptr(name);
+
+        // Stably-addressed F32 copies of GGUF tensors that are NOT stored as F32 in the file
+        // (keyed by tensor name). Freed in Dispose, after the native caches that key off
+        // these pointers have been cleared.
+        private readonly System.Collections.Generic.Dictionary<string, IntPtr> _f32Copies = new();
+        private readonly object _f32CopiesLock = new();
+
+        /// <summary>
+        /// Host pointer to <paramref name="name"/> as F32, which is what every native DiT
+        /// kernel assumes for the small per-block tensors (biases, QK-norm weights): they are
+        /// declared <c>GGML_TYPE_F32</c> and uploaded as <c>numElements * 4</c> bytes.
+        ///
+        /// The GGUF is NOT required to store them as F32. Q4_K_M-style Qwen-Image DiTs do
+        /// (so the mmap pointer could be handed over directly), but a low-bit mixed quant —
+        /// e.g. a Q2_K "rapid" DiT, which stores all 1093 of its small tensors as F16 —
+        /// does not. Passing the raw F16 mmap pointer made the kernel read F16 bit patterns
+        /// as F32 (garbage at +/-3.4e38, then NaN) AND run off the end of the tensor, since
+        /// it consumed twice the bytes the tensor actually has. The first bias add turned the
+        /// whole forward non-finite, and the edit came out SOLID BLACK with no error — the
+        /// managed path was unaffected because it uses the dequantized <c>_weights</c> copies.
+        ///
+        /// F32 tensors keep the zero-copy mmap pointer (no allocation, no regression); anything
+        /// else is dequantized once into an unmanaged buffer whose address stays stable for the
+        /// model's lifetime (the native side resident-caches weights BY POINTER).
+        /// </summary>
+        private IntPtr F32Ptr(string name)
         {
-            DitGgufLocal.TryGetTensorDataPointer(DitGgufLocal.Tensors[name], out IntPtr p);
-            return p;
+            lock (_f32CopiesLock)
+            {
+                if (_f32Copies.TryGetValue(name, out IntPtr cached)) return cached;
+
+                var info = DitGgufLocal.Tensors[name];
+                if (info.Type == GgmlTensorType.F32)
+                {
+                    DitGgufLocal.TryGetTensorDataPointer(info, out IntPtr direct);
+                    _f32Copies[name] = direct;
+                    return direct;
+                }
+
+                long n = info.NumElements;
+                long srcBytes = DitGgufLocal.GetTensorByteCount(info);
+                IntPtr dst = QuantizedWeight.AllocateBuffer(n * sizeof(float));
+                IntPtr tmp = QuantizedWeight.AllocateBuffer(srcBytes);
+                try
+                {
+                    DitGgufLocal.ReadTensorDataToNative(info, tmp, srcBytes);
+                    NativeDequant.DequantizeToFloat32Native((int)info.Type, tmp, dst, n);
+                }
+                catch
+                {
+                    QuantizedWeight.FreeBuffer(dst);
+                    throw;
+                }
+                finally { QuantizedWeight.FreeBuffer(tmp); }
+
+                _f32Copies[name] = dst;
+                _f32ConvertedBuffers.Add(dst);
+                return dst;
+            }
+        }
+
+        private readonly System.Collections.Generic.List<IntPtr> _f32ConvertedBuffers = new();
+
+        /// <summary>Free the dequantized F32 copies handed to the native kernels.</summary>
+        private void FreeF32Copies()
+        {
+            lock (_f32CopiesLock)
+            {
+                foreach (IntPtr p in _f32ConvertedBuffers) QuantizedWeight.FreeBuffer(p);
+                _f32ConvertedBuffers.Clear();
+                _f32Copies.Clear();
+            }
         }
 
         private GgufFile DitGgufLocal => _gguf;

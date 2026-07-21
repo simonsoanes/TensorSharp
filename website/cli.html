@@ -167,7 +167,7 @@ dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
     <tbody>
       <tr><td><code>--model &lt;path&gt;</code></td><td>Path to a GGUF model file (required).</td></tr>
       <tr><td><code>--input &lt;path&gt;</code></td><td>Text file containing the user prompt. One-shot text prompts always come from a file — <code>--prompt</code> is reserved for the Qwen-Image-Edit edit instruction.</td></tr>
-      <tr><td><code>--pdf &lt;path&gt;</code></td><td>PDF document input (one-shot mode). Born-digital PDFs are inlined as extracted text (token-budget truncated); scanned/image-only PDFs are rasterized to page images and require a vision model + <code>--mmproj</code>. <code>--input</code> becomes the question about the document; <code>TS_PDF_MAX_PAGES</code> caps the pages read (default: all).</td></tr>
+      <tr><td><code>--pdf &lt;path&gt;</code></td><td>PDF document input (one-shot mode). Born-digital PDFs are inlined with their complete extracted text; scanned/image-only PDFs are rasterized to page images and require a vision model + <code>--mmproj</code>. <code>--input</code> becomes the question about the document; <code>TS_PDF_MAX_PAGES</code> caps the pages read (default: all).</td></tr>
       <tr><td><code>--input-jsonl &lt;path&gt;</code></td><td>JSONL file with batch requests (one JSON per line).</td></tr>
       <tr><td><code>--multi-turn-jsonl &lt;path&gt;</code></td><td>JSONL file for multi-turn chat simulation with KV-cache reuse.</td></tr>
       <tr><td><code>--output &lt;path&gt;</code></td><td>Write generated text to this file.</td></tr>

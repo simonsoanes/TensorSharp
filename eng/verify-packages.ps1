@@ -25,7 +25,9 @@ else {
 
 $PublicPackages = @(
     @{
-        Id = "TensorSharp.Core"
+        # Package id intentionally differs from the project name - see the
+        # PackageId comment in TensorSharp.Core.csproj.
+        Id = "TensorSharp.Tensors"
         Project = "TensorSharp.Core/TensorSharp.Core.csproj"
         TensorSharpDependencies = @()
         EmbeddedAssemblies = @("AdvUtils.dll")
@@ -39,25 +41,25 @@ $PublicPackages = @(
     @{
         Id = "TensorSharp.Backends.Cuda"
         Project = "TensorSharp.Backends.Cuda/TensorSharp.Backends.Cuda.csproj"
-        TensorSharpDependencies = @("TensorSharp.Core")
+        TensorSharpDependencies = @("TensorSharp.Tensors")
         EmbeddedAssemblies = @()
     },
     @{
         Id = "TensorSharp.Backends.GGML"
         Project = "TensorSharp.Backends.GGML/TensorSharp.Backends.GGML.csproj"
-        TensorSharpDependencies = @("TensorSharp.Core")
+        TensorSharpDependencies = @("TensorSharp.Tensors")
         EmbeddedAssemblies = @()
     },
     @{
         Id = "TensorSharp.Backends.MLX"
         Project = "TensorSharp.Backends.MLX/TensorSharp.Backends.MLX.csproj"
-        TensorSharpDependencies = @("TensorSharp.Core", "TensorSharp.Runtime")
+        TensorSharpDependencies = @("TensorSharp.Tensors", "TensorSharp.Runtime")
         EmbeddedAssemblies = @()
     },
     @{
         Id = "TensorSharp.Models"
         Project = "TensorSharp.Models/TensorSharp.Models.csproj"
-        TensorSharpDependencies = @("TensorSharp.Core", "TensorSharp.Runtime", "TensorSharp.Backends.GGML", "TensorSharp.Backends.Cuda", "TensorSharp.Backends.MLX")
+        TensorSharpDependencies = @("TensorSharp.Tensors", "TensorSharp.Runtime", "TensorSharp.Backends.GGML", "TensorSharp.Backends.Cuda", "TensorSharp.Backends.MLX")
         EmbeddedAssemblies = @()
     },
     @{
@@ -69,7 +71,7 @@ $PublicPackages = @(
     @{
         Id = "TensorSharp.Cli"
         Project = "TensorSharp.Cli/TensorSharp.Cli.csproj"
-        TensorSharpDependencies = @("TensorSharp.Core", "TensorSharp.Runtime", "TensorSharp.Models", "TensorSharp.Backends.GGML", "TensorSharp.Backends.MLX")
+        TensorSharpDependencies = @("TensorSharp.Tensors", "TensorSharp.Runtime", "TensorSharp.Models", "TensorSharp.Backends.GGML", "TensorSharp.Backends.MLX")
         EmbeddedAssemblies = @()
     }
 )

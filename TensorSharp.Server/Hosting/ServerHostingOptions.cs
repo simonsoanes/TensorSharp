@@ -28,7 +28,6 @@ namespace TensorSharp.Server.Hosting
             string defaultBackend,
             IReadOnlyList<BackendOption> supportedBackends,
             int defaultWebMaxTokens,
-            int maxTextFileChars,
             string uploadDirectory,
             string logDirectory,
             bool fileLoggingEnabled,
@@ -42,7 +41,6 @@ namespace TensorSharp.Server.Hosting
             for (int i = 0; i < SupportedBackends.Count; i++)
                 SupportedBackendValues.Add(SupportedBackends[i].Value);
             DefaultWebMaxTokens = defaultWebMaxTokens;
-            MaxTextFileChars = maxTextFileChars;
             UploadDirectory = uploadDirectory;
             LogDirectory = logDirectory;
             FileLoggingEnabled = fileLoggingEnabled;
@@ -66,9 +64,6 @@ namespace TensorSharp.Server.Hosting
 
         /// <summary>Default token budget for the Web UI's chat endpoint.</summary>
         public int DefaultWebMaxTokens { get; }
-
-        /// <summary>Character cap for text uploads when no model tokenizer is available.</summary>
-        public int MaxTextFileChars { get; }
 
         /// <summary>Absolute path to the directory used for user uploads.</summary>
         public string UploadDirectory { get; }

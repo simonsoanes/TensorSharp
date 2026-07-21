@@ -29,6 +29,17 @@
     <Description Condition="'$(Description)' == ''">TensorSharp project component.</Description>
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
     <IsPackable Condition="'$(IsPackable)' == ''">false</IsPackable>
+
+    <!-- Published packages ship a companion .snupkg and Source Link metadata so
+         consumers can step into TensorSharp sources from a debugger. Source Link
+         is part of the .NET SDK, so no PackageReference is needed.
+         ContinuousIntegrationBuild makes the build deterministic; it is CI-only
+         because it rewrites local source paths that a dev build still needs. -->
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
   </PropertyGroup>
 
   <ItemGroup>

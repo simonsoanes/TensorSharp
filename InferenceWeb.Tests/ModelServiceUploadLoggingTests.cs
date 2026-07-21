@@ -171,6 +171,51 @@ public class ModelServiceUploadLoggingTests
     }
 
     [Fact]
+    public void SerializeMessagesForLog_BoundsUploadedDocumentContent()
+    {
+        string document = new('x', 200_000);
+        var history = new List<ChatMessage>
+        {
+            new()
+            {
+                Role = "user",
+                Content = document,
+                TextFilePaths = new List<string> { "/uploads/book.pdf" },
+            },
+        };
+
+        string json = ModelService.SerializeMessagesForLog(history);
+        using var doc = JsonDocument.Parse(json);
+        var entry = doc.RootElement.EnumerateArray().Single();
+
+        Assert.Equal(200_000, entry.GetProperty("contentChars").GetInt32());
+        Assert.True(entry.GetProperty("contentOmitted").GetBoolean());
+        Assert.False(entry.TryGetProperty("contentTruncated", out _));
+        Assert.True(entry.GetProperty("content").GetString()!.Length < 600);
+        Assert.True(json.Length < 1_000);
+    }
+
+    [Fact]
+    public void SerializeMessagesForLog_RedactsMarkerOnlyDocumentButKeepsInstruction()
+    {
+        string content = $"[File: book.pdf]\n{new string('q', 200_000)}\n[End of file]\n\nSummarize the book.";
+        var history = new List<ChatMessage>
+        {
+            new() { Role = "user", Content = content },
+        };
+
+        string json = ModelService.SerializeMessagesForLog(history);
+        using var doc = JsonDocument.Parse(json);
+        var entry = doc.RootElement.EnumerateArray().Single();
+
+        Assert.Equal(content.Length, entry.GetProperty("contentChars").GetInt32());
+        Assert.True(entry.GetProperty("contentOmitted").GetBoolean());
+        Assert.Contains("Summarize the book.", entry.GetProperty("content").GetString());
+        Assert.DoesNotContain(new string('q', 1_024), json);
+        Assert.True(json.Length < 1_000);
+    }
+
+    [Fact]
     public void ChatMessageParser_ParseWebUi_ParsesTextFilePathsAlongsideImagesAndAudio()
     {
         const string body = """

@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="zh-cn">
+<head prefix="og: https://ogp.me/ns# book: https://ogp.me/ns/book#">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>From Tensors to Tokens — TensorSharp 图书</title>
+  <meta name="description" content="了解 Zhongkai Fu 的《From Tensors to Tokens》：以 TensorSharp 与 Gemma 4 E4B 为例，从实现出发讲解多模态 LLM 推理引擎。">
+  <meta name="author" content="Zhongkai Fu">
+  <link rel="canonical" href="https://tensorsharp.ai/book_zh-cn.html">
+  <link rel="alternate" hreflang="en" href="https://tensorsharp.ai/book.html">
+  <link rel="alternate" hreflang="zh-CN" href="https://tensorsharp.ai/book_zh-cn.html">
+  <link rel="alternate" hreflang="x-default" href="https://tensorsharp.ai/book.html">
+  <meta property="og:type" content="book">
+  <meta property="og:site_name" content="TensorSharp">
+  <meta property="og:title" content="From Tensors to Tokens: Building a Multimodal LLM Inference Engine from Scratch with TensorSharp and Gemma 4 E4B">
+  <meta property="og:description" content="从张量存储与 GGUF 加载，一路走到多模态推理、token 流式输出与生产级服务。">
+  <meta property="og:url" content="https://tensorsharp.ai/book_zh-cn.html">
+  <meta property="og:image" content="https://tensorsharp.ai/assets/from-tensors-to-tokens-cover.jpg">
+  <meta property="og:image:alt" content="Zhongkai Fu 所著 From Tensors to Tokens 封面">
+  <meta property="og:image:width" content="1000">
+  <meta property="og:image:height" content="1430">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:locale:alternate" content="en_US">
+  <meta property="book:isbn" content="9798187878703">
+  <meta property="book:release_date" content="2026-07-18">
+  <meta property="book:tag" content="LLM inference">
+  <meta property="book:tag" content="TensorSharp">
+  <meta property="book:tag" content="Gemma 4 E4B">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="From Tensors to Tokens — TensorSharp 图书">
+  <meta name="twitter:description" content="以 TensorSharp 与 Gemma 4 E4B 为例，从零构建多模态 LLM 推理引擎。">
+  <meta name="twitter:image" content="https://tensorsharp.ai/assets/from-tensors-to-tokens-cover.jpg">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Book",
+    "name": "From Tensors to Tokens: Building a Multimodal LLM Inference Engine from Scratch with TensorSharp and Gemma 4 E4B",
+    "author": {
+      "@type": "Person",
+      "name": "Zhongkai Fu"
+    },
+    "bookFormat": "https://schema.org/Paperback",
+    "numberOfPages": 128,
+    "inLanguage": "en",
+    "datePublished": "2026-07-18",
+    "isbn": "9798187878703",
+    "description": "以 TensorSharp 与 Gemma 4 E4B 为例、从实现出发讲解如何从零构建多模态 LLM 推理引擎。",
+    "image": "https://tensorsharp.ai/assets/from-tensors-to-tokens-cover.jpg",
+    "url": "https://www.amazon.com/dp/B0H9P44QZZ"
+  }
+  </script>
+  <script>try{var t=localStorage.getItem('ts-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.classList.toggle('dark',t==='dark');}catch(e){}</script>
+  <script defer src="assets/search-index-zh.js"></script>
+  <script defer src="assets/app.js"></script>
+</head>
+<body data-page="book">
+<a class="skip" href="#content">跳到正文</a>
+<main class="content" id="content">
+  <div class="breadcrumb"><a href="index_zh-cn.html">首页</a> › 图书</div>
+
+  <section class="book-hero" id="why-read" aria-labelledby="book-title">
+    <div>
+      <p class="book-kicker">TensorSharp 图书</p>
+      <h1 id="book-title">From Tensors to Tokens</h1>
+      <p class="lede"><strong>从零构建多模态 LLM 推理引擎：以 TensorSharp 与 Gemma 4 E4B 为例</strong></p>
+      <p>不止于调用模型 API：从承载张量的内存出发，一路追踪到流式输出下一个 token 的代码，并看清文本、图像、视频与音频如何汇入同一套实现。</p>
+      <div class="book-meta" aria-label="图书信息">
+        <span><strong>Zhongkai Fu 著</strong></span>
+        <span>平装</span>
+        <span>128 页</span>
+        <span>英文</span>
+        <span>2026 年 7 月 18 日出版</span>
+        <span>ISBN-13 979-8187878703</span>
+      </div>
+      <div class="btn-row">
+        <a class="btn" href="https://www.amazon.com/dp/B0H9P44QZZ" target="_blank" rel="noopener">前往 Amazon 购买平装本 ↗</a>
+        <a class="btn secondary" href="#inside">看看你将构建什么 ↓</a>
+      </div>
+    </div>
+    <a class="book-cover-link" href="https://www.amazon.com/dp/B0H9P44QZZ" target="_blank" rel="noopener" aria-label="在 Amazon 查看 From Tensors to Tokens">
+      <img class="book-cover" src="assets/from-tensors-to-tokens-cover.jpg" alt="Zhongkai Fu 所著 From Tensors to Tokens 封面" width="1000" height="1430">
+    </a>
+  </section>
+
+  <h2 id="inside">沿着一条完整路径读懂推理引擎</h2>
+  <p>全书遵循刻意设计的实现顺序：先让每一层抽象证明自己的价值，再引入下一层，因此从第一次内存分配到最终响应，整套系统始终清晰可追踪。</p>
+  <div class="book-section-grid">
+    <article class="card">
+      <div class="ic">▦</div>
+      <h3>1 · 让张量变得具体</h3>
+      <p>从存储、形状、步幅、视图、内存分配与算子分派开始，建立后续所有模型运算依赖的小而坚实的契约。</p>
+    </article>
+    <article class="card">
+      <div class="ic">◫</div>
+      <h3>2 · 把模型文件变成输入</h3>
+      <p>读取 GGUF 元数据与权重，理解量化，完成提示词 tokenization，并准备送入网络的数值。</p>
+    </article>
+    <article class="card">
+      <div class="ic">→</div>
+      <h3>3 · 生成下一个 token</h3>
+      <p>追踪 Transformer 执行、logits、采样、停止条件与流式输出，直到一次底层前向计算变成可交互的回答。</p>
+    </article>
+    <article class="card">
+      <div class="ic">◉</div>
+      <h3>4 · 接入每一种模态</h3>
+      <p>跟随 Gemma 4 E4B，观察图像、视频与音频编码器如何把各自的输入投影进语言模型的 token 流。</p>
+    </article>
+    <article class="card">
+      <div class="ic">✓</div>
+      <h3>5 · 正确性优先</h3>
+      <p>构建易读的 CPU 参考实现，验证中间结果与最终输出，在优化之前先获得可信的正确性基线。</p>
+    </article>
+    <article class="card">
+      <div class="ic">⚡</div>
+      <h3>6 · 扩展已经跑通的设计</h3>
+      <p>在不丢失原始心智模型的前提下，引入加速后端、分页 KV 缓存、连续批处理、前缀共享与推测解码。</p>
+    </article>
+  </div>
+
+  <h2 id="read-with-repo">在实现中学习架构</h2>
+  <p>TensorSharp 在书中不是一个黑盒。概念会直接落到推理引擎必须承担的职责：管理内存、分派算子、解码可移植模型格式、执行多模态 Transformer、选择 token，并高效地对外提供结果。</p>
+  <p>Gemma 4 E4B 让这段旅程始终锚定在同一个具体示例上。它的文本、图像、视频与音频路径，把模型加载、模态编码器、投影、Transformer 执行与输出生成之间的边界呈现在同一套系统里。</p>
+  <div class="callout note"><div class="ic">📖</div><p><strong>源码与参考文档的学习伴侣。</strong> 通过本书获得连贯的讲解，再回到本维基与 TensorSharp 仓库，查看最新的命令、API、架构卡片与实现细节。请注意：本书正文为英文。</p></div>
+
+  <h2 id="audience">这本书适合谁</h2>
+  <div class="book-section-grid">
+    <article class="card"><h3>.NET 开发者</h3><p>从使用 AI 服务迈向理解本地推理背后的 C# 系统。</p></article>
+    <article class="card"><h3>机器学习与系统工程师</h3><p>把模型架构与内存布局、执行、验证、加速和服务化连接起来。</p></article>
+    <article class="card"><h3>学生与动手型构建者</h3><p>用一套可以阅读、运行与探索的端到端实现，串起原本分散的概念。</p></article>
+  </div>
+
+  <section class="book-cta-panel" aria-labelledby="get-the-book">
+    <p class="book-kicker">从第一个张量，到下一个 token</p>
+    <h2 id="get-the-book">真正理解你的推理引擎正在做什么</h2>
+    <p>沿着 TensorSharp 与 Gemma 4 E4B 的实现路径系统学习，再回到仓库时，你将能把代码读成一套完整的系统。</p>
+    <div class="btn-row">
+      <a class="btn" href="https://www.amazon.com/dp/B0H9P44QZZ" target="_blank" rel="noopener">前往 Amazon 购买平装本 ↗</a>
+      <a class="btn secondary" href="getting-started_zh-cn.html">运行 TensorSharp →</a>
+    </div>
+  </section>
+
+  <div class="content-footer">
+    <a href="features_zh-cn.html">← 功能特性</a>
+    <a href="getting-started_zh-cn.html">下一篇：快速开始 →</a>
+  </div>
+</main>
+</body>
+</html>

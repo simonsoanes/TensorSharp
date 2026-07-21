@@ -1,65 +1,17 @@
-using System;
-using System.Collections.Generic;
-using TensorSharp.Runtime;
-
 namespace TensorSharp.Server
 {
-    internal sealed class TextUploadResult
-    {
-        public string TextContent { get; init; }
-        public bool Truncated { get; init; }
-        public int TruncateLimit { get; init; }
-        public string TruncateUnit { get; init; }
-        public int? ModelContextLimit { get; init; }
-        public int? OriginalTokenCount { get; init; }
-        public int? ReturnedTokenCount { get; init; }
-    }
-
     internal static class TextUploadHelper
     {
-        internal static TextUploadResult PrepareTextContent(
-            string textContent,
-            ITokenizer tokenizer,
-            int modelContextLimit,
-            int fallbackCharLimit)
+        /// <summary>
+        /// Normalizes an uploaded text payload without applying an upload-time
+        /// character or token budget. Context validation belongs to the fully
+        /// rendered prompt, where message/template/generation overhead is known;
+        /// cutting a file here loses source data and needlessly rejects documents
+        /// that fit comfortably in the model's actual context window.
+        /// </summary>
+        internal static string PreserveFullText(string textContent)
         {
-            if (tokenizer != null && modelContextLimit > 0)
-            {
-                int tokenLimit = Math.Max(1, modelContextLimit / 2);
-                List<int> tokens = tokenizer.Encode(textContent ?? string.Empty, addSpecial: false);
-                bool truncated = tokens.Count > tokenLimit;
-
-                if (truncated)
-                    textContent = tokenizer.Decode(tokens.GetRange(0, tokenLimit));
-
-                List<int> returnedTokens = tokenizer.Encode(textContent ?? string.Empty, addSpecial: false);
-                return new TextUploadResult
-                {
-                    TextContent = textContent,
-                    Truncated = truncated,
-                    TruncateLimit = tokenLimit,
-                    TruncateUnit = "tokens",
-                    ModelContextLimit = modelContextLimit,
-                    OriginalTokenCount = tokens.Count,
-                    ReturnedTokenCount = returnedTokens.Count
-                };
-            }
-
-            string safeText = textContent ?? string.Empty;
-            bool charTruncated = safeText.Length > fallbackCharLimit;
-            if (charTruncated)
-                safeText = safeText.Substring(0, fallbackCharLimit);
-
-            return new TextUploadResult
-            {
-                TextContent = safeText,
-                Truncated = charTruncated,
-                TruncateLimit = fallbackCharLimit,
-                TruncateUnit = "characters",
-                ModelContextLimit = null,
-                OriginalTokenCount = null,
-                ReturnedTokenCount = null
-            };
+            return textContent ?? string.Empty;
         }
     }
 }

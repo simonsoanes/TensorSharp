@@ -1087,17 +1087,8 @@ async function uploadOneFile(file) {
       if (data.warning) {
         alert(data.warning);
       } else if (data.renderedAsImages && data.frameUrls) {
-        // A scanned / image-only PDF was recovered as page images for a vision model.
-        // No blocking alert needed; the chip shows the page count.
-      }
-      if (data.truncated) {
-        let detail = 'Only the first portion of the file will be sent to the model.';
-        if (data.truncateUnit === 'tokens' && data.truncateLimit && data.modelContextLimit) {
-          detail = `It was limited to the first ${data.truncateLimit} tokens (1/2 of the loaded model context ${data.modelContextLimit}).`;
-        } else if (data.truncateUnit === 'characters' && data.truncateLimit) {
-          detail = `It was limited to the first ${data.truncateLimit} characters because no model context limit was available yet.`;
-        }
-        alert(`Note: "${data.fileName}" was truncated. ${detail}`);
+        // A complete scanned / image-only PDF was recovered as page images.
+        // The attachment chip keeps the page count visible.
       }
     } else {
       alert('Upload failed: ' + data.error);
@@ -1125,7 +1116,12 @@ function renderAttachments() {
     else if (att.mediaType === 'video') icon = '&#x1F3AC;';
     else if (att.mediaType === 'audio') icon = '&#x1F3B5;';
     else if (att.mediaType === 'text') icon = '&#x1F4DD;';
-    else if (att.mediaType === 'pdf') icon = '&#x1F4C4;';
+    else if (att.mediaType === 'pdf') {
+      icon = '&#x1F4C4;';
+      if (att.renderedAsImages && Number.isInteger(att.extractedPageCount) && Number.isInteger(att.pageCount)) {
+        label = `${att.fileName} (${att.extractedPageCount}/${att.pageCount} pages)`;
+      }
+    }
     chip.innerHTML = `${icon} ${label} <span class="remove" onclick="removeAttachment(${idx})">&times;</span>`;
     attachmentsDiv.appendChild(chip);
   });
@@ -1173,6 +1169,9 @@ async function sendMessage() {
         if (att.path) textFilePaths.push(att.path);
       } else if (att.framePaths && att.framePaths.length) {
         // Scanned / image-only PDF: send its page images to the vision model.
+        // Keep the original PDF path as document provenance too, so the server
+        // never silently trims pages if the expanded vision prompt is too large.
+        if (att.path) textFilePaths.push(att.path);
         att.framePaths.forEach(f => imagePaths.push(f));
       }
     }
@@ -1342,6 +1341,22 @@ async function requestAssistantResponse() {
           signal: currentAbortController.signal
         });
       }
+    }
+
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try {
+        const errorText = await res.text();
+        if (errorText) {
+          try {
+            const errorBody = JSON.parse(errorText);
+            detail = errorBody.error || errorBody.detail || errorBody.message || errorText;
+          } catch {
+            detail = errorText;
+          }
+        }
+      } catch {}
+      throw new Error(detail);
     }
 
     const reader = res.body.getReader();
@@ -1597,8 +1612,11 @@ function addUserBubble(text, attachments, historyIdx) {
     } else if (att.mediaType === 'pdf') {
       if (att.renderedAsImages && att.frameUrls && att.frameUrls.length) {
         const n = att.frameUrls.length;
+        const pageStatus = Number.isInteger(att.extractedPageCount) && Number.isInteger(att.pageCount)
+          ? `${att.extractedPageCount}/${att.pageCount} pages`
+          : `${n} page image${n > 1 ? 's' : ''}`;
         mediaHtml += `<div class="media-preview"><img src="${escapeHtml(att.frameUrls[0])}" alt="pdf page"></div>`;
-        mediaHtml += `<div class="audio-label">&#x1F4C4; ${escapeHtml(att.fileName || '')} (${n} page image${n > 1 ? 's' : ''})</div>`;
+        mediaHtml += `<div class="audio-label">&#x1F4C4; ${escapeHtml(att.fileName || '')} (${pageStatus})</div>`;
       } else {
         mediaHtml += `<div class="media-preview"><div class="audio-label">&#x1F4C4; ${escapeHtml(att.fileName || '')}</div></div>`;
       }

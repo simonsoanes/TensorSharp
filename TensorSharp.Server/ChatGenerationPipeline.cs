@@ -124,12 +124,16 @@ namespace TensorSharp.Server
                     "Continuous-batching engine is unavailable for this model " +
                     "(the model supports neither IBatchedPagedModel.ForwardBatch " +
                     "nor IModelArchitecture.SupportsKVStateSnapshot).");
+            var enginePoolStats = engine.PoolStats;
+            long engineCapacityLong = (long)enginePoolStats.totalBlocks * enginePoolStats.blockSize;
+            int engineContextLimit = (int)Math.Min(int.MaxValue, engineCapacityLong);
 
             string arch = model.Config.Architecture;
             var preparedHistory = ChatHistoryPreparer.PrepareHistoryForInference(history, arch, _logger);
             List<ChatMessage> renderHistory;
             lock (session.HistoryLock)
                 renderHistory = ChatHistoryPreparer.AugmentWithCachedRawTokens(preparedHistory, session.TrackedHistory);
+            bool preserveAttachedDocuments = HasTextFileAttachments(renderHistory);
 
             using var chatScope = _telemetry.BeginInferenceScope(
                 session, _lifecycle.LoadedModelName, _lifecycle.LoadedBackend, "chat.stream");
@@ -144,6 +148,8 @@ namespace TensorSharp.Server
             // shared bucket).
             string requestId = $"chat-{Guid.NewGuid():N}";
             bool injectorBucketCreated = false;
+            try
+            {
 
             var promptSw = Stopwatch.StartNew();
             List<int> inputTokens;
@@ -183,9 +189,15 @@ namespace TensorSharp.Server
                     inputTokens = _kvCacheRenderer.RenderToTokens(
                         model.Tokenizer, model.Config.ChatTemplate, renderHistory, arch,
                         addGenerationPrompt: true, tools: tools, enableThinking: enableThinking);
-                    inputTokens = model.MultimodalInjector.ProcessPromptTokens(renderHistory, inputTokens, requestId);
+                    // ClearPreparedPromptState is safe when preparation fails
+                    // before creating a bucket. Arm cleanup first so partial
+                    // image/audio preparation cannot leak tensors on overflow
+                    // or any other exception before engine submission.
                     injectorBucketCreated = true;
-                    inputTokens = TruncatePromptToContext(session, inputTokens, maxTokens, requestId);
+                    inputTokens = model.MultimodalInjector.ProcessPromptTokens(renderHistory, inputTokens, requestId);
+                    inputTokens = TruncatePromptToContext(
+                        session, inputTokens, maxTokens, requestId, preserveAttachedDocuments,
+                        engineContextLimit);
                 }
             }
             else
@@ -193,7 +205,9 @@ namespace TensorSharp.Server
                 inputTokens = _kvCacheRenderer.RenderToTokens(
                     model.Tokenizer, model.Config.ChatTemplate, renderHistory, arch,
                     addGenerationPrompt: true, tools: tools, enableThinking: enableThinking);
-                inputTokens = TruncatePromptToContext(session, inputTokens, maxTokens);
+                inputTokens = TruncatePromptToContext(
+                    session, inputTokens, maxTokens, preserveAllInput: preserveAttachedDocuments,
+                    executionContextLimit: engineContextLimit);
             }
 
             int promptTokenCount = inputTokens.Count;
@@ -211,7 +225,7 @@ namespace TensorSharp.Server
                 requestId: requestId,
                 promptTokens: inputTokens,
                 maxNewTokens: maxTokens,
-                blockSize: engine.PoolStats.blockSize,
+                blockSize: enginePoolStats.blockSize,
                 samplingConfig: cfg,
                 userTag: session,
                 mediaFingerprint: mediaFingerprint);
@@ -238,8 +252,6 @@ namespace TensorSharp.Server
             bool firstTokenSampled = false;
             var totalSw = Stopwatch.StartNew();
 
-            try
-            {
             // Stream tokens off the engine handle, doing UTF-8-valid piece
             // accumulation and stop-sequence detection in this layer.
             await foreach (var nextToken in handle.Tokens.ReadAllAsync(cancellationToken).ConfigureAwait(false))
@@ -383,6 +395,7 @@ namespace TensorSharp.Server
             List<ChatMessage> renderHistory;
             lock (session.HistoryLock)
                 renderHistory = ChatHistoryPreparer.AugmentWithCachedRawTokens(preparedHistory, session.TrackedHistory);
+            bool preserveAttachedDocuments = HasTextFileAttachments(renderHistory);
 
             using var chatScope = _telemetry.BeginInferenceScope(
                 session, _lifecycle.LoadedModelName, _lifecycle.LoadedBackend, "diffusion.chat.stream");
@@ -391,7 +404,8 @@ namespace TensorSharp.Server
             List<int> inputTokens = _kvCacheRenderer.RenderToTokens(
                 model.Tokenizer, model.Config.ChatTemplate, renderHistory, arch,
                 addGenerationPrompt: true, tools: null, enableThinking: false);
-            inputTokens = TruncatePromptToContext(session, inputTokens, maxTokens);
+            inputTokens = TruncatePromptToContext(
+                session, inputTokens, maxTokens, preserveAllInput: preserveAttachedDocuments);
             int promptTokenCount = inputTokens.Count;
             promptSw.Stop();
 
@@ -520,13 +534,26 @@ namespace TensorSharp.Server
             }
         }
 
-        /// <summary>Trim the prompt so the prompt+max-tokens fits inside the
-        /// model's context window. Multimodal embedding spans are not split.</summary>
-        public List<int> TruncatePromptToContext(ChatSession session, List<int> inputTokens, int maxTokens, string requestId = null)
+        /// <summary>Trim ordinary conversation history so the prompt plus
+        /// generation reserve fits inside the model context. Attached text
+        /// documents opt out: silently dropping their leading pages would
+        /// produce a deceptively incomplete answer, so a real overflow is
+        /// reported instead. Multimodal embedding spans are not split.</summary>
+        public List<int> TruncatePromptToContext(
+            ChatSession session,
+            List<int> inputTokens,
+            int maxTokens,
+            string requestId = null,
+            bool preserveAllInput = false,
+            int executionContextLimit = 0)
         {
             var model = _lifecycle.Model;
             int maxCtx = model.MaxContextLength;
-            if (maxCtx <= 0 || inputTokens == null || inputTokens.Count + maxTokens <= maxCtx)
+            if (executionContextLimit > 0 && (maxCtx <= 0 || executionContextLimit < maxCtx))
+                maxCtx = executionContextLimit;
+            int inputCount = inputTokens?.Count ?? 0;
+            RejectAttachedDocumentOverflow(inputCount, maxTokens, maxCtx, preserveAllInput);
+            if (maxCtx <= 0 || inputTokens == null || (long)inputCount + maxTokens <= maxCtx)
                 return inputTokens;
 
             int available = maxCtx - maxTokens;
@@ -553,6 +580,53 @@ namespace TensorSharp.Server
             model.MultimodalInjector.TrimPreparedPrompt(trimStart, requestId);
             session?.TrackedHistory.Clear();
             return inputTokens.GetRange(trimStart, kept);
+        }
+
+        internal static void RejectAttachedDocumentOverflow(
+            int promptTokens,
+            int maxTokens,
+            int modelContextLimit,
+            bool preserveAllInput)
+        {
+            if (!preserveAllInput || modelContextLimit <= 0 ||
+                (long)promptTokens + maxTokens <= modelContextLimit)
+            {
+                return;
+            }
+
+            throw new InvalidOperationException(
+                $"The prompt containing the complete attached document requires {promptTokens} prompt " +
+                $"tokens plus a {maxTokens}-token generation reserve, but the current model/engine " +
+                $"configuration allows {modelContextLimit} context tokens. No document content was " +
+                "truncated. Reduce maxTokens, attach a shorter document, increase the scheduler KV " +
+                "block pool, or use a model with a larger context window.");
+        }
+
+        internal static bool HasTextFileAttachments(List<ChatMessage> history)
+        {
+            if (history == null)
+                return false;
+
+            foreach (ChatMessage message in history)
+            {
+                if (message?.TextFilePaths != null && message.TextFilePaths.Count > 0)
+                    return true;
+
+                // API clients may inline /api/upload's textContent without also
+                // echoing textFilePaths. Recognize the documented envelopes so
+                // those documents receive the same no-silent-truncation contract
+                // as the bundled Web UI.
+                string content = message?.Content;
+                if (!string.IsNullOrEmpty(content) &&
+                    content.IndexOf("[End of file]", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                    (content.IndexOf("[File:", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     content.IndexOf("[Attached file:", StringComparison.OrdinalIgnoreCase) >= 0))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private static bool RequiresMultimodalPreparation(List<ChatMessage> history)
