@@ -21,6 +21,6 @@
   "mmproj": "${root}/gemma-4-12B-mmproj-BF16.gguf",
 
   // MTP speculative decoding (server only): separate draft GGUF, lossless.
-  "mtp-spec": true,
+  "mtp-spec": false,
   "mtp-draft-model": "${root}/gemma-4-12B-it-Q4_0-MTP.gguf"
 }

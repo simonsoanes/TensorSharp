@@ -56,6 +56,10 @@ namespace TensorSharp.Server.RequestParsers
                 cfg.RepetitionPenalty = rp.GetSingle();
             if (body.TryGetProperty("repetitionPenalty", out var rp2))
                 cfg.RepetitionPenalty = rp2.GetSingle();
+            if (body.TryGetProperty("repeat_last_n", out var rln))
+                cfg.PenaltyLastN = rln.GetInt32();
+            if (body.TryGetProperty("repeatLastN", out var rln2))
+                cfg.PenaltyLastN = rln2.GetInt32();
             if (body.TryGetProperty("presence_penalty", out var pp))
                 cfg.PresencePenalty = pp.GetSingle();
             if (body.TryGetProperty("presencePenalty", out var pp2))
@@ -93,6 +97,7 @@ namespace TensorSharp.Server.RequestParsers
                 if (opts.TryGetProperty("top_p", out var tp)) cfg.TopP = tp.GetSingle();
                 if (opts.TryGetProperty("min_p", out var mp)) cfg.MinP = mp.GetSingle();
                 if (opts.TryGetProperty("repeat_penalty", out var rp)) cfg.RepetitionPenalty = rp.GetSingle();
+                if (opts.TryGetProperty("repeat_last_n", out var rln)) cfg.PenaltyLastN = rln.GetInt32();
                 if (opts.TryGetProperty("presence_penalty", out var pp)) cfg.PresencePenalty = pp.GetSingle();
                 if (opts.TryGetProperty("frequency_penalty", out var fp)) cfg.FrequencyPenalty = fp.GetSingle();
                 if (opts.TryGetProperty("seed", out var sd)) cfg.Seed = sd.GetInt32();
@@ -117,6 +122,7 @@ namespace TensorSharp.Server.RequestParsers
             if (body.TryGetProperty("top_p", out var tp)) cfg.TopP = tp.GetSingle();
             if (body.TryGetProperty("presence_penalty", out var pp)) cfg.PresencePenalty = pp.GetSingle();
             if (body.TryGetProperty("frequency_penalty", out var fp)) cfg.FrequencyPenalty = fp.GetSingle();
+            if (body.TryGetProperty("repeat_last_n", out var rln)) cfg.PenaltyLastN = rln.GetInt32();
             if (body.TryGetProperty("seed", out var sd)) cfg.Seed = sd.GetInt32();
             if (body.TryGetProperty("stop", out var stopEl))
             {

@@ -8,6 +8,18 @@
 
 **Native .NET LLM inference engine for GGUF models** — autoregressive LLMs *and* DiffusionGemma-style text-diffusion, plus Qwen-Image-Edit image editing. Ships a console app, a browser chat UI, and Ollama/OpenAI-compatible HTTP APIs. A pure-.NET engine that trades wins with the hand-tuned C++ `llama.cpp` on identical GGUF files and the same GPU.
 
+## From Tensors to Tokens — the TensorSharp book
+
+<p align="center">
+  <a href="https://www.amazon.com/dp/B0H9P44QZZ">
+    <img src="website/assets/from-tensors-to-tokens-cover.jpg" alt="From Tensors to Tokens: Building a Multimodal LLM Inference Engine from Scratch with TensorSharp and Gemma 4 E4B" width="220">
+  </a>
+</p>
+
+**[From Tensors to Tokens: Building a Multimodal LLM Inference Engine from Scratch with TensorSharp and Gemma 4 E4B](https://www.amazon.com/dp/B0H9P44QZZ)** by Zhongkai Fu turns this repository into a guided, end-to-end learning journey. It uses Gemma 4 E4B to connect tensor fundamentals, model execution, multimodal inputs, and the application surfaces of a working LLM inference engine.
+
+**[Explore the book and its repository reading path](docs/BOOK.md)** · **[Buy the paperback on Amazon](https://www.amazon.com/dp/B0H9P44QZZ)**
+
 ## Highlights
 
 - **⚡ Trades wins with llama.cpp — from pure .NET.** On identical GGUF files and the same GPU, TensorSharp matches or beats `llama.cpp` on the workloads that matter: Gemma 4 E4B and 2-bit Qwen 3.6 35B-A3B MoE prefill **1.28×** faster on CUDA with first tokens **1.27×** sooner (multi-turn up to **1.49×**); Gemma 4 12B decodes **1.21×** faster on Vulkan (up to **1.32×** on long context). → [Benchmarks](#benchmarks)
@@ -120,6 +132,7 @@ New here? The sections above are all you need to get running. Everything else is
 
 | Doc | What's inside |
 |---|---|
+| [Book guide: From Tensors to Tokens](docs/BOOK.md) | A guided path from tensor fundamentals to a multimodal Gemma 4 E4B inference engine, with publication details and links into the companion repository |
 | [Model Downloads](MODEL_DOWNLOADS.md) | Per-model `huggingface-cli` download + run quick reference (quant tiers, projectors, companions) |
 | [Usage](USAGE.md) | Full CLI reference (options, interactive REPL, JSONL batch), server hosting, logging, HTTP API examples, backends, and the env-var matrix |
 | [Features](FEATURES.md) | Deep dives on continuous batching, MTP speculative decoding, tool calling, thinking mode, multimodal, MoE, KV codecs, and more |

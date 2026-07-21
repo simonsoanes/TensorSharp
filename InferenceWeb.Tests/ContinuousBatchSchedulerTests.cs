@@ -77,6 +77,36 @@ public class ContinuousBatchSchedulerTests
     }
 
     [Fact]
+    public void BlockPool_RestorableDuplicateWins_AndRecyclingStaleDuplicateKeepsMapping()
+    {
+        var pool = NewPool(numBlocks: 2);
+        var blocks = pool.AllocateNew(2);
+        var stale = blocks[0];
+        var checkpoint = blocks[1];
+        var hash = KvBlockHasher.ComputeBlockHashes(
+            Enumerable.Range(0, BlockSize).ToList(), BlockSize, "fp-duplicate")[0];
+
+        pool.RegisterFullBlock(
+            stale, hash, BlockSize, isRestorablePrefixEnd: false);
+        pool.RegisterFullBlock(
+            checkpoint, hash, BlockSize, isRestorablePrefixEnd: true);
+
+        Assert.True(pool.TryFindByHash(hash, out var preferred));
+        Assert.Same(checkpoint, preferred);
+
+        // Recycling the stale duplicate evicts its own metadata.  It must not
+        // unregister the newer checkpoint that now owns the hash-index entry.
+        pool.Free(stale);
+        var recycled = pool.AllocateNew(1)[0];
+        Assert.Same(stale, recycled);
+        Assert.Null(recycled.ContentHash);
+        Assert.Equal(0, recycled.Used);
+        Assert.True(recycled.IsRestorablePrefixEnd);
+        Assert.True(pool.TryFindByHash(hash, out preferred));
+        Assert.Same(checkpoint, preferred);
+    }
+
+    [Fact]
     public void BlockTable_AdvanceTokens_TracksUsedBlocks()
     {
         var pool = NewPool(numBlocks: 4);
@@ -123,6 +153,70 @@ public class ContinuousBatchSchedulerTests
         var step = sched.Schedule();
         Assert.Equal(3, step.ScheduledWork.Count);
         Assert.All(seqs, s => Assert.Equal(SequenceStatus.Running, s.Status));
+    }
+
+    [Fact]
+    public void Scheduler_RecurrentPrefix_BacktracksToLastRestorableEndpoint()
+    {
+        const string fingerprint = "fp-recurrent-prefix";
+        var pool = NewPool(numBlocks: 12);
+        var sched = NewScheduler(pool, fingerprint, requiresPerBlockCapture: true);
+        int[] prompt = Enumerable.Range(1, 4 * BlockSize + 1).ToArray();
+        var hashes = KvBlockHasher.ComputeBlockHashes(prompt, BlockSize, fingerprint);
+        var cached = pool.AllocateNew(4);
+
+        // Model one 3-block fused prefill followed by a later interior block:
+        // the first two blocks have usable attention slices but their recurrent
+        // payload belongs to a later boundary; block 2 is the last real
+        // checkpoint, while block 3 must not be the adopted endpoint.
+        bool[] restorable = { false, false, true, false };
+        for (int i = 0; i < cached.Length; i++)
+        {
+            pool.RegisterFullBlock(
+                cached[i], hashes[i], BlockSize,
+                isRestorablePrefixEnd: restorable[i]);
+        }
+
+        var seq = NewSequenceFromTokens("reuse", prompt, maxNew: 1);
+        sched.Submit(seq);
+        var step = sched.Schedule();
+
+        Assert.Single(step.ScheduledWork);
+        Assert.Equal(3 * BlockSize, seq.PrefixCacheReusedTokens);
+        Assert.Equal(2, cached[0].RefCount);
+        Assert.Equal(2, cached[1].RefCount);
+        Assert.Equal(2, cached[2].RefCount);
+        Assert.Equal(1, cached[3].RefCount); // scan-only: no leaked Touch past endpoint
+        Assert.Same(cached[0], seq.BlockTable.Blocks[0]);
+        Assert.Same(cached[1], seq.BlockTable.Blocks[1]);
+        Assert.Same(cached[2], seq.BlockTable.Blocks[2]);
+        Assert.DoesNotContain(cached[3], seq.BlockTable.Blocks);
+    }
+
+    [Fact]
+    public void Scheduler_RecurrentPrefix_WithNoRestorableEndpoint_ReusesNothing()
+    {
+        const string fingerprint = "fp-no-recurrent-checkpoint";
+        var pool = NewPool(numBlocks: 8);
+        var sched = NewScheduler(pool, fingerprint, requiresPerBlockCapture: true);
+        int[] prompt = Enumerable.Range(1, 2 * BlockSize + 1).ToArray();
+        var hashes = KvBlockHasher.ComputeBlockHashes(prompt, BlockSize, fingerprint);
+        var cached = pool.AllocateNew(2);
+        for (int i = 0; i < cached.Length; i++)
+        {
+            pool.RegisterFullBlock(
+                cached[i], hashes[i], BlockSize,
+                isRestorablePrefixEnd: false);
+        }
+
+        var seq = NewSequenceFromTokens("reuse-none", prompt, maxNew: 1);
+        sched.Submit(seq);
+        sched.Schedule();
+
+        Assert.Equal(0, seq.PrefixCacheReusedTokens);
+        Assert.All(cached, block => Assert.Equal(1, block.RefCount));
+        Assert.DoesNotContain(cached[0], seq.BlockTable.Blocks);
+        Assert.DoesNotContain(cached[1], seq.BlockTable.Blocks);
     }
 
     [Fact]
@@ -214,6 +308,68 @@ public class ContinuousBatchSchedulerTests
     }
 
     [Fact]
+    public void Engine_RecurrentLargePrefill_CachesOnlyExactChunkEndpoints()
+    {
+        var model = new RecurrentStubModel("fp-recurrent-engine", peakToken: 3);
+        var cfg = RecurrentConfig();
+        using var engine = new InferenceEngine(model, cfg, NullLogger.Instance);
+        int[] prompt = Enumerable.Range(1, 5 * BlockSize + 5).ToArray();
+
+        var first = NewSequenceFromTokens("recurrent-a", prompt, maxNew: 1);
+        engine.SubmitRequest(first).Completion.GetAwaiter().GetResult();
+
+        // Keep the high-throughput 32-token fused prefill.  Only the final
+        // prompt chunk is split so position 40 becomes an exact checkpoint.
+        Assert.Equal(
+            new[] { 4 * BlockSize, BlockSize, 5 },
+            model.ForwardChunkSizes.Take(3).ToArray());
+
+        var second = NewSequenceFromTokens("recurrent-b", prompt, maxNew: 1);
+        engine.SubmitRequest(second).Completion.GetAwaiter().GetResult();
+
+        Assert.Equal(5 * BlockSize, second.PrefixCacheReusedTokens);
+        Assert.Equal(new[] { 5, 1 }, model.ForwardChunkSizes.Skip(4).Take(2).ToArray());
+    }
+
+    [Fact]
+    public void Executor_RecurrentOwnerSwap_PreservesFullCheckpoints_AndRefreshesPartialTail()
+    {
+        var model = new RecurrentStubModel("fp-recurrent-swap", peakToken: 3);
+        var cfg = RecurrentConfig();
+        var pool = NewPool(numBlocks: cfg.NumBlocks);
+        var sched = new ContinuousBatchScheduler(
+            cfg, pool, model.KVStateFingerprint, NullLogger.Instance,
+            requiresPerBlockCapture: true);
+        var executor = new BatchExecutor(model, pool, sched, NullLogger.Instance);
+
+        var owner = NewSequence("owner", promptLen: 5 * BlockSize + 5, maxNew: 8);
+        sched.Submit(owner);
+        for (int i = 0; i < 3; i++)
+        {
+            var step = sched.Schedule();
+            var result = executor.ExecuteStep(step);
+            Assert.Single(result);
+            Assert.Same(owner, result[0].Sequence);
+        }
+        Assert.Equal(new[] { 4 * BlockSize, BlockSize, 5 }, model.ForwardChunkSizes);
+        Assert.Equal(5, model.ExtractCalls.Count); // one call per newly-full block
+
+        var newcomer = NewSequence("newcomer", promptLen: BlockSize, maxNew: 1);
+        sched.Submit(newcomer);
+        var swapStep = sched.Schedule();
+        var swapResult = executor.ExecuteStep(swapStep);
+
+        Assert.Single(swapResult);
+        Assert.Same(newcomer, swapResult[0].Sequence);
+        // Owner swap extracts only the live partial tail (40..45); the five
+        // previously-captured full checkpoints are not overwritten.  The final
+        // call is newcomer's own newly-full block capture.
+        Assert.Equal(
+            new[] { (5 * BlockSize, 5), (0, BlockSize) },
+            model.ExtractCalls.Skip(5).ToArray());
+    }
+
+    [Fact]
     public void TrimComputedToTotalTokens_RestoresInvariantAfterTailTruncation()
     {
         // Mirrors what the engine does after a mid-batch speculative stop:
@@ -285,7 +441,10 @@ public class ContinuousBatchSchedulerTests
         return new BlockPool(numBlocks, BlockSize, blockBytes);
     }
 
-    private static ContinuousBatchScheduler NewScheduler(BlockPool pool, string fp)
+    private static ContinuousBatchScheduler NewScheduler(
+        BlockPool pool,
+        string fp,
+        bool requiresPerBlockCapture = false)
     {
         var cfg = new SchedulerConfig
         {
@@ -297,7 +456,9 @@ public class ContinuousBatchSchedulerTests
             EnablePrefixCaching = true,
             DecodeQuantumTokens = BlockSize,
         };
-        return new ContinuousBatchScheduler(cfg, pool, fp, NullLogger.Instance);
+        return new ContinuousBatchScheduler(
+            cfg, pool, fp, NullLogger.Instance,
+            requiresPerBlockCapture: requiresPerBlockCapture);
     }
 
     private static SchedulerConfig SmallConfig() => new()
@@ -306,6 +467,18 @@ public class ContinuousBatchSchedulerTests
         MaxNumRunningSequences = 8,
         MaxPrefillChunkSize = 64,
         NumBlocks = 16,
+        BlockSize = BlockSize,
+        EnablePrefixCaching = true,
+        DecodeQuantumTokens = BlockSize,
+    };
+
+    private static SchedulerConfig RecurrentConfig() => new()
+    {
+        MaxNumBatchedTokens = 4 * BlockSize,
+        MaxNumRunningSequences = 8,
+        MaxPrefillChunkSize = 4 * BlockSize,
+        SoloPrefillChunkSize = 4 * BlockSize,
+        NumBlocks = 32,
         BlockSize = BlockSize,
         EnablePrefixCaching = true,
         DecodeQuantumTokens = BlockSize,
@@ -442,6 +615,116 @@ public class ContinuousBatchSchedulerTests
                     buffer.Add(b);
             }
             public bool IsEos(int tokenId) => _owner._eos == tokenId;
+            public int LookupToken(string tokenStr) => -1;
+        }
+    }
+
+    /// <summary>
+    /// Snapshot model whose attention bytes are per-token but whose recurrent
+    /// payload is one running-state position.  A large Forward therefore writes
+    /// the same final recurrent position into every block extracted afterwards,
+    /// reproducing the hybrid Qwen/Nemotron checkpoint constraint cheaply.
+    /// </summary>
+    private sealed class RecurrentStubModel : IModelArchitecture
+    {
+        private readonly string _fp;
+        private readonly int _peak;
+        private byte[] _tokenState = Array.Empty<byte>();
+        private int _cacheSeqLen;
+        private int _recurrentPosition;
+
+        public RecurrentStubModel(string fingerprint, int peakToken)
+        {
+            _fp = fingerprint;
+            _peak = peakToken;
+            Tokenizer = new RecurrentStubTokenizer(VocabSize);
+        }
+
+        public List<int> ForwardChunkSizes { get; } = new();
+        public List<(int StartToken, int TokenCount)> ExtractCalls { get; } = new();
+        public ModelConfig Config { get; } = new() { VocabSize = VocabSize };
+        public ITokenizer Tokenizer { get; }
+        public IMultimodalInjector MultimodalInjector => null;
+        public IBackendExecutionPlan ExecutionPlan => null;
+        public bool SupportsKVCacheTruncation => false;
+        public bool SupportsKVStateSnapshot => true;
+        public bool RequiresPerBlockCapture => true;
+        public string KVStateFingerprint => _fp;
+
+        public float[] Forward(int[] tokens)
+        {
+            if (_recurrentPosition != _cacheSeqLen)
+            {
+                throw new InvalidOperationException(
+                    $"Recurrent state is at {_recurrentPosition}, attention cache is at {_cacheSeqLen}.");
+            }
+
+            ForwardChunkSizes.Add(tokens.Length);
+            int needed = _cacheSeqLen + tokens.Length;
+            if (_tokenState.Length < needed)
+                Array.Resize(ref _tokenState, needed);
+            for (int i = 0; i < tokens.Length; i++)
+                _tokenState[_cacheSeqLen + i] = (byte)(tokens[i] & 0xFF);
+            _cacheSeqLen = needed;
+            _recurrentPosition = needed;
+
+            var logits = new float[VocabSize];
+            logits[_peak] = 10.0f;
+            return logits;
+        }
+
+        public void ResetKVCache()
+        {
+            _cacheSeqLen = 0;
+            _recurrentPosition = 0;
+        }
+
+        public void TruncateKVCache(int tokenCount) => throw new NotSupportedException();
+        public void Dispose() { }
+
+        public long ComputeKVBlockByteSize(int tokenCount)
+            => tokenCount + sizeof(int);
+
+        public bool TryExtractKVBlock(int startToken, int tokenCount, Span<byte> destination)
+        {
+            ExtractCalls.Add((startToken, tokenCount));
+            if (destination.Length != ComputeKVBlockByteSize(tokenCount)) return false;
+            if (startToken < 0 || startToken + tokenCount > _cacheSeqLen) return false;
+
+            _tokenState.AsSpan(startToken, tokenCount).CopyTo(destination);
+            BitConverter.TryWriteBytes(destination[tokenCount..], _recurrentPosition);
+            return true;
+        }
+
+        public bool TryInjectKVBlock(int destToken, int tokenCount, ReadOnlySpan<byte> source)
+        {
+            if (destToken != _cacheSeqLen) return false;
+            if (source.Length != ComputeKVBlockByteSize(tokenCount)) return false;
+
+            int needed = destToken + tokenCount;
+            if (_tokenState.Length < needed)
+                Array.Resize(ref _tokenState, needed);
+            source[..tokenCount].CopyTo(_tokenState.AsSpan(destToken, tokenCount));
+            _cacheSeqLen = needed;
+            _recurrentPosition = BitConverter.ToInt32(source[tokenCount..]);
+            return true;
+        }
+
+        private sealed class RecurrentStubTokenizer : ITokenizer
+        {
+            public RecurrentStubTokenizer(int vocab)
+            {
+                Vocab = Enumerable.Range(0, vocab).Select(i => i.ToString()).ToArray();
+            }
+
+            public string[] Vocab { get; }
+            public int BosTokenId => -1;
+            public int[] EosTokenIds => Array.Empty<int>();
+            public int VocabSize => Vocab.Length;
+            public List<int> Encode(string text, bool addSpecial = true) => new();
+            public string Decode(List<int> ids) => string.Join(",", ids);
+            public void AppendTokenBytes(int tokenId, List<byte> buffer) { }
+            public bool IsEos(int tokenId) => false;
             public int LookupToken(string tokenStr) => -1;
         }
     }

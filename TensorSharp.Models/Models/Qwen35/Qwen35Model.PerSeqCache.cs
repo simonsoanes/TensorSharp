@@ -37,6 +37,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using TensorSharp.GGML;
 using TensorSharp.Runtime.Scheduling;
 
 namespace TensorSharp.Models
@@ -50,6 +51,7 @@ namespace TensorSharp.Models
             public Tensor[] V;
             public int KvCapacity;
             public int CacheSeqLen;
+            public bool KvHostDirty;
             // GDN recurrent state: host conv ring + write idx + device delta state.
             public float[][] ConvState;
             public int[] ConvWriteIdx;
@@ -59,6 +61,7 @@ namespace TensorSharp.Models
             // currently seeded (resident) on the device.
             public IntPtr ConvScratch;
             public bool FdStateResident;
+            public bool GdnHostDirty;
         }
 
         // Per-request fused-decode holders, keyed by RequestId.
@@ -109,11 +112,13 @@ namespace TensorSharp.Models
             V = _kvCacheV,
             KvCapacity = _kvCacheCapacity,
             CacheSeqLen = _cacheSeqLen,
+            KvHostDirty = _kvCacheHostDirty,
             ConvState = _convState,
             ConvWriteIdx = _convStateWriteIdx,
             DeltaState = _deltaStateTensor,
             ConvScratch = _fdConvScratch,
             FdStateResident = _fdStateResident,
+            GdnHostDirty = _gdnStateHostDirty,
         };
 
         private void LoadCacheHolder(Qwen35KvCacheHolder h)
@@ -122,11 +127,13 @@ namespace TensorSharp.Models
             _kvCacheV = h.V;
             _kvCacheCapacity = h.KvCapacity;
             _cacheSeqLen = h.CacheSeqLen;
+            _kvCacheHostDirty = h.KvHostDirty;
             _convState = h.ConvState;
             _convStateWriteIdx = h.ConvWriteIdx;
             _deltaStateTensor = h.DeltaState;
             _fdConvScratch = h.ConvScratch;
             _fdStateResident = h.FdStateResident;
+            _gdnStateHostDirty = h.GdnHostDirty;
             // The fused-decode descriptors are rebuilt from these fields on every
             // TryFullModelDecode call, so no cached pointer array needs refreshing
             // (unlike Gemma4's _decodeArrays). The native g_q35dc_pool selects this
@@ -173,11 +180,13 @@ namespace TensorSharp.Models
                 V = v,
                 KvCapacity = cap,
                 CacheSeqLen = 0,
+                KvHostDirty = false,
                 ConvState = convState,
                 ConvWriteIdx = convWriteIdx,
                 DeltaState = deltaState,
                 ConvScratch = convScratch,
                 FdStateResident = false,
+                GdnHostDirty = false,
             };
         }
 
@@ -291,14 +300,56 @@ namespace TensorSharp.Models
         private void DisposeHolder(Qwen35KvCacheHolder holder)
         {
             if (holder == null) return;
+
+            // Persistent whole-model decode graphs capture the device addresses
+            // backing this holder's K/V and recurrent-state mirrors.  Drop those
+            // graphs before evicting any mirror or freeing its host key; otherwise
+            // a recycled host pointer could select a graph that still references
+            // freed device memory.  Releases are infrequent (one per completed
+            // concurrent request), so rebuilding the surviving holders' graphs on
+            // their next token is a small price for deterministic lifetime safety.
+            if (IsGgmlBackend)
+                GgmlBasicOps.Qwen35ResetDecodeCache();
+
             if (holder.K != null)
-                foreach (var t in holder.K) t?.Dispose();
+                foreach (var t in holder.K)
+                {
+                    InvalidateTensorDeviceCache(t);
+                    t?.Dispose();
+                }
             if (holder.V != null)
-                foreach (var t in holder.V) t?.Dispose();
+                foreach (var t in holder.V)
+                {
+                    InvalidateTensorDeviceCache(t);
+                    t?.Dispose();
+                }
             if (holder.DeltaState != null)
-                foreach (var t in holder.DeltaState) t?.Dispose();
+                foreach (var t in holder.DeltaState)
+                {
+                    InvalidateTensorDeviceCache(t);
+                    t?.Dispose();
+                }
             if (holder.ConvScratch != IntPtr.Zero)
+            {
+                // Each recurrent layer binds its offset within ConvScratch as an
+                // independent cache key (not the enclosing allocation pointer).
+                int convDim = _convKernel - 1;
+                int qkvDim = _headKDim * _numKHeads * 2 + _headVDim * _numVHeads;
+                long layerBytes = (long)Math.Max(0, convDim) * qkvDim * sizeof(float);
+                int recurrentSlot = 0;
+                for (int l = 0; l < Config.NumLayers; l++)
+                {
+                    if (!_isRecurrent[l]) continue;
+                    if (IsGgmlBackend && layerBytes > 0)
+                    {
+                        long byteOffset = recurrentSlot * layerBytes;
+                        GgmlBasicOps.InvalidateHostBuffer(
+                            new IntPtr(holder.ConvScratch.ToInt64() + byteOffset));
+                    }
+                    recurrentSlot++;
+                }
                 Marshal.FreeHGlobal(holder.ConvScratch);
+            }
         }
 
         /// <summary>Free every per-request fused holder (and the saved primary

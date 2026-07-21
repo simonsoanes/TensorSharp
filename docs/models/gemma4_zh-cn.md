@@ -2,6 +2,8 @@
 
 [← 返回模型索引](README_zh-cn.md) | [English](gemma4.md)
 
+> **想沿着一条从零构建的路线学习？** Zhongkai Fu 所著的 [From Tensors to Tokens](../BOOK_zh-cn.md) 以 Gemma 4 E4B 为例，连接张量基础、多模态模型执行与完整的 TensorSharp 推理应用。[在 Amazon 查看平装本](https://www.amazon.com/dp/B0H9P44QZZ)。
+
 | 属性 | 值 |
 |---|---|
 | 提供方 | Google |

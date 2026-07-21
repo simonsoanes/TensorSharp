@@ -49,7 +49,10 @@ namespace TensorSharp.Models.QwenImage
                 _loraTable = QwenImageLoraTable.Load(LoraPath, LoraScale);
                 LightningSteps = QwenImageLoraTable.ParseLightningSteps(LoraPath);
                 if (LightningSteps > 0)
+                {
                     Console.WriteLine($"  [lora] Lightning distillation detected: default {LightningSteps} steps, cfg 1.0, fixed timestep shift 3.0");
+                    WarnIfBaseAlreadyDistilled(ggufPath);
+                }
             }
             LoadWeights();
         }
@@ -74,6 +77,44 @@ namespace TensorSharp.Models.QwenImage
         /// filename; 0 = no Lightning LoRA. The pipeline uses this to default Steps/CfgScale
         /// and the scheduler's fixed timestep shift.</summary>
         internal int LightningSteps { get; }
+
+        // Markers used by community DiT builds that ALREADY bake in a few-step distillation
+        // ("rapid"/"turbo"/"hyper"/"lightning"/"lcm"/"...-8steps"). Deliberately does not match
+        // a bare "distill", which also appears on ordinary fine-tunes.
+        private static readonly string[] DistilledBaseMarkers =
+            { "rapid", "turbo", "hyper", "lightning", "lightx2v", "lcm", "nitro", "step" };
+
+        /// <summary>The distillation marker in a DiT filename, or null if it looks undistilled.</summary>
+        internal static string DistilledBaseMarkerIn(string ditPath)
+        {
+            string name = System.IO.Path.GetFileNameWithoutExtension(ditPath ?? string.Empty).ToLowerInvariant();
+            return System.Array.Find(DistilledBaseMarkers, m => name.Contains(m, StringComparison.Ordinal));
+        }
+
+        /// <summary>
+        /// Warn when a Lightning LoRA is stacked on a base DiT that is ITSELF already
+        /// step-distilled. Both distillations then apply at once, and the result is not merely
+        /// "a bit worse": measured on qwen-rapid-nsfw-v9.0-Q2_K + Lightning-8steps, the edit
+        /// comes out covered in speckled colour noise with the scene structure rearranged,
+        /// while the SAME model with no LoRA is clean. stable-diffusion.cpp reproduces both
+        /// results exactly, so this is the model pairing, not our sampler.
+        ///
+        /// Name-based, because nothing in the GGUF metadata marks a build as distilled. It only
+        /// prints — a false positive costs a line of console text, and a caller who really wants
+        /// the stack can ignore it.
+        /// </summary>
+        private static void WarnIfBaseAlreadyDistilled(string ditPath)
+        {
+            string hit = DistilledBaseMarkerIn(ditPath);
+            if (hit == null) return;
+            Console.WriteLine(
+                $"  [lora] WARNING: the DiT '{System.IO.Path.GetFileName(ditPath)}' looks ALREADY step-distilled " +
+                $"(name contains \"{hit}\"), and a Lightning LoRA is being applied on top. Stacking two " +
+                "distillations degrades the edit badly — expect speckled colour noise and changes you did not " +
+                "ask for. A few-step base model needs NO Lightning LoRA: drop \"qwen-image-lora\" from the " +
+                "config (config/qwen-image-rapid-nsfw.json is the worked example), or pair the LoRA with the " +
+                "undistilled base it was trained for (config/qwen-image-edit-2511.json).");
+        }
 
         /// <summary>
         /// CPU offload (sd.cpp <c>--offload-to-cpu</c> equivalent): stream the DiT weights from
@@ -122,6 +163,9 @@ namespace TensorSharp.Models.QwenImage
         {
             base.Dispose();
             _loraTable?.Dispose();
+            // After the base dispose has cleared the native weight caches that key off
+            // these pointers (same ordering constraint as the LoRA factors above).
+            FreeF32Copies();
         }
 
         public override float[] Forward(int[] tokens) => throw new NotSupportedException("Use Predict().");

@@ -20,6 +20,11 @@ namespace TensorSharp.Runtime
     {
         private readonly SamplingConfig _config;
         private readonly Random _rng;
+        private float[]? _scoreBuffer;
+        private int[]? _indexBuffer;
+        private readonly Dictionary<int, int> _penaltyCounts = new();
+        private int[]? _penaltyTokenBuffer;
+        private float[]? _penaltyOriginalBuffer;
 
         public TokenSampler(SamplingConfig config)
         {
@@ -68,24 +73,28 @@ namespace TensorSharp.Runtime
                 bool hasHistory = generatedTokenIds != null && generatedTokenIds.Count > 0;
                 if (!HasPenalties() || !hasHistory)
                     return Argmax(logits);
-                return ArgmaxWithPenaltiesInPlace(logits, generatedTokenIds);
+                return ArgmaxWithPenaltiesInPlace(logits, generatedTokenIds!);
             }
 
             // Non-greedy: work on a copy to avoid mutating the caller's buffer.
-            float[] scores = new float[vocabSize];
+            float[] scores = _scoreBuffer != null && _scoreBuffer.Length == vocabSize
+                ? _scoreBuffer
+                : (_scoreBuffer = new float[vocabSize]);
             Array.Copy(logits, scores, vocabSize);
 
             ApplyPenalties(scores, generatedTokenIds);
 
+            // Match llama.cpp's default sampler chain exactly: penalties ->
+            // top-k -> top-p -> min-p -> temperature -> distribution.  In
+            // particular, top-p must normalize the already top-k-truncated set;
+            // normalizing the full vocabulary first changes the nucleus and does
+            // a needless vocab-sized exp/softmax on every generated token.
+            int[] candidates = ApplyTopK(scores);
+            candidates = ApplyTopP(scores, candidates);
+            candidates = ApplyMinP(scores, candidates);
             ApplyTemperature(scores, _config.Temperature);
 
-            float[] probs = Softmax(scores);
-
-            ApplyMinP(probs);
-            int[] candidates = ApplyTopK(probs);
-            candidates = ApplyTopP(probs, candidates);
-
-            return SampleFromCandidates(probs, candidates);
+            return SampleFromCandidates(scores, candidates);
         }
 
         /// <summary>
@@ -99,16 +108,10 @@ namespace TensorSharp.Runtime
         /// </summary>
         private int ArgmaxWithPenaltiesInPlace(float[] logits, IList<int> generatedTokenIds)
         {
-            // Distinct counts over the history (frequency penalty needs the count;
-            // repetition/presence need presence). Mirrors ApplyPenalties' counting.
-            var counts = new Dictionary<int, int>();
-            foreach (int id in generatedTokenIds)
-            {
-                if (id < 0 || id >= logits.Length)
-                    continue;
-                counts.TryGetValue(id, out int c);
-                counts[id] = c + 1;
-            }
+            // llama.cpp bounds penalty history (64 tokens by default). Reuse a
+            // sampler-owned count map so long generations stay O(last_n) and do
+            // not allocate a dictionary on every decoded token.
+            var counts = CollectPenaltyCounts(logits.Length, generatedTokenIds, null);
             if (counts.Count == 0)
                 return Argmax(logits);
 
@@ -118,12 +121,16 @@ namespace TensorSharp.Runtime
 
             // Save originals, apply the penalty in place (same arithmetic and order
             // as ApplyPenalties), argmax, then restore the caller's buffer exactly.
-            var saved = new KeyValuePair<int, float>[counts.Count];
+            EnsurePenaltySaveCapacity(counts.Count);
+            int[] tokenBuffer = _penaltyTokenBuffer!;
+            float[] originalBuffer = _penaltyOriginalBuffer!;
             int si = 0;
             foreach (var (tokenId, count) in counts)
             {
                 float original = logits[tokenId];
-                saved[si++] = new KeyValuePair<int, float>(tokenId, original);
+                tokenBuffer[si] = tokenId;
+                originalBuffer[si] = original;
+                si++;
 
                 float v = original;
                 if (repPenalty != 1.0f)
@@ -137,8 +144,8 @@ namespace TensorSharp.Runtime
 
             int best = Argmax(logits);
 
-            for (int i = 0; i < saved.Length; i++)
-                logits[saved[i].Key] = saved[i].Value;
+            for (int i = 0; i < si; i++)
+                logits[tokenBuffer[i]] = originalBuffer[i];
 
             return best;
         }
@@ -196,24 +203,9 @@ namespace TensorSharp.Runtime
             if (!HasPenalties())
                 return;
 
-            // Count occurrences
-            var counts = new Dictionary<int, int>();
-            if (generatedTokenIds != null)
-            {
-                foreach (int id in generatedTokenIds)
-                {
-                    counts.TryGetValue(id, out int c);
-                    counts[id] = c + 1;
-                }
-            }
-            if (pendingTokens != null)
-            {
-                foreach (int id in pendingTokens)
-                {
-                    counts.TryGetValue(id, out int c);
-                    counts[id] = c + 1;
-                }
-            }
+            var counts = CollectPenaltyCounts(scores.Length, generatedTokenIds, pendingTokens);
+            if (counts.Count == 0)
+                return;
 
             float repPenalty = _config.RepetitionPenalty > 0f ? _config.RepetitionPenalty : 1.0f;
             float presPenalty = _config.PresencePenalty;
@@ -243,6 +235,58 @@ namespace TensorSharp.Runtime
             }
         }
 
+        private Dictionary<int, int> CollectPenaltyCounts(
+            int vocabSize,
+            IList<int>? generatedTokenIds,
+            IReadOnlyList<int>? pendingTokens)
+        {
+            _penaltyCounts.Clear();
+            int lastN = _config.PenaltyLastN;
+            if (lastN == 0)
+                return _penaltyCounts;
+
+            int remaining = lastN < 0 ? int.MaxValue : lastN;
+
+            // Pending speculative tokens are the newest part of the combined
+            // history, so they consume the window before generated tokens.
+            if (pendingTokens != null && pendingTokens.Count > 0 && remaining > 0)
+            {
+                int take = Math.Min(pendingTokens.Count, remaining);
+                int start = pendingTokens.Count - take;
+                for (int i = start; i < pendingTokens.Count; i++)
+                    AddPenaltyToken(pendingTokens[i], vocabSize);
+                if (remaining != int.MaxValue)
+                    remaining -= take;
+            }
+
+            if (generatedTokenIds != null && generatedTokenIds.Count > 0 && remaining > 0)
+            {
+                int take = Math.Min(generatedTokenIds.Count, remaining);
+                int start = generatedTokenIds.Count - take;
+                for (int i = start; i < generatedTokenIds.Count; i++)
+                    AddPenaltyToken(generatedTokenIds[i], vocabSize);
+            }
+
+            return _penaltyCounts;
+        }
+
+        private void AddPenaltyToken(int tokenId, int vocabSize)
+        {
+            if ((uint)tokenId >= (uint)vocabSize)
+                return;
+            _penaltyCounts.TryGetValue(tokenId, out int count);
+            _penaltyCounts[tokenId] = count + 1;
+        }
+
+        private void EnsurePenaltySaveCapacity(int count)
+        {
+            if (_penaltyTokenBuffer != null && _penaltyTokenBuffer.Length >= count)
+                return;
+            int capacity = Math.Max(16, count);
+            _penaltyTokenBuffer = new int[capacity];
+            _penaltyOriginalBuffer = new float[capacity];
+        }
+
         #endregion
 
         #region Temperature
@@ -256,75 +300,50 @@ namespace TensorSharp.Runtime
 
         #endregion
 
-        #region Softmax
-
-        private static float[] Softmax(float[] scores)
-        {
-            int n = scores.Length;
-            float max = float.NegativeInfinity;
-            for (int i = 0; i < n; i++)
-                if (scores[i] > max) max = scores[i];
-
-            float[] probs = new float[n];
-            float sum = 0;
-            for (int i = 0; i < n; i++)
-            {
-                probs[i] = MathF.Exp(scores[i] - max);
-                sum += probs[i];
-            }
-            if (sum > 0)
-            {
-                float invSum = 1.0f / sum;
-                for (int i = 0; i < n; i++)
-                    probs[i] *= invSum;
-            }
-            return probs;
-        }
-
-        #endregion
-
         #region Top-K
 
         /// <summary>
         /// Returns indices of top-K tokens sorted by probability (descending).
         /// If topK is 0, returns all indices sorted by probability.
         /// </summary>
-        private int[] ApplyTopK(float[] probs)
+        private int[] ApplyTopK(float[] scores)
         {
-            int n = probs.Length;
+            int n = scores.Length;
             int k = _config.TopK > 0 ? Math.Min(_config.TopK, n) : n;
 
             // Build index array and partial sort
-            int[] indices = new int[n];
+            int[] indices = _indexBuffer != null && _indexBuffer.Length == n
+                ? _indexBuffer
+                : (_indexBuffer = new int[n]);
             for (int i = 0; i < n; i++) indices[i] = i;
 
             if (k < n)
             {
                 // Partial sort: find top-K elements
-                PartialSort(indices, probs, 0, n - 1, k);
-                // Sort the top-K by probability descending
-                Array.Sort(indices, 0, k, new ProbComparer(probs));
+                PartialSort(indices, scores, 0, n - 1, k);
+                // Sort the top-K by logit descending.
+                Array.Sort(indices, 0, k, new ScoreComparer(scores));
                 int[] topK = new int[k];
                 Array.Copy(indices, topK, k);
                 return topK;
             }
 
-            Array.Sort(indices, new ProbComparer(probs));
+            Array.Sort(indices, new ScoreComparer(scores));
             return indices;
         }
 
-        private sealed class ProbComparer : IComparer<int>
+        private sealed class ScoreComparer : IComparer<int>
         {
-            private readonly float[] _p;
-            public ProbComparer(float[] p) => _p = p;
-            public int Compare(int a, int b) => _p[b].CompareTo(_p[a]);
+            private readonly float[] _scores;
+            public ScoreComparer(float[] scores) => _scores = scores;
+            public int Compare(int a, int b) => _scores[b].CompareTo(_scores[a]);
         }
 
-        private static void PartialSort(int[] indices, float[] probs, int lo, int hi, int k)
+        private static void PartialSort(int[] indices, float[] scores, int lo, int hi, int k)
         {
             while (lo < hi)
             {
-                int pivot = Partition(indices, probs, lo, hi);
+                int pivot = Partition(indices, scores, lo, hi);
                 if (pivot == k) return;
                 if (pivot < k)
                     lo = pivot + 1;
@@ -333,13 +352,13 @@ namespace TensorSharp.Runtime
             }
         }
 
-        private static int Partition(int[] indices, float[] probs, int lo, int hi)
+        private static int Partition(int[] indices, float[] scores, int lo, int hi)
         {
-            float pivotVal = probs[indices[hi]];
+            float pivotVal = scores[indices[hi]];
             int store = lo;
             for (int i = lo; i < hi; i++)
             {
-                if (probs[indices[i]] >= pivotVal)
+                if (scores[indices[i]] >= pivotVal)
                 {
                     (indices[store], indices[i]) = (indices[i], indices[store]);
                     store++;
@@ -357,16 +376,26 @@ namespace TensorSharp.Runtime
         /// Filter candidates to the smallest set whose cumulative probability >= topP.
         /// Input candidates must be sorted by probability descending.
         /// </summary>
-        private int[] ApplyTopP(float[] probs, int[] candidates)
+        private int[] ApplyTopP(float[] scores, int[] candidates)
         {
-            if (_config.TopP >= 1.0f)
+            if (_config.TopP >= 1.0f || candidates.Length <= 1)
                 return candidates;
 
-            float cumulative = 0f;
+            // candidates are already sorted by descending logit.  llama.cpp's
+            // top-p sampler softmaxes this CURRENT candidate set (after top-k),
+            // not the full vocabulary.
+            float max = scores[candidates[0]];
+            double sum = 0d;
+            for (int i = 0; i < candidates.Length; i++)
+                sum += Math.Exp(scores[candidates[i]] - max);
+            if (!(sum > 0d))
+                return new[] { candidates[0] };
+
+            double cumulative = 0d;
             int cutoff = candidates.Length;
             for (int i = 0; i < candidates.Length; i++)
             {
-                cumulative += probs[candidates[i]];
+                cumulative += Math.Exp(scores[candidates[i]] - max) / sum;
                 if (cumulative >= _config.TopP)
                 {
                     cutoff = i + 1;
@@ -390,44 +419,56 @@ namespace TensorSharp.Runtime
         /// <summary>
         /// Zero out probabilities below min_p * max_probability.
         /// </summary>
-        private void ApplyMinP(float[] probs)
+        private int[] ApplyMinP(float[] scores, int[] candidates)
         {
-            if (_config.MinP <= 0f)
-                return;
+            if (_config.MinP <= 0f || candidates.Length <= 1)
+                return candidates;
 
-            float maxProb = 0f;
-            for (int i = 0; i < probs.Length; i++)
-                if (probs[i] > maxProb) maxProb = probs[i];
+            // p(token) / p(max) == exp(logit - maxLogit), so this test is
+            // independent of the normalization constant and avoids another
+            // softmax. Keep at least the highest-logit token, like llama.cpp.
+            double minRatio = _config.MinP;
+            float max = scores[candidates[0]];
+            int keep = 1;
+            while (keep < candidates.Length &&
+                   Math.Exp(scores[candidates[keep]] - max) >= minRatio)
+            {
+                keep++;
+            }
+            if (keep == candidates.Length)
+                return candidates;
 
-            float threshold = _config.MinP * maxProb;
-            for (int i = 0; i < probs.Length; i++)
-                if (probs[i] < threshold) probs[i] = 0f;
+            var filtered = new int[keep];
+            Array.Copy(candidates, filtered, keep);
+            return filtered;
         }
 
         #endregion
 
         #region Final Sampling
 
-        private int SampleFromCandidates(float[] probs, int[] candidates)
+        private int SampleFromCandidates(float[] scores, int[] candidates)
         {
             if (candidates.Length == 0)
                 return 0;
             if (candidates.Length == 1)
                 return candidates[0];
 
-            // Re-normalize probabilities over candidates
-            float sum = 0f;
+            // Softmax only the final candidate set. With Qwen3.5's top_k=20
+            // this replaces a 248K-element exp loop with at most twenty.
+            float max = scores[candidates[0]];
+            double sum = 0d;
             for (int i = 0; i < candidates.Length; i++)
-                sum += probs[candidates[i]];
+                sum += Math.Exp(scores[candidates[i]] - max);
 
-            if (sum <= 0f)
+            if (!(sum > 0d))
                 return candidates[0];
 
-            float r = (float)_rng.NextDouble() * sum;
-            float cumulative = 0f;
+            double r = _rng.NextDouble() * sum;
+            double cumulative = 0d;
             for (int i = 0; i < candidates.Length; i++)
             {
-                cumulative += probs[candidates[i]];
+                cumulative += Math.Exp(scores[candidates[i]] - max);
                 if (r <= cumulative)
                     return candidates[i];
             }

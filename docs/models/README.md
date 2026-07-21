@@ -52,6 +52,11 @@ fused native kernels. See the
 Its matching `mmproj` is optional for text and required for image, video, or
 audio input.
 
+For a continuous learning path through that example—from tensor foundations to
+a complete multimodal inference engine—use Zhongkai Fu's
+[From Tensors to Tokens book guide](../BOOK.md), or
+[view the paperback on Amazon](https://www.amazon.com/dp/B0H9P44QZZ).
+
 ## Implementation matrix
 
 | Architecture | Card | Verified download (HF) | Source class | GGUF keys | Modalities | Reasoning | Tools | Batched / paged forward | Notable acceleration |

@@ -22,7 +22,9 @@ namespace TensorSharp.Server
     {
         private readonly ILogger _logger;
 
-        // Reused JSON options for the per-turn fullInput serializer below. Relaxed
+        private const int MaxLoggedMessageChars = 512;
+
+        // Reused JSON options for the per-turn input-summary serializer below. Relaxed
         // escaping keeps non-ASCII content readable in the log file instead of
         // expanding it to \uXXXX escapes; control characters are still escaped by
         // JsonSerializer so each entry stays on a single line.
@@ -61,6 +63,9 @@ namespace TensorSharp.Server
             List<ChatMessage> preparedHistory,
             SamplingConfig samplingConfig)
         {
+            if (!_logger.IsEnabled(LogLevel.Information))
+                return;
+
             int userMessageCount = 0;
             int assistantMessageCount = 0;
             int systemMessageCount = 0;
@@ -86,7 +91,10 @@ namespace TensorSharp.Server
                 }
             }
 
-            string lastUserContent = LoggingExtensions.SanitizeForLogFull(lastUserMessage?.Content ?? string.Empty);
+            string lastUserPreview = BuildMessageContentForLog(
+                lastUserMessage, out _, out _);
+            string lastUserContent = LoggingExtensions.SanitizeForLog(
+                lastUserPreview, MaxLoggedMessageChars);
             string turnUploads = SerializeUploadsForLog(lastUserMessage);
             string fullInput = SerializeMessagesForLog(preparedHistory);
 
@@ -138,7 +146,13 @@ namespace TensorSharp.Server
             ChatMessage promptMessage,
             SamplingConfig samplingConfig)
         {
-            string promptContent = LoggingExtensions.SanitizeForLogFull(promptMessage?.Content ?? string.Empty);
+            if (!_logger.IsEnabled(LogLevel.Information))
+                return;
+
+            string promptPreview = BuildMessageContentForLog(
+                promptMessage, out _, out _);
+            string promptContent = LoggingExtensions.SanitizeForLog(
+                promptPreview, MaxLoggedMessageChars);
             string turnUploads = SerializeUploadsForLog(promptMessage);
             _logger.LogInformation(LogEventIds.ChatStarted,
                 "generate.start arch={Architecture} maxTokens={MaxTokens} imageAttachments={ImageCount} uploads={Uploads} sampling(temp={Temperature},topK={TopK},topP={TopP},seed={Seed}) prompt=\"{Prompt}\"",
@@ -181,8 +195,10 @@ namespace TensorSharp.Server
             => elapsedTicks * (1_000_000_000L / Stopwatch.Frequency);
 
         /// <summary>
-        /// Serialize the entire conversation array submitted for this turn into a
-        /// single-line JSON string for logging.
+        /// Serialize a bounded summary of the conversation submitted for this turn.
+        /// Message bodies are capped so a losslessly uploaded document is not copied
+        /// wholesale into telemetry (which would add avoidable memory, I/O, and
+        /// sensitive-content exposure). Original character counts remain available.
         /// </summary>
         public static string SerializeMessagesForLog(List<ChatMessage> messages)
         {
@@ -193,15 +209,20 @@ namespace TensorSharp.Server
             foreach (var m in messages)
             {
                 if (m == null) continue;
+                string contentPreview = BuildMessageContentForLog(
+                    m, out bool contentOmitted, out bool contentTruncated);
                 entries.Add(new ChatMessageLogEntry
                 {
                     Role = m.Role ?? string.Empty,
-                    Content = m.Content ?? string.Empty,
+                    Content = contentPreview,
+                    ContentChars = m.Content?.Length ?? 0,
+                    ContentOmitted = contentOmitted ? true : (bool?)null,
+                    ContentTruncated = contentTruncated ? true : (bool?)null,
                     Images = ToPathList(m.ImagePaths),
                     Audios = ToPathList(m.AudioPaths),
                     TextFiles = ToPathList(m.TextFilePaths),
                     IsVideo = m.IsVideo ? true : (bool?)null,
-                    Thinking = string.IsNullOrEmpty(m.Thinking) ? null : m.Thinking,
+                    Thinking = string.IsNullOrEmpty(m.Thinking) ? null : LimitStructuredLogValue(m.Thinking),
                     ToolCallCount = (m.ToolCalls != null && m.ToolCalls.Count > 0) ? m.ToolCalls.Count : (int?)null,
                 });
             }
@@ -261,10 +282,68 @@ namespace TensorSharp.Server
             return result.Count == 0 ? null : result;
         }
 
+        private static string LimitStructuredLogValue(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+                return string.Empty;
+            if (value.Length <= MaxLoggedMessageChars)
+                return value;
+
+            return value.Substring(0, MaxLoggedMessageChars) +
+                $"...(+{value.Length - MaxLoggedMessageChars} chars)";
+        }
+
+        private static string BuildMessageContentForLog(
+            ChatMessage message,
+            out bool contentOmitted,
+            out bool contentTruncated)
+        {
+            contentOmitted = false;
+            contentTruncated = false;
+            string content = message?.Content ?? string.Empty;
+            if (content.Length == 0)
+                return string.Empty;
+
+            const string endMarker = "[End of file]";
+            int endMarkerIndex = content.LastIndexOf(endMarker, StringComparison.OrdinalIgnoreCase);
+            bool hasDocumentEnvelope = endMarkerIndex >= 0 &&
+                (content.IndexOf("[File:", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 content.IndexOf("[Attached file:", StringComparison.OrdinalIgnoreCase) >= 0);
+            bool hasTextFilePath = message?.TextFilePaths != null && message.TextFilePaths.Count > 0;
+
+            if (hasDocumentEnvelope || (hasTextFilePath && content.Length > MaxLoggedMessageChars))
+            {
+                contentOmitted = true;
+                string summary = $"[attached document omitted from log; {content.Length} chars]";
+                if (hasDocumentEnvelope)
+                {
+                    int instructionStart = endMarkerIndex + endMarker.Length;
+                    while (instructionStart < content.Length && char.IsWhiteSpace(content[instructionStart]))
+                        instructionStart++;
+                    if (instructionStart < content.Length)
+                    {
+                        int instructionLength = content.Length - instructionStart;
+                        string instruction = instructionLength <= MaxLoggedMessageChars
+                            ? content.Substring(instructionStart, instructionLength)
+                            : content.Substring(instructionStart, MaxLoggedMessageChars) +
+                              $"...(+{instructionLength - MaxLoggedMessageChars} chars)";
+                        summary += " instruction=\"" + instruction + "\"";
+                    }
+                }
+                return summary;
+            }
+
+            contentTruncated = content.Length > MaxLoggedMessageChars;
+            return LimitStructuredLogValue(content);
+        }
+
         private sealed class ChatMessageLogEntry
         {
             public string Role { get; init; }
             public string Content { get; init; }
+            public int ContentChars { get; init; }
+            public bool? ContentOmitted { get; init; }
+            public bool? ContentTruncated { get; init; }
             public List<string> Images { get; init; }
             public List<string> Audios { get; init; }
             public List<string> TextFiles { get; init; }

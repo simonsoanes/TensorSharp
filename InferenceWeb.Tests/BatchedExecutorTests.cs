@@ -226,6 +226,35 @@ public class BatchedExecutorTests
     }
 
     [Fact]
+    public async Task BatchExecutor_RecurrentModelWithoutCrossSequenceReuse_SkipsPooledSnapshots()
+    {
+        var model = new PerSeqFusedStubModel(
+            "fp-recurrent-no-pool",
+            supportsCrossSequenceReuse: false,
+            requiresPerBlockCapture: true);
+        var cfg = new SchedulerConfig
+        {
+            MaxNumBatchedTokens = 64,
+            MaxNumRunningSequences = 4,
+            MaxPrefillChunkSize = 64,
+            SoloPrefillChunkSize = 64,
+            NumBlocks = 16,
+            BlockSize = BlockSize,
+            EnablePrefixCaching = true,
+            DecodeQuantumTokens = 1,
+        };
+        using var engine = new InferenceEngine(model, cfg, NullLogger.Instance);
+        var seq = new SequenceState("long-recurrent", Enumerable.Range(1, 20).ToList(),
+            maxNewTokens: 2, BlockSize, SamplingConfig.Default);
+
+        var completion = await engine.SubmitRequest(seq).Completion.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(SequenceStatus.FinishedLengthCapped, completion.Status);
+        Assert.Equal(0, model.ExtractCalls);
+        Assert.Equal(22, model.LastPreparedContext);
+    }
+
+    [Fact]
     public async Task InferenceEngine_ExecutorStepException_CompletesErroredRequestAndContinuesWaiting()
     {
         var model = new ThrowingBatchedStubModel("fp-step-error", badRequestId: "bad", peakToken: 7);
@@ -346,6 +375,43 @@ public class BatchedExecutorTests
         var handle = engine.SubmitRequest(seq);
         var completion = await handle.Completion.WaitAsync(TimeSpan.FromSeconds(10));
         Assert.True(completion.OutputTokenCount > 0);
+    }
+
+    [Fact]
+    public async Task InferenceEngine_AutoSizedPool_CrossesFormer65536TokenBoundary()
+    {
+        // Mirrors the reported PDF accounting: 62,715 prompt tokens plus a
+        // 4,096-token output budget. The old 256x256 pool stopped permanently
+        // at 65,536; the context-sized pool must carry the sequence to 66,811.
+        const int blockSize = 256;
+        const int promptTokens = 62_715;
+        const int outputTokens = 4_096;
+        var model = new BatchedStubModel("fp-pdf-boundary", peakToken: 7, maxContext: 262_144);
+        var cfg = new SchedulerConfig
+        {
+            MaxNumBatchedTokens = 65_536,
+            MaxNumRunningSequences = 1,
+            MaxPrefillChunkSize = 65_536,
+            SoloPrefillChunkSize = 65_536,
+            NumBlocks = 256,
+            BlockSize = blockSize,
+            EnablePrefixCaching = false,
+            DecodeQuantumTokens = 1,
+        };
+        using var engine = new InferenceEngine(model, cfg, NullLogger.Instance);
+        var seq = new SequenceState(
+            "pdf-boundary",
+            Enumerable.Repeat(1, promptTokens).ToList(),
+            outputTokens,
+            blockSize,
+            SamplingConfig.Greedy);
+
+        var completion = await engine.SubmitRequest(seq).Completion.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(SequenceStatus.FinishedLengthCapped, completion.Status);
+        Assert.Equal(outputTokens, completion.OutputTokenCount);
+        Assert.Equal(promptTokens + outputTokens, seq.NumComputedTokens);
+        Assert.Equal(1_024, engine.PoolStats.totalBlocks);
     }
 
     // ----- helpers -----
@@ -484,18 +550,27 @@ public class BatchedExecutorTests
     private sealed class PerSeqFusedStubModel : IModelArchitecture, IBatchedPagedModel
     {
         private readonly string _fp;
+        private readonly bool _supportsCrossSequenceReuse;
+        private readonly bool _requiresPerBlockCapture;
         private string _activeReqId;
         private readonly HashSet<string> _liveCaches = new(StringComparer.Ordinal);
 
-        public PerSeqFusedStubModel(string fp)
+        public PerSeqFusedStubModel(
+            string fp,
+            bool supportsCrossSequenceReuse = true,
+            bool requiresPerBlockCapture = false)
         {
             _fp = fp;
+            _supportsCrossSequenceReuse = supportsCrossSequenceReuse;
+            _requiresPerBlockCapture = requiresPerBlockCapture;
             Tokenizer = new StubTokenizer(VocabSize);
         }
 
         public Dictionary<string, int> PeakForRequest { get; } = new(StringComparer.Ordinal);
         public int NumBatchCalls { get; private set; }
         public int NumForwardCalls { get; private set; }
+        public int ExtractCalls { get; private set; }
+        public int LastPreparedContext { get; private set; }
         public int MaxConcurrentBoundCaches { get; private set; }
         public HashSet<string> BoundRequestIds { get; } = new(StringComparer.Ordinal);
 
@@ -505,6 +580,8 @@ public class BatchedExecutorTests
         public IBackendExecutionPlan ExecutionPlan => null;
         public bool SupportsKVCacheTruncation => true;
         public bool SupportsKVStateSnapshot => true;
+        public bool SupportsCrossSequenceKvReuse => _supportsCrossSequenceReuse;
+        public bool RequiresPerBlockCapture => _requiresPerBlockCapture;
         public string KVStateFingerprint => _fp;
         public long ComputeKVBlockByteSize(int n) => 2L * NumLayers * NumKVHeads * n * HeadDim * sizeof(float);
 
@@ -519,7 +596,8 @@ public class BatchedExecutorTests
 
         public void ResetKVCache() { }
         public void TruncateKVCache(int n) { }
-        public bool TryExtractKVBlock(int s, int n, Span<byte> dst) => true;
+        public void PrepareForPrefill(int totalPromptTokens) => LastPreparedContext = totalPromptTokens;
+        public bool TryExtractKVBlock(int s, int n, Span<byte> dst) { ExtractCalls++; return true; }
         public bool TryInjectKVBlock(int s, int n, ReadOnlySpan<byte> src) => true;
         public void Dispose() { }
 

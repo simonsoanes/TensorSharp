@@ -144,7 +144,7 @@ namespace TensorSharp.Server.ProtocolAdapters
             generateLogger.LogInformation(LogEventIds.ChatStarted,
                 "/api/generate request: model={Model} stream={Stream} maxTokens={MaxTokens} images={ImageCount} promptChars={PromptLength} prompt=\"{Prompt}\"",
                 modelName, stream, maxTokens, imagePaths?.Count ?? 0, prompt?.Length ?? 0,
-                LoggingExtensions.SanitizeForLogFull(prompt));
+                LoggingExtensions.SanitizeForLog(prompt, 512));
 
             using var ticket = _queue.Enqueue(ctx.RequestAborted);
 
@@ -275,7 +275,8 @@ namespace TensorSharp.Server.ProtocolAdapters
             var ollamaTools = ToolFunctionParser.ParseOllama(body);
             bool ollamaThink = body.TryGetProperty("think", out var thinkProp) && thinkProp.GetBoolean();
 
-            string lastOllamaUserContent = LoggingExtensions.SanitizeForLogFull(messages.LastOrDefault(m => m.Role == "user")?.Content ?? string.Empty);
+            string lastOllamaUserContent = LoggingExtensions.SanitizeForLog(
+                messages.LastOrDefault(m => m.Role == "user")?.Content ?? string.Empty, 512);
             ollamaLogger.LogInformation(LogEventIds.ChatStarted,
                 "/api/chat/ollama request: model={Model} stream={Stream} maxTokens={MaxTokens} messages={Messages} tools={Tools} thinking={Thinking} userInput=\"{LastUser}\"",
                 modelName, stream, maxTokens, messages.Count, ollamaTools?.Count ?? 0, ollamaThink, lastOllamaUserContent);

@@ -74,6 +74,11 @@ namespace TensorSharp.Runtime
                     @"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+|" +
                     @"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*|" +
                     @"\p{N}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+",
+                // Qwen3.5 keeps Unicode combining marks attached to letters and
+                // excludes them from the punctuation run. This matches llama.cpp's
+                // tokenizer.ggml.pre == "qwen35" pre-tokenizer exactly.
+                "qwen35" =>
+                    @"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+",
                 _ =>
                     @"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+",
             };
@@ -230,10 +235,17 @@ namespace TensorSharp.Runtime
                 if (!mergeNodes[a].Active || !mergeNodes[b].Active)
                     continue;
 
-                string merged = mergeNodes[a].Runes + mergeNodes[b].Runes;
-                if (merged != mergeNodes[a].Runes + mergeNodes[b].Runes)
+                // A neighboring merge can change the text stored in an active
+                // node while an older candidate for this node pair remains in
+                // the queue. Only apply a candidate if the nodes are still
+                // adjacent and their current pair still has the queued rank.
+                // Otherwise the stale rank can incorrectly jump ahead of a
+                // newly-created, higher-priority merge.
+                if (mergeNodes[a].Next != b || mergeNodes[b].Prev != a ||
+                    GetMergeRank(mergeNodes[a].Runes, mergeNodes[b].Runes) != best.rank)
                     continue;
 
+                string merged = mergeNodes[a].Runes + mergeNodes[b].Runes;
                 if (!_vocabLookup.ContainsKey(merged))
                     continue;
 

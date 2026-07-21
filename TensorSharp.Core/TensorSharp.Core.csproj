@@ -6,6 +6,13 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <OutputPath>bin\</OutputPath>
     <IsPackable>true</IsPackable>
+    <!-- Ships as TensorSharp.Tensors, not TensorSharp.Core: the TensorSharp.Core
+         id on nuget.org belongs to an unrelated, abandoned project (all versions
+         unlisted, source repo deleted) and pushing to it returns 403. Only the
+         NuGet id differs - the assembly, namespaces, and project name stay
+         TensorSharp.Core, so consumer `using` statements are unaffected.
+         Do not "fix" this back to the default without checking id ownership. -->
+    <PackageId>TensorSharp.Tensors</PackageId>
     <Nullable>disable</Nullable>
     <Description>Core tensor primitives, CPU operations, memory management, storage, and device abstractions for TensorSharp.</Description>
     <PackageTags>$(TensorSharpPackageTags);core;ops;memory;device;cpu</PackageTags>

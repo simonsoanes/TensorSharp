@@ -16,6 +16,10 @@
   "top-k": 20,
   "top-p": 0.8,
   "min-p": 0,
+  // This aggressive fine-tune enters a long-form paragraph attractor at 1.0
+  // (disabled) in both TensorSharp and llama.cpp. Keep a modest safety penalty.
+  "repeat-penalty": 1.1,
+  "repeat-last-n": 64,
 
   "model": "${modelRoot}/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q8_0.gguf"
 }

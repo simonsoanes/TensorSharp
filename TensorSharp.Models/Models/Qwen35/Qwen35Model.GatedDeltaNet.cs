@@ -926,6 +926,47 @@ namespace TensorSharp.Models
         private bool _fdUnsupported;      // latched: gating failed once, never retry
         private bool _fdDiagPrinted;
         private bool _fdStateResident;    // GDN conv/delta state currently device-resident
+        // True after whole-model fused decode advances the device-resident GDN
+        // state without updating _convState / _deltaStateTensor's host mirrors.
+        private bool _gdnStateHostDirty;
+
+        /// <summary>
+        /// Drain fused-decode GDN state to its host representation without
+        /// evicting the device buffers.  Snapshotting can then read exact state
+        /// while the next decode token still reuses the resident graph.
+        /// </summary>
+        private unsafe void EnsureFusedDecodeStateHostSynchronized()
+        {
+            if (!_gdnStateHostDirty || !_fdStateResident || _fdConvScratch == IntPtr.Zero || _fdGdnSlot == null)
+                return;
+
+            int convDim = _convKernel - 1;
+            int qkvDim = _headKDim * _numKHeads * 2 + _headVDim * _numVHeads;
+            float* convBase = (float*)_fdConvScratch;
+            for (int l = 0; l < Config.NumLayers; l++)
+            {
+                if (!_isRecurrent[l]) continue;
+
+                int gi = _fdGdnSlot[l];
+                float* conv = convBase + (long)gi * convDim * qkvDim;
+                // Native binds each layer's offset pointer as an independent
+                // cacheable buffer. Syncing the enclosing allocation would miss
+                // those exact pointer/size keys in the GGML host-buffer cache.
+                GgmlBasicOps.SyncHostBuffer(
+                    (IntPtr)conv,
+                    (long)convDim * qkvDim * sizeof(float));
+                float[] ring = _convState[l];
+                for (int t = 0; t < convDim; t++)
+                    for (int ch = 0; ch < qkvDim; ch++)
+                        ring[t * qkvDim + ch] = conv[ch * convDim + t];
+                _convStateWriteIdx[l] = 0;
+
+                IntPtr deltaPtr = (IntPtr)GetFloatPtr(_deltaStateTensor[l]);
+                GgmlBasicOps.SyncHostBuffer(deltaPtr, _deltaStateTensor[l].Storage.ByteLength);
+            }
+
+            _gdnStateHostDirty = false;
+        }
         private bool _fdSpecSessionActive; // MTP/spec in use this session -> disable fused decode
 
         // Called whenever host-side GDN state becomes the source of truth again
@@ -933,6 +974,10 @@ namespace TensorSharp.Models
         // decode to re-seed the device-resident state from the host buffers.
         internal void InvalidateFullDecodeState()
         {
+            // A graph reset drops the only current copy of recurrent state when
+            // fused decode has kept it device-resident.  Preserve it first (reset
+            // intentionally discards it by clearing _gdnStateHostDirty beforehand).
+            EnsureFusedDecodeStateHostSynchronized();
             _fdStateResident = false;
             // The batched-fused device KV pool is seeded from the host paged pool;
             // any state reset/rebuild must force a re-seed before the next fused decode.
@@ -1230,6 +1275,8 @@ namespace TensorSharp.Models
                 // GDN state is now device-resident and was updated in-place; no
                 // host write-back. Mark resident so subsequent tokens skip seeding.
                 _fdStateResident = true;
+                _gdnStateHostDirty = true;
+                _kvCacheHostDirty = true;
             }
 
             // logitsOut now holds the final logits (final-norm + lm_head folded
@@ -1308,6 +1355,13 @@ namespace TensorSharp.Models
                 return false;
             if (_headKDim != _headVDim)   // gated_delta_net needs S_k == S_v
                 return false;
+
+            // A multi-token verify may follow fused single-token decode (for
+            // example a same-session refill).  Verify seeds its recurrent graph
+            // from the host ring, so preserve the resident decode state before
+            // switching graph families.
+            if (_fdStateResident)
+                InvalidateFullDecodeState();
 
             int n = Config.NumLayers;
             int headDim = Config.HeadDim;
@@ -1573,6 +1627,10 @@ namespace TensorSharp.Models
             // (prefill / rollback) updates the host mirror but NOT the resident device
             // buffer, so the next resident call must re-seed it (guarded by this flag).
             _fvStateResident = residentThisCall;
+            // Attention K/V remains in GGML's device-copy cache.  GDN state was
+            // explicitly downloaded and converted to the host ring above.
+            _kvCacheHostDirty = true;
+            _gdnStateHostDirty = false;
             return true;
         }
 
@@ -1656,6 +1714,8 @@ namespace TensorSharp.Models
                     finalNormPtr, normedOut != null ? (IntPtr)np : IntPtr.Zero, nLogitRows,
                     null, null);
             }
+            if (ok)
+                _kvCacheHostDirty = true;
             return ok;
         }
 

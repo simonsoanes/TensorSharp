@@ -63,7 +63,7 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf
     <li>多轮对话，带流式 token 生成（SSE）。</li>
     <li>每标签页独立的聊天会话 —— 每个标签页拥有自己的跟踪对话历史；请求 KV 块与前缀复用由推理引擎管理。</li>
     <li>用于多模态推理的图像、视频、音频、PDF 与文本 / 代码上传（最大 500 MB）。</li>
-    <li>PDF 文档：原生数字 PDF 会抽取文本层并内联到提示词（按 token 预算截断）；扫描 PDF 在视觉模型上回退为逐页图像（<code>TS_PDF_MAX_PAGES</code> 限制读取页数）。</li>
+    <li>PDF 文档：原生数字 PDF 会完整抽取文本层并内联到提示词；扫描 PDF 在视觉模型上回退为逐页图像（<code>TS_PDF_MAX_PAGES</code> 限制读取页数）。最终渲染的提示词会根据模型的实际上下文窗口进行检查。</li>
     <li>思考 / 推理模式开关，以及带函数定义的工具调用。</li>
     <li>消息编辑与删除，并可从对话中任意位置重新生成。</li>
     <li>当托管 <code>diffusion-gemma</code> GGUF 时，提供 DiffusionGemma 去噪预览（每步替换整条助手消息，最后定稿）。</li>
@@ -130,7 +130,6 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --config config/server-basi
     <tbody>
       <tr><td><code>BACKEND</code></td><td>未传 <code>--backend</code> 时的默认后端（默认：macOS 上为 <code>ggml_metal</code>，其他平台为 <code>ggml_cpu</code>）。</td></tr>
       <tr><td><code>MAX_TOKENS</code></td><td>默认最大生成长度（默认：<code>20000</code>）。</td></tr>
-      <tr><td><code>MAX_TEXT_FILE_CHARS</code></td><td>截断纯文本上传的字符上限（默认：<code>8000</code>）。</td></tr>
       <tr><td><code>TS_PDF_MAX_PAGES</code></td><td>上传 PDF 时读取的页数上限，文本提取与页面图像渲染均遵循（默认：<code>0</code> = 全部页面；CLI <code>--pdf</code> 同样遵循）。</td></tr>
       <tr><td><code>VIDEO_SAMPLE_FPS</code> / <code>VIDEO_MAX_FRAMES</code></td><td>每秒视频采样的帧数 / 可选的抽帧上限。</td></tr>
       <tr><td><code>TS_FUSED_QKNORM_ROPE</code></td><td>Direct <code>cuda</code> 后端上 Qwen 3.5/3.6 文本 prefill 的融合 QK-Norm + RoPE CUDA 内核（默认开启；<code>0</code> 关闭）。</td></tr>
