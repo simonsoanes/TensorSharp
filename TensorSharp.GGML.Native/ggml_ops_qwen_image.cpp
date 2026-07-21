@@ -1106,7 +1106,29 @@ ggml_tensor* qi_attention(ggml_context* ctx, ggml_tensor* q_attn, ggml_tensor* k
         // materialized path is unaffected). Scale K/V down by S before the kernel (so
         // K/V/S fits F16) and the result back up by S. Scores stay exact: pass scale*S
         // so (q·(K/S))·(scale·S) == q·K·scale; output softmax·(V/S) is rescaled by S.
-        constexpr float QI_FA_SCALE = 16.0f;
+        //
+        // S = 128 matches stable-diffusion.cpp, which passes kv_scale = 1/128 for THIS model
+        // (QwenImageAttention -> Rope::attention(..., 1.0f/128.f), src/model/diffusion/
+        // qwen_image.hpp) while leaving every other diffusion model there at the 1.0 default.
+        // Qwen-Image needs it because only q/k are RMSNorm'd (norm_q/norm_k) — v is a RAW
+        // to_v projection of an AdaLN-modulated stream, so |v| is unbounded and scales with
+        // the modulation (measured: AdaLN scale/shift reach ~840, the residual stream ~1e8).
+        //
+        // S = 16 was NOT enough. Bisecting the guard on a real 880x1168 edit: S = 16 is
+        // finite but S = 8 already goes all-NaN, i.e. max|v| lands between 8*65504 (5.2e5)
+        // and 16*65504 (1.0e6) — under a 2x margin. Any input that pushes |v| slightly
+        // higher (a different photo, prompt, or resolution) overflows F16 to inf, NaNs the
+        // whole forward, and the edit decodes SOLID BLACK. S = 128 restores an ~8x margin.
+        //
+        // The rescale is exact in infinite precision, but it does change F16 rounding and
+        // therefore the sampled image (~19 dB PSNR vs S = 16 at a fixed seed). That is a
+        // re-baseline, not a regression: both are valid samples and S = 128 is the one with
+        // the headroom. TS_QWEN_DIT_FLASH_KV_SCALE overrides for an even more extreme quant.
+        static const float QI_FA_SCALE = []{
+            const char* e = std::getenv("TS_QWEN_DIT_FLASH_KV_SCALE");
+            if (e != nullptr) { float v = std::strtof(e, nullptr); if (v > 0.0f) return v; }
+            return 128.0f;
+        }();
         ggml_tensor* ks = ggml_scale(ctx, kpad, 1.0f / QI_FA_SCALE);
         ggml_tensor* vs = ggml_scale(ctx, vpad, 1.0f / QI_FA_SCALE);
         // On Metal, hand flash_attn_ext F16 K/V so it selects the fast

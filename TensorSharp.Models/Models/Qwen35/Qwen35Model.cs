@@ -289,6 +289,12 @@ namespace TensorSharp.Models
         // Full attention KV cache (only for attention layers)
         private Tensor[] _kvCacheK;
         private Tensor[] _kvCacheV;
+        // The fused GGML verify/decode graphs update attention K/V in the
+        // cacheable device mirror.  The host allocation is therefore stale until
+        // it is explicitly downloaded.  Keep that fact separate from
+        // _cacheSeqLen so cache growth and paged snapshots never memcpy stale
+        // host bytes (most visibly when a long decode crosses 32K -> 64K).
+        private bool _kvCacheHostDirty;
         private MlxFusedOps.AttentionKvCache[] _mlxAttentionCache;
         private int _kvCacheCapacity;
         // Initial KV capacity captured at InitCaches; fresh per-request fused-cache
@@ -901,16 +907,46 @@ namespace TensorSharp.Models
             _cacheSeqLen = 0;
         }
 
-        private void EnsureCacheCapacity(int requiredSeqLen)
+        /// <summary>Reserve the complete request context once, before its first
+        /// prefill. This avoids a 65,536-to-131,072 power-of-two expansion in
+        /// the middle of a long decode when only a few thousand additional
+        /// slots are required.</summary>
+        public override void PrepareForPrefill(int requiredContextTokens)
+        {
+            if (requiredContextTokens <= 0)
+                return;
+            EnsureCacheCapacity(requiredContextTokens, geometricGrowth: false);
+        }
+
+        private void EnsureCacheCapacity(int requiredSeqLen, bool geometricGrowth = true)
         {
             if (requiredSeqLen <= _kvCacheCapacity)
                 return;
             if (requiredSeqLen > _maxContextLength)
                 throw new InvalidOperationException($"Requested sequence length {requiredSeqLen} exceeds configured max context {_maxContextLength}.");
 
-            int newCapacity = Math.Max(_kvCacheCapacity, 1);
-            while (newCapacity < requiredSeqLen)
-                newCapacity = Math.Min(_maxContextLength, newCapacity * 2);
+            // Ops.Copy below is a host-side copy.  Whole-model GGML prefill and
+            // decode leave attention K/V and recurrent state device-resident, so
+            // drain both before replacing the buffers / invalidating their graphs.
+            EnsureKvCacheHostSynchronized();
+            EnsureFusedDecodeStateHostSynchronized();
+
+            int newCapacity;
+            if (geometricGrowth)
+            {
+                newCapacity = Math.Max(_kvCacheCapacity, 1);
+                while (newCapacity < requiredSeqLen)
+                    newCapacity = Math.Min(_maxContextLength, newCapacity * 2);
+            }
+            else
+            {
+                // Native Qwen decode windows are 256-token aligned. Reserve
+                // exactly the request budget rounded to that boundary rather
+                // than doubling a multi-gigabyte cache.
+                const int alignment = 256;
+                long rounded = ((long)requiredSeqLen + alignment - 1) / alignment * alignment;
+                newCapacity = (int)Math.Min(_maxContextLength, rounded);
+            }
 
             DType kvDtype = _kvCacheDtype.ToDType();
             for (int l = 0; l < TotalLayerCount; l++)
@@ -934,6 +970,11 @@ namespace TensorSharp.Models
                     Ops.Copy(dstV, srcV);
                 }
 
+                // Device-copy cache entries are keyed by the old host pointers.
+                // Evict them while those pointers are still valid; otherwise a
+                // grow leaks the old slabs and a captured graph can retain them.
+                InvalidateTensorDeviceCache(_kvCacheK[l]);
+                InvalidateTensorDeviceCache(_kvCacheV[l]);
                 _kvCacheK[l].Dispose();
                 _kvCacheV[l].Dispose();
                 _kvCacheK[l] = newK;
@@ -941,6 +982,7 @@ namespace TensorSharp.Models
             }
 
             _kvCacheCapacity = newCapacity;
+            _kvCacheHostDirty = false;
             // The KV tensors were reallocated, so any cached fused-decode / fused-verify
             // graph pins the freed device buffers -> drop them (they rebuild on the next
             // call against the new buffers).
@@ -999,6 +1041,8 @@ namespace TensorSharp.Models
                 }
             }
             _cacheSeqLen = 0;
+            _kvCacheHostDirty = false;
+            _gdnStateHostDirty = false;
             InvalidateFullDecodeState();
             InvalidateVerifyCache();
             _fdSpecSessionActive = false;
@@ -1029,6 +1073,15 @@ namespace TensorSharp.Models
 
         public override bool SupportsKVStateSnapshot => _kvCacheK != null && _kvCacheV != null;
 
+        // A byte snapshot is retained as a diagnostic/legacy capability, but it
+        // is not a viable cross-request cache for this hybrid architecture: each
+        // 256-token block repeats the complete GDN recurrent state (about 50 MiB
+        // for the 9B model), and interleaving those snapshots has historically
+        // corrupted sequence isolation. Continuous batching uses the model's
+        // device-resident per-request KV+GDN holders instead; fallback paths
+        // re-prefill cleanly.
+        public override bool SupportsCrossSequenceKvReuse => false;
+
         public override string KVStateFingerprint =>
             $"qwen35|arch={Config.Architecture}|L={Config.NumLayers}|H={Config.NumHeads}|KV={Config.NumKVHeads}|D={Config.HeadDim}|gdnK={_headKDim}|gdnV={_headVDim}|nKHead={_numKHeads}|nVHead={_numVHeads}|convKern={_convKernel}|dtype={_kvCacheDtype.ToShortString()}";
 
@@ -1057,6 +1110,12 @@ namespace TensorSharp.Models
             if (!SupportsKVStateSnapshot) return false;
             long expected = ComputeKVBlockByteSize(tokenCount);
             if (destination.Length != expected) return false;
+
+            // CopyAttentionOut / CopyGdnStateOut read raw host pointers.  A fused
+            // GGML call may have advanced only their device mirrors.
+            EnsureKvCacheHostSynchronized();
+            EnsureFusedDecodeStateHostSynchronized();
+
             int offset = 0;
             for (int l = 0; l < Config.NumLayers; l++)
             {
@@ -1088,6 +1147,8 @@ namespace TensorSharp.Models
             if (source.Length != expected) return false;
 
             EnsureCacheCapacity(destToken + tokenCount);
+            EnsureKvCacheHostSynchronized();
+            EnsureFusedDecodeStateHostSynchronized();
             int offset = 0;
             for (int l = 0; l < Config.NumLayers; l++)
             {
@@ -1117,7 +1178,30 @@ namespace TensorSharp.Models
                 InvalidateTensorDeviceCache(_kvCacheK[l]);
                 InvalidateTensorDeviceCache(_kvCacheV[l]);
             }
+            _kvCacheHostDirty = false;
+            _gdnStateHostDirty = false;
             return true;
+        }
+
+        /// <summary>
+        /// Download attention caches written through GGML's cacheable device-copy
+        /// path before any code reads or copies their host allocations.
+        /// </summary>
+        private void EnsureKvCacheHostSynchronized()
+        {
+            if (!_kvCacheHostDirty || !IsGgmlBackend || _kvCacheK == null)
+                return;
+
+            var seen = new HashSet<Storage>();
+            for (int l = 0; l < TotalLayerCount; l++)
+            {
+                if (_kvCacheK[l] != null && seen.Add(_kvCacheK[l].Storage))
+                    SyncTensorHostCache(_kvCacheK[l]);
+                if (_kvCacheV[l] != null && seen.Add(_kvCacheV[l].Storage))
+                    SyncTensorHostCache(_kvCacheV[l]);
+            }
+
+            _kvCacheHostDirty = false;
         }
 
         private static long AttentionLayerBlockBytes(Tensor cacheTensor, int tokenCount)
@@ -1671,6 +1755,8 @@ namespace TensorSharp.Models
                 }
             }
 
+            EnsureKvCacheHostSynchronized();
+            EnsureFusedDecodeStateHostSynchronized();
             hidden = RunCudaPrefillLayerLoop(hidden, seqLen, startPos);
 
             hidden.Dispose();
@@ -1747,6 +1833,8 @@ namespace TensorSharp.Models
             {
             // Per-op path runs the recurrent state on the host, so the fused
             // decode's device-resident GDN state must be re-seeded next time.
+            EnsureKvCacheHostSynchronized();
+            EnsureFusedDecodeStateHostSynchronized();
             InvalidateFullDecodeState();
             hidden = RunCudaPrefillLayerLoop(hidden, seqLen, startPos);
             }
@@ -3191,6 +3279,7 @@ namespace TensorSharp.Models
                 // Apple Silicon), but downstream GGML ops still need to know the buffer is
                 // host-fresh so any cached device mirror is reloaded.
                 InvalidateTensorDeviceCache(output);
+                _kvCacheHostDirty = true;
                 return true;
             }
             catch (Exception)
@@ -3341,12 +3430,12 @@ namespace TensorSharp.Models
                     Config.Eps, Config.RopeBase, ropeFreqScale, ropeMode);
                 _attnTicks += Stopwatch.GetTimestamp() - t0;
 
-                // Output is written through the host pointer (unified memory). Downstream
-                // GGML ops need a fresh device mirror so invalidate the cache for the residual
-                // and the KV cache slabs that we just appended into.
+                // The residual is downloaded to its host buffer, but on CUDA the
+                // appended K/V remains authoritative in the cacheable device copy.
+                // Keep those device slabs alive and lazily download them before a
+                // host snapshot/grow instead of invalidating (and losing) the write.
                 InvalidateTensorDeviceCache(residual);
-                InvalidateTensorDeviceCache(kCache);
-                InvalidateTensorDeviceCache(vCache);
+                _kvCacheHostDirty = true;
                 return true;
             }
             catch (Exception)

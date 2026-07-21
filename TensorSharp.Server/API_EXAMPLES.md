@@ -758,9 +758,12 @@ images via `imagePaths`, extracted video frames via `isVideo: true` +
 
 - **Born-digital PDF** (has a selectable text layer): the text is extracted and
   returned in `textContent`, with `renderedAsImages: false`, `pageCount`,
-  `extractedPageCount`, and the same truncation metadata as text uploads
-  (content is truncated to half the model's context length in tokens). Inline
-  it into the chat message the way the bundled UI does:
+  and `extractedPageCount`. The extracted text is returned in full; the final
+  rendered prompt is checked against the loaded model's actual context window.
+  `truncated` is always `false` for extracted text. Legacy truncation/count
+  fields remain present as nullable compatibility fields; uploads are no longer
+  tokenized just to populate them.
+  Inline it into the chat message the way the bundled UI does:
 
 ```bash
 curl -N -X POST http://localhost:5000/api/chat \
@@ -768,7 +771,8 @@ curl -N -X POST http://localhost:5000/api/chat \
   -d '{
     "messages": [{
       "role": "user",
-      "content": "[File: report.pdf]\n<textContent from the upload response>\n[End of file]\nPlease analyze the attached PDF document and summarize its content."
+      "content": "[File: report.pdf]\n<textContent from the upload response>\n[End of file]\nPlease analyze the attached PDF document and summarize its content.",
+      "textFilePaths": ["<path from the upload response>"]
     }],
     "maxTokens": 500
   }'

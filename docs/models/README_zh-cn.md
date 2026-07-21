@@ -30,6 +30,10 @@
 [Gemma 4 卡片](gemma4_zh-cn.md#已验证的-gemma-4-e4b-原生-ggml-快速路径)。
 匹配的 `mmproj` 对纯文本可选，对图像、视频或音频输入则是必需的。
 
+如果希望沿着一条连贯路线，从张量基础一直学到完整的多模态推理引擎，请阅读
+Zhongkai Fu 的 [《From Tensors to Tokens》书籍指南](../BOOK_zh-cn.md)，或
+[在 Amazon 查看平装本](https://www.amazon.com/dp/B0H9P44QZZ)。
+
 ## 实现矩阵
 
 | 架构 | 卡片 | 已验证下载（HF） | 模型类 | GGUF keys | 模态 | 思维链 | 工具调用 | 批处理 / 分页前向 | 主要加速路径 |

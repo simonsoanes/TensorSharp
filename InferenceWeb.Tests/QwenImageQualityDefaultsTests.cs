@@ -122,5 +122,30 @@ namespace InferenceWeb.Tests
             using (SetEnv("TS_QWEN_IMAGE_REF_AREA", "1"))
                 Assert.Equal(65536, QwenImagePipeline.ResolveRefArea(TensorSharp.Runtime.BackendType.GgmlCuda));
         }
+
+        // Stacking a Lightning LoRA on a base DiT that is ALREADY step-distilled produces an
+        // edit covered in speckled colour noise with the scene rearranged (reproduced here on
+        // qwen-rapid-nsfw-v9.0-Q2_K + Lightning-8steps, and identically in stable-diffusion.cpp,
+        // while the same model with no LoRA is clean). Nothing in the GGUF marks a build as
+        // distilled, so the pairing is caught by filename.
+        [Fact]
+        public void DistilledBaseMarker_FlagsAlreadyDistilledBases()
+        {
+            Assert.Equal("rapid", QwenImageDiT.DistilledBaseMarkerIn("C:/m/qwen-rapid-nsfw-v9.0-Q2_K.gguf"));
+            Assert.Equal("turbo", QwenImageDiT.DistilledBaseMarkerIn("qwen-image-TURBO.gguf"));   // case-insensitive
+            Assert.Equal("lightning", QwenImageDiT.DistilledBaseMarkerIn("/m/qwen-image-lightning-merged.gguf"));
+            Assert.Equal("step", QwenImageDiT.DistilledBaseMarkerIn("qwen-image-edit-8steps-merged.gguf"));
+        }
+
+        [Fact]
+        public void DistilledBaseMarker_LeavesOrdinaryBasesAlone()
+        {
+            // The stock base models the Lightning LoRA is actually trained for, plus a plain
+            // fine-tune: none may trip the warning, or it becomes noise users learn to ignore.
+            Assert.Null(QwenImageDiT.DistilledBaseMarkerIn("C:/Works/models/qwen-image-edit-2511-Q4_K_M.gguf"));
+            Assert.Null(QwenImageDiT.DistilledBaseMarkerIn("qwen-image-edit-2509-Q8_0.gguf"));
+            Assert.Null(QwenImageDiT.DistilledBaseMarkerIn("qwen-image-anime-finetune.gguf"));
+            Assert.Null(QwenImageDiT.DistilledBaseMarkerIn(null));
+        }
     }
 }

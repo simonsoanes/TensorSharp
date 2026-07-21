@@ -118,6 +118,7 @@ namespace TensorSharp.Models
         {
             int n = tokens.Length;
             EnsureCacheCapacity(startPos + n);
+            EnsureKvCacheHostSynchronized();
 
             Tensor x = MtpProjectInput(tokens, hRows);
 
@@ -194,6 +195,7 @@ namespace TensorSharp.Models
                 return;
             }
 
+            EnsureKvCacheHostSynchronized();
             x = AttentionBlock(x, _mtpLayerIdx, 1, pos);
 
             Tensor headNorm = _mtpHeadNormW ?? _finalNormW;
@@ -248,6 +250,7 @@ namespace TensorSharp.Models
                 return;
             }
 
+            EnsureKvCacheHostSynchronized();
             x = AttentionBlock(x, _mtpLayerIdx, tokens.Length, startPos);
             x.Dispose();
         }
@@ -297,6 +300,8 @@ namespace TensorSharp.Models
                 return;
             }
 
+            EnsureKvCacheHostSynchronized();
+            EnsureFusedDecodeStateHostSynchronized();
             for (int layer = 0; layer < Config.NumLayers; layer++)
             {
                 long tl = Stopwatch.GetTimestamp();

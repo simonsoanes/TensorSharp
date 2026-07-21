@@ -8,6 +8,7 @@
       { page: "index",    label: { en: "Home", zh: "首页" } },
       { page: "overview", label: { en: "Overview & Architecture", zh: "概览与架构" } },
       { page: "features", label: { en: "Features", zh: "功能特性" } },
+      { page: "book",     label: { en: "TensorSharp Book", zh: "TensorSharp 配套图书" } },
     ]},
     { group: { en: "Get started", zh: "快速上手" }, items: [
       { page: "getting-started", label: { en: "Getting Started", zh: "快速开始" } },
@@ -41,7 +42,7 @@
       footOpen: "open", footNav: "navigate", footClose: "close",
       onThisPage: "On this page",
       copy: "Copy", copied: "Copied!",
-      menu: "Menu", theme: "Toggle theme", search: "Search", github: "GitHub",
+      menu: "Menu", theme: "Toggle theme", search: "Search", github: "GitHub", book: "Book",
       switchLabel: "中文", switchAria: "切换到中文 (Switch to Chinese)",
       noMatches: function (q) { return "No matches for “" + q + "”."; },
     },
@@ -52,13 +53,14 @@
       footOpen: "打开", footNav: "切换", footClose: "关闭",
       onThisPage: "本页目录",
       copy: "复制", copied: "已复制！",
-      menu: "菜单", theme: "切换主题", search: "搜索", github: "GitHub",
+      menu: "菜单", theme: "切换主题", search: "搜索", github: "GitHub", book: "配套图书",
       switchLabel: "EN", switchAria: "Switch to English (切换到英文)",
       noMatches: function (q) { return "未找到 “" + q + "” 的匹配结果。"; },
     },
   };
 
   var REPO = "https://github.com/zhongkaifu/TensorSharp";
+  var BOOK = "https://www.amazon.com/dp/B0H9P44QZZ";
 
   function el(tag, attrs, html) {
     var e = document.createElement(tag);
@@ -124,6 +126,8 @@
     var trig = el("button", { class: "search-trigger", id: "search-trigger", "aria-label": S.search });
     trig.innerHTML = ICONS.search + '<span class="lbl">' + S.searchTrigger + '</span><kbd>/</kbd>';
     actions.appendChild(trig);
+    var book = el("a", { class: "book-link", href: BOOK, target: "_blank", rel: "noopener", "aria-label": S.book }, "<span aria-hidden=\"true\">📘</span> " + S.book);
+    actions.appendChild(book);
     var langBtn = el("a", { class: "icon-btn lang-btn", href: otherLangHref(), "aria-label": S.switchAria, title: S.switchAria }, S.switchLabel);
     actions.appendChild(langBtn);
     var theme = el("button", { class: "icon-btn", id: "theme-toggle", "aria-label": S.theme });
@@ -316,8 +320,8 @@
   document.addEventListener("DOMContentLoaded", function () {
     var t = "light";
     try { t = localStorage.getItem("ts-theme") || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); } catch (e) {}
-    applyTheme(t);
     buildTopbar();
+    applyTheme(t);
     buildLayout();
     buildToc();
     enhanceCode();

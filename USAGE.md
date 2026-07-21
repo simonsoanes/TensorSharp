@@ -167,7 +167,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --test-templates ~/models
 | `--image <path>` | Image file for vision inference |
 | `--video <path>` | Video file for video inference |
 | `--audio <path>` | Audio file (WAV, MP3, OGG) for audio inference |
-| `--pdf <path>` | PDF document input (one-shot mode). Born-digital PDFs have their text layer extracted and inlined into the prompt (token-budget truncated; page cap via `TS_PDF_MAX_PAGES`); scanned PDFs are rasterized to page images and require a vision model (`--mmproj` or a built-in vision encoder). `--input` text becomes the instruction over the document. |
+| `--pdf <path>` | PDF document input (one-shot mode). Born-digital PDFs have their complete text layer extracted and inlined into the prompt (page cap via `TS_PDF_MAX_PAGES`); scanned PDFs are rasterized to page images and require a vision model (`--mmproj` or a built-in vision encoder). `--input` text becomes the instruction over the document. |
 | `--mmproj <path>` | Path to the multimodal projector GGUF file |
 | `--max-tokens <N>` | Maximum tokens to generate (default: 100) |
 | `--backend <type>` | Compute backend: `cpu`, `cuda`, `mlx`, `ggml_cpu`, `ggml_metal`, `ggml_cuda`, or `ggml_vulkan` |
@@ -282,7 +282,7 @@ Uploads (queued for the next user turn, then auto-cleared after the turn):
 | `/image <path>`, `/img <path>` | Attach an image (vision-capable models only) |
 | `/audio <path>` | Attach an audio file (Gemma 4) |
 | `/video <path>`, `/vid <path>` | Attach a video; frames are extracted automatically (Gemma 4) |
-| `/text <path>`, `/file <path>`, `/txt <path>` | Inline a UTF-8 text/markdown/csv/code file into the next prompt (large files are token-budget truncated) |
+| `/text <path>`, `/file <path>`, `/txt <path>` | Inline up to the first 256 KiB of a UTF-8 text/markdown/csv/code file into the next prompt |
 | `/clearattach` | Drop any pending image/audio/video/text attachments without sending a turn |
 
 Quoted paths (single or double quotes) are accepted, so drag-and-drop from a file manager works on macOS. Multimodal commands require a multimodal projector to be loaded — pass `--mmproj` at startup or use `/mmproj <path>` from the REPL.
@@ -320,7 +320,7 @@ Open `http://localhost:5000/index.html` in your browser (`GET /` is the liveness
 - Per-tab chat sessions: each browser tab owns its own tracked conversation history; KV blocks are owned by the inference engine
 - A single hosted GGUF selected explicitly with `--model`
 - An explicit hosted multimodal projector via `--mmproj` when needed
-- Image, video, and audio uploads for multimodal inference (up to 500 MB)
+- Full text and PDF document uploads, plus image, video, and audio uploads for multimodal inference (up to 500 MB)
 - Thinking/reasoning mode toggle
 - Tool calling with function definitions
 - Streaming token generation via Server-Sent Events
@@ -378,7 +378,6 @@ server-wide defaults; the defaults only fill in fields the client omits.
 |---|---|
 | `BACKEND` | Default compute backend (`cpu`, `cuda`, `mlx`, `ggml_cpu`, `ggml_metal`, `ggml_cuda`, or `ggml_vulkan`), used when `--backend` is not passed (default: `ggml_metal` on macOS, `ggml_cpu` elsewhere) |
 | `MAX_TOKENS` | Default maximum generation length when neither `--max-tokens` nor a request-level limit is set (default: `20000`) |
-| `MAX_TEXT_FILE_CHARS` | Character cap used to truncate plain-text uploads when no tokenizer is available (default: `8000`) |
 | `VIDEO_SAMPLE_FPS` | Frames sampled per second of video for video prompts; time-based extraction (default: `1`) |
 | `VIDEO_MAX_FRAMES` | Optional upper bound on extracted video frames (evenly down-sampled); unset/`0` means no cap (default: no cap) |
 | `PORT` / `ASPNETCORE_URLS` | Currently overridden by the fixed `http://0.0.0.0:5000` listener in `Program.cs`; Docker Space images rewrite that constant with `APP_PORT` at build time. |
@@ -545,7 +544,7 @@ These fill in fields the request body omits; per-request JSON always wins, CLI f
 | Feature | Default | Env vars |
 |---|---|---|
 | ASP.NET Core listener | `http://0.0.0.0:5000` | Fixed in `Program.cs`; Docker Space images rewrite it with the `APP_PORT` build arg |
-| Plain-text upload character cap (when no tokenizer available) | 8000 chars | `MAX_TEXT_FILE_CHARS` |
+| Text and born-digital PDF uploads | Full extracted content; the final rendered prompt must fit the loaded model context | — |
 | Video-frame extraction | 1 fps (time-based, no cap) | `VIDEO_SAMPLE_FPS`, `VIDEO_MAX_FRAMES` |
 | DiffusionGemma Web UI denoising | 48 steps, max batch 2 | `DIFFUSION_STEPS`, `DIFFUSION_MAX_BATCH` |
 
@@ -572,35 +571,34 @@ These are read by `build-linux.sh` / `build-windows.ps1` / the auto-build during
 ## Server Logging
 
 The server emits one structured Information-level entry at the start and end of
-every chat / generate turn, so a single grep over the log file reproduces the
-full request-response audit trail without replaying any traffic.
+every chat / generate turn, so a single grep over the log file provides a compact
+request-response audit trail without replaying any traffic.
 
 | Event id | Emitted on | Carries |
 |---|---|---|
-| `ChatStarted` (1500) | `chat.start`, `generate.start`, plus per-protocol request banners | sampling config, message + attachment counts, `userInput=` (full latest user message), `fullInput=` (JSON-encoded array of EVERY message in the request: system prompts + all prior user/assistant turns + the new user message, with attachment counts), or the full prompt for `/api/generate` |
+| `ChatStarted` (1500) | `chat.start`, `generate.start`, plus per-protocol request banners | sampling config, message + attachment counts, `userInput=` (bounded latest-user preview), and `fullInput=` (JSON array of every message with attachment paths, original character counts, and bodies capped at 512 characters). Inlined uploaded documents are replaced by an omission marker while retaining the user's trailing instruction. `/api/generate` likewise logs a bounded prompt preview. |
 | `ChatCompleted` (1502) | `chat.complete`, `generate.complete` | token counts, KV cache reuse (`kvReused`, `kvReusePercent`), TTFT, elapsed, throughput, finish reason, full raw assistant output (reasoning + result) |
 | `ChatAborted` (1503) | client disconnected mid-stream | partial output, KV reuse fraction at the time of abort |
 | `KvCacheReusePlan` (1510) | per-prefix-reuse decision | `Debug`-level fine-grained breakdown (exact match / partial / full reset) |
 | `HttpRequestStarted/Completed` (1100/1101) | every HTTP request | method, path, remote IP, status, duration; `/api/queue/status` is demoted to `Debug` so high-frequency UI polling does not drown out the per-turn entries |
 
 The raw assistant output captures `<think>...</think>`, `<|channel|>analysis`,
-and any other inline framing the model emits, so the log line for a single turn
-contains both reasoning and the user-visible result. Combined with the
-`fullInput=` field on `chat.start`, every turn is fully reproducible from the
-log file alone (request inputs + raw model output). Long uploads or long
-reasoning traces can produce multi-kilobyte log lines; raise the log level
-(`TENSORSHARP_LOG_LEVEL=Warning`) to suppress them while still keeping the start
-banner and error logs.
+and any other inline framing the model emits, so the completion entry contains
+both reasoning and the user-visible result. Input bodies are deliberately bounded:
+losslessly uploaded documents are not duplicated into logs, avoiding large memory/I/O
+spikes and accidental document disclosure. The upload manifest and `contentChars`
+retain useful audit metadata; capture requests separately when byte-for-byte replay is
+required. Set `TENSORSHARP_LOG_LEVEL=Warning` to suppress per-turn Information logs.
 
 Sample `fullInput` payload (formatted for readability; it is emitted as a
 single line in the actual log):
 
 ```json
 [
-  {"role":"system","content":"You are a helpful assistant."},
-  {"role":"user","content":"What is the tallest mountain?"},
-  {"role":"assistant","content":"Mount Everest."},
-  {"role":"user","content":"How tall is it?","images":1}
+  {"role":"system","content":"You are a helpful assistant.","contentChars":28},
+  {"role":"user","content":"What is the tallest mountain?","contentChars":29},
+  {"role":"assistant","content":"Mount Everest.","contentChars":14},
+  {"role":"user","content":"How tall is it?","contentChars":15,"images":["/uploads/mountain.jpg"]}
 ]
 ```
 

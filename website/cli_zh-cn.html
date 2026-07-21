@@ -167,7 +167,7 @@ dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
     <tbody>
       <tr><td><code>--model &lt;path&gt;</code></td><td>GGUF 模型文件路径（必需）。</td></tr>
       <tr><td><code>--input &lt;path&gt;</code></td><td>包含用户提示词的文本文件。单次文本提示词只能来自文件；<code>--prompt</code> 保留用于 Qwen-Image-Edit 的编辑指令。</td></tr>
-      <tr><td><code>--pdf &lt;path&gt;</code></td><td>单次模式的 PDF 文档输入。含文本的 PDF 会提取文本并按 token 预算截断；扫描件/纯图像 PDF 会光栅化为页面图像，并需要视觉模型 + <code>--mmproj</code>。<code>--input</code> 变为针对文档的问题；<code>TS_PDF_MAX_PAGES</code> 限制读取页数（默认：全部）。</td></tr>
+      <tr><td><code>--pdf &lt;path&gt;</code></td><td>单次模式的 PDF 文档输入。含文本的 PDF 会完整提取并内联文本；扫描件/纯图像 PDF 会光栅化为页面图像，并需要视觉模型 + <code>--mmproj</code>。<code>--input</code> 变为针对文档的问题；<code>TS_PDF_MAX_PAGES</code> 限制读取页数（默认：全部）。</td></tr>
       <tr><td><code>--input-jsonl &lt;path&gt;</code></td><td>含批量请求的 JSONL 文件（每行一个 JSON）。</td></tr>
       <tr><td><code>--multi-turn-jsonl &lt;path&gt;</code></td><td>用于带 KV 缓存复用的多轮对话模拟的 JSONL 文件。</td></tr>
       <tr><td><code>--output &lt;path&gt;</code></td><td>将生成文本写入此文件。</td></tr>

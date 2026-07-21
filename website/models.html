@@ -17,6 +17,7 @@
   <div class="breadcrumb"><a href="index.html">Home</a> › Supported Models</div>
   <h1>Supported Models</h1>
   <p class="lede">TensorSharp loads models in GGUF format and auto-detects the architecture from the file's <code>general.architecture</code> metadata. Pick a quantization that fits your hardware (<code>Q4_K_M</code> for low memory, <code>Q8_0</code> for higher quality).</p>
+  <div class="callout note"><div class="ic">📘</div><p><strong>Gemma 4 E4B is the example model in <em>From Tensors to Tokens</em>.</strong> Read the book for a guided build from tensor fundamentals through multimodal inference; use this page for current downloads and capability details. <a href="book.html">Explore the book →</a></p></div>
 
   <h2 id="table">Supported architectures</h2>
   <div class="table-scroll">
@@ -174,7 +175,7 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/qwen-image-e
     </tbody>
   </table>
   </div>
-  <p>Send images/audio/video via the <a href="cli.html#examples">CLI</a> (<code>--image</code>, <code>--video</code>, <code>--audio</code>), the <a href="server.html#webui">Web UI</a> uploads, or the <a href="http-api.html">HTTP API</a> (base64 <code>images</code> array for Ollama, <code>image_url</code> data URI for OpenAI). <strong>PDF documents</strong> are supported too — born-digital PDFs have their text layer extracted and inlined into the prompt (token-budget truncated); scanned PDFs fall back to page images for vision-capable models — via the CLI's <code>--pdf</code> flag (one-shot mode) or the Web UI upload (<code>TS_PDF_MAX_PAGES</code> caps the page count; default: all pages).</p>
+  <p>Send images/audio/video via the <a href="cli.html#examples">CLI</a> (<code>--image</code>, <code>--video</code>, <code>--audio</code>), the <a href="server.html#webui">Web UI</a> uploads, or the <a href="http-api.html">HTTP API</a> (base64 <code>images</code> array for Ollama, <code>image_url</code> data URI for OpenAI). <strong>PDF documents</strong> are supported too — born-digital PDFs have their complete text layer extracted and inlined into the prompt; scanned PDFs fall back to page images for vision-capable models — via the CLI's <code>--pdf</code> flag (one-shot mode) or the Web UI upload (<code>TS_PDF_MAX_PAGES</code> caps the page count; default: all pages).</p>
 
   <h2 id="imageedit">Image editing (Qwen-Image-Edit)</h2>
   <p>Qwen-Image-Edit takes a <strong>prompt + an input image</strong> and returns an edited image — a different output modality from the text LLMs above. The loaded <code>qwen_image</code> GGUF is only the MMDiT (multimodal diffusion transformer); TensorSharp resolves two companion GGUFs alongside it:</p>

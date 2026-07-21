@@ -275,12 +275,8 @@ namespace TensorSharp.Server.ProtocolAdapters
 
             if (mediaType == "text")
             {
-                string textContent = await File.ReadAllTextAsync(savePath);
-                var prepared = TextUploadHelper.PrepareTextContent(
-                    textContent,
-                    _svc.Model?.Tokenizer,
-                    _svc.Model?.MaxContextLength ?? 0,
-                    _options.MaxTextFileChars);
+                string textContent = TextUploadHelper.PreserveFullText(
+                    await File.ReadAllTextAsync(savePath));
 
                 return Results.Json(new
                 {
@@ -289,13 +285,13 @@ namespace TensorSharp.Server.ProtocolAdapters
                     url = uploadUrl,
                     mediaType,
                     fileName = file.FileName,
-                    textContent = prepared.TextContent,
-                    truncated = prepared.Truncated,
-                    truncateLimit = prepared.TruncateLimit,
-                    truncateUnit = prepared.TruncateUnit,
-                    modelContextLimit = prepared.ModelContextLimit,
-                    originalTokenCount = prepared.OriginalTokenCount,
-                    returnedTokenCount = prepared.ReturnedTokenCount,
+                    textContent,
+                    truncated = false,
+                    truncateLimit = (int?)null,
+                    truncateUnit = (string)null,
+                    modelContextLimit = _svc.Model?.MaxContextLength,
+                    originalTokenCount = (int?)null,
+                    returnedTokenCount = (int?)null,
                 });
             }
 
@@ -323,15 +319,21 @@ namespace TensorSharp.Server.ProtocolAdapters
 
                 if (!pdf.LooksTextless)
                 {
-                    var prepared = TextUploadHelper.PrepareTextContent(
-                        pdf.Text,
-                        _svc.Model?.Tokenizer,
-                        _svc.Model?.MaxContextLength ?? 0,
-                        _options.MaxTextFileChars);
+                    string textContent = TextUploadHelper.PreserveFullText(pdf.Text);
+                    bool allPagesExtracted = pdf.ExtractedPageCount == pdf.PageCount;
 
-                    uploadLogger.LogInformation(LogEventIds.UploadReceived,
-                        "PDF text extracted: name={FileName} pages={Pages} extractedPages={ExtractedPages} chars={Chars} truncated={Truncated}",
-                        file.FileName, pdf.PageCount, pdf.ExtractedPageCount, prepared.TextContent?.Length ?? 0, prepared.Truncated);
+                    if (allPagesExtracted)
+                    {
+                        uploadLogger.LogInformation(LogEventIds.UploadReceived,
+                            "PDF text extracted without upload truncation: name={FileName} pages={Pages} extractedPages={ExtractedPages} chars={Chars}",
+                            file.FileName, pdf.PageCount, pdf.ExtractedPageCount, textContent.Length);
+                    }
+                    else
+                    {
+                        uploadLogger.LogWarning(LogEventIds.UploadReceived,
+                            "PDF text extraction did not read every page: name={FileName} pages={Pages} extractedPages={ExtractedPages} chars={Chars}",
+                            file.FileName, pdf.PageCount, pdf.ExtractedPageCount, textContent.Length);
+                    }
 
                     return Results.Json(new
                     {
@@ -343,13 +345,17 @@ namespace TensorSharp.Server.ProtocolAdapters
                         renderedAsImages = false,
                         pageCount = pdf.PageCount,
                         extractedPageCount = pdf.ExtractedPageCount,
-                        textContent = prepared.TextContent,
-                        truncated = prepared.Truncated,
-                        truncateLimit = prepared.TruncateLimit,
-                        truncateUnit = prepared.TruncateUnit,
-                        modelContextLimit = prepared.ModelContextLimit,
-                        originalTokenCount = prepared.OriginalTokenCount,
-                        returnedTokenCount = prepared.ReturnedTokenCount,
+                        textContent,
+                        truncated = false,
+                        complete = allPagesExtracted,
+                        warning = allPagesExtracted
+                            ? null
+                            : $"Only {pdf.ExtractedPageCount} of {pdf.PageCount} PDF pages could be read. The extracted pages were not token-truncated.",
+                        truncateLimit = (int?)null,
+                        truncateUnit = (string)null,
+                        modelContextLimit = _svc.Model?.MaxContextLength,
+                        originalTokenCount = (int?)null,
+                        returnedTokenCount = (int?)null,
                     });
                 }
 
@@ -412,10 +418,22 @@ namespace TensorSharp.Server.ProtocolAdapters
                 var framePaths = pdfImages.ImagePaths.ToList();
                 var frameNames = framePaths.Select(Path.GetFileName).ToList();
                 var frameUrls = frameNames.Select(BuildUploadUrl).ToList();
+                bool allPagesRendered = pdfImages.ExtractedPageCount == pdfImages.PageCount;
+                string incompleteWarning = BuildIncompletePdfImageWarning(
+                    pdfImages.ExtractedPageCount, pdfImages.PageCount);
 
-                uploadLogger.LogInformation(LogEventIds.UploadReceived,
-                    "PDF rendered as page images: name={FileName} pages={Pages} images={Images}",
-                    file.FileName, pdf.PageCount, framePaths.Count);
+                if (allPagesRendered)
+                {
+                    uploadLogger.LogInformation(LogEventIds.UploadReceived,
+                        "PDF rendered as page images: name={FileName} pages={Pages} images={Images} complete=true",
+                        file.FileName, pdf.PageCount, framePaths.Count);
+                }
+                else
+                {
+                    uploadLogger.LogWarning(LogEventIds.UploadReceived,
+                        "PDF page-image extraction was incomplete: name={FileName} pages={Pages} images={Images}",
+                        file.FileName, pdf.PageCount, framePaths.Count);
+                }
 
                 return Results.Json(new
                 {
@@ -427,6 +445,8 @@ namespace TensorSharp.Server.ProtocolAdapters
                     renderedAsImages = true,
                     pageCount = pdf.PageCount,
                     extractedPageCount = pdfImages.ExtractedPageCount,
+                    complete = allPagesRendered,
+                    warning = incompleteWarning,
                     frames = frameNames,
                     frameUrls,
                     framePaths,
@@ -755,11 +775,20 @@ namespace TensorSharp.Server.ProtocolAdapters
             return "/uploads/" + Uri.EscapeDataString(fileName);
         }
 
+        internal static string BuildIncompletePdfImageWarning(int extractedPages, int totalPages)
+        {
+            if (totalPages <= 0 || extractedPages >= totalPages)
+                return null;
+
+            return $"Only {extractedPages} of {totalPages} PDF pages could be extracted as images. " +
+                "The missing pages will not be sent to the model. If TS_PDF_MAX_PAGES is set, " +
+                "unset or increase it; otherwise repair or convert the PDF.";
+        }
+
         /// <summary>
         /// Optional cap on the number of PDF pages read during upload, from the
         /// <c>TS_PDF_MAX_PAGES</c> environment variable. Returns <c>0</c> (all pages)
-        /// when unset or invalid; the extracted text is separately truncated to the
-        /// model's token budget before it reaches the model.
+        /// when unset or invalid. Extracted text is otherwise preserved in full.
         /// </summary>
         private static int ResolvePdfMaxPages()
         {

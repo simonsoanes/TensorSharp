@@ -396,31 +396,18 @@ namespace TensorSharp.Models
             if (!_fdStateResident || _fdConvScratch == IntPtr.Zero || _fdGdnSlot == null)
                 return; // host _convState / _deltaStateTensor are already current
 
-            int convDim = _convKernel - 1;
-            int qkvDim = _headKDim * _numKHeads * 2 + _headVDim * _numVHeads;
-            int gdnCount = 0;
-            for (int l = 0; l < Config.NumLayers; l++) if (_isRecurrent[l]) gdnCount++;
+            EnsureFusedDecodeStateHostSynchronized();
 
-            // conv state: download the cacheable device buffer -> _fdConvScratch (ggml
-            // [time, channel]) then un-rotate into each layer's host ring (_convState).
-            GgmlBasicOps.SyncHostBuffer(_fdConvScratch, (long)gdnCount * convDim * qkvDim * sizeof(float));
-            float* convBase = (float*)_fdConvScratch;
             for (int l = 0; l < Config.NumLayers; l++)
             {
                 if (!_isRecurrent[l]) continue;
-                int gi = _fdGdnSlot[l];
-                float* conv = convBase + (long)gi * convDim * qkvDim;
-                float[] ring = _convState[l];
-                for (int t = 0; t < convDim; t++)
-                    for (int ch = 0; ch < qkvDim; ch++)
-                        ring[t * qkvDim + ch] = conv[ch * convDim + t];
-                _convStateWriteIdx[l] = 0;
-                // delta state: drain the device buffer back to host + invalidate the
-                // device cache so the subsequent Ops.Copy re-reads the current state.
-                GgmlBasicOps.SyncHostBuffer((IntPtr)GetFloatPtr(_deltaStateTensor[l]), _deltaStateTensor[l].Storage.ByteLength);
+                // Migration switches to the paged host source of truth.  The
+                // shared helper already downloaded and converted the state; now
+                // evict the per-sequence device mirror before copying it.
                 InvalidateTensorDeviceCache(_deltaStateTensor[l]);
             }
             _fdStateResident = false;
+            _gdnStateHostDirty = false;
         }
 
         private void EnsureBfdScratch(ref IntPtr buf, ref long curBytes, long needBytes)

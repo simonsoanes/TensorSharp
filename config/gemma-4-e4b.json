@@ -23,6 +23,6 @@
 
   // MTP speculative decoding (server only): Gemma-4's draft head ships as its
   // own GGUF. Lossless — the verify step guarantees identical output.
-  "mtp-spec": true,
+  "mtp-spec": false,
   "mtp-draft-model": "${modelRoot}/gemma-4-E4B-it-assistant.Q8_0.gguf"
 }

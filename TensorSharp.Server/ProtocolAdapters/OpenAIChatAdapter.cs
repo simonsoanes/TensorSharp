@@ -106,7 +106,8 @@ namespace TensorSharp.Server.ProtocolAdapters
             var openaiTools = ToolFunctionParser.ParseOpenAI(body);
             bool openaiThink = body.TryGetProperty("think", out var oaiThinkProp) && oaiThinkProp.GetBoolean();
 
-            string lastOpenAiUserContent = LoggingExtensions.SanitizeForLogFull(messages.LastOrDefault(m => m.Role == "user")?.Content ?? string.Empty);
+            string lastOpenAiUserContent = LoggingExtensions.SanitizeForLog(
+                messages.LastOrDefault(m => m.Role == "user")?.Content ?? string.Empty, 512);
             openaiLogger.LogInformation(LogEventIds.ChatStarted,
                 "/v1/chat/completions request: id={ChatcmplId} model={Model} stream={Stream} maxTokens={MaxTokens} messages={Messages} tools={Tools} thinking={Thinking} userInput=\"{LastUser}\"",
                 requestId, modelName, stream, maxTokens, messages.Count, openaiTools?.Count ?? 0, openaiThink, lastOpenAiUserContent);

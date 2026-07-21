@@ -82,12 +82,11 @@ namespace TensorSharp.Models.QwenImage
             finally
             {
                 // Hand back ALL device residency at request end (DiT weights + LoRA +
-                // captured graphs + reuse gallocr + VAE uploads, ~10 GB on CUDA). The
-                // captured DiT graph cannot survive into the next request anyway — the
-                // next FreeEncoders' global cache clear resets it — but if it lingers
-                // here, the next request's text-encoder upload + compute run against
-                // ~10 GB of dead residency and spill into shared memory (measured
-                // te.llm 1.1s -> 8.3s on a 16 GB card). Runs in a finally because a
+                // captured graphs + reuse gallocr + VAE uploads, ~10 GB on CUDA). This
+                // frees VRAM only — every model OBJECT stays loaded for the next request.
+                // It has to happen: if ~10 GB of dead residency lingers, the next
+                // request's text-encoder upload + compute spill into shared memory
+                // (measured te.llm 1.1s -> 8.3s on a 16 GB card). Runs in a finally because a
                 // cancelled stream (client disconnect throws OperationCanceledException
                 // out of OnStep mid-denoise) or a decode failure must not strand that
                 // residency either — both native frees are idempotent no-ops when
@@ -265,16 +264,17 @@ namespace TensorSharp.Models.QwenImage
             // ~3.6 GB (Qwen2.5-VL-7B ~2.3 GB + mmproj ~1.3 GB) that is dead weight through
             // the entire denoise loop — leaving it resident pushes the DiT (7 GB) + its
             // O(n^2) attention scratch past 16 GB, spilling into shared VRAM (slow) and
-            // then OOM at high resolution. Free it now; the lazy properties reload it on
-            // the next Edit. Keep the VAE (small, needed again for the final decode).
-            FreeEncoders();
+            // then OOM at high resolution. Hand that VRAM back now, but KEEP the loaded
+            // encoders (see ReleaseEncoderResidency) so the next edit re-uploads from RAM
+            // instead of re-reading the files. Keep the VAE (small, needed again to decode).
+            ReleaseEncoderResidency();
 
             // CPU offload: cap the resident device-copy set for the denoise. New weight
             // uploads past the budget are DENIED residency and stream through the per-graph
             // upload path instead (sd.cpp --offload-to-cpu semantics: keep in VRAM what fits
             // after the activations are budgeted, stream the rest from RAM every forward).
-            // Set AFTER FreeEncoders so the text-encoder pass ran at full speed and its
-            // residency is already cleared; the Edit finally lifts the cap again.
+            // Set AFTER ReleaseEncoderResidency so the text-encoder pass ran at full speed
+            // and its residency is already cleared; the Edit finally lifts the cap again.
             if (Dit.OffloadCpu)
             {
                 int refTokens = 0;
@@ -370,6 +370,18 @@ namespace TensorSharp.Models.QwenImage
                         stepCache.AfterCompute(step, latents, v, null);
                     }
                 }
+                // A non-finite velocity makes every later step NaN and the VAE decode then
+                // emits a SOLID BLACK image with no other symptom. Catch it at the source
+                // (one pass over ~seq*64 floats, negligible beside a multi-second step) and
+                // say what actually happened instead of handing back a black PNG.
+                if (!AllFinite(v))
+                    throw new InvalidOperationException(
+                        $"Qwen-Image-Edit: the DiT produced a non-finite velocity at denoise step {step + 1}/{sched.Steps}. " +
+                        "Every later step stays NaN and the VAE would decode a SOLID BLACK image, so this fails here " +
+                        "instead. To narrow it down: TS_QWEN_DIT_NATIVE=0 runs the managed reference forward (if that is " +
+                        "finite, the defect is in a native kernel, not the weights), TS_QWEN_DIT_FLASH=0 drops the " +
+                        "flash-attention path, and TS_QWEN_DIT_FLASH_KV_SCALE raises the attention K/V F16 guard scale " +
+                        "(default 128) if this model's activations are overflowing even that.");
                 sched.Step(latents, v, step);
                 Console.Write($"\r  denoise step {step + 1}/{sched.Steps}   ");
 
@@ -535,6 +547,14 @@ namespace TensorSharp.Models.QwenImage
             }
             for (; k < counts.Length; k++) starts[k] = -1;
             return outp.ToArray();
+        }
+
+        private static bool AllFinite(float[] a)
+        {
+            if (a == null) return true;
+            foreach (float f in a)
+                if (float.IsNaN(f) || float.IsInfinity(f)) return false;
+            return true;
         }
 
         // true-CFG over packed velocity rows [seq, 64]
@@ -780,12 +800,28 @@ namespace TensorSharp.Models.QwenImage
             return Math.Max(maskFloor, free - activations - headroom);
         }
 
-        // Release the text + vision encoders (reclaim their CUDA VRAM mid-request); the
-        // lazy Te/Vision properties re-create them on demand for the next request.
-        private void FreeEncoders()
+        /// <summary>
+        /// Hand back the text + vision encoders' VRAM for the denoise, WITHOUT unloading them.
+        ///
+        /// These used to be Disposed here, which reclaimed the same VRAM but also threw away the
+        /// GGUF mmap, the parsed weight tables and the tokenizer — so every subsequent edit in a
+        /// long-lived server re-read ~5.3 GB of encoder files from disk ("Loading model
+        /// weights..." once per request, ~1.6 s) to rebuild state that had not changed. Worse,
+        /// ModelBase.Dispose ends in a process-global ClearHostBufferCache, so disposing the text
+        /// encoder mid-request also evicted the DiT's freshly uploaded weights and reset its
+        /// captured graph.
+        ///
+        /// Releasing residency per model keeps the denoise's VRAM budget exactly as it was (the
+        /// encoders are ~3.6 GB of dead weight across the denoise on CUDA, and leaving them
+        /// resident is what pushed a 16 GB card into shared-memory spill) while making the next
+        /// request a pure re-upload from pages already in RAM.
+        /// </summary>
+        private void ReleaseEncoderResidency()
         {
-            _te?.Dispose(); _te = null;
-            _vision?.Dispose(); _vision = null;
+            if (_model.Backend is not BackendType.GgmlCuda)
+                return;   // unified/host-memory backends have nothing to hand back
+            _te?.ReleaseGgmlDeviceResidency();
+            _vision?.ReleaseGgmlDeviceResidency();
         }
 
         public void Dispose()

@@ -172,6 +172,21 @@ public class ExecutionPlannerTests
     }
 
     [Fact]
+    public void FusedCapableSoloOwnershipSwap_UsesPerRequestHolder()
+    {
+        var caps = BatchedCaps() with
+        {
+            SupportsPerSequenceFusedForward = true,
+            SupportsCrossSequenceKvReuse = false,
+        };
+        var features = Seqs(1) with { SoloRequiresOwnershipSwap = true };
+
+        var plan = ExecutionPlanner.PlanStep(caps, ExecutionOptions.Default, PlainConfig, features);
+
+        Assert.Equal(ExecutionPathKind.PerSequenceFused, plan.Selected);
+    }
+
+    [Fact]
     public void FusedCapableModel_NeverFusedSolo_KeepsN1FastPath()
     {
         var caps = BatchedCaps() with { SupportsPerSequenceFusedForward = true };
