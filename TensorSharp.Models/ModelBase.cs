@@ -2311,6 +2311,7 @@ namespace TensorSharp.Models
 
             // Shard quantized weights.
             var quantToRemove = new List<string>();
+            var colParallelOwners = new List<QuantizedWeight>();
             foreach (var kv in _quantWeights)
             {
                 string name = kv.Key;
@@ -2331,10 +2332,15 @@ namespace TensorSharp.Models
                     for (int lr = 0; lr < tp; lr++)
                     {
                         int globalRank = rankOffset + lr;
-                        IntPtr shardPtr = IntPtr.Add(qw.Data, (int)(globalRank * bytesPerShard));
+                        IntPtr shardPtr = new IntPtr((long)qw.Data + globalRank * bytesPerShard);
                         shards[lr] = QuantizedWeight.CreateExternalView(
                             shardPtr, bytesPerShard, qw.GgmlType, qw.Ne0, rowsPerShard, qw);
                     }
+
+                    // Keep the original owner alive: column-parallel shards
+                    // are external views into its buffer. Disposing it here
+                    // would leave the shards with dangling pointers.
+                    colParallelOwners.Add(qw);
                 }
                 else
                 {
@@ -2378,9 +2384,14 @@ namespace TensorSharp.Models
             }
 
             // Remove original unsharded quantized weights that have been sharded.
+            // Column-parallel owners are kept alive because their shards are
+            // external views into the original buffer; only row-parallel
+            // originals (whose shards own independent copies) are disposed.
             foreach (var name in quantToRemove)
             {
-                _quantWeights[name].Dispose();
+                var qw = _quantWeights[name];
+                if (!colParallelOwners.Contains(qw))
+                    qw.Dispose();
                 _quantWeights.Remove(name);
             }
 
@@ -2649,7 +2660,35 @@ namespace TensorSharp.Models
             }
 
             _cudaQuantWeightsPrepared = true;
-            _gguf?.Dispose();
+
+            // Only dispose the GGUF file when no external host views remain
+            // (column-parallel shards may still reference mmap'd data).
+            bool anyHostViewsRemain = false;
+            foreach (var kv in _tpQuantWeights)
+            {
+                foreach (var qw in kv.Value)
+                {
+                    if (qw.HasExternalHostView && qw.HasHostData)
+                    {
+                        anyHostViewsRemain = true;
+                        break;
+                    }
+                }
+                if (anyHostViewsRemain) break;
+            }
+            if (!anyHostViewsRemain)
+            {
+                foreach (QuantizedWeight qw in _quantWeights.Values)
+                {
+                    if (qw.HasExternalHostView && qw.HasHostData)
+                    {
+                        anyHostViewsRemain = true;
+                        break;
+                    }
+                }
+            }
+            if (!anyHostViewsRemain)
+                _gguf?.Dispose();
 
             if (preloadedCount > 0)
                 Console.WriteLine($"  TP CUDA resident quantized weights: {preloadedBytes / 1024 / 1024} MB across {preloadedCount} shards (host copies released)");

@@ -80,15 +80,35 @@ namespace TensorSharp.Distributed
                     client.Connect(endpoints[r]);
                     _peers[r] = client;
                     _streams[r] = client.GetStream();
+
+                    // Handshake: tell the remote peer our rank so it can
+                    // map this connection to the correct slot.
+                    byte[] rankBytes = new byte[4];
+                    BinaryPrimitives.WriteInt32LittleEndian(rankBytes, rank);
+                    _streams[r].Write(rankBytes, 0, 4);
+                    _streams[r].Flush();
                 }
 
                 // Accept inbound connections from lower-ranked peers.
+                // AcceptTcpClient() does not guarantee rank order, so each
+                // inbound connection advertises its rank in a 4-byte header.
                 for (int r = 0; r < rank; r++)
                 {
                     var client = _listener.AcceptTcpClient();
                     client.NoDelay = true;
-                    _peers[r] = client;
-                    _streams[r] = client.GetStream();
+                    var stream = client.GetStream();
+
+                    byte[] rankBytes = ReadExact(stream, 4);
+                    int remoteRank = BinaryPrimitives.ReadInt32LittleEndian(rankBytes);
+                    if (remoteRank < 0 || remoteRank >= _worldSize || remoteRank == rank)
+                        throw new InvalidOperationException(
+                            $"Received invalid rank {remoteRank} during handshake (this node is rank {rank}).");
+                    if (_peers[remoteRank] != null)
+                        throw new InvalidOperationException(
+                            $"Duplicate inbound connection from rank {remoteRank}.");
+
+                    _peers[remoteRank] = client;
+                    _streams[remoteRank] = stream;
                 }
             }
             catch
@@ -154,7 +174,7 @@ namespace TensorSharp.Distributed
                         $"Expected AllReduceResult from rank 0, got message type 0x{msgType:X2}.");
 
                 fixed (float* bufPtr = buffer)
-                    System.Runtime.InteropServices.Marshal.Copy(payload, 0, (IntPtr)bufPtr, buffer.Length);
+                    System.Runtime.InteropServices.Marshal.Copy(payload, 0, (IntPtr)bufPtr, byteCount);
             }
 
             // Barrier so all nodes have the result before any proceeds.
@@ -188,7 +208,7 @@ namespace TensorSharp.Distributed
                         $"Expected Broadcast from rank {rootRank}, got message type 0x{msgType:X2}.");
 
                 fixed (float* bufPtr = buffer)
-                    System.Runtime.InteropServices.Marshal.Copy(payload, 0, (IntPtr)bufPtr, buffer.Length);
+                    System.Runtime.InteropServices.Marshal.Copy(payload, 0, (IntPtr)bufPtr, byteCount);
             }
 
             Barrier();

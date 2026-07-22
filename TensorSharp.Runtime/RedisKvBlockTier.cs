@@ -91,8 +91,8 @@ namespace TensorSharp.Runtime
                 return false;
             }
 
-            payload = new byte[payloadLength];
-            Array.Copy(raw, HeaderSize, payload, 0, payloadLength);
+            payload = new byte[(int)payloadLength];
+            Array.Copy(raw, HeaderSize, payload, 0, (int)payloadLength);
             return true;
         }
 

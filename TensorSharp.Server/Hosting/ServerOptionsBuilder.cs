@@ -368,7 +368,9 @@ namespace TensorSharp.Server.Hosting
         /// <c>TS_KV_CACHE_REDIS_URL</c> and
         /// <c>TS_RESPONSES_STORE_REDIS_URL</c> so a single flag enables Redis
         /// for both the paged KV cache tier and the Responses API store.
-        /// Individual env vars still override for split configurations.
+        /// If either env var is already set, it is left untouched so that
+        /// split configurations (different Redis instances per subsystem)
+        /// are preserved.
         /// Returns true when the flag was present.
         /// </summary>
         public static bool ApplyRedisCliFlags(string[] args)
@@ -380,8 +382,10 @@ namespace TensorSharp.Server.Hosting
             {
                 if (TryReadOption(args, ref i, "--redis-url", out string redisUrl))
                 {
-                    Environment.SetEnvironmentVariable("TS_KV_CACHE_REDIS_URL", redisUrl);
-                    Environment.SetEnvironmentVariable("TS_RESPONSES_STORE_REDIS_URL", redisUrl);
+                    if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("TS_KV_CACHE_REDIS_URL")))
+                        Environment.SetEnvironmentVariable("TS_KV_CACHE_REDIS_URL", redisUrl);
+                    if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("TS_RESPONSES_STORE_REDIS_URL")))
+                        Environment.SetEnvironmentVariable("TS_RESPONSES_STORE_REDIS_URL", redisUrl);
                     return true;
                 }
             }

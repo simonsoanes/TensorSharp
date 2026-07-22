@@ -18,9 +18,10 @@ namespace TensorSharp.Runtime.Redis
     /// <summary>
     /// <see cref="IRedisKeyValueStore"/> backed by a StackExchange.Redis
     /// <see cref="ConnectionMultiplexer"/>. The connection is established
-    /// lazily on first use and reconnects automatically (the multiplexer's
-    /// default behaviour). All operations are synchronous from the caller's
-    /// perspective; the multiplexer pipelines them internally.
+    /// eagerly in the constructor and reconnects automatically (the
+    /// multiplexer's default behaviour). All operations are synchronous
+    /// from the caller's perspective; the multiplexer pipelines them
+    /// internally.
     /// </summary>
     public sealed class RedisConnection : IRedisKeyValueStore
     {
