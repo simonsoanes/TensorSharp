@@ -1,5 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
-// https://github.com/zhongkaifu/TensorSharp
+/// https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
 //
