@@ -345,8 +345,47 @@ namespace TensorSharp.Server.Hosting
                     changed = true;
                     continue;
                 }
+                if (TryReadOption(args, ref i, "--paged-kv-redis-url", out string redisUrlOpt))
+                {
+                    Environment.SetEnvironmentVariable("TS_KV_CACHE_REDIS_URL", redisUrlOpt);
+                    changed = true;
+                    continue;
+                }
+                if (TryReadOption(args, ref i, "--paged-kv-redis-ttl", out string redisTtlOpt))
+                {
+                    if (!int.TryParse(redisTtlOpt, NumberStyles.Integer, CultureInfo.InvariantCulture, out int redisTtl) || redisTtl < 0)
+                        throw new ArgumentException($"Invalid value for --paged-kv-redis-ttl: '{redisTtlOpt}'. Expected minutes (0 = no TTL).");
+                    Environment.SetEnvironmentVariable("TS_KV_CACHE_REDIS_TTL_MINUTES", redisTtl.ToString(CultureInfo.InvariantCulture));
+                    changed = true;
+                    continue;
+                }
             }
             return changed;
+        }
+
+        /// <summary>
+        /// Translate <c>--redis-url &lt;url&gt;</c> into both
+        /// <c>TS_KV_CACHE_REDIS_URL</c> and
+        /// <c>TS_RESPONSES_STORE_REDIS_URL</c> so a single flag enables Redis
+        /// for both the paged KV cache tier and the Responses API store.
+        /// Individual env vars still override for split configurations.
+        /// Returns true when the flag was present.
+        /// </summary>
+        public static bool ApplyRedisCliFlags(string[] args)
+        {
+            if (args == null || args.Length == 0)
+                return false;
+
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (TryReadOption(args, ref i, "--redis-url", out string redisUrl))
+                {
+                    Environment.SetEnvironmentVariable("TS_KV_CACHE_REDIS_URL", redisUrl);
+                    Environment.SetEnvironmentVariable("TS_RESPONSES_STORE_REDIS_URL", redisUrl);
+                    return true;
+                }
+            }
+            return false;
         }
 
         /// <summary>
@@ -609,7 +648,15 @@ namespace TensorSharp.Server.Hosting
                     || TryReadOption(args, ref i, "--paged-kv-ram-mb", out _)
                     || TryReadOption(args, ref i, "--paged-kv-ssd-dir", out _)
                     || TryReadOption(args, ref i, "--paged-kv-ssd-mb", out _)
-                    || TryReadOption(args, ref i, "--paged-kv-quant-bits", out _))
+                    || TryReadOption(args, ref i, "--paged-kv-quant-bits", out _)
+                    || TryReadOption(args, ref i, "--paged-kv-redis-url", out _)
+                    || TryReadOption(args, ref i, "--paged-kv-redis-ttl", out _))
+                {
+                    continue;
+                }
+                // --redis-url is consumed by ApplyRedisCliFlags(args) in a
+                // separate earlier pass; skip it (and its value) here.
+                if (TryReadOption(args, ref i, "--redis-url", out _))
                 {
                     continue;
                 }
