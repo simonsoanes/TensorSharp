@@ -47,7 +47,7 @@ namespace TensorSharp.Models
 
         private void ValidateNemotronTpConstraints()
         {
-            int tp = TpDegree;
+            int tp = GlobalTpDegree;
             var errors = new List<string>();
 
             // Check per-layer attention head divisibility
@@ -99,7 +99,7 @@ namespace TensorSharp.Models
                 }
             }
 
-            Console.WriteLine($"  TP constraints validated: tp={tp}, " +
+            Console.WriteLine($"  TP constraints validated: tp={tp} (local={TpDegree}), " +
                 $"{attnCount} attention (TP), {mambaCount} Mamba2 (replicated), {ffnCount} FFN (TP)");
         }
 
@@ -130,7 +130,7 @@ namespace TensorSharp.Models
             // Mamba2 weights: NOT sharded (replicated on rank 0).
             // ssm_in.weight, ssm_out.weight, ssm_conv1d.weight, etc. stay in _weights.
 
-            Console.WriteLine($"  Nemotron TP weight sharding complete ({TpDegree} GPUs).");
+            Console.WriteLine($"  Nemotron TP weight sharding complete ({GlobalTpDegree} GPUs, {TpDegree} local).");
         }
 
         private void ShardNemotronMoeWeightsForTP()
@@ -157,17 +157,20 @@ namespace TensorSharp.Models
         private void ShardNemotronExpertColumnParallel(string weightName)
         {
             int tp = TpDegree;
+            int globalTp = GlobalTpDegree;
+            int rankOffset = TpRankOffset;
 
             if (_quantWeights.TryGetValue(weightName, out var qw))
             {
-                long rowsPerShard = qw.Ne1 / tp;
+                long rowsPerShard = qw.Ne1 / globalTp;
                 long rowBytes = NativeDequant.RowSize(qw.GgmlType, qw.Ne0);
                 long bytesPerShard = rowsPerShard * rowBytes;
 
                 var shards = new QuantizedWeight[tp];
                 for (int r = 0; r < tp; r++)
                 {
-                    IntPtr shardPtr = IntPtr.Add(qw.Data, (int)(r * bytesPerShard));
+                    int globalRank = rankOffset + r;
+                    IntPtr shardPtr = IntPtr.Add(qw.Data, (int)(globalRank * bytesPerShard));
                     shards[r] = QuantizedWeight.CreateExternalView(
                         shardPtr, bytesPerShard, qw.GgmlType, qw.Ne0, rowsPerShard, qw);
                 }
@@ -178,11 +181,12 @@ namespace TensorSharp.Models
             }
             else if (_weights.TryGetValue(weightName, out var w))
             {
-                long shardSize = w.Sizes[0] / tp;
+                long shardSize = w.Sizes[0] / globalTp;
                 var shards = new Tensor[tp];
                 for (int r = 0; r < tp; r++)
                 {
-                    var view = w.Narrow(0, r * shardSize, shardSize);
+                    int globalRank = rankOffset + r;
+                    var view = w.Narrow(0, globalRank * shardSize, shardSize);
                     shards[r] = Ops.NewContiguous(view);
                     view.Dispose();
                 }
@@ -196,6 +200,8 @@ namespace TensorSharp.Models
         private void ShardNemotronExpertRowParallel(string weightName)
         {
             int tp = TpDegree;
+            int globalTp = GlobalTpDegree;
+            int rankOffset = TpRankOffset;
 
             if (_quantWeights.TryGetValue(weightName, out var qw))
             {
@@ -203,7 +209,7 @@ namespace TensorSharp.Models
                 long blockSize = GgufFile.GetBlockSize(type);
                 long typeSize = GgufFile.GetTypeSize(type);
                 long blocksPerRow = qw.Ne0 / blockSize;
-                long blocksPerShard = blocksPerRow / tp;
+                long blocksPerShard = blocksPerRow / globalTp;
                 long ne0PerShard = blocksPerShard * blockSize;
                 long srcRowBytes = NativeDequant.RowSize(qw.GgmlType, qw.Ne0);
                 long dstRowBytes = (ne0PerShard / blockSize) * typeSize;
@@ -213,12 +219,13 @@ namespace TensorSharp.Models
                 var shards = new QuantizedWeight[tp];
                 for (int r = 0; r < tp; r++)
                 {
+                    int globalRank = rankOffset + r;
                     IntPtr shardPtr = QuantizedWeight.AllocateBuffer(totalBytesPerShard);
                     unsafe
                     {
                         byte* src = (byte*)qw.Data.ToPointer();
                         byte* dst = (byte*)shardPtr.ToPointer();
-                        long srcBlockOffset = r * blocksPerShard * typeSize;
+                        long srcBlockOffset = globalRank * blocksPerShard * typeSize;
                         for (long row = 0; row < qw.Ne1; row++)
                         {
                             Buffer.MemoryCopy(
@@ -237,11 +244,12 @@ namespace TensorSharp.Models
             }
             else if (_weights.TryGetValue(weightName, out var w))
             {
-                long shardSize = w.Sizes[1] / tp;
+                long shardSize = w.Sizes[1] / globalTp;
                 var shards = new Tensor[tp];
                 for (int r = 0; r < tp; r++)
                 {
-                    var view = w.Narrow(1, r * shardSize, shardSize);
+                    int globalRank = rankOffset + r;
+                    var view = w.Narrow(1, globalRank * shardSize, shardSize);
                     shards[r] = Ops.NewContiguous(view);
                     view.Dispose();
                 }

@@ -270,26 +270,40 @@ tp:group:{group_id}:barrier → INCR/DECR counter for sync
 tp:group:{group_id}:config → JSON { worldSize, localTp, nodeCount }
 ```
 
-### Changes Required
+### Changes Required (Stage 2 — Implemented)
 
 | Component | Change |
 |-----------|--------|
-| `TensorSharp.Backends.Cuda` | Add `NetworkCommunicator` (TCP), hierarchical AllReduce |
-| `TensorSharp.Models/ModelBase.cs` | Extend `TensorParallelGroup` to support multi-node ranks |
-| `TensorSharp.Runtime` | Add `RedisKvCacheStore`, `RedisResponseQueue` |
-| `TensorSharp.Server` | Add `--tp-node-id`, `--tp-peers`, `--redis-url` options |
-| New project: `TensorSharp.Distributed` | Network communicator, Redis integration, rank coordination |
+| `TensorSharp.Backends.Cuda/ITensorParallelGroup.cs` | **New.** Interface abstracting local and distributed TP groups |
+| `TensorSharp.Backends.Cuda/TensorParallelGroup.cs` | Implements `ITensorParallelGroup`; adds `GlobalDegree`, `GlobalRankOffset`, `NodeCount` |
+| New project: `TensorSharp.Distributed` | TCP communicator, distributed TP group, config parsing |
+| `TensorSharp.Distributed/TcpCommunicator.cs` | **New.** TCP mesh with length-prefixed framing; AllReduce, Broadcast, Barrier |
+| `TensorSharp.Distributed/DistributedTensorParallelGroup.cs` | **New.** Hierarchical AllReduce: local P2P → TCP → local broadcast |
+| `TensorSharp.Distributed/DistributedTpConfig.cs` | **New.** Peer endpoint parsing, env-var configuration |
+| `TensorSharp.Models/ModelBase.cs` | `ITensorParallelGroup` field, `GlobalTpDegree`/`TpRankOffset` properties, multi-node weight sharding |
+| `TensorSharp.Cli/Program.cs` | `--tp-node-id`, `--tp-peers` arguments |
+| `TensorSharp.Server/ModelLifecycleService.cs` | `TENSORSHARP_TP_NODE_ID`, `TENSORSHARP_TP_PEERS` env-var support |
 
 ### Configuration
 
-```json
-{
-  "tp": 4,
-  "tp-node-id": 0,
-  "tp-peers": ["192.168.1.10:9500", "192.168.1.11:9500"],
-  "redis-url": "redis://192.168.1.1:6379",
-  "backend": "cuda"
-}
+```bash
+# CLI: 2-node tensor parallelism (each node has 2 GPUs)
+# Node 0:
+TensorSharp.Cli --model qwen3-8b.gguf --backend cuda --tp 2 \
+  --tp-node-id 0 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
+
+# Node 1:
+TensorSharp.Cli --model qwen3-8b.gguf --backend cuda --tp 2 \
+  --tp-node-id 1 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
+
+# Server: via environment variables
+# Node 0:
+TENSORSHARP_TP_DEGREE=2 TENSORSHARP_TP_NODE_ID=0 \
+TENSORSHARP_TP_PEERS=192.168.1.10:9500,192.168.1.11:9500 \
+  dotnet run --project TensorSharp.Server
+
+# Config JSON (auto-expanded to CLI args)
+{ "tp": 2, "tp-node-id": 0, "tp-peers": "192.168.1.10:9500,192.168.1.11:9500", "backend": "cuda" }
 ```
 
 ---
@@ -422,12 +436,17 @@ Stage 1 (Local TP)          █████████████████�
   ├── Batched forward TP     ░░░░░░░░░░░░░░░░░░░░ TODO
   └── NCCL (Linux)           ░░░░░░░░░░░░░░░░░░░░ TODO
 
-Stage 2 (Network TP)        ░░░░░░░░░░░░░░░░░░░░ PLANNED
-  ├── TCP communicator       ░░░░░░░░░░░░░░░░░░░░
-  ├── Hierarchical AllReduce ░░░░░░░░░░░░░░░░░░░░
-  ├── Redis KV cache         ░░░░░░░░░░░░░░░░░░░░
-  ├── Redis response queue   ░░░░░░░░░░░░░░░░░░░░
-  └── Multi-node server      ░░░░░░░░░░░░░░░░░░░░
+Stage 2 (Network TP)        ██████████░░░░░░░░░░ IN PROGRESS
+  ├── TCP communicator       ████████████████████ DONE
+  ├── Hierarchical AllReduce ████████████████████ DONE
+  ├── ITensorParallelGroup   ████████████████████ DONE
+  ├── ModelBase multi-node   ████████████████████ DONE
+  ├── CLI --tp-node-id/peers ████████████████████ DONE
+  ├── Server env-var config  ████████████████████ DONE
+  ├── Model-specific sharding████████████████░░░░ IN PROGRESS
+  ├── Redis KV cache         ░░░░░░░░░░░░░░░░░░░░ DEFERRED (direct TCP instead)
+  ├── Redis response queue   ░░░░░░░░░░░░░░░░░░░░ DEFERRED (direct TCP instead)
+  └── Multi-node server      ████████████████████ DONE
 
 Stage 3 (RDMA)              ░░░░░░░░░░░░░░░░░░░░ CONDITIONAL
   ├── Profile Stage 2 first  ░░░░░░░░░░░░░░░░░░░░

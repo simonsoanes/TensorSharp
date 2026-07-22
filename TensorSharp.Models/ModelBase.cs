@@ -350,9 +350,18 @@ namespace TensorSharp.Models
         protected readonly Dictionary<string, QuantizedWeight> _quantWeights = new();
 
         // ---- Tensor Parallelism ----
-        protected readonly Cuda.TensorParallelGroup _tpGroup;
+        protected readonly Cuda.ITensorParallelGroup _tpGroup;
         protected int TpDegree => _tpGroup?.Degree ?? 1;
         protected bool IsTensorParallel => _tpGroup != null && _tpGroup.IsActive;
+
+        /// <summary>Total GPUs across all nodes (for weight shard sizing).</summary>
+        protected int GlobalTpDegree => _tpGroup?.GlobalDegree ?? 1;
+
+        /// <summary>First global rank on this node (for selecting local weight shards).</summary>
+        protected int TpRankOffset => _tpGroup?.GlobalRankOffset ?? 0;
+
+        /// <summary>Number of nodes in the distributed group (1 for local-only).</summary>
+        protected int TpNodeCount => _tpGroup?.NodeCount ?? 1;
 
         /// <summary>Per-GPU sharded quantized weights, keyed by weight name.</summary>
         protected readonly Dictionary<string, QuantizedWeight[]> _tpQuantWeights = new();
@@ -471,7 +480,7 @@ namespace TensorSharp.Models
         protected int _forwardCount;
         protected Stopwatch _forwardSw = new Stopwatch();
 
-        protected ModelBase(string ggufPath, BackendType backend, int tpDegree = 1)
+        protected ModelBase(string ggufPath, BackendType backend, int tpDegree = 1, Cuda.ITensorParallelGroup tpGroup = null)
         {
             _backend = backend;
             // The pure-C# CPU backend must never touch native (ggml P/Invoke) dequant — route
@@ -482,7 +491,9 @@ namespace TensorSharp.Models
             ExecutionPlan = new BackendExecutionPlan(backend);
             MultimodalInjector = new ModelMultimodalInjector(this);
 
-            if (tpDegree > 1 && backend == BackendType.Cuda)
+            if (tpGroup != null)
+                _tpGroup = tpGroup;
+            else if (tpDegree > 1 && backend == BackendType.Cuda)
                 _tpGroup = new Cuda.TensorParallelGroup(tpDegree);
 
             switch (backend)
@@ -2293,6 +2304,8 @@ namespace TensorSharp.Models
             if (!IsTensorParallel) return;
 
             int tp = TpDegree;
+            int globalTp = GlobalTpDegree;
+            int rankOffset = TpRankOffset;
             var colPatterns = new List<string>(columnParallelPatterns);
             var rowPatterns = new List<string>(rowParallelPatterns);
 
@@ -2311,14 +2324,15 @@ namespace TensorSharp.Models
                 if (isCol)
                 {
                     // Split along ne1 (output dim): consecutive rows.
-                    long rowsPerShard = qw.Ne1 / tp;
+                    long rowsPerShard = qw.Ne1 / globalTp;
                     long rowBytes = NativeDequant.RowSize(qw.GgmlType, qw.Ne0);
                     long bytesPerShard = rowsPerShard * rowBytes;
 
-                    for (int r = 0; r < tp; r++)
+                    for (int lr = 0; lr < tp; lr++)
                     {
-                        IntPtr shardPtr = IntPtr.Add(qw.Data, (int)(r * bytesPerShard));
-                        shards[r] = QuantizedWeight.CreateExternalView(
+                        int globalRank = rankOffset + lr;
+                        IntPtr shardPtr = IntPtr.Add(qw.Data, (int)(globalRank * bytesPerShard));
+                        shards[lr] = QuantizedWeight.CreateExternalView(
                             shardPtr, bytesPerShard, qw.GgmlType, qw.Ne0, rowsPerShard, qw);
                     }
                 }
@@ -2329,21 +2343,22 @@ namespace TensorSharp.Models
                     long blockSize = GgufFile.GetBlockSize(type);
                     long typeSize = GgufFile.GetTypeSize(type);
                     long blocksPerRow = qw.Ne0 / blockSize;
-                    long blocksPerShard = blocksPerRow / tp;
+                    long blocksPerShard = blocksPerRow / globalTp;
                     long ne0PerShard = blocksPerShard * blockSize;
                     long srcRowBytes = NativeDequant.RowSize(qw.GgmlType, qw.Ne0);
                     long dstRowBytes = (ne0PerShard / blockSize) * typeSize;
                     long totalBytesPerShard = qw.Ne1 * dstRowBytes;
                     long blockBytesPerShard = blocksPerShard * typeSize;
 
-                    for (int r = 0; r < tp; r++)
+                    for (int lr = 0; lr < tp; lr++)
                     {
+                        int globalRank = rankOffset + lr;
                         IntPtr shardPtr = QuantizedWeight.AllocateBuffer(totalBytesPerShard);
                         unsafe
                         {
                             byte* src = (byte*)qw.Data.ToPointer();
                             byte* dst = (byte*)shardPtr.ToPointer();
-                            long srcBlockOffset = r * blocksPerShard * typeSize;
+                            long srcBlockOffset = globalRank * blocksPerShard * typeSize;
                             for (long row = 0; row < qw.Ne1; row++)
                             {
                                 Buffer.MemoryCopy(
@@ -2353,7 +2368,7 @@ namespace TensorSharp.Models
                                     blockBytesPerShard);
                             }
                         }
-                        shards[r] = new QuantizedWeight(shardPtr, totalBytesPerShard,
+                        shards[lr] = new QuantizedWeight(shardPtr, totalBytesPerShard,
                             qw.GgmlType, ne0PerShard, qw.Ne1);
                     }
                 }
@@ -2384,22 +2399,24 @@ namespace TensorSharp.Models
                 if (isCol)
                 {
                     // Split along dim 0 (output dim).
-                    long shardSize = w.Sizes[0] / tp;
-                    for (int r = 0; r < tp; r++)
+                    long shardSize = w.Sizes[0] / globalTp;
+                    for (int lr = 0; lr < tp; lr++)
                     {
-                        var view = w.Narrow(0, r * shardSize, shardSize);
-                        shards[r] = Ops.NewContiguous(view);
+                        int globalRank = rankOffset + lr;
+                        var view = w.Narrow(0, globalRank * shardSize, shardSize);
+                        shards[lr] = Ops.NewContiguous(view);
                         view.Dispose();
                     }
                 }
                 else
                 {
                     // Split along dim 1 (input dim).
-                    long shardSize = w.Sizes[1] / tp;
-                    for (int r = 0; r < tp; r++)
+                    long shardSize = w.Sizes[1] / globalTp;
+                    for (int lr = 0; lr < tp; lr++)
                     {
-                        var view = w.Narrow(1, r * shardSize, shardSize);
-                        shards[r] = Ops.NewContiguous(view);
+                        int globalRank = rankOffset + lr;
+                        var view = w.Narrow(1, globalRank * shardSize, shardSize);
+                        shards[lr] = Ops.NewContiguous(view);
                         view.Dispose();
                     }
                 }
@@ -4371,9 +4388,9 @@ namespace TensorSharp.Models
                 allocatorDisposable.Dispose();
         }
 
-        public static ModelBase Create(string ggufPath, BackendType backend, int tpDegree = 1)
+        public static ModelBase Create(string ggufPath, BackendType backend, int tpDegree = 1, Cuda.ITensorParallelGroup tpGroup = null)
         {
-            if (tpDegree <= 1)
+            if (tpGroup == null && tpDegree <= 1)
             {
                 string envTp = Environment.GetEnvironmentVariable("TENSORSHARP_TP_DEGREE");
                 if (int.TryParse(envTp, out int envTpDegree) && envTpDegree > 1)
@@ -4385,15 +4402,15 @@ namespace TensorSharp.Models
 
             return arch switch
             {
-                "qwen3" => new Qwen3Model(ggufPath, backend, tpDegree),
-                "qwen35" or "qwen35moe" or "qwen3next" => new Qwen35Model(ggufPath, backend, tpDegree),
-                "gemma3" => new Gemma3Model(ggufPath, backend, tpDegree),
-                "gemma4" => new Gemma4Model(ggufPath, backend, tpDegree),
+                "qwen3" => new Qwen3Model(ggufPath, backend, tpDegree, tpGroup),
+                "qwen35" or "qwen35moe" or "qwen3next" => new Qwen35Model(ggufPath, backend, tpDegree, tpGroup),
+                "gemma3" => new Gemma3Model(ggufPath, backend, tpDegree, tpGroup),
+                "gemma4" => new Gemma4Model(ggufPath, backend, tpDegree, tpGroup),
                 "diffusion-gemma" or "diffusion_gemma" => new DiffusionGemmaModel(ggufPath, backend),
                 "qwen_image" or "qwen-image" => new QwenImage.QwenImageModel(ggufPath, backend),
-                "gptoss" or "gpt-oss" => new GptOssModel(ggufPath, backend, tpDegree),
-                "nemotron_h" or "nemotron_h_moe" => new NemotronModel(ggufPath, backend, tpDegree),
-                "mistral3" => new Mistral3Model(ggufPath, backend, tpDegree),
+                "gptoss" or "gpt-oss" => new GptOssModel(ggufPath, backend, tpDegree, tpGroup),
+                "nemotron_h" or "nemotron_h_moe" => new NemotronModel(ggufPath, backend, tpDegree, tpGroup),
+                "mistral3" => new Mistral3Model(ggufPath, backend, tpDegree, tpGroup),
                 _ => throw new NotSupportedException($"Unsupported architecture: {arch}"),
             };
         }

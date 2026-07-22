@@ -301,8 +301,8 @@ namespace TensorSharp.Models
             }
         }
 
-        public NemotronModel(string ggufPath, BackendType backend, int tpDegree = 1)
-            : base(ggufPath, backend, tpDegree)
+        public NemotronModel(string ggufPath, BackendType backend, int tpDegree = 1, Cuda.ITensorParallelGroup tpGroup = null)
+            : base(ggufPath, backend, tpDegree, tpGroup)
         {
             string arch = _gguf.GetString("general.architecture") ?? "nemotron_h";
             Config = new ModelConfig { Architecture = arch };

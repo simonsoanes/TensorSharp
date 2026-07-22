@@ -61,8 +61,8 @@ namespace TensorSharp.Models
         private Mistral3VisionEncoder _visionEncoder;
         private List<(Tensor embeddings, int position)> _pendingVisionEmbeddingsList = new();
 
-        public Mistral3Model(string ggufPath, BackendType backend, int tpDegree = 1)
-            : base(ggufPath, backend, tpDegree)
+        public Mistral3Model(string ggufPath, BackendType backend, int tpDegree = 1, Cuda.ITensorParallelGroup tpGroup = null)
+            : base(ggufPath, backend, tpDegree, tpGroup)
         {
             string arch = _gguf.GetString("general.architecture") ?? "mistral3";
             Config = new ModelConfig { Architecture = arch };

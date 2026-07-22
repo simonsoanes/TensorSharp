@@ -295,7 +295,7 @@ namespace TensorSharp.Models
             _pendingAudioEmbeddingsList.Add((embeddings, insertPosition));
         }
 
-        public Gemma4Model(string ggufPath, BackendType backend, int tpDegree = 1) : base(ggufPath, backend, tpDegree)
+        public Gemma4Model(string ggufPath, BackendType backend, int tpDegree = 1, Cuda.ITensorParallelGroup tpGroup = null) : base(ggufPath, backend, tpDegree, tpGroup)
         {
             Config = new ModelConfig { Architecture = _gguf.GetString("general.architecture") };
             ParseBaseConfig();

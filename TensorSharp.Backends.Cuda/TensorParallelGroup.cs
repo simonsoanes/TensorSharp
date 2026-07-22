@@ -12,7 +12,7 @@ namespace TensorSharp.Cuda
     /// <see cref="AllReduce"/> at row-parallel boundaries and
     /// <see cref="GetAllocator"/> to place per-rank tensors.
     /// </summary>
-    public sealed class TensorParallelGroup : IDisposable
+    public sealed class TensorParallelGroup : ITensorParallelGroup
     {
         private readonly CudaAllocator[] _allocators;
         private readonly CudaP2PCommunicator _communicator;
@@ -55,6 +55,15 @@ namespace TensorSharp.Cuda
 
         /// <summary>True when TP is active (degree > 1).</summary>
         public bool IsActive => Degree > 1;
+
+        /// <summary>Single-node: global degree equals local degree.</summary>
+        public int GlobalDegree => Degree;
+
+        /// <summary>Single-node: no rank offset.</summary>
+        public int GlobalRankOffset => 0;
+
+        /// <summary>Single-node: one node.</summary>
+        public int NodeCount => 1;
 
         public CudaAllocator GetAllocator(int rank)
         {

@@ -341,8 +341,8 @@ namespace TensorSharp.Models
         private long _mlxEvalBoundaryTicks;
         private long _mlxCacheEvalTicks;
 
-        public Qwen35Model(string ggufPath, BackendType backend, int tpDegree = 1)
-            : base(ggufPath, backend, tpDegree)
+        public Qwen35Model(string ggufPath, BackendType backend, int tpDegree = 1, Cuda.ITensorParallelGroup tpGroup = null)
+            : base(ggufPath, backend, tpDegree, tpGroup)
         {
             string arch = _gguf.GetString("general.architecture") ?? "qwen35";
             Config = new ModelConfig { Architecture = arch };

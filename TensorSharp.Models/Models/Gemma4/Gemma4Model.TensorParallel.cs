@@ -41,15 +41,15 @@ namespace TensorSharp.Models
 
         private void ValidateGemma4TpConstraints()
         {
-            int tp = TpDegree;
+            int tp = GlobalTpDegree;
             var errors = new List<string>();
 
             if (Config.NumHeads % tp != 0)
-                errors.Add($"Attention heads ({Config.NumHeads}) not divisible by TP degree ({tp})");
+                errors.Add($"Attention heads ({Config.NumHeads}) not divisible by global TP degree ({tp})");
             if (Config.NumKVHeads % tp != 0)
-                errors.Add($"Local KV heads ({Config.NumKVHeads}) not divisible by TP degree ({tp})");
+                errors.Add($"Local KV heads ({Config.NumKVHeads}) not divisible by global TP degree ({tp})");
             if (_numGlobalKVHeads % tp != 0)
-                errors.Add($"Global KV heads ({_numGlobalKVHeads}) not divisible by TP degree ({tp})");
+                errors.Add($"Global KV heads ({_numGlobalKVHeads}) not divisible by global TP degree ({tp})");
 
             // Check per-layer head dims are divisible
             for (int l = 0; l < Config.NumLayers; l++)
@@ -57,7 +57,7 @@ namespace TensorSharp.Models
                 int kvHeads = KVHeadsForLayer(l);
                 if (kvHeads % tp != 0)
                 {
-                    errors.Add($"Layer {l} KV heads ({kvHeads}) not divisible by TP degree ({tp})");
+                    errors.Add($"Layer {l} KV heads ({kvHeads}) not divisible by global TP degree ({tp})");
                     break;
                 }
             }
@@ -71,12 +71,12 @@ namespace TensorSharp.Models
                     string gateKey = $"blk.{l}.ffn_gate_exps.0.weight";
                     if (_quantWeights.TryGetValue(gateKey, out var qw) && qw.Ne1 % tp != 0)
                     {
-                        errors.Add($"Layer {l} expert FFN ({qw.Ne1}) not divisible by TP degree ({tp})");
+                        errors.Add($"Layer {l} expert FFN ({qw.Ne1}) not divisible by global TP degree ({tp})");
                         break;
                     }
                     if (_weights.TryGetValue(gateKey, out var w) && w.Sizes[0] % tp != 0)
                     {
-                        errors.Add($"Layer {l} expert FFN ({w.Sizes[0]}) not divisible by TP degree ({tp})");
+                        errors.Add($"Layer {l} expert FFN ({w.Sizes[0]}) not divisible by global TP degree ({tp})");
                         break;
                     }
                 }
@@ -89,7 +89,7 @@ namespace TensorSharp.Models
                 throw new InvalidOperationException(
                     $"Gemma4 TP validation failed:\n  " + string.Join("\n  ", errors));
 
-            Console.WriteLine($"  TP constraints validated: tp={tp}, " +
+            Console.WriteLine($"  TP constraints validated: globalTp={tp}, localTp={TpDegree}, " +
                 $"Heads={Config.NumHeads}, KVHeads local={Config.NumKVHeads}/global={_numGlobalKVHeads}");
         }
 
@@ -118,8 +118,6 @@ namespace TensorSharp.Models
 
         private void ShardGemma4MoeWeightsForTP()
         {
-            int tp = TpDegree;
-
             for (int layer = 0; layer < Config.NumLayers; layer++)
             {
                 if (!HasMoE(layer))
@@ -151,17 +149,18 @@ namespace TensorSharp.Models
         private void ShardExpertColumnParallel(string weightName)
         {
             int tp = TpDegree;
+            int globalTp = GlobalTpDegree;
 
             if (_quantWeights.TryGetValue(weightName, out var qw))
             {
-                long rowsPerShard = qw.Ne1 / tp;
+                long rowsPerShard = qw.Ne1 / globalTp;
                 long rowBytes = NativeDequant.RowSize(qw.GgmlType, qw.Ne0);
                 long bytesPerShard = rowsPerShard * rowBytes;
 
                 var shards = new QuantizedWeight[tp];
                 for (int r = 0; r < tp; r++)
                 {
-                    IntPtr shardPtr = IntPtr.Add(qw.Data, (int)(r * bytesPerShard));
+                    IntPtr shardPtr = IntPtr.Add(qw.Data, (int)((TpRankOffset + r) * bytesPerShard));
                     shards[r] = QuantizedWeight.CreateExternalView(
                         shardPtr, bytesPerShard, qw.GgmlType, qw.Ne0, rowsPerShard, qw);
                 }
@@ -172,11 +171,11 @@ namespace TensorSharp.Models
             }
             else if (_weights.TryGetValue(weightName, out var w))
             {
-                long shardSize = w.Sizes[0] / tp;
+                long shardSize = w.Sizes[0] / globalTp;
                 var shards = new Tensor[tp];
                 for (int r = 0; r < tp; r++)
                 {
-                    var view = w.Narrow(0, r * shardSize, shardSize);
+                    var view = w.Narrow(0, (TpRankOffset + r) * shardSize, shardSize);
                     shards[r] = Ops.NewContiguous(view);
                     view.Dispose();
                 }
@@ -190,6 +189,7 @@ namespace TensorSharp.Models
         private void ShardExpertRowParallel(string weightName)
         {
             int tp = TpDegree;
+            int globalTp = GlobalTpDegree;
 
             if (_quantWeights.TryGetValue(weightName, out var qw))
             {
@@ -197,7 +197,7 @@ namespace TensorSharp.Models
                 long blockSize = GgufFile.GetBlockSize(type);
                 long typeSize = GgufFile.GetTypeSize(type);
                 long blocksPerRow = qw.Ne0 / blockSize;
-                long blocksPerShard = blocksPerRow / tp;
+                long blocksPerShard = blocksPerRow / globalTp;
                 long ne0PerShard = blocksPerShard * blockSize;
                 long srcRowBytes = NativeDequant.RowSize(qw.GgmlType, qw.Ne0);
                 long dstRowBytes = (ne0PerShard / blockSize) * typeSize;
@@ -212,7 +212,7 @@ namespace TensorSharp.Models
                     {
                         byte* src = (byte*)qw.Data.ToPointer();
                         byte* dst = (byte*)shardPtr.ToPointer();
-                        long srcBlockOffset = r * blocksPerShard * typeSize;
+                        long srcBlockOffset = (TpRankOffset + r) * blocksPerShard * typeSize;
                         for (long row = 0; row < qw.Ne1; row++)
                         {
                             Buffer.MemoryCopy(
@@ -231,11 +231,11 @@ namespace TensorSharp.Models
             }
             else if (_weights.TryGetValue(weightName, out var w))
             {
-                long shardSize = w.Sizes[1] / tp;
+                long shardSize = w.Sizes[1] / globalTp;
                 var shards = new Tensor[tp];
                 for (int r = 0; r < tp; r++)
                 {
-                    var view = w.Narrow(1, r * shardSize, shardSize);
+                    var view = w.Narrow(1, (TpRankOffset + r) * shardSize, shardSize);
                     shards[r] = Ops.NewContiguous(view);
                     view.Dispose();
                 }
