@@ -31,7 +31,7 @@ namespace TensorSharp.Models
         private void InitTpKVCache(int initialSeqLen, int maxSeqLen)
         {
             int tp = TpDegree;
-            int numKVHeadsPerGpu = Config.NumKVHeads / tp;
+            int numKVHeadsPerGpu = Config.NumKVHeads / GlobalTpDegree;
             int headDim = Config.HeadDim;
             DType kvDtype = _kvCacheDtype.ToDType();
 
@@ -66,7 +66,7 @@ namespace TensorSharp.Models
                 newCapacity = Math.Min(_maxContextLength, newCapacity * 2);
 
             int tp = TpDegree;
-            int numKVHeadsPerGpu = Config.NumKVHeads / tp;
+            int numKVHeadsPerGpu = Config.NumKVHeads / GlobalTpDegree;
             int headDim = Config.HeadDim;
             DType kvDtype = _kvCacheDtype.ToDType();
 
@@ -243,8 +243,8 @@ namespace TensorSharp.Models
         private Tensor[] AttentionTP(Tensor[] qkvFused, int layer, string[] wn, int seqLen, int startPos)
         {
             int tp = TpDegree;
-            int numHeadsPerGpu = Config.NumHeads / tp;
-            int numKVHeadsPerGpu = Config.NumKVHeads / tp;
+            int numHeadsPerGpu = Config.NumHeads / GlobalTpDegree;
+            int numKVHeadsPerGpu = Config.NumKVHeads / GlobalTpDegree;
             int headDim = Config.HeadDim;
             int qDimPerGpu = numHeadsPerGpu * headDim;
             int kDimPerGpu = numKVHeadsPerGpu * headDim;

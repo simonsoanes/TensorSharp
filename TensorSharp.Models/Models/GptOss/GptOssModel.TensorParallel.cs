@@ -218,7 +218,7 @@ namespace TensorSharp.Models
         private void InitGptOssTpKVCache(int initialSeqLen, int maxSeqLen)
         {
             int tp = TpDegree;
-            int numKVHeadsPerGpu = Config.NumKVHeads / tp;
+            int numKVHeadsPerGpu = Config.NumKVHeads / GlobalTpDegree;
             int headDim = Config.HeadDim;
             DType kvDtype = _kvCacheDtype.ToDType();
 
@@ -242,7 +242,7 @@ namespace TensorSharp.Models
             }
 
             // Slice attention sinks per rank.
-            int numHeadsPerGpu = Config.NumHeads / tp;
+            int numHeadsPerGpu = Config.NumHeads / GlobalTpDegree;
             _tpSinks = new float[Config.NumLayers][];
             for (int l = 0; l < Config.NumLayers; l++)
             {
@@ -273,7 +273,7 @@ namespace TensorSharp.Models
                 newCapacity = Math.Min(_maxContextLength, newCapacity * 2);
 
             int tp = TpDegree;
-            int numKVHeadsPerGpu = Config.NumKVHeads / tp;
+            int numKVHeadsPerGpu = Config.NumKVHeads / GlobalTpDegree;
             int headDim = Config.HeadDim;
             DType kvDtype = _kvCacheDtype.ToDType();
 
@@ -482,8 +482,8 @@ namespace TensorSharp.Models
         private Tensor[] GptOssAttentionTP(Tensor[] qkvFused, int layer, int seqLen, int startPos, bool isSWA)
         {
             int tp = TpDegree;
-            int numHeadsPerGpu = Config.NumHeads / tp;
-            int numKVHeadsPerGpu = Config.NumKVHeads / tp;
+            int numHeadsPerGpu = Config.NumHeads / GlobalTpDegree;
+            int numKVHeadsPerGpu = Config.NumKVHeads / GlobalTpDegree;
             int headDim = Config.HeadDim;
             int qDimPerGpu = numHeadsPerGpu * headDim;
             int kDimPerGpu = numKVHeadsPerGpu * headDim;
@@ -530,12 +530,15 @@ namespace TensorSharp.Models
                     kTensor = ApplyGptOssRoPEPrefill(kTensor, numKVHeadsPerGpu, headDim, seqLen, startPos);
                 }
 
-                // Slice sinks for this rank.
+                // Slice sinks for this rank's heads. Local rank r maps to global
+                // rank (TpRankOffset + r), which owns heads
+                // [globalRank*numHeadsPerGpu, +numHeadsPerGpu) of the full array.
                 float[] rankSinks = null;
                 if (fullSinks != null)
                 {
+                    int globalRank = TpRankOffset + r;
                     rankSinks = new float[numHeadsPerGpu];
-                    Array.Copy(fullSinks, r * numHeadsPerGpu, rankSinks, 0, numHeadsPerGpu);
+                    Array.Copy(fullSinks, globalRank * numHeadsPerGpu, rankSinks, 0, numHeadsPerGpu);
                 }
 
                 if (seqLen == 1)

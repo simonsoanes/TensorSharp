@@ -717,7 +717,7 @@ namespace TensorSharp.Models
             int tp = TpDegree;
 
             // --- Full-attention KV caches ---
-            int numKVHeadsPerGpu = Config.NumKVHeads / tp;
+            int numKVHeadsPerGpu = Config.NumKVHeads / GlobalTpDegree;
             int headDim = Config.HeadDim;
             DType kvDtype = _kvCacheDtype.ToDType();
 
@@ -746,10 +746,10 @@ namespace TensorSharp.Models
                 }
             }
 
-            // --- GDN recurrent state ---
+            // --- GDN recurrent state (sharded by the GLOBAL degree) ---
             int convDim = _convKernel - 1;
-            int localVHeads = _numVHeads / tp;
-            int localKHeads = _numKHeads / tp;
+            int localVHeads = _numVHeads / GlobalTpDegree;
+            int localKHeads = _numKHeads / GlobalTpDegree;
             int localQkvDim = 2 * (_headKDim * localKHeads) + (_headVDim * localVHeads);
 
             _tpDeltaState = new Tensor[Config.NumLayers][];
@@ -800,7 +800,7 @@ namespace TensorSharp.Models
                 newCapacity = Math.Min(_maxContextLength, newCapacity * 2);
 
             int tp = TpDegree;
-            int numKVHeadsPerGpu = Config.NumKVHeads / tp;
+            int numKVHeadsPerGpu = Config.NumKVHeads / GlobalTpDegree;
             int headDim = Config.HeadDim;
             DType kvDtype = _kvCacheDtype.ToDType();
 
@@ -945,8 +945,8 @@ namespace TensorSharp.Models
         private Tensor[] FullAttentionTP(Tensor[] qkvFused, int layer, int seqLen, int startPos)
         {
             int tp = TpDegree;
-            int numHeadsPerGpu = Config.NumHeads / tp;
-            int numKVHeadsPerGpu = Config.NumKVHeads / tp;
+            int numHeadsPerGpu = Config.NumHeads / GlobalTpDegree;
+            int numKVHeadsPerGpu = Config.NumKVHeads / GlobalTpDegree;
             int headDim = Config.HeadDim;
             // Qwen3.5: Q output includes gate (2x), so Q dim per GPU = 2 * numHeadsPerGpu * headDim
             int qFullDimPerGpu = 2 * numHeadsPerGpu * headDim;
@@ -1143,8 +1143,8 @@ namespace TensorSharp.Models
         private Tensor[] GatedDeltaNetTP(Tensor[] packedInput, int layer, int seqLen)
         {
             int tp = TpDegree;
-            int localKHeads = _numKHeads / tp;
-            int localVHeads = _numVHeads / tp;
+            int localKHeads = _numKHeads / GlobalTpDegree;
+            int localVHeads = _numVHeads / GlobalTpDegree;
             int localQkDim = _headKDim * localKHeads;
             int localVDim = _headVDim * localVHeads;
             int localQkvDim = 2 * localQkDim + localVDim;
@@ -1311,7 +1311,7 @@ namespace TensorSharp.Models
                 var output = new Tensor(alloc, DType.Float32, seqLen, hiddenSize);
                 Ops.Fill(output, 0f);
 
-                int expertFfnPerGpu = _expertFfnLength / tp;
+                int expertFfnPerGpu = _expertFfnLength / GlobalTpDegree;
 
                 for (int k = 0; k < _numExpertsUsed; k++)
                 {

@@ -95,7 +95,16 @@ namespace TensorSharp.Distributed
             Array.Copy(_hostBuffer, resultSlice, elementCount);
 
             for (int r = 0; r < Degree; r++)
+            {
                 tensors[r].SetElementsAsFloat(resultSlice);
+                // SetElementsAsFloat only marks the host buffer dirty; force the
+                // upload now so downstream GPU kernels (including fused kernels
+                // that read the raw device pointer) see the reduced values
+                // rather than the stale pre-reduction partial. Without this the
+                // multi-node result never reaches the device and generation is
+                // garbage, even though single-node (device-to-device) works.
+                tensors[r].EnsureDeviceCurrent();
+            }
 
             // Sync all local GPUs so the result is visible.
             _localGroup.Synchronize();

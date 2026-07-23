@@ -42,7 +42,7 @@ namespace TensorSharp.Models
         private void InitTpKVCache(int initialSeqLen, int maxSeqLen)
         {
             int tp = TpDegree;
-            int numKVHeadsPerGpu = Config.NumKVHeads / tp;
+            int numKVHeadsPerGpu = Config.NumKVHeads / GlobalTpDegree;
             DType kvDtype = _kvCacheDtype.ToDType();
 
             _maxContextLength = maxSeqLen;
@@ -77,7 +77,7 @@ namespace TensorSharp.Models
                 newCapacity = Math.Min(_maxContextLength, newCapacity * 2);
 
             int tp = TpDegree;
-            int numKVHeadsPerGpu = Config.NumKVHeads / tp;
+            int numKVHeadsPerGpu = Config.NumKVHeads / GlobalTpDegree;
             DType kvDtype = _kvCacheDtype.ToDType();
 
             for (int l = 0; l < Config.NumLayers; l++)
@@ -272,8 +272,8 @@ namespace TensorSharp.Models
         private Tensor[] AttentionTP(Tensor[] q, Tensor[] k, Tensor[] v, int layer, int seqLen, int startPos)
         {
             int tp = TpDegree;
-            int numHeadsPerGpu = Config.NumHeads / tp;
-            int numKVHeadsPerGpu = Config.NumKVHeads / tp;
+            int numHeadsPerGpu = Config.NumHeads / GlobalTpDegree;
+            int numKVHeadsPerGpu = Config.NumKVHeads / GlobalTpDegree;
             int totalSeqLen = startPos + seqLen;
             bool isGlobal = IsGlobalLayer(layer);
             string prefix = $"blk.{layer}";

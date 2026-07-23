@@ -89,7 +89,7 @@ namespace TensorSharp.Cuda
             return AddBytes(deviceBuffer, checked(index * ElementType.Size()));
         }
 
-        internal void EnsureDeviceCurrent()
+        public override void EnsureDeviceCurrent()
         {
             ThrowIfDisposed();
             if (ByteLength == 0)

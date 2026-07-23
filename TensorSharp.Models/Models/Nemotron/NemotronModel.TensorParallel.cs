@@ -296,7 +296,7 @@ namespace TensorSharp.Models
                     continue;
                 }
 
-                int kvHeadsPerGpu = _layerNumKVHeads[l] / tp;
+                int kvHeadsPerGpu = _layerNumKVHeads[l] / GlobalTpDegree;
                 int headDim = Config.HeadDim;
 
                 _tpKvCacheK[l] = new Tensor[tp];
@@ -337,7 +337,7 @@ namespace TensorSharp.Models
                 if (_layerTypes[l] != LayerType.Attention || _tpKvCacheK[l] == null)
                     continue;
 
-                int kvHeadsPerGpu = _layerNumKVHeads[l] / tp;
+                int kvHeadsPerGpu = _layerNumKVHeads[l] / GlobalTpDegree;
                 int headDim = Config.HeadDim;
 
                 for (int r = 0; r < tp; r++)
@@ -474,8 +474,8 @@ namespace TensorSharp.Models
             string prefix = _layerPrefixes[layer];
             int numHeads = _layerNumHeads[layer];
             int numKVHeads = _layerNumKVHeads[layer];
-            int numHeadsPerGpu = numHeads / tp;
-            int numKVHeadsPerGpu = numKVHeads / tp;
+            int numHeadsPerGpu = numHeads / GlobalTpDegree;
+            int numKVHeadsPerGpu = numKVHeads / GlobalTpDegree;
             int headDim = Config.HeadDim;
             int qDimPerGpu = numHeadsPerGpu * headDim;
             int kDimPerGpu = numKVHeadsPerGpu * headDim;
