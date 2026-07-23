@@ -855,6 +855,12 @@ namespace TensorSharp.Models
             Tensor hidden0 = Embedding(tokens);
             _embTicks += Stopwatch.GetTimestamp() - t1;
 
+            // Inject any queued vision embeddings on rank 0 before broadcasting
+            // (mirrors the non-TP ForwardCore). The matching MRoPE positions are
+            // staged via SetMRoPEPositions and consumed by the attention block.
+            if (_visionEmbeddingsList.Count > 0)
+                InjectVisionEmbeddings(hidden0, seqLen);
+
             // Broadcast embedding to all GPUs.
             Tensor[] hidden = BroadcastTensorToAllRanks(hidden0);
 
@@ -899,6 +905,9 @@ namespace TensorSharp.Models
 
             _cacheSeqLen += seqLen;
             _forwardCount++;
+            // Drop the MRoPE positions staged for this (multimodal) forward so the
+            // next call defaults to scalar positions, matching the non-TP path.
+            _pendingMRoPEPositions = null;
             _forwardSw.Stop();
             return _logitsBuffer;
         }
@@ -991,9 +1000,20 @@ namespace TensorSharp.Models
                 qTensor = ApplyQKNormCached(qTensor, _attnQNormW[layer], numHeadsPerGpu, seqLen);
                 kTensor = ApplyQKNormCached(kTensor, _attnKNormW[layer], numKVHeadsPerGpu, seqLen);
 
-                // RoPE.
-                qTensor = ApplyRoPEPrefill(qTensor, numHeadsPerGpu, seqLen, startPos);
-                kTensor = ApplyRoPEPrefill(kTensor, numKVHeadsPerGpu, seqLen, startPos);
+                // RoPE: per-axis MRoPE when multimodal positions are staged for
+                // this forward, otherwise the scalar position RoPE. MRoPE positions
+                // are per-token, so they apply identically to this rank's head slice.
+                bool useMRoPE = _pendingMRoPEPositions != null && _pendingMRoPEPositions.Length >= 3 * seqLen;
+                if (useMRoPE)
+                {
+                    qTensor = ApplyMRoPEPrefill(qTensor, numHeadsPerGpu, seqLen, _pendingMRoPEPositions);
+                    kTensor = ApplyMRoPEPrefill(kTensor, numKVHeadsPerGpu, seqLen, _pendingMRoPEPositions);
+                }
+                else
+                {
+                    qTensor = ApplyRoPEPrefill(qTensor, numHeadsPerGpu, seqLen, startPos);
+                    kTensor = ApplyRoPEPrefill(kTensor, numKVHeadsPerGpu, seqLen, startPos);
+                }
 
                 if (seqLen == 1)
                 {
