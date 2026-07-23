@@ -99,9 +99,12 @@ namespace TensorSharp.Models
 
         private void ShardGemma4WeightsForTP()
         {
-            // Attention: fused QKV (column) + output (row)
+            // Attention: fused QKV (column) + output (row). KV-sharing layers
+            // (KV donor map) only project Q — they carry a separate
+            // "attn_q.weight" instead of the fused QKV, so it must be sharded
+            // column-parallel too.
             ShardWeightsForTensorParallelism(
-                columnParallelPatterns: new[] { "attn_qkv.weight" },
+                columnParallelPatterns: new[] { "attn_qkv.weight", "attn_q.weight" },
                 rowParallelPatterns: new[] { "attn_output.weight" });
 
             // Dense FFN: gate_up (column) + down (row)
@@ -408,6 +411,7 @@ namespace TensorSharp.Models
             string prefix = $"blk.{layer}";
             int tp = TpDegree;
             bool isLocal = IsLocalLayer(layer);
+            bool isShared = _kvDonorMap != null && _kvDonorMap.ContainsKey(layer);
             int headDim = HeadDimForLayer(layer);
             int numKVHeads = KVHeadsForLayer(layer);
             int numHeadsPerGpu = Config.NumHeads / tp;
@@ -416,14 +420,18 @@ namespace TensorSharp.Models
             // 1. Pre-attention norm (replicated).
             Tensor[] normed = TpRMSNorm(hidden, $"{prefix}.attn_norm.weight");
 
-            // 2. Column-parallel fused QKV projection.
-            Tensor[] qkvFused = TpColumnParallelLinear(normed[0], $"{prefix}.attn_qkv.weight");
+            // 2. Column-parallel projection. KV-sharing layers only project Q
+            // (they read K/V from their donor layer's cache); all other layers
+            // use the fused QKV projection.
+            Tensor[] qkvFused = isShared
+                ? TpColumnParallelLinear(normed[0], $"{prefix}.attn_q.weight")
+                : TpColumnParallelLinear(normed[0], $"{prefix}.attn_qkv.weight");
             for (int r = 0; r < tp; r++)
                 normed[r].Dispose();
 
             // 3. Per-GPU attention.
             Tensor[] attnOut = Gemma4AttentionTP(qkvFused, layer, seqLen, startPos,
-                isLocal, headDim, numHeadsPerGpu, numKVHeadsPerGpu);
+                isLocal, isShared, headDim, numHeadsPerGpu, numKVHeadsPerGpu);
 
             // 4. Row-parallel output projection + AllReduce.
             Tensor reducedAttn = TpRowParallelLinear(attnOut, $"{prefix}.attn_output.weight");
@@ -449,7 +457,7 @@ namespace TensorSharp.Models
         }
 
         private Tensor[] Gemma4AttentionTP(Tensor[] qkvFused, int layer, int seqLen, int startPos,
-            bool isLocal, int headDim, int numHeadsPerGpu, int numKVHeadsPerGpu)
+            bool isLocal, bool isShared, int headDim, int numHeadsPerGpu, int numKVHeadsPerGpu)
         {
             int tp = TpDegree;
             int qDimPerGpu = numHeadsPerGpu * headDim;
@@ -457,6 +465,8 @@ namespace TensorSharp.Models
             int totalSeqLen = startPos + seqLen;
             string prefix = $"blk.{layer}";
             float ropeBase = isLocal ? _ropeLocalBase : _ropeGlobalBase;
+            // KV-sharing layers attend the donor layer's cache instead of their own.
+            int kvCacheLayer = isShared ? _kvDonorMap[layer] : layer;
 
             var results = new Tensor[tp];
 
@@ -464,9 +474,15 @@ namespace TensorSharp.Models
             {
                 var alloc = _tpGroup.GetAllocator(r);
 
-                // Split Q, K, V from fused QKV output.
-                Tensor qTensor, kTensor, vTensor;
-                if (seqLen == 1)
+                // Split Q, K, V from fused QKV output. KV-sharing layers only
+                // projected Q; K/V come from the donor's cache.
+                Tensor qTensor, kTensor = null, vTensor = null;
+                if (isShared)
+                {
+                    // The projection output is Q-only; use it directly.
+                    qTensor = qkvFused[r];
+                }
+                else if (seqLen == 1)
                 {
                     qTensor = qkvFused[r].Narrow(1, 0, qDimPerGpu);
                     kTensor = qkvFused[r].Narrow(1, qDimPerGpu, kDimPerGpu);
@@ -484,13 +500,16 @@ namespace TensorSharp.Models
                     qkvFused[r].Dispose();
                 }
 
-                // QK norm (per-GPU, replicated weights).
+                // QK norm (per-GPU, replicated weights). K is skipped for
+                // KV-sharing layers (they reuse the donor's cached K/V).
                 qTensor = ApplyGemma4QKNormTP(qTensor, $"{prefix}.attn_q_norm.weight", numHeadsPerGpu, headDim, seqLen, r);
-                kTensor = ApplyGemma4QKNormTP(kTensor, $"{prefix}.attn_k_norm.weight", numKVHeadsPerGpu, headDim, seqLen, r);
+                if (!isShared)
+                    kTensor = ApplyGemma4QKNormTP(kTensor, $"{prefix}.attn_k_norm.weight", numKVHeadsPerGpu, headDim, seqLen, r);
 
                 // RoPE.
                 qTensor = ApplyGemma4RoPETP(qTensor, numHeadsPerGpu, headDim, seqLen, startPos, ropeBase);
-                kTensor = ApplyGemma4RoPETP(kTensor, numKVHeadsPerGpu, headDim, seqLen, startPos, ropeBase);
+                if (!isShared)
+                    kTensor = ApplyGemma4RoPETP(kTensor, numKVHeadsPerGpu, headDim, seqLen, startPos, ropeBase);
 
                 // Q scaling: multiply by 1/sqrt(headDim).
                 float qScale = 1f / MathF.Sqrt(headDim);
@@ -498,17 +517,21 @@ namespace TensorSharp.Models
 
                 if (seqLen == 1)
                 {
-                    // Decode: copy K/V to per-GPU cache, run attention.
-                    CopyToCacheDecode(_tpKvCacheK[layer][r], kTensor, _tpKvCacheV[layer][r], vTensor,
-                        numKVHeadsPerGpu, headDim, startPos);
-                    kTensor.Dispose();
-                    vTensor.Dispose();
+                    // Decode: copy K/V to per-GPU cache (own layers only), run
+                    // attention against the own or donor cache.
+                    if (!isShared)
+                    {
+                        CopyToCacheDecode(_tpKvCacheK[layer][r], kTensor, _tpKvCacheV[layer][r], vTensor,
+                            numKVHeadsPerGpu, headDim, startPos);
+                        kTensor.Dispose();
+                        vTensor.Dispose();
+                    }
 
                     int attendLen = isLocal ? Math.Min(totalSeqLen, _slidingWindow) : totalSeqLen;
                     int attendStart = totalSeqLen - attendLen;
 
                     var attnResult = new Tensor(alloc, DType.Float32, 1, numHeadsPerGpu * headDim);
-                    AttentionDecodeWithWindow(qTensor, _tpKvCacheK[layer][r], _tpKvCacheV[layer][r], attnResult,
+                    AttentionDecodeWithWindow(qTensor, _tpKvCacheK[kvCacheLayer][r], _tpKvCacheV[kvCacheLayer][r], attnResult,
                         numHeadsPerGpu, numKVHeadsPerGpu, headDim, headDim,
                         attendStart, totalSeqLen, 1f);
                     qTensor.Dispose();
@@ -520,19 +543,25 @@ namespace TensorSharp.Models
                     // Prefill path.
                     Tensor qHeads = ReshapeToHeads(qTensor, numHeadsPerGpu, seqLen, headDim);
                     qTensor.Dispose();
-                    Tensor kHeads = ReshapeToHeads(kTensor, numKVHeadsPerGpu, seqLen, headDim);
-                    kTensor.Dispose();
-                    Tensor vHeads = ReshapeToHeads(vTensor, numKVHeadsPerGpu, seqLen, headDim);
-                    vTensor.Dispose();
 
-                    CopyToCache(_tpKvCacheK[layer][r], kHeads, startPos, seqLen);
-                    CopyToCache(_tpKvCacheV[layer][r], vHeads, startPos, seqLen);
-                    kHeads.Dispose();
-                    vHeads.Dispose();
+                    // Own layers project + cache their K/V; KV-sharing layers
+                    // reuse the donor's already-cached K/V.
+                    if (!isShared)
+                    {
+                        Tensor kHeads = ReshapeToHeads(kTensor, numKVHeadsPerGpu, seqLen, headDim);
+                        kTensor.Dispose();
+                        Tensor vHeads = ReshapeToHeads(vTensor, numKVHeadsPerGpu, seqLen, headDim);
+                        vTensor.Dispose();
+
+                        CopyToCache(_tpKvCacheK[layer][r], kHeads, startPos, seqLen);
+                        CopyToCache(_tpKvCacheV[layer][r], vHeads, startPos, seqLen);
+                        kHeads.Dispose();
+                        vHeads.Dispose();
+                    }
 
                     int groupSize = numHeadsPerGpu / numKVHeadsPerGpu;
-                    Tensor kExpanded = ExpandKVHeads(_tpKvCacheK[layer][r], groupSize, totalSeqLen);
-                    Tensor vExpanded = ExpandKVHeads(_tpKvCacheV[layer][r], groupSize, totalSeqLen);
+                    Tensor kExpanded = ExpandKVHeads(_tpKvCacheK[kvCacheLayer][r], groupSize, totalSeqLen);
+                    Tensor vExpanded = ExpandKVHeads(_tpKvCacheV[kvCacheLayer][r], groupSize, totalSeqLen);
 
                     using var kT = kExpanded.Transpose(1, 2);
                     var scores = new Tensor(alloc, DType.Float32, numHeadsPerGpu, seqLen, totalSeqLen);
