@@ -116,6 +116,19 @@ namespace TensorSharp.Models
             Tensor hidden0 = Embedding(tokens);
             _embTicks += Stopwatch.GetTimestamp() - t1;
 
+            // Inject pending vision embeddings on rank 0 before broadcasting
+            // (mirrors the non-TP ForwardCore and the batched TP path). Without
+            // this, multimodal prompts silently drop the image under TP.
+            if (_pendingVisionEmbeddingsList.Count > 0)
+            {
+                foreach (var (embeddings, position) in _pendingVisionEmbeddingsList)
+                {
+                    InjectVisionEmbeddings(hidden0, embeddings, position, startPos);
+                    embeddings.Dispose();
+                }
+                _pendingVisionEmbeddingsList.Clear();
+            }
+
             // Broadcast embedding to all GPUs.
             Tensor[] hidden = BroadcastTensorToAllRanks(hidden0);
 

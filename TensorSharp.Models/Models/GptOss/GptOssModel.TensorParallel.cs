@@ -521,8 +521,8 @@ namespace TensorSharp.Models
                 // RoPE (NeoX with YaRN scaling).
                 if (seqLen == 1)
                 {
-                    ApplyGptOssRoPEDecode(qTensor, numHeadsPerGpu, headDim, startPos);
-                    ApplyGptOssRoPEDecode(kTensor, numKVHeadsPerGpu, headDim, startPos);
+                    qTensor = ApplyGptOssRoPEDecode(qTensor, numHeadsPerGpu, headDim, startPos);
+                    kTensor = ApplyGptOssRoPEDecode(kTensor, numKVHeadsPerGpu, headDim, startPos);
                 }
                 else
                 {
@@ -615,74 +615,18 @@ namespace TensorSharp.Models
             return results;
         }
 
-        private void ApplyGptOssRoPEDecode(Tensor data, int numHeads, int headDim, int position)
+        private Tensor ApplyGptOssRoPEDecode(Tensor data, int numHeads, int headDim, int position)
         {
-            // NeoX-style RoPE with YaRN scaling
-            int ropeDim = headDim;
-            int halfDim = ropeDim / 2;
-            float freqScale = 1.0f / Config.RopeScale;
-
-            unsafe
-            {
-                float* ptr = GetFloatPtr(data);
-                for (int h = 0; h < numHeads; h++)
-                {
-                    float* head = ptr + h * headDim;
-                    float* hi = head + halfDim;
-                    for (int i = 0; i < halfDim; i++)
-                    {
-                        float freq = ComputeYaRNFreq(i, halfDim, freqScale);
-                        float theta = position * freq;
-                        float cos = MathF.Cos(theta);
-                        float sin = MathF.Sin(theta);
-                        float x0 = head[i], x1 = hi[i];
-                        head[i] = x0 * cos - x1 * sin;
-                        hi[i] = x0 * sin + x1 * cos;
-                    }
-                }
-            }
-            InvalidateTensorDeviceCache(data);
+            // Delegate to the shared non-TP RoPE so the full YaRN extension
+            // (per-frequency ramp blend + mscale amplitude) is applied — the
+            // previous hand-rolled loop did only flat position-interpolation,
+            // which corrupts attention whenever RopeScale != 1.
+            return ApplyRoPEInPlace(data, numHeads, headDim, 1, position);
         }
 
         private Tensor ApplyGptOssRoPEPrefill(Tensor data, int numHeads, int headDim, int seqLen, int startPos)
         {
-            int ropeDim = headDim;
-            int halfDim = ropeDim / 2;
-            float freqScale = 1.0f / Config.RopeScale;
-
-            unsafe
-            {
-                float* ptr = GetFloatPtr(data);
-                for (int s = 0; s < seqLen; s++)
-                {
-                    int position = startPos + s;
-                    float* row = ptr + s * numHeads * headDim;
-                    for (int h = 0; h < numHeads; h++)
-                    {
-                        float* head = row + h * headDim;
-                        float* hi = head + halfDim;
-                        for (int i = 0; i < halfDim; i++)
-                        {
-                            float freq = ComputeYaRNFreq(i, halfDim, freqScale);
-                            float theta = position * freq;
-                            float cos = MathF.Cos(theta);
-                            float sin = MathF.Sin(theta);
-                            float x0 = head[i], x1 = hi[i];
-                            head[i] = x0 * cos - x1 * sin;
-                            hi[i] = x0 * sin + x1 * cos;
-                        }
-                    }
-                }
-            }
-            InvalidateTensorDeviceCache(data);
-            return data;
-        }
-
-        private float ComputeYaRNFreq(int i, int halfDim, float freqScale)
-        {
-            // YaRN frequency computation matching the existing GptOss RoPE
-            float baseFreq = 1.0f / MathF.Pow(Config.RopeBase, 2.0f * i / (halfDim * 2));
-            return baseFreq * freqScale;
+            return ApplyRoPEInPlace(data, numHeads, headDim, seqLen, startPos);
         }
 
         private void ApplyGptOssCausalMask(Tensor scores, int seqLen, int totalSeqLen, int windowSize)
@@ -884,9 +828,13 @@ namespace TensorSharp.Models
                     Tensor downOut = TpExpertLinear(gate, downKey, r, seqLen);
                     gate.Dispose();
 
-                    // Down bias is replicated (added after AllReduce), so skip here.
                     // Weighted accumulate.
                     Ops.Mul(downOut, downOut, weight);
+                    // Replicated down bias: add weight*bias once across the upcoming
+                    // AllReduce by contributing weight/GlobalTpDegree on each of the
+                    // GlobalTpDegree ranks (local GPUs x nodes) so the AllReduce sum
+                    // reproduces weight*bias exactly once.
+                    AddReplicatedBiasScaled(downOut, downBiasKey, weight / GlobalTpDegree);
                     Ops.Add(output, output, downOut);
                     downOut.Dispose();
                 }
@@ -896,44 +844,6 @@ namespace TensorSharp.Models
 
             // AllReduce across ranks.
             _tpGroup.AllReduce(results);
-
-            // Add down biases (replicated, after AllReduce).
-            // The down bias is per-expert, but since we've already accumulated
-            // weighted expert outputs, we can't add per-expert biases post-hoc.
-            // Instead, the down bias should have been added per-expert before
-            // weighting. Let me fix this: add down bias inside the expert loop.
-            // Actually, for row-parallel, the bias is added AFTER the matmul but
-            // BEFORE the AllReduce. Since each rank computes a partial result,
-            // the bias should be added to each rank's partial. But the bias is
-            // the full hidden-size bias, not split. So it should be added once
-            // after AllReduce. But we have multiple experts...
-            //
-            // The correct approach: each expert's down bias is added to that
-            // expert's output before weighting and accumulation. Since the down
-            // projection is row-parallel, each rank computes a partial sum.
-            // The bias should be added to the FULL result after AllReduce.
-            // But with multiple experts, each has its own bias.
-            //
-            // For simplicity and correctness: add each expert's down bias
-            // inside the loop, before weighting. This means the bias is added
-            // to each rank's partial, which is incorrect for row-parallel.
-            //
-            // The correct fix: don't shard the down bias. Add it after the
-            // expert's down matmul, before weighting. Since the down matmul
-            // is row-parallel (partial sum), the bias should only be added
-            // to the final reduced result. But with multiple experts, we need
-            // to track which bias goes with which expert.
-            //
-            // Simplest correct approach: add the down bias to the accumulated
-            // output after AllReduce, weighted by the routing weight.
-            for (int r = 0; r < tp; r++)
-            {
-                // Re-compute routing to get expert indices and weights
-                // (they're identical on all ranks).
-                // Actually, we already have them from the loop above.
-                // For now, skip the down bias in TP mode — it's a small
-                // correction that can be added as a follow-up.
-            }
 
             return results;
         }
@@ -985,6 +895,32 @@ namespace TensorSharp.Models
                     for (int i = 0; i < dim; i++)
                         row[i] += bPtr[i];
                 }
+            }
+        }
+
+        /// <summary>
+        /// Add a replicated (unsharded) bias scaled by <paramref name="scale"/> to
+        /// a [seqLen, outDim] tensor, broadcasting the [outDim] bias across rows.
+        /// Used for the MoE expert down bias, which is replicated and must be added
+        /// once across the row-parallel AllReduce: callers pass weight/GlobalTpDegree
+        /// so the AllReduce's sum over all ranks reproduces weight*bias exactly once.
+        /// </summary>
+        private unsafe void AddReplicatedBiasScaled(Tensor tensor, string biasName, float scale)
+        {
+            if (!_weights.TryGetValue(biasName, out var bias))
+                return;
+
+            float* rPtr = GetFloatPtr(tensor);
+            float* bPtr = GetFloatPtr(bias);
+            int seqLen = (int)tensor.Sizes[0];
+            int outDim = (int)tensor.Sizes[1];
+            int biasDim = (int)bias.ElementCount();
+            int dim = Math.Min(outDim, biasDim);
+            for (int s = 0; s < seqLen; s++)
+            {
+                float* row = rPtr + s * outDim;
+                for (int i = 0; i < dim; i++)
+                    row[i] += scale * bPtr[i];
             }
         }
 

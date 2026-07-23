@@ -1430,17 +1430,43 @@ namespace TensorSharp.Models
 
             var topExperts = new int[topK];
             var topWeights = new float[topK];
-            float sum = 0;
             for (int k = 0; k < topK; k++)
-            {
                 topExperts[k] = indices[k];
-                topWeights[k] = routerLogits[indices[k]];
-                sum += topWeights[k];
-            }
 
-            if (_normTopKProb && sum > 0)
+            if (_normTopKProb)
+            {
+                // routerLogits are RAW logits: softmax over the selected top-K
+                // experts (matches the non-TP SelectTopKRouteWeights). The previous
+                // raw-logit / raw-sum renormalization produced wrong (even negative)
+                // expert weights and corrupted every MoE layer.
+                float maxLogit = float.NegativeInfinity;
                 for (int k = 0; k < topK; k++)
-                    topWeights[k] /= sum;
+                {
+                    float v = routerLogits[topExperts[k]];
+                    if (v > maxLogit) maxLogit = v;
+                }
+                float sum = 0f;
+                for (int k = 0; k < topK; k++)
+                {
+                    float w = MathF.Exp(routerLogits[topExperts[k]] - maxLogit);
+                    topWeights[k] = w;
+                    sum += w;
+                }
+                if (sum > 0f)
+                {
+                    float inv = 1.0f / sum;
+                    for (int k = 0; k < topK; k++)
+                        topWeights[k] *= inv;
+                }
+            }
+            else
+            {
+                // routerLogits are already full-softmax probabilities (the caller
+                // pre-softmaxed): use the selected probabilities directly, with no
+                // further renormalization.
+                for (int k = 0; k < topK; k++)
+                    topWeights[k] = routerLogits[topExperts[k]];
+            }
 
             return (topExperts, topWeights);
         }

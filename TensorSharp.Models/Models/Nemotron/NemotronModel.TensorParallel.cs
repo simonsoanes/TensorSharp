@@ -110,15 +110,17 @@ namespace TensorSharp.Models
         private void ShardNemotronWeightsForTP()
         {
             // Attention output (row) + dense FFN down (row). The fused attn_qkv
-            // ([Q|K|V]) and ffn_gate_up ([gate|up]) are column-parallel but need
-            // segment-aware sharding (below): a contiguous split would give each
-            // rank whole segments instead of its per-rank [Q_r|K_r|V_r] /
-            // [gate_r|up_r] slice.
+            // ([Q|K|V]) is column-parallel but needs segment-aware sharding
+            // (below). The dense FFN up projection (ffn_up.weight) is a single
+            // column segment, so the generic contiguous column split is correct.
+            var columnPatterns = _numExperts == 0
+                ? new[] { "ffn_up.weight" }
+                : Array.Empty<string>();
             var rowPatterns = _numExperts == 0
                 ? new[] { "attn_output.weight", "ffn_down.weight" }
                 : new[] { "attn_output.weight" };
             ShardWeightsForTensorParallelism(
-                columnParallelPatterns: Array.Empty<string>(),
+                columnParallelPatterns: columnPatterns,
                 rowParallelPatterns: rowPatterns);
 
             int headDim = Config.HeadDim;
@@ -130,10 +132,6 @@ namespace TensorSharp.Models
                     _layerNumHeads[layer] * headDim,     // Q
                     _layerNumKVHeads[layer] * headDim,   // K
                     _layerNumKVHeads[layer] * headDim);  // V
-
-                // Dense fused gate_up only exists on non-MoE FFN layers.
-                if (_numExperts == 0)
-                    ShardFusedGateUpColumnParallel($"{_layerPrefixes[layer]}ffn_gate_up.weight");
             }
 
             // MoE expert weights: tensor-parallel experts
@@ -387,6 +385,25 @@ namespace TensorSharp.Models
             Tensor hidden0 = Embedding(tokens);
             _embTicks += Stopwatch.GetTimestamp() - t1;
 
+            // Inject pending multimodal (vision/audio) embeddings on rank 0 before
+            // broadcasting (mirrors the non-TP ForwardCore). Without this, image/
+            // audio input is silently dropped under TP.
+            if (_pendingVisionEmbeddings.Count > 0 || _pendingAudioEmbeddings.Count > 0)
+            {
+                foreach (var (emb, pos) in _pendingVisionEmbeddings)
+                {
+                    InjectMultimodalEmbeddings(hidden0, emb, pos);
+                    emb.Dispose();
+                }
+                _pendingVisionEmbeddings.Clear();
+                foreach (var (emb, pos) in _pendingAudioEmbeddings)
+                {
+                    InjectMultimodalEmbeddings(hidden0, emb, pos);
+                    emb.Dispose();
+                }
+                _pendingAudioEmbeddings.Clear();
+            }
+
             // Broadcast embedding to all GPUs.
             Tensor[] hidden = BroadcastTensorToAllRanks(hidden0);
 
@@ -602,41 +619,23 @@ namespace TensorSharp.Models
             if (_numExperts > 0)
                 return NemotronMoEBlockTP(hidden, layer, seqLen, prefix);
 
-            // Dense FFN: norm → gate_up (column) → SiLU·mul → down (row) → residual
+            // Dense FFN: norm -> up (column) -> ReLU^2 -> down (row) -> residual.
+            // Nemotron uses attn_norm.weight for the FFN input norm and a single
+            // ffn_up projection with ReLU^2 (not a gated SwiGLU).
             int tp = TpDegree;
 
-            Tensor[] normed = TpRMSNorm(hidden, prefix + "ffn_norm.weight");
+            Tensor[] normed = TpRMSNorm(hidden, prefix + "attn_norm.weight");
 
-            Tensor[] gateUp = TpColumnParallelLinear(normed[0], prefix + "ffn_gate_up.weight");
+            Tensor[] upResults = TpColumnParallelLinear(normed[0], prefix + "ffn_up.weight");
             for (int r = 0; r < tp; r++)
                 normed[r].Dispose();
 
-            int halfDim = (int)(gateUp[0].Sizes[1] / 2);
-            Tensor[] gateResults = new Tensor[tp];
             for (int r = 0; r < tp; r++)
-            {
-                Tensor gate, up;
-                if (seqLen == 1)
-                {
-                    gate = gateUp[r].Narrow(1, 0, halfDim);
-                    up = gateUp[r].Narrow(1, halfDim, halfDim);
-                }
-                else
-                {
-                    using var gView = gateUp[r].Narrow(1, 0, halfDim);
-                    gate = Ops.NewContiguous(gView);
-                    using var uView = gateUp[r].Narrow(1, halfDim, halfDim);
-                    up = Ops.NewContiguous(uView);
-                }
-                gateUp[r].Dispose();
-                Ops.SiLUMul(gate, gate, up);
-                up.Dispose();
-                gateResults[r] = gate;
-            }
+                ReluSquaredInPlace(upResults[r]);
 
-            Tensor ffnOut = TpRowParallelLinear(gateResults, prefix + "ffn_down.weight");
+            Tensor ffnOut = TpRowParallelLinear(upResults, prefix + "ffn_down.weight");
             for (int r = 0; r < tp; r++)
-                gateResults[r].Dispose();
+                upResults[r].Dispose();
 
             Tensor[] ffnReplicated = BroadcastTensorToAllRanks(ffnOut);
             TpResidualAdd(hidden, ffnReplicated);
@@ -655,41 +654,52 @@ namespace TensorSharp.Models
         {
             int tp = TpDegree;
             int hiddenSize = Config.HiddenSize;
+            ref var moeInfo = ref _moeLayerInfo[layer];
+            bool hasLatent = moeInfo.HasLatentIn && moeInfo.LatentDim > 0;
+            int expertOutDim = hasLatent ? moeInfo.LatentDim : hiddenSize;
 
-            // 1. FFN norm (replicated).
-            Tensor[] normed = TpRMSNorm(hidden, prefix + "ffn_norm.weight");
+            // 1. FFN input norm. Nemotron uses attn_norm.weight for every block
+            //    type (the TP path previously read ffn_norm.weight, which the
+            //    GGUF does not contain).
+            Tensor[] normed = TpRMSNorm(hidden, prefix + "attn_norm.weight");
 
-            // 2. Router (replicated — every rank computes identical routing).
+            // Router bias (replicated), if the model ships one.
+            float[] routerBias = null;
+            if (_weights.TryGetValue(prefix + "exp_probs_b.bias", out var biasTensor) ||
+                _weights.TryGetValue(prefix + "exp_probs_b", out biasTensor))
+                routerBias = TensorToFloatArray(biasTensor);
+
+            // Latent-in projection (replicated): when present, experts operate in
+            // latent space and the accumulated result is projected back to hidden
+            // size via ffn_latent_out after the AllReduce.
+            Tensor latentIn = hasLatent ? LinearForward(normed[0], prefix + "ffn_latent_in.weight") : null;
+
+            // 2. Per-rank expert accumulation (column-parallel up + row-parallel down).
             var results = new Tensor[tp];
             for (int r = 0; r < tp; r++)
             {
                 var alloc = _tpGroup.GetAllocator(r);
-                var localInput = normed[r];
 
-                Tensor routerLogits = LinearForward(localInput, prefix + "ffn_gate_inp.weight");
+                Tensor routerLogits = LinearForward(normed[r], prefix + "ffn_gate_inp.weight");
                 float[] routePtr = TensorToFloatArray(routerLogits);
                 routerLogits.Dispose();
 
-                var (topExperts, routeWeights) = SelectNemotronTopKExperts(routePtr);
+                var (topExperts, routeWeights) = SelectNemotronTopKExperts(routePtr, routerBias);
 
-                var output = new Tensor(alloc, DType.Float32, seqLen, hiddenSize);
+                Tensor expertInput = hasLatent ? latentIn : normed[r];
+
+                var output = new Tensor(alloc, DType.Float32, seqLen, expertOutDim);
                 Ops.Fill(output, 0f);
 
                 for (int k = 0; k < _numExpertsUsed; k++)
                 {
                     int expertIdx = topExperts[k];
                     float weight = routeWeights[k];
-
                     string upKey = prefix + $"ffn_up_exps.{expertIdx}.weight";
                     string downKey = prefix + $"ffn_down_exps.{expertIdx}.weight";
 
-                    Tensor upOut = TpNemotronExpertLinear(localInput, upKey, r, seqLen);
-
-                    // Nemotron MoE uses SiLU activation on the up projection
-                    // (no separate gate — the up projection IS the gate+up fused).
-                    // Apply SiLU in-place.
-                    Ops.SiLU(upOut, upOut);
-
+                    Tensor upOut = TpNemotronExpertLinear(expertInput, upKey, r, seqLen);
+                    ReluSquaredInPlace(upOut);   // Nemotron MoE uses ReLU^2, not SiLU.
                     Tensor downOut = TpNemotronExpertLinear(upOut, downKey, r, seqLen);
                     upOut.Dispose();
 
@@ -701,16 +711,43 @@ namespace TensorSharp.Models
                 results[r] = output;
             }
 
-            for (int r = 0; r < tp; r++)
-                normed[r].Dispose();
+            latentIn?.Dispose();
 
-            // 3. AllReduce.
+            // 3. AllReduce the expert accumulation across ranks.
             _tpGroup.AllReduce(results);
 
-            // 4. Residual add.
-            TpResidualAdd(hidden, results);
-            for (int r = 1; r < tp; r++)
-                results[r].Dispose();
+            // 4. Project back from latent space (replicated) to hidden size.
+            Tensor contribution;
+            if (hasLatent)
+            {
+                contribution = LinearForward(results[0], prefix + "ffn_latent_out.weight");
+                for (int r = 0; r < tp; r++) results[r].Dispose();
+            }
+            else
+            {
+                contribution = results[0];
+                for (int r = 1; r < tp; r++) results[r].Dispose();
+            }
+
+            // 5. Shared experts (replicated): normed -> up_shexp -> ReLU^2 ->
+            //    down_shexp, added to the contribution. Computed on rank 0 from the
+            //    replicated normed input.
+            if (moeInfo.HasSharedExperts)
+            {
+                Tensor sharedUp = LinearForward(normed[0], prefix + "ffn_up_shexp.weight");
+                ReluSquaredInPlace(sharedUp);
+                using var sharedDown = LinearForward(sharedUp, prefix + "ffn_down_shexp.weight");
+                sharedUp.Dispose();
+                Ops.Add(contribution, contribution, sharedDown);
+            }
+
+            for (int r = 0; r < tp; r++) normed[r].Dispose();
+
+            // 6. Broadcast the contribution to all ranks and add the residual.
+            Tensor[] contribReplicated = BroadcastTensorToAllRanks(contribution);
+            TpResidualAdd(hidden, contribReplicated);
+            for (int r = 1; r < tp; r++) contribReplicated[r].Dispose();
+            contribution.Dispose();
 
             return hidden;
         }
@@ -742,12 +779,23 @@ namespace TensorSharp.Models
             throw new KeyNotFoundException($"TP expert weight '{weightName}' not found.");
         }
 
-        private (int[] experts, float[] weights) SelectNemotronTopKExperts(float[] routerLogits)
+        private (int[] experts, float[] weights) SelectNemotronTopKExperts(float[] routerLogits, float[] bias)
         {
             int numExperts = routerLogits.Length;
+
+            // Router logits -> sigmoid probabilities; top-K selection uses the
+            // bias-adjusted probabilities (matches the non-TP MoEForward).
+            var probs = new float[numExperts];
+            var selectionProbs = new float[numExperts];
+            for (int e = 0; e < numExperts; e++)
+            {
+                probs[e] = SigmoidScalar(routerLogits[e]);
+                selectionProbs[e] = bias != null ? probs[e] + bias[e] : probs[e];
+            }
+
             var indices = new int[numExperts];
             for (int i = 0; i < numExperts; i++) indices[i] = i;
-            Array.Sort(indices, (a, b) => routerLogits[b].CompareTo(routerLogits[a]));
+            Array.Sort(indices, (a, b) => selectionProbs[b].CompareTo(selectionProbs[a]));
 
             var topExperts = new int[_numExpertsUsed];
             var topWeights = new float[_numExpertsUsed];
@@ -755,16 +803,21 @@ namespace TensorSharp.Models
             for (int k = 0; k < _numExpertsUsed; k++)
             {
                 topExperts[k] = indices[k];
-                topWeights[k] = routerLogits[indices[k]];
+                // Routing weight is the SIGMOID probability (not the raw logit and
+                // not the bias-adjusted selection probability).
+                topWeights[k] = probs[topExperts[k]];
                 sum += topWeights[k];
             }
 
-            // Nemotron normalizes expert weights
-            if (_expertWeightsNorm && sum > 0)
+            // Nemotron normalizes expert weights.
+            if (_expertWeightsNorm)
+            {
+                if (sum < 6.103515625e-5f) sum = 6.103515625e-5f;
                 for (int k = 0; k < _numExpertsUsed; k++)
                     topWeights[k] /= sum;
+            }
 
-            // Apply global expert scale
+            // Apply global expert scale.
             if (_expertWeightsScale != 1.0f)
                 for (int k = 0; k < _numExpertsUsed; k++)
                     topWeights[k] *= _expertWeightsScale;

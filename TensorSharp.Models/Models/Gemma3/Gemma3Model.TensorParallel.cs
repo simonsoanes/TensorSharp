@@ -127,6 +127,19 @@ namespace TensorSharp.Models
             // Gemma3 scales embeddings by sqrt(hidden_size).
             ScaleEmbedding(hidden0);
 
+            // Inject pending vision embeddings on rank 0 before broadcasting
+            // (mirrors the non-TP ForwardCore). Also clears the queue so the
+            // embeddings don't leak or get re-injected on a later forward.
+            if (_pendingVisionEmbeddingsList.Count > 0)
+            {
+                foreach (var (embeddings, position) in _pendingVisionEmbeddingsList)
+                {
+                    InjectVisionEmbeddings(hidden0, embeddings, position, startPos);
+                    embeddings.Dispose();
+                }
+                _pendingVisionEmbeddingsList.Clear();
+            }
+
             // Broadcast embedding to all GPUs.
             Tensor[] hidden = BroadcastTensorToAllRanks(hidden0);
 
