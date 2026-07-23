@@ -378,13 +378,28 @@ namespace TensorSharp.Models
             // Gemma4 scales embeddings by sqrt(hidden_size).
             ScaleEmbedding(hidden0);
 
+            // Per-Layer Embedding (PLE): a per-layer input combining a token
+            // embedding and a projection of the (initial) hidden state, injected
+            // at the end of every block. Computed once from the embedding — the
+            // non-TP path does the same. Without it the per-layer token-identity
+            // signal is never reinjected and generation collapses to the same
+            // input-independent output. Replicated input => identical on every
+            // node, so it needs no AllReduce.
+            Tensor perLayerInputs = _pleDim > 0 ? ComputePLE(tokens, hidden0, seqLen) : null;
+
             // Broadcast embedding to all GPUs.
             Tensor[] hidden = BroadcastTensorToAllRanks(hidden0);
 
             for (int layer = 0; layer < Config.NumLayers; layer++)
             {
-                hidden = Gemma4TransformerBlockTP(hidden, layer, seqLen, startPos);
+                Tensor perLayerInput = perLayerInputs != null
+                    ? ExtractPerLayerSlice(perLayerInputs, layer, seqLen)
+                    : null;
+                hidden = Gemma4TransformerBlockTP(hidden, layer, seqLen, startPos, perLayerInput);
+                perLayerInput?.Dispose();
             }
+
+            perLayerInputs?.Dispose();
 
             // Final norm + LM head on GPU 0 only.
             Tensor normed = RMSNormOp(hidden[0], "output_norm.weight");
@@ -425,7 +440,8 @@ namespace TensorSharp.Models
             return _logitsBuffer;
         }
 
-        private Tensor[] Gemma4TransformerBlockTP(Tensor[] hidden, int layer, int seqLen, int startPos)
+        private Tensor[] Gemma4TransformerBlockTP(Tensor[] hidden, int layer, int seqLen, int startPos,
+            Tensor perLayerInput)
         {
             string prefix = $"blk.{layer}";
             int tp = TpDegree;
@@ -472,10 +488,55 @@ namespace TensorSharp.Models
                 hidden[r].Dispose();
 
             // 6. FFN (dense or MoE).
-            if (HasMoE(layer))
-                return Gemma4MoEBlockTP(postAttnNormed, layer, seqLen, prefix);
-            else
-                return Gemma4DenseFFNBlockTP(postAttnNormed, layer, seqLen, prefix);
+            Tensor[] ffnOut = HasMoE(layer)
+                ? Gemma4MoEBlockTP(postAttnNormed, layer, seqLen, prefix)
+                : Gemma4DenseFFNBlockTP(postAttnNormed, layer, seqLen, prefix);
+
+            // 7. PLE injection + per-layer output scalar (replicated, rank 0).
+            ApplyGemma4PleAndScaleTP(ffnOut, perLayerInput, layer, prefix, seqLen);
+
+            return ffnOut;
+        }
+
+        /// <summary>
+        /// Gemma4's per-layer PLE block, run on the replicated rank-0 activation:
+        /// a gated bottleneck MLP (inp_gate -> GELU·perLayerInput -> proj ->
+        /// post_norm) added to the residual, followed by the per-layer output
+        /// scalar. Mirrors the non-TP TransformerBlock's PLE injection. The result
+        /// is then re-broadcast to the other local ranks so the next layer's
+        /// column-parallel projection sees identical input on every GPU.
+        /// </summary>
+        private void ApplyGemma4PleAndScaleTP(Tensor[] hidden, Tensor perLayerInput, int layer, string prefix, int seqLen)
+        {
+            int tp = TpDegree;
+
+            if (perLayerInput != null &&
+                (_weights.ContainsKey($"{prefix}.inp_gate.weight") || _quantWeights.ContainsKey($"{prefix}.inp_gate.weight")))
+            {
+                Tensor gate = LinearForward(hidden[0], $"{prefix}.inp_gate.weight");
+                if (gate != null)
+                {
+                    Ops.GELUMul(gate, gate, perLayerInput);
+                    using var pleProj = LinearForward(gate, $"{prefix}.proj.weight");
+                    gate.Dispose();
+                    if (pleProj != null)
+                    {
+                        string postPleNormKey = $"{prefix}.post_norm.weight";
+                        using var pleNormed = RMSNormOp(pleProj, postPleNormKey);
+                        Ops.Add(hidden[0], hidden[0], pleNormed);
+                    }
+                }
+            }
+
+            float scalar = _layerScalars[layer];
+            if (scalar != 1f)
+                Ops.Mul(hidden[0], hidden[0], scalar);
+
+            for (int r = 1; r < tp; r++)
+            {
+                hidden[r].Dispose();
+                hidden[r] = ReplicateTensorToRank(hidden[0], r);
+            }
         }
 
         private Tensor[] Gemma4AttentionTP(Tensor[] qkvFused, int layer, int seqLen, int startPos,
