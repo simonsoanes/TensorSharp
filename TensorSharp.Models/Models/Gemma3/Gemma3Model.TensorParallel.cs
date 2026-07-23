@@ -402,9 +402,16 @@ namespace TensorSharp.Models
         /// </summary>
         private void ShardGemma3WeightsForTP()
         {
+            // attn_q/k/v are separate (single column segment each), so the
+            // generic contiguous split is correct for them. The fused
+            // ffn_gate_up ([gate|up]) is not: a contiguous split would give
+            // rank 0 all of gate and rank 1 all of up. Shard it segment-aware.
             ShardWeightsForTensorParallelism(
-                columnParallelPatterns: new[] { "attn_q.weight", "attn_k.weight", "attn_v.weight", "ffn_gate_up.weight" },
+                columnParallelPatterns: new[] { "attn_q.weight", "attn_k.weight", "attn_v.weight" },
                 rowParallelPatterns: new[] { "attn_output.weight", "ffn_down.weight" });
+
+            for (int layer = 0; layer < Config.NumLayers; layer++)
+                ShardFusedGateUpColumnParallel($"blk.{layer}.ffn_gate_up.weight");
         }
     }
 }

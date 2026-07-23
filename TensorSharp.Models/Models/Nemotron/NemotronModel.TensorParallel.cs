@@ -109,18 +109,31 @@ namespace TensorSharp.Models
 
         private void ShardNemotronWeightsForTP()
         {
-            // Attention layers: fused QKV (column) + output (row)
+            // Attention output (row) + dense FFN down (row). The fused attn_qkv
+            // ([Q|K|V]) and ffn_gate_up ([gate|up]) are column-parallel but need
+            // segment-aware sharding (below): a contiguous split would give each
+            // rank whole segments instead of its per-rank [Q_r|K_r|V_r] /
+            // [gate_r|up_r] slice.
+            var rowPatterns = _numExperts == 0
+                ? new[] { "attn_output.weight", "ffn_down.weight" }
+                : new[] { "attn_output.weight" };
             ShardWeightsForTensorParallelism(
-                columnParallelPatterns: new[] { "attn_qkv.weight" },
-                rowParallelPatterns: new[] { "attn_output.weight" });
+                columnParallelPatterns: Array.Empty<string>(),
+                rowParallelPatterns: rowPatterns);
 
-            // Dense FFN layers: gate_up (column) + down (row)
-            // Only shard if dense FFN weights exist (non-MoE models)
-            if (_numExperts == 0)
+            int headDim = Config.HeadDim;
+            for (int layer = 0; layer < Config.NumLayers; layer++)
             {
-                ShardWeightsForTensorParallelism(
-                    columnParallelPatterns: new[] { "ffn_gate_up.weight" },
-                    rowParallelPatterns: new[] { "ffn_down.weight" });
+                // attn_qkv exists only on attention layers; the call no-ops
+                // otherwise. Mamba2 layers stay replicated (not sharded).
+                ShardConcatenatedColumnParallel($"{_layerPrefixes[layer]}attn_qkv.weight",
+                    _layerNumHeads[layer] * headDim,     // Q
+                    _layerNumKVHeads[layer] * headDim,   // K
+                    _layerNumKVHeads[layer] * headDim);  // V
+
+                // Dense fused gate_up only exists on non-MoE FFN layers.
+                if (_numExperts == 0)
+                    ShardFusedGateUpColumnParallel($"{_layerPrefixes[layer]}ffn_gate_up.weight");
             }
 
             // MoE expert weights: tensor-parallel experts

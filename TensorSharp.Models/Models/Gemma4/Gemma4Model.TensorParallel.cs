@@ -99,18 +99,30 @@ namespace TensorSharp.Models
 
         private void ShardGemma4WeightsForTP()
         {
-            // Attention: fused QKV (column) + output (row). KV-sharing layers
-            // (KV donor map) only project Q — they carry a separate
-            // "attn_q.weight" instead of the fused QKV, so it must be sharded
-            // column-parallel too.
+            // Attention + FFN row-parallel weights. attn_q.weight (KV-sharing
+            // layers, which only project Q) is a single column segment, so the
+            // generic contiguous column split is correct for it.
+            // The fused attn_qkv ([Q|K|V]) and ffn_gate_up ([gate|up]) are
+            // handled below with segment-aware sharding — a contiguous split
+            // would mix whole segments across ranks and corrupt the per-rank
+            // [Q_r|K_r|V_r] / [gate_r|up_r] layout the forward pass expects.
             ShardWeightsForTensorParallelism(
-                columnParallelPatterns: new[] { "attn_qkv.weight", "attn_q.weight" },
-                rowParallelPatterns: new[] { "attn_output.weight" });
+                columnParallelPatterns: new[] { "attn_q.weight" },
+                rowParallelPatterns: new[] { "attn_output.weight", "ffn_down.weight" });
 
-            // Dense FFN: gate_up (column) + down (row)
-            ShardWeightsForTensorParallelism(
-                columnParallelPatterns: new[] { "ffn_gate_up.weight" },
-                rowParallelPatterns: new[] { "ffn_down.weight" });
+            for (int layer = 0; layer < Config.NumLayers; layer++)
+            {
+                int hd = HeadDimForLayer(layer);
+                int kvHeads = KVHeadsForLayer(layer);
+                // Non-shared layers carry a fused [Q|K|V]; shared layers use
+                // attn_q (handled above) and have no attn_qkv (no-op here).
+                ShardConcatenatedColumnParallel($"blk.{layer}.attn_qkv.weight",
+                    Config.NumHeads * hd,  // Q
+                    kvHeads * hd,          // K
+                    kvHeads * hd);         // V
+
+                ShardFusedGateUpColumnParallel($"blk.{layer}.ffn_gate_up.weight");
+            }
 
             // MoE expert weights: tensor-parallel experts
             if (_numExperts > 0)
@@ -133,11 +145,14 @@ namespace TensorSharp.Models
                 // Expert weights: column-parallel for gate/up, row-parallel for down
                 for (int e = 0; e < _numExperts; e++)
                 {
-                    // Check for fused gate_up first, then separate
+                    // Check for fused gate_up first, then separate. A fused
+                    // [gate|up] expert weight needs segment-aware sharding (like
+                    // the dense gate_up); separate gate/up are single segments
+                    // and shard correctly with a contiguous split.
                     string fusedGateUpKey = prefix + $"ffn_gate_up_exps.{e}.weight";
                     if (_weights.ContainsKey(fusedGateUpKey) || _quantWeights.ContainsKey(fusedGateUpKey))
                     {
-                        ShardExpertColumnParallel(fusedGateUpKey);
+                        ShardFusedGateUpColumnParallel(fusedGateUpKey);
                     }
                     else
                     {

@@ -380,9 +380,24 @@ namespace TensorSharp.Models
         /// </summary>
         private void ShardQwen3WeightsForTP()
         {
+            // attn_output / ffn_down are row-parallel. The fused attn_qkv
+            // ([Q|K|V]) and ffn_gate_up ([gate|up]) are column-parallel but must
+            // be sharded segment-aware: a plain contiguous split would give
+            // rank 0 whole segments (all Q / all gate) and corrupt the per-rank
+            // [Q_r|K_r|V_r] / [gate_r|up_r] layout the forward pass re-splits.
             ShardWeightsForTensorParallelism(
-                columnParallelPatterns: new[] { "attn_qkv.weight", "ffn_gate_up.weight" },
+                columnParallelPatterns: Array.Empty<string>(),
                 rowParallelPatterns: new[] { "attn_output.weight", "ffn_down.weight" });
+
+            int hd = Config.HeadDim;
+            for (int layer = 0; layer < Config.NumLayers; layer++)
+            {
+                ShardConcatenatedColumnParallel($"blk.{layer}.attn_qkv.weight",
+                    Config.NumHeads * hd,     // Q
+                    Config.NumKVHeads * hd,   // K
+                    Config.NumKVHeads * hd);  // V
+                ShardFusedGateUpColumnParallel($"blk.{layer}.ffn_gate_up.weight");
+            }
         }
     }
 }

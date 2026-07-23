@@ -75,10 +75,22 @@ namespace TensorSharp.Models
 
         private void ShardGptOssWeightsForTP()
         {
-            // Attention: fused QKV (column) + output (row)
+            // Attention output is row-parallel. The fused attn_qkv ([Q|K|V]) is
+            // column-parallel but needs segment-aware sharding — a contiguous
+            // split would give each rank whole segments instead of its
+            // [Q_r|K_r|V_r] slice, corrupting the forward re-split.
             ShardWeightsForTensorParallelism(
-                columnParallelPatterns: new[] { "attn_qkv.weight" },
+                columnParallelPatterns: Array.Empty<string>(),
                 rowParallelPatterns: new[] { "attn_output.weight" });
+
+            int headDim = Config.HeadDim;
+            for (int l = 0; l < Config.NumLayers; l++)
+            {
+                ShardConcatenatedColumnParallel($"blk.{l}.attn_qkv.weight",
+                    Config.NumHeads * headDim,     // Q
+                    Config.NumKVHeads * headDim,   // K
+                    Config.NumKVHeads * headDim);  // V
+            }
 
             // Shard QKV bias (column-parallel: split along output dim)
             ShardGptOssBiasesForTP();
@@ -99,41 +111,22 @@ namespace TensorSharp.Models
         {
             int tp = TpDegree;
 
+            int headDim = Config.HeadDim;
             for (int l = 0; l < Config.NumLayers; l++)
             {
                 string prefix = $"blk.{l}.";
 
-                // QKV bias: column-parallel split
-                ShardBiasColumnParallel(prefix + "attn_qkv.bias");
+                // QKV bias: segment-aware column-parallel [Q|K|V] — must match
+                // the attn_qkv weight regrouping.
+                ShardConcatenatedBiasColumnParallel(prefix + "attn_qkv.bias",
+                    Config.NumHeads * headDim,     // Q
+                    Config.NumKVHeads * headDim,   // K
+                    Config.NumKVHeads * headDim);  // V
 
-                // Expert gate_up biases: column-parallel split
+                // Expert gate_up biases: segment-aware column-parallel [gate|up].
                 for (int e = 0; e < _numExperts; e++)
-                    ShardBiasColumnParallel(prefix + $"ffn_gate_up_exps.{e}.bias");
+                    ShardFusedGateUpBiasColumnParallel(prefix + $"ffn_gate_up_exps.{e}.bias");
             }
-        }
-
-        private void ShardBiasColumnParallel(string biasName)
-        {
-            int tp = TpDegree;
-            int globalTp = GlobalTpDegree;
-
-            if (!_weights.TryGetValue(biasName, out var bias))
-                return;
-
-            int totalDim = (int)bias.ElementCount();
-            int shardDim = totalDim / globalTp;
-
-            var shards = new Tensor[tp];
-            for (int r = 0; r < tp; r++)
-            {
-                var view = bias.Narrow(0, (TpRankOffset + r) * shardDim, shardDim);
-                shards[r] = Ops.NewContiguous(view);
-                view.Dispose();
-            }
-
-            _tpWeights[biasName] = shards;
-            _weights.Remove(biasName);
-            bias.Dispose();
         }
 
         private void ShardGptOssMoeWeightsForTP()
@@ -148,51 +141,13 @@ namespace TensorSharp.Models
 
                 for (int e = 0; e < _numExperts; e++)
                 {
-                    // Fused gate_up: column-parallel
-                    ShardGptOssExpertColumnParallel(prefix + $"ffn_gate_up_exps.{e}.weight");
+                    // Fused gate_up: segment-aware column-parallel [gate|up].
+                    // A contiguous split would give rank 0 all of gate and
+                    // rank 1 all of up, corrupting the SwiGLU inputs.
+                    ShardFusedGateUpColumnParallel(prefix + $"ffn_gate_up_exps.{e}.weight");
                     // Down: row-parallel
                     ShardGptOssExpertRowParallel(prefix + $"ffn_down_exps.{e}.weight");
                 }
-            }
-        }
-
-        private void ShardGptOssExpertColumnParallel(string weightName)
-        {
-            int tp = TpDegree;
-            int globalTp = GlobalTpDegree;
-
-            if (_quantWeights.TryGetValue(weightName, out var qw))
-            {
-                long rowsPerShard = qw.Ne1 / globalTp;
-                long rowBytes = NativeDequant.RowSize(qw.GgmlType, qw.Ne0);
-                long bytesPerShard = rowsPerShard * rowBytes;
-
-                var shards = new QuantizedWeight[tp];
-                for (int r = 0; r < tp; r++)
-                {
-                    IntPtr shardPtr = IntPtr.Add(qw.Data, (int)((TpRankOffset + r) * bytesPerShard));
-                    shards[r] = QuantizedWeight.CreateExternalView(
-                        shardPtr, bytesPerShard, qw.GgmlType, qw.Ne0, rowsPerShard, qw);
-                }
-
-                _tpQuantWeights[weightName] = shards;
-                _quantWeights.Remove(weightName);
-                qw.Dispose();
-            }
-            else if (_weights.TryGetValue(weightName, out var w))
-            {
-                long shardSize = w.Sizes[0] / globalTp;
-                var shards = new Tensor[tp];
-                for (int r = 0; r < tp; r++)
-                {
-                    var view = w.Narrow(0, (TpRankOffset + r) * shardSize, shardSize);
-                    shards[r] = Ops.NewContiguous(view);
-                    view.Dispose();
-                }
-
-                _tpWeights[weightName] = shards;
-                _weights.Remove(weightName);
-                w.Dispose();
             }
         }
 

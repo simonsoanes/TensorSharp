@@ -2446,6 +2446,192 @@ namespace TensorSharp.Models
         }
 
         /// <summary>
+        /// Output dimension (row count) of a possibly-quantized weight, or 0 if
+        /// the weight is not present in either weight dictionary.
+        /// </summary>
+        protected int GetFusedOutputDim(string weightName)
+        {
+            if (_quantWeights.TryGetValue(weightName, out var qw))
+                return (int)qw.Ne1;
+            if (_weights.TryGetValue(weightName, out var w))
+                return (int)w.Sizes[0];
+            return 0;
+        }
+
+        /// <summary>
+        /// Shard a column-parallel weight whose output dimension is the
+        /// concatenation of several logical segments — e.g. a fused QKV
+        /// projection [Q | K | V] or a fused FFN [gate | up].
+        ///
+        /// The generic <see cref="ShardWeightsForTensorParallelism"/> column
+        /// split assigns each rank one CONTIGUOUS block of output rows. For a
+        /// concatenated weight that mixes whole segments across ranks (rank 0
+        /// gets all of Q/gate, rank 1 gets all of K+V/up), which is wrong: the
+        /// forward pass re-splits each rank's shard expecting it to contain that
+        /// rank's slice of EVERY segment, i.e. [seg0_r | seg1_r | …].
+        ///
+        /// This method instead gathers, for each rank, its 1/tp slice of every
+        /// segment in order, producing the per-rank layout the forward pass
+        /// expects. Every segment dim must be divisible by the global TP degree
+        /// (enforced by the per-model ValidateTpConstraints for head counts and
+        /// intermediate sizes). No-op if the weight is not present.
+        /// </summary>
+        protected void ShardConcatenatedColumnParallel(string weightName, params int[] segmentDims)
+        {
+            if (!IsTensorParallel) return;
+
+            int tp = TpDegree;
+            int globalTp = GlobalTpDegree;
+            int rankOffset = TpRankOffset;
+
+            // Output-row indices for a global rank: its 1/tp slice of each segment.
+            int[] BuildRows(int globalRank)
+            {
+                var idx = new List<int>();
+                int baseOff = 0;
+                foreach (int segDim in segmentDims)
+                {
+                    int perRank = segDim / globalTp;
+                    int start = baseOff + globalRank * perRank;
+                    for (int i = 0; i < perRank; i++)
+                        idx.Add(start + i);
+                    baseOff += segDim;
+                }
+                return idx.ToArray();
+            }
+
+            if (_quantWeights.TryGetValue(weightName, out var qw))
+            {
+                long rowBytes = NativeDequant.RowSize(qw.GgmlType, qw.Ne0);
+                var shards = new QuantizedWeight[tp];
+                for (int r = 0; r < tp; r++)
+                {
+                    int[] rows = BuildRows(rankOffset + r);
+                    long totalBytes = rows.Length * rowBytes;
+                    IntPtr shardPtr = QuantizedWeight.AllocateBuffer(totalBytes);
+                    unsafe
+                    {
+                        byte* src = (byte*)qw.Data.ToPointer();
+                        byte* dst = (byte*)shardPtr.ToPointer();
+                        for (int row = 0; row < rows.Length; row++)
+                            Buffer.MemoryCopy(
+                                src + (long)rows[row] * rowBytes,
+                                dst + (long)row * rowBytes,
+                                rowBytes, rowBytes);
+                    }
+                    shards[r] = new QuantizedWeight(shardPtr, totalBytes,
+                        qw.GgmlType, qw.Ne0, rows.Length);
+                }
+
+                _tpQuantWeights[weightName] = shards;
+                _quantWeights.Remove(weightName);
+                qw.Dispose();
+            }
+            else if (_weights.TryGetValue(weightName, out var w))
+            {
+                int inDim = (int)w.Sizes[1];
+                var shards = new Tensor[tp];
+                for (int r = 0; r < tp; r++)
+                {
+                    int[] rows = BuildRows(rankOffset + r);
+                    var shard = new Tensor(_tpGroup.GetAllocator(r), DType.Float32, rows.Length, inDim);
+                    unsafe
+                    {
+                        float* srcPtr = GetFloatPtr(w);
+                        float* dstPtr = GetFloatPtr(shard);
+                        for (int row = 0; row < rows.Length; row++)
+                            Buffer.MemoryCopy(
+                                srcPtr + (long)rows[row] * inDim,
+                                dstPtr + (long)row * inDim,
+                                (long)inDim * 4, (long)inDim * 4);
+                    }
+                    shards[r] = shard;
+                }
+
+                _tpWeights[weightName] = shards;
+                _weights.Remove(weightName);
+                w.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Shard a fused [gate | up] FFN projection as two equal column-parallel
+        /// segments, deriving the half size from the weight itself. No-op if the
+        /// weight is not present (e.g. a MoE layer with no dense gate_up).
+        /// </summary>
+        protected void ShardFusedGateUpColumnParallel(string weightName)
+        {
+            int fullDim = GetFusedOutputDim(weightName);
+            if (fullDim <= 0) return;
+            int half = fullDim / 2;
+            ShardConcatenatedColumnParallel(weightName, half, half);
+        }
+
+        /// <summary>
+        /// Column-parallel shard of a 1-D bias whose length is the concatenation
+        /// of several logical segments (fused QKV bias [Q|K|V], fused gate_up
+        /// bias [gate|up], …). The bias must be regrouped exactly like the
+        /// weight it accompanies (<see cref="ShardConcatenatedColumnParallel"/>),
+        /// otherwise each rank would add the wrong bias slice to its outputs.
+        /// No-op if the bias is not present.
+        /// </summary>
+        protected void ShardConcatenatedBiasColumnParallel(string biasName, params int[] segmentDims)
+        {
+            if (!IsTensorParallel) return;
+            if (!_weights.TryGetValue(biasName, out var bias)) return;
+
+            int tp = TpDegree;
+            int globalTp = GlobalTpDegree;
+            int rankOffset = TpRankOffset;
+
+            int[] BuildRows(int globalRank)
+            {
+                var idx = new List<int>();
+                int baseOff = 0;
+                foreach (int segDim in segmentDims)
+                {
+                    int perRank = segDim / globalTp;
+                    int start = baseOff + globalRank * perRank;
+                    for (int i = 0; i < perRank; i++)
+                        idx.Add(start + i);
+                    baseOff += segDim;
+                }
+                return idx.ToArray();
+            }
+
+            var shards = new Tensor[tp];
+            for (int r = 0; r < tp; r++)
+            {
+                int[] rows = BuildRows(rankOffset + r);
+                var shard = new Tensor(_tpGroup.GetAllocator(r), DType.Float32, rows.Length);
+                unsafe
+                {
+                    float* srcPtr = GetFloatPtr(bias);
+                    float* dstPtr = GetFloatPtr(shard);
+                    for (int i = 0; i < rows.Length; i++)
+                        dstPtr[i] = srcPtr[rows[i]];
+                }
+                shards[r] = shard;
+            }
+
+            _tpWeights[biasName] = shards;
+            _weights.Remove(biasName);
+            bias.Dispose();
+        }
+
+        /// <summary>
+        /// Column-parallel shard of a fused [gate | up] bias as two equal
+        /// segments, deriving the half length from the bias itself.
+        /// </summary>
+        protected void ShardFusedGateUpBiasColumnParallel(string biasName)
+        {
+            if (!_weights.TryGetValue(biasName, out var bias)) return;
+            int total = (int)bias.ElementCount();
+            int half = total / 2;
+            ShardConcatenatedBiasColumnParallel(biasName, half, half);
+        }
+
+        /// <summary>
         /// Column-parallel linear forward: each GPU computes its output slice
         /// using its weight shard. Input is replicated across all GPUs.
         /// Returns one output tensor per GPU, each with outDim/tp columns.

@@ -421,9 +421,24 @@ namespace TensorSharp.Models
         /// </summary>
         private void ShardMistral3WeightsForTP()
         {
+            // Separate attn_q/k/v are single column segments (contiguous split
+            // is correct). The fused attn_qkv ([Q|K|V]) and ffn_gate_up
+            // ([gate|up]) need segment-aware sharding: a contiguous split would
+            // hand each rank whole segments rather than its [Q_r|K_r|V_r] /
+            // [gate_r|up_r] slice, corrupting the forward re-split.
             ShardWeightsForTensorParallelism(
-                columnParallelPatterns: new[] { "attn_qkv.weight", "attn_q.weight", "attn_k.weight", "attn_v.weight", "ffn_gate_up.weight" },
+                columnParallelPatterns: new[] { "attn_q.weight", "attn_k.weight", "attn_v.weight" },
                 rowParallelPatterns: new[] { "attn_output.weight", "ffn_down.weight" });
+
+            for (int layer = 0; layer < Config.NumLayers; layer++)
+            {
+                // attn_qkv exists only on fused-QKV layers; no-op otherwise.
+                ShardConcatenatedColumnParallel($"blk.{layer}.attn_qkv.weight",
+                    Config.NumHeads * _attnKeyLen,     // Q
+                    Config.NumKVHeads * _attnKeyLen,   // K
+                    Config.NumKVHeads * _attnValLen);  // V
+                ShardFusedGateUpColumnParallel($"blk.{layer}.ffn_gate_up.weight");
+            }
         }
     }
 }
