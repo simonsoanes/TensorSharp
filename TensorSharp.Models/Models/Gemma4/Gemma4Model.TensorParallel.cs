@@ -270,7 +270,8 @@ namespace TensorSharp.Models
 
         private void InitGemma4TpKVCache(int initialSeqLen, int maxSeqLen)
         {
-            int tp = TpDegree;
+            int tp = TpDegree;              // local GPUs on this node (loop / allocator index)
+            int globalTp = GlobalTpDegree; // total ranks across the cluster (shard/head split)
             DType kvDtype = _kvCacheDtype.ToDType();
 
             _maxContextLength = maxSeqLen;
@@ -281,7 +282,9 @@ namespace TensorSharp.Models
             for (int l = 0; l < Config.NumLayers; l++)
             {
                 int kvHeads = KVHeadsForLayer(l);
-                int kvHeadsPerGpu = kvHeads / tp;
+                // Each rank owns 1/globalTp of the KV heads (weights are sharded
+                // by the GLOBAL degree). For multi-node runs globalTp > tp.
+                int kvHeadsPerGpu = kvHeads / globalTp;
                 int headDim = HeadDimForLayer(l);
                 int cacheLen = IsLocalLayer(l) ? Math.Min(_slidingWindow, initialSeqLen) : initialSeqLen;
 
@@ -297,8 +300,8 @@ namespace TensorSharp.Models
                 }
             }
 
-            Console.WriteLine($"  Gemma4 TP KV cache initialized: {tp} GPUs, " +
-                $"local KV/GPU={Config.NumKVHeads / tp}, global KV/GPU={_numGlobalKVHeads / tp}");
+            Console.WriteLine($"  Gemma4 TP KV cache initialized: {tp} local GPU(s)/{globalTp} total, " +
+                $"local KV/GPU={Config.NumKVHeads / globalTp}, global KV/GPU={_numGlobalKVHeads / globalTp}");
         }
 
         private void EnsureGemma4TpCacheCapacity(int requiredSeqLen)
@@ -314,6 +317,7 @@ namespace TensorSharp.Models
                 newCapacity = Math.Min(_maxContextLength, newCapacity * 2);
 
             int tp = TpDegree;
+            int globalTp = GlobalTpDegree;
             DType kvDtype = _kvCacheDtype.ToDType();
 
             for (int l = 0; l < Config.NumLayers; l++)
@@ -322,7 +326,7 @@ namespace TensorSharp.Models
                     continue; // SWA layers never grow
 
                 int kvHeads = KVHeadsForLayer(l);
-                int kvHeadsPerGpu = kvHeads / tp;
+                int kvHeadsPerGpu = kvHeads / globalTp; // 1/globalTp of KV heads per rank
                 int headDim = HeadDimForLayer(l);
 
                 for (int r = 0; r < tp; r++)
@@ -429,8 +433,11 @@ namespace TensorSharp.Models
             bool isShared = _kvDonorMap != null && _kvDonorMap.ContainsKey(layer);
             int headDim = HeadDimForLayer(layer);
             int numKVHeads = KVHeadsForLayer(layer);
-            int numHeadsPerGpu = Config.NumHeads / tp;
-            int numKVHeadsPerGpu = numKVHeads / tp;
+            // Per-rank head counts use the GLOBAL degree: weights/caches are
+            // sharded across all ranks in the cluster, not just this node's GPUs.
+            // (Single-node: GlobalTpDegree == TpDegree, so this is unchanged.)
+            int numHeadsPerGpu = Config.NumHeads / GlobalTpDegree;
+            int numKVHeadsPerGpu = numKVHeads / GlobalTpDegree;
 
             // 1. Pre-attention norm (replicated).
             Tensor[] normed = TpRMSNorm(hidden, $"{prefix}.attn_norm.weight");
