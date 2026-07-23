@@ -526,16 +526,26 @@ namespace TensorSharp.Models
                 // KV-sharing layers (they reuse the donor's cached K/V).
                 qTensor = ApplyGemma4QKNormTP(qTensor, $"{prefix}.attn_q_norm.weight", numHeadsPerGpu, headDim, seqLen, r);
                 if (!isShared)
+                {
                     kTensor = ApplyGemma4QKNormTP(kTensor, $"{prefix}.attn_k_norm.weight", numKVHeadsPerGpu, headDim, seqLen, r);
+                    // Gemma4 applies an UNWEIGHTED RMS norm to V before attention
+                    // (the non-TP path's ApplyUnweightedRMSNorm). The Gemma3-derived
+                    // TP path omitted it, so every layer attended to un-normalised
+                    // values and the output collapsed into repetitive gibberish.
+                    vTensor = ApplyGemma4VNormTP(vTensor, numKVHeadsPerGpu, headDim, seqLen, r);
+                }
 
                 // RoPE.
                 qTensor = ApplyGemma4RoPETP(qTensor, numHeadsPerGpu, headDim, seqLen, startPos, ropeBase);
                 if (!isShared)
                     kTensor = ApplyGemma4RoPETP(kTensor, numKVHeadsPerGpu, headDim, seqLen, startPos, ropeBase);
 
-                // Q scaling: multiply by 1/sqrt(headDim).
-                float qScale = 1f / MathF.Sqrt(headDim);
-                Ops.Mul(qTensor, qTensor, qScale);
+                // NOTE: no 1/sqrt(headDim) Q scaling here. Gemma4 attention runs at
+                // unit scale — the Q/K RMS norms provide the normalisation and the
+                // non-TP path passes scale=1.0 to every attention kernel with no Q
+                // pre-scaling. The previous Gemma3-style 1/sqrt(headDim) pre-scale
+                // shrank the logits ~16-22x, flattening attention to near-uniform and
+                // driving the repeated-token output under TP.
 
                 if (seqLen == 1)
                 {
@@ -630,6 +640,37 @@ namespace TensorSharp.Models
             Tensor result = normed.View(seqLen, numHeads * headDim);
             normed.Dispose();
             return result;
+        }
+
+        // Per-rank all-ones weight for the unweighted V RMS norm, recreated when
+        // the head dim changes (local SWA layers use 256, global layers 512).
+        private Tensor[] _tpVNormOnes;
+        private int _tpVNormOnesDim;
+
+        /// <summary>
+        /// TP-aware unweighted V RMS norm — the counterpart of the non-TP path's
+        /// ApplyUnweightedRMSNorm. Normalises each head's headDim-vector to unit
+        /// RMS with no learned weight (an all-ones weight on the rank's allocator).
+        /// </summary>
+        private Tensor ApplyGemma4VNormTP(Tensor data, int numHeads, int headDim, int seqLen, int rank)
+        {
+            int tp = TpDegree;
+            if (_tpVNormOnes == null || _tpVNormOnesDim != headDim)
+            {
+                if (_tpVNormOnes != null)
+                    for (int r = 0; r < _tpVNormOnes.Length; r++)
+                        _tpVNormOnes[r]?.Dispose();
+                _tpVNormOnes = new Tensor[tp];
+                for (int r = 0; r < tp; r++)
+                {
+                    _tpVNormOnes[r] = new Tensor(_tpGroup.GetAllocator(r), DType.Float32, headDim);
+                    Ops.Fill(_tpVNormOnes[r], 1f);
+                }
+                _tpVNormOnesDim = headDim;
+            }
+
+            RMSNormInPlace(data, _tpVNormOnes[rank], numHeads * seqLen, headDim, Config.Eps);
+            return data;
         }
 
         private Tensor ApplyGemma4RoPETP(Tensor data, int numHeads, int headDim, int seqLen, int startPos,
@@ -930,6 +971,14 @@ namespace TensorSharp.Models
 
         private void DisposeGemma4TpState()
         {
+            if (_tpVNormOnes != null)
+            {
+                for (int r = 0; r < _tpVNormOnes.Length; r++)
+                    _tpVNormOnes[r]?.Dispose();
+                _tpVNormOnes = null;
+                _tpVNormOnesDim = 0;
+            }
+
             if (_tpKvCacheK != null)
             {
                 for (int l = 0; l < _tpKvCacheK.Length; l++)
