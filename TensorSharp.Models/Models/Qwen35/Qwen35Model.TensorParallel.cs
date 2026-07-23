@@ -153,17 +153,41 @@ namespace TensorSharp.Models
             int tp = TpDegree;
             int globalTp = GlobalTpDegree;
 
-            // --- Full-attention layers: standard column/row parallel ---
-            // attn_qkv.weight is column-parallel (split output heads)
-            // attn_output.weight is row-parallel (split input dim)
+            // --- Full-attention layers: column/row parallel ---
+            // attn_output.weight is row-parallel (split input dim).
+            // attn_qkv.weight is column-parallel, but the fused weight is a plain
+            // [Q(+gate) | K | V] concatenation along the output dim. A contiguous
+            // split would hand rank 0 mostly Q rows and no K/V, so it is sharded
+            // separately with head-aware regrouping (see ShardFusedQkvForTP).
             ShardWeightsForTensorParallelism(
-                columnParallelPatterns: new[] { "attn_qkv.weight" },
+                columnParallelPatterns: Array.Empty<string>(),
                 rowParallelPatterns: new[] { "attn_output.weight" });
 
-            // --- Dense FFN layers: standard column/row parallel ---
+            for (int layer = 0; layer < TotalLayerCount; layer++)
+            {
+                if (_isRecurrent[layer])
+                    continue; // recurrent layers pack Q/K into ssm_in_proj instead
+                ShardFusedQkvForTP($"blk.{layer}.attn_qkv.weight");
+            }
+
+            // --- Dense FFN layers: column/row parallel ---
+            // ffn_down.weight is row-parallel. ffn_gate_up.weight is a plain
+            // [gate | up] concatenation, so it needs the same segment-aware
+            // regrouping as QKV: a contiguous split would give rank 0 all of
+            // gate and rank 1 all of up.
             ShardWeightsForTensorParallelism(
-                columnParallelPatterns: new[] { "ffn_gate_up.weight" },
+                columnParallelPatterns: Array.Empty<string>(),
                 rowParallelPatterns: new[] { "ffn_down.weight" });
+
+            for (int layer = 0; layer < TotalLayerCount; layer++)
+            {
+                string guName = $"blk.{layer}.ffn_gate_up.weight";
+                int fullDim = GetFusedOutputDim(guName);
+                if (fullDim <= 0)
+                    continue; // no dense fused gate_up on this layer (MoE / recurrent)
+                int half = fullDim / 2;
+                ShardConcatenatedColumnParallel(guName, half, half); // [gate | up]
+            }
 
             // --- GDN layers: segmented sharding ---
             ShardGdnWeightsForTP();
@@ -173,6 +197,124 @@ namespace TensorSharp.Models
                 ShardMoeWeightsForTP();
 
             Console.WriteLine($"  Qwen3.5 TP weight sharding complete ({globalTp} GPUs, {tp} local).");
+        }
+
+        /// <summary>
+        /// Shard the fused full-attention QKV weight for TP with head-aware
+        /// regrouping. The fused weight is a plain output-dim concatenation
+        ///   [ Q+gate (2*numHeads*headDim) | K (numKVHeads*headDim) | V (numKVHeads*headDim) ]
+        /// so a generic contiguous split would give rank 0 mostly Q rows and no
+        /// K/V. See <see cref="ShardConcatenatedColumnParallel"/>.
+        /// </summary>
+        private void ShardFusedQkvForTP(string weightName)
+        {
+            int headDim = Config.HeadDim;
+            ShardConcatenatedColumnParallel(weightName,
+                2 * Config.NumHeads * headDim,   // Q + gate interleaved per head
+                Config.NumKVHeads * headDim,     // K
+                Config.NumKVHeads * headDim);    // V
+        }
+
+        /// <summary>
+        /// Output dimension of a (possibly quantized) fused weight, or 0 if the
+        /// weight is not present. Used to derive equal gate/up segment sizes.
+        /// </summary>
+        private int GetFusedOutputDim(string weightName)
+        {
+            if (_quantWeights.TryGetValue(weightName, out var qw))
+                return (int)qw.Ne1;
+            if (_weights.TryGetValue(weightName, out var w))
+                return (int)w.Sizes[0];
+            return 0;
+        }
+
+        /// <summary>
+        /// Shard a column-parallel weight whose output dimension is the
+        /// concatenation of several logical segments (fused [Q|K|V], [gate|up], …).
+        /// The generic column split (<see cref="ShardWeightsForTensorParallelism"/>)
+        /// takes one contiguous block of output rows per rank, which for a
+        /// concatenated weight mixes whole segments across ranks (e.g. rank 0
+        /// gets all of Q/gate, rank 1 gets all of K/V or up). Instead, for each
+        /// rank we gather its 1/tp slice of every segment in order, so the
+        /// per-rank shard is [seg0_r | seg1_r | …] — exactly how the forward
+        /// pass re-splits the fused projection. Each segment dim must be
+        /// divisible by the global TP degree (guaranteed by ValidateTpConstraints
+        /// for heads/intermediate size).
+        /// </summary>
+        private void ShardConcatenatedColumnParallel(string weightName, params int[] segmentDims)
+        {
+            int tp = TpDegree;
+            int globalTp = GlobalTpDegree;
+            int rankOffset = TpRankOffset;
+
+            // Output-row indices for a global rank: its 1/tp slice of each segment.
+            int[] BuildRows(int globalRank)
+            {
+                var idx = new List<int>();
+                int baseOff = 0;
+                foreach (int segDim in segmentDims)
+                {
+                    int perRank = segDim / globalTp;
+                    int start = baseOff + globalRank * perRank;
+                    for (int i = 0; i < perRank; i++)
+                        idx.Add(start + i);
+                    baseOff += segDim;
+                }
+                return idx.ToArray();
+            }
+
+            if (_quantWeights.TryGetValue(weightName, out var qw))
+            {
+                long rowBytes = NativeDequant.RowSize(qw.GgmlType, qw.Ne0);
+                var shards = new QuantizedWeight[tp];
+                for (int r = 0; r < tp; r++)
+                {
+                    int[] rows = BuildRows(rankOffset + r);
+                    long totalBytes = rows.Length * rowBytes;
+                    IntPtr shardPtr = QuantizedWeight.AllocateBuffer(totalBytes);
+                    unsafe
+                    {
+                        byte* src = (byte*)qw.Data.ToPointer();
+                        byte* dst = (byte*)shardPtr.ToPointer();
+                        for (int row = 0; row < rows.Length; row++)
+                            Buffer.MemoryCopy(
+                                src + (long)rows[row] * rowBytes,
+                                dst + (long)row * rowBytes,
+                                rowBytes, rowBytes);
+                    }
+                    shards[r] = new QuantizedWeight(shardPtr, totalBytes,
+                        qw.GgmlType, qw.Ne0, rows.Length);
+                }
+
+                _tpQuantWeights[weightName] = shards;
+                _quantWeights.Remove(weightName);
+                qw.Dispose();
+            }
+            else if (_weights.TryGetValue(weightName, out var w))
+            {
+                int inDim = (int)w.Sizes[1];
+                var shards = new Tensor[tp];
+                for (int r = 0; r < tp; r++)
+                {
+                    int[] rows = BuildRows(rankOffset + r);
+                    var shard = new Tensor(_tpGroup.GetAllocator(r), DType.Float32, rows.Length, inDim);
+                    unsafe
+                    {
+                        float* srcPtr = GetFloatPtr(w);
+                        float* dstPtr = GetFloatPtr(shard);
+                        for (int row = 0; row < rows.Length; row++)
+                            Buffer.MemoryCopy(
+                                srcPtr + (long)rows[row] * inDim,
+                                dstPtr + (long)row * inDim,
+                                (long)inDim * 4, (long)inDim * 4);
+                    }
+                    shards[r] = shard;
+                }
+
+                _tpWeights[weightName] = shards;
+                _weights.Remove(weightName);
+                w.Dispose();
+            }
         }
 
         /// <summary>
