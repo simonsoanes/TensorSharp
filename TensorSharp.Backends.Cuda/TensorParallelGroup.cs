@@ -90,6 +90,14 @@ namespace TensorSharp.Cuda
                 _allocators[i].Synchronize();
         }
 
+        // Single-node group: there are no worker nodes, so the driver/worker
+        // control channel is never used. (NodeCount == 1.)
+        public void BroadcastControl(int op, int[] payload) =>
+            throw new NotSupportedException("Control broadcast is only meaningful for multi-node distributed groups.");
+
+        public (int op, int[] payload) ReceiveControl() =>
+            throw new NotSupportedException("Control receive is only meaningful for multi-node distributed groups.");
+
         public void Dispose()
         {
             if (_disposed) return;

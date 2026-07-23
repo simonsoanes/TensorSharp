@@ -33,6 +33,7 @@ namespace TensorSharp.Distributed
         private const byte MsgAllReduceContribute = 0x01;
         private const byte MsgAllReduceResult     = 0x02;
         private const byte MsgBarrierAck          = 0x03;
+        private const byte MsgControl             = 0x04;
 
         private readonly int _rank;
         private readonly int _worldSize;
@@ -69,15 +70,21 @@ namespace TensorSharp.Distributed
 
             try
             {
+                // Nodes are typically launched by hand, seconds or minutes apart,
+                // so peers may not be listening yet when we start connecting. Retry
+                // outbound connects (and tolerate the OS not having bound the peer's
+                // listener yet) until a deadline instead of failing on the first
+                // ECONNREFUSED. Override the window with TENSORSHARP_TP_CONNECT_TIMEOUT_SECONDS.
+                TimeSpan connectTimeout = ResolveConnectTimeout();
+                DateTime deadline = DateTime.UtcNow + connectTimeout;
+
                 // Lower-ranked node initiates the connection to higher-ranked nodes.
                 // Higher-ranked nodes accept. This gives exactly one connection per pair.
-                var acceptFutures = new List<(int remoteRank, TcpClient client)>();
 
                 // Initiate outbound connections to higher-ranked peers.
                 for (int r = rank + 1; r < _worldSize; r++)
                 {
-                    var client = new TcpClient { NoDelay = true };
-                    client.Connect(endpoints[r]);
+                    var client = ConnectWithRetry(endpoints[r], r, deadline);
                     _peers[r] = client;
                     _streams[r] = client.GetStream();
 
@@ -122,6 +129,58 @@ namespace TensorSharp.Distributed
 
         public int Rank => _rank;
         public int WorldSize => _worldSize;
+
+        private static TimeSpan ResolveConnectTimeout()
+        {
+            string s = Environment.GetEnvironmentVariable("TENSORSHARP_TP_CONNECT_TIMEOUT_SECONDS");
+            if (!string.IsNullOrWhiteSpace(s) && int.TryParse(s, out int secs) && secs > 0)
+                return TimeSpan.FromSeconds(secs);
+            return TimeSpan.FromSeconds(120);
+        }
+
+        /// <summary>
+        /// Connect to a peer, retrying until <paramref name="deadline"/>. Tolerates
+        /// the peer's listener not being up yet (connection refused / unreachable),
+        /// which is the normal case when nodes are started a few seconds apart.
+        /// </summary>
+        private TcpClient ConnectWithRetry(IPEndPoint endpoint, int remoteRank, DateTime deadline)
+        {
+            const int retryDelayMs = 250;
+            bool announced = false;
+            int attempts = 0;
+
+            while (true)
+            {
+                var client = new TcpClient { NoDelay = true };
+                try
+                {
+                    client.Connect(endpoint);
+                    if (announced)
+                        Console.WriteLine($"[TcpCommunicator] Rank {_rank}: connected to rank {remoteRank} at {endpoint}.");
+                    return client;
+                }
+                catch (SocketException) when (DateTime.UtcNow < deadline)
+                {
+                    client.Dispose();
+                    attempts++;
+                    if (!announced)
+                    {
+                        Console.WriteLine($"[TcpCommunicator] Rank {_rank}: waiting for rank {remoteRank} at {endpoint} " +
+                            $"(retrying up to {(deadline - DateTime.UtcNow).TotalSeconds:F0}s)...");
+                        announced = true;
+                    }
+                    Thread.Sleep(retryDelayMs);
+                }
+                catch (SocketException ex)
+                {
+                    client.Dispose();
+                    throw new InvalidOperationException(
+                        $"Rank {_rank} could not connect to rank {remoteRank} at {endpoint} after {attempts} attempts. " +
+                        "Check the peer is running, the host:port is reachable, and firewall rules allow it. " +
+                        "Increase the window with TENSORSHARP_TP_CONNECT_TIMEOUT_SECONDS.", ex);
+                }
+            }
+        }
 
         /// <summary>
         /// In-place AllReduce (sum) across all nodes. The buffer is modified
@@ -179,6 +238,48 @@ namespace TensorSharp.Distributed
 
             // Barrier so all nodes have the result before any proceeds.
             Barrier();
+        }
+
+        /// <summary>
+        /// Driver→worker control broadcast. Called on rank 0 (the driver node)
+        /// to send an op code plus an int payload to every other node. Workers
+        /// call <see cref="ReceiveControl"/> to read it. Unlike AllReduce this is
+        /// one-way (no barrier): it precedes the forward pass whose AllReduces
+        /// then provide the synchronisation.
+        /// </summary>
+        public void BroadcastControl(int op, int[] payload)
+        {
+            int n = payload?.Length ?? 0;
+            byte[] buf = new byte[8 + n * 4];
+            BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(0, 4), op);
+            BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(4, 4), n);
+            for (int i = 0; i < n; i++)
+                BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(8 + i * 4, 4), payload[i]);
+
+            for (int r = 0; r < _worldSize; r++)
+            {
+                if (r == _rank) continue;
+                SendMessage(r, MsgControl, buf);
+            }
+        }
+
+        /// <summary>
+        /// Worker-side receive for <see cref="BroadcastControl"/>. Blocks until
+        /// rank 0 sends the next control message, then returns (op, payload).
+        /// </summary>
+        public (int op, int[] payload) ReceiveControl()
+        {
+            var (msgType, data) = ReceiveMessage(0);
+            if (msgType != MsgControl)
+                throw new InvalidOperationException(
+                    $"Expected Control from rank 0, got message type 0x{msgType:X2}.");
+
+            int op = BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(0, 4));
+            int n = BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(4, 4));
+            var payload = new int[n];
+            for (int i = 0; i < n; i++)
+                payload[i] = BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(8 + i * 4, 4));
+            return (op, payload);
         }
 
         /// <summary>

@@ -148,7 +148,7 @@ namespace TensorSharp.Models
             }
         }
 
-        public override void ResetKVCache()
+        protected override void ResetKVCacheCore()
         {
             _cacheSeqLen = 0;
             if (_kvCacheK != null)
@@ -170,9 +170,9 @@ namespace TensorSharp.Models
                     foreach (var v in layer) ResetCacheTensor(v);
         }
 
-        public override void TruncateKVCache(int tokenCount)
+        protected override void TruncateKVCacheCore(int tokenCount)
         {
-            base.TruncateKVCache(tokenCount);
+            base.TruncateKVCacheCore(tokenCount);
             if (_kvCacheK != null)
             {
                 foreach (var k in _kvCacheK)
@@ -236,7 +236,7 @@ namespace TensorSharp.Models
 
         public Gemma3VisionEncoder VisionEncoder => _visionEncoder;
 
-        public override float[] Forward(int[] tokens)
+        protected override float[] ForwardCore(int[] tokens)
         {
             if (IsTensorParallel)
                 return ForwardTP(tokens);

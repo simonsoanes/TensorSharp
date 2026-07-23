@@ -475,6 +475,22 @@ namespace TensorSharp.Cli
             _log.LogInformation(LogEventIds.HostConfiguration,
                 "Kernel warmup completed in {ElapsedMs:F1} ms", warmupSw.Elapsed.TotalMilliseconds);
 
+            // Multi-node tensor parallelism: warmup ran identically (in lockstep)
+            // on every node. From here on only the driver (node 0) runs the
+            // generation logic and owns sampling/IO; the other nodes become
+            // workers that mirror the driver's forward passes so their weight
+            // shards contribute to every AllReduce. Worker nodes never reach the
+            // interactive/batch code below — they loop until the driver exits.
+            if (tpGroup != null && tpGroup.NodeCount > 1)
+            {
+                if (model.IsDistributedWorker)
+                {
+                    model.RunDistributedWorkerLoop();
+                    return;
+                }
+                model.BeginDistributedDriver();
+            }
+
             if (mmProjPath != null)
             {
                 _log.LogInformation(LogEventIds.HostConfiguration,

@@ -45,5 +45,20 @@ namespace TensorSharp.Cuda
 
         /// <summary>Synchronize all GPU streams.</summary>
         void Synchronize();
+
+        /// <summary>
+        /// Driver→worker control channel for multi-node lockstep execution.
+        /// The driver node (global rank offset 0) calls this to broadcast an
+        /// op code plus an int payload (e.g. the tokens for a forward pass) to
+        /// every worker node before running the op locally. Single-node groups
+        /// have no workers and do not implement this.
+        /// </summary>
+        void BroadcastControl(int op, int[] payload);
+
+        /// <summary>
+        /// Worker-side counterpart to <see cref="BroadcastControl"/>: block until
+        /// the driver broadcasts the next control message, and return it.
+        /// </summary>
+        (int op, int[] payload) ReceiveControl();
     }
 }

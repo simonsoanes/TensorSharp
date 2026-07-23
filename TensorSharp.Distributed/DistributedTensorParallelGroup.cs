@@ -106,6 +106,12 @@ namespace TensorSharp.Distributed
             _localGroup.Synchronize();
         }
 
+        /// <summary>Driver (node 0) broadcasts a control op + payload to worker nodes.</summary>
+        public void BroadcastControl(int op, int[] payload) => _tcp.BroadcastControl(op, payload);
+
+        /// <summary>Worker node blocks for the next control message from the driver.</summary>
+        public (int op, int[] payload) ReceiveControl() => _tcp.ReceiveControl();
+
         private void EnsureHostBuffer(int elementCount)
         {
             if (_hostBuffer.Length >= elementCount)

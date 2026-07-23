@@ -731,7 +731,7 @@ namespace TensorSharp.Models
             }
         }
 
-        public override void ResetKVCache()
+        protected override void ResetKVCacheCore()
         {
             _cacheSeqLen = 0;
             _kvCacheHostDirty = false;
@@ -757,11 +757,11 @@ namespace TensorSharp.Models
             }
         }
 
-        public override void TruncateKVCache(int tokenCount)
+        protected override void TruncateKVCacheCore(int tokenCount)
         {
             DisposeSwaPrevWindows();
             EnsureKvCacheHostSynchronized();
-            base.TruncateKVCache(tokenCount);
+            base.TruncateKVCacheCore(tokenCount);
             _kvCacheHostDirty = false;
             if (_kvCacheK == null) return;
             var invalidated = new HashSet<int>();
@@ -966,7 +966,7 @@ namespace TensorSharp.Models
             _pendingVisionEmbeddingsList.Add((embeddings, insertPosition));
         }
 
-        public override float[] Forward(int[] tokens)
+        protected override float[] ForwardCore(int[] tokens)
         {
             if (IsTensorParallel)
                 return ForwardTP(tokens);
@@ -979,11 +979,11 @@ namespace TensorSharp.Models
             // IsOnWorkerThread and run inline, eliminating ~15 ms / token of
             // queue overhead. Other backends are unaffected.
             if (_backend == BackendType.Mlx && !MlxWorker.Shared.IsOnWorkerThread)
-                return MlxWorker.Shared.Invoke(() => ForwardCore(tokens));
-            return ForwardCore(tokens);
+                return MlxWorker.Shared.Invoke(() => ForwardComputeCore(tokens));
+            return ForwardComputeCore(tokens);
         }
 
-        private float[] ForwardCore(int[] tokens)
+        private float[] ForwardComputeCore(int[] tokens)
         {
             _forwardSw.Start();
             int seqLen = tokens.Length;
@@ -1623,10 +1623,10 @@ namespace TensorSharp.Models
             return prefillChunkSize;
         }
 
-        public override float[] ForwardRefill(int[] tokens)
+        protected override float[] ForwardRefillCore(int[] tokens)
         {
             if (tokens == null || tokens.Length <= 1 || !_canUseFusedDecode)
-                return Forward(tokens);
+                return ForwardCore(tokens);
 
             int lastIdx = tokens.Length - 1;
 
@@ -1657,13 +1657,13 @@ namespace TensorSharp.Models
                     Array.Copy(tokens, pos, chunk, 0, chunkLen);
                     PrefillWithoutLogits(chunk);
                 }
-                return Forward(new[] { tokens[lastIdx] });
+                return ForwardCore(new[] { tokens[lastIdx] });
             }
 
             var prefixTokens = new int[lastIdx];
             Array.Copy(tokens, prefixTokens, lastIdx);
             PrefillWithoutLogits(prefixTokens);
-            return Forward(new[] { tokens[lastIdx] });
+            return ForwardCore(new[] { tokens[lastIdx] });
         }
 
         private void PrefillWithoutLogits(int[] tokens)

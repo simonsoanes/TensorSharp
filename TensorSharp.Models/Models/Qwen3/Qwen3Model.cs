@@ -227,7 +227,7 @@ namespace TensorSharp.Models
             Console.WriteLine($"Expanded Qwen3 attention cache to {newCapacity} tokens.");
         }
 
-        public override void ResetKVCache()
+        protected override void ResetKVCacheCore()
         {
             for (int l = 0; l < Config.NumLayers; l++)
             {
@@ -241,10 +241,10 @@ namespace TensorSharp.Models
             _forwardSw.Reset();
         }
 
-        public override void TruncateKVCache(int tokenCount)
+        protected override void TruncateKVCacheCore(int tokenCount)
         {
             EnsureKvCacheHostSynchronized();
-            base.TruncateKVCache(tokenCount);
+            base.TruncateKVCacheCore(tokenCount);
             for (int l = 0; l < Config.NumLayers; l++)
             {
                 InvalidateTensorDeviceCache(_kvCacheK[l]);
@@ -293,7 +293,7 @@ namespace TensorSharp.Models
             return true;
         }
 
-        public override float[] Forward(int[] tokens)
+        protected override float[] ForwardCore(int[] tokens)
         {
             if (IsTensorParallel)
                 return ForwardTP(tokens);
@@ -376,10 +376,10 @@ namespace TensorSharp.Models
             return 2048;
         }
 
-        public override float[] ForwardRefill(int[] tokens)
+        protected override float[] ForwardRefillCore(int[] tokens)
         {
             if (tokens == null || tokens.Length <= 1)
-                return Forward(tokens);
+                return ForwardCore(tokens);
 
             int chunkSize = ResolvePrefillChunkSize();
             int lastIdx = tokens.Length - 1;
@@ -387,7 +387,7 @@ namespace TensorSharp.Models
             // For short prompts stay on the single-pass Forward — the extra
             // PrefillWithoutLogits/Forward split is pure overhead.
             if (tokens.Length <= chunkSize)
-                return Forward(tokens);
+                return ForwardCore(tokens);
 
             for (int pos = 0; pos < lastIdx; pos += chunkSize)
             {
@@ -396,7 +396,7 @@ namespace TensorSharp.Models
                 Array.Copy(tokens, pos, chunk, 0, chunkLen);
                 PrefillWithoutLogits(chunk);
             }
-            return Forward(new[] { tokens[lastIdx] });
+            return ForwardCore(new[] { tokens[lastIdx] });
         }
 
         private void PrefillWithoutLogits(int[] tokens)

@@ -4074,9 +4074,116 @@ namespace TensorSharp.Models
             }
         }
 
-        public abstract float[] Forward(int[] tokens);
-        public virtual float[] ForwardRefill(int[] tokens) => Forward(tokens);
-        public abstract void ResetKVCache();
+        // ====================================================================
+        // Forward / cache entry points.
+        //
+        // These are template methods: models implement the *Core variants; the
+        // public methods add the multi-node tensor-parallel driver hook. When
+        // this process is the distributed DRIVER (node 0 of a >1-node group,
+        // after BeginDistributedDriver), each call first broadcasts its op +
+        // tokens to the worker nodes so they run the identical forward pass in
+        // lockstep (their per-layer AllReduces line up with the driver's).
+        // On single-node and worker processes the hook is inert.
+        // ====================================================================
+        private const int TpControlForward       = 1;
+        private const int TpControlForwardRefill = 2;
+        private const int TpControlReset         = 3;
+        private const int TpControlShutdown      = 4;
+        private const int TpControlTruncate      = 5;
+
+        private bool _distributedDriver;
+
+        /// <summary>True when this process is a worker node in a multi-node TP group.</summary>
+        public bool IsDistributedWorker =>
+            _tpGroup != null && _tpGroup.NodeCount > 1 && _tpGroup.GlobalRankOffset > 0;
+
+        /// <summary>
+        /// Start acting as the distributed driver. After this call every
+        /// Forward/ForwardRefill/ResetKVCache broadcasts to the worker nodes.
+        /// Call once, on the driver node (global rank offset 0), AFTER
+        /// <see cref="WarmUpKernels"/> (warmup runs symmetrically on every node
+        /// and must not broadcast).
+        /// </summary>
+        public void BeginDistributedDriver()
+        {
+            if (_tpGroup != null && _tpGroup.NodeCount > 1 && _tpGroup.GlobalRankOffset == 0)
+                _distributedDriver = true;
+        }
+
+        public float[] Forward(int[] tokens)
+        {
+            if (_distributedDriver) _tpGroup.BroadcastControl(TpControlForward, tokens);
+            return ForwardCore(tokens);
+        }
+
+        public float[] ForwardRefill(int[] tokens)
+        {
+            if (_distributedDriver) _tpGroup.BroadcastControl(TpControlForwardRefill, tokens);
+            return ForwardRefillCore(tokens);
+        }
+
+        public void ResetKVCache()
+        {
+            if (_distributedDriver) _tpGroup.BroadcastControl(TpControlReset, Array.Empty<int>());
+            ResetKVCacheCore();
+        }
+
+        protected abstract float[] ForwardCore(int[] tokens);
+        protected virtual float[] ForwardRefillCore(int[] tokens) => ForwardCore(tokens);
+        protected abstract void ResetKVCacheCore();
+
+        /// <summary>
+        /// Worker-node event loop for multi-node tensor parallelism. Blocks,
+        /// mirroring the driver's op stream (forward / refill / reset) so this
+        /// node contributes its weight shards to every AllReduce, until the
+        /// driver broadcasts shutdown (or the connection drops). Returns
+        /// immediately on single-node groups.
+        /// </summary>
+        public void RunDistributedWorkerLoop()
+        {
+            if (_tpGroup == null || _tpGroup.NodeCount <= 1)
+                return;
+
+            Console.WriteLine(
+                $"[TP worker] ready — mirroring driver forward passes (global rank offset {_tpGroup.GlobalRankOffset}).");
+
+            try
+            {
+                while (true)
+                {
+                    var (op, payload) = _tpGroup.ReceiveControl();
+                    switch (op)
+                    {
+                        case TpControlForward:       ForwardCore(payload); break;
+                        case TpControlForwardRefill: ForwardRefillCore(payload); break;
+                        case TpControlReset:         ResetKVCacheCore(); break;
+                        case TpControlTruncate:      TruncateKVCacheCore(payload.Length > 0 ? payload[0] : 0); break;
+                        case TpControlShutdown:
+                            Console.WriteLine("[TP worker] shutdown received; exiting worker loop.");
+                            return;
+                        default:
+                            throw new InvalidOperationException($"Unknown TP control op {op}.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[TP worker] loop ended: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Driver-side shutdown: tell worker nodes to leave their loops. Safe to
+        /// call when not the driver (no-op). Invoked from Dispose so every exit
+        /// path releases the workers.
+        /// </summary>
+        private void SignalDistributedWorkersShutdown()
+        {
+            if (!_distributedDriver) return;
+            try { _tpGroup.BroadcastControl(TpControlShutdown, Array.Empty<int>()); }
+            catch { /* workers may already be gone; ignore */ }
+            _distributedDriver = false;
+        }
 
         // Pipelined greedy decode (overridden by models that support it,
         // e.g. Qwen35Model on MLX). When SupportsPipelinedGreedy is true,
@@ -4366,7 +4473,13 @@ namespace TensorSharp.Models
         /// Subsequent Forward calls will append starting at this position.
         /// Subclasses MUST override to invalidate device (GPU/Metal) caches.
         /// </summary>
-        public virtual void TruncateKVCache(int tokenCount)
+        public void TruncateKVCache(int tokenCount)
+        {
+            if (_distributedDriver) _tpGroup.BroadcastControl(TpControlTruncate, new[] { tokenCount });
+            TruncateKVCacheCore(tokenCount);
+        }
+
+        protected virtual void TruncateKVCacheCore(int tokenCount)
         {
             Console.WriteLine($"[KV cache] Truncating from {_cacheSeqLen} to {tokenCount}");
             _cacheSeqLen = tokenCount;
@@ -4552,6 +4665,11 @@ namespace TensorSharp.Models
 
         public virtual void Dispose()
         {
+            // Release any distributed worker nodes before tearing down the TP
+            // group, so every driver exit path (normal or exception) lets the
+            // workers leave their loops cleanly.
+            SignalDistributedWorkersShutdown();
+
             if (MultimodalInjector is IDisposable multimodalInjector)
                 multimodalInjector.Dispose();
 
