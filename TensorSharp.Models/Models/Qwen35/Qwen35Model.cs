@@ -488,24 +488,114 @@ namespace TensorSharp.Models
         private unsafe void FuseRecurrentInputWeights()
         {
             int fused = 0;
+            int fusedF32 = 0;
             for (int layer = 0; layer < Config.NumLayers; layer++)
             {
                 if (!_isRecurrent[layer])
                     continue;
 
                 string prefix = $"blk.{layer}.";
-                if (TryFuseWeights(prefix + "ssm_in_proj.weight", keepSources: true,
+                string[] sources =
+                {
                     prefix + "attn_qkv.weight",
                     prefix + "attn_gate.weight",
                     prefix + "ssm_beta.weight",
-                    prefix + "ssm_alpha.weight"))
+                    prefix + "ssm_alpha.weight",
+                };
+                if (TryFuseWeights(prefix + "ssm_in_proj.weight", keepSources: true, sources))
                 {
                     fused++;
+                }
+                else if (IsTensorParallel &&
+                         TryFuseWeightsToFloat32(prefix + "ssm_in_proj.weight", sources))
+                {
+                    // The same-type quant fusion can't run when the sources have
+                    // mismatched ggml types — e.g. an aggressively quantized model
+                    // (IQ2_XXS/…) whose ssm_beta/ssm_alpha stay F32 while attn_qkv
+                    // is 2-bit. The fused ssm_in_proj is only consumed by the TP
+                    // recurrent path (non-TP uses the separate source weights), so
+                    // build an F32 pack there instead of leaving it missing (which
+                    // crashed TP with "ssm_in_proj not found in sharded weights").
+                    fusedF32++;
                 }
             }
 
             if (fused > 0)
                 Console.WriteLine($"  Fused projections: {fused} recurrent input packs");
+            if (fusedF32 > 0)
+                Console.WriteLine($"  Fused projections: {fusedF32} recurrent input packs (dequantized to F32 for TP; mixed source quant types)");
+        }
+
+        /// <summary>
+        /// Build a fused projection as one F32 tensor by dequantizing (quantized
+        /// sources) or copying (F32 sources) each in order along the output
+        /// dimension. Fallback for <see cref="TryFuseWeights"/> when the sources
+        /// have mismatched ggml types and cannot be packed in-place. Sources are
+        /// left in place. Returns false if any source is absent or the input
+        /// dimensions disagree. The result is F32, so this trades memory for
+        /// compatibility — used only where the fused pack is required (TP).
+        /// </summary>
+        private unsafe bool TryFuseWeightsToFloat32(string fusedName, params string[] weightNames)
+        {
+            if (weightNames == null || weightNames.Length < 2)
+                return false;
+
+            int inDim = -1;
+            long totalRows = 0;
+            var quant = new QuantizedWeight[weightNames.Length];
+            var f32 = new Tensor[weightNames.Length];
+            for (int i = 0; i < weightNames.Length; i++)
+            {
+                if (_quantWeights.TryGetValue(weightNames[i], out quant[i]))
+                {
+                    int d = (int)quant[i].Ne0;
+                    if (inDim < 0) inDim = d; else if (inDim != d) return false;
+                    totalRows += quant[i].Ne1;
+                }
+                else if (_weights.TryGetValue(weightNames[i], out f32[i]))
+                {
+                    int d = (int)f32[i].Sizes[1];
+                    if (inDim < 0) inDim = d; else if (inDim != d) return false;
+                    totalRows += f32[i].Sizes[0];
+                }
+                else
+                {
+                    return false; // missing source
+                }
+            }
+
+            var fused = new Tensor(_allocator, DType.Float32, totalRows, inDim);
+            float* dstBase = GetFloatPtr(fused);
+            long rowOffset = 0;
+            for (int i = 0; i < weightNames.Length; i++)
+            {
+                if (quant[i] != null)
+                {
+                    var qw = quant[i];
+                    long rowBytes = NativeDequant.RowSize(qw.GgmlType, qw.Ne0);
+                    byte* srcBase = (byte*)qw.Data.ToPointer();
+                    for (long row = 0; row < qw.Ne1; row++)
+                        NativeDequant.DequantizeToFloat32Native(
+                            qw.GgmlType,
+                            (IntPtr)(srcBase + row * rowBytes),
+                            (IntPtr)(dstBase + (rowOffset + row) * inDim),
+                            inDim);
+                    rowOffset += qw.Ne1;
+                }
+                else
+                {
+                    var w = f32[i];
+                    long rows = w.Sizes[0];
+                    float* srcPtr = GetFloatPtr(w);
+                    long bytes = rows * inDim * sizeof(float);
+                    Buffer.MemoryCopy(srcPtr, dstBase + rowOffset * inDim, bytes, bytes);
+                    rowOffset += rows;
+                }
+            }
+
+            InvalidateTensorDeviceCache(fused);
+            _weights[fusedName] = fused;
+            return true;
         }
 
         private unsafe bool TryFuseWeights(string fusedName, bool keepSources, params string[] weightNames)
