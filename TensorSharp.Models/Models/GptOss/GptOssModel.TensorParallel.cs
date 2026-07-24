@@ -393,15 +393,30 @@ namespace TensorSharp.Models
             for (int r = 0; r < tp; r++)
                 normed[r].Dispose();
 
+            // DIAG
+            if (TpDiag && layer == 0)
+                Console.Error.WriteLine($"[DIAG]   layer 0 qkv L2={DiagL2(qkvFused[0]):F4}");
+            // END DIAG
+
             // 3. Per-GPU attention (with sinks + SWA).
             bool isSWA = layer % 2 == 0;
             Tensor[] attnOut = GptOssAttentionTP(qkvFused, layer, seqLen, startPos, isSWA);
+
+            // DIAG
+            if (TpDiag && layer == 0)
+                Console.Error.WriteLine($"[DIAG]   layer 0 attn-out L2={DiagL2(attnOut[0]):F4}");
+            // END DIAG
 
             // 4. Row-parallel output + bias + AllReduce.
             // Output bias is replicated (added after AllReduce).
             Tensor reducedAttn = TpRowParallelLinear(attnOut, wn[3]);
             for (int r = 0; r < tp; r++)
                 attnOut[r].Dispose();
+
+            // DIAG
+            if (TpDiag && layer == 0)
+                Console.Error.WriteLine($"[DIAG]   layer 0 proj-pre-bias L2={DiagL2(reducedAttn):F4}");
+            // END DIAG
 
             // Add output bias (replicated).
             AddBiasToTensor(reducedAttn, wn[4]);

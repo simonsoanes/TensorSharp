@@ -1165,6 +1165,11 @@ namespace TensorSharp.Models
             {
                 Tensor qkvFused = LinearForwardWithBias(input, wn[1], wn[2]);
 
+                // DIAG
+                if (TpDiag && layer == 0)
+                    Console.Error.WriteLine($"[DIAG]   layer 0 qkv L2={DiagL2(qkvFused):F4}");
+                // END DIAG
+
                 if (seqLen == 1)
                 {
                     qTensor = qkvFused.Narrow(1, 0, _qDim);
@@ -1248,8 +1253,19 @@ namespace TensorSharp.Models
 
                 _attnTicks += Stopwatch.GetTimestamp() - t0;
 
+                // DIAG
+                if (TpDiag && layer == 0)
+                    Console.Error.WriteLine($"[DIAG]   layer 0 attn-out L2={DiagL2(attnResult):F4}");
+                // END DIAG
+
                 Tensor decodeOut = LinearForwardWithBias(attnResult, wn[3], wn[4]);
                 attnResult.Dispose();
+
+                // DIAG
+                if (TpDiag && layer == 0)
+                    Console.Error.WriteLine($"[DIAG]   layer 0 proj+bias L2={DiagL2(decodeOut):F4}");
+                // END DIAG
+
                 return decodeOut;
             }
 
