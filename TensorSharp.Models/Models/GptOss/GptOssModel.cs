@@ -968,6 +968,10 @@ namespace TensorSharp.Models
                 attnOut.Dispose();
             }
 
+            // DIAG
+            if (TpDiag) Console.Error.WriteLine($"[DIAG]   layer {layer} post-attn L2={DiagL2(hidden):F4}");
+            // END DIAG
+
             int moeSeqLen = seqLen;
             Tensor moeInput = hidden;
             if (isLastLayer && seqLen > 1)
@@ -999,6 +1003,10 @@ namespace TensorSharp.Models
                 Ops.Add(hidden, hidden, moeOut);
             }
             moeOut.Dispose();
+
+            // DIAG
+            if (TpDiag) Console.Error.WriteLine($"[DIAG]   layer {layer} post-moe  L2={DiagL2(hidden):F4}");
+            // END DIAG
 
             return hidden;
         }
@@ -1579,6 +1587,17 @@ namespace TensorSharp.Models
         {
             string[] wn = _layerNames[layer];
             var (routingWeights, selectedExperts) = MoERoute(hiddenState, wn[6], wn[7], seqLen);
+
+            // DIAG: dump routing for first token of first layer
+            if (TpDiag && layer == 0)
+            {
+                var sb = new System.Text.StringBuilder($"[DIAG]   layer 0 router:");
+                for (int k = 0; k < _numExpertsUsed; k++)
+                    sb.Append($" e{selectedExperts[k]}={routingWeights[k]:F4}");
+                sb.Append($" | input L2={DiagL2(hiddenState):F4}");
+                Console.Error.WriteLine(sb.ToString());
+            }
+            // END DIAG
 
             int hiddenDim = (int)hiddenState.Sizes[1];
             var output = new Tensor(_allocator, DType.Float32, seqLen, hiddenDim);
