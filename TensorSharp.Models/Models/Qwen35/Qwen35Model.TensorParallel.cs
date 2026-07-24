@@ -494,7 +494,11 @@ namespace TensorSharp.Models
 
         /// <summary>
         /// Shard ssm_out.weight [hidden, v_dim] as row-parallel.
-        /// The input columns must be permuted to match the block-cyclic V-head order.
+        /// The input columns are gathered in block-cyclic V-head order so
+        /// each rank's shard aligns with the GDN kernel output (which emits
+        /// V heads in the order returned by <see cref="ComputeBlockCyclicVHeads"/>).
+        /// A plain contiguous split would pair the wrong V-head weights with
+        /// the wrong GDN outputs and corrupt every recurrent layer.
         /// </summary>
         private void ShardSsmOutWeight(string weightName)
         {
@@ -504,34 +508,40 @@ namespace TensorSharp.Models
 
             if (_quantWeights.TryGetValue(weightName, out var qw))
             {
-                // Quantized row-parallel: extract block-aligned columns per row
+                // Quantized row-parallel: gather block-aligned columns per V head.
                 var type = (GgmlTensorType)qw.GgmlType;
                 long blockSize = GgufFile.GetBlockSize(type);
                 long typeSize = GgufFile.GetTypeSize(type);
-                long blocksPerRow = qw.Ne0 / blockSize;
-                long blocksPerShard = blocksPerRow / globalTp;
-                long ne0PerShard = blocksPerShard * blockSize;
                 long srcRowBytes = NativeDequant.RowSize(qw.GgmlType, qw.Ne0);
-                long dstRowBytes = (ne0PerShard / blockSize) * typeSize;
+                int blocksPerVHead = _headVDim / (int)blockSize;
+                long vHeadBytes = (long)blocksPerVHead * typeSize;
+                int localVHeads = _numVHeads / globalTp;
+                long ne0PerShard = (long)localVHeads * _headVDim;
+                long dstRowBytes = (long)localVHeads * blocksPerVHead * typeSize;
                 long totalBytesPerShard = qw.Ne1 * dstRowBytes;
-                long blockBytesPerShard = blocksPerShard * typeSize;
 
                 var shards = new QuantizedWeight[tp];
                 for (int r = 0; r < tp; r++)
                 {
                     int globalRank = rankOffset + r;
+                    int[] vHeads = ComputeBlockCyclicVHeads(globalRank, globalTp, _numVHeads, _numKHeads);
                     IntPtr shardPtr = QuantizedWeight.AllocateBuffer(totalBytesPerShard);
                     unsafe
                     {
                         byte* src = (byte*)qw.Data.ToPointer();
                         byte* dst = (byte*)shardPtr.ToPointer();
-                        long srcBlockOffset = globalRank * blocksPerShard * typeSize;
                         for (long row = 0; row < qw.Ne1; row++)
                         {
-                            Buffer.MemoryCopy(
-                                src + row * srcRowBytes + srcBlockOffset,
-                                dst + row * dstRowBytes,
-                                dstRowBytes, blockBytesPerShard);
+                            long dstOffset = 0;
+                            for (int vhIdx = 0; vhIdx < vHeads.Length; vhIdx++)
+                            {
+                                long srcVhOffset = (long)vHeads[vhIdx] * blocksPerVHead * typeSize;
+                                Buffer.MemoryCopy(
+                                    src + row * srcRowBytes + srcVhOffset,
+                                    dst + row * dstRowBytes + dstOffset,
+                                    vHeadBytes, vHeadBytes);
+                                dstOffset += vHeadBytes;
+                            }
                         }
                     }
                     shards[r] = new QuantizedWeight(shardPtr, totalBytesPerShard,
@@ -544,15 +554,36 @@ namespace TensorSharp.Models
             }
             else if (_weights.TryGetValue(weightName, out var w))
             {
-                // F32 row-parallel: split along dim 1 (input dim = v_dim)
-                int vDimPerShard = (int)w.Sizes[1] / globalTp;
+                // F32 row-parallel: gather columns per V head in block-cyclic order.
+                int totalVDim = (int)w.Sizes[1];
+                int localVHeads = _numVHeads / globalTp;
+                int vDimPerShard = localVHeads * _headVDim;
+                int hiddenDim = (int)w.Sizes[0];
                 var shards = new Tensor[tp];
                 for (int r = 0; r < tp; r++)
                 {
                     int globalRank = rankOffset + r;
-                    var view = w.Narrow(1, globalRank * vDimPerShard, vDimPerShard);
-                    shards[r] = Ops.NewContiguous(view);
-                    view.Dispose();
+                    int[] vHeads = ComputeBlockCyclicVHeads(globalRank, globalTp, _numVHeads, _numKHeads);
+                    var shard = new Tensor(_tpGroup.GetAllocator(r), DType.Float32, hiddenDim, vDimPerShard);
+                    unsafe
+                    {
+                        float* srcPtr = GetFloatPtr(w);
+                        float* dstPtr = GetFloatPtr(shard);
+                        for (int row = 0; row < hiddenDim; row++)
+                        {
+                            long dstColOffset = 0;
+                            for (int vhIdx = 0; vhIdx < vHeads.Length; vhIdx++)
+                            {
+                                long srcCol = (long)vHeads[vhIdx] * _headVDim;
+                                Buffer.MemoryCopy(
+                                    srcPtr + (long)row * totalVDim + srcCol,
+                                    dstPtr + (long)row * vDimPerShard + dstColOffset,
+                                    (long)_headVDim * 4, (long)_headVDim * 4);
+                                dstColOffset += _headVDim;
+                            }
+                        }
+                    }
+                    shards[r] = shard;
                 }
 
                 _tpWeights[weightName] = shards;

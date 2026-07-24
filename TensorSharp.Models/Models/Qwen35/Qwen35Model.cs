@@ -1791,6 +1791,12 @@ namespace TensorSharp.Models
             if (tokens == null || tokens.Length <= 1)
                 return ForwardCore(tokens);
 
+            // The chunked prefill path (PrefillWithoutLogits) uses the non-TP
+            // layer loop and non-sharded weights, which are unavailable under
+            // tensor parallelism. Route through ForwardCore → ForwardTP instead.
+            if (IsTensorParallel)
+                return ForwardCore(tokens);
+
             // Multimodal embeddings carry positions relative to the current
             // Forward call's hidden tensor; chunked prefill would need to
             // remap them per-chunk. Fall back to single Forward when any are pending.
