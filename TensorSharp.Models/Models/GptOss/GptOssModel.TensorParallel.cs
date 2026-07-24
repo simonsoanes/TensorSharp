@@ -327,9 +327,16 @@ namespace TensorSharp.Models
 
             Tensor[] hidden = BroadcastTensorToAllRanks(hidden0);
 
+            // DIAG
+            if (TpDiag) { _diagCall++; Console.Error.WriteLine($"[DIAG] === ForwardTP call={_diagCall} seqLen={seqLen} startPos={startPos} emb L2={DiagL2(hidden[0]):F4}"); }
+            // END DIAG
+
             for (int layer = 0; layer < Config.NumLayers; layer++)
             {
                 hidden = GptOssTransformerBlockTP(hidden, layer, seqLen, startPos);
+                // DIAG
+                if (TpDiag) Console.Error.WriteLine($"[DIAG]   layer {layer} L2={DiagL2(hidden[0]):F4}");
+                // END DIAG
             }
 
             // Final norm + LM head on GPU 0.
@@ -362,6 +369,10 @@ namespace TensorSharp.Models
             _logitsBuffer = TensorToFloatArray(logitsTensor);
             _logitsCopyTicks += Stopwatch.GetTimestamp() - t3;
             logitsTensor.Dispose();
+
+            // DIAG
+            DiagLogits(_logitsBuffer, $"TP call={_diagCall}");
+            // END DIAG
 
             _cacheSeqLen += seqLen;
             _forwardCount++;
@@ -402,6 +413,10 @@ namespace TensorSharp.Models
                 attnReplicated[r].Dispose();
             reducedAttn.Dispose();
 
+            // DIAG
+            if (TpDiag) Console.Error.WriteLine($"[DIAG]   layer {layer} post-attn L2={DiagL2(hidden[0]):F4}");
+            // END DIAG
+
             // 6. Post-attention norm (replicated).
             Tensor[] postAttnNormed = TpRMSNorm(hidden, wn[5]);
 
@@ -414,6 +429,10 @@ namespace TensorSharp.Models
             TpResidualAdd(hidden, moeOut);
             for (int r = 1; r < tp; r++)
                 moeOut[r].Dispose();
+
+            // DIAG
+            if (TpDiag) Console.Error.WriteLine($"[DIAG]   layer {layer} post-moe  L2={DiagL2(hidden[0]):F4}");
+            // END DIAG
 
             return hidden;
         }
@@ -804,6 +823,17 @@ namespace TensorSharp.Models
                 }
             }
 
+            // DIAG: dump routing for first token of first layer
+            if (TpDiag && layer == 0)
+            {
+                var sb = new System.Text.StringBuilder($"[DIAG]   layer 0 router:");
+                for (int k = 0; k < nUsed; k++)
+                    sb.Append($" e{selectedExperts[k]}={routeWeights[k]:F4}");
+                sb.Append($" | input L2={DiagL2(normed[0]):F4}");
+                Console.Error.WriteLine(sb.ToString());
+            }
+            // END DIAG
+
             // Bucket token assignments by expert so each expert runs a single fat
             // matmul over its assigned tokens (mirrors the non-TP MoEForwardBatched).
             var expertCounts = new int[numExperts];
@@ -921,8 +951,18 @@ namespace TensorSharp.Models
                 results[r] = output;
             }
 
+            // DIAG
+            if (TpDiag && layer == 0)
+                Console.Error.WriteLine($"[DIAG]   layer 0 moe pre-AR L2={DiagL2(results[0]):F4}");
+            // END DIAG
+
             // AllReduce across ranks (sums the row-parallel down partials + biases).
             _tpGroup.AllReduce(results);
+
+            // DIAG
+            if (TpDiag && layer == 0)
+                Console.Error.WriteLine($"[DIAG]   layer 0 moe post-AR L2={DiagL2(results[0]):F4}");
+            // END DIAG
 
             return results;
         }

@@ -116,6 +116,32 @@ namespace TensorSharp.Models
         private const float SiluAlpha = 1.702f;
         private const float SiluLimit = 7.0f;
 
+        // DIAG: set TS_TP_DIAG=1 to dump hidden-state norms + logits for TP vs
+        // non-TP comparison. Remove this block and all "// DIAG" lines to clean up.
+        internal static readonly bool TpDiag =
+            Environment.GetEnvironmentVariable("TS_TP_DIAG") == "1";
+        private int _diagCall;
+        private static unsafe float DiagL2(Tensor t)
+        {
+            float* p = GetFloatPtr(t);
+            int n = (int)t.ElementCount();
+            double sum = 0;
+            for (int i = 0; i < n; i++) sum += (double)p[i] * p[i];
+            return MathF.Sqrt((float)sum);
+        }
+        private static void DiagLogits(float[] buf, string tag)
+        {
+            if (!TpDiag) return;
+            var sb = new System.Text.StringBuilder($"[DIAG] {tag} logits[0..9]: ");
+            for (int i = 0; i < 10 && i < buf.Length; i++) sb.Append($"{buf[i]:F4} ");
+            int topIdx = 0; float topVal = float.NegativeInfinity;
+            for (int i = 0; i < buf.Length; i++)
+                if (buf[i] > topVal) { topVal = buf[i]; topIdx = i; }
+            sb.Append($"| argmax={topIdx} val={topVal:F4}");
+            Console.Error.WriteLine(sb.ToString());
+        }
+        // END DIAG
+
         private string[][] _layerNames;
         private string[][][] _expertNames;
         private float[][] _layerSinks;
@@ -839,10 +865,17 @@ namespace TensorSharp.Models
             Tensor hidden = Embedding(tokens);
             _embTicks += Stopwatch.GetTimestamp() - t1;
 
+            // DIAG
+            if (TpDiag) { _diagCall++; Console.Error.WriteLine($"[DIAG] === ForwardSingle call={_diagCall} seqLen={seqLen} startPos={startPos} emb L2={DiagL2(hidden):F4}"); }
+            // END DIAG
+
             for (int layer = 0; layer < Config.NumLayers; layer++)
             {
                 bool isLastLayer = (layer == Config.NumLayers - 1);
                 hidden = TransformerBlock(hidden, layer, seqLen, startPos, isLastLayer);
+                // DIAG
+                if (TpDiag) Console.Error.WriteLine($"[DIAG]   layer {layer} L2={DiagL2(hidden):F4}");
+                // END DIAG
                 if (_backend == BackendType.Mlx && (layer + 1) % MlxEvalEveryNLayers == 0
                     && !isLastLayer && hidden != null)
                 {
@@ -876,6 +909,10 @@ namespace TensorSharp.Models
             _logitsBuffer = TensorToFloatArray(logitsTensor);
             _logitsCopyTicks += Stopwatch.GetTimestamp() - t3;
             logitsTensor.Dispose();
+
+            // DIAG
+            DiagLogits(_logitsBuffer, $"Single call={_diagCall}");
+            // END DIAG
 
             _cacheSeqLen += seqLen;
             _forwardCount++;
