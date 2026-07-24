@@ -1219,6 +1219,23 @@ namespace TensorSharp.Models
                 bool attnOk = false;
                 if (_backend == BackendType.Cuda)
                 {
+                    // DIAG: dump Q/KV-cache/sink for head 0 before attention
+                    if (TpDiag && layer == 0)
+                    {
+                        unsafe
+                        {
+                            float* qP = GetFloatPtr(qTensor);
+                            float* kP = GetFloatPtr(_kvCacheK[layer]);
+                            float* vP = GetFloatPtr(_kvCacheV[layer]);
+                            int kvSeq = (int)_kvCacheK[layer].Sizes[1];
+                            Console.Error.WriteLine($"[DIAG]   NM Q[0][0..3]:    {qP[0]:F6} {qP[1]:F6} {qP[2]:F6} {qP[3]:F6}");
+                            Console.Error.WriteLine($"[DIAG]   NM Kcache[0][0..3]: {kP[0]:F6} {kP[1]:F6} {kP[2]:F6} {kP[3]:F6}");
+                            Console.Error.WriteLine($"[DIAG]   NM Vcache[0][0..3]: {vP[0]:F6} {vP[1]:F6} {vP[2]:F6} {vP[3]:F6}");
+                            Console.Error.WriteLine($"[DIAG]   NM sink[0]={sinks?[0]:F6} scale={scale:F6} kvSeq={kvSeq}");
+                        }
+                    }
+                    // END DIAG
+
                     Tensor sinksCuda = sinks != null ? GetOrCreateSinksMlxTensor(layer, sinks, numHeads) : null;
                     int attendStart = isSWA ? Math.Max(0, totalSeqLen - _slidingWindow) : 0;
                     int attendLen = totalSeqLen - attendStart;

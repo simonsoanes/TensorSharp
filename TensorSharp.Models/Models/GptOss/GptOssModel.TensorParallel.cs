@@ -407,6 +407,19 @@ namespace TensorSharp.Models
                 Console.Error.WriteLine($"[DIAG]   layer 0 attn-out L2={DiagL2(attnOut[0]):F4}");
             // END DIAG
 
+            // DIAG: dump head-0 Q/K/V/sink values for the TP attention
+            if (TpDiag && layer == 0 && seqLen == 1)
+            {
+                unsafe
+                {
+                    // qkvFused is already disposed, but attnOut is available.
+                    // Dump the first 4 values of attnOut head 0.
+                    float* aPtr = GetFloatPtr(attnOut[0]);
+                    Console.Error.WriteLine($"[DIAG]   layer 0 TP attnOut[0][0..3]: {aPtr[0]:F6} {aPtr[1]:F6} {aPtr[2]:F6} {aPtr[3]:F6}");
+                }
+            }
+            // END DIAG
+
             // 4. Row-parallel output + bias + AllReduce.
             // Output bias is replicated (added after AllReduce).
             Tensor reducedAttn = TpRowParallelLinear(attnOut, wn[3]);
@@ -586,6 +599,23 @@ namespace TensorSharp.Models
                     int attendStart = totalSeqLen - attendLen;
 
                     var attnResult = new Tensor(alloc, DType.Float32, 1, numHeadsPerGpu * headDim);
+
+                    // DIAG: dump Q/KV-cache/sink for head 0 before attention
+                    if (TpDiag && layer == 0 && r == 0)
+                    {
+                        unsafe
+                        {
+                            float* qP = GetFloatPtr(qTensor);
+                            float* kP = GetFloatPtr(_tpKvCacheK[layer][r]);
+                            float* vP = GetFloatPtr(_tpKvCacheV[layer][r]);
+                            int kvSeq = (int)_tpKvCacheK[layer][r].Sizes[1];
+                            Console.Error.WriteLine($"[DIAG]   TP Q[0][0..3]:    {qP[0]:F6} {qP[1]:F6} {qP[2]:F6} {qP[3]:F6}");
+                            Console.Error.WriteLine($"[DIAG]   TP Kcache[0][0..3]: {kP[0]:F6} {kP[1]:F6} {kP[2]:F6} {kP[3]:F6}");
+                            Console.Error.WriteLine($"[DIAG]   TP Vcache[0][0..3]: {vP[0]:F6} {vP[1]:F6} {vP[2]:F6} {vP[3]:F6}");
+                            Console.Error.WriteLine($"[DIAG]   TP sink[0]={rankSinks?[0]:F6} scale={scale:F6} kvSeq={kvSeq} attendStart={attendStart}");
+                        }
+                    }
+                    // END DIAG
 
                     if (rankSinks != null)
                     {
