@@ -18,6 +18,14 @@ namespace TensorSharp.Cuda
         private readonly CudaP2PCommunicator _communicator;
         private bool _disposed;
 
+        // Diagnostic/fallback: when set, reduce across the local GPUs by staging
+        // through host memory (device→host, sum, host→device) instead of the
+        // device-to-device P2P path. This mirrors the multi-node AllReduce, which
+        // is known-good, and is enabled with TENSORSHARP_TP_HOST_ALLREDUCE=1 to
+        // isolate P2P-specific correctness issues.
+        private static readonly bool _forceHostAllReduce =
+            string.Equals(Environment.GetEnvironmentVariable("TENSORSHARP_TP_HOST_ALLREDUCE"), "1", StringComparison.Ordinal);
+
         public TensorParallelGroup(int degree)
         {
             if (degree < 1)
@@ -80,7 +88,45 @@ namespace TensorSharp.Cuda
         public void AllReduce(Tensor[] tensors)
         {
             if (!IsActive) return;
-            _communicator.AllReduce(tensors);
+            if (_forceHostAllReduce)
+                HostAllReduce(tensors);
+            else
+                _communicator.AllReduce(tensors);
+        }
+
+        /// <summary>
+        /// Host-staged AllReduce across the local GPUs: read each rank's tensor
+        /// to host, sum, write the result back to every rank and force the device
+        /// upload. Correctness fallback for the device-to-device P2P path; slower
+        /// but matches the multi-node reduce exactly. Gated by
+        /// TENSORSHARP_TP_HOST_ALLREDUCE.
+        /// </summary>
+        private void HostAllReduce(Tensor[] tensors)
+        {
+            if (tensors == null || tensors.Length != Degree)
+                throw new ArgumentException($"Expected {Degree} tensors, got {tensors?.Length ?? 0}.");
+
+            // Make sure every rank's partial is finished before reading it back.
+            for (int r = 0; r < Degree; r++)
+                _allocators[r].Synchronize();
+
+            int n = (int)tensors[0].Storage.ElementCount;
+            float[] acc = tensors[0].GetElementsAsFloat(n);
+            for (int r = 1; r < Degree; r++)
+            {
+                float[] part = tensors[r].GetElementsAsFloat(n);
+                for (int i = 0; i < n; i++)
+                    acc[i] += part[i];
+            }
+
+            for (int r = 0; r < Degree; r++)
+            {
+                tensors[r].SetElementsAsFloat(acc);
+                tensors[r].EnsureDeviceCurrent();
+            }
+
+            for (int r = 0; r < Degree; r++)
+                _allocators[r].Synchronize();
         }
 
         /// <summary>Synchronize all GPU streams.</summary>
