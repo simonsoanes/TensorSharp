@@ -83,7 +83,104 @@ namespace TensorSharp.Cuda
                 }
             }
 
+            // Verify that P2P DMA actually round-trips correctly. Some platforms
+            // (L4 behind certain PCIe switches, IOMMU-enabled hosts, constrained
+            // BAR1) report canAccessPeer=1 and accept cuCtxEnablePeerAccess, yet
+            // cuMemcpyPeerAsync silently transfers corrupt data. Write a known
+            // pattern on GPU i, peer-copy to GPU j, read back and compare.
+            for (int i = 0; i < n; i++)
+            {
+                for (int j = 0; j < n; j++)
+                {
+                    if (i == j || !enabled[i * n + j]) continue;
+
+                    if (!VerifyP2PRoundTrip(allocators, i, j))
+                    {
+                        Console.WriteLine(
+                            $"  TP: P2P DMA self-test FAILED for GPU {i} → GPU {j} " +
+                            $"(cuDeviceCanAccessPeer=1 but data is corrupt). " +
+                            $"Falling back to host-staged transfers for this pair.");
+                        enabled[i * n + j] = false;
+                        CudaStorage.MarkPeerAccessFailed(
+                            allocators[i].DeviceId, allocators[j].DeviceId);
+                    }
+                }
+            }
+
             return enabled;
+        }
+
+        /// <summary>
+        /// Allocate a small buffer on GPU <paramref name="src"/>, fill it with a
+        /// known pattern, peer-copy it to GPU <paramref name="dst"/>, read the
+        /// result back to the host and verify every byte. Returns false when the
+        /// round-trip corrupts data (the exact failure mode seen on some L4
+        /// PCIe topologies).
+        /// </summary>
+        private static unsafe bool VerifyP2PRoundTrip(CudaAllocator[] allocators, int src, int dst)
+        {
+            const int testBytes = 4096;
+            IntPtr srcBuf = IntPtr.Zero;
+            IntPtr dstBuf = IntPtr.Zero;
+
+            try
+            {
+                // Allocate on source GPU and write a recognisable pattern.
+                allocators[src].Context.MakeCurrent();
+                CudaDriverApi.cuMemAlloc(out srcBuf, new UIntPtr(testBytes)).ThrowOnError();
+
+                var pattern = new byte[testBytes];
+                for (int k = 0; k < testBytes; k++)
+                    pattern[k] = (byte)((k * 7 + src * 31 + dst * 17) & 0xFF);
+
+                fixed (byte* p = pattern)
+                    CudaDriverApi.cuMemcpyHtoD(srcBuf, (IntPtr)p, new UIntPtr(testBytes)).ThrowOnError();
+
+                // Allocate on destination GPU (zero-fill so a failed copy is visible).
+                allocators[dst].Context.MakeCurrent();
+                CudaDriverApi.cuMemAlloc(out dstBuf, new UIntPtr(testBytes)).ThrowOnError();
+                CudaDriverApi.cuMemsetD8(dstBuf, 0, new UIntPtr(testBytes)).ThrowOnError();
+
+                // Peer copy: src GPU → dst GPU, enqueued on dst's stream.
+                CudaDriverApi.cuMemcpyPeerAsync(
+                    dstBuf, allocators[dst].Context.Handle,
+                    srcBuf, allocators[src].Context.Handle,
+                    new UIntPtr(testBytes),
+                    allocators[dst].Stream.Handle).ThrowOnError();
+
+                allocators[dst].Stream.Synchronize();
+
+                // Read back and compare.
+                var readback = new byte[testBytes];
+                fixed (byte* r = readback)
+                    CudaDriverApi.cuMemcpyDtoH((IntPtr)r, dstBuf, new UIntPtr(testBytes)).ThrowOnError();
+
+                for (int k = 0; k < testBytes; k++)
+                {
+                    if (readback[k] != pattern[k])
+                        return false;
+                }
+
+                return true;
+            }
+            catch
+            {
+                // Any CUDA error during the self-test → treat P2P as broken.
+                return false;
+            }
+            finally
+            {
+                if (srcBuf != IntPtr.Zero)
+                {
+                    allocators[src].Context.MakeCurrent();
+                    CudaDriverApi.cuMemFree(srcBuf);
+                }
+                if (dstBuf != IntPtr.Zero)
+                {
+                    allocators[dst].Context.MakeCurrent();
+                    CudaDriverApi.cuMemFree(dstBuf);
+                }
+            }
         }
 
         private bool CanAccessPeer(int from, int to) => _p2pEnabled[from * _worldSize + to];

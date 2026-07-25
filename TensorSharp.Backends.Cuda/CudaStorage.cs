@@ -175,6 +175,18 @@ namespace TensorSharp.Cuda
         internal static readonly bool DisableP2P =
             Environment.GetEnvironmentVariable("TENSORSHARP_TP_DISABLE_P2P") == "1";
 
+        /// <summary>
+        /// Called by <see cref="CudaP2PCommunicator"/> when the P2P DMA self-test
+        /// detects that a device pair reports peer-accessible but the actual
+        /// cuMemcpyPeer round-trip produces corrupt data (seen on some L4 PCIe
+        /// topologies). Forces the pair through host staging permanently.
+        /// </summary>
+        internal static void MarkPeerAccessFailed(int deviceA, int deviceB)
+        {
+            _peerAccessCache[(deviceA, deviceB)] = false;
+            _peerAccessCache[(deviceB, deviceA)] = false;
+        }
+
         private static bool CanAccessPeer(int srcDevice, int dstDevice)
         {
             if (srcDevice == dstDevice)
