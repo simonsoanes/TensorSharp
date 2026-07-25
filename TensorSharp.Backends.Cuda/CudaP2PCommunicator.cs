@@ -52,6 +52,14 @@ namespace TensorSharp.Cuda
             int n = allocators.Length;
             var enabled = new bool[n * n];
 
+            // TENSORSHARP_TP_DISABLE_P2P=1 → leave every pair disabled so AllReduce
+            // stages through host memory, matching no-peer hardware exactly.
+            if (CudaStorage.DisableP2P)
+            {
+                Console.WriteLine("  TP: peer-to-peer DISABLED by TENSORSHARP_TP_DISABLE_P2P; staging collectives through host.");
+                return enabled;
+            }
+
             for (int i = 0; i < n; i++)
             {
                 for (int j = 0; j < n; j++)
@@ -109,7 +117,17 @@ namespace TensorSharp.Cuda
             long byteCount = tensors[0].Storage.ByteLength;
             int elementCount = (int)tensors[0].Storage.ElementCount;
 
-            // Synchronize all GPUs to ensure partial results are complete.
+            // Flush any pending HOST writes to the device before we read the raw
+            // device pointers below. A partial that was accumulated host-side (any
+            // GetFloatPtr/PtrAtElement checkout marks the storage host-dirty) still
+            // has a STALE device buffer until this runs, and we would reduce the
+            // stale contents. Mirrors CudaStorage.CopyDeviceFrom, which does the
+            // same before a cross-device copy.
+            for (int i = 0; i < _worldSize; i++)
+                ((CudaStorage)tensors[i].Storage).EnsureDeviceCurrent();
+
+            // Synchronize all GPUs to ensure partial results are complete
+            // (this also flushes the async HtoD uploads issued just above).
             for (int i = 0; i < _worldSize; i++)
                 _allocators[i].Synchronize();
 
@@ -168,6 +186,15 @@ namespace TensorSharp.Cuda
             // Final sync so all GPUs have the reduced result.
             for (int i = 0; i < _worldSize; i++)
                 _allocators[i].Synchronize();
+
+            // Every tensor's DEVICE buffer was just rewritten through raw pointers,
+            // which bypasses the storage's dirty tracking. Without this the flags
+            // still claim host and device agree (EnsureDeviceCurrent clears BOTH),
+            // so the next SyncHostFromDevice short-circuits on !deviceDirty and
+            // hands back the pre-AllReduce host contents — silently discarding the
+            // reduced result. Mark device-authoritative so host reads re-fetch.
+            for (int i = 0; i < _worldSize; i++)
+                ((CudaStorage)tensors[i].Storage).MarkDeviceModified();
         }
 
         private unsafe void AllReduceViaHost(Tensor dst, Tensor src, int elementCount, long byteCount)

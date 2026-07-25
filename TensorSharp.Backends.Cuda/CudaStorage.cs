@@ -164,10 +164,23 @@ namespace TensorSharp.Cuda
         // invalid and must go through host memory instead.
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<(int, int), bool> _peerAccessCache = new();
 
+        /// <summary>
+        /// Diagnostic / workaround: treat every device pair as NOT peer-accessible,
+        /// forcing all cross-GPU transfers through host staging. Set
+        /// TENSORSHARP_TP_DISABLE_P2P=1 to make peer-capable hardware (paired L4s,
+        /// NVLink boxes) take exactly the code path that no-peer hardware (A16 vGPU
+        /// profiles, consumer cards) takes. Slower, but it isolates whether a
+        /// multi-GPU defect lives in the P2P branches.
+        /// </summary>
+        internal static readonly bool DisableP2P =
+            Environment.GetEnvironmentVariable("TENSORSHARP_TP_DISABLE_P2P") == "1";
+
         private static bool CanAccessPeer(int srcDevice, int dstDevice)
         {
             if (srcDevice == dstDevice)
                 return true;
+            if (DisableP2P)
+                return false;
             return _peerAccessCache.GetOrAdd((srcDevice, dstDevice), key =>
             {
                 try
