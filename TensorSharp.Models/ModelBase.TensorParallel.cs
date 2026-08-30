@@ -1243,6 +1243,26 @@ namespace TensorSharp.Models
                 Console.WriteLine($"  TP replicated on rank 0: {replicatedCount} unsharded quantized weight(s), " +
                     $"{replicatedBytes / 1024 / 1024} MB.");
             }
+
+            // Sharding a handful of weights and replicating the rest is not a
+            // speedup - every rank recomputes the same replicated matmuls and
+            // then pays a collective on top, so TP can land well BELOW one GPU.
+            // gpt-oss is the live example: 24 sharded vs 1538 replicated
+            // (10.8 GB) measures 28 tok/s on two GPUs against 349 on one.
+            // Say so, because the alternative is a silent 12x regression.
+            long shardedBytes = 0;
+            foreach (var kv in _tpQuantWeights)
+                if (kv.Value is { Length: > 0 } sh && sh[0] != null)
+                    shardedBytes += sh[0].RawBytes * sh.Length;
+            if (replicatedBytes > 0 && shardedBytes < replicatedBytes)
+            {
+                Console.Error.WriteLine(
+                    $"WARNING: tensor parallelism sharded only {shardedBytes / 1024 / 1024} MB across " +
+                    $"{TpDegree} ranks while {replicatedBytes / 1024 / 1024} MB stays replicated on every " +
+                    "rank. The replicated weights are recomputed identically by each rank and the " +
+                    "collectives are pure overhead, so this run is likely SLOWER than a single GPU. " +
+                    "Prefer one GPU for this model, or use it only to fit weights that do not fit on one.");
+            }
             if (supersededCount > 0)
             {
                 Console.WriteLine($"  TP not resident: {supersededCount} fusion-source weight(s), " +
