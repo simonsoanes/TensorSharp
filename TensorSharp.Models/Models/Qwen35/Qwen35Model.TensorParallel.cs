@@ -486,6 +486,7 @@ namespace TensorSharp.Models
                 }
 
                 _tpQuantWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
                 _quantWeights.Remove(weightName);
                 qw.Dispose();
             }
@@ -542,6 +543,7 @@ namespace TensorSharp.Models
                         qShards[r].Scale = qw.Scale;
                     }
                     _tpQuantWeights[weightName] = qShards;
+                    RecordTpWeightScale(weightName, qw);
                 }
                 else
                 {
@@ -566,6 +568,7 @@ namespace TensorSharp.Models
                         shards[r] = shard;
                     }
                     _tpWeights[weightName] = shards;
+                    RecordTpWeightScale(weightName, qw);
                 }
 
                 _weights.Remove(weightName);
@@ -801,6 +804,7 @@ namespace TensorSharp.Models
                 }
 
                 _tpQuantWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
                 _quantWeights.Remove(weightName);
                 qw.Dispose();
             }
@@ -839,6 +843,7 @@ namespace TensorSharp.Models
                 }
 
                 _tpWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
                 _weights.Remove(weightName);
                 w.Dispose();
             }
@@ -933,6 +938,7 @@ namespace TensorSharp.Models
                     shards[r].Scale = qw.Scale;
                 }
                 _tpQuantWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
             }
             else
             {
@@ -968,6 +974,7 @@ namespace TensorSharp.Models
                     shards[r] = shard;
                 }
                 _tpWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
             }
 
             _quantWeights.Remove(weightName);
@@ -1047,6 +1054,7 @@ namespace TensorSharp.Models
                 }
 
                 _tpQuantWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
                 _quantWeights.Remove(weightName);
                 qw.Dispose();
             }
@@ -1063,6 +1071,7 @@ namespace TensorSharp.Models
                 }
 
                 _tpWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
                 _weights.Remove(weightName);
                 w.Dispose();
             }
@@ -1125,6 +1134,7 @@ namespace TensorSharp.Models
                 }
 
                 _tpQuantWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
                 _quantWeights.Remove(weightName);
                 qw.Dispose();
             }
@@ -1141,6 +1151,7 @@ namespace TensorSharp.Models
                 }
 
                 _tpWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
                 _weights.Remove(weightName);
                 w.Dispose();
             }

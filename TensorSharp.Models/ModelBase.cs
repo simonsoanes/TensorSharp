@@ -62,6 +62,13 @@ namespace TensorSharp.Models
         /// <summary>Per-GPU sharded F32 weights, keyed by weight name.</summary>
         protected readonly Dictionary<string, Tensor[]> _tpWeights = new();
 
+        /// <summary>Per-tensor weight scale of a SHARDED weight, keyed by the
+        /// name the TP linears look it up by. Recorded when the shards are cut,
+        /// because the shard itself may be a plain F32 <see cref="Tensor"/> with
+        /// nowhere to carry it. The scalar is shard-invariant, so one value
+        /// covers every rank (see the TP linears for why).</summary>
+        protected readonly Dictionary<string, float> _tpWeightScales = new();
+
         /// <summary>
         /// Stacked-along-experts views of MoE expert weight tensors keyed by
         /// the original GGUF tensor name (e.g. <c>"blk.0.ffn_gate_exps.weight"</c>).

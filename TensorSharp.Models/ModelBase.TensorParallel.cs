@@ -150,6 +150,7 @@ namespace TensorSharp.Models
                 }
 
                 _tpQuantWeights[name] = shards;
+                RecordTpWeightScale(name, qw);
                 quantToRemove.Add(name);
             }
 
@@ -298,6 +299,7 @@ namespace TensorSharp.Models
                 }
 
                 _tpQuantWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
                 _quantWeights.Remove(weightName);
                 qw.Dispose();
             }
@@ -323,6 +325,7 @@ namespace TensorSharp.Models
                 }
 
                 _tpWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
                 _weights.Remove(weightName);
                 w.Dispose();
             }
@@ -475,6 +478,8 @@ namespace TensorSharp.Models
                     shards[r] = shard;
             }
 
+            // This pack is built from several sources; the F32 fallback already
+            // baked each source's scale into its rows, so record nothing here.
             if (requantize)
                 _tpQuantWeights[fusedName] = quantShards;
             else
@@ -620,19 +625,30 @@ namespace TensorSharp.Models
             ShardConcatenatedBiasColumnParallel(biasName, half, half);
         }
 
-        /// <summary>
-        /// Apply a sharded weight's per-tensor sidecar scale to each rank's
-        /// result. The scalar is shard-invariant, and for a row-parallel layer
-        /// scaling the partials before the AllReduce is equivalent to scaling
-        /// the sum, so both splits use this same helper.
-        /// </summary>
-        private static void TpApplyWeightScale(Tensor[] results, QuantizedWeight[] shards)
+        /// <summary>Remember a sharded weight's per-tensor scale under the name
+        /// the TP linears resolve it by. Tolerates a null source (an F32 shard
+        /// cut from a tensor that never had one).</summary>
+        protected void RecordTpWeightScale(string weightName, QuantizedWeight source)
         {
-            if (shards == null || shards.Length == 0 || shards[0] == null || shards[0].Scale == 1.0f)
+            if (weightName == null)
+                return;
+            float s = source?.Scale ?? 1.0f;
+            if (s != 1.0f)
+                _tpWeightScales[weightName] = s;
+        }
+
+        /// <summary>Multiply every rank's result by the sharded weight's
+        /// per-tensor scale. Shard-invariant on both splits: column-parallel
+        /// divides output rows and the scalar does not depend on the row, and
+        /// row-parallel divides the contraction, where scaling each partial
+        /// before the all-reduce equals scaling the sum.</summary>
+        protected void TpApplyNamedWeightScale(Tensor[] results, string weightName)
+        {
+            if (results == null || !_tpWeightScales.TryGetValue(weightName, out float s))
                 return;
             for (int r = 0; r < results.Length; r++)
                 if (results[r] != null)
-                    Ops.Mul(results[r], results[r], shards[r].Scale);
+                    Ops.Mul(results[r], results[r], s);
         }
 
         /// <summary>
@@ -656,8 +672,7 @@ namespace TensorSharp.Models
                 for (int r = 0; r < tp; r++) sharedInputs[r] = input;
                 if (TryTpFusedQuantLinear(sharedInputs, qShards, results, seqLen, allReduce: false))
                 {
-                    if (_tpQuantWeights.TryGetValue(weightName, out var scaleShards))
-                        TpApplyWeightScale(results, scaleShards);
+                    TpApplyNamedWeightScale(results, weightName);
                     _linearTicks += Stopwatch.GetTimestamp() - t0;
                     return results;
                 }
@@ -897,8 +912,7 @@ namespace TensorSharp.Models
 
             _linearTicks += Stopwatch.GetTimestamp() - t0;
 
-            if (_tpQuantWeights.TryGetValue(weightName, out var rowScaleShards))
-                TpApplyWeightScale(partials, rowScaleShards);
+            TpApplyNamedWeightScale(partials, weightName);
 
             _tpGroup.AllReduce(partials);
             return partials;
