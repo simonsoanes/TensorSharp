@@ -101,6 +101,12 @@ namespace TensorSharp.Models
                     long typeSize = GgufFile.GetTypeSize(type);
                     long blocksPerRow = qw.Ne0 / blockSize;
                     long blocksPerShard = blocksPerRow / globalTp;
+                    if (blocksPerRow % globalTp != 0)
+                        throw new NotSupportedException(
+                            $"Row-parallel shard of '{name}' would drop a tail: {qw.Ne0} columns is " +
+                            $"{blocksPerRow} blocks of {blockSize} for {globalTp} ranks. A quantized " +
+                            $"row can only be split on block boundaries, so ne0 must be a multiple of " +
+                            $"{blockSize * globalTp}.");
                     long ne0PerShard = blocksPerShard * blockSize;
                     long srcRowBytes = NativeDequant.RowSize(qw.GgmlType, qw.Ne0);
                     long dstRowBytes = (ne0PerShard / blockSize) * typeSize;
@@ -136,6 +142,10 @@ namespace TensorSharp.Models
                         }
                         shards[lr] = new QuantizedWeight(shardPtr, totalBytesPerShard,
                             qw.GgmlType, ne0PerShard, qw.Ne1);
+                        // A per-tensor scale is shard-invariant: it does not depend on
+                        // the output row, and it distributes over the row-parallel
+                        // AllReduce, so every shard carries the parent's value.
+                        shards[lr].Scale = qw.Scale;
                     });
                 }
 
@@ -281,6 +291,10 @@ namespace TensorSharp.Models
                     }
                     shards[r] = new QuantizedWeight(shardPtr, totalBytes,
                         qw.GgmlType, qw.Ne0, rows.Length);
+                    // A per-tensor scale is shard-invariant: it does not depend on
+                    // the output row, and it distributes over the row-parallel
+                    // AllReduce, so every shard carries the parent's value.
+                    shards[r].Scale = qw.Scale;
                 }
 
                 _tpQuantWeights[weightName] = shards;
@@ -607,6 +621,21 @@ namespace TensorSharp.Models
         }
 
         /// <summary>
+        /// Apply a sharded weight's per-tensor sidecar scale to each rank's
+        /// result. The scalar is shard-invariant, and for a row-parallel layer
+        /// scaling the partials before the AllReduce is equivalent to scaling
+        /// the sum, so both splits use this same helper.
+        /// </summary>
+        private static void TpApplyWeightScale(Tensor[] results, QuantizedWeight[] shards)
+        {
+            if (shards == null || shards.Length == 0 || shards[0] == null || shards[0].Scale == 1.0f)
+                return;
+            for (int r = 0; r < results.Length; r++)
+                if (results[r] != null)
+                    Ops.Mul(results[r], results[r], shards[r].Scale);
+        }
+
+        /// <summary>
         /// Column-parallel linear forward: each GPU computes its output slice
         /// using its weight shard. Input is replicated across all GPUs.
         /// Returns one output tensor per GPU, each with outDim/tp columns.
@@ -627,6 +656,8 @@ namespace TensorSharp.Models
                 for (int r = 0; r < tp; r++) sharedInputs[r] = input;
                 if (TryTpFusedQuantLinear(sharedInputs, qShards, results, seqLen, allReduce: false))
                 {
+                    if (_tpQuantWeights.TryGetValue(weightName, out var scaleShards))
+                        TpApplyWeightScale(results, scaleShards);
                     _linearTicks += Stopwatch.GetTimestamp() - t0;
                     return results;
                 }
@@ -865,6 +896,9 @@ namespace TensorSharp.Models
             }
 
             _linearTicks += Stopwatch.GetTimestamp() - t0;
+
+            if (_tpQuantWeights.TryGetValue(weightName, out var rowScaleShards))
+                TpApplyWeightScale(partials, rowScaleShards);
 
             _tpGroup.AllReduce(partials);
             return partials;

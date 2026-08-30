@@ -1299,6 +1299,15 @@ namespace TensorSharp.Models
         /// store ffn_gate and ffn_up in different IQ types.</summary>
         protected override bool SupportsSplitGateUpFfn => true;
 
+        /// <summary>
+        /// The fused per-rank TP graphs carry the per-projection scale table
+        /// (see <c>TryBuildTpFdLayerDescs</c>), and the native graphs apply each
+        /// scale on the correct side of the AllReduce cut. The per-op TP
+        /// fallback linears do NOT, so a scaled GGUF that cannot take the fused
+        /// path still has to be refused - <c>ValidateTpConstraints</c> does that.
+        /// </summary>
+        protected override bool SupportsTensorParallelWeightScales => true;
+
         // Per-block snapshot for Qwen 3.5 (mix of attention layers and GDN
         // recurrent layers). Each block bundles:
         //   * For every attention layer L: K bytes for [start,start+B), V bytes

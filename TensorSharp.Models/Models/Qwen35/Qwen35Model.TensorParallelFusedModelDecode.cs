@@ -160,6 +160,11 @@ namespace TensorSharp.Models
                 {
                     var a = default(Qwen35LayerDecodeArgs);
                     a.StructBytes = structBytes;
+                    // Per-tensor sidecar scales. Shard-invariant: column-parallel
+                    // splits output rows (the scalar is row-independent) and
+                    // row-parallel splits the contraction (the scalar distributes
+                    // over the AllReduce), so every rank applies the same value.
+                    a.ProjScales = ProjScalesPtr(l);
                     if (!_weights.TryGetValue(_attnNormKey[l], out var attnNorm) || attnNorm == null ||
                         !_weights.TryGetValue(_postAttnNormKey[l], out var postNorm) || postNorm == null)
                         return false;

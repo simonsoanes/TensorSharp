@@ -868,12 +868,23 @@ namespace TensorSharp.Models
             {
                 HasSidecarWeightScales = true;
                 Console.WriteLine($"  Per-tensor weight scales: {attached} sidecar .scale tensors attached (NVFP4 scale2)");
-                if (IsTensorParallel)
+                if (IsTensorParallel && !SupportsTensorParallelWeightScales)
                     throw new NotSupportedException(
-                        "Per-tensor weight-scale sidecars (.scale) are not wired into the tensor-parallel " +
-                        "paths yet; run this GGUF without --tp.");
+                        "This GGUF carries per-tensor weight-scale sidecars (.scale), which the " +
+                        "tensor-parallel path for this architecture does not apply yet. " +
+                        "Run it without --tp, or use a GGUF whose scales are folded into " +
+                        "the quantized blocks.");
             }
         }
+
+        /// <summary>
+        /// Whether this architecture's tensor-parallel paths apply per-tensor
+        /// sidecar weight scales (<see cref="QuantizedWeight.Scale"/>). The scalar
+        /// itself is shard-invariant - it does not depend on the output row, and it
+        /// distributes over the row-parallel AllReduce - so this is purely about
+        /// whether every per-rank matmul in the family has been wired to apply it.
+        /// </summary>
+        protected virtual bool SupportsTensorParallelWeightScales => false;
 
         protected virtual bool SupportsSplitGateUpFfn => false;
 

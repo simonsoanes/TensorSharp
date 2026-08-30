@@ -479,6 +479,10 @@ namespace TensorSharp.Models
                     }
                     shards[r] = new QuantizedWeight(shardPtr, totalBytes,
                         qw.GgmlType, dstNe0, dstNe1);
+                    // A per-tensor scale is shard-invariant: it does not depend on
+                    // the output row, and it distributes over the row-parallel
+                    // AllReduce, so every shard carries the parent's value.
+                    shards[r].Scale = qw.Scale;
                 }
 
                 _tpQuantWeights[weightName] = shards;
@@ -532,6 +536,10 @@ namespace TensorSharp.Models
                         }
                         qShards[r] = new QuantizedWeight(shardPtr, totalBytes,
                             q8Type, hiddenSize, rowIndices.Length);
+                        // A per-tensor scale is shard-invariant: it does not depend on
+                        // the output row, and it distributes over the row-parallel
+                        // AllReduce, so every shard carries the parent's value.
+                        qShards[r].Scale = qw.Scale;
                     }
                     _tpQuantWeights[weightName] = qShards;
                 }
@@ -786,6 +794,10 @@ namespace TensorSharp.Models
                     }
                     shards[r] = new QuantizedWeight(shardPtr, totalBytesPerShard,
                         qw.GgmlType, ne0PerShard, qw.Ne1);
+                    // A per-tensor scale is shard-invariant: it does not depend on
+                    // the output row, and it distributes over the row-parallel
+                    // AllReduce, so every shard carries the parent's value.
+                    shards[r].Scale = qw.Scale;
                 }
 
                 _tpQuantWeights[weightName] = shards;
@@ -915,6 +927,10 @@ namespace TensorSharp.Models
                     }
                     shards[r] = new QuantizedWeight(shardPtr, totalBytesPerShard,
                         q8Type, ne0PerShard, qw.Ne1);
+                    // A per-tensor scale is shard-invariant: it does not depend on
+                    // the output row, and it distributes over the row-parallel
+                    // AllReduce, so every shard carries the parent's value.
+                    shards[r].Scale = qw.Scale;
                 }
                 _tpQuantWeights[weightName] = shards;
             }
@@ -1102,6 +1118,10 @@ namespace TensorSharp.Models
                     }
                     shards[r] = new QuantizedWeight(shardPtr, totalBytesPerShard,
                         qw.GgmlType, ne0PerShard, qw.Ne1);
+                    // A per-tensor scale is shard-invariant: it does not depend on
+                    // the output row, and it distributes over the row-parallel
+                    // AllReduce, so every shard carries the parent's value.
+                    shards[r].Scale = qw.Scale;
                 }
 
                 _tpQuantWeights[weightName] = shards;
