@@ -580,7 +580,11 @@ namespace
         // stays global — every rank computes the same top-k from the replicated
         // hidden state, and a per-rank id LUT + weight mask (see below) confine
         // its rank's mul_mat_id to the experts it owns.
-        const bool tp_mode = tp_degree > 1 && tp_plan_out != nullptr;
+        // Plan mode is requested by PASSING tp_plan_out, not by the degree: a
+        // distributed run drives one local rank per node and still needs the
+        // plan, because its reduction happens across nodes rather than across
+        // local ranks. Callers that want the graph run inline pass nullptr.
+        const bool tp_mode = tp_degree >= 1 && tp_plan_out != nullptr;
         if (tp_mode)
             *tp_plan_out = nullptr;
 

@@ -313,7 +313,11 @@ namespace
         // stacked experts, shared-expert width) arrive already sharded; the MoE
         // router stays global and the ep_lut/ep_mask pair below confines each
         // rank's mul_mat_id to the whole experts it owns.
-        const bool tp_mode = tp_degree > 1 && tp_plan_out != nullptr;
+        // Plan mode is requested by PASSING tp_plan_out, not by the degree: a
+        // distributed run drives one local rank per node and still needs the
+        // plan, because its reduction happens across nodes rather than across
+        // local ranks. Callers that want the graph run inline pass nullptr.
+        const bool tp_mode = tp_degree >= 1 && tp_plan_out != nullptr;
         if (tp_mode)
         {
             *tp_plan_out = nullptr;
