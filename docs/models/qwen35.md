@@ -27,6 +27,7 @@ name their projector `mmproj-F16.gguf`, so they must not share a directory):
 | Qwen3.5-9B (dense hybrid) | [unsloth/Qwen3.5-9B-GGUF](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) | `Qwen3.5-9B-UD-Q4_K_XL.gguf` (5.966 GB) or `Qwen3.5-9B-Q8_0.gguf` (9.528 GB) | `mmproj-F16.gguf` (0.918 GB) |
 | Qwen3.5-35B-A3B (MoE) | [ggml-org/Qwen3.5-35B-A3B-GGUF](https://huggingface.co/ggml-org/Qwen3.5-35B-A3B-GGUF) | `Qwen3.5-35B-A3B-Q8_0.gguf` (36.903 GB) | `mmproj-Qwen3.5-35B-A3B-Q8_0.gguf` (0.614 GB) |
 | Qwen3.6-35B-A3B with NextN / MTP (MoE) | [unsloth/Qwen3.6-35B-A3B-MTP-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF) | `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` (22.663 GB) or `Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf` (11.819 GB) | `mmproj-F16.gguf` (0.899 GB) |
+| Qwen3.8-27B in NVFP4 (dense hybrid, 4-bit FP) | [akopytko/Qwen3.8-27B-NVFP4-GGUF](https://huggingface.co/akopytko/Qwen3.8-27B-NVFP4-GGUF) | `Qwen3.8-27B-NVFP4-MTP-N4_0.gguf` (15.716 GB, self-contained NVFP4) | `mmproj-BF16.gguf` (0.931 GB) |
 
 > **Qwen 3.6 MTP:** the NextN draft block (GGUF metadata key
 > `nextn_predict_layers`) is retained **only** in the GGUFs from
@@ -35,6 +36,16 @@ name their projector `mmproj-F16.gguf`, so they must not share a directory):
 > files (same file names) strip it — on those, `--spec` silently falls back
 > to standard decode (`--spec-type ngram` still works there, since it needs no
 > trained drafter weights).
+
+> **NVFP4 (GGML type 40):** 4-bit E2M1 values with UE4M3 per-16 sub-block
+> scales (36 bytes / 64 weights, 4.5 bpw), NVIDIA's Blackwell-native FP4
+> format. Two GGUF flavors exist: self-contained files (all scale factors
+> folded into the blocks, e.g. the repo above) and checkpoint-converted files
+> that carry extra 1-element `blk.N.<proj>.scale` tensors (HF
+> `weight_scale_2`), which TensorSharp multiplies into the projection outputs
+> exactly as llama.cpp does (`.input_scale` sidecars are calibration metadata
+> and are ignored at inference). On sm_120 GPUs prefill uses ggml-cuda's
+> native block-scaled FP4 tensor-core path.
 
 The conversion cards identify the corresponding official Qwen repositories as
 their base models; those upstream cards declare Apache-2.0.
