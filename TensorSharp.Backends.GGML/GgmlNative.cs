@@ -2387,7 +2387,7 @@ internal enum GgmlIndexReductionOp
             int numHeads, int numKvHeads,
             int maxSeqLen, int position,
             float eps, float ropeBase, float ropeFreqScale,
-            int ropeMode, int kvCacheType);
+            int ropeNDims, int ropeMode, int kvCacheType);
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -5578,7 +5578,7 @@ internal enum GgmlIndexReductionOp
             int numHeads, int numKvHeads,
             int maxSeqLen, int position,
             float eps, float ropeBase, float ropeFreqScale,
-            int ropeMode, int kvCacheType = 0)
+            int ropeNDims, int ropeMode, int kvCacheType = 0)
         {
             CheckResult(TSGgml_Qwen35AttentionLayerDecode(
                 residualData, hiddenSize,
@@ -5589,7 +5589,7 @@ internal enum GgmlIndexReductionOp
                 kCacheData, vCacheData,
                 numHeads, numKvHeads,
                 maxSeqLen, position,
-                eps, ropeBase, ropeFreqScale, ropeMode, kvCacheType), "qwen35_attention_layer_decode");
+                eps, ropeBase, ropeFreqScale, ropeNDims, ropeMode, kvCacheType), "qwen35_attention_layer_decode");
         }
 
         public static void TransformerModelDecode(

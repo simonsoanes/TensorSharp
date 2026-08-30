@@ -2807,7 +2807,7 @@ namespace TensorSharp.GGML
             Tensor kCache, Tensor vCache,
             int numHeads, int numKvHeads,
             int maxSeqLen, int position,
-            float eps, float ropeBase, float ropeFreqScale, int ropeMode)
+            float eps, float ropeBase, float ropeFreqScale, int ropeNDims, int ropeMode)
         {
             if (residual == null || attnNorm == null || qNorm == null || kNorm == null ||
                 kCache == null || vCache == null)
@@ -2840,7 +2840,7 @@ namespace TensorSharp.GGML
                 kCachePtr, vCachePtr,
                 numHeads, numKvHeads,
                 maxSeqLen, position,
-                eps, ropeBase, ropeFreqScale, ropeMode, kvGgmlType);
+                eps, ropeBase, ropeFreqScale, ropeNDims, ropeMode, kvGgmlType);
         }
 
         /// <summary>

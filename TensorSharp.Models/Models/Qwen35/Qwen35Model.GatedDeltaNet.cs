@@ -1460,6 +1460,7 @@ namespace TensorSharp.Models
                 for (int l = 0; l < n; l++)
                 {
                     var a = default(Qwen35LayerDecodeArgs);
+                    a.ProjScales = ProjScalesPtr(l);   // every layer kind, not just dense FFN
                     a.StructBytes = structBytes;
                     a.AttnNormW = TensorComputePrimitives.GetStoragePointer(_attnNormW[l]);
                     a.PostAttnNormW = TensorComputePrimitives.GetStoragePointer(_postAttnNormW[l]);
@@ -1471,7 +1472,6 @@ namespace TensorSharp.Models
                         var dn = ResolveW(_ffnDownQW[l], _ffnDownF32[l]);
                         a.DownW = dn.ptr; a.DownType = dn.type; a.DownNe0 = dn.ne0; a.DownNe1 = dn.ne1; a.DownBytes = dn.bytes;
                         FillDenseFfnArgs(ref a, l);
-            a.ProjScales = ProjScalesPtr(l);
                     }
                     else
                     {
@@ -1881,6 +1881,7 @@ namespace TensorSharp.Models
             for (int l = 0; l < n; l++)
             {
                 var a = default(Qwen35LayerDecodeArgs);
+                a.ProjScales = ProjScalesPtr(l);   // every layer kind, not just dense FFN
                 a.StructBytes = structBytes;
                 a.AttnNormW = (IntPtr)GetFloatPtr(_attnNormW[l]);
                 a.PostAttnNormW = (IntPtr)GetFloatPtr(_postAttnNormW[l]);
@@ -1891,7 +1892,6 @@ namespace TensorSharp.Models
                     var dn = ResolveW(_ffnDownQW[l], _ffnDownF32[l]);
                     a.DownW = dn.ptr; a.DownType = dn.type; a.DownNe0 = dn.ne0; a.DownNe1 = dn.ne1; a.DownBytes = dn.bytes;
                     FillDenseFfnArgs(ref a, l);
-            a.ProjScales = ProjScalesPtr(l);
                 }
                 else
                 {
@@ -2015,7 +2015,7 @@ namespace TensorSharp.Models
             }
 
             if (_lmHeadQW != null && _lmHeadQW.Scale != 1.0f)
-                return false; // per-op path applies the lm-head sidecar scale
+                return FvBail("lm-head sidecar scale2 not folded into the fused verify graph");
             var lmh = ResolveW(_lmHeadQW, _lmHeadF32);
             IntPtr finalNormPtr = (IntPtr)GetFloatPtr(_finalNormW);
             int capCount = (captureData != null && captureLayers != null) ? captureLayers.Length : 0;
@@ -2364,6 +2364,7 @@ namespace TensorSharp.Models
         /// a missing MTP weight must not disable the trunk verify path.</summary>
         private unsafe bool TryFillMtpDraftLayerArgs(int l, ref Qwen35LayerDecodeArgs a)
         {
+            a.ProjScales = ProjScalesPtr(l);
             static bool HasW(QuantizedWeight q, Tensor f) => q != null || f != null;
             if (_attnNormW[l] == null || _postAttnNormW[l] == null)
                 return false;
@@ -2381,7 +2382,6 @@ namespace TensorSharp.Models
                 var dn = ResolveW(_ffnDownQW[l], _ffnDownF32[l]);
                 a.DownW = dn.ptr; a.DownType = dn.type; a.DownNe0 = dn.ne0; a.DownNe1 = dn.ne1; a.DownBytes = dn.bytes;
                 FillDenseFfnArgs(ref a, l);
-            a.ProjScales = ProjScalesPtr(l);
             }
             else
             {

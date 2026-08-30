@@ -219,6 +219,7 @@ namespace TensorSharp.Models
             for (int l = 0; l < n; l++)
             {
                 var a = default(Qwen35LayerDecodeArgs);
+                a.ProjScales = ProjScalesPtr(l);   // every layer kind, not just dense FFN
                 a.StructBytes = Marshal.SizeOf<Qwen35LayerDecodeArgs>();
                 a.AttnNormW = (IntPtr)GetFloatPtr(_attnNormW[l]);
                 a.PostAttnNormW = (IntPtr)GetFloatPtr(_postAttnNormW[l]);
@@ -229,7 +230,6 @@ namespace TensorSharp.Models
                     var dn = ResolveW(_ffnDownQW[l], _ffnDownF32[l]);
                     a.DownW = dn.Item1; a.DownType = dn.Item2; a.DownNe0 = dn.Item3; a.DownNe1 = dn.Item4; a.DownBytes = dn.Item5;
                     FillDenseFfnArgs(ref a, l);
-                a.ProjScales = ProjScalesPtr(l);
                 }
                 else
                 {

@@ -18,6 +18,8 @@
 //       slot serially first, then all together through the fused batched
 //       decode; the two must agree token for token.
 //   parity <model.gguf> <tok0,tok1,...> [n_predict] [backend]   raw greedy
+//   parity <model.gguf> --raw-step <tok0,tok1,...> [backend]
+//       raw logits with the prompt fed one token at a time (decode path)
 //   parity <model.gguf> --ppl <text-file> [backend] [n_ctx] [max_chunks]
 //       teacher-forced perplexity over non-overlapping n_ctx windows,
 //       scoring the SECOND half of each window (llama.cpp's
@@ -80,6 +82,7 @@ public static class Program
         if (args[1] == "--bench") return RunBench(modelPath, args);
         if (args[1] == "--batched") return RunBatched(modelPath, args);
         if (args[1] == "--ppl") return RunPerplexity(modelPath, args);
+        if (args[1] == "--raw-step") return RunRawStepped(modelPath, args);
         return RunRaw(modelPath, args);
     }
 
@@ -144,6 +147,30 @@ public static class Program
 
         double ppl = Math.Exp(nllSum / Math.Max(1, scored));
         Console.WriteLine($"[ppl] Final estimate: PPL = {ppl:F4}  over {scored} tokens in {chunks} chunks of {nCtx}");
+        return 0;
+    }
+
+    /// <summary>
+    /// Same output as the raw mode, but the prompt is fed ONE TOKEN AT A TIME
+    /// (decode kernels) instead of as a single batched prefill. Comparing the two
+    /// isolates the engine's own prefill-vs-decode numerical difference from any
+    /// difference against another engine: on Blackwell the batched path can
+    /// quantize activations to FP4 while the single-token path stays exact.
+    /// </summary>
+    private static int RunRawStepped(string modelPath, string[] args)
+    {
+        int[] tokens = args[2].Split(',', StringSplitOptions.RemoveEmptyEntries)
+                              .Select(t => int.Parse(t.Trim(), CultureInfo.InvariantCulture)).ToArray();
+        BackendType backend = ResolveBackend(args.Length > 3 ? args[3] : "ggmlcuda");
+
+        using var model = ModelBase.Create(modelPath, backend, ResolveTp());
+        model.ResetKVCache();
+        float[] logits = null;
+        foreach (int tok in tokens)
+            logits = model.Forward(new[] { tok });
+
+        Console.WriteLine($"n_vocab {logits.Length}");
+        Console.WriteLine("logits " + string.Join(' ', logits.Select(v => v.ToString("F6", CultureInfo.InvariantCulture))));
         return 0;
     }
 

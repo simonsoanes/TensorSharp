@@ -55,9 +55,15 @@ namespace
         int num_heads, int num_kv_heads,
         int max_seq_len, int position,
         float eps, float rope_base, float rope_freq_scale,
-        int rope_mode,
+        int rope_n_dims, int rope_mode,
         int kv_cache_type = GGML_TYPE_F32)
     {
+        // Partial rotary: Qwen3.5 ropes only rope.dimension_count (64) of the
+        // 256-dim head. Roping all of head_dim here would rotate a different
+        // subspace than the KV rows prefill wrote, which drifts silently.
+        if (rope_n_dims <= 0 || rope_n_dims > head_dim)
+            rope_n_dims = head_dim;
+
         if (!ensure_backend())
             return 0;
 
@@ -162,9 +168,9 @@ namespace
         ggml_tensor* k_3d = ggml_reshape_3d(ctx, k_normed, head_dim, num_kv_heads, 1);
 
         ggml_tensor* q_rope = ggml_rope_ext(ctx, q_3d, pos_tensor, nullptr,
-            head_dim, rope_mode, 0, rope_base, rope_freq_scale, 0, 1, 0, 0);
+            rope_n_dims, rope_mode, 0, rope_base, rope_freq_scale, 0, 1, 0, 0);
         ggml_tensor* k_rope = ggml_rope_ext(ctx, k_3d, pos_tensor, nullptr,
-            head_dim, rope_mode, 0, rope_base, rope_freq_scale, 0, 1, 0, 0);
+            rope_n_dims, rope_mode, 0, rope_base, rope_freq_scale, 0, 1, 0, 0);
 
         // 6. Append K, V into the persistent cache at `position`
         // q_rope: [head_dim, num_heads, 1] -> q_attn: [head_dim, 1, num_heads]
@@ -350,7 +356,7 @@ TSG_EXPORT int TSGgml_Qwen35AttentionLayerDecode(
     int num_heads, int num_kv_heads,
     int max_seq_len, int position,
     float eps, float rope_base, float rope_freq_scale,
-    int rope_mode,
+    int rope_n_dims, int rope_mode,
     int kv_cache_type)
 {
     try
@@ -364,7 +370,7 @@ TSG_EXPORT int TSGgml_Qwen35AttentionLayerDecode(
             k_cache_data, v_cache_data,
             num_heads, num_kv_heads,
             max_seq_len, position,
-            eps, rope_base, rope_freq_scale, rope_mode,
+            eps, rope_base, rope_freq_scale, rope_n_dims, rope_mode,
             kv_cache_type);
     }
     catch (const std::exception& ex)

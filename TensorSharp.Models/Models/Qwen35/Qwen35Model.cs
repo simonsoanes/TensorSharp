@@ -2115,14 +2115,24 @@ namespace TensorSharp.Models
             if (hasMultimodal || tokens.Length <= chunkSize)
                 return ForwardCore(tokens);
 
-            for (int pos = 0; pos < lastIdx; pos += chunkSize)
+            // The FINAL chunk carries the last prompt token and produces the
+            // logits, so every prompt position - including the one the first
+            // sampled token is drawn from - is evaluated by the same prefill
+            // graph. Running that last token alone through the 1-token decode
+            // graph (as this did) drew the first logits from a structurally
+            // different kernel than the rest of the prompt, and than the
+            // corresponding llama.cpp ubatch.
+            for (int pos = 0; pos < tokens.Length; pos += chunkSize)
             {
-                int chunkLen = Math.Min(chunkSize, lastIdx - pos);
+                int chunkLen = Math.Min(chunkSize, tokens.Length - pos);
                 var chunk = new int[chunkLen];
                 Array.Copy(tokens, pos, chunk, 0, chunkLen);
+                if (pos + chunkLen >= tokens.Length)
+                    return ForwardCore(chunk);
                 PrefillWithoutLogits(chunk);
             }
-            return ForwardCore(new[] { tokens[lastIdx] });
+
+            throw new InvalidOperationException("Chunked prefill produced no logits.");
         }
 
         private void PrefillWithoutLogits(int[] tokens)
@@ -4036,6 +4046,10 @@ namespace TensorSharp.Models
             int maxSeqLen = (int)kCache.Sizes[1];
 
             // The fused kernel uses NeoX RoPE (rope_mode = 2), matching the standalone path.
+            // Partial rotary (rope.dimension_count, e.g. 64 of the 256-dim head).
+            // Must match the whole-model decode graph AND the KV rows prefill
+            // wrote; roping all 256 dims here rotates a different subspace.
+            int ropeDims = _ropeDimCount > 0 ? _ropeDimCount : headDim;
             const int ropeMode = 2;
             float ropeFreqScale = 1.0f / Config.RopeScale;
 
@@ -4051,7 +4065,7 @@ namespace TensorSharp.Models
                     kCache, vCache,
                     numHeads, numKVHeads,
                     maxSeqLen, position,
-                    Config.Eps, Config.RopeBase, ropeFreqScale, ropeMode);
+                    Config.Eps, Config.RopeBase, ropeFreqScale, ropeDims, ropeMode);
                 _attnTicks += Stopwatch.GetTimestamp() - t0;
 
                 // The residual is downloaded to its host buffer, but on CUDA the

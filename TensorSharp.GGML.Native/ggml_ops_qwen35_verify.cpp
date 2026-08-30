@@ -428,9 +428,13 @@ namespace
         constexpr int kVerifyKvStride = 256;
         // Persist mode pads the attention window to a fixed stride so one cached graph
         // serves every start_pos in that stride (the mask masks the unused tail).
-        const int window = fv_persist
-            ? std::min(cache_size, ((totalSeqLen + kVerifyKvStride - 1) / kVerifyKvStride) * kVerifyKvStride)
-            : std::min(cache_size, totalSeqLen);
+        // Pad the attended window up to the flash-attention KV stride on BOTH
+        // paths. The mask already -infs ki >= totalSeqLen so the padded columns
+        // contribute nothing; what the padding buys is a graph shape constant
+        // across prefill chunks and the stride ggml-cuda's GQA-optimised flash
+        // kernel requires. (Previously only the persist path padded.)
+        const int window = std::min(cache_size,
+            ((totalSeqLen + kVerifyKvStride - 1) / kVerifyKvStride) * kVerifyKvStride);
         const void* sig = layers[0].attn_norm_w;
 
         // Device-resident GDN state: when the C# caller points each recurrent layer's
