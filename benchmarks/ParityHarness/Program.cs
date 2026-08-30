@@ -18,6 +18,11 @@
 //       slot serially first, then all together through the fused batched
 //       decode; the two must agree token for token.
 //   parity <model.gguf> <tok0,tok1,...> [n_predict] [backend]   raw greedy
+//   parity <model.gguf> --ppl <text-file> [backend] [n_ctx] [max_chunks]
+//       teacher-forced perplexity over non-overlapping n_ctx windows,
+//       scoring the SECOND half of each window (llama.cpp's
+//       `llama-perplexity` protocol: first = n_ctx/2), so the numbers are
+//       directly comparable to its "Final estimate: PPL = ..." line.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -74,7 +79,72 @@ public static class Program
         if (args[1] == "--ref") return RunReference(modelPath, args);
         if (args[1] == "--bench") return RunBench(modelPath, args);
         if (args[1] == "--batched") return RunBatched(modelPath, args);
+        if (args[1] == "--ppl") return RunPerplexity(modelPath, args);
         return RunRaw(modelPath, args);
+    }
+
+    /// <summary>
+    /// Teacher-forced perplexity, mirroring llama.cpp's `llama-perplexity`
+    /// protocol: the text is tokenized once, split into non-overlapping n_ctx
+    /// windows, and only the SECOND half of each window is scored (llama.cpp
+    /// uses `first = n_ctx/2`) so every scored token has at least n_ctx/2 tokens
+    /// of context. The window is fed one token at a time, which is what makes
+    /// each position's logits available; that also means this measures the
+    /// DECODE kernels, whereas llama.cpp scores a batched prefill.
+    /// </summary>
+    private static int RunPerplexity(string modelPath, string[] args)
+    {
+        string textPath = args[2];
+        BackendType backend = ResolveBackend(args.Length > 3 ? args[3] : "ggmlcuda");
+        int nCtx = args.Length > 4 ? int.Parse(args[4], CultureInfo.InvariantCulture) : 512;
+        int maxChunks = args.Length > 5 ? int.Parse(args[5], CultureInfo.InvariantCulture) : int.MaxValue;
+
+        var sw = Stopwatch.StartNew();
+        using var model = ModelBase.Create(modelPath, backend, ResolveTp());
+        Console.WriteLine($"[ppl] model loaded in {sw.Elapsed.TotalSeconds:F1}s, backend={backend}, arch={model.Config.Architecture}");
+
+        List<int> ids = model.Tokenizer.Encode(File.ReadAllText(textPath), addSpecial: true);
+        int chunks = Math.Min(maxChunks, ids.Count / nCtx);
+        if (chunks <= 0)
+        {
+            Console.Error.WriteLine($"[ppl] text has {ids.Count} tokens, need at least n_ctx={nCtx}");
+            return 1;
+        }
+        int first = nCtx / 2;
+        Console.WriteLine($"[ppl] {ids.Count} tokens, n_ctx={nCtx}, scoring tokens [{first},{nCtx}) of {chunks} chunks");
+
+        double nllSum = 0.0;
+        long scored = 0;
+        var swAll = Stopwatch.StartNew();
+        for (int c = 0; c < chunks; c++)
+        {
+            model.ResetKVCache();
+            int baseIdx = c * nCtx;
+            float[] logits = null;
+            for (int i = 0; i < nCtx - 1; i++)
+            {
+                logits = model.Forward(new[] { ids[baseIdx + i] });
+                if (i + 1 < first)
+                    continue;   // context-only positions are not scored
+
+                int target = ids[baseIdx + i + 1];
+                // log_softmax(logits)[target], computed in the numerically stable way.
+                float max = float.NegativeInfinity;
+                for (int v = 0; v < logits.Length; v++)
+                    if (logits[v] > max) max = logits[v];
+                double sumExp = 0.0;
+                for (int v = 0; v < logits.Length; v++)
+                    sumExp += Math.Exp(logits[v] - max);
+                nllSum += -(logits[target] - max - Math.Log(sumExp));
+                scored++;
+            }
+            double running = Math.Exp(nllSum / Math.Max(1, scored));
+            Console.WriteLine($"[ppl] chunk {c + 1}/{chunks}  scored={scored}  running PPL = {running:F4}  ({swAll.Elapsed.TotalSeconds:F0}s)");
+        }
+
+        double ppl = Math.Exp(nllSum / Math.Max(1, scored));
+        Console.WriteLine($"[ppl] Final estimate: PPL = {ppl:F4}  over {scored} tokens in {chunks} chunks of {nCtx}");
+        return 0;
     }
 
     private static int RunRaw(string modelPath, string[] args)
