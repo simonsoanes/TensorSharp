@@ -622,6 +622,20 @@ namespace TensorSharp.GGML
         public static void TensorParallelExecutePlans(IntPtr[] plans)
             => GgmlNative.TensorParallelExecutePlans(plans);
 
+        /// <summary>Cross-node AllReduce hook for a distributed fused run: sums
+        /// <paramref name="data"/> element-wise across every NODE and leaves the
+        /// result in place. Return false to abort the forward pass.</summary>
+        public delegate bool CrossNodeAllReduce(IntPtr user, IntPtr data, int count);
+
+        /// <summary>
+        /// The same fused segmented schedule, with each boundary's partial also
+        /// reduced across the cluster. Lets a multi-node run keep the fused
+        /// per-rank graphs instead of degrading to the per-op chain.
+        /// </summary>
+        public static void TensorParallelExecutePlansDistributed(IntPtr[] plans, CrossNodeAllReduce crossNode)
+            => GgmlNative.TensorParallelExecutePlansDistributed(
+                plans, new GgmlNative.CrossNodeAllReduce(crossNode));
+
         /// <summary>
         /// One tensor-parallel linear layer across every rank:
         /// <c>results[r] = inputs[r] · weights[r]</c>, submitted as N concurrent

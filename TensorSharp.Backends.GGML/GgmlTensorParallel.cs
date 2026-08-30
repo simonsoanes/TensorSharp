@@ -69,6 +69,11 @@ namespace TensorSharp.GGML
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int TSGgml_TensorParallelExecutePlansDistributed(
+            IntPtr[] plans, int rankCount, IntPtr crossNodeCallback, IntPtr crossNodeUser);
+
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static unsafe partial int TSGgml_TensorParallelMatmul(
             GgmlTensorView2D* results,
             GgmlTensorView2D* inputs,
@@ -266,6 +271,39 @@ namespace TensorSharp.GGML
         {
             try { return TSGgml_TensorParallelFusedAvailable(rankCount) != 0; }
             catch (EntryPointNotFoundException) { return false; }
+        }
+
+        /// <summary>
+        /// Element-wise sum of <paramref name="data"/> across every NODE of a
+        /// distributed run, left in place on all of them. Invoked from native
+        /// code at each of the fused graph's AllReduce boundaries.
+        /// </summary>
+        public delegate bool CrossNodeAllReduce(IntPtr user, IntPtr data, int count);
+
+        /// <summary>
+        /// The same segmented fused schedule as
+        /// <see cref="TensorParallelExecutePlans"/>, but each boundary's partial
+        /// is additionally reduced across the cluster through
+        /// <paramref name="crossNode"/>. A multi-node run keeps the fused
+        /// per-rank graphs this way instead of degrading to the per-op chain -
+        /// the graph is identical, only the reduction is wider.
+        /// </summary>
+        public static void TensorParallelExecutePlansDistributed(IntPtr[] plans, CrossNodeAllReduce crossNode)
+        {
+            if (plans == null || plans.Length == 0)
+                throw new ArgumentException("At least one plan is required.", nameof(plans));
+            ArgumentNullException.ThrowIfNull(crossNode);
+            IntPtr fn = Marshal.GetFunctionPointerForDelegate(crossNode);
+            try
+            {
+                if (TSGgml_TensorParallelExecutePlansDistributed(plans, plans.Length, fn, IntPtr.Zero) == 0)
+                    throw new InvalidOperationException(
+                        GetLastErrorMessage("GGML distributed tensor-parallel plan execution failed."));
+            }
+            finally
+            {
+                GC.KeepAlive(crossNode);
+            }
         }
 
         /// <summary>

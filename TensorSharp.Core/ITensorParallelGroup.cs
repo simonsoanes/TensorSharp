@@ -98,5 +98,14 @@ namespace TensorSharp
     public interface INestedTensorParallelGroup
     {
         ITensorParallelGroup LocalGroup { get; }
+
+        /// <summary>
+        /// Sum <paramref name="buffer"/>[0..count) element-wise across every NODE
+        /// (this node's local ranks are assumed already reduced) and leave the
+        /// result in place on all of them. Lets a fused whole-model graph do its
+        /// own cross-node reduction at each segment boundary rather than
+        /// dropping to a per-op forward.
+        /// </summary>
+        void CrossNodeAllReduce(float[] buffer, int count);
     }
 }

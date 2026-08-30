@@ -67,6 +67,38 @@ namespace TensorSharp.Models
         /// </summary>
         private bool _tpFdDeclineLogged;
 
+        /// <summary>The cross-node half of a distributed AllReduce, or null on a
+        /// single-node run. Present exactly when the TP group spans nodes.</summary>
+        private INestedTensorParallelGroup TpCrossNodeReducer =>
+            GlobalTpDegree != TpDegree ? _tpGroup as INestedTensorParallelGroup : null;
+
+        private GgmlBasicOps.CrossNodeAllReduce _tpCrossNodeCallback;
+        private float[] _tpCrossNodeBuf = Array.Empty<float>();
+
+        /// <summary>Marshalled once and cached: the native executor calls this at
+        /// every AllReduce boundary, so a per-call delegate allocation would land
+        /// on the hot path.</summary>
+        private GgmlBasicOps.CrossNodeAllReduce TpCrossNodeCallback =>
+            _tpCrossNodeCallback ??= (user, data, count) =>
+            {
+                try
+                {
+                    if (count <= 0)
+                        return true;
+                    if (_tpCrossNodeBuf.Length < count)
+                        _tpCrossNodeBuf = new float[count];
+                    System.Runtime.InteropServices.Marshal.Copy(data, _tpCrossNodeBuf, 0, count);
+                    TpCrossNodeReducer.CrossNodeAllReduce(_tpCrossNodeBuf, count);
+                    System.Runtime.InteropServices.Marshal.Copy(_tpCrossNodeBuf, 0, data, count);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[qwen35-tp] cross-node AllReduce failed: {ex.Message}");
+                    return false;
+                }
+            };
+
         private bool TpFdBail(string reason)
         {
             if (!_tpFdDeclineLogged)
@@ -88,8 +120,11 @@ namespace TensorSharp.Models
             _tpFdChecked = true;
             _tpFdReady =
                 _tpFdEnabled && IsGgmlBackend && IsTensorParallel
-                // One driving thread submits every rank: single-process only.
-                && GlobalTpDegree == TpDegree
+                // Multi-node keeps this fused schedule: the executor reduces this
+                // node's ranks on-device and then calls back for the cross-node
+                // exchange, so the graph is identical and only the reduction is
+                // wider. Without such a group there is nobody to do that half.
+                && (GlobalTpDegree == TpDegree || TpCrossNodeReducer != null)
                 // The graph folds the column-parallel LM head per rank.
                 && _tpLmHeadKey != null && _tpQuantWeights.ContainsKey(_tpLmHeadKey)
                 && _weights.ContainsKey("output_norm.weight")
@@ -103,7 +138,7 @@ namespace TensorSharp.Models
                 TpFdBail(
                     !_tpFdEnabled ? "disabled via TS_QWEN35_TP_FUSED_DECODE=0"
                     : !IsGgmlBackend ? $"backend {_backend} has no fused TP decode kernel"
-                    : GlobalTpDegree != TpDegree ? $"multi-node TP (global={GlobalTpDegree}, local={TpDegree})"
+                    : GlobalTpDegree != TpDegree ? $"multi-node TP (global={GlobalTpDegree}, local={TpDegree}) without a cross-node reducer"
                     : _tpLmHeadKey == null ? "the LM head was not sharded column-parallel (tied embeddings, a vocab that does not divide by the TP degree, or a non-GGML backend)"
                     : !_tpQuantWeights.ContainsKey(_tpLmHeadKey) ? $"no quantized TP shard for the LM head ({_tpLmHeadKey})"
                     : !_weights.ContainsKey("output_norm.weight") ? "output_norm.weight is missing"
@@ -398,7 +433,10 @@ namespace TensorSharp.Models
                         offset += lm.Ne1;
                     }
 
-                    GgmlBasicOps.TensorParallelExecutePlans(_tpFdPlans);
+                    if (TpCrossNodeReducer != null)
+                        GgmlBasicOps.TensorParallelExecutePlansDistributed(_tpFdPlans, TpCrossNodeCallback);
+                    else
+                        GgmlBasicOps.TensorParallelExecutePlans(_tpFdPlans);
                 }
             }
             catch (InvalidOperationException)
@@ -649,7 +687,10 @@ namespace TensorSharp.Models
                         offset += lm.Ne1;
                     }
 
-                    GgmlBasicOps.TensorParallelExecutePlans(_tpFdPlans);
+                    if (TpCrossNodeReducer != null)
+                        GgmlBasicOps.TensorParallelExecutePlansDistributed(_tpFdPlans, TpCrossNodeCallback);
+                    else
+                        GgmlBasicOps.TensorParallelExecutePlans(_tpFdPlans);
                 }
             }
             catch (InvalidOperationException)

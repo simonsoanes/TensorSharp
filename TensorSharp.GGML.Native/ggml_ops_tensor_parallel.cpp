@@ -733,7 +733,8 @@ namespace tsg
         }
     } // namespace
 
-    bool tp_execute_plans(TpRankPlan** plans, int rank_count)
+    bool tp_execute_plans(TpRankPlan** plans, int rank_count,
+                          TpDistributedAllReduce cross_node, void* cross_node_user)
     {
         if (plans == nullptr || rank_count < 1 || rank_count > TSG_MAX_DEVICES)
         {
@@ -835,6 +836,38 @@ namespace tsg
                     nodes[static_cast<std::size_t>(r)] = plans[r]->ar_tensor[s];
                 if (!tp_reduce_segment(nodes.data(), rank_count))
                     return false;
+
+                // Multi-node: the local reduce above collapsed this node's
+                // ranks. The partial is still per-NODE, so hand it to the
+                // caller's cluster AllReduce and broadcast the result back
+                // to every local rank before the next segment reads it.
+                if (cross_node != nullptr)
+                {
+                    ggml_tensor* ar0 = plans[0]->ar_tensor[s];
+                    const std::size_t n = static_cast<std::size_t>(ggml_nelements(ar0));
+                    if (ar0->type != GGML_TYPE_F32)
+                    {
+                        set_last_error("Distributed tensor-parallel AllReduce requires F32 partials.");
+                        return false;
+                    }
+                    static thread_local std::vector<float> s_xnode;
+                    if (s_xnode.size() < n) s_xnode.resize(n);
+                    {
+                        ScopedRank rank(0);
+                        ggml_backend_synchronize(g_backend);
+                        ggml_backend_tensor_get(ar0, s_xnode.data(), 0, n * sizeof(float));
+                    }
+                    if (!cross_node(cross_node_user, s_xnode.data(), static_cast<int>(n)))
+                    {
+                        set_last_error("Distributed tensor-parallel AllReduce callback failed.");
+                        return false;
+                    }
+                    for (int r = 0; r < rank_count; ++r)
+                    {
+                        ScopedRank rank(r);
+                        ggml_backend_tensor_set(plans[r]->ar_tensor[s], s_xnode.data(), 0, n * sizeof(float));
+                    }
+                }
             }
         }
 
@@ -1528,6 +1561,45 @@ TSG_EXPORT int TSGgml_TensorParallelExecutePlans(void** plans, int rankCount)
     }
     catch (const std::exception& ex)
     {
+
+// Same schedule, but every AllReduce boundary is additionally exchanged
+// across the cluster through `cross_node`. This is what lets a multi-NODE
+// run keep the fused per-rank graphs instead of degrading to the per-op
+// chain: the graph structure is identical, only the reduction is wider.
+TSG_EXPORT int TSGgml_TensorParallelExecutePlansDistributed(
+    void** plans, int rankCount, void* crossNodeCallback, void* crossNodeUser)
+{
+    try
+    {
+        tsg::clear_last_error();
+        if (plans == nullptr || rankCount <= 0 || rankCount > tsg::TSG_MAX_DEVICES)
+        {
+            tsg::set_last_error("Invalid tensor-parallel plan array.");
+            return 0;
+        }
+        for (int r = 0; r < rankCount; ++r)
+        {
+            if (plans[r] == nullptr)
+            {
+                tsg::set_last_error("Null tensor-parallel plan for rank " + std::to_string(r) + ".");
+                return 0;
+            }
+        }
+        return tsg::tp_execute_plans(reinterpret_cast<tsg::TpRankPlan**>(plans), rankCount,
+                                     reinterpret_cast<tsg::TpDistributedAllReduce>(crossNodeCallback),
+                                     crossNodeUser) ? 1 : 0;
+    }
+    catch (const std::exception& ex)
+    {
+        tsg::set_last_error(ex.what());
+        return 0;
+    }
+    catch (...)
+    {
+        tsg::set_last_error("Unknown distributed tensor-parallel plan execution failure.");
+        return 0;
+    }
+}
         tsg::set_last_error(ex.what());
         return 0;
     }

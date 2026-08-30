@@ -786,7 +786,14 @@ namespace tsg
     // Run one segmented graph per rank. `plans[r]` must describe rank r and all
     // ranks must agree on the segment count. Returns false (with the last error
     // set) when a submission or a collective fails.
-    bool tp_execute_plans(TpRankPlan** plans, int rank_count);
+    /// Cross-node AllReduce hook: sums `data` element-wise across every node
+    /// of the cluster and leaves the result in place on all of them. Returns
+    /// false to abort the forward pass. Null for a single-node run.
+    using TpDistributedAllReduce = bool (*)(void* user, float* data, int count);
+
+    bool tp_execute_plans(TpRankPlan** plans, int rank_count,
+                          TpDistributedAllReduce cross_node = nullptr,
+                          void* cross_node_user = nullptr);
 
     // True when the fused TP path is usable: more than one rank and a device
     // collective to reduce with. Without a collective every segment boundary
