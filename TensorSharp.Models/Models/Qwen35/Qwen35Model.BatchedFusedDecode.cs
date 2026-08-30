@@ -229,6 +229,7 @@ namespace TensorSharp.Models
                     var dn = ResolveW(_ffnDownQW[l], _ffnDownF32[l]);
                     a.DownW = dn.Item1; a.DownType = dn.Item2; a.DownNe0 = dn.Item3; a.DownNe1 = dn.Item4; a.DownBytes = dn.Item5;
                     FillDenseFfnArgs(ref a, l);
+                a.ProjScales = ProjScalesPtr(l);
                 }
                 else
                 {

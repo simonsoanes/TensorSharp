@@ -483,6 +483,10 @@ public struct Qwen35LayerDecodeArgs
     /// when <see cref="GuW"/> is zero; the graph then runs two matmuls.</summary>
     public IntPtr FfnGateW;
     public IntPtr FfnUpW;
+    /// <summary>Optional host pointer to 16 F32 per-projection matmul-output
+    /// scales (NVFP4 per-tensor scale2 sidecars; native TSQ35_SC_* slot order).
+    /// Zero when no projection of this layer carries a scale.</summary>
+    public IntPtr ProjScales;
 
     // int64 weight shapes
     public long QkvNe0, QkvNe1, QkvBytes;

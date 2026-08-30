@@ -762,6 +762,12 @@ namespace TensorSharp.Models
             if (hidden == null || hidden.DimensionCount != 2 || hidden.ElementType != DType.Float32) return false;
             if (hidden.Sizes[0] != seqLen || hidden.Sizes[1] != Config.HiddenSize) return false;
             if (_headKDim != _headVDim) return false; // gated_delta_net path assumes shared head dim
+            // Sidecar per-tensor scales are not wired into this cached graph;
+            // decline so the chunked scale-aware path runs instead.
+            if ((_attnQkvRecQW[layer]?.Scale ?? 1.0f) != 1.0f || (_attnGateRecQW[layer]?.Scale ?? 1.0f) != 1.0f
+                || (_ssmBetaQW[layer]?.Scale ?? 1.0f) != 1.0f || (_ssmAlphaQW[layer]?.Scale ?? 1.0f) != 1.0f
+                || (_ssmOutQW[layer]?.Scale ?? 1.0f) != 1.0f)
+                return false;
 
             QuantizedWeight gq = _attnQkvRecQW[layer];  Tensor gqF = _attnQkvRecF32[layer];
             QuantizedWeight gz = _attnGateRecQW[layer]; Tensor gzF = _attnGateRecF32[layer];
@@ -867,7 +873,7 @@ namespace TensorSharp.Models
                     if (halfDim > 0 && hidden.DimensionCount == 2 && gated.DimensionCount == 2
                         && hidden.Sizes[0] == gated.Sizes[0])
                     {
-                        try
+                        if (Unscaled(_ssmOutQW[layer], _ffnGateUpQW[layer], _ffnDownQW[layer])) try
                         {
                             long t0 = Stopwatch.GetTimestamp();
                             GgmlBasicOps.FusedOutProjFFN(hidden, gated,
@@ -910,7 +916,8 @@ namespace TensorSharp.Models
             bool canFuseMoeRouter = IsGgmlBackend && isMoeLayer && seqLen == 1
                 && _ssmOutQW[layer] != null && _postAttnNormW[layer] != null
                 && (_ffnGateInpQW[layer] != null || _ffnGateInpF32[layer] != null)
-                && _moeTokenInput != null && _moeTokenInput.Sizes[1] == Config.HiddenSize;
+                && _moeTokenInput != null && _moeTokenInput.Sizes[1] == Config.HiddenSize
+                && Unscaled(_ssmOutQW[layer]);
 
             if (canFuseMoeRouter)
             {
@@ -1464,6 +1471,7 @@ namespace TensorSharp.Models
                         var dn = ResolveW(_ffnDownQW[l], _ffnDownF32[l]);
                         a.DownW = dn.ptr; a.DownType = dn.type; a.DownNe0 = dn.ne0; a.DownNe1 = dn.ne1; a.DownBytes = dn.bytes;
                         FillDenseFfnArgs(ref a, l);
+            a.ProjScales = ProjScalesPtr(l);
                     }
                     else
                     {
@@ -1556,6 +1564,9 @@ namespace TensorSharp.Models
                 _fdBindingConvScratch = _fdConvScratch;
                 _fdBindingCacheSize = cacheSize;
             }
+
+            if (_lmHeadQW != null && _lmHeadQW.Scale != 1.0f)
+                return FdBail("lm-head sidecar scale2 not folded into the fused decode graph");
 
             // Fold final-norm + lm_head into the graph: output logits directly.
             var lmh = ResolveW(_lmHeadQW, _lmHeadF32);
@@ -1880,6 +1891,7 @@ namespace TensorSharp.Models
                     var dn = ResolveW(_ffnDownQW[l], _ffnDownF32[l]);
                     a.DownW = dn.ptr; a.DownType = dn.type; a.DownNe0 = dn.ne0; a.DownNe1 = dn.ne1; a.DownBytes = dn.bytes;
                     FillDenseFfnArgs(ref a, l);
+            a.ProjScales = ProjScalesPtr(l);
                 }
                 else
                 {
@@ -2002,6 +2014,8 @@ namespace TensorSharp.Models
                 mropeSecs = new int[4] { _mropeSections[0], _mropeSections[1], _mropeSections[2], _mropeSections[3] };
             }
 
+            if (_lmHeadQW != null && _lmHeadQW.Scale != 1.0f)
+                return false; // per-op path applies the lm-head sidecar scale
             var lmh = ResolveW(_lmHeadQW, _lmHeadF32);
             IntPtr finalNormPtr = (IntPtr)GetFloatPtr(_finalNormW);
             int capCount = (captureData != null && captureLayers != null) ? captureLayers.Length : 0;
@@ -2316,6 +2330,9 @@ namespace TensorSharp.Models
             _mtpDraftLayer ??= new Qwen35LayerDecodeArgs[1];
             _mtpDraftLayer[0] = a;
 
+            QuantizedWeight mtpHeadSel = hasOwnHead ? _mtpHeadQW : _lmHeadQW;
+            if (mtpHeadSel != null && mtpHeadSel.Scale != 1.0f)
+                return false; // per-op path applies the head sidecar scale
             var lmh = hasOwnHead ? ResolveW(_mtpHeadQW, _mtpHeadF32) : ResolveW(_lmHeadQW, _lmHeadF32);
             IntPtr finalNormPtr = (IntPtr)GetFloatPtr(headNormW);
             bool ok;
@@ -2364,6 +2381,7 @@ namespace TensorSharp.Models
                 var dn = ResolveW(_ffnDownQW[l], _ffnDownF32[l]);
                 a.DownW = dn.ptr; a.DownType = dn.type; a.DownNe0 = dn.ne0; a.DownNe1 = dn.ne1; a.DownBytes = dn.bytes;
                 FillDenseFfnArgs(ref a, l);
+            a.ProjScales = ProjScalesPtr(l);
             }
             else
             {

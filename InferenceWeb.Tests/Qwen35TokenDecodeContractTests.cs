@@ -196,7 +196,7 @@ public class Qwen35TokenDecodeContractTests
         //                             the dense FFN of a mixed-quant "UD" layer whose
         //                             ffn_gate and ffn_up have different GGML types
         //                             and so cannot be fused into one tensor
-        Assert.Equal(35, fields.Count(field => field.FieldType == typeof(IntPtr)));
+        Assert.Equal(36, fields.Count(field => field.FieldType == typeof(IntPtr)));
         Assert.Equal(54, fields.Count(field => field.FieldType == typeof(long)));
         Assert.Equal(26, fields.Count(field => field.FieldType == typeof(int)));
         Assert.All(fields, field => Assert.True(
@@ -208,7 +208,7 @@ public class Qwen35TokenDecodeContractTests
         static long Align(long value, int alignment)
             => (value + alignment - 1) / alignment * alignment;
 
-        long int64Start = Align(35L * IntPtr.Size, sizeof(long));
+        long int64Start = Align(36L * IntPtr.Size, sizeof(long));
         long int32Start = int64Start + 54L * sizeof(long);
         long expectedSize = Align(
             int32Start + 26L * sizeof(int),
@@ -238,6 +238,9 @@ public class Qwen35TokenDecodeContractTests
         Assert.Equal(
             34L * IntPtr.Size,
             Marshal.OffsetOf<Qwen35LayerDecodeArgs>(nameof(Qwen35LayerDecodeArgs.FfnUpW)).ToInt64());
+        Assert.Equal(
+            35L * IntPtr.Size,
+            Marshal.OffsetOf<Qwen35LayerDecodeArgs>(nameof(Qwen35LayerDecodeArgs.ProjScales)).ToInt64());
         Assert.Equal(
             int64Start + 48L * sizeof(long),
             Marshal.OffsetOf<Qwen35LayerDecodeArgs>(nameof(Qwen35LayerDecodeArgs.FfnGateNe0)).ToInt64());

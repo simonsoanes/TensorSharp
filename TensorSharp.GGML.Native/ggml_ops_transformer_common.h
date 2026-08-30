@@ -437,6 +437,27 @@ namespace tsg
 
 // Per-layer descriptor for the Qwen3.5/3.6 full-model kernels (decode,
 // verify, batched decode). Passed by pointer from C#. Layout MUST match the
+// Slot order of TSGgmlQwen35LayerDesc::proj_scales (must match
+// Qwen35Model.BuildProjScaleTable). Each slot is the optional sidecar
+// per-tensor scale (NVFP4 scale2) multiplying that projection's matmul
+// output; 1.0f = no scale.
+enum {
+    TSQ35_SC_QKV = 0, TSQ35_SC_K = 1, TSQ35_SC_V = 2, TSQ35_SC_O = 3,
+    TSQ35_SC_GDN_QKV = 4, TSQ35_SC_GDN_GATE = 5, TSQ35_SC_BETA = 6, TSQ35_SC_ALPHA = 7,
+    TSQ35_SC_SSM_OUT = 8, TSQ35_SC_GU = 9, TSQ35_SC_FFN_GATE = 10, TSQ35_SC_FFN_UP = 11,
+    TSQ35_SC_DOWN = 12, TSQ35_SC_COUNT = 16,
+};
+
+// Multiply a projection's matmul output by its optional 1-element sidecar
+// scale tensor. Null tensor = no sidecar, returns x unchanged (so graphs
+// without scales are node-for-node identical to before). Emitting the scale
+// as MUL(mm, 1-elem F32) matches the exact node pattern ggml-cuda fuses into
+// its NVFP4 mmvq epilogue at batch-1.
+static inline ggml_tensor* q35_scaled(ggml_context* ctx, ggml_tensor* x, ggml_tensor* sc)
+{
+    return sc != nullptr ? ggml_mul(ctx, x, sc) : x;
+}
+
 // mirror struct in GgmlNative.cs: pointers first, then int64 shapes, then
 // int32 scalars, so natural alignment is identical on both sides.
 struct TSGgmlQwen35LayerDesc
@@ -488,6 +509,10 @@ struct TSGgmlQwen35LayerDesc
     // when gu_w is null.
     void* ffn_gate_w;        // ffn_gate [hidden, ff_dense]
     void* ffn_up_w;          // ffn_up   [hidden, ff_dense]
+    // Optional host pointer to TSQ35_SC_COUNT floats: per-projection
+    // matmul-output scales (NVFP4 per-tensor scale2 sidecars). Null when no
+    // projection of this layer carries a scale.
+    void* proj_scales;
 
     // --- int64 weight shapes/bytes ---
     std::int64_t qkv_ne0, qkv_ne1, qkv_bytes;

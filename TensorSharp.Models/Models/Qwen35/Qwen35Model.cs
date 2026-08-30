@@ -478,6 +478,7 @@ namespace TensorSharp.Models
             FuseGateUpWeights(TotalLayerCount);
             DetectMoeLayers();
             BuildLayerKeys();
+            BuildProjScaleTable();
             InitMoeBuffers();
 
             if (IsTensorParallel)
@@ -646,6 +647,15 @@ namespace TensorSharp.Models
                             (IntPtr)(srcBase + row * rowBytes),
                             (IntPtr)(dstBase + (rowOffset + row) * inDim),
                             inDim);
+                    if (qw.Scale != 1.0f)
+                    {
+                        // Bake the sidecar per-tensor scale into the F32 rows so the
+                        // fused pack needs no scalar at inference.
+                        long scaledCount = qw.Ne1 * inDim;
+                        float ws = qw.Scale;
+                        float* wsPtr = dstBase + rowOffset * inDim;
+                        for (long e = 0; e < scaledCount; e++) wsPtr[e] *= ws;
+                    }
                     rowOffset += qw.Ne1;
                 }
                 else
@@ -688,7 +698,7 @@ namespace TensorSharp.Models
                 for (int i = 0; i < quantWeights.Length; i++)
                 {
                     var qw = quantWeights[i];
-                    if (qw.GgmlType != first.GgmlType || qw.Ne0 != first.Ne0)
+                    if (qw.GgmlType != first.GgmlType || qw.Ne0 != first.Ne0 || qw.Scale != first.Scale)
                         return false;
 
                     totalBytes += qw.RawBytes;
@@ -698,6 +708,7 @@ namespace TensorSharp.Models
                 if (!TryCreateFusedQuantizedWeight(out QuantizedWeight fusedWeight, quantWeights))
                     return false;
 
+                fusedWeight.Scale = quantWeights[0].Scale;
                 _quantWeights[fusedName] = fusedWeight;
                 if (!keepSources)
                 {
@@ -2611,7 +2622,8 @@ namespace TensorSharp.Models
                 && _attnOutputQW[layer] != null
                 && _postAttnNormW[layer] != null
                 && _ffnGateUpQW[layer] != null
-                && _ffnDownQW[layer] != null;
+                && _ffnDownQW[layer] != null
+                && Unscaled(_attnOutputQW[layer], _ffnGateUpQW[layer], _ffnDownQW[layer]);
 
             Tensor attnOut;
             if (canFuseAttnOutFFN)
@@ -3434,6 +3446,57 @@ namespace TensorSharp.Models
         /// FFN with pre-resolved weight references, mirroring <see cref="ModelBase.FFN"/>
         /// but skipping the dictionary lookup. SwiGLU on a fused gate+up projection.
         /// </summary>
+        /// <summary>True when none of the given weights carries a sidecar
+        /// per-tensor scale (fused mega-dispatches have no scale hook and must
+        /// decline to the scale-aware per-op primitives).</summary>
+        private static bool Unscaled(params QuantizedWeight[] ws)
+        {
+            foreach (var w in ws)
+                if (w != null && w.Scale != 1.0f)
+                    return false;
+            return true;
+        }
+
+        // Per-layer per-projection sidecar scale table handed to the fused native
+        // graphs (slot order = the native TSQ35_SC_* constants; 16 floats/layer).
+        private float[] _projScaleTable;
+        private GCHandle _projScaleHandle;
+
+        private unsafe IntPtr ProjScalesPtr(int layer)
+            => _projScaleTable == null
+                ? IntPtr.Zero
+                : (IntPtr)((float*)_projScaleHandle.AddrOfPinnedObject() + layer * 16);
+
+        private void BuildProjScaleTable()
+        {
+            if (!HasSidecarWeightScales)
+                return;
+            int n = TotalLayerCount;
+            var tbl = new float[n * 16];
+            for (int i = 0; i < tbl.Length; i++) tbl[i] = 1.0f;
+            float S(string key) => _quantWeights.TryGetValue(key, out var qw) ? qw.Scale : 1.0f;
+            for (int l = 0; l < n; l++)
+            {
+                string p = $"blk.{l}.";
+                int b = l * 16;
+                tbl[b + 0] = _quantWeights.ContainsKey(p + "attn_qkv.weight") ? S(p + "attn_qkv.weight") : S(p + "attn_q.weight"); // QKV (or Q when separate)
+                tbl[b + 1] = S(p + "attn_k.weight");        // K (separate only)
+                tbl[b + 2] = S(p + "attn_v.weight");        // V (separate only)
+                tbl[b + 3] = S(p + "attn_output.weight");   // O
+                tbl[b + 4] = S(p + "attn_qkv.weight");      // GDN in-proj (same GGUF name)
+                tbl[b + 5] = S(p + "attn_gate.weight");     // GDN z gate
+                tbl[b + 6] = S(p + "ssm_beta.weight");
+                tbl[b + 7] = S(p + "ssm_alpha.weight");
+                tbl[b + 8] = S(p + "ssm_out.weight");
+                tbl[b + 9] = S(p + "ffn_gate_up.weight");   // fused gate_up (gate==up scale)
+                tbl[b + 10] = S(p + "ffn_gate.weight");     // split fallback
+                tbl[b + 11] = S(p + "ffn_up.weight");
+                tbl[b + 12] = S(p + "ffn_down.weight");
+            }
+            _projScaleTable = tbl;
+            _projScaleHandle = GCHandle.Alloc(tbl, GCHandleType.Pinned);
+        }
+
         private Tensor FFNCached(Tensor input, int layer, int seqLen)
         {
             int intermSize = Config.IntermediateSize;
@@ -3490,6 +3553,8 @@ namespace TensorSharp.Models
                 && postNormW != null
                 && _ffnGateUpQW[layer] != null
                 && _ffnDownQW[layer] != null
+                && _ffnGateUpQW[layer].Scale == 1.0f
+                && _ffnDownQW[layer].Scale == 1.0f   // sidecar scales: use the scale-aware unfused chain
                 && residual.DimensionCount == 2
                 && residual.Sizes[0] == seqLen
                 && residual.Sizes[1] == _ffnGateUpQW[layer].Ne0)
@@ -3669,11 +3734,13 @@ namespace TensorSharp.Models
                 Tensor result = new Tensor(_allocator, DType.Float32, seqLen, outDim);
                 GgmlBasicOps.FusedRmsNormMatMulQuant(result, input, normW, Config.Eps,
                     qw.CacheKey, qw.GgmlType, qw.Ne0, qw.Ne1, qw.RawBytes);
+                if (qw.Scale != 1.0f)
+                    Ops.Mul(result, result, qw.Scale); // sidecar per-tensor scale2
                 _linearTicks += Stopwatch.GetTimestamp() - t0;
                 return result;
             }
 
-            if (_backend == BackendType.Mlx && qw != null && normW != null && input.DimensionCount == 2)
+            if (_backend == BackendType.Mlx && qw != null && normW != null && input.DimensionCount == 2 && qw.Scale == 1.0f)
             {
                 long t0 = Stopwatch.GetTimestamp();
                 int seqLen = (int)input.Sizes[0];
@@ -3720,6 +3787,9 @@ namespace TensorSharp.Models
                 || output.Sizes[0] != input.Sizes[0])
                 return null;
 
+            if (qw.Scale != 1.0f)
+                return null; // scale-aware fallback (FusedNormLinear) applies it
+
             if (_backend == BackendType.Mlx)
             {
                 long tMlx = Stopwatch.GetTimestamp();
@@ -3763,6 +3833,9 @@ namespace TensorSharp.Models
         {
             if (qw == null || input.DimensionCount != 2 || residual.DimensionCount != 2)
                 return false;
+
+            if (qw.Scale != 1.0f)
+                return false; // the scale must apply before the residual add
 
             if (_backend == BackendType.Mlx)
             {
@@ -3876,6 +3949,8 @@ namespace TensorSharp.Models
 
             QuantizedWeight qkv = _attnQkvQW[layer];
             QuantizedWeight oOut = _attnOutputQW[layer];
+            if ((qkv?.Scale ?? 1.0f) != 1.0f || (oOut?.Scale ?? 1.0f) != 1.0f)
+                return false; // sidecar scale2 not wired into this per-layer graph
             Tensor attnNorm = _attnNormW[layer];
             Tensor qNorm = _attnQNormW[layer];
             Tensor kNorm = _attnKNormW[layer];
@@ -3939,6 +4014,8 @@ namespace TensorSharp.Models
 
             QuantizedWeight qkv = _attnQkvQW[layer];
             QuantizedWeight oOut = _attnOutputQW[layer];
+            if ((qkv?.Scale ?? 1.0f) != 1.0f || (oOut?.Scale ?? 1.0f) != 1.0f)
+                return false; // sidecar scale2 not wired into this per-layer graph
             Tensor attnNorm = _attnNormW[layer];
             Tensor qNorm = _attnQNormW[layer];
             Tensor kNorm = _attnKNormW[layer];
@@ -5809,6 +5886,8 @@ namespace TensorSharp.Models
                     GgmlBasicOps.AddmmQuant(result, input, qw.CacheKey, qw.GgmlType, qw.Ne0, qw.Ne1, qw.RawBytes);
                 else
                     AddmmQuantManaged(result, input, qw);
+                if (qw.Scale != 1.0f)
+                    Ops.Mul(result, result, qw.Scale); // sidecar per-tensor scale2
             }
             else if (wF32 != null)
             {
