@@ -231,6 +231,8 @@ namespace TensorSharp.Runtime
                     && msg.RawOutputTokens.Count > 0;
 
                 bool hasMarker = msg?.CacheControl != null;
+                bool hasPartMarkers = msg?.ContentCacheBreakpoints != null
+                    && msg.ContentCacheBreakpoints.Count > 0;
 
                 // A tool-level marker can only be expressed by prefixing the
                 // first message's content, because the tool block itself is
@@ -248,7 +250,7 @@ namespace TensorSharp.Runtime
                 // template itself, which the Jinja path cannot express.
                 bool needsToolsMarker = toolsHasMarker && i == 0;
 
-                if (!hasRawTokens && !hasMarker && !needsToolsMarker)
+                if (!hasRawTokens && !hasMarker && !hasPartMarkers && !needsToolsMarker)
                 {
                     if (renderedMessages != null)
                         renderedMessages.Add(msg!);
@@ -272,15 +274,33 @@ namespace TensorSharp.Runtime
                     placeholderCount++;
                 }
 
-                if (needsToolsMarker)
+                // Breakpoints are NUMBERED in the order they appear in the text,
+                // which is what lets the strip pass walk them forwards and record
+                // final indices in one go. So claim the indices in that order too:
+                // the tool breakpoint sits in front of the content, the part
+                // offsets are interior and ascending, and the message-scoped
+                // marker closes the content.
+                string breakpointPrefix = needsToolsMarker
+                    ? MakeBreakpoint(breakpointCount++)
+                    : string.Empty;
+
+                if (hasPartMarkers && !hasRawTokens)
                 {
-                    newContent = MakeBreakpoint(breakpointCount++) + newContent;
+                    // Part-scoped markers address offsets into the ORIGINAL
+                    // content, so they only mean anything while that content is
+                    // still there. A message spliced from raw tokens has had its
+                    // content replaced by a placeholder, and an offset into that
+                    // placeholder would be meaningless, so they are dropped.
+                    newContent = InsertBreakpointsAtOffsets(
+                        newContent, msg.ContentCacheBreakpoints!, ref breakpointCount);
                 }
 
                 if (hasMarker)
                 {
                     newContent = newContent + MakeBreakpoint(breakpointCount++);
                 }
+
+                newContent = breakpointPrefix + newContent;
 
                 renderedMessages.Add(new ChatMessage
                 {
@@ -485,6 +505,33 @@ namespace TensorSharp.Runtime
         }
 
         /// <summary>
+        /// Splice a breakpoint sentinel into <paramref name="content"/> at each of
+        /// <paramref name="offsets"/>, which are character positions in ascending
+        /// order. Offsets are clamped into range and never allowed to move
+        /// backwards, so a marker whose offset does not fit the content (a caller
+        /// that rewrote the text after parsing it) degrades to a breakpoint at the
+        /// nearest legal position rather than throwing.
+        /// </summary>
+        private static string InsertBreakpointsAtOffsets(
+            string content, List<int> offsets, ref int breakpointCount)
+        {
+            var sb = new System.Text.StringBuilder(content.Length + offsets.Count * 8);
+            int copied = 0;
+            for (int i = 0; i < offsets.Count; i++)
+            {
+                int at = offsets[i];
+                if (at < copied) at = copied;
+                if (at > content.Length) at = content.Length;
+
+                sb.Append(content, copied, at - copied);
+                sb.Append(MakeBreakpoint(breakpointCount++));
+                copied = at;
+            }
+            sb.Append(content, copied, content.Length - copied);
+            return sb.ToString();
+        }
+
+        /// <summary>
         /// Tokenize <paramref name="text"/> as a SINGLE string (so the BPE/SentencePiece
         /// merging decisions at segment boundaries match exactly what the renderer would
         /// have produced for an entire turn-1-style prompt), then replace each occurrence
@@ -550,8 +597,12 @@ namespace TensorSharp.Runtime
             // Unlike a placeholder, a breakpoint that cannot be found is skipped
             // rather than fatal: a template is free to drop the content it was
             // attached to (Gemma 4's strip_thinking filter does exactly that),
-            // and a cache hint is not worth failing a completion over. The cost
-            // of a dropped hint is a shorter cached prefix, never a wrong one.
+            // and a cache hint is not worth failing a completion over. Dropping
+            // an interior breakpoint only shortens the marked region. Dropping
+            // the LAST one raises the ceiling to the next breakpoint down, and
+            // dropping every one of them leaves the request with no markers at
+            // all, which falls back to implicit caching - i.e. caching more than
+            // the client asked to have cached, not less.
             if (breakpointCount > 0)
             {
                 explicitBreakpoints = new List<int>(breakpointCount);

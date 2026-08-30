@@ -41,14 +41,22 @@ namespace TensorSharp.Runtime.Scheduling
             RequestId = requestId ?? $"seq-{Sn:X}";
             BlockTable = new BlockTable(blockSize);
             PromptTokens = new List<int>(promptTokens);
-            CacheBreakpoints = cacheBreakpoints;
-            if (cacheBreakpoints != null)
+            // Snapshot rather than alias, exactly as PromptTokens does above. The
+            // caller builds this as a mutable List and edits it in place while
+            // truncating the prompt; keeping the reference would let a later edit
+            // (or another thread) drift CacheBreakpoints away from the
+            // CacheBreakpointLimit computed here and make caching nondeterministic.
+            if (cacheBreakpoints != null && cacheBreakpoints.Count > 0)
             {
+                var copy = new List<int>(cacheBreakpoints.Count);
                 for (int i = 0; i < cacheBreakpoints.Count; i++)
                 {
-                    if (cacheBreakpoints[i] > CacheBreakpointLimit)
-                        CacheBreakpointLimit = cacheBreakpoints[i];
+                    int bp = cacheBreakpoints[i];
+                    copy.Add(bp);
+                    if (bp > CacheBreakpointLimit)
+                        CacheBreakpointLimit = bp;
                 }
+                CacheBreakpoints = copy;
             }
             OutputTokens = new List<int>(capacity: Math.Min(maxNewTokens, 256));
             MaxNewTokens = maxNewTokens;

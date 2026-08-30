@@ -169,15 +169,23 @@ namespace TensorSharp.Server.RequestParsers
                         var textParts = new List<string>();
                         msg.ImagePaths = new List<string>();
                         msg.AudioPaths = new List<string>();
+                        // Running length of the string.Join("\n", textParts) built
+                        // below, so a part's cache_control marker can be recorded at
+                        // the offset where that part ends rather than at the end of
+                        // the whole message.
+                        int joinedLength = 0;
 
                         foreach (var part in contentEl.EnumerateArray())
                         {
                             string type = part.TryGetProperty("type", out var t) ? t.GetString() : "";
                             if (type == "text" && part.TryGetProperty("text", out var txt))
                             {
-                                textParts.Add(txt.GetString());
-                                if (CacheControlParser.TryParse(part, out var partMarker))
-                                    msg.CacheControl = partMarker;
+                                string text = txt.GetString() ?? string.Empty;
+                                if (textParts.Count > 0) joinedLength++; // the "\n" separator
+                                joinedLength += text.Length;
+                                textParts.Add(text);
+                                if (CacheControlParser.TryParse(part, out _))
+                                    msg.AddContentCacheBreakpoint(joinedLength);
                             }
                             else if (type == "image_url" && part.TryGetProperty("image_url", out var imgUrl))
                             {
@@ -289,6 +297,9 @@ namespace TensorSharp.Server.RequestParsers
                     var textParts = new List<string>();
                     msg.ImagePaths = new List<string>();
                     msg.AudioPaths = new List<string>();
+                    // See the equivalent loop in ParseOpenAI: the offset of a
+                    // part-scoped marker is the running length of the join.
+                    int joinedLength = 0;
 
                     foreach (var part in contentEl.EnumerateArray())
                     {
@@ -296,9 +307,12 @@ namespace TensorSharp.Server.RequestParsers
                         if ((partType == "input_text" || partType == "output_text") &&
                             part.TryGetProperty("text", out var txt))
                         {
-                            textParts.Add(txt.GetString());
-                            if (CacheControlParser.TryParse(part, out var partMarker))
-                                msg.CacheControl = partMarker;
+                            string text = txt.GetString() ?? string.Empty;
+                            if (textParts.Count > 0) joinedLength++; // the "\n" separator
+                            joinedLength += text.Length;
+                            textParts.Add(text);
+                            if (CacheControlParser.TryParse(part, out _))
+                                msg.AddContentCacheBreakpoint(joinedLength);
                         }
                         else if (partType == "input_audio" && part.TryGetProperty("input_audio", out var audioEl))
                         {
