@@ -1020,7 +1020,8 @@ namespace TensorSharp.Models
                 GgmlTensorType.IQ1_M or
                 GgmlTensorType.TQ1_0 or
                 GgmlTensorType.TQ2_0 or
-                GgmlTensorType.MXFP4 => true,
+                GgmlTensorType.MXFP4 or
+                GgmlTensorType.NVFP4 => true,
                 _ => false,
             };
         }

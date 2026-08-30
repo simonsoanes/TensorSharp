@@ -2897,6 +2897,80 @@ public class CudaBackendTests
         }
     }
 
+    [CudaFact]
+    public void CudaQuantizedMatmul_NVFP4MatchesNativeReference()
+    {
+        // NVFP4 (ggml type 40) is NVIDIA's 4-bit FP format for Blackwell: a
+        // 36-byte block = 4 UE4M3 sub-block scales (one per 16 elements) + 32
+        // packed E2M1 nibble bytes for 64 elements. Without device support its
+        // weights would stay host-backed and every matmul would dequantize on
+        // the CPU (the MXFP4/IQ4_NL perf-cliff class).
+        const int rows = 3;
+        const int inDim = 256;   // multiple of the 64-element NVFP4 block
+        const int outDim = 5;
+        byte[] weights = CreateNvfp4Rows(outDim, inDim);
+        float[,] input = new float[rows, inDim];
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < inDim; c++)
+                input[r, c] = MathF.Sin((r + 1) * (c + 1) * 0.019f) + MathF.Cos((r + 2) * (c + 3) * 0.011f) * 0.3f;
+
+        IntPtr host = Marshal.AllocHGlobal(weights.Length);
+        IntPtr cacheKey = new(0x767000 + (int)GgmlTensorType.NVFP4);
+        try
+        {
+            Marshal.Copy(weights, 0, host, weights.Length);
+            using var allocator = new CudaAllocator();
+            Assert.True(CudaQuantizedOps.SupportsQuantizedType((int)GgmlTensorType.NVFP4));
+            CudaQuantizedOps.PreloadQuantizedWeight(allocator, cacheKey, host, (int)GgmlTensorType.NVFP4, inDim, outDim, weights.Length);
+
+            using var inputTensor = Tensor.FromArray(allocator, input);
+            using var output = new Tensor(allocator, DType.Float32, rows, outDim);
+            Assert.True(CudaQuantizedOps.TryAddmmQuantizedToFloat32(
+                output,
+                inputTensor,
+                cacheKey,
+                IntPtr.Zero,
+                (int)GgmlTensorType.NVFP4,
+                inDim,
+                outDim,
+                weights.Length));
+
+            float[] expected = DequantizedMatmulNative(weights, GgmlTensorType.NVFP4, outDim, inDim, input);
+            float maxAbs = 0f;
+            foreach (float e in expected)
+                maxAbs = MathF.Max(maxAbs, MathF.Abs(e));
+            AssertClose(expected, output.GetElementsAsFloat(rows * outDim), MathF.Max(5e-2f, maxAbs * 3e-4f));
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(host);
+        }
+    }
+
+    private static byte[] CreateNvfp4Rows(int rows, int cols)
+    {
+        const int blockSize = 64;
+        const int blockBytes = 36;   // 4 UE4M3 sub-block scales + 32 packed nibble bytes
+        Assert.Equal(0, cols % blockSize);
+        int blocksPerRow = cols / blockSize;
+        byte[] raw = new byte[rows * blocksPerRow * blockBytes];
+        for (int r = 0; r < rows; r++)
+        {
+            for (int b = 0; b < blocksPerRow; b++)
+            {
+                int offset = (r * blocksPerRow + b) * blockBytes;
+                // UE4M3 sub-block scales around 0.5..8, plus the 0x00/0x7F -> 0
+                // special encodings on the very first block.
+                for (int s = 0; s < 4; s++)
+                    raw[offset + s] = (byte)((r == 0 && b == 0 && s < 2) ? (s == 0 ? 0x00 : 0x7F) : (0x30 + ((r * 5 + b * 3 + s) % 20)));
+                for (int i = 0; i < 32; i++)
+                    raw[offset + 4 + i] = (byte)((r * 29 + b * 17 + i * 11 + 3) & 0xFF);
+            }
+        }
+
+        return raw;
+    }
+
     private static byte[] CreateMxfp4Rows(int rows, int cols)
     {
         const int blockSize = 32;

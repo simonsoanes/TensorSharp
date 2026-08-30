@@ -29,6 +29,8 @@ namespace TensorSharp.Models
         private const int QK8_1 = 32;
         private const int QK4_NL = 32;
         private const int QK_MXFP4 = 32;
+        private const int QK_NVFP4 = 64;
+        private const int Nvfp4BlockBytes = 4 + QK_NVFP4 / 2; // 36
         private const int QK_K = 256;
         private const int K_SCALE_SIZE = 12;
         private const int Q4_0BlockBytes = 2 + QK4_0 / 2;
@@ -79,6 +81,7 @@ namespace TensorSharp.Models
                 GgmlTensorType.IQ3_XXS => true,
                 GgmlTensorType.IQ3_S => true,
                 GgmlTensorType.MXFP4 => true,
+                GgmlTensorType.NVFP4 => true,
                 _ => false,
             };
         }
@@ -874,6 +877,13 @@ namespace TensorSharp.Models
                     activationRowBytes = elementCount / QK8_0 * Q8_0BlockBytes;
                     return true;
 
+                case GgmlTensorType.NVFP4:
+                    if (elementCount % QK_NVFP4 != 0)
+                        return false;
+                    activationKind = ActivationQuantKind.Q8_0;
+                    activationRowBytes = elementCount / QK8_0 * Q8_0BlockBytes;
+                    return true;
+
                 default:
                     return false;
             }
@@ -914,6 +924,7 @@ namespace TensorSharp.Models
                 GgmlTensorType.IQ2_XS => VecDotIq2XsQ8K(weightRow, activationRow, elementCount / QK_K),
                 GgmlTensorType.IQ3_XXS => VecDotIq3XxsQ8K(weightRow, activationRow, elementCount / QK_K),
                 GgmlTensorType.MXFP4 => VecDotMxfp4Q8_0(weightRow, activationRow, elementCount / QK_MXFP4),
+                GgmlTensorType.NVFP4 => VecDotNvfp4Q8_0(weightRow, activationRow, elementCount / QK_NVFP4),
                 _ => throw new NotSupportedException($"Direct managed quantized matmul does not support {type}."),
             };
         }
@@ -1008,6 +1019,9 @@ namespace TensorSharp.Models
                     return;
                 case GgmlTensorType.MXFP4:
                     DequantizeMxfp4(src, dst, numElements);
+                    return;
+                case GgmlTensorType.NVFP4:
+                    DequantizeNvfp4(src, dst, numElements);
                     return;
                 default:
                     throw new NotSupportedException($"Pure C# backend does not support GGUF tensor type {type}.");
@@ -1811,6 +1825,31 @@ namespace TensorSharp.Models
                 {
                     y[j] = d * Mxfp4Values[qs[j] & 0x0F];
                     y[j + QK_MXFP4 / 2] = d * Mxfp4Values[qs[j] >> 4];
+                }
+            }
+        }
+
+        private static unsafe void DequantizeNvfp4(byte* src, float* dst, long numElements)
+        {
+            if (numElements % QK_NVFP4 != 0)
+                throw new NotSupportedException($"NVFP4 requires {QK_NVFP4}-element alignment, got {numElements}.");
+
+            int nb = (int)(numElements / QK_NVFP4);
+            for (int i = 0; i < nb; i++)
+            {
+                byte* block = src + i * Nvfp4BlockBytes;
+                byte* qs = block + 4;
+                float* y = dst + i * QK_NVFP4;
+                for (int sub = 0; sub < QK_NVFP4 / 16; sub++)
+                {
+                    float d = Ue4m3ToFp32(block[sub]);
+                    byte* sq = qs + sub * 8;
+                    float* sy = y + sub * 16;
+                    for (int j = 0; j < 8; j++)
+                    {
+                        sy[j] = d * Mxfp4Values[sq[j] & 0x0F];
+                        sy[j + 8] = d * Mxfp4Values[sq[j] >> 4];
+                    }
                 }
             }
         }
@@ -3241,6 +3280,110 @@ namespace TensorSharp.Models
                     Avx2.MultiplyAddAdjacent(w16hi, q16hi));
                 int sumi = HorizontalSum128(Sse2.Add(prod.GetLower(), prod.GetUpper()));
                 sum += d * sumi;
+            }
+            return sum;
+        }
+
+        // ------------------------------------------------------------------
+        // NVFP4 x Q8_0 (mirrors ggml_vec_dot_nvfp4_q8_0_generic). One 64-element
+        // NVFP4 block (4 UE4M3 sub-scales + 32 packed nibble bytes) spans two
+        // 32-element Q8_0 activation blocks; within a 16-element sub-block,
+        // elements 0..7 sit in the low nibbles and 8..15 in the high nibbles of
+        // the same 8 bytes, through the shared doubled E2M1 codebook.
+        // ------------------------------------------------------------------
+
+        private static readonly float[] Ue4m3Table = BuildUe4m3Table();
+
+        private static float[] BuildUe4m3Table()
+        {
+            // Mirrors ggml_ue4m3_to_fp32: unsigned E4M3 (bias 7), 0x00 and the
+            // 0x7F NaN pattern decode to 0, and the result is halved to cancel
+            // the doubled E2M1 codebook values.
+            var table = new float[256];
+            for (int v = 0; v < 256; v++)
+            {
+                if (v == 0 || v == 0x7F)
+                    continue;
+                int exp = (v >> 3) & 0xF;
+                int man = v & 0x7;
+                float raw = exp == 0
+                    ? MathF.ScaleB(man, -9)
+                    : MathF.ScaleB(1.0f + man / 8.0f, exp - 7);
+                table[v] = raw * 0.5f;
+            }
+            return table;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static float Ue4m3ToFp32(byte value) => Ue4m3Table[value];
+
+        private static unsafe float VecDotNvfp4Q8_0(byte* nv, byte* q8, int blockCount)
+        {
+            if (Avx2.IsSupported)
+                return VecDotNvfp4Q8_0Avx2(nv, q8, blockCount);
+
+            float sum = 0.0f;
+            for (int block = 0; block < blockCount; block++)
+            {
+                byte* xb = nv + block * Nvfp4BlockBytes;
+                byte* qs = xb + 4;
+                for (int sub = 0; sub < QK_NVFP4 / 16; sub++)
+                {
+                    byte* yb = q8 + (block * 2 + (sub >> 1)) * Q8_0BlockBytes;
+                    float dy = HalfToSingle(ReadUInt16(yb));
+                    sbyte* q8v = (sbyte*)(yb + 2) + (sub & 1) * 16;
+                    byte* sq = qs + sub * 8;
+                    int sumiLo = 0, sumiHi = 0;
+                    for (int j = 0; j < 8; j++)
+                    {
+                        sumiLo += q8v[j] * Mxfp4Values[sq[j] & 0xF];
+                        sumiHi += q8v[j + 8] * Mxfp4Values[sq[j] >> 4];
+                    }
+                    sum += dy * Ue4m3ToFp32(xb[sub]) * (sumiLo + sumiHi);
+                }
+            }
+            return sum;
+        }
+
+        private static unsafe float VecDotNvfp4Q8_0Avx2(byte* nv, byte* q8, int blockCount)
+        {
+            Vector128<byte> loMask = Vector128.Create((byte)0x0F);
+            Vector128<byte> table;
+            fixed (sbyte* tbl = Mxfp4Values)
+            {
+                table = Unsafe.ReadUnaligned<Vector128<byte>>(tbl);
+            }
+
+            float sum = 0.0f;
+            for (int block = 0; block < blockCount; block++)
+            {
+                byte* xb = nv + block * Nvfp4BlockBytes;
+                for (int half = 0; half < 2; half++)
+                {
+                    // qs bytes 16*half..16*half+15 hold sub-blocks 2*half and
+                    // 2*half+1, which pair with Q8_0 activation block `half`.
+                    byte* yb = q8 + (block * 2 + half) * Q8_0BlockBytes;
+                    float dy = HalfToSingle(ReadUInt16(yb));
+
+                    Vector128<byte> qsBytes = Unsafe.ReadUnaligned<Vector128<byte>>(xb + 4 + half * 16);
+                    Vector128<sbyte> wLo = Ssse3.Shuffle(table, Sse2.And(qsBytes, loMask)).AsSByte();
+                    Vector128<sbyte> wHi = Ssse3.Shuffle(table, Sse2.And(Sse2.ShiftRightLogical(qsBytes.AsUInt16(), 4).AsByte(), loMask)).AsSByte();
+
+                    Vector128<sbyte> a0 = Unsafe.ReadUnaligned<Vector128<sbyte>>(yb + 2);
+                    Vector128<sbyte> a1 = Unsafe.ReadUnaligned<Vector128<sbyte>>(yb + 2 + 16);
+                    // wLo covers elements [sub 2h: 0..7 | sub 2h+1: 16..23] of the
+                    // q8 block, wHi covers [sub 2h: 8..15 | sub 2h+1: 24..31].
+                    Vector128<sbyte> aLo = Sse2.UnpackLow(a0.AsInt64(), a1.AsInt64()).AsSByte();
+                    Vector128<sbyte> aHi = Sse2.UnpackHigh(a0.AsInt64(), a1.AsInt64()).AsSByte();
+
+                    Vector256<int> prodLo = Avx2.MultiplyAddAdjacent(Avx2.ConvertToVector256Int16(wLo), Avx2.ConvertToVector256Int16(aLo));
+                    Vector256<int> prodHi = Avx2.MultiplyAddAdjacent(Avx2.ConvertToVector256Int16(wHi), Avx2.ConvertToVector256Int16(aHi));
+
+                    Vector128<int> subA = Sse2.Add(prodLo.GetLower(), prodHi.GetLower());
+                    Vector128<int> subB = Sse2.Add(prodLo.GetUpper(), prodHi.GetUpper());
+                    sum += dy * (Ue4m3ToFp32(xb[2 * half]) * HorizontalSum128(subA)
+                               + Ue4m3ToFp32(xb[2 * half + 1]) * HorizontalSum128(subB));
+                }
             }
             return sum;
         }

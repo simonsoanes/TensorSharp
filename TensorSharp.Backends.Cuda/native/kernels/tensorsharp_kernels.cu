@@ -26,6 +26,7 @@
 #define GGML_IQ2_S 22
 #define GGML_IQ4_XS 23
 #define GGML_MXFP4 39
+#define GGML_NVFP4 40
 #define TS_QK8_1 32
 #define TS_Q80_F16_CHUNK 2048
 #define TS_Q80_BLOCK_BYTES 34
@@ -111,6 +112,18 @@ __device__ __forceinline__ int dp4a_i8(int a, int b, int c)
 #endif
 }
 
+// UE4M3 (unsigned E4M3, bias 7) scale byte -> fp32, halved to cancel the
+// doubled E2M1 codebook, bit-identical to ggml's ggml_ue4m3_to_fp32
+// (0x00 and the 0x7F NaN pattern decode to 0).
+__device__ __forceinline__ float ts_ue4m3_to_fp32(uint8_t v)
+{
+    if (v == 0 || v == 0x7F) return 0.0f;
+    const int e = (v >> 3) & 0xF;
+    const int m = v & 0x7;
+    const float raw = (e == 0) ? ldexpf((float)m, -9) : ldexpf(1.0f + (float)m / 8.0f, e - 7);
+    return raw * 0.5f;
+}
+
 __device__ __forceinline__ int qrow_bytes(int type, int cols)
 {
     switch (type)
@@ -132,6 +145,7 @@ __device__ __forceinline__ int qrow_bytes(int type, int cols)
         case GGML_IQ3_S: return (cols / 256) * 110;
         case GGML_IQ4_NL: return (cols / 32) * 18;
         case GGML_MXFP4: return (cols / 32) * 17;
+        case GGML_NVFP4: return (cols / 64) * 36;
         case GGML_IQ4_XS: return (cols / 256) * 136;
         default: return 0;
     }
@@ -453,6 +467,22 @@ __device__ __forceinline__ float qvalue_at(const uint8_t* row, int type, int col
         int j = within & 15;
         uint8_t packed = qs[j];
         int nib = (within < 16) ? (packed & 0xF) : (packed >> 4);
+        return d * (float)ts_kvalues_mxfp4[nib];
+    }
+
+    if (type == GGML_NVFP4)
+    {
+        // block_nvfp4: d[4] (UE4M3, one per 16-element sub-block), qs[32] = 36
+        // bytes per 64 elements. Within a sub-block, elements 0..7 take the low
+        // nibble of qs[j] and 8..15 the high nibble, through the shared doubled
+        // E2M1 codebook (ggml dequantize_row_nvfp4).
+        const uint8_t* block = row + (col / 64) * 36;
+        int within = col & 63;
+        int sub = within >> 4;
+        float d = ts_ue4m3_to_fp32(block[sub]);
+        const uint8_t* qs = block + 4 + sub * 8;
+        uint8_t packed = qs[within & 7];
+        int nib = ((within & 15) < 8) ? (packed & 0xF) : (packed >> 4);
         return d * (float)ts_kvalues_mxfp4[nib];
     }
 
