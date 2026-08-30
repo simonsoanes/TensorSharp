@@ -457,9 +457,13 @@ namespace tsg
 
     // --- Fused tensor-parallel graph execution ------------------------------
 
-    bool tp_fused_available(int rank_count)
+    bool tp_fused_available(int rank_count, bool distributed)
     {
-        if (rank_count < 2)
+        // A distributed run may legitimately drive ONE local rank per node:
+        // the fused graph still collapses the per-op dispatches into a single
+        // graph per token, and the reduction that a second local rank would
+        // have provided happens across nodes instead.
+        if (rank_count < (distributed ? 1 : 2))
             return false;
         if (rank_count != g_device_count.load(std::memory_order_acquire))
             return false;
@@ -834,7 +838,9 @@ namespace tsg
             {
                 for (int r = 0; r < rank_count; ++r)
                     nodes[static_cast<std::size_t>(r)] = plans[r]->ar_tensor[s];
-                if (!tp_reduce_segment(nodes.data(), rank_count))
+                // One local rank has nothing to reduce on-node; the cross-node
+                // exchange below is the whole reduction in that configuration.
+                if (rank_count > 1 && !tp_reduce_segment(nodes.data(), rank_count))
                     return false;
 
                 // Multi-node: the local reduce above collapsed this node's
@@ -1527,7 +1533,21 @@ TSG_EXPORT int TSGgml_TensorParallelFusedAvailable(int rankCount)
 {
     try
     {
-        return tsg::tp_fused_available(rankCount) ? 1 : 0;
+        return tsg::tp_fused_available(rankCount, /*distributed*/ false) ? 1 : 0;
+    }
+    catch (...)
+    {
+        return 0;
+    }
+}
+
+// Availability for a DISTRIBUTED run, where one local rank per node is a
+// valid configuration because the reduction spans nodes.
+TSG_EXPORT int TSGgml_TensorParallelFusedAvailableDistributed(int rankCount)
+{
+    try
+    {
+        return tsg::tp_fused_available(rankCount, /*distributed*/ true) ? 1 : 0;
     }
     catch (...)
     {
@@ -1561,6 +1581,15 @@ TSG_EXPORT int TSGgml_TensorParallelExecutePlans(void** plans, int rankCount)
     }
     catch (const std::exception& ex)
     {
+        tsg::set_last_error(ex.what());
+        return 0;
+    }
+    catch (...)
+    {
+        tsg::set_last_error("Unknown tensor-parallel plan execution failure.");
+        return 0;
+    }
+}
 
 // Same schedule, but every AllReduce boundary is additionally exchanged
 // across the cluster through `cross_node`. This is what lets a multi-NODE
@@ -1597,15 +1626,6 @@ TSG_EXPORT int TSGgml_TensorParallelExecutePlansDistributed(
     catch (...)
     {
         tsg::set_last_error("Unknown distributed tensor-parallel plan execution failure.");
-        return 0;
-    }
-}
-        tsg::set_last_error(ex.what());
-        return 0;
-    }
-    catch (...)
-    {
-        tsg::set_last_error("Unknown tensor-parallel plan execution failure.");
         return 0;
     }
 }

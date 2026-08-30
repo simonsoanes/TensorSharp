@@ -615,6 +615,10 @@ namespace TensorSharp.GGML
         public static bool TensorParallelFusedAvailable(int rankCount)
             => GgmlNative.TensorParallelFusedAvailable(rankCount);
 
+        /// <summary>Fused availability for a distributed (multi-node) run.</summary>
+        public static bool TensorParallelFusedAvailableDistributed(int rankCount)
+            => GgmlNative.TensorParallelFusedAvailableDistributed(rankCount);
+
         /// <summary>
         /// Execute one fused per-rank graph plan per rank, AllReducing the
         /// row-parallel partials on-device between segments.

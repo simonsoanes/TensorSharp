@@ -65,6 +65,10 @@ namespace TensorSharp.GGML
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int TSGgml_TensorParallelFusedAvailableDistributed(int rankCount);
+
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial int TSGgml_TensorParallelExecutePlans(IntPtr[] plans, int rankCount);
 
         [LibraryImport(DllName)]
@@ -270,6 +274,14 @@ namespace TensorSharp.GGML
         public static bool TensorParallelFusedAvailable(int rankCount)
         {
             try { return TSGgml_TensorParallelFusedAvailable(rankCount) != 0; }
+            catch (EntryPointNotFoundException) { return false; }
+        }
+
+        /// <summary>Fused availability for a DISTRIBUTED run: one local rank per
+        /// node is valid there, because the reduction spans nodes.</summary>
+        public static bool TensorParallelFusedAvailableDistributed(int rankCount)
+        {
+            try { return TSGgml_TensorParallelFusedAvailableDistributed(rankCount) != 0; }
             catch (EntryPointNotFoundException) { return false; }
         }
 

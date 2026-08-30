@@ -131,7 +131,9 @@ namespace TensorSharp.Models
                 // MoE must be sharded by whole experts (the stacked slices the
                 // graph's mul_mat_id dispatches over).
                 && (_numExperts <= 0 || UsesExpertParallelMoE)
-                && GgmlBasicOps.TensorParallelFusedAvailable(TpDegree);
+                && (TpCrossNodeReducer != null
+                    ? GgmlBasicOps.TensorParallelFusedAvailableDistributed(TpDegree)
+                    : GgmlBasicOps.TensorParallelFusedAvailable(TpDegree));
             if (_tpFdReady)
                 _tpFdPlans = new IntPtr[TpDegree];
             else if (IsTensorParallel)
@@ -143,7 +145,7 @@ namespace TensorSharp.Models
                     : !_tpQuantWeights.ContainsKey(_tpLmHeadKey) ? $"no quantized TP shard for the LM head ({_tpLmHeadKey})"
                     : !_weights.ContainsKey("output_norm.weight") ? "output_norm.weight is missing"
                     : (_numExperts > 0 && !UsesExpertParallelMoE) ? "MoE is not expert-parallel sharded"
-                    : $"the native bridge reports no fused TP support for tp={TpDegree}");
+                    : $"the native bridge reports no fused TP support for tp={TpDegree} (distributed={TpCrossNodeReducer != null})");
             return _tpFdReady;
         }
 

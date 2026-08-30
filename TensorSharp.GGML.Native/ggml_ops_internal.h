@@ -799,7 +799,7 @@ namespace tsg
     // collective to reduce with. Without a collective every segment boundary
     // would cost a host round trip, which is exactly what this path exists to
     // remove, so the caller should fall back to the generic per-op forward.
-    bool tp_fused_available(int rank_count);
+    bool tp_fused_available(int rank_count, bool distributed = false);
 
     // ------------------------------------------------------------------
     // MoE CPU offload (--n-cpu-moe / --cpu-moe)
