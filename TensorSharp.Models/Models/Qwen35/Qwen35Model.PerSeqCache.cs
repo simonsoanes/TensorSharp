@@ -88,7 +88,14 @@ namespace TensorSharp.Models
         /// unsupported shapes still fall back to the isolated per-holder
         /// operation path. This preserves both concurrency and per-request
         /// recurrent/attention state.</summary>
+        /// <para>Never under tensor parallelism: the per-request holders
+        /// snapshot and swap the single-GPU cache arrays (<c>_kvCacheK</c> and
+        /// friends), which the TP path never populates - it builds its own
+        /// per-rank caches instead. Taking this path with TP active dereferenced
+        /// a null cache array the moment a second sequence arrived.</para>
         public bool SupportsPerSequenceFusedForward =>
+            !IsTensorParallel
+            &&
             !_fdSpecSessionActive
             && ((_backend == BackendType.GgmlCuda && _fullDecodeEnabled && !_fdUnsupported)
                 || _backend == BackendType.GgmlMetal);
