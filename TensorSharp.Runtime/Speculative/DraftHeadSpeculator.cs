@@ -34,8 +34,23 @@ namespace TensorSharp.Runtime.Speculative
         /// Default gate for a per-token head: the top-1 probability over the
         /// head's top-10 logits, thresholded per drafted token (llama.cpp's
         /// top-k(10) draft sampler with p_min).
+        ///
+        /// llama.cpp's own default for this is <c>p_min = 0.0</c> - it never
+        /// declines to draft - and a high gate is expensive here: every token
+        /// it refuses becomes a PLAIN decode step, which costs a full forward
+        /// and cannot amortise anything. Measured on Qwen3.8-27B-NVFP4 (MTP
+        /// head, window 3, greedy, RTX 5090), 256 tokens:
+        ///
+        ///   gate 0.75 -&gt;  97.8 tok/s   (82% accepted, 57 of ~93 steps plain)
+        ///   gate 0.50 -&gt; 107.0 tok/s   (63% accepted, 23 plain)
+        ///   gate 0.30 -&gt; 123.9 tok/s   (59% accepted,  2 plain)
+        ///   gate 0.10 -&gt; 129.4 tok/s   (59% accepted,  0 plain)
+        ///
+        /// A rejected draft costs one wasted head pass; a refused draft costs
+        /// a whole decode. The gate therefore only pays when the head is much
+        /// slower than the trunk, which it is not for an in-trunk MTP block.
         /// </summary>
-        public const float DefaultGate = 0.75f;
+        public const float DefaultGate = 0.1f;
 
         private readonly IDraftHead _head;
         private readonly int _vocab;

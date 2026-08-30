@@ -30,8 +30,8 @@ namespace TensorSharp.Runtime.Speculative
     public sealed class BlockDraftSpeculator : ISpeculator
     {
         /// <summary>
-        /// Default gate for a BLOCK drafter. Much lower than
-        /// <see cref="DraftHeadSpeculator.DefaultGate"/> because it thresholds a
+        /// Default gate for a BLOCK drafter. It thresholds a different quantity to
+        /// <see cref="DraftHeadSpeculator.DefaultGate"/>:
         /// different quantity: the CUMULATIVE prefix probability (the product of
         /// the confidence head's per-position estimates), which decays with every
         /// position. 0.35 is the break-even point where an extra verify row stops

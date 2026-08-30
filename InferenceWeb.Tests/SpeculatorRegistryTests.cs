@@ -49,9 +49,13 @@ public class SpeculatorRegistryTests
         // A block drafter can never propose more than it was trained to emit.
         Assert.Equal(5, spec.MaxDraftTokens);
         // The two gates threshold different quantities, so each algorithm brings
-        // its own default rather than sharing one.
+        // The two gates threshold different quantities, so each algorithm brings
+        // its own default rather than sharing one: the block gate is a CUMULATIVE
+        // prefix probability (it decays with every position), the per-token gate a
+        // single top-1 probability. They are not on a common scale, so neither
+        // ordering between them is meaningful - only that each is its own value.
         Assert.Equal(BlockDraftSpeculator.DefaultGate, spec.MinDraftProb);
-        Assert.True(BlockDraftSpeculator.DefaultGate < DraftHeadSpeculator.DefaultGate);
+        Assert.NotEqual(BlockDraftSpeculator.DefaultGate, DraftHeadSpeculator.DefaultGate);
     }
 
     [Fact]
