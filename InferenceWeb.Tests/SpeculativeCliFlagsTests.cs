@@ -107,6 +107,7 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
     }
 
     [Theory]
+    [InlineData("0")]
     [InlineData("-1")]
     [InlineData("abc")]
     // Above the bound the glm-dsa native loader silently ignores when it sizes its
@@ -124,7 +125,6 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
     }
 
     [Theory]
-    [InlineData("0")]
     [InlineData("1.5")]
     [InlineData("nope")]
     public void Apply_SpecPminOutsideTheUnitInterval_FailsFastNamingTheFlag(string value)
