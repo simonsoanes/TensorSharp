@@ -625,6 +625,10 @@ namespace TensorSharp.Models
             ShardConcatenatedBiasColumnParallel(biasName, half, half);
         }
 
+        internal static readonly bool TpScaleDebug =
+            Environment.GetEnvironmentVariable("TS_TP_SCALE_DEBUG") == "1";
+        private readonly HashSet<string> _tpScaleSeen = new(StringComparer.Ordinal);
+
         /// <summary>Remember a sharded weight's per-tensor scale under the name
         /// the TP linears resolve it by. Tolerates a null source (an F32 shard
         /// cut from a tensor that never had one).</summary>
@@ -634,7 +638,24 @@ namespace TensorSharp.Models
                 return;
             float s = source?.Scale ?? 1.0f;
             if (s != 1.0f)
+            {
                 _tpWeightScales[weightName] = s;
+                if (TpScaleDebug)
+                    Console.Error.WriteLine($"[tp-scale] recorded {weightName} = {s}");
+            }
+        }
+
+        /// <summary>Whether any of these sharded weights carries a per-tensor
+        /// scale. The fused per-block TP kernels have no hook to apply one, so
+        /// they must decline rather than silently drop it.</summary>
+        protected bool TpAnyWeightScaled(params string[] weightNames)
+        {
+            if (_tpWeightScales.Count == 0 || weightNames == null)
+                return false;
+            foreach (string n in weightNames)
+                if (n != null && _tpWeightScales.ContainsKey(n))
+                    return true;
+            return false;
         }
 
         /// <summary>Multiply every rank's result by the sharded weight's
@@ -644,6 +665,13 @@ namespace TensorSharp.Models
         /// before the all-reduce equals scaling the sum.</summary>
         protected void TpApplyNamedWeightScale(Tensor[] results, string weightName)
         {
+            if (TpScaleDebug)
+            {
+                bool found = _tpWeightScales.TryGetValue(weightName, out float dbg);
+                if (_tpScaleSeen.Add(weightName))
+                    Console.Error.WriteLine($"[tp-scale] {weightName}: " +
+                        (found ? $"applying {dbg}" : "no recorded scale"));
+            }
             if (results == null || !_tpWeightScales.TryGetValue(weightName, out float s))
                 return;
             for (int r = 0; r < results.Length; r++)

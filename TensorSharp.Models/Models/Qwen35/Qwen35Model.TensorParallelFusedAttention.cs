@@ -56,6 +56,10 @@ namespace TensorSharp.Models
         {
             if (!TpFusedAttentionAvailable() || shards == null)
                 return false;
+            // The fused residual matmul has no scale hook; a scaled shard must
+            // take the scale-aware per-op path instead.
+            if (shards.Length > 0 && shards[0] != null && shards[0].Scale != 1.0f)
+                return false;
 
             int tp = TpDegree;
             int previousRank = GgmlBasicOps.GetActiveRank();
@@ -101,6 +105,10 @@ namespace TensorSharp.Models
         /// </summary>
         private unsafe bool TryQwen35FusedDenseFfnTP(Tensor[] hidden, int layer, int seqLen)
         {
+            // No scale hook in the fused FFN kernel: decline so the scale-aware
+            // per-op TP linears run instead.
+            if (TpAnyWeightScaled(_ffnGateUpKey[layer], _ffnDownKey[layer]))
+                return TpAttnBail($"layer {layer} FFN carries a per-tensor weight scale");
             if (!TpFusedAttentionAvailable())
                 return false;
 
@@ -252,6 +260,11 @@ namespace TensorSharp.Models
         /// </summary>
         private unsafe bool TryQwen35FusedAttentionBlockTP(Tensor[] hidden, int layer, int seqLen, int startPos)
         {
+            // Same for the fused attention block: qkv / o are matmuls with no
+            // scale hook in the native graph.
+            if (TpAnyWeightScaled(_attnQkvKey[layer], _attnOutputKey[layer],
+                    _attnQKey[layer], _attnKKey[layer], _attnVKey[layer]))
+                return TpAttnBail($"layer {layer} attention carries a per-tensor weight scale");
             if (!TpFusedAttentionAvailable())
                 return false;
             // MRoPE bakes per-axis angles the fused graph cannot express.
