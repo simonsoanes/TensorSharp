@@ -30,7 +30,8 @@ namespace TensorSharp.Runtime.Scheduling
             int blockSize,
             SamplingConfig samplingConfig,
             object userTag = null,
-            string mediaFingerprint = null)
+            string mediaFingerprint = null,
+            IReadOnlyList<int> cacheBreakpoints = null)
         {
             if (promptTokens == null) throw new ArgumentNullException(nameof(promptTokens));
             if (promptTokens.Count == 0) throw new ArgumentException("Prompt must be non-empty.", nameof(promptTokens));
@@ -40,6 +41,15 @@ namespace TensorSharp.Runtime.Scheduling
             RequestId = requestId ?? $"seq-{Sn:X}";
             BlockTable = new BlockTable(blockSize);
             PromptTokens = new List<int>(promptTokens);
+            CacheBreakpoints = cacheBreakpoints;
+            if (cacheBreakpoints != null)
+            {
+                for (int i = 0; i < cacheBreakpoints.Count; i++)
+                {
+                    if (cacheBreakpoints[i] > CacheBreakpointLimit)
+                        CacheBreakpointLimit = cacheBreakpoints[i];
+                }
+            }
             OutputTokens = new List<int>(capacity: Math.Min(maxNewTokens, 256));
             MaxNewTokens = maxNewTokens;
             SamplingConfig = samplingConfig ?? SamplingConfig.Default;
@@ -55,6 +65,24 @@ namespace TensorSharp.Runtime.Scheduling
 
         public string RequestId { get; }
         public List<int> PromptTokens { get; }
+
+        /// <summary>
+        /// Explicit token-index breakpoints requested by the client for prompt caching.
+        /// When present, the cache manager captures K/V state exactly up to these points
+        /// (rounded down to the nearest block) instead of opportunistically capturing
+        /// the entire prefix.
+        /// </summary>
+        public IReadOnlyList<int> CacheBreakpoints { get; }
+
+        /// <summary>
+        /// The furthest explicit breakpoint, or 0 when the request set none.
+        /// Only the last one bounds what gets cached — the earlier ones mark
+        /// segment boundaries inside a prefix that is cached in full anyway —
+        /// so the capture path compares against this instead of rescanning
+        /// <see cref="CacheBreakpoints"/> for every block.
+        /// </summary>
+        public int CacheBreakpointLimit { get; }
+
         public List<int> OutputTokens { get; }
         public int MaxNewTokens { get; }
         public SamplingConfig SamplingConfig { get; }

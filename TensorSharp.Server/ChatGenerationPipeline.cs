@@ -201,6 +201,7 @@ namespace TensorSharp.Server
             var promptSw = Stopwatch.StartNew();
             List<int> inputTokens;
             int effectiveMaxTokens;
+            List<int> explicitBreakpoints = null;
             bool hasMultimodal = RequiresMultimodalPreparation(renderHistory);
             if (hasMultimodal)
             {
@@ -236,27 +237,40 @@ namespace TensorSharp.Server
                 {
                     inputTokens = _kvCacheRenderer.RenderToTokens(
                         model.Tokenizer, model.Config.ChatTemplate, renderHistory, arch,
-                        addGenerationPrompt: true, tools: tools, enableThinking: enableThinking);
+                        addGenerationPrompt: true, out _, tools: tools, enableThinking: enableThinking);
                     // ClearPreparedPromptState is safe when preparation fails
                     // before creating a bucket. Arm cleanup first so partial
                     // image/audio preparation cannot leak tensors on overflow
                     // or any other exception before engine submission.
                     injectorBucketCreated = true;
                     inputTokens = model.MultimodalInjector.ProcessPromptTokens(renderHistory, inputTokens, requestId);
+
+                    // ProcessPromptTokens expands each single placeholder token
+                    // (<|image_pad|>, the audio equivalent) into however many
+                    // tokens the encoded media actually occupies, so every
+                    // breakpoint index past the first attachment now points at
+                    // the wrong token. There is no mapping back from the
+                    // expanded prompt to the pre-expansion offsets, so the
+                    // markers are discarded (the renderer's out-parameter is
+                    // dropped above) rather than applied at bogus positions.
+                    // That falls back to the default implicit behaviour of
+                    // caching every full block, which is the safe direction:
+                    // the request caches at least as much as it would have,
+                    // never less.
                     inputTokens = TruncatePromptToContext(
                         session, inputTokens, maxTokens, out effectiveMaxTokens, requestId,
-                        preserveAttachedDocuments, engineContextLimit);
+                        preserveAttachedDocuments, engineContextLimit, explicitBreakpoints: null);
                 }
             }
             else
             {
                 inputTokens = _kvCacheRenderer.RenderToTokens(
                     model.Tokenizer, model.Config.ChatTemplate, renderHistory, arch,
-                    addGenerationPrompt: true, tools: tools, enableThinking: enableThinking);
+                    addGenerationPrompt: true, out explicitBreakpoints, tools: tools, enableThinking: enableThinking);
                 inputTokens = TruncatePromptToContext(
-                    session, inputTokens, maxTokens, out effectiveMaxTokens,
+                    session, inputTokens, maxTokens, out effectiveMaxTokens, null,
                     preserveAllInput: preserveAttachedDocuments,
-                    executionContextLimit: engineContextLimit);
+                    executionContextLimit: engineContextLimit, explicitBreakpoints: explicitBreakpoints);
             }
 
             int promptTokenCount = inputTokens.Count;
@@ -277,7 +291,8 @@ namespace TensorSharp.Server
                 blockSize: enginePoolStats.blockSize,
                 samplingConfig: cfg,
                 userTag: session,
-                mediaFingerprint: mediaFingerprint);
+                mediaFingerprint: mediaFingerprint,
+                cacheBreakpoints: explicitBreakpoints);
 
             promptSw.Stop();
             long promptNs = InferenceTelemetry.ToNanos(promptSw.ElapsedTicks);
@@ -595,7 +610,8 @@ namespace TensorSharp.Server
             out int effectiveMaxTokens,
             string requestId = null,
             bool preserveAllInput = false,
-            int executionContextLimit = 0)
+            int executionContextLimit = 0,
+            List<int> explicitBreakpoints = null)
         {
             var model = _lifecycle.Model;
             int maxCtx = model.MaxContextLength;
@@ -635,6 +651,24 @@ namespace TensorSharp.Server
                 inputTokens.Count, kept, maxCtx, effectiveMaxTokens, session?.Id ?? "(none)");
             model.MultimodalInjector.TrimPreparedPrompt(trimStart, requestId);
             session?.TrackedHistory.Clear();
+
+            // Dropping the first trimStart tokens renumbers everything that
+            // survives, so the breakpoints have to move with it (in place - the
+            // caller holds this list and passes it on to the sequence). A
+            // breakpoint at or before the cut marked a prefix that no longer
+            // exists in the prompt at all and is discarded; if that empties the
+            // list the request simply falls back to implicit caching.
+            if (explicitBreakpoints != null && explicitBreakpoints.Count > 0)
+            {
+                for (int i = explicitBreakpoints.Count - 1; i >= 0; i--)
+                {
+                    if (explicitBreakpoints[i] <= trimStart)
+                        explicitBreakpoints.RemoveAt(i);
+                    else
+                        explicitBreakpoints[i] -= trimStart;
+                }
+            }
+
             return inputTokens.GetRange(trimStart, kept);
         }
 

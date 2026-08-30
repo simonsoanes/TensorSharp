@@ -56,7 +56,7 @@ namespace TensorSharp.Server.RequestParsers
             {
                 if (!TryGetObject(toolEl, "function", out var fnEl))
                     continue;
-                tools.Add(ParseFunction(fnEl));
+                tools.Add(ParseFunction(fnEl, toolEl));
             }
             return tools.Count > 0 ? tools : null;
         }
@@ -72,7 +72,7 @@ namespace TensorSharp.Server.RequestParsers
                 if (!IsFunctionTool(toolEl)) continue;
                 if (!TryGetObject(toolEl, "function", out var fnEl)) continue;
 
-                tools.Add(ParseFunction(fnEl));
+                tools.Add(ParseFunction(fnEl, toolEl));
             }
             return tools.Count > 0 ? tools : null;
         }
@@ -123,14 +123,27 @@ namespace TensorSharp.Server.RequestParsers
         /// <summary>
         /// Parse one function declaration — <c>{name, description, parameters}</c>,
         /// where <c>parameters</c> is a JSON Schema object. Never returns null.
+        /// <para>
+        /// <paramref name="wrapperEl"/> is the enclosing <c>{type, function}</c>
+        /// entry where the protocol nests one (Chat Completions and Ollama), and
+        /// default/undefined for the Responses API's flat shape. A cache
+        /// breakpoint is read from either level because clients place it on
+        /// both; the inner declaration wins when they disagree.
+        /// </para>
         /// </summary>
-        private static ToolFunction ParseFunction(JsonElement fnEl)
+        private static ToolFunction ParseFunction(JsonElement fnEl, JsonElement wrapperEl = default)
         {
             var tf = new ToolFunction
             {
                 Name = ReadString(fnEl, "name") ?? string.Empty,
                 Description = ReadString(fnEl, "description") ?? string.Empty
             };
+
+            if (CacheControlParser.TryParse(fnEl, out var marker) ||
+                CacheControlParser.TryParse(wrapperEl, out marker))
+            {
+                tf.CacheControl = marker;
+            }
 
             // "parameters": null on an argument-less tool is common, and so is
             // omitting it entirely; both leave the defaults from ToolFunction.

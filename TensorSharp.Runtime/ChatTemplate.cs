@@ -59,6 +59,10 @@ namespace TensorSharp.Runtime
         /// reliable KV cache reuse across turns.
         /// </summary>
         public List<int>? RawOutputTokens { get; set; }
+        /// <summary>
+        /// Explicit cache-control marker for prefix caching.
+        /// </summary>
+        public CacheControlMarker? CacheControl { get; set; }
     }
 
     public static class ChatTemplate

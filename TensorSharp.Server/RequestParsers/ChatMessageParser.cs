@@ -155,6 +155,9 @@ namespace TensorSharp.Server.RequestParsers
                     Role = msgEl.TryGetProperty("role", out var r) ? r.GetString() : "user"
                 };
 
+                if (CacheControlParser.TryParse(msgEl, out var msgMarker))
+                    msg.CacheControl = msgMarker;
+
                 if (msgEl.TryGetProperty("content", out var contentEl))
                 {
                     if (contentEl.ValueKind == JsonValueKind.String)
@@ -173,6 +176,8 @@ namespace TensorSharp.Server.RequestParsers
                             if (type == "text" && part.TryGetProperty("text", out var txt))
                             {
                                 textParts.Add(txt.GetString());
+                                if (CacheControlParser.TryParse(part, out var partMarker))
+                                    msg.CacheControl = partMarker;
                             }
                             else if (type == "image_url" && part.TryGetProperty("image_url", out var imgUrl))
                             {
@@ -263,6 +268,9 @@ namespace TensorSharp.Server.RequestParsers
                     Role = itemEl.TryGetProperty("role", out var r) ? r.GetString() : "user",
                 };
 
+                if (CacheControlParser.TryParse(itemEl, out var itemMarker))
+                    msg.CacheControl = itemMarker;
+
                 if (!itemEl.TryGetProperty("content", out var contentEl))
                 {
                     messages.Add(msg);
@@ -289,6 +297,8 @@ namespace TensorSharp.Server.RequestParsers
                             part.TryGetProperty("text", out var txt))
                         {
                             textParts.Add(txt.GetString());
+                            if (CacheControlParser.TryParse(part, out var partMarker))
+                                msg.CacheControl = partMarker;
                         }
                         else if (partType == "input_audio" && part.TryGetProperty("input_audio", out var audioEl))
                         {
