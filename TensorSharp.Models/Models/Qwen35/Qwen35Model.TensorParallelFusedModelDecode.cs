@@ -65,7 +65,7 @@ namespace TensorSharp.Models
         /// leave no trace at all. Mirrors the non-TP FdBail added for the same
         /// failure mode on the single-GPU path.
         /// </summary>
-        private bool _tpFdDeclineLogged;
+        private readonly HashSet<string> _tpFdDeclineLogged = new(StringComparer.Ordinal);
 
         /// <summary>The cross-node half of a distributed AllReduce, or null on a
         /// single-node run. Present exactly when the TP group spans nodes.</summary>
@@ -101,9 +101,10 @@ namespace TensorSharp.Models
 
         private bool TpFdBail(string reason)
         {
-            if (!_tpFdDeclineLogged)
+            // Distinct reasons each print once. A single process-wide latch hid
+            // the real cause whenever an outer check declined first.
+            if (_tpFdDeclineLogged.Add(reason))
             {
-                _tpFdDeclineLogged = true;
                 Console.Error.WriteLine(
                     $"[qwen35-tp] fused whole-model decode NOT engaged ({reason}); " +
                     "falling back to the per-op tensor-parallel decode.");
@@ -341,10 +342,10 @@ namespace TensorSharp.Models
         private unsafe bool TryQwen35FusedModelDecodeTP(Tensor hidden, int position, float[] logitsOut)
         {
             if (!TpFusedModelDecodeAvailable() || logitsOut == null || logitsOut.Length < Config.VocabSize)
-                return false;
+                return TpFdBail("availability/logits buffer");
             if (hidden == null || hidden.DimensionCount != 2 || hidden.Sizes[0] != 1
                 || hidden.ElementType != DType.Float32)
-                return false;
+                return TpFdBail("hidden shape");
 
             int tp = TpDegree;
             int n = Config.NumLayers;
@@ -357,13 +358,13 @@ namespace TensorSharp.Models
                     continue;
                 var k0 = _tpKvCacheK[l][0];
                 if (k0.ElementType != DType.Float32 && k0.ElementType != DType.Float16)
-                    return false;
+                    return TpFdBail("kv cache geometry");
                 cacheSize = (int)k0.Sizes[1];
                 kvCacheType = k0.ElementType == DType.Float16 ? 1 : 0;
                 break;
             }
             if (cacheSize <= 0 || position >= cacheSize)
-                return false;
+                return TpFdBail("no attention KV cache");
 
             if (_tpFdLayers == null || _tpFdBuiltCapacity != _tpKvCacheCapacity)
             {
@@ -379,7 +380,7 @@ namespace TensorSharp.Models
                     // returned false through a path that had nothing to say.
                     TpFdBail("a per-layer descriptor could not be built");
                     _tpFdFailed = true;
-                    return false;
+                    return TpFdBail("layer descriptor build");
                 }
             }
 
