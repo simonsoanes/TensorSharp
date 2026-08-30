@@ -700,6 +700,8 @@ namespace TensorSharp.Models
                 for (int r = 0; r < tp; r++) sharedInputs[r] = input;
                 if (TryTpFusedQuantLinear(sharedInputs, qShards, results, seqLen, allReduce: false))
                 {
+                    // The fused multi-rank linear returns here without touching the
+                    // method's normal exit, so it needs the scale applied too.
                     TpApplyNamedWeightScale(results, weightName);
                     _linearTicks += Stopwatch.GetTimestamp() - t0;
                     return results;
@@ -739,6 +741,9 @@ namespace TensorSharp.Models
                 throw new KeyNotFoundException($"TP column-parallel weight '{weightName}' not found in sharded weights.");
             }
 
+            // Every branch above lands here: the fused multi-rank linear, the
+            // generic per-rank quantized loop, and the F32 shards.
+            TpApplyNamedWeightScale(results, weightName);
             _linearTicks += Stopwatch.GetTimestamp() - t0;
             return results;
         }
@@ -908,6 +913,9 @@ namespace TensorSharp.Models
                 int seqLen = (int)inputs[0].Sizes[0];
                 if (TryTpFusedQuantLinear(inputs, qShards, partials, seqLen, allReduce: true))
                 {
+                    // The fused multi-rank linear returns here without touching the
+                    // method's normal exit, so it needs the scale applied too.
+                    TpApplyNamedWeightScale(partials, weightName);
                     _linearTicks += Stopwatch.GetTimestamp() - t0;
                     return partials;
                 }
