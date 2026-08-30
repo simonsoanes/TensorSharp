@@ -618,7 +618,9 @@ public class SpeculativeExecutionTests
 
         var block = NewExec(new FakeSpeculativeModel { BlockDraftSize = 5 }, maxDraftTokens: 8);
         Assert.Equal(BlockDraftSpeculator.DefaultGate, block.MinDraftProb);
-        Assert.True(block.MinDraftProb < perToken.MinDraftProb);
+        // The two are not on a common scale (single top-1 probability vs a
+        // cumulative product), so only their identity is asserted, not an order.
+        Assert.NotEqual(block.MinDraftProb, perToken.MinDraftProb);
         // The window still clamps to what the drafter was trained to propose.
         Assert.Equal(5, block.MaxDraftTokens);
     }
@@ -642,11 +644,11 @@ public class SpeculativeExecutionTests
         Assert.Equal(4, exec.Stats.TokensDrafted);
         Assert.True(outcome.UsedSpeculation);
 
-        // The same block under the per-token default keeps half as many: the
+        // The same block under a per-token-SIZED gate keeps half as many: the
         // product falls under 0.75 already at the third position (0.612).
         var strictModel = new FakeSpeculativeModel { BlockDraftSize = 5, BlockConfidences = model.BlockConfidences };
         var strict = NewExec(strictModel, maxDraftTokens: 5,
-            minDraftProb: DraftHeadSpeculator.DefaultGate);
+            minDraftProb: 0.75f);   // a per-token-SIZED gate, not today's default
         int pos2 = PrefillPrompt(strictModel, strict, promptLen: 5, out int lastToken2);
         strict.DecodeStep(lastToken2, pos2, kMax: 5, drawNext: Argmax);
         Assert.Equal(2, strict.Stats.TokensDrafted);

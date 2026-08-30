@@ -44,13 +44,19 @@ namespace TensorSharp.Runtime.Speculative
         ///   gate 0.75 -&gt;  97.8 tok/s   (82% accepted, 57 of ~93 steps plain)
         ///   gate 0.50 -&gt; 107.0 tok/s   (63% accepted, 23 plain)
         ///   gate 0.30 -&gt; 123.9 tok/s   (59% accepted,  2 plain)
-        ///   gate 0.10 -&gt; 129.4 tok/s   (59% accepted,  0 plain)
+        ///   gate 0.15 -&gt; 129.9 tok/s   (59% accepted,  0 plain)
+        ///
+        /// 0.15 rather than lower because the confidence is the top-1 of the
+        /// head's TOP-10 logits: a completely flat (zero-information) draft
+        /// scores exactly 0.10, so a gate at or below that would wave through
+        /// a head that knows nothing. 0.15 is the first value above it, and it
+        /// measured best of everything tried.
         ///
         /// A rejected draft costs one wasted head pass; a refused draft costs
         /// a whole decode. The gate therefore only pays when the head is much
         /// slower than the trunk, which it is not for an in-trunk MTP block.
         /// </summary>
-        public const float DefaultGate = 0.1f;
+        public const float DefaultGate = 0.15f;
 
         private readonly IDraftHead _head;
         private readonly int _vocab;
