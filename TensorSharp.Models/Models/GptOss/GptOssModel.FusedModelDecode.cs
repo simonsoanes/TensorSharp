@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -10,6 +10,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using TensorSharp.GGML;
 
 namespace TensorSharp.Models
@@ -149,6 +150,73 @@ namespace TensorSharp.Models
         /// layer is missing a weight the kernel needs, in which case the fused
         /// model decode is permanently disabled for this model instance.
         /// </summary>
+        // ---- F16 prefill-GEMM weight copies (TS_GPTOSS_PREFILL_F16=1) ----
+        // Prefill is compute-bound: at 2048-token chunks quantized MMQ runs the
+        // big GEMMs well below the F16 tensor-core rate, and forcing cuBLAS on
+        // quantized weights loses to the per-chunk dequant. With VRAM headroom
+        // we dequantize the seven heavy weights ONCE per layer (Q8_0 -> F16 is
+        // exact: int8 x f16-scale fits an F16 significand) and the prefill
+        // kernel binds them; decode stays on the bandwidth-friendly quantized
+        // copies. Costs ~2 host+device bytes per parameter.
+        private static readonly bool PrefillF16WeightsEnabled =
+            Environment.GetEnvironmentVariable("TS_GPTOSS_PREFILL_F16") == "1";
+        private List<IntPtr> _f16PrefillBuffers;
+
+        private static unsafe void DequantRowToHalf(
+            int ggmlType, IntPtr src, long rowBytes, int row, float[] scratch, IntPtr dst, long ne0)
+        {
+            fixed (float* fb = scratch)
+            {
+                ManagedQuantizedOps.DequantizeRowToFloat32(
+                    ggmlType, (IntPtr)((byte*)src + (long)row * rowBytes), fb, ne0);
+                System.Half* hp = (System.Half*)dst + (long)row * ne0;
+                for (long i = 0; i < ne0; i++)
+                    hp[i] = (System.Half)fb[i];
+            }
+        }
+
+        private unsafe IntPtr BuildF16WeightCopy(IntPtr src, int ggmlType, long ne0, long rows)
+        {
+            if (src == IntPtr.Zero || rows <= 0 || ne0 <= 0)
+                return IntPtr.Zero;
+            if (ggmlType == (int)GgmlTensorType.F16)
+                return IntPtr.Zero;   // already the fast-GEMM type; use the original
+            if (!ManagedQuantizedOps.SupportsDequantization((GgmlTensorType)ggmlType))
+                return IntPtr.Zero;
+            long elems = ne0 * rows;
+            IntPtr dst;
+            try { dst = (IntPtr)NativeMemory.AlignedAlloc((nuint)(elems * 2), 64); }
+            catch (OutOfMemoryException) { return IntPtr.Zero; }
+            long rowBytes = ManagedQuantizedOps.RowSize(ggmlType, ne0);
+            try
+            {
+                Parallel.For(0, checked((int)rows),
+                    () => new float[ne0],
+                    (r, _, scratch) => { DequantRowToHalf(ggmlType, src, rowBytes, r, scratch, dst, ne0); return scratch; },
+                    _ => { });
+            }
+            catch (Exception)
+            {
+                NativeMemory.AlignedFree((void*)dst);
+                return IntPtr.Zero;
+            }
+            (_f16PrefillBuffers ??= new List<IntPtr>()).Add(dst);
+            return dst;
+        }
+
+        private unsafe void FreeF16PrefillBuffers()
+        {
+            if (_f16PrefillBuffers == null) return;
+            foreach (var p in _f16PrefillBuffers)
+            {
+                // Drop the resident device copy keyed by this host pointer
+                // before the memory goes away.
+                GgmlBasicOps.InvalidateHostBuffer(p);
+                NativeMemory.AlignedFree((void*)p);
+            }
+            _f16PrefillBuffers = null;
+        }
+
         private unsafe bool TryBuildModelDecodeArgs()
         {
             if (_modelDecodeArgs != null)
@@ -256,6 +324,22 @@ namespace TensorSharp.Models
                     OaiAlpha = SiluAlpha,
                     OaiLimit = SiluLimit,
                 };
+
+                if (PrefillF16WeightsEnabled)
+                {
+                    ref var a = ref args[l];
+                    if (qkvQw.HasHostData)
+                        a.QkvWF16 = BuildF16WeightCopy(a.QkvW, a.QkvType, a.QkvNe0, a.QkvNe1);
+                    if (kQw != null && kQw.HasHostData)
+                        a.KWF16 = BuildF16WeightCopy(a.KW, a.KType, a.KNe0, a.KNe1);
+                    if (vQw != null && vQw.HasHostData)
+                        a.VWF16 = BuildF16WeightCopy(a.VW, a.VType, a.VNe0, a.VNe1);
+                    if (oQw.HasHostData)
+                        a.OWF16 = BuildF16WeightCopy(a.OW, a.OType, a.ONe0, a.ONe1);
+                    a.GateExpsF16 = BuildF16WeightCopy(a.GateExps, a.GeType, a.GeNe0, a.GeNe1 * _numExperts);
+                    a.UpExpsF16 = BuildF16WeightCopy(a.UpExps, a.UeType, a.UeNe0, a.UeNe1 * _numExperts);
+                    a.DownExpsF16 = BuildF16WeightCopy(a.DownExps, a.DeType, a.DeNe0, a.DeNe1 * _numExperts);
+                }
             }
 
             if (_modelDecodeUnavailable)
@@ -465,6 +549,12 @@ namespace TensorSharp.Models
         private void DisposeFusedModelDecodeState()
         {
             ResetFusedModelDecodeCache();
+            FreeF16PrefillBuffers();
+            // The token-batched arena pool deliberately survives prefills (and
+            // the reset above); on model teardown it must go explicitly or its
+            // per-entry arena buffers keep their VRAM until process exit.
+            if (IsGgmlBackend)
+                GgmlBasicOps.GptOssResetBatchedDecodeCache();
             FreePinnedDecodeArrays();
             if (_foldLogitsHandle.IsAllocated)
                 _foldLogitsHandle.Free();

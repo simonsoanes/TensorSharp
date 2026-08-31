@@ -544,6 +544,13 @@ namespace
     };
     Q35DecodeCachePool g_q35dc_pool;
 
+    void q35dc_drop_by_kv(const void* kc0)
+    {
+        for (auto& e : g_q35dc_pool.entries)
+            if (e.valid && e.sig_kcache0 == kc0)
+                e.reset();
+    }
+
     int qwen35_model_decode_impl(
         const TSGgmlQwen35LayerDesc* layers, int num_layers, int reseed_state,
         void* hidden_data, int hidden_size, int position,
@@ -606,6 +613,15 @@ namespace
                 std::to_string(layers[0].struct_bytes) + " vs native " +
                 std::to_string(sizeof(TSGgmlQwen35LayerDesc)) + ").");
             return 0;
+        }
+        // If any of this call's caches/state currently decode in the token-
+        // batched arena, their newest rows/state exist only there: flush and
+        // retire those slots before this graph binds the resident copies.
+        for (int l = 0; l < num_layers; l++)
+        {
+            tsg_q35arena::on_external_touch(layers[l].k_cache);
+            tsg_q35arena::on_external_touch(layers[l].conv_state_in);
+            tsg_q35arena::on_external_touch(layers[l].delta_state_in);
         }
         // gated_delta_net requires S_k == S_v (state is [S_v, S_v, H]).
         // Reject unsupported geometry before ggml graph construction can assert.
@@ -2319,6 +2335,14 @@ TSG_EXPORT int TSGgml_Qwen35ModelDecodeToken(
 // recurrent state is re-seeded / the per-op path runs (the cached graph pins the
 // conv/delta device-buffer addresses, which move on re-seed), so the next fused
 // decode rebuilds against the fresh state.
+// Drop the persistent solo decode graphs whose captured nodes bind the given
+// holder's first-attention K cache (called by the arena flush after it frees
+// that holder's resident cacheable buffers).
+void tsg_q35_drop_decode_graphs_for_kv(const void* k_cache0)
+{
+    q35dc_drop_by_kv(k_cache0);
+}
+
 TSG_EXPORT void TSGgml_Qwen35ResetDecodeCache()
 {
     g_q35dc_pool.reset_all();

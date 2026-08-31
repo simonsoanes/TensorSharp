@@ -1883,6 +1883,17 @@ TSG_EXPORT int TSGgml_Qwen35ModelVerify(
 {
     try
     {
+        // Arena coherence: prefill/verify writes go to the resident copies;
+        // flush + retire any arena slots holding these caches/state first.
+        if (layers != nullptr)
+        {
+            for (int l = 0; l < num_layers; l++)
+            {
+                tsg_q35arena::on_external_touch(layers[l].k_cache);
+                tsg_q35arena::on_external_touch(layers[l].conv_state_in);
+                tsg_q35arena::on_external_touch(layers[l].delta_state_in);
+            }
+        }
         int r = qwen35_model_verify_impl(
             layers, num_layers, hidden_data, hidden_size, start_pos, num_tokens,
             num_heads, num_kv_heads, head_dim, cache_size,

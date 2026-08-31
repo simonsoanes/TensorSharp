@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -1105,6 +1105,10 @@ namespace TensorSharp.Models
 
         private void EnsureCacheCapacity(int requiredSeqLen, bool geometricGrowth = true)
         {
+            // Growth discards and reallocates the active caches; if this holder
+            // occupies an arena batched-decode slot, its newest rows/state exist
+            // only there — flush them to host first or growth strands them.
+            FlushArenaSlotForActiveHolder();
             if (requiredSeqLen <= _kvCacheCapacity)
                 return;
             if (requiredSeqLen > _maxContextLength)
@@ -1443,7 +1447,13 @@ namespace TensorSharp.Models
         /// </summary>
         private void EnsureKvCacheHostSynchronized()
         {
-            if (!_kvCacheHostDirty || !IsGgmlBackend || _kvCacheK == null)
+            if (!IsGgmlBackend || _kvCacheK == null)
+                return;
+            // If the active holder occupies an arena batched-decode slot, its
+            // newest KV rows/state exist only there: flush-and-retire the slot
+            // first so the resident-copy download below sees current bytes.
+            FlushArenaSlotForActiveHolder();
+            if (!_kvCacheHostDirty)
                 return;
 
             var seen = new HashSet<Storage>();
@@ -6139,6 +6149,9 @@ namespace TensorSharp.Models
 
         protected override void OnBeforeReleaseGgmlDeviceResidency()
         {
+            // Arena slots hold the only current KV/GDN state; flush them to
+            // host before the residency wipe frees the resident copies.
+            GgmlBasicOps.Qwen35ArenaResetBatchedDecodeCache();
             // Whole-model Qwen graphs pin weight buffers. Preserve mutable
             // device-authoritative state, then drop every graph family before
             // ModelBase evicts the corresponding weight bindings.
@@ -6161,6 +6174,10 @@ namespace TensorSharp.Models
             if (IsGgmlBackend)
             {
                 GgmlBasicOps.Qwen35ResetDecodeCache();
+                // The arena batched-decode pool survives everything else by
+                // design; drop it (with a dirty-slot flush) at teardown or its
+                // per-entry buffers keep their VRAM until process exit.
+                GgmlBasicOps.Qwen35ArenaResetBatchedDecodeCache();
                 GgmlBasicOps.Qwen35ResetVerifyCache();
                 GgmlBasicOps.Qwen35ResetBatchedDecodeCache();
                 GgmlBasicOps.Qwen35ReleaseVerifyTpGraphs();

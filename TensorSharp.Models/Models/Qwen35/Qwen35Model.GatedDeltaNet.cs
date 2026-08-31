@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -1067,8 +1067,27 @@ namespace TensorSharp.Models
         /// evicting the device buffers.  Snapshotting can then read exact state
         /// while the next decode token still reuses the resident graph.
         /// </summary>
+        /// <summary>Flush-and-retire the ACTIVE holder's arena batched-decode
+        /// slot, if it has one. Any managed path that reads or replaces the
+        /// active caches/state outside the hooked native kernels (growth, host
+        /// syncs, snapshot extraction, residency release) must call this first
+        /// or it operates on pre-arena bytes.</summary>
+        internal void FlushArenaSlotForActiveHolder()
+        {
+            if (_backend != BackendType.GgmlCuda || _kvCacheK == null || _isRecurrent == null)
+                return;
+            for (int l = 0; l < Config.NumLayers && l < _kvCacheK.Length; l++)
+            {
+                if (_isRecurrent[l] || _kvCacheK[l] == null) continue;
+                GgmlBasicOps.Qwen35ArenaFlushHostPointer(
+                    TensorComputePrimitives.GetStoragePointer(_kvCacheK[l]));
+                break;   // one registered pointer retires the whole slot
+            }
+        }
+
         private unsafe void EnsureFusedDecodeStateHostSynchronized()
         {
+            FlushArenaSlotForActiveHolder();
             if (!_gdnStateHostDirty || !_fdStateResident || _fdConvScratch == IntPtr.Zero || _fdGdnSlot == null)
                 return;
 
@@ -1367,6 +1386,7 @@ namespace TensorSharp.Models
                     if (!ok)
                     {
                         _fdUnsupported = true;
+                GgmlBasicOps.Qwen35ArenaResetBatchedDecodeCache();   // flush stranded arena slots to host
                         return FdBail($"layer {l} ({(_isRecurrent[l] ? "recurrent" : "attention")}, moe={isMoeL}) missing a required weight/state" +
                             (!_isRecurrent[l] && _kvCacheK[l] != null && !IsFusedGraphKvCacheDType(_kvCacheK[l].ElementType)
                                 ? $" (KV cache dtype {_kvCacheK[l].ElementType} unsupported by fused graph on {_backend})"
@@ -1623,7 +1643,8 @@ namespace TensorSharp.Models
                     _fdDiagPrinted = true;
                     Console.Error.WriteLine($"[full-decode] disabled (native returned 0); falling back to per-op decode.");
                 }
-                _fdUnsupported = true;   // don't retry a failing kernel every token
+                _fdUnsupported = true;
+                GgmlBasicOps.Qwen35ArenaResetBatchedDecodeCache();   // flush stranded arena slots to host   // don't retry a failing kernel every token
                 return false;
             }
 

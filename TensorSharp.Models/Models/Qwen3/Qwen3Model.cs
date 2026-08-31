@@ -217,19 +217,12 @@ namespace TensorSharp.Models
         {
             _maxContextLength = maxSeqLen;
             _kvCacheCapacity = initialSeqLen;
-            int numKVHeads = Config.NumKVHeads;
-            int headDim = Config.HeadDim;
+            _initialKvCacheLength = initialSeqLen;
             ApplyModelAlignedKvCacheDefault(_quantWeights);
-            DType kvDtype = _kvCacheDtype.ToDType();
-            _kvCacheK = new Tensor[Config.NumLayers];
-            _kvCacheV = new Tensor[Config.NumLayers];
-            for (int l = 0; l < Config.NumLayers; l++)
-            {
-                _kvCacheK[l] = new Tensor(_allocator, kvDtype, numKVHeads, initialSeqLen, headDim);
-                _kvCacheV[l] = new Tensor(_allocator, kvDtype, numKVHeads, initialSeqLen, headDim);
-                InitializeCacheTensor(_kvCacheK[l]);
-                InitializeCacheTensor(_kvCacheV[l]);
-            }
+            // Shared with the per-request holders (Qwen3Model.PerSeqCache.cs)
+            // so the primary cache and every concurrent request's cache have
+            // exactly one definition of the layout.
+            AllocateKvCacheArrays(initialSeqLen, out _kvCacheK, out _kvCacheV);
             _cacheSeqLen = 0;
         }
 
@@ -239,6 +232,14 @@ namespace TensorSharp.Models
                 return;
             if (requiredSeqLen > _maxContextLength)
                 throw new InvalidOperationException($"Requested sequence length {requiredSeqLen} exceeds configured max context {_maxContextLength}.");
+
+            // Growth copies through the HOST mirror and hands every layer a new
+            // pointer. The whole-model fused decode writes K/V device-side only
+            // (it sets _kvCacheHostDirty), so without this flush the copy below
+            // reads stale bytes and silently drops everything decoded since the
+            // last sync. Per-request holders start small and grow, so this is
+            // now on the common path rather than a corner case.
+            EnsureKvCacheHostSynchronized();
 
             int newCapacity = Math.Max(_kvCacheCapacity, 1);
             while (newCapacity < requiredSeqLen)
@@ -265,13 +266,22 @@ namespace TensorSharp.Models
                     Ops.Copy(dstV, srcV);
                 }
 
+                // Release the device windows keyed on the OLD host pointer, or
+                // they leak their VRAM and a recycled address could rebind them.
+                InvalidateTensorDeviceCache(_kvCacheK[l]);
+                InvalidateTensorDeviceCache(_kvCacheV[l]);
                 _kvCacheK[l].Dispose();
                 _kvCacheV[l].Dispose();
                 _kvCacheK[l] = newK;
                 _kvCacheV[l] = newV;
             }
 
+            _kvCacheHostDirty = false;
             _kvCacheCapacity = newCapacity;
+            // The whole-model decode kernel holds raw per-layer K/V pointers
+            // captured at construction; the tensors above were just replaced,
+            // so without this the next fused decode reads the freed cache.
+            RefreshDecodeArraysKvCache();
             Console.WriteLine($"Expanded Qwen3 attention cache to {newCapacity} tokens.");
         }
 
@@ -1076,6 +1086,7 @@ namespace TensorSharp.Models
 
         public override void Dispose()
         {
+            DisposeFusedSequenceCaches();
             if (_kvCacheK != null)
                 foreach (var t in _kvCacheK) t?.Dispose();
             if (_kvCacheV != null)

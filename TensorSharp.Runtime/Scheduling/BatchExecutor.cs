@@ -551,7 +551,7 @@ namespace TensorSharp.Runtime.Scheduling
                 }
                 else
                 {
-                    int sampledFirst = SampleFromLogits(seq);
+                    int sampledFirst = TakePendingOrSample(seq);
                     seq.AppendOutputToken(sampledFirst);
                     inputTokens = new[] { sampledFirst };
                 }
@@ -709,32 +709,82 @@ namespace TensorSharp.Runtime.Scheduling
             // supports it, decode all N tokens in ONE fused graph (weights loaded
             // once) instead of N serial per-seq forwards. Falls through to the
             // round-robin loop below when the model declines this batch.
+            // A mixed step no longer forfeits batching: the decode SUBSET
+            // batches here and the prefill chunks run through the per-sequence
+            // loop below in the same step (the chunked-prefill mixing the
+            // vLLM/SGLang schedulers do) - without this, a single admission
+            // degraded every in-flight decode to a serial weight sweep.
+            HashSet<string> handledBatched = null;
             if (options.BatchedFusedDecodeEnabled && n >= 2)
             {
-                bool allDecode = true;
+                var decodeWork = new List<ScheduledSequenceWork>(n);
                 foreach (var work in output.ScheduledWork)
-                    if (work.IsPrefill) { allDecode = false; break; }
-                if (allDecode)
+                    if (!work.IsPrefill &&
+                        fused.CanBatchDecode(work.Sequence.RequestId, work.Sequence.NumComputedTokens))
+                        decodeWork.Add(work);
+                int dn = decodeWork.Count;
+                if (dn >= 2)
                 {
-                    var reqIds = new string[n];
-                    var btokens = new int[n];
-                    var bpositions = new int[n];
-                    for (int i = 0; i < n; i++)
+                    var reqIds = new string[dn];
+                    var btokens = new int[dn];
+                    var bpositions = new int[dn];
+                    bool allGreedy = true;
+                    for (int i = 0; i < dn; i++)
                     {
-                        var seq = output.ScheduledWork[i].Sequence;
-                        // Peek-sample (deterministic for greedy); do NOT append yet
-                        // so the round-robin fallback re-samples cleanly.
-                        btokens[i] = SampleFromLogits(seq);
+                        var seq = decodeWork[i].Sequence;
+                        // Peek-sample (deterministic for greedy); do NOT append or
+                        // consume the device-sampled stash yet, so a decline below
+                        // leaves the round-robin fallback a valid token source
+                        // (device-sampled sequences have no LastLogits to re-sample).
+                        btokens[i] = PeekPendingOrSample(seq);
                         bpositions[i] = seq.NumComputedTokens;
                         reqIds[i] = seq.RequestId;
+                        if (allGreedy && !seq.GetOrCreateSampler().IsPlainGreedyArgmax)
+                            allGreedy = false;
                     }
-                    var outLogits = new float[n][];
+                    if (allGreedy)
+                    {
+                        // Device-sampled fast path: no host logits at all. The
+                        // model returns each sequence's NEXT token (argmax of
+                        // this step's logits); it is stashed on the sequence and
+                        // consumed by TakePendingOrSample at the next step.
+                        var nextTokens = new int[dn];
+                        if (fused.TryForwardBatchedFusedDecodeSampled(reqIds, btokens, bpositions, nextTokens))
+                        {
+                            for (int i = 0; i < dn; i++)
+                            {
+                                var seq = decodeWork[i].Sequence;
+                                seq.AppendOutputToken(btokens[i]);
+                                seq.LastLogits = null;
+                                seq.AdvanceComputedTokens(1);
+                                seq.PendingDeviceToken = nextTokens[i];   // replaces the consumed stash
+                                seq.PendingDevicePosition = seq.NumComputedTokens;
+                                if (!seq.FirstTokenAt.HasValue) seq.FirstTokenAt = DateTime.UtcNow;
+                                results.Add(new SequenceStepResult
+                                {
+                                    Sequence = seq,
+                                    TokensForwarded = 1,
+                                    SampledToken = btokens[i],
+                                    IsPrefill = false,
+                                    FullBlocksCaptured = 0,
+                                });
+                            }
+                            if (dn == n)
+                                return results;
+                            handledBatched = new HashSet<string>(reqIds);
+                        }
+                        // else: fall through to the logits variant below.
+                    }
+                    if (handledBatched == null)
+                    {
+                    var outLogits = new float[dn][];
                     if (fused.TryForwardBatchedFusedDecode(reqIds, btokens, bpositions, outLogits))
                     {
-                        for (int i = 0; i < n; i++)
+                        for (int i = 0; i < dn; i++)
                         {
-                            var seq = output.ScheduledWork[i].Sequence;
+                            var seq = decodeWork[i].Sequence;
                             seq.AppendOutputToken(btokens[i]);
+                            seq.PendingDeviceToken = null;   // consumed by this step
                             seq.LastLogits = outLogits[i];
                             seq.AdvanceComputedTokens(1);
                             if (!seq.FirstTokenAt.HasValue) seq.FirstTokenAt = DateTime.UtcNow;
@@ -747,14 +797,21 @@ namespace TensorSharp.Runtime.Scheduling
                                 FullBlocksCaptured = 0,
                             });
                         }
-                        return results;
+                        if (dn == n)
+                            return results;
+                        handledBatched = new HashSet<string>(reqIds);
                     }
                     // else: not appended ÔÇö fall through to the round-robin loop.
+                    }
                 }
             }
 
             foreach (var work in output.ScheduledWork)
             {
+                // Decode subset already served by the batched fast path
+                // above; only the prefill chunks of a mixed step remain.
+                if (handledBatched != null && handledBatched.Contains(work.Sequence.RequestId))
+                    continue;
                 var seq = work.Sequence;
                 int prevComputed = seq.NumComputedTokens;
                 // Track this fused sequence so a clean finish can retain its holder
@@ -798,7 +855,7 @@ namespace TensorSharp.Runtime.Scheduling
                     }
                     else
                     {
-                        sampledToken = SampleFromLogits(seq);
+                        sampledToken = TakePendingOrSample(seq);
                         seq.AppendOutputToken(sampledToken);
                         inputTokens = new[] { sampledToken };
                     }
@@ -981,7 +1038,7 @@ namespace TensorSharp.Runtime.Scheduling
                     }
                     else
                     {
-                        sampledToken = SampleFromLogits(seq);
+                        sampledToken = TakePendingOrSample(seq);
                         seq.AppendOutputToken(sampledToken);
                         inputTokens = new[] { sampledToken };
                     }
@@ -1310,7 +1367,7 @@ namespace TensorSharp.Runtime.Scheduling
             }
             else
             {
-                sampledToken = SampleFromLogits(seq);
+                sampledToken = TakePendingOrSample(seq);
             }
             seq.AppendOutputToken(sampledToken);
 
@@ -1807,6 +1864,37 @@ namespace TensorSharp.Runtime.Scheduling
             return buf;
         }
 
+        /// <summary>Consume a token the batched greedy path sampled on-device
+        /// last step (bit-equivalent to re-sampling the logits it summarizes),
+        /// falling back to host sampling from LastLogits. Any position drift —
+        /// preemption, recompute, rollback — invalidates the stash.</summary>
+        private static int TakePendingOrSample(SequenceState seq)
+        {
+            if (seq.PendingDeviceToken.HasValue)
+            {
+                int t = seq.PendingDeviceToken.Value;
+                seq.PendingDeviceToken = null;
+                if (seq.PendingDevicePosition == seq.NumComputedTokens)
+                    return t;
+            }
+            return SampleFromLogits(seq);
+        }
+
+        /// <summary>Non-destructive form of <see cref="TakePendingOrSample"/> for
+        /// the batched fast path's peek: a stash that is still valid stays on the
+        /// sequence until a successful step replaces (or clears) it, so a decline
+        /// leaves the fallback loop a token source.</summary>
+        private static int PeekPendingOrSample(SequenceState seq)
+        {
+            if (seq.PendingDeviceToken.HasValue)
+            {
+                if (seq.PendingDevicePosition == seq.NumComputedTokens)
+                    return seq.PendingDeviceToken.Value;
+                seq.PendingDeviceToken = null;   // stale: position moved under it
+            }
+            return SampleFromLogits(seq);
+        }
+
         private static int SampleFromLogits(SequenceState seq)
         {
             if (seq.LastLogits == null)
@@ -2182,6 +2270,25 @@ namespace TensorSharp.Runtime.Scheduling
         /// per-sequence round-robin loop). Default false (opt-in).</summary>
         bool TryForwardBatchedFusedDecode(
             IReadOnlyList<string> requestIds, int[] tokens, int[] positions, float[][] outLogits) => false;
+
+        /// <summary>Greedy fast path of <see cref="TryForwardBatchedFusedDecode"/>:
+        /// instead of materializing [vocab] host logits per sequence, the model
+        /// samples each sequence's next token ON-DEVICE (argmax) and returns just
+        /// the token ids — for a 200k vocab at N=32 that replaces a ~25 MB
+        /// PCIe download plus N host argmax scans per step (this is how
+        /// vLLM/SGLang sample). Only called when every scheduled sequence's
+        /// sampler is a plain argmax (see TokenSampler.IsPlainGreedyArgmax).
+        /// Default false (opt-in per model).</summary>
+        bool TryForwardBatchedFusedDecodeSampled(
+            IReadOnlyList<string> requestIds, int[] tokens, int[] positions, int[] outNextTokens) => false;
+
+        /// <summary>Whether this sequence can join the token-batched decode at
+        /// <paramref name="position"/> right now (holder exists, no cache growth
+        /// needed). One sequence crossing a growth boundary then falls back to
+        /// the per-sequence loop ALONE instead of declining the whole batch —
+        /// previously that decline degraded every in-flight decode to a serial
+        /// weight sweep for the step. Default true.</summary>
+        bool CanBatchDecode(string requestId, int position) => true;
     }
 
     /// <summary>Per-step metadata for the batched paged attention path.

@@ -233,7 +233,10 @@ set(TSG_GGMLOPS_SOURCES
     ggml_ops_transformer.cpp
     ggml_ops_transformer_prefill.cpp
     ggml_ops_gptoss_decode.cpp
+    ggml_ops_gptoss_batched.cpp
+    ggml_ops_qwen35_batched_arena.cpp
     ggml_ops_qwen4exp.cpp
+    ggml_ops_qwen4exp_arena.cpp
     ggml_ops_gptoss_prefill.cpp
     ggml_ops_qwen35_decode.cpp
     ggml_ops_qwen35_verify.cpp

@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -35,6 +35,9 @@ namespace TensorSharp.Models
         // requestId -> native slot id. Guarded by _nativeSync, the same lock
         // that serializes ForwardNative / ResetNative.
         private Dictionary<string, int> _slotByRequest;
+        // Set when a mid-step chunked batched call failed once; large
+        // batches then decline outright (see TryForwardBatchedFusedDecode).
+        private bool _batchedChunkingLatched;
         // Native slot serving the single-stream (N==1) path. Slot 0 at load;
         // replaced when AdoptPrimaryCacheToFused hands slot 0 to a request.
         private int _primarySlot;
@@ -148,7 +151,7 @@ namespace TensorSharp.Models
             {
                 if (_native == IntPtr.Zero || _slotByRequest == null) return false;
                 int n = requestIds.Count;
-                if (n < 2 || n > 16) return false;
+                if (n < 2) return false;
 
                 var slots = new int[n];
                 for (int i = 0; i < n; i++)
@@ -161,8 +164,51 @@ namespace TensorSharp.Models
                 if ((long) n * vocab > int.MaxValue) return false;
                 var flat = new float[n * vocab];
 
-                if (!GgmlGlmNative.ForwardBatchedDecode(_native, slots, tokens, positions, flat))
-                    return false;
+                // The native batched graph caps at 16 sequences (its per-slot
+                // attention forks are O(n) graph nodes). Above that, run the
+                // step as near-equal windows of <=16 - two weight sweeps for a
+                // double-cap batch still beat that many serial solo sweeps.
+                // Windows are sized so none is ever 1 (native needs n>=2). A
+                // failure AFTER the first window would leave earlier slots
+                // advanced while the engine retries the whole step, and the
+                // native position gates would then error those sequences
+                // visibly - so on any mid-step failure, latch chunking off and
+                // decline.
+                const int MaxPerCall = 16;
+                if (n <= MaxPerCall)
+                {
+                    if (!GgmlGlmNative.ForwardBatchedDecode(_native, slots, tokens, positions, flat))
+                        return false;
+                }
+                else
+                {
+                    if (_batchedChunkingLatched) return false;
+                    int chunks = (n + MaxPerCall - 1) / MaxPerCall;
+                    int baseSize = n / chunks, rem = n % chunks;
+                    int off = 0;
+                    for (int c = 0; c < chunks; c++)
+                    {
+                        int len = baseSize + (c < rem ? 1 : 0);
+                        var cs = new int[len]; var ct = new int[len]; var cp = new int[len];
+                        Array.Copy(slots, off, cs, 0, len);
+                        Array.Copy(tokens, off, ct, 0, len);
+                        Array.Copy(positions, off, cp, 0, len);
+                        var cf = new float[len * vocab];
+                        if (!GgmlGlmNative.ForwardBatchedDecode(_native, cs, ct, cp, cf))
+                        {
+                            if (c > 0)
+                            {
+                                _batchedChunkingLatched = true;
+                                Console.Error.WriteLine(
+                                    "[glm batched-decode] chunk " + (c + 1) + "/" + chunks +
+                                    " failed mid-step; chunked batching disabled");
+                            }
+                            return false;
+                        }
+                        Array.Copy(cf, 0, flat, (long) off * vocab, (long) len * vocab);
+                        off += len;
+                    }
+                }
 
                 for (int i = 0; i < n; i++)
                 {

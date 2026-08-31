@@ -42,6 +42,14 @@ namespace TensorSharp.Runtime
         /// <param name="logits">Raw logits from the model (vocabSize elements).</param>
         /// <param name="generatedTokenIds">Previously generated token ids for penalty computation.</param>
         /// <returns>Selected token id.</returns>
+        /// <summary>True when, for any step that already has at least one
+        /// generated token, <see cref="Sample"/> reduces to a plain first-max
+        /// argmax over the raw logits: greedy temperature, no grammar, no
+        /// penalties, no logit rewriting. The engine then takes the token from
+        /// a device-side argmax and never materializes host logits.</summary>
+        internal bool IsPlainGreedyArgmax =>
+            _config.Temperature <= 0f && _config.Grammar == null && !HasPenalties();
+
         public int Sample(float[] logits, IList<int>? generatedTokenIds = null)
         {
             int vocabSize = logits.Length;
