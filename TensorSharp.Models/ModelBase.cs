@@ -270,12 +270,15 @@ namespace TensorSharp.Models
             // experts than it had bytes bound for and let the router address the
             // difference. Harmless to set on a single node: it publishes the
             // local degree and offset 0, which is what the kernels assume anyway.
-            if (_tpGroup != null &&
-                backend is BackendType.GgmlCuda or BackendType.GgmlVulkan
+            if (backend is BackendType.GgmlCuda or BackendType.GgmlVulkan
                         or BackendType.GgmlCpu or BackendType.GgmlMetal)
             {
+                // Published unconditionally, including the (0, 0) reset for a
+                // non-TP model: the value is process-global and sticky, so a
+                // plain model loaded after a tensor-parallel one would inherit
+                // the old degree and take the plan-mode branch it must not.
                 GgmlBasicOps.TensorParallelSetGlobalGeometry(
-                    _tpGroup.GlobalDegree, _tpGroup.GlobalRankOffset);
+                    _tpGroup?.GlobalDegree ?? 0, _tpGroup?.GlobalRankOffset ?? 0);
             }
 
             _gguf = new GgufFile(ggufPath);

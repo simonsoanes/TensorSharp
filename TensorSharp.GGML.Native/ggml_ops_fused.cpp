@@ -255,7 +255,16 @@ int fused_matmul_quant_add_f32_impl(
     // add closes the block. Cutting at the matmul is what lets an attention or
     // SSM output projection run as one graph per rank instead of a linear, a
     // collective and an add, each a separate host round trip.
-    const bool tp_mode = tp_degree >= 1 && tp_plan_out != nullptr;
+    // Plan mode needs BOTH a place to put the plan and a group that actually
+        // spans ranks. The degree alone is not enough: one local rank per node is
+        // a legitimate distributed shape. Nor is the pointer alone - this entry is
+        // marshalled as `out IntPtr`, so C# hands it a non-null slot on EVERY call,
+        // including a plain single-GPU decode. Gating on the pointer by itself put
+        // that decode into plan mode: the graph was built, never executed, and the
+        // caller read an untouched logits buffer - fluent-looking <pad> spam at
+        // thousands of tokens/sec because no compute had happened at all.
+        const bool tp_mode = tp_plan_out != nullptr &&
+            (tp_degree > 1 || tsg::tp_global_degree(tp_degree) > 1);
     if (tp_mode)
     {
         *tp_plan_out = nullptr;
@@ -519,7 +528,16 @@ static int fused_ffn_swiglu_quant_f32_slab(
     // Tensor-parallel build mode: the down projection is row-parallel, so its
     // output is this rank's partial sum and the residual add has to wait for the
     // ranks to agree. Build the graph, mark that cut, hand it back.
-    const bool tp_mode = tp_degree >= 1 && tp_plan_out != nullptr;
+    // Plan mode needs BOTH a place to put the plan and a group that actually
+        // spans ranks. The degree alone is not enough: one local rank per node is
+        // a legitimate distributed shape. Nor is the pointer alone - this entry is
+        // marshalled as `out IntPtr`, so C# hands it a non-null slot on EVERY call,
+        // including a plain single-GPU decode. Gating on the pointer by itself put
+        // that decode into plan mode: the graph was built, never executed, and the
+        // caller read an untouched logits buffer - fluent-looking <pad> spam at
+        // thousands of tokens/sec because no compute had happened at all.
+        const bool tp_mode = tp_plan_out != nullptr &&
+            (tp_degree > 1 || tsg::tp_global_degree(tp_degree) > 1);
     if (tp_mode)
     {
         *tp_plan_out = nullptr;
@@ -854,7 +872,16 @@ int fused_ffn_swiglu_quant_f32_impl(
     int tp_degree,
     void** tp_plan_out)
 {
-    const bool tp_mode = tp_degree >= 1 && tp_plan_out != nullptr;
+    // Plan mode needs BOTH a place to put the plan and a group that actually
+        // spans ranks. The degree alone is not enough: one local rank per node is
+        // a legitimate distributed shape. Nor is the pointer alone - this entry is
+        // marshalled as `out IntPtr`, so C# hands it a non-null slot on EVERY call,
+        // including a plain single-GPU decode. Gating on the pointer by itself put
+        // that decode into plan mode: the graph was built, never executed, and the
+        // caller read an untouched logits buffer - fluent-looking <pad> spam at
+        // thousands of tokens/sec because no compute had happened at all.
+        const bool tp_mode = tp_plan_out != nullptr &&
+            (tp_degree > 1 || tsg::tp_global_degree(tp_degree) > 1);
     const int rows = input_desc.dim0;
     if (tp_mode || rows <= 1 || half_dim <= 0 || input_desc.dim1 <= 0)
     {
