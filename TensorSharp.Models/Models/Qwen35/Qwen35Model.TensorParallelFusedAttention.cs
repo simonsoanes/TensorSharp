@@ -80,7 +80,10 @@ namespace TensorSharp.Models
                     _tpAttnPlans[r] = planSlot[0];
                 }
 
-                GgmlBasicOps.TensorParallelExecutePlans(_tpAttnPlans);
+                if (TpCrossNodeReducer != null)
+                    GgmlBasicOps.TensorParallelExecutePlansDistributed(_tpAttnPlans, TpCrossNodeCallback);
+                else
+                    GgmlBasicOps.TensorParallelExecutePlans(_tpAttnPlans);
             }
             catch (Exception ex) when (ex is InvalidOperationException || ex is NotSupportedException || ex is ArgumentException)
             {
@@ -144,7 +147,10 @@ namespace TensorSharp.Models
                     _tpAttnPlans[r] = planSlot[0];
                 }
 
-                GgmlBasicOps.TensorParallelExecutePlans(_tpAttnPlans);
+                if (TpCrossNodeReducer != null)
+                    GgmlBasicOps.TensorParallelExecutePlansDistributed(_tpAttnPlans, TpCrossNodeCallback);
+                else
+                    GgmlBasicOps.TensorParallelExecutePlans(_tpAttnPlans);
             }
             catch (Exception ex) when (ex is InvalidOperationException || ex is NotSupportedException || ex is ArgumentException)
             {
@@ -235,10 +241,14 @@ namespace TensorSharp.Models
                 _tpFusedBlocksEnabled &&
                 IsGgmlBackend &&
                 IsTensorParallel &&
-                // One driving thread submits every rank, so this is a
-                // single-process facility; multi-node keeps the per-op path.
-                GlobalTpDegree == TpDegree &&
-                GgmlBasicOps.TensorParallelFusedAvailable(TpDegree);
+                // Across nodes the local ranks still reduce on-device; the
+                // cluster half of each boundary goes through the cross-node
+                // hook, exactly as the whole-model graph does. What it cannot
+                // do is span nodes with no reducer to call.
+                (GlobalTpDegree == TpDegree || TpCrossNodeReducer != null) &&
+                (TpCrossNodeReducer != null
+                    ? GgmlBasicOps.TensorParallelFusedAvailableDistributed(TpDegree)
+                    : GgmlBasicOps.TensorParallelFusedAvailable(TpDegree));
 
             if (_tpFusedAttnReady)
                 _tpAttnPlans = new IntPtr[TpDegree];
@@ -246,7 +256,7 @@ namespace TensorSharp.Models
                 TpAttnBail(
                     !_tpFusedBlocksEnabled ? "disabled via TS_QWEN35_TP_FUSED=0"
                     : !IsGgmlBackend ? $"backend {_backend} has no fused TP attention kernel"
-                    : GlobalTpDegree != TpDegree ? $"multi-node TP (global={GlobalTpDegree}, local={TpDegree})"
+                    : GlobalTpDegree != TpDegree ? $"multi-node TP (global={GlobalTpDegree}, local={TpDegree}) without a cross-node reducer"
                     : $"the native bridge reports no fused TP support for tp={TpDegree}");
             return _tpFusedAttnReady;
         }
@@ -349,7 +359,10 @@ namespace TensorSharp.Models
                     _tpAttnPlans[r] = planSlot[0];
                 }
 
-                GgmlBasicOps.TensorParallelExecutePlans(_tpAttnPlans);
+                if (TpCrossNodeReducer != null)
+                    GgmlBasicOps.TensorParallelExecutePlansDistributed(_tpAttnPlans, TpCrossNodeCallback);
+                else
+                    GgmlBasicOps.TensorParallelExecutePlans(_tpAttnPlans);
             }
             catch (InvalidOperationException)
             {

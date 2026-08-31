@@ -179,6 +179,21 @@ namespace TensorSharp.GGML
         }
 
         /// <summary>Number of ranks the native bridge currently has initialized.</summary>
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial void TSGgml_TensorParallelSetGlobalGeometry(int globalDegree, int rankOffset);
+
+        /// <summary>
+        /// Describe the whole tensor-parallel group to the kernels: its total
+        /// rank count and the global index of this process's rank 0. Expert
+        /// parallelism is sharded by the GLOBAL degree, so without this a
+        /// multi-node rank sizes its expert stack by the local degree and reads
+        /// past the bytes actually bound to it. No-op semantics for one node:
+        /// pass the local degree and offset 0.
+        /// </summary>
+        public static void TensorParallelSetGlobalGeometry(int globalDegree, int rankOffset)
+            => TSGgml_TensorParallelSetGlobalGeometry(globalDegree, rankOffset);
+
         public static int TensorParallelDegree()
         {
             try { return Math.Max(1, TSGgml_GetTensorParallelDegree()); }

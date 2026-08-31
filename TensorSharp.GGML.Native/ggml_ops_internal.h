@@ -271,6 +271,32 @@ namespace tsg
     // drive several GPUs concurrently without stepping on each other.
     extern thread_local int g_active_rank;
 
+    // Cluster-wide tensor-parallel geometry, for a run split across NODES.
+    // g_device_count is this process's share; these two describe the whole
+    // group. Both stay at their defaults for a single-node run, where the
+    // helpers below then reduce to the local values exactly.
+    //
+    // These exist because expert parallelism is sharded GLOBALLY: the managed
+    // side slices the expert stack by the cluster degree, so a kernel that
+    // derived its geometry from the LOCAL degree declared a tensor with more
+    // experts than the bytes bound to it and let the router address the
+    // difference - uninitialised VRAM, silently, on every multi-node MoE token.
+    extern std::atomic<int> g_tp_global_degree;   // 0 = single node
+    extern std::atomic<int> g_tp_rank_offset;     // this node's first global rank
+
+    // Cluster degree, falling back to the local one when nothing set it.
+    inline int tp_global_degree(int local_degree)
+    {
+        const int g = g_tp_global_degree.load(std::memory_order_relaxed);
+        return g > 0 ? g : local_degree;
+    }
+
+    // This thread's rank within the whole group.
+    inline int tp_global_rank()
+    {
+        return g_tp_rank_offset.load(std::memory_order_relaxed) + g_active_rank;
+    }
+
     inline DeviceState& dev() { return g_device_states[g_active_rank]; }
     inline DeviceState& dev(int rank) { return g_device_states[rank]; }
     inline ggml_backend_t& active_backend() { return g_device_states[g_active_rank].backend; }

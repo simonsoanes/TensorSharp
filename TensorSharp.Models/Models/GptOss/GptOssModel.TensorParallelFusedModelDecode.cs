@@ -31,11 +31,10 @@ namespace TensorSharp.Models
     /// (expert-parallel). That is 2 AllReduce per layer instead of ~30 host round
     /// trips.
     ///
-    /// Single node only for now. The native expert LUT derives this rank's expert
-    /// slice from the LOCAL device index, which only equals the global expert
-    /// offset when <see cref="ModelBase.TpRankOffset"/> is 0; a multi-node run
-    /// keeps the per-op chain until the descriptor carries an explicit first-expert
-    /// field.
+    /// Multi-node works the same way: the local ranks reduce on-device and the
+    /// cluster half of each boundary goes through the cross-node hook. The expert
+    /// slice is derived from the GLOBAL geometry the model publishes at load
+    /// (TensorParallelSetGlobalGeometry), not from the local device index.
     /// </summary>
     public partial class GptOssModel
     {
@@ -54,6 +53,38 @@ namespace TensorSharp.Models
         // One line per DISTINCT reason. A single process-wide latch used to print
         // the outermost refusal and hide the one that actually mattered.
         private readonly HashSet<string> _tpFdDeclineLogged = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>The cross-node half of a distributed AllReduce, or null on a
+        /// single-node run. Present exactly when the TP group spans nodes.</summary>
+        private INestedTensorParallelGroup TpCrossNodeReducer =>
+            GlobalTpDegree != TpDegree ? _tpGroup as INestedTensorParallelGroup : null;
+
+        private GgmlBasicOps.CrossNodeAllReduce _tpCrossNodeCallback;
+        private float[] _tpCrossNodeBuf = Array.Empty<float>();
+
+        /// <summary>Marshalled once and cached: the executor calls this at every
+        /// AllReduce boundary, so a per-call delegate allocation would land on
+        /// the hot path.</summary>
+        private GgmlBasicOps.CrossNodeAllReduce TpCrossNodeCallback =>
+            _tpCrossNodeCallback ??= (user, data, count) =>
+            {
+                try
+                {
+                    if (count <= 0)
+                        return true;
+                    if (_tpCrossNodeBuf.Length < count)
+                        _tpCrossNodeBuf = new float[count];
+                    System.Runtime.InteropServices.Marshal.Copy(data, _tpCrossNodeBuf, 0, count);
+                    TpCrossNodeReducer.CrossNodeAllReduce(_tpCrossNodeBuf, count);
+                    System.Runtime.InteropServices.Marshal.Copy(_tpCrossNodeBuf, 0, data, count);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[gptoss-tp] cross-node AllReduce failed: {ex.Message}");
+                    return false;
+                }
+            };
 
         private bool TpFdBail(string reason)
         {
@@ -81,8 +112,8 @@ namespace TensorSharp.Models
             if (!FusedModelDecodeEnabled) return TpFdBail("TS_GPTOSS_MODEL_DECODE=0");
             if (!IsGgmlBackend) return TpFdBail("not a GGML backend");
             if (!IsTensorParallel) return TpFdBail("tensor parallelism is not active");
-            if (GlobalTpDegree != TpDegree)
-                return TpFdBail($"multi-node TP (global={GlobalTpDegree}, local={TpDegree}) is not supported yet");
+            if (GlobalTpDegree != TpDegree && TpCrossNodeReducer == null)
+                return TpFdBail($"multi-node TP (global={GlobalTpDegree}, local={TpDegree}) without a cross-node reducer");
             if (!UsesExpertParallelMoE)
                 return TpFdBail("MoE is not expert-parallel (the fused graph needs whole-expert shards)");
             if (_layerStackedReady == 0) return TpFdBail("stacked expert weights are not ready");
@@ -96,7 +127,10 @@ namespace TensorSharp.Models
             if (!_quantWeights.ContainsKey("output.weight") && !_quantWeights.ContainsKey("token_embd.weight"))
                 return TpFdBail("no quantized LM head to fold");
             if (!_weights.ContainsKey("output_norm.weight")) return TpFdBail("no output_norm.weight");
-            if (!GgmlBasicOps.TensorParallelFusedAvailable(TpDegree))
+            bool executorReady = TpCrossNodeReducer != null
+                ? GgmlBasicOps.TensorParallelFusedAvailableDistributed(TpDegree)
+                : GgmlBasicOps.TensorParallelFusedAvailable(TpDegree);
+            if (!executorReady)
                 return TpFdBail("the native fused TP executor is unavailable");
 
             _tpFdReady = true;
@@ -331,7 +365,10 @@ namespace TensorSharp.Models
                     plans[r] = planSlot[0];
                 }
 
-                GgmlBasicOps.TensorParallelExecutePlans(plans);
+                if (TpCrossNodeReducer != null)
+                    GgmlBasicOps.TensorParallelExecutePlansDistributed(plans, TpCrossNodeCallback);
+                else
+                    GgmlBasicOps.TensorParallelExecutePlans(plans);
             }
             catch (InvalidOperationException ex)
             {
@@ -433,7 +470,10 @@ namespace TensorSharp.Models
                     _tpFdPlans[r] = planSlot[0];
                 }
 
-                GgmlBasicOps.TensorParallelExecutePlans(_tpFdPlans);
+                if (TpCrossNodeReducer != null)
+                    GgmlBasicOps.TensorParallelExecutePlansDistributed(_tpFdPlans, TpCrossNodeCallback);
+                else
+                    GgmlBasicOps.TensorParallelExecutePlans(_tpFdPlans);
             }
             catch (InvalidOperationException)
             {

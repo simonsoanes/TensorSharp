@@ -140,7 +140,7 @@ TSG_EXPORT int TSGgml_Gemma4ModelVerify(
         if (!ensure_backend())
             return 0;
 
-        const bool tp_mode = tp_degree > 1 && tp_plan_out != nullptr;
+        const bool tp_mode = tp_degree >= 1 && tp_plan_out != nullptr;
         if (tp_mode)
         {
             *tp_plan_out = nullptr;

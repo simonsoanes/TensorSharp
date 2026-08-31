@@ -624,7 +624,7 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecode(
             return 0;
         }
 
-        const bool tp_mode = tp_degree > 1 && tp_plan_out != nullptr;
+        const bool tp_mode = tp_degree >= 1 && tp_plan_out != nullptr;
         if (tp_mode)
             *tp_plan_out = nullptr;
         if (layers[0].struct_bytes != static_cast<std::int32_t>(sizeof(TSGgmlGemma4MoELayerDesc)))
@@ -1587,7 +1587,7 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelVerify(
             return 0;
         }
 
-        const bool tp_mode = tp_degree > 1 && tp_plan_out != nullptr;
+        const bool tp_mode = tp_degree >= 1 && tp_plan_out != nullptr;
         if (tp_mode)
         {
             *tp_plan_out = nullptr;

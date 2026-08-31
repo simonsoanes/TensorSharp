@@ -255,7 +255,7 @@ int fused_matmul_quant_add_f32_impl(
     // add closes the block. Cutting at the matmul is what lets an attention or
     // SSM output projection run as one graph per rank instead of a linear, a
     // collective and an add, each a separate host round trip.
-    const bool tp_mode = tp_degree > 1 && tp_plan_out != nullptr;
+    const bool tp_mode = tp_degree >= 1 && tp_plan_out != nullptr;
     if (tp_mode)
     {
         *tp_plan_out = nullptr;
@@ -519,7 +519,7 @@ static int fused_ffn_swiglu_quant_f32_slab(
     // Tensor-parallel build mode: the down projection is row-parallel, so its
     // output is this rank's partial sum and the residual add has to wait for the
     // ranks to agree. Build the graph, mark that cut, hand it back.
-    const bool tp_mode = tp_degree > 1 && tp_plan_out != nullptr;
+    const bool tp_mode = tp_degree >= 1 && tp_plan_out != nullptr;
     if (tp_mode)
     {
         *tp_plan_out = nullptr;
@@ -854,7 +854,7 @@ int fused_ffn_swiglu_quant_f32_impl(
     int tp_degree,
     void** tp_plan_out)
 {
-    const bool tp_mode = tp_degree > 1 && tp_plan_out != nullptr;
+    const bool tp_mode = tp_degree >= 1 && tp_plan_out != nullptr;
     const int rows = input_desc.dim0;
     if (tp_mode || rows <= 1 || half_dim <= 0 || input_desc.dim1 <= 0)
     {

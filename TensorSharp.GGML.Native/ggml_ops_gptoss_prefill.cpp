@@ -179,10 +179,12 @@ static int gptoss_model_prefill_impl(
             g_gptoss_prefill_tp[tp_rank].reset();
         }
         const int global_experts = layers[0].num_experts;
+        // Cluster degree - see ggml_ops_gptoss_decode.cpp.
+        const int tp_group_degree = tsg::tp_global_degree(tp_degree);
         const int stacked_experts = (tp_mode && global_experts > 0)
-            ? global_experts / tp_degree : global_experts;
+            ? global_experts / tp_group_degree : global_experts;
         if (tp_mode && global_experts > 0 &&
-            (global_experts % tp_degree != 0 || stacked_experts < layers[0].num_experts_used))
+            (global_experts % tp_group_degree != 0 || stacked_experts < layers[0].num_experts_used))
         {
             set_last_error("GPT-OSS model prefill: expert count is not shardable across the "
                            "tensor-parallel ranks.");
@@ -368,11 +370,11 @@ static int gptoss_model_prefill_impl(
         ggml_tensor* ep_mask = nullptr;
         std::vector<std::int32_t> ep_lut_data;
         std::vector<float> ep_mask_data;
-        if (tp_mode && global_experts > 0 && tp_degree > 1)
+        if (tp_mode && global_experts > 0 && tp_group_degree > 1)
         {
             ep_lut = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, 1, global_experts);
             ep_mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, global_experts);
-            const int first = tp_rank * stacked_experts;
+            const int first = tsg::tp_global_rank() * stacked_experts;
             const int last = first + stacked_experts;
             ep_lut_data.resize(static_cast<std::size_t>(global_experts));
             ep_mask_data.resize(static_cast<std::size_t>(global_experts));

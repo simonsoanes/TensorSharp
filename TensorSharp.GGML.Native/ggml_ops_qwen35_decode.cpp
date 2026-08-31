@@ -589,9 +589,13 @@ namespace
             *tp_plan_out = nullptr;
 
         const int tp_rank = tp_mode ? g_active_rank : 0;
-        const int stacked_experts = tp_mode && num_experts > 0 ? num_experts / tp_degree : num_experts;
+        // Sharded by the CLUSTER degree, matching how the managed side sliced
+        // the expert stack; deriving it from tp_degree left a multi-node rank
+        // declaring more experts than it had bytes for.
+        const int tp_group_degree = tsg::tp_global_degree(tp_degree);
+        const int stacked_experts = tp_mode && num_experts > 0 ? num_experts / tp_group_degree : num_experts;
         if (tp_mode && num_experts > 0 &&
-            (num_experts % tp_degree != 0 || stacked_experts < num_experts_used))
+            (num_experts % tp_group_degree != 0 || stacked_experts < num_experts_used))
         {
             set_last_error("Qwen3.5 model decode: expert count is not shardable across the tensor-parallel ranks.");
             return 0;
@@ -1130,7 +1134,7 @@ namespace
             {
                 ep_lut = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, 1, num_experts);
                 ep_mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, num_experts);
-                const int first = tp_rank * stacked_experts;
+                const int first = tsg::tp_global_rank() * stacked_experts;
                 const int last = first + stacked_experts;
                 ep_lut_data.resize(static_cast<std::size_t>(num_experts));
                 ep_mask_data.resize(static_cast<std::size_t>(num_experts));

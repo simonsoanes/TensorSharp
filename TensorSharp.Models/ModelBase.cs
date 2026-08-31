@@ -264,6 +264,20 @@ namespace TensorSharp.Models
             }
             Console.WriteLine($"Backend: {backend}");
 
+            // Tell the kernels about the whole cluster, not just this process.
+            // Expert parallelism is sharded by the GLOBAL degree, so a kernel
+            // that sized its expert stack from the local one declared more
+            // experts than it had bytes bound for and let the router address the
+            // difference. Harmless to set on a single node: it publishes the
+            // local degree and offset 0, which is what the kernels assume anyway.
+            if (_tpGroup != null &&
+                backend is BackendType.GgmlCuda or BackendType.GgmlVulkan
+                        or BackendType.GgmlCpu or BackendType.GgmlMetal)
+            {
+                GgmlBasicOps.TensorParallelSetGlobalGeometry(
+                    _tpGroup.GlobalDegree, _tpGroup.GlobalRankOffset);
+            }
+
             _gguf = new GgufFile(ggufPath);
         }
 

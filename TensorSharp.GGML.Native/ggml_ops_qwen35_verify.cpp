@@ -326,7 +326,9 @@ namespace
             g_q35v_tp[g_active_rank].reset();
         }
         const int tp_rank = tp_mode ? g_active_rank : 0;
-        const int stacked_experts = tp_mode && num_experts > 0 ? num_experts / tp_degree : num_experts;
+        // Cluster degree, not this process's - see ggml_ops_qwen35_decode.cpp.
+        const int tp_group_degree = tsg::tp_global_degree(tp_degree);
+        const int stacked_experts = tp_mode && num_experts > 0 ? num_experts / tp_group_degree : num_experts;
         if (tp_mode && num_experts > 0 &&
             (num_experts % tp_degree != 0 || stacked_experts < num_experts_used))
         {
@@ -816,7 +818,7 @@ namespace
                 ep_mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, num_experts);
                 ggml_set_input(ep_lut);
                 ggml_set_input(ep_mask);
-                const int ep_first = tp_rank * stacked_experts;
+                const int ep_first = tsg::tp_global_rank() * stacked_experts;
                 const int ep_last = ep_first + stacked_experts;
                 ep_lut_data.resize(static_cast<std::size_t>(num_experts));
                 ep_mask_data.resize(static_cast<std::size_t>(num_experts));

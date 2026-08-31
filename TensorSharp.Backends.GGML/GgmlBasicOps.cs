@@ -2317,6 +2317,12 @@ namespace TensorSharp.GGML
                 startPos, logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes,
                 finalNorm, tpDegree, tpPlanOut);
 
+        /// <summary>Publish the whole group's tensor-parallel geometry (total rank
+        /// count, this process's global rank offset) so the kernels shard experts
+        /// by the cluster rather than by the local device count.</summary>
+        public static void TensorParallelSetGlobalGeometry(int globalDegree, int rankOffset)
+            => GgmlNative.TensorParallelSetGlobalGeometry(globalDegree, rankOffset);
+
         /// <summary>Same graph in tensor-parallel plan mode: returns this rank's
         /// plan instead of executing, for TensorParallelExecutePlans to drive.</summary>
         public static bool TryGptOssModelDecodeTP(

@@ -56,6 +56,9 @@
 
 namespace tsg
 {
+    std::atomic<int> g_tp_global_degree{0};
+    std::atomic<int> g_tp_rank_offset{0};
+
     // --- Communicator ------------------------------------------------------
 
     namespace
@@ -1645,6 +1648,15 @@ TSG_EXPORT int TSGgml_SetActiveDevice(int rank)
 TSG_EXPORT int TSGgml_GetActiveDevice()
 {
     return tsg::g_active_rank;
+}
+
+// Describe the CLUSTER to the kernels: how many ranks the group has in total
+// and which global rank this process's rank 0 is. Set once, before any graph is
+// built; a single-node run never calls it and the kernels use the local degree.
+TSG_EXPORT void TSGgml_TensorParallelSetGlobalGeometry(int globalDegree, int rankOffset)
+{
+    tsg::g_tp_global_degree.store(globalDegree > 0 ? globalDegree : 0, std::memory_order_relaxed);
+    tsg::g_tp_rank_offset.store(rankOffset > 0 ? rankOffset : 0, std::memory_order_relaxed);
 }
 
 TSG_EXPORT int TSGgml_GetTensorParallelDegree()
