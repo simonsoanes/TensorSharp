@@ -413,7 +413,7 @@ namespace
                                      static_cast<std::size_t>(num_heads) * sizeof(float));
         }
 
-        ggml_status st = ggml_backend_graph_compute(g_backend, sess->graph);
+        ggml_status st = tsg::compute_graph(g_backend, sess->graph);
         if (st != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml graph compute failed for paged attention.");
@@ -748,7 +748,7 @@ namespace
                                      static_cast<std::size_t>(num_heads) * sizeof(float));
         }
 
-        ggml_status st = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status st = tsg::compute_graph(g_backend, graph);
         if (st != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml graph compute failed for paged attention (device).");

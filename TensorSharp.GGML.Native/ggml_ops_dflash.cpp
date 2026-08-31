@@ -419,7 +419,7 @@ TSG_EXPORT int TSGgml_DFlashInject(
         ggml_backend_tensor_set(pos_t, positions, 0, static_cast<std::size_t>(n_rows) * sizeof(std::int32_t));
         ggml_backend_tensor_set(idx_t, ring_rows_idx, 0, static_cast<std::size_t>(n_rows) * sizeof(std::int64_t));
 
-        if (ggml_backend_graph_compute(g_backend, graph) != GGML_STATUS_SUCCESS)
+        if (tsg::compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
         {
             set_last_error("DFlash inject: graph execution failed.");
             if (can_persist) { ggml_backend_buffer_free(persist_buf); ggml_free(ctx); }
@@ -567,7 +567,7 @@ TSG_EXPORT int TSGgml_DFlashDraftBlock(
             // drains - otherwise the executor verifies stale drafts (correct
             // output, silently collapsed acceptance).
             if (g_backend_type == BACKEND_TYPE_METAL)
-                ggml_backend_synchronize(g_backend);
+                tsg::sync_backend(g_backend);
             if (use_selector)
             {
                 ggml_backend_tensor_get(dc->out_cand, sel_cand_out, 0,
@@ -974,7 +974,7 @@ TSG_EXPORT int TSGgml_DFlashDraftBlock(
                 static_cast<std::size_t>(b) * sizeof(float));
         }
 
-        if (ggml_backend_graph_compute(g_backend, graph) != GGML_STATUS_SUCCESS)
+        if (tsg::compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
         {
             set_last_error("DFlash draft: graph execution failed.");
             if (can_persist) { ggml_backend_buffer_free(persist_buf); ggml_free(ctx); }
@@ -982,7 +982,7 @@ TSG_EXPORT int TSGgml_DFlashDraftBlock(
         }
         // See the replay path above: Metal must drain before reading the ids.
         if (g_backend_type == BACKEND_TYPE_METAL)
-            ggml_backend_synchronize(g_backend);
+            tsg::sync_backend(g_backend);
         if (use_selector)
         {
             ggml_backend_tensor_get(sel_cand, sel_cand_out, 0,

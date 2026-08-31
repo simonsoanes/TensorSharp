@@ -1101,8 +1101,19 @@ namespace TensorSharp.Models
             // so there is nothing to pre-reserve here.
             if (_kvCacheK == null || _kvCacheV == null)
                 return;
+            // The request declares prompt + its whole generation budget, which on a
+            // server started with a large --max-tokens is the entire context window:
+            // 260,864 tokens here is 16 GiB of K/V on top of the weights. Reserve
+            // only what the device can actually hold — EnsureCacheCapacity still
+            // grows the cache on demand if the generation really runs that long.
+            requiredContextTokens = ResolvePrefillReservationLength(
+                requiredContextTokens, _kvCacheCapacity, granularity: CacheCapacityAlignment);
             EnsureCacheCapacity(requiredContextTokens, geometricGrowth: false);
         }
+
+        /// <summary>Native Qwen decode windows are 256-token aligned, so every
+        /// non-geometric cache reservation snaps to that boundary.</summary>
+        private const int CacheCapacityAlignment = 256;
 
         private void EnsureCacheCapacity(int requiredSeqLen, bool geometricGrowth = true)
         {
@@ -1134,7 +1145,7 @@ namespace TensorSharp.Models
                 // Native Qwen decode windows are 256-token aligned. Reserve
                 // exactly the request budget rounded to that boundary rather
                 // than doubling a multi-gigabyte cache.
-                const int alignment = 256;
+                const int alignment = CacheCapacityAlignment;
                 long rounded = ((long)requiredSeqLen + alignment - 1) / alignment * alignment;
                 newCapacity = (int)Math.Min(_maxContextLength, rounded);
             }

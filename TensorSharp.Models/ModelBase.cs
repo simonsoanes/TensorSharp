@@ -487,6 +487,73 @@ namespace TensorSharp.Models
         /// </summary>
         protected virtual long KvCacheBytesPerToken => 0;
 
+        /// <summary>Last reservation this model actually trimmed to, so a clamp is
+        /// reported when it changes rather than once per request.</summary>
+        private int _loggedReservationClamp;
+
+        /// <summary>
+        /// Cap a <see cref="PrepareForPrefill"/> reservation against the device
+        /// memory that is actually free right now.
+        ///
+        /// The reservation is only a hint — the KV cache still grows on demand — so
+        /// trimming it costs at most one later grow. Honouring it blind, on the
+        /// other hand, sizes a multi-gigabyte buffer from the request's declared
+        /// GENERATION budget rather than from anything the machine has:
+        /// <c>BatchExecutor.BuildPrefillChunk</c> passes prompt + MaxNewTokens, so a
+        /// server started with a large --max-tokens reserves the whole window on the
+        /// very first request. On Metal that is fatal rather than merely slow (see
+        /// <see cref="GpuMemoryBudget.AppliesToReservations"/>).
+        ///
+        /// Only ever trims: returns <paramref name="requiredContextTokens"/>
+        /// unchanged when the backend has no queryable budget, the model reports no
+        /// per-token KV cost, or the reservation already fits.
+        /// </summary>
+        protected int ResolvePrefillReservationLength(
+            int requiredContextTokens, int currentCapacityTokens, int granularity = 256)
+        {
+            long bytesPerToken = KvCacheBytesPerToken;
+            if (bytesPerToken <= 0 || requiredContextTokens <= currentCapacityTokens)
+                return requiredContextTokens;
+            if (!GpuMemoryBudget.TryGetReservationSpareBytes(_backend, out long spare))
+                return requiredContextTokens;
+
+            int fitted = ResolvePrefillReservationLength(
+                spare, bytesPerToken, requiredContextTokens, currentCapacityTokens, granularity);
+            if (fitted >= requiredContextTokens)
+                return requiredContextTokens;
+
+            if (_loggedReservationClamp != fitted)
+            {
+                _loggedReservationClamp = fitted;
+                Console.WriteLine(
+                    $"[KV cache] Reserving {fitted} of the {requiredContextTokens} tokens this request " +
+                    $"declared: {GibiBytes((long)requiredContextTokens * bytesPerToken)} of KV does not fit " +
+                    $"the {GibiBytes(spare)} the {_backend} device has spare. The cache still grows on demand.");
+            }
+            return fitted;
+        }
+
+        /// <summary>The arithmetic of <see cref="ResolvePrefillReservationLength(int, int, int)"/>,
+        /// separated from the device query so it can be exercised directly.</summary>
+        internal static int ResolvePrefillReservationLength(
+            long spareBytes,
+            long kvBytesPerToken,
+            int requiredContextTokens,
+            int currentCapacityTokens,
+            int granularity = 256)
+        {
+            if (kvBytesPerToken <= 0 || requiredContextTokens <= currentCapacityTokens)
+                return requiredContextTokens;
+            // Half the spare, the same split ResolveInitialCacheAllocationLength
+            // uses: the other half has to cover the prefill and decode graph
+            // scratch, which is sized separately and is live at the same time.
+            return GpuMemoryBudget.FitTokens(
+                spareBytes / 2, kvBytesPerToken, requiredContextTokens,
+                minTokens: Math.Max(currentCapacityTokens, 1), granularity: granularity);
+        }
+
+        private static string GibiBytes(long bytes) => $"{bytes / 1024.0 / 1024.0 / 1024.0:F1} GiB";
+
         internal static int ResolveInitialCacheAllocationLength(
             BackendType backend,
             int requestedContextLength,
@@ -1810,7 +1877,35 @@ namespace TensorSharp.Models
         public float[] Forward(int[] tokens)
         {
             if (_distributedDriver) _tpGroup.BroadcastControl(TpControlForward, tokens);
-            return DumpLogitsIfRequested(ForwardCore(tokens));
+            float[] logits = ForwardCore(tokens);
+            ThrowIfBackendFailed();
+            return DumpLogitsIfRequested(logits);
+        }
+
+        /// <summary>
+        /// Stop as soon as the GPU backend has died, rather than at whichever op
+        /// happens to fail next.
+        ///
+        /// A command buffer that fails on the GPU (Metal reports
+        /// kIOGPUCommandBufferCallbackErrorOutOfMemory) is discovered inside
+        /// ggml_backend_synchronize, which returns void: the op that drained it
+        /// returns SUCCESS over undefined results, and only a LATER graph fails —
+        /// so the exception used to name an innocent bystander (an embedding
+        /// get_rows, typically, since that is the first op of the next forward) and
+        /// every forward in between produced quietly wrong logits.
+        ///
+        /// One P/Invoke reading one atomic per forward, and only on the GGML
+        /// backends — nothing measurable next to the forward itself.
+        /// </summary>
+        private void ThrowIfBackendFailed()
+        {
+            if (!IsGgmlBackend || !GgmlBasicOps.HasBackendFailure())
+                return;
+            string detail = GgmlBasicOps.BackendFailureText();
+            throw new InvalidOperationException(
+                $"The GGML {_backend} backend failed during GPU execution and cannot recover in this " +
+                "process — the results of this and any preceding forward are undefined. Restart the host. " +
+                (string.IsNullOrWhiteSpace(detail) ? string.Empty : $"ggml reported: {detail}"));
         }
 
         /// <summary>
@@ -1843,7 +1938,9 @@ namespace TensorSharp.Models
         public float[] ForwardRefill(int[] tokens)
         {
             if (_distributedDriver) _tpGroup.BroadcastControl(TpControlForwardRefill, tokens);
-            return ForwardRefillCore(tokens);
+            float[] logits = ForwardRefillCore(tokens);
+            ThrowIfBackendFailed();
+            return logits;
         }
 
         public void ResetKVCache()

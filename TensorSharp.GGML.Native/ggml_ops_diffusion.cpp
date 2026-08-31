@@ -567,7 +567,7 @@ TSG_EXPORT int TSGgml_DiffusionDecodeLayer(const TSGgmlDiffusionDecodeLayerDesc*
         }
         else
         {
-            status = ggml_backend_graph_compute(g_backend, graph);
+            status = tsg::compute_graph(g_backend, graph);
         }
         if (status != GGML_STATUS_SUCCESS)
         {
@@ -975,7 +975,7 @@ TSG_EXPORT int TSGgml_DiffusionModelDecode(
         }
         else
         {
-            status = ggml_backend_graph_compute(g_backend, graph);
+            status = tsg::compute_graph(g_backend, graph);
         }
         if (status != GGML_STATUS_SUCCESS)
         {
@@ -1085,7 +1085,7 @@ TSG_EXPORT int TSGgml_DiffusionLmHead(
         for (auto& u : upload_list) ggml_backend_tensor_set(u.tensor, resolve_upload_source(u.data), 0, u.bytes);
         ggml_backend_tensor_set(hidden_t, hidden_data, 0, (std::size_t)H * C * sizeof(float));
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS) { ggml_gallocr_free(galloc); set_last_error("Diffusion lm_head: graph execution failed."); return 0; }
 
         finalize_compute_with_download(logits, logits_out, (std::size_t)vocab * C * sizeof(float));
@@ -1206,13 +1206,13 @@ TSG_EXPORT int TSGgml_DiffusionLmHeadSample(
         for (auto& u : upload_list) ggml_backend_tensor_set(u.tensor, resolve_upload_source(u.data), 0, u.bytes);
         ggml_backend_tensor_set(hidden_t, hidden_data, 0, (std::size_t)H * C * sizeof(float));
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS) { ggml_gallocr_free(galloc); set_last_error("Diffusion lm_head sample: graph execution failed."); return 0; }
 
         // The compute is synchronized (ggml_backend_graph_compute syncs the CUDA backend), so the logits
         // device buffer is ready. Sample on-device directly on logits->data, downloading only the small
         // per-row outputs. The gallocr buffer must outlive the kernel, so free it AFTER sampling.
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         bool ok = tsg_cuda_diffusion_sample(
             logits->data, vocab, C, inv_temp, final_logit_softcap,
             u_host, top_k, argmax_out, entropy_out, sampled_out, top_tokens_out, top_probs_out);

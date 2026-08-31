@@ -642,9 +642,9 @@ bool wan_t5_build_and_run(const TSGgmlWanT5Desc* d)
     if (mask != nullptr)
         ggml_backend_tensor_set(mask, d->attn_mask, 0, static_cast<std::size_t>(n) * sizeof(float));
 
-    if (ggml_backend_graph_compute(g_backend, graph) != GGML_STATUS_SUCCESS)
+    if (tsg::compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
     { set_last_error("WanT5Encode: graph compute failed."); return false; }
-    ggml_backend_synchronize(g_backend);
+    tsg::sync_backend(g_backend);
     ggml_backend_tensor_get(outT, d->out, 0, static_cast<std::size_t>(dim) * n * sizeof(float));
     return true;
 }
@@ -1018,9 +1018,9 @@ int wan_dit_run_persist(WanDitPersist* e, const TSGgmlWanDitDesc* d)
             if (u.t->buffer == gb) ggml_backend_tensor_set(u.t, u.d, 0, u.b);
     }
     wan_dit_upload_inputs(g, d);
-    if (ggml_backend_graph_compute(g_backend, g.graph) != GGML_STATUS_SUCCESS)
+    if (tsg::compute_graph(g_backend, g.graph) != GGML_STATUS_SUCCESS)
     { set_last_error("WanDitForward: graph compute failed."); return 0; }
-    ggml_backend_synchronize(g_backend);
+    tsg::sync_backend(g_backend);
     ggml_backend_tensor_get(g.outT, d->out, 0, static_cast<std::size_t>(d->head.ne1) * d->seq * sizeof(float));
     clear_last_error();
     return 1;
@@ -1948,10 +1948,10 @@ bool wan_vae_encode(const TSGgmlWanVaeEncodeDesc* d)
     // un-lowered CONV_2D nodes and needs the same segmented runner.
     const ggml_status encSt = tsg::fast_conv_enabled()
         ? tsg::graph_compute_fast_conv(graph, "wan vae")
-        : ggml_backend_graph_compute(g_backend, graph);
+        : tsg::compute_graph(g_backend, graph);
     if (encSt != GGML_STATUS_SUCCESS)
     { set_last_error("WanVaeEncode: graph compute failed."); return false; }
-    ggml_backend_synchronize(g_backend);
+    tsg::sync_backend(g_backend);
     ggml_backend_tensor_get(outT, d->out, 0, static_cast<std::size_t>(d->out_len) * sizeof(float));
     return true;
 }
@@ -2136,10 +2136,10 @@ bool wan_vae_decode(const TSGgmlWanVaeDecodeDesc* d)
             ggml_cgraph* sub = ggml_new_graph_custom(sctx, static_cast<std::size_t>(K) + 8, false);
             for (int i = a; i < e; i++)
                 ggml_graph_add_node(sub, ggml_graph_node(graph, i));
-            const ggml_status st = ggml_backend_graph_compute(g_backend, sub);
+            const ggml_status st = tsg::compute_graph(g_backend, sub);
             if (st != GGML_STATUS_SUCCESS)
             { ggml_free(sctx); set_last_error("WanVaeDecode: sliced graph compute failed."); return false; }
-            if (doSync) ggml_backend_synchronize(g_backend);
+            if (doSync) tsg::sync_backend(g_backend);
 
             // TS_WAN_VAE_SLICE_SCAN=<path>: immediately after each synced slice,
             // scan the slice's own outputs (nothing later has run, so only
@@ -2208,7 +2208,7 @@ bool wan_vae_decode(const TSGgmlWanVaeDecodeDesc* d)
     }
     else if (tsg::graph_compute_profiled(g_backend, graph, "wan vae decode") != GGML_STATUS_SUCCESS)
     { set_last_error("WanVaeDecode: graph compute failed."); return false; }
-    ggml_backend_synchronize(g_backend);
+    tsg::sync_backend(g_backend);
     wan_vae_trace_nan(graph);
     ggml_backend_tensor_get(outT, d->out, 0, static_cast<std::size_t>(d->out_len) * sizeof(float));
     return true;
@@ -2307,9 +2307,9 @@ TSG_EXPORT int TSGgml_WanDitForward(const TSGgmlWanDitDesc* d)
             if (u.t->buffer != nullptr) ggml_backend_tensor_set(u.t, u.d, 0, u.b);
         wan_dit_upload_inputs(g, d);
 
-        if (ggml_backend_graph_compute(g_backend, g.graph) != GGML_STATUS_SUCCESS)
+        if (tsg::compute_graph(g_backend, g.graph) != GGML_STATUS_SUCCESS)
         { set_last_error("WanDitForward: graph compute failed."); return 0; }
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         wan_dit_trace_taps(g);
         ggml_backend_tensor_get(g.outT, d->out, 0, static_cast<std::size_t>(d->head.ne1) * d->seq * sizeof(float));
         clear_last_error();

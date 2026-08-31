@@ -196,7 +196,7 @@ int fused_rms_norm_matmul_quant_f32_impl(
     if (!m2_bound || m2_needs_upload)
         upload_binding(m2_binding, m2_quant.data, m2_binding.raw_bytes);
 
-    ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+    ggml_status status = tsg::compute_graph(g_backend, graph);
     if (status != GGML_STATUS_SUCCESS)
     {
         set_last_error("Graph execution failed for fused rms_norm_matmul.");
@@ -422,7 +422,7 @@ int fused_matmul_quant_add_f32_impl(
         return 1;
     }
 
-    ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+    ggml_status status = tsg::compute_graph(g_backend, graph);
     if (status != GGML_STATUS_SUCCESS)
     {
         set_last_error("Graph execution failed for fused matmul_add.");
@@ -823,7 +823,7 @@ static int fused_ffn_swiglu_quant_f32_slab(
         return 1;
     }
 
-    ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+    ggml_status status = tsg::compute_graph(g_backend, graph);
     if (status != GGML_STATUS_SUCCESS)
     {
         set_last_error("fused_ffn_swiglu: graph execution failed.");
@@ -1181,7 +1181,7 @@ int fused_ffn_act_project_quant_f32_impl(
         upload_binding(tmp, norm_weight_data, norm_bytes);
     }
 
-    ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+    ggml_status status = tsg::compute_graph(g_backend, graph);
     if (status != GGML_STATUS_SUCCESS)
     {
         set_last_error("fused_ffn_act: graph execution failed.");
@@ -1532,7 +1532,7 @@ int fused_vision_mlp_f32_impl(
     upload_if_needed(down_w_t, down_w_data, down_bytes,                 down_w_bound, down_w_upload);
     upload_if_needed(down_b_t, down_b_data, down_b_dim * sizeof(float), down_b_bound, down_b_upload);
 
-    ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+    ggml_status status = tsg::compute_graph(g_backend, graph);
     if (status != GGML_STATUS_SUCCESS)
     {
         set_last_error("fused_vision_mlp: graph compute failed.");
@@ -1666,7 +1666,7 @@ int fused_vision_attention_f32_impl(
     ggml_backend_tensor_set(cos_t, cos_table, 0, cos_sin_elems * sizeof(float));
     ggml_backend_tensor_set(sin_t, sin_table, 0, cos_sin_elems * sizeof(float));
 
-    ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+    ggml_status status = tsg::compute_graph(g_backend, graph);
     if (status != GGML_STATUS_SUCCESS) { set_last_error("fused_vision_attn: compute failed."); return 0; }
     finalize_compute(use_zero_copy, hidden_binding.storage, hidden_desc.data, hidden_binding.raw_bytes);
 
@@ -1894,7 +1894,7 @@ int fused_gemma4_vision_block_f32_impl(
     for (auto& u : ups)
         ggml_backend_tensor_set(u.t, u.data, 0, u.bytes);
 
-    ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+    ggml_status status = tsg::compute_graph(g_backend, graph);
     if (status != GGML_STATUS_SUCCESS) { set_last_error("fused_gemma4_vision_block: compute failed."); return 0; }
     finalize_compute(use_zero_copy, hidden_binding.storage, hidden_desc.data, hidden_binding.raw_bytes);
     // Drain the queued async download before the per-call fallback buffer frees
@@ -2081,7 +2081,7 @@ int fused_outproj_ffn_quant_f32_impl(
     if (!dn_bound || dn_upl) upload_binding(dn_w_bind, down_quant.data, dn_w_bind.raw_bytes);
     if (!norm_bound || norm_upl) { TensorBinding tmp = { norm_w, norm_w, norm_bytes }; upload_binding(tmp, ffn_norm_weight_data, norm_bytes); }
 
-    ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+    ggml_status status = tsg::compute_graph(g_backend, graph);
     if (status != GGML_STATUS_SUCCESS) { set_last_error("fused_outproj_ffn: compute failed."); return 0; }
     finalize_compute(use_zero_copy, residual_binding.storage, residual_desc.data, residual_binding.raw_bytes);
     if (buffer.value != nullptr) host_read_barrier();
@@ -2232,11 +2232,11 @@ int fused_outproj_norm_router_quant_f32_impl(
     if (!norm_b || norm_u) { TensorBinding tmp = { norm_w, norm_w, (std::size_t)norm_count * sizeof(float) };
         upload_binding(tmp, norm_weight_data, tmp.raw_bytes); }
 
-    ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+    ggml_status status = tsg::compute_graph(g_backend, graph);
     if (status != GGML_STATUS_SUCCESS) { set_last_error("fused_outproj_norm_router: compute failed."); return 0; }
     // Multi-tensor download path. Drain any prior async work, then sync+download.
     host_read_barrier();
-    ggml_backend_synchronize(g_backend);
+    tsg::sync_backend(g_backend);
 
     if (!use_zero_copy) {
         ggml_backend_tensor_get(residual_binding.storage, residual_desc.data, 0, residual_binding.raw_bytes);
@@ -2576,7 +2576,7 @@ int fused_rms_norm_residual_add_f32_impl(
         upload_binding(tmp, norm_weight_data, norm_bytes);
     }
 
-    ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+    ggml_status status = tsg::compute_graph(g_backend, graph);
     if (status != GGML_STATUS_SUCCESS)
     {
         set_last_error("fused_rms_norm_add: graph execution failed.");
@@ -2813,7 +2813,7 @@ int fused_ple_block_quant_f32_impl(
         upload_binding(tmp, post_norm_data, norm_bytes);
     }
 
-    ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+    ggml_status status = tsg::compute_graph(g_backend, graph);
     if (status != GGML_STATUS_SUCCESS)
     {
         set_last_error("fused_ple: graph execution failed.");
@@ -3072,7 +3072,7 @@ static int fused_qwen35_vision_encoder_f32_impl(
     ggml_backend_tensor_set(cos_t, cos_table, 0, cos_sin_elems * sizeof(float));
     ggml_backend_tensor_set(sin_t, sin_table, 0, cos_sin_elems * sizeof(float));
 
-    ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+    ggml_status status = tsg::compute_graph(g_backend, graph);
     if (status != GGML_STATUS_SUCCESS) { ggml_gallocr_free(galloc); set_last_error("vision_encoder: graph compute failed."); return 0; }
     finalize_compute(use_zero_copy, hidden_binding.storage, hidden_desc.data, hidden_binding.raw_bytes);
 
@@ -3331,7 +3331,7 @@ static int fused_glm_vision_encoder_f32_impl(
     ggml_backend_tensor_set(cos_t, cos_table, 0, cos_sin_elems * sizeof(float));
     ggml_backend_tensor_set(sin_t, sin_table, 0, cos_sin_elems * sizeof(float));
 
-    ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+    ggml_status status = tsg::compute_graph(g_backend, graph);
     if (status != GGML_STATUS_SUCCESS) { ggml_gallocr_free(galloc); set_last_error("glm_vision_encoder: graph compute failed."); return 0; }
     finalize_compute(use_zero_copy, hidden_binding.storage, hidden_desc.data, hidden_binding.raw_bytes);
 
@@ -3630,7 +3630,7 @@ TSG_EXPORT int TSGgml_MoEExpertsForwardF32(
                 ggml_backend_tensor_set(dn_w[e].t, down_data_ptrs[e], 0, dn_w[e].bytes);
         }
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("MoE: graph compute failed");
@@ -3815,7 +3815,7 @@ TSG_EXPORT int TSGgml_MoEExpertsSwiGLUForwardF32(
                 ggml_backend_tensor_set(dn_w[e].t, down_data_ptrs[e], 0, dn_w[e].bytes);
         }
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("MoE SwiGLU: graph compute failed");
@@ -4057,7 +4057,7 @@ TSG_EXPORT int TSGgml_MoEExpertsSwiGLUResidualF32(
                 ggml_backend_tensor_set(sh_d.t, shared_down_data, 0, sh_d.bytes);
         }
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("MoE SwiGLU residual: graph compute failed");

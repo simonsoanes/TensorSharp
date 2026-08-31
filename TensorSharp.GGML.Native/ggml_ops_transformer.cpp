@@ -228,7 +228,7 @@ namespace
         ggml_backend_tensor_set(k_in, k_data, 0, static_cast<std::size_t>(kv_dim) * sizeof(float));
         ggml_backend_tensor_set(v_in, v_data, 0, static_cast<std::size_t>(kv_dim) * sizeof(float));
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed for flash attention decode.");
@@ -490,7 +490,7 @@ namespace
         ggml_backend_tensor_set(pos_tensor, &pos_val, 0, sizeof(std::int32_t));
 
         // Execute
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed for transformer layer decode.");
@@ -948,7 +948,7 @@ TSG_EXPORT int TSGgml_TransformerModelDecode(
         ggml_backend_tensor_set(pos_tensor, &pos_val, 0, sizeof(std::int32_t));
 
         // Execute single graph
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed for model decode.");

@@ -1507,6 +1507,11 @@ namespace TensorSharp.GGML
         public static void InvalidateHostBuffer(IntPtr ptr) => GgmlNative.InvalidateHostBuffer(ptr);
         public static long DeviceCopyCacheResidentBytes() => GgmlNative.DeviceCopyCacheResidentBytes();
         public static bool TryGetBackendMemory(out long freeBytes, out long totalBytes) => GgmlNative.TryGetBackendMemory(out freeBytes, out totalBytes);
+        /// <summary>True once a GPU command buffer has failed in this process; see
+        /// <see cref="GgmlNative.HasBackendFailure"/>. Sticky and unrecoverable in-process.</summary>
+        public static bool HasBackendFailure() => GgmlNative.HasBackendFailure();
+        /// <summary>What ggml logged about that failure, or an empty string.</summary>
+        public static string BackendFailureText() => GgmlNative.BackendFailureText();
         /// <summary>True if the active GGML backend device is an integrated GPU (unified-memory iGPU).</summary>
         public static bool IsActiveDeviceIntegrated() => GgmlNative.IsActiveDeviceIntegrated();
         public static void SyncHostBuffer(IntPtr ptr, long byteCount) => GgmlNative.SyncHostBuffer(ptr, byteCount);

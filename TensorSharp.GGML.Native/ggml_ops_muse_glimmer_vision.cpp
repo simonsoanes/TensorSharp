@@ -428,7 +428,7 @@ namespace
         for (const Upload& upload : uploads)
             ggml_backend_tensor_set(upload.tensor, resolve_upload_source(upload.data), 0, upload.bytes);
 
-        const ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        const ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             ggml_gallocr_free(galloc);

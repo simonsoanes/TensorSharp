@@ -275,7 +275,7 @@ namespace {
                 upload_binding(m2_binding, packed_m2.data(), m2_binding.raw_bytes);
         }
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed.");
@@ -521,7 +521,7 @@ namespace {
             upload_binding(m2_binding, m2_quant.data, m2_binding.raw_bytes);
         }
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed for addmm_quant.");
@@ -671,7 +671,7 @@ namespace {
             return 0;
         ggml_backend_tensor_set(index_tensor, indices.data(), 0, indices.size() * sizeof(std::int32_t));
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed for get_rows_quant.");
@@ -957,7 +957,7 @@ namespace {
                 upload_binding(m2_binding, packed_m2.data(), m2_binding.raw_bytes);
         }
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed.");
@@ -1120,7 +1120,7 @@ namespace {
         }
         ggml_backend_tensor_set(ids_tensor, ids.data(), 0, ids.size() * sizeof(std::int32_t));
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed.");
@@ -1277,7 +1277,7 @@ namespace {
         }
         ggml_backend_tensor_set(ids_tensor, ids.data(), 0, ids.size() * sizeof(std::int32_t));
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed.");

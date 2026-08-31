@@ -439,13 +439,13 @@ TSG_EXPORT int TSGgml_Qwen35GdnLayerTP(
             ggml_backend_tensor_set(entry->a_log_t,     a_log_data,       0, ggml_nbytes(entry->a_log_t));
             ggml_backend_tensor_set(entry->ssm_norm_t,  ssm_norm_w_data,  0, ggml_nbytes(entry->ssm_norm_t));
 
-            ggml_status status = ggml_backend_graph_compute(g_backend, entry->graph);
+            ggml_status status = tsg::compute_graph(g_backend, entry->graph);
             if (status != GGML_STATUS_SUCCESS)
             {
                 set_last_error("Qwen35GdnLayerTP: graph compute failed.");
                 return 0;
             }
-            ggml_backend_synchronize(g_backend);
+            tsg::sync_backend(g_backend);
             ggml_backend_tensor_get(entry->gated_out_t, gated_out_data, 0, ggml_nbytes(entry->gated_out_t));
         }
 

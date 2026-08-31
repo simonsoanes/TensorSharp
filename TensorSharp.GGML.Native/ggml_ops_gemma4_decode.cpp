@@ -1078,7 +1078,7 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecode(
         {
             // Execute single graph
             g4_debug_check_buffers(graph, can_persist ? "build-persist" : "build-transient");
-            ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+            ggml_status status = tsg::compute_graph(g_backend, graph);
             if (status != GGML_STATUS_SUCCESS)
             {
                 set_last_error("ggml backend graph execution failed for Gemma4 model decode.");

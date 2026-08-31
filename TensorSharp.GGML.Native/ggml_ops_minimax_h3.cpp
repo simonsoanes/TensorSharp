@@ -438,9 +438,9 @@ TSG_EXPORT int TSGgml_MiniMaxH3VideoVaeDecode(const TSGgmlMiniMaxH3VideoVaeDecod
         ggml_backend_tensor_set(cosf, d->cosf, 0, static_cast<std::size_t>(rot) * seq * f);
         ggml_backend_tensor_set(sinf, d->sinf, 0, static_cast<std::size_t>(rot) * seq * f);
 
-        if (ggml_backend_graph_compute(g_backend, graph) != GGML_STATUS_SUCCESS)
+        if (tsg::compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
         { set_last_error("MiniMaxH3VideoVaeDecode: graph compute failed."); return 0; }
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(outT, d->out, 0, static_cast<std::size_t>(pdim) * ntok * f);
         clear_last_error();
         return 1;
@@ -691,9 +691,9 @@ TSG_EXPORT int TSGgml_MiniMaxH3TextEncode(const TSGgmlMiniMaxH3TextEncodeDesc* d
         if (causalMask)
             ggml_backend_tensor_set(causalMask, causalMaskData.data(), 0, causalMaskData.size() * f);
 
-        if (ggml_backend_graph_compute(g_backend, graph) != GGML_STATUS_SUCCESS)
+        if (tsg::compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
         { set_last_error("MiniMaxH3TextEncode: graph compute failed."); return 0; }
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(outT, d->out, 0, static_cast<std::size_t>(hidden) * seq * f);
         clear_last_error();
         return 1;
@@ -1246,9 +1246,9 @@ TSG_EXPORT int TSGgml_MiniMaxH3DitForward(const TSGgmlMiniMaxH3DitForwardDesc* d
         ggml_backend_tensor_set(sinf, d->sinf, 0, ggml_nbytes(sinf));
         if (tin) ggml_backend_tensor_set(tin, d->text_hidden, 0, ggml_nbytes(tin));
 
-        if (ggml_backend_graph_compute(g_backend, graph) != GGML_STATUS_SUCCESS)
+        if (tsg::compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
         { set_last_error("MiniMaxH3DitForward: graph compute failed."); return 0; }
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(voutT, d->video_out, 0, ggml_nbytes(voutT));
         ggml_backend_tensor_get(aoutT, d->audio_out, 0, ggml_nbytes(aoutT));
         clear_last_error();
@@ -1511,9 +1511,9 @@ TSG_EXPORT int TSGgml_MiniMaxH3VideoVaeEncode(const TSGgmlMiniMaxH3VideoVaeEncod
         for (auto& u : uploads) ggml_backend_tensor_set(u.t, u.data, 0, u.bytes);
         ggml_backend_tensor_set(img, d->image, 0, ggml_nbytes(img));
 
-        if (ggml_backend_graph_compute(g_backend, graph) != GGML_STATUS_SUCCESS)
+        if (tsg::compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
         { set_last_error("MiniMaxH3VideoVaeEncode: graph compute failed."); return 0; }
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(outT, d->out, 0, ggml_nbytes(outT));
         clear_last_error();
         return 1;
@@ -1823,9 +1823,9 @@ TSG_EXPORT int TSGgml_MiniMaxH3AudioVaeDecode(const TSGgmlMiniMaxH3AudioVaeDecod
         for (auto& u : uploads) ggml_backend_tensor_set(u.t, u.data, 0, u.bytes);
         ggml_backend_tensor_set(z, d->latent, 0, ggml_nbytes(z));
 
-        if (ggml_backend_graph_compute(g_backend, graph) != GGML_STATUS_SUCCESS)
+        if (tsg::compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
         { set_last_error("MiniMaxH3AudioVaeDecode: graph compute failed."); return 0; }
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(outT, d->out, 0, ggml_nbytes(outT));
         clear_last_error();
         return 1;
@@ -2087,9 +2087,9 @@ TSG_EXPORT int TSGgml_MiniMaxH3VisionEncode(const TSGgmlMiniMaxH3VisionEncodeDes
             put(posEmbed, d->pos_embed);
             put(cosf, d->cosf);
             put(sinf, d->sinf);
-            if (ggml_backend_graph_compute(g_backend, pg) != GGML_STATUS_SUCCESS)
+            if (tsg::compute_graph(g_backend, pg) != GGML_STATUS_SUCCESS)
             { set_last_error("MiniMaxH3VisionEncode: probe compute failed."); return 0; }
-            ggml_backend_synchronize(g_backend);
+            tsg::sync_backend(g_backend);
             std::vector<float> tmp(static_cast<std::size_t>(ggml_nelements(pOut)));
             ggml_backend_tensor_get(pOut, tmp.data(), 0, ggml_nbytes(pOut));
             std::size_t nans = 0; double acc = 0;
@@ -2145,9 +2145,9 @@ TSG_EXPORT int TSGgml_MiniMaxH3VisionEncode(const TSGgmlMiniMaxH3VisionEncodeDes
         ggml_backend_tensor_set(cosf, d->cosf, 0, ggml_nbytes(cosf));
         ggml_backend_tensor_set(sinf, d->sinf, 0, ggml_nbytes(sinf));
 
-        if (ggml_backend_graph_compute(g_backend, graph) != GGML_STATUS_SUCCESS)
+        if (tsg::compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
         { set_last_error("MiniMaxH3VisionEncode: graph compute failed."); return 0; }
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(outT, d->out, 0, ggml_nbytes(outT));
         clear_last_error();
         return 1;
@@ -2471,9 +2471,9 @@ TSG_EXPORT int TSGgml_MiniMaxH3AudioVaeEncode(const TSGgmlMiniMaxH3AudioVaeEncod
         ggml_backend_tensor_set(wave, d->wave, 0, ggml_nbytes(wave));
         ggml_backend_tensor_set(mask, maskData.data(), 0, ggml_nbytes(mask));
 
-        if (ggml_backend_graph_compute(g_backend, graph) != GGML_STATUS_SUCCESS)
+        if (tsg::compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
         { set_last_error("MiniMaxH3AudioVaeEncode: graph compute failed."); return 0; }
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(outT, d->out, 0, ggml_nbytes(outT));
         clear_last_error();
         return 1;
@@ -2802,9 +2802,9 @@ TSG_EXPORT int TSGgml_MiniMaxH3VideoVaeEncode3D(const TSGgmlMiniMaxH3VideoVaeEnc
             host_read_barrier();
             for (auto& u : uploads) ggml_backend_tensor_set(u.t, u.data, 0, u.bytes);
             ggml_backend_tensor_set(video, d->video, 0, ggml_nbytes(video));
-            if (ggml_backend_graph_compute(g_backend, pg) != GGML_STATUS_SUCCESS)
+            if (tsg::compute_graph(g_backend, pg) != GGML_STATUS_SUCCESS)
             { set_last_error("MiniMaxH3VideoVaeEncode3D: probe compute failed."); return 0; }
-            ggml_backend_synchronize(g_backend);
+            tsg::sync_backend(g_backend);
             if (const char* path = getenv("TS_H3_ENC3D_DUMP"))
             {
                 std::vector<float> tmp(static_cast<std::size_t>(ggml_nelements(pOut)));
@@ -2873,9 +2873,9 @@ TSG_EXPORT int TSGgml_MiniMaxH3VideoVaeEncode3D(const TSGgmlMiniMaxH3VideoVaeEnc
         for (auto& u : uploads) ggml_backend_tensor_set(u.t, u.data, 0, u.bytes);
         ggml_backend_tensor_set(video, d->video, 0, ggml_nbytes(video));
 
-        if (ggml_backend_graph_compute(g_backend, graph) != GGML_STATUS_SUCCESS)
+        if (tsg::compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
         { set_last_error("MiniMaxH3VideoVaeEncode3D: graph compute failed."); return 0; }
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(outT, d->out, 0, ggml_nbytes(outT));
         clear_last_error();
         return 1;

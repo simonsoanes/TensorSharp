@@ -115,7 +115,7 @@ TSG_EXPORT int TSGgml_Conv2d(const TSGgmlConv2dDesc* d)
         ggml_backend_tensor_set(inp, d->input, 0, static_cast<std::size_t>(W) * H * C * sizeof(float));
         if (bias) ggml_backend_tensor_set(bias, d->bias, 0, static_cast<std::size_t>(OC) * sizeof(float));
 
-        if (ggml_backend_graph_compute(g_backend, graph) != GGML_STATUS_SUCCESS)
+        if (tsg::compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
         { set_last_error("Conv2d: graph compute failed."); return 0; }
         // Synchronous readback. The VAE runs this conv as a long C# chain (each conv's
         // output is the next conv's input), so the result MUST be on the host before this
@@ -126,7 +126,7 @@ TSG_EXPORT int TSGgml_Conv2d(const TSGgmlConv2dDesc* d)
         // decode that was long misdiagnosed as Q2_K quantization. CUDA/CPU were unaffected
         // (finalize takes the synchronous branch off Metal-async). Match the attn/fused-block
         // kernels and drain synchronously here.
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(out, d->output, 0, static_cast<std::size_t>(OW) * OH * OC * sizeof(float));
         clear_last_error();
         return 1;
@@ -361,10 +361,10 @@ TSG_EXPORT int TSGgml_QwenVaeRun(const TSGgmlQwenVaeDesc* d)
 
         const ggml_status vaeSt = tsg::fast_conv_enabled()
             ? tsg::graph_compute_fast_conv(graph, "qwen-image vae")
-            : ggml_backend_graph_compute(g_backend, graph);
+            : tsg::compute_graph(g_backend, graph);
         if (vaeSt != GGML_STATUS_SUCCESS)
         { set_last_error("QwenVaeRun: graph compute failed."); return 0; }
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(out, d->output, 0, static_cast<std::size_t>(d->out_len) * sizeof(float));
         clear_last_error();
         return 1;
@@ -481,7 +481,7 @@ TSG_EXPORT int TSGgml_QwenImageModMlp(const TSGgmlQwenImageModMlpDesc* d)
         ggml_backend_tensor_set(shift_t, d->shift, 0, actBytes);
         ggml_backend_tensor_set(gate_t, d->gate, 0, actBytes);
 
-        if (ggml_backend_graph_compute(g_backend, graph) != GGML_STATUS_SUCCESS)
+        if (tsg::compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
         {
             set_last_error("QwenImageModMlp: graph compute failed.");
             return 0;
@@ -491,7 +491,7 @@ TSG_EXPORT int TSGgml_QwenImageModMlp(const TSGgmlQwenImageModMlpDesc* d)
         // it queues a non-blocking ggml_backend_tensor_get_async + marks pending, but the C#
         // caller reads the host buffer immediately (no host_read_barrier between), so the 3-call
         // MLP sub-layer saw uninitialized/stale output (cosine ~0.12 vs the managed reference).
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(out_t, d->x, 0, actBytes);
         clear_last_error();
         return 1;
@@ -883,9 +883,9 @@ TSG_EXPORT int TSGgml_QwenTeTrunk(const TSGgmlQwenTeTrunkDesc* d)
         if (winMask) ggml_backend_tensor_set(winMask, d->win_mask, 0, static_cast<std::size_t>(seq) * seq * sizeof(float));
         if (causalMask) ggml_backend_tensor_set(causalMask, causalMaskData.data(), 0, causalMaskData.size() * sizeof(float));
 
-        if (ggml_backend_graph_compute(g_backend, graph) != GGML_STATUS_SUCCESS)
+        if (tsg::compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
         { set_last_error("QwenTeTrunk: graph compute failed."); return 0; }
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(outT, d->out, 0, static_cast<std::size_t>(hidden) * seq * sizeof(float));
         clear_last_error();
         return 1;
@@ -1019,9 +1019,9 @@ TSG_EXPORT int TSGgml_QwenImageJointAttn(const TSGgmlQwenImageJointAttnDesc* d)
         setF(i_cos, d->img_cos, hd, iseq); setF(i_sin, d->img_sin, hd, iseq);
         setF(t_cos, d->txt_cos, hd, tseq); setF(t_sin, d->txt_sin, hd, tseq);
 
-        if (ggml_backend_graph_compute(g_backend, graph) != GGML_STATUS_SUCCESS)
+        if (tsg::compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
         { set_last_error("QwenImageJointAttn: graph compute failed."); return 0; }
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(i_out, d->img, 0, static_cast<std::size_t>(dim) * iseq * sizeof(float));
         ggml_backend_tensor_get(t_out, d->txt, 0, static_cast<std::size_t>(dim) * tseq * sizeof(float));
         clear_last_error();
@@ -1511,9 +1511,9 @@ int qi_block_run(QiBlockPersist* e, const TSGgmlQwenImageBlockDesc* d)
     setF(t.t_cos, d->t_cos, hd, tseq, "t_cos"); setF(t.t_sin, d->t_sin, hd, tseq, "t_sin");
     if (!ok) return 0;
 
-    if (ggml_backend_graph_compute(g_backend, e->graph) != GGML_STATUS_SUCCESS)
+    if (tsg::compute_graph(g_backend, e->graph) != GGML_STATUS_SUCCESS)
     { set_last_error("QwenImageBlock(persist): graph compute failed."); return 0; }
-    ggml_backend_synchronize(g_backend);
+    tsg::sync_backend(g_backend);
     ggml_backend_tensor_get(e->i_out, d->img, 0, static_cast<std::size_t>(dim) * iseq * sizeof(float));
     ggml_backend_tensor_get(e->t_out, d->txt, 0, static_cast<std::size_t>(dim) * tseq * sizeof(float));
     return 1;
@@ -1779,9 +1779,9 @@ int qi_cfg_run(QiBlockCfgPersist* e, const TSGgmlQwenImageBlockDesc* dc, const T
     setBranch(e->tn, dn, tseqn);
     if (!ok) return 0;
 
-    if (ggml_backend_graph_compute(g_backend, e->graph) != GGML_STATUS_SUCCESS)
+    if (tsg::compute_graph(g_backend, e->graph) != GGML_STATUS_SUCCESS)
     { set_last_error("QwenImageBlockCfg(persist): graph compute failed."); return 0; }
-    ggml_backend_synchronize(g_backend);
+    tsg::sync_backend(g_backend);
     ggml_backend_tensor_get(e->ic_out, dc->img, 0, static_cast<std::size_t>(dim) * iseq * sizeof(float));
     ggml_backend_tensor_get(e->tc_out, dc->txt, 0, static_cast<std::size_t>(dim) * tseqc * sizeof(float));
     ggml_backend_tensor_get(e->in_out, dn->img, 0, static_cast<std::size_t>(dim) * iseq * sizeof(float));
@@ -2025,9 +2025,9 @@ TSG_EXPORT int TSGgml_QwenImageBlock(const TSGgmlQwenImageBlockDesc* d)
         setF(t.i_cos, d->i_cos, hd, iseq); setF(t.i_sin, d->i_sin, hd, iseq);
         setF(t.t_cos, d->t_cos, hd, tseq); setF(t.t_sin, d->t_sin, hd, tseq);
 
-        if (ggml_backend_graph_compute(g_backend, graph) != GGML_STATUS_SUCCESS)
+        if (tsg::compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
         { set_last_error("QwenImageBlock: graph compute failed."); return 0; }
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(i_out, d->img, 0, static_cast<std::size_t>(dim) * iseq * sizeof(float));
         ggml_backend_tensor_get(t_out, d->txt, 0, static_cast<std::size_t>(dim) * tseq * sizeof(float));
         clear_last_error();
@@ -2272,9 +2272,9 @@ TSG_EXPORT int TSGgml_QwenImageBlockCfg(const TSGgmlQwenImageBlockDesc* dc,
         setBranch(tc, dc, tseqc);
         setBranch(tn, dn, tseqn);
 
-        if (ggml_backend_graph_compute(g_backend, graph) != GGML_STATUS_SUCCESS)
+        if (tsg::compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
         { set_last_error("QwenImageBlockCfg: graph compute failed."); return 0; }
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(ic_out, dc->img, 0, static_cast<std::size_t>(dim) * iseq * sizeof(float));
         ggml_backend_tensor_get(tc_out, dc->txt, 0, static_cast<std::size_t>(dim) * tseqc * sizeof(float));
         ggml_backend_tensor_get(in_out, dn->img, 0, static_cast<std::size_t>(dim) * iseq * sizeof(float));
@@ -2791,9 +2791,9 @@ int qi_fwd_run(QiForwardPersist* e, const TSGgmlQwenImageForwardDesc* d)
     ggml_backend_tensor_set(g.tSin, d->txt_sin, 0, static_cast<std::size_t>(hd) * tseq * sizeof(float));
     ggml_backend_tensor_set(g.modIdx, d->modulate_index, 0, static_cast<std::size_t>(iseq) * sizeof(std::int32_t));
 
-    if (ggml_backend_graph_compute(g_backend, g.graph) != GGML_STATUS_SUCCESS)
+    if (tsg::compute_graph(g_backend, g.graph) != GGML_STATUS_SUCCESS)
     { set_last_error("QwenImageForward: graph compute failed."); return 0; }
-    ggml_backend_synchronize(g_backend);
+    tsg::sync_backend(g_backend);
     ggml_backend_tensor_get(g.imgOut, d->img, 0, static_cast<std::size_t>(dim) * iseq * sizeof(float));
     ggml_backend_tensor_get(g.txtOut, d->txt, 0, static_cast<std::size_t>(dim) * tseq * sizeof(float));
     clear_last_error();
@@ -3025,9 +3025,9 @@ TSG_EXPORT int TSGgml_QwenImageForward(const TSGgmlQwenImageForwardDesc* d)
         if (mask && maskHost && !maskResident)
             ggml_backend_tensor_set(mask, maskHost, 0, static_cast<std::size_t>(total_pad) * total_pad * sizeof(ggml_fp16_t));
 
-        if (ggml_backend_graph_compute(g_backend, graph) != GGML_STATUS_SUCCESS)
+        if (tsg::compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
         { set_last_error("QwenImageForward: graph compute failed."); return 0; }
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(imgOut, d->img, 0, static_cast<std::size_t>(dim) * iseq * sizeof(float));
         ggml_backend_tensor_get(txtOut, d->txt, 0, static_cast<std::size_t>(dim) * tseq * sizeof(float));
         clear_last_error();

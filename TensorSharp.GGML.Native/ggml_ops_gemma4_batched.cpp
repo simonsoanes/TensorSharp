@@ -250,7 +250,7 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatched(
                 fill_batched_mask(md, li[l].win);
                 ggml_backend_tensor_set(dc->attn_mask[l], md.data(), 0, md.size() * sizeof(ggml_fp16_t));
             }
-            if (ggml_backend_graph_compute(g_backend, dc->graph) != GGML_STATUS_SUCCESS)
+            if (tsg::compute_graph(g_backend, dc->graph) != GGML_STATUS_SUCCESS)
             {
                 set_last_error("Gemma4 batched decode: replay graph compute failed.");
                 dc->reset();
@@ -631,7 +631,7 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatched(
                 }
         }
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("Gemma4 batched decode: graph compute failed.");
@@ -771,7 +771,7 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecodeBatched(
                 std::vector<ggml_fp16_t> md; fill_batched_mask(md, li[l].win);
                 ggml_backend_tensor_set(dc->attn_mask[l], md.data(), 0, md.size() * sizeof(ggml_fp16_t));
             }
-            if (ggml_backend_graph_compute(g_backend, dc->graph) != GGML_STATUS_SUCCESS)
+            if (tsg::compute_graph(g_backend, dc->graph) != GGML_STATUS_SUCCESS)
             { set_last_error("Gemma4 MoE batched decode: replay failed."); dc->reset(); return 0; }
             finalize_compute_with_download(dc->logits_out, logits_data, static_cast<std::size_t>(vocab_size) * n_seqs * sizeof(float));
             host_read_barrier();
@@ -1078,7 +1078,7 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecodeBatched(
                 for (int s = 0; s < n_seqs; s++)
                 { std::int64_t row = positions[s]; ggml_backend_tensor_set(kv_index_all[static_cast<std::size_t>(l) * n_seqs + s], &row, 0, sizeof(std::int64_t)); }
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         { set_last_error("Gemma4 MoE batched decode: graph compute failed."); if (can_persist) { ggml_backend_buffer_free(persist_buf); ggml_free(ctx); } return 0; }
 

@@ -669,7 +669,7 @@ TSG_EXPORT int TSGgml_MuseGlimmerModelForward(
             // See the transient path: Metal must drain before a shared-buffer
             // tensor_get, or the capture rows are read mid-flight.
             if (dc->capture_count > 0 && g_backend_type == BACKEND_TYPE_METAL)
-                ggml_backend_synchronize(g_backend);
+                tsg::sync_backend(g_backend);
             for (int c = 0; c < dc->capture_count; c++)
             {
                 ggml_backend_tensor_get(dc->capture_out[c],
@@ -1234,7 +1234,7 @@ TSG_EXPORT int TSGgml_MuseGlimmerModelForward(
         void* out_data = fold ? logits_data : hidden_data;
         if (!tp_mode)
         {
-            ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+            ggml_status status = tsg::compute_graph(g_backend, graph);
             if (status != GGML_STATUS_SUCCESS)
             {
                 set_last_error("Muse-Glimmer forward: graph execution failed.");
@@ -1247,7 +1247,7 @@ TSG_EXPORT int TSGgml_MuseGlimmerModelForward(
             // reading the capture/trace outputs below without draining first
             // returns stale bytes. CUDA/Vulkan get_tensor already synchronize.
             if ((cap_count > 0 || !trace_out.empty()) && g_backend_type == BACKEND_TYPE_METAL)
-                ggml_backend_synchronize(g_backend);
+                tsg::sync_backend(g_backend);
 
             for (int c = 0; c < cap_count; c++)
             {

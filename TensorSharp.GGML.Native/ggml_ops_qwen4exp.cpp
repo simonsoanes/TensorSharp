@@ -1334,7 +1334,7 @@ TSG_EXPORT int TSGgml_Qwen4ExpGdnBlock(
             q4e_note(1, false);
             if (graph_compute_profiled(g_backend, slot->graph, kQwen4ExpGdnKernel) != GGML_STATUS_SUCCESS)
             { slot->reset(); set_last_error("qwen4exp GDN block: replay failed."); return 0; }
-            ggml_backend_synchronize(g_backend);
+            tsg::sync_backend(g_backend);
             if (slot->conv_out != nullptr)
             {
                 ggml_backend_tensor_copy(slot->conv_out, slot->conv_in);
@@ -1451,7 +1451,7 @@ TSG_EXPORT int TSGgml_Qwen4ExpGdnBlock(
             return 0;
         }
 
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_copy(conv_state_out, conv_state);
         ggml_backend_tensor_copy(ssm_state_out, ssm_state);
         if (res_resident) ggml_backend_tensor_copy(res_out, res_in);
@@ -1824,7 +1824,7 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
             // deeper and the copy wins, which corrupted the recurrent state from
             // the first replay after a long prefill.
             if (!slot->span_copies.empty())
-                ggml_backend_synchronize(g_backend);
+                tsg::sync_backend(g_backend);
             for (const auto& c : slot->span_copies)
                 ggml_backend_tensor_copy(c.first, c.second);
             ggml_backend_tensor_get(slot->res_out, res_data, 0, res_bytes);
@@ -2175,7 +2175,7 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
         }
         if (q4e_phase_log() && T > 1)
         {
-            ggml_backend_synchronize(g_backend);
+            tsg::sync_backend(g_backend);
             const double t_cmp = q4e_now_ms();
             fprintf(stderr, "[q4e-phase] span %d..%d T=%d: nodes=%.1fms binder=%.1fms gallocr=%.1fms uploads=%.1fms compute=%.1fms%c",
                     layer_begin, layer_end, T,
@@ -2184,7 +2184,7 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
 
         // See the replay path: the drain before the copies is load-bearing.
         if (!slot->span_copies.empty())
-            ggml_backend_synchronize(g_backend);
+            tsg::sync_backend(g_backend);
         for (const auto& c : slot->span_copies)
             ggml_backend_tensor_copy(c.first, c.second);
         if (logits != nullptr)
@@ -2303,7 +2303,7 @@ TSG_EXPORT int TSGgml_Qwen4ExpResDownload(void* data, long long bytes)
     {
         if (!ensure_backend() || data == nullptr || bytes <= 0) return 0;
         if (g_q4e_res == nullptr || g_q4e_res_capacity < (std::size_t)bytes) return 0;
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(g_q4e_res, data, 0, (std::size_t)bytes);
         return 1;
     }

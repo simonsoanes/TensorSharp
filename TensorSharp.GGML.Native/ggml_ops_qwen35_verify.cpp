@@ -494,7 +494,7 @@ namespace
                 // tensors the previous (async) graph_compute is still reading -> the
                 // pipeline accumulates across reuses and faults. host_read_barrier()
                 // only syncs conditionally, so force a full backend sync here.
-                ggml_backend_synchronize(g_backend);
+                tsg::sync_backend(g_backend);
                 ggml_backend_tensor_set(c.hidden_t, hidden_data, 0, static_cast<std::size_t>(H) * N * sizeof(float));
                 std::vector<std::int32_t> pv(N);
                 std::vector<std::int64_t> kv(N);
@@ -1735,7 +1735,7 @@ namespace
         }
         if (vram_log_enabled())
         {
-            ggml_backend_synchronize(g_backend);
+            tsg::sync_backend(g_backend);
             char tag[96];
             std::snprintf(tag, sizeof(tag), "q35-verify-compute-end(N=%d)", N);
             vram_log(tag, 0);

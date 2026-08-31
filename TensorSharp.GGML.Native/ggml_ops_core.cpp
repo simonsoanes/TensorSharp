@@ -168,11 +168,68 @@ namespace tsg
         return v;
     }
 
+    // ggml reports the interesting failures — a Metal command buffer that died
+    // with kIOGPUCommandBufferCallbackErrorOutOfMemory, a backend that has
+    // latched its sticky error state — only through this log callback, which used
+    // to go to stderr and nowhere else. The op that then returns 0 says nothing
+    // more than "graph execution failed", so the .NET exception named whichever
+    // op happened to run next (an embedding get_rows, say) and the real cause was
+    // visible only to whoever was watching the console. Keep the most recent
+    // error text so a failing op can hand it to the caller.
+    //
+    // Process-global rather than thread_local like g_last_error: ggml logs from
+    // whichever thread encodes or synchronizes the command buffer, so scoping the
+    // capture to the failing thread would usually capture nothing.
+    std::mutex g_ggml_error_log_mutex;
+    // Errors since the last op succeeded — what set_last_error() appends.
+    std::string g_ggml_error_log;
+    // The same text, but never cleared: once the backend has failed, the op that
+    // saw it has long since returned and its window is gone.
+    std::string g_ggml_failure_log;
+    constexpr std::size_t kGgmlErrorLogCap = 1024;
+    std::atomic<std::uint64_t> g_ggml_error_count{0};
+    std::atomic<bool> g_backend_compute_failed{false};
+    // clear_last_error() runs on every successful op — hundreds per forward — and
+    // the capture is empty on all but the failing path, so the lock is worth
+    // skipping. Set only by capture_ggml_error, cleared only under the lock.
+    std::atomic<bool> g_ggml_error_log_dirty{false};
+
+    static void append_capped(std::string& target, const std::string& line)
+    {
+        if (target.size() >= kGgmlErrorLogCap)
+            return;
+        if (!target.empty())
+            target += " | ";
+        target += line;
+    }
+
+    static void capture_ggml_error(const char* text)
+    {
+        std::string line(text);
+        while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+            line.pop_back();
+        if (line.empty())
+            return;
+
+        {
+            std::lock_guard<std::mutex> lock(g_ggml_error_log_mutex);
+            append_capped(g_ggml_error_log, line);
+            append_capped(g_ggml_failure_log, line);
+        }
+        g_ggml_error_log_dirty.store(true, std::memory_order_release);
+
+        // Bumped last so compute_graph()/sync_backend()'s before/after comparison
+        // never observes a count for text it cannot yet read.
+        g_ggml_error_count.fetch_add(1, std::memory_order_release);
+    }
+
     static void filtered_ggml_log(enum ggml_log_level level, const char* text, void* user_data)
     {
         (void) user_data;
         if (level == GGML_LOG_LEVEL_DEBUG && !ggml_debug_log_enabled())
             return;
+        if (level == GGML_LOG_LEVEL_ERROR && text != nullptr)
+            capture_ggml_error(text);
         std::fputs(text, stderr);
         std::fflush(stderr);
     }
@@ -187,11 +244,32 @@ namespace tsg
     void set_last_error(const std::string& message)
     {
         g_last_error = message;
+
+        // Whatever ggml logged since the last op succeeded IS the cause of this
+        // failure — append it rather than making the operator go find the console.
+        if (!g_ggml_error_log_dirty.load(std::memory_order_acquire))
+            return;
+
+        std::lock_guard<std::mutex> lock(g_ggml_error_log_mutex);
+        if (!g_ggml_error_log.empty())
+        {
+            g_last_error += " ggml: ";
+            g_last_error += g_ggml_error_log;
+        }
     }
 
     void clear_last_error()
     {
         g_last_error.clear();
+
+        // An op that succeeded is the point past which older ggml chatter can no
+        // longer explain a failure, so the capture window starts again here.
+        if (!g_ggml_error_log_dirty.load(std::memory_order_acquire))
+            return;
+
+        std::lock_guard<std::mutex> lock(g_ggml_error_log_mutex);
+        g_ggml_error_log.clear();
+        g_ggml_error_log_dirty.store(false, std::memory_order_release);
     }
 
 #if defined(GGML_USE_VULKAN)
@@ -1642,7 +1720,7 @@ namespace tsg
     void optimize_graph_for_metal(ggml_cgraph* graph)
     {
 #if defined(TSG_GGML_USE_METAL)
-        // Direct ggml_backend_graph_compute() calls do not run the backend
+        // Direct tsg::compute_graph() calls do not run the backend
         // optimizer. Match ggml's scheduler path for Metal, where this hook
         // reorders alias-aware nodes and applies supported graph fusions.
         // This must run before gallocr/context allocation because reordering
@@ -1802,7 +1880,7 @@ namespace tsg
             return false;
 
         ggml_backend_tensor_get(tensor, data, 0, bytes);
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         return true;
     }
 
@@ -2526,19 +2604,19 @@ namespace tsg
             {
                 ggml_cgraph view = ggml_graph_view(graph, from, i);
                 const auto t0 = now();
-                const ggml_status st = ggml_backend_graph_compute(g_backend, &view);
+                const ggml_status st = tsg::compute_graph(g_backend, &view);
                 if (st != GGML_STATUS_SUCCESS) return st;
-                if (prof) { ggml_backend_synchronize(g_backend); graphUs += std::chrono::duration<double, std::micro>(now() - t0).count(); }
+                if (prof) { tsg::sync_backend(g_backend); graphUs += std::chrono::duration<double, std::micro>(now() - t0).count(); }
             }
-            ggml_backend_synchronize(g_backend);
+            tsg::sync_backend(g_backend);
             const auto t1 = now();
             if (!run_conv_fast(node))
             {
                 // Unsupported shape: let ggml run just this node.
                 ggml_cgraph one = ggml_graph_view(graph, i, i + 1);
-                const ggml_status st = ggml_backend_graph_compute(g_backend, &one);
+                const ggml_status st = tsg::compute_graph(g_backend, &one);
                 if (st != GGML_STATUS_SUCCESS) return st;
-                if (prof) { ggml_backend_synchronize(g_backend); fallbacks++; }
+                if (prof) { tsg::sync_backend(g_backend); fallbacks++; }
             }
             if (prof) { convUs += std::chrono::duration<double, std::micro>(now() - t1).count(); convs++; }
             from = i + 1;
@@ -2547,9 +2625,9 @@ namespace tsg
         {
             ggml_cgraph view = ggml_graph_view(graph, from, n);
             const auto t0 = now();
-            const ggml_status st = ggml_backend_graph_compute(g_backend, &view);
+            const ggml_status st = tsg::compute_graph(g_backend, &view);
             if (st != GGML_STATUS_SUCCESS) return st;
-            if (prof) { ggml_backend_synchronize(g_backend); graphUs += std::chrono::duration<double, std::micro>(now() - t0).count(); }
+            if (prof) { tsg::sync_backend(g_backend); graphUs += std::chrono::duration<double, std::micro>(now() - t0).count(); }
         }
         if (prof)
         {
@@ -2568,19 +2646,19 @@ namespace tsg
     ggml_status graph_compute_profiled(ggml_backend_t backend, ggml_cgraph* graph, const char* tag)
     {
         if (!graph_node_profile_enabled())
-            return ggml_backend_graph_compute(backend, graph);
+            return tsg::compute_graph(backend, graph);
 
         const int n = ggml_graph_n_nodes(graph);
         std::vector<double> per_node(static_cast<std::size_t>(n), 0.0);
 
-        ggml_backend_synchronize(backend);
+        tsg::sync_backend(backend);
         const auto t_start = std::chrono::steady_clock::now();
         for (int i = 0; i < n; i++)
         {
             ggml_cgraph view = ggml_graph_view(graph, i, i + 1);
             const auto t0 = std::chrono::steady_clock::now();
-            ggml_status st = ggml_backend_graph_compute(backend, &view);
-            ggml_backend_synchronize(backend);
+            ggml_status st = tsg::compute_graph(backend, &view);
+            tsg::sync_backend(backend);
             const auto t1 = std::chrono::steady_clock::now();
             if (st != GGML_STATUS_SUCCESS)
                 return st;
@@ -2675,6 +2753,33 @@ using namespace tsg;
 TSG_EXPORT const char* TSGgml_GetLastError()
 {
     return g_last_error.c_str();
+}
+
+// Whether a GPU command buffer has failed at any point in this process, together
+// with what ggml said about it. Latched by sync_backend() (ggml_ops_internal.h)
+// rather than reported by the op that hit it, because the op that drains a dead
+// command buffer returns SUCCESS — ggml_backend_synchronize has no way to say
+// otherwise — and only the NEXT graph fails.
+//
+// It never clears. On Metal the backend latches its own has_error and recovers
+// only by being recreated, and TSGgml_Shutdown consumes this process's one-shot
+// backend init (std::call_once on g_backend_init_once), so there is no in-process
+// recovery to offer: the honest answer is that the host has to restart.
+TSG_EXPORT int TSGgml_HasBackendFailure()
+{
+    return g_backend_compute_failed.load(std::memory_order_acquire) ? 1 : 0;
+}
+
+TSG_EXPORT const char* TSGgml_GetBackendFailureText()
+{
+    // Copied into a thread_local so the caller reads a stable buffer while the
+    // log keeps growing behind the mutex.
+    static thread_local std::string snapshot;
+    {
+        std::lock_guard<std::mutex> lock(g_ggml_error_log_mutex);
+        snapshot = g_ggml_failure_log;
+    }
+    return snapshot.c_str();
 }
 
 TSG_EXPORT int TSGgml_IsMetalAvailable()
@@ -2955,7 +3060,7 @@ TSG_EXPORT void TSGgml_Shutdown()
         tsg::ScopedRank rank(r);
         if (g_backend != nullptr)
         {
-            ggml_backend_synchronize(g_backend);
+            tsg::sync_backend(g_backend);
             ggml_backend_free(g_backend);
             g_backend = nullptr;
         }
@@ -3242,7 +3347,7 @@ TSG_EXPORT void TSGgml_SetAsyncCompute(int enabled)
     {
         if (g_pending_gpu_work.exchange(false, std::memory_order_acq_rel) && g_backend != nullptr)
         {
-            ggml_backend_synchronize(g_backend);
+            tsg::sync_backend(g_backend);
         }
     }
 }
@@ -3374,7 +3479,7 @@ TSG_EXPORT int TSGgml_PreloadQuantizedWeight(
         }
 
         ggml_backend_tensor_set(tensor, host_data, 0, bytes);
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
 
         {
             std::lock_guard<std::mutex> lock(g_preloaded_buffer_cache_mutex);

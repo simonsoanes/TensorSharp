@@ -325,7 +325,7 @@ namespace
         std::int32_t pos_val = position;
         ggml_backend_tensor_set(pos_tensor, &pos_val, 0, sizeof(std::int32_t));
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed for Qwen3.5 attention layer decode.");
@@ -2114,7 +2114,7 @@ namespace
         {
             status = use_metal_async_submit
                 ? ggml_backend_graph_compute_async(g_backend, graph)
-                : ggml_backend_graph_compute(g_backend, graph);
+                : tsg::compute_graph(g_backend, graph);
         }
         if (status != GGML_STATUS_SUCCESS)
         {
@@ -2452,7 +2452,7 @@ namespace
                 ggml_backend_tensor_set(g_q35bdc.conv_state[gi], layers[l].conv_state_in, 0, convStateBytes);
                 ggml_backend_tensor_set(g_q35bdc.delta_state[gi], layers[l].delta_state_in, 0, deltaStateBytes);
             }
-            ggml_status st = ggml_backend_graph_compute(g_backend, g_q35bdc.graph);
+            ggml_status st = tsg::compute_graph(g_backend, g_q35bdc.graph);
             if (st != GGML_STATUS_SUCCESS)
             {
                 set_last_error("Qwen3.5 batched decode: cached graph execution failed.");
@@ -2964,7 +2964,7 @@ namespace
             bfd_upload_mask(mask[s], pad_kv, seq_lens[s]);
         }
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("Qwen3.5 batched decode: graph execution failed.");
