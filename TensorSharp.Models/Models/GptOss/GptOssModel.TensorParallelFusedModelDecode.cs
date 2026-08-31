@@ -280,12 +280,12 @@ namespace TensorSharp.Models
                 !_quantWeights.TryGetValue("token_embd.weight", out lmHead))
             {
                 _tpFpFailed = true;
-                return false;
+                return TpFdBail("prefill: no quantized LM head");
             }
             if (!_weights.TryGetValue("output_norm.weight", out var finalNorm))
             {
                 _tpFpFailed = true;
-                return false;
+                return TpFdBail("prefill: no output_norm.weight");
             }
 
             EnsureFoldLogitsBuffer();
@@ -333,9 +333,10 @@ namespace TensorSharp.Models
 
                 GgmlBasicOps.TensorParallelExecutePlans(plans);
             }
-            catch (InvalidOperationException)
+            catch (InvalidOperationException ex)
             {
                 _tpFpFailed = true;
+                TpFdBail("prefill executor threw: " + ex.Message);
                 return false;
             }
             finally
