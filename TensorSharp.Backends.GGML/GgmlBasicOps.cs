@@ -2307,6 +2307,27 @@ namespace TensorSharp.GGML
             => GgmlNative.TryGptOssModelDecode(layers, numLayers, hidden, hiddenSize, position,
                 logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm);
 
+        /// <summary>Whole GPT-OSS prefill in tensor-parallel plan mode.</summary>
+        public static bool TryGptOssModelPrefillTP(
+            GptOssLayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize,
+            int numTokens, int startPos, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType,
+            long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm,
+            int tpDegree, IntPtr[] tpPlanOut)
+            => GgmlNative.TryGptOssModelPrefillTP(layers, numLayers, hidden, hiddenSize, numTokens,
+                startPos, logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes,
+                finalNorm, tpDegree, tpPlanOut);
+
+        /// <summary>Same graph in tensor-parallel plan mode: returns this rank's
+        /// plan instead of executing, for TensorParallelExecutePlans to drive.</summary>
+        public static bool TryGptOssModelDecodeTP(
+            GptOssLayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int position,
+            IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType,
+            long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm,
+            int tpDegree, IntPtr[] tpPlanOut)
+            => GgmlNative.TryGptOssModelDecodeTP(layers, numLayers, hidden, hiddenSize, position,
+                logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm,
+                tpDegree, tpPlanOut);
+
         /// <summary>Whole GPT-OSS transformer over a prompt chunk as a single
         /// graph dispatch (all layers + MoE + folded final norm/LM head over the
         /// last token). Returns false when the kernel refuses the shape so the

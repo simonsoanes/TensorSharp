@@ -400,8 +400,42 @@ namespace TensorSharp.Models
         /// </summary>
         private void EnsureKvCacheHostSynchronized()
         {
-            if (!_kvCacheHostDirty || !IsGgmlBackend || _kvCacheK == null)
+            if (!_kvCacheHostDirty || !IsGgmlBackend)
                 return;
+
+            if (_kvCacheK == null)
+            {
+                // Tensor parallelism keeps its KV in the per-rank arrays, and the
+                // fused TP decode advances them device-side only. Without this the
+                // sync silently no-opped and any host reader (snapshot, truncate,
+                // the per-op chain) saw a stale prefix.
+                if (_tpKvCacheK == null || _tpKvCacheK[0] == null || _tpKvCacheK[0][0] == null)
+                    return;
+                int tpCacheSize = (int)_tpKvCacheK[0][0].Sizes[1];
+                int previousRank = GgmlBasicOps.GetActiveRank();
+                try
+                {
+                    for (int r = 0; r < TpDegree; r++)
+                    {
+                        GgmlBasicOps.SetActiveRank(r);
+                        for (int l = 0; l < Config.NumLayers; l++)
+                        {
+                            if (_tpKvCacheK[l] == null || _tpKvCacheV[l] == null) continue;
+                            if (_tpKvCacheK[l][r] == null || _tpKvCacheV[l][r] == null) continue;
+                            GgmlBasicOps.GptOssSyncKvCacheToHost(
+                                TensorComputePrimitives.GetStoragePointer(_tpKvCacheK[l][r]),
+                                TensorComputePrimitives.GetStoragePointer(_tpKvCacheV[l][r]),
+                                tpCacheSize, _cacheSeqLen);
+                        }
+                    }
+                }
+                finally
+                {
+                    GgmlBasicOps.SetActiveRank(previousRank);
+                }
+                _kvCacheHostDirty = false;
+                return;
+            }
 
             int cacheSize = (int)_kvCacheK[0].Sizes[1];
             for (int l = 0; l < Config.NumLayers; l++)
@@ -424,6 +458,8 @@ namespace TensorSharp.Models
         {
             if (IsGgmlBackend)
                 GgmlBasicOps.GptOssResetDecodeCache();
+            // The per-rank TP graphs come from the same native pools.
+            _tpFdBuiltCapacity = -1;
         }
 
         private void DisposeFusedModelDecodeState()

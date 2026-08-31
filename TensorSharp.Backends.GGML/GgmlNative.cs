@@ -3347,6 +3347,65 @@ internal enum GgmlIndexReductionOp
             => TSGgml_GptOssModelDecode(layers, numLayers, hidden, hiddenSize, position,
                 logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm) != 0;
 
+        // Same graph, tensor-parallel plan mode: builds this rank's graph and
+        // hands it back UNEXECUTED for tp_execute_plans to drive segment by
+        // segment (see ggml_ops_gptoss_decode.cpp).
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int TSGgml_GptOssModelDecodeTP(
+            [In] GptOssLayerDecodeArgs[] layers, int numLayers,
+            IntPtr hidden, int hiddenSize, int position,
+            IntPtr logits, int vocabSize,
+            IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
+            IntPtr finalNorm,
+            int tpDegree, out IntPtr tpPlanOut);
+
+        /// <summary>
+        /// Builds one rank's whole-model decode graph and returns a plan pointer
+        /// in <paramref name="tpPlanOut"/> instead of running it. Returns false
+        /// when the kernel declines, leaving the caller on the per-op TP chain.
+        /// </summary>
+        public static bool TryGptOssModelDecodeTP(
+            GptOssLayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int position,
+            IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType,
+            long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm,
+            int tpDegree, IntPtr[] tpPlanOut)
+        {
+            int rc = TSGgml_GptOssModelDecodeTP(layers, numLayers, hidden, hiddenSize, position,
+                logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm,
+                tpDegree, out IntPtr plan);
+            if (tpPlanOut != null) tpPlanOut[0] = plan;
+            return rc != 0;
+        }
+
+        // Same graph, tensor-parallel plan mode.
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int TSGgml_GptOssModelPrefillTP(
+            [In] GptOssLayerDecodeArgs[] layers, int numLayers,
+            IntPtr hidden, int hiddenSize, int numTokens, int startPos,
+            IntPtr logits, int vocabSize,
+            IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
+            IntPtr finalNorm,
+            int tpDegree, out IntPtr tpPlanOut);
+
+        /// <summary>
+        /// Builds one rank's whole-model prefill graph and returns a plan pointer
+        /// instead of running it.
+        /// </summary>
+        public static bool TryGptOssModelPrefillTP(
+            GptOssLayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize,
+            int numTokens, int startPos, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType,
+            long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm,
+            int tpDegree, IntPtr[] tpPlanOut)
+        {
+            int rc = TSGgml_GptOssModelPrefillTP(layers, numLayers, hidden, hiddenSize, numTokens,
+                startPos, logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes,
+                finalNorm, tpDegree, out IntPtr plan);
+            if (tpPlanOut != null) tpPlanOut[0] = plan;
+            return rc != 0;
+        }
+
         // GPT-OSS whole-model prefill: N tokens through every layer + MoE +
         // folded final norm/LM head in ONE graph (see ggml_ops_gptoss_prefill.cpp).
         [LibraryImport(DllName)]
