@@ -170,13 +170,15 @@ Notes:
 - **Multimodal** configs load a vision projector, so add `--image photo.png` to ask
   about a picture.
 - **Speculative decoding** is lossless and works on **both** hosts — a key here
-  becomes the matching flag, and `TensorSharp.Cli` honours every one of them. The
-  current spellings are `"spec": true` and `"spec-type"`; `"mtp-spec"` and
-  `"mtp-draft-model"` are accepted aliases, which is why the shipped Gemma configs
-  still use them. Gemma's draft head is a separate GGUF, named by
-  `"spec-draft-model"`; Qwen3.6 and GLM 5.2 embed theirs in the trunk, so
-  `"spec": true` is all they need. `"spec-type": "ngram"` needs no drafter at all,
-  so it works with any config in this folder.
+  becomes the matching flag, and `TensorSharp.Cli` honours every one of them.
+  There is one spelling per option: `"spec"`, `"spec-type"`, `"spec-draft"`,
+  `"spec-pmin"` and `"draft-model"` (the old `"mtp-*"` / `"spec-draft-model"`
+  keys now fail with a message naming the replacement). Any drafter that ships
+  as its own GGUF — Gemma's assistant head, a DFlash/DSpark block drafter — is
+  named by `"draft-model"`, and naming it is the request: no `"spec": true`
+  needed beside it. Qwen3.6 and GLM 5.2 embed theirs in the trunk, so
+  `"spec": true` is all they need. `"spec-type": "ngram"` needs no drafter at
+  all, so it works with any config in this folder.
 - **Image-edit** configs run the DiT pipeline: `--image in.png --prompt "…" --output
   out.png`. Per-edit `--diffusion-steps` / `--cfg` / `--diffusion-seed` are CLI flags.
 - **DiffusionGemma** uses the CLI's iterative denoising path; tune it with

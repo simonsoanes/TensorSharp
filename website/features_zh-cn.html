@@ -27,6 +27,7 @@
     <a class="card" href="models-video_zh-cn.html#minimax-h3"><div class="ic">🎬</div><h3>视频生成</h3><p>MiniMax-H3 在<strong>一份打包潜变量里同时生成视频与原生 32 kHz 立体声音频</strong>，无需 CFG，4–8 步即可。Wan 2.1 / 2.2 只生成画面；换用步数蒸馏权重，5 秒 720p 视频可从数小时缩短到几十分钟。</p></a>
     <div class="card"><div class="ic">💭</div><h3>思考模式</h3><p>结构化的思维链，与可见答案分离。</p></div>
     <div class="card"><div class="ic">🛠️</div><h3>工具调用</h3><p>跨三种 API 风格的多轮函数调用。</p></div>
+    <a class="card" href="#skills"><div class="ic">🧩</div><h3>Agent Skills（智能体技能）</h3><p>面向模型的说明文件夹，只在任务需要时才加载 —— 用 <code>--skill</code> 或 <code>"skills": ["pdf"]</code> 选中，其余内容由模型通过 TensorSharp 自己应答的内置工具取回。</p></a>
     <div class="card"><div class="ic">📦</div><h3>原生量化计算</h3><p>Q4_K_M、Q8_0、MXFP4、IQ2_XXS 等在 matmul 中直接运算，无需反量化到 FP32。</p></div>
     <div class="card"><div class="ic">🔀</div><h3>连续批处理</h3><p>vLLM 式分页 KV 缓存，跨请求前缀共享。</p></div>
     <a class="card" href="advanced_zh-cn.html#dspark"><div class="ic">⏩</div><h3>推测解码</h3><p>MTP / NextN 草稿头，以及 DeepSeek V4 的 DSpark 与 Muse-Glimmer 的 DFlash 块级草稿器加速单序列解码。</p></a>
@@ -60,6 +61,18 @@
     <li><strong>结构化输出</strong> —— OpenAI <code>response_format</code> 支持 <code>text</code>、<code>json_object</code> 与经过校验的 <code>json_schema</code>。→ <a href="http-api_zh-cn.html#structured">结构化输出</a></li>
     <li><strong>聊天模板</strong> —— 从 GGUF 元数据自动加载（Jinja2），并按架构提供硬编码回退。</li>
     <li><strong>流式输出</strong> —— 通过 SSE（Web）或 stdout（控制台）逐 token 输出，支持中止 / 停止进行中的生成。</li>
+  </ul>
+
+  <h2 id="skills">Agent Skills（智能体技能）</h2>
+  <ul>
+    <li><strong>技能是什么</strong> —— 一个目录，里面放着 <code>SKILL.md</code>（YAML frontmatter + 写给模型看的 Markdown 说明），以及这些说明会用到的脚本、参考文档和素材。TensorSharp 扫描一个或多个技能目录（<code>--skills-dir</code>，或二进制文件旁边的 <code>skills</code> 目录），把每个技能的一行描述展示给模型，其余内容<strong>只在模型主动索取时才加载</strong>。→ <a href="cli_zh-cn.html#skills">CLI 参数</a> · <a href="http-api_zh-cn.html#skills">HTTP 字段与端点</a> · <a href="code-api_zh-cn.html#skills">C# API</a></li>
+    <li><strong>两个内置工具（开启 <code>--skills-allow-exec</code> 后是三个）</strong> —— <code>skills_list()</code> 列出本次对话可达的全部技能，含描述与随包文件路径；<code>skills_read(skill, path, offset)</code> 读取某个技能中某个文件的一页，<code>path="SKILL.md"</code> 即该技能自身的说明。<code>skills_run(skill, path, args)</code> 运行技能自带的脚本，<strong>默认关闭</strong>；<code>--skills-allow-exec</code> 才会开启，而开启它就等于允许在宿主机上执行任意代码。</li>
+    <li><strong>这些调用由 TensorSharp 自己应答</strong> —— 在进程内、紧挨着权重完成。这正是该功能对“完全不了解技能”的客户端也成立的原因：普通的 OpenAI 客户端只要发 <code>"skills": ["pdf"]</code>，收到的就是一条已经写完的回复，而不是一个它根本无法执行的工具调用。调用方<em>自己的</em>工具则从不会被执行——它们照常回传给调用方。</li>
+    <li><strong>渐进式披露</strong> —— 元数据（名称 + 描述）始终可见。被显式选中的技能，其 <code>SKILL.md</code> 正文在预算允许时会写进提示词（预算由上下文长度推出：取四分之一，并夹在约 1024–48000 token 之间）；放不下的选中技能则被<em>推迟</em>——仍以名称、描述和大小公布，并附上“先读它”的指示。随包文件永远不会内联，提示词里只列路径与大小，内容由 <code>skills_read</code> 按 48 KB 分页取回。</li>
+    <li><strong>提示词形态</strong> —— 该文本块会并入首条 <code>system</code>/<code>developer</code> 消息，而不是另起一条——这是本仓库所有聊天模板都能正确处理的唯一注入点。它的每一个字节都是“排序后的技能选择”的纯函数：没有时间戳、没有路径、没有计数，因此同一段对话逐轮哈希结果一致，KV 前缀缓存可以从第 0 块起持续命中。</li>
+    <li><strong>边界约束</strong> —— 模型给出的每一个路径都要经过 <code>SkillPathGuard</code>，它同时封堵词法层（<code>..</code>、绝对路径、<code>~</code>、UNC、盘符限定）、规范化层与<strong>符号链接</strong>三类逃逸，并把每个技能限制在它自己的目录内。ZIP 安装同样让每个条目走这道关卡（zip-slip），按解压后的字节流校验大小，并设置单文件（64 MB）、整包（256 MB）、条目数（4096）与压缩比（200×）上限。</li>
+    <li><strong>模型家族差异</strong> —— Gemma 3 与 Mistral 3 的聊天格式不承载工具声明，因此在它们上面改为把选中技能的正文直接写进提示词，并且不提供 <code>skills_read</code>；Mistral 3 还会丢弃 <code>role: "tool"</code> 消息，所以工具结果改以 user 轮回灌。</li>
+    <li><strong>选择技能</strong> —— CLI 用 <code>--skill pdf</code>，所有聊天 API 用 <code>"skills": ["pdf"]</code>（<code>/v1/chat/completions</code>、<code>/v1/responses</code>、<code>/api/chat/ollama</code>，以及 Web UI 的 <code>/api/chat</code>）；再加上 <code>"skills_discovery": false</code>，即可把本次请求限制在它点名的技能上。服务端同时暴露技能注册表本身 —— <code>GET /v1/skills</code>、<code>GET /api/skills</code>、<code>POST /api/skills</code>（上传 <code>.zip</code>）、<code>DELETE /api/skills/{name}</code>；<code>/api/models</code> 会返回一个 <code>skills</code> 块（<code>enabled</code>、<code>installable</code>、<code>count</code>），供前端判断是否要显示相关控件。可直接取用的开源技能：<a href="https://github.com/anthropics/skills" target="_blank" rel="noopener">github.com/anthropics/skills</a>。</li>
   </ul>
 
   <h2 id="performance">性能与扩展</h2>

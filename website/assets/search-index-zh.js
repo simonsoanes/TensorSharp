@@ -105,7 +105,7 @@ window.SEARCH_INDEX_ZH = [
 
   { t: "连续批处理与分页 KV 缓存", p: "高级", u: "advanced.html#continuous-batching", s: "vLLM 式分页 KV 池、块哈希前缀共享、迭代级调度器。", k: "vllm 分页注意力 调度器 批处理" },
   { t: "分页注意力", p: "高级", u: "advanced.html#paged-kv", s: "原生 TSGgml_PagedAttentionForward 在 Metal/CUDA 上驱动 ggml_flash_attn_ext。", k: "flash 闪存注意力 kv 块" },
-  { t: "MTP / NextN 推测解码", p: "高级", u: "advanced.html#mtp", s: "草稿头提出 token；主干一次批量前向验证。--mtp-spec。", k: "speculative 推测 解码 草稿 eagle nextn qwen gemma" },
+  { t: "MTP / NextN 推测解码", p: "高级", u: "advanced.html#mtp", s: "草稿头提出 token；主干一次批量前向验证。--spec。", k: "speculative 推测 解码 草稿 eagle nextn qwen gemma" },
   { t: "性能优化", p: "高级", u: "advanced.html#perf", s: "保留 E4B 语义的融合 GPU decode/prefill、原生量化计算、批量 MoE 与 KV 前缀复用。", k: "fused 融合 内核 速度 优化 gpu solo prefill chunk 独占 gemma4 e4b ple 共享 kv n1" },
   { t: "内存优化", p: "高级", u: "advanced.html#memory", s: "零拷贝 mmap 权重、最佳匹配池、SSD KV 溢出、KV 编解码器。", k: "memory 内存 mmap 占用 ram turboquant q2 q4 q8 paged-kv-quant-bits kv 编解码器" },
   { t: "DiffusionGemma 文本扩散", p: "高级", u: "advanced.html#diffusion", s: "在 Gemma-4 MoE 主干上的块式 EntropyBound 去噪。", k: "diffusion 扩散 去噪 文本生成" },

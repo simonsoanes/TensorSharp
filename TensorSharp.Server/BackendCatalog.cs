@@ -89,6 +89,11 @@ namespace TensorSharp.Server
             };
         }
 
+        // The reason a GGML backend probe threw, per backend, so the startup banner
+        // can say WHY a backend is missing instead of just omitting it from the list.
+        // First failure wins; the probe may run more than once.
+        private static readonly Dictionary<GgmlBackendType, string> ProbeFailures = new();
+
         private static bool IsGgmlBackendAvailable(GgmlBackendType backendType)
         {
             try
@@ -101,9 +106,27 @@ namespace TensorSharp.Server
                 // backend is actually selected.
                 return GgmlBasicOps.CanInitializeBackend(backendType);
             }
-            catch
+            catch (Exception ex)
             {
+                lock (ProbeFailures)
+                {
+                    ProbeFailures.TryAdd(backendType, ex.Message);
+                }
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// The probe exceptions swallowed above, one <c>"ggml_metal: reason"</c> line
+        /// per backend, so the startup banner's backend list carries a cause.
+        /// </summary>
+        internal static IReadOnlyList<string> DescribeProbeFailures()
+        {
+            lock (ProbeFailures)
+            {
+                return ProbeFailures
+                    .Select(kv => "ggml_" + kv.Key.ToString().ToLowerInvariant() + ": " + kv.Value)
+                    .ToArray();
             }
         }
 

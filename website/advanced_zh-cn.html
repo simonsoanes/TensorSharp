@@ -38,18 +38,18 @@
   <h2 id="mtp">MTP / NextN 推测解码</h2>
   <p>部分架构自带一个<strong>多 token 预测（MTP / NextN）草稿头</strong>，让服务器可为单序列（非并发）运行<em>无损</em>推测解码。草稿廉价地提出若干未来 token，主干在一次批量前向中验证全部，被接受的 token 一步提交。</p>
   <div class="callout tip"><div class="ic">🎯</div><p>由于请求自身的采样器 —— 温度、top-k/p 与全部惩罚 —— <em>同时</em>驱动草稿与验证，输出<strong>与标准解码完全一致</strong>。推测只改变产生相同 token 所需的前向次数。</p></div>
-  <p>它默认关闭。在服务器上用 <code>--mtp-spec</code>（环境变量 <code>TS_MTP_SPEC=1</code>）启用：</p>
+  <p>它默认关闭。内嵌在主干 GGUF 里的草稿头在服务器上用 <code>--spec</code>（环境变量 <code>TS_SPEC=1</code>，旧名 <code>TS_MTP_SPEC=1</code>）启用；以独立 GGUF 发布的草稿头则只需用 <code>--draft-model</code> 写出文件即自动启用：</p>
   <pre data-lang="bash"><code># Qwen 3.6 —— 必须使用保留 NextN 块的 -MTP- 仓库 GGUF；基础仓库导出会剥离该块
 dotnet run --project TensorSharp.Server -c Release --no-build -- --model Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf --backend ggml_cuda \
-    --mtp-spec --mtp-draft 8 --mtp-pmin 0.75
+    --spec --spec-draft 8 --spec-pmin 0.75
 
 # Gemma 4 —— 加载与目标匹配的独立 gemma4-assistant 草稿 GGUF
 dotnet run --project TensorSharp.Server -c Release --no-build -- --model gemma-4-12B-it-qat-UD-Q4_K_XL.gguf --backend ggml_cuda \
-    --mtp-spec --mtp-draft-model mtp-gemma-4-12B-it.gguf</code></pre>
+    --draft-model mtp-gemma-4-12B-it.gguf</code></pre>
   <h4>两种草稿头形态</h4>
   <ul>
-    <li><strong>Qwen 3.6（内嵌 NextN）</strong> —— GGUF 携带一个额外解码块以及 NextN 投影/归一化张量。无需独立文件；<code>--mtp-draft-model</code> 会被忽略。只有 <a href="https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF" target="_blank" rel="noopener">unsloth/Qwen3.6-35B-A3B-MTP-GGUF</a> 一类保留 NextN 张量的导出才具备该块；基础仓库导出会剥离它并静默回退到标准 decode。GatedDeltaNet 主干状态会被快照，以便部分被拒绝的验证批可回滚。</li>
-    <li><strong>Gemma 4（独立 <code>gemma4-assistant</code> GGUF）</strong> —— 一个 EAGLE 式循环草稿器，用 <code>--mtp-draft-model</code> 加载。它自身不持有 K/V：每个草稿层都查询目标模型已有的逐层 KV 缓存。草稿的隐藏维度必须与目标一致（把 12B 目标与其 12B 草稿配对）。不匹配或不完整的草稿会在<strong>启动时立即失败</strong>并给出修复提示。</li>
+    <li><strong>Qwen 3.6（内嵌 NextN）</strong> —— GGUF 携带一个额外解码块以及 NextN 投影/归一化张量。无需独立文件；<code>--draft-model</code> 会被忽略。只有 <a href="https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF" target="_blank" rel="noopener">unsloth/Qwen3.6-35B-A3B-MTP-GGUF</a> 一类保留 NextN 张量的导出才具备该块；基础仓库导出会剥离它并静默回退到标准 decode。GatedDeltaNet 主干状态会被快照，以便部分被拒绝的验证批可回滚。</li>
+    <li><strong>Gemma 4（独立 <code>gemma4-assistant</code> GGUF）</strong> —— 一个 EAGLE 式循环草稿器，用 <code>--draft-model</code> 加载（写出该文件本身即启用投机）。它自身不持有 K/V：每个草稿层都查询目标模型已有的逐层 KV 缓存。草稿的隐藏维度必须与目标一致（把 12B 目标与其 12B 草稿配对）。不匹配或不完整的草稿会在<strong>启动时立即失败</strong>并给出修复提示。</li>
   </ul>
   <h4>何处有收益</h4>
   <div class="table-scroll">
@@ -62,7 +62,7 @@ dotnet run --project TensorSharp.Server -c Release --no-build -- --model gemma-4
     </tbody>
   </table>
   </div>
-  <p>调参：<code>--mtp-draft</code>（默认 8）限定每步草拟的 token 数；<code>--mtp-pmin</code> 是保留某 token 所需的最低草稿置信度，其默认值取决于草稿器类型（逐 token 草稿头为 <code>0.75</code>，块级草稿器为 <code>0.35</code> —— 后者的门限是<em>累积</em>前缀概率，因此同一个数字要严格得多）。Gemma 4 的 A/B 开关是 <code>TS_GMTP_*</code> 环境变量。</p>
+  <p>调参：<code>--spec-draft</code>（默认 8）限定每步草拟的 token 数；<code>--spec-pmin</code> 是保留某 token 所需的最低草稿置信度，其默认值取决于草稿器类型（逐 token 草稿头为 <code>0.75</code>，块级草稿器为 <code>0.35</code> —— 后者的门限是<em>累积</em>前缀概率，因此同一个数字要严格得多）。Gemma 4 的 A/B 开关是 <code>TS_GMTP_*</code> 环境变量。</p>
 
 
   <h2 id="dspark">DSpark 块级投机解码（DeepSeek V4）</h2>
@@ -73,9 +73,9 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model DeepSeek-V4-Flash-...-000
     --backend ggml_cuda --draft-model DSpark-drafter-Q2K-Q8-0731.gguf \
     --input prompt.txt --max-tokens 200 --temperature 0
 
-# 服务端 —— 同一个草稿器，外加 --mtp-spec
+# 服务端 —— 同一个草稿器参数；写出文件即启用投机
 dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model DeepSeek-V4-Flash-...-00001-of-00005.gguf \
-    --backend ggml_cuda --tp 4 --mtp-spec --draft-model DSpark-drafter-Q2K-Q8-0731.gguf</code></pre>
+    --backend ggml_cuda --tp 4 --draft-model DSpark-drafter-Q2K-Q8-0731.gguf</code></pre>
   <p>它可运行在<strong>两个 GPU 引擎</strong>上 —— <code>--backend cuda</code>（Direct CUDA）与 <code>--backend ggml_cuda</code>（原生 ggml）；<code>ggml_vulkan</code> 与 <code>cpu</code> 对该架构没有投机路径，配置了草稿器时会打印警告。在 ggml 上草稿器就是计算图里额外的三层，其 key ring 由主干图自己提交，因此投机不产生任何主机往返。CLI 上它需要纯 argmax 采样（任何 temperature、top-k/p 或重复惩罚都会将其关闭）；服务端每一行验证都用该请求自己的采样器，因此可与任意采样设置组合。投机<strong>只服务单序列</strong> —— 一旦有第二个请求在途，DSV4 的 per-sequence slot 会以正常 decode 速度服务这一批。</p>
   <h4>实测（4×A40，DeepSeek-V4-Flash-0731 UD-Q8_K_XL，贪心）</h4>
   <div class="table-scroll">
@@ -89,12 +89,12 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model DeepSeek-V4-Flash-.
   </table>
   </div>
   <p>多轮对话获益最大 —— 延续既有上下文的轮次，正是草稿器最有把握的地方。在同一台机器上的 5 轮交互式会话中，每轮实测 1.50× 到 <strong>2.02×</strong>（接受率 66–87%），prefill 保持持平。在 200 token 与 15K 上下文两次运行中，贪心输出都与非投机基线逐字节一致。</p>
-  <p>为什么是 1.3× 而不是更多：主干是 6 选 256 的稀疏结构，验证批中每多一个 token 就要把它自己那套路由专家拉过显存 —— 无论起草多便宜，一行验证都要花掉约四分之一个完整 decode 步。<code>--spec-draft-conf-min</code>（默认 <code>0.35</code>，即保留某个起草位置所需的最小<em>累积</em>接受概率）正是让这笔交易保持正收益的旋钮；<code>--spec-draft-n-max</code> 则限制每块的 token 数。</p>
+  <p>为什么是 1.3× 而不是更多：主干是 6 选 256 的稀疏结构，验证批中每多一个 token 就要把它自己那套路由专家拉过显存 —— 无论起草多便宜，一行验证都要花掉约四分之一个完整 decode 步。<code>--spec-pmin</code>（块级草稿器默认 <code>0.35</code>，即保留某个起草位置所需的最小<em>累积</em>接受概率）正是让这笔交易保持正收益的旋钮；<code>--spec-draft</code> 则限制每块的 token 数。</p>
 
   <h2 id="dflash">DFlash 块级投机解码（Muse-Glimmer）</h2>
   <p>Muse-Glimmer 有自己的块级草稿模型 <strong>DFlash</strong>：一个独立的 5 层 GGUF（<code>general.architecture = dflash</code>），一次前向即提出整个投机窗口。它复用主干的 token embedding 与 LM head，维护自己的滑动窗口 KV 环，并按三步驱动——把主干在 <code>dflash.target_layers</code> 处的逐层输入残差<em>编码</em>成一行宽向量，将该行<em>注入</em>为每个草稿层的 K/V，然后把 <code>[anchor, MASK × (block−1)]</code> 送过 5 个块<em>起草</em>，并用主干的 LM head 打分。随后主干用一次批量前向完成验证。</p>
   <pre data-lang="bash"><code>dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
-    --backend ggml_cuda --draft-model dflash-kquant.gguf --spec-draft-n-max 15 \
+    --backend ggml_cuda --draft-model dflash-kquant.gguf --spec-draft 15 \
     --input prompt.txt --max-tokens 256</code></pre>
   <p>两部分都是可被 CUDA 图捕获并重放的融合原生图：<code>TSGgml_DFlashInject</code> 与 <code>TSGgml_DFlashDraftBlock</code>，后者以设备端 <code>argmax</code> 收尾，因此 202048 宽的概率块无需经 PCIe 回传主机。验证以贪心方式对齐主干，因此输出与普通贪心 decode 一致。运行期的<strong>成本调控器</strong>会把投机与普通解码逐 token 计时对比，在投机确实更慢时暂停起草——这保证投机只会更快，但也意味着它需要生成数百个 token 才能稳定，因此很短的回答可能看不到收益。CLI 上不要传任何采样参数：<code>--top-k 1</code> 不满足 <code>SamplingConfig.IsGreedy</code>，会静默关闭整条投机路径。在单张 RTX PRO 6000 Blackwell 上与 llama.cpp 自带的 DFlash 实现对比（Q8_0、贪心、60 token 提示）：<strong>50.9 tok/s，对比 llama.cpp 的 45.5 与普通解码的 35.0</strong>。完整的上下文阶梯（包括 llama.cpp 领先的区间）见仓库中的 <code>docs/models/muse-glimmer.md</code> 卡片。</p>
 

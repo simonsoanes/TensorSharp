@@ -53,6 +53,10 @@ public class ApiModelsResponseTests : IDisposable
                 fileLoggingEnabled: false,
                 samplingDefaults: null),
             new UploadStoragePolicy(_baseDir),
+            new SkillRegistry(new SkillRegistryOptions()),
+            codeRunner: null,
+            workspaces: null,
+            codeArtifacts: null,
             NullLoggerFactory.Instance);
 
         var result = adapter.GetModels();

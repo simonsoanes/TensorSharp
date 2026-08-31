@@ -24,7 +24,7 @@
 
   // MTP speculative decoding: Qwen3.6 embeds its NextN draft head in the trunk
   // GGUF (no separate draft file). Enable it on either host with:
-  //   "mtp-spec": true
+  //   "spec": true
   //
   // A second, slightly smaller build of this model lives at the models root:
   //   ${modelRoot}/Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf  (+ Qwen3.6-35B-A3B-mmproj-F16.gguf)

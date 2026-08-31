@@ -45,6 +45,8 @@ namespace TensorSharp.Models
         private IntPtr[] _tpDecodePlans;
         private bool _tpFusedDecodeReady;
         private bool _tpFusedDecodeLogged;
+        private bool _tpFusedDecodeDeclineLogged;
+        private bool _tpFusedPrefillDeclineLogged;
 
         // Set once a fused TP decode has written KV rows straight into the
         // device-resident cache copies. The op-at-a-time TP prefill reads the KV
@@ -348,10 +350,16 @@ namespace TensorSharp.Models
                     GgmlBasicOps.TensorParallelExecutePlans(_tpDecodePlans);
                 }
             }
-            catch (InvalidOperationException)
+            catch (InvalidOperationException ex)
             {
                 // The native side declined (no persistent graph for this window).
                 // Fall back to the per-op TP forward for this token.
+                if (!_tpFusedDecodeDeclineLogged)
+                {
+                    _tpFusedDecodeDeclineLogged = true;
+                    Console.WriteLine($"  Gemma4 fused tensor-parallel decode declined: {ex.Message}; " +
+                        "falling back to the per-op TP forward (slower). Reported once.");
+                }
                 return false;
             }
             finally
@@ -448,8 +456,14 @@ namespace TensorSharp.Models
 
                 GgmlBasicOps.TensorParallelExecutePlans(_tpDecodePlans);
             }
-            catch (InvalidOperationException)
+            catch (InvalidOperationException ex)
             {
+                if (!_tpFusedPrefillDeclineLogged)
+                {
+                    _tpFusedPrefillDeclineLogged = true;
+                    Console.WriteLine($"  Gemma4 fused tensor-parallel prefill declined: {ex.Message}; " +
+                        "falling back to the per-op TP forward (slower). Reported once.");
+                }
                 return false;
             }
             finally

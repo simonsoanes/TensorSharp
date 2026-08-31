@@ -20,7 +20,10 @@ using Microsoft.Extensions.Logging;
 using TensorSharp.Models;
 using TensorSharp.Runtime;
 using TensorSharp.Runtime.Logging;
+using TensorSharp.AgentHost.CodeExec;
+using TensorSharp.AgentHost.Skills;
 using TensorSharp.Server.Hosting;
+using TensorSharp.Server.Skills;
 using TensorSharp.Server.RequestParsers;
 using TensorSharp.Server.ResponseSerializers;
 using TensorSharp.Server.StreamingWriters;
@@ -42,6 +45,8 @@ namespace TensorSharp.Server.ProtocolAdapters
         private readonly InferenceQueue _queue;
         private readonly ServerHostingOptions _options;
         private readonly UploadStoragePolicy _uploads;
+        private readonly SkillRegistry _skills;
+        private readonly ICodeRunner? _codeRunner;
         private readonly ILoggerFactory _loggerFactory;
 
         public OllamaAdapter(
@@ -49,12 +54,16 @@ namespace TensorSharp.Server.ProtocolAdapters
             InferenceQueue queue,
             ServerHostingOptions options,
             UploadStoragePolicy uploads,
+            SkillRegistry skills,
+            ICodeRunner? codeRunner,
             ILoggerFactory loggerFactory)
         {
             _svc = svc ?? throw new ArgumentNullException(nameof(svc));
             _queue = queue ?? throw new ArgumentNullException(nameof(queue));
             _options = options ?? throw new ArgumentNullException(nameof(options));
             _uploads = uploads ?? throw new ArgumentNullException(nameof(uploads));
+            _skills = skills ?? throw new ArgumentNullException(nameof(skills));
+            _codeRunner = codeRunner;
             _loggerFactory = loggerFactory ?? throw new ArgumentNullException(nameof(loggerFactory));
         }
 
@@ -316,22 +325,65 @@ namespace TensorSharp.Server.ProtocolAdapters
             }
             var ollamaTools = ToolFunctionParser.ParseOllama(body);
             bool ollamaThink = body.TryGetProperty("think", out var thinkProp) && thinkProp.GetBoolean();
+            var requestedSkills = SkillSelectionParser.Parse(body);
 
             string lastOllamaUserContent = LoggingExtensions.SanitizeForLog(
                 messages.LastOrDefault(m => m.Role == "user")?.Content ?? string.Empty, 512);
             ollamaLogger.LogInformation(LogEventIds.ChatStarted,
-                "/api/chat/ollama request: model={Model} stream={Stream} maxTokens={MaxTokens} messages={Messages} tools={Tools} thinking={Thinking} userInput=\"{LastUser}\"",
-                modelName, stream, maxTokens, messages.Count, ollamaTools?.Count ?? 0, ollamaThink, lastOllamaUserContent);
+                "/api/chat/ollama request: model={Model} stream={Stream} maxTokens={MaxTokens} messages={Messages} tools={Tools} skills={Skills} thinking={Thinking} userInput=\"{LastUser}\"",
+                modelName, stream, maxTokens, messages.Count, ollamaTools?.Count ?? 0,
+                requestedSkills?.Count ?? 0, ollamaThink, lastOllamaUserContent);
+
+            if (requestedSkills is { Count: > 0 } && !_options.SkillsEnabled)
+            {
+                ollamaLogger.LogWarning(LogEventIds.HttpRequestRejected,
+                    "/api/chat/ollama rejected: skills requested but disabled");
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsJsonAsync(new { error = "Agent skills are disabled on this server (--no-skills)." });
+                return;
+            }
+
+            var skillPlan = SkillRequestPlan.Create(
+                _skills, requestedSkills, SkillSelectionParser.ParseDiscovery(body), ollamaTools,
+                _svc.Architecture, _svc.ContextTokens, _options, out var unknownSkills, codeRunner: _codeRunner,
+                logger: ollamaLogger);
+
+            if (unknownSkills.Count > 0)
+            {
+                ollamaLogger.LogWarning(LogEventIds.HttpRequestRejected,
+                    "/api/chat/ollama rejected: unknown skills {Unknown}", string.Join(",", unknownSkills));
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsJsonAsync(new
+                {
+                    error = $"No skill called '{unknownSkills[0]}' is installed. "
+                            + "GET /api/skills lists what this server has.",
+                });
+                return;
+            }
+
+            // This surface has no StructuredOutputPrompt.Apply to compose with, so the
+            // skill block is injected directly. Same shape either way: merged into the
+            // leading system message, or prepended as one.
+            var ollamaTools2 = skillPlan?.Tools ?? ollamaTools;
+            if (skillPlan != null)
+            {
+                messages = skillPlan.Apply(messages);
+                ollamaLogger.LogInformation(LogEventIds.SkillSelected,
+                    "/api/chat/ollama skills: selected={Selected} announced={Announced} inlined={Inlined} catalog={Catalog} tools={ToolsOffered}",
+                    skillPlan.DescribeSelection(), skillPlan.Prompt.Deferred.Count,
+                    skillPlan.Prompt.Inlined.Count,
+                    skillPlan.Prompt.Catalog.Count, skillPlan.ToolsOffered);
+            }
 
             using var ticket = _queue.Enqueue(ctx.RequestAborted);
 
             if (stream)
             {
-                await StreamChatAsync(ctx, modelName, messages, maxTokens, samplingConfig, ollamaTools, ollamaThink, ticket);
+                await StreamChatAsync(ctx, modelName, messages, maxTokens, samplingConfig, ollamaTools2, ollamaThink, ticket, skillPlan, ollamaLogger);
             }
             else
             {
-                await CompleteChatAsync(ctx, modelName, messages, maxTokens, samplingConfig, ollamaTools, ollamaThink, ticket);
+                await CompleteChatAsync(ctx, modelName, messages, maxTokens, samplingConfig, ollamaTools2, ollamaThink, ticket, skillPlan, ollamaLogger);
             }
         }
 
@@ -343,7 +395,9 @@ namespace TensorSharp.Server.ProtocolAdapters
             SamplingConfig samplingConfig,
             List<ToolFunction> tools,
             bool enableThinking,
-            QueueTicket ticket)
+            QueueTicket ticket,
+            SkillRequestPlan skillPlan,
+            ILogger skillLogger)
         {
             NdJsonWriter.ApplyHeaders(ctx.Response);
 
@@ -368,13 +422,34 @@ namespace TensorSharp.Server.ProtocolAdapters
             parser.Init(enableThinking, tools);
             bool useParser = enableThinking || (tools != null && tools.Count > 0) || parser.AlwaysRequired;
             List<ToolCall> collectedToolCalls = null;
+            // Set when the skills loop hands over already-separated pieces (see
+            // SkillChatLoop). `parser` is bypassed for those and must not be flushed at
+            // the end either — the loop's own parser already flushed.
+            bool sawParsedUpdate = false;
 
             await foreach (var update
-                in _svc.ChatStreamWithMetricsAsync(messages, maxTokens, ctx.RequestAborted, samplingConfig,
-                    tools, enableThinking))
+                in _svc.ChatStreamWithSkillsAsync(messages, maxTokens, ctx.RequestAborted, samplingConfig,
+                    tools, enableThinking, skillPlan, skillLogger))
             {
                 if (!update.Done)
                 {
+                    if (update.IsParsed)
+                    {
+                        sawParsedUpdate = true;
+                        if (update.ParsedToolCalls is { Count: > 0 })
+                            collectedToolCalls = new List<ToolCall>(update.ParsedToolCalls);
+
+                        string parsedThink = string.IsNullOrEmpty(update.ThinkingPiece) ? null : update.ThinkingPiece;
+                        string parsedContent = update.Piece ?? "";
+                        if (parsedThink == null && parsedContent.Length == 0)
+                            continue;
+
+                        await NdJsonWriter.WriteLineAsync(ctx.Response,
+                            OllamaResponseFactory.ChatParsedChunk(_svc.LoadedModelName, parsedContent, parsedThink),
+                            ctx.RequestAborted, JsonOptions.IgnoreNulls);
+                        continue;
+                    }
+
                     object resp = useParser
                         ? BuildParsedChatChunk(_svc.LoadedModelName, parser, update.Piece, ref collectedToolCalls, out bool emit)
                         : OllamaResponseFactory.ChatRawTokenChunk(_svc.LoadedModelName, update.Piece);
@@ -386,9 +461,9 @@ namespace TensorSharp.Server.ProtocolAdapters
                 }
                 else
                 {
-                    if (useParser)
+                    if (useParser || sawParsedUpdate)
                     {
-                        var finalParsed = parser.Add("", true);
+                        var finalParsed = sawParsedUpdate ? new ParsedOutput() : parser.Add("", true);
                         if (finalParsed.ToolCalls != null)
                             collectedToolCalls = finalParsed.ToolCalls;
 
@@ -461,7 +536,9 @@ namespace TensorSharp.Server.ProtocolAdapters
             SamplingConfig samplingConfig,
             List<ToolFunction> tools,
             bool enableThinking,
-            QueueTicket ticket)
+            QueueTicket ticket,
+            SkillRequestPlan skillPlan,
+            ILogger skillLogger)
         {
             await ticket.WaitUntilReadyAsync();
 
@@ -473,18 +550,18 @@ namespace TensorSharp.Server.ProtocolAdapters
                 return;
             }
 
-            var sb = new StringBuilder();
+            var collector = new ChatStreamCollector();
             int promptTokens = 0, evalTokens = 0, kvReusedTokens = 0;
             long totalNs = 0, promptNs = 0, evalNs = 0;
             string pipelineFinishReason = null;
 
             await foreach (var update
-                in _svc.ChatStreamWithMetricsAsync(messages, maxTokens, ctx.RequestAborted, samplingConfig,
-                    tools, enableThinking))
+                in _svc.ChatStreamWithSkillsAsync(messages, maxTokens, ctx.RequestAborted, samplingConfig,
+                    tools, enableThinking, skillPlan, skillLogger))
             {
                 if (!update.Done)
                 {
-                    sb.Append(update.Piece);
+                    collector.Add(update);
                 }
                 else
                 {
@@ -494,17 +571,16 @@ namespace TensorSharp.Server.ProtocolAdapters
                 }
             }
 
-            string rawOutput = sb.ToString();
-            var parser = OutputParserFactory.Create(_svc.Architecture);
-            parser.Init(enableThinking, tools);
-            bool useParser = enableThinking || (tools != null && tools.Count > 0) || parser.AlwaysRequired;
+            string rawOutput = collector.PlainText();
+            bool useParser = enableThinking || (tools != null && tools.Count > 0)
+                || OutputParserFactory.IsAlwaysRequired(_svc.Architecture);
 
             object finalMessage;
             bool sawToolCalls = false;
 
-            if (useParser)
+            if (useParser || collector.IsParsed)
             {
-                var parsed = parser.Add(rawOutput, true);
+                var parsed = collector.Resolve(_svc.Architecture, enableThinking, tools);
                 string thinkingOut = enableThinking && !string.IsNullOrEmpty(parsed.Thinking) ? parsed.Thinking : null;
                 finalMessage = OllamaResponseFactory.ChatNonStreamingMessage(parsed.Content, thinkingOut, parsed.ToolCalls);
                 sawToolCalls = parsed.ToolCalls != null && parsed.ToolCalls.Count > 0;

@@ -12,7 +12,7 @@ namespace TensorSharp.Server.Hosting
 {
     /// <summary>
     /// Startup-time validation for the optional MTP speculative-decoding draft.
-    /// When an operator explicitly names a draft GGUF with <c>--mtp-draft-model</c>,
+    /// When an operator explicitly names a draft GGUF with <c>--draft-model</c>,
     /// a load that doesn't activate speculation used to be swallowed as a warning,
     /// leaving the server running with MTP silently off — the operator had to dig
     /// through the log to discover their command did nothing. This helper turns
@@ -29,7 +29,7 @@ namespace TensorSharp.Server.Hosting
         /// </summary>
         /// <param name="activationError">
         /// The per-load reason recorded by the model lifecycle when an explicit
-        /// <c>--mtp-draft-model</c> could not be activated; <c>null</c> when the
+        /// <c>--draft-model</c> could not be activated; <c>null</c> when the
         /// draft loaded successfully or no draft was requested.
         /// </param>
         public static string GetFatalActivationError(string activationError)
@@ -37,11 +37,11 @@ namespace TensorSharp.Server.Hosting
             if (string.IsNullOrEmpty(activationError))
                 return null;
 
-            return "MTP speculative decoding was requested via --mtp-draft-model but the draft head " +
+            return "Speculative decoding was requested via --draft-model but the draft head " +
                    "could not be activated: " + activationError + " " +
                    "Use the draft GGUF that matches this target model (the draft's embedding_length_out " +
                    "must equal the target's hidden size — e.g. pair the 12B target with its 12B draft, not the " +
-                   "26B-A4B draft), or drop --mtp-draft-model / --mtp-spec to run without speculation.";
+                   "26B-A4B draft), or drop --draft-model to run without speculation.";
         }
     }
 }

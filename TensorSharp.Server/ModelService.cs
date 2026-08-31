@@ -14,6 +14,7 @@ using System.Linq;
 using System.Threading;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using TensorSharp.Server.Skills;
 
 namespace TensorSharp.Server
 {
@@ -58,7 +59,7 @@ namespace TensorSharp.Server
         public ModelBase Model => _lifecycle.Model;
 
         /// <summary>
-        /// Non-null when an explicitly requested <c>--mtp-draft-model</c> could not
+        /// Non-null when an explicitly requested <c>--draft-model</c> could not
         /// be activated on the loaded target (see
         /// <see cref="ModelLifecycleService.DraftHeadActivationError"/>). The startup
         /// loader promotes it to a fail-fast error.
@@ -200,6 +201,91 @@ namespace TensorSharp.Server
                 bool enableThinking = false)
         {
             return _generation.ChatStreamWithMetricsAsync(session, history, maxTokens, cancellationToken, samplingConfig, tools, enableThinking);
+        }
+
+        /// <summary>
+        /// The loaded model's context length, or 0 when nothing is loaded. Used to size
+        /// the Agent Skills prompt block: the injected instructions are budgeted as a
+        /// fraction of the context so a large skill cannot crowd out the conversation.
+        /// </summary>
+        public int ContextTokens => _lifecycle.Model?.MaxContextLength ?? 0;
+
+        /// <summary>
+        /// Session-aware chat with Agent Skills.
+        ///
+        /// <para>
+        /// With <paramref name="skills"/> null — or with a plan whose model family
+        /// cannot carry tool declarations, so nothing will be fetched — this is exactly
+        /// <see cref="ChatStreamWithMetricsAsync(ChatSession, List{ChatMessage}, int, CancellationToken, SamplingConfig, List{ToolFunction}, bool)"/>
+        /// and costs nothing. Otherwise the request runs through the
+        /// progressive-disclosure loop, which answers the model's <c>skills_read</c>
+        /// calls in process and forwards every round's content and reasoning as it
+        /// decodes while keeping the tool markup to itself, so an ordinary OpenAI client
+        /// streams a normal completion rather than stalling on a tool call it has no
+        /// implementation for.
+        /// </para>
+        /// <para>
+        /// The updates it yields in that case carry <see cref="ChatStreamUpdate.IsParsed"/>:
+        /// the loop has already run the output parser, and an adapter that runs its own
+        /// over them would be parsing parsed text.
+        /// </para>
+        /// </summary>
+        internal IAsyncEnumerable<ChatStreamUpdate>
+            ChatStreamWithSkillsAsync(
+                ChatSession session,
+                List<ChatMessage> history,
+                int maxTokens,
+                CancellationToken cancellationToken,
+                SamplingConfig samplingConfig,
+                List<ToolFunction> tools,
+                bool enableThinking,
+                SkillRequestPlan skills,
+                ILogger logger = null)
+        {
+            if (skills == null || !skills.ToolsOffered)
+            {
+                return ChatStreamWithMetricsAsync(
+                    session, history, maxTokens, cancellationToken, samplingConfig, tools, enableThinking);
+            }
+
+            // Sampling for a turn that can run code. The runner decides, because it is
+            // what knows the operator's configuration; SamplingConfig.ForCodingTurn then
+            // changes only values still sitting at their built-in default, so a
+            // temperature a client or an operator actually chose is never overruled. The
+            // caller's instance is cloned, never mutated — it is the server-wide default
+            // and is shared across every request.
+            SamplingConfig turnSampling =
+                skills.ToolContext?.CodeRunner?.ForCodingTurn(samplingConfig) ?? samplingConfig;
+
+            return SkillChatLoop.RunAsync(
+                Architecture,
+                history,
+                skills,
+                enableThinking,
+                (turnMessages, turnTools, ct) => _generation.ChatStreamWithMetricsAsync(
+                    session, turnMessages, maxTokens, ct, turnSampling, turnTools, enableThinking),
+                logger,
+                cancellationToken);
+        }
+
+        /// <summary>
+        /// Stateless overload for the protocols that do not carry a session
+        /// (OpenAI chat, Responses, Ollama).
+        /// </summary>
+        internal IAsyncEnumerable<ChatStreamUpdate>
+            ChatStreamWithSkillsAsync(
+                List<ChatMessage> history,
+                int maxTokens,
+                CancellationToken cancellationToken,
+                SamplingConfig samplingConfig,
+                List<ToolFunction> tools,
+                bool enableThinking,
+                SkillRequestPlan skills,
+                ILogger logger = null)
+        {
+            return ChatStreamWithSkillsAsync(
+                _intrinsicSession, history, maxTokens, cancellationToken,
+                samplingConfig, tools, enableThinking, skills, logger);
         }
 
         /// <summary>True when the loaded model is a DiffusionGemma block-diffusion model, which is

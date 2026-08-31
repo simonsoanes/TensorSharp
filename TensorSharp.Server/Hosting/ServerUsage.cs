@@ -9,6 +9,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
 using System;
+using TensorSharp.AgentHost.Skills;
 using System.Collections.Generic;
 using System.IO;
 
@@ -265,13 +266,15 @@ namespace TensorSharp.Server.Hosting
                     "turns at the GPU. Default: 1024.",
                     "--prefill-chunk-size 256"),
             }),
-            ("Speculative decoding", new[]
+            ("Speculative decoding (one name per option; the old --mtp-*/--spec-draft-model spellings error with a pointer here)", new[]
             {
                 new OptionHelp("--spec | --no-spec",
                     "Enable/disable speculative decoding: a drafter proposes the next few tokens and the trunk " +
                     "verifies them in one batched forward. Every emitted token still comes from a trunk row, so " +
-                    "the output is what standard decoding would have produced. Engages for solo (non-concurrent) " +
-                    "sequences. Accepted as --mtp-spec / --no-mtp-spec too. Default: off.",
+                    "the output is what standard decoding would have produced. Needed only for a drafter EMBEDDED " +
+                    "in the checkpoint (Qwen 3.6 / GLM 5.2 NextN) - it pages extra weights into VRAM, so it stays " +
+                    "an explicit choice; a drafter named on --draft-model engages by itself. Engages for solo " +
+                    "(non-concurrent) sequences. Default: off.",
                     "--spec"),
                 new OptionHelp("--spec-type <name>",
                     "Speculation algorithm: 'auto' (default) uses whatever drafter the checkpoint carries; " +
@@ -280,26 +283,22 @@ namespace TensorSharp.Server.Hosting
                     "quotes its input: summarizing, editing, structured output, agentic loops).",
                     "--spec --spec-type ngram"),
                 new OptionHelp("--spec-draft <N>",
-                    "Maximum draft tokens per step (1-64). Accepted as --mtp-draft too. Default: 8.",
+                    "Maximum draft tokens per step (1-64). Default: 8.",
                     "--spec-draft 4"),
                 new OptionHelp("--spec-pmin <f>",
-                    "Draft-confidence gate in (0, 1]; drafting stops below it. What the number means is per " +
-                    "algorithm, so each brings its own default — 0.75 for a per-token draft head, 0.35 for a " +
-                    "block drafter (where the gate is the CUMULATIVE prefix probability, so the same number " +
-                    "means something much stricter), 0 for n-gram. Accepted as --mtp-pmin too.",
+                    "Draft-confidence gate in [0, 1]; drafting stops below it, and 0 disables the gate " +
+                    "entirely. What the number means is per algorithm, so each brings its own default — 0.75 " +
+                    "for a per-token draft head, 0.35 for a block drafter (where the gate is the CUMULATIVE " +
+                    "prefix probability, so the same number means something much stricter), 0 for n-gram.",
                     "--spec-pmin 0.6"),
-                new OptionHelp("--spec-draft-model <path>",
-                    "Separate draft GGUF for models whose draft head ships as its own file (Gemma 4 assistant). " +
-                    "Qwen 3.6 and GLM 5.2 embed their NextN block and need no flag. Accepted as " +
-                    "--mtp-draft-model too. Default: none.",
-                    "--spec-draft-model gemma-4-E4B-it-assistant.Q8_0.gguf"),
                 new OptionHelp("--draft-model <path>",
-                    "Block drafter GGUF for architectures whose drafter must be resident before the layer " +
-                    "split: DeepSeek V4's DSpark, and the DFlash / DFlash2 drafters for Muse-Glimmer and " +
-                    "Qwen 3.8. The file's general.architecture decides which it is, not its name. Naming the " +
-                    "file IS the request, so it needs no --spec; engages for solo sequences on the cuda and " +
-                    "ggml_cuda backends. Default: none; env TS_DSV4_DSPARK / TS_QWEN35_DFLASH / " +
-                    "TS_MUSE_GLIMMER_DFLASH.",
+                    "A drafter that ships as its own GGUF, whatever its kind: DeepSeek V4's DSpark, the DFlash / " +
+                    "DFlash2 drafters for Muse-Glimmer and Qwen 3.8, or Gemma 4's per-token assistant head. " +
+                    "The file's own general.architecture decides how it loads (a block drafter is fused before " +
+                    "the layer split, a per-token head attaches after) - never its file name, and never a " +
+                    "second flag. Naming the file IS the request: speculation turns on with it, no --spec " +
+                    "needed, and an explicit --no-spec vetoes it. Qwen 3.6 and GLM 5.2 embed their drafter in " +
+                    "the trunk and use --spec instead. Default: none.",
                     "--draft-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf"),
             }),
             ("Qwen-Image-Edit companion models (qwen_image DiT GGUFs)", new[]
@@ -407,6 +406,171 @@ namespace TensorSharp.Server.Hosting
                     "the server is reachable by untrusted clients (TS_UPLOAD_TTL_HOURS env var overrides).",
                     "--upload-ttl-hours 24"),
             }),
+            ("Agent skills (SKILL.md bundles; the skills/ directory next to the server binary)", new[]
+            {
+                new OptionHelp("--skills-dir <path>",
+                    "Directory to scan for skills. A root may hold one skill (it contains SKILL.md) or many, " +
+                    "nested up to three levels, so a checkout of a skills repository works as-is. Repeat the " +
+                    "flag for several; earlier roots take precedence on a name clash. Default: the skills/ " +
+                    "directory next to the binary, created on startup (TS_SKILLS_DIR env var overrides, " +
+                    "path-separated).",
+                    "--skills-dir ./skills"),
+                new OptionHelp("--skill <name>",
+                    "Give EVERY request this skill, instead of waiting for a client to name it in the request's " +
+                    "\"skills\" array. Repeat the flag for several. A request that names its own skills replaces " +
+                    "this selection rather than adding to it, so a client can always narrow it. Default: none.",
+                    "--skill pdf --skill xlsx"),
+                new OptionHelp("--list-skills",
+                    "Print the skill registry and exit, without loading a model: what was found, where it came " +
+                    "from, and every directory that looked like a skill but failed to load, with the reason - " +
+                    "which is otherwise invisible, since a skill whose SKILL.md will not parse is simply absent.",
+                    "--list-skills"),
+                new OptionHelp("--no-skills",
+                    "Disable Agent Skills entirely: no directory is scanned, the /v1/skills and /api/skills " +
+                    "endpoints are not mapped, and a 'skills' field on a chat request is rejected instead of " +
+                    "silently ignored. Default: enabled (TS_NO_SKILLS env var overrides).",
+                    "--no-skills"),
+                new OptionHelp("--skills-no-discovery",
+                    "Show a request only the skills it named, instead of also advertising the rest of the " +
+                    "registry so the model can pick up one the caller did not think of. A request can override " +
+                    "this per call with \"skills_discovery\". Default: discovery on.",
+                    "--skills-no-discovery"),
+                new OptionHelp("--skills-allow-exec",
+                    "Let the model RUN a skill's bundled scripts on this host. This is arbitrary code execution " +
+                    "under the server's own account, chosen by a model reading uploaded Markdown - leave it off " +
+                    "on any server that accepts skill uploads or is reachable by untrusted clients. Default: off " +
+                    "(TS_SKILLS_ALLOW_EXEC env var overrides).",
+                    "--skills-allow-exec"),
+                new OptionHelp("--skills-sandbox <off|preferred|required>",
+                    "How hard to insist on OS isolation for a skill's scripts. required (the default) refuses to " +
+                    "run them at all on a host with no sandbox, rather than running them unconfined; preferred " +
+                    "sandboxes where it can and runs them anyway where it cannot; off applies only the in-process " +
+                    "limits. macOS uses sandbox-exec, Linux uses bubblewrap when bwrap is installed " +
+                    "(TS_SKILLS_SANDBOX env var overrides).",
+                    "--skills-sandbox required"),
+                new OptionHelp("--skills-allow-network",
+                    "Let a sandboxed skill script reach the network. Denied by default, which is what stops a " +
+                    "script that read something it should not from sending it anywhere " +
+                    "(TS_SKILLS_ALLOW_NETWORK env var overrides).",
+                    "--skills-allow-network"),
+                new OptionHelp("--skills-max-rounds <N>",
+                    "How many times a model may fetch skill content - or run, read and fix code - in one turn before " +
+                    "it must answer (1-64). Each round is a full generation, so this bounds what one " +
+                    "malfunctioning request costs. Default: 8, or 24 when --code-exec is on, because " +
+                    "writing a file, running it and fixing the traceback takes more steps than reading " +
+                    "files. A value set here is used as given, either way " +
+                    "(TS_SKILLS_MAX_ROUNDS env var overrides).",
+                    "--skills-max-rounds 4"),
+            }),
+            ("Code execution (the shell tool: commands the MODEL writes, run in a sandbox)", new[]
+            {
+                new OptionHelp("--code-exec",
+                    "Offer the model a 'shell' tool: it types a command, this host runs it in a sandbox, and " +
+                    "the model reads back the exit code and everything it printed. This is how the model does " +
+                    "all its work with files and code - write one with a heredoc, run it, search it, install " +
+                    "what it needs, check its own output - which is the shape Codex and Claude Code use. Files " +
+                    "it writes are kept and handed to the user as download links, and the working directory " +
+                    "PERSISTS for the rest of that chat session, so one step's output is the next step's input " +
+                    "and cd and exported variables survive from call to call (PATH does not, so an activated " +
+                    "virtualenv does not stay activated - installed packages are already on the path). One " +
+                    "tool comes with it: 'apply_patch', Codex's patch envelope, which creates, updates, deletes " +
+                    "and renames SEVERAL files in one all-or-nothing call. It is there because a heredoc " +
+                    "rewrites a whole file while a patch changes three lines of it, and because the HOST places " +
+                    "the bytes - from anchors it either finds or refuses to guess at - rather than the model " +
+                    "retyping a file it half-remembers. Separate from --skills-allow-exec on purpose: that runs " +
+                    "a script an operator put on disk, this runs commands written during the request. The " +
+                    "sandbox is required, not optional - on a host that cannot confine a process (no " +
+                    "sandbox-exec on macOS, no bwrap on Linux, and Windows job objects, which bound CPU but not " +
+                    "files or sockets) the tool refuses to run rather than running unconfined - and there is no " +
+                    "override here, because an operator cannot make that trade for everyone who can reach the " +
+                    "port (--code-exec-unconfined exists, but only TensorSharp.Cli honours it; this server " +
+                    "rejects it at startup). A command NEVER reaches the network, on any host and in any " +
+                    "configuration: installs are the only thing that reaches a registry, and the HOST performs " +
+                    "those itself rather than running the model's install command. Default: off. TS_CODE_EXEC " +
+                    "also turns it on, and note the rule: ANY value except 0 counts as on, so " +
+                    "TS_CODE_EXEC=false enables it.",
+                    "--code-exec"),
+                new OptionHelp("--code-exec-allow-install",
+                    "Let the model install packages (pip / npm) into an environment the chat session keeps - so " +
+                    "a later command, and a skill's own scripts, can import them too. This is the half that " +
+                    "touches the network, so it is a separate decision. What makes it safe is that the " +
+                    "model's install command is READ, not run: the host takes the tool and the package names " +
+                    "out of it, validates the names, and performs the install itself with an argument vector " +
+                    "it built - then substitutes the install out of the line, so the rest of the line runs " +
+                    "with no network like anything else. Two holes closed at once, which is why it is done " +
+                    "this way: an argument the model wrote can no longer choose the index, and a socket " +
+                    "granted for an install can no longer be shared with whatever else was on the line. An " +
+                    "option that would change where a package comes from (--index-url, -i, --find-links, " +
+                    "--registry, a URL requirement) is refused by name; an installer the host cannot perform " +
+                    "(gem, cargo) is refused too; -r requirements.txt is read and each line validated. Only " +
+                    "prebuilt wheels are installed and install scripts never run (pip --only-binary=:all:, " +
+                    "npm --ignore-scripts), so a package shipping source only fails to install rather than " +
+                    "executing its setup.py as this account. Also what lets a skill script's missing " +
+                    "dependency be installed automatically instead of failing. Requires --code-exec. " +
+                    "Default: off (TS_CODE_EXEC_ALLOW_INSTALL env var overrides).",
+                    "--code-exec --code-exec-allow-install"),
+                new OptionHelp("--code-exec-packages <list>",
+                    "Restrict installs to these package names, comma-separated; anything else is refused and " +
+                    "the model is told which names are allowed. Matching is on the bare name, so a version the " +
+                    "model pins (numpy==2.1.0) still matches the entry 'numpy'; at most 16 packages are " +
+                    "installed at once regardless. This is enforceable because the HOST performs every " +
+                    "install: it READS the names out of the model's command rather than running that command, " +
+                    "and builds the installer's argument vector itself — so the list applies whether the model " +
+                    "wrote pip, python -m pip, or a requirements file. Only meaningful with " +
+                    "--code-exec-allow-install. Default: empty, meaning any package may be installed.",
+                    "--code-exec-packages numpy,pandas,reportlab"),
+                new OptionHelp("--code-exec-install-domains <list>",
+                    "The hosts a host-performed install may reach, comma-separated; exact names or *.suffix " +
+                    "wildcards. A loopback CONNECT proxy holds the list and the installer is pointed at it " +
+                    "through HTTPS_PROXY. On macOS the sandbox admits exactly that one port, so every other " +
+                    "destination is unreachable at the OS level; elsewhere the installer follows the proxy " +
+                    "because pip and npm honour that variable - obedience rather than confinement, with what " +
+                    "still holds being that the host built the argument vector, so nothing in it points " +
+                    "elsewhere. Exact names by default and no wildcards, because '*.pypi.org' would also admit " +
+                    "upload.pypi.org. An EMPTY value disables the pinning entirely. Default: pypi.org," +
+                    "files.pythonhosted.org,registry.npmjs.org (TS_CODE_EXEC_INSTALL_DOMAINS env var " +
+                    "overrides; a value set with this flag wins over it).",
+                    "--code-exec-install-domains pypi.org,files.pythonhosted.org"),
+                new OptionHelp("--code-exec-timeout <seconds>",
+                    "How long one command may run before it is killed, in whole seconds; must be a positive " +
+                    "number. Bounds what a single runaway command costs. A call may ask for less or more, up to " +
+                    "10 minutes; a command that runs over is stopped and the model still gets everything it " +
+                    "printed first, because a timeout that discards output makes it re-run the command blind. " +
+                    "Default: 120.",
+                    "--code-exec-timeout 300"),
+                new OptionHelp("--code-exec-temperature <number>",
+                    "Sampling temperature for a turn in which the model can run code, between 0 and 2; a " +
+                    "negative number leaves sampling alone entirely. The built-in defaults are Ollama's CHAT " +
+                    "defaults - temperature 0.8, top_k 40, top_p 0.9, repeat_penalty 1.1 over a 64-token " +
+                    "window - inherited for API compatibility and never chosen for code. That penalty window " +
+                    "is two to four lines of Python, so it penalises the indentation, the 'self.', the " +
+                    "'return' and the closing delimiters that carry the code's structure against each other; " +
+                    "this setting turns it off as well as setting the temperature. Only values still sitting " +
+                    "at the built-in default are changed, so a temperature a client sent or an operator " +
+                    "pinned is never overruled. Applies to the whole turn, the final written answer " +
+                    "included. No TEMPERATURE is set by default, deliberately: the Agents SDK leaves " +
+                    "temperature, top_p and both penalties unset and omits them from the request, and " +
+                    "Claude Code exposes no sampling setting at all, so there is no precedent for adding " +
+                    "one and it is offered as a switch instead. The repetition PENALTY is removed for " +
+                    "coding turns regardless, because that REMOVES an Ollama chat default which neither " +
+                    "reference has any analogue of. Default: not set.",
+                    "--code-exec-temperature 0.1"),
+                new OptionHelp("--code-exec-shell <path|name>",
+                    "Which shell to run commands through, when the host's own choice is wrong or absent. The " +
+                    "default is bash (then sh) on macOS and Linux, and PowerShell on Windows - where a bare " +
+                    "'bash' on PATH is refused on purpose, because it is the WSL launcher and would run the " +
+                    "command inside a Linux VM that the job object holding the launcher cannot reach. Point " +
+                    "this at a real bash (Git Bash, MSYS2) to use one there. The model is told which dialect it " +
+                    "is typing into, so this also changes the examples in its tool description. Default: chosen " +
+                    "by platform.",
+                    "--code-exec-shell /opt/homebrew/bin/bash"),
+                new OptionHelp("--code-exec-max-output <bytes>",
+                    "How much of one command's output is kept and shown to the model. What is dropped comes out " +
+                    "of the MIDDLE, keeping the head and the tail: the end of a build or a test run is where " +
+                    "the failure is, and head-only truncation reliably discards exactly the part that was " +
+                    "wanted. Default: 32768.",
+                    "--code-exec-max-output 65536"),
+            }),
             ("Configuration file", new[]
             {
                 new OptionHelp("--config <path>",
@@ -440,6 +604,61 @@ namespace TensorSharp.Server.Hosting
         /// placeholder can itself contain one (<c>--mmproj &lt;path|none&gt;</c>,
         /// <c>--sampling-precedence &lt;config|request&gt;</c>).
         /// </summary>
+        /// <summary>
+        /// Print the skill registry for <c>--list-skills</c>: what loaded, where it came
+        /// from, and — the reason the command earns its keep — every directory that
+        /// looked like a skill and did not load, with the reason. A skill whose
+        /// <c>SKILL.md</c> will not parse is otherwise simply absent from every listing,
+        /// which is the hardest kind of problem for its author to diagnose.
+        /// </summary>
+        public static void PrintSkills(TextWriter writer, SkillRegistry registry, bool enabled)
+        {
+            if (!enabled || registry == null)
+            {
+                writer.WriteLine("Agent skills are disabled (--no-skills / TS_NO_SKILLS).");
+                return;
+            }
+
+            writer.WriteLine($"Skill roots: {string.Join(", ", registry.Roots)}");
+            writer.WriteLine();
+
+            if (registry.Skills.Count == 0)
+            {
+                writer.WriteLine("No skills found.");
+                writer.WriteLine();
+                writer.WriteLine("A skill is a directory containing SKILL.md. Drop one under a root above,");
+                writer.WriteLine("point at your own with --skills-dir <path>, or POST a .zip to /api/skills.");
+            }
+            else
+            {
+                writer.WriteLine($"{registry.Skills.Count} skill(s):");
+                writer.WriteLine();
+                foreach (Skill skill in registry.Skills)
+                {
+                    string origin = skill.Origin == SkillOrigin.Installed ? "installed" : "discovered";
+                    writer.WriteLine($"  {skill.Id}  [{origin}]");
+                    writer.WriteLine($"      {SkillTextBudget.Truncate(skill.Description, 300)}");
+                    int bundled = System.Linq.Enumerable.Count(skill.BundledFiles);
+                    writer.WriteLine(
+                        $"      {bundled} bundled file(s), {SkillTextBudget.FormatBytes(skill.TotalBytes)}, "
+                        + $"~{skill.Manifest.ApproximateBodyTokens} tokens of instructions");
+                    foreach (string warning in skill.Manifest.Warnings)
+                        writer.WriteLine($"      warning: {warning}");
+                    writer.WriteLine();
+                }
+            }
+
+            if (registry.Errors.Count > 0)
+            {
+                writer.WriteLine($"{registry.Errors.Count} directory/directories could not be loaded:");
+                foreach (SkillLoadError error in registry.Errors)
+                    writer.WriteLine($"  {error.Path}: {error.Message}");
+                writer.WriteLine();
+            }
+
+            writer.WriteLine("Select one per request with \"skills\": [\"<name>\"], or for every request with --skill <name>.");
+        }
+
         internal static IEnumerable<string> DocumentedFlags()
         {
             foreach (var (_, options) in Sections)

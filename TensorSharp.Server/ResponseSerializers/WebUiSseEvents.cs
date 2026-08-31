@@ -9,6 +9,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
 using System.Collections.Generic;
+using TensorSharp.AgentHost.Skills;
 using System.Linq;
 using TensorSharp.Models;
 
@@ -50,6 +51,55 @@ namespace TensorSharp.Server.ResponseSerializers
                 name = tc.Name,
                 arguments = tc.Arguments,
             }).ToList(),
+        };
+
+        /// <summary>
+        /// One Agent Skills lookup the server performed on the model's behalf.
+        ///
+        /// <para>
+        /// The browser discriminates frames purely by WHICH KEY IS PRESENT, so
+        /// <c>skill_step</c> must not collide with any other frame's discriminator. It
+        /// exists because the progressive-disclosure loop deliberately withholds an
+        /// intermediate round's tokens (they carry the tool-call markup); without these
+        /// frames the user watches a blank composer for however long the model spends
+        /// reading files.
+        /// </para>
+        /// </summary>
+        public static object SkillStep(SkillToolInvocation invocation) => new
+        {
+            skill_step = invocation.Tool,
+            skill = invocation.SkillId,
+            detail = invocation.ResourcePath,
+            ok = invocation.Ok,
+            round = invocation.Round,
+            // Files a shell command produced, so the UI can render download links
+            // itself. The model is separately told to repeat the links in its answer,
+            // but a small model does that erratically — the user's download must not
+            // depend on it.
+            files = invocation.Files.Count == 0 ? null : invocation.Files.Select(f => (object)new
+            {
+                name = f.Name,
+                bytes = f.Bytes,
+                url = f.Url,
+            }).ToList(),
+        };
+
+        /// <summary>
+        /// Live progress through an in-process tool call's two silent stretches:
+        /// <c>writing</c> while the model generates the call (with the new body text),
+        /// <c>running</c> while the host executes it (with elapsed seconds, one frame a
+        /// second), <c>finished</c> when execution returned. Without these the user
+        /// watches a frozen page for the length of a program being written plus a pip
+        /// install.
+        /// </summary>
+        public static object ToolProgress(string phase, string tool, string text, double seconds, string detail) => new
+        {
+            tool_progress = phase,
+            tool,
+            text,
+            seconds,
+            // What is being run, in one line: "python · 2.1 KB", "scripts/extract.py 2400".
+            detail,
         };
 
         public static object Done(

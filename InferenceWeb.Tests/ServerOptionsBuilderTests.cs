@@ -11,8 +11,11 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using TensorSharp.Runtime;
+using TensorSharp.AgentHost.CodeExec;
 using TensorSharp.Runtime.Scheduling;
+using TensorSharp.AgentHost.Skills;
 using TensorSharp.Runtime.Speculative;
 using TensorSharp.Server.Hosting;
 
@@ -489,12 +492,14 @@ public class ServerOptionsBuilderTests : IDisposable
             "--paged-kv", "--paged-kv-block-size", "--paged-kv-ram-mb",
             "--paged-kv-ssd-dir", "--paged-kv-ssd-mb", "--paged-kv-quant-bits",
             "--continuous-batching", "--prefill-chunk-size",
-            "--spec", "--spec-draft", "--spec-pmin", "--spec-draft-model",
-            "--mtp-spec", "--mtp-draft", "--mtp-pmin", "--mtp-draft-model", "--draft-model",
+            "--spec", "--spec-type", "--spec-draft", "--spec-pmin", "--draft-model",
             "--qwen-image-vae", "--qwen-image-vl", "--qwen-image-mmproj", "--qwen-image-lora",
             "--wan-vae", "--wan-te", "--wan-dit2",
             "--offload-cpu",
             "--n-cpu-moe", "--cpu-moe", "--cpu-moe-threads",
+            "--skill", "--list-skills",
+            "--code-exec", "--code-exec-allow-install", "--code-exec-install-domains",
+            "--code-exec-timeout", "--code-exec-shell", "--code-exec-max-output",
             "--config",
             "--help",
         };
@@ -503,6 +508,43 @@ public class ServerOptionsBuilderTests : IDisposable
 
         Assert.Contains("Default:", usage);
         Assert.Contains("Example:", usage);
+    }
+
+    /// <summary>
+    /// The inverse of the hand-list above, for the flag families whose names live in
+    /// shared constant tables: every flag such a table accepts must be mentioned
+    /// SOMEWHERE on the usage page. This is the direction that actually drifted —
+    /// all six --code-exec* flags were parsed and working while --help never named
+    /// them, so an operator had no way to learn they existed. A prose mention
+    /// counts: an alias documented inside another entry's description is documented.
+    /// </summary>
+    [Fact]
+    public void ServerUsage_MentionsEveryFlagTheConstantTablesAccept()
+    {
+        var sw = new StringWriter();
+        ServerUsage.PrintUsage(sw);
+        string usage = sw.ToString();
+
+        var accepted = new List<string>
+        {
+            SkillHostOptions.RootsFlag, SkillHostOptions.SelectFlag, SkillHostOptions.ListFlag,
+            SkillHostOptions.DisableFlag, SkillHostOptions.NoDiscoveryFlag,
+            SkillHostOptions.AllowScriptsFlag, SkillHostOptions.MaxRoundsFlag,
+            SkillHostOptions.SandboxFlag, SkillHostOptions.AllowNetworkFlag,
+        };
+        accepted.AddRange(SpeculativeCliFlags.SwitchFlags);
+        accepted.AddRange(SpeculativeCliFlags.ValueFlags);
+        // Driven off CodeExecOptions' own tables, minus the one flag the server
+        // deliberately does NOT offer: --code-exec-unconfined is refused at startup here,
+        // so documenting it would advertise something this host rejects.
+        accepted.AddRange(CodeExecOptions.SwitchFlags
+            .Where(f => !string.Equals(f, CodeExecOptions.UnconfinedFlag, StringComparison.Ordinal)));
+        accepted.AddRange(CodeExecOptions.ValueFlags);
+
+        var missing = accepted.Where(f => !usage.Contains(f, StringComparison.Ordinal)).ToList();
+        Assert.True(missing.Count == 0,
+            "The server accepts these flags but --help never mentions them:\n  "
+            + string.Join("\n  ", missing));
     }
 
     // ---- Wan video companion flags ----
@@ -894,7 +936,7 @@ public class ServerOptionsBuilderTests : IDisposable
     public void ApplySpeculativeCliFlags_SpecFlag_EnablesSchedulerSpeculation()
     {
         _env.ClearSpeculationVars();
-        bool applied = ServerOptionsBuilder.ApplySpeculativeCliFlags(new[] { "--mtp-spec" });
+        bool applied = ServerOptionsBuilder.ApplySpeculativeCliFlags(new[] { "--spec" });
         Assert.True(applied);
         Assert.Equal("1", Environment.GetEnvironmentVariable("TS_MTP_SPEC"));
         Assert.True(SchedulerConfig.FromEnvironment().Speculation.Enabled);
@@ -905,31 +947,10 @@ public class ServerOptionsBuilderTests : IDisposable
     {
         _env.ClearSpeculationVars();
         _env.Set("TS_MTP_SPEC", "1");
-        bool applied = ServerOptionsBuilder.ApplySpeculativeCliFlags(new[] { "--no-mtp-spec" });
+        bool applied = ServerOptionsBuilder.ApplySpeculativeCliFlags(new[] { "--no-spec" });
         Assert.True(applied);
         Assert.Equal("0", Environment.GetEnvironmentVariable("TS_MTP_SPEC"));
         Assert.False(SchedulerConfig.FromEnvironment().Speculation.Enabled);
-    }
-
-    [Fact]
-    public void ApplySpeculativeCliFlags_DraftModel_DoesNotCollideWithDraftCount()
-    {
-        // --mtp-draft is a prefix of --mtp-draft-model; the parser must route each
-        // to its own env var rather than mis-reading the longer flag as the shorter.
-        _env.ClearSpeculationVars();
-        string draftFile = Path.Combine(_baseDir, "draft.gguf");
-        File.WriteAllText(draftFile, "stub");   // the parser validates File.Exists
-
-        bool applied = ServerOptionsBuilder.ApplySpeculativeCliFlags(new[]
-        {
-            "--mtp-draft", "5",
-            "--mtp-draft-model", draftFile,
-        });
-
-        Assert.True(applied);
-        Assert.Equal("5", Environment.GetEnvironmentVariable("TS_MTP_DRAFT"));
-        Assert.Equal(draftFile, Environment.GetEnvironmentVariable("TS_MTP_DRAFT_MODEL"));
-        Assert.Equal(5, SchedulerConfig.FromEnvironment().Speculation.MaxDraftTokens);
     }
 
     [Fact]
@@ -937,30 +958,46 @@ public class ServerOptionsBuilderTests : IDisposable
     {
         var ex = Assert.Throws<ArgumentException>(() =>
             ServerOptionsBuilder.ApplySpeculativeCliFlags(
-                new[] { "--mtp-draft-model", Path.Combine(_baseDir, "does-not-exist.gguf") }));
-        Assert.Contains("--mtp-draft-model", ex.Message);
+                new[] { "--draft-model", Path.Combine(_baseDir, "does-not-exist.gguf") }));
+        Assert.Contains("--draft-model", ex.Message);
     }
 
     [Fact]
-    public void ApplySpeculativeCliFlags_BlockDraftModel_IsRoutedToItsOwnEnvVar()
+    public void ApplySpeculativeCliFlags_OneDraftModel_ReachesEveryConsumer()
     {
-        // --draft-model (a block drafter handed to the model factory) and
-        // --mtp-draft-model (a draft head attached after load) are different
-        // mechanisms; each must reach its own consumer.
+        // There used to be two flags for one intent: --draft-model fed the model
+        // FACTORY (a block drafter must be resident before the layer split) and
+        // --spec-draft-model fed the attach-after-load path (a per-token head).
+        // The operator cannot be expected to know which their file needs, and the
+        // loaders already probe the GGUF's own declared architecture - so the ONE
+        // surviving flag publishes to both channels, the loaders route by what
+        // the file says it is, and TryAttachConfiguredDraftHead skips a drafter
+        // the factory already attached. Naming the file also IS the request:
+        // speculation turns on without a separate --spec.
         _env.Set("TS_DSV4_DSPARK", null);
+        _env.Set("TS_QWEN35_DFLASH", null);
+        _env.Set("TS_MUSE_GLIMMER_DFLASH", null);
         _env.ClearSpeculationVars();
-        string blockDraft = Path.Combine(_baseDir, "dspark.gguf");
-        File.WriteAllText(blockDraft, "stub");
+        string draftFile = Path.Combine(_baseDir, "drafter.gguf");
+        File.WriteAllText(draftFile, "stub");   // the parser validates File.Exists
 
         bool applied = ServerOptionsBuilder.ApplySpeculativeCliFlags(new[]
         {
-            "--mtp-spec",
-            "--draft-model", blockDraft,
+            "--spec-draft", "5",
+            "--draft-model", draftFile,
         });
 
         Assert.True(applied);
-        Assert.Equal(blockDraft, Environment.GetEnvironmentVariable("TS_DSV4_DSPARK"));
-        Assert.Null(Environment.GetEnvironmentVariable("TS_MTP_DRAFT_MODEL"));
+        // The window routed exactly, never by prefix.
+        Assert.Equal("5", Environment.GetEnvironmentVariable("TS_MTP_DRAFT"));
+        // The factory channel, all three architectures.
+        Assert.Equal(draftFile, Environment.GetEnvironmentVariable("TS_DSV4_DSPARK"));
+        Assert.Equal(draftFile, Environment.GetEnvironmentVariable("TS_QWEN35_DFLASH"));
+        Assert.Equal(draftFile, Environment.GetEnvironmentVariable("TS_MUSE_GLIMMER_DFLASH"));
+        // The attach-after-load channel.
+        Assert.Equal(draftFile, Environment.GetEnvironmentVariable("TS_MTP_DRAFT_MODEL"));
+        // Naming the file is the request.
+        Assert.True(SchedulerConfig.FromEnvironment().Speculation.Enabled);
     }
 
     [Fact]
@@ -1003,7 +1040,7 @@ public class ServerOptionsBuilderTests : IDisposable
         string msg = SpeculationStartupValidation.GetFatalActivationError(reason);
         Assert.NotNull(msg);
         Assert.Contains(reason, msg);
-        Assert.Contains("--mtp-draft-model", msg);
+        Assert.Contains("--draft-model", msg);
         Assert.Contains("embedding_length_out", msg);
     }
 
@@ -1388,16 +1425,9 @@ public class ServerOptionsBuilderTests : IDisposable
     [Theory]
     [InlineData("--spec")]
     [InlineData("--no-spec")]
-    [InlineData("--mtp-spec")]
-    [InlineData("--no-mtp-spec")]
     [InlineData("--spec-draft")]
-    [InlineData("--mtp-draft")]
     [InlineData("--spec-type")]
-    [InlineData("--mtp-type")]
     [InlineData("--spec-pmin")]
-    [InlineData("--mtp-pmin")]
-    [InlineData("--spec-draft-model")]
-    [InlineData("--mtp-draft-model")]
     [InlineData("--draft-model")]
     public void Build_SpeculativeFlags_SurviveBothPasses(string flag)
     {
@@ -1406,15 +1436,14 @@ public class ServerOptionsBuilderTests : IDisposable
 
         string[] args = flag switch
         {
-            "--spec" or "--no-spec" or "--mtp-spec" or "--no-mtp-spec" => new[] { flag },
-            "--spec-draft" or "--mtp-draft" => new[] { flag, "3" },
-            "--spec-type" or "--mtp-type" => new[] { flag, "ngram" },
-            "--spec-pmin" or "--mtp-pmin" => new[] { flag, "0.6" },
+            "--spec" or "--no-spec" => new[] { flag },
+            "--spec-draft" => new[] { flag, "3" },
+            "--spec-type" => new[] { flag, "ngram" },
+            "--spec-pmin" => new[] { flag, "0.6" },
             _ => new[] { flag, draft },
         };
 
-        // Pass 1: the applier consumes it (--draft-model is server-local and
-        // handled by ApplySpeculativeCliFlags' own extra branch, not the tables).
+        // Pass 1: the applier consumes it.
         ServerOptionsBuilder.ApplySpeculativeCliFlags(args);
 
         // Pass 2: the unknown-arg trap must not trip on that very same argv.
@@ -1433,6 +1462,41 @@ public class ServerOptionsBuilderTests : IDisposable
                 ex2 is ArgumentException ae2 && ae2.Message.StartsWith("Unknown option", StringComparison.Ordinal),
                 flag + "=VALUE was rejected by Build: " + ex2?.Message);
         }
+    }
+
+    [Fact]
+    public void Build_RemovedSpeculativeSpellings_ErrorWithAPointerToTheSurvivor()
+    {
+        // The removed duplicates must fail LOUDLY through the server's own entry
+        // path, not survive as hidden aliases and not fall to a bare "Unknown
+        // option" (Levenshtein('--mtp-spec','--spec') is above the suggestion
+        // cutoff, so without RejectRemoved the operator would get no pointer at
+        // all). Driven off the shared table so a spelling removed later cannot
+        // dodge the guard.
+        Assert.NotEmpty(SpeculativeCliFlags.RemovedFlags);
+        foreach ((string flag, string survivor) in SpeculativeCliFlags.RemovedFlags)
+        {
+            var ex = Assert.Throws<ArgumentException>(() =>
+                ServerOptionsBuilder.ApplySpeculativeCliFlags(new[] { flag, "1" }));
+            Assert.Contains(flag, ex.Message);
+            Assert.Contains(survivor, ex.Message);
+        }
+    }
+
+    [Fact]
+    public void ConfigFile_RemovedSpecKeys_FailWithThePointerToo()
+    {
+        // Shipped configs used {"mtp-spec": true, "mtp-draft-model": "..."}; after
+        // the rename a stale file must produce the same migration error as the
+        // command line, since ConfigFileArgs.Expand turns keys into flags.
+        string cfg = Path.Combine(_baseDir, "stale-spec.json");
+        File.WriteAllText(cfg, "{ \"mtp-spec\": true }");
+
+        string[] expanded = ConfigFileArgs.Expand(new[] { "--config", cfg });
+        var ex = Assert.Throws<ArgumentException>(
+            () => ServerOptionsBuilder.ApplySpeculativeCliFlags(expanded));
+        Assert.Contains("--mtp-spec", ex.Message);
+        Assert.Contains("--spec", ex.Message);
     }
 
     [Fact]

@@ -170,6 +170,126 @@ Console.WriteLine($"Saved {output.Width}x{output.Height} edited image.");</code>
   </table>
   </div>
 
+  <h2 id="skills">Agent Skills —— <code>SkillsChatClient</code></h2>
+  <p><a href="features_zh-cn.html#skills">Agent Skill（智能体技能）</a>是一个面向模型的说明文件夹——一份 <code>SKILL.md</code>，外加它引用的脚本、参考文档与素材——模型只在任务需要时才加载它。<code>SkillsChatClient</code>（命名空间 <code>TensorSharp.AgentHost.Skills</code>，位于 <code>TensorSharp.AgentHost</code> 项目）就是 .NET 应用取用技能的入口。它通过 HTTP 调用兼容 OpenAI 的聊天端点，而不是在进程内加载 GGUF，因此与本页其余内容不同：它既不需要后端，也不需要引用 <code>TensorSharp.Models</code>。</p>
+  <p>它覆盖实际会遇到的两种情形，由 <code>SkillsChatClientOptions.Delivery</code> 选择。</p>
+
+  <h3>面向 TensorSharp.Server —— <code>SkillDelivery.Server</code></h3>
+  <p>只需点名技能，其余全部由服务端在模型旁边完成，渐进式披露的循环也在那里跑。每次请求不上传任何东西，技能文件也从不离开服务端。</p>
+  <pre data-lang="csharp"><code>using System;
+using System.Threading.Tasks;
+using TensorSharp.AgentHost.Skills;
+
+using var client = new SkillsChatClient(new SkillsChatClientOptions
+{
+    Endpoint = "http://localhost:5000",           // 带不带结尾的 /v1 都可以
+    DefaultModel = "gemma-4-E4B-it-Q8_0.gguf",
+    Delivery = SkillDelivery.Server,
+});
+
+// 单轮场景的便捷写法：提示词 + 要使用的技能。
+SkillsChatResponse reply = await client.CompleteAsync(
+    SkillsChatRequest.User("Extract the tables from report.pdf", "pdf"));
+
+Console.WriteLine(reply.Content);
+Console.WriteLine($"{reply.Rounds} 轮，prompt {reply.PromptTokens} + completion {reply.CompletionTokens} token");</code></pre>
+  <p>服务端交付模式下，渐进式披露的循环跑在服务端内部，因此 <code>reply.SkillInvocations</code> 返回为空，<code>reply.Rounds</code> 为 <code>1</code> —— 本客户端恰好只发出了一次请求。</p>
+
+  <h3>面向任意其他兼容 OpenAI 的端点 —— <code>SkillDelivery.Local</code></h3>
+  <p>把客户端指向一个本地 <code>SkillRegistry</code>，它就会<em>在本进程内</em>构造提示词块、声明技能工具并运行整个循环，于是一个从没听说过技能的端点表现得就像原生支持一样。代价是模型每读一个文件多一次网络往返。</p>
+  <pre data-lang="csharp"><code>using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using TensorSharp.Runtime;          // ChatMessage
+using TensorSharp.AgentHost.Skills;
+
+var registry = new SkillRegistry(new SkillRegistryOptions
+{
+    Roots = new[] { "/srv/skills" },   // 最深扫描 MaxDepth（3）层
+});
+
+using var client = new SkillsChatClient(new SkillsChatClientOptions
+{
+    Endpoint = "https://api.example.com/v1",
+    ApiKey = Environment.GetEnvironmentVariable("EXAMPLE_API_KEY"),
+    DefaultModel = "some-hosted-model",
+    Delivery = SkillDelivery.Local,
+    Registry = registry,
+    Discovery = true,                  // 同时展示本次请求没有点名的技能
+});
+
+SkillsChatResponse reply = await client.CompleteAsync(new SkillsChatRequest
+{
+    Messages = { new ChatMessage { Role = "user", Content = "Fill in this AcroForm and tell me what you set." } },
+    Skills = { "pdf" },
+    MaxTokens = 800,
+});
+
+Console.WriteLine(reply.Content);
+
+// 模型读过的每一个技能文件，按顺序排列。
+foreach (SkillToolInvocation call in reply.SkillInvocations)
+    Console.WriteLine($"round {call.Round}: {call.Tool} {call.SkillId}/{call.ResourcePath} ok={call.Ok}");</code></pre>
+  <p>默认值 <code>SkillDelivery.Auto</code> 会探测一次 <code>/v1/skills</code>，并把结果缓存到该客户端的整个生命周期：端点有响应就走服务端交付，没有响应且本客户端带了注册表就走本地交付。<code>await client.ResolveDeliveryAsync()</code> 会告诉你最终选了哪一种；<code>await client.ListServerSkillsAsync()</code> 则向端点询问它有哪些技能，端点没有实现技能 API 时返回空列表而不是抛异常。</p>
+  <div class="callout warn"><div class="ic">🔁</div><p><code>SkillsChatResponse.ToolCalls</code> 装的是对<strong>调用方自己的</strong>工具（即传入 <code>SkillsChatRequest.Tools</code> 的那些）的调用，客户端从不执行它们——只有调用方知道这些工具做什么。列表非空就意味着你需要自己执行它们，并在后续请求中把结果送回；技能工具此时已经应答完毕，<code>reply.Messages</code> 就是可以直接续写的完整对话记录。请求失败会抛出 <code>SkillsChatException</code>。</p></div>
+
+  <h4><code>SkillsChatClientOptions</code></h4>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>属性</th><th>类型</th><th>默认</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td><code>Endpoint</code></td><td>string</td><td><em>必填</em></td><td>API 根地址，带不带结尾的 <code>/v1</code> 都可以。</td></tr>
+      <tr><td><code>ApiKey</code></td><td>string?</td><td>null</td><td>端点需要时使用的 Bearer token。TensorSharp.Server 不需要。</td></tr>
+      <tr><td><code>DefaultModel</code></td><td>string?</td><td>null</td><td>未按请求单独指定时，随每次请求发送的模型名。</td></tr>
+      <tr><td><code>Delivery</code></td><td><code>SkillDelivery</code></td><td><code>Auto</code></td><td>由谁解析技能：<code>Auto</code>、<code>Server</code> 或 <code>Local</code>。</td></tr>
+      <tr><td><code>Registry</code></td><td><code>SkillRegistry?</code></td><td>null</td><td>本地交付时使用的技能集合。服务端交付时忽略——那时技能归端点所有。</td></tr>
+      <tr><td><code>PromptOptions</code></td><td><code>SkillPromptOptions</code></td><td><code>.Default</code></td><td>本地交付的提示词预算。</td></tr>
+      <tr><td><code>LoopOptions</code></td><td><code>SkillAgentLoopOptions</code></td><td><code>.Default</code></td><td>本地交付的循环上限 —— <code>MaxRounds</code> 8、<code>MaxCallsPerRound</code> 8，以及每次工具调用执行后触发的 <code>OnInvocation</code> 回调。</td></tr>
+      <tr><td><code>Discovery</code></td><td>bool</td><td>true</td><td>把本次请求未点名的技能也展示给模型，好让它自己发现。<code>SkillsChatRequest.Discovery</code> 可按请求覆盖。</td></tr>
+      <tr><td><code>Timeout</code></td><td><code>TimeSpan</code></td><td>10 分钟</td><td>单次请求超时。仅在客户端自行创建 <code>HttpClient</code> 时生效——若从 <code>IHttpClientFactory</code> 取一个传进构造函数，则不会改动它。</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h4><code>SkillsChatRequest</code> 与 <code>SkillsChatResponse</code></h4>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>成员</th><th>类型</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td><code>SkillsChatRequest.Messages</code></td><td><code>List&lt;ChatMessage&gt;</code></td><td>对话内容。首条 <code>system</code> 消息会与技能文本块合并，而不是被顶掉。</td></tr>
+      <tr><td><code>SkillsChatRequest.Skills</code></td><td><code>List&lt;string&gt;</code></td><td>要使用的技能名，取自注册表中的名称。</td></tr>
+      <tr><td><code>SkillsChatRequest.Tools</code></td><td><code>List&lt;ToolFunction&gt;?</code></td><td>调用方自己的工具。客户端从不执行，会原样回传给调用方处理。</td></tr>
+      <tr><td><code>SkillsChatRequest.Model</code> · <code>MaxTokens</code> · <code>Temperature</code> · <code>TopP</code> · <code>Think</code> · <code>Discovery</code></td><td>string? · int? · double? · double? · bool · bool?</td><td>按请求覆盖的设置；为 null 时交由端点决定（<code>Discovery</code> 则回落到客户端自身的选项）。</td></tr>
+      <tr><td><code>SkillsChatRequest.User(prompt, params skills)</code></td><td>静态方法</td><td>单轮常见场景的便捷写法。</td></tr>
+      <tr><td><code>SkillsChatResponse.Content</code> · <code>Thinking</code></td><td>string · string?</td><td>助手的回答，以及模型给出推理内容时的推理文本。</td></tr>
+      <tr><td><code>SkillsChatResponse.ToolCalls</code></td><td><code>IReadOnlyList&lt;ToolCall&gt;</code></td><td>对调用方自己的工具的调用，客户端从不执行。</td></tr>
+      <tr><td><code>SkillsChatResponse.Messages</code></td><td><code>List&lt;ChatMessage&gt;</code></td><td>完整对话记录，含披露循环追加的全部内容。</td></tr>
+      <tr><td><code>SkillsChatResponse.SkillInvocations</code></td><td><code>IReadOnlyList&lt;SkillToolInvocation&gt;</code></td><td>模型读过的每一个技能文件，按顺序排列 —— <code>Round</code>、<code>Tool</code>、<code>SkillId</code>、<code>ResourcePath</code>、<code>Ok</code>、<code>ResultBytes</code>。服务端交付时为空。</td></tr>
+      <tr><td><code>SkillsChatResponse.FinishReason</code> · <code>PromptTokens</code> · <code>CompletionTokens</code> · <code>Rounds</code></td><td>string? · int · int · int</td><td>生成停止的原因、逐轮累加的 token 数，以及实际跑了几次生成。<code>Rounds</code> 为 1 表示模型没读任何东西就作答了。</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h4><code>SkillRegistry</code> 与 <code>SkillRegistryOptions</code></h4>
+  <p>注册表负责发现（在配置的目录中查找 <code>SKILL.md</code>）、安装与查找；它是唯一接触技能存储的组件，因此边界约束规则集中在一处。CLI 与服务端也正是用 <code>--skills-dir</code> 构造出它。</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>成员</th><th>类型 / 默认</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td><code>SkillRegistryOptions.Roots</code></td><td><code>IReadOnlyList&lt;string&gt;</code>，空</td><td>要扫描的目录，按优先级顺序排列。一个根目录可以是单个技能（直接含 <code>SKILL.md</code>），也可以是装着若干技能的目录。</td></tr>
+      <tr><td><code>SkillRegistryOptions.InstallDirectory</code></td><td><code>string?</code>，null</td><td>运行时安装的技能写入的位置；同样会被扫描，并且优先级永远排在最前。为 null 时注册表只读。</td></tr>
+      <tr><td><code>SkillRegistryOptions.MaxDepth</code></td><td>int，<code>3</code></td><td>在一个根目录下查找 <code>SKILL.md</code> 的最大深度。</td></tr>
+      <tr><td><code>SkillRegistryOptions.MaxSkills</code> · <code>MaxManifestBytes</code> · <code>MaxSkillBytes</code> · <code>MaxSkillFiles</code></td><td>512 · 4 MB · 256 MB · 4096</td><td>各项上限，好让指错目录的根目录显式失败，而不是耗尽内存。</td></tr>
+      <tr><td><code>Skills</code> · <code>Errors</code> · <code>Roots</code></td><td><code>IReadOnlyList&lt;Skill&gt;</code> · <code>IReadOnlyList&lt;SkillLoadError&gt;</code> · <code>IReadOnlyList&lt;string&gt;</code></td><td>成功加载的技能、加载失败的项（含 <code>Path</code> 与 <code>Message</code>），以及实际扫描过的根目录。</td></tr>
+      <tr><td><code>CanInstall</code> · <code>InstallDirectory</code></td><td>bool · string?</td><td>是否配置了运行时安装，以及安装到哪里。</td></tr>
+      <tr><td><code>TryGet(id, out Skill)</code> · <code>Resolve(ids, out unknown)</code></td><td>bool · <code>IReadOnlyList&lt;Skill&gt;</code></td><td>按名称查找单个技能，或解析一组选择并得知哪些名称没找到。</td></tr>
+      <tr><td><code>Refresh()</code></td><td><code>SkillScanResult</code></td><td>重新扫描全部根目录 —— <code>POST /api/skills/rescan</code> 调用的就是它。</td></tr>
+      <tr><td><code>InstallFromDirectory(path, overwrite)</code> · <code>InstallFromZip(stream, overwrite, limits)</code> · <code>Remove(id)</code></td><td><code>Skill</code> · <code>Skill</code> · bool</td><td>从文件夹或上传的压缩包安装技能，或删除一个已安装的技能。压缩包的每个条目都要经过与模型读取相同的那道路径关卡；被拒绝的压缩包会抛出 <code>SkillInstallException</code>。</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>完整参考（frontmatter 字段、提示词预算与安全模型）见 <code>docs/agent_skills.md</code>。可直接取用的开源技能：<a href="https://github.com/anthropics/skills" target="_blank" rel="noopener">github.com/anthropics/skills</a>。</p>
+
   <h2 id="namespaces">关键类型与接口</h2>
   <div class="table-scroll">
   <table>
@@ -183,6 +303,8 @@ Console.WriteLine($"Saved {output.Width}x{output.Height} edited image.");</code>
       <tr><td><code>IBatchedPagedModel</code></td><td>可选的批量/分页前向（<code>ForwardBatch</code>），多数架构为连续批处理而实现。</td></tr>
       <tr><td><code>DiffusionGemmaModel</code> + <code>DiffusionGemmaSampler</code></td><td>文本扩散模型及其 EntropyBound 去噪采样器（<code>Generate(promptTokens, DiffusionEbParams, …)</code>）。<code>Forward()</code> 不受支持。</td></tr>
       <tr><td><code>QwenImageModel</code> + <code>QwenImageParams</code></td><td>Qwen-Image-Edit 图像编辑器。<code>EditImage(prompt, RgbImage, QwenImageParams)</code> 返回修改后的 <code>RgbImage</code>；<code>ImageIO</code> 负责 PNG 加载/保存。</td></tr>
+      <tr><td><code>SkillsChatClient</code> + <code>SkillsChatClientOptions</code></td><td>面向兼容 OpenAI 的端点使用 <a href="#skills">Agent Skills</a>。<code>CompleteAsync(SkillsChatRequest)</code> 返回 <code>SkillsChatResponse</code>；<code>SkillDelivery</code> 决定披露循环由服务端还是本进程运行（位于 <code>TensorSharp.AgentHost.Skills</code>）。</td></tr>
+      <tr><td><code>SkillRegistry</code> + <code>SkillRegistryOptions</code></td><td>宿主已知的技能集合：在配置的根目录中扫描 <code>SKILL.md</code>、从文件夹或 <code>.zip</code> 安装，以及查找。它是唯一接触技能存储的组件，因此边界约束集中在一处生效。</td></tr>
       <tr><td><code>InferenceEngine</code></td><td>支撑服务器连续批处理的 worker 线程调度器 + 分页块池（在 <code>TensorSharp.Runtime.Scheduling</code> 中）。</td></tr>
     </tbody>
   </table>

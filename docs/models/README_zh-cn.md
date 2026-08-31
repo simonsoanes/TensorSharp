@@ -71,7 +71,7 @@ Zhongkai Fu 的 [《From Tensors to Tokens》书籍指南](../BOOK_zh-cn.md)，�
 
 上表所列的自回归架构都会经过共享的 `InferenceEngine` + `ContinuousBatchScheduler` + `BatchExecutor` 栈，详情见 [`docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md`](../PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md)。实现了 `IBatchedPagedModel.ForwardBatch` 的模型会在每个调度步骤中执行一次批处理前向（使用基于 `slotMapping` 的 K/V 写入与共享分页缓冲，并通过原生分页内核做按序列注意力）；其余模型则在同一引擎内沿用按序列 KV 交换。DiffusionGemma 不支持自回归 `Forward()`，因此改用 `DiffusionGemmaSampler` 与服务端 `DiffusionBatchScheduler`。Qwen-Image-Edit 同样非自回归：`Forward()` 抛异常，编辑通过 `QwenImageModel.EditImage()` 在 FlowMatch-Euler 扩散循环上进行，且并发编辑被串行化（扩散网络非线程安全）。各模型的启用方式见上方实现矩阵以及项目根 README。
 
-对于自带多 token 预测草稿头的架构——Qwen 3.6（内嵌 NextN 块）与 Gemma 4（独立 `gemma4-assistant` 草稿 GGUF）——单序列（无并发）请求还可以通过同一引擎运行无损的 MTP 投机解码（`--spec` —— **CLI 与服务端都接受**，因为 `TensorSharp.Cli` 与 `TensorSharp.Server` 共用同一套标志解析；历史拼写 `--mtp-spec` 仍然有效，`TS_SPEC_*` 以及旧的 `TS_MTP_*` 环境变量同样有效）。共享的起草 / 验证 / 回滚核心是 `SpeculativeExecution`；各架构具体机制见 Qwen 3.5/3.6（§12）与 Gemma 4（§12）卡片。
+对于自带多 token 预测草稿头的架构——Qwen 3.6（内嵌 NextN 块）与 Gemma 4（独立 `gemma4-assistant` 草稿 GGUF）——单序列（无并发）请求还可以通过同一引擎运行无损的 MTP 投机解码（Qwen 3.6 内嵌的 NextN 块用 `--spec` 显式启用；Gemma 4 只需用 `--draft-model` 指定草稿 GGUF，本身即可启用投机。两个标志 **CLI 与服务端都接受**，因为 `TensorSharp.Cli` 与 `TensorSharp.Server` 共用同一套标志解析；`TS_SPEC_*` 以及旧的 `TS_MTP_*` 环境变量同样有效）。共享的起草 / 验证 / 回滚核心是 `SpeculativeExecution`；各架构具体机制见 Qwen 3.5/3.6（§12）与 Gemma 4（§12）卡片。
 
 DeepSeek V4 把一个**块级**草稿器接入了同一套核心：它的 DSpark 支持模块作为独立 GGUF 通过 `--draft-model` 加载（CLI 与服务端都支持），每步提议一整块 token 而不是逐个。由于草稿器的权重必须计入层切分，它在加载阶段就传给 `ModelBase.Create()`，而不是事后附加。详见 [DeepSeek V4 卡片](deepseek4_zh-cn.md#dspark-投机解码)。
 

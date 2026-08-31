@@ -569,12 +569,12 @@ class TensorSharpServer(ServerHandle):
             cmd += ["--max-tokens", str(self.max_tokens)]
             if self.model.mmproj is not None and self.model.mmproj.exists():
                 cmd += ["--mmproj", str(self.model.mmproj)]
-        # MTP / NextN speculative decoding: --mtp-spec engages it; Gemma 4 also
+        # MTP / NextN speculative decoding: --spec engages it; Gemma 4 also
         # needs a separate draft GGUF (Qwen 3.6 embeds NextN in the trunk).
         if self.mtp:
-            cmd += ["--mtp-spec"]
+            cmd += ["--spec"]
             if self.model.mtp_draft is not None:
-                cmd += ["--mtp-draft-model", str(self.model.mtp_draft)]
+                cmd += ["--draft-model", str(self.model.mtp_draft)]
         # Tensor parallelism: split the hosted model across `tp` local GPUs.
         if self.tp > 1:
             cmd += [spec.ts_tp_arg, str(self.tp)]

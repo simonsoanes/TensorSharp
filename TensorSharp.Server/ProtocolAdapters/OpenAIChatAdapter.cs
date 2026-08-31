@@ -20,7 +20,10 @@ using Microsoft.Extensions.Logging;
 using TensorSharp.Models;
 using TensorSharp.Runtime;
 using TensorSharp.Runtime.Logging;
+using TensorSharp.AgentHost.CodeExec;
+using TensorSharp.AgentHost.Skills;
 using TensorSharp.Server.Hosting;
+using TensorSharp.Server.Skills;
 using TensorSharp.Server.RequestParsers;
 using TensorSharp.Server.ResponseSerializers;
 using TensorSharp.Server.StreamingWriters;
@@ -43,6 +46,8 @@ namespace TensorSharp.Server.ProtocolAdapters
         private readonly InferenceQueue _queue;
         private readonly ServerHostingOptions _options;
         private readonly UploadStoragePolicy _uploads;
+        private readonly SkillRegistry _skills;
+        private readonly ICodeRunner? _codeRunner;
         private readonly ILoggerFactory _loggerFactory;
 
         public OpenAIChatAdapter(
@@ -50,12 +55,16 @@ namespace TensorSharp.Server.ProtocolAdapters
             InferenceQueue queue,
             ServerHostingOptions options,
             UploadStoragePolicy uploads,
+            SkillRegistry skills,
+            ICodeRunner? codeRunner,
             ILoggerFactory loggerFactory)
         {
             _svc = svc ?? throw new ArgumentNullException(nameof(svc));
             _queue = queue ?? throw new ArgumentNullException(nameof(queue));
             _options = options ?? throw new ArgumentNullException(nameof(options));
             _uploads = uploads ?? throw new ArgumentNullException(nameof(uploads));
+            _skills = skills ?? throw new ArgumentNullException(nameof(skills));
+            _codeRunner = codeRunner;
             _loggerFactory = loggerFactory ?? throw new ArgumentNullException(nameof(loggerFactory));
         }
 
@@ -110,7 +119,7 @@ namespace TensorSharp.Server.ProtocolAdapters
             List<ChatMessage> messages;
             try
             {
-                messages = ChatMessageParser.ParseOpenAI(messagesEl, _uploads);
+                messages = ChatMessageParser.ParseOpenAI(messagesEl, _uploads, openaiLogger);
             }
             catch (UploadLimitExceededException ex)
             {
@@ -132,12 +141,23 @@ namespace TensorSharp.Server.ProtocolAdapters
 
             var openaiTools = ToolFunctionParser.ParseOpenAI(body);
             bool openaiThink = body.TryGetProperty("think", out var oaiThinkProp) && oaiThinkProp.GetBoolean();
+            var requestedSkills = SkillSelectionParser.Parse(body);
 
             string lastOpenAiUserContent = LoggingExtensions.SanitizeForLog(
                 messages.LastOrDefault(m => m.Role == "user")?.Content ?? string.Empty, 512);
             openaiLogger.LogInformation(LogEventIds.ChatStarted,
-                "/v1/chat/completions request: id={ChatcmplId} model={Model} stream={Stream} maxTokens={MaxTokens} messages={Messages} tools={Tools} thinking={Thinking} userInput=\"{LastUser}\"",
-                requestId, modelName, stream, maxTokens, messages.Count, openaiTools?.Count ?? 0, openaiThink, lastOpenAiUserContent);
+                "/v1/chat/completions request: id={ChatcmplId} model={Model} stream={Stream} maxTokens={MaxTokens} messages={Messages} tools={Tools} skills={Skills} thinking={Thinking} userInput=\"{LastUser}\"",
+                requestId, modelName, stream, maxTokens, messages.Count, openaiTools?.Count ?? 0,
+                requestedSkills?.Count ?? 0, openaiThink, lastOpenAiUserContent);
+
+            if (requestedSkills is { Count: > 0 } && !_options.SkillsEnabled)
+            {
+                openaiLogger.LogWarning(LogEventIds.HttpRequestRejected,
+                    "/v1/chat/completions rejected: skills requested but disabled (id={ChatcmplId})", requestId);
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsJsonAsync(new { error = new { message = "Agent skills are disabled on this server (--no-skills).", type = "invalid_request_error" } });
+                return;
+            }
 
             if (!OpenAIResponseFormatParser.TryParse(body, out StructuredOutputFormat responseFormat, out string responseFormatError))
             {
@@ -148,22 +168,59 @@ namespace TensorSharp.Server.ProtocolAdapters
                 return;
             }
 
+            // The compatibility check sees the CLIENT's tools, never the built-in skill
+            // tools added below: a request that combines response_format with skills is
+            // legal (skills are delivered inline for it, see SkillRequestPlan.Create),
+            // while one that combines response_format with its own tools is not.
             if (responseFormat != null && !await ValidateStructuredOutputCompatibilityAsync(ctx, responseFormat, openaiThink, openaiTools))
                 return;
 
+            var skillPlan = SkillRequestPlan.Create(
+                _skills, requestedSkills, SkillSelectionParser.ParseDiscovery(body), openaiTools,
+                _svc.Architecture, _svc.ContextTokens, _options, out var unknownSkills,
+                allowTools: responseFormat == null, codeRunner: _codeRunner, logger: openaiLogger);
+
+            if (unknownSkills.Count > 0)
+            {
+                openaiLogger.LogWarning(LogEventIds.HttpRequestRejected,
+                    "/v1/chat/completions rejected: unknown skills {Unknown} (id={ChatcmplId})",
+                    string.Join(",", unknownSkills), requestId);
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsJsonAsync(new
+                {
+                    error = new
+                    {
+                        message = $"No skill called '{unknownSkills[0]}' is installed. "
+                                  + "GET /v1/skills lists what this server has.",
+                        type = "invalid_request_error",
+                    },
+                });
+                return;
+            }
+
+            var effectiveTools = skillPlan?.Tools ?? openaiTools;
             var inferenceMessages = StructuredOutputPrompt.Apply(messages, responseFormat);
+            if (skillPlan != null)
+            {
+                inferenceMessages = skillPlan.Apply(inferenceMessages);
+                openaiLogger.LogInformation(LogEventIds.SkillSelected,
+                    "/v1/chat/completions skills: id={ChatcmplId} selected={Selected} announced={Announced} inlined={Inlined} catalog={Catalog} tools={ToolsOffered} promptTokens~{PromptTokens}",
+                    requestId, skillPlan.DescribeSelection(), skillPlan.Prompt.Deferred.Count,
+                    skillPlan.Prompt.Inlined.Count,
+                    skillPlan.Prompt.Catalog.Count, skillPlan.ToolsOffered, skillPlan.Prompt.ApproximateTokens);
+            }
 
             using var ticket = _queue.Enqueue(ctx.RequestAborted);
 
             if (stream)
             {
                 await StreamCompletionAsync(ctx, requestId, modelName, inferenceMessages, maxTokens,
-                    samplingConfig, openaiTools, openaiThink, responseFormat, ticket);
+                    samplingConfig, effectiveTools, openaiThink, responseFormat, ticket, skillPlan, openaiLogger);
             }
             else
             {
                 await CompleteSyncAsync(ctx, requestId, modelName, inferenceMessages, maxTokens,
-                    samplingConfig, openaiTools, openaiThink, responseFormat, ticket);
+                    samplingConfig, effectiveTools, openaiThink, responseFormat, ticket, skillPlan, openaiLogger);
             }
         }
 
@@ -251,7 +308,14 @@ namespace TensorSharp.Server.ProtocolAdapters
                 return samplingConfig;
             var tok = _svc.Model?.Tokenizer;
             if (tok == null)
+            {
+                _loggerFactory.CreateLogger("TensorSharp.Server.OpenAI.StructuredOutput")
+                    .LogWarning(
+                        "response_format {Kind} was requested but the loaded model exposes no tokenizer, so the " +
+                        "constraint is dropped: generating WITHOUT the JSON constraint, and the response may not " +
+                        "be valid JSON.", responseFormat.Kind);
                 return samplingConfig;
+            }
 
             if (!string.Equals(Environment.GetEnvironmentVariable("TS_JSON_GRAMMAR"), "0", StringComparison.Ordinal))
             {
@@ -342,7 +406,9 @@ namespace TensorSharp.Server.ProtocolAdapters
             List<ToolFunction> openaiTools,
             bool openaiThink,
             StructuredOutputFormat responseFormat,
-            QueueTicket ticket)
+            QueueTicket ticket,
+            SkillRequestPlan skillPlan,
+            ILogger skillLogger)
         {
             // Only the strict json_schema path must buffer the whole response so it
             // can be schema-normalized before anything is sent to the client. Plain
@@ -397,6 +463,10 @@ namespace TensorSharp.Server.ProtocolAdapters
 
             IOutputParser parser = null;
             bool sawToolCall = false;
+            // Set once the skills loop hands over pre-parsed pieces, so the structured
+            // flush below does not run a parser over text that has already been through
+            // one.
+            bool preParsed = false;
             if (useStreamParser && !bufferForStructured)
             {
                 parser = OutputParserFactory.Create(_svc.Architecture);
@@ -411,12 +481,45 @@ namespace TensorSharp.Server.ProtocolAdapters
                 && responseFormat.Kind == StructuredOutputKind.JsonObject)
                 ? new StreamingJsonObjectFilter() : null;
 
-            await foreach (var update in _svc.ChatStreamWithMetricsAsync(inferenceMessages, maxTokens,
-                ctx.RequestAborted, samplingConfig, openaiTools, openaiThink))
+            await foreach (var update in _svc.ChatStreamWithSkillsAsync(inferenceMessages, maxTokens,
+                ctx.RequestAborted, samplingConfig, openaiTools, openaiThink, skillPlan, skillLogger))
             {
                 string piece = update.Piece;
                 if (!update.Done)
                 {
+                    if (update.IsParsed)
+                    {
+                        // Pre-separated by the skills loop (see SkillChatLoop): content,
+                        // reasoning and tool calls arrive on their own fields, and the
+                        // tool markup that our parser would look for is already gone.
+                        preParsed = true;
+                        if (bufferForStructured)
+                        {
+                            buffer.Append(piece);
+                            continue;
+                        }
+                        if (update.ParsedToolCalls is { Count: > 0 })
+                        {
+                            sawToolCall = true;
+                            await SseWriter.WriteEventAsync(ctx.Response,
+                                OpenAIResponseFactory.ToolCallsChunk(requestId, _svc.LoadedModelName, update.ParsedToolCalls),
+                                ctx.RequestAborted);
+                        }
+                        if (!string.IsNullOrEmpty(update.ThinkingPiece))
+                            await SseWriter.WriteEventAsync(ctx.Response,
+                                OpenAIResponseFactory.ReasoningContentChunk(requestId, _svc.LoadedModelName, update.ThinkingPiece),
+                                ctx.RequestAborted);
+                        if (!string.IsNullOrEmpty(piece))
+                        {
+                            string parsedContent = jsonObjectFilter != null ? jsonObjectFilter.Feed(piece) : piece;
+                            if (!string.IsNullOrEmpty(parsedContent))
+                                await SseWriter.WriteEventAsync(ctx.Response,
+                                    OpenAIResponseFactory.ContentChunk(requestId, _svc.LoadedModelName, parsedContent),
+                                    ctx.RequestAborted);
+                        }
+                        continue;
+                    }
+
                     if (bufferForStructured)
                     {
                         buffer.Append(piece);
@@ -477,7 +580,7 @@ namespace TensorSharp.Server.ProtocolAdapters
                 if (bufferForStructured)
                 {
                     if (!await FlushStructuredCompletionAsync(ctx, requestId, responseFormat,
-                            buffer.ToString(), useStreamParser, openaiThink, openaiTools, update))
+                            buffer.ToString(), useStreamParser && !preParsed, openaiThink, openaiTools, update))
                         return;
                     continue;
                 }
@@ -599,7 +702,9 @@ namespace TensorSharp.Server.ProtocolAdapters
             List<ToolFunction> openaiTools,
             bool openaiThink,
             StructuredOutputFormat responseFormat,
-            QueueTicket ticket)
+            QueueTicket ticket,
+            SkillRequestPlan skillPlan,
+            ILogger skillLogger)
         {
             await ticket.WaitUntilReadyAsync();
 
@@ -613,16 +718,16 @@ namespace TensorSharp.Server.ProtocolAdapters
 
             samplingConfig = WithStructuredOutputConstraint(samplingConfig, responseFormat);
 
-            var sb = new StringBuilder();
+            var collector = new ChatStreamCollector();
             int promptTokens = 0, evalTokens = 0, kvReusedTokens = 0;
             string pipelineFinishReason = null;
 
-            await foreach (var update in _svc.ChatStreamWithMetricsAsync(inferenceMessages, maxTokens,
-                ctx.RequestAborted, samplingConfig, openaiTools, openaiThink))
+            await foreach (var update in _svc.ChatStreamWithSkillsAsync(inferenceMessages, maxTokens,
+                ctx.RequestAborted, samplingConfig, openaiTools, openaiThink, skillPlan, skillLogger))
             {
                 if (!update.Done)
                 {
-                    sb.Append(update.Piece);
+                    collector.Add(update);
                 }
                 else
                 {
@@ -633,7 +738,7 @@ namespace TensorSharp.Server.ProtocolAdapters
                 }
             }
 
-            string rawOutput = sb.ToString();
+            string rawOutput = collector.PlainText();
             bool useParser = openaiThink || (openaiTools != null && openaiTools.Count > 0)
                 || OutputParserFactory.IsAlwaysRequired(_svc.Architecture);
             object responseMessage;
@@ -659,11 +764,9 @@ namespace TensorSharp.Server.ProtocolAdapters
 
                 responseMessage = OpenAIResponseFactory.StructuredAssistantMessage(normalized.NormalizedContent);
             }
-            else if (useParser)
+            else if (useParser || collector.IsParsed)
             {
-                var parser = OutputParserFactory.Create(_svc.Architecture);
-                parser.Init(openaiThink, openaiTools);
-                var parsed = parser.Add(rawOutput, true);
+                var parsed = collector.Resolve(_svc.Architecture, openaiThink, openaiTools);
 
                 string thinkingOut = openaiThink && !string.IsNullOrEmpty(parsed.Thinking) ? parsed.Thinking : null;
                 responseMessage = OpenAIResponseFactory.ParsedAssistantMessage(parsed.Content, thinkingOut, parsed.ToolCalls);

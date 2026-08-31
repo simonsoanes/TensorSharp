@@ -23,7 +23,11 @@ using Microsoft.Extensions.Logging;
 using TensorSharp.Models;
 using TensorSharp.Runtime;
 using TensorSharp.Runtime.Logging;
+using TensorSharp.AgentHost.CodeExec;
+using TensorSharp.AgentHost.Skills;
+using TensorSharp.Server.Endpoints;
 using TensorSharp.Server.Hosting;
+using TensorSharp.Server.Skills;
 using TensorSharp.Server.RequestParsers;
 using TensorSharp.Server.ResponseSerializers;
 using TensorSharp.Server.StreamingWriters;
@@ -51,6 +55,10 @@ namespace TensorSharp.Server.ProtocolAdapters
         private readonly SessionManager _sessions;
         private readonly ServerHostingOptions _options;
         private readonly UploadStoragePolicy _uploads;
+        private readonly SkillRegistry _skills;
+        private readonly ICodeRunner? _codeRunner;
+        private readonly SessionWorkspaceManager? _workspaces;
+        private readonly CodeArtifactStore? _codeArtifacts;
         private readonly ILoggerFactory _loggerFactory;
 
         public WebUiAdapter(
@@ -59,6 +67,10 @@ namespace TensorSharp.Server.ProtocolAdapters
             SessionManager sessions,
             ServerHostingOptions options,
             UploadStoragePolicy uploads,
+            SkillRegistry skills,
+            ICodeRunner? codeRunner,
+            SessionWorkspaceManager? workspaces,
+            CodeArtifactStore? codeArtifacts,
             ILoggerFactory loggerFactory)
         {
             _svc = svc ?? throw new ArgumentNullException(nameof(svc));
@@ -66,7 +78,42 @@ namespace TensorSharp.Server.ProtocolAdapters
             _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
             _options = options ?? throw new ArgumentNullException(nameof(options));
             _uploads = uploads ?? throw new ArgumentNullException(nameof(uploads));
+            _skills = skills ?? throw new ArgumentNullException(nameof(skills));
+            _codeRunner = codeRunner;
+            _workspaces = workspaces;
+            _codeArtifacts = codeArtifacts;
             _loggerFactory = loggerFactory ?? throw new ArgumentNullException(nameof(loggerFactory));
+        }
+
+        /// <summary>
+        /// The session's persistent execution workspace, or null when the feature is
+        /// off or the session is the shared default (stateless API clients all pass
+        /// through that one, and they must not see each other's files).
+        /// </summary>
+        private SessionWorkspace? WorkspaceFor(ChatSession session) =>
+            _workspaces != null && session != null
+            && !string.Equals(session.Id, SessionManager.DefaultSessionId, StringComparison.Ordinal)
+                ? _workspaces.GetOrCreate(session.Id)
+                : null;
+
+        /// <summary>
+        /// How a skill script's output files become downloadable: captured into the
+        /// same artifact store the shell tool uses, under a fresh run id.
+        /// </summary>
+        private WorkspaceFileCapture? ScriptFileCapture()
+        {
+            if (_codeArtifacts == null)
+                return null;
+
+            return (workDirectory, exclude) =>
+            {
+                string runId = Guid.NewGuid().ToString("N");
+                IReadOnlyList<CodeArtifact> kept = _codeArtifacts.Capture(
+                    runId, workDirectory,
+                    (id, relative, _) => CodeArtifactEndpoints.RoutePrefix.TrimEnd('/') + "/" + id + "/" + relative,
+                    out _, exclude);
+                return kept.Select(a => new SkillProducedFile(a.Path, a.Bytes, a.Pointer)).ToList();
+            };
         }
 
         // ---- Queue ------------------------------------------------------------
@@ -130,6 +177,10 @@ namespace TensorSharp.Server.ProtocolAdapters
                 return Results.NotFound(new { ok = false, error = $"Session '{id}' not found." });
             }
 
+            // The session's execution workspace — its files, installed packages,
+            // everything its runs accumulated — lives exactly as long as the session.
+            _workspaces?.Release(id);
+
             // Keep the legacy queue handshake for the API contract. The queue is a
             // no-op now; in-flight KV state is owned by the engine, while disposing
             // the session only clears tracked chat history.
@@ -183,6 +234,18 @@ namespace TensorSharp.Server.ProtocolAdapters
                 architecture = _svc.Architecture,
                 defaultMaxTokens = _options.DefaultMaxTokens,
                 video,
+                // Null when this build serves no skills at all, so the UI can hide the
+                // whole control by testing one field rather than discovering it after a
+                // failed /api/skills fetch. An older UI ignores the extra member.
+                skills = _options.SkillsEnabled
+                    ? new
+                    {
+                        enabled = true,
+                        installable = _skills.CanInstall,
+                        allowScripts = _options.SkillsAllowScripts,
+                        count = _skills.Skills.Count,
+                    }
+                    : null,
             });
         }
 
@@ -1272,6 +1335,10 @@ namespace TensorSharp.Server.ProtocolAdapters
                 webUiLogger.LogInformation(LogEventIds.SessionReset,
                     "/api/chat newChat=true; resetting session {SessionId}", chatSession.Id);
                 _svc.ResetSession(chatSession);
+                // A new chat starts from a clean desk: the old conversation's files and
+                // installs belong to the old conversation.
+                if (!string.Equals(chatSession.Id, SessionManager.DefaultSessionId, StringComparison.Ordinal))
+                    _workspaces?.Release(chatSession.Id);
             }
 
             if (!_svc.IsLoaded)
@@ -1290,6 +1357,8 @@ namespace TensorSharp.Server.ProtocolAdapters
             List<ToolFunction> uiTools = null;
             if (body.TryGetProperty("tools", out var uiToolsEl) && uiToolsEl.ValueKind == JsonValueKind.Array)
                 uiTools = ToolFunctionParser.ParseOllama(body);
+
+            var requestedSkills = SkillSelectionParser.Parse(body);
 
             var messages = ChatMessageParser.ParseWebUi(messagesEl);
 
@@ -1322,8 +1391,46 @@ namespace TensorSharp.Server.ProtocolAdapters
                 return;
             }
 
+            // Resolved AFTER attachment paths so nothing about that check changes, and
+            // before the parser gate because the built-in skill tools turn it on.
+            var skillPlan = SkillRequestPlan.Create(
+                _skills, requestedSkills, SkillSelectionParser.ParseDiscovery(body), uiTools,
+                _svc.Architecture, _svc.ContextTokens, _options, out var unknownSkills, codeRunner: _codeRunner,
+                codeInputFiles: CollectCodeInputFiles(messages),
+                workspace: WorkspaceFor(chatSession),
+                captureProducedFiles: ScriptFileCapture(),
+                logger: webUiLogger);
+
+            if (unknownSkills.Count > 0)
+            {
+                webUiLogger.LogWarning(LogEventIds.HttpRequestRejected,
+                    "/api/chat rejected: unknown skills {Unknown}", string.Join(",", unknownSkills));
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsJsonAsync(new
+                {
+                    error = $"No skill called '{unknownSkills[0]}' is installed.",
+                });
+                return;
+            }
+
+            if (skillPlan != null)
+            {
+                messages = skillPlan.Apply(messages);
+                uiTools = skillPlan.Tools;
+                webUiLogger.LogInformation(LogEventIds.SkillSelected,
+                    "/api/chat skills: session={SessionId} selected={Selected} announced={Announced} inlined={Inlined} catalog={Catalog} tools={ToolsOffered}",
+                    chatSession.Id, skillPlan.DescribeSelection(), skillPlan.Prompt.Deferred.Count,
+                    skillPlan.Prompt.Inlined.Count,
+                    skillPlan.Prompt.Catalog.Count, skillPlan.ToolsOffered);
+            }
+
             var sw = Stopwatch.StartNew();
             int tokenCount = 0;
+            // How many of the plan's invocations have already been streamed to the
+            // browser. The loop appends to that list as it runs, and every update we
+            // receive is a chance to flush whatever is new — which is what turns a
+            // multi-second skill lookup into visible progress rather than a hang.
+            int reportedInvocations = 0;
             bool alwaysNeedsParsing = OutputParserFactory.IsAlwaysRequired(_svc.Architecture);
             bool useUiParser = uiThink || (uiTools != null && uiTools.Count > 0) || alwaysNeedsParsing;
 
@@ -1346,17 +1453,48 @@ namespace TensorSharp.Server.ProtocolAdapters
             // as a "response was truncated" hint, so a user staring at a sentence that
             // stops mid-word knows to raise max tokens rather than blame the model.
             bool turnTruncated = false;
+            // Set when the skills loop hands over already-separated pieces. uiParser is
+            // bypassed for those, so it must not be flushed at the end either — it holds
+            // no state, and the loop's own parser already did its final flush.
+            bool sawParsedUpdate = false;
             try
             {
                 await foreach (var update
-                    in _svc.ChatStreamWithMetricsAsync(chatSession, messages, maxTokens, ctx.RequestAborted, samplingConfig,
-                        uiTools, uiThink))
+                    in _svc.ChatStreamWithSkillsAsync(chatSession, messages, maxTokens, ctx.RequestAborted, samplingConfig,
+                        uiTools, uiThink, skillPlan, webUiLogger))
                 {
+                    reportedInvocations = await FlushSkillTraceAsync(ctx, skillPlan, reportedInvocations);
+
                     if (update.Done)
                     {
                         turnPromptTokens = update.PromptTokens;
                         turnKvReusedTokens = update.KvCacheReusedTokens;
                         turnTruncated = FinishReasonMapper.IsTruncated(update.FinishReason);
+                        continue;
+                    }
+
+                    if (update.IsParsed)
+                    {
+                        sawParsedUpdate = true;
+                        // The skills loop already parsed this round and is handing over
+                        // the separated pieces (see SkillChatLoop). Running our own
+                        // parser over them would be parsing parsed text.
+                        if (!string.IsNullOrEmpty(update.ThinkingPiece))
+                            await SseWriter.WriteEventAsync(ctx.Response, WebUiSseEvents.Thinking(update.ThinkingPiece), ctx.RequestAborted);
+                        if (!string.IsNullOrEmpty(update.Piece))
+                        {
+                            tokenCount++;
+                            await SseWriter.WriteEventAsync(ctx.Response, WebUiSseEvents.Token(update.Piece), ctx.RequestAborted);
+                        }
+                        if (update.ParsedToolCalls is { Count: > 0 })
+                            await SseWriter.WriteEventAsync(ctx.Response, WebUiSseEvents.ToolCalls(update.ParsedToolCalls), ctx.RequestAborted);
+                        if (update.ToolProgressPhase != null)
+                            await SseWriter.WriteEventAsync(ctx.Response,
+                                WebUiSseEvents.ToolProgress(
+                                    update.ToolProgressPhase, update.ToolProgressName,
+                                    update.ToolProgressPiece, update.ToolProgressSeconds,
+                                    update.ToolProgressDetail),
+                                ctx.RequestAborted);
                         continue;
                     }
 
@@ -1398,7 +1536,62 @@ namespace TensorSharp.Server.ProtocolAdapters
                 inferenceError = ex.Message;
             }
 
-            await FinalizeChatStreamAsync(ctx, uiParser, aborted, inferenceError, chatSession, sw, tokenCount,
+            // The remedy for a turn that reasoned itself out of an answer: run it once
+            // more with thinking OFF, so the model must write content from its first
+            // token. Only when the first attempt produced literally nothing — a partial
+            // answer is the model's to finish, and re-rolling it would discard work the
+            // user can already see. One retry only; a second would double the cost of a
+            // request that is simply too big for its budget.
+            if (turnTruncated && tokenCount == 0 && !aborted && inferenceError == null && uiThink)
+            {
+                var retryLogger = ctx.RequestServices.GetRequiredService<ILoggerFactory>()
+                    .CreateLogger("TensorSharp.Server.WebUI.Chat");
+                retryLogger.LogWarning(LogEventIds.ChatCompleted,
+                    "chat.retry-without-thinking sessionId={SessionId}: the turn spent its whole "
+                    + "token budget reasoning and produced no answer; retrying with thinking off.",
+                    chatSession.Id);
+
+                await SseWriter.WriteEventAsync(ctx.Response, WebUiSseEvents.Thinking(
+                    "\n[the reasoning ran past this turn's budget - answering directly instead]\n"));
+
+                try
+                {
+                    var retryParser = useUiParser ? OutputParserFactory.Create(_svc.Architecture) : null;
+                    retryParser?.Init(false, uiTools);
+                    await foreach (var update
+                        in _svc.ChatStreamWithSkillsAsync(chatSession, messages, maxTokens, ctx.RequestAborted,
+                            samplingConfig, uiTools, false, skillPlan, webUiLogger))
+                    {
+                        if (update.Done)
+                        {
+                            turnPromptTokens = update.PromptTokens;
+                            turnKvReusedTokens = update.KvCacheReusedTokens;
+                            turnTruncated = FinishReasonMapper.IsTruncated(update.FinishReason);
+                            continue;
+                        }
+                        if (string.IsNullOrEmpty(update.Piece))
+                            continue;
+
+                        tokenCount++;
+                        await SseWriter.WriteEventAsync(ctx.Response, WebUiSseEvents.Token(update.Piece));
+                    }
+                    uiParser = retryParser;
+                    sawParsedUpdate = true;   // the retry streamed content directly
+                }
+                catch (OperationCanceledException)
+                {
+                    aborted = true;
+                }
+                catch (Exception ex)
+                {
+                    // The retry is a rescue, not a contract: its failure must not replace
+                    // the original turn's explanation with a new error.
+                    retryLogger.LogWarning(LogEventIds.ChatFailed, ex,
+                        "chat.retry-without-thinking failed sessionId={SessionId}", chatSession.Id);
+                }
+            }
+
+            await FinalizeChatStreamAsync(ctx, sawParsedUpdate ? null : uiParser, aborted, inferenceError, chatSession, sw, tokenCount,
                 turnPromptTokens, turnKvReusedTokens, turnTruncated);
         }
 
@@ -1454,6 +1647,90 @@ namespace TensorSharp.Server.ProtocolAdapters
             }
         }
 
+        /// <summary>
+        /// The conversation's uploaded text documents, as files a <c>shell</c> command
+        /// may open by name.
+        ///
+        /// <para>
+        /// The upload's CONTENT is already inlined into the message text, but content in
+        /// the prompt is not a file on disk: asked to "convert this md file", a model with
+        /// only the inline copy re-types it into its program, abridged. Staging the actual
+        /// file under the name the user knows it by lets the code read all of it. The
+        /// paths were resolved (and confined to the upload root) by
+        /// <see cref="ChatMessageParser.ResolveAttachmentPaths"/> before this runs.
+        /// </para>
+        /// </summary>
+        private static IReadOnlyList<CodeInputFile> CollectCodeInputFiles(List<ChatMessage> messages)
+        {
+            List<CodeInputFile> files = null;
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (ChatMessage message in messages ?? new List<ChatMessage>())
+            {
+                if (message?.TextFilePaths == null)
+                    continue;
+
+                for (int i = 0; i < message.TextFilePaths.Count; i++)
+                {
+                    string path = message.TextFilePaths[i];
+                    if (string.IsNullOrEmpty(path))
+                        continue;
+
+                    // Same order as textFilePaths; the stored name stands in when the
+                    // client did not send display names. A repeated name keeps its first
+                    // file — re-attaching the same document must not flip which copy the
+                    // code reads mid-conversation.
+                    string name = message.TextFileNames != null && i < message.TextFileNames.Count
+                        && !string.IsNullOrWhiteSpace(message.TextFileNames[i])
+                        ? Path.GetFileName(message.TextFileNames[i])
+                        : Path.GetFileName(path);
+
+                    if (name.Length == 0 || !seen.Add(name))
+                        continue;
+
+                    (files ??= new List<CodeInputFile>()).Add(new CodeInputFile(name, path));
+                }
+            }
+
+            return files ?? (IReadOnlyList<CodeInputFile>)Array.Empty<CodeInputFile>();
+        }
+
+        /// <summary>
+        /// Stream any skill lookups the disclosure loop has performed since the last
+        /// call, as their own SSE frames.
+        ///
+        /// <para>
+        /// The loop deliberately does not forward an intermediate round's tokens - they
+        /// carry the tool-call markup - so without this the user would watch a blank
+        /// composer for as long as the model spends reading files. These frames are what
+        /// they see instead: "read pdf / references/api.md".
+        /// </para>
+        /// </summary>
+        /// <returns>The new watermark, to pass back on the next call.</returns>
+        private static async Task<int> FlushSkillTraceAsync(HttpContext ctx, SkillRequestPlan plan, int reported)
+        {
+            if (plan == null)
+                return reported;
+
+            SkillToolInvocation[] pending;
+            lock (plan.Invocations)
+            {
+                if (plan.Invocations.Count <= reported)
+                    return reported;
+                pending = plan.Invocations.GetRange(reported, plan.Invocations.Count - reported).ToArray();
+                reported = plan.Invocations.Count;
+            }
+
+            foreach (var invocation in pending)
+            {
+                await SseWriter.WriteEventAsync(
+                    ctx.Response,
+                    WebUiSseEvents.SkillStep(invocation),
+                    ctx.RequestAborted);
+            }
+            return reported;
+        }
+
         private static async Task FinalizeChatStreamAsync(
             HttpContext ctx, IOutputParser uiParser, bool aborted, string inferenceError,
             ChatSession chatSession, Stopwatch sw, int tokenCount, int turnPromptTokens, int turnKvReusedTokens,
@@ -1470,6 +1747,24 @@ namespace TensorSharp.Server.ProtocolAdapters
                         await SseWriter.WriteEventAsync(ctx.Response, WebUiSseEvents.Token(finalParsed.Content));
                     if (finalParsed.ToolCalls != null)
                         await SseWriter.WriteEventAsync(ctx.Response, WebUiSseEvents.ToolCalls(finalParsed.ToolCalls));
+                }
+
+                // A turn that was cut off before producing ANY answer is the one case
+                // where silence is actively misleading: the caller gets an empty string
+                // and a `truncated` flag it has to know to look for, and a user sees the
+                // assistant say nothing at all. It happens when a reasoning model spends
+                // the whole allowance inside its thinking channel — observed at 8000
+                // tokens and 888 seconds for an empty reply. Say what happened, in the
+                // answer itself, where it cannot be missed.
+                //
+                // The retry that precedes this is the actual remedy; this message is what
+                // is left when even that produced nothing.
+                if (truncated && tokenCount == 0)
+                {
+                    await SseWriter.WriteEventAsync(ctx.Response, WebUiSseEvents.Token(
+                        "_(No answer was produced: the model spent this turn's whole token budget "
+                        + "on internal reasoning before writing anything. Raise max tokens, turn "
+                        + "thinking off for this request, or ask for something narrower.)_"));
                 }
 
                 sw.Stop();

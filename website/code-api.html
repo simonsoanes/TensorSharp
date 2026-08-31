@@ -170,6 +170,126 @@ Console.WriteLine($"Saved {output.Width}x{output.Height} edited image.");</code>
   </table>
   </div>
 
+  <h2 id="skills">Agent Skills — <code>SkillsChatClient</code></h2>
+  <p>An <a href="features.html#skills">Agent Skill</a> is a folder of model-facing instructions — a <code>SKILL.md</code> plus the scripts, reference documents and assets it refers to — that a model loads only when a task needs it. <code>SkillsChatClient</code> (namespace <code>TensorSharp.AgentHost.Skills</code>, project <code>TensorSharp.AgentHost</code>) is how a .NET application gets them. It calls an OpenAI-compatible chat endpoint over HTTP rather than loading a GGUF in process, so unlike the rest of this page it needs no backend and no <code>TensorSharp.Models</code> reference.</p>
+  <p>It covers the two situations that actually arise, selected with <code>SkillsChatClientOptions.Delivery</code>.</p>
+
+  <h3>Against TensorSharp.Server — <code>SkillDelivery.Server</code></h3>
+  <p>Name the skills and the server does everything, including the progressive-disclosure loop, next to the model. Nothing is uploaded per request and the skill files never leave the server.</p>
+  <pre data-lang="csharp"><code>using System;
+using System.Threading.Tasks;
+using TensorSharp.AgentHost.Skills;
+
+using var client = new SkillsChatClient(new SkillsChatClientOptions
+{
+    Endpoint = "http://localhost:5000",           // with or without a trailing /v1
+    DefaultModel = "gemma-4-E4B-it-Q8_0.gguf",
+    Delivery = SkillDelivery.Server,
+});
+
+// Convenience for the common single-turn case: prompt + the skills to use.
+SkillsChatResponse reply = await client.CompleteAsync(
+    SkillsChatRequest.User("Extract the tables from report.pdf", "pdf"));
+
+Console.WriteLine(reply.Content);
+Console.WriteLine($"{reply.Rounds} round(s), {reply.PromptTokens} prompt + {reply.CompletionTokens} completion tokens");</code></pre>
+  <p>Under server delivery the progressive-disclosure loop runs inside the server, so <code>reply.SkillInvocations</code> comes back empty and <code>reply.Rounds</code> is <code>1</code> — this client made exactly one request.</p>
+
+  <h3>Against any other OpenAI-compatible endpoint — <code>SkillDelivery.Local</code></h3>
+  <p>Point the client at a local <code>SkillRegistry</code> and it builds the prompt block, declares the skill tools and runs the loop <em>in this process</em>, so an endpoint that has never heard of skills behaves as though it had. The cost is one extra round trip per file the model reads.</p>
+  <pre data-lang="csharp"><code>using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using TensorSharp.Runtime;          // ChatMessage
+using TensorSharp.AgentHost.Skills;
+
+var registry = new SkillRegistry(new SkillRegistryOptions
+{
+    Roots = new[] { "/srv/skills" },   // scanned up to MaxDepth (3) levels deep
+});
+
+using var client = new SkillsChatClient(new SkillsChatClientOptions
+{
+    Endpoint = "https://api.example.com/v1",
+    ApiKey = Environment.GetEnvironmentVariable("EXAMPLE_API_KEY"),
+    DefaultModel = "some-hosted-model",
+    Delivery = SkillDelivery.Local,
+    Registry = registry,
+    Discovery = true,                  // also advertise the skills a request did not select
+});
+
+SkillsChatResponse reply = await client.CompleteAsync(new SkillsChatRequest
+{
+    Messages = { new ChatMessage { Role = "user", Content = "Fill in this AcroForm and tell me what you set." } },
+    Skills = { "pdf" },
+    MaxTokens = 800,
+});
+
+Console.WriteLine(reply.Content);
+
+// Every skill file the model read, in order.
+foreach (SkillToolInvocation call in reply.SkillInvocations)
+    Console.WriteLine($"round {call.Round}: {call.Tool} {call.SkillId}/{call.ResourcePath} ok={call.Ok}");</code></pre>
+  <p><code>SkillDelivery.Auto</code> — the default — probes <code>/v1/skills</code> once and caches the answer for the client's lifetime: server delivery if the endpoint answers, local delivery if it does not and this client has a registry. <code>await client.ResolveDeliveryAsync()</code> reports which one won, and <code>await client.ListServerSkillsAsync()</code> asks an endpoint what it has, returning an empty list rather than throwing when it implements no skills API.</p>
+  <div class="callout warn"><div class="ic">🔁</div><p><code>SkillsChatResponse.ToolCalls</code> holds calls to the <strong>caller's own</strong> tools (those passed in <code>SkillsChatRequest.Tools</code>), which the client never executes — only the client knows what they do. A non-empty list means you must service them and send the results back in a follow-up request; the skill tools have already been answered, and <code>reply.Messages</code> is the full transcript to continue from. A failed request throws <code>SkillsChatException</code>.</p></div>
+
+  <h4><code>SkillsChatClientOptions</code></h4>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Property</th><th>Type</th><th>Default</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><code>Endpoint</code></td><td>string</td><td><em>required</em></td><td>API root, with or without a trailing <code>/v1</code>.</td></tr>
+      <tr><td><code>ApiKey</code></td><td>string?</td><td>null</td><td>Bearer token, when the endpoint wants one. TensorSharp.Server does not.</td></tr>
+      <tr><td><code>DefaultModel</code></td><td>string?</td><td>null</td><td>Model name sent with every request unless one is set per request.</td></tr>
+      <tr><td><code>Delivery</code></td><td><code>SkillDelivery</code></td><td><code>Auto</code></td><td>Who resolves skills: <code>Auto</code>, <code>Server</code>, or <code>Local</code>.</td></tr>
+      <tr><td><code>Registry</code></td><td><code>SkillRegistry?</code></td><td>null</td><td>The skills used under local delivery. Ignored under server delivery, where the endpoint owns them.</td></tr>
+      <tr><td><code>PromptOptions</code></td><td><code>SkillPromptOptions</code></td><td><code>.Default</code></td><td>Prompt budgets for local delivery.</td></tr>
+      <tr><td><code>LoopOptions</code></td><td><code>SkillAgentLoopOptions</code></td><td><code>.Default</code></td><td>Loop bounds for local delivery — <code>MaxRounds</code> 8, <code>MaxCallsPerRound</code> 8, and an <code>OnInvocation</code> callback fired after each executed tool call.</td></tr>
+      <tr><td><code>Discovery</code></td><td>bool</td><td>true</td><td>Advertise skills the request did not select, so the model can pick one up. <code>SkillsChatRequest.Discovery</code> overrides it per request.</td></tr>
+      <tr><td><code>Timeout</code></td><td><code>TimeSpan</code></td><td>10 minutes</td><td>Per-request timeout. Only used when the client creates its own <code>HttpClient</code> — pass one from <code>IHttpClientFactory</code> to the constructor instead and it is left alone.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h4><code>SkillsChatRequest</code> and <code>SkillsChatResponse</code></h4>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Member</th><th>Type</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><code>SkillsChatRequest.Messages</code></td><td><code>List&lt;ChatMessage&gt;</code></td><td>The conversation. A leading <code>system</code> message is merged with the skill block rather than displaced.</td></tr>
+      <tr><td><code>SkillsChatRequest.Skills</code></td><td><code>List&lt;string&gt;</code></td><td>Skill names to use, as they appear in the registry.</td></tr>
+      <tr><td><code>SkillsChatRequest.Tools</code></td><td><code>List&lt;ToolFunction&gt;?</code></td><td>The caller's own tools. Never executed by the client; returned for the caller to service.</td></tr>
+      <tr><td><code>SkillsChatRequest.Model</code> · <code>MaxTokens</code> · <code>Temperature</code> · <code>TopP</code> · <code>Think</code> · <code>Discovery</code></td><td>string? · int? · double? · double? · bool · bool?</td><td>Per-request overrides; a null leaves the setting to the endpoint (or, for <code>Discovery</code>, to the client's own option).</td></tr>
+      <tr><td><code>SkillsChatRequest.User(prompt, params skills)</code></td><td>static</td><td>Convenience for the common single-turn case.</td></tr>
+      <tr><td><code>SkillsChatResponse.Content</code> · <code>Thinking</code></td><td>string · string?</td><td>The assistant's answer, and its reasoning when the model exposed any.</td></tr>
+      <tr><td><code>SkillsChatResponse.ToolCalls</code></td><td><code>IReadOnlyList&lt;ToolCall&gt;</code></td><td>Calls to the caller's own tools, which the client never executes.</td></tr>
+      <tr><td><code>SkillsChatResponse.Messages</code></td><td><code>List&lt;ChatMessage&gt;</code></td><td>The full transcript, including anything the disclosure loop appended.</td></tr>
+      <tr><td><code>SkillsChatResponse.SkillInvocations</code></td><td><code>IReadOnlyList&lt;SkillToolInvocation&gt;</code></td><td>Every skill file the model read, in order — <code>Round</code>, <code>Tool</code>, <code>SkillId</code>, <code>ResourcePath</code>, <code>Ok</code>, <code>ResultBytes</code>. Empty under server delivery.</td></tr>
+      <tr><td><code>SkillsChatResponse.FinishReason</code> · <code>PromptTokens</code> · <code>CompletionTokens</code> · <code>Rounds</code></td><td>string? · int · int · int</td><td>Why generation stopped, tokens summed over every round, and how many generations ran. <code>Rounds</code> is 1 when the model answered without reading anything.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h4><code>SkillRegistry</code> and <code>SkillRegistryOptions</code></h4>
+  <p>The registry owns discovery (walking configured roots for <code>SKILL.md</code>), installation, and lookup; it is the only component that touches skill storage, so the containment rules live in one place. It is also what the CLI and the server build from <code>--skills-dir</code>.</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Member</th><th>Type / default</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><code>SkillRegistryOptions.Roots</code></td><td><code>IReadOnlyList&lt;string&gt;</code>, empty</td><td>Directories to scan, in precedence order. A root may be a single skill (it holds <code>SKILL.md</code> directly) or a directory of them.</td></tr>
+      <tr><td><code>SkillRegistryOptions.InstallDirectory</code></td><td><code>string?</code>, null</td><td>Where skills installed at runtime are written; also scanned, and always first in precedence. Null leaves the registry read-only.</td></tr>
+      <tr><td><code>SkillRegistryOptions.MaxDepth</code></td><td>int, <code>3</code></td><td>How deep to walk under a root looking for <code>SKILL.md</code>.</td></tr>
+      <tr><td><code>SkillRegistryOptions.MaxSkills</code> · <code>MaxManifestBytes</code> · <code>MaxSkillBytes</code> · <code>MaxSkillFiles</code></td><td>512 · 4 MB · 256 MB · 4096</td><td>Ceilings so a root pointed at the wrong directory fails visibly instead of exhausting memory.</td></tr>
+      <tr><td><code>Skills</code> · <code>Errors</code> · <code>Roots</code></td><td><code>IReadOnlyList&lt;Skill&gt;</code> · <code>IReadOnlyList&lt;SkillLoadError&gt;</code> · <code>IReadOnlyList&lt;string&gt;</code></td><td>What loaded, what failed to load (with <code>Path</code> and <code>Message</code>), and the roots that were scanned.</td></tr>
+      <tr><td><code>CanInstall</code> · <code>InstallDirectory</code></td><td>bool · string?</td><td>Whether runtime installation is configured, and where it lands.</td></tr>
+      <tr><td><code>TryGet(id, out Skill)</code> · <code>Resolve(ids, out unknown)</code></td><td>bool · <code>IReadOnlyList&lt;Skill&gt;</code></td><td>Look one skill up by name, or resolve a selection and learn which names were not found.</td></tr>
+      <tr><td><code>Refresh()</code></td><td><code>SkillScanResult</code></td><td>Re-scan every root — what <code>POST /api/skills/rescan</code> calls.</td></tr>
+      <tr><td><code>InstallFromDirectory(path, overwrite)</code> · <code>InstallFromZip(stream, overwrite, limits)</code> · <code>Remove(id)</code></td><td><code>Skill</code> · <code>Skill</code> · bool</td><td>Install a skill from a folder or an uploaded archive, or remove an installed one. Every archive entry is resolved through the same path guard the model's reads go through; a rejected archive throws <code>SkillInstallException</code>.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Full reference, including the frontmatter fields, the prompt budget and the security model: <code>docs/agent_skills.md</code>. Open-source skills to start from: <a href="https://github.com/anthropics/skills" target="_blank" rel="noopener">github.com/anthropics/skills</a>.</p>
+
   <h2 id="namespaces">Key types &amp; interfaces</h2>
   <div class="table-scroll">
   <table>
@@ -183,6 +303,8 @@ Console.WriteLine($"Saved {output.Width}x{output.Height} edited image.");</code>
       <tr><td><code>IBatchedPagedModel</code></td><td>Optional batched/paged forward (<code>ForwardBatch</code>) implemented by most architectures for continuous batching.</td></tr>
       <tr><td><code>DiffusionGemmaModel</code> + <code>DiffusionGemmaSampler</code></td><td>Text-diffusion model and its EntropyBound denoising sampler (<code>Generate(promptTokens, DiffusionEbParams, …)</code>). <code>Forward()</code> is unsupported.</td></tr>
       <tr><td><code>QwenImageModel</code> + <code>QwenImageParams</code></td><td>Qwen-Image-Edit image editor. <code>EditImage(prompt, RgbImage, QwenImageParams)</code> returns the modified <code>RgbImage</code>; <code>ImageIO</code> loads/saves PNG.</td></tr>
+      <tr><td><code>SkillsChatClient</code> + <code>SkillsChatClientOptions</code></td><td><a href="#skills">Agent Skills</a> against an OpenAI-compatible endpoint. <code>CompleteAsync(SkillsChatRequest)</code> returns a <code>SkillsChatResponse</code>; <code>SkillDelivery</code> chooses whether the server or this process runs the disclosure loop (in <code>TensorSharp.AgentHost.Skills</code>).</td></tr>
+      <tr><td><code>SkillRegistry</code> + <code>SkillRegistryOptions</code></td><td>The set of skills a host knows about: scanning configured roots for <code>SKILL.md</code>, installing from a folder or a <code>.zip</code>, and lookup. The only component that touches skill storage, so containment is enforced in one place.</td></tr>
       <tr><td><code>InferenceEngine</code></td><td>Worker-thread scheduler + paged block pool that powers the server's continuous batching (in <code>TensorSharp.Runtime.Scheduling</code>).</td></tr>
     </tbody>
   </table>

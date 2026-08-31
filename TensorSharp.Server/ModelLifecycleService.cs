@@ -43,7 +43,7 @@ namespace TensorSharp.Server
 
         /// <summary>
         /// When the operator explicitly named an MTP draft via
-        /// <c>--mtp-draft-model</c> (<c>TS_MTP_DRAFT_MODEL</c>) but it could not be
+        /// <c>--draft-model</c> (<c>TS_SPEC_DRAFT_MODEL</c>) but it could not be
         /// activated on the loaded target (missing file, wrong architecture, an
         /// incompatible draft, or an incomplete GGUF), this holds a
         /// human-readable reason. It is <c>null</c> when no draft was requested or
@@ -287,7 +287,14 @@ namespace TensorSharp.Server
                 "ggml_cuda" => BackendType.GgmlCuda,
                 "ggml_vulkan" => BackendType.GgmlVulkan,
                 "cpu" => BackendType.Cpu,
-                _ => BackendType.GgmlCpu
+                // No backend named at all: the documented server default.
+                null => BackendType.GgmlCpu,
+                // A name we do not recognise used to fall back to ggml_cpu in silence,
+                // hiding a typo behind a CPU-speed model. Both callers turn this into a
+                // clean error (the Web UI's 500 JSON, the startup loader's fail-fast).
+                var other => throw new ArgumentException(
+                    $"Unrecognised backend '{other}'. Valid backends: mlx, cuda, ggml_metal, ggml_cuda, ggml_vulkan, ggml_cpu, cpu.",
+                    nameof(backendStr)),
             };
         }
 

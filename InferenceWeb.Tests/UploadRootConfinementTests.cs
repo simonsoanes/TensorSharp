@@ -174,6 +174,10 @@ public class UploadRootConfinementTests : IDisposable
         new SessionManager(),
         Options(),
         new UploadStoragePolicy(_uploadRoot),
+        new SkillRegistry(new SkillRegistryOptions()),
+        codeRunner: null,
+        workspaces: null,
+        codeArtifacts: null,
         NullLoggerFactory.Instance);
 
     private static JsonElement VideoRequest(string imagePath) =>

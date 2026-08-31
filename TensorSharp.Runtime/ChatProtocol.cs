@@ -138,6 +138,40 @@ namespace TensorSharp.Runtime
         /// </summary>
         public bool CapsVideoFrames { get; init; }
 
+        /// <summary>
+        /// False when this family's renderer never puts TOOL DECLARATIONS in the
+        /// prompt, so a tool offered to it can never be called.
+        ///
+        /// <para>
+        /// Gemma 3 and Mistral 3 are the two: their <see cref="Render"/> delegates take
+        /// only the messages and the generation flag, and the tool list is discarded
+        /// before the renderer sees it. Declaring a tool for them is not an error the
+        /// caller can see - the request succeeds and the model simply never calls what
+        /// it was never told about.
+        /// </para>
+        /// <para>
+        /// Agent Skills reads this to choose how to deliver a skill: where tools are
+        /// rendered the skill body is fetched on demand through <c>skills_read</c>
+        /// (progressive disclosure); where they are not, the body has to be written
+        /// into the prompt up front instead. Without this flag, skills would appear to
+        /// work on every model and silently do nothing on these two.
+        /// </para>
+        /// </summary>
+        public bool RendersToolDeclarations { get; init; } = true;
+
+        /// <summary>
+        /// False when this family's renderer DROPS <c>role: "tool"</c> messages.
+        ///
+        /// <para>
+        /// Mistral 3's renderer handles only <c>user</c> and <c>assistant</c>, so a tool
+        /// result is not merely framed oddly - it is absent from the prompt entirely.
+        /// An agentic loop that feeds a result back that way asks the model to continue
+        /// from an answer it cannot see, and the usual outcome is that it calls the same
+        /// tool again forever.
+        /// </para>
+        /// </summary>
+        public bool RendersToolResultMessages { get; init; } = true;
+
         internal void Validate()
         {
             if (string.IsNullOrWhiteSpace(Id))

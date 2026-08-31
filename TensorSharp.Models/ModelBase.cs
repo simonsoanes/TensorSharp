@@ -906,6 +906,18 @@ namespace TensorSharp.Models
 
             var vocabTokens = gguf.GetStringArray("tokenizer.ggml.tokens");
 
+            // A GGUF with no tokenizer vocabulary is a pipeline COMPONENT — the
+            // MiniMax-H3 towers ship with zero KV metadata, for example — not a chat
+            // model. Loading one via --model used to die on an unhandled null
+            // reference deep in EOG resolution; say what is actually wrong instead.
+            if (vocabTokens == null || vocabTokens.Length == 0)
+            {
+                throw new InvalidOperationException(
+                    "this GGUF carries no tokenizer vocabulary (tokenizer.ggml.tokens), so it cannot be " +
+                    "served as a chat model. Component GGUFs — a pipeline's encoder or tower — are loaded " +
+                    "by the pipeline that owns them, not via --model.");
+            }
+
             var tokenTypes = gguf.GetInt32Array("tokenizer.ggml.token_type");
             int bosId = (int)gguf.GetUint32("tokenizer.ggml.bos_token_id");
             int eosId = (int)gguf.GetUint32("tokenizer.ggml.eos_token_id");
@@ -1195,6 +1207,20 @@ namespace TensorSharp.Models
         private static readonly bool GgmlF32ResidentLinearEnabled =
             !string.Equals(Environment.GetEnvironmentVariable("TS_GGML_F32_RESIDENT"), "0", StringComparison.Ordinal);
 
+        // Once per process: the resident path failing means every F32 linear falls
+        // back the same way, and this runs once per layer per token.
+        private static int _f32ResidentFallbackWarned;
+
+        private static void WarnGgmlF32ResidentFallback(Exception ex)
+        {
+            if (Interlocked.Exchange(ref _f32ResidentFallbackWarned, 1) != 0)
+                return;
+            Console.Error.WriteLine(
+                $"WARNING: device-resident GGML F32 linear rejected ({ex.Message}); using the generic " +
+                "Addmm path instead, which re-uploads the weight on every call and can dominate decode " +
+                "time. Reported once.");
+        }
+
         protected unsafe bool TryGgmlF32LinearResident(Tensor result, Tensor input, Tensor w)
         {
             if (!GgmlF32ResidentLinearEnabled)
@@ -1218,12 +1244,14 @@ namespace TensorSharp.Models
                     0 /* GGML_TYPE_F32 */, inDim, outDim, inDim * outDim * sizeof(float));
                 return true;
             }
-            catch (NotSupportedException)
+            catch (NotSupportedException ex)
             {
+                WarnGgmlF32ResidentFallback(ex);
                 return false;
             }
-            catch (ArgumentException)
+            catch (ArgumentException ex)
             {
+                WarnGgmlF32ResidentFallback(ex);
                 return false;
             }
         }
@@ -1292,6 +1320,26 @@ namespace TensorSharp.Models
             return result;
         }
 
+        // Once per (backend, quant type): a missing device kernel for a quant type
+        // affects every layer that uses that type, on every token.
+        private static readonly HashSet<(BackendType, int)> _managedQuantFallbackWarned = new();
+
+        private void WarnAddmmQuantManagedFallback(int ggmlType)
+        {
+            // On the pure-C# CPU backend the managed dequant IS the kernel, not a fallback.
+            if (_backend == BackendType.Cpu)
+                return;
+            lock (_managedQuantFallbackWarned)
+            {
+                if (!_managedQuantFallbackWarned.Add((_backend, ggmlType)))
+                    return;
+            }
+            Console.Error.WriteLine(
+                $"WARNING: the {_backend} backend has no device kernel for quant type " +
+                $"{(GgmlTensorType)ggmlType}; every projection of that type runs on the CPU " +
+                "managed-dequant path instead, which is much slower. Reported once per backend and type.");
+        }
+
         protected unsafe void AddmmQuantManaged(Tensor result, Tensor input, QuantizedWeight weight)
         {
             if (!input.IsContiguous() || !result.IsContiguous())
@@ -1347,6 +1395,8 @@ namespace TensorSharp.Models
 
             if (!weight.HasHostData)
                 throw new InvalidOperationException($"Quantized linear weight type {(GgmlTensorType)weight.GgmlType} is not available on the selected device and its host copy has been released.");
+
+            WarnAddmmQuantManagedFallback(weight.GgmlType);
 
             // One managed implementation, in ManagedQuantizedOps: integer dot
             // kernels where the weight type has them, dequant-once + register-

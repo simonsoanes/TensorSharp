@@ -25,6 +25,8 @@ using TensorSharp.Cpu;
 using TensorSharp.Cuda;
 using TensorSharp.Models.Architecture;
 using TensorSharp.Runtime;
+using TensorSharp.AgentHost.CodeExec;
+using TensorSharp.AgentHost.Skills;
 using TensorSharp.Runtime.Scheduling;
 using TensorSharp.Runtime.Speculative;
 
@@ -107,12 +109,50 @@ namespace TensorSharp.Cli
                     LibcExit(Environment.ExitCode);
                 }
             }
+            catch (ArgumentException ex)
+            {
+                // A bad flag or value (including a removed spelling's "use --X
+                // instead" pointer) is the operator's to fix; a stack trace
+                // buries the one line they need. The full exception still goes
+                // to the log for the rare deep ArgumentException.
+                _log.LogError(LogEventIds.CliFailed, ex, "cli.invalid-arguments {Error}", ex.Message);
+                Console.Error.WriteLine("Configuration error: " + ex.Message);
+                Environment.ExitCode = 1;
+            }
             catch (Exception ex)
             {
                 _log.LogCritical(LogEventIds.CliFailed, ex,
                     "tensorsharp-cli aborted with unhandled exception {ExceptionType}", ex.GetType().Name);
                 throw;
             }
+            finally
+            {
+                // The CLI process IS the session, so its execution workspace — the
+                // working directory, the packages installed into it — is released when
+                // the process leaves, whichever of MainCore's many exits it took. Doing
+                // this here rather than at one call site is what keeps the one-shot
+                // (--input) path from leaking a directory the interactive path cleans up.
+                // Files a program PRODUCED were already copied into the artifact store,
+                // which outlives this.
+                ReleaseCodeWorkspace();
+            }
+        }
+
+        /// <summary>
+        /// This process's code-execution workspace, held statically so
+        /// <see cref="Main"/> can release it on every exit path.
+        /// </summary>
+        private static SessionWorkspaceManager _codeWorkspaces;
+        private static SessionWorkspace _codeWorkspace;
+
+        private static void ReleaseCodeWorkspace()
+        {
+            SessionWorkspaceManager manager = _codeWorkspaces;
+            SessionWorkspace workspace = _codeWorkspace;
+            _codeWorkspaces = null;
+            _codeWorkspace = null;
+            if (manager != null && workspace != null)
+                manager.Release(workspace.Id);
         }
 
         /// <summary>The effective --backend value (last one wins, as in MainCore).</summary>
@@ -132,6 +172,37 @@ namespace TensorSharp.Cli
 
         static void MainCore(string[] args)
         {
+            // Parsed BEFORE the switch below and REMOVED from the argument list, the
+            // same way the server does it: the code-execution flags are owned by
+            // CodeExecOptions rather than by this switch, so consuming them here is
+            // what keeps the switch from meeting a flag it has no case for. Running
+            // code the MODEL wrote is its own decision, separate from --skills-allow-exec.
+            // Retired spellings are refused first, against the ORIGINAL line: Parse
+            // consumes what it recognises, and the CLI's own switch has no unknown-flag
+            // trap at all, so a retired --code-exec-packages would otherwise be silently
+            // dropped and the operator would never learn their setting stopped applying.
+            if (CodeExecOptions.RejectRemoved(args) is { } removedCodeExecFlag)
+            {
+                Console.Error.WriteLine(removedCodeExecFlag);
+                Environment.ExitCode = 1;
+                return;
+            }
+
+            CodeExecOptions codeExecOptions;
+            List<string> remainingArgs;
+            try
+            {
+                codeExecOptions = CodeExecOptions.Parse(args, out remainingArgs);
+            }
+            catch (ArgumentException ex)
+            {
+                Console.Error.WriteLine(ex.Message);
+                Environment.ExitCode = 1;
+                return;
+            }
+            codeExecOptions.ApplyEnvironment();
+            args = remainingArgs.ToArray();
+
             // Pick up the KV cache dtype from the KV_CACHE_DTYPE environment variable
             // before parsing CLI args. The --kv-cache-dtype flag below overrides this.
             KvCacheDtypeConfig.ConfigureFromEnvironment();
@@ -166,6 +237,10 @@ namespace TensorSharp.Cli
             string multiTurnJsonl = null;
             bool enableThinking = false;
             string toolsFile = null;
+            // Agent Skills. Parsed by the shared reader after the switch so this host and
+            // the server accept exactly the same spellings; the locals below only exist
+            // for the cases the switch itself has to consume.
+            var skillsCliArgs = new List<string>();
             bool dumpPrompt = false;
             bool runBenchmark = false;
             int benchmarkPrefill = 32;
@@ -289,22 +364,6 @@ namespace TensorSharp.Cli
                     case "--video": videoPath = args[++i]; break;
                     case "--mmproj": mmProjPath = args[++i]; break;
                     case "--draft-model": draftModelPath = args[++i]; break;
-                    case "--spec-draft-n-max": specDraftMax = int.Parse(args[++i]); break;
-                    case "--spec-draft-conf-min":
-                    {
-                        string confStr = args[++i];
-                        // 0 is legal and means "never gate a draft on confidence";
-                        // anything above 1 is not a looser gate but a dead one — no
-                        // probability clears it, so speculation would arm, log, and
-                        // then never draft a single token.
-                        if (!float.TryParse(confStr, NumberStyles.Float, CultureInfo.InvariantCulture, out specDraftConfMin)
-                            || specDraftConfMin < 0f || specDraftConfMin > 1f)
-                        {
-                            throw new ArgumentException(
-                                $"Invalid value for --spec-draft-conf-min: '{confStr}'. Expected a probability in [0, 1].");
-                        }
-                        break;
-                    }
                     case "--max-tokens": maxTokens = int.Parse(args[++i]); break;
                     case "--test": runTest = true; break;
                     case "--backend": backendStr = args[++i].ToLowerInvariant(); break;
@@ -323,6 +382,23 @@ namespace TensorSharp.Cli
                     case "--test-templates": testTemplatesDir = args[++i]; break;
                     case "--think": enableThinking = true; break;
                     case "--tools": toolsFile = args[++i]; break;
+                    // Agent Skills. The values are collected verbatim and handed to
+                    // SkillHostOptions.Parse below, which owns the validation and the
+                    // env-var layering for both hosts.
+                    case "--skills-dir":
+                    case "--skill":
+                    case "--skills-max-rounds":
+                    case "--skills-sandbox":
+                        skillsCliArgs.Add(args[i]);
+                        skillsCliArgs.Add(args[++i]);
+                        break;
+                    case "--list-skills":
+                    case "--no-skills":
+                    case "--skills-no-discovery":
+                    case "--skills-allow-exec":
+                    case "--skills-allow-network":
+                        skillsCliArgs.Add(args[i]);
+                        break;
                     case "--dump-prompt": dumpPrompt = true; break;
                     case "--multi-turn-jsonl": multiTurnJsonl = args[++i]; break;
                     case "--benchmark": runBenchmark = true; break;
@@ -453,6 +529,102 @@ namespace TensorSharp.Cli
                 return;
             }
 
+            // Agent Skills, resolved before the model is touched so `--list-skills`
+            // works with no `--model` at all and a mistyped `--skills-dir` fails here
+            // rather than after a multi-gigabyte load.
+            SkillHostOptions skillOptions;
+            try
+            {
+                skillOptions = SkillHostOptions.Parse(skillsCliArgs)
+                    .ApplyEnvironmentAndDefaults(AppContext.BaseDirectory);
+                if (skillOptions.Enabled)
+                {
+                    bool onlyDefaultRoot = skillOptions.Roots.Count == 1
+                        && string.Equals(
+                            skillOptions.Roots[0],
+                            Path.Combine(AppContext.BaseDirectory, SkillHostOptions.DefaultDirectoryName),
+                            StringComparison.Ordinal);
+                    skillOptions.ValidateRoots(createDefault: onlyDefaultRoot);
+                }
+            }
+            catch (ArgumentException ex)
+            {
+                _log.LogError(LogEventIds.CliFailed, "cli.skills.invalid {Error}", ex.Message);
+                Console.Error.WriteLine(ex.Message);
+                return;
+            }
+
+            SkillRegistry skillRegistry = skillOptions.Enabled
+                ? new SkillRegistry(skillOptions.ToRegistryOptions(), _log)
+                : null;
+
+            if (skillOptions.ListOnly)
+            {
+                ListSkills(skillRegistry);
+                return;
+            }
+
+            // Code execution (--code-exec). The CLI is ONE session for the life of the
+            // process, so it gets exactly one workspace: files a program writes and
+            // packages it installs stay available to the next call and to a skill's
+            // scripts, and the whole thing is released when the process exits. Orphans
+            // from a previous run are swept first — a crashed run leaves a directory
+            // nothing can reach again.
+            ICodeRunner codeRunner = null;
+            SessionWorkspace codeWorkspace = null;
+            CodeArtifactStore codeArtifacts = null;
+            if (codeExecOptions.Enabled)
+            {
+                codeExecOptions.ScratchDirectory ??= Path.Combine(AppContext.BaseDirectory, "code-scratch");
+                codeArtifacts = new CodeArtifactStore(
+                    codeExecOptions.ArtifactDirectory
+                        ?? Path.Combine(AppContext.BaseDirectory, "code-artifacts"),
+                    new CodeArtifactLimits());
+                _codeWorkspaces = new SessionWorkspaceManager(codeExecOptions.ScratchDirectory, _log);
+                _codeWorkspaces.SweepOrphans();
+                codeWorkspace = _codeWorkspaces.GetOrCreate(
+                    "cli-" + Environment.ProcessId.ToString(CultureInfo.InvariantCulture));
+                _codeWorkspace = codeWorkspace;
+
+                // ArtifactUriPrefix stays null here on purpose: a server hands back a
+                // URL, but there is nothing serving one in a terminal, so the pointer a
+                // program's output gets is its absolute path on disk — which is what a
+                // CLI user can actually open.
+                var runner = new ShellRunner(codeExecOptions, _log, codeArtifacts);
+                codeRunner = new CodeRunnerAdapter(runner, codeExecOptions);
+
+                if (!runner.CanRun)
+                {
+                    Console.Error.WriteLine(
+                        SkillToolNames.Shell + " is not available: " + runner.UnavailableReason);
+                    codeRunner = null;
+                }
+                else
+                {
+                    _log.LogInformation(LogEventIds.HostConfiguration,
+                        "cli.codeexec.ready shell={Shell} sandbox={Sandbox} install={AllowInstall} tools={Tools} workspace={Workspace}",
+                        runner.Shell?.Name ?? "none", runner.Sandbox?.Name ?? "none",
+                        codeExecOptions.AllowInstall,
+                        string.Join(",", CodeEnvironment.AvailableTools), codeWorkspace.Root);
+                }
+            }
+
+            List<Skill> selectedSkills = new List<Skill>();
+            if (skillRegistry != null && skillOptions.Selected.Count > 0)
+            {
+                selectedSkills = new List<Skill>(
+                    skillRegistry.Resolve(skillOptions.Selected, out var unknownSkills));
+                if (unknownSkills.Count > 0)
+                {
+                    _log.LogError(LogEventIds.CliFailed,
+                        "cli.skills.unknown name={SkillName}", unknownSkills[0]);
+                    Console.Error.WriteLine(
+                        $"No skill called '{unknownSkills[0]}' was found in {string.Join(", ", skillRegistry.Roots)}.");
+                    Console.Error.WriteLine("Run with --list-skills to see what is available.");
+                    return;
+                }
+            }
+
             List<ToolFunction> tools = null;
             if (toolsFile != null)
             {
@@ -474,6 +646,14 @@ namespace TensorSharp.Cli
                 _log.LogInformation(LogEventIds.HostConfiguration,
                     "Loaded {ToolCount} tool definition(s) from {ToolsFile}", tools.Count, toolsFile);
             }
+
+            // Agent Skills. The plan is finalised here, before the model loads, because
+            // that is where the registry already is; the CONTEXT budget it needs is
+            // filled in after the load (see skillPlan below), since MaxContextLength is
+            // not known until then.
+            SkillPlan skillPlan = null;
+            SkillToolContext skillToolContext = null;
+            bool skillScriptsAllowed = skillOptions.AllowScripts;
 
             if (testTemplatesDir != null)
             {
@@ -518,11 +698,6 @@ namespace TensorSharp.Cli
                 pagedKvEnableOverride, pagedKvBlockSizeOverride,
                 pagedKvRamMbOverride, pagedKvSsdDirOverride, pagedKvSsdMbOverride,
                 pagedKvQuantBitsOverride);
-
-            // --spec-draft-n-max is the older spelling of --mtp-draft and is parsed
-            // in the switch above, too late for SpeculativeCliFlags.Apply. Publish
-            // it now, while the model has still not been created.
-            SpeculativeDecodingOptions.PublishDraftWindow(specDraftMax);
 
             // A NextN block with no LM head of its own borrows the trunk's, which is
             // column-parallel under tensor parallelism — the draft would read one
@@ -806,7 +981,12 @@ namespace TensorSharp.Cli
                     maxTokens > 0 ? maxTokens : 512,
                     _log,
                     specDraftMax,
-                    specDraftConfMin);
+                    specDraftConfMin,
+                    skillRegistry,
+                    skillOptions,
+                    selectedSkills,
+                    codeRunner,
+                    codeWorkspace);
                 if (!string.IsNullOrEmpty(systemPrompt))
                     session.SetInitialSystemPrompt(systemPrompt);
                 session.Run();
@@ -1018,12 +1198,101 @@ namespace TensorSharp.Cli
             if (pdfPageImages != null && pdfPageImages.Count > 0)
                 imagePaths = pdfPageImages;
 
+            // Now that the model is loaded its context length is known, so the skills
+            // block can be budgeted against it rather than against a guess, and the
+            // family's ability to carry tool declarations can be consulted: Gemma 3 and
+            // Mistral 3 discard them, so on those the instructions are written into the
+            // prompt up front instead of being fetched on demand.
+            // The operator's OWN --tools, before anything of ours is merged in. The loop
+            // needs the two apart: a name in neither list belongs to nobody, and telling
+            // the model so beats ending its turn on a guess.
+            List<ToolFunction> clientTools = tools != null ? new List<ToolFunction>(tools) : null;
+
+            if (skillRegistry != null && (selectedSkills.Count > 0 || (skillOptions.Discovery && skillRegistry.Skills.Count > 0)))
+            {
+                var skillCaps = SkillCapabilities.For(model.Config.Architecture);
+                var catalogSkills = skillOptions.Discovery
+                    ? skillRegistry.Skills
+                    : (IReadOnlyList<Skill>)Array.Empty<Skill>();
+
+                skillPlan = SkillPrompt.Plan(selectedSkills, catalogSkills, new SkillPromptOptions
+                {
+                    ContextTokens = model.MaxContextLength,
+                    ToolsAvailable = skillCaps.ToolsRendered,
+                });
+
+                if (!skillPlan.IsEmpty)
+                {
+                    systemPrompt = string.IsNullOrWhiteSpace(systemPrompt)
+                        ? skillPlan.Instructions
+                        : systemPrompt.TrimEnd() + "\n\n" + skillPlan.Instructions;
+
+                    if (skillCaps.ToolsRendered)
+                    {
+                        tools = SkillTools.Merge(tools, skillScriptsAllowed, out var shadowedTools);
+                        foreach (string shadowed in shadowedTools)
+                        {
+                            _log.LogWarning(LogEventIds.HostConfiguration,
+                                "cli.skills.tool-shadowed name={ToolName} - your --tools definition wins", shadowed);
+                        }
+                        if (codeRunner != null)
+                            tools = AppendCodeTool(tools, codeRunner, codeWorkspace);
+
+                        skillToolContext = new SkillToolContext(new List<Skill>(skillPlan.Reachable))
+                        {
+                            ScriptRunner = skillScriptsAllowed
+                                ? new SkillScriptRunner(ToScriptRunnerOptions(
+                                    skillOptions, codeWorkspace, codeRunner), _log)
+                                : null,
+                            CodeRunner = codeRunner,
+                            Workspace = codeWorkspace,
+                        };
+                    }
+
+                    _log.LogInformation(LogEventIds.SkillSelected,
+                        "cli.skills.ready selected={Selected} announced={Announced} inlined={Inlined} catalog={Catalog} tools={ToolsOffered} promptTokens~{PromptTokens}",
+                        selectedSkills.Count == 0 ? "(none)" : string.Join(",", selectedSkills.Select(sk => sk.Id)),
+                        skillPlan.Deferred.Count, skillPlan.Inlined.Count, skillPlan.Catalog.Count, skillCaps.ToolsRendered,
+                        skillPlan.ApproximateTokens);
+                }
+                else
+                {
+                    skillPlan = null;
+                }
+            }
+
+            // Code execution does not require skills: --code-exec with no skill selected
+            // (and no registry at all) must still offer the shell tool, the way the server's
+            // code-only plan does. Without this the flag looked accepted and did nothing.
+            if (codeRunner != null && skillToolContext == null
+                && SkillCapabilities.For(model.Config.Architecture).ToolsRendered)
+            {
+                tools = AppendCodeTool(tools, codeRunner, codeWorkspace);
+                skillToolContext = new SkillToolContext(new List<Skill>())
+                {
+                    CodeRunner = codeRunner,
+                    Workspace = codeWorkspace,
+                };
+            }
+
+            // The editing rules, after every path that may have declared the code tools —
+            // with skills and without. They were injected only by the SERVER's plan, so a
+            // one-shot CLI run was declared all five code tools and told nothing about
+            // which to reach for, which is the exact condition the measurement blamed for
+            // models re-typing whole files.
+            if (CodeSystemBlock(tools) is { Length: > 0 } editingRules)
+            {
+                systemPrompt = string.IsNullOrWhiteSpace(systemPrompt)
+                    ? editingRules
+                    : systemPrompt.TrimEnd() + "\n\n" + editingRules;
+            }
+
             if (dumpPrompt)
             {
-                var dumpMessages = new List<ChatMessage>
-                {
-                    new ChatMessage { Role = "user", Content = rawText }
-                };
+                var dumpMessages = new List<ChatMessage>();
+                if (!string.IsNullOrWhiteSpace(systemPrompt))
+                    dumpMessages.Add(new ChatMessage { Role = "system", Content = systemPrompt });
+                dumpMessages.Add(new ChatMessage { Role = "user", Content = rawText });
                 string rendered = PromptRenderer.Render(
                     model.Config.ChatTemplate, dumpMessages, addGenerationPrompt: true,
                     architecture: model.Config.Architecture, tools: tools, enableThinking: enableThinking);
@@ -1078,11 +1347,30 @@ namespace TensorSharp.Cli
                 model.ResetForwardTiming();
             }
 
-            string result = RunInference(model, rawText, imagePaths, maxTokens, audioPaths,
-                isVideo: videoPath != null, samplingConfig: samplingConfig,
-                enableThinking: enableThinking, tools: tools,
-                preserveAllInput: pdfPath != null,
-                specDraftMax: specDraftMax, specDraftConfMin: specDraftConfMin);
+            // With skills in play the model may answer by asking to read one first. Those
+            // reads are served here, in process, and the loop re-enters — so a single-shot
+            // run still ends in an answer rather than a printed tool call the user would
+            // have to service by hand.
+            string result;
+            if (skillToolContext != null)
+            {
+                result = RunInferenceWithSkills(
+                    model, rawText, imagePaths, maxTokens, audioPaths, videoPath != null,
+                    samplingConfig, enableThinking, tools, pdfPath != null,
+                    specDraftMax, specDraftConfMin, systemPrompt,
+                    skillToolContext, skillOptions.RoundsFor(skillToolContext.CodeRunner is { CanRun: true }),
+                    SkillCapabilities.For(model.Config.Architecture).ToolResultsRendered,
+                    clientTools);
+            }
+            else
+            {
+                result = RunInference(model, rawText, imagePaths, maxTokens, audioPaths,
+                    isVideo: videoPath != null, samplingConfig: samplingConfig,
+                    enableThinking: enableThinking, tools: tools,
+                    preserveAllInput: pdfPath != null,
+                    specDraftMax: specDraftMax, specDraftConfMin: specDraftConfMin,
+                    systemPrompt: systemPrompt);
+            }
 
             _log.LogInformation(LogEventIds.ChatCompleted,
                 "cli.inference.complete chars={Chars} preview=\"{Preview}\"",
@@ -1956,15 +2244,146 @@ namespace TensorSharp.Cli
             }
         }
 
+        /// <summary>
+        /// Run a single-shot turn that may need to read skill content first.
+        ///
+        /// <para>
+        /// Each round is a fresh prefill — the CLI has no continuous-batching engine and
+        /// no prefix cache on this path, so the KV state is reset between rounds and the
+        /// conversation is re-rendered from scratch. That is the honest cost of the
+        /// single-shot path: interactive chat pays it once per turn instead, because
+        /// <see cref="InteractiveSession"/> keeps its cache warm across rounds.
+        /// </para>
+        /// </summary>
+        static string RunInferenceWithSkills(
+            ModelBase model, string rawText, List<string> imagePaths, int maxTokens,
+            List<string> audioPaths, bool isVideo, SamplingConfig samplingConfig,
+            bool enableThinking, List<ToolFunction> tools, bool preserveAllInput,
+            int specDraftMax, float specDraftConfMin, string systemPrompt,
+            SkillToolContext skillContext, int maxRounds, bool toolResultsRendered,
+            List<ToolFunction> clientTools = null)
+        {
+            var priorTurns = new List<ChatMessage>();
+            string result = string.Empty;
+
+            for (int round = 1; round <= Math.Max(1, maxRounds); round++)
+            {
+                ParsedOutput parsed = null;
+                result = RunInference(model, rawText, imagePaths, maxTokens, audioPaths,
+                    isVideo: isVideo, samplingConfig: samplingConfig,
+                    enableThinking: enableThinking, tools: tools,
+                    preserveAllInput: preserveAllInput,
+                    specDraftMax: specDraftMax, specDraftConfMin: specDraftConfMin,
+                    systemPrompt: systemPrompt,
+                    priorTurns: priorTurns.Count > 0 ? priorTurns : null,
+                    onParsed: p => parsed = p);
+
+                // Three ways, so a name nobody declared is answered here rather than
+                // dropped: returning at this point handed the operator whatever prose
+                // preceded the call, which for a reasoning model is nothing at all.
+                SkillTools.Partition(
+                    parsed?.ToolCalls, clientTools,
+                    out var builtInCalls, out _, out var unknownCalls);
+                if (builtInCalls.Count == 0 && unknownCalls.Count == 0)
+                    return result;
+
+                var calls = parsed.ToolCalls;
+
+                priorTurns.Add(new ChatMessage
+                {
+                    Role = "assistant",
+                    Content = parsed.Content ?? string.Empty,
+                    Thinking = string.IsNullOrEmpty(parsed.Thinking) ? null : parsed.Thinking,
+                    ToolCalls = new List<ToolCall>(calls),
+                });
+
+                foreach (var call in unknownCalls)
+                {
+                    _log.LogWarning(LogEventIds.SkillToolInvoked,
+                        "cli.skills.tool round={Round} tool={Tool} skill={SkillId} path={Path} ok={Ok} bytes={Bytes}",
+                        round, call.Name ?? "-", "-", "-", false, 0);
+                    Console.Error.WriteLine($"[tool call] {call.Name} (no such tool)");
+                    priorTurns.Add(BuildSkillResultMessage(
+                        toolResultsRendered, SkillTools.DescribeUnknownTool(call.Name, tools), call.Name));
+                }
+
+                foreach (var call in builtInCalls)
+                {
+                    var toolResult = SkillTools.Execute(call, skillContext);
+                    _log.LogInformation(LogEventIds.SkillToolInvoked,
+                        "cli.skills.tool round={Round} tool={Tool} skill={SkillId} path={Path} ok={Ok} bytes={Bytes}",
+                        round, call.Name, toolResult.SkillId ?? "-", toolResult.ResourcePath ?? "-",
+                        toolResult.Ok, toolResult.Content?.Length ?? 0);
+                    Console.Error.WriteLine(
+                        $"[skill] {call.Name} {toolResult.SkillId ?? "?"} {toolResult.ResourcePath ?? string.Empty}"
+                        + (toolResult.Ok ? string.Empty : " (failed)"));
+                    priorTurns.Add(BuildSkillResultMessage(toolResultsRendered, toolResult.Content, call.Name));
+                }
+
+                // The CLI drives Forward() directly with no engine-owned KV lifecycle, so
+                // the next round must start from a clean cache or its prefill would
+                // continue the previous round's state.
+                model.ResetKVCache();
+            }
+
+            _log.LogWarning(LogEventIds.SkillLoopCapped,
+                "cli.skills.loop.capped rounds={Rounds}", maxRounds);
+            priorTurns.Add(BuildSkillResultMessage(toolResultsRendered,
+                "Error: the limit on skill lookups for this turn has been reached. Answer now using what you "
+                + "have already read, and say which part you could not check.", null));
+            model.ResetKVCache();
+
+            return RunInference(model, rawText, imagePaths, maxTokens, audioPaths,
+                isVideo: isVideo, samplingConfig: samplingConfig,
+                enableThinking: enableThinking, tools: tools,
+                preserveAllInput: preserveAllInput,
+                specDraftMax: specDraftMax, specDraftConfMin: specDraftConfMin,
+                systemPrompt: systemPrompt, priorTurns: priorTurns);
+        }
+
+        /// <summary>
+        /// Wrap a skill tool result in the message shape this family renders. Mistral 3
+        /// drops <c>role: "tool"</c> messages outright, so there the result is fed back
+        /// as a user turn rather than vanishing from the prompt.
+        /// </summary>
+        static ChatMessage BuildSkillResultMessage(bool toolResultsRendered, string content, string tool)
+        {
+            if (toolResultsRendered)
+                return new ChatMessage { Role = "tool", Content = content };
+
+            string prefix = tool == null
+                ? "Result of the skill lookup you requested:"
+                : $"Result of your {tool} call:";
+            return new ChatMessage { Role = "user", Content = prefix + "\n\n" + content };
+        }
+
+        /// <param name="systemPrompt">
+        /// Rendered as a leading system turn. Until Agent Skills needed a system channel
+        /// here, this path built a ONE-MESSAGE list containing only the user turn, so
+        /// <c>--system</c> and <c>--system-file</c> were silently discarded on every
+        /// single-shot run and only took effect in interactive chat.
+        /// </param>
+        /// <param name="priorTurns">
+        /// Turns to append after the user message — the assistant/tool exchanges an
+        /// Agent Skills lookup has already produced. Null for an ordinary single-shot run.
+        /// </param>
+        /// <param name="onParsed">
+        /// Receives the final parse, so a caller can inspect tool calls without this
+        /// method's string return type changing under every existing caller.
+        /// </param>
         static string RunInference(ModelBase model, string rawText, List<string> imagePaths, int maxTokens,
             List<string> audioPaths = null, bool isVideo = false, SamplingConfig samplingConfig = null,
             bool enableThinking = false, List<ToolFunction> tools = null, bool silent = false,
-            bool preserveAllInput = false, int specDraftMax = 0, float specDraftConfMin = -1f)
+            bool preserveAllInput = false, int specDraftMax = 0, float specDraftConfMin = -1f,
+            string systemPrompt = null, List<ChatMessage> priorTurns = null,
+            Action<ParsedOutput> onParsed = null)
         {
-            var messages = new List<ChatMessage>
-            {
-                new ChatMessage { Role = "user", Content = rawText, ImagePaths = imagePaths, AudioPaths = audioPaths, IsVideo = isVideo }
-            };
+            var messages = new List<ChatMessage>();
+            if (!string.IsNullOrWhiteSpace(systemPrompt))
+                messages.Add(new ChatMessage { Role = "system", Content = systemPrompt });
+            messages.Add(new ChatMessage { Role = "user", Content = rawText, ImagePaths = imagePaths, AudioPaths = audioPaths, IsVideo = isVideo });
+            if (priorTurns != null)
+                messages.AddRange(priorTurns);
 
             string rendered = PromptRenderer.Render(
                 model.Config.ChatTemplate, messages, addGenerationPrompt: true,
@@ -2060,7 +2479,7 @@ namespace TensorSharp.Cli
                 if (specDecoder != null)
                 {
                     return RunSpeculativeInference(model, (ISpeculativeTarget)model, specDecoder,
-                        inputTokens, maxTokens, specCfg, enableThinking, tools, silent);
+                        inputTokens, maxTokens, specCfg, enableThinking, tools, silent, onParsed);
                 }
                 if (specSettings.Requested && specDeclineReason != null && !silent)
                 {
@@ -2241,6 +2660,7 @@ namespace TensorSharp.Cli
                             if (useParser)
                             {
                                 var finalParsed = parser.Add(trimmed, true);
+                                onParsed?.Invoke(finalParsed);
                                 return FormatParsedResult(finalParsed, showThinking);
                             }
                             return trimmed;
@@ -2273,8 +2693,10 @@ namespace TensorSharp.Cli
             if (useParser)
             {
                 var parsed = parser.Add(decoded, true);
+                onParsed?.Invoke(parsed);
                 return FormatParsedResult(parsed, showThinking);
             }
+            onParsed?.Invoke(new ParsedOutput { Content = decoded });
             return decoded;
         }
 
@@ -2289,7 +2711,8 @@ namespace TensorSharp.Cli
         /// </summary>
         static string RunSpeculativeInference(ModelBase model, ISpeculativeTarget spec,
             SpeculativeDecoder decoder, List<int> inputTokens, int maxTokens,
-            SamplingConfig sampling, bool enableThinking, List<ToolFunction> tools, bool silent)
+            SamplingConfig sampling, bool enableThinking, List<ToolFunction> tools, bool silent,
+            Action<ParsedOutput> onParsed = null)
         {
             var parser = OutputParserFactory.Create(model.Config.Architecture);
             parser.Init(enableThinking, tools);
@@ -2376,13 +2799,23 @@ namespace TensorSharp.Cli
             if (trimmedAtStop != null)
             {
                 if (useParser)
-                    return FormatParsedResult(parser.Add(trimmedAtStop, true), showThinking);
+                {
+                    var stopParsed = parser.Add(trimmedAtStop, true);
+                    onParsed?.Invoke(stopParsed);
+                    return FormatParsedResult(stopParsed, showThinking);
+                }
+                onParsed?.Invoke(new ParsedOutput { Content = trimmedAtStop });
                 return trimmedAtStop;
             }
 
             string decoded = model.Tokenizer.Decode(generated);
             if (useParser)
-                return FormatParsedResult(parser.Add(decoded, true), showThinking);
+            {
+                var finalParsed = parser.Add(decoded, true);
+                onParsed?.Invoke(finalParsed);
+                return FormatParsedResult(finalParsed, showThinking);
+            }
+            onParsed?.Invoke(new ParsedOutput { Content = decoded });
             return decoded;
         }
 
@@ -3329,6 +3762,161 @@ namespace TensorSharp.Cli
         /// operator knows what to pass to <c>--gpu-device</c> on multi-GPU hosts.
         /// Enumerating spins up the Vulkan instance but no backend/device state.
         /// </summary>
+        /// <summary>
+        /// Print the registered skills and exit. Console-only, like
+        /// <see cref="ListVulkanGpus"/>, and reached before any model is loaded so it
+        /// answers "what do I have?" without a GGUF on disk.
+        ///
+        /// <para>
+        /// The load ERRORS are printed too, and that is the point of the command: a
+        /// skill whose SKILL.md will not parse is otherwise simply absent from every
+        /// list, which is the hardest kind of problem for its author to diagnose.
+        /// </para>
+        /// </summary>
+        /// <summary>
+        /// Splice the code-execution declarations into the tool list. A caller's own tool
+        /// of the same name wins: it is theirs and they can service it.
+        /// </summary>
+        /// <param name="workspace">
+        /// The session's workspace, or null when this host keeps nothing between calls.
+        /// It is passed rather than assumed: this took the <c>DeclareTools()</c> overload
+        /// whose <c>persists</c> defaults to true, so a CLI without a workspace would have
+        /// been offered the file tools and the patcher — every call to which refuses,
+        /// because all four need a directory that outlives the call.
+        /// </param>
+        /// <summary>
+        /// The six editing rules for the tools that were actually declared, or the empty
+        /// string. Read off the finished tool list rather than from the options that
+        /// produced it, so the block can never name a tool the model was not given.
+        /// </summary>
+        internal static string CodeSystemBlock(IReadOnlyList<ToolFunction>? tools)
+        {
+            if (tools == null)
+                return string.Empty;
+
+            bool Declared(string name) =>
+                tools.Any(t => string.Equals(t?.Name, name, StringComparison.Ordinal));
+
+            return CodePrompt.Block(
+                fileTools: Declared(SkillToolNames.EditFile) && Declared(SkillToolNames.ReadFile),
+                hasPatch: Declared(SkillToolNames.ApplyPatch));
+        }
+
+        internal static List<ToolFunction> AppendCodeTool(
+            List<ToolFunction> tools, ICodeRunner runner, SessionWorkspace? workspace = null)
+        {
+            var merged = tools != null ? new List<ToolFunction>(tools) : new List<ToolFunction>();
+
+            // Shadowing is decided PER NAME. An early return on a clash with one of them
+            // would also withhold the other, which a caller never asked for: a client that
+            // happens to own a tool called 'shell' must not silently lose apply_patch.
+            foreach (ToolFunction declaration in runner.DeclareTools(persists: workspace != null))
+            {
+                if (!merged.Any(t => string.Equals(t?.Name, declaration.Name, StringComparison.OrdinalIgnoreCase)))
+                    merged.Add(declaration);
+            }
+            return merged;
+        }
+
+        /// <summary>
+        /// The skill-script runner's options, extended with the session workspace and the
+        /// package installer. Both come from code execution: with them a skill's bundled
+        /// script runs in the same directory as everything else and gets its missing
+        /// dependencies installed automatically; without <c>--code-exec</c> the script
+        /// keeps the plain per-call scratch it always had.
+        /// </summary>
+        internal static SkillScriptRunnerOptions ToScriptRunnerOptions(
+            SkillHostOptions skillOptions, SessionWorkspace workspace, ICodeRunner installer)
+        {
+            SkillScriptRunnerOptions options = skillOptions.ToScriptRunnerOptions();
+            if (workspace == null)
+                return options;
+
+            return new SkillScriptRunnerOptions
+            {
+                Sandbox = options.Sandbox,
+                AllowNetwork = options.AllowNetwork,
+                Workspace = workspace,
+                PackageInstaller = installer,
+            };
+        }
+
+        static void ListSkills(SkillRegistry registry)
+        {
+            if (registry == null)
+            {
+                Console.WriteLine("Agent skills are disabled (--no-skills / TS_NO_SKILLS).");
+                return;
+            }
+
+            Console.WriteLine($"Skill roots: {string.Join(", ", registry.Roots)}");
+            Console.WriteLine();
+
+            if (registry.Skills.Count == 0)
+            {
+                Console.WriteLine("No skills found.");
+                Console.WriteLine();
+                Console.WriteLine("A skill is a directory containing SKILL.md. Put one under a root above, or");
+                Console.WriteLine("point at your own with --skills-dir <path>.");
+            }
+            else
+            {
+                Console.WriteLine($"{registry.Skills.Count} skill(s):");
+                Console.WriteLine();
+                foreach (var skill in registry.Skills)
+                {
+                    Console.WriteLine($"  {skill.Id}");
+                    Console.WriteLine($"      {Wrap(skill.Description, 92, 6)}");
+                    int bundled = 0;
+                    foreach (var _ in skill.BundledFiles)
+                        bundled++;
+                    Console.WriteLine(
+                        $"      {bundled} bundled file(s), {SkillTextBudget.FormatBytes(skill.TotalBytes)}, "
+                        + $"~{skill.Manifest.ApproximateBodyTokens} tokens of instructions");
+                    foreach (string warning in skill.Manifest.Warnings)
+                        Console.WriteLine($"      warning: {warning}");
+                    Console.WriteLine();
+                }
+            }
+
+            if (registry.Errors.Count > 0)
+            {
+                Console.WriteLine($"{registry.Errors.Count} directory/directories could not be loaded:");
+                foreach (var error in registry.Errors)
+                    Console.WriteLine($"  {error.Path}: {error.Message}");
+                Console.WriteLine();
+            }
+
+            Console.WriteLine("Use one with:  --skill <name>");
+        }
+
+        /// <summary>Wrap text to <paramref name="width"/> columns, indenting continuations.</summary>
+        static string Wrap(string text, int width, int indent)
+        {
+            if (string.IsNullOrEmpty(text))
+                return string.Empty;
+
+            var sb = new StringBuilder();
+            int column = 0;
+            string pad = new string(' ', indent);
+            foreach (string word in text.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (column > 0 && column + 1 + word.Length > width)
+                {
+                    sb.Append('\n').Append(pad);
+                    column = 0;
+                }
+                else if (column > 0)
+                {
+                    sb.Append(' ');
+                    column++;
+                }
+                sb.Append(word);
+                column += word.Length;
+            }
+            return sb.ToString();
+        }
+
         static void ListVulkanGpus()
         {
             int count = TensorSharp.GGML.GgmlBasicOps.GetVulkanDeviceCount();

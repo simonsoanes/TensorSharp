@@ -20,7 +20,7 @@
 | 批处理执行 | 实现 `IBatchedPagedModel.ForwardBatch` 的模型会把本轮所有序列打包到一次模型调用中，显式传入 `positions`、`slotMapping`、`queryStartLoc` 与每序列 block table。 |
 | 回退执行 | 路径选择集中在 `ExecutionPlanner`：模型+后端能力（`ExecutionCapabilities`）、运维覆盖（`ExecutionOptions`）与每步请求特征共同产出 `ExecutionPlan`（选中路径、回退链、被拒原因）。模型仍可对某个具体 batch 抛出 `NotSupportedException`，该步会落入计划中的下一个候选，最终止于按序列 KV-swap 路径。 |
 | 原生注意力 | `TSGgml_PagedAttentionForward` 在 C++ 中聚合分页 K/V 并派发 `ggml_flash_attn_ext`；GPT OSS 使用 `TSGgml_PagedAttentionForwardWithSinks`。 |
-| 投机解码 | 可选的 MTP / NextN 草稿头加速单序列（无并发）请求。`BatchExecutor` 为实现了 `IBatchedSpeculativeTarget` 的模型（Qwen 3.6 内嵌 NextN；Gemma 4 独立 `gemma4-assistant` 草稿 GGUF）驱动共享的 `SpeculativeExecution` 起草 / 验证 / 回滚核心。默认关闭；服务端 `--mtp-spec`。详见 [投机解码（MTP / NextN）](#投机解码mtp--nextn)。 |
+| 投机解码 | 可选的 MTP / NextN 草稿头加速单序列（无并发）请求。`BatchExecutor` 为实现了 `IBatchedSpeculativeTarget` 的模型（Qwen 3.6 内嵌 NextN；Gemma 4 独立 `gemma4-assistant` 草稿 GGUF）驱动共享的 `SpeculativeExecution` 起草 / 验证 / 回滚核心。默认关闭；服务端 `--spec`。详见 [投机解码（MTP / NextN）](#投机解码mtp--nextn)。 |
 | 并发吞吐 | **当前没有任何路径能随并发扩展。** 无论同时有多少序列在跑，`BatchedPaged` 路径都会在约 **69 tok/s** 处饱和，因为分页 KV cache 驻留在主机内存。按序列 slot 与迭代级调度本身确实有效。参见[并发实测表现](#并发实测表现)。 |
 | 设备驻留分页池 | **已实现，但未接入。** `TSGgml_PagedKvPool*`（`TensorSharp.GGML.Native/ggml_ops_paged_kv_pool.cpp`）与其托管封装 `DevicePagedKvCache`（`TensorSharp.Models/Paged/DevicePagedKvCache.cs`）都已存在，但没有任何模型或 executor 调用它们，因此它还不是已交付的功能。 |
 | 队列 API | `InferenceQueue` 是 no-op 兼容层。`/api/queue/status` 与队列位置事件形状保留给依赖这些字段的客户端，不再承担请求串行化。 |
@@ -152,7 +152,7 @@ ExecutionCapabilities（模型 × 后端，声明式）
         +
 ExecutionOptions     （运维 TS_* 覆盖，集中读取）
         +
-SchedulerConfig      （引擎配置，如 --mtp-spec）
+SchedulerConfig      （引擎配置，如 --spec）
         +
 ExecutionStepFeatures（本步请求特征：N、待注入多模态、
         |             KV 驻留位置、fused cache 驻留、是否需换主）
@@ -218,7 +218,7 @@ GPT OSS 可用 `TS_GPTOSS_PAGED_ATTN_MANAGED=1` 强制走托管 sinks 路径。
 
 ### 投机解码（MTP / NextN）
 
-当设置服务端 `--mtp-spec` 参数（`TS_MTP_SPEC=1`）时，`BatchExecutor` 会为实现了
+当设置服务端 `--spec` 参数（环境变量 `TS_SPEC=1`，旧名 `TS_MTP_SPEC=1`）时，`BatchExecutor` 会为实现了
 `IBatchedSpeculativeTarget` 的模型对**单序列（无并发）**请求运行可选的多 token 预测
 投机路径。每步流程：
 
@@ -233,8 +233,8 @@ GPT OSS 可用 `TS_GPTOSS_PAGED_ATTN_MANAGED=1` 强制走托管 sinks 路径。
 
 | 模型 | 草稿头 | 被拒时的状态 |
 |---|---|---|
-| Qwen 3.6 | 主干 GGUF 中内嵌的 NextN 块（`{arch}.nextn_predict_layers`）；无需额外文件。`--mtp-draft-model` 被忽略。 | GatedDeltaNet 递归状态快照 / 恢复（CUDA 上在设备侧完成）。 |
-| Gemma 4 | 通过 `--mtp-draft-model` 加载的独立 EAGLE 风格 `gemma4-assistant` GGUF；草稿层读取**目标**最后一个 local / global 层的 KV（自身无 K/V）。 | 仅注意力 KV 位置回退——草稿器在给定 `(token, h)` 时无状态。 |
+| Qwen 3.6 | 主干 GGUF 中内嵌的 NextN 块（`{arch}.nextn_predict_layers`）；无需额外文件。`--draft-model` 被忽略。 | GatedDeltaNet 递归状态快照 / 恢复（CUDA 上在设备侧完成）。 |
+| Gemma 4 | 通过 `--draft-model` 加载的独立 EAGLE 风格 `gemma4-assistant` GGUF；草稿层读取**目标**最后一个 local / global 层的 KV（自身无 K/V）。 | 仅注意力 KV 位置回退——草稿器在给定 `(token, h)` 时无状态。 |
 
 投机仅在有收益处启用（`SpeculationProfitable`）：ggml 后端（融合多 token 验证 + 草稿步
 内核）与纯 C# `cuda` 后端（完全驻留 GPU 的逐算子验证 / 草稿）。在 CPU / GGML CPU / MLX 上验证
@@ -247,9 +247,9 @@ GPT OSS 可用 `TS_GPTOSS_PAGED_ATTN_MANAGED=1` 强制走托管 sinks 路径。
 | 模型家族 | 批处理 / 分页状态 | 关闭 / 子开关 |
 |---|---|---|
 | Mistral 3 | 默认 `ForwardBatch` 路径。使用分页 K/V、YaRN 感知位置、原生分页注意力，并在 prompt 准备后注入视觉 embedding。已在 Ministral-3-14B 上验证；长上下文原生分页注意力比旧按序列 GGML 路径快约 21%。 | `TS_PAGED_ATTN_KERNEL` 选择 `native`、`tensor` 或 `managed`。 |
-| Gemma 4 | 密集文本负载默认走批处理路径，覆盖逐层 SWA / 全局注意力、可变 head dim、PLE、KV donor 层别名。当前回退场景包括待注入多模态 embedding、MoE 层与块量化 KV cache。可选地通过独立 `gemma4-assistant` 草稿 GGUF 做 MTP 投机解码。 | `TS_GEMMA4_BATCHED=0` 强制按序列回退。服务端 `--mtp-spec` + `--mtp-draft-model` 启用投机；`TS_GMTP_*` 为草稿路径 A/B 开关。 |
+| Gemma 4 | 密集文本负载默认走批处理路径，覆盖逐层 SWA / 全局注意力、可变 head dim、PLE、KV donor 层别名。当前回退场景包括待注入多模态 embedding、MoE 层与块量化 KV cache。可选地通过独立 `gemma4-assistant` 草稿 GGUF 做 MTP 投机解码。 | `TS_GEMMA4_BATCHED=0` 强制按序列回退。服务端只需 `--draft-model` 即可启用投机（显式 `--no-spec` 可否决）；`TS_GMTP_*` 为草稿路径 A/B 开关。 |
 | Qwen 3 | attention-only 参考批处理移植，包含分页 K/V、逐 token RoPE position 与最后 token gather。提供基础 Qwen 3 GGUF 时可运行可选测试自验证。 | 无模型专属关闭开关；全局 `TS_SCHED_DISABLE_BATCHED=1` 强制回退。 |
-| Qwen 3.5 / 3.6 family | 默认批处理路径。支持 FullAttention 层、通过每槽位状态池处理 GatedDeltaNet 递归层、MoE 变体、视觉注入与多模态 RoPE 表。Qwen 3.6 还通过其内嵌 NextN 块支持 MTP 投机解码（GDN 递归状态快照 / 回滚）。 | `TS_QWEN35_BATCHED=0`；`TS_QWEN35_BATCHED_GDN_NATIVE=1` 启用原生批处理 GDN 内核；服务端 `--mtp-spec` 在 Qwen 3.6 上启用投机。 |
+| Qwen 3.5 / 3.6 family | 默认批处理路径。支持 FullAttention 层、通过每槽位状态池处理 GatedDeltaNet 递归层、MoE 变体、视觉注入与多模态 RoPE 表。Qwen 3.6 还通过其内嵌 NextN 块支持 MTP 投机解码（GDN 递归状态快照 / 回滚）。 | `TS_QWEN35_BATCHED=0`；`TS_QWEN35_BATCHED_GDN_NATIVE=1` 启用原生批处理 GDN 内核；服务端 `--spec` 在 Qwen 3.6 上启用投机。 |
 | GPT OSS | 默认批处理路径。支持 Q/K/V/O bias、YaRN RoPE、滑窗层、attention sinks、MXFP4 MoE expert 与原生 sinks 注意力。已与旧路径做贪心正确性验证；性能仍主要受逐层图构建限制。 | `TS_GPTOSS_BATCHED=0`；`TS_GPTOSS_PAGED_ATTN_MANAGED=1`。 |
 | Nemotron-H | 默认批处理路径。Attention 层使用分页 K/V；Mamba2 层使用每槽位 conv/SSM 状态池；MoE 层使用批处理 expert 内核；准备好的图像 / 音频 embedding 可注入到批处理 hidden state。 | `TS_NEMOTRON_BATCHED=0`；`TS_NEMOTRON_MAMBA2_BATCHED_NATIVE=1` 启用原生批处理 Mamba2 step。 |
 | GLM 5.x | 没有 `ForwardBatch`：MLA 每个 token 只存一行压缩表示，DSA indexer 又要对同一段连续历史打分，没有分页 KV 布局可批。并发改由原生**序列 slot** 承担（`TSGgml_GlmSlotAlloc` / `SetActiveSlot` / `SlotFree`）——绑定请求只是切换活动 slot，不搬运 KV 字节，每个 slot 的计算图独立缓存与捕获。在此之上实现了批量融合 decode（一张图、每序列一个 token，整批只读一遍权重）：4 个并发请求时合计 decode 提速 1.81×；默认需显式开启，因为批处理改变 GEMM 形状，而 2 bit MoE 会把这点差别放大成不同的专家选择。 | `TS_BATCHED_FUSED_DECODE=1` 开启批量 decode；`TS_GLM_BATCHED_DECODE=0` 让原生侧拒绝它。 |
@@ -288,10 +288,10 @@ GPT OSS 可用 `TS_GPTOSS_PAGED_ATTN_MANAGED=1` 强制走托管 sinks 路径。
 | `TS_RETAINED_FUSED_CACHE` | `1` | 保留已完成 fused 请求的 KV holder 用于跨请求前缀复用；`0` 关闭（限 VRAM / A/B）。 |
 | `TS_RETAINED_FUSED_CACHE_MAX` | `4` | 保留 fused holder 的 LRU 预算（每个各占一份 per-request KV cache）。 |
 | `TS_KV_PAGED_QUANT_BITS` | `0` | 可选 TurboQuant 分页 KV 块编码位数（`2`、`4` 或 `8`）；带递归状态的模型可能回退到 passthrough。 |
-| `TS_MTP_SPEC` | `0` | `1` 为单序列启用 MTP / NextN 投机解码（服务端 `--mtp-spec`）。 |
-| `TS_MTP_DRAFT` | `8` | 每个投机步最多起草的 token 数（服务端 `--mtp-draft`）。 |
-| `TS_MTP_PMIN` | `0.75` | 保留草稿 token 所需的最低草稿置信度（服务端 `--mtp-pmin`）。 |
-| `TS_MTP_DRAFT_MODEL` | 无 | Gemma 4 独立 `gemma4-assistant` 草稿 GGUF 路径（服务端 `--mtp-draft-model`）；Qwen 3.6 忽略。 |
+| `TS_MTP_SPEC` | `0` | `1` 为单序列启用 MTP / NextN 投机解码（服务端 `--spec`）。 |
+| `TS_MTP_DRAFT` | `8` | 每个投机步最多起草的 token 数（服务端 `--spec-draft`）。 |
+| `TS_MTP_PMIN` | `0.75` | 保留草稿 token 所需的最低草稿置信度（服务端 `--spec-pmin`；`0` 表示从不设阈）。 |
+| `TS_MTP_DRAFT_MODEL` | 无 | Gemma 4 独立 `gemma4-assistant` 草稿 GGUF 路径（服务端 `--draft-model`）；Qwen 3.6 忽略。 |
 | `TS_GMTP_NO_FUSED` / `TS_GMTP_NO_FAST_ROLLBACK` / `TS_GMTP_BATCHED_TRUNK` | 关闭 | Gemma 4 草稿路径 A/B 开关（关闭融合验证/草稿内核；恢复保留前缀回滚；用批量主干代替线性主干）。 |
 | `DIFFUSION_STEPS` | `48` | Web UI DiffusionGemma 每个 block 的去噪步数；与自回归调度器的 step 预算无关。 |
 | `DIFFUSION_MAX_BATCH` | `2` | diffusion scheduler 中同时活跃的 DiffusionGemma Web UI 请求数上限。 |

@@ -117,9 +117,11 @@ README.
 Solo (non-concurrent) sequences on architectures that ship a multi-token-prediction
 draft head — Qwen 3.6 (embedded NextN block) and Gemma 4 (separate `gemma4-assistant`
 draft GGUF) — can additionally run lossless MTP speculative decoding through the same
-engine (`--spec` — accepted on **both** hosts, since `TensorSharp.Cli` and
-`TensorSharp.Server` share one flag parser; the historical `--mtp-spec` spelling still
-works, as do the `TS_SPEC_*` / legacy `TS_MTP_*` env vars). The shared draft / verify /
+engine (`--spec` opts in Qwen 3.6's embedded NextN block; for Gemma 4, naming the
+draft GGUF on `--draft-model` enables speculation by itself. Both flags are accepted
+on **both** hosts, since `TensorSharp.Cli` and
+`TensorSharp.Server` share one flag parser; the `TS_SPEC_*` / legacy `TS_MTP_*` env
+vars work too). The shared draft / verify /
 rollback core is
 `SpeculativeExecution`; per-architecture mechanics are in the Qwen 3.5/3.6 (§12)
 and Gemma 4 (§12) cards.

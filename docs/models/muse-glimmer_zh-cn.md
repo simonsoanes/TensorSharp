@@ -36,7 +36,7 @@ dotnet run --project TensorSharp.Cli -c Release -- \
 dotnet run --project TensorSharp.Cli -c Release -- \
   --model models/Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
   --draft-model models/dflash-kquant.gguf \
-  --spec-draft-n-max 15 --input prompt.txt --backend ggml_cuda
+  --spec-draft 15 --input prompt.txt --backend ggml_cuda
 ```
 
 `--draft-model` 也可以用环境变量 `TS_MUSE_GLIMMER_DFLASH` 指定。
@@ -214,11 +214,11 @@ decode 在 60 token 上下文时打平，到 128K 降到 0.86x —— 差距随 
 
 ### DFlash 投机解码
 
-同一批运行加上 `--draft-model dflash-kquant.gguf --spec-draft-n-max 15`，
+同一批运行加上 `--draft-model dflash-kquant.gguf --spec-draft 15`，
 对手是 llama.cpp 的 `-md … --spec-type draft-dflash --spec-draft-n-max 15 -ngld 99`。
 单位是 decode tok/s；括号内是两次重复的范围（仅在差距大时给出）。
 
-| 提示 token 数 | llama.cpp | TensorSharp | TS，`--spec-draft-conf-min 0` |
+| 提示 token 数 | llama.cpp | TensorSharp | TS，`--spec-pmin 0` |
 |---|---:|---:|---:|
 | 60 | 45.5 | **50.9** | 43.5 |
 | 501 | 117.5 | 164.6（150-179） | **180.3** |
@@ -268,7 +268,7 @@ TensorSharp 在草稿模型前面放了一个**自适应成本调控器**
 #### 置信度下限
 
 TensorSharp 默认 `confMin = 0.35`；llama.cpp 这条路径上的 `p_min` 默认是 0，
-也就是永远起草满窗口。`--spec-draft-conf-min 0` 能让两侧策略可比，但它**并非**
+也就是永远起草满窗口。`--spec-pmin 0` 能让两侧策略可比，但它**并非**
 一律更好：在 501 与 128K 上它赢（180 对 165、60 对 42），在 16K 与 32K 上输得很惨
 （33 对 56、30 对 34）—— 那里接受率从约 75% 掉到 24-42%，而每个被拒绝的行仍然
 占用一个验证槽位。这个下限应该是自适应的，而不是常数 —— 与更早的笔记本测试得到

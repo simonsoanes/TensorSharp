@@ -6,7 +6,7 @@ TensorSharp.Server provides three API styles plus a few utility endpoints:
 
 - **Ollama-compatible** (`/api/generate`, `/api/chat/ollama`, `/api/tags`, `/api/show`)
 - **OpenAI-compatible** (`/v1/chat/completions`, `/v1/models`)
-- **Web UI** (`/api/chat`, `/api/sessions`, `/api/models`, `/api/models/load`, `/api/upload`, `/api/image-edit`, `/api/image-edit/stream`)
+- **Web UI** (`/api/chat`, `/api/sessions`, `/api/models`, `/api/models/load`, `/api/upload`, `/api/skills`, `/api/image-edit`, `/api/image-edit/stream`)
 - **Utilities** (`/api/version`, `/api/queue/status`)
 
 Start the server with the exact hosted model via `--model` and, when needed, the exact projector via `--mmproj`. The projector is **not auto-detected** by `TensorSharp.Server`. The Web UI and compatibility endpoints expose only that startup model/projector pair; `/api/models/load` can reload the same pair on a supported backend, but it cannot choose a model on a model-less server or switch to another file at runtime.
@@ -24,6 +24,7 @@ Start the server with the exact hosted model via `--model` and, when needed, the
 | Uploads | `/api/upload` accepts image / video / audio / text / **PDF** files; born-digital PDFs return extracted text, scanned PDFs return page images for vision-capable models (`TS_PDF_MAX_PAGES` caps pages read) |
 | Image editing | Qwen-Image-Edit (`qwen_image`) models are served through `/api/image-edit` and `/api/image-edit/stream`, not the chat endpoints |
 | Video generation | Any video-generation model — MiniMax-H3 (`minimax-h3`), Wan 2.1 / 2.2 (`wan`) — is served through `/api/video-generate`, `/api/video-generate/stream` and `/v1/videos/generations`; MiniMax-H3 returns a 32 kHz stereo `.wav` sidecar alongside the MP4, and `/api/models` advertises what conditioning the loaded checkpoint takes |
+| Agent Skills | Skill directories from `--skills-dir` (or a `skills` folder beside the binary), listed at `/v1/skills` and `/api/skills` and installable as a `.zip` through `POST /api/skills`. Selected per request with `"skills": [...]` on every chat endpoint; the model's own `skills_read` calls are answered inside the server, so clients receive a finished completion. `skills_run` (executing a skill's scripts) is off unless the server was started with `--skills-allow-exec` |
 | Structured outputs | OpenAI `response_format` supports `text`, `json_object`, and `json_schema`; `response_format` (`json_object` / `json_schema`) cannot be combined with `think` or `tools` |
 
 > **Network safety:** the server listens on `0.0.0.0:5000` and has no API-key
@@ -410,6 +411,42 @@ The response shape (when the model decides to call the tool):
 
 Continue the conversation by appending the assistant tool call and a `role: "tool"` message containing the function result, then call `/api/chat/ollama` again.
 
+### Chat with Agent Skills
+
+Add a `skills` array to name the Agent Skills the answer should be written under.
+Only each skill's one-line description costs context up front; the model pulls
+the `SKILL.md` body and any reference files it needs through built-in
+`skills_list` / `skills_read` tools that **the server executes itself**, so the
+response you get back is an ordinary completion rather than a tool call your
+client has to service.
+
+`skills_discovery` is optional and defaults to `true` — the model is also shown
+the names and descriptions of the skills the request did *not* select, so it can
+pick up one you did not think to name. Set it to `false` to restrict the request
+to exactly the skills it listed.
+
+```bash
+curl -X POST http://localhost:5000/api/chat/ollama \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemma-4-E4B-it-Q8_0.gguf",
+    "messages": [{"role": "user", "content": "Pull the totals table out of statement.pdf and give me the quarter-over-quarter change."}],
+    "skills": ["pdf"],
+    "skills_discovery": false,
+    "stream": false,
+    "options": {"num_predict": 800}
+  }'
+```
+
+Naming a skill the server does not have is a `400`. `GET /api/skills` lists what
+is registered. The same two fields are accepted on `/api/chat` (Web UI) and on
+`/v1/chat/completions` / `/v1/responses`.
+
+Skills combine with your own `tools`: the built-in skill tools are merged into
+the list you sent, TensorSharp answers only its own, and a call to one of *your*
+tools comes back to you as usual — with whatever the model read from a skill
+already folded into the conversation.
+
 ---
 
 ## 2. OpenAI-compatible API
@@ -652,6 +689,42 @@ When the model emits a tool call the response uses OpenAI-style fields:
 
 Append the assistant `tool_calls` plus a follow-up `{"role": "tool", "tool_call_id": "...", "content": "..."}` message to continue the loop.
 
+### Chat with Agent Skills
+
+The same `skills` / `skills_discovery` fields work on the OpenAI surface, and on
+`/v1/responses`:
+
+```bash
+curl -X POST http://localhost:5000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemma-4-E4B-it-Q8_0.gguf",
+    "messages": [{"role": "user", "content": "Build a spreadsheet of these figures with a chart."}],
+    "skills": ["xlsx"],
+    "max_tokens": 800
+  }'
+```
+
+The reply is a normal `chat.completion`. Any `skills_read` calls the model made
+happened inside the server; the OpenAI SDK needs no changes and sees no tool
+call it cannot service.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:5000/v1", api_key="not-needed")
+response = client.chat.completions.create(
+    model="gemma-4-E4B-it-Q8_0.gguf",
+    messages=[{"role": "user", "content": "Fill in this AcroForm and tell me what you set."}],
+    max_tokens=800,
+    extra_body={"skills": ["pdf"], "skills_discovery": False},
+)
+print(response.choices[0].message.content)
+```
+
+Design notes — the prompt budget, the disclosure loop and the security model —
+are in [Agent Skills in TensorSharp](../docs/agent_skills.md).
+
 ### Utilities
 
 ```bash
@@ -730,12 +803,19 @@ Event shapes:
 | `replace`, `diffusionStep`, `diffusionTotal`, `preview` | each DiffusionGemma denoising preview and final replacement | replace the whole assistant message body instead of appending a token |
 | `thinking` | each parsed reasoning chunk (only when the model emits one) | streaming chain-of-thought |
 | `tool_calls` | when the model emits a tool call | array of `{name, arguments}` |
+| `skill_step`, `skill`, `detail`, `ok` | each Agent Skill tool call the server executed while answering | progress trace: which tool ran (`skills_list` / `skills_read` / `skills_run`), on which skill, on which file, and whether it succeeded |
 | `done`, `tokenCount`, `elapsed`, `tokPerSec`, `aborted`, `error`, `sessionId`, `promptTokens`, `kvReusedTokens`, `kvReusePercent` | last frame | terminal summary |
 
 Sample terminal frame:
 
 ```
 data: {"done":true,"tokenCount":187,"elapsed":2.143,"tokPerSec":87.23,"aborted":false,"error":null,"sessionId":"a3b...","promptTokens":512,"kvReusedTokens":420,"kvReusePercent":82.0}
+```
+
+Sample skill-step frame:
+
+```
+data: {"skill_step":"skills_read","skill":"pdf","detail":"references/forms.md","ok":true}
 ```
 
 Sample DiffusionGemma preview frame:
@@ -798,6 +878,99 @@ curl -N -X POST http://localhost:5000/api/chat \
 
 Set the `TS_PDF_MAX_PAGES` environment variable to cap the number of PDF pages
 read (default `0` = all pages).
+
+### Skills (`/api/skills`)
+
+Manage the Agent Skills registry. Two shapes of the same data are served: the
+OpenAI-flavoured `/v1/skills` (list + one skill, read-only) and the Web UI
+`/api/skills` (adds load errors, upload and delete).
+
+```bash
+# Everything the server has registered, plus the directories that looked like a
+# skill and failed to load, plus whether uploads are accepted at all.
+curl http://localhost:5000/api/skills
+
+# One skill, with the SKILL.md body under "instructions".
+curl http://localhost:5000/api/skills/pdf
+
+# OpenAI-shaped equivalents.
+curl http://localhost:5000/v1/skills
+curl http://localhost:5000/v1/skills/pdf
+```
+
+`/api/skills`:
+
+```json
+{
+  "enabled": true,
+  "installable": true,
+  "skills": [
+    {
+      "id": "pdf",
+      "object": "skill",
+      "name": "pdf",
+      "description": "Extract text and tables from PDF files, fill in PDF forms, and merge or split documents...",
+      "license": "Apache-2.0",
+      "compatibility": "Requires python3 with pypdf installed.",
+      "files": [
+        {"path": "scripts/extract_tables.py", "bytes": 4021, "kind": "script", "text": true},
+        {"path": "references/forms.md", "bytes": 18233, "kind": "reference", "text": true}
+      ],
+      "bytes": 41288,
+      "origin": "installed",
+      "warnings": [],
+      "modified": "2026-08-29T12:00:00Z"
+    }
+  ],
+  "errors": [
+    {"path": "/srv/skills/broken", "message": "SKILL.md is missing the required 'description' field"}
+  ]
+}
+```
+
+`/v1/skills` wraps the same objects as `{"object": "list", "data": [...]}`.
+`kind` is one of `script` / `reference` / `asset` / `manifest` / `other`, and
+`origin` is `discovered` for a skill found by scanning a configured directory or
+`installed` for one uploaded here — only the latter can be deleted. `warnings`
+carries anything that loaded despite being out of spec (a `name` that disagrees
+with its directory, a description over the 1024-character limit).
+
+Installing and removing:
+
+```bash
+# Upload a .zip of the skill folder (pdf/SKILL.md) or of its contents
+# (SKILL.md at the archive root). "overwrite" replaces an installed skill of
+# the same name; without it, a name clash is a 409.
+curl -X POST http://localhost:5000/api/skills \
+  -F "file=@pdf.zip" \
+  -F "overwrite=true"
+
+# Response: the installed SkillObject, exactly as the list returns it.
+
+# Remove an installed skill.
+curl -X DELETE http://localhost:5000/api/skills/pdf
+# {"removed":true}
+```
+
+Uploads are validated before anything lands: every ZIP entry is resolved through
+the same path guard that confines the model's own reads (so `../../authorized_keys`
+is rejected rather than written), size is enforced on the decompressed stream
+rather than on the entry's declared length, and the archive is refused if it
+holds more than 4096 files, expands past 64 MB for one file or 256 MB in total,
+or expands more than 200x. An archive containing several skill directories is
+refused rather than silently installing one of them.
+
+Errors follow the server-wide convention: `/api/*` returns `{"error": "..."}`
+and `/v1/*` returns `{"error": {"message": "...", "type": "invalid_request_error"}}`.
+
+`GET /api/models` reports whether any of this is available:
+
+```json
+"skills": { "enabled": true, "installable": true, "count": 7 }
+```
+
+The field is `null` when the server has skills disabled, which is how the Web UI
+decides whether to show the skills control at all.
 
 ### Image Editing (`/api/image-edit`, Qwen-Image-Edit)
 

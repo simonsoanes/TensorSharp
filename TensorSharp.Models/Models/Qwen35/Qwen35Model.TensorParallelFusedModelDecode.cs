@@ -396,9 +396,16 @@ namespace TensorSharp.Models
                     GgmlBasicOps.TensorParallelExecutePlans(_tpFdPlans);
                 }
             }
-            catch (InvalidOperationException)
+            catch (InvalidOperationException e)
             {
                 _tpFdFailed = true;
+                if (!_tpFdLogged)
+                {
+                    _tpFdLogged = true;
+                    Console.Error.WriteLine(
+                        $"[tp-full-decode] native execution failed ({e.Message}); " +
+                        "staying on the per-op TP decode (roughly 10x slower). Reported once.");
+                }
                 return false;
             }
             finally
@@ -559,11 +566,19 @@ namespace TensorSharp.Models
             {
                 DropTpFusedDecodeGraphs();
                 bool built;
+                string buildErr = null;
                 try { built = TryBuildTpFdLayerDescs(); }
-                catch (KeyNotFoundException) { built = false; }
+                catch (KeyNotFoundException e) { built = false; buildErr = $"missing weight {e.Message}"; }
                 if (!built)
                 {
                     _tpPfFailed = true;
+                    if (!_tpPfLogged)
+                    {
+                        _tpPfLogged = true;
+                        Console.Error.WriteLine(
+                            $"[tp-full-prefill] {buildErr ?? "a per-layer descriptor could not be built"}; " +
+                            "staying on the per-layer TP prefill (significantly slower). Reported once.");
+                    }
                     return false;
                 }
             }
@@ -647,9 +662,16 @@ namespace TensorSharp.Models
                     GgmlBasicOps.TensorParallelExecutePlans(_tpFdPlans);
                 }
             }
-            catch (InvalidOperationException)
+            catch (InvalidOperationException e)
             {
                 _tpPfFailed = true;
+                if (!_tpPfLogged)
+                {
+                    _tpPfLogged = true;
+                    Console.Error.WriteLine(
+                        $"[tp-full-prefill] native execution failed ({e.Message}); " +
+                        "staying on the per-layer TP prefill (significantly slower). Reported once.");
+                }
                 return false;
             }
             finally

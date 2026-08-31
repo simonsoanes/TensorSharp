@@ -36,6 +36,14 @@ namespace TensorSharp.Runtime
         /// </summary>
         public List<string>? TextFilePaths { get; set; }
         /// <summary>
+        /// The names the user knows the <see cref="TextFilePaths"/> files by, in the same
+        /// order. Uploads are stored under generated names; this keeps the original
+        /// "report.md" so code execution can stage the file under the name the model has
+        /// seen in the conversation. Absent from older clients, in which case the stored
+        /// file name stands in.
+        /// </summary>
+        public List<string>? TextFileNames { get; set; }
+        /// <summary>
         /// True if ImagePaths represent video frames (inserts &lt;|video&gt; before frame &lt;|image&gt; tokens).
         /// </summary>
         public bool IsVideo { get; set; }
@@ -43,6 +51,21 @@ namespace TensorSharp.Runtime
         /// Tool calls made by assistant in this message (for multi-turn tool calling).
         /// </summary>
         public List<ToolCall>? ToolCalls { get; set; }
+        /// <summary>
+        /// For a <c>role: "tool"</c> message, the id of the assistant tool call this
+        /// result answers.
+        ///
+        /// <para>
+        /// No chat template in this repository renders it — every one of them frames a
+        /// tool result positionally, right after the call it answers. It exists for the
+        /// OpenAI WIRE format, which does not: a <c>tool</c> message there is rejected
+        /// outright without <c>tool_call_id</c>, so anything that speaks to a real
+        /// OpenAI-compatible endpoint (see <c>SkillsChatClient</c> under
+        /// <c>SkillDelivery.Local</c>) has to carry the id through the conversation
+        /// rather than re-derive it.
+        /// </para>
+        /// </summary>
+        public string? ToolCallId { get; set; }
         /// <summary>
         /// Thinking/reasoning content produced by the model in this message.
         /// </summary>
@@ -552,9 +575,8 @@ namespace TensorSharp.Runtime
                         // back to the hardcoded template, which always emits message content.
                         if (!RenderedContainsLastUserText(result, messages))
                         {
-                            Console.Error.WriteLine(
-                                $"[ChatTemplate] Jinja2 rendering for '{architecture}' dropped the last user message; " +
-                                "falling back to hardcoded template.");
+                            WarnTemplateFallbackOnce(architecture, "dropped-user-message",
+                                "the rendered prompt dropped the last user message (lightweight-Jinja-engine guard).");
                         }
                         else
                         {
@@ -573,14 +595,33 @@ namespace TensorSharp.Runtime
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"[ChatTemplate] Jinja2 rendering failed for architecture '{architecture}': {ex.Message}");
-                    Console.Error.WriteLine($"[ChatTemplate] Exception: {ex}");
-                    Console.Error.WriteLine($"[ChatTemplate] Falling back to hardcoded template.");
+                    WarnTemplateFallbackOnce(architecture, "jinja-error",
+                        $"Jinja2 rendering threw {ex.GetType().Name}: {ex.Message}.");
                 }
             }
 
             Console.Error.WriteLine($"[ChatTemplate] Using hardcoded template for '{architecture}'");
             return RenderHardcoded(messages, addGenerationPrompt, architecture, tools, enableThinking);
+        }
+
+        // (architecture, reason-kind) pairs whose Jinja→hardcoded fallback has
+        // already been reported, so the per-request render path warns once
+        // instead of per prompt. ChatTemplate is a static class reachable from
+        // the CLI, server, and tests with no ILogger to inject — routing this
+        // through Microsoft.Extensions.Logging would mean replumbing every
+        // RenderFromGgufTemplate call site — so Console.Error is the channel.
+        private static readonly HashSet<string> TemplateFallbackReported = new(StringComparer.Ordinal);
+
+        private static void WarnTemplateFallbackOnce(string? architecture, string kind, string detail)
+        {
+            lock (TemplateFallbackReported)
+            {
+                if (!TemplateFallbackReported.Add($"{architecture}|{kind}")) return;
+            }
+            Console.Error.WriteLine(
+                $"[ChatTemplate] The model's GGUF Jinja chat template for '{architecture}' was abandoned: {detail} " +
+                "Affected requests render with the built-in hardcoded template instead; prompt formatting may " +
+                "differ from the model's shipped template. Reported once per architecture.");
         }
 
         /// <summary>

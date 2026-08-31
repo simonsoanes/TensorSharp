@@ -6,7 +6,7 @@ TensorSharp.Server 提供三种 API 风格以及若干工具型接口：
 
 - **兼容 Ollama**（`/api/generate`、`/api/chat/ollama`、`/api/tags`、`/api/show`）
 - **兼容 OpenAI**（`/v1/chat/completions`、`/v1/models`）
-- **Web UI**（`/api/chat`、`/api/sessions`、`/api/models`、`/api/models/load`、`/api/upload`、`/api/image-edit`、`/api/image-edit/stream`）
+- **Web UI**（`/api/chat`、`/api/sessions`、`/api/models`、`/api/models/load`、`/api/upload`、`/api/skills`、`/api/image-edit`、`/api/image-edit/stream`）
 - **工具型接口**（`/api/version`、`/api/queue/status`）
 
 启动服务时通过 `--model` 指定承载的模型文件，必要时通过 `--mmproj` **显式**指定多模态投影器；`TensorSharp.Server` 不会自动探测投影器。Web UI 与兼容接口仅暴露启动时指定的模型 / 投影器组合；`/api/models/load` 可以用受支持的后端重新加载同一组合，但无模型启动时不能用它选择模型，也不能在运行时切换到其他文件。
@@ -24,6 +24,7 @@ TensorSharp.Server 提供三种 API 风格以及若干工具型接口：
 | 上传 | `/api/upload` 接受图像 / 视频 / 音频 / 文本 / **PDF** 文件；原生数字 PDF 返回抽取出的文本，扫描版 PDF 在加载了具备视觉能力的模型时返回逐页图像（`TS_PDF_MAX_PAGES` 限制读取页数） |
 | 图像编辑 | Qwen-Image-Edit（`qwen_image`）模型通过 `/api/image-edit` 与 `/api/image-edit/stream` 提供服务，而不是聊天端点 |
 | 视频生成 | 任何视频生成模型 —— MiniMax-H3（`minimax-h3`）、Wan 2.1 / 2.2（`wan`）—— 都通过 `/api/video-generate`、`/api/video-generate/stream` 与 `/v1/videos/generations` 提供服务；MiniMax-H3 在 MP4 之外还会返回一个 32 kHz 立体声 `.wav` 旁挂文件，`/api/models` 会告知当前加载的检查点接受哪些条件输入 |
+| Agent Skills | 技能目录来自 `--skills-dir`（或二进制文件旁的 `skills` 目录），在 `/v1/skills` 与 `/api/skills` 列出，也可通过 `POST /api/skills` 以 `.zip` 安装。所有聊天端点都可用 `"skills": [...]` 按请求选中；模型自己发出的 `skills_read` 调用在服务端内部就被应答，因此客户端拿到的是一条写完的回复。`skills_run`（运行技能自带脚本）只有在启动时传入 `--skills-allow-exec` 才可用 |
 | 结构化输出 | OpenAI `response_format` 支持 `text`、`json_object`、`json_schema`；`response_format`（`json_object` / `json_schema`）不能与 `think` 或 `tools` 同时使用 |
 
 > **网络安全：**服务监听 `0.0.0.0:5000`，没有 API Key 身份验证或内置 TLS。
@@ -404,6 +405,37 @@ curl -X POST http://localhost:5000/api/chat/ollama \
 
 继续会话时，把 assistant 的 tool call 与一条 `role: "tool"` 的消息（包含函数返回结果）追加到 messages，再次请求 `/api/chat/ollama` 即可。
 
+### 聊天 + Agent Skills
+
+加上一个 `skills` 数组，即可指定本次回答应当遵循哪些 Agent Skills。前期只有每个技能
+的一行描述会占用上下文；`SKILL.md` 正文与所需的参考文件由模型通过内置的
+`skills_list` / `skills_read` 工具自取，而这些工具**由服务端自己执行**，因此你拿到的
+是一条普通回复，而不是一个需要客户端去执行的工具调用。
+
+`skills_discovery` 可选，默认为 `true` —— 模型还会看到本次请求*没有*选中的那些技能的
+名称与描述，以便自己挑出你没想到要点名的那个。设为 `false` 则把本次请求严格限制在它
+列出的技能上。
+
+```bash
+curl -X POST http://localhost:5000/api/chat/ollama \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemma-4-E4B-it-Q8_0.gguf",
+    "messages": [{"role": "user", "content": "把 statement.pdf 里的合计表格提取出来，并给出环比变化。"}],
+    "skills": ["pdf"],
+    "skills_discovery": false,
+    "stream": false,
+    "options": {"num_predict": 800}
+  }'
+```
+
+点名一个服务端没有的技能会返回 `400`。`GET /api/skills` 可列出已注册的技能。同样这两个
+字段在 `/api/chat`（Web UI）以及 `/v1/chat/completions` / `/v1/responses` 上都可用。
+
+技能与你自己的 `tools` 可以共存：内置的技能工具会并入你发来的工具列表，TensorSharp 只
+应答属于它自己的那几个，而对*你的*工具的调用照常回传给你——此时模型从技能里读到的内容
+已经留在对话中。
+
 ---
 
 ## 2. 兼容 OpenAI 的 API
@@ -645,6 +677,40 @@ curl -X POST http://localhost:5000/v1/chat/completions \
 
 将 assistant 的 `tool_calls` 与一条 `{"role": "tool", "tool_call_id": "...", "content": "..."}` 消息追加到 messages，即可继续工具循环。
 
+### Chat Completions + Agent Skills
+
+同样的 `skills` / `skills_discovery` 字段在 OpenAI 接口以及 `/v1/responses` 上同样可用：
+
+```bash
+curl -X POST http://localhost:5000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemma-4-E4B-it-Q8_0.gguf",
+    "messages": [{"role": "user", "content": "把这些数字做成一张带图表的电子表格。"}],
+    "skills": ["xlsx"],
+    "max_tokens": 800
+  }'
+```
+
+返回的是一条普通的 `chat.completion`。模型发出的所有 `skills_read` 调用都发生在服务端
+内部；OpenAI SDK 无需做任何改动，也不会看到它无法执行的工具调用。
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:5000/v1", api_key="not-needed")
+response = client.chat.completions.create(
+    model="gemma-4-E4B-it-Q8_0.gguf",
+    messages=[{"role": "user", "content": "帮我填好这个 AcroForm 表单，并说明你填了什么。"}],
+    max_tokens=800,
+    extra_body={"skills": ["pdf"], "skills_discovery": False},
+)
+print(response.choices[0].message.content)
+```
+
+提示词预算、披露循环与安全模型等设计说明见
+[Agent Skills in TensorSharp](../docs/agent_skills.md)（英文）。
+
 ### 工具型接口
 
 ```bash
@@ -718,12 +784,19 @@ curl -N -X POST http://localhost:5000/api/chat \
 | `replace`、`diffusionStep`、`diffusionTotal`、`preview` | 每个 DiffusionGemma 去噪预览与最终替换 | 替换整条 assistant 消息，而不是追加 token |
 | `thinking` | 解析到的思维链片段（仅当模型输出含思维链时） | 流式思维链 |
 | `tool_calls` | 模型输出工具调用 | `{name, arguments}` 数组 |
+| `skill_step`、`skill`、`detail`、`ok` | 服务端在作答过程中执行的每一次 Agent Skill 工具调用 | 进度轨迹：跑的是哪个工具（`skills_list` / `skills_read` / `skills_run`）、作用于哪个技能、哪个文件，以及是否成功 |
 | `done`、`tokenCount`、`elapsed`、`tokPerSec`、`aborted`、`error`、`sessionId`、`promptTokens`、`kvReusedTokens`、`kvReusePercent` | 末尾帧 | 终态汇总 |
 
 末尾帧示例：
 
 ```
 data: {"done":true,"tokenCount":187,"elapsed":2.143,"tokPerSec":87.23,"aborted":false,"error":null,"sessionId":"a3b...","promptTokens":512,"kvReusedTokens":420,"kvReusePercent":82.0}
+```
+
+技能步骤帧示例：
+
+```
+data: {"skill_step":"skills_read","skill":"pdf","detail":"references/forms.md","ok":true}
 ```
 
 DiffusionGemma 预览帧示例：
@@ -778,6 +851,94 @@ curl -N -X POST http://localhost:5000/api/chat \
   模型重启服务。
 
 设置 `TS_PDF_MAX_PAGES` 环境变量可限制读取的 PDF 页数（默认 `0` = 全部页面）。
+
+### 技能（`/api/skills`）
+
+管理 Agent Skills 注册表。同一份数据有两种形态：偏 OpenAI 风格的 `/v1/skills`
+（列表 + 单个技能，只读），以及 Web UI 风格的 `/api/skills`（额外提供加载错误、
+上传与删除）。
+
+```bash
+# 服务端已注册的全部技能，外加那些“看起来像技能却加载失败”的目录，
+# 以及当前是否接受上传。
+curl http://localhost:5000/api/skills
+
+# 单个技能，`instructions` 字段里是 SKILL.md 正文。
+curl http://localhost:5000/api/skills/pdf
+
+# OpenAI 风格的等价接口。
+curl http://localhost:5000/v1/skills
+curl http://localhost:5000/v1/skills/pdf
+```
+
+`/api/skills`：
+
+```json
+{
+  "enabled": true,
+  "installable": true,
+  "skills": [
+    {
+      "id": "pdf",
+      "object": "skill",
+      "name": "pdf",
+      "description": "Extract text and tables from PDF files, fill in PDF forms, and merge or split documents...",
+      "license": "Apache-2.0",
+      "compatibility": "Requires python3 with pypdf installed.",
+      "files": [
+        {"path": "scripts/extract_tables.py", "bytes": 4021, "kind": "script", "text": true},
+        {"path": "references/forms.md", "bytes": 18233, "kind": "reference", "text": true}
+      ],
+      "bytes": 41288,
+      "origin": "installed",
+      "warnings": [],
+      "modified": "2026-08-29T12:00:00Z"
+    }
+  ],
+  "errors": [
+    {"path": "/srv/skills/broken", "message": "SKILL.md is missing the required 'description' field"}
+  ]
+}
+```
+
+`/v1/skills` 把同样的对象包成 `{"object": "list", "data": [...]}`。`kind` 取值为
+`script` / `reference` / `asset` / `manifest` / `other`；`origin` 为 `discovered`
+表示它是扫描配置目录时发现的，为 `installed` 表示它是从这里上传安装的——只有后者
+可以被删除。`warnings` 里是那些“不完全合规但仍然加载成功”的问题（`name` 与目录名
+不一致、description 超过 1024 字符上限等）。
+
+安装与删除：
+
+```bash
+# 上传技能文件夹的 .zip（pdf/SKILL.md），或其内容的 .zip（SKILL.md 位于压缩包根目录）。
+# overwrite 表示替换同名的已安装技能；不传时，重名会返回 409。
+curl -X POST http://localhost:5000/api/skills \
+  -F "file=@pdf.zip" \
+  -F "overwrite=true"
+
+# 返回：安装后的 SkillObject，与列表接口返回的结构完全一致。
+
+# 删除一个已安装的技能。
+curl -X DELETE http://localhost:5000/api/skills/pdf
+# {"removed":true}
+```
+
+上传在任何文件落盘之前就会被校验：每个 ZIP 条目都要经过与模型文件读取相同的那道
+路径关卡（因此 `../../authorized_keys` 会被拒绝而不是写出去），大小按解压后的字节流
+统计而不是采信条目自称的长度；若压缩包内文件超过 4096 个、单个文件解压后超过 64 MB、
+整包超过 256 MB，或整体膨胀超过 200 倍，都会被拒绝。包含多个技能目录的压缩包同样会被
+拒绝，而不是从中悄悄挑一个装上。
+
+错误遵循服务端统一约定：`/api/*` 返回 `{"error": "..."}`，`/v1/*` 返回
+`{"error": {"message": "...", "type": "invalid_request_error"}}`。
+
+`GET /api/models` 会报告以上功能是否可用：
+
+```json
+"skills": { "enabled": true, "installable": true, "count": 7 }
+```
+
+服务端关闭了技能功能时该字段为 `null`，Web UI 据此决定是否显示技能控件。
 
 ### 图像编辑（`/api/image-edit`，Qwen-Image-Edit）
 

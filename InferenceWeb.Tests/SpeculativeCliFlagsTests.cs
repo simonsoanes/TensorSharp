@@ -11,23 +11,26 @@
 using System;
 using System.IO;
 using TensorSharp.Runtime.Scheduling;
+using TensorSharp.Runtime.Speculative;
 using Xunit;
 
 namespace InferenceWeb.Tests;
 
 /// <summary>
-/// The speculative-decoding flags translated to their environment variables,
-/// under both the current <c>--spec*</c> / <c>TS_SPEC_*</c> spelling and the
-/// legacy <c>--mtp-*</c> / <c>TS_MTP_*</c> one. Shared by
-/// TensorSharp.Cli and TensorSharp.Server. This is the only seam either host's
-/// MTP command line can be tested through: the CLI's own parser is a switch
-/// inside a private <c>MainCore</c> with no return value.
+/// The speculative-decoding flags translated to their environment variables.
+/// One spelling per option (<c>--spec*</c> / <c>--draft-model</c>); the removed
+/// duplicate spellings (<c>--mtp-*</c>, <c>--spec-draft-model</c>,
+/// <c>--spec-draft-n-max</c>, <c>--spec-draft-conf-min</c>) hard-error with a
+/// pointer to their survivor. Shared by TensorSharp.Cli and TensorSharp.Server.
+/// This is the only seam either host's speculative command line can be tested
+/// through: the CLI's own parser is a switch inside a private <c>MainCore</c>
+/// with no return value.
 ///
 /// The env var is the contract rather than a parsed value object because the
-/// request has to reach the model LOADER — glm-dsa decides from
-/// <c>TS_MTP_SPEC</c> whether to page a whole extra 256-expert decoder layer
-/// into VRAM, and sizes its graph cache from <c>TS_MTP_DRAFT</c>, both while the
-/// model is loading.
+/// request has to reach the model LOADER — glm-dsa decides from the enabled
+/// variable whether to page a whole extra 256-expert decoder layer into VRAM,
+/// and sizes its graph cache from <c>TS_MTP_DRAFT</c> (still read from C++),
+/// both while the model is loading.
 /// </summary>
 public sealed class SpeculativeCliFlagsTests : IDisposable
 {
@@ -42,9 +45,9 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
     public void Dispose() => _env.Dispose();
 
     [Fact]
-    public void Apply_SpecSpec_TurnsSpeculationOnForTheScheduler()
+    public void Apply_Spec_TurnsSpeculationOnForTheScheduler()
     {
-        bool applied = SpeculativeCliFlags.Apply(new[] { "--mtp-spec" });
+        bool applied = SpeculativeCliFlags.Apply(new[] { "--spec" });
 
         Assert.True(applied);
         Assert.Equal("1", Environment.GetEnvironmentVariable("TS_MTP_SPEC"));
@@ -52,11 +55,11 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
     }
 
     [Fact]
-    public void Apply_NoMtpSpec_TurnsSpeculationOffOverAnExportedEnvVar()
+    public void Apply_NoSpec_TurnsSpeculationOffOverAnExportedEnvVar()
     {
         _env.Set("TS_MTP_SPEC", "1");
 
-        Assert.True(SpeculativeCliFlags.Apply(new[] { "--no-mtp-spec" }));
+        Assert.True(SpeculativeCliFlags.Apply(new[] { "--no-spec" }));
 
         Assert.Equal("0", Environment.GetEnvironmentVariable("TS_MTP_SPEC"));
         Assert.False(SchedulerConfig.FromEnvironment().Speculation.Enabled);
@@ -73,9 +76,9 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
     }
 
     [Theory]
-    [InlineData("--mtp-draft", "4")]
-    [InlineData("--mtp-draft=4", null)]
-    public void Apply_SpecDraft_AcceptsBothSpellings(string first, string second)
+    [InlineData("--spec-draft", "4")]
+    [InlineData("--spec-draft=4", null)]
+    public void Apply_SpecDraft_AcceptsBothValueSpellings(string first, string second)
     {
         string[] args = second == null ? new[] { first } : new[] { first, second };
 
@@ -88,20 +91,32 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
     [Fact]
     public void Apply_SpecPmin_ReachesTheSchedulerAsANullableProbability()
     {
-        Assert.True(SpeculativeCliFlags.Apply(new[] { "--mtp-pmin", "0.55" }));
+        Assert.True(SpeculativeCliFlags.Apply(new[] { "--spec-pmin", "0.55" }));
 
         Assert.Equal(0.55f, SchedulerConfig.FromEnvironment().Speculation.MinDraftProb);
     }
 
     [Fact]
-    public void Apply_WithoutMtpPmin_LeavesTheGateUnsetForTheDrafterToChoose()
+    public void Apply_SpecPminZero_MeansNeverGateAndSurvivesTheEnvRoundTrip()
+    {
+        // 0 is a real value ("never gate a draft on confidence") that the removed
+        // --spec-draft-conf-min spelling could express; its survivor must keep
+        // expressing it, all the way through the env reader that used to treat
+        // 0 as unset.
+        Assert.True(SpeculativeCliFlags.Apply(new[] { "--spec-pmin", "0" }));
+
+        Assert.Equal(0f, SchedulerConfig.FromEnvironment().Speculation.MinDraftProb);
+    }
+
+    [Fact]
+    public void Apply_WithoutPmin_LeavesTheGateUnsetForTheDrafterToChoose()
     {
         // The per-token gate (top-1 probability over the head's top-10 logits,
         // default 0.75) and the block gate (cumulative prefix-acceptance product,
         // default 0.35) threshold different quantities, so "unset" has to survive
         // all the way to SpeculativeExecution rather than collapsing to one
         // shared number that badly mis-gates the other kind.
-        Assert.True(SpeculativeCliFlags.Apply(new[] { "--mtp-spec" }));
+        Assert.True(SpeculativeCliFlags.Apply(new[] { "--spec" }));
 
         Assert.Null(SchedulerConfig.FromEnvironment().Speculation.MinDraftProb);
     }
@@ -118,25 +133,25 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
     public void Apply_SpecDraftWithAnUnusableValue_FailsFastNamingTheFlag(string value)
     {
         var ex = Assert.Throws<ArgumentException>(() =>
-            SpeculativeCliFlags.Apply(new[] { "--mtp-draft", value }));
+            SpeculativeCliFlags.Apply(new[] { "--spec-draft", value }));
 
-        Assert.Contains("--mtp-draft", ex.Message);
+        Assert.Contains("--spec-draft", ex.Message);
         Assert.Null(Environment.GetEnvironmentVariable("TS_MTP_DRAFT"));
     }
 
     [Theory]
-    [InlineData("0")]
+    [InlineData("-0.1")]
     [InlineData("1.5")]
     [InlineData("nope")]
     public void Apply_SpecPminOutsideTheUnitInterval_FailsFastNamingTheFlag(string value)
     {
-        // The (0, 1] bound exists ONLY here: SchedulerConfig reads the variable
+        // The [0, 1] bound exists ONLY here: SchedulerConfig reads the variable
         // back with a plain float parse, so a value of 5 would be accepted there
         // and would reject every draft while speculation still logged as armed.
         var ex = Assert.Throws<ArgumentException>(() =>
-            SpeculativeCliFlags.Apply(new[] { "--mtp-pmin", value }));
+            SpeculativeCliFlags.Apply(new[] { "--spec-pmin", value }));
 
-        Assert.Contains("--mtp-pmin", ex.Message);
+        Assert.Contains("--spec-pmin", ex.Message);
         Assert.Null(Environment.GetEnvironmentVariable("TS_MTP_PMIN"));
     }
 
@@ -146,50 +161,25 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
         // Every other CLI flag does args[++i] and surfaces as an unhandled
         // IndexOutOfRangeException; these say which option is missing a value.
         var ex = Assert.Throws<ArgumentException>(() =>
-            SpeculativeCliFlags.Apply(new[] { "--model", "x.gguf", "--mtp-draft" }));
+            SpeculativeCliFlags.Apply(new[] { "--model", "x.gguf", "--spec-draft" }));
 
-        Assert.Contains("--mtp-draft", ex.Message);
+        Assert.Contains("--spec-draft", ex.Message);
     }
 
     [Fact]
-    public void Apply_SpecDraftModel_DoesNotSwallowMtpDraft()
-    {
-        // "--mtp-draft" is a strict prefix of "--mtp-draft-model". A parser that
-        // matched on a prefix would route the GGUF path into TS_MTP_DRAFT, where
-        // an int parse discards it back to the default while the draft model
-        // silently never loads.
-        string gguf = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".gguf");
-        File.WriteAllBytes(gguf, new byte[] { 1, 2, 3 });
-        try
-        {
-            Assert.True(SpeculativeCliFlags.Apply(new[]
-            {
-                "--mtp-spec", "--mtp-draft", "6", "--mtp-draft-model", gguf,
-            }));
-
-            Assert.Equal("6", Environment.GetEnvironmentVariable("TS_MTP_DRAFT"));
-            Assert.Equal(gguf, Environment.GetEnvironmentVariable("TS_MTP_DRAFT_MODEL"));
-        }
-        finally
-        {
-            File.Delete(gguf);
-        }
-    }
-
-    [Fact]
-    public void Apply_SpecDraftModelThatDoesNotExist_FailsFast()
+    public void Apply_DraftModelThatDoesNotExist_FailsFast()
     {
         var ex = Assert.Throws<ArgumentException>(() =>
-            SpeculativeCliFlags.Apply(new[] { "--mtp-draft-model", "/no/such/draft.gguf" }));
+            SpeculativeCliFlags.Apply(new[] { "--draft-model", "/no/such/draft.gguf" }));
 
-        Assert.Contains("--mtp-draft-model", ex.Message);
+        Assert.Contains("--draft-model", ex.Message);
     }
 
     [Fact]
     public void Apply_SpecDraftAtTheBound_IsAccepted()
     {
         Assert.True(SpeculativeCliFlags.Apply(
-            new[] { "--mtp-draft", SpeculativeCliFlags.MaxDraftTokens.ToString() }));
+            new[] { "--spec-draft", SpeculativeCliFlags.MaxDraftTokens.ToString() }));
 
         Assert.Equal(SpeculativeCliFlags.MaxDraftTokens,
             SchedulerConfig.FromEnvironment().Speculation.MaxDraftTokens);
@@ -201,23 +191,70 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
         // Config-file expansion (ConfigFileArgs.Expand) splices file-derived
         // tokens ahead of the real command line, so the operator's own flag has
         // to be the one that survives.
-        Assert.True(SpeculativeCliFlags.Apply(new[] { "--mtp-spec", "--no-mtp-spec" }));
+        Assert.True(SpeculativeCliFlags.Apply(new[] { "--spec", "--no-spec" }));
         Assert.False(SchedulerConfig.FromEnvironment().Speculation.Enabled);
 
-        Assert.True(SpeculativeCliFlags.Apply(new[] { "--no-mtp-spec", "--mtp-spec" }));
+        Assert.True(SpeculativeCliFlags.Apply(new[] { "--no-spec", "--spec" }));
         Assert.True(SchedulerConfig.FromEnvironment().Speculation.Enabled);
     }
 
-    // ----- the dual TS_SPEC_* / TS_MTP_* spelling -----
+    // ----- naming a draft file IS the request -----
 
     [Fact]
-    public void Apply_PublishesBothSpellings_SoTheNativeLoaderStillSeesTheRequest()
+    public void Apply_DraftModelAlone_EnablesSpeculation()
     {
-        // The glm-dsa NATIVE loader reads TS_MTP_SPEC / TS_MTP_DRAFT from C++ while
-        // the model is loading (it decides whether to page a whole extra 256-expert
-        // decoder layer into VRAM, and sizes its graph cache). Publishing only the
-        // current spelling would leave that loader blind, and speculation would go
-        // quiet with nothing in the log to explain it.
+        // Nobody passes --draft-model hoping the file stays idle. Requiring a
+        // separate --spec beside it was a trap both hosts fell into differently:
+        // the CLI engaged, the server silently did not.
+        string gguf = Path.Combine(Path.GetTempPath(), $"drafter-{Guid.NewGuid():N}.gguf");
+        File.WriteAllBytes(gguf, new byte[] { 1, 2, 3 });
+        try
+        {
+            Assert.True(SpeculativeCliFlags.Apply(new[] { "--draft-model", gguf }));
+
+            Assert.True(SchedulerConfig.FromEnvironment().Speculation.Enabled);
+            Assert.Equal(gguf, Environment.GetEnvironmentVariable(SpeculationEnvVars.DraftModel));
+            Assert.Equal(gguf, Environment.GetEnvironmentVariable(SpeculationEnvVars.LegacyDraftModel));
+        }
+        finally
+        {
+            File.Delete(gguf);
+        }
+    }
+
+    [Fact]
+    public void Apply_ExplicitNoSpec_VetoesTheDraftModelAutoEnable_InEitherOrder()
+    {
+        // The operator said "off" in words; a convenience must not override them.
+        string gguf = Path.Combine(Path.GetTempPath(), $"drafter-{Guid.NewGuid():N}.gguf");
+        File.WriteAllBytes(gguf, new byte[] { 1, 2, 3 });
+        try
+        {
+            Assert.True(SpeculativeCliFlags.Apply(new[] { "--no-spec", "--draft-model", gguf }));
+            Assert.False(SchedulerConfig.FromEnvironment().Speculation.Enabled);
+
+            _env.ClearSpeculationVars();
+            Assert.True(SpeculativeCliFlags.Apply(new[] { "--draft-model", gguf, "--no-spec" }));
+            Assert.False(SchedulerConfig.FromEnvironment().Speculation.Enabled);
+        }
+        finally
+        {
+            File.Delete(gguf);
+        }
+    }
+
+    // ----- the dual TS_SPEC_* / TS_MTP_* env spelling -----
+
+    [Fact]
+    public void Apply_PublishesBothEnvSpellings_SoTheNativeLoaderStillSeesTheRequest()
+    {
+        // The glm-dsa NATIVE loader reads TS_MTP_DRAFT from C++ while the model is
+        // loading (it sizes its graph cache from it), and the managed half of the
+        // same loader reads the enabled variable to decide whether to page a whole
+        // extra 256-expert decoder layer into VRAM. Publishing only the current
+        // spelling would leave that loader blind, and speculation would go quiet
+        // with nothing in the log to explain it. Only the ENV spelling is dual;
+        // the FLAG spelling is one name per option.
         Assert.True(SpeculativeCliFlags.Apply(new[] { "--spec", "--spec-draft", "5", "--spec-pmin", "0.6" }));
 
         Assert.Equal("1", Environment.GetEnvironmentVariable(SpeculationEnvVars.Enabled));
@@ -226,17 +263,6 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
         Assert.Equal("5", Environment.GetEnvironmentVariable(SpeculationEnvVars.LegacyDraft));
         Assert.Equal("0.6", Environment.GetEnvironmentVariable(SpeculationEnvVars.PMin));
         Assert.Equal("0.6", Environment.GetEnvironmentVariable(SpeculationEnvVars.LegacyPMin));
-    }
-
-    [Fact]
-    public void Apply_LegacyMtpSpellings_AreStillHonoured()
-    {
-        Assert.True(SpeculativeCliFlags.Apply(new[] { "--mtp-spec", "--mtp-draft", "3", "--mtp-pmin", "0.9" }));
-
-        var cfg = SchedulerConfig.FromEnvironment().Speculation;
-        Assert.True(cfg.Enabled);
-        Assert.Equal(3, cfg.MaxDraftTokens);
-        Assert.Equal(0.9f, cfg.MinDraftProb);
     }
 
     [Fact]
@@ -250,6 +276,45 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
         var cfg = SpeculationOptions.FromEnvironment();
         Assert.True(cfg.Enabled);
         Assert.Equal(12, cfg.MaxDraftTokens);
+    }
+
+    // ----- removed duplicate spellings -----
+
+    [Fact]
+    public void Apply_EveryRemovedSpelling_ErrorsNamingItsSurvivor()
+    {
+        // Driven off the shared table so a spelling removed later cannot dodge the
+        // guard. A hard error, never a silent ignore: the CLI's argument switch
+        // drops unknown flags, and "speculation quietly off" is exactly the
+        // failure the table exists to prevent.
+        Assert.NotEmpty(SpeculativeCliFlags.RemovedFlags);
+        foreach ((string flag, string survivor) in SpeculativeCliFlags.RemovedFlags)
+        {
+            var ex = Assert.Throws<ArgumentException>(() =>
+                SpeculativeCliFlags.Apply(new[] { flag, "1" }));
+            Assert.Contains(flag, ex.Message);
+            Assert.Contains(survivor, ex.Message);
+
+            var eq = Assert.Throws<ArgumentException>(() =>
+                SpeculativeCliFlags.Apply(new[] { flag + "=1" }));
+            Assert.Contains(survivor, eq.Message);
+        }
+
+        // And nothing leaked into the environment before the throw.
+        Assert.Null(Environment.GetEnvironmentVariable(SpeculationEnvVars.Enabled));
+        Assert.Null(Environment.GetEnvironmentVariable(SpeculationEnvVars.LegacyEnabled));
+    }
+
+    [Fact]
+    public void Apply_RemovedSpellingAnywhereOnTheLine_StillErrors()
+    {
+        // RejectRemoved must run before any flag is applied, so a valid --spec
+        // earlier on the line does not half-configure the environment first.
+        var ex = Assert.Throws<ArgumentException>(() =>
+            SpeculativeCliFlags.Apply(new[] { "--spec", "--mtp-draft", "4" }));
+
+        Assert.Contains("--spec-draft", ex.Message);
+        Assert.Null(Environment.GetEnvironmentVariable(SpeculationEnvVars.Enabled));
     }
 
     [Fact]
@@ -272,16 +337,17 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
     }
 
     [Fact]
-    public void SpecDraftModel_DoesNotCollideWithSpecDraft()
+    public void DraftModel_DoesNotCollideWithSpecDraft()
     {
-        // --spec-draft is a prefix of --spec-draft-model; the parser must route
-        // each to its own variable rather than mis-reading the longer flag.
+        // --spec-draft once had longer siblings (--spec-draft-model and friends);
+        // the value flags must keep routing exactly, never by prefix, so
+        // --spec-draft 6 and --draft-model PATH land in their own variables.
         string gguf = Path.Combine(Path.GetTempPath(), $"spec-draft-{Guid.NewGuid():N}.gguf");
         File.WriteAllBytes(gguf, new byte[] { 1, 2, 3 });
         try
         {
             Assert.True(SpeculativeCliFlags.Apply(
-                new[] { "--spec-draft", "6", "--spec-draft-model", gguf }));
+                new[] { "--spec-draft", "6", "--draft-model", gguf }));
 
             Assert.Equal("6", Environment.GetEnvironmentVariable(SpeculationEnvVars.Draft));
             Assert.Equal(gguf, Environment.GetEnvironmentVariable(SpeculationEnvVars.DraftModel));
@@ -291,19 +357,5 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
         {
             File.Delete(gguf);
         }
-    }
-
-    [Fact]
-    public void Apply_InvalidValue_NamesTheSpellingTheOperatorActuallyTyped()
-    {
-        // Being told "--spec-draft is invalid" after typing --mtp-draft sends the
-        // operator looking for a flag they never used.
-        var legacy = Assert.Throws<ArgumentException>(() =>
-            SpeculativeCliFlags.Apply(new[] { "--mtp-draft", "999" }));
-        Assert.Contains("--mtp-draft", legacy.Message);
-
-        var current = Assert.Throws<ArgumentException>(() =>
-            SpeculativeCliFlags.Apply(new[] { "--spec-draft", "999" }));
-        Assert.Contains("--spec-draft", current.Message);
     }
 }

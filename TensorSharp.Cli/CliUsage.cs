@@ -9,6 +9,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 
 namespace TensorSharp.Cli
@@ -44,7 +45,10 @@ namespace TensorSharp.Cli
         private readonly record struct OptionHelp(string Flag, string Description, string Example);
 
         // Grouped by task. Keep flags in sync with the switch in
-        // Program.MainCore and with CliLoggingSetup.ParseFromArgs.
+        // Program.MainCore, with CliLoggingSetup.ParseFromArgs, and with the
+        // shared option parsers that run before the switch: CodeExecOptions.Parse,
+        // SkillHostOptions.Parse and SpeculativeCliFlags.Apply. CliUsageTests
+        // asserts the constant-table families are all documented here.
         private static readonly (string Section, OptionHelp[] Options)[] Sections =
         {
             ("Model and prompt input", new[]
@@ -74,6 +78,141 @@ namespace TensorSharp.Cli
                     "JSON file with an array of tool/function definitions to expose to the model (function " +
                     "calling). Default: none.",
                     "--tools tools.json"),
+                new OptionHelp("--skills-dir <path>",
+                    "Directory to scan for Agent Skills (SKILL.md bundles). A root may hold one skill or many, " +
+                    "nested up to three levels, so a checkout of a skills repository works as-is. Repeat the " +
+                    "flag for several; earlier roots win a name clash. Default: the skills/ directory next to " +
+                    "the binary, created on first run (TS_SKILLS_DIR env var overrides, path-separated).",
+                    "--skills-dir ./skills"),
+                new OptionHelp("--skill <name>",
+                    "Use this skill for the run: its instructions go into the prompt and the model is told to " +
+                    "follow them. Repeat the flag for several. Run --list-skills for the names. Default: none " +
+                    "selected (other installed skills are still advertised so the model can pick one up).",
+                    "--skill pdf --skill xlsx"),
+                new OptionHelp("--list-skills",
+                    "Print every installed skill, with the load errors for any directory that failed, and exit. " +
+                    "Needs no --model. Default: off.",
+                    "--list-skills"),
+                new OptionHelp("--no-skills",
+                    "Disable Agent Skills entirely for this run. Default: enabled " +
+                    "(TS_NO_SKILLS env var overrides).",
+                    "--no-skills"),
+                new OptionHelp("--skills-no-discovery",
+                    "Show the model only the skills named with --skill, instead of also advertising the rest of " +
+                    "the registry so it can pick up one you did not think of. Default: discovery on.",
+                    "--skills-no-discovery"),
+                new OptionHelp("--skills-allow-exec",
+                    "Let the model RUN a skill's bundled scripts on this machine, with your privileges. Useful " +
+                    "for skills you wrote or trust; it is arbitrary code execution for any skill you did not. " +
+                    "Default: off (TS_SKILLS_ALLOW_EXEC env var overrides).",
+                    "--skills-allow-exec"),
+                new OptionHelp("--skills-sandbox <off|preferred|required>",
+                    "How hard to insist on OS isolation for a skill's scripts. required (the default) refuses to " +
+                    "run them on a machine with no sandbox rather than running them unconfined; preferred runs " +
+                    "them anyway; off applies only the in-process limits. macOS uses sandbox-exec, Linux uses " +
+                    "bubblewrap when bwrap is installed. Default: required " +
+                    "(TS_SKILLS_SANDBOX env var overrides).",
+                    "--skills-sandbox preferred"),
+                new OptionHelp("--skills-allow-network",
+                    "Let a sandboxed skill script reach the network. Default: denied " +
+                    "(TS_SKILLS_ALLOW_NETWORK env var overrides).",
+                    "--skills-allow-network"),
+                new OptionHelp("--skills-max-rounds <N>",
+                    "How many times the model may fetch skill content - or run, read and fix code - in one " +
+                    "turn before it must answer. Range: 1-64. Default: 8, or 24 when --code-exec is on, because " +
+                    "writing a file, running it and fixing the traceback takes more steps than reading files. " +
+                    "A value set here is used as given, either way (TS_SKILLS_MAX_ROUNDS env var overrides).",
+                    "--skills-max-rounds 4"),
+                new OptionHelp("--code-exec",
+                    "Offer the model a 'shell' tool: it types a command, this host runs it in a sandbox, and " +
+                    "the model reads back the exit code and everything it printed. This is how the model does " +
+                    "all its work with files and code - write one with a heredoc, run it, search it, install " +
+                    "what it needs, check its own output. The working directory PERSISTS for the whole session " +
+                    "and is shared with any skill scripts, so one step's output is the next step's input, and " +
+                    "cd and exported variables survive from call to call (PATH does not, so an activated " +
+                    "virtualenv does not stay activated - installed packages are already on the path); the " +
+                    "directory is released when the CLI exits. One tool comes with it: 'apply_patch', which " +
+                    "creates, updates, deletes and renames several files in one all-or-nothing call, so a " +
+                    "one-line fix costs one line instead of a whole rewritten file - and the host places the " +
+                    "bytes from anchors it either finds or refuses, rather than the model retyping a file it " +
+                    "half-remembers. Separate from --skills-allow-exec on purpose: that runs a script already " +
+                    "on disk, this runs commands written during the request. Needs a real sandbox (macOS " +
+                    "sandbox-exec, Linux bwrap); without one the tool refuses rather than running unconfined - " +
+                    "see --code-exec-unconfined. A command NEVER reaches the network, on any host and in " +
+                    "any configuration: installs are the only thing that reaches a registry, and the HOST " +
+                    "performs those itself rather than running the model's install command. Default: off " +
+                    "(TS_CODE_EXEC env var overrides; any value but 0 turns it on).",
+                    "--code-exec"),
+                new OptionHelp("--code-exec-allow-install",
+                    "Let the model install packages (pip / npm) into an environment this session keeps, so a " +
+                    "later command, and a skill's scripts, can import them too. This is the half that " +
+                    "touches the network, so it is a separate decision. What makes it safe is that the " +
+                    "model's install command is READ, not run: the host takes the tool and the package names " +
+                    "out of it, validates the names, and performs the install itself with an argument vector " +
+                    "it built - then substitutes the install out of the line so the rest runs with no network " +
+                    "like anything else. An option that would change where a package comes from (--index-url, " +
+                    "-i, --find-links, --registry, a URL requirement) is refused by name, and so is an " +
+                    "installer the host cannot perform (gem, cargo); -r requirements.txt is read and each " +
+                    "line validated. Only prebuilt wheels are installed and install scripts never run " +
+                    "(pip --only-binary=:all:, npm --ignore-scripts). Also what lets a skill script's missing " +
+                    "dependency be installed automatically instead of just failing. Requires --code-exec. " +
+                    "Default: off (TS_CODE_EXEC_ALLOW_INSTALL env var overrides).",
+                    "--code-exec --code-exec-allow-install"),
+                new OptionHelp("--code-exec-packages <list>",
+                    "Restrict installs to these package names, comma-separated; anything else is refused and " +
+                    "the model is told which names are allowed. Matching is on the bare name, so a version the " +
+                    "model pins (numpy==2.1.0) still matches the entry 'numpy'. Enforceable because the HOST " +
+                    "performs installs: it reads the names out of the model's command and builds the install " +
+                    "itself, so the list applies however the request was spelled. Only meaningful with " +
+                    "--code-exec-allow-install. Default: empty, meaning any package.",
+                    "--code-exec-packages numpy,pandas,reportlab"),
+                new OptionHelp("--code-exec-install-domains <list>",
+                    "The hosts a host-performed install may reach, comma-separated; exact names or *.suffix " +
+                    "wildcards. A loopback CONNECT proxy holds the list and the installer is pointed at it. " +
+                    "On macOS the sandbox admits exactly that one port, so every other destination is " +
+                    "unreachable; elsewhere the installer follows the proxy because pip and npm honour " +
+                    "HTTPS_PROXY - obedience rather than confinement, with the argument vector still the " +
+                    "host's. An EMPTY value disables the pinning entirely. Default: pypi.org," +
+                    "files.pythonhosted.org,registry.npmjs.org (TS_CODE_EXEC_INSTALL_DOMAINS env var " +
+                    "overrides; a value set with this flag wins over it).",
+                    "--code-exec-install-domains pypi.org,files.pythonhosted.org"),
+                new OptionHelp("--code-exec-timeout <seconds>",
+                    "How long one command may run before it is killed, in seconds. A call may ask for less or " +
+                    "more, up to 10 minutes; a command that runs over is stopped and the model still gets " +
+                    "everything it printed first. Default: 120.",
+                    "--code-exec-timeout 300"),
+                new OptionHelp("--code-exec-temperature <number>",
+                    "Sampling temperature for a turn in which the model can run code, 0 to 2. The built-in " +
+                    "defaults are Ollama's CHAT defaults (temperature 0.8, repeat_penalty 1.1 over a 64-token " +
+                    "window), inherited for API compatibility and never chosen for code: a repetition penalty " +
+                    "over four lines of Python penalises the indentation, the 'return' and the closing " +
+                    "delimiters that carry the code's structure. This setting also turns that penalty off. " +
+                    "Only values still at the built-in default are changed, so a temperature you or a client " +
+                    "asked for explicitly always wins. Give a negative number to leave sampling alone " +
+                    "entirely. No temperature is set by default - neither Codex nor Claude Code sets one for " +
+                    "code, so it is offered rather than applied. The repetition penalty IS removed for " +
+                    "coding turns either way, because that takes away a chat default neither of them has. " +
+                    "Default: not set.",
+                    "--code-exec-temperature 0.1"),
+                new OptionHelp("--code-exec-shell <path|name>",
+                    "Which shell to run commands through, when the host's own choice is wrong or absent. The " +
+                    "default is bash (then sh) on macOS and Linux, and PowerShell on Windows - where a bare " +
+                    "'bash' on PATH is refused on purpose, because it is the WSL launcher and would run the " +
+                    "command inside a VM the sandbox cannot reach. Point this at a real bash (Git Bash, MSYS2) " +
+                    "to use one there. Default: chosen by platform.",
+                    "--code-exec-shell /opt/homebrew/bin/bash"),
+                new OptionHelp("--code-exec-max-output <bytes>",
+                    "How much of a command's output is kept. What is dropped comes out of the MIDDLE, so the " +
+                    "end of a build or a test run - where the failure is - always survives. Default: 32768.",
+                    "--code-exec-max-output 65536"),
+                new OptionHelp("--code-exec-unconfined",
+                    "Run the model's commands even where the OS cannot confine them. This is the escape hatch " +
+                    "for a machine that is yours - on Windows, where a job object bounds CPU and memory but " +
+                    "cannot restrict one file or one socket, it is the only way to use the tool at all. It " +
+                    "means model-written commands run with your account's access to the filesystem and the " +
+                    "network. Deliberately CLI-only: the server refuses this flag, because its operator cannot " +
+                    "make that trade on behalf of everyone who can reach the port. Default: off.",
+                    "--code-exec --code-exec-unconfined"),
                 new OptionHelp("--think",
                     "Enable the model's thinking/reasoning mode on architectures that support it (e.g. Qwen3/3.5, " +
                     "Gemma 4). Default: off.",
@@ -187,18 +326,19 @@ namespace TensorSharp.Cli
                     "emitted). Repeat the flag for several. Default: none (the model's EOS token always stops).",
                     "--stop \"</s>\" --stop \"<|eot|>\""),
             }),
-            ("Speculative decoding", new[]
+            ("Speculative decoding (one name per option; the old --mtp-*/--spec-draft-* spellings error with a pointer here)", new[]
             {
                 new OptionHelp("--spec | --no-spec",
                     "Enable/disable speculative decoding: a drafter proposes the next few tokens and the trunk " +
                     "verifies them in ONE batched forward. Every emitted token still comes from a trunk row, so " +
-                    "this is a speed path only - the output is what plain decoding would have produced. Engages " +
-                    "on --input, --input-jsonl, --multi-turn-jsonl and --interactive. Must be passed BEFORE the " +
-                    "model loads (it is what tells glm-dsa to page its ~3 GiB NextN layer into VRAM, which also " +
-                    "leaves less room for the context). Not available under --tp N>1 on a checkpoint whose draft " +
-                    "block borrows the trunk's LM head, which includes GLM-5.2. Accepted as --mtp-spec / " +
-                    "--no-mtp-spec too. Default: off; env TS_SPEC (or TS_MTP_SPEC; glm-dsa also honours " +
-                    "TS_GLM_MTP=1/0, which overrides both).",
+                    "this is a speed path only - the output is what plain decoding would have produced. Needed " +
+                    "only for a drafter EMBEDDED in the checkpoint (GLM-5.2 / Qwen 3.6 NextN): it must be passed " +
+                    "BEFORE the model loads because it is what tells glm-dsa to page its ~3 GiB NextN layer into " +
+                    "VRAM (which also leaves less room for the context), so it stays an explicit choice. A " +
+                    "drafter named on --draft-model engages by itself. Engages on --input, --input-jsonl, " +
+                    "--multi-turn-jsonl and --interactive. Not available under --tp N>1 on a checkpoint whose " +
+                    "draft block borrows the trunk's LM head, which includes GLM-5.2. Default: off; env TS_SPEC " +
+                    "(glm-dsa also honours TS_GLM_MTP=1/0, which overrides it).",
                     "--model GLM-5.2-UD-IQ2_XXS-00001-of-00006.gguf --backend ggml_cuda --spec --chat"),
                 new OptionHelp("--spec-type <name>",
                     "Which speculation ALGORITHM to draft with. 'auto' (default) uses whatever drafter the " +
@@ -211,44 +351,30 @@ namespace TensorSharp.Cli
                     "prompt. Env: TS_SPEC_TYPE.",
                     "--spec --spec-type ngram --spec-draft 8"),
                 new OptionHelp("--spec-draft <N>",
-                    "Maximum tokens drafted per speculative step. Also sizes the native graph cache at load, so " +
-                    "it belongs on the same command line as --spec. Accepted as --mtp-draft too. Range: 1-64. " +
-                    "Default: 8; env TS_SPEC_DRAFT (or TS_MTP_DRAFT).",
+                    "Maximum tokens drafted per speculative step; a block drafter additionally clamps it to its " +
+                    "trained block size (5 for DSpark). Also sizes the native graph cache at load, so it belongs " +
+                    "on the same command line as --spec. Range: 1-64. Default: 8; env TS_SPEC_DRAFT.",
                     "--spec --spec-draft 4"),
                 new OptionHelp("--spec-pmin <f>",
-                    "Confidence gate below which drafting stops. What the number MEANS is the algorithm's " +
-                    "business, so each picks its own default rather than sharing one: 0.75 for a per-token head " +
-                    "(top-1 probability over its top-10 logits), 0.35 for a block drafter (the CUMULATIVE prefix " +
-                    "probability, so the same number is far stricter), 0 for n-gram (where it scales the required " +
-                    "match length instead). Accepted as --mtp-pmin too. Range: 0.0-1.0 (exclusive of 0). " +
-                    "Env: TS_SPEC_PMIN (or TS_MTP_PMIN).",
+                    "Confidence gate below which drafting stops; 0 disables the gate entirely. What the number " +
+                    "MEANS is the algorithm's business, so each picks its own default rather than sharing one: " +
+                    "0.75 for a per-token head (top-1 probability over its top-10 logits), 0.35 for a block " +
+                    "drafter (the CUMULATIVE prefix probability - the product of the confidence head's " +
+                    "per-position estimates - so the same number is far stricter), 0 for n-gram (where it scales " +
+                    "the required match length instead). Range: 0.0-1.0. Env: TS_SPEC_PMIN.",
                     "--spec --spec-draft 4 --spec-pmin 0.55"),
-                new OptionHelp("--spec-draft-model <path>",
-                    "Draft-head GGUF for architectures whose speculator weights ship as their own file " +
-                    "(Gemma 4's gemma4-assistant). Loaded onto the target at startup so --spec can engage. " +
-                    "Qwen 3.6 and GLM-5.2 embed their NextN block in the trunk GGUF and need no such flag. " +
-                    "Accepted as --mtp-draft-model too. Default: none; env TS_SPEC_DRAFT_MODEL.",
-                    "--spec --spec-draft-model gemma-4-12B-it-Q4_0-MTP.gguf"),
                 new OptionHelp("--draft-model <path>",
-                    "Block drafter GGUF that has to be resident before the model's layer split runs (DeepSeek " +
-                    "V4's DSpark support module, the DFlash / DFlash2 drafters for Muse-Glimmer and Qwen 3.8). "
-                    + "The drafter proposes a whole block of " +
-                    "tokens per step and the trunk verifies it in one batched forward. Naming the file IS the " +
-                    "request - such a drafter needs no --spec. Every emitted token is still drawn from a trunk " +
-                    "row - with argmax under a greedy config, with your sampler otherwise - so output is " +
-                    "unchanged either way. Default: none; env TS_DSV4_DSPARK.",
+                    "A drafter that ships as its own GGUF, whatever its kind: DeepSeek V4's DSpark support " +
+                    "module, the DFlash / DFlash2 drafters for Muse-Glimmer and Qwen 3.8, or Gemma 4's " +
+                    "per-token assistant head (gemma4-assistant). The file's own general.architecture decides " +
+                    "how it loads (a block drafter is fused before the layer split, a per-token head attaches " +
+                    "after) - never its file name, and never a second flag. Naming the file IS the request: " +
+                    "speculation turns on with it, no --spec needed, and an explicit --no-spec vetoes it. " +
+                    "Qwen 3.6 and GLM-5.2 embed their drafter in the trunk and use --spec instead. Every " +
+                    "emitted token is still drawn from a trunk row - with argmax under a greedy config, with " +
+                    "your sampler otherwise - so output is unchanged either way. Default: none; env " +
+                    "TS_SPEC_DRAFT_MODEL.",
                     "--draft-model DSpark-drafter-Q2K-Q8-0731.gguf --temperature 0"),
-                new OptionHelp("--spec-draft-n-max <N>",
-                    "Older spelling of --spec-draft, kept for block drafters. Cap on tokens drafted per " +
-                    "speculative block; a block drafter additionally clamps it to its trained block size " +
-                    "(5 for DSpark). Default: the drafter's block size.",
-                    "--spec-draft-n-max 3"),
-                new OptionHelp("--spec-draft-conf-min <p>",
-                    "Older spelling of --spec-pmin, kept for block drafters, where the gate is the CUMULATIVE " +
-                    "acceptance probability (the product of the confidence head's per-position estimates). Lower " +
-                    "drafts further and rolls back more; higher falls back to plain decode sooner. Range: " +
-                    "0.0-1.0. Default: 0.35 for a block drafter, 0.75 for a per-token head.",
-                    "--spec-draft-conf-min 0.5"),
             }),
             ("Interactive chat", new[]
             {
@@ -571,6 +697,39 @@ namespace TensorSharp.Cli
                     "--help"),
             }),
         };
+
+        /// <summary>
+        /// Every flag token named on the usage page, placeholders stripped.
+        /// Mirrors ServerUsage.DocumentedFlags: it exists so a test can assert
+        /// the page and the parsers agree — the direction that actually drifted
+        /// on the server was accepted-but-undocumented (all six --code-exec*
+        /// flags were parsed and working while --help never named them), and
+        /// the CLI's switch has no unknown-flag trap at all, so the page is the
+        /// only place a user can discover what exists.
+        /// </summary>
+        internal static IEnumerable<string> DocumentedFlags()
+        {
+            foreach (var (_, options) in Sections)
+            {
+                foreach (var opt in options)
+                {
+                    string flag = opt.Flag;
+                    int lt;
+                    while ((lt = flag.IndexOf('<')) >= 0)
+                    {
+                        int gt = flag.IndexOf('>', lt);
+                        if (gt < 0) { flag = flag.Substring(0, lt); break; }
+                        flag = flag.Remove(lt, gt - lt + 1);
+                    }
+                    foreach (string part in flag.Split('|'))
+                    {
+                        string token = part.Trim();
+                        if (token.StartsWith("--", StringComparison.Ordinal))
+                            yield return token;
+                    }
+                }
+            }
+        }
 
         public static void PrintUsage(TextWriter writer)
         {

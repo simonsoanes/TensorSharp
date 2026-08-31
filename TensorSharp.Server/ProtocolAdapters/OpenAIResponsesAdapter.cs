@@ -16,7 +16,10 @@ using Microsoft.Extensions.Logging;
 using TensorSharp.Models;
 using TensorSharp.Runtime;
 using TensorSharp.Runtime.Logging;
+using TensorSharp.AgentHost.CodeExec;
+using TensorSharp.AgentHost.Skills;
 using TensorSharp.Server.Hosting;
+using TensorSharp.Server.Skills;
 using TensorSharp.Server.RequestParsers;
 using TensorSharp.Server.ResponseSerializers;
 using TensorSharp.Server.Responses;
@@ -40,6 +43,8 @@ namespace TensorSharp.Server.ProtocolAdapters
         private readonly InferenceQueue _queue;
         private readonly ServerHostingOptions _options;
         private readonly UploadStoragePolicy _uploads;
+        private readonly SkillRegistry _skills;
+        private readonly ICodeRunner? _codeRunner;
         private readonly ILoggerFactory _loggerFactory;
         private readonly IResponsesStore _store;
 
@@ -48,6 +53,8 @@ namespace TensorSharp.Server.ProtocolAdapters
             InferenceQueue queue,
             ServerHostingOptions options,
             UploadStoragePolicy uploads,
+            SkillRegistry skills,
+            ICodeRunner? codeRunner,
             ILoggerFactory loggerFactory,
             IResponsesStore store)
         {
@@ -55,6 +62,8 @@ namespace TensorSharp.Server.ProtocolAdapters
             _queue = queue ?? throw new ArgumentNullException(nameof(queue));
             _options = options ?? throw new ArgumentNullException(nameof(options));
             _uploads = uploads ?? throw new ArgumentNullException(nameof(uploads));
+            _skills = skills ?? throw new ArgumentNullException(nameof(skills));
+            _codeRunner = codeRunner;
             _loggerFactory = loggerFactory ?? throw new ArgumentNullException(nameof(loggerFactory));
             _store = store ?? throw new ArgumentNullException(nameof(store));
         }
@@ -116,7 +125,7 @@ namespace TensorSharp.Server.ProtocolAdapters
             List<ChatMessage> messages;
             try
             {
-                messages = ChatMessageParser.ParseResponsesInput(inputEl, instructions, _uploads);
+                messages = ChatMessageParser.ParseResponsesInput(inputEl, instructions, _uploads, logger);
             }
             catch (UploadLimitExceededException ex)
             {
@@ -127,13 +136,23 @@ namespace TensorSharp.Server.ProtocolAdapters
             }
             var tools = ToolFunctionParser.ParseOpenAIResponses(body);
             bool enableThinking = body.TryGetProperty("reasoning", out var reasoningEl) && reasoningEl.ValueKind == JsonValueKind.Object;
+            var requestedSkills = SkillSelectionParser.Parse(body);
 
             string requestId = OpenAIResponsesFactory.NewResponseId();
 
             string lastUserContent = LoggingExtensions.SanitizeForLogFull(messages.LastOrDefault(m => m.Role == "user")?.Content ?? string.Empty);
             logger.LogInformation(LogEventIds.ChatStarted,
-                "/v1/responses request: id={ResponseId} model={Model} stream={Stream} maxOutputTokens={MaxOutputTokens} messages={Messages} tools={Tools} thinking={Thinking} userInput=\"{LastUser}\"",
-                requestId, modelName, stream, maxOutputTokens, messages.Count, tools?.Count ?? 0, enableThinking, lastUserContent);
+                "/v1/responses request: id={ResponseId} model={Model} stream={Stream} maxOutputTokens={MaxOutputTokens} messages={Messages} tools={Tools} skills={Skills} thinking={Thinking} userInput=\"{LastUser}\"",
+                requestId, modelName, stream, maxOutputTokens, messages.Count, tools?.Count ?? 0,
+                requestedSkills?.Count ?? 0, enableThinking, lastUserContent);
+
+            if (requestedSkills is { Count: > 0 } && !_options.SkillsEnabled)
+            {
+                logger.LogWarning(LogEventIds.HttpRequestRejected,
+                    "/v1/responses rejected: skills requested but disabled (id={ResponseId})", requestId);
+                await WriteErrorAsync(ctx, 400, "Agent skills are disabled on this server (--no-skills).");
+                return;
+            }
 
             if (!OpenAIResponseFormatParser.TryParseResponsesText(body, out StructuredOutputFormat responseFormat, out string formatError))
             {
@@ -142,22 +161,52 @@ namespace TensorSharp.Server.ProtocolAdapters
                 return;
             }
 
+            // The compatibility check sees the CLIENT's tools only; the built-in skill
+            // tools are added after it, and are suppressed entirely for a structured
+            // request (see SkillRequestPlan.Create's allowTools).
             if (responseFormat != null && !await ValidateStructuredOutputCompatibilityAsync(ctx, responseFormat, enableThinking, tools))
                 return;
 
+            var skillPlan = SkillRequestPlan.Create(
+                _skills, requestedSkills, SkillSelectionParser.ParseDiscovery(body), tools,
+                _svc.Architecture, _svc.ContextTokens, _options, out var unknownSkills,
+                allowTools: responseFormat == null, codeRunner: _codeRunner, logger: logger);
+
+            if (unknownSkills.Count > 0)
+            {
+                logger.LogWarning(LogEventIds.HttpRequestRejected,
+                    "/v1/responses rejected: unknown skills {Unknown} (id={ResponseId})",
+                    string.Join(",", unknownSkills), requestId);
+                await WriteErrorAsync(ctx, 400,
+                    $"No skill called '{unknownSkills[0]}' is installed. GET /v1/skills lists what this server has.");
+                return;
+            }
+
+            var effectiveTools = skillPlan?.Tools ?? tools;
             var inferenceMessages = StructuredOutputPrompt.Apply(messages, responseFormat);
+            if (skillPlan != null)
+            {
+                inferenceMessages = skillPlan.Apply(inferenceMessages);
+                logger.LogInformation(LogEventIds.SkillSelected,
+                    "/v1/responses skills: id={ResponseId} selected={Selected} announced={Announced} inlined={Inlined} catalog={Catalog} tools={ToolsOffered}",
+                    requestId, skillPlan.DescribeSelection(), skillPlan.Prompt.Deferred.Count,
+                    skillPlan.Prompt.Inlined.Count,
+                    skillPlan.Prompt.Catalog.Count, skillPlan.ToolsOffered);
+            }
 
             using var ticket = _queue.Enqueue(ctx.RequestAborted);
 
             if (stream)
             {
                 await StreamResponseAsync(ctx, requestId, modelName, instructions, maxOutputTokens,
-                    inferenceMessages, samplingConfig, tools, enableThinking, responseFormat, store, ticket);
+                    inferenceMessages, samplingConfig, effectiveTools, enableThinking, responseFormat, store, ticket,
+                    skillPlan, logger);
             }
             else
             {
                 await CompleteSyncAsync(ctx, requestId, modelName, instructions, maxOutputTokens,
-                    inferenceMessages, samplingConfig, tools, enableThinking, responseFormat, store, ticket);
+                    inferenceMessages, samplingConfig, effectiveTools, enableThinking, responseFormat, store, ticket,
+                    skillPlan, logger);
             }
         }
 
@@ -217,7 +266,9 @@ namespace TensorSharp.Server.ProtocolAdapters
             bool enableThinking,
             StructuredOutputFormat responseFormat,
             bool store,
-            QueueTicket ticket)
+            QueueTicket ticket,
+            SkillRequestPlan skillPlan,
+            ILogger skillLogger)
         {
             await ticket.WaitUntilReadyAsync();
 
@@ -228,16 +279,16 @@ namespace TensorSharp.Server.ProtocolAdapters
                 return;
             }
 
-            var sb = new StringBuilder();
+            var collector = new ChatStreamCollector();
             int promptTokens = 0, evalTokens = 0, kvReusedTokens = 0;
             string pipelineFinishReason = null;
 
             await foreach (var update
-                in _svc.ChatStreamWithMetricsAsync(inferenceMessages, maxOutputTokens, ctx.RequestAborted, samplingConfig, tools, enableThinking))
+                in _svc.ChatStreamWithSkillsAsync(inferenceMessages, maxOutputTokens, ctx.RequestAborted, samplingConfig, tools, enableThinking, skillPlan, skillLogger))
             {
                 if (!update.Done)
                 {
-                    sb.Append(update.Piece);
+                    collector.Add(update);
                 }
                 else
                 {
@@ -254,7 +305,7 @@ namespace TensorSharp.Server.ProtocolAdapters
             var (status, incompleteReason) = FinishReasonMapper.ToResponsesStatus(pipelineFinishReason);
             string itemStatus = status == FinishReasonMapper.ResponsesIncomplete ? "incomplete" : "completed";
 
-            string rawOutput = sb.ToString();
+            string rawOutput = collector.PlainText();
             bool useParser = enableThinking || (tools != null && tools.Count > 0) || OutputParserFactory.IsAlwaysRequired(_svc.Architecture);
             var output = new List<object>();
 
@@ -268,11 +319,9 @@ namespace TensorSharp.Server.ProtocolAdapters
                 }
                 output.Add(OpenAIResponsesFactory.OutputMessageItem(OpenAIResponsesFactory.NewMessageItemId(), normalized.NormalizedContent, itemStatus));
             }
-            else if (useParser)
+            else if (useParser || collector.IsParsed)
             {
-                var parser = OutputParserFactory.Create(_svc.Architecture);
-                parser.Init(enableThinking, tools);
-                var parsed = parser.Add(rawOutput, true);
+                var parsed = collector.Resolve(_svc.Architecture, enableThinking, tools);
 
                 if (!string.IsNullOrEmpty(parsed.Content))
                     output.Add(OpenAIResponsesFactory.OutputMessageItem(OpenAIResponsesFactory.NewMessageItemId(), parsed.Content, itemStatus));
@@ -314,7 +363,9 @@ namespace TensorSharp.Server.ProtocolAdapters
             bool enableThinking,
             StructuredOutputFormat responseFormat,
             bool store,
-            QueueTicket ticket)
+            QueueTicket ticket,
+            SkillRequestPlan skillPlan,
+            ILogger skillLogger)
         {
             await ticket.WaitUntilReadyAsync();
             SseWriter.ApplyHeaders(ctx.Response);
@@ -348,6 +399,10 @@ namespace TensorSharp.Server.ProtocolAdapters
             int outputIndex = 0;
             int promptTokens = 0, evalTokens = 0, kvReusedTokens = 0;
             string pipelineFinishReason = null;
+            // Set when the skills loop hands over already-separated pieces (see
+            // SkillChatLoop). `parser` is bypassed for those, so it must not be flushed
+            // at the end either.
+            bool sawParsedUpdate = false;
 
             async Task EmitDeltaAsync(string chunk)
             {
@@ -369,10 +424,26 @@ namespace TensorSharp.Server.ProtocolAdapters
             }
 
             await foreach (var update
-                in _svc.ChatStreamWithMetricsAsync(inferenceMessages, maxOutputTokens, ctx.RequestAborted, samplingConfig, tools, enableThinking))
+                in _svc.ChatStreamWithSkillsAsync(inferenceMessages, maxOutputTokens, ctx.RequestAborted, samplingConfig, tools, enableThinking, skillPlan, skillLogger))
             {
                 if (!update.Done)
                 {
+                    if (update.IsParsed)
+                    {
+                        // Pre-separated by the skills loop: the tool markup our parser
+                        // would look for is already gone. (Reasoning is dropped here for
+                        // the same reason the parsed branch below drops it — this API
+                        // surfaces no reasoning item.)
+                        sawParsedUpdate = true;
+                        if (update.ParsedToolCalls is { Count: > 0 })
+                            toolCalls.AddRange(update.ParsedToolCalls);
+                        if (bufferForStructured)
+                            buffer.Append(update.Piece);
+                        else
+                            await EmitDeltaAsync(update.Piece);
+                        continue;
+                    }
+
                     if (bufferForStructured)
                     {
                         buffer.Append(update.Piece);
@@ -418,7 +489,7 @@ namespace TensorSharp.Server.ProtocolAdapters
 
                 await EmitDeltaAsync(normalized.NormalizedContent);
             }
-            else if (parser != null)
+            else if (parser != null && !sawParsedUpdate)
             {
                 var finalParsed = parser.Add("", true);
                 if (finalParsed.ToolCalls != null && finalParsed.ToolCalls.Count > 0)

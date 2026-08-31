@@ -17,6 +17,7 @@
 // draft/verify core requires.
 using System;
 using TensorSharp.GGML;
+using TensorSharp.Runtime.Speculative;
 
 namespace TensorSharp.Models
 {
@@ -27,15 +28,20 @@ namespace TensorSharp.Models
         /// The draft block is a whole extra 256-expert decoder layer (~3 GiB of
         /// GLM-5.2 at IQ2_XXS, and it competes with the KV cache for the same
         /// VRAM the loader sizes the context against), so it is only paged in
-        /// when it is going to be used. <c>--mtp-spec</c> sets TS_MTP_SPEC before
-        /// the startup model loads; TS_GLM_MTP overrides either way for A/B runs.
+        /// when it is going to be used. <c>--spec</c> sets TS_SPEC and the legacy
+        /// TS_MTP_SPEC before the startup model loads; both are honoured here so
+        /// a deployment exporting the documented TS_SPEC directly does not get a
+        /// scheduler that believes speculation is on while the loader never paged
+        /// the block in. TS_GLM_MTP overrides either way for A/B runs.
         /// </summary>
         private static bool NativeMtpRequested()
         {
             string glm = Environment.GetEnvironmentVariable("TS_GLM_MTP");
             if (!string.IsNullOrEmpty(glm))
                 return glm != "0";
-            string spec = Environment.GetEnvironmentVariable("TS_MTP_SPEC");
+            string spec = Environment.GetEnvironmentVariable(SpeculationEnvVars.Enabled);
+            if (string.IsNullOrEmpty(spec))
+                spec = Environment.GetEnvironmentVariable(SpeculationEnvVars.LegacyEnabled);
             return !string.IsNullOrEmpty(spec) && spec != "0";
         }
 

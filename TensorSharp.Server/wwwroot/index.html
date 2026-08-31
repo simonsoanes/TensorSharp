@@ -838,6 +838,256 @@ button.primary:hover { background: var(--accent-hover); }
   justify-content: flex-end;
   margin-top: 8px;
 }
+
+/* ---- Agent Skills -------------------------------------------------------
+   The pill reuses .model-value; the manager reuses .modal-overlay/.modal and
+   only widens them, and the selected-skill chips reuse .attachment-chip. */
+
+.skills-pill {
+  cursor: pointer;
+  font-family: inherit;
+  gap: 6px;
+}
+
+.skills-pill:hover { background: #333; border-color: #444; }
+
+/* An empty chip strip must not reserve its margin above the composer. */
+#skill-chips:empty { display: none; }
+
+.modal.skills-modal {
+  min-width: min(640px, 92vw);
+  max-width: min(640px, 92vw);
+  width: 640px;
+  max-height: 84vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.skills-hint {
+  font-size: 12px;
+  color: var(--text2);
+  line-height: 1.5;
+}
+
+.skills-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.skills-toolbar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.skills-toolbar input[type="checkbox"] {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.skills-notice {
+  font-size: 12px;
+  color: var(--text2);
+  line-height: 1.5;
+  margin: 10px 0;
+  word-break: break-word;
+}
+
+.skills-errors {
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--text2);
+  line-height: 1.5;
+  max-height: 130px;
+  overflow-y: auto;
+}
+
+.skills-error-title {
+  color: var(--danger);
+  margin-bottom: 4px;
+}
+
+.skills-error-row { word-break: break-word; }
+
+.skills-list {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface2);
+  /* Owns the gap to whatever precedes it, since the toolbar, the notice and the
+     error block are each hidden when they have nothing to say. */
+  margin-top: 12px;
+  max-height: 46vh;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.skill-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.skill-row:last-child { border-bottom: none; }
+.skill-row:hover { background: #333; }
+
+.skill-row input[type="checkbox"] {
+  margin-top: 3px;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.skill-row-body { flex: 1; min-width: 0; }
+
+.skill-name {
+  display: block;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  word-break: break-word;
+}
+
+.skill-origin {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 7px;
+  margin-left: 6px;
+  font-size: 10px;
+  color: var(--text2);
+  white-space: nowrap;
+}
+
+/* Descriptions are free text from SKILL.md, so clamp them and keep the full
+   text in the row's title attribute. */
+.skill-desc {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text2);
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.skill-meta {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text2);
+}
+
+.skill-warning {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text2);
+  word-break: break-word;
+}
+
+.skill-delete {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text2);
+  padding: 2px 9px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.skill-delete:hover {
+  background: transparent;
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+/* Skill trace: the .thinking-block idiom in the neutral surface palette. */
+.skill-block {
+  background: var(--surface2);
+  border-color: var(--border);
+}
+
+.skill-block .thinking-header { color: var(--text2); }
+.skill-block .thinking-header:hover { background: #333; }
+
+.skill-block .thinking-content {
+  border-top-color: var(--border);
+  color: var(--text2);
+  white-space: normal;
+}
+
+.skill-step-line { word-break: break-word; }
+.skill-step-line.failed { color: var(--danger); }
+
+/* Live tool-call progress: visible in the header while the trace is collapsed. */
+.skill-live { color: var(--text2); font-size: 0.85em; font-weight: normal; }
+
+/* The draft of a tool call as the model writes it, inside the collapsed trace. */
+.tool-draft {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.8em;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Always-visible tail of the code being written / the command being run,
+   directly under the Skills header — live detail without expanding the trace. */
+.tool-live-preview {
+  margin: 4px 8px 6px;
+  padding: 5px 8px;
+  max-height: 5.6em;
+  overflow-y: auto;
+  border-left: 2px solid var(--accent);
+  background: var(--surface2);
+  border-radius: 4px;
+  color: var(--text2);
+  font-size: 0.78em;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Files a shell command produced: visible download chips on the reply itself,
+   so getting the file never depends on the model repeating the link in prose. */
+.artifact-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.artifact-files a {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface2);
+  color: var(--accent);
+  font-size: 0.85em;
+  text-decoration: none;
+  word-break: break-all;
+}
+.artifact-files a:hover { border-color: var(--accent); }
+.artifact-files .artifact-size { color: var(--text2); }
+
+/* A download link the model wrote into its answer, made clickable at render. */
+.bubble-text a.artifact-link { color: var(--accent); }
 </style>
 </head>
 <body>
@@ -863,12 +1113,14 @@ button.primary:hover { background: var(--accent-hover); }
 
   <div id="input-area">
     <div class="attachments" id="attachments"></div>
+    <div class="attachments" id="skill-chips"></div>
     <div class="model-switcher" id="model-switcher">
       <label class="reasoning-toggle" title="Enable reasoning / chain-of-thought output">
         <input type="checkbox" id="reasoning-toggle" checked>
         <span class="toggle-track"></span>
         <span>Reasoning</span>
       </label>
+      <button type="button" class="model-value skills-pill" id="skills-pill" style="display:none" onclick="openSkillsModal()" title="Agent Skills the model can use">&#x1F9E9; Skills</button>
     </div>
     <div class="input-row">
       <div class="input-wrapper">
@@ -880,6 +1132,26 @@ button.primary:hover { background: var(--accent-hover); }
       </div>
     </div>
     <input type="file" id="file-input" multiple accept="image/*,video/*,audio/*,.pdf,.heic,.heif,.txt,.csv,.json,.xml,.md,.log,.py,.js,.ts,.cs,.java,.cpp,.c,.h,.html,.css,.yaml,.yml,.toml,.ini,.cfg,.sh,.bat,.ps1,.rb,.go,.rs,.swift,.kt,.sql,.r,.m,.tex,.rtf" onchange="handleFileSelect(event)">
+  </div>
+</div>
+
+<input type="file" id="skill-zip-input" accept=".zip" style="display:none" onchange="handleSkillZipSelect(event)">
+
+<div class="modal-overlay" id="skills-modal" onclick="onSkillsOverlayClick(event)">
+  <div class="modal skills-modal">
+    <h2>&#x1F9E9; Agent Skills</h2>
+    <div class="skills-hint">Selected skills are described to the model up front; it then reads their bundled files on demand.</div>
+    <div class="skills-toolbar" id="skills-toolbar" style="display:none">
+      <button type="button" onclick="document.getElementById('skill-zip-input').click()">&#x2B06; Install .zip</button>
+      <label title="Replace a skill of the same name if it is already installed"><input type="checkbox" id="skill-overwrite"> <span class="skills-hint">Overwrite existing</span></label>
+    </div>
+    <div class="skills-notice" id="skills-notice" style="display:none"></div>
+    <div class="skills-errors" id="skills-errors" style="display:none"></div>
+    <div class="skills-list" id="skills-list"></div>
+    <div class="actions">
+      <button type="button" onclick="closeSkillsModal()">Cancel</button>
+      <button type="button" class="primary" onclick="applySkillsModal()">Apply</button>
+    </div>
   </div>
 </div>
 
@@ -904,6 +1176,19 @@ let currentVideoCaps = null;
 // Architectures whose /api/models 'architecture' id means "this model generates video".
 // The id comes from GGUF metadata, so it is matched rather than renamed.
 const VIDEO_ARCHITECTURES = new Set(['wan', 'wan2.1', 'wan2.2', 'minimax-h3']);
+// Agent Skills capability block from /api/models, or null on a server that has no
+// skills support at all. Every read is guarded, so an older server degrades to
+// "no Skills control" rather than to a broken page.
+let currentSkillsCaps = null;
+// Skill names sent with the next chat request.
+let selectedSkills = [];
+// Last /api/skills payload. The modal's inline handlers address rows by index into
+// skillsRoster, so no attacker-controlled name is ever spliced into an attribute.
+let skillsRoster = [];
+let skillsErrors = [];
+let skillsInstallable = false;
+// Draft selection while the manager is open: Apply commits it, Cancel drops it.
+let pendingSkillSelection = null;
 let needsCacheReset = false;
 let shouldAutoScroll = true;
 let serverDefaultMaxTokens = 20000;
@@ -1017,6 +1302,9 @@ async function fetchServerState() {
     const data = await res.json();
     serverDefaultMaxTokens = data.defaultMaxTokens || 20000;
     updateStatusBadge(data);
+    // Nullable on purpose: a server without the feature omits the block entirely.
+    currentSkillsCaps = (data && typeof data.skills === 'object' && data.skills) ? data.skills : null;
+    updateSkillsControl();
     renderEmptyState();
     await createSession();
     return data;
@@ -1142,6 +1430,570 @@ function removeAttachment(idx) {
   renderAttachments();
 }
 
+// ---- Agent Skills --------------------------------------------------------
+// Every string below (skill name, description, file path, warning, load error)
+// comes from SKILL.md frontmatter or from a filename inside an uploaded ZIP, so
+// it is attacker-controlled: these renderers build nodes and assign textContent
+// instead of interpolating into innerHTML.
+
+const SKILL_STEP_LABELS = { skills_list: 'List', skills_read: 'Read', skills_run: 'Run' };
+
+function skillNameOf(sk) {
+  if (!sk) return '';
+  if (typeof sk.name === 'string' && sk.name) return sk.name;
+  if (typeof sk.id === 'string' && sk.id) return sk.id;
+  return '';
+}
+
+function formatSkillBytes(n) {
+  if (typeof n !== 'number' || !isFinite(n) || n < 0) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+// Both error shapes the server can produce: {"error":"..."} outside /v1, and
+// {"error":{"message":"..."}} under it.
+function skillsRequestError(res, data) {
+  if (data && typeof data.error === 'string' && data.error) return data.error;
+  if (data && data.error && typeof data.error.message === 'string' && data.error.message) return data.error.message;
+  return 'HTTP ' + (res ? res.status : '?');
+}
+
+function updateSkillsControl() {
+  const pill = document.getElementById('skills-pill');
+  if (!pill) return;
+  const enabled = !!(currentSkillsCaps && currentSkillsCaps.enabled);
+  if (!enabled) {
+    pill.style.display = 'none';
+    if (selectedSkills.length > 0) {
+      // The server no longer offers skills, so a stale selection would keep
+      // changing the system prompt for a feature that is gone.
+      selectedSkills = [];
+      needsCacheReset = true;
+      renderSkillChips();
+    }
+    return;
+  }
+  pill.style.display = '';
+  pill.textContent = selectedSkills.length > 0
+    ? '\u{1F9E9} Skills: ' + selectedSkills.length
+    : '\u{1F9E9} Skills';
+  const count = typeof currentSkillsCaps.count === 'number' ? currentSkillsCaps.count : null;
+  pill.title = count === null
+    ? 'Agent Skills the model can use'
+    : count + (count === 1 ? ' skill' : ' skills') + ' available to the model';
+}
+
+function renderSkillChips() {
+  const host = document.getElementById('skill-chips');
+  if (!host) return;
+  host.innerHTML = '';
+  selectedSkills.forEach((name, idx) => {
+    const chip = document.createElement('div');
+    chip.className = 'attachment-chip';
+    const label = document.createElement('span');
+    label.textContent = '\u{1F9E9} ' + name;
+    chip.appendChild(label);
+    const remove = document.createElement('span');
+    remove.className = 'remove';
+    remove.textContent = '×';
+    remove.title = 'Remove this skill';
+    remove.setAttribute('onclick', 'removeSelectedSkill(' + idx + ')');
+    chip.appendChild(remove);
+    host.appendChild(chip);
+  });
+}
+
+function setSelectedSkills(names) {
+  const unique = [];
+  (Array.isArray(names) ? names : []).forEach(n => {
+    const name = String(n == null ? '' : n);
+    if (name && unique.indexOf(name) === -1) unique.push(name);
+  });
+  const changed = unique.length !== selectedSkills.length
+    || unique.some((n, i) => n !== selectedSkills[i]);
+  selectedSkills = unique;
+  if (changed) {
+    // The selection is rendered into the leading system message, so changing it
+    // changes the prompt prefix: the same invalidation class as an edit or a
+    // revert. Without this the server would silently reuse a mismatched KV cache.
+    needsCacheReset = true;
+  }
+  renderSkillChips();
+  updateSkillsControl();
+}
+
+function removeSelectedSkill(idx) {
+  const next = selectedSkills.slice();
+  next.splice(idx, 1);
+  setSelectedSkills(next);
+}
+
+function openSkillsModal() {
+  pendingSkillSelection = selectedSkills.slice();
+  const overlay = document.getElementById('skills-modal');
+  if (overlay) overlay.classList.add('visible');
+  setSkillsNotice('');
+  loadSkillsRoster();
+}
+
+function closeSkillsModal() {
+  const overlay = document.getElementById('skills-modal');
+  if (overlay) overlay.classList.remove('visible');
+  pendingSkillSelection = null;
+}
+
+function onSkillsOverlayClick(event) {
+  // Backdrop only: a click inside the dialog bubbles up here too.
+  if (event && event.target && event.target.id === 'skills-modal') closeSkillsModal();
+}
+
+function applySkillsModal() {
+  setSelectedSkills(Array.isArray(pendingSkillSelection) ? pendingSkillSelection : selectedSkills);
+  closeSkillsModal();
+}
+
+function setSkillsNotice(text) {
+  const el = document.getElementById('skills-notice');
+  if (!el) return;
+  el.textContent = text || '';
+  el.style.display = text ? '' : 'none';
+}
+
+function toggleSkillSelection(idx, checked) {
+  const name = skillNameOf(skillsRoster[idx]);
+  if (!name) return;
+  if (!Array.isArray(pendingSkillSelection)) pendingSkillSelection = selectedSkills.slice();
+  const at = pendingSkillSelection.indexOf(name);
+  if (checked && at === -1) pendingSkillSelection.push(name);
+  else if (!checked && at !== -1) pendingSkillSelection.splice(at, 1);
+}
+
+function setSkillsListMessage(text) {
+  const listEl = document.getElementById('skills-list');
+  if (!listEl) return;
+  listEl.innerHTML = '';
+  const row = document.createElement('div');
+  row.className = 'skill-row';
+  const body = document.createElement('div');
+  body.className = 'skill-row-body';
+  const msg = document.createElement('div');
+  msg.className = 'skill-desc';
+  msg.textContent = text;
+  body.appendChild(msg);
+  row.appendChild(body);
+  listEl.appendChild(row);
+}
+
+async function loadSkillsRoster() {
+  setSkillsListMessage('Loading skills…');
+  try {
+    const res = await fetch('/api/skills');
+    let data = null;
+    try { data = await res.json(); } catch {}
+    if (!res.ok) {
+      skillsRoster = [];
+      skillsErrors = [];
+      skillsInstallable = false;
+      setSkillsNotice('Could not load skills: ' + skillsRequestError(res, data));
+    } else {
+      skillsRoster = (data && Array.isArray(data.skills)) ? data.skills : [];
+      skillsErrors = (data && Array.isArray(data.errors)) ? data.errors : [];
+      skillsInstallable = !!(data && data.installable);
+      if (data && data.enabled === false) setSkillsNotice('Skills are disabled on this server.');
+    }
+  } catch (e) {
+    skillsRoster = [];
+    skillsErrors = [];
+    skillsInstallable = false;
+    setSkillsNotice('Could not load skills: ' + (e && e.message ? e.message : e));
+  }
+  renderSkillsModal();
+}
+
+function renderSkillsModal() {
+  const toolbar = document.getElementById('skills-toolbar');
+  if (toolbar) toolbar.style.display = skillsInstallable ? '' : 'none';
+  renderSkillsErrors();
+
+  const listEl = document.getElementById('skills-list');
+  if (!listEl) return;
+  if (skillsRoster.length === 0) {
+    setSkillsListMessage(skillsInstallable
+      ? 'No skills found. Install a .zip package to add one.'
+      : 'No skills found. Start the server with --skills-dir <path>.');
+    return;
+  }
+
+  const selected = Array.isArray(pendingSkillSelection) ? pendingSkillSelection : selectedSkills;
+  listEl.innerHTML = '';
+  skillsRoster.forEach((sk, idx) => listEl.appendChild(buildSkillRow(sk, idx, selected)));
+}
+
+function buildSkillRow(sk, idx, selected) {
+  const name = skillNameOf(sk);
+  const row = document.createElement('div');
+  row.className = 'skill-row';
+
+  const checkId = 'skill-check-' + idx;
+  const check = document.createElement('input');
+  check.type = 'checkbox';
+  check.id = checkId;
+  check.checked = !!name && selected.indexOf(name) !== -1;
+  check.disabled = !name;
+  check.setAttribute('onchange', 'toggleSkillSelection(' + idx + ', this.checked)');
+  row.appendChild(check);
+
+  const body = document.createElement('div');
+  body.className = 'skill-row-body';
+
+  const label = document.createElement('label');
+  label.className = 'skill-name';
+  label.htmlFor = checkId;
+  label.textContent = name || '(unnamed skill)';
+  const origin = typeof (sk && sk.origin) === 'string' ? sk.origin : '';
+  if (origin) {
+    const badge = document.createElement('span');
+    badge.className = 'skill-origin';
+    badge.textContent = origin;
+    label.appendChild(badge);
+  }
+  body.appendChild(label);
+
+  const description = (sk && typeof sk.description === 'string') ? sk.description : '';
+  if (description) {
+    const desc = document.createElement('div');
+    desc.className = 'skill-desc';
+    desc.textContent = description;
+    desc.title = description;   // clamped to two lines, so keep the full text here
+    body.appendChild(desc);
+  }
+
+  const metaParts = [];
+  const fileCount = (sk && Array.isArray(sk.files)) ? sk.files.length : 0;
+  metaParts.push(fileCount + (fileCount === 1 ? ' file' : ' files'));
+  const size = formatSkillBytes(sk && sk.bytes);
+  if (size) metaParts.push(size);
+  if (sk && typeof sk.compatibility === 'string' && sk.compatibility) metaParts.push(sk.compatibility);
+  if (sk && typeof sk.license === 'string' && sk.license) metaParts.push(sk.license);
+  const meta = document.createElement('div');
+  meta.className = 'skill-meta';
+  meta.textContent = metaParts.join(' · ');
+  body.appendChild(meta);
+
+  const warnings = (sk && Array.isArray(sk.warnings)) ? sk.warnings : [];
+  warnings.forEach(w => {
+    const warn = document.createElement('div');
+    warn.className = 'skill-warning';
+    warn.textContent = '⚠ ' + String(w == null ? '' : w);
+    body.appendChild(warn);
+  });
+
+  row.appendChild(body);
+
+  if (origin === 'installed' && name) {
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'skill-delete';
+    del.textContent = '×';
+    del.title = 'Delete this installed skill';
+    del.setAttribute('onclick', 'deleteSkill(' + idx + ')');
+    row.appendChild(del);
+  }
+
+  return row;
+}
+
+function renderSkillsErrors() {
+  const box = document.getElementById('skills-errors');
+  if (!box) return;
+  box.innerHTML = '';
+  if (skillsErrors.length === 0) {
+    box.style.display = 'none';
+    return;
+  }
+  const title = document.createElement('div');
+  title.className = 'skills-error-title';
+  title.textContent = skillsErrors.length + (skillsErrors.length === 1
+    ? ' skill failed to load'
+    : ' skills failed to load');
+  box.appendChild(title);
+  skillsErrors.forEach(err => {
+    const line = document.createElement('div');
+    line.className = 'skills-error-row';
+    const path = String((err && err.path) || '');
+    const message = String((err && err.message) || '');
+    line.textContent = path ? path + ': ' + message : message;
+    box.appendChild(line);
+  });
+  box.style.display = '';
+}
+
+function handleSkillZipSelect(event) {
+  const input = event && event.target;
+  if (!input) return;
+  const files = Array.from(input.files || []);
+  input.value = '';
+  if (files.length > 0) uploadSkillZip(files[0]);
+}
+
+async function uploadSkillZip(file) {
+  setSkillsNotice('Installing ' + file.name + '…');
+  const formData = new FormData();
+  formData.append('file', file);
+  const overwrite = document.getElementById('skill-overwrite');
+  if (overwrite && overwrite.checked) formData.append('overwrite', 'true');
+
+  try {
+    const res = await fetch('/api/skills', { method: 'POST', body: formData });
+    let data = null;
+    try { data = await res.json(); } catch {}
+    if (!res.ok) setSkillsNotice('Install failed: ' + skillsRequestError(res, data));
+    else setSkillsNotice('Installed ' + (skillNameOf(data) || file.name) + '.');
+  } catch (e) {
+    setSkillsNotice('Install failed: ' + (e && e.message ? e.message : e));
+  }
+  await loadSkillsRoster();
+}
+
+async function deleteSkill(idx) {
+  const name = skillNameOf(skillsRoster[idx]);
+  if (!name) return;
+  if (!confirm('Delete the installed skill "' + name + '"? Its files are removed from the server.')) return;
+
+  try {
+    const res = await fetch('/api/skills/' + encodeURIComponent(name), { method: 'DELETE' });
+    let data = null;
+    try { data = await res.json(); } catch {}
+    if (!res.ok) {
+      setSkillsNotice('Delete failed: ' + skillsRequestError(res, data));
+    } else {
+      setSkillsNotice('Deleted ' + name + '.');
+      if (Array.isArray(pendingSkillSelection)) {
+        pendingSkillSelection = pendingSkillSelection.filter(n => n !== name);
+      }
+      if (selectedSkills.indexOf(name) !== -1) {
+        setSelectedSkills(selectedSkills.filter(n => n !== name));
+      }
+    }
+  } catch (e) {
+    setSkillsNotice('Delete failed: ' + (e && e.message ? e.message : e));
+  }
+  await loadSkillsRoster();
+}
+
+// The collapsed Skills trace block above the reply, created on first use.
+function ensureSkillBlock(assistDiv) {
+  let block = assistDiv.querySelector('.skill-block');
+  if (!block) {
+    const bubbleText = assistDiv.querySelector('.bubble-text');
+    const bubble = assistDiv.querySelector('.bubble');
+    if (!bubbleText && !bubble) return null;
+    block = document.createElement('div');
+    block.className = 'thinking-block skill-block';
+    block.innerHTML = '<div class="thinking-header" onclick="toggleThinking(this)"><span class="arrow">&#x25B6;</span> <span class="skill-block-title">Skills</span> <span class="skill-live"></span></div><div class="thinking-content"></div>';
+    // Before the reply text, i.e. after any reasoning block already sitting there.
+    if (bubbleText && bubbleText.parentNode) bubbleText.parentNode.insertBefore(block, bubbleText);
+    else bubble.appendChild(block);
+  }
+  return block;
+}
+
+// Make a tool-call draft readable: Gemma frames string arguments with <|"|>,
+// and a JSON-shaped body (Qwen) carries the program with escaped newlines.
+// Display-only cleanup — nothing here is ever parsed or sent back.
+function cleanToolDraft(raw) {
+  let text = raw.replace(/<\|"\|>/g, '"');
+  if (text.trimStart().startsWith('{'))
+    text = text.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"');
+  return text;
+}
+
+// Live progress while the model WRITES a tool call and while the host RUNS it —
+// the two stretches where nothing else streams. Three surfaces, all visible with
+// the trace still collapsed: the header shows the state ("writing shell…") and,
+// for a shell call, data.detail is the first line of the command, truncated to 64 chars,
+// a small preview pane shows the last lines of the code as they are written and
+// what exactly is executing ("python · 2.1 KB"), and the full draft accumulates
+// inside the collapsed content for anyone who expands it.
+function updateToolProgress(assistDiv, data) {
+  const block = ensureSkillBlock(assistDiv);
+  if (!block) return;
+  const live = block.querySelector('.skill-live');
+  const content = block.querySelector('.thinking-content');
+  const label = data.tool ? String(data.tool) : 'tool call';
+
+  let preview = block.querySelector('.tool-live-preview');
+  function ensurePreview() {
+    if (!preview) {
+      preview = document.createElement('pre');
+      preview.className = 'tool-live-preview';
+      block.insertBefore(preview, content);
+    }
+    return preview;
+  }
+
+  if (data.tool_progress === 'writing') {
+    block._rawDraft = (block._rawDraft || '') + (data.text ? String(data.text) : '');
+    const cleaned = cleanToolDraft(block._rawDraft);
+
+    let draft = block.querySelector('.tool-draft');
+    if (!draft) {
+      draft = document.createElement('pre');
+      draft.className = 'tool-draft';
+      content.appendChild(draft);
+    }
+    draft.textContent = cleaned.length > 20000 ? cleaned.slice(-20000) : cleaned;
+
+    // The visible pane follows the last few lines being written, like a tail -f.
+    let tail = cleaned.slice(-400);
+    const firstBreak = tail.indexOf('\n');
+    if (firstBreak > 0 && firstBreak < tail.length - 1) tail = tail.slice(firstBreak + 1);
+    const pane = ensurePreview();
+    pane.textContent = tail;
+    pane.scrollTop = pane.scrollHeight;
+
+    if (live) live.textContent = '· writing ' + label + '… ' + formatArtifactBytes(block._rawDraft.length);
+  } else if (data.tool_progress === 'running') {
+    const secs = Math.round(Number(data.seconds) || 0);
+    const what = data.detail ? String(data.detail) : label;
+    if (live) live.textContent = '· running ' + label + '…' + (secs > 0 ? ' ' + secs + 's' : '');
+
+    // The tool's own stdout/stderr, streamed while it runs: pip's "Collecting
+    // reportlab", the program's prints. Full (capped) log goes into the
+    // expandable trace; the preview pane tails the last few lines.
+    if (data.text) {
+      block._runOutput = (block._runOutput || '') + String(data.text);
+      let out = block.querySelector('.tool-output');
+      if (!out) {
+        out = document.createElement('pre');
+        out.className = 'tool-draft tool-output';
+        content.appendChild(out);
+      }
+      out.textContent = block._runOutput.length > 20000
+        ? block._runOutput.slice(-20000) : block._runOutput;
+    }
+    const outTail = (block._runOutput || '').split('\n').slice(-6).join('\n').trimEnd();
+    const pane = ensurePreview();
+    pane.textContent = '⏵ running ' + what + (secs > 0 ? ' — ' + secs + 's' : '')
+      + (outTail ? '\n' + outTail : '');
+    pane.scrollTop = pane.scrollHeight;
+  } else if (data.tool_progress === 'finished') {
+    if (live) live.textContent = '';
+    if (preview) preview.remove();
+    block._rawDraft = '';
+    block._runOutput = '';
+  }
+}
+
+// One executed skill tool call, appended to a collapsed trace above the reply.
+function appendSkillStep(assistDiv, data) {
+  const block = ensureSkillBlock(assistDiv);
+  if (!block) return;
+
+  const step = String(data.skill_step || '');
+  // hasOwnProperty, so a step name like "constructor" cannot pull a label off
+  // Object.prototype and stringify a function into the trace.
+  const known = Object.prototype.hasOwnProperty.call(SKILL_STEP_LABELS, step);
+  const parts = [known ? SKILL_STEP_LABELS[step] : step];
+  if (data.skill) parts.push(String(data.skill));
+  if (data.detail) parts.push(String(data.detail));
+
+  const line = document.createElement('div');
+  line.className = 'skill-step-line';
+  let text = parts.join(' / ');
+  if (data.ok === false) {
+    text += ' — failed';
+    line.classList.add('failed');
+  }
+  line.textContent = text;
+
+  const content = block.querySelector('.thinking-content');
+  content.appendChild(line);
+  const count = content.childElementCount;
+  const title = block.querySelector('.skill-block-title');
+  if (title) title.textContent = 'Skills · ' + count + (count === 1 ? ' step' : ' steps');
+
+  if (Array.isArray(data.files) && data.files.length) appendArtifactFiles(assistDiv, data.files);
+}
+
+// Only this server's own artifact routes become hrefs; anything else in a frame
+// or in model prose stays inert text.
+const ARTIFACT_URL_PREFIX = '/api/code/artifacts/';
+
+function formatArtifactBytes(bytes) {
+  if (typeof bytes !== 'number' || !isFinite(bytes) || bytes < 0) return '';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+// Download chips for the files a shell command produced. Deliberately fed by the
+// skill_step SSE frame, not by the model's answer: the file must be reachable
+// even when the model forgets (or garbles) the link.
+function appendArtifactFiles(assistDiv, files) {
+  const bubble = assistDiv.querySelector('.bubble');
+  if (!bubble) return;
+  let box = assistDiv.querySelector('.artifact-files');
+  if (!box) {
+    box = document.createElement('div');
+    box.className = 'artifact-files';
+    bubble.appendChild(box);
+  }
+  files.forEach(f => {
+    const url = String((f && f.url) || '');
+    if (!url.startsWith(ARTIFACT_URL_PREFIX)) return;
+    if (box.querySelector(`a[href="${CSS.escape(url)}"]`)) return;   // one chip per file
+    const a = document.createElement('a');
+    a.href = url;
+    a.setAttribute('download', '');
+    a.textContent = '⭳ ' + String((f && f.name) || url.split('/').pop());
+    const size = formatArtifactBytes(f && f.bytes);
+    if (size) {
+      const span = document.createElement('span');
+      span.className = 'artifact-size';
+      span.textContent = size;
+      a.appendChild(span);
+    }
+    box.appendChild(a);
+  });
+}
+
+// Turn the artifact links the model wrote into its answer into real anchors.
+// Handles the markdown form "[name](/api/code/artifacts/...)" and a bare or
+// backticked URL. Built with DOM nodes, never innerHTML: everything except the
+// vetted href stays plain text.
+function renderArtifactLinks(el, text) {
+  const pattern = /\[([^\]\n]{1,200})\]\((\/api\/code\/artifacts\/[^\s)]+)\)|`?(\/api\/code\/artifacts\/[^\s`")\]]+)`?/g;
+  let last = 0, match, found = false;
+  const nodes = [];
+  while ((match = pattern.exec(text)) !== null) {
+    let url = match[2] || match[3];
+    let consumed = match[0].length;
+    if (match[3]) {
+      // A bare URL at the end of a sentence drags its punctuation along; the
+      // markdown form has explicit delimiters and needs no trimming.
+      const trimmed = url.replace(/[.,;:!?]+$/, '');
+      consumed -= (url.length - trimmed.length);
+      url = trimmed;
+    }
+    if (!url || !url.startsWith(ARTIFACT_URL_PREFIX)) continue;
+    found = true;
+    if (match.index > last) nodes.push(document.createTextNode(text.slice(last, match.index)));
+    const a = document.createElement('a');
+    a.className = 'artifact-link';
+    a.href = url;
+    a.setAttribute('download', '');
+    a.textContent = match[1] || url.split('/').pop();
+    nodes.push(a);
+    last = match.index + consumed;
+  }
+  if (!found) { el.textContent = text; return; }
+  if (last < text.length) nodes.push(document.createTextNode(text.slice(last)));
+  el.replaceChildren(...nodes);
+}
+
 async function sendMessage() {
   if (isGenerating) return;
   const text = messageInput.value.trim();
@@ -1159,6 +2011,7 @@ async function sendMessage() {
   const videoFilePaths = [];
   const audioPaths = [];
   const textFilePaths = [];
+  const textFileNames = [];
   let isVideo = false;
   const textParts = [];
   const attachmentsCopy = [...pendingAttachments];
@@ -1175,17 +2028,19 @@ async function sendMessage() {
       audioPaths.push(att.file);
     } else if (att.mediaType === 'text' && att.textContent) {
       textParts.push(`[File: ${att.fileName}]\n${att.textContent}\n[End of file]`);
-      if (att.file) textFilePaths.push(att.file);
+      // The display name rides along with the stored name (same order) so
+      // the shell tool can stage the file under the name the model sees here.
+      if (att.file) { textFilePaths.push(att.file); textFileNames.push(att.fileName || att.file); }
     } else if (att.mediaType === 'pdf') {
       if (att.textContent) {
         // Born-digital PDF: inline the extracted text.
         textParts.push(`[File: ${att.fileName}]\n${att.textContent}\n[End of file]`);
-        if (att.file) textFilePaths.push(att.file);
+        if (att.file) { textFilePaths.push(att.file); textFileNames.push(att.fileName || att.file); }
       } else if (att.frames && att.frames.length) {
         // Scanned / image-only PDF: send its page images to the vision model.
         // Keep the original PDF file as document provenance too, so the server
         // never silently trims pages if the expanded vision prompt is too large.
-        if (att.file) textFilePaths.push(att.file);
+        if (att.file) { textFilePaths.push(att.file); textFileNames.push(att.fileName || att.file); }
         att.frames.forEach(f => imagePaths.push(f));
       }
     }
@@ -1201,6 +2056,7 @@ async function sendMessage() {
   if (videoFilePaths.length > 0) msg.videoFilePaths = videoFilePaths;
   if (audioPaths.length > 0) msg.audioPaths = audioPaths;
   if (textFilePaths.length > 0) msg.textFilePaths = textFilePaths;
+  if (textFileNames.length > 0) msg.textFileNames = textFileNames;
   if (isVideo) msg.isVideo = true;
 
   chatHistory.push(msg);
@@ -1453,6 +2309,9 @@ async function requestAssistantResponse() {
   let fullText = '';
   let fullThinking = '';
   let wasAborted = false;
+  // Names of tool calls the server handed back because nothing in process answered
+  // them. This page has no tool implementations, so they are reported, never run.
+  let forwardedToolCalls = [];
 
   try {
     if (!currentSessionId) {
@@ -1477,6 +2336,9 @@ async function requestAssistantResponse() {
     const chatPayload = { messages: chatHistory, maxTokens: serverDefaultMaxTokens, think: reasoningOn };
     if (currentSessionId) {
       chatPayload.sessionId = currentSessionId;
+    }
+    if (selectedSkills.length > 0) {
+      chatPayload.skills = selectedSkills.slice();
     }
     if (needsCacheReset) {
       chatPayload.newChat = true;
@@ -1575,6 +2437,28 @@ async function requestAssistantResponse() {
             tc.textContent += data.thinking;
             if (reasoningOn) scrollChatToBottom();
           }
+          if (data.skill_step) {
+            // One executed skill tool call. Frames are discriminated by key, so a
+            // server without skills simply never sends this one.
+            appendSkillStep(assistDiv, data);
+            scrollChatToBottom();
+          }
+          if (data.tool_progress) {
+            // Live "writing code… / running…" state for an in-process tool call.
+            updateToolProgress(assistDiv, data);
+            scrollChatToBottom();
+          }
+          if (data.tool_calls) {
+            // A tool call the SERVER could not answer and handed back. This page
+            // declares no tools of its own, so there is nothing here to run it — and
+            // for a long time nothing here to show it either: the frame matched none
+            // of the key checks and fell into the catch below, so a reply whose every
+            // word was inside the reasoning block rendered as an empty bubble and the
+            // chat simply stopped. Say what happened instead of nothing.
+            forwardedToolCalls = forwardedToolCalls.concat(
+              data.tool_calls.map(c => c && c.name).filter(Boolean));
+            scrollChatToBottom();
+          }
           if (data.token) {
             fullText += data.token;
             bubbleText.textContent = fullText;
@@ -1596,6 +2480,22 @@ async function requestAssistantResponse() {
               bubbleText.textContent = 'Error: ' + data.error;
               statsDiv.textContent = 'Inference failed';
             } else {
+              // A turn that produced no answer at all must never render as a blank
+              // bubble. It happens when the model spent the whole reply asking for a
+              // tool nobody can run, and the silence is indistinguishable from a hang:
+              // the user's only move is to retry the identical prompt and watch it
+              // happen again.
+              if (!fullText) {
+                bubbleText.textContent = forwardedToolCalls.length > 0
+                  ? 'No answer was produced: the model asked for '
+                    + forwardedToolCalls.join(', ')
+                    + ', which this page cannot run. Try rephrasing, or ask it to answer directly.'
+                  : 'No answer was produced. Try sending the message again, or rephrasing it.';
+                bubbleText.style.opacity = '0.75';
+              }
+              // Streaming renders plain text; once the answer is complete, any
+              // artifact download links the model wrote become clickable.
+              if (fullText) renderArtifactLinks(bubbleText, fullText);
               let stats = `${data.tokenCount} tokens \u00B7 ${data.elapsed.toFixed(1)}s \u00B7 ${data.tokPerSec.toFixed(1)} tok/s`;
               if (typeof data.promptTokens === 'number' && data.promptTokens > 0) {
                 const reused = typeof data.kvReusedTokens === 'number' ? data.kvReusedTokens : 0;

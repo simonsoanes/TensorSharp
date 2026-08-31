@@ -221,6 +221,19 @@ namespace TensorSharp.Runtime
         public string Content { get; set; } = "";
         public string Thinking { get; set; } = "";
         public List<ToolCall>? ToolCalls { get; set; }
+
+        /// <summary>
+        /// Tool-call body text the model wrote since the last <c>Add</c>, while the call
+        /// is still incomplete. Progress signal only — a UI shows "the model is writing
+        /// code" with it; nothing should try to parse it. A parser that does not track
+        /// call bodies incrementally leaves it empty, which is the old behavior: the
+        /// whole call surfaces at once in <see cref="ToolCalls"/> when it completes.
+        /// </summary>
+        public string ToolCallText { get; set; } = "";
+
+        /// <summary>The name of the tool call in progress, once enough of it has been
+        /// written to tell. Null outside a call and before the name is complete.</summary>
+        public string? ToolCallName { get; set; }
     }
 
     /// <summary>
@@ -244,6 +257,13 @@ namespace TensorSharp.Runtime
         private bool _stripLeadingThinkTag;
         private int _callIndex;
 
+        // Watermark into the in-progress tool-call body already surfaced as
+        // ParsedOutput.ToolCallText. The buffer keeps the whole body for the completion
+        // parse; this only tracks what a streaming consumer has been shown. Same
+        // mechanism as Gemma4OutputParser — a 27B model writes a run_code program for
+        // many minutes, and without this the UI has nothing to show for any of it.
+        private int _toolReportedChars;
+
         public bool HasThinkingSupport => true;
         public bool HasToolSupport => true;
         public bool AlwaysRequired => false;
@@ -252,6 +272,7 @@ namespace TensorSharp.Runtime
         {
             _buffer.Clear();
             _callIndex = 0;
+            _toolReportedChars = 0;
             if (enableThinking)
             {
                 _state = State.CollectingThinking;
@@ -270,6 +291,7 @@ namespace TensorSharp.Runtime
             var result = new ParsedOutput();
             var thinkingSb = new StringBuilder();
             var contentSb = new StringBuilder();
+            var toolCallTextSb = new StringBuilder();
             var toolCalls = new List<ToolCall>();
 
             bool keepParsing = true;
@@ -398,6 +420,11 @@ namespace TensorSharp.Runtime
                             string after = buf.Substring(endIdx + 12).TrimStart();
                             _buffer.Clear();
                             _buffer.Append(after);
+                            // The body's unreported tail rides out with the completion,
+                            // so a consumer rendering the draft ends with all of it.
+                            if (endIdx > _toolReportedChars)
+                                toolCallTextSb.Append(raw, _toolReportedChars, endIdx - _toolReportedChars);
+                            _toolReportedChars = 0;
                             var tc = ParseQwen3ToolCall(raw);
                             if (tc != null) toolCalls.Add(tc);
                             _state = State.CollectingContent;
@@ -405,10 +432,27 @@ namespace TensorSharp.Runtime
                         }
                         else if (done && buf.Length > 0)
                         {
+                            if (buf.Length > _toolReportedChars)
+                                toolCallTextSb.Append(buf, _toolReportedChars, buf.Length - _toolReportedChars);
+                            _toolReportedChars = 0;
                             var tc = ParseQwen3ToolCall(buf);
                             if (tc != null) toolCalls.Add(tc);
                             _buffer.Clear();
                             _state = State.CollectingContent;
+                        }
+                        else if (!done)
+                        {
+                            // Mid-call: surface the newly written body as progress,
+                            // holding back a possible partial closing tag. Both body
+                            // shapes stream the same way — the JSON object and the
+                            // XML-ish <function=...> fallback are just text here.
+                            int reportable = buf.Length - HoldBackForPartialTag(buf, "</tool_call>");
+                            if (reportable > _toolReportedChars)
+                            {
+                                toolCallTextSb.Append(buf, _toolReportedChars, reportable - _toolReportedChars);
+                                _toolReportedChars = reportable;
+                            }
+                            result.ToolCallName ??= ToolCallNameFrom(buf);
                         }
                         break;
                 }
@@ -417,7 +461,34 @@ namespace TensorSharp.Runtime
             result.Content = contentSb.ToString();
             result.Thinking = thinkingSb.ToString();
             result.ToolCalls = toolCalls.Count > 0 ? toolCalls : null;
+            result.ToolCallText = toolCallTextSb.ToString();
             return result;
+        }
+
+        private static readonly Regex QwenJsonToolNameRe = new(
+            "^\\s*\\{\\s*\"name\"\\s*:\\s*\"([^\"]+)\"",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        /// <summary>The in-progress call's tool name, from whichever body shape has
+        /// gotten far enough to carry it.</summary>
+        private static string? ToolCallNameFrom(string body)
+        {
+            Match m = QwenJsonToolNameRe.Match(body);
+            if (m.Success)
+                return m.Groups[1].Value;
+
+            int fn = body.IndexOf("<function=", StringComparison.Ordinal);
+            if (fn >= 0)
+            {
+                int close = body.IndexOf('>', fn + 10);
+                if (close > fn + 10)
+                {
+                    string name = body.Substring(fn + 10, close - fn - 10).Trim();
+                    if (name.Length > 0)
+                        return name;
+                }
+            }
+            return null;
         }
 
         private ToolCall? ParseQwen3ToolCall(string raw)
@@ -574,6 +645,26 @@ namespace TensorSharp.Runtime
     }
 
     // ========================================================================
+    // Qwen2 / Qwen2.5(-VL) Parser: ChatML with <tool_call> JSON, NO thinking
+    // channel. Wraps Qwen3's machinery with thinking pinned off: initialized
+    // with enableThinking=true it would misread the whole answer as thought
+    // while waiting for a </think> these models never emit.
+    // ========================================================================
+
+    public class Qwen25OutputParser : IOutputParser
+    {
+        private readonly Qwen3OutputParser _inner = new();
+
+        public bool HasThinkingSupport => false;
+        public bool HasToolSupport => true;
+        public bool AlwaysRequired => false;
+
+        public void Init(bool enableThinking, List<ToolFunction> tools) => _inner.Init(false, tools);
+
+        public ParsedOutput Add(string text, bool done) => _inner.Add(text, done);
+    }
+
+    // ========================================================================
     // Gemma4 Parser: <|channel>thought\n...<channel|> for thinking,
     //                <|tool_call>call:NAME{args}<tool_call|> for tool calls
     // ========================================================================
@@ -587,6 +678,12 @@ namespace TensorSharp.Runtime
         private bool _thinkingEnabled;
         private bool _needsChannelNameStrip;
 
+        // How much of the in-progress tool-call body has been surfaced as
+        // ParsedOutput.ToolCallText. The buffer itself is kept whole until the call
+        // closes (ParseGemma4ToolCall needs all of it), so progress is a watermark
+        // into it rather than a consumption.
+        private int _toolReportedChars;
+
         public bool HasThinkingSupport => true;
         public bool HasToolSupport => true;
         public bool AlwaysRequired => true;
@@ -597,6 +694,7 @@ namespace TensorSharp.Runtime
             _thinkingEnabled = enableThinking;
             _needsChannelNameStrip = false;
             _state = State.CollectingContent;
+            _toolReportedChars = 0;
         }
 
         public ParsedOutput Add(string text, bool done)
@@ -605,6 +703,7 @@ namespace TensorSharp.Runtime
             var result = new ParsedOutput();
             var thinkingSb = new StringBuilder();
             var contentSb = new StringBuilder();
+            var toolCallTextSb = new StringBuilder();
             var toolCalls = new List<ToolCall>();
 
             bool keepParsing = true;
@@ -752,6 +851,12 @@ namespace TensorSharp.Runtime
                             string after = buf.Substring(endIdx + 12).TrimStart();
                             _buffer.Clear();
                             _buffer.Append(after);
+                            // Whatever of the body was not yet surfaced as progress goes
+                            // out with the completion, so a consumer that renders the
+                            // draft ends with the complete text.
+                            if (endIdx > _toolReportedChars)
+                                toolCallTextSb.Append(raw, _toolReportedChars, endIdx - _toolReportedChars);
+                            _toolReportedChars = 0;
                             var tc = ParseGemma4ToolCall(raw);
                             if (tc != null) toolCalls.Add(tc);
                             _state = State.CollectingContent;
@@ -759,10 +864,28 @@ namespace TensorSharp.Runtime
                         }
                         else if (done && buf.Length > 0)
                         {
+                            if (buf.Length > _toolReportedChars)
+                                toolCallTextSb.Append(buf, _toolReportedChars, buf.Length - _toolReportedChars);
+                            _toolReportedChars = 0;
                             var tc = ParseGemma4ToolCall(buf);
                             if (tc != null) toolCalls.Add(tc);
                             _buffer.Clear();
                             _state = State.CollectingContent;
+                        }
+                        else
+                        {
+                            // Mid-call: surface the newly written body text as progress,
+                            // holding back what could be the start of the closing tag.
+                            // The model spends its longest silent stretches here — a
+                            // run_code call carries a whole program — and this is what
+                            // lets a UI show the code being written instead of nothing.
+                            int reportable = buf.Length - HoldBack(buf, "<tool_call|>");
+                            if (reportable > _toolReportedChars)
+                            {
+                                toolCallTextSb.Append(buf, _toolReportedChars, reportable - _toolReportedChars);
+                                _toolReportedChars = reportable;
+                            }
+                            result.ToolCallName ??= ToolCallNameFrom(buf);
                         }
                         break;
                 }
@@ -771,11 +894,30 @@ namespace TensorSharp.Runtime
             result.Content = contentSb.ToString();
             result.Thinking = thinkingSb.ToString();
             result.ToolCalls = toolCalls.Count > 0 ? toolCalls : null;
+            result.ToolCallText = toolCallTextSb.ToString();
             return result;
+        }
+
+        /// <summary>The call's tool name, once <c>call:NAME{</c> has been written.</summary>
+        private static string? ToolCallNameFrom(string body)
+        {
+            if (!body.StartsWith("call:", StringComparison.Ordinal))
+                return null;
+            int brace = body.IndexOf('{');
+            if (brace <= 5)
+                return null;
+            string name = body.Substring(5, brace - 5).Trim();
+            return name.Length > 0 ? name : null;
         }
 
         private static readonly Regex GemmaQuotedStringRe = new(@"<\|""\|>(.*?)<\|""\|>", RegexOptions.Singleline);
         private static readonly Regex GemmaBareKeyRe = new(@"([,{])(\w+):");
+
+        // Tool names whose call bodies already failed to parse. The raw body
+        // still reaches the client via ToolCallText, but the dropped structured
+        // call must not fail silently — nor warn per retry. This class has no
+        // logger, so Console.Error is the channel.
+        private static readonly HashSet<string> GemmaParseFailReported = new(StringComparer.Ordinal);
 
         private static ToolCall? ParseGemma4ToolCall(string content)
         {
@@ -798,8 +940,15 @@ namespace TensorSharp.Runtime
                     args[prop.Name] = Qwen3OutputParser.JsonElementToObject(prop.Value);
                 return new ToolCall { Name = name, Arguments = args };
             }
-            catch
+            catch (Exception ex)
             {
+                bool first;
+                lock (GemmaParseFailReported) first = GemmaParseFailReported.Add(name);
+                if (first)
+                    Console.Error.WriteLine(
+                        $"[Gemma4OutputParser] Tool call '{name}' has arguments that do not parse as JSON ({ex.Message}); " +
+                        "it is dropped from ToolCalls, so the tool will not run — the raw call text is still " +
+                        "delivered in ToolCallText. Reported once per tool name.");
                 return null;
             }
         }
@@ -901,6 +1050,7 @@ namespace TensorSharp.Runtime
             var result = new ParsedOutput();
             var contentSb = new StringBuilder();
             var thinkingSb = new StringBuilder();
+            var toolTextSb = new StringBuilder();
             var toolCalls = new List<ToolCall>();
 
             bool keepParsing = true;
@@ -974,7 +1124,7 @@ namespace TensorSharp.Runtime
                             // stream that never closes one.
                             if (buf.Length > MaxHeaderChars)
                             {
-                                EmitContent(buf, contentSb, thinkingSb);
+                                EmitContent(buf, contentSb, thinkingSb, toolTextSb);
                                 _buffer.Clear();
                                 _state = HState.ParsingContent;
                             }
@@ -990,7 +1140,7 @@ namespace TensorSharp.Runtime
                             _buffer.Clear();
                             _buffer.Append(after);
 
-                            EmitContent(content, contentSb, thinkingSb);
+                            EmitContent(content, contentSb, thinkingSb, toolTextSb);
                             FinalizeMessage(toolCalls);
                             _state = HState.LookingForStart;
                             keepParsing = after.Length > 0;
@@ -1001,19 +1151,19 @@ namespace TensorSharp.Runtime
                             if (hold > 0)
                             {
                                 string emit = buf.Substring(0, buf.Length - hold);
-                                if (emit.Length > 0) EmitContent(emit, contentSb, thinkingSb);
+                                if (emit.Length > 0) EmitContent(emit, contentSb, thinkingSb, toolTextSb);
                                 _buffer.Clear();
                                 _buffer.Append(buf.Substring(buf.Length - hold));
                             }
                             else
                             {
-                                EmitContent(buf, contentSb, thinkingSb);
+                                EmitContent(buf, contentSb, thinkingSb, toolTextSb);
                                 _buffer.Clear();
                             }
                         }
                         else
                         {
-                            if (buf.Length > 0) EmitContent(buf, contentSb, thinkingSb);
+                            if (buf.Length > 0) EmitContent(buf, contentSb, thinkingSb, toolTextSb);
                             FinalizeMessage(toolCalls);
                             _buffer.Clear();
                             _state = HState.LookingForStart;
@@ -1024,6 +1174,9 @@ namespace TensorSharp.Runtime
 
             result.Content = contentSb.ToString();
             result.Thinking = thinkingSb.ToString();
+            result.ToolCallText = toolTextSb.ToString();
+            if (IsToolCall())
+                result.ToolCallName = _currentRecipient!.Substring(FunctionPrefix.Length);
             if (toolCalls.Count > 0)
                 result.ToolCalls = toolCalls;
             return result;
@@ -1061,11 +1214,18 @@ namespace TensorSharp.Runtime
             }
         }
 
-        private void EmitContent(string content, StringBuilder contentSb, StringBuilder thinkingSb)
+        private void EmitContent(
+            string content, StringBuilder contentSb, StringBuilder thinkingSb, StringBuilder toolTextSb)
         {
             if (content.Length == 0) return;
             if (IsToolCall())
+            {
+                // The call's body, surfaced live: Harmony already drains it
+                // incrementally through the holdback, so the progress signal is
+                // simply a copy of what lands in _toolArgs.
                 _toolArgs.Append(content);
+                toolTextSb.Append(content);
+            }
             else if (_currentChannel == "analysis")
                 thinkingSb.Append(content);
             else
@@ -1497,6 +1657,7 @@ namespace TensorSharp.Runtime
             var result = new ParsedOutput();
             var contentSb = new StringBuilder();
             var thinkingSb = new StringBuilder();
+            var toolTextSb = new StringBuilder();
             var toolCalls = new List<ToolCall>();
 
             bool keepParsing = true;
@@ -1563,7 +1724,7 @@ namespace TensorSharp.Runtime
                             // a guard against a stream that never closes one.
                             if (buf.Length > MaxHeaderChars)
                             {
-                                EmitContent(buf, contentSb, thinkingSb);
+                                EmitContent(buf, contentSb, thinkingSb, toolTextSb);
                                 _buffer.Clear();
                                 _state = MState.ParsingContent;
                             }
@@ -1574,7 +1735,7 @@ namespace TensorSharp.Runtime
                         int endIdx = FindEarliestEnd(buf, out int tagLen);
                         if (endIdx >= 0)
                         {
-                            EmitContent(buf.Substring(0, endIdx), contentSb, thinkingSb);
+                            EmitContent(buf.Substring(0, endIdx), contentSb, thinkingSb, toolTextSb);
                             string after = buf.Substring(endIdx + tagLen);
                             _buffer.Clear();
                             _buffer.Append(after);
@@ -1588,19 +1749,19 @@ namespace TensorSharp.Runtime
                             if (hold > 0)
                             {
                                 string emit = buf.Substring(0, buf.Length - hold);
-                                if (emit.Length > 0) EmitContent(emit, contentSb, thinkingSb);
+                                if (emit.Length > 0) EmitContent(emit, contentSb, thinkingSb, toolTextSb);
                                 _buffer.Clear();
                                 _buffer.Append(buf.Substring(buf.Length - hold));
                             }
                             else
                             {
-                                EmitContent(buf, contentSb, thinkingSb);
+                                EmitContent(buf, contentSb, thinkingSb, toolTextSb);
                                 _buffer.Clear();
                             }
                         }
                         else
                         {
-                            EmitContent(buf, contentSb, thinkingSb);
+                            EmitContent(buf, contentSb, thinkingSb, toolTextSb);
                             _buffer.Clear();
                             FinalizeMessage(toolCalls);
                             _state = MState.LookingForStart;
@@ -1611,6 +1772,9 @@ namespace TensorSharp.Runtime
 
             result.Content = contentSb.ToString();
             result.Thinking = thinkingSb.ToString();
+            result.ToolCallText = toolTextSb.ToString();
+            if (IsToolCall())
+                result.ToolCallName = _currentRecipient;
             if (toolCalls.Count > 0)
                 result.ToolCalls = toolCalls;
             return result;
@@ -1637,10 +1801,17 @@ namespace TensorSharp.Runtime
             !string.Equals(_currentRecipient, "self", StringComparison.Ordinal) &&
             !string.Equals(_currentRecipient, "user", StringComparison.Ordinal);
 
-        private void EmitContent(string content, StringBuilder contentSb, StringBuilder thinkingSb)
+        private void EmitContent(
+            string content, StringBuilder contentSb, StringBuilder thinkingSb, StringBuilder toolTextSb)
         {
             if (content.Length == 0) return;
-            if (IsToolCall()) _toolArgs.Append(content);
+            if (IsToolCall())
+            {
+                // Same live progress copy the Harmony parser makes: the body is
+                // already drained incrementally, so this is the streaming signal.
+                _toolArgs.Append(content);
+                toolTextSb.Append(content);
+            }
             else if (IsThinking()) thinkingSb.Append(content);
             else contentSb.Append(content);
         }

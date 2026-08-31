@@ -13,6 +13,7 @@
 // assistant tokens across turns.
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -68,6 +69,88 @@ namespace TensorSharp.Server
     {
         /// <summary>An ordinary (non-terminal) update carrying just newly decoded text.</summary>
         public static ChatStreamUpdate Text(string piece) => new(piece, false, 0, 0, 0, 0, 0, 0, null);
+
+        /// <summary>
+        /// Reasoning text decoded since the last update, already separated from
+        /// <see cref="Piece"/>. Only meaningful when <see cref="IsParsed"/> is true.
+        /// </summary>
+        public string ThinkingPiece { get; init; }
+
+        /// <summary>
+        /// Tool calls the CALLER must service, already extracted. Only meaningful when
+        /// <see cref="IsParsed"/> is true. Skill tools never appear here — those are
+        /// answered in process and never reach a client.
+        /// </summary>
+        public IReadOnlyList<ToolCall> ParsedToolCalls { get; init; }
+
+        /// <summary>
+        /// True when this update has ALREADY been through an output parser, so
+        /// <see cref="Piece"/> holds content only, <see cref="ThinkingPiece"/> holds
+        /// reasoning, and <see cref="ParsedToolCalls"/> holds whatever the caller must
+        /// service. An adapter that sees this must NOT run its own parser over the
+        /// update.
+        ///
+        /// <para>
+        /// Only the Agent Skills path sets it. That path has to parse anyway — it is
+        /// looking for <c>skills_read</c> calls to answer itself — and once it has, the
+        /// tool markup must not be forwarded, because the adapter's own parser would
+        /// turn it back into a tool call the client cannot service. Handing over the
+        /// already-separated pieces is what lets a skills request stream token by token
+        /// instead of buffering the whole answer to check it afterwards.
+        /// </para>
+        /// </summary>
+        public bool IsParsed { get; init; }
+
+        /// <summary>One already-parsed delta: content, reasoning, or caller tool calls.</summary>
+        public static ChatStreamUpdate Parsed(
+            string content, string thinking, IReadOnlyList<ToolCall> toolCalls) =>
+            new(content ?? string.Empty, false, 0, 0, 0, 0, 0, 0, null)
+            {
+                ThinkingPiece = thinking,
+                ParsedToolCalls = toolCalls,
+                IsParsed = true,
+            };
+
+        /// <summary>
+        /// Which stage of an in-process tool call this update reports: <c>writing</c>
+        /// while the model is generating the call, <c>running</c> while the host
+        /// executes it, <c>finished</c> when execution returned. Null on every other
+        /// update. Carried so a UI can show live progress through the two long silent
+        /// stretches — a shell call can be a whole heredoc, and executing it can take
+        /// minutes — where previously nothing streamed at all.
+        /// </summary>
+        public string ToolProgressPhase { get; init; }
+
+        /// <summary>The tool being written or run, when known ("shell").</summary>
+        public string ToolProgressName { get; init; }
+
+        /// <summary>New tool-call body text (the <c>writing</c> phase), or null.</summary>
+        public string ToolProgressPiece { get; init; }
+
+        /// <summary>Seconds the execution has been running (the <c>running</c> and
+        /// <c>finished</c> phases).</summary>
+        public double ToolProgressSeconds { get; init; }
+
+        /// <summary>
+        /// One human-readable line saying WHAT is being run — "python · 2.1 KB code",
+        /// "scripts/extract.py 2400" — so the user watching the progress knows more
+        /// than the tool's name. Null when there is nothing beyond the name to say.
+        /// </summary>
+        public string ToolProgressDetail { get; init; }
+
+        /// <summary>A tool-progress event. Piece stays empty and IsParsed is set, so an
+        /// adapter that predates the field treats it as a no-op update.</summary>
+        public static ChatStreamUpdate ToolProgress(
+            string phase, string name, string piece = null, double seconds = 0, string detail = null) =>
+            new(string.Empty, false, 0, 0, 0, 0, 0, 0, null)
+            {
+                IsParsed = true,
+                ToolProgressPhase = phase,
+                ToolProgressName = name,
+                ToolProgressPiece = piece,
+                ToolProgressSeconds = seconds,
+                ToolProgressDetail = detail,
+            };
     }
 
     internal sealed class ChatGenerationPipeline : IDisposable
@@ -295,6 +378,24 @@ namespace TensorSharp.Server
             StringBuilder decodedForStops = hasStopSequences ? new StringBuilder() : null;
             TokenSampler stopSampler = hasStopSequences ? new TokenSampler(cfg) : null;
             string finishReason = "max_tokens";
+
+            // The thinking budget. A reasoning model can spend an ENTIRE token
+            // allowance inside its thinking channel and emit no answer at all: observed
+            // on the algorithmic-art skill, where 8000 tokens — 100% of them thinking —
+            // produced an empty response after 888 seconds, reported to the caller as a
+            // bare `truncated: true` with nothing to read. Capping thinking turns that
+            // silent write-off into a fast, explained stop, and leaves the rest of the
+            // allowance for an answer.
+            //
+            // Detected from the decoded text rather than the parser, because the parser
+            // runs a layer above this loop: while thinking is open the close marker has
+            // not appeared, and every reasoning family this host serves closes with
+            // </think>. A family that does not is simply never capped, which is the
+            // safe direction to be wrong in.
+            int thinkingBudget = ThinkingBudgetFor(effectiveMaxTokens, enableThinking);
+            StringBuilder thinkingScan = thinkingBudget > 0 ? new StringBuilder() : null;
+            bool thinkingClosed = false;
+            int thinkingTokens = 0;
             bool wasCancelled = false;
             int kvCacheReusedTokens = 0;
             long timeToFirstTokenMs = 0;
@@ -346,6 +447,30 @@ namespace TensorSharp.Server
                     {
                         stopRequested = true;
                         finishReason = "stop_sequence";
+                    }
+                }
+
+                if (thinkingScan != null && !thinkingClosed)
+                {
+                    if (piece.Length > 0)
+                        thinkingScan.Append(piece);
+                    thinkingTokens++;
+
+                    // Only the tail can contain the marker, and the marker is short.
+                    if (thinkingScan.Length > 64)
+                        thinkingScan.Remove(0, thinkingScan.Length - 64);
+
+                    if (thinkingScan.ToString().Contains("</think>", StringComparison.Ordinal))
+                    {
+                        thinkingClosed = true;
+                    }
+                    else if (thinkingTokens >= thinkingBudget)
+                    {
+                        // Stop now rather than at the full budget: the answer would be
+                        // empty either way, and this way it costs a fraction of the time
+                        // and says what happened.
+                        stopRequested = true;
+                        finishReason = "thinking_budget";
                     }
                 }
 
@@ -752,6 +877,42 @@ namespace TensorSharp.Server
         /// Find the length of the longest prefix of the byte buffer that forms valid UTF-8.
         /// Strips any trailing incomplete multi-byte sequence.
         /// </summary>
+        /// <summary>
+        /// How many tokens of THINKING a turn may spend before it is stopped, or 0 for
+        /// no cap.
+        ///
+        /// <para>
+        /// Default: three quarters of the turn's allowance, which leaves a quarter for an
+        /// answer. The shape of the failure this prevents is not "the model thought a bit
+        /// too long" — it is "the model thought until there was nothing left and returned
+        /// an empty string", which reads to a user as the server being broken. A model
+        /// that closes its thinking before the cap never notices this exists.
+        /// </para>
+        /// <para>
+        /// TS_THINKING_BUDGET overrides: a token count, or 0 to disable the cap entirely
+        /// for a deployment that would rather have long reasoning than a guaranteed answer.
+        /// </para>
+        /// </summary>
+        internal static int ThinkingBudgetFor(int maxTokens, bool enableThinking)
+        {
+            if (!enableThinking || maxTokens <= 0)
+                return 0;
+
+            string configured = Environment.GetEnvironmentVariable("TS_THINKING_BUDGET");
+            if (!string.IsNullOrWhiteSpace(configured)
+                && int.TryParse(configured, NumberStyles.Integer, CultureInfo.InvariantCulture, out int explicitBudget))
+            {
+                return explicitBudget > 0 ? explicitBudget : 0;
+            }
+
+            // Small allowances are left alone: capping a 200-token turn at 150 would fire
+            // on ordinary short reasoning.
+            if (maxTokens < 512)
+                return 0;
+
+            return (int)(maxTokens * 0.75);
+        }
+
         private static int FindValidUtf8Length(List<byte> bytes)
         {
             int len = bytes.Count;

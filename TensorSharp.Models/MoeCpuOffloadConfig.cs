@@ -115,12 +115,23 @@ namespace TensorSharp.Models
             {
                 TensorSharp.GGML.GgmlBasicOps.SetHostMoeThreads(CpuThreads);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
                 // No GGML native library on this platform/build (MLX-only, say).
-                // The thread count is advisory; never fail start-up over it.
+                // The thread count is advisory; never fail start-up over it — but
+                // when a count was actually requested, say it was not delivered.
+                if (CpuThreads > 0 &&
+                    System.Threading.Interlocked.Exchange(ref _threadsUndeliveredWarned, 1) == 0)
+                {
+                    Console.Error.WriteLine(
+                        $"[moe-offload] WARNING: could not hand --cpu-moe-threads {CpuThreads} to the native " +
+                        $"GGML layer ({ex.GetType().Name}: {ex.Message}); the host MoE matmul keeps its " +
+                        "default thread count. Reported once.");
+                }
             }
         }
+
+        private static int _threadsUndeliveredWarned;
 
         /// <summary>
         /// Reset to the "no offload" default. Used by tests and by model reload
@@ -273,8 +284,12 @@ namespace TensorSharp.Models
                 "--backend ggml_cuda (or ggml_vulkan) for this model if you need the offload.");
         }
 
-        /// <summary>Reset the once-only warning latch. Tests only.</summary>
-        internal static void ResetWarningLatch() => System.Threading.Interlocked.Exchange(ref _unsupportedWarned, 0);
+        /// <summary>Reset the once-only warning latches. Tests only.</summary>
+        internal static void ResetWarningLatch()
+        {
+            System.Threading.Interlocked.Exchange(ref _unsupportedWarned, 0);
+            System.Threading.Interlocked.Exchange(ref _threadsUndeliveredWarned, 0);
+        }
 
         /// <summary>
         /// Human-readable summary for the model-load banner, e.g.

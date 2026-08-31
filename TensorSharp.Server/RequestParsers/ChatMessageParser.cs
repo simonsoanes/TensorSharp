@@ -13,7 +13,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using TensorSharp.Models;
+using TensorSharp.Runtime.Logging;
 using TensorSharp.Server.Hosting;
 
 namespace TensorSharp.Server.RequestParsers
@@ -57,6 +59,12 @@ namespace TensorSharp.Server.RequestParsers
                 // which uploaded files belonged to this message.
                 if (msgEl.TryGetProperty("textFilePaths", out var texts) && texts.GetArrayLength() > 0)
                     msg.TextFilePaths = texts.EnumerateArray().Select(e => e.GetString()).ToList();
+
+                // The names the user knows those files by ("report.md" rather than the
+                // stored GUID), same order as textFilePaths. Optional: older clients
+                // don't send it, and code execution then stages under the stored name.
+                if (msgEl.TryGetProperty("textFileNames", out var textNames) && textNames.GetArrayLength() > 0)
+                    msg.TextFileNames = textNames.EnumerateArray().Select(e => e.GetString()).ToList();
 
                 if (msgEl.TryGetProperty("isVideo", out var iv))
                     msg.IsVideo = iv.GetBoolean();
@@ -145,9 +153,11 @@ namespace TensorSharp.Server.RequestParsers
         /// either a plain string content, or an array of parts where each part
         /// is either text or an image (data URL or external URL).
         /// </summary>
-        public static List<ChatMessage> ParseOpenAI(JsonElement messagesEl, UploadStoragePolicy uploads)
+        public static List<ChatMessage> ParseOpenAI(JsonElement messagesEl, UploadStoragePolicy uploads, ILogger logger = null)
         {
             var messages = new List<ChatMessage>();
+            int droppedImages = 0;
+            int droppedAudio = 0;
             foreach (var msgEl in messagesEl.EnumerateArray())
             {
                 var msg = new ChatMessage
@@ -177,15 +187,20 @@ namespace TensorSharp.Server.RequestParsers
                             else if (type == "image_url" && part.TryGetProperty("image_url", out var imgUrl))
                             {
                                 string url = imgUrl.TryGetProperty("url", out var u) ? u.GetString() : "";
-                                if (!string.IsNullOrEmpty(url) && url.StartsWith("data:"))
+                                int commaIdx = !string.IsNullOrEmpty(url) && url.StartsWith("data:")
+                                    ? url.IndexOf(',')
+                                    : -1;
+                                if (commaIdx > 0)
                                 {
-                                    int commaIdx = url.IndexOf(',');
-                                    if (commaIdx > 0)
-                                    {
-                                        string b64 = url.Substring(commaIdx + 1);
-                                        string path = WriteBase64Image(b64, uploads);
-                                        msg.ImagePaths.Add(path);
-                                    }
+                                    string b64 = url.Substring(commaIdx + 1);
+                                    string path = WriteBase64Image(b64, uploads);
+                                    msg.ImagePaths.Add(path);
+                                }
+                                else if (!string.IsNullOrEmpty(url))
+                                {
+                                    // http(s) or a malformed data: URI - never fetched or
+                                    // decoded; counted so the drop is reported below.
+                                    droppedImages++;
                                 }
                             }
                             else if (type == "input_audio" && part.TryGetProperty("input_audio", out var audioEl))
@@ -197,6 +212,8 @@ namespace TensorSharp.Server.RequestParsers
                                     uploads);
                                 if (path != null)
                                     msg.AudioPaths.Add(path);
+                                else
+                                    droppedAudio++;     // empty or undecodable base64 content
                             }
                             else if (type == "audio_url" && part.TryGetProperty("audio_url", out var audioUrl))
                             {
@@ -207,6 +224,8 @@ namespace TensorSharp.Server.RequestParsers
                                 string path = WriteBase64AudioDataUri(url, uploads);
                                 if (path != null)
                                     msg.AudioPaths.Add(path);
+                                else if (!string.IsNullOrEmpty(url))
+                                    droppedAudio++;     // http(s) or undecodable data: URI
                             }
                         }
 
@@ -222,6 +241,21 @@ namespace TensorSharp.Server.RequestParsers
 
                 messages.Add(msg);
             }
+
+            if (droppedImages > 0)
+            {
+                logger?.LogWarning(LogEventIds.RequestContentDropped,
+                    "Discarded {Count} image_url part(s): only data: URIs are supported (remote http(s) images are " +
+                    "not fetched). The model answers without seeing those images.",
+                    droppedImages);
+            }
+            if (droppedAudio > 0)
+            {
+                logger?.LogWarning(LogEventIds.RequestContentDropped,
+                    "Discarded {Count} audio part(s): only base64 / data: URI audio is supported (remote URLs are not " +
+                    "fetched), and undecodable content is skipped. The model answers without hearing that audio.",
+                    droppedAudio);
+            }
             return messages;
         }
 
@@ -233,9 +267,11 @@ namespace TensorSharp.Server.RequestParsers
         /// string is prepended as a system message, matching how the real API
         /// folds it into the model's system prompt.
         /// </summary>
-        public static List<ChatMessage> ParseResponsesInput(JsonElement inputEl, string instructions, UploadStoragePolicy uploads)
+        public static List<ChatMessage> ParseResponsesInput(JsonElement inputEl, string instructions, UploadStoragePolicy uploads, ILogger logger = null)
         {
             var messages = new List<ChatMessage>();
+            Dictionary<string, int> skippedItems = null;
+            int droppedImages = 0;
 
             if (!string.IsNullOrEmpty(instructions))
                 messages.Add(new ChatMessage { Role = "system", Content = instructions });
@@ -253,10 +289,17 @@ namespace TensorSharp.Server.RequestParsers
             {
                 // Only message-shaped items are supported; other item types
                 // (function_call, function_call_output, reasoning, ...) are
-                // ignored for this MVP surface.
+                // ignored for this MVP surface - counted so the drop is
+                // reported below rather than happening in silence.
                 string itemType = itemEl.TryGetProperty("type", out var t) ? t.GetString() : "message";
                 if (itemType != "message")
+                {
+                    skippedItems ??= new Dictionary<string, int>(StringComparer.Ordinal);
+                    string key = itemType ?? "(none)";
+                    skippedItems.TryGetValue(key, out int seen);
+                    skippedItems[key] = seen + 1;
                     continue;
+                }
 
                 var msg = new ChatMessage
                 {
@@ -304,14 +347,19 @@ namespace TensorSharp.Server.RequestParsers
                             string url = part.TryGetProperty("image_url", out var u)
                                 ? (u.ValueKind == JsonValueKind.String ? u.GetString() : null)
                                 : null;
-                            if (!string.IsNullOrEmpty(url) && url.StartsWith("data:"))
+                            int commaIdx = !string.IsNullOrEmpty(url) && url.StartsWith("data:")
+                                ? url.IndexOf(',')
+                                : -1;
+                            if (commaIdx > 0)
                             {
-                                int commaIdx = url.IndexOf(',');
-                                if (commaIdx > 0)
-                                {
-                                    string b64 = url.Substring(commaIdx + 1);
-                                    msg.ImagePaths.Add(WriteBase64Image(b64, uploads));
-                                }
+                                string b64 = url.Substring(commaIdx + 1);
+                                msg.ImagePaths.Add(WriteBase64Image(b64, uploads));
+                            }
+                            else if (!string.IsNullOrEmpty(url))
+                            {
+                                // http(s) or a malformed data: URI - never fetched or
+                                // decoded; counted so the drop is reported below.
+                                droppedImages++;
                             }
                         }
                     }
@@ -324,6 +372,21 @@ namespace TensorSharp.Server.RequestParsers
                 messages.Add(msg);
             }
 
+            if (skippedItems != null)
+            {
+                logger?.LogWarning(LogEventIds.RequestContentDropped,
+                    "/v1/responses input: skipped {Count} unsupported input item(s) (types: {Types}); only 'message' " +
+                    "items are used, so their content never reaches the model.",
+                    skippedItems.Values.Sum(),
+                    string.Join(", ", skippedItems.Select(kv => kv.Key + " x" + kv.Value)));
+            }
+            if (droppedImages > 0)
+            {
+                logger?.LogWarning(LogEventIds.RequestContentDropped,
+                    "/v1/responses input: discarded {Count} input_image part(s): only data: URIs are supported " +
+                    "(remote http(s) images are not fetched). The model answers without seeing those images.",
+                    droppedImages);
+            }
             return messages;
         }
 

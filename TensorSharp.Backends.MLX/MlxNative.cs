@@ -3529,14 +3529,14 @@ if (kind == 0) {
         // The worker is re-entrant, so the C# `trace` delegate is free to
         // call any MlxNative.* helper.
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        private delegate int MlxClosureCallback(ref MlxVectorArray result, MlxVectorArray input, IntPtr payload);
+        private unsafe delegate int MlxClosureCallback(MlxVectorArray* result, MlxVectorArray input, IntPtr payload);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate void MlxClosureDestructor(IntPtr payload);
 
-        private static readonly MlxClosureCallback ClosureCallbackDelegate = ClosureCallback;
+        private static readonly unsafe MlxClosureCallback ClosureCallbackDelegate = ClosureCallback;
         private static readonly MlxClosureDestructor ClosureDestructorDelegate = ClosureDestructor;
-        private static readonly IntPtr ClosureCallbackPtr = Marshal.GetFunctionPointerForDelegate(ClosureCallbackDelegate);
+        private static readonly unsafe IntPtr ClosureCallbackPtr = Marshal.GetFunctionPointerForDelegate(ClosureCallbackDelegate);
         private static readonly IntPtr ClosureDestructorPtr = Marshal.GetFunctionPointerForDelegate(ClosureDestructorDelegate);
 
         internal sealed class CompiledClosure
@@ -3674,13 +3674,13 @@ if (kind == 0) {
         //   stores them in `result`; we then release our reference so that
         //   when `result` is later freed (by the apply caller) the final
         //   ref drops as expected.
-        private static int ClosureCallback(ref MlxVectorArray result, MlxVectorArray input, IntPtr payload)
+        private static unsafe int ClosureCallback(MlxVectorArray* result, MlxVectorArray input, IntPtr payload)
         {
             MlxArray[] inputs = null;
             MlxArray[] outputs = null;
             try
             {
-                if (payload == IntPtr.Zero) return 1;
+                if (result == null || payload == IntPtr.Zero) return 1;
                 var handle = GCHandle.FromIntPtr(payload);
                 var trace = handle.Target as TraceFunc;
                 if (trace == null) return 1;
@@ -3704,13 +3704,13 @@ if (kind == 0) {
                 {
                     if (outputs.Length == 0)
                     {
-                        rc = mlx_vector_array_set_data(ref result, IntPtr.Zero, 0);
+                        rc = mlx_vector_array_set_data(ref *result, IntPtr.Zero, 0);
                     }
                     else
                     {
                         fixed (MlxArray* p = outputs)
                         {
-                            rc = mlx_vector_array_set_data(ref result, (IntPtr)p, (nuint)outputs.Length);
+                            rc = mlx_vector_array_set_data(ref *result, (IntPtr)p, (nuint)outputs.Length);
                         }
                     }
                 }
@@ -7294,6 +7294,24 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
             });
         }
 
+        // Runs at most once per kernel family: callers only reach this on the
+        // disabled-flag transition, which happens once under fastKernelSync.
+        private static void WarnSimdgroupKernelUnavailable(string label)
+        {
+            try
+            {
+                Console.Error.WriteLine(
+                    $"[mlx] the {label} simdgroup_matrix matmul kernel failed to compile; {label} prefill " +
+                    "permanently uses the ~8x slower per-output kernel for the rest of this process. " +
+                    "This usually means a Metal toolchain without simdgroup_matrix support - " +
+                    "update Xcode / the Metal command line tools. Reported once.");
+            }
+            catch
+            {
+                // Diagnostics must never break kernel dispatch.
+            }
+        }
+
         // Generic per-quant simdgroup kernel ensure: builds the kernel
         // source from the template + a quant-specific dequant function
         // name and block byte count, paired with the per-quant header
@@ -7323,6 +7341,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (!slot.IsValid)
                 {
                     disabledFlag = true;
+                    WarnSimdgroupKernelUnavailable(label);
                     throw new NotSupportedException($"Unable to initialize MLX {label} simdgroup matmul kernel.");
                 }
                 return slot;
@@ -7347,6 +7366,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (!iq2XxsMatmulSimdgroupKernel.IsValid)
                 {
                     iq2XxsMatmulSimdgroupKernelDisabled = true;
+                    WarnSimdgroupKernelUnavailable("IQ2_XXS");
                     throw new NotSupportedException("Unable to initialize MLX IQ2_XXS simdgroup_matrix matmul kernel.");
                 }
                 return iq2XxsMatmulSimdgroupKernel;

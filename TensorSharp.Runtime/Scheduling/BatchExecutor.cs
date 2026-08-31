@@ -103,6 +103,15 @@ namespace TensorSharp.Runtime.Scheduling
         // --spec-type).
         private bool _speculationDeclineWarned;
 
+        // The user's rule for every one of these: a fallback must never be
+        // silent. Each fires ONCE per executor (i.e. per loaded model) so the
+        // console names the degradation without turning into per-token spam.
+        private bool _forwardBatchDeclineWarned;
+        private bool _fusedBatchedDeclineWarned;
+        private bool _specPrefixReuseDeclineWarned;
+        private bool _crossSeqSerializationWarned;
+        private readonly HashSet<string> _fallbackTransitionsWarned = new(StringComparer.Ordinal);
+
         private sealed class SpecSeqContext
         {
             public SequenceState Seq;
@@ -242,9 +251,26 @@ namespace TensorSharp.Runtime.Scheduling
                 {
                     if (i > 0)
                     {
-                        _logger.LogDebug(
-                            "BatchExecutor: {Declined} declined this step; falling back to {Next}.",
-                            plan.Candidates[i - 1], plan.Candidates[i]);
+                        // The Information plan line above reports the SELECTED
+                        // candidate; when that candidate declines at runtime the
+                        // user must hear that what actually ran is the fallback,
+                        // or the log claims the opposite of what is happening.
+                        // Once per transition; Debug afterwards.
+                        string transition = plan.Candidates[i - 1] + "->" + plan.Candidates[i];
+                        if (_fallbackTransitionsWarned.Add(transition))
+                        {
+                            _logger.LogWarning(
+                                "BatchExecutor: the {Declined} path declined at runtime; executing on " +
+                                "{Next} instead. Reported once per transition; later occurrences log at Debug.",
+                                plan.Candidates[i - 1], plan.Candidates[i]);
+                            _lastPlanDescription = null;
+                        }
+                        else
+                        {
+                            _logger.LogDebug(
+                                "BatchExecutor: {Declined} declined this step; falling back to {Next}.",
+                                plan.Candidates[i - 1], plan.Candidates[i]);
+                        }
                     }
                     var results = TryExecutePath(plan.Candidates[i], output, options);
                     if (results != null)
@@ -417,6 +443,15 @@ namespace TensorSharp.Runtime.Scheduling
             {
                 // The model declared support but bailed for this specific
                 // batch. Decline to the plan's next candidate (per-seq swap).
+                if (!_forwardBatchDeclineWarned)
+                {
+                    _forwardBatchDeclineWarned = true;
+                    _logger.LogWarning(
+                        "The model declined the batched forward for this step ({Reason}); serving " +
+                        "sequences one at a time on the per-sequence path. Sustained declines mean " +
+                        "concurrent throughput is degraded toward single-stream. Reported once.",
+                        ex.Message);
+                }
                 _logger.LogDebug(ex, "BatchExecutor: ForwardBatch declined the batch; falling back.");
                 return null;
             }
@@ -750,6 +785,15 @@ namespace TensorSharp.Runtime.Scheduling
                         return results;
                     }
                     // else: not appended ÔÇö fall through to the round-robin loop.
+                    if (!_fusedBatchedDeclineWarned)
+                    {
+                        _fusedBatchedDeclineWarned = true;
+                        _logger.LogWarning(
+                            "TS_BATCHED_FUSED_DECODE=1 was requested but the model declined to batch " +
+                            "a {Count}-sequence decode step; serving sequences round-robin on the " +
+                            "serial fused path instead (concurrency stays near 1x). Reported once.",
+                            output.ScheduledWork.Count);
+                    }
                 }
             }
 
@@ -776,8 +820,12 @@ namespace TensorSharp.Runtime.Scheduling
                     // position. Drop the claim and re-prefill from position 0.
                     if (freshCache && seq.UsesLiveCacheContinuation)
                     {
-                        _logger.LogDebug(
-                            "Live-cache continuation for {RequestId} not materializable on the fused path; re-prefilling.",
+                        // The reuse was PROMISED at admission and revoked here;
+                        // without this line the user sees a full re-prefill on a
+                        // turn the scheduler already counted as a cache hit.
+                        _logger.LogInformation(
+                            "Planned live-cache continuation for {RequestId} was revoked before " +
+                            "execution (the claimed live state is gone); re-prefilling the full prompt.",
                             seq.RequestId);
                         seq.ClearLiveCacheContinuation();
                     }
@@ -915,6 +963,17 @@ namespace TensorSharp.Runtime.Scheduling
                 // swap; concurrent sequences serialize on the owner instead of
                 // producing corrupted output.
                 bool canSwap = _model.SupportsKVStateSnapshot && _model.SupportsCrossSequenceKvReuse;
+                if (!canSwap && output.ScheduledWork.Count > 1 && !_crossSeqSerializationWarned)
+                {
+                    // Without a swap the second request LOOKS hung, not slow: it
+                    // streams nothing until the current owner finishes.
+                    _crossSeqSerializationWarned = true;
+                    _logger.LogWarning(
+                        "{Count} concurrent requests are scheduled but this model cannot swap KV " +
+                        "state between sequences, so they are served to completion one at a time - " +
+                        "a later request does not stream until the current one finishes. Reported once.",
+                        output.ScheduledWork.Count);
+                }
                 int quantum = Math.Max(1, _scheduler.Config.DecodeQuantumTokens);
                 bool quantumExceeded = canSwap && _ownerForwardedTokens >= quantum;
 
@@ -1125,7 +1184,20 @@ namespace TensorSharp.Runtime.Scheduling
                 if (prevComputed > 0 && !exec.Speculator.CanArmAfterPrefixReuse)
                 {
                     // This algorithm chains per-position state; a gap makes every
-                    // proposal garbage. Serve the request on the plain path.
+                    // proposal garbage. Serve the request on the plain path - and
+                    // SAY so, because in a chat session every turn after the first
+                    // adopts a prefix, so "--spec engaged on turn one and never
+                    // again" looks exactly like speculation silently broken.
+                    if (!_specPrefixReuseDeclineWarned)
+                    {
+                        _specPrefixReuseDeclineWarned = true;
+                        _logger.LogWarning(
+                            "Speculative decoding cannot arm for this request: the {Algorithm} " +
+                            "algorithm does not resume after a reused KV prefix ({Tokens} tokens " +
+                            "adopted), so turns that reuse cache decode plainly. Speculation engages " +
+                            "only on turns that prefill from position 0. Reported once.",
+                            exec.Speculator.Describe(), prevComputed);
+                    }
                     exec.Dispose();
                     return null;
                 }
@@ -1428,59 +1500,86 @@ namespace TensorSharp.Runtime.Scheduling
 
             int liveLen = Math.Min(_liveCacheLen, _liveCacheSeq.NumTotalTokens);
 
-            // NOTE: do NOT shorten liveLen here. The adopted length becomes the
-            // sequence's NumComputedTokens, and EnsureOwnership only keeps the live
-            // cache when `_liveCacheLen == seq.NumComputedTokens` exactly - the model
-            // has no way to drop a token off the end of its cache (Qwen3.x cannot
-            // truncate its recurrent state at all). Returning liveLen-1 gets the
-            // continuation planned and then silently discarded one step later, which
-            // is worse than not planning it: an EOS-terminated turn reported 0% reuse
-            // while a max_tokens-terminated turn of the same conversation reported
-            // ~95%.
-
             if (liveLen <= cap)
                 return LiveContinuationDeclined(seq,
                     $"live prefix {liveLen} within the pooled reuse cap {cap}");
-            if (seq.PromptTokens.Count <= liveLen)
-                return LiveContinuationDeclined(seq,
-                    $"prompt ({seq.PromptTokens.Count} tokens) has no new suffix past the live prefix ({liveLen})");
 
-            // Require the live sequence to be an exact prefix of the new prompt.
-            // This is the common multi-turn append ("continue") case and avoids
-            // truncating the circular cache (which would reintroduce the wrap issue).
-            for (int i = 0; i < liveLen; i++)
+            // Longest common prefix between the new prompt and what the cache holds.
+            int lcp = 0;
+            int limit = Math.Min(liveLen, seq.PromptTokens.Count);
+            while (lcp < limit && seq.PromptTokens[lcp] == _liveCacheSeq.TokenAt(lcp))
+                lcp++;
+
+            if (seq.PromptTokens.Count <= lcp)
+                return LiveContinuationDeclined(seq,
+                    $"prompt ({seq.PromptTokens.Count} tokens) has no new suffix past the matched prefix ({lcp})");
+
+            if (lcp == liveLen)
+                return liveLen;   // exact prefix: continue with no rewind at all
+
+            // The cache holds tokens the prompt does not reproduce. Continuing means
+            // rewinding past them, which is only sound when the model can rewind.
+            int rewind = liveLen - lcp;
+            if (rewind > MaxLiveContinuationRewindTokens)
             {
-                if (seq.PromptTokens[i] != _liveCacheSeq.TokenAt(i))
-                {
-                    // A mismatch at the very last cached position is its own story:
-                    // that token is the sampled EOS, which the engine stops on and
-                    // never publishes, so turn N+1 re-derives the boundary from the
-                    // chat template rather than from the previous turn's raw output
-                    // tokens. Nothing can be salvaged (the model cannot drop the
-                    // trailing token), but it is worth naming so it is not confused
-                    // with a template/tokenizer divergence earlier in the prompt.
-                    bool trailingEos = i == liveLen - 1
-                        && _model.Tokenizer != null
-                        && _model.Tokenizer.IsEos(_liveCacheSeq.TokenAt(i));
-                    return LiveContinuationDeclined(seq,
-                        (trailingEos
-                            ? $"prompt does not reproduce the cached trailing EOS at token {i} of {liveLen} "
-                            : $"prompt diverges from the live cache at token {i} of {liveLen} ") +
-                        $"(prompt={seq.PromptTokens[i]}, cached={_liveCacheSeq.TokenAt(i)}); " +
-                        $"context prompt=[{DescribeTokenWindow(k => seq.PromptTokens[k], seq.PromptTokens.Count, i)}] " +
-                        $"cached=[{DescribeTokenWindow(k => _liveCacheSeq.TokenAt(k), liveLen, i)}]");
-                }
+                return LiveContinuationDeclined(seq,
+                    $"prompt diverges from the live cache at token {lcp} of {liveLen}, which would need a " +
+                    $"{rewind}-token rewind (limit {MaxLiveContinuationRewindTokens}); " +
+                    $"context prompt=[{DescribeTokenWindow(k => seq.PromptTokens[k], seq.PromptTokens.Count, lcp)}] " +
+                    $"cached=[{DescribeTokenWindow(k => _liveCacheSeq.TokenAt(k), liveLen, lcp)}]");
             }
-            return liveLen;
+            if (!_model.SupportsKVCacheTruncation)
+            {
+                return LiveContinuationDeclined(seq,
+                    $"prompt diverges from the live cache at token {lcp} of {liveLen} and this model cannot " +
+                    "rewind its KV state (recurrent layers have no reverse)");
+            }
+            if (lcp <= cap)
+                return LiveContinuationDeclined(seq,
+                    $"matched prefix {lcp} (after a {rewind}-token rewind) is within the pooled reuse cap {cap}");
+
+            _logger.LogDebug(
+                "Live-cache continuation for {RequestId} rewinding {Rewind} trailing token(s) the prompt does " +
+                "not reproduce: keeping {Lcp} of {LiveLen}.",
+                seq.RequestId, rewind, lcp, liveLen);
+            return lcp;
         }
+
+        /// <summary>
+        /// How many trailing cached tokens a live continuation may rewind past.
+        ///
+        /// <para>
+        /// The case this exists for is one or two tokens long: a turn ends on a
+        /// generation-only control token — an EOS, or Gemma 4's
+        /// <c>&lt;|tool_response&gt;</c> — that the model samples and the engine
+        /// forwards, but that the chat template never reproduces when it re-renders
+        /// that turn as history. Without a rewind the whole conversation re-prefills
+        /// from token 0 on the next turn, which is why an EOS-terminated turn used to
+        /// report 0% reuse while a max_tokens-terminated turn of the same conversation
+        /// reported ~95%, and why an Agent Skills lookup reused nothing at all.
+        /// </para>
+        /// <para>
+        /// It is deliberately small rather than unbounded. On a sliding-window model
+        /// the KV cache is circular, so a rewind is only faithful close to the head;
+        /// and a long rewind is a sign the prompt genuinely diverges (an edited turn, a
+        /// changed system prompt) where a clean re-prefill is the correct answer rather
+        /// than a cheaper wrong one.
+        /// </para>
+        /// </summary>
+        private const int MaxLiveContinuationRewindTokens = 16;
 
         /// <summary>Log why live-cache continuation was refused and return 0. The
         /// path had five distinct bare `return 0`s, which is why a report of "KV
         /// reuse is 0" carried no way to tell which one fired.</summary>
         private int LiveContinuationDeclined(SequenceState seq, string reason)
         {
-            _logger.LogDebug(
-                "Live-cache continuation declined for {RequestId}: {Reason}.",
+            // Information, not Debug: this is the difference between ~95% and 0%
+            // KV reuse on a follow-up turn (seconds of TTFT), it fires at most
+            // once per request, and the response's kvCacheReusedTokens=0 gives
+            // the user the symptom with no cause unless this line is visible.
+            _logger.LogInformation(
+                "Live-cache continuation declined for {RequestId}: {Reason}. This turn re-prefills " +
+                "its full prompt (KV reuse 0).",
                 seq.RequestId, reason);
             return 0;
         }
@@ -1722,8 +1821,22 @@ namespace TensorSharp.Runtime.Scheduling
                 if (_currentOwner == null
                     && _liveCacheValid
                     && seq.NumComputedTokens > 0
-                    && _liveCacheLen == seq.NumComputedTokens)
+                    && _liveCacheLen >= seq.NumComputedTokens
+                    && (_liveCacheLen == seq.NumComputedTokens || _model.SupportsKVCacheTruncation))
                 {
+                    if (_liveCacheLen > seq.NumComputedTokens)
+                    {
+                        // The scheduler matched a prefix shorter than what the cache
+                        // holds, because the previous turn ended on a control token the
+                        // template does not re-render (see
+                        // MaxLiveContinuationRewindTokens). Drop those trailing
+                        // positions so the model's cache and this sequence agree on
+                        // where the next token goes - the same rewind speculative
+                        // decoding performs when a draft is rejected.
+                        _model.TruncateKVCache(seq.NumComputedTokens);
+                        _liveCacheLen = seq.NumComputedTokens;
+                    }
+                    _liveCacheSeq = seq;
                     _currentOwner = seq;
                     _ownerTokensInModel = seq.NumComputedTokens;
                     _ownerForwardedTokens = 0;

@@ -15,7 +15,9 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using TensorSharp.Runtime;
+using TensorSharp.AgentHost.CodeExec;
 using TensorSharp.Runtime.Scheduling;
+using TensorSharp.AgentHost.Skills;
 
 namespace TensorSharp.Server.Hosting
 {
@@ -101,6 +103,20 @@ namespace TensorSharp.Server.Hosting
                 configuredUploads.QuotaMb, "TS_UPLOAD_QUOTA_MB", 0);
             TimeSpan? uploadTtl = ResolveUploadTtl(configuredUploads.TtlHours, "TS_UPLOAD_TTL_HOURS");
 
+            // Agent Skills. Parsed by the shared reader so the CLI and this host accept
+            // exactly the same spellings, then layered with its env vars and defaulted to
+            // the skills/ directory next to the binary (created if absent, so dropping a
+            // skill directory in and restarting is all it takes).
+            SkillHostOptions skillOptions = SkillHostOptions.Parse(args)
+                .ApplyEnvironmentAndDefaults(baseDirectory);
+            bool skillDirectoriesAreDefault = skillOptions.Roots.Count == 1
+                && string.Equals(
+                    skillOptions.Roots[0],
+                    Path.Combine(baseDirectory, SkillHostOptions.DefaultDirectoryName),
+                    StringComparison.Ordinal);
+            if (skillOptions.Enabled)
+                skillOptions.ValidateRoots(createDefault: skillDirectoriesAreDefault);
+
             // TS_NO_WEBUI follows the TENSORSHARP_LOG_FILE convention: set to
             // anything but "0" counts as on.
             string noWebUiEnv = Environment.GetEnvironmentVariable("TS_NO_WEBUI");
@@ -128,7 +144,18 @@ namespace TensorSharp.Server.Hosting
                 uploadMaxFileBytes,
                 uploadQuotaBytes,
                 uploadTtl,
-                webUiEnabled);
+                webUiEnabled,
+                skillOptions.Roots,
+                skillOptions.Enabled,
+                skillOptions.Discovery,
+                skillOptions.AllowScripts,
+                // Zero means "the operator did not choose", which is what lets a
+                // code-execution host raise its own default without overriding a
+                // number somebody set on purpose.
+                skillOptions.MaxRoundsSpecified ? skillOptions.MaxRounds : 0,
+                skillOptions.Selected,
+                skillOptions.Sandbox,
+                skillOptions.AllowNetwork);
         }
 
         /// <summary>Backend originally requested via <c>--backend</c> / <c>BACKEND</c> (without the OS-default fallback).</summary>
@@ -514,8 +541,8 @@ namespace TensorSharp.Server.Hosting
         }
 
         /// <summary>
-        /// Translate <c>--mtp-spec</c> / <c>--no-mtp-spec</c> /
-        /// <c>--mtp-draft N</c> / <c>--mtp-pmin X</c> into the <c>TS_MTP_*</c>
+        /// Translate <c>--spec</c> / <c>--no-spec</c> /
+        /// <c>--spec-draft N</c> / <c>--spec-pmin X</c> / <c>--draft-model PATH</c> into the
         /// env vars read by <c>SchedulerConfig.FromEnvironment</c> when the
         /// inference engine is constructed. NextN/MTP speculative decoding only
         /// engages on models that ship a draft head (Qwen3.6) and is off by
@@ -534,24 +561,24 @@ namespace TensorSharp.Server.Hosting
 
             for (int i = 0; i < args.Length; i++)
             {
-                // Path to a BLOCK drafter GGUF that has to be resident before the
-                // model's layer split runs: DeepSeek V4's DSpark, and the DFlash /
-                // DFlash2 drafters for Muse-Glimmer and Qwen 3.8. Unlike
-                // --spec-draft-model this one is handed to the model factory, so
-                // it is carried as the same env vars the CLI's --draft-model reads
-                // and picked up again by a runtime model switch. It stays
-                // server-local because the CLI passes its own --draft-model
-                // straight to ModelBase.Create instead.
+                // The one --draft-model also has to reach the model FACTORY for the
+                // block drafters that must be resident before the layer split runs
+                // (DeepSeek V4's DSpark, the DFlash / DFlash2 drafters for
+                // Muse-Glimmer and Qwen 3.8). SpeculativeCliFlags.Apply above
+                // already validated the path, published it for the attach-after-load
+                // path, and enabled speculation; these env vars are how the factory
+                // and a runtime model switch see it.
                 //
                 // All THREE are set, because each architecture reads its own and
                 // only the loaded model reads any of them. Setting just the DSpark
                 // one - which is what this did - meant --draft-model was silently
                 // ignored on the server for every DFlash target, the flag's most
-                // common use.
+                // common use. A file that is not a block drafter at all (Gemma 4's
+                // per-token assistant head) is simply never read from these: the
+                // loaders probe the GGUF's own declared architecture, so the
+                // operator never has to know which kind their file is.
                 if (SpeculativeCliFlags.TryReadOption(args, ref i, "--draft-model", out string dsparkOpt))
                 {
-                    if (string.IsNullOrWhiteSpace(dsparkOpt) || !File.Exists(dsparkOpt))
-                        throw new ArgumentException($"--draft-model file not found: '{dsparkOpt}'.");
                     Environment.SetEnvironmentVariable("TS_DSV4_DSPARK", dsparkOpt);
                     Environment.SetEnvironmentVariable("TS_QWEN35_DFLASH", dsparkOpt);
                     Environment.SetEnvironmentVariable("TS_MUSE_GLIMMER_DFLASH", dsparkOpt);
@@ -1086,6 +1113,27 @@ namespace TensorSharp.Server.Hosting
                     continue;
                 }
 
+                // Agent Skills. The VALUES are read by SkillHostOptions.Parse, which
+                // lives in TensorSharp.Runtime so this host and the CLI cannot drift
+                // apart on a spelling — a config file's keys ARE CLI flags, and the same
+                // file is expected to drive either. This block only consumes them so the
+                // unknown-option trap below does not refuse to start.
+                if (string.Equals(args[i], SkillHostOptions.DisableFlag, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(args[i], SkillHostOptions.NoDiscoveryFlag, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(args[i], SkillHostOptions.AllowScriptsFlag, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(args[i], SkillHostOptions.ListFlag, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(args[i], SkillHostOptions.AllowNetworkFlag, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                if (TryReadOption(args, ref i, SkillHostOptions.RootsFlag, out _)
+                    || TryReadOption(args, ref i, SkillHostOptions.SelectFlag, out _)
+                    || TryReadOption(args, ref i, SkillHostOptions.MaxRoundsFlag, out _)
+                    || TryReadOption(args, ref i, SkillHostOptions.SandboxFlag, out _))
+                {
+                    continue;
+                }
+
                 if (TryReadOption(args, ref i, "--upload-ttl-hours", out string uploadTtlOption))
                 {
                     if (!double.TryParse(uploadTtlOption, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsedTtlHours)
@@ -1213,6 +1261,24 @@ namespace TensorSharp.Server.Hosting
                 {
                     continue;
                 }
+                // Code-execution flags are consumed by CodeExecOptions.Parse in
+                // Program.cs, which REMOVES them from argv before Build ever runs.
+                // Recognise + skip them here anyway so a Build handed the raw command
+                // line — a test, a future reordering, an embedder — doesn't trip the
+                // unknown-arg trap on a flag the server documents and accepts.
+                //
+                // Driven off CodeExecOptions' own constants for the same reason the
+                // speculative block above is: a hand-copied list is a drift bug waiting
+                // to happen, and this one already bit — the flags reached --help while
+                // this trap still rejected them.
+                if (MatchesAny(args[i], CodeExecSwitchFlags))
+                {
+                    continue;
+                }
+                if (TryReadAnyOption(args, ref i, CodeExecValueFlags))
+                {
+                    continue;
+                }
                 // Qwen-Image-Edit companion-model flags are consumed by
                 // ApplyQwenImageCompanionCliFlags(args) in a separate earlier
                 // pass. Recognise + skip them here so they don't trip the
@@ -1276,7 +1342,7 @@ namespace TensorSharp.Server.Hosting
         /// when no flag is within edit distance 2.</summary>
         private static string SuggestFlagCorrection(string typo)
         {
-            string[] knownFlags = new[]
+            var knownFlags = new List<string>
             {
                 "--model", "--mmproj", "--backend", "--max-tokens", "--video-frames", "--fps",
                 "--port", "--host", "--urls", "--no-webui",
@@ -1302,8 +1368,22 @@ namespace TensorSharp.Server.Hosting
                 "--kv-cache-dtype", "--gpu-device", "--list-gpus", "--help",
                 "--tp", "--tp-node-id", "--tp-peers",
                 "--upload-max-mb", "--upload-quota-mb", "--upload-ttl-hours",
+                SkillHostOptions.RootsFlag, SkillHostOptions.SelectFlag, SkillHostOptions.ListFlag,
+                SkillHostOptions.DisableFlag, SkillHostOptions.NoDiscoveryFlag,
+                SkillHostOptions.AllowScriptsFlag, SkillHostOptions.MaxRoundsFlag,
+                SkillHostOptions.SandboxFlag, SkillHostOptions.AllowNetworkFlag,
+                SkillHostOptions.SelectFlag, SkillHostOptions.ListFlag,
+                // Without these, a typo like --code-exe fell through to a bare
+                // "Unknown option" with no hint, because CodeExecOptions.Parse does not
+                // match a misspelling and nothing else knew the names.
                 "--config",
             };
+            // Taken from CodeExecOptions' own tables rather than copied: without these a
+            // typo like --code-exe fell through to a bare "Unknown option" with no hint,
+            // because CodeExecOptions.Parse does not match a misspelling and nothing else
+            // knew the names.
+            knownFlags.AddRange(CodeExecOptions.SwitchFlags);
+            knownFlags.AddRange(CodeExecOptions.ValueFlags);
             string best = null;
             int bestDist = int.MaxValue;
             foreach (var flag in knownFlags)
@@ -1327,6 +1407,16 @@ namespace TensorSharp.Server.Hosting
         }
 
         /// <summary>True when <paramref name="arg"/> is exactly one of
+        /// <summary>
+        /// The code-execution flags, taken from CodeExecOptions rather than copied, so
+        /// adding one there cannot leave this parser (or the typo hints) behind.
+        /// </summary>
+        internal static readonly string[] CodeExecSwitchFlags =
+            CodeExecOptions.SwitchFlags.ToArray();
+
+        internal static readonly string[] CodeExecValueFlags =
+            CodeExecOptions.ValueFlags.ToArray();
+
         /// <paramref name="flags"/> (case-insensitive). Used to consume the
         /// valueless switches an earlier applier pass already handled.</summary>
         private static bool MatchesAny(string arg, string[] flags)
@@ -1341,7 +1431,7 @@ namespace TensorSharp.Server.Hosting
 
         /// <summary>Consume the first of <paramref name="flags"/> that matches at
         /// <paramref name="index"/>, in the order given (longest names first, so
-        /// <c>--spec-draft</c> can never eat <c>--spec-draft-model</c>'s value).</summary>
+        /// a shorter flag can never eat a longer flag's value).</summary>
         private static bool TryReadAnyOption(string[] args, ref int index, string[] flags)
         {
             foreach (var flag in flags)

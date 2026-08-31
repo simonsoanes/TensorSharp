@@ -18,7 +18,7 @@ GLM-5.2 是一个 744B 参数的 MoE 模型（256 个路由专家，top-8，外�
 | indexer 层 | 78 层里的 21 层 | 第 0、1、2 层，之后从第 6 层起每隔 4 层；中间的层复用上一个完整层的选择 |
 | MoE | 256 专家，top-8，`n_ff_exp` 2048 | sigmoid 门控，路由 bias **只影响选择**，权重重归一化，路由分支 ×2.5 |
 | Dense 层 | 前 3 层 | 普通 SwiGLU，`feed_forward_length` 12288 |
-| NextN / MTP | 末尾 1 个块 | `block_count` 把它算在内；主干图跑的是 `block_count - nextn_predict_layers` 层。传入 `--mtp-spec` 时用于[投机解码](#nextn--mtp-投机解码)，否则不加载 |
+| NextN / MTP | 末尾 1 个块 | `block_count` 把它算在内；主干图跑的是 `block_count - nextn_predict_layers` 层。传入 `--spec` 时用于[投机解码](#nextn--mtp-投机解码)，否则不加载 |
 | RoPE | NORM，base 8e6，无 YaRN | 作用在 Q 的 64 宽 rope 切片和单个 K 的 rope 尾部 |
 
 注意力 softmax 的缩放是 `1/sqrt(n_embd_head_k_mla)` = 1/16 —— 用的是**解压后**的
@@ -180,21 +180,21 @@ logits = lm_head(h_mtp)
 
 其中 `h` 是主干经过 **`output_norm` 之后**、`t` 前一个 token 的隐状态。该块由 token *t*
 预测 token *t+1*，把它链式展开就得到一个草稿窗口，主干再用一次批量前向完成验证。
-CLI 与服务端都用 `--mtp-spec` 启用，无需下载任何额外文件：
+CLI 与服务端都用 `--spec` 启用，无需下载任何额外文件：
 
 ```bash
 # CLI —— 单轮输入、chat REPL 或多轮 JSONL 运行
 dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
     --model models/GLM-5.2-UD-IQ2_XXS-00001-of-00006.gguf \
-    --backend ggml_cuda --n-cpu-moe 20 --mtp-spec --chat
+    --backend ggml_cuda --n-cpu-moe 20 --spec --chat
 
 # 服务端
 dotnet TensorSharp.Server/bin/TensorSharp.Server.dll \
     --model models/GLM-5.2-UD-IQ2_XXS-00001-of-00006.gguf \
-    --backend ggml_cuda --n-cpu-moe 20 --mtp-spec
+    --backend ggml_cuda --n-cpu-moe 20 --spec
 ```
 
-`--mtp-draft N` 与 `--mtp-pmin X` 在两端都用来调节草稿窗口与置信度阈值（见[实测](#实测)）。
+`--spec-draft N` 与 `--spec-pmin X` 在两端都用来调节草稿窗口与置信度阈值（见[实测](#实测)）。
 验证时每个输出 token 都取自主干的某一行，且用的是本次运行所配置的采样器——`--temperature 0`
 下是 argmax，`--chat` 下是聊天采样器——因此投机不会改变 token 来自哪个分布，只改变得到它
 需要几次前向。
@@ -214,7 +214,7 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll \
 
 **默认关闭是有原因的。** 该块是一整个解码层——IQ2_XXS 下约 3 GiB——会和 KV 缓存争抢
 loader 用来确定上下文长度的同一块显存，因此原生 loader 只在模型加载前设置了
-`--mtp-spec`（`TS_MTP_SPEC`）时才加载它。这也是为什么这个开关必须写在命令行上、而不能
+`--spec`（环境变量 `TS_SPEC`，旧名 `TS_MTP_SPEC`）时才加载它。这也是为什么这个开关必须写在命令行上、而不能
 事后再切换，以及为什么把它加到一条本来刚好放得下的命令上，会让 loader 最终确定的上下文
 变短。`TS_GLM_MTP=1` / `0` 可以双向覆盖，便于 A/B。
 
@@ -228,8 +228,8 @@ loader 用来确定上下文长度的同一块显存，因此原生 loader 只�
 | 配置 | decode（5 轮） | 相对基线 | 草稿接受率 | 每次验证的草稿数 |
 |---|---|---|---|---|
 | 纯贪心 | 17.96 / 18.33 / 20.42 / 20.37 / 18.56 tok/s | 1.00x | — | — |
-| `--mtp-spec`（默认值：k=8，pMin 0.75） | 20.50 / 25.68 / 25.83 / 25.85 / 23.52 tok/s | 1.14 / 1.40 / 1.27 / 1.27 / 1.27x，**中位数 1.27x** | 93.8% | 1.59 |
-| `--mtp-spec --mtp-draft 4 --mtp-pmin 0.55` | 22.35 / 26.99 / 25.86 / 26.81 / 25.89 tok/s | 1.24 / 1.47 / 1.27 / 1.32 / 1.39x，中位数 1.32x | 75.0% | 2.04 |
+| `--spec`（默认值：k=8，pMin 0.75） | 20.50 / 25.68 / 25.83 / 25.85 / 23.52 tok/s | 1.14 / 1.40 / 1.27 / 1.27 / 1.27x，**中位数 1.27x** | 93.8% | 1.59 |
+| `--spec --spec-draft 4 --spec-pmin 0.55` | 22.35 / 26.99 / 25.86 / 26.81 / 25.89 tok/s | 1.24 / 1.47 / 1.27 / 1.32 / 1.39x，中位数 1.32x | 75.0% | 2.04 |
 
 整套基准跑了五轮：一轮不足以把 5% 的调优效果和噪声区分开。
 
@@ -260,7 +260,7 @@ k=8 时，四轮里赢三轮输三轮。这两个参数是相互作用的，要�
 |---|---|---|
 | 纯贪心 | 12.57 tok/s | 1.00x |
 | 默认值 | 14.57 tok/s | 1.16x |
-| `--mtp-draft 4 --mtp-pmin 0.55` | 14.78 tok/s | 1.18x |
+| `--spec-draft 4 --spec-pmin 0.55` | 14.78 tok/s | 1.18x |
 
 卸载得越多，1 行基线被拖慢的幅度大于宽验证被拖慢的幅度，曲线因此变平（那里 2 行验证是
 1 行 decode 的 1.16 倍，而不是 1.27 倍），各配置随之收敛。
@@ -280,7 +280,7 @@ k=8 时，四轮里赢三轮输三轮。这两个参数是相互作用的，要�
 - 关闭起草后跑完整条投机循环——同样的缓存记账、同样的 catch-up、同样的回退——与贪心**完全一致**。
 
 也就是说，该效应来自 batch 尺寸而非投机本身。如果需要与非投机贪心逐 token 一致，就不要
-打开 `--mtp-spec`。
+打开 `--spec`。
 
 ## 数值一致性
 
@@ -470,7 +470,7 @@ KDA 递归状态（卷积尾部 + delta-net 状态，每序列约 150 MB）无�
   `<|image|>` 占位行（`TSGgml_GlmQueueVisionRows`）——文本塔是 NoPE，
   完全不需要 MRoPE 记账。
 - **暂未支持**：`--tp` 张量并行（干净地拒绝；用层切分）与 NextN/MTP 投机
-  （llama.cpp 同样 assert 其 glm5next MTP 图未实现；`--mtp-spec` 打印提示后按
+  （llama.cpp 同样 assert 其 glm5next MTP 图未实现；`--spec` 打印提示后按
   标准解码服务）。
 
 ### 实测

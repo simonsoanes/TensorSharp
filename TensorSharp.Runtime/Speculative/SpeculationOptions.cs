@@ -132,10 +132,13 @@ namespace TensorSharp.Runtime.Speculative
 
         private static float? ReadFloatOrNull(string name, string fallbackName)
         {
+            // Zero is a real value, not "unset": --spec-pmin 0 means "never gate a
+            // draft on confidence", which the removed --spec-draft-conf-min spelling
+            // could express and its survivor must keep expressing.
             string raw = ReadString(name, fallbackName);
             return raw != null
                    && float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out float v)
-                   && v > 0f && v <= 1f
+                   && v >= 0f && v <= 1f
                 ? v
                 : null;
         }

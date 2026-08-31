@@ -273,6 +273,13 @@ namespace TensorSharp.Models
 
             _kvCacheCapacity = newCapacity;
             Console.WriteLine($"Expanded Qwen3 attention cache to {newCapacity} tokens.");
+
+            // The native layer-decode arrays hold RAW storage pointers into the K/V
+            // tensors that were just disposed and replaced. Rebuilding them here is
+            // what stands between "cache grew" and the next decode's memmove landing
+            // in freed memory — the SIGSEGV that killed qwen2vl chats whose prompt
+            // outgrew the initial allocation.
+            BuildModelDecodeArrays();
         }
 
         protected override void ResetKVCacheCore()

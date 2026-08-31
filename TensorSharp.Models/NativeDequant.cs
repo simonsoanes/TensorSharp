@@ -24,6 +24,21 @@ namespace TensorSharp.Models
         private static bool UseManaged(int ggmlType)
             => PreferManaged && ManagedQuantizedOps.SupportsDequantization((GgmlTensorType)ggmlType);
 
+        // One notice for the whole process: once the native library is missing it is
+        // missing for every tensor, and the load loop hits these catches thousands of times.
+        private static int _managedFallbackWarned;
+
+        private static void WarnManagedFallback(Exception ex)
+        {
+            if (System.Threading.Interlocked.Exchange(ref _managedFallbackWarned, 1) != 0)
+                return;
+            Console.Error.WriteLine(
+                $"WARNING: native GgmlOps dequantization is unavailable ({ex.Message}); load-time " +
+                "dequantization is running on the managed C# path instead, so model loading will be " +
+                "substantially slower. Verify the GgmlOps native library is present and matches this " +
+                "build. Reported once.");
+        }
+
         public static void DequantizeToFloat32(int ggmlType, byte[] src, int srcOffset, float[] dst, int dstOffset, long numElements)
         {
             if (UseManaged(ggmlType))
@@ -37,6 +52,7 @@ namespace TensorSharp.Models
             }
             catch (Exception ex) when (ShouldUseManagedFallback(ex))
             {
+                WarnManagedFallback(ex);
                 ManagedQuantizedOps.DequantizeToFloat32(ggmlType, src, srcOffset, dst, dstOffset, numElements);
             }
         }
@@ -54,6 +70,7 @@ namespace TensorSharp.Models
             }
             catch (Exception ex) when (ShouldUseManagedFallback(ex))
             {
+                WarnManagedFallback(ex);
                 ManagedQuantizedOps.DequantizeToFloat32(ggmlType, src, dst, dstOffset, numElements);
             }
         }
@@ -71,6 +88,7 @@ namespace TensorSharp.Models
             }
             catch (Exception ex) when (ShouldUseManagedFallback(ex))
             {
+                WarnManagedFallback(ex);
                 ManagedQuantizedOps.DequantizeToFloat32Native(ggmlType, src, dst, numElements);
             }
         }
@@ -85,6 +103,7 @@ namespace TensorSharp.Models
             }
             catch (Exception ex) when (ShouldUseManagedFallback(ex))
             {
+                WarnManagedFallback(ex);
                 var type = (GgmlTensorType)ggmlType;
                 long blockSize = GgufFile.GetBlockSize(type);
                 if (ne % blockSize != 0)

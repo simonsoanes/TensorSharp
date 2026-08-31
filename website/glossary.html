@@ -70,7 +70,7 @@
   <ul>
     <li>Use a GPU backend (<code>ggml_cuda</code>, <code>ggml_vulkan</code>, or <code>ggml_metal</code>).</li>
     <li>Pick a smaller or more aggressively quantized model.</li>
-    <li>On supported models, enable <a href="advanced.html#mtp">speculative decoding</a> with <code>--mtp-spec</code> — or, on DeepSeek V4, load a <a href="advanced.html#dspark">DSpark block drafter</a> with <code>--draft-model</code>.</li>
+    <li>On supported models, enable <a href="advanced.html#mtp">speculative decoding</a> with <code>--spec</code> — or, on DeepSeek V4, load a <a href="advanced.html#dspark">DSpark block drafter</a> with <code>--draft-model</code>.</li>
     <li>Reuse sessions so the <a href="advanced.html#continuous-batching">KV-cache prefix</a> carries over between turns.</li>
   </ul>
 

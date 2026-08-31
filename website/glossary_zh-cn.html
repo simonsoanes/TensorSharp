@@ -70,7 +70,7 @@
   <ul>
     <li>使用 GPU 后端（<code>ggml_cuda</code>、<code>ggml_vulkan</code> 或 <code>ggml_metal</code>）。</li>
     <li>选更小或量化更激进的模型。</li>
-    <li>在受支持的模型上，用 <code>--mtp-spec</code> 启用<a href="advanced_zh-cn.html#mtp">推测解码</a>；在 DeepSeek V4 上则用 <code>--draft-model</code> 加载 <a href="advanced_zh-cn.html#dspark">DSpark 块级草稿器</a>。</li>
+    <li>在受支持的模型上，用 <code>--spec</code> 启用<a href="advanced_zh-cn.html#mtp">推测解码</a>；在 DeepSeek V4 上则用 <code>--draft-model</code> 加载 <a href="advanced_zh-cn.html#dspark">DSpark 块级草稿器</a>。</li>
     <li>复用会话，让 <a href="advanced_zh-cn.html#continuous-batching">KV 缓存前缀</a>在轮次间延续。</li>
   </ul>
 

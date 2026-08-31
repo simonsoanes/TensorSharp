@@ -32,8 +32,8 @@ namespace TensorSharp.Cli
     ///     Qwen 3.6) is always there once the checkpoint is loaded, so it needs an
     ///     explicit <c>--spec</c> — matching the server's opt-in default, and
     ///     for GLM also matching what the loader was told: the native loader only
-    ///     pages the ~3 GiB draft layer into VRAM when <c>TS_MTP_SPEC</c> was
-    ///     already set, so a request that arrives after the model is loaded cannot
+    ///     pages the ~3 GiB draft layer into VRAM when the speculation env var
+    ///     was already set, so a request that arrives after the model is loaded cannot
     ///     be honoured at all.
     /// </summary>
     internal static class SpeculativeDecodingOptions
@@ -81,44 +81,12 @@ namespace TensorSharp.Cli
         }
 
         /// <summary>
-        /// Publish the effective draft window to the environment before the model
-        /// is created, so the older <c>--spec-draft-n-max</c> spelling reaches the
-        /// places only the environment can reach.
-        ///
-        /// <see cref="SpeculativeCliFlags.Apply"/> already did this for
-        /// <c>--spec-draft</c>, at the top of Main; <c>--spec-draft-n-max</c> is parsed
-        /// later, in the main argument switch, and would otherwise resize the decoder
-        /// without resizing what the LOADER sizes from the same number — the glm-dsa
-        /// native graph cache, which holds one entry per live graph shape and gets
-        /// <c>8 + 2*(N+1)</c> of them. Left at the default 8, a
-        /// <c>--spec-draft-n-max 16</c> run rebuilds and re-allocates a graph it had a
-        /// moment ago on every step, and measures slower than plain decoding for a
-        /// reason nothing in the log explains.
-        /// </summary>
-        internal static void PublishDraftWindow(int specDraftMax)
-        {
-            if (specDraftMax <= 0)
-                return;
-            if (specDraftMax > SpeculativeCliFlags.MaxDraftTokens)
-            {
-                throw new ArgumentException(
-                    $"Invalid value for --spec-draft-n-max: '{specDraftMax}'. "
-                    + $"Expected an integer in [1, {SpeculativeCliFlags.MaxDraftTokens}].");
-            }
-            // BOTH spellings: managed readers prefer TS_SPEC_DRAFT, and leaving a
-            // stale one behind would let an earlier --spec-draft silently win over
-            // the more specific --spec-draft-n-max. The glm-dsa native loader only
-            // knows TS_MTP_DRAFT.
-            string value = specDraftMax.ToString(CultureInfo.InvariantCulture);
-            Environment.SetEnvironmentVariable(SpeculationEnvVars.Draft, value);
-            Environment.SetEnvironmentVariable(SpeculativeCliFlags.DraftEnvVar, value);
-        }
-
-        /// <summary>
-        /// Combine the speculation environment (already carrying whatever
-        /// <see cref="SpeculativeCliFlags.Apply"/> translated from the command
-        /// line) with the CLI's own <c>--spec-draft-n-max</c> / <c>--spec-draft-conf-min</c>
-        /// flags, which win when set because they are the more specific spelling.
+        /// Resolve the run's speculation knobs from the environment (already
+        /// carrying whatever <see cref="SpeculativeCliFlags.Apply"/> translated
+        /// from the command line). The parameters are programmatic overrides for
+        /// callers that decide per run; the command line has exactly one spelling
+        /// per knob (--spec-draft / --spec-pmin), so for a normal CLI run both
+        /// arrive unset and the environment decides.
         /// </summary>
         internal static Settings Resolve(int specDraftMax, float specDraftConfMin)
         {

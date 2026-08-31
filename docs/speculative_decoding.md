@@ -208,12 +208,16 @@ accept `--spec-type ngram` on any checkpoint.
 --spec-type <name>              auto (default) | draft-head | block | ngram
 --spec-draft <N>                max tokens drafted per step (1-64, default 8)
 --spec-pmin <f>                 confidence gate (default: per algorithm)
---spec-draft-model <path>       separate draft-head GGUF (Gemma 4)
---draft-model <path>            block drafter GGUF resident before the layer split
+--draft-model <path>            a drafter that ships as its own GGUF: Gemma 4's
+                                draft head, or a block drafter resident before
+                                the layer split
 ```
 
 The historical `--mtp-spec`, `--mtp-draft`, `--mtp-pmin` and `--mtp-draft-model`
-spellings are accepted unchanged. Environment variables are published under both
+spellings (and the old `--spec-draft-model` alias) have been removed: each fails
+with an error naming its replacement, never a silent ignore, because the CLI's
+argument switch drops unknown flags and "speculation quietly off" is exactly the
+failure that would produce. Environment variables are published under both
 `TS_SPEC_*` and `TS_MTP_*`, and that is not merely for compatibility: the glm-dsa
 **native** loader reads `TS_MTP_SPEC` and `TS_MTP_DRAFT` from C++ while the model
 is loading — it decides whether to page a whole extra 256-expert decoder layer
@@ -304,7 +308,7 @@ The selector's lattice comes back to the host as `k + k*k*(gamma-1)` floats
 
 ### Attaching one
 
-`--draft-model <path>` (or `--spec-draft-model`, or `TS_QWEN35_DFLASH` /
+`--draft-model <path>` (or `TS_QWEN35_DFLASH` /
 `TS_MUSE_GLIMMER_DFLASH`). The file's `general.architecture` decides what it is,
 not its name. A target that already carries a NextN/MTP block (Qwen 3.8 does)
 uses the DFlash drafter instead when one is attached: they consume different

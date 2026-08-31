@@ -520,6 +520,12 @@ namespace TensorSharp.Models
                 $"sum={sum:F4} sumsq={sumsq:F4} min={min:F5} max={max:F5} first={data[0]:F6},{data[1]:F6},{data[2]:F6}");
         }
 
+        // One-shot degrade notices: these fused paths used to fall back silently,
+        // leaving image prefill on the per-op chain with no trace of why it was slow.
+        private bool _wholeEncoderFusedWarned;
+        private bool _fusedVisionAttnWarned;
+        private bool _fusedVisionMlpWarned;
+
         /// <summary>
         /// Run every encoder block as ONE device-resident GGML graph
         /// (<see cref="GgmlBasicOps.Qwen35VisionEncoder"/>). Collects the per-block
@@ -579,8 +585,15 @@ namespace TensorSharp.Models
                     _hostModel?.YieldGpuComputeLock();
                 return ok;
             }
-            catch (Exception)
+            catch (Exception e)
             {
+                if (!_wholeEncoderFusedWarned)
+                {
+                    _wholeEncoderFusedWarned = true;
+                    Console.Error.WriteLine(
+                        $"[qwen35-vision] whole-encoder fused graph failed ({e.Message}); " +
+                        "falling back to the per-block encoder (5-15x slower image prefill). Reported once.");
+                }
                 return false;
             }
         }
@@ -608,9 +621,17 @@ namespace TensorSharp.Models
                         cosTable, sinTable, numPatches, _numHeads, headDim, halfDim, attnScale);
                     fusedAttn = true;
                 }
-                catch
+                catch (Exception e)
                 {
                     fusedAttn = false;
+                    if (!_fusedVisionAttnWarned)
+                    {
+                        _fusedVisionAttnWarned = true;
+                        Console.Error.WriteLine(
+                            $"[qwen35-vision] FusedVisionAttention failed ({e.Message}); " +
+                            "using the managed split + RoPE + SDPA chain instead " +
+                            "(significantly slower image prefill). Reported once.");
+                    }
                 }
             }
 
@@ -641,9 +662,17 @@ namespace TensorSharp.Models
                     GgmlBasicOps.FusedVisionMLP(hidden, ln2W, ln2B, _eps, upW, upB, downW, downB);
                     return hidden;
                 }
-                catch
+                catch (Exception e)
                 {
                     // Fall back to unfused path on failure.
+                    if (!_fusedVisionMlpWarned)
+                    {
+                        _fusedVisionMlpWarned = true;
+                        Console.Error.WriteLine(
+                            $"[qwen35-vision] FusedVisionMLP failed ({e.Message}); " +
+                            "using the unfused LayerNorm + up/GELU/down chain instead " +
+                            "(significantly slower image prefill). Reported once.");
+                    }
                 }
             }
 

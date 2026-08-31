@@ -54,7 +54,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
 # 通过 HTTP 服务，4 张 GPU，开启投机
 dotnet TensorSharp.Server/bin/TensorSharp.Server.dll \
     --model models/UD-Q8_K_XL/DeepSeek-V4-Flash-0731-UD-Q8_K_XL-00001-of-00005.gguf \
-    --backend ggml_cuda --tp 4 --mtp-spec --draft-model models/DSpark-drafter-Q2K-Q8-0731.gguf</code></pre>
+    --backend ggml_cuda --tp 4 --draft-model models/DSpark-drafter-Q2K-Q8-0731.gguf</code></pre>
   <p>DSpark 每步起草一整<em>块</em> token，主干用一次批量前向验证整块，因此贪心输出保持不变。在 CLI 上它需要纯 argmax 采样（任何 temperature、top-k/p 或惩罚项都会将其关闭）；在服务端每一行验证都用该请求自己的采样器，因此可与任意采样设置组合。详见 <a href="advanced_zh-cn.html#dspark">DSpark 投机解码</a>。</p>
 
   <h3 id="glm">GLM 5.x（744B-A40B MoE，文本、思考、工具）</h3>
@@ -135,10 +135,10 @@ hf download unsloth/Qwen3.5-9B-GGUF mmproj-F16.gguf --local-dir models
 dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf \
     --image photo.png --max-tokens 300 --backend ggml_cuda
 dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf --backend ggml_cuda</code></pre>
-  <p>Qwen 3.6 NextN 必须从保留该块的 <code>-MTP-</code> 仓库下载，并在<em>服务端</em>加入 <code>--mtp-spec</code>；基础仓库 GGUF 会剥离 NextN 块并回退到标准解码：</p>
+  <p>Qwen 3.6 NextN 必须从保留该块的 <code>-MTP-</code> 仓库下载，并在<em>服务端</em>加入 <code>--spec</code> —— 该草稿头内嵌在主干 checkpoint 里，加载它要把额外权重调入显存，因此需要显式开启；基础仓库 GGUF 会剥离 NextN 块并回退到标准解码：</p>
   <pre data-lang="bash"><code>hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --local-dir models
 
-dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda --mtp-spec</code></pre>
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda --spec</code></pre>
 
   <h3 id="qwen4exp">Qwen 3.8 Flash Next（混合 MoE，文本 + 图像、思考、工具）</h3>
   <p>一个混合专家模型，GGUF 架构 id 为 <code>qwen4exp</code>：GatedDeltaNet 递归层与全注意力层交错（其中一部分还挂在 Qwen 稀疏注意力的索引器之后），一个 PLE n-gram 嵌入块，×4 的超连接流，以及 512 专家的 MoE。48 层，隐藏维度 2560，24 个 query 头 / 2 个 KV 头、head_dim 256，词表 248,320，每个 token 从 512 个专家里用 10 个，48 层中有 36 层带 GDN，PLE 在第 1 层。在各 ggml 后端上，整个 token（几乎）作为<strong>一张图</strong>跑完——嵌入、图内 PLE、全部 48 层、最后的混合器与 LM 头——并从按形状索引的已捕获图缓存中回放。视觉走 Qwen3.5-VL 塔，使用 (T,H,W) IMRoPE 位置，因此多图提示与多轮图像会话都可用；只要新提示恰好是缓存前缀的延长，跨轮的 KV 就会被复用（GDN 递归无法回退）。并发请求由按序列的状态持有者承载——每个请求拥有自己的注意力 KV 与索引器缓存、自己的 GDN 与 PLE 状态——因此请求之间的切换只是换一个引用。思考与工具调用都可用。</p>
@@ -200,7 +200,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Muse-Glimmer-30B-U
     --max-tokens 300 --backend ggml_cuda
 # DFlash 投机解码（草稿 GGUF 可从同仓库下载）
 dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
-    --draft-model models/dflash-kquant.gguf --spec-draft-n-max 15 --input prompt.txt --backend ggml_cuda</code></pre>
+    --draft-model models/dflash-kquant.gguf --spec-draft 15 --input prompt.txt --backend ggml_cuda</code></pre>
 
   <h3 id="diffusiongemma">DiffusionGemma（分块文本扩散）</h3>
   <pre data-lang="bash"><code>hf download unsloth/diffusiongemma-26B-A4B-it-GGUF diffusiongemma-26B-A4B-it-Q4_K_M.gguf --local-dir models
