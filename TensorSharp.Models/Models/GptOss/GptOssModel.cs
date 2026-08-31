@@ -686,8 +686,7 @@ namespace TensorSharp.Models
         {
             _maxContextLength = maxSeqLen;
             _kvCacheCapacity = initialSeqLen;
-            int numKVHeads = Config.NumKVHeads;
-            int headDim = Config.HeadDim;
+            _initialKvCacheLength = initialSeqLen;
             // Pick model-aligned default. For F16-quantised GPT-OSS this gives
             // an F16 KV cache (halves cache memory + bandwidth, byte-identical
             // outputs at 1e-3). The fused prefill kernel and the F16-aware
@@ -700,16 +699,10 @@ namespace TensorSharp.Models
             // shipping GGUF, so the F16 default is safe for benchmark and
             // chat workloads.
             ApplyModelAlignedKvCacheDefault(_quantWeights);
-            DType kvDtype = _kvCacheDtype.ToDType();
-            _kvCacheK = new Tensor[Config.NumLayers];
-            _kvCacheV = new Tensor[Config.NumLayers];
-            for (int l = 0; l < Config.NumLayers; l++)
-            {
-                _kvCacheK[l] = new Tensor(_allocator, kvDtype, numKVHeads, initialSeqLen, headDim);
-                _kvCacheV[l] = new Tensor(_allocator, kvDtype, numKVHeads, initialSeqLen, headDim);
-                InitializeCacheTensor(_kvCacheK[l]);
-                InitializeCacheTensor(_kvCacheV[l]);
-            }
+            // Shared with the per-request holders (GptOssModel.PerSeqCache.cs)
+            // so the primary cache and every concurrent request's cache have
+            // exactly one definition of the layout.
+            AllocateKvCacheArrays(initialSeqLen, out _kvCacheK, out _kvCacheV);
             _cacheSeqLen = 0;
         }
 
@@ -2726,6 +2719,7 @@ namespace TensorSharp.Models
                 foreach (var handle in _sinksHandles)
                     if (handle.IsAllocated)
                         handle.Free();
+            DisposeFusedSequenceCaches();
             DisposeFusedModelDecodeState();
             base.Dispose();
         }

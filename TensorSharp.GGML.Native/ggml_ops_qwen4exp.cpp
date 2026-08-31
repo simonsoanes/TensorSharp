@@ -50,18 +50,8 @@ namespace
     // A 48-layer span builds ~150 nodes a layer; 16384 leaves headroom.
     constexpr int kQwen4ExpSpanGraphSize = 16384;
 
-    // A weight binding resolved through the resident cache, remembered so a
-    // REPLAY can re-resolve it. The cache can move or re-create a device copy
-    // (large allocations elsewhere churn it), and a persisted graph would keep
-    // reading the old address forever - the graph-uid stamp even tells ggml-cuda
-    // to skip the staleness walk that might have noticed.
-    struct Q4eCachedBind
-    {
-        ggml_tensor* tensor;
-        void* data;
-        std::size_t bytes;
-        ggml_backend_buffer_usage usage;
-    };
+    // Q4eCachedBind (a cache-resolved weight binding a REPLAY can re-resolve)
+    // lives in ggml_ops_internal.h, shared with the arena kernel.
 
     // One built graph per layer (or per span), kept across tokens.
     //
@@ -165,12 +155,8 @@ namespace
     // own holder's state entry. `ready` gates the one-time seed upload: a
     // rebuild binds the existing buffer WITHOUT re-seeding (the device copy is
     // authoritative; the host seed is stale after the first forward).
-    struct Q4eSeqStateEntry
-    {
-        ggml_backend_buffer_t buf = nullptr;
-        std::size_t bytes = 0;
-        bool ready = false;
-    };
+    // (Q4eSeqStateEntry itself lives in ggml_ops_internal.h - the arena kernel
+    // joins from and flushes into these entries device-to-device.)
     // ---- per-device executor state ---------------------------------------
     //
     // A layer split puts a contiguous run of layers on each GPU, so the same
@@ -211,8 +197,12 @@ namespace
 #define g_q4e_res_capacity   (q4e_dev().res_capacity)
 #define g_q4e_res_ctx        (q4e_dev().res_ctx)
 #define g_q4e_res            (q4e_dev().res)
+}
 
-    Q4eSeqStateEntry* q4e_seq_state(const void* key, std::size_t bytes)
+// External linkage (declared in ggml_ops_internal.h): shared with the arena
+// kernel. Both operate on the ACTIVE rank's map - callers select the device
+// first.
+Q4eSeqStateEntry* q4e_seq_state(const void* key, std::size_t bytes)
     {
         if (key == nullptr) return nullptr;
         Q4eSeqStateEntry& e = g_q4e_seq_state[key];
@@ -233,22 +223,35 @@ namespace
         return &e;
     }
 
-    // ggml-cuda's flash attention takes F16 K/V and one of a fixed set of head sizes;
-    // for head_dim 256 the only other condition is V->ne[0] == K->ne[0], which holds
-    // here. TS_Q4E_FLASH_ATTN=0 falls back to the soft_max path.
-    bool q4e_flash_attn_ok(int kv_type, int head_dim)
+// Lookup WITHOUT creating: the arena join declines on a missing entry instead
+// of fabricating recurrent state for a sequence that never ran through the
+// span.
+Q4eSeqStateEntry* q4e_seq_state_find(const void* key)
+{
+    if (key == nullptr) return nullptr;
+    auto it = g_q4e_seq_state.find(key);
+    return it == g_q4e_seq_state.end() ? nullptr : &it->second;
+}
+
+// ggml-cuda's flash attention takes F16 K/V and one of a fixed set of head sizes;
+// for head_dim 256 the only other condition is V->ne[0] == K->ne[0], which holds
+// here. TS_Q4E_FLASH_ATTN=0 falls back to the soft_max path.
+bool q4e_flash_attn_ok(int kv_type, int head_dim)
+{
+    static const bool enabled = []{
+        const char* e = std::getenv("TS_Q4E_FLASH_ATTN");
+        return !(e != nullptr && e[0] == '0');
+    }();
+    if (!enabled || kv_type != GGML_TYPE_F16) return false;
+    switch (head_dim)
     {
-        static const bool enabled = []{
-            const char* e = std::getenv("TS_Q4E_FLASH_ATTN");
-            return !(e != nullptr && e[0] == '0');
-        }();
-        if (!enabled || kv_type != GGML_TYPE_F16) return false;
-        switch (head_dim)
-        {
-            case 64: case 80: case 96: case 112: case 128: case 256: return true;
-            default: return false;
-        }
+        case 64: case 80: case 96: case 112: case 128: case 256: return true;
+        default: return false;
     }
+}
+
+namespace
+{
 
     // ggml-cuda picks its GQA-optimised flash-attention kernel only when
     // K->ne[1] % FATTN_KQ_STRIDE == 0, so the window is padded to that and the pad
@@ -494,17 +497,22 @@ namespace
     //
     // Used by the per-layer fallback's residency experiment; the token span does not
     // need it - inside one graph the residual never exists on the host at all.
-    // Clamp a caller-supplied device index to an initialized rank. -1 (or an
-    // out-of-range value from a host that predates the layer split) means "the
-    // current rank", which is 0 on every single-GPU run.
-    int q4e_resolve_device(int device)
-    {
-        if (device < 0) return tsg::g_active_rank;
-        const int ndev = tsg::g_device_count.load(std::memory_order_acquire);
-        if (device >= ndev || device >= tsg::TSG_MAX_DEVICES) return tsg::g_active_rank;
-        return device;
-    }
+}
 
+// Clamp a caller-supplied device index to an initialized rank. -1 (or an
+// out-of-range value from a host that predates the layer split) means "the
+// current rank", which is 0 on every single-GPU run. External linkage: the
+// arena kernel selects its per-device pool with the same rule as the span.
+int q4e_resolve_device(int device)
+{
+    if (device < 0) return tsg::g_active_rank;
+    const int ndev = tsg::g_device_count.load(std::memory_order_acquire);
+    if (device >= ndev || device >= tsg::TSG_MAX_DEVICES) return tsg::g_active_rank;
+    return device;
+}
+
+namespace
+{
     // Ensure the shared residual tensor exists and is at least `bytes` big.
     // Per device: see Q4eDeviceState.
     bool q4e_res_ensure(std::size_t bytes)
@@ -538,21 +546,16 @@ namespace
         return true;
     }
 
-    // One place for the weight-binding policy the three block builders shared as a
-    // copy-pasted lambda each. Collecting the uploads here rather than binding
-    // immediately is what lets several layers build into one graph: everything is
-    // bound before a single ggml_gallocr_alloc_graph runs over the lot.
-    struct Q4eHostBinding { ggml_tensor* tensor; void* data; std::size_t bytes; };
+}
 
-    struct Q4eBinder
-    {
-        ggml_backend_dev_t dev = nullptr;
-        std::vector<Q4eHostBinding> upload_list;
-        std::vector<Q4eCachedBind> cached;
-
-        void add(ggml_tensor* tgt, void* data, std::size_t bytes,
-                 ggml_backend_buffer_usage usage = GGML_BACKEND_BUFFER_USAGE_WEIGHTS)
-        {
+// One place for the weight-binding policy every block builder shares (the
+// struct lives in ggml_ops_internal.h so the arena kernel binds through the
+// same policy). Collecting the uploads rather than binding immediately is what
+// lets several layers build into one graph: everything is bound before a
+// single allocation pass runs over the lot.
+void Q4eBinder::add(ggml_tensor* tgt, void* data, std::size_t bytes,
+                    ggml_backend_buffer_usage usage)
+{
             if (tgt == nullptr || data == nullptr) return;
             if (bytes >= 4096)
             {
@@ -590,10 +593,10 @@ namespace
             ggml_set_input(tgt);
             ggml_set_output(tgt);
             upload_list.push_back({tgt, data, bytes});
-        }
+}
 
-        void flush()
-        {
+void Q4eBinder::flush()
+{
             // resolve_upload_source, not the raw pointer. For a QUANTIZED weight the
             // "host pointer" C# passes is a CacheKey - a GCHandle value, not memory -
             // and the redirect turns it back into the real bytes. Every other fused
@@ -607,95 +610,11 @@ namespace
             for (const Q4eHostBinding& hb : upload_list)
                 ggml_backend_tensor_set(hb.tensor, resolve_upload_source(hb.data), 0, hb.bytes);
             upload_list.clear();
-        }
-    };
 }
 
-extern "C"
-{
-
-// Per-layer weights. Pointers first, then int64, then int32 - the layout the
-// C# side mirrors; append within a run rather than reordering.
-struct TSGgmlQwen4ExpFfnArgs
-{
-    // hyper-connection mixer
-    void* hc_norm;          // f32 [hc_dim], gamma folded to (1 + w)
-    void* hc_down;          // [hc_dim, hc_low_rank]
-    void* hc_up;            // [hc_low_rank, hc_dim]
-    void* hc_inject;        // [hc_dim, hc]
-    // MoE
-    void* router;           // [n_embd, n_expert]
-    void* gate_exps;        // [n_embd, n_ff, n_expert]
-    void* up_exps;          // [n_embd, n_ff, n_expert]
-    void* down_exps;        // [n_ff, n_embd, n_expert]
-    // shared expert
-    void* sh_gate_inp;      // f32 [n_embd] - one sigmoid scalar per token
-    void* sh_gate;          // [n_embd, n_ff_sh]
-    void* sh_up;            // [n_embd, n_ff_sh]
-    void* sh_down;          // [n_ff_sh, n_embd]
-
-    long long hc_down_bytes, hc_up_bytes, hc_inject_bytes;
-    long long router_bytes, gate_exps_bytes, up_exps_bytes, down_exps_bytes;
-    long long sh_gate_bytes, sh_up_bytes, sh_down_bytes;
-
-    int hc_down_type, hc_up_type, hc_inject_type;
-    int router_type, gate_exps_type, up_exps_type, down_exps_type;
-    int sh_gate_type, sh_up_type, sh_down_type;
-};
-
-// Per-layer weights for the recurrent (Gated DeltaNet) half of a layer.
-struct TSGgmlQwen4ExpGdnArgs
-{
-    // hyper-connection mixer
-    void* hc_norm;
-    void* hc_down;
-    void* hc_up;
-    void* hc_inject;
-    // delta net
-    void* qkv;              // [n_embd, conv_dim]
-    void* gate;             // [n_embd, value_dim]
-    void* beta;             // [n_embd, n_v_heads]
-    void* alpha;            // [n_embd, n_v_heads]
-    void* conv1d;           // f32 [d_conv, conv_dim]
-    void* ssm_dt;           // f32 [n_v_heads]
-    void* ssm_a;            // f32 [n_v_heads], pre-negated
-    void* ssm_norm;         // f32 [head_v_dim]
-    void* out_proj;         // [value_dim, n_embd]
-    // state, updated in place
-    void* conv_state;       // f32 [d_conv-1, conv_dim]
-    void* ssm_state;        // f32 [head_v_dim, head_v_dim, n_v_heads]
-
-    long long hc_down_bytes, hc_up_bytes, hc_inject_bytes;
-    long long qkv_bytes, gate_bytes, beta_bytes, alpha_bytes, out_proj_bytes;
-
-    int hc_down_type, hc_up_type, hc_inject_type;
-    int qkv_type, gate_type, beta_type, alpha_type, out_proj_type;
-};
-
-// Per-layer weights for the full-attention half of a layer.
-struct TSGgmlQwen4ExpAttnArgs
-{
-    void* hc_norm;
-    void* hc_down;
-    void* hc_up;
-    void* hc_inject;
-    void* wq;               // [n_embd, head_dim * n_head * 2]  (query|gate interleaved)
-    void* wk;               // [n_embd, head_dim * n_head_kv]
-    void* wv;
-    void* wo;               // [head_dim * n_head, n_embd]
-    void* q_norm;           // f32 [head_dim]
-    void* k_norm;           // f32 [head_dim]
-    void* k_cache;          // f16/f32 [head_dim, capacity, n_head_kv]
-    void* v_cache;
-
-    long long hc_down_bytes, hc_up_bytes, hc_inject_bytes;
-    long long wq_bytes, wk_bytes, wv_bytes, wo_bytes;
-    long long kv_bytes;     // per cache
-
-    int hc_down_type, hc_up_type, hc_inject_type;
-    int wq_type, wk_type, wv_type, wo_type;
-    int kv_type;
-};
+// The per-layer descriptor structs (TSGgmlQwen4ExpFfnArgs / GdnArgs / AttnArgs)
+// live in ggml_ops_internal.h, shared with the arena kernel; the C# side
+// mirrors their layout.
 
 // ============================================================================
 // Node builders. Each appends one half-layer to ctx and returns the new
@@ -705,7 +624,7 @@ struct TSGgmlQwen4ExpAttnArgs
 
 // FFN half: hyper-connection mixer -> routed experts + gated shared expert ->
 // hyper-connection scatter. No side effects; expands nothing.
-static ggml_tensor* q4e_nodes_ffn(
+ggml_tensor* q4e_nodes_ffn(
     ggml_context* ctx, Q4eBinder& bnd,
     const TSGgmlQwen4ExpFfnArgs* a, ggml_tensor* res_in,
     int n_embd, int hc, int hc_low_rank, int T,
@@ -832,16 +751,14 @@ static ggml_tensor* q4e_nodes_ffn(
 // always has; the span expands cpy(tail -> conv_state) into the graph AFTER
 // the nodes that read the state, so node order sequences the write behind the
 // read. The write-back sources come out through `wb`.
-struct Q4eGdnWriteback { ggml_tensor* tail; ggml_tensor* new_state; };
-
-static ggml_tensor* q4e_nodes_gdn(
+ggml_tensor* q4e_nodes_gdn(
     ggml_context* ctx, Q4eBinder& bnd,
     const TSGgmlQwen4ExpGdnArgs* a, ggml_tensor* res_in,
     ggml_tensor* conv_state, ggml_tensor* ssm_state,
     int n_embd, int hc, int hc_low_rank, int T,
     int head_k_dim, int head_v_dim, int n_k_heads, int n_v_heads, int d_conv,
     float eps, Q4eGdnWriteback* wb,
-    std::vector<ggml_tensor*>* probe = nullptr)
+    std::vector<ggml_tensor*>* probe)
 {
     const int hc_dim = hc * n_embd;
     const int key_dim = head_k_dim * n_k_heads;
@@ -995,7 +912,7 @@ static ggml_tensor* q4e_nodes_gdn(
 // k_full is a plain view of the cache and ggml does not treat view aliasing as
 // an edge - so node order is the only thing sequencing the write against the
 // read, and this token has to be able to attend to itself.
-static ggml_tensor* q4e_nodes_attn(
+ggml_tensor* q4e_nodes_attn(
     ggml_context* ctx, ggml_cgraph* graph, Q4eBinder& bnd,
     const TSGgmlQwen4ExpAttnArgs* a, ggml_tensor* res_in,
     ggml_tensor* mask, ggml_tensor* pos, ggml_tensor* kv_idx,
@@ -1003,9 +920,10 @@ static ggml_tensor* q4e_nodes_attn(
     int head_dim, int n_head, int n_head_kv, int kv_capacity, int n_kv_pad,
     int n_rot, float rope_base, float rope_freq_scale, float attn_scale,
     float eps, bool use_flash,
-    std::vector<ggml_tensor*>* kv_out = nullptr,
-    std::vector<ggml_tensor*>* probe = nullptr,
-    const int32_t* mrope_sections = nullptr)
+    std::vector<ggml_tensor*>* kv_out,
+    std::vector<ggml_tensor*>* probe,
+    const int32_t* mrope_sections,
+    Q4eAttnArenaIO* arena)
 {
     const int hc_dim = hc * n_embd;
     const int q_dim = head_dim * n_head;
@@ -1020,8 +938,15 @@ static ggml_tensor* q4e_nodes_attn(
     ggml_tensor* wo       = ggml_new_tensor_2d(ctx, (ggml_type)a->wo_type, q_dim, n_embd);
     ggml_tensor* q_norm_w = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, head_dim);
     ggml_tensor* k_norm_w = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, head_dim);
-    ggml_tensor* k_cache  = ggml_new_tensor_3d(ctx, (ggml_type)a->kv_type, head_dim, kv_capacity, n_head_kv);
-    ggml_tensor* v_cache  = ggml_new_tensor_3d(ctx, (ggml_type)a->kv_type, head_dim, kv_capacity, n_head_kv);
+    // In arena mode the KV lives in the caller's slot-stable arena tensors;
+    // the holder-resident cache pair is neither created nor bound.
+    ggml_tensor* k_cache  = nullptr;
+    ggml_tensor* v_cache  = nullptr;
+    if (arena == nullptr)
+    {
+        k_cache = ggml_new_tensor_3d(ctx, (ggml_type)a->kv_type, head_dim, kv_capacity, n_head_kv);
+        v_cache = ggml_new_tensor_3d(ctx, (ggml_type)a->kv_type, head_dim, kv_capacity, n_head_kv);
+    }
 
     // ---- hyper-connection mixer ----
     ggml_tensor* res3 = ggml_reshape_3d(ctx, res_in, n_embd, hc, T);
@@ -1072,6 +997,36 @@ static ggml_tensor* q4e_nodes_attn(
                           0.0f, 1.0f, 0.0f, 0.0f);
     }
 
+    ggml_tensor* attn = nullptr;
+    if (arena != nullptr)
+    {
+        // ---- slot-stable arena KV (T == n_slots, one token per slot) ----
+        // ONE absolute-row scatter per K/V for the whole batch; the attention
+        // reads views of the set_rows RESULT so the write->read edge is a real
+        // src edge (the solo path below relies on node order instead). The
+        // caller's mask is [cap, 1, 1, n_slots] over the FULL rounded cap, so
+        // the solo path's n_kv_pad rebuild cadence does not apply here.
+        const std::size_t kv_row_bytes = ggml_row_size((ggml_type)a->kv_type, head_dim);
+        ggml_tensor* k_rows = ggml_reshape_2d(ctx, k, head_dim, (int64_t)n_head_kv * T);
+        ggml_tensor* v_rows = ggml_reshape_2d(ctx, v, head_dim, (int64_t)n_head_kv * T);
+        arena->k_set = ggml_set_rows(ctx, arena->k_arena, k_rows, arena->kv_idx_abs);
+        arena->v_set = ggml_set_rows(ctx, arena->v_arena, v_rows, arena->kv_idx_abs);
+        ggml_tensor* k_view = ggml_view_4d(ctx, arena->k_set, head_dim, arena->cap, n_head_kv, T,
+                kv_row_bytes,
+                (std::size_t)arena->cap * kv_row_bytes,
+                (std::size_t)arena->rows_per_slot * kv_row_bytes, 0);
+        ggml_tensor* v_view = ggml_view_4d(ctx, arena->v_set, head_dim, arena->cap, n_head_kv, T,
+                kv_row_bytes,
+                (std::size_t)arena->cap * kv_row_bytes,
+                (std::size_t)arena->rows_per_slot * kv_row_bytes, 0);
+        ggml_tensor* q_4d = ggml_reshape_4d(ctx, q, head_dim, 1, n_head, T);
+        arena->fa = ggml_flash_attn_ext(ctx, q_4d, k_view, v_view, mask,
+                                        attn_scale, 0.0f, 0.0f);
+        ggml_flash_attn_ext_set_prec(arena->fa, GGML_PREC_F32);
+        attn = ggml_reshape_3d(ctx, arena->fa, head_dim, n_head, T);
+    }
+    else
+    {
     // ---- append to the cache ----
     ggml_tensor* k_write = ggml_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3)); // [hd, T, kvH]
     ggml_tensor* v_write = ggml_cont(ctx, ggml_permute(ctx, v, 0, 2, 1, 3));
@@ -1086,7 +1041,6 @@ static ggml_tensor* q4e_nodes_attn(
 
     // ---- attention ----
     ggml_tensor* q_attn = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));  // [hd, T, nH]
-    ggml_tensor* attn = nullptr;
     if (use_flash)
     {
         // One fused kernel in place of mul_mat -> soft_max -> cont(permute(V)) ->
@@ -1112,6 +1066,7 @@ static ggml_tensor* q4e_nodes_attn(
             probe->push_back(scores); probe->push_back(probs); probe->push_back(attn);
         }
     }
+    }
 
     // qwen4exp gates the attention output before the output projection.
     attn = ggml_mul(ctx, attn, ggml_sigmoid(ctx, gate));
@@ -1136,12 +1091,178 @@ static ggml_tensor* q4e_nodes_attn(
     bnd.add(q_norm_w, a->q_norm, (std::size_t)head_dim * sizeof(float));
     bnd.add(k_norm_w, a->k_norm, (std::size_t)head_dim * sizeof(float));
     // The caches are read AND written, so they need a device buffer that outlives
-    // the graph rather than a weights binding.
-    bnd.add(k_cache, a->k_cache, (std::size_t)a->kv_bytes, GGML_BACKEND_BUFFER_USAGE_ANY);
-    bnd.add(v_cache, a->v_cache, (std::size_t)a->kv_bytes, GGML_BACKEND_BUFFER_USAGE_ANY);
-    if (kv_out != nullptr) { kv_out->push_back(k_cache); kv_out->push_back(v_cache); }
+    // the graph rather than a weights binding. (Arena mode owns no cache pair.)
+    if (arena == nullptr)
+    {
+        bnd.add(k_cache, a->k_cache, (std::size_t)a->kv_bytes, GGML_BACKEND_BUFFER_USAGE_ANY);
+        bnd.add(v_cache, a->v_cache, (std::size_t)a->kv_bytes, GGML_BACKEND_BUFFER_USAGE_ANY);
+        if (kv_out != nullptr) { kv_out->push_back(k_cache); kv_out->push_back(v_cache); }
+    }
 
     return res_out;
+}
+
+// PLE half: key/query grouped norms -> per-stream gate -> value projection ->
+// dilated causal depthwise conv over the persistent history -> residual add.
+// The caller owns `conv_hist` ([hc_dim, hist] for the span, a
+// [hc_dim, hist, n_streams] arena view for the arena) and its seeding; this
+// builder only reads it and produces the tail write-back. With `writes` null
+// the write-back cpy is expanded into `graph` right after the residual (the
+// span's proven ordering); otherwise it is appended for the caller's
+// OUTPUT-flag + expand pass.
+ggml_tensor* q4e_nodes_ple(
+    ggml_context* ctx, ggml_cgraph* graph, Q4eBinder& bnd,
+    const TSGgmlQwen4ExpPleArgs* a, ggml_tensor* res_in, ggml_tensor* ple_emb_in,
+    ggml_tensor* conv_hist,
+    int n_embd, int hc, int T, int n_streams, float eps,
+    std::vector<ggml_tensor*>* writes)
+{
+    const int hc_dim2 = hc * n_embd;
+    const int kern = a->kern;
+    const int dil = a->dil;
+    const int hist = (kern - 1) * dil;
+    const int TT = T * n_streams;   // total residual columns in this call
+
+    ggml_tensor* w_key   = ggml_new_tensor_2d(ctx, (ggml_type)a->key_type, n_embd, hc_dim2);
+    ggml_tensor* w_value = ggml_new_tensor_2d(ctx, (ggml_type)a->value_type, n_embd, n_embd);
+    ggml_tensor* w_nk    = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hc_dim2);
+    ggml_tensor* w_nq    = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hc_dim2);
+    ggml_tensor* w_nc    = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hc_dim2);
+    ggml_tensor* w_ct    = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hc_dim2, kern);
+
+    // key/query grouped norms: normalise each stream, scale the full row.
+    auto gnorm = [&](ggml_tensor* x, ggml_tensor* w) {
+        ggml_tensor* x3 = ggml_reshape_3d(ctx, x, n_embd, hc, TT);
+        ggml_tensor* nx = ggml_reshape_2d(ctx, ggml_rms_norm(ctx, x3, eps), hc_dim2, TT);
+        return ggml_mul(ctx, nx, w);
+    };
+
+    ggml_tensor* keyn = gnorm(ggml_mul_mat(ctx, w_key, ple_emb_in), w_nk);   // [hc_dim, TT]
+    ggml_tensor* qryn = gnorm(res_in, w_nq);
+
+    // Per-stream dot, scaled, signed-sqrt, sigmoid: the PLE gate.
+    ggml_tensor* prod = ggml_reshape_3d(ctx, ggml_mul(ctx, keyn, qryn), n_embd, hc, TT);
+    ggml_tensor* sdot = ggml_scale(ctx, ggml_sum_rows(ctx, prod),
+            1.0f / std::sqrt((float)n_embd));                                 // [1, hc, TT]
+    ggml_tensor* sg   = ggml_sgn(ctx, sdot);
+    ggml_tensor* mag  = ggml_sqrt(ctx, ggml_clamp(ctx, ggml_mul(ctx, sdot, sg),
+            1e-6f, 3.0e38f));
+    ggml_tensor* gate = ggml_sigmoid(ctx, ggml_mul(ctx, sg, mag));            // [1, hc, TT]
+
+    ggml_tensor* val  = ggml_mul_mat(ctx, w_value, ple_emb_in);               // [n_embd, TT]
+    ggml_tensor* v3   = ggml_repeat_4d(ctx,
+            ggml_reshape_3d(ctx, val, n_embd, 1, TT), n_embd, hc, TT, 1);
+    ggml_tensor* gated = ggml_reshape_2d(ctx, ggml_mul(ctx, v3, gate), hc_dim2, TT);
+
+    // Dilated causal depthwise conv over the conv-normed gate output.
+    ggml_tensor* normc = gnorm(gated, w_nc);
+    ggml_tensor* conv = nullptr;
+    ggml_tensor* tail = nullptr;
+    if (n_streams == 1)
+    {
+        ggml_tensor* padded = (conv_hist != nullptr)
+                ? ggml_concat(ctx, conv_hist, normc, 1)                       // [hc_dim, hist+T]
+                : normc;
+        ggml_tensor* acc = nullptr;
+        for (int kk = 0; kk < kern; ++kk)
+        {
+            // tap kk reads (kern-1-kk) dilated positions back: with hist rows
+            // of history in front, that is a plain offset of kk*dil rows.
+            ggml_tensor* slice = ggml_view_2d(ctx, padded, hc_dim2, TT,
+                    padded->nb[1], (std::size_t)(kk * dil) * padded->nb[1]);
+            ggml_tensor* wk = ggml_view_2d(ctx, w_ct, hc_dim2, 1,
+                    w_ct->nb[1], (std::size_t)kk * w_ct->nb[1]);
+            ggml_tensor* term = ggml_mul(ctx, slice, wk);
+            acc = (acc == nullptr) ? term : ggml_add(ctx, acc, term);
+        }
+        conv = ggml_silu(ctx, acc);                                           // [hc_dim, TT]
+        if (conv_hist != nullptr)
+            tail = ggml_view_2d(ctx, padded, hc_dim2, hist,
+                    padded->nb[1], (std::size_t)TT * padded->nb[1]);
+    }
+    else
+    {
+        // Arena: T == 1 per stream, per-stream history planes. Same taps with
+        // one extra (stream) axis; the tap weight broadcasts across it.
+        ggml_tensor* normc3 = ggml_reshape_3d(ctx, normc, hc_dim2, T, n_streams);
+        ggml_tensor* padded = ggml_concat(ctx, conv_hist, normc3, 1);         // [hc_dim, hist+T, S]
+        ggml_tensor* acc = nullptr;
+        for (int kk = 0; kk < kern; ++kk)
+        {
+            ggml_tensor* slice = ggml_view_3d(ctx, padded, hc_dim2, T, n_streams,
+                    padded->nb[1], padded->nb[2], (std::size_t)(kk * dil) * padded->nb[1]);
+            ggml_tensor* wk = ggml_view_2d(ctx, w_ct, hc_dim2, 1,
+                    w_ct->nb[1], (std::size_t)kk * w_ct->nb[1]);
+            ggml_tensor* term = ggml_mul(ctx, slice, wk);
+            acc = (acc == nullptr) ? term : ggml_add(ctx, acc, term);
+        }
+        conv = ggml_reshape_2d(ctx, ggml_silu(ctx, acc), hc_dim2, TT);
+        tail = ggml_view_3d(ctx, padded, hc_dim2, hist, n_streams,
+                padded->nb[1], padded->nb[2], (std::size_t)T * padded->nb[1]);
+    }
+
+    // res += gated + conv
+    ggml_tensor* res_out = ggml_add(ctx, ggml_add(ctx, res_in, gated), conv);
+    ggml_build_forward_expand(graph, res_out);
+    if (tail != nullptr)
+    {
+        // Keep the last `hist` rows for the next step. Expanded here, the
+        // residual expand above has already ordered every read of the state
+        // first; collected via `writes`, the caller's expand pass (in build
+        // order) provides the same ordering.
+        ggml_tensor* wr = ggml_cpy(ctx, tail, conv_hist);
+        if (writes == nullptr)
+            ggml_build_forward_expand(graph, wr);
+        else
+            writes->push_back(wr);
+    }
+
+    bnd.add(w_key, a->key_w, (std::size_t)a->key_bytes);
+    bnd.add(w_value, a->value_w, (std::size_t)a->value_bytes);
+    bnd.add(w_nk, a->norm_key, (std::size_t)hc_dim2 * sizeof(float));
+    bnd.add(w_nq, a->norm_query, (std::size_t)hc_dim2 * sizeof(float));
+    bnd.add(w_nc, a->norm_conv, (std::size_t)hc_dim2 * sizeof(float));
+    bnd.add(w_ct, a->conv1d_t, (std::size_t)hc_dim2 * kern * sizeof(float));
+    return res_out;
+}
+
+// Head: the final hyper-connection mixer (which IS the output norm) + LM head
+// over `res_last` [hc_dim, T], T-generic so the arena can run it with
+// T = n_slots (every slot's token is "last"). Returns logits [vocab, T]; the
+// caller flags and expands it.
+ggml_tensor* q4e_nodes_head(
+    ggml_context* ctx, Q4eBinder& bnd,
+    const TSGgmlQwen4ExpHeadArgs* a, ggml_tensor* res_last,
+    int n_embd, int hc, int hc_low_rank, int T, float eps)
+{
+    const int hc_dim = hc * n_embd;
+    ggml_tensor* w_fnorm = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hc_dim);
+    ggml_tensor* w_fdown = ggml_new_tensor_2d(ctx, (ggml_type)a->hc_down_type, hc_dim, hc_low_rank);
+    ggml_tensor* w_fup   = ggml_new_tensor_2d(ctx, (ggml_type)a->hc_up_type, hc_low_rank, hc_dim);
+    ggml_tensor* w_head  = ggml_new_tensor_2d(ctx, (ggml_type)a->head_type, n_embd, a->vocab);
+
+    ggml_tensor* res3f = ggml_reshape_3d(ctx, res_last, n_embd, hc, T);
+    ggml_tensor* xnf = ggml_mul(ctx,
+            ggml_reshape_2d(ctx, ggml_rms_norm(ctx, res3f, eps), hc_dim, T), w_fnorm);
+    ggml_tensor* lof = ggml_silu(ctx, ggml_scale(ctx,
+            ggml_mul_mat(ctx, w_fdown, xnf), 1.0f / (float)hc));
+    ggml_tensor* gtf = ggml_sigmoid(ctx, ggml_mul_mat(ctx, w_fup, lof));
+    ggml_tensor* gatedf = ggml_reshape_3d(ctx, ggml_mul(ctx, xnf, gtf), n_embd, hc, T);
+    ggml_tensor* mixedf = ggml_cont(ctx, ggml_view_2d(ctx, gatedf, n_embd, T,
+            ggml_row_size(gatedf->type, n_embd) * hc, 0));
+    for (int c = 1; c < hc; ++c)
+        mixedf = ggml_add(ctx, mixedf, ggml_view_2d(ctx, gatedf, n_embd, T,
+                ggml_row_size(gatedf->type, n_embd) * hc,
+                ggml_row_size(gatedf->type, n_embd) * c));
+    mixedf = ggml_scale(ctx, mixedf, 1.0f / (float)hc);
+
+    ggml_tensor* logits = ggml_mul_mat(ctx, w_head, mixedf);                  // [vocab, T]
+
+    bnd.add(w_fnorm, a->hc_norm, (std::size_t)hc_dim * sizeof(float));
+    bnd.add(w_fdown, a->hc_down, (std::size_t)a->hc_down_bytes);
+    bnd.add(w_fup, a->hc_up, (std::size_t)a->hc_up_bytes);
+    bnd.add(w_head, a->head, (std::size_t)a->head_bytes);
+    return logits;
 }
 
 // ============================================================================
@@ -1315,6 +1436,7 @@ TSG_EXPORT int TSGgml_Qwen4ExpGdnBlock(
     {
         if (a == nullptr || res_data == nullptr) { set_last_error("qwen4exp GDN block: null args."); return 0; }
         if (!ensure_backend()) return 0;
+        tsg_q4earena::on_external_touch(a->conv_state);
 
         const int hc_dim = hc * n_embd;
         const int T = n_tokens;
@@ -1493,6 +1615,8 @@ TSG_EXPORT int TSGgml_Qwen4ExpAttnBlock(
     {
         if (a == nullptr || res_data == nullptr) { set_last_error("qwen4exp attn block: null args."); return 0; }
         if (!ensure_backend()) return 0;
+        tsg_q4earena::on_external_touch(a->k_cache);
+        tsg_q4earena::on_external_touch(a->v_cache);
 
         const int hc_dim = hc * n_embd;
         const int T = n_tokens;
@@ -1636,44 +1760,8 @@ TSG_EXPORT int TSGgml_Qwen4ExpAttnBlock(
 // cpy(tail -> conv_state) expanded after the nodes that read conv_state, so
 // node order sequences the write behind the read.
 // ============================================================================
-// The PLE block riding inside the span. Only the n-gram hash and the gather
-// from the ~320M-row host table stay on the CPU; the gathered rows arrive as a
-// graph input and the projections, norms, gating, dilated depthwise conv and
-// the residual add all run on the device. The conv history is persistent
-// device state, written in place like the GDN state.
-struct TSGgmlQwen4ExpPleArgs
-{
-    void* key_w;            // [n_embd, hc_dim]
-    void* value_w;          // [n_embd, n_embd]
-    void* norm_key;         // f32 [hc_dim]
-    void* norm_query;       // f32 [hc_dim]
-    void* norm_conv;        // f32 [hc_dim]
-    void* conv1d_t;         // f32 [hc_dim, kern] - tap-major transpose of ple_conv1d
-    void* conv_state;       // f32 [hc_dim, hist] seed (host layout matches)
-
-    long long key_bytes, value_bytes;
-
-    int key_type, value_type;
-    int kern;               // conv kernel taps
-    int dil;                // dilation (the n-gram size)
-};
-
-// The output stage: the final hyper-connection mixer (which IS the output norm -
-// qwen4exp ships no separate one) and the LM head, riding the tail of the last
-// span. The mixer runs on the LAST token only - at prefill the managed path used
-// to mix every position and throw all but one away.
-struct TSGgmlQwen4ExpHeadArgs
-{
-    void* hc_norm;          // f32 [hc_dim]
-    void* hc_down;          // [hc_dim, hc_low_rank]
-    void* hc_up;            // [hc_low_rank, hc_dim]
-    void* head;             // [n_embd, vocab]
-
-    long long hc_down_bytes, hc_up_bytes, head_bytes;
-
-    int hc_down_type, hc_up_type, head_type;
-    int vocab;
-};
+// TSGgmlQwen4ExpPleArgs / TSGgmlQwen4ExpHeadArgs live in ggml_ops_internal.h
+// (shared with the arena kernel).
 
 TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
     const TSGgmlQwen4ExpFfnArgs* ffn,
@@ -1709,6 +1797,20 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
         // is selected by the active rank, so the scope is the whole mechanism.
         tsg::ScopedRank q4e_rank(q4e_resolve_device(device));
         if (!ensure_backend()) return 0;
+        // Retire any arena slots holding this holder's caches or recurrent
+        // state: the span reads the resident KV copies and the seq-state
+        // buffers, whose newest truth lives in the arena until flushed. Any
+        // registered pointer of a slot retires the whole slot; no-ops while
+        // nothing is registered, so solo-only serving is untouched.
+        for (int il = layer_begin; il < layer_end; ++il)
+        {
+            if (kinds[il] == 0)
+                tsg_q4earena::on_external_touch(attn[il].k_cache);
+            else
+                tsg_q4earena::on_external_touch(gdn[il].conv_state);
+        }
+        if (ple != nullptr)
+            tsg_q4earena::on_external_touch(ple->conv_state);
         if ((head != nullptr) != (logits_out != nullptr))
         {
             set_last_error("qwen4exp token span: head and logits_out come together.");
@@ -1900,101 +2002,30 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
             if (has_ple && il == ple_layer)
             {
                 // ---- the PLE block, ahead of this layer's halves ----
-                const int hc_dim2 = hc_dim;
-                const int kern = ple->kern;
-                const int dil = ple->dil;
-                const int hist = (kern - 1) * dil;
-
-                ggml_tensor* w_key   = ggml_new_tensor_2d(ctx, (ggml_type)ple->key_type, n_embd, hc_dim2);
-                ggml_tensor* w_value = ggml_new_tensor_2d(ctx, (ggml_type)ple->value_type, n_embd, n_embd);
-                ggml_tensor* w_nk    = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hc_dim2);
-                ggml_tensor* w_nq    = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hc_dim2);
-                ggml_tensor* w_nc    = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hc_dim2);
-                ggml_tensor* w_ct    = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hc_dim2, kern);
-
-                // conv history: persistent device state, like the GDN state.
+                // Only the conv-history STATE handling lives here; the node
+                // math is q4e_nodes_ple, shared with the arena kernel.
+                const int hist = (ple->kern - 1) * ple->dil;
                 ggml_tensor* conv_state = nullptr;
-                Q4eSeqStateEntry* ple_st = nullptr;
                 if (hist > 0)
                 {
-                    const std::size_t st_bytes = (std::size_t)hist * hc_dim2 * sizeof(float);
-                    ple_st = q4e_seq_state(ple->conv_state, st_bytes);
+                    // conv history: persistent device state, like the GDN state.
+                    const std::size_t st_bytes = (std::size_t)hist * hc_dim * sizeof(float);
+                    Q4eSeqStateEntry* ple_st = q4e_seq_state(ple->conv_state, st_bytes);
                     if (ple_st == nullptr)
                     { failed = true; fail_what = "ple state alloc"; break; }
-                    conv_state = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hc_dim2, hist);
+                    conv_state = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hc_dim, hist);
                     ggml_set_input(conv_state);
                     if (ggml_backend_tensor_alloc(ple_st->buf, conv_state,
                             ggml_backend_buffer_get_base(ple_st->buf)) != GGML_STATUS_SUCCESS)
                     { failed = true; fail_what = "ple state bind"; break; }
                     if (!ple_st->ready)
                     {
-                        binder.upload_list.push_back({conv_state, ple->conv_state,
-                                (std::size_t)hist * hc_dim2 * sizeof(float)});
+                        binder.upload_list.push_back({conv_state, ple->conv_state, st_bytes});
                         seeded_states.push_back(ple_st);
                     }
                 }
-
-                // key/query grouped norms: normalise each stream, scale the full row.
-                auto gnorm = [&](ggml_tensor* x, ggml_tensor* w) {
-                    ggml_tensor* x3 = ggml_reshape_3d(ctx, x, n_embd, hc, T);
-                    ggml_tensor* nx = ggml_reshape_2d(ctx, ggml_rms_norm(ctx, x3, eps), hc_dim2, T);
-                    return ggml_mul(ctx, nx, w);
-                };
-
-                ggml_tensor* keyn = gnorm(ggml_mul_mat(ctx, w_key, ple_emb_in), w_nk);   // [hc_dim, T]
-                ggml_tensor* qryn = gnorm(res, w_nq);
-
-                // Per-stream dot, scaled, signed-sqrt, sigmoid: the PLE gate.
-                ggml_tensor* prod = ggml_reshape_3d(ctx, ggml_mul(ctx, keyn, qryn), n_embd, hc, T);
-                ggml_tensor* sdot = ggml_scale(ctx, ggml_sum_rows(ctx, prod),
-                        1.0f / std::sqrt((float)n_embd));                                 // [1, hc, T]
-                ggml_tensor* sg   = ggml_sgn(ctx, sdot);
-                ggml_tensor* mag  = ggml_sqrt(ctx, ggml_clamp(ctx, ggml_mul(ctx, sdot, sg),
-                        1e-6f, 3.0e38f));
-                ggml_tensor* gate = ggml_sigmoid(ctx, ggml_mul(ctx, sg, mag));            // [1, hc, T]
-
-                ggml_tensor* val  = ggml_mul_mat(ctx, w_value, ple_emb_in);               // [n_embd, T]
-                ggml_tensor* v3   = ggml_repeat_4d(ctx,
-                        ggml_reshape_3d(ctx, val, n_embd, 1, T), n_embd, hc, T, 1);
-                ggml_tensor* gated = ggml_reshape_2d(ctx, ggml_mul(ctx, v3, gate), hc_dim2, T);
-
-                // Dilated causal depthwise conv over the conv-normed gate output.
-                ggml_tensor* normc = gnorm(gated, w_nc);
-                ggml_tensor* padded = (conv_state != nullptr)
-                        ? ggml_concat(ctx, conv_state, normc, 1)                          // [hc_dim, hist+T]
-                        : normc;
-                ggml_tensor* acc = nullptr;
-                for (int kk = 0; kk < kern; ++kk)
-                {
-                    // tap kk reads (kern-1-kk) dilated positions back: with hist rows
-                    // of history in front, that is a plain offset of kk*dil rows.
-                    ggml_tensor* slice = ggml_view_2d(ctx, padded, hc_dim2, T,
-                            padded->nb[1], (std::size_t)(kk * dil) * padded->nb[1]);
-                    ggml_tensor* wk = ggml_view_2d(ctx, w_ct, hc_dim2, 1,
-                            w_ct->nb[1], (std::size_t)kk * w_ct->nb[1]);
-                    ggml_tensor* term = ggml_mul(ctx, slice, wk);
-                    acc = (acc == nullptr) ? term : ggml_add(ctx, acc, term);
-                }
-                ggml_tensor* conv = ggml_silu(ctx, acc);                                  // [hc_dim, T]
-
-                // res += gated + conv
-                res = ggml_add(ctx, ggml_add(ctx, res, gated), conv);
-                ggml_build_forward_expand(graph, res);
-                if (conv_state != nullptr)
-                {
-                    // Keep the last `hist` rows for the next batch; ordered after
-                    // every read of the state by the expand above.
-                    ggml_tensor* tail = ggml_view_2d(ctx, padded, hc_dim2, hist,
-                            padded->nb[1], (std::size_t)T * padded->nb[1]);
-                    ggml_build_forward_expand(graph, ggml_cpy(ctx, tail, conv_state));
-                }
-
-                binder.add(w_key, ple->key_w, (std::size_t)ple->key_bytes);
-                binder.add(w_value, ple->value_w, (std::size_t)ple->value_bytes);
-                binder.add(w_nk, ple->norm_key, (std::size_t)hc_dim2 * sizeof(float));
-                binder.add(w_nq, ple->norm_query, (std::size_t)hc_dim2 * sizeof(float));
-                binder.add(w_nc, ple->norm_conv, (std::size_t)hc_dim2 * sizeof(float));
-                binder.add(w_ct, ple->conv1d_t, (std::size_t)hc_dim2 * kern * sizeof(float));
+                res = q4e_nodes_ple(ctx, graph, binder, ple, res, ple_emb_in,
+                        conv_state, n_embd, hc, T, 1, eps);
             }
 
             if (il == layer_begin && first_ffn_only != 0)
@@ -2093,36 +2124,14 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
         if (head != nullptr)
         {
             // ---- final mixer on the LAST token only, then the LM head ----
-            ggml_tensor* w_fnorm = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hc_dim);
-            ggml_tensor* w_fdown = ggml_new_tensor_2d(ctx, (ggml_type)head->hc_down_type, hc_dim, hc_low_rank);
-            ggml_tensor* w_fup   = ggml_new_tensor_2d(ctx, (ggml_type)head->hc_up_type, hc_low_rank, hc_dim);
-            ggml_tensor* w_head  = ggml_new_tensor_2d(ctx, (ggml_type)head->head_type, n_embd, head->vocab);
-
+            // (q4e_nodes_head, shared with the arena kernel, which runs it
+            // with T = n_slots since every slot's token is "last".)
             ggml_tensor* last = ggml_view_2d(ctx, res_out, hc_dim, 1,
                     res_out->nb[1], (std::size_t)(T - 1) * res_out->nb[1]);
-            ggml_tensor* res3f = ggml_reshape_3d(ctx, ggml_cont(ctx, last), n_embd, hc, 1);
-            ggml_tensor* xnf = ggml_mul(ctx,
-                    ggml_reshape_2d(ctx, ggml_rms_norm(ctx, res3f, eps), hc_dim, 1), w_fnorm);
-            ggml_tensor* lof = ggml_silu(ctx, ggml_scale(ctx,
-                    ggml_mul_mat(ctx, w_fdown, xnf), 1.0f / (float)hc));
-            ggml_tensor* gtf = ggml_sigmoid(ctx, ggml_mul_mat(ctx, w_fup, lof));
-            ggml_tensor* gatedf = ggml_reshape_3d(ctx, ggml_mul(ctx, xnf, gtf), n_embd, hc, 1);
-            ggml_tensor* mixedf = ggml_cont(ctx, ggml_view_2d(ctx, gatedf, n_embd, 1,
-                    ggml_row_size(gatedf->type, n_embd) * hc, 0));
-            for (int c = 1; c < hc; ++c)
-                mixedf = ggml_add(ctx, mixedf, ggml_view_2d(ctx, gatedf, n_embd, 1,
-                        ggml_row_size(gatedf->type, n_embd) * hc,
-                        ggml_row_size(gatedf->type, n_embd) * c));
-            mixedf = ggml_scale(ctx, mixedf, 1.0f / (float)hc);
-
-            logits = ggml_mul_mat(ctx, w_head, mixedf);       // [vocab, 1]
+            logits = q4e_nodes_head(ctx, binder, head, ggml_cont(ctx, last),
+                    n_embd, hc, hc_low_rank, 1, eps);
             ggml_set_output(logits);
             ggml_build_forward_expand(graph, logits);
-
-            binder.add(w_fnorm, head->hc_norm, (std::size_t)hc_dim * sizeof(float));
-            binder.add(w_fdown, head->hc_down, (std::size_t)head->hc_down_bytes);
-            binder.add(w_fup, head->hc_up, (std::size_t)head->hc_up_bytes);
-            binder.add(w_head, head->head, (std::size_t)head->head_bytes);
         }
         else
         {
@@ -2334,6 +2343,46 @@ TSG_EXPORT void TSGgml_Qwen4ExpResetFfnCache()
     }
 }
 
+// Drop (graphs only - state kept) every cached per-layer/span graph built from
+// the given holder descriptor arrays, on every device. The arena flush calls
+// this after invalidating a holder's resident KV copies: captured solo graphs
+// bake those buffers, and q4e_refresh_bindings only SAMPLES every 32nd replay,
+// which is no protection against a freed pointer. Per-layer slots key on
+// &array[layer], span slots on the array base, so both a stride-range and an
+// exact-base match are needed.
+void q4e_drop_holder_graphs(const void* attn_base, const void* gdn_base, const void* ple_base)
+{
+    auto in_array = [](const void* sig, const void* base, std::size_t stride) {
+        if (sig == nullptr || base == nullptr) return false;
+        const std::uintptr_t sv = (std::uintptr_t)sig;
+        const std::uintptr_t bv = (std::uintptr_t)base;
+        if (sv < bv) return false;
+        const std::uintptr_t d = sv - bv;
+        return d < stride * (std::uintptr_t)kQwen4ExpMaxSlots && d % stride == 0;
+    };
+    const int ndev = tsg::g_device_count.load(std::memory_order_acquire);
+    for (int dv = 0; dv < ndev && dv < tsg::TSG_MAX_DEVICES; ++dv)
+    {
+        tsg::ScopedRank rank(dv);
+        for (int i = 0; i < kQwen4ExpMaxSlots; ++i)
+        {
+            if (g_q4e_attn[i].valid && in_array(g_q4e_attn[i].sig, attn_base, sizeof(TSGgmlQwen4ExpAttnArgs)))
+                g_q4e_attn[i].reset_graph();
+            if (g_q4e_gdn[i].valid && in_array(g_q4e_gdn[i].sig, gdn_base, sizeof(TSGgmlQwen4ExpGdnArgs)))
+                g_q4e_gdn[i].reset_graph();
+        }
+        for (int i = 0; i < kQwen4ExpSpanSlots; ++i)
+        {
+            Qwen4ExpFfnCache& sp = g_q4e_span[i];
+            if (!sp.valid) continue;
+            if ((attn_base != nullptr && sp.sig3 == attn_base) ||
+                (gdn_base != nullptr && sp.sig2 == gdn_base) ||
+                (ple_base != nullptr && sp.sig5 == ple_base))
+                sp.reset_graph();
+        }
+    }
+}
+
 /// Mark one sequence-state entry (keyed by its host seed pointer) as needing a
 /// re-seed on the next graph build. The buffer and its baked addresses stay
 /// valid; only the one-time upload re-arms. Used by the managed reset, whose
@@ -2354,6 +2403,10 @@ TSG_EXPORT void TSGgml_Qwen4ExpInvalidateSeqState(const void* key)
 /// with stale entries keyed on recycled host addresses.
 TSG_EXPORT void TSGgml_Qwen4ExpReleaseAllSeqState()
 {
+    // The freed buffers may still be flush targets of registered arena slots;
+    // drop the registrations WITHOUT flushing (the managed dispose ordering
+    // flushes first when it wants the bytes).
+    tsg_q4earena::on_drop_all();
     const int ndev = tsg::g_device_count.load(std::memory_order_acquire);
     for (int d = 0; d < ndev && d < tsg::TSG_MAX_DEVICES; ++d)
     {
@@ -2371,6 +2424,10 @@ TSG_EXPORT void TSGgml_Qwen4ExpReleaseAllSeqState()
 /// re-seeding).
 TSG_EXPORT void TSGgml_Qwen4ExpReleaseSeqState(const void* const* keys, int n)
 {
+    // See ReleaseAllSeqState: retire (without flushing) any arena slot still
+    // registered on a key whose device state is about to be freed.
+    for (int i = 0; i < n; ++i)
+        tsg_q4earena::on_drop(keys[i]);
     bool freed = false;
     const int ndev = tsg::g_device_count.load(std::memory_order_acquire);
     for (int d = 0; d < ndev && d < tsg::TSG_MAX_DEVICES; ++d)
@@ -2388,5 +2445,3 @@ TSG_EXPORT void TSGgml_Qwen4ExpReleaseSeqState(const void* const* keys, int n)
     if (freed)
         TSGgml_Qwen4ExpResetFfnCache();
 }
-
-} // extern "C"

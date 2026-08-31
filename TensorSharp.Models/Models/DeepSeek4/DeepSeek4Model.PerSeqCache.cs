@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -43,6 +43,13 @@ namespace TensorSharp.Models
         private int _primarySlot;
         // Request whose slot is currently active, or null when the primary is.
         private string _activeSlotKey;
+        // Set when a mid-step chunked batched call failed once (see
+        // TryForwardBatchedFusedDecode); large batches then decline outright.
+        private bool _batchedChunkingLatched;
+        // Set when the 16-wide native graph failed to build once; batched
+        // steps then run as 8-wide windows (see TryForwardBatchedFusedDecode).
+        private bool _batchedWideSpanFailed;
+
 
         /// <summary>The batched paged forward has no DSV4 implementation (the
         /// compressed attention caches have no paged layout); the engine's
@@ -153,7 +160,7 @@ namespace TensorSharp.Models
             {
                 if (_handle == IntPtr.Zero || _slotByRequest == null) return false;
                 int n = requestIds.Count;
-                if (n < 2 || n > 8) return false;
+                if (n < 2) return false;
 
                 var slots = new int[n];
                 for (int i = 0; i < n; i++)
@@ -163,11 +170,67 @@ namespace TensorSharp.Models
                 }
 
                 int vocab = Config.VocabSize;
-                var flat = new float[(long) n * vocab <= int.MaxValue ? n * vocab : 0];
-                if (flat.Length == 0) return false;
+                if ((long) n * vocab > int.MaxValue) return false;
+                var flat = new float[n * vocab];
 
-                if (!GgmlDeepSeek4Native.ForwardBatchedDecode(_handle, slots, tokens, positions, flat))
-                    return false;
+                // The native batched graph caps at 8 sequences (its per-slot
+                // attention forks are O(n) graph nodes). Above that, run the
+                // step as near-equal windows of <=8 - two weight sweeps for a
+                // double-cap batch still beat that many serial solo sweeps.
+                // Windows are sized so none is ever 1 (native needs n>=2). A
+                // failure AFTER the first window would leave earlier slots
+                // advanced while the engine retries the whole step, and the
+                // native position gates would then error those sequences
+                // visibly - so on any mid-step failure, latch chunking off and
+                // decline.
+                // The native graph now spans up to 16 sequences in ONE weight
+                // sweep; if the wide graph fails to build on this rig (node or
+                // VRAM budget), narrow to 8-wide windows permanently rather
+                // than declining the step.
+                int maxPerCall = _batchedWideSpanFailed ? 8 : 16;
+                bool ranWhole = false;
+                if (n <= maxPerCall)
+                {
+                    ranWhole = GgmlDeepSeek4Native.ForwardBatchedDecode(_handle, slots, tokens, positions, flat);
+                    if (!ranWhole)
+                    {
+                        if (n <= 8) return false;
+                        _batchedWideSpanFailed = true;
+                        Console.Error.WriteLine(
+                            "[dsv4 batched-decode] wide span n=" + n +
+                            " failed; narrowing to 8-wide windows");
+                        maxPerCall = 8;
+                    }
+                }
+                if (!ranWhole)
+                {
+                    if (_batchedChunkingLatched) return false;
+                    int chunks = (n + maxPerCall - 1) / maxPerCall;
+                    int baseSize = n / chunks, rem = n % chunks;
+                    int off = 0;
+                    for (int c = 0; c < chunks; c++)
+                    {
+                        int len = baseSize + (c < rem ? 1 : 0);
+                        var cs = new int[len]; var ct = new int[len]; var cp = new int[len];
+                        Array.Copy(slots, off, cs, 0, len);
+                        Array.Copy(tokens, off, ct, 0, len);
+                        Array.Copy(positions, off, cp, 0, len);
+                        var cf = new float[len * vocab];
+                        if (!GgmlDeepSeek4Native.ForwardBatchedDecode(_handle, cs, ct, cp, cf))
+                        {
+                            if (c > 0)
+                            {
+                                _batchedChunkingLatched = true;
+                                Console.Error.WriteLine(
+                                    "[dsv4 batched-decode] chunk " + (c + 1) + "/" + chunks +
+                                    " failed mid-step; chunked batching disabled");
+                            }
+                            return false;
+                        }
+                        Array.Copy(cf, 0, flat, (long) off * vocab, (long) len * vocab);
+                        off += len;
+                    }
+                }
 
                 for (int i = 0; i < n; i++)
                 {

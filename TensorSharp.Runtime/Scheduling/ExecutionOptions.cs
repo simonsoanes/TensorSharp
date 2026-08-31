@@ -44,9 +44,13 @@ namespace TensorSharp.Runtime.Scheduling
 
         /// <summary>TRUE token-batched fused decode inside the per-sequence
         /// fused path: decode one token for each of N sequences in a single
-        /// fused graph. Env: <c>TS_BATCHED_FUSED_DECODE</c> (default off,
-        /// correctness-first; strict opt-in "1"/"true").</summary>
-        public bool BatchedFusedDecodeEnabled { get; init; }
+        /// fused graph (slot-stable arena KV + captured CUDA graph + on-device
+        /// greedy sampling — see ggml_ops_gptoss_batched.cpp). This is what
+        /// lifts concurrent decode from the round-robin ~1x ceiling to the
+        /// vLLM-class batched rate, so it is ON by default; models that cannot
+        /// batch a step decline per call and fall back per-sequence. Env:
+        /// <c>TS_BATCHED_FUSED_DECODE</c> (set 0 to disable for A/B).</summary>
+        public bool BatchedFusedDecodeEnabled { get; init; } = true;
 
         /// <summary>Retain finished fused-path KV holders for cross-request
         /// prefix reuse. Env: <c>TS_RETAINED_FUSED_CACHE</c> (default on;
@@ -68,7 +72,7 @@ namespace TensorSharp.Runtime.Scheduling
             BatchedPathDisabled = ReadFlag("TS_SCHED_DISABLE_BATCHED", false),
             BatchedN1FastPathEnabled = ReadFlag("TS_BATCHED_N1_FAST_PATH", true),
             PerSeqFusedEnabled = ReadFlag("TS_PER_SEQ_FUSED", true),
-            BatchedFusedDecodeEnabled = ReadStrictOptIn("TS_BATCHED_FUSED_DECODE"),
+            BatchedFusedDecodeEnabled = ReadFlag("TS_BATCHED_FUSED_DECODE", true),
             RetainedFusedCacheEnabled = ReadFlag("TS_RETAINED_FUSED_CACHE", true),
             RetainedFusedCacheBudget = ReadNonNegativeInt("TS_RETAINED_FUSED_CACHE_MAX", 4),
         };

@@ -2265,6 +2265,44 @@ namespace TensorSharp.GGML
         /// GDN state is re-seeded so the next fused decode rebuilds).</summary>
         public static void Qwen35ResetDecodeCache() => GgmlNative.Qwen35ResetDecodeCache();
 
+        /// <summary>Qwen3.5/3.8 slot-stable arena token-batched decode (one fused
+        /// graph for N sequences; see ggml_ops_qwen35_batched_arena.cpp).</summary>
+        public static bool TryQwen35ArenaDecodeBatched(
+            Qwen35LayerDecodeArgs[] layers, int numLayers, int nSeqs,
+            int[] tokenIds, int[] positions,
+            IntPtr[] kCaches, IntPtr[] vCaches,
+            IntPtr[] convStates, IntPtr[] deltaStates,
+            int[] gdnHostAuth, int[] cacheSizes,
+            int numHeads, int numKvHeads, int headDim,
+            int ropeNDims, int ropeMode, int kvCacheType,
+            int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads,
+            float eps, float ropeBase, float ropeFreqScale,
+            int numExperts, int numExpertsUsed, int expertFf, int sharedFf,
+            int normTopk, float expertWeightsScale,
+            IntPtr logits, int vocabSize,
+            IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
+            IntPtr finalNorm,
+            IntPtr tokenEmbd, int tokenEmbdType,
+            long tokenEmbdNe0, long tokenEmbdNe1, long tokenEmbdBytes,
+            IntPtr sampled, bool wantLogits)
+            => GgmlNative.TryQwen35ArenaDecodeBatched(layers, numLayers, nSeqs, tokenIds, positions,
+                kCaches, vCaches, convStates, deltaStates, gdnHostAuth, cacheSizes,
+                numHeads, numKvHeads, headDim, ropeNDims, ropeMode, kvCacheType,
+                convKernel, headKDim, headVDim, numKHeads, numVHeads,
+                eps, ropeBase, ropeFreqScale,
+                numExperts, numExpertsUsed, expertFf, sharedFf, normTopk, expertWeightsScale,
+                logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes,
+                finalNorm, tokenEmbd, tokenEmbdType, tokenEmbdNe0, tokenEmbdNe1, tokenEmbdBytes,
+                sampled, wantLogits);
+
+        /// <summary>Drop the qwen35 arena batched-decode pool (flushes dirty
+        /// slots to host first). Call on model teardown.</summary>
+        public static void Qwen35ArenaResetBatchedDecodeCache() => GgmlNative.Qwen35ArenaResetBatchedDecodeCache();
+
+        /// <summary>Flush-and-retire the qwen35 arena slot registered for this
+        /// host pointer (no-op when none).</summary>
+        public static void Qwen35ArenaFlushHostPointer(IntPtr hostPtr) => GgmlNative.Qwen35ArenaFlushHostPointer(hostPtr);
+
         /// <summary>Drop the persistent Gemma4 decode-graph cache (call before any
         /// prefill and on KV reset/grow so the next fused decode rebuilds against
         /// the current ggml-cuda pool / KV-buffer state).</summary>
@@ -2289,6 +2327,20 @@ namespace TensorSharp.GGML
             => GgmlNative.TryGptOssModelDecode(layers, numLayers, hidden, hiddenSize, position,
                 logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm);
 
+        /// <summary>TRUE token-batched GPT-OSS decode: one token for each of N
+        /// concurrent sequences in one fused graph, each sequence against its own
+        /// per-request KV cache (see ggml_ops_gptoss_batched.cpp).</summary>
+        public static bool TryGptOssModelDecodeBatched(
+            GptOssLayerDecodeArgs[] layers, int numLayers, int nSeqs, IntPtr hidden,
+            IntPtr[] kCaches, IntPtr[] vCaches, int[] cacheSizes, int[] positions,
+            IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType,
+            long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm,
+            IntPtr sampled, bool wantLogits)
+            => GgmlNative.TryGptOssModelDecodeBatched(layers, numLayers, nSeqs, hidden,
+                kCaches, vCaches, cacheSizes, positions,
+                logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm,
+                sampled, wantLogits);
+
         /// <summary>Whole GPT-OSS transformer over a prompt chunk as a single
         /// graph dispatch (all layers + MoE + folded final norm/LM head over the
         /// last token). Returns false when the kernel refuses the shape so the
@@ -2304,6 +2356,10 @@ namespace TensorSharp.GGML
         /// <summary>Drop the persistent GPT-OSS whole-model decode-graph cache.
         /// Call before any prefill and on KV reset/grow.</summary>
         public static void GptOssResetDecodeCache() => GgmlNative.GptOssResetDecodeCache();
+
+        /// <summary>Drop the token-batched GPT-OSS decode state (arena + slot
+        /// graphs). Survives prefills by design; call on model teardown.</summary>
+        public static void GptOssResetBatchedDecodeCache() => GgmlNative.GptOssResetBatchedDecodeCache();
 
         /// <summary>Copy the device-resident GPT-OSS KV rows back into the host
         /// mirror (the fused decode graph never does so per token).</summary>

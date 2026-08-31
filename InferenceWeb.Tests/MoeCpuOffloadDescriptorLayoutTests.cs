@@ -44,11 +44,12 @@ public class MoeCpuOffloadDescriptorLayoutTests
     /// </summary>
     private static void AssertDescriptorLayout<T>(
         int pointers, int int64s, int int32s, int floats,
-        string firstPointerField, string firstInt32Field) where T : struct
+        string firstPointerField, string firstInt32Field,
+        int trailingPointers = 0, string firstTrailingPointerField = null) where T : struct
     {
         FieldInfo[] fields = typeof(T).GetFields(BindingFlags.Public | BindingFlags.Instance);
 
-        Assert.Equal(pointers, fields.Count(f => f.FieldType == typeof(IntPtr)));
+        Assert.Equal(pointers + trailingPointers, fields.Count(f => f.FieldType == typeof(IntPtr)));
         Assert.Equal(int64s, fields.Count(f => f.FieldType == typeof(long)));
         Assert.Equal(int32s, fields.Count(f => f.FieldType == typeof(int)));
         Assert.Equal(floats, fields.Count(f => f.FieldType == typeof(float)));
@@ -61,13 +62,20 @@ public class MoeCpuOffloadDescriptorLayoutTests
 
         long int64Start = Align((long)pointers * IntPtr.Size, sizeof(long));
         long int32Start = int64Start + (long)int64s * sizeof(long);
-        // int32 and float are both 4 bytes and pack into one run.
+        // int32 and float are both 4 bytes and pack into one run. A descriptor
+        // may append an extra pointer run at the very end (e.g. the optional
+        // F16 prefill-weight copies on the GPT-OSS descriptor) so every
+        // pre-existing field keeps its offset.
+        long floatEnd = int32Start + ((long)int32s + floats) * sizeof(int);
+        long trailStart = Align(floatEnd, IntPtr.Size);
         long expectedSize = Align(
-            int32Start + ((long)int32s + floats) * sizeof(int),
+            trailingPointers > 0 ? trailStart + (long)trailingPointers * IntPtr.Size : floatEnd,
             Math.Max(IntPtr.Size, sizeof(long)));
 
         Assert.Equal(0, Marshal.OffsetOf<T>(firstPointerField).ToInt64());
         Assert.Equal(int32Start, Marshal.OffsetOf<T>(firstInt32Field).ToInt64());
+        if (trailingPointers > 0 && firstTrailingPointerField != null)
+            Assert.Equal(trailStart, Marshal.OffsetOf<T>(firstTrailingPointerField).ToInt64());
         Assert.Equal(expectedSize, Marshal.SizeOf<T>());
 
         // CpuMoe is appended at the end of the int32 run so every field before it
@@ -87,7 +95,8 @@ public class MoeCpuOffloadDescriptorLayoutTests
     public void GptOssLayerDecodeArgs_MatchesNativeLayout()
         => AssertDescriptorLayout<TensorSharp.GGML.GptOssLayerDecodeArgs>(
             pointers: 21, int64s: 21, int32s: 22, floats: 5,
-            firstPointerField: "AttnNormW", firstInt32Field: "StructBytes");
+            firstPointerField: "AttnNormW", firstInt32Field: "StructBytes",
+            trailingPointers: 7, firstTrailingPointerField: "QkvWF16");
 
     [Fact]
     public void DiffusionDecodeLayerArgs_MatchesNativeLayout()

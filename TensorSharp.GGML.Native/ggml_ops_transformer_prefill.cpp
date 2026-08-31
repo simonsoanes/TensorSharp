@@ -950,6 +950,11 @@ KvWindow* kv_find(const void* host_cache)
 KvWindow* kv_acquire(const void* host_cache, int head_dim, int kv_heads,
                      ggml_type type, std::int64_t needed_rows, std::int64_t cache_rows)
 {
+    // If this cache currently decodes in the token-batched arena, its newest
+    // rows live only there — flush them to the host mirror before any other
+    // path attaches to the window. No-op from inside the batched kernel.
+    batched_on_external_acquire(host_cache);
+
     auto it = g_gptoss_kv.find(host_cache);
     if (it != g_gptoss_kv.end())
     {
@@ -1009,6 +1014,10 @@ void kv_drop_locked(const void* host_cache)
 {
     if (host_cache == nullptr)
         return;
+    // Dropping means the host was rewritten behind the kernels' backs (KV
+    // snapshot restore, holder reuse, dispose): any batched-arena copy of this
+    // cache is stale too. Discard, never flush.
+    batched_on_drop(host_cache);
     auto it = g_gptoss_kv.find(host_cache);
     if (it == g_gptoss_kv.end())
         return;
@@ -1024,6 +1033,7 @@ void kv_drop_pair_locked(const void* k_cache, const void* v_cache)
 
 void kv_drop_all_locked()
 {
+    batched_on_drop_all();
     for (auto& kv : g_gptoss_kv)
         kv_release(kv.second);
     g_gptoss_kv.clear();

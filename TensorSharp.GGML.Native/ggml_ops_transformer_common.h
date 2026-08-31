@@ -593,6 +593,22 @@ struct TSGgmlGptOssLayerDesc
     float rope_freq_scale;
     float oai_alpha;
     float oai_limit;
+
+    // --- optional F16 prefill-GEMM weight copies (host; may be null) ---
+    // Prefill is compute-bound: at 2048-token chunks the quantized MMQ path
+    // runs the big GEMMs at roughly half the tensor-core F16 rate, and forcing
+    // cuBLAS on the quantized weights loses even more to per-chunk dequant.
+    // When the model has VRAM headroom the C# side dequantizes these once
+    // (Q8_0 -> F16 is exact) and the PREFILL kernel binds them instead; the
+    // decode kernels ignore these fields (decode is bandwidth-bound and wants
+    // the small quantized reads). TS_GPTOSS_PREFILL_F16=1.
+    void* qkv_w_f16;
+    void* k_w_f16;
+    void* v_w_f16;
+    void* o_w_f16;
+    void* gate_exps_f16;
+    void* up_exps_f16;
+    void* down_exps_f16;
 };
 
 // MoE layer descriptor for the Gemma 4 MoE kernels (layer/model decode,

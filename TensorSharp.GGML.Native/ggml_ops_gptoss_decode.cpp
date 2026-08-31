@@ -978,6 +978,14 @@ TSG_EXPORT int TSGgml_GptOssModelDecode(
 // prefill (which grows the pool) or a KV reset/grow can move those, so the C#
 // caller drops the cache before any prefill and on ResetKVCache. No-op when the
 // persist path is off.
+// Defined in ggml_ops_gptoss_batched.cpp. Deliberately NOT chained here: the
+// solo pool dies on every prefill ("prefill moves the compute pool"), but the
+// batched arena graphs allocate everything in their own buffers and reference
+// no KV windows, so they survive prefills — that is what keeps request churn
+// replaying one captured CUDA graph. Teardown paths in ggml_ops_core.cpp call
+// it explicitly.
+TSG_EXPORT void TSGgml_GptOssResetBatchedDecodeCache();
+
 TSG_EXPORT void TSGgml_GptOssResetDecodeCache()
 {
     for (auto& pool : g_gptoss_dc_pools)
@@ -997,6 +1005,11 @@ TSG_EXPORT int TSGgml_GptOssSyncKvCacheToHost(
         if (!ensure_backend())
             return 0;
         std::lock_guard<std::mutex> lock(tsg_gptoss::kv_mutex());
+        // Rows decoded in the token-batched arena exist only there until this
+        // flush; it writes them straight into the host mirror (and retires the
+        // slot), after which the window download below completes the picture.
+        tsg_gptoss::batched_on_external_acquire(k_cache);
+        tsg_gptoss::batched_on_external_acquire(v_cache);
         tsg_gptoss::KvWindow* kw = tsg_gptoss::kv_find(k_cache);
         tsg_gptoss::KvWindow* vw = tsg_gptoss::kv_find(v_cache);
         if (kw == nullptr && vw == nullptr)
