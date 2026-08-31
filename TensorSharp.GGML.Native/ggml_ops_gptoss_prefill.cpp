@@ -872,6 +872,27 @@ static int gptoss_model_prefill_impl(
                                     ep_mask_data.size() * sizeof(float));
         }
 
+        // The deferred causal-mask fill has to happen HERE, above the
+        // tensor-parallel early return, not next to graph_compute. A
+        // device_mask_fill mask is ggml_set_input-flagged with mask_slot == -1,
+        // so the bind loop skips it and nothing uploads host bytes for it; the
+        // only thing that ever writes it is this fill. In plan mode the function
+        // hands the graph back UNEXECUTED and returns, so a fill placed after
+        // that return never runs and every rank attends through whatever the
+        // freshly allocated (never cleared) VRAM happened to hold. The masks are
+        // graph INPUTS and their buffers are allocated by this point, so filling
+        // them here is correct for both modes - the same order
+        // ggml_ops_gemma4_verify.cpp already uses.
+#ifdef TSG_GGML_USE_CUDA
+        // Deferred causal masks: written straight into their device buffers on
+        // stream 0, then synced so the backend-stream compute sees them.
+        if (!gpu_mask_fills.empty())
+        {
+            for (const auto& g : gpu_mask_fills)
+                tsg_cuda_fill_causal_mask_f16(g.tensor->data, g.kvLen, g.n, g.nPast, g.window, g.kvLen);
+            tsg_cuda_sync_stream0();
+        }
+#endif
         if (tp_mode)
         {
             GptOssPrefillTpSlot& slot = g_gptoss_prefill_tp[tp_rank];
@@ -906,16 +927,6 @@ static int gptoss_model_prefill_impl(
             return 1;
         }
 
-#ifdef TSG_GGML_USE_CUDA
-        // Deferred causal masks: written straight into their device buffers on
-        // stream 0, then synced so the backend-stream compute sees them.
-        if (!gpu_mask_fills.empty())
-        {
-            for (const auto& g : gpu_mask_fills)
-                tsg_cuda_fill_causal_mask_f16(g.tensor->data, g.kvLen, g.n, g.nPast, g.window, g.kvLen);
-            tsg_cuda_sync_stream0();
-        }
-#endif
 
         ggml_status status = GGML_STATUS_SUCCESS;
         if (!host_moe.empty())

@@ -565,6 +565,12 @@ namespace TensorSharp.Models
             return hidden;
         }
 
+        // Fused prefill attention reading the F16 KV cache in place, instead of the
+        // host ExpandKVHeads + materialized score matrix. TS_QWEN3_FLASH_PREFILL=0
+        // forces the legacy path (A/B / debugging). See Attention.
+        private static readonly bool Qwen3FlashPrefillEnabled =
+            Environment.GetEnvironmentVariable("TS_QWEN3_FLASH_PREFILL") != "0";
+
         private Tensor Attention(Tensor input, int layer, string[] wn, int seqLen, int startPos)
         {
             int numHeads = Config.NumHeads;
@@ -642,6 +648,48 @@ namespace TensorSharp.Models
             CopyToCache(_kvCacheV[layer], vHeads, startPos, seqLen);
             kHeads.Dispose();
             vHeads.Dispose();
+
+            // Fused prefill attention straight off the F16 cache. The legacy path
+            // below expands the cache with ExpandKVHeads, which on the GGML backend
+            // is a HOST loop: it dequantizes F16->F32 and repeats each KV head
+            // group_size times, so a 36-layer 2048-token prefill wrote ~2.4 GB
+            // through system memory and re-uploaded it, then materialized an
+            // [numHeads, seqLen, kvLen] score tensor on top. That put 74% of Qwen3
+            // prefill inside "Attention" and held the GPU at ~5% - 2048 tokens took
+            // 27 s (75 tok/s) where gpt-oss on the same card does 19,800 tok/s.
+            //
+            // This kernel reads the [kvHeads, cacheLen, headDim] F16 cache in place,
+            // does the GQA broadcast and the causal mask inside the graph, and picks
+            // a flash-attention variant once kvLen is large enough to make the score
+            // matrix expensive. mul_mat accumulates in F32, so it is numerically the
+            // same computation as dequantizing first, up to floating-point ordering:
+            // the scale moves from the score matmul into soft_max_ext and the K/V
+            // matmuls pick different kernels, so a greedy near-tie can land on the
+            // other token - the same trade Gemma 4 already takes for its global
+            // layers (Gemma4Model.cs). TS_QWEN3_FLASH_PREFILL=0 forces the legacy
+            // materialized path for A/B.
+            if (Qwen3FlashPrefillEnabled
+                && IsGgmlBackend
+                && _kvCacheK[layer].ElementType == DType.Float16
+                && _kvCacheV[layer].ElementType == DType.Float16
+                && numHeads % numKVHeads == 0)
+            {
+                var fused = new Tensor(_allocator, DType.Float32, seqLen, numHeads * headDim);
+                // maskStartPos == startPos == totalSeqLen - seqLen: query row t
+                // attends keys [0, startPos + t]. No sliding window on Qwen3.
+                GgmlBasicOps.FusedPrefillAttentionF16KV(
+                    qHeads, _kvCacheK[layer], _kvCacheV[layer], fused,
+                    numHeads, numKVHeads, headDim,
+                    seqLen, totalSeqLen, (int)_kvCacheK[layer].Sizes[1],
+                    maskStartPos: startPos, slidingWindow: 0, scale: scale);
+                qHeads.Dispose();
+
+                _attnTicks += Stopwatch.GetTimestamp() - t0;
+
+                Tensor fusedOut = LinearForward(fused, wn[4]);
+                fused.Dispose();
+                return fusedOut;
+            }
 
             int groupSize = numHeads / numKVHeads;
             Tensor kExpanded = ExpandKVHeads(_kvCacheK[layer], groupSize, totalSeqLen);

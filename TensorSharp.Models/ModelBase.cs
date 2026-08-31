@@ -120,6 +120,7 @@ namespace TensorSharp.Models
         /// </summary>
         protected void ApplyModelAlignedKvCacheDefault(IDictionary<string, QuantizedWeight> quantWeights)
         {
+            RefuseUnsupportedBlockQuantizedKvCache();
             if (KvCacheDtypeConfig.IsExplicitlySet) return;
 
             int dominant = 0; // GGML_TYPE_F32
@@ -140,6 +141,44 @@ namespace TensorSharp.Models
             }
 
             KvCacheDtypeConfig.ApplyModelDtypeDefault(dominant);
+            _kvCacheDtype = KvCacheDtypeConfig.Current;
+        }
+
+        /// <summary>
+        /// Whether every path this architecture can take can READ a
+        /// block-quantized (Q8_0 / Q4_0) K/V cache.
+        ///
+        /// A block-quantized cache is only ever readable by kernels that know the
+        /// block layout. An architecture whose fused kernels decline the type AND
+        /// whose managed fallback walks the cache as a flat float buffer cannot
+        /// honour <c>--kv-cache-dtype q8_0</c> on any path, and must say so here:
+        /// otherwise the request survives model construction and dies much later
+        /// as an unhandled "Requires a Float32 tensor" deep inside the first
+        /// forward pass - which, because kernel warm-up is the first forward,
+        /// means the process aborts before it has generated a single token.
+        /// Default true; override to false for a family that cannot.
+        /// </summary>
+        protected virtual bool SupportsBlockQuantizedKvCache => true;
+
+        /// <summary>
+        /// Downgrade an explicitly requested block-quantized KV cache to F16 on
+        /// architectures that cannot read one (see
+        /// <see cref="SupportsBlockQuantizedKvCache"/>), with a message on stderr
+        /// naming the substitution. F16 is the right substitute rather than F32:
+        /// it is what <see cref="KvCacheDtypeConfig.ApplyModelDtypeDefault"/>
+        /// would have chosen for any quantized model, so the operator gets the
+        /// cache the model would have used anyway instead of an abort.
+        /// </summary>
+        private void RefuseUnsupportedBlockQuantizedKvCache()
+        {
+            if (SupportsBlockQuantizedKvCache) return;
+            KvCacheDtype requested = KvCacheDtypeConfig.Current;
+            if (requested != KvCacheDtype.Q8_0 && requested != KvCacheDtype.Q4_0) return;
+
+            Console.Error.WriteLine(
+                $"[kv-cache] {GetType().Name} cannot read a {requested.ToShortString()} K/V cache "
+                + "on any of its attention paths; using f16 instead.");
+            KvCacheDtypeConfig.Set(KvCacheDtype.F16);
             _kvCacheDtype = KvCacheDtypeConfig.Current;
         }
 

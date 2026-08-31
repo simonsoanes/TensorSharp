@@ -461,9 +461,37 @@ namespace TensorSharp.Models
                 int attendStart = totalSeqLen - attendLen;
 
                 result = new Tensor(_allocator, DType.Float32, 1, Config.NumHeads * _attnValLen);
-                AttentionDecodeWithWindow(q, _kvCacheK[layer], _kvCacheV[layer], result,
-                    Config.NumHeads, Config.NumKVHeads, _attnKeyLen, _attnValLen,
-                    attendStart, totalSeqLen, 1f);
+                // Decode is the same fused kernel at seqLen == 1. The managed
+                // fallback below cannot read an F16 cache, so it dequantizes the
+                // WHOLE attended window to F32 on the host for every layer of every
+                // token (ExpandKVHeadsF16): with 34 layers and a 2k context that is
+                // ~150M host conversions per token and it pinned decode at ~2 tok/s
+                // on a card that runs the same model's prefill on the GPU. The
+                // kernel reads the cache in place and expresses the SWA window as
+                // its mask: for one query row the mask attends
+                // [max(0, totalSeqLen - window), totalSeqLen - 1], which is exactly
+                // the [attendStart, totalSeqLen) span the fallback walks.
+                bool decodeFused = false;
+                if (Gemma3FlashAttnEnabled
+                    && IsGgmlBackend
+                    && _attnKeyLen == _attnValLen
+                    && _kvCacheK[layer].ElementType == DType.Float16
+                    && _kvCacheV[layer].ElementType == DType.Float16
+                    && Config.NumHeads % Config.NumKVHeads == 0)
+                {
+                    using Tensor qHeads1 = ReshapeToHeads(q, Config.NumHeads, 1, _attnKeyLen);
+                    GgmlBasicOps.FusedPrefillAttentionF16KV(
+                        qHeads1, _kvCacheK[layer], _kvCacheV[layer], result,
+                        Config.NumHeads, Config.NumKVHeads, _attnKeyLen,
+                        1, totalSeqLen, (int)_kvCacheK[layer].Sizes[1],
+                        maskStartPos: totalSeqLen - 1,
+                        slidingWindow: isGlobal ? 0 : _slidingWindow, scale: 1f);
+                    decodeFused = true;
+                }
+                if (!decodeFused)
+                    AttentionDecodeWithWindow(q, _kvCacheK[layer], _kvCacheV[layer], result,
+                        Config.NumHeads, Config.NumKVHeads, _attnKeyLen, _attnValLen,
+                        attendStart, totalSeqLen, 1f);
             }
             else
             {
@@ -476,6 +504,44 @@ namespace TensorSharp.Models
                 kHeads.Dispose();
                 vHeads.Dispose();
 
+                result = null;
+                int windowSizeFused = isGlobal ? 0 : _slidingWindow;
+                // Fused prefill attention straight off the F16 cache - the same
+                // escape Gemma 4 already takes for its global layers. The legacy
+                // path below calls ExpandKVHeads, which on the GGML backend is a
+                // HOST loop: it dequantizes F16->F32 and repeats every KV head
+                // group_size times, and the code then materializes an
+                // [numHeads, seqLen, kvLen] score tensor and softmaxes it. A long
+                // prompt therefore spent nearly all of its prefill in system
+                // memory with the GPU idle.
+                //
+                // The kernel reads the [kvHeads, cacheLen, headDim] cache in place,
+                // does the GQA broadcast in-graph, and builds exactly the mask
+                // ApplyCausalMask builds below: query row t attends keys
+                // [max(0, startPos + t - window + 1), startPos + t]. mul_mat
+                // accumulates in F32, so this is the same computation up to
+                // floating-point ordering - different kernels round differently, so
+                // a greedy near-tie can land on the other token, exactly as any
+                // kernel swap does. TS_GEMMA3_FLASH_ATTN=0 forces the legacy path.
+                // Q was already scaled by 1/sqrt(keyLen) above, hence scale: 1.
+                if (Gemma3FlashAttnEnabled
+                    && IsGgmlBackend
+                    && _attnKeyLen == _attnValLen
+                    && _kvCacheK[layer].ElementType == DType.Float16
+                    && _kvCacheV[layer].ElementType == DType.Float16
+                    && Config.NumHeads % Config.NumKVHeads == 0)
+                {
+                    result = new Tensor(_allocator, DType.Float32, seqLen, Config.NumHeads * _attnValLen);
+                    GgmlBasicOps.FusedPrefillAttentionF16KV(
+                        qHeads, _kvCacheK[layer], _kvCacheV[layer], result,
+                        Config.NumHeads, Config.NumKVHeads, _attnKeyLen,
+                        seqLen, totalSeqLen, (int)_kvCacheK[layer].Sizes[1],
+                        maskStartPos: startPos, slidingWindow: windowSizeFused, scale: 1.0f);
+                    qHeads.Dispose();
+                }
+
+                if (result == null)
+                {
                 int groupSize = Config.NumHeads / Config.NumKVHeads;
                 Tensor kExpanded = ExpandKVHeads(_kvCacheK[layer], groupSize, totalSeqLen);
                 Tensor vExpanded = ExpandKVHeads(_kvCacheV[layer], groupSize, totalSeqLen);
@@ -497,6 +563,7 @@ namespace TensorSharp.Models
 
                 result = ReshapeFromHeads(attnOut, Config.NumHeads, seqLen, _attnValLen);
                 attnOut.Dispose();
+                }
             }
 
             q.Dispose();
@@ -578,6 +645,12 @@ namespace TensorSharp.Models
         /// Attention decode with optional sliding window.
         /// attendStart..totalSeqLen-1 is the window of positions to attend to.
         /// </summary>
+        // Fused attention reading the F16 KV cache in place (prefill AND decode),
+        // instead of the host ExpandKVHeadsF16 dequant plus a materialized score
+        // matrix. TS_GEMMA3_FLASH_ATTN=0 forces the legacy path (A/B / debugging).
+        private static readonly bool Gemma3FlashAttnEnabled =
+            Environment.GetEnvironmentVariable("TS_GEMMA3_FLASH_ATTN") != "0";
+
         private unsafe void AttentionDecodeWithWindow(Tensor q, Tensor kCache, Tensor vCache,
             Tensor result, int numHeads, int numKVHeads, int keyDim, int valDim,
             int attendStart, int totalSeqLen, float scale)

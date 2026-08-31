@@ -682,6 +682,19 @@ namespace TensorSharp.Models
 
         private int _kvCacheCapacity;
 
+        /// <summary>
+        /// GPT-OSS has no path that can read a block-quantized K/V cache. Both
+        /// fused native graphs refuse the type outright ("GPT-OSS model
+        /// decode/prefill: only F32/F16 KV caches are supported", see
+        /// ggml_ops_gptoss_decode.cpp / ggml_ops_gptoss_prefill.cpp), and the
+        /// managed fallback the refusal drops into,
+        /// <see cref="AttentionDecodeWithSinks"/>, dispatches on F16 and then
+        /// walks the cache as a flat float buffer - so
+        /// <c>--kv-cache-dtype q8_0</c> used to abort the process inside kernel
+        /// warm-up with an unhandled "Requires a Float32 tensor, but found Q8_0".
+        /// </summary>
+        protected override bool SupportsBlockQuantizedKvCache => false;
+
         private void InitKVCache(int initialSeqLen, int maxSeqLen)
         {
             _maxContextLength = maxSeqLen;

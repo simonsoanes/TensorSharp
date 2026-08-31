@@ -509,6 +509,19 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
                 set_last_error("Qwen3.5 arena batched decode: MoE CPU offload not supported (v1).");
                 return 0;
             }
+            // Per-tensor NVFP4 weight scales (scale2). The solo decode and verify
+            // graphs wrap every projection in q35_scaled(..., t.psc[TSQ35_SC_*]);
+            // this graph has no psc[] and would emit bare mul_mats, i.e. compute
+            // the whole model at an effective scale of 1.0 with no error raised.
+            // The managed caller declines first (Qwen35Model.BatchedArenaDecode.cs),
+            // and this is the belt to that braces: a wrong answer must never be a
+            // reachable outcome of forgetting a gate one layer up.
+            if (layers[l].proj_scales != nullptr)
+            {
+                set_last_error("Qwen3.5 arena batched decode: per-tensor sidecar scales "
+                               "(NVFP4 scale2) are not applied by the arena graph.");
+                return 0;
+            }
         }
         {
             const ggml_type emb_type = static_cast<ggml_type>(token_embd_type);
