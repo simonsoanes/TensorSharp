@@ -78,9 +78,9 @@ python3 test_multiturn.py
 ### 按能力门控的覆盖项
 
 - 思维链测试仅在当前 TensorSharp 中支持思维链的架构上运行：
-  Gemma 4、Qwen 3、Qwen 3.5、GPT OSS、Nemotron-H
+  Gemma 4、Qwen 3.5/3.6/3.8-family、Qwen 4 experimental、GPT OSS、Nemotron-H
 - 工具调用测试仅在当前 TensorSharp 中支持工具调用的架构上运行：
-  Gemma 4、Qwen 3、Qwen 3.5、Nemotron-H
+  Gemma 4、Qwen 3.5/3.6/3.8-family、Qwen 4 experimental、Nemotron-H
 - GPT OSS 思维链会被测试，但当前脚本会跳过 GPT OSS 工具调用检查：脚本的能力门控（`test_multiturn.py` 中的 `_detect_capabilities`）对 `gptoss` 仍报告 `tools=False`，这相对于服务端已经过时 —— Harmony 输出解析器实际支持工具调用（commentary channel 的 `to=functions.NAME` 调用），因此这里的跳过并不代表不支持。
 
 不支持的架构会被标记为 `SKIP`，而不是 `FAIL`。

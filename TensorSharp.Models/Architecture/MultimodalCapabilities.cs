@@ -81,9 +81,9 @@ namespace TensorSharp.Models.Architecture
     /// <summary>
     /// How an architecture expands its own media placeholders in a rendered prompt.
     ///
-    /// Prompt formats differ far more between families than queueing does (Gemma's
-    /// <c>&lt;start_of_image&gt;</c>, Qwen-VL's vision-pad runs plus M-RoPE, Mistral's
-    /// row/break tokens, GLM's <c>&lt;|image|&gt;</c>), so each family names its own
+    /// Prompt formats differ far more between families than queueing does (Qwen-VL's
+    /// vision-pad runs plus M-RoPE, Mistral's row/break tokens, GLM's
+    /// <c>&lt;|image|&gt;</c>), so each family names its own
     /// expansion here instead of being named in a dispatch chain inside the injector.
     /// The expansion itself runs on the injector's shared machinery - media caching,
     /// span registration, token splicing - which is why the injector is the argument.

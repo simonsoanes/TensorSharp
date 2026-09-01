@@ -22,7 +22,7 @@ namespace TensorSharp.Models
     /// - Standard LLaMA-like transformer with SiLU-gated MLP (SwiGLU)
     /// - GPT-J (norm) style RoPE with YaRN scaling for extended context
     /// - Position-dependent Q scaling: q *= (1 + beta * log(1 + floor(pos / orig_ctx)))
-    /// - No QK-norm (unlike Qwen3/Gemma3)
+    /// - No per-head QK normalization
     /// - Supports multimodal (vision) via separate Pixtral vision encoder
     /// </summary>
     public partial class Mistral3Model : ModelBase
@@ -877,9 +877,9 @@ namespace TensorSharp.Models
         }
 
         // Native batch decode is not used for Mistral 3 because YaRN applies
-        // per-dimension frequency correction that the generic TransformerLayerDecode
-        // API cannot express. The C# decode path uses GGML-backed matmul/attention
-        // and only adds a lightweight C# RoPE kernel.
+        // per-dimension frequency correction that its fused decode path cannot
+        // express. The C# decode path uses GGML-backed matmul/attention and only
+        // adds a lightweight C# RoPE kernel.
 
         public override void Dispose()
         {

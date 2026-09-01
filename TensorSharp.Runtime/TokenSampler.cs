@@ -367,7 +367,7 @@ namespace TensorSharp.Runtime
             if (k >= n)
             {
                 // Only the no-top-k branch needs the identity permutation. Filling it
-                // unconditionally wrote a vocab-sized array (248k ints on Qwen3.x) on
+                // unconditionally wrote a vocab-sized array (hundreds of thousands of ints) on
                 // every sampled token and then discarded it whenever top_k was set,
                 // which is the common case (the model's own recommendation is 20).
                 int[] indices = _indexBuffer != null && _indexBuffer.Length == n
@@ -556,4 +556,3 @@ namespace TensorSharp.Runtime
         #endregion
     }
 }
-

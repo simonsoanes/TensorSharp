@@ -225,7 +225,7 @@ namespace TensorSharp.Cli
                     "set it only on your own. Default: off.",
                     "--code-exec --code-exec-unconfined"),
                 new OptionHelp("--think",
-                    "Enable the model's thinking/reasoning mode on architectures that support it (e.g. Qwen3/3.5, " +
+                    "Enable the model's thinking/reasoning mode on architectures that support it (e.g. Qwen 3.5, " +
                     "Gemma 4). Default: off.",
                     "--think"),
                 new OptionHelp("--max-tokens <N>",
@@ -251,7 +251,7 @@ namespace TensorSharp.Cli
                     "--video clip.mp4"),
                 new OptionHelp("--mmproj <path>",
                     "Multimodal projector (vision/audio encoder) GGUF that pairs with the model. Default: " +
-                    "auto-detected next to the model for known architectures (gemma3/gemma4, Qwen3.5, Mistral3, " +
+                    "auto-detected next to the model for known architectures (Gemma 4, Qwen 3.5, Mistral 3, " +
                     "Nemotron); pass it explicitly for anything else.",
                     "--mmproj mmproj-gemma-4-E4B-it-Q8_0.gguf"),
             }),

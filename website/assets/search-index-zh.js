@@ -35,7 +35,7 @@ window.SEARCH_INDEX_ZH = [
   { t: "构建原生 GGML / MLX 库", p: "后端", u: "backends.html#native-build", s: "build-windows.ps1 / build-linux.sh / build-macos.sh、CUDA 架构检测，以及自动启用的 Vulkan（用 --no-vulkan 退出；Windows 便携 Vulkan 工具链）。", k: "compile 编译 native cmake cuda arch vulkan glslc no-vulkan TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN" },
   { t: "当前二进制发行状态", p: "后端", u: "backends.html#binaries", s: "最新 v3.0.5.0 只有源码下载，没有上传 CLI/server 应用归档；Release 出现资产前请从源码构建。", k: "release 下载 归档 二进制 预构建 source v3.0.5.0" },
 
-  { t: "支持的模型", p: "模型", u: "models.html#table", s: "DeepSeek V4 Flash、GLM 5.x、Gemma 3/4、Qwen 3 / 3.5 / 3.6、GPT OSS、Nemotron-H、Mistral 3、DiffusionGemma、Muse-Glimmer、Qwen-Image-Edit、MiniMax-H3 视频带音频、Wan 视频。", k: "architectures 架构 家族 deepseek glm glm-dsa glm5 gemma qwen gptoss nemotron mistral 图像 编辑 minimax h3 minimax-h3 minimax_h3 音频 wan 视频" },
+  { t: "支持的模型", p: "模型", u: "models.html#table", s: "DeepSeek V4 Flash、GLM 5.x、Gemma 4、Qwen 3.5 / 3.6 / 3.8 Flash Next、GPT OSS、Nemotron-H、Mistral 3、DiffusionGemma、Muse-Glimmer、Qwen-Image-Edit、MiniMax-H3 视频带音频、Wan 视频。", k: "architectures 架构 家族 deepseek glm glm-dsa glm5 gemma qwen gptoss nemotron mistral 图像 编辑 minimax h3 minimax-h3 minimax_h3 音频 wan 视频" },
   { t: "哪个更快——每个家族最关键的那一项设置", p: "模型", u: "models.html#fast-lane", s: "每个家族中真正决定端到端耗时的那一个检查点、LoRA 或参数。", k: "fast 快 更快 加速 蒸馏 turbo lightning lora draft 推测解码 性能 哪个" },
   { t: "浏览模型参考", p: "模型", u: "models.html#browse", s: "模型参考分为四个页面：模型下载、文本与 LLM 模型、图像生成、视频生成。", k: "索引 浏览 目录 页面 导航" },
   { t: "模型下载（GGUF）", p: "模型下载", u: "models-downloads.html#downloads", s: "各受支持架构的 Hugging Face 链接、精确文件名，以及 mmproj、VAE、文本编码器与 MTP 草稿等伴随文件。", k: "huggingface 权重 下载 mmproj mtp draft lora vae turbo 蒸馏" },

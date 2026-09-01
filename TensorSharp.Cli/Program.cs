@@ -683,8 +683,6 @@ namespace TensorSharp.Cli
                 string binDir = AppContext.BaseDirectory;
                 string[] candidates = {
                     Path.Combine(binDir, "Qwen3.5-9B-Q8_0.gguf"),
-                    Path.Combine(binDir, "Qwen3-4B.fp16.gguf"),
-                    "/Users/ZhongkaiFu/Downloads/Qwen3-4B.fp16.gguf",
                 };
                 modelPath = candidates.FirstOrDefault(File.Exists);
             }
@@ -1217,8 +1215,8 @@ namespace TensorSharp.Cli
 
             // Now that the model is loaded its context length is known, so the skills
             // block can be budgeted against it rather than against a guess, and the
-            // family's ability to carry tool declarations can be consulted: Gemma 3 and
-            // Mistral 3 discard them, so on those the instructions are written into the
+            // family's ability to carry tool declarations can be consulted: Mistral 3
+            // discards them, so there the instructions are written into the
             // prompt up front instead of being fetched on demand.
             // The operator's OWN --tools, before anything of ours is merged in. The loop
             // needs the two apart: a name in neither list belongs to nobody, and telling
@@ -2425,7 +2423,7 @@ namespace TensorSharp.Cli
                 // format through IMultimodalPromptExpander.
                 //
                 // The CLI used to carry a second, per-architecture copy of all of that -
-                // ~600 lines that had drifted from the injector (Gemma 3 only ever
+                // ~600 lines that had drifted from the injector (one path only ever
                 // encoded imagePaths[0]; Gemma 4 audio re-derived its own mel path) and
                 // that every new vision model had to be added to twice. qwen4exp and
                 // glm-dsa already routed through the injector; the rest now do too.
@@ -3546,7 +3544,7 @@ namespace TensorSharp.Cli
             if (!model.SupportsKVStateSnapshot)
             {
                 _log.LogError(LogEventIds.CliBenchmark,
-                    "paged-bench: model architecture '{Arch}' does not support KV snapshot. Use Qwen3, Gemma3, GptOss, or Mistral3.",
+                    "paged-bench: model architecture '{Arch}' does not support KV snapshot. Use GptOss or Mistral3.",
                     model.Config.Architecture);
                 return;
             }
@@ -4032,7 +4030,7 @@ namespace TensorSharp.Cli
                 new ChatMessage { Role = "user", Content = "Hello" }
             };
 
-            string rendered = ChatTemplate.RenderQwen3(messages, true);
+            string rendered = ChatTemplate.RenderChatMl(messages, true);
             string expected = "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n";
             _log.LogInformation(LogEventIds.CliBenchmark,
                 "chat template test rendered=\"{Rendered}\" expected=\"{Expected}\" match={Match}",
@@ -4050,7 +4048,7 @@ namespace TensorSharp.Cli
             {
                 new ChatMessage { Role = "user", Content = testInput }
             };
-            string rendered = ChatTemplate.RenderQwen3(messages, true);
+            string rendered = ChatTemplate.RenderChatMl(messages, true);
 
             var inputTokens = model.Tokenizer.Encode(rendered, addSpecial: true);
             _log.LogDebug(LogEventIds.CliBenchmark,
@@ -4123,7 +4121,7 @@ namespace TensorSharp.Cli
                 client.Timeout = TimeSpan.FromSeconds(120);
                 string json = System.Text.Json.JsonSerializer.Serialize(new
                 {
-                    model = "qwen3-fp16-test",
+                    model = "tensorsharp-test",
                     prompt = rawPrompt,
                     raw = true,
                     stream = false,

@@ -932,7 +932,6 @@ namespace TensorSharp.Models
             "<|call|>",
             "<|flush|>",
             "<|calls|>",
-            "<end_of_turn>",
             "<|endoftext|>",
             "</s>",
             "<|eom_id|>",
@@ -955,7 +954,8 @@ namespace TensorSharp.Models
         public static int[] ResolveEogTokenIds(
             IReadOnlyList<string> vocabTokens,
             int eosId,
-            IEnumerable<int>? extraEosIds = null)
+            IEnumerable<int>? extraEosIds = null,
+            int? declaredEotId = null)
         {
             var ids = new HashSet<int>();
             if (eosId >= 0 && eosId < vocabTokens.Count)
@@ -966,6 +966,8 @@ namespace TensorSharp.Models
                     if (id >= 0 && id < vocabTokens.Count)
                         ids.Add(id);
             }
+            if (declaredEotId is int eotId && eotId >= 0 && eotId < vocabTokens.Count)
+                ids.Add(eotId);
 
             for (int id = 0; id < vocabTokens.Count; id++)
             {
@@ -1068,7 +1070,11 @@ namespace TensorSharp.Models
             }
 
             var extraEos = gguf.GetInt32Array("tokenizer.ggml.eos_token_ids");
-            var eosIds = new List<int>(ResolveEogTokenIds(vocabTokens, eosId, extraEos));
+            int? declaredEotId = gguf.Metadata.ContainsKey("tokenizer.ggml.eot_token_id")
+                ? (int)gguf.GetUint32("tokenizer.ggml.eot_token_id")
+                : null;
+            var eosIds = new List<int>(ResolveEogTokenIds(
+                vocabTokens, eosId, extraEos, declaredEotId));
 
             // llama.cpp folds the declared end-of-turn control into the EOG set
             // for EVERY tokenizer type (llama_vocab::impl::load inserts
@@ -1079,15 +1085,6 @@ namespace TensorSharp.Models
             // turn with <|eot|> (tokenizer.ggml.eot_token_id = 200008), so it ran
             // past its answer and re-answered until max_tokens.
             bool isSentencePiece = UsesSentencePieceTokenizer(tokenizerModel);
-            // 106 (<end_of_turn>) is the SentencePiece/Gemma fallback that
-            // predates the metadata key; BPE vocabularies get no fallback, only
-            // the key when the converter wrote one.
-            if (gguf.Metadata.ContainsKey("tokenizer.ggml.eot_token_id") || isSentencePiece)
-            {
-                int eotId = (int)gguf.GetUint32("tokenizer.ggml.eot_token_id", 106);
-                if (eotId >= 0 && eotId < vocabTokens.Length && !eosIds.Contains(eotId))
-                    eosIds.Add(eotId);
-            }
 
             if (isSentencePiece)
             {

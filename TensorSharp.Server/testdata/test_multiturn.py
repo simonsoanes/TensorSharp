@@ -146,11 +146,7 @@ class TestRunner:
 
         if normalized.startswith("gemma4"):
             return True, True
-        if normalized.startswith("gemma3"):
-            return False, False
-        if normalized.startswith("qwen35"):
-            return True, True
-        if normalized.startswith("qwen3"):
+        if normalized.startswith(("qwen35", "qwen36", "qwen38", "qwen4exp", "qwen3next")):
             return True, True
         if "gptoss" in normalized:
             return True, False

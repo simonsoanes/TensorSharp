@@ -8,8 +8,8 @@
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 //
-// Unit tests for Qwen 3 / 3.5 tool-call parsing. Qwen 3 emits a JSON object
-// inside <tool_call>...</tool_call>; Qwen 3.5 emits the XML-ish
+// Unit tests for Qwen 3.5 tool-call parsing. The shared ChatML parser accepts a
+// JSON object inside <tool_call>...</tool_call>; Qwen 3.5 also emits the XML-ish
 // <function=NAME><parameter=KEY>VALUE</parameter></function> body instead.
 // Both must reach the OpenAI `tool_calls` surface — a body the parser cannot
 // read is silently dropped along with the whole turn (the text has already been

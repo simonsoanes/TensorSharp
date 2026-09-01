@@ -55,7 +55,7 @@
   <p>不需要。TensorSharp 可在普通 CPU 上运行（<code>--backend cpu</code> 或更快的 <code>ggml_cpu</code>）。GPU —— NVIDIA（CUDA）、任何支持 Vulkan 的 AMD/Intel/NVIDIA GPU，或 Apple Silicon（Metal/MLX）—— 会让生成显著更快，尤其是更大的模型。见<a href="backends_zh-cn.html">后端</a>。</p>
 
   <h3>我该从哪个模型开始？</h3>
-  <p>建议从 <strong>Gemma 4 E4B Q8_0</strong>（推荐公开文件为 7.48 GiB）开始 —— 它是 TensorSharp 原生 GGML 快路径上经过验证的快速上手模型，支持思维链、工具调用，以及需要可选投影器的图像/视频/音频输入。内存占用更低的小型入门模型是 <strong>Qwen3-4B Q4_K_M</strong>（2.33 GiB）。见 <a href="getting-started_zh-cn.html#e4b-fast-lane">E4B 快路径</a>或<a href="models-downloads_zh-cn.html#downloads">模型下载</a>。</p>
+  <p>建议从 <strong>Gemma 4 E4B Q8_0</strong>（推荐公开文件为 7.48 GiB）开始 —— 它是 TensorSharp 原生 GGML 快路径上经过验证的快速上手模型，支持思维链、工具调用，以及需要可选投影器的图像/视频/音频输入。内存占用更低的入门模型是 <strong>Qwen3.5-9B IQ4_XS</strong>（约 5.2 GB）。见 <a href="getting-started_zh-cn.html#e4b-fast-lane">E4B 快路径</a>或<a href="models-downloads_zh-cn.html#downloads">模型下载</a>。</p>
 
   <h3>我的数据私密吗？</h3>
   <p>是的 —— 推理完全在你的机器上进行。提示词、文档与图像不会发送到任何外部服务。这正是各组织选择本地推理的主要原因。见<a href="overview_zh-cn.html#business">商业价值</a>。</p>

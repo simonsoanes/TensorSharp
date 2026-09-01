@@ -705,7 +705,7 @@ namespace TensorSharp.Models
                 throw new InvalidOperationException(
                     $"[dsv4-cuda] draft model architecture '{arch}' is not a DeepSeek V4 DSpark drafter " +
                     "(expected deepseek4-dspark or deepseek_v4_flash_dspark_draft). DSpark drafters for other " +
-                    "architectures (Qwen 3, Gemma 4) use a different drafter design and are not supported.");
+                    "architectures such as Gemma 4 use a different drafter design and are not supported.");
             }
 
             int DsUint(params string[] keys)

@@ -31,7 +31,7 @@ namespace TensorSharp.Models
     /// The resize kernel is a first-order source of divergence from the reference
     /// implementation, so the fixed-point two-pass Pillow filter is ported here
     /// verbatim rather than reusing the repo's bilinear helper. Only
-    /// <see cref="Gemma3ImageProcessor.DecodeImageToRGBA"/> is shared.
+    /// <see cref="ImageProcessorUtils.DecodeImageToRGBA"/> is shared.
     /// </summary>
     public sealed class MuseGlimmerImageProcessor
     {
@@ -77,7 +77,7 @@ namespace TensorSharp.Models
 
         public static (int width, int height) ReadImageDimensions(string path)
         {
-            return Gemma3ImageProcessor.ReadImageDimensions(path);
+            return ImageProcessorUtils.ReadImageDimensions(path);
         }
 
         /// <summary>
@@ -156,7 +156,7 @@ namespace TensorSharp.Models
 
         public (float[] pixels, int width, int height) ProcessImageBytes(byte[] fileBytes)
         {
-            byte[] rgba = Gemma3ImageProcessor.DecodeImageToRGBA(fileBytes, out int srcW, out int srcH);
+            byte[] rgba = ImageProcessorUtils.DecodeImageToRGBA(fileBytes, out int srcW, out int srcH);
             var (dstW, dstH) = ComputeTargetSize(srcW, srcH);
 
             // llama.cpp operates on a 3-channel u8 image. The repo's decoders emit

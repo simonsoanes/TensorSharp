@@ -72,7 +72,7 @@ DiffusionGemma 当前不属于已注册的 TestMatrix 功能目录：还没有 d
 
 | 环境变量 | 适用范围 | 功能影响 | 运行时 baseline | Sweep 值 | 默认 sweep |
 |---|---|---|---|---|---|
-| `TS_PREFILL_CHUNK` | 在 GPT OSS、Qwen 3.5 / 3.6 family 长上下文功能上 sweep；运行时 Gemma 4、Nemotron-H、Mistral 3、Qwen 3 也会读取 | 分块 prefill 大小 | 架构默认值 | `256`, `512`, `1024` | 是 |
+| `TS_PREFILL_CHUNK` | 在 GPT OSS、Qwen 3.5 / 3.6 family 长上下文功能上 sweep；运行时 Gemma 4、Nemotron-H、Mistral 3 也会读取 | 分块 prefill 大小 | 架构默认值 | `256`, `512`, `1024` | 是 |
 | `GDN_DISABLE_CHUNKED_PREFILL` | `qwen3next` | 关闭 GDN 分块 prefill | 关闭 | `0`, `1` | 否 |
 | `TS_GGML_ASYNC_COMPUTE` | GGML 后端 | 异步 compute 提交 | `ggml_metal` 上启用（`0` 关闭），其他 GGML 后端关闭 | `0`, `1` | 是 |
 | `TS_QWEN35_FD_PERSIST` | GGML GPU 后端上的 Qwen 3.5 / 3.6 family | 保留并重放整模型单 token decode 图 | 启用 | `0`, `1` | 否 |
@@ -191,7 +191,7 @@ Muse-Glimmer 的融合整模型内核与它的 DFlash 块级草稿模型各有�
 | `TS_Q35_VERIFY_DEFER_STATE` | Qwen 3.5 / 3.8 投机验证 | `0` 在每次持久化调用后都把窗口末尾的递归状态下载回主机，而不是留在设备上等待 slot 提交；它与快照可以分开测，因为它同样覆盖投机会话中穿插的单行步骤 | 开 | 未注册 | 否 |
 | `TS_Q35_VERIFY_STRIDED_VIEWS` | Qwen 3.5 / 3.8 投机验证 | `0` 关闭 CUDA 与 Metal 上连续跨步的 KV view，回退为按 head 的 `set_rows` 写入 | 开 | 未注册 | 否 |
 | `TS_Q35_MTP_DRAFT_PERSIST` | Qwen 3.5 / 3.8 MTP 草稿图 | `1` 允许单层 MTP 草稿图使用持久化 / 重放缓存。默认关闭：这张图曾在 CUDA graph 捕获重放时死锁，保留这个开关是为了在新版 ggml 上重新验证。收益约 1% | 关 | 未注册 | 否 |
-| `TS_MTP_FOLD_CATCHUP` | Qwen 3.x NextN/MTP 投机 | `0` 把草稿头的 catch-up 与第一个草稿步拆成两次调用，而不是折叠成对 `n_accepted + 1` 行的一次前向（llama.cpp draft-mtp 的形状）。收益约 4-5% | 开 | 未注册 | 否 |
+| `TS_MTP_FOLD_CATCHUP` | Qwen 3.5 / 3.6 NextN/MTP 投机 | `0` 把草稿头的 catch-up 与第一个草稿步拆成两次调用，而不是折叠成对 `n_accepted + 1` 行的一次前向（llama.cpp draft-mtp 的形状）。收益约 4-5% | 开 | 未注册 | 否 |
 | `TS_SPEC_ADAPTIVE` | 投机解码（所有草稿器） | `0` 关闭成本调节器，于是起草不再与普通 baseline 做对比、也永远不会被暂停。用于 A/B 测量：调节器每一轮的 baseline 步骤都是普通 decode，它们并不免费 | 开 | 未注册 | 否 |
 | `TS_GGML_LOG_DEBUG` | GGML 后端 | `1` 把 ggml 的 DEBUG 日志通道透传出来而不是丢弃。它承载 CUDA 后端的 "CUDA graph warmup complete" / "reset" 这两行，而这是唯一能看出一张图是否真的被 CUDA graph 捕获的途径 | 关 | 未注册 | 否 |
 

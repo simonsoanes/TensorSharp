@@ -23,15 +23,13 @@ namespace TensorSharp.Models.Architecture
     {
         public static void RegisterAll()
         {
-            // Metadata-free detectors first: these must get a chance before the
-            // default architecture claims an unlabelled file.
+            // Metadata-free detectors first so unlabelled files can be recognized
+            // from their tensor layout before resolution fails closed.
             ModelArchitectureRegistry.Register(MiniMaxH3.MiniMaxH3Architecture.Descriptor);
 
             // Text / multimodal language models.
-            ModelArchitectureRegistry.Register(Qwen3Architecture.Descriptor);
             ModelArchitectureRegistry.Register(Qwen35Architecture.Descriptor);
             ModelArchitectureRegistry.Register(Qwen4ExpArchitecture.Descriptor);
-            ModelArchitectureRegistry.Register(Gemma3Architecture.Descriptor);
             ModelArchitectureRegistry.Register(Gemma4Architecture.Descriptor);
             ModelArchitectureRegistry.Register(GptOssArchitecture.Descriptor);
             ModelArchitectureRegistry.Register(NemotronArchitecture.Descriptor);

@@ -364,7 +364,7 @@ public class SkillPromptTests : IDisposable
         Assert.Equal(string.Empty, plan.Instructions);
     }
 
-    // ---- Plan: no tools (Gemma 3, Mistral 3) --------------------------------
+    // ---- Plan: no tools ------------------------------------------------------
 
     [Fact]
     public void Plan_WithoutTools_DropsTheDiscoveryCatalog()
@@ -388,7 +388,7 @@ public class SkillPromptTests : IDisposable
     [Fact]
     public void Plan_WithoutTools_TheUsageTextNamesNoToolTheModelCannotCall()
     {
-        // Telling a Gemma 3 or Mistral 3 model to "call skills_read" is an instruction
+        // Telling a model without tool declarations to "call skills_read" is an instruction
         // it has no way to follow; the best case is that it ignores the line, the worst
         // is that it hallucinates the call as prose and the user sees markup.
         WriteSkill("pdf", "does pdfs");

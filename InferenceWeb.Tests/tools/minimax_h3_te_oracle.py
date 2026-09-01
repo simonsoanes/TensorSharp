@@ -130,7 +130,7 @@ def main():
         k = F.linear(n1, W.get(p + 'self_attn.k_proj.weight')).view(seq, kvh, head_dim)
         v = F.linear(n1, W.get(p + 'self_attn.v_proj.weight')).view(seq, kvh, head_dim)
 
-        # Qwen3 normalizes Q and K per head, before RoPE.
+        # The text encoder normalizes Q and K per head, before RoPE.
         q = rms_norm(q, W.get(p + 'self_attn.q_norm.weight'))
         k = rms_norm(k, W.get(p + 'self_attn.k_norm.weight'))
         q = apply_rope(q, cos, sin)

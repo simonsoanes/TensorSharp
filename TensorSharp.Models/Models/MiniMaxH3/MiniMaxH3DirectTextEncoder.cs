@@ -5,12 +5,12 @@
 //
 // TensorSharp is licensed under the BSD-3-Clause license found in the LICENSE file in the root directory of this source tree.
 //
-// Direct-backend MiniMax-H3 text encoder: the Qwen3 trunk of
+// Direct-backend MiniMax-H3 text encoder: the language-model trunk of
 // TSGgml_MiniMaxH3TextEncode expressed against the shared direct primitives, so
 // BackendType.Cpu (the 100% pure-C# backend) can run it with no ggml.
 //
 // Two details are specific to this trunk and easy to get wrong:
-//   - Q and K are RMS-normalized PER HEAD before RoPE (Qwen3), not after.
+//   - Q and K are RMS-normalized per head before RoPE, not after.
 //   - the checkpoint has no final norm; the DiT consumes the raw last-layer state.
 using System;
 
@@ -208,7 +208,7 @@ namespace TensorSharp.Models.MiniMaxH3
                         Tensor k = lw.K.Forward(n1);
                         using Tensor v = lw.V.Forward(n1);
 
-                        // Qwen3 normalizes Q and K per head BEFORE RoPE.
+                        // This encoder normalizes Q and K per head before RoPE.
                         if (lw.QNorm != null) q = NormHeads(q, lw.QNorm, seq, heads, hd);
                         if (lw.KNorm != null) k = NormHeads(k, lw.KNorm, seq, kvh, hd);
                         RopeHalf(q, cos, sin, seq, heads, hd);

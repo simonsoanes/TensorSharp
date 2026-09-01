@@ -146,8 +146,7 @@ hidden ─► narrow(seq_len-1) if prefill
   the GGUF stores Q / K / V separately. The decoder uses
   `_layerQkvFused[l]` to pick the fused matmul vs. the three separate
   matmuls per layer.
-- **No QK-norm** — unlike Qwen 3, Gemma 3, and Gemma 4, Mistral 3 skips the
-  per-head RMSNorm of Q and K.
+- **No QK-norm** — Mistral 3 skips the per-head RMSNorm of Q and K.
 
 ### 4.2 RoPE — GPT-J style with YaRN
 
@@ -433,8 +432,7 @@ cache end-to-end on a real GGUF.
 
 - **Native whole-model decode** — the entire legacy forward pass is
   managed C# with backend-dispatched matmul. A native single-call decode
-  path (analogous to Qwen 3's `TransformerModelDecode`) would remove most
-  of the managed overhead from the per-seq path.
+  path would remove most of the managed overhead from the per-seq path.
 - **Fused single-graph decode** — a `Mistral3ModelDecode` GGML kernel
   would significantly improve Metal / CUDA throughput by collapsing the
   per-layer dispatches in the legacy path.

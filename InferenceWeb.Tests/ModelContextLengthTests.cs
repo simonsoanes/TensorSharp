@@ -7,11 +7,11 @@ public class ModelContextLengthTests
     {
         var metadata = new Dictionary<string, object>
         {
-            ["qwen3.context_length"] = 32768u,
-            ["qwen3.rope.scaling.original_context_length"] = 4096u
+            ["mistral3.context_length"] = 32768u,
+            ["mistral3.rope.scaling.original_context_length"] = 4096u
         };
 
-        int resolved = ModelBase.ResolveConfiguredContextLength("qwen3", metadata, 4096, 8192, out string source);
+        int resolved = ModelBase.ResolveConfiguredContextLength("mistral3", metadata, 4096, 8192, out string source);
 
         Assert.Equal(8192, resolved);
         Assert.Equal("MAX_CONTEXT", source);

@@ -1420,7 +1420,7 @@ for (int col = static_cast<int>(tid); col < HiddenDim; col += 256) {
 ";
 
         // Fused (residual += input; normed = RmsNorm(residual, norm_weight)).
-        // Used by pre-norm transformer blocks (Mistral3 / Qwen3 / Nemotron /
+        // Used by pre-norm transformer blocks (Mistral3 / Qwen35 / Nemotron /
         // GptOss): folds the residual-add + post-add rmsnorm into one
         // dispatch, eliminating one MLX kernel launch per residual stage
         // (2 stages per layer × 40 layers = 80 saved dispatches/token on

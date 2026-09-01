@@ -25,7 +25,7 @@ namespace InferenceWeb.Tests;
 /// </summary>
 public sealed class RawPromptBoundaryPropagationTests : IDisposable
 {
-    private const string Architecture = "qwen3";
+    private const string Architecture = "qwen35";
     private readonly string _skillsDir = Path.Combine(
         Path.GetTempPath(), "ts-prompt-boundary-" + Guid.NewGuid().ToString("N"));
 

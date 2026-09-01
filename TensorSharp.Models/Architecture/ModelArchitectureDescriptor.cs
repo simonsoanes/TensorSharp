@@ -68,9 +68,9 @@ namespace TensorSharp.Models.Architecture
 
         /// <summary>
         /// Recognises a GGUF that declares NO architecture metadata at all. Only a
-        /// handful of published files are like this (MiniMax-H3), and without a
-        /// detector they would fall through to the default architecture and load as
-        /// the wrong model instead of failing cleanly. Null for the normal case.
+        /// handful of published files are like this (MiniMax-H3); without a detector,
+        /// resolution fails because the loader does not guess an architecture. Null
+        /// for the normal case.
         /// </summary>
         public Func<GgufFile, bool> DetectFromTensors { get; init; }
 

@@ -157,8 +157,7 @@ namespace TensorSharp.Server.Skills
         /// <param name="clientTools">The caller's own tools. Not modified.</param>
         /// <param name="architecture">
         /// The loaded model's <c>general.architecture</c>. Decides whether tools can be
-        /// offered at all — Gemma 3 and Mistral 3 discard tool declarations, and Mistral 3
-        /// additionally drops tool results.
+        /// offered at all — Mistral 3 discards tool declarations and tool results.
         /// </param>
         /// <param name="contextTokens">The model's context length, for budgeting. Zero when unknown.</param>
         /// <param name="options">Server configuration.</param>

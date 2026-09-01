@@ -246,10 +246,10 @@ namespace TensorSharp.Runtime
     }
 
     // ========================================================================
-    // Qwen3 Parser: <think>...</think> for thinking, <tool_call>...</tool_call>
+    // ChatML parser: <think>...</think> for thinking, <tool_call>...</tool_call>
     // ========================================================================
 
-    public class Qwen3OutputParser : IOutputParser
+    public class ChatMlOutputParser : IOutputParser
     {
         private enum State { CollectingThinking, ThinkingDone, CollectingContent, CollectingTool }
 
@@ -426,7 +426,7 @@ namespace TensorSharp.Runtime
                             if (endIdx > _toolReportedChars)
                                 toolCallTextSb.Append(raw, _toolReportedChars, endIdx - _toolReportedChars);
                             _toolReportedChars = 0;
-                            var tc = ParseQwen3ToolCall(raw);
+                            var tc = ParseToolCall(raw);
                             if (tc != null) toolCalls.Add(tc);
                             _state = State.CollectingContent;
                             keepParsing = after.Length > 0;
@@ -436,7 +436,7 @@ namespace TensorSharp.Runtime
                             if (buf.Length > _toolReportedChars)
                                 toolCallTextSb.Append(buf, _toolReportedChars, buf.Length - _toolReportedChars);
                             _toolReportedChars = 0;
-                            var tc = ParseQwen3ToolCall(buf);
+                            var tc = ParseToolCall(buf);
                             if (tc != null) toolCalls.Add(tc);
                             _buffer.Clear();
                             _state = State.CollectingContent;
@@ -466,7 +466,7 @@ namespace TensorSharp.Runtime
             return result;
         }
 
-        private static readonly Regex QwenJsonToolNameRe = new(
+        private static readonly Regex JsonToolNameRe = new(
             "^\\s*\\{\\s*\"name\"\\s*:\\s*\"([^\"]+)\"",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
@@ -474,7 +474,7 @@ namespace TensorSharp.Runtime
         /// gotten far enough to carry it.</summary>
         private static string? ToolCallNameFrom(string body)
         {
-            Match m = QwenJsonToolNameRe.Match(body);
+            Match m = JsonToolNameRe.Match(body);
             if (m.Success)
                 return m.Groups[1].Value;
 
@@ -492,7 +492,7 @@ namespace TensorSharp.Runtime
             return null;
         }
 
-        private ToolCall? ParseQwen3ToolCall(string raw)
+        private ToolCall? ParseToolCall(string raw)
         {
             raw = raw.Trim();
             if (raw.Length == 0) return null;
@@ -638,23 +638,23 @@ namespace TensorSharp.Runtime
     }
 
     // ========================================================================
-    // Qwen3.5 Parser: same tags as Qwen3, always starts in thinking mode
+    // Qwen3.5 parser: ChatML thinking and tool-call tags.
     // ========================================================================
 
-    public class Qwen35OutputParser : Qwen3OutputParser
+    public class Qwen35OutputParser : ChatMlOutputParser
     {
     }
 
     // ========================================================================
     // Qwen2 / Qwen2.5(-VL) Parser: ChatML with <tool_call> JSON, NO thinking
-    // channel. Wraps Qwen3's machinery with thinking pinned off: initialized
+    // channel. Wraps the ChatML parser with thinking pinned off: initialized
     // with enableThinking=true it would misread the whole answer as thought
     // while waiting for a </think> these models never emit.
     // ========================================================================
 
     public class Qwen25OutputParser : IOutputParser
     {
-        private readonly Qwen3OutputParser _inner = new();
+        private readonly ChatMlOutputParser _inner = new();
 
         public bool HasThinkingSupport => false;
         public bool HasToolSupport => true;
@@ -938,7 +938,7 @@ namespace TensorSharp.Runtime
                 using var doc = JsonDocument.Parse(json);
                 var args = new Dictionary<string, object>();
                 foreach (var prop in doc.RootElement.EnumerateObject())
-                    args[prop.Name] = Qwen3OutputParser.JsonElementToObject(prop.Value);
+                    args[prop.Name] = ChatMlOutputParser.JsonElementToObject(prop.Value);
                 return new ToolCall { Name = name, Arguments = args };
             }
             catch (Exception ex)
@@ -1264,7 +1264,7 @@ namespace TensorSharp.Runtime
                     if (doc.RootElement.ValueKind == JsonValueKind.Object)
                     {
                         foreach (var prop in doc.RootElement.EnumerateObject())
-                            args[prop.Name] = Qwen3OutputParser.JsonElementToObject(prop.Value);
+                            args[prop.Name] = ChatMlOutputParser.JsonElementToObject(prop.Value);
                     }
                 }
                 catch
@@ -1567,7 +1567,7 @@ namespace TensorSharp.Runtime
             try
             {
                 using var doc = JsonDocument.Parse(value);
-                return Qwen3OutputParser.JsonElementToObject(doc.RootElement);
+                return ChatMlOutputParser.JsonElementToObject(doc.RootElement);
             }
             catch (JsonException)
             {
@@ -1889,7 +1889,7 @@ namespace TensorSharp.Runtime
                 try
                 {
                     using var doc = JsonDocument.Parse(t);
-                    return Qwen3OutputParser.JsonElementToObject(doc.RootElement);
+                    return ChatMlOutputParser.JsonElementToObject(doc.RootElement);
                 }
                 catch
                 {
@@ -2257,4 +2257,3 @@ namespace TensorSharp.Runtime
             => ChatProtocolRegistry.For(architecture)?.OutputParserAlwaysRequired ?? false;
     }
 }
-

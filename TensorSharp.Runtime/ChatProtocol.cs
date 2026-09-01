@@ -92,8 +92,8 @@ namespace TensorSharp.Runtime
         public required IReadOnlyList<string> Architectures { get; init; }
 
         /// <summary>
-        /// Purpose-built renderer for this family. Null means the generic Qwen3-style
-        /// ChatML renderer, which is the fallback for anything unrecognised.
+        /// Purpose-built renderer for this family. Null means the generic ChatML
+        /// renderer, which is the fallback for anything unrecognised.
         /// </summary>
         public Func<ChatRenderRequest, string>? Render { get; init; }
 
@@ -234,9 +234,9 @@ namespace TensorSharp.Runtime
         /// prompt, so a tool offered to it can never be called.
         ///
         /// <para>
-        /// Gemma 3 and Mistral 3 are the two: their <see cref="Render"/> delegates take
-        /// only the messages and the generation flag, and the tool list is discarded
-        /// before the renderer sees it. Declaring a tool for them is not an error the
+        /// Mistral 3's <see cref="Render"/> delegate takes only the messages and the
+        /// generation flag, and the tool list is discarded before the renderer sees
+        /// it. Declaring a tool for it is not an error the
         /// caller can see - the request succeeds and the model simply never calls what
         /// it was never told about.
         /// </para>
@@ -245,7 +245,7 @@ namespace TensorSharp.Runtime
         /// rendered the skill body is fetched on demand through <c>skills_read</c>
         /// (progressive disclosure); where they are not, the body has to be written
         /// into the prompt up front instead. Without this flag, skills would appear to
-        /// work on every model and silently do nothing on these two.
+        /// work on every model and silently do nothing on this family.
         /// </para>
         /// </summary>
         public bool RendersToolDeclarations { get; init; } = true;

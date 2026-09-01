@@ -798,8 +798,6 @@ public class KVCachePromptRendererTests
     [Fact]
     public void GetAssistantGenerationSuffix_OtherArchitectures_ReturnEmpty()
     {
-        Assert.Equal(string.Empty, KVCachePromptRenderer.GetAssistantGenerationSuffix("qwen3", false));
-        Assert.Equal(string.Empty, KVCachePromptRenderer.GetAssistantGenerationSuffix("gemma3", false));
         Assert.Equal(string.Empty, KVCachePromptRenderer.GetAssistantGenerationSuffix("mistral3", false));
         Assert.Equal(string.Empty, KVCachePromptRenderer.GetAssistantGenerationSuffix("gptoss", false));
         Assert.Equal(string.Empty, KVCachePromptRenderer.GetAssistantGenerationSuffix("nemotron_h", false));

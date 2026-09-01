@@ -72,19 +72,19 @@ curl -s http://localhost:5000/v1/chat/completions \
 
 ```bash
 # 仅文本模型
-dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend ggml_metal
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend ggml_metal
 
 # Windows/Linux + NVIDIA，Direct CUDA/cuBLAS 后端
-dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend cuda
 
 # Windows/Linux + NVIDIA，GGML CUDA 后端
-dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend ggml_cuda
 
 # Windows/Linux + AMD/Intel/NVIDIA GPU，GGML Vulkan 后端（多 GPU 主机用 --gpu-device 选择设备；见 --list-gpus）
-dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend ggml_vulkan --gpu-device 0
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend ggml_vulkan --gpu-device 0
 
 # Apple Silicon，MLX 后端
-dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend mlx
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend mlx
 
 # 多模态模型（显式指定投影器）
 dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/gemma-4-E4B-it-Q8_0.gguf \
@@ -97,7 +97,7 @@ DIFFUSION_STEPS=48 DIFFUSION_MAX_BATCH=2 \
 # 覆盖默认 token 预算（默认 20000）。它对每个端点都生效 —— Web UI、Ollama
 # 与 OpenAI —— 只要请求省略了 max_tokens / num_predict 就采用该值，并且会把
 # 要得更多的请求钳制到该值。
-dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend ggml_metal --max-tokens 4096
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend ggml_metal --max-tokens 4096
 ```
 
 API 默认监听 `http://localhost:5000`；Web UI 就在同一个根地址上提供。
@@ -143,7 +143,7 @@ curl http://localhost:5000/api/tags
 ```json
 {
   "models": [
-    {"name": "Qwen3-4B-Q8_0", "model": "Qwen3-4B-Q8_0.gguf", "size": 4530000000, "modified_at": "2025-03-15T10:00:00Z"}
+    {"name": "Qwen3.5-9B-Q8_0", "model": "Qwen3.5-9B-Q8_0.gguf", "size": 9550000000, "modified_at": "2025-03-15T10:00:00Z"}
   ]
 }
 ```
@@ -153,7 +153,7 @@ curl http://localhost:5000/api/tags
 ```bash
 curl -X POST http://localhost:5000/api/show \
   -H "Content-Type: application/json" \
-  -d '{"model": "Qwen3-4B-Q8_0.gguf"}'
+  -d '{"model": "Qwen3.5-9B-Q8_0.gguf"}'
 ```
 
 ### 生成（非流式）
@@ -162,7 +162,7 @@ curl -X POST http://localhost:5000/api/show \
 curl -X POST http://localhost:5000/api/generate \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "prompt": "What is 1+1?",
     "stream": false,
     "options": {
@@ -176,7 +176,7 @@ curl -X POST http://localhost:5000/api/generate \
 响应：
 ```json
 {
-  "model": "Qwen3-4B-Q8_0.gguf",
+  "model": "Qwen3.5-9B-Q8_0.gguf",
   "created_at": "2025-03-15T10:00:00Z",
   "response": "1+1 equals 2.",
   "done": true,
@@ -202,7 +202,7 @@ curl -X POST http://localhost:5000/api/generate \
 curl -X POST http://localhost:5000/api/generate \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "prompt": "Tell me a joke.",
     "stream": true,
     "options": {"num_predict": 100}
@@ -211,10 +211,10 @@ curl -X POST http://localhost:5000/api/generate \
 
 每一行都是一条 JSON（newline-delimited JSON）：
 ```
-{"model":"Qwen3-4B-Q8_0.gguf","created_at":"...","response":"Why","done":false}
-{"model":"Qwen3-4B-Q8_0.gguf","created_at":"...","response":" did","done":false}
+{"model":"Qwen3.5-9B-Q8_0.gguf","created_at":"...","response":"Why","done":false}
+{"model":"Qwen3.5-9B-Q8_0.gguf","created_at":"...","response":" did","done":false}
 ...
-{"model":"Qwen3-4B-Q8_0.gguf","created_at":"...","response":"","done":true,"done_reason":"stop","total_duration":...,"eval_count":...,"prompt_cache_hit_tokens":0,"prompt_cache_hit_ratio":0.0}
+{"model":"Qwen3.5-9B-Q8_0.gguf","created_at":"...","response":"","done":true,"done_reason":"stop","total_duration":...,"eval_count":...,"prompt_cache_hit_tokens":0,"prompt_cache_hit_ratio":0.0}
 ```
 
 末尾的 `done` chunk 与非流式响应一样，也会携带 `prompt_cache_hit_tokens` /
@@ -243,7 +243,7 @@ curl -X POST http://localhost:5000/api/generate \
 curl -X POST http://localhost:5000/api/chat/ollama \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [
       {"role": "system", "content": "You are a helpful assistant."},
       {"role": "user", "content": "What is the capital of France?"}
@@ -256,7 +256,7 @@ curl -X POST http://localhost:5000/api/chat/ollama \
 响应：
 ```json
 {
-  "model": "Qwen3-4B-Q8_0.gguf",
+  "model": "Qwen3.5-9B-Q8_0.gguf",
   "created_at": "2025-03-15T10:00:00Z",
   "message": {"role": "assistant", "content": "The capital of France is Paris."},
   "done": true,
@@ -282,7 +282,7 @@ chunk 同样携带这些字段。
 curl -X POST http://localhost:5000/api/chat/ollama \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [{"role": "user", "content": "Hello!"}],
     "stream": true,
     "options": {"num_predict": 50}
@@ -295,7 +295,7 @@ curl -X POST http://localhost:5000/api/chat/ollama \
 curl -X POST http://localhost:5000/api/chat/ollama \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [
       {"role": "user", "content": "My name is Alice."},
       {"role": "assistant", "content": "Nice to meet you, Alice!"},
@@ -326,13 +326,13 @@ curl -X POST http://localhost:5000/api/chat/ollama \
 
 ### 聊天 + 思维链 / 推理模式
 
-支持思维链的架构（Qwen 3、Qwen 3.5/3.6-family、Gemma 4、GPT OSS、Nemotron-H）可接受 `"think": true`，并将思考过程与可见回答分开返回：
+支持思维链的架构（Qwen 3.5/3.6/3.8-family、Gemma 4、GPT OSS、Nemotron-H）可接受 `"think": true`，并将思考过程与可见回答分开返回：
 
 ```bash
 curl -X POST http://localhost:5000/api/chat/ollama \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [{"role": "user", "content": "Solve 17 * 23 step by step."}],
     "think": true,
     "stream": false,
@@ -362,7 +362,7 @@ curl -X POST http://localhost:5000/api/chat/ollama \
 curl -X POST http://localhost:5000/api/chat/ollama \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
     "tools": [{
       "type": "function",
@@ -451,7 +451,7 @@ curl http://localhost:5000/v1/models
 {
   "object": "list",
   "data": [
-    {"id": "Qwen3-4B-Q8_0", "object": "model", "owned_by": "local"}
+    {"id": "Qwen3.5-9B-Q8_0", "object": "model", "owned_by": "local"}
   ]
 }
 ```
@@ -462,7 +462,7 @@ curl http://localhost:5000/v1/models
 curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [
       {"role": "system", "content": "You are a helpful assistant."},
       {"role": "user", "content": "What is 2+3?"}
@@ -478,7 +478,7 @@ curl -X POST http://localhost:5000/v1/chat/completions \
   "id": "chatcmpl-abc123...",
   "object": "chat.completion",
   "created": 1710500000,
-  "model": "Qwen3-4B-Q8_0.gguf",
+  "model": "Qwen3.5-9B-Q8_0.gguf",
   "choices": [{
     "index": 0,
     "message": {"role": "assistant", "content": "2 + 3 = 5."},
@@ -505,7 +505,7 @@ curl -X POST http://localhost:5000/v1/chat/completions \
 curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [{"role": "user", "content": "Hello!"}],
     "max_tokens": 50,
     "stream": true
@@ -532,7 +532,7 @@ data: [DONE]
 curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [
       {"role": "user", "content": "Return a JSON object with keys answer and confidence for 2+3."}
     ],
@@ -562,7 +562,7 @@ TensorSharp.Server 接收 OpenAI Chat Completions 的 `response_format` 形式�
 curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [
       {
         "role": "system",
@@ -632,7 +632,7 @@ curl -X POST http://localhost:5000/v1/chat/completions \
 curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
     "tools": [{
       "type": "function",
@@ -1206,7 +1206,7 @@ import json
 
 url = "http://localhost:5000/api/generate"
 payload = {
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "prompt": "What is machine learning?",
     "stream": False,
     "options": {"num_predict": 100, "temperature": 0.7}
@@ -1224,7 +1224,7 @@ import json
 
 url = "http://localhost:5000/api/generate"
 payload = {
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "prompt": "Tell me a story.",
     "stream": True,
     "options": {"num_predict": 200}
@@ -1248,7 +1248,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:5000/v1", api_key="not-needed")
 
 response = client.chat.completions.create(
-    model="Qwen3-4B-Q8_0.gguf",
+    model="Qwen3.5-9B-Q8_0.gguf",
     messages=[
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "What is 2+3?"}
@@ -1269,7 +1269,7 @@ import json
 client = OpenAI(base_url="http://localhost:5000/v1", api_key="not-needed")
 
 response = client.chat.completions.create(
-    model="Qwen3-4B-Q8_0.gguf",
+    model="Qwen3.5-9B-Q8_0.gguf",
     messages=[
         {"role": "user", "content": "Extract the city and country from: Tokyo, Japan."}
     ],
@@ -1304,7 +1304,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:5000/v1", api_key="not-needed")
 
 stream = client.chat.completions.create(
-    model="Qwen3-4B-Q8_0.gguf",
+    model="Qwen3.5-9B-Q8_0.gguf",
     messages=[{"role": "user", "content": "Tell me about Python."}],
     max_tokens=200,
     stream=True

@@ -12,7 +12,7 @@ namespace TensorSharp.Models.QwenImage
 {
     /// <summary>
     /// Image load/save/resize helpers for the Qwen-Image edit pipeline, backed by
-    /// the Magick.NET dependency already used by <c>Gemma3.ImageProcessor</c>.
+    /// the shared Magick.NET image-decoding dependency.
     ///
     /// The canonical in-memory representation here is interleaved <b>HWC RGB</b>
     /// (row-major: pixel (y,x) channel c at index <c>(y*W + x)*3 + c</c>) with

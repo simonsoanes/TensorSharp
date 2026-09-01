@@ -105,7 +105,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend gg
 dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal -i \
     --system "You are a terse assistant." --temperature 0.7 --top-p 0.9 --think
 
-# Image inference (Gemma 3/4, Qwen 3.5-family)
+# Image inference (Gemma 4, Qwen 3.5-family)
 dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --image photo.png --backend ggml_metal
 
 # Video inference (Gemma 4)
@@ -391,7 +391,7 @@ script gets that error instead of watching a setting be ignored.
 | `--tp <N>` | Multi-GPU degree — how many GPUs to spread the model over in a single process (default: `1`). Which of the two multi-GPU modes you get is the architecture's business, not yours: **tensor parallelism** (the weights split *inside* every layer) where it is implemented, and a **layer split** (whole layers per GPU — capacity, not speed) on Qwen 3.8 Flash Next (`qwen4exp`) and DeepSeek V4. An architecture that supports neither says so on stderr and runs on one GPU. Requires `--backend cuda`, `ggml_cuda`, or `ggml_vulkan`. See [Tensor Parallelism & Distributed Inference](#tensor-parallelism--distributed-inference). |
 | `--tp-node-id <N>` | This node's 0-based ID for multi-node (distributed) tensor parallelism. Requires `--tp-peers`. |
 | `--tp-peers <list>` | Comma-separated `host:port` list of all nodes in the distributed TP cluster (e.g. `192.168.1.10:9500,192.168.1.11:9500`). Requires `--tp-node-id`. |
-| `--test` | Run built-in tokenizer + Qwen3 chat-template + ollama-comparison tests |
+| `--test` | Run built-in tokenizer, ChatML-template, and Ollama-comparison tests |
 | `--test-templates <dir>` | Validate hardcoded chat templates against GGUF Jinja2 templates for every *.gguf in `<dir>` |
 | `--config <path>` | Read options from a JSON config file (command-line options override it). Supports `${variables}` and auto-downloading models via `{ "path": ..., "urls": [...] }`. Repeatable. See [Configuration file](#configuration-file-cli--server). |
 | `--log-level <lvl>` | Console + file logger level: `trace`, `debug`, `info`, `warning`, `error`, `critical`, `off` |
@@ -727,7 +727,7 @@ These can be set with either the `--paged-kv*` / `--continuous-batching` CLI fla
 | `TS_MLX_MOE_FUSED_GATE_UP_SILU` | `1` (default) fuses gate matmul + up matmul + SiLUMul into one Metal kernel for batched MoE decode. Set to `0` to A/B against the legacy 3-dispatch path. |
 | `TS_MLX_DEVICE_ROUTER` | `1` (default) keeps MoE router top-K + softmax on device to skip ~60 host syncs/token on Qwen 3.6-35B-A3B. Set to `0` to disable; the code also falls back automatically when prerequisites are missing. |
 | `TS_MLX_MEMORY_LIMIT_MB` / `TS_MLX_CACHE_LIMIT_MB` / `TS_MLX_WIRED_LIMIT_MB` | Override the MLX allocator hard cap / unused-buffer cache cap / wired-buffer residency cap (megabytes). Defaults are derived from the host's unified-memory capacity. |
-| `TS_MLX_EVAL_EVERY_N_LAYERS` / `TS_MLX_GEMMA4_EVAL_EVERY_N_LAYERS` | Periodic `mlx_async_eval` cadence during decode to overlap GPU work with host queueing. Gemma 4 defaults to every 4 layers via `TS_MLX_GEMMA4_EVAL_EVERY_N_LAYERS`; Qwen 3 / Qwen 3.5 / Nemotron-H default to every 16 layers via `TS_MLX_EVAL_EVERY_N_LAYERS`. Set to `0` to disable where supported. |
+| `TS_MLX_EVAL_EVERY_N_LAYERS` / `TS_MLX_GEMMA4_EVAL_EVERY_N_LAYERS` | Periodic `mlx_async_eval` cadence during decode to overlap GPU work with host queueing. Gemma 4 defaults to every 4 layers via `TS_MLX_GEMMA4_EVAL_EVERY_N_LAYERS`; Qwen 3.5 and Nemotron-H default to every 16 layers via `TS_MLX_EVAL_EVERY_N_LAYERS`. Set to `0` to disable where supported. |
 | `TENSORSHARP_MLX_LIBRARY` / `TENSORSHARP_MLX_LIBRARY_DIR` | Override the search path for `libmlxc` when using `--backend mlx`. |
 
 **MTP / speculative-decoding tunables**
@@ -1546,9 +1546,7 @@ must be reachable between all nodes.
 
 | Architecture | TP status | Notes |
 |---|---|---|
-| Qwen 3 | ✅ | Reference implementation |
 | Mistral 3 | ✅ | Fused/separate QKV, YaRN RoPE |
-| Gemma 3 | ✅ | Separate Q/K/V, GELU, sliding window |
 | Gemma 4 | ✅ | Dense TP + MoE. On GGML the fused whole-model MoE trunk splits *inside* each expert (gate/up column-parallel, down row-parallel) so global expert ids keep working; `TS_GEMMA4_TP_FUSED_MOE=0` falls back to the whole-expert per-op path. Per-expert slicing on direct CUDA |
 | Qwen 3.5 / 3.6 family | ✅ | GatedDeltaNet SSM with per-rank V-head ownership; expert-parallel MoE on GGML (whole experts per rank, Megatron-split shared expert), expert slicing on direct CUDA. Runs on both `cuda` and `ggml_cuda` / `ggml_vulkan` — the GGML path uses the packed per-rank GDN kernel (`TSGgml_Qwen35GdnLayerTP`) with device-resident recurrent state |
 | Qwen 3.8 Flash Next | layer split | Not tensor parallelism: `--tp N` gives each GPU a contiguous run of whole layers, which is also the only multi-GPU mode llama.cpp offers `qwen4exp` (`-sm row` refuses to load it). Capacity, not speed — 2× A100-80GB on Qwen3.8-Flash-Next-UD-Q2_K_XL (73.4 GiB): greedy output byte-identical to the 1-GPU run (same SHA-256), VRAM 24.2 + 26.2 GB instead of one card holding everything, prefill ~1520-1550 t/s and decode ~56 t/s either way. `TS_Q4E_LAYER_SPLIT=20,28` sets the per-GPU layer counts by hand |
@@ -1637,7 +1635,7 @@ for the combined numbers.
 
 - `numHeads`, `numKVHeads`, and `intermediateSize` must be divisible by the TP degree.
 - Quantized row-parallel splits require `ne0` divisible by `tp × blockSize`.
-- Batched/continuous-batching forward under TP is implemented for Qwen 3 and Mistral 3; MoE models (Gemma 4, Qwen 3.5/3.6, GPT OSS, Nemotron-H) fall back to per-sequence forward under TP.
+- Batched/continuous-batching forward under TP is implemented for Mistral 3; MoE models (Gemma 4, Qwen 3.5/3.6, GPT OSS, Nemotron-H) fall back to per-sequence forward under TP.
 - **Muse-Glimmer** caps at `--tp 2`: it has 2 KV heads, and no model here replicates KV heads when `numKVHeads < tp`. Its DFlash drafter and pooled KV-block snapshots stay single-GPU under TP (multi-turn reuse comes from live-cache continuation instead), and it requires the GGML CUDA/Vulkan backends — the fused per-rank plan needs a device collective that ggml-metal does not provide.
 
 ### Cluster tuning & diagnostics
@@ -1698,12 +1696,10 @@ Quick reference for which environment variables (and matching CLI flags) gate ea
 |---|---|---|---|
 | Mistral 3 | ON | — | `TS_PAGED_ATTN_KERNEL` = `native` (default) / `tensor` / `managed` |
 | Gemma 4 | ON | `TS_GEMMA4_BATCHED=0` to force legacy per-seq | — |
-| Qwen 3 | ON (reference port) | — | — |
 | Qwen 3.5 / 3.6 family | ON | `TS_QWEN35_BATCHED=0` to force legacy per-seq (or `--no-continuous-batching`) | `TS_QWEN35_BATCHED_GDN_NATIVE=1` enables native batched GDN kernel; `FUSED_ATTN_LAYER_MIN_SEQ_LEN=N` overrides fused-attention engage threshold (default 4096) |
 | GPT OSS | ON | `TS_GPTOSS_BATCHED=0` to force legacy per-seq | `TS_GPTOSS_PAGED_ATTN_MANAGED=1` forces the managed (C#) sinks softmax instead of the native paged-attention-with-sinks kernel |
 | Nemotron-H | ON | `TS_NEMOTRON_BATCHED=0` to force legacy per-seq | `TS_NEMOTRON_MAMBA2_BATCHED_NATIVE=1` enables the native batched Mamba2 step (NEON SIMD + GCD parallelism) |
 | GLM 5.x | not implemented — concurrency runs on native per-sequence **slots** instead (each request owns its MLA and indexer caches and its own `n_past`; binding a request switches the active slot without moving KV bytes). MLA keeps one 576-wide row per token and the DSA indexer scores that same contiguous history, so there is no paged-KV layout to batch over | — | Batched fused decode over those slots is ON by default (one graph, one token per sequence, weights read once): 1.81x aggregate decode at 4 concurrent requests. Set `TS_BATCHED_FUSED_DECODE=0` to use serial fused decode; `TS_GLM_BATCHED_DECODE=0` also makes the GLM native side decline batching. Batching changes GEMM shapes, and a 2-bit MoE can amplify that into different expert picks. |
-| Gemma 3 | not implemented (per-seq fallback) | — | — |
 | DiffusionGemma | Separate diffusion scheduler in the Web UI path; not an `IBatchedPagedModel` autoregressive path | `DIFFUSION_MAX_BATCH`, `DIFFUSION_STEPS` | `DIFFUSION_BATCHED_FORWARD=1` enables true batched canvas decode; fused GGML decode is on by default unless disabled with `DIFFUSION_NO_FUSED_DECODE=1` |
 
 #### Speculative decoding

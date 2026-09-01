@@ -108,7 +108,7 @@ public class ToolCallProgressStreamingTests
         Assert.Null(delta.ToolCallName);
     }
 
-    // ---- the Qwen family (Qwen3 / 3.5 / 3.8 share this parser) --------------
+    // ---- ChatML-family parser ----------------------------------------------
 
     private static Qwen35OutputParser NewQwenParser(bool thinking = false)
     {

@@ -26,10 +26,8 @@ input.
 | Architecture | GGUF arch keys | What it does | English card | 中文卡片 |
 |---|---|---|---|---|
 | DeepSeek V4 Flash | `deepseek4` | Sparse-MoE text model with compressed attention; DSpark block speculative decoding via a separate `--draft-model` GGUF | [models/deepseek4.md](models/deepseek4.md) | [models/deepseek4_zh-cn.md](models/deepseek4_zh-cn.md) |
-| Gemma 3 | `gemma3` | Dense text + image chat | [models/gemma3.md](models/gemma3.md) | [models/gemma3_zh-cn.md](models/gemma3_zh-cn.md) |
 | Gemma 4 | `gemma4` | Dense and MoE text + image + video + audio chat, thinking, tools; MTP speculative decoding with a separate `gemma4-assistant` draft GGUF | [models/gemma4.md](models/gemma4.md) | [models/gemma4_zh-cn.md](models/gemma4_zh-cn.md) |
 | DiffusionGemma | `diffusion-gemma`, `diffusion_gemma` | Text **diffusion** generation — an EntropyBound denoising sampler instead of autoregressive decode | [models/diffusiongemma.md](models/diffusiongemma.md) | [models/diffusiongemma_zh-cn.md](models/diffusiongemma_zh-cn.md) |
-| Qwen 3 | `qwen3`, `qwen2`, `qwen2vl`, `qwen2_vl` | Dense text chat with thinking and tools (Qwen2 / Qwen2.5-VL checkpoints load as text-only chat) | [models/qwen3.md](models/qwen3.md) | [models/qwen3_zh-cn.md](models/qwen3_zh-cn.md) |
 | Qwen 3.5 / 3.6 family | `qwen35`, `qwen35moe`, `qwen3next` | Hybrid full-attention + GatedDeltaNet text + image chat, dense or MoE; Qwen 3.6 embeds a NextN draft block for speculative decoding | [models/qwen35.md](models/qwen35.md) | [models/qwen35_zh-cn.md](models/qwen35_zh-cn.md) |
 | GPT OSS | `gptoss`, `gpt-oss` | MXFP4 MoE text model with attention sinks and Harmony thinking/tools | [models/gptoss.md](models/gptoss.md) | [models/gptoss_zh-cn.md](models/gptoss_zh-cn.md) |
 | Nemotron-H | `nemotron_h`, `nemotron_h_moe` | Hybrid Mamba2 SSM + attention + (MoE) FFN text model; the Omni checkpoints add image input | [models/nemotron.md](models/nemotron.md) | [models/nemotron_zh-cn.md](models/nemotron_zh-cn.md) |

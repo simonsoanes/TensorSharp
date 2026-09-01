@@ -570,10 +570,9 @@ namespace TensorSharp.Models
         /// is identical to the F32 variant - <c>(num_kv_heads, max_seq_len, head_dim)</c> -
         /// so callers don't need to special-case anything but the storage dtype.
         ///
-        /// This is the C# fallback path when the native fused decode kernel is
-        /// unavailable. On Apple Silicon Metal / CUDA the native path
-        /// (<c>TransformerLayerDecode</c> / <c>TransformerModelDecode</c>) handles
-        /// F16 K/V directly via <c>ggml_flash_attn_ext</c>, which is much faster.
+        /// This is the C# fallback path when an architecture's native fused decode
+        /// kernel is unavailable. Native GPU paths handle F16 K/V directly via
+        /// <c>ggml_flash_attn_ext</c>, which is much faster.
         /// </summary>
         protected unsafe void AttentionDecodePureCSF16(Tensor q, Tensor kCache, Tensor vCache,
             Tensor result, int numHeads, int numKVHeads, int headDim, int totalSeqLen, float scale)

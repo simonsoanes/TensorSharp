@@ -507,7 +507,7 @@ namespace TensorSharp.Runtime.Scheduling
 
                         // Stop on EOS. Do NOT publish the EOS token to the
                         // consumer channel: its textual form is a special
-                        // marker (e.g. <end_of_turn>, <|im_end|>) that would
+                        // marker (e.g. <|im_end|>) that would
                         // otherwise be decoded by AppendTokenBytes and leak
                         // into the streamed assistant output.
                         if (_model.Tokenizer != null && _model.Tokenizer.IsEos(token))

@@ -704,10 +704,9 @@ protocol registry, so a new family with an unusual renderer gets it right for fr
 
 | Family | Tool declarations rendered? | `role: "tool"` rendered? | What happens |
 |---|---|---|---|
-| Qwen 3 / 3.5 / 3.6, Gemma 4, GPT OSS, Nemotron-H, Muse-Glimmer, DeepSeek V4, GLM 5.x | yes | yes | Full progressive disclosure |
-| **Gemma 3** | no | yes | No tools are offered; the selected skill bodies are written into the prompt up front and the catalog is dropped |
-| **Mistral 3** | no | **no** | Same as Gemma 3, and any tool result the loop does produce is fed back as a `user` turn rather than a `tool` turn |
-| **Any family nothing can parse** — `qwen4exp`, and every architecture with no registry entry at all | withheld | n/a | Same as Gemma 3 |
+| Qwen 3.5 / 3.6, Gemma 4, GPT OSS, Nemotron-H, Muse-Glimmer, DeepSeek V4, GLM 5.x | yes | yes | Full progressive disclosure |
+| **Mistral 3** | no | **no** | No tools are offered; selected skill bodies are written into the prompt up front, and any tool result the loop does produce is fed back as a `user` turn rather than a `tool` turn |
+| **Any family nothing can parse** — `qwen4exp`, and every architecture with no registry entry at all | withheld | n/a | Selected skill bodies are written into the prompt up front and the catalog is dropped |
 
 That last row is the one worth understanding, because it is the one that was wrong.
 Offering a tool is two halves decided in two places: the protocol registry says whether
@@ -723,10 +722,9 @@ the two halves, and a family that cannot complete the round trip gets its skill 
 inlined instead — which works. `SkillCapabilityConsistencyTests` walks every registered
 architecture and fails if the two halves ever drift apart again.
 
-Gemma 3's and Mistral 3's renderers take only the messages and the generation
-flag — the tool list is discarded before the renderer sees it, and the request
-still succeeds. Without this flag, skills would appear to work everywhere and
-silently do nothing on those two. The prompt wording changes accordingly: with
+Mistral 3's renderer takes only the messages and the generation flag — the tool
+list is discarded before the renderer sees it, and the request still succeeds.
+Without this flag, skills would appear to work and silently do nothing. The prompt wording changes accordingly: with
 no tools, telling the model to "call `skills_read`" is an instruction it cannot
 follow, so it is told instead that everything available to it is already in
 front of it.

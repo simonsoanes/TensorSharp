@@ -69,11 +69,10 @@ public class SkillPayloadExampleTests : IDisposable
         ("gemma4",   (m, t) => ChatTemplate.RenderGemma4(m, true, tools: t)),
         ("gpt-oss",  (m, t) => ChatTemplate.RenderHarmony(m, true, tools: t)),
         ("qwen35",   (m, t) => ChatTemplate.RenderQwen35(m, true, enableThinking: true, tools: t)),
-        ("qwen3",    (m, t) => ChatTemplate.RenderQwen3(m, true, tools: t)),
+        ("qwen2",    (m, t) => ChatTemplate.RenderChatMl(m, true, tools: t)),
         ("nemotron_h_moe", (m, t) => ChatTemplate.RenderNemotron(m, true, tools: t)),
         ("glm-dsa",  (m, t) => ChatTemplate.RenderGlmDsa(m, true, tools: t)),
         ("deepseek4", (m, t) => ChatTemplate.RenderDeepSeek4(m, true, tools: t)),
-        ("gemma3",   (m, t) => ChatTemplate.RenderGemma3(m, true)),
         ("mistral3", (m, t) => ChatTemplate.RenderMistral3(m, true)),
     };
 
@@ -120,7 +119,7 @@ public class SkillPayloadExampleTests : IDisposable
         // ---- 3. the same selection on a family that cannot carry tools ----------
         SkillPlan noTools = SkillPrompt.Plan(selected, Array.Empty<Skill>(),
             new SkillPromptOptions { ContextTokens = 32768, ToolsAvailable = false });
-        Section("3. SYSTEM BLOCK for a family that renders NO tool declarations (gemma3, mistral3)");
+        Section("3. SYSTEM BLOCK for a family that renders NO tool declarations (mistral3)");
         sb.Append(noTools.Instructions);
 
         // ---- 4. the synthesized tools ------------------------------------------

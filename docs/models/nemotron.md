@@ -15,7 +15,7 @@
 | Thinking mode | Yes (`<think> ... </think>`) |
 | Tool calling | Yes (`<tool_call>{...}</tool_call>`) |
 | Batched / paged forward | **Default ON** — set `TS_NEMOTRON_BATCHED=0` to force the legacy per-sequence KV-swap path for A/B comparison. Per-slot Mamba2 conv + SSM state pool, paged K/V for attention layers. Optional native batched Mamba2 step kernel (`TS_NEMOTRON_MAMBA2_BATCHED_NATIVE=1`). See §11. |
-| Output parser | `Qwen3OutputParser` |
+| Output parser | `ChatMlOutputParser` |
 
 ## Downloads
 
@@ -588,17 +588,17 @@ the path. Now exposed as a method getter (same pattern as Qwen 3.5).
 
 ## 12. Output parser and chat template
 
-- `Qwen3OutputParser` is reused: `<think> ... </think>` for chain-of-thought
+- `ChatMlOutputParser` parses `<think> ... </think>` for chain-of-thought
   reasoning and `<tool_call>{...}</tool_call>` for tool calls.
-- Chat template uses the Qwen 3 chat template format (`<|im_start|>` /
+- Chat template uses the ChatML format (`<|im_start|>` /
   `<|im_end|>`). Multimodal placeholders include `<image>` (later expanded
   into `<img>` + N + `</img>`) and `<so_embedding>` (audio).
 
 ## 13. Optimization opportunities
 
 - **Native whole-model decode** — the entire legacy forward pass runs
-  in managed C# today. A native `NemotronModelDecode` (analogous to
-  Qwen 3) would eliminate the managed loop overhead on the per-seq path.
+  in managed C# today. A native `NemotronModelDecode` would eliminate the
+  managed loop overhead on the per-seq path.
 - **Native Mamba2 decode for the legacy path** — the SIMD-vectorized
   scan in `Mamba2SSMStepSIMD` is already fast on CPU, but a native CUDA
   / Metal kernel would unblock GPU-side execution of the full Mamba2

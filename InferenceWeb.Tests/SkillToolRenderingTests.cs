@@ -22,8 +22,9 @@ namespace InferenceWeb.Tests;
 /// invents them and splices them into whatever tool list the request already carried, so
 /// nobody outside this repository ever looks at the declaration and notices it came out
 /// wrong. Each family formats a tool completely differently: Harmony writes a TypeScript
-/// namespace, Qwen 3.5 writes a JSON schema plus an XML-ish call format, Qwen 3 writes
-/// the raw serialized list, and Gemma 4 writes <c>&lt;|tool&gt;declaration:NAME{...}</c>
+/// namespace, Qwen 3.5 writes a JSON schema plus an XML-ish call format, generic
+/// ChatML writes the raw serialized list, and Gemma 4 writes
+/// <c>&lt;|tool&gt;declaration:NAME{...}</c>
 /// with its own quoting. A declaration that one of them cannot express does not fail —
 /// the request succeeds, the model simply never calls a tool it was never shown, and
 /// skills quietly stop working on that family alone.
@@ -89,9 +90,9 @@ public class SkillToolRenderingTests
     }
 
     [Fact]
-    public void RenderQwen3_DeclaresBothTools()
+    public void RenderChatMl_DeclaresBothTools()
     {
-        string prompt = ChatTemplate.RenderQwen3(Ask(), addGenerationPrompt: true, tools: Tools());
+        string prompt = ChatTemplate.RenderChatMl(Ask(), addGenerationPrompt: true, tools: Tools());
 
         Assert.Contains(SkillTools.ListToolName, prompt, StringComparison.Ordinal);
         Assert.Contains(SkillTools.ReadToolName, prompt, StringComparison.Ordinal);
@@ -132,9 +133,9 @@ public class SkillToolRenderingTests
     }
 
     [Fact]
-    public void Qwen3Parser_RecoversASkillsReadCall()
+    public void ChatMlParser_RecoversASkillsReadCall()
     {
-        var parser = new Qwen3OutputParser();
+        var parser = new ChatMlOutputParser();
         parser.Init(enableThinking: false, tools: Tools());
 
         ParsedOutput parsed = parser.Add(

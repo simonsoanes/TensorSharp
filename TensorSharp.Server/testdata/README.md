@@ -83,9 +83,9 @@ python3 test_multiturn.py
 ### Capability-gated coverage
 
 - Thinking-mode tests run only on architectures that currently support thinking in TensorSharp:
-  Gemma 4, Qwen 3, Qwen 3.5, GPT OSS, and Nemotron-H
+  Gemma 4, Qwen 3.5/3.6/3.8-family, Qwen 4 experimental, GPT OSS, and Nemotron-H
 - Tool-calling tests run only on architectures that currently support tool calling in TensorSharp:
-  Gemma 4, Qwen 3, Qwen 3.5, and Nemotron-H
+  Gemma 4, Qwen 3.5/3.6/3.8-family, Qwen 4 experimental, and Nemotron-H
 - GPT OSS thinking is exercised, but GPT OSS tool-call checks are currently skipped by these scripts: the scripts' capability gate (`_detect_capabilities` in `test_multiturn.py`) still reports `tools=False` for `gptoss`, which is stale relative to the server — the Harmony output parser does support tool calling (commentary-channel `to=functions.NAME` calls), so skipped here does not mean unsupported.
 
 Unsupported architectures are reported as `SKIP`, not `FAIL`.

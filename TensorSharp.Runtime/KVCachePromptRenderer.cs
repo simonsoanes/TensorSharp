@@ -103,8 +103,8 @@ namespace TensorSharp.Runtime
             // that family's renderer and output parser - it is a property of the chat
             // format, and it used to be a chain of name comparisons here that a new
             // family had to be remembered into. Families whose template frames past and
-            // current-turn assistant messages identically (Qwen3, Harmony, Gemma 3,
-            // Mistral 3, Nemotron, ...) declare nothing and get an empty suffix.
+            // current-turn assistant messages identically (Harmony, Mistral 3,
+            // Nemotron, ...) declare nothing and get an empty suffix.
             return ChatProtocolRegistry.For(architecture)?.AssistantGenerationSuffix?.Invoke(enableThinking)
                    ?? string.Empty;
         }

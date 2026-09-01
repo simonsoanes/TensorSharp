@@ -15,36 +15,8 @@ using StbImageSharp;
 
 namespace TensorSharp.Models
 {
-    public class Gemma3ImageProcessor
+    internal static class ImageProcessorUtils
     {
-        public int TokensPerImage { get; }
-        public int ImageSize { get; }
-        public int PatchSize { get; }
-
-        public const int StartOfImageToken = 255999;
-        public const int EndOfImageToken = 256000;
-        public const int NewlineNewlineToken = 108;
-        public const int PadToken = 0;
-
-        public Gemma3ImageProcessor(int tokensPerImage = 256, int imageSize = 896, int patchSize = 14)
-        {
-            TokensPerImage = tokensPerImage;
-            ImageSize = imageSize;
-            PatchSize = patchSize;
-        }
-
-        /// <summary>
-        /// Process an image file into normalized pixel values in channel-first format [C, H, W].
-        /// Matches Ollama's processing: composite over white, bilinear resize, normalize with mean=0.5, std=0.5.
-        /// </summary>
-        public float[] ProcessImage(string imagePath)
-        {
-            byte[] fileBytes = File.ReadAllBytes(imagePath);
-            int origWidth, origHeight;
-            byte[] rgba = DecodeImageToRGBA(fileBytes, out origWidth, out origHeight);
-            return ResizeRgbaToChannelFirstNormalized(rgba, origWidth, origHeight, ImageSize, ImageSize);
-        }
-
         internal static byte[] DecodeImageToRGBA(byte[] fileBytes, out int width, out int height)
         {
             if (IsPng(fileBytes))
@@ -514,4 +486,3 @@ namespace TensorSharp.Models
         }
     }
 }
-

@@ -77,11 +77,11 @@ public class SkillChatLoopStreamingTests : IDisposable
     }
 
     /// <summary>
-    /// Qwen 3 is the family used throughout: its markers (<c>&lt;think&gt;</c>,
+    /// Nemotron-H is used throughout: its ChatML markers (<c>&lt;think&gt;</c>,
     /// <c>&lt;tool_call&gt;</c>) are simple enough to write by hand in a fixture, and it
     /// renders both tool declarations and tool results, so the loop takes its full path.
     /// </summary>
-    private const string Architecture = "qwen3";
+    private const string Architecture = "nemotron_h_moe";
 
     /// <param name="clientTools">
     /// Names the CALLER declared. Passing them matters: the loop tells a tool the client
@@ -117,7 +117,7 @@ public class SkillChatLoopStreamingTests : IDisposable
     /// </summary>
     /// <remarks>
     /// Every fixture opens with a <c>&lt;think&gt;</c> block because that is what a
-    /// reasoning model emits and what the qwen3 parser expects: with thinking enabled it
+    /// reasoning model emits and what the ChatML parser expects: with thinking enabled it
     /// starts INSIDE the reasoning channel, so a fixture that skipped the tag would be
     /// read as pure reasoning and assert nothing about content.
     /// </remarks>
@@ -387,7 +387,7 @@ public class SkillChatLoopStreamingTests : IDisposable
     public void Collector_OnAPreParsedStream_ReturnsThePiecesWithoutReParsing()
     {
         var collector = new ChatStreamCollector();
-        // Text that WOULD be mangled if a qwen3 parser ran over it a second time.
+        // Text that would be mangled if a ChatML parser ran over it a second time.
         collector.Add(ChatStreamUpdate.Parsed("Write <think> to open a block.", "why not", null));
         collector.Add(ChatStreamUpdate.Parsed(" Done.", null,
             new List<ToolCall> { new() { Name = "get_weather" } }));

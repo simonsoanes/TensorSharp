@@ -15,7 +15,7 @@
 | 思维链模式 | 是（`<think> ... </think>`） |
 | 工具调用 | 是（`<tool_call>{...}</tool_call>`） |
 | 批处理 / 分页前向 | **默认启用** —— 设置 `TS_NEMOTRON_BATCHED=0` 可强制走旧的按序列 KV-swap 路径用于 A/B 对比。每槽位 Mamba2 conv + SSM 状态池，注意力层使用分页 K/V。可选的原生批处理 Mamba2 步内核（`TS_NEMOTRON_MAMBA2_BATCHED_NATIVE=1`）。详见 §11。 |
-| 输出解析器 | `Qwen3OutputParser` |
+| 输出解析器 | `ChatMlOutputParser` |
 
 ## 下载
 
@@ -464,13 +464,13 @@ GgmlMetal、进程内 legacy-vs-batched 切换；详见
 
 ## 12. 输出解析器与聊天模板
 
-- 复用 `Qwen3OutputParser`：`<think> ... </think>` 表示思维链，`<tool_call>{...}</tool_call>` 表示工具调用。
-- 聊天模板使用 Qwen 3 风格（`<|im_start|>` / `<|im_end|>`）。多模态占位符包括 `<image>`（之后展开为 `<img>` + N 个 token + `</img>`）与 `<so_embedding>`（音频）。
+- `ChatMlOutputParser` 解析 `<think> ... </think>` 思维链与 `<tool_call>{...}</tool_call>` 工具调用。
+- 聊天模板使用 ChatML 格式（`<|im_start|>` / `<|im_end|>`）。多模态占位符包括 `<image>`（之后展开为 `<img>` + N 个 token + `</img>`）与 `<so_embedding>`（音频）。
 
 ## 13. 优化机会
 
 - **原生 whole-model decode** —— 旧的单序列 forward 仍跑在托管 C#。原生
-  `NemotronModelDecode`（类比 Qwen 3）能消除单序列路径上的托管循环开销。
+  `NemotronModelDecode` 能消除单序列路径上的托管循环开销。
 - **旧路径的原生 Mamba2 decode** —— `Mamba2SSMStepSIMD` 中的 SIMD 向量化
   扫描在 CPU 上已经很快，但原生 CUDA / Metal 内核能解锁完整 Mamba2 路径在
   GPU 上的执行（针对单序列路径）。批处理路径已经在

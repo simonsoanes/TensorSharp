@@ -448,10 +448,9 @@ namespace TensorSharp.AgentHost.Skills
             ChatProtocol? protocol = ChatProtocolRegistry.For(architecture);
 
             // Whether a `role: "tool"` message survives is a property of the RENDERER
-            // alone, and stays independent of everything below: Gemma 3 carries a tool
-            // result into the prompt perfectly well and simply cannot declare a tool.
-            // Collapsing the two flags together is a real regression - it would make the
-            // loop feed results back as user turns on a family that never needed it.
+            // alone, and stays independent of whether the model can receive tool
+            // declarations. Collapsing the two flags together would make the loop feed
+            // results back as user turns on families that do not need that adaptation.
             bool resultsRendered = protocol?.RendersToolResultMessages ?? true;
 
             // Declarations are the AND of the two halves: the renderer must write the

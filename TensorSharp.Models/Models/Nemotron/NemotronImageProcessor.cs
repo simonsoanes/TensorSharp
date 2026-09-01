@@ -86,8 +86,8 @@ namespace TensorSharp.Models
         public List<ProcessedTile> ProcessImage(string imagePath)
         {
             byte[] file = File.ReadAllBytes(imagePath);
-            byte[] rgba = Gemma3ImageProcessor.DecodeImageToRGBA(file, out int origW, out int origH);
-            rgba = Gemma3ImageProcessor.CompositeOverWhite(rgba, origW, origH);
+            byte[] rgba = ImageProcessorUtils.DecodeImageToRGBA(file, out int origW, out int origH);
+            rgba = ImageProcessorUtils.CompositeOverWhite(rgba, origW, origH);
 
             return UseDynamicResolution()
                 ? ProcessDynamicResolution(rgba, origW, origH)

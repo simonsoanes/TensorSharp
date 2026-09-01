@@ -213,6 +213,19 @@ public class BpeTokenizerTests
     }
 
     [Fact]
+    public void ResolveEogTokenIds_UsesOnlyDeclaredEndOfTurnId()
+    {
+        string[] vocab = Enumerable.Range(0, 107).Select(i => $"token-{i}").ToArray();
+
+        Assert.Equal(
+            new[] { 1 },
+            ModelBase.ResolveEogTokenIds(vocab, eosId: 1));
+        Assert.Equal(
+            new[] { 1, 106 },
+            ModelBase.ResolveEogTokenIds(vocab, eosId: 1, declaredEotId: 106));
+    }
+
+    [Fact]
     public void Encode_ParsesNormalTypedEogMarkerAsSpecialToken()
     {
         string[] vocab = { "a", "b", "<|tool_response>" };

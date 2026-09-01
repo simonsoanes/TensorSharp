@@ -15,7 +15,7 @@
 | Tool calling | Yes (`<tool_call>{...}</tool_call>`) |
 | Batched / paged forward | **Default ON** — set `TS_QWEN35_BATCHED=0` (or `--no-continuous-batching`) to force the legacy per-sequence KV-swap path for A/B comparison. Includes a per-slot GatedDeltaNet recurrent-state pool and optional native batched GDN kernel (`TS_QWEN35_BATCHED_GDN_NATIVE=1`). See §11. |
 | MTP speculative decoding | Qwen 3.6 — NextN draft block embedded in the trunk GGUF (no separate file; MTP-retaining GGUFs only, see [Downloads](#downloads)); engage with `--spec` on **either host** — `TensorSharp.Cli` and `TensorSharp.Server` share [`SpeculativeCliFlags`](../../TensorSharp.Runtime/Speculative/SpeculativeCliFlags.cs). GDN recurrent-state snapshot/rollback on partial accept. Engages for solo (non-concurrent) sequences whenever the GGUF retains the NextN block. Qwen 3.8 additionally accepts a **DFlash2** block drafter as a separate `--draft-model` GGUF (§12.4). See §12. |
-| Output parser | `Qwen35OutputParser` (inherits `Qwen3OutputParser`) |
+| Output parser | `Qwen35OutputParser` (inherits `ChatMlOutputParser`) |
 
 ## Downloads
 
@@ -956,7 +956,7 @@ Folding it into the fused MTP graph is the next step.
 
 ## 13. Output parser and chat template
 
-- `Qwen35OutputParser` inherits `Qwen3OutputParser`, so the wire format is
+- `Qwen35OutputParser` inherits `ChatMlOutputParser`, so the wire format is
   identical: `<think> ... </think>` for chain-of-thought reasoning, and
   `<tool_call>{"name": "...", "arguments": {...}}</tool_call>` for tool calls.
 - Chat template uses the standard Qwen `<|im_start|>` / `<|im_end|>` rolling

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Text &amp; LLM Models — TensorSharp Wiki</title>
-  <meta name="description" content="Download-and-run recipes for all twelve text architectures, plus multimodal input, thinking mode and tool calling.">
+  <meta name="description" content="Download-and-run recipes for all ten text architectures, plus multimodal input, thinking mode and tool calling.">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
   <script>try{var t=localStorage.getItem('ts-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.classList.toggle('dark',t==='dark');}catch(e){}</script>
@@ -115,19 +115,6 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll \
   <p>Measured on 2× RTX PRO 6000 Blackwell (96 GB) with GLM-5.3-Flash-UD-Q2_K_XL (101 GiB), layer split, both engines at <code>n_ubatch</code> 2048, back to back: pp2048 <strong>2070 t/s</strong> for llama.cpp against 2014 for TensorSharp, pp16384 1690 against <strong>1692</strong>, pp32768 <strong>1483</strong> against 1446, and tg64 36.6 against <strong>73.5</strong>. Prefill is within a few percent either way; decode runs at <strong>2.0× llama.cpp</strong>.</p>
   <p>It runs on <code>--backend cpu</code> too — the 100% pure-C# path, no native dependencies — now that <code>glm5next</code>'s NoPE MLA (no rope half anywhere, so nothing to split off) and its <code>IQ2_XS</code> / <code>IQ4_XS</code> weights have managed support. It is well behind the GGML backends there: on a 122-CPU box (22-token prompt, 16 tokens out) it measures prefill <strong>3.1</strong> / decode <strong>1.6</strong> tok/s against <code>ggml_cpu</code>'s 17.7 / 3.9 on the same file and box — about 5.7× off on prefill and 2.4× on decode, with roughly 89% of the time in the MoE expert path. Treat it as a reference implementation to A/B against rather than a bit-parity one: the prefill-logit cosine against <code>ggml_cpu</code> is <strong>0.9567</strong> over the 154880-wide vocabulary and the greedy text differs, because native's top two logits are 0.11 apart and the managed path ranks them the other way. That is consistent with 2-bit expert-pick sensitivity, but it is <em>not</em> proven to be only that — 0.96 is lower than the ~0.999 a higher-precision checkpoint would be expected to give, and no higher-precision GLM-5.3 GGUF was available as a control. The measurements, the four fixes it took, and the caveat in full are in the <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/models/glm.md">GLM model card</a>.</p>
 
-  <h3 id="gemma3">Gemma 3 (text + image)</h3>
-  <pre data-lang="bash"><code>hf download ggml-org/gemma-3-4b-it-GGUF gemma-3-4b-it-Q4_K_M.gguf --local-dir models
-hf download ggml-org/gemma-3-4b-it-GGUF mmproj-model-f16.gguf --local-dir models
-
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-3-4b-it-Q4_K_M.gguf --mmproj models/mmproj-model-f16.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
-dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gemma-3-4b-it-Q4_K_M.gguf --mmproj models/mmproj-model-f16.gguf --backend ggml_cuda</code></pre>
-
-  <h3 id="qwen3">Qwen 3 (text, thinking, tools)</h3>
-  <pre data-lang="bash"><code>hf download Qwen/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf --local-dir models
-
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Qwen3-4B-Q4_K_M.gguf --input prompt.txt --think --max-tokens 400 --backend ggml_cuda
-dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3-4B-Q4_K_M.gguf --backend ggml_cuda</code></pre>
-
   <h3 id="qwen35">Qwen 3.5 / 3.6 (text + image, thinking, tools, NextN MTP on 3.6)</h3>
   <pre data-lang="bash"><code>hf download unsloth/Qwen3.5-9B-GGUF Qwen3.5-9B-UD-Q4_K_XL.gguf --local-dir models
 hf download unsloth/Qwen3.5-9B-GGUF mmproj-F16.gguf --local-dir models
@@ -215,7 +202,6 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/diffusiongem
     <thead><tr><th>Family</th><th>Inputs</th><th>Notes</th></tr></thead>
     <tbody>
       <tr><td>Gemma 4</td><td>Image · Video · Audio</td><td>Images PNG/JPEG/HEIC; Video MP4 (1 fps via OpenCV); Audio WAV 16 kHz mono / MP3 / OGG. E4B projector: <code>mmproj-gemma-4-E4B-it-Q8_0.gguf</code>.</td></tr>
-      <tr><td>Gemma 3</td><td>Image</td><td>PNG / JPEG / HEIC. Non-gated 4B projector: <code>mmproj-model-f16.gguf</code>.</td></tr>
       <tr><td>Qwen 3.5 / 3.6</td><td>Image</td><td>Dynamic-resolution vision encoder. The 9B / 3.6 repositories use <code>mmproj-F16.gguf</code>.</td></tr>
       <tr><td>Qwen 3.8 Flash Next</td><td>Image</td><td>The Qwen3.5-VL tower with (T,H,W) IMRoPE positions; multi-image prompts and multi-turn image sessions, with KV reuse across turns when the new prompt extends the cached prefix exactly. Projector: <code>mmproj-BF16.gguf</code> (same repo).</td></tr>
       <tr><td>GLM 5.x (5.3-Flash)</td><td>Image</td><td>The GLM-OCR ViT — all 24 blocks run as one device-resident graph, and the projected rows override the <code>&lt;|image|&gt;</code> placeholders inside the native executor. Multi-image and multi-turn image sessions. Projector: <code>mmproj-BF16.gguf</code> (same repo). GLM-5.2 is text only.</td></tr>
@@ -228,9 +214,9 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/diffusiongem
   <p>Send images/audio/video via the <a href="cli.html#examples">CLI</a> (<code>--image</code>, <code>--video</code>, <code>--audio</code>), the <a href="server.html#webui">Web UI</a> uploads, or the <a href="http-api.html">HTTP API</a> (base64 <code>images</code> array for Ollama, <code>image_url</code> data URI for OpenAI). <strong>PDF documents</strong> are supported too — born-digital PDFs have their complete text layer extracted and inlined into the prompt; scanned PDFs fall back to page images for vision-capable models — via the CLI's <code>--pdf</code> flag (one-shot mode) or the Web UI upload (<code>TS_PDF_MAX_PAGES</code> caps the page count; default: all pages).</p>
 
   <h2 id="thinking">Thinking / reasoning mode</h2>
-  <p>Thinking-capable models (Qwen 3, Qwen 3.5/3.6, Qwen 3.8 Flash Next, Gemma 4, GPT OSS, Nemotron-H, DeepSeek V4, GLM 5.x, Muse-Glimmer) produce structured chain-of-thought before the final answer. The thinking content is separated from the visible response so the client can show or hide it.</p>
+  <p>Thinking-capable models (Qwen 3.5/3.6, Qwen 3.8 Flash Next, Gemma 4, GPT OSS, Nemotron-H, DeepSeek V4, GLM 5.x, Muse-Glimmer) produce structured chain-of-thought before the final answer. The thinking content is separated from the visible response so the client can show or hide it.</p>
   <ul>
-    <li><strong>Qwen 3 / Qwen 3.5/3.6 / Nemotron-H</strong> — <code>&lt;think&gt;…&lt;/think&gt;</code> tags.</li>
+    <li><strong>Qwen 3.5/3.6 / Nemotron-H</strong> — <code>&lt;think&gt;…&lt;/think&gt;</code> tags.</li>
     <li><strong>Qwen 3.8 Flash Next</strong> — the same <code>&lt;think&gt;…&lt;/think&gt;</code> tags, but always on: the generation prompt opens the block unconditionally, so there is no non-thinking mode to switch to.</li>
     <li><strong>Gemma 4</strong> — <code>&lt;|channel&gt;thought …&lt;channel|&gt;</code> tags.</li>
     <li><strong>GPT OSS</strong> — Harmony format: <code>&lt;|channel|&gt;analysis</code> for thinking, <code>&lt;|channel|&gt;final</code> for the answer.</li>
@@ -243,7 +229,7 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/diffusiongem
   <h2 id="toolcalling">Tool calling / function calling</h2>
   <p>Models can invoke user-defined tools and participate in multi-turn tool-call conversations. Define tools as JSON and pass them via <code>--tools</code> (CLI) or the <code>tools</code> parameter (API). Each architecture uses its own wire format, but the output parser extracts calls into structured <code>tool_calls</code> regardless:</p>
   <ul>
-    <li><strong>Qwen 3 / Nemotron-H</strong> — <code>&lt;tool_call&gt;{"name": …, "arguments": {…}}&lt;/tool_call&gt;</code></li>
+    <li><strong>Nemotron-H</strong> — <code>&lt;tool_call&gt;{"name": …, "arguments": {…}}&lt;/tool_call&gt;</code></li>
     <li><strong>Qwen 3.5 / 3.6</strong> — the same <code>&lt;tool_call&gt;</code> block with an XML body: <code>&lt;function=NAME&gt;&lt;parameter=key&gt;value&lt;/parameter&gt;&lt;/function&gt;</code> (the JSON form is still accepted).</li>
     <li><strong>Gemma 4</strong> — <code>&lt;|tool_call&gt;call:function_name{args}&lt;tool_call|&gt;</code></li>
     <li><strong>GPT OSS (Harmony)</strong> — tools declared as a TypeScript namespace; calls emitted on the commentary channel.</li>

@@ -75,19 +75,19 @@ Run the commands below from the repository root after building; they invoke `Ten
 
 ```bash
 # Text-only model
-dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend ggml_metal
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend ggml_metal
 
 # Windows/Linux + NVIDIA, direct CUDA/cuBLAS backend
-dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend cuda
 
 # Windows/Linux + NVIDIA, GGML CUDA backend
-dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend ggml_cuda
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend ggml_cuda
 
 # Windows/Linux + AMD/Intel/NVIDIA GPU, GGML Vulkan backend (pick the device on multi-GPU hosts with --gpu-device; see --list-gpus)
-dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend ggml_vulkan --gpu-device 0
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend ggml_vulkan --gpu-device 0
 
 # Apple Silicon, MLX backend
-dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend mlx
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend mlx
 
 # Multimodal model (explicit projector)
 dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/gemma-4-E4B-it-Q8_0.gguf \
@@ -100,7 +100,7 @@ DIFFUSION_STEPS=48 DIFFUSION_MAX_BATCH=2 \
 # Override the default token budget (default 20000). It applies to every
 # endpoint — Web UI, Ollama and OpenAI — whenever a request omits max_tokens /
 # num_predict, and caps requests that ask for more.
-dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3-4B-Q8_0.gguf --backend ggml_metal --max-tokens 4096
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend ggml_metal --max-tokens 4096
 ```
 
 The API starts on `http://localhost:5000`; the Web UI is served from that same
@@ -148,7 +148,7 @@ Response:
 ```json
 {
   "models": [
-    {"name": "Qwen3-4B-Q8_0", "model": "Qwen3-4B-Q8_0.gguf", "size": 4530000000, "modified_at": "2025-03-15T10:00:00Z"}
+    {"name": "Qwen3.5-9B-Q8_0", "model": "Qwen3.5-9B-Q8_0.gguf", "size": 9550000000, "modified_at": "2025-03-15T10:00:00Z"}
   ]
 }
 ```
@@ -158,7 +158,7 @@ Response:
 ```bash
 curl -X POST http://localhost:5000/api/show \
   -H "Content-Type: application/json" \
-  -d '{"model": "Qwen3-4B-Q8_0.gguf"}'
+  -d '{"model": "Qwen3.5-9B-Q8_0.gguf"}'
 ```
 
 ### Generate (non-streaming)
@@ -167,7 +167,7 @@ curl -X POST http://localhost:5000/api/show \
 curl -X POST http://localhost:5000/api/generate \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "prompt": "What is 1+1?",
     "stream": false,
     "options": {
@@ -181,7 +181,7 @@ curl -X POST http://localhost:5000/api/generate \
 Response:
 ```json
 {
-  "model": "Qwen3-4B-Q8_0.gguf",
+  "model": "Qwen3.5-9B-Q8_0.gguf",
   "created_at": "2025-03-15T10:00:00Z",
   "response": "1+1 equals 2.",
   "done": true,
@@ -207,7 +207,7 @@ non-zero on `/api/chat/ollama` when the prompt prefix matches a previous turn.
 curl -X POST http://localhost:5000/api/generate \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "prompt": "Tell me a joke.",
     "stream": true,
     "options": {"num_predict": 100}
@@ -216,10 +216,10 @@ curl -X POST http://localhost:5000/api/generate \
 
 Each line is a JSON object (newline-delimited JSON):
 ```
-{"model":"Qwen3-4B-Q8_0.gguf","created_at":"...","response":"Why","done":false}
-{"model":"Qwen3-4B-Q8_0.gguf","created_at":"...","response":" did","done":false}
+{"model":"Qwen3.5-9B-Q8_0.gguf","created_at":"...","response":"Why","done":false}
+{"model":"Qwen3.5-9B-Q8_0.gguf","created_at":"...","response":" did","done":false}
 ...
-{"model":"Qwen3-4B-Q8_0.gguf","created_at":"...","response":"","done":true,"done_reason":"stop","total_duration":...,"eval_count":...,"prompt_cache_hit_tokens":0,"prompt_cache_hit_ratio":0.0}
+{"model":"Qwen3.5-9B-Q8_0.gguf","created_at":"...","response":"","done":true,"done_reason":"stop","total_duration":...,"eval_count":...,"prompt_cache_hit_tokens":0,"prompt_cache_hit_ratio":0.0}
 ```
 
 The final `done` chunk also carries the same `prompt_cache_hit_tokens` /
@@ -248,7 +248,7 @@ curl -X POST http://localhost:5000/api/generate \
 curl -X POST http://localhost:5000/api/chat/ollama \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [
       {"role": "system", "content": "You are a helpful assistant."},
       {"role": "user", "content": "What is the capital of France?"}
@@ -261,7 +261,7 @@ curl -X POST http://localhost:5000/api/chat/ollama \
 Response:
 ```json
 {
-  "model": "Qwen3-4B-Q8_0.gguf",
+  "model": "Qwen3.5-9B-Q8_0.gguf",
   "created_at": "2025-03-15T10:00:00Z",
   "message": {"role": "assistant", "content": "The capital of France is Paris."},
   "done": true,
@@ -288,7 +288,7 @@ prior conversation prefix they grow to (often) close to `prompt_eval_count` /
 curl -X POST http://localhost:5000/api/chat/ollama \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [{"role": "user", "content": "Hello!"}],
     "stream": true,
     "options": {"num_predict": 50}
@@ -301,7 +301,7 @@ curl -X POST http://localhost:5000/api/chat/ollama \
 curl -X POST http://localhost:5000/api/chat/ollama \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [
       {"role": "user", "content": "My name is Alice."},
       {"role": "assistant", "content": "Nice to meet you, Alice!"},
@@ -332,13 +332,13 @@ curl -X POST http://localhost:5000/api/chat/ollama \
 
 ### Chat with Thinking / Reasoning Mode
 
-Thinking-capable architectures (Qwen 3, Qwen 3.5/3.6-family, Gemma 4, GPT OSS, Nemotron-H) accept `"think": true` and split chain-of-thought from the visible response:
+Thinking-capable architectures (Qwen 3.5/3.6/3.8-family, Gemma 4, GPT OSS, Nemotron-H) accept `"think": true` and split chain-of-thought from the visible response:
 
 ```bash
 curl -X POST http://localhost:5000/api/chat/ollama \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [{"role": "user", "content": "Solve 17 * 23 step by step."}],
     "think": true,
     "stream": false,
@@ -368,7 +368,7 @@ Define tools in the same shape as Ollama's tool API. The server detects the arch
 curl -X POST http://localhost:5000/api/chat/ollama \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
     "tools": [{
       "type": "function",
@@ -462,7 +462,7 @@ Response:
 {
   "object": "list",
   "data": [
-    {"id": "Qwen3-4B-Q8_0", "object": "model", "owned_by": "local"}
+    {"id": "Qwen3.5-9B-Q8_0", "object": "model", "owned_by": "local"}
   ]
 }
 ```
@@ -473,7 +473,7 @@ Response:
 curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [
       {"role": "system", "content": "You are a helpful assistant."},
       {"role": "user", "content": "What is 2+3?"}
@@ -489,7 +489,7 @@ Response:
   "id": "chatcmpl-abc123...",
   "object": "chat.completion",
   "created": 1710500000,
-  "model": "Qwen3-4B-Q8_0.gguf",
+  "model": "Qwen3.5-9B-Q8_0.gguf",
   "choices": [{
     "index": 0,
     "message": {"role": "assistant", "content": "2 + 3 = 5."},
@@ -517,7 +517,7 @@ about TTFT savings without enabling Debug logging on the server.
 curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [{"role": "user", "content": "Hello!"}],
     "max_tokens": 50,
     "stream": true
@@ -544,7 +544,7 @@ just like the non-streaming response.
 curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [
       {"role": "user", "content": "Return a JSON object with keys answer and confidence for 2+3."}
     ],
@@ -574,7 +574,7 @@ TensorSharp.Server accepts the OpenAI Chat Completions `response_format` shape, 
 curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [
       {
         "role": "system",
@@ -644,7 +644,7 @@ curl -X POST http://localhost:5000/v1/chat/completions \
 curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
     "tools": [{
       "type": "function",
@@ -1263,7 +1263,7 @@ import json
 
 url = "http://localhost:5000/api/generate"
 payload = {
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "prompt": "What is machine learning?",
     "stream": False,
     "options": {"num_predict": 100, "temperature": 0.7}
@@ -1281,7 +1281,7 @@ import json
 
 url = "http://localhost:5000/api/generate"
 payload = {
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "prompt": "Tell me a story.",
     "stream": True,
     "options": {"num_predict": 200}
@@ -1305,7 +1305,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:5000/v1", api_key="not-needed")
 
 response = client.chat.completions.create(
-    model="Qwen3-4B-Q8_0.gguf",
+    model="Qwen3.5-9B-Q8_0.gguf",
     messages=[
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "What is 2+3?"}
@@ -1326,7 +1326,7 @@ import json
 client = OpenAI(base_url="http://localhost:5000/v1", api_key="not-needed")
 
 response = client.chat.completions.create(
-    model="Qwen3-4B-Q8_0.gguf",
+    model="Qwen3.5-9B-Q8_0.gguf",
     messages=[
         {"role": "user", "content": "Extract the city and country from: Tokyo, Japan."}
     ],
@@ -1361,7 +1361,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:5000/v1", api_key="not-needed")
 
 stream = client.chat.completions.create(
-    model="Qwen3-4B-Q8_0.gguf",
+    model="Qwen3.5-9B-Q8_0.gguf",
     messages=[{"role": "user", "content": "Tell me about Python."}],
     max_tokens=200,
     stream=True

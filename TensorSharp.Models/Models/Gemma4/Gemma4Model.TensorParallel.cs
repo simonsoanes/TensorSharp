@@ -10,8 +10,8 @@
 // ============================================================================
 // Gemma4Model.TensorParallel.cs
 //
-// Tensor-parallel forward pass for Gemma 4. Extends the Gemma 3 TP pattern
-// (Megatron-LM column/row parallelism) with:
+// Tensor-parallel forward pass for Gemma 4, using Megatron-LM column/row
+// parallelism with:
 //   - Fused QKV projection (attn_qkv.weight)
 //   - Per-layer head dimensions (local SWA vs global)
 //   - Per-layer KV head counts
@@ -919,8 +919,8 @@ namespace TensorSharp.Models
                 {
                     kTensor = ApplyGemma4QKNormTP(kTensor, $"{prefix}.attn_k_norm.weight", numKVHeadsPerGpu, headDim, seqLen, r);
                     // Gemma4 applies an UNWEIGHTED RMS norm to V before attention
-                    // (the non-TP path's ApplyUnweightedRMSNorm). The Gemma3-derived
-                    // TP path omitted it, so every layer attended to un-normalised
+                    // (the non-TP path's ApplyUnweightedRMSNorm). An earlier TP path
+                    // omitted it, so every layer attended to un-normalised
                     // values and the output collapsed into repetitive gibberish.
                     vTensor = ApplyGemma4VNormTP(vTensor, numKVHeadsPerGpu, headDim, seqLen, r);
                 }
@@ -946,7 +946,7 @@ namespace TensorSharp.Models
                 // NOTE: no 1/sqrt(headDim) Q scaling here. Gemma4 attention runs at
                 // unit scale — the Q/K RMS norms provide the normalisation and the
                 // non-TP path passes scale=1.0 to every attention kernel with no Q
-                // pre-scaling. The previous Gemma3-style 1/sqrt(headDim) pre-scale
+                // pre-scaling. The previous 1/sqrt(headDim) pre-scale
                 // shrank the logits ~16-22x, flattening attention to near-uniform and
                 // driving the repeated-token output under TP.
 

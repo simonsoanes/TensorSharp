@@ -872,8 +872,7 @@ TSG_EXPORT int TSGgml_Gemma4LayerPrefill(
 //
 // Replaces ~10 separate C# → GGML round trips per attention layer (each its
 // own ggml_cgraph + Metal command buffer) with a single graph dispatch. This
-// is the prefill counterpart to TSGgml_TransformerLayerDecode and the GPT-OSS
-// analogue of TSGgml_Gemma4LayerPrefill.
+// is the GPT-OSS analogue of TSGgml_Gemma4LayerPrefill.
 //
 // llama.cpp reference: src/models/openai-moe-iswa.cpp::llm_build_openai_moe_iswa
 // (the attention block before the MoE FFN).

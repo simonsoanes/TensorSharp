@@ -6,9 +6,9 @@
 // TensorSharp is licensed under the BSD-3-Clause license found in the LICENSE file in the root directory of this source tree.
 //
 // Batched paged-attention forward path for Mistral 3. Second reference
-// implementation of <see cref="IBatchedPagedModel"/>, after Qwen3.
+// implementation of <see cref="IBatchedPagedModel"/>.
 //
-// Differences from the Qwen3 template:
+// Architecture-specific details:
 //   * Mistral 3 has no Q-norm / K-norm.
 //   * RoPE uses YaRN scaling - extFactor / betaFast / betaSlow / attnFactor
 //     are passed through to Ops.RoPEEx.
@@ -30,7 +30,7 @@ namespace TensorSharp.Models
 {
     public partial class Mistral3Model : IBatchedPagedModel
     {
-        // Per-layer paged K/V floats. Same shape as for Qwen3 - lazily
+        // Per-layer paged K/V floats, lazily
         // allocated once the engine's block-pool dimensions are known.
         private float[][] _pagedKBuf;
         private float[][] _pagedVBuf;

@@ -421,50 +421,6 @@ namespace TensorSharp.Models
             });
         }
 
-        internal List<int> ProcessGemma3History(Gemma3Model model, List<ChatMessage> history, List<int> inputTokens)
-        {
-            if (model.VisionEncoder == null)
-                return inputTokens;
-
-            var imagePaths = GetImagePathsInPromptOrder(history);
-            if (imagePaths.Count == 0)
-                return inputTokens;
-
-            var processor = new Gemma3ImageProcessor();
-            int startId = _model.Tokenizer.LookupToken("<start_of_image>");
-            if (startId < 0) startId = Gemma3ImageProcessor.StartOfImageToken;
-            int endId = Gemma3ImageProcessor.EndOfImageToken;
-            int newlineId = Gemma3ImageProcessor.NewlineNewlineToken;
-            int padId = Gemma3ImageProcessor.PadToken;
-
-            inputTokens = ChatTemplate.ExpandGemma3ImageTokens(
-                inputTokens,
-                startId,
-                endId,
-                newlineId,
-                padId,
-                processor.TokensPerImage);
-
-            int searchFrom = 0;
-            foreach (var imagePath in imagePaths)
-            {
-                CachedEmbedding cached = GetOrCreateGemma3VisionEmbedding(model, processor, imagePath);
-                int tokenStart = FindGemma3ImageInsertPosition(inputTokens, startId, padId, searchFrom);
-
-                if (tokenStart >= 0)
-                {
-                    _preparedVisionEmbeddings.Add(new PreparedEmbeddingSpan(
-                        cached,
-                        tokenStart,
-                        tokenStart - 2,
-                        tokenStart + cached.TokenCount + 2));
-                    searchFrom = tokenStart + processor.TokensPerImage + 2;
-                }
-            }
-
-            return inputTokens;
-        }
-
         internal List<int> ProcessQwen35History(Qwen35Model model, List<ChatMessage> history, List<int> inputTokens)
             => ProcessQwenVLHistory(model.VisionEncoder, history, inputTokens);
 
@@ -814,19 +770,6 @@ namespace TensorSharp.Models
                     throw new InvalidOperationException($"Audio file '{fullPath}' did not produce a valid mel spectrogram.");
 
                 Tensor embeddings = model.AudioEncoder.Encode(melData, numFrames);
-                return CreateCachedEmbedding(fullPath, embeddings);
-            });
-        }
-
-        private CachedEmbedding GetOrCreateGemma3VisionEmbedding(
-            Gemma3Model model,
-            Gemma3ImageProcessor processor,
-            string imagePath)
-        {
-            return GetOrCreateCachedEmbedding(_visionCache, imagePath, fullPath =>
-            {
-                float[] pixels = processor.ProcessImage(fullPath);
-                Tensor embeddings = model.VisionEncoder.Encode(pixels);
                 return CreateCachedEmbedding(fullPath, embeddings);
             });
         }
@@ -1191,17 +1134,6 @@ namespace TensorSharp.Models
             {
                 if (tokens[i] == tokenId)
                     return i;
-            }
-
-            return -1;
-        }
-
-        private static int FindGemma3ImageInsertPosition(List<int> tokens, int startTokenId, int padTokenId, int searchFrom)
-        {
-            for (int i = Math.Max(0, searchFrom); i + 1 < tokens.Count; i++)
-            {
-                if (tokens[i] == startTokenId && tokens[i + 1] == padTokenId)
-                    return i + 1;
             }
 
             return -1;

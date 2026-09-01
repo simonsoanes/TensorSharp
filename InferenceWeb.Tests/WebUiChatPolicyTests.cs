@@ -15,7 +15,7 @@ public class WebUiChatPolicyTests
     [Fact]
     public void TryValidateChatRequest_RejectsPerTurnModelSelection()
     {
-        bool allowed = WebUiChatPolicy.TryValidateChatRequest("Qwen3-4B-Q8_0.gguf", null, out string? error);
+        bool allowed = WebUiChatPolicy.TryValidateChatRequest("Gemma4-E4B-Q8_0.gguf", null, out string? error);
 
         Assert.False(allowed);
         Assert.Equal(WebUiChatPolicy.ModelSelectionLockedMessage, error);

@@ -3682,7 +3682,7 @@ TSG_EXPORT int TSGgml_MoEExpertsForwardF32(
 }
 
 // ============================================================================
-// Batched MoE SwiGLU expert forward: SwiGLU activation pattern (qwen3 / mixtral).
+// Batched MoE SwiGLU expert forward: standard SwiGLU activation pattern.
 // For each selected expert e:
 //   gate_e = input @ gate_w[e]        // [interm_dim]
 //   up_e   = input @ up_w[e]          // [interm_dim]

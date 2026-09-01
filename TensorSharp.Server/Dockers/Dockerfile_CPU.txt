@@ -76,10 +76,10 @@ COPY --chown=1000:1000 --from=build /src/TensorSharp.Server/bin/ ./
 
 # Download the GGUF model for the demo (gemma-4-E2B QAT Q4_0, ~3.4 GB) plus its
 # multimodal projector (mmproj, ~1 GB) so vision input works out of the box.
-# Override either build arg to host a different model, e.g. a smaller/faster one:
+# Override either build arg to host a different text-only model:
 #   docker build \
-#     --build-arg MODEL_URL=https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf \
-#     --build-arg MODEL_FILE=Qwen3-4B-Q4_K_M.gguf ...
+#     --build-arg MODEL_URL=https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q8_0.gguf \
+#     --build-arg MODEL_FILE=Qwen3.5-9B-Q8_0.gguf ...
 ARG MODEL_URL=https://huggingface.co/huihui-ai/Huihui-gemma-4-E2B-it-qat-q4_0-unquantized-abliterated-GGUF/resolve/main/Huihui-gemma-4-E2B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf
 ARG MODEL_FILE=Huihui-gemma-4-E2B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf
 ENV MODEL_FILE=${MODEL_FILE}

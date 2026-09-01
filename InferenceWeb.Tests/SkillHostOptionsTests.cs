@@ -361,16 +361,15 @@ public class SkillHostOptionsTests : IDisposable
     }
 
     [Theory]
-    [InlineData("gemma3")]
     [InlineData("mistral3")]
     public void Capabilities_AFamilyWhoseRendererDiscardsTools_ReportsSo(string architecture)
     {
-        // Both families' ChatProtocol entries pass only (Messages, AddGenerationPrompt)
-        // to their renderer, so the tool list is dropped before the renderer sees it.
-        // Declaring a tool for them is not an error anyone can observe — the request
+        // This family's ChatProtocol entry passes only (Messages, AddGenerationPrompt)
+        // to its renderer, so the tool list is dropped before the renderer sees it.
+        // Declaring a tool for it is not an error anyone can observe — the request
         // succeeds and the model simply never calls what it was never told about — so
         // Agent Skills has to learn it from this table instead. Getting it wrong makes
-        // skills appear to work on these two and silently do nothing.
+        // skills appear to work and silently do nothing.
         Assert.False(SkillCapabilities.For(architecture).ToolsRendered);
     }
 
@@ -383,15 +382,6 @@ public class SkillHostOptionsTests : IDisposable
         // from its prompt, and it would call the same tool again until the round budget
         // ran out. The loop feeds results back as a user turn here instead.
         Assert.False(SkillCapabilities.For("mistral3").ToolResultsRendered);
-    }
-
-    [Fact]
-    public void Capabilities_Gemma3_StillRendersToolResultMessages()
-    {
-        // Gemma 3 frames an unknown role as its own turn rather than dropping it, so a
-        // tool result does reach the prompt — oddly framed, but present. Only the
-        // declaration is lost, which is why the two flags are separate.
-        Assert.True(SkillCapabilities.For("gemma3").ToolResultsRendered);
     }
 
     // ---- script argument splitting -----------------------------------------

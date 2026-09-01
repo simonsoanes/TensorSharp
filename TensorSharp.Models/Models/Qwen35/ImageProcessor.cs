@@ -32,7 +32,7 @@ namespace TensorSharp.Models
 
         public static (int width, int height) ReadImageDimensions(string path)
         {
-            return Gemma3ImageProcessor.ReadImageDimensions(path);
+            return ImageProcessorUtils.ReadImageDimensions(path);
         }
 
         public (int height, int width) SmartResize(int height, int width)
@@ -87,10 +87,10 @@ namespace TensorSharp.Models
         public (float[] pixels, int resizedH, int resizedW) ProcessImage(string imagePath)
         {
             byte[] fileBytes = File.ReadAllBytes(imagePath);
-            byte[] rgba = Gemma3ImageProcessor.DecodeImageToRGBA(fileBytes, out int origWidth, out int origHeight);
+            byte[] rgba = ImageProcessorUtils.DecodeImageToRGBA(fileBytes, out int origWidth, out int origHeight);
 
             var (resizedH, resizedW) = SmartResize(origHeight, origWidth);
-            float[] pixels = Gemma3ImageProcessor.ResizeRgbaToChannelFirstNormalized(
+            float[] pixels = ImageProcessorUtils.ResizeRgbaToChannelFirstNormalized(
                 rgba, origWidth, origHeight, resizedW, resizedH);
             return (pixels, resizedH, resizedW);
         }

@@ -146,7 +146,8 @@ namespace TensorSharp.Runtime
 
     public static class ChatTemplate
     {
-        public static string RenderQwen3(List<ChatMessage> messages, bool addGenerationPrompt = true,
+        /// <summary>Render the generic ChatML conversation and optional tool declarations.</summary>
+        public static string RenderChatMl(List<ChatMessage> messages, bool addGenerationPrompt = true,
             List<ToolFunction>? tools = null, bool enableThinking = false)
         {
             var sb = new StringBuilder();
@@ -565,33 +566,6 @@ namespace TensorSharp.Runtime
         }
 
         /// <summary>
-        /// Render Gemma3 chat template.
-        /// Uses &lt;start_of_turn&gt;/&lt;end_of_turn&gt; markers. Images use &lt;start_of_image&gt;.
-        /// BOS token is prepended by the tokenizer (add_bos_token=true).
-        /// </summary>
-        public static string RenderGemma3(List<ChatMessage> messages, bool addGenerationPrompt = true)
-        {
-            var sb = new StringBuilder();
-            for (int i = 0; i < messages.Count; i++)
-            {
-                var msg = messages[i];
-                string role = msg.Role == "assistant" ? "model" : (msg.Role ?? "");
-                sb.Append($"<start_of_turn>{role}\n");
-                if (msg.ImagePaths != null)
-                {
-                    foreach (var _ in msg.ImagePaths)
-                        sb.Append("<start_of_image>");
-                }
-                sb.Append($"{msg.Content}<end_of_turn>\n");
-            }
-            if (addGenerationPrompt)
-            {
-                sb.Append("<start_of_turn>model\n");
-            }
-            return sb.ToString();
-        }
-
-        /// <summary>
         /// Render a chat prompt using the model's built-in GGUF template if available,
         /// otherwise fall back to hardcoded architecture-specific templates.
         /// Multimodal tokens (image/audio/video) are injected into message content
@@ -739,7 +713,7 @@ namespace TensorSharp.Runtime
             // unrecognised architecture gets.
             return render != null
                 ? render(request)
-                : RenderQwen3(messages, addGenerationPrompt, tools, enableThinking);
+                : RenderChatMl(messages, addGenerationPrompt, tools, enableThinking);
         }
 
         private const string GlmToolsHeader =
@@ -1681,8 +1655,8 @@ namespace TensorSharp.Runtime
         /// skips thinking.
         ///
         /// BOS is NOT emitted here: the tokenizer prepends it (add_bos_token=true,
-        /// encode addSpecial=true), exactly like <see cref="RenderGemma3"/> and the
-        /// GGUF Jinja2 path (which renders an empty bos_token). Emitting a literal
+        /// encode addSpecial=true), exactly like the GGUF Jinja2 path (which renders
+        /// an empty bos_token). Emitting a literal
         /// &lt;bos&gt; here too would double the BOS token in the prompt.
         /// </summary>
         public static string RenderGemma4(List<ChatMessage> messages, bool addGenerationPrompt = true,
@@ -1999,31 +1973,5 @@ namespace TensorSharp.Runtime
             return result;
         }
 
-        /// <summary>
-        /// Expand Gemma3 image tokens: replace each &lt;start_of_image&gt; token with
-        /// \n\n &lt;start_of_image&gt; [pad_tokens...] &lt;end_of_image&gt; \n\n
-        /// </summary>
-        public static List<int> ExpandGemma3ImageTokens(List<int> tokens, int startOfImageId,
-            int endOfImageId, int newlineNewlineId, int padTokenId, int tokensPerImage)
-        {
-            var result = new List<int>(tokens.Count + tokensPerImage + 10);
-            foreach (int token in tokens)
-            {
-                if (token == startOfImageId)
-                {
-                    result.Add(newlineNewlineId);
-                    result.Add(startOfImageId);
-                    for (int j = 0; j < tokensPerImage; j++)
-                        result.Add(padTokenId);
-                    result.Add(endOfImageId);
-                    result.Add(newlineNewlineId);
-                }
-                else
-                {
-                    result.Add(token);
-                }
-            }
-            return result;
-        }
     }
 }
