@@ -95,6 +95,14 @@ namespace TensorSharp.Server
         public IReadOnlyList<int> RawOutputTokens { get; init; }
 
         /// <summary>
+        /// Exact whitespace at the end of the prompt that preceded
+        /// <see cref="RawOutputTokens"/>. The skills loop and tracked session history
+        /// retain it so later renders can reproduce each raw-token boundary exactly.
+        /// Empty is a valid, known boundary; null is reserved for legacy updates.
+        /// </summary>
+        public string? RawPromptTrailingWhitespace { get; init; }
+
+        /// <summary>
         /// Reasoning text decoded since the last update, already separated from
         /// <see cref="Piece"/>. Only meaningful when <see cref="IsParsed"/> is true.
         /// </summary>
@@ -309,6 +317,7 @@ namespace TensorSharp.Server
             List<int> inputTokens;
             int effectiveMaxTokens;
             List<int> explicitBreakpoints = null;
+            string generationPromptTrailingWhitespace;
             bool hasMultimodal = RequiresMultimodalPreparation(renderHistory);
             if (hasMultimodal)
             {
@@ -345,6 +354,7 @@ namespace TensorSharp.Server
                     inputTokens = _kvCacheRenderer.RenderToTokens(
                         model.Tokenizer, model.Config.ChatTemplate, renderHistory, arch,
                         addGenerationPrompt: true, out explicitBreakpoints,
+                        out generationPromptTrailingWhitespace,
                         tools: tools, enableThinking: enableThinking);
                     var unexpandedTokens = inputTokens;
                     // ClearPreparedPromptState is safe when preparation fails
@@ -371,7 +381,9 @@ namespace TensorSharp.Server
             {
                 inputTokens = _kvCacheRenderer.RenderToTokens(
                     model.Tokenizer, model.Config.ChatTemplate, renderHistory, arch,
-                    addGenerationPrompt: true, out explicitBreakpoints, tools: tools, enableThinking: enableThinking);
+                    addGenerationPrompt: true, out explicitBreakpoints,
+                    out generationPromptTrailingWhitespace,
+                    tools: tools, enableThinking: enableThinking);
                 inputTokens = TruncatePromptToContext(
                     session, inputTokens, maxTokens, out effectiveMaxTokens, null,
                     preserveAllInput: preserveAttachedDocuments,
@@ -548,7 +560,8 @@ namespace TensorSharp.Server
 
             lock (session.HistoryLock)
                 ChatHistoryPreparer.UpdateTrackedHistory(
-                    session.TrackedHistory, renderHistory, assistantText, generatedTokens);
+                    session.TrackedHistory, renderHistory, assistantText, generatedTokens,
+                    generationPromptTrailingWhitespace);
 
             double evalSeconds = evalSw.Elapsed.TotalSeconds;
             double tokensPerSecond = (evalSeconds > 0 && generatedTokens.Count > 0)
@@ -571,6 +584,7 @@ namespace TensorSharp.Server
                 // Carried so the skills loop can splice this round back verbatim on its
                 // next render instead of re-tokenizing it. See RawOutputTokens.
                 RawOutputTokens = generatedTokens,
+                RawPromptTrailingWhitespace = generationPromptTrailingWhitespace,
             };
             }
             finally
@@ -619,7 +633,9 @@ namespace TensorSharp.Server
             var promptSw = Stopwatch.StartNew();
             List<int> inputTokens = _kvCacheRenderer.RenderToTokens(
                 model.Tokenizer, model.Config.ChatTemplate, renderHistory, arch,
-                addGenerationPrompt: true, tools: null, enableThinking: false);
+                addGenerationPrompt: true, out _,
+                out string generationPromptTrailingWhitespace,
+                tools: null, enableThinking: false);
             inputTokens = TruncatePromptToContext(
                 session, inputTokens, maxTokens, out _, preserveAllInput: preserveAttachedDocuments);
             int promptTokenCount = inputTokens.Count;
@@ -659,7 +675,8 @@ namespace TensorSharp.Server
 
             lock (session.HistoryLock)
                 ChatHistoryPreparer.UpdateTrackedHistory(
-                    session.TrackedHistory, renderHistory, finalText, generated);
+                    session.TrackedHistory, renderHistory, finalText, generated,
+                    generationPromptTrailingWhitespace);
 
             long totalNs = InferenceTelemetry.ToNanos(totalSw.ElapsedTicks);
             _telemetry.LogChatFinished(

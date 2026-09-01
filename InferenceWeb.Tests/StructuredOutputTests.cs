@@ -64,6 +64,7 @@ public class StructuredOutputTests
             Role = "assistant",
             Content = "earlier answer",
             RawOutputTokens = new List<int> { 11, 12 },
+            RawPromptTrailingWhitespace = "\n",
             CacheControl = new CacheControlMarker { Type = "ephemeral" },
             ContentCacheBreakpoints = new List<int> { 4 },
             TextFilePaths = new List<string> { "/tmp/input.txt" },
@@ -77,6 +78,7 @@ public class StructuredOutputTests
         ChatMessage clone = result[1];
         Assert.NotSame(message, clone);
         Assert.Equal(new[] { 11, 12 }, clone.RawOutputTokens);
+        Assert.Equal("\n", clone.RawPromptTrailingWhitespace);
         Assert.Equal(new[] { 4 }, clone.ContentCacheBreakpoints);
         Assert.Equal("ephemeral", clone.CacheControl?.Type);
         Assert.Equal(new[] { "/tmp/input.txt" }, clone.TextFilePaths);

@@ -113,10 +113,11 @@ namespace TensorSharp.Runtime
                 // the generation prompt so the model skips reasoning; the template does
                 // not re-emit it for past assistant messages, but the cache holds it.
                 AssistantGenerationSuffix = thinking => thinking ? null : "<|channel>thought\n<channel|>",
-                // The template re-renders an in-turn tool round's thinking channel from
-                // `reasoning`, and needs `tool_calls` present to render that round's tool
-                // RESULT. Handing both over is what makes a skills/code round re-render
-                // byte-identically to what was generated - see RendersAssistantReasoning.
+                // The template can re-render an in-turn tool round's thinking channel
+                // from `reasoning`, and needs `tool_calls` present to render that round's
+                // tool RESULT. The KV renderer's canonical-template replay hook keeps
+                // `tool_calls` for that result while splicing the exact generated token
+                // run; structured reasoning remains the conservative fallback.
                 RendersAssistantReasoning = true,
                 // ...but only the CANONICAL Gemma 4 template has that reasoning branch.
                 // The template shipped in earlier builds - and in the community

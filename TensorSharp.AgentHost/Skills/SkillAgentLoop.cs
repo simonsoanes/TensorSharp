@@ -35,7 +35,15 @@ namespace TensorSharp.AgentHost.Skills
     /// from the first assistant turn onward.
     /// </para>
     /// </param>
-    public readonly record struct SkillTurnOutput(ParsedOutput Parsed, IReadOnlyList<int>? RawTokens = null);
+    public readonly record struct SkillTurnOutput(ParsedOutput Parsed, IReadOnlyList<int>? RawTokens = null)
+    {
+        /// <summary>
+        /// Exact trailing whitespace of the rendered generation prompt that preceded
+        /// <see cref="RawTokens"/>. Empty is a known boundary with no whitespace;
+        /// null means the producer does not support boundary tracking yet.
+        /// </summary>
+        public string? RawPromptTrailingWhitespace { get; init; }
+    }
 
     /// <summary>
     /// Runs one generation against whatever execution path the host owns.
@@ -256,6 +264,7 @@ namespace TensorSharp.AgentHost.Skills
                     Thinking = string.IsNullOrEmpty(output.Parsed?.Thinking) ? null : output.Parsed!.Thinking,
                     ToolCalls = new List<ToolCall>(calls),
                     RawOutputTokens = output.RawTokens != null ? new List<int>(output.RawTokens) : null,
+                    RawPromptTrailingWhitespace = output.RawPromptTrailingWhitespace,
                 });
 
                 foreach (ToolCall unknownCall in unknownCalls)

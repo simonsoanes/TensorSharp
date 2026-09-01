@@ -150,6 +150,104 @@ public class Gemma4PromptRenderReproTests
         Assert.EndsWith("<turn|>", rendered);
     }
 
+    private const string Gemma4CachedToolReasoningTemplate =
+        "{%- macro format_tool_response_block(tool_name, response) -%}" +
+        "{{- '<|tool_response>' + response + '<tool_response|>' -}}" +
+        "{%- endmacro -%}" +
+        "{%- set ns = namespace(prev_message_type=None) -%}" +
+        "{%- set loop_messages = messages -%}" +
+        "{%- set ns_turn = namespace(last_user_idx=-1) -%}" +
+        "{%- for message in loop_messages -%}" +
+        "{%- if message['role'] == 'user' -%}" +
+        "{%- set ns_turn.last_user_idx = loop.index0 -%}" +
+        "{%- endif -%}" +
+        "{%- endfor -%}" +
+        "{%- for message in loop_messages -%}" +
+        "{%- if message['role'] != 'tool' -%}" +
+        "{%- set thinking_text = message.get('reasoning') or message.get('reasoning_content') -%}" +
+        "{%- if thinking_text and loop.index0 > ns_turn.last_user_idx and message.get('tool_calls') -%}" +
+        "{{- '<|channel>thought\\n' + thinking_text + '\\n<channel|>' -}}" +
+        "{%- endif -%}" +
+        "{%- if message['tool_calls'] -%}" +
+        "{%- set ns.prev_message_type = 'tool_call' -%}" +
+        "{{- '<CALL>' -}}" +
+        "{%- elif message['role'] == 'user' -%}" +
+        "{{- '<U>' + message['content'] -}}" +
+        "{%- elif message['role'] == 'assistant' -%}" +
+        "{{- '<A>' + message['content'] -}}" +
+        "{%- endif -%}" +
+        "{%- if message.get('tool_responses') -%}" +
+        "{%- elif message.get('tool_calls') -%}" +
+        "{%- for k in range(loop.index0 + 1, loop_messages | length) -%}" +
+        "{%- endfor -%}" +
+        "{%- endif -%}" +
+        "{%- else -%}" +
+        "{{- format_tool_response_block('', message['content']) -}}" +
+        "{%- endif -%}" +
+        "{%- endfor -%}";
+
+    private static List<ChatMessage> CachedGemma4ToolHistory(bool cached)
+    {
+        return new List<ChatMessage>
+        {
+            new() { Role = "user", Content = "make the game" },
+            new()
+            {
+                Role = "assistant",
+                Content = "",
+                Thinking = "inspect the workspace",
+                ToolCalls = new List<ToolCall>
+                {
+                    new()
+                    {
+                        Name = "shell",
+                        Arguments = new Dictionary<string, object> { ["command"] = "pwd" },
+                    },
+                },
+                RawOutputTokens = cached ? new List<int> { 101, 102 } : null,
+            },
+            new() { Role = "tool", Content = "/workspace" },
+            new() { Role = "user", Content = "now add a boss" },
+        };
+    }
+
+    [Fact]
+    public void CachedGemma4ToolRound_ReplaysReasoningAfterANewerUserTurn()
+    {
+        string rendered = ChatTemplate.RenderFromGgufTemplate(
+            Gemma4CachedToolReasoningTemplate,
+            CachedGemma4ToolHistory(cached: true),
+            addGenerationPrompt: false,
+            architecture: "gemma4",
+            enableThinking: true);
+
+        const string thought = "<|channel>thought\ninspect the workspace<channel|>";
+        const string result = "<|tool_response>/workspace<tool_response|>";
+        Assert.Contains(thought, rendered);
+        Assert.Contains(result, rendered);
+        Assert.True(rendered.IndexOf(thought, StringComparison.Ordinal)
+            < rendered.IndexOf("<CALL>", StringComparison.Ordinal));
+        Assert.True(rendered.IndexOf("<CALL>", StringComparison.Ordinal)
+            < rendered.IndexOf(result, StringComparison.Ordinal));
+        Assert.DoesNotContain(ChatTemplate.ReasoningEndSentinel, rendered);
+    }
+
+    [Fact]
+    public void NonCachedGemma4ToolRound_KeepsCanonicalLastUserReasoningGate()
+    {
+        string rendered = ChatTemplate.RenderFromGgufTemplate(
+            Gemma4CachedToolReasoningTemplate,
+            CachedGemma4ToolHistory(cached: false),
+            addGenerationPrompt: false,
+            architecture: "gemma4",
+            enableThinking: true);
+
+        Assert.DoesNotContain("inspect the workspace", rendered);
+        Assert.Contains("<CALL>", rendered);
+        Assert.Contains("<|tool_response>/workspace<tool_response|>", rendered);
+        Assert.Contains("now add a boss", rendered);
+    }
+
     private static BpeTokenizer CreateCharacterGemma4Tokenizer(string text)
     {
         string[] vocab = text
@@ -221,11 +319,26 @@ public class Gemma4PromptRenderReproTests
             new[] { 2, 105, 2364, 107, 23391, 106, 107, 105, 4368, 107, 100, 45518, 107, 101 },
             tokenizer.Encode(noThinkingPrompt, addSpecial: true));
 
-        const string thinkingPrompt =
+        // Gemma 4 GGUFs exist with two upstream system-think preamble revisions.
+        // Keep both byte shapes and both token sequences as explicit oracles: the only
+        // difference is whether <|think|> and <turn|> are adjacent or newline-separated.
+        // Accepting either rendered shape keeps the test useful across those revisions
+        // without weakening it to a whitespace-normalized comparison.
+        const string compactSystemThinkPrompt =
             "<|turn>system\n<|think|><turn|>\n<|turn>user\nhello<turn|>\n<|turn>model\n";
+        const string separatedSystemThinkPrompt =
+            "<|turn>system\n<|think|>\n<turn|>\n<|turn>user\nhello<turn|>\n<|turn>model\n";
+        int[] compactSystemThinkTokens =
+            { 2, 105, 9731, 107, 98, 106, 107, 105, 2364, 107, 23391, 106, 107, 105, 4368, 107 };
+        int[] separatedSystemThinkTokens =
+            { 2, 105, 9731, 107, 98, 107, 106, 107, 105, 2364, 107, 23391, 106, 107, 105, 4368, 107 };
+
         Assert.Equal(
-            new[] { 2, 105, 9731, 107, 98, 106, 107, 105, 2364, 107, 23391, 106, 107, 105, 4368, 107 },
-            tokenizer.Encode(thinkingPrompt, addSpecial: true));
+            compactSystemThinkTokens,
+            tokenizer.Encode(compactSystemThinkPrompt, addSpecial: true));
+        Assert.Equal(
+            separatedSystemThinkTokens,
+            tokenizer.Encode(separatedSystemThinkPrompt, addSpecial: true));
 
         var history = new List<ChatMessage> { new() { Role = "user", Content = "hello" } };
         string renderedThinkingPrompt = ChatTemplate.RenderFromGgufTemplate(
@@ -234,14 +347,148 @@ public class Gemma4PromptRenderReproTests
             addGenerationPrompt: true,
             architecture: "gemma4",
             enableThinking: true);
-        Assert.Equal(thinkingPrompt, renderedThinkingPrompt);
+        Assert.True(
+            renderedThinkingPrompt == compactSystemThinkPrompt
+                || renderedThinkingPrompt == separatedSystemThinkPrompt,
+            "The embedded Gemma 4 template must render one of the two known exact " +
+            "system-think preamble revisions.");
+        int[] renderedThinkingTokens = renderedThinkingPrompt == compactSystemThinkPrompt
+            ? compactSystemThinkTokens
+            : separatedSystemThinkTokens;
         Assert.Equal(
-            new[] { 2, 105, 9731, 107, 98, 106, 107, 105, 2364, 107, 23391, 106, 107, 105, 4368, 107 },
+            renderedThinkingTokens,
             tokenizer.Encode(renderedThinkingPrompt, addSpecial: true));
 
         Assert.Equal(
             "Hello! How can I help you today?",
             tokenizer.Decode(new List<int> { 9259, 236888, 2088, 740, 564, 1601, 611, 3124, 236881 }));
+    }
+
+    [ModelFact("TS_GEMMA4_BPE_MODEL")]
+    public void RealTemplate_CodeToolTranscript_RemainsAnExactPrefixAfterANewUserTurn()
+    {
+        // Metadata/tokenizer-only regression for the code-exec live-cache failure.
+        // No weights or backend are loaded. Deriving every expected prefix from this
+        // GGUF's own template keeps the test valid across Gemma template revisions.
+        string? modelPath = FindBpeModel();
+        if (modelPath == null) { _output.WriteLine("Gemma 4 BPE GGUF not found; skipping"); return; }
+
+        using var gguf = new GgufFile(modelPath);
+        ITokenizer tokenizer = ModelBase.CreateTokenizerFromGguf(gguf);
+        string template = gguf.GetString("tokenizer.chat_template") ?? "";
+        var renderer = new KVCachePromptRenderer(new GgufPromptRenderer());
+        var tools = new List<ToolFunction>
+        {
+            new()
+            {
+                Name = "write_file",
+                Description = "Write a text file.",
+                Parameters = new Dictionary<string, ToolParameter>
+                {
+                    ["path"] = new() { Type = "string", Description = "Path" },
+                    ["content"] = new() { Type = "string", Description = "Content" },
+                },
+                Required = new List<string> { "path", "content" },
+            },
+        };
+
+        var baseHistory = new List<ChatMessage>
+        {
+            new() { Role = "system", Content = "Use tools when requested." },
+            new() { Role = "user", Content = "Create a tiny file." },
+        };
+        var firstPrompt = renderer.RenderToTokens(
+            tokenizer, template, baseHistory, "gemma4", true,
+            out _, out string firstBoundary, tools: tools, enableThinking: true);
+
+        const string firstRawText =
+            "<|channel>thought\n<channel|>" +
+            "<|tool_call>call:write_file{content:<|\"|><h1>ok</h1><|\"|>,path:<|\"|>game.html<|\"|>}<tool_call|>";
+        List<int> firstRaw = tokenizer.Encode(firstRawText, addSpecial: false);
+
+        // The sampler is allowed to produce a valid but non-canonical BPE
+        // decomposition. Replace one ordinary merged token by byte-fallback tokens:
+        // decoded text (and therefore parser output) stays identical, while a later
+        // structured reserialization cannot recover the sampled token IDs.
+        List<int> canonicalFirstRaw = new(firstRaw);
+        Assert.True(ReplaceOneTokenWithByteFallback((BpeTokenizer)tokenizer, firstRaw));
+        Assert.NotEqual(canonicalFirstRaw, firstRaw);
+        Assert.Equal(firstRawText, tokenizer.Decode(firstRaw));
+
+        var firstParser = new Gemma4OutputParser();
+        firstParser.Init(enableThinking: true, tools);
+        var parsedThinking = new System.Text.StringBuilder();
+        var parsedContent = new System.Text.StringBuilder();
+        var parsedCalls = new List<ToolCall>();
+        foreach (char ch in tokenizer.Decode(firstRaw))
+        {
+            ParsedOutput delta = firstParser.Add(ch.ToString(), done: false);
+            parsedThinking.Append(delta.Thinking);
+            parsedContent.Append(delta.Content);
+            if (delta.ToolCalls != null) parsedCalls.AddRange(delta.ToolCalls);
+        }
+        ParsedOutput parsedLast = firstParser.Add(string.Empty, done: true);
+        parsedThinking.Append(parsedLast.Thinking);
+        parsedContent.Append(parsedLast.Content);
+        if (parsedLast.ToolCalls != null) parsedCalls.AddRange(parsedLast.ToolCalls);
+
+        var firstLive = new List<int>(firstPrompt);
+        firstLive.AddRange(firstRaw);
+
+        var afterTool = new List<ChatMessage>(baseHistory)
+        {
+            new()
+            {
+                Role = "assistant",
+                Content = parsedContent.ToString(),
+                Thinking = parsedThinking.ToString(),
+                ToolCalls = parsedCalls,
+                RawOutputTokens = firstRaw,
+                RawPromptTrailingWhitespace = firstBoundary,
+                // Part-scoped content offsets cannot be recovered after raw replay,
+                // so this conservatively marks the start of the raw run. The
+                // message-scoped marker must close that run before the canonical
+                // template forwards the following tool result.
+                ContentCacheBreakpoints = new List<int> { 0 },
+                CacheControl = new CacheControlMarker(),
+            },
+            new() { Role = "tool", Content = "Created game.html" },
+        };
+        var secondPrompt = renderer.RenderToTokens(
+            tokenizer, template, afterTool, "gemma4", true,
+            out List<int>? firstRoundBreakpoints, out string secondBoundary,
+            tools: tools, enableThinking: true);
+        int firstLcp = LongestCommonPrefix(firstLive, secondPrompt);
+        Assert.Equal(firstLive.Count, firstLcp);
+        Assert.Equal(
+            new[] { firstPrompt.Count, firstPrompt.Count + firstRaw.Count },
+            firstRoundBreakpoints);
+        Assert.Contains("Created game.html", tokenizer.Decode(secondPrompt));
+
+        const string secondRawText =
+            "<|channel>thought\nThe file is ready.<channel|>Done.";
+        List<int> secondRaw = tokenizer.Encode(secondRawText, addSpecial: false);
+        var secondLive = new List<int>(secondPrompt);
+        secondLive.AddRange(secondRaw);
+
+        var followUp = new List<ChatMessage>(afterTool)
+        {
+            new()
+            {
+                Role = "assistant",
+                Content = "Done.",
+                Thinking = "The file is ready.",
+                RawOutputTokens = secondRaw,
+                RawPromptTrailingWhitespace = secondBoundary,
+            },
+            new() { Role = "user", Content = "Send the link again." },
+        };
+        var thirdPrompt = renderer.RenderToTokens(
+            tokenizer, template, followUp, "gemma4", true,
+            tools: tools, enableThinking: true);
+        int secondLcp = LongestCommonPrefix(secondLive, thirdPrompt);
+
+        Assert.Equal(secondLive.Count, secondLcp);
     }
 
     [ModelFact("TS_GEMMA4_12B")]
@@ -415,6 +662,45 @@ public class Gemma4PromptRenderReproTests
 
     // ---------- helpers ----------
 
+    private static bool ReplaceOneTokenWithByteFallback(BpeTokenizer tokenizer, List<int> ids)
+    {
+        var specialIds = new HashSet<int>(tokenizer.SpecialTokenIds);
+        for (int i = 0; i < ids.Count; i++)
+        {
+            if (specialIds.Contains(ids[i]))
+                continue;
+
+            string piece = tokenizer.Decode(new List<int> { ids[i] });
+            if (piece.Length == 0)
+                continue;
+
+            var replacement = new List<int>();
+            bool complete = true;
+            foreach (byte value in System.Text.Encoding.UTF8.GetBytes(piece))
+            {
+                int byteId = tokenizer.LookupToken($"<0x{value:X2}>");
+                if (byteId < 0)
+                {
+                    complete = false;
+                    break;
+                }
+                replacement.Add(byteId);
+            }
+
+            if (!complete
+                || replacement.SequenceEqual(new[] { ids[i] })
+                || tokenizer.Decode(replacement) != piece)
+            {
+                continue;
+            }
+
+            ids.RemoveAt(i);
+            ids.InsertRange(i, replacement);
+            return true;
+        }
+        return false;
+    }
+
     private static bool ContainsSubsequence(List<int> hay, List<int> needle)
     {
         if (needle.Count == 0) return true;
@@ -433,6 +719,14 @@ public class Gemma4PromptRenderReproTests
         int n = 0;
         foreach (int t in toks) { if (t == id) n++; else break; }
         return n;
+    }
+
+    private static int LongestCommonPrefix(IReadOnlyList<int> left, IReadOnlyList<int> right)
+    {
+        int n = Math.Min(left.Count, right.Count);
+        int i = 0;
+        while (i < n && left[i] == right[i]) i++;
+        return i;
     }
 
     private static int ArgMax(float[] a)

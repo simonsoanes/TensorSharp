@@ -457,6 +457,7 @@ namespace TensorSharp.AgentHost.Skills
             ToolCallId = message.ToolCallId,
             Thinking = message.Thinking,
             RawOutputTokens = message.RawOutputTokens != null ? new List<int>(message.RawOutputTokens) : null,
+            RawPromptTrailingWhitespace = message.RawPromptTrailingWhitespace,
             CacheControl = message.CacheControl != null
                 ? new CacheControlMarker { Type = message.CacheControl.Type }
                 : null,

@@ -1521,6 +1521,8 @@ namespace TensorSharp.Cli
                 renderHistory,
                 arch,
                 addGenerationPrompt: true,
+                out _,
+                out string generationPromptTrailingWhitespace,
                 tools: _tools,
                 enableThinking: _enableThinking);
 
@@ -1786,6 +1788,7 @@ namespace TensorSharp.Cli
                 // and re-prefill it.
                 ToolCalls = turnToolCalls.Count > 0 ? new List<ToolCall>(turnToolCalls) : null,
                 RawOutputTokens = new List<int>(generatedTokens),
+                RawPromptTrailingWhitespace = generationPromptTrailingWhitespace,
             });
 
             return turnToolCalls;

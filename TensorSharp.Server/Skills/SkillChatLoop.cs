@@ -209,6 +209,7 @@ namespace TensorSharp.Server.Skills
                     RawOutputTokens = terminal.RawOutputTokens != null
                         ? new List<int>(terminal.RawOutputTokens)
                         : null,
+                    RawPromptTrailingWhitespace = terminal.RawPromptTrailingWhitespace,
                 });
 
                 foreach (ToolCall unknownCall in unknownCalls)
@@ -570,7 +571,11 @@ namespace TensorSharp.Server.Skills
             long evalNs,
             long totalNs) =>
             new(string.Empty, true, promptTokens, evalTokens, reusedTokens,
-                totalNs, promptNs, evalNs, terminal.FinishReason ?? "stop");
+                totalNs, promptNs, evalNs, terminal.FinishReason ?? "stop")
+            {
+                RawOutputTokens = terminal.RawOutputTokens,
+                RawPromptTrailingWhitespace = terminal.RawPromptTrailingWhitespace,
+            };
 
         /// <summary>
         /// Wrap a tool result in the message shape this model family renders. Mistral 3

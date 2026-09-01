@@ -1505,6 +1505,8 @@ namespace TensorSharp.Cli
                     history,
                     arch,
                     addGenerationPrompt: true,
+                    out _,
+                    out string generationPromptTrailingWhitespace,
                     enableThinking: enableThinking);
 
                 // Expand image placeholders, prepare (cached) vision embeddings and
@@ -1633,6 +1635,7 @@ namespace TensorSharp.Cli
                     Content = content,
                     Thinking = thinking,
                     RawOutputTokens = generatedTokens,
+                    RawPromptTrailingWhitespace = generationPromptTrailingWhitespace,
                 });
             }
 
@@ -3473,6 +3476,8 @@ namespace TensorSharp.Cli
                     history,
                     arch,
                     addGenerationPrompt: true,
+                    out _,
+                    out string generationPromptTrailingWhitespace,
                     enableThinking: enableThinking);
 
                 promptTokens[turn] = inputTokens.Count;
@@ -3519,6 +3524,7 @@ namespace TensorSharp.Cli
                     Content = parsed.Content ?? "",
                     Thinking = parsed.Thinking ?? "",
                     RawOutputTokens = generatedTokens,
+                    RawPromptTrailingWhitespace = generationPromptTrailingWhitespace,
                 });
             }
 

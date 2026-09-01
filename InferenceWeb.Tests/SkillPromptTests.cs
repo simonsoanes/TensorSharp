@@ -216,6 +216,7 @@ public class SkillPromptTests : IDisposable
                 Role = "assistant",
                 Content = "Earlier answer.",
                 RawOutputTokens = new List<int> { 11, 22, 33 },
+                RawPromptTrailingWhitespace = "\n",
                 TextFilePaths = new List<string> { "/tmp/notes.txt" },
                 CacheControl = new CacheControlMarker(),
                 ContentCacheBreakpoints = new List<int> { 7 },
@@ -226,6 +227,7 @@ public class SkillPromptTests : IDisposable
 
         Assert.NotSame(messages[1], result[1]);                       // really a copy
         Assert.Equal(new[] { 11, 22, 33 }, result[1].RawOutputTokens);
+        Assert.Equal("\n", result[1].RawPromptTrailingWhitespace);
         Assert.Equal(new[] { "/tmp/notes.txt" }, result[1].TextFilePaths);
         Assert.Equal("ephemeral", result[1].CacheControl?.Type);
         Assert.Equal(new[] { 7 }, result[1].ContentCacheBreakpoints);
