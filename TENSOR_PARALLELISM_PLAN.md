@@ -82,12 +82,8 @@ Replicated hidden state (all GPUs hold identical copy)
 | `TensorSharp.Backends.Cuda/CudaP2PCommunicator.cs` | **New.** AllReduce via P2P copies + elementwise-add kernel. Reduce-to-zero + broadcast algorithm. Host-memory fallback when P2P is unavailable |
 | `TensorSharp.Backends.Cuda/TensorParallelGroup.cs` | **New.** Multi-GPU coordinator: owns N `CudaAllocator`s + P2P communicator. Public API: `AllReduce(Tensor[])`, `GetAllocator(rank)`, `Synchronize()` |
 | `TensorSharp.Models/ModelBase.cs` | Added TP fields, `tpDegree` constructor param, `ShardWeightsForTensorParallelism()`, `TpColumnParallelLinear()`, `TpRowParallelLinear()`, `TpRMSNorm()`, `TpResidualAdd()`, `BroadcastTensorToAllRanks()`, `PrepareCudaQuantizedWeightsForInferenceTP()`, TP cleanup in `Dispose()`, `Create()` accepts `tpDegree` |
-| `TensorSharp.Models/Models/Qwen3/Qwen3Model.cs` | Constructor accepts `tpDegree`, dispatches to `ForwardTP()` when TP active, TP KV cache init/dispose |
-| `TensorSharp.Models/Models/Qwen3/Qwen3Model.TensorParallel.cs` | **New.** TP forward pass: `ForwardTP`, `TransformerBlockTP`, `AttentionTP`, per-GPU KV cache management |
 | `TensorSharp.Models/Models/Mistral3/Mistral3Model.cs` | Constructor accepts `tpDegree`, dispatches to `ForwardTP()` when TP active |
 | `TensorSharp.Models/Models/Mistral3/Mistral3Model.TensorParallel.cs` | **New.** TP forward pass with fused/separate QKV, YaRN RoPE |
-| `TensorSharp.Models/Models/Gemma3/Gemma3Model.cs` | Constructor accepts `tpDegree`, dispatches to `ForwardTP()` when TP active |
-| `TensorSharp.Models/Models/Gemma3/Gemma3Model.TensorParallel.cs` | **New.** TP forward pass with separate Q/K/V, GELU, sliding window, extra norms |
 | `TensorSharp.Models/Models/Gemma4/Gemma4Model.cs` | Constructor accepts `tpDegree`, dispatches to `ForwardTP()` when TP active |
 | `TensorSharp.Models/Models/Gemma4/Gemma4Model.TensorParallel.cs` | **New.** TP forward pass with dense GeGLU + MoE dual-path FFN, per-layer head dims, shared KV layers |
 | `TensorSharp.Models/Models/Qwen35/Qwen35Model.cs` | Constructor accepts `tpDegree`, dispatches to `ForwardTP()` when TP active |
@@ -97,9 +93,7 @@ Replicated hidden state (all GPUs hold identical copy)
 | `TensorSharp.Models/Models/Nemotron/NemotronModel.cs` | Constructor accepts `tpDegree`, dispatches to `ForwardTP()` when TP active |
 | `TensorSharp.Models/Models/Nemotron/NemotronModel.TensorParallel.cs` | **New.** TP forward pass with Mamba2 (replicated), attention (no RoPE), dense + MoE FFN |
 | `TensorSharp.Cli/Program.cs` | Added `--tp <N>` CLI argument |
-| `TensorSharp.Models/Models/Qwen3/Qwen3Model.BatchedForwardTP.cs` | **New.** TP batched paged-attention forward: per-rank paged KV buffers, TP column/row-parallel linears, per-rank ManagedPagedAttention |
 | `TensorSharp.Models/Models/Mistral3/Mistral3Model.BatchedForwardTP.cs` | **New.** TP batched forward with YaRN RoPE, fused/separate QKV, position-dependent Q scaling |
-| `TensorSharp.Models/Models/Qwen3/Qwen3Model.BatchedForward.cs` | Added TP dispatch to `ForwardBatchTP` when `IsTensorParallel` |
 | `TensorSharp.Models/Models/Mistral3/Mistral3Model.BatchedForward.cs` | Added TP dispatch to `ForwardBatchTP` when `IsTensorParallel` |
 | `TensorSharp.Models/Models/Gemma4/Gemma4Model.BatchedForward.cs` | `BatchedForwardAvailable` returns false under TP (per-seq fallback) |
 | `TensorSharp.Models/Models/Qwen35/Qwen35Model.BatchedForward.cs` | `BatchedForwardAvailable` returns false under TP (per-seq fallback) |
@@ -126,13 +120,13 @@ Row-parallel splits copy the relevant blocks per row into new aligned buffers.
 
 ```bash
 # CLI: 2-GPU tensor parallelism
-TensorSharp.Cli --model qwen3-8b.gguf --backend cuda --tp 2
+TensorSharp.Cli --model qwen3.5-9b.gguf --backend cuda --tp 2
 
 # Server: via environment variable
 TENSORSHARP_TP_DEGREE=2 dotnet run --project TensorSharp.Server
 
 # Config JSON (auto-expanded to CLI args)
-{ "tp": 2, "backend": "cuda", "model": "qwen3-8b.gguf" }
+{ "tp": 2, "backend": "cuda", "model": "qwen3.5-9b.gguf" }
 ```
 
 ### Constraints
@@ -158,7 +152,7 @@ column/row-parallel pattern:
 ### Known Limitations / Future Work (Stage 1)
 
 - [x] Extend TP to other model architectures (Gemma4, Qwen3.5, Mistral3, etc.)
-- [x] TP-aware batched forward (Qwen3, Mistral3 implemented; MoE models fall back to per-seq)
+- [x] TP-aware batched forward (Mistral3 implemented; MoE models fall back to per-seq)
 - [ ] TP-aware batched forward for MoE models (Gemma4, Qwen3.5, GptOss, Nemotron)
 - [ ] TP-aware CUDA graph capture (current graphs are single-device)
 - [ ] Overlap AllReduce with next layer's norm (pipeline communication)
@@ -274,7 +268,7 @@ does not reach the native `getenv`.
 
 ```bash
 # 2 GPUs on the GGML CUDA backend
-TensorSharp.Cli --model qwen3-8b.gguf --backend ggml_cuda --tp 2
+TensorSharp.Cli --model qwen3.5-9b.gguf --backend ggml_cuda --tp 2
 
 # Pick specific GPUs
 TENSORSHARP_TP_DEVICES=0,2 TensorSharp.Cli --model m.gguf --backend ggml_cuda --tp 2
@@ -302,30 +296,7 @@ TensorSharp.Cli --model m.gguf --backend ggml_cuda --tp 2 \
 
 | Model | 1 GPU | TP=2 rank 0 | TP=2 rank 1 |
 |---|---|---|---|
-| Qwen3-4B Q8_0 | 4075 MB | 2234 MB | 1840 MB |
 | Gemma-4-26B-A4B IQ4_XS | 12908 MB | 6835 MB | 6087 MB |
-
-**Correctness:** on a fixed prompt with greedy decode, TP=2 and single-GPU
-produce byte-identical text for short generations and diverge only after ~30
-tokens, at a natural branch point, with both continuations coherent — the
-expected consequence of summing the row-parallel partials in a different order.
-Parallel and sequential rank dispatch are bit-identical to each other, which is
-what rules out a race in the worker pool.
-
-**Throughput (Qwen3-4B Q8_0, tokens/s):**
-
-| | prefill 512 | prefill 2048 | decode |
-|---|---|---|---|
-| 1 GPU | 67.8 | 42.1 | 25.8 |
-| TP=2 | 42.3 | 33.8 | 11.6 |
-
-TP is currently **slower than a single GPU for models that fit on one**. This is
-not an AllReduce cost — it is dispatch count. The single-GPU GGML path runs a
-whole 36-layer decode as *one* fused native graph
-(`TSGgml_TransformerModelDecode`); the TP path runs the generic op-at-a-time
-forward, which is ~1000 native calls per token, doubled across two ranks. The
-per-op overhead is fixed, which is why prefill closes the gap as the prompt
-grows (0.62× at 512 tokens, 0.80× at 2048) while decode does not.
 
 ---
 
@@ -336,7 +307,7 @@ grows (0.62× at 512 tokens, 0.80× at 2048) while decode does not.
 ### The problem
 
 Stage 1b measured TP as a capacity win and a latency loss, and blamed dispatch
-count. That was right, and the magnitude was worse than the Qwen3-4B numbers
+count. That was right, and the magnitude was worse than the initial measurements
 suggested. On Gemma-4-E4B Q8_0, `--tp 2` ran prefill at 37.5 tok/s against
 1000+ on one GPU, and decode at 5.5 against 36.8. Every GGML op submits a graph,
 synchronizes, and copies its result back to host memory; a 42-layer decode is
@@ -546,10 +517,6 @@ Output is **byte-identical** to the single-GPU run on every prompt tested
       before the AllReduce; giving them a "write the block output" mode would
       make them usable per rank. This is now the largest remaining item: 32% of
       decode and ~75% of prefill time.
-- [ ] Qwen3's QKV fusion requires all three of Q/K/V to share a quant type, so
-      mixed-quant GGUFs (`Q4_K_M`) fuse only some layers and then fault. Pre-existing,
-      hit while sourcing a test model.
-
 ### Expert parallelism for MoE (Gemma 4, GGML)
 
 Slicing *inside* each expert (column-parallel gate/up, row-parallel down) leaves
@@ -818,11 +785,11 @@ tp:group:{group_id}:config → JSON { worldSize, localTp, nodeCount }
 ```bash
 # CLI: 2-node tensor parallelism (each node has 2 GPUs)
 # Node 0:
-TensorSharp.Cli --model qwen3-8b.gguf --backend cuda --tp 2 \
+TensorSharp.Cli --model qwen3.5-9b.gguf --backend cuda --tp 2 \
   --tp-node-id 0 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 
 # Node 1:
-TensorSharp.Cli --model qwen3-8b.gguf --backend cuda --tp 2 \
+TensorSharp.Cli --model qwen3.5-9b.gguf --backend cuda --tp 2 \
   --tp-node-id 1 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 
 # Server: via environment variables
@@ -953,16 +920,14 @@ meaningful user-facing improvement.
 
 ```
 Stage 1 (Local TP)          ████████████████████ NEARLY COMPLETE
-  ├── Qwen3 reference impl  ████████████████████ DONE
   ├── Mistral3               ████████████████████ DONE
-  ├── Gemma3                 ████████████████████ DONE
   ├── Gemma4 (dense+MoE)     ████████████████████ DONE
   ├── Qwen3.5 (SSM+MoE)     ████████████████████ DONE
   ├── GptOss (MoE)           ██████████████████░░ DONE (down-bias gap)
   ├── Nemotron (SSM+MoE)     ████████████████████ DONE (Mamba2 replicated)
   ├── DiffusionGemma         ──────────────────── N/A (diffusion model)
   ├── QwenImage              ──────────────────── N/A (image generation)
-  ├── Batched forward TP     ████████████████████ DONE (Qwen3, Mistral3; MoE models fall back to per-seq)
+  ├── Batched forward TP     ████████████████████ DONE (Mistral3; MoE models fall back to per-seq)
   └── NCCL (Linux)           ░░░░░░░░░░░░░░░░░░░░ TODO
 
 Stage 2 (Network TP)        ██████████░░░░░░░░░░ IN PROGRESS
@@ -987,9 +952,7 @@ Stage 3 (RDMA)              ░░░░░░░░░░░░░░░░░�
 
 | Model | Architecture | TP Status | Notes |
 |-------|-------------|-----------|-------|
-| Qwen3 | Dense transformer | ✅ Done | Reference implementation |
 | Mistral3 | Dense transformer | ✅ Done | Fused/separate QKV, YaRN RoPE |
-| Gemma3 | Dense transformer | ✅ Done | Separate Q/K/V, GELU, sliding window, extra norms |
 | Gemma4 | Dense + MoE | ✅ Done | Expert slicing, dual dense+MoE FFN, per-layer head dims, shared KV layers |
 | Qwen3.5 | SSM + MoE | ✅ Done | GatedDeltaNet SSM with per-rank V-head ownership, packed GDN kernels on direct CUDA and GGML; expert-parallel MoE + column-parallel LM head on GGML |
 | GptOss | MoE | ✅ Done | Expert slicing with biased projections, attention sinks, YaRN; expert down-bias skipped in TP |

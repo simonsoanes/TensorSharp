@@ -7,7 +7,7 @@
 //
 // Tensor-parallel batched paged-attention forward path for Mistral 3.
 // Combines the Megatron-LM column/row-parallel pattern with continuous
-// batching. Differences from the Qwen3 TP-batched template:
+// batching. Architecture-specific details:
 //   * No Q-norm / K-norm.
 //   * YaRN RoPE scaling parameters.
 //   * Position-dependent Q scaling.

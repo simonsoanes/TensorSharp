@@ -39,8 +39,9 @@ namespace TensorSharp.AgentHost.CodeExec
     /// nothing else — validates the names the way it always did, and performs the install
     /// itself through <see cref="PackageInstaller"/> with an argument vector it built:
     /// wheels only, no install scripts, egress pinned to the registry allow-list where the
-    /// sandbox can pin it. The model's own command then runs with no socket at all, like
-    /// every other command. The ergonomics are unchanged — the model types
+    /// sandbox can pin it. The rewritten command then runs under the operator's independent
+    /// command-network policy: offline by default, or unrestricted only when that broader
+    /// permission was explicitly enabled. The ergonomics are unchanged — the model types
     /// <c>pip install pandas</c> and it works — while the guarantee is the one the
     /// two-phase program runner had, restored and now platform-independent.
     /// </para>

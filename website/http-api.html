@@ -47,19 +47,19 @@
 
 curl -X POST http://localhost:5000/api/show \
   -H "Content-Type: application/json" \
-  -d '{"model": "Qwen3-4B-Q8_0.gguf"}'</code></pre>
+  -d '{"model": "Qwen3.5-9B-Q8_0.gguf"}'</code></pre>
 
   <h3>Generate (non-streaming)</h3>
   <pre data-lang="bash"><code>curl -X POST http://localhost:5000/api/generate \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "prompt": "What is 1+1?",
     "stream": false,
     "options": { "num_predict": 50, "temperature": 0.7, "top_p": 0.9 }
   }'</code></pre>
   <pre data-lang="json"><code>{
-  "model": "Qwen3-4B-Q8_0.gguf",
+  "model": "Qwen3.5-9B-Q8_0.gguf",
   "response": "1+1 equals 2.",
   "done": true,
   "done_reason": "stop",
@@ -73,14 +73,14 @@ curl -X POST http://localhost:5000/api/show \
   <h3>Generate (streaming)</h3>
   <pre data-lang="bash"><code>curl -X POST http://localhost:5000/api/generate \
   -H "Content-Type: application/json" \
-  -d '{ "model": "Qwen3-4B-Q8_0.gguf", "prompt": "Tell me a joke.", "stream": true, "options": {"num_predict": 100} }'</code></pre>
+  -d '{ "model": "Qwen3.5-9B-Q8_0.gguf", "prompt": "Tell me a joke.", "stream": true, "options": {"num_predict": 100} }'</code></pre>
   <p>Each line is a JSON object (newline-delimited JSON); the final <code>"done": true</code> chunk carries timing and cache fields.</p>
 
   <h3>Chat (multi-turn)</h3>
   <pre data-lang="bash"><code>curl -X POST http://localhost:5000/api/chat/ollama \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [
       {"role": "system", "content": "You are a helpful assistant."},
       {"role": "user", "content": "What is the capital of France?"}
@@ -107,7 +107,7 @@ curl -X POST http://localhost:5000/api/generate \
   <pre data-lang="bash"><code>curl -X POST http://localhost:5000/api/chat/ollama \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [{"role": "user", "content": "Solve 17 * 23 step by step."}],
     "think": true, "stream": false, "options": {"num_predict": 200}
   }'</code></pre>
@@ -126,7 +126,7 @@ curl -X POST http://localhost:5000/api/generate \
   <pre data-lang="bash"><code>curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [
       {"role": "system", "content": "You are a helpful assistant."},
       {"role": "user", "content": "What is 2+3?"}
@@ -136,7 +136,7 @@ curl -X POST http://localhost:5000/api/generate \
   <pre data-lang="json"><code>{
   "id": "chatcmpl-abc123...",
   "object": "chat.completion",
-  "model": "Qwen3-4B-Q8_0.gguf",
+  "model": "Qwen3.5-9B-Q8_0.gguf",
   "choices": [{
     "index": 0,
     "message": {"role": "assistant", "content": "2 + 3 = 5."},
@@ -152,7 +152,7 @@ curl -X POST http://localhost:5000/api/generate \
   <h3>Chat Completions (streaming)</h3>
   <pre data-lang="bash"><code>curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{ "model": "Qwen3-4B-Q8_0.gguf", "messages": [{"role": "user", "content": "Hello!"}], "max_tokens": 50, "stream": true }'</code></pre>
+  -d '{ "model": "Qwen3.5-9B-Q8_0.gguf", "messages": [{"role": "user", "content": "Hello!"}], "max_tokens": 50, "stream": true }'</code></pre>
   <p>Each chunk is an SSE <code>data:</code> frame of <code>object: "chat.completion.chunk"</code>; the stream ends with <code>data: [DONE]</code>.</p>
 
   <h3>Image input (OpenAI format)</h3>
@@ -176,7 +176,7 @@ curl -X POST http://localhost:5000/v1/chat/completions \
   <pre data-lang="bash"><code>curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
     "tools": [{
       "type": "function",
@@ -299,7 +299,7 @@ curl -X DELETE http://localhost:5000/api/skills/pdf   # {"removed":true}</code><
   <pre data-lang="bash"><code>curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "messages": [
       {"role": "system", "content": "You are a concise extraction assistant."},
       {"role": "user", "content": "Extract the city and country from: Paris, France."}
@@ -391,7 +391,7 @@ curl -s http://localhost:5000/api/video-generate \
   <pre data-lang="python"><code>import requests
 
 resp = requests.post("http://localhost:5000/api/generate", json={
-    "model": "Qwen3-4B-Q8_0.gguf",
+    "model": "Qwen3.5-9B-Q8_0.gguf",
     "prompt": "What is machine learning?",
     "stream": False,
     "options": {"num_predict": 100, "temperature": 0.7}
@@ -404,7 +404,7 @@ print(resp.json()["response"])</code></pre>
 client = OpenAI(base_url="http://localhost:5000/v1", api_key="not-needed")
 
 response = client.chat.completions.create(
-    model="Qwen3-4B-Q8_0.gguf",
+    model="Qwen3.5-9B-Q8_0.gguf",
     messages=[
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "What is 2+3?"}
@@ -415,7 +415,7 @@ print(response.choices[0].message.content)</code></pre>
 
   <h4>Streaming with the <code>openai</code> SDK</h4>
   <pre data-lang="python"><code>stream = client.chat.completions.create(
-    model="Qwen3-4B-Q8_0.gguf",
+    model="Qwen3.5-9B-Q8_0.gguf",
     messages=[{"role": "user", "content": "Tell me about Python."}],
     max_tokens=200, stream=True
 )

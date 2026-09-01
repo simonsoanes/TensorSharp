@@ -77,11 +77,11 @@ public class SkillChatLoopStreamingTests : IDisposable
     }
 
     /// <summary>
-    /// Qwen 3 is the family used throughout: its markers (<c>&lt;think&gt;</c>,
+    /// Nemotron-H is used throughout: its ChatML markers (<c>&lt;think&gt;</c>,
     /// <c>&lt;tool_call&gt;</c>) are simple enough to write by hand in a fixture, and it
     /// renders both tool declarations and tool results, so the loop takes its full path.
     /// </summary>
-    private const string Architecture = "qwen3";
+    private const string Architecture = "nemotron_h_moe";
 
     /// <param name="clientTools">
     /// Names the CALLER declared. Passing them matters: the loop tells a tool the client
@@ -110,6 +110,20 @@ public class SkillChatLoopStreamingTests : IDisposable
         return plan;
     }
 
+    private SkillRequestPlan CodePlan(ICodeRunner codeRunner, SessionWorkspace workspace)
+    {
+        var registry = new SkillRegistry(new SkillRegistryOptions { Roots = new[] { _baseDir } });
+        ServerHostingOptions options = ServerOptionsBuilder.Build(
+            new[] { "--model", "x.gguf", "--skills-dir", _baseDir }, _baseDir);
+        SkillRequestPlan plan = SkillRequestPlan.Create(
+            registry, Array.Empty<string>(), false, null, Architecture,
+            contextTokens: 32768, options, out IReadOnlyList<string> unknown,
+            codeRunner: codeRunner, workspace: workspace);
+        Assert.Empty(unknown);
+        Assert.NotNull(plan);
+        return plan;
+    }
+
     /// <summary>
     /// A generator that replays canned rounds one CHARACTER at a time, which is the
     /// worst case a real token stream can present: every marker is split across updates,
@@ -117,7 +131,7 @@ public class SkillChatLoopStreamingTests : IDisposable
     /// </summary>
     /// <remarks>
     /// Every fixture opens with a <c>&lt;think&gt;</c> block because that is what a
-    /// reasoning model emits and what the qwen3 parser expects: with thinking enabled it
+    /// reasoning model emits and what the ChatML parser expects: with thinking enabled it
     /// starts INSIDE the reasoning channel, so a fixture that skipped the tag would be
     /// read as pure reasoning and assert nothing about content.
     /// </remarks>
@@ -237,6 +251,14 @@ public class SkillChatLoopStreamingTests : IDisposable
             .ToList();
         ToolCall only = Assert.Single(forwarded);
         Assert.Equal("get_weather", only.Name);
+
+        // The Web UI owns one transient activity panel. Even though this call is
+        // handed to the caller rather than executed here, its generation progress
+        // still needs a terminal event so the panel cannot remain stuck on screen.
+        ChatStreamUpdate lastProgress = Payload(updates)
+            .Last(u => u.ToolProgressPhase != null);
+        Assert.Equal("finished", lastProgress.ToolProgressPhase);
+        Assert.Equal("get_weather", lastProgress.ToolProgressName);
     }
 
     [Fact]
@@ -261,6 +283,22 @@ public class SkillChatLoopStreamingTests : IDisposable
 
         SkillToolInvocation invocation = Assert.Single(plan.Invocations);
         Assert.Equal(SkillToolNames.Shell, invocation.Tool);
+
+        // Many writing updates are expected because Replay emits one character at
+        // a time. Collapse adjacent equal phases and pin the lifecycle rather than
+        // an implementation-dependent frame count: the live Web UI replaces its
+        // current activity on each transition and removes it on finished.
+        List<ChatStreamUpdate> progress = Payload(updates)
+            .Where(u => u.ToolProgressPhase != null)
+            .ToList();
+        string[] phases = progress.Select(u => u.ToolProgressPhase).ToArray();
+        string[] phaseTransitions = phases
+            .Where((phase, i) => i == 0 || phase != phases[i - 1])
+            .ToArray();
+        Assert.Equal(new[] { "writing", "running", "finished" }, phaseTransitions);
+
+        ChatStreamUpdate finished = progress[^1];
+        Assert.Equal(SkillToolNames.Shell, finished.ToolProgressName);
     }
 
     [Fact]
@@ -320,6 +358,83 @@ public class SkillChatLoopStreamingTests : IDisposable
             ToolCall call, IReadOnlyList<CodeInputFile> inputFiles = null, Action<string> onOutput = null,
             SessionWorkspace workspace = null, IReadOnlyList<string> skillDirectories = null) =>
             SkillToolResult.Failure("not used in these tests");
+    }
+
+    [Fact]
+    public async Task Cancellation_DetachesTheRequest_ButDefersWorkspaceDeleteUntilItsWorkerStops()
+    {
+        string workspaceRoot = Path.Combine(_baseDir, "request-workspaces");
+        var manager = new SessionWorkspaceManager(workspaceRoot);
+        var runner = new BlockingRunner();
+        RequestWorkspaceLease lease = Assert.IsType<RequestWorkspaceLease>(
+            RequestWorkspaceLease.Acquire(manager, runner, Architecture));
+        string leasedRoot = lease.Workspace.Root;
+        SkillRequestPlan plan = CodePlan(runner, lease.Workspace);
+        using var cancelled = new CancellationTokenSource();
+
+        var messages = new List<ChatMessage> { new() { Role = "user", Content = "run it" } };
+        Task<List<ChatStreamUpdate>> drain = Drain(SkillChatLoop.RunAsync(
+            Architecture, messages, plan, enableThinking: true,
+            Replay("<think>run</think><tool_call>\n{\"name\": \"shell\", \"arguments\": {\"command\": \"wait\"}}\n</tool_call>"),
+            logger: null, cancelled.Token));
+
+        try
+        {
+            await runner.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            cancelled.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => drain);
+
+            // This is the adapter's method-scope using/finally on an aborted stream.
+            lease.Dispose();
+            Assert.True(Directory.Exists(leasedRoot),
+                "request disposal must not delete a directory under an in-flight tool");
+
+            runner.AllowCompletion();
+            await runner.Completed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True(SpinWait.SpinUntil(() => !Directory.Exists(leasedRoot), TimeSpan.FromSeconds(5)),
+                "the deferred release should delete as soon as the worker exits");
+        }
+        finally
+        {
+            runner.AllowCompletion();
+            lease.Dispose();
+        }
+    }
+
+    private sealed class BlockingRunner : ICodeRunner
+    {
+        private readonly ManualResetEventSlim _continue = new(false);
+
+        public TaskCompletionSource<bool> Started { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource<bool> Completed { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public bool CanRun => true;
+        public string UnavailableReason => null;
+
+        public ToolFunction Declare() =>
+            new() { Name = SkillToolNames.Shell, Description = "runs commands" };
+
+        public SkillToolResult Execute(
+            ToolCall call, IReadOnlyList<CodeInputFile> inputFiles = null,
+            Action<string> onOutput = null, SessionWorkspace workspace = null,
+            IReadOnlyList<string> skillDirectories = null)
+        {
+            Started.TrySetResult(true);
+            try
+            {
+                _continue.Wait();
+                return new SkillToolResult(true, "done", null, null);
+            }
+            finally
+            {
+                Completed.TrySetResult(true);
+            }
+        }
+
+        public void AllowCompletion() => _continue.Set();
     }
 
     [Fact]
@@ -387,7 +502,7 @@ public class SkillChatLoopStreamingTests : IDisposable
     public void Collector_OnAPreParsedStream_ReturnsThePiecesWithoutReParsing()
     {
         var collector = new ChatStreamCollector();
-        // Text that WOULD be mangled if a qwen3 parser ran over it a second time.
+        // Text that would be mangled if a ChatML parser ran over it a second time.
         collector.Add(ChatStreamUpdate.Parsed("Write <think> to open a block.", "why not", null));
         collector.Add(ChatStreamUpdate.Parsed(" Done.", null,
             new List<ToolCall> { new() { Name = "get_weather" } }));

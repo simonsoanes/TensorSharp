@@ -129,7 +129,7 @@ Gemma 4 是 TensorSharp 当前支持的功能最丰富的架构。它把 Google 
 - **MoE 变体**（如 `gemma-4-26B-A4B`）：每个 block 同时跑一个密集 MLP 与一个稀疏 MoE 分支，分别经过各自的 post-norm 后求和。
 - **真正的多模态**：图像、视频帧栈与音频共用同一 residual stream。
 
-相对 Gemma 3，SWA mask 与 RoPE 表跨层缓存，SWA 缓存改为环形（内存与上下文长度无关），整套 transformer 在 decode 时可以一次 GGML 图调度完成。
+SWA mask 与 RoPE 表会跨层缓存，SWA 缓存为环形（内存与上下文长度无关），整套 transformer 在 decode 时可以一次 GGML 图调度完成。
 
 ## 2. 模型架构
 
@@ -297,7 +297,7 @@ V 投影后，`ApplyUnweightedRMSNorm()` 用全 1 权重张量（`_onesForVNorm`
 
 ### 4.8 Logit softcap
 
-与 Gemma 3 一致：当 `gemma4.final_logit_softcapping > 0` 时走 `tanh(logits / cap) * cap`。
+当 `gemma4.final_logit_softcapping > 0` 时走 `tanh(logits / cap) * cap`。
 
 ### 4.9 视觉管线（图像与视频帧）
 
@@ -554,8 +554,7 @@ Gemma 4 是 TensorSharp 中最难移植到分页批处理的模型，因为它�
    Q 是非连续 view 时，Metal 上的 `ggml_flash_attn_ext` 会静默产出错误结果。
 2. `EnsurePagedBuffers` 之前在扩容时会破坏性重建 K/V 数组，把同一 batch 中
    先调度过的序列已经写入的 K/V 抹掉。第一个序列在后续序列加入后做首次
-   decode 时会退化为单 token 循环。修复（grow-on-copy）也用于 Mistral 3
-   和 Qwen 3。
+   decode 时会退化为单 token 循环。修复（grow-on-copy）也用于 Mistral 3。
 
 ## 12. MTP 投机解码（gemma4-assistant 草稿头）
 

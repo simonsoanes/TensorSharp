@@ -13,8 +13,10 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using Microsoft.Win32.SafeHandles;
 using TensorSharp.AgentHost.Skills;
 
 namespace TensorSharp.AgentHost.CodeExec
@@ -55,10 +57,10 @@ namespace TensorSharp.AgentHost.CodeExec
         }
 
         /// <summary>Where the persisted working directory is kept.</summary>
-        private string CwdFile => Path.Combine(_workspace.StateDirectory, "cwd");
+        private string CwdFile => Path.Combine(_workspace.ShellStateDirectory, "cwd");
 
         /// <summary>Where the persisted exported environment is kept.</summary>
-        private string EnvFile => Path.Combine(_workspace.StateDirectory,
+        private string EnvFile => Path.Combine(_workspace.ShellStateDirectory,
             _shell.Kind == ShellKind.PowerShell ? "env.txt" : "env.sh");
 
         /// <summary>
@@ -71,16 +73,469 @@ namespace TensorSharp.AgentHost.CodeExec
             {
                 try
                 {
-                    if (File.Exists(CwdFile))
+                    if (TryReadStateText(CwdFile, out string saved))
                     {
-                        string saved = File.ReadAllText(CwdFile).Trim();
-                        if (saved.Length > 0 && Directory.Exists(saved) && IsInsideRoot(saved))
-                            return saved;
+                        saved = saved.Trim();
+                        if (saved.Length > 0 && Directory.Exists(saved) && IsInsideRoot(saved)
+                            && SkillPathGuard.TryResolveSymlinks(
+                                Path.GetFullPath(_workspace.Root), Path.GetFullPath(saved),
+                                out string? resolved, out _)
+                            && resolved != null && Directory.Exists(resolved))
+                        {
+                            // Use the resolved spelling as well as validating it. That
+                            // keeps a persisted in-workspace directory symlink from
+                            // becoming an escape if its target is changed between calls.
+                            return resolved;
+                        }
                     }
                 }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                              or ArgumentException or NotSupportedException
+                                              or PathTooLongException) { }
                 return _workspace.WorkDirectory;
             }
+        }
+
+        /// <summary>
+        /// Read one of the small files written by the model-owned shell wrapper without
+        /// letting the model turn a host-side status lookup into an unbounded read.
+        ///
+        /// <para>
+        /// The leaf is attacker-controlled: a command can replace <c>cwd</c> with a
+        /// symlink or FIFO before the unsandboxed host asks for the next prompt label.
+        /// <see cref="File.ReadAllText(string)"/> follows the former and blocks on the
+        /// latter; a link to <c>/dev/zero</c> additionally grows memory until the host is
+        /// killed. Open the leaf without following it, inspect that exact handle, accept
+        /// only a regular file, and never allocate or read beyond a path-sized cap.
+        /// </para>
+        /// </summary>
+        internal static bool TryReadStateText(string path, out string text)
+            => TryReadBoundedRegularText(path, MaxStateFileBytes, out text);
+
+        /// <summary>
+        /// Read a bounded regular file through the exact no-follow handle that was
+        /// inspected. This is also used for model-authored source locations: those paths
+        /// can be replaced with a link, FIFO, device or socket after a command exits, so
+        /// checking a <see cref="FileInfo"/> and then reopening by name is not safe.
+        /// </summary>
+        internal static bool TryReadBoundedRegularText(string path, int maxBytes, out string text)
+        {
+            text = string.Empty;
+            if (maxBytes < 0)
+                return false;
+            try
+            {
+                using SafeFileHandle? handle = OpenStateFileNoFollow(path);
+                return handle != null && !handle.IsInvalid
+                    && TryReadBoundedRegularText(handle, maxBytes, out text);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                          or ArgumentException or NotSupportedException
+                                          or DllNotFoundException or EntryPointNotFoundException)
+            {
+                text = string.Empty;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// The workspace form additionally anchors every path component to an already
+        /// open root. A background process can rename a parent directory between path
+        /// validation and the read; opening each Unix component with openat/no-follow,
+        /// or validating the Windows file handle's final path against the root handle,
+        /// prevents that race from redirecting a diagnostic excerpt outside the worktree.
+        /// </summary>
+        internal static bool TryReadBoundedRegularTextUnderRoot(
+            string root, string path, int maxBytes, out string text)
+        {
+            text = string.Empty;
+            if (maxBytes < 0)
+                return false;
+            try
+            {
+                using SafeFileHandle? handle = OpenFileUnderRootNoFollow(root, path);
+                return handle != null && !handle.IsInvalid
+                    && TryReadBoundedRegularText(handle, maxBytes, out text);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                          or ArgumentException or NotSupportedException
+                                          or DllNotFoundException or EntryPointNotFoundException)
+            {
+                text = string.Empty;
+                return false;
+            }
+        }
+
+        private static bool TryReadBoundedRegularText(
+            SafeFileHandle handle, int maxBytes, out string text)
+        {
+            text = string.Empty;
+            if (!TryGetRegularFileSnapshot(handle, out RegularFileSnapshot before)
+                || before.Length < 0 || before.Length > maxBytes || before.Length >= int.MaxValue)
+            {
+                return false;
+            }
+            long length = before.Length;
+
+            // One extra byte detects a file extended after fstat/GetFileInformation.
+            // A shrink is rejected by the exact-length check below. Both make a
+            // concurrently rewritten file cost one fallback, not a torn excerpt.
+            byte[] bytes = new byte[checked((int)length + 1)];
+            int total = 0;
+            bool reachedEnd = false;
+            while (total < bytes.Length)
+            {
+                int read = RandomAccess.Read(handle, bytes.AsSpan(total), total);
+                if (read == 0)
+                {
+                    reachedEnd = true;
+                    break;
+                }
+                total += read;
+            }
+            if (!reachedEnd || total != (int)length
+                || !TryGetRegularFileSnapshot(handle, out RegularFileSnapshot after)
+                || after != before)
+                return false;
+
+            // Windows PowerShell 5.1 writes UTF-16 with a BOM; PowerShell 7 and the
+            // POSIX wrappers write UTF-8. StreamReader retains File.ReadAllText's BOM
+            // detection while operating only on the bounded bytes above.
+            using var memory = new MemoryStream(bytes, 0, total, writable: false, publiclyVisible: false);
+            using var reader = new StreamReader(memory, Encoding.UTF8,
+                detectEncodingFromByteOrderMarks: true, bufferSize: 1024, leaveOpen: false);
+            text = reader.ReadToEnd();
+            return true;
+        }
+
+        /// <summary>
+        /// Paths can exceed the traditional POSIX PATH_MAX, while an extended Windows
+        /// path can contain 32,767 UTF-16 code units (up to four UTF-8 bytes each).
+        /// This covers both plus a line terminator without making attacker-controlled
+        /// state an appreciable allocation.
+        /// </summary>
+        private const int MaxStateFileBytes = 128 * 1024;
+
+        private static SafeFileHandle? OpenStateFileNoFollow(string path)
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                SafeFileHandle handle = CreateFileW(path, GenericRead,
+                    FileShareRead | FileShareWrite | FileShareDelete, IntPtr.Zero,
+                    OpenExisting, FileFlagOpenReparsePoint | SecuritySqosPresent, IntPtr.Zero);
+                if (!handle.IsInvalid)
+                    return handle;
+                handle.Dispose();
+                return null;
+            }
+
+            int flags;
+            if (OperatingSystem.IsLinux())
+                flags = LinuxONonBlock | LinuxONoFollow | LinuxOCloseExec;
+            else if (OperatingSystem.IsMacOS())
+                flags = MacONonBlock | MacONoFollow | MacOCloseExec;
+            else
+                return null; // Safe fallback for a Unix whose open(2) values we do not know.
+
+            int fd;
+            do
+            {
+                fd = OpenUnix(path, flags);
+            }
+            while (fd < 0 && Marshal.GetLastWin32Error() == InterruptedSystemCall);
+            return fd < 0 ? null : new SafeFileHandle((IntPtr)fd, ownsHandle: true);
+        }
+
+        private static SafeFileHandle? OpenFileUnderRootNoFollow(string root, string path)
+        {
+            string fullRoot = Path.GetFullPath(root);
+            string fullPath = Path.GetFullPath(path);
+            string relative = Path.GetRelativePath(fullRoot, fullPath);
+            string[] segments = relative.Split(
+                new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+                StringSplitOptions.RemoveEmptyEntries);
+            if (segments.Length == 0 || Path.IsPathRooted(relative)
+                || segments.Any(segment => segment is "." or ".."))
+            {
+                return null;
+            }
+
+            if (OperatingSystem.IsWindows())
+                return OpenWindowsFileUnderRoot(fullRoot, fullPath);
+            if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+                return null;
+
+            int noFollow = OperatingSystem.IsMacOS() ? MacONoFollow : LinuxONoFollow;
+            int closeExec = OperatingSystem.IsMacOS() ? MacOCloseExec : LinuxOCloseExec;
+            int directoryFlag = OperatingSystem.IsMacOS() ? MacODirectory : LinuxODirectory;
+            int nonBlock = OperatingSystem.IsMacOS() ? MacONonBlock : LinuxONonBlock;
+
+            int rootFd;
+            do
+            {
+                rootFd = OpenUnix(fullRoot, noFollow | closeExec | directoryFlag);
+            }
+            while (rootFd < 0 && Marshal.GetLastWin32Error() == InterruptedSystemCall);
+            if (rootFd < 0)
+                return null;
+
+            SafeFileHandle? directory = new((IntPtr)rootFd, ownsHandle: true);
+            try
+            {
+                for (int index = 0; index < segments.Length; index++)
+                {
+                    bool leaf = index == segments.Length - 1;
+                    int flags = noFollow | closeExec
+                              | (leaf ? nonBlock : directoryFlag);
+                    int fd;
+                    do
+                    {
+                        fd = OpenAtUnix(
+                            directory.DangerousGetHandle().ToInt32(), segments[index], flags);
+                    }
+                    while (fd < 0 && Marshal.GetLastWin32Error() == InterruptedSystemCall);
+                    if (fd < 0)
+                        return null;
+
+                    var next = new SafeFileHandle((IntPtr)fd, ownsHandle: true);
+                    if (leaf)
+                        return next;
+
+                    directory.Dispose();
+                    directory = next;
+                }
+                return null;
+            }
+            finally
+            {
+                directory.Dispose();
+            }
+        }
+
+        private static SafeFileHandle? OpenWindowsFileUnderRoot(string root, string path)
+        {
+            // Final-handle comparison rejects ordinary intermediate junctions and swaps.
+            // Windows code execution is available only through the explicit unconfined
+            // mode, so this is defense in depth rather than a filesystem-isolation claim:
+            // an adversarial host-user process can also rename the root itself.
+            using SafeFileHandle rootHandle = CreateFileW(
+                root, 0, FileShareRead | FileShareWrite | FileShareDelete, IntPtr.Zero,
+                OpenExisting,
+                FileFlagOpenReparsePoint | FileFlagBackupSemantics | SecuritySqosPresent,
+                IntPtr.Zero);
+            if (rootHandle.IsInvalid
+                || !GetFileInformationByHandle(rootHandle, out ByHandleFileInformation rootInfo)
+                || (rootInfo.FileAttributes & FileAttributeDirectory) == 0
+                || (rootInfo.FileAttributes & FileAttributeReparsePoint) != 0
+                || !TryGetFinalPath(rootHandle, out string finalRoot))
+            {
+                return null;
+            }
+
+            SafeFileHandle fileHandle = CreateFileW(
+                path, GenericRead, FileShareRead | FileShareDelete, IntPtr.Zero,
+                OpenExisting, FileFlagOpenReparsePoint | SecuritySqosPresent, IntPtr.Zero);
+            if (fileHandle.IsInvalid || !TryGetFinalPath(fileHandle, out string finalFile))
+            {
+                fileHandle.Dispose();
+                return null;
+            }
+
+            string rootPrefix = finalRoot.TrimEnd('\\', '/') + "\\";
+            string normalizedFile = finalFile.Replace('/', '\\');
+            if (!normalizedFile.StartsWith(rootPrefix.Replace('/', '\\'), StringComparison.OrdinalIgnoreCase))
+            {
+                fileHandle.Dispose();
+                return null;
+            }
+            return fileHandle;
+        }
+
+        private static bool TryGetFinalPath(SafeFileHandle handle, out string path)
+        {
+            path = string.Empty;
+            var buffer = new StringBuilder(512);
+            uint length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, 0);
+            if (length == 0)
+                return false;
+            if (length >= (uint)buffer.Capacity)
+            {
+                if (length >= 32768)
+                    return false;
+                buffer = new StringBuilder(checked((int)length + 1));
+                length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, 0);
+                if (length == 0 || length >= (uint)buffer.Capacity)
+                    return false;
+            }
+            path = buffer.ToString();
+            return path.Length > 0;
+        }
+
+        private static bool TryGetRegularFileSnapshot(
+            SafeFileHandle handle, out RegularFileSnapshot snapshot)
+        {
+            snapshot = default;
+            if (OperatingSystem.IsWindows())
+            {
+                if (GetFileType(handle) != FileTypeDisk
+                    || !GetFileInformationByHandle(handle, out ByHandleFileInformation info)
+                    || (info.FileAttributes & (FileAttributeDirectory | FileAttributeReparsePoint)) != 0)
+                {
+                    return false;
+                }
+
+                ulong unsignedLength = ((ulong)info.FileSizeHigh << 32) | info.FileSizeLow;
+                if (unsignedLength > long.MaxValue)
+                    return false;
+                snapshot = new RegularFileSnapshot(
+                    (long)unsignedLength,
+                    info.VolumeSerialNumber,
+                    ((ulong)info.FileIndexHigh << 32) | info.FileIndexLow,
+                    ((ulong)info.LastWriteTime.HighDateTime << 32) | info.LastWriteTime.LowDateTime,
+                    0);
+                return true;
+            }
+
+            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+            {
+                int result;
+                UnixFileStatus status;
+                do
+                {
+                    result = FStatUnix(handle, out status);
+                }
+                while (result != 0 && Marshal.GetLastWin32Error() == InterruptedSystemCall);
+
+                if (result == 0 && (status.Mode & UnixFileTypeMask) == UnixRegularFile)
+                {
+                    snapshot = new RegularFileSnapshot(
+                        status.Size,
+                        unchecked((ulong)status.Dev),
+                        unchecked((ulong)status.Ino),
+                        CombineUnixTime(status.MTime, status.MTimeNsec),
+                        CombineUnixTime(status.CTime, status.CTimeNsec));
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static ulong CombineUnixTime(long seconds, long nanoseconds) =>
+            unchecked((ulong)seconds * 1_000_000_000UL + (ulong)nanoseconds);
+
+        private readonly record struct RegularFileSnapshot(
+            long Length, ulong Device, ulong Identity, ulong Modified, ulong Changed);
+
+        // open(2) flag values are ABI values, not POSIX constants, and differ between
+        // Linux and Darwin. O_RDONLY is zero on both platforms.
+        private const int LinuxONonBlock = 0x00000800;
+        private const int LinuxODirectory = 0x00010000;
+        private const int LinuxONoFollow = 0x00020000;
+        private const int LinuxOCloseExec = 0x00080000;
+        private const int MacONonBlock = 0x00000004;
+        private const int MacONoFollow = 0x00000100;
+        private const int MacODirectory = 0x00100000;
+        private const int MacOCloseExec = 0x01000000;
+        private const int InterruptedSystemCall = 4;
+
+        private const int UnixFileTypeMask = 0xF000;
+        private const int UnixRegularFile = 0x8000;
+
+        private const uint GenericRead = 0x80000000;
+        private const uint FileShareRead = 0x00000001;
+        private const uint FileShareWrite = 0x00000002;
+        private const uint FileShareDelete = 0x00000004;
+        private const uint OpenExisting = 3;
+        private const uint SecuritySqosPresent = 0x00100000;
+        private const uint FileFlagBackupSemantics = 0x02000000;
+        private const uint FileFlagOpenReparsePoint = 0x00200000;
+        private const uint FileTypeDisk = 0x0001;
+        private const uint FileAttributeDirectory = 0x00000010;
+        private const uint FileAttributeReparsePoint = 0x00000400;
+
+        [DllImport("libc", EntryPoint = "open", SetLastError = true)]
+        private static extern int OpenUnix(
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
+
+        [DllImport("libc", EntryPoint = "openat", SetLastError = true)]
+        private static extern int OpenAtUnix(
+            int directoryFd,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+            int flags);
+
+        [DllImport("libSystem.Native", EntryPoint = "SystemNative_FStat", SetLastError = true)]
+        private static extern int FStatUnix(SafeFileHandle handle, out UnixFileStatus status);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode,
+            ExactSpelling = true, SetLastError = true)]
+        private static extern SafeFileHandle CreateFileW(
+            string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes,
+            uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint GetFileType(SafeFileHandle handle);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetFileInformationByHandle(
+            SafeFileHandle handle, out ByHandleFileInformation information);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode,
+            ExactSpelling = true, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandleW(
+            SafeFileHandle handle, StringBuilder path, uint pathLength, uint flags);
+
+        /// <summary>
+        /// Stable layout exported by the .NET runtime's System.Native shim. Using its
+        /// normalized status record avoids hard-coding the incompatible Linux/Darwin
+        /// struct stat layouts while still checking the already-open descriptor.
+        /// </summary>
+        [StructLayout(LayoutKind.Sequential)]
+        private struct UnixFileStatus
+        {
+            public int Flags;
+            public int Mode;
+            public uint Uid;
+            public uint Gid;
+            public long Size;
+            public long ATime;
+            public long ATimeNsec;
+            public long MTime;
+            public long MTimeNsec;
+            public long CTime;
+            public long CTimeNsec;
+            public long BirthTime;
+            public long BirthTimeNsec;
+            public long Dev;
+            public long RDev;
+            public long Ino;
+            public uint UserFlags;
+            // Appended in newer System.Native versions without changing the 64-bit
+            // record size (it occupied prior tail padding). Keeping it explicit is also
+            // safe with older runtimes, which simply leave it zero.
+            public uint HardLinkCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FileTime
+        {
+            public uint LowDateTime;
+            public uint HighDateTime;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ByHandleFileInformation
+        {
+            public uint FileAttributes;
+            public FileTime CreationTime;
+            public FileTime LastAccessTime;
+            public FileTime LastWriteTime;
+            public uint VolumeSerialNumber;
+            public uint FileSizeHigh;
+            public uint FileSizeLow;
+            public uint NumberOfLinks;
+            public uint FileIndexHigh;
+            public uint FileIndexLow;
         }
 
         /// <summary>
@@ -342,7 +797,12 @@ namespace TensorSharp.AgentHost.CodeExec
             "^(declare -[-aAilnrtux]+ |export |typeset -[-aAilnrtux]+ |readonly )?"
             + "(PATH|HOME|TMPDIR|TEMP|TMP|PWD|OLDPWD|SHLVL|IFS|_|"
             + "LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Za-z_]*|"
-            + "HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy|NO_PROXY|no_proxy|"
+            + "HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|"
+            + "http_proxy|https_proxy|all_proxy|no_proxy|GRPC_PROXY|grpc_proxy|"
+            + "SSL_CERT_FILE|SSL_CERT_DIR|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|"
+            + "NODE_EXTRA_CA_CERTS|GIT_SSL_CAINFO|AWS_CA_BUNDLE|PIP_CERT|NPM_CONFIG_CAFILE|"
+            + "CARGO_HTTP_CAINFO|DENO_CERT|CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE|"
+            + "NIX_SSL_CERT_FILE|GRPC_DEFAULT_SSL_ROOTS_FILE_PATH|"
             + "TS_[A-Za-z_]*)=";
 
         private static string Sq(string value) => ShellCommand.QuotePosix(value);
@@ -352,7 +812,7 @@ namespace TensorSharp.AgentHost.CodeExec
             var sb = new StringBuilder();
             sb.Append("# TensorSharp shell wrapper. Everything between the markers is the command\n");
             sb.Append("# as the model wrote it; the rest restores and re-saves the session's state.\n");
-            sb.Append("__ts_state=").Append(Sq(_workspace.StateDirectory)).Append('\n');
+            sb.Append("__ts_state=").Append(Sq(_workspace.ShellStateDirectory)).Append('\n');
             sb.Append("__ts_work=").Append(Sq(_workspace.WorkDirectory)).Append('\n');
             sb.Append("__ts_root=").Append(Sq(_workspace.Root)).Append('\n');
             sb.Append("__ts_env=").Append(Sq(EnvFile)).Append('\n');
@@ -447,7 +907,7 @@ namespace TensorSharp.AgentHost.CodeExec
             sb.Append("try { [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false } catch { }\n");
             sb.Append("try { [Console]::InputEncoding = New-Object Text.UTF8Encoding $false } catch { }\n");
             sb.Append("try { $OutputEncoding = [Console]::OutputEncoding } catch { }\n");
-            sb.Append("$__ts_state = ").Append(Pq(_workspace.StateDirectory)).Append('\n');
+            sb.Append("$__ts_state = ").Append(Pq(_workspace.ShellStateDirectory)).Append('\n');
             sb.Append("$__ts_work  = ").Append(Pq(_workspace.WorkDirectory)).Append('\n');
             sb.Append("$__ts_root  = ").Append(Pq(_workspace.Root)).Append('\n');
             sb.Append("$__ts_env   = ").Append(Pq(EnvFile)).Append('\n');
@@ -527,6 +987,10 @@ namespace TensorSharp.AgentHost.CodeExec
         private const string PowerShellEnvFilter =
             "^(Path|PATHEXT|HOME|USERPROFILE|TEMP|TMP|PWD|PSModulePath|"
             + "COMSPEC|SYSTEMROOT|SYSTEMDRIVE|WINDIR|"
-            + "HTTP_PROXY|HTTPS_PROXY|NO_PROXY|TS_.*)$";
+            + "HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|"
+            + "SSL_CERT_FILE|SSL_CERT_DIR|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|"
+            + "NODE_EXTRA_CA_CERTS|GIT_SSL_CAINFO|AWS_CA_BUNDLE|PIP_CERT|NPM_CONFIG_CAFILE|"
+            + "CARGO_HTTP_CAINFO|DENO_CERT|CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE|"
+            + "NIX_SSL_CERT_FILE|GRPC_DEFAULT_SSL_ROOTS_FILE_PATH|GRPC_PROXY|TS_.*)$";
     }
 }

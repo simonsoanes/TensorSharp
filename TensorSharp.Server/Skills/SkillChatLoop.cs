@@ -209,6 +209,7 @@ namespace TensorSharp.Server.Skills
                     RawOutputTokens = terminal.RawOutputTokens != null
                         ? new List<int>(terminal.RawOutputTokens)
                         : null,
+                    RawPromptTrailingWhitespace = terminal.RawPromptTrailingWhitespace,
                 });
 
                 foreach (ToolCall unknownCall in unknownCalls)
@@ -266,8 +267,25 @@ namespace TensorSharp.Server.Skills
                     // arrive on the process's reader threads and drain into the
                     // heartbeat frames the user is already watching.
                     var liveOutput = new LiveOutputBuffer();
-                    Task<SkillToolResult> execution = Task.Run(
-                        () => SkillTools.Execute(call, plan.ToolContext, liveOutput.Add));
+                    // Acquire BEFORE scheduling. Request cancellation can dispose this
+                    // async iterator before the worker even starts; holding the operation
+                    // here lets the request lease detach immediately while deferring
+                    // workspace deletion until the worker's finally has run.
+                    IDisposable workspaceOperation = plan.ToolContext?.Workspace?.BeginOperation();
+                    Task<SkillToolResult> execution;
+                    try
+                    {
+                        execution = Task.Run(() =>
+                        {
+                            using (workspaceOperation)
+                                return SkillTools.Execute(call, plan.ToolContext, liveOutput.Add);
+                        });
+                    }
+                    catch
+                    {
+                        workspaceOperation?.Dispose();
+                        throw;
+                    }
                     var executionClock = Stopwatch.StartNew();
                     while (await Task.WhenAny(execution, Task.Delay(1000, cancellationToken)).ConfigureAwait(false) != execution)
                     {
@@ -570,7 +588,11 @@ namespace TensorSharp.Server.Skills
             long evalNs,
             long totalNs) =>
             new(string.Empty, true, promptTokens, evalTokens, reusedTokens,
-                totalNs, promptNs, evalNs, terminal.FinishReason ?? "stop");
+                totalNs, promptNs, evalNs, terminal.FinishReason ?? "stop")
+            {
+                RawOutputTokens = terminal.RawOutputTokens,
+                RawPromptTrailingWhitespace = terminal.RawPromptTrailingWhitespace,
+            };
 
         /// <summary>
         /// Wrap a tool result in the message shape this model family renders. Mistral 3

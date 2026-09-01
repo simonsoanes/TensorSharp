@@ -138,7 +138,7 @@ detect_capabilities() {
     SUPPORTS_TOOLS=false
 
     case "$normalized" in
-        gemma4*|qwen35*|qwen3*|nemotronh*|nemotron*)
+        gemma4*|qwen35*|qwen36*|qwen38*|qwen4exp*|qwen3next*|nemotronh*|nemotron*)
             SUPPORTS_THINKING=true
             SUPPORTS_TOOLS=true
             ;;
@@ -146,7 +146,7 @@ detect_capabilities() {
             SUPPORTS_THINKING=true
             SUPPORTS_TOOLS=false
             ;;
-        gemma3*|mistral3*|mistral*)
+        mistral3*|mistral*)
             SUPPORTS_THINKING=false
             SUPPORTS_TOOLS=false
             ;;
@@ -1066,4 +1066,3 @@ main() {
 }
 
 main
-

@@ -103,14 +103,17 @@ namespace TensorSharp.AgentHost.CodeExec
 
             // The file tools need a workspace: they read and write files that have to
             // outlive the call, and the read ledger that authorises an edit lives on the
-            // session. A stateless endpoint gets a fresh empty directory per call, so
+            // request/session. A caller that supplies no workspace gets a fresh empty
+            // directory per call, so
             // there is nothing there to read and nothing that would survive being
             // written — declaring them would offer capability the host cannot honour.
             if (!persists)
             {
                 return new[]
                 {
-                    ShellTools.DeclareShell(_options, shell, _runner.KeepsArtifacts, persists: false, fileTools: false),
+                    ShellTools.DeclareShell(
+                        _options, shell, _runner.KeepsArtifacts, persists: false, fileTools: false,
+                        networkConfinementGuaranteed: _runner.NetworkConfinementGuaranteed),
                 };
             }
 
@@ -124,7 +127,9 @@ namespace TensorSharp.AgentHost.CodeExec
                 ShellTools.DeclareRead(),
                 ShellTools.DeclareEdit(),
                 ShellTools.DeclareWrite(),
-                ShellTools.DeclareShell(_options, shell, _runner.KeepsArtifacts, persists, fileTools: true),
+                ShellTools.DeclareShell(
+                    _options, shell, _runner.KeepsArtifacts, persists, fileTools: true,
+                    networkConfinementGuaranteed: _runner.NetworkConfinementGuaranteed),
                 ShellTools.DeclarePatch(),
             };
         }

@@ -68,6 +68,10 @@ public static class ModelDiscovery
                     continue;
                 }
                 FamilyGuess guess = GuessFamily(name);
+                if (guess.Family == "unknown")
+                {
+                    continue;
+                }
                 string id = guess.Id;
                 if (byId.ContainsKey(id))
                 {
@@ -123,7 +127,6 @@ public static class ModelDiscovery
         string[] needles = family.ToLowerInvariant() switch
         {
             "gemma4" => new[] { "gemma-4", "gemma4" },
-            "gemma3" => new[] { "gemma-3", "gemma3" },
             "mistral3" => new[] { "ministral", "mistral" },
             "qwen35" or "qwen36" => new[] { "qwen" },
             "nemotron" => new[] { "nemotron" },
@@ -173,13 +176,6 @@ public static class ModelDiscovery
                 SupportsTools: true,
                 SupportsThinking: true);
         }
-        // Gemma 3
-        if (lower.Contains("gemma-3") || lower.Contains("gemma3"))
-        {
-            return new FamilyGuess(baseName.ToLowerInvariant(), "gemma3", baseName,
-                SupportsImage: true, SupportsAudio: false, SupportsVideo: false,
-                SupportsTools: false, SupportsThinking: false);
-        }
         // GPT OSS
         if (lower.Contains("gpt-oss") || lower.Contains("gptoss"))
         {
@@ -213,14 +209,6 @@ public static class ModelDiscovery
                 SupportsImage: !moe, SupportsAudio: false, SupportsVideo: false,
                 SupportsTools: true, SupportsThinking: true);
         }
-        // Qwen 3
-        if (lower.Contains("qwen3"))
-        {
-            return new FamilyGuess(baseName.ToLowerInvariant(), "qwen3", baseName,
-                SupportsImage: false, SupportsAudio: false, SupportsVideo: false,
-                SupportsTools: true, SupportsThinking: true);
-        }
-
         return new FamilyGuess(baseName.ToLowerInvariant(), "unknown", baseName,
             SupportsImage: false, SupportsAudio: false, SupportsVideo: false,
             SupportsTools: false, SupportsThinking: false);

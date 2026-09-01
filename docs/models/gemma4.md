@@ -145,8 +145,8 @@ TensorSharp. It pushes Google's Gemma line into:
 - **True multimodality**: vision, video frame stacks, and audio all flow into
   the same residual stream.
 
-Compared to Gemma 3, the SWA mask and RoPE caches are precomputed across all
-layers in a forward pass, the SWA cache is a circular buffer (so memory is
+The SWA mask and RoPE caches are precomputed across all layers in a forward
+pass, the SWA cache is a circular buffer (so memory is
 bounded regardless of context length), and the entire transformer can be
 executed as a single fused GGML graph during decode.
 
@@ -356,7 +356,7 @@ returning to the next layer.
 
 ### 4.8 Logit softcap
 
-Identical to Gemma 3: `tanh(logits / cap) * cap` when
+Uses `tanh(logits / cap) * cap` when
 `gemma4.final_logit_softcapping > 0`.
 
 ### 4.9 Vision pipeline (images and video frames)
@@ -711,7 +711,7 @@ exists for batch-1 workloads.
    in the same batch. The first sequence in a multi-sequence batch
    would then degenerate into a single-token loop on its first decode
    after later sequences joined. The fix (copy-on-grow) applies to
-   Mistral 3 and Qwen 3 too.
+   Mistral 3 too.
 
 ## 12. MTP speculative decoding (gemma4-assistant draft head)
 

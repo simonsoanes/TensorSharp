@@ -257,7 +257,7 @@ public class MuseGlimmerKvReuseRenderTests
         };
 
         List<int> tokens = renderer.RenderToTokens(
-            tokenizer, chatTemplate: null, messages, architecture: "qwen3", addGenerationPrompt: true);
+            tokenizer, chatTemplate: null, messages, architecture: "qwen2", addGenerationPrompt: true);
 
         Assert.Contains("assistant to=user<|message|>", tokenizer.Decode(tokens));
     }

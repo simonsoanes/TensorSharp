@@ -19,9 +19,8 @@ namespace TensorSharp.Models.MiniMaxH3
             Factory = c => new MiniMaxH3Model(c.GgufPath, c.Backend),
 
             // MiniMax-H3's published GGUFs carry ZERO metadata - no architecture string at
-            // all - so they have to be recognised by their tensors. Without this they would
-            // fall through to the default architecture and load as the wrong model instead
-            // of failing cleanly.
+            // all - so they have to be recognised by their tensors. Without this detector,
+            // architecture resolution fails closed.
             DetectFromTensors = MiniMaxH3Model.LooksLikeMiniMaxH3,
         };
     }

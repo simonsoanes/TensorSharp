@@ -8,7 +8,7 @@
   // fails, the next one is tried. A relative "path" is resolved next to this
   // config file. An optional "sha256" verifies the download.
   //
-  // The URLs below are REAL, public, ungated GGUFs (Qwen3-0.6B, ~640 MB Q8_0),
+  // The URL below is a real, public, ungated GGUF (Qwen3.5-9B, ~8.9 GB Q8_0),
   // so this file works as-is:
   //   TensorSharp.Server --config config/auto-download.json --backend ggml_cuda
   // downloads the model into ${modelRoot} on the first run and reuses the local
@@ -25,10 +25,9 @@
   "max-tokens": 4096,
 
   "model": {
-    "path": "${modelRoot}/Qwen3-0.6B-Q8_0.gguf",
+    "path": "${modelRoot}/Qwen3.5-9B-Q8_0.gguf",
     "urls": [
-      "${hf}/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf",
-      "${hf}/ggml-org/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"
+      "${hf}/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q8_0.gguf"
     ]
     // Optional integrity check for a freshly downloaded file:
     // "sha256": "0123456789abcdef..."

@@ -14,8 +14,6 @@ TensorSharp loads models in GGUF format. Below are verified Hugging Face repos f
 | Gemma 4 | gemma-4-26B-A4B-it (MoE) | [ggml-org/gemma-4-26B-A4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF) — mmproj files in the same repo |
 | Gemma 4 | gemma-4-31B-it | [ggml-org/gemma-4-31B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-31B-it-GGUF) — mmproj files in the same repo |
 | Gemma 4 | `gemma4-assistant` MTP drafts (optional — speculative decoding) | [AtomicChat/gemma-4-E4B-it-assistant-GGUF](https://huggingface.co/AtomicChat/gemma-4-E4B-it-assistant-GGUF) (E4B) and [AtomicChat/gemma-4-26B-A4B-it-assistant-GGUF](https://huggingface.co/AtomicChat/gemma-4-26B-A4B-it-assistant-GGUF) (26B-A4B) — load via `--draft-model`, which enables speculation by itself; pair each draft with its matching target size |
-| Gemma 3 | gemma-3-4b-it | [ggml-org/gemma-3-4b-it-GGUF](https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF) — mmproj `mmproj-model-f16.gguf` in the same repo. The official QAT repo [google/gemma-3-4b-it-qat-q4_0-gguf](https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf) is gated (requires HF login + accepting Google's Gemma license) |
-| Qwen 3 | Qwen3-4B | [Qwen/Qwen3-4B-GGUF](https://huggingface.co/Qwen/Qwen3-4B-GGUF) (text only — no companion files) |
 | Qwen 3.5 / 3.6 family | Qwen3.5-9B | [unsloth/Qwen3.5-9B-GGUF](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) — mmproj `mmproj-F16.gguf` in the same repo |
 | Qwen 3.5 / 3.6 family | Qwen3.5-35B-A3B (MoE) | [ggml-org/Qwen3.5-35B-A3B-GGUF](https://huggingface.co/ggml-org/Qwen3.5-35B-A3B-GGUF) — mmproj `mmproj-Qwen3.5-35B-A3B-Q8_0.gguf` in the same repo |
 | Qwen 3.5 / 3.6 family | Qwen3.6-35B-A3B (MoE, embedded NextN MTP) | [unsloth/Qwen3.6-35B-A3B-MTP-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF) — these GGUFs retain the NextN block for the server's `--spec`; mmproj `mmproj-F16.gguf` in the same repo. The base repo [unsloth/Qwen3.6-35B-A3B-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) ships the same file names with NextN stripped — those load fine but silently fall back to standard decode |
@@ -68,8 +66,8 @@ shards are downloaded, ~11 GB): see
 [Getting a drafter](docs/models/deepseek4.md#getting-a-drafter) and
 `eng/dsv4-dspark-to-gguf.py`.
 
-**DSpark drafters for Qwen 3 / Gemma 4 are NOT supported yet.** DeepSeek also released
-DSpark drafters for Qwen 3 and Gemma 4, and community GGUF conversions exist, but they are a
+**DSpark drafters for Gemma 4 are NOT supported yet.** DeepSeek also released
+DSpark drafters for Gemma 4, and community GGUF conversions exist, but they are a
 different drafter design — a 5-layer transformer stack with an `fc` fusion over five target
 layers (`general.architecture` = `dspark` or `dflash`, `block_size` 7), not DeepSeek V4's
 three hyper-connection blocks (`mtp.*`). TensorSharp rejects them against a DeepSeek V4 target
@@ -82,9 +80,6 @@ with a clear message rather than mis-loading them. Listed here so you know what 
 
 | Backbone | Official checkpoint (safetensors) | Community GGUF |
 |---|---|---|
-| Qwen3-4B | [deepseek-ai/dspark_qwen3_4b_block7](https://huggingface.co/deepseek-ai/dspark_qwen3_4b_block7) | — |
-| Qwen3-8B | [deepseek-ai/dspark_qwen3_8b_block7](https://huggingface.co/deepseek-ai/dspark_qwen3_8b_block7) | [ankk98/dspark-qwen3-8b-block7-Q4_K_M-GGUF](https://huggingface.co/ankk98/dspark-qwen3-8b-block7-Q4_K_M-GGUF) (1.5 GB) |
-| Qwen3-14B | [deepseek-ai/dspark_qwen3_14b_block7](https://huggingface.co/deepseek-ai/dspark_qwen3_14b_block7) | — |
 | Gemma-4-12B | [deepseek-ai/dspark_gemma4_12b_block7](https://huggingface.co/deepseek-ai/dspark_gemma4_12b_block7) | [ankk98/dspark-gemma4-12b-block7-Q4_0-GGUF](https://huggingface.co/ankk98/dspark-gemma4-12b-block7-Q4_0-GGUF) (1.9 GB), [williamliao/dspark_gemma4_12b-GGUF](https://huggingface.co/williamliao/dspark_gemma4_12b-GGUF) (IQ4_XS…F16) |
 | Gemma-4-26B-A4B | — | [williamliao/dspark_gemma4_26b-a4b-it-GGUF](https://huggingface.co/williamliao/dspark_gemma4_26b-a4b-it-GGUF) (1.2-3.8 GB) |
 | Gemma-4-31B | — | [williamliao/dspark_gemma4_31b-it-GGUF](https://huggingface.co/williamliao/dspark_gemma4_31b-it-GGUF) (3.3-11 GB) |
@@ -131,25 +126,6 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gemma-4-E4B-
 ```
 
 (The third download and the `--draft-model` flag are optional — they enable MTP speculative decoding, a server-only feature.)
-
-**Gemma 3** — text + image ([ggml-org/gemma-3-4b-it-GGUF](https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF); the official [google/gemma-3-4b-it-qat-q4_0-gguf](https://huggingface.co/google/gemma-3-4b-it-qat-q4_0-gguf) is gated: HF login + Gemma license)
-
-```bash
-hf download ggml-org/gemma-3-4b-it-GGUF gemma-3-4b-it-Q4_K_M.gguf --local-dir models
-hf download ggml-org/gemma-3-4b-it-GGUF mmproj-model-f16.gguf --local-dir models
-
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-3-4b-it-Q4_K_M.gguf --mmproj models/mmproj-model-f16.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
-dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gemma-3-4b-it-Q4_K_M.gguf --mmproj models/mmproj-model-f16.gguf --backend ggml_cuda
-```
-
-**Qwen 3** — text, thinking, tools ([Qwen/Qwen3-4B-GGUF](https://huggingface.co/Qwen/Qwen3-4B-GGUF))
-
-```bash
-hf download Qwen/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf --local-dir models
-
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Qwen3-4B-Q4_K_M.gguf --input prompt.txt --max-tokens 300 --think --backend ggml_cuda
-dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3-4B-Q4_K_M.gguf --backend ggml_cuda
-```
 
 **Qwen 3.5 / 3.6 family** — text + image, thinking, tools, NextN MTP on 3.6 ([unsloth/Qwen3.5-9B-GGUF](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF))
 
@@ -358,4 +334,3 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
     --video-text-encoder models/umt5-xxl-encoder-Q8_0.gguf \
     --prompt "the ship sails into the storm, waves crashing" --image ship.jpg --output ship.mp4
 ```
-

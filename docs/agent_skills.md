@@ -217,13 +217,19 @@ skills_run(skill, path, args)                  -> run a bundled script; OFF unle
 replacing them: `read_file`, which shows a file's real bytes with line numbers;
 `edit_file`, which replaces one exact string in one file; `write_file`, which
 creates a file or deliberately replaces one whole; `shell`, which runs a command
-line in the session's working directory; and `apply_patch`, which changes several
-files at once by anchored hunks, all or nothing. A skill's instructions and a
-command the model writes are useful in the same turn.
+line in the current working directory; and `apply_patch`, which changes several
+files at once by anchored hunks, all or nothing. A Web/CLI conversation keeps that
+directory for its session. An OpenAI or Ollama request keeps an isolated directory
+for every internal tool round in that request and deletes it afterward, preserving
+cross-request statelessness without forcing a repair round to regenerate a file
+the preceding round just created. A skill's instructions and a command the model
+writes are useful in the same turn.
 
-The split is the two references', not an invention. Claude Code's editing surface
-is `Read`/`Edit`/`Write` and contains no diff format at all; Codex's is a shell
-plus the `apply_patch` envelope. Each is kept for the job it actually solved —
+The split follows the reference tools: [Claude Code's editing
+surface](https://code.claude.com/docs/en/tools-reference#edit-tool-behavior) is
+`Read`/`Edit`/`Write`, while [Codex exposes precise diffs through
+`apply_patch`](https://developers.openai.com/api/docs/guides/tools-apply-patch).
+Each is kept for the job it actually solved —
 string replacement for the common one-file change, an atomic envelope for the
 multi-file one — because emitting a patch and reading one are different problems
 with different right answers, and a small model gets the envelope wrong far more
@@ -276,6 +282,15 @@ understand skills, which is exactly the clients that do not need it. Because
 these particular tools are read-only and confined to a directory the operator
 already chose to expose, TensorSharp can answer them itself. That is what makes
 progressive disclosure work over a stateless HTTP API at all.
+
+**Stateless does not mean stateless between the tool calls inside one request.**
+When code execution is available, the OpenAI chat, OpenAI Responses and Ollama
+chat adapters allocate a private request workspace before entering a tool-compatible
+loop. A generated file, its failing test, an exact `edit_file` repair and the
+successful rerun therefore operate on the same bytes. The workspace is released
+after the buffered or streaming response ends (including rejection and cancellation);
+another HTTP request never inherits it. With skill-script execution but no code
+runner, scripts retain their per-call scratch directories.
 
 **The caller's own tools are never executed.** A turn that calls one stops the
 loop, and the call is returned to the caller as a normal `tool_calls` response
@@ -584,12 +599,17 @@ must never quietly become *"isolation was skipped"*.
 
 | | macOS | Linux | Windows |
 |---|---|---|---|
-| Mechanism | `sandbox-exec` (Seatbelt) | `bwrap` (bubblewrap) | job object |
+| Mechanism | `sandbox-exec` (Seatbelt) | `bwrap` 0.12.0+ (bubblewrap) | job object |
 | Writes confined to the working directory | yes | yes | **no** |
-| Network denied | yes | yes | **no** |
+| Network denied | yes by default | yes by default | **no** |
 | Home directory unreadable | yes | yes | **no** |
 | Process tree bounded | yes | yes | yes |
-| Available by default | always | only if `bwrap` is installed | always |
+| Available by default | always | only if `bwrap` 0.12.0 or newer is installed | always |
+
+The two network opt-ins are deliberately separate. `--skills-allow-network`
+changes the first two columns for bundled `skills_run` scripts;
+`--code-exec-allow-network` changes them for model-authored `shell` commands.
+Neither flag grants network access to the other execution surface.
 
 Windows is weaker and says so. The Windows sandbox bounds the process tree and
 **declares the rest as gaps**: every `skills_run` result on Windows carries a
@@ -614,13 +634,14 @@ that acts as a *shell* survives inside one:
 * Loopback is blocked outright, so the egress proxy that makes the install
   allow-list enforceable is unreachable from inside the container.
 
-So on Windows there is no OS mechanism that confines a model-written command.
-That is also where the two references this host is modelled on landed: neither
-Codex nor Claude Code sandboxes on Windows, and both make the operator opt in
-explicitly instead of implying an isolation the platform does not offer. Here
-that opt-in is `--code-exec-unconfined`, accepted by **both** hosts and required
-on Windows for `--code-exec` to do anything at all; for skill scripts the
-equivalent is `--skills-sandbox preferred`. Both are now stated at startup - a
+TensorSharp's current Windows job-object backend therefore does not confine a
+model-written command's files or network. Stronger Windows designs exist — for
+example a separate low-privilege identity plus firewall/WFP rules — but are not
+implemented here. The reference implementations share the important operator
+principle: do not imply isolation the selected backend does not provide. Here
+the explicit opt-in is `--code-exec-unconfined`, accepted by **both** hosts and
+required on Windows for `--code-exec` to do anything at all; for skill scripts
+the equivalent is `--skills-sandbox preferred`. Both are stated at startup - a
 host told to run scripts it cannot confine says so on its own line, rather than
 only inside a tool result the model is free to summarise as success.
 
@@ -628,9 +649,28 @@ only inside a tool result the model is free to summarise as success.
 is wrapped by `ConfinedProcess` through the same `ISkillSandbox`, under the same
 `required`-by-default rule, so the table above is what a model-written command
 gets as well — and every result likewise names what was not confined on this
-host. The network row has no exception: a command the model wrote gets no socket
-at all, on every platform and in every configuration, whether or not installing
-is enabled. Installing still works, because the host performs it.
+host. Network access is denied by default. The explicit
+`--code-exec-allow-network` / `TS_CODE_EXEC_ALLOW_NETWORK` opt-in gives every
+model-authored command unrestricted host IP-network access — including LAN/loopback
+services and IP listening sockets — while write and home-read confinement remains
+active on macOS and Linux. Linux additionally bounds descendants with a PID namespace.
+On macOS, children inherit Seatbelt and ordinary process groups are stopped, but a
+deliberately detached child can outlive the request; every result reports that gap.
+macOS denies common
+`/private/tmp/com.apple.launchd*` pathname sockets while permitting runtime-required
+Mach lookup and the exact mDNSResponder pathname socket required for DNS, and Linux
+hides common `/run` endpoints, but this is not a complete
+local Unix-IPC boundary:
+macOS retains shared-temporary-directory Unix IPC for compatibility, and Linux's
+host network namespace may expose abstract sockets and pathname sockets outside
+`/run`. Other host-readable files can therefore be exfiltrated. Installing permission
+does not imply that broader access: the host still performs recognised installs.
+The child environment remains credential-blank. Direct-network runs receive only
+credential-free host HTTP/SOCKS proxy settings; an authenticated upstream therefore
+needs a credential-free host-side forwarder. Configured custom-CA bundles no larger
+than 16 MiB are read once, and only validated public certificates are copied into an
+immutable, read-only per-session snapshot. The original host path and any adjacent
+text or private material are never exposed to generated code.
 `--code-exec-allow-install` makes the host READ a `pip install` instead of
 running it — the tool and the package names, nothing else — validate the names,
 and run the installer itself with an argument vector it built: wheels only, no
@@ -638,8 +678,9 @@ install scripts, and, where the sandbox can pin a single loopback port
 (Seatbelt), egress through the proxy to the hosts in
 `--code-exec-install-domains` and nowhere else. The install command is then
 substituted out of the model's line with `true`, so `pip install x && python y.py`
-installs and then runs `y.py` with no network; an install that fails stops the
-line where it stands and is what comes back, so `y.py` never runs. Giving the install command its own
+installs and then runs `y.py` under the configured command-network policy
+(offline by default); an install that fails stops the line where it stands and
+is what comes back, so `y.py` never runs. Giving the install command its own
 socket was the earlier design, and it had two holes that could not both be
 closed: the line is written by the model, so `--index-url` pointed the installer
 wherever it liked, and a socket belongs to the whole line, so anything sharing it
@@ -653,8 +694,10 @@ so is an installer the host cannot perform on your behalf (`uv`, `poetry`, `gem`
 `cargo`) — ignoring either would install something other than what was asked for
 and report success. A `-r requirements.txt` is honoured by reading the file and
 validating each line. It is also what brought `--code-exec-packages` back: the
-host builds the install, so a name allow-list applies however the model spelled
-the request.
+host builds the install, so a name allow-list applies to a recognised request
+however the model spelled it. Once unrestricted command networking is enabled, neither
+that package list nor the install-domain list is a security boundary: generated
+code can fetch or execute an artifact without using TensorSharp's host installer.
 
 **"Writes confined" has one deliberate exception: the shared system temp.** On
 macOS `/private/tmp` is readable and writable. A whole class of tools a skill
@@ -665,11 +708,15 @@ LibreOffice's headless converter opens
 building its profile — which is why the `xlsx` skill's `recalc.py` could never
 recalculate a sheet under the sandbox. It is not much of a hole: `/private/tmp` is
 world-writable already (mode 1777, shared by every process on the host), what
-matters stays closed — the home directory is still unreadable and the network is
-still denied — and the session's own files live under the scratch root, never
-there. The per-user Darwin temp (`/var/folders/…/T`) is still denied; nothing
+matters stays closed — the home directory is still unreadable and the network
+remains under its separate, denied-by-default policy — and the session's own
+files live under the scratch root, never there. The per-user Darwin temp
+(`/var/folders/…/T`) is still denied; nothing
 needed it once `/private/tmp` was open. On Linux nothing had to be opened:
-bubblewrap mounts a fresh `--tmpfs /tmp`, so a write there succeeds, is invisible
+bubblewrap 0.12.0 is the minimum accepted version: older releases have a published
+[setup-time symlink traversal](https://github.com/containers/bubblewrap/security/advisories/GHSA-pxhw-h44j-8pfx) that can escape a sandbox built over attacker-controlled
+paths. TensorSharp refuses those releases rather than silently weakening `required`.
+Bubblewrap mounts a fresh `--tmpfs /tmp`, so a write there succeeds, is invisible
 to the host, and dies with the process.
 
 Verified on macOS against a deliberately hostile skill — a script that tries to
@@ -704,10 +751,9 @@ protocol registry, so a new family with an unusual renderer gets it right for fr
 
 | Family | Tool declarations rendered? | `role: "tool"` rendered? | What happens |
 |---|---|---|---|
-| Qwen 3 / 3.5 / 3.6, Gemma 4, GPT OSS, Nemotron-H, Muse-Glimmer, DeepSeek V4, GLM 5.x | yes | yes | Full progressive disclosure |
-| **Gemma 3** | no | yes | No tools are offered; the selected skill bodies are written into the prompt up front and the catalog is dropped |
-| **Mistral 3** | no | **no** | Same as Gemma 3, and any tool result the loop does produce is fed back as a `user` turn rather than a `tool` turn |
-| **Any family nothing can parse** — `qwen4exp`, and every architecture with no registry entry at all | withheld | n/a | Same as Gemma 3 |
+| Qwen 3.5 / 3.6, Gemma 4, GPT OSS, Nemotron-H, Muse-Glimmer, DeepSeek V4, GLM 5.x | yes | yes | Full progressive disclosure |
+| **Mistral 3** | no | **no** | No tools are offered; selected skill bodies are written into the prompt up front, and any tool result the loop does produce is fed back as a `user` turn rather than a `tool` turn |
+| **Any family nothing can parse** — `qwen4exp`, and every architecture with no registry entry at all | withheld | n/a | Selected skill bodies are written into the prompt up front and the catalog is dropped |
 
 That last row is the one worth understanding, because it is the one that was wrong.
 Offering a tool is two halves decided in two places: the protocol registry says whether
@@ -723,10 +769,9 @@ the two halves, and a family that cannot complete the round trip gets its skill 
 inlined instead — which works. `SkillCapabilityConsistencyTests` walks every registered
 architecture and fails if the two halves ever drift apart again.
 
-Gemma 3's and Mistral 3's renderers take only the messages and the generation
-flag — the tool list is discarded before the renderer sees it, and the request
-still succeeds. Without this flag, skills would appear to work everywhere and
-silently do nothing on those two. The prompt wording changes accordingly: with
+Mistral 3's renderer takes only the messages and the generation flag — the tool
+list is discarded before the renderer sees it, and the request still succeeds.
+Without this flag, skills would appear to work and silently do nothing. The prompt wording changes accordingly: with
 no tools, telling the model to "call `skills_read`" is an instruction it cannot
 follow, so it is told instead that everything available to it is already in
 front of it.
@@ -775,6 +820,8 @@ front of the prompt.
 | `--no-skills` | `TS_NO_SKILLS` (anything but `0`) | Turn the feature off entirely. |
 | `--skills-no-discovery` | — | Do not advertise unselected skills to the model. |
 | `--skills-allow-exec` | `TS_SKILLS_ALLOW_EXEC` (anything but `0`) | Allow `skills_run`. Off by default. |
+| `--skills-sandbox <mode>` | `TS_SKILLS_SANDBOX` | `off`, `preferred`, or the default `required`. |
+| `--skills-allow-network` | `TS_SKILLS_ALLOW_NETWORK` | Let bundled `skills_run` scripts reach the network. Off by default; separate from code execution. |
 | `--skills-max-rounds <n>` | `TS_SKILLS_MAX_ROUNDS` | Skill lookups — and shell commands — per turn, 1–64. Default 8, or 24 with `--code-exec`, where one fix is a write, a run, a read of the traceback and a patch. |
 
 `TensorSharp.Server` accepts exactly the same spellings, and a config-file key
@@ -1098,13 +1145,23 @@ Three differences are deliberate and asserted as such:
   whether its own command is safe is not a control. So the trade is made once, by
   the operator at startup (`--code-exec`, `--skills-allow-exec`), and after that
   the confinement is not advisory: on a host that cannot confine a process the
-  tool refuses rather than asking, and `--code-exec-unconfined` — the deliberate
-  way out — is honoured only by the CLI, because a server's operator cannot make
-  that trade on behalf of everyone who can reach the port. The same absence
-  decides the network: a model-written command gets no socket at all, and a
-  package install happens only because the host reads the request out of that
-  command and performs it itself, because "the model said it was downloading a
-  dependency" is nobody's approval.
+  tool refuses rather than asking. `--code-exec-unconfined` is the deliberate
+  way out accepted by both hosts and required on Windows, where it openly leaves
+  filesystem and network access unconfined; it should not be enabled on a server
+  reachable by untrusted users. Network access is a second operator decision:
+  commands are offline by default, while `--code-exec-allow-network` gives every
+  generated command unrestricted host IP-network access without removing macOS/Linux
+  write or home-read confinement. Linux additionally bounds descendants with a PID
+  namespace. On macOS, children inherit Seatbelt and ordinary process groups are
+  stopped, but a deliberately detached child can outlive the request; every result
+  reports that gap. macOS denies common
+  `/private/tmp/com.apple.launchd*` pathname sockets while permitting runtime-required
+  Mach lookup and the exact mDNSResponder pathname socket required for DNS, and retains
+  shared-temporary-directory Unix IPC for compatibility; Linux hides common
+  `/run` endpoints, but its host network namespace may expose abstract sockets and
+  pathname sockets outside `/run`. Local Unix IPC is therefore not a complete
+  isolation boundary. A package install remains separate and happens only
+  because the host reads the request out of that command and performs it itself.
 
 What has **not** been compared is live output against the OpenAI or Anthropic
 APIs; no API key was available in the environment this was built in. The

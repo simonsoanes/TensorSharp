@@ -30,8 +30,8 @@
 //     the row-parallel output projection.
 //   - Four norms per layer: the pre-norms at Config.Eps, the post-norms at the
 //     hardcoded 1e-8 (PostNormEps).
-//   - SwiGLU (SiLU), not GeGLU. Gemma 3's TP file uses Ops.GELUMul; copying
-//     that here would silently change the activation.
+//   - SwiGLU (SiLU), not GeGLU. Using Ops.GELUMul here would silently change
+//     the activation.
 //   - The sliding-window RING KV cache. Its row count is fixed at construction
 //     and is rank-independent, so KvRow/KvRows are reused unchanged and only
 //     the head dimension is split per rank.
@@ -599,8 +599,8 @@ namespace TensorSharp.Models
                 }
                 gateUp[r].Dispose();
 
-                // SwiGLU. Muse-Glimmer is SiLU-gated; Gemma 3's TP file uses
-                // Ops.GELUMul here and copying it would change the model.
+                // SwiGLU. Muse-Glimmer is SiLU-gated; Ops.GELUMul here would
+                // change the model.
                 Ops.SiLUMul(g, g, up);
                 up.Dispose();
                 activated[r] = g;

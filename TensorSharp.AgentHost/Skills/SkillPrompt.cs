@@ -263,8 +263,8 @@ namespace TensorSharp.AgentHost.Skills
             // hint about which one to activate, not the activation itself, so selection
             // no longer buys a body.
             //
-            // The exception is a model that cannot call skills_read at all (Gemma 3 and
-            // Mistral 3 discard tool declarations). There, deferring would not disclose
+            // The exception is a model that cannot call skills_read at all. There,
+            // deferring would not disclose
             // progressively, it would simply withhold: nothing could ever fetch the
             // body, so it goes in the prompt or nowhere.
             bool inlineBodies = !options.ToolsAvailable || options.InlineSelectedBodies;
@@ -457,6 +457,7 @@ namespace TensorSharp.AgentHost.Skills
             ToolCallId = message.ToolCallId,
             Thinking = message.Thinking,
             RawOutputTokens = message.RawOutputTokens != null ? new List<int>(message.RawOutputTokens) : null,
+            RawPromptTrailingWhitespace = message.RawPromptTrailingWhitespace,
             CacheControl = message.CacheControl != null
                 ? new CacheControlMarker { Type = message.CacheControl.Type }
                 : null,
@@ -586,8 +587,8 @@ namespace TensorSharp.AgentHost.Skills
         /// progressive disclosure and are fetched on demand.
         ///
         /// <para>
-        /// Skipped entirely when the model has no way to fetch them. Listing files a
-        /// Gemma 3 or Mistral 3 conversation can never open would spend context on an
+        /// Skipped entirely when the model has no way to fetch them. Listing files such
+        /// a conversation can never open would spend context on an
         /// index that only invites the model to claim it read something it did not —
         /// and naming <c>skills_read</c> to a family whose renderer discards tool
         /// declarations is an instruction it cannot follow.
@@ -660,8 +661,8 @@ namespace TensorSharp.AgentHost.Skills
             + "in one line, then continue with the best alternative.\n";
 
         /// <summary>
-        /// Guidance for a model whose chat format cannot carry tool declarations
-        /// (Gemma 3 and Mistral 3). Telling it to call <c>skills_read</c> there would be
+        /// Guidance for a model whose chat format cannot carry tool declarations.
+        /// Telling it to call <c>skills_read</c> there would be
         /// an instruction it has no way to follow, so the wording promises nothing that
         /// is not already in front of it.
         /// </summary>

@@ -217,7 +217,7 @@ namespace TensorSharp.Models
         /// <summary>
         /// glm5next's KDA recurrence cannot be rewound to an earlier position, so a
         /// cached prefix is only reusable when the new prompt EXTENDS it exactly
-        /// (same contract as the Qwen 3.x GDN models). glm-dsa proper has no
+        /// (same contract as the retained Qwen hybrid GDN models). glm-dsa proper has no
         /// recurrent state and keeps the base behaviour.
         /// </summary>
         public override bool SupportsKVCacheTruncation => Config.Architecture != "glm5next";

@@ -10,11 +10,34 @@
 
 using System;
 using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using TensorSharp.AgentHost.CodeExec;
 using TensorSharp.AgentHost.Skills;
 
 namespace InferenceWeb.Tests;
+
+internal static class ShellRunnerTestCertificate
+{
+    public static void Write(string path)
+    {
+        using RSA key = RSA.Create(2048);
+        var request = new CertificateRequest(
+            "CN=TensorSharp Test CA", key, HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1);
+        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(
+            certificateAuthority: true, hasPathLengthConstraint: false, pathLengthConstraint: 0,
+            critical: true));
+        using X509Certificate2 certificate = request.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddDays(1));
+        File.WriteAllText(path, certificate.ExportCertificatePem());
+    }
+}
 
 /// <summary>
 /// The shell tool end to end: real commands, a real workspace, real files on disk.
@@ -117,6 +140,25 @@ public class ShellRunnerTests : IDisposable
 
     private static int LineCount(string text) =>
         text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length;
+
+    private static EnvScope CleanHostNetworkEnvironment()
+    {
+        var scope = new EnvScope();
+        foreach (string name in new[]
+        {
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+            "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+            "GRPC_PROXY", "grpc_proxy",
+            "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+            "GIT_SSL_CAINFO", "AWS_CA_BUNDLE", "PIP_CERT", "NPM_CONFIG_CAFILE",
+            "CARGO_HTTP_CAINFO", "DENO_CERT", "CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE",
+            "NIX_SSL_CERT_FILE", "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH",
+        })
+        {
+            scope.Set(name, null);
+        }
+        return scope;
+    }
 
     // ---- the switch, and what happens without a shell ----------------------
 
@@ -271,6 +313,171 @@ public class ShellRunnerTests : IDisposable
 
         CodeExecResult echoed = runner.Run(new ShellRequest("echo \"[$PROBE_COLOUR]\""), workspace);
         Assert.Contains("[tangerine]", echoed.Content, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void HostProxyAndCaSettings_AreInheritedOnlyWithTheNetworkOptIn(bool allowNetwork)
+    {
+        const string proxy = "http://ts-proxy.invalid:3210";
+        const string socks = "socks5://ts-socks.invalid:1080";
+        const string bypass = "localhost,127.0.0.1";
+        string ca = Path.Combine(_base, "ts-enterprise-ca-" + Guid.NewGuid().ToString("N") + ".pem");
+        ShellRunnerTestCertificate.Write(ca);
+        using var env = CleanHostNetworkEnvironment();
+        env.Set("HTTP_PROXY", proxy);
+        env.Set("ALL_PROXY", socks);
+        env.Set("NO_PROXY", bypass);
+        env.Set("SSL_CERT_FILE", ca);
+
+        using var runner = new ShellRunner(Options(o => o.AllowNetwork = allowNetwork));
+        if (runner.Shell == null) return;
+        SessionWorkspace workspace = Workspace("network-env-" + allowNetwork);
+
+        string expected = allowNetwork ? "NETWORK-ENV-ON" : "NETWORK-ENV-OFF";
+        string command;
+        if (runner.Shell.Kind == ShellKind.Posix)
+        {
+            command = allowNetwork
+                ? "if [ \"${HTTP_PROXY-}\" = '" + proxy + "' ] "
+                  + "&& [ \"${ALL_PROXY-}\" = '" + socks + "' ] "
+                  + "&& [ \"${NO_PROXY-}\" = '" + bypass + "' ] "
+                  + "&& [ \"${SSL_CERT_FILE-}\" != '" + ca + "' ] "
+                  + "&& grep -q 'BEGIN CERTIFICATE' \"$SSL_CERT_FILE\"; then "
+                  + "echo NETWORK-ENV-ON; else echo NETWORK-ENV-BAD; fi"
+                : "if [ -z \"${HTTP_PROXY+x}\" ] && [ -z \"${ALL_PROXY+x}\" ] "
+                  + "&& [ -z \"${NO_PROXY+x}\" ] && [ -z \"${SSL_CERT_FILE+x}\" ]; then "
+                  + "echo NETWORK-ENV-OFF; else echo NETWORK-ENV-BAD; fi";
+        }
+        else
+        {
+            command = allowNetwork
+                ? "if ($env:HTTP_PROXY -eq '" + proxy + "' -and $env:ALL_PROXY -eq '" + socks
+                  + "' -and $env:NO_PROXY -eq '" + bypass + "' -and $env:SSL_CERT_FILE -ne '"
+                  + ca + "' -and (Test-Path -LiteralPath $env:SSL_CERT_FILE) "
+                  + "-and ((Get-Content -Raw -LiteralPath $env:SSL_CERT_FILE) -match 'BEGIN CERTIFICATE')) "
+                  + "{ 'NETWORK-ENV-ON' } else { 'NETWORK-ENV-BAD' }"
+                : "if ($null -eq $env:HTTP_PROXY -and $null -eq $env:ALL_PROXY "
+                  + "-and $null -eq $env:NO_PROXY -and $null -eq $env:SSL_CERT_FILE) "
+                  + "{ 'NETWORK-ENV-OFF' } else { 'NETWORK-ENV-BAD' }";
+        }
+
+        CodeExecResult result = runner.Run(new ShellRequest(command), workspace);
+
+        Assert.True(result.Ok, result.Content);
+        Assert.Contains(expected, result.Content, StringComparison.Ordinal);
+        Assert.DoesNotContain("NETWORK-ENV-BAD", result.Content, StringComparison.Ordinal);
+        string[] snapshots = Directory.GetFiles(workspace.StateDirectory, "ca-*.pem");
+        Assert.Equal(allowNetwork ? 1 : 0, snapshots.Length);
+    }
+
+    [Fact]
+    public void CredentialBearingHostProxy_IsNotPassedToGeneratedCode()
+    {
+        using var env = CleanHostNetworkEnvironment();
+        env.Set("HTTP_PROXY", "http://token:secret@proxy.invalid:8080");
+        using var runner = new ShellRunner(Options(o => o.AllowNetwork = true));
+        if (runner.Shell == null) return;
+
+        string command = runner.Shell.Kind == ShellKind.Posix
+            ? "if [ -z \"${HTTP_PROXY+x}\" ]; then echo PROXY-CREDENTIAL-WITHHELD; else echo PROXY-CREDENTIAL-LEAKED; fi"
+            : "if ($null -eq $env:HTTP_PROXY) { 'PROXY-CREDENTIAL-WITHHELD' } else { 'PROXY-CREDENTIAL-LEAKED' }";
+        CodeExecResult result = runner.Run(new ShellRequest(command), Workspace("proxy-credential"));
+
+        Assert.True(result.Ok, result.Content);
+        Assert.Contains("PROXY-CREDENTIAL-WITHHELD", result.Content, StringComparison.Ordinal);
+        Assert.DoesNotContain("PROXY-CREDENTIAL-LEAKED", result.Content, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("HTTP_PROXY", "http://proxy.example:8080", true)]
+    [InlineData("https_proxy", "socks5h://proxy.example:1080", true)]
+    [InlineData("GRPC_PROXY", "http://proxy.example:8080", true)]
+    [InlineData("HTTP_PROXY", "proxy.example:8080", true)]
+    [InlineData("ALL_PROXY", "[::1]:1080", true)]
+    [InlineData("NO_PROXY", "localhost,127.0.0.1,.example.com", true)]
+    [InlineData("HTTP_PROXY", "http://user:secret@proxy.example:8080", false)]
+    [InlineData("HTTP_PROXY", "http://user%3Asecret@proxy.example:8080", false)]
+    [InlineData("HTTP_PROXY", "http://proxy.example:8080/path", false)]
+    [InlineData("HTTP_PROXY", "http://proxy.example:8080?token=secret", false)]
+    [InlineData("HTTP_PROXY", "proxy.example:99999", false)]
+    [InlineData("HTTP_PROXY", "file:///tmp/socket", false)]
+    [InlineData("HTTP_PROXY", "http://proxy.example:8080\r\nINJECTED=1", false)]
+    public void HostProxyValidation_AcceptsOnlyCredentialFreeNetworkEndpoints(
+        string name, string value, bool expected)
+    {
+        Assert.Equal(expected, ShellRunner.ProxyValueHasNoCredentials(name, value));
+    }
+
+    [Fact]
+    public void AHostCaVariableCannotGrantReadAccessToAnArbitraryNonCertificateFile()
+    {
+        string secret = Path.Combine(_base, "not-a-ca.txt");
+        File.WriteAllText(secret, "HOST-SECRET-NOT-A-CERTIFICATE\n");
+        using var env = CleanHostNetworkEnvironment();
+        env.Set("SSL_CERT_FILE", secret);
+        using var runner = new ShellRunner(Options(o => o.AllowNetwork = true));
+        if (runner.Shell == null) return;
+
+        string command = runner.Shell.Kind == ShellKind.Posix
+            ? "if [ -z \"${SSL_CERT_FILE+x}\" ]; then echo NON-CA-WITHHELD; else echo NON-CA-LEAKED; fi"
+            : "if ($null -eq $env:SSL_CERT_FILE) { 'NON-CA-WITHHELD' } else { 'NON-CA-LEAKED' }";
+        CodeExecResult result = runner.Run(new ShellRequest(command), Workspace("non-ca-setting"));
+
+        Assert.True(result.Ok, result.Content);
+        Assert.Contains("NON-CA-WITHHELD", result.Content, StringComparison.Ordinal);
+        Assert.DoesNotContain("NON-CA-LEAKED", result.Content, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AHostCaBundleIsSanitizedAndSnapshottedOnlyOnce()
+    {
+        string source = Path.Combine(_base, "ca-with-adjacent-secret.pem");
+        ShellRunnerTestCertificate.Write(source);
+        File.AppendAllText(source,
+            "HOST-PRIVATE-METADATA-MUST-NOT-LEAK\n"
+            + "-----BEGIN PRIVATE KEY-----\nQUJDRA==\n-----END PRIVATE KEY-----\n");
+        using var env = CleanHostNetworkEnvironment();
+        env.Set("SSL_CERT_FILE", source);
+        using var runner = new ShellRunner(Options(o => o.AllowNetwork = true));
+        if (runner.Shell == null) return;
+        SessionWorkspace workspace = Workspace("sanitized-ca");
+
+        string firstCommand = runner.Shell.Kind == ShellKind.Posix
+            ? "grep -q 'BEGIN CERTIFICATE' \"$SSL_CERT_FILE\" "
+              + "&& ! grep -q 'HOST-PRIVATE' \"$SSL_CERT_FILE\" "
+              + "&& ! grep -q 'BEGIN PRIVATE KEY' \"$SSL_CERT_FILE\" "
+              + "&& echo CA-SANITIZED"
+            : "if (((Get-Content -Raw -LiteralPath $env:SSL_CERT_FILE) -match 'BEGIN CERTIFICATE') "
+              + "-and -not ((Get-Content -Raw -LiteralPath $env:SSL_CERT_FILE) -match "
+              + "'HOST-PRIVATE|BEGIN PRIVATE KEY')) { 'CA-SANITIZED' }";
+        CodeExecResult first = runner.Run(new ShellRequest(firstCommand), workspace);
+
+        Assert.True(first.Ok, first.Content);
+        Assert.Contains("CA-SANITIZED", first.Content, StringComparison.Ordinal);
+        string snapshot = Assert.Single(Directory.GetFiles(workspace.StateDirectory, "ca-*.pem"));
+        Assert.NotEqual(Path.GetFullPath(source), Path.GetFullPath(snapshot));
+        string normalized = File.ReadAllText(snapshot);
+        Assert.Contains("BEGIN CERTIFICATE", normalized, StringComparison.Ordinal);
+        Assert.DoesNotContain("HOST-PRIVATE", normalized, StringComparison.Ordinal);
+        Assert.DoesNotContain("BEGIN PRIVATE KEY", normalized, StringComparison.Ordinal);
+
+        // Changing the host path after the first launch cannot change what a later
+        // generated command reads, and does not repeat certificate parsing/copying.
+        File.WriteAllText(source, "HOST-SECRET-AFTER-SNAPSHOT\n");
+        string secondCommand = runner.Shell.Kind == ShellKind.Posix
+            ? "grep -q 'BEGIN CERTIFICATE' \"$SSL_CERT_FILE\" "
+              + "&& ! grep -q 'HOST-SECRET-AFTER' \"$SSL_CERT_FILE\" "
+              + "&& echo CA-SNAPSHOT-STABLE"
+            : "if (((Get-Content -Raw -LiteralPath $env:SSL_CERT_FILE) -match 'BEGIN CERTIFICATE') "
+              + "-and -not ((Get-Content -Raw -LiteralPath $env:SSL_CERT_FILE) -match "
+              + "'HOST-SECRET-AFTER')) { 'CA-SNAPSHOT-STABLE' }";
+        CodeExecResult second = runner.Run(new ShellRequest(secondCommand), workspace);
+
+        Assert.True(second.Ok, second.Content);
+        Assert.Contains("CA-SNAPSHOT-STABLE", second.Content, StringComparison.Ordinal);
+        Assert.Single(Directory.GetFiles(workspace.StateDirectory, "ca-*.pem"));
     }
 
     [Fact]
@@ -595,9 +802,9 @@ public class ShellRunnerTests : IDisposable
 
         Assert.True(started.Ok, started.Content);
         Assert.Contains("Started in the background as job-1", started.Content, StringComparison.Ordinal);
-        Assert.Contains(".jobs/job-1.log", started.Content, StringComparison.Ordinal);
+        Assert.Contains("../state/.jobs/job-1.log", started.Content, StringComparison.Ordinal);
 
-        string log = Path.Combine(workspace.WorkDirectory, ".jobs", "job-1.log");
+        string log = Path.Combine(workspace.StateDirectory, ".jobs", "job-1.log");
         for (int waited = 0; waited < 100 && LineCount(ReadWhileOpen(ticks)) < 2; waited++)
             Thread.Sleep(100);
 
@@ -748,6 +955,44 @@ public class ShellRunnerSandboxTests : IDisposable
         Assert.Contains("sandboxed-body", read.Content, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void HostAuthoredStateCannotBeReplacedByASymlinkBetweenCommands(bool allowNetwork)
+    {
+        if (!HavePosixShell) return;
+
+        CodeExecOptions options = Sandboxed();
+        options.AllowNetwork = allowNetwork;
+        using var runner = new ShellRunner(options);
+        if (!runner.CanRun) return;
+
+        string witness = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            "ts-shell-state-witness-" + Guid.NewGuid().ToString("N") + ".txt");
+        File.WriteAllText(witness, "ORIGINAL\n");
+        try
+        {
+            SessionWorkspace workspace = Workspace("state-symlink-" + allowNetwork);
+            CodeExecResult planted = runner.Run(new ShellRequest(
+                "ln -s '" + witness + "' ../state/cmd-2.sh 2>/dev/null || true; "
+                + "if [ -L ../state/cmd-2.sh ]; then echo STATE-WRITABLE; else echo STATE-PROTECTED; fi"),
+                workspace);
+            Assert.True(planted.Ok, planted.Content);
+            Assert.Contains("STATE-PROTECTED", planted.Content, StringComparison.Ordinal);
+            Assert.DoesNotContain("STATE-WRITABLE", planted.Content, StringComparison.Ordinal);
+
+            CodeExecResult next = runner.Run(new ShellRequest("echo SECOND-COMMAND"), workspace);
+            Assert.True(next.Ok, next.Content);
+            Assert.Contains("SECOND-COMMAND", next.Content, StringComparison.Ordinal);
+            Assert.Equal("ORIGINAL\n", File.ReadAllText(witness));
+        }
+        finally
+        {
+            try { File.Delete(witness); } catch (IOException) { /* best effort */ }
+        }
+    }
+
     [Fact]
     public void APlainCommandUnderTheSandboxHasNoSocket()
     {
@@ -756,6 +1001,13 @@ public class ShellRunnerSandboxTests : IDisposable
         using var runner = new ShellRunner(Sandboxed());
         if (!runner.CanRun) return;
 
+        // A deterministic reachable endpoint. Probing a public address can report
+        // DENIED merely because the test host itself is offline, which proves nothing
+        // about the sandbox policy.
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+
         // Written to a file with a heredoc and then run, rather than squeezed through
         // `python3 -c`, so the quoting stays readable and the heredoc path is exercised
         // under confinement too.
@@ -763,7 +1015,7 @@ public class ShellRunnerSandboxTests : IDisposable
             "cat > probe.py <<'EOF'\n"
             + "import socket\n"
             + "try:\n"
-            + "    socket.create_connection(('1.1.1.1', 80), timeout=4)\n"
+            + $"    socket.create_connection(('127.0.0.1', {port}), timeout=4)\n"
             + "    print('CONNECTED')\n"
             + "except Exception as e:\n"
             + "    print('DENIED', type(e).__name__)\n"
@@ -772,6 +1024,186 @@ public class ShellRunnerSandboxTests : IDisposable
 
         Assert.DoesNotContain("CONNECTED", result.Content, StringComparison.Ordinal);
         Assert.Contains("DENIED", result.Content, StringComparison.Ordinal);
+        Assert.False(listener.Pending(), "the sandboxed child reached the host listener");
+    }
+
+    [Fact]
+    public async Task ACommandWithNetworkOptInCanReachAHostHttpServer()
+    {
+        if (!HavePosixShell || !HavePython) return;
+
+        CodeExecOptions options = Sandboxed();
+        options.AllowNetwork = true;
+        using var runner = new ShellRunner(options);
+        if (!runner.CanRun) return;
+
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        Task server = Task.Run(async () =>
+        {
+            try
+            {
+                // First request redirects and the second carries the body. Redirects are
+                // part of real web access (especially news/CDN URLs), and every child
+                // connection must retain the same network policy.
+                for (int requestNumber = 0; requestNumber < 2; requestNumber++)
+                {
+                    using TcpClient client = await listener.AcceptTcpClientAsync(deadline.Token);
+                    NetworkStream stream = client.GetStream();
+                    var request = new byte[4096];
+                    _ = await stream.ReadAsync(request, deadline.Token);
+                    if (requestNumber == 0)
+                    {
+                        byte[] redirect = Encoding.ASCII.GetBytes(
+                            "HTTP/1.1 302 Found\r\nConnection: close\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n");
+                        await stream.WriteAsync(redirect, deadline.Token);
+                    }
+                    else
+                    {
+                        byte[] body = Encoding.UTF8.GetBytes("NETWORK-OK");
+                        byte[] response = Encoding.ASCII.GetBytes(
+                            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: "
+                            + body.Length + "\r\n\r\n");
+                        await stream.WriteAsync(response, deadline.Token);
+                        await stream.WriteAsync(body, deadline.Token);
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or SocketException)
+            {
+                // The assertions on the command result carry the useful failure.
+            }
+        }, deadline.Token);
+
+        CodeExecResult result;
+        try
+        {
+            result = runner.Run(new ShellRequest(
+                "python3 - <<'PY'\n"
+                + "import urllib.request\n"
+                + "opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))\n"
+                + $"print(opener.open('http://127.0.0.1:{port}/probe', timeout=5).read().decode())\n"
+                + "PY"), Workspace("network-enabled"));
+        }
+        finally
+        {
+            listener.Stop();
+        }
+        await server;
+
+        Assert.True(result.Ok, result.Content);
+        Assert.Contains("NETWORK-OK", result.Content, StringComparison.Ordinal);
+        Assert.Contains(CodeExecOptions.AllowNetworkFlag, result.Content, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NetworkOptIn_CanResolveDnsAndFetchHttps_WhenLiveTestsAreEnabled()
+    {
+        // Public-internet checks are opt-in so ordinary CI stays deterministic. Run this
+        // explicitly when changing the OS policy to cover DNS, TLS roots and real egress.
+        if (!string.Equals(Environment.GetEnvironmentVariable("TS_TEST_LIVE_NETWORK"), "1",
+                StringComparison.Ordinal)) return;
+        if (!HavePosixShell || !HavePython) return;
+
+        CodeExecOptions options = Sandboxed();
+        options.AllowNetwork = true;
+        using var runner = new ShellRunner(options);
+        if (!runner.CanRun) return;
+
+        CodeExecResult result = runner.Run(new ShellRequest(
+            "python3 - <<'PY'\n"
+            + "import socket, urllib.request\n"
+            + "addresses = socket.getaddrinfo('example.com', 443)\n"
+            + "with urllib.request.urlopen('https://example.com/', timeout=15) as response:\n"
+            + "    body = response.read()\n"
+            + "print('LIVE-NETWORK-OK', len(addresses), response.status, len(body))\n"
+            + "PY"), Workspace("network-live"));
+
+        Assert.True(result.Ok, result.Content);
+        Assert.Contains("LIVE-NETWORK-OK", result.Content, StringComparison.Ordinal);
+        Assert.Contains(" 200 ", result.Content, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NetworkOptIn_DoesNotRelaxTheFilesystemSandbox()
+    {
+        if (!HavePosixShell) return;
+
+        CodeExecOptions options = Sandboxed();
+        options.AllowNetwork = true;
+        using var runner = new ShellRunner(options);
+        if (!runner.CanRun) return;
+
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (string.IsNullOrEmpty(home)) return;
+
+        string witness = Path.Combine(home, "ts-shell-net-witness-" + Guid.NewGuid().ToString("N")[..12] + ".txt");
+        string outsideDirectory = Path.Combine(
+            _base, "network-mode-readable-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(outsideDirectory);
+        string outsideWrite = Path.Combine(outsideDirectory, "read-only.txt");
+        File.WriteAllText(witness, "NETWORK-MODE-SECRET\n");
+        File.WriteAllText(outsideWrite, "ORIGINAL\n");
+        try
+        {
+            CodeExecResult result = runner.Run(
+                new ShellRequest(
+                    "cat '" + witness + "' 2>&1 | head -2; "
+                    + "cat '" + outsideWrite + "'; "
+                    + "printf 'CHANGED\\n' > '" + outsideWrite + "' 2>/dev/null || true; "
+                    + "printf 'FILESYSTEM-CONFINED\\n'")
+                {
+                    ReadablePaths = new[] { outsideDirectory },
+                }, Workspace("network-files"));
+
+            Assert.True(result.Ok, result.Content);
+            Assert.Contains("FILESYSTEM-CONFINED", result.Content, StringComparison.Ordinal);
+            Assert.DoesNotContain("sandbox: none", result.Content, StringComparison.Ordinal);
+            Assert.DoesNotContain("NETWORK-MODE-SECRET", result.Content, StringComparison.Ordinal);
+            Assert.Contains("ORIGINAL", result.Content, StringComparison.Ordinal);
+            Assert.Equal("ORIGINAL\n", File.ReadAllText(outsideWrite));
+        }
+        finally
+        {
+            try { File.Delete(witness); } catch (IOException) { /* best effort */ }
+            try { Directory.Delete(outsideDirectory, recursive: true); } catch (IOException) { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public void NetworkOptIn_ReadBindsASanitizedCaSnapshotFromTheOtherwiseHiddenHome()
+    {
+        if (!HavePosixShell) return;
+
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (string.IsNullOrEmpty(home)) return;
+        string ca = Path.Combine(home, "ts-shell-ca-" + Guid.NewGuid().ToString("N") + ".pem");
+        ShellRunnerTestCertificate.Write(ca);
+        using var env = new EnvScope();
+        env.Set("SSL_CERT_FILE", ca);
+        try
+        {
+            CodeExecOptions options = Sandboxed();
+            options.AllowNetwork = true;
+            using var runner = new ShellRunner(options);
+            if (!runner.CanRun) return;
+
+            CodeExecResult result = runner.Run(new ShellRequest(
+                "test \"$SSL_CERT_FILE\" != '" + ca + "' "
+                + "&& grep -q 'BEGIN CERTIFICATE' \"$SSL_CERT_FILE\" "
+                + "&& ! cat '" + ca + "' >/dev/null 2>&1 "
+                + "&& echo CUSTOM-CA-READABLE"), Workspace("network-ca-home"));
+
+            Assert.True(result.Ok, result.Content);
+            Assert.Contains("CUSTOM-CA-READABLE", result.Content, StringComparison.Ordinal);
+            Assert.DoesNotContain("sandbox: none", result.Content, StringComparison.Ordinal);
+        }
+        finally
+        {
+            try { File.Delete(ca); } catch (IOException) { /* best effort */ }
+        }
     }
 
     [Fact]

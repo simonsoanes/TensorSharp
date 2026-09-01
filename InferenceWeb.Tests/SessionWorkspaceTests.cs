@@ -321,6 +321,76 @@ public class SessionWorkspaceTests : IDisposable
     }
 
     [Fact]
+    public void Release_DetachesImmediately_ButWaitsForAnActiveOperationBeforeDeleting()
+    {
+        SessionWorkspaceManager manager = Manager();
+        SessionWorkspace retiring = manager.GetOrCreate("reused-id");
+        IDisposable operation = retiring.BeginOperation();
+
+        manager.Release("reused-id");
+
+        Assert.True(Directory.Exists(retiring.Root),
+            "a worker still using the workspace must not have its directory deleted");
+
+        // Release removes the map entry immediately. Reusing an id gets a separate
+        // object and physical directory rather than attaching to the retiring worker.
+        SessionWorkspace replacement = manager.GetOrCreate("reused-id");
+        Assert.NotSame(retiring, replacement);
+        Assert.NotEqual(retiring.Root, replacement.Root);
+
+        operation.Dispose();
+
+        Assert.False(Directory.Exists(retiring.Root));
+        Assert.True(Directory.Exists(replacement.Root));
+        manager.Release("reused-id");
+    }
+
+    [Fact]
+    public async Task CleanupRegisteredWhileReleaseIsRunning_IsDisposedInsteadOfLeaked()
+    {
+        SessionWorkspaceManager manager = Manager();
+        SessionWorkspace workspace = manager.GetOrCreate("cleanup-race");
+        using var entered = new System.Threading.ManualResetEventSlim();
+        using var resume = new System.Threading.ManualResetEventSlim();
+        var blocking = new BlockingCleanup(entered, resume);
+        var late = new CountingCleanup();
+        workspace.RegisterCleanup(blocking);
+
+        Task release = Task.Run(() => manager.Release("cleanup-race"));
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(5)), "release never entered cleanup");
+
+        // RunCleanups has already copied and cleared its list. Registering now used to
+        // append to an orphaned list that would never be drained again.
+        workspace.RegisterCleanup(late);
+        Assert.Equal(1, late.DisposeCount);
+
+        resume.Set();
+        await release.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1, blocking.DisposeCount);
+        Assert.False(Directory.Exists(workspace.Root));
+    }
+
+    [Fact]
+    public void CleanupRegisteredByAnActiveOperationAfterRelease_IsDrainedAtOperationEnd()
+    {
+        SessionWorkspaceManager manager = Manager();
+        SessionWorkspace workspace = manager.GetOrCreate("deferred-cleanup");
+        IDisposable operation = workspace.BeginOperation();
+        var cleanup = new CountingCleanup();
+
+        manager.Release("deferred-cleanup");
+        workspace.RegisterCleanup(cleanup);
+
+        Assert.Equal(0, cleanup.DisposeCount);
+        Assert.True(Directory.Exists(workspace.Root));
+
+        operation.Dispose();
+
+        Assert.Equal(1, cleanup.DisposeCount);
+        Assert.False(Directory.Exists(workspace.Root));
+    }
+
+    [Fact]
     public void OrphanedWorkspaces_AreSweptAtStartup()
     {
         string root = Path.Combine(_base, "sessions");
@@ -333,5 +403,36 @@ public class SessionWorkspaceTests : IDisposable
         after.SweepOrphans();
 
         Assert.False(Directory.Exists(orphan.Root));
+    }
+
+    private sealed class CountingCleanup : IDisposable
+    {
+        private int _disposeCount;
+        public int DisposeCount => _disposeCount;
+        public void Dispose() => System.Threading.Interlocked.Increment(ref _disposeCount);
+    }
+
+    private sealed class BlockingCleanup : IDisposable
+    {
+        private readonly System.Threading.ManualResetEventSlim _entered;
+        private readonly System.Threading.ManualResetEventSlim _resume;
+        private int _disposeCount;
+
+        public BlockingCleanup(
+            System.Threading.ManualResetEventSlim entered,
+            System.Threading.ManualResetEventSlim resume)
+        {
+            _entered = entered;
+            _resume = resume;
+        }
+
+        public int DisposeCount => _disposeCount;
+
+        public void Dispose()
+        {
+            System.Threading.Interlocked.Increment(ref _disposeCount);
+            _entered.Set();
+            _resume.Wait(TimeSpan.FromSeconds(5));
+        }
     }
 }

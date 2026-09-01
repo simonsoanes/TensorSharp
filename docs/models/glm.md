@@ -544,7 +544,7 @@ architectural changes layered on top:
 
 The KDA recurrent state (conv tail + delta-net state, ~150 MB per sequence)
 cannot be rewound, so a cached prefix is only reused when the new prompt
-extends it exactly — the same contract as the Qwen 3.x GDN family — and
+extends it exactly — the same contract as the Qwen 3.5 / 3.6 GDN family — and
 `Reset` wipes the state along with the position counter.
 
 ### What runs today

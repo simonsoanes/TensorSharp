@@ -22,13 +22,6 @@ namespace TensorSharp.Models.Architecture
     /// </summary>
     public static class ModelArchitectureRegistry
     {
-        /// <summary>
-        /// Architecture assumed when a GGUF declares none and no detector claims it.
-        /// Historically Qwen 3's block, which is also what unlabelled community
-        /// conversions of that family ship.
-        /// </summary>
-        public const string DefaultArchitectureId = "qwen3";
-
         private static readonly object Gate = new();
         private static readonly Dictionary<string, ModelArchitectureDescriptor> ByAlias =
             new(StringComparer.OrdinalIgnoreCase);
@@ -94,8 +87,9 @@ namespace TensorSharp.Models.Architecture
         /// <summary>
         /// Pick the plug-in for a model file. <paramref name="architecture"/> is the
         /// GGUF's <c>general.architecture</c>, which may be null: a file with no
-        /// metadata at all is offered to every registered detector first, and only
-        /// then falls back to <see cref="DefaultArchitectureId"/>.
+        /// metadata at all is offered to every registered detector first. If no
+        /// detector claims it, loading fails because guessing a model architecture
+        /// from an unlabelled tensor file is unsafe.
         /// </summary>
         public static ModelArchitectureDescriptor Resolve(string architecture, GgufFile probe)
         {
@@ -119,11 +113,8 @@ namespace TensorSharp.Models.Architecture
                 }
             }
 
-            if (TryGet(DefaultArchitectureId, out var fallback))
-                return fallback;
-
             throw new NotSupportedException(
-                $"The model declares no architecture and the default '{DefaultArchitectureId}' is not registered.");
+                "The model declares no architecture and no registered tensor-layout detector recognized it.");
         }
 
         /// <summary>

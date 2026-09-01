@@ -390,6 +390,99 @@ public class KVCachePromptRendererTests
         }
     }
 
+    /// <summary>
+    /// Models the relevant Gemma 4 template asymmetry. Ordinary generations end in
+    /// an explicitly restored newline, but after a tool result the template continues
+    /// the existing model turn and therefore ends in a non-whitespace control marker.
+    /// The framing of an older assistant message itself does not change.
+    /// </summary>
+    private sealed class ToolContinuationTailRenderer : IPromptRenderer
+    {
+        public string Render(string? template, List<ChatMessage> messages,
+            bool addGenerationPrompt = true, string? architecture = null,
+            List<ToolFunction>? tools = null, bool enableThinking = false)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append("<|bos|>");
+            foreach (var m in messages)
+            {
+                sb.Append('<').Append(m.Role).Append(">\n");
+                sb.Append(m.Content ?? "");
+                sb.Append("</").Append(m.Role).Append(">\n");
+            }
+
+            if (addGenerationPrompt)
+            {
+                if (messages.Count > 0 && messages[^1].Role == "tool")
+                    sb.Append("<tool-continuation>");
+                else
+                    sb.Append("<assistant>\n");
+            }
+            return sb.ToString();
+        }
+    }
+
+    /// <summary>
+    /// Reconstructs an assistant tool-call round byte-for-byte, but puts a space at
+    /// the generation boundary. The recorded live boundary is a newline, so merely
+    /// finding the raw token run in this render is not sufficient for KV reuse.
+    /// </summary>
+    private sealed class BoundaryMismatchToolRenderer : IPromptRenderer
+    {
+        public string Render(string? template, List<ChatMessage> messages,
+            bool addGenerationPrompt = true, string? architecture = null,
+            List<ToolFunction>? tools = null, bool enableThinking = false)
+        {
+            var sb = new System.Text.StringBuilder("<|bos|>");
+            foreach (ChatMessage message in messages)
+            {
+                sb.Append('<').Append(message.Role).Append("> ");
+                sb.Append(message.Content ?? string.Empty);
+                sb.Append("</").Append(message.Role).Append('>');
+            }
+            if (addGenerationPrompt)
+                sb.Append("<assistant> ");
+            return sb.ToString();
+        }
+    }
+
+    /// <summary>
+    /// Models a template that folds a tool result into the preceding assistant turn
+    /// only while structured ToolCalls is present. Raw-token splicing clears that field,
+    /// so the candidate optimized render drops the result. Its user header deliberately
+    /// contains the word "user" to exercise the collision that substring guards miss.
+    /// </summary>
+    private sealed class ToolResultDroppingOnSpliceRenderer : IPromptRenderer
+    {
+        public string Render(string? template, List<ChatMessage> messages,
+            bool addGenerationPrompt = true, string? architecture = null,
+            List<ToolFunction>? tools = null, bool enableThinking = false)
+        {
+            var sb = new System.Text.StringBuilder();
+            ChatMessage? previous = null;
+            foreach (ChatMessage message in messages)
+            {
+                if (message.Role == "user")
+                {
+                    sb.Append("<|turn>user\n").Append(message.Content).Append("<turn|>");
+                }
+                else if (message.Role == "assistant")
+                {
+                    sb.Append("<|turn>model\n").Append(message.Content).Append("<turn|>");
+                }
+                else if (message.Role == "tool"
+                    && previous?.ToolCalls is { Count: > 0 })
+                {
+                    sb.Append("<tool>").Append(message.Content).Append("</tool>");
+                }
+                previous = message;
+            }
+            if (addGenerationPrompt)
+                sb.Append("<|turn>model\n");
+            return sb.ToString();
+        }
+    }
+
     [Fact]
     public void RenderToTokens_TrimEndRenderer_TurnNRendersConsistentlyWithTurn1()
     {
@@ -470,6 +563,201 @@ public class KVCachePromptRendererTests
     }
 
     [Fact]
+    public void RenderToTokens_ToolContinuationTail_DoesNotRenormalizeOlderAssistantBoundary()
+    {
+        // Regression for the 2-D-game/code-exec incident. The ordinary follow-up
+        // correctly cached `<assistant>\n` + the prior raw output. Adding a tool result
+        // made the final rendered character non-whitespace, and the old global heuristic
+        // then removed the newline before EVERY placeholder. The live-cache LCP stopped
+        // at that first assistant boundary thousands of tokens before the new suffix.
+        var renderer = new KVCachePromptRenderer(new ToolContinuationTailRenderer());
+        var tokenizer = new CharTokenizer();
+        var firstRaw = tokenizer.Encode("RAW_FIRST_ANSWER", addSpecial: false);
+
+        var firstPrompt = renderer.RenderToTokens(
+            tokenizer, null,
+            new List<ChatMessage> { new() { Role = "user", Content = "Q1" } },
+            "gemma4", addGenerationPrompt: true, out _, out string firstBoundary,
+            enableThinking: true);
+        var liveBeforeTool = new List<int>(firstPrompt);
+        liveBeforeTool.AddRange(firstRaw);
+
+        var toolRoundPrompt = renderer.RenderToTokens(
+            tokenizer, null,
+            new List<ChatMessage>
+            {
+                new() { Role = "user", Content = "Q1" },
+                new()
+                {
+                    Role = "assistant",
+                    Content = "parsed",
+                    RawOutputTokens = firstRaw,
+                    RawPromptTrailingWhitespace = firstBoundary,
+                },
+                new() { Role = "user", Content = "Q2" },
+            },
+            "gemma4", addGenerationPrompt: true, out _, out string toolBoundary,
+            enableThinking: true);
+
+        Assert.True(toolRoundPrompt.Take(liveBeforeTool.Count).SequenceEqual(liveBeforeTool),
+            "The ordinary follow-up must reproduce the first turn's live prefix.");
+
+        var toolRaw = tokenizer.Encode("RAW_TOOL_CALL", addSpecial: false);
+        var afterToolResult = renderer.RenderToTokens(
+            tokenizer, null,
+            new List<ChatMessage>
+            {
+                new() { Role = "user", Content = "Q1" },
+                new()
+                {
+                    Role = "assistant",
+                    Content = "parsed",
+                    RawOutputTokens = firstRaw,
+                    RawPromptTrailingWhitespace = firstBoundary,
+                },
+                new() { Role = "user", Content = "Q2" },
+                new()
+                {
+                    Role = "assistant",
+                    Content = "tool call",
+                    Thinking = "use tool",
+                    ToolCalls = new List<ToolCall> { new() { Name = "shell" } },
+                    RawOutputTokens = toolRaw,
+                    RawPromptTrailingWhitespace = toolBoundary,
+                },
+                new() { Role = "tool", Content = "ok" },
+            },
+            "gemma4", addGenerationPrompt: true, enableThinking: true);
+
+        Assert.True(afterToolResult.Take(liveBeforeTool.Count).SequenceEqual(liveBeforeTool),
+            "A tool-continuation tail must not change an older assistant boundary.");
+    }
+
+    [Fact]
+    public void RenderToTokens_AdaptiveToolReconstruction_RejectsWrongExactBoundaryWhitespace()
+    {
+        var tokenizer = new CharTokenizer();
+        const string rawText = "RAW_GENERATED_TOOL_CALL";
+        List<int> rawTokens = tokenizer.Encode(rawText, addSpecial: false);
+        var messages = new List<ChatMessage>
+        {
+            new() { Role = "user", Content = "find it" },
+            new()
+            {
+                Role = "assistant",
+                // The unspliced render reproduces these exact token IDs, but the
+                // renderer places a space before them. The live cache recorded '\n'.
+                Content = rawText,
+                RawOutputTokens = rawTokens,
+                RawPromptTrailingWhitespace = "\n",
+                ToolCalls = new List<ToolCall> { new() { Name = "search" } },
+            },
+            new() { Role = "tool", Content = "UNIQUE_RESULT" },
+        };
+
+        List<int> tokens = new KVCachePromptRenderer(new BoundaryMismatchToolRenderer())
+            .RenderToTokens(
+                tokenizer, null, messages, "gemma4",
+                addGenerationPrompt: true, enableThinking: true);
+
+        int rawStart = FindSubsequence(tokens, rawTokens);
+        Assert.True(rawStart > 0, "The selected prompt must contain the generated tool-call run.");
+        int newline = Assert.Single(tokenizer.Encode("\n", addSpecial: false));
+        Assert.Equal(newline, tokens[rawStart - 1]);
+        Assert.Contains("UNIQUE_RESULT", tokenizer.Decode(tokens));
+    }
+
+    [Fact]
+    public void ConditionalToolSplice_DoesNotMistakeNextTurnHeaderForDroppedResult()
+    {
+        var tokenizer = new CharTokenizer();
+        List<int> rawTokens = tokenizer.Encode("RAW_GENERATED_TOOL_CALL", addSpecial: false);
+        var messages = new List<ChatMessage>
+        {
+            new() { Role = "user", Content = "run it" },
+            new()
+            {
+                Role = "assistant",
+                Content = "structured call that differs from the generated tokens",
+                ToolCalls = new List<ToolCall> { new() { Name = "shell" } },
+                RawOutputTokens = rawTokens,
+            },
+            // This result is absent from the candidate spliced render, but the same
+            // word occurs in Gemma's following role header: <|turn>user.
+            new() { Role = "tool", Content = "user" },
+            new() { Role = "user", Content = "continue" },
+        };
+
+        List<int> tokens = new KVCachePromptRenderer(new ToolResultDroppingOnSpliceRenderer())
+            .RenderToTokens(
+                tokenizer, null, messages, "gemma4",
+                addGenerationPrompt: true, enableThinking: true);
+
+        string rendered = tokenizer.Decode(tokens);
+        Assert.Contains("<tool>user</tool>", rendered);
+        Assert.DoesNotContain("RAW_GENERATED_TOOL_CALL", rendered);
+        Assert.DoesNotContain(KVCachePromptRenderer.ToolResultProofSentinel, rendered);
+    }
+
+    [Fact]
+    public void ConditionalToolSplice_StripsProofWithoutChangingUnicodeResultText()
+    {
+        var tokenizer = new CharTokenizer();
+        List<int> rawTokens = tokenizer.Encode("RAW_TOOL_CALL", addSpecial: false);
+        var messages = new List<ChatMessage>
+        {
+            new() { Role = "user", Content = "run" },
+            new()
+            {
+                Role = "assistant",
+                Content = "different structured rendering",
+                ToolCalls = new List<ToolCall> { new() { Name = "shell" } },
+                RawOutputTokens = rawTokens,
+            },
+            new() { Role = "tool", Content = "  😀 ok  " },
+        };
+
+        List<int> tokens = new KVCachePromptRenderer(new FakeRenderer()).RenderToTokens(
+            tokenizer, null, messages, "gemma4",
+            addGenerationPrompt: true, enableThinking: true);
+
+        string rendered = tokenizer.Decode(tokens);
+        Assert.Contains("<tool>  😀 ok  </tool>", rendered);
+        Assert.Contains("RAW_TOOL_CALL", rendered);
+        Assert.DoesNotContain(KVCachePromptRenderer.ToolResultProofSentinel, rendered);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   \n")]
+    public void ConditionalToolSplice_EmptyResultFailsClosed(string toolResult)
+    {
+        var tokenizer = new CharTokenizer();
+        List<int> rawTokens = tokenizer.Encode("RAW_TOOL_CALL", addSpecial: false);
+        var messages = new List<ChatMessage>
+        {
+            new() { Role = "user", Content = "run" },
+            new()
+            {
+                Role = "assistant",
+                Content = "STRUCTURED_TOOL_CALL",
+                ToolCalls = new List<ToolCall> { new() { Name = "shell" } },
+                RawOutputTokens = rawTokens,
+            },
+            new() { Role = "tool", Content = toolResult },
+        };
+
+        List<int> tokens = new KVCachePromptRenderer(new FakeRenderer()).RenderToTokens(
+            tokenizer, null, messages, "gemma4",
+            addGenerationPrompt: true, enableThinking: true);
+
+        string rendered = tokenizer.Decode(tokens);
+        Assert.Contains("STRUCTURED_TOOL_CALL", rendered);
+        Assert.DoesNotContain("RAW_TOOL_CALL", rendered);
+        Assert.DoesNotContain(KVCachePromptRenderer.ToolResultProofSentinel, rendered);
+    }
+
+    [Fact]
     public void GetAssistantGenerationSuffix_Gemma4ThinkingDisabled_ReturnsChannelBlock()
     {
         Assert.Equal("<|channel>thought\n<channel|>",
@@ -510,8 +798,6 @@ public class KVCachePromptRendererTests
     [Fact]
     public void GetAssistantGenerationSuffix_OtherArchitectures_ReturnEmpty()
     {
-        Assert.Equal(string.Empty, KVCachePromptRenderer.GetAssistantGenerationSuffix("qwen3", false));
-        Assert.Equal(string.Empty, KVCachePromptRenderer.GetAssistantGenerationSuffix("gemma3", false));
         Assert.Equal(string.Empty, KVCachePromptRenderer.GetAssistantGenerationSuffix("mistral3", false));
         Assert.Equal(string.Empty, KVCachePromptRenderer.GetAssistantGenerationSuffix("gptoss", false));
         Assert.Equal(string.Empty, KVCachePromptRenderer.GetAssistantGenerationSuffix("nemotron_h", false));
@@ -540,6 +826,50 @@ public class KVCachePromptRendererTests
         // What remains must be exactly the framing the cache saw, so that the
         // subsequent "<think>\n" injection reproduces it byte for byte.
         Assert.Equal("<|im_start|>assistant\n" + P(0) + "<|im_end|>\n", stripped);
+    }
+
+    [Fact]
+    public void StripEmptyThinkBlock_PreservesAdjacentPrefixBreakpoint()
+    {
+        string breakpoint = KVCachePromptRenderer.MakeBreakpoint(0);
+        string rendered =
+            "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            + breakpoint + P(0) + "<|im_end|>\n";
+
+        string stripped = KVCachePromptRenderer.StripEmptyThinkBlockBeforePlaceholders(rendered);
+
+        Assert.Equal(
+            "<|im_start|>assistant\n" + breakpoint + P(0) + "<|im_end|>\n",
+            stripped);
+    }
+
+    [Fact]
+    public void StripTemplateAssistantHeaders_PreservesAdjacentPrefixBreakpoint()
+    {
+        const string anchor = "<|start|>assistant";
+        string breakpoint = KVCachePromptRenderer.MakeBreakpoint(3);
+        string rendered =
+            "prefix" + anchor + " to=user<|message|>" + breakpoint + P(0) + "suffix";
+
+        string stripped = InvokePrivateStringMethod(
+            "StripTemplateAssistantHeaders", rendered, anchor);
+
+        Assert.Equal("prefix" + anchor + breakpoint + P(0) + "suffix", stripped);
+    }
+
+    [Fact]
+    public void NormalizeWhitespace_CrossesFiveDigitBreakpointMarker()
+    {
+        string breakpoint = KVCachePromptRenderer.MakeBreakpoint(10_000);
+        string rendered = "prefix \t" + breakpoint + P(0) + "suffix";
+
+        string normalized = InvokePrivateStringMethod(
+            "NormalizeWhitespaceBeforeEachPlaceholder",
+            rendered,
+            new string?[] { "\n" },
+            false);
+
+        Assert.Equal("prefix\n" + breakpoint + P(0) + "suffix", normalized);
     }
 
     [Fact]
@@ -946,6 +1276,81 @@ public class KVCachePromptRendererTests
     }
 
     [Fact]
+    public void RenderToTokens_RecognizedGemmaReplayTemplateThatFallsBack_DoesNotThrowOrLoseToolResult()
+    {
+        // This contains every signature used to recognize the canonical Gemma 4
+        // raw-tool replay shape, but its loop is deliberately empty. Jinja therefore
+        // drops the user's question and ChatTemplate abandons it for the hardcoded
+        // renderer. That fallback does not understand the render-only replay field, so
+        // the optimized pass loses its placeholder. The KV renderer must detect that
+        // and retry through its established adaptive splice path instead of throwing.
+        const string recognizedButDroppingTemplate =
+            "{%- macro format_tool_response_block(tool_name, response) -%}" +
+            "{{- response -}}" +
+            "{%- endmacro -%}" +
+            "{%- set ns = namespace(prev_message_type=None) -%}" +
+            "{%- set ns_turn = namespace(last_user_idx=-1) -%}" +
+            "{%- set loop_messages = [] -%}" +
+            "{%- for message in loop_messages -%}" +
+            "{%- if message['role'] != 'tool' -%}" +
+            "{%- set thinking_text = message.get('reasoning') or message.get('reasoning_content') -%}" +
+            "{%- if thinking_text and loop.index0 > ns_turn.last_user_idx and message.get('tool_calls') -%}" +
+            "{%- endif -%}" +
+            "{%- if message['tool_calls'] -%}" +
+            "{%- set ns.prev_message_type = 'tool_call' -%}" +
+            "{%- endif -%}" +
+            "{%- if message.get('tool_responses') -%}" +
+            "{%- elif message.get('tool_calls') -%}" +
+            "{%- for k in range(loop.index0 + 1, loop_messages | length) -%}" +
+            "{%- endfor -%}" +
+            "{%- endif -%}" +
+            "{%- endif -%}" +
+            "{%- endfor -%}" +
+            "DROPPED";
+
+        Assert.True(ChatTemplate.SupportsGemma4RawToolCallReplay(
+            recognizedButDroppingTemplate, "gemma4"));
+
+        var tokenizer = new CharTokenizer();
+        var rawTokens = new List<int> { 1001, 1002, 1003 };
+        var messages = new List<ChatMessage>
+        {
+            new() { Role = "user", Content = "question" },
+            new()
+            {
+                Role = "assistant",
+                Content = "",
+                Thinking = "use the shell",
+                ToolCalls = new List<ToolCall>
+                {
+                    new()
+                    {
+                        Name = "shell",
+                        Arguments = new Dictionary<string, object> { ["command"] = "pwd" },
+                    },
+                },
+                RawOutputTokens = rawTokens,
+                RawPromptTrailingWhitespace = "\n",
+            },
+            new() { Role = "tool", Content = "UNIQUE_TOOL_RESULT" },
+        };
+
+        var renderer = new KVCachePromptRenderer(new GgufPromptRenderer());
+        List<int> tokens = renderer.RenderToTokens(
+            tokenizer,
+            recognizedButDroppingTemplate,
+            messages,
+            architecture: "gemma4",
+            addGenerationPrompt: true,
+            enableThinking: true);
+
+        Assert.True(FindSubsequence(tokens, rawTokens) >= 0,
+            "The safe retry must splice the exact cached tool-call tokens.");
+        Assert.Contains("UNIQUE_TOOL_RESULT", tokenizer.Decode(tokens));
+        Assert.DoesNotContain(KVCachePromptRenderer.PlaceholderSentinel, tokenizer.Decode(tokens));
+    }
+
+    [Fact]
     public void RenderToTokens_PartScopedMarkerPastEndOfContent_ClampsInsteadOfThrowing()
     {
         var renderer = new KVCachePromptRenderer(new FakeRenderer());
@@ -966,6 +1371,15 @@ public class KVCachePromptRendererTests
         // Mirrors KVCachePromptRenderer.MakePlaceholder so we don't have to expose it
         // publicly. We assert structural invariants instead of behavior.
         return $"{KVCachePromptRenderer.PlaceholderSentinel}R{index:D4}{KVCachePromptRenderer.PlaceholderSentinel}";
+    }
+
+    private static string InvokePrivateStringMethod(string name, params object[] arguments)
+    {
+        var method = typeof(KVCachePromptRenderer).GetMethod(
+            name,
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Assert.NotNull(method);
+        return Assert.IsType<string>(method!.Invoke(null, arguments));
     }
 
     /// <summary>Find the first index of a contiguous subsequence in <paramref name="haystack"/>.</summary>

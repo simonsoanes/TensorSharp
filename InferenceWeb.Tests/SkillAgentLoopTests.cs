@@ -327,7 +327,10 @@ public class SkillAgentLoopTests : IDisposable
         // produces a correct answer, but every round re-prefills the whole conversation
         // from the first assistant turn onward — a pure, silent slowdown.
         var generator = new ScriptedGenerator(
-            new SkillTurnOutput(SkillCall(), new List<int> { 101, 102, 103 }),
+            new SkillTurnOutput(SkillCall(), new List<int> { 101, 102, 103 })
+            {
+                RawPromptTrailingWhitespace = string.Empty,
+            },
             new SkillTurnOutput(Answer("Done.")));
 
         SkillLoopResult result = await SkillAgentLoop.RunAsync(
@@ -335,6 +338,7 @@ public class SkillAgentLoopTests : IDisposable
 
         ChatMessage assistant = result.Messages.Single(m => m.Role == "assistant");
         Assert.Equal(new[] { 101, 102, 103 }, assistant.RawOutputTokens);
+        Assert.Equal(string.Empty, assistant.RawPromptTrailingWhitespace);
         Assert.Single(assistant.ToolCalls!);
     }
 

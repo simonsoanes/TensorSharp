@@ -15,6 +15,7 @@ using System.IO;
 using System.IO.Enumeration;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using TensorSharp.Runtime.Logging;
@@ -197,6 +198,10 @@ namespace TensorSharp.AgentHost.Skills
 
         private readonly HashSet<string> _installedPackages = new(StringComparer.OrdinalIgnoreCase);
         private readonly object _gate = new();
+        private int _activeOperations;
+        private bool _releaseRequested;
+        private Action? _releaseWhenIdle;
+        private bool _cleanupRegistrationClosed;
 
         internal SessionWorkspace(string root, string sessionId = "")
         {
@@ -205,10 +210,12 @@ namespace TensorSharp.AgentHost.Skills
             WorkDirectory = Path.Combine(root, "work");
             EnvDirectory = Path.Combine(root, "env");
             StateDirectory = Path.Combine(root, "state");
+            ShellStateDirectory = Path.Combine(StateDirectory, "shell");
             TempDirectory = Path.Combine(root, "tmp");
             Directory.CreateDirectory(WorkDirectory);
             Directory.CreateDirectory(EnvDirectory);
             Directory.CreateDirectory(StateDirectory);
+            Directory.CreateDirectory(ShellStateDirectory);
             Directory.CreateDirectory(TempDirectory);
         }
 
@@ -267,6 +274,14 @@ namespace TensorSharp.AgentHost.Skills
         public string StateDirectory { get; }
 
         /// <summary>
+        /// The small part of state a shell wrapper may update: its saved working
+        /// directory and exported environment. Sandboxes mount this child writable while
+        /// keeping the parent <see cref="StateDirectory"/>, which holds host-authored
+        /// scripts and logs, read-only.
+        /// </summary>
+        public string ShellStateDirectory { get; }
+
+        /// <summary>
         /// Where <c>TMPDIR</c> points, so a tool's scratch file is not mistaken for the
         /// user's output.
         ///
@@ -278,6 +293,73 @@ namespace TensorSharp.AgentHost.Skills
         /// </para>
         /// </summary>
         public string TempDirectory { get; }
+
+        /// <summary>
+        /// Keep this workspace alive while one host tool is using it.
+        /// </summary>
+        /// <remarks>
+        /// HTTP cancellation stops an async iterator immediately, but the synchronous
+        /// tool it started on a worker may still be winding down. The operation token
+        /// lets the manager detach the request immediately while deferring cleanup and
+        /// directory deletion until that worker has finished touching the workspace.
+        /// </remarks>
+        public IDisposable BeginOperation()
+        {
+            lock (_gate)
+            {
+                if (_releaseRequested)
+                    throw new ObjectDisposedException(nameof(SessionWorkspace));
+                _activeOperations++;
+            }
+            return new WorkspaceOperation(this);
+        }
+
+        private void EndOperation()
+        {
+            Action? release = null;
+            lock (_gate)
+            {
+                if (_activeOperations > 0)
+                    _activeOperations--;
+                if (_activeOperations == 0 && _releaseWhenIdle != null)
+                {
+                    release = _releaseWhenIdle;
+                    _releaseWhenIdle = null;
+                }
+            }
+            release?.Invoke();
+        }
+
+        /// <summary>
+        /// Mark the workspace unavailable to new operations and run its final cleanup
+        /// now, or after the last operation completes.
+        /// </summary>
+        internal void ReleaseWhenIdle(Action release)
+        {
+            ArgumentNullException.ThrowIfNull(release);
+            bool releaseNow;
+            lock (_gate)
+            {
+                if (_releaseRequested)
+                    return;
+                _releaseRequested = true;
+                releaseNow = _activeOperations == 0;
+                if (!releaseNow)
+                    _releaseWhenIdle = release;
+            }
+            if (releaseNow)
+                release();
+        }
+
+        private sealed class WorkspaceOperation : IDisposable
+        {
+            private SessionWorkspace? _workspace;
+
+            public WorkspaceOperation(SessionWorkspace workspace) => _workspace = workspace;
+
+            public void Dispose() =>
+                Interlocked.Exchange(ref _workspace, null)?.EndOperation();
+        }
 
         /// <summary>
         /// The packages already installed into <see cref="EnvDirectory"/> this session,
@@ -546,8 +628,20 @@ namespace TensorSharp.AgentHost.Skills
         public void RegisterCleanup(IDisposable cleanup)
         {
             ArgumentNullException.ThrowIfNull(cleanup);
+            bool disposeNow;
             lock (_gate)
-                _cleanups.Add(cleanup);
+            {
+                disposeNow = _cleanupRegistrationClosed;
+                if (!disposeNow)
+                    _cleanups.Add(cleanup);
+            }
+
+            // Run outside the gate: cleanup may wait for a worker that needs another
+            // workspace lock. Once final cleanup starts, RunCleanups may already have
+            // copied and cleared the list, so appending here would otherwise leak the
+            // resource forever.
+            if (disposeNow)
+                DisposeCleanup(cleanup);
         }
 
         /// <summary>Run every registered cleanup. Called once, before the directory is deleted.</summary>
@@ -556,16 +650,20 @@ namespace TensorSharp.AgentHost.Skills
             IDisposable[] pending;
             lock (_gate)
             {
+                _cleanupRegistrationClosed = true;
                 pending = _cleanups.ToArray();
                 _cleanups.Clear();
             }
             foreach (IDisposable cleanup in pending)
-            {
-                // One misbehaving cleanup must not strand the rest, and must not leave the
-                // workspace undeleted — the disk is the resource that actually accumulates.
-                try { cleanup.Dispose(); }
-                catch (Exception ex) when (ex is not (OutOfMemoryException or StackOverflowException)) { }
-            }
+                DisposeCleanup(cleanup);
+        }
+
+        private static void DisposeCleanup(IDisposable cleanup)
+        {
+            // One misbehaving cleanup must not strand the rest, and must not leave the
+            // workspace undeleted — the disk is the resource that actually accumulates.
+            try { cleanup.Dispose(); }
+            catch (Exception ex) when (ex is not (OutOfMemoryException or StackOverflowException)) { }
         }
 
         private readonly HashSet<string> _appliedSetups = new(StringComparer.Ordinal);
@@ -630,6 +728,7 @@ namespace TensorSharp.AgentHost.Skills
         private readonly string _root;
         private readonly ILogger _logger;
         private readonly ConcurrentDictionary<string, SessionWorkspace> _workspaces = new(StringComparer.Ordinal);
+        private readonly object _mapGate = new();
 
         /// <param name="root">Parent directory the workspaces live under.</param>
         public SessionWorkspaceManager(string root, ILogger? logger = null)
@@ -662,14 +761,22 @@ namespace TensorSharp.AgentHost.Skills
         public SessionWorkspace GetOrCreate(string sessionId)
         {
             ArgumentException.ThrowIfNullOrEmpty(sessionId);
-            return _workspaces.GetOrAdd(sessionId, id =>
+            lock (_mapGate)
             {
+                if (_workspaces.TryGetValue(sessionId, out SessionWorkspace? existing))
+                    return existing;
+
+                // The suffix matters when an id is reused while its previous workspace
+                // is retiring: Release removes the mapping immediately, but an active
+                // worker may keep the old directory alive for a little longer.
                 var workspace = new SessionWorkspace(
-                    Path.Combine(_root, SessionWorkspace.DirectoryPrefix + Sanitize(id)), id);
+                    Path.Combine(_root, SessionWorkspace.DirectoryPrefix + Sanitize(sessionId)
+                        + "-" + Guid.NewGuid().ToString("N")), sessionId);
+                _workspaces[sessionId] = workspace;
                 _logger.LogInformation(LogEventIds.SkillScriptExecuted,
-                    "workspace.created session={SessionId} root={Root}", id, workspace.Root);
+                    "workspace.created session={SessionId} root={Root}", sessionId, workspace.Root);
                 return workspace;
-            });
+            }
         }
 
         /// <summary>Delete the session's workspace and everything in it, if one exists.</summary>
@@ -677,15 +784,23 @@ namespace TensorSharp.AgentHost.Skills
         {
             if (string.IsNullOrEmpty(sessionId))
                 return;
-            if (_workspaces.TryRemove(sessionId, out SessionWorkspace? workspace))
+
+            SessionWorkspace? workspace;
+            lock (_mapGate)
+                _workspaces.TryRemove(sessionId, out workspace);
+
+            if (workspace != null)
             {
                 _logger.LogInformation(LogEventIds.SkillScriptExecuted,
                     "workspace.released session={SessionId} root={Root}", sessionId, workspace.Root);
-                // Stop anything still running in the directory BEFORE deleting it: a
-                // background job holding a file open turns the delete into a partial one,
-                // and the leftovers are what SweepOrphans has to clean up next boot.
-                workspace.RunCleanups();
-                TryDelete(workspace.Root);
+                workspace.ReleaseWhenIdle(() =>
+                {
+                    // Stop anything still running in the directory BEFORE deleting it: a
+                    // background job holding a file open turns the delete into a partial one,
+                    // and the leftovers are what SweepOrphans has to clean up next boot.
+                    workspace.RunCleanups();
+                    TryDelete(workspace.Root);
+                });
             }
         }
 

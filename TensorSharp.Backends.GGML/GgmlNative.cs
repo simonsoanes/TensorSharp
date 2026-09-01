@@ -1007,7 +1007,7 @@ public struct H3TeLayerW
 {
     public IntPtr InputNorm;      // [hidden] F32
     public IntPtr PostAttnNorm;   // [hidden] F32
-    public IntPtr QNorm;          // [headDim] F32, Qwen3 per-head QK norm
+    public IntPtr QNorm;          // [headDim] F32, optional per-head QK norm
     public IntPtr KNorm;          // [headDim] F32
     public H3Lin Q, K, V, O;
     public H3Lin Gate, Up, Down;
@@ -2138,25 +2138,6 @@ internal enum GgmlIndexReductionOp
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_TransformerLayerDecode(
-            IntPtr hiddenData, int hiddenSize,
-            IntPtr attnNormData,
-            IntPtr qkvData, int qkvType, long qkvNe0, long qkvNe1, long qkvBytes,
-            IntPtr qkvBiasData,
-            IntPtr qNormData, IntPtr kNormData, int headDim,
-            IntPtr oData, int oType, long oNe0, long oNe1, long oBytes,
-            IntPtr ffnNormData,
-            IntPtr guData, int guType, long guNe0, long guNe1, long guBytes,
-            IntPtr downData, int downType, long downNe0, long downNe1, long downBytes,
-            IntPtr kCacheData, IntPtr vCacheData,
-            int numHeads, int numKvHeads,
-            int maxSeqLen, int position,
-            float eps, float ropeBase, float ropeFreqScale,
-            int intermediateSize, int ropeMode,
-            int kvCacheType);
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial int TSGgml_Gemma4LayerPrefill(
             IntPtr hiddenData, int hiddenSize, int seqLen,
             IntPtr attnNormW,
@@ -2535,30 +2516,6 @@ internal enum GgmlIndexReductionOp
                 kvCacheType,
                 eps), "gpt_oss_attention_layer_prefill");
         }
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_TransformerModelDecode(
-            IntPtr hiddenData, int hiddenSize, int numLayers,
-            IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr,
-            IntPtr[] oArr, IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr,
-            IntPtr[] kCacheArr, IntPtr[] vCacheArr,
-            IntPtr[] qkvBiasArr,
-            IntPtr[] qArr, IntPtr[] kArr, IntPtr[] vArr,
-            int[] splitTypeArr, long[] splitBytesArr,
-            int[] qkvTypeArr, long[] qkvBytesArr,
-            int[] oTypeArr, long[] oBytesArr,
-            int[] guTypeArr, long[] guBytesArr,
-            int[] downTypeArr, long[] downBytesArr,
-            int qkvType, long qkvNe0, long qkvNe1, long qkvBytes,
-            int oType, long oNe0, long oNe1, long oBytes,
-            int guType, long guNe0, long guNe1, long guBytes,
-            int downType, long downNe0, long downNe1, long downBytes,
-            int headDim, int numHeads, int numKvHeads,
-            int maxSeqLen, int position,
-            float eps, float ropeBase, float ropeFreqScale,
-            int intermediateSize, int ropeMode,
-            int kvCacheType);
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -5423,45 +5380,6 @@ internal enum GgmlIndexReductionOp
                 "rope_ex_ff");
         }
 
-        /// <param name="qkvBiasData">
-        /// Optional fused Q|K|V bias vector (IntPtr.Zero when the architecture has none).
-        /// Qwen2 / Qwen2.5-VL carry a QKV bias and no QK norm; Qwen3 is the reverse.
-        /// <paramref name="qNormData"/>/<paramref name="kNormData"/> may likewise be Zero.
-        /// </param>
-        public static void TransformerLayerDecode(
-            IntPtr hiddenData, int hiddenSize,
-            IntPtr attnNormData,
-            IntPtr qkvData, int qkvType, long qkvNe0, long qkvNe1, long qkvBytes,
-            IntPtr qkvBiasData,
-            IntPtr qNormData, IntPtr kNormData, int headDim,
-            IntPtr oData, int oType, long oNe0, long oNe1, long oBytes,
-            IntPtr ffnNormData,
-            IntPtr guData, int guType, long guNe0, long guNe1, long guBytes,
-            IntPtr downData, int downType, long downNe0, long downNe1, long downBytes,
-            IntPtr kCacheData, IntPtr vCacheData,
-            int numHeads, int numKvHeads,
-            int maxSeqLen, int position,
-            float eps, float ropeBase, float ropeFreqScale,
-            int intermediateSize, int ropeMode,
-            int kvCacheType = 0)
-        {
-            CheckResult(TSGgml_TransformerLayerDecode(
-                hiddenData, hiddenSize,
-                attnNormData,
-                qkvData, qkvType, qkvNe0, qkvNe1, qkvBytes,
-                qkvBiasData,
-                qNormData, kNormData, headDim,
-                oData, oType, oNe0, oNe1, oBytes,
-                ffnNormData,
-                guData, guType, guNe0, guNe1, guBytes,
-                downData, downType, downNe0, downNe1, downBytes,
-                kCacheData, vCacheData,
-                numHeads, numKvHeads,
-                maxSeqLen, position,
-                eps, ropeBase, ropeFreqScale,
-                intermediateSize, ropeMode, kvCacheType), "transformer_layer_decode");
-        }
-
         /// <summary>
         /// Single-token flash attention decode kernel. Appends the new K/V to the persistent
         /// KV cache at <paramref name="position"/>, then runs <c>ggml_flash_attn_ext</c> on the
@@ -5785,50 +5703,6 @@ internal enum GgmlIndexReductionOp
                 numHeads, numKvHeads,
                 maxSeqLen, position,
                 eps, ropeBase, ropeFreqScale, ropeNDims, ropeMode, kvCacheType), "qwen35_attention_layer_decode");
-        }
-
-        public static void TransformerModelDecode(
-            IntPtr hiddenData, int hiddenSize, int numLayers,
-            IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr,
-            IntPtr[] oArr, IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr,
-            IntPtr[] kCacheArr, IntPtr[] vCacheArr,
-            IntPtr[] qkvBiasArr,
-            IntPtr[] qArr, IntPtr[] kArr, IntPtr[] vArr,
-            int[] splitTypeArr, long[] splitBytesArr,
-            int[] qkvTypeArr, long[] qkvBytesArr,
-            int[] oTypeArr, long[] oBytesArr,
-            int[] guTypeArr, long[] guBytesArr,
-            int[] downTypeArr, long[] downBytesArr,
-            int qkvType, long qkvNe0, long qkvNe1, long qkvBytes,
-            int oType, long oNe0, long oNe1, long oBytes,
-            int guType, long guNe0, long guNe1, long guBytes,
-            int downType, long downNe0, long downNe1, long downBytes,
-            int headDim, int numHeads, int numKvHeads,
-            int maxSeqLen, int position,
-            float eps, float ropeBase, float ropeFreqScale,
-            int intermediateSize, int ropeMode,
-            int kvCacheType = 0)
-        {
-            CheckResult(TSGgml_TransformerModelDecode(
-                hiddenData, hiddenSize, numLayers,
-                attnNormArr, qkvArr, qNormArr, kNormArr,
-                oArr, ffnNormArr, guArr, downArr,
-                kCacheArr, vCacheArr,
-                qkvBiasArr,
-                qArr, kArr, vArr,
-                splitTypeArr, splitBytesArr,
-                qkvTypeArr, qkvBytesArr,
-                oTypeArr, oBytesArr,
-                guTypeArr, guBytesArr,
-                downTypeArr, downBytesArr,
-                qkvType, qkvNe0, qkvNe1, qkvBytes,
-                oType, oNe0, oNe1, oBytes,
-                guType, guNe0, guNe1, guBytes,
-                downType, downNe0, downNe1, downBytes,
-                headDim, numHeads, numKvHeads,
-                maxSeqLen, position,
-                eps, ropeBase, ropeFreqScale,
-                intermediateSize, ropeMode, kvCacheType), "transformer_model_decode");
         }
 
         public static void Gemma4ModelDecode(

@@ -195,7 +195,7 @@ namespace TensorSharp.AgentHost.CodeExec
                 {
                     Interpreter = interpreter,
                     Arguments = arguments,
-                    WriteDirectory = workspace.Root,
+                    WriteDirectory = workspace.TempDirectory,
                     WorkingDirectory = ranIn is { Length: > 0 } ? ranIn : workspace.WorkDirectory,
                     ReadOnlyDirectory = workspace.Root,
                     ReadablePaths = new[] { workspace.EnvDirectory },

@@ -10,6 +10,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 
@@ -83,6 +84,26 @@ namespace TensorSharp.Runtime
         /// </summary>
         public List<int>? RawOutputTokens { get; set; }
         /// <summary>
+        /// Exact trailing whitespace of the generation prompt that immediately
+        /// preceded <see cref="RawOutputTokens"/> when this assistant round was
+        /// produced. <c>null</c> means the round predates boundary tracking;
+        /// <see cref="string.Empty"/> is a known boundary with no whitespace.
+        ///
+        /// Templates do not necessarily frame every generation the same way. Gemma 4,
+        /// for example, ends an ordinary model prompt with a newline but continues
+        /// directly after a tool response. Keeping this tiny piece of lossless metadata
+        /// lets the KV prompt renderer reproduce either boundary without guessing from
+        /// the final character of a later, structurally different render.
+        /// </summary>
+        public string? RawPromptTrailingWhitespace { get; set; }
+        /// <summary>
+        /// Render-only placeholder used by the Gemma 4 GGUF template adapter to put a
+        /// cached raw tool-calling round at the template's tool-call position while
+        /// retaining structured <see cref="ToolCalls"/> for tool-result rendering.
+        /// It never belongs to persisted or wire-format history.
+        /// </summary>
+        internal string? RawToolCallReplayPlaceholder { get; set; }
+        /// <summary>
         /// Explicit cache-control marker scoped to the whole message: a prefix
         /// cache breakpoint at the END of <see cref="Content"/>. A marker on an
         /// individual content part belongs in
@@ -125,7 +146,8 @@ namespace TensorSharp.Runtime
 
     public static class ChatTemplate
     {
-        public static string RenderQwen3(List<ChatMessage> messages, bool addGenerationPrompt = true,
+        /// <summary>Render the generic ChatML conversation and optional tool declarations.</summary>
+        public static string RenderChatMl(List<ChatMessage> messages, bool addGenerationPrompt = true,
             List<ToolFunction>? tools = null, bool enableThinking = false)
         {
             var sb = new StringBuilder();
@@ -544,33 +566,6 @@ namespace TensorSharp.Runtime
         }
 
         /// <summary>
-        /// Render Gemma3 chat template.
-        /// Uses &lt;start_of_turn&gt;/&lt;end_of_turn&gt; markers. Images use &lt;start_of_image&gt;.
-        /// BOS token is prepended by the tokenizer (add_bos_token=true).
-        /// </summary>
-        public static string RenderGemma3(List<ChatMessage> messages, bool addGenerationPrompt = true)
-        {
-            var sb = new StringBuilder();
-            for (int i = 0; i < messages.Count; i++)
-            {
-                var msg = messages[i];
-                string role = msg.Role == "assistant" ? "model" : (msg.Role ?? "");
-                sb.Append($"<start_of_turn>{role}\n");
-                if (msg.ImagePaths != null)
-                {
-                    foreach (var _ in msg.ImagePaths)
-                        sb.Append("<start_of_image>");
-                }
-                sb.Append($"{msg.Content}<end_of_turn>\n");
-            }
-            if (addGenerationPrompt)
-            {
-                sb.Append("<start_of_turn>model\n");
-            }
-            return sb.ToString();
-        }
-
-        /// <summary>
         /// Render a chat prompt using the model's built-in GGUF template if available,
         /// otherwise fall back to hardcoded architecture-specific templates.
         /// Multimodal tokens (image/audio/video) are injected into message content
@@ -598,7 +593,9 @@ namespace TensorSharp.Runtime
                 try
                 {
                     var preprocessed = InjectMultimodalTokens(messages, architecture);
-                    var jinja = new Jinja2Template(template);
+                    string effectiveTemplate = EnableGemma4CachedToolReasoningReplay(
+                        template, preprocessed, architecture);
+                    var jinja = new Jinja2Template(effectiveTemplate);
                     var context = BuildJinja2Context(
                         preprocessed, addGenerationPrompt, tools, enableThinking, architecture);
                     string result = jinja.Render(context).TrimEnd();
@@ -716,7 +713,7 @@ namespace TensorSharp.Runtime
             // unrecognised architecture gets.
             return render != null
                 ? render(request)
-                : RenderQwen3(messages, addGenerationPrompt, tools, enableThinking);
+                : RenderChatMl(messages, addGenerationPrompt, tools, enableThinking);
         }
 
         private const string GlmToolsHeader =
@@ -1078,6 +1075,150 @@ namespace TensorSharp.Runtime
         /// </summary>
         internal const string ReasoningEndSentinel = "\uE000TS_REASONING_END\uE000";
 
+        // The canonical Gemma 4 template only emits an assistant tool round's
+        // `reasoning` when that round follows the LAST user message. That is right for
+        // ordinary serialized history, but not for TensorSharp's host-cached transcript:
+        // after the user sends the next turn, the previously generated tool round is now
+        // before the last user even though its exact thought-channel tokens are still in
+        // the live KV cache. Mark only those cached rounds and let them bypass the
+        // last-user gate. Keeping `tool_calls` in the condition and on the message is
+        // essential: the same canonical template uses it to fold the following tool
+        // result into this model turn.
+        private const string Gemma4CachedToolReasoningMarker =
+            "_tensorsharp_cached_tool_reasoning";
+        private const string Gemma4RawToolCallReplayMarker =
+            "_tensorsharp_raw_tool_call_replay";
+        private const string Gemma4CurrentTurnReasoningCondition =
+            "thinking_text and loop.index0 > ns_turn.last_user_idx and message.get('tool_calls')";
+        private const string Gemma4ToolCallsBranch =
+            "{%- if message['tool_calls'] -%}";
+        private const string Gemma4ToolResponseMacro =
+            "{%- macro format_tool_response_block(tool_name, response) -%}";
+        private const string Gemma4MessageStateNamespace =
+            "{%- set ns = namespace(prev_message_type=None) -%}";
+        private const string Gemma4ToolCallStateAssignment =
+            "{%- set ns.prev_message_type = 'tool_call' -%}";
+        private const string Gemma4LoopMessagesIteration =
+            "{%- for message in loop_messages -%}";
+        private const string Gemma4NonToolBranch =
+            "{%- if message['role'] != 'tool' -%}";
+        private const string Gemma4ForwardToolCallBranch =
+            "{%- elif message.get('tool_calls') -%}";
+        private const string Gemma4ForwardToolResultScan =
+            "{%- for k in range(loop.index0 + 1, loop_messages | length) -%}";
+        private const string Gemma4CachedToolReasoningCondition =
+            "thinking_text and (loop.index0 > ns_turn.last_user_idx or " +
+            "message.get('" + Gemma4CachedToolReasoningMarker + "')) and " +
+            "message.get('tool_calls')";
+        private const string Gemma4RawToolReplayBranch =
+            "{%- if message.get('" + Gemma4RawToolCallReplayMarker + "') -%}" +
+            "{{- message.get('" + Gemma4RawToolCallReplayMarker + "') -}}" +
+            "{%- set ns.prev_message_type = 'tool_call' -%}" +
+            "{%- elif message['tool_calls'] -%}";
+
+        private sealed class Gemma4ReplayTemplateVariants
+        {
+            public Gemma4ReplayTemplateVariants(string template)
+            {
+                int first = template.IndexOf(Gemma4ToolCallsBranch, StringComparison.Ordinal);
+                SupportsRawToolCallReplay = first >= 0
+                    && template.IndexOf(
+                        Gemma4ToolCallsBranch,
+                        first + Gemma4ToolCallsBranch.Length,
+                        StringComparison.Ordinal) < 0
+                    && template.Contains(Gemma4CurrentTurnReasoningCondition, StringComparison.Ordinal)
+                    && template.Contains(Gemma4ToolResponseMacro, StringComparison.Ordinal)
+                    && template.Contains(Gemma4MessageStateNamespace, StringComparison.Ordinal)
+                    && template.Contains(Gemma4ToolCallStateAssignment, StringComparison.Ordinal)
+                    && template.Contains(Gemma4LoopMessagesIteration, StringComparison.Ordinal)
+                    && template.Contains(Gemma4NonToolBranch, StringComparison.Ordinal)
+                    && template.Contains(Gemma4ForwardToolCallBranch, StringComparison.Ordinal)
+                    && template.Contains(Gemma4ForwardToolResultScan, StringComparison.Ordinal);
+
+                CachedReasoning = SupportsRawToolCallReplay
+                    ? template.Replace(
+                        Gemma4CurrentTurnReasoningCondition,
+                        Gemma4CachedToolReasoningCondition,
+                        StringComparison.Ordinal)
+                    : template;
+                RawToolCallReplay = SupportsRawToolCallReplay
+                    ? CachedReasoning.Replace(
+                        Gemma4ToolCallsBranch,
+                        Gemma4RawToolReplayBranch,
+                        StringComparison.Ordinal)
+                    : template;
+            }
+
+            public bool SupportsRawToolCallReplay { get; }
+            public string CachedReasoning { get; }
+            public string RawToolCallReplay { get; }
+        }
+
+        // The GGUF template is immutable for a loaded model. Cache both recognition and
+        // transformed variants by string identity so a long tool loop does not rescan and
+        // reallocate the same multi-kilobyte Jinja source on every continuation.
+        private static readonly ConditionalWeakTable<string, Gemma4ReplayTemplateVariants>
+            Gemma4ReplayTemplates = new();
+
+        /// <summary>
+        /// True only for the canonical Gemma 4 template shape whose structured
+        /// tool-call branch can be replaced losslessly. Requiring exactly one match
+        /// keeps community templates on the existing adaptive fallback.
+        /// </summary>
+        internal static bool SupportsGemma4RawToolCallReplay(
+            string template, string? architecture)
+        {
+            if (!string.Equals(architecture, "gemma4", StringComparison.Ordinal)
+                || string.IsNullOrEmpty(template))
+            {
+                return false;
+            }
+
+            return Gemma4ReplayTemplates.GetValue(
+                template,
+                static value => new Gemma4ReplayTemplateVariants(value))
+                .SupportsRawToolCallReplay;
+        }
+
+        private static string EnableGemma4CachedToolReasoningReplay(
+            string template, List<ChatMessage> messages, string? architecture)
+        {
+            if (!string.Equals(architecture, "gemma4", StringComparison.Ordinal)
+                || string.IsNullOrEmpty(template)
+                || messages == null)
+            {
+                return template;
+            }
+
+            bool hasCachedToolRound = false;
+            bool hasRawReplayPlaceholder = false;
+            for (int i = 0; i < messages.Count; i++)
+            {
+                ChatMessage message = messages[i];
+                if (message == null)
+                    continue;
+                if (message.Role == "assistant"
+                    && message.ToolCalls is { Count: > 0 }
+                    && message.RawOutputTokens is { Count: > 0 })
+                {
+                    hasCachedToolRound = true;
+                }
+                if (!string.IsNullOrEmpty(message.RawToolCallReplayPlaceholder))
+                    hasRawReplayPlaceholder = true;
+            }
+            if (!hasCachedToolRound)
+                return template;
+
+            Gemma4ReplayTemplateVariants variants = Gemma4ReplayTemplates.GetValue(
+                template,
+                static value => new Gemma4ReplayTemplateVariants(value));
+            if (!variants.SupportsRawToolCallReplay)
+                return template;
+            return hasRawReplayPlaceholder
+                ? variants.RawToolCallReplay
+                : variants.CachedReasoning;
+        }
+
         /// <summary>
         /// Remove the sentinel and the framing newline the template emitted after it, so a
         /// re-rendered reasoning block is byte-identical to what the model generated.
@@ -1120,7 +1261,10 @@ namespace TensorSharp.Runtime
                     ["role"] = m.Role ?? "",
                     ["content"] = m.Content ?? ""
                 };
-                if (passReasoning && m.Role == "assistant" && m.ToolCalls is { Count: > 0 })
+                if (passReasoning
+                    && m.Role == "assistant"
+                    && m.ToolCalls is { Count: > 0 }
+                    && string.IsNullOrEmpty(m.RawToolCallReplayPlaceholder))
                 {
                     // The reasoning, plus a sentinel marking where it ENDS.
                     //
@@ -1142,6 +1286,8 @@ namespace TensorSharp.Runtime
                     string reasoning = (m.Thinking ?? string.Empty) + ReasoningEndSentinel;
                     dict["reasoning"] = reasoning;
                     dict["reasoning_content"] = reasoning;
+                    if (m.RawOutputTokens is { Count: > 0 })
+                        dict[Gemma4CachedToolReasoningMarker] = true;
                 }
                 if (m.ToolCalls != null && m.ToolCalls.Count > 0)
                 {
@@ -1159,6 +1305,8 @@ namespace TensorSharp.Runtime
                     }
                     dict["tool_calls"] = tcList;
                 }
+                if (!string.IsNullOrEmpty(m.RawToolCallReplayPlaceholder))
+                    dict[Gemma4RawToolCallReplayMarker] = m.RawToolCallReplayPlaceholder;
                 msgList.Add(dict);
             }
 
@@ -1259,7 +1407,17 @@ namespace TensorSharp.Runtime
                     Content = sb.ToString(),
                     ImagePaths = msg.ImagePaths,
                     AudioPaths = msg.AudioPaths,
-                    IsVideo = msg.IsVideo
+                    TextFilePaths = msg.TextFilePaths,
+                    TextFileNames = msg.TextFileNames,
+                    IsVideo = msg.IsVideo,
+                    ToolCalls = msg.ToolCalls,
+                    ToolCallId = msg.ToolCallId,
+                    Thinking = msg.Thinking,
+                    RawOutputTokens = msg.RawOutputTokens,
+                    RawPromptTrailingWhitespace = msg.RawPromptTrailingWhitespace,
+                    RawToolCallReplayPlaceholder = msg.RawToolCallReplayPlaceholder,
+                    CacheControl = msg.CacheControl,
+                    ContentCacheBreakpoints = msg.ContentCacheBreakpoints,
                 });
             }
             return result;
@@ -1497,8 +1655,8 @@ namespace TensorSharp.Runtime
         /// skips thinking.
         ///
         /// BOS is NOT emitted here: the tokenizer prepends it (add_bos_token=true,
-        /// encode addSpecial=true), exactly like <see cref="RenderGemma3"/> and the
-        /// GGUF Jinja2 path (which renders an empty bos_token). Emitting a literal
+        /// encode addSpecial=true), exactly like the GGUF Jinja2 path (which renders
+        /// an empty bos_token). Emitting a literal
         /// &lt;bos&gt; here too would double the BOS token in the prompt.
         /// </summary>
         public static string RenderGemma4(List<ChatMessage> messages, bool addGenerationPrompt = true,
@@ -1815,31 +1973,5 @@ namespace TensorSharp.Runtime
             return result;
         }
 
-        /// <summary>
-        /// Expand Gemma3 image tokens: replace each &lt;start_of_image&gt; token with
-        /// \n\n &lt;start_of_image&gt; [pad_tokens...] &lt;end_of_image&gt; \n\n
-        /// </summary>
-        public static List<int> ExpandGemma3ImageTokens(List<int> tokens, int startOfImageId,
-            int endOfImageId, int newlineNewlineId, int padTokenId, int tokensPerImage)
-        {
-            var result = new List<int>(tokens.Count + tokensPerImage + 10);
-            foreach (int token in tokens)
-            {
-                if (token == startOfImageId)
-                {
-                    result.Add(newlineNewlineId);
-                    result.Add(startOfImageId);
-                    for (int j = 0; j < tokensPerImage; j++)
-                        result.Add(padTokenId);
-                    result.Add(endOfImageId);
-                    result.Add(newlineNewlineId);
-                }
-                else
-                {
-                    result.Add(token);
-                }
-            }
-            return result;
-        }
     }
 }

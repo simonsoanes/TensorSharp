@@ -55,7 +55,7 @@ namespace TensorSharp.Server
         public string LoadedMmProjName => _lifecycle.LoadedMmProjName;
         public string LoadedMmProjPath => _lifecycle.LoadedMmProjPath;
         public string LoadedBackend => _lifecycle.LoadedBackend;
-        public string Architecture => _lifecycle.Architecture;
+        public virtual string Architecture => _lifecycle.Architecture;
         public ModelBase Model => _lifecycle.Model;
 
         /// <summary>

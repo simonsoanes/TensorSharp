@@ -134,7 +134,7 @@ hidden ─► narrow(seq_len-1) if prefill
 
 - **GQA**，`Config.NumKVHeads < Config.NumHeads`。支持独立的 `key_length` 与 `value_length`（`_attnKeyLen`、`_attnValLen`），未设置时缺省为 `Config.HeadDim`。
 - **可选融合 QKV**。`FuseQKVWeights()` 在 GGUF 分散存放 Q / K / V 时构建 `attn_qkv.weight`。Decode 用 `_layerQkvFused[l]` per-layer 选择融合 matmul 还是三次独立 matmul。
-- **没有 QK-norm** —— 与 Qwen 3、Gemma 3、Gemma 4 不同，Mistral 3 跳过 Q、K 的 per-head RMSNorm。
+- **没有 QK-norm** —— Mistral 3 跳过 Q、K 的 per-head RMSNorm。
 
 ### 4.2 RoPE —— GPT-J 风格 + YaRN
 
@@ -363,8 +363,7 @@ prompt 块（`reused=1536`、`hashedCached=3`），首次在真实 GGUF 上端�
 ## 13. 优化机会
 
 - **原生 whole-model decode** —— 旧单序列 forward 仍是托管 C# + 后端派发
-  matmul。原生单调用 decode 路径（类比 Qwen 3 的 `TransformerModelDecode`）
-  能消除单序列路径上的大部分托管开销。
+  matmul。原生单调用 decode 路径能消除单序列路径上的大部分托管开销。
 - **融合单调用 decode** —— `Mistral3ModelDecode` GGML kernel 能通过把
   per-layer 派发合并显著提升旧单序列路径上的 Metal / CUDA 吞吐。
 - **量化视觉编码器** —— Pixtral 权重当前在加载时 dequantize 到 F32，图像繁

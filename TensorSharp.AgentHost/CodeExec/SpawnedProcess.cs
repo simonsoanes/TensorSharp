@@ -211,6 +211,14 @@ namespace TensorSharp.AgentHost.CodeExec
         {
             var thread = new Thread(() =>
             {
+                // Observe without consuming the zombie first. While the leader remains
+                // waitable its PID cannot be recycled, so -pid still names the process
+                // group we created even when the leader itself is already dead. Stopping
+                // that group here also means a caller cannot accidentally leave ordinary
+                // background descendants alive merely by observing a successful exit.
+                if (PosixSpawn.WaitForExitWithoutReaping(_pid))
+                    PosixSpawn.kill(-_pid, PosixSpawn.Sigkill);
+
                 int status = 0;
                 int rc;
                 do
@@ -410,7 +418,17 @@ namespace TensorSharp.AgentHost.CodeExec
             catch (Exception) { return true; }
         }
 
-        /// <summary>Kill it and everything it started. Safe to call on a process that has exited.</summary>
+        /// <summary>
+        /// Kill it and every process that remains in the launch process group. Safe to
+        /// call after the group leader has exited.
+        ///
+        /// <para>
+        /// A Unix process can deliberately escape a process group with <c>setsid()</c>.
+        /// Linux confined runs add a PID namespace around this group, which closes that
+        /// escape; macOS has no equivalent primitive, so Seatbelt reports that limitation
+        /// through its process-tree capability instead of this method overpromising it.
+        /// </para>
+        /// </summary>
         public void Kill()
         {
             if (_managed != null)
@@ -427,7 +445,9 @@ namespace TensorSharp.AgentHost.CodeExec
             {
                 // The tree first, and ONLY once the kernel confirms this pid really leads
                 // its own process group. If setting the group had silently failed the child
-                // would still be in OURS, and a signal to -pgid would kill the server.
+                // would still be in OURS, and a signal to -pgid would kill the server. Once
+                // the leader is reaped this check fails safely; the reaper has already
+                // signalled the group while the leader PID was still reserved.
                 if (PosixSpawn.getpgid(_pid) == _pid)
                     PosixSpawn.kill(-_pid, PosixSpawn.Sigkill);
 

@@ -76,24 +76,6 @@ namespace TensorSharp.Runtime
             // ---- Gemma ------------------------------------------------------
             Register(new ChatProtocol
             {
-                Id = "gemma3",
-                Architectures = new[] { "gemma3" },
-                Render = r => ChatTemplate.RenderGemma3(r.Messages, r.AddGenerationPrompt),
-                // The renderer takes only the messages: r.Tools is discarded before it
-                // is called, so a tool offered to Gemma 3 is never declared and can
-                // never be called. Saying so here is what makes Agent Skills write a
-                // selected skill's body into the prompt on this family instead of
-                // telling the model to fetch it with a tool that does not exist.
-                RendersToolDeclarations = false,
-                AppendMediaPlaceholders = (msg, sb) =>
-                {
-                    if (msg.ImagePaths != null)
-                        foreach (var _ in msg.ImagePaths) sb.Append("<start_of_image>");
-                },
-            });
-
-            Register(new ChatProtocol
-            {
                 Id = "gemma4",
                 Architectures = new[] { "gemma4" },
                 Render = r => ChatTemplate.RenderGemma4(r.Messages, r.AddGenerationPrompt, r.Tools, r.EnableThinking),
@@ -113,10 +95,11 @@ namespace TensorSharp.Runtime
                 // the generation prompt so the model skips reasoning; the template does
                 // not re-emit it for past assistant messages, but the cache holds it.
                 AssistantGenerationSuffix = thinking => thinking ? null : "<|channel>thought\n<channel|>",
-                // The template re-renders an in-turn tool round's thinking channel from
-                // `reasoning`, and needs `tool_calls` present to render that round's tool
-                // RESULT. Handing both over is what makes a skills/code round re-render
-                // byte-identically to what was generated - see RendersAssistantReasoning.
+                // The template can re-render an in-turn tool round's thinking channel
+                // from `reasoning`, and needs `tool_calls` present to render that round's
+                // tool RESULT. The KV renderer's canonical-template replay hook keeps
+                // `tool_calls` for that result while splicing the exact generated token
+                // run; structured reasoning remains the conservative fallback.
                 RendersAssistantReasoning = true,
                 // ...but only the CANONICAL Gemma 4 template has that reasoning branch.
                 // The template shipped in earlier builds - and in the community
@@ -136,24 +119,17 @@ namespace TensorSharp.Runtime
             });
 
             // ---- Qwen -------------------------------------------------------
-            Register(new ChatProtocol
-            {
-                Id = "qwen3",
-                Architectures = new[] { "qwen3" },
-                CreateOutputParser = () => new Qwen3OutputParser(),
-            });
-
-            // Qwen2 / Qwen2.5(-VL): same ChatML tool syntax as Qwen3, no thinking
+            // Qwen2 / Qwen2.5(-VL): ChatML tool syntax without a thinking
             // channel. Without this entry the family fell through to the passthrough
             // parser, which can never read a tool call back — so skills and run_code
             // were silently withheld from a model that handles them fine. The GGUF's
-            // own template renders the prompt; the hardcoded Qwen3 renderer (thinking
+            // own template renders the prompt; the hardcoded ChatML renderer (thinking
             // off) stands in when that template is missing or misrenders.
             Register(new ChatProtocol
             {
                 Id = "qwen25",
                 Architectures = new[] { "qwen2", "qwen2vl", "qwen2_vl", "qwen25vl" },
-                Render = r => ChatTemplate.RenderQwen3(r.Messages, r.AddGenerationPrompt, r.Tools, enableThinking: false),
+                Render = r => ChatTemplate.RenderChatMl(r.Messages, r.AddGenerationPrompt, r.Tools, enableThinking: false),
                 CreateOutputParser = () => new Qwen25OutputParser(),
             });
 
@@ -184,8 +160,8 @@ namespace TensorSharp.Runtime
                 ToolCallRawSplicing = ToolCallRawSplicing.Always,
             });
 
-            // Qwen3.8-Flash-Next frames chat exactly like Qwen 3 (the generic ChatML
-            // renderer) but carries the Qwen-VL vision placeholders.
+            // Qwen3.8-Flash-Next uses generic ChatML framing with Qwen-VL vision
+            // placeholders.
             Register(new ChatProtocol
             {
                 Id = "qwen4exp",
@@ -299,7 +275,7 @@ namespace TensorSharp.Runtime
                 Architectures = new[] { "nemotron_h", "nemotron_h_moe", "nemotron_h_omni" },
                 Render = r => ChatTemplate.RenderNemotron(r.Messages, r.AddGenerationPrompt, r.Tools, r.EnableThinking),
                 PreferOwnRenderer = _ => true,
-                CreateOutputParser = () => new Qwen3OutputParser(),
+                CreateOutputParser = () => new ChatMlOutputParser(),
             });
 
             Register(new ChatProtocol

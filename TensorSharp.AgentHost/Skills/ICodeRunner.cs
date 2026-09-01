@@ -104,7 +104,8 @@ namespace TensorSharp.AgentHost.Skills
         /// between calls on this request.
         ///
         /// <para>
-        /// False for the stateless endpoints, which get a fresh empty directory per call.
+        /// False for callers that supply no request/session workspace and therefore get a
+        /// fresh empty directory per call.
         /// It is passed IN rather than patched out of the finished text afterwards: editing
         /// the prose swapped eight words out of a paragraph whose other sixty went on
         /// asserting that files persist, ending with "Do not re-create what you already

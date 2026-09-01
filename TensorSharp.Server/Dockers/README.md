@@ -116,10 +116,9 @@ Model sizing guidance:
 
 | Model | Download size | Notes |
 |---|---|---|
-| Qwen3-1.7B Q4_K_M | ~1.1 GB | Smallest listed option; fast download, suitable for `cpu-basic` |
-| Qwen3-4B | ~2.5 GB | Good quality/speed balance on CPU |
 | **gemma-4-E2B-it (abliterated, QAT)** (default) | ~3.4 GB | Multimodal; decodes acceptably on CPU |
 | gemma-4-12B-it (abliterated) | ~7.4 GB | Higher quality; slow to decode on CPU — prefer `cpu-upgrade` |
+| Qwen3.5-9B Q8_0 | ~8.9 GB | Text-only; highest-quality local quant, but slow on CPU — prefer GPU acceleration |
 
 The default gemma-4-E2B image already downloads the `mmproj` projector and passes
 `--mmproj` in the `CMD`, so vision input works out of the box. To host a

@@ -171,6 +171,7 @@ namespace TensorSharp.Runtime
                 ToolCallId = msg.ToolCallId,
                 Thinking = msg.Thinking,
                 RawOutputTokens = msg.RawOutputTokens != null ? new List<int>(msg.RawOutputTokens) : null,
+                RawPromptTrailingWhitespace = msg.RawPromptTrailingWhitespace,
                 CacheControl = msg.CacheControl != null
                     ? new CacheControlMarker { Type = msg.CacheControl.Type }
                     : null,

@@ -132,6 +132,7 @@ namespace TensorSharp.Server
                         ToolCallId = src.ToolCallId,
                         Thinking = src.Thinking,
                         RawOutputTokens = tracked.RawOutputTokens,
+                        RawPromptTrailingWhitespace = tracked.RawPromptTrailingWhitespace,
                         CacheControl = src.CacheControl,
                         ContentCacheBreakpoints = src.ContentCacheBreakpoints,
                     });
@@ -279,7 +280,8 @@ namespace TensorSharp.Server
             List<ChatMessage> trackedHistory,
             List<ChatMessage> incomingHistory,
             string assistantText,
-            List<int> generatedTokens)
+            List<int> generatedTokens,
+            string? rawPromptTrailingWhitespace = null)
         {
             trackedHistory.Clear();
             if (incomingHistory != null)
@@ -293,6 +295,7 @@ namespace TensorSharp.Server
                 Role = "assistant",
                 Content = assistantText,
                 RawOutputTokens = generatedTokens,
+                RawPromptTrailingWhitespace = rawPromptTrailingWhitespace,
             });
         }
 
@@ -367,6 +370,7 @@ namespace TensorSharp.Server
                 ToolCallId = msg.ToolCallId,
                 Thinking = msg.Thinking,
                 RawOutputTokens = msg.RawOutputTokens,
+                RawPromptTrailingWhitespace = msg.RawPromptTrailingWhitespace,
                 CacheControl = msg.CacheControl,
                 ContentCacheBreakpoints = msg.ContentCacheBreakpoints != null
                     ? new List<int>(msg.ContentCacheBreakpoints)
@@ -389,6 +393,7 @@ namespace TensorSharp.Server
                 ToolCallId = src.ToolCallId,
                 Thinking = src.Thinking,
                 RawOutputTokens = src.RawOutputTokens,
+                RawPromptTrailingWhitespace = src.RawPromptTrailingWhitespace,
                 CacheControl = src.CacheControl != null
                     ? new CacheControlMarker { Type = src.CacheControl.Type }
                     : null,

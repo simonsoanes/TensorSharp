@@ -211,23 +211,89 @@ public class SpawnedProcessTests
     }
 
     [Fact]
+    public void ReaperStopsTheProcessGroupBeforeReapingItsExitedLeader()
+    {
+        if (!OnUnix)
+            return;
+
+        // The old kill path first asked getpgid(leader). The reaper has already waited
+        // this shell by the time WaitForExit returns, so that query failed and the group
+        // signal was skipped even though the background child still belonged to it.
+        // Closing the child's stdio makes the drain complete too, reproducing the exact
+        // case where there was no remaining pipe to reveal the leaked process.
+        var lines = new List<string>();
+        Assert.True(
+            SpawnedProcess.TryStart(
+                Request("/bin/sh", new[]
+                {
+                    "-c", "sleep 30 </dev/null >/dev/null 2>&1 & echo $!",
+                }, onOut: lines.Add),
+                out SpawnedProcess? p, out string error),
+            error);
+
+        int descendant = -1;
+        try
+        {
+            Assert.True(p!.WaitForExit(20_000), "the group leader should exit immediately");
+            Assert.True(p.WaitForDrain(10_000));
+            Assert.True(int.TryParse(Assert.Single(lines), out descendant));
+
+            Assert.True(
+                SpinWait.SpinUntil(() => PosixSpawn.kill(descendant, 0) != 0, 10_000),
+                $"background descendant {descendant} survived the reaped group leader");
+        }
+        finally
+        {
+            if (descendant > 0)
+                PosixSpawn.kill(descendant, PosixSpawn.Sigkill);
+            p?.Dispose();
+        }
+    }
+
+    [Fact]
     public void DrainingIsBoundedWhenSomethingElseHoldsThePipe()
     {
         if (!OnUnix)
             return;
 
-        // The documented hang: `cmd &` leaves a grandchild holding the inherited stdout, so
-        // the pipe never reaches EOF even though the process everyone waited for is gone.
-        var lines = new List<string>();
+        // The bounded drain still matters for a process that deliberately leaves the
+        // launch group. Linux has setsid(1); macOS /bin/sh can put a monitored job in its
+        // own group. Either child keeps inherited stdout open after the reaper safely
+        // stops the shell's original group.
+        string command;
+        if (OperatingSystem.IsLinux())
+        {
+            string? setsid = File.Exists("/usr/bin/setsid") ? "/usr/bin/setsid"
+                : File.Exists("/bin/setsid") ? "/bin/setsid"
+                : null;
+            if (setsid == null)
+                return;
+            command = setsid + " sleep 30 & echo child:$!; echo done";
+        }
+        else if (OperatingSystem.IsMacOS())
+        {
+            command = "set -m; sleep 30 & echo child:$!; echo done";
+        }
+        else
+        {
+            return;
+        }
+
+        var lines = new ConcurrentQueue<string>();
         Assert.True(
             SpawnedProcess.TryStart(
-                Request("/bin/sh", new[] { "-c", "sleep 30 & echo done" }, onOut: lines.Add),
+                Request("/bin/sh", new[] { "-c", command },
+                    onOut: lines.Enqueue),
                 out SpawnedProcess? p, out string error),
             error);
 
-        using (p)
+        int escaped = -1;
+        try
         {
             Assert.True(p!.WaitForExit(20_000), "the shell itself should exit immediately");
+            Assert.True(SpinWait.SpinUntil(() => lines.Count >= 2, 5000));
+            string childLine = lines.Single(line => line.StartsWith("child:", StringComparison.Ordinal));
+            Assert.True(int.TryParse(childLine.AsSpan("child:".Length), out escaped));
 
             var sw = Stopwatch.StartNew();
             bool drained = p.WaitForDrain(500);
@@ -235,6 +301,12 @@ public class SpawnedProcessTests
 
             Assert.False(drained, "the pipe cannot be at EOF while the grandchild holds it");
             Assert.True(sw.Elapsed < TimeSpan.FromSeconds(5), $"the bound did not hold: {sw.Elapsed}");
+        }
+        finally
+        {
+            if (escaped > 0)
+                PosixSpawn.kill(escaped, PosixSpawn.Sigkill);
+            p?.Dispose();
         }
     }
 

@@ -86,7 +86,7 @@ public class SkillCapabilityConsistencyTests
     public void Qwen25Family_IsRegistered_WithToolsButNoThinking()
     {
         // qwen2vl used to be this suite's example of an unregistered family, and its
-        // chats got no tools at all. It speaks the same ChatML tool syntax as Qwen3,
+        // chats got no tools at all. It speaks the standard ChatML tool syntax,
         // so it is registered now — with thinking pinned off, because it has no
         // <think> channel for the parser to wait on.
         Assert.True(SkillCapabilities.For("qwen2vl").ToolsRendered);
@@ -112,7 +112,6 @@ public class SkillCapabilityConsistencyTests
     [InlineData("nemotron_h_moe")]
     [InlineData("deepseek4")]
     [InlineData("glm-dsa")]
-    [InlineData("qwen3")]
     public void TheFamiliesThatCanDoTheRoundTrip_StillOfferTools(string architecture)
     {
         // The guard above must not have quietly disabled skills everywhere.
@@ -168,9 +167,8 @@ public class SkillCapabilityConsistencyTests
     }
 
     [Fact]
-    public void GemmaThreeAndMistral_KeepTheirExistingOptOut()
+    public void Mistral_KeepsItsExistingOptOut()
     {
-        Assert.False(SkillCapabilities.For("gemma3").ToolsRendered);
         Assert.False(SkillCapabilities.For("mistral3").ToolsRendered);
         Assert.False(SkillCapabilities.For("mistral3").ToolResultsRendered);
     }

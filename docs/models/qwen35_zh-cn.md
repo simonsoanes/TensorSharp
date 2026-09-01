@@ -15,7 +15,7 @@
 | 工具调用 | 是（`<tool_call>{...}</tool_call>`） |
 | 批处理 / 分页前向 | **默认启用** —— 设置 `TS_QWEN35_BATCHED=0`（或 `--no-continuous-batching`）可强制走旧的按序列 KV-swap 路径用于 A/B 对比。带每槽位 GatedDeltaNet 递归状态池与可选的原生批处理 GDN 内核（`TS_QWEN35_BATCHED_GDN_NATIVE=1`）。详见 §11。 |
 | MTP 投机解码 | Qwen 3.6 —— NextN 草稿块内嵌在主干 GGUF 中（无需独立文件；仅限保留 MTP 的 GGUF，见[下载](#下载)）；在**两个宿主上**都用 `--spec` 启用 —— `TensorSharp.Cli` 与 `TensorSharp.Server` 共用同一个 [`SpeculativeCliFlags`](../../TensorSharp.Runtime/Speculative/SpeculativeCliFlags.cs)。部分接受时做 GDN 递归状态快照 / 回滚。只要 GGUF 保留 NextN 块，就会对单序列（无并发）请求启用。详见 §12。 |
-| 输出解析器 | `Qwen35OutputParser`（继承 `Qwen3OutputParser`） |
+| 输出解析器 | `Qwen35OutputParser`（继承 `ChatMlOutputParser`） |
 
 ## 下载
 
@@ -618,7 +618,7 @@ prefill 内核也会加速投机验证：在 Qwen3.6-27B IQ2_XXS 上实测把 MT
 
 ## 13. 输出解析器与聊天模板
 
-- `Qwen35OutputParser` 继承 `Qwen3OutputParser`，wire 格式相同：`<think> ... </think>` 表示思维链，`<tool_call>{"name": "...", "arguments": {...}}</tool_call>` 表示工具调用。
+- `Qwen35OutputParser` 继承 `ChatMlOutputParser`，wire 格式为：`<think> ... </think>` 表示思维链，`<tool_call>{"name": "...", "arguments": {...}}</tool_call>` 表示工具调用。
 - 聊天模板使用标准 Qwen `<|im_start|>` / `<|im_end|>` 格式，外加视觉占位符 `<|image_pad|>`。
 - `ChatTemplate.ExpandImageTokens(inputTokens, imagePadId, tokenCounts)` 把每个 `<|image_pad|>` 占位符展开为对应图像所需 token 数；多模态注入器随后在这些位置写入编码后的 embedding，再调用 `Forward()`。
 

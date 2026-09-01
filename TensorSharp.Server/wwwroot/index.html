@@ -1012,44 +1012,39 @@ button.primary:hover { background: var(--accent-hover); }
   border-color: var(--danger);
 }
 
-/* Skill trace: the .thinking-block idiom in the neutral surface palette. */
-.skill-block {
+/* One transient activity panel for the operation that is running now. It is
+   removed at completion; completed tool/skill details belong in server logs. */
+.current-activity {
   background: var(--surface2);
-  border-color: var(--border);
-}
-
-.skill-block .thinking-header { color: var(--text2); }
-.skill-block .thinking-header:hover { background: #333; }
-
-.skill-block .thinking-content {
-  border-top-color: var(--border);
-  color: var(--text2);
-  white-space: normal;
-}
-
-.skill-step-line { word-break: break-word; }
-.skill-step-line.failed { color: var(--danger); }
-
-/* Live tool-call progress: visible in the header while the trace is collapsed. */
-.skill-live { color: var(--text2); font-size: 0.85em; font-weight: normal; }
-
-/* The draft of a tool call as the model writes it, inside the collapsed trace. */
-.tool-draft {
-  margin: 6px 0 0;
-  padding: 6px 8px;
-  max-height: 200px;
-  overflow-y: auto;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  font-size: 0.8em;
-  white-space: pre-wrap;
-  word-break: break-word;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  overflow: hidden;
 }
 
-/* Always-visible tail of the code being written / the command being run,
-   directly under the Skills header — live detail without expanding the trace. */
-.tool-live-preview {
-  margin: 4px 8px 6px;
+.current-activity-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  color: var(--text2);
+  font-size: 12px;
+}
+
+.current-activity-spinner {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+/* A bounded tail of only the current code draft, edit, file operation, or
+   process output. The node and its buffers disappear when that operation ends. */
+.current-activity-detail {
+  margin: 0 8px 7px;
   padding: 5px 8px;
   max-height: 5.6em;
   overflow-y: auto;
@@ -1436,8 +1431,6 @@ function removeAttachment(idx) {
 // it is attacker-controlled: these renderers build nodes and assign textContent
 // instead of interpolating into innerHTML.
 
-const SKILL_STEP_LABELS = { skills_list: 'List', skills_read: 'Read', skills_run: 'Run' };
-
 function skillNameOf(sk) {
   if (!sk) return '';
   if (typeof sk.name === 'string' && sk.name) return sk.name;
@@ -1783,21 +1776,62 @@ async function deleteSkill(idx) {
   await loadSkillsRoster();
 }
 
-// The collapsed Skills trace block above the reply, created on first use.
-function ensureSkillBlock(assistDiv) {
-  let block = assistDiv.querySelector('.skill-block');
-  if (!block) {
-    const bubbleText = assistDiv.querySelector('.bubble-text');
-    const bubble = assistDiv.querySelector('.bubble');
-    if (!bubbleText && !bubble) return null;
-    block = document.createElement('div');
-    block.className = 'thinking-block skill-block';
-    block.innerHTML = '<div class="thinking-header" onclick="toggleThinking(this)"><span class="arrow">&#x25B6;</span> <span class="skill-block-title">Skills</span> <span class="skill-live"></span></div><div class="thinking-content"></div>';
-    // Before the reply text, i.e. after any reasoning block already sitting there.
-    if (bubbleText && bubbleText.parentNode) bubbleText.parentNode.insertBefore(block, bubbleText);
-    else bubble.appendChild(block);
-  }
+// The WebUX intentionally has no completed-operation transcript. It owns one
+// replace-in-place panel for the operation running now, then removes the panel
+// on `finished`, `done`, cancellation, failure, or a closed stream. Debugging
+// remains a server-log concern.
+function ensureCurrentActivity(assistDiv) {
+  let block = assistDiv.querySelector('.current-activity');
+  if (block) return block;
+
+  const bubbleText = assistDiv.querySelector('.bubble-text');
+  const bubble = assistDiv.querySelector('.bubble');
+  if (!bubbleText && !bubble) return null;
+
+  block = document.createElement('div');
+  block.className = 'current-activity';
+
+  const header = document.createElement('div');
+  header.className = 'current-activity-header';
+  const spinner = document.createElement('span');
+  spinner.className = 'current-activity-spinner';
+  const status = document.createElement('span');
+  status.className = 'current-activity-status';
+  header.appendChild(spinner);
+  header.appendChild(status);
+
+  const detail = document.createElement('pre');
+  detail.className = 'current-activity-detail';
+  block.appendChild(header);
+  block.appendChild(detail);
+
+  // Before the reply text, i.e. after any reasoning block already sitting there.
+  if (bubbleText && bubbleText.parentNode) bubbleText.parentNode.insertBefore(block, bubbleText);
+  else bubble.appendChild(block);
   return block;
+}
+
+function clearCurrentActivity(assistDiv) {
+  const block = assistDiv && assistDiv.querySelector('.current-activity');
+  if (block) block.remove();
+}
+
+function activityLabel(tool, phase) {
+  const writing = phase === 'writing';
+  switch (tool) {
+    case 'shell':       return writing ? 'Generating code…' : 'Running code…';
+    case 'apply_patch': return writing ? 'Generating patch…' : 'Applying patch…';
+    case 'read_file':   return writing ? 'Preparing file read…' : 'Reading file…';
+    case 'edit_file':   return writing ? 'Preparing file edit…' : 'Editing file…';
+    case 'write_file':  return writing ? 'Generating file…' : 'Writing file…';
+    case 'skills_list': return writing ? 'Preparing skill lookup…' : 'Checking skills…';
+    case 'skills_read': return writing ? 'Preparing skill read…' : 'Reading skill file…';
+    case 'skills_run':  return writing ? 'Preparing skill run…' : 'Running skill…';
+    default: {
+      const name = tool ? String(tool).replace(/_/g, ' ') : 'operation';
+      return (writing ? 'Preparing ' : 'Running ') + name + '…';
+    }
+  }
 }
 
 // Make a tool-call draft readable: Gemma frames string arguments with <|"|>,
@@ -1810,112 +1844,68 @@ function cleanToolDraft(raw) {
   return text;
 }
 
-// Live progress while the model WRITES a tool call and while the host RUNS it —
-// the two stretches where nothing else streams. Three surfaces, all visible with
-// the trace still collapsed: the header shows the state ("writing shell…") and,
-// for a shell call, data.detail is the first line of the command, truncated to 64 chars,
-// a small preview pane shows the last lines of the code as they are written and
-// what exactly is executing ("python · 2.1 KB"), and the full draft accumulates
-// inside the collapsed content for anyone who expands it.
+// Live progress while the model writes a tool call and while the host runs it.
+// Only a bounded tail for the CURRENT phase is retained. Moving from generation
+// to execution replaces the draft with current runtime output; finishing removes
+// all activity UI instead of turning it into a historical trace.
 function updateToolProgress(assistDiv, data) {
-  const block = ensureSkillBlock(assistDiv);
-  if (!block) return;
-  const live = block.querySelector('.skill-live');
-  const content = block.querySelector('.thinking-content');
-  const label = data.tool ? String(data.tool) : 'tool call';
-
-  let preview = block.querySelector('.tool-live-preview');
-  function ensurePreview() {
-    if (!preview) {
-      preview = document.createElement('pre');
-      preview.className = 'tool-live-preview';
-      block.insertBefore(preview, content);
-    }
-    return preview;
+  const phase = String(data.tool_progress || '');
+  if (phase === 'finished') {
+    clearCurrentActivity(assistDiv);
+    return;
   }
+  if (phase !== 'writing' && phase !== 'running') return;
 
-  if (data.tool_progress === 'writing') {
-    block._rawDraft = (block._rawDraft || '') + (data.text ? String(data.text) : '');
+  const block = ensureCurrentActivity(assistDiv);
+  if (!block) return;
+  const status = block.querySelector('.current-activity-status');
+  const detail = block.querySelector('.current-activity-detail');
+  const incomingTool = data.tool ? String(data.tool) : '';
+  const tool = incomingTool || block._tool || '';
+  const changedTool = !!(incomingTool && block._tool && incomingTool !== block._tool);
+  const changedPhase = block._phase !== phase;
+
+  if (changedTool || changedPhase) {
+    block._rawDraft = '';
+    block._runOutput = '';
+    detail.textContent = '';
+  }
+  block._phase = phase;
+  block._tool = tool;
+
+  if (phase === 'writing') {
+    // This short-lived buffer exists only to turn escaped JSON/code deltas into
+    // a readable tail. Bound it, and discard it at the next phase transition.
+    block._rawDraft = ((block._rawDraft || '') + (data.text ? String(data.text) : '')).slice(-8000);
     const cleaned = cleanToolDraft(block._rawDraft);
 
-    let draft = block.querySelector('.tool-draft');
-    if (!draft) {
-      draft = document.createElement('pre');
-      draft.className = 'tool-draft';
-      content.appendChild(draft);
-    }
-    draft.textContent = cleaned.length > 20000 ? cleaned.slice(-20000) : cleaned;
-
-    // The visible pane follows the last few lines being written, like a tail -f.
+    // Follow the last few lines being generated, like a small tail -f.
     let tail = cleaned.slice(-400);
     const firstBreak = tail.indexOf('\n');
     if (firstBreak > 0 && firstBreak < tail.length - 1) tail = tail.slice(firstBreak + 1);
-    const pane = ensurePreview();
-    pane.textContent = tail;
-    pane.scrollTop = pane.scrollHeight;
-
-    if (live) live.textContent = '· writing ' + label + '… ' + formatArtifactBytes(block._rawDraft.length);
-  } else if (data.tool_progress === 'running') {
+    detail.textContent = tail;
+    detail.style.display = tail ? '' : 'none';
+    detail.scrollTop = detail.scrollHeight;
+    if (status) {
+      const size = formatArtifactBytes(block._rawDraft.length);
+      status.textContent = activityLabel(tool, phase) + (size ? ' ' + size : '');
+    }
+  } else {
     const secs = Math.round(Number(data.seconds) || 0);
-    const what = data.detail ? String(data.detail) : label;
-    if (live) live.textContent = '· running ' + label + '…' + (secs > 0 ? ' ' + secs + 's' : '');
+    const what = data.detail ? String(data.detail) : (tool || 'operation');
+    if (status) status.textContent = activityLabel(tool, phase) + (secs > 0 ? ' ' + secs + 's' : '');
 
-    // The tool's own stdout/stderr, streamed while it runs: pip's "Collecting
-    // reportlab", the program's prints. Full (capped) log goes into the
-    // expandable trace; the preview pane tails the last few lines.
+    // Show only the current operation's short stdout/stderr tail. Long-lived
+    // diagnostic history is intentionally not kept in the browser.
     if (data.text) {
-      block._runOutput = (block._runOutput || '') + String(data.text);
-      let out = block.querySelector('.tool-output');
-      if (!out) {
-        out = document.createElement('pre');
-        out.className = 'tool-draft tool-output';
-        content.appendChild(out);
-      }
-      out.textContent = block._runOutput.length > 20000
-        ? block._runOutput.slice(-20000) : block._runOutput;
+      block._runOutput = ((block._runOutput || '') + String(data.text)).slice(-4000);
     }
     const outTail = (block._runOutput || '').split('\n').slice(-6).join('\n').trimEnd();
-    const pane = ensurePreview();
-    pane.textContent = '⏵ running ' + what + (secs > 0 ? ' — ' + secs + 's' : '')
+    detail.textContent = '⏵ ' + what
       + (outTail ? '\n' + outTail : '');
-    pane.scrollTop = pane.scrollHeight;
-  } else if (data.tool_progress === 'finished') {
-    if (live) live.textContent = '';
-    if (preview) preview.remove();
-    block._rawDraft = '';
-    block._runOutput = '';
+    detail.style.display = '';
+    detail.scrollTop = detail.scrollHeight;
   }
-}
-
-// One executed skill tool call, appended to a collapsed trace above the reply.
-function appendSkillStep(assistDiv, data) {
-  const block = ensureSkillBlock(assistDiv);
-  if (!block) return;
-
-  const step = String(data.skill_step || '');
-  // hasOwnProperty, so a step name like "constructor" cannot pull a label off
-  // Object.prototype and stringify a function into the trace.
-  const known = Object.prototype.hasOwnProperty.call(SKILL_STEP_LABELS, step);
-  const parts = [known ? SKILL_STEP_LABELS[step] : step];
-  if (data.skill) parts.push(String(data.skill));
-  if (data.detail) parts.push(String(data.detail));
-
-  const line = document.createElement('div');
-  line.className = 'skill-step-line';
-  let text = parts.join(' / ');
-  if (data.ok === false) {
-    text += ' — failed';
-    line.classList.add('failed');
-  }
-  line.textContent = text;
-
-  const content = block.querySelector('.thinking-content');
-  content.appendChild(line);
-  const count = content.childElementCount;
-  const title = block.querySelector('.skill-block-title');
-  if (title) title.textContent = 'Skills · ' + count + (count === 1 ? ' step' : ' steps');
-
-  if (Array.isArray(data.files) && data.files.length) appendArtifactFiles(assistDiv, data.files);
 }
 
 // Only this server's own artifact routes become hrefs; anything else in a frame
@@ -2438,10 +2428,13 @@ async function requestAssistantResponse() {
             if (reasoningOn) scrollChatToBottom();
           }
           if (data.skill_step) {
-            // One executed skill tool call. Frames are discriminated by key, so a
-            // server without skills simply never sends this one.
-            appendSkillStep(assistDiv, data);
-            scrollChatToBottom();
+            // Completion metadata is intentionally not rendered as a history.
+            // Keep only user-facing output files; call execution is logged
+            // by the server and the matching `finished` event clears live activity.
+            if (Array.isArray(data.files) && data.files.length) {
+              appendArtifactFiles(assistDiv, data.files);
+              scrollChatToBottom();
+            }
           }
           if (data.tool_progress) {
             // Live "writing code… / running…" state for an in-process tool call.
@@ -2475,6 +2468,7 @@ async function requestAssistantResponse() {
             scrollChatToBottom();
           }
           if (data.done) {
+            clearCurrentActivity(assistDiv);
             if (data.sessionId) currentSessionId = data.sessionId;
             if (data.error) {
               bubbleText.textContent = 'Error: ' + data.error;
@@ -2522,6 +2516,9 @@ async function requestAssistantResponse() {
       bubbleText.textContent = 'Error: ' + e.message;
     }
   } finally {
+    // Covers cancellation, network failure, malformed/early-ended SSE, and any
+    // server path that could not emit the normal `finished`/`done` lifecycle.
+    clearCurrentActivity(assistDiv);
     if (fullText) {
       const assistantMessage = { role: 'assistant', content: fullText };
       if (fullThinking) assistantMessage.thinking = fullThinking;

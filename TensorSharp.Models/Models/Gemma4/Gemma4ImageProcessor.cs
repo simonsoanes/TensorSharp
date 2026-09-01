@@ -52,7 +52,7 @@ namespace TensorSharp.Models
         {
             byte[] fileBytes = File.ReadAllBytes(imagePath);
             int origWidth, origHeight;
-            byte[] rgba = Gemma3ImageProcessor.DecodeImageToRGBA(fileBytes, out origWidth, out origHeight);
+            byte[] rgba = ImageProcessorUtils.DecodeImageToRGBA(fileBytes, out origWidth, out origHeight);
 
             int alignSize = PatchSize * NMerge;
             CalcSizePreservedRatio(origWidth, origHeight, alignSize, _minPixels, _maxPixels,
@@ -126,8 +126,8 @@ namespace TensorSharp.Models
 
             // Resize the content preserving aspect ratio into [C, newH, newW].
             float[] content = hasMeanStd
-                ? Gemma3ImageProcessor.ResizeRgbaToChannelFirstNormalized(rgba, origW, origH, newW, newH, _imageMean, _imageStd)
-                : Gemma3ImageProcessor.ResizeRgbaToChannelFirstNormalized(rgba, origW, origH, newW, newH);
+                ? ImageProcessorUtils.ResizeRgbaToChannelFirstNormalized(rgba, origW, origH, newW, newH, _imageMean, _imageStd)
+                : ImageProcessorUtils.ResizeRgbaToChannelFirstNormalized(rgba, origW, origH, newW, newH);
 
             int targetPixels = targetW * targetH;
             int contentPixels = newW * newH;

@@ -54,10 +54,10 @@ namespace TensorSharp.Models
         public (float[] pixels, int width, int height) ProcessImage(string imagePath)
         {
             byte[] fileBytes = File.ReadAllBytes(imagePath);
-            byte[] rgba = Gemma3ImageProcessor.DecodeImageToRGBA(fileBytes, out int origWidth, out int origHeight);
+            byte[] rgba = ImageProcessorUtils.DecodeImageToRGBA(fileBytes, out int origWidth, out int origHeight);
 
             // Composite over white background
-            rgba = Gemma3ImageProcessor.CompositeOverWhite(rgba, origWidth, origHeight);
+            rgba = ImageProcessorUtils.CompositeOverWhite(rgba, origWidth, origHeight);
 
             // Resize to fit longest_edge
             double ratio = Math.Max((double)origHeight / LongestEdge, (double)origWidth / LongestEdge);

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>文本与 LLM 模型 — TensorSharp 维基</title>
-  <meta name="description" content="十二种文本架构的下载与运行示例，以及多模态输入、思考模式与工具调用。">
+  <meta name="description" content="十种文本架构的下载与运行示例，以及多模态输入、思考模式与工具调用。">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
   <script>try{var t=localStorage.getItem('ts-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.classList.toggle('dark',t==='dark');}catch(e){}</script>
@@ -115,19 +115,6 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll \
   <p>实测：2× RTX PRO 6000 Blackwell（96 GB）、GLM-5.3-Flash-UD-Q2_K_XL（101 GiB）、按层切分、两个引擎都用 <code>n_ubatch</code> 2048、背靠背运行：pp2048 llama.cpp <strong>2070 t/s</strong> 对 TensorSharp 2014，pp16384 1690 对 <strong>1692</strong>，pp32768 <strong>1483</strong> 对 1446，tg64 36.6 对 <strong>73.5</strong>。prefill 双方相差不过几个百分点；decode 是 llama.cpp 的 <strong>2.0×</strong>。</p>
   <p>它现在也能在 <code>--backend cpu</code>（100% 纯 C#、无原生依赖）上跑：<code>glm5next</code> 的 NoPE MLA（文本塔里没有 rope 半边，也就没有可切分的部分）以及它使用的 <code>IQ2_XS</code> / <code>IQ4_XS</code> 权重都已获得托管支持。但在这条路径上它明显落后于 GGML 后端：在 122 CPU 的机器上（22 token 提示、输出 16 token）实测 prefill <strong>3.1</strong> / decode <strong>1.6</strong> tok/s，而同文件同机器上的 <code>ggml_cpu</code> 是 17.7 / 3.9——prefill 约慢 5.7 倍，decode 约慢 2.4 倍，其中约 89% 的时间花在 MoE 专家路径上。请把它当作用于 A/B 的参考实现，而不是逐位对齐的实现：与 <code>ggml_cpu</code> 相比，prefill 的 logits 在 154880 词表上余弦相似度为 <strong>0.9567</strong>，贪心解码出的文本也不同——原生一侧排前两位的 logit 只差 0.11，而托管路径把两者的顺序调了个个儿。这与 2 bit 下专家选择的敏感性相符，但<em>并不</em>构成证明：0.96 低于更高精度 checkpoint 应有的 ~0.999，而当时没有更高精度的 GLM-5.3 GGUF 可作对照。完整的实测数据、为此所做的四处修复与这一说明，见 <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/models/glm_zh-cn.md">GLM 模型卡</a>。</p>
 
-  <h3 id="gemma3">Gemma 3（文本 + 图像）</h3>
-  <pre data-lang="bash"><code>hf download ggml-org/gemma-3-4b-it-GGUF gemma-3-4b-it-Q4_K_M.gguf --local-dir models
-hf download ggml-org/gemma-3-4b-it-GGUF mmproj-model-f16.gguf --local-dir models
-
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-3-4b-it-Q4_K_M.gguf --mmproj models/mmproj-model-f16.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
-dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gemma-3-4b-it-Q4_K_M.gguf --mmproj models/mmproj-model-f16.gguf --backend ggml_cuda</code></pre>
-
-  <h3 id="qwen3">Qwen 3（文本、思维链、工具）</h3>
-  <pre data-lang="bash"><code>hf download Qwen/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf --local-dir models
-
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Qwen3-4B-Q4_K_M.gguf --input prompt.txt --think --max-tokens 400 --backend ggml_cuda
-dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3-4B-Q4_K_M.gguf --backend ggml_cuda</code></pre>
-
   <h3 id="qwen35">Qwen 3.5 / 3.6（文本 + 图像、思维链、工具；3.6 支持 NextN MTP）</h3>
   <pre data-lang="bash"><code>hf download unsloth/Qwen3.5-9B-GGUF Qwen3.5-9B-UD-Q4_K_XL.gguf --local-dir models
 hf download unsloth/Qwen3.5-9B-GGUF mmproj-F16.gguf --local-dir models
@@ -215,7 +202,6 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/diffusiongem
     <thead><tr><th>家族</th><th>输入</th><th>说明</th></tr></thead>
     <tbody>
       <tr><td>Gemma 4</td><td>图像 · 视频 · 音频</td><td>图像 PNG/JPEG/HEIC；视频 MP4（经 OpenCV 以 1 fps 采样）；音频 WAV 16 kHz 单声道 / MP3 / OGG。E4B 投影器：<code>mmproj-gemma-4-E4B-it-Q8_0.gguf</code>。</td></tr>
-      <tr><td>Gemma 3</td><td>图像</td><td>PNG / JPEG / HEIC。非 gated 4B 投影器：<code>mmproj-model-f16.gguf</code>。</td></tr>
       <tr><td>Qwen 3.5 / 3.6</td><td>图像</td><td>动态分辨率视觉编码器；9B / 3.6 仓库使用 <code>mmproj-F16.gguf</code>。</td></tr>
       <tr><td>Qwen 3.8 Flash Next</td><td>图像</td><td>Qwen3.5-VL 视觉塔，使用 (T,H,W) IMRoPE 位置；支持多图提示与多轮图像会话，新提示恰好延长缓存前缀时跨轮复用 KV。投影器：<code>mmproj-BF16.gguf</code>（同仓库）。</td></tr>
       <tr><td>GLM 5.x（5.3-Flash）</td><td>图像</td><td>GLM-OCR ViT——24 个块作为一张常驻设备的图跑完，投影后的行在原生执行器内部覆盖 <code>&lt;|image|&gt;</code> 占位。支持多图与多轮图像会话。投影器：<code>mmproj-BF16.gguf</code>（同仓库）。GLM-5.2 仅文本。</td></tr>
@@ -228,9 +214,9 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/diffusiongem
   <p>通过 <a href="cli_zh-cn.html#examples">CLI</a>（<code>--image</code>、<code>--video</code>、<code>--audio</code>、<code>--pdf</code>）、<a href="server_zh-cn.html#webui">Web UI</a> 上传，或 <a href="http-api_zh-cn.html">HTTP API</a>（Ollama 用 base64 <code>images</code> 数组，OpenAI 用 <code>image_url</code> data URI）发送文件。数字版 PDF 会提取文本；扫描版 PDF 会转换为页面图像并需要视觉模型。</p>
 
   <h2 id="thinking">思考 / 推理模式</h2>
-  <p>具备思考能力的模型（Qwen 3、Qwen 3.5/3.6、Qwen 3.8 Flash Next、Gemma 4、GPT OSS、Nemotron-H、DeepSeek V4、GLM 5.x、Muse-Glimmer）会在最终答案前产生结构化的思维链。思考内容与可见回复分离，便于客户端显示或隐藏。</p>
+  <p>具备思考能力的模型（Qwen 3.5/3.6、Qwen 3.8 Flash Next、Gemma 4、GPT OSS、Nemotron-H、DeepSeek V4、GLM 5.x、Muse-Glimmer）会在最终答案前产生结构化的思维链。思考内容与可见回复分离，便于客户端显示或隐藏。</p>
   <ul>
-    <li><strong>Qwen 3 / Qwen 3.5/3.6 / Nemotron-H</strong> —— <code>&lt;think&gt;…&lt;/think&gt;</code> 标签。</li>
+    <li><strong>Qwen 3.5/3.6 / Nemotron-H</strong> —— <code>&lt;think&gt;…&lt;/think&gt;</code> 标签。</li>
     <li><strong>Qwen 3.8 Flash Next</strong> —— 同样是 <code>&lt;think&gt;…&lt;/think&gt;</code> 标签，但始终开启：生成提示会无条件打开该块，没有非思考模式可切。</li>
     <li><strong>Gemma 4</strong> —— <code>&lt;|channel&gt;thought …&lt;channel|&gt;</code> 标签。</li>
     <li><strong>GPT OSS</strong> —— Harmony 格式：<code>&lt;|channel|&gt;analysis</code> 用于思考，<code>&lt;|channel|&gt;final</code> 用于答案。</li>
@@ -243,7 +229,7 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/diffusiongem
   <h2 id="toolcalling">工具调用 / 函数调用</h2>
   <p>模型可以调用用户自定义工具，并参与多轮工具调用对话。将工具定义为 JSON，通过 <code>--tools</code>（CLI）或 <code>tools</code> 参数（API）传入。每个架构使用各自的线格式，但输出解析器都会将调用提取为结构化 <code>tool_calls</code>：</p>
   <ul>
-    <li><strong>Qwen 3 / Nemotron-H</strong> —— <code>&lt;tool_call&gt;{"name": …, "arguments": {…}}&lt;/tool_call&gt;</code></li>
+    <li><strong>Nemotron-H</strong> —— <code>&lt;tool_call&gt;{"name": …, "arguments": {…}}&lt;/tool_call&gt;</code></li>
     <li><strong>Qwen 3.5 / 3.6</strong> —— 同样是 <code>&lt;tool_call&gt;</code> 块，但内容为 XML：<code>&lt;function=NAME&gt;&lt;parameter=key&gt;value&lt;/parameter&gt;&lt;/function&gt;</code>（JSON 形式仍被接受）。</li>
     <li><strong>Gemma 4</strong> —— <code>&lt;|tool_call&gt;call:function_name{args}&lt;tool_call|&gt;</code></li>
     <li><strong>GPT OSS (Harmony)</strong> —— 工具以 TypeScript 命名空间声明；调用在 commentary 通道发出。</li>

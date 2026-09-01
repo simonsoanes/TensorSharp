@@ -85,6 +85,7 @@ public class CodeExecFlagTests
         var scope = new EnvScope();
         scope.Set(CodeExecOptions.EnabledEnvVar, null);
         scope.Set(CodeExecOptions.AllowInstallEnvVar, null);
+        scope.Set(CodeExecOptions.AllowNetworkEnvVar, null);
         scope.Set(CodeExecOptions.InstallDomainsEnvVar, null);
         return scope;
     }
@@ -124,6 +125,7 @@ public class CodeExecFlagTests
 
         Assert.False(options.Enabled);
         Assert.False(options.AllowInstall);
+        Assert.False(options.AllowNetwork);
         Assert.False(options.Unconfined);
         Assert.False(options.IsConfigured);
         Assert.Empty(remaining);
@@ -137,14 +139,21 @@ public class CodeExecFlagTests
     }
 
     [Fact]
-    public void Parse_TheThreeSwitches_AreRead()
+    public void Parse_TheFourSwitches_AreRead()
     {
         CodeExecOptions options = CodeExecOptions.Parse(
-            new[] { CodeExecOptions.EnabledFlag, CodeExecOptions.AllowInstallFlag, CodeExecOptions.UnconfinedFlag },
+            new[]
+            {
+                CodeExecOptions.EnabledFlag,
+                CodeExecOptions.AllowInstallFlag,
+                CodeExecOptions.AllowNetworkFlag,
+                CodeExecOptions.UnconfinedFlag,
+            },
             out List<string> remaining);
 
         Assert.True(options.Enabled);
         Assert.True(options.AllowInstall);
+        Assert.True(options.AllowNetwork);
         Assert.True(options.Unconfined);
         Assert.True(options.IsConfigured);
         Assert.Empty(remaining);
@@ -157,11 +166,18 @@ public class CodeExecFlagTests
         // typed one in any case; the two hosts must not disagree about which spellings
         // count.
         CodeExecOptions options = CodeExecOptions.Parse(
-            new[] { "--CODE-EXEC", "--Code-Exec-Allow-Install", "--CODE-exec-UNCONFINED" },
+            new[]
+            {
+                "--CODE-EXEC",
+                "--Code-Exec-Allow-Install",
+                "--code-EXEC-Allow-Network",
+                "--CODE-exec-UNCONFINED",
+            },
             out List<string> remaining);
 
         Assert.True(options.Enabled);
         Assert.True(options.AllowInstall);
+        Assert.True(options.AllowNetwork);
         Assert.True(options.Unconfined);
         Assert.Empty(remaining);
     }
@@ -404,6 +420,23 @@ public class CodeExecFlagTests
         // Reaching the network is the separate, more dangerous decision: turning the
         // tool on must not turn installs on, nor the other way round.
         Assert.True(options.AllowInstall);
+        Assert.False(options.AllowNetwork);
+        Assert.False(options.Enabled);
+    }
+
+    [Fact]
+    public void ApplyEnvironment_TheNetworkSwitch_HasItsOwnVariable()
+    {
+        using EnvScope env = CleanEnvironment();
+        env.Set(CodeExecOptions.AllowNetworkEnvVar, "1");
+
+        var options = new CodeExecOptions();
+        options.ApplyEnvironment();
+
+        // Network access is broader than a host-performed package install and must be a
+        // separate decision. It must not silently turn either neighbouring feature on.
+        Assert.True(options.AllowNetwork);
+        Assert.False(options.AllowInstall);
         Assert.False(options.Enabled);
     }
 

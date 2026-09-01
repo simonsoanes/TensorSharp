@@ -458,7 +458,7 @@ TSG_EXPORT int TSGgml_MiniMaxH3VideoVaeDecode(const TSGgmlMiniMaxH3VideoVaeDecod
 // states.
 //
 // Differences from the Qwen-Image (Qwen2.5-VL) trunk that made a separate op
-// worthwhile: Qwen3 adds per-head QK-RMSNorm, and the MLP keeps gate/up/down as
+// worthwhile: this encoder adds per-head QK-RMSNorm, and the MLP keeps gate/up/down as
 // three separate matrices. RoPE is supplied as host-built cos/sin tables, which
 // also means interleaved M-RoPE needs no special casing here: for text tokens all
 // three position axes are equal, so M-RoPE collapses to ordinary RoPE and the
@@ -621,7 +621,7 @@ TSG_EXPORT int TSGgml_MiniMaxH3TextEncode(const TSGgmlMiniMaxH3TextEncodeDesc* d
             ggml_tensor* k = ggml_reshape_3d(ctx, lin(kw, n1, kb), hd, kvh, seq);
             ggml_tensor* v = ggml_reshape_3d(ctx, lin(vw, n1, vb), hd, kvh, seq);
 
-            // Qwen3 normalizes Q and K per head BEFORE RoPE.
+            // The text encoder normalizes Q and K per head BEFORE RoPE.
             if (qNorm) q = ggml_mul(ctx, ggml_rms_norm(ctx, q, eps), qNorm);
             if (kNorm) k = ggml_mul(ctx, ggml_rms_norm(ctx, k, eps), kNorm);
 

@@ -19,11 +19,11 @@ namespace TensorSharp.Runtime
     /// Key invariant: when an assistant message has <see cref="ChatMessage.RawOutputTokens"/>
     /// set (i.e. the model previously generated this turn), those raw tokens are spliced
     /// directly into the rendered token sequence INSTEAD OF re-tokenizing the assistant's
-    /// content text. A TOOL-CALLING round is the exception: splicing one clears
-    /// <see cref="ChatMessage.ToolCalls"/>, which some templates read in order to render
-    /// or address the tool RESULT that follows, so each family declares through
-    /// <see cref="ChatProtocol.ToolCallRawSplicing"/> whether such a round may be spliced
-    /// always, never, or only when the template proves it cannot rebuild the round itself.
+    /// content text. A TOOL-CALLING round needs extra care because some templates read
+    /// <see cref="ChatMessage.ToolCalls"/> to render the tool RESULT that follows. The
+    /// canonical Gemma 4 template has a narrow replay hook that places the raw-token
+    /// placeholder at its tool-call branch while retaining the structured field; other
+    /// templates follow the family policy in <see cref="ChatProtocol.ToolCallRawSplicing"/>.
     ///
     /// Why this matters: assistant content is typically lossy with respect to raw
     /// generation. Thinking-style models emit <c>&lt;think&gt;...&lt;/think&gt;</c> tokens
@@ -68,6 +68,11 @@ namespace TensorSharp.Runtime
         // U+E001 is used for explicit cache breakpoints.
         internal const char BreakpointSentinel = '\uE001';
 
+        // U+E002 brackets a per-render nonce inserted inside each tool result while
+        // proving that a candidate raw-token splice did not make the template drop it.
+        // The proof is removed before tokenization and never reaches the model.
+        internal const char ToolResultProofSentinel = '\uE002';
+
         private readonly IPromptRenderer _innerRenderer;
 
         public KVCachePromptRenderer(IPromptRenderer innerRenderer)
@@ -98,8 +103,8 @@ namespace TensorSharp.Runtime
             // that family's renderer and output parser - it is a property of the chat
             // format, and it used to be a chain of name comparisons here that a new
             // family had to be remembered into. Families whose template frames past and
-            // current-turn assistant messages identically (Qwen3, Harmony, Gemma 3,
-            // Mistral 3, Nemotron, ...) declare nothing and get an empty suffix.
+            // current-turn assistant messages identically (Harmony, Mistral 3,
+            // Nemotron, ...) declare nothing and get an empty suffix.
             return ChatProtocolRegistry.For(architecture)?.AssistantGenerationSuffix?.Invoke(enableThinking)
                    ?? string.Empty;
         }
@@ -145,17 +150,30 @@ namespace TensorSharp.Runtime
                     break;
                 }
 
+                int decorationsStart = FindBreakpointRunStart(text, searchPos, sentinel);
                 int copyEnd = sentinel;
-                int anchorStart = text.LastIndexOf(anchor, sentinel - 1 < 0 ? 0 : sentinel - 1, StringComparison.Ordinal);
+                bool strippedHeader = false;
+                int anchorStart = text.LastIndexOf(
+                    anchor,
+                    decorationsStart - 1 < 0 ? 0 : decorationsStart - 1,
+                    StringComparison.Ordinal);
                 if (anchorStart >= searchPos)
                 {
                     int headerStart = anchorStart + anchor.Length;
                     // Refuse to swallow a whole turn: the header may only be the short
                     // routing/channel run the template adds right before the content.
-                    if (text.IndexOf("<|start|>", headerStart, sentinel - headerStart, StringComparison.Ordinal) < 0)
+                    if (headerStart <= decorationsStart
+                        && text.IndexOf(
+                        "<|start|>", headerStart, decorationsStart - headerStart,
+                        StringComparison.Ordinal) < 0)
+                    {
                         copyEnd = headerStart;
+                        strippedHeader = true;
+                    }
                 }
                 sb.Append(text, searchPos, copyEnd - searchPos);
+                if (strippedHeader && decorationsStart < sentinel)
+                    sb.Append(text, decorationsStart, sentinel - decorationsStart);
 
                 int sentinelEnd = text.IndexOf(PlaceholderSentinel, sentinel + 1);
                 if (sentinelEnd < 0)
@@ -200,7 +218,29 @@ namespace TensorSharp.Runtime
             List<ToolFunction>? tools = null,
             bool enableThinking = false)
         {
+            return RenderToTokens(
+                tokenizer, chatTemplate, messages, architecture, addGenerationPrompt,
+                out explicitBreakpoints, out _, tools, enableThinking);
+        }
+
+        /// <summary>
+        /// Render a prompt and report the exact whitespace at its generation boundary.
+        /// The server records that value beside the generated raw tokens so later turns
+        /// can replay the boundary without a template-shape heuristic.
+        /// </summary>
+        public List<int> RenderToTokens(
+            ITokenizer tokenizer,
+            string chatTemplate,
+            List<ChatMessage> messages,
+            string architecture,
+            bool addGenerationPrompt,
+            out List<int>? explicitBreakpoints,
+            out string generationPromptTrailingWhitespace,
+            List<ToolFunction>? tools = null,
+            bool enableThinking = false)
+        {
             explicitBreakpoints = null;
+            generationPromptTrailingWhitespace = string.Empty;
             if (tokenizer == null)
                 throw new ArgumentNullException(nameof(tokenizer));
             if (messages == null)
@@ -208,49 +248,90 @@ namespace TensorSharp.Runtime
 
             ToolCallRawSplicing splicing =
                 ChatProtocolRegistry.For(architecture)?.ToolCallRawSplicing ?? ToolCallRawSplicing.Never;
+            bool hasCachedToolCallRound = false;
+            bool isGemma4ReplayCandidate = splicing == ToolCallRawSplicing.WhenTemplateLosesTheRound
+                && _innerRenderer is GgufPromptRenderer
+                && string.Equals(architecture, "gemma4", StringComparison.Ordinal)
+                && !string.IsNullOrEmpty(chatTemplate);
+            if (isGemma4ReplayCandidate)
+            {
+                for (int i = 0; i < messages.Count; i++)
+                {
+                    ChatMessage message = messages[i];
+                    if (message != null
+                        && message.Role == "assistant"
+                        && message.RawOutputTokens is { Count: > 0 }
+                        && message.ToolCalls is { Count: > 0 })
+                    {
+                        hasCachedToolCallRound = true;
+                        break;
+                    }
+                }
+            }
+            bool losslessGemma4ToolReplay = hasCachedToolCallRound
+                && ChatTemplate.SupportsGemma4RawToolCallReplay(chatTemplate, architecture);
 
-            RenderPass pass = Render(
-                tokenizer, chatTemplate, messages, architecture, addGenerationPrompt, tools, enableThinking,
-                spliceToolCallRounds: splicing == ToolCallRawSplicing.Always);
+            RenderPass pass;
+            try
+            {
+                pass = Render(
+                    tokenizer, chatTemplate, messages, architecture, addGenerationPrompt, tools, enableThinking,
+                    spliceToolCallRounds: splicing == ToolCallRawSplicing.Always || losslessGemma4ToolReplay,
+                    useGemma4RawToolReplay: losslessGemma4ToolReplay,
+                    proveToolResults: losslessGemma4ToolReplay);
+            }
+            catch (RawToolCallReplayUnavailableException)
+            {
+                // A recognized GGUF template can still be abandoned by the Jinja
+                // correctness guard (or a custom renderer can otherwise omit the
+                // injected branch). Retry through the established structured/adaptive
+                // path instead of turning a cache optimization into a failed request.
+                losslessGemma4ToolReplay = false;
+                pass = Render(
+                    tokenizer, chatTemplate, messages, architecture, addGenerationPrompt, tools, enableThinking,
+                    spliceToolCallRounds: splicing == ToolCallRawSplicing.Always,
+                    useGemma4RawToolReplay: false,
+                    proveToolResults: false);
+            }
 
+            RenderPass selected;
             if (splicing != ToolCallRawSplicing.WhenTemplateLosesTheRound
                 || pass.ToolCallRoundsLeftToTemplate.Count == 0)
             {
-                explicitBreakpoints = pass.ExplicitBreakpoints;
-                return pass.Tokens;
+                selected = pass;
             }
-
-            // The template was given this family's structured reasoning and tool calls and
-            // asked to rebuild each tool-calling round. Check whether it actually did, by
-            // the only measure that matters for cache reuse: are the round's generated
-            // tokens present, in order, in the prompt we just built? When they are, the
-            // re-render is byte-identical to the live cache and nothing more is needed -
-            // this is the canonical Gemma 4 template, and its behaviour is unchanged.
-            if (ReproducesEveryToolCallRound(pass.Tokens, pass.ToolCallRoundsLeftToTemplate))
+            else if (ReproducesEveryToolCallRound(
+                tokenizer, pass.Tokens, pass.ToolCallRoundsLeftToTemplate))
             {
-                explicitBreakpoints = pass.ExplicitBreakpoints;
-                return pass.Tokens;
+                // The template was given this family's structured reasoning and tool calls
+                // and reproduced the generated runs. Boundary fidelity is handled below by
+                // the per-round RawPromptTrailingWhitespace metadata.
+                selected = pass;
             }
-
-            // It did not. The round's thought channel (and whatever else the template
-            // dropped) has no counterpart in the prompt, so the live cache diverges right
-            // at that turn and the whole conversation re-prefills. Splicing the raw tokens
-            // reproduces it exactly - PROVIDED the template still renders the tool results
-            // once the structured tool_calls field is cleared, which is the one thing
-            // splicing costs and the one thing that must never be lost.
-            RenderPass spliced = Render(
-                tokenizer, chatTemplate, messages, architecture, addGenerationPrompt, tools, enableThinking,
-                spliceToolCallRounds: true);
-
-            if (!ToolResultsSurvive(spliced.Text, messages))
+            else
             {
-                WarnToolCallSplicingUnavailableOnce(architecture);
-                explicitBreakpoints = pass.ExplicitBreakpoints;
-                return pass.Tokens;
+                // The template dropped part of a generated tool round. Splice it only
+                // when doing so leaves every tool result visible to the model.
+                RenderPass spliced = Render(
+                    tokenizer, chatTemplate, messages, architecture, addGenerationPrompt, tools, enableThinking,
+                    spliceToolCallRounds: true,
+                    useGemma4RawToolReplay: false,
+                    proveToolResults: true);
+
+                if (!spliced.ToolResultsProven)
+                {
+                    WarnToolCallSplicingUnavailableOnce(architecture);
+                    selected = pass;
+                }
+                else
+                {
+                    selected = spliced;
+                }
             }
 
-            explicitBreakpoints = spliced.ExplicitBreakpoints;
-            return spliced.Tokens;
+            explicitBreakpoints = selected.ExplicitBreakpoints;
+            generationPromptTrailingWhitespace = TrailingWhitespace(selected.Text);
+            return selected.Tokens;
         }
 
         /// <summary>One rendered prompt, plus what the template was left to reconstruct.</summary>
@@ -259,13 +340,15 @@ namespace TensorSharp.Runtime
             public RenderPass(
                 List<int> tokens,
                 string text,
-                List<List<int>> toolCallRoundsLeftToTemplate,
-                List<int>? explicitBreakpoints)
+                List<UnsplicedToolCallRound> toolCallRoundsLeftToTemplate,
+                List<int>? explicitBreakpoints,
+                bool toolResultsProven)
             {
                 Tokens = tokens;
                 Text = text;
                 ToolCallRoundsLeftToTemplate = toolCallRoundsLeftToTemplate;
                 ExplicitBreakpoints = explicitBreakpoints;
+                ToolResultsProven = toolResultsProven;
             }
 
             /// <summary>The prompt token sequence.</summary>
@@ -278,10 +361,50 @@ namespace TensorSharp.Runtime
             /// Raw output tokens of each assistant TOOL-CALLING round this pass did NOT
             /// splice, i.e. the rounds the chat template was asked to rebuild itself.
             /// </summary>
-            public List<List<int>> ToolCallRoundsLeftToTemplate { get; }
+            public List<UnsplicedToolCallRound> ToolCallRoundsLeftToTemplate { get; }
 
             /// <summary>Final token offsets of explicit cache-control markers.</summary>
             public List<int>? ExplicitBreakpoints { get; }
+
+            /// <summary>
+            /// Whether every render-time tool-result proof survived exactly once.
+            /// Always true for passes that did not request proofing.
+            /// </summary>
+            public bool ToolResultsProven { get; }
+        }
+
+        /// <summary>
+        /// Internal control-flow signal: the template renderer did not preserve the
+        /// canonical Gemma replay hook, so the caller should use its safe adaptive path.
+        /// </summary>
+        private sealed class RawToolCallReplayUnavailableException : Exception
+        {
+        }
+
+        private readonly struct UnsplicedToolCallRound
+        {
+            public UnsplicedToolCallRound(List<int> rawTokens, string? boundaryWhitespace)
+            {
+                RawTokens = rawTokens;
+                BoundaryWhitespace = boundaryWhitespace;
+            }
+
+            public List<int> RawTokens { get; }
+            public string? BoundaryWhitespace { get; }
+        }
+
+        private readonly struct ToolResultProof
+        {
+            public ToolResultProof(string marker, string expectedWrappedContent)
+            {
+                Marker = marker;
+                ExpectedWrappedContent = expectedWrappedContent;
+                MarkerOffset = expectedWrappedContent.IndexOf(marker, StringComparison.Ordinal);
+            }
+
+            public string Marker { get; }
+            public string ExpectedWrappedContent { get; }
+            public int MarkerOffset { get; }
         }
 
         private RenderPass Render(
@@ -292,14 +415,20 @@ namespace TensorSharp.Runtime
             bool addGenerationPrompt,
             List<ToolFunction>? tools,
             bool enableThinking,
-            bool spliceToolCallRounds)
+            bool spliceToolCallRounds,
+            bool useGemma4RawToolReplay,
+            bool proveToolResults)
         {
             // Build a parallel list where each cached assistant message is replaced with a
             // placeholder ChatMessage. Track the raw tokens in render order so we can splice
             // them back in.
             List<ChatMessage>? renderedMessages = null;
             List<List<int>>? rawTokensByPlaceholderIndex = null;
-            var toolCallRoundsLeftToTemplate = new List<List<int>>();
+            List<string?>? rawBoundaryWhitespaceByPlaceholderIndex = null;
+            List<int>? rawToolCallReplayPlaceholderIndices = null;
+            List<ToolResultProof>? toolResultProofs = null;
+            var toolCallRoundsLeftToTemplate = new List<UnsplicedToolCallRound>();
+            bool toolResultsProvable = true;
             int placeholderCount = 0;
             int breakpointCount = 0;
 
@@ -332,15 +461,32 @@ namespace TensorSharp.Runtime
                 // family as ChatProtocol.ToolCallRawSplicing; the caller resolves the
                 // condition and passes the answer down.
                 bool isToolCallRound = hasRawTokens && msg!.ToolCalls is { Count: > 0 };
+                bool useRawToolCallReplayMarker = isToolCallRound
+                    && spliceToolCallRounds
+                    && useGemma4RawToolReplay;
                 if (isToolCallRound && !spliceToolCallRounds)
                 {
-                    toolCallRoundsLeftToTemplate.Add(msg!.RawOutputTokens!);
+                    toolCallRoundsLeftToTemplate.Add(new UnsplicedToolCallRound(
+                        msg!.RawOutputTokens!, msg.RawPromptTrailingWhitespace));
                     hasRawTokens = false;
                 }
 
                 bool hasMarker = msg?.CacheControl != null;
                 bool hasPartMarkers = msg?.ContentCacheBreakpoints != null
                     && msg.ContentCacheBreakpoints.Count > 0;
+                bool needsToolResultProof = proveToolResults
+                    && msg?.Role == "tool"
+                    && !string.IsNullOrWhiteSpace(msg.Content);
+                if (proveToolResults
+                    && msg?.Role == "tool"
+                    && string.IsNullOrWhiteSpace(msg.Content))
+                {
+                    // There is no interior character at which a proof can be inserted
+                    // without changing truthiness or edge-trimming behavior. Keep the
+                    // structured pass for this rare shape rather than guessing whether
+                    // the response framing survived.
+                    toolResultsProvable = false;
+                }
 
                 // A tool-level marker can only be expressed by prefixing the
                 // first message's content, because the tool block itself is
@@ -358,7 +504,8 @@ namespace TensorSharp.Runtime
                 // template itself, which the Jinja path cannot express.
                 bool needsToolsMarker = toolsHasMarker && i == 0;
 
-                if (!hasRawTokens && !hasMarker && !hasPartMarkers && !needsToolsMarker)
+                if (!hasRawTokens && !hasMarker && !hasPartMarkers
+                    && !needsToolsMarker && !needsToolResultProof)
                 {
                     if (renderedMessages != null)
                         renderedMessages.Add(msg!);
@@ -371,14 +518,32 @@ namespace TensorSharp.Runtime
                     for (int j = 0; j < i; j++)
                         renderedMessages.Add(messages[j]);
                     rawTokensByPlaceholderIndex = new List<List<int>>();
+                    rawBoundaryWhitespaceByPlaceholderIndex = new List<string?>();
                 }
 
                 string newContent = msg!.Content ?? "";
+                string? rawToolCallReplayPlaceholder = null;
 
                 if (hasRawTokens)
                 {
-                    newContent = MakePlaceholder(placeholderCount);
+                    string placeholder = MakePlaceholder(placeholderCount);
+                    if (useRawToolCallReplayMarker)
+                    {
+                        // The canonical Gemma template renders results only while the
+                        // structured tool_calls field is present. Put the raw-token
+                        // placeholder at that branch and leave Content empty so the call
+                        // is not duplicated later in the assistant body.
+                        newContent = string.Empty;
+                        rawToolCallReplayPlaceholder = placeholder;
+                        rawToolCallReplayPlaceholderIndices ??= new List<int>();
+                        rawToolCallReplayPlaceholderIndices.Add(placeholderCount);
+                    }
+                    else
+                    {
+                        newContent = placeholder;
+                    }
                     rawTokensByPlaceholderIndex!.Add(msg.RawOutputTokens!);
+                    rawBoundaryWhitespaceByPlaceholderIndex!.Add(msg.RawPromptTrailingWhitespace);
                     placeholderCount++;
                 }
 
@@ -410,12 +575,35 @@ namespace TensorSharp.Runtime
                         newContent, msg.ContentCacheBreakpoints!, ref breakpointCount);
                 }
 
-                if (hasMarker)
+                string breakpointSuffix = hasMarker
+                    ? MakeBreakpoint(breakpointCount++)
+                    : string.Empty;
+
+                if (useRawToolCallReplayMarker)
                 {
-                    newContent = newContent + MakeBreakpoint(breakpointCount++);
+                    // Content is rendered after the canonical tool/result scan, so a
+                    // cache marker left there would point at the wrong part of the
+                    // prompt (or be dropped). Keep both sides attached to the relocated
+                    // raw-token placeholder instead.
+                    rawToolCallReplayPlaceholder = breakpointPrefix
+                        + rawToolCallReplayPlaceholder
+                        + breakpointSuffix;
+                    newContent = string.Empty;
+                }
+                else
+                {
+                    newContent = breakpointPrefix + newContent + breakpointSuffix;
                 }
 
-                newContent = breakpointPrefix + newContent;
+                if (needsToolResultProof)
+                {
+                    string marker = MakeToolResultProof();
+                    newContent = InsertToolResultProof(newContent, marker);
+                    toolResultProofs ??= new List<ToolResultProof>();
+                    toolResultProofs.Add(new ToolResultProof(
+                        marker,
+                        NormalizeNewlines(StripBreakpointMarkers(newContent)).Trim()));
+                }
 
                 renderedMessages.Add(new ChatMessage
                 {
@@ -423,10 +611,16 @@ namespace TensorSharp.Runtime
                     Content = newContent,
                     // Don't carry Thinking through the template - the raw tokens already contain it.
                     Thinking = hasRawTokens ? null : msg.Thinking,
-                    ToolCalls = hasRawTokens ? null : msg.ToolCalls,
+                    ToolCalls = hasRawTokens && !useRawToolCallReplayMarker
+                        ? null
+                        : msg.ToolCalls,
                     ImagePaths = msg.ImagePaths,
                     AudioPaths = msg.AudioPaths,
                     IsVideo = msg.IsVideo,
+                    // Kept for the Jinja context's narrowly scoped Gemma 4 replay.
+                    RawOutputTokens = msg.RawOutputTokens,
+                    RawPromptTrailingWhitespace = msg.RawPromptTrailingWhitespace,
+                    RawToolCallReplayPlaceholder = rawToolCallReplayPlaceholder,
                 });
             }
 
@@ -440,6 +634,32 @@ namespace TensorSharp.Runtime
                 tools: tools,
                 enableThinking: enableThinking);
 
+            text = ValidateAndStripToolResultProofs(
+                text, toolResultProofs, out bool renderedToolResultsProven);
+            bool toolResultsProven = toolResultsProvable && renderedToolResultsProven;
+
+            if (rawToolCallReplayPlaceholderIndices != null)
+            {
+                foreach (int index in rawToolCallReplayPlaceholderIndices)
+                {
+                    string placeholder = MakePlaceholder(index);
+                    int first = text.IndexOf(placeholder, StringComparison.Ordinal);
+                    if (first < 0
+                        || text.IndexOf(
+                            placeholder,
+                            first + placeholder.Length,
+                            StringComparison.Ordinal) >= 0)
+                    {
+                        throw new RawToolCallReplayUnavailableException();
+                    }
+                }
+
+                // Verify before tokenization so a rejected optimization does not pay for
+                // a full prompt encode that the safe retry will immediately discard.
+                if (!toolResultsProven)
+                    throw new RawToolCallReplayUnavailableException();
+            }
+
             // Fast path: no placeholders and no breakpoints -> just tokenize the whole rendered string.
             if (placeholderCount == 0 && breakpointCount == 0)
             {
@@ -447,7 +667,8 @@ namespace TensorSharp.Runtime
                     tokenizer.Encode(text, addSpecial: true),
                     text,
                     toolCallRoundsLeftToTemplate,
-                    explicitBreakpoints: null);
+                    explicitBreakpoints: null,
+                    toolResultsProven);
             }
 
             // Some chat templates (notably Gemma 4) call a strip_thinking filter on
@@ -480,22 +701,23 @@ namespace TensorSharp.Runtime
             if (!string.IsNullOrEmpty(headerAnchor))
                 text = StripTemplateAssistantHeaders(text, headerAnchor);
 
-            // Some renderers (those that go through ChatTemplate.RenderFromGgufTemplate's
-            // jinja path) apply a final TrimEnd to the whole rendered text. That stripped
-            // trailing whitespace from the GENERATION PROMPT in the previous turn, so the
-            // KV cache contains tokens WITHOUT that trailing whitespace at the boundary
-            // between the assistant prompt and the model's first generated token.
+            // Reproduce the exact whitespace that preceded each raw generation. Prompt
+            // tails are structural: Gemma 4's ordinary generation prompt ends in a newline,
+            // while its tool-result continuation ends in a control marker. Inferring every
+            // OLD boundary from the NEW prompt's last character made those two shapes flip
+            // an old newline on alternate rounds and destroyed the live-cache prefix.
             //
-            // For our re-render to produce a token sequence whose prefix matches the cache,
-            // we need to mimic the same trim at every interior placeholder boundary.
-            // We detect "renderer applied TrimEnd" simply by checking whether the FINAL
-            // character of the rendered text is whitespace - if it is, the renderer didn't
-            // trim and we shouldn't either; if it isn't, the renderer trimmed and we mirror
-            // that trimming at each interior boundary.
+            // RawPromptTrailingWhitespace is authoritative for newly tracked rounds. Null
+            // identifies legacy/client-provided history, for which the old final-character
+            // heuristic remains as a compatibility fallback.
             bool rendererStrippedTrailingWhitespace =
                 text.Length > 0 && !char.IsWhiteSpace(text[text.Length - 1]);
-            if (rendererStrippedTrailingWhitespace)
-                text = TrimWhitespaceBeforeEachPlaceholder(text);
+            text = NormalizeWhitespaceBeforeEachPlaceholder(
+                text,
+                rawBoundaryWhitespaceByPlaceholderIndex is { } boundaries
+                    ? boundaries
+                    : Array.Empty<string?>(),
+                trimUnknownBoundaries: rendererStrippedTrailingWhitespace);
 
             List<int> tokens = TokenizeAndReplacePlaceholderSpans(
                 tokenizer,
@@ -508,7 +730,8 @@ namespace TensorSharp.Runtime
                 tokens,
                 text,
                 toolCallRoundsLeftToTemplate,
-                explicitBreakpoints);
+                explicitBreakpoints,
+                toolResultsProven);
         }
 
         /// <summary>
@@ -523,63 +746,221 @@ namespace TensorSharp.Runtime
         /// </para>
         /// </summary>
         private static bool ReproducesEveryToolCallRound(
-            List<int> promptTokens, List<List<int>> toolCallRounds)
+            ITokenizer tokenizer,
+            List<int> promptTokens,
+            List<UnsplicedToolCallRound> toolCallRounds)
         {
+            int searchStart = 0;
             for (int i = 0; i < toolCallRounds.Count; i++)
             {
-                if (FindSubsequence(promptTokens, toolCallRounds[i]) < 0)
+                UnsplicedToolCallRound round = toolCallRounds[i];
+                bool found = false;
+                while (searchStart + round.RawTokens.Count <= promptTokens.Count)
+                {
+                    int at = FindSubsequence(promptTokens, round.RawTokens, searchStart);
+                    if (at < 0)
+                        break;
+
+                    if (round.BoundaryWhitespace == null
+                        || string.Equals(
+                            TrailingWhitespaceBeforeToken(tokenizer, promptTokens, at),
+                            round.BoundaryWhitespace,
+                            StringComparison.Ordinal))
+                    {
+                        searchStart = at + round.RawTokens.Count;
+                        found = true;
+                        break;
+                    }
+                    searchStart = at + 1;
+                }
+                if (!found)
                     return false;
             }
             return true;
         }
 
-        /// <summary>
-        /// Longest tool-result needle compared against a rendered prompt. Tool output runs
-        /// to whole files; a few hundred characters of it identify the message beyond doubt
-        /// and keep the check independent of how large the result was.
-        /// </summary>
-        private const int ToolResultProbeChars = 512;
-
-        /// <summary>
-        /// True when every <c>role: "tool"</c> message's content is still present in
-        /// <paramref name="renderedText"/>.
-        ///
-        /// <para>
-        /// Splicing a tool-calling round clears <see cref="ChatMessage.ToolCalls"/>, and a
-        /// template that folds the result INTO the model turn - gated on that very field -
-        /// then emits nothing for the following <c>role: "tool"</c> messages. The model is
-        /// shown none of the output of the tools it called and answers from invention: it
-        /// asks for a directory listing, is given nothing, and names files that do not
-        /// exist. That regression is worth far more than the prefill this saves, so the
-        /// spliced render is only used once it has been checked.
-        /// </para>
-        /// </summary>
-        internal static bool ToolResultsSurvive(string renderedText, List<ChatMessage> messages)
+        private static string TrailingWhitespaceBeforeToken(
+            ITokenizer tokenizer, List<int> tokens, int tokenIndex)
         {
-            if (messages == null)
-                return true;
+            if (tokenIndex <= 0)
+                return string.Empty;
 
-            // Cache breakpoints are renderer-only sentinels. A part-scoped marker can
-            // legitimately split a tool result in the intermediate text, but it is
-            // removed before the model sees the prompt. Ignore those sentinels here so
-            // the safety check judges the same visible tool result as the model will.
-            string haystack = NormalizeNewlines(StripBreakpointMarkers(renderedText));
-            for (int i = 0; i < messages.Count; i++)
+            var reverseChunks = new List<string>();
+            for (int i = tokenIndex - 1; i >= 0; i--)
             {
-                ChatMessage msg = messages[i];
-                if (msg == null || msg.Role != "tool")
-                    continue;
-
-                string needle = NormalizeNewlines(msg.Content).Trim();
-                if (needle.Length == 0)
-                    continue;
-                if (needle.Length > ToolResultProbeChars)
-                    needle = needle.Substring(0, ToolResultProbeChars);
-
-                if (haystack.IndexOf(needle, StringComparison.Ordinal) < 0)
-                    return false;
+                string piece = tokenizer.Decode(new List<int> { tokens[i] });
+                int start = piece.Length;
+                while (start > 0 && char.IsWhiteSpace(piece[start - 1]))
+                    start--;
+                if (start < piece.Length)
+                    reverseChunks.Add(piece.Substring(start));
+                if (start > 0)
+                    break;
             }
-            return true;
+            if (reverseChunks.Count == 0)
+                return string.Empty;
+
+            var result = new System.Text.StringBuilder();
+            for (int i = reverseChunks.Count - 1; i >= 0; i--)
+                result.Append(reverseChunks[i]);
+            return result.ToString();
+        }
+
+        /// <summary>
+        /// Put an unpredictable render-only marker INSIDE a tool result, after its first
+        /// visible character. Keeping the marker away from either edge preserves the
+        /// template's ordinary Trim/TrimEnd behavior. Cache-control sentinels are skipped
+        /// because they are zero-width prompt decorations rather than result text.
+        /// </summary>
+        private static string InsertToolResultProof(string content, string marker)
+        {
+            int i = 0;
+            while (i < content.Length)
+            {
+                if (content[i] == BreakpointSentinel)
+                {
+                    int markerEnd = content.IndexOf(BreakpointSentinel, i + 1);
+                    if (markerEnd >= 0)
+                    {
+                        i = markerEnd + 1;
+                        continue;
+                    }
+                }
+
+                if (!char.IsWhiteSpace(content[i]))
+                {
+                    int insertAt = i + 1;
+                    if (char.IsHighSurrogate(content[i])
+                        && insertAt < content.Length
+                        && char.IsLowSurrogate(content[insertAt]))
+                    {
+                        insertAt++;
+                    }
+                    return content.Insert(insertAt, marker);
+                }
+                i++;
+            }
+
+            // The caller excludes empty/all-whitespace results. Keep this fail-safe so
+            // future callers cannot accidentally put a proof at a trimming boundary.
+            return content;
+        }
+
+        private static string MakeToolResultProof()
+            => $"{ToolResultProofSentinel}T{Guid.NewGuid():N}{ToolResultProofSentinel}";
+
+        /// <summary>
+        /// Prove direct ownership rather than looking for the result text anywhere in
+        /// the prompt. A full content run containing its unguessable marker must appear
+        /// exactly once and in message order, then remove every proof in one forward
+        /// pass. Thus a dropped result cannot be mistaken for the same short word in a
+        /// later role header or user message. The work is linear in prompt size plus the
+        /// total size of the tool results, even for long code-exec histories.
+        /// </summary>
+        private static string ValidateAndStripToolResultProofs(
+            string renderedText,
+            List<ToolResultProof>? proofs,
+            out bool proven)
+        {
+            if (proofs == null || proofs.Count == 0)
+            {
+                proven = true;
+                return renderedText;
+            }
+
+            var proofIndexByMarker = new Dictionary<string, int>(
+                proofs.Count, StringComparer.Ordinal);
+            for (int i = 0; i < proofs.Count; i++)
+                proofIndexByMarker.Add(proofs[i].Marker, i);
+
+            string haystack = NormalizeNewlines(StripBreakpointMarkers(renderedText));
+            var markerPositions = new int[proofs.Count];
+            Array.Fill(markerPositions, -1);
+
+            bool proofsValid = true;
+            ScanToolResultProofs(
+                haystack,
+                proofIndexByMarker,
+                (proofIndex, markerAt) =>
+                {
+                    if (markerPositions[proofIndex] >= 0)
+                        proofsValid = false;
+                    else
+                        markerPositions[proofIndex] = markerAt;
+                });
+
+            int previousMarkerAt = -1;
+            for (int i = 0; i < proofs.Count; i++)
+            {
+                ToolResultProof proof = proofs[i];
+                int markerAt = markerPositions[i];
+                int wrappedAt = markerAt - proof.MarkerOffset;
+                if (markerAt < 0
+                    || proof.MarkerOffset < 0
+                    || markerAt <= previousMarkerAt
+                    || wrappedAt < 0
+                    || wrappedAt + proof.ExpectedWrappedContent.Length > haystack.Length
+                    || string.CompareOrdinal(
+                        haystack,
+                        wrappedAt,
+                        proof.ExpectedWrappedContent,
+                        0,
+                        proof.ExpectedWrappedContent.Length) != 0)
+                {
+                    proofsValid = false;
+                }
+                previousMarkerAt = markerAt;
+            }
+
+            proven = proofsValid;
+
+            var sb = new System.Text.StringBuilder(renderedText.Length);
+            int copied = 0;
+            ScanToolResultProofs(
+                renderedText,
+                proofIndexByMarker,
+                (_, markerAt) =>
+                {
+                    sb.Append(renderedText, copied, markerAt - copied);
+                    copied = markerAt + ToolResultProofLength;
+                });
+            sb.Append(renderedText, copied, renderedText.Length - copied);
+            return sb.ToString();
+        }
+
+        private const int ToolResultProofLength = 35;
+
+        /// <summary>
+        /// Visit only recognized proof markers in one left-to-right pass. Unknown U+E002
+        /// text is ordinary prompt content and is not removed.
+        /// </summary>
+        private static void ScanToolResultProofs(
+            string text,
+            Dictionary<string, int> proofIndexByMarker,
+            Action<int, int> visit)
+        {
+            int searchStart = 0;
+            while (searchStart < text.Length)
+            {
+                int markerAt = text.IndexOf(ToolResultProofSentinel, searchStart);
+                if (markerAt < 0)
+                    return;
+
+                if (markerAt + ToolResultProofLength <= text.Length
+                    && text[markerAt + 1] == 'T'
+                    && text[markerAt + ToolResultProofLength - 1] == ToolResultProofSentinel)
+                {
+                    string candidate = text.Substring(markerAt, ToolResultProofLength);
+                    if (proofIndexByMarker.TryGetValue(candidate, out int proofIndex))
+                    {
+                        visit(proofIndex, markerAt);
+                        searchStart = markerAt + ToolResultProofLength;
+                        continue;
+                    }
+                }
+
+                searchStart = markerAt + 1;
+            }
         }
 
         private static string StripBreakpointMarkers(string text)
@@ -664,8 +1045,13 @@ namespace TensorSharp.Runtime
                     break;
                 }
 
+                // Cache-control markers immediately before the raw run are zero-width
+                // prompt decorations. Look through them when finding the empty block,
+                // but preserve them at the raw boundary.
+                int decorationsStart = FindBreakpointRunStart(text, searchPos, sentinel);
+
                 // Walk back over trailing whitespace, then require "</think>".
-                int cursor = sentinel;
+                int cursor = decorationsStart;
                 while (cursor > searchPos && char.IsWhiteSpace(text[cursor - 1]))
                     cursor--;
                 if (cursor - searchPos >= close.Length
@@ -685,6 +1071,8 @@ namespace TensorSharp.Runtime
                         // where the cache has `assistant\n` + `<think>\n`, which just
                         // moves the divergence rather than removing it.
                         sb.Append(text, searchPos, (cursor - open.Length) - searchPos);
+                        if (decorationsStart < sentinel)
+                            sb.Append(text, decorationsStart, sentinel - decorationsStart);
                         sb.Append(text[sentinel]);
                         searchPos = sentinel + 1;
                         continue;
@@ -697,10 +1085,17 @@ namespace TensorSharp.Runtime
             return sb.ToString();
         }
 
-        private static string TrimWhitespaceBeforeEachPlaceholder(string text)
+        private static string NormalizeWhitespaceBeforeEachPlaceholder(
+            string text,
+            IReadOnlyList<string?> boundaryWhitespace,
+            bool trimUnknownBoundaries)
         {
+            if (!NeedsWhitespaceNormalization(text, boundaryWhitespace, trimUnknownBoundaries))
+                return text;
+
             var sb = new System.Text.StringBuilder(text.Length);
             int searchPos = 0;
+            int placeholderIndex = 0;
             while (searchPos < text.Length)
             {
                 int sentinel = text.IndexOf(PlaceholderSentinel, searchPos);
@@ -710,10 +1105,31 @@ namespace TensorSharp.Runtime
                     break;
                 }
 
-                int copyEnd = sentinel;
-                while (copyEnd > searchPos && char.IsWhiteSpace(text[copyEnd - 1]))
-                    copyEnd--;
-                sb.Append(text, searchPos, copyEnd - searchPos);
+                string? exact = placeholderIndex < boundaryWhitespace.Count
+                    ? boundaryWhitespace[placeholderIndex]
+                    : null;
+                if (!IsValidBoundaryWhitespace(exact))
+                    exact = null;
+                if (exact != null || trimUnknownBoundaries)
+                {
+                    // Cache-control markers may be attached immediately before a raw
+                    // placeholder. The generation-boundary whitespace belongs BEFORE
+                    // those zero-width markers; otherwise the marker stops this trim at
+                    // its private-use sentinel and an old template newline survives in
+                    // addition to the exact recorded newline.
+                    int markerRunStart = FindBreakpointRunStart(text, searchPos, sentinel);
+                    int copyEnd = markerRunStart;
+                    while (copyEnd > searchPos && char.IsWhiteSpace(text[copyEnd - 1]))
+                        copyEnd--;
+                    sb.Append(text, searchPos, copyEnd - searchPos);
+                    if (exact != null)
+                        sb.Append(exact);
+                    sb.Append(text, markerRunStart, sentinel - markerRunStart);
+                }
+                else
+                {
+                    sb.Append(text, searchPos, sentinel - searchPos);
+                }
 
                 int sentinelEnd = text.IndexOf(PlaceholderSentinel, sentinel + 1);
                 if (sentinelEnd < 0)
@@ -721,8 +1137,124 @@ namespace TensorSharp.Runtime
                         "Malformed KV-cache placeholder: opening sentinel without matching close.");
                 sb.Append(text, sentinel, sentinelEnd - sentinel + 1);
                 searchPos = sentinelEnd + 1;
+                placeholderIndex++;
             }
             return sb.ToString();
+        }
+
+        private static bool NeedsWhitespaceNormalization(
+            string text,
+            IReadOnlyList<string?> boundaryWhitespace,
+            bool trimUnknownBoundaries)
+        {
+            int searchPos = 0;
+            int placeholderIndex = 0;
+            while (searchPos < text.Length)
+            {
+                int sentinel = text.IndexOf(PlaceholderSentinel, searchPos);
+                if (sentinel < 0)
+                    return false;
+
+                string? exact = placeholderIndex < boundaryWhitespace.Count
+                    ? boundaryWhitespace[placeholderIndex]
+                    : null;
+                if (!IsValidBoundaryWhitespace(exact))
+                    exact = null;
+                if (exact != null || trimUnknownBoundaries)
+                {
+                    int decorationsStart = FindBreakpointRunStart(text, searchPos, sentinel);
+                    int whitespaceStart = decorationsStart;
+                    while (whitespaceStart > searchPos
+                        && char.IsWhiteSpace(text[whitespaceStart - 1]))
+                    {
+                        whitespaceStart--;
+                    }
+
+                    int existingLength = decorationsStart - whitespaceStart;
+                    if (exact == null)
+                    {
+                        if (existingLength > 0)
+                            return true;
+                    }
+                    else if (existingLength != exact.Length
+                        || string.CompareOrdinal(
+                            text, whitespaceStart,
+                            exact, 0, exact.Length) != 0)
+                    {
+                        return true;
+                    }
+                }
+
+                int sentinelEnd = text.IndexOf(PlaceholderSentinel, sentinel + 1);
+                if (sentinelEnd < 0)
+                    throw new InvalidOperationException(
+                        "Malformed KV-cache placeholder: opening sentinel without matching close.");
+                searchPos = sentinelEnd + 1;
+                placeholderIndex++;
+            }
+            return false;
+        }
+
+        private static bool IsValidBoundaryWhitespace(string? value)
+        {
+            // Generation-prompt tails are tiny structural runs. Treat malformed or
+            // externally supplied non-whitespace metadata as legacy/unknown rather than
+            // allowing it to inject arbitrary prompt text or a pathological allocation.
+            if (value == null)
+                return false;
+            if (value.Length > 1024)
+                return false;
+            for (int i = 0; i < value.Length; i++)
+                if (!char.IsWhiteSpace(value[i]))
+                    return false;
+            return true;
+        }
+
+        /// <summary>
+        /// Walk backwards across adjacent renderer-generated breakpoint markers ending
+        /// immediately before a raw-token placeholder.
+        /// </summary>
+        private static int FindBreakpointRunStart(string text, int lowerBound, int end)
+        {
+            int cursor = end;
+            while (cursor > lowerBound && text[cursor - 1] == BreakpointSentinel)
+            {
+                if (cursor - 2 < lowerBound)
+                    break;
+                int opening = text.LastIndexOf(BreakpointSentinel, cursor - 2);
+                if (opening < lowerBound)
+                    break;
+
+                int markerLength = cursor - opening;
+                if (markerLength < 4 || text[opening + 1] != 'B')
+                {
+                    break;
+                }
+
+                bool digits = true;
+                for (int i = opening + 2; i < cursor - 1; i++)
+                {
+                    if (!char.IsDigit(text[i]))
+                    {
+                        digits = false;
+                        break;
+                    }
+                }
+                if (!digits)
+                    break;
+
+                cursor = opening;
+            }
+            return cursor;
+        }
+
+        private static string TrailingWhitespace(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+                return string.Empty;
+            int start = text.Length;
+            while (start > 0 && char.IsWhiteSpace(text[start - 1])) start--;
+            return start == text.Length ? string.Empty : text.Substring(start);
         }
 
         private static string InjectSuffixBeforePlaceholders(string text, string suffix)
@@ -737,8 +1269,11 @@ namespace TensorSharp.Runtime
                     sb.Append(text, searchPos, text.Length - searchPos);
                     break;
                 }
-                sb.Append(text, searchPos, sentinel - searchPos);
+                int decorationsStart = FindBreakpointRunStart(text, searchPos, sentinel);
+                sb.Append(text, searchPos, decorationsStart - searchPos);
                 sb.Append(suffix);
+                if (decorationsStart < sentinel)
+                    sb.Append(text, decorationsStart, sentinel - decorationsStart);
                 int sentinelEnd = text.IndexOf(PlaceholderSentinel, sentinel + 1);
                 if (sentinelEnd < 0)
                     throw new InvalidOperationException(
@@ -882,12 +1417,16 @@ namespace TensorSharp.Runtime
         }
 
         private static int FindSubsequence(List<int> haystack, List<int> needle)
+            => FindSubsequence(haystack, needle, 0);
+
+        private static int FindSubsequence(
+            List<int> haystack, List<int> needle, int startIndex)
         {
             if (needle.Count == 0 || haystack.Count < needle.Count)
                 return -1;
 
             int last = haystack.Count - needle.Count;
-            for (int i = 0; i <= last; i++)
+            for (int i = Math.Max(0, startIndex); i <= last; i++)
             {
                 bool match = true;
                 for (int j = 0; j < needle.Count; j++)

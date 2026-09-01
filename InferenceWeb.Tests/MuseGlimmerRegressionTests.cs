@@ -186,7 +186,6 @@ public class MuseGlimmerRegressionTests
     /// </summary>
     [Theory]
     [InlineData("gemma4", "<|image>")]
-    [InlineData("gemma3", "<start_of_image>")]
     [InlineData("qwen35", "<|vision_start|><|image_pad|><|vision_end|>")]
     [InlineData("mistral3", "[IMG]")]
     [InlineData("muse-glimmer", "<|patch|>")]

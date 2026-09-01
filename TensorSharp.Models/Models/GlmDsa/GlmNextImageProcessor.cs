@@ -50,7 +50,7 @@ namespace TensorSharp.Models
         }
 
         public static (int width, int height) ReadImageDimensions(string path)
-            => Gemma3ImageProcessor.ReadImageDimensions(path);
+            => ImageProcessorUtils.ReadImageDimensions(path);
 
         private int Align(long v) => (int)((v + Factor - 1) / Factor * Factor);
 
@@ -132,7 +132,7 @@ namespace TensorSharp.Models
         public (float[] pixels, int canvasH, int canvasW) ProcessImage(string imagePath)
         {
             byte[] fileBytes = System.IO.File.ReadAllBytes(imagePath);
-            byte[] rgba = Gemma3ImageProcessor.DecodeImageToRGBA(fileBytes, out int origW, out int origH);
+            byte[] rgba = ImageProcessorUtils.DecodeImageToRGBA(fileBytes, out int origW, out int origH);
 
             var (canvasW, canvasH) = SmartResize(origW, origH);
             if (canvasW == 0 || canvasH == 0)

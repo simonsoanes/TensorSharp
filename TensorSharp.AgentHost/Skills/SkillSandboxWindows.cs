@@ -25,7 +25,7 @@ namespace TensorSharp.AgentHost.Skills
     /// <b>This is weaker than the macOS and Linux sandboxes, and says so.</b> A job
     /// object bounds a process TREE — how many processes it may spawn, how much memory
     /// it may commit, and that every one of them dies when the job handle closes — but
-    /// Windows offers no filesystem or network confinement through it. Real isolation
+    /// TensorSharp's current Windows backend offers no filesystem or network confinement through it. Real isolation
     /// on Windows means an AppContainer or a low-integrity token, both of which require
     /// launching the child through <c>CreateProcessAsUser</c> with a hand-built
     /// security-capability attribute list and hand-plumbed stdio handles; that is a
@@ -75,8 +75,8 @@ namespace TensorSharp.AgentHost.Skills
         /// </summary>
         public string Describe() =>
             "bounds the process tree: kills every child when the request ends, caps the process count and "
-            + "committed memory. It does NOT confine writes and does NOT block the network - Windows offers "
-            + "no mechanism that confines a shell (see the docs), so a script writes and reaches the network "
+            + "committed memory. It does NOT confine writes and does NOT block the network - TensorSharp's "
+            + "current Windows backend has no shell-confinement mechanism, so a script writes and reaches the network "
             + "with this process's own access";
 
         /// <summary>

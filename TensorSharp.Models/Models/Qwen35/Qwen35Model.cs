@@ -427,7 +427,7 @@ namespace TensorSharp.Models
             _numExpertsUsed = (int)_gguf.GetUint32($"{arch}.expert_used_count", 0);
             _expertFfnLength = (int)_gguf.GetUint32($"{arch}.expert_feed_forward_length", 0);
             _sharedExpertFfnLength = (int)_gguf.GetUint32($"{arch}.expert_shared_feed_forward_length", (uint)_expertFfnLength);
-            // qwen3 MoE renormalizes the selected top-K probabilities by default.
+            // This MoE family renormalizes the selected top-K probabilities by default.
             _normTopKProb = true;
             Config.NumExperts = _numExperts;
             Config.NumExpertsUsed = _numExpertsUsed;
@@ -5788,7 +5788,7 @@ namespace TensorSharp.Models
                     if (gQW0 == null) { gQW0 = g; uQW0 = u; dQW0 = d; }
 
                     // All experts in a layer must share dtype + shape so the batched kernel can
-                    // bind them as identically-shaped tensors. The Qwen3 GGUF format guarantees
+                    // bind them as identically-shaped tensors. The GGUF expert layout guarantees
                     // this, but we keep a defensive check for forward compatibility.
                     if (g.GgmlType != gQW0.GgmlType || g.Ne0 != gQW0.Ne0 || g.Ne1 != gQW0.Ne1 ||
                         u.GgmlType != uQW0.GgmlType || u.Ne0 != uQW0.Ne0 || u.Ne1 != uQW0.Ne1 ||
