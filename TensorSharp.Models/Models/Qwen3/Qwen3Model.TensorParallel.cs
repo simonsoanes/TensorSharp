@@ -397,13 +397,50 @@ namespace TensorSharp.Models
                 rowParallelPatterns: new[] { "attn_output.weight", "ffn_down.weight" });
 
             int hd = Config.HeadDim;
+            int qDim = Config.NumHeads * hd;
+            int kDim = Config.NumKVHeads * hd;
+            int ff = Config.IntermediateSize;
             for (int layer = 0; layer < Config.NumLayers; layer++)
             {
-                ShardConcatenatedColumnParallel($"blk.{layer}.attn_qkv.weight",
-                    Config.NumHeads * hd,     // Q
-                    Config.NumKVHeads * hd,   // K
-                    Config.NumKVHeads * hd);  // V
-                ShardFusedGateUpColumnParallel($"blk.{layer}.ffn_gate_up.weight");
+                // Load-time fusion is conditional: it needs Q, K and V to carry
+                // the SAME quant type (see Qwen3Model.FuseQkvWeights). Community
+                // and UD requants routinely give them different ones, so there is
+                // no attn_qkv tensor to shard - and because the sharder skips a
+                // name it cannot find, the failure surfaced much later as
+                // "TP column-parallel weight 'blk.0.attn_qkv.weight' not found in
+                // sharded weights" on the first forward. Build each rank's
+                // [Q_r|K_r|V_r] slice straight from the separate tensors instead
+                // and register it under the fused name the TP forward asks for,
+                // mirroring the gpt-oss and Qwen3.5 fallbacks.
+                string qkvName = $"blk.{layer}.attn_qkv.weight";
+                if (_quantWeights.ContainsKey(qkvName) || _weights.ContainsKey(qkvName))
+                {
+                    ShardConcatenatedColumnParallel(qkvName, qDim, kDim, kDim);
+                }
+                else
+                {
+                    ShardSeparateColumnParallel(qkvName,
+                        new[]
+                        {
+                            $"blk.{layer}.attn_q.weight",
+                            $"blk.{layer}.attn_k.weight",
+                            $"blk.{layer}.attn_v.weight",
+                        },
+                        new[] { qDim, kDim, kDim });
+                }
+
+                // Same story for the SwiGLU pair.
+                string gateUpName = $"blk.{layer}.ffn_gate_up.weight";
+                if (_quantWeights.ContainsKey(gateUpName) || _weights.ContainsKey(gateUpName))
+                {
+                    ShardFusedGateUpColumnParallel(gateUpName);
+                }
+                else
+                {
+                    ShardSeparateColumnParallel(gateUpName,
+                        new[] { $"blk.{layer}.ffn_gate.weight", $"blk.{layer}.ffn_up.weight" },
+                        new[] { ff, ff });
+                }
             }
         }
     }

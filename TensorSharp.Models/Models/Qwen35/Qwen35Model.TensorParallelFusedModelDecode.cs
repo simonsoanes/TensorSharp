@@ -65,13 +65,46 @@ namespace TensorSharp.Models
         /// leave no trace at all. Mirrors the non-TP FdBail added for the same
         /// failure mode on the single-GPU path.
         /// </summary>
-        private bool _tpFdDeclineLogged;
+        private readonly HashSet<string> _tpFdDeclineLogged = new(StringComparer.Ordinal);
+
+        /// <summary>The cross-node half of a distributed AllReduce, or null on a
+        /// single-node run. Present exactly when the TP group spans nodes.</summary>
+        private INestedTensorParallelGroup TpCrossNodeReducer =>
+            GlobalTpDegree != TpDegree ? _tpGroup as INestedTensorParallelGroup : null;
+
+        private GgmlBasicOps.CrossNodeAllReduce _tpCrossNodeCallback;
+        private float[] _tpCrossNodeBuf = Array.Empty<float>();
+
+        /// <summary>Marshalled once and cached: the native executor calls this at
+        /// every AllReduce boundary, so a per-call delegate allocation would land
+        /// on the hot path.</summary>
+        private GgmlBasicOps.CrossNodeAllReduce TpCrossNodeCallback =>
+            _tpCrossNodeCallback ??= (user, data, count) =>
+            {
+                try
+                {
+                    if (count <= 0)
+                        return true;
+                    if (_tpCrossNodeBuf.Length < count)
+                        _tpCrossNodeBuf = new float[count];
+                    System.Runtime.InteropServices.Marshal.Copy(data, _tpCrossNodeBuf, 0, count);
+                    TpCrossNodeReducer.CrossNodeAllReduce(_tpCrossNodeBuf, count);
+                    System.Runtime.InteropServices.Marshal.Copy(_tpCrossNodeBuf, 0, data, count);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[qwen35-tp] cross-node AllReduce failed: {ex.Message}");
+                    return false;
+                }
+            };
 
         private bool TpFdBail(string reason)
         {
-            if (!_tpFdDeclineLogged)
+            // Distinct reasons each print once. A single process-wide latch hid
+            // the real cause whenever an outer check declined first.
+            if (_tpFdDeclineLogged.Add(reason))
             {
-                _tpFdDeclineLogged = true;
                 Console.Error.WriteLine(
                     $"[qwen35-tp] fused whole-model decode NOT engaged ({reason}); " +
                     "falling back to the per-op tensor-parallel decode.");
@@ -88,27 +121,32 @@ namespace TensorSharp.Models
             _tpFdChecked = true;
             _tpFdReady =
                 _tpFdEnabled && IsGgmlBackend && IsTensorParallel
-                // One driving thread submits every rank: single-process only.
-                && GlobalTpDegree == TpDegree
+                // Multi-node keeps this fused schedule: the executor reduces this
+                // node's ranks on-device and then calls back for the cross-node
+                // exchange, so the graph is identical and only the reduction is
+                // wider. Without such a group there is nobody to do that half.
+                && (GlobalTpDegree == TpDegree || TpCrossNodeReducer != null)
                 // The graph folds the column-parallel LM head per rank.
                 && _tpLmHeadKey != null && _tpQuantWeights.ContainsKey(_tpLmHeadKey)
                 && _weights.ContainsKey("output_norm.weight")
                 // MoE must be sharded by whole experts (the stacked slices the
                 // graph's mul_mat_id dispatches over).
                 && (_numExperts <= 0 || UsesExpertParallelMoE)
-                && GgmlBasicOps.TensorParallelFusedAvailable(TpDegree);
+                && (TpCrossNodeReducer != null
+                    ? GgmlBasicOps.TensorParallelFusedAvailableDistributed(TpDegree)
+                    : GgmlBasicOps.TensorParallelFusedAvailable(TpDegree));
             if (_tpFdReady)
                 _tpFdPlans = new IntPtr[TpDegree];
             else if (IsTensorParallel)
                 TpFdBail(
                     !_tpFdEnabled ? "disabled via TS_QWEN35_TP_FUSED_DECODE=0"
                     : !IsGgmlBackend ? $"backend {_backend} has no fused TP decode kernel"
-                    : GlobalTpDegree != TpDegree ? $"multi-node TP (global={GlobalTpDegree}, local={TpDegree})"
+                    : GlobalTpDegree != TpDegree ? $"multi-node TP (global={GlobalTpDegree}, local={TpDegree}) without a cross-node reducer"
                     : _tpLmHeadKey == null ? "the LM head was not sharded column-parallel (tied embeddings, a vocab that does not divide by the TP degree, or a non-GGML backend)"
                     : !_tpQuantWeights.ContainsKey(_tpLmHeadKey) ? $"no quantized TP shard for the LM head ({_tpLmHeadKey})"
                     : !_weights.ContainsKey("output_norm.weight") ? "output_norm.weight is missing"
                     : (_numExperts > 0 && !UsesExpertParallelMoE) ? "MoE is not expert-parallel sharded"
-                    : $"the native bridge reports no fused TP support for tp={TpDegree}");
+                    : $"the native bridge reports no fused TP support for tp={TpDegree} (distributed={TpCrossNodeReducer != null})");
             return _tpFdReady;
         }
 
@@ -160,6 +198,11 @@ namespace TensorSharp.Models
                 {
                     var a = default(Qwen35LayerDecodeArgs);
                     a.StructBytes = structBytes;
+                    // Per-tensor sidecar scales. Shard-invariant: column-parallel
+                    // splits output rows (the scalar is row-independent) and
+                    // row-parallel splits the contraction (the scalar distributes
+                    // over the AllReduce), so every rank applies the same value.
+                    a.ProjScales = ProjScalesPtr(l);
                     if (!_weights.TryGetValue(_attnNormKey[l], out var attnNorm) || attnNorm == null ||
                         !_weights.TryGetValue(_postAttnNormKey[l], out var postNorm) || postNorm == null)
                         return false;
@@ -299,10 +342,10 @@ namespace TensorSharp.Models
         private unsafe bool TryQwen35FusedModelDecodeTP(Tensor hidden, int position, float[] logitsOut)
         {
             if (!TpFusedModelDecodeAvailable() || logitsOut == null || logitsOut.Length < Config.VocabSize)
-                return false;
+                return TpFdBail("availability/logits buffer");
             if (hidden == null || hidden.DimensionCount != 2 || hidden.Sizes[0] != 1
                 || hidden.ElementType != DType.Float32)
-                return false;
+                return TpFdBail("hidden shape");
 
             int tp = TpDegree;
             int n = Config.NumLayers;
@@ -315,13 +358,13 @@ namespace TensorSharp.Models
                     continue;
                 var k0 = _tpKvCacheK[l][0];
                 if (k0.ElementType != DType.Float32 && k0.ElementType != DType.Float16)
-                    return false;
+                    return TpFdBail("kv cache geometry");
                 cacheSize = (int)k0.Sizes[1];
                 kvCacheType = k0.ElementType == DType.Float16 ? 1 : 0;
                 break;
             }
             if (cacheSize <= 0 || position >= cacheSize)
-                return false;
+                return TpFdBail("no attention KV cache");
 
             if (_tpFdLayers == null || _tpFdBuiltCapacity != _tpKvCacheCapacity)
             {
@@ -337,7 +380,7 @@ namespace TensorSharp.Models
                     // returned false through a path that had nothing to say.
                     TpFdBail("a per-layer descriptor could not be built");
                     _tpFdFailed = true;
-                    return false;
+                    return TpFdBail("layer descriptor build");
                 }
             }
 
@@ -393,7 +436,10 @@ namespace TensorSharp.Models
                         offset += lm.Ne1;
                     }
 
-                    GgmlBasicOps.TensorParallelExecutePlans(_tpFdPlans);
+                    if (TpCrossNodeReducer != null)
+                        GgmlBasicOps.TensorParallelExecutePlansDistributed(_tpFdPlans, TpCrossNodeCallback);
+                    else
+                        GgmlBasicOps.TensorParallelExecutePlans(_tpFdPlans);
                 }
             }
             catch (InvalidOperationException)
@@ -644,7 +690,10 @@ namespace TensorSharp.Models
                         offset += lm.Ne1;
                     }
 
-                    GgmlBasicOps.TensorParallelExecutePlans(_tpFdPlans);
+                    if (TpCrossNodeReducer != null)
+                        GgmlBasicOps.TensorParallelExecutePlansDistributed(_tpFdPlans, TpCrossNodeCallback);
+                    else
+                        GgmlBasicOps.TensorParallelExecutePlans(_tpFdPlans);
                 }
             }
             catch (InvalidOperationException)

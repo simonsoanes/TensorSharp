@@ -169,6 +169,48 @@ public class ManagedQuantizedOpsTests
         Assert.True(anyNonZero, "dequantized block was entirely zero - the fixture is not exercising the codebook");
     }
 
+    [Fact]
+    public void ManagedNvfp4_MatchesNativeGgmlDequantizer()
+    {
+        // NVFP4 (ggml type 40): 36-byte block = 4 UE4M3 sub-block scales + 32
+        // packed E2M1 nibble bytes for 64 elements. Ground truth is ggml's own
+        // dequantize_row_nvfp4 (doubled codebook, halved UE4M3 decode).
+        const int blocks = 9;
+        const int elems = blocks * 64;
+        int blockBytes = (int)GgufFile.GetTypeSize(GgmlTensorType.NVFP4);
+        Assert.Equal(36, blockBytes);
+        Assert.Equal(64, GgufFile.GetBlockSize(GgmlTensorType.NVFP4));
+        Assert.Equal(blocks * blockBytes, NativeDequant.RowSize((int)GgmlTensorType.NVFP4, elems));
+
+        byte[] raw = new byte[blocks * blockBytes];
+        uint state = 0x9E3779B9u;
+        for (int i = 0; i < raw.Length; i++)
+        {
+            state = state * 1664525u + 1013904223u;
+            raw[i] = (byte)(state >> 24);
+        }
+        // Exercise the special scale encodings (0x00 and the 0x7F NaN pattern
+        // both decode to 0) on the first block's sub-scales.
+        raw[0] = 0x00;
+        raw[1] = 0x7F;
+
+        var managed = new float[elems];
+        ManagedQuantizedOps.DequantizeToFloat32((int)GgmlTensorType.NVFP4, raw, 0, managed, 0, elems);
+
+        var native = new float[elems];
+        TensorSharp.GGML.GgmlGgufTensorDequant.DequantizeToFloat32(
+            (int)GgmlTensorType.NVFP4, raw, 0, native, 0, elems);
+
+        bool anyNonZero = false;
+        for (int i = 0; i < elems; i++)
+        {
+            if (native[i] != 0f) anyNonZero = true;
+            Assert.True(Math.Abs(native[i] - managed[i]) <= 1e-6f * Math.Max(1f, Math.Abs(native[i])),
+                $"element {i}: native {native[i]}, managed {managed[i]}");
+        }
+        Assert.True(anyNonZero, "dequantized block was entirely zero - the fixture is not exercising the codebook");
+    }
+
     [Theory]
     [InlineData((int)GgmlTensorType.IQ1_S, 50)]
     [InlineData((int)GgmlTensorType.IQ1_M, 56)]
@@ -654,6 +696,9 @@ public class ManagedQuantizedOpsTests
     [InlineData(GgmlTensorType.MXFP4, 256, 5, 1)]
     [InlineData(GgmlTensorType.MXFP4, 512, 5, 3)]
     [InlineData(GgmlTensorType.MXFP4, 1024, 33, 4)]
+    [InlineData(GgmlTensorType.NVFP4, 256, 5, 1)]
+    [InlineData(GgmlTensorType.NVFP4, 512, 5, 3)]
+    [InlineData(GgmlTensorType.NVFP4, 1024, 33, 4)]
     public void TryAddmmQuantizedToFloat32_MoeQuantDots_MatchDequantReference(
         GgmlTensorType type, int inDim, int outDim, int rows)
     {
@@ -702,6 +747,12 @@ public class ManagedQuantizedOpsTests
                         // E8M0 exponent constrained so scales stay finite/sane
                         raw[o] = (byte)(118 + rng.Next(0, 10));
                         for (int i = 1; i < blockBytes; i++) raw[o + i] = (byte)rng.Next(0, 256);
+                        break;
+                    case GgmlTensorType.NVFP4:
+                        // 4 UE4M3 sub-block scales constrained sane (around 0.5..8),
+                        // then 32 random packed E2M1 nibble bytes.
+                        for (int i = 0; i < 4; i++) raw[o + i] = (byte)(0x30 + rng.Next(0, 22));
+                        for (int i = 4; i < blockBytes; i++) raw[o + i] = (byte)rng.Next(0, 256);
                         break;
                     default:
                         throw new NotSupportedException(type.ToString());

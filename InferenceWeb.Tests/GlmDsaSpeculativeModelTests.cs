@@ -295,7 +295,7 @@ public class GlmDsaSpeculativeModelTests
         // verify row, and [2c] says that row is nearly free.
         (int k, float pMin)[] configs =
         {
-            (8, 0.75f),   // the shared per-token default
+            (8, 0.75f),   // the per-token gate this suite was tuned against
             (8, 0.60f),   // glm-dsa's own gate, full window
             (4, 0.60f),   // glm-dsa's own gate, capped window
             (4, 0.55f),

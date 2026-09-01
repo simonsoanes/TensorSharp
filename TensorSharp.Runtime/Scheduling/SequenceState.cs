@@ -143,6 +143,15 @@ namespace TensorSharp.Runtime.Scheduling
         /// sequence's "current" position. Used by the next step's sampler.</summary>
         public float[] LastLogits { get; internal set; }
 
+        /// <summary>Next output token sampled ON-DEVICE by the batched greedy
+        /// fast path (argmax of the step's logits, which are never downloaded).
+        /// Valid only while <see cref="PendingDevicePosition"/> equals
+        /// <see cref="NumComputedTokens"/>; any recompute/preemption clears it.
+        /// Greedy-deterministic, so consuming it is bit-equivalent to
+        /// re-sampling from the logits it summarizes.</summary>
+        internal int? PendingDeviceToken;
+        internal int PendingDevicePosition;
+
         /// <summary>Reason the sequence finished, set when <see cref="Status"/>
         /// becomes one of the Finished* values.</summary>
         public string FinishReason { get; internal set; }
@@ -217,6 +226,7 @@ namespace TensorSharp.Runtime.Scheduling
         {
             NumComputedTokens = 0;
             LastLogits = null;
+            PendingDeviceToken = null;
             // A preempted sequence re-prefills on re-admission; any prior live-cache
             // continuation claim is stale (its blocks were freed and the model's live
             // cache has since moved on), so drop it and let admission re-decide.
@@ -235,6 +245,7 @@ namespace TensorSharp.Runtime.Scheduling
             NumComputedTokens = 0;
             PrefixCacheReusedTokens = 0;
             LastLogits = null;
+            PendingDeviceToken = null;
             BlockTable.ResetTokensKeepingBlocks();
         }
 

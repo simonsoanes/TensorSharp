@@ -62,6 +62,13 @@ namespace TensorSharp.Models
         /// <summary>Per-GPU sharded F32 weights, keyed by weight name.</summary>
         protected readonly Dictionary<string, Tensor[]> _tpWeights = new();
 
+        /// <summary>Per-tensor weight scale of a SHARDED weight, keyed by the
+        /// name the TP linears look it up by. Recorded when the shards are cut,
+        /// because the shard itself may be a plain F32 <see cref="Tensor"/> with
+        /// nowhere to carry it. The scalar is shard-invariant, so one value
+        /// covers every rank (see the TP linears for why).</summary>
+        protected readonly Dictionary<string, float> _tpWeightScales = new();
+
         /// <summary>
         /// Stacked-along-experts views of MoE expert weight tensors keyed by
         /// the original GGUF tensor name (e.g. <c>"blk.0.ffn_gate_exps.weight"</c>).
@@ -113,6 +120,7 @@ namespace TensorSharp.Models
         /// </summary>
         protected void ApplyModelAlignedKvCacheDefault(IDictionary<string, QuantizedWeight> quantWeights)
         {
+            RefuseUnsupportedBlockQuantizedKvCache();
             if (KvCacheDtypeConfig.IsExplicitlySet) return;
 
             int dominant = 0; // GGML_TYPE_F32
@@ -133,6 +141,44 @@ namespace TensorSharp.Models
             }
 
             KvCacheDtypeConfig.ApplyModelDtypeDefault(dominant);
+            _kvCacheDtype = KvCacheDtypeConfig.Current;
+        }
+
+        /// <summary>
+        /// Whether every path this architecture can take can READ a
+        /// block-quantized (Q8_0 / Q4_0) K/V cache.
+        ///
+        /// A block-quantized cache is only ever readable by kernels that know the
+        /// block layout. An architecture whose fused kernels decline the type AND
+        /// whose managed fallback walks the cache as a flat float buffer cannot
+        /// honour <c>--kv-cache-dtype q8_0</c> on any path, and must say so here:
+        /// otherwise the request survives model construction and dies much later
+        /// as an unhandled "Requires a Float32 tensor" deep inside the first
+        /// forward pass - which, because kernel warm-up is the first forward,
+        /// means the process aborts before it has generated a single token.
+        /// Default true; override to false for a family that cannot.
+        /// </summary>
+        protected virtual bool SupportsBlockQuantizedKvCache => true;
+
+        /// <summary>
+        /// Downgrade an explicitly requested block-quantized KV cache to F16 on
+        /// architectures that cannot read one (see
+        /// <see cref="SupportsBlockQuantizedKvCache"/>), with a message on stderr
+        /// naming the substitution. F16 is the right substitute rather than F32:
+        /// it is what <see cref="KvCacheDtypeConfig.ApplyModelDtypeDefault"/>
+        /// would have chosen for any quantized model, so the operator gets the
+        /// cache the model would have used anyway instead of an abort.
+        /// </summary>
+        private void RefuseUnsupportedBlockQuantizedKvCache()
+        {
+            if (SupportsBlockQuantizedKvCache) return;
+            KvCacheDtype requested = KvCacheDtypeConfig.Current;
+            if (requested != KvCacheDtype.Q8_0 && requested != KvCacheDtype.Q4_0) return;
+
+            Console.Error.WriteLine(
+                $"[kv-cache] {GetType().Name} cannot read a {requested.ToShortString()} K/V cache "
+                + "on any of its attention paths; using f16 instead.");
+            KvCacheDtypeConfig.Set(KvCacheDtype.F16);
             _kvCacheDtype = KvCacheDtypeConfig.Current;
         }
 
@@ -256,6 +302,23 @@ namespace TensorSharp.Models
                     throw new ArgumentException($"Unsupported backend: {backend}");
             }
             Console.WriteLine($"Backend: {backend}");
+
+            // Tell the kernels about the whole cluster, not just this process.
+            // Expert parallelism is sharded by the GLOBAL degree, so a kernel
+            // that sized its expert stack from the local one declared more
+            // experts than it had bytes bound for and let the router address the
+            // difference. Harmless to set on a single node: it publishes the
+            // local degree and offset 0, which is what the kernels assume anyway.
+            if (backend is BackendType.GgmlCuda or BackendType.GgmlVulkan
+                        or BackendType.GgmlCpu or BackendType.GgmlMetal)
+            {
+                // Published unconditionally, including the (0, 0) reset for a
+                // non-TP model: the value is process-global and sticky, so a
+                // plain model loaded after a tensor-parallel one would inherit
+                // the old degree and take the plan-mode branch it must not.
+                GgmlBasicOps.TensorParallelSetGlobalGeometry(
+                    _tpGroup?.GlobalDegree ?? 0, _tpGroup?.GlobalRankOffset ?? 0);
+            }
 
             _gguf = new GgufFile(ggufPath);
         }
@@ -1020,7 +1083,8 @@ namespace TensorSharp.Models
                 GgmlTensorType.IQ1_M or
                 GgmlTensorType.TQ1_0 or
                 GgmlTensorType.TQ2_0 or
-                GgmlTensorType.MXFP4 => true,
+                GgmlTensorType.MXFP4 or
+                GgmlTensorType.NVFP4 => true,
                 _ => false,
             };
         }

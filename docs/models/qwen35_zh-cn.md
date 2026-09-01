@@ -27,12 +27,21 @@
 | Qwen3.5-9B（dense hybrid） | [unsloth/Qwen3.5-9B-GGUF](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) | `Qwen3.5-9B-UD-Q4_K_XL.gguf`（5.966 GB）或 `Qwen3.5-9B-Q8_0.gguf`（9.528 GB） | `mmproj-F16.gguf`（0.918 GB） |
 | Qwen3.5-35B-A3B（MoE） | [ggml-org/Qwen3.5-35B-A3B-GGUF](https://huggingface.co/ggml-org/Qwen3.5-35B-A3B-GGUF) | `Qwen3.5-35B-A3B-Q8_0.gguf`（36.903 GB） | `mmproj-Qwen3.5-35B-A3B-Q8_0.gguf`（0.614 GB） |
 | Qwen3.6-35B-A3B 含 NextN / MTP（MoE） | [unsloth/Qwen3.6-35B-A3B-MTP-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF) | `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`（22.663 GB）或 `Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf`（11.819 GB） | `mmproj-F16.gguf`（0.899 GB） |
+| Qwen3.8-27B NVFP4（dense hybrid，4-bit FP） | [akopytko/Qwen3.8-27B-NVFP4-GGUF](https://huggingface.co/akopytko/Qwen3.8-27B-NVFP4-GGUF) | `Qwen3.8-27B-NVFP4-MTP-N4_0.gguf`（15.716 GB，自包含 NVFP4） | `mmproj-BF16.gguf`（0.931 GB） |
 
 > **Qwen 3.6 MTP：** NextN 草稿块（GGUF 元数据键 `nextn_predict_layers`）**只**在
 > `unsloth/Qwen3.6-35B-A3B-MTP-GGUF` 的 GGUF 中保留。基础仓库
 > [unsloth/Qwen3.6-35B-A3B-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF)
 > 中的文件（文件名相同）去掉了该块 —— 对这些文件，`--spec` 会静默回退到
 > 标准 decode（`--spec-type ngram` 在那里仍然可用，它不需要训练好的草稿器权重）。
+
+> **NVFP4（GGML 类型 40）：** 4-bit E2M1 数值加 UE4M3 每 16 元素子块缩放
+> （每 64 个权重 36 字节，4.5 bpw），即 NVIDIA Blackwell 原生 FP4 格式。
+> GGUF 有两种形态：自包含文件（所有缩放折叠进块内，如上表仓库）和从
+> checkpoint 转换、带有额外 1 元素 `blk.N.<proj>.scale` 张量（HF
+> `weight_scale_2`）的文件 —— TensorSharp 与 llama.cpp 一致地把它乘到投影
+> 输出上（`.input_scale` 是校准元数据，推理时忽略）。在 sm_120 GPU 上，
+> prefill 走 ggml-cuda 的原生 block-scaled FP4 tensor-core 路径。
 
 转换模型卡将对应的 Qwen 官方仓库标记为基础模型；这些上游模型卡声明 Apache-2.0。
 

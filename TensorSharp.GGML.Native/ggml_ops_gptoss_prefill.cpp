@@ -68,23 +68,65 @@ namespace
     {
         const ggml_fp16_t neg_inf = ggml_fp32_to_fp16(-std::numeric_limits<float>::infinity());
         const ggml_fp16_t zero_val = ggml_fp32_to_fp16(0.0f);
-        mask.assign(static_cast<std::size_t>(wlen) * static_cast<std::size_t>(n), neg_inf);
+        mask.resize(static_cast<std::size_t>(wlen) * static_cast<std::size_t>(n));
+        // Each row's admissible keys are one contiguous span [lo, position], so
+        // fill three spans per row instead of branching per element. The old
+        // per-element loop was O(wlen*n) with a data-dependent branch and, at an
+        // 8K context, dominated the whole graph-build phase (~8M iterations per
+        // chunk); the span form runs at fp16-store bandwidth.
         for (int qi = 0; qi < n; qi++)
         {
             const int position = start_pos + qi;
             const int lo = swa ? std::max(0, position - sliding_window + 1) : 0;
+            // clamp the valid span into window-local coordinates
+            const int lo_ki = std::max(0, lo - wstart);
+            const int hi_ki = std::min(wlen - 1, position - wstart);
             ggml_fp16_t* row = &mask[static_cast<std::size_t>(qi) * static_cast<std::size_t>(wlen)];
-            for (int ki = 0; ki < wlen; ki++)
+            if (hi_ki < lo_ki)
             {
-                const int abs_row = wstart + ki;
-                if (abs_row >= lo && abs_row <= position)
-                    row[ki] = zero_val;
+                std::fill(row, row + wlen, neg_inf);
+                continue;
             }
+            std::fill(row, row + lo_ki, neg_inf);
+            std::fill(row + lo_ki, row + hi_ki + 1, zero_val);
+            std::fill(row + hi_ki + 1, row + wlen, neg_inf);
         }
     }
 }
 
-TSG_EXPORT int TSGgml_GptOssModelPrefill(
+namespace {
+
+// Fused tensor parallelism: the driver executes the graph AFTER this function
+// returns, so the context, its backend buffer and the graph all have to outlive
+// the call. One slot per rank, freed when that rank builds its next prefill (or
+// when the decode caches are dropped, which the same events trigger).
+struct GptOssPrefillTpSlot
+{
+    tsg::PooledContextHandle ctx;
+    BufferHandle buffer{nullptr};
+    ggml_cgraph* graph = nullptr;
+    tsg::TpRankPlan plan;
+
+    void reset()
+    {
+        plan.clear();
+        graph = nullptr;
+        buffer = BufferHandle(nullptr);
+        ctx = tsg::PooledContextHandle();
+    }
+};
+
+GptOssPrefillTpSlot g_gptoss_prefill_tp[tsg::TSG_MAX_DEVICES];
+
+}  // namespace
+
+void gptoss_prefill_tp_reset_all()
+{
+    for (auto& slot : g_gptoss_prefill_tp)
+        slot.reset();
+}
+
+static int gptoss_model_prefill_impl(
     const TSGgmlGptOssLayerDesc* layers, int num_layers,
     // [num_tokens, hidden_size] F32 embeddings in. Not written back: the caller
     // only wants the logits, and the hidden states never leave the device.
@@ -94,7 +136,8 @@ TSG_EXPORT int TSGgml_GptOssModelPrefill(
     void* logits_data, int vocab_size,
     const void* lm_head_data, int lm_head_type,
     std::int64_t lm_head_ne0, std::int64_t lm_head_ne1, std::int64_t lm_head_bytes,
-    const void* final_norm_data)
+    const void* final_norm_data,
+    int tp_degree, void** tp_plan_out)
 {
     tsg::PhaseTimer pt(kGptOssPrefillKernel);
     try
@@ -120,6 +163,43 @@ TSG_EXPORT int TSGgml_GptOssModelPrefill(
         const int H = hidden_size;
         const int N = num_tokens;
         const int totalSeqLen = start_pos + N;
+
+        // ---- fused tensor parallelism ----
+        // Plan mode is requested by PASSING tp_plan_out, not by the degree.
+        const bool tp_mode = tp_plan_out != nullptr;
+        const int tp_rank = tp_mode ? tsg::g_active_rank : 0;
+        if (tp_mode)
+        {
+            *tp_plan_out = nullptr;
+            if (tp_degree < 1 || tp_rank < 0 || tp_rank >= tsg::TSG_MAX_DEVICES)
+            {
+                set_last_error("GPT-OSS model prefill: invalid tensor-parallel rank/degree.");
+                return 0;
+            }
+            for (int l = 0; l < num_layers; l++)
+            {
+                if (layers[l].cpu_moe != 0)
+                {
+                    set_last_error("GPT-OSS model prefill: MoE CPU offload is not supported under "
+                                   "fused tensor parallelism.");
+                    return 0;
+                }
+            }
+            // Free THIS rank's previous graph before building the next one.
+            g_gptoss_prefill_tp[tp_rank].reset();
+        }
+        const int global_experts = layers[0].num_experts;
+        // Cluster degree - see ggml_ops_gptoss_decode.cpp.
+        const int tp_group_degree = tsg::tp_global_degree(tp_degree);
+        const int stacked_experts = (tp_mode && global_experts > 0)
+            ? global_experts / tp_group_degree : global_experts;
+        if (tp_mode && global_experts > 0 &&
+            (global_experts % tp_group_degree != 0 || stacked_experts < layers[0].num_experts_used))
+        {
+            set_last_error("GPT-OSS model prefill: expert count is not shardable across the "
+                           "tensor-parallel ranks.");
+            return 0;
+        }
         const int kvType = layers[0].kv_cache_type;
         if (kvType != GGML_TYPE_F32 && kvType != GGML_TYPE_F16)
         {
@@ -222,6 +302,17 @@ TSG_EXPORT int TSGgml_GptOssModelPrefill(
         struct MaskEntry { MaskKey key; ggml_tensor* tensor; int slot; };
         std::vector<MaskEntry> mask_cache;
         std::vector<std::vector<ggml_fp16_t>> mask_store;
+        // slot == -1 entries are filled ON DEVICE after allocation (CUDA):
+        // at an 8-32K context the full-attention mask is tens of MB of host
+        // fp16 fill + upload per chunk, and it dominated the build phase.
+        struct GpuMaskFill { ggml_tensor* tensor; int kvLen; int n; int nPast; int window; };
+        std::vector<GpuMaskFill> gpu_mask_fills;
+        const bool device_mask_fill =
+#ifdef TSG_GGML_USE_CUDA
+            (g_backend_type == BACKEND_TYPE_CUDA);
+#else
+            false;
+#endif
 
         ggml_tensor* hidden_t = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, H, N);
         ggml_tensor* pos_tensor = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, N);
@@ -237,17 +328,24 @@ TSG_EXPORT int TSGgml_GptOssModelPrefill(
             const int nExp = d.num_experts;
 
             t.attn_norm_w = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
-            t.qkv_w = ggml_new_tensor_2d(ctx, static_cast<ggml_type>(d.qkv_type), d.qkv_ne0, d.qkv_ne1);
+            // F16 prefill-GEMM copies (see the desc): per-weight, a non-null
+            // *_f16 pointer swaps that tensor to the F16 copy — tensor-core
+            // GEMMs for the compute-bound prefill, while decode keeps the
+            // quantized (bandwidth-friendly) versions.
+            auto wtype = [](const void* f16, std::int32_t qt) {
+                return f16 != nullptr ? GGML_TYPE_F16 : static_cast<ggml_type>(qt);
+            };
+            t.qkv_w = ggml_new_tensor_2d(ctx, wtype(d.qkv_w_f16, d.qkv_type), d.qkv_ne0, d.qkv_ne1);
             const int qkvDim = (d.separate_qkv != 0) ? qDim : (qDim + 2 * kDim);
             if (d.qkv_b != nullptr) t.qkv_b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, qkvDim);
             if (d.separate_qkv != 0)
             {
-                t.k_w = ggml_new_tensor_2d(ctx, static_cast<ggml_type>(d.k_type), d.k_ne0, d.k_ne1);
-                t.v_w = ggml_new_tensor_2d(ctx, static_cast<ggml_type>(d.v_type), d.v_ne0, d.v_ne1);
+                t.k_w = ggml_new_tensor_2d(ctx, wtype(d.k_w_f16, d.k_type), d.k_ne0, d.k_ne1);
+                t.v_w = ggml_new_tensor_2d(ctx, wtype(d.v_w_f16, d.v_type), d.v_ne0, d.v_ne1);
                 if (d.k_b != nullptr) t.k_b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, kDim);
                 if (d.v_b != nullptr) t.v_b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, kDim);
             }
-            t.o_w = ggml_new_tensor_2d(ctx, static_cast<ggml_type>(d.o_type), d.o_ne0, d.o_ne1);
+            t.o_w = ggml_new_tensor_2d(ctx, wtype(d.o_w_f16, d.o_type), d.o_ne0, d.o_ne1);
             if (d.o_b != nullptr) t.o_b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
             if (d.sinks != nullptr) t.sinks = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, d.num_heads);
             t.k_cache = ggml_new_tensor_3d(ctx, static_cast<ggml_type>(kvType), hd, k_wins[l]->capacity, kvH);
@@ -260,12 +358,16 @@ TSG_EXPORT int TSGgml_GptOssModelPrefill(
             // omission IS the VRAM saving.
             if (d.cpu_moe == 0 || host_moe_verify_enabled())
             {
-                t.gate_exps = ggml_new_tensor_3d(ctx, static_cast<ggml_type>(d.ge_type), d.ge_ne0, d.ge_ne1, nExp);
-                t.up_exps = ggml_new_tensor_3d(ctx, static_cast<ggml_type>(d.ue_type), d.ue_ne0, d.ue_ne1, nExp);
-                t.down_exps = ggml_new_tensor_3d(ctx, static_cast<ggml_type>(d.de_type), d.de_ne0, d.de_ne1, nExp);
-                if (d.gate_exps_b != nullptr) t.gate_exps_b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, d.ge_ne1, nExp);
-                if (d.up_exps_b != nullptr) t.up_exps_b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, d.ue_ne1, nExp);
-                if (d.down_exps_b != nullptr) t.down_exps_b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, d.de_ne1, nExp);
+                // TP shards the stacked experts by rank; the F16 prefill copies
+                // are only ever built on the solo path (the TP arg builder leaves
+                // every *_f16 pointer null), so the two compose safely.
+                const int nExpLocal = tp_mode ? stacked_experts : nExp;
+                t.gate_exps = ggml_new_tensor_3d(ctx, wtype(d.gate_exps_f16, d.ge_type), d.ge_ne0, d.ge_ne1, nExpLocal);
+                t.up_exps = ggml_new_tensor_3d(ctx, wtype(d.up_exps_f16, d.ue_type), d.ue_ne0, d.ue_ne1, nExpLocal);
+                t.down_exps = ggml_new_tensor_3d(ctx, wtype(d.down_exps_f16, d.de_type), d.de_ne0, d.de_ne1, nExpLocal);
+                if (d.gate_exps_b != nullptr) t.gate_exps_b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, d.ge_ne1, nExpLocal);
+                if (d.up_exps_b != nullptr) t.up_exps_b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, d.ue_ne1, nExpLocal);
+                if (d.down_exps_b != nullptr) t.down_exps_b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, d.de_ne1, nExpLocal);
             }
             // Masks are shared by geometry rather than built per layer. GPT-OSS
             // has exactly two: the sliding-window one on even layers and the full
@@ -282,14 +384,57 @@ TSG_EXPORT int TSGgml_GptOssModelPrefill(
                 if (!found)
                 {
                     t.attn_mask = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, wlen[l], N, 1, 1);
-                    t.mask_slot = static_cast<int>(mask_store.size());
-                    mask_store.emplace_back();
-                    gptoss_fill_prefill_mask(mask_store.back(), wstart[l], wlen[l], start_pos, N,
-                                             d.is_swa != 0, d.sliding_window);
+                    if (device_mask_fill)
+                    {
+                        // Same span semantics as the host fill, in window-local
+                        // coordinates: threshold = (start_pos - wstart) + qi,
+                        // lo = threshold - window + 1 (SWA), hi = min(threshold,
+                        // wlen - 1). Bit-identical fp16 constants.
+                        ggml_set_input(t.attn_mask);   // dedicated gallocr slab, alive all graph
+                        t.mask_slot = -1;
+                        gpu_mask_fills.push_back({t.attn_mask, wlen[l], N,
+                                                  start_pos - wstart[l],
+                                                  (d.is_swa != 0) ? d.sliding_window : 0});
+                    }
+                    else
+                    {
+                        t.mask_slot = static_cast<int>(mask_store.size());
+                        mask_store.emplace_back();
+                        gptoss_fill_prefill_mask(mask_store.back(), wstart[l], wlen[l], start_pos, N,
+                                                 d.is_swa != 0, d.sliding_window);
+                    }
                     mask_cache.push_back({key, t.attn_mask, t.mask_slot});
                 }
             }
         }
+
+        // ---- expert-parallel routing tables ----
+        // Same construction as the decode graph: top_k runs on the GLOBAL router
+        // logits (identical on every rank), and these two tables map the winners
+        // onto this rank's expert slice, zeroing the weight of foreign routes.
+        ggml_tensor* ep_lut = nullptr;
+        ggml_tensor* ep_mask = nullptr;
+        std::vector<std::int32_t> ep_lut_data;
+        std::vector<float> ep_mask_data;
+        if (tp_mode && global_experts > 0 && tp_group_degree > 1)
+        {
+            ep_lut = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, 1, global_experts);
+            ep_mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, global_experts);
+            const int first = tsg::tp_global_rank() * stacked_experts;
+            const int last = first + stacked_experts;
+            ep_lut_data.resize(static_cast<std::size_t>(global_experts));
+            ep_mask_data.resize(static_cast<std::size_t>(global_experts));
+            for (int e = 0; e < global_experts; e++)
+            {
+                const bool own = e >= first && e < last;
+                ep_lut_data[static_cast<std::size_t>(e)] = own ? e - first : 0;
+                ep_mask_data[static_cast<std::size_t>(e)] = own ? 1.0f : 0.0f;
+            }
+        }
+
+        // Tensor-parallel cut points, as in the decode graph.
+        std::vector<ggml_tensor*> tp_partial;
+        std::vector<ggml_tensor*> tp_boundary;
 
         ggml_tensor* hidden = hidden_t;      // [H, N]
         bool fa_unsupported = false;
@@ -398,8 +543,15 @@ TSG_EXPORT int TSGgml_GptOssModelPrefill(
             }
 
             ggml_tensor* o_mm = ggml_mul_mat(ctx, t.o_w, attn_flat);       // [H, N]
-            if (t.o_b != nullptr) o_mm = ggml_add(ctx, o_mm, t.o_b);
-            ggml_tensor* ffn_inp = ggml_add(ctx, hidden, o_mm);            // [H, N]
+            // Row-parallel cut #1, recorded before the bias so the add runs in
+            // the next segment against the already-reduced sum.
+            if (tp_mode)
+            {
+                tp_partial.push_back(o_mm);
+                tp_boundary.push_back(o_mm);
+            }
+            ggml_tensor* o_biased = (t.o_b != nullptr) ? ggml_add(ctx, o_mm, t.o_b) : o_mm;
+            ggml_tensor* ffn_inp = ggml_add(ctx, hidden, o_biased);        // [H, N]
 
             // ===== MoE FFN =====
             // Only the last token's logits are wanted, so the final layer's MoE
@@ -426,6 +578,22 @@ TSG_EXPORT int TSGgml_GptOssModelPrefill(
             ggml_tensor* w = ggml_get_rows(ctx, logits_r, sel);                     // [1, nUsed, M]
             ggml_tensor* w_soft = ggml_soft_max(ctx, ggml_reshape_2d(ctx, w, nUsed, M));
             ggml_tensor* w_final = ggml_reshape_3d(ctx, w_soft, 1, nUsed, M);
+
+            // Expert-parallel id remap. get_rows pairs a's ne[2] with b's ne[1],
+            // so the ids are flattened to one row first - that keeps the tables
+            // independent of this layer's token count (M is N for most layers
+            // and 1 for the last).
+            ggml_tensor* sel_ids = sel;
+            if (ep_lut != nullptr)
+            {
+                ggml_tensor* sel_flat = ggml_reshape_2d(ctx, ggml_cont(ctx, sel), nUsed * M, 1);
+                ggml_tensor* lut_r = ggml_reshape_3d(ctx, ep_lut, 1, nExp, 1);
+                ggml_tensor* local_ids = ggml_get_rows(ctx, lut_r, sel_flat);   // [1, nUsed*M, 1] I32
+                sel_ids = ggml_reshape_2d(ctx, local_ids, nUsed, M);
+                ggml_tensor* mask_r = ggml_reshape_3d(ctx, ep_mask, 1, nExp, 1);
+                ggml_tensor* own_mask = ggml_get_rows(ctx, mask_r, sel_flat);   // [1, nUsed*M, 1] F32
+                w_final = ggml_mul(ctx, w_final, ggml_reshape_3d(ctx, own_mask, 1, nUsed, M));
+            }
 
             ggml_tensor* moe_out_2d = nullptr;
             if (d.cpu_moe != 0)
@@ -497,13 +665,13 @@ TSG_EXPORT int TSGgml_GptOssModelPrefill(
             else
             {
                 ggml_tensor* moe_in_3d = ggml_reshape_3d(ctx, moe_in, H, 1, M);
-                ggml_tensor* gate = ggml_mul_mat_id(ctx, t.gate_exps, moe_in_3d, sel);   // [nFf, nUsed, M]
-                if (t.gate_exps_b != nullptr) gate = ggml_add_id(ctx, gate, t.gate_exps_b, sel);
-                ggml_tensor* up = ggml_mul_mat_id(ctx, t.up_exps, moe_in_3d, sel);
-                if (t.up_exps_b != nullptr) up = ggml_add_id(ctx, up, t.up_exps_b, sel);
+                ggml_tensor* gate = ggml_mul_mat_id(ctx, t.gate_exps, moe_in_3d, sel_ids); // [nFf, nUsed, M]
+                if (t.gate_exps_b != nullptr) gate = ggml_add_id(ctx, gate, t.gate_exps_b, sel_ids);
+                ggml_tensor* up = ggml_mul_mat_id(ctx, t.up_exps, moe_in_3d, sel_ids);
+                if (t.up_exps_b != nullptr) up = ggml_add_id(ctx, up, t.up_exps_b, sel_ids);
                 ggml_tensor* act = ggml_swiglu_oai(ctx, gate, up, d.oai_alpha, d.oai_limit);
-                ggml_tensor* down = ggml_mul_mat_id(ctx, t.down_exps, act, sel);         // [H, nUsed, M]
-                if (t.down_exps_b != nullptr) down = ggml_add_id(ctx, down, t.down_exps_b, sel);
+                ggml_tensor* down = ggml_mul_mat_id(ctx, t.down_exps, act, sel_ids);     // [H, nUsed, M]
+                if (t.down_exps_b != nullptr) down = ggml_add_id(ctx, down, t.down_exps_b, sel_ids);
                 ggml_tensor* weighted = ggml_mul(ctx, down, w_final);
 
                 // Sum the nUsed expert results per token. weighted is
@@ -517,6 +685,12 @@ TSG_EXPORT int TSGgml_GptOssModelPrefill(
                     acc = ggml_add(ctx, acc, view_u);
                 }
                 moe_out_2d = acc;
+                // Row-parallel cut #2: only this rank's experts contributed.
+                if (tp_mode)
+                {
+                    tp_partial.push_back(moe_out_2d);
+                    tp_boundary.push_back(moe_out_2d);
+                }
             }
             hidden = ggml_add(ctx, moe_src, moe_out_2d);   // [H, M]
         }
@@ -601,17 +775,25 @@ TSG_EXPORT int TSGgml_GptOssModelPrefill(
             LayerTensors& t = lt[l];
             const int hd = d.head_dim;
             const int nExp = d.num_experts;
+            // The stacked experts and their biases are this rank's slice.
+            const int nExpLocal = tp_mode ? stacked_experts : nExp;
             const int qDim = d.num_heads * hd;
             const int kDim = d.num_kv_heads * hd;
             const int qkvDim = (d.separate_qkv != 0) ? qDim : (qDim + 2 * kDim);
 
-            bind_or_mark(t.qkv_w, d.qkv_w, static_cast<std::size_t>(d.qkv_bytes), true);
-            bind_or_mark(t.o_w, d.o_w, static_cast<std::size_t>(d.o_bytes), true);
-            bind_or_mark(t.k_w, d.k_w, static_cast<std::size_t>(d.k_bytes), true);
-            bind_or_mark(t.v_w, d.v_w, static_cast<std::size_t>(d.v_bytes), true);
-            bind_or_mark(t.gate_exps, d.gate_exps, static_cast<std::size_t>(d.ge_bytes), true);
-            bind_or_mark(t.up_exps, d.up_exps, static_cast<std::size_t>(d.ue_bytes), true);
-            bind_or_mark(t.down_exps, d.down_exps, static_cast<std::size_t>(d.de_bytes), true);
+            auto wbind = [&](ggml_tensor* tgt, const void* qdata, std::size_t qbytes, const void* f16data) {
+                if (f16data != nullptr)
+                    bind_or_mark(tgt, f16data, static_cast<std::size_t>(ggml_nbytes(tgt)), true);
+                else
+                    bind_or_mark(tgt, qdata, qbytes, true);
+            };
+            wbind(t.qkv_w, d.qkv_w, static_cast<std::size_t>(d.qkv_bytes), d.qkv_w_f16);
+            wbind(t.o_w, d.o_w, static_cast<std::size_t>(d.o_bytes), d.o_w_f16);
+            wbind(t.k_w, d.k_w, static_cast<std::size_t>(d.k_bytes), d.k_w_f16);
+            wbind(t.v_w, d.v_w, static_cast<std::size_t>(d.v_bytes), d.v_w_f16);
+            wbind(t.gate_exps, d.gate_exps, static_cast<std::size_t>(d.ge_bytes), d.gate_exps_f16);
+            wbind(t.up_exps, d.up_exps, static_cast<std::size_t>(d.ue_bytes), d.up_exps_f16);
+            wbind(t.down_exps, d.down_exps, static_cast<std::size_t>(d.de_bytes), d.down_exps_f16);
             bind_or_mark(t.attn_norm_w, d.attn_norm_w, static_cast<std::size_t>(H) * sizeof(float), true);
             bind_or_mark(t.post_attn_norm_w, d.post_attn_norm_w, static_cast<std::size_t>(H) * sizeof(float), true);
             bind_or_mark(t.gate_inp_w, d.gate_inp_w, static_cast<std::size_t>(H) * nExp * sizeof(float), true);
@@ -621,9 +803,9 @@ TSG_EXPORT int TSGgml_GptOssModelPrefill(
             bind_or_mark(t.v_b, d.v_b, static_cast<std::size_t>(kDim) * sizeof(float), true);
             bind_or_mark(t.o_b, d.o_b, static_cast<std::size_t>(H) * sizeof(float), true);
             bind_or_mark(t.sinks, d.sinks, static_cast<std::size_t>(d.num_heads) * sizeof(float), true);
-            bind_or_mark(t.gate_exps_b, d.gate_exps_b, static_cast<std::size_t>(d.ge_ne1) * nExp * sizeof(float), true);
-            bind_or_mark(t.up_exps_b, d.up_exps_b, static_cast<std::size_t>(d.ue_ne1) * nExp * sizeof(float), true);
-            bind_or_mark(t.down_exps_b, d.down_exps_b, static_cast<std::size_t>(d.de_ne1) * nExp * sizeof(float), true);
+            bind_or_mark(t.gate_exps_b, d.gate_exps_b, static_cast<std::size_t>(d.ge_ne1) * nExpLocal * sizeof(float), true);
+            bind_or_mark(t.up_exps_b, d.up_exps_b, static_cast<std::size_t>(d.ue_ne1) * nExpLocal * sizeof(float), true);
+            bind_or_mark(t.down_exps_b, d.down_exps_b, static_cast<std::size_t>(d.de_ne1) * nExpLocal * sizeof(float), true);
 
             // The K/V caches are the shared device windows: point this graph's
             // tensors straight at them (no host binding, no upload).
@@ -640,14 +822,27 @@ TSG_EXPORT int TSGgml_GptOssModelPrefill(
         }
         bind_or_mark(lm_head_t, lm_head_data, static_cast<std::size_t>(lm_head_bytes), true);
         bind_or_mark(final_norm_t, final_norm_data, static_cast<std::size_t>(H) * sizeof(float), true);
-        // One bind per DISTINCT mask, not per layer.
+        // One bind per DISTINCT mask, not per layer. Device-filled masks
+        // (slot == -1) are generated after allocation instead.
         for (const auto& m : mask_cache)
-            bind_or_mark(m.tensor, mask_store[static_cast<std::size_t>(m.slot)].data(),
-                         mask_store[static_cast<std::size_t>(m.slot)].size() * sizeof(ggml_fp16_t), false);
+            if (m.slot >= 0)
+                bind_or_mark(m.tensor, mask_store[static_cast<std::size_t>(m.slot)].data(),
+                             mask_store[static_cast<std::size_t>(m.slot)].size() * sizeof(ggml_fp16_t), false);
 
         pt.mark("bind");
         BufferHandle buffer(nullptr);
-        if (!alloc_graph_reuse_gallocr(graph))
+        // Plan mode cannot use the shared gallocr scratch: the next rank's build
+        // would reuse it before this graph has run.
+        if (tp_mode)
+        {
+            buffer.value = ggml_backend_alloc_ctx_tensors(ctx, g_backend);
+            if (buffer.value == nullptr)
+            {
+                set_last_error("GPT-OSS model prefill: failed to allocate the tensor-parallel buffer.");
+                return 0;
+            }
+        }
+        else if (!alloc_graph_reuse_gallocr(graph))
         {
             buffer.value = ggml_backend_alloc_ctx_tensors(ctx, g_backend);
             if (buffer.value == nullptr)
@@ -669,6 +864,69 @@ TSG_EXPORT int TSGgml_GptOssModelPrefill(
         for (int i = 0; i < N; i++)
             pos_vals[static_cast<std::size_t>(i)] = start_pos + i;
         ggml_backend_tensor_set(pos_tensor, pos_vals.data(), 0, pos_vals.size() * sizeof(std::int32_t));
+        if (ep_lut != nullptr)
+        {
+            ggml_backend_tensor_set(ep_lut, ep_lut_data.data(), 0,
+                                    ep_lut_data.size() * sizeof(std::int32_t));
+            ggml_backend_tensor_set(ep_mask, ep_mask_data.data(), 0,
+                                    ep_mask_data.size() * sizeof(float));
+        }
+
+        // The deferred causal-mask fill has to happen HERE, above the
+        // tensor-parallel early return, not next to graph_compute. A
+        // device_mask_fill mask is ggml_set_input-flagged with mask_slot == -1,
+        // so the bind loop skips it and nothing uploads host bytes for it; the
+        // only thing that ever writes it is this fill. In plan mode the function
+        // hands the graph back UNEXECUTED and returns, so a fill placed after
+        // that return never runs and every rank attends through whatever the
+        // freshly allocated (never cleared) VRAM happened to hold. The masks are
+        // graph INPUTS and their buffers are allocated by this point, so filling
+        // them here is correct for both modes - the same order
+        // ggml_ops_gemma4_verify.cpp already uses.
+#ifdef TSG_GGML_USE_CUDA
+        // Deferred causal masks: written straight into their device buffers on
+        // stream 0, then synced so the backend-stream compute sees them.
+        if (!gpu_mask_fills.empty())
+        {
+            for (const auto& g : gpu_mask_fills)
+                tsg_cuda_fill_causal_mask_f16(g.tensor->data, g.kvLen, g.n, g.nPast, g.window, g.kvLen);
+            tsg_cuda_sync_stream0();
+        }
+#endif
+        if (tp_mode)
+        {
+            GptOssPrefillTpSlot& slot = g_gptoss_prefill_tp[tp_rank];
+            slot.plan.clear();
+            slot.plan.graph = graph;
+            slot.plan.ar_tensor = tp_partial;
+            if (!tsg::tp_plan_segments(slot.plan, tp_boundary))
+            {
+                set_last_error("GPT-OSS model prefill: could not segment the tensor-parallel plan.");
+                slot.reset();
+                return 0;
+            }
+            // Only rank 0 downloads: the folded LM head is replicated, so every
+            // rank computes the same logits from the same reduced hidden state.
+            const bool tp_download = (tp_rank == 0);
+            slot.plan.out_tensor = tp_download ? logits_out : nullptr;
+            slot.plan.out_host = tp_download ? logits_data : nullptr;
+            slot.plan.out_bytes = tp_download
+                ? static_cast<std::size_t>(vocab_size) * sizeof(float) : 0;
+            // Ownership moves into the slot; the driver runs the graph after this
+            // returns and the next prefill on this rank frees it.
+            slot.graph = graph;
+            slot.buffer = std::move(buffer);
+            slot.ctx = std::move(context);
+            for (int l = 0; l < num_layers; l++)
+            {
+                k_wins[l]->rows_valid = std::max<std::int64_t>(k_wins[l]->rows_valid, totalSeqLen);
+                v_wins[l]->rows_valid = std::max<std::int64_t>(v_wins[l]->rows_valid, totalSeqLen);
+            }
+            *tp_plan_out = &slot.plan;
+            clear_last_error();
+            return 1;
+        }
+
 
         ggml_status status = GGML_STATUS_SUCCESS;
         if (!host_moe.empty())
@@ -711,4 +969,35 @@ TSG_EXPORT int TSGgml_GptOssModelPrefill(
         set_last_error("Unknown error in GPT-OSS model prefill.");
         return 0;
     }
+}
+
+// Thin ABI wrappers. The original export keeps its signature; the TP one asks
+// for a plan and gets the graph back unexecuted.
+TSG_EXPORT int TSGgml_GptOssModelPrefill(
+    const TSGgmlGptOssLayerDesc* layers, int num_layers,
+    const void* hidden_data, int hidden_size, int num_tokens, int start_pos,
+    void* logits_data, int vocab_size,
+    const void* lm_head_data, int lm_head_type,
+    std::int64_t lm_head_ne0, std::int64_t lm_head_ne1, std::int64_t lm_head_bytes,
+    const void* final_norm_data)
+{
+    return gptoss_model_prefill_impl(layers, num_layers, hidden_data, hidden_size, num_tokens,
+                                     start_pos, logits_data, vocab_size, lm_head_data, lm_head_type,
+                                     lm_head_ne0, lm_head_ne1, lm_head_bytes, final_norm_data,
+                                     1, nullptr);
+}
+
+TSG_EXPORT int TSGgml_GptOssModelPrefillTP(
+    const TSGgmlGptOssLayerDesc* layers, int num_layers,
+    const void* hidden_data, int hidden_size, int num_tokens, int start_pos,
+    void* logits_data, int vocab_size,
+    const void* lm_head_data, int lm_head_type,
+    std::int64_t lm_head_ne0, std::int64_t lm_head_ne1, std::int64_t lm_head_bytes,
+    const void* final_norm_data,
+    int tp_degree, void** tp_plan_out)
+{
+    return gptoss_model_prefill_impl(layers, num_layers, hidden_data, hidden_size, num_tokens,
+                                     start_pos, logits_data, vocab_size, lm_head_data, lm_head_type,
+                                     lm_head_ne0, lm_head_ne1, lm_head_bytes, final_norm_data,
+                                     tp_degree, tp_plan_out);
 }

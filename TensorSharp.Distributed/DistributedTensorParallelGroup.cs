@@ -136,6 +136,16 @@ namespace TensorSharp.Distributed
                 _localGroup.Synchronize();
         }
 
+        /// <summary>Cross-node half of <see cref="AllReduce(Tensor[])"/>: the
+        /// caller has already reduced this node's ranks, so only the TCP
+        /// exchange between nodes remains.</summary>
+        public void CrossNodeAllReduce(float[] buffer, int count)
+        {
+            ArgumentNullException.ThrowIfNull(buffer);
+            if (count > 0)
+                _tcp.AllReduce(buffer, count);
+        }
+
         public void Synchronize()
         {
             _localGroup.Synchronize();

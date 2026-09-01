@@ -217,19 +217,12 @@ namespace TensorSharp.Models
         {
             _maxContextLength = maxSeqLen;
             _kvCacheCapacity = initialSeqLen;
-            int numKVHeads = Config.NumKVHeads;
-            int headDim = Config.HeadDim;
+            _initialKvCacheLength = initialSeqLen;
             ApplyModelAlignedKvCacheDefault(_quantWeights);
-            DType kvDtype = _kvCacheDtype.ToDType();
-            _kvCacheK = new Tensor[Config.NumLayers];
-            _kvCacheV = new Tensor[Config.NumLayers];
-            for (int l = 0; l < Config.NumLayers; l++)
-            {
-                _kvCacheK[l] = new Tensor(_allocator, kvDtype, numKVHeads, initialSeqLen, headDim);
-                _kvCacheV[l] = new Tensor(_allocator, kvDtype, numKVHeads, initialSeqLen, headDim);
-                InitializeCacheTensor(_kvCacheK[l]);
-                InitializeCacheTensor(_kvCacheV[l]);
-            }
+            // Shared with the per-request holders (Qwen3Model.PerSeqCache.cs)
+            // so the primary cache and every concurrent request's cache have
+            // exactly one definition of the layout.
+            AllocateKvCacheArrays(initialSeqLen, out _kvCacheK, out _kvCacheV);
             _cacheSeqLen = 0;
         }
 
@@ -239,6 +232,14 @@ namespace TensorSharp.Models
                 return;
             if (requiredSeqLen > _maxContextLength)
                 throw new InvalidOperationException($"Requested sequence length {requiredSeqLen} exceeds configured max context {_maxContextLength}.");
+
+            // Growth copies through the HOST mirror and hands every layer a new
+            // pointer. The whole-model fused decode writes K/V device-side only
+            // (it sets _kvCacheHostDirty), so without this flush the copy below
+            // reads stale bytes and silently drops everything decoded since the
+            // last sync. Per-request holders start small and grow, so this is
+            // now on the common path rather than a corner case.
+            EnsureKvCacheHostSynchronized();
 
             int newCapacity = Math.Max(_kvCacheCapacity, 1);
             while (newCapacity < requiredSeqLen)
@@ -265,13 +266,22 @@ namespace TensorSharp.Models
                     Ops.Copy(dstV, srcV);
                 }
 
+                // Release the device windows keyed on the OLD host pointer, or
+                // they leak their VRAM and a recycled address could rebind them.
+                InvalidateTensorDeviceCache(_kvCacheK[l]);
+                InvalidateTensorDeviceCache(_kvCacheV[l]);
                 _kvCacheK[l].Dispose();
                 _kvCacheV[l].Dispose();
                 _kvCacheK[l] = newK;
                 _kvCacheV[l] = newV;
             }
 
+            _kvCacheHostDirty = false;
             _kvCacheCapacity = newCapacity;
+            // The whole-model decode kernel holds raw per-layer K/V pointers
+            // captured at construction; the tensors above were just replaced,
+            // so without this the next fused decode reads the freed cache.
+            RefreshDecodeArraysKvCache();
             Console.WriteLine($"Expanded Qwen3 attention cache to {newCapacity} tokens.");
         }
 
@@ -555,6 +565,12 @@ namespace TensorSharp.Models
             return hidden;
         }
 
+        // Fused prefill attention reading the F16 KV cache in place, instead of the
+        // host ExpandKVHeads + materialized score matrix. TS_QWEN3_FLASH_PREFILL=0
+        // forces the legacy path (A/B / debugging). See Attention.
+        private static readonly bool Qwen3FlashPrefillEnabled =
+            Environment.GetEnvironmentVariable("TS_QWEN3_FLASH_PREFILL") != "0";
+
         private Tensor Attention(Tensor input, int layer, string[] wn, int seqLen, int startPos)
         {
             int numHeads = Config.NumHeads;
@@ -632,6 +648,48 @@ namespace TensorSharp.Models
             CopyToCache(_kvCacheV[layer], vHeads, startPos, seqLen);
             kHeads.Dispose();
             vHeads.Dispose();
+
+            // Fused prefill attention straight off the F16 cache. The legacy path
+            // below expands the cache with ExpandKVHeads, which on the GGML backend
+            // is a HOST loop: it dequantizes F16->F32 and repeats each KV head
+            // group_size times, so a 36-layer 2048-token prefill wrote ~2.4 GB
+            // through system memory and re-uploaded it, then materialized an
+            // [numHeads, seqLen, kvLen] score tensor on top. That put 74% of Qwen3
+            // prefill inside "Attention" and held the GPU at ~5% - 2048 tokens took
+            // 27 s (75 tok/s) where gpt-oss on the same card does 19,800 tok/s.
+            //
+            // This kernel reads the [kvHeads, cacheLen, headDim] F16 cache in place,
+            // does the GQA broadcast and the causal mask inside the graph, and picks
+            // a flash-attention variant once kvLen is large enough to make the score
+            // matrix expensive. mul_mat accumulates in F32, so it is numerically the
+            // same computation as dequantizing first, up to floating-point ordering:
+            // the scale moves from the score matmul into soft_max_ext and the K/V
+            // matmuls pick different kernels, so a greedy near-tie can land on the
+            // other token - the same trade Gemma 4 already takes for its global
+            // layers (Gemma4Model.cs). TS_QWEN3_FLASH_PREFILL=0 forces the legacy
+            // materialized path for A/B.
+            if (Qwen3FlashPrefillEnabled
+                && IsGgmlBackend
+                && _kvCacheK[layer].ElementType == DType.Float16
+                && _kvCacheV[layer].ElementType == DType.Float16
+                && numHeads % numKVHeads == 0)
+            {
+                var fused = new Tensor(_allocator, DType.Float32, seqLen, numHeads * headDim);
+                // maskStartPos == startPos == totalSeqLen - seqLen: query row t
+                // attends keys [0, startPos + t]. No sliding window on Qwen3.
+                GgmlBasicOps.FusedPrefillAttentionF16KV(
+                    qHeads, _kvCacheK[layer], _kvCacheV[layer], fused,
+                    numHeads, numKVHeads, headDim,
+                    seqLen, totalSeqLen, (int)_kvCacheK[layer].Sizes[1],
+                    maskStartPos: startPos, slidingWindow: 0, scale: scale);
+                qHeads.Dispose();
+
+                _attnTicks += Stopwatch.GetTimestamp() - t0;
+
+                Tensor fusedOut = LinearForward(fused, wn[4]);
+                fused.Dispose();
+                return fusedOut;
+            }
 
             int groupSize = numHeads / numKVHeads;
             Tensor kExpanded = ExpandKVHeads(_kvCacheK[layer], groupSize, totalSeqLen);
@@ -1076,6 +1134,7 @@ namespace TensorSharp.Models
 
         public override void Dispose()
         {
+            DisposeFusedSequenceCaches();
             if (_kvCacheK != null)
                 foreach (var t in _kvCacheK) t?.Dispose();
             if (_kvCacheV != null)

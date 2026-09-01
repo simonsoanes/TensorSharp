@@ -171,6 +171,7 @@ namespace TensorSharp.Models
                 }
             }
             Console.WriteLine($" done ({countF32} F32 tensors, {countQuant} quantized tensors)");
+            AttachSidecarWeightScales();
             if (countQuant > 0)
             {
                 if (mappedQuantBytes > 0)
@@ -832,6 +833,59 @@ namespace TensorSharp.Models
         /// GGUFs make that reachable, so a family that has not implemented the
         /// split path must say so at load time rather than fail later.
         /// </summary>
+        /// <summary>Non-trivial per-tensor sidecar ".scale" tensors were found
+        /// and attached to their QuantizedWeights at load time.</summary>
+        protected bool HasSidecarWeightScales { get; private set; }
+
+        /// <summary>
+        /// llama.cpp-style NVFP4 sidecars: a 1-element F32 tensor named
+        /// "&lt;base&gt;.scale" (converted from HF weight_scale_2) multiplies the
+        /// matmul output of "&lt;base&gt;.weight". Attach the value to the weight so
+        /// every consumer can apply it. ".input_scale" sidecars are calibration
+        /// metadata that llama.cpp also ignores at inference. Vector-valued
+        /// ".scale" tensors (per-expert / per-dim, e.g. Gemma4's) are left in
+        /// _weights for their model-specific consumers.
+        /// </summary>
+        private void AttachSidecarWeightScales()
+        {
+            int attached = 0;
+            foreach (var kv in _quantWeights)
+            {
+                if (!kv.Key.EndsWith(".weight", StringComparison.Ordinal))
+                    continue;
+                string scaleKey = kv.Key.Substring(0, kv.Key.Length - ".weight".Length) + ".scale";
+                if (_weights.TryGetValue(scaleKey, out var st) && st.ElementCount() == 1)
+                {
+                    float v = st.GetElementsAsFloat(1)[0];
+                    if (v != 1.0f)
+                    {
+                        kv.Value.Scale = v;
+                        attached++;
+                    }
+                }
+            }
+            if (attached > 0)
+            {
+                HasSidecarWeightScales = true;
+                Console.WriteLine($"  Per-tensor weight scales: {attached} sidecar .scale tensors attached (NVFP4 scale2)");
+                if (IsTensorParallel && !SupportsTensorParallelWeightScales)
+                    throw new NotSupportedException(
+                        "This GGUF carries per-tensor weight-scale sidecars (.scale), which the " +
+                        "tensor-parallel path for this architecture does not apply yet. " +
+                        "Run it without --tp, or use a GGUF whose scales are folded into " +
+                        "the quantized blocks.");
+            }
+        }
+
+        /// <summary>
+        /// Whether this architecture's tensor-parallel paths apply per-tensor
+        /// sidecar weight scales (<see cref="QuantizedWeight.Scale"/>). The scalar
+        /// itself is shard-invariant - it does not depend on the output row, and it
+        /// distributes over the row-parallel AllReduce - so this is purely about
+        /// whether every per-rank matmul in the family has been wired to apply it.
+        /// </summary>
+        protected virtual bool SupportsTensorParallelWeightScales => false;
+
         protected virtual bool SupportsSplitGateUpFfn => false;
 
         protected unsafe void FuseGateUpWeights(int numLayers = 0)
@@ -860,6 +914,15 @@ namespace TensorSharp.Models
                     // different types, which a single fused tensor can't represent.
                     // Requantize the lower-fidelity side into the higher-fidelity
                     // type first, then fuse as usual.
+                    if (gw.Scale != uw.Scale)
+                    {
+                        // Per-tensor sidecar scales differ: one fused tensor would
+                        // need a single scalar for both halves. Keep the pair split;
+                        // the split-FFN path applies each side's own scale.
+                        splitLayers.Add($"{l}:scale {gw.Scale}!={uw.Scale}");
+                        continue;
+                    }
+
                     QuantizedWeight gateSrc = gw, upSrc = uw, requant = null;
                     if (gw.GgmlType != uw.GgmlType)
                     {
@@ -897,6 +960,7 @@ namespace TensorSharp.Models
                     if (!TryCreateFusedQuantizedWeight(out QuantizedWeight fusedWeight, gateSrc, upSrc))
                         fusedWeight = QuantizedWeight.ConcatOrCreateCopy(gateSrc, upSrc);
 
+                    fusedWeight.Scale = gw.Scale;
                     _quantWeights[guName] = fusedWeight;
                     _quantWeights.Remove(gateName); gw.Dispose();
                     _quantWeights.Remove(upName); uw.Dispose();

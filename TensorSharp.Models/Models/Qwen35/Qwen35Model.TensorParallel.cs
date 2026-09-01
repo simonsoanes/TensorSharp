@@ -320,14 +320,24 @@ namespace TensorSharp.Models
                     "(no separate output.weight - tied embeddings).");
                 return;
             }
-            if (qw.Ne1 % GlobalTpDegree != 0 || qw.Ne1 != Config.VocabSize)
+            // Split across THIS NODE's ranks, not the cluster's. The head is
+            // column-parallel and nothing reduces its output: each rank writes a
+            // disjoint slice of the logits and the driver reads the buffer
+            // directly. Splitting it globally therefore left the driver holding
+            // only its own node's slice of the vocabulary, with the rest of the
+            // buffer never written - and because Qwen's EOS id sits in the upper
+            // half, EOS could never win the argmax. Generation ran to max_tokens
+            // and repeated itself, on output that otherwise read as fluent.
+            // Every node computing the whole vocabulary is the same arrangement
+            // gpt-oss uses, and on one node this is bit-identical to before.
+            if (qw.Ne1 % TpDegree != 0 || qw.Ne1 != Config.VocabSize)
             {
                 Console.WriteLine($"  Qwen3.5 LM head: kept replicated on rank 0 " +
-                    $"(vocab rows {qw.Ne1} vs config vocab {Config.VocabSize}, TP degree {GlobalTpDegree}).");
+                    $"(vocab rows {qw.Ne1} vs config vocab {Config.VocabSize}, local TP degree {TpDegree}).");
                 return;
             }
 
-            ShardExpertColumnParallel("output.weight");
+            ShardExpertColumnParallel("output.weight", perNodeOnly: true);
             if (!_tpQuantWeights.ContainsKey("output.weight"))
             {
                 Console.WriteLine("  Qwen3.5 LM head: kept replicated on rank 0 " +
@@ -336,8 +346,9 @@ namespace TensorSharp.Models
             }
 
             _tpLmHeadKey = "output.weight";
-            Console.WriteLine($"  Qwen3.5 LM head: column-parallel across {GlobalTpDegree} GPU(s), " +
-                $"{qw.Ne1 / GlobalTpDegree} vocab rows each.");
+            Console.WriteLine($"  Qwen3.5 LM head: column-parallel across {TpDegree} local GPU(s), " +
+                $"{qw.Ne1 / TpDegree} vocab rows each" +
+                (GlobalTpDegree != TpDegree ? " (replicated per node: nothing reduces the head)." : "."));
         }
 
         /// <summary>
@@ -479,9 +490,14 @@ namespace TensorSharp.Models
                     }
                     shards[r] = new QuantizedWeight(shardPtr, totalBytes,
                         qw.GgmlType, dstNe0, dstNe1);
+                    // A per-tensor scale is shard-invariant: it does not depend on
+                    // the output row, and it distributes over the row-parallel
+                    // AllReduce, so every shard carries the parent's value.
+                    shards[r].Scale = qw.Scale;
                 }
 
                 _tpQuantWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
                 _quantWeights.Remove(weightName);
                 qw.Dispose();
             }
@@ -532,8 +548,13 @@ namespace TensorSharp.Models
                         }
                         qShards[r] = new QuantizedWeight(shardPtr, totalBytes,
                             q8Type, hiddenSize, rowIndices.Length);
+                        // A per-tensor scale is shard-invariant: it does not depend on
+                        // the output row, and it distributes over the row-parallel
+                        // AllReduce, so every shard carries the parent's value.
+                        qShards[r].Scale = qw.Scale;
                     }
                     _tpQuantWeights[weightName] = qShards;
+                    RecordTpWeightScale(weightName, qw);
                 }
                 else
                 {
@@ -558,6 +579,7 @@ namespace TensorSharp.Models
                         shards[r] = shard;
                     }
                     _tpWeights[weightName] = shards;
+                    RecordTpWeightScale(weightName, qw);
                 }
 
                 _weights.Remove(weightName);
@@ -786,9 +808,14 @@ namespace TensorSharp.Models
                     }
                     shards[r] = new QuantizedWeight(shardPtr, totalBytesPerShard,
                         qw.GgmlType, ne0PerShard, qw.Ne1);
+                    // A per-tensor scale is shard-invariant: it does not depend on
+                    // the output row, and it distributes over the row-parallel
+                    // AllReduce, so every shard carries the parent's value.
+                    shards[r].Scale = qw.Scale;
                 }
 
                 _tpQuantWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
                 _quantWeights.Remove(weightName);
                 qw.Dispose();
             }
@@ -827,6 +854,7 @@ namespace TensorSharp.Models
                 }
 
                 _tpWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
                 _weights.Remove(weightName);
                 w.Dispose();
             }
@@ -915,8 +943,13 @@ namespace TensorSharp.Models
                     }
                     shards[r] = new QuantizedWeight(shardPtr, totalBytesPerShard,
                         q8Type, ne0PerShard, qw.Ne1);
+                    // A per-tensor scale is shard-invariant: it does not depend on
+                    // the output row, and it distributes over the row-parallel
+                    // AllReduce, so every shard carries the parent's value.
+                    shards[r].Scale = qw.Scale;
                 }
                 _tpQuantWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
             }
             else
             {
@@ -952,6 +985,7 @@ namespace TensorSharp.Models
                     shards[r] = shard;
                 }
                 _tpWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
             }
 
             _quantWeights.Remove(weightName);
@@ -1004,11 +1038,18 @@ namespace TensorSharp.Models
             }
         }
 
-        private void ShardExpertColumnParallel(string weightName)
+        /// <param name="perNodeOnly">
+        /// Split across this node's ranks only, giving every node the whole
+        /// tensor. Correct exactly for a column-parallel output that nothing
+        /// reduces afterwards - the LM head. Everything else here feeds a
+        /// row-parallel projection whose AllReduce spans the cluster, so it must
+        /// keep splitting by the GLOBAL degree.
+        /// </param>
+        private void ShardExpertColumnParallel(string weightName, bool perNodeOnly = false)
         {
             int tp = TpDegree;
-            int globalTp = GlobalTpDegree;
-            int rankOffset = TpRankOffset;
+            int globalTp = perNodeOnly ? TpDegree : GlobalTpDegree;
+            int rankOffset = perNodeOnly ? 0 : TpRankOffset;
 
             if (_quantWeights.TryGetValue(weightName, out var qw))
             {
@@ -1031,6 +1072,7 @@ namespace TensorSharp.Models
                 }
 
                 _tpQuantWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
                 _quantWeights.Remove(weightName);
                 qw.Dispose();
             }
@@ -1047,6 +1089,7 @@ namespace TensorSharp.Models
                 }
 
                 _tpWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
                 _weights.Remove(weightName);
                 w.Dispose();
             }
@@ -1102,9 +1145,14 @@ namespace TensorSharp.Models
                     }
                     shards[r] = new QuantizedWeight(shardPtr, totalBytesPerShard,
                         qw.GgmlType, ne0PerShard, qw.Ne1);
+                    // A per-tensor scale is shard-invariant: it does not depend on
+                    // the output row, and it distributes over the row-parallel
+                    // AllReduce, so every shard carries the parent's value.
+                    shards[r].Scale = qw.Scale;
                 }
 
                 _tpQuantWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
                 _quantWeights.Remove(weightName);
                 qw.Dispose();
             }
@@ -1121,6 +1169,7 @@ namespace TensorSharp.Models
                 }
 
                 _tpWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
                 _weights.Remove(weightName);
                 w.Dispose();
             }

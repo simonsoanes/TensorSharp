@@ -153,10 +153,10 @@ namespace TensorSharp.Runtime.Speculative
                 if (TryReadOption(args, ref i, "--spec-pmin", "--mtp-pmin", out string pminOpt, out string pminFlag))
                 {
                     if (!float.TryParse(pminOpt, NumberStyles.Float, CultureInfo.InvariantCulture, out float pmin)
-                        || pmin <= 0f || pmin > 1f)
+                        || pmin < 0f || pmin > 1f)
                     {
                         throw new ArgumentException(
-                            $"Invalid value for {pminFlag}: '{pminOpt}'. Expected a probability in (0, 1].");
+                            $"Invalid value for {pminFlag}: '{pminOpt}'. Expected a probability in [0, 1].");
                     }
                     SetBoth(SpeculationEnvVars.PMin, SpeculationEnvVars.LegacyPMin,
                         pmin.ToString(CultureInfo.InvariantCulture));

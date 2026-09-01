@@ -380,6 +380,28 @@ namespace TensorSharp.Models
             Tensor hidden0 = Embedding(tokens);
             _embTicks += Stopwatch.GetTimestamp() - t1;
 
+            // Fused whole-model tensor-parallel decode: one graph per rank per
+            // token, summed at the two cut points every layer has. The per-op
+            // chain below is the fallback, and it is ~12x slower - it is the
+            // pre-fused-graph path.
+            if (seqLen > 1 && TryGptOssFusedModelPrefillTP(hidden0, startPos, seqLen))
+            {
+                hidden0.Dispose();
+                _cacheSeqLen += seqLen;
+                _forwardCount++;
+                _forwardSw.Stop();
+                return _foldLogitsBuffer;
+            }
+
+            if (seqLen == 1 && TryGptOssFusedModelDecodeTP(hidden0, startPos))
+            {
+                hidden0.Dispose();
+                _cacheSeqLen += seqLen;
+                _forwardCount++;
+                _forwardSw.Stop();
+                return _foldLogitsBuffer;
+            }
+
             Tensor[] hidden = BroadcastTensorToAllRanks(hidden0);
 
             for (int layer = 0; layer < Config.NumLayers; layer++)

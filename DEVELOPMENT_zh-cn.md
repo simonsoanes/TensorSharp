@@ -459,7 +459,7 @@ span 记账、前缀裁剪、截断、切片——并且不再出现任何模型
 - **融合输出投影 + 归一化 + 路由器**（Qwen 3.5/3.6-family MoE）：`FusedOutProjNormRouter` 将 GatedDeltaNet 输出投影、残差加法、post-attention RMSNorm 和 MoE 路由器投影合并为一次调度。预计算的路由器 logits 随后由批量 MoE 内核直接消费，消除了每个 MoE 层的独立路由器调度。
 - **融合视觉编码器**（Qwen 3.5/3.6-family）：`FusedVisionAttention` 将 LayerNorm + QKV + 偏置 + 2D RoPE + 缩放点积注意力 + 输出投影 + 偏置 + 残差合并为一次 GGML 计算图调度（~8 个算子 → 1）。`FusedVisionMLP` 将 LayerNorm + up + 偏置 + GELU + down + 偏置 + 残差合并为一次调度（7 个算子 → 1）。两者结合将每个编码器块的 GPU 往返从约 15 次减少到 2 次。
 - **融合权重投影**：同类型的 Q/K/V 投影融合为单次 QKV matmul；混合类型的 importance-matrix / UD 量化投影保持独立，以免产生数 GB 的 FP32 展开。gate 与 up 投影融合为单次 gate_up matmul。
-- **原生量化计算**：量化权重（Q4_K_M、Q6_K、Q8_0、IQ2_XXS、MXFP4 等）直接参与 matmul，无需展开为 FP32，节省内存与带宽。批量 `AddmmQuantBatch` 内核可在一次调度内完成对同一量化权重块的多个子矩阵 matmul。
+- **原生量化计算**：量化权重（Q4_K_M、Q6_K、Q8_0、IQ2_XXS、MXFP4、NVFP4 等）直接参与 matmul，无需展开为 FP32，节省内存与带宽。批量 `AddmmQuantBatch` 内核可在一次调度内完成对同一量化权重块的多个子矩阵 matmul。
 - **Direct CUDA 内核**：`cuda` 后端加速 fill/copy、unary ops、融合激活、RMSNorm、softmax、index select、因果掩码、RoPE/RoPEEx、cuBLAS GEMM，以及受支持的量化 matmul/get-rows；未覆盖算子会安全回退。
 - **批量 GPU MoE**：`MoEExpertsSwiGLUResidual`（Qwen 3.5/3.6-family）和 `MoEExpertsForward`（Nemotron-H）将每个 MoE 层中所有被选中的专家——以及 Qwen 3.5/3.6-family 中可选的 shared expert 与残差加法——合并为一次 GGML 计算图调度。
 - **整模型融合 decode 计算图**（Gemma 4 dense + MoE、Qwen 3.5/3.6、GPT OSS）：一个 decode token 的全部计算——每一层、MoE 路由与专家、最终 norm 与 LM head——作为**一次** GGML 计算图提交，而不是每层一次。在 CUDA/Vulkan 上该图只构建一次、张量地址保持稳定后反复重放（KV 写入用 `ggml_set_rows`、行号作为 I64 输入；注意力窗口按 stride 补齐、掩码作为 F16 输入），这正是 ggml-cuda 能把它捕获成 CUDA 图的前提。GPT OSS decode 在 A40 上从 24 → 154 tok/s，且随上下文长度基本持平（16K 时 133 tok/s，而逐层路径已跌到 2.3）。补齐的注意力窗口必须清零而不能留作未初始化——残留显存按 F16 解读会产生能穿过 `-inf` 掩码的 NaN。按模型的关闭开关：`TS_GPTOSS_MODEL_DECODE=0`、`TS_GEMMA4_FD_PERSIST=0`、`TS_QWEN35_FD_PERSIST=0`。

@@ -270,6 +270,18 @@ public struct GptOssLayerDecodeArgs
     public float RopeFreqScale;
     public float OaiAlpha;
     public float OaiLimit;
+
+    // Optional F16 prefill-GEMM weight copies (may be zero). Only the PREFILL
+    // kernel reads these: prefill is compute-bound and F16 tensor-core GEMMs
+    // beat the quantized MMQ path at large token counts, while decode stays on
+    // the small quantized reads. Populated when TS_GPTOSS_PREFILL_F16=1.
+    public IntPtr QkvWF16;
+    public IntPtr KWF16;
+    public IntPtr VWF16;
+    public IntPtr OWF16;
+    public IntPtr GateExpsF16;
+    public IntPtr UpExpsF16;
+    public IntPtr DownExpsF16;
 }
 
 // Descriptor for the fused single-layer Gemma 4 MoE decode kernel
@@ -483,6 +495,10 @@ public struct Qwen35LayerDecodeArgs
     /// when <see cref="GuW"/> is zero; the graph then runs two matmuls.</summary>
     public IntPtr FfnGateW;
     public IntPtr FfnUpW;
+    /// <summary>Optional host pointer to 16 F32 per-projection matmul-output
+    /// scales (NVFP4 per-tensor scale2 sidecars; native TSQ35_SC_* slot order).
+    /// Zero when no projection of this layer carries a scale.</summary>
+    public IntPtr ProjScales;
 
     // int64 weight shapes
     public long QkvNe0, QkvNe1, QkvBytes;
@@ -2383,7 +2399,7 @@ internal enum GgmlIndexReductionOp
             int numHeads, int numKvHeads,
             int maxSeqLen, int position,
             float eps, float ropeBase, float ropeFreqScale,
-            int ropeMode, int kvCacheType);
+            int ropeNDims, int ropeMode, int kvCacheType);
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -3343,6 +3359,97 @@ internal enum GgmlIndexReductionOp
             => TSGgml_GptOssModelDecode(layers, numLayers, hidden, hiddenSize, position,
                 logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm) != 0;
 
+        // Same graph, tensor-parallel plan mode: builds this rank's graph and
+        // hands it back UNEXECUTED for tp_execute_plans to drive segment by
+        // segment (see ggml_ops_gptoss_decode.cpp).
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int TSGgml_GptOssModelDecodeTP(
+            [In] GptOssLayerDecodeArgs[] layers, int numLayers,
+            IntPtr hidden, int hiddenSize, int position,
+            IntPtr logits, int vocabSize,
+            IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
+            IntPtr finalNorm,
+            int tpDegree, out IntPtr tpPlanOut);
+
+        /// <summary>
+        /// Builds one rank's whole-model decode graph and returns a plan pointer
+        /// in <paramref name="tpPlanOut"/> instead of running it. Returns false
+        /// when the kernel declines, leaving the caller on the per-op TP chain.
+        /// </summary>
+        public static bool TryGptOssModelDecodeTP(
+            GptOssLayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int position,
+            IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType,
+            long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm,
+            int tpDegree, IntPtr[] tpPlanOut)
+        {
+            int rc = TSGgml_GptOssModelDecodeTP(layers, numLayers, hidden, hiddenSize, position,
+                logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm,
+                tpDegree, out IntPtr plan);
+            if (tpPlanOut != null) tpPlanOut[0] = plan;
+            return rc != 0;
+        }
+
+        // Same graph, tensor-parallel plan mode.
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int TSGgml_GptOssModelPrefillTP(
+            [In] GptOssLayerDecodeArgs[] layers, int numLayers,
+            IntPtr hidden, int hiddenSize, int numTokens, int startPos,
+            IntPtr logits, int vocabSize,
+            IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
+            IntPtr finalNorm,
+            int tpDegree, out IntPtr tpPlanOut);
+
+        /// <summary>
+        /// Builds one rank's whole-model prefill graph and returns a plan pointer
+        /// instead of running it.
+        /// </summary>
+        public static bool TryGptOssModelPrefillTP(
+            GptOssLayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize,
+            int numTokens, int startPos, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType,
+            long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm,
+            int tpDegree, IntPtr[] tpPlanOut)
+        {
+            int rc = TSGgml_GptOssModelPrefillTP(layers, numLayers, hidden, hiddenSize, numTokens,
+                startPos, logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes,
+                finalNorm, tpDegree, out IntPtr plan);
+            if (tpPlanOut != null) tpPlanOut[0] = plan;
+            return rc != 0;
+        }
+
+        // GPT-OSS TRUE token-batched decode: N concurrent sequences, one token
+        // each, in ONE graph (see ggml_ops_gptoss_batched.cpp). kCaches/vCaches
+        // are [layer * nSeqs + seq] HOST cache pointers (the device-window keys).
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int TSGgml_GptOssModelDecodeBatched(
+            [In] GptOssLayerDecodeArgs[] layers, int numLayers, int nSeqs,
+            IntPtr hidden,
+            [In] IntPtr[] kCaches, [In] IntPtr[] vCaches,
+            [In] int[] cacheSizes, [In] int[] positions,
+            IntPtr logits, int vocabSize,
+            IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
+            IntPtr finalNorm, IntPtr sampled, int wantLogits);
+
+        /// <summary>
+        /// Decode one token for each of N concurrent GPT-OSS sequences in a single
+        /// fused graph, each against its own KV cache. Logits land in
+        /// <paramref name="logits"/> as [vocab, nSeqs]. Returns false (native
+        /// error recorded) when the kernel declines, so the caller falls back to
+        /// the round-robin per-sequence path.
+        /// </summary>
+        public static bool TryGptOssModelDecodeBatched(
+            GptOssLayerDecodeArgs[] layers, int numLayers, int nSeqs, IntPtr hidden,
+            IntPtr[] kCaches, IntPtr[] vCaches, int[] cacheSizes, int[] positions,
+            IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType,
+            long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm,
+            IntPtr sampled, bool wantLogits)
+            => TSGgml_GptOssModelDecodeBatched(layers, numLayers, nSeqs, hidden,
+                kCaches, vCaches, cacheSizes, positions,
+                logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm,
+                sampled, wantLogits ? 1 : 0) != 0;
+
         // GPT-OSS whole-model prefill: N tokens through every layer + MoE +
         // folded final norm/LM head in ONE graph (see ggml_ops_gptoss_prefill.cpp).
         [LibraryImport(DllName)]
@@ -3378,6 +3485,18 @@ internal enum GgmlIndexReductionOp
         /// pool and the KV windows.
         /// </summary>
         public static void GptOssResetDecodeCache() => TSGgml_GptOssResetDecodeCache();
+
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial void TSGgml_GptOssResetBatchedDecodeCache();
+
+        /// <summary>
+        /// Drops the token-batched GPT-OSS decode state (slot-stable arena
+        /// graphs). Unlike the solo pool this survives prefills; call it on
+        /// model teardown so a disposed model's arenas release their VRAM.
+        /// Dirty arena rows are flushed to the host mirrors first.
+        /// </summary>
+        public static void GptOssResetBatchedDecodeCache() => TSGgml_GptOssResetBatchedDecodeCache();
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -3531,6 +3650,78 @@ internal enum GgmlIndexReductionOp
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial void TSGgml_Qwen35ResetDecodeCache();
+
+        // Qwen3.5/3.8 SLOT-STABLE ARENA token-batched decode (the GPT-OSS arena
+        // design ported to the hybrid GDN + attention family; see
+        // ggml_ops_qwen35_batched_arena.cpp). kCaches/vCaches are
+        // [attn_layer * n + s]; convStates/deltaStates are [gdn_layer * n + s].
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int TSGgml_Qwen35ArenaDecodeBatched(
+            [In] Qwen35LayerDecodeArgs[] layers, int numLayers, int nSeqs,
+            [In] int[] tokenIds, [In] int[] positions,
+            [In] IntPtr[] kCaches, [In] IntPtr[] vCaches,
+            [In] IntPtr[] convStates, [In] IntPtr[] deltaStates,
+            [In] int[] gdnHostAuth, [In] int[] cacheSizes,
+            int numHeads, int numKvHeads, int headDim,
+            int ropeNDims, int ropeMode, int kvCacheType,
+            int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads,
+            float eps, float ropeBase, float ropeFreqScale,
+            int numExperts, int numExpertsUsed, int expertFf, int sharedFf,
+            int normTopk, float expertWeightsScale,
+            IntPtr logits, int vocabSize,
+            IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
+            IntPtr finalNorm,
+            IntPtr tokenEmbd, int tokenEmbdType,
+            long tokenEmbdNe0, long tokenEmbdNe1, long tokenEmbdBytes,
+            IntPtr sampled, int wantLogits);
+
+        public static bool TryQwen35ArenaDecodeBatched(
+            Qwen35LayerDecodeArgs[] layers, int numLayers, int nSeqs,
+            int[] tokenIds, int[] positions,
+            IntPtr[] kCaches, IntPtr[] vCaches,
+            IntPtr[] convStates, IntPtr[] deltaStates,
+            int[] gdnHostAuth, int[] cacheSizes,
+            int numHeads, int numKvHeads, int headDim,
+            int ropeNDims, int ropeMode, int kvCacheType,
+            int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads,
+            float eps, float ropeBase, float ropeFreqScale,
+            int numExperts, int numExpertsUsed, int expertFf, int sharedFf,
+            int normTopk, float expertWeightsScale,
+            IntPtr logits, int vocabSize,
+            IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
+            IntPtr finalNorm,
+            IntPtr tokenEmbd, int tokenEmbdType,
+            long tokenEmbdNe0, long tokenEmbdNe1, long tokenEmbdBytes,
+            IntPtr sampled, bool wantLogits)
+            => TSGgml_Qwen35ArenaDecodeBatched(layers, numLayers, nSeqs, tokenIds, positions,
+                kCaches, vCaches, convStates, deltaStates, gdnHostAuth, cacheSizes,
+                numHeads, numKvHeads, headDim, ropeNDims, ropeMode, kvCacheType,
+                convKernel, headKDim, headVDim, numKHeads, numVHeads,
+                eps, ropeBase, ropeFreqScale,
+                numExperts, numExpertsUsed, expertFf, sharedFf, normTopk, expertWeightsScale,
+                logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes,
+                finalNorm, tokenEmbd, tokenEmbdType, tokenEmbdNe0, tokenEmbdNe1, tokenEmbdBytes,
+                sampled, wantLogits ? 1 : 0) != 0;
+
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial void TSGgml_Qwen35ArenaResetBatchedDecodeCache();
+
+        /// <summary>Drops the qwen35 slot-stable arena batched-decode state
+        /// (flushing dirty slots to their host bytes first). Survives prefills
+        /// and holder churn by design; call on model teardown.</summary>
+        public static void Qwen35ArenaResetBatchedDecodeCache() => TSGgml_Qwen35ArenaResetBatchedDecodeCache();
+
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial void TSGgml_Qwen35ArenaFlushHostPointer(IntPtr hostPtr);
+
+        /// <summary>Flush-and-retire the qwen35 arena slot registered for this
+        /// host cache/state pointer (no-op when none) — call before any managed
+        /// path reads or replaces a holder's caches outside the hooked
+        /// kernels (growth, host sync, snapshot extraction).</summary>
+        public static void Qwen35ArenaFlushHostPointer(IntPtr hostPtr) => TSGgml_Qwen35ArenaFlushHostPointer(hostPtr);
 
         public static void Qwen35ResetDecodeCache() => TSGgml_Qwen35ResetDecodeCache();
 
@@ -5574,7 +5765,7 @@ internal enum GgmlIndexReductionOp
             int numHeads, int numKvHeads,
             int maxSeqLen, int position,
             float eps, float ropeBase, float ropeFreqScale,
-            int ropeMode, int kvCacheType = 0)
+            int ropeNDims, int ropeMode, int kvCacheType = 0)
         {
             CheckResult(TSGgml_Qwen35AttentionLayerDecode(
                 residualData, hiddenSize,
@@ -5585,7 +5776,7 @@ internal enum GgmlIndexReductionOp
                 kCacheData, vCacheData,
                 numHeads, numKvHeads,
                 maxSeqLen, position,
-                eps, ropeBase, ropeFreqScale, ropeMode, kvCacheType), "qwen35_attention_layer_decode");
+                eps, ropeBase, ropeFreqScale, ropeNDims, ropeMode, kvCacheType), "qwen35_attention_layer_decode");
         }
 
         public static void TransformerModelDecode(

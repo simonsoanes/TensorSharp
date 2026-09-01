@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -762,6 +762,12 @@ namespace TensorSharp.Models
             if (hidden == null || hidden.DimensionCount != 2 || hidden.ElementType != DType.Float32) return false;
             if (hidden.Sizes[0] != seqLen || hidden.Sizes[1] != Config.HiddenSize) return false;
             if (_headKDim != _headVDim) return false; // gated_delta_net path assumes shared head dim
+            // Sidecar per-tensor scales are not wired into this cached graph;
+            // decline so the chunked scale-aware path runs instead.
+            if ((_attnQkvRecQW[layer]?.Scale ?? 1.0f) != 1.0f || (_attnGateRecQW[layer]?.Scale ?? 1.0f) != 1.0f
+                || (_ssmBetaQW[layer]?.Scale ?? 1.0f) != 1.0f || (_ssmAlphaQW[layer]?.Scale ?? 1.0f) != 1.0f
+                || (_ssmOutQW[layer]?.Scale ?? 1.0f) != 1.0f)
+                return false;
 
             QuantizedWeight gq = _attnQkvRecQW[layer];  Tensor gqF = _attnQkvRecF32[layer];
             QuantizedWeight gz = _attnGateRecQW[layer]; Tensor gzF = _attnGateRecF32[layer];
@@ -867,7 +873,7 @@ namespace TensorSharp.Models
                     if (halfDim > 0 && hidden.DimensionCount == 2 && gated.DimensionCount == 2
                         && hidden.Sizes[0] == gated.Sizes[0])
                     {
-                        try
+                        if (Unscaled(_ssmOutQW[layer], _ffnGateUpQW[layer], _ffnDownQW[layer])) try
                         {
                             long t0 = Stopwatch.GetTimestamp();
                             GgmlBasicOps.FusedOutProjFFN(hidden, gated,
@@ -910,7 +916,8 @@ namespace TensorSharp.Models
             bool canFuseMoeRouter = IsGgmlBackend && isMoeLayer && seqLen == 1
                 && _ssmOutQW[layer] != null && _postAttnNormW[layer] != null
                 && (_ffnGateInpQW[layer] != null || _ffnGateInpF32[layer] != null)
-                && _moeTokenInput != null && _moeTokenInput.Sizes[1] == Config.HiddenSize;
+                && _moeTokenInput != null && _moeTokenInput.Sizes[1] == Config.HiddenSize
+                && Unscaled(_ssmOutQW[layer]);
 
             if (canFuseMoeRouter)
             {
@@ -1060,8 +1067,27 @@ namespace TensorSharp.Models
         /// evicting the device buffers.  Snapshotting can then read exact state
         /// while the next decode token still reuses the resident graph.
         /// </summary>
+        /// <summary>Flush-and-retire the ACTIVE holder's arena batched-decode
+        /// slot, if it has one. Any managed path that reads or replaces the
+        /// active caches/state outside the hooked native kernels (growth, host
+        /// syncs, snapshot extraction, residency release) must call this first
+        /// or it operates on pre-arena bytes.</summary>
+        internal void FlushArenaSlotForActiveHolder()
+        {
+            if (_backend != BackendType.GgmlCuda || _kvCacheK == null || _isRecurrent == null)
+                return;
+            for (int l = 0; l < Config.NumLayers && l < _kvCacheK.Length; l++)
+            {
+                if (_isRecurrent[l] || _kvCacheK[l] == null) continue;
+                GgmlBasicOps.Qwen35ArenaFlushHostPointer(
+                    TensorComputePrimitives.GetStoragePointer(_kvCacheK[l]));
+                break;   // one registered pointer retires the whole slot
+            }
+        }
+
         private unsafe void EnsureFusedDecodeStateHostSynchronized()
         {
+            FlushArenaSlotForActiveHolder();
             if (!_gdnStateHostDirty || !_fdStateResident || _fdConvScratch == IntPtr.Zero || _fdGdnSlot == null)
                 return;
 
@@ -1360,6 +1386,7 @@ namespace TensorSharp.Models
                     if (!ok)
                     {
                         _fdUnsupported = true;
+                GgmlBasicOps.Qwen35ArenaResetBatchedDecodeCache();   // flush stranded arena slots to host
                         return FdBail($"layer {l} ({(_isRecurrent[l] ? "recurrent" : "attention")}, moe={isMoeL}) missing a required weight/state" +
                             (!_isRecurrent[l] && _kvCacheK[l] != null && !IsFusedGraphKvCacheDType(_kvCacheK[l].ElementType)
                                 ? $" (KV cache dtype {_kvCacheK[l].ElementType} unsupported by fused graph on {_backend})"
@@ -1453,6 +1480,7 @@ namespace TensorSharp.Models
                 for (int l = 0; l < n; l++)
                 {
                     var a = default(Qwen35LayerDecodeArgs);
+                    a.ProjScales = ProjScalesPtr(l);   // every layer kind, not just dense FFN
                     a.StructBytes = structBytes;
                     a.AttnNormW = TensorComputePrimitives.GetStoragePointer(_attnNormW[l]);
                     a.PostAttnNormW = TensorComputePrimitives.GetStoragePointer(_postAttnNormW[l]);
@@ -1557,6 +1585,9 @@ namespace TensorSharp.Models
                 _fdBindingCacheSize = cacheSize;
             }
 
+            if (_lmHeadQW != null && _lmHeadQW.Scale != 1.0f)
+                return FdBail("lm-head sidecar scale2 not folded into the fused decode graph");
+
             // Fold final-norm + lm_head into the graph: output logits directly.
             var lmh = ResolveW(_lmHeadQW, _lmHeadF32);
             IntPtr finalNormPtr = TensorComputePrimitives.GetStoragePointer(_finalNormW);
@@ -1612,7 +1643,8 @@ namespace TensorSharp.Models
                     _fdDiagPrinted = true;
                     Console.Error.WriteLine($"[full-decode] disabled (native returned 0); falling back to per-op decode.");
                 }
-                _fdUnsupported = true;   // don't retry a failing kernel every token
+                _fdUnsupported = true;
+                GgmlBasicOps.Qwen35ArenaResetBatchedDecodeCache();   // flush stranded arena slots to host   // don't retry a failing kernel every token
                 return false;
             }
 
@@ -1870,6 +1902,7 @@ namespace TensorSharp.Models
             for (int l = 0; l < n; l++)
             {
                 var a = default(Qwen35LayerDecodeArgs);
+                a.ProjScales = ProjScalesPtr(l);   // every layer kind, not just dense FFN
                 a.StructBytes = structBytes;
                 a.AttnNormW = (IntPtr)GetFloatPtr(_attnNormW[l]);
                 a.PostAttnNormW = (IntPtr)GetFloatPtr(_postAttnNormW[l]);
@@ -2002,6 +2035,8 @@ namespace TensorSharp.Models
                 mropeSecs = new int[4] { _mropeSections[0], _mropeSections[1], _mropeSections[2], _mropeSections[3] };
             }
 
+            if (_lmHeadQW != null && _lmHeadQW.Scale != 1.0f)
+                return FvBail("lm-head sidecar scale2 not folded into the fused verify graph");
             var lmh = ResolveW(_lmHeadQW, _lmHeadF32);
             IntPtr finalNormPtr = (IntPtr)GetFloatPtr(_finalNormW);
             int capCount = (captureData != null && captureLayers != null) ? captureLayers.Length : 0;
@@ -2316,6 +2351,9 @@ namespace TensorSharp.Models
             _mtpDraftLayer ??= new Qwen35LayerDecodeArgs[1];
             _mtpDraftLayer[0] = a;
 
+            QuantizedWeight mtpHeadSel = hasOwnHead ? _mtpHeadQW : _lmHeadQW;
+            if (mtpHeadSel != null && mtpHeadSel.Scale != 1.0f)
+                return false; // per-op path applies the head sidecar scale
             var lmh = hasOwnHead ? ResolveW(_mtpHeadQW, _mtpHeadF32) : ResolveW(_lmHeadQW, _lmHeadF32);
             IntPtr finalNormPtr = (IntPtr)GetFloatPtr(headNormW);
             bool ok;
@@ -2347,6 +2385,7 @@ namespace TensorSharp.Models
         /// a missing MTP weight must not disable the trunk verify path.</summary>
         private unsafe bool TryFillMtpDraftLayerArgs(int l, ref Qwen35LayerDecodeArgs a)
         {
+            a.ProjScales = ProjScalesPtr(l);
             static bool HasW(QuantizedWeight q, Tensor f) => q != null || f != null;
             if (_attnNormW[l] == null || _postAttnNormW[l] == null)
                 return false;

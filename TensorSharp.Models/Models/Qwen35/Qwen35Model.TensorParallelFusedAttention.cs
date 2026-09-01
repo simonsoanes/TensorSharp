@@ -56,6 +56,10 @@ namespace TensorSharp.Models
         {
             if (!TpFusedAttentionAvailable() || shards == null)
                 return false;
+            // The fused residual matmul has no scale hook; a scaled shard must
+            // take the scale-aware per-op path instead.
+            if (shards.Length > 0 && shards[0] != null && shards[0].Scale != 1.0f)
+                return false;
 
             int tp = TpDegree;
             int previousRank = GgmlBasicOps.GetActiveRank();
@@ -76,7 +80,10 @@ namespace TensorSharp.Models
                     _tpAttnPlans[r] = planSlot[0];
                 }
 
-                GgmlBasicOps.TensorParallelExecutePlans(_tpAttnPlans);
+                if (TpCrossNodeReducer != null)
+                    GgmlBasicOps.TensorParallelExecutePlansDistributed(_tpAttnPlans, TpCrossNodeCallback);
+                else
+                    GgmlBasicOps.TensorParallelExecutePlans(_tpAttnPlans);
             }
             catch (Exception ex) when (ex is InvalidOperationException || ex is NotSupportedException || ex is ArgumentException)
             {
@@ -101,6 +108,10 @@ namespace TensorSharp.Models
         /// </summary>
         private unsafe bool TryQwen35FusedDenseFfnTP(Tensor[] hidden, int layer, int seqLen)
         {
+            // No scale hook in the fused FFN kernel: decline so the scale-aware
+            // per-op TP linears run instead.
+            if (TpAnyWeightScaled(_ffnGateUpKey[layer], _ffnDownKey[layer]))
+                return TpAttnBail($"layer {layer} FFN carries a per-tensor weight scale");
             if (!TpFusedAttentionAvailable())
                 return false;
 
@@ -136,7 +147,10 @@ namespace TensorSharp.Models
                     _tpAttnPlans[r] = planSlot[0];
                 }
 
-                GgmlBasicOps.TensorParallelExecutePlans(_tpAttnPlans);
+                if (TpCrossNodeReducer != null)
+                    GgmlBasicOps.TensorParallelExecutePlansDistributed(_tpAttnPlans, TpCrossNodeCallback);
+                else
+                    GgmlBasicOps.TensorParallelExecutePlans(_tpAttnPlans);
             }
             catch (Exception ex) when (ex is InvalidOperationException || ex is NotSupportedException || ex is ArgumentException)
             {
@@ -227,10 +241,14 @@ namespace TensorSharp.Models
                 _tpFusedBlocksEnabled &&
                 IsGgmlBackend &&
                 IsTensorParallel &&
-                // One driving thread submits every rank, so this is a
-                // single-process facility; multi-node keeps the per-op path.
-                GlobalTpDegree == TpDegree &&
-                GgmlBasicOps.TensorParallelFusedAvailable(TpDegree);
+                // Across nodes the local ranks still reduce on-device; the
+                // cluster half of each boundary goes through the cross-node
+                // hook, exactly as the whole-model graph does. What it cannot
+                // do is span nodes with no reducer to call.
+                (GlobalTpDegree == TpDegree || TpCrossNodeReducer != null) &&
+                (TpCrossNodeReducer != null
+                    ? GgmlBasicOps.TensorParallelFusedAvailableDistributed(TpDegree)
+                    : GgmlBasicOps.TensorParallelFusedAvailable(TpDegree));
 
             if (_tpFusedAttnReady)
                 _tpAttnPlans = new IntPtr[TpDegree];
@@ -238,7 +256,7 @@ namespace TensorSharp.Models
                 TpAttnBail(
                     !_tpFusedBlocksEnabled ? "disabled via TS_QWEN35_TP_FUSED=0"
                     : !IsGgmlBackend ? $"backend {_backend} has no fused TP attention kernel"
-                    : GlobalTpDegree != TpDegree ? $"multi-node TP (global={GlobalTpDegree}, local={TpDegree})"
+                    : GlobalTpDegree != TpDegree ? $"multi-node TP (global={GlobalTpDegree}, local={TpDegree}) without a cross-node reducer"
                     : $"the native bridge reports no fused TP support for tp={TpDegree}");
             return _tpFusedAttnReady;
         }
@@ -252,6 +270,11 @@ namespace TensorSharp.Models
         /// </summary>
         private unsafe bool TryQwen35FusedAttentionBlockTP(Tensor[] hidden, int layer, int seqLen, int startPos)
         {
+            // Same for the fused attention block: qkv / o are matmuls with no
+            // scale hook in the native graph.
+            if (TpAnyWeightScaled(_attnQkvKey[layer], _attnOutputKey[layer],
+                    _attnQKey[layer], _attnKKey[layer], _attnVKey[layer]))
+                return TpAttnBail($"layer {layer} attention carries a per-tensor weight scale");
             if (!TpFusedAttentionAvailable())
                 return false;
             // MRoPE bakes per-axis angles the fused graph cannot express.
@@ -336,7 +359,10 @@ namespace TensorSharp.Models
                     _tpAttnPlans[r] = planSlot[0];
                 }
 
-                GgmlBasicOps.TensorParallelExecutePlans(_tpAttnPlans);
+                if (TpCrossNodeReducer != null)
+                    GgmlBasicOps.TensorParallelExecutePlansDistributed(_tpAttnPlans, TpCrossNodeCallback);
+                else
+                    GgmlBasicOps.TensorParallelExecutePlans(_tpAttnPlans);
             }
             catch (InvalidOperationException)
             {

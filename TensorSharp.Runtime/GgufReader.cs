@@ -36,6 +36,7 @@ namespace TensorSharp.Runtime
         IQ1_M = 29, BF16 = 30,
         TQ1_0 = 34, TQ2_0 = 35,
         MXFP4 = 39,
+        NVFP4 = 40,
     }
 
     public class GgufTensorInfo
@@ -734,6 +735,8 @@ namespace TensorSharp.Runtime
                 case GgmlTensorType.IQ4_NL:
                 case GgmlTensorType.MXFP4:
                     return 32;
+                case GgmlTensorType.NVFP4:
+                    return 64;
                 default:
                     return 256;
             }
@@ -770,6 +773,7 @@ namespace TensorSharp.Runtime
                 case GgmlTensorType.TQ1_0: return 2 + 256 / 64 + (256 - 4 * 256 / 64) / 5; // 54
                 case GgmlTensorType.TQ2_0: return 2 + 256 / 4;                 // 66
                 case GgmlTensorType.MXFP4: return 1 + 32 / 2;                  // 17
+                case GgmlTensorType.NVFP4: return 4 + 64 / 2;               // 36
                 case GgmlTensorType.I8: return 1;
                 case GgmlTensorType.I16: return 2;
                 case GgmlTensorType.I32: return 4;

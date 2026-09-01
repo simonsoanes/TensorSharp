@@ -682,12 +682,24 @@ namespace TensorSharp.Models
 
         private int _kvCacheCapacity;
 
+        /// <summary>
+        /// GPT-OSS has no path that can read a block-quantized K/V cache. Both
+        /// fused native graphs refuse the type outright ("GPT-OSS model
+        /// decode/prefill: only F32/F16 KV caches are supported", see
+        /// ggml_ops_gptoss_decode.cpp / ggml_ops_gptoss_prefill.cpp), and the
+        /// managed fallback the refusal drops into,
+        /// <see cref="AttentionDecodeWithSinks"/>, dispatches on F16 and then
+        /// walks the cache as a flat float buffer - so
+        /// <c>--kv-cache-dtype q8_0</c> used to abort the process inside kernel
+        /// warm-up with an unhandled "Requires a Float32 tensor, but found Q8_0".
+        /// </summary>
+        protected override bool SupportsBlockQuantizedKvCache => false;
+
         private void InitKVCache(int initialSeqLen, int maxSeqLen)
         {
             _maxContextLength = maxSeqLen;
             _kvCacheCapacity = initialSeqLen;
-            int numKVHeads = Config.NumKVHeads;
-            int headDim = Config.HeadDim;
+            _initialKvCacheLength = initialSeqLen;
             // Pick model-aligned default. For F16-quantised GPT-OSS this gives
             // an F16 KV cache (halves cache memory + bandwidth, byte-identical
             // outputs at 1e-3). The fused prefill kernel and the F16-aware
@@ -700,16 +712,10 @@ namespace TensorSharp.Models
             // shipping GGUF, so the F16 default is safe for benchmark and
             // chat workloads.
             ApplyModelAlignedKvCacheDefault(_quantWeights);
-            DType kvDtype = _kvCacheDtype.ToDType();
-            _kvCacheK = new Tensor[Config.NumLayers];
-            _kvCacheV = new Tensor[Config.NumLayers];
-            for (int l = 0; l < Config.NumLayers; l++)
-            {
-                _kvCacheK[l] = new Tensor(_allocator, kvDtype, numKVHeads, initialSeqLen, headDim);
-                _kvCacheV[l] = new Tensor(_allocator, kvDtype, numKVHeads, initialSeqLen, headDim);
-                InitializeCacheTensor(_kvCacheK[l]);
-                InitializeCacheTensor(_kvCacheV[l]);
-            }
+            // Shared with the per-request holders (GptOssModel.PerSeqCache.cs)
+            // so the primary cache and every concurrent request's cache have
+            // exactly one definition of the layout.
+            AllocateKvCacheArrays(initialSeqLen, out _kvCacheK, out _kvCacheV);
             _cacheSeqLen = 0;
         }
 
@@ -2726,6 +2732,7 @@ namespace TensorSharp.Models
                 foreach (var handle in _sinksHandles)
                     if (handle.IsAllocated)
                         handle.Free();
+            DisposeFusedSequenceCaches();
             DisposeFusedModelDecodeState();
             base.Dispose();
         }

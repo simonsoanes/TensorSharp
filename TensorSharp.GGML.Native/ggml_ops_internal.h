@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -70,6 +71,29 @@ namespace ggml_pool
 // ---------------------------------------------------------------------------
 // Internal shared types, globals, and helpers
 // ---------------------------------------------------------------------------
+// Qwen3.5 arena batched-decode coherence hooks (ggml_ops_qwen35_batched_arena.cpp).
+// on_external_touch: a non-arena path is about to use this host cache/state
+// pointer — flush the arena slot's rows/state to the host bytes, invalidate the
+// resident copies, and retire the slot (no-op for unregistered pointers).
+// on_drop: the host bytes were rewritten/freed — discard without flushing.
+namespace tsg_q35arena
+{
+    void on_external_touch(const void* host_ptr);
+    void on_drop(const void* host_ptr);
+    void on_drop_all();
+}
+
+// qwen4exp arena batched-decode coherence hooks (ggml_ops_qwen4exp_arena.cpp).
+// Same contract as tsg_q35arena, plus a per-device sweep: the qwen4exp pools
+// are per-rank, and the touch/drop caller does not always know which rank a
+// holder's slot lives on.
+namespace tsg_q4earena
+{
+    void on_external_touch(const void* host_ptr);
+    void on_drop(const void* host_ptr);
+    void on_drop_all();
+}
+
 namespace tsg
 {
     // --- Tensor descriptor structs ---
@@ -270,6 +294,32 @@ namespace tsg
     // Active rank for the calling thread. Per-thread so a rank worker pool can
     // drive several GPUs concurrently without stepping on each other.
     extern thread_local int g_active_rank;
+
+    // Cluster-wide tensor-parallel geometry, for a run split across NODES.
+    // g_device_count is this process's share; these two describe the whole
+    // group. Both stay at their defaults for a single-node run, where the
+    // helpers below then reduce to the local values exactly.
+    //
+    // These exist because expert parallelism is sharded GLOBALLY: the managed
+    // side slices the expert stack by the cluster degree, so a kernel that
+    // derived its geometry from the LOCAL degree declared a tensor with more
+    // experts than the bytes bound to it and let the router address the
+    // difference - uninitialised VRAM, silently, on every multi-node MoE token.
+    extern std::atomic<int> g_tp_global_degree;   // 0 = single node
+    extern std::atomic<int> g_tp_rank_offset;     // this node's first global rank
+
+    // Cluster degree, falling back to the local one when nothing set it.
+    inline int tp_global_degree(int local_degree)
+    {
+        const int g = g_tp_global_degree.load(std::memory_order_relaxed);
+        return g > 0 ? g : local_degree;
+    }
+
+    // This thread's rank within the whole group.
+    inline int tp_global_rank()
+    {
+        return g_tp_rank_offset.load(std::memory_order_relaxed) + g_active_rank;
+    }
 
     inline DeviceState& dev() { return g_device_states[g_active_rank]; }
     inline DeviceState& dev(int rank) { return g_device_states[rank]; }
@@ -786,13 +836,20 @@ namespace tsg
     // Run one segmented graph per rank. `plans[r]` must describe rank r and all
     // ranks must agree on the segment count. Returns false (with the last error
     // set) when a submission or a collective fails.
-    bool tp_execute_plans(TpRankPlan** plans, int rank_count);
+    /// Cross-node AllReduce hook: sums `data` element-wise across every node
+    /// of the cluster and leaves the result in place on all of them. Returns
+    /// false to abort the forward pass. Null for a single-node run.
+    using TpDistributedAllReduce = bool (*)(void* user, float* data, int count);
+
+    bool tp_execute_plans(TpRankPlan** plans, int rank_count,
+                          TpDistributedAllReduce cross_node = nullptr,
+                          void* cross_node_user = nullptr);
 
     // True when the fused TP path is usable: more than one rank and a device
     // collective to reduce with. Without a collective every segment boundary
     // would cost a host round trip, which is exactly what this path exists to
     // remove, so the caller should fall back to the generic per-op forward.
-    bool tp_fused_available(int rank_count);
+    bool tp_fused_available(int rank_count, bool distributed = false);
 
     // ------------------------------------------------------------------
     // MoE CPU offload (--n-cpu-moe / --cpu-moe)
@@ -1146,6 +1203,8 @@ namespace tsg
         ggml_backend_buffer_t& out_buffer,
         bool allow_unified_weight = false);
 
+    bool try_peek_cached_device_copy(const void* data, std::size_t bytes,
+                                     ggml_backend_buffer_t& out_buffer, void*& out_addr);
     bool try_get_cacheable_tensor_buffer(
         ggml_backend_t backend, ggml_backend_dev_t dev,
         ggml_tensor* tensor, void* data, std::size_t bytes,
@@ -1296,3 +1355,272 @@ namespace tsg
         std::int64_t rows, std::int64_t cols, float label_smooth);
 
 } // namespace tsg
+
+// ---------------------------------------------------------------------------
+// qwen4exp (Qwen3.8-Flash-Next) shared executor pieces.
+//
+// The per-layer descriptor structs, the weight binder and the node builders
+// are defined/implemented in ggml_ops_qwen4exp.cpp and shared with the arena
+// batched-decode kernel in ggml_ops_qwen4exp_arena.cpp, so the solo span and
+// the arena compose their layer math from ONE source of truth.
+// ---------------------------------------------------------------------------
+
+// Per-layer weights. Pointers first, then int64, then int32 - the layout the
+// C# side mirrors; append within a run rather than reordering.
+struct TSGgmlQwen4ExpFfnArgs
+{
+    // hyper-connection mixer
+    void* hc_norm;          // f32 [hc_dim], gamma folded to (1 + w)
+    void* hc_down;          // [hc_dim, hc_low_rank]
+    void* hc_up;            // [hc_low_rank, hc_dim]
+    void* hc_inject;        // [hc_dim, hc]
+    // MoE
+    void* router;           // [n_embd, n_expert]
+    void* gate_exps;        // [n_embd, n_ff, n_expert]
+    void* up_exps;          // [n_embd, n_ff, n_expert]
+    void* down_exps;        // [n_ff, n_embd, n_expert]
+    // shared expert
+    void* sh_gate_inp;      // f32 [n_embd] - one sigmoid scalar per token
+    void* sh_gate;          // [n_embd, n_ff_sh]
+    void* sh_up;            // [n_embd, n_ff_sh]
+    void* sh_down;          // [n_ff_sh, n_embd]
+
+    long long hc_down_bytes, hc_up_bytes, hc_inject_bytes;
+    long long router_bytes, gate_exps_bytes, up_exps_bytes, down_exps_bytes;
+    long long sh_gate_bytes, sh_up_bytes, sh_down_bytes;
+
+    int hc_down_type, hc_up_type, hc_inject_type;
+    int router_type, gate_exps_type, up_exps_type, down_exps_type;
+    int sh_gate_type, sh_up_type, sh_down_type;
+};
+
+// Per-layer weights for the recurrent (Gated DeltaNet) half of a layer.
+struct TSGgmlQwen4ExpGdnArgs
+{
+    // hyper-connection mixer
+    void* hc_norm;
+    void* hc_down;
+    void* hc_up;
+    void* hc_inject;
+    // delta net
+    void* qkv;              // [n_embd, conv_dim]
+    void* gate;             // [n_embd, value_dim]
+    void* beta;             // [n_embd, n_v_heads]
+    void* alpha;            // [n_embd, n_v_heads]
+    void* conv1d;           // f32 [d_conv, conv_dim]
+    void* ssm_dt;           // f32 [n_v_heads]
+    void* ssm_a;            // f32 [n_v_heads], pre-negated
+    void* ssm_norm;         // f32 [head_v_dim]
+    void* out_proj;         // [value_dim, n_embd]
+    // state, updated in place
+    void* conv_state;       // f32 [d_conv-1, conv_dim]
+    void* ssm_state;        // f32 [head_v_dim, head_v_dim, n_v_heads]
+
+    long long hc_down_bytes, hc_up_bytes, hc_inject_bytes;
+    long long qkv_bytes, gate_bytes, beta_bytes, alpha_bytes, out_proj_bytes;
+
+    int hc_down_type, hc_up_type, hc_inject_type;
+    int qkv_type, gate_type, beta_type, alpha_type, out_proj_type;
+};
+
+// Per-layer weights for the full-attention half of a layer.
+struct TSGgmlQwen4ExpAttnArgs
+{
+    void* hc_norm;
+    void* hc_down;
+    void* hc_up;
+    void* hc_inject;
+    void* wq;               // [n_embd, head_dim * n_head * 2]  (query|gate interleaved)
+    void* wk;               // [n_embd, head_dim * n_head_kv]
+    void* wv;
+    void* wo;               // [head_dim * n_head, n_embd]
+    void* q_norm;           // f32 [head_dim]
+    void* k_norm;           // f32 [head_dim]
+    void* k_cache;          // f16/f32 [head_dim, capacity, n_head_kv]
+    void* v_cache;
+
+    long long hc_down_bytes, hc_up_bytes, hc_inject_bytes;
+    long long wq_bytes, wk_bytes, wv_bytes, wo_bytes;
+    long long kv_bytes;     // per cache
+
+    int hc_down_type, hc_up_type, hc_inject_type;
+    int wq_type, wk_type, wv_type, wo_type;
+    int kv_type;
+};
+
+// The PLE block riding inside the span. Only the n-gram hash and the gather
+// from the ~320M-row host table stay on the CPU; the gathered rows arrive as a
+// graph input and the projections, norms, gating, dilated depthwise conv and
+// the residual add all run on the device. The conv history is persistent
+// device state, written in place like the GDN state.
+struct TSGgmlQwen4ExpPleArgs
+{
+    void* key_w;            // [n_embd, hc_dim]
+    void* value_w;          // [n_embd, n_embd]
+    void* norm_key;         // f32 [hc_dim]
+    void* norm_query;       // f32 [hc_dim]
+    void* norm_conv;        // f32 [hc_dim]
+    void* conv1d_t;         // f32 [hc_dim, kern] - tap-major transpose of ple_conv1d
+    void* conv_state;       // f32 [hc_dim, hist] seed (host layout matches)
+
+    long long key_bytes, value_bytes;
+
+    int key_type, value_type;
+    int kern;               // conv kernel taps
+    int dil;                // dilation (the n-gram size)
+};
+
+// The output stage: the final hyper-connection mixer (which IS the output norm -
+// qwen4exp ships no separate one) and the LM head, riding the tail of the last
+// span. The mixer runs on the LAST token only - at prefill the managed path used
+// to mix every position and throw all but one away.
+struct TSGgmlQwen4ExpHeadArgs
+{
+    void* hc_norm;          // f32 [hc_dim]
+    void* hc_down;          // [hc_dim, hc_low_rank]
+    void* hc_up;            // [hc_low_rank, hc_dim]
+    void* head;             // [n_embd, vocab]
+
+    long long hc_down_bytes, hc_up_bytes, head_bytes;
+
+    int hc_down_type, hc_up_type, head_type;
+    int vocab;
+};
+
+// A weight binding resolved through the resident cache, remembered so a
+// REPLAY can re-resolve it. The cache can move or re-create a device copy
+// (large allocations elsewhere churn it), and a persisted graph would keep
+// reading the old address forever - the graph-uid stamp even tells ggml-cuda
+// to skip the staleness walk that might have noticed.
+struct Q4eCachedBind
+{
+    ggml_tensor* tensor;
+    void* data;
+    std::size_t bytes;
+    ggml_backend_buffer_usage usage;
+};
+
+// One place for the weight-binding policy the block builders share. Collecting
+// the uploads rather than binding immediately is what lets several layers
+// build into one graph: everything is bound before a single allocation pass
+// runs over the lot. Methods are defined in ggml_ops_qwen4exp.cpp.
+struct Q4eHostBinding { ggml_tensor* tensor; void* data; std::size_t bytes; };
+
+struct Q4eBinder
+{
+    ggml_backend_dev_t dev = nullptr;
+    std::vector<Q4eHostBinding> upload_list;
+    std::vector<Q4eCachedBind> cached;
+
+    void add(ggml_tensor* tgt, void* data, std::size_t bytes,
+             ggml_backend_buffer_usage usage = GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+    void flush();
+};
+
+// GDN write-back sources: the caller decides how they reach the persistent
+// state (copied out after the compute, or cpy-expanded in graph after the
+// reads).
+struct Q4eGdnWriteback { ggml_tensor* tail; ggml_tensor* new_state; };
+
+// Arena override for q4e_nodes_attn: the KV lives in a slot-stable 2D arena
+// [head_dim, (n_slots+1) * n_head_kv * cap] instead of the holder's resident
+// cache copy, written by ONE absolute-row ggml_set_rows per K/V and read back
+// as a 4D view of the set_rows RESULT (a real src edge, so node order is not
+// load-bearing for the write->read hazard). The mask passed alongside must be
+// the 4D per-slot mask [cap, 1, 1, n_slots] and `pos` the per-slot ROPE
+// positions.
+struct Q4eAttnArenaIO
+{
+    ggml_tensor* k_arena = nullptr;     // [head_dim, (n_slots+1)*kvH*cap], kv_type
+    ggml_tensor* v_arena = nullptr;
+    ggml_tensor* kv_idx_abs = nullptr;  // I64 [kvH * n_slots], absolute arena rows
+    std::int64_t cap = 0;               // rows per head plane
+    std::int64_t rows_per_slot = 0;     // kvH * cap
+    // out: the set_rows nodes, for the caller's OUTPUT-flag + expand pass.
+    ggml_tensor* k_set = nullptr;
+    ggml_tensor* v_set = nullptr;
+    ggml_tensor* fa = nullptr;          // out: the flash node, for support probing
+};
+
+// Per-sequence recurrent-state entry: GDN conv+ssm state (packed conv @0,
+// ssm @ (conv_bytes + 255) & ~255) or the PLE conv history, in a device buffer
+// keyed by the HOST SEED POINTER the descriptors carry. `ready` gates the
+// one-time seed upload; after the first forward the device copy is
+// authoritative and the host seed permanently stale.
+struct Q4eSeqStateEntry
+{
+    ggml_backend_buffer_t buf = nullptr;
+    std::size_t bytes = 0;
+    bool ready = false;
+};
+
+// Create-or-grow the active rank's entry for `key` (the span/per-layer path).
+Q4eSeqStateEntry* q4e_seq_state(const void* key, std::size_t bytes);
+// Lookup WITHOUT creating (the arena join declines on a missing entry rather
+// than fabricating state for a sequence that never ran through the span).
+Q4eSeqStateEntry* q4e_seq_state_find(const void* key);
+// Clamp a caller-supplied device index to an initialized rank (-1 = active).
+int q4e_resolve_device(int device);
+// ggml-cuda flash-attention eligibility for this family's KV type/head size.
+bool q4e_flash_attn_ok(int kv_type, int head_dim);
+// Drop (graph only - state kept) every cached per-layer/span graph built from
+// the given holder descriptor arrays, on every device. The arena flush calls
+// this after invalidating a holder's resident KV copies: captured solo graphs
+// bake those buffers, and q4e_refresh_bindings only SAMPLES every 32nd replay,
+// which is no protection against a freed pointer.
+void q4e_drop_holder_graphs(const void* attn_base, const void* gdn_base, const void* ple_base);
+
+// ---------------------------------------------------------------------------
+// Node builders (defined in ggml_ops_qwen4exp.cpp). Each appends one
+// half-layer to ctx and returns the new residual; the per-layer entry points,
+// the token span and the arena share them, so the graph a half builds has a
+// single source of truth.
+// ---------------------------------------------------------------------------
+ggml_tensor* q4e_nodes_ffn(
+    ggml_context* ctx, Q4eBinder& bnd,
+    const TSGgmlQwen4ExpFfnArgs* a, ggml_tensor* res_in,
+    int n_embd, int hc, int hc_low_rank, int T,
+    int n_expert, int n_expert_used, int n_ff, int n_ff_sh, float eps);
+
+ggml_tensor* q4e_nodes_gdn(
+    ggml_context* ctx, Q4eBinder& bnd,
+    const TSGgmlQwen4ExpGdnArgs* a, ggml_tensor* res_in,
+    ggml_tensor* conv_state, ggml_tensor* ssm_state,
+    int n_embd, int hc, int hc_low_rank, int T,
+    int head_k_dim, int head_v_dim, int n_k_heads, int n_v_heads, int d_conv,
+    float eps, Q4eGdnWriteback* wb,
+    std::vector<ggml_tensor*>* probe = nullptr);
+
+ggml_tensor* q4e_nodes_attn(
+    ggml_context* ctx, ggml_cgraph* graph, Q4eBinder& bnd,
+    const TSGgmlQwen4ExpAttnArgs* a, ggml_tensor* res_in,
+    ggml_tensor* mask, ggml_tensor* pos, ggml_tensor* kv_idx,
+    int n_embd, int hc, int hc_low_rank, int T,
+    int head_dim, int n_head, int n_head_kv, int kv_capacity, int n_kv_pad,
+    int n_rot, float rope_base, float rope_freq_scale, float attn_scale,
+    float eps, bool use_flash,
+    std::vector<ggml_tensor*>* kv_out = nullptr,
+    std::vector<ggml_tensor*>* probe = nullptr,
+    const std::int32_t* mrope_sections = nullptr,
+    Q4eAttnArenaIO* arena = nullptr);
+
+// PLE half. `conv_hist` is the persistent history - [hc_dim, hist] for the
+// span (n_streams == 1), a [hc_dim, hist, n_streams] arena view for the arena
+// (T == 1 per stream). When `writes` is null the write-back cpy is expanded
+// into `graph` right after the residual (span semantics); otherwise it is
+// appended to *writes for the caller's OUTPUT-flag + expand pass.
+ggml_tensor* q4e_nodes_ple(
+    ggml_context* ctx, ggml_cgraph* graph, Q4eBinder& bnd,
+    const TSGgmlQwen4ExpPleArgs* a, ggml_tensor* res_in, ggml_tensor* ple_emb_in,
+    ggml_tensor* conv_hist,
+    int n_embd, int hc, int T, int n_streams, float eps,
+    std::vector<ggml_tensor*>* writes = nullptr);
+
+// Head: final hyper-connection mixer + LM head over `res_last` [hc_dim, T]
+// (must be contiguous - the span passes a cont of the last column, the arena
+// its whole [hc_dim, n_slots] residual since every slot's token is "last").
+// Returns logits [vocab, T]; the caller flags/expands it.
+ggml_tensor* q4e_nodes_head(
+    ggml_context* ctx, Q4eBinder& bnd,
+    const TSGgmlQwen4ExpHeadArgs* a, ggml_tensor* res_last,
+    int n_embd, int hc, int hc_low_rank, int T, float eps);

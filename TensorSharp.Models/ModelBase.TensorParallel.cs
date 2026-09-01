@@ -101,6 +101,12 @@ namespace TensorSharp.Models
                     long typeSize = GgufFile.GetTypeSize(type);
                     long blocksPerRow = qw.Ne0 / blockSize;
                     long blocksPerShard = blocksPerRow / globalTp;
+                    if (blocksPerRow % globalTp != 0)
+                        throw new NotSupportedException(
+                            $"Row-parallel shard of '{name}' would drop a tail: {qw.Ne0} columns is " +
+                            $"{blocksPerRow} blocks of {blockSize} for {globalTp} ranks. A quantized " +
+                            $"row can only be split on block boundaries, so ne0 must be a multiple of " +
+                            $"{blockSize * globalTp}.");
                     long ne0PerShard = blocksPerShard * blockSize;
                     long srcRowBytes = NativeDequant.RowSize(qw.GgmlType, qw.Ne0);
                     long dstRowBytes = (ne0PerShard / blockSize) * typeSize;
@@ -136,10 +142,15 @@ namespace TensorSharp.Models
                         }
                         shards[lr] = new QuantizedWeight(shardPtr, totalBytesPerShard,
                             qw.GgmlType, ne0PerShard, qw.Ne1);
+                        // A per-tensor scale is shard-invariant: it does not depend on
+                        // the output row, and it distributes over the row-parallel
+                        // AllReduce, so every shard carries the parent's value.
+                        shards[lr].Scale = qw.Scale;
                     });
                 }
 
                 _tpQuantWeights[name] = shards;
+                RecordTpWeightScale(name, qw);
                 quantToRemove.Add(name);
             }
 
@@ -281,9 +292,14 @@ namespace TensorSharp.Models
                     }
                     shards[r] = new QuantizedWeight(shardPtr, totalBytes,
                         qw.GgmlType, qw.Ne0, rows.Length);
+                    // A per-tensor scale is shard-invariant: it does not depend on
+                    // the output row, and it distributes over the row-parallel
+                    // AllReduce, so every shard carries the parent's value.
+                    shards[r].Scale = qw.Scale;
                 }
 
                 _tpQuantWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
                 _quantWeights.Remove(weightName);
                 qw.Dispose();
             }
@@ -309,6 +325,7 @@ namespace TensorSharp.Models
                 }
 
                 _tpWeights[weightName] = shards;
+                RecordTpWeightScale(weightName, qw);
                 _weights.Remove(weightName);
                 w.Dispose();
             }
@@ -461,6 +478,8 @@ namespace TensorSharp.Models
                     shards[r] = shard;
             }
 
+            // This pack is built from several sources; the F32 fallback already
+            // baked each source's scale into its rows, so record nothing here.
             if (requantize)
                 _tpQuantWeights[fusedName] = quantShards;
             else
@@ -606,6 +625,60 @@ namespace TensorSharp.Models
             ShardConcatenatedBiasColumnParallel(biasName, half, half);
         }
 
+        internal static readonly bool TpScaleDebug =
+            Environment.GetEnvironmentVariable("TS_TP_SCALE_DEBUG") == "1";
+        private readonly HashSet<string> _tpScaleSeen = new(StringComparer.Ordinal);
+
+        /// <summary>Remember a sharded weight's per-tensor scale under the name
+        /// the TP linears resolve it by. Tolerates a null source (an F32 shard
+        /// cut from a tensor that never had one).</summary>
+        protected void RecordTpWeightScale(string weightName, QuantizedWeight source)
+        {
+            if (weightName == null)
+                return;
+            float s = source?.Scale ?? 1.0f;
+            if (s != 1.0f)
+            {
+                _tpWeightScales[weightName] = s;
+                if (TpScaleDebug)
+                    Console.Error.WriteLine($"[tp-scale] recorded {weightName} = {s}");
+            }
+        }
+
+        /// <summary>Whether any of these sharded weights carries a per-tensor
+        /// scale. The fused per-block TP kernels have no hook to apply one, so
+        /// they must decline rather than silently drop it.</summary>
+        protected bool TpAnyWeightScaled(params string[] weightNames)
+        {
+            if (_tpWeightScales.Count == 0 || weightNames == null)
+                return false;
+            foreach (string n in weightNames)
+                if (n != null && _tpWeightScales.ContainsKey(n))
+                    return true;
+            return false;
+        }
+
+        /// <summary>Multiply every rank's result by the sharded weight's
+        /// per-tensor scale. Shard-invariant on both splits: column-parallel
+        /// divides output rows and the scalar does not depend on the row, and
+        /// row-parallel divides the contraction, where scaling each partial
+        /// before the all-reduce equals scaling the sum.</summary>
+        protected void TpApplyNamedWeightScale(Tensor[] results, string weightName)
+        {
+            if (TpScaleDebug)
+            {
+                bool found = _tpWeightScales.TryGetValue(weightName, out float dbg);
+                if (_tpScaleSeen.Add(weightName))
+                    Console.Error.WriteLine($"[tp-scale] {weightName}: " +
+                        (found ? $"applying {dbg}" : "no recorded scale"));
+            }
+            if (results == null || !_tpWeightScales.TryGetValue(weightName, out float s))
+                return;
+            for (int r = 0; r < results.Length; r++)
+                if (results[r] != null)
+                    Ops.Mul(results[r], results[r], s);
+        }
+
         /// <summary>
         /// Column-parallel linear forward: each GPU computes its output slice
         /// using its weight shard. Input is replicated across all GPUs.
@@ -627,6 +700,9 @@ namespace TensorSharp.Models
                 for (int r = 0; r < tp; r++) sharedInputs[r] = input;
                 if (TryTpFusedQuantLinear(sharedInputs, qShards, results, seqLen, allReduce: false))
                 {
+                    // The fused multi-rank linear returns here without touching the
+                    // method's normal exit, so it needs the scale applied too.
+                    TpApplyNamedWeightScale(results, weightName);
                     _linearTicks += Stopwatch.GetTimestamp() - t0;
                     return results;
                 }
@@ -665,6 +741,9 @@ namespace TensorSharp.Models
                 throw new KeyNotFoundException($"TP column-parallel weight '{weightName}' not found in sharded weights.");
             }
 
+            // Every branch above lands here: the fused multi-rank linear, the
+            // generic per-rank quantized loop, and the F32 shards.
+            TpApplyNamedWeightScale(results, weightName);
             _linearTicks += Stopwatch.GetTimestamp() - t0;
             return results;
         }
@@ -834,6 +913,9 @@ namespace TensorSharp.Models
                 int seqLen = (int)inputs[0].Sizes[0];
                 if (TryTpFusedQuantLinear(inputs, qShards, partials, seqLen, allReduce: true))
                 {
+                    // The fused multi-rank linear returns here without touching the
+                    // method's normal exit, so it needs the scale applied too.
+                    TpApplyNamedWeightScale(partials, weightName);
                     _linearTicks += Stopwatch.GetTimestamp() - t0;
                     return partials;
                 }
@@ -865,6 +947,8 @@ namespace TensorSharp.Models
             }
 
             _linearTicks += Stopwatch.GetTimestamp() - t0;
+
+            TpApplyNamedWeightScale(partials, weightName);
 
             _tpGroup.AllReduce(partials);
             return partials;
@@ -1158,6 +1242,26 @@ namespace TensorSharp.Models
             {
                 Console.WriteLine($"  TP replicated on rank 0: {replicatedCount} unsharded quantized weight(s), " +
                     $"{replicatedBytes / 1024 / 1024} MB.");
+            }
+
+            // Sharding a handful of weights and replicating the rest is not a
+            // speedup - every rank recomputes the same replicated matmuls and
+            // then pays a collective on top, so TP can land well BELOW one GPU.
+            // gpt-oss is the live example: 24 sharded vs 1538 replicated
+            // (10.8 GB) measures 28 tok/s on two GPUs against 349 on one.
+            // Say so, because the alternative is a silent 12x regression.
+            long shardedBytes = 0;
+            foreach (var kv in _tpQuantWeights)
+                if (kv.Value is { Length: > 0 } sh && sh[0] != null)
+                    shardedBytes += sh[0].RawBytes * sh.Length;
+            if (replicatedBytes > 0 && shardedBytes < replicatedBytes)
+            {
+                Console.Error.WriteLine(
+                    $"WARNING: tensor parallelism sharded only {shardedBytes / 1024 / 1024} MB across " +
+                    $"{TpDegree} ranks while {replicatedBytes / 1024 / 1024} MB stays replicated on every " +
+                    "rank. The replicated weights are recomputed identically by each rank and the " +
+                    "collectives are pure overhead, so this run is likely SLOWER than a single GPU. " +
+                    "Prefer one GPU for this model, or use it only to fit weights that do not fit on one.");
             }
             if (supersededCount > 0)
             {

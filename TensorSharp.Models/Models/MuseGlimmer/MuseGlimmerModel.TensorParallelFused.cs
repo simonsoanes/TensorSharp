@@ -82,11 +82,50 @@ namespace TensorSharp.Models
         /// layout is readable by the fused kernels only, so arming it under TP is
         /// exactly as safe (and as unsafe) as arming it on one GPU.
         /// </summary>
+        /// <summary>The cross-node half of a distributed AllReduce, or null on a
+        /// single-node run. Present exactly when the TP group spans nodes.</summary>
+        private INestedTensorParallelGroup TpCrossNodeReducer =>
+            GlobalTpDegree != TpDegree ? _tpGroup as INestedTensorParallelGroup : null;
+
+        private GgmlBasicOps.CrossNodeAllReduce _tpCrossNodeCallback;
+        private float[] _tpCrossNodeBuf = Array.Empty<float>();
+
+        /// <summary>Marshalled once and cached: the executor calls this at every
+        /// AllReduce boundary, so a per-call delegate allocation would land on the
+        /// hot path.</summary>
+        private GgmlBasicOps.CrossNodeAllReduce TpCrossNodeCallback =>
+            _tpCrossNodeCallback ??= (user, data, count) =>
+            {
+                try
+                {
+                    if (count <= 0)
+                        return true;
+                    if (_tpCrossNodeBuf.Length < count)
+                        _tpCrossNodeBuf = new float[count];
+                    System.Runtime.InteropServices.Marshal.Copy(data, _tpCrossNodeBuf, 0, count);
+                    TpCrossNodeReducer.CrossNodeAllReduce(_tpCrossNodeBuf, count);
+                    System.Runtime.InteropServices.Marshal.Copy(_tpCrossNodeBuf, 0, data, count);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[muse-tp] cross-node AllReduce failed: {ex.Message}");
+                    return false;
+                }
+            };
+
         internal bool CanUseTpFusedForward =>
             FusedForwardEnabled && TpFusedForwardEnabled && IsTensorParallel && IsGgmlBackend &&
             (_backend == BackendType.GgmlCuda || _backend == BackendType.GgmlVulkan) &&
-            GlobalTpDegree == TpDegree &&
-            GgmlBasicOps.TensorParallelFusedAvailable(TpDegree);
+            // Across nodes the local ranks still reduce on-device and the cluster
+            // half of each boundary goes through the cross-node hook, exactly as
+            // gpt-oss and qwen35 do. What it cannot do is span nodes with no
+            // reducer to call. Refusing outright cost 8x: the per-op fallback ran
+            // Muse-Glimmer at 10 tok/s against 81.8 on one GPU.
+            (GlobalTpDegree == TpDegree || TpCrossNodeReducer != null) &&
+            (TpCrossNodeReducer != null
+                ? GgmlBasicOps.TensorParallelFusedAvailableDistributed(TpDegree)
+                : GgmlBasicOps.TensorParallelFusedAvailable(TpDegree));
 
         /// <summary>
         /// Build (or rebuild) the per-rank pointer tables. Called after weight
@@ -220,7 +259,14 @@ namespace TensorSharp.Models
         {
             qw = null;
             if (!_tpQuantWeights.TryGetValue(name, out var shards) || shards == null || rank >= shards.Length)
-                return false;
+            {
+                // Not sharded: fall back to the whole tensor, which every rank
+                // then computes identically. Only reachable when a weight class
+                // is deliberately left replicated (TS_MG_TP_FFN_REPLICATED).
+                if (!_quantWeights.TryGetValue(name, out qw) || qw == null)
+                    return false;
+                return qw.CacheKey != IntPtr.Zero;
+            }
             qw = shards[rank];
             return qw != null && qw.CacheKey != IntPtr.Zero;
         }
@@ -300,7 +346,11 @@ namespace TensorSharp.Models
                             // Per-rank head counts: the column-parallel shards
                             // produce this rank's heads only, and its KV cache
                             // holds just those.
-                            Config.NumHeads / tp, Config.NumKVHeads / tp, _headDim,
+                            // GlobalTpDegree, not the local one: every shard was cut
+                            // by the cluster degree (InitTpKVCache, the shard helpers),
+                            // so with one local rank per node the local degree would
+                            // hand the kernel head counts that do not match its shards.
+                            Config.NumHeads / GlobalTpDegree, Config.NumKVHeads / GlobalTpDegree, _headDim,
                             _kvCacheCapacity, _kvSwaRows, startPos, _slidingWindow,
                             Config.Eps, PostNormEps, Config.RopeBase, 1.0f / Config.RopeScale,
                             1f / MathF.Sqrt(_headDim), (int)_kvCacheDtype.GgmlType(),
@@ -322,7 +372,12 @@ namespace TensorSharp.Models
                     }
 
                     if (ok)
-                        GgmlBasicOps.TensorParallelExecutePlans(_tpFusedPlans);
+                    {
+                        if (TpCrossNodeReducer != null)
+                            GgmlBasicOps.TensorParallelExecutePlansDistributed(_tpFusedPlans, TpCrossNodeCallback);
+                        else
+                            GgmlBasicOps.TensorParallelExecutePlans(_tpFusedPlans);
+                    }
                 }
             }
             catch (InvalidOperationException)

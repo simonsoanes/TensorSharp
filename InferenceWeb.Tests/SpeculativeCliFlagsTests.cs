@@ -125,12 +125,11 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
     }
 
     [Theory]
-    [InlineData("0")]
     [InlineData("1.5")]
     [InlineData("nope")]
     public void Apply_SpecPminOutsideTheUnitInterval_FailsFastNamingTheFlag(string value)
     {
-        // The (0, 1] bound exists ONLY here: SchedulerConfig reads the variable
+        // The [0, 1] bound exists ONLY here: SchedulerConfig reads the variable
         // back with a plain float parse, so a value of 5 would be accepted there
         // and would reject every draft while speculation still logged as armed.
         var ex = Assert.Throws<ArgumentException>(() =>
@@ -138,6 +137,15 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
 
         Assert.Contains("--mtp-pmin", ex.Message);
         Assert.Null(Environment.GetEnvironmentVariable("TS_MTP_PMIN"));
+    }
+
+    [Fact]
+    public void Apply_SpecPminZero_IsAcceptedAsNeverDecline()
+    {
+        // 0 is a meaningful setting, not an out-of-range one: never decline to
+        // draft. It is llama.cpp's own default for the same knob (p_min = 0.0).
+        SpeculativeCliFlags.Apply(new[] { "--spec-pmin", "0" });
+        Assert.Equal("0", Environment.GetEnvironmentVariable(SpeculativeCliFlags.PMinEnvVar));
     }
 
     [Fact]

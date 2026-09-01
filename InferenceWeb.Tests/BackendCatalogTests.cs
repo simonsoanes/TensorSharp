@@ -169,6 +169,7 @@ public class BackendCatalogTests
     [InlineData(GgmlTensorType.IQ2_XXS)]
     [InlineData(GgmlTensorType.IQ2_S)]
     [InlineData(GgmlTensorType.MXFP4)]
+    [InlineData(GgmlTensorType.NVFP4)]
     public void ShouldStoreWeightQuantized_DirectCudaKeepsHostFallbackWeightsCompressed(GgmlTensorType type)
     {
         var info = new GgufTensorInfo
