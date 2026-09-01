@@ -19,7 +19,11 @@ namespace TensorSharp.Runtime
     /// Key invariant: when an assistant message has <see cref="ChatMessage.RawOutputTokens"/>
     /// set (i.e. the model previously generated this turn), those raw tokens are spliced
     /// directly into the rendered token sequence INSTEAD OF re-tokenizing the assistant's
-    /// content text.
+    /// content text. A TOOL-CALLING round is the exception: splicing one clears
+    /// <see cref="ChatMessage.ToolCalls"/>, which some templates read in order to render
+    /// or address the tool RESULT that follows, so each family declares through
+    /// <see cref="ChatProtocol.ToolCallRawSplicing"/> whether such a round may be spliced
+    /// always, never, or only when the template proves it cannot rebuild the round itself.
     ///
     /// Why this matters: assistant content is typically lossy with respect to raw
     /// generation. Thinking-style models emit <c>&lt;think&gt;...&lt;/think&gt;</c> tokens
@@ -185,11 +189,86 @@ namespace TensorSharp.Runtime
             if (messages == null)
                 throw new ArgumentNullException(nameof(messages));
 
+            ToolCallRawSplicing splicing =
+                ChatProtocolRegistry.For(architecture)?.ToolCallRawSplicing ?? ToolCallRawSplicing.Never;
+
+            RenderPass pass = Render(
+                tokenizer, chatTemplate, messages, architecture, addGenerationPrompt, tools, enableThinking,
+                spliceToolCallRounds: splicing == ToolCallRawSplicing.Always);
+
+            if (splicing != ToolCallRawSplicing.WhenTemplateLosesTheRound
+                || pass.ToolCallRoundsLeftToTemplate.Count == 0)
+            {
+                return pass.Tokens;
+            }
+
+            // The template was given this family's structured reasoning and tool calls and
+            // asked to rebuild each tool-calling round. Check whether it actually did, by
+            // the only measure that matters for cache reuse: are the round's generated
+            // tokens present, in order, in the prompt we just built? When they are, the
+            // re-render is byte-identical to the live cache and nothing more is needed -
+            // this is the canonical Gemma 4 template, and its behaviour is unchanged.
+            if (ReproducesEveryToolCallRound(pass.Tokens, pass.ToolCallRoundsLeftToTemplate))
+                return pass.Tokens;
+
+            // It did not. The round's thought channel (and whatever else the template
+            // dropped) has no counterpart in the prompt, so the live cache diverges right
+            // at that turn and the whole conversation re-prefills. Splicing the raw tokens
+            // reproduces it exactly - PROVIDED the template still renders the tool results
+            // once the structured tool_calls field is cleared, which is the one thing
+            // splicing costs and the one thing that must never be lost.
+            RenderPass spliced = Render(
+                tokenizer, chatTemplate, messages, architecture, addGenerationPrompt, tools, enableThinking,
+                spliceToolCallRounds: true);
+
+            if (!ToolResultsSurvive(spliced.Text, messages))
+            {
+                WarnToolCallSplicingUnavailableOnce(architecture);
+                return pass.Tokens;
+            }
+
+            return spliced.Tokens;
+        }
+
+        /// <summary>One rendered prompt, plus what the template was left to reconstruct.</summary>
+        private readonly struct RenderPass
+        {
+            public RenderPass(List<int> tokens, string text, List<List<int>> toolCallRoundsLeftToTemplate)
+            {
+                Tokens = tokens;
+                Text = text;
+                ToolCallRoundsLeftToTemplate = toolCallRoundsLeftToTemplate;
+            }
+
+            /// <summary>The prompt token sequence.</summary>
+            public List<int> Tokens { get; }
+
+            /// <summary>The rendered text, before tokenization (placeholders still in it).</summary>
+            public string Text { get; }
+
+            /// <summary>
+            /// Raw output tokens of each assistant TOOL-CALLING round this pass did NOT
+            /// splice, i.e. the rounds the chat template was asked to rebuild itself.
+            /// </summary>
+            public List<List<int>> ToolCallRoundsLeftToTemplate { get; }
+        }
+
+        private RenderPass Render(
+            ITokenizer tokenizer,
+            string chatTemplate,
+            List<ChatMessage> messages,
+            string architecture,
+            bool addGenerationPrompt,
+            List<ToolFunction>? tools,
+            bool enableThinking,
+            bool spliceToolCallRounds)
+        {
             // Build a parallel list where each cached assistant message is replaced with a
             // placeholder ChatMessage. Track the raw tokens in render order so we can splice
             // them back in.
             List<ChatMessage>? renderedMessages = null;
             List<List<int>>? rawTokensByPlaceholderIndex = null;
+            var toolCallRoundsLeftToTemplate = new List<List<int>>();
             int placeholderCount = 0;
 
             for (int i = 0; i < messages.Count; i++)
@@ -198,36 +277,22 @@ namespace TensorSharp.Runtime
                 bool hasRawTokens = msg != null
                     && msg.Role == "assistant"
                     && msg.RawOutputTokens != null
-                    && msg.RawOutputTokens.Count > 0
-                    // ...and NOT a round that called a tool. Splicing one is not merely
-                    // unnecessary there, it is wrong in two ways at once.
-                    //
-                    // The placeholder below blanks ToolCalls, because the raw tokens
-                    // already carry the tool-call markup and rendering it twice would
-                    // duplicate it. But a chat template needs `tool_calls` to know that a
-                    // tool RESULT follows: Gemma 4's renders the result inside the same
-                    // model turn, gated on `message.get('tool_calls')`. With the field
-                    // blanked, every `role: tool` message fell out of the prompt - so from
-                    // the second round of a skills/code turn onwards the model was shown
-                    // none of the output of the tools it had called. It asked for a
-                    // directory listing and answered from invention; it read a SKILL.md
-                    // and then named a script that file does not contain.
-                    //
-                    // And the order cannot be reconciled anyway. The model produces
-                    // reasoning, then the call; the host then appends the result. The
-                    // template emits the call, then the result, then the CONTENT - which
-                    // is where the placeholder sits - so a spliced round would put the
-                    // generated tokens after the result rather than before it, and the
-                    // rendered prefix could never match the cache.
-                    //
-                    // Nothing is lost by leaving these to the template. Where the family
-                    // declares RendersAssistantReasoning the template reproduces the round
-                    // exactly, reasoning channel included, and the prefix stays
-                    // byte-identical - which is the whole point of this class. Where it
-                    // does not, the round re-renders without its reasoning and that round
-                    // re-prefills, exactly as it did before - but with its tool results
-                    // present, which matters more.
-                    && !(msg.ToolCalls is { Count: > 0 });
+                    && msg.RawOutputTokens.Count > 0;
+
+                // A tool-calling round is the contested case. The placeholder below blanks
+                // ToolCalls, because the raw tokens already carry the call markup and
+                // rendering it twice would duplicate it - but a template may read that same
+                // field to place or address the tool RESULT that follows, and Gemma 4's
+                // canonical template deletes every result without it. Which families may
+                // splice such a round, and under what condition, is declared once per
+                // family as ChatProtocol.ToolCallRawSplicing; the caller resolves the
+                // condition and passes the answer down.
+                bool isToolCallRound = hasRawTokens && msg!.ToolCalls is { Count: > 0 };
+                if (isToolCallRound && !spliceToolCallRounds)
+                {
+                    toolCallRoundsLeftToTemplate.Add(msg!.RawOutputTokens!);
+                    hasRawTokens = false;
+                }
 
                 if (!hasRawTokens)
                 {
@@ -272,7 +337,7 @@ namespace TensorSharp.Runtime
 
             // Fast path: no placeholders -> just tokenize the whole rendered string.
             if (placeholderCount == 0)
-                return tokenizer.Encode(text, addSpecial: true);
+                return new RenderPass(tokenizer.Encode(text, addSpecial: true), text, toolCallRoundsLeftToTemplate);
 
             // Some chat templates (notably Gemma 4) call a strip_thinking filter on
             // assistant content, which would silently delete a prefix injected via the
@@ -321,7 +386,103 @@ namespace TensorSharp.Runtime
             if (rendererStrippedTrailingWhitespace)
                 text = TrimWhitespaceBeforeEachPlaceholder(text);
 
-            return TokenizeAndReplacePlaceholderSpans(tokenizer, text, rawTokensByPlaceholderIndex!);
+            return new RenderPass(
+                TokenizeAndReplacePlaceholderSpans(tokenizer, text, rawTokensByPlaceholderIndex!),
+                text,
+                toolCallRoundsLeftToTemplate);
+        }
+
+        /// <summary>
+        /// True when every tool-calling round the template was asked to rebuild appears in
+        /// the rendered prompt as the exact token run the model generated.
+        ///
+        /// <para>
+        /// This is deliberately measured in TOKENS rather than text. Reproducing the round
+        /// as far as the KV cache is concerned means reproducing its tokens; a template
+        /// that re-emits the same words with one different merge at a boundary has not
+        /// reproduced it, and text comparison would say it had.
+        /// </para>
+        /// </summary>
+        private static bool ReproducesEveryToolCallRound(
+            List<int> promptTokens, List<List<int>> toolCallRounds)
+        {
+            for (int i = 0; i < toolCallRounds.Count; i++)
+            {
+                if (FindSubsequence(promptTokens, toolCallRounds[i]) < 0)
+                    return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Longest tool-result needle compared against a rendered prompt. Tool output runs
+        /// to whole files; a few hundred characters of it identify the message beyond doubt
+        /// and keep the check independent of how large the result was.
+        /// </summary>
+        private const int ToolResultProbeChars = 512;
+
+        /// <summary>
+        /// True when every <c>role: "tool"</c> message's content is still present in
+        /// <paramref name="renderedText"/>.
+        ///
+        /// <para>
+        /// Splicing a tool-calling round clears <see cref="ChatMessage.ToolCalls"/>, and a
+        /// template that folds the result INTO the model turn - gated on that very field -
+        /// then emits nothing for the following <c>role: "tool"</c> messages. The model is
+        /// shown none of the output of the tools it called and answers from invention: it
+        /// asks for a directory listing, is given nothing, and names files that do not
+        /// exist. That regression is worth far more than the prefill this saves, so the
+        /// spliced render is only used once it has been checked.
+        /// </para>
+        /// </summary>
+        internal static bool ToolResultsSurvive(string renderedText, List<ChatMessage> messages)
+        {
+            if (messages == null)
+                return true;
+
+            string haystack = NormalizeNewlines(renderedText);
+            for (int i = 0; i < messages.Count; i++)
+            {
+                ChatMessage msg = messages[i];
+                if (msg == null || msg.Role != "tool")
+                    continue;
+
+                string needle = NormalizeNewlines(msg.Content).Trim();
+                if (needle.Length == 0)
+                    continue;
+                if (needle.Length > ToolResultProbeChars)
+                    needle = needle.Substring(0, ToolResultProbeChars);
+
+                if (haystack.IndexOf(needle, StringComparison.Ordinal) < 0)
+                    return false;
+            }
+            return true;
+        }
+
+        private static string NormalizeNewlines(string? s)
+        {
+            if (string.IsNullOrEmpty(s))
+                return string.Empty;
+            return s.Replace("\r\n", "\n").Replace('\r', '\n');
+        }
+
+        // Architectures whose "the template lost the round but splicing would lose the
+        // tool results" dead end has already been reported. Both halves of the trade are
+        // bad; the prompt stays correct and pays the prefill, but a silent choice between
+        // two costs is exactly the kind of thing that goes unnoticed for months.
+        private static readonly HashSet<string> ToolCallSplicingWarned = new(StringComparer.Ordinal);
+
+        private static void WarnToolCallSplicingUnavailableOnce(string? architecture)
+        {
+            lock (ToolCallSplicingWarned)
+            {
+                if (!ToolCallSplicingWarned.Add(architecture ?? string.Empty)) return;
+            }
+            Console.Error.WriteLine(
+                $"[KVCachePromptRenderer] '{architecture}': the chat template did not reproduce a past " +
+                "tool-calling round's generated tokens, and splicing them back would drop the tool results " +
+                "from the prompt. Keeping the results, so that round re-prefills instead of continuing the " +
+                "live KV cache. Reported once per architecture.");
         }
 
         /// <summary>

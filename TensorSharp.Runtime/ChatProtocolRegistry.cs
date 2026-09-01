@@ -118,6 +118,21 @@ namespace TensorSharp.Runtime
                 // RESULT. Handing both over is what makes a skills/code round re-render
                 // byte-identically to what was generated - see RendersAssistantReasoning.
                 RendersAssistantReasoning = true,
+                // ...but only the CANONICAL Gemma 4 template has that reasoning branch.
+                // The template shipped in earlier builds - and in the community
+                // fine-tunes that inherited it - renders a past model turn as
+                // `<|turn>model\n` + tool call, with `strip_thinking` deleting the
+                // channel from the content and no `reasoning` field read anywhere. The
+                // round's whole thought block (hundreds of tokens) then has no
+                // counterpart in the re-render, the prompt diverges from the live cache
+                // at the first tool-calling turn, and every following round of an Agent
+                // Skills / code-exec turn re-prefills the entire conversation.
+                //
+                // That template does render `role: "tool"` as its own `<|turn>tool` turn,
+                // independent of the assistant's tool_calls, so splicing the round's raw
+                // tokens is safe THERE and only there. The renderer decides per prompt by
+                // checking what the active template actually produced.
+                ToolCallRawSplicing = ToolCallRawSplicing.WhenTemplateLosesTheRound,
             });
 
             // ---- Qwen -------------------------------------------------------
@@ -162,6 +177,11 @@ namespace TensorSharp.Runtime
                 // `<think>\n\n</think>\n\n` for past turns, so nothing is needed.
                 AssistantGenerationSuffix = thinking => thinking ? "<think>\n" : null,
                 EmitsEmptyThinkBlockForPastTurns = thinking => thinking,
+                // Its tool-result branch depends only on role=tool, never on the
+                // preceding assistant's structured tool_calls field. Keep the exact
+                // generated reasoning + call tokens so an agent round extends the live
+                // cache instead of re-prefilling the conversation.
+                ToolCallRawSplicing = ToolCallRawSplicing.Always,
             });
 
             // Qwen3.8-Flash-Next frames chat exactly like Qwen 3 (the generic ChatML

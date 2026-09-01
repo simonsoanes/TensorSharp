@@ -19,6 +19,54 @@ namespace TensorSharp.Runtime
         bool EnableThinking);
 
     /// <summary>
+    /// Whether a family may reuse a past TOOL-CALLING round's exact generated tokens
+    /// instead of asking its chat template to reconstruct that round.
+    ///
+    /// <para>
+    /// Splicing is the only lossless way to reproduce what the live KV cache holds -
+    /// reasoning channel, call syntax, whitespace and tokenization all included - but
+    /// it costs the structured <see cref="ChatMessage.ToolCalls"/> field, which some
+    /// templates read in order to render or address the tool RESULT that follows. The
+    /// two effects pull in opposite directions, so each family declares which one it
+    /// can afford.
+    /// </para>
+    /// </summary>
+    public enum ToolCallRawSplicing
+    {
+        /// <summary>
+        /// Never splice a tool-calling round. The template reconstructs it; where the
+        /// template cannot, that round re-prefills. The safe default.
+        /// </summary>
+        Never = 0,
+
+        /// <summary>
+        /// Always splice. For families whose tool-result framing depends only on the
+        /// <c>role: "tool"</c> message itself and never on the preceding assistant's
+        /// structured tool calls - Qwen 3.5 / 3.6.
+        /// </summary>
+        Always,
+
+        /// <summary>
+        /// Splice only when the ACTIVE template demonstrably failed to reproduce the
+        /// round, AND splicing it does not drop any tool result from the prompt.
+        ///
+        /// <para>
+        /// Gemma 4 needs this because two different chat templates ship under one
+        /// architecture name. The canonical (2026-07-09) template re-renders the round's
+        /// thinking channel from <c>reasoning</c> and folds the tool result INTO the same
+        /// model turn, gated on <c>tool_calls</c> - blanking that field there deletes
+        /// every tool result from the prompt. Earlier builds (and the community
+        /// fine-tunes carrying their template) have no reasoning branch at all and render
+        /// <c>role: "tool"</c> as its own <c>&lt;|turn&gt;tool</c> turn - so there the
+        /// round's whole thought channel is lost on re-render and splicing is both safe
+        /// and necessary. Which template a GGUF carries is not knowable from the
+        /// architecture name, so the renderer decides per prompt.
+        /// </para>
+        /// </summary>
+        WhenTemplateLosesTheRound,
+    }
+
+    /// <summary>
     /// One model family's CHAT PROTOCOL: how its prompts are framed, what media
     /// placeholders its template expects, and how its replies are parsed back apart.
     ///
@@ -156,6 +204,22 @@ namespace TensorSharp.Runtime
         /// </para>
         /// </summary>
         public bool RendersAssistantReasoning { get; init; }
+
+        /// <summary>
+        /// Whether this protocol may splice a past assistant tool-call round's exact
+        /// <see cref="ChatMessage.RawOutputTokens"/> into the prompt, and under what
+        /// condition. Default <see cref="Runtime.ToolCallRawSplicing.Never"/>.
+        ///
+        /// <para>
+        /// This is opt-in because replacing the message with a raw placeholder clears
+        /// <see cref="ChatMessage.ToolCalls"/>: the raw tokens already contain the call
+        /// syntax, but some templates need the structured field to place or address the
+        /// following result. Qwen 3.5 / 3.6 renders <c>role: "tool"</c> independently,
+        /// so splicing is safe there and is the only lossless way to reproduce its
+        /// thinking-prefixed live KV-cache stream.
+        /// </para>
+        /// </summary>
+        public ToolCallRawSplicing ToolCallRawSplicing { get; init; } = ToolCallRawSplicing.Never;
 
         /// <summary>
         /// True when this family turns a video into N evenly spaced FRAME images that
