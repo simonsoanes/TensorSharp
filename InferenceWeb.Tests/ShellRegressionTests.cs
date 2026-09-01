@@ -158,9 +158,43 @@ public class ShellRegressionTests : IDisposable
 
     // ---- containment the host performs on the model's behalf -----------------
 
+    /// <summary>
+    /// Whether this host lets an unprivileged process create a symbolic link at all.
+    ///
+    /// <para>
+    /// Windows requires either Developer Mode or an elevated token for
+    /// <c>CreateSymbolicLink</c>. Without one, the two tests below fail in their SETUP
+    /// with "Administrator privilege required" - which looks exactly like the
+    /// containment they check having regressed, while saying nothing whatever about it.
+    /// Probed once, so a developer box without Developer Mode reports "not run" instead
+    /// of "broken".
+    /// </para>
+    /// </summary>
+    private static readonly Lazy<bool> CanCreateSymlinks = new(() =>
+    {
+        string probe = Path.Combine(Path.GetTempPath(), "ts-symlink-probe-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            File.WriteAllText(probe + ".target", "x");
+            File.CreateSymbolicLink(probe + ".link", probe + ".target");
+            return true;
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+        {
+            return false;
+        }
+        finally
+        {
+            try { File.Delete(probe + ".link"); } catch (Exception) { }
+            try { File.Delete(probe + ".target"); } catch (Exception) { }
+        }
+    });
+
     [Fact]
     public void ASymlinkOutOfTheWorkspace_IsNotFollowedByThePatcher()
     {
+        if (!CanCreateSymlinks.Value) return;
+
         // The host process does this I/O and no sandbox confines it, so a lexical
         // containment check is not enough: `ln -s ~/.ssh/id_rsa notes.txt` is one
         // ordinary command, entirely permitted inside the workspace, and a patch of
@@ -180,6 +214,8 @@ public class ShellRegressionTests : IDisposable
     [Fact]
     public void ASymlinkOutOfTheWorkspace_IsNotOfferedAsAProducedFile()
     {
+        if (!CanCreateSymlinks.Value) return;
+
         // The other half of the same hole: change-based capture enumerates the work
         // directory and copies what is new, which would have followed the link and handed
         // the user a download of whatever it pointed at.

@@ -219,8 +219,80 @@ namespace TensorSharp.AgentHost.CodeExec
         /// <summary>Resolve a bare executable name against PATH.</summary>
         public static string? Which(string name) =>
             Path.IsPathRooted(name)
-                ? (File.Exists(name) ? name : null)
+                ? (IsUsableExecutable(name) ? name : ResolveRootedWithExtension(name))
                 : WhichCache.GetOrAdd(name, ProbePath);
+
+        /// <summary>
+        /// A rooted name that exists as given, or with one of Windows' executable
+        /// extensions appended. <c>--code-exec-shell C:	ools\pwsh</c> is a path a
+        /// person would write and a path that does not exist.
+        /// </summary>
+        private static string? ResolveRootedWithExtension(string name)
+        {
+            if (!OperatingSystem.IsWindows() || Path.HasExtension(name))
+                return null;
+            foreach (string extension in WindowsExecutableExtensions)
+            {
+                if (IsUsableExecutable(name + extension))
+                    return name + extension;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// The extensions a bare name may be carrying on Windows, in PATHEXT order.
+        ///
+        /// <para>
+        /// Without this, <see cref="Which"/> looked for a file literally named
+        /// <c>git</c> beside a <c>git.exe</c> and concluded the host had no git. That
+        /// is not a cosmetic miss: <see cref="AvailableTools"/> is the list this host
+        /// puts in the model's tool description to say what it can reach, and on
+        /// Windows it came back with nothing but the interpreters, which are the only
+        /// two candidates spelled with <c>.exe</c> in the table above. A model told the
+        /// host has no <c>git</c>, no <c>ffmpeg</c>, no <c>soffice</c> and no
+        /// <c>pdftoppm</c> plans around tools that are installed and on PATH.
+        /// </para>
+        /// <para>
+        /// PATHEXT is read rather than assumed, because an operator may have added to
+        /// it, but <c>.EXE</c>, <c>.CMD</c> and <c>.BAT</c> are forced in: a stripped
+        /// service environment can arrive without PATHEXT at all, and a host that then
+        /// finds no executables would be back where it started. <c>.COM</c> is left to
+        /// PATHEXT; nothing here ships one.
+        /// </para>
+        /// </summary>
+        private static readonly string[] WindowsExecutableExtensions = BuildExecutableExtensions();
+
+        private static string[] BuildExecutableExtensions()
+        {
+            if (!OperatingSystem.IsWindows())
+                return Array.Empty<string>();
+
+            var extensions = new List<string>();
+            void Add(string extension)
+            {
+                if (extension.Length > 1
+                    && extension[0] == '.'
+                    && !extensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
+                {
+                    extensions.Add(extension);
+                }
+            }
+
+            foreach (string entry in (Environment.GetEnvironmentVariable("PATHEXT") ?? string.Empty)
+                         .Split(';', StringSplitOptions.RemoveEmptyEntries))
+            {
+                Add(entry.Trim());
+            }
+
+            // Order matters, and this is the order CreateProcess itself uses: an
+            // interpreter shipped as both a .exe and a .cmd shim must resolve to the
+            // .exe, because a .cmd is a batch file that ProcessStartInfo with
+            // UseShellExecute=false cannot start at all.
+            foreach (string forced in new[] { ".EXE", ".CMD", ".BAT" })
+                Add(forced);
+
+            return extensions.ToArray();
+        }
 
         /// <summary>
         /// Answers remembered for the life of the process.
@@ -237,6 +309,49 @@ namespace TensorSharp.AgentHost.CodeExec
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string?> WhichCache =
             new(StringComparer.Ordinal);
 
+        /// <summary>
+        /// A file that exists AND is not one of Windows' App Execution Aliases.
+        ///
+        /// <para>
+        /// <c>%LOCALAPPDATA%\Microsoft\WindowsApps</c> is on every Windows user's PATH
+        /// and ships zero-byte reparse stubs named <c>python.exe</c> and
+        /// <c>python3.exe</c>. Running one does not run Python: it prints "Python was not
+        /// found; run without arguments to install from the Microsoft Store" and exits
+        /// 9009. A plain <c>File.Exists</c> cannot tell it apart from an interpreter, and
+        /// the consequences ran in both directions.
+        /// </para>
+        /// <para>
+        /// It made <c>python3</c> fail outright. <see cref="ShellRunner"/> writes a
+        /// <c>python3</c> shim precisely so a model that types the name every SKILL.md
+        /// uses gets this host's interpreter — but only when no <c>python3</c> already
+        /// resolves. The stub resolved, so no shim was written, and every
+        /// <c>python3 scripts/thumbnail.py</c> came back as exit 9009 and an advertisement
+        /// for the Store.
+        /// </para>
+        /// <para>
+        /// And on a machine where WindowsApps precedes the real install on PATH it would
+        /// have been worse: <c>python</c> ITSELF would resolve to the stub, and the host
+        /// would report an interpreter it does not have.
+        /// </para>
+        /// <para>
+        /// Zero length is the test because that is what the stubs are — the reparse point
+        /// carries the target and the file has no data. It costs one stat on a path that
+        /// is cached for the life of the process.
+        /// </para>
+        /// </summary>
+        private static bool IsUsableExecutable(string path)
+        {
+            if (!File.Exists(path))
+                return false;
+            if (!OperatingSystem.IsWindows())
+                return true;
+            try { return new FileInfo(path).Length > 0; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return true;         // cannot tell, so do not remove a real candidate
+            }
+        }
+
         private static string? ProbePath(string name)
         {
 
@@ -249,8 +364,20 @@ namespace TensorSharp.AgentHost.CodeExec
                     try { candidate = Path.Combine(dir.Trim(), name); }
                     catch (ArgumentException) { continue; }      // a malformed PATH entry
 
-                    if (File.Exists(candidate))
+                    if (IsUsableExecutable(candidate))
                         return candidate;
+
+                    // Windows: a bare name on PATH is spelled without its extension.
+                    // Skipped when the caller already gave one, so "python.exe" is not
+                    // probed as "python.exe.exe".
+                    if (!Path.HasExtension(name))
+                    {
+                        foreach (string extension in WindowsExecutableExtensions)
+                        {
+                            if (IsUsableExecutable(candidate + extension))
+                                return candidate + extension;
+                        }
+                    }
                 }
             }
 
@@ -271,6 +398,131 @@ namespace TensorSharp.AgentHost.CodeExec
 
             return null;
         }
+
+        // ---- windows --------------------------------------------------------
+
+        /// <summary>
+        /// Add the variables a Windows child needs, and redirect the per-user ones into
+        /// <paramref name="workDirectory"/>.
+        ///
+        /// <para>
+        /// One copy, called from both confined-launch paths, because there ARE two of
+        /// them (<c>ConfinedProcess</c> and <c>SkillScriptRunner.RunConfined</c>) and
+        /// they had already drifted: between them they passed <c>SYSTEMROOT</c>,
+        /// <c>COMSPEC</c> and <c>PATHEXT</c> and nothing else, which is short of what
+        /// Windows actually needs by a long way.
+        /// </para>
+        /// <para>
+        /// What was missing and what it cost:
+        /// <list type="bullet">
+        /// <item><c>USERPROFILE</c> — CPython's <c>ntpath.expanduser</c> reads
+        /// USERPROFILE and does NOT read HOME, so <c>~</c> in a skill script resolved to
+        /// the REAL user profile even though HOME had been redirected. Every scrubbing
+        /// guarantee about the home directory was a no-op for the one call that asks for
+        /// it by name.</item>
+        /// <item><c>TEMP</c> / <c>TMP</c> — set here to the work directory. Python reads
+        /// TMPDIR first so it coped, but nothing else on Windows does: a tool writing a
+        /// temporary file found neither and fell back to the current directory or to a
+        /// path it had no business using.</item>
+        /// <item><c>LOCALAPPDATA</c> / <c>APPDATA</c> — pip's cache, npm's cache and
+        /// prefix, and a long tail of tools. Redirected into the work directory rather
+        /// than passed through, for the same reason HOME is: a session's caches belong
+        /// in that session's workspace. This is also the variable an AppContainer launch
+        /// REQUIRES — CreateProcess fails with ERROR_ENVVAR_NOT_FOUND (203) without
+        /// it — which is how its absence was found.</item>
+        /// <item><c>PSMODULEPATH</c> — PowerShell is the shell on Windows, and without
+        /// it a script that calls anything outside the core snap-ins fails to bind.</item>
+        /// <item><c>SYSTEMDRIVE</c>, <c>WINDIR</c>, <c>PROGRAMDATA</c>,
+        /// <c>PROGRAMFILES</c>, <c>PROGRAMFILES(X86)</c>, <c>PUBLIC</c>,
+        /// <c>NUMBER_OF_PROCESSORS</c>, <c>PROCESSOR_ARCHITECTURE</c>, <c>OS</c> — they
+        /// name the machine and the OS install, not the user, so they carry nothing
+        /// sensitive, and a surprising amount of tooling reads them.</item>
+        /// </list>
+        /// </para>
+        /// <para>
+        /// Deliberately still absent: <c>USERNAME</c>, <c>USERDOMAIN</c>,
+        /// <c>COMPUTERNAME</c>, <c>HOMEDRIVE</c>, <c>HOMEPATH</c>, <c>SESSIONNAME</c>,
+        /// and everything else that identifies the person rather than the machine.
+        /// </para>
+        /// </summary>
+        public static void ApplyWindowsBaseline(
+            IDictionary<string, string> environment, string workDirectory)
+        {
+            ArgumentNullException.ThrowIfNull(environment);
+            if (!OperatingSystem.IsWindows())
+                return;
+
+            foreach (string name in WindowsPassThrough)
+            {
+                if (Environment.GetEnvironmentVariable(name) is { Length: > 0 } value)
+                    environment[name] = value;
+            }
+
+            // Per-user state, pointed into ONE hidden directory rather than at the
+            // working directory itself.
+            //
+            // Pointing them straight at the work directory is what the POSIX side does
+            // with HOME, and on Windows it does not stay invisible: PowerShell creates
+            // %USERPROFILE%\AppData\Roaming on startup and pip creates a cache under
+            // TEMP, so after two commands the directory the model lists with
+            // Get-ChildItem contained AppData/ and pip/ beside its own files. That is
+            // not cosmetic - it is what the model reads to decide what it has produced,
+            // and it is what artifact capture walks to decide what to offer the user.
+            //
+            // A single dot-directory keeps all of it in one place that both walkers
+            // already skip by name, and the hidden attribute keeps it out of a bare
+            // Get-ChildItem too, so the model never has to be told to ignore it.
+            string home = EnsureSubdirectory(workDirectory, ".home", hidden: true);
+            environment["HOME"] = home;
+            environment["USERPROFILE"] = home;
+            environment["TEMP"] = EnsureSubdirectory(home, "Temp");
+            environment["TMP"] = environment["TEMP"];
+            // CPython reads TMPDIR BEFORE TEMP, on Windows as well as on Unix, so leaving
+            // the caller's value in place would send every tempfile.* call back into the
+            // working directory and undo the redirection above for the one language every
+            // skill script here is written in.
+            environment["TMPDIR"] = environment["TEMP"];
+            environment["LOCALAPPDATA"] = EnsureSubdirectory(home, "Local");
+            environment["APPDATA"] = EnsureSubdirectory(home, "Roaming");
+
+            // CPython on Windows picks its stdio codec from the console code page, which
+            // for a redirected pipe means cp1252. A script that prints one character
+            // outside it - an arrow, an em dash, a CJK title, anything a slide deck or a
+            // document skill routinely handles - dies with UnicodeEncodeError partway
+            // through, and the model reads a traceback about encoding rather than the
+            // output it asked for. PYTHONUTF8 also makes open() default to UTF-8, which
+            // is what every skill script here already assumes when it writes a file.
+            // Both are ignored by a non-Python child.
+            environment["PYTHONUTF8"] = "1";
+            environment["PYTHONIOENCODING"] = "utf-8";
+        }
+
+        private static string EnsureSubdirectory(string parent, string name, bool hidden = false)
+        {
+            string path = Path.Combine(parent, name);
+            try
+            {
+                Directory.CreateDirectory(path);
+                if (hidden && OperatingSystem.IsWindows())
+                    File.SetAttributes(path, File.GetAttributes(path) | FileAttributes.Hidden);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // The work directory itself is always writable, and is a correct answer
+                // for every consumer of these variables. Naming a directory that could
+                // not be created would not be.
+                return parent;
+            }
+            return path;
+        }
+
+        /// <summary>Machine-describing variables copied through unchanged. See <see cref="ApplyWindowsBaseline"/>.</summary>
+        private static readonly string[] WindowsPassThrough =
+        {
+            "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT",
+            "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "PUBLIC",
+            "PSMODULEPATH", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS",
+        };
 
         // ---- python --------------------------------------------------------
 
@@ -297,7 +549,8 @@ namespace TensorSharp.AgentHost.CodeExec
         /// </para>
         /// </summary>
         public static CodeInstallPlan PythonInstall(
-            string interpreter, string envDirectory, IReadOnlyList<string> packages)
+            string interpreter, string envDirectory, IReadOnlyList<string> packages,
+            string? indexUrl = null)
         {
             var args = new List<string>
             {
@@ -308,6 +561,15 @@ namespace TensorSharp.AgentHost.CodeExec
                 "--no-warn-script-location",
                 "--target", envDirectory,
             };
+            // The OPERATOR's index, never the model's. A --index-url the model wrote is
+            // refused by PackageInstaller and must stay refused; this one comes from
+            // --code-exec-install-index, and it is the only way a host that cannot reach
+            // pypi.org can install anything at all.
+            if (!string.IsNullOrWhiteSpace(indexUrl))
+            {
+                args.Add("--index-url");
+                args.Add(indexUrl!);
+            }
             args.AddRange(packages);
             return new CodeInstallPlan(interpreter, args, envDirectory);
         }

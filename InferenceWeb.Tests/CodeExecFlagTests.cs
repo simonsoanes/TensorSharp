@@ -46,9 +46,10 @@ namespace InferenceWeb.Tests;
 /// usage pages, mirroring the guards the speculative-decoding family already carries: a
 /// flag that is accepted but undocumented is undiscoverable (and on the CLI, typing it
 /// yields no error either), while a flag that is documented but not accepted is an
-/// advertised no-op. <c>--code-exec-unconfined</c> is the one deliberate asymmetry — it
-/// is a trade only the owner of a machine can make, so the server rejects it at startup
-/// and its page must not offer it.
+/// advertised no-op. <c>--code-exec-unconfined</c> used to be a deliberate asymmetry, the
+/// server refusing it at startup; it is now accepted by both hosts, because refusing it
+/// made <c>--code-exec</c> permanently inert on Windows, which has no confining sandbox
+/// for a shell at all. Both pages must therefore offer it.
 /// </para>
 /// </summary>
 public class CodeExecFlagTests
@@ -471,14 +472,12 @@ public class CodeExecFlagTests
     }
 
     [Fact]
-    public void EveryAcceptedFlag_ExceptTheEscapeHatch_IsDocumentedOnTheServerUsagePage()
+    public void EveryAcceptedFlag_IsDocumentedOnTheServerUsagePage()
     {
         var documented = new HashSet<string>(ServerUsage.DocumentedFlags(), StringComparer.Ordinal);
-        List<string> flags = AcceptedFlags()
-            // --code-exec-unconfined is refused by the server at startup, so its page
-            // must not list it as an option; see TheEscapeHatch_IsOfferedByTheCliOnly.
-            .Where(f => f != CodeExecOptions.UnconfinedFlag)
-            .ToList();
+        // In full, including --code-exec-unconfined: the server accepts it now, and a
+        // flag that is accepted but undocumented is undiscoverable.
+        List<string> flags = AcceptedFlags();
         Assert.NotEmpty(flags);
 
         List<string> missing = flags.Where(f => !documented.Contains(f)).ToList();
@@ -556,15 +555,18 @@ public class CodeExecFlagTests
     }
 
     [Fact]
-    public void TheEscapeHatch_IsOfferedByTheCliOnly()
+    public void TheEscapeHatch_IsOfferedByBothHosts()
     {
-        // "Run model-written commands with the filesystem open" is a trade the owner of
-        // a machine can make and the operator of a shared port cannot: TensorSharp.Server
-        // exits with an error when handed this flag, so offering it on the server's page
-        // would document a startup failure as a feature. Checked against the option
-        // table rather than the rendered text, because the server's --code-exec entry
-        // mentions the flag in prose precisely to say that it refuses it.
+        // It used to be CLI-only, on the reasoning that "run model-written commands with
+        // the filesystem open" is a trade the owner of a machine can make and the
+        // operator of a shared port cannot. The reasoning holds; applying it by refusing
+        // the flag did not. On Windows there is no confining sandbox for a shell to fall
+        // back to - a job object restricts no file and no socket, PowerShell cannot
+        // initialise its filesystem provider inside an AppContainer, and an msys bash
+        // fails to load in one at all - so the refusal did not make the server safer, it
+        // made --code-exec a flag that could never do anything there. Both hosts now
+        // offer the same explicit opt-in, and both say plainly what it gives up.
         Assert.Contains(CodeExecOptions.UnconfinedFlag, CliUsage.DocumentedFlags());
-        Assert.DoesNotContain(CodeExecOptions.UnconfinedFlag, ServerUsage.DocumentedFlags());
+        Assert.Contains(CodeExecOptions.UnconfinedFlag, ServerUsage.DocumentedFlags());
     }
 }

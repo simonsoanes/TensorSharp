@@ -125,7 +125,7 @@ namespace TensorSharp.AgentHost.CodeExec
         /// <summary>Every flag of this family that takes a value.</summary>
         public static readonly IReadOnlyList<string> ValueFlags = new[]
         {
-            TimeoutFlag, InstallDomainsFlag, ShellFlag, MaxOutputFlag, AllowedPackagesFlag,
+            TimeoutFlag, InstallDomainsFlag, InstallIndexFlag, ShellFlag, MaxOutputFlag, AllowedPackagesFlag,
             TemperatureFlag,
         };
 
@@ -316,6 +316,35 @@ namespace TensorSharp.AgentHost.CodeExec
         /// <summary>Env var overriding <see cref="InstallDomains"/>.</summary>
         public const string InstallDomainsEnvVar = "TS_CODE_EXEC_INSTALL_DOMAINS";
 
+        /// <summary>Point installs at a package index other than the default.</summary>
+        public const string InstallIndexFlag = "--code-exec-install-index";
+
+        /// <summary>Env var overriding <see cref="InstallIndex"/>.</summary>
+        public const string InstallIndexEnvVar = "TS_CODE_EXEC_INSTALL_INDEX";
+
+        /// <summary>
+        /// The package index installs are pointed at, or null for the tool's own default.
+        ///
+        /// <para>
+        /// This exists because there was no way to say it. A model naming
+        /// <c>--index-url</c> is refused by <see cref="PackageInstaller"/> and should be:
+        /// an argument the model wrote must never choose where a package comes from. But
+        /// the OPERATOR has to be able to, and could not - so on any host that cannot
+        /// reach <c>pypi.org</c> or <c>files.pythonhosted.org</c> (a corporate proxy, an
+        /// air-gapped network with an internal mirror, or a router that terminates TLS by
+        /// SNI, which is how this was found) every install failed with a bare
+        /// <c>SSLError</c> and the feature was unusable with no way out.
+        /// </para>
+        /// <para>
+        /// Setting it also ADMITS the index's host through the egress allowlist, because
+        /// an index the operator named that the proxy then refuses would be a setting
+        /// that silently does nothing. Its dependency-file host is not guessed at: a
+        /// mirror that serves files from a second hostname needs that one named in
+        /// <see cref="InstallDomains"/> too, and the failure says so.
+        /// </para>
+        /// </summary>
+        public string? InstallIndex { get; set; }
+
         /// <summary>
         /// The shell to run commands through, or null to let the host choose: a POSIX
         /// shell on macOS and Linux, PowerShell on Windows. An operator sets this when
@@ -406,6 +435,11 @@ namespace TensorSharp.AgentHost.CodeExec
                 if (Matches(arg, AllowInstallFlag)) { options.AllowInstall = true; continue; }
                 if (Matches(arg, UnconfinedFlag)) { options.Unconfined = true; continue; }
 
+                if (TryValue(args, ref i, InstallIndexFlag, out string? index))
+                {
+                    options.InstallIndex = string.IsNullOrWhiteSpace(index) ? null : index!.Trim();
+                    continue;
+                }
                 if (TryValue(args, ref i, InstallDomainsFlag, out string? domains))
                 {
                     options.InstallDomains = SplitList(domains);
@@ -475,10 +509,48 @@ namespace TensorSharp.AgentHost.CodeExec
                     .Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             }
 
+            if (InstallIndex == null
+                && Environment.GetEnvironmentVariable(InstallIndexEnvVar) is { Length: > 0 } index)
+            {
+                InstallIndex = index.Trim();
+            }
+
             if (!Enabled && IsEnvOn(EnabledEnvVar))
                 Enabled = true;
             if (!AllowInstall && IsEnvOn(AllowInstallEnvVar))
                 AllowInstall = true;
+        }
+
+        /// <summary>
+        /// The egress allowlist an install actually runs under: <see cref="InstallDomains"/>
+        /// plus the host of <see cref="InstallIndex"/> when the operator named one.
+        ///
+        /// <para>
+        /// Merged here rather than at the point the flag is parsed, so that
+        /// <c>--code-exec-install-domains</c> and <c>--code-exec-install-index</c> compose
+        /// in either order and neither silently cancels the other.
+        /// </para>
+        /// </summary>
+        public IReadOnlyList<string> EffectiveInstallDomains
+        {
+            get
+            {
+                if (string.IsNullOrEmpty(InstallIndex)
+                    || !Uri.TryCreate(InstallIndex, UriKind.Absolute, out Uri? uri)
+                    || uri.Host.Length == 0)
+                {
+                    return InstallDomains;
+                }
+
+                foreach (string existing in InstallDomains)
+                {
+                    if (string.Equals(existing, uri.Host, StringComparison.OrdinalIgnoreCase))
+                        return InstallDomains;
+                }
+
+                var merged = new List<string>(InstallDomains) { uri.Host };
+                return merged;
+            }
         }
 
         private static bool IsEnvOn(string name) =>

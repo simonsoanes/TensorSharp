@@ -360,16 +360,11 @@ namespace TensorSharp.AgentHost.CodeExec
                 ["LANG"] = "C.UTF-8",
             };
 
-            if (OperatingSystem.IsWindows())
-            {
-                // Windows will not start a process without these; they name the OS
-                // install, not the user, so they carry nothing sensitive.
-                foreach (string name in new[] { "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC", "PATHEXT", "WINDIR" })
-                {
-                    if (Environment.GetEnvironmentVariable(name) is { } value)
-                        environment[name] = value;
-                }
-            }
+            // Windows needs considerably more than the five variables that used to be
+            // listed here, and needs several of them REDIRECTED rather than copied.
+            // CodeEnvironment owns the list so the two confined-launch paths cannot
+            // drift apart again; see ApplyWindowsBaseline for what each one is for.
+            CodeEnvironment.ApplyWindowsBaseline(environment, launch.WriteDirectory);
 
             foreach (KeyValuePair<string, string> pair in launch.EnvironmentVariables)
                 environment[pair.Key] = pair.Value;

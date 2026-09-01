@@ -60,8 +60,24 @@ namespace TensorSharp.AgentHost.Skills
             ConfinesHomeReads: false,
             BoundsProcessTree: true);
 
+        /// <summary>
+        /// What this sandbox enforces AND what it does not, in one line.
+        ///
+        /// <para>
+        /// The negative half is not padding. This string is what an operator reads in
+        /// the startup banner and in <c>--list-skills</c>, and it used to name only the
+        /// process-tree bound - so the line said "sandbox: bounds the process tree" and
+        /// left the reader to infer that files and sockets were bounded too, which is
+        /// the single inference this whole area is written to prevent.
+        /// <c>SkillSandboxCapabilities</c> already reported both gaps; the sentence a
+        /// human actually reads did not.
+        /// </para>
+        /// </summary>
         public string Describe() =>
-            "bounds the process tree: kills every child when the request ends, caps the process count and committed memory";
+            "bounds the process tree: kills every child when the request ends, caps the process count and "
+            + "committed memory. It does NOT confine writes and does NOT block the network - Windows offers "
+            + "no mechanism that confines a shell (see the docs), so a script writes and reaches the network "
+            + "with this process's own access";
 
         /// <summary>
         /// Nothing to rewrite — a job object attaches to a process that is already

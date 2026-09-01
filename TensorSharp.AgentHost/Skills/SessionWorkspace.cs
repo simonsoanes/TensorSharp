@@ -73,10 +73,20 @@ namespace TensorSharp.AgentHost.Skills
         /// English word — a model asked to organise documents may well create one — and
         /// pruning it at depth would silently swallow the user's own output.
         /// </para>
+        /// <para>
+        /// <c>AppData</c> and <c>pip</c> are the Windows half of the same list, and it was
+        /// missing: PowerShell creates <c>AppData\Roaming</c> the moment it starts, and
+        /// pip writes a cache tree, both directly in the working directory. Two commands
+        /// into a session the model's own <c>Get-ChildItem</c> showed them beside its
+        /// files, and artifact capture counted them as things the run had produced. Both
+        /// are ordinary-looking names, so like <c>Library</c> they are pruned at the root
+        /// only — a <c>pip</c> directory the model deliberately creates inside a project it
+        /// is building is its own output and must survive.
+        /// </para>
         /// </summary>
         private static readonly HashSet<string> PrunedAtRoot = new(StringComparer.Ordinal)
         {
-            "Library", ".jobs",
+            "Library", ".jobs", "AppData", "pip",
         };
 
         private static readonly HashSet<string>.AlternateLookup<ReadOnlySpan<char>> AnywhereLookup =

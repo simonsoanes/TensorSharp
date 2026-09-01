@@ -246,7 +246,26 @@ public class ShellEnvironmentPathTests : IDisposable
         if (!CodeEnvironment.TryResolveInterpreter(CodeLanguage.Python, out _, out _))
             return;
 
-        Assert.Equal("python3", CodeDiagnostics.SpelledDifferentlyHere("python"));
+        // WHICH spelling is the missing one is a property of the host, not a constant.
+        // This asserted `python` -> `python3` outright, which is the POSIX answer: on
+        // Windows the interpreter on PATH is `python.exe` and there is no real
+        // `python3` at all (only WindowsApps' zero-byte Microsoft Store stub, which
+        // CodeEnvironment.Which now refuses). The claim being made is "whichever
+        // spelling this host does not have is answered with the one it does" - so ask
+        // the host which that is.
+        string? absent =
+            CodeEnvironment.Which("python") == null ? "python"
+            : CodeEnvironment.Which("python3") == null ? "python3"
+            : null;
+
+        if (absent != null)
+        {
+            string? suggestion = CodeDiagnostics.SpelledDifferentlyHere(absent);
+            Assert.NotNull(suggestion);
+            Assert.NotEqual(absent, suggestion);
+            // And the suggestion has to be real, not merely different.
+            Assert.NotNull(CodeEnvironment.Which(suggestion!));
+        }
 
         // And a program that genuinely is not here keeps the honest answer.
         Assert.Null(CodeDiagnostics.SpelledDifferentlyHere("ts-no-such-program-xyz"));

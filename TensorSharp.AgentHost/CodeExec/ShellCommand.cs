@@ -247,6 +247,31 @@ namespace TensorSharp.AgentHost.CodeExec
                         current.Append(c);
                         continue;
 
+                    // PowerShell's here-string. Its body is DATA, exactly like a bash
+                    // heredoc body, and until this case existed only the bash spelling was
+                    // treated that way. The consequence is the one the heredoc handling
+                    // was written to prevent, reappearing on the other platform: a
+                    // here-string carrying prose that happens to contain `>` -
+                    //     @'
+                    //     Run it with: python gen.py > out.py
+                    //     '@ | Set-Content README.md
+                    // - was split into segments at the `|`, and SyntaxCheck.RedirectTargets
+                    // then read `> out.py` out of the PROSE and reported on a file the
+                    // command never opened. On Windows this is not an edge case: a
+                    // here-string is the only way to write a multi-line file from
+                    // PowerShell, so it is what every model writing a file here produces.
+                    //
+                    // Both spellings are handled. @' ... '@ is literal and @" ... "@
+                    // interpolates, and neither difference matters to a scanner that is
+                    // only skipping the body: what ends it is the terminator at the START
+                    // of a line, which is PowerShell's own rule.
+                    case '@' when i + 1 < text.Length && (text[i + 1] == '\'' || text[i + 1] == '"')
+                                  && IsHereStringOpener(text, i):
+                        {
+                            i = SkipPowerShellHereString(text, i, text[i + 1], current);
+                            continue;
+                        }
+
                     case '<' when i + 1 < text.Length && text[i + 1] == '<' && !IsHereString(text, i):
                         {
                             i += 2;
@@ -341,6 +366,56 @@ namespace TensorSharp.AgentHost.CodeExec
         /// <summary><c>&lt;&lt;&lt;</c> is a here-STRING: one word, no body to skip.</summary>
         private static bool IsHereString(string text, int i) =>
             i + 2 < text.Length && text[i + 2] == '<';
+
+        /// <summary>
+        /// True when <c>@'</c> or <c>@"</c> at <paramref name="i"/> really opens a
+        /// here-string: PowerShell requires the quote to be the last thing on its line.
+        /// </summary>
+        private static bool IsHereStringOpener(string text, int i)
+        {
+            for (int k = i + 2; k < text.Length; k++)
+            {
+                if (text[k] == '\n') return true;
+                if (text[k] != ' ' && text[k] != '\t') return false;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Copy a PowerShell here-string body through verbatim and return the index of its
+        /// terminator's last character, so the caller's loop resumes after it.
+        ///
+        /// <para>
+        /// The terminator is <c>'@</c> (or <c>"@</c>) at the START of a line - leading
+        /// whitespace does not count, which is PowerShell's rule and the reason a here-
+        /// string is so easy to break by indenting. An unterminated one runs to the end of
+        /// the command, which is what PowerShell itself would report.
+        /// </para>
+        /// </summary>
+        private static int SkipPowerShellHereString(string text, int i, char quote, StringBuilder current)
+        {
+            // The body is DROPPED, not copied - the same treatment SkipHeredocBody gives a
+            // bash heredoc, and for the same reason. Everything downstream reads a
+            // segment's TEXT as shell: SyntaxCheck.RedirectTargets looks for `>` in it,
+            // and a here-string carrying the sentence "run it with: python gen.py > out.py"
+            // would otherwise report a redirection into out.py that the command never
+            // performs. Keeping the delimiters means the segment still reads as a
+            // here-string rather than vanishing.
+            current.Append(text[i]).Append(quote);
+            int k = i + 2;
+            while (k < text.Length)
+            {
+                if (text[k - 1] == '\n' && text[k] == quote && k + 1 < text.Length && text[k + 1] == '@')
+                {
+                    current.Append(quote).Append('@');
+                    return k + 1;
+                }
+                k++;
+            }
+            // Unterminated: PowerShell would fail to parse it, and there is nothing after
+            // it to classify either way.
+            return text.Length - 1;
+        }
 
         private static int SkipHeredocBody(string text, int from, string tag, bool stripTabs)
         {

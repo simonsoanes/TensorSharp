@@ -71,6 +71,30 @@ namespace TensorSharp.Server
         public static ChatStreamUpdate Text(string piece) => new(piece, false, 0, 0, 0, 0, 0, 0, null);
 
         /// <summary>
+        /// The token ids this round actually generated. Set on the TERMINAL update only,
+        /// and null everywhere else.
+        ///
+        /// <para>
+        /// It exists for the skills/code tool loop, which runs several generations inside
+        /// one request and re-renders the transcript before each. Re-rendering an assistant
+        /// round from its PARSED pieces does not reproduce the tokens that were generated:
+        /// the turn header, the channel markers and the tool-call markup are re-derived by
+        /// the chat template, and the render diverges from the live KV cache at exactly the
+        /// point that round began. The engine rewinds only a handful of trailing tokens, so
+        /// every round after the first re-prefilled the whole conversation - measured on
+        /// gemma-4-12B at 0% reuse and ~7s to first token per round, against 99.9% and
+        /// ~0.3s on the one round where the render happened to line up.
+        /// </para>
+        /// <para>
+        /// <c>SkillAgentLoop</c> - the CLI's copy of the same loop - has always recorded
+        /// this; the server's copy had no way to, because the terminal update did not carry
+        /// it. Two copies of one algorithm is exactly the shape that lets one of them
+        /// quietly lose a property the other has.
+        /// </para>
+        /// </summary>
+        public IReadOnlyList<int> RawOutputTokens { get; init; }
+
+        /// <summary>
         /// Reasoning text decoded since the last update, already separated from
         /// <see cref="Piece"/>. Only meaningful when <see cref="IsParsed"/> is true.
         /// </summary>
@@ -529,7 +553,12 @@ namespace TensorSharp.Server
             long evalNs = InferenceTelemetry.ToNanos(evalSw.ElapsedTicks);
             long totalNs = InferenceTelemetry.ToNanos(totalSw.ElapsedTicks);
             yield return new ChatStreamUpdate("", true, promptTokenCount, generatedTokens.Count,
-                                             kvCacheReusedTokens, totalNs, promptNs, evalNs, finishReason);
+                                             kvCacheReusedTokens, totalNs, promptNs, evalNs, finishReason)
+            {
+                // Carried so the skills loop can splice this round back verbatim on its
+                // next render instead of re-tokenizing it. See RawOutputTokens.
+                RawOutputTokens = generatedTokens,
+            };
             }
             finally
             {

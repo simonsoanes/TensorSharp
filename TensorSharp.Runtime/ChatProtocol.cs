@@ -131,6 +131,33 @@ namespace TensorSharp.Runtime
         public string? TemplateAssistantHeaderAnchor { get; init; }
 
         /// <summary>
+        /// True when this family's chat template re-renders an assistant turn's REASONING
+        /// from a <c>reasoning</c> / <c>reasoning_content</c> field, so the host should
+        /// hand it over instead of dropping it.
+        ///
+        /// <para>
+        /// It is opt-in per family because it changes the rendered prompt, and only a
+        /// template that gates the reasoning correctly may have it: Gemma 4's emits the
+        /// thinking channel only for an assistant message that comes AFTER the last user
+        /// message and carries tool calls - that is, the rounds of the turn in progress -
+        /// and strips it from every earlier turn, which is exactly the rule the KV cache
+        /// needs. A template that re-emitted reasoning for past turns would change every
+        /// multi-turn prompt, so families are enabled here one at a time, after their
+        /// template has been read.
+        /// </para>
+        /// <para>
+        /// What it fixes is not cosmetic. Without it the host had no way to reproduce a
+        /// tool-calling round it had already generated, so
+        /// <see cref="KVCachePromptRenderer"/> substituted the raw generated tokens
+        /// instead - and that substitution blanks <c>tool_calls</c>, which Gemma 4's
+        /// template requires in order to render the tool RESULT at all. Every tool result
+        /// therefore vanished from the prompt from the second round on: the model asked
+        /// for a directory listing, was shown nothing, and answered from invention.
+        /// </para>
+        /// </summary>
+        public bool RendersAssistantReasoning { get; init; }
+
+        /// <summary>
         /// True when this family turns a video into N evenly spaced FRAME images that
         /// each cost a full image's worth of tokens, so a long clip has to be
         /// downsampled to the configured frame cap before it reaches the model.

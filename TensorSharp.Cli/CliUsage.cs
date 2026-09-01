@@ -166,6 +166,16 @@ namespace TensorSharp.Cli
                     "itself, so the list applies however the request was spelled. Only meaningful with " +
                     "--code-exec-allow-install. Default: empty, meaning any package.",
                     "--code-exec-packages numpy,pandas,reportlab"),
+                new OptionHelp("--code-exec-install-index <url>",
+                    "Package index installs are pointed at, instead of the tool's default. The host applies it - " +
+                    "an --index-url the MODEL writes is still refused, because an argument the model wrote must " +
+                    "never choose where a package comes from. This is for a host that cannot reach pypi.org: a " +
+                    "corporate proxy, an internal mirror, or a network that filters TLS by SNI, where every " +
+                    "install otherwise dies with a bare SSLError and there is no way out. The index's own host " +
+                    "is admitted through the egress allowlist automatically; if the mirror serves downloads " +
+                    "from a second hostname, name that one in --code-exec-install-domains as well. Default: " +
+                    "unset (TS_CODE_EXEC_INSTALL_INDEX env var overrides).",
+                    "--code-exec-install-index https://pypi.example.com/simple"),
                 new OptionHelp("--code-exec-install-domains <list>",
                     "The hosts a host-performed install may reach, comma-separated; exact names or *.suffix " +
                     "wildcards. A loopback CONNECT proxy holds the list and the installer is pointed at it. " +
@@ -210,8 +220,9 @@ namespace TensorSharp.Cli
                     "for a machine that is yours - on Windows, where a job object bounds CPU and memory but " +
                     "cannot restrict one file or one socket, it is the only way to use the tool at all. It " +
                     "means model-written commands run with your account's access to the filesystem and the " +
-                    "network. Deliberately CLI-only: the server refuses this flag, because its operator cannot " +
-                    "make that trade on behalf of everyone who can reach the port. Default: off.",
+                    "network. TensorSharp.Server accepts it too, for the same reason - without it --code-exec " +
+                    "is inert on Windows - but there it is a statement about a machine others may reach, so " +
+                    "set it only on your own. Default: off.",
                     "--code-exec --code-exec-unconfined"),
                 new OptionHelp("--think",
                     "Enable the model's thinking/reasoning mode on architectures that support it (e.g. Qwen3/3.5, " +

@@ -175,7 +175,16 @@ public class OutputPathsTests : IDisposable
             if (!runner.CanRun)
                 return;
 
-            CodeExecResult result = runner.Run(new ShellRequest("pwd && ls -d \"$PWD\""), _workspace);
+            // In the dialect this host speaks. `pwd && ls -d "$PWD"` is bash, and Windows
+            // PowerShell 5.1 has no `&&` at all - the command was a parse error there, so
+            // the assertions below ran against a FAILED command and the test reported a
+            // redaction defect that did not exist. `pwd` is a PowerShell alias for
+            // Get-Location, so only the second half needs translating.
+            CodeExecResult result = runner.Run(
+                new ShellRequest(runner.Shell is { Kind: ShellKind.PowerShell }
+                    ? "pwd; (Get-Location).Path"
+                    : "pwd && ls -d \"$PWD\""),
+                _workspace);
 
             Assert.True(result.Ok);
             Assert.DoesNotContain(_workspace.WorkDirectory, result.Content);

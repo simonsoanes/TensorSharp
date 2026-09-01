@@ -142,7 +142,8 @@ namespace TensorSharp.AgentHost.CodeExec
                 // A venv is not created: `pip install --target` populates a plain directory
                 // that PYTHONPATH then points at, which needs no interpreter copy, no
                 // activation, and no writable environment at run time.
-                plan = CodeEnvironment.PythonInstall(interpreter, envDirectory, packages);
+                plan = CodeEnvironment.PythonInstall(
+                    interpreter, envDirectory, packages, _options.InstallIndex);
             }
             else if (!CodeEnvironment.TryNpmInstall(interpreter, envDirectory, packages, out plan, out string? npmError))
             {
@@ -204,7 +205,7 @@ namespace TensorSharp.AgentHost.CodeExec
             if (denied.Count > 0)
             {
                 sb.Append("Installs may only reach this host's package registries (")
-                  .Append(string.Join(", ", _options.InstallDomains))
+                  .Append(string.Join(", ", _options.EffectiveInstallDomains))
                   .Append("), and this one tried to reach: ")
                   .Append(string.Join(", ", denied.Take(6)))
                   .Append(". Those connections were refused.\n");
@@ -222,6 +223,22 @@ namespace TensorSharp.AgentHost.CodeExec
                 sb.Append("The install did not finish in time — that is a deadline, not a verdict on the ")
                   .Append("package. Install fewer packages in one command, or name just the one you need ")
                   .Append("next, and try again.\n");
+            }
+            else if (denied.Count == 0 && result.Error == null && LooksLikeNetworkFailure(result.Stderr))
+            {
+                // A network failure is not a verdict on the package, and saying it was is
+                // the worst answer available: the model abandons a package that installs
+                // fine everywhere else, and the operator - the only one who can actually
+                // fix it - is never told. Observed as a TLS handshake failure against
+                // files.pythonhosted.org on a network that filters by SNI, reported to the
+                // model as "no wheel for this platform".
+                sb.Append("The installer could not REACH the package index. This is a network or TLS ")
+                  .Append("failure on the host, not a problem with the package, and retrying will not ")
+                  .Append("help - nothing you can write fixes it, so say so rather than trying another ")
+                  .Append("package or another spelling. The host's operator can point installs at a ")
+                  .Append("reachable mirror with ").Append(CodeExecOptions.InstallIndexFlag)
+                  .Append(" (naming its download host in ").Append(CodeExecOptions.InstallDomainsFlag)
+                  .Append(" too, if it serves files from a second hostname).\n");
             }
             else if (denied.Count == 0 && result.Error == null)
             {
@@ -250,9 +267,9 @@ namespace TensorSharp.AgentHost.CodeExec
         /// </summary>
         internal EgressProxy? ProxyOrNull()
         {
-            if (_options.InstallDomains.Count == 0)
+            if (_options.EffectiveInstallDomains.Count == 0)
                 return null;
-            return new EgressProxy(_options.InstallDomains, _logger);
+            return new EgressProxy(_options.EffectiveInstallDomains, _logger);
         }
 
         /// <summary>
@@ -331,6 +348,39 @@ namespace TensorSharp.AgentHost.CodeExec
             int cut = package.IndexOfAny(new[] { '[', '=', '>', '<', '~' });
             return cut < 0 ? package : package.Substring(0, cut);
         }
+
+        /// <summary>
+        /// True when the installer's own output says it could not REACH the index, rather
+        /// than that it reached it and did not like what it found.
+        ///
+        /// <para>
+        /// Every phrase here is one pip or npm prints only for a transport failure: a TLS
+        /// handshake refused, a name that did not resolve, a connection reset or timed
+        /// out, a proxy that would not tunnel. None can be produced by a package that
+        /// merely has no wheel for this platform, which is what the host used to say.
+        /// </para>
+        /// </summary>
+        internal static bool LooksLikeNetworkFailure(string? stderr)
+        {
+            if (string.IsNullOrEmpty(stderr))
+                return false;
+            foreach (string marker in NetworkFailureMarkers)
+            {
+                if (stderr!.Contains(marker, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
+        private static readonly string[] NetworkFailureMarkers =
+        {
+            "SSLError", "SSLV3_ALERT", "handshake failure", "CERTIFICATE_VERIFY_FAILED",
+            "Max retries exceeded", "NewConnectionError", "ConnectionResetError",
+            "Temporary failure in name resolution", "Name or service not known",
+            "getaddrinfo", "ProxyError", "Tunnel connection failed",
+            "Connection refused", "Read timed out", "network is unreachable",
+            "ETIMEDOUT", "ECONNREFUSED", "ENOTFOUND", "ECONNRESET", "EAI_AGAIN",
+        };
 
         private static string Tail(string text, int max) =>
             text.Length <= max ? text : "…" + text.Substring(text.Length - max);

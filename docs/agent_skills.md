@@ -591,16 +591,38 @@ must never quietly become *"isolation was skipped"*.
 | Process tree bounded | yes | yes | yes |
 | Available by default | always | only if `bwrap` is installed | always |
 
-Windows is weaker and says so. Real filesystem isolation there means an
-AppContainer or a low-integrity token, both of which need the child launched
-through `CreateProcessAsUser` with a hand-built capability attribute list and
-hand-plumbed stdio — a large piece of interop whose subtle failure mode is
-reporting "sandboxed" while confining nothing. Rather than risk that, the Windows
-sandbox bounds the process tree and **declares the rest as gaps**: every
-`skills_run` result on Windows carries a `Not confined on this host:` line naming
-what was not enforced, and the same appears in the startup log and in
-`--list-skills`. `SkillSandboxCapabilities` is the single source for all three,
-so the claim and the implementation cannot drift.
+Windows is weaker and says so. The Windows sandbox bounds the process tree and
+**declares the rest as gaps**: every `skills_run` result on Windows carries a
+`Not confined on this host:` line naming what was not enforced, and the same
+appears in the startup log and in `--list-skills`. `SkillSandboxCapabilities` is
+the single source for all three, so the claim and the implementation cannot
+drift.
+
+The mechanism that would close those rows is an AppContainer, and it has been
+measured rather than assumed. A CPython child launched with
+`PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` is confined exactly as the macOS
+column describes: writes outside its work directory fail, reads of the user
+profile fail, and a socket fails with `WSAEACCES` unless the `internetClient`
+capability is granted. It is still not usable for this feature, because nothing
+that acts as a *shell* survives inside one:
+
+* Windows PowerShell cannot initialise its filesystem provider - it needs to open
+  the drive root, which the container SID is not granted - so `Set-Location`
+  fails and every relative path resolves against `C:\`.
+* An msys `bash` (Git Bash, MSYS2) fails at load with `STATUS_DLL_INIT_FAILED`
+  (`0xC0000142`): it cannot create the shared sections msys needs.
+* Loopback is blocked outright, so the egress proxy that makes the install
+  allow-list enforceable is unreachable from inside the container.
+
+So on Windows there is no OS mechanism that confines a model-written command.
+That is also where the two references this host is modelled on landed: neither
+Codex nor Claude Code sandboxes on Windows, and both make the operator opt in
+explicitly instead of implying an isolation the platform does not offer. Here
+that opt-in is `--code-exec-unconfined`, accepted by **both** hosts and required
+on Windows for `--code-exec` to do anything at all; for skill scripts the
+equivalent is `--skills-sandbox preferred`. Both are now stated at startup - a
+host told to run scripts it cannot confine says so on its own line, rather than
+only inside a tool result the model is free to summarise as success.
 
 **The same two layers confine the `shell` tool.** A command line the model types
 is wrapped by `ConfinedProcess` through the same `ISkillSandbox`, under the same

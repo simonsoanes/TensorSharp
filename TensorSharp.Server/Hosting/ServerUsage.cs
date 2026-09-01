@@ -481,10 +481,12 @@ namespace TensorSharp.Server.Hosting
                     "a script an operator put on disk, this runs commands written during the request. The " +
                     "sandbox is required, not optional - on a host that cannot confine a process (no " +
                     "sandbox-exec on macOS, no bwrap on Linux, and Windows job objects, which bound CPU but not " +
-                    "files or sockets) the tool refuses to run rather than running unconfined - and there is no " +
-                    "override here, because an operator cannot make that trade for everyone who can reach the " +
-                    "port (--code-exec-unconfined exists, but only TensorSharp.Cli honours it; this server " +
-                    "rejects it at startup). A command NEVER reaches the network, on any host and in any " +
+                    "files or sockets) the tool refuses to run rather than running unconfined, and says so at " +
+                    "startup. The one way past that is --code-exec-unconfined, which the server now accepts as " +
+                    "well as the CLI: on Windows there is no confining sandbox to fall back to at all, so " +
+                    "without it --code-exec is a flag that can never do anything. It is an explicit statement " +
+                    "about the machine the server runs on - do not set it on a server others can reach. " +
+                    "A command NEVER reaches the network, on any host and in any " +
                     "configuration: installs are the only thing that reaches a registry, and the HOST performs " +
                     "those itself rather than running the model's install command. Default: off. TS_CODE_EXEC " +
                     "also turns it on, and note the rule: ANY value except 0 counts as on, so " +
@@ -509,6 +511,20 @@ namespace TensorSharp.Server.Hosting
                     "dependency be installed automatically instead of failing. Requires --code-exec. " +
                     "Default: off (TS_CODE_EXEC_ALLOW_INSTALL env var overrides).",
                     "--code-exec --code-exec-allow-install"),
+                new OptionHelp("--code-exec-unconfined",
+                    "Run the model's commands even where the OS cannot confine them. On Windows this is not " +
+                    "an edge case but the only way to use --code-exec at all: a job object bounds a process " +
+                    "tree's CPU, memory and lifetime and cannot restrict one file or one socket, and no " +
+                    "Windows mechanism confines a SHELL - an AppContainer denies the filesystem and the " +
+                    "network as required, but PowerShell cannot initialise its filesystem provider inside " +
+                    "one and an msys bash fails to load at all. Without this flag --code-exec is inert " +
+                    "there. It means model-written commands run with this process's access to the " +
+                    "filesystem and the network; the in-process bounds still apply (a workspace-confined " +
+                    "working directory, an argument vector rather than a command line, a scrubbed " +
+                    "environment, host-performed installs, and time and output caps), and every tool result " +
+                    "says which of them are NOT confinement. It is a statement about the machine this " +
+                    "server runs on - do not set it on a server others can reach. Default: off.",
+                    "--code-exec --code-exec-unconfined"),
                 new OptionHelp("--code-exec-packages <list>",
                     "Restrict installs to these package names, comma-separated; anything else is refused and " +
                     "the model is told which names are allowed. Matching is on the bare name, so a version the " +
@@ -519,6 +535,16 @@ namespace TensorSharp.Server.Hosting
                     "wrote pip, python -m pip, or a requirements file. Only meaningful with " +
                     "--code-exec-allow-install. Default: empty, meaning any package may be installed.",
                     "--code-exec-packages numpy,pandas,reportlab"),
+                new OptionHelp("--code-exec-install-index <url>",
+                    "Package index installs are pointed at, instead of the tool's default. The host applies it - " +
+                    "an --index-url the MODEL writes is still refused, because an argument the model wrote must " +
+                    "never choose where a package comes from. This is for a host that cannot reach pypi.org: a " +
+                    "corporate proxy, an internal mirror, or a network that filters TLS by SNI, where every " +
+                    "install otherwise dies with a bare SSLError and there is no way out. The index's own host " +
+                    "is admitted through the egress allowlist automatically; if the mirror serves downloads " +
+                    "from a second hostname, name that one in --code-exec-install-domains as well. Default: " +
+                    "unset (TS_CODE_EXEC_INSTALL_INDEX env var overrides).",
+                    "--code-exec-install-index https://pypi.example.com/simple"),
                 new OptionHelp("--code-exec-install-domains <list>",
                     "The hosts a host-performed install may reach, comma-separated; exact names or *.suffix " +
                     "wildcards. A loopback CONNECT proxy holds the list and the installer is pointed at it " +

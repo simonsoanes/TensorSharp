@@ -203,14 +203,19 @@ public class SessionWorkspaceTests : IDisposable
         if (!HavePython) return;
 
         SessionWorkspace workspace = Manager().GetOrCreate("s6");
-        Skill skill = MakeSkill("import defusedxml\nprint('unreachable')");
+        // A name no host can have. It was `defusedxml`, a REAL package - so the test
+        // asserted "this module is missing" about a developer machine that may well have
+        // it, and any machine set up to exercise the document skills certainly does,
+        // since pptx and docx validation both import it. The claim under test is about
+        // the COACHING, not about defusedxml.
+        Skill skill = MakeSkill("import ts_absent_module_xyz\nprint('unreachable')");
 
         SkillToolResult result = ScriptRunner(workspace).Run(skill, "scripts/tool.py", Array.Empty<string>());
 
         Assert.False(result.Ok);
         // The message must name the exact next command, not merely the module: a bare
         // traceback is what gemma-4-E4B re-ran verbatim before claiming success.
-        Assert.Contains("defusedxml", result.Content, StringComparison.Ordinal);
+        Assert.Contains("ts_absent_module_xyz", result.Content, StringComparison.Ordinal);
         Assert.Contains("install", result.Content, StringComparison.OrdinalIgnoreCase);
     }
 

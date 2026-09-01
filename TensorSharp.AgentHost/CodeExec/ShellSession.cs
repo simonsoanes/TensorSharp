@@ -271,7 +271,15 @@ namespace TensorSharp.AgentHost.CodeExec
                     : text.Take(endOfMarkerLine + 1).Count(c => c == '\n');
             }
 
-            File.WriteAllText(path, text);
+            // The encoding is not a detail on Windows. Windows PowerShell 5.1 decodes a
+            // -File script as the system's ANSI code page unless it starts with a UTF-8
+            // BOM, and File.WriteAllText writes UTF-8 WITHOUT one. Any non-ASCII byte in
+            // the model's command — an em dash in a slide title, a CJK string, an arrow
+            // in a comment — therefore reached the shell as mojibake, and the file the
+            // command went on to write carried the damage. A BOM costs three bytes and
+            // PowerShell 7 reads it identically; a POSIX shell must NOT get one, because
+            // `#!` has to be the first two bytes.
+            File.WriteAllText(path, text, ScriptEncoding);
             PruneOldScripts(n);
             if (!OperatingSystem.IsWindows())
             {
@@ -283,6 +291,13 @@ namespace TensorSharp.AgentHost.CodeExec
 
         /// <summary>The line the model's own command starts after, in both dialects.</summary>
         internal const string CommandMarker = "# ---- command ----";
+
+        /// <summary>
+        /// How a command script is encoded: UTF-8, with a BOM only for PowerShell.
+        /// See the note at the <c>WriteAllText</c> call above.
+        /// </summary>
+        private Encoding ScriptEncoding =>
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: _shell.Kind == ShellKind.PowerShell);
 
         /// <summary>How many recent command scripts are kept on disk.</summary>
         /// <remarks>
@@ -407,6 +422,31 @@ namespace TensorSharp.AgentHost.CodeExec
             var sb = new StringBuilder();
             sb.Append("# TensorSharp shell wrapper (PowerShell).\n");
             sb.Append("$ErrorActionPreference = 'Continue'\n");
+            // UTF-8 in both directions, so nothing above 0x7F is lost on the way out.
+            //
+            // The decode that mattered most was NOT here - it was the host reading the
+            // pipe with the parent's OEM console encoding, and it is fixed in
+            // SpawnedProcess. A native command's bytes reach the host untouched:
+            // PowerShell passes its inherited handle straight through, verified with a
+            // script that writes the three raw bytes of an arrow.
+            //
+            // What is left for this prologue is PowerShell's OWN output - Write-Output,
+            // Get-ChildItem, an error record. Those it encodes with
+            // [Console]::OutputEncoding, which defaults to the OEM code page, so without
+            // the assignment below a cmdlet printing an accented filename would still
+            // arrive mangled even though `python x.py` no longer does.
+            //
+            // chcp runs first because the assignment alone does not move the console code
+            // page when stdout is a pipe (.NET calls SetConsoleOutputCP only for a real
+            // console handle), and a native tool that asks the console which code page to
+            // write reads THAT. It is best-effort: 5.1 snapshots its own native-command
+            // decoder before this line can run, which is precisely why the host-side fix
+            // is the one carrying the weight. $OutputEncoding covers what PowerShell
+            // writes INTO a native command's stdin. All of it is a no-op on PowerShell 7.
+            sb.Append("try { chcp 65001 > $null 2>&1 } catch { }\n");
+            sb.Append("try { [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false } catch { }\n");
+            sb.Append("try { [Console]::InputEncoding = New-Object Text.UTF8Encoding $false } catch { }\n");
+            sb.Append("try { $OutputEncoding = [Console]::OutputEncoding } catch { }\n");
             sb.Append("$__ts_state = ").Append(Pq(_workspace.StateDirectory)).Append('\n');
             sb.Append("$__ts_work  = ").Append(Pq(_workspace.WorkDirectory)).Append('\n');
             sb.Append("$__ts_root  = ").Append(Pq(_workspace.Root)).Append('\n');

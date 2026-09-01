@@ -534,11 +534,12 @@ public class ServerOptionsBuilderTests : IDisposable
         };
         accepted.AddRange(SpeculativeCliFlags.SwitchFlags);
         accepted.AddRange(SpeculativeCliFlags.ValueFlags);
-        // Driven off CodeExecOptions' own tables, minus the one flag the server
-        // deliberately does NOT offer: --code-exec-unconfined is refused at startup here,
-        // so documenting it would advertise something this host rejects.
-        accepted.AddRange(CodeExecOptions.SwitchFlags
-            .Where(f => !string.Equals(f, CodeExecOptions.UnconfinedFlag, StringComparison.Ordinal)));
+        // Driven off CodeExecOptions' own tables, in full. --code-exec-unconfined used to
+        // be excluded here because the server refused it at startup; it no longer does.
+        // Refusing it made --code-exec permanently inert on Windows, which has no
+        // confining sandbox for a shell at all, so the server has to offer the same
+        // explicit opt-in the CLI does — and therefore has to document it.
+        accepted.AddRange(CodeExecOptions.SwitchFlags);
         accepted.AddRange(CodeExecOptions.ValueFlags);
 
         var missing = accepted.Where(f => !usage.Contains(f, StringComparison.Ordinal)).ToList();

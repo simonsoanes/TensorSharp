@@ -843,7 +843,7 @@ namespace TensorSharp.AgentHost.CodeExec
                 outcomes.OrderByDescending(o => o.Install.Segment.Start))
             {
                 line.Remove(install.Segment.Start, install.Segment.Length);
-                line.Insert(install.Segment.Start, error == null ? "true" : "false");
+                line.Insert(install.Segment.Start, error == null ? SucceededNoOp : FailedNoOp);
             }
 
             // A failed install becomes `false` and the line RUNS. That is what the shell
@@ -859,14 +859,59 @@ namespace TensorSharp.AgentHost.CodeExec
         }
 
         /// <summary>
-        /// A line that is nothing but the <c>true</c>s left behind by substituted installs
-        /// has nothing left to run.
+        /// What a performed install is replaced by, in the dialect this host actually
+        /// speaks.
+        ///
+        /// <para>
+        /// It was <c>true</c> and <c>false</c> unconditionally, which are POSIX
+        /// utilities and not PowerShell commands. On Windows every
+        /// <c>pip install x; python y.py</c> therefore came back carrying
+        /// "The term 'true' is not recognized as the name of a cmdlet" — an error about
+        /// a command the MODEL never wrote, in the middle of a line that had otherwise
+        /// worked, with nothing to connect it to the install the host had silently
+        /// performed on its behalf.
+        /// </para>
+        /// <para>
+        /// The replacements keep the properties the originals had: neither prints
+        /// anything, both leave the exit status the wrapper reports, and the rest of the
+        /// line still runs - which is the documented behaviour, so that
+        /// <c>pip install x || pip install y</c> still reaches its fallback.
+        /// </para>
+        /// <para>
+        /// Each is ONE statement with no <c>;</c> in it, and that is a requirement rather
+        /// than a style: <see cref="ShellCommand.SplitSegments"/> splits on <c>;</c>, so a
+        /// substitution containing one would be read as two segments - which would both
+        /// defeat <see cref="StripNoOps"/> below and change how the rest of the model's
+        /// line parses. An earlier draft used a <c>&amp; { ...; Write-Error ... }</c>
+        /// block for exactly the reason given below, and had to be given up for this.
+        /// </para>
+        /// <para>
+        /// The one thing not carried over: on PowerShell 7, <c>&amp;&amp;</c> and
+        /// <c>||</c> branch on <c>$?</c>, and an assignment always succeeds, so a failed
+        /// install no longer short-circuits a <c>&amp;&amp;</c> chain there. It cannot be
+        /// fixed with a statement that has no <c>;</c>, it does not arise on Windows
+        /// PowerShell 5.1 (which has no <c>&amp;&amp;</c> at all), and the model is told
+        /// what did not install either way - the install notes name every package that
+        /// failed and why, ahead of the command's own output.
+        /// </para>
         /// </summary>
-        private static string StripNoOps(string line)
+        private string SucceededNoOp =>
+            _shell is { Kind: ShellKind.PowerShell } ? "$global:LASTEXITCODE = 0" : "true";
+
+        private string FailedNoOp =>
+            _shell is { Kind: ShellKind.PowerShell } ? "$global:LASTEXITCODE = 1" : "false";
+
+        /// <summary>
+        /// A line that is nothing but the no-ops left behind by substituted installs has
+        /// nothing left to run.
+        /// </summary>
+        private string StripNoOps(string line)
         {
+            string succeeded = SucceededNoOp;
+            string failed = FailedNoOp;
             foreach (ShellSegment segment in ShellCommand.SplitSegments(line))
             {
-                if (segment.Text != "true" && segment.Text != "false")
+                if (segment.Text != succeeded && segment.Text != failed)
                     return line;
             }
             return string.Empty;

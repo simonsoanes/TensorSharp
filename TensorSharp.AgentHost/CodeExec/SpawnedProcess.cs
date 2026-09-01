@@ -100,6 +100,13 @@ namespace TensorSharp.AgentHost.CodeExec
             Mechanism = "fork";
         }
 
+        /// <summary>
+        /// The encoding both paths agree on. Without a BOM: it describes a pipe, and a
+        /// byte-order mark written into a child's stdin would be data the child did not
+        /// ask for.
+        /// </summary>
+        private static readonly Encoding Utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+
         /// <summary>Start <paramref name="request"/>, or explain why it could not start.</summary>
         public static bool TryStart(SpawnRequest request, out SpawnedProcess? process, out string error)
         {
@@ -243,6 +250,31 @@ namespace TensorSharp.AgentHost.CodeExec
                 RedirectStandardInput = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
+                // UTF-8, explicitly, on every one of the three.
+                //
+                // Left unset, .NET decodes a redirected child's output with the PARENT
+                // process's console output encoding, which on Windows is the OEM code
+                // page — 437 on an en-US install. The posix path a few lines up has
+                // always constructed its readers with `new UTF8Encoding(false)`; this
+                // one inherited whatever the host happened to be attached to, and the
+                // two therefore disagreed about every byte above 0x7F.
+                //
+                // What that cost is not theoretical. A Python script printing an arrow
+                // writes E2 86 92; decoded as CP437 those are three separate characters
+                // (U+0393 U+00E5 U+00C6), and that is the string the model was handed
+                // and the string a later edit_file anchor was written against. Every
+                // em dash in a generated document, every accented filename in a
+                // listing, every CJK title came back mangled — silently, because
+                // mojibake is still valid text and nothing downstream could tell.
+                //
+                // Measured before and after: `python -c "sys.stdout.buffer.write(
+                // b'RAW:â')"` returned U+0393 U+00E5 U+00C6 before, and
+                // the arrow after. Note the shell was never the culprit — PowerShell
+                // passes a native command's bytes straight through to the inherited
+                // handle. The decode happened here.
+                StandardOutputEncoding = Utf8NoBom,
+                StandardErrorEncoding = Utf8NoBom,
+                StandardInputEncoding = Utf8NoBom,
             };
             foreach (string argument in request.Arguments)
                 startInfo.ArgumentList.Add(argument);

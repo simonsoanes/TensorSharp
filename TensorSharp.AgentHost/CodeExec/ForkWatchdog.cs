@@ -327,11 +327,40 @@ namespace TensorSharp.AgentHost.CodeExec
                 ex is System.ComponentModel.Win32Exception or InvalidOperationException
                    or System.IO.IOException or PlatformNotSupportedException)
             {
-                error = ex.Message;
+                error = Describe(ex, process.StartInfo.FileName);
             }
 
             Release(process);
             return false;
+        }
+
+        /// <summary>
+        /// Say "not found" in the words the rest of the host looks for.
+        ///
+        /// <para>
+        /// The posix path spells this itself - <c>SpawnedProcess.DescribeErrno</c> turns
+        /// ENOENT into "'x' was not found". This path returned the raw exception message,
+        /// and Windows phrases the same condition as "The system cannot find the file
+        /// specified", which contains neither the program's name nor the words anything
+        /// downstream matches on. So a command the model misspelled came back as a
+        /// sentence about an unnamed file, and the coaching that turns "python: not found"
+        /// into "this host spells it python3" never fired on Windows.
+        /// </para>
+        /// </summary>
+        private static string Describe(Exception ex, string? fileName)
+        {
+            const int ErrorFileNotFound = 2;
+            const int ErrorPathNotFound = 3;
+
+            if (ex is System.ComponentModel.Win32Exception win32
+                && (win32.NativeErrorCode == ErrorFileNotFound || win32.NativeErrorCode == ErrorPathNotFound))
+            {
+                return string.IsNullOrEmpty(fileName)
+                    ? "the program was not found"
+                    : $"'{fileName}' was not found";
+            }
+
+            return ex.Message;
         }
 
         /// <summary>

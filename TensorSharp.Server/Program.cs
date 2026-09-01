@@ -124,15 +124,30 @@ catch (ArgumentException ex)
 }
 codeExecOptions.ArtifactUriPrefix = CodeArtifactEndpoints.RoutePrefix;
 codeExecOptions.ScratchDirectory ??= Path.Combine(baseDirectory, "code-scratch");
+// --code-exec-unconfined used to be refused here outright, "available on
+// TensorSharp.Cli only". That was not a policy so much as a platform outage.
+//
+// The reasoning was sound for a server reachable from elsewhere, but it was applied
+// unconditionally, and on Windows there IS no confining sandbox to fall back to: the
+// job object bounds a process tree and cannot restrict a single file or socket, so
+// ShellRunner.CanRun was false forever and --code-exec was a flag that did nothing at
+// all. An operator running the server on their own desktop had no way to say yes,
+// while --skills-allow-exec — which lets the model run any script in any installed
+// skill with this process's privileges, the same class of decision — was accepted on
+// the same command line with a warning. One of the two had to move, and refusing the
+// weaker one while permitting the stronger was the wrong way round.
+//
+// So it is accepted and said plainly, which is also what the references this host is
+// modelled on do: neither Codex nor Claude Code sandboxes on Windows, and both make
+// the operator opt in explicitly instead of pretending the platform offers isolation
+// it does not have. What is NOT relaxed is the reporting: SandboxNote below states the
+// gap in the startup log and ShellRunner repeats it in every tool result.
 if (codeExecOptions.Unconfined)
 {
-    // The escape hatch is for a developer's own machine. A server accepts requests from
-    // elsewhere, so "run model-written code with the filesystem open" is not a trade its
-    // operator can make on behalf of everyone who can reach the port.
     Console.Error.WriteLine(
-        $"{CodeExecOptions.UnconfinedFlag} is refused by the server; it is available on TensorSharp.Cli only.");
-    Environment.ExitCode = 2;
-    return;
+        $"{CodeExecOptions.UnconfinedFlag} is set: commands this model writes will run with this "
+        + "process's privileges — full filesystem access, and the network. That is a decision about "
+        + "the machine this server runs on, so do not leave it on for a server others can reach.");
 }
 
 // --list-skills answers "what does this deployment have?" without starting the
@@ -448,12 +463,41 @@ if (hostingOptions.SkillsEnabled && (skillRegistry.Skills.Count > 0 || skillRegi
     }
     if (hostingOptions.SkillsAllowScripts)
     {
-        // Worth its own line at Warning: this is the one setting that turns a skill
-        // upload into code execution, and an operator who set it by copying a command
-        // line should see it said plainly at every start.
-        startupLogger.LogWarning(LogEventIds.HostConfiguration,
-            "--skills-allow-exec is set: the model may RUN scripts bundled with any installed skill, " +
-            "with this process's privileges. Do not leave this on for a server that accepts skill uploads.");
+        // Whether the flag can actually DO anything here, said at startup rather than
+        // only inside a tool result the model may never surface.
+        //
+        // The startup line above prints scripts=True from the flag alone. On Windows
+        // that was a lie in the one direction that costs a session: the default
+        // --skills-sandbox required cannot be satisfied by a job object, which confines
+        // no file and no socket, so every skills_run refused - and the only place that
+        // refusal appeared was the tool result, where a model is free to summarise it
+        // as "done". The reported failure did exactly that: four rounds, then "the
+        // README has been converted into a slide deck", with nothing on disk.
+        //
+        // --code-exec already had this line. Skills did not.
+        var probe = new SkillScriptRunner(new SkillScriptRunnerOptions
+        {
+            Sandbox = hostingOptions.SkillsSandbox,
+        });
+        if (!probe.CanRun)
+        {
+            startupLogger.LogWarning(LogEventIds.HostConfiguration,
+                "--skills-allow-exec is set but skill scripts cannot run on this host: {Reason}",
+                probe.UnavailableReason);
+        }
+        else
+        {
+            // Worth its own line at Warning: this is the one setting that turns a skill
+            // upload into code execution, and an operator who set it by copying a command
+            // line should see it said plainly at every start.
+            startupLogger.LogWarning(LogEventIds.HostConfiguration,
+                "--skills-allow-exec is set: the model may RUN scripts bundled with any installed skill, " +
+                "with this process's privileges. Do not leave this on for a server that accepts skill uploads." +
+                (probe.Sandbox is { } box && box.Capabilities.Gaps().Count > 0
+                    ? " This host's sandbox (" + box.Name + ") does not confine: "
+                      + string.Join("; ", box.Capabilities.Gaps()) + "."
+                    : string.Empty));
+        }
     }
 }
 else if (!hostingOptions.SkillsEnabled)

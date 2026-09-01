@@ -51,6 +51,34 @@ public class SyntaxCheckTests : IDisposable
 
     private string Work(string name) => Path.Combine(_workspace.WorkDirectory, name);
 
+    /// <summary>
+    /// A command that writes <paramref name="body"/> into <paramref name="path"/>, in the
+    /// dialect THIS host's shell actually speaks.
+    ///
+    /// <para>
+    /// These tests were written as bash heredocs - <c>cat &gt; f &lt;&lt;'EOF' ... EOF</c>
+    /// - which PowerShell cannot parse at all. On Windows every one of them therefore
+    /// failed in the COMMAND rather than in the thing it was checking, and the three that
+    /// assert on a syntax diagnostic reported a defect in a feature that was working. The
+    /// feature is dialect-aware already: SyntaxCheck.RedirectTargets matches
+    /// <c>Set-Content</c> and <c>Out-File</c> alongside <c>&gt;</c>, <c>&gt;&gt;</c> and
+    /// <c>tee</c>. Only the tests were not, so on Windows they exercised nothing.
+    /// </para>
+    /// <para>
+    /// The PowerShell form is a here-string, whose terminator <c>'@</c> has to sit at
+    /// column zero - which is why it is built here once rather than inline per test.
+    /// </para>
+    /// </summary>
+    private string Heredoc(string path, string body) =>
+        _runner.Shell is { Kind: ShellKind.PowerShell }
+            ? "@'\n" + body + "\n'@ | Set-Content -LiteralPath " + path + "\n"
+            : "cat > " + path + " <<'EOF'\n" + body + "\nEOF";
+
+    /// <summary>The spelling of "run this python file" this host understands.</summary>
+    private string RunPython(string path) =>
+        _runner.Shell is { Kind: ShellKind.PowerShell } ? "python " + path : "python3 " + path;
+
+
     // ---- which files a command wrote -----------------------------------------
 
     private static string[] Paths(string command) =>
@@ -60,6 +88,8 @@ public class SyntaxCheckTests : IDisposable
     public void AHeredocRedirectTargetIsFound()
     {
         Assert.Contains("deck.py", Paths("cat > deck.py <<'EOF'\nprint(1)\nEOF"));
+        // The PowerShell spelling of the same write, which the host must see as well.
+        Assert.Contains("deck.py", Paths("@'\nprint(1)\n'@ | Set-Content -LiteralPath deck.py"));
     }
 
     [Fact]
@@ -82,7 +112,7 @@ public class SyntaxCheckTests : IDisposable
     public void ARedirectionInsideAHeredocBodyIsNotATarget()
     {
         string[] targets = Paths(
-            "cat > README.md <<'EOF'\nRun it with: python gen.py > out.py\nEOF");
+            Heredoc("README.md", "Run it with: python gen.py > out.py"));
 
         Assert.Contains("README.md", targets);
         Assert.DoesNotContain("out.py", targets);
@@ -106,7 +136,7 @@ public class SyntaxCheckTests : IDisposable
         File.WriteAllText(Work("out.py"), "def broken(:\n    pass\n");
 
         CodeExecResult result = _runner.Run(
-            new ShellRequest("cat > README.md <<'EOF'\nRun it with: python gen.py > out.py\nEOF"),
+            new ShellRequest(Heredoc("README.md", "Run it with: python gen.py > out.py")),
             _workspace);
 
         Assert.True(result.Ok, result.Content);
@@ -297,7 +327,7 @@ public class SyntaxCheckTests : IDisposable
         }
 
         CodeExecResult result = _runner.Run(
-            new ShellRequest("cat > deck.py <<'EOF'\ndef build(:\n    pass\nEOF"), _workspace);
+            new ShellRequest(Heredoc("deck.py", "def build(:\n    pass")), _workspace);
 
         Assert.True(result.Ok);
         Assert.Contains("does not parse", result.Content, StringComparison.Ordinal);
@@ -317,7 +347,7 @@ public class SyntaxCheckTests : IDisposable
         }
 
         CodeExecResult result = _runner.Run(
-            new ShellRequest("cat > deck.py <<'EOF'\ndef build(:\n    pass\nEOF\npython3 deck.py"),
+            new ShellRequest(Heredoc("deck.py", "def build(:\n    pass") + "\n" + RunPython("deck.py")),
             _workspace);
 
         Assert.False(result.Ok);

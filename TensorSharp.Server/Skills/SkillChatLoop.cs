@@ -201,6 +201,14 @@ namespace TensorSharp.Server.Skills
                     Content = content.ToString(),
                     Thinking = thinking.Length == 0 ? null : thinking.ToString(),
                     ToolCalls = new List<ToolCall>(calls),
+                    // The tokens as GENERATED, so the next round's render reproduces this
+                    // one exactly and the live KV cache can be continued rather than
+                    // rebuilt. Without it every round after the first re-prefilled the
+                    // entire conversation; SkillAgentLoop has always recorded it, and this
+                    // loop could not until the terminal update began carrying it.
+                    RawOutputTokens = terminal.RawOutputTokens != null
+                        ? new List<int>(terminal.RawOutputTokens)
+                        : null,
                 });
 
                 foreach (ToolCall unknownCall in unknownCalls)

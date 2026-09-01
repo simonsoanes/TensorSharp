@@ -221,7 +221,13 @@ public class SkillScriptAutoInstallTests : IDisposable
     {
         if (!HavePython) return;
 
-        Skill skill = MakeSkill("import defusedxml");
+        // A name no host can have, like every other case in this file. It used to be
+        // `defusedxml`, which is a REAL package: the test then asserted "this module is
+        // missing" about a developer machine that may perfectly well have it installed -
+        // and any machine set up to exercise the document skills certainly does, since
+        // pptx and docx validation both import it. The assertion is about the COACHING,
+        // not about defusedxml.
+        Skill skill = MakeSkill("import ts_absent_module_xyz");
         var runner = new SkillScriptRunner(new SkillScriptRunnerOptions
         {
             Sandbox = SkillSandboxMode.Off,
@@ -235,7 +241,7 @@ public class SkillScriptAutoInstallTests : IDisposable
         // that is the whole lesson of the gemma-4-E4B incident. What changed with the
         // shell surface is only the SPELLING of that action: an install is now a command
         // the model types, not a 'packages' argument it fills in.
-        Assert.Contains("defusedxml", result.Content, StringComparison.Ordinal);
+        Assert.Contains("ts_absent_module_xyz", result.Content, StringComparison.Ordinal);
         Assert.Contains("pip", result.Content, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("install", result.Content, StringComparison.OrdinalIgnoreCase);
     }

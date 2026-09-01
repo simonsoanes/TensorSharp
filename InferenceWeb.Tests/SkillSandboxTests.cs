@@ -71,7 +71,18 @@ public class SkillSandboxTests : IDisposable
         // does not it must refuse AND explain.
         var runner = new SkillScriptRunner(new SkillScriptRunnerOptions { Sandbox = SkillSandboxMode.Required });
 
-        if (SkillSandboxFactory.Detect() == null)
+        // "No sandbox" is not the only way isolation can be unavailable, and the
+        // distinction is the reason this assertion is written against CONFINEMENT
+        // rather than against the existence of an ISkillSandbox. Windows always has
+        // one - a job object - and it restricts no file and no socket, which its own
+        // Capabilities say plainly. Testing for existence made this pass on Windows
+        // while `required`, the DEFAULT, behaved exactly like `preferred` there.
+        ISkillSandbox? detected = SkillSandboxFactory.Detect();
+        bool confines = detected is not null
+            && detected.Capabilities.ConfinesWrites
+            && detected.Capabilities.ConfinesNetwork;
+
+        if (!confines)
         {
             Assert.False(runner.CanRun);
             Assert.NotNull(runner.UnavailableReason);
@@ -85,7 +96,7 @@ public class SkillSandboxTests : IDisposable
         else
         {
             Assert.True(runner.CanRun);
-            Assert.Equal(SkillSandboxFactory.Detect()!.Name, runner.Sandbox!.Name);
+            Assert.Equal(detected!.Name, runner.Sandbox!.Name);
         }
     }
 

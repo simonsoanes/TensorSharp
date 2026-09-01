@@ -198,7 +198,36 @@ namespace TensorSharp.Runtime
                 bool hasRawTokens = msg != null
                     && msg.Role == "assistant"
                     && msg.RawOutputTokens != null
-                    && msg.RawOutputTokens.Count > 0;
+                    && msg.RawOutputTokens.Count > 0
+                    // ...and NOT a round that called a tool. Splicing one is not merely
+                    // unnecessary there, it is wrong in two ways at once.
+                    //
+                    // The placeholder below blanks ToolCalls, because the raw tokens
+                    // already carry the tool-call markup and rendering it twice would
+                    // duplicate it. But a chat template needs `tool_calls` to know that a
+                    // tool RESULT follows: Gemma 4's renders the result inside the same
+                    // model turn, gated on `message.get('tool_calls')`. With the field
+                    // blanked, every `role: tool` message fell out of the prompt - so from
+                    // the second round of a skills/code turn onwards the model was shown
+                    // none of the output of the tools it had called. It asked for a
+                    // directory listing and answered from invention; it read a SKILL.md
+                    // and then named a script that file does not contain.
+                    //
+                    // And the order cannot be reconciled anyway. The model produces
+                    // reasoning, then the call; the host then appends the result. The
+                    // template emits the call, then the result, then the CONTENT - which
+                    // is where the placeholder sits - so a spliced round would put the
+                    // generated tokens after the result rather than before it, and the
+                    // rendered prefix could never match the cache.
+                    //
+                    // Nothing is lost by leaving these to the template. Where the family
+                    // declares RendersAssistantReasoning the template reproduces the round
+                    // exactly, reasoning channel included, and the prefix stays
+                    // byte-identical - which is the whole point of this class. Where it
+                    // does not, the round re-renders without its reasoning and that round
+                    // re-prefills, exactly as it did before - but with its tool results
+                    // present, which matters more.
+                    && !(msg.ToolCalls is { Count: > 0 });
 
                 if (!hasRawTokens)
                 {

@@ -418,7 +418,7 @@ namespace TensorSharp.AgentHost.Skills
                     FileName = fileName,
                     Arguments = argv,
                     WorkingDirectory = workDirectory,
-                    Environment = BuildEnvironment(workDirectory),
+                    Environment = BuildEnvironment(workDirectory, skill.RootDirectory),
                     OnStdoutLine = line => { stdout.AppendLine(line); Tap(onOutput, line); },
                     OnStderrLine = line => { stderr.AppendLine(line); Tap(onOutput, line); },
                 };
@@ -518,12 +518,37 @@ namespace TensorSharp.AgentHost.Skills
                 if (process.ExitCode != 0
                     && CodeExec.CodeDiagnostics.MissingModule(CodeExec.CodeLanguage.Python, stderr.ToStringWithNotice()) is { } missing)
                 {
-                    string install = CodeExec.CodeDiagnostics.InstallNameFor(CodeExec.CodeLanguage.Python, missing);
-                    sb.Append("\nThe module '").Append(missing)
-                      .Append("' is not installed in this session's environment. Install it from the shell ")
-                      .Append("and run this script again:\n  pip install ").Append(install)
-                      .Append("\nThe shell and skill scripts share one environment, so what you install ")
-                      .Append("there is visible here.\n");
+                    // A module that is a DIRECTORY OF THIS SKILL is never a package to
+                    // install, and saying so was actively dangerous. skill-creator's entry
+                    // points import `scripts.quick_validate`; the advice this produced was
+                    // "pip install scripts", and `scripts` is a real name on PyPI owned by
+                    // nobody in particular - the host was telling the model to pull a
+                    // stranger's package to satisfy an import of a file sitting beside the
+                    // script. The import itself is now made to work (the skill root goes on
+                    // PYTHONPATH in BuildEnvironment); this is the second half, so that if
+                    // one ever fails again it fails honestly.
+                    string top = missing.Split('.')[0];
+                    bool insideSkill =
+                        File.Exists(Path.Combine(skill.RootDirectory, top + ".py"))
+                        || Directory.Exists(Path.Combine(skill.RootDirectory, top));
+
+                    if (insideSkill)
+                    {
+                        sb.Append("\n'").Append(missing)
+                          .Append("' is part of this skill, not a package to install - do NOT try to ")
+                          .Append("install it. It failed to import because of how the script was ")
+                          .Append("invoked, not because anything is missing. Run it from the shell ")
+                          .Append("instead, with the skill's own directory on PYTHONPATH.\n");
+                    }
+                    else
+                    {
+                        string install = CodeExec.CodeDiagnostics.InstallNameFor(CodeExec.CodeLanguage.Python, missing);
+                        sb.Append("\nThe module '").Append(missing)
+                          .Append("' is not installed in this session's environment. Install it from the shell ")
+                          .Append("and run this script again:\n  pip install ").Append(install)
+                          .Append("\nThe shell and skill scripts share one environment, so what you install ")
+                          .Append("there is visible here.\n");
+                    }
                 }
 
                 // A skill script that fails for any reason OTHER than a missing import
@@ -602,7 +627,11 @@ namespace TensorSharp.AgentHost.Skills
         /// an interpreter needs to run.
         /// </para>
         /// </summary>
-        private Dictionary<string, string> BuildEnvironment(string workDirectory)
+        /// <param name="skillRoot">
+        /// The directory of the skill whose script this is, so its own modules are
+        /// importable. See the PYTHONPATH note below.
+        /// </param>
+        private Dictionary<string, string> BuildEnvironment(string workDirectory, string? skillRoot = null)
         {
             var startInfo = new EnvironmentBag();
 
@@ -616,6 +645,12 @@ namespace TensorSharp.AgentHost.Skills
             startInfo.Environment["PWD"] = workDirectory;
             startInfo.Environment["TMPDIR"] = workDirectory;
             startInfo.Environment["HOME"] = workDirectory;
+            // HOME is not what Windows reads. CPython's ntpath.expanduser resolves `~`
+            // from USERPROFILE and never looks at HOME, so on Windows the redirection
+            // above was invisible to the one call that asks for the home directory by
+            // name; the same list also supplies TEMP/TMP, LOCALAPPDATA/APPDATA and the
+            // machine variables a Windows child cannot start without.
+            CodeExec.CodeEnvironment.ApplyWindowsBaseline(startInfo.Environment, workDirectory);
             // Keeps CPython from writing .pyc files into the read-only skill directory,
             // which fails under the sandbox and produces a confusing error.
             startInfo.Environment["PYTHONDONTWRITEBYTECODE"] = "1";
@@ -629,6 +664,29 @@ namespace TensorSharp.AgentHost.Skills
             {
                 startInfo.Environment["PYTHONPATH"] = workspace.EnvDirectory;
                 startInfo.Environment["NODE_PATH"] = Path.Combine(workspace.EnvDirectory, "node_modules");
+            }
+
+            // The skill's OWN root, so a script can import its siblings the way its
+            // author wrote them.
+            //
+            // Python puts the SCRIPT's directory on sys.path, never the skill root, so a
+            // script at <skill>/scripts/package_skill.py that says
+            // `from scripts.quick_validate import validate_skill` — a package-qualified
+            // import of the file sitting right beside it — cannot resolve it. Both of
+            // skill-creator's entry points are written that way and both failed with
+            // ModuleNotFoundError before this line existed. It is not a Windows problem;
+            // it simply had never been exercised.
+            //
+            // Appended AFTER the session environment rather than prepended, so a skill
+            // cannot shadow an installed package with a directory of the same name —
+            // `scripts`, `utils` and `core` are exactly the names at stake here.
+            if (!string.IsNullOrEmpty(skillRoot))
+            {
+                startInfo.Environment["PYTHONPATH"] =
+                    startInfo.Environment.TryGetValue("PYTHONPATH", out string? existing)
+                    && !string.IsNullOrEmpty(existing)
+                        ? existing + Path.PathSeparator + skillRoot
+                        : skillRoot;
             }
 
             foreach (KeyValuePair<string, string> entry in _options.EnvironmentVariables)

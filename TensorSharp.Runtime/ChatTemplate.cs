@@ -560,7 +560,8 @@ namespace TensorSharp.Runtime
                 {
                     var preprocessed = InjectMultimodalTokens(messages, architecture);
                     var jinja = new Jinja2Template(template);
-                    var context = BuildJinja2Context(preprocessed, addGenerationPrompt, tools, enableThinking);
+                    var context = BuildJinja2Context(
+                        preprocessed, addGenerationPrompt, tools, enableThinking, architecture);
                     string result = jinja.Render(context).TrimEnd();
                     if (result.Length > 0)
                     {
@@ -580,11 +581,15 @@ namespace TensorSharp.Runtime
                         }
                         else
                         {
-                            if (architecture == "gemma4" && addGenerationPrompt)
+                            result = StripReasoningEndSentinel(result);
+                            if (architecture == "gemma4")
                             {
-                                result = enableThinking
-                                    ? EnsureGemma4ThinkingPromptNewline(result)
-                                    : EnsureGemma4ThinkingBlock(result);
+                                if (addGenerationPrompt)
+                                {
+                                    result = enableThinking
+                                        ? EnsureGemma4ThinkingPromptNewline(result)
+                                        : EnsureGemma4ThinkingBlock(result);
+                                }
                             }
                             else if (IsQwen35Family(architecture) && addGenerationPrompt && enableThinking)
                                 result = EnsureQwen35ThinkOpen(result);
@@ -1027,10 +1032,47 @@ namespace TensorSharp.Runtime
                    architecture == "qwen3vlmoe";
         }
 
+        /// <summary>
+        /// A private-use marker for where a re-rendered reasoning block ends, so the
+        /// template's own closing newline can be taken back off. Never appears in text a
+        /// model or a user can write.
+        /// </summary>
+        internal const string ReasoningEndSentinel = "\uE000TS_REASONING_END\uE000";
+
+        /// <summary>
+        /// Remove the sentinel and the framing newline the template emitted after it, so a
+        /// re-rendered reasoning block is byte-identical to what the model generated.
+        /// See the note in BuildJinja2Context.
+        /// </summary>
+        internal static string StripReasoningEndSentinel(string rendered)
+        {
+            if (string.IsNullOrEmpty(rendered)
+                || !rendered.Contains(ReasoningEndSentinel, StringComparison.Ordinal))
+            {
+                return rendered;
+            }
+
+            // The newline the template adds between the reasoning and the channel close
+            // goes with it. Ordered longest-first; the bare sentinel is the fallback for a
+            // template that frames the block some other way, and dropping it alone is
+            // still better than leaving a marker in the prompt.
+            return rendered
+                .Replace(ReasoningEndSentinel + "\r\n", string.Empty, StringComparison.Ordinal)
+                .Replace(ReasoningEndSentinel + "\n", string.Empty, StringComparison.Ordinal)
+                .Replace(ReasoningEndSentinel, string.Empty, StringComparison.Ordinal);
+        }
+
         private static Dictionary<string, object> BuildJinja2Context(
             List<ChatMessage> messages, bool addGenerationPrompt,
-            List<ToolFunction>? tools = null, bool enableThinking = false)
+            List<ToolFunction>? tools = null, bool enableThinking = false,
+            string? architecture = null)
         {
+            // Whether this family's template re-renders an assistant turn's reasoning,
+            // and therefore whether handing it over is correct rather than a change in
+            // what past turns look like. See ChatProtocol.RendersAssistantReasoning.
+            bool passReasoning =
+                ChatProtocolRegistry.For(architecture)?.RendersAssistantReasoning ?? false;
+
             var msgList = new List<object>();
             foreach (var m in messages)
             {
@@ -1039,6 +1081,29 @@ namespace TensorSharp.Runtime
                     ["role"] = m.Role ?? "",
                     ["content"] = m.Content ?? ""
                 };
+                if (passReasoning && m.Role == "assistant" && m.ToolCalls is { Count: > 0 })
+                {
+                    // The reasoning, plus a sentinel marking where it ENDS.
+                    //
+                    // The template frames the channel itself, as
+                    // '<|channel>thought(nl)' + text + '(nl)<channel|>'. The model does
+                    // not: it writes '<|channel>thought(nl)' + text + '<channel|>', with
+                    // whatever trailing newline the text itself happened to have. So the
+                    // template's closing newline is one the cache does not contain when
+                    // the reasoning ended without one, and one too many when it ended
+                    // with one - and no value of `text` fixes both, which is why passing
+                    // the reasoning alone still diverged by exactly one token.
+                    //
+                    // The sentinel is removed after rendering together with the newline
+                    // the template put after it, leaving precisely the bytes the model
+                    // produced. It also covers the empty case: a round that opened and
+                    // closed the channel without thinking renders as the sentinel alone
+                    // and collapses to the bare four-token channel, which no non-empty
+                    // reasoning value could have produced.
+                    string reasoning = (m.Thinking ?? string.Empty) + ReasoningEndSentinel;
+                    dict["reasoning"] = reasoning;
+                    dict["reasoning_content"] = reasoning;
+                }
                 if (m.ToolCalls != null && m.ToolCalls.Count > 0)
                 {
                     var tcList = new List<object>();
