@@ -14,6 +14,8 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 
+using TensorSharp.AgentHost.CodeExec;
+
 namespace TensorSharp.AgentHost.Skills
 {
     /// <summary>
@@ -80,7 +82,7 @@ namespace TensorSharp.AgentHost.Skills
         }
 
         /// <inheritdoc />
-        public bool TryAttach(Process process, out string error)
+        public bool TryAttach(SpawnedProcess process, out string error)
         {
             error = null!;
             if (!OperatingSystem.IsWindows())
@@ -126,6 +128,16 @@ namespace TensorSharp.AgentHost.Skills
                 finally
                 {
                     Marshal.FreeHGlobal(buffer);
+                }
+
+                // SpawnedProcess.Handle is the Windows process handle, and non-zero only
+                // where the child was started through System.Diagnostics.Process — which on
+                // Windows it always is, because there is no posix_spawn and no fork to
+                // avoid. A zero handle means this is not the platform this sandbox is for.
+                if (process.Handle == IntPtr.Zero)
+                {
+                    error = "the process was not started with a Windows process handle";
+                    return false;
                 }
 
                 if (!AssignProcessToJobObject(job, process.Handle))

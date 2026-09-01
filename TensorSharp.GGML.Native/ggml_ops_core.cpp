@@ -1730,7 +1730,33 @@ namespace tsg
             graph != nullptr &&
             g_backend->iface.graph_optimize != nullptr)
         {
-            g_backend->iface.graph_optimize(g_backend, graph);
+            // graph_optimize also takes an allocation-dependency sink. A backend
+            // that reorders across concurrent streams uses it to say "keep TENSOR
+            // allocated until UNTIL has been computed", and ggml_backend_sched
+            // honours that by inserting GGML_OP_NONE nodes into its graph copy
+            // before it allocates. This path allocates with gallocr directly and
+            // has nowhere to put such a node, so it cannot honour one.
+            //
+            // Calling from here is sound only because Metal's implementation is
+            // GGML_UNUSED(params) and adds none. That is ggml's to change, and a
+            // dropped dependency would surface as a tensor freed while still live —
+            // wrong numbers rather than a failure. So the sink is real and it says
+            // so, rather than being the null pointer that would turn the same
+            // change into a crash inside the backend.
+            ggml_backend_graph_optimize_params opt_params = {
+                /* .add_alloc_dep = */ [](void*, ggml_tensor*, ggml_tensor*) {
+                    static std::once_flag once;
+                    std::call_once(once, []() {
+                        std::fprintf(stderr,
+                            "[TSGGML] Metal's graph_optimize asked for an allocation dependency, "
+                            "which the direct-compute path cannot honour — reordered graphs on this "
+                            "path are no longer trustworthy. Please report this.\n");
+                        std::fflush(stderr);
+                    });
+                },
+                /* .user_data     = */ nullptr,
+            };
+            g_backend->iface.graph_optimize(g_backend, graph, &opt_params);
         }
 #else
         (void) graph;

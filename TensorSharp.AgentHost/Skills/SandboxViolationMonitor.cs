@@ -14,6 +14,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using TensorSharp.AgentHost.CodeExec;
 
 namespace TensorSharp.AgentHost.Skills
 {
@@ -65,11 +66,43 @@ namespace TensorSharp.AgentHost.Skills
         /// <summary>How long a FAILED run waits for the tail of its denials. Nothing else waits.</summary>
         private static readonly TimeSpan TailGrace = TimeSpan.FromMilliseconds(150);
 
-        private readonly Process? _stream;
+        private SpawnedProcess? _stream;
         private readonly List<(DateTime At, string Line)> _lines = new();
         private readonly object _gate = new();
 
-        private SandboxViolationMonitor(Process? stream) => _stream = stream;
+        private SandboxViolationMonitor(SpawnedProcess? stream) => _stream = stream;
+
+        /// <summary>Take ownership of the stream, once it has actually started.</summary>
+        /// <remarks>
+        /// Two-step because the line sink has to exist before the process does: what
+        /// receives a line is this instance, and the request that starts the process needs
+        /// that sink handed to it up front rather than attached afterwards.
+        /// </remarks>
+        private void Attach(SpawnedProcess stream) => _stream = stream;
+
+        private static Dictionary<string, string> HostEnvironment()
+        {
+            var environment = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
+            {
+                if (entry.Key is string key && entry.Value is string value)
+                    environment[key] = value;
+            }
+            return environment;
+        }
+
+        /// <summary>Keep one denial line, dropping the oldest once the cap is reached.</summary>
+        private void Record(string line)
+        {
+            if (!line.Contains("deny", StringComparison.Ordinal))
+                return;
+            lock (_gate)
+            {
+                _lines.Add((DateTime.UtcNow, line));
+                if (_lines.Count > MaxLines)
+                    _lines.RemoveRange(0, _lines.Count - MaxLines);
+            }
+        }
 
         private static SandboxViolationMonitor? _shared;
         private static readonly object SharedGate = new();
@@ -114,39 +147,30 @@ namespace TensorSharp.AgentHost.Skills
 
             try
             {
-                var psi = new ProcessStartInfo
+                var monitor = new SandboxViolationMonitor(null);
+                var request = new SpawnRequest
                 {
                     FileName = "/usr/bin/log",
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-                foreach (string a in new[]
-                {
-                    "stream", "--style", "compact",
-                    "--predicate", "sender == \"Sandbox\"",
-                })
-                {
-                    psi.ArgumentList.Add(a);
-                }
-
-                var process = new Process { StartInfo = psi };
-                var monitor = new SandboxViolationMonitor(process);
-                process.OutputDataReceived += (_, e) =>
-                {
-                    if (e.Data == null || !e.Data.Contains("deny", StringComparison.Ordinal))
-                        return;
-                    lock (monitor._gate)
+                    Arguments = new[]
                     {
-                        monitor._lines.Add((DateTime.UtcNow, e.Data));
-                        if (monitor._lines.Count > MaxLines)
-                            monitor._lines.RemoveRange(0, monitor._lines.Count - MaxLines);
-                    }
+                        "stream", "--style", "compact",
+                        "--predicate", "sender == \"Sandbox\"",
+                    },
+                    // The one child that INHERITS this process's environment. The rule that
+                    // every other launch starts from nothing is about code the model
+                    // supplied; this is an Apple diagnostic binary with a fixed argument
+                    // vector, and stripping its environment would be a behaviour change to
+                    // the only thing that can explain a sandbox denial.
+                    Environment = HostEnvironment(),
+                    OnStdoutLine = monitor.Record,
                 };
-                if (!process.Start())
+
+                // A monitor is a diagnostic, so a start that fails degrades to an inert one
+                // rather than failing the run it was meant to describe.
+                if (!SpawnedProcess.TryStart(request, out SpawnedProcess? stream, out _) || stream == null)
                     return new SandboxViolationMonitor(null);
-                process.BeginOutputReadLine();
+
+                monitor.Attach(stream);
                 return monitor;
             }
             catch (Exception ex) when (ex is IOException or InvalidOperationException
@@ -276,7 +300,7 @@ namespace TensorSharp.AgentHost.Skills
             try
             {
                 if (!_stream.HasExited)
-                    _stream.Kill(entireProcessTree: true);
+                    _stream.Kill();
                 _stream.Dispose();
             }
             catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)

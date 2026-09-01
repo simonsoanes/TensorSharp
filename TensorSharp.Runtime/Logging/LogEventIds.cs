@@ -125,6 +125,12 @@ namespace TensorSharp.Runtime.Logging
         public static readonly EventId CodeExecEdited = new(1627, nameof(CodeExecEdited));
         public static readonly EventId CodeExecRewrote = new(1628, nameof(CodeExecRewrote));
 
+        // A fork of this host that wedged before exec and had to be reaped. The recovery
+        // is invisible to the model by design, so this is the only place it is countable —
+        // and the count is the difference between a known platform hazard being handled
+        // and it quietly costing seconds on every tool call.
+        public static readonly EventId CodeExecForkWedged = new(1629, nameof(CodeExecForkWedged));
+
         // CLI --------------------------------------------------------------
         public static readonly EventId CliStarted = new(1700, nameof(CliStarted));
         public static readonly EventId CliCompleted = new(1701, nameof(CliCompleted));

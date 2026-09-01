@@ -104,21 +104,40 @@ namespace TensorSharp.AgentHost.CodeExec
             {
                 try
                 {
-                    var startInfo = new System.Diagnostics.ProcessStartInfo
+                    // Old Pythons print the version to stderr and new ones to stdout, so
+                    // both are collected and searched together.
+                    var output = new System.Text.StringBuilder();
+                    void Collect(string line) { lock (output) output.Append(line).Append('\n'); }
+
+                    var request = new SpawnRequest
                     {
                         FileName = path,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
+                        Arguments = new[] { "--version" },
+                        Environment = new Dictionary<string, string>(StringComparer.Ordinal)
+                        {
+                            ["PATH"] = Environment.GetEnvironmentVariable("PATH") ?? string.Empty,
+                            ["LANG"] = "C.UTF-8",
+                        },
+                        OnStdoutLine = Collect,
+                        OnStderrLine = Collect,
                     };
-                    startInfo.ArgumentList.Add("--version");
-                    using var process = System.Diagnostics.Process.Start(startInfo);
-                    if (process == null)
+
+                    // The caching is why a hang here would matter more than a one-line probe
+                    // suggests: whatever the first caller concluded is memoised for every
+                    // caller after it.
+                    if (!SpawnedProcess.TryStart(request, out SpawnedProcess? started, out _)
+                        || started == null)
+                    {
                         return null;
-                    string output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
+                    }
+
+                    using var process = started;
                     process.WaitForExit(5000);
-                    var match = System.Text.RegularExpressions.Regex.Match(output, @"Python (\d+)\.(\d+)");
+                    process.WaitForDrain(1000);
+
+                    string text;
+                    lock (output) text = output.ToString();
+                    var match = System.Text.RegularExpressions.Regex.Match(text, @"Python (\d+)\.(\d+)");
                     return match.Success
                         ? new Version(int.Parse(match.Groups[1].Value), int.Parse(match.Groups[2].Value))
                         : null;

@@ -18,6 +18,7 @@ using System.Text;
 using System.Threading;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using TensorSharp.AgentHost.CodeExec;
 using TensorSharp.Runtime.Logging;
 
 namespace TensorSharp.AgentHost.Skills
@@ -404,45 +405,33 @@ namespace TensorSharp.AgentHost.Skills
                     SkillSandboxFactory.DescribeHost());
             }
 
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = fileName,
-                WorkingDirectory = workDirectory,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                RedirectStandardInput = true,
-                // No shell: the arguments are passed as a vector, so a path or an
-                // argument containing ; | > $ ` is data, not syntax.
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-            foreach (string argument in argv)
-                startInfo.ArgumentList.Add(argument);
-
-            ApplyEnvironment(startInfo, workDirectory);
-
             var stdout = new BoundedWriter(_options.MaxOutputBytes);
             var stderr = new BoundedWriter(_options.MaxOutputBytes);
             var sw = Stopwatch.StartNew();
 
             try
             {
-                using var process = new Process { StartInfo = startInfo };
-                process.OutputDataReceived += (_, e) =>
+                // No shell: the arguments are passed as a vector, so a path or an
+                // argument containing ; | > $ ` is data, not syntax.
+                var request = new SpawnRequest
                 {
-                    if (e.Data == null) return;
-                    stdout.AppendLine(e.Data);
-                    Tap(onOutput, e.Data);
-                };
-                process.ErrorDataReceived += (_, e) =>
-                {
-                    if (e.Data == null) return;
-                    stderr.AppendLine(e.Data);
-                    Tap(onOutput, e.Data);
+                    FileName = fileName,
+                    Arguments = argv,
+                    WorkingDirectory = workDirectory,
+                    Environment = BuildEnvironment(workDirectory),
+                    OnStdoutLine = line => { stdout.AppendLine(line); Tap(onOutput, line); },
+                    OnStderrLine = line => { stderr.AppendLine(line); Tap(onOutput, line); },
                 };
 
-                if (!process.Start())
-                    return SkillToolResult.Failure($"'{fileName}' could not be started.");
+                if (!SpawnedProcess.TryStart(request, out SpawnedProcess? started, out string startError)
+                    || started == null)
+                {
+                    return SkillToolResult.Failure(startError.Length > 0
+                        ? $"'{normalized}' could not be started: {startError}"
+                        : $"'{fileName}' could not be started.");
+                }
+
+                using var process = started;
 
                 // A job-object style sandbox attaches to a process that is already
                 // running. If it cannot, the child is killed rather than left running
@@ -461,14 +450,9 @@ namespace TensorSharp.AgentHost.Skills
                         skill.Id, normalized, attachError);
                 }
 
-                process.BeginOutputReadLine();
-                process.BeginErrorReadLine();
-
-                // Close stdin immediately. A script that reads from it would otherwise
-                // block until the deadline instead of failing fast, and there is nothing
-                // meaningful to feed it.
-                try { process.StandardInput.Close(); } catch (IOException) { /* already gone */ }
-
+                // Reading the pipes and closing stdin happen as part of starting: a script
+                // that reads stdin fails fast instead of blocking until the deadline, and a
+                // child whose output nobody drains blocks on a full pipe.
                 bool exited = process.WaitForExit((int)_options.Timeout.TotalMilliseconds);
                 if (!exited)
                 {
@@ -482,9 +466,13 @@ namespace TensorSharp.AgentHost.Skills
                         + Describe(stdout, stderr, workDirectory, preRun, _options.Workspace));
                 }
 
-                // WaitForExit(int) can return before the async output handlers have
-                // drained; the parameterless overload waits for them too.
-                process.WaitForExit();
+                // Waiting for exit can return before the output pipes have drained, so the
+                // drain is waited for separately — and BOUNDED. This used to be an
+                // unbounded wait, which is the same shape that hung the shell tool: a pipe
+                // stays open while anything still holds the inherited handle, so a script
+                // that leaves a background process behind never reaches EOF. The tree is
+                // killed on dispose regardless; the only question was whether this returns.
+                process.WaitForDrain(DrainMilliseconds);
                 sw.Stop();
                 stderrText = stderr.ToStringWithNotice();
 
@@ -614,9 +602,9 @@ namespace TensorSharp.AgentHost.Skills
         /// an interpreter needs to run.
         /// </para>
         /// </summary>
-        private void ApplyEnvironment(ProcessStartInfo startInfo, string workDirectory)
+        private Dictionary<string, string> BuildEnvironment(string workDirectory)
         {
-            startInfo.Environment.Clear();
+            var startInfo = new EnvironmentBag();
 
             foreach (string name in _options.PassThroughEnvironmentVariables)
             {
@@ -645,6 +633,18 @@ namespace TensorSharp.AgentHost.Skills
 
             foreach (KeyValuePair<string, string> entry in _options.EnvironmentVariables)
                 startInfo.Environment[entry.Key] = entry.Value;
+
+            return startInfo.Environment;
+        }
+
+        /// <summary>
+        /// A stand-in for the <see cref="ProcessStartInfo"/> this used to fill in, so the
+        /// assignments below read exactly as they did when the environment was applied to a
+        /// start info rather than handed over as a complete set.
+        /// </summary>
+        private sealed class EnvironmentBag
+        {
+            public Dictionary<string, string> Environment { get; } = new(StringComparer.Ordinal);
         }
 
         /// <summary>
@@ -715,9 +715,16 @@ namespace TensorSharp.AgentHost.Skills
             catch (Exception) { /* the tap is best-effort observability */ }
         }
 
-        private static void TryKill(Process process)
+        /// <summary>
+        /// How long to wait for the output pipes to drain AFTER the script itself has
+        /// exited. Bounded because a pipe held open by a process the script left running
+        /// never reaches EOF.
+        /// </summary>
+        private const int DrainMilliseconds = 2000;
+
+        private static void TryKill(SpawnedProcess process)
         {
-            try { process.Kill(entireProcessTree: true); }
+            try { process.Kill(); }
             catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or System.ComponentModel.Win32Exception)
             {
                 // Already exited, or the platform will not walk the tree. Either way

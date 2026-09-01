@@ -15,6 +15,8 @@ using System.IO;
 using System.Linq;
 using System.Text;
 
+using TensorSharp.AgentHost.CodeExec;
+
 namespace TensorSharp.AgentHost.Skills
 {
     /// <summary>How hard a host insists on OS-level isolation for a skill's scripts.</summary>
@@ -126,7 +128,7 @@ namespace TensorSharp.AgentHost.Skills
         /// wrapper-style sandbox does nothing here.
         /// </summary>
         /// <returns>False when the child could not be confined and must be killed.</returns>
-        bool TryAttach(Process process, out string error) { error = null!; return true; }
+        bool TryAttach(SpawnedProcess process, out string error) { error = null!; return true; }
 
         /// <summary>
         /// One line describing what this sandbox actually enforces, so a host can log

@@ -117,6 +117,12 @@ namespace TensorSharp.AgentHost.CodeExec
             // Resolved once, at construction: the answer cannot change while the process
             // runs, and the prompt has to state the dialect before the first call.
             ShellProgram.TryResolve(_options.Shell, out _shell, out _shellError);
+
+            // The watchdog's sink is static because the callers that trip it — a syntax
+            // check, a violation monitor, an interpreter probe — hold no logger. First
+            // runner to be built wins; they all log to the same place.
+            ForkWatchdog.Observer ??= detail => _logger.LogWarning(
+                LogEventIds.CodeExecForkWedged, "codeexec.forkwedged {Detail}", detail);
         }
 
         /// <summary>The sandbox in use, or null.</summary>

@@ -198,25 +198,6 @@ namespace TensorSharp.AgentHost.CodeExec
                 }
             }
 
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = fileName,
-                WorkingDirectory = launch.WorkingDirectory ?? launch.WriteDirectory,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                RedirectStandardInput = true,
-                // No shell is interposed by US: the arguments cross as a vector, so a
-                // value containing ; | > $ ` is data rather than syntax. The shell tool
-                // hands its interpreter a SCRIPT FILE for the same reason — the model's
-                // command never becomes part of a command line anyone else has to quote.
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-            foreach (string argument in argv)
-                startInfo.ArgumentList.Add(argument);
-
-            ApplyEnvironment(startInfo, launch);
-
             var stdout = new BoundedText(launch.MaxOutputBytes);
             var stderr = new BoundedText(launch.MaxOutputBytes);
             var sw = Stopwatch.StartNew();
@@ -228,26 +209,36 @@ namespace TensorSharp.AgentHost.CodeExec
                 sandboxName != "none" ? SandboxViolationMonitor.Shared : null;
             DateTime violationsFrom = SandboxViolationMonitor.Mark();
 
-            Process? process = null;
+            SpawnedProcess? process = null;
             try
             {
-                process = new Process { StartInfo = startInfo };
-                process.OutputDataReceived += (_, e) =>
+                // No shell is interposed by US: the arguments cross as a vector, so a
+                // value containing ; | > $ ` is data rather than syntax. The shell tool
+                // hands its interpreter a SCRIPT FILE for the same reason — the model's
+                // command never becomes part of a command line anyone else has to quote.
+                var request = new SpawnRequest
                 {
-                    if (e.Data == null) return;
-                    stdout.AppendLine(e.Data);
-                    Tap(launch.OnOutputLine, e.Data);
-                };
-                process.ErrorDataReceived += (_, e) =>
-                {
-                    if (e.Data == null) return;
-                    stderr.AppendLine(e.Data);
-                    Tap(launch.OnOutputLine, e.Data);
+                    FileName = fileName,
+                    Arguments = argv,
+                    WorkingDirectory = launch.WorkingDirectory ?? launch.WriteDirectory,
+                    Environment = BuildEnvironment(launch),
+                    OnStdoutLine = line =>
+                    {
+                        stdout.AppendLine(line);
+                        Tap(launch.OnOutputLine, line);
+                    },
+                    OnStderrLine = line =>
+                    {
+                        stderr.AppendLine(line);
+                        Tap(launch.OnOutputLine, line);
+                    },
                 };
 
-                if (!process.Start())
+                if (!SpawnedProcess.TryStart(request, out process, out string startError) || process == null)
                 {
-                    failure = Failed($"'{fileName}' could not be started");
+                    failure = Failed(startError.Length > 0
+                        ? startError
+                        : $"'{fileName}' could not be started");
                     Cleanup(process, cleanup);
                     return false;
                 }
@@ -287,13 +278,9 @@ namespace TensorSharp.AgentHost.CodeExec
                     attachFailure = attachError;
                 }
 
-                process.BeginOutputReadLine();
-                process.BeginErrorReadLine();
-
-                // Nothing will be typed at it, and a program that reads stdin would
-                // otherwise block until the deadline rather than failing immediately.
-                try { process.StandardInput.Close(); } catch (IOException) { /* already gone */ }
-
+                // Reading the pipes and closing stdin are SpawnedProcess's, done as part of
+                // starting: a child whose output nobody drains blocks on a full pipe, and
+                // that must not be a step a caller can forget.
                 job = new ConfinedJob(
                     process, cleanup, violations, violationsFrom, stdout, stderr, sw, sandboxName, launch)
                 {
@@ -309,7 +296,7 @@ namespace TensorSharp.AgentHost.CodeExec
             }
         }
 
-        private static void Cleanup(Process? process, IDisposable? cleanup)
+        private static void Cleanup(SpawnedProcess? process, IDisposable? cleanup)
         {
             process?.Dispose();
             cleanup?.Dispose();
@@ -357,17 +344,21 @@ namespace TensorSharp.AgentHost.CodeExec
         /// interpreter needs.
         /// </para>
         /// </summary>
-        private static void ApplyEnvironment(ProcessStartInfo startInfo, ConfinedLaunch launch)
+        private static Dictionary<string, string> BuildEnvironment(ConfinedLaunch launch)
         {
-            startInfo.Environment.Clear();
-
-            startInfo.Environment["PATH"] = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
-            startInfo.Environment["TMPDIR"] = launch.WriteDirectory;
-            startInfo.Environment["TEMP"] = launch.WriteDirectory;
-            startInfo.Environment["TMP"] = launch.WriteDirectory;
-            startInfo.Environment["HOME"] = launch.WriteDirectory;
-            startInfo.Environment["USERPROFILE"] = launch.WriteDirectory;
-            startInfo.Environment["LANG"] = "C.UTF-8";
+            // The COMPLETE environment, built from nothing rather than edited from ours:
+            // SpawnedProcess passes exactly this to the child, so a variable that is not
+            // here is not there.
+            var environment = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["PATH"] = Environment.GetEnvironmentVariable("PATH") ?? string.Empty,
+                ["TMPDIR"] = launch.WriteDirectory,
+                ["TEMP"] = launch.WriteDirectory,
+                ["TMP"] = launch.WriteDirectory,
+                ["HOME"] = launch.WriteDirectory,
+                ["USERPROFILE"] = launch.WriteDirectory,
+                ["LANG"] = "C.UTF-8",
+            };
 
             if (OperatingSystem.IsWindows())
             {
@@ -376,12 +367,14 @@ namespace TensorSharp.AgentHost.CodeExec
                 foreach (string name in new[] { "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC", "PATHEXT", "WINDIR" })
                 {
                     if (Environment.GetEnvironmentVariable(name) is { } value)
-                        startInfo.Environment[name] = value;
+                        environment[name] = value;
                 }
             }
 
             foreach (KeyValuePair<string, string> pair in launch.EnvironmentVariables)
-                startInfo.Environment[pair.Key] = pair.Value;
+                environment[pair.Key] = pair.Value;
+
+            return environment;
         }
 
         /// <summary>A live-output tap must never be able to kill the reader thread.</summary>
@@ -392,9 +385,9 @@ namespace TensorSharp.AgentHost.CodeExec
             catch (Exception) { /* the tap is best-effort observability */ }
         }
 
-        internal static void TryKill(Process process)
+        internal static void TryKill(SpawnedProcess process)
         {
-            try { process.Kill(entireProcessTree: true); }
+            try { process.Kill(); }
             catch (Exception) { /* already gone, or we cannot reach the tree */ }
         }
 
@@ -509,7 +502,7 @@ namespace TensorSharp.AgentHost.CodeExec
         /// </summary>
         public string? AttachFailure { get; init; }
 
-        private readonly Process _process;
+        private readonly SpawnedProcess _process;
         private readonly IDisposable? _cleanup;
         private readonly SandboxViolationMonitor? _violations;
         private readonly DateTime _violationsFrom;
@@ -521,7 +514,7 @@ namespace TensorSharp.AgentHost.CodeExec
         private int _disposed;
 
         internal ConfinedJob(
-            Process process, IDisposable? cleanup, SandboxViolationMonitor? violations,
+            SpawnedProcess process, IDisposable? cleanup, SandboxViolationMonitor? violations,
             DateTime violationsFrom,
             ConfinedProcess.BoundedText stdout, ConfinedProcess.BoundedText stderr,
             Stopwatch stopwatch, string sandboxName, ConfinedLaunch launch)
@@ -538,19 +531,13 @@ namespace TensorSharp.AgentHost.CodeExec
         }
 
         /// <summary>The operating system's id for the process, for a result the model can act on.</summary>
-        public int ProcessId
-        {
-            get { try { return _process.Id; } catch (InvalidOperationException) { return -1; } }
-        }
+        public int ProcessId => _process.Id;
 
         /// <summary>Which sandbox wrapped it, or "none".</summary>
         public string SandboxName => _sandboxName;
 
         /// <summary>Whether it has finished.</summary>
-        public bool HasExited
-        {
-            get { try { return _process.HasExited; } catch (InvalidOperationException) { return true; } }
-        }
+        public bool HasExited => _process.HasExited;
 
         /// <summary>
         /// How long to wait for the output pipes to drain AFTER the process itself has
@@ -591,7 +578,7 @@ namespace TensorSharp.AgentHost.CodeExec
                 //
                 // Verified at the OS level: `( sh -c 'sleep 8 & echo done' ) | cat` prints
                 // immediately and the pipe reaches EOF eight seconds later.
-                if (!_process.WaitForExit(DrainMilliseconds))
+                if (!_process.WaitForDrain(DrainMilliseconds))
                 {
                     // The tree is killed on Dispose regardless, so the only question was
                     // ever whether the call returns. Anything the shell itself printed has
