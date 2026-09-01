@@ -47,6 +47,7 @@ namespace TensorSharp.Server.ProtocolAdapters
         private readonly UploadStoragePolicy _uploads;
         private readonly SkillRegistry _skills;
         private readonly ICodeRunner? _codeRunner;
+        private readonly SessionWorkspaceManager _workspaces;
         private readonly ILoggerFactory _loggerFactory;
 
         public OllamaAdapter(
@@ -56,6 +57,7 @@ namespace TensorSharp.Server.ProtocolAdapters
             UploadStoragePolicy uploads,
             SkillRegistry skills,
             ICodeRunner? codeRunner,
+            SessionWorkspaceManager workspaces,
             ILoggerFactory loggerFactory)
         {
             _svc = svc ?? throw new ArgumentNullException(nameof(svc));
@@ -64,6 +66,7 @@ namespace TensorSharp.Server.ProtocolAdapters
             _uploads = uploads ?? throw new ArgumentNullException(nameof(uploads));
             _skills = skills ?? throw new ArgumentNullException(nameof(skills));
             _codeRunner = codeRunner;
+            _workspaces = workspaces;
             _loggerFactory = loggerFactory ?? throw new ArgumentNullException(nameof(loggerFactory));
         }
 
@@ -343,10 +346,13 @@ namespace TensorSharp.Server.ProtocolAdapters
                 return;
             }
 
+            using RequestWorkspaceLease workspaceLease = RequestWorkspaceLease.Acquire(
+                _workspaces, _codeRunner, _svc.Architecture);
+
             var skillPlan = SkillRequestPlan.Create(
                 _skills, requestedSkills, SkillSelectionParser.ParseDiscovery(body), ollamaTools,
                 _svc.Architecture, _svc.ContextTokens, _options, out var unknownSkills, codeRunner: _codeRunner,
-                logger: ollamaLogger);
+                workspace: workspaceLease?.Workspace, logger: ollamaLogger);
 
             if (unknownSkills.Count > 0)
             {

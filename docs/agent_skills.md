@@ -217,13 +217,19 @@ skills_run(skill, path, args)                  -> run a bundled script; OFF unle
 replacing them: `read_file`, which shows a file's real bytes with line numbers;
 `edit_file`, which replaces one exact string in one file; `write_file`, which
 creates a file or deliberately replaces one whole; `shell`, which runs a command
-line in the session's working directory; and `apply_patch`, which changes several
-files at once by anchored hunks, all or nothing. A skill's instructions and a
-command the model writes are useful in the same turn.
+line in the current working directory; and `apply_patch`, which changes several
+files at once by anchored hunks, all or nothing. A Web/CLI conversation keeps that
+directory for its session. An OpenAI or Ollama request keeps an isolated directory
+for every internal tool round in that request and deletes it afterward, preserving
+cross-request statelessness without forcing a repair round to regenerate a file
+the preceding round just created. A skill's instructions and a command the model
+writes are useful in the same turn.
 
-The split is the two references', not an invention. Claude Code's editing surface
-is `Read`/`Edit`/`Write` and contains no diff format at all; Codex's is a shell
-plus the `apply_patch` envelope. Each is kept for the job it actually solved —
+The split follows the reference tools: [Claude Code's editing
+surface](https://code.claude.com/docs/en/tools-reference#edit-tool-behavior) is
+`Read`/`Edit`/`Write`, while [Codex exposes precise diffs through
+`apply_patch`](https://developers.openai.com/api/docs/guides/tools-apply-patch).
+Each is kept for the job it actually solved —
 string replacement for the common one-file change, an atomic envelope for the
 multi-file one — because emitting a patch and reading one are different problems
 with different right answers, and a small model gets the envelope wrong far more
@@ -276,6 +282,15 @@ understand skills, which is exactly the clients that do not need it. Because
 these particular tools are read-only and confined to a directory the operator
 already chose to expose, TensorSharp can answer them itself. That is what makes
 progressive disclosure work over a stateless HTTP API at all.
+
+**Stateless does not mean stateless between the tool calls inside one request.**
+When code execution is available, the OpenAI chat, OpenAI Responses and Ollama
+chat adapters allocate a private request workspace before entering a tool-compatible
+loop. A generated file, its failing test, an exact `edit_file` repair and the
+successful rerun therefore operate on the same bytes. The workspace is released
+after the buffered or streaming response ends (including rejection and cancellation);
+another HTTP request never inherits it. With skill-script execution but no code
+runner, scripts retain their per-call scratch directories.
 
 **The caller's own tools are never executed.** A turn that calls one stops the
 loop, and the call is returned to the caller as a normal `tool_calls` response

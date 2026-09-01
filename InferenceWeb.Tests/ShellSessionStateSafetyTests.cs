@@ -77,6 +77,27 @@ public sealed class ShellSessionStateSafetyTests : IDisposable
             return; // Windows needs Developer Mode or an elevated token to create one.
 
         Assert.False(ShellSession.TryReadStateText(CwdFile, out _));
+        Assert.False(ShellSession.TryReadBoundedRegularTextUnderRoot(
+            _workspace.ShellStateDirectory, CwdFile, 128 * 1024, out _));
+    }
+
+    [Fact]
+    public void ParentDirectorySymlinkCannotRedirectABoundedWorkspaceRead()
+    {
+        string outside = Path.Combine(_base, "outside-parent");
+        string nested = Path.Combine(outside, "source.py");
+        string link = Path.Combine(_workspace.ShellStateDirectory, "linked-parent");
+        Directory.CreateDirectory(outside);
+        File.WriteAllText(nested, "SECRET_OUTSIDE_SOURCE\n");
+        if (!TryCreateDirectorySymlink(link, outside))
+            return;
+
+        Assert.False(ShellSession.TryReadBoundedRegularTextUnderRoot(
+            _workspace.ShellStateDirectory,
+            Path.Combine(link, "source.py"),
+            128 * 1024,
+            out string text));
+        Assert.Empty(text);
     }
 
     [Fact]
@@ -119,6 +140,22 @@ public sealed class ShellSessionStateSafetyTests : IDisposable
     }
 
     [Fact]
+    public void RootAnchoredReaderAcceptsTheExactCapAndRejectsOneByteMore()
+    {
+        const int cap = 128 * 1024;
+        string path = Path.Combine(_workspace.ShellStateDirectory, "at-cap");
+        File.WriteAllText(path, new string('x', cap));
+
+        Assert.True(ShellSession.TryReadBoundedRegularTextUnderRoot(
+            _workspace.ShellStateDirectory, path, cap, out string text));
+        Assert.Equal(cap, text.Length);
+
+        File.AppendAllText(path, "x");
+        Assert.False(ShellSession.TryReadBoundedRegularTextUnderRoot(
+            _workspace.ShellStateDirectory, path, cap, out _));
+    }
+
+    [Fact]
     public void FifoStateIsRejectedWithoutWaitingForInput()
     {
         if (OperatingSystem.IsWindows())
@@ -136,13 +173,25 @@ public sealed class ShellSessionStateSafetyTests : IDisposable
         Assert.True(fd >= 0, $"open failed with errno {Marshal.GetLastWin32Error()}");
 
         using var keeper = new SafeFileHandle((IntPtr)fd, ownsHandle: true);
+        AssertFifoRejectedWithoutBlocking(
+            () => ShellSession.TryReadStateText(path, out _), keeper, "state reader");
+        AssertFifoRejectedWithoutBlocking(
+            () => ShellSession.TryReadBoundedRegularTextUnderRoot(
+                _workspace.ShellStateDirectory, path, 128 * 1024, out _),
+            keeper,
+            "root-anchored reader");
+    }
+
+    private static void AssertFifoRejectedWithoutBlocking(
+        Func<bool> read, SafeFileHandle keeper, string readerName)
+    {
         bool accepted = false;
         Exception? failure = null;
         var reader = new Thread(() =>
         {
             try
             {
-                accepted = ShellSession.TryReadStateText(path, out _);
+                accepted = read();
             }
             catch (Exception ex)
             {
@@ -163,8 +212,102 @@ public sealed class ShellSessionStateSafetyTests : IDisposable
         }
 
         Assert.Null(failure);
-        Assert.True(completedWithoutRescue, "the state reader blocked on a FIFO");
+        Assert.True(completedWithoutRescue, $"the {readerName} blocked on a FIFO");
         Assert.False(accepted);
+    }
+
+    [Fact]
+    public async Task ConcurrentLeafReplacementReturnsOneCompleteVersion()
+    {
+        string path = Path.Combine(_workspace.ShellStateDirectory, "replaced-source");
+        string first = new('a', 64 * 1024);
+        string second = new('b', 64 * 1024);
+        File.WriteAllText(path, first);
+
+        using var stop = new CancellationTokenSource();
+        Task writer = Task.Run(() =>
+        {
+            int sequence = 0;
+            while (!stop.IsCancellationRequested)
+            {
+                string replacement = path + "."
+                    + (sequence++).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                File.WriteAllText(replacement, (sequence & 1) == 0 ? first : second);
+                try
+                {
+                    File.Move(replacement, path, overwrite: true);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    try { File.Delete(replacement); } catch { /* best effort */ }
+                }
+            }
+        });
+
+        try
+        {
+            for (int i = 0; i < 100; i++)
+            {
+                bool read = ShellSession.TryReadBoundedRegularTextUnderRoot(
+                    _workspace.ShellStateDirectory, path, 128 * 1024, out string text);
+                Assert.True(!read || text == first || text == second,
+                    "a path replacement must never produce mixed or partial content");
+            }
+        }
+        finally
+        {
+            stop.Cancel();
+            await writer.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    [Fact]
+    public async Task ConcurrentParentSwapNeverReadsThroughTheOutsideSymlink()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        string root = _workspace.ShellStateDirectory;
+        string outside = Path.Combine(_base, "swap-outside");
+        string active = Path.Combine(root, "swap-parent");
+        string parked = Path.Combine(root, "swap-parent-parked");
+        string link = Path.Combine(root, "swap-parent-link");
+        Directory.CreateDirectory(outside);
+        Directory.CreateDirectory(active);
+        File.WriteAllText(Path.Combine(active, "source.py"), "INSIDE\n");
+        File.WriteAllText(Path.Combine(outside, "source.py"), "SECRET_OUTSIDE\n");
+        if (!TryCreateDirectorySymlink(link, outside))
+            return;
+
+        using var stop = new CancellationTokenSource();
+        Task toggler = Task.Run(() =>
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                Rename(active, parked);
+                Rename(link, active);
+                Rename(active, link);
+                Rename(parked, active);
+                Thread.Yield();
+            }
+        });
+
+        try
+        {
+            string source = Path.Combine(active, "source.py");
+            for (int i = 0; i < 500; i++)
+            {
+                bool read = ShellSession.TryReadBoundedRegularTextUnderRoot(
+                    root, source, 128 * 1024, out string text);
+                Assert.True(!read || text == "INSIDE\n",
+                    "a parent swap redirected a workspace read outside its root");
+            }
+        }
+        finally
+        {
+            stop.Cancel();
+            await toggler.WaitAsync(TimeSpan.FromSeconds(5));
+        }
     }
 
     private string CwdFile => Path.Combine(_workspace.ShellStateDirectory, "cwd");
@@ -204,4 +347,15 @@ public sealed class ShellSessionStateSafetyTests : IDisposable
     [DllImport("libc", EntryPoint = "open", SetLastError = true)]
     private static extern int OpenUnix(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
+
+    private static void Rename(string from, string to)
+    {
+        if (RenameUnix(from, to) != 0)
+            throw new IOException($"rename failed with errno {Marshal.GetLastWin32Error()}");
+    }
+
+    [DllImport("libc", EntryPoint = "rename", SetLastError = true)]
+    private static extern int RenameUnix(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string from,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string to);
 }

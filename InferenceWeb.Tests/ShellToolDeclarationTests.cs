@@ -647,9 +647,9 @@ public class ShellToolDeclarationTests : IDisposable
     [Fact]
     public void WithoutAPersistentWorkspace_OnlyTheShellIsDeclared()
     {
-        // The stateless endpoints get a fresh empty directory per call, so a file tool
-        // would offer capability the host cannot honour: nothing is there to read, and
-        // nothing written survives the call. This branch previously had no test at all.
+        // A direct caller that provides no request/session workspace gets a fresh empty
+        // directory per call, so a file tool would offer capability the host cannot
+        // honour: nothing is there to read, and nothing written survives the call.
         Assert.Equal(
             new[] { "shell" },
             _adapter.DeclareTools(persists: false).Select(t => t.Name).ToArray());

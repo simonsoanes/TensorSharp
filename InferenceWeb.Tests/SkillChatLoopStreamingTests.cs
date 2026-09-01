@@ -110,6 +110,20 @@ public class SkillChatLoopStreamingTests : IDisposable
         return plan;
     }
 
+    private SkillRequestPlan CodePlan(ICodeRunner codeRunner, SessionWorkspace workspace)
+    {
+        var registry = new SkillRegistry(new SkillRegistryOptions { Roots = new[] { _baseDir } });
+        ServerHostingOptions options = ServerOptionsBuilder.Build(
+            new[] { "--model", "x.gguf", "--skills-dir", _baseDir }, _baseDir);
+        SkillRequestPlan plan = SkillRequestPlan.Create(
+            registry, Array.Empty<string>(), false, null, Architecture,
+            contextTokens: 32768, options, out IReadOnlyList<string> unknown,
+            codeRunner: codeRunner, workspace: workspace);
+        Assert.Empty(unknown);
+        Assert.NotNull(plan);
+        return plan;
+    }
+
     /// <summary>
     /// A generator that replays canned rounds one CHARACTER at a time, which is the
     /// worst case a real token stream can present: every marker is split across updates,
@@ -344,6 +358,83 @@ public class SkillChatLoopStreamingTests : IDisposable
             ToolCall call, IReadOnlyList<CodeInputFile> inputFiles = null, Action<string> onOutput = null,
             SessionWorkspace workspace = null, IReadOnlyList<string> skillDirectories = null) =>
             SkillToolResult.Failure("not used in these tests");
+    }
+
+    [Fact]
+    public async Task Cancellation_DetachesTheRequest_ButDefersWorkspaceDeleteUntilItsWorkerStops()
+    {
+        string workspaceRoot = Path.Combine(_baseDir, "request-workspaces");
+        var manager = new SessionWorkspaceManager(workspaceRoot);
+        var runner = new BlockingRunner();
+        RequestWorkspaceLease lease = Assert.IsType<RequestWorkspaceLease>(
+            RequestWorkspaceLease.Acquire(manager, runner, Architecture));
+        string leasedRoot = lease.Workspace.Root;
+        SkillRequestPlan plan = CodePlan(runner, lease.Workspace);
+        using var cancelled = new CancellationTokenSource();
+
+        var messages = new List<ChatMessage> { new() { Role = "user", Content = "run it" } };
+        Task<List<ChatStreamUpdate>> drain = Drain(SkillChatLoop.RunAsync(
+            Architecture, messages, plan, enableThinking: true,
+            Replay("<think>run</think><tool_call>\n{\"name\": \"shell\", \"arguments\": {\"command\": \"wait\"}}\n</tool_call>"),
+            logger: null, cancelled.Token));
+
+        try
+        {
+            await runner.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            cancelled.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => drain);
+
+            // This is the adapter's method-scope using/finally on an aborted stream.
+            lease.Dispose();
+            Assert.True(Directory.Exists(leasedRoot),
+                "request disposal must not delete a directory under an in-flight tool");
+
+            runner.AllowCompletion();
+            await runner.Completed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True(SpinWait.SpinUntil(() => !Directory.Exists(leasedRoot), TimeSpan.FromSeconds(5)),
+                "the deferred release should delete as soon as the worker exits");
+        }
+        finally
+        {
+            runner.AllowCompletion();
+            lease.Dispose();
+        }
+    }
+
+    private sealed class BlockingRunner : ICodeRunner
+    {
+        private readonly ManualResetEventSlim _continue = new(false);
+
+        public TaskCompletionSource<bool> Started { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource<bool> Completed { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public bool CanRun => true;
+        public string UnavailableReason => null;
+
+        public ToolFunction Declare() =>
+            new() { Name = SkillToolNames.Shell, Description = "runs commands" };
+
+        public SkillToolResult Execute(
+            ToolCall call, IReadOnlyList<CodeInputFile> inputFiles = null,
+            Action<string> onOutput = null, SessionWorkspace workspace = null,
+            IReadOnlyList<string> skillDirectories = null)
+        {
+            Started.TrySetResult(true);
+            try
+            {
+                _continue.Wait();
+                return new SkillToolResult(true, "done", null, null);
+            }
+            finally
+            {
+                Completed.TrySetResult(true);
+            }
+        }
+
+        public void AllowCompletion() => _continue.Set();
     }
 
     [Fact]

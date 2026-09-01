@@ -267,8 +267,25 @@ namespace TensorSharp.Server.Skills
                     // arrive on the process's reader threads and drain into the
                     // heartbeat frames the user is already watching.
                     var liveOutput = new LiveOutputBuffer();
-                    Task<SkillToolResult> execution = Task.Run(
-                        () => SkillTools.Execute(call, plan.ToolContext, liveOutput.Add));
+                    // Acquire BEFORE scheduling. Request cancellation can dispose this
+                    // async iterator before the worker even starts; holding the operation
+                    // here lets the request lease detach immediately while deferring
+                    // workspace deletion until the worker's finally has run.
+                    IDisposable workspaceOperation = plan.ToolContext?.Workspace?.BeginOperation();
+                    Task<SkillToolResult> execution;
+                    try
+                    {
+                        execution = Task.Run(() =>
+                        {
+                            using (workspaceOperation)
+                                return SkillTools.Execute(call, plan.ToolContext, liveOutput.Add);
+                        });
+                    }
+                    catch
+                    {
+                        workspaceOperation?.Dispose();
+                        throw;
+                    }
                     var executionClock = Stopwatch.StartNew();
                     while (await Task.WhenAny(execution, Task.Delay(1000, cancellationToken)).ConfigureAwait(false) != execution)
                     {

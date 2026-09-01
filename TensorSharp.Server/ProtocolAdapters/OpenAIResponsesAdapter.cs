@@ -35,7 +35,9 @@ namespace TensorSharp.Server.ProtocolAdapters
     /// chaining is rejected outright (there is no cross-request session to
     /// chain against), and <c>store</c> only controls whether the completed
     /// response is cached in <see cref="IResponsesStore"/> for later retrieval
-    /// by id, not whether it is used as future context.
+    /// by id, not whether it is used as future context. Internal code-tool rounds
+    /// share one temporary request workspace, which is deleted before this method
+    /// returns and never becomes cross-request state.
     /// </summary>
     internal sealed class OpenAIResponsesAdapter
     {
@@ -45,6 +47,7 @@ namespace TensorSharp.Server.ProtocolAdapters
         private readonly UploadStoragePolicy _uploads;
         private readonly SkillRegistry _skills;
         private readonly ICodeRunner? _codeRunner;
+        private readonly SessionWorkspaceManager _workspaces;
         private readonly ILoggerFactory _loggerFactory;
         private readonly IResponsesStore _store;
 
@@ -55,6 +58,7 @@ namespace TensorSharp.Server.ProtocolAdapters
             UploadStoragePolicy uploads,
             SkillRegistry skills,
             ICodeRunner? codeRunner,
+            SessionWorkspaceManager workspaces,
             ILoggerFactory loggerFactory,
             IResponsesStore store)
         {
@@ -64,6 +68,7 @@ namespace TensorSharp.Server.ProtocolAdapters
             _uploads = uploads ?? throw new ArgumentNullException(nameof(uploads));
             _skills = skills ?? throw new ArgumentNullException(nameof(skills));
             _codeRunner = codeRunner;
+            _workspaces = workspaces;
             _loggerFactory = loggerFactory ?? throw new ArgumentNullException(nameof(loggerFactory));
             _store = store ?? throw new ArgumentNullException(nameof(store));
         }
@@ -167,10 +172,14 @@ namespace TensorSharp.Server.ProtocolAdapters
             if (responseFormat != null && !await ValidateStructuredOutputCompatibilityAsync(ctx, responseFormat, enableThinking, tools))
                 return;
 
+            using RequestWorkspaceLease workspaceLease = RequestWorkspaceLease.Acquire(
+                _workspaces, _codeRunner, _svc.Architecture, allowTools: responseFormat == null);
+
             var skillPlan = SkillRequestPlan.Create(
                 _skills, requestedSkills, SkillSelectionParser.ParseDiscovery(body), tools,
                 _svc.Architecture, _svc.ContextTokens, _options, out var unknownSkills,
-                allowTools: responseFormat == null, codeRunner: _codeRunner, logger: logger);
+                allowTools: responseFormat == null, codeRunner: _codeRunner,
+                workspace: workspaceLease?.Workspace, logger: logger);
 
             if (unknownSkills.Count > 0)
             {

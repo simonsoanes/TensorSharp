@@ -110,45 +110,24 @@ namespace TensorSharp.AgentHost.CodeExec
         /// </para>
         /// </summary>
         internal static bool TryReadStateText(string path, out string text)
+            => TryReadBoundedRegularText(path, MaxStateFileBytes, out text);
+
+        /// <summary>
+        /// Read a bounded regular file through the exact no-follow handle that was
+        /// inspected. This is also used for model-authored source locations: those paths
+        /// can be replaced with a link, FIFO, device or socket after a command exits, so
+        /// checking a <see cref="FileInfo"/> and then reopening by name is not safe.
+        /// </summary>
+        internal static bool TryReadBoundedRegularText(string path, int maxBytes, out string text)
         {
             text = string.Empty;
+            if (maxBytes < 0)
+                return false;
             try
             {
                 using SafeFileHandle? handle = OpenStateFileNoFollow(path);
-                if (handle == null || handle.IsInvalid
-                    || !TryGetRegularFileLength(handle, out long length)
-                    || length < 0 || length > MaxStateFileBytes)
-                {
-                    return false;
-                }
-
-                // One extra byte detects a file extended after fstat/GetFileInformation.
-                // A shrink is rejected by the exact-length check below. Both make a
-                // concurrently rewritten state file cost one fallback, not a torn path.
-                byte[] bytes = new byte[checked((int)length + 1)];
-                int total = 0;
-                bool reachedEnd = false;
-                while (total < bytes.Length)
-                {
-                    int read = RandomAccess.Read(handle, bytes.AsSpan(total), total);
-                    if (read == 0)
-                    {
-                        reachedEnd = true;
-                        break;
-                    }
-                    total += read;
-                }
-                if (!reachedEnd || total != (int)length)
-                    return false;
-
-                // Windows PowerShell 5.1 writes UTF-16 with a BOM; PowerShell 7 and the
-                // POSIX wrappers write UTF-8. StreamReader retains File.ReadAllText's BOM
-                // detection while operating only on the bounded bytes above.
-                using var memory = new MemoryStream(bytes, 0, total, writable: false, publiclyVisible: false);
-                using var reader = new StreamReader(memory, Encoding.UTF8,
-                    detectEncodingFromByteOrderMarks: true, bufferSize: 1024, leaveOpen: false);
-                text = reader.ReadToEnd();
-                return true;
+                return handle != null && !handle.IsInvalid
+                    && TryReadBoundedRegularText(handle, maxBytes, out text);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
                                           or ArgumentException or NotSupportedException
@@ -157,6 +136,76 @@ namespace TensorSharp.AgentHost.CodeExec
                 text = string.Empty;
                 return false;
             }
+        }
+
+        /// <summary>
+        /// The workspace form additionally anchors every path component to an already
+        /// open root. A background process can rename a parent directory between path
+        /// validation and the read; opening each Unix component with openat/no-follow,
+        /// or validating the Windows file handle's final path against the root handle,
+        /// prevents that race from redirecting a diagnostic excerpt outside the worktree.
+        /// </summary>
+        internal static bool TryReadBoundedRegularTextUnderRoot(
+            string root, string path, int maxBytes, out string text)
+        {
+            text = string.Empty;
+            if (maxBytes < 0)
+                return false;
+            try
+            {
+                using SafeFileHandle? handle = OpenFileUnderRootNoFollow(root, path);
+                return handle != null && !handle.IsInvalid
+                    && TryReadBoundedRegularText(handle, maxBytes, out text);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                          or ArgumentException or NotSupportedException
+                                          or DllNotFoundException or EntryPointNotFoundException)
+            {
+                text = string.Empty;
+                return false;
+            }
+        }
+
+        private static bool TryReadBoundedRegularText(
+            SafeFileHandle handle, int maxBytes, out string text)
+        {
+            text = string.Empty;
+            if (!TryGetRegularFileSnapshot(handle, out RegularFileSnapshot before)
+                || before.Length < 0 || before.Length > maxBytes || before.Length >= int.MaxValue)
+            {
+                return false;
+            }
+            long length = before.Length;
+
+            // One extra byte detects a file extended after fstat/GetFileInformation.
+            // A shrink is rejected by the exact-length check below. Both make a
+            // concurrently rewritten file cost one fallback, not a torn excerpt.
+            byte[] bytes = new byte[checked((int)length + 1)];
+            int total = 0;
+            bool reachedEnd = false;
+            while (total < bytes.Length)
+            {
+                int read = RandomAccess.Read(handle, bytes.AsSpan(total), total);
+                if (read == 0)
+                {
+                    reachedEnd = true;
+                    break;
+                }
+                total += read;
+            }
+            if (!reachedEnd || total != (int)length
+                || !TryGetRegularFileSnapshot(handle, out RegularFileSnapshot after)
+                || after != before)
+                return false;
+
+            // Windows PowerShell 5.1 writes UTF-16 with a BOM; PowerShell 7 and the
+            // POSIX wrappers write UTF-8. StreamReader retains File.ReadAllText's BOM
+            // detection while operating only on the bounded bytes above.
+            using var memory = new MemoryStream(bytes, 0, total, writable: false, publiclyVisible: false);
+            using var reader = new StreamReader(memory, Encoding.UTF8,
+                detectEncodingFromByteOrderMarks: true, bufferSize: 1024, leaveOpen: false);
+            text = reader.ReadToEnd();
+            return true;
         }
 
         /// <summary>
@@ -197,9 +246,135 @@ namespace TensorSharp.AgentHost.CodeExec
             return fd < 0 ? null : new SafeFileHandle((IntPtr)fd, ownsHandle: true);
         }
 
-        private static bool TryGetRegularFileLength(SafeFileHandle handle, out long length)
+        private static SafeFileHandle? OpenFileUnderRootNoFollow(string root, string path)
         {
-            length = -1;
+            string fullRoot = Path.GetFullPath(root);
+            string fullPath = Path.GetFullPath(path);
+            string relative = Path.GetRelativePath(fullRoot, fullPath);
+            string[] segments = relative.Split(
+                new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+                StringSplitOptions.RemoveEmptyEntries);
+            if (segments.Length == 0 || Path.IsPathRooted(relative)
+                || segments.Any(segment => segment is "." or ".."))
+            {
+                return null;
+            }
+
+            if (OperatingSystem.IsWindows())
+                return OpenWindowsFileUnderRoot(fullRoot, fullPath);
+            if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+                return null;
+
+            int noFollow = OperatingSystem.IsMacOS() ? MacONoFollow : LinuxONoFollow;
+            int closeExec = OperatingSystem.IsMacOS() ? MacOCloseExec : LinuxOCloseExec;
+            int directoryFlag = OperatingSystem.IsMacOS() ? MacODirectory : LinuxODirectory;
+            int nonBlock = OperatingSystem.IsMacOS() ? MacONonBlock : LinuxONonBlock;
+
+            int rootFd;
+            do
+            {
+                rootFd = OpenUnix(fullRoot, noFollow | closeExec | directoryFlag);
+            }
+            while (rootFd < 0 && Marshal.GetLastWin32Error() == InterruptedSystemCall);
+            if (rootFd < 0)
+                return null;
+
+            SafeFileHandle? directory = new((IntPtr)rootFd, ownsHandle: true);
+            try
+            {
+                for (int index = 0; index < segments.Length; index++)
+                {
+                    bool leaf = index == segments.Length - 1;
+                    int flags = noFollow | closeExec
+                              | (leaf ? nonBlock : directoryFlag);
+                    int fd;
+                    do
+                    {
+                        fd = OpenAtUnix(
+                            directory.DangerousGetHandle().ToInt32(), segments[index], flags);
+                    }
+                    while (fd < 0 && Marshal.GetLastWin32Error() == InterruptedSystemCall);
+                    if (fd < 0)
+                        return null;
+
+                    var next = new SafeFileHandle((IntPtr)fd, ownsHandle: true);
+                    if (leaf)
+                        return next;
+
+                    directory.Dispose();
+                    directory = next;
+                }
+                return null;
+            }
+            finally
+            {
+                directory.Dispose();
+            }
+        }
+
+        private static SafeFileHandle? OpenWindowsFileUnderRoot(string root, string path)
+        {
+            // Final-handle comparison rejects ordinary intermediate junctions and swaps.
+            // Windows code execution is available only through the explicit unconfined
+            // mode, so this is defense in depth rather than a filesystem-isolation claim:
+            // an adversarial host-user process can also rename the root itself.
+            using SafeFileHandle rootHandle = CreateFileW(
+                root, 0, FileShareRead | FileShareWrite | FileShareDelete, IntPtr.Zero,
+                OpenExisting,
+                FileFlagOpenReparsePoint | FileFlagBackupSemantics | SecuritySqosPresent,
+                IntPtr.Zero);
+            if (rootHandle.IsInvalid
+                || !GetFileInformationByHandle(rootHandle, out ByHandleFileInformation rootInfo)
+                || (rootInfo.FileAttributes & FileAttributeDirectory) == 0
+                || (rootInfo.FileAttributes & FileAttributeReparsePoint) != 0
+                || !TryGetFinalPath(rootHandle, out string finalRoot))
+            {
+                return null;
+            }
+
+            SafeFileHandle fileHandle = CreateFileW(
+                path, GenericRead, FileShareRead | FileShareDelete, IntPtr.Zero,
+                OpenExisting, FileFlagOpenReparsePoint | SecuritySqosPresent, IntPtr.Zero);
+            if (fileHandle.IsInvalid || !TryGetFinalPath(fileHandle, out string finalFile))
+            {
+                fileHandle.Dispose();
+                return null;
+            }
+
+            string rootPrefix = finalRoot.TrimEnd('\\', '/') + "\\";
+            string normalizedFile = finalFile.Replace('/', '\\');
+            if (!normalizedFile.StartsWith(rootPrefix.Replace('/', '\\'), StringComparison.OrdinalIgnoreCase))
+            {
+                fileHandle.Dispose();
+                return null;
+            }
+            return fileHandle;
+        }
+
+        private static bool TryGetFinalPath(SafeFileHandle handle, out string path)
+        {
+            path = string.Empty;
+            var buffer = new StringBuilder(512);
+            uint length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, 0);
+            if (length == 0)
+                return false;
+            if (length >= (uint)buffer.Capacity)
+            {
+                if (length >= 32768)
+                    return false;
+                buffer = new StringBuilder(checked((int)length + 1));
+                length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, 0);
+                if (length == 0 || length >= (uint)buffer.Capacity)
+                    return false;
+            }
+            path = buffer.ToString();
+            return path.Length > 0;
+        }
+
+        private static bool TryGetRegularFileSnapshot(
+            SafeFileHandle handle, out RegularFileSnapshot snapshot)
+        {
+            snapshot = default;
             if (OperatingSystem.IsWindows())
             {
                 if (GetFileType(handle) != FileTypeDisk
@@ -212,7 +387,12 @@ namespace TensorSharp.AgentHost.CodeExec
                 ulong unsignedLength = ((ulong)info.FileSizeHigh << 32) | info.FileSizeLow;
                 if (unsignedLength > long.MaxValue)
                     return false;
-                length = (long)unsignedLength;
+                snapshot = new RegularFileSnapshot(
+                    (long)unsignedLength,
+                    info.VolumeSerialNumber,
+                    ((ulong)info.FileIndexHigh << 32) | info.FileIndexLow,
+                    ((ulong)info.LastWriteTime.HighDateTime << 32) | info.LastWriteTime.LowDateTime,
+                    0);
                 return true;
             }
 
@@ -228,20 +408,33 @@ namespace TensorSharp.AgentHost.CodeExec
 
                 if (result == 0 && (status.Mode & UnixFileTypeMask) == UnixRegularFile)
                 {
-                    length = status.Size;
+                    snapshot = new RegularFileSnapshot(
+                        status.Size,
+                        unchecked((ulong)status.Dev),
+                        unchecked((ulong)status.Ino),
+                        CombineUnixTime(status.MTime, status.MTimeNsec),
+                        CombineUnixTime(status.CTime, status.CTimeNsec));
                     return true;
                 }
             }
             return false;
         }
 
+        private static ulong CombineUnixTime(long seconds, long nanoseconds) =>
+            unchecked((ulong)seconds * 1_000_000_000UL + (ulong)nanoseconds);
+
+        private readonly record struct RegularFileSnapshot(
+            long Length, ulong Device, ulong Identity, ulong Modified, ulong Changed);
+
         // open(2) flag values are ABI values, not POSIX constants, and differ between
         // Linux and Darwin. O_RDONLY is zero on both platforms.
         private const int LinuxONonBlock = 0x00000800;
+        private const int LinuxODirectory = 0x00010000;
         private const int LinuxONoFollow = 0x00020000;
         private const int LinuxOCloseExec = 0x00080000;
         private const int MacONonBlock = 0x00000004;
         private const int MacONoFollow = 0x00000100;
+        private const int MacODirectory = 0x00100000;
         private const int MacOCloseExec = 0x01000000;
         private const int InterruptedSystemCall = 4;
 
@@ -254,6 +447,7 @@ namespace TensorSharp.AgentHost.CodeExec
         private const uint FileShareDelete = 0x00000004;
         private const uint OpenExisting = 3;
         private const uint SecuritySqosPresent = 0x00100000;
+        private const uint FileFlagBackupSemantics = 0x02000000;
         private const uint FileFlagOpenReparsePoint = 0x00200000;
         private const uint FileTypeDisk = 0x0001;
         private const uint FileAttributeDirectory = 0x00000010;
@@ -262,6 +456,12 @@ namespace TensorSharp.AgentHost.CodeExec
         [DllImport("libc", EntryPoint = "open", SetLastError = true)]
         private static extern int OpenUnix(
             [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
+
+        [DllImport("libc", EntryPoint = "openat", SetLastError = true)]
+        private static extern int OpenAtUnix(
+            int directoryFd,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+            int flags);
 
         [DllImport("libSystem.Native", EntryPoint = "SystemNative_FStat", SetLastError = true)]
         private static extern int FStatUnix(SafeFileHandle handle, out UnixFileStatus status);
@@ -279,6 +479,11 @@ namespace TensorSharp.AgentHost.CodeExec
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool GetFileInformationByHandle(
             SafeFileHandle handle, out ByHandleFileInformation information);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode,
+            ExactSpelling = true, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandleW(
+            SafeFileHandle handle, StringBuilder path, uint pathLength, uint flags);
 
         /// <summary>
         /// Stable layout exported by the .NET runtime's System.Native shim. Using its

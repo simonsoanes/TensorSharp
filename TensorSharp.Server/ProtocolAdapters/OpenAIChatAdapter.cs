@@ -48,6 +48,7 @@ namespace TensorSharp.Server.ProtocolAdapters
         private readonly UploadStoragePolicy _uploads;
         private readonly SkillRegistry _skills;
         private readonly ICodeRunner? _codeRunner;
+        private readonly SessionWorkspaceManager _workspaces;
         private readonly ILoggerFactory _loggerFactory;
 
         public OpenAIChatAdapter(
@@ -57,6 +58,7 @@ namespace TensorSharp.Server.ProtocolAdapters
             UploadStoragePolicy uploads,
             SkillRegistry skills,
             ICodeRunner? codeRunner,
+            SessionWorkspaceManager workspaces,
             ILoggerFactory loggerFactory)
         {
             _svc = svc ?? throw new ArgumentNullException(nameof(svc));
@@ -65,6 +67,7 @@ namespace TensorSharp.Server.ProtocolAdapters
             _uploads = uploads ?? throw new ArgumentNullException(nameof(uploads));
             _skills = skills ?? throw new ArgumentNullException(nameof(skills));
             _codeRunner = codeRunner;
+            _workspaces = workspaces;
             _loggerFactory = loggerFactory ?? throw new ArgumentNullException(nameof(loggerFactory));
         }
 
@@ -175,10 +178,14 @@ namespace TensorSharp.Server.ProtocolAdapters
             if (responseFormat != null && !await ValidateStructuredOutputCompatibilityAsync(ctx, responseFormat, openaiThink, openaiTools))
                 return;
 
+            using RequestWorkspaceLease workspaceLease = RequestWorkspaceLease.Acquire(
+                _workspaces, _codeRunner, _svc.Architecture, allowTools: responseFormat == null);
+
             var skillPlan = SkillRequestPlan.Create(
                 _skills, requestedSkills, SkillSelectionParser.ParseDiscovery(body), openaiTools,
                 _svc.Architecture, _svc.ContextTokens, _options, out var unknownSkills,
-                allowTools: responseFormat == null, codeRunner: _codeRunner, logger: openaiLogger);
+                allowTools: responseFormat == null, codeRunner: _codeRunner,
+                workspace: workspaceLease?.Workspace, logger: openaiLogger);
 
             if (unknownSkills.Count > 0)
             {

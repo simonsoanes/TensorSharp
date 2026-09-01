@@ -56,7 +56,7 @@ namespace TensorSharp.AgentHost.CodeExec
         /// </summary>
         /// <param name="fileTools">
         /// Whether <c>read_file</c>, <c>edit_file</c> and <c>write_file</c> are declared.
-        /// A stateless endpoint has none of them, and telling such a model to "use
+        /// A caller with no workspace has none of them, and telling such a model to "use
         /// edit_file" names a tool it was never given — the one failure worse than saying
         /// nothing, because the model cannot tell that the instruction is inapplicable
         /// rather than that it has misread its own tool list.

@@ -100,11 +100,10 @@ namespace TensorSharp.Server.Skills
         /// True when this plan changes nothing about the request.
         ///
         /// <para>
-        /// No longer the same question as "is the prompt empty". A code-only plan renders
-        /// no instruction block at all — its <see cref="Prompt"/> is
-        /// <see cref="SkillPlan.Empty"/> — while still declaring <c>shell</c> and
-        /// carrying the runner that answers it. Reading the prompt alone would report such
-        /// a plan as inert and invite a caller to drop it, silently disabling the feature.
+        /// No longer the same question as "is the prompt empty". A code-only plan may
+        /// carry tools even if a future architecture or host chooses not to render an
+        /// instruction block. Reading the prompt alone would then report that plan as
+        /// inert and invite a caller to drop it, silently disabling the feature.
         /// </para>
         /// </summary>
         public bool IsEmpty => Prompt.IsEmpty && !ToolsOffered;
@@ -182,8 +181,8 @@ namespace TensorSharp.Server.Skills
         /// the real attachment instead of re-typing its content into the source.
         /// </param>
         /// <param name="workspace">
-        /// The session's persistent workspace, shared by <c>shell</c> and skill
-        /// scripts. Null on hosts (or protocols) that keep the call-scoped scratch.
+        /// The request/session workspace, shared by <c>shell</c> and skill scripts. Null
+        /// on hosts that keep call-scoped scratch.
         /// </param>
         /// <param name="captureProducedFiles">
         /// How files a skill script produced become user-downloadable. Only used
@@ -431,11 +430,6 @@ namespace TensorSharp.Server.Skills
         }
 
         /// <summary>
-        /// Splice the code-execution tools into a tool list, without disturbing what is
-        /// there. Both of them: the program runner, and the delta editor that fixes the
-        /// last program without resending it.
-        /// </summary>
-        /// <summary>
         /// The editing rules as a plan, derived from what was actually declared.
         ///
         /// <para>
@@ -484,9 +478,9 @@ namespace TensorSharp.Server.Skills
             if (shell == null)
                 return Merge(merged, declarations, persists);
 
-            // Without a session workspace — every stateless API surface: /v1/chat/completions,
-            // /v1/responses, Ollama — each command gets a throwaway directory that is deleted
-            // when the call returns. The declaration is written for the persistent case and
+            // Without a request/session workspace each command gets a throwaway directory
+            // that is deleted when the call returns. The declaration is written for the
+            // persistent case and
             // says so at length, and a model that believes it writes a file in one call and
             // reads it back in the next, finds nothing, and concludes its own program is
             // broken. Say what is actually true here, and do not offer apply_patch at all:

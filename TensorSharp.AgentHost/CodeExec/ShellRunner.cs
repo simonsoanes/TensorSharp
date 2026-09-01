@@ -66,15 +66,15 @@ namespace TensorSharp.AgentHost.CodeExec
     }
 
     /// <summary>
-    /// Runs the model's shell commands, and applies its patches.
+    /// Runs the model's shell commands and backs its read/edit/write/patch tools.
     ///
     /// <para>
-    /// The whole tool surface is two things — a shell and a patch applier — because that
-    /// is the smallest set that covers the work. Everything the previous five tools did
-    /// is a command: writing a file is a heredoc, reading one is <c>sed -n</c>, listing
-    /// is <c>ls</c>, installing is <c>pip install</c>, and running is running. What a
-    /// shell genuinely cannot do well is change three lines of a file without re-emitting
-    /// the other three hundred, so that one capability stays a host-implemented program.
+    /// The surface separates execution from mutation: the shell runs and verifies code;
+    /// <c>read_file</c> supplies bounded current context; <c>edit_file</c> performs the
+    /// common exact local repair; <c>write_file</c> creates or intentionally replaces a
+    /// whole file; and <c>apply_patch</c> makes an atomic multi-file change. Keeping local
+    /// fixes out of heredocs is what avoids re-emitting and re-rolling hundreds of lines
+    /// that were already correct.
     /// </para>
     /// <para>
     /// Nothing about the CONFINEMENT changed, and that is deliberate: the sandbox, the
@@ -274,8 +274,8 @@ namespace TensorSharp.AgentHost.CodeExec
         /// <param name="request">What to run.</param>
         /// <param name="workspace">
         /// The session's workspace. Null gets a throwaway one that is deleted when the
-        /// call returns — correct for a stateless API client, and useless for real work,
-        /// which is why every interactive host supplies one.
+        /// call returns — useful only to a direct one-shot caller. Interactive hosts and
+        /// HTTP agent loops supply a session- or request-scoped workspace.
         /// </param>
         /// <param name="onOutput">
         /// Live tap, called per line while the command runs, so a host can show progress
@@ -307,7 +307,7 @@ namespace TensorSharp.AgentHost.CodeExec
             bool ephemeral = workspace == null;
             try
             {
-                return RunIn(request, command, session, onOutput);
+                return RunIn(request, command, session, onOutput, fileToolsAvailable: workspace != null);
             }
             finally
             {
@@ -320,7 +320,8 @@ namespace TensorSharp.AgentHost.CodeExec
         }
 
         private CodeExecResult RunIn(
-            ShellRequest request, string command, SessionWorkspace workspace, Action<string>? onOutput)
+            ShellRequest request, string command, SessionWorkspace workspace, Action<string>? onOutput,
+            bool fileToolsAvailable)
         {
             // The command AS THE MODEL WROTE IT. `command` is rewritten further down —
             // TryPerformInstalls reads each install out of the line and substitutes it
@@ -513,7 +514,7 @@ namespace TensorSharp.AgentHost.CodeExec
                 // wrote, not about the line the shell finally received.
                 typed, Rewrite(result, script, workspace, launch.WorkingDirectory),
                 workspace, session, before, notes, launch.Timeout,
-                repeats, failedBefore, rewrites, installedFor, installsOk);
+                repeats, failedBefore, rewrites, installedFor, installsOk, fileToolsAvailable);
         }
 
         /// <summary>
@@ -2846,7 +2847,8 @@ namespace TensorSharp.AgentHost.CodeExec
             bool failedBefore = false,
             RewriteWatch? rewrites = null,
             AutoInstallOutcome installedFor = default,
-            bool installsOk = true)
+            bool installsOk = true,
+            bool fileToolsAvailable = false)
         {
             if (!run.Started)
                 return CodeExecResult.Refused(run.Error ?? "the shell could not be started");
@@ -2952,7 +2954,9 @@ namespace TensorSharp.AgentHost.CodeExec
             // correctly finding nothing is the false-failure defect one layer along.
             if (!benign)
             {
-                AppendCoaching(sb, run, command, workspace, session.CurrentDirectory, installedFor);
+                AppendCoaching(
+                    sb, run, command, workspace, session.CurrentDirectory, installedFor,
+                    fileToolsAvailable);
                 AppendRepeatWarning(sb, run, repeats, failedBefore);
             }
 
@@ -3043,7 +3047,8 @@ namespace TensorSharp.AgentHost.CodeExec
         /// </summary>
         private void AppendCoaching(
             StringBuilder sb, ConfinedResult run, string command,
-            SessionWorkspace workspace, string? ranIn, AutoInstallOutcome installedFor)
+            SessionWorkspace workspace, string? ranIn, AutoInstallOutcome installedFor,
+            bool fileToolsAvailable)
         {
             if (run.Ok || run.TimedOut)
                 return;
@@ -3166,6 +3171,16 @@ namespace TensorSharp.AgentHost.CodeExec
             }
 
             AppendWhoseFaultThisIs(sb, run, diagnosis);
+
+            // Only name edit_file/apply_patch when this request was actually offered
+            // them. A null-workspace caller has shell alone and must never be instructed
+            // to invoke a tool it cannot send.
+            if (fileToolsAvailable
+                && CodeRepairHint.Create(diagnosis, workspace, ranIn, NetworkWasConfined(run))
+                    is { Length: > 0 } repair)
+            {
+                sb.Append(repair);
+            }
         }
 
         /// <summary>
