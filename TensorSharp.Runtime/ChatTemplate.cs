@@ -59,6 +59,45 @@ namespace TensorSharp.Runtime
         /// reliable KV cache reuse across turns.
         /// </summary>
         public List<int>? RawOutputTokens { get; set; }
+        /// <summary>
+        /// Explicit cache-control marker scoped to the whole message: a prefix
+        /// cache breakpoint at the END of <see cref="Content"/>. A marker on an
+        /// individual content part belongs in
+        /// <see cref="ContentCacheBreakpoints"/> instead, which can express a
+        /// position in the middle of the message.
+        /// </summary>
+        public CacheControlMarker? CacheControl { get; set; }
+
+        /// <summary>
+        /// Character offsets into <see cref="Content"/> at which a content part
+        /// carried its own <c>cache_control</c> marker, in ascending order.
+        /// <para>
+        /// A message assembled from parts concatenates them into one
+        /// <see cref="Content"/> string, so a marker on part <i>k</i> means "the
+        /// cacheable prefix ends where part <i>k</i> ends", not "at the end of
+        /// the message". Collapsing those onto <see cref="CacheControl"/> would
+        /// push the breakpoint to the end of the concatenated content and cache
+        /// more than the client marked, so the offsets are kept separately.
+        /// </para>
+        /// </summary>
+        public List<int>? ContentCacheBreakpoints { get; set; }
+
+        /// <summary>
+        /// Record a content-part breakpoint at <paramref name="offset"/> characters
+        /// into <see cref="Content"/>. Callers append in ascending order as they
+        /// concatenate the parts; a repeat of the previous offset (two markers with
+        /// no text between them) collapses into one.
+        /// </summary>
+        public void AddContentCacheBreakpoint(int offset)
+        {
+            ContentCacheBreakpoints ??= new List<int>();
+            if (ContentCacheBreakpoints.Count > 0 &&
+                ContentCacheBreakpoints[ContentCacheBreakpoints.Count - 1] == offset)
+            {
+                return;
+            }
+            ContentCacheBreakpoints.Add(offset);
+        }
     }
 
     public static class ChatTemplate

@@ -1,4 +1,4 @@
-﻿// Copyright (c) Zhongkai Fu. All rights reserved.
+// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -60,6 +60,9 @@ namespace TensorSharp.Runtime
         // order even if the chat template duplicates content (it doesn't today, but
         // numbering is cheap and defensive).
         internal const char PlaceholderSentinel = '\uE000';
+
+        // U+E001 is used for explicit cache breakpoints.
+        internal const char BreakpointSentinel = '\uE001';
 
         private readonly IPromptRenderer _innerRenderer;
 
@@ -180,6 +183,20 @@ namespace TensorSharp.Runtime
             List<ToolFunction>? tools = null,
             bool enableThinking = false)
         {
+            return RenderToTokens(tokenizer, chatTemplate, messages, architecture, addGenerationPrompt, out _, tools, enableThinking);
+        }
+
+        public List<int> RenderToTokens(
+            ITokenizer tokenizer,
+            string chatTemplate,
+            List<ChatMessage> messages,
+            string architecture,
+            bool addGenerationPrompt,
+            out List<int>? explicitBreakpoints,
+            List<ToolFunction>? tools = null,
+            bool enableThinking = false)
+        {
+            explicitBreakpoints = null;
             if (tokenizer == null)
                 throw new ArgumentNullException(nameof(tokenizer));
             if (messages == null)
@@ -191,6 +208,19 @@ namespace TensorSharp.Runtime
             List<ChatMessage>? renderedMessages = null;
             List<List<int>>? rawTokensByPlaceholderIndex = null;
             int placeholderCount = 0;
+            int breakpointCount = 0;
+
+            // A marker on any tool means "keep the tool block cached". The chat
+            // template renders the whole tool list as one unit, so a marker on
+            // one tool and a marker on all of them mean the same thing.
+            bool toolsHasMarker = false;
+            if (tools != null)
+            {
+                foreach (var t in tools)
+                {
+                    if (t.CacheControl != null) { toolsHasMarker = true; break; }
+                }
+            }
 
             for (int i = 0; i < messages.Count; i++)
             {
@@ -200,7 +230,27 @@ namespace TensorSharp.Runtime
                     && msg.RawOutputTokens != null
                     && msg.RawOutputTokens.Count > 0;
 
-                if (!hasRawTokens)
+                bool hasMarker = msg?.CacheControl != null;
+                bool hasPartMarkers = msg?.ContentCacheBreakpoints != null
+                    && msg.ContentCacheBreakpoints.Count > 0;
+
+                // A tool-level marker can only be expressed by prefixing the
+                // first message's content, because the tool block itself is
+                // emitted by the chat template and there is nowhere else to put
+                // a sentinel. Where the template renders tools ahead of the
+                // messages (the hardcoded Qwen 3.5 path, which opens its own
+                // system turn for them) that lands the breakpoint just after the
+                // tool block, which is what the client asked for. Templates that
+                // render the tool list *inside* the first system message — which
+                // most Jinja templates do — put the tool JSON after that
+                // message's content, so the breakpoint lands before the tools
+                // and the tool block is left out of the cached prefix. The
+                // marker then under-caches rather than caching the wrong thing;
+                // placing it correctly needs the sentinel emitted by the
+                // template itself, which the Jinja path cannot express.
+                bool needsToolsMarker = toolsHasMarker && i == 0;
+
+                if (!hasRawTokens && !hasMarker && !hasPartMarkers && !needsToolsMarker)
                 {
                     if (renderedMessages != null)
                         renderedMessages.Add(msg!);
@@ -215,20 +265,54 @@ namespace TensorSharp.Runtime
                     rawTokensByPlaceholderIndex = new List<List<int>>();
                 }
 
+                string newContent = msg!.Content ?? "";
+
+                if (hasRawTokens)
+                {
+                    newContent = MakePlaceholder(placeholderCount);
+                    rawTokensByPlaceholderIndex!.Add(msg.RawOutputTokens!);
+                    placeholderCount++;
+                }
+
+                // Breakpoints are NUMBERED in the order they appear in the text,
+                // which is what lets the strip pass walk them forwards and record
+                // final indices in one go. So claim the indices in that order too:
+                // the tool breakpoint sits in front of the content, the part
+                // offsets are interior and ascending, and the message-scoped
+                // marker closes the content.
+                string breakpointPrefix = needsToolsMarker
+                    ? MakeBreakpoint(breakpointCount++)
+                    : string.Empty;
+
+                if (hasPartMarkers && !hasRawTokens)
+                {
+                    // Part-scoped markers address offsets into the ORIGINAL
+                    // content, so they only mean anything while that content is
+                    // still there. A message spliced from raw tokens has had its
+                    // content replaced by a placeholder, and an offset into that
+                    // placeholder would be meaningless, so they are dropped.
+                    newContent = InsertBreakpointsAtOffsets(
+                        newContent, msg.ContentCacheBreakpoints!, ref breakpointCount);
+                }
+
+                if (hasMarker)
+                {
+                    newContent = newContent + MakeBreakpoint(breakpointCount++);
+                }
+
+                newContent = breakpointPrefix + newContent;
+
                 renderedMessages.Add(new ChatMessage
                 {
-                    Role = msg!.Role,
-                    Content = MakePlaceholder(placeholderCount),
+                    Role = msg.Role,
+                    Content = newContent,
                     // Don't carry Thinking through the template - the raw tokens already contain it.
-                    Thinking = null,
-                    ToolCalls = null,
+                    Thinking = hasRawTokens ? null : msg.Thinking,
+                    ToolCalls = hasRawTokens ? null : msg.ToolCalls,
                     ImagePaths = msg.ImagePaths,
                     AudioPaths = msg.AudioPaths,
                     IsVideo = msg.IsVideo,
                 });
-
-                rawTokensByPlaceholderIndex!.Add(msg.RawOutputTokens!);
-                placeholderCount++;
             }
 
             List<ChatMessage> messagesForRender = renderedMessages ?? messages;
@@ -241,8 +325,8 @@ namespace TensorSharp.Runtime
                 tools: tools,
                 enableThinking: enableThinking);
 
-            // Fast path: no placeholders -> just tokenize the whole rendered string.
-            if (placeholderCount == 0)
+            // Fast path: no placeholders and no breakpoints -> just tokenize the whole rendered string.
+            if (placeholderCount == 0 && breakpointCount == 0)
                 return tokenizer.Encode(text, addSpecial: true);
 
             // Some chat templates (notably Gemma 4) call a strip_thinking filter on
@@ -292,7 +376,7 @@ namespace TensorSharp.Runtime
             if (rendererStrippedTrailingWhitespace)
                 text = TrimWhitespaceBeforeEachPlaceholder(text);
 
-            return TokenizeAndReplacePlaceholderSpans(tokenizer, text, rawTokensByPlaceholderIndex!);
+            return TokenizeAndReplacePlaceholderSpans(tokenizer, text, rawTokensByPlaceholderIndex ?? new List<List<int>>(), breakpointCount, out explicitBreakpoints);
         }
 
         /// <summary>
@@ -415,6 +499,38 @@ namespace TensorSharp.Runtime
             return $"{PlaceholderSentinel}R{index:D4}{PlaceholderSentinel}";
         }
 
+        internal static string MakeBreakpoint(int index)
+        {
+            return $"{BreakpointSentinel}B{index:D4}{BreakpointSentinel}";
+        }
+
+        /// <summary>
+        /// Splice a breakpoint sentinel into <paramref name="content"/> at each of
+        /// <paramref name="offsets"/>, which are character positions in ascending
+        /// order. Offsets are clamped into range and never allowed to move
+        /// backwards, so a marker whose offset does not fit the content (a caller
+        /// that rewrote the text after parsing it) degrades to a breakpoint at the
+        /// nearest legal position rather than throwing.
+        /// </summary>
+        private static string InsertBreakpointsAtOffsets(
+            string content, List<int> offsets, ref int breakpointCount)
+        {
+            var sb = new System.Text.StringBuilder(content.Length + offsets.Count * 8);
+            int copied = 0;
+            for (int i = 0; i < offsets.Count; i++)
+            {
+                int at = offsets[i];
+                if (at < copied) at = copied;
+                if (at > content.Length) at = content.Length;
+
+                sb.Append(content, copied, at - copied);
+                sb.Append(MakeBreakpoint(breakpointCount++));
+                copied = at;
+            }
+            sb.Append(content, copied, content.Length - copied);
+            return sb.ToString();
+        }
+
         /// <summary>
         /// Tokenize <paramref name="text"/> as a SINGLE string (so the BPE/SentencePiece
         /// merging decisions at segment boundaries match exactly what the renderer would
@@ -433,8 +549,12 @@ namespace TensorSharp.Runtime
         private static List<int> TokenizeAndReplacePlaceholderSpans(
             ITokenizer tokenizer,
             string text,
-            List<List<int>> rawTokensByPlaceholderIndex)
+            List<List<int>> rawTokensByPlaceholderIndex,
+            int breakpointCount,
+            out List<int>? explicitBreakpoints)
         {
+            explicitBreakpoints = null;
+
             // Step 1: tokenize the rendered text as a whole.
             List<int> tokens = tokenizer.Encode(text, addSpecial: true);
 
@@ -456,6 +576,48 @@ namespace TensorSharp.Runtime
 
                 tokens.RemoveRange(spanStart, placeholderTokens.Count);
                 tokens.InsertRange(spanStart, rawTokensByPlaceholderIndex[i]);
+            }
+
+            // Step 3: strip the explicit cache breakpoints, recording where each
+            // one fell.
+            //
+            // Breakpoints are numbered in render order and walked FORWARDS, which
+            // is what makes the recorded indices final. Step 2 goes backwards
+            // because it splices raw tokens in place and needs the positions it
+            // has not reached yet to stay put; this loop only ever deletes, so
+            // the opposite holds. Removing breakpoint i shifts every later
+            // breakpoint left by its length, and going forwards means that shift
+            // has already been applied by the time we search for i+1 - while
+            // deletions after a recorded index cannot disturb it. Walking
+            // backwards instead records each index in the coordinate space of an
+            // array that still contains all the earlier breakpoints, leaving
+            // every breakpoint but the first too large by the length of the ones
+            // preceding it.
+            //
+            // Unlike a placeholder, a breakpoint that cannot be found is skipped
+            // rather than fatal: a template is free to drop the content it was
+            // attached to (Gemma 4's strip_thinking filter does exactly that),
+            // and a cache hint is not worth failing a completion over. Dropping
+            // an interior breakpoint only shortens the marked region. Dropping
+            // the LAST one raises the ceiling to the next breakpoint down, and
+            // dropping every one of them leaves the request with no markers at
+            // all, which falls back to implicit caching - i.e. caching more than
+            // the client asked to have cached, not less.
+            if (breakpointCount > 0)
+            {
+                explicitBreakpoints = new List<int>(breakpointCount);
+                for (int i = 0; i < breakpointCount; i++)
+                {
+                    string breakpoint = MakeBreakpoint(i);
+                    List<int> breakpointTokens = tokenizer.Encode(breakpoint, addSpecial: false);
+
+                    int spanStart = FindSubsequence(tokens, breakpointTokens);
+                    if (spanStart >= 0)
+                    {
+                        tokens.RemoveRange(spanStart, breakpointTokens.Count);
+                        explicitBreakpoints.Add(spanStart);
+                    }
+                }
             }
 
             return tokens;

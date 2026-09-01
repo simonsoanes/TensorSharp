@@ -586,6 +586,342 @@ public class KVCachePromptRendererTests
         Assert.Equal(noThink, KVCachePromptRenderer.StripEmptyThinkBlockBeforePlaceholders(noThink));
     }
 
+    // ---------------------------------------------------------------------
+    // Explicit prompt-cache breakpoints (cache_control / prompt_cache_breakpoint).
+    //
+    // The contract these tests pin down: a marker changes NOTHING about the
+    // token sequence handed to the model, and reports the token offset where
+    // the marked prefix ends. A breakpoint index is only useful if
+    // tokens[0..index] is exactly the prefix the client marked, so most of
+    // these assert that identity directly.
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public void RenderToTokens_NoCacheControl_ReportsNoBreakpoints()
+    {
+        var renderer = new KVCachePromptRenderer(new FakeRenderer());
+        var tokenizer = new CharTokenizer();
+        var messages = new List<ChatMessage>
+        {
+            new() { Role = "system", Content = "sys" },
+            new() { Role = "user", Content = "Hi" },
+        };
+
+        var tokens = renderer.RenderToTokens(tokenizer, chatTemplate: null, messages,
+            architecture: "fake", addGenerationPrompt: true, out var breakpoints);
+
+        Assert.Null(breakpoints);
+
+        var expectedText = new FakeRenderer().Render(null, messages, addGenerationPrompt: true);
+        Assert.Equal(tokenizer.Encode(expectedText, addSpecial: true), tokens);
+    }
+
+    [Fact]
+    public void RenderToTokens_MessageCacheControl_LeavesTokenStreamIdentical()
+    {
+        var tokenizer = new CharTokenizer();
+        var messages = new List<ChatMessage>
+        {
+            new() { Role = "system", Content = "sys", CacheControl = new CacheControlMarker() },
+            new() { Role = "user", Content = "Hi" },
+        };
+        var unmarked = new List<ChatMessage>
+        {
+            new() { Role = "system", Content = "sys" },
+            new() { Role = "user", Content = "Hi" },
+        };
+
+        var marked = new KVCachePromptRenderer(new FakeRenderer()).RenderToTokens(
+            tokenizer, null, messages, "fake", addGenerationPrompt: true, out var breakpoints);
+        var plain = new KVCachePromptRenderer(new FakeRenderer()).RenderToTokens(
+            tokenizer, null, unmarked, "fake", addGenerationPrompt: true, out _);
+
+        // The marker must be invisible to the model: same tokens either way.
+        Assert.Equal(plain, marked);
+
+        // And no sentinel may survive into the prompt.
+        Assert.DoesNotContain(KVCachePromptRenderer.BreakpointSentinel, tokenizer.Decode(marked));
+
+        var bp = Assert.Single(breakpoints!);
+        Assert.InRange(bp, 1, marked.Count);
+    }
+
+    [Fact]
+    public void RenderToTokens_MessageCacheControl_BreakpointEndsTheMarkedPrefix()
+    {
+        var renderer = new KVCachePromptRenderer(new FakeRenderer());
+        var tokenizer = new CharTokenizer();
+        var messages = new List<ChatMessage>
+        {
+            new() { Role = "system", Content = "sys", CacheControl = new CacheControlMarker() },
+            new() { Role = "user", Content = "Hi" },
+        };
+
+        var tokens = renderer.RenderToTokens(tokenizer, null, messages, "fake",
+            addGenerationPrompt: true, out var breakpoints);
+
+        int bp = Assert.Single(breakpoints!);
+
+        // The marker sits at the end of the system message's content, so the
+        // prefix it closes is everything the fake template emits up to and
+        // including "sys" - and not the "</system>" that follows it.
+        Assert.Equal("<|bos|><system>sys", tokenizer.Decode(tokens.GetRange(0, bp)));
+    }
+
+    [Fact]
+    public void RenderToTokens_MultipleCacheControls_AreReportedInAscendingOrder()
+    {
+        var renderer = new KVCachePromptRenderer(new FakeRenderer());
+        var tokenizer = new CharTokenizer();
+        var messages = new List<ChatMessage>
+        {
+            new() { Role = "system", Content = "sys", CacheControl = new CacheControlMarker() },
+            new() { Role = "user", Content = "docs", CacheControl = new CacheControlMarker() },
+            new() { Role = "user", Content = "question" },
+        };
+
+        var tokens = renderer.RenderToTokens(tokenizer, null, messages, "fake",
+            addGenerationPrompt: true, out var breakpoints);
+
+        Assert.Equal(2, breakpoints!.Count);
+        Assert.True(breakpoints[0] < breakpoints[1],
+            $"Breakpoints must be in render order, got [{breakpoints[0]}, {breakpoints[1]}].");
+
+        Assert.Equal("<|bos|><system>sys", tokenizer.Decode(tokens.GetRange(0, breakpoints[0])));
+        Assert.Equal("<|bos|><system>sys</system>\n<user>docs",
+            tokenizer.Decode(tokens.GetRange(0, breakpoints[1])));
+    }
+
+    [Fact]
+    public void RenderToTokens_CacheControlOnMessageWithRawTokens_BreakpointFollowsSplicedTokens()
+    {
+        var renderer = new KVCachePromptRenderer(new FakeRenderer());
+        var tokenizer = new CharTokenizer();
+        var rawTokens = new List<int> { 1001, 1002, 1003, 1004 };
+
+        var messages = new List<ChatMessage>
+        {
+            new() { Role = "user", Content = "Hi" },
+            new()
+            {
+                Role = "assistant",
+                Content = "IGNORED",
+                RawOutputTokens = rawTokens,
+                CacheControl = new CacheControlMarker(),
+            },
+            new() { Role = "user", Content = "again" },
+        };
+
+        var tokens = renderer.RenderToTokens(tokenizer, null, messages, "fake",
+            addGenerationPrompt: true, out var breakpoints);
+
+        int bp = Assert.Single(breakpoints!);
+
+        // The breakpoint must land AFTER the spliced raw tokens, not at the
+        // (much shorter) placeholder's position: the index is in the final
+        // array's coordinate space.
+        int rawStart = FindSubsequence(tokens, rawTokens);
+        Assert.True(rawStart >= 0, "Expected the raw tokens to be spliced into the output.");
+        Assert.Equal(rawStart + rawTokens.Count, bp);
+    }
+
+    [Fact]
+    public void RenderToTokens_ToolCacheControl_MarksPrefixAheadOfTheFirstMessageContent()
+    {
+        var renderer = new KVCachePromptRenderer(new FakeRenderer());
+        var tokenizer = new CharTokenizer();
+        var tools = new List<ToolFunction>
+        {
+            new() { Name = "search", Description = "d", CacheControl = new CacheControlMarker() },
+        };
+        var messages = new List<ChatMessage>
+        {
+            new() { Role = "system", Content = "sys" },
+            new() { Role = "user", Content = "Hi" },
+        };
+
+        var tokens = renderer.RenderToTokens(tokenizer, null, messages, "fake",
+            addGenerationPrompt: true, out var breakpoints, tools: tools);
+
+        int bp = Assert.Single(breakpoints!);
+
+        // The tool block has nowhere else to anchor, so the breakpoint goes
+        // immediately before the first message's content. See the comment on
+        // needsToolsMarker in KVCachePromptRenderer for why this only lines up
+        // with the end of the tool block on templates that emit tools first.
+        Assert.Equal("<|bos|><system>", tokenizer.Decode(tokens.GetRange(0, bp)));
+        Assert.DoesNotContain(KVCachePromptRenderer.BreakpointSentinel, tokenizer.Decode(tokens));
+    }
+
+    [Fact]
+    public void RenderToTokens_ToolAndMessageCacheControl_ReportsBothInOrder()
+    {
+        var renderer = new KVCachePromptRenderer(new FakeRenderer());
+        var tokenizer = new CharTokenizer();
+        var tools = new List<ToolFunction>
+        {
+            new() { Name = "search", Description = "d", CacheControl = new CacheControlMarker() },
+        };
+        var messages = new List<ChatMessage>
+        {
+            new() { Role = "system", Content = "sys", CacheControl = new CacheControlMarker() },
+            new() { Role = "user", Content = "Hi" },
+        };
+
+        var tokens = renderer.RenderToTokens(tokenizer, null, messages, "fake",
+            addGenerationPrompt: true, out var breakpoints, tools: tools);
+
+        Assert.Equal(2, breakpoints!.Count);
+        Assert.Equal("<|bos|><system>", tokenizer.Decode(tokens.GetRange(0, breakpoints[0])));
+        Assert.Equal("<|bos|><system>sys", tokenizer.Decode(tokens.GetRange(0, breakpoints[1])));
+    }
+
+    [Fact]
+    public void RenderToTokens_CacheControlOnLastMessage_DoesNotSwallowGenerationPrompt()
+    {
+        var renderer = new KVCachePromptRenderer(new FakeRenderer());
+        var tokenizer = new CharTokenizer();
+        var messages = new List<ChatMessage>
+        {
+            new() { Role = "user", Content = "Hi", CacheControl = new CacheControlMarker() },
+        };
+
+        var tokens = renderer.RenderToTokens(tokenizer, null, messages, "fake",
+            addGenerationPrompt: true, out var breakpoints);
+
+        int bp = Assert.Single(breakpoints!);
+        Assert.Equal("<|bos|><user>Hi", tokenizer.Decode(tokens.GetRange(0, bp)));
+        Assert.True(bp < tokens.Count, "The generation prompt must fall outside the marked prefix.");
+    }
+
+    [Fact]
+    public void RenderToTokens_PartScopedMarker_BreaksInsideTheMessage_NotAtItsEnd()
+    {
+        var renderer = new KVCachePromptRenderer(new FakeRenderer());
+        var tokenizer = new CharTokenizer();
+
+        // The shape a part-scoped marker exists for: a big cacheable document
+        // part, then a volatile question part in the SAME message. The
+        // breakpoint has to land between them.
+        var msg = new ChatMessage { Role = "user", Content = "DOC\nQ" };
+        msg.AddContentCacheBreakpoint(3); // end of "DOC"
+
+        var tokens = renderer.RenderToTokens(tokenizer, null, new List<ChatMessage> { msg },
+            "fake", addGenerationPrompt: true, out var breakpoints);
+
+        int bp = Assert.Single(breakpoints!);
+        Assert.Equal("<|bos|><user>DOC", tokenizer.Decode(tokens.GetRange(0, bp)));
+
+        // The question must fall OUTSIDE the marked prefix - collapsing the
+        // marker onto the message would have swallowed it.
+        Assert.DoesNotContain("Q", tokenizer.Decode(tokens.GetRange(0, bp)));
+    }
+
+    [Fact]
+    public void RenderToTokens_PartScopedMarkers_AreAllKept_AndDoNotAlterTheTokens()
+    {
+        var tokenizer = new CharTokenizer();
+
+        var marked = new ChatMessage { Role = "user", Content = "AAA\nBBB\nCCC" };
+        marked.AddContentCacheBreakpoint(3);  // end of "AAA"
+        marked.AddContentCacheBreakpoint(7);  // end of "BBB"
+
+        var tokens = new KVCachePromptRenderer(new FakeRenderer()).RenderToTokens(
+            tokenizer, null, new List<ChatMessage> { marked }, "fake",
+            addGenerationPrompt: true, out var breakpoints);
+
+        // An earlier marker must not be lost to a later one.
+        Assert.Equal(2, breakpoints!.Count);
+        Assert.Equal("<|bos|><user>AAA", tokenizer.Decode(tokens.GetRange(0, breakpoints[0])));
+        Assert.Equal("<|bos|><user>AAA\nBBB", tokenizer.Decode(tokens.GetRange(0, breakpoints[1])));
+
+        // And the prompt itself is untouched by the markers.
+        var plain = new KVCachePromptRenderer(new FakeRenderer()).RenderToTokens(
+            tokenizer, null,
+            new List<ChatMessage> { new() { Role = "user", Content = "AAA\nBBB\nCCC" } },
+            "fake", addGenerationPrompt: true, out _);
+        Assert.Equal(plain, tokens);
+    }
+
+    [Fact]
+    public void RenderToTokens_PartScopedAndMessageScopedMarkers_AreNumberedInTextOrder()
+    {
+        var renderer = new KVCachePromptRenderer(new FakeRenderer());
+        var tokenizer = new CharTokenizer();
+        var tools = new List<ToolFunction>
+        {
+            new() { Name = "search", Description = "d", CacheControl = new CacheControlMarker() },
+        };
+
+        // All three anchors at once on the first message: the tool breakpoint in
+        // front of the content, a part breakpoint inside it, and a
+        // message-scoped one closing it.
+        var first = new ChatMessage
+        {
+            Role = "system",
+            Content = "DOC\nQ",
+            CacheControl = new CacheControlMarker(),
+        };
+        first.AddContentCacheBreakpoint(3);
+
+        var tokens = renderer.RenderToTokens(tokenizer, null, new List<ChatMessage> { first },
+            "fake", addGenerationPrompt: true, out var breakpoints, tools: tools);
+
+        Assert.Equal(3, breakpoints!.Count);
+        Assert.Equal("<|bos|><system>", tokenizer.Decode(tokens.GetRange(0, breakpoints[0])));
+        Assert.Equal("<|bos|><system>DOC", tokenizer.Decode(tokens.GetRange(0, breakpoints[1])));
+        Assert.Equal("<|bos|><system>DOC\nQ", tokenizer.Decode(tokens.GetRange(0, breakpoints[2])));
+
+        // Numbering must follow the text, so the reported list is ascending.
+        Assert.True(breakpoints[0] < breakpoints[1] && breakpoints[1] < breakpoints[2],
+            $"Expected ascending breakpoints, got [{string.Join(", ", breakpoints)}].");
+        Assert.DoesNotContain(KVCachePromptRenderer.BreakpointSentinel, tokenizer.Decode(tokens));
+    }
+
+    [Fact]
+    public void RenderToTokens_PartScopedMarkerOnSplicedAssistantTurn_IsDropped()
+    {
+        var renderer = new KVCachePromptRenderer(new FakeRenderer());
+        var tokenizer = new CharTokenizer();
+        var rawTokens = new List<int> { 1001, 1002, 1003 };
+
+        // The content these offsets addressed is replaced wholesale by the raw
+        // tokens, so the offsets no longer refer to anything: they must be
+        // dropped rather than clamped onto the placeholder.
+        var assistant = new ChatMessage
+        {
+            Role = "assistant",
+            Content = "IGNORED",
+            RawOutputTokens = rawTokens,
+        };
+        assistant.AddContentCacheBreakpoint(3);
+
+        var tokens = renderer.RenderToTokens(tokenizer, null,
+            new List<ChatMessage> { new() { Role = "user", Content = "Hi" }, assistant },
+            "fake", addGenerationPrompt: true, out var breakpoints);
+
+        Assert.True(breakpoints == null || breakpoints.Count == 0,
+            "A part offset into content that was replaced by raw tokens must be dropped.");
+        Assert.True(FindSubsequence(tokens, rawTokens) >= 0);
+        Assert.DoesNotContain(KVCachePromptRenderer.BreakpointSentinel, tokenizer.Decode(tokens));
+    }
+
+    [Fact]
+    public void RenderToTokens_PartScopedMarkerPastEndOfContent_ClampsInsteadOfThrowing()
+    {
+        var renderer = new KVCachePromptRenderer(new FakeRenderer());
+        var tokenizer = new CharTokenizer();
+
+        var msg = new ChatMessage { Role = "user", Content = "Hi" };
+        msg.AddContentCacheBreakpoint(999);
+
+        var tokens = renderer.RenderToTokens(tokenizer, null, new List<ChatMessage> { msg },
+            "fake", addGenerationPrompt: true, out var breakpoints);
+
+        int bp = Assert.Single(breakpoints!);
+        Assert.Equal("<|bos|><user>Hi", tokenizer.Decode(tokens.GetRange(0, bp)));
+    }
+
     private static string MakePlaceholder(int index)
     {
         // Mirrors KVCachePromptRenderer.MakePlaceholder so we don't have to expose it

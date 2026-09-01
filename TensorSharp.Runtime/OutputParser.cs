@@ -25,6 +25,7 @@ namespace TensorSharp.Runtime
         public string Description { get; set; } = string.Empty;
         public Dictionary<string, ToolParameter> Parameters { get; set; } = new();
         public List<string> Required { get; set; } = new();
+        public CacheControlMarker? CacheControl { get; set; }
 
         /// <summary>
         /// Parse a list of tool definitions from JSON, accepting every shape a
