@@ -137,7 +137,8 @@ public class ShellToolDeclarationTests : IDisposable
         // had models abandoning installable libraries; "installs reach the registry" alone
         // would have them writing a command to curl a URL.
         ToolFunction shell = ShellTools.DeclareShell(
-            new CodeExecOptions { Enabled = true, AllowInstall = true }, Stub("bash"));
+            new CodeExecOptions { Enabled = true, AllowInstall = true }, Stub("bash"),
+            networkConfinementGuaranteed: true);
 
         // Installs are available…
         Assert.Contains("Installing", shell.Description, StringComparison.Ordinal);
@@ -147,7 +148,9 @@ public class ShellToolDeclarationTests : IDisposable
         Assert.Contains("HOST performs the install", shell.Description, StringComparison.Ordinal);
         // …while a command still has none, stated in the same breath so neither half is
         // read as the whole truth.
-        Assert.Contains("NO NETWORK", shell.Description, StringComparison.Ordinal);
+        Assert.Contains("Internet/IP network access: BLOCKED", shell.Description, StringComparison.Ordinal);
+        Assert.Contains("installing a dependency does not widen your command's network policy", shell.Description,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -156,12 +159,39 @@ public class ShellToolDeclarationTests : IDisposable
         // A host that cannot install must not describe a phase it does not have, or the
         // model spends a round asking for a package it will never get.
         ToolFunction shell = ShellTools.DeclareShell(
-            new CodeExecOptions { Enabled = true, AllowInstall = false }, Stub("bash"));
+            new CodeExecOptions { Enabled = true, AllowInstall = false }, Stub("bash"),
+            networkConfinementGuaranteed: true);
 
         Assert.Contains("Installing packages is not enabled here", shell.Description, StringComparison.Ordinal);
-        Assert.Contains("no command has network access", shell.Description, StringComparison.Ordinal);
+        Assert.Contains("Internet/IP network access: BLOCKED", shell.Description, StringComparison.Ordinal);
         Assert.DoesNotContain("NOTHING ELSE reaches the network", shell.Description, StringComparison.Ordinal);
         Assert.DoesNotContain("downloads from the package registry", shell.Description, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheDeclaration_WithNetworkOptIn_SaysItIsUnrestrictedAndTreatsRemoteContentAsUntrusted()
+    {
+        ToolFunction shell = ShellTools.DeclareShell(
+            new CodeExecOptions { Enabled = true, AllowNetwork = true }, Stub("bash"));
+
+        Assert.Contains("IP network access: ENABLED and unrestricted", shell.Description, StringComparison.Ordinal);
+        Assert.Contains("fetch URLs", shell.Description, StringComparison.Ordinal);
+        Assert.Contains("untrusted data", shell.Description, StringComparison.Ordinal);
+        Assert.Contains("Package installation is still not authorized", shell.Description,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("Internet/IP network access: BLOCKED", shell.Description, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheDeclaration_WhereTheOsCannotEnforceNetwork_DoesNotPromiseItIsBlocked()
+    {
+        ToolFunction shell = ShellTools.DeclareShell(
+            new CodeExecOptions { Enabled = true, Unconfined = true }, Stub("pwsh"),
+            networkConfinementGuaranteed: false);
+
+        Assert.Contains("Network confinement: NOT GUARANTEED", shell.Description, StringComparison.Ordinal);
+        Assert.Contains("may be able to use the host network", shell.Description, StringComparison.Ordinal);
+        Assert.DoesNotContain("Internet/IP network access: BLOCKED", shell.Description, StringComparison.Ordinal);
     }
 
     [Fact]

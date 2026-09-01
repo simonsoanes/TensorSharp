@@ -205,10 +205,12 @@ namespace TensorSharp.AgentHost.Skills
             WorkDirectory = Path.Combine(root, "work");
             EnvDirectory = Path.Combine(root, "env");
             StateDirectory = Path.Combine(root, "state");
+            ShellStateDirectory = Path.Combine(StateDirectory, "shell");
             TempDirectory = Path.Combine(root, "tmp");
             Directory.CreateDirectory(WorkDirectory);
             Directory.CreateDirectory(EnvDirectory);
             Directory.CreateDirectory(StateDirectory);
+            Directory.CreateDirectory(ShellStateDirectory);
             Directory.CreateDirectory(TempDirectory);
         }
 
@@ -265,6 +267,14 @@ namespace TensorSharp.AgentHost.Skills
         /// </para>
         /// </summary>
         public string StateDirectory { get; }
+
+        /// <summary>
+        /// The small part of state a shell wrapper may update: its saved working
+        /// directory and exported environment. Sandboxes mount this child writable while
+        /// keeping the parent <see cref="StateDirectory"/>, which holds host-authored
+        /// scripts and logs, read-only.
+        /// </summary>
+        public string ShellStateDirectory { get; }
 
         /// <summary>
         /// Where <c>TMPDIR</c> points, so a tool's scratch file is not mistaken for the

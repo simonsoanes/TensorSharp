@@ -110,7 +110,9 @@ namespace TensorSharp.AgentHost.CodeExec
             {
                 return new[]
                 {
-                    ShellTools.DeclareShell(_options, shell, _runner.KeepsArtifacts, persists: false, fileTools: false),
+                    ShellTools.DeclareShell(
+                        _options, shell, _runner.KeepsArtifacts, persists: false, fileTools: false,
+                        networkConfinementGuaranteed: _runner.NetworkConfinementGuaranteed),
                 };
             }
 
@@ -124,7 +126,9 @@ namespace TensorSharp.AgentHost.CodeExec
                 ShellTools.DeclareRead(),
                 ShellTools.DeclareEdit(),
                 ShellTools.DeclareWrite(),
-                ShellTools.DeclareShell(_options, shell, _runner.KeepsArtifacts, persists, fileTools: true),
+                ShellTools.DeclareShell(
+                    _options, shell, _runner.KeepsArtifacts, persists, fileTools: true,
+                    networkConfinementGuaranteed: _runner.NetworkConfinementGuaranteed),
                 ShellTools.DeclarePatch(),
             };
         }

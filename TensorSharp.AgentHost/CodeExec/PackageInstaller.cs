@@ -167,10 +167,9 @@ namespace TensorSharp.AgentHost.CodeExec
                 {
                     Interpreter = plan.Interpreter,
                     Arguments = plan.Arguments,
-                    // The whole workspace, because a manifest install has to READ
-                    // package.json out of the working directory while WRITING into the
-                    // environment beside it.
-                    WriteDirectory = workspace.Root,
+                    // A manifest install reads package.json from the read-only work tree
+                    // and writes only into the session package environment.
+                    WriteDirectory = workspace.EnvDirectory,
                     WorkingDirectory = workspace.WorkDirectory,
                     ReadOnlyDirectory = workspace.Root,
                     // Where the sandbox can pin one loopback port, the proxy is the

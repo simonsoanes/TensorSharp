@@ -10,6 +10,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 
@@ -228,6 +229,195 @@ public class SkillCrossPlatformTests : IDisposable
             Assert.Contains("a b; rm -rf /", argv);
             Assert.Contains("$(whoami)", argv);
         }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SeatbeltNetworkPolicy_IsPinnedOnEveryPlatform(bool allowNetwork)
+    {
+        SkillSandboxRequest request = SandboxRequest("seatbelt-policy", allowNetwork);
+
+        string profile = SeatbeltSandbox.BuildProfile(request);
+
+        Assert.Equal(allowNetwork, profile.Contains("(allow network*)", StringComparison.Ordinal));
+        Assert.Equal(!allowNetwork, profile.Contains("(deny network*)", StringComparison.Ordinal));
+        Assert.Equal(allowNetwork,
+            profile.Contains("(literal \"/private/var/run/mDNSResponder\")", StringComparison.Ordinal));
+        // Network is an orthogonal axis: opening it must not remove either filesystem
+        // boundary from the generated profile.
+        Assert.Contains("(deny default)", profile, StringComparison.Ordinal);
+        Assert.DoesNotContain("(allow file-write*)", profile, StringComparison.Ordinal);
+        Assert.Contains("(allow file-read* file-write* (subpath", profile, StringComparison.Ordinal);
+        if (!string.IsNullOrEmpty(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)))
+            Assert.Contains("(deny file-read* (subpath", profile, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SeatbeltDoesNotClaimItCanContainASetsidDescendant()
+    {
+        var sandbox = new SeatbeltSandbox();
+
+        Assert.False(sandbox.Capabilities.BoundsProcessTree);
+        Assert.Contains(sandbox.Capabilities.Gaps(),
+            gap => gap.Contains("outlive", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BubblewrapNetworkPolicy_IsPinnedOnEveryPlatform(bool allowNetwork)
+    {
+        SkillSandboxRequest request = SandboxRequest("bwrap-policy", allowNetwork);
+
+        IReadOnlyList<string> arguments = BubblewrapSandbox.BuildArguments(request);
+
+        Assert.Equal(!allowNetwork, arguments.Contains("--unshare-net"));
+        Assert.True(arguments.Zip(arguments.Skip(1))
+            .Any(pair => pair.First == "--tmpfs" && pair.Second == "/run"));
+        // The enabled fast path removes only the network namespace split. Read-only root,
+        // writable workspace and process namespaces remain present in both policies.
+        Assert.Contains("--ro-bind", arguments);
+        Assert.Contains("--bind", arguments);
+        Assert.Contains("--new-session", arguments);
+        Assert.Contains("--unshare-pid", arguments);
+    }
+
+    [Fact]
+    public void ExactReadableFilesAndAdditionalWritableRoots_ArePinnedOnEveryPlatform()
+    {
+        string skill = Path.Combine(_baseDir, "extra-policy-skill");
+        string work = Path.Combine(_baseDir, "extra-policy-work");
+        string state = Path.Combine(_baseDir, "extra-policy-state");
+        string ca = Path.Combine(_baseDir, "enterprise-ca.pem");
+        Directory.CreateDirectory(skill);
+        Directory.CreateDirectory(work);
+        Directory.CreateDirectory(state);
+        File.WriteAllText(ca, "TEST-CA\n");
+        var request = new SkillSandboxRequest(
+            "python3", new[] { Path.Combine(skill, "run.py") }, skill, work,
+            AllowNetwork: true, ReadablePaths: new[] { ca })
+        {
+            WritablePaths = new[] { state },
+            StartDirectory = skill,
+        };
+
+        string profile = SeatbeltSandbox.BuildProfile(request);
+        Assert.Contains("(allow file-read* (literal \"" + ca, profile, StringComparison.Ordinal);
+        Assert.Contains("(deny file-write* (literal \"" + ca, profile, StringComparison.Ordinal);
+        Assert.Contains("(allow file-read* file-write* (subpath \"" + state,
+            profile, StringComparison.Ordinal);
+        Assert.Contains("(allow network-bind (local unix-socket (subpath \"" + state,
+            profile, StringComparison.Ordinal);
+
+        IReadOnlyList<string> arguments = BubblewrapSandbox.BuildArguments(request);
+        Assert.True(HasTriplet(arguments, "--ro-bind", ca, ca));
+        Assert.True(HasTriplet(arguments, "--bind", state, state));
+        int chdir = arguments.ToList().IndexOf("--chdir");
+        Assert.InRange(chdir, 0, arguments.Count - 2);
+        Assert.Equal(skill, arguments[chdir + 1]);
+    }
+
+    [Fact]
+    public void WindowsJobObject_ExplicitlyReportsThatItCannotConfineNetworkOrFiles()
+    {
+#pragma warning disable CA1416 // Construction reads managed capability metadata only; no Windows API is invoked.
+        var sandbox = new WindowsJobObjectSandbox();
+
+        Assert.False(sandbox.Capabilities.ConfinesNetwork);
+        Assert.False(sandbox.Capabilities.ConfinesWrites);
+        Assert.True(sandbox.Capabilities.BoundsProcessTree);
+#pragma warning restore CA1416
+    }
+
+    [Theory]
+    [InlineData("bubblewrap 0.11.0", false)]
+    [InlineData("bubblewrap 0.12.0", true)]
+    [InlineData("bwrap 1.2.3", true)]
+    [InlineData("not-a-version", false)]
+    public void BubblewrapVersionFloor_RejectsKnownVulnerableReleases(
+        string output, bool expectedSafe)
+    {
+        bool parsed = BubblewrapSandbox.TryParseVersion(output, out Version? version);
+
+        Assert.Equal(output != "not-a-version", parsed);
+        Assert.Equal(expectedSafe,
+            parsed && version != null && version >= BubblewrapSandbox.MinimumSafeVersion);
+    }
+
+    [Fact]
+    public void BubblewrapVersionProbe_BoundsAHungExecutable()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        string probe = WriteExecutable("bwrap-hangs", "#!/bin/sh\nwhile :; do :; done\n");
+        var stopwatch = Stopwatch.StartNew();
+
+        bool parsed = BubblewrapSandbox.TryReadVersion(
+            probe, out Version? version, timeoutMilliseconds: 200);
+
+        stopwatch.Stop();
+        Assert.False(parsed);
+        Assert.Null(version);
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(3),
+            $"a version probe configured for 200 ms took {stopwatch.Elapsed}");
+    }
+
+    [Fact]
+    public void BubblewrapVersionProbe_DrainsStderrWithoutDeadlocking()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        string probe = WriteExecutable(
+            "bwrap-fills-stderr",
+            "#!/bin/sh\n"
+            + "i=0\n"
+            + "while [ \"$i\" -lt 4096 ]; do\n"
+            + "  printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\\n'\n"
+            + "  i=$((i + 1))\n"
+            + "done >&2\n"
+            + "printf 'bubblewrap 0.12.0\\n'\n");
+
+        bool parsed = BubblewrapSandbox.TryReadVersion(
+            probe, out Version? version, timeoutMilliseconds: 5000);
+
+        Assert.True(parsed);
+        Assert.Equal(new Version(0, 12, 0), version);
+    }
+
+    private string WriteExecutable(string name, string body)
+    {
+        string path = Path.Combine(_baseDir, name);
+        File.WriteAllText(path, body);
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(
+                path,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+        return path;
+    }
+
+    private SkillSandboxRequest SandboxRequest(string name, bool allowNetwork)
+    {
+        string skill = Path.Combine(_baseDir, name + "-skill");
+        string work = Path.Combine(_baseDir, name + "-work");
+        Directory.CreateDirectory(skill);
+        Directory.CreateDirectory(work);
+        return new SkillSandboxRequest(
+            "python3", new[] { Path.Combine(skill, "run.py") }, skill, work,
+            AllowNetwork: allowNetwork, ReadablePaths: Array.Empty<string>());
+    }
+
+    private static bool HasTriplet(
+        IReadOnlyList<string> values, string first, string second, string third)
+    {
+        for (int i = 0; i + 2 < values.Count; i++)
+        {
+            if (values[i] == first && values[i + 1] == second && values[i + 2] == third)
+                return true;
+        }
+        return false;
     }
 
     // ---- everything except script execution works with no sandbox at all ----

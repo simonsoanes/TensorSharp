@@ -135,7 +135,7 @@ namespace TensorSharp.AgentHost.Skills
 
                 return "this host provides no OS sandbox (checked: "
                     + (OperatingSystem.IsMacOS() ? "sandbox-exec"
-                       : OperatingSystem.IsLinux() ? "bubblewrap (install bwrap to enable it)"
+                       : OperatingSystem.IsLinux() ? "bubblewrap 0.12.0 or newer (install/update bwrap to enable it)"
                        : OperatingSystem.IsWindows() ? "windows job object"
                        : "none for this platform")
                     + "), and skill scripts are configured to run only when they can be confined";

@@ -592,6 +592,23 @@ namespace TensorSharp.Cli
             CodeArtifactStore codeArtifacts = null;
             if (codeExecOptions.Enabled)
             {
+                if (codeExecOptions.Unconfined)
+                {
+                    Console.Error.WriteLine(
+                        $"{CodeExecOptions.UnconfinedFlag} is set: model-authored commands may fall back to "
+                        + "this process's filesystem and network privileges when confinement is unavailable "
+                        + "(every run on Windows). Do not use it for a "
+                        + "session or machine you do not trust.");
+                }
+                if (codeExecOptions.AllowNetwork)
+                {
+                    Console.Error.WriteLine(
+                        $"{CodeExecOptions.AllowNetworkFlag} is set: model-authored commands have "
+                        + "unrestricted IP network access, including LAN/loopback services and listening "
+                        + "sockets, and can send any data the sandbox lets them read. Package/install-domain "
+                        + "allow-lists constrain only the host installer, not direct downloads by a command. "
+                        + "On macOS, a deliberately detached child may outlive its request; tool results report that gap.");
+                }
                 codeExecOptions.ScratchDirectory ??= Path.Combine(AppContext.BaseDirectory, "code-scratch");
                 codeArtifacts = new CodeArtifactStore(
                     codeExecOptions.ArtifactDirectory
@@ -619,9 +636,9 @@ namespace TensorSharp.Cli
                 else
                 {
                     _log.LogInformation(LogEventIds.HostConfiguration,
-                        "cli.codeexec.ready shell={Shell} sandbox={Sandbox} install={AllowInstall} tools={Tools} workspace={Workspace}",
+                        "cli.codeexec.ready shell={Shell} sandbox={Sandbox} install={AllowInstall} network={AllowNetwork} tools={Tools} workspace={Workspace}",
                         runner.Shell?.Name ?? "none", runner.Sandbox?.Name ?? "none",
-                        codeExecOptions.AllowInstall,
+                        codeExecOptions.AllowInstall, codeExecOptions.AllowNetwork,
                         string.Join(",", CodeEnvironment.AvailableTools), codeWorkspace.Root);
                 }
             }

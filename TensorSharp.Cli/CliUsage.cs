@@ -110,7 +110,7 @@ namespace TensorSharp.Cli
                     "How hard to insist on OS isolation for a skill's scripts. required (the default) refuses to " +
                     "run them on a machine with no sandbox rather than running them unconfined; preferred runs " +
                     "them anyway; off applies only the in-process limits. macOS uses sandbox-exec, Linux uses " +
-                    "bubblewrap when bwrap is installed. Default: required " +
+                    "bubblewrap when bwrap 0.12.0 or newer is installed. Default: required " +
                     "(TS_SKILLS_SANDBOX env var overrides).",
                     "--skills-sandbox preferred"),
                 new OptionHelp("--skills-allow-network",
@@ -137,10 +137,11 @@ namespace TensorSharp.Cli
                     "bytes from anchors it either finds or refuses, rather than the model retyping a file it " +
                     "half-remembers. Separate from --skills-allow-exec on purpose: that runs a script already " +
                     "on disk, this runs commands written during the request. Needs a real sandbox (macOS " +
-                    "sandbox-exec, Linux bwrap); without one the tool refuses rather than running unconfined - " +
-                    "see --code-exec-unconfined. A command NEVER reaches the network, on any host and in " +
-                    "any configuration: installs are the only thing that reaches a registry, and the HOST " +
-                    "performs those itself rather than running the model's install command. Default: off " +
+                    "sandbox-exec, Linux bwrap 0.12.0 or newer); without one the tool refuses rather than running unconfined - " +
+                    "see --code-exec-unconfined. Commands cannot reach the network by default; " +
+                    "--code-exec-allow-network is the separate explicit opt-in. Package installs do not " +
+                    "grant that access: the HOST performs them rather than running the model's install " +
+                    "command. Default: off " +
                     "(TS_CODE_EXEC env var overrides; any value but 0 turns it on).",
                     "--code-exec"),
                 new OptionHelp("--code-exec-allow-install",
@@ -149,8 +150,9 @@ namespace TensorSharp.Cli
                     "touches the network, so it is a separate decision. What makes it safe is that the " +
                     "model's install command is READ, not run: the host takes the tool and the package names " +
                     "out of it, validates the names, and performs the install itself with an argument vector " +
-                    "it built - then substitutes the install out of the line so the rest runs with no network " +
-                    "like anything else. An option that would change where a package comes from (--index-url, " +
+                    "it built - then substitutes the install out of the line, so installing never widens the " +
+                    "rest of the command's separately configured network policy. An option that would change " +
+                    "where a package comes from (--index-url, " +
                     "-i, --find-links, --registry, a URL requirement) is refused by name, and so is an " +
                     "installer the host cannot perform (gem, cargo); -r requirements.txt is read and each " +
                     "line validated. Only prebuilt wheels are installed and install scripts never run " +
@@ -158,13 +160,35 @@ namespace TensorSharp.Cli
                     "dependency be installed automatically instead of just failing. Requires --code-exec. " +
                     "Default: off (TS_CODE_EXEC_ALLOW_INSTALL env var overrides).",
                     "--code-exec --code-exec-allow-install"),
+                new OptionHelp("--code-exec-allow-network",
+                    "Give every model-authored command unrestricted IP network access (subject to the host OS " +
+                    "and firewall), so generated code can fetch URLs, follow redirects, use DNS and call " +
+                    "remote APIs. This is separate " +
+                    "from package-install permission and is off by default, following the same default-deny, " +
+                    "explicit-opt-in principle as Codex and Claude's sandbox runtime. This mode grants the " +
+                    "full host network rather than their optional domain-filtered proxy mode. Write/home-read " +
+                    "confinement remains active on macOS and Linux, subject to macOS's shared /private/tmp read/write " +
+                    "compatibility exception. Linux also bounds descendants with a PID namespace; macOS Seatbelt is " +
+                    "inherited, but a deliberately detached child may outlive the request and every result reports that gap. Network access raises prompt-injection, " +
+                    "data-exfiltration, host-local service and untrusted-download risk; credential-free host " +
+                    "proxy settings are passed only in this mode. Custom-CA bundles up to 16 MiB are read once, " +
+                    "with only validated public certificates copied into a read-only session snapshot; the " +
+                    "source path and adjacent data are not exposed. " +
+                    "Authenticated proxies need a credential-free host-side forwarder. Enable it only when needed. " +
+                    "Package allow-lists and install-domain settings constrain only TensorSharp's recognised " +
+                    "host installer; unrestricted generated code can fetch or execute artifacts directly. " +
+                    "On Windows, --code-exec-unconfined is still required because a job object cannot " +
+                    "confine filesystem access. Default: off (TS_CODE_EXEC_ALLOW_NETWORK env var overrides).",
+                    "--code-exec --code-exec-allow-network"),
                 new OptionHelp("--code-exec-packages <list>",
                     "Restrict installs to these package names, comma-separated; anything else is refused and " +
                     "the model is told which names are allowed. Matching is on the bare name, so a version the " +
                     "model pins (numpy==2.1.0) still matches the entry 'numpy'. Enforceable because the HOST " +
-                    "performs installs: it reads the names out of the model's command and builds the install " +
-                    "itself, so the list applies however the request was spelled. Only meaningful with " +
-                    "--code-exec-allow-install. Default: empty, meaning any package.",
+                    "performs recognised installs: it reads the names out of the model's command and builds " +
+                    "the install itself, so the list applies to those requests however they were spelled. " +
+                    "With unrestricted command networking this is not a security boundary, because generated " +
+                    "code can fetch or execute artifacts directly. Only meaningful with --code-exec-allow-install. " +
+                    "Default: empty, meaning any package.",
                     "--code-exec-packages numpy,pandas,reportlab"),
                 new OptionHelp("--code-exec-install-index <url>",
                     "Package index installs are pointed at, instead of the tool's default. The host applies it - " +

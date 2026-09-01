@@ -61,7 +61,13 @@ namespace TensorSharp.AgentHost.CodeExec
         /// <summary>Environment override for <see cref="AllowInstallFlag"/>.</summary>
         public const string AllowInstallEnvVar = "TS_CODE_EXEC_ALLOW_INSTALL";
 
-        /// <summary>Run even where the OS cannot confine the process. CLI only.</summary>
+        /// <summary>Let model-authored commands use the host network without restriction.</summary>
+        public const string AllowNetworkFlag = "--code-exec-allow-network";
+
+        /// <summary>Environment override for <see cref="AllowNetworkFlag"/>.</summary>
+        public const string AllowNetworkEnvVar = "TS_CODE_EXEC_ALLOW_NETWORK";
+
+        /// <summary>Run even where the OS cannot confine the process. Accepted by both hosts.</summary>
         public const string UnconfinedFlag = "--code-exec-unconfined";
 
         /// <summary>Seconds a single command may take.</summary>
@@ -119,7 +125,7 @@ namespace TensorSharp.AgentHost.CodeExec
         /// <summary>Every flag of this family that takes no value.</summary>
         public static readonly IReadOnlyList<string> SwitchFlags = new[]
         {
-            EnabledFlag, AllowInstallFlag, UnconfinedFlag,
+            EnabledFlag, AllowInstallFlag, AllowNetworkFlag, UnconfinedFlag,
         };
 
         /// <summary>Every flag of this family that takes a value.</summary>
@@ -134,11 +140,14 @@ namespace TensorSharp.AgentHost.CodeExec
         /// <see cref="AllowInstall"/> was turned on deliberately.
         ///
         /// <para>
-        /// This is enforceable again. It was retired when the tool surface became a shell,
-        /// because a model typing its own <c>pip install</c> could spell the request in
-        /// ways no name list could see. It came back when installs moved BACK to the host:
-        /// the model's command is read, not run, and the host builds the argument vector
-        /// from names it has checked — so an allow-list applies to every spelling at once.
+        /// This is enforceable for recognised, host-performed installs. It was retired
+        /// when the tool surface became a shell, because a model typing its own
+        /// <c>pip install</c> could spell the request in ways no name list could see. It
+        /// came back when those installs moved back to the host: the command is read, not
+        /// run, and the host builds the argument vector from checked names. It is not a
+        /// security boundary once <see cref="AllowNetwork"/> gives arbitrary generated
+        /// code unrestricted egress; such code can download or execute artifacts without
+        /// using the recognised install path.
         /// </para>
         /// </summary>
         public IReadOnlyList<string> AllowedPackages { get; set; } = Array.Empty<string>();
@@ -155,21 +164,49 @@ namespace TensorSharp.AgentHost.CodeExec
         /// message naming this flag. With it on, the model's install command is READ
         /// rather than run: the host takes the package names out of it and performs the
         /// install itself, pointed at the egress proxy that admits
-        /// <see cref="InstallDomains"/>. The command the model wrote still has no socket —
-        /// no command ever does.
+        /// <see cref="InstallDomains"/>. This permission never widens the model command's
+        /// network policy; commands remain offline unless <see cref="AllowNetwork"/> is
+        /// enabled as a separate operator decision. With that broader permission enabled,
+        /// this switch and the package/domain lists govern only TensorSharp's recognised
+        /// host installer and cannot prevent a command from fetching software directly.
         /// </para>
         /// </summary>
         public bool AllowInstall { get; set; }
 
         /// <summary>
+        /// Whether commands written by the model may use the host network.
+        ///
+        /// <para>
+        /// Off by default and separate from <see cref="AllowInstall"/>. Installing a
+        /// dependency is a narrow host-performed operation; opening the command's network
+        /// namespace lets arbitrary generated code fetch untrusted content, listen on IP
+        /// sockets or send data anywhere the host permits. Operators must opt in to that
+        /// broader capability explicitly.
+        /// Package allow-lists and install-domain controls are not egress controls in this
+        /// mode: they continue to constrain the host-performed installer only.
+        /// </para>
+        /// <para>
+        /// Write and home-read confinement remain in force. Linux additionally bounds
+        /// descendants with a PID namespace. On macOS the Seatbelt policy is inherited
+        /// by children and ordinary process groups are cleaned up, but a deliberately
+        /// detached child can outlive the request; results report that gap. Seatbelt admits
+        /// IP-network operations while retaining scoped Unix-socket rules; on Linux
+        /// bubblewrap keeps the host network namespace but hides host service sockets
+        /// under /run; on Windows the existing job
+        /// object cannot confine either files or sockets, so
+        /// <see cref="UnconfinedFlag"/> is still required there.
+        /// </para>
+        /// </summary>
+        public bool AllowNetwork { get; set; }
+
+        /// <summary>
         /// Run even when the OS provides no real confinement.
         ///
         /// <para>
-        /// The escape hatch for a developer on Windows, where a job object bounds CPU and
-        /// memory but cannot restrict one file or one socket. It is refused by the server
-        /// — a shared host must not be talked into running model-authored commands with
-        /// the filesystem open — and on the CLI it is a deliberate act by the person whose
-        /// machine it is.
+        /// The escape hatch for Windows, where TensorSharp's current job-object backend
+        /// bounds CPU and memory but cannot restrict one file or one socket. Both the CLI
+        /// and server accept it as an explicit operator decision; it must not be enabled
+        /// on a server reachable by users who are not trusted with that machine.
         /// </para>
         /// </summary>
         public bool Unconfined { get; set; }
@@ -373,7 +410,7 @@ namespace TensorSharp.AgentHost.CodeExec
         public SkillSandboxMode Sandbox { get; set; } = SkillSandboxMode.Required;
 
         /// <summary>True when nothing has been configured, so the feature is simply absent.</summary>
-        public bool IsConfigured => Enabled || AllowInstall || Unconfined;
+        public bool IsConfigured => Enabled || AllowInstall || AllowNetwork || Unconfined;
 
         // ---- parsing -------------------------------------------------------
 
@@ -433,6 +470,7 @@ namespace TensorSharp.AgentHost.CodeExec
 
                 if (Matches(arg, EnabledFlag)) { options.Enabled = true; continue; }
                 if (Matches(arg, AllowInstallFlag)) { options.AllowInstall = true; continue; }
+                if (Matches(arg, AllowNetworkFlag)) { options.AllowNetwork = true; continue; }
                 if (Matches(arg, UnconfinedFlag)) { options.Unconfined = true; continue; }
 
                 if (TryValue(args, ref i, InstallIndexFlag, out string? index))
@@ -519,6 +557,8 @@ namespace TensorSharp.AgentHost.CodeExec
                 Enabled = true;
             if (!AllowInstall && IsEnvOn(AllowInstallEnvVar))
                 AllowInstall = true;
+            if (!AllowNetwork && IsEnvOn(AllowNetworkEnvVar))
+                AllowNetwork = true;
         }
 
         /// <summary>

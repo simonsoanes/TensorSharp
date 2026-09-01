@@ -97,6 +97,8 @@ namespace TensorSharp.AgentHost.CodeExec
         private readonly string? _shellError;
         private readonly ConcurrentDictionary<string, ShellSession> _sessions = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, BackgroundJobs> _jobs = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, Lazy<string?>>>
+            _sanitizedCertificateBundles = new(StringComparer.Ordinal);
 
         /// <param name="options">The host's terms.</param>
         /// <param name="logger">Where runs are recorded, as metadata only.</param>
@@ -144,12 +146,15 @@ namespace TensorSharp.AgentHost.CodeExec
         /// Whether commands may run here at all.
         ///
         /// <para>
-        /// Asks whether the host actually CONFINES rather than whether a sandbox object
-        /// exists — a Windows job object bounds CPU and memory but cannot restrict a file
-        /// or a socket, and an existence test made the default behave like "preferred"
-        /// there, quietly running model-written commands with the filesystem open. The
-        /// only way past a "no" is <c>--code-exec-unconfined</c>, an explicit statement by
-        /// an operator about their own machine.
+        /// Asks whether the host actually confines every capability the operator did not
+        /// deliberately open, rather than whether a sandbox object merely exists. A
+        /// Windows job object bounds CPU and memory but cannot restrict a file or a socket,
+        /// and an existence test made the default behave like "preferred" there, quietly
+        /// running model-written commands with the filesystem open. Network confinement
+        /// is not required after the operator explicitly enables network access; write
+        /// confinement still is. The only way past a remaining "no" is
+        /// <c>--code-exec-unconfined</c>, an explicit statement by an operator about their
+        /// own machine.
         /// </para>
         /// </summary>
         public bool CanRun =>
@@ -157,12 +162,24 @@ namespace TensorSharp.AgentHost.CodeExec
             && _shell != null
             && (_options.Unconfined
                 || _options.Sandbox != SkillSandboxMode.Required
-                || Confines(_sandbox));
+                || Confines(_sandbox, requireNetworkConfinement: !_options.AllowNetwork));
 
-        private static bool Confines(ISkillSandbox? sandbox) =>
+        /// <summary>
+        /// Whether the declaration can promise IP-network confinement before a command
+        /// starts. Required mode fails closed if wrapping fails; preferred/unconfined
+        /// modes may deliberately fall back to a raw process and therefore cannot make
+        /// that promise even when a capable sandbox was detected at startup.
+        /// </summary>
+        internal bool NetworkConfinementGuaranteed =>
+            !_options.AllowNetwork
+            && !_options.Unconfined
+            && _options.Sandbox == SkillSandboxMode.Required
+            && _sandbox?.Capabilities.ConfinesNetwork == true;
+
+        private static bool Confines(ISkillSandbox? sandbox, bool requireNetworkConfinement) =>
             sandbox is not null
             && sandbox.Capabilities.ConfinesWrites
-            && sandbox.Capabilities.ConfinesNetwork;
+            && (!requireNetworkConfinement || sandbox.Capabilities.ConfinesNetwork);
 
         /// <summary>Why <see cref="CanRun"/> is false, or null.</summary>
         public string? UnavailableReason
@@ -181,14 +198,19 @@ namespace TensorSharp.AgentHost.CodeExec
 
                 if (_sandbox is { } present)
                 {
-                    IReadOnlyList<string> gaps = present.Capabilities.Gaps();
+                    IReadOnlyList<string> gaps = CommandGaps(
+                        present.Capabilities, includeNetwork: !_options.AllowNetwork);
                     return $"this host's sandbox ({present.Name}) cannot confine commands: "
                          + string.Join("; ", gaps)
                          + ". Running commands written during the request needs real isolation, so it is refused"
                          + $" — pass {CodeExecOptions.UnconfinedFlag} to accept the risk on a machine that is yours";
                 }
 
-                return "this host provides no OS sandbox, and running model-written commands without one is refused"
+                string sandboxDetail = OperatingSystem.IsLinux()
+                    ? $" ({BubblewrapSandbox.AvailabilityError})"
+                    : string.Empty;
+                return "this host provides no OS sandbox" + sandboxDetail
+                     + ", and running model-written commands without one is refused"
                      + $" — pass {CodeExecOptions.UnconfinedFlag} to accept the risk on a machine that is yours";
             }
         }
@@ -210,7 +232,8 @@ namespace TensorSharp.AgentHost.CodeExec
                 // Forget it when the session ends. Without this the map grows one entry per
                 // conversation for the life of the process — small each, unbounded together,
                 // and on the CLI an ephemeral workspace per call makes it grow per CALL.
-                workspace.RegisterCleanup(new Forget(_sessions, _jobs, key));
+                workspace.RegisterCleanup(new Forget(
+                    _sessions, _jobs, _sanitizedCertificateBundles, key));
                 return created;
             }
             return _sessions[key];
@@ -221,15 +244,19 @@ namespace TensorSharp.AgentHost.CodeExec
         {
             private readonly ConcurrentDictionary<string, ShellSession> _sessions;
             private readonly ConcurrentDictionary<string, BackgroundJobs> _jobs;
+            private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, Lazy<string?>>>
+                _certificateBundles;
             private readonly string _key;
 
             public Forget(
                 ConcurrentDictionary<string, ShellSession> sessions,
                 ConcurrentDictionary<string, BackgroundJobs> jobs,
+                ConcurrentDictionary<string, ConcurrentDictionary<string, Lazy<string?>>> certificateBundles,
                 string key)
             {
                 _sessions = sessions;
                 _jobs = jobs;
+                _certificateBundles = certificateBundles;
                 _key = key;
             }
 
@@ -237,6 +264,7 @@ namespace TensorSharp.AgentHost.CodeExec
             {
                 _sessions.TryRemove(_key, out _);
                 _jobs.TryRemove(_key, out _);
+                _certificateBundles.TryRemove(_key, out _);
             }
         }
 
@@ -322,8 +350,9 @@ namespace TensorSharp.AgentHost.CodeExec
             // command's status. The model then reads `exit 0` and the program's output and
             // concludes its edit landed, when the file was never touched.
             // A trailing `&` cannot do what the model means by it: every call is a fresh
-            // confined process whose whole tree is killed when the call returns, so the
-            // job is dead before the next call can look at it. Refused with the parameter
+            // confined process whose launched job is stopped when the call returns, so an
+            // ordinary shell background job is dead before the next call can look at it.
+            // Refused with the parameter
             // that DOES work — the shape of refusal this codebase uses everywhere, and the
             // shape Claude Code's own shims use ("Narrow the pattern, or target your own
             // children with `pkill -P $$ ...`").
@@ -331,7 +360,7 @@ namespace TensorSharp.AgentHost.CodeExec
             {
                 return CodeExecResult.Refused(
                     "a trailing '&' does not work here. Every command is its own confined process and "
-                    + "its whole process tree is stopped when the call returns, so a job put in the "
+                    + "its launched job is stopped when the call returns, so a job put in the "
                     + "background with '&' is gone before you can read from it. Use the "
                     + "run_in_background argument instead: the host keeps that job alive for the rest of "
                     + "the conversation and gives you a log file to read with an ordinary command.");
@@ -350,13 +379,12 @@ namespace TensorSharp.AgentHost.CodeExec
             if (!TryResolveWorkDirectory(request.WorkDirectory, workspace, out string? workDirectory, out string? workError))
                 return CodeExecResult.Refused(workError!);
 
-            // Installs are performed BY THE HOST, and the model's own command never gets a
-            // socket. See ShellInstall for why: handing the line a network would either
-            // let the model choose the index it installs from, or share the install's
-            // reach with everything else on the line — and on a host whose sandbox cannot
-            // pin egress to a proxy, that second one is the whole internet. Reading the
-            // request and building the argument vector ourselves closes both, on every
-            // platform, without changing what the model types.
+            // Installs are performed BY THE HOST and never widen the command's separately
+            // configured network policy. See ShellInstall for why: granting a socket just
+            // for an install would either let the model choose its index or share that
+            // reach with everything else on the line. Reading the request and building
+            // the argument vector ourselves closes both holes on every platform, while a
+            // command gets general network access only from the explicit network switch.
             var notes = new List<string>();
             if (ShellCommand.ContainsInstall(command))
             {
@@ -404,8 +432,8 @@ namespace TensorSharp.AgentHost.CodeExec
 
             EnsureInterpreterAliases(workspace);
             EnsureNodeResolution(workspace);
-            var environment = BuildEnvironment(workspace);
             ShellSession session = SessionFor(workspace);
+            var environment = BuildEnvironment(workspace, out IReadOnlyList<string> networkReadablePaths);
             ShellSession.ShellScript script;
             try
             {
@@ -420,17 +448,20 @@ namespace TensorSharp.AgentHost.CodeExec
             {
                 Interpreter = _shell!.Path,
                 Arguments = _shell.ArgumentsFor(script.Path),
-                // The whole workspace is writable: the work directory the model edits in,
-                // the environment its installs land in, and the state the wrapper saves.
-                // It STARTS in whatever directory the session last left off in.
-                WriteDirectory = workspace.Root,
+                // Generated code writes its work tree plus narrowly separated temp and
+                // shell-persistence roots. The package environment and host-authored
+                // scripts/logs stay read-only, so a symlink planted in one command cannot
+                // redirect a later host write outside the sandbox.
+                WriteDirectory = workspace.WorkDirectory,
+                WritablePaths = new[] { workspace.TempDirectory, workspace.ShellStateDirectory },
                 WorkingDirectory = workDirectory ?? session.CurrentDirectory,
                 ReadOnlyDirectory = workspace.Root,
-                ReadablePaths = ReadablePathsFor(workspace, request.ReadablePaths),
-                // Never. A command the model wrote has no network on any host, in any
-                // configuration — installs are the only thing that reaches a registry and
-                // the host performs those itself.
-                AllowNetwork = false,
+                ReadablePaths = ReadablePathsFor(
+                    workspace, request.ReadablePaths, networkReadablePaths),
+                // Network access is a distinct operator decision. Package-install
+                // permission does not imply it: installs are still performed by the host,
+                // while this controls the generated command's own sockets.
+                AllowNetwork = _options.AllowNetwork,
                 Timeout = TimeoutFor(request.Timeout),
                 MaxOutputBytes = _options.MaxOutputBytes,
                 EnvironmentVariables = environment,
@@ -753,7 +784,7 @@ namespace TensorSharp.AgentHost.CodeExec
 
         /// <summary>
         /// Perform every install the line asked for, then substitute each one out of the
-        /// line so what remains runs with no network.
+        /// line so the install cannot alter the residual command's network policy.
         ///
         /// <para>
         /// Substitution rather than removal, because the operators around an install mean
@@ -957,11 +988,15 @@ namespace TensorSharp.AgentHost.CodeExec
         /// </para>
         /// </summary>
         private static IReadOnlyList<string> ReadablePathsFor(
-            SessionWorkspace workspace, IReadOnlyList<string>? extra)
+            SessionWorkspace workspace,
+            IReadOnlyList<string>? extra,
+            IReadOnlyList<string>? networkPaths = null)
         {
             var paths = new List<string> { workspace.EnvDirectory };
             if (extra != null)
                 paths.AddRange(extra.Where(p => !string.IsNullOrWhiteSpace(p)));
+            if (networkPaths != null)
+                paths.AddRange(networkPaths.Where(p => !string.IsNullOrWhiteSpace(p)));
             return paths;
         }
 
@@ -1145,8 +1180,34 @@ namespace TensorSharp.AgentHost.CodeExec
             && CodeEnvironment.PythonVersionOf(incumbent) is { } b
             && a > b;
 
-        private static Dictionary<string, string> BuildEnvironment(SessionWorkspace workspace)
+        /// <summary>
+        /// Host network settings that are useful without being general credential
+        /// inheritance. They are copied only for the explicit network opt-in: many
+        /// enterprise/CI hosts have no direct route and require an HTTP/SOCKS proxy or a
+        /// custom trust bundle. Everything else still starts from ConfinedProcess's blank
+        /// environment, especially cloud/API credentials.
+        /// </summary>
+        private static readonly string[] ProxyEnvironmentVariables =
         {
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+            "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+            "GRPC_PROXY", "grpc_proxy",
+        };
+
+        private static readonly string[] CertificateFileEnvironmentVariables =
+        {
+            "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+            "GIT_SSL_CAINFO", "AWS_CA_BUNDLE", "PIP_CERT", "NPM_CONFIG_CAFILE",
+            "CARGO_HTTP_CAINFO", "DENO_CERT", "CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE",
+            "NIX_SSL_CERT_FILE", "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH",
+        };
+
+        private const long MaxCertificateBundleBytes = 16L * 1024 * 1024;
+
+        private Dictionary<string, string> BuildEnvironment(
+            SessionWorkspace workspace, out IReadOnlyList<string> networkReadablePaths)
+        {
+            var readablePaths = new List<string>();
             var environment = new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 // ConfinedProcess points HOME and TMPDIR at the whole writable region,
@@ -1198,7 +1259,231 @@ namespace TensorSharp.AgentHost.CodeExec
                 hostPath,
             }.Where(p => p.Length > 0));
 
+            if (_options.AllowNetwork)
+                AddNetworkEnvironment(workspace, environment, readablePaths);
+
+            networkReadablePaths = readablePaths;
             return environment;
+        }
+
+        private void AddNetworkEnvironment(
+            SessionWorkspace workspace,
+            Dictionary<string, string> environment,
+            List<string> readablePaths)
+        {
+            foreach (string name in ProxyEnvironmentVariables)
+            {
+                if (Environment.GetEnvironmentVariable(name) is not { Length: > 0 } value)
+                    continue;
+
+                // Proxy URLs frequently carry user:password@host. The generated command
+                // gets network access, not host credentials. Claude's proxy architecture
+                // similarly exposes only an ephemeral local credential; until TensorSharp
+                // has that forwarding layer, credential-bearing endpoints fail closed.
+                if (ProxyValueHasNoCredentials(name, value))
+                    environment[name] = value;
+            }
+
+            // A host CA path is never handed to generated code directly. Read it once,
+            // extract and validate only X.509 certificate blocks, and write their
+            // canonical public PEM form to random host-authored session state. That
+            // closes three otherwise subtle holes at once: arbitrary text/private-key
+            // material adjacent to a certificate is not disclosed, a writable source
+            // cannot be swapped after validation but before sandbox launch, and a large
+            // system bundle is not reparsed on every shell call. State is read-only to
+            // the command (apart from the separate state/shell child), so the immutable
+            // snapshot cannot be redirected by a model-created symlink.
+            foreach (string name in CertificateFileEnvironmentVariables)
+            {
+                if (Environment.GetEnvironmentVariable(name) is not { Length: > 0 } source)
+                    continue;
+                try
+                {
+                    string full = Path.GetFullPath(source);
+                    string? sanitized = SanitizedCertificateBundle(workspace, full);
+                    if (sanitized == null)
+                        continue;
+                    environment[name] = sanitized;
+                    if (!readablePaths.Contains(sanitized, StringComparer.Ordinal))
+                        readablePaths.Add(sanitized);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                               or ArgumentException or NotSupportedException)
+                {
+                    // A malformed, inaccessible or oversized host setting is omitted. A
+                    // generated command must never inherit a path it cannot actually use.
+                }
+            }
+        }
+
+        private string? SanitizedCertificateBundle(SessionWorkspace workspace, string source)
+        {
+            ConcurrentDictionary<string, Lazy<string?>> bundles =
+                _sanitizedCertificateBundles.GetOrAdd(
+                    workspace.Root,
+                    _ => new ConcurrentDictionary<string, Lazy<string?>>(StringComparer.Ordinal));
+            return bundles.GetOrAdd(
+                source,
+                _ => new Lazy<string?>(
+                    () => CreateSanitizedCertificateBundle(workspace, source),
+                    System.Threading.LazyThreadSafetyMode.ExecutionAndPublication)).Value;
+        }
+
+        private static string? CreateSanitizedCertificateBundle(
+            SessionWorkspace workspace, string source)
+        {
+            string? canonical = ReadAndNormalizeCertificateBundle(source);
+            if (canonical == null)
+                return null;
+
+            for (int attempt = 0; attempt < 8; attempt++)
+            {
+                string destination = Path.Combine(
+                    workspace.StateDirectory,
+                    "ca-" + Path.GetRandomFileName() + ".pem");
+                FileStream stream;
+                try
+                {
+                    // CreateNew plus an unpredictable leaf is important even though the
+                    // containing state directory is sandbox-read-only: it also avoids
+                    // following stale files from a crashed or deliberately unconfined
+                    // session.
+                    stream = new FileStream(
+                        destination, FileMode.CreateNew, FileAccess.Write, FileShare.Read,
+                        bufferSize: 4096, FileOptions.WriteThrough);
+                }
+                catch (IOException) when (File.Exists(destination))
+                {
+                    // Vanishingly unlikely random collision. Choose a new leaf; never
+                    // overwrite or follow what was already there.
+                    continue;
+                }
+
+                using (stream)
+                using (var writer = new StreamWriter(
+                    stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
+                {
+                    writer.Write(canonical);
+                }
+                if (!OperatingSystem.IsWindows())
+                {
+                    try
+                    {
+                        File.SetUnixFileMode(
+                            destination, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+                }
+                return destination;
+            }
+
+            return null;
+        }
+
+        private static string? ReadAndNormalizeCertificateBundle(string path)
+        {
+            try
+            {
+                // Hold one handle for length check and read. A rename then leaves this
+                // handle on the original inode; an in-place race still has to produce a
+                // valid public certificate before any byte is copied onward.
+                using var stream = new FileStream(
+                    path, FileMode.Open, FileAccess.Read, FileShare.Read,
+                    bufferSize: 4096, FileOptions.SequentialScan);
+                long length = stream.Length;
+                if (length <= 0 || length > MaxCertificateBundleBytes)
+                    return null;
+
+                // One extra byte detects a source that grows after the length check.
+                var bytes = new byte[checked((int)length) + 1];
+                int read = 0;
+                while (read < bytes.Length)
+                {
+                    int count = stream.Read(bytes, read, bytes.Length - read);
+                    if (count == 0)
+                        break;
+                    read += count;
+                }
+                if (read != length)
+                    return null;
+
+                string text = new UTF8Encoding(
+                    encoderShouldEmitUTF8Identifier: false,
+                    throwOnInvalidBytes: true).GetString(bytes, 0, read);
+                System.Text.RegularExpressions.MatchCollection certificates =
+                    System.Text.RegularExpressions.Regex.Matches(
+                        text,
+                        @"-----BEGIN (?<label>CERTIFICATE|TRUSTED CERTIFICATE)-----\s*"
+                        + @"(?<body>[A-Za-z0-9+/=\s]+?)\s*"
+                        + @"-----END (?<end>CERTIFICATE|TRUSTED CERTIFICATE)-----",
+                        System.Text.RegularExpressions.RegexOptions.CultureInvariant
+                        | System.Text.RegularExpressions.RegexOptions.NonBacktracking);
+                if (certificates.Count == 0)
+                    return null;
+
+                var normalized = new StringBuilder();
+                foreach (System.Text.RegularExpressions.Match match in certificates)
+                {
+                    if (!string.Equals(
+                        match.Groups["label"].Value,
+                        match.Groups["end"].Value,
+                        StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+                    byte[] der = Convert.FromBase64String(
+                        System.Text.RegularExpressions.Regex.Replace(
+                            match.Groups["body"].Value, @"\s+", string.Empty));
+                    using System.Security.Cryptography.X509Certificates.X509Certificate2 certificate =
+                        System.Security.Cryptography.X509Certificates.X509CertificateLoader
+                            .LoadCertificate(der);
+                    normalized.Append(certificate.ExportCertificatePem()).Append('\n');
+                }
+                return normalized.Length == 0 ? null : normalized.ToString();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                           or DecoderFallbackException or FormatException
+                                           or System.Security.Cryptography.CryptographicException)
+            {
+                return null;
+            }
+        }
+
+        internal static bool ProxyValueHasNoCredentials(string name, string value)
+        {
+            if (value.Length == 0 || value.Any(char.IsControl)
+                || !string.Equals(value, value.Trim(), StringComparison.Ordinal))
+                return false;
+            if (name.Equals("NO_PROXY", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (value.Contains('@') || value.Contains('?') || value.Contains('#'))
+                return false;
+
+            // Some tools accept the conventional proxy.example:8080 spelling. Feeding
+            // that directly to Uri.TryCreate is ambiguous (`localhost:` can be parsed as
+            // a URI scheme), so validate the host/IPv4/bracketed-IPv6 + numeric-port form
+            // explicitly before handling normal scheme:// URLs.
+            if (!value.Contains("://", StringComparison.Ordinal))
+            {
+                System.Text.RegularExpressions.Match bare =
+                    System.Text.RegularExpressions.Regex.Match(
+                        value, @"^(?:\[[0-9A-Fa-f:.%]+\]|[A-Za-z0-9._-]+):(\d{1,5})$");
+                return bare.Success
+                    && int.TryParse(bare.Groups[1].Value, NumberStyles.None,
+                        CultureInfo.InvariantCulture, out int port)
+                    && port is > 0 and <= 65535;
+            }
+
+            if (!Uri.TryCreate(value, UriKind.Absolute, out Uri? uri)
+                || uri.Host.Length == 0
+                || uri.Scheme is not ("http" or "https" or "socks4" or "socks4a" or "socks5" or "socks5h"))
+            {
+                return false;
+            }
+            return string.IsNullOrEmpty(uri.UserInfo)
+                && string.IsNullOrEmpty(uri.Query)
+                && string.IsNullOrEmpty(uri.Fragment)
+                && (uri.AbsolutePath.Length == 0 || uri.AbsolutePath == "/");
         }
 
         // ---- background jobs ------------------------------------------------
@@ -1300,7 +1585,7 @@ namespace TensorSharp.AgentHost.CodeExec
         private CodeExecResult StartBackground(
             SessionWorkspace workspace, ConfinedLaunch launch)
         {
-            string logDirectory = Path.Combine(workspace.WorkDirectory, ".jobs");
+            string logDirectory = Path.Combine(workspace.StateDirectory, ".jobs");
             Directory.CreateDirectory(logDirectory);
 
             BackgroundJobs jobs = JobsFor(workspace);
@@ -1330,6 +1615,7 @@ namespace TensorSharp.AgentHost.CodeExec
                 WorkingDirectory = launch.WorkingDirectory,
                 ReadOnlyDirectory = launch.ReadOnlyDirectory,
                 ReadablePaths = launch.ReadablePaths,
+                WritablePaths = launch.WritablePaths,
                 AllowNetwork = launch.AllowNetwork,
                 AllowLoopbackPort = launch.AllowLoopbackPort,
                 // A background job has no deadline of its own: it ends when it ends, when
@@ -2526,12 +2812,27 @@ namespace TensorSharp.AgentHost.CodeExec
 
         // ---- describing -----------------------------------------------------
 
-        private static readonly string[] AllGaps =
+        /// <summary>
+        /// Render typed capability axes as command-facing prose. Security decisions must
+        /// not be made by searching these sentences for a word: wording changes, while
+        /// <see cref="SkillSandboxCapabilities.ConfinesNetwork"/> does not.
+        /// </summary>
+        private static IReadOnlyList<string> CommandGaps(
+            SkillSandboxCapabilities? capabilities, bool includeNetwork)
         {
-            "commands may write anywhere the host process can",
-            "commands may reach the network",
-            "commands may read the user's home directory",
-        };
+            SkillSandboxCapabilities actual = capabilities
+                ?? new SkillSandboxCapabilities(false, false, false, false);
+            var gaps = new List<string>();
+            if (!actual.ConfinesWrites)
+                gaps.Add("commands may write anywhere the host process can");
+            if (includeNetwork && !actual.ConfinesNetwork)
+                gaps.Add("commands may reach the network");
+            if (!actual.ConfinesHomeReads)
+                gaps.Add("commands may read the user's home directory");
+            if (!actual.BoundsProcessTree)
+                gaps.Add("a child process may outlive the request");
+            return gaps;
+        }
 
         private CodeExecResult Describe(
             string command,
@@ -2624,12 +2925,20 @@ namespace TensorSharp.AgentHost.CodeExec
             // model was told, by silence, that its command had been confined. That is the
             // opposite of the truth about whether the command could have reached the
             // network, and it is the one fact a model must be able to trust here.
-            IReadOnlyList<string> gaps =
+            SkillSandboxCapabilities? enforcedCapabilities =
                 string.Equals(run.SandboxName, "none", StringComparison.Ordinal)
-                    ? AllGaps
-                    : _sandbox?.Capabilities.Gaps() ?? AllGaps;
+                    ? null
+                    : _sandbox?.Capabilities;
+            IReadOnlyList<string> gaps = CommandGaps(
+                enforcedCapabilities, includeNetwork: !_options.AllowNetwork);
             if (gaps.Count > 0)
                 sb.Append("Not confined on this host: ").Append(string.Join("; ", gaps)).Append(".\n");
+            if (_options.AllowNetwork)
+            {
+                sb.Append("Network access is intentionally ENABLED by ")
+                  .Append(CodeExecOptions.AllowNetworkFlag)
+                  .Append(": commands may reach the network without restriction, including host IP networks.\n");
+            }
 
             string output = Merge(run.Stdout, run.Stderr);
             if (output.Length > 0)
@@ -2834,11 +3143,11 @@ namespace TensorSharp.AgentHost.CodeExec
                 }
             }
 
-            if (NetworkIsConfined && LooksLikeNetworkFailure(diagnosis))
+            if (NetworkWasConfined(run) && LooksLikeNetworkFailure(diagnosis))
             {
                 // The single most common wrong conclusion a model draws here is "the host
                 // is offline, so I will implement the protocol by hand".
-                sb.Append("\nCommands here have no network at all — not this one, not any of them. The only "
+                sb.Append("\nCommands here have no Internet/IP network access. The only "
                         + "thing that reaches a registry is a package install, and the host performs those "
                         + "itself from the names you give. So bring what you need in by installing it; "
                         + "there is no way to fetch a URL or call an API from a command.\n");
@@ -2856,7 +3165,7 @@ namespace TensorSharp.AgentHost.CodeExec
                     sb.Append('\n');
             }
 
-            AppendWhoseFaultThisIs(sb, diagnosis);
+            AppendWhoseFaultThisIs(sb, run, diagnosis);
         }
 
         /// <summary>
@@ -2887,9 +3196,9 @@ namespace TensorSharp.AgentHost.CodeExec
         /// sentence that makes the model look for something that is no longer there.
         /// </para>
         /// </summary>
-        private void AppendWhoseFaultThisIs(StringBuilder sb, string diagnosis)
+        private void AppendWhoseFaultThisIs(StringBuilder sb, ConfinedResult run, string diagnosis)
         {
-            bool networkConfined = NetworkIsConfined;
+            bool networkConfined = NetworkWasConfined(run);
 
             CodeDiagnostics.FailureCause cause = CodeDiagnostics.ClassifyFailure(
                 diagnosis, CodeLanguage.Unknown, networkConfined);
@@ -2949,12 +3258,15 @@ namespace TensorSharp.AgentHost.CodeExec
         /// that stop agreeing — the rule CodeDiagnostics already states about its regexes.
         /// </summary>
         /// <summary>
-        /// Whether this host's sandbox actually blocks the network. False on Windows, where
-        /// the job-object sandbox reports <c>ConfinesNetwork: false</c> and the network
-        /// really does work — so "nothing here can reach the network" would be a false
-        /// statement of a constraint.
+        /// Whether the sandbox that actually ran this command blocks its IP network.
+        /// False for a raw/degraded run and on Windows, where a job object does not
+        /// confine sockets. This must use the result's sandbox name rather than the
+        /// detected object: preferred execution can fall back after declaration time.
         /// </summary>
-        private bool NetworkIsConfined => _sandbox?.Capabilities.ConfinesNetwork == true;
+        private bool NetworkWasConfined(ConfinedResult run) =>
+            !_options.AllowNetwork
+            && !string.Equals(run.SandboxName, "none", StringComparison.Ordinal)
+            && _sandbox?.Capabilities.ConfinesNetwork == true;
 
         private static bool LooksLikeNetworkFailure(string text) =>
             CodeDiagnostics.LooksLikeNetworkAttempt(text);
@@ -3058,12 +3370,14 @@ namespace TensorSharp.AgentHost.CodeExec
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }
 
-        /// <summary>Nothing long-lived to stop: the registry proxy lives and dies with the command that needed it.</summary>
+        /// <summary>Stop background jobs and release per-session caches owned by this runner.</summary>
         public void Dispose()
         {
             foreach (BackgroundJobs jobs in _jobs.Values)
                 jobs.Dispose();
             _jobs.Clear();
+            _sessions.Clear();
+            _sanitizedCertificateBundles.Clear();
         }
     }
 }

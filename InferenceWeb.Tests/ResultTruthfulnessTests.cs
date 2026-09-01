@@ -328,14 +328,15 @@ public class ResultTruthfulnessTests : IDisposable
     /// </para>
     /// <para>
     /// Forcing a preparation failure needs a sandbox that cannot be prepared, which no
-    /// portable test can arrange; asserting the invariant instead covers the path on
-    /// whichever host does hit it, and is checked here in both directions.
+    /// portable test can arrange; asserting the one-way invariant instead covers the path
+    /// on whichever host does hit it. A confined run may still report a narrower missing
+    /// capability, so the reverse implication would be false.
     /// </para>
     /// </summary>
     [Theory]
     [InlineData(SkillSandboxMode.Off)]
     [InlineData(SkillSandboxMode.Preferred)]
-    public void SayingSandboxNoneAndSayingConfinedAreNeverBothTrue(SkillSandboxMode mode)
+    public void SayingSandboxNoneAlwaysReportsTheConfinementGaps(SkillSandboxMode mode)
     {
         if (!HavePosix) return;
 
@@ -353,13 +354,15 @@ public class ResultTruthfulnessTests : IDisposable
         bool ranRaw = result.Content.Contains("sandbox: none", StringComparison.Ordinal);
         bool warned = result.Content.Contains("Not confined on this host", StringComparison.Ordinal);
 
-        // Exactly the two consistent states. "Ran raw and said nothing" is the defect.
-        Assert.Equal(ranRaw, warned);
+        // "Ran raw and said nothing" is the defect. The reverse is intentionally not an
+        // invariant: a real sandbox may enforce files/network while honestly reporting a
+        // separate missing axis (Seatbelt cannot contain a setsid descendant on macOS).
+        Assert.False(ranRaw && !warned);
     }
 
     /// <summary>
-    /// And the converse: a run that really was confined must not carry the warning, or the
-    /// warning means nothing.
+    /// A run that really had network confinement must not report that network was open.
+    /// It may still report an independent platform gap such as process lifetime.
     /// </summary>
     [Fact]
     public void AConfinedRunDoesNotClaimToBeUnconfined()
@@ -375,6 +378,47 @@ public class ResultTruthfulnessTests : IDisposable
             return;   // this host has no sandbox; the warning is correct and expected
 
         Assert.DoesNotContain("may reach the network", result.Content);
+    }
+
+    [Fact]
+    public void ANetworkEnabledRunSaysThatTheOperatorOpenedIt()
+    {
+        if (!HavePosix) return;
+
+        using ShellRunner runner = Runner(o =>
+        {
+            o.AllowNetwork = true;
+            o.Sandbox = SkillSandboxMode.Off;
+            o.Unconfined = true;
+        });
+        CodeExecResult result = runner.Run(
+            new ShellRequest("echo hi"), _workspaces.GetOrCreate("network-open"));
+
+        Assert.True(result.Ok, result.Content);
+        Assert.Contains("may reach the network", result.Content, StringComparison.Ordinal);
+        Assert.Contains(CodeExecOptions.AllowNetworkFlag, result.Content, StringComparison.Ordinal);
+        Assert.DoesNotContain("Commands here have no network", result.Content, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnUnconfinedDeclarationDoesNotPromiseNetworkDenial()
+    {
+        using ShellRunner runner = Runner(o =>
+        {
+            o.AllowNetwork = false;
+            o.Sandbox = SkillSandboxMode.Off;
+            o.Unconfined = true;
+        });
+        if (runner.Shell == null) return;
+
+        var adapter = new CodeRunnerAdapter(runner);
+        ToolFunction declaration = adapter.DeclareTools()
+            .Single(d => string.Equals(d.Name, ShellTools.ShellToolName, StringComparison.Ordinal));
+
+        Assert.Contains("Network confinement: NOT GUARANTEED", declaration.Description,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("Internet/IP network access: BLOCKED", declaration.Description,
+            StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -397,8 +441,8 @@ public class ResultTruthfulnessTests : IDisposable
         if (!HavePosix) return;
 
         // The invariant that holds on every platform, asserted through the real runner:
-        // whatever the sandbox did or did not manage, "sandbox: none" and the gap list
-        // travel together. A degraded attach reaches exactly this state.
+        // whatever the sandbox did or did not manage, "sandbox: none" implies the gap
+        // list. A degraded attach reaches exactly this state.
         using ShellRunner runner = Runner(o =>
         {
             o.Sandbox = SkillSandboxMode.Preferred;
@@ -409,9 +453,9 @@ public class ResultTruthfulnessTests : IDisposable
             new ShellRequest("echo hi"), _workspaces.GetOrCreate("degrade"));
 
         Assert.True(result.Ok, result.Content);
-        Assert.Equal(
-            result.Content.Contains("sandbox: none", StringComparison.Ordinal),
-            result.Content.Contains("Not confined on this host", StringComparison.Ordinal));
+        bool ranRaw = result.Content.Contains("sandbox: none", StringComparison.Ordinal);
+        bool warned = result.Content.Contains("Not confined on this host", StringComparison.Ordinal);
+        Assert.False(ranRaw && !warned);
     }
 
     // ---- the environment the model actually writes for ----------------------

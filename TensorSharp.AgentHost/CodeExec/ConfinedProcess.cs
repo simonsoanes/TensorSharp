@@ -58,12 +58,11 @@ namespace TensorSharp.AgentHost.CodeExec
         /// Where the process starts, when that is not the root of what it may write.
         ///
         /// <para>
-        /// The shell needs these separated. Its writable region is the whole session
-        /// workspace — the work directory it edits in, the environment packages install
-        /// into, the state the wrapper saves — while the directory it starts in is
-        /// wherever the model last <c>cd</c>'d to. Collapsing the two would mean either a
-        /// shell that cannot install anything or one whose <c>ls</c> shows the host's
-        /// bookkeeping.
+        /// The shell needs these separated. Its primary writable root is the work tree
+        /// (with narrowly listed temp/persistence children beside it), while the directory
+        /// it starts in is wherever the model last <c>cd</c>'d to. An installer similarly
+        /// writes the package environment while starting in the read-only work tree so it
+        /// can inspect a manifest. Collapsing start and write roots breaks both cases.
         /// </para>
         /// </summary>
         public string? WorkingDirectory { get; init; }
@@ -73,6 +72,9 @@ namespace TensorSharp.AgentHost.CodeExec
 
         /// <summary>Anything else it may read.</summary>
         public IReadOnlyList<string> ReadablePaths { get; init; } = Array.Empty<string>();
+
+        /// <summary>Additional exact paths it may write, besides <see cref="WriteDirectory"/>.</summary>
+        public IReadOnlyList<string> WritablePaths { get; init; } = Array.Empty<string>();
 
         /// <summary>Whether it may open a socket.</summary>
         public bool AllowNetwork { get; init; }
@@ -181,6 +183,8 @@ namespace TensorSharp.AgentHost.CodeExec
                     launch.ReadablePaths)
                 {
                     AllowLoopbackPort = launch.AllowLoopbackPort,
+                    WritablePaths = launch.WritablePaths,
+                    StartDirectory = launch.WorkingDirectory ?? launch.WriteDirectory,
                 };
 
                 if (sandbox.TryWrap(request, out string wrappedFile, out IReadOnlyList<string> wrappedArgs,
@@ -478,9 +482,12 @@ namespace TensorSharp.AgentHost.CodeExec
     /// A confined process that has been started and not yet waited for.
     ///
     /// <para>
-    /// Disposing it kills the process tree and releases the sandbox's temporary profile.
-    /// That is the behaviour a background job needs at session end, and it is why the
-    /// session workspace takes ownership of one rather than the call that started it.
+    /// Disposing it stops the launched process group (and every descendant covered by the
+    /// active OS sandbox's lifetime primitive) and releases the sandbox's temporary
+    /// profile. That is the behaviour a background job needs at session end, and it is
+    /// why the session workspace takes ownership of one rather than the call that started
+    /// it. <see cref="ISkillSandbox.Capabilities"/> states whether that process-lifetime
+    /// coverage is complete on the current platform.
     /// </para>
     /// </summary>
     public sealed class ConfinedJob : IDisposable
@@ -575,8 +582,8 @@ namespace TensorSharp.AgentHost.CodeExec
                 // immediately and the pipe reaches EOF eight seconds later.
                 if (!_process.WaitForDrain(DrainMilliseconds))
                 {
-                    // The tree is killed on Dispose regardless, so the only question was
-                    // ever whether the call returns. Anything the shell itself printed has
+                    // The launched job is stopped on Dispose regardless, so the only
+                    // question was ever whether the call returns. Anything the shell itself printed has
                     // been captured; what is still holding the pipe is a background process
                     // the model was told, in the refusal for `&`, to start with
                     // run_in_background instead.

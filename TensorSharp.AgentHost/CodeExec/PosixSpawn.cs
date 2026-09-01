@@ -96,6 +96,8 @@ namespace TensorSharp.AgentHost.CodeExec
         [DllImport("libc", SetLastError = true)] internal static extern int close(int fd);
         [DllImport("libc", SetLastError = true)] private static extern int fcntl(int fd, int cmd, int arg);
         [DllImport("libc", SetLastError = true)] internal static extern int waitpid(int pid, out int status, int options);
+        [DllImport("libc", SetLastError = true)]
+        private static extern int waitid(int idtype, uint id, byte[] info, int options);
         [DllImport("libc", SetLastError = true)] internal static extern int kill(int pid, int sig);
         [DllImport("libc", SetLastError = true)] internal static extern int getpgid(int pid);
 
@@ -110,6 +112,40 @@ namespace TensorSharp.AgentHost.CodeExec
         /// <see cref="System.Diagnostics.Process"/> behind <see cref="ForkWatchdog"/>.
         /// </summary>
         internal static bool IsSupported => Supported.Value;
+
+        /// <summary>
+        /// Wait until <paramref name="pid"/> exits without reaping it. Keeping the leader
+        /// waitable also keeps its PID reserved while the caller signals the process group,
+        /// so a recycled PID can never make that signal name an unrelated group.
+        /// </summary>
+        internal static bool WaitForExitWithoutReaping(int pid)
+        {
+            if (OperatingSystem.IsWindows() || pid <= 0)
+                return false;
+
+            // P_PID is 1 and WEXITED is 4 on both supported Unix families. WNOWAIT is
+            // unfortunately not ABI-identical: Darwin uses 0x20, Linux 0x01000000.
+            const int Pid = 1;
+            const int WExited = 0x00000004;
+            int noWait = OperatingSystem.IsMacOS() ? 0x00000020 : 0x01000000;
+            var info = new byte[256]; // larger than siginfo_t on Darwin and Linux
+
+            try
+            {
+                int rc;
+                do
+                {
+                    rc = waitid(Pid, unchecked((uint)pid), info, WExited | noWait);
+                }
+                while (rc < 0 && Marshal.GetLastWin32Error() == 4); // EINTR
+
+                return rc == 0;
+            }
+            catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+            {
+                return false;
+            }
+        }
 
         private static bool Probe()
         {
@@ -255,12 +291,16 @@ namespace TensorSharp.AgentHost.CodeExec
                 // Its own process group, which is what makes killing the TREE a single
                 // signal to -pgid rather than a walk of a table that races with anything
                 // the child is still forking.
-                posix_spawnattr_setpgroup(attr, 0);
+                int groupRc = posix_spawnattr_setpgroup(attr, 0);
+                if (groupRc != 0)
+                    return groupRc;
 
                 short flags = SetPgroup | SetSigDef | SetSigMask;
                 if (OperatingSystem.IsMacOS())
                     flags |= CloExecDefault;
-                posix_spawnattr_setflags(attr, flags);
+                int flagsRc = posix_spawnattr_setflags(attr, flags);
+                if (flagsRc != 0)
+                    return flagsRc;
 
                 IntPtr path = Marshal.StringToCoTaskMemUTF8(fileName);
                 owned.Add(path);

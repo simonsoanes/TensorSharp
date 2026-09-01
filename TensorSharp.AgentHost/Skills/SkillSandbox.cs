@@ -9,8 +9,8 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -65,6 +65,12 @@ namespace TensorSharp.AgentHost.Skills
         bool AllowNetwork,
         IReadOnlyList<string> ReadablePaths)
     {
+        /// <summary>Additional exact paths writable beside <see cref="WorkDirectory"/>.</summary>
+        public IReadOnlyList<string> WritablePaths { get; init; } = Array.Empty<string>();
+
+        /// <summary>Directory the process starts in when it differs from the writable root.</summary>
+        public string? StartDirectory { get; init; }
+
         /// <summary>
         /// When set (and <see cref="AllowNetwork"/> is false), the one TCP port on
         /// localhost the process may connect to. This is how an install phase is
@@ -89,7 +95,7 @@ namespace TensorSharp.AgentHost.Skills
     /// </para>
     /// </summary>
     /// <param name="ConfinesWrites">The script can only write to its scratch directory.</param>
-    /// <param name="ConfinesNetwork">The script cannot open a socket.</param>
+    /// <param name="ConfinesNetwork">The script cannot use the external/IP network. Sandboxes may still admit narrowly scoped local Unix IPC.</param>
     /// <param name="ConfinesHomeReads">The script cannot read the user's home directory — credentials, keys, other skills.</param>
     /// <param name="BoundsProcessTree">Children are killed with the parent, so nothing outlives the request.</param>
     public readonly record struct SkillSandboxCapabilities(
@@ -209,7 +215,9 @@ namespace TensorSharp.AgentHost.Skills
         {
             ISkillSandbox? sandbox = Detect();
             if (sandbox == null)
-                return "no OS sandbox available on this platform";
+                return OperatingSystem.IsLinux()
+                    ? "no safe OS sandbox available: " + BubblewrapSandbox.AvailabilityError
+                    : "no OS sandbox available on this platform";
 
             IReadOnlyList<string> gaps = sandbox.Capabilities.Gaps();
             return gaps.Count == 0
@@ -250,11 +258,18 @@ namespace TensorSharp.AgentHost.Skills
             ConfinesWrites: true,
             ConfinesNetwork: true,
             ConfinesHomeReads: true,
-            BoundsProcessTree: true);
+            // Seatbelt policy is inherited across fork/exec, but macOS has no cgroup,
+            // PID namespace, job object, or supported kernel descendant-tracking API.
+            // The launcher kills the process group even after its leader exits, which
+            // contains normal background children, but generated code can call setsid()
+            // and leave that group. Claiming that nothing can outlive the request would
+            // therefore turn a best-effort cleanup into a false security guarantee.
+            BoundsProcessTree: false);
 
         public string Describe() =>
-            "denies network (unix sockets scoped to /tmp and the scratch directory), denies reads and " +
-            "file metadata of the user's home directory, and confines writes to the run's scratch directory";
+            "can deny IP network access (pathname Unix sockets remain scoped to shared temporary/scratch paths " +
+            "plus the exact mDNSResponder endpoint when networking is enabled), " +
+            "denies reads and file metadata of the user's home directory, and confines writes to the run's scratch directory";
 
         public bool TryWrap(
             SkillSandboxRequest request,
@@ -274,35 +289,16 @@ namespace TensorSharp.AgentHost.Skills
                 return false;
             }
 
-            // The profile goes somewhere the confined process CANNOT reach, under a name
-            // it cannot predict. It used to live in the write directory — which is, by
-            // definition, the one place the process being confined is allowed to write —
-            // at a fixed name. sandbox-exec reads the file at exec time, so anything
-            // already running inside that directory could overwrite it between this write
-            // and that read and be governed by `(allow default)` instead. That was only
-            // theoretical while every run was a single short-lived process; a shell that
-            // can leave a background job running across later calls supplies exactly the
-            // process needed to sit in that loop.
-            string profilePath;
-            try
-            {
-                profilePath = Path.Combine(
-                    Path.GetTempPath(),
-                    ".tensorsharp-sandbox-" + Guid.NewGuid().ToString("N") + ".sb");
-                File.WriteAllText(profilePath, BuildProfile(request));
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                error = $"the sandbox profile could not be written: {ex.Message}";
-                return false;
-            }
-
-            var argv = new List<string> { "-f", profilePath, request.Interpreter };
+            // Pass the policy as an argument. A profile file creates a read-after-write
+            // race with an earlier background command whenever TMPDIR resolves to a
+            // shared writable directory; sandbox-exec supports the in-memory -p form, so
+            // there is no file for generated code to replace before exec reads it.
+            var argv = new List<string> { "-p", BuildProfile(request), request.Interpreter };
             argv.AddRange(request.Arguments);
 
             fileName = Helper;
             arguments = argv;
-            cleanup = new FileCleanup(profilePath);
+            cleanup = NullCleanup.Instance;
             return true;
         }
 
@@ -311,52 +307,51 @@ namespace TensorSharp.AgentHost.Skills
         /// winning, which is what lets a broad allow be carved back by a narrower deny
         /// and then punched through again for one directory.
         /// </summary>
-        private static string BuildProfile(SkillSandboxRequest request)
+        internal static string BuildProfile(SkillSandboxRequest request)
         {
             var sb = new StringBuilder();
             sb.AppendLine("(version 1)");
             sb.AppendLine("(deny default)");
+            // Direct network opt-in opens the host's IP network. Keep pathname AF_UNIX
+            // sockets scoped to scratch/shared-temp paths in both modes, and explicitly
+            // deny launchd's shared-temp endpoints, while allowing Internet/LAN/loopback
+            // TCP and UDP only in the opted-in mode. This reduces exposure to common
+            // local control endpoints but is not a complete Unix-IPC boundary: tools
+            // such as LibreOffice retain shared-temp singleton sockets for compatibility.
+            sb.AppendLine(request.AllowNetwork ? "(allow network*)" : "(deny network*)");
             if (request.AllowNetwork)
             {
-                sb.AppendLine("(allow network*)");
+                sb.AppendLine("(deny network-bind (local unix-socket))");
+                sb.AppendLine("(deny network-outbound (remote unix-socket))");
+                // macOS getaddrinfo(3) talks to mDNSResponder over this exact local
+                // pathname socket. Opening IP operations without it looks like network
+                // access but cannot resolve a host name, so web search still fails. Keep
+                // the exception literal and network-opt-in-only; no other /var/run
+                // service endpoint is exposed by this rule.
+                sb.AppendLine("(allow network-outbound (remote unix-socket (literal \"/private/var/run/mDNSResponder\")))");
+                sb.AppendLine("(allow network-outbound (remote unix-socket (literal \"/var/run/mDNSResponder\")))");
             }
-            else
+            sb.AppendLine("(allow system-socket (socket-domain AF_UNIX))");
+            var socketRoots = new List<string> { "/private/tmp" };
+            socketRoots.AddRange(Forms(request.WorkDirectory));
+            foreach (string writable in request.WritablePaths ?? Array.Empty<string>())
             {
-                // Deny the NETWORK, but not local IPC. A blanket `(deny network*)`
-                // also blocks AF_UNIX sockets, which are how a local tool coordinates
-                // with itself — LibreOffice's headless bootstrap opens a unix-domain
-                // singleton pipe and, denied it, exits non-zero with a half-built
-                // profile, so the xlsx skill's recalc.py could never recalculate a
-                // sheet under the sandbox.
-                //
-                // But "unix sockets" is not one thing: a host unix socket is a door
-                // into whatever service listens on it — /var/run/docker.sock is root
-                // in a trench coat, and launchd keeps the ssh-agent listener under
-                // /private/tmp. So the allowance is scoped BY SOCKET PATH (the same
-                // shape Anthropic's sandbox-runtime uses): sockets under the shared
-                // system temp and the run's own scratch directory work, which is
-                // exactly what self-coordinating tools create, and every other
-                // socket on the host stays out of reach. The launchd listeners that
-                // live under /private/tmp are carved back out explicitly.
-                sb.AppendLine("(deny network*)");
-                sb.AppendLine("(allow system-socket (socket-domain AF_UNIX))");
-                var socketRoots = new List<string> { "/private/tmp" };
-                socketRoots.AddRange(Forms(request.WorkDirectory));
-                foreach (string root in socketRoots)
-                {
-                    sb.Append("(allow network-bind (local unix-socket (subpath ").Append(Quote(root)).AppendLine(")))");
-                    sb.Append("(allow network-outbound (remote unix-socket (subpath ").Append(Quote(root)).AppendLine(")))");
-                }
-                sb.AppendLine("(deny network-outbound (remote unix-socket (regex #\"^/private/tmp/com\\.apple\\.launchd\")))");
+                if (!string.IsNullOrWhiteSpace(writable))
+                    socketRoots.AddRange(Forms(writable));
+            }
+            foreach (string root in socketRoots.Distinct(StringComparer.Ordinal))
+            {
+                sb.Append("(allow network-bind (local unix-socket (subpath ").Append(Quote(root)).AppendLine(")))");
+                sb.Append("(allow network-outbound (remote unix-socket (subpath ").Append(Quote(root)).AppendLine(")))");
+            }
+            sb.AppendLine("(deny network-outbound (remote unix-socket (regex #\"^/private/tmp/com\\.apple\\.launchd\")))");
 
-                // The install phase's registry proxy: one loopback TCP port, and
-                // nothing else. The proxy on the host side enforces the domain
-                // allowlist; this rule is what makes the proxy the ONLY way out.
-                if (request.AllowLoopbackPort is int port and > 0 and <= 65535)
-                {
-                    sb.Append("(allow network-outbound (remote ip \"localhost:")
-                      .Append(port).AppendLine("\"))");
-                }
+            // The install phase's registry proxy: one loopback TCP port, and nothing
+            // else. The proxy on the host side enforces the domain allowlist.
+            if (!request.AllowNetwork && request.AllowLoopbackPort is int port and > 0 and <= 65535)
+            {
+                sb.Append("(allow network-outbound (remote ip \"localhost:")
+                  .Append(port).AppendLine("\"))");
             }
 
             // The interpreter needs to fork/exec, read sysctls, talk to the bootstrap
@@ -406,16 +401,13 @@ namespace TensorSharp.AgentHost.Skills
             }
             foreach (string form in readableRoots)
             {
-                sb.Append("(allow file-read* (subpath ").Append(Quote(form)).AppendLine("))");
-                sb.Append("(allow file-read-metadata (subpath ").Append(Quote(form)).AppendLine("))");
+                string filter = File.Exists(form) ? "literal" : "subpath";
+                sb.Append("(allow file-read* (").Append(filter).Append(' ')
+                  .Append(Quote(form)).AppendLine("))");
+                sb.Append("(allow file-read-metadata (").Append(filter).Append(' ')
+                  .Append(Quote(form)).AppendLine("))");
             }
 
-            // Writes: the scratch directory and the null device, nothing else.
-            foreach (string form in Forms(request.WorkDirectory))
-            {
-                sb.Append("(allow file-read* file-write* (subpath ").Append(Quote(form)).AppendLine("))");
-                sb.Append("(allow file-read-metadata (subpath ").Append(Quote(form)).AppendLine("))");
-            }
             sb.AppendLine("(allow file-write-data (literal \"/dev/null\"))");
             sb.AppendLine("(allow file-ioctl (literal \"/dev/null\") (literal \"/dev/urandom\"))");
 
@@ -435,13 +427,48 @@ namespace TensorSharp.AgentHost.Skills
             // headless converter opens /private/tmp/OSL_PIPE_<uid>_SingleOfficeIPC_<hash>
             // and, denied it, exits without building its profile — which is why the xlsx
             // skill's recalc.py could never recalculate a sheet under the sandbox. This
-            // is not a hole: /private/tmp is world-writable already (mode 1777 — every
-            // process on the host shares it), the confinement's guarantees that matter
-            // stay intact — the home directory is still unreadable and the network is
-            // still closed — and the session's own files live under the server's scratch
-            // root, never here. The per-user Darwin temp (/var/folders/.../T) is left
-            // denied; nothing needed it once /private/tmp was open.
+            // is an explicit compatibility exception: /private/tmp is world-writable
+            // already (mode 1777 — every process on the host shares it), so generated
+            // code can exchange data/IPC there. The user's home stays unreadable and the
+            // session's own files live under the server's scratch root, never here. The
+            // per-user Darwin temp (/var/folders/.../T) is left denied; nothing needed it
+            // once /private/tmp was open.
             sb.AppendLine("(allow file-read* file-write* (subpath \"/private/tmp\"))");
+
+            // Reassert the caller's boundary after the compatibility carve-out above.
+            // This matters when a test or deployment itself lives under /private/tmp:
+            // host-authored state stays read-only, then the work root and explicitly
+            // named runtime-state paths are punched back through. Exact readable files
+            // (notably sanitized per-session CA snapshots) stay read-only too.
+            foreach (string form in Forms(request.SkillDirectory))
+                sb.Append("(deny file-write* (subpath ").Append(Quote(form)).AppendLine("))");
+            foreach (string extra in request.ReadablePaths ?? Array.Empty<string>())
+            {
+                if (string.IsNullOrWhiteSpace(extra))
+                    continue;
+                foreach (string form in Forms(extra))
+                {
+                    string filter = File.Exists(form) ? "literal" : "subpath";
+                    sb.Append("(deny file-write* (").Append(filter).Append(' ')
+                      .Append(Quote(form)).AppendLine("))");
+                }
+            }
+
+            var writableRoots = new List<string>();
+            writableRoots.AddRange(Forms(request.WorkDirectory));
+            foreach (string extra in request.WritablePaths ?? Array.Empty<string>())
+            {
+                if (!string.IsNullOrWhiteSpace(extra))
+                    writableRoots.AddRange(Forms(extra));
+            }
+            foreach (string form in writableRoots)
+            {
+                string filter = File.Exists(form) ? "literal" : "subpath";
+                sb.Append("(allow file-read* file-write* (").Append(filter).Append(' ')
+                  .Append(Quote(form)).AppendLine("))");
+                sb.Append("(allow file-read-metadata (").Append(filter).Append(' ')
+                  .Append(Quote(form)).AppendLine("))");
+            }
 
             return sb.ToString();
         }
@@ -516,17 +543,11 @@ namespace TensorSharp.AgentHost.Skills
         private static string Quote(string path) =>
             "\"" + path.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
 
-        private sealed class FileCleanup : IDisposable
+        private sealed class NullCleanup : IDisposable
         {
-            private readonly string _path;
+            public static readonly NullCleanup Instance = new();
 
-            public FileCleanup(string path) => _path = path;
-
-            public void Dispose()
-            {
-                try { File.Delete(_path); }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* best effort */ }
-            }
+            public void Dispose() { }
         }
     }
 
@@ -543,11 +564,14 @@ namespace TensorSharp.AgentHost.Skills
     /// </summary>
     internal sealed class BubblewrapSandbox : ISkillSandbox
     {
-        private static readonly Lazy<string?> Located = new(Locate);
+        internal static readonly Version MinimumSafeVersion = new(0, 12, 0);
+        private static readonly Lazy<(string? Path, string Error)> Located = new(Locate);
+
+        internal static string AvailabilityError => Located.Value.Error;
 
         public string Name => "bubblewrap";
 
-        public bool IsAvailable => OperatingSystem.IsLinux() && Located.Value != null;
+        public bool IsAvailable => OperatingSystem.IsLinux() && Located.Value.Path != null;
 
         public SkillSandboxCapabilities Capabilities => new(
             ConfinesWrites: true,
@@ -556,7 +580,8 @@ namespace TensorSharp.AgentHost.Skills
             BoundsProcessTree: true);
 
         public string Describe() =>
-            "unshares the network and PID namespaces, mounts the filesystem read-only, and confines writes to the run's scratch directory";
+            "can unshare the IP-network namespace, always unshares PID/IPC/UTS namespaces, mounts the filesystem read-only, " +
+            "and confines writes to the run's scratch directory";
 
         public bool TryWrap(
             SkillSandboxRequest request,
@@ -570,13 +595,29 @@ namespace TensorSharp.AgentHost.Skills
             cleanup = null!;
             error = null!;
 
-            string? bwrap = Located.Value;
+            (string? bwrap, string reason) = Located.Value;
             if (bwrap == null)
             {
-                error = "bwrap (bubblewrap) is not installed on this host";
+                error = reason;
                 return false;
             }
 
+            List<string> argv = BuildArguments(request);
+
+            fileName = bwrap;
+            arguments = argv;
+            cleanup = NullCleanup.Instance;
+            return true;
+        }
+
+        /// <summary>
+        /// Build the platform-independent bubblewrap argument vector. Kept separate from
+        /// locating/executing bwrap so policy construction is testable on macOS and
+        /// Windows too; a cross-platform test can pin that only the network opt-in removes
+        /// <c>--unshare-net</c> while all filesystem/process restrictions remain.
+        /// </summary>
+        internal static List<string> BuildArguments(SkillSandboxRequest request)
+        {
             var argv = new List<string>
             {
                 // Everything read-only, then the pieces that must be writable bound
@@ -587,13 +628,32 @@ namespace TensorSharp.AgentHost.Skills
                 "--proc", "/proc",
                 "--tmpfs", "/tmp",
                 "--die-with-parent",
+                // Start without the caller's controlling terminal. Bubblewrap's own
+                // security guidance requires this unless a TIOCSTI-blocking seccomp
+                // policy is installed; redirected stdio alone does not prove that the
+                // child cannot still address the inherited controlling TTY.
+                "--new-session",
                 "--unshare-pid",
                 "--unshare-ipc",
                 "--unshare-uts",
             };
 
+            // Hide host service sockets in both modes. A network-enabled command needs
+            // DNS configuration, not Docker/containerd/D-Bus authority; the resolved
+            // resolv.conf target is rebound read-only below when systemd stores it here.
+            argv.Add("--tmpfs");
+            argv.Add("/run");
+
             if (!request.AllowNetwork)
+            {
                 argv.Add("--unshare-net");
+            }
+            else if (ResolverRuntimeFile() is { } resolver)
+            {
+                argv.Add("--ro-bind");
+                argv.Add(resolver);
+                argv.Add(resolver);
+            }
 
             // The user's home is replaced by an empty tmpfs rather than merely made
             // read-only: credentials and every other installed skill live there, and a
@@ -612,7 +672,8 @@ namespace TensorSharp.AgentHost.Skills
 
             foreach (string extra in request.ReadablePaths ?? Array.Empty<string>())
             {
-                if (string.IsNullOrWhiteSpace(extra) || !Directory.Exists(extra))
+                if (string.IsNullOrWhiteSpace(extra)
+                    || (!Directory.Exists(extra) && !File.Exists(extra)))
                     continue;
                 argv.Add("--ro-bind");
                 argv.Add(extra);
@@ -622,29 +683,127 @@ namespace TensorSharp.AgentHost.Skills
             argv.Add("--bind");
             argv.Add(request.WorkDirectory);
             argv.Add(request.WorkDirectory);
+            foreach (string extra in request.WritablePaths ?? Array.Empty<string>())
+            {
+                if (string.IsNullOrWhiteSpace(extra)
+                    || (!Directory.Exists(extra) && !File.Exists(extra)))
+                    continue;
+                argv.Add("--bind");
+                argv.Add(extra);
+                argv.Add(extra);
+            }
             argv.Add("--chdir");
-            argv.Add(request.WorkDirectory);
+            argv.Add(request.StartDirectory ?? request.WorkDirectory);
 
             argv.Add("--");
             argv.Add(request.Interpreter);
             argv.AddRange(request.Arguments);
-
-            fileName = bwrap;
-            arguments = argv;
-            cleanup = NullCleanup.Instance;
-            return true;
+            return argv;
         }
 
-        private static string? Locate()
+        private static string? ResolverRuntimeFile()
         {
             if (!OperatingSystem.IsLinux())
                 return null;
+            try
+            {
+                FileSystemInfo? target = new FileInfo("/etc/resolv.conf")
+                    .ResolveLinkTarget(returnFinalTarget: true);
+                if (target == null || !File.Exists(target.FullName))
+                    return null;
+                string full = Path.GetFullPath(target.FullName);
+                return full.Equals("/run", StringComparison.Ordinal)
+                    || full.StartsWith("/run/", StringComparison.Ordinal)
+                        ? full
+                        : null;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                          or ArgumentException or NotSupportedException)
+            {
+                return null;
+            }
+        }
+
+        private static (string? Path, string Error) Locate()
+        {
+            if (!OperatingSystem.IsLinux())
+                return (null, "bubblewrap is available only on Linux");
+            string? rejected = null;
             foreach (string candidate in new[] { "/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap" })
             {
-                if (File.Exists(candidate))
-                    return candidate;
+                if (!File.Exists(candidate))
+                    continue;
+                if (TryReadVersion(candidate, out Version? version)
+                    && version >= MinimumSafeVersion)
+                {
+                    return (candidate, string.Empty);
+                }
+                rejected = version == null
+                    ? $"{candidate} did not report a usable version"
+                    : $"{candidate} {version} is unsafe; TensorSharp requires bubblewrap {MinimumSafeVersion} or newer";
             }
-            return null;
+            return (null, rejected ?? "bwrap (bubblewrap) is not installed on this host");
+        }
+
+        internal static bool TryReadVersion(
+            string path, out Version? version, int timeoutMilliseconds = 3000)
+        {
+            version = null;
+            try
+            {
+                var output = new ConcurrentQueue<string>();
+                var request = new SpawnRequest
+                {
+                    FileName = path,
+                    Arguments = new[] { "--version" },
+                    WorkingDirectory = Path.GetDirectoryName(path),
+                    Environment = new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["PATH"] = Environment.GetEnvironmentVariable("PATH") ?? string.Empty,
+                        ["LANG"] = "C.UTF-8",
+                    },
+                    OnStdoutLine = output.Enqueue,
+                    OnStderrLine = output.Enqueue,
+                };
+                if (!SpawnedProcess.TryStart(request, out SpawnedProcess? process, out _)
+                    || process == null)
+                {
+                    return false;
+                }
+
+                using (process)
+                {
+                    int timeout = Math.Clamp(timeoutMilliseconds, 1, 30_000);
+                    if (!process.WaitForExit(timeout))
+                    {
+                        process.Kill();
+                        process.WaitForExit(1000);
+                        return false;
+                    }
+
+                    // SpawnedProcess drains stdout and stderr concurrently, avoiding the
+                    // classic full-pipe deadlock. Keep the drain bounded too: a malicious
+                    // wrapper can leave a descendant holding either descriptor open.
+                    if (!process.WaitForDrain(Math.Min(timeout, 1000)))
+                        return false;
+                    return TryParseVersion(string.Join(" ", output), out version);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                          or InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                return false;
+            }
+        }
+
+        internal static bool TryParseVersion(string? output, out Version? version)
+        {
+            version = null;
+            if (string.IsNullOrWhiteSpace(output))
+                return false;
+            System.Text.RegularExpressions.Match match =
+                System.Text.RegularExpressions.Regex.Match(output, @"(?:bubblewrap|bwrap)\s+(\d+(?:\.\d+){1,3})");
+            return match.Success && Version.TryParse(match.Groups[1].Value, out version);
         }
 
         private sealed class NullCleanup : IDisposable

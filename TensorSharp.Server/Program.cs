@@ -137,17 +137,27 @@ codeExecOptions.ScratchDirectory ??= Path.Combine(baseDirectory, "code-scratch")
 // the same command line with a warning. One of the two had to move, and refusing the
 // weaker one while permitting the stronger was the wrong way round.
 //
-// So it is accepted and said plainly, which is also what the references this host is
-// modelled on do: neither Codex nor Claude Code sandboxes on Windows, and both make
-// the operator opt in explicitly instead of pretending the platform offers isolation
-// it does not have. What is NOT relaxed is the reporting: SandboxNote below states the
-// gap in the startup log and ShellRunner repeats it in every tool result.
-if (codeExecOptions.Unconfined)
+// So it is accepted and said plainly. Other agents' Windows mechanisms and setup
+// requirements differ; this decision describes TensorSharp's CURRENT job-object
+// backend only. What is not relaxed is the reporting: the startup warning states the
+// gap and ShellRunner repeats it in every tool result.
+if (codeExecOptions.Enabled && codeExecOptions.Unconfined)
 {
     Console.Error.WriteLine(
-        $"{CodeExecOptions.UnconfinedFlag} is set: commands this model writes will run with this "
-        + "process's privileges — full filesystem access, and the network. That is a decision about "
+        $"{CodeExecOptions.UnconfinedFlag} is set: commands this model writes may fall back to this "
+        + "process's privileges — full filesystem access and network — when confinement is unavailable "
+        + "(every run on Windows). That is a decision about "
         + "the machine this server runs on, so do not leave it on for a server others can reach.");
+}
+if (codeExecOptions.Enabled && codeExecOptions.AllowNetwork)
+{
+    Console.Error.WriteLine(
+        $"{CodeExecOptions.AllowNetworkFlag} is set: commands this model writes have unrestricted "
+        + "IP network access (subject to the host OS and firewall), including LAN/loopback services and "
+        + "listening sockets. Remote content can contain prompt injections, and generated code can send "
+        + "workspace or other host-readable data away. Package/install-domain allow-lists constrain only "
+        + "the host installer, not direct downloads by a command. On macOS, a deliberately detached child "
+        + "may outlive its request; tool results report that gap. Enable this only for users and tasks you trust.");
 }
 
 // --list-skills answers "what does this deployment have?" without starting the
@@ -357,7 +367,7 @@ if (codeExecOptions.Enabled)
         startupLogger.LogWarning(LogEventIds.HostConfiguration,
             "--code-exec is set but code execution is unavailable: {Reason}. The shell tool will NOT be offered to the model; " +
             "requests are answered without running code. Install an OS sandbox to enable it " +
-            "(Linux: bubblewrap/bwrap; macOS: sandbox-exec ships with the OS).",
+            "(Linux: install/update bubblewrap/bwrap 0.12.0 or newer; macOS: sandbox-exec ships with the OS).",
             startupCodeRunner.UnavailableReason);
     }
 }
