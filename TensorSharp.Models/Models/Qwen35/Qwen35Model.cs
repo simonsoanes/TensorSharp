@@ -365,6 +365,18 @@ namespace TensorSharp.Models
                 $"[qwen35] fused dense FFN declined, falling back to the unfused chain: {reason}");
         }
 
+        // FusedOutProjFFN threw once on the attention-layer callsite: latched so the
+        // call is not retried — and re-failed — for every layer of every token. The
+        // latch also serves as the one-shot warning. Per-callsite on purpose: the
+        // GDN callsite in RecurrentBlock latches independently, so a failure here
+        // cannot switch that path off (and vice versa).
+        private bool _fusedOutProjFfnFailed;
+
+        // The direct-CUDA fused GQA prefill attention threw: once per exception
+        // TYPE (not per layer/chunk), because the legacy expanded-KV fallback it
+        // degrades to cannot serve long contexts at all (see FullAttention).
+        private readonly HashSet<string> _cudaGqaPrefillExWarned = new HashSet<string>(StringComparer.Ordinal);
+
         private long _mlxEvalBoundaryTicks;
         private long _mlxCacheEvalTicks;
 
@@ -1100,8 +1112,19 @@ namespace TensorSharp.Models
             // so there is nothing to pre-reserve here.
             if (_kvCacheK == null || _kvCacheV == null)
                 return;
+            // The request declares prompt + its whole generation budget, which on a
+            // server started with a large --max-tokens is the entire context window:
+            // 260,864 tokens here is 16 GiB of K/V on top of the weights. Reserve
+            // only what the device can actually hold — EnsureCacheCapacity still
+            // grows the cache on demand if the generation really runs that long.
+            requiredContextTokens = ResolvePrefillReservationLength(
+                requiredContextTokens, _kvCacheCapacity, granularity: CacheCapacityAlignment);
             EnsureCacheCapacity(requiredContextTokens, geometricGrowth: false);
         }
+
+        /// <summary>Native Qwen decode windows are 256-token aligned, so every
+        /// non-geometric cache reservation snaps to that boundary.</summary>
+        private const int CacheCapacityAlignment = 256;
 
         private void EnsureCacheCapacity(int requiredSeqLen, bool geometricGrowth = true)
         {
@@ -1137,7 +1160,7 @@ namespace TensorSharp.Models
                 // Native Qwen decode windows are 256-token aligned. Reserve
                 // exactly the request budget rounded to that boundary rather
                 // than doubling a multi-gigabyte cache.
-                const int alignment = 256;
+                const int alignment = CacheCapacityAlignment;
                 long rounded = ((long)requiredSeqLen + alignment - 1) / alignment * alignment;
                 newCapacity = (int)Math.Min(_maxContextLength, rounded);
             }
@@ -2669,7 +2692,8 @@ namespace TensorSharp.Models
                 int intermSize = Config.IntermediateSize;
                 int halfDim = intermSize > 0 ? intermSize : (int)(_ffnGateUpQW[layer].Ne1 / 2);
 
-                if (halfDim > 0 && hidden.DimensionCount == 2 && attnOut.DimensionCount == 2
+                if (halfDim > 0 && !_fusedOutProjFfnFailed
+                    && hidden.DimensionCount == 2 && attnOut.DimensionCount == 2
                     && hidden.Sizes[0] == attnOut.Sizes[0])
                 {
                     try
@@ -2689,7 +2713,15 @@ namespace TensorSharp.Models
                         attnOut.Dispose();
                         return hidden;
                     }
-                    catch { /* fall through */ }
+                    catch (Exception e)
+                    {
+                        _fusedOutProjFfnFailed = true;
+                        Console.Error.WriteLine(
+                            $"[qwen35] FusedOutProjFFN failed on the attention path ({e.Message}); " +
+                            "using the separate out-proj + FFN dispatches instead (slower). " +
+                            "Not retried. Reported once.");
+                        // fall through
+                    }
                 }
 
                 // Fallback: separate output proj + residual.
@@ -3154,7 +3186,15 @@ namespace TensorSharp.Models
                             seqLen: seqLen, kvLen: totalSeqLen, cacheSize: cacheSize,
                             maskStart: startPos, windowSize: 0, scale: attentionScale);
                     }
-                    catch { okCuda = false; }
+                    catch (Exception e)
+                    {
+                        okCuda = false;
+                        if (_cudaGqaPrefillExWarned.Add(e.GetType().Name))
+                            Console.Error.WriteLine(
+                                $"[qwen35] CUDA fused GQA prefill attention threw {e.GetType().Name} ({e.Message}); " +
+                                "using the legacy expanded-KV attention instead (slower, and it cannot serve " +
+                                "long contexts). Reported once per exception type.");
+                    }
                     qHeadsCuda.Dispose();
                     if (okCuda)
                     {

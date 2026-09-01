@@ -550,6 +550,73 @@ namespace TensorSharp.Models
         /// </summary>
         protected virtual long KvCacheBytesPerToken => 0;
 
+        /// <summary>Last reservation this model actually trimmed to, so a clamp is
+        /// reported when it changes rather than once per request.</summary>
+        private int _loggedReservationClamp;
+
+        /// <summary>
+        /// Cap a <see cref="PrepareForPrefill"/> reservation against the device
+        /// memory that is actually free right now.
+        ///
+        /// The reservation is only a hint — the KV cache still grows on demand — so
+        /// trimming it costs at most one later grow. Honouring it blind, on the
+        /// other hand, sizes a multi-gigabyte buffer from the request's declared
+        /// GENERATION budget rather than from anything the machine has:
+        /// <c>BatchExecutor.BuildPrefillChunk</c> passes prompt + MaxNewTokens, so a
+        /// server started with a large --max-tokens reserves the whole window on the
+        /// very first request. On Metal that is fatal rather than merely slow (see
+        /// <see cref="GpuMemoryBudget.AppliesToReservations"/>).
+        ///
+        /// Only ever trims: returns <paramref name="requiredContextTokens"/>
+        /// unchanged when the backend has no queryable budget, the model reports no
+        /// per-token KV cost, or the reservation already fits.
+        /// </summary>
+        protected int ResolvePrefillReservationLength(
+            int requiredContextTokens, int currentCapacityTokens, int granularity = 256)
+        {
+            long bytesPerToken = KvCacheBytesPerToken;
+            if (bytesPerToken <= 0 || requiredContextTokens <= currentCapacityTokens)
+                return requiredContextTokens;
+            if (!GpuMemoryBudget.TryGetReservationSpareBytes(_backend, out long spare))
+                return requiredContextTokens;
+
+            int fitted = ResolvePrefillReservationLength(
+                spare, bytesPerToken, requiredContextTokens, currentCapacityTokens, granularity);
+            if (fitted >= requiredContextTokens)
+                return requiredContextTokens;
+
+            if (_loggedReservationClamp != fitted)
+            {
+                _loggedReservationClamp = fitted;
+                Console.WriteLine(
+                    $"[KV cache] Reserving {fitted} of the {requiredContextTokens} tokens this request " +
+                    $"declared: {GibiBytes((long)requiredContextTokens * bytesPerToken)} of KV does not fit " +
+                    $"the {GibiBytes(spare)} the {_backend} device has spare. The cache still grows on demand.");
+            }
+            return fitted;
+        }
+
+        /// <summary>The arithmetic of <see cref="ResolvePrefillReservationLength(int, int, int)"/>,
+        /// separated from the device query so it can be exercised directly.</summary>
+        internal static int ResolvePrefillReservationLength(
+            long spareBytes,
+            long kvBytesPerToken,
+            int requiredContextTokens,
+            int currentCapacityTokens,
+            int granularity = 256)
+        {
+            if (kvBytesPerToken <= 0 || requiredContextTokens <= currentCapacityTokens)
+                return requiredContextTokens;
+            // Half the spare, the same split ResolveInitialCacheAllocationLength
+            // uses: the other half has to cover the prefill and decode graph
+            // scratch, which is sized separately and is live at the same time.
+            return GpuMemoryBudget.FitTokens(
+                spareBytes / 2, kvBytesPerToken, requiredContextTokens,
+                minTokens: Math.Max(currentCapacityTokens, 1), granularity: granularity);
+        }
+
+        private static string GibiBytes(long bytes) => $"{bytes / 1024.0 / 1024.0 / 1024.0:F1} GiB";
+
         internal static int ResolveInitialCacheAllocationLength(
             BackendType backend,
             int requestedContextLength,
@@ -969,6 +1036,18 @@ namespace TensorSharp.Models
 
             var vocabTokens = gguf.GetStringArray("tokenizer.ggml.tokens");
 
+            // A GGUF with no tokenizer vocabulary is a pipeline COMPONENT — the
+            // MiniMax-H3 towers ship with zero KV metadata, for example — not a chat
+            // model. Loading one via --model used to die on an unhandled null
+            // reference deep in EOG resolution; say what is actually wrong instead.
+            if (vocabTokens == null || vocabTokens.Length == 0)
+            {
+                throw new InvalidOperationException(
+                    "this GGUF carries no tokenizer vocabulary (tokenizer.ggml.tokens), so it cannot be " +
+                    "served as a chat model. Component GGUFs — a pipeline's encoder or tower — are loaded " +
+                    "by the pipeline that owns them, not via --model.");
+            }
+
             var tokenTypes = gguf.GetInt32Array("tokenizer.ggml.token_type");
             int bosId = (int)gguf.GetUint32("tokenizer.ggml.bos_token_id");
             int eosId = (int)gguf.GetUint32("tokenizer.ggml.eos_token_id");
@@ -1259,6 +1338,20 @@ namespace TensorSharp.Models
         private static readonly bool GgmlF32ResidentLinearEnabled =
             !string.Equals(Environment.GetEnvironmentVariable("TS_GGML_F32_RESIDENT"), "0", StringComparison.Ordinal);
 
+        // Once per process: the resident path failing means every F32 linear falls
+        // back the same way, and this runs once per layer per token.
+        private static int _f32ResidentFallbackWarned;
+
+        private static void WarnGgmlF32ResidentFallback(Exception ex)
+        {
+            if (Interlocked.Exchange(ref _f32ResidentFallbackWarned, 1) != 0)
+                return;
+            Console.Error.WriteLine(
+                $"WARNING: device-resident GGML F32 linear rejected ({ex.Message}); using the generic " +
+                "Addmm path instead, which re-uploads the weight on every call and can dominate decode " +
+                "time. Reported once.");
+        }
+
         protected unsafe bool TryGgmlF32LinearResident(Tensor result, Tensor input, Tensor w)
         {
             if (!GgmlF32ResidentLinearEnabled)
@@ -1282,12 +1375,14 @@ namespace TensorSharp.Models
                     0 /* GGML_TYPE_F32 */, inDim, outDim, inDim * outDim * sizeof(float));
                 return true;
             }
-            catch (NotSupportedException)
+            catch (NotSupportedException ex)
             {
+                WarnGgmlF32ResidentFallback(ex);
                 return false;
             }
-            catch (ArgumentException)
+            catch (ArgumentException ex)
             {
+                WarnGgmlF32ResidentFallback(ex);
                 return false;
             }
         }
@@ -1356,6 +1451,26 @@ namespace TensorSharp.Models
             return result;
         }
 
+        // Once per (backend, quant type): a missing device kernel for a quant type
+        // affects every layer that uses that type, on every token.
+        private static readonly HashSet<(BackendType, int)> _managedQuantFallbackWarned = new();
+
+        private void WarnAddmmQuantManagedFallback(int ggmlType)
+        {
+            // On the pure-C# CPU backend the managed dequant IS the kernel, not a fallback.
+            if (_backend == BackendType.Cpu)
+                return;
+            lock (_managedQuantFallbackWarned)
+            {
+                if (!_managedQuantFallbackWarned.Add((_backend, ggmlType)))
+                    return;
+            }
+            Console.Error.WriteLine(
+                $"WARNING: the {_backend} backend has no device kernel for quant type " +
+                $"{(GgmlTensorType)ggmlType}; every projection of that type runs on the CPU " +
+                "managed-dequant path instead, which is much slower. Reported once per backend and type.");
+        }
+
         protected unsafe void AddmmQuantManaged(Tensor result, Tensor input, QuantizedWeight weight)
         {
             if (!input.IsContiguous() || !result.IsContiguous())
@@ -1411,6 +1526,8 @@ namespace TensorSharp.Models
 
             if (!weight.HasHostData)
                 throw new InvalidOperationException($"Quantized linear weight type {(GgmlTensorType)weight.GgmlType} is not available on the selected device and its host copy has been released.");
+
+            WarnAddmmQuantManagedFallback(weight.GgmlType);
 
             // One managed implementation, in ManagedQuantizedOps: integer dot
             // kernels where the weight type has them, dequant-once + register-
@@ -1824,7 +1941,35 @@ namespace TensorSharp.Models
         public float[] Forward(int[] tokens)
         {
             if (_distributedDriver) _tpGroup.BroadcastControl(TpControlForward, tokens);
-            return DumpLogitsIfRequested(ForwardCore(tokens));
+            float[] logits = ForwardCore(tokens);
+            ThrowIfBackendFailed();
+            return DumpLogitsIfRequested(logits);
+        }
+
+        /// <summary>
+        /// Stop as soon as the GPU backend has died, rather than at whichever op
+        /// happens to fail next.
+        ///
+        /// A command buffer that fails on the GPU (Metal reports
+        /// kIOGPUCommandBufferCallbackErrorOutOfMemory) is discovered inside
+        /// ggml_backend_synchronize, which returns void: the op that drained it
+        /// returns SUCCESS over undefined results, and only a LATER graph fails —
+        /// so the exception used to name an innocent bystander (an embedding
+        /// get_rows, typically, since that is the first op of the next forward) and
+        /// every forward in between produced quietly wrong logits.
+        ///
+        /// One P/Invoke reading one atomic per forward, and only on the GGML
+        /// backends — nothing measurable next to the forward itself.
+        /// </summary>
+        private void ThrowIfBackendFailed()
+        {
+            if (!IsGgmlBackend || !GgmlBasicOps.HasBackendFailure())
+                return;
+            string detail = GgmlBasicOps.BackendFailureText();
+            throw new InvalidOperationException(
+                $"The GGML {_backend} backend failed during GPU execution and cannot recover in this " +
+                "process — the results of this and any preceding forward are undefined. Restart the host. " +
+                (string.IsNullOrWhiteSpace(detail) ? string.Empty : $"ggml reported: {detail}"));
         }
 
         /// <summary>
@@ -1857,7 +2002,9 @@ namespace TensorSharp.Models
         public float[] ForwardRefill(int[] tokens)
         {
             if (_distributedDriver) _tpGroup.BroadcastControl(TpControlForwardRefill, tokens);
-            return ForwardRefillCore(tokens);
+            float[] logits = ForwardRefillCore(tokens);
+            ThrowIfBackendFailed();
+            return logits;
         }
 
         public void ResetKVCache()

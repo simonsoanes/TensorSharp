@@ -924,9 +924,10 @@ namespace TensorSharp.Models
                 _kvCacheHostStale = true;
                 return true;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
                 _fusedAttnUnsupported = true;
+                WarnFusedPathDisabled("attention", ex);
                 return false;
             }
         }
@@ -1017,6 +1018,15 @@ namespace TensorSharp.Models
             double n2 = 0;
             for (long i = 0; i < n; i++) n2 += (double)rp[i] * rp[i];
             Console.Error.WriteLine($"[q4e-drv] {what} l2={Math.Sqrt(n2):E9}");
+        }
+
+        // Fired from the permanent kill-switch catches below. Each latch is
+        // checked on entry and set exactly once, so this prints once per path.
+        private static void WarnFusedPathDisabled(string what, Exception ex)
+        {
+            Console.Error.WriteLine(
+                $"[q4e] fused {what} path disabled after error: {ex.Message}; " +
+                "continuing on the per-op path (slower). Reported once.");
         }
 
         // TS_Q4E_SPAN_ATTN=0 cuts the spans at attention layers and runs those
@@ -1357,9 +1367,10 @@ namespace TensorSharp.Models
             {
                 throw;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
                 _tokenGraphUnsupported = true;
+                WarnFusedPathDisabled("token-graph", ex);
                 return false;
             }
         }
@@ -1534,9 +1545,10 @@ namespace TensorSharp.Models
                 if (!_resOnDevice) InvalidateTensorDeviceCache(res);
                 return true;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
                 _fusedGdnUnsupported = true;
+                WarnFusedPathDisabled("GDN", ex);
                 return false;
             }
         }
@@ -1606,9 +1618,10 @@ namespace TensorSharp.Models
                 if (!_resOnDevice) InvalidateTensorDeviceCache(res);
                 return true;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
                 _fusedFfnUnsupported = true;
+                WarnFusedPathDisabled("FFN", ex);
                 return false;
             }
         }

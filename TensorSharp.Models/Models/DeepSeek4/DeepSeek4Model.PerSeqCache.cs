@@ -149,7 +149,8 @@ namespace TensorSharp.Models
         /// <summary>TRUE token-batched decode: one token for each of N
         /// concurrent requests in a single fused graph, so the dense weights
         /// (and each step's routed experts) are read once per step instead of
-        /// once per sequence. Engine opt-in via TS_BATCHED_FUSED_DECODE=1.
+        /// once per sequence. Enabled by default; the engine kill switch is
+        /// TS_BATCHED_FUSED_DECODE=0.
         /// Declines (returns false) whenever a request has no slot yet or a
         /// position disagrees with its slot — the engine then falls back to
         /// the per-sequence round-robin loop.</summary>

@@ -24,7 +24,7 @@
 
   // MTP speculative decoding: Qwen3.6 embeds its NextN draft head in the trunk
   // GGUF, so no separate draft file is needed — enable it on either host with:
-  //   "mtp-spec": true
+  //   "spec": true
   // It is lossless (verify step guarantees identical output); whether it is
   // faster than plain decode depends on the workload, so measure before pinning.
 }

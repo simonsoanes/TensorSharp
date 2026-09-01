@@ -8,13 +8,15 @@
 - **多模态推理** —— 图像、视频和音频输入（Gemma 4）；图像输入（Gemma 3 / Qwen 3.5/3.6-family / Qwen 3.8 Flash Next / GLM-5.3-Flash / Mistral 3 / Muse-Glimmer / Nemotron-H Omni，各自通过自己的 `mmproj` 视觉塔）。音频输入仅 Gemma 4 支持。`--pdf` 与架构无关：原生数字 PDF 的文本层会被内联进任意模型的提示词，只有扫描件才回退为页面图像（此时需要视觉模型）。生成的媒体是另一条轴：Qwen-Image-Edit 输出图像，Wan 2.1/2.2 输出 H.264 MP4，而 MiniMax-H3 是唯一**连音频一起输出**的家族——32 kHz 立体声音轨与画面联合去噪，并作为旁挂 `.wav` 写在 MP4 旁边
 - **思维链 / 推理模式** —— 通过 `<think>` / `<|channel>thought` / `<|channel>analysis` 标签输出结构化的思维链推理（Qwen 3、Qwen 3.5/3.6-family、Qwen 3.8 Flash Next、Gemma 4、GPT OSS、Nemotron-H、Muse-Glimmer、DeepSeek V4、GLM 5.x）
 - **工具调用 / 函数调用** —— 模型可调用用户定义的工具；所有三种 API 风格均支持多轮工具调用对话
+- **Agent Skills（智能体技能）** —— 面向模型的说明文件夹（`SKILL.md` + 脚本 / 参考文档 / 素材），只在任务需要时才加载。每次请求用 `"skills": ["pdf"]`（所有聊天 API）或 CLI 的 `--skill` 选中；其余内容由模型通过内置的 `skills_list` / `skills_read` 工具自取，而这些工具由 TensorSharp 在进程内应答，因此普通 OpenAI 客户端拿到的仍然只是一条写完的回复。→ [Agent Skills（智能体技能）](#agent-skills智能体技能)
+- **代码执行** —— 打开 `--code-exec` 后，模型在一个沙箱化的工作区里驱动真正的 shell：敲一行命令，读回退出码和命令打印的全部内容。该工作区在整个聊天会话期间持续存在，并与技能脚本共享，因此 `cd`、导出的环境变量、装好的包以及先前写下的文件，到下一次调用时都还在；和文件相关的活儿不再走 shell，而是有一套专门的工具：`read_file` 带行号显示文件的真实内容，`edit_file` 在一个文件里替换一段确切的文本，`write_file` 新建文件，`apply_patch` 则一次性、全有或全无地改动多个文件。这正是两个参照实现的形态——常见情形用 Claude Code 的 `Read`/`Edit`/`Write`，需要跨文件原子改动时用 Codex 的 `apply_patch` 信封。之所以这么做，是因为 heredoc 会把*整个*文件重新吐一遍：改一行要付出所有本来就正确的行的代价，并把它们全部重新采样一次。字节由宿主机写入，依据的文本要么精确找到、要么直接拒绝去猜。默认关闭，且需要真正的操作系统沙箱（macOS 用 `sandbox-exec`、Linux 用 `bwrap`）——宿主机若无法约束进程，该工具就拒绝运行，而不是不加约束地跑起来。
 - **量化模型支持** —— 加载 Q4_K_M、Q8_0、F16、MXFP4 等量化格式的 GGUF 文件；执行原生量化矩阵乘法（matmul），无需反量化到 FP32，并且纯 C# CPU 后端在加载大型 GGUF 时也会保持量化权重压缩状态
 - **GPU 加速** —— 通过 GGML 支持 Apple Metal（macOS）、GGML CUDA（Windows/Linux + NVIDIA）和 GGML Vulkan（Windows/Linux + AMD/Intel/NVIDIA），并提供 Direct CUDA/cuBLAS 后端（含 PTX 内核与未覆盖算子的 CPU 回退），以及面向 Apple Silicon 的 MLX 后端（mlx-c / Metal）
 - **优化后的纯 C# CPU 后端** —— 为 GEMM、RMSNorm、RoPE、softmax、融合激活等推理热点路径提供托管快速路径和 SIMD 内核；托管矩阵乘法现在跑在一个常驻的“先自旋后挂起”工作线程池上，而不是每次矩阵乘都开一次 `Parallel.For`——在 122 核主机上 prefill 约 +15%、decode 约 2.8×。→ [纯 C# CPU 后端](#纯-c-cpu-后端)
-- **连续批处理 & 分页 KV 缓存** —— vLLM 风格的分页 KV 块池，跨请求的块级哈希前缀共享，迭代级调度器（可在批内动态加入/抢占序列），可选的 SSD 冷层用于超大 KV 工作集，原生融合分页注意力内核（`TSGgml_PagedAttentionForward`，在 Metal/CUDA/Vulkan 上驱动 `ggml_flash_attn_ext`）。`TensorSharp.Server` 默认启用，可用 `--no-continuous-batching` 关闭。详见 [docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING_zh-cn.md](docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING_zh-cn.md)。要分清楚它买到了什么、没买到什么：分页 KV 缓存是**驻留主机内存**的，因此它提供的是准入控制与跨请求的前缀复用，而不是随并发数扩展的吞吐：无论有多少序列在飞，`BatchedPaged` 路线的总吞吐都在约 **69 tok/s** 处饱和，因为它写入的块池位于主机内存。（这个上限是在**分页**路径上测得的。GLM 5.x 另有一条可选的、非分页的批处理融合解码——见下面“批处理 / 并行推理”那一条——其报告值为 4 路并发下总解码吞吐 1.81 倍；那是另一套机制，并不能用来说明分页路径可以扩展。）（仓库里确实有一个驻留设备的分页 KV 池——`TensorSharp.GGML.Native/ggml_ops_paged_kv_pool.cpp` 与 `TensorSharp.Models/Paged/DevicePagedKvCache.cs`——但它没有接入任何模型，不是已发布的特性。）GLM 5.x 是个例外：带权重吸收的 MLA（每层每 token 只占一行 576 宽的缓存）与 DSA lightning indexer 没有分页布局，因此那里的并发靠原生的按序列**槽位**来承载——每个请求拥有自己的 MLA 与索引器缓存以及自己的 `n_past`，绑定请求只是切换活跃槽位，不搬运任何 KV 字节。Qwen 3.8 Flash Next（`qwen4exp`）出于同样的原因是同样的形状——它的 GatedDeltaNet、PLE 与 QSA 索引器状态同样没有分页布局——因此靠按序列的**状态持有器**承载：每个在飞请求拥有自己的注意力 KV 与索引器缓存、GDN 卷积 + delta-net 状态以及 PLE 历史，原生内核把驻留设备的递归状态按持有器做键，因此切换请求只是一次引用交换；引擎则让各序列轮转跑各自捕获的融合 decode 图。
-- **投机解码** —— 在共享的"起草—验证—回滚"运行时之上，架了一层可插拔的算法（`--spec-type`：`auto` / `draft-head` / `block` / `ngram`）；无权重的 `ngram` 投机器对**所有**模型都可用，训练出来的草稿头则加速单序列（无并发）decode。Qwen 3.6 与 GLM 5.2 将 NextN 块内嵌在主干 GGUF 中；Gemma 4 通过 `--spec-draft-model` 加载独立的 EAGLE 风格 `gemma4-assistant` 草稿 GGUF，其草稿层读取目标模型自身的 KV 缓存。草稿每步最多提议 `--spec-draft` 个 token（草稿置信度 ≥ `--spec-pmin` 时保留），主干用一次批量前向完成验证；起草与验证均由该请求自己的采样器（含惩罚项）驱动，因此输出与标准 decode 完全一致。CLI 与服务端均通过 `--spec` 启用（默认关闭）。在 `TensorSharp.Cli` 上，它在所有单序列路径上生效——`--input`、`--multi-turn-jsonl` 与 `--interactive`。ggml 后端有融合的多 token 验证 / 草稿步内核，是明确收益；Direct `cuda` 后端运行完全驻留 GPU 的逐算子验证 / 草稿，同样有收益；CPU / GGML CPU / MLX 保持标准 decode。环境变量：`TS_SPEC_*`（通用；旧的 `TS_MTP_*` 拼法仍然有效）与 `TS_GMTP_*`（Gemma 4 调优）。
+- **连续批处理 & 分页 KV 缓存** —— vLLM 风格的分页 KV 块池，跨请求的块级哈希前缀共享，迭代级调度器（可在批内动态加入/抢占序列），可选的 SSD 冷层用于超大 KV 工作集，原生融合分页注意力内核（`TSGgml_PagedAttentionForward`，在 Metal/CUDA/Vulkan 上驱动 `ggml_flash_attn_ext`）。`TensorSharp.Server` 默认启用，可用 `--no-continuous-batching` 关闭。详见 [docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING_zh-cn.md](docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING_zh-cn.md)。要分清楚它买到了什么、没买到什么：分页 KV 缓存是**驻留主机内存**的，因此它提供的是准入控制与跨请求的前缀复用，而不是随并发数扩展的吞吐：无论有多少序列在飞，`BatchedPaged` 路线的总吞吐都在约 **69 tok/s** 处饱和，因为它写入的块池位于主机内存。（这个上限是在**分页**路径上测得的。GLM 5.x 另有一条默认启用的、非分页的批处理融合解码——见下面“批处理 / 并行推理”那一条——其报告值为 4 路并发下总解码吞吐 1.81 倍；那是另一套机制，并不能用来说明分页路径可以扩展。）（仓库里确实有一个驻留设备的分页 KV 池——`TensorSharp.GGML.Native/ggml_ops_paged_kv_pool.cpp` 与 `TensorSharp.Models/Paged/DevicePagedKvCache.cs`——但它没有接入任何模型，不是已发布的特性。）GLM 5.x 是个例外：带权重吸收的 MLA（每层每 token 只占一行 576 宽的缓存）与 DSA lightning indexer 没有分页布局，因此那里的并发靠原生的按序列**槽位**来承载——每个请求拥有自己的 MLA 与索引器缓存以及自己的 `n_past`，绑定请求只是切换活跃槽位，不搬运任何 KV 字节。Qwen 3.8 Flash Next（`qwen4exp`）出于同样的原因是同样的形状——它的 GatedDeltaNet、PLE 与 QSA 索引器状态同样没有分页布局——因此靠按序列的**状态持有器**承载：每个在飞请求拥有自己的注意力 KV 与索引器缓存、GDN 卷积 + delta-net 状态以及 PLE 历史，原生内核把驻留设备的递归状态按持有器做键，因此切换请求只是一次引用交换；引擎则让各序列轮转跑各自捕获的融合 decode 图。
+- **投机解码** —— 在共享的"起草—验证—回滚"运行时之上，架了一层可插拔的算法（`--spec-type`：`auto` / `draft-head` / `block` / `ngram`）；无权重的 `ngram` 投机器对**所有**模型都可用，训练出来的草稿头则加速单序列（无并发）decode。Qwen 3.6 与 GLM 5.2 将 NextN 块内嵌在主干 GGUF 中；Gemma 4 通过 `--draft-model` 加载独立的 EAGLE 风格 `gemma4-assistant` 草稿 GGUF，其草稿层读取目标模型自身的 KV 缓存。草稿每步最多提议 `--spec-draft` 个 token（草稿置信度 ≥ `--spec-pmin` 时保留），主干用一次批量前向完成验证；起草与验证均由该请求自己的采样器（含惩罚项）驱动，因此输出与标准 decode 完全一致。CLI 与服务端均通过 `--spec` 启用（默认关闭）。在 `TensorSharp.Cli` 上，它在所有单序列路径上生效——`--input`、`--multi-turn-jsonl` 与 `--interactive`。ggml 后端有融合的多 token 验证 / 草稿步内核，是明确收益；Direct `cuda` 后端运行完全驻留 GPU 的逐算子验证 / 草稿，同样有收益；CPU / GGML CPU / MLX 保持标准 decode。环境变量：`TS_SPEC_*`（通用；旧的 `TS_MTP_*` 拼法仍然有效）与 `TS_GMTP_*`（Gemma 4 调优）。
 - **张量并行与分布式推理** —— 用 `--tp N`（`TensorSharp.Cli` 与 `TensorSharp.Server` 均支持，也可用 `TENSORSHARP_TP_DEGREE`）把一个模型按 Megatron-LM 列/行并行范式切分到多张 GPU 上，再用点对点 TCP 集群（`--tp-node-id` / `--tp-peers`）扩展到多台机器。分层 AllReduce 把跨网络流量降到最低。可运行在 Direct `cuda` 后端以及 GGML CUDA / Vulkan 后端上——后者每个 rank 在自己的 GPU 上拥有独立的 ggml 后端、权重分片与 KV 缓存。支持全部自回归架构（Qwen 3、Mistral 3、Gemma 3/4、Qwen 3.5/3.6-family、GPT OSS、Nemotron-H、GLM 5.x（仅 GGML 后端，且仅 GLM-5.2 `glm-dsa`）、Muse-Glimmer——因为只有 2 个 KV 头，并行度上限为 `--tp 2`），并针对 MoE 专家并行 / 专家切分、GatedDeltaNet 按 rank V-head 归属、Mamba2 复制等异构层提供各自的策略。融合的按 rank 计算图使 `--tp 2` 的 decode 快于单卡（Gemma 4 E4B 51.7 对 37.3 tok/s），也让单卡装不下的模型得以运行。注意 TP 并不是模型用上多张 GPU 的唯一途径——现在产品里有两种不同的多卡模式。**张量并行**把每一层*内部*的权重切片，并为此每层付出集合通信的代价来重新汇聚，因此它可能同时买到容量与延迟。**按层切分**则是每张 GPU 拿一段连续的*整层*：不切分任何权重，不发起任何集合通信；它是一项**容量**特性——它解决的是“单卡装不下的模型怎么跑”，而不是让它更快。DeepSeek V4 与 GLM 5.x **不加任何开关就会按层切分到所有可见 GPU**（它们的整模型执行器会按每张卡的空闲显存对整层做装箱）；`--tp` 在 GLM-5.2 上会把这种切分换成层内部的 Megatron 切分，GLM-5.3-Flash（`glm5next`）会干净地拒绝 `--tp` 并继续用按层切分，而在 DeepSeek V4 上 `--tp` 只是限制按层切分使用几张卡（等同 `TS_DSV4_NGPU`）。在 Qwen 3.8 Flash Next（`qwen4exp`）上，`--tp N` 本身*就是*按层切分——该架构不切分任何权重，而这也是 llama.cpp 对这个架构提供的同一种（也是唯一一种）多卡模式，因为 `-sm row` 拒绝加载它。在 2x A100-80GB 上用 Qwen3.8-Flash-Next-UD-Q2_K_XL（73.4 GiB）实测：单卡与双卡的贪心输出**逐字节一致**（SHA-256 相同），显存为 24.2 GB + 26.2 GB 而不是全部压在一张卡上，吞吐则基本不变（prefill 约 1520-1550 t/s，decode 约 56 t/s，两边都一样）。启动时会打印实际跑的是哪种模式，以及每张 GPU 的层数 / 字节分配。其他所有架构在不加 `--tp` 时只用一张 GPU；而既不支持张量并行、也不支持按层切分的架构现在会在 stderr 上明确说明并只用一张 GPU，而不是默默地把其余 GPU 扔在那里闲置。服务端还可选用 Redis 支撑的共享 KV 缓存与 Responses API 存储。→ [张量并行](USAGE_zh-cn.md#张量并行与分布式推理)
-- **批处理 / 并行推理** —— 已为 Mistral 3、Gemma 4、GPT OSS、Qwen 3、Qwen 3.5/3.6-family、Nemotron-H 默认启用 `IBatchedPagedModel.ForwardBatch`，能在一次前向传播中打包 N 个序列，使用 `slotMapping` 进行分页 K/V 写入，并通过原生内核做按序列注意力。Gemma 4、Qwen 3.5/3.6、GPT OSS 与 Nemotron-H 提供各自的 `TS_<FAMILY>_BATCHED=0` 兜底开关；Qwen 3 与 Mistral 3 没有家族专属开关，请用全局 `TS_SCHED_DISABLE_BATCHED=1` 强制回到按序列 KV-swap 路径。GLM 5.x 没有分页版 `ForwardBatch`；取而代之的是一条可选的批处理融合解码（`TS_BATCHED_FUSED_DECODE=1`）：一张图、每个序列一个 token，权重只读一次——4 路并发下总解码吞吐 1.81 倍。默认关闭，因为批处理会改变 GEMM 形状，而 2-bit MoE 会把这点差异放大成不同的专家选择。
+- **批处理 / 并行推理** —— 已为 Mistral 3、Gemma 4、GPT OSS、Qwen 3、Qwen 3.5/3.6-family、Nemotron-H 默认启用 `IBatchedPagedModel.ForwardBatch`，能在一次前向传播中打包 N 个序列，使用 `slotMapping` 进行分页 K/V 写入，并通过原生内核做按序列注意力。Gemma 4、Qwen 3.5/3.6、GPT OSS 与 Nemotron-H 提供各自的 `TS_<FAMILY>_BATCHED=0` 兜底开关；Qwen 3 与 Mistral 3 没有家族专属开关，请用全局 `TS_SCHED_DISABLE_BATCHED=1` 强制回到按序列 KV-swap 路径。GLM 5.x 没有分页版 `ForwardBatch`；取而代之的是一条默认启用的批处理融合解码：一张图、每个序列一个 token，权重只读一次——4 路并发下总解码吞吐 1.81 倍。设置 `TS_BATCHED_FUSED_DECODE=0` 可切回串行融合 decode 以做 A/B 或隔离回归；批处理会改变 GEMM 形状，而 2-bit MoE 可能把这点差异放大成不同的专家选择。
 - **兼容 Ollama 与 OpenAI API** —— 可作为现有工具链的即插即用替代端点
 - **可配置采样** —— temperature、top-k、top-p、min-p、重复/存在/频率惩罚、seed、停止序列
 - **结构化输出** —— OpenAI `response_format` 中的 JSON schema 会被编译成语法，并通过语法约束解码强制执行：任何会破坏 schema 的 token 在采样前就被从分布中剔除，因此返回值天然结构合法，而不是事后修补。支持 `type`、`enum`、`const`、`properties`、`required`、`additionalProperties`、`items`、`prefixItems`、`min/maxItems`、`anyOf`、`oneOf`、`allOf`、`$ref`/`$defs`（含递归）、`min/maxLength`、`pattern`，以及 date/time/date-time/uuid 格式与整数 `minimum`/`maximum`。CFG 无法表达的关键字（`not`、`if`/`then`/`else`、`dependentSchemas`、`dependentRequired`、`multipleOf`、`patternProperties`）会在请求阶段直接拒绝。`TS_JSON_GRAMMAR=0` 回退到旧的提示 + 修补行为。
@@ -80,23 +82,23 @@ Muse-Glimmer 有自己的块级草稿模型 **DFlash**：一个独立的 5 层 G
 
 `ngram` 是与模型无关的那一个：它对**每一个** checkpoint 都可用，包括完全不带草稿器的模型；在答案会引用输入的场景下最强——摘要、编辑、翻译、就文档作答、重复性的结构化输出、含重复标识符的代码、智能体的工具循环。在不带草稿头的 Qwen3.5-9B 上实测（Q8_0、ggml_metal、M5 Pro）：一条"复现这份配置"的提示词跑出 **45.2 tok/s，对比普通 decode 的 31.4（1.44×）**，输出逐字节一致。在自由散文上它找不到可用后缀，每一步都退化成普通 decode，而运行期的成本调控器会让这件事保持廉价。
 
-投机解码**默认关闭**。在服务端或 `TensorSharp.Cli` 上用 `--spec`（环境变量 `TS_SPEC=1`）启用。历史拼法 `--mtp-spec` / `--mtp-draft` / `--mtp-pmin` / `--mtp-draft-model` 原样保留，环境变量也同时以 `TS_SPEC_*` 与 `TS_MTP_*` 两套名字发布——glm-dsa 的原生加载器会在加载模型时从 C++ 侧读取 `TS_MTP_SPEC` / `TS_MTP_DRAFT`，所以那套名字是一份跨语言契约：
+投机解码**默认关闭**。在服务端或 `TensorSharp.Cli` 上，`--spec`（环境变量 `TS_SPEC=1`）是内嵌在主干检查点里的草稿器（Qwen 3.6 与 GLM 5.2 的 NextN 块）的显式开关——因为加载它们要把额外的权重调入显存；以独立 GGUF 发布的草稿器只需 `--draft-model` 即可启用，显式的 `--no-spec` 则是否决。环境变量仍然同时以 `TS_SPEC_*` 与 `TS_MTP_*` 两套名字发布——glm-dsa 的原生加载器会在加载模型时从 C++ 侧读取 `TS_MTP_SPEC` / `TS_MTP_DRAFT`，所以那套名字是一份跨语言契约：
 
 ```bash
 # Qwen 3.6 —— 使用 -MTP- 仓库 GGUF，确保主干保留内嵌 NextN 块
 dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda \
-    --mtp-spec --mtp-draft 8 --mtp-pmin 0.75
+    --spec --spec-draft 8 --spec-pmin 0.75
 
 # Gemma 4 —— 加载与目标匹配的独立 gemma4-assistant 草稿 GGUF
 dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda \
-    --mtp-spec --mtp-draft-model models/gemma-4-E4B-it-assistant.Q8_0.gguf
+    --draft-model models/gemma-4-E4B-it-assistant.Q8_0.gguf
 ```
 
 **三种草稿头形态：**
 
-- **Qwen 3.6（内嵌 NextN）** —— GGUF 在主干栈之后带有一个额外解码块（`{arch}.nextn_predict_layers`）以及 NextN 投影 / 归一化张量。无需独立文件，`--mtp-draft-model` 被忽略。主干的递归状态（GatedDeltaNet）会被快照，以便部分被拒的验证批次可以回滚。
-- **GLM 5.2（内嵌 NextN）** —— 形态相同，且官方 [unsloth/GLM-5.2-GGUF](https://huggingface.co/unsloth/GLM-5.2-GGUF) 已经带有该块（`blk.78.nextn.*` 加上一个完整的 MLA + 256 专家解码块），无需额外下载，`--mtp-spec` 就是全部配置——在 CLI（`--input`、`--multi-turn-jsonl`、`--interactive`）上与在服务端上都是如此。该块只在传入该参数时才会加载：它是一整个解码层（IQ2_XXS 下约 3 GiB），会与 KV 缓存争抢 loader 用来确定上下文长度的同一块显存。glm-dsa 没有递归状态，因此部分被拒的验证批次会保留已接受前缀的 KV，只回退位置计数，不需要重跑。详见 [GLM 卡片](docs/models/glm_zh-cn.md#nextn--mtp-投机解码)。
-- **Gemma 4（独立 `gemma4-assistant` GGUF）** —— 通过 `--mtp-draft-model` 加载的 EAGLE 风格递归草稿器。它自身不保存任何 K/V：每个草稿层都查询**目标模型**已有的逐层 KV 缓存（最后一个 local 层 + 最后一个 global 层），因此在给定 `(token, hidden)` 时草稿器是无状态的。草稿的隐藏维度必须与目标一致——12B 目标配 12B 草稿，而非 26B-A4B 草稿。草稿 GGUF 不匹配、缺失或不完整会在启动时**立即失败**并给出修复提示，而非静默关闭投机。
+- **Qwen 3.6（内嵌 NextN）** —— GGUF 在主干栈之后带有一个额外解码块（`{arch}.nextn_predict_layers`）以及 NextN 投影 / 归一化张量。无需独立文件，`--draft-model` 被忽略。主干的递归状态（GatedDeltaNet）会被快照，以便部分被拒的验证批次可以回滚。
+- **GLM 5.2（内嵌 NextN）** —— 形态相同，且官方 [unsloth/GLM-5.2-GGUF](https://huggingface.co/unsloth/GLM-5.2-GGUF) 已经带有该块（`blk.78.nextn.*` 加上一个完整的 MLA + 256 专家解码块），无需额外下载，`--spec` 就是全部配置——在 CLI（`--input`、`--multi-turn-jsonl`、`--interactive`）上与在服务端上都是如此。该块只在传入该参数时才会加载：它是一整个解码层（IQ2_XXS 下约 3 GiB），会与 KV 缓存争抢 loader 用来确定上下文长度的同一块显存。glm-dsa 没有递归状态，因此部分被拒的验证批次会保留已接受前缀的 KV，只回退位置计数，不需要重跑。详见 [GLM 卡片](docs/models/glm_zh-cn.md#nextn--mtp-投机解码)。
+- **Gemma 4（独立 `gemma4-assistant` GGUF）** —— 通过 `--draft-model` 加载的 EAGLE 风格递归草稿器，给出该文件本身即可启用投机。它自身不保存任何 K/V：每个草稿层都查询**目标模型**已有的逐层 KV 缓存（最后一个 local 层 + 最后一个 global 层），因此在给定 `(token, hidden)` 时草稿器是无状态的。草稿的隐藏维度必须与目标一致——12B 目标配 12B 草稿，而非 26B-A4B 草稿。草稿 GGUF 不匹配、缺失或不完整会在启动时**立即失败**并给出修复提示，而非静默关闭投机。
 
 **何处有收益**（自动启用；否则引擎走标准 decode）：
 
@@ -106,7 +108,7 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/gemma-4-E4B-
 | Direct CUDA（`cuda`，Driver API / cuBLAS） | ✅ 完全驻留 GPU 的逐算子验证 / 草稿 | —（GLM 的逐算子路径只在 `cpu` 上运行） | ✅ 完全驻留 GPU 的逐算子验证 / 草稿 |
 | CPU / GGML CPU / MLX | 标准 decode（验证跟不上） | 逐算子参考实现（正确，但不快） | 标准 decode |
 
-调优：`--spec-draft`（默认 `8`，别名 `--mtp-draft`）限制每步起草的 token 数；`--spec-pmin`（别名 `--mtp-pmin`）是置信度门限，遇到第一个低于该值的 token 即停止起草。这个数字*意味着什么*由算法自己决定，因此各算法带各自的默认值而不是共用一个：逐 token 草稿头是 `0.75`（在其 top-10 logits 上的 top-1 概率），块级草稿器是累计 `0.35`，n-gram 是 `0`（在那里它转而缩放所需的匹配长度）。这两个参数是相互作用的——窗口开得宽时偶尔会形成一条最终大部分被拒的长链，而那些验证行的开销照付不误——所以在新的模型 / 机器组合上值得把它们一起扫描，而不是分别调。在 GLM 5.2 上，`--spec-draft 4 --spec-pmin 0.55` 在每一轮实测中都是最好或并列最好，比默认值高约 4%。Gemma 4 草稿路径 A/B 开关为 `TS_GMTP_*` 环境变量（见 [Web 应用](USAGE_zh-cn.md#web-应用) 下的 **MTP / 投机解码调优变量** 表）。各架构具体机制见 [Qwen 3.5/3.6 卡片](docs/models/qwen35_zh-cn.md)、[GLM 卡片](docs/models/glm_zh-cn.md#nextn--mtp-投机解码) 与 [Gemma 4 卡片](docs/models/gemma4_zh-cn.md)。
+调优：`--spec-draft`（默认 `8`）限制每步起草的 token 数；`--spec-pmin` 是置信度门限（`0` = 从不设门限），遇到第一个低于该值的 token 即停止起草。这个数字*意味着什么*由算法自己决定，因此各算法带各自的默认值而不是共用一个：逐 token 草稿头是 `0.15`（在其 top-10 logits 上的 top-1 概率），块级草稿器是累计 `0.35`，n-gram 是 `0`（在那里它转而缩放所需的匹配长度）。这两个参数是相互作用的——窗口开得宽时偶尔会形成一条最终大部分被拒的长链，而那些验证行的开销照付不误——所以在新的模型 / 机器组合上值得把它们一起扫描，而不是分别调。在 GLM 5.2 上，`--spec-draft 4 --spec-pmin 0.55` 在每一轮实测中都是最好或并列最好，比默认值高约 4%。Gemma 4 草稿路径 A/B 开关为 `TS_GMTP_*` 环境变量（见 [Web 应用](USAGE_zh-cn.md#web-应用) 下的 **MTP / 投机解码调优变量** 表）。各架构具体机制见 [Qwen 3.5/3.6 卡片](docs/models/qwen35_zh-cn.md)、[GLM 卡片](docs/models/glm_zh-cn.md#nextn--mtp-投机解码) 与 [Gemma 4 卡片](docs/models/gemma4_zh-cn.md)。
 
 **贪心输出与浮点。** 每个输出 token 都取自**主干**的某一行，因此投机不会改变 token 来自哪个分布，只改变得到它需要几次前向。但它确实改变了**算术**：K+1 行的验证让主干的矩阵乘运行在与 1 行 decode 不同的 batch 尺寸上，从而选中不同的 kernel 与归约顺序。在稠密模型上这不可见；在 GLM-5.2 上——2 bit 权重、256 专家 top-8——路由 logit 的最后一位差异会改变**实际激活哪些专家**，78 层会把它放大。对 140 个验证行与逐 token decode 的实测：**2.9%** 的行 top-1 token 不同，因此长贪心生成最终会走向另一条（同样合理的）分支。关闭起草后跑同一条投机代码路径可与贪心逐 token 一致，这正说明该效应来自 batch 尺寸而非投机本身。
 
@@ -185,7 +187,7 @@ token（单位 tok/s）：
 （词表宽 154880；用 `TS_DUMP_LOGITS` 对比，它写出的是第一次*真实* forward 的 logits，会
 跳过预热的那几次）。贪心解码的文本不一样，是因为原生路径最高的两个 logit 只差 0.11，而
 托管路径把它们排反了，原生选中的那个在托管路径里落到第 2 位。这与 2 bit 下专家选择的敏感
-性是吻合的——也正是 `TS_BATCHED_FUSED_DECODE` 默认关闭的那个效应——但这**并没有**被证明就
+性是吻合的——也正是让 `TS_BATCHED_FUSED_DECODE=0` 适合做严格串行路径 A/B 的那个效应——但这**并没有**被证明就
 只是这个原因：0.96 低于更高精度 checkpoint 预期能给出的 ~0.999，而当时没有更高精度的
 GLM-5.3 GGUF 可以拿来做对照。请把托管路径当成一个用来做 A/B 的参考实现，而不是逐位一致。
 → [GLM 卡片](docs/models/glm_zh-cn.md#--backend-cpu-上的-glm-53-flash)
@@ -343,6 +345,46 @@ Responses API 存储（`TS_RESPONSES_STORE_REDIS_URL`）用于持久化响应。
 
 输出解析器（`OutputParser.cs`）会自动从模型原始输出中提取工具调用，与架构无关。
 
+## Agent Skills（智能体技能）
+
+一个技能就是一个目录，里面放着 `SKILL.md`（YAML frontmatter + 写给模型看的 Markdown 说明），以及这些说明会用到的脚本、参考文档和素材。TensorSharp 扫描一个或多个技能目录（`--skills-dir`，或二进制文件旁边的 `skills` 目录），把每个技能的一行描述展示给模型，其余内容**只在模型主动索取时才加载**。
+
+按需加载由两个内置工具承担，它们由 TensorSharp 在进程内自己执行：
+
+- `skills_list()` —— 列出本次对话可达的全部技能，含描述与随包文件路径
+- `skills_read(skill, path, offset)` —— 读取某个技能中某个文件的一页；`path="SKILL.md"` 即该技能自身的说明
+- `skills_run(skill, path, args)` —— 运行技能自带的脚本。**默认关闭**；`--skills-allow-exec` 才会开启，且开启后**要么在沙箱内运行、要么干脆不运行**（默认即 `--skills-sandbox required`）
+
+在引擎内部应答这些调用，正是这个功能对“完全不了解技能”的客户端也成立的原因：普通的 OpenAI 客户端只要发 `"skills": ["pdf"]`，收到的就是一条已经写完的回复，而不是一个它根本无法执行的工具调用。调用方**自己的**工具则从不会被执行——它们照常回传给调用方。
+
+**渐进式披露。** 元数据（名称 + 描述）始终可见。被显式选中的技能，其 `SKILL.md` 正文在预算允许时会写进提示词（预算由上下文长度推出：取四分之一，并夹在约 1024–48000 token 之间）；放不下的选中技能则被**推迟**——仍以名称、描述和大小公布，并附上“先读它”的指示。随包文件永远不会内联，提示词里只列路径与大小，内容由 `skills_read` 按 48 KB 分页取回。
+
+**提示词形态。** 该文本块会并入首条 `system`/`developer` 消息，而不是另起一条——这是本仓库所有聊天模板都能正确处理的唯一注入点。它的每一个字节都是“排序后的技能选择”的纯函数：没有时间戳、没有路径、没有计数，因此同一段对话逐轮哈希结果一致，KV 前缀缓存可以从第 0 块起持续命中。
+
+**边界约束。** 模型给出的每一个路径都要经过 `SkillPathGuard`，它同时封堵词法层（`..`、绝对路径、`~`、UNC、盘符限定）、规范化层与**符号链接**三类逃逸，并把每个技能限制在它自己的目录内。ZIP 安装同样让每个条目走这道关卡（zip-slip），按解压后的字节流校验大小，并设置单文件（64 MB）、整包（256 MB）、条目数（4096）与压缩比（200×）上限。
+
+**脚本沙箱。** 开启脚本执行后，子进程在 macOS 上由 `sandbox-exec`、在 Linux 上由 `bwrap` 约束——禁止联网、无法读取用户主目录、写入仅限该次运行的临时暂存目录——此外在所有平台上还有解释器白名单、不经过 shell、清洗过的环境变量（宿主机凭据不会传给脚本）、超时与输出上限。Windows 只能通过 job object 限制进程树，无法约束文件系统与网络，并且会如实说明：每次结果都会列出**未被约束**的项。默认的 `--skills-sandbox required` 意味着：宿主机若无法提供隔离，就拒绝运行脚本，而不是不加约束地跑起来。
+
+**模型家族差异。** Gemma 3 与 Mistral 3 的聊天格式不承载工具声明，因此在它们上面改为把选中技能的正文直接写进提示词，并且不提供 `skills_read`；Mistral 3 还会丢弃 `role: "tool"` 消息，所以工具结果改以 user 轮回灌。
+
+选择技能：
+
+```bash
+# CLI
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
+    --backend ggml_metal --skills-dir ~/skills --skill pdf --input prompt.txt
+
+# 任意聊天 API —— /v1/chat/completions、/v1/responses、/api/chat（Ollama）、/api/chat（Web UI）
+curl -X POST http://localhost:5000/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model": "gemma-4-E4B-it-Q8_0.gguf",
+       "messages": [{"role": "user", "content": "把这份对账单里的合计表格提取出来。"}],
+       "skills": ["pdf"], "skills_discovery": false}'
+```
+
+服务端同时暴露技能注册表本身 —— `GET /v1/skills`、`GET /api/skills`、`POST /api/skills`（上传 `.zip`）、`DELETE /api/skills/{name}`；`/api/models` 会返回一个 `skills` 块（`enabled`、`installable`、`count`），供前端判断是否要显示相关控件。
+
+完整参考（frontmatter 字段、预算、安全模型，以及 C# 的 `SkillsChatClient` API）见 [Agent Skills in TensorSharp](docs/agent_skills.md)。可直接取用的开源技能：<https://github.com/anthropics/skills>。
+
 ## 多模态支持
 
 ### Gemma 4
@@ -392,4 +434,3 @@ Nemotron Omni 发行版加入了 RADIO / v2_vl ViT 图像编码器。通过 `--m
 
 - **图像：** PNG、JPEG、HEIC/HEIF
 - **音频：** 聊天模板会为每个上传的音频文件发出一个 `<so_embedding>` token，CLI 仍会运行 Parakeet 风格 log-mel 预处理器以验证管线，但真正的音频推理需要尚未在公开 GGUF 中发布的 Parakeet 音频 mmproj。
-

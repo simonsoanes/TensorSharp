@@ -4626,15 +4626,25 @@ namespace TensorSharp.Models
             _cudaMoEUsable = true;
         }
 
-        /// <summary>TS_CUDA_MOE_DEBUG=1: report why the on-device MoE decode path was
-        /// rejected. Without it a model silently falls back to the per-expert host
-        /// loop, which is an order of magnitude slower and looks like an
-        /// unexplained perf cliff on one model.</summary>
+        private static bool _cudaMoEGateWarned;
+
+        /// <summary>Report why the on-device MoE decode path was rejected. The first
+        /// refusal always prints once — the silent fallback is the per-expert host
+        /// loop, an order of magnitude slower, and looks like an unexplained perf
+        /// cliff on one model. TS_CUDA_MOE_DEBUG=1 prints every refusal.</summary>
         private static void CudaMoEGateLog(int layer, int expert, string reason)
         {
-            if (Environment.GetEnvironmentVariable("TS_CUDA_MOE_DEBUG") != "1")
-                return;
             string where = expert >= 0 ? $"layer {layer} expert {expert}" : $"layer {layer}";
+            if (Environment.GetEnvironmentVariable("TS_CUDA_MOE_DEBUG") != "1")
+            {
+                if (_cudaMoEGateWarned)
+                    return;
+                _cudaMoEGateWarned = true;
+                Console.WriteLine($"  [cuda-moe] on-device MoE decode disabled at {where}: {reason}; " +
+                    "using the per-expert host loop (much slower). " +
+                    "TS_CUDA_MOE_DEBUG=1 lists every refusal. Reported once.");
+                return;
+            }
             Console.WriteLine($"  [cuda-moe] on-device MoE decode disabled at {where}: {reason}");
         }
 

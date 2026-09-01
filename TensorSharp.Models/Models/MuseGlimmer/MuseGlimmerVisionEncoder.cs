@@ -867,14 +867,12 @@ namespace TensorSharp.Models
                 _fusedVisionBlockUnavailable = true;
                 return false;
             }
-            catch (EntryPointNotFoundException)
+            catch (Exception ex) when (ex is EntryPointNotFoundException or DllNotFoundException)
             {
                 _fusedVisionBlockUnavailable = true;
-                return false;
-            }
-            catch (DllNotFoundException)
-            {
-                _fusedVisionBlockUnavailable = true;
+                Console.WriteLine("  Vision encoder: fused vision block missing from the loaded GgmlOps " +
+                    $"library ({ex.Message}); using the portable per-op encoder (slower). " +
+                    "Update/rebuild GgmlOps to restore the fused path. Reported once.");
                 return false;
             }
         }

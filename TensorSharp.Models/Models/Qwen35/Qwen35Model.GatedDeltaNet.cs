@@ -846,6 +846,13 @@ namespace TensorSharp.Models
             return true;
         }
 
+        // FusedOutProjFFN threw once on the GDN (recurrent-layer) callsite: latched
+        // so the call is not retried — and re-failed — for every recurrent layer of
+        // every token. The latch also serves as the one-shot warning. Per-callsite
+        // on purpose: the attention-layer callsite in Qwen35Model.cs latches
+        // independently.
+        private bool _gdnFusedOutProjFfnFailed;
+
         private Tensor RecurrentBlock(Tensor hidden, int layer, int seqLen, int startPos)
         {
             // The op-by-op recurrent path reads the HOST state mirrors, so a
@@ -870,7 +877,8 @@ namespace TensorSharp.Models
                     int intermSize = Config.IntermediateSize;
                     int halfDim = intermSize > 0 ? intermSize : (int)(_ffnGateUpQW[layer].Ne1 / 2);
 
-                    if (halfDim > 0 && hidden.DimensionCount == 2 && gated.DimensionCount == 2
+                    if (halfDim > 0 && !_gdnFusedOutProjFfnFailed
+                        && hidden.DimensionCount == 2 && gated.DimensionCount == 2
                         && hidden.Sizes[0] == gated.Sizes[0])
                     {
                         if (Unscaled(_ssmOutQW[layer], _ffnGateUpQW[layer], _ffnDownQW[layer])) try
@@ -889,7 +897,15 @@ namespace TensorSharp.Models
                             gated.Dispose();
                             return hidden;
                         }
-                        catch { /* fall through */ }
+                        catch (Exception e)
+                        {
+                            _gdnFusedOutProjFfnFailed = true;
+                            Console.Error.WriteLine(
+                                $"[qwen35] FusedOutProjFFN failed on the GDN path ({e.Message}); " +
+                                "using the separate out-proj + FFN dispatches instead (slower). " +
+                                "Not retried. Reported once.");
+                            // fall through
+                        }
                     }
                     // Fallback: do output proj + residual, then standard FFN.
                     if (TryLinearAddInto(hidden, gated, _ssmOutQW[layer]))
@@ -1279,7 +1295,7 @@ namespace TensorSharp.Models
             if (!_fdDiagPrinted)
             {
                 _fdDiagPrinted = true;
-                Console.Error.WriteLine($"[full-decode] not engaged: {reason}; using per-op decode.");
+                Console.Error.WriteLine($"[full-decode] not engaged: {reason}; using per-op decode (roughly 10x slower).");
             }
             return false;
         }
@@ -1294,7 +1310,7 @@ namespace TensorSharp.Models
             // (_kvCacheK, _deltaStateTensor) and the unsharded LM head, none of
             // which exist under tensor parallelism — ForwardTP owns that state.
             if (IsTensorParallel)
-                return false;
+                return FdBail("tensor parallelism active — ForwardTP owns the caches (the fused TP decode reports separately)");
             // Fold final-norm + lm_head into the graph requires both present.
             if ((_lmHeadQW == null && _lmHeadF32 == null) || _finalNormW == null)
                 return FdBail("final-norm or lm_head weight missing");
@@ -1302,10 +1318,13 @@ namespace TensorSharp.Models
             // graph. CUDA/Vulkan use dynamic SET_ROWS KV writes; Metal moves CPY
             // destination views before replay, avoiding its problematic SET_ROWS
             // shape. GDN recurrence and MoE top-K routing remain device-resident.
-            if (!_fullDecodeEnabled || _fdSpecSessionActive
-                || (_backend != BackendType.GgmlCuda && _backend != BackendType.GgmlMetal
-                    && _backend != BackendType.GgmlVulkan))
-                return false;
+            if (!_fullDecodeEnabled)
+                return FdBail("disabled via TS_QWEN35_FULL_DECODE=0");
+            if (_fdSpecSessionActive)
+                return FdBail("speculative/MTP session active (host GDN state is authoritative)");
+            if (_backend != BackendType.GgmlCuda && _backend != BackendType.GgmlMetal
+                && _backend != BackendType.GgmlVulkan)
+                return FdBail($"backend {_backend} has no fused whole-model decode graph");
             if (_fdUnsupported)
                 return false;
             if (!tokenInput &&

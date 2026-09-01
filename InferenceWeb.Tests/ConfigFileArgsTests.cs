@@ -139,12 +139,14 @@ public class ConfigFileArgsTests : IDisposable
         "paged-kv-ram-mb", "paged-kv-ssd-dir", "paged-kv-ssd-mb", "paged-kv-quant-bits",
         "paged-kv-redis-url", "paged-kv-redis-ttl", "redis-url",
         "cpu-moe", "n-cpu-moe", "cpu-moe-threads", "offload-cpu",
-        "mtp-spec", "no-mtp-spec", "mtp-draft", "mtp-pmin", "mtp-draft-model", "draft-model",
+        "spec", "no-spec", "spec-type", "spec-draft", "spec-pmin", "draft-model",
         "qwen-image-vae", "qwen-image-vl", "qwen-image-mmproj", "qwen-image-lora",
         "video-vae", "video-text-encoder", "video-te", "video-dit2", "audio-vae",
         "video-width", "video-height", "video-steps", "video-mode", "video-frames", "fps",
         "wan-vae", "wan-te", "wan-dit2", "width", "height",
         "upload-max-mb", "upload-quota-mb", "upload-ttl-hours",
+        "skills-dir", "skill", "list-skills", "no-skills", "skills-no-discovery",
+        "skills-allow-exec", "skills-max-rounds", "skills-sandbox", "skills-allow-network",
     };
 
     [Fact]

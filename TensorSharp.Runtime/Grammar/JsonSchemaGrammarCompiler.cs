@@ -104,6 +104,24 @@ ws     ::= [ \t\n]{0,20}
             }
         }
 
+        // Patterns already reported as unenforceable. A schema is recompiled per
+        // request, so without the latch the same pattern would warn every time.
+        // No logger reaches this static compiler; Console.Error is the channel.
+        private static readonly HashSet<string> UnenforceablePatternsReported = new(StringComparer.Ordinal);
+
+        private static void WarnPatternNotEnforced(string pattern, string? reason)
+        {
+            lock (UnenforceablePatternsReported)
+            {
+                if (!UnenforceablePatternsReported.Add(pattern)) return;
+            }
+            Console.Error.WriteLine(
+                $"[JsonSchemaGrammarCompiler] Schema pattern '{pattern}' uses constructs constrained decoding " +
+                $"cannot enforce ({reason ?? "unsupported construct"}); this string is generated without the " +
+                "pattern constraint (validate it after generation) — the rest of the schema is still enforced. " +
+                "Reported once per pattern.");
+        }
+
         private sealed class CompileContext
         {
             private readonly JsonElement _documentRoot;
@@ -584,10 +602,14 @@ ws     ::= [ \t\n]{0,20}
                 }
 
                 if (schema.TryGetProperty("pattern", out JsonElement pat) &&
-                    pat.ValueKind == JsonValueKind.String &&
-                    RegexToGbnf.TryConvert(pat.GetString()!, out string regexBody))
+                    pat.ValueKind == JsonValueKind.String)
                 {
-                    return AddRule(baseName, $"\"\\\"\" {regexBody} \"\\\"\" ws");
+                    string patternText = pat.GetString()!;
+                    if (RegexToGbnf.TryConvert(patternText, out string regexBody, out string? why))
+                        return AddRule(baseName, $"\"\\\"\" {regexBody} \"\\\"\" ws");
+                    if (patternText.Length > 0)
+                        WarnPatternNotEnforced(patternText, why);
+                    // fall through: the string is still bounded by min/maxLength.
                 }
 
                 int min = ReadInt(schema, "minLength", 0);

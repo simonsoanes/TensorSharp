@@ -51,6 +51,23 @@ namespace TensorSharp.Runtime
         private readonly Thread _writerThread;
         private volatile bool _disposed;
 
+        private const int ReadFailureLogInterval = 100;
+        private long _readFailures;
+
+        // Logged on the first read failure and every ReadFailureLogInterval after,
+        // so repeated failures (tier not serving reuse) stay visible without
+        // per-lookup spam.
+        private void NoteReadFailure(KvBlockHash hash, string reason, Exception ex = null)
+        {
+            long count = Interlocked.Increment(ref _readFailures);
+            if (count != 1 && count % ReadFailureLogInterval != 0)
+                return;
+
+            _logger.LogWarning(ex,
+                "SSD KV tier failed to read block {Hash} ({Reason}); the block is recomputed instead, so the SSD tier is not serving KV reuse for it. {Count} read failure(s) so far; logged first, then every {Interval}.",
+                hash, reason, count, ReadFailureLogInterval);
+        }
+
         public SsdKvBlockTier(string rootDir, long maxBytes, string fingerprint, ILogger logger = null)
         {
             if (string.IsNullOrWhiteSpace(rootDir))
@@ -105,6 +122,7 @@ namespace TensorSharp.Runtime
                 Span<byte> header = stackalloc byte[HeaderSize];
                 if (ReadExact(fs, header) != HeaderSize)
                 {
+                    NoteReadFailure(hash, "truncated header");
                     payload = null;
                     return false;
                 }
@@ -116,6 +134,7 @@ namespace TensorSharp.Runtime
 
                 if (magic != Magic || version != FormatVersion || fingerprint != _fingerprintHash || payloadLength <= 0 || payloadLength > int.MaxValue)
                 {
+                    NoteReadFailure(hash, "header mismatch (corrupt file or written by a different model/config)");
                     payload = null;
                     return false;
                 }
@@ -124,6 +143,7 @@ namespace TensorSharp.Runtime
                 int read = ReadExact(fs, payload);
                 if (read != payloadLength)
                 {
+                    NoteReadFailure(hash, "truncated payload");
                     payload = null;
                     return false;
                 }
@@ -131,7 +151,7 @@ namespace TensorSharp.Runtime
             }
             catch (IOException ex)
             {
-                _logger.LogWarning(ex, "Failed to read SSD KV cache block {Hash}", hash);
+                NoteReadFailure(hash, $"I/O error: {ex.Message}", ex);
                 payload = null;
                 return false;
             }
@@ -278,41 +298,70 @@ namespace TensorSharp.Runtime
             if (!Directory.Exists(_rootDir))
                 return;
 
+            int skipped = 0;
+            int total = 0;
             foreach (string subDir in Directory.EnumerateDirectories(_rootDir))
             {
                 foreach (string file in Directory.EnumerateFiles(subDir, "*.kvb"))
                 {
+                    total++;
                     KvBlockHash hash;
                     try
                     {
                         string stem = Path.GetFileNameWithoutExtension(file);
                         if (stem.Length != 32)
+                        {
+                            skipped++;
                             continue;
+                        }
                         byte[] bytes = Convert.FromHexString(stem);
                         if (bytes.Length != 16)
+                        {
+                            skipped++;
                             continue;
+                        }
                         hash = KvBlockHash.FromBytes(bytes);
                     }
                     catch
                     {
+                        skipped++;
                         continue;
                     }
 
                     long length;
                     try { length = new FileInfo(file).Length; }
-                    catch { continue; }
-                    if (length < HeaderSize)
+                    catch
+                    {
+                        skipped++;
                         continue;
+                    }
+                    if (length < HeaderSize)
+                    {
+                        skipped++;
+                        continue;
+                    }
 
                     // Validate header so leftovers from a different model don't poison the index.
                     if (!ValidateHeader(file))
+                    {
+                        skipped++;
                         continue;
+                    }
 
                     var entry = new DiskEntry(hash, length);
                     var node = _lru.AddLast(entry);
                     _index[hash] = node;
                     _residentBytes += length;
                 }
+            }
+
+            // One line per startup scan: skipped files stay on disk but will
+            // never serve KV reuse, so the operator should know they exist.
+            if (skipped > 0)
+            {
+                _logger.LogWarning(
+                    "SSD KV tier reindex skipped {Skipped} of {Total} block file(s) under {Root} (corrupt, truncated, or written by a different model/config); those blocks are not indexed and will not serve KV reuse.",
+                    skipped, total, _rootDir);
             }
         }
 

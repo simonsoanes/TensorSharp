@@ -41,6 +41,71 @@ namespace TensorSharp.Models
         private int _pagedNumBlocks;
         private int _pagedBlockSize;
 
+        /// <summary>
+        /// The batched path is built around the fused attn_qkv projection. A
+        /// checkpoint whose q/k/v could not be fused — the K-quant Qwen2-style GGUFs
+        /// quantize them with different block types — CAN run the split fallback
+        /// below, but on Metal each split projection thrashes residency setup badly
+        /// enough that a 7B "hangs" for minutes per turn. The planner routes such
+        /// models to the single-sequence fused path instead, which has handled split
+        /// weights since before batching existed.
+        /// </summary>
+        public bool BatchedForwardAvailable =>
+            IsTensorParallel
+                ? SupportsBatchedTensorParallelGeometry(TpDegree, GlobalTpDegree)
+                  && HasRequiredBatchedTensorParallelWeights(
+                      Config.NumLayers, HasCompleteTensorParallelShard)
+                : _quantWeights.ContainsKey("blk.0.attn_qkv.weight")
+                  || _weights.ContainsKey("blk.0.attn_qkv.weight");
+
+        /// <summary>
+        /// The paged TP forward currently drives only this process's local ranks.
+        /// Unlike <see cref="ModelBase.Forward"/>, it has no distributed control
+        /// message that makes worker nodes enter the matching forward, so advertising
+        /// it when the global group is larger than the local group would deadlock at
+        /// the first cross-node AllReduce. Keep distributed TP on the ordinary
+        /// <c>Forward</c> path until a batched worker protocol is implemented.
+        /// </summary>
+        internal static bool SupportsBatchedTensorParallelGeometry(int localDegree, int globalDegree)
+            => localDegree > 0 && localDegree == globalDegree;
+
+        /// <summary>
+        /// Construction attempts to shard every projection used by both TP forward
+        /// paths, but the mixed-quant fallback deliberately returns without throwing
+        /// when a source tensor is absent or incompatible. Do not advertise the
+        /// batched route unless all four sharded projections consumed per layer are
+        /// actually present; otherwise the first scheduled batch fails late with a
+        /// <see cref="KeyNotFoundException"/> instead of staying on ordinary forward.
+        /// </summary>
+        internal static bool HasRequiredBatchedTensorParallelWeights(
+            int numLayers, Func<string, bool> hasCompleteShard)
+        {
+            if (numLayers <= 0 || hasCompleteShard == null)
+                return false;
+
+            for (int layer = 0; layer < numLayers; layer++)
+            {
+                string prefix = $"blk.{layer}.";
+                if (!hasCompleteShard(prefix + "attn_qkv.weight")
+                    || !hasCompleteShard(prefix + "attn_output.weight")
+                    || !hasCompleteShard(prefix + "ffn_gate_up.weight")
+                    || !hasCompleteShard(prefix + "ffn_down.weight"))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private bool HasCompleteTensorParallelShard(string weightName)
+        {
+            if (_tpQuantWeights.TryGetValue(weightName, out var quantShards))
+                return quantShards.Length == TpDegree && Array.TrueForAll(quantShards, shard => shard != null);
+            if (_tpWeights.TryGetValue(weightName, out var tensorShards))
+                return tensorShards.Length == TpDegree && Array.TrueForAll(tensorShards, shard => shard != null);
+            return false;
+        }
+
         public IReadOnlyList<float[]> ForwardBatch(BatchedForwardContext ctx)
         {
             if (ctx == null) throw new ArgumentNullException(nameof(ctx));
@@ -120,22 +185,55 @@ namespace TensorSharp.Models
                 Tensor normed = RMSNormOp(hiddenStates, wn[0]);
                 hiddenStates.Dispose();
 
-                // Q/K/V projection.
+                // Q/K/V projection. Not every checkpoint HAS a fused attn_qkv: the
+                // K-quant GGUFs of Qwen2-style models quantize q, k and v with
+                // different block types, which FuseQKVWeights cannot merge — the legacy
+                // path has always fallen back to the split projections, and this path
+                // NRE'd instead (a qwen2vl chat died on its very first batched step).
+                Tensor q, k, v;
                 Tensor qkv = LinearForward(normed, wn[1]);
+                if (qkv != null)
+                {
+                    // Qwen2 / Qwen2.5-VL variant: a bias on the fused projection,
+                    // applied exactly as the legacy path applies it.
+                    if (_hasQkvBias && _weights.TryGetValue(wn[8], out var qkvBias))
+                        AddRowBiasInPlace(qkv, qkvBias, numTokens);
+
+                    using (var qView = qkv.Narrow(1, 0, qDim))
+                        q = Ops.NewContiguous(qView);
+                    using (var kView = qkv.Narrow(1, qDim, kDim))
+                        k = Ops.NewContiguous(kView);
+                    using (var vView = qkv.Narrow(1, qDim + kDim, kDim))
+                        v = Ops.NewContiguous(vView);
+                    qkv.Dispose();
+                }
+                else
+                {
+                    string prefix = $"blk.{layer}.";
+                    q = LinearForward(normed, prefix + "attn_q.weight");
+                    k = LinearForward(normed, prefix + "attn_k.weight");
+                    v = LinearForward(normed, prefix + "attn_v.weight");
+                    if (q == null || k == null || v == null)
+                        throw new InvalidOperationException(
+                            $"Layer {layer} has neither a fused attn_qkv weight nor separate attn_q/k/v weights.");
+
+                    // The fused bias is laid out Q|K|V, so slice it the same way.
+                    if (_hasQkvBias && _weights.TryGetValue(wn[8], out var splitBias))
+                    {
+                        using (var qb = splitBias.Narrow(0, 0, qDim)) AddRowBiasInPlace(q, qb, numTokens);
+                        using (var kb = splitBias.Narrow(0, qDim, kDim)) AddRowBiasInPlace(k, kb, numTokens);
+                        using (var vb = splitBias.Narrow(0, qDim + kDim, kDim)) AddRowBiasInPlace(v, vb, numTokens);
+                    }
+                }
                 normed.Dispose();
 
-                Tensor q, k, v;
-                using (var qView = qkv.Narrow(1, 0, qDim))
-                    q = Ops.NewContiguous(qView);
-                using (var kView = qkv.Narrow(1, qDim, kDim))
-                    k = Ops.NewContiguous(kView);
-                using (var vView = qkv.Narrow(1, qDim + kDim, kDim))
-                    v = Ops.NewContiguous(vView);
-                qkv.Dispose();
-
-                // Q-norm / K-norm (per-head RMSNorm).
-                q = ApplyQKNormBatched(q, wn[2], numTokens, numHeads, headDim);
-                k = ApplyQKNormBatched(k, wn[3], numTokens, numKvHeads, headDim);
+                // Q-norm / K-norm (per-head RMSNorm). Qwen2-style checkpoints have no
+                // such weights, and the legacy path already skips them there.
+                if (_hasQkNorm)
+                {
+                    q = ApplyQKNormBatched(q, wn[2], numTokens, numHeads, headDim);
+                    k = ApplyQKNormBatched(k, wn[3], numTokens, numKvHeads, headDim);
+                }
 
                 // Per-token RoPE on Q and K via Ops.RoPEEx (which supports
                 // an arbitrary positions tensor).
@@ -293,10 +391,10 @@ namespace TensorSharp.Models
                     Array.Copy(oldV[l], _pagedV[l], copyLen);
                 }
             }
-            _pagedNumBlocks = targetBlocks;
-            _pagedBlockSize = blockSize;
-        }
-
+            _pagedNumBlocks = targetBlocks;
+            _pagedBlockSize = blockSize;
+        }
+
         /// <summary>The model can copy a solo sequence's linear K/V history
         /// into paged storage (where <c>ForwardBatch</c> reads from). This is the
         /// gate on the N=1 SingleSequenceFused fast path: without it every solo

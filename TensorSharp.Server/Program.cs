@@ -17,6 +17,9 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using TensorSharp.GGML;
 using TensorSharp.Runtime.Logging;
+using System.Collections.Generic;
+using TensorSharp.AgentHost.CodeExec;
+using TensorSharp.AgentHost.Skills;
 using TensorSharp.Runtime;
 using TensorSharp.Server;
 using TensorSharp.Server.Endpoints;
@@ -65,7 +68,105 @@ if (ServerUsage.IsListGpusRequested(args))
 }
 
 string baseDirectory = AppContext.BaseDirectory;
-ServerHostingOptions hostingOptions = ServerOptionsBuilder.Build(args, baseDirectory);
+
+// Parsed BEFORE the server's own options and removed from the argument list, because
+// ServerOptionsBuilder.ParseArgs rejects any flag it does not recognise — a deliberate
+// guard against typos that would otherwise be ignored. Feature-owned flags therefore have
+// to be consumed first rather than handed to it.
+//
+// Running code the MODEL wrote is its own decision, separate from skills: a skill's
+// script is a file an operator put on disk and can read first, this is not.
+// The retired spellings are checked against the ORIGINAL line, because Parse consumes
+// what it recognises and a retired flag is by definition not recognised.
+string[] originalArgs = (string[])args.Clone();
+CodeExecOptions codeExecOptions;
+List<string> remainingArgs;
+try
+{
+    codeExecOptions = CodeExecOptions.Parse(args, out List<string> parsedRemaining);
+    remainingArgs = parsedRemaining;
+}
+catch (ArgumentException ex)
+{
+    Console.Error.WriteLine("Configuration error: " + ex.Message);
+    Environment.ExitCode = 1;
+    return;
+}
+codeExecOptions.ApplyEnvironment();
+
+// Consume them, exactly as the config-file expansion above rewrites `args`. A dozen
+// helpers downstream each re-parse the array, and every one of them would reject an
+// unrecognised flag; filtering once here is what keeps that guard useful for real typos.
+args = remainingArgs.ToArray();
+
+ServerHostingOptions hostingOptions;
+try
+{
+    // Removed flag spellings (e.g. --mtp-spec) would otherwise die in the
+    // unknown-option trap with no pointer; reject them first so the error names
+    // the surviving spelling. Then let Build validate everything else.
+    TensorSharp.Runtime.Speculative.SpeculativeCliFlags.RejectRemoved(args);
+    // Same reason, for the code-execution family: --code-exec-packages and
+    // --code-exec-languages could not be enforced once the tool surface became a shell,
+    // so they are refused by name with a pointer at what replaced them rather than
+    // being silently ignored.
+    if (CodeExecOptions.RejectRemoved(originalArgs) is { } removedCodeExecFlag)
+        throw new ArgumentException(removedCodeExecFlag);
+    hostingOptions = ServerOptionsBuilder.Build(args, baseDirectory);
+}
+catch (ArgumentException ex)
+{
+    // A configuration mistake is the operator's to fix; a stack trace buries
+    // the one line they need.
+    Console.Error.WriteLine("Configuration error: " + ex.Message);
+    Environment.ExitCode = 1;
+    return;
+}
+codeExecOptions.ArtifactUriPrefix = CodeArtifactEndpoints.RoutePrefix;
+codeExecOptions.ScratchDirectory ??= Path.Combine(baseDirectory, "code-scratch");
+// --code-exec-unconfined used to be refused here outright, "available on
+// TensorSharp.Cli only". That was not a policy so much as a platform outage.
+//
+// The reasoning was sound for a server reachable from elsewhere, but it was applied
+// unconditionally, and on Windows there IS no confining sandbox to fall back to: the
+// job object bounds a process tree and cannot restrict a single file or socket, so
+// ShellRunner.CanRun was false forever and --code-exec was a flag that did nothing at
+// all. An operator running the server on their own desktop had no way to say yes,
+// while --skills-allow-exec — which lets the model run any script in any installed
+// skill with this process's privileges, the same class of decision — was accepted on
+// the same command line with a warning. One of the two had to move, and refusing the
+// weaker one while permitting the stronger was the wrong way round.
+//
+// So it is accepted and said plainly, which is also what the references this host is
+// modelled on do: neither Codex nor Claude Code sandboxes on Windows, and both make
+// the operator opt in explicitly instead of pretending the platform offers isolation
+// it does not have. What is NOT relaxed is the reporting: SandboxNote below states the
+// gap in the startup log and ShellRunner repeats it in every tool result.
+if (codeExecOptions.Unconfined)
+{
+    Console.Error.WriteLine(
+        $"{CodeExecOptions.UnconfinedFlag} is set: commands this model writes will run with this "
+        + "process's privileges — full filesystem access, and the network. That is a decision about "
+        + "the machine this server runs on, so do not leave it on for a server others can reach.");
+}
+
+// --list-skills answers "what does this deployment have?" without starting the
+// host or loading a model, and prints the LOAD ERRORS too — a skill whose
+// SKILL.md will not parse is otherwise simply absent from every listing, which
+// is the hardest kind of problem for its author to diagnose.
+if (SkillHostOptions.Parse(args).ListOnly)
+{
+    var listing = new SkillRegistry(new SkillRegistryOptions
+    {
+        Roots = hostingOptions.SkillDirectories,
+        InstallDirectory = hostingOptions.SkillsEnabled
+            ? Path.Combine(baseDirectory, SkillHostOptions.DefaultDirectoryName)
+            : null,
+    });
+    ServerUsage.PrintSkills(Console.Out, listing, hostingOptions.SkillsEnabled);
+    return;
+}
+
 LogLevel resolvedLogLevel = LoggingSetup.ResolveMinimumLevel();
 string configuredBackendInput = ServerOptionsBuilder.ReadConfiguredBackendInput(args);
 // Translate --paged-kv* flags into env vars before startup logging reads
@@ -80,7 +181,7 @@ bool redisFlagsApplied = ServerOptionsBuilder.ApplyRedisCliFlags(args);
 // (TS_QWEN35_BATCHED). Must run before InferenceEngine constructs its
 // BatchExecutor and the per-model batched-paged adapters initialise.
 bool continuousBatchingFlagApplied = ServerOptionsBuilder.ApplyContinuousBatchingCliFlag(args);
-// Translate --mtp-spec / --mtp-draft / --mtp-pmin into the TS_MTP_* env vars
+// Translate --spec / --spec-draft / --spec-pmin / --draft-model into the env vars
 // read by SchedulerConfig.FromEnvironment when the engine is constructed.
 bool specFlagsApplied = ServerOptionsBuilder.ApplySpeculativeCliFlags(args);
 // Translate --qwen-image-vae / --qwen-image-vl / --qwen-image-mmproj into the
@@ -133,6 +234,67 @@ var uploadPolicy = new UploadStoragePolicy(
 builder.Services.AddSingleton(uploadPolicy);
 if (hostingOptions.UploadTtl.HasValue)
     builder.Services.AddHostedService<UploadCleanupService>();
+// Agent Skills, constructed eagerly for the same reason as the upload policy: the
+// constructor walks the configured roots once, so the on-disk state seeds the
+// in-memory index and the first chat request never pays for the scan.
+//
+// Uploads land in ONE dedicated directory next to the binary, never in a root the
+// operator named with --skills-dir. That separation is what makes DELETE safe: a
+// skill discovered under an operator root is refused by SkillRegistry.Remove, so
+// pointing --skills-dir at a checkout of somebody's skills repository cannot turn
+// the management API - or the delete button in the Web UI - into a way to erase it.
+// The registry scans the install directory first, so an uploaded fix shadows a stale
+// copy of the same name in a read-only root rather than being shadowed by it.
+var skillRegistry = new SkillRegistry(
+    new SkillRegistryOptions
+    {
+        Roots = hostingOptions.SkillDirectories,
+        InstallDirectory = hostingOptions.SkillsEnabled
+            ? Path.Combine(baseDirectory, SkillHostOptions.DefaultDirectoryName)
+            : null,
+    });
+builder.Services.AddSingleton(skillRegistry);
+builder.Services.AddSingleton<SkillsAdapter>();
+
+// Where a command's output files are kept so a user can download them.
+//
+// Deliberately NOT the scratch directory the run itself used: that one is deleted the
+// moment the call returns, which is right for an interpreter and its installed packages
+// and wrong for the PDF the user asked the model to produce. Registered as null when the
+// feature is off, so the download route can answer "not enabled" rather than 404 and
+// leave the caller guessing.
+CodeArtifactStore? codeArtifactStore = codeExecOptions.Enabled
+    ? new CodeArtifactStore(
+        codeExecOptions.ArtifactDirectory
+            ?? Path.Combine(baseDirectory, "code-artifacts"),
+        new CodeArtifactLimits())
+    : null;
+builder.Services.AddSingleton(_ => codeArtifactStore!);
+
+// One persistent execution workspace per chat session: the files, installed packages
+// and working directory that the shell tool and skill scripts share for the length of a
+// conversation — generate.pptx in one step, validate it in the next. Registered null
+// when code execution is off. A restart orphans every session, so old workspaces are
+// swept at startup rather than leaked.
+SessionWorkspaceManager? workspaceManager = codeExecOptions.Enabled
+    ? new SessionWorkspaceManager(codeExecOptions.ScratchDirectory!)
+    : null;
+workspaceManager?.SweepOrphans();
+builder.Services.AddSingleton(_ => workspaceManager!);
+
+// The thing that answers a shell call. Registered as null when the feature is off, so
+// every adapter can take it unconditionally and SkillRequestPlan simply does not offer
+// the tool — rather than each adapter having to know whether the feature exists.
+// Built lazily so the runner gets a real logger: its codeexec.ran line (shell, exit
+// code, sandbox, elapsed) is the one place a failed run is diagnosable after the fact.
+builder.Services.AddSingleton<ICodeRunner>(sp => codeExecOptions.Enabled
+    ? new CodeRunnerAdapter(
+        new ShellRunner(
+            codeExecOptions,
+            sp.GetRequiredService<ILoggerFactory>().CreateLogger("TensorSharp.Server.CodeExec"),
+            codeArtifactStore),
+        codeExecOptions)
+    : null!);
 builder.Services.AddSingleton<ModelService>();
 builder.Services.AddSingleton<InferenceQueue>();
 builder.Services.AddSingleton<SessionManager>();
@@ -182,6 +344,23 @@ startupLogger.LogInformation(LogEventIds.LoggingInitialized,
     "Logging initialized: minimumLevel={MinimumLevel} fileLogging={FileLogging} logDir={LogDir}",
     resolvedLogLevel, hostingOptions.FileLoggingEnabled,
     hostingOptions.FileLoggingEnabled ? hostingOptions.LogDirectory : "(disabled)");
+
+// --code-exec was asked for but the runner would refuse every call (no usable
+// sandbox on this host). Said once at startup rather than discovered one request
+// at a time: the shell tool is simply never offered to the model, and nothing else in
+// any response says why.
+if (codeExecOptions.Enabled)
+{
+    ICodeRunner startupCodeRunner = app.Services.GetRequiredService<ICodeRunner>();
+    if (!startupCodeRunner.CanRun)
+    {
+        startupLogger.LogWarning(LogEventIds.HostConfiguration,
+            "--code-exec is set but code execution is unavailable: {Reason}. The shell tool will NOT be offered to the model; " +
+            "requests are answered without running code. Install an OS sandbox to enable it " +
+            "(Linux: bubblewrap/bwrap; macOS: sandbox-exec ships with the OS).",
+            startupCodeRunner.UnavailableReason);
+    }
+}
 
 if (pagedKvFlagsApplied)
 {
@@ -262,6 +441,71 @@ if (hostingOptions.UploadMaxFileBytes != UploadStoragePolicy.DefaultMaxFileBytes
         uploadPolicy.UsedBytes / (1024 * 1024));
 }
 
+if (hostingOptions.SkillsEnabled && (skillRegistry.Skills.Count > 0 || skillRegistry.Errors.Count > 0))
+{
+    startupLogger.LogInformation(LogEventIds.SkillsScanned,
+        "Agent skills: loaded={SkillCount} errors={ErrorCount} roots={Roots} scripts={AllowScripts} maxRounds={MaxRounds}",
+        skillRegistry.Skills.Count,
+        skillRegistry.Errors.Count,
+        string.Join(", ", skillRegistry.Roots),
+        hostingOptions.SkillsAllowScripts,
+        // The EFFECTIVE cap, not the configured one. A host that offers code execution
+        // raises its own default, and printing 8 while the loop enforces 24 sends an
+        // operator reading their own startup log looking for a bug that is not there.
+        hostingOptions.SkillsMaxRoundsSpecified
+            ? hostingOptions.SkillsMaxRounds
+            : Math.Max(hostingOptions.SkillsMaxRounds,
+                codeExecOptions.Enabled ? SkillHostOptions.CodeExecutionRounds : 0));
+    foreach (var skillError in skillRegistry.Errors)
+    {
+        startupLogger.LogWarning(LogEventIds.SkillRejected,
+            "Agent skill not loaded: {Path} - {Reason}", skillError.Path, skillError.Message);
+    }
+    if (hostingOptions.SkillsAllowScripts)
+    {
+        // Whether the flag can actually DO anything here, said at startup rather than
+        // only inside a tool result the model may never surface.
+        //
+        // The startup line above prints scripts=True from the flag alone. On Windows
+        // that was a lie in the one direction that costs a session: the default
+        // --skills-sandbox required cannot be satisfied by a job object, which confines
+        // no file and no socket, so every skills_run refused - and the only place that
+        // refusal appeared was the tool result, where a model is free to summarise it
+        // as "done". The reported failure did exactly that: four rounds, then "the
+        // README has been converted into a slide deck", with nothing on disk.
+        //
+        // --code-exec already had this line. Skills did not.
+        var probe = new SkillScriptRunner(new SkillScriptRunnerOptions
+        {
+            Sandbox = hostingOptions.SkillsSandbox,
+        });
+        if (!probe.CanRun)
+        {
+            startupLogger.LogWarning(LogEventIds.HostConfiguration,
+                "--skills-allow-exec is set but skill scripts cannot run on this host: {Reason}",
+                probe.UnavailableReason);
+        }
+        else
+        {
+            // Worth its own line at Warning: this is the one setting that turns a skill
+            // upload into code execution, and an operator who set it by copying a command
+            // line should see it said plainly at every start.
+            startupLogger.LogWarning(LogEventIds.HostConfiguration,
+                "--skills-allow-exec is set: the model may RUN scripts bundled with any installed skill, " +
+                "with this process's privileges. Do not leave this on for a server that accepts skill uploads." +
+                (probe.Sandbox is { } box && box.Capabilities.Gaps().Count > 0
+                    ? " This host's sandbox (" + box.Name + ") does not confine: "
+                      + string.Join("; ", box.Capabilities.Gaps()) + "."
+                    : string.Empty));
+        }
+    }
+}
+else if (!hostingOptions.SkillsEnabled)
+{
+    startupLogger.LogInformation(LogEventIds.HostConfiguration,
+        "Agent skills disabled (--no-skills / TS_NO_SKILLS): /v1/skills and /api/skills are not mapped");
+}
+
 StartupBanner.EmitBackendFallback(startupLogger, hostingOptions, configuredBackendInput);
 
 // Outermost application middleware, so it handles an escaping exception before
@@ -301,6 +545,10 @@ app.UseStaticFiles(UploadContentPolicy.BuildStaticFileOptions(hostingOptions.Upl
 app.MapHealthEndpoints(app.Environment, hostingOptions.WebUiEnabled);
 app.MapSessionEndpoints();
 app.MapUploadEndpoints();
+if (hostingOptions.SkillsEnabled)
+    app.MapSkillEndpoints();
+if (codeExecOptions.Enabled)
+    app.MapCodeArtifactEndpoints();
 app.MapWebUiEndpoints();
 app.MapOllamaEndpoints();
 app.MapOpenAIEndpoints();

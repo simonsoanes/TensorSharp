@@ -7,6 +7,7 @@
 //
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
+using System;
 using System.Collections.Generic;
 
 namespace TensorSharp.Runtime
@@ -147,6 +148,61 @@ namespace TensorSharp.Runtime
             TopP = 0.9f,
             MinP = 0.05f,
         };
+
+        /// <summary>
+        /// This config adjusted for a turn that is writing CODE, leaving every value
+        /// somebody actually chose exactly as it is.
+        ///
+        /// <para>
+        /// <b>The repetition penalty is the part that matters, and it is a correctness
+        /// fix rather than a preference.</b> <see cref="RepetitionPenalty"/> 1.1 over a
+        /// <see cref="PenaltyLastN"/> window of 64 tokens is two to four lines of Python:
+        /// every fifth line of a loop body is penalised against the indentation, the
+        /// <c>self.</c>, the <c>return</c> and the closing delimiters of the four above
+        /// it. Code is legitimately repetitive in exactly the tokens that carry its
+        /// structure, so penalising them is a mechanism for producing the malformed
+        /// indentation and the drifted near-duplicate rewrites that the patcher and the
+        /// rewrite watch exist to catch downstream. Neither reference implementation
+        /// applies a repetition penalty to code: the Agents SDK's
+        /// <c>ModelSettings.frequency_penalty</c> and <c>presence_penalty</c> both default
+        /// to <c>None</c> and it sends nothing at all.
+        /// </para>
+        /// <para>
+        /// The defaults being replaced are Ollama's chat defaults — <c>temperature=0.8,
+        /// top_k=40, top_p=0.9</c> — inherited for API compatibility and never chosen for
+        /// code. That is the whole justification: this is not a claim that 0.2 is the one
+        /// true temperature, it is the removal of a chat-tuned default from a task that is
+        /// not chat.
+        /// </para>
+        /// <para>
+        /// <b>Only values still at their built-in default are touched.</b> A temperature
+        /// that differs from <see cref="Default"/> was chosen by somebody — a client, an
+        /// operator's flag, a config file — and a host-side preference must not overrule a
+        /// deliberate request. This is the same rule the operator's own pinning logic
+        /// states: anything left at the built-in default "is never fighting an operator
+        /// decision".
+        /// </para>
+        /// </summary>
+        /// <param name="temperature">
+        /// The temperature to use for code, or null to leave temperature alone and adjust
+        /// only the penalty.
+        /// </param>
+        public SamplingConfig ForCodingTurn(float? temperature)
+        {
+            var builtIn = new SamplingConfig();
+            SamplingConfig adjusted = Clone();
+
+            if (temperature is { } wanted
+                && Math.Abs(Temperature - builtIn.Temperature) < 0.0001f)
+            {
+                adjusted.Temperature = wanted;
+            }
+
+            if (Math.Abs(RepetitionPenalty - builtIn.RepetitionPenalty) < 0.0001f)
+                adjusted.RepetitionPenalty = 1.0f;
+
+            return adjusted;
+        }
 
         /// <summary>
         /// Returns a deep copy of this config. Useful when callers want to seed

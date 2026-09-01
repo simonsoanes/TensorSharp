@@ -23,7 +23,7 @@ namespace TensorSharp.Models
     /// head ships separately as <c>gemma4-assistant</c> and has to be loaded
     /// onto the target before <see cref="IDraftHead.HasDraftHead"/> turns on.
     ///
-    /// Shared by the CLI and the server so a <c>--spec-draft-model</c> means the
+    /// Shared by the CLI and the server so a <c>--draft-model</c> means the
     /// same thing in both. It used to live only in the server, which made the
     /// CLI accept the flag and silently ignore it.
     /// </summary>
@@ -37,7 +37,7 @@ namespace TensorSharp.Models
             string path = Environment.GetEnvironmentVariable(SpeculationEnvVars.DraftModel);
             if (string.IsNullOrWhiteSpace(path))
                 path = Environment.GetEnvironmentVariable(SpeculationEnvVars.LegacyDraftModel);
-            return string.IsNullOrWhiteSpace(path) ? null : path;
+            return string.IsNullOrWhiteSpace(path) ? null : path.Trim();
         }
 
         /// <summary>
@@ -54,6 +54,20 @@ namespace TensorSharp.Models
             string draftPath = ConfiguredDraftHeadPath();
             if (draftPath == null)
                 return true;
+
+            // Block drafters have to participate in model construction so their
+            // weights are included in device placement/layer splitting. If the
+            // factory already produced a usable one (DSpark or DFlash), the
+            // attach-after-load phase is complete. Without this guard a valid
+            // DSpark is misrouted as a Gemma-style head and logged as disabled.
+            if (model is IDraftHead
+                {
+                    HasDraftHead: true,
+                    DraftHeadKind: DraftHeadKind.Block,
+                })
+            {
+                return true;
+            }
 
             if (!File.Exists(draftPath))
             {
@@ -98,7 +112,7 @@ namespace TensorSharp.Models
                 // separate draft file (Qwen 3.6 embeds its NextN block in the
                 // trunk). Say so rather than leave the operator wondering why
                 // their flag was ignored.
-                error = $"--spec-draft-model was given but the loaded model architecture "
+                error = $"--draft-model was given but the loaded model architecture "
                         + $"'{model?.Config?.Architecture ?? "unknown"}' does not use a separate draft GGUF.";
                 return false;
             }
@@ -133,10 +147,24 @@ namespace TensorSharp.Models
                 return string.Equals(probe.GetString("general.architecture"),
                     DFlashConfig.ArchName, StringComparison.Ordinal);
             }
-            catch
+            catch (Exception ex)
             {
+                // Routing is unchanged (per-token draft head), but say the probe
+                // failed: a truncated/unreadable DFlash file would otherwise be
+                // misclassified without a trace. Once per path.
+                bool firstForPath;
+                lock (_probeFailureWarned)
+                    firstForPath = _probeFailureWarned.Add(path);
+                if (firstForPath)
+                {
+                    Console.Error.WriteLine(
+                        $"WARNING: Could not read general.architecture from draft model {path} " +
+                        $"({ex.Message}); treating it as a per-token draft head. Reported once.");
+                }
                 return false;
             }
         }
+
+        private static readonly System.Collections.Generic.HashSet<string> _probeFailureWarned = new(StringComparer.Ordinal);
     }
 }

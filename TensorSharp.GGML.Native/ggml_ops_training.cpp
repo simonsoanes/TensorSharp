@@ -137,14 +137,14 @@ namespace {
             upload_binding(probs_binding, probs_desc.data, probs_binding.raw_bytes);
         upload_binding(labels_binding, labels.data(), labels_binding.raw_bytes);
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed.");
             return 0;
         }
 
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(loss_tensor, loss_value, 0, sizeof(float));
 
         clear_last_error();
@@ -321,14 +321,14 @@ namespace {
         upload_binding(labels_binding, labels.data(), labels_binding.raw_bytes);
         ggml_backend_tensor_set(loss_grad_binding.storage, &loss_gradient, 0, sizeof(float));
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed.");
             return 0;
         }
 
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         if (!use_zero_copy)
             ggml_backend_tensor_get(grad_binding.storage, grad_desc.data, 0, grad_binding.raw_bytes);
 
@@ -508,16 +508,16 @@ namespace {
         }
         ggml_backend_tensor_set(adamw_params_tensor, adamw_params.data(), 0, adamw_params.size() * sizeof(float));
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed.");
             return 0;
         }
 
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_memset(gradient_binding.storage, 0, 0, gradient_binding.raw_bytes);
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
 
         if (!use_zero_copy)
         {

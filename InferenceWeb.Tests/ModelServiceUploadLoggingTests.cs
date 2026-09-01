@@ -273,6 +273,9 @@ public class ModelServiceUploadLoggingTests
                     ImagePaths = Enumerable.Range(1, 6).Select(i => $"frame{i:D2}.png").ToList(),
                     AudioPaths = new List<string> { "/uploads/track.mp3" },
                     TextFilePaths = new List<string> { "/uploads/script.txt" },
+                    TextFileNames = new List<string> { "script.txt" },
+                    CacheControl = new CacheControlMarker(),
+                    ContentCacheBreakpoints = new List<int> { 8 },
                 },
             };
 
@@ -280,6 +283,9 @@ public class ModelServiceUploadLoggingTests
 
             Assert.Equal(new[] { "/uploads/track.mp3" }, prepared[0].AudioPaths);
             Assert.Equal(new[] { "/uploads/script.txt" }, prepared[0].TextFilePaths);
+            Assert.Equal(new[] { "script.txt" }, prepared[0].TextFileNames);
+            Assert.NotNull(prepared[0].CacheControl);
+            Assert.Equal(new[] { 8 }, prepared[0].ContentCacheBreakpoints);
         }
         finally
         {

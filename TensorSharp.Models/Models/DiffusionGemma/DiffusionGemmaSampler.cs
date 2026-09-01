@@ -62,6 +62,20 @@ namespace TensorSharp.Models
         //    under-utilised (small canvas / large GPU); a loss when already compute-bound.
         private readonly bool _useBatchedForward = Environment.GetEnvironmentVariable("DIFFUSION_BATCHED_FORWARD") == "1";
 
+        // One-time notice when the on-device sampling kernel rejects a step and the
+        // block continues on the host logits path (full [vocab,C] logits cross PCIe
+        // plus a host CPU sweep per step — slower).
+        private bool _deviceSampleFallbackWarned;
+
+        private void WarnDeviceSampleFallback()
+        {
+            if (_deviceSampleFallbackWarned) return;
+            _deviceSampleFallbackWarned = true;
+            Console.WriteLine("  [device-sample] on-device sampling kernel rejected the layout; " +
+                "sampling moves to the host logits path for the rest of the block (full logits readback " +
+                "per step, slower). Reported once.");
+        }
+
         public DiffusionGemmaSampler(DiffusionGemmaModel model)
         {
             _model = model;
@@ -198,6 +212,7 @@ namespace TensorSharp.Models
                     // device path rejected the layout: fall back to the host logits path for the rest of the
                     // block (self-conditioning restarts from the next step, scBuffer null this step).
                     useDeviceSample = false;
+                    WarnDeviceSampleFallback();
                 }
 
                 float[] logits;
@@ -532,6 +547,7 @@ namespace TensorSharp.Models
                                 continue;
                             }
                             useDeviceSample = false;   // kernel rejected: fall back to the host path for the rest
+                            WarnDeviceSampleFallback();
                         }
 
                         float[] lg;

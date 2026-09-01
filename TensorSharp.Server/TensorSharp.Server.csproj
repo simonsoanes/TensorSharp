@@ -28,6 +28,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\TensorSharp.Runtime\TensorSharp.Runtime.csproj" />
+    <ProjectReference Include="..\TensorSharp.AgentHost\TensorSharp.AgentHost.csproj" />
     <ProjectReference Include="..\TensorSharp.Models\TensorSharp.Models.csproj" />
     <ProjectReference Include="..\TensorSharp.Backends.GGML\TensorSharp.Backends.GGML.csproj" />
     <ProjectReference Include="..\TensorSharp.Backends.Cuda\TensorSharp.Backends.Cuda.csproj" />

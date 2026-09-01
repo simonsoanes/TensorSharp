@@ -129,7 +129,7 @@ namespace {
                 upload_binding(result_binding, result_desc.data, result_binding.raw_bytes);
         }
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed.");
@@ -249,7 +249,7 @@ namespace {
         if (!src_zero_copy)
             upload_binding(src_binding, src_desc.data, src_binding.raw_bytes);
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed.");
@@ -260,7 +260,7 @@ namespace {
         // We're about to read indices on the host, so drain any prior async work
         // before issuing the (still-blocking) tensor_get below.
         host_read_barrier();
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(arg_tensor, host_indices.data(), 0, host_indices.size() * sizeof(std::int32_t));
 
         float* result_data = static_cast<float*>(result_desc.data);
@@ -378,7 +378,7 @@ namespace {
                 upload_binding(result_binding, result_desc.data, result_binding.raw_bytes);
         }
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed.");
@@ -507,7 +507,7 @@ namespace {
                 upload_binding(result_binding, result_desc.data, result_binding.raw_bytes);
         }
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed.");
@@ -648,7 +648,7 @@ namespace {
                 upload_binding(result_binding, result_desc.data, result_binding.raw_bytes);
         }
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed.");
@@ -773,7 +773,7 @@ namespace {
                 upload_binding(result_binding, result_desc.data, result_binding.raw_bytes);
         }
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed.");
@@ -951,7 +951,7 @@ namespace {
                 upload_binding(result_binding, result_desc.data, result_binding.raw_bytes);
         }
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed for fused_act_mul_split.");
@@ -1121,7 +1121,7 @@ namespace {
         if (op != BinaryScalarOpCode::Mul)
             ggml_backend_tensor_set(scalar_binding.storage, &scalar, 0, sizeof(float));
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed.");
@@ -1354,7 +1354,7 @@ namespace {
         const float one_value = 1.0f;
         ggml_backend_tensor_set(one_binding.storage, &one_value, 0, sizeof(float));
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed.");
@@ -1507,7 +1507,7 @@ namespace {
         }
         ggml_backend_tensor_set(index_tensor, indices.data(), 0, indices.size() * sizeof(std::int32_t));
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed.");
@@ -1689,7 +1689,7 @@ namespace {
             ggml_backend_tensor_set(upload.tensor, &upload.value, 0, sizeof(upload.value));
         }
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed.");

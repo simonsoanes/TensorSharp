@@ -19,6 +19,54 @@ namespace TensorSharp.Runtime
         bool EnableThinking);
 
     /// <summary>
+    /// Whether a family may reuse a past TOOL-CALLING round's exact generated tokens
+    /// instead of asking its chat template to reconstruct that round.
+    ///
+    /// <para>
+    /// Splicing is the only lossless way to reproduce what the live KV cache holds -
+    /// reasoning channel, call syntax, whitespace and tokenization all included - but
+    /// it costs the structured <see cref="ChatMessage.ToolCalls"/> field, which some
+    /// templates read in order to render or address the tool RESULT that follows. The
+    /// two effects pull in opposite directions, so each family declares which one it
+    /// can afford.
+    /// </para>
+    /// </summary>
+    public enum ToolCallRawSplicing
+    {
+        /// <summary>
+        /// Never splice a tool-calling round. The template reconstructs it; where the
+        /// template cannot, that round re-prefills. The safe default.
+        /// </summary>
+        Never = 0,
+
+        /// <summary>
+        /// Always splice. For families whose tool-result framing depends only on the
+        /// <c>role: "tool"</c> message itself and never on the preceding assistant's
+        /// structured tool calls - Qwen 3.5 / 3.6.
+        /// </summary>
+        Always,
+
+        /// <summary>
+        /// Splice only when the ACTIVE template demonstrably failed to reproduce the
+        /// round, AND splicing it does not drop any tool result from the prompt.
+        ///
+        /// <para>
+        /// Gemma 4 needs this because two different chat templates ship under one
+        /// architecture name. The canonical (2026-07-09) template re-renders the round's
+        /// thinking channel from <c>reasoning</c> and folds the tool result INTO the same
+        /// model turn, gated on <c>tool_calls</c> - blanking that field there deletes
+        /// every tool result from the prompt. Earlier builds (and the community
+        /// fine-tunes carrying their template) have no reasoning branch at all and render
+        /// <c>role: "tool"</c> as its own <c>&lt;|turn&gt;tool</c> turn - so there the
+        /// round's whole thought channel is lost on re-render and splicing is both safe
+        /// and necessary. Which template a GGUF carries is not knowable from the
+        /// architecture name, so the renderer decides per prompt.
+        /// </para>
+        /// </summary>
+        WhenTemplateLosesTheRound,
+    }
+
+    /// <summary>
     /// One model family's CHAT PROTOCOL: how its prompts are framed, what media
     /// placeholders its template expects, and how its replies are parsed back apart.
     ///
@@ -131,12 +179,89 @@ namespace TensorSharp.Runtime
         public string? TemplateAssistantHeaderAnchor { get; init; }
 
         /// <summary>
+        /// True when this family's chat template re-renders an assistant turn's REASONING
+        /// from a <c>reasoning</c> / <c>reasoning_content</c> field, so the host should
+        /// hand it over instead of dropping it.
+        ///
+        /// <para>
+        /// It is opt-in per family because it changes the rendered prompt, and only a
+        /// template that gates the reasoning correctly may have it: Gemma 4's emits the
+        /// thinking channel only for an assistant message that comes AFTER the last user
+        /// message and carries tool calls - that is, the rounds of the turn in progress -
+        /// and strips it from every earlier turn, which is exactly the rule the KV cache
+        /// needs. A template that re-emitted reasoning for past turns would change every
+        /// multi-turn prompt, so families are enabled here one at a time, after their
+        /// template has been read.
+        /// </para>
+        /// <para>
+        /// What it fixes is not cosmetic. Without it the host had no way to reproduce a
+        /// tool-calling round it had already generated, so
+        /// <see cref="KVCachePromptRenderer"/> substituted the raw generated tokens
+        /// instead - and that substitution blanks <c>tool_calls</c>, which Gemma 4's
+        /// template requires in order to render the tool RESULT at all. Every tool result
+        /// therefore vanished from the prompt from the second round on: the model asked
+        /// for a directory listing, was shown nothing, and answered from invention.
+        /// </para>
+        /// </summary>
+        public bool RendersAssistantReasoning { get; init; }
+
+        /// <summary>
+        /// Whether this protocol may splice a past assistant tool-call round's exact
+        /// <see cref="ChatMessage.RawOutputTokens"/> into the prompt, and under what
+        /// condition. Default <see cref="Runtime.ToolCallRawSplicing.Never"/>.
+        ///
+        /// <para>
+        /// This is opt-in because replacing the message with a raw placeholder clears
+        /// <see cref="ChatMessage.ToolCalls"/>: the raw tokens already contain the call
+        /// syntax, but some templates need the structured field to place or address the
+        /// following result. Qwen 3.5 / 3.6 renders <c>role: "tool"</c> independently,
+        /// so splicing is safe there and is the only lossless way to reproduce its
+        /// thinking-prefixed live KV-cache stream.
+        /// </para>
+        /// </summary>
+        public ToolCallRawSplicing ToolCallRawSplicing { get; init; } = ToolCallRawSplicing.Never;
+
+        /// <summary>
         /// True when this family turns a video into N evenly spaced FRAME images that
         /// each cost a full image's worth of tokens, so a long clip has to be
         /// downsampled to the configured frame cap before it reaches the model.
         /// Families that render a video as a single placeholder token do not.
         /// </summary>
         public bool CapsVideoFrames { get; init; }
+
+        /// <summary>
+        /// False when this family's renderer never puts TOOL DECLARATIONS in the
+        /// prompt, so a tool offered to it can never be called.
+        ///
+        /// <para>
+        /// Gemma 3 and Mistral 3 are the two: their <see cref="Render"/> delegates take
+        /// only the messages and the generation flag, and the tool list is discarded
+        /// before the renderer sees it. Declaring a tool for them is not an error the
+        /// caller can see - the request succeeds and the model simply never calls what
+        /// it was never told about.
+        /// </para>
+        /// <para>
+        /// Agent Skills reads this to choose how to deliver a skill: where tools are
+        /// rendered the skill body is fetched on demand through <c>skills_read</c>
+        /// (progressive disclosure); where they are not, the body has to be written
+        /// into the prompt up front instead. Without this flag, skills would appear to
+        /// work on every model and silently do nothing on these two.
+        /// </para>
+        /// </summary>
+        public bool RendersToolDeclarations { get; init; } = true;
+
+        /// <summary>
+        /// False when this family's renderer DROPS <c>role: "tool"</c> messages.
+        ///
+        /// <para>
+        /// Mistral 3's renderer handles only <c>user</c> and <c>assistant</c>, so a tool
+        /// result is not merely framed oddly - it is absent from the prompt entirely.
+        /// An agentic loop that feeds a result back that way asks the model to continue
+        /// from an answer it cannot see, and the usual outcome is that it calls the same
+        /// tool again forever.
+        /// </para>
+        /// </summary>
+        public bool RendersToolResultMessages { get; init; } = true;
 
         internal void Validate()
         {

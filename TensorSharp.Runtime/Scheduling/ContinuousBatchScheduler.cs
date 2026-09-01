@@ -514,6 +514,13 @@ namespace TensorSharp.Runtime.Scheduling
             }
             if (victim == null) return false;
 
+            // A preemption is a running request visibly stalling and later
+            // re-prefilling; leaving it unlogged makes that look like a hang.
+            _logger.LogWarning(
+                "KV block pool pressure: preempting {VictimRequestId} ({VictimTokens} computed tokens) " +
+                "to make room; it re-queues and re-prefills when capacity frees up. Raise " +
+                "TS_SCHED_NUM_BLOCKS to avoid this.",
+                victim.RequestId, victim.NumComputedTokens);
             PreemptSequence(victim);
             output.PreemptedRequestIds.Add(victim.RequestId);
             return TryEnsureBlocksForStep(needyForBlocks, extraTokens);
@@ -554,6 +561,12 @@ namespace TensorSharp.Runtime.Scheduling
 
             var hashes = KvBlockHasher.ComputeBlockHashes(seq.PromptTokens, _cfg.BlockSize, EffectiveFingerprint(seq));
             int maxAdoptableTokens = Math.Max(0, seq.PromptTokens.Count - 1);
+            // An explicit boundary limits reuse as well as registration. Otherwise a
+            // request that says "cache none" (empty/[0]) could still adopt blocks that
+            // an earlier implicit-cache request placed in the shared index, and a request
+            // with a finite boundary could reuse volatile prompt content past it.
+            if (seq.CacheBreakpoints != null)
+                maxAdoptableTokens = Math.Min(maxAdoptableTokens, seq.CacheBreakpointLimit);
             // Cap reuse at the model's reliably-restorable prefix length (sliding
             // window for circular caches). Adopting beyond this would inject a wrapped
             // snapshot that the model can't faithfully reconstruct -> corrupt output.
@@ -578,6 +591,17 @@ namespace TensorSharp.Runtime.Scheduling
             // that transient state. Backtrack to the newest such endpoint before
             // changing refcounts or the sequence block table.
             int adopted = lastRestorable + 1;
+            if (adopted < matching.Count)
+            {
+                // The cache MATCHED more than it can deliver; without this line
+                // the user sees kvCacheReusedTokens far below a warm cache's
+                // promise with no explanation.
+                _logger.LogInformation(
+                    "Prefix cache matched {Matched} block(s) for {RequestId} but only {Adopted} are " +
+                    "restorable (a recurrent checkpoint boundary caps adoption); the rest of the " +
+                    "prompt re-prefills.",
+                    matching.Count, seq.RequestId, adopted);
+            }
             for (int i = 0; i < adopted; i++)
             {
                 _pool.Touch(matching[i]);
@@ -637,8 +661,9 @@ namespace TensorSharp.Runtime.Scheduling
         /// </summary>
         private bool IsBlockAllowedByExplicitMarkers(SequenceState seq, int blockIndex)
         {
+            if (seq.CacheBreakpoints == null)
+                return true;
             int limit = seq.CacheBreakpointLimit;
-            if (limit <= 0) return true;
             return (blockIndex + 1) * _cfg.BlockSize <= limit;
         }
 

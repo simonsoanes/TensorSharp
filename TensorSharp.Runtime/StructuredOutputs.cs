@@ -64,9 +64,23 @@ namespace TensorSharp.Runtime
                 (messages[0].Role == "system" || messages[0].Role == "developer"))
             {
                 var first = CloneMessage(messages[0])!;
-                first.Content = string.IsNullOrWhiteSpace(first.Content)
+                string originalContent = string.IsNullOrWhiteSpace(first.Content)
+                    ? string.Empty
+                    : first.Content!.TrimEnd();
+                // A marker in removed trailing whitespace must not migrate into
+                // the separator or the structured-output instruction appended below.
+                ClampContentCacheBreakpoints(first, originalContent.Length);
+                if (first.CacheControl != null)
+                {
+                    // The message marker originally ended before the injected
+                    // structured-output instruction. Keep that exact boundary
+                    // as a content-part marker instead of moving it to the new end.
+                    first.AddContentCacheBreakpoint(originalContent.Length);
+                    first.CacheControl = null;
+                }
+                first.Content = originalContent.Length == 0
                     ? instruction
-                    : first.Content!.TrimEnd() + "\n\n" + instruction;
+                    : originalContent + "\n\n" + instruction;
                 result.Add(first);
 
                 for (int i = 1; i < messages.Count; i++)
@@ -81,6 +95,27 @@ namespace TensorSharp.Runtime
                     result.Add(CloneMessage(msg)!);
             }
             return result;
+        }
+
+        private static void ClampContentCacheBreakpoints(ChatMessage message, int contentLength)
+        {
+            List<int>? breakpoints = message.ContentCacheBreakpoints;
+            if (breakpoints == null)
+                return;
+
+            for (int i = 0; i < breakpoints.Count; i++)
+                breakpoints[i] = System.Math.Clamp(breakpoints[i], 0, contentLength);
+
+            breakpoints.Sort();
+            int writeIndex = 0;
+            for (int readIndex = 0; readIndex < breakpoints.Count; readIndex++)
+            {
+                if (writeIndex == 0 || breakpoints[readIndex] != breakpoints[writeIndex - 1])
+                    breakpoints[writeIndex++] = breakpoints[readIndex];
+            }
+
+            if (writeIndex < breakpoints.Count)
+                breakpoints.RemoveRange(writeIndex, breakpoints.Count - writeIndex);
         }
 
         public static string BuildInstruction(StructuredOutputFormat format)
@@ -129,9 +164,19 @@ namespace TensorSharp.Runtime
                 Content = msg.Content,
                 ImagePaths = msg.ImagePaths != null ? new List<string>(msg.ImagePaths) : null,
                 AudioPaths = msg.AudioPaths != null ? new List<string>(msg.AudioPaths) : null,
+                TextFilePaths = msg.TextFilePaths != null ? new List<string>(msg.TextFilePaths) : null,
+                TextFileNames = msg.TextFileNames != null ? new List<string>(msg.TextFileNames) : null,
                 IsVideo = msg.IsVideo,
                 ToolCalls = msg.ToolCalls != null ? new List<ToolCall>(msg.ToolCalls) : null,
-                Thinking = msg.Thinking
+                ToolCallId = msg.ToolCallId,
+                Thinking = msg.Thinking,
+                RawOutputTokens = msg.RawOutputTokens != null ? new List<int>(msg.RawOutputTokens) : null,
+                CacheControl = msg.CacheControl != null
+                    ? new CacheControlMarker { Type = msg.CacheControl.Type }
+                    : null,
+                ContentCacheBreakpoints = msg.ContentCacheBreakpoints != null
+                    ? new List<int>(msg.ContentCacheBreakpoints)
+                    : null,
             };
         }
     }
@@ -1042,4 +1087,3 @@ namespace TensorSharp.Runtime
         }
     }
 }
-

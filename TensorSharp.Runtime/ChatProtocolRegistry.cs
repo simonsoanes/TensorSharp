@@ -79,6 +79,12 @@ namespace TensorSharp.Runtime
                 Id = "gemma3",
                 Architectures = new[] { "gemma3" },
                 Render = r => ChatTemplate.RenderGemma3(r.Messages, r.AddGenerationPrompt),
+                // The renderer takes only the messages: r.Tools is discarded before it
+                // is called, so a tool offered to Gemma 3 is never declared and can
+                // never be called. Saying so here is what makes Agent Skills write a
+                // selected skill's body into the prompt on this family instead of
+                // telling the model to fetch it with a tool that does not exist.
+                RendersToolDeclarations = false,
                 AppendMediaPlaceholders = (msg, sb) =>
                 {
                     if (msg.ImagePaths != null)
@@ -107,6 +113,26 @@ namespace TensorSharp.Runtime
                 // the generation prompt so the model skips reasoning; the template does
                 // not re-emit it for past assistant messages, but the cache holds it.
                 AssistantGenerationSuffix = thinking => thinking ? null : "<|channel>thought\n<channel|>",
+                // The template re-renders an in-turn tool round's thinking channel from
+                // `reasoning`, and needs `tool_calls` present to render that round's tool
+                // RESULT. Handing both over is what makes a skills/code round re-render
+                // byte-identically to what was generated - see RendersAssistantReasoning.
+                RendersAssistantReasoning = true,
+                // ...but only the CANONICAL Gemma 4 template has that reasoning branch.
+                // The template shipped in earlier builds - and in the community
+                // fine-tunes that inherited it - renders a past model turn as
+                // `<|turn>model\n` + tool call, with `strip_thinking` deleting the
+                // channel from the content and no `reasoning` field read anywhere. The
+                // round's whole thought block (hundreds of tokens) then has no
+                // counterpart in the re-render, the prompt diverges from the live cache
+                // at the first tool-calling turn, and every following round of an Agent
+                // Skills / code-exec turn re-prefills the entire conversation.
+                //
+                // That template does render `role: "tool"` as its own `<|turn>tool` turn,
+                // independent of the assistant's tool_calls, so splicing the round's raw
+                // tokens is safe THERE and only there. The renderer decides per prompt by
+                // checking what the active template actually produced.
+                ToolCallRawSplicing = ToolCallRawSplicing.WhenTemplateLosesTheRound,
             });
 
             // ---- Qwen -------------------------------------------------------
@@ -115,6 +141,20 @@ namespace TensorSharp.Runtime
                 Id = "qwen3",
                 Architectures = new[] { "qwen3" },
                 CreateOutputParser = () => new Qwen3OutputParser(),
+            });
+
+            // Qwen2 / Qwen2.5(-VL): same ChatML tool syntax as Qwen3, no thinking
+            // channel. Without this entry the family fell through to the passthrough
+            // parser, which can never read a tool call back — so skills and run_code
+            // were silently withheld from a model that handles them fine. The GGUF's
+            // own template renders the prompt; the hardcoded Qwen3 renderer (thinking
+            // off) stands in when that template is missing or misrenders.
+            Register(new ChatProtocol
+            {
+                Id = "qwen25",
+                Architectures = new[] { "qwen2", "qwen2vl", "qwen2_vl", "qwen25vl" },
+                Render = r => ChatTemplate.RenderQwen3(r.Messages, r.AddGenerationPrompt, r.Tools, enableThinking: false),
+                CreateOutputParser = () => new Qwen25OutputParser(),
             });
 
             Register(new ChatProtocol
@@ -137,6 +177,11 @@ namespace TensorSharp.Runtime
                 // `<think>\n\n</think>\n\n` for past turns, so nothing is needed.
                 AssistantGenerationSuffix = thinking => thinking ? "<think>\n" : null,
                 EmitsEmptyThinkBlockForPastTurns = thinking => thinking,
+                // Its tool-result branch depends only on role=tool, never on the
+                // preceding assistant's structured tool_calls field. Keep the exact
+                // generated reasoning + call tokens so an agent round extends the live
+                // cache instead of re-prefilling the conversation.
+                ToolCallRawSplicing = ToolCallRawSplicing.Always,
             });
 
             // Qwen3.8-Flash-Next frames chat exactly like Qwen 3 (the generic ChatML
@@ -262,6 +307,14 @@ namespace TensorSharp.Runtime
                 Id = "mistral3",
                 Architectures = new[] { "mistral3" },
                 Render = r => ChatTemplate.RenderMistral3(r.Messages, r.AddGenerationPrompt),
+                // Two separate losses, both silent. r.Tools is discarded before the
+                // renderer is called, so no tool is ever declared; and the renderer's
+                // message loop handles only "user" and "assistant", so a role:"tool"
+                // message is written nowhere at all - an agentic loop would feed a
+                // result back into a prompt that does not contain it and the model
+                // would call the same tool again until its budget ran out.
+                RendersToolDeclarations = false,
+                RendersToolResultMessages = false,
                 PreferOwnRenderer = _ => true,
                 AppendMediaPlaceholders = (msg, sb) =>
                 {

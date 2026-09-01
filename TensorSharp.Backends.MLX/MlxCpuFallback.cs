@@ -16,13 +16,42 @@ namespace TensorSharp.MLX
     {
         private static readonly CpuAllocator CpuAllocator = new(BlasEnum.DotNet);
 
+        // Ops that have already reported their CPU fallback (once per op name per process).
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> WarnedOps =
+            new(StringComparer.Ordinal);
+
+        private static void WarnFallback(string opName, string consequence)
+        {
+            if (!WarnedOps.TryAdd(opName, true))
+                return;
+
+            try
+            {
+                Console.Error.WriteLine(
+                    $"[mlx] op '{opName}' has no MLX GPU implementation for these arguments; it runs as {consequence}. " +
+                    "Reported once per op.");
+            }
+            catch
+            {
+                // Diagnostics must never break op dispatch.
+            }
+        }
+
         public static object Invoke(string opName, MlxFallbackReturnKind returnKind, int[] modifiedTensorIndexes, object[] args)
         {
             if (string.Equals(opName, "SiLUMulSplit", StringComparison.Ordinal))
+            {
+                WarnFallback(opName, "an unfused two-op decomposition (slower than the fused kernel)");
                 return SiLUMulSplit((Tensor)args[0], (Tensor)args[1], (int)args[2]);
+            }
 
             if (string.Equals(opName, "scaled_dot_product_attention", StringComparison.Ordinal))
+            {
+                WarnFallback(opName, "element-by-element CPU attention (orders of magnitude slower)");
                 return ScaledDotProductAttention((Tensor)args[0], (Tensor)args[1], (Tensor)args[2], (Tensor)args[3], (Tensor)args[4], (float)args[5]);
+            }
+
+            WarnFallback(opName, "an element-by-element CPU fallback with a GPU-to-host round-trip (orders of magnitude slower)");
 
             object returnValue = InvokeCpu(opName, args, out Dictionary<Tensor, Tensor> mappedTensors);
             try

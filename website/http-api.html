@@ -23,8 +23,8 @@
     <thead><tr><th>Style</th><th>Endpoints</th></tr></thead>
     <tbody>
       <tr><td><strong>Ollama-compatible</strong></td><td><code>/api/generate</code>, <code>/api/chat/ollama</code>, <code>/api/tags</code>, <code>/api/show</code></td></tr>
-      <tr><td><strong>OpenAI-compatible</strong></td><td><code>/v1/chat/completions</code>, <code>/v1/models</code>, <code>/v1/videos/generations</code></td></tr>
-      <tr><td><strong>Web UI (SSE)</strong></td><td><code>/api/chat</code>, <code>/api/sessions</code>, <code>/api/models</code>, <code>/api/upload</code>, <code>/api/image-edit</code>, <code>/api/image-edit/stream</code>, <code>/api/video-generate</code>, <code>/api/video-generate/stream</code></td></tr>
+      <tr><td><strong>OpenAI-compatible</strong></td><td><code>/v1/chat/completions</code>, <code>/v1/models</code>, <code>/v1/videos/generations</code>, <code>/v1/skills</code></td></tr>
+      <tr><td><strong>Web UI (SSE)</strong></td><td><code>/api/chat</code>, <code>/api/sessions</code>, <code>/api/models</code>, <code>/api/upload</code>, <code>/api/image-edit</code>, <code>/api/image-edit/stream</code>, <code>/api/video-generate</code>, <code>/api/video-generate/stream</code>, <code>/api/skills</code></td></tr>
       <tr><td><strong>Utilities</strong></td><td><code>/api/version</code>, <code>/api/queue/status</code></td></tr>
     </tbody>
   </table>
@@ -209,7 +209,92 @@ curl -X POST http://localhost:5000/v1/chat/completions \
 }</code></pre>
   <p>Continue the loop by appending the assistant <code>tool_calls</code> plus a <code>{"role": "tool", "tool_call_id": "...", "content": "..."}</code> message with the function result, then calling the endpoint again. (The Ollama endpoint uses the same flow with a <code>role: "tool"</code> message.)</p>
 
-  <h2 id="structured">4 · Structured outputs (JSON schema)</h2>
+  <h2 id="skills">4 · Agent Skills over HTTP</h2>
+  <p>An <a href="features.html#skills">Agent Skill</a> is a folder of model-facing instructions — a <code>SKILL.md</code> plus the scripts, reference documents and assets it refers to — that the server loads only when a task needs it. Every chat surface — <code>/v1/chat/completions</code>, <code>/v1/responses</code>, the Ollama-compatible <code>/api/chat/ollama</code>, and the Web UI's <code>/api/chat</code> — takes the same two optional fields:</p>
+  <pre data-lang="json"><code>"skills": ["pdf", "xlsx"],
+"skills_discovery": true</code></pre>
+  <p><code>skills_discovery</code> defaults to <code>true</code>: the model is also shown the names and descriptions of the skills the request did <em>not</em> select, so it can pick up one you did not think to name. Set it to <code>false</code> to restrict the request to exactly the skills it listed. Naming a skill the server does not have is a <code>400</code> — <a href="#skills-manage"><code>GET /api/skills</code></a> lists what is registered.</p>
+  <pre data-lang="bash"><code># OpenAI-compatible
+curl -X POST http://localhost:5000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemma-4-E4B-it-Q8_0.gguf",
+    "messages": [{"role": "user", "content": "Pull the totals table out of this statement."}],
+    "skills": ["pdf"],
+    "max_tokens": 600
+  }'
+
+# Ollama-compatible
+curl -X POST http://localhost:5000/api/chat/ollama \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemma-4-E4B-it-Q8_0.gguf",
+    "messages": [{"role": "user", "content": "Build me a budget spreadsheet."}],
+    "skills": ["xlsx"],
+    "skills_discovery": false,
+    "stream": false
+  }'
+
+# Web UI SSE
+curl -N -X POST http://localhost:5000/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"messages": [{"role": "user", "content": "Summarize this PDF."}], "skills": ["pdf"], "maxTokens": 400}'</code></pre>
+  <p>The reply is an ordinary completion. The model reaches the rest of a skill through built-in <code>skills_list</code> / <code>skills_read</code> tools that the server answers <strong>itself</strong>, in process and next to the weights, so the client never receives a tool call it has no implementation for and an existing OpenAI SDK needs no changes (pass the fields as <code>extra_body</code>). Skills also combine with your own <code>tools</code>: the skill tools are merged into the list you sent, the server answers only its own, and a call to one of <em>yours</em> comes back as usual — with whatever the model read from a skill already folded into the conversation.</p>
+  <div class="callout note"><div class="ic">📌</div><p>Each lookup the model makes is a further generation, and <strong>every round streams</strong>: the disclosure loop parses the token stream itself — it has to, it is hunting the <code>skills_read</code> calls it answers — and forwards content and reasoning as they decode while keeping the tool markup to itself, so a client never sees a call it cannot service. On <code>/api/chat</code> the <code>skill_step</code> frames below mark each lookup as it completes, so the pause while the model reads a file is visible rather than blank. A request whose selected skill is already written into the prompt — the common case — runs a single round; <code>--skills-max-rounds</code> (default <code>8</code>) bounds the rest.</p></div>
+  <p>The Web UI stream carries one frame per executed skill tool call, as it completes:</p>
+  <pre data-lang="text"><code>data: {"skill_step":"skills_read","skill":"pdf","detail":"references/forms.md","ok":true}</code></pre>
+  <p><code>skill_step</code> is the tool that ran (<code>skills_list</code> / <code>skills_read</code> / <code>skills_run</code>), <code>skill</code> is the skill it touched, <code>detail</code> the file, and <code>ok</code> whether it succeeded. → <a href="#webui-sse">Web UI SSE protocol</a></p>
+
+  <h3 id="skills-manage">Managing the registry</h3>
+  <p>Two shapes of the same data: the read-only, OpenAI-flavoured <code>/v1/skills</code>, and the Web UI's <code>/api/skills</code>, which adds load errors, single-file reads, upload and delete.</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Endpoint</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><code>GET /v1/skills</code></td><td>Every registered skill, wrapped as <code>{"object": "list", "data": [...]}</code>.</td></tr>
+      <tr><td><code>GET /v1/skills/{name}</code></td><td>One skill, with the <code>SKILL.md</code> body added as <code>instructions</code>.</td></tr>
+      <tr><td><code>GET /api/skills</code></td><td>The same objects as <code>{"enabled": …, "installable": …, "skills": [ … ], "errors": [{"path", "message"}]}</code> — so a management UI can also show the directories that <em>looked</em> like a skill and failed to load, with the reason.</td></tr>
+      <tr><td><code>GET /api/skills/{name}</code></td><td>One skill, including its <code>instructions</code>.</td></tr>
+      <tr><td><code>GET /api/skills/{name}/files/{*path}</code></td><td>One bundled file, resolved through the same path guard the model's own reads go through and always served as <code>text/plain</code> with <code>nosniff</code>: a skill may ship an <code>.html</code> or <code>.js</code> file, and serving it with its real type would execute uploaded content in the server's own origin.</td></tr>
+      <tr><td><code>POST /api/skills</code></td><td>Install a skill from a multipart <code>.zip</code> (<code>file=@pdf.zip</code>), optionally with <code>overwrite=true</code> to replace an installed skill of the same name. Answers <code>201</code> with the installed skill object.</td></tr>
+      <tr><td><code>POST /api/skills/rescan</code></td><td>Pick up changes made on disk without a restart; answers with the same body as <code>GET /api/skills</code>.</td></tr>
+      <tr><td><code>DELETE /api/skills/{name}</code></td><td>Remove an installed skill — <code>{"removed":true}</code>. Only a skill uploaded here (<code>"origin": "installed"</code>) can be deleted; one discovered under an operator-configured directory is that operator's own file tree and is refused.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <pre data-lang="bash"><code>curl http://localhost:5000/v1/skills
+curl http://localhost:5000/v1/skills/pdf
+
+curl http://localhost:5000/api/skills
+curl http://localhost:5000/api/skills/pdf
+curl http://localhost:5000/api/skills/pdf/files/references/forms.md
+
+# Upload a .zip of the skill folder (pdf/SKILL.md) or of its contents (SKILL.md at the root)
+curl -X POST http://localhost:5000/api/skills -F "file=@pdf.zip" -F "overwrite=true"
+
+curl -X POST http://localhost:5000/api/skills/rescan
+curl -X DELETE http://localhost:5000/api/skills/pdf   # {"removed":true}</code></pre>
+  <p>A skill object:</p>
+  <pre data-lang="json"><code>{
+  "id": "pdf",
+  "object": "skill",
+  "name": "pdf",
+  "description": "Extract text and tables from PDF files, fill in PDF forms, and merge or split documents...",
+  "license": "Apache-2.0",
+  "compatibility": "Requires python3 with pypdf installed.",
+  "files": [
+    {"path": "scripts/extract_tables.py", "bytes": 4021, "kind": "script", "text": true},
+    {"path": "references/forms.md", "bytes": 18233, "kind": "reference", "text": true}
+  ],
+  "bytes": 41288,
+  "origin": "installed",
+  "warnings": [],
+  "modified": "2026-08-29T12:00:00Z"
+}</code></pre>
+  <p><code>kind</code> is one of <code>script</code> / <code>reference</code> / <code>asset</code> / <code>manifest</code> / <code>other</code>; <code>origin</code> is <code>discovered</code> for a skill found by scanning a configured directory and <code>installed</code> for one uploaded here; <code>warnings</code> carries anything that loaded despite being out of spec (a <code>name</code> that disagrees with its directory, a description over the 1024-character limit). <code>GET /api/models</code> reports the feature itself as <code>"skills": {"enabled": true, "installable": true, "count": 7}</code>, or <code>null</code> when the server has skills disabled — which is how the Web UI decides whether to show the control at all. Errors follow the server's per-prefix convention: <code>/v1/*</code> returns <code>{"error": {"message": "…", "type": "invalid_request_error"}}</code> and <code>/api/*</code> returns <code>{"error": "…"}</code>.</p>
+  <div class="callout warn"><div class="ic">🔒</div><p>An uploaded skill is untrusted content, and it is validated before anything lands: every ZIP entry is resolved through the same path guard that confines the model's own reads (so <code>../../authorized_keys</code> is rejected rather than written), size is enforced on the decompressed stream rather than on the entry's declared length, and the archive is refused if it holds more than 4096 files, expands past 64 MB for one file or 256 MB in total, or expands more than 200×. Running a skill's bundled scripts (<code>skills_run</code>) stays off unless the server was started with <code>--skills-allow-exec</code> — on a shared server that flag is a remote code execution primitive. → <a href="cli.html#skills">Skill flags</a></p></div>
+
+  <h2 id="structured">5 · Structured outputs (JSON schema)</h2>
   <p>The OpenAI <code>response_format</code> accepts <code>text</code>, <code>json_object</code>, and validated <code>json_schema</code>. The server injects strict JSON instructions and validates the output before returning it. JSON requests also constrain the <strong>first sampled token</strong> to a <code>{</code>-opening candidate, so chatty models cannot ramble prose before the object and streamed time-to-first-token reflects prefill latency (<code>TS_JSON_FORCE_OPEN=0</code> disables).</p>
   <pre data-lang="bash"><code>curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -239,7 +324,7 @@ curl -X POST http://localhost:5000/v1/chat/completions \
   }'</code></pre>
   <div class="callout warn"><div class="ic">⚠️</div><p><code>json_schema</code> cannot be combined with <code>tools</code> or <code>think</code>. Invalid schemas return HTTP <code>400</code>; outputs that fail validation return HTTP <code>422</code>.</p></div>
 
-  <h2 id="webui-sse">5 · Web UI SSE protocol (<code>/api/chat</code>)</h2>
+  <h2 id="webui-sse">6 · Web UI SSE protocol (<code>/api/chat</code>)</h2>
   <p>This is the protocol the bundled chat UI uses; external UIs can plug into the same endpoint. Every event is a JSON object delivered as a single <code>data: …</code> SSE frame.</p>
   <pre data-lang="bash"><code># Create / dispose a session (Web UI flow only)
 curl -X POST http://localhost:5000/api/sessions          # {"sessionId":"a3b1c2..."}
@@ -251,7 +336,7 @@ curl -N -X POST http://localhost:5000/api/chat \
   -d '{ "messages": [{"role": "user", "content": "Hi"}], "maxTokens": 50, "sessionId": null, "newChat": false, "think": false, "tools": [] }'</code></pre>
   <p>Reusing the same <code>sessionId</code> splices prior assistant tokens into the KV-cache prefix on the next turn. The terminal frame reports reuse:</p>
   <pre data-lang="text"><code>data: {"done":true,"tokenCount":187,"elapsed":2.143,"tokPerSec":87.23,"promptTokens":512,"kvReusedTokens":420,"kvReusePercent":82.0}</code></pre>
-  <p>Event fields include <code>token</code> (content), <code>thinking</code> (reasoning chunk), <code>tool_calls</code>, <code>replace</code>/<code>diffusionStep</code> (DiffusionGemma previews), and the terminal <code>done</code> summary.</p>
+  <p>Event fields include <code>token</code> (content), <code>thinking</code> (reasoning chunk), <code>tool_calls</code>, <code>replace</code>/<code>diffusionStep</code> (DiffusionGemma previews), <code>skill_step</code> (<a href="#skills">Agent Skills</a> lookups), and the terminal <code>done</code> summary.</p>
 
   <h3 id="upload">Uploads (<code>/api/upload</code>)</h3>
   <p><code>POST /api/upload</code> takes a multipart form (first file used) and returns the stored path/URL plus per-type metadata; <code>/api/chat</code> messages then reference the returned server paths (<code>imagePaths</code>, <code>audioPaths</code>, …). Accepted types: <strong>images</strong> (<code>.png .jpg .jpeg .gif .webp .bmp .heic .heif</code>), <strong>video</strong> (<code>.mp4 .mov .avi .mkv .webm</code> — frames extracted at <code>VIDEO_SAMPLE_FPS</code>), <strong>audio</strong> (<code>.mp3 .wav .ogg .flac .m4a</code>), <strong>PDF</strong>, and <strong>text/code</strong> files (returned in full as <code>textContent</code>). Born-digital PDFs return their complete extracted <code>textContent</code>; scanned PDFs return page images like video frames when a vision model is hosted (otherwise a <code>needsVision</code> warning). <code>TS_PDF_MAX_PAGES</code> caps the pages read (default: all).</p>
@@ -279,7 +364,7 @@ curl -s http://localhost:5000/api/video-generate \
   <p><code>POST /v1/videos/generations</code> is the OpenAI-images-shaped envelope over the same job. On top of the fields above it accepts <code>"size": "832x480"</code> (split into width/height), <code>negative_prompt</code>, and <code>response_format</code> of <code>"url"</code> or <code>"b64_json"</code>, and answers <code>{ created, data: [{ url, b64_json }], audio_url, width, height, frames, fps, seed, codec, elapsed_seconds }</code> with the MP4 served under <code>/uploads/</code>.</p>
   <p><code>GET /api/models</code> is how a client learns what the hosted video model will accept before it builds a request: alongside the model lists it returns a <code>video</code> object carrying <code>family</code> (<code>"minimax-h3"</code> or <code>"wan"</code>), <code>supportsAudio</code>, <code>supportsImageConditioning</code>, <code>supportsEndImageConditioning</code>, <code>supportsReferenceConditioning</code> and <code>maxReferenceImages</code> (9 on MiniMax-H3 Ref2VA) — and <code>null</code> for every non-video model. The bundled Web UI reads exactly that block to decide which attachment controls to offer — a first frame, a last frame, or reference stills capped at <code>maxReferenceImages</code> — instead of pattern-matching an architecture string; with no block at all (an older server, or a model that reports none) it falls back to the single-image request it has always sent.</p>
 
-  <h2 id="sampling">6 · Sampling parameters</h2>
+  <h2 id="sampling">7 · Sampling parameters</h2>
   <h4>Ollama-style (inside the <code>options</code> object)</h4>
   <p>The defaults shown apply when a request omits the field — they are the server-wide defaults, configurable via server flags / <code>TENSORSHARP_*</code> env vars (see <a href="server.html#options">Server options</a>).</p>
   <div class="table-scroll">
@@ -301,7 +386,7 @@ curl -s http://localhost:5000/api/video-generate \
   <h4>OpenAI-style (top-level)</h4>
   <p><code>max_tokens</code> (default 200 when omitted), <code>temperature</code>, <code>top_p</code>, <code>presence_penalty</code>, <code>frequency_penalty</code>, <code>seed</code>, <code>stop</code> (string or array), and <code>response_format</code> (<code>text</code> / <code>json_object</code> / <code>json_schema</code>). Note: <code>top_k</code>, <code>min_p</code>, and <code>repetition_penalty</code> are <em>not</em> parsed on the OpenAI surface — the server-wide defaults apply for those.</p>
 
-  <h2 id="python">7 · Python client examples</h2>
+  <h2 id="python">8 · Python client examples</h2>
   <h4>Using <code>requests</code> (Ollama-style)</h4>
   <pre data-lang="python"><code>import requests
 

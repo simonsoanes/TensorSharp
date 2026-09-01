@@ -36,6 +36,14 @@ namespace TensorSharp.Runtime
         /// </summary>
         public List<string>? TextFilePaths { get; set; }
         /// <summary>
+        /// The names the user knows the <see cref="TextFilePaths"/> files by, in the same
+        /// order. Uploads are stored under generated names; this keeps the original
+        /// "report.md" so code execution can stage the file under the name the model has
+        /// seen in the conversation. Absent from older clients, in which case the stored
+        /// file name stands in.
+        /// </summary>
+        public List<string>? TextFileNames { get; set; }
+        /// <summary>
         /// True if ImagePaths represent video frames (inserts &lt;|video&gt; before frame &lt;|image&gt; tokens).
         /// </summary>
         public bool IsVideo { get; set; }
@@ -43,6 +51,21 @@ namespace TensorSharp.Runtime
         /// Tool calls made by assistant in this message (for multi-turn tool calling).
         /// </summary>
         public List<ToolCall>? ToolCalls { get; set; }
+        /// <summary>
+        /// For a <c>role: "tool"</c> message, the id of the assistant tool call this
+        /// result answers.
+        ///
+        /// <para>
+        /// No chat template in this repository renders it — every one of them frames a
+        /// tool result positionally, right after the call it answers. It exists for the
+        /// OpenAI WIRE format, which does not: a <c>tool</c> message there is rejected
+        /// outright without <c>tool_call_id</c>, so anything that speaks to a real
+        /// OpenAI-compatible endpoint (see <c>SkillsChatClient</c> under
+        /// <c>SkillDelivery.Local</c>) has to carry the id through the conversation
+        /// rather than re-derive it.
+        /// </para>
+        /// </summary>
+        public string? ToolCallId { get; set; }
         /// <summary>
         /// Thinking/reasoning content produced by the model in this message.
         /// </summary>
@@ -576,7 +599,8 @@ namespace TensorSharp.Runtime
                 {
                     var preprocessed = InjectMultimodalTokens(messages, architecture);
                     var jinja = new Jinja2Template(template);
-                    var context = BuildJinja2Context(preprocessed, addGenerationPrompt, tools, enableThinking);
+                    var context = BuildJinja2Context(
+                        preprocessed, addGenerationPrompt, tools, enableThinking, architecture);
                     string result = jinja.Render(context).TrimEnd();
                     if (result.Length > 0)
                     {
@@ -591,17 +615,20 @@ namespace TensorSharp.Runtime
                         // back to the hardcoded template, which always emits message content.
                         if (!RenderedContainsLastUserText(result, messages))
                         {
-                            Console.Error.WriteLine(
-                                $"[ChatTemplate] Jinja2 rendering for '{architecture}' dropped the last user message; " +
-                                "falling back to hardcoded template.");
+                            WarnTemplateFallbackOnce(architecture, "dropped-user-message",
+                                "the rendered prompt dropped the last user message (lightweight-Jinja-engine guard).");
                         }
                         else
                         {
-                            if (architecture == "gemma4" && addGenerationPrompt)
+                            result = StripReasoningEndSentinel(result);
+                            if (architecture == "gemma4")
                             {
-                                result = enableThinking
-                                    ? EnsureGemma4ThinkingPromptNewline(result)
-                                    : EnsureGemma4ThinkingBlock(result);
+                                if (addGenerationPrompt)
+                                {
+                                    result = enableThinking
+                                        ? EnsureGemma4ThinkingPromptNewline(result)
+                                        : EnsureGemma4ThinkingBlock(result);
+                                }
                             }
                             else if (IsQwen35Family(architecture) && addGenerationPrompt && enableThinking)
                                 result = EnsureQwen35ThinkOpen(result);
@@ -612,14 +639,33 @@ namespace TensorSharp.Runtime
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"[ChatTemplate] Jinja2 rendering failed for architecture '{architecture}': {ex.Message}");
-                    Console.Error.WriteLine($"[ChatTemplate] Exception: {ex}");
-                    Console.Error.WriteLine($"[ChatTemplate] Falling back to hardcoded template.");
+                    WarnTemplateFallbackOnce(architecture, "jinja-error",
+                        $"Jinja2 rendering threw {ex.GetType().Name}: {ex.Message}.");
                 }
             }
 
             Console.Error.WriteLine($"[ChatTemplate] Using hardcoded template for '{architecture}'");
             return RenderHardcoded(messages, addGenerationPrompt, architecture, tools, enableThinking);
+        }
+
+        // (architecture, reason-kind) pairs whose Jinja→hardcoded fallback has
+        // already been reported, so the per-request render path warns once
+        // instead of per prompt. ChatTemplate is a static class reachable from
+        // the CLI, server, and tests with no ILogger to inject — routing this
+        // through Microsoft.Extensions.Logging would mean replumbing every
+        // RenderFromGgufTemplate call site — so Console.Error is the channel.
+        private static readonly HashSet<string> TemplateFallbackReported = new(StringComparer.Ordinal);
+
+        private static void WarnTemplateFallbackOnce(string? architecture, string kind, string detail)
+        {
+            lock (TemplateFallbackReported)
+            {
+                if (!TemplateFallbackReported.Add($"{architecture}|{kind}")) return;
+            }
+            Console.Error.WriteLine(
+                $"[ChatTemplate] The model's GGUF Jinja chat template for '{architecture}' was abandoned: {detail} " +
+                "Affected requests render with the built-in hardcoded template instead; prompt formatting may " +
+                "differ from the model's shipped template. Reported once per architecture.");
         }
 
         /// <summary>
@@ -1025,10 +1071,47 @@ namespace TensorSharp.Runtime
                    architecture == "qwen3vlmoe";
         }
 
+        /// <summary>
+        /// A private-use marker for where a re-rendered reasoning block ends, so the
+        /// template's own closing newline can be taken back off. Never appears in text a
+        /// model or a user can write.
+        /// </summary>
+        internal const string ReasoningEndSentinel = "\uE000TS_REASONING_END\uE000";
+
+        /// <summary>
+        /// Remove the sentinel and the framing newline the template emitted after it, so a
+        /// re-rendered reasoning block is byte-identical to what the model generated.
+        /// See the note in BuildJinja2Context.
+        /// </summary>
+        internal static string StripReasoningEndSentinel(string rendered)
+        {
+            if (string.IsNullOrEmpty(rendered)
+                || !rendered.Contains(ReasoningEndSentinel, StringComparison.Ordinal))
+            {
+                return rendered;
+            }
+
+            // The newline the template adds between the reasoning and the channel close
+            // goes with it. Ordered longest-first; the bare sentinel is the fallback for a
+            // template that frames the block some other way, and dropping it alone is
+            // still better than leaving a marker in the prompt.
+            return rendered
+                .Replace(ReasoningEndSentinel + "\r\n", string.Empty, StringComparison.Ordinal)
+                .Replace(ReasoningEndSentinel + "\n", string.Empty, StringComparison.Ordinal)
+                .Replace(ReasoningEndSentinel, string.Empty, StringComparison.Ordinal);
+        }
+
         private static Dictionary<string, object> BuildJinja2Context(
             List<ChatMessage> messages, bool addGenerationPrompt,
-            List<ToolFunction>? tools = null, bool enableThinking = false)
+            List<ToolFunction>? tools = null, bool enableThinking = false,
+            string? architecture = null)
         {
+            // Whether this family's template re-renders an assistant turn's reasoning,
+            // and therefore whether handing it over is correct rather than a change in
+            // what past turns look like. See ChatProtocol.RendersAssistantReasoning.
+            bool passReasoning =
+                ChatProtocolRegistry.For(architecture)?.RendersAssistantReasoning ?? false;
+
             var msgList = new List<object>();
             foreach (var m in messages)
             {
@@ -1037,6 +1120,29 @@ namespace TensorSharp.Runtime
                     ["role"] = m.Role ?? "",
                     ["content"] = m.Content ?? ""
                 };
+                if (passReasoning && m.Role == "assistant" && m.ToolCalls is { Count: > 0 })
+                {
+                    // The reasoning, plus a sentinel marking where it ENDS.
+                    //
+                    // The template frames the channel itself, as
+                    // '<|channel>thought(nl)' + text + '(nl)<channel|>'. The model does
+                    // not: it writes '<|channel>thought(nl)' + text + '<channel|>', with
+                    // whatever trailing newline the text itself happened to have. So the
+                    // template's closing newline is one the cache does not contain when
+                    // the reasoning ended without one, and one too many when it ended
+                    // with one - and no value of `text` fixes both, which is why passing
+                    // the reasoning alone still diverged by exactly one token.
+                    //
+                    // The sentinel is removed after rendering together with the newline
+                    // the template put after it, leaving precisely the bytes the model
+                    // produced. It also covers the empty case: a round that opened and
+                    // closed the channel without thinking renders as the sentinel alone
+                    // and collapses to the bare four-token channel, which no non-empty
+                    // reasoning value could have produced.
+                    string reasoning = (m.Thinking ?? string.Empty) + ReasoningEndSentinel;
+                    dict["reasoning"] = reasoning;
+                    dict["reasoning_content"] = reasoning;
+                }
                 if (m.ToolCalls != null && m.ToolCalls.Count > 0)
                 {
                     var tcList = new List<object>();

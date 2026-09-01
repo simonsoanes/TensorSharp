@@ -24,6 +24,7 @@ namespace TensorSharp.Cuda
             if (CudaKernelOps.TryCopy(result, src))
                 return;
 
+            CudaCpuFallback.WarnFallback("copy");
             CudaCpuFallback.CopyLogical(result, src);
         }
 

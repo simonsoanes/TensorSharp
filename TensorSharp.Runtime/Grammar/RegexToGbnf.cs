@@ -34,19 +34,37 @@ namespace TensorSharp.Runtime.Grammar
     internal static class RegexToGbnf
     {
         public static bool TryConvert(string pattern, out string gbnf)
+            => TryConvert(pattern, out gbnf, out _);
+
+        /// <summary>
+        /// As <see cref="TryConvert(string, out string)"/>, additionally naming
+        /// the unsupported construct in <paramref name="failReason"/> on failure
+        /// so the caller can tell the operator why the pattern is not enforced.
+        /// </summary>
+        public static bool TryConvert(string pattern, out string gbnf, out string? failReason)
         {
             gbnf = string.Empty;
-            if (string.IsNullOrEmpty(pattern)) return false;
+            failReason = null;
+            if (string.IsNullOrEmpty(pattern))
+            {
+                failReason = "empty pattern";
+                return false;
+            }
             try
             {
                 var p = new Parser(pattern);
                 string body = p.ParseAlternation();
-                if (!p.AtEnd) return false;
+                if (!p.AtEnd)
+                {
+                    failReason = "trailing input after the parsable prefix";
+                    return false;
+                }
                 gbnf = body;
                 return true;
             }
-            catch (NotSupportedException)
+            catch (NotSupportedException ex)
             {
+                failReason = ex.Message;
                 return false;
             }
         }

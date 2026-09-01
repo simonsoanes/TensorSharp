@@ -48,7 +48,7 @@ results as part of the standard matrix.
 | `TS_NEMOTRON_MAMBA2_BATCHED_NATIVE` | Nemotron-H | Native batched Mamba2 step | OFF | `0`, `1` | no |
 | `TS_BATCHED_N1_FAST_PATH` | all | Fused N=1 fast-path decode for solo sequences; `0` forces those steps onto the fully-batched path | ON | `0`, `1` | yes |
 | `TS_PER_SEQ_FUSED` | fused-capable models (Gemma 4, Qwen 3.5/3.6, DeepSeek V4, GLM 5.x) | Per-request fused Forward for concurrent (N>=2) sequences; `0` forces the op-by-op batched paged path | ON | `0`, `1` | no |
-| `TS_BATCHED_FUSED_DECODE` | fused-capable models | True token-batched fused decode inside the per-seq fused path (one graph for all N). On GLM 5.x this is 1.81x aggregate decode at 4 concurrent requests, but batching changes GEMM shapes and a 2-bit MoE turns that into different expert picks, which is why it stays opt-in | OFF | `0`, `1` | no |
+| `TS_BATCHED_FUSED_DECODE` | fused-capable models | True token-batched fused decode inside the per-seq fused path (one graph for all N). On GLM 5.x this is 1.81x aggregate decode at 4 concurrent requests. Batching changes GEMM shapes and a 2-bit MoE can turn that into different expert picks; set `0` for a serial-path A/B. | ON | `0`, `1` | no |
 | `TS_RETAINED_FUSED_CACHE` | fused-capable sliding-window models (Gemma 4) | Retain finished fused KV holders for cross-request prefix reuse | ON | `0`, `1` | no |
 | `TS_RETAINED_FUSED_CACHE_MAX` | fused-capable sliding-window models | LRU budget of retained fused holders (VRAM cap) | `4` | n/a | no |
 | `TS_SCHED_DISABLE_BATCHED` | all | Global per-sequence KV-swap fallback | OFF | `0`, `1` | yes |
@@ -164,7 +164,7 @@ their `--mtp-*` aliases) on both hosts.
 | `TS_SPEC` | `TS_MTP_SPEC` | Qwen 3.5/3.6, GLM 5.2, Gemma 4, DeepSeek V4, Muse-Glimmer (CLI + server) | Enable speculative decode for solo sequences | OFF (`0`) | not registered | no |
 | `TS_SPEC_TYPE` | — | all of the above | Speculation algorithm: `auto` \| `draft-head` \| `block` \| `ngram` | `auto` | not registered | no |
 | `TS_SPEC_DRAFT` | `TS_MTP_DRAFT` | all of the above | Max tokens drafted per speculative step (1-64) | `8` | not registered | no |
-| `TS_SPEC_PMIN` | `TS_MTP_PMIN` | all of the above | Draft-confidence gate; meaning is per algorithm | per algorithm (`0.75` / `0.35` / `0`) | not registered | no |
+| `TS_SPEC_PMIN` | `TS_MTP_PMIN` | all of the above | Draft-confidence gate; meaning is per algorithm | per algorithm (`0.15` / `0.35` / `0`) | not registered | no |
 | `TS_SPEC_DRAFT_MODEL` | `TS_MTP_DRAFT_MODEL` | Gemma 4 (CLI + server) | Path to the separate `gemma4-assistant` draft GGUF | none | not registered | no |
 | `TS_GLM_MTP` | — | GLM 5.2 | Force the NextN block on (`1`) or off (`0`), overriding `TS_SPEC`/`TS_MTP_SPEC` in both directions | unset | not registered | no |
 | `TS_GMTP_NO_FUSED` | — | Gemma 4 on ggml backends | Disable fused multi-token-verify / draft-step kernels (per-op fallback) | OFF | not registered | no |
@@ -234,7 +234,7 @@ in the TP table below.
 | `TS_GLM_GRAPH_CACHE` | GLM 5.x on GGML | How many built+allocated graphs are kept, so a repeated shape replays instead of rebuilding | `8` | — | no |
 | `TS_GLM_NODES_PER_LAYER` | GLM 5.x on GGML | Graph node budget per layer per rank | `256` | — | no |
 | `TS_GLM_MOE_MMAP` | GLM 5.x with `--n-cpu-moe` | `0` copies host-resident experts into a private buffer instead of multiplying them in place out of the GGUF mapping | `1` (mapped) | `0`, `1` | no |
-| `TS_GLM_BATCHED_DECODE` | GLM 5.x | `0` makes the native side decline every batched decode, forcing the per-sequence slot path even when `TS_BATCHED_FUSED_DECODE=1` | `1` (accepted) | `0`, `1` | no |
+| `TS_GLM_BATCHED_DECODE` | GLM 5.x | `0` makes the native side decline every batched decode, forcing the per-sequence slot path even while the global batched fused decode is enabled | `1` (accepted) | `0`, `1` | no |
 | `TS_GLM_LOAD_THREADS` / `TS_GLM_LOAD_CHUNK_MB` | GLM 5.x | Weight-load parallelism and chunk size — 16 reader threads across the six shards move 218 GiB in ~37 s (5.9 GiB/s) from a warm page cache | `16` / `64` | — | no |
 | `TS_GLM_TRACE` | GLM 5.x (diagnostic) | Layer list (or `all`) to dump per-layer activation sums in `llama-eval-callback`'s layout, for diffing against llama.cpp | unset | — | no |
 | `TS_GLM_BD_DEBUG` | GLM 5.x (diagnostic) | `1` narrates each batched decode step: which slots took part, whether the graph was reused or rebuilt, and how far it got | `0` | `0`, `1` | no |

@@ -356,9 +356,9 @@ TSG_EXPORT int TSGgml_Qwen35RecurrentLayerPrefill(
             ggml_backend_tensor_set(entry->conv_state_in,  conv_state_in_data, 0, ggml_nbytes(entry->conv_state_in));
             ggml_backend_tensor_set(entry->delta_state_in, delta_state_in_data,0, ggml_nbytes(entry->delta_state_in));
 
-            ggml_status status = ggml_backend_graph_compute(g_backend, entry->graph);
+            ggml_status status = tsg::compute_graph(g_backend, entry->graph);
             if (status != GGML_STATUS_SUCCESS) { set_last_error("RecPrefill: graph compute failed."); return 0; }
-            ggml_backend_synchronize(g_backend);
+            tsg::sync_backend(g_backend);
 
             ggml_backend_tensor_get(entry->hidden_out,      hidden_data,         0, ggml_nbytes(entry->hidden_out));
             ggml_backend_tensor_get(entry->conv_state_out,  conv_state_out_data, 0, ggml_nbytes(entry->conv_state_out));

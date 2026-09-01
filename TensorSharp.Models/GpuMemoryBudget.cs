@@ -46,6 +46,31 @@ namespace TensorSharp.Models
             backend == BackendType.GgmlCuda || backend == BackendType.GgmlVulkan;
 
         /// <summary>
+        /// Backends whose device budget also bounds a one-off <em>reservation</em> —
+        /// a buffer sized once from a request's declared budget and then kept for
+        /// the whole request, rather than a steady-state working buffer.
+        ///
+        /// Metal is on this list even though it is unified-memory, because
+        /// <c>recommendedMaxWorkingSetSize</c> is a hard ceiling and not a soft one.
+        /// Past it a command buffer does not degrade, it fails outright with
+        /// <c>kIOGPUCommandBufferCallbackErrorOutOfMemory</c>, and ggml-metal then
+        /// latches a sticky error state (ggml-metal-context.m: <c>ctx-&gt;has_error</c>)
+        /// that fails EVERY later graph until the backend is recreated — so the
+        /// process is dead, not slow, and the op that reports it is an innocent
+        /// bystander. Measured: Qwen3.8-27B-Q8_0 (29.0 GB of weights) on a 48 GB
+        /// M5 Pro whose working set is 40.2 GB, served with --max-tokens 256000,
+        /// reserved 260,864 KV tokens x 64 KiB = 17.1 GB on the first request and
+        /// killed the backend.
+        ///
+        /// It stays out of <see cref="AppliesTo"/> because the Metal numbers the
+        /// tuned defaults there carry (initial KV allocation, prefill chunk width)
+        /// were measured against their own fixed caps, and must not start moving
+        /// with whatever happens to be free.
+        /// </summary>
+        internal static bool AppliesToReservations(BackendType backend) =>
+            AppliesTo(backend) || backend == BackendType.GgmlMetal;
+
+        /// <summary>
         /// VRAM to keep free for the driver, other processes, and the transient
         /// allocations our own graph rebuilds make. TS_VRAM_HEADROOM_MB overrides
         /// (0 disables the policy and restores the fixed-constant behaviour).
@@ -67,9 +92,20 @@ namespace TensorSharp.Models
         /// their own default untouched.
         /// </summary>
         internal static bool TryGetSpareBytes(BackendType backend, out long spareBytes)
+            => TryGetSpareBytes(AppliesTo(backend), out spareBytes);
+
+        /// <summary>
+        /// Same as <see cref="TryGetSpareBytes(BackendType, out long)"/>, but for a
+        /// buffer a request reserves up front — see <see cref="AppliesToReservations"/>
+        /// for why Metal is included here and not there.
+        /// </summary>
+        internal static bool TryGetReservationSpareBytes(BackendType backend, out long spareBytes)
+            => TryGetSpareBytes(AppliesToReservations(backend), out spareBytes);
+
+        private static bool TryGetSpareBytes(bool backendApplies, out long spareBytes)
         {
             spareBytes = 0;
-            if (!AppliesTo(backend))
+            if (!backendApplies)
                 return false;
             if (string.Equals(Environment.GetEnvironmentVariable("TS_VRAM_HEADROOM_MB"), "0", StringComparison.Ordinal))
                 return false;

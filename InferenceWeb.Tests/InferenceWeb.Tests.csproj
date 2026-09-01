@@ -27,8 +27,10 @@
   <ItemGroup>
     <ProjectReference Include="..\AdvUtils\AdvUtils.csproj" />
     <ProjectReference Include="..\TensorSharp.Runtime\TensorSharp.Runtime.csproj" />
+    <ProjectReference Include="..\TensorSharp.AgentHost\TensorSharp.AgentHost.csproj" />
     <ProjectReference Include="..\TensorSharp.Models\TensorSharp.Models.csproj" />
     <ProjectReference Include="..\TensorSharp.Server\TensorSharp.Server.csproj" />
+    <ProjectReference Include="..\TensorSharp.Cli\TensorSharp.Cli.csproj" />
     <ProjectReference Include="..\TensorSharp.Backends.Cuda\TensorSharp.Backends.Cuda.csproj" />
     <ProjectReference Include="..\TensorSharp.Backends.MLX\TensorSharp.Backends.MLX.csproj" />
     <ProjectReference Include="..\TensorSharp.Distributed\TensorSharp.Distributed.csproj" />

@@ -58,7 +58,7 @@ namespace TensorSharp.Server.Hosting
 
             modelService.LoadModel(options.StartupModelPath, options.StartupMmProjPath, startupBackend);
 
-            // An explicit --mtp-draft-model that couldn't be activated (missing,
+            // An explicit --draft-model that couldn't be activated (missing,
             // wrong architecture, an incompatible/incomplete draft) used to be
             // swallowed as a warning, leaving the server up with speculation
             // silently off. Promote it to a fail-fast startup error so the operator

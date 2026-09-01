@@ -19,7 +19,7 @@ see [its section below](#glm-53-flash-glm5next).
 | Indexer layers | 21 of 78 | layers 0,1,2 then every 4th from 6; the layers in between reuse the last full layer's selection |
 | MoE | 256 experts, top-8, `n_ff_exp` 2048 | sigmoid gating, a routing bias for SELECTION only, weight renormalisation, x2.5 routed scale |
 | Dense layers | first 3 | plain SwiGLU with `feed_forward_length` 12288 |
-| NextN / MTP | 1 trailing block | `block_count` includes it; the trunk graph runs `block_count - nextn_predict_layers` layers. Drives [speculative decoding](#nextn--mtp-speculative-decoding) under `--mtp-spec`; unloaded otherwise |
+| NextN / MTP | 1 trailing block | `block_count` includes it; the trunk graph runs `block_count - nextn_predict_layers` layers. Drives [speculative decoding](#nextn--mtp-speculative-decoding) under `--spec`; unloaded otherwise |
 | RoPE | NORM, base 8e6, no YaRN | applied to the 64-wide rope slice of Q and to the single K rope tail |
 
 Attention softmax scale is `1/sqrt(n_embd_head_k_mla)` = 1/16 — the *decompressed*
@@ -218,21 +218,21 @@ logits = lm_head(h_mtp)
 where `h` is the trunk's **post-`output_norm`** hidden state of the token before
 `t`. The block predicts token *t+1* from token *t*, so chaining it drafts a
 window that the trunk then verifies in a single batched forward. Enable it with
-`--mtp-spec` on either host; there is nothing to download.
+`--spec` on either host; there is nothing to download.
 
 ```bash
 # CLI — single-shot, chat REPL, or a multi-turn JSONL run
 dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
     --model models/GLM-5.2-UD-IQ2_XXS-00001-of-00006.gguf \
-    --backend ggml_cuda --n-cpu-moe 20 --mtp-spec --chat
+    --backend ggml_cuda --n-cpu-moe 20 --spec --chat
 
 # Server
 dotnet TensorSharp.Server/bin/TensorSharp.Server.dll \
     --model models/GLM-5.2-UD-IQ2_XXS-00001-of-00006.gguf \
-    --backend ggml_cuda --n-cpu-moe 20 --mtp-spec
+    --backend ggml_cuda --n-cpu-moe 20 --spec
 ```
 
-`--mtp-draft N` and `--mtp-pmin X` tune the window and the confidence gate on
+`--spec-draft N` and `--spec-pmin X` tune the window and the confidence gate on
 both hosts (see [Measured](#measured)). Verification draws every emitted token
 from a trunk row with whatever sampler the run configured — argmax under
 `--temperature 0`, the chat sampler under `--chat` — so speculation never
@@ -260,7 +260,7 @@ Three details are worth stating, because getting any of them wrong is silent:
 
 **Opt-in for a reason.** The block is a whole extra decoder layer — ~3 GiB at
 IQ2_XXS — competing for the VRAM the loader sizes the context against, so the
-native loader only pages it in when `--mtp-spec` (`TS_MTP_SPEC`) was set before
+native loader only pages it in when `--spec` (env `TS_SPEC`, legacy `TS_MTP_SPEC`) was set before
 the model loaded. That is why the flag has to be on the command line rather than
 toggled later, and why adding it to a command that already just fit can shorten
 the context the loader settles on. `TS_GLM_MTP=1` / `0` overrides either way for
@@ -278,8 +278,8 @@ one round is not enough to tell a 5% tuning effect from that noise.
 | Configuration | Decode (5 runs) | vs plain | Draft acceptance | Drafted per verify |
 |---|---|---|---|---|
 | plain greedy | 17.96 / 18.33 / 20.42 / 20.37 / 18.56 tok/s | 1.00x | — | — |
-| `--mtp-spec` (the defaults: k=8, pMin 0.75) | 20.50 / 25.68 / 25.83 / 25.85 / 23.52 tok/s | 1.14 / 1.40 / 1.27 / 1.27 / 1.27x — **median 1.27x** | 93.8% | 1.59 |
-| `--mtp-spec --mtp-draft 4 --mtp-pmin 0.55` | 22.35 / 26.99 / 25.86 / 26.81 / 25.89 tok/s | 1.24 / 1.47 / 1.27 / 1.32 / 1.39x — median 1.32x | 75.0% | 2.04 |
+| `--spec` (the defaults: k=8, pMin 0.75) | 20.50 / 25.68 / 25.83 / 25.85 / 23.52 tok/s | 1.14 / 1.40 / 1.27 / 1.27 / 1.27x — **median 1.27x** | 93.8% | 1.59 |
+| `--spec --spec-draft 4 --spec-pmin 0.55` | 22.35 / 26.99 / 25.86 / 26.81 / 25.89 tok/s | 1.24 / 1.47 / 1.27 / 1.32 / 1.39x — median 1.32x | 75.0% | 2.04 |
 
 **On tuning.** A narrower window with a lower gate was best or tied-best in
 every run (and in a `--n-cpu-moe 34` variant), by ~4% on average — but never by
@@ -314,7 +314,7 @@ experts on the host):
 |---|---|---|
 | plain greedy | 12.57 tok/s | 1.00x |
 | the defaults | 14.57 tok/s | 1.16x |
-| `--mtp-draft 4 --mtp-pmin 0.55` | 14.78 tok/s | 1.18x |
+| `--spec-draft 4 --spec-pmin 0.55` | 14.78 tok/s | 1.18x |
 
 Heavier offload slows the 1-row baseline more than it slows a wide verify, so
 the curve flattens (a 2-row verify is 1.16x a 1-row decode there, not 1.27x) and
@@ -342,7 +342,7 @@ tests pin down where it does *not* come from:
   bookkeeping, same catch-up calls, same rewinds — reproduces greedy **exactly**.
 
 So the effect is the batch size, not the speculation. If you need a run to match
-non-speculative greedy token for token, leave `--mtp-spec` off.
+non-speculative greedy token for token, leave `--spec` off.
 
 ## Numerical parity
 
@@ -566,7 +566,7 @@ extends it exactly — the same contract as the Qwen 3.x GDN family — and
   need no MRoPE bookkeeping.
 - **Not yet**: `--tp` tensor parallelism (cleanly refused; use the layer
   split) and NextN/MTP speculation (llama.cpp asserts its glm5next MTP graph
-  unimplemented too; `--mtp-spec` prints a notice and serves standard decode).
+  unimplemented too; `--spec` prints a notice and serves standard decode).
 
 ### Measured
 

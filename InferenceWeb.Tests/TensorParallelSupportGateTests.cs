@@ -24,6 +24,7 @@
 // ModelArchitectureDescriptor.Validate() instead, asserted here over the whole
 // registered set.
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using TensorSharp;
 using TensorSharp.Models.Architecture;
@@ -97,6 +98,43 @@ public class TensorParallelSupportGateTests
         ITensorParallelGroup group = null;
         Assert.Equal(4, Resolve(arch, BackendType.GgmlCuda, 4, ref group, out int layerSplit));
         Assert.Equal(1, layerSplit);
+    }
+
+    [Theory]
+    [InlineData(1, 1, true)]
+    [InlineData(2, 2, true)]
+    [InlineData(1, 2, false)]
+    [InlineData(2, 4, false)]
+    public void Qwen3BatchedTp_RequiresAllRanksToBeLocal(
+        int localDegree, int globalDegree, bool expected)
+    {
+        Assert.Equal(expected,
+            TensorSharp.Models.Qwen3Model.SupportsBatchedTensorParallelGeometry(
+                localDegree, globalDegree));
+    }
+
+    [Fact]
+    public void Qwen3BatchedTp_RequiresEveryProjectionShard()
+    {
+        var shards = new HashSet<string>(StringComparer.Ordinal);
+        foreach (int layer in Enumerable.Range(0, 2))
+        {
+            string prefix = $"blk.{layer}.";
+            shards.Add(prefix + "attn_qkv.weight");
+            shards.Add(prefix + "attn_output.weight");
+            shards.Add(prefix + "ffn_gate_up.weight");
+            shards.Add(prefix + "ffn_down.weight");
+        }
+
+        Assert.True(TensorSharp.Models.Qwen3Model.HasRequiredBatchedTensorParallelWeights(
+            numLayers: 2, shards.Contains));
+
+        // The separate-Q/K/V mixed-quant sharder can decline silently when a
+        // source is absent. That must keep ForwardBatch off rather than fail the
+        // first live request with a missing TP column-parallel weight.
+        shards.Remove("blk.1.attn_qkv.weight");
+        Assert.False(TensorSharp.Models.Qwen3Model.HasRequiredBatchedTensorParallelWeights(
+            numLayers: 2, shards.Contains));
     }
 
     [Fact]

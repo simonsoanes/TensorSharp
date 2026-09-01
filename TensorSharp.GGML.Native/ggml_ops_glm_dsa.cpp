@@ -1496,7 +1496,7 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
     // Loading it costs a whole extra decoder layer (~3 GiB of GLM-5.2 at
     // IQ2_XXS) that also competes with the KV cache for the VRAM the context is
     // sized against, so it is opt-in: the server sets TS_MTP_SPEC from
-    // --mtp-spec before the model loads, and the managed side forwards that as
+    // --spec before the model loads, and the managed side forwards that as
     // `load_mtp`. A checkpoint that declares nextn_predict_layers but ships no
     // MTP tensors (a trunk-only re-quantization) loads normally without one.
     if (load_mtp && hp.g5n)
@@ -2529,7 +2529,7 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
         // requested, and "(+1 MTP)" on a run with no draft head is exactly the
         // kind of log line that costs an hour.
         const char * mtp_state = m->has_mtp ? " +1 NextN/MTP draft block"
-                               : (hp.n_layer_nextn > 0 ? " (NextN block present but not loaded; --mtp-spec loads it)"
+                               : (hp.n_layer_nextn > 0 ? " (NextN block present but not loaded; --spec loads it)"
                                                        : "");
         fprintf(stderr, "[glm] glm-dsa: %d trunk layers%s, n_embd=%d, %d heads, MLA(q_lora=%d, kv_lora=%d, "
                 "head_k=%d, head_v=%d, rope=%d), %d experts top-%d (ff=%d), dense_lead=%d, indexer %dx%d top-%d on "

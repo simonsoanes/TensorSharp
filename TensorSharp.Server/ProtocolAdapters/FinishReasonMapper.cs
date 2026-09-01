@@ -40,6 +40,14 @@ namespace TensorSharp.Server.ProtocolAdapters
         /// only reason that must survive translation intact on every protocol.</summary>
         public const string PipelineMaxTokens = "max_tokens";
 
+        /// <summary>
+        /// The turn was stopped because reasoning consumed its thinking allowance. Maps
+        /// to the same client-visible "length" as running out of tokens, because from
+        /// the caller's side it IS a length stop — the difference is only that it was
+        /// caught early enough to say why.
+        /// </summary>
+        public const string PipelineThinkingBudget = "thinking_budget";
+
         // ---- OpenAI /v1/chat/completions --------------------------------------
 
         /// <summary>Truncated by the token budget.</summary>
@@ -146,6 +154,7 @@ namespace TensorSharp.Server.ProtocolAdapters
         /// re-request work that was already finished.
         /// </summary>
         public static bool IsTruncated(string pipelineReason) =>
-            string.Equals(pipelineReason, PipelineMaxTokens, StringComparison.Ordinal);
+            string.Equals(pipelineReason, PipelineMaxTokens, StringComparison.Ordinal)
+            || string.Equals(pipelineReason, PipelineThinkingBudget, StringComparison.Ordinal);
     }
 }

@@ -1389,7 +1389,7 @@ TSG_EXPORT int TSGgml_Gemma4DraftStep(
         if (freq_t != nullptr)
             ggml_backend_tensor_set(freq_t, rope_freq_factors, 0, static_cast<std::size_t>(rope_freq_factors_len) * sizeof(float));
 
-        if (ggml_backend_graph_compute(g_backend, graph) != GGML_STATUS_SUCCESS)
+        if (tsg::compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
         {
             set_last_error("ggml backend graph execution failed for Gemma4 draft step.");
             return 0;

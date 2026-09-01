@@ -55,6 +55,14 @@ namespace TensorSharp.Server.Hosting
                     string.Join(", ", options.SupportedBackends.Select(b => b.Value)));
             }
 
+            // Why a probed backend is missing from the list above: the probe threw and
+            // the exception was swallowed into "unavailable" during discovery.
+            foreach (string probeFailure in BackendCatalog.DescribeProbeFailures())
+            {
+                logger.LogInformation(LogEventIds.BackendUnavailable,
+                    "Backend probe failed, so that backend is not offered: {ProbeFailure}", probeFailure);
+            }
+
             logger.LogInformation(LogEventIds.HostConfiguration,
                 "Server configuration: hostedModel={HostedModel} hostedMmProj={HostedMmProj} defaultMaxTokens={DefaultMaxTokens}{MaxTokensPinned} videoFrames={VideoFrames} videoFps={VideoFps} videoSize={VideoSize} videoSteps={VideoSteps} videoMode={VideoMode} videoSampleFps={VideoSampleFps} videoMaxFrames={VideoMaxFrames} listen={ListenAddress}",
                 options.StartupModelPath ?? "(none)",

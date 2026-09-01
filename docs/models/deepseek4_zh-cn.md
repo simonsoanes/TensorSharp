@@ -114,13 +114,13 @@ argmax，否则就是对话采样器——因此投机可与 REPL 中的 `/temp`
 
 ### 在 TensorSharp.Server 上
 
-同一个草稿器也可用于 HTTP API。用 `--draft-model` 传入，并用 `--mtp-spec` 打开
-投机：
+同一个草稿器也可用于 HTTP API。用 `--draft-model` 传入即可 —— 指定草稿器本身
+就会启用投机（显式 `--no-spec` 可否决）：
 
 ```bash
 TensorSharp.Server --model DeepSeek-V4-Flash-...-00001-of-00005.gguf \
     --backend ggml_cuda --tp 4 \
-    --mtp-spec --draft-model DSpark-drafter-Q2K-Q8-0731.gguf
+    --draft-model DSpark-drafter-Q2K-Q8-0731.gguf
 ```
 
 引擎同样会用**该请求自己的采样器**抽取每一行验证结果，因此投机可与任意
@@ -138,9 +138,9 @@ per-sequence slot 以正常 decode 速度服务这一批。并发是安全的，
 | 配置 | tok/s |
 |---|---|
 | 无草稿器 | 25.1 |
-| `--mtp-spec --draft-model …` | **31.3 – 32.1（1.25–1.28×）** |
+| `--draft-model …` | **31.3 – 32.1（1.25–1.28×）** |
 
-`--mtp-pmin` 的默认值会匹配所加载的草稿器——块级草稿器为 0.35，逐 token 草稿头
+`--spec-pmin` 的默认值会匹配所加载的草稿器——块级草稿器为 0.35，逐 token 草稿头
 为 0.75——因此无需调参。显式设置仍可能更优；启动日志会报告当前生效的门限
 （`pMin=0.35, draft=block(5)`）。
 
@@ -200,10 +200,10 @@ checkpoint 中的路由专家以 FP4 加每 32 个元素一个 E8M0 scale 存储
 | 参数 | 默认值 | 含义 |
 |---|---|---|
 | `--draft-model <path>` | 无 | DSpark 草稿器 GGUF（环境变量 `TS_DSV4_DSPARK`） |
-| `--spec-draft-n-max <N>` | 块大小（5） | 每步最多起草的 token 数 |
-| `--spec-draft-conf-min <p>` | `0.35` | 保留某个起草位置所需的最小**累积**接受概率（置信度头各位置估计值的乘积） |
+| `--spec-draft <N>` | 块大小（5） | 每步最多起草的 token 数 |
+| `--spec-pmin <p>` | `0.35` | 保留某个起草位置所需的最小**累积**接受概率（置信度头各位置估计值的乘积）；`0` 表示从不设阈 |
 
-`--spec-draft-conf-min` 是真正关键的旋钮：在这个稀疏 MoE 主干上，验证批中多一行
+`--spec-pmin` 是真正关键的旋钮：在这个稀疏 MoE 主干上，验证批中多一行
 大约相当于四分之一个 decode 步（每一行都会拉入自己那套专家），因此在前缀接受率
 估计低于约 0.35 之后继续起草，期望收益为负。调低会起草更多、回滚更多；调高则更
 频繁地退回普通 decode。

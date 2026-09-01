@@ -30,7 +30,7 @@
 
   <h3 id="paged-kv">Native paged attention</h3>
   <p>The native kernel <code>TSGgml_PagedAttentionForward</code> (and a <code>WithSinks</code> variant for GPT OSS) gathers K/V from the paged buffer in C++, builds a small GGML graph per sequence, and dispatches <code>ggml_flash_attn_ext</code> — the same fused Metal/CUDA flash-attention kernel the single-sequence path uses. On a long-context Ministral-3-14B workload (4×~800 tokens) it runs ~21% faster than the legacy per-sequence GGML path.</p>
-  <p>MLA / sparse-attention architectures (DeepSeek V4, GLM 5.x) take a third path. A single compressed cache row per token has no paged layout to page, so the native executor gives each request its own <strong>slot</strong> — a full set of per-layer MLA and indexer caches plus its own <code>n_past</code> — and binding a request switches the active slot without moving KV bytes. GLM adds an optional <strong>batched fused decode</strong> (<code>TS_BATCHED_FUSED_DECODE=1</code>): one graph, one token from each of N sequences, so the weights are read once between them — 1.81× aggregate decode at four concurrent requests. It is off by default because batching changes every GEMM shape, and 75 of the 78 layers routing top-8-of-256 can turn a last-bit difference into a different expert pick on a 2-bit checkpoint.</p>
+  <p>MLA / sparse-attention architectures (DeepSeek V4, GLM 5.x) take a third path. A single compressed cache row per token has no paged layout to page, so the native executor gives each request its own <strong>slot</strong> — a full set of per-layer MLA and indexer caches plus its own <code>n_past</code> — and binding a request switches the active slot without moving KV bytes. GLM's <strong>batched fused decode</strong> is enabled by default: one graph takes one token from each of N sequences, so the weights are read once between them — 1.81× aggregate decode at four concurrent requests. Set <code>TS_BATCHED_FUSED_DECODE=0</code> to use serial fused decode for an exact path comparison. Batching changes every GEMM shape, and 75 of the 78 layers routing top-8-of-256 can turn a last-bit difference into a different expert pick on a 2-bit checkpoint.</p>
 
   <p>Batched forward passes (Mistral 3, Gemma 4, GPT OSS, Qwen 3.5/3.6 with a GatedDeltaNet recurrent-state pool, and Nemotron-H with a Mamba2 recurrent-state pool) pack N sequences into one <code>ForwardBatch</code> call with one batched linear-projection matmul per layer and paged K/V scatter. Gemma 4 reaches ~1.5–1.6× legacy throughput; Nemotron-H Mamba2 batched reaches ~3.95× at batch=3 on an Apple M4 Pro.</p>
   <div class="callout note"><div class="ic">📖</div><p>Full deep dive: <code>docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md</code> in the repository.</p></div>
@@ -38,19 +38,19 @@
   <h2 id="mtp">MTP / NextN speculative decoding</h2>
   <p>Some architectures ship a <strong>multi-token-prediction (MTP / NextN) draft head</strong> that lets the server run <em>lossless</em> speculative decoding for solo (non-concurrent) sequences. The draft proposes several future tokens cheaply, the trunk verifies all of them in one batched forward, and accepted tokens are committed in a single step.</p>
   <div class="callout tip"><div class="ic">🎯</div><p>Because the request's own sampler — temperature, top-k/p, and all penalties — drives <em>both</em> the draft and the verify, the output is <strong>identical to standard decode</strong>. Speculation only changes how many forward passes it takes to produce the same tokens.</p></div>
-  <p>It is off by default. Enable it on the server with <code>--mtp-spec</code> (env <code>TS_MTP_SPEC=1</code>):</p>
+  <p>It is off by default. For a draft head embedded in the trunk GGUF, enable it on the server with <code>--spec</code> (env <code>TS_SPEC=1</code>, legacy <code>TS_MTP_SPEC=1</code>); a draft head that ships as its own GGUF is enabled simply by naming it with <code>--draft-model</code>:</p>
   <pre data-lang="bash"><code># Qwen 3.6 — the NextN block is embedded in the trunk GGUF, no extra file needed
 # (use a GGUF from unsloth/Qwen3.6-35B-A3B-MTP-GGUF; base-repo exports strip the NextN block)
 dotnet run --project TensorSharp.Server -c Release --no-build -- --model Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf --backend ggml_cuda \
-    --mtp-spec --mtp-draft 8 --mtp-pmin 0.75
+    --spec --spec-draft 8 --spec-pmin 0.75
 
 # Gemma 4 — load the separate gemma4-assistant draft GGUF that matches the target
 dotnet run --project TensorSharp.Server -c Release --no-build -- --model gemma-4-12B-it-qat-UD-Q4_K_XL.gguf --backend ggml_cuda \
-    --mtp-spec --mtp-draft-model mtp-gemma-4-12B-it.gguf</code></pre>
+    --draft-model mtp-gemma-4-12B-it.gguf</code></pre>
   <h4>Two draft-head shapes</h4>
   <ul>
-    <li><strong>Qwen 3.6 (embedded NextN)</strong> — the GGUF carries one extra decoder block plus the NextN projection/norm tensors. No separate file; <code>--mtp-draft-model</code> is ignored. Note that only GGUFs that retain the NextN tensors carry it — the <a href="https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF" target="_blank" rel="noopener">unsloth/Qwen3.6-35B-A3B-MTP-GGUF</a> repo keeps them, while base-repo Qwen3.6 exports strip the block and silently fall back to standard decode. The GatedDeltaNet trunk state is snapshotted so a partially-rejected verify batch can roll back.</li>
-    <li><strong>Gemma 4 (separate <code>gemma4-assistant</code> GGUF)</strong> — an EAGLE-style recurrent drafter loaded with <code>--mtp-draft-model</code>. It holds no K/V of its own: every draft layer queries the target model's existing per-layer KV cache. The draft's hidden size must match the target (pair the 12B target with its 12B draft). A mismatched or incomplete draft <strong>fails fast at startup</strong> with a remediation hint.</li>
+    <li><strong>Qwen 3.6 (embedded NextN)</strong> — the GGUF carries one extra decoder block plus the NextN projection/norm tensors. No separate file; <code>--draft-model</code> is ignored. Note that only GGUFs that retain the NextN tensors carry it — the <a href="https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF" target="_blank" rel="noopener">unsloth/Qwen3.6-35B-A3B-MTP-GGUF</a> repo keeps them, while base-repo Qwen3.6 exports strip the block and silently fall back to standard decode. The GatedDeltaNet trunk state is snapshotted so a partially-rejected verify batch can roll back.</li>
+    <li><strong>Gemma 4 (separate <code>gemma4-assistant</code> GGUF)</strong> — an EAGLE-style recurrent drafter loaded with <code>--draft-model</code> (which enables speculation by itself). It holds no K/V of its own: every draft layer queries the target model's existing per-layer KV cache. The draft's hidden size must match the target (pair the 12B target with its 12B draft). A mismatched or incomplete draft <strong>fails fast at startup</strong> with a remediation hint.</li>
   </ul>
   <h4>Where it's profitable</h4>
   <div class="table-scroll">
@@ -63,7 +63,7 @@ dotnet run --project TensorSharp.Server -c Release --no-build -- --model gemma-4
     </tbody>
   </table>
   </div>
-  <p>Tuning: <code>--mtp-draft</code> (default 8) bounds tokens drafted per step; <code>--mtp-pmin</code> is the minimum draft confidence to keep a token — its default depends on the drafter kind (<code>0.75</code> for a per-token draft head, <code>0.35</code> for a block drafter, where the gate is the <em>cumulative</em> prefix probability and so the same number is far stricter). Gemma 4 A/B switches are the <code>TS_GMTP_*</code> env vars.</p>
+  <p>Tuning: <code>--spec-draft</code> (default 8) bounds tokens drafted per step; <code>--spec-pmin</code> is the minimum draft confidence to keep a token — its default depends on the drafter kind (<code>0.15</code> for a per-token draft head, <code>0.35</code> for a block drafter, where the gate is the <em>cumulative</em> prefix probability and so the same number is far stricter). Gemma 4 A/B switches are the <code>TS_GMTP_*</code> env vars.</p>
 
   <h2 id="dspark">DSpark block speculative decoding (DeepSeek V4)</h2>
   <p>DeepSeek V4 ships <strong>DSpark</strong> ("Confidence-Scheduled Speculative Decoding with Semi-Autoregressive Generation") as a support module in the checkpoint: three DSV4 blocks that read the trunk's hidden states and propose a whole <strong>block</strong> of tokens per step instead of one, a Markov head that conditions each block position on the token before it, and a confidence head that predicts each position's acceptance probability. The trunk then verifies the block in one batched forward and keeps only the prefix its own sampler would have produced.</p>
@@ -73,9 +73,9 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model DeepSeek-V4-Flash-...-000
     --backend ggml_cuda --draft-model DSpark-drafter-Q2K-Q8-0731.gguf \
     --input prompt.txt --max-tokens 200 --temperature 0
 
-# Server — same drafter, plus --mtp-spec
+# Server — the same drafter flag; naming the file turns speculation on
 dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model DeepSeek-V4-Flash-...-00001-of-00005.gguf \
-    --backend ggml_cuda --tp 4 --mtp-spec --draft-model DSpark-drafter-Q2K-Q8-0731.gguf</code></pre>
+    --backend ggml_cuda --tp 4 --draft-model DSpark-drafter-Q2K-Q8-0731.gguf</code></pre>
   <p>It runs on <strong>both GPU engines</strong> — <code>--backend cuda</code> (direct CUDA) and <code>--backend ggml_cuda</code> (native ggml); <code>ggml_vulkan</code> and <code>cpu</code> have no speculative path for this architecture and log a warning if a drafter is configured. On ggml the drafter is three extra graph layers whose key ring the trunk graph commits itself, so speculation costs no host round-trips. On the CLI it needs a pure-argmax sampler (any temperature, top-k/p, or repetition penalty turns it off); on the server every verify row is drawn with the request's own sampler, so it composes with any sampling settings. Speculation serves <strong>solo sequences only</strong> — as soon as a second request is in flight, DSV4's per-sequence slots serve the batch at normal decode speed.</p>
   <h4>Measured (4×A40, DeepSeek-V4-Flash-0731 UD-Q8_K_XL, greedy)</h4>
   <div class="table-scroll">
@@ -89,12 +89,12 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model DeepSeek-V4-Flash-.
   </table>
   </div>
   <p>Multi-turn chat benefits most — a turn that continues an established context is exactly where the drafter is confident. On a 5-turn interactive session the same box measured 1.50× to <strong>2.02×</strong> per turn (66–87% acceptance), with prefill at parity. Greedy output was byte-identical to the non-speculative baseline on both the 200-token and the 15K-context runs.</p>
-  <p>Why 1.3× and not more: the trunk is 6-of-256 sparse, so each extra token in the verify batch pulls its own set of routed experts through VRAM — a verify row costs roughly a quarter of a full decode step no matter how cheap the draft was. <code>--spec-draft-conf-min</code> (default <code>0.35</code>, the minimum <em>cumulative</em> acceptance probability for a drafted position) is the knob that keeps that trade positive; <code>--spec-draft-n-max</code> caps tokens per block.</p>
+  <p>Why 1.3× and not more: the trunk is 6-of-256 sparse, so each extra token in the verify batch pulls its own set of routed experts through VRAM — a verify row costs roughly a quarter of a full decode step no matter how cheap the draft was. <code>--spec-pmin</code> (default <code>0.35</code> for a block drafter, the minimum <em>cumulative</em> acceptance probability for a drafted position) is the knob that keeps that trade positive; <code>--spec-draft</code> caps tokens per block.</p>
 
   <h2 id="dflash">DFlash block speculative decoding (Muse-Glimmer)</h2>
   <p>Muse-Glimmer has its own block drafter, <strong>DFlash</strong>: a separate 5-layer GGUF (<code>general.architecture = dflash</code>) that proposes the whole speculative window in a single forward. It borrows the target's token embedding and LM head, keeps its own sliding-window KV ring, and is driven in three passes — <em>encode</em> the trunk's per-layer input residuals at <code>dflash.target_layers</code> into one wide row, <em>inject</em> that row as the K/V of every draft layer, then <em>draft</em> <code>[anchor, MASK × (block−1)]</code> through the five blocks and score it with the target's LM head. The trunk then verifies the block in one batched forward.</p>
   <pre data-lang="bash"><code>dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
-    --backend ggml_cuda --draft-model dflash-kquant.gguf --spec-draft-n-max 15 \
+    --backend ggml_cuda --draft-model dflash-kquant.gguf --spec-draft 15 \
     --input prompt.txt --max-tokens 256</code></pre>
   <p>Both halves are fused native graphs that CUDA-graph-capture and replay: <code>TSGgml_DFlashInject</code> and <code>TSGgml_DFlashDraftBlock</code>, the latter finishing with an on-device <code>argmax</code> so the 202048-wide probability block never crosses PCIe. Verification is greedy against the target, so the emitted stream is the plain-greedy stream. A runtime <strong>cost governor</strong> measures speculation against plain decoding and parks the drafter while it is measurably slower, which means speculation can only help — but it also needs a few hundred generated tokens to settle, so very short answers may not see the win. Pass no sampler flags on the CLI: <code>--top-k 1</code> is not greedy enough for <code>SamplingConfig.IsGreedy</code> and silently disables the whole speculative path. Measured against llama.cpp's own DFlash implementation on one RTX PRO 6000 Blackwell (Q8_0, greedy, 60-token prompt): <strong>50.9 tok/s against llama.cpp's 45.5 and 35.0 for plain decode</strong>. Full ladder, including where llama.cpp is ahead: the repository's <code>docs/models/muse-glimmer.md</code> card.</p>
 

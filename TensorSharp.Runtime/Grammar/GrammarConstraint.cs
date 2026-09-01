@@ -286,6 +286,11 @@ namespace TensorSharp.Runtime.Grammar
             }
         }
 
+        // Latched once a token's bytes could not be decoded in Accept(): the
+        // token is emitted without advancing the parser, so warning per token
+        // would spam every remaining step of the response.
+        private static bool _acceptDecodeFailReported;
+
         /// <summary>
         /// Commit a token the sampler chose, advancing the parser. EOS and other
         /// special ids carry no text and leave the state untouched.
@@ -299,8 +304,16 @@ namespace TensorSharp.Runtime.Grammar
             {
                 _tokenizer.AppendTokenBytes(tokenId, _tokenBytes);
             }
-            catch
+            catch (Exception ex)
             {
+                if (!_acceptDecodeFailReported)
+                {
+                    _acceptDecodeFailReported = true;
+                    Console.Error.WriteLine(
+                        $"[GrammarConstraint] Tokenizer failed to decode the bytes of accepted token {tokenId} ({ex.Message}); " +
+                        "the token is emitted without advancing the grammar parser, so constrained output may " +
+                        "no longer match the grammar/schema from this point on. Reported once.");
+                }
                 return;
             }
             if (_tokenBytes.Count == 0) return;

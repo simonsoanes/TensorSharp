@@ -52,6 +52,11 @@ namespace TensorSharp.Models
         private int _g4PagedBlockSize;
         private int[] _g4PagedKvDimPerLayer; // num_kv_heads * head_dim per layer
 
+        // One-time notice for the q8_0 KV gate below: without it every request
+        // silently serializes through the per-seq path and it looks like a
+        // scheduler bug rather than a KV-dtype limitation.
+        private bool _g4BatchedKvDtypeWarned;
+
         /// <summary>Declared availability of the batched path (see
         /// <see cref="IBatchedPagedModel.BatchedForwardAvailable"/>). Mirrors
         /// the STATIC gates <see cref="ForwardBatch"/> enforces with
@@ -69,7 +74,18 @@ namespace TensorSharp.Models
                 if (string.Equals(optOut, "0", StringComparison.Ordinal) ||
                     string.Equals(optOut, "false", StringComparison.OrdinalIgnoreCase))
                     return false;
-                if (_kvCacheDtype.IsBlockQuantized()) return false;
+                if (_kvCacheDtype.IsBlockQuantized())
+                {
+                    if (!_g4BatchedKvDtypeWarned)
+                    {
+                        _g4BatchedKvDtypeWarned = true;
+                        Console.WriteLine($"  Gemma4 batched forward unavailable with a {_kvCacheDtype} KV cache " +
+                            "(--kv-cache-dtype): the batched path and the fused speculative trunk are off, " +
+                            "so concurrent requests serialize through the per-sequence forward (slower under load). " +
+                            "Reported once.");
+                    }
+                    return false;
+                }
                 for (int l = 0; l < Config.NumLayers; l++)
                     if (HasMoE(l)) return false;
                 return true;

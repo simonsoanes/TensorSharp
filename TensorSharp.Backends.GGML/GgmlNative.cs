@@ -1631,6 +1631,14 @@ internal enum GgmlIndexReductionOp
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial IntPtr TSGgml_GetLastError();
 
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int TSGgml_HasBackendFailure();
+
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial IntPtr TSGgml_GetBackendFailureText();
+
         [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf8)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial int TSGgml_SetNativeEnvironmentVariable(
@@ -6663,6 +6671,24 @@ internal enum GgmlIndexReductionOp
             IntPtr errPtr = TSGgml_GetLastError();
             string message = errPtr == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(errPtr);
             return string.IsNullOrWhiteSpace(message) ? fallback : message;
+        }
+
+        /// <summary>
+        /// True once a GPU command buffer has failed in this process. The op that
+        /// drained the dead buffer still returned success — ggml_backend_synchronize
+        /// cannot report otherwise — so without this check the first visible symptom
+        /// is an unrelated op failing one or more forwards later, over results that
+        /// were already undefined.
+        ///
+        /// Sticky and unrecoverable in-process: see TSGgml_HasBackendFailure.
+        /// </summary>
+        public static bool HasBackendFailure() => TSGgml_HasBackendFailure() != 0;
+
+        /// <summary>What ggml logged about the failure, or an empty string.</summary>
+        public static string BackendFailureText()
+        {
+            IntPtr ptr = TSGgml_GetBackendFailureText();
+            return ptr == IntPtr.Zero ? string.Empty : (Marshal.PtrToStringAnsi(ptr) ?? string.Empty);
         }
 
         private static string GetBackendAvailabilityHint(GgmlBackendType backendType)

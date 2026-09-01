@@ -879,15 +879,15 @@ public class KVCachePromptRendererTests
     }
 
     [Fact]
-    public void RenderToTokens_PartScopedMarkerOnSplicedAssistantTurn_IsDropped()
+    public void RenderToTokens_PartScopedMarkerOnSplicedAssistantTurn_UsesSafePreRawBoundary()
     {
         var renderer = new KVCachePromptRenderer(new FakeRenderer());
         var tokenizer = new CharTokenizer();
         var rawTokens = new List<int> { 1001, 1002, 1003 };
 
         // The content these offsets addressed is replaced wholesale by the raw
-        // tokens, so the offsets no longer refer to anything: they must be
-        // dropped rather than clamped onto the placeholder.
+        // tokens, so the exact offset is unknowable. It must collapse to a safe
+        // boundary before the raw run rather than disappear into cache-all mode.
         var assistant = new ChatMessage
         {
             Role = "assistant",
@@ -900,9 +900,48 @@ public class KVCachePromptRendererTests
             new List<ChatMessage> { new() { Role = "user", Content = "Hi" }, assistant },
             "fake", addGenerationPrompt: true, out var breakpoints);
 
-        Assert.True(breakpoints == null || breakpoints.Count == 0,
-            "A part offset into content that was replaced by raw tokens must be dropped.");
-        Assert.True(FindSubsequence(tokens, rawTokens) >= 0);
+        int rawStart = FindSubsequence(tokens, rawTokens);
+        Assert.True(rawStart >= 0);
+        Assert.Equal(rawStart, Assert.Single(breakpoints!));
+        Assert.DoesNotContain(KVCachePromptRenderer.BreakpointSentinel, tokenizer.Decode(tokens));
+    }
+
+    [Fact]
+    public void RenderToTokens_ConditionalToolSplice_PreservesPartMarkerInToolResult()
+    {
+        var renderer = new KVCachePromptRenderer(new FakeRenderer());
+        var tokenizer = new CharTokenizer();
+        var rawTokens = tokenizer.Encode("RAW_GENERATED_TOOL_CALL", addSpecial: false);
+
+        var toolResult = new ChatMessage { Role = "tool", Content = "RESULT_BODY" };
+        toolResult.AddContentCacheBreakpoint(6); // end of "RESULT"
+
+        var messages = new List<ChatMessage>
+        {
+            new() { Role = "user", Content = "find it" },
+            new()
+            {
+                Role = "assistant",
+                Content = "template cannot reproduce the generated round",
+                RawOutputTokens = rawTokens,
+                ToolCalls = new List<ToolCall> { new() { Name = "search" } },
+            },
+            toolResult,
+            new() { Role = "user", Content = "continue" },
+        };
+
+        // Gemma 4 conditionally retries with raw-token splicing when the active
+        // template cannot reconstruct a tool-calling round. The breakpoint sentinel
+        // temporarily splits RESULT_BODY in that retry, but it must not make the
+        // tool-result survival check reject an otherwise safe splice.
+        var tokens = renderer.RenderToTokens(tokenizer, null, messages, "gemma4",
+            addGenerationPrompt: true, out var breakpoints, enableThinking: true);
+
+        Assert.True(FindSubsequence(tokens, rawTokens) >= 0,
+            "Expected the conditional retry to return the raw-token-spliced pass.");
+
+        int bp = Assert.Single(breakpoints!);
+        Assert.EndsWith("<tool>RESULT", tokenizer.Decode(tokens.GetRange(0, bp)));
         Assert.DoesNotContain(KVCachePromptRenderer.BreakpointSentinel, tokenizer.Decode(tokens));
     }
 

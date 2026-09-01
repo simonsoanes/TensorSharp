@@ -425,6 +425,49 @@ namespace tsg
         g_pending_gpu_work.store(true, std::memory_order_release);
     }
 
+    // Bumped once per GGML_LOG_LEVEL_ERROR line ggml emits (see
+    // filtered_ggml_log), and latched when one of those lines shows up while we
+    // are draining an op's GPU work.
+    extern std::atomic<std::uint64_t> g_ggml_error_count;
+    extern std::atomic<bool> g_backend_compute_failed;
+
+    // A command buffer that dies on the GPU — Metal's
+    // kIOGPUCommandBufferCallbackErrorOutOfMemory, say — is reported to the ggml
+    // log and NOWHERE else, because the call that discovers it,
+    // ggml_backend_synchronize, returns void. Worse, ggml_backend_graph_compute is
+    // compute_async + synchronize and returns the status captured BEFORE that
+    // synchronize (ggml-backend.cpp:455-459), while ggml_metal_graph_compute
+    // commits its command buffers and returns GGML_STATUS_SUCCESS without waiting
+    // for them. So the graph whose command buffer died still reports SUCCESS, its
+    // op hands back undefined results, ggml-metal latches its own has_error, and
+    // the first thing to actually fail is the NEXT graph — which is why the
+    // exception used to name an innocent bystander (the embedding get_rows that
+    // opens the following forward).
+    //
+    // These two drop-ins keep ggml's signatures and return values and add the one
+    // thing missing: any error ggml logs while a compute or a drain is in flight
+    // belongs to that command buffer, so latch it. The flag is sticky because the
+    // backend is — ggml-metal clears has_error only by being recreated, and
+    // TSGgml_Shutdown consumes this process's one-shot backend init, so nothing
+    // short of a restart recovers.
+    inline ggml_status compute_graph(ggml_backend_t backend, ggml_cgraph* graph)
+    {
+        const std::uint64_t before = g_ggml_error_count.load(std::memory_order_acquire);
+        const ggml_status status = ggml_backend_graph_compute(backend, graph);
+        if (g_ggml_error_count.load(std::memory_order_acquire) != before)
+            g_backend_compute_failed.store(true, std::memory_order_release);
+        return status;
+    }
+
+    // Same, for the paths that submit asynchronously and drain separately.
+    inline void sync_backend(ggml_backend_t backend)
+    {
+        const std::uint64_t before = g_ggml_error_count.load(std::memory_order_acquire);
+        ggml_backend_synchronize(backend);
+        if (g_ggml_error_count.load(std::memory_order_acquire) != before)
+            g_backend_compute_failed.store(true, std::memory_order_release);
+    }
+
     // Standard end-of-op finalisation. Either records that the GPU still has work in
     // flight (lazy-sync path) or syncs and copies the result back to the caller's
     // buffer (eager path, used when the result is not host-mapped or when async
@@ -440,7 +483,7 @@ namespace tsg
             mark_pending_gpu_work();
             return;
         }
-        ggml_backend_synchronize(g_backend);
+        sync_backend(g_backend);
         if (!result_used_zero_copy &&
             result_storage != nullptr &&
             result_data != nullptr &&
@@ -460,7 +503,7 @@ namespace tsg
             mark_pending_gpu_work();
             return;
         }
-        ggml_backend_synchronize(g_backend);
+        sync_backend(g_backend);
     }
 
     // Variant for ops whose result lives in a ggml-owned backend buffer (no
@@ -483,7 +526,7 @@ namespace tsg
             mark_pending_gpu_work();
             return;
         }
-        ggml_backend_synchronize(g_backend);
+        sync_backend(g_backend);
         if (result_storage != nullptr && result_data != nullptr && result_bytes > 0)
         {
             ggml_backend_tensor_get(result_storage, result_data, 0, result_bytes);
@@ -497,7 +540,7 @@ namespace tsg
     {
         if (g_pending_gpu_work.exchange(false, std::memory_order_acq_rel))
         {
-            ggml_backend_synchronize(g_backend);
+            sync_backend(g_backend);
             return true;
         }
         return false;

@@ -46,7 +46,7 @@ namespace TensorSharp.Runtime.Scheduling
             // truncating the prompt; keeping the reference would let a later edit
             // (or another thread) drift CacheBreakpoints away from the
             // CacheBreakpointLimit computed here and make caching nondeterministic.
-            if (cacheBreakpoints != null && cacheBreakpoints.Count > 0)
+            if (cacheBreakpoints != null)
             {
                 var copy = new List<int>(cacheBreakpoints.Count);
                 for (int i = 0; i < cacheBreakpoints.Count; i++)
@@ -78,12 +78,16 @@ namespace TensorSharp.Runtime.Scheduling
         /// Explicit token-index breakpoints requested by the client for prompt caching.
         /// When present, the cache manager captures K/V state exactly up to these points
         /// (rounded down to the nearest block) instead of opportunistically capturing
-        /// the entire prefix.
+        /// the entire prefix. <c>null</c> means the client supplied no explicit cache
+        /// policy and the full prefix remains eligible; a non-null empty list explicitly
+        /// disables prefix caching for this request, as does a sole breakpoint at zero.
         /// </summary>
         public IReadOnlyList<int> CacheBreakpoints { get; }
 
         /// <summary>
-        /// The furthest explicit breakpoint, or 0 when the request set none.
+        /// The furthest explicit breakpoint, or 0 when an explicit policy allows no
+        /// cacheable prefix. Use <see cref="CacheBreakpoints"/> to distinguish that from
+        /// the implicit cache-all policy, whose breakpoint list is <c>null</c>.
         /// Only the last one bounds what gets cached — the earlier ones mark
         /// segment boundaries inside a prefix that is cached in full anyway —
         /// so the capture path compares against this instead of rescanning

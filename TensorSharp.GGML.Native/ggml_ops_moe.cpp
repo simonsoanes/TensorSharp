@@ -634,7 +634,7 @@ namespace
 
         if (s_probe)
         {
-            ggml_backend_synchronize(backend);
+            tsg::sync_backend(backend);
             const double ms = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t_probe).count();
             static thread_local int s_n = 0;
@@ -799,7 +799,7 @@ namespace
             return e != nullptr && e[0] == '1';
         }();
         const auto t_compute = std::chrono::steady_clock::now();
-        const ggml_status status = ggml_backend_graph_compute(cpu, graph);
+        const ggml_status status = tsg::compute_graph(cpu, graph);
         if (s_timing)
         {
             const auto t_end = std::chrono::steady_clock::now();
@@ -1476,7 +1476,7 @@ namespace
         }
 
         const auto t_compute = std::chrono::steady_clock::now();
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("MoE prefill: ggml_backend_graph_compute failed.");
@@ -1953,7 +1953,7 @@ namespace tsg
             if (end > begin)
             {
                 ggml_cgraph view = ggml_graph_view(graph, begin, end);
-                if (ggml_backend_graph_compute(g_backend, &view) != GGML_STATUS_SUCCESS)
+                if (tsg::compute_graph(g_backend, &view) != GGML_STATUS_SUCCESS)
                 {
                     set_last_error(std::string(kernel_name) + ": host-MoE segment execution failed.");
                     return false;

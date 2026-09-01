@@ -1,6 +1,7 @@
 <Solution>
   <Project Path="AdvUtils/AdvUtils.csproj" />
   <Project Path="InferenceWeb.Tests/InferenceWeb.Tests.csproj" />
+  <Project Path="TensorSharp.AgentHost/TensorSharp.AgentHost.csproj" />
   <Project Path="TensorSharp.Backends.Cuda/TensorSharp.Backends.Cuda.csproj" />
   <Project Path="TensorSharp.Backends.GGML/TensorSharp.Backends.GGML.csproj" />
   <Project Path="TensorSharp.Backends.MLX/TensorSharp.Backends.MLX.csproj" />

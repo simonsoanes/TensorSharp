@@ -9,6 +9,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
 using System;
+using TensorSharp.AgentHost.Skills;
 using System.Collections.Generic;
 using TensorSharp.Runtime;
 
@@ -54,7 +55,15 @@ namespace TensorSharp.Server.Hosting
             long uploadMaxFileBytes = UploadStoragePolicy.DefaultMaxFileBytes,
             long uploadQuotaBytes = 0,
             TimeSpan? uploadTtl = null,
-            bool webUiEnabled = true)
+            bool webUiEnabled = true,
+            IReadOnlyList<string> skillDirectories = null,
+            bool skillsEnabled = true,
+            bool skillsDiscovery = true,
+            bool skillsAllowScripts = false,
+            int skillsMaxRounds = 8,
+            IReadOnlyList<string> defaultSkills = null,
+            SkillSandboxMode skillsSandbox = SkillSandboxMode.Required,
+            bool skillsAllowNetwork = false)
         {
             WebUiEnabled = webUiEnabled;
             ListenUrls = string.IsNullOrWhiteSpace(listenUrls) ? DefaultListenUrls : listenUrls;
@@ -80,6 +89,15 @@ namespace TensorSharp.Server.Hosting
             UploadMaxFileBytes = uploadMaxFileBytes;
             UploadQuotaBytes = uploadQuotaBytes;
             UploadTtl = uploadTtl;
+            SkillDirectories = skillDirectories ?? Array.Empty<string>();
+            SkillsEnabled = skillsEnabled;
+            SkillsDiscovery = skillsDiscovery;
+            SkillsAllowScripts = skillsAllowScripts;
+            SkillsMaxRoundsSpecified = skillsMaxRounds > 0;
+            SkillsMaxRounds = skillsMaxRounds > 0 ? skillsMaxRounds : 8;
+            DefaultSkills = defaultSkills ?? Array.Empty<string>();
+            SkillsSandbox = skillsSandbox;
+            SkillsAllowNetwork = skillsAllowNetwork;
         }
 
         /// <summary>
@@ -193,6 +211,88 @@ namespace TensorSharp.Server.Hosting
         /// path and may legitimately reuse them much later.
         /// </summary>
         public TimeSpan? UploadTtl { get; }
+
+        /// <summary>
+        /// Directories scanned for Agent Skills, in precedence order, from
+        /// <c>--skills-dir</c> / <c>TS_SKILLS_DIR</c>. Defaults to the single
+        /// <c>skills/</c> directory next to the server binary, which is created
+        /// on startup so an operator can drop a skill directory in and restart.
+        /// </summary>
+        public IReadOnlyList<string> SkillDirectories { get; }
+
+        /// <summary>
+        /// False when the operator passed <c>--no-skills</c> (or set
+        /// <c>TS_NO_SKILLS</c> to anything but <c>0</c>): the skills API is not
+        /// mapped, no directory is scanned, and a <c>skills</c> field on a chat
+        /// request is rejected rather than silently ignored.
+        /// </summary>
+        public bool SkillsEnabled { get; }
+
+        /// <summary>
+        /// Whether a chat request that selects no skill still sees the rest of
+        /// the registry advertised, so the model can pick up one the caller did
+        /// not name. From <c>--skills-no-discovery</c>; a request may override it
+        /// per call with <c>"skills_discovery"</c>.
+        /// </summary>
+        public bool SkillsDiscovery { get; }
+
+        /// <summary>
+        /// True when <c>--skills-allow-exec</c> / <c>TS_SKILLS_ALLOW_EXEC</c> lets
+        /// the model run a skill's bundled scripts.
+        ///
+        /// <para>
+        /// Off by default, and it should stay off on any server that accepts skill
+        /// uploads: a skill is content someone else supplied, so running its scripts
+        /// is arbitrary code execution on this host, under this process's account,
+        /// chosen by a model reading that same person's Markdown.
+        /// </para>
+        /// </summary>
+        public bool SkillsAllowScripts { get; }
+
+        /// <summary>
+        /// How many times a model may fetch skill content in one turn before it must
+        /// answer, from <c>--skills-max-rounds</c> / <c>TS_SKILLS_MAX_ROUNDS</c>.
+        /// Each round is a full generation, so this bounds what one malfunctioning
+        /// request can cost.
+        /// </summary>
+        public int SkillsMaxRounds { get; }
+
+        /// <summary>
+        /// True when the operator chose <see cref="SkillsMaxRounds"/> rather than taking
+        /// the default.
+        ///
+        /// <para>
+        /// The distinction exists because the default has to mean different things for
+        /// different work. Eight rounds is generous for fetching skill files and far too
+        /// few once the same budget also gates writing a program, running it, reading the
+        /// traceback and fixing it — a plan that offers code execution raises its own
+        /// default. An operator's explicit number is never raised.
+        /// </para>
+        /// </summary>
+        public bool SkillsMaxRoundsSpecified { get; }
+
+        /// <summary>
+        /// Skills made active for every request that does not name its own, from
+        /// <c>--skill</c>. A request's <c>skills</c> array replaces this rather than
+        /// adding to it, so a client can always narrow the selection - including to
+        /// nothing, by sending an empty array.
+        /// </summary>
+        public IReadOnlyList<string> DefaultSkills { get; }
+
+        /// <summary>
+        /// How hard this server insists on OS isolation for a skill's scripts, from
+        /// <c>--skills-sandbox</c> / <c>TS_SKILLS_SANDBOX</c>. Required by default, so a
+        /// host with no sandbox refuses to run them rather than running them unconfined.
+        /// </summary>
+        public SkillSandboxMode SkillsSandbox { get; }
+
+        /// <summary>
+        /// Whether a sandboxed skill script may reach the network, from
+        /// <c>--skills-allow-network</c> / <c>TS_SKILLS_ALLOW_NETWORK</c>. Off by
+        /// default: denying it is what stops a script that read something it should not
+        /// from sending it anywhere.
+        /// </summary>
+        public bool SkillsAllowNetwork { get; }
 
         /// <summary>Resolved log directory (used by the file logger when it is enabled).</summary>
         public string LogDirectory { get; }

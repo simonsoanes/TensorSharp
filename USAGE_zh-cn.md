@@ -175,6 +175,13 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prom
 dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal \
     --tools tools.json
 
+# Agent Skills（智能体技能）：注册一个技能目录，并为本次运行选中其中一个。前期只有
+# 每个技能的一行描述会占用上下文——SKILL.md 正文与所需的参考文件由模型通过内置的
+# skills_list / skills_read 工具按需自取，而这两个工具由 TensorSharp 在进程内应答。
+# --list-skills 打印注册表（名称、描述、文件、告警）后退出。
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal \
+    --skills-dir ~/skills --skill pdf
+
 # 使用采样参数
 dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal \
     --temperature 0.7 --top-p 0.9 --top-k 40 --repeat-penalty 1.2 --seed 42
@@ -253,14 +260,56 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cu
 | `--system-file <path>` | 从 UTF-8 文本文件读取初始系统提示词（`--system` 的替代写法） |
 | `--think` | 启用思维链/推理模式。所有系列（含 GLM 5.x）都是按需开启：不加时 GLM 的模板会把推理块立刻闭合（`<think></think>`），模型直接作答；加上后提示里会带上 `Reasoning Effort: Max`，并留下一个未闭合的 `<think>` 交给模型自己收尾。REPL 里用 `/think on\|off` 切换。 |
 | `--tools <path>` | 包含工具/函数定义的 JSON 文件。线格式因系列而异，解析器按架构选取——GLM 5.x 发出的是 XML（`<tool_call>NAME<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>`，每个参数一个元素，非纯字符串的值以 `tojson` 编码）而不是 JSON 主体，服务端会把它解析回常规的 OpenAI 工具调用字段，因此客户端看到的仍是标准形状。 |
-| `--spec` / `--no-spec`<br>*（别名 `--mtp-spec` / `--no-mtp-spec`）* | 启用投机解码（默认关闭）。在默认的 `--spec-type auto` 下，它使用主干检查点自带的逐 token 草稿头——GLM 5.2 的 NextN 块与 Qwen 3.6 的同款，无需额外下载任何文件。草稿头每步最多起草 `--spec-draft` 个 token，主干用一次批量前向完成验证；每个输出 token 仍然取自主干的某一行，因此得到的 token 流与普通 decode 本该产生的完全一致（贪心配置下为 argmax，带采样器时同分布），这纯粹是一条加速路径。在所有单序列路径（`--input`、`--input-jsonl`、`--multi-turn-jsonl`、`--interactive`）上生效。**必须在模型加载之前就出现在命令行上**：对 glm-dsa 而言，正是它告诉原生加载器把约 3 GiB 的 NextN 层调入显存，而这一层要与 KV 缓存争抢上下文长度所依据的那块内存。若权重的草稿块复用主干的 LM head（GLM 5.2 即是如此），在 `--tp N>1` 下会被拒绝。环境变量：`TS_SPEC`（旧写法 `TS_MTP_SPEC` 仍被 glm-dsa 的原生加载器读取；glm-dsa 还认 `TS_GLM_MTP=1`/`0`，它会覆盖上述两者，便于 A/B 对比）。 |
-| `--spec-type <name>`<br>*（别名 `--mtp-type`）* | 投机**算法**：`auto`（默认，使用检查点自带的草稿器）、`draft-head`、`block` 或 `ngram`。`ngram` 不需要任何训练权重，对所有模型都能用——它的做法是在上文里找最近几个 token 曾经出现过的位置，把当时紧随其后的内容拿来当草稿，因此凡是答案大量引用输入的场景都很强（摘要、改写、翻译、重复性的结构化输出、Agent 循环），其他场景则退回普通 decode。在 Qwen3.5-9B（Q8_0、`ggml_metal`、M5 Pro）这个完全不带草稿头的检查点上实测 45.2 tok/s，对比普通解码的 31.4 tok/s（1.44x），输出逐字节一致。环境变量：`TS_SPEC_TYPE`。参见 [TensorSharp 的投机解码](docs/speculative_decoding.md)。 |
-| `--spec-draft <N>`<br>*（别名 `--mtp-draft`）* | 每个投机步最多起草的 token 数（取值 1-64，默认 `8`）。它同时决定加载时原生计算图缓存的大小，因此请与 `--spec` 一并显式传入，而不要依赖默认值。环境变量：`TS_SPEC_DRAFT`（或 `TS_MTP_DRAFT`）。 |
-| `--spec-pmin <f>`<br>*（别名 `--mtp-pmin`）* | 草稿置信度门限，取值 `(0, 1]`；遇到第一个低于该值的 token 即停止起草。这个数字*意味着什么*由算法自己决定，因此各算法带各自的默认值：逐 token 草稿头为 `0.75`（其 top-10 logits 上的 top-1 概率），块级草稿器为 `0.35`——后者的门限是**累积**前缀概率，因此同一个数字要严格得多，n-gram 为 `0`（在那里它转而缩放所需的匹配长度）。环境变量：`TS_SPEC_PMIN`（或 `TS_MTP_PMIN`）。 |
-| `--spec-draft-model <path>`<br>*（别名 `--mtp-draft-model`）* | 草稿器权重以独立文件发布的架构所用的草稿头 GGUF（Gemma 4 的 `gemma4-assistant`）。它在启动时加载到目标模型上，`--spec` 才能生效。草稿模型的隐藏维度必须与目标一致（12B 目标配它自己的 12B 草稿，而不是 26B-A4B 那个）。Qwen 3.6 与 GLM 5.2 把 NextN 块内嵌在主干 GGUF 里，不需要这个参数。环境变量：`TS_SPEC_DRAFT_MODEL`。 |
-| `--draft-model <path>` | 投机解码草稿 GGUF，适用于草稿器以独立文件发布的架构——DeepSeek V4 的 DSpark 支持模块（见 [DeepSeek V4](docs/models/deepseek4_zh-cn.md#dspark-投机解码)）与 Muse-Glimmer 的 DFlash 块级草稿器（见 [Muse-Glimmer](docs/models/muse-glimmer_zh-cn.md#3-dflash-投机解码)，环境变量 `TS_MUSE_GLIMMER_DFLASH`）。它每步起草一整块 token，主干用一次批量前向验证。每个输出 token 仍然取自主干的某一行——贪心配置下用 argmax，否则用本次运行自己的采样器——因此两种情况下输出流都保持不变。在所有单序列路径（`--input`、`--multi-turn-jsonl`、`--interactive`）上生效，需要 `--backend cuda` 或 `--backend ggml_cuda`。环境变量：`TS_DSV4_DSPARK`。 |
-| `--spec-draft-n-max <N>` | `--spec-draft` 的旧写法，为块级草稿器保留。每个投机块最多起草的 token 数；块级草稿器还会把它夹到自己训练时的块大小以内（默认即为该块大小：DSpark 为 5，Muse-Glimmer 的 DFlash 为 15）。 |
-| `--spec-draft-conf-min <p>` | `--spec-pmin` 的旧写法，为块级草稿器保留；这里的门限是**累积**接受概率——置信度头各位置估计值的乘积。调低会起草更远、回滚更多；调高则更早退回普通 decode。默认：块级草稿器为 `0.35`，逐 token 草稿头为 `0.75`。 |
+| `--skills-dir <path>` | 扫描 Agent Skills 的目录（可以是装着若干 `SKILL.md` 的文件夹，也可以是单个技能目录）。可重复；按给出的顺序扫描，最深三层。不传时使用二进制文件旁的 `skills` 目录，不存在则创建。传入的路径不存在会在启动时报错并点名该参数。环境变量：`TS_SKILLS_DIR`（以路径分隔符分隔的列表）。 |
+| `--skill <name>` | 为本次运行选中一个技能，名称取自其 `SKILL.md`（也就是它的目录名）。可重复。被选中技能的说明正文在预算允许时会写进提示词；随包文件则始终按需取回。 |
+| `--list-skills` | 打印技能注册表——名称、描述、来源、随包文件、大小，以及任何加载告警或错误——然后退出。 |
+| `--no-skills` | 彻底关闭 Agent Skills：不扫描、不注入提示词块、不提供工具。环境变量：`TS_NO_SKILLS`（非 `0` 即视为开启）。 |
+| `--skills-no-discovery` | 不向模型展示未被选中的技能。不加时，所有已注册技能的名称与描述都会列出，好让模型自己发现你没想到要点名的那个；加上后，本次运行只看得到 `--skill` 选中的技能。 |
+| `--skills-allow-exec` | 允许模型通过 `skills_run` 工具运行选中技能自带的脚本。**默认关闭，且这就是在执行任意代码**：脚本以子进程形式、用本进程的权限运行，而做出运行决定的是一个正在读别人写的 `SKILL.md` 的模型。可达范围仅限该脚本自己的技能目录，只启动已知解释器（`.py`、`.js`/`.mjs`、`.sh`、`.bash`），不经过 shell，工作目录为该技能自身，进程 60 秒后被杀，stdout / stderr 各截取到 32 KB——但这并不是沙箱。环境变量：`TS_SKILLS_ALLOW_EXEC`（非 `0` 即视为开启）。 |
+| `--skills-max-rounds <n>` | 模型在必须作答前可以取用技能内容——或运行、查看并修正代码——的次数，范围 1-64（默认：`8`；开启 `--code-exec` 时为 `24`，因为写程序、运行它并按回溯修正它比读文件需要更多轮次；此处显式设定的值一律按原样使用）。每一轮都是一次完整生成，因此这一项限制的是那种反复把文件名叫错的模型所能造成的开销。预算用尽时会在对话里告知模型，让它用已读到的内容作答，并说明已经完成了哪些部分。环境变量：`TS_SKILLS_MAX_ROUNDS`。 |
+| 技能脚本沙箱 | `required`（宿主机无法隔离时拒绝运行） | `TS_SKILLS_SANDBOX`（`off`/`preferred`/`required`）、`TS_SKILLS_ALLOW_NETWORK` | `--skills-sandbox`、`--skills-allow-network` |
+| `--skills-sandbox <off\|preferred\|required>` | 对技能脚本要求多强的操作系统级隔离。`required`（默认）在没有沙箱的宿主机上直接拒绝运行，而不是不加约束地跑；`preferred` 则照跑不误；`off` 只保留进程内限制。macOS 用 `sandbox-exec`，Linux 用 `bwrap`，Windows 仅能限制进程树。环境变量：`TS_SKILLS_SANDBOX`。 |
+| `--skills-allow-network` | 允许沙箱内的技能脚本联网。默认禁止。环境变量：`TS_SKILLS_ALLOW_NETWORK`。 |
+| `--code-exec` | 向模型提供 `shell` 工具：模型敲下一行真正的命令，宿主在操作系统沙箱里执行它，模型读回退出码以及命令打印的一切（stdout 与 stderr 合并在一起）。模型用它来**运行**东西和四处查看——运行程序、用 `rg` 找模式、移动和删除文件、装上需要的包、再检查自己的输出——这正是 OpenAI Codex 与 Claude Code 采用的形状。参数：`command`（必填）、`workdir`（**只对这一次调用**生效）、`timeout_ms`，以及 `run_in_background`——用于那些本来就要一直跑下去的东西，其结果会给出一个日志文件，之后用普通命令去读。随它一起提供的还有四个工具，文件相关的活儿实际上都在这里发生。`read_file`（`path`、`offset`、`limit`）以 `   42 \| 文本` 的形式带行号显示文件当前的字节；重复读一个没有变化的文件时，只会告诉你「没变」，而不会把内容再吐一遍。`edit_file`（`path`、`old_string`、`new_string`、`replace_all`）在一个文件里替换一段确切的文本——这就是 Claude Code 的 `Edit`，参数逐个对应，也正是 Anthropic 公开的 `str_replace_based_edit_tool` 的形状。它必须精确匹配、且只能匹配一次：匹配到两处则拒绝执行，并把每一处的位置指给你；一处都匹配不到，则会把文件里最接近你所写内容的那一段，连同真实行号一起显示出来。`write_file`（`path`、`content`）用于新建文件，或有意地整体替换一个文件——发生整体替换时，宿主会数出有多少行原封不动地又被重打了一遍，并把这个数字告诉模型。`apply_patch` 即 Codex 的 `*** Begin Patch` 信封，可在一次「要么全部生效、要么全不生效」的调用里创建、更新、删除并重命名多个文件；它有两条到达路径——既可以作为工具调用，也可以作为 heredoc 敲进 shell，后者会被宿主拦截，永远不会真的执行。这样切分是照着两个参照实现来的，而不是自创格式：单文件的常见改动用字符串替换，跨文件的原子改动用信封。既然 shell 本来就能用 heredoc 重写任何文件，它们为什么还要存在：因为 heredoc 会把**整个**文件重新发一遍，改三行要付出每一行本来就正确的代码的代价，并且把它们逐行重新掷了一次骰子；也因为落笔的是**宿主**——依据它要么找得到、要么直接拒绝去猜的文本，而不是让模型凭半个记忆把文件重打一遍。`apply_patch` 的匹配引擎是对参考实现 V4A applier 的逐行移植：先精确匹配，否则忽略行尾空白，否则忽略行首行尾空白，再不行就失败——没有相似度打分，也没有「最接近的那一处」。`edit_file` 的匹配阶梯则是两个参照实现所容忍范围的并集——先精确匹配，再把印刷体引号与破折号折算成 ASCII 形式，再解码字面量 `\uXXXX`，最后剥掉行号前缀——第一级以上的每一级只要生效都会写进结果里，并且替换内容会按文件自己的标点风格写回，因此「容忍」永远不会悄悄改动没人要求改的字节。这四个文件工具需要持久化工作区，所以无状态端点只会拿到 shell 一个工具。所有工具都由宿主在进程内应答，任何一个都不会被交回客户端。默认关闭。环境变量：`TS_CODE_EXEC`（非 `0` 即视为开启）。 |
+| `--code-exec-allow-install` | 允许模型把它需要的包（pip / npm）装进本会话保留的环境里，因此后续命令、以及技能自带的脚本也能 import 它们；需要 `--code-exec`。模型敲下的那行命令本身**依旧完全不通网络**：宿主不会去执行它写的安装命令，而是去**读**它——只读出工具名与包名，别的一概不读——校验这些名字，再用自己拼出的参数向量亲自完成安装，且只装预编译 wheel（`--only-binary=:all:` / `--ignore-scripts`，安装脚本永远不会执行）。那条安装命令随后会在命令行里被替换掉——装成功替换成 `true`，装失败则替换成 `false`——因此它周围的运算符仍然保持模型写下时的含义：`pip install x && python y.py` 会先装包、再在完全无网络的情况下运行 `y.py`，而安装失败时 `y.py` 根本不会被运行；`pip install x || pip install y` 则仍会去尝试那个后备方案。无论哪种情况，失败原因都会被报回来。把套接字交给安装命令是先前的做法，那种做法无法成立：命令行出自模型之手，`--index-url` 想把安装器指向哪里就指向哪里；而套接字属于整行命令，与安装同处一行的任何东西都共享它能到达的范围——在沙箱无法把出口钉死在代理上的宿主机上，那个范围就是整个互联网。因此凡是会改变「包从哪里来」的参数（`--index-url`、`-i`、`--find-links`、`--registry`，以及本身就是一个 URL 的依赖项）都会被按名字拒绝，宿主无法代为执行的安装器（`uv`、`poetry`、`gem`、`cargo`、`go`）同样如此；`-r requirements.txt` 则是支持的——宿主会读取该文件并逐行校验。环境变量：`TS_CODE_EXEC_ALLOW_INSTALL`。 |
+| `--code-exec-packages <list>` | 把安装限制在这些包名之内，逗号分隔；其余一律拒绝，并告诉模型允许哪些名字（默认：留空，即不限包名——且无论如何单次安装最多 16 个包）。匹配的是去掉版本后的裸名字，因此模型钉住的版本（`numpy==2.1.0`）仍然匹配名单里的 `numpy`。工具接口变成 shell 时它曾被退休，因为模型自己敲 `pip install` 时，可以用包名白名单看不见的方式写出同一个请求；如今它回来了，因为安装重新由**宿主**执行：宿主是把包名从模型的命令里读出来，而不是去运行那条命令，安装器的参数向量由宿主自己拼出，所以无论请求写成 `pip`、`pip3`、`python -m pip` 还是一个 requirements 文件，这份名单都同样生效。只有配合 `--code-exec-allow-install` 才有意义。 |
+| `--code-exec-install-domains <list>` | 一次安装可以到达的主机，逗号分隔——可以是精确名字，也可以是 `*.suffix` 通配（默认：`pypi.org,files.pythonhosted.org,registry.npmjs.org`；传空值则关闭这层限制，恢复成开放的安装网络）。它约束的是**宿主**代为执行的那次安装，而那也是这里唯一能碰到软件源的东西：沙箱若能把安装器钉在唯一一个 loopback 端口上（macOS Seatbelt），安装器就只能经由 CONNECT 出口代理，因而只能到达这些主机、别处一概到不了；而且这个代理只为一次安装而建、随该次安装一起关闭，于是安装器留在后台的子进程回头也找不到还能对话的端口。沙箱钉不住端口时（bubblewrap 对网络只有全开或全关），安装器拿到的是真正的网络，此时管用的是「参数向量出自宿主而非模型」——默认软件源、只装预编译 wheel。默认用精确名字而不是通配，因为 `*.pypi.org` 会把 `upload.pypi.org` 一并放进来。被代理拦下的主机会写进模型读到的失败信息里，因为 pip 只会把它报成一个看不出所以然的连接错误。环境变量：`TS_CODE_EXEC_INSTALL_DOMAINS`。 |
+| `--code-exec-timeout <seconds>` | 单条命令被杀死前最多可运行的秒数（默认 `120`，而不是旧程序运行器的 30 秒，因为现在装包、跑构建、跑测试用的都是同一个 shell 命令）。单次调用可以用 `timeout_ms` 要求更短或更长，上限 10 分钟；超时的命令会被停掉，但它在此之前打印的一切仍会交给模型——丢掉输出的超时只会让它闭着眼睛把命令再跑一遍。 |
+| `--code-exec-shell <path\|name>` | 宿主自己的选择不合适或找不到时，用哪个 shell 来执行命令。默认：macOS 与 Linux 上是 `bash`，其次 `sh`；Windows 上是 PowerShell 7（`pwsh`），其次 Windows PowerShell——在 Windows 上，PATH 里那个裸的 `bash` 会被**故意**拒绝，因为它是 WSL 启动器，经由它执行会把命令送进一个 Linux 虚拟机，而 job object 在 Windows 这一侧握住的只是那个启动器。要在那里用真正的 bash（Git Bash、MSYS2），就用这个参数指到它。模型会被告知自己正在敲的是哪一种方言，因此这一项也会改变它工具说明里的示例。 |
+| `--code-exec-max-output <bytes>` | 一条命令的输出保留并展示给模型的字节数（默认 `32768`）。放不下的部分是从**中间**丢弃的，头尾都保留：构建或测试跑到最后的那一段才是失败所在，而只保留开头的截断丢掉的恰恰是最需要的那一段。 |
+| `--code-exec-unconfined` | 即使操作系统无法隔离也照样运行模型写的命令——沙箱本是必需的，在无法限制文件与套接字的宿主机上工具会直接拒绝运行，而 Windows 上每台机器都是如此（job object 只能限制 CPU 与内存，这两样都限制不了），所以在那里这是唯一能用上该工具的方式。它意味着模型写的命令将以你账户对文件系统与网络的权限运行。此参数**仅限 CLI**：服务端会在启动时拒绝它（退出码 2），因为服务端的运维者无权替所有能连上这个端口的人做这个取舍。 |
+
+**shell 是怎么被用的，又能碰到什么。** 模型的全部工作都走这一行命令：用
+heredoc 写出文件、运行它、grep 它、读自己的回溯再把它改掉——这也正是开启本
+功能后 `--skills-max-rounds` 会从 8 升到 24 的原因。工作目录在整个聊天会话内
+持久保留，并与技能脚本共享，因此 `cd`、导出的环境变量、激活的 virtualenv 以及
+装好的包都会从一次调用留到下一次。这背后并没有常驻的 shell 进程：Seatbelt
+配置在 exec 那一刻就固定了，而单次调用能读到哪些路径要逐次决定，所以每次调用
+都是一个全新的受限进程，由包装脚本通过文件把工作目录与导出的环境变量恢复回来、
+再重新存回去。联网规则属于宿主而不属于模型，而且不留例外：模型写下的命令在任何
+平台、任何配置下都**完全不通网络**。唯一能碰到软件源的是安装，而安装由宿主亲自
+执行——命令行会被拆成各个简单命令（引号与 heredoc 正文都被正确对待），每一条被
+识别出来的安装命令都会被读出工具名与包名，再由宿主用自己拼出的参数向量去调用
+安装器；那条命令随后会在命令行里被替换掉——装成功换成 `true`，装失败换成
+`false`——因此模型写在它周围的 `&&`、管道与循环体仍然分毫不差地是原来的意思：
+安装失败时 `&&` 后面的东西不会运行，而 `||` 后面的后备方案会运行。无论哪种情况，
+失败原因都会被报回来。把套接字交给安装命令是先前的做法，
+它有两个无法同时堵上的窟窿：命令行出自模型之手，于是 `--index-url` 决定了用哪个
+软件源；而套接字属于整行命令，于是与安装同处一行的任何东西都共享它能到达的
+范围——在沙箱无法把出口钉死在代理上的宿主机上，那个范围就是整个互联网。
+每次结果还会说明本机上有哪些项**未被约束**。已退休的 `--code-exec-languages`
+会在启动时被按名字拒绝，并且没有替代品可指：shell 能够到达 PATH 上的每一个
+解释器，而 PATH 必须包含 `/bin` 与 `/usr/bin` 这个 shell 才跑得起来，所以
+`--code-exec` 现在改为如实报告本机有哪些解释器，而不是假装能把它们挡在门外——
+于是旧脚本得到的是这条报错，而不是一个被悄悄忽略的设置。
+
+| 参数 | 说明 |
+|---|---|
+| `--spec` / `--no-spec` | 启用投机解码（默认关闭）。`--spec` 是内嵌在主干检查点里的草稿器（GLM 5.2 的 NextN 块与 Qwen 3.6 的同款，无需额外下载任何文件）的显式开关——因为加载它们要把额外的权重调入显存；以独立 GGUF 发布的草稿器只需 `--draft-model` 即可启用，显式的 `--no-spec` 则对两者都是否决。草稿头每步最多起草 `--spec-draft` 个 token，主干用一次批量前向完成验证；每个输出 token 仍然取自主干的某一行，因此得到的 token 流与普通 decode 本该产生的完全一致（贪心配置下为 argmax，带采样器时同分布），这纯粹是一条加速路径。在所有单序列路径（`--input`、`--input-jsonl`、`--multi-turn-jsonl`、`--interactive`）上生效。**必须在模型加载之前就出现在命令行上**：对 glm-dsa 而言，正是它告诉原生加载器把约 3 GiB 的 NextN 层调入显存，而这一层要与 KV 缓存争抢上下文长度所依据的那块内存。若权重的草稿块复用主干的 LM head（GLM 5.2 即是如此），在 `--tp N>1` 下会被拒绝。环境变量：`TS_SPEC`（旧写法 `TS_MTP_SPEC` 仍被 glm-dsa 的原生加载器读取；glm-dsa 还认 `TS_GLM_MTP=1`/`0`，它会覆盖上述两者，便于 A/B 对比）。 |
+| `--spec-type <name>` | 投机**算法**：`auto`（默认，使用检查点自带的草稿器）、`draft-head`、`block` 或 `ngram`。`ngram` 不需要任何训练权重，对所有模型都能用——它的做法是在上文里找最近几个 token 曾经出现过的位置，把当时紧随其后的内容拿来当草稿，因此凡是答案大量引用输入的场景都很强（摘要、改写、翻译、重复性的结构化输出、Agent 循环），其他场景则退回普通 decode。在 Qwen3.5-9B（Q8_0、`ggml_metal`、M5 Pro）这个完全不带草稿头的检查点上实测 45.2 tok/s，对比普通解码的 31.4 tok/s（1.44x），输出逐字节一致。环境变量：`TS_SPEC_TYPE`。参见 [TensorSharp 的投机解码](docs/speculative_decoding.md)。 |
+| `--spec-draft <N>` | 每个投机步最多起草的 token 数（取值 1-64，默认 `8`）。它同时决定加载时原生计算图缓存的大小，因此请与 `--spec` 一并显式传入，而不要依赖默认值。块级草稿器还会把它夹到自己训练时的块大小以内，且在那里默认即为该块大小：DSpark 为 5，Muse-Glimmer 的 DFlash 为 15，Qwen 3.8 的 DFlash2 为 7。在**递归**主干（Qwen 3.5/3.8 的 GatedDeltaNet 层）上，窄窗口远比宽窗口划算：它同时限制验证宽度与回滚重算，`--spec-draft 3` 在 Qwen3.8-27B 上比默认值快 1.6 倍。环境变量：`TS_SPEC_DRAFT`（或 `TS_MTP_DRAFT`）。 |
+| `--spec-pmin <f>` | 草稿置信度门限，取值 `[0, 1]`；遇到第一个低于该值的 token 即停止起草，`0` 表示从不设门限。这个数字*意味着什么*由算法自己决定，因此各算法带各自的默认值：逐 token 草稿头为 `0.15`（其 top-10 logits 上的 top-1 概率），块级草稿器为 `0.35`——后者的门限是**累积**前缀概率，即置信度头各位置估计值的乘积，因此同一个数字要严格得多（调低会起草更远、回滚更多，调高则更早退回普通 decode），n-gram 为 `0`（在那里它转而缩放所需的匹配长度）。环境变量：`TS_SPEC_PMIN`（或 `TS_MTP_PMIN`）。 |
+| `--draft-model <path>` | 投机解码草稿 GGUF，适用于所有以独立文件发布的草稿器——DeepSeek V4 的 DSpark 支持模块（见 [DeepSeek V4](docs/models/deepseek4_zh-cn.md#dspark-投机解码)）、Muse-Glimmer 的 DFlash 与 Qwen 3.8 的 DFlash2 块级草稿器（见 [Muse-Glimmer](docs/models/muse-glimmer_zh-cn.md#3-dflash-投机解码)，环境变量 `TS_MUSE_GLIMMER_DFLASH`），以及 Gemma 4 的 `gemma4-assistant` 逐 token 草稿头。文件自己的 `general.architecture` 决定它如何加载——你从不需要挑选机制。在这里给出文件本身就会启用投机：不需要再加 `--spec`，显式的 `--no-spec` 则会否决它。草稿模型的隐藏维度必须与目标一致（12B 目标配它自己的 12B 草稿，而不是 26B-A4B 那个）；草稿 GGUF 不匹配、缺失或不完整会在启动时立即失败。Qwen 3.6 与 GLM 5.2 把 NextN 块内嵌在主干 GGUF 里，不需要这个参数——它们用 `--spec`。块级草稿器每步起草一整块 token，主干用一次批量前向验证。每个输出 token 仍然取自主干的某一行——贪心配置下用 argmax，否则用本次运行自己的采样器——因此两种情况下输出流都保持不变。块级起草在所有单序列路径（`--input`、`--multi-turn-jsonl`、`--interactive`）上生效，需要 `--backend cuda` 或 `--backend ggml_cuda`。环境变量：`TS_SPEC_DRAFT_MODEL`、`TS_DSV4_DSPARK`。 |
 | `--temperature <f>` | 采样温度（0 = 贪心） |
 | `--top-k <N>` | Top-K 过滤（0 = 关闭） |
 | `--top-p <f>` | Nucleus 采样阈值（1.0 = 关闭） |
@@ -348,6 +397,8 @@ CLI 只会自动识别少数旧式投影器文件名，而当前模型仓库经�
 | `/history` | 打印对话历史 |
 | `/save <文件>` | 将当前对话追加写入 UTF-8 文件 |
 | `/system <文本>` | 设置系统提示词（参数为空表示清空），并重置 KV 缓存 |
+| `/skills` | 列出已注册的 Agent Skills，并标出本会话中哪些处于启用状态 |
+| `/skill <name>` | 为本会话开启或关闭某个技能。与 `/system` 一样会重置对话——技能文本块位于提示词最前端。 |
 | `/think on\|off` | 切换思维链/推理模式（仅对支持的模型生效） |
 | `/multiline on\|off` | 切换多行输入（在单独一行输入 `.` 结束消息） |
 
@@ -446,6 +497,7 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --config config/server-basi
 - 完整上传文本和 PDF 文档，并可上传图像、视频和音频进行多模态推理（最大 500 MB）
 - 思维链/推理模式切换
 - 带函数定义的工具调用
+- Agent Skills：可在界面上勾选服务端已注册的技能，并实时展示模型作答过程中读取过的每一个技能文件（服务端没有技能时该控件不显示）
 - 通过 Server-Sent Events 进行流式 token 生成
 - 承载 `diffusion-gemma` GGUF 时展示 DiffusionGemma 去噪预览（每一步替换整条 assistant 消息，最终再发出定稿）
 - 向后兼容的队列状态事件（实际并发由推理引擎处理）
@@ -473,6 +525,45 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --config config/server-basi
 | `--cpu-moe-threads <N>` | 主机侧专家矩阵乘的工作线程数。默认：在核数多于 8 的主机上取可用 CPU 并行度（`hardware_concurrency`，再受亲和性掩码与 cgroup CPU 配额约束）的一半。服务端还需要另一半来跑 Kestrel、调度器与加速器提交线程；把它设到接近配额会让吞吐直接崩塌而不是缓慢下降（95 CPU 配额下 64 线程 20.7 tok/s，71 线程只剩 8.2）。环境变量：`TS_CPU_MOE_THREADS`。 |
 | `--help` | 打印参数说明后退出（不带任何参数启动服务时也会显示） |
 | `--max-tokens <N>` | 最大生成 token 数：请求未携带上限时用它填充，请求要求更多时按它截断。对所有端点生效（Web UI、`/api/chat`、`/api/generate`、`/v1/chat/completions`、`/v1/responses`）。默认：`20000`，此默认值只用于填充、不做截断。环境变量：`MAX_TOKENS`。 |
+| `--skills-dir <path>` | 扫描 Agent Skills 的目录。可重复；按给出的顺序扫描，最深三层。不传时使用二进制文件旁的 `skills` 目录，不存在则创建，`POST /api/skills` 上传的技能也落在那里。传入的路径不存在会在启动时报错。环境变量：`TS_SKILLS_DIR`（以路径分隔符分隔的列表）。 |
+| `--skill <name>` | 让某个技能对所有未自行指定技能的请求生效。可重复。请求体里的 `skills` 数组会覆盖它。 |
+| `--list-skills` | 打印技能注册表——名称、描述、文件、告警与加载错误——然后退出。 |
+| `--no-skills` | 关闭 Agent Skills：`/v1/skills` 与 `/api/skills` 会报告功能已禁用，请求中的 `skills` 字段不再生效。环境变量：`TS_NO_SKILLS`（非 `0` 即视为开启）。 |
+| `--skills-no-discovery` | 不向模型展示未被选中的技能，于是每个请求只看得到它自己点名的技能。按请求粒度可用 `"skills_discovery": false` 达到同样效果。 |
+| `--skills-allow-exec` | 允许 `skills_run`。**默认关闭。在共享服务器上，这就是一个远程代码执行入口**——技能是别人上传的内容，而决定要不要运行其中某个脚本的，是一个正在读同一个人写的 Markdown 的模型。环境变量：`TS_SKILLS_ALLOW_EXEC`（非 `0` 即视为开启）。 |
+| `--skills-max-rounds <n>` | 模型在必须作答前可以取用技能内容——或运行、查看并修正代码——的次数，范围 1-64（默认：`8`；开启 `--code-exec` 时为 `24`；此处显式设定的值按原样使用）。每一轮都是一次完整生成。环境变量：`TS_SKILLS_MAX_ROUNDS`。 |
+| `--skills-sandbox <off\|preferred\|required>` | 对技能脚本要求多强的操作系统级隔离。`required`（默认）在没有沙箱的宿主机上直接拒绝运行，而不是不加约束地跑；`preferred` 则照跑不误；`off` 只保留进程内限制。macOS 用 `sandbox-exec`，Linux 用 `bwrap`，Windows 仅能限制进程树。环境变量：`TS_SKILLS_SANDBOX`。 |
+| `--skills-allow-network` | 允许沙箱内的技能脚本联网。默认禁止。环境变量：`TS_SKILLS_ALLOW_NETWORK`。 |
+| `--code-exec` | 向模型提供 `shell` 工具：模型敲下一行真正的命令，宿主在操作系统沙箱里执行它，模型读回退出码以及命令打印的一切（stdout 与 stderr 合并在一起）。模型用它来**运行**东西和四处查看——运行程序、用 `rg` 找模式、装上需要的包、再检查自己的输出——这正是 OpenAI Codex 与 Claude Code 采用的形状。参数：`command`（必填）、`workdir`（**只对这一次调用**生效）、`timeout_ms`，以及 `run_in_background`——用于那些本来就要一直跑下去的东西，其结果会给出一个日志文件，之后再去读。命令写出的文件会作为下载链接交给用户，工作目录则在该聊天会话余下的时间里一直保留。随它一起提供的还有四个工具，文件相关的活儿实际上都在这里发生。`read_file`（`path`、`offset`、`limit`）以 `   42 \| 文本` 的形式带行号显示文件当前的字节；重复读一个没有变化的文件时，只会告诉你「没变」，而不会把内容再吐一遍。`edit_file`（`path`、`old_string`、`new_string`、`replace_all`）在一个文件里替换一段确切的文本——这就是 Claude Code 的 `Edit`，参数逐个对应，也正是 Anthropic 公开的 `str_replace_based_edit_tool` 的形状。它必须精确匹配、且只能匹配一次：匹配到两处则拒绝执行，并把每一处的位置指给你；一处都匹配不到，则会把文件里最接近你所写内容的那一段，连同真实行号一起显示出来。`write_file`（`path`、`content`）用于新建文件，或有意地整体替换一个文件——发生整体替换时，宿主会数出有多少行原封不动地又被重打了一遍，并把这个数字告诉模型。`apply_patch` 即 Codex 的 `*** Begin Patch` 信封，可在一次「要么全部生效、要么全不生效」的调用里创建、更新、删除并重命名多个文件；它有两条到达路径——既可以作为工具调用，也可以作为 heredoc 敲进 shell，后者会被宿主拦截，永远不会真的执行。这样切分是照着两个参照实现来的，而不是自创格式：单文件的常见改动用字符串替换，跨文件的原子改动用信封。既然 shell 本来就能用 heredoc 重写任何文件，它们为什么还要存在：因为 heredoc 会把**整个**文件重新发一遍，改三行要付出每一行本来就正确的代码的代价，并且把它们逐行重新掷了一次骰子；也因为落笔的是**宿主**——依据它要么找得到、要么直接拒绝去猜的文本，而不是让模型凭半个记忆把文件重打一遍。`apply_patch` 的匹配引擎是对参考实现 V4A applier 的逐行移植：先精确匹配，否则忽略行尾空白，否则忽略行首行尾空白，再不行就失败——没有相似度打分，也没有「最接近的那一处」。`edit_file` 的匹配阶梯则是两个参照实现所容忍范围的并集——先精确匹配，再把印刷体引号与破折号折算成 ASCII 形式，再解码字面量 `\uXXXX`，最后剥掉行号前缀——第一级以上的每一级只要生效都会写进结果里，并且替换内容会按文件自己的标点风格写回，因此「容忍」永远不会悄悄改动没人要求改的字节。这四个文件工具需要持久化工作区，所以无状态端点只会拿到 shell 一个工具。沙箱是**必需的**：无法隔离进程的宿主机上工具会直接拒绝运行，而不是不加约束地跑，且服务端没有任何绕过手段（`--code-exec-unconfined` 仅限 CLI，本服务端会在启动时以退出码 2 拒绝它），因为运维者无权替所有能连上这个端口的人做这个取舍。所有工具都由宿主在进程内应答——任何一个都不会被交回客户端。默认关闭。环境变量：`TS_CODE_EXEC`（非 `0` 即视为开启）。 |
+| `--code-exec-allow-install` | 允许模型把它需要的包（pip / npm）装进该聊天会话保留的环境里，因此后续命令、以及技能自带的脚本也能 import 它们；需要 `--code-exec`。模型敲下的那行命令本身**依旧完全不通网络**：宿主不会去执行它写的安装命令，而是去**读**它——只读出工具名与包名，别的一概不读——校验这些名字，再用自己拼出的参数向量亲自完成安装，且只装预编译 wheel（`--only-binary=:all:` / `--ignore-scripts`，安装脚本永远不会执行）。那条安装命令随后会在命令行里被替换掉——装成功替换成 `true`，装失败则替换成 `false`——因此它周围的运算符仍然保持模型写下时的含义：`pip install x && python y.py` 会先装包、再在完全无网络的情况下运行 `y.py`，而安装失败时 `y.py` 根本不会被运行；`pip install x || pip install y` 则仍会去尝试那个后备方案。无论哪种情况，失败原因都会被报回来。把套接字交给安装命令是先前的做法，那种做法无法成立：命令行出自模型之手，`--index-url` 想把安装器指向哪里就指向哪里；而套接字属于整行命令，与安装同处一行的任何东西都共享它能到达的范围——在沙箱无法把出口钉死在代理上的宿主机上，那个范围就是整个互联网。因此凡是会改变「包从哪里来」的参数（`--index-url`、`-i`、`--find-links`、`--registry`，以及本身就是一个 URL 的依赖项）都会被按名字拒绝，宿主无法代为执行的安装器（`uv`、`poetry`、`gem`、`cargo`、`go`）同样如此；`-r requirements.txt` 则是支持的——宿主会读取该文件并逐行校验。环境变量：`TS_CODE_EXEC_ALLOW_INSTALL`。 |
+| `--code-exec-packages <list>` | 把安装限制在这些包名之内，逗号分隔；其余一律拒绝，并告诉模型允许哪些名字（默认：留空，即不限包名——且无论如何单次安装最多 16 个包）。匹配的是去掉版本后的裸名字，因此模型钉住的版本（`numpy==2.1.0`）仍然匹配名单里的 `numpy`。工具接口变成 shell 时它曾被退休，因为模型自己敲 `pip install` 时，可以用包名白名单看不见的方式写出同一个请求；如今它回来了，因为安装重新由**宿主**执行：宿主是把包名从模型的命令里读出来，而不是去运行那条命令，安装器的参数向量由宿主自己拼出，所以无论请求写成 `pip`、`pip3`、`python -m pip` 还是一个 requirements 文件，这份名单都同样生效。只有配合 `--code-exec-allow-install` 才有意义。 |
+| `--code-exec-install-domains <list>` | 一次安装可以到达的主机，逗号分隔——可以是精确名字，也可以是 `*.suffix` 通配（默认：`pypi.org,files.pythonhosted.org,registry.npmjs.org`；传空值则关闭这层限制，恢复成开放的安装网络）。它约束的是**宿主**代为执行的那次安装，而那也是这里唯一能碰到软件源的东西：沙箱若能把安装器钉在唯一一个 loopback 端口上（macOS Seatbelt），安装器就只能经由 CONNECT 出口代理，因而只能到达这些主机、别处一概到不了；而且这个代理只为一次安装而建、随该次安装一起关闭，于是安装器留在后台的子进程回头也找不到还能对话的端口。沙箱钉不住端口时（bubblewrap 对网络只有全开或全关），安装器拿到的是真正的网络，此时管用的是「参数向量出自宿主而非模型」——默认软件源、只装预编译 wheel。默认用精确名字而不是通配，因为 `*.pypi.org` 会把 `upload.pypi.org` 一并放进来。被代理拦下的主机会写进模型读到的失败信息里，因为 pip 只会把它报成一个看不出所以然的连接错误。环境变量：`TS_CODE_EXEC_INSTALL_DOMAINS`。 |
+| `--code-exec-timeout <seconds>` | 单条命令被杀死前最多可运行的秒数（默认 `120`，而不是旧程序运行器的 30 秒，因为现在装包、跑构建、跑测试用的都是同一个 shell 命令）。单次调用可以用 `timeout_ms` 要求更短或更长，上限 10 分钟；超时的命令会被停掉，但它在此之前打印的一切仍会交给模型——丢掉输出的超时只会让它闭着眼睛把命令再跑一遍。 |
+| `--code-exec-shell <path\|name>` | 宿主自己的选择不合适或找不到时，用哪个 shell 来执行命令。默认：macOS 与 Linux 上是 `bash`，其次 `sh`；Windows 上是 PowerShell 7（`pwsh`），其次 Windows PowerShell——在 Windows 上，PATH 里那个裸的 `bash` 会被**故意**拒绝，因为它是 WSL 启动器，经由它执行会把命令送进一个 Linux 虚拟机，而 job object 在 Windows 这一侧握住的只是那个启动器。要在那里用真正的 bash（Git Bash、MSYS2），就用这个参数指到它。模型会被告知自己正在敲的是哪一种方言，因此这一项也会改变它工具说明里的示例。 |
+| `--code-exec-max-output <bytes>` | 一条命令的输出保留并展示给模型的字节数（默认 `32768`）。放不下的部分是从**中间**丢弃的，头尾都保留：构建或测试跑到最后的那一段才是失败所在，而只保留开头的截断丢掉的恰恰是最需要的那一段。 |
+
+**shell 是怎么被用的，又能碰到什么。** 模型对文件与代码的一切操作都走这一行
+命令——写、运行、grep、读回溯、修正——这也正是开启本功能后
+`--skills-max-rounds` 会从 8 升到 24 的原因。工作目录与 shell 状态在该聊天会话
+余下的时间里持久保留，因此 `cd`、导出的环境变量、激活的 virtualenv 以及装好的
+包都会从一次调用留到下一次；但两次调用之间并没有 shell 进程活着：沙箱配置在
+exec 那一刻就固定了，而单次调用能读到哪些路径要逐次决定，所以每次调用都是一个
+全新的受限进程，由包装脚本通过文件把这些状态恢复回来、再重新存回去。联网规则
+属于宿主而不属于模型，而且不留例外：模型写下的命令在任何平台、任何配置下都
+**完全不通网络**。唯一能碰到软件源的是安装，而它由宿主亲自执行——宿主从每一条
+被识别出来的安装命令里读出工具名与包名，用自己拼出的参数向量去调用安装器，再把
+那条命令在命令行里替换掉——装成功换成 `true`，装失败换成 `false`——于是模型写在
+它周围的那些操作符仍然分毫不差地是原来的意思：`&&` 后面的东西不会运行，而 `||`
+后面的后备方案会运行。无论哪种情况，失败原因都会被报回来。把套接字交给安装命令是先前的做法，它有两个无法同时堵上的窟窿：
+命令行出自模型之手，于是 `--index-url` 决定了用哪个软件源；而套接字属于整行
+命令，于是与安装同处一行的任何东西都共享它能到达的范围——在沙箱无法把出口钉死
+在代理上的宿主机上，那个范围就是整个互联网。已退休的 `--code-exec-languages`
+会在启动时被按名字拒绝，并且没有替代品可指，因为 shell 能够到达 PATH 上的每一
+个解释器；于是从旧接口沿用下来的部署脚本得到的是这条报错，而不是一个被悄悄丢掉
+的设置。
+
+| 参数 | 说明 |
+|---|---|
 | `--video-width <px>` | Web UI 或 API 请求未提供 `width` 时，视频生成使用的默认输出宽度；别名 `--width`。这是**服务端最主要的质量杠杆**，因为 Web UI 自己不发送尺寸——不设置的话每段视频都会用模型默认值生成。MiniMax-H3 的推荐起点是 `640`（配合 `--video-height 384`）。会向上取整到模型的网格。 |
 | `--video-height <px>` | 请求未提供 `height` 时的默认输出高度；别名 `--height`。只给出宽高之一时，MiniMax-H3 会按条件图片的宽高比推出另一个，这样 4:3 的照片就不会被拉成 16:9。 |
 | `--video-steps <N>` | 请求未提供 `steps` 时的默认去噪步数——分辨率之后最重要的质量/时间取舍。MiniMax-H3 自身默认 `20`；`4`–`8` 是快速工作点，`16`–`24` 明显更干净，超过 30 提升有限。 |
@@ -496,12 +587,11 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --config config/server-basi
 | `--kv-cache-dtype <type>` | 托管模型的 KV 缓存精度：`f32`、`f16`、`q8_0` 或 `q4_0`（量化缓存以微小数值漂移换取内存节省；各档位的取舍见上文 CLI 参数表）。默认：自动 —— 由后端 / 模型决定。环境变量：`KV_CACHE_DTYPE`。 |
 | `--continuous-batching` / `--no-continuous-batching` | 启用（默认）或关闭迭代级分页批处理。启用时服务会在批内动态加入 / 抢占序列，并在实现了 `IBatchedPagedModel` 的模型上将多个序列打包到一次前向中执行。`--no-continuous-batching` 会让所有模型回退到按序列 KV 交换。别名：`--paged-batching` / `--no-paged-batching`。 |
 | `--prefill-chunk-size <N>` | 存在竞争时的分块 prefill 粒度 —— 有其他请求同时运行时，每个调度步最多处理的 prefill token 数；块越小，并行 decode 请求越容易频繁轮到 GPU（默认：`1024`）。环境变量：`TS_SCHED_PREFILL_CHUNK`。 |
-| `--spec` / `--no-spec`<br>*（别名 `--mtp-spec` / `--no-mtp-spec`）* | 启用投机解码（默认关闭）。在默认的 `--spec-type auto` 下，它使用检查点自带的多 token 预测草稿头：Qwen 3.6 内嵌的 NextN 块，或通过 `--spec-draft-model` 加载的 Gemma 4 `gemma4-assistant` 草稿。仅对单序列（无并发）请求生效：草稿头每步最多提议 `--spec-draft` 个 token，主干网络用一次批量前向完成验证；起草与验证均由该请求自己的采样器（含惩罚项）驱动，输出与标准 decode 一致。仅在有收益处自动启用：Qwen 3.6 的内嵌 NextN 块在所有后端上都被认为有收益，而 Gemma 4 的独立草稿头只在各 ggml 后端与 Direct `cuda` 后端上启用；CPU / GGML CPU / MLX 走标准 decode。环境变量：`TS_SPEC`（旧写法 `TS_MTP_SPEC`）。 |
-| `--spec-type <name>`<br>*（别名 `--mtp-type`）* | 投机算法：`auto`（默认）/ `draft-head` / `block` / `ngram`。`ngram` 不需要任何训练权重，对所有模型都能用——它在上文里找最近几个 token 曾经出现过的位置，把当时紧随其后的内容拿来当草稿，因此凡是答案大量引用输入的场景都很强。环境变量：`TS_SPEC_TYPE`。 |
-| `--spec-draft <N>`<br>*（别名 `--mtp-draft`）* | 每个投机步最多起草的 token 数（默认 `8`）。环境变量：`TS_SPEC_DRAFT`（或 `TS_MTP_DRAFT`）。 |
-| `--spec-pmin <f>`<br>*（别名 `--mtp-pmin`）* | 草稿置信度门限，取值 `(0, 1]`；遇到第一个低于该值的 token 即停止起草。默认值按算法选择：逐 token 草稿头为 `0.75`（其 top-10 logits 上的 top-1 概率），块级草稿器为 `0.35`——后者的门限是**累积**前缀概率，因此同一个数字要严格得多，n-gram 为 `0`。环境变量：`TS_SPEC_PMIN`（或 `TS_MTP_PMIN`）。 |
-| `--draft-model <path>` | 草稿器以独立文件发布的架构所用的投机解码草稿模型：DeepSeek V4 的 DSpark 支持 GGUF（见 [DeepSeek V4](docs/models/deepseek4_zh-cn.md#dspark-投机解码)）与 Muse-Glimmer 的 DFlash 草稿器（见 [Muse-Glimmer](docs/models/muse-glimmer_zh-cn.md)，环境变量 `TS_MUSE_GLIMMER_DFLASH`）。两者都每步起草一整块 token，主干用一次批量前向验证，因此贪心输出保持不变。需要与 `--spec` 一起使用，在 `cuda` 与 `ggml_cuda` 后端上对单序列请求生效。与 CLI 不同，服务端的每一行验证都用该请求自己的采样器，因此可与任意采样设置组合。环境变量：`TS_DSV4_DSPARK`。 |
-| `--spec-draft-model <path>`<br>*（别名 `--mtp-draft-model`）* | 对于草稿头作为独立文件发布的架构（Gemma 4 的 `gemma4-assistant`），指定其草稿 GGUF 路径。草稿的隐藏维度必须与目标一致（例如 12B 目标配 12B 草稿，而非 26B-A4B 草稿）；草稿不匹配或不完整会在启动时立即失败并给出修复提示。Qwen 3.6 将 NextN 块内嵌在主干 GGUF 中，此参数对其无效。环境变量：`TS_SPEC_DRAFT_MODEL`（旧写法 `TS_MTP_DRAFT_MODEL`）。 |
+| `--spec` / `--no-spec` | 启用投机解码（默认关闭）。`--spec` 是内嵌在主干检查点里的草稿器（Qwen 3.6 与 GLM 5.2 的 NextN 块）的显式开关——因为加载它们要把额外的权重调入显存；以独立 GGUF 发布的草稿器只需 `--draft-model` 即可启用，显式的 `--no-spec` 则对两者都是否决。仅对单序列（无并发）请求生效：草稿头每步最多提议 `--spec-draft` 个 token，主干网络用一次批量前向完成验证；起草与验证均由该请求自己的采样器（含惩罚项）驱动，输出与标准 decode 一致。仅在有收益处自动启用：Qwen 3.6 的内嵌 NextN 块在所有后端上都被认为有收益，而 Gemma 4 的独立草稿头只在各 ggml 后端与 Direct `cuda` 后端上启用；CPU / GGML CPU / MLX 走标准 decode。环境变量：`TS_SPEC`（旧写法 `TS_MTP_SPEC`）。 |
+| `--spec-type <name>` | 投机算法：`auto`（默认）/ `draft-head` / `block` / `ngram`。`ngram` 不需要任何训练权重，对所有模型都能用——它在上文里找最近几个 token 曾经出现过的位置，把当时紧随其后的内容拿来当草稿，因此凡是答案大量引用输入的场景都很强。环境变量：`TS_SPEC_TYPE`。 |
+| `--spec-draft <N>` | 每个投机步最多起草的 token 数（默认 `8`；块级草稿器会把它夹到自己训练时的块大小以内，在那里默认也是该块大小）。环境变量：`TS_SPEC_DRAFT`（或 `TS_MTP_DRAFT`）。 |
+| `--spec-pmin <f>` | 草稿置信度门限，取值 `[0, 1]`；遇到第一个低于该值的 token 即停止起草，`0` 表示从不设门限。默认值按算法选择：逐 token 草稿头为 `0.15`（其 top-10 logits 上的 top-1 概率），块级草稿器为 `0.35`——后者的门限是**累积**前缀概率，因此同一个数字要严格得多，n-gram 为 `0`。环境变量：`TS_SPEC_PMIN`（或 `TS_MTP_PMIN`）。 |
+| `--draft-model <path>` | 投机解码草稿模型，适用于所有以独立文件发布的草稿器：DeepSeek V4 的 DSpark 支持 GGUF（见 [DeepSeek V4](docs/models/deepseek4_zh-cn.md#dspark-投机解码)）、Muse-Glimmer 的 DFlash 与 Qwen 3.8 的 DFlash2 块级草稿器（见 [Muse-Glimmer](docs/models/muse-glimmer_zh-cn.md)，环境变量 `TS_MUSE_GLIMMER_DFLASH`），以及 Gemma 4 的 `gemma4-assistant` 逐 token 草稿头。文件自己的 `general.architecture` 决定它如何加载——操作者从不需要挑选机制；在这里给出文件本身就会启用投机，不需要再加 `--spec`，显式的 `--no-spec` 则会否决它。草稿的隐藏维度必须与目标一致（例如 12B 目标配 12B 草稿，而非 26B-A4B 草稿）；草稿不匹配或不完整会在启动时立即失败并给出修复提示。Qwen 3.6 与 GLM 5.2 将 NextN 块内嵌在主干 GGUF 中，不需要这个参数——它们用 `--spec`。块级草稿器每步起草一整块 token，主干用一次批量前向验证，因此贪心输出保持不变；在 `cuda` 与 `ggml_cuda` 后端上对单序列请求生效。服务端的每一行验证都用该请求自己的采样器，因此可与任意采样设置组合。环境变量：`TS_SPEC_DRAFT_MODEL`（旧写法 `TS_MTP_DRAFT_MODEL`）、`TS_DSV4_DSPARK`。 |
 | `--paged-kv` / `--no-paged-kv` | 已移除的按会话分页 KV 管理器的兼容参数。当前服务端 KV 状态由引擎持有；请使用连续批处理 / `TS_SCHED_*` 开关调节引擎。别名：`--paged-kv-cache` / `--no-paged-kv-cache`。 |
 | `--paged-kv-block-size <N>` | 旧的独立分页 KV 块大小。当前引擎使用 `TS_SCHED_BLOCK_SIZE`。 |
 | `--paged-kv-ram-mb <N>` | 旧的独立分页 KV RAM 层上限。 |
@@ -607,8 +697,8 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --config config/server-basi
 | `TS_SPEC` *（旧写法 `TS_MTP_SPEC`）* | `1` 为单序列启用投机解码（默认 `0`）。CLI：`--spec` / `--no-spec`。 |
 | `TS_SPEC_TYPE` | 投机算法：`auto`（默认）/ `draft-head` / `block` / `ngram`。CLI：`--spec-type`。 |
 | `TS_SPEC_DRAFT` *（旧写法 `TS_MTP_DRAFT`）* | 每个投机步最多起草的 token 数（默认 `8`）。CLI：`--spec-draft`。 |
-| `TS_SPEC_PMIN` *（旧写法 `TS_MTP_PMIN`）* | 草稿置信度门限，取值 `(0, 1]`（默认按算法：逐 token 草稿头 `0.75`，块级 `0.35`，n-gram `0`）。CLI：`--spec-pmin`。 |
-| `TS_SPEC_DRAFT_MODEL` *（旧写法 `TS_MTP_DRAFT_MODEL`）* | Gemma 4 独立 `gemma4-assistant` 草稿 GGUF 路径。CLI：`--spec-draft-model`。Qwen 3.6（内嵌 NextN）忽略此项。 |
+| `TS_SPEC_PMIN` *（旧写法 `TS_MTP_PMIN`）* | 草稿置信度门限，取值 `[0, 1]`，`0` 表示从不设门限（默认按算法：逐 token 草稿头 `0.15`，块级 `0.35`，n-gram `0`）。CLI：`--spec-pmin`。 |
+| `TS_SPEC_DRAFT_MODEL` *（旧写法 `TS_MTP_DRAFT_MODEL`）* | Gemma 4 独立 `gemma4-assistant` 草稿 GGUF 路径。CLI：`--draft-model`。Qwen 3.6（内嵌 NextN）忽略此项。 |
 | `TS_GMTP_NO_FUSED` | `1` 关闭 Gemma 4 融合多 token 验证 / 草稿步 GGML 内核，回退到逐算子路径（ggml 后端上的 A/B 测试）。 |
 | `TS_GMTP_NO_FAST_ROLLBACK` | `1` 恢复保留前缀的回滚路径，而非部分接受时使用的稠密精确匹配快速回滚。 |
 | `TS_GMTP_BATCHED_TRUNK` | `1` 让 Gemma 4 验证主干走批量分页路径；默认对单序列投机使用更快的线性主干。 |
@@ -1424,7 +1514,7 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model <model.gguf> --back
 | Qwen 3.5 / 3.6 系列 | 启用 | `TS_QWEN35_BATCHED=0` 强制走旧的按序列路径（或 `--no-continuous-batching`） | `TS_QWEN35_BATCHED_GDN_NATIVE=1` 启用原生批处理 GDN 内核；`FUSED_ATTN_LAYER_MIN_SEQ_LEN=N` 覆盖融合注意力启用阈值（默认 4096） |
 | GPT OSS | 启用 | `TS_GPTOSS_BATCHED=0` 强制走旧的按序列路径 | `TS_GPTOSS_PAGED_ATTN_MANAGED=1` 强制使用托管 (C#) sinks softmax，而非原生带 sinks 的分页注意力内核 |
 | Nemotron-H | 启用 | `TS_NEMOTRON_BATCHED=0` 强制走旧的按序列路径 | `TS_NEMOTRON_MAMBA2_BATCHED_NATIVE=1` 启用原生批处理 Mamba2 步（NEON SIMD + GCD 并行） |
-| GLM 5.x | 未实现——并发走的是原生的按序列**槽位**（每个请求拥有自己的 MLA 与索引器缓存以及自己的 `n_past`；绑定请求只是切换活跃槽位，不搬运任何 KV 字节）。MLA 每个 token 只存一行 576 宽的数据，DSA 索引器打分的也正是这段连续历史，所以这里没有可供批处理的分页 KV 布局 | — | `TS_BATCHED_FUSED_DECODE=1` 启用跨槽位的批处理融合解码（一张图、每个序列一个 token、权重只读一次）：4 路并发下总解码吞吐 1.81 倍。默认关闭，因为批处理会改变 GEMM 形状，而 2-bit MoE 会把这点差异放大成不同的专家选择；`TS_GLM_BATCHED_DECODE=0` 让原生侧直接拒绝它 |
+| GLM 5.x | 未实现——并发走的是原生的按序列**槽位**（每个请求拥有自己的 MLA 与索引器缓存以及自己的 `n_past`；绑定请求只是切换活跃槽位，不搬运任何 KV 字节）。MLA 每个 token 只存一行 576 宽的数据，DSA 索引器打分的也正是这段连续历史，所以这里没有可供批处理的分页 KV 布局 | — | 跨槽位的批处理融合解码默认开启（一张图、每个序列一个 token、权重只读一次）：4 路并发下总解码吞吐 1.81 倍。设置 `TS_BATCHED_FUSED_DECODE=0` 可切回串行融合 decode；`TS_GLM_BATCHED_DECODE=0` 也会让 GLM 原生侧拒绝批处理。批处理会改变 GEMM 形状，而 2-bit MoE 可能把这点差异放大成不同的专家选择。 |
 | Gemma 3 | 未实现（走按序列回退） | — | — |
 | DiffusionGemma | Web UI 路径使用独立 diffusion 调度器；不是 `IBatchedPagedModel` 自回归路径 | `DIFFUSION_MAX_BATCH`、`DIFFUSION_STEPS` | `DIFFUSION_BATCHED_FORWARD=1` 启用真正的批处理 canvas decode；GGML 融合 decode 默认开启，可用 `DIFFUSION_NO_FUSED_DECODE=1` 关闭 |
 
@@ -1435,8 +1525,8 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model <model.gguf> --back
 | 投机解码引擎（单序列） | 关闭 | **`TS_SPEC=1`**（旧写法 `TS_MTP_SPEC`） | `--spec` / `--no-spec` |
 | 投机算法 | `auto` | `TS_SPEC_TYPE` | `--spec-type auto\|draft-head\|block\|ngram` |
 | 每步最多起草 token 数 | `8` | `TS_SPEC_DRAFT`（旧写法 `TS_MTP_DRAFT`） | `--spec-draft N` |
-| 草稿置信度门限 | 按算法（`0.75` / `0.35` / `0`） | `TS_SPEC_PMIN`（旧写法 `TS_MTP_PMIN`） | `--spec-pmin X` |
-| Gemma 4 独立草稿 GGUF（`gemma4-assistant`） | 无 | `TS_SPEC_DRAFT_MODEL`（旧写法 `TS_MTP_DRAFT_MODEL`） | `--spec-draft-model <path>` |
+| 草稿置信度门限 | 按算法（`0.15` / `0.35` / `0`） | `TS_SPEC_PMIN`（旧写法 `TS_MTP_PMIN`） | `--spec-pmin X` |
+| Gemma 4 独立草稿 GGUF（`gemma4-assistant`） | 无 | `TS_SPEC_DRAFT_MODEL`（旧写法 `TS_MTP_DRAFT_MODEL`） | `--draft-model <path>` |
 | Muse-Glimmer DFlash / DFlash2 草稿器 GGUF | 无 | `TS_MUSE_GLIMMER_DFLASH` | `--draft-model <path>` |
 | Qwen 3.5 / 3.8 DFlash2 草稿器 GGUF | 无 | `TS_QWEN35_DFLASH` | `--draft-model <path>` |
 | 融合 DFlash 计算图（ggml） | 开启 | `TS_DFLASH_FUSED=0` 回退到逐算子草稿器 | — |
@@ -1461,7 +1551,7 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model <model.gguf> --back
 | 上下文窗口 | 自报长度只作**上界**，加载后按实际空闲显存重新定档 | `MAX_CONTEXT=N` 把它变成硬上限 | —（仅环境变量） |
 | 张量并行切哪一半 | `3`（头 + 路由专家） | `TS_GLM_TP_SHARD`（1 头、2 专家、3 两者都切）、`TS_GLM_TP_OVERSUBSCRIBE=1` 允许多个 rank 挤在一张卡上做测试 | `--tp N` |
 | 主机端专家从 GGUF 映射直接读取 | 开启 | `TS_GLM_MOE_MMAP=0` 改为拷进私有缓冲 | 由 `--n-cpu-moe N` 决定哪些层 |
-| 跨序列的批处理融合解码 | 关闭 | **`TS_BATCHED_FUSED_DECODE=1`**；`TS_GLM_BATCHED_DECODE=0` 让原生侧拒绝它 | — |
+| 跨序列的批处理融合解码 | 开启 | **`TS_BATCHED_FUSED_DECODE=0`** 可关闭；`TS_GLM_BATCHED_DECODE=0` 让原生侧拒绝它 | — |
 | Flash attention / 融合 lightning 索引器 | 开启 | `TS_GLM_FA=0`、`TS_GLM_FUSED_LID=0` 退回到基本算子拼装 | — |
 | 缓存的已构建+已分配计算图数量 | `8` | `TS_GLM_GRAPH_CACHE=N` | — |
 | 权重加载并行度 | `16` 线程 / `64` MB 分块 | `TS_GLM_LOAD_THREADS`、`TS_GLM_LOAD_CHUNK_MB` | — |
@@ -1534,6 +1624,43 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model <model.gguf> --back
 | 工作线程挂起前的自旋次数 | `4096` | `TS_CPU_SPIN=N` —— 在这个宽度下挂起才是最贵的部分，所以默认自旋次数足够多，使稳态下根本不会挂起 | — |
 | 单次托管矩阵乘的任务切分 | 每个工作项 `131072` 字节权重，每个线程最多 `4` 个工作项 | `TS_CPU_TASK_BYTES`、`TS_CPU_TASKS_PER_WORKER` —— 按**工作量**而不是线程数来切 | — |
 | direct 视频网络（Wan、MiniMax-H3）上的量化权重 | 保持 GGUF 存储类型，直接参与乘法 | `TS_DIRECT_QUANT_WEIGHTS=0` 改回加载时一次性展开成 F32 再做普通 GEMM（旧行为，权重内存为 4 倍）。Wan 在 256x160x5f、单步下，就地路径实测 80.9 秒，展开路径 121.4 秒 | — |
+
+#### Agent Skills
+
+| 功能 | 默认 | 环境变量 | CLI 等价参数 |
+|---|---|---|---|
+| Agent Skills | 启用（二进制文件旁的 `skills` 目录，不存在则创建） | `TS_NO_SKILLS=1` 关闭该功能 | `--no-skills` |
+| 扫描的技能目录 | `<binDir>/skills` | `TS_SKILLS_DIR`（以路径分隔符分隔的列表） | `--skills-dir <path>`（可重复） |
+| 预先启用的技能 | 无 | — | `--skill <name>`（可重复）；按请求则用 `"skills": [...]` |
+| 向模型展示未选中的技能 | 启用 | — | `--skills-no-discovery`；按请求则用 `"skills_discovery": false` |
+| `skills_run`（运行技能自带脚本） | **关闭** | **`TS_SKILLS_ALLOW_EXEC=1`** | `--skills-allow-exec` |
+| 每轮可取用技能内容（及代码）的次数 | `8`，开启 `--code-exec` 时为 `24`（范围 1-64） | `TS_SKILLS_MAX_ROUNDS` | `--skills-max-rounds N` |
+| 打印注册表后退出 | — | — | `--list-skills` |
+
+`TS_NO_SKILLS` 与 `TS_SKILLS_ALLOW_EXEC` 只要取值不是 `0` 就算开启。两个宿主接受
+完全相同的参数拼写，且配置文件的键*就是* CLI 参数（`"skills-dir": ["/srv/skills"]`），
+因此同一份配置文件可以同时驱动 CLI 与服务端。完整参考见
+[Agent Skills in TensorSharp](docs/agent_skills.md)（英文）。
+
+#### 代码执行（`shell` 工具）
+
+| 功能 | 默认 | 环境变量 | CLI 等价参数 |
+|---|---|---|---|
+| `shell`、`read_file`、`edit_file`、`write_file` 与 `apply_patch` 工具 | **关闭** | **`TS_CODE_EXEC=1`** | `--code-exec` |
+| 安装软件包 | **关闭** | **`TS_CODE_EXEC_ALLOW_INSTALL=1`** | `--code-exec-allow-install` |
+| 一次安装可以指名的包 | 不限（单次安装最多 16 个） | — | `--code-exec-packages <list>` |
+| 一次安装可以到达的主机 | `pypi.org`、`files.pythonhosted.org`、`registry.npmjs.org`（传空值 = 不做限制） | `TS_CODE_EXEC_INSTALL_DOMAINS` | `--code-exec-install-domains <list>` |
+| 单条命令的时限 | `120` 秒（单次调用最多可要求 10 分钟） | — | `--code-exec-timeout N` |
+| shell | `bash`，其次 `sh`；Windows 上为 PowerShell | — | `--code-exec-shell <path\|name>` |
+| 单条命令保留的输出 | `32768` 字节，从中间截断 | — | `--code-exec-max-output N` |
+| 操作系统沙箱 | `required`（无法约束文件与套接字时拒绝运行） | — | `--code-exec-unconfined`（仅限 CLI；服务端会在启动时拒绝） |
+
+`TS_CODE_EXEC` 与 `TS_CODE_EXEC_ALLOW_INSTALL` 只要取值不是 `0` 就算开启。模型
+写下的命令在任何宿主机、任何配置下都拿不到套接字；唯一能碰到软件源的，是**宿主**
+从那条命令里读出包名之后代为执行的那次安装。随旧的程序式工具一同退休的只剩
+`--code-exec-languages`：它在启动时会被按名字拒绝，并且没有替代品可指，因为
+shell 能够到达 PATH 上的每一个解释器——于是手上还拿着旧脚本的运维者得到的是这条
+报错，而不是眼看着一个设置被忽略。
 
 #### 采样默认值（仅服务端）
 
@@ -1653,6 +1780,20 @@ curl -X POST http://localhost:5000/api/chat/ollama \
 curl -X POST http://localhost:5000/api/chat/ollama \
   -H "Content-Type: application/json" \
   -d '{"model": "gemma-4-E4B-it-Q8_0.gguf", "messages": [{"role": "user", "content": "天气怎么样？"}], "tools": [{"function": {"name": "get_weather", "description": "获取当前天气", "parameters": {"properties": {"city": {"type": "string"}}, "required": ["city"]}}}], "stream": false}'
+
+# 带 Agent Skills 的聊天。所有聊天接口都接受 "skills"
+#（/v1/chat/completions、/v1/responses、/api/chat 的 Ollama 与 Web UI 两种形态）；
+# 可选的 "skills_discovery": false 会把本次请求限制在它点名的技能上。
+# 模型的 skills_read 调用在服务端内部就被应答掉了，因此返回的是一条普通回复，
+# 而不是一个需要客户端自己去执行的工具调用。
+curl -X POST http://localhost:5000/api/chat/ollama \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gemma-4-E4B-it-Q8_0.gguf", "messages": [{"role": "user", "content": "把这份对账单里的合计表格提取出来。"}], "skills": ["pdf"], "skills_discovery": false, "stream": false}'
+
+# 列出已注册的技能；GET /v1/skills/{name} 会额外返回 SKILL.md 正文（字段名
+# "instructions"）。/api/skills 还会报告加载错误以及是否接受上传；
+# POST /api/skills 安装一个 .zip，DELETE 则删除一个。
+curl http://localhost:5000/v1/skills
 ```
 
 **兼容 OpenAI 的 API：**
@@ -1709,4 +1850,3 @@ print(response.choices[0].message.content)
 curl http://localhost:5000/api/queue/status
 # {"busy":false,"pending_requests":0,"total_processed":42}
 ```
-

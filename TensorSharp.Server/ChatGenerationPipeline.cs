@@ -13,6 +13,7 @@
 // assistant tokens across turns.
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -68,6 +69,112 @@ namespace TensorSharp.Server
     {
         /// <summary>An ordinary (non-terminal) update carrying just newly decoded text.</summary>
         public static ChatStreamUpdate Text(string piece) => new(piece, false, 0, 0, 0, 0, 0, 0, null);
+
+        /// <summary>
+        /// The token ids this round actually generated. Set on the TERMINAL update only,
+        /// and null everywhere else.
+        ///
+        /// <para>
+        /// It exists for the skills/code tool loop, which runs several generations inside
+        /// one request and re-renders the transcript before each. Re-rendering an assistant
+        /// round from its PARSED pieces does not reproduce the tokens that were generated:
+        /// the turn header, the channel markers and the tool-call markup are re-derived by
+        /// the chat template, and the render diverges from the live KV cache at exactly the
+        /// point that round began. The engine rewinds only a handful of trailing tokens, so
+        /// every round after the first re-prefilled the whole conversation - measured on
+        /// gemma-4-12B at 0% reuse and ~7s to first token per round, against 99.9% and
+        /// ~0.3s on the one round where the render happened to line up.
+        /// </para>
+        /// <para>
+        /// <c>SkillAgentLoop</c> - the CLI's copy of the same loop - has always recorded
+        /// this; the server's copy had no way to, because the terminal update did not carry
+        /// it. Two copies of one algorithm is exactly the shape that lets one of them
+        /// quietly lose a property the other has.
+        /// </para>
+        /// </summary>
+        public IReadOnlyList<int> RawOutputTokens { get; init; }
+
+        /// <summary>
+        /// Reasoning text decoded since the last update, already separated from
+        /// <see cref="Piece"/>. Only meaningful when <see cref="IsParsed"/> is true.
+        /// </summary>
+        public string ThinkingPiece { get; init; }
+
+        /// <summary>
+        /// Tool calls the CALLER must service, already extracted. Only meaningful when
+        /// <see cref="IsParsed"/> is true. Skill tools never appear here — those are
+        /// answered in process and never reach a client.
+        /// </summary>
+        public IReadOnlyList<ToolCall> ParsedToolCalls { get; init; }
+
+        /// <summary>
+        /// True when this update has ALREADY been through an output parser, so
+        /// <see cref="Piece"/> holds content only, <see cref="ThinkingPiece"/> holds
+        /// reasoning, and <see cref="ParsedToolCalls"/> holds whatever the caller must
+        /// service. An adapter that sees this must NOT run its own parser over the
+        /// update.
+        ///
+        /// <para>
+        /// Only the Agent Skills path sets it. That path has to parse anyway — it is
+        /// looking for <c>skills_read</c> calls to answer itself — and once it has, the
+        /// tool markup must not be forwarded, because the adapter's own parser would
+        /// turn it back into a tool call the client cannot service. Handing over the
+        /// already-separated pieces is what lets a skills request stream token by token
+        /// instead of buffering the whole answer to check it afterwards.
+        /// </para>
+        /// </summary>
+        public bool IsParsed { get; init; }
+
+        /// <summary>One already-parsed delta: content, reasoning, or caller tool calls.</summary>
+        public static ChatStreamUpdate Parsed(
+            string content, string thinking, IReadOnlyList<ToolCall> toolCalls) =>
+            new(content ?? string.Empty, false, 0, 0, 0, 0, 0, 0, null)
+            {
+                ThinkingPiece = thinking,
+                ParsedToolCalls = toolCalls,
+                IsParsed = true,
+            };
+
+        /// <summary>
+        /// Which stage of an in-process tool call this update reports: <c>writing</c>
+        /// while the model is generating the call, <c>running</c> while the host
+        /// executes it, <c>finished</c> when execution returned. Null on every other
+        /// update. Carried so a UI can show live progress through the two long silent
+        /// stretches — a shell call can be a whole heredoc, and executing it can take
+        /// minutes — where previously nothing streamed at all.
+        /// </summary>
+        public string ToolProgressPhase { get; init; }
+
+        /// <summary>The tool being written or run, when known ("shell").</summary>
+        public string ToolProgressName { get; init; }
+
+        /// <summary>New tool-call body text (the <c>writing</c> phase), or null.</summary>
+        public string ToolProgressPiece { get; init; }
+
+        /// <summary>Seconds the execution has been running (the <c>running</c> and
+        /// <c>finished</c> phases).</summary>
+        public double ToolProgressSeconds { get; init; }
+
+        /// <summary>
+        /// One human-readable line saying WHAT is being run — "python · 2.1 KB code",
+        /// "scripts/extract.py 2400" — so the user watching the progress knows more
+        /// than the tool's name. Null when there is nothing beyond the name to say.
+        /// </summary>
+        public string ToolProgressDetail { get; init; }
+
+        /// <summary>A tool-progress event. Piece stays empty and IsParsed is set, so an
+        /// adapter that predates the field treats it as a no-op update.</summary>
+        public static ChatStreamUpdate ToolProgress(
+            string phase, string name, string piece = null, double seconds = 0, string detail = null) =>
+            new(string.Empty, false, 0, 0, 0, 0, 0, 0, null)
+            {
+                IsParsed = true,
+                ToolProgressPhase = phase,
+                ToolProgressName = name,
+                ToolProgressPiece = piece,
+                ToolProgressSeconds = seconds,
+                ToolProgressDetail = detail,
+            };
     }
 
     internal sealed class ChatGenerationPipeline : IDisposable
@@ -237,7 +344,9 @@ namespace TensorSharp.Server
                 {
                     inputTokens = _kvCacheRenderer.RenderToTokens(
                         model.Tokenizer, model.Config.ChatTemplate, renderHistory, arch,
-                        addGenerationPrompt: true, out _, tools: tools, enableThinking: enableThinking);
+                        addGenerationPrompt: true, out explicitBreakpoints,
+                        tools: tools, enableThinking: enableThinking);
+                    var unexpandedTokens = inputTokens;
                     // ClearPreparedPromptState is safe when preparation fails
                     // before creating a bucket. Arm cleanup first so partial
                     // image/audio preparation cannot leak tensors on overflow
@@ -246,20 +355,16 @@ namespace TensorSharp.Server
                     inputTokens = model.MultimodalInjector.ProcessPromptTokens(renderHistory, inputTokens, requestId);
 
                     // ProcessPromptTokens expands each single placeholder token
-                    // (<|image_pad|>, the audio equivalent) into however many
-                    // tokens the encoded media actually occupies, so every
-                    // breakpoint index past the first attachment now points at
-                    // the wrong token. There is no mapping back from the
-                    // expanded prompt to the pre-expansion offsets, so the
-                    // markers are discarded (the renderer's out-parameter is
-                    // dropped above) rather than applied at bogus positions.
-                    // That falls back to the default implicit behaviour of
-                    // caching every full block, which is the safe direction:
-                    // the request caches at least as much as it would have,
-                    // never less.
+                    // (<|image_pad|>, the audio equivalent) into the encoded
+                    // media span. Markers in the byte-identical token prefix are
+                    // still exact; later offsets cannot be mapped safely and are
+                    // removed while retaining explicit-cache mode.
+                    RetainCacheBreakpointsInUnchangedPrefix(
+                        unexpandedTokens, inputTokens, explicitBreakpoints);
                     inputTokens = TruncatePromptToContext(
                         session, inputTokens, maxTokens, out effectiveMaxTokens, requestId,
-                        preserveAttachedDocuments, engineContextLimit, explicitBreakpoints: null);
+                        preserveAttachedDocuments, engineContextLimit,
+                        explicitBreakpoints: explicitBreakpoints);
                 }
             }
             else
@@ -310,6 +415,24 @@ namespace TensorSharp.Server
             StringBuilder decodedForStops = hasStopSequences ? new StringBuilder() : null;
             TokenSampler stopSampler = hasStopSequences ? new TokenSampler(cfg) : null;
             string finishReason = "max_tokens";
+
+            // The thinking budget. A reasoning model can spend an ENTIRE token
+            // allowance inside its thinking channel and emit no answer at all: observed
+            // on the algorithmic-art skill, where 8000 tokens — 100% of them thinking —
+            // produced an empty response after 888 seconds, reported to the caller as a
+            // bare `truncated: true` with nothing to read. Capping thinking turns that
+            // silent write-off into a fast, explained stop, and leaves the rest of the
+            // allowance for an answer.
+            //
+            // Detected from the decoded text rather than the parser, because the parser
+            // runs a layer above this loop: while thinking is open the close marker has
+            // not appeared, and every reasoning family this host serves closes with
+            // </think>. A family that does not is simply never capped, which is the
+            // safe direction to be wrong in.
+            int thinkingBudget = ThinkingBudgetFor(effectiveMaxTokens, enableThinking);
+            StringBuilder thinkingScan = thinkingBudget > 0 ? new StringBuilder() : null;
+            bool thinkingClosed = false;
+            int thinkingTokens = 0;
             bool wasCancelled = false;
             int kvCacheReusedTokens = 0;
             long timeToFirstTokenMs = 0;
@@ -361,6 +484,30 @@ namespace TensorSharp.Server
                     {
                         stopRequested = true;
                         finishReason = "stop_sequence";
+                    }
+                }
+
+                if (thinkingScan != null && !thinkingClosed)
+                {
+                    if (piece.Length > 0)
+                        thinkingScan.Append(piece);
+                    thinkingTokens++;
+
+                    // Only the tail can contain the marker, and the marker is short.
+                    if (thinkingScan.Length > 64)
+                        thinkingScan.Remove(0, thinkingScan.Length - 64);
+
+                    if (thinkingScan.ToString().Contains("</think>", StringComparison.Ordinal))
+                    {
+                        thinkingClosed = true;
+                    }
+                    else if (thinkingTokens >= thinkingBudget)
+                    {
+                        // Stop now rather than at the full budget: the answer would be
+                        // empty either way, and this way it costs a fraction of the time
+                        // and says what happened.
+                        stopRequested = true;
+                        finishReason = "thinking_budget";
                     }
                 }
 
@@ -419,7 +566,12 @@ namespace TensorSharp.Server
             long evalNs = InferenceTelemetry.ToNanos(evalSw.ElapsedTicks);
             long totalNs = InferenceTelemetry.ToNanos(totalSw.ElapsedTicks);
             yield return new ChatStreamUpdate("", true, promptTokenCount, generatedTokens.Count,
-                                             kvCacheReusedTokens, totalNs, promptNs, evalNs, finishReason);
+                                             kvCacheReusedTokens, totalNs, promptNs, evalNs, finishReason)
+            {
+                // Carried so the skills loop can splice this round back verbatim on its
+                // next render instead of re-tokenizing it. See RawOutputTokens.
+                RawOutputTokens = generatedTokens,
+            };
             }
             finally
             {
@@ -657,7 +809,8 @@ namespace TensorSharp.Server
             // caller holds this list and passes it on to the sequence). A
             // breakpoint at or before the cut marked a prefix that no longer
             // exists in the prompt at all and is discarded; if that empties the
-            // list the request simply falls back to implicit caching.
+            // list the request remains in explicit cache-none mode rather than
+            // silently widening the boundary to the whole truncated prompt.
             if (explicitBreakpoints != null && explicitBreakpoints.Count > 0)
             {
                 for (int i = explicitBreakpoints.Count - 1; i >= 0; i--)
@@ -670,6 +823,34 @@ namespace TensorSharp.Server
             }
 
             return inputTokens.GetRange(trimStart, kept);
+        }
+
+        /// <summary>Keep only explicit cache boundaries whose token prefix is
+        /// unchanged by multimodal placeholder expansion. An empty, non-null
+        /// list is intentional: it means the request explicitly caches no
+        /// blocks, rather than falling back to implicit cache-all behavior.</summary>
+        internal static void RetainCacheBreakpointsInUnchangedPrefix(
+            IReadOnlyList<int> beforeExpansion,
+            IReadOnlyList<int> afterExpansion,
+            List<int> explicitBreakpoints)
+        {
+            if (explicitBreakpoints == null) return;
+
+            int beforeCount = beforeExpansion?.Count ?? 0;
+            int afterCount = afterExpansion?.Count ?? 0;
+            int common = Math.Min(beforeCount, afterCount);
+            int unchangedPrefix = 0;
+            while (unchangedPrefix < common
+                && beforeExpansion![unchangedPrefix] == afterExpansion![unchangedPrefix])
+            {
+                unchangedPrefix++;
+            }
+
+            for (int i = explicitBreakpoints.Count - 1; i >= 0; i--)
+            {
+                if (explicitBreakpoints[i] > unchangedPrefix)
+                    explicitBreakpoints.RemoveAt(i);
+            }
         }
 
         /// <summary>
@@ -786,6 +967,42 @@ namespace TensorSharp.Server
         /// Find the length of the longest prefix of the byte buffer that forms valid UTF-8.
         /// Strips any trailing incomplete multi-byte sequence.
         /// </summary>
+        /// <summary>
+        /// How many tokens of THINKING a turn may spend before it is stopped, or 0 for
+        /// no cap.
+        ///
+        /// <para>
+        /// Default: three quarters of the turn's allowance, which leaves a quarter for an
+        /// answer. The shape of the failure this prevents is not "the model thought a bit
+        /// too long" — it is "the model thought until there was nothing left and returned
+        /// an empty string", which reads to a user as the server being broken. A model
+        /// that closes its thinking before the cap never notices this exists.
+        /// </para>
+        /// <para>
+        /// TS_THINKING_BUDGET overrides: a token count, or 0 to disable the cap entirely
+        /// for a deployment that would rather have long reasoning than a guaranteed answer.
+        /// </para>
+        /// </summary>
+        internal static int ThinkingBudgetFor(int maxTokens, bool enableThinking)
+        {
+            if (!enableThinking || maxTokens <= 0)
+                return 0;
+
+            string configured = Environment.GetEnvironmentVariable("TS_THINKING_BUDGET");
+            if (!string.IsNullOrWhiteSpace(configured)
+                && int.TryParse(configured, NumberStyles.Integer, CultureInfo.InvariantCulture, out int explicitBudget))
+            {
+                return explicitBudget > 0 ? explicitBudget : 0;
+            }
+
+            // Small allowances are left alone: capping a 200-token turn at 150 would fire
+            // on ordinary short reasoning.
+            if (maxTokens < 512)
+                return 0;
+
+            return (int)(maxTokens * 0.75);
+        }
+
         private static int FindValidUtf8Length(List<byte> bytes)
         {
             int len = bytes.Count;

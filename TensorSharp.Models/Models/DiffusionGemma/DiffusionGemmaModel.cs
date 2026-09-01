@@ -171,6 +171,7 @@ namespace TensorSharp.Models
         // separate small graph keeps it correct (unlike folding lm_head into the layer graph).
         private readonly bool _fusedLmHeadTailDisabled = Environment.GetEnvironmentVariable("DIFFUSION_NO_FUSED_LMHEAD_TAIL") == "1";
         private bool _fusedLmHeadTailOk = true;
+        private string _fusedLmHeadTailError;   // exception message from TryFusedLmHead, for the one-time notice
         // Segmented (per-layer) fused decode: run each layer as its own fused graph so layers whose
         // weights are NOT device-resident stream through one bounded, reused staging buffer instead of
         // all coexisting in VRAM. Selected automatically by PrepareCudaWeightResidency when the model
@@ -1201,7 +1202,11 @@ namespace TensorSharp.Models
                     _swForward.Stop();
                     return flLogits;
                 }
-                _fusedLmHeadTailOk = false;
+                _fusedLmHeadTailOk = false;   // latched: this branch never runs again
+                Console.WriteLine("  [fused lm_head tail] disabled" +
+                    (_fusedLmHeadTailError != null ? $" after error: {_fusedLmHeadTailError}" : ": kernel declined") +
+                    "; using the per-op output_norm + lm_head + softcap chain (slower; on-device sampling also off). " +
+                    "Reported once.");
             }
 
             Tensor normedOut = RMSNormOp(hidden, "output_norm.weight");
@@ -1773,8 +1778,9 @@ namespace TensorSharp.Models
                 }
                 return logits;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                _fusedLmHeadTailError = ex.Message;
                 return null;
             }
         }
@@ -1964,7 +1970,10 @@ namespace TensorSharp.Models
                 }
                 if (TryMoEFusedOnDeviceMlx(attnOut, moeInput, output, layer, N, D))
                     return output;
-                _moeFusedDeviceOk = false;
+                _moeFusedDeviceOk = false;   // latched: this branch never runs again
+                Console.WriteLine($"  [MLX fused on-device MoE] kernel rejected layer {layer} after passing the " +
+                    "self-check; fused on-device MoE disabled for the rest of the run, using the per-expert " +
+                    "fallback (per-layer host round-trips return). Reported once.");
             }
 
             long tr = Stopwatch.GetTimestamp();
@@ -1999,7 +2008,10 @@ namespace TensorSharp.Models
                 }
                 if (TryMoEGatherQmmMlx(moeInput, output, selectedExperts, routingWeights, layer, N, D))
                     return output;
-                _moeGatherQmmOk = false;
+                _moeGatherQmmOk = false;   // latched: this branch never runs again
+                Console.WriteLine($"  [MLX gather_qmm MoE] kernel rejected layer {layer} after passing the " +
+                    "self-check; gather_qmm MoE disabled for the rest of the run, using the per-expert " +
+                    "fallback. Reported once.");
             }
 
             // MLX device path: per-expert gather -> FFN -> weighted scatter-add, all on-device.

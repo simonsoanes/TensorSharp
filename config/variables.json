@@ -27,8 +27,8 @@
   },
 
   // MTP speculative decoding: Gemma-4's draft head ships as its own GGUF.
-  "mtp-spec": true,
-  "mtp-draft-model": {
+  "spec": true,
+  "draft-model": {
     "path": "${gemmaBase}-it-Q4_0-MTP.gguf",
     "urls": [ "${repo}/MTP/mtp-gemma-4-26B-A4B-it-Q4_0.gguf" ]
   }

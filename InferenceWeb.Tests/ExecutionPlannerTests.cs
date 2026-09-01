@@ -432,4 +432,18 @@ public class ExecutionPlannerTests
             Environment.SetEnvironmentVariable("TS_BATCHED_FUSED_DECODE", prevFused);
         }
     }
+
+    [Fact]
+    public void ExecutionOptions_DescribeOverrides_ReportsOnlyNonDefaults()
+    {
+        Assert.Empty(ExecutionOptions.Default.DescribeOverrides());
+
+        string description = (ExecutionOptions.Default with
+        {
+            BatchedFusedDecodeEnabled = false,
+        }).DescribeOverrides();
+
+        Assert.Contains("TS_BATCHED_FUSED_DECODE=0", description);
+        Assert.DoesNotContain("TS_BATCHED_FUSED_DECODE=1", description);
+    }
 }

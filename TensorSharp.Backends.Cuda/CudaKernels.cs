@@ -223,23 +223,25 @@ namespace TensorSharp.Cuda
             scaledDotProductAttentionF32 = module.GetFunction("ts_scaled_dot_product_attention_f32");
             // Optional: a PTX built before these kernels existed simply leaves the
             // table empty and vision attention keeps the generic SDPA kernel.
+            var missingOptional = new System.Collections.Generic.List<string>();
             foreach (int headDim in new[] { 64, 72, 80, 88, 96, 112, 128 })
             {
                 try { visionAttentionF32[headDim] = module.GetFunction($"ts_vision_attention_d{headDim}_f32"); }
-                catch { }
+                catch { missingOptional.Add($"ts_vision_attention_d{headDim}_f32"); }
             }
             foreach (int headDim in new[] { 64, 128 })
             {
                 try { wanAttentionF32[headDim] = module.GetFunction($"ts_wan_attention_d{headDim}_f32"); }
-                catch { }
+                catch { missingOptional.Add($"ts_wan_attention_d{headDim}_f32"); }
             }
-            wanRopeF32 = GetOptionalFunction(module, "ts_wan_rope_f32");
-            wanModulateF32 = GetOptionalFunction(module, "ts_wan_modulate_f32");
-            wanGateAddF32 = GetOptionalFunction(module, "ts_wan_gate_add_f32");
-            wanScaleColsF32 = GetOptionalFunction(module, "ts_wan_scale_cols_f32");
-            wanIm2colF32 = GetOptionalFunction(module, "ts_wan_im2col_f32");
-            wanChanRmsF32 = GetOptionalFunction(module, "ts_wan_chan_rms_f32");
-            wanUpsample2xF32 = GetOptionalFunction(module, "ts_wan_upsample2x_f32");
+            wanRopeF32 = GetOptionalFunction(module, "ts_wan_rope_f32", missingOptional);
+            wanModulateF32 = GetOptionalFunction(module, "ts_wan_modulate_f32", missingOptional);
+            wanGateAddF32 = GetOptionalFunction(module, "ts_wan_gate_add_f32", missingOptional);
+            wanScaleColsF32 = GetOptionalFunction(module, "ts_wan_scale_cols_f32", missingOptional);
+            wanIm2colF32 = GetOptionalFunction(module, "ts_wan_im2col_f32", missingOptional);
+            wanChanRmsF32 = GetOptionalFunction(module, "ts_wan_chan_rms_f32", missingOptional);
+            wanUpsample2xF32 = GetOptionalFunction(module, "ts_wan_upsample2x_f32", missingOptional);
+            WarnOptionalKernelsMissing(missingOptional);
             gqaPrefillAttentionF32 = module.GetFunction("ts_gqa_prefill_attention_f32");
             gqaPrefillAttentionF16 = module.GetFunction("ts_gqa_prefill_attention_f16");
             gqaPrefillAttentionGroup4D256F32 = module.GetFunction("ts_gqa_prefill_attention_group4_d256_f32");
@@ -896,10 +898,39 @@ namespace TensorSharp.Cuda
             Launch(visionAttentionF32[headDim], qBlocks, (uint)numHeads, 1, threads, 1, 1, 0, stream, args);
         }
 
-        private static IntPtr GetOptionalFunction(CudaModule module, string name)
+        private static IntPtr GetOptionalFunction(CudaModule module, string name, System.Collections.Generic.List<string> missing)
         {
             try { return module.GetFunction(name); }
-            catch { return IntPtr.Zero; }
+            catch
+            {
+                missing.Add(name);
+                return IntPtr.Zero;
+            }
+        }
+
+        private static int optionalKernelWarningEmitted;
+
+        private static void WarnOptionalKernelsMissing(System.Collections.Generic.List<string> missing)
+        {
+            // One startup line per process: without it, an old PTX silently pins
+            // vision/Wan ops to slower generic kernels or the CPU fallback.
+            if (missing.Count == 0)
+                return;
+            if (System.Threading.Interlocked.Exchange(ref optionalKernelWarningEmitted, 1) != 0)
+                return;
+
+            try
+            {
+                Console.Error.WriteLine(
+                    "WARNING: the loaded TensorSharp CUDA PTX predates these optional kernels: " +
+                    string.Join(", ", missing) + ". The affected vision/Wan ops use slower generic kernels " +
+                    "or the CPU fallback instead. Rebuild the PTX (TensorSharp.Backends.Cuda with nvcc, " +
+                    "refreshing cuda_kernels/tensorsharp_kernels.ptx) to enable them. Reported once.");
+            }
+            catch
+            {
+                // Diagnostics must never break model initialization.
+            }
         }
 
         private static uint GridLong(long count)

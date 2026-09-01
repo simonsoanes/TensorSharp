@@ -42,6 +42,18 @@ namespace TensorSharp.Models
         private bool _qwenCudaMoETablesReady;    // tables built (or unavailable)
         private bool _qwenCudaMoEUsable;
 
+        // One-time stderr note when the tables cannot be built: _qwenCudaMoEUsable
+        // then stays false for the process and every MoE layer decodes through the
+        // host per-expert path, roughly an order of magnitude slower — a degrade
+        // that used to latch with no message at all. Naturally once-per-process:
+        // the build itself is latched by _qwenCudaMoETablesReady.
+        private static void WarnQwenCudaMoEUnusable(string reason)
+        {
+            Console.Error.WriteLine(
+                $"[qwen35-cuda-moe] on-device MoE decode unavailable ({reason}); " +
+                "using the host per-expert MoE path (roughly 10x slower decode).");
+        }
+
         // Build the per-layer device pointer tables addressing the resident per-expert
         // gate / up / down quantized weights by expert id, so one captured graph can
         // replay for every token regardless of routing. Any gap (a non-resident
@@ -53,16 +65,27 @@ namespace TensorSharp.Models
             _qwenCudaMoETablesReady = true;
             _qwenCudaMoEUsable = false;
 
-            if (_backend != BackendType.Cuda || !s_qwenCudaMoeOnDeviceEnabled
-                || _numExperts <= 0 || _allocator is not CudaAllocator cudaAllocator)
+            // Non-CUDA backends and dense models never had this path: no fallback,
+            // nothing to report.
+            if (_backend != BackendType.Cuda || _numExperts <= 0
+                || _allocator is not CudaAllocator cudaAllocator)
                 return;
+            if (!s_qwenCudaMoeOnDeviceEnabled)
+            {
+                WarnQwenCudaMoEUnusable("disabled via TS_CUDA_MOE_ONDEVICE=0");
+                return;
+            }
             // Under TP the expert weights were moved into _tpQuantWeights and the
             // originals these arrays point at are already disposed. The per-rank
-            // tables in Qwen35Model.TensorParallelMoE.cs serve that path instead.
+            // tables in Qwen35Model.TensorParallelMoE.cs serve that path instead
+            // (not a fallback, so no warning).
             if (IsTensorParallel)
                 return;
             if (_expertGateQW == null || _expertUpQW == null || _expertDownQW == null)
+            {
+                WarnQwenCudaMoEUnusable("per-expert quantized gate/up/down weight arrays not loaded");
                 return;
+            }
 
             int numLayers = Config.NumLayers;
             _qwenMoEGatePtrTable = new IntPtr[numLayers];
@@ -76,7 +99,10 @@ namespace TensorSharp.Models
                 if (_isMoeLayer == null || l >= _isMoeLayer.Length || !_isMoeLayer[l])
                     continue;
                 if (_expertGateQW[l] == null || _expertUpQW[l] == null || _expertDownQW[l] == null)
+                {
+                    WarnQwenCudaMoEUnusable($"layer {l}: per-expert gate/up/down weight table missing");
                     return;
+                }
 
                 var gPtrs = new IntPtr[_numExperts];
                 var uPtrs = new IntPtr[_numExperts];
@@ -84,27 +110,46 @@ namespace TensorSharp.Models
                 int gateUpType = -1;
                 int downType = -1;
                 bool ok = true;
+                string gap = null;
 
                 for (int e = 0; e < _numExperts; e++)
                 {
                     var gw = _expertGateQW[l][e];
                     var uw = _expertUpQW[l][e];
                     var dw = _expertDownQW[l][e];
-                    if (gw == null || uw == null || dw == null) { ok = false; break; }
+                    if (gw == null || uw == null || dw == null)
+                    {
+                        gap = $"layer {l} expert {e}: gate/up/down weight missing";
+                        ok = false;
+                        break;
+                    }
 
-                    if (!CudaQuantizedOps.TryGetResidentDevicePtr(cudaAllocator, gw.EnsureDeviceCacheKey(), out IntPtr gDev, out int gType)
-                        || !CudaQuantizedOps.TryGetResidentDevicePtr(cudaAllocator, uw.EnsureDeviceCacheKey(), out IntPtr uDev, out int uType)
-                        || !CudaQuantizedOps.TryGetResidentDevicePtr(cudaAllocator, dw.EnsureDeviceCacheKey(), out IntPtr dDev, out int dType)
-                        || gType != uType)
+                    // Same short-circuit order as the original chained condition.
+                    IntPtr uDev = IntPtr.Zero, dDev = IntPtr.Zero;
+                    int uType = -1, dType = -1;
+                    bool gRes = CudaQuantizedOps.TryGetResidentDevicePtr(cudaAllocator, gw.EnsureDeviceCacheKey(), out IntPtr gDev, out int gType);
+                    bool uRes = gRes && CudaQuantizedOps.TryGetResidentDevicePtr(cudaAllocator, uw.EnsureDeviceCacheKey(), out uDev, out uType);
+                    bool dRes = uRes && CudaQuantizedOps.TryGetResidentDevicePtr(cudaAllocator, dw.EnsureDeviceCacheKey(), out dDev, out dType);
+                    if (!dRes || gType != uType)
                     {
                         // gate and up must share a type (they run the same projection
                         // kernel against one q8_1 activation); down may differ.
+                        gap = !gRes ? $"layer {l} expert {e}: gate weight not device-resident"
+                            : !uRes ? $"layer {l} expert {e}: up weight not device-resident"
+                            : !dRes ? $"layer {l} expert {e}: down weight not device-resident"
+                            : $"layer {l} expert {e}: gate/up quant types differ (gate={gType}, up={uType})";
                         ok = false;
                         break;
                     }
 
                     if (gateUpType < 0) { gateUpType = gType; downType = dType; }
-                    else if (gateUpType != gType || downType != dType) { ok = false; break; }
+                    else if (gateUpType != gType || downType != dType)
+                    {
+                        gap = $"layer {l} expert {e}: quant type differs across experts " +
+                            $"(gate/up {gType} vs {gateUpType}, down {dType} vs {downType})";
+                        ok = false;
+                        break;
+                    }
 
                     gPtrs[e] = gDev;
                     uPtrs[e] = uDev;
@@ -112,7 +157,11 @@ namespace TensorSharp.Models
                 }
 
                 if (!ok || gateUpType < 0)
-                    return; // any gap -> keep the host path for the whole model
+                {
+                    // any gap -> keep the host path for the whole model
+                    WarnQwenCudaMoEUnusable(gap ?? $"layer {l}: no expert quant type resolved");
+                    return;
+                }
 
                 _qwenMoEGatePtrTable[l] = CudaQuantizedOps.CreateDevicePointerTable(cudaAllocator, gPtrs);
                 _qwenMoEUpPtrTable[l] = CudaQuantizedOps.CreateDevicePointerTable(cudaAllocator, uPtrs);

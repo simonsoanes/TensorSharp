@@ -1240,7 +1240,7 @@ TSG_EXPORT int TSGgml_GptOssSyncKvCacheToHost(
         tsg_gptoss::KvWindow* vw = tsg_gptoss::kv_find(v_cache);
         if (kw == nullptr && vw == nullptr)
             return 0;
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         if (kw != nullptr)
             kv_download(kw, k_cache, cache_size, std::min<std::int64_t>(rows, kw->rows_valid));
         if (vw != nullptr)

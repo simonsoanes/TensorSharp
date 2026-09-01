@@ -35,7 +35,7 @@ dotnet run --project TensorSharp.Cli -c Release -- \
 dotnet run --project TensorSharp.Cli -c Release -- \
   --model models/Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
   --draft-model models/dflash-kquant.gguf \
-  --spec-draft-n-max 15 --input prompt.txt --backend ggml_cuda
+  --spec-draft 15 --input prompt.txt --backend ggml_cuda
 ```
 
 `--draft-model` can also be supplied as `TS_MUSE_GLIMMER_DFLASH`.

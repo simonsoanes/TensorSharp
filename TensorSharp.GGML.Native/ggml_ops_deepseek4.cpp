@@ -1005,7 +1005,7 @@ static bool dsv4_build_rope_table_host(dsv4_model & m, bool comp, std::vector<fl
                                     freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow);
     ggml_cgraph * g = ggml_new_graph(c);
     ggml_build_forward_expand(g, r);
-    if (ggml_backend_graph_compute(m.backends[m.n_gpu], g) != GGML_STATUS_SUCCESS)
+    if (tsg::compute_graph(m.backends[m.n_gpu], g) != GGML_STATUS_SUCCESS)
     {
         ggml_free(c);
         return false;

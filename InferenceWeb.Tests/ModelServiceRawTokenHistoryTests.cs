@@ -114,7 +114,14 @@ public class ModelServiceRawTokenHistoryTests
         var incoming = new List<ChatMessage>
         {
             new() { Role = "user", Content = "What is 1+1?" },          // unchanged
-            new() { Role = "assistant", Content = "1+1=2", Thinking = "let me think" }, // PARSED!
+            new()
+            {
+                Role = "assistant",
+                Content = "1+1=2",
+                Thinking = "let me think",
+                CacheControl = new CacheControlMarker(),
+                ContentCacheBreakpoints = new List<int> { 3 },
+            }, // PARSED!
             new() { Role = "user", Content = "What is 2+2?" },
         };
 
@@ -122,6 +129,8 @@ public class ModelServiceRawTokenHistoryTests
 
         Assert.Equal(3, result.Count);
         Assert.Same(rawTokens, result[1].RawOutputTokens);
+        Assert.NotNull(result[1].CacheControl);
+        Assert.Equal(new[] { 3 }, result[1].ContentCacheBreakpoints);
     }
 
     [Fact]

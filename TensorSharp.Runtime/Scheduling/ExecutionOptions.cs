@@ -85,7 +85,7 @@ namespace TensorSharp.Runtime.Scheduling
             if (BatchedPathDisabled) parts.Add("TS_SCHED_DISABLE_BATCHED");
             if (!BatchedN1FastPathEnabled) parts.Add("TS_BATCHED_N1_FAST_PATH=0");
             if (!PerSeqFusedEnabled) parts.Add("TS_PER_SEQ_FUSED=0");
-            if (BatchedFusedDecodeEnabled) parts.Add("TS_BATCHED_FUSED_DECODE=1");
+            if (!BatchedFusedDecodeEnabled) parts.Add("TS_BATCHED_FUSED_DECODE=0");
             if (!RetainedFusedCacheEnabled) parts.Add("TS_RETAINED_FUSED_CACHE=0");
             if (RetainedFusedCacheBudget != 4) parts.Add($"TS_RETAINED_FUSED_CACHE_MAX={RetainedFusedCacheBudget}");
             return string.Join(", ", parts);

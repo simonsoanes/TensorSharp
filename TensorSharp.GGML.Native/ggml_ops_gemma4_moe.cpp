@@ -436,7 +436,7 @@ TSG_EXPORT int TSGgml_Gemma4MoELayerDecode(const TSGgmlGemma4MoELayerDesc* d)
         }
         else
         {
-            status = ggml_backend_graph_compute(g_backend, graph);
+            status = tsg::compute_graph(g_backend, graph);
         }
         if (status != GGML_STATUS_SUCCESS)
         {
@@ -1415,7 +1415,7 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecode(
             }
             else
             {
-                status = ggml_backend_graph_compute(g_backend, graph);
+                status = tsg::compute_graph(g_backend, graph);
             }
             if (status != GGML_STATUS_SUCCESS)
             {

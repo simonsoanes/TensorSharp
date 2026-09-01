@@ -594,13 +594,13 @@ TSG_EXPORT int TSGgml_GatedDeltaNetChunkedF32(
             ggml_backend_tensor_set(entry->state_storage, state_desc.data, 0, entry->state_bytes);
             ggml_backend_tensor_set(entry->ssm_norm_storage, ssm_norm_w_data, 0, entry->ssm_norm_bytes);
 
-            ggml_status status = ggml_backend_graph_compute(g_backend, entry->graph);
+            ggml_status status = tsg::compute_graph(g_backend, entry->graph);
             if (status != GGML_STATUS_SUCCESS)
             {
                 set_last_error("GatedDeltaNetChunked: graph compute failed.");
                 return 0;
             }
-            ggml_backend_synchronize(g_backend);
+            tsg::sync_backend(g_backend);
 
             ggml_backend_tensor_get(entry->gated_out_storage, gated_out_desc.data, 0, entry->gated_out_bytes);
             ggml_backend_tensor_get(entry->state_storage,     state_desc.data,     0, entry->state_bytes);

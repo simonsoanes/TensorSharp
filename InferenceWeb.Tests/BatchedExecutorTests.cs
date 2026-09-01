@@ -181,6 +181,260 @@ public class BatchedExecutorTests
     }
 
     [Fact]
+    public async Task BatchExecutor_DecodeTimeBatchDecline_DoesNotDoubleAppendSampledToken()
+    {
+        var model = new DecodeDecliningBatchedStubModel("fp-decode-decline", peakToken: 7);
+        using var engine = new InferenceEngine(model, SmallConfig(), NullLogger.Instance);
+
+        var sequences = Enumerable.Range(0, 3)
+            .Select(i => new SequenceState($"decline-{i}", Enumerable.Range(1, 4).ToList(),
+                maxNewTokens: 5, BlockSize, SamplingConfig.Greedy))
+            .ToList();
+        var handles = sequences.Select(seq => engine.SubmitRequest(seq)).ToList();
+
+        foreach (var handle in handles)
+        {
+            var completion = await handle.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(SequenceStatus.FinishedLengthCapped, completion.Status);
+            Assert.Equal(5, completion.OutputTokenCount);
+            Assert.Equal(Enumerable.Repeat(7, 5), handle.Sequence.OutputTokens);
+        }
+
+        Assert.Equal(1, model.DecodeDeclines);
+        Assert.Equal(0, model.NumForwardCalls);
+        Assert.True(model.SingletonBatchCalls > 0,
+            "The declined batch did not exercise the state-safe singleton paged fallback.");
+    }
+
+    [Fact]
+    public void BatchExecutor_BatchDeclineAfterLinearMigration_PreservesOwnerTail()
+    {
+        using var model = new StatefulMigrationStubModel(
+            "fp-migration-decline", peakToken: 7, declineMultiBatchNumber: 1);
+        var cfg = SmallConfig();
+        var pool = new BlockPool(
+            cfg.NumBlocks, cfg.BlockSize, model.ComputeKVBlockByteSize(cfg.BlockSize));
+        var scheduler = new ContinuousBatchScheduler(
+            cfg, pool, model.KVStateFingerprint, NullLogger.Instance);
+        var executor = new BatchExecutor(model, pool, scheduler, NullLogger.Instance);
+
+        var owner = new SequenceState(
+            "migration-owner",
+            Enumerable.Range(1, BlockSize + 3).ToList(),
+            maxNewTokens: 4,
+            BlockSize,
+            SamplingConfig.Greedy);
+        scheduler.Submit(owner);
+        var firstResults = executor.ExecuteStep(scheduler.Schedule());
+        Assert.Single(firstResults);
+        Assert.Null(firstResults[0].Error);
+
+        var newcomer = new SequenceState(
+            "migration-newcomer",
+            Enumerable.Range(2, 4).ToList(),
+            maxNewTokens: 4,
+            BlockSize,
+            SamplingConfig.Greedy);
+        scheduler.Submit(newcomer);
+        var mixedStep = scheduler.Schedule();
+        Assert.Equal(2, mixedStep.ScheduledWork.Count);
+
+        var fallbackResults = executor.ExecuteStep(mixedStep);
+
+        Assert.All(fallbackResults, result => Assert.Null(result.Error));
+        Assert.Equal(1, model.MigrationCalls);
+        // The per-sequence fairness policy serves the fresh newcomer first.
+        // On the next step the prior owner is restored from its captured blocks
+        // and migrated again; that is where a missing partial tail is exposed.
+        Assert.All(executor.ExecuteStep(scheduler.Schedule()), result => Assert.Null(result.Error));
+        Assert.True(model.SawMigratedOwnerFallbackForward,
+            $"The owner did not continue from the complete live linear tail after ForwardBatch declined " +
+            $"(expected {model.OwnerFallbackExpectedLength}, saw {model.OwnerFallbackActualLength}).");
+        Assert.False(model.LostMigratedOwnerTail,
+            "The model's copy-only migration was treated as a destructive handoff before ForwardBatch accepted.");
+    }
+
+    [Fact]
+    public void BatchExecutor_PagedBatchDecline_UsesPagedSingletonsAndNextBatchSeesFullHistory()
+    {
+        using var model = new StatefulMigrationStubModel(
+            "fp-paged-decline", peakToken: 7, declineMultiBatchNumber: 2);
+        var cfg = SmallConfig();
+        var pool = new BlockPool(
+            cfg.NumBlocks, cfg.BlockSize, model.ComputeKVBlockByteSize(cfg.BlockSize));
+        var scheduler = new ContinuousBatchScheduler(
+            cfg, pool, model.KVStateFingerprint, NullLogger.Instance);
+        var executor = new BatchExecutor(model, pool, scheduler, NullLogger.Instance);
+
+        var sequences = Enumerable.Range(0, 3)
+            .Select(i => new SequenceState(
+                $"paged-{i}",
+                Enumerable.Range(1 + i, 4).ToList(),
+                maxNewTokens: 5,
+                BlockSize,
+                SamplingConfig.Greedy))
+            .ToList();
+        foreach (var sequence in sequences)
+            scheduler.Submit(sequence);
+
+        Assert.All(executor.ExecuteStep(scheduler.Schedule()), result => Assert.Null(result.Error));
+        Assert.All(executor.ExecuteStep(scheduler.Schedule()), result => Assert.Null(result.Error));
+        Assert.All(executor.ExecuteStep(scheduler.Schedule()), result => Assert.Null(result.Error));
+
+        Assert.Equal(sequences.Count, model.SingletonBatchCalls);
+        Assert.Equal(0, model.LinearForwardCalls);
+        Assert.Equal(0, model.PagedHistoryValidationFailures);
+        Assert.True(model.SawAcceptedMultiBatchAfterDecline,
+            "The regression did not exercise an accepted multi-sequence batch after the decline.");
+    }
+
+    [Fact]
+    public void BatchExecutor_DynamicBatchDisable_DrainsPagedResidentsThroughSingletonBatches()
+    {
+        string previousDisable = Environment.GetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED");
+        try
+        {
+            Environment.SetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED", "0");
+
+            using var model = new StatefulMigrationStubModel(
+                "fp-dynamic-batch-disable", peakToken: 7);
+            var cfg = SmallConfig();
+            var pool = new BlockPool(
+                cfg.NumBlocks, cfg.BlockSize, model.ComputeKVBlockByteSize(cfg.BlockSize));
+            var scheduler = new ContinuousBatchScheduler(
+                cfg, pool, model.KVStateFingerprint, NullLogger.Instance);
+            var executor = new BatchExecutor(model, pool, scheduler, NullLogger.Instance);
+
+            var sequences = Enumerable.Range(0, 2)
+                .Select(i => new SequenceState(
+                    $"disable-paged-{i}",
+                    Enumerable.Range(1 + i, 4).ToList(),
+                    maxNewTokens: 4,
+                    BlockSize,
+                    SamplingConfig.Greedy))
+                .ToList();
+            foreach (var sequence in sequences)
+                scheduler.Submit(sequence);
+
+            var prefillResults = executor.ExecuteStep(scheduler.Schedule());
+            Assert.All(prefillResults, result => Assert.Null(result.Error));
+            Assert.Equal(1, model.ForwardBatchCalls);
+            Assert.Equal(0, model.SingletonBatchCalls);
+
+            // Options are re-read at every step. Once the histories live only
+            // in model-owned paged arrays, disabling multi-sequence batching
+            // must drain them through singleton paged calls rather than inject
+            // unrelated pooled bytes into the linear cache.
+            Environment.SetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED", "1");
+            var decodeResults = executor.ExecuteStep(scheduler.Schedule());
+
+            Assert.All(decodeResults, result => Assert.Null(result.Error));
+            Assert.Equal(sequences.Count, decodeResults.Count);
+            Assert.Equal(sequences.Count, model.SingletonBatchCalls);
+            Assert.Equal(0, model.LinearForwardCalls);
+            Assert.Equal(0, model.PagedHistoryValidationFailures);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED", previousDisable);
+        }
+    }
+
+    [Fact]
+    public void BatchExecutor_MixedMultimodalMigrationFailure_FallsBackBeforeAdvancingEitherSubset()
+    {
+        var injector = new PendingRequestInjector();
+        using var model = new StatefulMigrationStubModel(
+            "fp-mixed-migration-failure",
+            peakToken: 7,
+            migrationSucceeds: false,
+            injector: injector);
+        var cfg = SmallConfig();
+        var pool = new BlockPool(
+            cfg.NumBlocks, cfg.BlockSize, model.ComputeKVBlockByteSize(cfg.BlockSize));
+        var scheduler = new ContinuousBatchScheduler(
+            cfg, pool, model.KVStateFingerprint, NullLogger.Instance);
+        var executor = new BatchExecutor(model, pool, scheduler, NullLogger.Instance);
+
+        var owner = new SequenceState(
+            "mixed-text-owner",
+            Enumerable.Range(1, BlockSize + 1).ToList(),
+            maxNewTokens: 4,
+            BlockSize,
+            SamplingConfig.Greedy);
+        scheduler.Submit(owner);
+        Assert.Null(executor.ExecuteStep(scheduler.Schedule())[0].Error);
+
+        var multimodal = new SequenceState(
+            "mixed-mm",
+            Enumerable.Range(3, 4).ToList(),
+            maxNewTokens: 4,
+            BlockSize,
+            SamplingConfig.Greedy);
+        injector.AddPending(multimodal.RequestId);
+        scheduler.Submit(multimodal);
+        var mixedStep = scheduler.Schedule();
+        Assert.Equal(2, mixedStep.ScheduledWork.Count);
+
+        var results = executor.ExecuteStep(mixedStep);
+
+        Assert.All(results, result => Assert.Null(result.Error));
+        Assert.Equal(1, model.MigrationCalls);
+        Assert.Equal(0, model.ForwardBatchCalls);
+        Assert.All(executor.ExecuteStep(scheduler.Schedule()), result => Assert.Null(result.Error));
+        Assert.True(model.SawMigratedOwnerFallbackForward,
+            $"Expected {model.OwnerFallbackExpectedLength} live tokens, saw {model.OwnerFallbackActualLength}.");
+        Assert.False(model.LostMigratedOwnerTail);
+    }
+
+    [Fact]
+    public async Task BatchExecutor_FusedDecodeDecline_DoesNotDrawSeededSamplerTwice()
+    {
+        static SamplingConfig SeededSampling() => new()
+        {
+            Temperature = 1f,
+            TopK = 4,
+            TopP = 1f,
+            MinP = 0f,
+            RepetitionPenalty = 1f,
+            PresencePenalty = 0f,
+            FrequencyPenalty = 0f,
+            Seed = 1729,
+        };
+
+        static async Task<(List<int[]> outputs, PerSeqFusedStubModel model)> RunAsync(
+            bool canBatchDecode, string fingerprint)
+        {
+            var model = new PerSeqFusedStubModel(
+                fingerprint, canBatchDecode: canBatchDecode, samplingLogits: true);
+            using var engine = new InferenceEngine(model, SmallConfig(), NullLogger.Instance);
+            var sequences = Enumerable.Range(0, 3)
+                .Select(i => new SequenceState($"{fingerprint}-{i}",
+                    Enumerable.Range(1, 4).ToList(), maxNewTokens: 16,
+                    BlockSize, SeededSampling()))
+                .ToList();
+            var handles = sequences.Select(seq => engine.SubmitRequest(seq)).ToList();
+
+            foreach (var handle in handles)
+                await handle.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+
+            return (sequences.Select(s => s.OutputTokens.ToArray()).ToList(), model);
+        }
+
+        // Both runs use the same per-sequence fused fallback and seeded samplers.
+        // The only difference is whether the model first gets (and declines) the
+        // token-batched fused attempt.
+        var baseline = await RunAsync(canBatchDecode: false, "seeded-baseline");
+        var declined = await RunAsync(canBatchDecode: true, "seeded-decline");
+
+        Assert.True(declined.model.BatchedFusedDecodeDeclines > 0,
+            "The test did not exercise the batched fused-decode decline.");
+        Assert.Equal(baseline.outputs.Count, declined.outputs.Count);
+        for (int i = 0; i < baseline.outputs.Count; i++)
+            Assert.Equal(baseline.outputs[i], declined.outputs[i]);
+    }
+
+    [Fact]
     public void BatchExecutor_PerSeqFused_ServesConcurrentSequencesViaForwardNotForwardBatch()
     {
         // A model that opts into the per-sequence fused path
@@ -540,6 +794,322 @@ public class BatchedExecutorTests
     }
 
     /// <summary>
+    /// Stateful linear/paged cache model used by the migration-decline tests.
+    /// Tokens themselves stand in for K/V rows, making a missing partial tail
+    /// observable without a real attention kernel.
+    /// </summary>
+    private sealed class StatefulMigrationStubModel : IModelArchitecture, IBatchedPagedModel
+    {
+        private readonly string _fp;
+        private readonly int _peak;
+        private readonly int _declineMultiBatchNumber;
+        private readonly bool _migrationSucceeds;
+        private readonly IMultimodalInjector _injector;
+        private readonly List<int> _linearHistory = new();
+        private readonly Dictionary<string, List<int>> _pagedHistory =
+            new(StringComparer.Ordinal);
+        private int _multiBatchCalls;
+        private bool _declinedMultiBatch;
+        private bool _awaitingOwnerFallback;
+        private string _expectedOwnerRequestId;
+        private int[] _expectedOwnerFallbackHistory = Array.Empty<int>();
+
+        public StatefulMigrationStubModel(
+            string fp,
+            int peakToken,
+            int declineMultiBatchNumber = 0,
+            bool migrationSucceeds = true,
+            IMultimodalInjector injector = null)
+        {
+            _fp = fp;
+            _peak = peakToken;
+            _declineMultiBatchNumber = declineMultiBatchNumber;
+            _migrationSucceeds = migrationSucceeds;
+            _injector = injector;
+            Tokenizer = new StubTokenizer(VocabSize);
+        }
+
+        public int MigrationCalls { get; private set; }
+        public int ForwardBatchCalls { get; private set; }
+        public int SingletonBatchCalls { get; private set; }
+        public int LinearForwardCalls { get; private set; }
+        public int PagedHistoryValidationFailures { get; private set; }
+        public bool SawMigratedOwnerFallbackForward { get; private set; }
+        public bool LostMigratedOwnerTail { get; private set; }
+        public bool SawAcceptedMultiBatchAfterDecline { get; private set; }
+        public int OwnerFallbackExpectedLength { get; private set; }
+        public int OwnerFallbackActualLength { get; private set; }
+
+        public ModelConfig Config { get; } = new ModelConfig { VocabSize = VocabSize };
+        public ITokenizer Tokenizer { get; }
+        public IMultimodalInjector MultimodalInjector => _injector;
+        public IBackendExecutionPlan ExecutionPlan => null;
+        public bool SupportsKVCacheTruncation => true;
+        public bool SupportsKVStateSnapshot => true;
+        public bool SupportsCrossSequenceKvReuse => true;
+        public bool SupportsLinearKVMigration => true;
+        public string KVStateFingerprint => _fp;
+        public long ComputeKVBlockByteSize(int tokenCount) => tokenCount * sizeof(int);
+
+        public float[] Forward(int[] tokens)
+        {
+            LinearForwardCalls++;
+            if (_awaitingOwnerFallback
+                && tokens.Length == 1
+                && tokens[0] == _peak)
+            {
+                ValidateRestoredOwnerTail();
+            }
+
+            _linearHistory.AddRange(tokens);
+            return PeakedLogits();
+        }
+
+        public void ResetKVCache() => _linearHistory.Clear();
+
+        public void TruncateKVCache(int tokenCount)
+        {
+            if (_linearHistory.Count > tokenCount)
+                _linearHistory.RemoveRange(tokenCount, _linearHistory.Count - tokenCount);
+        }
+
+        public bool TryExtractKVBlock(int startToken, int tokenCount, Span<byte> destination)
+        {
+            if (startToken < 0 || tokenCount < 0
+                || startToken + tokenCount > _linearHistory.Count
+                || destination.Length < tokenCount * sizeof(int))
+            {
+                return false;
+            }
+
+            for (int i = 0; i < tokenCount; i++)
+            {
+                BitConverter.TryWriteBytes(
+                    destination.Slice(i * sizeof(int), sizeof(int)),
+                    _linearHistory[startToken + i]);
+            }
+            return true;
+        }
+
+        public bool TryInjectKVBlock(int startToken, int tokenCount, ReadOnlySpan<byte> source)
+        {
+            if (startToken < 0 || tokenCount < 0
+                || startToken > _linearHistory.Count
+                || source.Length < tokenCount * sizeof(int))
+            {
+                return false;
+            }
+
+            if (_linearHistory.Count > startToken)
+                _linearHistory.RemoveRange(startToken, _linearHistory.Count - startToken);
+            for (int i = 0; i < tokenCount; i++)
+            {
+                _linearHistory.Add(BitConverter.ToInt32(
+                    source.Slice(i * sizeof(int), sizeof(int))));
+            }
+            return true;
+        }
+
+        public bool TryMigrateLinearKVToPaged(SequenceState owner, int blockSize)
+        {
+            MigrationCalls++;
+            if (_awaitingOwnerFallback
+                && string.Equals(owner.RequestId, _expectedOwnerRequestId, StringComparison.Ordinal))
+            {
+                ValidateRestoredOwnerTail();
+            }
+
+            int count = owner.NumComputedTokens;
+            _expectedOwnerFallbackHistory = _linearHistory.Take(count).ToArray();
+            _expectedOwnerRequestId = owner.RequestId;
+            _awaitingOwnerFallback = true;
+            if (!_migrationSucceeds || _linearHistory.Count < count)
+                return false;
+
+            _pagedHistory[owner.RequestId] = _expectedOwnerFallbackHistory.ToList();
+            return true;
+        }
+
+        public IReadOnlyList<float[]> ForwardBatch(BatchedForwardContext ctx)
+        {
+            ForwardBatchCalls++;
+            bool isMulti = ctx.Sequences.Count > 1;
+            if (!isMulti)
+                SingletonBatchCalls++;
+            else
+                _multiBatchCalls++;
+
+            ValidatePagedPrefixes(ctx);
+
+            if (isMulti
+                && _declineMultiBatchNumber > 0
+                && _multiBatchCalls == _declineMultiBatchNumber)
+            {
+                _declinedMultiBatch = true;
+                throw new NotSupportedException("decline the configured multi-sequence batch");
+            }
+
+            _awaitingOwnerFallback = false;
+            for (int s = 0; s < ctx.Sequences.Count; s++)
+            {
+                var seq = ctx.Sequences[s];
+                if (!_pagedHistory.TryGetValue(seq.RequestId, out var history))
+                {
+                    history = new List<int>();
+                    _pagedHistory[seq.RequestId] = history;
+                }
+
+                int queryStart = ctx.QueryStartLoc[s];
+                int queryEnd = ctx.QueryStartLoc[s + 1];
+                for (int q = queryStart; q < queryEnd; q++)
+                {
+                    int position = ctx.Positions[q];
+                    if (history.Count != position)
+                    {
+                        PagedHistoryValidationFailures++;
+                        if (history.Count > position)
+                            history.RemoveRange(position, history.Count - position);
+                        while (history.Count < position)
+                            history.Add(int.MinValue);
+                    }
+
+                    int token = position < seq.NumTotalTokens
+                        ? seq.TokenAt(position)
+                        : _peak;
+                    history.Add(token);
+                }
+            }
+
+            if (isMulti && _declinedMultiBatch)
+                SawAcceptedMultiBatchAfterDecline = true;
+
+            return Enumerable.Range(0, ctx.Sequences.Count)
+                .Select(_ => PeakedLogits())
+                .ToArray();
+        }
+
+        private void ValidatePagedPrefixes(BatchedForwardContext ctx)
+        {
+            foreach (var seq in ctx.Sequences)
+            {
+                int actual = _pagedHistory.TryGetValue(seq.RequestId, out var history)
+                    ? history.Count
+                    : 0;
+                if (actual != seq.NumComputedTokens)
+                    PagedHistoryValidationFailures++;
+            }
+        }
+
+        private float[] PeakedLogits()
+        {
+            var logits = new float[VocabSize];
+            logits[_peak] = 10f;
+            return logits;
+        }
+
+        private void ValidateRestoredOwnerTail()
+        {
+            OwnerFallbackExpectedLength = _expectedOwnerFallbackHistory.Length;
+            OwnerFallbackActualLength = _linearHistory.Count;
+            if (_linearHistory.SequenceEqual(_expectedOwnerFallbackHistory))
+                SawMigratedOwnerFallbackForward = true;
+            else
+                LostMigratedOwnerTail = true;
+            _awaitingOwnerFallback = false;
+        }
+
+        public void Dispose() { }
+    }
+
+    private sealed class PendingRequestInjector : IMultimodalInjector
+    {
+        private readonly HashSet<string> _pending = new(StringComparer.Ordinal);
+
+        public void AddPending(string requestId) => _pending.Add(requestId);
+        public void LoadProjectors(string mmProjPath) { }
+        public List<int> ProcessPromptTokens(
+            List<ChatMessage> history, List<int> inputTokens, string requestId = null)
+            => inputTokens;
+        public bool QueuePromptEmbeddings(int reusablePrefixTokenCount, string requestId = null)
+            => requestId != null && _pending.Remove(requestId);
+        public bool QueuePromptEmbeddingsForSlice(
+            int promptStartToken, int tokenCount, string requestId = null)
+            => requestId != null && _pending.Remove(requestId);
+        public int ClampReusablePrefix(int reusablePrefixTokenCount, string requestId = null)
+            => reusablePrefixTokenCount;
+        public int ClampTrimStart(int trimStartTokenCount, string requestId = null)
+            => trimStartTokenCount;
+        public void TrimPreparedPrompt(int trimStartTokenCount, string requestId = null) { }
+        public bool HasPendingEmbeddings(string requestId)
+            => requestId != null && _pending.Contains(requestId);
+        public void ClearPreparedPromptState(string requestId)
+            => _pending.Remove(requestId);
+    }
+
+    private sealed class DecodeDecliningBatchedStubModel : IModelArchitecture, IBatchedPagedModel
+    {
+        private readonly string _fp;
+        private readonly int _peak;
+        private bool _declined;
+
+        public DecodeDecliningBatchedStubModel(string fp, int peakToken)
+        {
+            _fp = fp;
+            _peak = peakToken;
+            Tokenizer = new StubTokenizer(VocabSize);
+        }
+
+        public int DecodeDeclines { get; private set; }
+        public int NumForwardCalls { get; private set; }
+        public int SingletonBatchCalls { get; private set; }
+        public ModelConfig Config { get; } = new ModelConfig { VocabSize = VocabSize };
+        public ITokenizer Tokenizer { get; }
+        public IMultimodalInjector MultimodalInjector => null;
+        public IBackendExecutionPlan ExecutionPlan => null;
+        public bool SupportsKVCacheTruncation => true;
+        public bool SupportsKVStateSnapshot => true;
+        public string KVStateFingerprint => _fp;
+        public long ComputeKVBlockByteSize(int n)
+            => 2L * NumLayers * NumKVHeads * n * HeadDim * sizeof(float);
+
+        public float[] Forward(int[] tokens)
+        {
+            NumForwardCalls++;
+            return PeakedLogits();
+        }
+
+        public void ResetKVCache() { }
+        public void TruncateKVCache(int n) { }
+        public bool TryExtractKVBlock(int s, int n, Span<byte> dst) => true;
+        public bool TryInjectKVBlock(int s, int n, ReadOnlySpan<byte> src) => true;
+        public void Dispose() { }
+
+        public IReadOnlyList<float[]> ForwardBatch(BatchedForwardContext ctx)
+        {
+            if (ctx.Sequences.Count == 1)
+                SingletonBatchCalls++;
+            bool isDecode = ctx.Sequences.Any(seq => seq.NumComputedTokens >= seq.PromptTokens.Count);
+            if (isDecode && !_declined)
+            {
+                _declined = true;
+                DecodeDeclines++;
+                throw new NotSupportedException("decline one decode batch");
+            }
+
+            return Enumerable.Range(0, ctx.Sequences.Count)
+                .Select(_ => PeakedLogits())
+                .ToArray();
+        }
+
+        private float[] PeakedLogits()
+        {
+            var logits = new float[VocabSize];
+            logits[_peak] = 10f;
+            return logits;
+        }
+    }
+
+    /// <summary>
     /// Stub that opts into the per-sequence fused path. Tracks per-request
     /// "caches" (just a bound-id set here) and returns logits for the
     /// currently-bound request, peaked at the token registered in
@@ -552,17 +1122,23 @@ public class BatchedExecutorTests
         private readonly string _fp;
         private readonly bool _supportsCrossSequenceReuse;
         private readonly bool _requiresPerBlockCapture;
+        private readonly bool _canBatchDecode;
+        private readonly bool _samplingLogits;
         private string _activeReqId;
         private readonly HashSet<string> _liveCaches = new(StringComparer.Ordinal);
 
         public PerSeqFusedStubModel(
             string fp,
             bool supportsCrossSequenceReuse = true,
-            bool requiresPerBlockCapture = false)
+            bool requiresPerBlockCapture = false,
+            bool canBatchDecode = true,
+            bool samplingLogits = false)
         {
             _fp = fp;
             _supportsCrossSequenceReuse = supportsCrossSequenceReuse;
             _requiresPerBlockCapture = requiresPerBlockCapture;
+            _canBatchDecode = canBatchDecode;
+            _samplingLogits = samplingLogits;
             Tokenizer = new StubTokenizer(VocabSize);
         }
 
@@ -572,6 +1148,7 @@ public class BatchedExecutorTests
         public int ExtractCalls { get; private set; }
         public int LastPreparedContext { get; private set; }
         public int MaxConcurrentBoundCaches { get; private set; }
+        public int BatchedFusedDecodeDeclines { get; private set; }
         public HashSet<string> BoundRequestIds { get; } = new(StringComparer.Ordinal);
 
         public ModelConfig Config { get; } = new ModelConfig { VocabSize = VocabSize };
@@ -589,6 +1166,12 @@ public class BatchedExecutorTests
         {
             NumForwardCalls++;
             var logits = new float[VocabSize];
+            if (_samplingLogits)
+            {
+                Array.Fill(logits, -100f);
+                for (int i = 0; i < 4; i++) logits[i] = 0f;
+                return logits;
+            }
             int peak = _activeReqId != null && PeakForRequest.TryGetValue(_activeReqId, out var p) ? p : 0;
             logits[peak] = 10f;
             return logits;
@@ -616,6 +1199,15 @@ public class BatchedExecutorTests
         // N==1 fast path uses fused Forward (not ForwardBatch) for single steps.
         public bool SupportsLinearKVMigration => true;
         public bool TryMigrateLinearKVToPaged(SequenceState owner, int blockSize) => true;
+
+        public bool CanBatchDecode(string requestId, int position) => _canBatchDecode;
+
+        public bool TryForwardBatchedFusedDecode(
+            IReadOnlyList<string> requestIds, int[] tokens, int[] positions, float[][] outLogits)
+        {
+            BatchedFusedDecodeDeclines++;
+            return false;
+        }
 
         public bool BindSequenceCache(string requestId)
         {

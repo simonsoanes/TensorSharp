@@ -17,7 +17,9 @@ using System.Text;
 using System.Threading;
 using Microsoft.Extensions.Logging;
 using TensorSharp.Cli.Logging;
+using TensorSharp.Models;
 using TensorSharp.Runtime.Scheduling;
+using TensorSharp.AgentHost.Skills;
 using TensorSharp.Runtime.Speculative;
 
 namespace TensorSharp.Cli
@@ -43,6 +45,8 @@ namespace TensorSharp.Cli
     /// </summary>
     internal sealed class InteractiveSession
     {
+        internal delegate bool DraftHeadAttacher(ModelBase model, out string error);
+
         private readonly ILogger _log;
         private readonly IPromptRenderer _promptRenderer;
 
@@ -67,14 +71,37 @@ namespace TensorSharp.Cli
         private BackendType _backend;
 
         private SamplingConfig _samplingConfig;
+        // Not readonly: /skill rebuilds it, because turning a skill on adds the
+        // built-in skills_* declarations to whatever --tools supplied.
         private List<ToolFunction> _tools;
+        private readonly List<ToolFunction> _clientTools;
         private string _systemPrompt;
+
+        // Agent Skills. _skillRegistry is the whole roster; _activeSkills is what this
+        // conversation selected. _skillSystemBlock is the rendered instruction text,
+        // held separately from _systemPrompt so /system and /skill do not overwrite
+        // each other, and re-rendered whenever the selection changes.
+        private readonly SkillRegistry _skillRegistry;
+        private readonly SkillHostOptions _skillOptions;
+
+        /// <summary>Answers the code-execution tools, or null when --code-exec is off.</summary>
+        private readonly ICodeRunner _codeRunner;
+
+        /// <summary>
+        /// This session's persistent workspace: one working directory and one package
+        /// environment shared by the shell tool and the skills' own scripts for the whole
+        /// session. Null when code execution is off.
+        /// </summary>
+        private readonly SessionWorkspace _codeWorkspace;
+        private readonly List<Skill> _activeSkills = new();
+        private string _skillSystemBlock;
+        private SkillToolContext _skillToolContext;
         private bool _enableThinking;
         private int _maxTokens;
         private bool _multilineInput;
 
         // Speculative decoding: a block drafter (DeepSeek V4 + DSpark) or a
-        // per-token NextN/MTP head under --mtp-spec (GLM-5.2, Qwen 3.6). The
+        // per-token NextN/MTP head under --spec (GLM-5.2, Qwen 3.6). The
         // decoder is built on first use and kept for the session: it carries the
         // hidden state that pairs the trunk with the drafter, so a turn that
         // extends the cached prefix continues where the previous one stopped.
@@ -125,7 +152,12 @@ namespace TensorSharp.Cli
             int maxTokens,
             ILogger log,
             int specDraftMax = 0,
-            float specDraftConfMin = -1f)
+            float specDraftConfMin = -1f,
+            SkillRegistry skillRegistry = null,
+            SkillHostOptions skillOptions = null,
+            IReadOnlyList<Skill> initialSkills = null,
+            ICodeRunner codeRunner = null,
+            SessionWorkspace codeWorkspace = null)
         {
             _model = model ?? throw new ArgumentNullException(nameof(model));
             _originalModel = _model;
@@ -136,10 +168,18 @@ namespace TensorSharp.Cli
             _renderer = new KVCachePromptRenderer(_promptRenderer);
             _samplingConfig = samplingConfig ?? SamplingConfig.Default;
             _tools = tools;
+            _clientTools = tools != null ? new List<ToolFunction>(tools) : null;
+            _skillRegistry = skillRegistry;
+            _skillOptions = skillOptions ?? new SkillHostOptions();
+            _codeRunner = codeRunner;
+            _codeWorkspace = codeWorkspace;
+            if (initialSkills != null)
+                _activeSkills.AddRange(initialSkills);
             _enableThinking = enableThinking;
             _maxTokens = maxTokens > 0 ? maxTokens : 512;
             _log = log;
             _specSettings = SpeculativeDecodingOptions.Resolve(specDraftMax, specDraftConfMin);
+            RebuildSkillContext();
         }
 
         /// <summary>
@@ -376,6 +416,12 @@ namespace TensorSharp.Cli
                 case "/clear-attachments":
                     ClearAttachments();
                     break;
+                case "/skills":
+                    ListSkills();
+                    break;
+                case "/skill":
+                    ToggleSkill(arg);
+                    break;
                 case "/multiline":
                     ToggleMultiline(arg);
                     break;
@@ -455,6 +501,12 @@ namespace TensorSharp.Cli
             Console.WriteLine("  /text <path>           Inline a text/markdown/csv file into the next prompt.");
             Console.WriteLine("                         (alias /file)");
             Console.WriteLine("  /clearattach           Drop any pending image/audio/video/text attachments.");
+            Console.WriteLine();
+            Console.WriteLine("Agent skills:");
+            Console.WriteLine("  /skills                List every installed skill and mark the active ones.");
+            Console.WriteLine("  /skill <name>          Turn a skill on or off for this conversation.");
+            Console.WriteLine("                         RESETS the conversation: the skill block is part of the");
+            Console.WriteLine("                         leading system message, so the KV cache no longer matches.");
             Console.WriteLine();
             Console.WriteLine("Plain text without a leading slash is sent to the model as the next user turn.");
             Console.WriteLine("Press Ctrl+C while generating to interrupt; press Ctrl+C at the prompt to exit.");
@@ -809,30 +861,29 @@ namespace TensorSharp.Cli
         private void ReloadModel(string modelPath, BackendType backend, string mmProjPath, string label)
         {
             string prevModel = _modelPath != null ? Path.GetFileName(_modelPath) : "(none)";
+            ModelBase newModel = null;
             try
             {
                 Console.WriteLine($"Loading {Path.GetFileName(modelPath)} on {backend}...");
                 var sw = Stopwatch.StartNew();
-                ModelBase newModel = ModelBase.Create(modelPath, backend);
+                var loaded = CreateModelForReload(modelPath, backend);
+                newModel = loaded.Model;
+                string draftHeadError = loaded.DraftHeadError;
+                if (draftHeadError != null)
+                {
+                    _log.LogWarning(LogEventIds.HostConfiguration,
+                        "{Error} Speculative decoding will serve standard decoding instead.",
+                        draftHeadError);
+                }
                 sw.Stop();
 
-                // Only after the new model is constructed do we tear down the
-                // old one - if Create() throws we must preserve the working
-                // session for the user. Skip disposing the caller-owned
-                // original; it gets cleaned up by the caller's own using.
-                if (_model != null && !ReferenceEquals(_model, _originalModel))
-                    _model.Dispose();
-                _model = newModel;
-                _modelPath = modelPath;
-                _backend = backend;
-                _mmProjPath = null;
-
+                string loadedMmProjPath = null;
                 if (!string.IsNullOrEmpty(mmProjPath) && File.Exists(mmProjPath))
                 {
                     try
                     {
-                        _model.MultimodalInjector.LoadProjectors(mmProjPath);
-                        _mmProjPath = mmProjPath;
+                        newModel.MultimodalInjector.LoadProjectors(mmProjPath);
+                        loadedMmProjPath = mmProjPath;
                     }
                     catch (Exception ex)
                     {
@@ -840,12 +891,39 @@ namespace TensorSharp.Cli
                     }
                 }
 
-                // History / KV state from the previous tokenizer is meaningless
-                // against the new one, so drop everything.
+                // Finish initializing the replacement before committing the
+                // handoff. If any of this fails, the catch below disposes the
+                // replacement and the working model remains untouched.
+                newModel.ResetKVCache();
+
+                ModelBase previousModel = _model;
+                _model = newModel;
+                newModel = null; // ownership now belongs to the session
+                _modelPath = modelPath;
+                _backend = backend;
+                _mmProjPath = loadedMmProjPath;
+
+                // History / KV and speculative state from the previous tokenizer
+                // are meaningless against the new one, so drop everything.
                 _history.Clear();
                 _kvCache.Reset();
-                _model.ResetKVCache();
+                _specDecoder = null;
+                _specDecoderModel = null;
                 ClearAttachments();
+
+                // Dispose only after the replacement has become the active model:
+                // a backend's cleanup error must not strand the session between
+                // models. The caller owns the original model's lifetime.
+                if (previousModel != null && !ReferenceEquals(previousModel, _originalModel))
+                {
+                    try { previousModel.Dispose(); }
+                    catch (Exception ex)
+                    {
+                        _log.LogWarning(LogEventIds.HostConfiguration, ex,
+                            "Interactive model switch succeeded, but disposing the previous model failed: {Error}",
+                            ex.Message);
+                    }
+                }
 
                 Console.WriteLine($"{char.ToUpper(label[0])}{label.Substring(1)} switch complete: " +
                     $"{Path.GetFileName(modelPath)} ({_model.Config.Architecture ?? "?"}, " +
@@ -859,10 +937,51 @@ namespace TensorSharp.Cli
             }
             catch (Exception ex)
             {
+                if (newModel != null)
+                {
+                    try { newModel.Dispose(); }
+                    catch (Exception disposeEx)
+                    {
+                        _log.LogWarning(LogEventIds.HostConfiguration, disposeEx,
+                            "Failed to dispose an incomplete interactive model reload: {Error}",
+                            disposeEx.Message);
+                    }
+                }
                 Console.WriteLine($"Failed to load model: {ex.Message}");
                 _log.LogError(LogEventIds.ModelLoadFailed, ex,
                     "Failed to reload model {Model} on backend {Backend}: {Error}",
                     Path.GetFileName(modelPath), backend, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Construct a replacement model with the process-wide draft-model
+        /// configuration and attach any draft weights that load after the trunk.
+        /// The delegates are a unit-test seam; production uses the same factory and
+        /// shared attachment loader as initial CLI startup.
+        /// </summary>
+        internal static (ModelBase Model, string DraftHeadError) CreateModelForReload(
+            string modelPath,
+            BackendType backend,
+            Func<string, BackendType, string, ModelBase> createModel = null,
+            DraftHeadAttacher attachDraftHead = null)
+        {
+            createModel ??= static (path, selectedBackend, draftPath) =>
+                ModelBase.Create(path, selectedBackend, draftModelPath: draftPath);
+            attachDraftHead ??= SpeculativeDraftHeadLoader.TryAttachConfiguredDraftHead;
+
+            ModelBase model = null;
+            try
+            {
+                string draftModelPath = Program.ResolveConfiguredDraftModelPath();
+                model = createModel(modelPath, backend, draftModelPath);
+                bool attached = attachDraftHead(model, out string error);
+                return (model, attached ? null : error);
+            }
+            catch
+            {
+                model?.Dispose();
+                throw;
             }
         }
 
@@ -1008,7 +1127,78 @@ namespace TensorSharp.Cli
             {
                 _generationCts = new CancellationTokenSource();
                 _isGenerating = true;
-                Stream(renderHistory, _generationCts.Token);
+
+                // One pass normally; more when the model asks to read skill content
+                // first. Each extra pass is a full generation, so the round budget is
+                // what stops a model that keeps mis-naming a file from looping forever,
+                // and the cancellation token is re-checked between rounds so Ctrl+C
+                // stops the whole turn rather than just the round in flight.
+                int maxRounds = _skillToolContext != null
+                    ? Math.Max(1, _skillOptions.RoundsFor(_skillToolContext.CodeRunner is { CanRun: true }))
+                    : 1;
+                for (int round = 1; round <= maxRounds; round++)
+                {
+                    List<ToolCall> toolCalls = Stream(renderHistory, _generationCts.Token);
+
+                    // Three ways. The caller's own tools are shown, as the --tools
+                    // contract has always promised; a name NOBODY declared is answered
+                    // in the conversation instead, so the model can correct itself
+                    // rather than have its whole turn end on a guess.
+                    SkillTools.Partition(
+                        toolCalls, _clientTools,
+                        out var skillCalls, out var clientCalls, out var unknownCalls);
+
+                    if (_skillToolContext == null || (skillCalls.Count == 0 && unknownCalls.Count == 0))
+                    {
+                        foreach (var call in clientCalls.Concat(unknownCalls))
+                            Console.WriteLine($"[tool call] {call}");
+                        break;
+                    }
+
+                    foreach (var call in unknownCalls)
+                    {
+                        Console.WriteLine($"[tool call] {call.Name} (no such tool)");
+                        _history.Add(BuildSkillResultMessage(
+                            SkillTools.DescribeUnknownTool(call.Name, _tools), call.Name));
+                    }
+
+                    _generationCts.Token.ThrowIfCancellationRequested();
+
+                    foreach (var call in skillCalls)
+                    {
+                        var result = SkillTools.Execute(call, _skillToolContext);
+                        Console.WriteLine(
+                            $"[skill] {call.Name} {result.SkillId ?? "?"} {result.ResourcePath ?? string.Empty}"
+                            + (result.Ok ? string.Empty : " (failed)"));
+                        _log.LogInformation(LogEventIds.SkillToolInvoked,
+                            "interactive.skills.tool round={Round} tool={Tool} skill={SkillId} path={Path} ok={Ok} bytes={Bytes}",
+                            round, call.Name, result.SkillId ?? "-", result.ResourcePath ?? "-",
+                            result.Ok, result.Content?.Length ?? 0);
+                        _history.Add(BuildSkillResultMessage(result.Content, call.Name));
+                    }
+
+                    if (round == maxRounds)
+                    {
+                        _log.LogWarning(LogEventIds.SkillLoopCapped,
+                            "interactive.skills.loop.capped rounds={Rounds}", maxRounds);
+
+                        // Told IN THE CONVERSATION and then given one last generation, the
+                        // way the one-shot path has always done it (Program.cs, the
+                        // "limit on skill lookups" message). Printing a bracketed note to
+                        // the terminal and breaking left the user with the tool trace and
+                        // no answer at all — the model was mid-work, was never asked to
+                        // wrap up, and never got a turn in which it could.
+                        Console.WriteLine("[skill lookup limit reached for this turn — answering now]");
+                        _history.Add(BuildSkillResultMessage(
+                            "Error: the limit on tool calls for this turn has been reached. Answer now "
+                            + "using what you have already read, and say which part you could not check.",
+                            null));
+                        Stream(BuildRenderHistoryForContinuation(), _generationCts.Token);
+                        break;
+                    }
+
+                    renderHistory = BuildRenderHistoryForContinuation();
+                }
             }
             catch (OperationCanceledException)
             {
@@ -1028,6 +1218,183 @@ namespace TensorSharp.Cli
                 _generationCts?.Dispose();
                 _generationCts = null;
             }
+        }
+
+        /// <summary>Print the roster and mark which skills this conversation is using.</summary>
+        private void ListSkills()
+        {
+            if (_skillRegistry == null || !_skillOptions.Enabled)
+            {
+                Console.WriteLine("Agent skills are disabled for this session (--no-skills / TS_NO_SKILLS).");
+                return;
+            }
+            if (_skillRegistry.Skills.Count == 0)
+            {
+                Console.WriteLine($"No skills found under: {string.Join(", ", _skillRegistry.Roots)}");
+                Console.WriteLine("A skill is a directory containing SKILL.md. Add one with --skills-dir <path>.");
+                return;
+            }
+
+            Console.WriteLine($"Skills ({_activeSkills.Count} active of {_skillRegistry.Skills.Count}):");
+            foreach (var skill in _skillRegistry.Skills)
+            {
+                bool active = _activeSkills.Any(a => string.Equals(a.Id, skill.Id, StringComparison.OrdinalIgnoreCase));
+                string mark = active ? "[on] " : "[  ] ";
+                string summary = skill.Description.Length > 96
+                    ? skill.Description.Substring(0, 93).TrimEnd() + "..."
+                    : skill.Description;
+                Console.WriteLine($"  {mark}{skill.Id,-24} {summary}");
+            }
+            Console.WriteLine();
+            Console.WriteLine("Turn one on or off with /skill <name>.");
+        }
+
+        /// <summary>
+        /// Toggle a skill for this conversation.
+        ///
+        /// <para>
+        /// Changing the selection RESETS the conversation, for the same reason
+        /// <c>/system</c> does: the skills block is rendered into the leading system
+        /// message, so every cached KV block from the first token onward is invalidated.
+        /// Continuing on a stale cache would answer from a prompt the model was never
+        /// actually shown, so the reset is stated plainly rather than done quietly.
+        /// </para>
+        /// </summary>
+        private void ToggleSkill(string arg)
+        {
+            if (_skillRegistry == null || !_skillOptions.Enabled)
+            {
+                Console.WriteLine("Agent skills are disabled for this session (--no-skills / TS_NO_SKILLS).");
+                return;
+            }
+            if (string.IsNullOrWhiteSpace(arg))
+            {
+                Console.WriteLine("Usage: /skill <name>    (run /skills to see the names)");
+                return;
+            }
+
+            string name = arg.Trim();
+            int existing = _activeSkills.FindIndex(a => string.Equals(a.Id, name, StringComparison.OrdinalIgnoreCase));
+            if (existing >= 0)
+            {
+                string removed = _activeSkills[existing].Id;
+                _activeSkills.RemoveAt(existing);
+                RebuildSkillContext();
+                ResetConversationForSkillChange();
+                Console.WriteLine($"[skill '{removed}' off — conversation reset]");
+                return;
+            }
+
+            if (!_skillRegistry.TryGet(name, out Skill skill))
+            {
+                Console.WriteLine($"No skill called '{name}'. Run /skills to see what is available.");
+                return;
+            }
+
+            _activeSkills.Add(skill);
+            _activeSkills.Sort((a, b) => string.CompareOrdinal(a.Id, b.Id));
+            RebuildSkillContext();
+            ResetConversationForSkillChange();
+            Console.WriteLine($"[skill '{skill.Id}' on — conversation reset]");
+            foreach (string warning in skill.Manifest.Warnings)
+                Console.WriteLine($"  warning: {warning}");
+        }
+
+        /// <summary>
+        /// Re-render the skills block and re-derive the tool list and the sandbox from
+        /// the current selection. Called from the constructor and after every
+        /// <c>/skill</c>.
+        /// </summary>
+        private void RebuildSkillContext()
+        {
+            _skillSystemBlock = null;
+            _skillToolContext = null;
+            _tools = _clientTools != null ? new List<ToolFunction>(_clientTools) : null;
+
+            BuildSkillPlanContext();
+
+            // Code execution does not require skills: --code-exec with nothing selected
+            // (or no skill registry at all) must still offer the shell tool, the way the
+            // server's code-only plan does. Without this the flag looked accepted and
+            // did nothing in a chat session.
+            if (_codeRunner != null && _skillToolContext == null
+                && SkillCapabilities.For(_model.Config.Architecture).ToolsRendered)
+            {
+                _tools = Program.AppendCodeTool(_tools, _codeRunner, _codeWorkspace);
+                _skillToolContext = new SkillToolContext(new List<Skill>())
+                {
+                    CodeRunner = _codeRunner,
+                    Workspace = _codeWorkspace,
+                };
+            }
+
+            // The editing rules, on BOTH paths — with skills and without. They were
+            // injected only by the server's plan, so a CLI chat was declared all five code
+            // tools and told nothing at all about which to reach for, which is the exact
+            // condition the measurement blamed for models re-typing whole files. Appended
+            // after any skills block so a skill's own wording is read first.
+            if (Program.CodeSystemBlock(_tools) is { Length: > 0 } editing)
+            {
+                _skillSystemBlock = string.IsNullOrEmpty(_skillSystemBlock)
+                    ? editing
+                    : _skillSystemBlock.TrimEnd() + "\n\n" + editing;
+            }
+        }
+
+        /// <summary>The skills half of <see cref="RebuildSkillContext"/>: renders the
+        /// instruction block and, where the family can carry tools, builds the tool
+        /// context for the current selection. Leaves everything null when skills are
+        /// off or the plan is empty.</summary>
+        private void BuildSkillPlanContext()
+        {
+            if (_skillRegistry == null || !_skillOptions.Enabled)
+                return;
+
+            var catalog = _skillOptions.Discovery
+                ? _skillRegistry.Skills
+                : (IReadOnlyList<Skill>)Array.Empty<Skill>();
+            if (_activeSkills.Count == 0 && catalog.Count == 0)
+                return;
+
+            var capabilities = SkillCapabilities.For(_model.Config.Architecture);
+            var plan = SkillPrompt.Plan(_activeSkills, catalog, new SkillPromptOptions
+            {
+                ContextTokens = _model.MaxContextLength,
+                ToolsAvailable = capabilities.ToolsRendered,
+            });
+            if (plan.IsEmpty)
+                return;
+
+            _skillSystemBlock = plan.Instructions;
+            if (capabilities.ToolsRendered)
+            {
+                _tools = SkillTools.Merge(_clientTools, _skillOptions.AllowScripts, out _);
+                if (_codeRunner != null)
+                    _tools = Program.AppendCodeTool(_tools, _codeRunner, _codeWorkspace);
+
+                _skillToolContext = new SkillToolContext(new List<Skill>(plan.Reachable))
+                {
+                    ScriptRunner = _skillOptions.AllowScripts
+                        ? new SkillScriptRunner(
+                            Program.ToScriptRunnerOptions(_skillOptions, _codeWorkspace, _codeRunner), _log)
+                        : null,
+                    CodeRunner = _codeRunner,
+                    Workspace = _codeWorkspace,
+                };
+            }
+        }
+
+        /// <summary>
+        /// Drop the conversation and the KV state after a skills change, exactly as
+        /// <c>/system</c> does — the leading system block is different, so nothing
+        /// cached from before it still describes this conversation.
+        /// </summary>
+        private void ResetConversationForSkillChange()
+        {
+            _history.Clear();
+            _model.ResetKVCache();
+            _specDecoder = null;
+            _specDecoderModel = null;
         }
 
         private List<ChatMessage> BuildRenderHistory(string userText)
@@ -1051,10 +1418,59 @@ namespace TensorSharp.Cli
             _history.Add(userMsg);
 
             var rendered = new List<ChatMessage>();
-            if (!string.IsNullOrEmpty(_systemPrompt))
-                rendered.Add(new ChatMessage { Role = "system", Content = _systemPrompt });
+            // ONE leading system message carrying both, never two: several chat
+            // templates recognise a system turn only at index 0, GPT-OSS's Harmony
+            // format lifts messages[0] into its developer block and would emit a
+            // duplicate system turn for a second one, and Mistral 3 drops a non-first
+            // system message outright.
+            string leadingSystem = ComposeSystemPrompt();
+            if (!string.IsNullOrEmpty(leadingSystem))
+                rendered.Add(new ChatMessage { Role = "system", Content = leadingSystem });
             rendered.AddRange(_history);
             return rendered;
+        }
+
+        /// <summary>
+        /// Re-render the conversation for another round of the same turn: the same
+        /// leading system block, plus everything the previous round appended. No new
+        /// user message — <see cref="BuildRenderHistory"/> adds one, and calling it again
+        /// mid-turn would duplicate the user's question.
+        /// </summary>
+        private List<ChatMessage> BuildRenderHistoryForContinuation()
+        {
+            var rendered = new List<ChatMessage>();
+            string leadingSystem = ComposeSystemPrompt();
+            if (!string.IsNullOrEmpty(leadingSystem))
+                rendered.Add(new ChatMessage { Role = "system", Content = leadingSystem });
+            rendered.AddRange(_history);
+            return rendered;
+        }
+
+        /// <summary>
+        /// Wrap a skill tool result in the message shape this family renders. Mistral 3
+        /// drops <c>role: "tool"</c> messages outright, so there it is fed back as a user
+        /// turn rather than vanishing from the prompt.
+        /// </summary>
+        private ChatMessage BuildSkillResultMessage(string content, string tool)
+        {
+            if (SkillCapabilities.For(_model.Config.Architecture).ToolResultsRendered)
+                return new ChatMessage { Role = "tool", Content = content };
+
+            return new ChatMessage
+            {
+                Role = "user",
+                Content = $"Result of your {tool} call:\n\n{content}",
+            };
+        }
+
+        /// <summary>The user's <c>--system</c> text and the Agent Skills block, in that order.</summary>
+        private string ComposeSystemPrompt()
+        {
+            if (string.IsNullOrEmpty(_skillSystemBlock))
+                return _systemPrompt;
+            if (string.IsNullOrEmpty(_systemPrompt))
+                return _skillSystemBlock;
+            return _systemPrompt.TrimEnd() + "\n\n" + _skillSystemBlock;
         }
 
         // Inline the contents of every queued /text file into the user prompt
@@ -1080,7 +1496,22 @@ namespace TensorSharp.Cli
             return sb.ToString();
         }
 
-        private void Stream(List<ChatMessage> renderHistory, CancellationToken cancellationToken)
+        /// <summary>
+        /// Generate and stream one assistant turn.
+        /// </summary>
+        /// <returns>
+        /// The tool calls the model made, or an empty list.
+        ///
+        /// <para>
+        /// This used to return void, and nothing anywhere in interactive chat ever read
+        /// <c>ParsedOutput.ToolCalls</c>: a model that emitted a tool call produced no
+        /// console output and no history entry at all, because the parser consumed the
+        /// span and the session dropped it. Reporting them is what lets
+        /// <see cref="RunTurn"/> answer an Agent Skills lookup and continue, and it fixes
+        /// the silent drop for ordinary <c>--tools</c> calls at the same time.
+        /// </para>
+        /// </returns>
+        private List<ToolCall> Stream(List<ChatMessage> renderHistory, CancellationToken cancellationToken)
         {
             string arch = _model.Config.Architecture;
 
@@ -1106,7 +1537,7 @@ namespace TensorSharp.Cli
                 inputTokens.Count, _enableThinking);
 
             // A model with a draft head (a block drafter such as DeepSeek V4 +
-            // DSpark, or a per-token NextN/MTP head under --mtp-spec) decodes
+            // DSpark, or a per-token NextN/MTP head under --spec) decodes
             // through the shared draft/verify core instead of one forward per
             // token. Its prefill has to go through the drafter-aware path too, so
             // the choice is made before the prompt is forwarded.
@@ -1146,6 +1577,7 @@ namespace TensorSharp.Cli
             // prefill can reuse the cache without re-tokenising.
             string assistantContentBuffer = string.Empty;
             string assistantThinkingBuffer = string.Empty;
+            var turnToolCalls = new List<ToolCall>();
             // Per-turn speculative counters (null when the turn decoded plainly).
             SpeculationStats specStats = null;
             int specWindow = 0;
@@ -1174,6 +1606,8 @@ namespace TensorSharp.Cli
                     if (useParser)
                     {
                         var parsed = parser.Add(piece, false);
+                        if (parsed.ToolCalls != null && parsed.ToolCalls.Count > 0)
+                            turnToolCalls.AddRange(parsed.ToolCalls);
                         if (showThinking && !string.IsNullOrEmpty(parsed.Thinking))
                         {
                             if (!inThinkingBlock)
@@ -1289,6 +1723,8 @@ namespace TensorSharp.Cli
             if (useParser)
             {
                 var finalParsed = parser.Add(string.Empty, true);
+                if (finalParsed.ToolCalls != null && finalParsed.ToolCalls.Count > 0)
+                    turnToolCalls.AddRange(finalParsed.ToolCalls);
                 if (showThinking && !string.IsNullOrEmpty(finalParsed.Thinking))
                 {
                     if (!inThinkingBlock) Console.Write("\n[thinking] ");
@@ -1344,8 +1780,15 @@ namespace TensorSharp.Cli
                 Role = "assistant",
                 Content = assistantContentBuffer,
                 Thinking = assistantThinkingBuffer,
+                // Kept on the assistant turn so the next render frames it as a tool call
+                // rather than as prose, and so RawOutputTokens still splices: without the
+                // tokens, every skill round-trip would re-tokenize the whole conversation
+                // and re-prefill it.
+                ToolCalls = turnToolCalls.Count > 0 ? new List<ToolCall>(turnToolCalls) : null,
                 RawOutputTokens = new List<int>(generatedTokens),
             });
+
+            return turnToolCalls;
         }
 
         /// <summary>

@@ -17,58 +17,54 @@ namespace TensorSharp.Runtime.Speculative
     ///
     /// The env var - not a parsed value object - is the contract here because
     /// the request has to reach places the flags cannot: the glm-dsa NATIVE
-    /// loader decides from <c>TS_MTP_SPEC</c> whether to page the NextN block
-    /// into VRAM at all (it is a whole extra 256-expert decoder layer), and
-    /// sizes its graph cache from <c>TS_MTP_DRAFT</c> - both from C++, while the
-    /// model is loading, long before any decoder object exists. Hosts must
-    /// therefore apply these BEFORE they construct the model, and every flag is
-    /// published under BOTH the current <c>TS_SPEC_*</c> spelling and the
-    /// legacy <c>TS_MTP_*</c> one the native loader reads.
-    ///
-    /// Flag spellings: the algorithm-neutral <c>--spec*</c> names are current;
-    /// the <c>--mtp-*</c> names are accepted unchanged so existing scripts and
-    /// deployments keep working.
+    /// loader sizes its graph cache from <c>TS_MTP_DRAFT</c> - from C++, while
+    /// the model is loading, long before any decoder object exists - and the
+    /// managed side of the same loader reads <c>TS_MTP_SPEC</c> to decide
+    /// whether to page the NextN block into VRAM at all (a whole extra
+    /// 256-expert decoder layer). Hosts must therefore apply these BEFORE they
+    /// construct the model, and every value is still published under BOTH the
+    /// current <c>TS_SPEC_*</c> name and the legacy <c>TS_MTP_*</c> one the
+    /// native loader reads. Only the ENV spellings are dual: the flag surface
+    /// is one name per concept, and a removed spelling errors with a pointer
+    /// to its replacement instead of being accepted or silently ignored.
     ///
     /// Shared by <c>TensorSharp.Server</c> and <c>TensorSharp.Cli</c> so the two
     /// hosts cannot drift on flag names, validation or defaults.
     /// </summary>
     public static class SpeculativeCliFlags
     {
-        /// <summary>Set to <c>1</c>/<c>0</c> by <c>--spec</c>/<c>--no-spec</c>
-        /// (aliases <c>--mtp-spec</c>/<c>--no-mtp-spec</c>).</summary>
+        /// <summary>Set to <c>1</c>/<c>0</c> by <c>--spec</c>/<c>--no-spec</c>.</summary>
         public const string SpecEnvVar = SpeculationEnvVars.LegacyEnabled;
 
-        /// <summary>Maximum tokens drafted per speculative step
-        /// (<c>--spec-draft</c>, alias <c>--mtp-draft</c>).</summary>
+        /// <summary>Maximum tokens drafted per speculative step (<c>--spec-draft</c>).</summary>
         public const string DraftEnvVar = SpeculationEnvVars.LegacyDraft;
 
-        /// <summary>Minimum draft confidence to keep a drafted token
-        /// (<c>--spec-pmin</c>, alias <c>--mtp-pmin</c>).</summary>
+        /// <summary>Minimum draft confidence to keep a drafted token (<c>--spec-pmin</c>).</summary>
         public const string PMinEnvVar = SpeculationEnvVars.LegacyPMin;
 
-        /// <summary>Separate draft-head GGUF for architectures that ship one
-        /// (<c>--spec-draft-model</c>, alias <c>--mtp-draft-model</c>).</summary>
+        /// <summary>Draft GGUF the operator named on <c>--draft-model</c>, for the
+        /// attach-after-load path (a per-token head such as Gemma 4's assistant, or
+        /// a DFlash drafter picked up on a runtime model switch).</summary>
         public const string DraftModelEnvVar = SpeculationEnvVars.LegacyDraftModel;
 
         /// <summary>Speculation algorithm (<c>--spec-type</c>).</summary>
         public const string TypeEnvVar = SpeculationEnvVars.Type;
 
         /// <summary>
-        /// Every valueless switch <see cref="Apply"/> consumes, current spelling
-        /// and historical alias alike.
+        /// Every valueless switch <see cref="Apply"/> consumes.
         ///
         /// This exists because the flags are applied in a pass SEPARATE from the
         /// host's own argument parse, and that pass does not REMOVE what it
         /// consumes: TensorSharp.Server then walks the same argv and throws
         /// "Unknown option" for anything it does not recognise. Two hand-written
         /// lists of the same flag names is a drift bug waiting to happen, and it
-        /// happened - the server knew only the legacy <c>--mtp-*</c> spellings, so
-        /// every documented <c>--spec*</c> flag made it refuse to start. Hosts MUST
-        /// consume these tables rather than re-typing the names.
+        /// happened - the server knew only older spellings, so every documented
+        /// <c>--spec*</c> flag made it refuse to start. Hosts MUST consume these
+        /// tables rather than re-typing the names.
         /// </summary>
         public static readonly string[] SwitchFlags =
         {
-            "--spec", "--no-spec", "--mtp-spec", "--no-mtp-spec",
+            "--spec", "--no-spec",
         };
 
         /// <summary>Every <c>--flag VALUE</c> option <see cref="Apply"/> consumes.
@@ -76,10 +72,31 @@ namespace TensorSharp.Runtime.Speculative
         /// flag's value. See <see cref="SwitchFlags"/> for why this table exists.</summary>
         public static readonly string[] ValueFlags =
         {
-            "--spec-draft-model", "--mtp-draft-model",
-            "--spec-draft", "--mtp-draft",
-            "--spec-type", "--mtp-type",
-            "--spec-pmin", "--mtp-pmin",
+            "--spec-draft", "--spec-type", "--spec-pmin", "--draft-model",
+        };
+
+        /// <summary>
+        /// Spellings that used to be accepted and were removed because each
+        /// duplicated a surviving flag, mapped to its replacement. There used to
+        /// be up to three names per concept (<c>--spec-draft</c>,
+        /// <c>--mtp-draft</c> and <c>--spec-draft-n-max</c> all set the same
+        /// value), which left operators guessing which one was real.
+        /// <see cref="Apply"/> rejects these with a pointer to the survivor -
+        /// a hard error, never a silent ignore, because the CLI's argument
+        /// switch drops unknown flags and "speculation quietly off" is exactly
+        /// the failure this table exists to prevent.
+        /// </summary>
+        public static readonly (string Flag, string Survivor)[] RemovedFlags =
+        {
+            ("--mtp-spec", "--spec"),
+            ("--no-mtp-spec", "--no-spec"),
+            ("--mtp-draft", "--spec-draft"),
+            ("--mtp-pmin", "--spec-pmin"),
+            ("--mtp-type", "--spec-type"),
+            ("--mtp-draft-model", "--draft-model"),
+            ("--spec-draft-model", "--draft-model"),
+            ("--spec-draft-n-max", "--spec-draft"),
+            ("--spec-draft-conf-min", "--spec-pmin"),
         };
 
         /// <summary>Largest accepted draft window; see
@@ -89,95 +106,149 @@ namespace TensorSharp.Runtime.Speculative
         /// <summary>
         /// Apply the speculative-decoding flags from <paramref name="args"/> to
         /// the process environment. Both <c>--opt V</c> and <c>--opt=V</c>
-        /// spellings are accepted, and each flag has an algorithm-neutral name
-        /// plus its historical <c>--mtp-*</c> alias:
+        /// spellings are accepted:
         ///
         /// <code>
-        ///   --spec | --no-spec              (--mtp-spec | --no-mtp-spec)
-        ///   --spec-type NAME                (new: auto | draft-head | block | ngram)
-        ///   --spec-draft N                  (--mtp-draft N)
-        ///   --spec-pmin X                   (--mtp-pmin X)
-        ///   --spec-draft-model PATH         (--mtp-draft-model PATH)
+        ///   --spec | --no-spec       explicit on/off for a drafter embedded in the checkpoint
+        ///   --spec-type NAME         auto | draft-head | block | ngram (default: auto)
+        ///   --spec-draft N           draft window
+        ///   --spec-pmin X            draft-confidence gate in [0, 1]; 0 = never gate
+        ///   --draft-model PATH       a drafter that ships as its own GGUF; naming it IS the request
         /// </code>
+        ///
+        /// Naming a file on <c>--draft-model</c> enables speculation by itself -
+        /// the file only exists on the command line because the operator wants it
+        /// used - unless an explicit <c>--no-spec</c> vetoes it. Which KIND of
+        /// drafter the file is (a DFlash/DSpark block drafter fused before the
+        /// layer split, or a per-token head attached after load) is read from the
+        /// GGUF itself by the loaders, never asked of the operator.
         ///
         /// Returns true when at least one flag was applied, so the caller can
         /// emit a startup log line.
         /// </summary>
-        /// <exception cref="ArgumentException">A flag carried a missing or unusable value.</exception>
+        /// <exception cref="ArgumentException">A flag carried a missing or unusable
+        /// value, or a removed spelling was used (the error names the replacement).</exception>
         public static bool Apply(string[] args)
         {
             if (args == null || args.Length == 0)
                 return false;
 
+            RejectRemoved(args);
+
             bool changed = false;
+            bool explicitOnOff = false;
+            bool draftModelNamed = false;
             for (int i = 0; i < args.Length; i++)
             {
                 string a = args[i];
-                if (IsFlag(a, "--spec", "--mtp-spec"))
+                if (IsFlag(a, "--spec"))
                 {
                     SetBoth(SpeculationEnvVars.Enabled, SpeculationEnvVars.LegacyEnabled, "1");
+                    explicitOnOff = true;
                     changed = true;
                     continue;
                 }
-                if (IsFlag(a, "--no-spec", "--no-mtp-spec"))
+                if (IsFlag(a, "--no-spec"))
                 {
                     SetBoth(SpeculationEnvVars.Enabled, SpeculationEnvVars.LegacyEnabled, "0");
+                    explicitOnOff = true;
                     changed = true;
                     continue;
                 }
-                if (TryReadOption(args, ref i, "--spec-type", "--mtp-type", out string typeOpt, out string typeFlag))
+                if (TryReadOption(args, ref i, "--spec-type", out string typeOpt))
                 {
                     if (!SpeculatorRegistry.IsKnown(typeOpt))
                     {
                         throw new ArgumentException(
-                            $"Invalid value for {typeFlag}: '{typeOpt}'. Expected one of: "
+                            $"Invalid value for --spec-type: '{typeOpt}'. Expected one of: "
                             + $"{SpeculatorRegistry.Auto}, {string.Join(", ", SpeculatorRegistry.Names)}.");
                     }
                     Environment.SetEnvironmentVariable(SpeculationEnvVars.Type, typeOpt.Trim());
                     changed = true;
                     continue;
                 }
-                if (TryReadOption(args, ref i, "--spec-draft", "--mtp-draft", out string draftOpt, out string draftFlag))
+                if (TryReadOption(args, ref i, "--spec-draft", out string draftOpt))
                 {
                     if (!int.TryParse(draftOpt, NumberStyles.Integer, CultureInfo.InvariantCulture, out int draft)
                         || draft < 1 || draft > MaxDraftTokens)
                     {
                         throw new ArgumentException(
-                            $"Invalid value for {draftFlag}: '{draftOpt}'. Expected an integer in [1, {MaxDraftTokens}].");
+                            $"Invalid value for --spec-draft: '{draftOpt}'. Expected an integer in [1, {MaxDraftTokens}].");
                     }
                     SetBoth(SpeculationEnvVars.Draft, SpeculationEnvVars.LegacyDraft,
                         draft.ToString(CultureInfo.InvariantCulture));
                     changed = true;
                     continue;
                 }
-                if (TryReadOption(args, ref i, "--spec-pmin", "--mtp-pmin", out string pminOpt, out string pminFlag))
+                if (TryReadOption(args, ref i, "--spec-pmin", out string pminOpt))
                 {
                     if (!float.TryParse(pminOpt, NumberStyles.Float, CultureInfo.InvariantCulture, out float pmin)
+                        || !float.IsFinite(pmin)
                         || pmin < 0f || pmin > 1f)
                     {
                         throw new ArgumentException(
-                            $"Invalid value for {pminFlag}: '{pminOpt}'. Expected a probability in [0, 1].");
+                            $"Invalid value for --spec-pmin: '{pminOpt}'. Expected a probability in [0, 1] "
+                            + "(0 disables the confidence gate).");
                     }
                     SetBoth(SpeculationEnvVars.PMin, SpeculationEnvVars.LegacyPMin,
                         pmin.ToString(CultureInfo.InvariantCulture));
                     changed = true;
                     continue;
                 }
-                // Path to a SEPARATE draft GGUF for models whose draft head ships
-                // as its own file (Gemma 4's "gemma4-assistant"). Qwen3.6 and
+                // Path to a drafter that ships as its own GGUF: DeepSeek V4's
+                // DSpark, the DFlash / DFlash2 drafters for Muse-Glimmer and
+                // Qwen 3.8, or Gemma 4's per-token assistant head. Qwen 3.6 and
                 // GLM-5.2 embed their NextN block in the trunk GGUF and need no
-                // such flag.
-                if (TryReadOption(args, ref i, "--spec-draft-model", "--mtp-draft-model",
-                        out string draftModelOpt, out string draftModelFlag))
+                // such flag. Published for the attach-after-load path here; the
+                // hosts additionally hand it to the model factory for the
+                // drafters that must be resident before the layer split - and
+                // TryAttachConfiguredDraftHead skips a drafter the factory
+                // already attached, so publishing both ways cannot double-load.
+                if (TryReadOption(args, ref i, "--draft-model", out string draftModelOpt))
                 {
                     if (string.IsNullOrWhiteSpace(draftModelOpt) || !File.Exists(draftModelOpt))
-                        throw new ArgumentException($"{draftModelFlag} file not found: '{draftModelOpt}'.");
+                        throw new ArgumentException($"--draft-model file not found: '{draftModelOpt}'.");
                     SetBoth(SpeculationEnvVars.DraftModel, SpeculationEnvVars.LegacyDraftModel, draftModelOpt);
+                    draftModelNamed = true;
                     changed = true;
                     continue;
                 }
             }
+
+            // Naming a draft file IS the request: nobody passes --draft-model
+            // hoping it stays idle, and requiring a separate --spec beside it
+            // was a trap both hosts fell into differently (the CLI engaged, the
+            // server silently did not). An explicit --spec/--no-spec anywhere on
+            // the line still wins - the operator said so in words.
+            if (draftModelNamed && !explicitOnOff)
+                SetBoth(SpeculationEnvVars.Enabled, SpeculationEnvVars.LegacyEnabled, "1");
+
             return changed;
+        }
+
+        /// <summary>
+        /// Throw for any removed spelling in <paramref name="args"/>, naming its
+        /// replacement. Called by <see cref="Apply"/>, so both hosts get it for
+        /// free; public so a host that parses independently can reuse it.
+        /// </summary>
+        /// <exception cref="ArgumentException">A removed spelling was present.</exception>
+        public static void RejectRemoved(string[] args)
+        {
+            if (args == null)
+                return;
+            foreach (string arg in args)
+            {
+                foreach ((string flag, string survivor) in RemovedFlags)
+                {
+                    if (string.Equals(arg, flag, StringComparison.OrdinalIgnoreCase)
+                        || arg.StartsWith(flag + "=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new ArgumentException(
+                            $"{flag} was removed; use {survivor} instead. "
+                            + "One name per option now - see the Speculative decoding section of --help.");
+                    }
+                }
+            }
         }
 
         /// <summary>
@@ -185,37 +256,6 @@ namespace TensorSharp.Runtime.Speculative
         /// advancing past a consumed value token.
         /// </summary>
         public static bool TryReadOption(string[] args, ref int index, string option, out string value)
-            => TryReadOption(args, ref index, option, null, out value);
-
-        /// <summary>As <see cref="TryReadOption(string[], ref int, string, out string)"/>,
-        /// also accepting a historical <paramref name="alias"/> spelling.</summary>
-        public static bool TryReadOption(string[] args, ref int index, string option, string alias, out string value)
-            => TryReadOption(args, ref index, option, alias, out value, out _);
-
-        /// <summary>
-        /// As above, additionally reporting WHICH spelling matched. Diagnostics
-        /// quote the flag the operator actually typed: being told
-        /// "--spec-draft is invalid" after typing <c>--mtp-draft</c> sends them
-        /// looking for a flag they never used.
-        /// </summary>
-        public static bool TryReadOption(string[] args, ref int index, string option, string alias,
-            out string value, out string matchedOption)
-        {
-            if (TryReadOne(args, ref index, option, out value))
-            {
-                matchedOption = option;
-                return true;
-            }
-            if (alias != null && TryReadOne(args, ref index, alias, out value))
-            {
-                matchedOption = alias;
-                return true;
-            }
-            matchedOption = option;
-            return false;
-        }
-
-        private static bool TryReadOne(string[] args, ref int index, string option, out string value)
         {
             string arg = args[index];
             if (string.Equals(arg, option, StringComparison.OrdinalIgnoreCase))
@@ -238,9 +278,8 @@ namespace TensorSharp.Runtime.Speculative
             return false;
         }
 
-        private static bool IsFlag(string arg, string option, string alias)
-            => string.Equals(arg, option, StringComparison.OrdinalIgnoreCase)
-               || string.Equals(arg, alias, StringComparison.OrdinalIgnoreCase);
+        private static bool IsFlag(string arg, string option)
+            => string.Equals(arg, option, StringComparison.OrdinalIgnoreCase);
 
         /// <summary>Publish under both spellings: managed readers prefer
         /// <c>TS_SPEC_*</c>, the glm-dsa native loader only knows

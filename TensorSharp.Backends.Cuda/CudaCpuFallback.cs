@@ -8,6 +8,28 @@ namespace TensorSharp.Cuda
     {
         private static readonly CpuAllocator CpuAllocator = new CpuAllocator(BlasEnum.DotNet);
 
+        // Ops that have already reported their CPU fallback (once per op name per process).
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> WarnedOps =
+            new(StringComparer.Ordinal);
+
+        internal static void WarnFallback(string opName)
+        {
+            if (!WarnedOps.TryAdd(opName, true))
+                return;
+
+            try
+            {
+                Console.Error.WriteLine(
+                    $"WARNING: TensorSharp CUDA op '{opName}' has no GPU implementation for these arguments; " +
+                    "it runs on the element-by-element CPU fallback (device-to-host round-trip, orders of " +
+                    "magnitude slower). Reported once per op.");
+            }
+            catch
+            {
+                // Diagnostics must never break op dispatch.
+            }
+        }
+
         public static Tensor InvokeTensor(string opName, Tensor resultTensor, params object[] args)
         {
             object returnValue = Invoke(opName, args, out Dictionary<Tensor, Tensor> mappedTensors);
@@ -52,6 +74,7 @@ namespace TensorSharp.Cuda
 
         private static object Invoke(string opName, object[] args, out Dictionary<Tensor, Tensor> mappedTensors)
         {
+            WarnFallback(opName);
             long t0 = CudaProfileCounters.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             try
             {

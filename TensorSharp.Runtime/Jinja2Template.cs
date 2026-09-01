@@ -691,22 +691,50 @@ namespace TensorSharp.Runtime
             return EvalOr(expr, ctx);
         }
 
+        /// <summary>
+        /// Python's <c>or</c>: the VALUE of the first truthy operand, or of the last one.
+        ///
+        /// <para>
+        /// It used to return <c>true</c>/<c>false</c>, which is right only where the
+        /// result is immediately tested. Jinja templates use <c>or</c> at least as often
+        /// to pick a value - <c>{{ x or 'default' }}</c>, and in Gemma 4's template
+        /// <c>{%- set thinking_text = message.get('reasoning') or
+        /// message.get('reasoning_content') -%}</c> - and there the boolean is rendered
+        /// into the prompt. That is not a hypothetical: with the reasoning field
+        /// populated, every past assistant turn's thinking channel came out as the literal
+        /// text <c>True</c>, which is both wrong in the prompt and, because it does not
+        /// match what the model generated, enough to cost the whole conversation its KV
+        /// prefix on the next turn.
+        /// </para>
+        /// </summary>
         private static object? EvalOr(string expr, Context ctx)
         {
             var parts = SplitTopLevel(expr, " or ");
             if (parts.Count == 1) return EvalAnd(parts[0], ctx);
+            object? last = null;
             foreach (string p in parts)
-                if (Truthy(EvalAnd(p, ctx))) return true;
-            return false;
+            {
+                last = EvalAnd(p, ctx);
+                if (Truthy(last)) return last;
+            }
+            return last;
         }
 
+        /// <summary>
+        /// Python's <c>and</c>: the VALUE of the first falsy operand, or of the last one.
+        /// Same reasoning as <see cref="EvalOr"/>.
+        /// </summary>
         private static object? EvalAnd(string expr, Context ctx)
         {
             var parts = SplitTopLevel(expr, " and ");
             if (parts.Count == 1) return EvalNot(parts[0], ctx);
+            object? last = null;
             foreach (string p in parts)
-                if (!Truthy(EvalNot(p, ctx))) return false;
-            return true;
+            {
+                last = EvalNot(p, ctx);
+                if (!Truthy(last)) return last;
+            }
+            return last;
         }
 
         private static object? EvalNot(string expr, Context ctx)
@@ -731,6 +759,27 @@ namespace TensorSharp.Runtime
                 return negated ? !result : result;
             }
 
+            // Handle 'not in' BEFORE 'in'. The two keywords overlap - " not in "
+            // contains " in " - so testing 'in' first matched the tail of every
+            // 'not in' expression and split it as ("key not", "standard_keys").
+            // EvalPrimary("key not") is not a value the context has, so the
+            // membership test answered false for EVERY 'not in', and the 'not in'
+            // branch below was unreachable code.
+            //
+            // What that cost, concretely: Gemma 4's shipped tool declaration macro
+            // guards each parameter with {% if key not in standard_keys %}. With the
+            // guard permanently false the loop body never ran, so every tool reached
+            // the model declared as `properties:{}` - no parameter names, no types,
+            // no descriptions - and the model had to guess the argument names of
+            // every tool it was offered.
+            int notInIdx = FindTopLevelKeyword(expr, " not in ");
+            if (notInIdx > 0)
+            {
+                var needle = EvalPrimary(expr.Substring(0, notInIdx).Trim(), ctx);
+                var haystack = EvalPrimary(expr.Substring(notInIdx + 8).Trim(), ctx);
+                return !ContainsValue(haystack, needle);
+            }
+
             // Handle 'in' operator
             int inIdx = FindTopLevelKeyword(expr, " in ");
             if (inIdx > 0)
@@ -738,15 +787,6 @@ namespace TensorSharp.Runtime
                 var needle = EvalPrimary(expr.Substring(0, inIdx).Trim(), ctx);
                 var haystack = EvalPrimary(expr.Substring(inIdx + 4).Trim(), ctx);
                 return ContainsValue(haystack, needle);
-            }
-
-            // Handle 'not in' operator
-            int notInIdx = FindTopLevelKeyword(expr, " not in ");
-            if (notInIdx > 0)
-            {
-                var needle = EvalPrimary(expr.Substring(0, notInIdx).Trim(), ctx);
-                var haystack = EvalPrimary(expr.Substring(notInIdx + 8).Trim(), ctx);
-                return !ContainsValue(haystack, needle);
             }
 
             string[] cmpOps = { "==", "!=", ">=", "<=", ">", "<" };

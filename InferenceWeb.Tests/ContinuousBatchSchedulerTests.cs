@@ -219,6 +219,70 @@ public class ContinuousBatchSchedulerTests
         Assert.DoesNotContain(cached[1], seq.BlockTable.Blocks);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Scheduler_ExplicitCacheNone_AdoptsNoPrefixBlocks(bool useZeroBreakpoint)
+    {
+        const string fingerprint = "fp-explicit-none-adoption";
+        var pool = NewPool(numBlocks: 8);
+        var sched = NewScheduler(pool, fingerprint);
+        int[] prompt = Enumerable.Range(1, 2 * BlockSize + 1).ToArray();
+        var hashes = KvBlockHasher.ComputeBlockHashes(prompt, BlockSize, fingerprint);
+        var cached = pool.AllocateNew(2);
+        for (int i = 0; i < cached.Length; i++)
+            pool.RegisterFullBlock(cached[i], hashes[i], BlockSize);
+
+        IReadOnlyList<int> explicitNone = useZeroBreakpoint
+            ? new[] { 0 }
+            : Array.Empty<int>();
+        var seq = new SequenceState(
+            $"reuse-none-{useZeroBreakpoint}", prompt, maxNewTokens: 1,
+            BlockSize, SamplingConfig.Default, cacheBreakpoints: explicitNone);
+
+        sched.Submit(seq);
+        var step = sched.Schedule();
+
+        Assert.Single(step.ScheduledWork);
+        Assert.NotNull(seq.CacheBreakpoints);
+        Assert.Equal(0, seq.CacheBreakpointLimit);
+        Assert.Equal(0, seq.PrefixCacheReusedTokens);
+        Assert.All(cached, block => Assert.Equal(1, block.RefCount));
+        Assert.DoesNotContain(cached[0], seq.BlockTable.Blocks);
+        Assert.DoesNotContain(cached[1], seq.BlockTable.Blocks);
+    }
+
+    [Fact]
+    public void Scheduler_ExplicitBreakpoint_CapsPrefixBlockAdoption()
+    {
+        const string fingerprint = "fp-capped-adoption";
+        var pool = NewPool(numBlocks: 12);
+        var sched = NewScheduler(pool, fingerprint);
+        int[] prompt = Enumerable.Range(1, 4 * BlockSize + 1).ToArray();
+        var hashes = KvBlockHasher.ComputeBlockHashes(prompt, BlockSize, fingerprint);
+        var cached = pool.AllocateNew(4);
+        for (int i = 0; i < cached.Length; i++)
+            pool.RegisterFullBlock(cached[i], hashes[i], BlockSize);
+
+        var seq = new SequenceState(
+            "reuse-capped", prompt, maxNewTokens: 1, BlockSize, SamplingConfig.Default,
+            cacheBreakpoints: new[] { 2 * BlockSize });
+
+        sched.Submit(seq);
+        var step = sched.Schedule();
+
+        Assert.Single(step.ScheduledWork);
+        Assert.Equal(2 * BlockSize, seq.PrefixCacheReusedTokens);
+        Assert.Equal(2, cached[0].RefCount);
+        Assert.Equal(2, cached[1].RefCount);
+        Assert.Equal(1, cached[2].RefCount);
+        Assert.Equal(1, cached[3].RefCount);
+        Assert.Same(cached[0], seq.BlockTable.Blocks[0]);
+        Assert.Same(cached[1], seq.BlockTable.Blocks[1]);
+        Assert.DoesNotContain(cached[2], seq.BlockTable.Blocks);
+        Assert.DoesNotContain(cached[3], seq.BlockTable.Blocks);
+    }
+
     [Fact]
     public void Engine_DriveOneSequence_ProducesTokens()
     {
@@ -511,6 +575,35 @@ public class ContinuousBatchSchedulerTests
         var hashes = KvBlockHasher.ComputeBlockHashes(prompt.ToList(), BlockSize, fingerprint);
         for (int i = 0; i < 3; i++)
             Assert.True(pool.TryFindByHash(hashes[i], out _), $"Block {i} should be registered.");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Scheduler_ExplicitCacheNone_RegistersNoBlocks(bool useZeroBreakpoint)
+    {
+        const string fingerprint = "fp-zero-breakpoint";
+        var pool = NewPool(numBlocks: 8);
+        var sched = NewScheduler(pool, fingerprint);
+
+        int[] prompt = Enumerable.Range(1, 2 * BlockSize).ToArray();
+        IReadOnlyList<int> explicitNone = useZeroBreakpoint
+            ? new[] { 0 }
+            : Array.Empty<int>();
+        var seq = new SequenceState(
+            "zero-bp", prompt.ToList(), maxNewTokens: 1, BlockSize, SamplingConfig.Default,
+            cacheBreakpoints: explicitNone);
+        foreach (var block in pool.AllocateNew(2))
+            seq.BlockTable.AppendBlock(block);
+        seq.AdvanceComputedTokens(prompt.Length);
+
+        sched.OnBlocksCommitted(seq, previousTokens: 0);
+
+        var hashes = KvBlockHasher.ComputeBlockHashes(prompt.ToList(), BlockSize, fingerprint);
+        Assert.NotNull(seq.CacheBreakpoints);
+        Assert.Equal(0, seq.CacheBreakpointLimit);
+        Assert.False(pool.TryFindByHash(hashes[0], out _));
+        Assert.False(pool.TryFindByHash(hashes[1], out _));
     }
 
     [Fact]

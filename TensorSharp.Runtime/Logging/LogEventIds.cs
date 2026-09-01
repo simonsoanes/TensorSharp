@@ -25,7 +25,7 @@ namespace TensorSharp.Runtime.Logging
     ///   1300-1399  session lifecycle
     ///   1400-1499  model load / unload
     ///   1500-1599  chat / generation operations
-    ///   1600-1699  uploads / media
+    ///   1600-1699  uploads / media / agent skills / code execution
     ///   1700-1799  CLI commands
     /// </summary>
     public static class LogEventIds
@@ -45,6 +45,7 @@ namespace TensorSharp.Runtime.Logging
         public static readonly EventId HttpRequestCompleted = new(1101, nameof(HttpRequestCompleted));
         public static readonly EventId HttpRequestFailed = new(1102, nameof(HttpRequestFailed));
         public static readonly EventId HttpRequestRejected = new(1103, nameof(HttpRequestRejected));
+        public static readonly EventId RequestContentDropped = new(1104, nameof(RequestContentDropped));
 
         // Inference queue --------------------------------------------------
         public static readonly EventId QueueEnqueued = new(1200, nameof(QueueEnqueued));
@@ -87,6 +88,48 @@ namespace TensorSharp.Runtime.Logging
         public static readonly EventId UploadReceived = new(1600, nameof(UploadReceived));
         public static readonly EventId UploadRejected = new(1601, nameof(UploadRejected));
         public static readonly EventId UploadCleanup = new(1602, nameof(UploadCleanup));
+
+        // Agent skills -----------------------------------------------------
+        // Skills are content a user supplies, so their lifecycle is audited on the
+        // same footing as uploads: what was registered, what was refused and why,
+        // and every file the model was given out of one.
+        public static readonly EventId SkillsScanned = new(1610, nameof(SkillsScanned));
+        public static readonly EventId SkillRejected = new(1611, nameof(SkillRejected));
+        public static readonly EventId SkillInstalled = new(1612, nameof(SkillInstalled));
+        public static readonly EventId SkillRemoved = new(1613, nameof(SkillRemoved));
+        public static readonly EventId SkillSelected = new(1614, nameof(SkillSelected));
+        public static readonly EventId SkillToolInvoked = new(1615, nameof(SkillToolInvoked));
+        public static readonly EventId SkillLoopCapped = new(1616, nameof(SkillLoopCapped));
+        public static readonly EventId SkillScriptExecuted = new(1617, nameof(SkillScriptExecuted));
+
+        // Code execution ---------------------------------------------------
+        // Its own ids rather than borrowing the skills script one, because these two
+        // are the pair an operator most needs to tell apart: a skill script is a file
+        // they put on disk and can read beforehand, and a shell command is text a model
+        // wrote during the request. An alert that cannot distinguish them is an alert
+        // about nothing. What is recorded is metadata only — never the command itself,
+        // which is conversation content.
+        public static readonly EventId CodeExecRan = new(1620, nameof(CodeExecRan));
+        public static readonly EventId CodeExecRefused = new(1621, nameof(CodeExecRefused));
+        public static readonly EventId CodeExecArtifacts = new(1622, nameof(CodeExecArtifacts));
+        public static readonly EventId CodeExecEgressDenied = new(1623, nameof(CodeExecEgressDenied));
+        public static readonly EventId CodeExecPatched = new(1624, nameof(CodeExecPatched));
+        public static readonly EventId CodeExecBackgroundJob = new(1625, nameof(CodeExecBackgroundJob));
+
+        // The file surface. Separate ids rather than one "edited" event, because the
+        // question these exist to answer is which of the three the model actually reached
+        // for — the whole change is a bet about that, and a bet with no counter is a
+        // belief. codeexec.rewrote is the one that matters most: it counts the times a
+        // file was re-typed to change a little of it, which had never been measurable.
+        public static readonly EventId CodeExecRead = new(1626, nameof(CodeExecRead));
+        public static readonly EventId CodeExecEdited = new(1627, nameof(CodeExecEdited));
+        public static readonly EventId CodeExecRewrote = new(1628, nameof(CodeExecRewrote));
+
+        // A fork of this host that wedged before exec and had to be reaped. The recovery
+        // is invisible to the model by design, so this is the only place it is countable —
+        // and the count is the difference between a known platform hazard being handled
+        // and it quietly costing seconds on every tool call.
+        public static readonly EventId CodeExecForkWedged = new(1629, nameof(CodeExecForkWedged));
 
         // CLI --------------------------------------------------------------
         public static readonly EventId CliStarted = new(1700, nameof(CliStarted));

@@ -18,7 +18,7 @@
 | Thinking mode | Yes (`<\|channel>thought ... <channel\|>`) |
 | Tool calling | Yes (`<\|tool_call>call:name{...}<tool_call\|>`) |
 | Batched / paged forward | **Default-on** — `IBatchedPagedModel.ForwardBatch` with per-layer paged K/V (handles dual head dims, KV donor sharing, PLE injection, SWA + global mix). Set `TS_GEMMA4_BATCHED=0` to force the legacy per-seq KV-swap path. See §11. |
-| MTP speculative decoding | Optional — loads a separate `gemma4-assistant` EAGLE-style draft GGUF via `--spec-draft-model` (`TS_SPEC_DRAFT_MODEL`) and engages with `--spec`. Both flags work on **either host**: `TensorSharp.Cli` and `TensorSharp.Server` share [`SpeculativeCliFlags`](../../TensorSharp.Runtime/Speculative/SpeculativeCliFlags.cs), and `--mtp-draft-model` / `--mtp-spec` remain accepted aliases. Profitable on ggml backends and the pure-C# `cuda` backend. See §12. |
+| MTP speculative decoding | Optional — loads a separate `gemma4-assistant` EAGLE-style draft GGUF via `--draft-model` (`TS_SPEC_DRAFT_MODEL`); naming the file enables speculation by itself (an explicit `--no-spec` vetoes it). The flag works on **either host**: `TensorSharp.Cli` and `TensorSharp.Server` share [`SpeculativeCliFlags`](../../TensorSharp.Runtime/Speculative/SpeculativeCliFlags.cs). Profitable on ggml backends and the pure-C# `cuda` backend. See §12. |
 | Output parser | `Gemma4OutputParser` |
 
 ## Downloads
@@ -107,22 +107,23 @@ dotnet run --project TensorSharp.Cli -c Release -- --model models/gemma-4-E4B-it
   --image photo.png --max-tokens 512 --backend ggml_cuda
 ```
 
-With MTP speculative decoding. `--spec` and `--spec-draft-model` are parsed by the
+With MTP speculative decoding. `--draft-model` is parsed by the
 same [`SpeculativeCliFlags`](../../TensorSharp.Runtime/Speculative/SpeculativeCliFlags.cs)
 on **both hosts**, so the spelling is identical on `TensorSharp.Cli` and
-`TensorSharp.Server` (`--mtp-spec` / `--mtp-draft-model` are accepted aliases).
-Both must be on the command line that *loads* the model — the draft GGUF is
-attached to the target at startup, and a `--spec-draft-model` that cannot be
+`TensorSharp.Server`. Naming the draft GGUF enables speculation by itself — no
+`--spec` is needed beside it (an explicit `--no-spec` vetoes it). It must be on
+the command line that *loads* the model — the draft GGUF is
+attached to the target at startup, and a `--draft-model` that cannot be
 activated is a fail-fast startup error rather than a silent fallback (§12.2):
 
 ```bash
 # server
 dotnet run --project TensorSharp.Server -c Release -- --model models/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf \
-  --backend ggml_cuda --spec --spec-draft-model models/mtp-gemma-4-12B-it.gguf
+  --backend ggml_cuda --draft-model models/mtp-gemma-4-12B-it.gguf
 
 # CLI — speculation engages on --input, --input-jsonl, --multi-turn-jsonl and --interactive
 dotnet run --project TensorSharp.Cli -c Release -- --model models/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf \
-  --backend ggml_cuda --spec --spec-draft-model models/mtp-gemma-4-12B-it.gguf --input prompt.txt --max-tokens 512
+  --backend ggml_cuda --draft-model models/mtp-gemma-4-12B-it.gguf --input prompt.txt --max-tokens 512
 ```
 
 Then open `http://localhost:5000` for the chat UI.
@@ -717,8 +718,8 @@ exists for batch-1 workloads.
 Gemma 4 supports lossless **multi-token-prediction (MTP) speculative decoding**
 for solo (non-concurrent) sequences on both hosts. Unlike Qwen 3.6,
 whose NextN block is embedded in the trunk GGUF, the Gemma 4 draft head ships as
-a **separate small `gemma4-assistant` GGUF** loaded with `--spec-draft-model`
-(alias `--mtp-draft-model`; env `TS_SPEC_DRAFT_MODEL`, legacy `TS_MTP_DRAFT_MODEL`)
+a **separate small `gemma4-assistant` GGUF** loaded with `--draft-model`
+(env `TS_SPEC_DRAFT_MODEL`, legacy `TS_MTP_DRAFT_MODEL`)
 and attached to the target at startup by
 [`SpeculativeDraftHeadLoader`](../../TensorSharp.Models/SpeculativeDraftHeadLoader.cs).
 Source:
@@ -758,7 +759,7 @@ contrast to Qwen 3.6's GatedDeltaNet trunk).
 
 The draft's output backbone dimension (`{arch}.embedding_length_out`) **must equal
 the target's hidden size** — pair the 12B target with its 12B draft, not the
-26B-A4B draft. When `--spec-draft-model` is given but the draft can't be activated
+26B-A4B draft. When `--draft-model` is given but the draft can't be activated
 (file missing, hidden-size mismatch, or required draft tensors absent), the server
 **fails fast at startup** with a remediation hint
 ([`SpeculationStartupValidation`](../../TensorSharp.Server/Hosting/SpeculationStartupValidation.cs))
@@ -789,8 +790,8 @@ gates whether speculation actually engages:
 The 26B-A4B MoE target additionally required a load-time OOM fix on `ggml_cuda`
 (skipping the per-expert device preload) before MTP speculation became a net win.
 
-Opt-in / opt-out and tuning use the shared `--spec` / `--spec-draft` /
-`--spec-pmin` flags (aliases `--mtp-spec` / `--mtp-draft` / `--mtp-pmin`), which
+Opt-in is the `--draft-model` file itself; opt-out (`--no-spec`) and tuning
+(`--spec-draft` / `--spec-pmin`) use the shared flags, which
 `TensorSharp.Cli` and `TensorSharp.Server` parse from the same
 [`SpeculativeCliFlags`](../../TensorSharp.Runtime/Speculative/SpeculativeCliFlags.cs);
 see [Speculative decoding](../../FEATURES.md#speculative-decoding) for the full
@@ -853,7 +854,7 @@ single-GPU runs. Full detail:
 ### Completed
 
 - **MTP speculative decoding (gemma4-assistant draft)** — a separate EAGLE-style
-  draft GGUF (`--spec-draft-model`) accelerates solo decode (§12). ggml backends run
+  draft GGUF (`--draft-model`) accelerates solo decode (§12). ggml backends run
   fused multi-token-verify (dense `NativeGemma4ModelVerify` and MoE
   `TryFusedMoEModelVerify`) and fused draft-step (`NativeGemma4DraftStep`) kernels,
   with a dense fast-rollback on partial acceptance; the pure-C# `cuda` backend runs

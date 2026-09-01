@@ -841,7 +841,7 @@ TSG_EXPORT int TSGgml_Gemma4LayerPrefill(
             ggml_backend_tensor_set(ple_input_t, pleInputData, 0,
                 static_cast<std::size_t>(seqLen) * pleDim * sizeof(float));
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS) {
             set_last_error("Graph compute failed for Gemma4 layer prefill.");
             return 0;
@@ -1536,7 +1536,7 @@ TSG_EXPORT int TSGgml_GptOssAttentionLayerPrefill(
             }
         }
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS) {
             set_last_error("Graph compute failed for GPT-OSS attention layer prefill.");
             return 0;
@@ -1547,7 +1547,7 @@ TSG_EXPORT int TSGgml_GptOssAttentionLayerPrefill(
         // We cannot use the async download here because BufferHandle's
         // destructor frees the per-call compute buffer immediately, while
         // pipelined MoE work can exhaust the GPU working set otherwise.
-        ggml_backend_synchronize(g_backend);
+        tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(hidden_out_t, hidden_data, 0,
             static_cast<std::size_t>(hiddenSize) * seqLen * sizeof(float));
 
@@ -1985,7 +1985,7 @@ TSG_EXPORT int TSGgml_Qwen35AttentionLayerPrefill(
             return 1;
         }
 
-        ggml_status status = ggml_backend_graph_compute(g_backend, graph);
+        ggml_status status = tsg::compute_graph(g_backend, graph);
         if (status != GGML_STATUS_SUCCESS) {
             set_last_error("Graph compute failed for Qwen3.5 attention layer prefill.");
             return 0;

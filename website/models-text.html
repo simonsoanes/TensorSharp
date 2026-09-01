@@ -54,7 +54,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
 # Served over HTTP, 4 GPUs, with speculation on
 dotnet TensorSharp.Server/bin/TensorSharp.Server.dll \
     --model models/UD-Q8_K_XL/DeepSeek-V4-Flash-0731-UD-Q8_K_XL-00001-of-00005.gguf \
-    --backend ggml_cuda --tp 4 --mtp-spec --draft-model models/DSpark-drafter-Q2K-Q8-0731.gguf</code></pre>
+    --backend ggml_cuda --tp 4 --draft-model models/DSpark-drafter-Q2K-Q8-0731.gguf</code></pre>
   <p>DSpark drafts a whole <em>block</em> of tokens per step and the trunk verifies the block in one batched forward, so greedy output is unchanged. On the CLI it needs a pure-argmax sampler (any temperature, top-k/p, or penalty turns it off); on the server every verify row is drawn with the request's own sampler, so it composes with any sampling settings. See <a href="advanced.html#dspark">DSpark speculative decoding</a>.</p>
 
   <h3 id="glm">GLM 5.x (744B-A40B MoE, text, thinking, tools)</h3>
@@ -82,7 +82,7 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll \
     --model models/UD-IQ2_XXS/GLM-5.2-UD-IQ2_XXS-00001-of-00006.gguf \
     --backend ggml_cuda</code></pre>
   <p>The advertised 1M-token context is a <em>ceiling</em>, not a promise: 1M tokens of MLA cache is about 93 GiB, so once the weights land the loader asks the devices how much VRAM is actually free, sizes the context to what fits alongside one full prefill graph, and logs what it picked. On 3× RTX PRO 6000 that is 342,272 tokens on the plain layer split, 646,400 with <code>--n-cpu-moe 30</code>, and 91,136 under <code>--tp 3</code> (every rank holds a full-length cache). Set <code>MAX_CONTEXT</code> to make a specific length a hard requirement instead — it is honoured if it fits and refused with the numbers if it does not.</p>
-  <p><code>--tp N</code> works here too, but on PCIe-attached cards it is a capacity feature rather than a speed one: the two all-reduces every one of the 78 layers needs cost more bus time than the split saves, so <code>--tp 3</code> measures pp2048 505.6 / tg64 17.6 tok/s against 915.9 / 43.9 on the layer split. Concurrency is served by native per-sequence slots (each request owns its MLA and indexer caches), and <code>TS_BATCHED_FUSED_DECODE=1</code> opts into a batched fused decode worth 1.81× aggregate at 4 concurrent requests. See <a href="distributed.html#architectures">Tensor parallelism</a> and <a href="advanced.html#continuous-batching">Continuous batching</a>.</p>
+  <p><code>--tp N</code> works here too, but on PCIe-attached cards it is a capacity feature rather than a speed one: the two all-reduces every one of the 78 layers needs cost more bus time than the split saves, so <code>--tp 3</code> measures pp2048 505.6 / tg64 17.6 tok/s against 915.9 / 43.9 on the layer split. Concurrency is served by native per-sequence slots (each request owns its MLA and indexer caches), with a default-on batched fused decode worth 1.81× aggregate at 4 concurrent requests; set <code>TS_BATCHED_FUSED_DECODE=0</code> to disable it. See <a href="distributed.html#architectures">Tensor parallelism</a> and <a href="advanced.html#continuous-batching">Continuous batching</a>.</p>
 
   <h3 id="glm53">GLM-5.3-Flash (320B MoE, text + image, thinking, tools)</h3>
   <p>The hybrid successor loads through the <em>same</em> native whole-model ggml executor and the same model class as GLM-5.2 — its GGUF architecture id is <code>glm5next</code> — with four architectural changes layered on top. 320B parameters, 288 routed experts at top-8 plus one shared, 46 blocks = 45 trunk + 1 NextN. <strong>KDA linear attention</strong> runs on 34 of the 45 trunk layers; the other 11 are <strong>NoPE MLA + DSA</strong> (no rope anywhere in the text tower, the 512-wide latent <em>is</em> the cache row); the indexer is <strong>pooled</strong> — 4-cell pools, top-k 2048 taken over pools and then expanded to their members; hyper-connections are Sinkhorn over ×4 streams; and every SwiGLU is clamped at limit 10. The KDA recurrent state cannot be rewound, so a cached prefix is reused only when the new prompt extends it exactly.</p>
@@ -135,10 +135,10 @@ hf download unsloth/Qwen3.5-9B-GGUF mmproj-F16.gguf --local-dir models
 dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf \
     --image photo.png --max-tokens 300 --backend ggml_cuda
 dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf --backend ggml_cuda</code></pre>
-  <p>For Qwen 3.6 NextN speculative decoding, download the trunk from the <code>-MTP-</code> repo (the base repo's GGUFs strip the NextN block and silently fall back to standard decode) and start the <em>server</em> with <code>--mtp-spec</code> — the MTP flags exist only on <code>TensorSharp.Server</code>:</p>
+  <p>For Qwen 3.6 NextN speculative decoding, download the trunk from the <code>-MTP-</code> repo (the base repo's GGUFs strip the NextN block and silently fall back to standard decode) and start the <em>server</em> with <code>--spec</code> — the explicit opt-in, because the NextN drafter is embedded in the trunk checkpoint and loading it pages extra weights into VRAM:</p>
   <pre data-lang="bash"><code>hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --local-dir models
 
-dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda --mtp-spec</code></pre>
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda --spec</code></pre>
 
   <h3 id="qwen4exp">Qwen 3.8 Flash Next (hybrid MoE, text + image, thinking, tools)</h3>
   <p>A hybrid mixture-of-experts model whose GGUF architecture id is <code>qwen4exp</code>: GatedDeltaNet recurrent layers interleaved with full-attention layers (some behind Qwen Sparse Attention's indexer), a PLE n-gram embedding block, ×4 hyper-connection streams and a 512-expert MoE. 48 layers, hidden size 2560, 24 query / 2 KV heads at head_dim 256, a 248,320-token vocabulary, 10 of the 512 experts used per token, GDN on 36 of the 48 layers and PLE on layer 1. On the GGML backends the whole token runs as (almost) <strong>one graph</strong> — embedding, in-graph PLE, all 48 layers, the final mixer and the LM head — replayed from a shape-keyed cache of captured graphs. Vision rides the Qwen3.5-VL tower with (T,H,W) IMRoPE positions, so multi-image prompts and multi-turn image sessions both work, with KV reused across turns as long as the new prompt extends the cached prefix exactly (the GDN recurrence cannot rewind). Concurrent requests are served through per-sequence state holders — each request owns its attention KV and indexer caches, its GDN and PLE state — so switching between them is a reference swap. Thinking and tool calling both work.</p>
@@ -200,7 +200,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Muse-Glimmer-30B-U
     --max-tokens 300 --backend ggml_cuda
 # DFlash speculative decoding (optional drafter GGUF from the same repo)
 dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
-    --draft-model models/dflash-kquant.gguf --spec-draft-n-max 15 --input prompt.txt --backend ggml_cuda</code></pre>
+    --draft-model models/dflash-kquant.gguf --spec-draft 15 --input prompt.txt --backend ggml_cuda</code></pre>
 
   <h3 id="diffusiongemma">DiffusionGemma (block text diffusion)</h3>
   <pre data-lang="bash"><code>hf download unsloth/diffusiongemma-26B-A4B-it-GGUF diffusiongemma-26B-A4B-it-Q4_K_M.gguf --local-dir models

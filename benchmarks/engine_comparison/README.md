@@ -240,8 +240,8 @@ form still load unchanged, and result files from old runs (backend ids `gpu` /
 ### MTP / NextN speculative decoding (`--mtp off | on | off,on`)
 
 Benchmarks **with and without** TensorSharp's multi-token-prediction draft head.
-Each mode relaunches the server (it is a load-time flag): `on` adds `--mtp-spec`,
-and for Gemma 4 also `--mtp-draft-model <draft.gguf>` (Qwen 3.6 embeds its NextN
+Each mode relaunches the server (it is a load-time flag): `on` adds `--spec`,
+and for Gemma 4 also `--draft-model <draft.gguf>` (Qwen 3.6 embeds its NextN
 block in the trunk, so no extra file is needed — but only GGUFs from the
 `unsloth/Qwen3.6-35B-A3B-MTP-GGUF` repo retain that block; base-repo Qwen3.6
 GGUFs with the same file names strip it and the server silently falls back to
@@ -584,5 +584,5 @@ To run it as a CI job instead, add a second job on the old
 - **CPU-kind backends** (`ggml_cpu`, `cpu`) are restricted to small/medium
   models; the 35B MoE is GPU-only.
 - **MTP** (`--mtp on`) only applies to TensorSharp on models that ship a draft
-  head (Qwen 3.6 embedded NextN; Gemma 4 with its paired `--mtp-draft-model`);
+  head (Qwen 3.6 embedded NextN; Gemma 4 with its paired `--draft-model`);
   every other engine/model `on` cell is recorded as skipped.

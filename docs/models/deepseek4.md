@@ -225,13 +225,13 @@ embeddings only the plain prefill can inject.
 
 ### On TensorSharp.Server
 
-The same drafter serves the HTTP API. Pass it with `--draft-model` and turn
-speculation on with `--mtp-spec`:
+The same drafter serves the HTTP API. Pass it with `--draft-model` — naming
+the drafter enables speculation by itself (an explicit `--no-spec` vetoes it):
 
 ```bash
 TensorSharp.Server --model DeepSeek-V4-Flash-...-00001-of-00005.gguf \
     --backend ggml_cuda --tp 4 \
-    --mtp-spec --draft-model DSpark-drafter-Q2K-Q8-0731.gguf
+    --draft-model DSpark-drafter-Q2K-Q8-0731.gguf
 ```
 
 Unlike the CLI, the engine draws every verify row with the **request's own
@@ -253,9 +253,9 @@ Measured on 4×A40 (`--tp 4`, 300-token OpenAI chat completion):
 | Config | tok/s |
 |---|---|
 | No drafter | 25.1 |
-| `--mtp-spec --draft-model …` | **31.3 – 32.1 (1.25–1.28x)** |
+| `--draft-model …` | **31.3 – 32.1 (1.25–1.28x)** |
 
-`--mtp-pmin` defaults to the value matching the loaded drafter — 0.35 for a
+`--spec-pmin` defaults to the value matching the loaded drafter — 0.35 for a
 block drafter, 0.75 for a per-token draft head — so it needs no tuning. Setting
 it explicitly still wins; the startup line reports which gate is in force
 (`pMin=0.35, draft=block(5)`).
@@ -320,10 +320,10 @@ size). Start with a small one; move up only if acceptance is your bottleneck.
 | Flag | Default | Meaning |
 |---|---|---|
 | `--draft-model <path>` | none | DSpark drafter GGUF (env `TS_DSV4_DSPARK`) |
-| `--spec-draft-n-max <N>` | block size (5) | Cap on tokens drafted per step |
-| `--spec-draft-conf-min <p>` | `0.35` | Minimum CUMULATIVE acceptance probability (the product of the confidence head's per-position estimates) for a drafted position to be kept |
+| `--spec-draft <N>` | block size (5) | Cap on tokens drafted per step |
+| `--spec-pmin <p>` | `0.35` | Minimum CUMULATIVE acceptance probability (the product of the confidence head's per-position estimates) for a drafted position to be kept; `0` never gates |
 
-`--spec-draft-conf-min` is the knob that matters: an extra verify row costs
+`--spec-pmin` is the knob that matters: an extra verify row costs
 roughly a quarter of a decode step on this sparse-MoE trunk (each row pulls in
 its own set of experts), so drafting past a ~0.35 prefix-acceptance estimate is
 expected-negative. Lower values draft more and roll back more; higher values

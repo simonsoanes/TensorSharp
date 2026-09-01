@@ -370,7 +370,7 @@ namespace tsg
             for (int r = 0; r < n; ++r)
             {
                 ScopedRank rank(r);
-                ggml_backend_synchronize(g_backend);
+                tsg::sync_backend(g_backend);
             }
         }
         cached = ok ? 1 : 0;
@@ -708,7 +708,7 @@ namespace tsg
             auto stage_down = [&](int r)
             {
                 ScopedRank rank(r);
-                ggml_backend_synchronize(g_backend);
+                tsg::sync_backend(g_backend);
                 ggml_backend_tensor_get(nodes[r], ptrs[r], 0, bytes);
             };
             auto stage_up = [&](int r)
@@ -809,7 +809,7 @@ namespace tsg
                 for (int r = 0; r < rank_count; ++r)
                 {
                     ScopedRank rank(r);
-                    ggml_backend_synchronize(g_backend);
+                    tsg::sync_backend(g_backend);
                 }
                 {
                     ScopedRank rank(0);
@@ -883,7 +883,7 @@ namespace tsg
         for (int r = 0; r < rank_count; ++r)
         {
             ScopedRank rank(r);
-            ggml_backend_synchronize(g_backend);
+            tsg::sync_backend(g_backend);
         }
 
         for (int r = 0; r < rank_count; ++r)
@@ -1189,7 +1189,7 @@ TSG_EXPORT int TSGgml_TensorParallelMatmul(
                 for (int r = 0; r < rankCount; ++r)
                 {
                     tsg::ScopedRank rank(r);
-                    ggml_backend_synchronize(g_backend);
+                    tsg::sync_backend(g_backend);
                     ggml_backend_tensor_get(nodes[static_cast<std::size_t>(r)],
                         graphs[static_cast<std::size_t>(r)].result_host, 0,
                         graphs[static_cast<std::size_t>(r)].result_bytes);
@@ -1205,7 +1205,7 @@ TSG_EXPORT int TSGgml_TensorParallelMatmul(
             for (int r = 0; r < rankCount; ++r)
             {
                 tsg::ScopedRank rank(r);
-                ggml_backend_synchronize(g_backend);
+                tsg::sync_backend(g_backend);
                 ggml_backend_tensor_get(nodes[static_cast<std::size_t>(r)],
                     graphs[static_cast<std::size_t>(r)].result_host, 0,
                     graphs[static_cast<std::size_t>(r)].result_bytes);
@@ -1217,7 +1217,7 @@ TSG_EXPORT int TSGgml_TensorParallelMatmul(
         for (int r = 0; r < rankCount; ++r)
         {
             tsg::ScopedRank rank(r);
-            ggml_backend_synchronize(g_backend);
+            tsg::sync_backend(g_backend);
             auto& rg = graphs[static_cast<std::size_t>(r)];
             if (!rg.zero_copy_result && rg.result_binding.storage != nullptr &&
                 rg.result_host != nullptr && rg.result_bytes > 0)
@@ -1458,7 +1458,7 @@ static int tsg_multi_device_init(int backendType, const int* deviceIndices, int 
                     return 0;
                 if (g_backend != nullptr)
                 {
-                    ggml_backend_synchronize(g_backend);
+                    tsg::sync_backend(g_backend);
                     ggml_backend_free(g_backend);
                 }
                 g_backend = replacement;
@@ -1472,7 +1472,7 @@ static int tsg_multi_device_init(int backendType, const int* deviceIndices, int 
             if (g_backend != nullptr)
             {
                 // Re-init after a previous group was torn down.
-                ggml_backend_synchronize(g_backend);
+                tsg::sync_backend(g_backend);
                 ggml_backend_free(g_backend);
                 g_backend = nullptr;
             }
@@ -1756,7 +1756,7 @@ TSG_EXPORT int TSGgml_TensorParallelAllReduceDevice(float** buffers, int rankCou
             for (int r = 0; r < rankCount; ++r)
             {
                 tsg::ScopedRank rank(r);
-                ggml_backend_synchronize(g_backend);
+                tsg::sync_backend(g_backend);
                 ggml_backend_tensor_get(tensors[static_cast<std::size_t>(r)], buffers[r], 0,
                     static_cast<std::size_t>(count) * sizeof(float));
             }

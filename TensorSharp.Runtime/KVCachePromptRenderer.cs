@@ -19,7 +19,11 @@ namespace TensorSharp.Runtime
     /// Key invariant: when an assistant message has <see cref="ChatMessage.RawOutputTokens"/>
     /// set (i.e. the model previously generated this turn), those raw tokens are spliced
     /// directly into the rendered token sequence INSTEAD OF re-tokenizing the assistant's
-    /// content text.
+    /// content text. A TOOL-CALLING round is the exception: splicing one clears
+    /// <see cref="ChatMessage.ToolCalls"/>, which some templates read in order to render
+    /// or address the tool RESULT that follows, so each family declares through
+    /// <see cref="ChatProtocol.ToolCallRawSplicing"/> whether such a round may be spliced
+    /// always, never, or only when the template proves it cannot rebuild the round itself.
     ///
     /// Why this matters: assistant content is typically lossy with respect to raw
     /// generation. Thinking-style models emit <c>&lt;think&gt;...&lt;/think&gt;</c> tokens
@@ -202,11 +206,100 @@ namespace TensorSharp.Runtime
             if (messages == null)
                 throw new ArgumentNullException(nameof(messages));
 
+            ToolCallRawSplicing splicing =
+                ChatProtocolRegistry.For(architecture)?.ToolCallRawSplicing ?? ToolCallRawSplicing.Never;
+
+            RenderPass pass = Render(
+                tokenizer, chatTemplate, messages, architecture, addGenerationPrompt, tools, enableThinking,
+                spliceToolCallRounds: splicing == ToolCallRawSplicing.Always);
+
+            if (splicing != ToolCallRawSplicing.WhenTemplateLosesTheRound
+                || pass.ToolCallRoundsLeftToTemplate.Count == 0)
+            {
+                explicitBreakpoints = pass.ExplicitBreakpoints;
+                return pass.Tokens;
+            }
+
+            // The template was given this family's structured reasoning and tool calls and
+            // asked to rebuild each tool-calling round. Check whether it actually did, by
+            // the only measure that matters for cache reuse: are the round's generated
+            // tokens present, in order, in the prompt we just built? When they are, the
+            // re-render is byte-identical to the live cache and nothing more is needed -
+            // this is the canonical Gemma 4 template, and its behaviour is unchanged.
+            if (ReproducesEveryToolCallRound(pass.Tokens, pass.ToolCallRoundsLeftToTemplate))
+            {
+                explicitBreakpoints = pass.ExplicitBreakpoints;
+                return pass.Tokens;
+            }
+
+            // It did not. The round's thought channel (and whatever else the template
+            // dropped) has no counterpart in the prompt, so the live cache diverges right
+            // at that turn and the whole conversation re-prefills. Splicing the raw tokens
+            // reproduces it exactly - PROVIDED the template still renders the tool results
+            // once the structured tool_calls field is cleared, which is the one thing
+            // splicing costs and the one thing that must never be lost.
+            RenderPass spliced = Render(
+                tokenizer, chatTemplate, messages, architecture, addGenerationPrompt, tools, enableThinking,
+                spliceToolCallRounds: true);
+
+            if (!ToolResultsSurvive(spliced.Text, messages))
+            {
+                WarnToolCallSplicingUnavailableOnce(architecture);
+                explicitBreakpoints = pass.ExplicitBreakpoints;
+                return pass.Tokens;
+            }
+
+            explicitBreakpoints = spliced.ExplicitBreakpoints;
+            return spliced.Tokens;
+        }
+
+        /// <summary>One rendered prompt, plus what the template was left to reconstruct.</summary>
+        private readonly struct RenderPass
+        {
+            public RenderPass(
+                List<int> tokens,
+                string text,
+                List<List<int>> toolCallRoundsLeftToTemplate,
+                List<int>? explicitBreakpoints)
+            {
+                Tokens = tokens;
+                Text = text;
+                ToolCallRoundsLeftToTemplate = toolCallRoundsLeftToTemplate;
+                ExplicitBreakpoints = explicitBreakpoints;
+            }
+
+            /// <summary>The prompt token sequence.</summary>
+            public List<int> Tokens { get; }
+
+            /// <summary>The rendered text, before tokenization (placeholders still in it).</summary>
+            public string Text { get; }
+
+            /// <summary>
+            /// Raw output tokens of each assistant TOOL-CALLING round this pass did NOT
+            /// splice, i.e. the rounds the chat template was asked to rebuild itself.
+            /// </summary>
+            public List<List<int>> ToolCallRoundsLeftToTemplate { get; }
+
+            /// <summary>Final token offsets of explicit cache-control markers.</summary>
+            public List<int>? ExplicitBreakpoints { get; }
+        }
+
+        private RenderPass Render(
+            ITokenizer tokenizer,
+            string chatTemplate,
+            List<ChatMessage> messages,
+            string architecture,
+            bool addGenerationPrompt,
+            List<ToolFunction>? tools,
+            bool enableThinking,
+            bool spliceToolCallRounds)
+        {
             // Build a parallel list where each cached assistant message is replaced with a
             // placeholder ChatMessage. Track the raw tokens in render order so we can splice
             // them back in.
             List<ChatMessage>? renderedMessages = null;
             List<List<int>>? rawTokensByPlaceholderIndex = null;
+            var toolCallRoundsLeftToTemplate = new List<List<int>>();
             int placeholderCount = 0;
             int breakpointCount = 0;
 
@@ -229,6 +322,21 @@ namespace TensorSharp.Runtime
                     && msg.Role == "assistant"
                     && msg.RawOutputTokens != null
                     && msg.RawOutputTokens.Count > 0;
+
+                // A tool-calling round is the contested case. The placeholder below blanks
+                // ToolCalls, because the raw tokens already carry the call markup and
+                // rendering it twice would duplicate it - but a template may read that same
+                // field to place or address the tool RESULT that follows, and Gemma 4's
+                // canonical template deletes every result without it. Which families may
+                // splice such a round, and under what condition, is declared once per
+                // family as ChatProtocol.ToolCallRawSplicing; the caller resolves the
+                // condition and passes the answer down.
+                bool isToolCallRound = hasRawTokens && msg!.ToolCalls is { Count: > 0 };
+                if (isToolCallRound && !spliceToolCallRounds)
+                {
+                    toolCallRoundsLeftToTemplate.Add(msg!.RawOutputTokens!);
+                    hasRawTokens = false;
+                }
 
                 bool hasMarker = msg?.CacheControl != null;
                 bool hasPartMarkers = msg?.ContentCacheBreakpoints != null
@@ -284,13 +392,20 @@ namespace TensorSharp.Runtime
                     ? MakeBreakpoint(breakpointCount++)
                     : string.Empty;
 
-                if (hasPartMarkers && !hasRawTokens)
+                if (hasPartMarkers && hasRawTokens)
+                {
+                    // Character offsets cannot be translated into the original
+                    // generated-token stream after content is replaced by a raw
+                    // placeholder. Preserve explicit-cache mode conservatively by
+                    // collapsing them to one boundary immediately before the raw
+                    // tokens; silently dropping every marker would mean cache-all.
+                    breakpointPrefix += MakeBreakpoint(breakpointCount++);
+                }
+                else if (hasPartMarkers)
                 {
                     // Part-scoped markers address offsets into the ORIGINAL
-                    // content, so they only mean anything while that content is
-                    // still there. A message spliced from raw tokens has had its
-                    // content replaced by a placeholder, and an offset into that
-                    // placeholder would be meaningless, so they are dropped.
+                    // content, so exact placement is possible while that content
+                    // is still present.
                     newContent = InsertBreakpointsAtOffsets(
                         newContent, msg.ContentCacheBreakpoints!, ref breakpointCount);
                 }
@@ -327,7 +442,13 @@ namespace TensorSharp.Runtime
 
             // Fast path: no placeholders and no breakpoints -> just tokenize the whole rendered string.
             if (placeholderCount == 0 && breakpointCount == 0)
-                return tokenizer.Encode(text, addSpecial: true);
+            {
+                return new RenderPass(
+                    tokenizer.Encode(text, addSpecial: true),
+                    text,
+                    toolCallRoundsLeftToTemplate,
+                    explicitBreakpoints: null);
+            }
 
             // Some chat templates (notably Gemma 4) call a strip_thinking filter on
             // assistant content, which would silently delete a prefix injected via the
@@ -376,7 +497,144 @@ namespace TensorSharp.Runtime
             if (rendererStrippedTrailingWhitespace)
                 text = TrimWhitespaceBeforeEachPlaceholder(text);
 
-            return TokenizeAndReplacePlaceholderSpans(tokenizer, text, rawTokensByPlaceholderIndex ?? new List<List<int>>(), breakpointCount, out explicitBreakpoints);
+            List<int> tokens = TokenizeAndReplacePlaceholderSpans(
+                tokenizer,
+                text,
+                rawTokensByPlaceholderIndex ?? new List<List<int>>(),
+                breakpointCount,
+                out List<int>? explicitBreakpoints);
+
+            return new RenderPass(
+                tokens,
+                text,
+                toolCallRoundsLeftToTemplate,
+                explicitBreakpoints);
+        }
+
+        /// <summary>
+        /// True when every tool-calling round the template was asked to rebuild appears in
+        /// the rendered prompt as the exact token run the model generated.
+        ///
+        /// <para>
+        /// This is deliberately measured in TOKENS rather than text. Reproducing the round
+        /// as far as the KV cache is concerned means reproducing its tokens; a template
+        /// that re-emits the same words with one different merge at a boundary has not
+        /// reproduced it, and text comparison would say it had.
+        /// </para>
+        /// </summary>
+        private static bool ReproducesEveryToolCallRound(
+            List<int> promptTokens, List<List<int>> toolCallRounds)
+        {
+            for (int i = 0; i < toolCallRounds.Count; i++)
+            {
+                if (FindSubsequence(promptTokens, toolCallRounds[i]) < 0)
+                    return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Longest tool-result needle compared against a rendered prompt. Tool output runs
+        /// to whole files; a few hundred characters of it identify the message beyond doubt
+        /// and keep the check independent of how large the result was.
+        /// </summary>
+        private const int ToolResultProbeChars = 512;
+
+        /// <summary>
+        /// True when every <c>role: "tool"</c> message's content is still present in
+        /// <paramref name="renderedText"/>.
+        ///
+        /// <para>
+        /// Splicing a tool-calling round clears <see cref="ChatMessage.ToolCalls"/>, and a
+        /// template that folds the result INTO the model turn - gated on that very field -
+        /// then emits nothing for the following <c>role: "tool"</c> messages. The model is
+        /// shown none of the output of the tools it called and answers from invention: it
+        /// asks for a directory listing, is given nothing, and names files that do not
+        /// exist. That regression is worth far more than the prefill this saves, so the
+        /// spliced render is only used once it has been checked.
+        /// </para>
+        /// </summary>
+        internal static bool ToolResultsSurvive(string renderedText, List<ChatMessage> messages)
+        {
+            if (messages == null)
+                return true;
+
+            // Cache breakpoints are renderer-only sentinels. A part-scoped marker can
+            // legitimately split a tool result in the intermediate text, but it is
+            // removed before the model sees the prompt. Ignore those sentinels here so
+            // the safety check judges the same visible tool result as the model will.
+            string haystack = NormalizeNewlines(StripBreakpointMarkers(renderedText));
+            for (int i = 0; i < messages.Count; i++)
+            {
+                ChatMessage msg = messages[i];
+                if (msg == null || msg.Role != "tool")
+                    continue;
+
+                string needle = NormalizeNewlines(msg.Content).Trim();
+                if (needle.Length == 0)
+                    continue;
+                if (needle.Length > ToolResultProbeChars)
+                    needle = needle.Substring(0, ToolResultProbeChars);
+
+                if (haystack.IndexOf(needle, StringComparison.Ordinal) < 0)
+                    return false;
+            }
+            return true;
+        }
+
+        private static string StripBreakpointMarkers(string text)
+        {
+            int markerStart = text.IndexOf(BreakpointSentinel);
+            if (markerStart < 0)
+                return text;
+
+            var sb = new System.Text.StringBuilder(text.Length);
+            int copied = 0;
+            while (markerStart >= 0)
+            {
+                sb.Append(text, copied, markerStart - copied);
+
+                int markerEnd = text.IndexOf(BreakpointSentinel, markerStart + 1);
+                if (markerEnd < 0)
+                {
+                    // A malformed/user-supplied lone sentinel is ordinary prompt text,
+                    // not one of MakeBreakpoint's paired markers.
+                    sb.Append(text, markerStart, text.Length - markerStart);
+                    return sb.ToString();
+                }
+
+                copied = markerEnd + 1;
+                markerStart = text.IndexOf(BreakpointSentinel, copied);
+            }
+
+            sb.Append(text, copied, text.Length - copied);
+            return sb.ToString();
+        }
+
+        private static string NormalizeNewlines(string? s)
+        {
+            if (string.IsNullOrEmpty(s))
+                return string.Empty;
+            return s.Replace("\r\n", "\n").Replace('\r', '\n');
+        }
+
+        // Architectures whose "the template lost the round but splicing would lose the
+        // tool results" dead end has already been reported. Both halves of the trade are
+        // bad; the prompt stays correct and pays the prefill, but a silent choice between
+        // two costs is exactly the kind of thing that goes unnoticed for months.
+        private static readonly HashSet<string> ToolCallSplicingWarned = new(StringComparer.Ordinal);
+
+        private static void WarnToolCallSplicingUnavailableOnce(string? architecture)
+        {
+            lock (ToolCallSplicingWarned)
+            {
+                if (!ToolCallSplicingWarned.Add(architecture ?? string.Empty)) return;
+            }
+            Console.Error.WriteLine(
+                $"[KVCachePromptRenderer] '{architecture}': the chat template did not reproduce a past " +
+                "tool-calling round's generated tokens, and splicing them back would drop the tool results " +
+                "from the prompt. Keeping the results, so that round re-prefills instead of continuing the " +
+                "live KV cache. Reported once per architecture.");
         }
 
         /// <summary>
@@ -599,10 +857,10 @@ namespace TensorSharp.Runtime
             // attached to (Gemma 4's strip_thinking filter does exactly that),
             // and a cache hint is not worth failing a completion over. Dropping
             // an interior breakpoint only shortens the marked region. Dropping
-            // the LAST one raises the ceiling to the next breakpoint down, and
-            // dropping every one of them leaves the request with no markers at
-            // all, which falls back to implicit caching - i.e. caching more than
-            // the client asked to have cached, not less.
+            // the LAST one raises the ceiling to the next breakpoint down. If
+            // every sentinel was dropped, the non-null empty result preserves
+            // explicit cache-none mode instead of silently widening to the whole
+            // prompt.
             if (breakpointCount > 0)
             {
                 explicitBreakpoints = new List<int>(breakpointCount);

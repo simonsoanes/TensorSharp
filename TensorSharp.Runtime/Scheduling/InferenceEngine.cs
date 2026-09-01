@@ -386,22 +386,39 @@ namespace TensorSharp.Runtime.Scheduling
         private void NotifyReleasedSequence(
             Runtime.Scheduling.IBatchedPagedModel batched,
             string requestId,
-            HashSet<string> seen)
+            HashSet<string> seen,
+            bool retainFusedCache = true)
         {
             if (string.IsNullOrEmpty(requestId)) return;
             if (seen != null && !seen.Add(requestId)) return;
 
             try
             {
-                // Give the executor first refusal: a fused sequence that finished
-                // cleanly has its per-request KV holder RETAINED (re-keyed out of the
-                // active set) for cross-request prefix reuse, so the model release
-                // below no-ops for it instead of disposing the still-useful K/V.
-                _executor.TryRetainReleasedFusedCache(requestId);
+                if (retainFusedCache)
+                {
+                    // Give the executor first refusal: a fused sequence that finished
+                    // cleanly has its per-request KV holder RETAINED (re-keyed out of the
+                    // active set) for cross-request prefix reuse, so the model release
+                    // below no-ops for it instead of disposing the still-useful K/V.
+                    _executor.TryRetainReleasedFusedCache(requestId);
+                }
+                else
+                {
+                    // Aborted requests are never retention candidates, but they may
+                    // already have executor tracking (or a retained-holder rewind that
+                    // was planned while waiting for suffix capacity). Clear both before
+                    // the model frees the holder.
+                    _executor.DiscardReleasedFusedCacheBookkeeping(requestId);
+                }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Fused-cache retention failed for sequence {RequestId}", requestId);
+                _logger.LogWarning(
+                    ex,
+                    retainFusedCache
+                        ? "Fused-cache retention failed for sequence {RequestId}"
+                        : "Fused-cache bookkeeping cleanup failed for sequence {RequestId}",
+                    requestId);
             }
 
             try
@@ -429,6 +446,16 @@ namespace TensorSharp.Runtime.Scheduling
 
                 case EngineCommandKind.Abort:
                     _scheduler.Abort(cmd.RequestId);
+                    if (_model is Runtime.Scheduling.IBatchedPagedModel batchedAbort)
+                    {
+                        // Abort bypasses ApplyResults/NotifyReleasedSequences, so run
+                        // the same executor-first cleanup before freeing model state.
+                        NotifyReleasedSequence(
+                            batchedAbort,
+                            cmd.RequestId,
+                            seen: null,
+                            retainFusedCache: false);
+                    }
                     if (_handles.TryRemove(cmd.RequestId, out var handle))
                     {
                         // Aborted requests (stop button, client disconnect,
@@ -438,8 +465,6 @@ namespace TensorSharp.Runtime.Scheduling
                         LogSpeculationStatsIfAny(handle.Sequence);
                         handle.CompleteAborted();
                     }
-                    if (_model is Runtime.Scheduling.IBatchedPagedModel batchedAbort)
-                        batchedAbort.OnSequenceReleased(cmd.RequestId);
                     break;
             }
         }

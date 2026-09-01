@@ -23,9 +23,17 @@ namespace TensorSharp.Runtime.Speculative
         /// <summary>Speculative decoding requested. Default OFF - a per-token
         /// head is resident in every checkpoint that ships one, so engaging by
         /// its mere presence would silently change what a plain run does.
-        /// CLI: <c>--spec</c> / <c>--mtp-spec</c>; env: <c>TS_SPEC</c> /
+        /// CLI: <c>--spec</c>; env: <c>TS_SPEC</c> /
         /// <c>TS_MTP_SPEC</c>.</summary>
         public bool Enabled { get; init; }
+
+        /// <summary>
+        /// True when the operator supplied the enable variable and its resolved
+        /// value is off. This is distinct from the default-off state: a separate
+        /// block-drafter GGUF normally counts as an opt-in by its presence, but an
+        /// explicit <c>--no-spec</c> / <c>TS_SPEC=0</c> must veto that convenience.
+        /// </summary>
+        public bool ExplicitlyDisabled { get; init; }
 
         /// <summary>Which algorithm to use; see <see cref="SpeculatorRegistry"/>.
         /// Default <see cref="SpeculatorRegistry.Auto"/> = "whatever drafter the
@@ -34,7 +42,7 @@ namespace TensorSharp.Runtime.Speculative
         public string SpeculatorName { get; init; } = SpeculatorRegistry.Auto;
 
         /// <summary>Maximum tokens drafted per speculative step (llama.cpp
-        /// n_max). CLI: <c>--spec-draft</c> / <c>--mtp-draft</c>; env:
+        /// n_max). CLI: <c>--spec-draft</c>; env:
         /// <c>TS_SPEC_DRAFT</c> / <c>TS_MTP_DRAFT</c>.</summary>
         public int MaxDraftTokens { get; init; } = DefaultMaxDraftTokens;
 
@@ -52,7 +60,7 @@ namespace TensorSharp.Runtime.Speculative
         /// (<see cref="ISpeculator.DefaultMinDraftProb"/>). The gates threshold
         /// DIFFERENT quantities per algorithm, so one shared default cannot
         /// serve them all - leave this unset unless the operator asked for a
-        /// specific value. CLI: <c>--spec-pmin</c> / <c>--mtp-pmin</c>; env:
+        /// specific value. CLI: <c>--spec-pmin</c>; env:
         /// <c>TS_SPEC_PMIN</c> / <c>TS_MTP_PMIN</c>.
         /// </summary>
         public float? MinDraftProb { get; init; }
@@ -90,16 +98,19 @@ namespace TensorSharp.Runtime.Speculative
         /// </summary>
         public static SpeculationOptions FromEnvironment()
         {
+            string enabledRaw = ReadString(SpeculationEnvVars.Enabled, SpeculationEnvVars.LegacyEnabled);
+            int maxDraftTokens = ReadDraftTokens(
+                SpeculationEnvVars.Draft, SpeculationEnvVars.LegacyDraft,
+                out bool maxDraftTokensExplicit);
             return new SpeculationOptions
             {
-                Enabled = ReadBool(SpeculationEnvVars.Enabled, SpeculationEnvVars.LegacyEnabled, false),
+                Enabled = ReadBool(enabledRaw, false),
+                ExplicitlyDisabled = enabledRaw != null && !ReadBool(enabledRaw, false),
                 SpeculatorName = ReadString(SpeculationEnvVars.Type, null) ?? SpeculatorRegistry.Auto,
-                MaxDraftTokens = ReadPositiveInt(SpeculationEnvVars.Draft, SpeculationEnvVars.LegacyDraft,
-                    DefaultMaxDraftTokens),
-                // The flags layer writes these only when the operator passed one.
-                MaxDraftTokensExplicit =
-                    !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(SpeculationEnvVars.Draft))
-                    || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(SpeculationEnvVars.LegacyDraft)),
+                MaxDraftTokens = maxDraftTokens,
+                // An invalid env value is ignored rather than becoming an
+                // explicit request for the fallback window.
+                MaxDraftTokensExplicit = maxDraftTokensExplicit,
                 MinDraftProb = ReadFloatOrNull(SpeculationEnvVars.PMin, SpeculationEnvVars.LegacyPMin),
             };
         }
@@ -112,30 +123,39 @@ namespace TensorSharp.Runtime.Speculative
             return string.IsNullOrWhiteSpace(raw) ? null : raw.Trim();
         }
 
-        private static bool ReadBool(string name, string fallbackName, bool fallback)
+        private static bool ReadBool(string raw, bool fallback)
         {
-            string raw = ReadString(name, fallbackName);
             if (raw == null)
                 return fallback;
             return raw is "1" or "true" or "TRUE" or "True" or "yes" or "on";
         }
 
-        private static int ReadPositiveInt(string name, string fallbackName, int fallback)
+        private static int ReadDraftTokens(string name, string fallbackName, out bool explicitlyConfigured)
         {
             string raw = ReadString(name, fallbackName);
-            return raw != null
-                   && int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int v)
-                   && v > 0
-                ? v
-                : fallback;
+            if (raw != null
+                && int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int v)
+                && v >= 1
+                && v <= MaxAllowedDraftTokens)
+            {
+                explicitlyConfigured = true;
+                return v;
+            }
+
+            explicitlyConfigured = false;
+            return DefaultMaxDraftTokens;
         }
 
         private static float? ReadFloatOrNull(string name, string fallbackName)
         {
+            // Zero is a real value, not "unset": --spec-pmin 0 means "never gate a
+            // draft on confidence", which the removed --spec-draft-conf-min spelling
+            // could express and its survivor must keep expressing.
             string raw = ReadString(name, fallbackName);
             return raw != null
                    && float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out float v)
-                   && v > 0f && v <= 1f
+                   && float.IsFinite(v)
+                   && v >= 0f && v <= 1f
                 ? v
                 : null;
         }

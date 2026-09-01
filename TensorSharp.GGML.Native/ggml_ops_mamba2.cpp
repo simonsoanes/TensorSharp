@@ -709,13 +709,13 @@ TSG_EXPORT int TSGgml_NemotronMamba2PrefillF32(
             if (has_norm)
                 ggml_backend_tensor_set(entry->norm_storage, ssm_norm_data, 0, entry->norm_bytes);
 
-            ggml_status status = ggml_backend_graph_compute(g_backend, entry->graph);
+            ggml_status status = tsg::compute_graph(g_backend, entry->graph);
             if (status != GGML_STATUS_SUCCESS)
             {
                 set_last_error("NemotronMamba2Prefill: graph compute failed.");
                 return 0;
             }
-            ggml_backend_synchronize(g_backend);
+            tsg::sync_backend(g_backend);
 
             if (!entry->hidden_out_zero_copy)
                 ggml_backend_tensor_get(entry->hidden_out_storage, hidden_out_desc.data, 0, entry->hidden_out_bytes);
@@ -1098,7 +1098,7 @@ TSG_EXPORT int TSGgml_NemotronMamba2DecodeF32(
                 entry->state_initialized = true;
             }
 
-            ggml_status status = ggml_backend_graph_compute(g_backend, entry->graph);
+            ggml_status status = tsg::compute_graph(g_backend, entry->graph);
             if (status != GGML_STATUS_SUCCESS)
             {
                 set_last_error("NemotronMamba2Decode: graph compute failed.");
@@ -1107,7 +1107,7 @@ TSG_EXPORT int TSGgml_NemotronMamba2DecodeF32(
 
             if (download_state)
             {
-                ggml_backend_synchronize(g_backend);
+                tsg::sync_backend(g_backend);
                 if (!entry->hidden_out_zero_copy)
                     ggml_backend_tensor_get(entry->hidden_out_storage, hidden_out_desc.data, 0, entry->hidden_out_bytes);
                 if (conv_dim > 0)
