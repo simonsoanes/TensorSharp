@@ -237,6 +237,14 @@ public class SkillChatLoopStreamingTests : IDisposable
             .ToList();
         ToolCall only = Assert.Single(forwarded);
         Assert.Equal("get_weather", only.Name);
+
+        // The Web UI owns one transient activity panel. Even though this call is
+        // handed to the caller rather than executed here, its generation progress
+        // still needs a terminal event so the panel cannot remain stuck on screen.
+        ChatStreamUpdate lastProgress = Payload(updates)
+            .Last(u => u.ToolProgressPhase != null);
+        Assert.Equal("finished", lastProgress.ToolProgressPhase);
+        Assert.Equal("get_weather", lastProgress.ToolProgressName);
     }
 
     [Fact]
@@ -261,6 +269,22 @@ public class SkillChatLoopStreamingTests : IDisposable
 
         SkillToolInvocation invocation = Assert.Single(plan.Invocations);
         Assert.Equal(SkillToolNames.Shell, invocation.Tool);
+
+        // Many writing updates are expected because Replay emits one character at
+        // a time. Collapse adjacent equal phases and pin the lifecycle rather than
+        // an implementation-dependent frame count: the live Web UI replaces its
+        // current activity on each transition and removes it on finished.
+        List<ChatStreamUpdate> progress = Payload(updates)
+            .Where(u => u.ToolProgressPhase != null)
+            .ToList();
+        string[] phases = progress.Select(u => u.ToolProgressPhase).ToArray();
+        string[] phaseTransitions = phases
+            .Where((phase, i) => i == 0 || phase != phases[i - 1])
+            .ToArray();
+        Assert.Equal(new[] { "writing", "running", "finished" }, phaseTransitions);
+
+        ChatStreamUpdate finished = progress[^1];
+        Assert.Equal(SkillToolNames.Shell, finished.ToolProgressName);
     }
 
     [Fact]
