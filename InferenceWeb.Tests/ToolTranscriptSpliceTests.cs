@@ -71,6 +71,33 @@ public class ToolTranscriptSpliceTests
     }
 
     [Fact]
+    public void ExpandedTurn_PreservesClientCacheMarkersAtSafeTranscriptBoundaries()
+    {
+        var tracked = TrackedTranscript();
+        int firstRoundLength = tracked[1].Content.Length;
+        var incoming = new List<ChatMessage>
+        {
+            new() { Role = "user", Content = "convert this file" },
+            new()
+            {
+                Role = "assistant",
+                Content = CleanAssistantText,
+                CacheControl = new CacheControlMarker(),
+                ContentCacheBreakpoints = new List<int> { 5, firstRoundLength + 5 },
+            },
+            new() { Role = "user", Content = "next" },
+        };
+
+        var result = ModelService.AugmentWithCachedRawTokens(incoming, tracked);
+
+        Assert.Equal(new[] { 5 }, result[1].ContentCacheBreakpoints);
+        Assert.Equal(new[] { 5 }, result[3].ContentCacheBreakpoints);
+        Assert.NotNull(result[5].CacheControl);
+        Assert.Null(tracked[1].ContentCacheBreakpoints);
+        Assert.Null(tracked[5].CacheControl);
+    }
+
+    [Fact]
     public void TheTurnAfterAnExpandedTurn_SplicesBothTurns()
     {
         // Tracked after turn 2 (a plain turn following the tool turn): the expanded

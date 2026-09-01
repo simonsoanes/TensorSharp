@@ -313,7 +313,11 @@ namespace
         // stacked experts, shared-expert width) arrive already sharded; the MoE
         // router stays global and the ep_lut/ep_mask pair below confines each
         // rank's mul_mat_id to the whole experts it owns.
-        const bool tp_mode = tp_degree > 1 && tp_plan_out != nullptr;
+        // Plan mode is requested by PASSING tp_plan_out, not by the degree: a
+        // distributed run drives one local rank per node and still needs the
+        // plan, because its reduction happens across nodes rather than across
+        // local ranks. Callers that want the graph run inline pass nullptr.
+        const bool tp_mode = tp_degree >= 1 && tp_plan_out != nullptr;
         if (tp_mode)
         {
             *tp_plan_out = nullptr;
@@ -322,7 +326,9 @@ namespace
             g_q35v_tp[g_active_rank].reset();
         }
         const int tp_rank = tp_mode ? g_active_rank : 0;
-        const int stacked_experts = tp_mode && num_experts > 0 ? num_experts / tp_degree : num_experts;
+        // Cluster degree, not this process's - see ggml_ops_qwen35_decode.cpp.
+        const int tp_group_degree = tsg::tp_global_degree(tp_degree);
+        const int stacked_experts = tp_mode && num_experts > 0 ? num_experts / tp_group_degree : num_experts;
         if (tp_mode && num_experts > 0 &&
             (num_experts % tp_degree != 0 || stacked_experts < num_experts_used))
         {
@@ -428,9 +434,13 @@ namespace
         constexpr int kVerifyKvStride = 256;
         // Persist mode pads the attention window to a fixed stride so one cached graph
         // serves every start_pos in that stride (the mask masks the unused tail).
-        const int window = fv_persist
-            ? std::min(cache_size, ((totalSeqLen + kVerifyKvStride - 1) / kVerifyKvStride) * kVerifyKvStride)
-            : std::min(cache_size, totalSeqLen);
+        // Pad the attended window up to the flash-attention KV stride on BOTH
+        // paths. The mask already -infs ki >= totalSeqLen so the padded columns
+        // contribute nothing; what the padding buys is a graph shape constant
+        // across prefill chunks and the stride ggml-cuda's GQA-optimised flash
+        // kernel requires. (Previously only the persist path padded.)
+        const int window = std::min(cache_size,
+            ((totalSeqLen + kVerifyKvStride - 1) / kVerifyKvStride) * kVerifyKvStride);
         const void* sig = layers[0].attn_norm_w;
 
         // Device-resident GDN state: when the C# caller points each recurrent layer's
@@ -619,6 +629,7 @@ namespace
             std::vector<ggml_tensor*> delta_snap_slots;  // per slot, shaped like delta_state_in
             ggml_tensor* gate_inp_w; ggml_tensor* gate_exps; ggml_tensor* up_exps; ggml_tensor* down_exps;
             ggml_tensor* shexp_gate_w; ggml_tensor* shexp_up_w; ggml_tensor* shexp_down_w; ggml_tensor* shexp_gate_inp_w;
+            ggml_tensor* psc[TSQ35_SC_COUNT];
         };
         std::vector<LayerTensors> lt(num_layers);
 
@@ -667,6 +678,13 @@ namespace
             const TSGgmlQwen35LayerDesc& d = layers[l];
             LayerTensors& t = lt[l];
             t.attn_norm_w = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
+            if (d.proj_scales != nullptr)
+            {
+                const float* ps = static_cast<const float*>(d.proj_scales);
+                for (int s = 0; s < TSQ35_SC_COUNT; s++)
+                    if (ps[s] != 1.0f)
+                        t.psc[s] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+            }
             t.post_attn_norm_w = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
             if (d.is_recurrent == 0)
             {
@@ -800,7 +818,7 @@ namespace
                 ep_mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, num_experts);
                 ggml_set_input(ep_lut);
                 ggml_set_input(ep_mask);
-                const int ep_first = tp_rank * stacked_experts;
+                const int ep_first = tsg::tp_global_rank() * stacked_experts;
                 const int ep_last = ep_first + stacked_experts;
                 ep_lut_data.resize(static_cast<std::size_t>(num_experts));
                 ep_mask_data.resize(static_cast<std::size_t>(num_experts));
@@ -881,13 +899,13 @@ namespace
                 ggml_tensor* qg_part; ggml_tensor* k_raw; ggml_tensor* v_raw;
                 if (d.separate_qkv != 0)
                 {
-                    qg_part = ggml_mul_mat(ctx, t.qkv_w, normed);  // [qFullDim, N]
-                    k_raw = ggml_mul_mat(ctx, t.k_w, normed);      // [kDim, N]
-                    v_raw = ggml_mul_mat(ctx, t.v_w, normed);
+                    qg_part = q35_scaled(ctx, ggml_mul_mat(ctx, t.qkv_w, normed), t.psc[TSQ35_SC_QKV]);  // [qFullDim, N]
+                    k_raw = q35_scaled(ctx, ggml_mul_mat(ctx, t.k_w, normed), t.psc[TSQ35_SC_K]);      // [kDim, N]
+                    v_raw = q35_scaled(ctx, ggml_mul_mat(ctx, t.v_w, normed), t.psc[TSQ35_SC_V]);
                 }
                 else
                 {
-                    ggml_tensor* qkv_out = ggml_mul_mat(ctx, t.qkv_w, normed); // [qFullDim+2kDim, N]
+                    ggml_tensor* qkv_out = q35_scaled(ctx, ggml_mul_mat(ctx, t.qkv_w, normed), t.psc[TSQ35_SC_QKV]); // [qFullDim+2kDim, N]
                     qg_part = ggml_view_2d(ctx, qkv_out, qFullDim, N, qkv_out->nb[1], 0);
                     k_raw = ggml_view_2d(ctx, qkv_out, kDim, N, qkv_out->nb[1], static_cast<std::size_t>(qFullDim) * sizeof(float));
                     v_raw = ggml_view_2d(ctx, qkv_out, kDim, N, qkv_out->nb[1], static_cast<std::size_t>(qFullDim + kDim) * sizeof(float));
@@ -1020,7 +1038,7 @@ namespace
 
                 ggml_tensor* gate_flat = ggml_reshape_2d(ctx, gate_cont, qDim, N);
                 ggml_tensor* attn_gated = ggml_mul(ctx, attn_flat, ggml_sigmoid(ctx, gate_flat));
-                block_out = ggml_mul_mat(ctx, t.o_w, attn_gated); // [H, N]
+                block_out = q35_scaled(ctx, ggml_mul_mat(ctx, t.o_w, attn_gated), t.psc[TSQ35_SC_O]); // [H, N]
                 if (tp_mode) { tp_partial.push_back(block_out); tp_boundary.push_back(block_out); }
             }
             else
@@ -1047,10 +1065,10 @@ namespace
                 }
                 else
                 {
-                    qkv_mixed = ggml_mul_mat(ctx, t.gdn_qkv_w, normed);  // [conv_dim, N]
-                    z_all = ggml_mul_mat(ctx, t.gdn_gate_w, normed);     // [value_dim, N]
-                    beta_all = ggml_sigmoid(ctx, ggml_mul_mat(ctx, t.ssm_beta_w, normed)); // [num_v_heads, N]
-                    alpha_all = ggml_mul_mat(ctx, t.ssm_alpha_w, normed); // [num_v_heads, N]
+                    qkv_mixed = q35_scaled(ctx, ggml_mul_mat(ctx, t.gdn_qkv_w, normed), t.psc[TSQ35_SC_GDN_QKV]);  // [conv_dim, N]
+                    z_all = q35_scaled(ctx, ggml_mul_mat(ctx, t.gdn_gate_w, normed), t.psc[TSQ35_SC_GDN_GATE]);     // [value_dim, N]
+                    beta_all = ggml_sigmoid(ctx, q35_scaled(ctx, ggml_mul_mat(ctx, t.ssm_beta_w, normed), t.psc[TSQ35_SC_BETA])); // [num_v_heads, N]
+                    alpha_all = q35_scaled(ctx, ggml_mul_mat(ctx, t.ssm_alpha_w, normed), t.psc[TSQ35_SC_ALPHA]); // [num_v_heads, N]
                 }
                 ggml_tensor* g_all = ggml_softplus(ctx, ggml_add(ctx, alpha_all, t.ssm_dt_w));
                 g_all = ggml_mul(ctx, g_all, t.ssm_a_w); // [num_v_heads, N]
@@ -1200,7 +1218,7 @@ namespace
                 ggml_tensor* z_3d = ggml_reshape_3d(ctx, z_all, head_v_dim, num_v_heads, N);
                 ggml_tensor* gated = ggml_mul(ctx, out_n_3d, ggml_silu(ctx, z_3d));
                 ggml_tensor* gated_flat = ggml_reshape_2d(ctx, gated, value_dim, N);
-                block_out = ggml_mul_mat(ctx, t.ssm_out_w, gated_flat); // [H, N]
+                block_out = q35_scaled(ctx, ggml_mul_mat(ctx, t.ssm_out_w, gated_flat), t.psc[TSQ35_SC_SSM_OUT]); // [H, N]
                 if (tp_mode) { tp_partial.push_back(block_out); tp_boundary.push_back(block_out); }
 
                 ggml_set_output(t.conv_state_out);
@@ -1219,16 +1237,16 @@ namespace
                 ggml_tensor* act;
                 if (t.gu_w != nullptr)
                 {
-                    act = ggml_swiglu(ctx, ggml_mul_mat(ctx, t.gu_w, ffn_normed));
+                    act = ggml_swiglu(ctx, q35_scaled(ctx, ggml_mul_mat(ctx, t.gu_w, ffn_normed), t.psc[TSQ35_SC_GU]));
                 }
                 else
                 {
                     // Unfused mixed-quant gate/up: two matmuls, same arithmetic.
-                    ggml_tensor* g = ggml_mul_mat(ctx, t.ffn_gate_w, ffn_normed);
-                    ggml_tensor* u = ggml_mul_mat(ctx, t.ffn_up_w, ffn_normed);
+                    ggml_tensor* g = q35_scaled(ctx, ggml_mul_mat(ctx, t.ffn_gate_w, ffn_normed), t.psc[TSQ35_SC_FFN_GATE]);
+                    ggml_tensor* u = q35_scaled(ctx, ggml_mul_mat(ctx, t.ffn_up_w, ffn_normed), t.psc[TSQ35_SC_FFN_UP]);
                     act = ggml_mul(ctx, ggml_silu(ctx, g), u);
                 }
-                ffn_out = ggml_mul_mat(ctx, t.down_w, act); // [H, N]
+                ffn_out = q35_scaled(ctx, ggml_mul_mat(ctx, t.down_w, act), t.psc[TSQ35_SC_DOWN]); // [H, N]
                 if (tp_mode) { tp_partial.push_back(ffn_out); tp_boundary.push_back(ffn_out); }
             }
             else
@@ -1496,6 +1514,9 @@ namespace
             const TSGgmlQwen35LayerDesc& d = layers[l];
             LayerTensors& t = lt[l];
             bind_or_mark(t.attn_norm_w, d.attn_norm_w, static_cast<std::size_t>(H) * sizeof(float), true);
+            for (int s = 0; s < TSQ35_SC_COUNT; s++)
+                if (t.psc[s] != nullptr)
+                    bind_or_mark(t.psc[s], static_cast<float*>(d.proj_scales) + s, sizeof(float), true);
             bind_or_mark(t.post_attn_norm_w, d.post_attn_norm_w, static_cast<std::size_t>(H) * sizeof(float), true);
             if (d.is_moe == 0)
             {
@@ -1862,6 +1883,17 @@ TSG_EXPORT int TSGgml_Qwen35ModelVerify(
 {
     try
     {
+        // Arena coherence: prefill/verify writes go to the resident copies;
+        // flush + retire any arena slots holding these caches/state first.
+        if (layers != nullptr)
+        {
+            for (int l = 0; l < num_layers; l++)
+            {
+                tsg_q35arena::on_external_touch(layers[l].k_cache);
+                tsg_q35arena::on_external_touch(layers[l].conv_state_in);
+                tsg_q35arena::on_external_touch(layers[l].delta_state_in);
+            }
+        }
         int r = qwen35_model_verify_impl(
             layers, num_layers, hidden_data, hidden_size, start_pos, num_tokens,
             num_heads, num_kv_heads, head_dim, cache_size,

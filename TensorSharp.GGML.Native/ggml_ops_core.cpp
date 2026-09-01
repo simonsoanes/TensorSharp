@@ -429,7 +429,18 @@ namespace tsg
             for (size_t i = 0; i < n; ++i)
             {
                 ggml_backend_dev_t d = ggml_backend_dev_get(i);
-                if (d == nullptr || ggml_backend_dev_type(d) != GGML_BACKEND_DEVICE_TYPE_GPU)
+                if (d == nullptr)
+                    continue;
+                // GPU or IGPU: ggml-cuda classifies a device by
+                // cudaDeviceProp.integrated, and some virtualized hosts
+                // (observed: RunPod RTX PRO 6000, driver 595.91) report
+                // integrated=1 for a discrete datacenter card. Filtering on
+                // GPU alone then silently drops every CUDA device - and the
+                // caller falls back to whatever the registry lists next
+                // (ggml-vulkan), so a server asked for ggml_cuda ran on
+                // Vulkan. The registry-name check below is the real gate.
+                const enum ggml_backend_dev_type dt = ggml_backend_dev_type(d);
+                if (dt != GGML_BACKEND_DEVICE_TYPE_GPU && dt != GGML_BACKEND_DEVICE_TYPE_IGPU)
                     continue;
                 ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(d);
                 // Only ggml-cuda devices: a mixed CUDA+Vulkan build registers both.
@@ -575,7 +586,15 @@ namespace tsg
         if (backend_type == BACKEND_TYPE_CUDA)
         {
 #if defined(GGML_USE_CUDA)
-            ggml_backend_dev_t device = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU);
+            // ggml_backend_dev_by_type(GPU) returns the registry's FIRST GPU
+            // device of ANY backend. In a CUDA+Vulkan build that has picked
+            // the ggml-vulkan device, so a server asked for ggml_cuda ran
+            // every graph on Vulkan (observed on RTX PRO 6000: the CUDA
+            // banner printed, the managed label said GgmlCuda, and the
+            // executing backend name was Vulkan0). Use the same
+            // registry-name-filtered enumeration the multi-GPU path uses.
+            const auto cuda_devices = enumerate_gpu_devices(BACKEND_TYPE_CUDA);
+            ggml_backend_dev_t device = cuda_devices.empty() ? nullptr : cuda_devices.front();
             if (device == nullptr)
             {
                 set_last_error("No GGML GPU device is available for ggml-cuda.");
@@ -1259,6 +1278,28 @@ namespace tsg
         }
 
         return true;
+    }
+
+    // Probe-only lookup: an EXISTING DeviceCopy-mode cached buffer for `data`
+    // covering exactly `bytes`. Never allocates, uploads, or evicts — callers
+    // that only want to READ the current resident bytes (the qwen35 arena join)
+    // use this so probing absent entries cannot create device copies.
+    bool try_peek_cached_device_copy(const void* data, std::size_t bytes,
+                                     ggml_backend_buffer_t& out_buffer, void*& out_addr)
+    {
+        out_buffer = nullptr;
+        out_addr = nullptr;
+        if (data == nullptr || bytes == 0)
+            return false;
+        std::lock_guard<std::mutex> lock(g_host_buffer_cache_mutex);
+        auto it = g_host_buffer_cache.find(const_cast<void*>(data));
+        if (it == g_host_buffer_cache.end() ||
+            it->second.mode != CachedBufferMode::DeviceCopy ||
+            it->second.bytes != bytes)
+            return false;
+        out_buffer = it->second.buffer;
+        out_addr = ggml_backend_buffer_get_base(it->second.buffer);
+        return out_addr != nullptr;
     }
 
     bool try_get_cacheable_tensor_buffer(
@@ -2671,6 +2712,15 @@ namespace tsg
 
     ggml_status graph_compute_profiled(ggml_backend_t backend, ggml_cgraph* graph, const char* tag)
     {
+        // TSG debug: identify the backend object actually executing graphs.
+        { static int tsg_dbg_n = 0;
+          if (tsg_dbg_n < 4) { tsg_dbg_n++;
+              FILE* f = fopen("/tmp/tsg_backend_id.log", "a");
+              if (f) { fprintf(f, "backend=%p name=%s compute=%p tag=%s n=%d\n",
+                               (void*)backend, ggml_backend_name(backend),
+                               (void*)nullptr, /* iface opaque here */
+                               tag ? tag : "?", graph ? ggml_graph_n_nodes(graph) : -1);
+                       fclose(f); } } }
         if (!graph_node_profile_enabled())
             return tsg::compute_graph(backend, graph);
 
@@ -2935,6 +2985,10 @@ extern "C" void TSGgml_Qwen35ResetVerifyCache();
 extern "C" void TSGgml_Gemma4ResetBatchedDecodeCache();
 extern "C" void TSGgml_Gemma4ResetMoEBatchedDecodeCache();
 extern "C" void TSGgml_GptOssResetDecodeCache();
+extern "C" void TSGgml_GptOssResetBatchedDecodeCache();
+extern "C" void TSGgml_Qwen35ArenaResetBatchedDecodeCache();
+extern "C" void TSGgml_Qwen4ExpArenaResetBatchedDecodeCache();
+namespace tsg_q35arena { void on_drop(const void* host_ptr); }
 extern "C" void TSGgml_GptOssInvalidateKvCache(const void* kCacheData, const void* vCacheData);
 extern "C" void TSGgml_MuseGlimmerResetDecodeCache();
 extern "C" void TSGgml_DFlashResetCaches();
@@ -2943,6 +2997,11 @@ extern "C" void TSGgml_WanResetForwardCache();
 
 TSG_EXPORT void TSGgml_ClearHostBufferCache()
 {
+    // The slot-stable arena pools bind resident weight buffers this wipe is
+    // about to free; their captured graphs must not survive it.
+    TSGgml_GptOssResetBatchedDecodeCache();
+    TSGgml_Qwen35ArenaResetBatchedDecodeCache();
+    TSGgml_Qwen4ExpArenaResetBatchedDecodeCache();
     // Drop any persistent whole-model graphs first: they bind weights resident by
     // GGUF pointer (shared via these caches), so freeing the caches below would leave
     // their captured graphs pointing at freed device memory.
@@ -3065,6 +3124,9 @@ TSG_EXPORT void TSGgml_Shutdown()
     // (SIGABRT / exit code 134) after a perfectly good generation. Passing
     // (null, null) drops every window.
     TSGgml_GptOssResetDecodeCache();
+    TSGgml_GptOssResetBatchedDecodeCache();
+    TSGgml_Qwen35ArenaResetBatchedDecodeCache();
+    TSGgml_Qwen4ExpArenaResetBatchedDecodeCache();
     TSGgml_GptOssInvalidateKvCache(nullptr, nullptr);
     // Same contract for the other whole-model graph caches: each parks a ggml
     // context + backend buffer that must be released before the backend is.
@@ -3252,6 +3314,11 @@ TSG_EXPORT void TSGgml_InvalidateHostBuffer(void* ptr)
     // without every call site having to know about both.
     TSGgml_GptOssInvalidateKvCache(ptr, nullptr);
 
+    // Same contract for the qwen35 arena: this host pointer's bytes changed (or
+    // are being freed) behind the kernels — its arena slot, if any, is stale.
+    tsg_q35arena::on_drop(ptr);
+    tsg_q4earena::on_drop(ptr);
+
     // Same argument, one level up: the persistent whole-model graphs bake the
     // buffer we just freed into their nodes, so replaying one after this point is
     // a use-after-free. ggml-vulkan catches it as
@@ -3277,6 +3344,9 @@ TSG_EXPORT void TSGgml_InvalidateHostBuffer(void* ptr)
     TSGgml_Gemma4ResetMoEBatchedDecodeCache();
     TSGgml_Gemma4MoEResetDecodeCache();
     TSGgml_GptOssResetDecodeCache();
+    TSGgml_GptOssResetBatchedDecodeCache();
+    TSGgml_Qwen35ArenaResetBatchedDecodeCache();
+    TSGgml_Qwen4ExpArenaResetBatchedDecodeCache();
     TSGgml_Qwen35ResetDecodeCache();
     TSGgml_Qwen35ResetBatchedDecodeCache();
     TSGgml_Qwen35ResetVerifyCache();

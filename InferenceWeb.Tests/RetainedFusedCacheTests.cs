@@ -69,6 +69,193 @@ public class RetainedFusedCacheTests
         Assert.True(pctB >= 80.0, $"follow-up B reuse {pctB:F1}% too low");
     }
 
+    [Fact]
+    public async Task ExplicitFollowUpBoundary_DoesNotReuseCompleteRetainedFusedHolder()
+    {
+        var (a, b) = await RunTwoRoundsAsync(
+            retentionEnabled: true,
+            followUpCacheBoundary: BlockSize);
+
+        Assert.True(a.PrefixCacheReusedTokens <= BlockSize,
+            $"follow-up A reused {a.PrefixCacheReusedTokens} tokens past its explicit boundary");
+        Assert.True(b.PrefixCacheReusedTokens <= BlockSize,
+            $"follow-up B reused {b.PrefixCacheReusedTokens} tokens past its explicit boundary");
+    }
+
+    [Fact]
+    public async Task ExplicitSourceBoundary_DoesNotRetainCompleteFusedHolder()
+    {
+        var (a, b) = await RunTwoRoundsAsync(
+            retentionEnabled: true,
+            firstRoundCacheBoundary: BlockSize);
+
+        // Per-sequence fused execution does not publish pooled snapshots. With
+        // source-side retention correctly vetoed, no cross-request prefix remains.
+        Assert.Equal(0, a.PrefixCacheReusedTokens);
+        Assert.Equal(0, b.PrefixCacheReusedTokens);
+    }
+
+    [Fact]
+    public async Task DifferentMediaFingerprint_DoesNotReusePlaceholderIdenticalRetainedHolder()
+    {
+        var (a, b) = await RunTwoRoundsAsync(
+            retentionEnabled: true,
+            firstRoundMediaFingerprint: "image-set-a",
+            followUpMediaFingerprint: "image-set-b");
+
+        Assert.Equal(0, a.PrefixCacheReusedTokens);
+        Assert.Equal(0, b.PrefixCacheReusedTokens);
+    }
+
+    [Fact]
+    public async Task OmittedEos_RewindsRetainedHolderBeforeContinuing()
+    {
+        string previous = Environment.GetEnvironmentVariable("TS_RETAINED_FUSED_CACHE");
+        Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE", "1");
+        try
+        {
+            var model = new FusedStubModel(peakIsEos: true);
+            using var engine = new InferenceEngine(model, Config(), NullLogger.Instance);
+
+            var promptA = Enumerable.Repeat(1, PromptLen).ToList();
+            var promptB = Enumerable.Repeat(2, PromptLen).ToList();
+            var hA1 = engine.SubmitRequest(new SequenceState(
+                "eos-A1", promptA, 4, BlockSize, SamplingConfig.Greedy));
+            var hB1 = engine.SubmitRequest(new SequenceState(
+                "eos-B1", promptB, 4, BlockSize, SamplingConfig.Greedy));
+            var rA1 = DrainAsync(hA1);
+            var rB1 = DrainAsync(hB1);
+            await Task.WhenAll(rA1, rB1);
+            var firstA = await rA1;
+            var firstB = await rB1;
+
+            // The engine forwards EOS into K/V but deliberately does not publish it,
+            // so the next rendered history extends the visible prompt, not the full
+            // retained holder token run.
+            Assert.Empty(firstA.output);
+            Assert.Empty(firstB.output);
+
+            var followA = new List<int>(promptA);
+            followA.AddRange(Enumerable.Repeat(PeakToken + 1, SuffixLen));
+            var followB = new List<int>(promptB);
+            followB.AddRange(Enumerable.Repeat(PeakToken + 1, SuffixLen));
+            var hA2 = engine.SubmitRequest(new SequenceState(
+                "eos-A2", followA, 4, BlockSize, SamplingConfig.Greedy));
+            var hB2 = engine.SubmitRequest(new SequenceState(
+                "eos-B2", followB, 4, BlockSize, SamplingConfig.Greedy));
+            var rA2 = DrainAsync(hA2);
+            var rB2 = DrainAsync(hB2);
+            await Task.WhenAll(rA2, rB2);
+            var secondA = await rA2;
+            var secondB = await rB2;
+
+            Assert.Equal(PromptLen, secondA.completion.PrefixCacheReusedTokens);
+            Assert.Equal(PromptLen, secondB.completion.PrefixCacheReusedTokens);
+            Assert.Equal(2, model.TruncationTargets.Count(t => t == PromptLen));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE", previous);
+        }
+    }
+
+    [Fact]
+    public async Task SequentialRequestIdReuse_DiscardsOldRetainedMetadataAndHolder()
+    {
+        string previous = Environment.GetEnvironmentVariable("TS_RETAINED_FUSED_CACHE");
+        Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE", "1");
+        try
+        {
+            var model = new FusedStubModel();
+            using var engine = new InferenceEngine(model, Config(), NullLogger.Instance);
+
+            const string reusedId = "reused-request-id";
+            var oldPrompt = Enumerable.Repeat(1, PromptLen).ToList();
+            var oldPartnerPrompt = Enumerable.Repeat(2, PromptLen).ToList();
+            var oldHandle = engine.SubmitRequest(new SequenceState(
+                reusedId, oldPrompt, 4, BlockSize, SamplingConfig.Greedy));
+            var oldPartnerHandle = engine.SubmitRequest(new SequenceState(
+                "old-partner", oldPartnerPrompt, 4, BlockSize, SamplingConfig.Greedy));
+            var oldResult = DrainAsync(oldHandle);
+            var oldPartnerResult = DrainAsync(oldPartnerHandle);
+            await Task.WhenAll(oldResult, oldPartnerResult);
+            var oldConversation = await oldResult;
+
+            // Reuse the public id for a completely unrelated conversation. Its
+            // retained model holder is id-keyed, so the old metadata must be removed
+            // before this new holder is stored under the same key.
+            var newPrompt = Enumerable.Repeat(5, PromptLen).ToList();
+            var newPartnerPrompt = Enumerable.Repeat(6, PromptLen).ToList();
+            var newHandle = engine.SubmitRequest(new SequenceState(
+                reusedId, newPrompt, 4, BlockSize, SamplingConfig.Greedy));
+            var newPartnerHandle = engine.SubmitRequest(new SequenceState(
+                "new-partner", newPartnerPrompt, 4, BlockSize, SamplingConfig.Greedy));
+            var newResult = DrainAsync(newHandle);
+            var newPartnerResult = DrainAsync(newPartnerHandle);
+            await Task.WhenAll(newResult, newPartnerResult);
+
+            // A continuation of the OLD conversation must not match stale token
+            // metadata and accidentally rebind the NEW conversation's K/V holder.
+            var oldFollowUp = new List<int>(oldPrompt);
+            oldFollowUp.AddRange(oldConversation.output);
+            oldFollowUp.AddRange(Enumerable.Repeat(PeakToken + 1, SuffixLen));
+            var followCompletion = (await DrainAsync(engine.SubmitRequest(new SequenceState(
+                "old-follow-up", oldFollowUp, 4, BlockSize, SamplingConfig.Greedy)))).completion;
+
+            Assert.Equal(0, followCompletion.PrefixCacheReusedTokens);
+            Assert.Equal(1, model.DiscardedRetainedRequestIds.Count(id => id == reusedId));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE", previous);
+        }
+    }
+
+    [Fact]
+    public async Task Abort_ClearsExecutorFusedBookkeepingBeforeModelReleaseCompletes()
+    {
+        string previous = Environment.GetEnvironmentVariable("TS_RETAINED_FUSED_CACHE");
+        Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE", "1");
+        try
+        {
+            var model = new FusedStubModel(forwardDelayMs: 1);
+            using var engine = new InferenceEngine(model, Config(), NullLogger.Instance);
+
+            const string abortedId = "abort-fused";
+            var aborted = engine.SubmitRequest(new SequenceState(
+                abortedId,
+                Enumerable.Repeat(1, PromptLen).ToList(),
+                1000,
+                BlockSize,
+                SamplingConfig.Greedy));
+            var partner = engine.SubmitRequest(new SequenceState(
+                "abort-partner",
+                Enumerable.Repeat(2, PromptLen).ToList(),
+                1000,
+                BlockSize,
+                SamplingConfig.Greedy));
+
+            // Seeing a decoded token proves the request passed through
+            // NoteFusedSequence and has executor-owned bookkeeping to clean.
+            _ = await aborted.Tokens.ReadAsync();
+            Assert.True(ExecutorTracksFusedRequest(engine, abortedId));
+
+            engine.Abort(abortedId);
+            var completion = await aborted.Completion;
+
+            Assert.Equal(SequenceStatus.FinishedAborted, completion.Status);
+            Assert.True(model.WasReleased(abortedId));
+            Assert.False(ExecutorTracksFusedRequest(engine, abortedId));
+
+            engine.Abort(partner.RequestId);
+            _ = await partner.Completion;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE", previous);
+        }
+    }
+
     /// <summary>
     /// Single-stream ("请继续") analogue of the bug above, on a model whose KV cache
     /// is BLOCK-QUANTIZED (q4_0 / q8_0). Such a model declines the batched paged path
@@ -120,11 +307,69 @@ public class RetainedFusedCacheTests
         Assert.True(pct >= 80.0, $"single-stream follow-up reuse {pct:F1}% too low");
     }
 
+    [Fact]
+    public async Task SingleStream_DifferentMediaFingerprint_DoesNotReusePlaceholderIdenticalLiveCache()
+    {
+        var completion = await RunSingleStreamContinuationAsync(
+            firstRoundMediaFingerprint: "image-set-a",
+            followUpMediaFingerprint: "image-set-b");
+
+        Assert.Equal(0, completion.PrefixCacheReusedTokens);
+    }
+
+    [Fact]
+    public async Task SingleStream_ExplicitBoundary_DoesNotReusePastClientLimit()
+    {
+        var completion = await RunSingleStreamContinuationAsync(
+            followUpCacheBreakpoints: new[] { BlockSize });
+
+        Assert.Equal(BlockSize, completion.PrefixCacheReusedTokens);
+    }
+
+    [Fact]
+    public async Task SingleStream_ExplicitSourceBoundary_DoesNotExposeLaterLiveTokens()
+    {
+        var completion = await RunSingleStreamContinuationAsync(
+            firstRoundCacheBreakpoints: new[] { BlockSize });
+
+        Assert.Equal(BlockSize, completion.PrefixCacheReusedTokens);
+    }
+
     private const int PromptLen = 24;   // > Cap so only the live holder can reuse it
     private const int Round1NewTokens = 24;
     private const int SuffixLen = 4;
 
-    private async Task<(InferenceCompletion a, InferenceCompletion b)> RunTwoRoundsAsync(bool retentionEnabled)
+    private async Task<InferenceCompletion> RunSingleStreamContinuationAsync(
+        string firstRoundMediaFingerprint = null,
+        string followUpMediaFingerprint = null,
+        IReadOnlyList<int> firstRoundCacheBreakpoints = null,
+        IReadOnlyList<int> followUpCacheBreakpoints = null)
+    {
+        var model = new FusedStubModel();
+        using var engine = new InferenceEngine(model, Config(), NullLogger.Instance);
+
+        var prompt1 = Enumerable.Repeat(1, PromptLen).ToList();
+        var seq1 = new SequenceState("single-1", prompt1, Round1NewTokens, BlockSize,
+            SamplingConfig.Greedy, mediaFingerprint: firstRoundMediaFingerprint,
+            cacheBreakpoints: firstRoundCacheBreakpoints);
+        var (_, out1) = await DrainAsync(engine.SubmitRequest(seq1));
+
+        var prompt2 = new List<int>(prompt1);
+        prompt2.AddRange(out1);
+        prompt2.AddRange(Enumerable.Repeat(PeakToken, SuffixLen));
+        var seq2 = new SequenceState("single-2", prompt2, 8, BlockSize,
+            SamplingConfig.Greedy, mediaFingerprint: followUpMediaFingerprint,
+            cacheBreakpoints: followUpCacheBreakpoints);
+        var (completion, _) = await DrainAsync(engine.SubmitRequest(seq2));
+        return completion;
+    }
+
+    private async Task<(InferenceCompletion a, InferenceCompletion b)> RunTwoRoundsAsync(
+        bool retentionEnabled,
+        int? followUpCacheBoundary = null,
+        int? firstRoundCacheBoundary = null,
+        string firstRoundMediaFingerprint = null,
+        string followUpMediaFingerprint = null)
     {
         string prev = Environment.GetEnvironmentVariable("TS_RETAINED_FUSED_CACHE");
         Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE", retentionEnabled ? "1" : "0");
@@ -136,8 +381,15 @@ public class RetainedFusedCacheTests
             // ---- Round 1: two distinct conversations, submitted in parallel. ----
             var promptA = Enumerable.Repeat(1, PromptLen).ToList();
             var promptB = Enumerable.Repeat(2, PromptLen).ToList();
-            var seqA1 = new SequenceState("A1", promptA, Round1NewTokens, BlockSize, SamplingConfig.Greedy);
-            var seqB1 = new SequenceState("B1", promptB, Round1NewTokens, BlockSize, SamplingConfig.Greedy);
+            var firstRoundBoundaries = firstRoundCacheBoundary.HasValue
+                ? new List<int> { firstRoundCacheBoundary.Value }
+                : null;
+            var seqA1 = new SequenceState("A1", promptA, Round1NewTokens, BlockSize,
+                SamplingConfig.Greedy, mediaFingerprint: firstRoundMediaFingerprint,
+                cacheBreakpoints: firstRoundBoundaries);
+            var seqB1 = new SequenceState("B1", promptB, Round1NewTokens, BlockSize,
+                SamplingConfig.Greedy, mediaFingerprint: firstRoundMediaFingerprint,
+                cacheBreakpoints: firstRoundBoundaries);
 
             // Submit BOTH before draining so the engine admits them together (N=2)
             // and serves them through the per-sequence fused path.
@@ -146,8 +398,8 @@ public class RetainedFusedCacheTests
             var rA1 = DrainAsync(hA1);
             var rB1 = DrainAsync(hB1);
             await Task.WhenAll(rA1, rB1);
-            var (_, outA1) = rA1.Result;
-            var (_, outB1) = rB1.Result;
+            var (_, outA1) = await rA1;
+            var (_, outB1) = await rB1;
 
             // ---- Round 2: "请继续" — each follow-up extends its own conversation. ----
             var followA = new List<int>(promptA);
@@ -157,14 +409,21 @@ public class RetainedFusedCacheTests
             followB.AddRange(outB1);
             followB.AddRange(Enumerable.Repeat(PeakToken, SuffixLen));
 
-            var seqA2 = new SequenceState("A2", followA, 8, BlockSize, SamplingConfig.Greedy);
-            var seqB2 = new SequenceState("B2", followB, 8, BlockSize, SamplingConfig.Greedy);
+            var followUpBoundaries = followUpCacheBoundary.HasValue
+                ? new List<int> { followUpCacheBoundary.Value }
+                : null;
+            var seqA2 = new SequenceState("A2", followA, 8, BlockSize,
+                SamplingConfig.Greedy, mediaFingerprint: followUpMediaFingerprint,
+                cacheBreakpoints: followUpBoundaries);
+            var seqB2 = new SequenceState("B2", followB, 8, BlockSize,
+                SamplingConfig.Greedy, mediaFingerprint: followUpMediaFingerprint,
+                cacheBreakpoints: followUpBoundaries);
             var hA2 = engine.SubmitRequest(seqA2);
             var hB2 = engine.SubmitRequest(seqB2);
             var rA2 = DrainAsync(hA2);
             var rB2 = DrainAsync(hB2);
             await Task.WhenAll(rA2, rB2);
-            return (rA2.Result.completion, rB2.Result.completion);
+            return ((await rA2).completion, (await rB2).completion);
         }
         finally
         {
@@ -179,6 +438,22 @@ public class RetainedFusedCacheTests
             output.Add(t);
         var completion = await handle.Completion;
         return (completion, output);
+    }
+
+    private static bool ExecutorTracksFusedRequest(InferenceEngine engine, string requestId)
+    {
+        const System.Reflection.BindingFlags flags =
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var executor = (BatchExecutor)typeof(InferenceEngine)
+            .GetField("_executor", flags)!
+            .GetValue(engine)!;
+        var sequences = (System.Collections.IDictionary)typeof(BatchExecutor)
+            .GetField("_fusedSeqById", flags)!
+            .GetValue(executor)!;
+        var truncations = (System.Collections.IDictionary)typeof(BatchExecutor)
+            .GetField("_pendingRetainedFusedTruncations", flags)!
+            .GetValue(executor)!;
+        return sequences.Contains(requestId) || truncations.Contains(requestId);
     }
 
     private static SchedulerConfig Config() => new()
@@ -206,18 +481,42 @@ public class RetainedFusedCacheTests
 
         private readonly Dictionary<string, Holder> _holders = new(StringComparer.Ordinal);
         private readonly Dictionary<string, Holder> _retained = new(StringComparer.Ordinal);
+        private readonly List<string> _releasedRequestIds = new();
+        private readonly List<string> _discardedRetainedRequestIds = new();
+        private readonly object _lifecycleLock = new();
+        private readonly int _forwardDelayMs;
         private string _activeKey;            // null => primary active
         private Holder _primary = new();
 
         private Holder Active => _activeKey == null ? _primary : _holders[_activeKey];
 
-        public FusedStubModel() => Tokenizer = new StubTokenizer();
+        public FusedStubModel(bool peakIsEos = false, int forwardDelayMs = 0)
+        {
+            Tokenizer = new StubTokenizer(peakIsEos);
+            _forwardDelayMs = forwardDelayMs;
+        }
+
+        public IReadOnlyList<string> DiscardedRetainedRequestIds
+        {
+            get
+            {
+                lock (_lifecycleLock)
+                    return _discardedRetainedRequestIds.ToArray();
+            }
+        }
+
+        public bool WasReleased(string requestId)
+        {
+            lock (_lifecycleLock)
+                return _releasedRequestIds.Contains(requestId);
+        }
 
         public ModelConfig Config { get; } = new ModelConfig { VocabSize = VocabSize };
         public ITokenizer Tokenizer { get; }
         public IMultimodalInjector MultimodalInjector => null;
         public IBackendExecutionPlan ExecutionPlan => null;
         public bool SupportsKVCacheTruncation => true;
+        public List<int> TruncationTargets { get; } = new();
 
         // The fused path never reads paged storage, but the engine still sizes the
         // block pool from this, so it must be > 0.
@@ -225,6 +524,8 @@ public class RetainedFusedCacheTests
 
         public float[] Forward(int[] tokens)
         {
+            if (_forwardDelayMs > 0)
+                System.Threading.Thread.Sleep(_forwardDelayMs);
             Active.SeqLen += tokens.Length;
             var logits = new float[VocabSize];
             logits[PeakToken] = 10.0f;
@@ -232,7 +533,11 @@ public class RetainedFusedCacheTests
         }
 
         public void ResetKVCache() => Active.SeqLen = 0;
-        public void TruncateKVCache(int tokenCount) => Active.SeqLen = Math.Min(Active.SeqLen, tokenCount);
+        public void TruncateKVCache(int tokenCount)
+        {
+            TruncationTargets.Add(tokenCount);
+            Active.SeqLen = Math.Min(Active.SeqLen, tokenCount);
+        }
         public void Dispose() { }
 
         // Sliding-window model: snapshot fine for own decode, capped cross-seq reuse.
@@ -240,6 +545,12 @@ public class RetainedFusedCacheTests
         public bool SupportsCrossSequenceKvReuse => true;
         public int MaxReusablePrefixTokens => Cap;
         public string KVStateFingerprint => "fused-stub";
+        public bool TryExtractKVBlock(int startToken, int tokenCount, Span<byte> destination)
+        {
+            destination.Clear();
+            return true;
+        }
+        public bool TryInjectKVBlock(int destToken, int tokenCount, ReadOnlySpan<byte> source) => true;
 
         // ---- IBatchedPagedModel: per-sequence fused forward + retention ----
         public bool SupportsPerSequenceFusedForward => true;
@@ -275,6 +586,8 @@ public class RetainedFusedCacheTests
 
         public void OnSequenceReleased(string requestId)
         {
+            lock (_lifecycleLock)
+                _releasedRequestIds.Add(requestId);
             if (string.Equals(_activeKey, requestId, StringComparison.Ordinal)) _activeKey = null;
             _holders.Remove(requestId);
         }
@@ -296,18 +609,26 @@ public class RetainedFusedCacheTests
             return true;
         }
 
-        public void DiscardRetainedCache(string requestId) => _retained.Remove(requestId);
+        public void DiscardRetainedCache(string requestId)
+        {
+            if (!_retained.Remove(requestId)) return;
+            lock (_lifecycleLock)
+                _discardedRetainedRequestIds.Add(requestId);
+        }
 
         private sealed class StubTokenizer : ITokenizer
         {
-            public StubTokenizer()
+            private readonly bool _peakIsEos;
+
+            public StubTokenizer(bool peakIsEos)
             {
+                _peakIsEos = peakIsEos;
                 Vocab = new string[RetainedFusedCacheTests.VocabSize];
                 for (int i = 0; i < RetainedFusedCacheTests.VocabSize; i++) Vocab[i] = i.ToString();
             }
             public string[] Vocab { get; }
             public int BosTokenId => -1;
-            public int[] EosTokenIds => Array.Empty<int>();
+            public int[] EosTokenIds => _peakIsEos ? new[] { PeakToken } : Array.Empty<int>();
             public int VocabSize => Vocab.Length;
             public List<int> Encode(string text, bool addSpecial = true) => new();
             public string Decode(List<int> ids) => string.Join(",", ids);
@@ -315,7 +636,7 @@ public class RetainedFusedCacheTests
             {
                 foreach (var b in System.Text.Encoding.UTF8.GetBytes(tokenId.ToString())) buffer.Add(b);
             }
-            public bool IsEos(int tokenId) => false;
+            public bool IsEos(int tokenId) => _peakIsEos && tokenId == PeakToken;
             public int LookupToken(string tokenStr) => -1;
         }
     }

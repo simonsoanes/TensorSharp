@@ -67,15 +67,23 @@ namespace TensorSharp.Runtime.Scheduling
         // multi-turn follow-up would re-prefill the whole conversation (KV reuse 0).
         // We retain a small LRU of finished fused holders (the model keeps the K/V
         // alive) keyed by their full token list, and re-adopt one for a later request
-        // whose prompt exactly extends it ÔÇö the cross-request analogue of the
-        // single-stream live-cache continuation. See ComputeFusedContinuationLcp.
+        // whose prompt extends it (allowing a short generated control-token tail that
+        // history rendering omits) ÔÇö the cross-request analogue of the single-stream
+        // live-cache continuation. See ComputeFusedContinuationLcp.
         private sealed class RetainedFusedCache
         {
             public string RequestId;   // model holder key (retained, not active)
             public int[] Tokens;       // full prompt+output tokens the holder's K/V covers
+            public string MediaFingerprint; // prevents placeholder-identical media cross-reuse
         }
         // Most-recently-retained at the tail; evict from the head.
         private readonly LinkedList<RetainedFusedCache> _retainedFused = new();
+        // A retained holder can include one or two generated control tokens (most
+        // commonly EOS) that the chat history intentionally does not render. After
+        // re-keying such a holder, truncate its active model cache to this target
+        // before forwarding the new prompt suffix.
+        private readonly Dictionary<string, int> _pendingRetainedFusedTruncations =
+            new(StringComparer.Ordinal);
         // In-flight fused sequences by RequestId, so the release hook can snapshot
         // a finishing sequence's tokens (the release notification only carries an id).
         private readonly Dictionary<string, SequenceState> _fusedSeqById =
@@ -93,7 +101,7 @@ namespace TensorSharp.Runtime.Scheduling
         // fresh full prefill from position 0.
         private SpecSeqContext _specCtx;
 
-        // One-time warning when --mtp-spec is requested but the model can't run its
+        // One-time warning when --spec is requested but the model can't run its
         // accelerated MTP path on the current backend (speculation would be net-
         // negative), so the engine serves standard decode instead.
         private bool _speculationUnprofitableWarned;
@@ -214,7 +222,7 @@ namespace TensorSharp.Runtime.Scheduling
                 // The scheduler freed the previous owner's blocks during
                 // FinishSequence / PreemptSequence, but our _currentOwner
                 // reference outlives that. Without this reset, the next
-                // step's TryMigrateOwnerToPagedIfNeeded would call into
+                // step's TryPrepareSequencesForPagedIfNeeded would call into
                 // TryMigrateLinearKVToPaged with NumBlocks==0 (it returns
                 // false and the executor logs a misleading "linearÔåÆpaged
                 // migration failed" warning), and EnsureOwnership on the
@@ -338,12 +346,14 @@ namespace TensorSharp.Runtime.Scheduling
 
                 case ExecutionPathKind.SpeculativePerSequence:
                 case ExecutionPathKind.SingleSequenceFused:
-                case ExecutionPathKind.PerSequence:
-                    // All three run the per-sequence executor; the plan kinds
+                    // Both run the per-sequence executor; the plan kinds
                     // differ only in WHY the route was chosen (linear-trunk
                     // speculation, N=1 fused fast path, universal fallback),
                     // which the plan log already records.
                     return ExecuteStepPerSequence(output);
+
+                case ExecutionPathKind.PerSequence:
+                    return ExecuteStepPerSequenceStateSafe(output);
 
                 case ExecutionPathKind.PerSequenceFused:
                     return ExecuteStepPerSequenceFused((IBatchedPagedModel)_model, output, options);
@@ -371,29 +381,49 @@ namespace TensorSharp.Runtime.Scheduling
             IBatchedPagedModel batched, SchedulerOutput output)
         {
             var (multimodalWork, textWork) = SplitMultimodalWork(output);
+            var textOutput = MakeSubOutput(textWork);
 
-            // The multimodal per-seq pass below may extract the current
-            // owner's linear K/V into pool blocks via EnsureOwnership before
-            // the text batched pass reads paged storage; if the owner's state
-            // was only ever in linear cache (came from the N=1 fast path), the
-            // batched pass would then attend to zeros for that owner. Migrate
-            // it up-front to keep the batched read consistent with where its
-            // K/V history lives.
-            TryMigrateOwnerToPagedIfNeeded(batched);
+            // Run the declinable text batch before committing any multimodal
+            // per-sequence work. If the current linear owner participates in
+            // that text batch, copy it to paged storage but keep the linear
+            // owner authoritative until ForwardBatch accepts. A decline can
+            // then fall back on the complete linear tail; a failed migration
+            // likewise falls back before either subset advances.
+            if (!TryPrepareSequencesForPagedIfNeeded(
+                    batched,
+                    textOutput,
+                    out var linearFallbackSequences))
+            {
+                var safeTextResults = ExecuteLinearAndPagedSplit(
+                    batched, textOutput, linearFallbackSequences);
+                if (safeTextResults == null)
+                    return ExecuteStepPerSequence(output);
+
+                safeTextResults.AddRange(ExecuteStepPerSequence(MakeSubOutput(multimodalWork)));
+                return safeTextResults;
+            }
+
             var results = new List<SequenceStepResult>(output.ScheduledWork.Count);
-            results.AddRange(ExecuteStepPerSequence(MakeSubOutput(multimodalWork)));
             try
             {
-                results.AddRange(ExecuteStepBatched(batched, MakeSubOutput(textWork)));
+                results.AddRange(ExecuteStepBatched(batched, textOutput));
                 foreach (var work in textWork)
                     work.Sequence.KvStateInPagedStorage = true;
+                CommitPreparedSequencesToPaged(linearFallbackSequences);
             }
             catch (NotSupportedException ex)
             {
                 _logger.LogDebug(ex,
-                    "BatchExecutor: model declined the text subset of a mixed batch; serving it per-sequence.");
-                results.AddRange(ExecuteStepPerSequence(MakeSubOutput(textWork)));
+                    "BatchExecutor: model declined the text subset of a mixed batch; selecting a state-safe fallback.");
+                var safeTextResults = ExecuteLinearAndPagedSplit(
+                    batched, textOutput, linearFallbackSequences);
+                if (safeTextResults == null)
+                    return ExecuteStepPerSequence(output);
+
+                results.AddRange(safeTextResults);
             }
+
+            results.AddRange(ExecuteStepPerSequence(MakeSubOutput(multimodalWork)));
             return results;
         }
 
@@ -411,7 +441,10 @@ namespace TensorSharp.Runtime.Scheduling
             // this the batched paged-attention kernel would read zeros for the
             // owner's prior positions and the sequence would emit a
             // token-repeat loop.
-            if (!TryMigrateOwnerToPagedIfNeeded(batched))
+            if (!TryPrepareSequencesForPagedIfNeeded(
+                    batched,
+                    output,
+                    out var linearFallbackSequences))
             {
                 // Migration was needed but couldn't proceed: either the model
                 // supports migration and it failed for this owner (worth
@@ -425,7 +458,8 @@ namespace TensorSharp.Runtime.Scheduling
                         "BatchExecutor: linear-to-paged migration failed for {RequestId}; falling back to per-seq path.",
                         _currentOwner?.RequestId);
                 }
-                return null;
+                return ExecuteLinearAndPagedSplit(
+                    batched, output, linearFallbackSequences);
             }
 
             try
@@ -437,6 +471,7 @@ namespace TensorSharp.Runtime.Scheduling
                 // fast path.
                 foreach (var work in output.ScheduledWork)
                     work.Sequence.KvStateInPagedStorage = true;
+                CommitPreparedSequencesToPaged(linearFallbackSequences);
                 return results;
             }
             catch (NotSupportedException ex)
@@ -453,7 +488,8 @@ namespace TensorSharp.Runtime.Scheduling
                         ex.Message);
                 }
                 _logger.LogDebug(ex, "BatchExecutor: ForwardBatch declined the batch; falling back.");
-                return null;
+                return ExecuteLinearAndPagedSplit(
+                    batched, output, linearFallbackSequences);
             }
         }
 
@@ -472,45 +508,182 @@ namespace TensorSharp.Runtime.Scheduling
             _logger.LogInformation("BatchExecutor execution plan: {Plan}", desc);
         }
 
-        /// <summary>Migrate the current owner's K/V state from the legacy
-        /// linear cache (populated by Forward, including the N=1 fast path
-        /// and the per-seq fallback used when ForwardBatch throws
-        /// NotSupported) into the model's paged storage so the upcoming
-        /// ForwardBatch sees the owner's full history.
+        /// <summary>Prepare every scheduled sequence whose authoritative K/V is
+        /// linear-only for an upcoming paged batch. This includes the current
+        /// live owner even when its sticky paged flag is still true: a prior
+        /// per-sequence step may have appended a partial tail only to linear K/V.
         ///
-        /// Returns true when migration succeeded or no migration was needed
-        /// (no owner, or owner already in paged storage). Returns false
-        /// when migration was needed but cannot proceed ÔÇö either because
-        /// the model doesn't expose migration at all (common case for
-        /// models whose batched path is gated off, so every step runs
-        /// per-seq and accumulates linear-only state) or because the model
-        /// supports migration but TryMigrateLinearKVToPaged bailed for this
-        /// owner.
-        /// The caller distinguishes the two via SupportsLinearKVMigration
-        /// to decide whether the situation is expected (silent fallback)
-        /// or worth logging (real migration failure).</summary>
-        private bool TryMigrateOwnerToPagedIfNeeded(IBatchedPagedModel batched)
+        /// A non-current linear sequence is first restored from its pooled
+        /// snapshot and then migrated. Migrations are copy-only; no sticky flag
+        /// or ownership state is committed until ForwardBatch accepts, so a
+        /// decline can still restore/swap the complete linear histories.
+        /// <paramref name="linearFallbackSequences"/> records exactly those
+        /// sequences whose state is safe to serve through Forward after a
+        /// decline. Already-paged sequences are deliberately absent because
+        /// model-owned paged arrays are not the same storage as BlockPool.</summary>
+        private bool TryPrepareSequencesForPagedIfNeeded(
+            IBatchedPagedModel batched,
+            SchedulerOutput output,
+            out HashSet<SequenceState> linearFallbackSequences)
         {
-            if (_currentOwner == null || _ownerTokensInModel <= 0)
-            {
+            linearFallbackSequences = new HashSet<SequenceState>();
+            if (output == null || output.ScheduledWork.Count == 0)
                 return true;
-            }
-            if (_currentOwner.KvStateInPagedStorage)
+
+            SequenceState initialOwner = _currentOwner;
+            var candidates = new List<SequenceState>();
+            foreach (var work in output.ScheduledWork)
             {
+                var seq = work.Sequence;
+                if (seq.NumComputedTokens <= 0)
+                    continue;
+                if (seq.KvStateInPagedStorage && !ReferenceEquals(seq, initialOwner))
+                    continue;
+                if (!candidates.Contains(seq))
+                    candidates.Add(seq);
+            }
+
+            // Restore/migrate the original owner last. That leaves its live
+            // linear tail resident if the declinable batch refuses the step.
+            candidates.Sort((left, right) =>
+            {
+                bool leftIsOwner = ReferenceEquals(left, initialOwner);
+                bool rightIsOwner = ReferenceEquals(right, initialOwner);
+                return leftIsOwner == rightIsOwner ? 0 : leftIsOwner ? 1 : -1;
+            });
+
+            foreach (var seq in candidates)
+            {
+                linearFallbackSequences.Add(seq);
+                if (!batched.SupportsLinearKVMigration)
+                    return false;
+
+                if (!ReferenceEquals(_currentOwner, seq))
+                {
+                    // Without a portable snapshot there is no way to make a
+                    // non-current linear history resident for migration.
+                    if (!_model.SupportsKVStateSnapshot
+                        || !_model.SupportsCrossSequenceKvReuse)
+                    {
+                        return false;
+                    }
+                    EnsureOwnership(seq);
+                }
+
+                if (!ReferenceEquals(_currentOwner, seq)
+                    || _ownerTokensInModel < seq.NumComputedTokens
+                    || !batched.TryMigrateLinearKVToPaged(seq, _blockSize))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>After a multi-sequence ForwardBatch decline, serve only
+        /// histories known to be linear-authoritative through Forward. A sticky
+        /// paged resident stays on model-owned paged storage via a singleton
+        /// ForwardBatch; pooled snapshots are not assumed to mirror those
+        /// model-owned arrays. Returns null when every sequence can use the
+        /// planner's ordinary per-sequence fallback.</summary>
+        private List<SequenceStepResult> ExecuteLinearAndPagedSplit(
+            IBatchedPagedModel batched,
+            SchedulerOutput output,
+            HashSet<SequenceState> linearFallbackSequences)
+        {
+            var linearWork = new List<ScheduledSequenceWork>();
+            var pagedWork = new List<ScheduledSequenceWork>();
+            foreach (var work in output.ScheduledWork)
+            {
+                var seq = work.Sequence;
+                bool canUseLinear = seq.NumComputedTokens == 0
+                    || !seq.KvStateInPagedStorage
+                    || linearFallbackSequences.Contains(seq);
+                (canUseLinear ? linearWork : pagedWork).Add(work);
+            }
+
+            if (pagedWork.Count == 0)
+                return null;
+
+            var resultBySequence = new Dictionary<SequenceState, SequenceStepResult>();
+            if (linearWork.Count > 0)
+            {
+                foreach (var result in ExecuteStepPerSequence(MakeSubOutput(linearWork)))
+                    resultBySequence[result.Sequence] = result;
+            }
+
+            foreach (var work in pagedWork)
+            {
+                try
+                {
+                    var singleton = MakeSubOutput(new List<ScheduledSequenceWork> { work });
+                    var singletonResults = ExecuteStepBatched(batched, singleton);
+                    work.Sequence.KvStateInPagedStorage = true;
+                    resultBySequence[work.Sequence] = singletonResults[0];
+                }
+                catch (NotSupportedException ex)
+                {
+                    var error = new NotSupportedException(
+                        $"The model declined singleton paged execution for {work.Sequence.RequestId}; " +
+                        "linear fallback is unsafe because its K/V history exists only in model-owned paged storage.",
+                        ex);
+                    _logger.LogError(error,
+                        "BatchExecutor cannot safely fall back paged sequence {RequestId} to linear execution.",
+                        work.Sequence.RequestId);
+                    resultBySequence[work.Sequence] = new SequenceStepResult
+                    {
+                        Sequence = work.Sequence,
+                        Error = error,
+                    };
+                }
+            }
+
+            var ordered = new List<SequenceStepResult>(output.ScheduledWork.Count);
+            foreach (var work in output.ScheduledWork)
+            {
+                // The universal per-sequence executor intentionally advances
+                // at most one linear sequence per scheduler step. Any other
+                // linear work remains uncommitted and is re-emitted next step.
+                if (resultBySequence.TryGetValue(work.Sequence, out var result))
+                    ordered.Add(result);
+            }
+            return ordered;
+        }
+
+        /// <summary>Universal per-sequence fallback that does not move a
+        /// sequence whose authoritative state is already paged into the empty
+        /// linear cache. This matters when the operator toggles the batched path
+        /// off between steps (options are intentionally re-read per step), or a
+        /// model capability latches off after paged work was accepted. Existing
+        /// paged residents drain through singleton ForwardBatch calls; new and
+        /// linear-resident work continues through the ordinary fallback.</summary>
+        private List<SequenceStepResult> ExecuteStepPerSequenceStateSafe(
+            SchedulerOutput output)
+        {
+            if (_model is IBatchedPagedModel batched)
+            {
+                var linearFallbackSequences = new HashSet<SequenceState>();
+                if (_currentOwner != null && _ownerTokensInModel > 0)
+                    linearFallbackSequences.Add(_currentOwner);
+
+                var splitResults = ExecuteLinearAndPagedSplit(
+                    batched, output, linearFallbackSequences);
+                if (splitResults != null)
+                    return splitResults;
+            }
+
+            return ExecuteStepPerSequence(output);
+        }
+
+        /// <summary>Commit a successful linear-to-paged handoff after the model
+        /// accepts the batched step. Before this point the live linear owner
+        /// remains authoritative for a runtime decline.</summary>
+        private void CommitPreparedSequencesToPaged(
+            HashSet<SequenceState> linearFallbackSequences)
+        {
+            if (_currentOwner != null && linearFallbackSequences.Contains(_currentOwner))
                 ClearLinearOwner();
-                return true;
-            }
-            if (!batched.SupportsLinearKVMigration)
-            {
-                return false;
-            }
-            if (batched.TryMigrateLinearKVToPaged(_currentOwner, _blockSize))
-            {
-                _currentOwner.KvStateInPagedStorage = true;
-                ClearLinearOwner();
-                return true;
-            }
-            return false;
         }
 
         private void ClearLinearOwner()
@@ -526,7 +699,7 @@ namespace TensorSharp.Runtime.Scheduling
             if (_speculationUnprofitableWarned) return;
             _speculationUnprofitableWarned = true;
             _logger.LogWarning(
-                "MTP speculative decoding was requested (--mtp-spec) but for the loaded model " +
+                "MTP speculative decoding was requested (--spec) but for the loaded model " +
                 "on this backend the standard decode path is already faster than speculative " +
                 "decode (its multi-token verify/draft runs op-by-op and cannot amortize a cheap, " +
                 "fused/captured decode). Serving the fast standard decode instead ÔÇö no action needed.");
@@ -572,7 +745,10 @@ namespace TensorSharp.Runtime.Scheduling
             int cursor = 0;
             ctx.QueryStartLoc.Add(0);
 
-            // Pre-fill tokens-to-forward array (decode samples a token first).
+            // Pre-fill tokens-to-forward array. Decode only peeks the sampled
+            // token here: ForwardBatch is allowed to decline this particular
+            // step, so committing the token before that call would make the
+            // per-sequence fallback append it a second time.
             var pendingTokens = new List<int[]>(numSeqs);
             for (int s = 0; s < numSeqs; s++)
             {
@@ -586,8 +762,7 @@ namespace TensorSharp.Runtime.Scheduling
                 }
                 else
                 {
-                    int sampledFirst = SampleFromLogits(seq);
-                    seq.AppendOutputToken(sampledFirst);
+                    int sampledFirst = PeekPendingOrSample(seq);
                     inputTokens = new[] { sampledFirst };
                 }
                 pendingTokens.Add(inputTokens);
@@ -623,7 +798,25 @@ namespace TensorSharp.Runtime.Scheduling
 
             // Dispatch the entire batch.
             var swForward = Stopwatch.StartNew();
-            IReadOnlyList<float[]> perSeqLogits = batched.ForwardBatch(ctx);
+            IReadOnlyList<float[]> perSeqLogits;
+            try
+            {
+                perSeqLogits = batched.ForwardBatch(ctx);
+            }
+            catch (NotSupportedException)
+            {
+                // Preserve each already-sampled decode token for the fallback.
+                // This is required even when it came from host sampling: sampling
+                // can advance RNG state, and re-sampling would change the request.
+                for (int s = 0; s < numSeqs; s++)
+                {
+                    if (output.ScheduledWork[s].IsPrefill) continue;
+                    var seq = output.ScheduledWork[s].Sequence;
+                    seq.PendingDeviceToken = pendingTokens[s][0];
+                    seq.PendingDevicePosition = seq.NumComputedTokens;
+                }
+                throw;
+            }
             swForward.Stop();
             if (perSeqLogits == null || perSeqLogits.Count != numSeqs)
                 throw new InvalidOperationException(
@@ -644,6 +837,11 @@ namespace TensorSharp.Runtime.Scheduling
                 var seq = work.Sequence;
                 var inputTokens = pendingTokens[s];
 
+                if (!work.IsPrefill)
+                {
+                    seq.PendingDeviceToken = null;
+                    seq.AppendOutputToken(inputTokens[0]);
+                }
                 seq.LastLogits = perSeqLogits[s];
                 seq.AdvanceComputedTokens(inputTokens.Length);
                 // In the batched path the model owns its own K/V layout
@@ -739,66 +937,140 @@ namespace TensorSharp.Runtime.Scheduling
             // speculative context tracks.
             _specCtx = null;
 
-            // ---- TRUE token-batched decode fast path (opt-in) ----
+            // ---- TRUE token-batched decode fast path ----
             // When every scheduled item is a decode step (n>=2) and the model
             // supports it, decode all N tokens in ONE fused graph (weights loaded
             // once) instead of N serial per-seq forwards. Falls through to the
             // round-robin loop below when the model declines this batch.
+            // A mixed step no longer forfeits batching: the decode SUBSET
+            // batches here and the prefill chunks run through the per-sequence
+            // loop below in the same step (the chunked-prefill mixing the
+            // vLLM/SGLang schedulers do) - without this, a single admission
+            // degraded every in-flight decode to a serial weight sweep.
+            HashSet<string> handledBatched = null;
             if (options.BatchedFusedDecodeEnabled && n >= 2)
             {
-                bool allDecode = true;
+                var decodeWork = new List<ScheduledSequenceWork>(n);
                 foreach (var work in output.ScheduledWork)
-                    if (work.IsPrefill) { allDecode = false; break; }
-                if (allDecode)
+                    if (!work.IsPrefill &&
+                        fused.CanBatchDecode(work.Sequence.RequestId, work.Sequence.NumComputedTokens))
+                        decodeWork.Add(work);
+                int dn = decodeWork.Count;
+                if (dn >= 2)
                 {
-                    var reqIds = new string[n];
-                    var btokens = new int[n];
-                    var bpositions = new int[n];
-                    for (int i = 0; i < n; i++)
+                    var reqIds = new string[dn];
+                    var btokens = new int[dn];
+                    var bpositions = new int[dn];
+                    bool allGreedy = true;
+                    for (int i = 0; i < dn; i++)
                     {
-                        var seq = output.ScheduledWork[i].Sequence;
-                        // Peek-sample (deterministic for greedy); do NOT append yet
-                        // so the round-robin fallback re-samples cleanly.
-                        btokens[i] = SampleFromLogits(seq);
+                        var seq = decodeWork[i].Sequence;
+                        // Peek-sample (deterministic for greedy); do NOT append or
+                        // consume the device-sampled stash yet, so a decline below
+                        // leaves the round-robin fallback a valid token source
+                        // (device-sampled sequences have no LastLogits to re-sample).
+                        btokens[i] = PeekPendingOrSample(seq);
                         bpositions[i] = seq.NumComputedTokens;
                         reqIds[i] = seq.RequestId;
+                        if (allGreedy && !seq.GetOrCreateSampler().IsPlainGreedyArgmax)
+                            allGreedy = false;
                     }
-                    var outLogits = new float[n][];
-                    if (fused.TryForwardBatchedFusedDecode(reqIds, btokens, bpositions, outLogits))
+                    if (allGreedy)
                     {
-                        for (int i = 0; i < n; i++)
+                        // Device-sampled fast path: no host logits at all. The
+                        // model returns each sequence's NEXT token (argmax of
+                        // this step's logits); it is stashed on the sequence and
+                        // consumed by TakePendingOrSample at the next step.
+                        var nextTokens = new int[dn];
+                        if (fused.TryForwardBatchedFusedDecodeSampled(reqIds, btokens, bpositions, nextTokens))
                         {
-                            var seq = output.ScheduledWork[i].Sequence;
-                            seq.AppendOutputToken(btokens[i]);
-                            seq.LastLogits = outLogits[i];
-                            seq.AdvanceComputedTokens(1);
-                            if (!seq.FirstTokenAt.HasValue) seq.FirstTokenAt = DateTime.UtcNow;
-                            results.Add(new SequenceStepResult
+                            for (int i = 0; i < dn; i++)
                             {
-                                Sequence = seq,
-                                TokensForwarded = 1,
-                                SampledToken = btokens[i],
-                                IsPrefill = false,
-                                FullBlocksCaptured = 0,
-                            });
+                                var seq = decodeWork[i].Sequence;
+                                seq.AppendOutputToken(btokens[i]);
+                                seq.LastLogits = null;
+                                seq.AdvanceComputedTokens(1);
+                                seq.PendingDeviceToken = nextTokens[i];   // replaces the consumed stash
+                                seq.PendingDevicePosition = seq.NumComputedTokens;
+                                if (!seq.FirstTokenAt.HasValue) seq.FirstTokenAt = DateTime.UtcNow;
+                                results.Add(new SequenceStepResult
+                                {
+                                    Sequence = seq,
+                                    TokensForwarded = 1,
+                                    SampledToken = btokens[i],
+                                    IsPrefill = false,
+                                    FullBlocksCaptured = 0,
+                                });
+                            }
+                            if (dn == n)
+                                return results;
+                            handledBatched = new HashSet<string>(reqIds);
                         }
-                        return results;
+                        // else: fall through to the logits variant below.
                     }
-                    // else: not appended ÔÇö fall through to the round-robin loop.
-                    if (!_fusedBatchedDeclineWarned)
+                    if (handledBatched == null)
                     {
-                        _fusedBatchedDeclineWarned = true;
-                        _logger.LogWarning(
-                            "TS_BATCHED_FUSED_DECODE=1 was requested but the model declined to batch " +
-                            "a {Count}-sequence decode step; serving sequences round-robin on the " +
-                            "serial fused path instead (concurrency stays near 1x). Reported once.",
-                            output.ScheduledWork.Count);
+                        var outLogits = new float[dn][];
+                        if (fused.TryForwardBatchedFusedDecode(reqIds, btokens, bpositions, outLogits))
+                        {
+                            for (int i = 0; i < dn; i++)
+                            {
+                                var seq = decodeWork[i].Sequence;
+                                seq.AppendOutputToken(btokens[i]);
+                                seq.PendingDeviceToken = null;   // consumed by this step
+                                seq.LastLogits = outLogits[i];
+                                seq.AdvanceComputedTokens(1);
+                                if (!seq.FirstTokenAt.HasValue) seq.FirstTokenAt = DateTime.UtcNow;
+                                results.Add(new SequenceStepResult
+                                {
+                                    Sequence = seq,
+                                    TokensForwarded = 1,
+                                    SampledToken = btokens[i],
+                                    IsPrefill = false,
+                                    FullBlocksCaptured = 0,
+                                });
+                            }
+                            if (dn == n)
+                                return results;
+                            handledBatched = new HashSet<string>(reqIds);
+                        }
+                        else
+                        {
+                            // The peek above may have advanced a stochastic
+                            // sampler. Preserve that exact draw for the serial
+                            // fallback; sampling again would advance its RNG a
+                            // second time and change the seeded output stream.
+                            // This also leaves an existing device-sampled token
+                            // intact at the same position.
+                            for (int i = 0; i < dn; i++)
+                            {
+                                var seq = decodeWork[i].Sequence;
+                                seq.PendingDeviceToken = btokens[i];
+                                seq.PendingDevicePosition = bpositions[i];
+                            }
+                        }
+                        // Otherwise nothing was appended; fall through to the
+                        // round-robin loop. A successful mixed-step batch sets
+                        // handledBatched, so only warn when logits batching declined.
+                        if (handledBatched == null && !_fusedBatchedDeclineWarned)
+                        {
+                            _fusedBatchedDeclineWarned = true;
+                            _logger.LogWarning(
+                                "The model declined the default batched fused-decode path for " +
+                                "a {Count}-sequence decode step; serving sequences round-robin on the " +
+                                "serial fused path instead (concurrency stays near 1x). Reported once.",
+                                dn);
+                        }
                     }
                 }
             }
 
             foreach (var work in output.ScheduledWork)
             {
+                // Decode subset already served by the batched fast path
+                // above; only the prefill chunks of a mixed step remain.
+                if (handledBatched != null && handledBatched.Contains(work.Sequence.RequestId))
+                    continue;
                 var seq = work.Sequence;
                 int prevComputed = seq.NumComputedTokens;
                 // Track this fused sequence so a clean finish can retain its holder
@@ -807,6 +1079,18 @@ namespace TensorSharp.Runtime.Scheduling
                 try
                 {
                     bool freshCache = fused.BindSequenceCache(seq.RequestId);
+
+                    if (_pendingRetainedFusedTruncations.Remove(
+                            seq.RequestId,
+                            out int retainedTruncationTarget))
+                    {
+                        if (freshCache)
+                        {
+                            throw new InvalidOperationException(
+                                $"Retained fused cache for {seq.RequestId} was rebound but its holder was not found.");
+                        }
+                        _model.TruncateKVCache(retainedTruncationTarget);
+                    }
 
                     // A planned live-cache continuation is only materialized on
                     // this path when the prior owner's primary cache was adopted
@@ -846,7 +1130,7 @@ namespace TensorSharp.Runtime.Scheduling
                     }
                     else
                     {
-                        sampledToken = SampleFromLogits(seq);
+                        sampledToken = TakePendingOrSample(seq);
                         seq.AppendOutputToken(sampledToken);
                         inputTokens = new[] { sampledToken };
                     }
@@ -1040,7 +1324,7 @@ namespace TensorSharp.Runtime.Scheduling
                     }
                     else
                     {
-                        sampledToken = SampleFromLogits(seq);
+                        sampledToken = TakePendingOrSample(seq);
                         seq.AppendOutputToken(sampledToken);
                         inputTokens = new[] { sampledToken };
                     }
@@ -1061,6 +1345,12 @@ namespace TensorSharp.Runtime.Scheduling
                     var swForward = Stopwatch.StartNew();
                     float[] logits = _model.Forward(inputTokens);
                     swForward.Stop();
+
+                    // Forward writes the shared linear cache, not the model's
+                    // paged arrays. Even if this sequence previously completed
+                    // a paged step, its newly-advanced tail is now linear-only
+                    // and must be restored/migrated before another batch.
+                    seq.KvStateInPagedStorage = false;
 
                     // Sampling happens at the *start* of the next step (see
                     // SampleFromLogits at the top of this branch), and
@@ -1382,7 +1672,7 @@ namespace TensorSharp.Runtime.Scheduling
             }
             else
             {
-                sampledToken = SampleFromLogits(seq);
+                sampledToken = TakePendingOrSample(seq);
             }
             seq.AppendOutputToken(sampledToken);
 
@@ -1488,6 +1778,20 @@ namespace TensorSharp.Runtime.Scheduling
                 return 0;
             if (!_liveCacheValid || _liveCacheSeq == null || _liveCacheLen <= 0)
                 return LiveContinuationDeclined(seq, "no live cache resident (reset, batched step, or first request)");
+            // An explicit cache policy must be enforced by the block-granular
+            // pooled path. Reusing the complete live holder here would let a
+            // cache-none request (or a finite breakpoint) silently reuse past
+            // the boundary selected by the client.
+            if (_liveCacheSeq.CacheBreakpoints != null || seq.CacheBreakpoints != null)
+                return LiveContinuationDeclined(seq, "the source or target request has an explicit cache boundary");
+            // Multimodal placeholders can render to identical token IDs while
+            // carrying different image/audio embeddings. Their K/V is reusable
+            // only when the prepared media fingerprint is identical as well.
+            if (!string.Equals(
+                    _liveCacheSeq.MediaFingerprint,
+                    seq.MediaFingerprint,
+                    StringComparison.Ordinal))
+                return LiveContinuationDeclined(seq, "the request media fingerprint differs from the live cache");
             // Only worth it when the pooled path cannot already reuse the full
             // prefix. Models that opt out of cross-sequence snapshots have an
             // effective pooled cap of zero, but continuing their still-live
@@ -1659,8 +1963,9 @@ namespace TensorSharp.Runtime.Scheduling
             && f.SupportsPerSequenceFusedForward
             && _model.MaxReusablePrefixTokens != int.MaxValue;
 
-        /// <summary>Longest retained fused-holder token run that is an EXACT prefix
-        /// of <paramref name="seq"/>'s prompt, or 0 when no retained holder applies.
+        /// <summary>Longest reusable prefix from a retained fused holder, or 0 when
+        /// no retained holder applies. A short trailing control-token tail may be
+        /// rewound when the rendered history intentionally omitted it.
         /// The matched holder's K/V is the full circular cache from the finished
         /// request, so continuing from it reuses the entire conversation prefix (past
         /// the sliding-window cap) with no corruption ÔÇö the cross-request analogue of
@@ -1670,8 +1975,8 @@ namespace TensorSharp.Runtime.Scheduling
         {
             if (seq == null || _retainedFused.Count == 0) return 0;
             if (!ModelUsesRetainableFusedCache()) return 0;
-            var match = FindRetainedFusedMatch(seq);
-            return match?.Tokens.Length ?? 0;
+            FindRetainedFusedMatch(seq, out int lcp);
+            return lcp;
         }
 
         /// <summary>Adopt a retained fused holder for <paramref name="seq"/>: re-key
@@ -1686,8 +1991,8 @@ namespace TensorSharp.Runtime.Scheduling
             if (seq.BlockTable.NumBlocks != 0) return false;
             if (_model is not IBatchedPagedModel fused) return false;
 
-            var match = FindRetainedFusedMatch(seq);
-            if (match == null || match.Tokens.Length != lcp) return false;
+            var match = FindRetainedFusedMatch(seq, out int matchedLcp);
+            if (match == null || matchedLcp != lcp) return false;
 
             int neededBlocks = (lcp + _blockSize - 1) / _blockSize;
             var blocks = _pool.AllocateNew(neededBlocks);
@@ -1705,6 +2010,8 @@ namespace TensorSharp.Runtime.Scheduling
 
             seq.SetComputedTokensForPrefixAdoption(lcp);
             seq.PrefixCacheReusedTokens = lcp;
+            if (lcp < match.Tokens.Length)
+                _pendingRetainedFusedTruncations[seq.RequestId] = lcp;
             // The rebound holder is now this request's active fused cache; the
             // fused path's BindSequenceCache finds it (fresh==false) and continues
             // from it without injecting from the (empty) reserved blocks.
@@ -1712,26 +2019,43 @@ namespace TensorSharp.Runtime.Scheduling
             return true;
         }
 
-        /// <summary>Find the retained fused holder whose token run is an exact prefix
-        /// of <paramref name="seq"/>'s prompt and leaves at least one new suffix token
-        /// to forward. Prefers the longest match.</summary>
-        private RetainedFusedCache FindRetainedFusedMatch(SequenceState seq)
+        /// <summary>Find the retained fused holder whose token run is a prefix of
+        /// <paramref name="seq"/>'s prompt, allowing the same one-or-two-token trailing
+        /// control-token rewind as live-cache continuation, and leaving at least one
+        /// new suffix token to forward. Prefers the longest reusable prefix.</summary>
+        private RetainedFusedCache FindRetainedFusedMatch(SequenceState seq, out int reusableLength)
         {
+            reusableLength = 0;
+            // Explicit policies deliberately use the block-granular pooled path:
+            // rebinding a whole request-owned holder must not bypass either the
+            // source or target request's client-selected cache boundary.
+            if (seq.CacheBreakpoints != null)
+                return null;
+
             RetainedFusedCache best = null;
             foreach (var entry in _retainedFused)
             {
+                if (!string.Equals(entry.MediaFingerprint, seq.MediaFingerprint, StringComparison.Ordinal))
+                    continue;
                 int len = entry.Tokens.Length;
                 // NB: no `len <= cap` skip. The fused path writes nothing to the shared
                 // pool, so a retained holder is the ONLY reuse source for a concurrent
                 // conversation ÔÇö even one shorter than the sliding window.
-                if (seq.PromptTokens.Count <= len) continue;    // no new suffix to forward
-                if (best != null && len <= best.Tokens.Length) continue;
-                bool prefix = true;
-                for (int i = 0; i < len; i++)
-                {
-                    if (seq.PromptTokens[i] != entry.Tokens[i]) { prefix = false; break; }
-                }
-                if (prefix) best = entry;
+                int lcp = 0;
+                int limit = Math.Min(len, seq.PromptTokens.Count);
+                while (lcp < limit && seq.PromptTokens[lcp] == entry.Tokens[lcp])
+                    lcp++;
+
+                if (seq.PromptTokens.Count <= lcp) continue;   // no new suffix to forward
+                int rewind = len - lcp;
+                if (rewind > 0
+                    && (rewind > MaxLiveContinuationRewindTokens
+                        || !_model.SupportsKVCacheTruncation))
+                    continue;
+                if (lcp <= reusableLength) continue;
+
+                best = entry;
+                reusableLength = lcp;
             }
             return best;
         }
@@ -1744,6 +2068,43 @@ namespace TensorSharp.Runtime.Scheduling
                 _fusedSeqById[seq.RequestId] = seq;
         }
 
+        /// <summary>Forget executor-owned state for a fused request that is being
+        /// released without retention (abort/cancellation). The model's release
+        /// hook still owns the holder itself; this only prevents an abandoned
+        /// sequence or a not-yet-applied retained-holder truncation from remaining
+        /// reachable inside the executor.</summary>
+        internal void DiscardReleasedFusedCacheBookkeeping(string requestId)
+        {
+            if (string.IsNullOrEmpty(requestId)) return;
+            _pendingRetainedFusedTruncations.Remove(requestId);
+            _fusedSeqById.Remove(requestId);
+        }
+
+        /// <summary>Remove stale retained metadata (and its model holder) before a
+        /// new finished request reuses the same public RequestId. The scheduler only
+        /// requires ids to be unique while in flight, so sequential id reuse must not
+        /// leave two token snapshots pointing at the model's single id-keyed holder.</summary>
+        private void DiscardRetainedFusedCacheWithRequestId(
+            IBatchedPagedModel fused,
+            string requestId)
+        {
+            bool found = false;
+            var node = _retainedFused.First;
+            while (node != null)
+            {
+                var next = node.Next;
+                if (string.Equals(node.Value.RequestId, requestId, StringComparison.Ordinal))
+                {
+                    _retainedFused.Remove(node);
+                    found = true;
+                }
+                node = next;
+            }
+
+            if (found)
+                fused.DiscardRetainedCache(requestId);
+        }
+
         /// <summary>Called by the engine when a sequence leaves the scheduler, BEFORE
         /// the model's <see cref="IBatchedPagedModel.OnSequenceReleased"/>. When the
         /// sequence finished cleanly on the fused path, retain its holder (the full
@@ -1753,6 +2114,7 @@ namespace TensorSharp.Runtime.Scheduling
         public bool TryRetainReleasedFusedCache(string requestId)
         {
             if (string.IsNullOrEmpty(requestId)) return false;
+            _pendingRetainedFusedTruncations.Remove(requestId);
             if (!_fusedSeqById.TryGetValue(requestId, out var seq))
                 return false;
             _fusedSeqById.Remove(requestId);
@@ -1765,6 +2127,12 @@ namespace TensorSharp.Runtime.Scheduling
                 && seq.Status != SequenceStatus.FinishedLengthCapped)
                 return false;
 
+            // A retained holder represents the model's complete fused cache and
+            // cannot currently be truncated when rebound. Do not let that
+            // cache-all reuse path bypass an explicit request cache boundary.
+            if (seq.CacheBreakpoints != null)
+                return false;
+
             // Snapshot exactly the tokens whose K/V is resident in the holder
             // (NumComputedTokens == the model's _cacheSeqLen at finish), so a later
             // continuation's reused-prefix length matches the holder's cache extent
@@ -1775,11 +2143,24 @@ namespace TensorSharp.Runtime.Scheduling
             // nothing to the shared pool, so retention is the only cross-request reuse
             // source for it (not just the >window case). The LRU budget bounds VRAM.
             if (len < _blockSize) return false;
+
+            // Request ids are unique only while in flight. If a caller reuses one
+            // sequentially, discard the older retained holder before the model's
+            // id-keyed retained dictionary is populated with this new cache. Keeping
+            // both metadata entries would let an old token match rebind the new,
+            // unrelated holder.
+            if (!fused.HasFusedSequenceCache(requestId)) return false;
+            DiscardRetainedFusedCacheWithRequestId(fused, requestId);
             if (!fused.RetainSequenceCache(requestId)) return false;
 
             var tokens = new int[len];
             for (int i = 0; i < len; i++) tokens[i] = seq.TokenAt(i);
-            _retainedFused.AddLast(new RetainedFusedCache { RequestId = requestId, Tokens = tokens });
+            _retainedFused.AddLast(new RetainedFusedCache
+            {
+                RequestId = requestId,
+                Tokens = tokens,
+                MediaFingerprint = seq.MediaFingerprint,
+            });
 
             // Evict oldest holders beyond the budget (frees their VRAM).
             int budget = ExecutionOptions.FromEnvironment().RetainedFusedCacheBudget;
@@ -1820,6 +2201,12 @@ namespace TensorSharp.Runtime.Scheduling
             {
                 if (_currentOwner == null
                     && _liveCacheValid
+                    && _liveCacheSeq?.CacheBreakpoints == null
+                    && seq.CacheBreakpoints == null
+                    && string.Equals(
+                        _liveCacheSeq?.MediaFingerprint,
+                        seq.MediaFingerprint,
+                        StringComparison.Ordinal)
                     && seq.NumComputedTokens > 0
                     && _liveCacheLen >= seq.NumComputedTokens
                     && (_liveCacheLen == seq.NumComputedTokens || _model.SupportsKVCacheTruncation))
@@ -1918,6 +2305,37 @@ namespace TensorSharp.Runtime.Scheduling
             for (int i = 0; i < want; i++)
                 buf[i] = seq.TokenAt(seq.NumComputedTokens + i);
             return buf;
+        }
+
+        /// <summary>Consume a token the batched greedy path sampled on-device
+        /// last step (bit-equivalent to re-sampling the logits it summarizes),
+        /// falling back to host sampling from LastLogits. Any position drift —
+        /// preemption, recompute, rollback — invalidates the stash.</summary>
+        private static int TakePendingOrSample(SequenceState seq)
+        {
+            if (seq.PendingDeviceToken.HasValue)
+            {
+                int t = seq.PendingDeviceToken.Value;
+                seq.PendingDeviceToken = null;
+                if (seq.PendingDevicePosition == seq.NumComputedTokens)
+                    return t;
+            }
+            return SampleFromLogits(seq);
+        }
+
+        /// <summary>Non-destructive form of <see cref="TakePendingOrSample"/> for
+        /// the batched fast path's peek: a stash that is still valid stays on the
+        /// sequence until a successful step replaces (or clears) it, so a decline
+        /// leaves the fallback loop a token source.</summary>
+        private static int PeekPendingOrSample(SequenceState seq)
+        {
+            if (seq.PendingDeviceToken.HasValue)
+            {
+                if (seq.PendingDevicePosition == seq.NumComputedTokens)
+                    return seq.PendingDeviceToken.Value;
+                seq.PendingDeviceToken = null;   // stale: position moved under it
+            }
+            return SampleFromLogits(seq);
         }
 
         private static int SampleFromLogits(SequenceState seq)
@@ -2092,6 +2510,7 @@ namespace TensorSharp.Runtime.Scheduling
             _liveCacheSeq = null;
             _liveCacheLen = 0;
             _liveCacheValid = false;
+            _pendingRetainedFusedTruncations.Clear();
             _specCtx = null;
             if (_model is IBatchedPagedModel fused)
             {
@@ -2295,6 +2714,25 @@ namespace TensorSharp.Runtime.Scheduling
         /// per-sequence round-robin loop). Default false (opt-in).</summary>
         bool TryForwardBatchedFusedDecode(
             IReadOnlyList<string> requestIds, int[] tokens, int[] positions, float[][] outLogits) => false;
+
+        /// <summary>Greedy fast path of <see cref="TryForwardBatchedFusedDecode"/>:
+        /// instead of materializing [vocab] host logits per sequence, the model
+        /// samples each sequence's next token ON-DEVICE (argmax) and returns just
+        /// the token ids — for a 200k vocab at N=32 that replaces a ~25 MB
+        /// PCIe download plus N host argmax scans per step (this is how
+        /// vLLM/SGLang sample). Only called when every scheduled sequence's
+        /// sampler is a plain argmax (see TokenSampler.IsPlainGreedyArgmax).
+        /// Default false (opt-in per model).</summary>
+        bool TryForwardBatchedFusedDecodeSampled(
+            IReadOnlyList<string> requestIds, int[] tokens, int[] positions, int[] outNextTokens) => false;
+
+        /// <summary>Whether this sequence can join the token-batched decode at
+        /// <paramref name="position"/> right now (holder exists, no cache growth
+        /// needed). One sequence crossing a growth boundary then falls back to
+        /// the per-sequence loop ALONE instead of declining the whole batch —
+        /// previously that decline degraded every in-flight decode to a serial
+        /// weight sweep for the step. Default true.</summary>
+        bool CanBatchDecode(string requestId, int position) => true;
     }
 
     /// <summary>Per-step metadata for the batched paged attention path.

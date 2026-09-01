@@ -51,8 +51,60 @@ namespace TensorSharp.Models
         /// weights since before batching existed.
         /// </summary>
         public bool BatchedForwardAvailable =>
-            _quantWeights.ContainsKey("blk.0.attn_qkv.weight")
-            || _weights.ContainsKey("blk.0.attn_qkv.weight");
+            IsTensorParallel
+                ? SupportsBatchedTensorParallelGeometry(TpDegree, GlobalTpDegree)
+                  && HasRequiredBatchedTensorParallelWeights(
+                      Config.NumLayers, HasCompleteTensorParallelShard)
+                : _quantWeights.ContainsKey("blk.0.attn_qkv.weight")
+                  || _weights.ContainsKey("blk.0.attn_qkv.weight");
+
+        /// <summary>
+        /// The paged TP forward currently drives only this process's local ranks.
+        /// Unlike <see cref="ModelBase.Forward"/>, it has no distributed control
+        /// message that makes worker nodes enter the matching forward, so advertising
+        /// it when the global group is larger than the local group would deadlock at
+        /// the first cross-node AllReduce. Keep distributed TP on the ordinary
+        /// <c>Forward</c> path until a batched worker protocol is implemented.
+        /// </summary>
+        internal static bool SupportsBatchedTensorParallelGeometry(int localDegree, int globalDegree)
+            => localDegree > 0 && localDegree == globalDegree;
+
+        /// <summary>
+        /// Construction attempts to shard every projection used by both TP forward
+        /// paths, but the mixed-quant fallback deliberately returns without throwing
+        /// when a source tensor is absent or incompatible. Do not advertise the
+        /// batched route unless all four sharded projections consumed per layer are
+        /// actually present; otherwise the first scheduled batch fails late with a
+        /// <see cref="KeyNotFoundException"/> instead of staying on ordinary forward.
+        /// </summary>
+        internal static bool HasRequiredBatchedTensorParallelWeights(
+            int numLayers, Func<string, bool> hasCompleteShard)
+        {
+            if (numLayers <= 0 || hasCompleteShard == null)
+                return false;
+
+            for (int layer = 0; layer < numLayers; layer++)
+            {
+                string prefix = $"blk.{layer}.";
+                if (!hasCompleteShard(prefix + "attn_qkv.weight")
+                    || !hasCompleteShard(prefix + "attn_output.weight")
+                    || !hasCompleteShard(prefix + "ffn_gate_up.weight")
+                    || !hasCompleteShard(prefix + "ffn_down.weight"))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private bool HasCompleteTensorParallelShard(string weightName)
+        {
+            if (_tpQuantWeights.TryGetValue(weightName, out var quantShards))
+                return quantShards.Length == TpDegree && Array.TrueForAll(quantShards, shard => shard != null);
+            if (_tpWeights.TryGetValue(weightName, out var tensorShards))
+                return tensorShards.Length == TpDegree && Array.TrueForAll(tensorShards, shard => shard != null);
+            return false;
+        }
 
         public IReadOnlyList<float[]> ForwardBatch(BatchedForwardContext ctx)
         {
@@ -341,6 +393,121 @@ namespace TensorSharp.Models
             }
             _pagedNumBlocks = targetBlocks;
             _pagedBlockSize = blockSize;
+        }
+
+        /// <summary>The model can copy a solo sequence's linear K/V history
+        /// into paged storage (where <c>ForwardBatch</c> reads from). This is the
+        /// gate on the N=1 SingleSequenceFused fast path: without it every solo
+        /// request is routed through the op-by-op batched paged forward, which on
+        /// Qwen3-8B/ggml_cuda measured 8.5 tok/s against the fused path's
+        /// 100+ tok/s. Ported from GptOssModel.BatchedForward.cs; block-quantised
+        /// caches are excluded (only F32/F16 reads are implemented).</summary>
+        public bool SupportsLinearKVMigration =>
+            _kvCacheK != null && _kvCacheV != null
+            && !_kvCacheDtype.IsBlockQuantized();
+
+        /// <summary>Copy <paramref name="owner"/>'s K/V history out of the linear
+        /// per-layer cache (layout <c>[numKVHeads, capacity, headDim]</c>) into
+        /// the paged buffers at slot positions derived from
+        /// <c>owner.BlockTable</c>. Qwen3 has no SWA circular cache, so every
+        /// position from 0..<c>_cacheSeqLen</c> is recoverable.</summary>
+        public bool TryMigrateLinearKVToPaged(SequenceState owner, int blockSize)
+        {
+            if (owner == null) return false;
+            if (!SupportsLinearKVMigration) return false;
+            int ownerTokens = _cacheSeqLen;
+            if (ownerTokens <= 0) return true;
+            if (owner.BlockTable.NumBlocks <= 0) return false;
+
+            // Flush rows the whole-model decode graph only ever wrote on-device,
+            // then any per-tensor device shadow, so the float reads below see the
+            // freshest K/V.
+            if (IsGgmlBackend)
+            {
+                EnsureKvCacheHostSynchronized();
+                var seen = new HashSet<Storage>();
+                for (int l = 0; l < Config.NumLayers; l++)
+                {
+                    if (_kvCacheK[l] != null && seen.Add(_kvCacheK[l].Storage))
+                        SyncTensorHostCache(_kvCacheK[l]);
+                    if (_kvCacheV[l] != null && seen.Add(_kvCacheV[l].Storage))
+                        SyncTensorHostCache(_kvCacheV[l]);
+                }
+            }
+
+            int maxBlockId = 0;
+            int numBlocks = owner.BlockTable.NumBlocks;
+            for (int b = 0; b < numBlocks; b++)
+            {
+                int id = owner.BlockTable.Blocks[b].Id;
+                if (id > maxBlockId) maxBlockId = id;
+            }
+            int kvHeads = Config.NumKVHeads;
+            int headDim = Config.HeadDim;
+            EnsurePagedBuffersAllocated(maxBlockId + 1, blockSize, kvHeads, headDim);
+
+            int stridePaged = kvHeads * headDim;
+            int numLayers = Config.NumLayers;
+
+            for (int layer = 0; layer < numLayers; layer++)
+            {
+                int cacheLen = (int)_kvCacheK[layer].Sizes[1];
+                int totalElems = kvHeads * cacheLen * headDim;
+                if (!TryReadCacheAsF32(_kvCacheK[layer], totalElems, out float[] kFlat) ||
+                    !TryReadCacheAsF32(_kvCacheV[layer], totalElems, out float[] vFlat))
+                {
+                    return false;
+                }
+
+                float[] kPaged = _pagedK[layer];
+                float[] vPaged = _pagedV[layer];
+
+                for (int p = 0; p < ownerTokens; p++)
+                {
+                    int blockIdx = p / blockSize;
+                    int offsetInBlock = p % blockSize;
+                    int physBlockId = owner.BlockTable.Blocks[blockIdx].Id;
+                    int slot = physBlockId * blockSize + offsetInBlock;
+                    int slotOffset = slot * stridePaged;
+
+                    for (int h = 0; h < kvHeads; h++)
+                    {
+                        int srcOffset = (h * cacheLen + p) * headDim;
+                        int dstOffset = slotOffset + h * headDim;
+                        Buffer.BlockCopy(
+                            kFlat, srcOffset * sizeof(float),
+                            kPaged, dstOffset * sizeof(float),
+                            headDim * sizeof(float));
+                        Buffer.BlockCopy(
+                            vFlat, srcOffset * sizeof(float),
+                            vPaged, dstOffset * sizeof(float),
+                            headDim * sizeof(float));
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        private static unsafe bool TryReadCacheAsF32(Tensor cache, int totalElems, out float[] flat)
+        {
+            if (cache.ElementType == DType.Float32)
+            {
+                flat = cache.GetElementsAsFloat(totalElems);
+                return true;
+            }
+            if (cache.ElementType == DType.Float16)
+            {
+                flat = new float[totalElems];
+                ushort* src = TensorComputePrimitives.GetHalfPointer(cache);
+                fixed (float* dst = flat)
+                {
+                    TensorComputePrimitives.F16ToF32(dst, src, totalElems);
+                }
+                return true;
+            }
+            flat = null;
+            return false;
         }
     }
 }

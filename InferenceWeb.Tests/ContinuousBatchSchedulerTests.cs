@@ -219,6 +219,70 @@ public class ContinuousBatchSchedulerTests
         Assert.DoesNotContain(cached[1], seq.BlockTable.Blocks);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Scheduler_ExplicitCacheNone_AdoptsNoPrefixBlocks(bool useZeroBreakpoint)
+    {
+        const string fingerprint = "fp-explicit-none-adoption";
+        var pool = NewPool(numBlocks: 8);
+        var sched = NewScheduler(pool, fingerprint);
+        int[] prompt = Enumerable.Range(1, 2 * BlockSize + 1).ToArray();
+        var hashes = KvBlockHasher.ComputeBlockHashes(prompt, BlockSize, fingerprint);
+        var cached = pool.AllocateNew(2);
+        for (int i = 0; i < cached.Length; i++)
+            pool.RegisterFullBlock(cached[i], hashes[i], BlockSize);
+
+        IReadOnlyList<int> explicitNone = useZeroBreakpoint
+            ? new[] { 0 }
+            : Array.Empty<int>();
+        var seq = new SequenceState(
+            $"reuse-none-{useZeroBreakpoint}", prompt, maxNewTokens: 1,
+            BlockSize, SamplingConfig.Default, cacheBreakpoints: explicitNone);
+
+        sched.Submit(seq);
+        var step = sched.Schedule();
+
+        Assert.Single(step.ScheduledWork);
+        Assert.NotNull(seq.CacheBreakpoints);
+        Assert.Equal(0, seq.CacheBreakpointLimit);
+        Assert.Equal(0, seq.PrefixCacheReusedTokens);
+        Assert.All(cached, block => Assert.Equal(1, block.RefCount));
+        Assert.DoesNotContain(cached[0], seq.BlockTable.Blocks);
+        Assert.DoesNotContain(cached[1], seq.BlockTable.Blocks);
+    }
+
+    [Fact]
+    public void Scheduler_ExplicitBreakpoint_CapsPrefixBlockAdoption()
+    {
+        const string fingerprint = "fp-capped-adoption";
+        var pool = NewPool(numBlocks: 12);
+        var sched = NewScheduler(pool, fingerprint);
+        int[] prompt = Enumerable.Range(1, 4 * BlockSize + 1).ToArray();
+        var hashes = KvBlockHasher.ComputeBlockHashes(prompt, BlockSize, fingerprint);
+        var cached = pool.AllocateNew(4);
+        for (int i = 0; i < cached.Length; i++)
+            pool.RegisterFullBlock(cached[i], hashes[i], BlockSize);
+
+        var seq = new SequenceState(
+            "reuse-capped", prompt, maxNewTokens: 1, BlockSize, SamplingConfig.Default,
+            cacheBreakpoints: new[] { 2 * BlockSize });
+
+        sched.Submit(seq);
+        var step = sched.Schedule();
+
+        Assert.Single(step.ScheduledWork);
+        Assert.Equal(2 * BlockSize, seq.PrefixCacheReusedTokens);
+        Assert.Equal(2, cached[0].RefCount);
+        Assert.Equal(2, cached[1].RefCount);
+        Assert.Equal(1, cached[2].RefCount);
+        Assert.Equal(1, cached[3].RefCount);
+        Assert.Same(cached[0], seq.BlockTable.Blocks[0]);
+        Assert.Same(cached[1], seq.BlockTable.Blocks[1]);
+        Assert.DoesNotContain(cached[2], seq.BlockTable.Blocks);
+        Assert.DoesNotContain(cached[3], seq.BlockTable.Blocks);
+    }
+
     [Fact]
     public void Engine_DriveOneSequence_ProducesTokens()
     {
@@ -431,6 +495,132 @@ public class ContinuousBatchSchedulerTests
         Assert.Null(ex);
         Assert.Contains("r0", output.FinishedRequestIds);
         Assert.True(seq.Status.IsFinished());
+    }
+
+    [Fact]
+    public void Scheduler_ExplicitBreakpoint_RegistersOnlyBlocksInsideTheMarkedPrefix()
+    {
+        const string fingerprint = "fp-explicit-breakpoint";
+        var pool = NewPool(numBlocks: 8);
+        var sched = NewScheduler(pool, fingerprint);
+
+        // 4 full blocks of prompt, with the client marking the end of block 1.
+        int[] prompt = Enumerable.Range(1, 4 * BlockSize).ToArray();
+        var seq = new SequenceState(
+            "bp", prompt.ToList(), maxNewTokens: 1, BlockSize, SamplingConfig.Default,
+            cacheBreakpoints: new List<int> { 2 * BlockSize });
+
+        var blocks = pool.AllocateNew(4);
+        foreach (var b in blocks)
+            seq.BlockTable.AppendBlock(b);
+        seq.AdvanceComputedTokens(prompt.Length);
+
+        sched.OnBlocksCommitted(seq, previousTokens: 0);
+
+        var hashes = KvBlockHasher.ComputeBlockHashes(prompt.ToList(), BlockSize, fingerprint);
+
+        // Blocks 0 and 1 end at or before the breakpoint and are cacheable.
+        Assert.True(pool.TryFindByHash(hashes[0], out _), "Block 0 should be registered.");
+        Assert.True(pool.TryFindByHash(hashes[1], out _), "Block 1 should be registered.");
+
+        // Blocks 2 and 3 lie past it and must stay out of the index.
+        Assert.False(pool.TryFindByHash(hashes[2], out _), "Block 2 is past the breakpoint.");
+        Assert.False(pool.TryFindByHash(hashes[3], out _), "Block 3 is past the breakpoint.");
+    }
+
+    [Fact]
+    public void Scheduler_ExplicitBreakpointMidBlock_DropsTheStraddlingBlock()
+    {
+        const string fingerprint = "fp-breakpoint-midblock";
+        var pool = NewPool(numBlocks: 8);
+        var sched = NewScheduler(pool, fingerprint);
+
+        int[] prompt = Enumerable.Range(1, 3 * BlockSize).ToArray();
+        // A breakpoint halfway through block 1: the index is block-granular, so
+        // block 1 holds tokens from both sides of the mark and is not cacheable.
+        var seq = new SequenceState(
+            "bp-mid", prompt.ToList(), maxNewTokens: 1, BlockSize, SamplingConfig.Default,
+            cacheBreakpoints: new List<int> { BlockSize + (BlockSize / 2) });
+
+        var blocks = pool.AllocateNew(3);
+        foreach (var b in blocks)
+            seq.BlockTable.AppendBlock(b);
+        seq.AdvanceComputedTokens(prompt.Length);
+
+        sched.OnBlocksCommitted(seq, previousTokens: 0);
+
+        var hashes = KvBlockHasher.ComputeBlockHashes(prompt.ToList(), BlockSize, fingerprint);
+        Assert.True(pool.TryFindByHash(hashes[0], out _), "Block 0 ends before the breakpoint.");
+        Assert.False(pool.TryFindByHash(hashes[1], out _), "Block 1 straddles the breakpoint.");
+        Assert.False(pool.TryFindByHash(hashes[2], out _), "Block 2 is past the breakpoint.");
+    }
+
+    [Fact]
+    public void Scheduler_NoExplicitBreakpoints_RegistersEveryFullBlock()
+    {
+        const string fingerprint = "fp-no-breakpoint";
+        var pool = NewPool(numBlocks: 8);
+        var sched = NewScheduler(pool, fingerprint);
+
+        int[] prompt = Enumerable.Range(1, 3 * BlockSize).ToArray();
+        var seq = NewSequenceFromTokens("no-bp", prompt, maxNew: 1);
+
+        var blocks = pool.AllocateNew(3);
+        foreach (var b in blocks)
+            seq.BlockTable.AppendBlock(b);
+        seq.AdvanceComputedTokens(prompt.Length);
+
+        sched.OnBlocksCommitted(seq, previousTokens: 0);
+
+        var hashes = KvBlockHasher.ComputeBlockHashes(prompt.ToList(), BlockSize, fingerprint);
+        for (int i = 0; i < 3; i++)
+            Assert.True(pool.TryFindByHash(hashes[i], out _), $"Block {i} should be registered.");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Scheduler_ExplicitCacheNone_RegistersNoBlocks(bool useZeroBreakpoint)
+    {
+        const string fingerprint = "fp-zero-breakpoint";
+        var pool = NewPool(numBlocks: 8);
+        var sched = NewScheduler(pool, fingerprint);
+
+        int[] prompt = Enumerable.Range(1, 2 * BlockSize).ToArray();
+        IReadOnlyList<int> explicitNone = useZeroBreakpoint
+            ? new[] { 0 }
+            : Array.Empty<int>();
+        var seq = new SequenceState(
+            "zero-bp", prompt.ToList(), maxNewTokens: 1, BlockSize, SamplingConfig.Default,
+            cacheBreakpoints: explicitNone);
+        foreach (var block in pool.AllocateNew(2))
+            seq.BlockTable.AppendBlock(block);
+        seq.AdvanceComputedTokens(prompt.Length);
+
+        sched.OnBlocksCommitted(seq, previousTokens: 0);
+
+        var hashes = KvBlockHasher.ComputeBlockHashes(prompt.ToList(), BlockSize, fingerprint);
+        Assert.NotNull(seq.CacheBreakpoints);
+        Assert.Equal(0, seq.CacheBreakpointLimit);
+        Assert.False(pool.TryFindByHash(hashes[0], out _));
+        Assert.False(pool.TryFindByHash(hashes[1], out _));
+    }
+
+    [Fact]
+    public void SequenceState_CopiesCacheBreakpoints_SoLaterCallerEditsCannotDrift()
+    {
+        var supplied = new List<int> { 2 * BlockSize };
+        var seq = new SequenceState(
+            "copy", Enumerable.Range(1, 4 * BlockSize).ToList(), maxNewTokens: 1,
+            BlockSize, SamplingConfig.Default, cacheBreakpoints: supplied);
+
+        // The pipeline hands over the same List it edited while truncating; a
+        // later edit must not move the limit the scheduler already read.
+        supplied.Clear();
+        supplied.Add(99 * BlockSize);
+
+        Assert.Equal(2 * BlockSize, seq.CacheBreakpointLimit);
+        Assert.Equal(new[] { 2 * BlockSize }, seq.CacheBreakpoints);
     }
 
     // ----------------------- helpers -----------------------

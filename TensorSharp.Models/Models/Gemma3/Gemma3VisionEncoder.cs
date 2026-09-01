@@ -260,9 +260,23 @@ namespace TensorSharp.Models
 
         private Tensor VisionMLP(Tensor input, string prefix)
         {
-            using var fc1Out = LinearForwardWithBias(input, $"{prefix}.ffn_down.weight", $"{prefix}.ffn_down.bias");
+            // Which of ffn_up / ffn_down is the expanding stage is decided by SHAPE,
+            // not by the name. llama.cpp's SigLIP export uses the ordinary
+            // convention - ffn_up is fc1 (hidden -> intermediate, e.g. 1152 -> 4304)
+            // and ffn_down is fc2 - and this method used to run ffn_down first
+            // unconditionally, which fed a 1152-wide activation into a matrix that
+            // wants 4304 and aborted every Gemma 3 image with "Size mismatch" out of
+            // the first encoder block. Selecting on the output width keeps a
+            // projector converted with the opposite naming working too.
+            string fc1 = "ffn_up", fc2 = "ffn_down";
+            if (!_weights.TryGetValue($"{prefix}.ffn_up.weight", out Tensor upW)
+                || (int)upW.Sizes[0] != _intermediateSize)
+            {
+                fc1 = "ffn_down"; fc2 = "ffn_up";
+            }
+            using var fc1Out = LinearForwardWithBias(input, $"{prefix}.{fc1}.weight", $"{prefix}.{fc1}.bias");
             Ops.GELU(fc1Out, fc1Out);
-            return LinearForwardWithBias(fc1Out, $"{prefix}.ffn_up.weight", $"{prefix}.ffn_up.bias");
+            return LinearForwardWithBias(fc1Out, $"{prefix}.{fc2}.weight", $"{prefix}.{fc2}.bias");
         }
 
         /// <summary>

@@ -369,7 +369,7 @@ namespace TensorSharp.Cli
                 new OptionHelp("--spec-pmin <f>",
                     "Confidence gate below which drafting stops; 0 disables the gate entirely. What the number " +
                     "MEANS is the algorithm's business, so each picks its own default rather than sharing one: " +
-                    "0.75 for a per-token head (top-1 probability over its top-10 logits), 0.35 for a block " +
+                    "0.15 for a per-token head (top-1 probability over its top-10 logits), 0.35 for a block " +
                     "drafter (the CUMULATIVE prefix probability - the product of the confidence head's " +
                     "per-position estimates - so the same number is far stricter), 0 for n-gram (where it scales " +
                     "the required match length instead). Range: 0.0-1.0. Env: TS_SPEC_PMIN.",

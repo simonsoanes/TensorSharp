@@ -561,6 +561,12 @@ namespace TensorSharp.Runtime.Scheduling
 
             var hashes = KvBlockHasher.ComputeBlockHashes(seq.PromptTokens, _cfg.BlockSize, EffectiveFingerprint(seq));
             int maxAdoptableTokens = Math.Max(0, seq.PromptTokens.Count - 1);
+            // An explicit boundary limits reuse as well as registration. Otherwise a
+            // request that says "cache none" (empty/[0]) could still adopt blocks that
+            // an earlier implicit-cache request placed in the shared index, and a request
+            // with a finite boundary could reuse volatile prompt content past it.
+            if (seq.CacheBreakpoints != null)
+                maxAdoptableTokens = Math.Min(maxAdoptableTokens, seq.CacheBreakpointLimit);
             // Cap reuse at the model's reliably-restorable prefix length (sliding
             // window for circular caches). Adopting beyond this would inject a wrapped
             // snapshot that the model can't faithfully reconstruct -> corrupt output.
@@ -627,6 +633,7 @@ namespace TensorSharp.Runtime.Scheduling
             {
                 var block = seq.BlockTable.Blocks[b];
                 if (block.ContentHash != null) continue;
+                if (!IsBlockAllowedByExplicitMarkers(seq, b)) continue;
                 // The recurrent batched-paged path keeps state in model-owned
                 // slot pools and does not populate PagedKvStorage. Only blocks
                 // explicitly extracted by CaptureNewlyFullBlocks are portable.
@@ -634,6 +641,30 @@ namespace TensorSharp.Runtime.Scheduling
                     continue;
                 _pool.RegisterFullBlock(block, hashes[b], _cfg.BlockSize);
             }
+        }
+
+        /// <summary>
+        /// Whether a full block may be registered in the prefix-cache index.
+        /// <para>
+        /// A request that carried explicit <c>cache_control</c> markers has told
+        /// us which prefix is worth keeping; blocks past the last breakpoint are
+        /// request-specific and are left out of the index so they cannot evict
+        /// the prefixes the client asked to keep. A block qualifies only when it
+        /// ends at or before that breakpoint — a block straddling it holds
+        /// tokens from both sides, and the index is block-granular, so it is
+        /// dropped (the floor-to-block-size loss the design accepts).
+        /// </para>
+        /// <para>
+        /// Sequences without markers — the overwhelming majority — return true
+        /// here and keep the default behaviour of caching every full block.
+        /// </para>
+        /// </summary>
+        private bool IsBlockAllowedByExplicitMarkers(SequenceState seq, int blockIndex)
+        {
+            if (seq.CacheBreakpoints == null)
+                return true;
+            int limit = seq.CacheBreakpointLimit;
+            return (blockIndex + 1) * _cfg.BlockSize <= limit;
         }
 
         private void CacheFullBlocksForSequence(SequenceState seq)
@@ -653,6 +684,7 @@ namespace TensorSharp.Runtime.Scheduling
             {
                 var block = seq.BlockTable.Blocks[b];
                 if (block.ContentHash != null) continue;
+                if (!IsBlockAllowedByExplicitMarkers(seq, b)) continue;
                 // Only register blocks whose K/V was actually extracted into
                 // pool storage. CaptureNewlyFullBlocks sets Used==BlockSize
                 // after a successful TryExtractKVBlock; blocks where extract

@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using Microsoft.Extensions.Logging.Abstractions;
 using TensorSharp;
+using TensorSharp.Runtime.Speculative;
 
 namespace InferenceWeb.Tests;
 
@@ -12,16 +13,52 @@ namespace InferenceWeb.Tests;
 public class ModelReloadRollbackTests : IDisposable
 {
     private readonly string _dir;
+    private readonly EnvScope _env = new();
 
     public ModelReloadRollbackTests()
     {
         _dir = Path.Combine(Path.GetTempPath(), $"ts-reload-rollback-{Guid.NewGuid():N}");
         Directory.CreateDirectory(_dir);
+        _env.ClearSpeculationVars();
+        _env.Set("TS_DSV4_DSPARK", null);
     }
 
     public void Dispose()
     {
+        _env.Dispose();
         Directory.Delete(_dir, recursive: true);
+    }
+
+    [Theory]
+    [InlineData(SpeculationEnvVars.DraftModel)]
+    [InlineData(SpeculationEnvVars.LegacyDraftModel)]
+    public void GenericDraftModelEnvironment_ReachesFactoryTimeDrafterLoad(string variable)
+    {
+        string modelPath = WriteMinimalGguf("model.gguf");
+        string draftPath = WriteMinimalGguf("draft.gguf");
+        _env.Set(variable, draftPath);
+        var factory = new ScriptedFactory();
+        factory.Enqueue(path => new FakeModel(path));
+
+        using var svc = NewService(factory);
+        svc.LoadModel(modelPath, null, "cpu");
+
+        Assert.Equal(draftPath, Assert.Single(factory.DraftPaths));
+    }
+
+    [Fact]
+    public void LegacyDsparkEnvironment_RemainsFactoryTimeFallback()
+    {
+        string modelPath = WriteMinimalGguf("model.gguf");
+        string draftPath = WriteMinimalGguf("draft.gguf");
+        _env.Set("TS_DSV4_DSPARK", draftPath);
+        var factory = new ScriptedFactory();
+        factory.Enqueue(path => new FakeModel(path));
+
+        using var svc = NewService(factory);
+        svc.LoadModel(modelPath, null, "cpu");
+
+        Assert.Equal(draftPath, Assert.Single(factory.DraftPaths));
     }
 
     [Fact]
@@ -218,6 +255,7 @@ public class ModelReloadRollbackTests : IDisposable
     private sealed class ScriptedFactory
     {
         public readonly List<(string Path, BackendType Backend)> Calls = new();
+        public readonly List<string> DraftPaths = new();
         private readonly Queue<Func<string, ModelBase>> _steps = new();
 
         public void Enqueue(Func<string, ModelBase> step) => _steps.Enqueue(step);
@@ -225,6 +263,7 @@ public class ModelReloadRollbackTests : IDisposable
         public ModelBase Create(string path, BackendType backend, ITensorParallelGroup tpGroup, string draftPath)
         {
             Calls.Add((path, backend));
+            DraftPaths.Add(draftPath);
             return _steps.Dequeue()(path);
         }
     }

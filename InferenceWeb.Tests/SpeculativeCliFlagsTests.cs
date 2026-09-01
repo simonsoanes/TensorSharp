@@ -10,6 +10,7 @@
 
 using System;
 using System.IO;
+using TensorSharp.Cli;
 using TensorSharp.Runtime.Scheduling;
 using TensorSharp.Runtime.Speculative;
 using Xunit;
@@ -112,7 +113,7 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
     public void Apply_WithoutPmin_LeavesTheGateUnsetForTheDrafterToChoose()
     {
         // The per-token gate (top-1 probability over the head's top-10 logits,
-        // default 0.75) and the block gate (cumulative prefix-acceptance product,
+        // default 0.15) and the block gate (cumulative prefix-acceptance product,
         // default 0.35) threshold different quantities, so "unset" has to survive
         // all the way to SpeculativeExecution rather than collapsing to one
         // shared number that badly mis-gates the other kind.
@@ -143,6 +144,9 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
     [InlineData("-0.1")]
     [InlineData("1.5")]
     [InlineData("nope")]
+    [InlineData("NaN")]
+    [InlineData("Infinity")]
+    [InlineData("-Infinity")]
     public void Apply_SpecPminOutsideTheUnitInterval_FailsFastNamingTheFlag(string value)
     {
         // The [0, 1] bound exists ONLY here: SchedulerConfig reads the variable
@@ -153,6 +157,15 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
 
         Assert.Contains("--spec-pmin", ex.Message);
         Assert.Null(Environment.GetEnvironmentVariable("TS_MTP_PMIN"));
+    }
+
+    [Fact]
+    public void Apply_SpecPminZero_IsAcceptedAsNeverDecline()
+    {
+        // 0 is a meaningful setting, not an out-of-range one: never decline to
+        // draft. It is llama.cpp's own default for the same knob (p_min = 0.0).
+        SpeculativeCliFlags.Apply(new[] { "--spec-pmin", "0" });
+        Assert.Equal("0", Environment.GetEnvironmentVariable(SpeculativeCliFlags.PMinEnvVar));
     }
 
     [Fact]
@@ -243,6 +256,55 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
         }
     }
 
+    [Fact]
+    public void Resolve_ExplicitNoSpec_VetoesAnAlreadyLoadedBlockDrafter()
+    {
+        SpeculativeCliFlags.Apply(new[] { "--no-spec" });
+
+        var settings = SpeculativeDecodingOptions.Resolve(0, -1f);
+
+        Assert.True(settings.ExplicitlyDisabled);
+        Assert.False(SpeculativeDecodingOptions.ShouldEngage(DraftHeadKind.Block, settings));
+    }
+
+    [Fact]
+    public void Resolve_DefaultOff_DoesNotVetoASeparatelyLoadedBlockDrafter()
+    {
+        var settings = SpeculativeDecodingOptions.Resolve(0, -1f);
+
+        Assert.False(settings.ExplicitlyDisabled);
+        Assert.True(SpeculativeDecodingOptions.ShouldEngage(DraftHeadKind.Block, settings));
+        Assert.False(SpeculativeDecodingOptions.ShouldEngage(DraftHeadKind.PerToken, settings));
+    }
+
+    [Fact]
+    public void CliHost_DraftModelEqualsForm_ReachesTheModelFactoryPath()
+    {
+        string gguf = Path.Combine(Path.GetTempPath(), $"drafter-{Guid.NewGuid():N}.gguf");
+        File.WriteAllBytes(gguf, new byte[] { 1, 2, 3 });
+        try
+        {
+            SpeculativeCliFlags.Apply(new[] { "--draft-model=" + gguf });
+
+            Assert.Equal(gguf, TensorSharp.Cli.Program.ResolveConfiguredDraftModelPath());
+        }
+        finally
+        {
+            File.Delete(gguf);
+        }
+    }
+
+    [Theory]
+    [InlineData(SpeculationEnvVars.DraftModel)]
+    [InlineData(SpeculationEnvVars.LegacyDraftModel)]
+    public void CliHost_EnvironmentDraftModel_ReachesTheModelFactoryPath(string variable)
+    {
+        const string gguf = "/configured/drafter.gguf";
+        _env.Set(variable, gguf);
+
+        Assert.Equal(gguf, TensorSharp.Cli.Program.ResolveConfiguredDraftModelPath());
+    }
+
     // ----- the dual TS_SPEC_* / TS_MTP_* env spelling -----
 
     [Fact]
@@ -276,6 +338,32 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
         var cfg = SpeculationOptions.FromEnvironment();
         Assert.True(cfg.Enabled);
         Assert.Equal(12, cfg.MaxDraftTokens);
+    }
+
+    [Theory]
+    [InlineData(SpeculationEnvVars.Draft, "65")]
+    [InlineData(SpeculationEnvVars.Draft, "1000")]
+    [InlineData(SpeculationEnvVars.LegacyDraft, "65")]
+    [InlineData(SpeculationEnvVars.LegacyDraft, "1000")]
+    public void FromEnvironment_DraftWindowAboveTheBound_IsIgnored(string variable, string value)
+    {
+        _env.Set(variable, value);
+
+        SpeculationOptions options = SpeculationOptions.FromEnvironment();
+
+        Assert.Equal(SpeculationOptions.DefaultMaxDraftTokens, options.MaxDraftTokens);
+        Assert.False(options.MaxDraftTokensExplicit);
+    }
+
+    [Theory]
+    [InlineData("NaN")]
+    [InlineData("Infinity")]
+    [InlineData("-Infinity")]
+    public void FromEnvironment_NonFinitePmin_IsIgnored(string value)
+    {
+        _env.Set(SpeculationEnvVars.PMin, value);
+
+        Assert.Null(SpeculationOptions.FromEnvironment().MinDraftProb);
     }
 
     // ----- removed duplicate spellings -----

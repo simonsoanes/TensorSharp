@@ -308,6 +308,7 @@ namespace TensorSharp.Server
             var promptSw = Stopwatch.StartNew();
             List<int> inputTokens;
             int effectiveMaxTokens;
+            List<int> explicitBreakpoints = null;
             bool hasMultimodal = RequiresMultimodalPreparation(renderHistory);
             if (hasMultimodal)
             {
@@ -343,27 +344,38 @@ namespace TensorSharp.Server
                 {
                     inputTokens = _kvCacheRenderer.RenderToTokens(
                         model.Tokenizer, model.Config.ChatTemplate, renderHistory, arch,
-                        addGenerationPrompt: true, tools: tools, enableThinking: enableThinking);
+                        addGenerationPrompt: true, out explicitBreakpoints,
+                        tools: tools, enableThinking: enableThinking);
+                    var unexpandedTokens = inputTokens;
                     // ClearPreparedPromptState is safe when preparation fails
                     // before creating a bucket. Arm cleanup first so partial
                     // image/audio preparation cannot leak tensors on overflow
                     // or any other exception before engine submission.
                     injectorBucketCreated = true;
                     inputTokens = model.MultimodalInjector.ProcessPromptTokens(renderHistory, inputTokens, requestId);
+
+                    // ProcessPromptTokens expands each single placeholder token
+                    // (<|image_pad|>, the audio equivalent) into the encoded
+                    // media span. Markers in the byte-identical token prefix are
+                    // still exact; later offsets cannot be mapped safely and are
+                    // removed while retaining explicit-cache mode.
+                    RetainCacheBreakpointsInUnchangedPrefix(
+                        unexpandedTokens, inputTokens, explicitBreakpoints);
                     inputTokens = TruncatePromptToContext(
                         session, inputTokens, maxTokens, out effectiveMaxTokens, requestId,
-                        preserveAttachedDocuments, engineContextLimit);
+                        preserveAttachedDocuments, engineContextLimit,
+                        explicitBreakpoints: explicitBreakpoints);
                 }
             }
             else
             {
                 inputTokens = _kvCacheRenderer.RenderToTokens(
                     model.Tokenizer, model.Config.ChatTemplate, renderHistory, arch,
-                    addGenerationPrompt: true, tools: tools, enableThinking: enableThinking);
+                    addGenerationPrompt: true, out explicitBreakpoints, tools: tools, enableThinking: enableThinking);
                 inputTokens = TruncatePromptToContext(
-                    session, inputTokens, maxTokens, out effectiveMaxTokens,
+                    session, inputTokens, maxTokens, out effectiveMaxTokens, null,
                     preserveAllInput: preserveAttachedDocuments,
-                    executionContextLimit: engineContextLimit);
+                    executionContextLimit: engineContextLimit, explicitBreakpoints: explicitBreakpoints);
             }
 
             int promptTokenCount = inputTokens.Count;
@@ -384,7 +396,8 @@ namespace TensorSharp.Server
                 blockSize: enginePoolStats.blockSize,
                 samplingConfig: cfg,
                 userTag: session,
-                mediaFingerprint: mediaFingerprint);
+                mediaFingerprint: mediaFingerprint,
+                cacheBreakpoints: explicitBreakpoints);
 
             promptSw.Stop();
             long promptNs = InferenceTelemetry.ToNanos(promptSw.ElapsedTicks);
@@ -749,7 +762,8 @@ namespace TensorSharp.Server
             out int effectiveMaxTokens,
             string requestId = null,
             bool preserveAllInput = false,
-            int executionContextLimit = 0)
+            int executionContextLimit = 0,
+            List<int> explicitBreakpoints = null)
         {
             var model = _lifecycle.Model;
             int maxCtx = model.MaxContextLength;
@@ -789,7 +803,54 @@ namespace TensorSharp.Server
                 inputTokens.Count, kept, maxCtx, effectiveMaxTokens, session?.Id ?? "(none)");
             model.MultimodalInjector.TrimPreparedPrompt(trimStart, requestId);
             session?.TrackedHistory.Clear();
+
+            // Dropping the first trimStart tokens renumbers everything that
+            // survives, so the breakpoints have to move with it (in place - the
+            // caller holds this list and passes it on to the sequence). A
+            // breakpoint at or before the cut marked a prefix that no longer
+            // exists in the prompt at all and is discarded; if that empties the
+            // list the request remains in explicit cache-none mode rather than
+            // silently widening the boundary to the whole truncated prompt.
+            if (explicitBreakpoints != null && explicitBreakpoints.Count > 0)
+            {
+                for (int i = explicitBreakpoints.Count - 1; i >= 0; i--)
+                {
+                    if (explicitBreakpoints[i] <= trimStart)
+                        explicitBreakpoints.RemoveAt(i);
+                    else
+                        explicitBreakpoints[i] -= trimStart;
+                }
+            }
+
             return inputTokens.GetRange(trimStart, kept);
+        }
+
+        /// <summary>Keep only explicit cache boundaries whose token prefix is
+        /// unchanged by multimodal placeholder expansion. An empty, non-null
+        /// list is intentional: it means the request explicitly caches no
+        /// blocks, rather than falling back to implicit cache-all behavior.</summary>
+        internal static void RetainCacheBreakpointsInUnchangedPrefix(
+            IReadOnlyList<int> beforeExpansion,
+            IReadOnlyList<int> afterExpansion,
+            List<int> explicitBreakpoints)
+        {
+            if (explicitBreakpoints == null) return;
+
+            int beforeCount = beforeExpansion?.Count ?? 0;
+            int afterCount = afterExpansion?.Count ?? 0;
+            int common = Math.Min(beforeCount, afterCount);
+            int unchangedPrefix = 0;
+            while (unchangedPrefix < common
+                && beforeExpansion![unchangedPrefix] == afterExpansion![unchangedPrefix])
+            {
+                unchangedPrefix++;
+            }
+
+            for (int i = explicitBreakpoints.Count - 1; i >= 0; i--)
+            {
+                if (explicitBreakpoints[i] > unchangedPrefix)
+                    explicitBreakpoints.RemoveAt(i);
+            }
         }
 
         /// <summary>

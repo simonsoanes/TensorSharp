@@ -92,6 +92,10 @@ namespace
         // stale bytes moe_out still held from the previous token.
         std::vector<tsg::HostMoeSegment> host_moe;
         std::vector<int> host_moe_seg_end;
+        // Fused tensor parallelism: the segmented plan this rank hands back to
+        // the driver instead of running the graph itself. It lives in the
+        // persist slot so the pointer C# receives stays valid across tokens.
+        tsg::TpRankPlan tp_plan;
 
         void reset()
         {
@@ -103,6 +107,7 @@ namespace
             layer_wstart.clear(); layer_wlen.clear();
             k_win_addr.clear(); v_win_addr.clear();
             host_moe.clear(); host_moe_seg_end.clear();
+            tp_plan.clear();
             sig_disc = sig_kcache0 = nullptr;
             num_layers = hidden_size = 0;
             folded = false; out_count = 0;
@@ -174,7 +179,7 @@ namespace
     }
 }
 
-TSG_EXPORT int TSGgml_GptOssModelDecode(
+static int gptoss_model_decode_impl(
     const TSGgmlGptOssLayerDesc* layers, int num_layers,
     void* hidden_data, int hidden_size, int position,
     // Folded final-norm + lm_head (nullable). When all of logits_data /
@@ -184,7 +189,8 @@ TSG_EXPORT int TSGgml_GptOssModelDecode(
     void* logits_data, int vocab_size,
     const void* lm_head_data, int lm_head_type,
     std::int64_t lm_head_ne0, std::int64_t lm_head_ne1, std::int64_t lm_head_bytes,
-    const void* final_norm_data)
+    const void* final_norm_data,
+    int tp_degree, void** tp_plan_out)
 {
     try
     {
@@ -220,6 +226,54 @@ TSG_EXPORT int TSGgml_GptOssModelDecode(
         }();
         bool can_persist = gptoss_persist &&
             (g_backend_type == BACKEND_TYPE_CUDA || g_backend_type == BACKEND_TYPE_VULKAN);
+
+        // ---- fused tensor parallelism ----
+        // Plan mode is requested by PASSING tp_plan_out, not by the degree: a
+        // distributed run drives one local rank per node at tp_degree == 1 and
+        // still needs a plan back.
+        const bool tp_mode = tp_plan_out != nullptr;
+        const int tp_rank = tp_mode ? tsg::g_active_rank : 0;
+        if (tp_mode)
+        {
+            *tp_plan_out = nullptr;
+            if (tp_degree < 1)
+            {
+                set_last_error("GPT-OSS model decode: tensor-parallel degree must be >= 1.");
+                return 0;
+            }
+            if (!can_persist)
+            {
+                set_last_error("GPT-OSS model decode: tensor-parallel plan mode requires the "
+                               "persistent decode graph - the driver runs the graph after this "
+                               "call returns, so ctx/buffer must outlive it.");
+                return 0;
+            }
+            for (int l = 0; l < num_layers; l++)
+            {
+                if (layers[l].cpu_moe != 0)
+                {
+                    set_last_error("GPT-OSS model decode: MoE CPU offload is not supported under "
+                                   "fused tensor parallelism.");
+                    return 0;
+                }
+            }
+        }
+        // Expert parallelism: every rank owns a contiguous slice of the expert
+        // stack. The router still runs over the GLOBAL expert count on every
+        // rank - the hidden stream is bit-identical after each reduction - so
+        // the selected ids are remapped into this rank's slice further down.
+        const int global_experts = layers[0].num_experts;
+        // Cluster degree: the managed side slices the expert stack globally.
+        const int tp_group_degree = tsg::tp_global_degree(tp_degree);
+        const int stacked_experts = (tp_mode && global_experts > 0)
+            ? global_experts / tp_group_degree : global_experts;
+        if (tp_mode && global_experts > 0 &&
+            (global_experts % tp_group_degree != 0 || stacked_experts < layers[0].num_experts_used))
+        {
+            set_last_error("GPT-OSS model decode: expert count is not shardable across the "
+                           "tensor-parallel ranks.");
+            return 0;
+        }
 
         // ---- device KV windows (shared with the per-layer prefill kernel) ----
         std::unique_lock<std::mutex> kv_lock(tsg_gptoss::kv_mutex());
@@ -324,6 +378,25 @@ TSG_EXPORT int TSGgml_GptOssModelDecode(
                                             layers[l].is_swa != 0, layers[l].sliding_window);
                     decode_input_set_async(dc->attn_mask[l], md.data(), md.size() * sizeof(ggml_fp16_t));
                 }
+            }
+
+            if (tp_mode)
+            {
+                if (!dc->tp_plan.valid())
+                {
+                    set_last_error("GPT-OSS model decode: cached graph has no tensor-parallel plan.");
+                    dc->reset();
+                    return 0;
+                }
+                const bool tp_download = (tp_rank == 0);
+                dc->tp_plan.out_tensor = tp_download ? dc->hidden_out : nullptr;
+                dc->tp_plan.out_host = tp_download ? (dc->folded ? logits_data : hidden_data) : nullptr;
+                dc->tp_plan.out_bytes = tp_download
+                    ? static_cast<std::size_t>(dc->out_count) * sizeof(float) : 0;
+                *tp_plan_out = &dc->tp_plan;
+                mark_rows_written();
+                clear_last_error();
+                return 1;
             }
 
             // MoE CPU offload replays with the same segment cuts the build pass
@@ -431,6 +504,9 @@ TSG_EXPORT int TSGgml_GptOssModelDecode(
             const int qDim = d.num_heads * hd;
             const int kDim = kvH * hd;
             const int nExp = d.num_experts;
+            // Expert-parallel: this rank's stacked tensors hold only its slice.
+            // The router (gate_inp_w/b) stays GLOBAL - it selects over all experts.
+            const int nExpLocal = tp_mode ? stacked_experts : nExp;
 
             t.attn_norm_w = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
             t.qkv_w = ggml_new_tensor_2d(ctx, static_cast<ggml_type>(d.qkv_type), d.qkv_ne0, d.qkv_ne1);
@@ -459,14 +535,50 @@ TSG_EXPORT int TSGgml_GptOssModelDecode(
             // same bytes straight out of the GGUF mmap.
             if (d.cpu_moe == 0 || host_moe_verify_enabled())
             {
-                t.gate_exps = ggml_new_tensor_3d(ctx, static_cast<ggml_type>(d.ge_type), d.ge_ne0, d.ge_ne1, nExp);
-                t.up_exps = ggml_new_tensor_3d(ctx, static_cast<ggml_type>(d.ue_type), d.ue_ne0, d.ue_ne1, nExp);
-                t.down_exps = ggml_new_tensor_3d(ctx, static_cast<ggml_type>(d.de_type), d.de_ne0, d.de_ne1, nExp);
-                if (d.gate_exps_b != nullptr) t.gate_exps_b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, d.ge_ne1, nExp);
-                if (d.up_exps_b != nullptr) t.up_exps_b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, d.ue_ne1, nExp);
-                if (d.down_exps_b != nullptr) t.down_exps_b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, d.de_ne1, nExp);
+                t.gate_exps = ggml_new_tensor_3d(ctx, static_cast<ggml_type>(d.ge_type), d.ge_ne0, d.ge_ne1, nExpLocal);
+                t.up_exps = ggml_new_tensor_3d(ctx, static_cast<ggml_type>(d.ue_type), d.ue_ne0, d.ue_ne1, nExpLocal);
+                t.down_exps = ggml_new_tensor_3d(ctx, static_cast<ggml_type>(d.de_type), d.de_ne0, d.de_ne1, nExpLocal);
+                if (d.gate_exps_b != nullptr) t.gate_exps_b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, d.ge_ne1, nExpLocal);
+                if (d.up_exps_b != nullptr) t.up_exps_b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, d.ue_ne1, nExpLocal);
+                if (d.down_exps_b != nullptr) t.down_exps_b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, d.de_ne1, nExpLocal);
             }
         }
+
+        // ---- expert-parallel routing tables ----
+        // top_k runs on the GLOBAL router logits, which are identical on every
+        // rank. Two 1-D tables then confine the result to this rank's slice
+        // without integer arithmetic (which ggml lacks on I32):
+        //   ep_lut  I32 [1, nExp]: global id -> local id (foreign -> 0)
+        //   ep_mask F32 [1, nExp]: 1 for owned experts, else 0
+        // A zero weight nullifies the locally computed, wrong-expert
+        // contribution of every foreign route. gpt-oss gates with
+        // SOFTMAX_WEIGHT and does NOT renormalise after the top-k, so the
+        // masked weights sum across the group to exactly the single-GPU values.
+        ggml_tensor* ep_lut = nullptr;
+        ggml_tensor* ep_mask = nullptr;
+        std::vector<std::int32_t> ep_lut_data;
+        std::vector<float> ep_mask_data;
+        if (tp_mode && global_experts > 0 && tp_group_degree > 1)
+        {
+            ep_lut = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, 1, global_experts);
+            ep_mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, global_experts);
+            const int first = tsg::tp_global_rank() * stacked_experts;
+            const int last = first + stacked_experts;
+            ep_lut_data.resize(static_cast<std::size_t>(global_experts));
+            ep_mask_data.resize(static_cast<std::size_t>(global_experts));
+            for (int e = 0; e < global_experts; e++)
+            {
+                const bool own = e >= first && e < last;
+                ep_lut_data[static_cast<std::size_t>(e)] = own ? e - first : 0;
+                ep_mask_data[static_cast<std::size_t>(e)] = own ? 1.0f : 0.0f;
+            }
+        }
+
+        // Tensor-parallel cut points. `tp_partial` is the row-parallel result
+        // whose per-rank values the collective sums; `tp_boundary` is the last
+        // graph node that may run before that reduction.
+        std::vector<ggml_tensor*> tp_partial;
+        std::vector<ggml_tensor*> tp_boundary;
 
         ggml_tensor* hidden = hidden_t;
         bool fa_unsupported = false;
@@ -588,8 +700,17 @@ TSG_EXPORT int TSGgml_GptOssModelDecode(
             }
 
             ggml_tensor* o_mm = ggml_mul_mat(ctx, t.o_w, attn_flat);
-            if (t.o_b != nullptr) o_mm = ggml_add(ctx, o_mm, t.o_b);
-            ggml_tensor* o_flat = ggml_reshape_1d(ctx, o_mm, H);
+            // Row-parallel cut #1. The boundary is the RAW matmul, deliberately
+            // before the bias: cutting pre-bias leaves the add in the next
+            // segment, where it reads the already-reduced sum, so o_b lands
+            // exactly once instead of once per rank.
+            if (tp_mode)
+            {
+                tp_partial.push_back(o_mm);
+                tp_boundary.push_back(o_mm);
+            }
+            ggml_tensor* o_biased = (t.o_b != nullptr) ? ggml_add(ctx, o_mm, t.o_b) : o_mm;
+            ggml_tensor* o_flat = ggml_reshape_1d(ctx, o_biased, H);
             ggml_tensor* ffn_inp = ggml_add(ctx, hidden, o_flat);
 
             // ===== MoE FFN =====
@@ -606,6 +727,19 @@ TSG_EXPORT int TSGgml_GptOssModelDecode(
             ggml_tensor* w = ggml_get_rows(ctx, logits_r, sel);                        // [1, nUsed, 1]
             ggml_tensor* w_soft = ggml_soft_max(ctx, ggml_reshape_2d(ctx, w, nUsed, 1));
             ggml_tensor* w_final = ggml_reshape_3d(ctx, w_soft, 1, nUsed, 1);
+
+            // Expert-parallel: map the global ids onto this rank's slice and
+            // zero the routing weight of every expert it does not own.
+            ggml_tensor* sel_ids = sel;
+            if (ep_lut != nullptr)
+            {
+                ggml_tensor* lut_r = ggml_reshape_3d(ctx, ep_lut, 1, nExp, 1);
+                ggml_tensor* local_ids = ggml_get_rows(ctx, lut_r, sel);      // [1, nUsed, 1] I32
+                sel_ids = ggml_reshape_2d(ctx, local_ids, nUsed, 1);
+                ggml_tensor* mask_r = ggml_reshape_3d(ctx, ep_mask, 1, nExp, 1);
+                ggml_tensor* own_mask = ggml_get_rows(ctx, mask_r, sel);      // [1, nUsed, 1] F32
+                w_final = ggml_mul(ctx, w_final, own_mask);
+            }
 
             ggml_tensor* moe_out_1d = nullptr;
             if (d.cpu_moe != 0)
@@ -679,13 +813,13 @@ TSG_EXPORT int TSGgml_GptOssModelDecode(
             else
             {
                 ggml_tensor* moe_in_3d = ggml_reshape_3d(ctx, moe_in, H, 1, 1);
-                ggml_tensor* gate = ggml_mul_mat_id(ctx, t.gate_exps, moe_in_3d, sel);     // [nFf, nUsed, 1]
-                if (t.gate_exps_b != nullptr) gate = ggml_add_id(ctx, gate, t.gate_exps_b, sel);
-                ggml_tensor* up = ggml_mul_mat_id(ctx, t.up_exps, moe_in_3d, sel);
-                if (t.up_exps_b != nullptr) up = ggml_add_id(ctx, up, t.up_exps_b, sel);
+                ggml_tensor* gate = ggml_mul_mat_id(ctx, t.gate_exps, moe_in_3d, sel_ids); // [nFf, nUsed, 1]
+                if (t.gate_exps_b != nullptr) gate = ggml_add_id(ctx, gate, t.gate_exps_b, sel_ids);
+                ggml_tensor* up = ggml_mul_mat_id(ctx, t.up_exps, moe_in_3d, sel_ids);
+                if (t.up_exps_b != nullptr) up = ggml_add_id(ctx, up, t.up_exps_b, sel_ids);
                 ggml_tensor* act = ggml_swiglu_oai(ctx, gate, up, d.oai_alpha, d.oai_limit);
-                ggml_tensor* down = ggml_mul_mat_id(ctx, t.down_exps, act, sel);           // [H, nUsed, 1]
-                if (t.down_exps_b != nullptr) down = ggml_add_id(ctx, down, t.down_exps_b, sel);
+                ggml_tensor* down = ggml_mul_mat_id(ctx, t.down_exps, act, sel_ids);       // [H, nUsed, 1]
+                if (t.down_exps_b != nullptr) down = ggml_add_id(ctx, down, t.down_exps_b, sel_ids);
                 ggml_tensor* weighted = ggml_mul(ctx, down, w_final);
 
                 ggml_tensor* moe_out = ggml_view_2d(ctx, weighted, H, 1, weighted->nb[2], 0);
@@ -696,6 +830,13 @@ TSG_EXPORT int TSGgml_GptOssModelDecode(
                     moe_out = ggml_add(ctx, moe_out, view_u);
                 }
                 moe_out_1d = ggml_reshape_1d(ctx, moe_out, H);
+                // Row-parallel cut #2: this rank summed only the experts it
+                // owns, so the routed output is a partial.
+                if (tp_mode)
+                {
+                    tp_partial.push_back(moe_out_1d);
+                    tp_boundary.push_back(moe_out_1d);
+                }
             }
             hidden = ggml_add(ctx, ffn_inp, moe_out_1d);
             (void)nFf;
@@ -796,6 +937,10 @@ TSG_EXPORT int TSGgml_GptOssModelDecode(
             LayerTensors& t = lt[l];
             const int hd = d.head_dim;
             const int nExp = d.num_experts;
+            // Expert-parallel: the stacked tensors and their per-expert biases
+            // hold this rank's slice, so their uploads are slice-sized. The
+            // router (gate_inp_w/b) stays global.
+            const int nExpLocal = tp_mode ? stacked_experts : nExp;
             const int qDim = d.num_heads * hd;
             const int kDim = d.num_kv_heads * hd;
             const int qkvDim = (d.separate_qkv != 0) ? qDim : (qDim + 2 * kDim);
@@ -816,9 +961,9 @@ TSG_EXPORT int TSGgml_GptOssModelDecode(
             bind_or_mark(t.v_b, d.v_b, static_cast<std::size_t>(kDim) * sizeof(float), true);
             bind_or_mark(t.o_b, d.o_b, static_cast<std::size_t>(H) * sizeof(float), true);
             bind_or_mark(t.sinks, d.sinks, static_cast<std::size_t>(d.num_heads) * sizeof(float), true);
-            bind_or_mark(t.gate_exps_b, d.gate_exps_b, static_cast<std::size_t>(d.ge_ne1) * nExp * sizeof(float), true);
-            bind_or_mark(t.up_exps_b, d.up_exps_b, static_cast<std::size_t>(d.ue_ne1) * nExp * sizeof(float), true);
-            bind_or_mark(t.down_exps_b, d.down_exps_b, static_cast<std::size_t>(d.de_ne1) * nExp * sizeof(float), true);
+            bind_or_mark(t.gate_exps_b, d.gate_exps_b, static_cast<std::size_t>(d.ge_ne1) * nExpLocal * sizeof(float), true);
+            bind_or_mark(t.up_exps_b, d.up_exps_b, static_cast<std::size_t>(d.ue_ne1) * nExpLocal * sizeof(float), true);
+            bind_or_mark(t.down_exps_b, d.down_exps_b, static_cast<std::size_t>(d.de_ne1) * nExpLocal * sizeof(float), true);
 
             // The K/V caches are the shared device windows: point this graph's
             // tensors straight at them (no host binding, no upload).
@@ -872,6 +1017,15 @@ TSG_EXPORT int TSGgml_GptOssModelDecode(
         ggml_backend_tensor_set(hidden_t, hidden_data, 0, static_cast<std::size_t>(H) * sizeof(float));
         std::int32_t pos_val = position;
         ggml_backend_tensor_set(pos_tensor, &pos_val, 0, sizeof(std::int32_t));
+        if (ep_lut != nullptr)
+        {
+            // Constant for the life of the graph; the replay path never
+            // re-uploads them.
+            ggml_backend_tensor_set(ep_lut, ep_lut_data.data(), 0,
+                                    ep_lut_data.size() * sizeof(std::int32_t));
+            ggml_backend_tensor_set(ep_mask, ep_mask_data.data(), 0,
+                                    ep_mask_data.size() * sizeof(float));
+        }
         if (can_persist)
         {
             std::int64_t row = position;
@@ -893,7 +1047,14 @@ TSG_EXPORT int TSGgml_GptOssModelDecode(
         // layer for the host expert matmul. Everything else still goes out as one
         // graph submission.
         ggml_status status = GGML_STATUS_SUCCESS;
-        if (!host_moe.empty())
+        // Plan mode builds the graph but must NOT run it: the tensor-parallel
+        // driver executes every rank's graph segment by segment, reducing at
+        // the cut points recorded above.
+        if (tp_mode)
+        {
+            // deliberately empty - execution belongs to tp_execute_plans
+        }
+        else if (!host_moe.empty())
         {
             if (!host_moe_execute_segments(graph, host_moe, host_moe_seg_end, kGptOssDecodeKernel))
                 status = GGML_STATUS_FAILED;
@@ -912,7 +1073,8 @@ TSG_EXPORT int TSGgml_GptOssModelDecode(
         }
 
         void* out_data = fold ? logits_data : hidden_data;
-        finalize_compute_with_download(hidden_out, out_data, static_cast<std::size_t>(out_count) * sizeof(float));
+        if (!tp_mode)
+            finalize_compute_with_download(hidden_out, out_data, static_cast<std::size_t>(out_count) * sizeof(float));
         // ALWAYS drain before returning. `out_data` is the C# caller's pinned
         // logits/hidden array, which it reads directly (no Storage read barrier),
         // and on Metal async mode finalize_compute_with_download only QUEUES the
@@ -957,6 +1119,34 @@ TSG_EXPORT int TSGgml_GptOssModelDecode(
             dcache->valid = true;
         }
 
+        if (tp_mode)
+        {
+            if (dcache == nullptr)
+            {
+                set_last_error("GPT-OSS model decode: tensor-parallel plan mode needs a persist slot.");
+                if (can_persist) { ggml_backend_buffer_free(persist_buf); ggml_free(ctx); }
+                return 0;
+            }
+            dcache->tp_plan.clear();
+            dcache->tp_plan.graph = graph;
+            dcache->tp_plan.ar_tensor = tp_partial;
+            if (!tp_plan_segments(dcache->tp_plan, tp_boundary))
+            {
+                set_last_error("GPT-OSS model decode: could not segment the tensor-parallel plan.");
+                dcache->reset();
+                return 0;
+            }
+            // Only rank 0 downloads. After the last reduction every rank holds
+            // the same hidden state and folds the same replicated LM head, so a
+            // second download would only write identical bytes over the first.
+            const bool tp_download = (tp_rank == 0);
+            dcache->tp_plan.out_tensor = tp_download ? hidden_out : nullptr;
+            dcache->tp_plan.out_host = tp_download ? out_data : nullptr;
+            dcache->tp_plan.out_bytes = tp_download
+                ? static_cast<std::size_t>(out_count) * sizeof(float) : 0;
+            *tp_plan_out = &dcache->tp_plan;
+        }
+
         mark_rows_written();
         clear_last_error();
         return 1;
@@ -973,15 +1163,59 @@ TSG_EXPORT int TSGgml_GptOssModelDecode(
     }
 }
 
+// Thin ABI wrappers over the impl. The original export keeps its exact
+// signature so every existing caller is unaffected; the TP one asks for a plan
+// and gets the graph back unexecuted for tp_execute_plans to drive.
+TSG_EXPORT int TSGgml_GptOssModelDecode(
+    const TSGgmlGptOssLayerDesc* layers, int num_layers,
+    void* hidden_data, int hidden_size, int position,
+    void* logits_data, int vocab_size,
+    const void* lm_head_data, int lm_head_type,
+    std::int64_t lm_head_ne0, std::int64_t lm_head_ne1, std::int64_t lm_head_bytes,
+    const void* final_norm_data)
+{
+    return gptoss_model_decode_impl(layers, num_layers, hidden_data, hidden_size, position,
+                                    logits_data, vocab_size, lm_head_data, lm_head_type,
+                                    lm_head_ne0, lm_head_ne1, lm_head_bytes, final_norm_data,
+                                    1, nullptr);
+}
+
+TSG_EXPORT int TSGgml_GptOssModelDecodeTP(
+    const TSGgmlGptOssLayerDesc* layers, int num_layers,
+    void* hidden_data, int hidden_size, int position,
+    void* logits_data, int vocab_size,
+    const void* lm_head_data, int lm_head_type,
+    std::int64_t lm_head_ne0, std::int64_t lm_head_ne1, std::int64_t lm_head_bytes,
+    const void* final_norm_data,
+    int tp_degree, void** tp_plan_out)
+{
+    return gptoss_model_decode_impl(layers, num_layers, hidden_data, hidden_size, position,
+                                    logits_data, vocab_size, lm_head_data, lm_head_type,
+                                    lm_head_ne0, lm_head_ne1, lm_head_bytes, final_norm_data,
+                                    tp_degree, tp_plan_out);
+}
+
 // Drop every persistent (CUDA-graph-captured) GPT-OSS decode graph. The captured
 // graph pins ggml-cuda's compute-pool scratch addresses and the KV windows; a
 // prefill (which grows the pool) or a KV reset/grow can move those, so the C#
 // caller drops the cache before any prefill and on ResetKVCache. No-op when the
 // persist path is off.
+// Defined in ggml_ops_gptoss_prefill.cpp: the tensor-parallel prefill graphs
+// pin the same KV windows and compute pool this reset invalidates.
+void gptoss_prefill_tp_reset_all();
+// Defined in ggml_ops_gptoss_batched.cpp. Deliberately NOT chained here: the
+// solo pool dies on every prefill ("prefill moves the compute pool"), but the
+// batched arena graphs allocate everything in their own buffers and reference
+// no KV windows, so they survive prefills — that is what keeps request churn
+// replaying one captured CUDA graph. Teardown paths in ggml_ops_core.cpp call
+// it explicitly.
+TSG_EXPORT void TSGgml_GptOssResetBatchedDecodeCache();
+
 TSG_EXPORT void TSGgml_GptOssResetDecodeCache()
 {
     for (auto& pool : g_gptoss_dc_pools)
         pool.reset_all();
+    gptoss_prefill_tp_reset_all();
 }
 
 // Copy the device-resident KV rows [0, rows) back into the host mirror. The
@@ -997,6 +1231,11 @@ TSG_EXPORT int TSGgml_GptOssSyncKvCacheToHost(
         if (!ensure_backend())
             return 0;
         std::lock_guard<std::mutex> lock(tsg_gptoss::kv_mutex());
+        // Rows decoded in the token-batched arena exist only there until this
+        // flush; it writes them straight into the host mirror (and retires the
+        // slot), after which the window download below completes the picture.
+        tsg_gptoss::batched_on_external_acquire(k_cache);
+        tsg_gptoss::batched_on_external_acquire(v_cache);
         tsg_gptoss::KvWindow* kw = tsg_gptoss::kv_find(k_cache);
         tsg_gptoss::KvWindow* vw = tsg_gptoss::kv_find(v_cache);
         if (kw == nullptr && vw == nullptr)

@@ -37,6 +37,12 @@ namespace TensorSharp.Models
         public long Ne0 { get; }
         public long Ne1 { get; }
         public long RawBytes { get; }
+
+        /// <summary>Per-tensor matmul-output multiplier from an optional
+        /// sidecar "&lt;base&gt;.scale" tensor (NVFP4 scale2, HF weight_scale_2).
+        /// The true weight is (quantized blocks) x Scale; consumers multiply
+        /// the projection output by it. 1.0 = no sidecar.</summary>
+        public float Scale { get; internal set; } = 1.0f;
         private bool _ownsBuffer;
         private bool _ownsCacheKeyHandle;
         private object _ownerToken;

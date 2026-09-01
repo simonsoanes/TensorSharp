@@ -6,6 +6,84 @@ namespace InferenceWeb.Tests;
 
 public class StructuredOutputTests
 {
+    [Fact]
+    public void PromptInjection_KeepsLeadingMessageMarkerAtOriginalContentBoundary()
+    {
+        const string stablePreamble = "Stable prefix.";
+        var message = new ChatMessage
+        {
+            Role = "system",
+            Content = stablePreamble + "   ",
+            CacheControl = new CacheControlMarker(),
+            ContentCacheBreakpoints = new List<int> { 6 },
+        };
+
+        ChatMessage injected = StructuredOutputPrompt.Apply(
+            new List<ChatMessage> { message }, StructuredOutputFormat.JsonObject())[0];
+
+        Assert.Null(injected.CacheControl);
+        Assert.Equal(new[] { 6, stablePreamble.Length }, injected.ContentCacheBreakpoints);
+        Assert.StartsWith(stablePreamble + "\n\n", injected.Content, StringComparison.Ordinal);
+        Assert.NotNull(message.CacheControl);
+    }
+
+    [Fact]
+    public void PromptInjection_ClampsTrailingWhitespaceMarkersBeforeInstruction()
+    {
+        const string stablePreamble = "Stable prefix.";
+        string contentWithWhitespace = stablePreamble + " \t  ";
+        var message = new ChatMessage
+        {
+            Role = "developer",
+            Content = contentWithWhitespace,
+            CacheControl = new CacheControlMarker(),
+            ContentCacheBreakpoints = new List<int>
+            {
+                contentWithWhitespace.Length,
+                3,
+                stablePreamble.Length + 1,
+                3,
+            },
+        };
+
+        ChatMessage injected = StructuredOutputPrompt.Apply(
+            new List<ChatMessage> { message }, StructuredOutputFormat.JsonObject())[0];
+
+        Assert.Equal(new[] { 3, stablePreamble.Length }, injected.ContentCacheBreakpoints);
+        Assert.Null(injected.CacheControl);
+        Assert.Equal(
+            new[] { contentWithWhitespace.Length, 3, stablePreamble.Length + 1, 3 },
+            message.ContentCacheBreakpoints);
+    }
+
+    [Fact]
+    public void PromptClone_PreservesCacheMarkersAndConversationMetadata()
+    {
+        var message = new ChatMessage
+        {
+            Role = "assistant",
+            Content = "earlier answer",
+            RawOutputTokens = new List<int> { 11, 12 },
+            CacheControl = new CacheControlMarker { Type = "ephemeral" },
+            ContentCacheBreakpoints = new List<int> { 4 },
+            TextFilePaths = new List<string> { "/tmp/input.txt" },
+            TextFileNames = new List<string> { "input.txt" },
+            ToolCallId = "call-1",
+        };
+
+        List<ChatMessage> result = StructuredOutputPrompt.Apply(
+            new List<ChatMessage> { message }, StructuredOutputFormat.JsonObject());
+
+        ChatMessage clone = result[1];
+        Assert.NotSame(message, clone);
+        Assert.Equal(new[] { 11, 12 }, clone.RawOutputTokens);
+        Assert.Equal(new[] { 4 }, clone.ContentCacheBreakpoints);
+        Assert.Equal("ephemeral", clone.CacheControl?.Type);
+        Assert.Equal(new[] { "/tmp/input.txt" }, clone.TextFilePaths);
+        Assert.Equal(new[] { "input.txt" }, clone.TextFileNames);
+        Assert.Equal("call-1", clone.ToolCallId);
+    }
+
     // Stream a model output in many small fragments through the json_object
     // streaming filter and return the concatenation actually sent to the client.
     private static string FeedInChunks(string modelOutput, int chunkSize = 3)
@@ -253,5 +331,3 @@ public class StructuredOutputTests
         Assert.Equal("""{"item":{"name":"Ada","age":30}}""", normalized.NormalizedContent);
     }
 }
-
-

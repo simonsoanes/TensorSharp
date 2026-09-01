@@ -4315,15 +4315,19 @@ static graph_build_result * dsv4_acquire_batched_graph(
     {
         m.graph_cache.emplace_front(new graph_build_result());
         graph_build_result & r = *m.graph_cache.front();
-        const size_t meta_size = (size_t) 96 * 1024 * 1024;
+        // The per-slot attention forks are the only O(n) node cost, roughly
+        // ~500 nodes/slot including the attn_cat concat chain; wide spans need
+        // a bigger node table and metadata arena.
+        const size_t graph_nodes = n <= 8 ? 32768 : 65536;
+        const size_t meta_size = (size_t) (n <= 8 ? 96 : 176) * 1024 * 1024;
         ggml_init_params gp = { meta_size, nullptr, true };
         r.ctx = ggml_init(gp);
-        r.gf = ggml_new_graph_custom(r.ctx, 32768, false);
+        r.gf = ggml_new_graph_custom(r.ctx, graph_nodes, false);
         r.nt = n;
         r.sig = sig;
         r.slot_id = -1;   // multi-slot; purge-on-free checks r.bd
         r.bd = std::move(bd);
-        r.sched = ggml_backend_sched_new(m.sched_backends, m.sched_bufts, m.n_sched_backends, 32768, false, true);
+        r.sched = ggml_backend_sched_new(m.sched_backends, m.sched_bufts, m.n_sched_backends, (int) graph_nodes, false, true);
         if (!r.sched)
         {
             fprintf(stderr, "[dsv4] batched sched creation failed\n");
@@ -4779,11 +4783,11 @@ TSG_EXPORT int TSGgml_Dsv4ForwardBatchedDecode(
     void * handle, int n, const int32_t * slot_ids, const int32_t * tokens,
     const int32_t * positions, float * logits_out)
 {
-    if (!handle || n < 2 || n > 8 || !slot_ids || !tokens || !positions || !logits_out) return -1;
+    if (!handle || n < 2 || n > 16 || !slot_ids || !tokens || !positions || !logits_out) return -1;
     auto * m = (tsg_dsv4::dsv4_model *) handle;
     if (!m->fused) return -2;
 
-    tsg_dsv4::dsv4_slot * slots[8];
+    tsg_dsv4::dsv4_slot * slots[16];
     for (int i = 0; i < n; i++)
     {
         auto it = m->slots.find(slot_ids[i]);

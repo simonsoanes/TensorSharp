@@ -45,6 +45,12 @@ namespace TensorSharp.Cli
             /// speculation on a drafter that is not itself an explicit request.</summary>
             public bool Requested { get; init; }
 
+            /// <summary>True when <c>--no-spec</c> (or a resolved speculation
+            /// environment variable set to off) explicitly vetoed drafting. This
+            /// stays distinct from the default-off state so naming a separate
+            /// block drafter can still count as the request.</summary>
+            public bool ExplicitlyDisabled { get; init; }
+
             /// <summary>Cap on tokens drafted per step. Always positive.</summary>
             public int MaxDraftTokens { get; init; }
 
@@ -54,7 +60,7 @@ namespace TensorSharp.Cli
             public bool MaxDraftTokensExplicit { get; init; }
 
             /// <summary>Draft-confidence gate, or null to let the ALGORITHM apply its own
-            /// default — 0.75 for a per-token head, 0.35 for a block drafter, 0 for
+            /// default — 0.15 for a per-token head, 0.35 for a block drafter, 0 for
             /// n-gram. They threshold different quantities, so there is no shared
             /// default to fall back on and "unset" has to survive all the way
             /// down.</summary>
@@ -71,6 +77,7 @@ namespace TensorSharp.Cli
             public SpeculationOptions ToSpeculationOptions() => new()
             {
                 Enabled = Requested,
+                ExplicitlyDisabled = ExplicitlyDisabled,
                 SpeculatorName = string.IsNullOrWhiteSpace(SpeculatorName)
                     ? SpeculatorRegistry.Auto
                     : SpeculatorName,
@@ -94,11 +101,13 @@ namespace TensorSharp.Cli
             return new Settings
             {
                 Requested = cfg.Speculation.Enabled,
+                ExplicitlyDisabled = cfg.Speculation.ExplicitlyDisabled,
                 SpeculatorName = cfg.Speculation.SpeculatorName,
                 MaxDraftTokens = specDraftMax > 0 ? specDraftMax : Math.Max(1, cfg.Speculation.MaxDraftTokens),
                 MaxDraftTokensExplicit = specDraftMax > 0 || cfg.Speculation.MaxDraftTokensExplicit,
                 MinDraftProb = specDraftConfMin >= 0f ? specDraftConfMin : cfg.Speculation.MinDraftProb,
-                AnyExplicit = cfg.Speculation.Enabled || specDraftMax > 0 || specDraftConfMin >= 0f
+                AnyExplicit = cfg.Speculation.Enabled || cfg.Speculation.ExplicitlyDisabled
+                              || specDraftMax > 0 || specDraftConfMin >= 0f
                               || cfg.Speculation.MinDraftProb.HasValue
                               || !string.Equals(cfg.Speculation.SpeculatorName, SpeculatorRegistry.Auto,
                                   StringComparison.OrdinalIgnoreCase),
@@ -138,8 +147,8 @@ namespace TensorSharp.Cli
             // does. A BLOCK drafter, by contrast, only exists because the
             // operator named its GGUF on --draft-model, so its presence IS the
             // request.
-            bool blockDrafter = (spec as IDraftHead)?.DraftHeadKind == DraftHeadKind.Block;
-            if (!blockDrafter && !settings.Requested)
+            DraftHeadKind? draftHeadKind = (spec as IDraftHead)?.DraftHeadKind;
+            if (!ShouldEngage(draftHeadKind, settings))
                 return null;
 
             // Backends whose accelerated verify/draft kernels are missing run the
@@ -176,6 +185,15 @@ namespace TensorSharp.Cli
                 PrefillChunkSize = spec.SpecPrefillChunkSize > 0 ? spec.SpecPrefillChunkSize : 512,
             };
         }
+
+        /// <summary>
+        /// Whether a discovered drafter represents an active request. Extracted
+        /// from <see cref="TryCreate"/> so the explicit-off policy can be covered
+        /// without loading a multi-gigabyte model in a command-line test.
+        /// </summary>
+        internal static bool ShouldEngage(DraftHeadKind? draftHeadKind, in Settings settings)
+            => !settings.ExplicitlyDisabled
+               && (settings.Requested || draftHeadKind == DraftHeadKind.Block);
 
         /// <summary>How the turn drafts, for logs.</summary>
         internal static string DescribeDrafter(SpeculativeDecoder decoder)

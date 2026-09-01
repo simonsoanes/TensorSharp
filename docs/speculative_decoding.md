@@ -225,7 +225,7 @@ into VRAM, and sizes its graph cache — so those names are a cross-language
 contract.
 
 `--spec-pmin` means something different per algorithm, which is why each brings
-its own default rather than sharing one: `0.75` for a per-token head (top-1
+its own default rather than sharing one: `0.15` for a per-token head (top-1
 probability over its top-10 logits), `0.35` for a block drafter (the CUMULATIVE
 prefix probability, so the same number is far stricter), `0` for n-gram (where it
 scales the required match length instead).

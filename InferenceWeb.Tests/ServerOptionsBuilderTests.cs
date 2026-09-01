@@ -510,6 +510,18 @@ public class ServerOptionsBuilderTests : IDisposable
         Assert.Contains("Example:", usage);
     }
 
+    [Fact]
+    public void ServerUsage_PrintUsage_DocumentsTheCurrentPerTokenSpeculationGate()
+    {
+        var sw = new StringWriter();
+        ServerUsage.PrintUsage(sw);
+        string usage = sw.ToString();
+        string flattened = System.Text.RegularExpressions.Regex.Replace(usage, @"\s+", " ");
+
+        Assert.Contains("0.15 for a per-token draft head", flattened);
+        Assert.DoesNotContain("0.75 for a per-token draft head", flattened);
+    }
+
     /// <summary>
     /// The inverse of the hand-list above, for the flag families whose names live in
     /// shared constant tables: every flag such a table accepts must be mentioned

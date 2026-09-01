@@ -219,6 +219,7 @@ namespace TensorSharp.Models
             for (int l = 0; l < n; l++)
             {
                 var a = default(Qwen35LayerDecodeArgs);
+                a.ProjScales = ProjScalesPtr(l);   // every layer kind, not just dense FFN
                 a.StructBytes = Marshal.SizeOf<Qwen35LayerDecodeArgs>();
                 a.AttnNormW = (IntPtr)GetFloatPtr(_attnNormW[l]);
                 a.PostAttnNormW = (IntPtr)GetFloatPtr(_postAttnNormW[l]);

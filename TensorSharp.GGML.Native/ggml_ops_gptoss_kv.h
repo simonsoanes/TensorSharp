@@ -86,4 +86,23 @@ namespace tsg_gptoss
     // freshly allocated window re-uploads them from there.
     bool kv_acquire_pair(const TSGgmlGptOssLayerDesc& d, std::int64_t needed_rows,
                          KvWindow*& k_win, KvWindow*& v_win);
+
+    // ------------------------------------------------------------------
+    // Batched-decode arena coherence hooks (ggml_ops_gptoss_batched.cpp).
+    // While a sequence decodes in the token-batched arena its newest K/V rows
+    // exist only there; any other consumer of that cache announces itself
+    // through these so the arena flushes (or discards) its copy first. All
+    // three expect kv_mutex() held; all are cheap no-ops for pointers with no
+    // arena slot.
+    // ------------------------------------------------------------------
+
+    // A non-batched path is about to use this host cache (solo prefill/decode,
+    // host sync, growth): flush the slot's dirty rows to the HOST mirror and
+    // retire the slot.
+    void batched_on_external_acquire(const void* host_cache);
+
+    // The host cache was invalidated/rewritten behind the kernels' backs: the
+    // arena copy is stale — drop the slot without flushing.
+    void batched_on_drop(const void* host_cache);
+    void batched_on_drop_all();
 }

@@ -835,7 +835,7 @@ namespace TensorSharp.Models
         /// (~13.7 ms/token) on 35B-A3B IQ2_XXS, already at the memory-bandwidth
         /// floor (only ~3B of 35B params are active, so each decode token is cheap).
         ///
-        /// <c>--mtp-spec</c> is an EXPLICIT operator opt-in, so we honor it whenever
+        /// <c>--spec</c> is an EXPLICIT operator opt-in, so we honor it whenever
         /// the model actually has an MTP/NextN head — even on ggml_cuda where the
         /// captured decode (~73 tok/s) may still beat speculation. (Earlier this gated
         /// OFF on ggml_cuda because the op-by-op verify made MTP ~34x slower; the

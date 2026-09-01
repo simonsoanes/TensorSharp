@@ -414,18 +414,36 @@ public class ExecutionPlannerTests
         try
         {
             Environment.SetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED", "1");
-            // Strict opt-in flag: an arbitrary non-"1"/"true" value stays off
-            // (historical parse rule preserved).
+            // Token-batched fused decode is ON by default now (the arena path
+            // is the serving-throughput baseline); the flag is a loose boolean
+            // kill-switch — only "0"/"false" disables it.
             Environment.SetEnvironmentVariable("TS_BATCHED_FUSED_DECODE", "yes");
 
             var options = ExecutionOptions.FromEnvironment();
             Assert.True(options.BatchedPathDisabled);
-            Assert.False(options.BatchedFusedDecodeEnabled);
+            Assert.True(options.BatchedFusedDecodeEnabled);
+
+            Environment.SetEnvironmentVariable("TS_BATCHED_FUSED_DECODE", "0");
+            Assert.False(ExecutionOptions.FromEnvironment().BatchedFusedDecodeEnabled);
         }
         finally
         {
             Environment.SetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED", prevDisable);
             Environment.SetEnvironmentVariable("TS_BATCHED_FUSED_DECODE", prevFused);
         }
+    }
+
+    [Fact]
+    public void ExecutionOptions_DescribeOverrides_ReportsOnlyNonDefaults()
+    {
+        Assert.Empty(ExecutionOptions.Default.DescribeOverrides());
+
+        string description = (ExecutionOptions.Default with
+        {
+            BatchedFusedDecodeEnabled = false,
+        }).DescribeOverrides();
+
+        Assert.Contains("TS_BATCHED_FUSED_DECODE=0", description);
+        Assert.DoesNotContain("TS_BATCHED_FUSED_DECODE=1", description);
     }
 }

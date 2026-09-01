@@ -181,26 +181,15 @@ namespace TensorSharp.Server
                             distConfig.LocalDegree, distConfig.NodeId, distConfig.PeerEndpoints);
                 }
 
-                // DeepSeek V4's DSpark drafter ships as a SEPARATE GGUF named by
-                // --draft-model (TS_DSV4_DSPARK). It goes to the factory rather
-                // than being attached afterwards like Gemma 4's draft head: the
-                // drafter's weights have to be counted by the layer split and
-                // uploaded with the trunk.
-                string blockDraftPath = Environment.GetEnvironmentVariable("TS_DSV4_DSPARK");
+                // Block drafters go to the factory rather than being attached
+                // afterwards like Gemma 4's draft head: their weights have to be
+                // counted by the layer split and uploaded with the trunk. The
+                // shared --draft-model variables are authoritative; the older
+                // DSpark-only variable remains an env compatibility fallback.
+                string blockDraftPath = SpeculativeDraftHeadLoader.ConfiguredDraftHeadPath();
+                if (string.IsNullOrWhiteSpace(blockDraftPath))
+                    blockDraftPath = Environment.GetEnvironmentVariable("TS_DSV4_DSPARK");
                 _model = _createModel(modelPath, _backend, tpGroup, blockDraftPath);
-
-                // Say so when a drafter was named but the loaded model has no
-                // block-draft head to put it in, instead of leaving the operator
-                // to wonder why speculation never engages.
-                if (!string.IsNullOrEmpty(blockDraftPath)
-                    && _model is not TensorSharp.Runtime.Speculative.IDraftHead { HasDraftHead: true })
-                {
-                    _logger.LogWarning(
-                        "--draft-model '{Draft}' was given but the loaded model ({Architecture} on {Backend}) has no " +
-                        "block drafter; serving standard decode. DSpark is implemented for DeepSeek V4 on the " +
-                        "cuda and ggml_cuda backends.",
-                        Path.GetFileName(blockDraftPath), Architecture ?? "unknown", _backend);
-                }
 
                 // A worker node (--tp-node-id > 0) spends its life blocked in a
                 // mirror loop and cannot also serve HTTP requests, so the server

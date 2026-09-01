@@ -287,7 +287,7 @@ namespace TensorSharp.Server.Hosting
                     "--spec-draft 4"),
                 new OptionHelp("--spec-pmin <f>",
                     "Draft-confidence gate in [0, 1]; drafting stops below it, and 0 disables the gate " +
-                    "entirely. What the number means is per algorithm, so each brings its own default — 0.75 " +
+                    "entirely. What the number means is per algorithm, so each brings its own default — 0.15 " +
                     "for a per-token draft head, 0.35 for a block drafter (where the gate is the CUMULATIVE " +
                     "prefix probability, so the same number means something much stricter), 0 for n-gram.",
                     "--spec-pmin 0.6"),

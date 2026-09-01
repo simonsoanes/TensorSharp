@@ -309,6 +309,7 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatched(
             std::vector<ggml_tensor*> v_cached;   // per seq
             std::vector<ggml_tensor*> k_cpy;      // per seq (KV write op)
             std::vector<ggml_tensor*> v_cpy;
+            std::vector<ggml_tensor*> attn_col_cpy;   // per seq attention-column writes
             ggml_tensor* attn_mask;
             std::vector<ggml_fp16_t> attn_mask_data;
         };
@@ -341,6 +342,7 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatched(
             lt.v_cached.resize(n_seqs);
             lt.k_cpy.resize(n_seqs, nullptr);
             lt.v_cpy.resize(n_seqs, nullptr);
+            lt.attn_col_cpy.resize(n_seqs, nullptr);
             for (int s = 0; s < n_seqs; s++)
             {
                 lt.k_cached[s] = ggml_new_tensor_3d(ctx, static_cast<ggml_type>(kv_cache_type), info.hd, info.cacheSize, info.kvHeads);
@@ -399,9 +401,19 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatched(
             ggml_tensor* k_rope = ggml_rope_ext(ctx, k_normed, pos_tensor, rope_ff,
                 rope_dims, 2, 0, rope_base, 1.0f, 0, 1, 0, 0);   // [hd, kvHeads, N]
 
-            // 5. per-seq KV write + windowed read; concat windows along ne3
-            ggml_tensor* k_cat = nullptr;
-            ggml_tensor* v_cat = nullptr;
+            // 5+6. Per-seq KV write, then per-seq single-query flash attention
+            // over a DIRECT window view. The first version concatenated every
+            // sequence's padded window along ne3 into one [hd, win, kvH, N]
+            // tensor per layer per step; the chained concats re-copied the
+            // accumulated windows (O(N^2) rows per layer per token), which made
+            // the step time LINEAR in N (measured 15.9 / 31.7 ms TPOT at
+            // N=2/4 on E4B) and pinned aggregate throughput at the
+            // single-stream rate. This is the same rework the GPT-OSS batched
+            // kernel got: each sequence runs the solo-shaped single-row fattn
+            // reading its window in place, and only the tiny [qDim] output
+            // column is copied. Projections and the FFN stay token-batched.
+            ggml_tensor* q_rope_cont = ggml_cont(ctx, q_rope);   // [hd, nH, N]
+            ggml_tensor* attn_2d = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, info.qDim, n_seqs);
             for (int s = 0; s < n_seqs; s++)
             {
                 const int cachePos = positions[s];   // no-wrap: index == position
@@ -445,28 +457,39 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatched(
                     v_src = lt.v_cached[s];
                 }
 
-                // windowed read [0, win). Pass the STRIDED view straight to concat
-                // (its non-contiguous kernel reads via strides) — the previous
-                // ggml_cont here copied the whole padded window per seq/layer EVERY
-                // step (only 1 KV row actually changed), a big redundant memcpy.
-                // ggml_concat already produces a contiguous output for flash.
-                // n_seqs > 1: the window feeds ggml_concat (whose non-contiguous
-                // kernel materialises a dense result), not flash attention
-                // directly, so it needs no defensive copy. n_seqs == 1 hands the
-                // raw view straight to the single-row fattn - the vec-kernel shape.
-                ggml_tensor* k_win = view_kv_cache_window(ctx, k_src, info.hd, info.cacheSize, info.kvHeads, 0, info.win, kv_cache_type, n_seqs == 1 ? 1 : 0);
-                ggml_tensor* v_win = view_kv_cache_window(ctx, v_src, info.hd, info.cacheSize, info.kvHeads, 0, info.win, kv_cache_type, n_seqs == 1 ? 1 : 0);
-                k_cat = (k_cat == nullptr) ? k_win : ggml_concat(ctx, k_cat, k_win, 3);
-                v_cat = (v_cat == nullptr) ? v_win : ggml_concat(ctx, v_cat, v_win, 3);
+                // Windowed read [0, win) straight off this sequence's cache —
+                // the single-row fattn (fattn_query_rows=1) applies the same
+                // defensive-copy logic the solo decode kernel uses.
+                ggml_tensor* k_win = view_kv_cache_window(ctx, k_src, info.hd, info.cacheSize, info.kvHeads, 0, info.win, kv_cache_type, 1);
+                ggml_tensor* v_win = view_kv_cache_window(ctx, v_src, info.hd, info.cacheSize, info.kvHeads, 0, info.win, kv_cache_type, 1);
+                if (k_win == nullptr || v_win == nullptr)
+                {
+                    set_last_error("Gemma4 batched decode: failed to build KV window views.");
+                    return 0;
+                }
+
+                // This sequence's query, [hd, 1, nH] like the solo kernel's.
+                ggml_tensor* q_s = ggml_view_3d(ctx, q_rope_cont, info.hd, num_heads, 1,
+                    q_rope_cont->nb[1], q_rope_cont->nb[2],
+                    static_cast<std::size_t>(s) * q_rope_cont->nb[2]);
+                ggml_tensor* q_attn = ggml_permute(ctx, q_s, 0, 2, 1, 3);
+                // Column s of the shared [win, 1, 1, N] mask input.
+                ggml_tensor* mask_s = ggml_view_4d(ctx, lt.attn_mask, info.win, 1, 1, 1,
+                    lt.attn_mask->nb[1], lt.attn_mask->nb[2], lt.attn_mask->nb[3],
+                    static_cast<std::size_t>(s) * lt.attn_mask->nb[3]);
+                ggml_tensor* fa = ggml_flash_attn_ext(ctx, q_attn, k_win, v_win, mask_s, 1.0f, 0.0f, 0.0f);
+                ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+
+                // Deposit this sequence's attention output into column s of the
+                // packed [qDim, N] activation; node ORDER (expanded before the
+                // O projection's consumers) guarantees the writes land first.
+                ggml_tensor* fa_flat = ggml_reshape_1d(ctx, fa, info.qDim);
+                ggml_tensor* col = ggml_view_1d(ctx, attn_2d, info.qDim,
+                    static_cast<std::size_t>(s) * attn_2d->nb[1]);
+                lt.attn_col_cpy[s] = ggml_cpy(ctx, fa_flat, col);
             }
 
-            // 6. flash attention, batched over ne3 = n_seqs
-            ggml_tensor* q4d = ggml_reshape_4d(ctx, ggml_cont(ctx, q_rope), info.hd, 1, num_heads, n_seqs);
-            ggml_tensor* attn_out = ggml_flash_attn_ext(ctx, q4d, k_cat, v_cat, lt.attn_mask, 1.0f, 0.0f, 0.0f);
-            ggml_flash_attn_ext_set_prec(attn_out, GGML_PREC_F32);
-
             // 7. O projection -> [H, N]
-            ggml_tensor* attn_2d = ggml_reshape_2d(ctx, ggml_cont(ctx, attn_out), info.qDim, n_seqs);
             ggml_tensor* o_out = ggml_mul_mat(ctx, lt.o_w, attn_2d);   // [H, N]
 
             // 8. post-attn norm + residual
@@ -508,13 +531,14 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatched(
         ggml_set_output(out_op);
 
         // build graph: KV writes first, then output
-        const std::size_t graph_size = static_cast<std::size_t>(num_layers) * (256 + 16 * n_seqs) + 1024;
+        const std::size_t graph_size = static_cast<std::size_t>(num_layers) * (256 + 48 * static_cast<std::size_t>(n_seqs)) + 2048;
         ggml_cgraph* graph = ggml_new_graph_custom(ctx, graph_size, false);
         for (int l = 0; l < num_layers; l++)
             for (int s = 0; s < n_seqs; s++)
             {
                 if (layers[l].k_cpy[s] != nullptr) ggml_build_forward_expand(graph, layers[l].k_cpy[s]);
                 if (layers[l].v_cpy[s] != nullptr) ggml_build_forward_expand(graph, layers[l].v_cpy[s]);
+                if (layers[l].attn_col_cpy[s] != nullptr) ggml_build_forward_expand(graph, layers[l].attn_col_cpy[s]);
             }
         ggml_build_forward_expand(graph, out_op);
 
@@ -801,7 +825,7 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecodeBatched(
             ggml_tensor *ffn_norm_w, *gu_w, *down_w, *post_ffw_norm_1_w;
             ggml_tensor *gate_inp_w, *gate_inp_scale_t, *pre_ffw_norm_2_w, *gate_up_exps_t, *down_exps_t, *down_exps_scale_t, *post_ffw_norm_2_w, *post_ffw_norm_w;
             ggml_tensor *freq_factors_t;
-            std::vector<ggml_tensor*> k_cached, v_cached, k_cpy, v_cpy;
+            std::vector<ggml_tensor*> k_cached, v_cached, k_cpy, v_cpy, attn_col_cpy;
             ggml_tensor* attn_mask; std::vector<ggml_fp16_t> attn_mask_data;
         };
         std::vector<LT> lt(num_layers);
@@ -832,6 +856,7 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecodeBatched(
             t.freq_factors_t = (!info.isLocal && d.freq_factors != nullptr && d.freq_factors_len > 0)
                 ? ggml_new_tensor_1d(ctx, GGML_TYPE_F32, d.freq_factors_len) : nullptr;
             t.k_cached.resize(n_seqs); t.v_cached.resize(n_seqs); t.k_cpy.resize(n_seqs, nullptr); t.v_cpy.resize(n_seqs, nullptr);
+            t.attn_col_cpy.resize(n_seqs, nullptr);
             for (int s = 0; s < n_seqs; s++)
             {
                 t.k_cached[s] = ggml_new_tensor_3d(ctx, static_cast<ggml_type>(kvType), info.hd, info.cacheSize, info.kvH);
@@ -873,7 +898,11 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecodeBatched(
             ggml_tensor* q_rope = ggml_rope_ext(ctx, q_normed, pos_tensor, rope_ff, d.rope_n_dims, 2, 0, d.rope_base, 1.0f, 0, 1, 0, 0);
             ggml_tensor* k_rope = ggml_rope_ext(ctx, k_normed, pos_tensor, rope_ff, d.rope_n_dims, 2, 0, d.rope_base, 1.0f, 0, 1, 0, 0);
 
-            ggml_tensor* k_cat = nullptr; ggml_tensor* v_cat = nullptr;
+            // Per-seq single-query fattn over direct window views — replaces
+            // the concat-along-ne3 chain whose re-copies made the step LINEAR
+            // in N (see the dense kernel above for the full story).
+            ggml_tensor* q_rope_cont = ggml_cont(ctx, q_rope);   // [hd, nH, N]
+            ggml_tensor* attn_2d = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, info.qDim, n_seqs);
             for (int s = 0; s < n_seqs; s++)
             {
                 const int cachePos = positions[s];
@@ -899,18 +928,27 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecodeBatched(
                     t.v_cpy[s] = ggml_cpy(ctx, v_write, v_dst);
                     k_src = t.k_cached[s]; v_src = t.v_cached[s];
                 }
-                // Same contract as the dense batched graph above: concat consumes
-                // the strided view for n_seqs > 1; only the n_seqs == 1 single-row
-                // fattn read needs the vec-kernel defensive copy.
-                ggml_tensor* k_win = view_kv_cache_window(ctx, k_src, info.hd, info.cacheSize, info.kvH, 0, info.win, kvType, n_seqs == 1 ? 1 : 0);
-                ggml_tensor* v_win = view_kv_cache_window(ctx, v_src, info.hd, info.cacheSize, info.kvH, 0, info.win, kvType, n_seqs == 1 ? 1 : 0);
-                k_cat = (k_cat == nullptr) ? k_win : ggml_concat(ctx, k_cat, k_win, 3);
-                v_cat = (v_cat == nullptr) ? v_win : ggml_concat(ctx, v_cat, v_win, 3);
+                ggml_tensor* k_win = view_kv_cache_window(ctx, k_src, info.hd, info.cacheSize, info.kvH, 0, info.win, kvType, 1);
+                ggml_tensor* v_win = view_kv_cache_window(ctx, v_src, info.hd, info.cacheSize, info.kvH, 0, info.win, kvType, 1);
+                if (k_win == nullptr || v_win == nullptr)
+                {
+                    set_last_error("Gemma4 MoE batched decode: failed to build KV window views.");
+                    return 0;
+                }
+                ggml_tensor* q_s = ggml_view_3d(ctx, q_rope_cont, info.hd, num_heads, 1,
+                    q_rope_cont->nb[1], q_rope_cont->nb[2],
+                    static_cast<std::size_t>(s) * q_rope_cont->nb[2]);
+                ggml_tensor* q_attn = ggml_permute(ctx, q_s, 0, 2, 1, 3);
+                ggml_tensor* mask_s = ggml_view_4d(ctx, t.attn_mask, info.win, 1, 1, 1,
+                    t.attn_mask->nb[1], t.attn_mask->nb[2], t.attn_mask->nb[3],
+                    static_cast<std::size_t>(s) * t.attn_mask->nb[3]);
+                ggml_tensor* fa = ggml_flash_attn_ext(ctx, q_attn, k_win, v_win, mask_s, 1.0f, 0.0f, 0.0f);
+                ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+                ggml_tensor* fa_flat = ggml_reshape_1d(ctx, fa, info.qDim);
+                ggml_tensor* col = ggml_view_1d(ctx, attn_2d, info.qDim,
+                    static_cast<std::size_t>(s) * attn_2d->nb[1]);
+                t.attn_col_cpy[s] = ggml_cpy(ctx, fa_flat, col);
             }
-            ggml_tensor* q4d = ggml_reshape_4d(ctx, ggml_cont(ctx, q_rope), info.hd, 1, num_heads, n_seqs);
-            ggml_tensor* attn_out = ggml_flash_attn_ext(ctx, q4d, k_cat, v_cat, t.attn_mask, 1.0f, 0.0f, 0.0f);
-            ggml_flash_attn_ext_set_prec(attn_out, GGML_PREC_F32);
-            ggml_tensor* attn_2d = ggml_reshape_2d(ctx, ggml_cont(ctx, attn_out), info.qDim, n_seqs);
             ggml_tensor* o_out = ggml_mul_mat(ctx, t.o_w, attn_2d);
             ggml_tensor* post_attn = ggml_mul(ctx, ggml_rms_norm(ctx, o_out, eps), t.post_attn_norm_w);
             ggml_tensor* residual1 = ggml_add(ctx, hidden, post_attn);   // [H, N]
@@ -981,13 +1019,14 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecodeBatched(
         ggml_tensor* out_op = ggml_cpy(ctx, logits, logits_out);
         ggml_set_output(out_op);
 
-        const std::size_t graph_size = static_cast<std::size_t>(num_layers) * (384 + 24 * n_seqs) + 1024;
+        const std::size_t graph_size = static_cast<std::size_t>(num_layers) * (384 + 48 * static_cast<std::size_t>(n_seqs)) + 2048;
         ggml_cgraph* graph = ggml_new_graph_custom(ctx, graph_size, false);
         for (int l = 0; l < num_layers; l++)
             for (int s = 0; s < n_seqs; s++)
             {
                 if (lt[l].k_cpy[s] != nullptr) ggml_build_forward_expand(graph, lt[l].k_cpy[s]);
                 if (lt[l].v_cpy[s] != nullptr) ggml_build_forward_expand(graph, lt[l].v_cpy[s]);
+                if (lt[l].attn_col_cpy[s] != nullptr) ggml_build_forward_expand(graph, lt[l].attn_col_cpy[s]);
             }
         ggml_build_forward_expand(graph, out_op);
 

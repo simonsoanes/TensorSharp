@@ -37,7 +37,7 @@ namespace TensorSharp.Models
             string path = Environment.GetEnvironmentVariable(SpeculationEnvVars.DraftModel);
             if (string.IsNullOrWhiteSpace(path))
                 path = Environment.GetEnvironmentVariable(SpeculationEnvVars.LegacyDraftModel);
-            return string.IsNullOrWhiteSpace(path) ? null : path;
+            return string.IsNullOrWhiteSpace(path) ? null : path.Trim();
         }
 
         /// <summary>
@@ -54,6 +54,20 @@ namespace TensorSharp.Models
             string draftPath = ConfiguredDraftHeadPath();
             if (draftPath == null)
                 return true;
+
+            // Block drafters have to participate in model construction so their
+            // weights are included in device placement/layer splitting. If the
+            // factory already produced a usable one (DSpark or DFlash), the
+            // attach-after-load phase is complete. Without this guard a valid
+            // DSpark is misrouted as a Gemma-style head and logged as disabled.
+            if (model is IDraftHead
+                {
+                    HasDraftHead: true,
+                    DraftHeadKind: DraftHeadKind.Block,
+                })
+            {
+                return true;
+            }
 
             if (!File.Exists(draftPath))
             {

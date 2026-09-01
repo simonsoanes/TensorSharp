@@ -83,3 +83,15 @@ benchmarks/engine_comparison/__pycache__/
 benchmarks/engine_comparison/results/
 /.vs
 /TensorSharp.Server/Properties/launchSettings.json
+
+# Local model weights. GGUF/safetensors checkpoints are multi-GB and are
+# downloaded per-machine, never committed.
+models/
+*.gguf
+*.safetensors
+
+# JetBrains Rider / IntelliJ per-user project settings.
+.idea/
+
+# Local scratch prompts used when driving the CLI by hand.
+prompt.txt

@@ -374,9 +374,22 @@ namespace TensorSharp.AgentHost.Skills
                 && (messages[0].Role == "system" || messages[0].Role == "developer"))
             {
                 ChatMessage first = Clone(messages[0]);
-                first.Content = string.IsNullOrWhiteSpace(first.Content)
+                string originalContent = string.IsNullOrWhiteSpace(first.Content)
+                    ? string.Empty
+                    : first.Content.TrimEnd();
+                // A marker in removed trailing whitespace must not migrate into
+                // the separator or the request-specific block appended below.
+                ClampContentCacheBreakpoints(first, originalContent.Length);
+                if (first.CacheControl != null)
+                {
+                    // The marker belongs after the caller's stable preamble,
+                    // not after the request-specific skills block we append.
+                    first.AddContentCacheBreakpoint(originalContent.Length);
+                    first.CacheControl = null;
+                }
+                first.Content = originalContent.Length == 0
                     ? instructions
-                    : first.Content.TrimEnd() + "\n\n" + instructions;
+                    : originalContent + "\n\n" + instructions;
                 result.Add(first);
 
                 for (int i = 1; i < messages.Count; i++)
@@ -391,6 +404,27 @@ namespace TensorSharp.AgentHost.Skills
                     result.Add(Clone(message));
             }
             return result;
+        }
+
+        private static void ClampContentCacheBreakpoints(ChatMessage message, int contentLength)
+        {
+            List<int>? breakpoints = message.ContentCacheBreakpoints;
+            if (breakpoints == null)
+                return;
+
+            for (int i = 0; i < breakpoints.Count; i++)
+                breakpoints[i] = System.Math.Clamp(breakpoints[i], 0, contentLength);
+
+            breakpoints.Sort();
+            int writeIndex = 0;
+            for (int readIndex = 0; readIndex < breakpoints.Count; readIndex++)
+            {
+                if (writeIndex == 0 || breakpoints[readIndex] != breakpoints[writeIndex - 1])
+                    breakpoints[writeIndex++] = breakpoints[readIndex];
+            }
+
+            if (writeIndex < breakpoints.Count)
+                breakpoints.RemoveRange(writeIndex, breakpoints.Count - writeIndex);
         }
 
         /// <summary>
@@ -417,10 +451,18 @@ namespace TensorSharp.AgentHost.Skills
             ImagePaths = message.ImagePaths != null ? new List<string>(message.ImagePaths) : null,
             AudioPaths = message.AudioPaths != null ? new List<string>(message.AudioPaths) : null,
             TextFilePaths = message.TextFilePaths != null ? new List<string>(message.TextFilePaths) : null,
+            TextFileNames = message.TextFileNames != null ? new List<string>(message.TextFileNames) : null,
             IsVideo = message.IsVideo,
             ToolCalls = message.ToolCalls != null ? new List<ToolCall>(message.ToolCalls) : null,
+            ToolCallId = message.ToolCallId,
             Thinking = message.Thinking,
             RawOutputTokens = message.RawOutputTokens != null ? new List<int>(message.RawOutputTokens) : null,
+            CacheControl = message.CacheControl != null
+                ? new CacheControlMarker { Type = message.CacheControl.Type }
+                : null,
+            ContentCacheBreakpoints = message.ContentCacheBreakpoints != null
+                ? new List<int>(message.ContentCacheBreakpoints)
+                : null,
         };
 
         // ---- rendering ---------------------------------------------------------

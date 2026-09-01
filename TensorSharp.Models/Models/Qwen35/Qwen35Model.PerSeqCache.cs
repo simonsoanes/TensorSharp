@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -62,10 +62,42 @@ namespace TensorSharp.Models
             public IntPtr ConvScratch;
             public bool FdStateResident;
             public bool GdnHostDirty;
+            // Reusable full-vocab logits buffer for the arena batched decode:
+            // owned by the holder so a SequenceState.LastLogits reference stays
+            // valid however the batch composition churns.
+            public float[] Logits;
         }
 
         // Per-request fused-decode holders, keyed by RequestId.
         private Dictionary<string, Qwen35KvCacheHolder> _fusedHolders;
+        // Freelist of released holders. Parking keeps their host pointers (and
+        // therefore the native decode-graph pools, resident copies, and arena
+        // slot keys) warm; disposing a holder per completed request fired the
+        // InvalidateHostBuffer chain that tears the whole arena pool down every
+        // completion. Reused holders are re-zeroed by ResetHolderForReuse.
+        private List<Qwen35KvCacheHolder> _holderPool;
+        private const int HolderPoolMax = 64;
+
+        private void ResetHolderForReuse(Qwen35KvCacheHolder h)
+        {
+            h.CacheSeqLen = 0;
+            h.KvHostDirty = false;
+            h.GdnHostDirty = false;
+            h.FdStateResident = false;
+            if (h.ConvState != null)
+                for (int l = 0; l < h.ConvState.Length; l++)
+                {
+                    if (h.ConvState[l] != null) Array.Clear(h.ConvState[l], 0, h.ConvState[l].Length);
+                    if (h.ConvWriteIdx != null) h.ConvWriteIdx[l] = 0;
+                }
+            if (h.DeltaState != null)
+                foreach (var t in h.DeltaState)
+                    if (t != null) Ops.Fill(t, 0);
+            // KV rows beyond the written prefix are mask-bounded on every read
+            // path, so stale bytes there are safe (same rule as the GPT-OSS
+            // holder pool). The arena slot (if any) is retired by the prefill
+            // verify hook the moment the new request's first chunk runs.
+        }
         // RequestId whose holder is currently checked out into the active model
         // fields, or null when the primary cache is active.
         private string _activeFusedKey;
@@ -88,7 +120,14 @@ namespace TensorSharp.Models
         /// unsupported shapes still fall back to the isolated per-holder
         /// operation path. This preserves both concurrency and per-request
         /// recurrent/attention state.</summary>
+        /// <para>Never under tensor parallelism: the per-request holders
+        /// snapshot and swap the single-GPU cache arrays (<c>_kvCacheK</c> and
+        /// friends), which the TP path never populates - it builds its own
+        /// per-rank caches instead. Taking this path with TP active dereferenced
+        /// a null cache array the moment a second sequence arrived.</para>
         public bool SupportsPerSequenceFusedForward =>
+            !IsTensorParallel
+            &&
             !_fdSpecSessionActive
             && ((_backend == BackendType.GgmlCuda && _fullDecodeEnabled && !_fdUnsupported)
                 || _backend == BackendType.GgmlMetal);
@@ -139,6 +178,13 @@ namespace TensorSharp.Models
 
         private Qwen35KvCacheHolder CreateFreshHolder()
         {
+            if (_holderPool != null && _holderPool.Count > 0)
+            {
+                var reused = _holderPool[_holderPool.Count - 1];
+                _holderPool.RemoveAt(_holderPool.Count - 1);
+                ResetHolderForReuse(reused);
+                return reused;
+            }
             int numLayers = _kvCacheK.Length;
             int qkvDim = _headKDim * _numKHeads * 2 + _headVDim * _numVHeads;
             int convDim = _convKernel - 1;
@@ -296,7 +342,15 @@ namespace TensorSharp.Models
             }
 
             _fusedHolders.Remove(requestId);
-            DisposeHolder(holder);
+            _holderPool ??= new List<Qwen35KvCacheHolder>(HolderPoolMax);
+            if (_holderPool.Count < HolderPoolMax)
+            {
+                _holderPool.Add(holder);
+            }
+            else
+            {
+                DisposeHolder(holder);
+            }
         }
 
         private void DisposeHolder(Qwen35KvCacheHolder holder)
@@ -377,6 +431,12 @@ namespace TensorSharp.Models
                 }
                 _fusedHolders.Clear();
                 _fusedHolders = null;
+            if (_holderPool != null)
+            {
+                foreach (var h in _holderPool)
+                    DisposeHolder(h);
+                _holderPool = null;
+            }
             }
             if (_primaryHolder != null)
             {

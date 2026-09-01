@@ -167,6 +167,20 @@ namespace TensorSharp.Cli
             return backend;
         }
 
+        /// <summary>
+        /// Draft path published by <see cref="SpeculativeCliFlags.Apply"/> or by
+        /// the process environment. Reading the shared environment contract here
+        /// makes both <c>--draft-model PATH</c> and <c>--draft-model=PATH</c> reach
+        /// the model factory; the main argument switch only sees the former.
+        /// </summary>
+        internal static string ResolveConfiguredDraftModelPath()
+        {
+            string path = Environment.GetEnvironmentVariable(SpeculationEnvVars.DraftModel);
+            if (string.IsNullOrWhiteSpace(path))
+                path = Environment.GetEnvironmentVariable(SpeculationEnvVars.LegacyDraftModel);
+            return string.IsNullOrWhiteSpace(path) ? null : path.Trim();
+        }
+
         [System.Runtime.InteropServices.LibraryImport("libc", EntryPoint = "_exit")]
         private static partial void LibcExit(int status);
 
@@ -211,11 +225,12 @@ namespace TensorSharp.Cli
             // default, --n-cpu-moe / --cpu-moe below override it.
             MoeCpuOffloadConfig.ConfigureFromEnvironment();
 
-            // --mtp-spec / --mtp-draft / --mtp-pmin / --mtp-draft-model become
-            // TS_MTP_* before anything else runs, because the request has to reach
+            // --spec / --spec-draft / --spec-pmin / --draft-model become the
+            // shared TS_SPEC_* settings (with legacy TS_MTP_* mirrors) before anything
+            // else runs, because the request has to reach
             // the LOADER and not just the decode loop: glm-dsa pages its NextN
-            // block into VRAM (a whole extra 256-expert layer) only when TS_MTP_SPEC
-            // is already set, and sizes its graph cache from TS_MTP_DRAFT. Parsing
+            // block into VRAM (a whole extra 256-expert layer) only when TS_SPEC
+            // is already set, and sizes its graph cache from TS_SPEC_DRAFT. Parsing
             // these in the switch below would be too late to matter. Shared with
             // the server so the two hosts cannot drift on names or validation.
             SpeculativeCliFlags.Apply(args);
@@ -314,7 +329,9 @@ namespace TensorSharp.Cli
             var refAudioPaths = new List<string>();
             var refVideoAudioPaths = new List<string>();
             bool videoAudioEnabled = true;
-            string draftModelPath = null;
+            // SpeculativeCliFlags.Apply already ran, so this captures both value
+            // spellings as well as an env-only deployment before ModelBase.Create.
+            string draftModelPath = ResolveConfiguredDraftModelPath();
             int specDraftMax = 0;
             float specDraftConfMin = -1f;
 
@@ -791,7 +808,7 @@ namespace TensorSharp.Cli
             using var model = ModelBase.Create(modelPath, backend, tpDegree, tpGroup, draftModelPath);
 
             // Speculator weights that ship as their own file (Gemma 4's
-            // gemma4-assistant draft head, named with --spec-draft-model) attach
+            // gemma4-assistant draft head, named with --draft-model) attach
             // to the target here, through the same loader the server uses. A
             // drafter is an optimization: failing to attach one warns and falls
             // back to plain decoding rather than failing the run.
@@ -2461,7 +2478,7 @@ namespace TensorSharp.Cli
             // Speculative decoding: a draft head proposes tokens and the trunk
             // verifies them in one batched forward. Either a block drafter
             // (DeepSeek V4 + DSpark, Muse-Glimmer + DFlash) or a per-token NextN/MTP
-            // head under --mtp-spec (GLM-5.2, Qwen 3.6). Every emitted token still
+            // head under --spec (GLM-5.2, Qwen 3.6). Every emitted token still
             // comes from a trunk row, so this is a speed path only.
             {
                 var specCfg = samplingConfig ?? SamplingConfig.Greedy;

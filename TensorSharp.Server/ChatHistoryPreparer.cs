@@ -105,8 +105,11 @@ namespace TensorSharp.Server
                 string nextIncomingRole = i + 1 < incoming.Count ? incoming[i + 1].Role : null;
                 if (TryMatchToolTranscript(trackedHistory, t, src, nextIncomingRole, out int runLength))
                 {
+                    var expanded = new List<ChatMessage>(runLength);
                     for (int k = 0; k < runLength; k++)
-                        result.Add(CloneShallow(trackedHistory[t + k]));
+                        expanded.Add(CloneShallow(trackedHistory[t + k]));
+                    PreserveCollapsedCacheMarkers(src, expanded);
+                    result.AddRange(expanded);
                     t += runLength;
                     continue;
                 }
@@ -123,10 +126,14 @@ namespace TensorSharp.Server
                         ImagePaths = src.ImagePaths,
                         AudioPaths = src.AudioPaths,
                         TextFilePaths = src.TextFilePaths,
+                        TextFileNames = src.TextFileNames,
                         IsVideo = src.IsVideo,
                         ToolCalls = src.ToolCalls,
+                        ToolCallId = src.ToolCallId,
                         Thinking = src.Thinking,
                         RawOutputTokens = tracked.RawOutputTokens,
+                        CacheControl = src.CacheControl,
+                        ContentCacheBreakpoints = src.ContentCacheBreakpoints,
                     });
                 }
                 else
@@ -136,6 +143,60 @@ namespace TensorSharp.Server
                 t++;
             }
             return result;
+        }
+
+        /// <summary>Map cache markers from a client-visible assistant message onto
+        /// the tracked assistant/tool transcript that replaces it. A message-level
+        /// marker belongs after the whole expansion. Content offsets are mapped over
+        /// the intermediate assistant text that TryMatchToolTranscript verified; if
+        /// an offset reaches the final raw model round, mark its start conservatively
+        /// because parser-stripped thinking text makes the exact offset unknowable.</summary>
+        private static void PreserveCollapsedCacheMarkers(
+            ChatMessage source, List<ChatMessage> expanded)
+        {
+            if (expanded.Count == 0) return;
+
+            int lastAssistant = expanded.FindLastIndex(m => m.Role == "assistant");
+            if (lastAssistant < 0) return;
+
+            if (source.CacheControl != null)
+            {
+                expanded[lastAssistant].CacheControl = new CacheControlMarker
+                {
+                    Type = source.CacheControl.Type,
+                };
+            }
+
+            if (source.ContentCacheBreakpoints == null
+                || source.ContentCacheBreakpoints.Count == 0)
+                return;
+
+            foreach (int rawOffset in source.ContentCacheBreakpoints)
+            {
+                int remaining = Math.Max(0, rawOffset);
+                bool mapped = false;
+                for (int i = 0; i < lastAssistant; i++)
+                {
+                    if (expanded[i].Role != "assistant") continue;
+                    int length = expanded[i].Content?.Length ?? 0;
+                    if (remaining <= length)
+                    {
+                        AddMappedContentCacheBreakpoint(expanded[i], remaining);
+                        mapped = true;
+                        break;
+                    }
+                    remaining -= length;
+                }
+
+                if (!mapped)
+                    AddMappedContentCacheBreakpoint(expanded[lastAssistant], 0);
+            }
+        }
+
+        private static void AddMappedContentCacheBreakpoint(ChatMessage message, int offset)
+        {
+            message.AddContentCacheBreakpoint(offset);
+            message.ContentCacheBreakpoints.Sort();
         }
 
         /// <summary>
@@ -300,10 +361,16 @@ namespace TensorSharp.Server
                 ImagePaths = sampled,
                 AudioPaths = msg.AudioPaths != null ? new List<string>(msg.AudioPaths) : null,
                 TextFilePaths = msg.TextFilePaths != null ? new List<string>(msg.TextFilePaths) : null,
+                TextFileNames = msg.TextFileNames != null ? new List<string>(msg.TextFileNames) : null,
                 IsVideo = msg.IsVideo,
                 ToolCalls = msg.ToolCalls,
+                ToolCallId = msg.ToolCallId,
                 Thinking = msg.Thinking,
                 RawOutputTokens = msg.RawOutputTokens,
+                CacheControl = msg.CacheControl,
+                ContentCacheBreakpoints = msg.ContentCacheBreakpoints != null
+                    ? new List<int>(msg.ContentCacheBreakpoints)
+                    : null,
             };
         }
 
@@ -316,10 +383,18 @@ namespace TensorSharp.Server
                 ImagePaths = src.ImagePaths,
                 AudioPaths = src.AudioPaths,
                 TextFilePaths = src.TextFilePaths,
+                TextFileNames = src.TextFileNames,
                 IsVideo = src.IsVideo,
                 ToolCalls = src.ToolCalls,
+                ToolCallId = src.ToolCallId,
                 Thinking = src.Thinking,
                 RawOutputTokens = src.RawOutputTokens,
+                CacheControl = src.CacheControl != null
+                    ? new CacheControlMarker { Type = src.CacheControl.Type }
+                    : null,
+                ContentCacheBreakpoints = src.ContentCacheBreakpoints != null
+                    ? new List<int>(src.ContentCacheBreakpoints)
+                    : null,
             };
         }
     }

@@ -17,6 +17,7 @@ using System.Text;
 using System.Threading;
 using Microsoft.Extensions.Logging;
 using TensorSharp.Cli.Logging;
+using TensorSharp.Models;
 using TensorSharp.Runtime.Scheduling;
 using TensorSharp.AgentHost.Skills;
 using TensorSharp.Runtime.Speculative;
@@ -44,6 +45,8 @@ namespace TensorSharp.Cli
     /// </summary>
     internal sealed class InteractiveSession
     {
+        internal delegate bool DraftHeadAttacher(ModelBase model, out string error);
+
         private readonly ILogger _log;
         private readonly IPromptRenderer _promptRenderer;
 
@@ -98,7 +101,7 @@ namespace TensorSharp.Cli
         private bool _multilineInput;
 
         // Speculative decoding: a block drafter (DeepSeek V4 + DSpark) or a
-        // per-token NextN/MTP head under --mtp-spec (GLM-5.2, Qwen 3.6). The
+        // per-token NextN/MTP head under --spec (GLM-5.2, Qwen 3.6). The
         // decoder is built on first use and kept for the session: it carries the
         // hidden state that pairs the trunk with the drafter, so a turn that
         // extends the cached prefix continues where the previous one stopped.
@@ -858,30 +861,29 @@ namespace TensorSharp.Cli
         private void ReloadModel(string modelPath, BackendType backend, string mmProjPath, string label)
         {
             string prevModel = _modelPath != null ? Path.GetFileName(_modelPath) : "(none)";
+            ModelBase newModel = null;
             try
             {
                 Console.WriteLine($"Loading {Path.GetFileName(modelPath)} on {backend}...");
                 var sw = Stopwatch.StartNew();
-                ModelBase newModel = ModelBase.Create(modelPath, backend);
+                var loaded = CreateModelForReload(modelPath, backend);
+                newModel = loaded.Model;
+                string draftHeadError = loaded.DraftHeadError;
+                if (draftHeadError != null)
+                {
+                    _log.LogWarning(LogEventIds.HostConfiguration,
+                        "{Error} Speculative decoding will serve standard decoding instead.",
+                        draftHeadError);
+                }
                 sw.Stop();
 
-                // Only after the new model is constructed do we tear down the
-                // old one - if Create() throws we must preserve the working
-                // session for the user. Skip disposing the caller-owned
-                // original; it gets cleaned up by the caller's own using.
-                if (_model != null && !ReferenceEquals(_model, _originalModel))
-                    _model.Dispose();
-                _model = newModel;
-                _modelPath = modelPath;
-                _backend = backend;
-                _mmProjPath = null;
-
+                string loadedMmProjPath = null;
                 if (!string.IsNullOrEmpty(mmProjPath) && File.Exists(mmProjPath))
                 {
                     try
                     {
-                        _model.MultimodalInjector.LoadProjectors(mmProjPath);
-                        _mmProjPath = mmProjPath;
+                        newModel.MultimodalInjector.LoadProjectors(mmProjPath);
+                        loadedMmProjPath = mmProjPath;
                     }
                     catch (Exception ex)
                     {
@@ -889,12 +891,39 @@ namespace TensorSharp.Cli
                     }
                 }
 
-                // History / KV state from the previous tokenizer is meaningless
-                // against the new one, so drop everything.
+                // Finish initializing the replacement before committing the
+                // handoff. If any of this fails, the catch below disposes the
+                // replacement and the working model remains untouched.
+                newModel.ResetKVCache();
+
+                ModelBase previousModel = _model;
+                _model = newModel;
+                newModel = null; // ownership now belongs to the session
+                _modelPath = modelPath;
+                _backend = backend;
+                _mmProjPath = loadedMmProjPath;
+
+                // History / KV and speculative state from the previous tokenizer
+                // are meaningless against the new one, so drop everything.
                 _history.Clear();
                 _kvCache.Reset();
-                _model.ResetKVCache();
+                _specDecoder = null;
+                _specDecoderModel = null;
                 ClearAttachments();
+
+                // Dispose only after the replacement has become the active model:
+                // a backend's cleanup error must not strand the session between
+                // models. The caller owns the original model's lifetime.
+                if (previousModel != null && !ReferenceEquals(previousModel, _originalModel))
+                {
+                    try { previousModel.Dispose(); }
+                    catch (Exception ex)
+                    {
+                        _log.LogWarning(LogEventIds.HostConfiguration, ex,
+                            "Interactive model switch succeeded, but disposing the previous model failed: {Error}",
+                            ex.Message);
+                    }
+                }
 
                 Console.WriteLine($"{char.ToUpper(label[0])}{label.Substring(1)} switch complete: " +
                     $"{Path.GetFileName(modelPath)} ({_model.Config.Architecture ?? "?"}, " +
@@ -908,10 +937,51 @@ namespace TensorSharp.Cli
             }
             catch (Exception ex)
             {
+                if (newModel != null)
+                {
+                    try { newModel.Dispose(); }
+                    catch (Exception disposeEx)
+                    {
+                        _log.LogWarning(LogEventIds.HostConfiguration, disposeEx,
+                            "Failed to dispose an incomplete interactive model reload: {Error}",
+                            disposeEx.Message);
+                    }
+                }
                 Console.WriteLine($"Failed to load model: {ex.Message}");
                 _log.LogError(LogEventIds.ModelLoadFailed, ex,
                     "Failed to reload model {Model} on backend {Backend}: {Error}",
                     Path.GetFileName(modelPath), backend, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Construct a replacement model with the process-wide draft-model
+        /// configuration and attach any draft weights that load after the trunk.
+        /// The delegates are a unit-test seam; production uses the same factory and
+        /// shared attachment loader as initial CLI startup.
+        /// </summary>
+        internal static (ModelBase Model, string DraftHeadError) CreateModelForReload(
+            string modelPath,
+            BackendType backend,
+            Func<string, BackendType, string, ModelBase> createModel = null,
+            DraftHeadAttacher attachDraftHead = null)
+        {
+            createModel ??= static (path, selectedBackend, draftPath) =>
+                ModelBase.Create(path, selectedBackend, draftModelPath: draftPath);
+            attachDraftHead ??= SpeculativeDraftHeadLoader.TryAttachConfiguredDraftHead;
+
+            ModelBase model = null;
+            try
+            {
+                string draftModelPath = Program.ResolveConfiguredDraftModelPath();
+                model = createModel(modelPath, backend, draftModelPath);
+                bool attached = attachDraftHead(model, out string error);
+                return (model, attached ? null : error);
+            }
+            catch
+            {
+                model?.Dispose();
+                throw;
             }
         }
 
@@ -1467,7 +1537,7 @@ namespace TensorSharp.Cli
                 inputTokens.Count, _enableThinking);
 
             // A model with a draft head (a block drafter such as DeepSeek V4 +
-            // DSpark, or a per-token NextN/MTP head under --mtp-spec) decodes
+            // DSpark, or a per-token NextN/MTP head under --spec) decodes
             // through the shared draft/verify core instead of one forward per
             // token. Its prefill has to go through the drafter-aware path too, so
             // the choice is made before the prompt is forwarded.

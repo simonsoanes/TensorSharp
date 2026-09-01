@@ -247,7 +247,7 @@ on models that implement `IBatchedSpeculativeTarget`. The flow per step:
 
 1. **Draft.** The model's draft head proposes up to `TS_MTP_DRAFT` (default `8`)
    future tokens, stopping at the first token whose draft confidence falls below
-   `TS_MTP_PMIN` (default `0.75`). The request's own sampler — temperature,
+   `TS_MTP_PMIN` (default `0.15`). The request's own sampler — temperature,
    top-k/p, and repetition/presence/frequency penalties — drives the drafting so
    the speculation stays aligned with what standard decode would have produced.
 2. **Verify.** The trunk verifies all drafted tokens in a single batched forward
@@ -282,7 +282,7 @@ fails fast at server startup (`SpeculationStartupValidation`).
 | Qwen 3.5 / 3.6 family | Default batched path. Handles full-attention layers, GatedDeltaNet recurrent layers via per-slot state pools, MoE variants, vision injection, and multimodal RoPE tables. Qwen 3.6 additionally supports MTP speculative decode via its embedded NextN block (GDN recurrent-state snapshot/rollback). | `TS_QWEN35_BATCHED=0`; `TS_QWEN35_BATCHED_GDN_NATIVE=1` enables the native batched GDN kernel; server `--spec` enables speculation on Qwen 3.6. |
 | GPT OSS | Default batched path. Handles Q/K/V/O bias, YaRN RoPE, sliding-window layers, attention sinks, MXFP4 MoE experts, and native sinks attention. Greedy correctness has been validated against the legacy path; performance remains limited by per-layer graph construction. | `TS_GPTOSS_BATCHED=0`; `TS_GPTOSS_PAGED_ATTN_MANAGED=1`. |
 | Nemotron-H | Default batched path. Attention layers use paged K/V; Mamba2 layers use per-slot conv/SSM state pools; MoE layers use batched expert kernels; prepared image/audio embeddings can be injected into the batched hidden state. | `TS_NEMOTRON_BATCHED=0`; `TS_NEMOTRON_MAMBA2_BATCHED_NATIVE=1` enables the native batched Mamba2 step. |
-| GLM 5.x | No `ForwardBatch`: MLA keeps one compressed row per token and the DSA indexer scores against that same contiguous history, so there is no paged-KV layout to batch over. Concurrency runs on native **sequence slots** instead (`TSGgml_GlmSlotAlloc` / `SetActiveSlot` / `SlotFree`) — binding a request switches the active slot without moving KV bytes, and each slot's graphs are cached and captured independently. A batched fused decode (one graph, one token per sequence, weights read once for the batch) is implemented on top: 1.81x aggregate decode at 4 concurrent requests, opt-in because batching changes GEMM shapes and a 2-bit MoE amplifies that into different expert picks. | `TS_BATCHED_FUSED_DECODE=1` enables the batched decode; `TS_GLM_BATCHED_DECODE=0` makes the native side decline it. |
+| GLM 5.x | No `ForwardBatch`: MLA keeps one compressed row per token and the DSA indexer scores against that same contiguous history, so there is no paged-KV layout to batch over. Concurrency runs on native **sequence slots** instead (`TSGgml_GlmSlotAlloc` / `SetActiveSlot` / `SlotFree`) — binding a request switches the active slot without moving KV bytes, and each slot's graphs are cached and captured independently. A default-on batched fused decode (one graph, one token per sequence, weights read once for the batch) is implemented on top: 1.81x aggregate decode at 4 concurrent requests. Batching changes GEMM shapes, and a 2-bit MoE can amplify that into different expert picks. | `TS_BATCHED_FUSED_DECODE=0` disables the batched decode; `TS_GLM_BATCHED_DECODE=0` makes the native side decline it. |
 | Gemma 3 | No true `ForwardBatch` port yet; runs through the engine's per-sequence fallback. | Global fallback only. |
 | DiffusionGemma | Separate text-diffusion path. `Forward(int[] tokens)` is intentionally unsupported; generation iteratively denoises fixed-length canvas blocks. Web UI requests share `DiffusionBatchScheduler`, which admits concurrent requests between blocks and can optionally batch active canvases. | `DIFFUSION_STEPS`, `DIFFUSION_MAX_BATCH`, `DIFFUSION_BATCHED_FORWARD`; `DIFFUSION_NO_FUSED_DECODE=1` disables the GGML whole-model diffusion decode. |
 
@@ -314,13 +314,13 @@ fails fast at server startup (`SpeculationStartupValidation`).
 | `TS_SCHED_DECODE_QUANTUM` | `256` | Number of decode tokens before a sequence switch is allowed in fallback-heavy execution. |
 | `TS_BATCHED_N1_FAST_PATH` | `1` | Solo single-sequence steps use the fused N=1 fast-path decode; set `0` to force those steps onto the fully-batched path (A/B testing). |
 | `TS_PER_SEQ_FUSED` | `1` | Concurrent (N≥2) sequences on fused-capable models run per-request fused Forward; set `0` to force the op-by-op batched paged path (A/B testing). |
-| `TS_BATCHED_FUSED_DECODE` | `0` | `1` enables true token-batched fused decode inside the per-sequence fused path (one graph decodes all N sequences). |
+| `TS_BATCHED_FUSED_DECODE` | `1` | `0` disables true token-batched fused decode inside the per-sequence fused path (one graph decodes all N sequences). |
 | `TS_RETAINED_FUSED_CACHE` | `1` | Retain finished fused-path KV holders for cross-request prefix reuse; `0` disables (VRAM cap / A/B). |
 | `TS_RETAINED_FUSED_CACHE_MAX` | `4` | LRU budget of retained fused holders (each pins one per-request KV cache). |
 | `TS_KV_PAGED_QUANT_BITS` | `0` | Optional TurboQuant codec bits for paged KV blocks (`2`, `4`, or `8`); recurrent-state models may fall back to passthrough. |
 | `TS_MTP_SPEC` | `0` | `1` enables MTP / NextN speculative decoding for solo sequences (server `--spec`). |
 | `TS_MTP_DRAFT` | `8` | Max tokens drafted per speculative step (server `--spec-draft`). |
-| `TS_MTP_PMIN` | `0.75` | Min draft-head confidence to keep a drafted token (server `--spec-pmin`; `0` never gates). |
+| `TS_MTP_PMIN` | `0.15` | Min draft-head confidence to keep a drafted token (server `--spec-pmin`; `0` never gates). |
 | `TS_MTP_DRAFT_MODEL` | none | Path to the separate Gemma 4 `gemma4-assistant` draft GGUF (server `--draft-model`); ignored by Qwen 3.6. |
 | `TS_GMTP_NO_FUSED` / `TS_GMTP_NO_FAST_ROLLBACK` / `TS_GMTP_BATCHED_TRUNK` | off | Gemma 4 draft-path A/B switches (disable fused verify/draft kernels; restore kept-prefix rollback; run the batched trunk instead of the linear trunk). |
 | `DIFFUSION_STEPS` | `48` | Web UI DiffusionGemma denoising steps per block. This is separate from autoregressive scheduler step budgets. |

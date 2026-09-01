@@ -4,6 +4,32 @@ namespace InferenceWeb.Tests;
 public class ModelServiceHistoryTests
 {
     [Fact]
+    public void MultimodalExpansion_KeepsOnlyBreakpointsInUnchangedTokenPrefix()
+    {
+        var before = new List<int> { 10, 11, 99, 20, 21 };
+        var after = new List<int> { 10, 11, 7, 8, 9, 20, 21 };
+        var breakpoints = new List<int> { 0, 1, 2, 3, 5 };
+
+        ChatGenerationPipeline.RetainCacheBreakpointsInUnchangedPrefix(before, after, breakpoints);
+
+        Assert.Equal(new[] { 0, 1, 2 }, breakpoints);
+    }
+
+    [Fact]
+    public void MultimodalExpansion_AllMarkersAfterPlaceholder_RemainsExplicitCacheNone()
+    {
+        var breakpoints = new List<int> { 3, 5 };
+
+        ChatGenerationPipeline.RetainCacheBreakpointsInUnchangedPrefix(
+            new List<int> { 10, 11, 99 },
+            new List<int> { 10, 11, 7, 8 },
+            breakpoints);
+
+        Assert.Empty(breakpoints);
+        Assert.NotNull(breakpoints);
+    }
+
+    [Fact]
     public void HasMultimodalContent_HistoryDetectsEarlierImageTurn()
     {
         var history = new List<ChatMessage>

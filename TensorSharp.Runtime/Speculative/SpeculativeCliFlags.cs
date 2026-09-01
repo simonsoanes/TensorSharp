@@ -183,6 +183,7 @@ namespace TensorSharp.Runtime.Speculative
                 if (TryReadOption(args, ref i, "--spec-pmin", out string pminOpt))
                 {
                     if (!float.TryParse(pminOpt, NumberStyles.Float, CultureInfo.InvariantCulture, out float pmin)
+                        || !float.IsFinite(pmin)
                         || pmin < 0f || pmin > 1f)
                     {
                         throw new ArgumentException(

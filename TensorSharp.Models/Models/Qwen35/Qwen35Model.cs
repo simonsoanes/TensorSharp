@@ -1,4 +1,4 @@
-// Copyright (c) Zhongkai Fu. All rights reserved.
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
 // https://github.com/zhongkaifu/TensorSharp
 //
 // This file is part of TensorSharp.
@@ -490,6 +490,7 @@ namespace TensorSharp.Models
             FuseGateUpWeights(TotalLayerCount);
             DetectMoeLayers();
             BuildLayerKeys();
+            BuildProjScaleTable();
             InitMoeBuffers();
 
             if (IsTensorParallel)
@@ -658,6 +659,15 @@ namespace TensorSharp.Models
                             (IntPtr)(srcBase + row * rowBytes),
                             (IntPtr)(dstBase + (rowOffset + row) * inDim),
                             inDim);
+                    if (qw.Scale != 1.0f)
+                    {
+                        // Bake the sidecar per-tensor scale into the F32 rows so the
+                        // fused pack needs no scalar at inference.
+                        long scaledCount = qw.Ne1 * inDim;
+                        float ws = qw.Scale;
+                        float* wsPtr = dstBase + rowOffset * inDim;
+                        for (long e = 0; e < scaledCount; e++) wsPtr[e] *= ws;
+                    }
                     rowOffset += qw.Ne1;
                 }
                 else
@@ -700,7 +710,7 @@ namespace TensorSharp.Models
                 for (int i = 0; i < quantWeights.Length; i++)
                 {
                     var qw = quantWeights[i];
-                    if (qw.GgmlType != first.GgmlType || qw.Ne0 != first.Ne0)
+                    if (qw.GgmlType != first.GgmlType || qw.Ne0 != first.Ne0 || qw.Scale != first.Scale)
                         return false;
 
                     totalBytes += qw.RawBytes;
@@ -710,6 +720,7 @@ namespace TensorSharp.Models
                 if (!TryCreateFusedQuantizedWeight(out QuantizedWeight fusedWeight, quantWeights))
                     return false;
 
+                fusedWeight.Scale = quantWeights[0].Scale;
                 _quantWeights[fusedName] = fusedWeight;
                 if (!keepSources)
                 {
@@ -1117,6 +1128,10 @@ namespace TensorSharp.Models
 
         private void EnsureCacheCapacity(int requiredSeqLen, bool geometricGrowth = true)
         {
+            // Growth discards and reallocates the active caches; if this holder
+            // occupies an arena batched-decode slot, its newest rows/state exist
+            // only there — flush them to host first or growth strands them.
+            FlushArenaSlotForActiveHolder();
             if (requiredSeqLen <= _kvCacheCapacity)
                 return;
             if (requiredSeqLen > _maxContextLength)
@@ -1311,6 +1326,15 @@ namespace TensorSharp.Models
         /// store ffn_gate and ffn_up in different IQ types.</summary>
         protected override bool SupportsSplitGateUpFfn => true;
 
+        /// <summary>
+        /// The fused per-rank TP graphs carry the per-projection scale table
+        /// (see <c>TryBuildTpFdLayerDescs</c>), and the native graphs apply each
+        /// scale on the correct side of the AllReduce cut. The per-op TP
+        /// fallback linears do NOT, so a scaled GGUF that cannot take the fused
+        /// path still has to be refused - <c>ValidateTpConstraints</c> does that.
+        /// </summary>
+        protected override bool SupportsTensorParallelWeightScales => true;
+
         // Per-block snapshot for Qwen 3.5 (mix of attention layers and GDN
         // recurrent layers). Each block bundles:
         //   * For every attention layer L: K bytes for [start,start+B), V bytes
@@ -1446,7 +1470,13 @@ namespace TensorSharp.Models
         /// </summary>
         private void EnsureKvCacheHostSynchronized()
         {
-            if (!_kvCacheHostDirty || !IsGgmlBackend || _kvCacheK == null)
+            if (!IsGgmlBackend || _kvCacheK == null)
+                return;
+            // If the active holder occupies an arena batched-decode slot, its
+            // newest KV rows/state exist only there: flush-and-retire the slot
+            // first so the resident-copy download below sees current bytes.
+            FlushArenaSlotForActiveHolder();
+            if (!_kvCacheHostDirty)
                 return;
 
             var seen = new HashSet<Storage>();
@@ -2127,14 +2157,24 @@ namespace TensorSharp.Models
             if (hasMultimodal || tokens.Length <= chunkSize)
                 return ForwardCore(tokens);
 
-            for (int pos = 0; pos < lastIdx; pos += chunkSize)
+            // The FINAL chunk carries the last prompt token and produces the
+            // logits, so every prompt position - including the one the first
+            // sampled token is drawn from - is evaluated by the same prefill
+            // graph. Running that last token alone through the 1-token decode
+            // graph (as this did) drew the first logits from a structurally
+            // different kernel than the rest of the prompt, and than the
+            // corresponding llama.cpp ubatch.
+            for (int pos = 0; pos < tokens.Length; pos += chunkSize)
             {
-                int chunkLen = Math.Min(chunkSize, lastIdx - pos);
+                int chunkLen = Math.Min(chunkSize, tokens.Length - pos);
                 var chunk = new int[chunkLen];
                 Array.Copy(tokens, pos, chunk, 0, chunkLen);
+                if (pos + chunkLen >= tokens.Length)
+                    return ForwardCore(chunk);
                 PrefillWithoutLogits(chunk);
             }
-            return ForwardCore(new[] { tokens[lastIdx] });
+
+            throw new InvalidOperationException("Chunked prefill produced no logits.");
         }
 
         private void PrefillWithoutLogits(int[] tokens)
@@ -2634,7 +2674,8 @@ namespace TensorSharp.Models
                 && _attnOutputQW[layer] != null
                 && _postAttnNormW[layer] != null
                 && _ffnGateUpQW[layer] != null
-                && _ffnDownQW[layer] != null;
+                && _ffnDownQW[layer] != null
+                && Unscaled(_attnOutputQW[layer], _ffnGateUpQW[layer], _ffnDownQW[layer]);
 
             Tensor attnOut;
             if (canFuseAttnOutFFN)
@@ -3474,6 +3515,57 @@ namespace TensorSharp.Models
         /// FFN with pre-resolved weight references, mirroring <see cref="ModelBase.FFN"/>
         /// but skipping the dictionary lookup. SwiGLU on a fused gate+up projection.
         /// </summary>
+        /// <summary>True when none of the given weights carries a sidecar
+        /// per-tensor scale (fused mega-dispatches have no scale hook and must
+        /// decline to the scale-aware per-op primitives).</summary>
+        private static bool Unscaled(params QuantizedWeight[] ws)
+        {
+            foreach (var w in ws)
+                if (w != null && w.Scale != 1.0f)
+                    return false;
+            return true;
+        }
+
+        // Per-layer per-projection sidecar scale table handed to the fused native
+        // graphs (slot order = the native TSQ35_SC_* constants; 16 floats/layer).
+        private float[] _projScaleTable;
+        private GCHandle _projScaleHandle;
+
+        private unsafe IntPtr ProjScalesPtr(int layer)
+            => _projScaleTable == null
+                ? IntPtr.Zero
+                : (IntPtr)((float*)_projScaleHandle.AddrOfPinnedObject() + layer * 16);
+
+        private void BuildProjScaleTable()
+        {
+            if (!HasSidecarWeightScales)
+                return;
+            int n = TotalLayerCount;
+            var tbl = new float[n * 16];
+            for (int i = 0; i < tbl.Length; i++) tbl[i] = 1.0f;
+            float S(string key) => _quantWeights.TryGetValue(key, out var qw) ? qw.Scale : 1.0f;
+            for (int l = 0; l < n; l++)
+            {
+                string p = $"blk.{l}.";
+                int b = l * 16;
+                tbl[b + 0] = _quantWeights.ContainsKey(p + "attn_qkv.weight") ? S(p + "attn_qkv.weight") : S(p + "attn_q.weight"); // QKV (or Q when separate)
+                tbl[b + 1] = S(p + "attn_k.weight");        // K (separate only)
+                tbl[b + 2] = S(p + "attn_v.weight");        // V (separate only)
+                tbl[b + 3] = S(p + "attn_output.weight");   // O
+                tbl[b + 4] = S(p + "attn_qkv.weight");      // GDN in-proj (same GGUF name)
+                tbl[b + 5] = S(p + "attn_gate.weight");     // GDN z gate
+                tbl[b + 6] = S(p + "ssm_beta.weight");
+                tbl[b + 7] = S(p + "ssm_alpha.weight");
+                tbl[b + 8] = S(p + "ssm_out.weight");
+                tbl[b + 9] = S(p + "ffn_gate_up.weight");   // fused gate_up (gate==up scale)
+                tbl[b + 10] = S(p + "ffn_gate.weight");     // split fallback
+                tbl[b + 11] = S(p + "ffn_up.weight");
+                tbl[b + 12] = S(p + "ffn_down.weight");
+            }
+            _projScaleTable = tbl;
+            _projScaleHandle = GCHandle.Alloc(tbl, GCHandleType.Pinned);
+        }
+
         private Tensor FFNCached(Tensor input, int layer, int seqLen)
         {
             int intermSize = Config.IntermediateSize;
@@ -3530,6 +3622,8 @@ namespace TensorSharp.Models
                 && postNormW != null
                 && _ffnGateUpQW[layer] != null
                 && _ffnDownQW[layer] != null
+                && _ffnGateUpQW[layer].Scale == 1.0f
+                && _ffnDownQW[layer].Scale == 1.0f   // sidecar scales: use the scale-aware unfused chain
                 && residual.DimensionCount == 2
                 && residual.Sizes[0] == seqLen
                 && residual.Sizes[1] == _ffnGateUpQW[layer].Ne0)
@@ -3709,11 +3803,13 @@ namespace TensorSharp.Models
                 Tensor result = new Tensor(_allocator, DType.Float32, seqLen, outDim);
                 GgmlBasicOps.FusedRmsNormMatMulQuant(result, input, normW, Config.Eps,
                     qw.CacheKey, qw.GgmlType, qw.Ne0, qw.Ne1, qw.RawBytes);
+                if (qw.Scale != 1.0f)
+                    Ops.Mul(result, result, qw.Scale); // sidecar per-tensor scale2
                 _linearTicks += Stopwatch.GetTimestamp() - t0;
                 return result;
             }
 
-            if (_backend == BackendType.Mlx && qw != null && normW != null && input.DimensionCount == 2)
+            if (_backend == BackendType.Mlx && qw != null && normW != null && input.DimensionCount == 2 && qw.Scale == 1.0f)
             {
                 long t0 = Stopwatch.GetTimestamp();
                 int seqLen = (int)input.Sizes[0];
@@ -3760,6 +3856,9 @@ namespace TensorSharp.Models
                 || output.Sizes[0] != input.Sizes[0])
                 return null;
 
+            if (qw.Scale != 1.0f)
+                return null; // scale-aware fallback (FusedNormLinear) applies it
+
             if (_backend == BackendType.Mlx)
             {
                 long tMlx = Stopwatch.GetTimestamp();
@@ -3803,6 +3902,9 @@ namespace TensorSharp.Models
         {
             if (qw == null || input.DimensionCount != 2 || residual.DimensionCount != 2)
                 return false;
+
+            if (qw.Scale != 1.0f)
+                return false; // the scale must apply before the residual add
 
             if (_backend == BackendType.Mlx)
             {
@@ -3916,6 +4018,8 @@ namespace TensorSharp.Models
 
             QuantizedWeight qkv = _attnQkvQW[layer];
             QuantizedWeight oOut = _attnOutputQW[layer];
+            if ((qkv?.Scale ?? 1.0f) != 1.0f || (oOut?.Scale ?? 1.0f) != 1.0f)
+                return false; // sidecar scale2 not wired into this per-layer graph
             Tensor attnNorm = _attnNormW[layer];
             Tensor qNorm = _attnQNormW[layer];
             Tensor kNorm = _attnKNormW[layer];
@@ -3979,6 +4083,8 @@ namespace TensorSharp.Models
 
             QuantizedWeight qkv = _attnQkvQW[layer];
             QuantizedWeight oOut = _attnOutputQW[layer];
+            if ((qkv?.Scale ?? 1.0f) != 1.0f || (oOut?.Scale ?? 1.0f) != 1.0f)
+                return false; // sidecar scale2 not wired into this per-layer graph
             Tensor attnNorm = _attnNormW[layer];
             Tensor qNorm = _attnQNormW[layer];
             Tensor kNorm = _attnKNormW[layer];
@@ -3999,6 +4105,10 @@ namespace TensorSharp.Models
             int maxSeqLen = (int)kCache.Sizes[1];
 
             // The fused kernel uses NeoX RoPE (rope_mode = 2), matching the standalone path.
+            // Partial rotary (rope.dimension_count, e.g. 64 of the 256-dim head).
+            // Must match the whole-model decode graph AND the KV rows prefill
+            // wrote; roping all 256 dims here rotates a different subspace.
+            int ropeDims = _ropeDimCount > 0 ? _ropeDimCount : headDim;
             const int ropeMode = 2;
             float ropeFreqScale = 1.0f / Config.RopeScale;
 
@@ -4014,7 +4124,7 @@ namespace TensorSharp.Models
                     kCache, vCache,
                     numHeads, numKVHeads,
                     maxSeqLen, position,
-                    Config.Eps, Config.RopeBase, ropeFreqScale, ropeMode);
+                    Config.Eps, Config.RopeBase, ropeFreqScale, ropeDims, ropeMode);
                 _attnTicks += Stopwatch.GetTimestamp() - t0;
 
                 // The residual is downloaded to its host buffer, but on CUDA the
@@ -5849,6 +5959,8 @@ namespace TensorSharp.Models
                     GgmlBasicOps.AddmmQuant(result, input, qw.CacheKey, qw.GgmlType, qw.Ne0, qw.Ne1, qw.RawBytes);
                 else
                     AddmmQuantManaged(result, input, qw);
+                if (qw.Scale != 1.0f)
+                    Ops.Mul(result, result, qw.Scale); // sidecar per-tensor scale2
             }
             else if (wF32 != null)
             {
@@ -6077,6 +6189,9 @@ namespace TensorSharp.Models
 
         protected override void OnBeforeReleaseGgmlDeviceResidency()
         {
+            // Arena slots hold the only current KV/GDN state; flush them to
+            // host before the residency wipe frees the resident copies.
+            GgmlBasicOps.Qwen35ArenaResetBatchedDecodeCache();
             // Whole-model Qwen graphs pin weight buffers. Preserve mutable
             // device-authoritative state, then drop every graph family before
             // ModelBase evicts the corresponding weight bindings.
@@ -6099,6 +6214,10 @@ namespace TensorSharp.Models
             if (IsGgmlBackend)
             {
                 GgmlBasicOps.Qwen35ResetDecodeCache();
+                // The arena batched-decode pool survives everything else by
+                // design; drop it (with a dirty-slot flush) at teardown or its
+                // per-entry buffers keep their VRAM until process exit.
+                GgmlBasicOps.Qwen35ArenaResetBatchedDecodeCache();
                 GgmlBasicOps.Qwen35ResetVerifyCache();
                 GgmlBasicOps.Qwen35ResetBatchedDecodeCache();
                 GgmlBasicOps.Qwen35ReleaseVerifyTpGraphs();

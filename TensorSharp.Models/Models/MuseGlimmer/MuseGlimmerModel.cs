@@ -353,6 +353,26 @@ namespace TensorSharp.Models
             // capture), and their flash kernels skip fully-masked blocks.
             if (!SwaRingEnabled || !(CanUseFusedForward || CanUseTpFusedForward) || _slidingWindow <= 0)
                 return 0;
+            // The ring is correct on one GPU and WRONG under tensor parallelism,
+            // and the difference is the KV head count. A ring layer is read
+            // whole (window == rows), so kv_window_needs_cuda_flash_attn_copy
+            // takes its "the window IS the cache" early return and never
+            // materialises it - which is right when a rank owns every KV head.
+            // Split two ways this model holds ONE (32 Q heads over 2 KV heads),
+            // and ggml-cuda's flash-attention picks a different kernel for a
+            // ne[2] == 1 K/V; the same single-KV-head hazard that
+            // ggml_ops_transformer_common.h already documents for truncated
+            // windows. Measured: --tp 2 answers "Compute 17 plus 25" with
+            // fluent nonsense on the ring and correctly without it, byte-for-byte
+            // deterministic either way, on every AllReduce transport and with
+            // CUDA graph capture disabled.
+            //
+            // Uniform caches cost KV memory the ring was introduced to save, so
+            // this is a correctness-first fallback, not the end state: the ring
+            // should come back for TP once the ne[2] == 1 flash-attention path is
+            // pinned down. One GPU is untouched and keeps the ring.
+            if (IsTensorParallel)
+                return 0;
             if (_backend == BackendType.GgmlCpu)
                 return 0;
             int need = _slidingWindow + Math.Max(PrefillChunkTokens, 1) + 1;

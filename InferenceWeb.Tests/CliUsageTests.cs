@@ -94,4 +94,14 @@ public class CliUsageTests
         Assert.Contains("Default:", usage);
         Assert.Contains("Example:", usage);
     }
+
+    [Fact]
+    public void PrintUsage_DocumentsTheCurrentPerTokenSpeculationGate()
+    {
+        string usage = Usage();
+        string flattened = System.Text.RegularExpressions.Regex.Replace(usage, @"\s+", " ");
+
+        Assert.Contains("0.15 for a per-token head", flattened);
+        Assert.DoesNotContain("0.75 for a per-token head", flattened);
+    }
 }

@@ -1496,7 +1496,7 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
     // Loading it costs a whole extra decoder layer (~3 GiB of GLM-5.2 at
     // IQ2_XXS) that also competes with the KV cache for the VRAM the context is
     // sized against, so it is opt-in: the server sets TS_MTP_SPEC from
-    // --mtp-spec before the model loads, and the managed side forwards that as
+    // --spec before the model loads, and the managed side forwards that as
     // `load_mtp`. A checkpoint that declares nextn_predict_layers but ships no
     // MTP tensors (a trunk-only re-quantization) loads normally without one.
     if (load_mtp && hp.g5n)
@@ -1617,12 +1617,24 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
     // 1M context, which at 78 layers is ~93 GiB of cache — a whole card's worth
     // on top of the weights — so the advertised number is a ceiling to fit
     // under, not a promise.
+    // Row widths must match slot_alloc exactly: the indexer packs [key | gate]
+    // when the cells are pooled, and KDA layers keep a fixed-size recurrent
+    // state instead of per-token rows.
+    const size_t idx_row_bytes = (hp.indexer_kpool > 0 ? 2 * (size_t) hp.indexer_head_size
+                                                       : (size_t) hp.indexer_head_size) * 2;
+    const size_t kda_state_bytes = hp.g5n
+        ? ((size_t) (hp.d_conv - 1) * 3 * hp.kda_head_dim * hp.kda_n_head
+           + (size_t) hp.kda_head_dim * hp.kda_head_dim * hp.kda_n_head) * 4
+        : 0;
     size_t kv_bytes_per_token = 0;
+    size_t kv_bytes_fixed = 0;
     for (int il = 0; il < hp.n_layer; il++)
     {
+        if (hp.g5n && hp.is_recr[(size_t) il] != 0) { kv_bytes_fixed += kda_state_bytes; continue; }
         kv_bytes_per_token += (size_t) hp.n_kv_row * 2;
-        if (hp.indexer_full[il]) kv_bytes_per_token += (size_t) hp.indexer_head_size * 2;
+        if (hp.indexer_full[il]) kv_bytes_per_token += idx_row_bytes;
     }
+    if (m->has_mtp) kv_bytes_per_token += (size_t) hp.n_kv_row * 2;
 
     // What a graph needs on top of the caches. Two things scale with the
     // context: the DSA top-k masks, which are [n_kv, n_ubatch] F16 and live for
@@ -1633,7 +1645,8 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
     const int n_full_indexer = (int) std::count(hp.indexer_full.begin(), hp.indexer_full.end(), (uint8_t) 1);
     const size_t graph_bytes_per_token = 2 * (size_t) n_full_indexer * (size_t) m->n_ubatch * 2;
     const size_t graph_bytes_fixed =
-        2 * (size_t) m->n_ubatch * ((size_t) hp.n_vocab + 16 * (size_t) hp.n_embd) * 4;
+        2 * (size_t) m->n_ubatch * ((size_t) hp.n_vocab + 16 * (size_t) hp.n_embd) * 4
+        + kv_bytes_fixed;
 
     /// Largest context whose caches AND graphs still fit in `avail`, in whole
     /// 256-token steps because that is the granularity the graphs are keyed on.
@@ -2388,27 +2401,118 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
     // is what decides the context the session really gets.
     if (!ctx_is_hard_limit && n_gpu > 0 && (m->tp <= 1 || m->tp <= n_gpu))
     {
-        size_t free_min = SIZE_MAX;
-        const int n_rank = m->tp > 1 ? m->tp : n_gpu;
-        for (int r = 0; r < n_rank; r++)
-        {
-            const int d = m->tp > 1 ? m->rank_device(r) : r;
-            size_t free_b = 0, total_b = 0;
-            ggml_backend_dev_memory(ggml_backend_get_device(m->backends[d]), &free_b, &total_b);
-            // Under a layer split the caches are spread over the devices, so each
-            // one only carries its own layers' share; with tensor parallelism
-            // every rank carries the lot.
-            const size_t share = m->tp > 1 ? free_b : free_b * (size_t) n_gpu;
-            free_min = std::min(free_min, share);
-        }
+        // How many sequence slots the context must leave room for. Each slot is
+        // a full-context set of cache rows, so a server running N sequences
+        // needs N of everything per-token below. Defaults to the interactive
+        // case; a serving config sets TS_GLM_PLAN_SLOTS instead of hand-tuning
+        // MAX_CONTEXT.
+        size_t plan_slots = 1;
+        if (const char * e = getenv("TS_GLM_PLAN_SLOTS")) { long v = atol(e); if (v >= 1 && v <= 256) plan_slots = (size_t) v; }
         const size_t reserve = (size_t) 1024 * 1024 * 1024;   // leave the driver room to breathe
-        const int fit = free_min > reserve ? ctx_that_fits(free_min - reserve) : 0;
-        if (fit >= 256 && fit != m->n_ctx)
+        int fit = 0;
+        if (m->tp > 1)
+        {
+            // Every rank holds a full-length copy of every cache.
+            size_t free_min = SIZE_MAX;
+            for (int r = 0; r < m->tp; r++)
+            {
+                size_t free_b = 0, total_b = 0;
+                ggml_backend_dev_memory(ggml_backend_get_device(m->backends[m->rank_device(r)]), &free_b, &total_b);
+                free_min = std::min(free_min, free_b);
+            }
+            // The LM-head graph and the DSA masks exist once per rank, not per
+            // slot; only the cache rows and KDA state scale with plan_slots.
+            const size_t fixed = reserve + graph_bytes_fixed + (plan_slots - 1) * kv_bytes_fixed;
+            const size_t per_tok = plan_slots * kv_bytes_per_token + graph_bytes_per_token;
+            const size_t avail = free_min > fixed ? free_min - fixed : 0;
+            size_t t = per_tok > 0 ? avail / per_tok : 0;
+            t -= t % 256;
+            fit = (int) std::min((size_t) ctx_requested, t);
+        }
+        else
+        {
+            // The caches land where their layers live (slot_alloc), so size the
+            // context against each device's actual share of the rows. Assuming
+            // an even 1/n_gpu spread over-commits whichever device carries the
+            // most cache layers: GLM-5.2 on 3 GPUs sized itself to 342k tokens
+            // this way and then failed its very first slot allocation.
+            const int n_cache_layers = hp.n_layer + (m->has_mtp ? 1 : 0);
+            std::vector<size_t> tok_b((size_t) n_gpu, 0);      // per-slot, per-token
+            std::vector<size_t> fix_slot_b((size_t) n_gpu, 0); // per-slot, fixed
+            std::vector<size_t> gtok_b((size_t) n_gpu, 0);     // shared graph, per-token
+            for (int il = 0; il < n_cache_layers; il++)
+            {
+                const int d = m->layers[(size_t) il].device;
+                if (d < 0 || d >= n_gpu) continue;
+                if (il < hp.n_layer && m->layers[(size_t) il].recurrent)
+                {
+                    fix_slot_b[(size_t) d] += kda_state_bytes;
+                    continue;
+                }
+                tok_b[(size_t) d] += (size_t) hp.n_kv_row * 2;
+                if (il < hp.n_layer && hp.indexer_full[(size_t) il])
+                {
+                    tok_b[(size_t) d] += idx_row_bytes;
+                    // this layer's DSA top-k masks: [n_kv, n_ubatch] F16, twice
+                    // over for the graph cache, shared across slots
+                    gtok_b[(size_t) d] += 2 * (size_t) m->n_ubatch * 2;
+                }
+            }
+            // The LM-head output buffer dominates graph_bytes_fixed and is
+            // allocated where the head runs - the last trunk layer's device
+            // (the MTP block follows it there). The KDA state share of that
+            // constant is per-slot and already charged via fix_slot_b, so
+            // subtract it back out.
+            const int dev_head = m->layers[(size_t) hp.n_layer - 1].device;
+            const size_t graph_fixed_head = graph_bytes_fixed > kv_bytes_fixed
+                                          ? graph_bytes_fixed - kv_bytes_fixed : 0;
+            fit = ctx_requested;
+            for (int d = 0; d < n_gpu; d++)
+            {
+                const size_t per_tok = plan_slots * tok_b[(size_t) d] + gtok_b[(size_t) d];
+                const size_t fixed = reserve + (d == dev_head ? graph_fixed_head : 0)
+                                   + plan_slots * fix_slot_b[(size_t) d];
+                if (per_tok == 0 && fix_slot_b[(size_t) d] == 0 && d != dev_head)
+                    continue;   // no caches, no graphs: this device does not constrain
+                size_t free_b = 0, total_b = 0;
+                ggml_backend_dev_memory(ggml_backend_get_device(m->backends[d]), &free_b, &total_b);
+                const size_t avail = free_b > fixed ? free_b - fixed : 0;
+                int dev_fit;
+                if (per_tok > 0)
+                {
+                    size_t t = avail / per_tok;
+                    t -= t % 256;
+                    dev_fit = (int) std::min((size_t) ctx_requested, t);
+                }
+                else
+                {
+                    // Only fixed-size state lives here (all-KDA device, or just
+                    // the head graph): the context is unconstrained as long as
+                    // that state actually fits.
+                    dev_fit = avail > 0 || fixed <= free_b ? ctx_requested : 0;
+                }
+                fit = std::min(fit, dev_fit);
+            }
+        }
+        if (fit < 256)
+        {
+            // Refuse now, with the reason, rather than letting slot_alloc fail
+            // after the whole load: the measurement above mirrors exactly what
+            // slot_alloc is about to allocate.
+            fprintf(stderr, "[glm] not enough VRAM left after the weights for even a 256-token context%s. "
+                    "Lower TS_GLM_PLAN_SLOTS%s, set MAX_CONTEXT explicitly, or add --n-cpu-moe N to move "
+                    "expert weights off the GPUs.\n",
+                    plan_slots > 1 ? " per slot" : "",
+                    plan_slots > 1 ? "" : " (unset)");
+            return nullptr;
+        }
+        if (fit != m->n_ctx)
         {
             if (fit < ctx_requested)
-                fprintf(stderr, "[glm] context %d tokens (the GGUF advertises %d): %.1f GiB free per rank after the "
-                        "weights, and the caches and graphs have to live in it. Set MAX_CONTEXT to ask for a "
-                        "different one.\n", fit, ctx_requested, free_min / 1073741824.0);
+                fprintf(stderr, "[glm] context %d tokens (the GGUF advertises %d)%s: sized to what is free on each "
+                        "device after the weights, with the caches and graphs placed where their layers are. Set "
+                        "MAX_CONTEXT to ask for a different one.\n", fit, ctx_requested,
+                        plan_slots > 1 ? " per slot" : "");
             m->n_ctx = fit;
         }
     }
@@ -2425,7 +2529,7 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
         // requested, and "(+1 MTP)" on a run with no draft head is exactly the
         // kind of log line that costs an hour.
         const char * mtp_state = m->has_mtp ? " +1 NextN/MTP draft block"
-                               : (hp.n_layer_nextn > 0 ? " (NextN block present but not loaded; --mtp-spec loads it)"
+                               : (hp.n_layer_nextn > 0 ? " (NextN block present but not loaded; --spec loads it)"
                                                        : "");
         fprintf(stderr, "[glm] glm-dsa: %d trunk layers%s, n_embd=%d, %d heads, MLA(q_lora=%d, kv_lora=%d, "
                 "head_k=%d, head_v=%d, rope=%d), %d experts top-%d (ff=%d), dense_lead=%d, indexer %dx%d top-%d on "

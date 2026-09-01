@@ -438,7 +438,16 @@ TSG_EXPORT int TSGgml_MuseGlimmerModelForward(
         if (!ensure_backend())
             return 0;
 
-        const bool tp_mode = tp_degree > 1 && tp_plan_out != nullptr;
+        // Plan mode needs BOTH a place to put the plan and a group that actually
+        // spans ranks. The degree alone is not enough: one local rank per node is
+        // a legitimate distributed shape. Nor is the pointer alone - this entry is
+        // marshalled as `out IntPtr`, so C# hands it a non-null slot on EVERY call,
+        // including a plain single-GPU decode. Gating on the pointer by itself put
+        // that decode into plan mode: the graph was built, never executed, and the
+        // caller read an untouched logits buffer - fluent-looking <pad> spam at
+        // thousands of tokens/sec because no compute had happened at all.
+        const bool tp_mode = tp_plan_out != nullptr &&
+            (tp_degree > 1 || tsg::tp_global_degree(tp_degree) > 1);
         if (tp_mode)
         {
             tp_plan_out[0] = nullptr;

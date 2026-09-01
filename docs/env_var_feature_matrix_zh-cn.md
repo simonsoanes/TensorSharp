@@ -43,7 +43,7 @@ DiffusionGemma 当前不属于已注册的 TestMatrix 功能目录：还没有 d
 | `TS_NEMOTRON_MAMBA2_BATCHED_NATIVE` | Nemotron-H | 原生批处理 Mamba2 step | 关闭 | `0`, `1` | 否 |
 | `TS_BATCHED_N1_FAST_PATH` | 全部 | solo 序列走融合 N=1 快速路径 decode；`0` 强制这些步骤走完全批处理路径 | 启用 | `0`, `1` | 是 |
 | `TS_PER_SEQ_FUSED` | fused 能力模型（Gemma 4、Qwen 3.5/3.6、DeepSeek V4、GLM 5.x） | 并发（N>=2）序列走 per-request 融合 Forward；`0` 强制逐算子批处理分页路径 | 启用 | `0`, `1` | 否 |
-| `TS_BATCHED_FUSED_DECODE` | fused 能力模型 | per-seq fused 路径内的真正 token 批量融合 decode（一张图跑全部 N 个序列）。在 GLM 5.x 上 4 个并发请求可得合计 1.81× decode，但批处理会改变 GEMM 形状，2 bit MoE 会把这点差别放大成不同的专家选择，因此默认需显式开启 | 关闭 | `0`, `1` | 否 |
+| `TS_BATCHED_FUSED_DECODE` | fused 能力模型 | per-seq fused 路径内的真正 token 批量融合 decode（一张图跑全部 N 个序列）。在 GLM 5.x 上 4 个并发请求可得合计 1.81× decode。批处理会改变 GEMM 形状，2 bit MoE 可能把这点差别放大成不同的专家选择；设为 `0` 可做串行路径 A/B。 | 开启 | `0`, `1` | 否 |
 | `TS_RETAINED_FUSED_CACHE` | fused 能力的滑窗模型（Gemma 4） | 保留已完成 fused KV holder 用于跨请求前缀复用 | 启用 | `0`, `1` | 否 |
 | `TS_RETAINED_FUSED_CACHE_MAX` | fused 能力的滑窗模型 | 保留 fused holder 的 LRU 预算（限 VRAM） | `4` | 不适用 | 否 |
 | `TS_SCHED_DISABLE_BATCHED` | 全部 | 全局按序列 KV-swap 回退 | 关闭 | `0`, `1` | 是 |
@@ -153,7 +153,7 @@ decoder 调进显存，并据此确定图缓存大小），所以这两个名字
 | `TS_SPEC` | `TS_MTP_SPEC` | Qwen 3.5/3.6、GLM 5.2、Gemma 4、DeepSeek V4、Muse-Glimmer（CLI + 服务端） | 为单序列启用投机解码 | 关闭（`0`） | 未注册 | 否 |
 | `TS_SPEC_TYPE` | — | 同上全部 | 投机算法：`auto` \| `draft-head` \| `block` \| `ngram` | `auto` | 未注册 | 否 |
 | `TS_SPEC_DRAFT` | `TS_MTP_DRAFT` | 同上全部 | 每个投机步最多起草的 token 数（1-64） | `8` | 未注册 | 否 |
-| `TS_SPEC_PMIN` | `TS_MTP_PMIN` | 同上全部 | 草稿置信度门限；含义随算法而定 | 按算法（`0.75` / `0.35` / `0`） | 未注册 | 否 |
+| `TS_SPEC_PMIN` | `TS_MTP_PMIN` | 同上全部 | 草稿置信度门限；含义随算法而定 | 按算法（`0.15` / `0.35` / `0`） | 未注册 | 否 |
 | `TS_SPEC_DRAFT_MODEL` | `TS_MTP_DRAFT_MODEL` | Gemma 4（CLI + 服务端） | 独立 `gemma4-assistant` 草稿 GGUF 路径 | 无 | 未注册 | 否 |
 | `TS_GLM_MTP` | — | GLM 5.2 | 强制开启（`1`）或关闭（`0`）NextN 块，双向覆盖 `TS_SPEC`/`TS_MTP_SPEC` | 未设置 | 未注册 | 否 |
 | `TS_GMTP_NO_FUSED` | — | ggml 后端上的 Gemma 4 | 关闭融合多 token 验证 / 草稿步内核（逐算子回退） | 关闭 | 未注册 | 否 |
@@ -219,7 +219,7 @@ Muse-Glimmer 的融合整模型内核与它的 DFlash 块级草稿模型各有�
 | `TS_GLM_GRAPH_CACHE` | GGML 上的 GLM 5.x | 缓存多少张已构建且已分配的计算图，使相同形状可以直接重放而不必重建 | `8` | — | 否 |
 | `TS_GLM_NODES_PER_LAYER` | GGML 上的 GLM 5.x | 每 rank 每层的计算图节点预算 | `256` | — | 否 |
 | `TS_GLM_MOE_MMAP` | 带 `--n-cpu-moe` 的 GLM 5.x | `0` 把驻留主机的专家拷进私有缓冲，而不是在 GGUF 映射上就地做乘法 | `1`（映射） | `0`, `1` | 否 |
-| `TS_GLM_BATCHED_DECODE` | GLM 5.x | `0` 让原生侧拒绝一切批处理解码，即便设了 `TS_BATCHED_FUSED_DECODE=1` 也强制走按序列的槽位路径 | `1`（接受） | `0`, `1` | 否 |
+| `TS_GLM_BATCHED_DECODE` | GLM 5.x | `0` 让原生侧拒绝一切批处理解码，即便全局批处理融合 decode 已启用，也强制走按序列的槽位路径 | `1`（接受） | `0`, `1` | 否 |
 | `TS_GLM_LOAD_THREADS` / `TS_GLM_LOAD_CHUNK_MB` | GLM 5.x | 权重加载的并行度与分块大小——16 个读线程跨 6 个分片，在页缓存预热的情况下约 37 秒读入 218 GiB（5.9 GiB/s） | `16` / `64` | — | 否 |
 | `TS_GLM_TRACE` | GLM 5.x（诊断） | 指定层列表（或 `all`）按 `llama-eval-callback` 的排版打印逐层激活和，用于与 llama.cpp 对拍 | 未设置 | — | 否 |
 | `TS_GLM_BD_DEBUG` | GLM 5.x（诊断） | `1` 逐步叙述每次批处理解码：参与的是哪些槽位、计算图是复用还是重建、跑到了哪一步 | `0` | `0`, `1` | 否 |

@@ -121,6 +121,56 @@ public class SkillPromptTests : IDisposable
     }
 
     [Fact]
+    public void Apply_LeadingMessageMarkerStaysAtOriginalPreambleBoundary()
+    {
+        const string stablePreamble = "Follow the house style.";
+        var original = new ChatMessage
+        {
+            Role = "developer",
+            Content = stablePreamble + "  ",
+            CacheControl = new CacheControlMarker(),
+            ContentCacheBreakpoints = new List<int> { 6 },
+        };
+
+        ChatMessage injected = SkillPrompt.Apply(
+            new List<ChatMessage> { original }, "## Agent skills\nblock body")[0];
+
+        Assert.Null(injected.CacheControl);
+        Assert.Equal(new[] { 6, stablePreamble.Length }, injected.ContentCacheBreakpoints);
+        Assert.StartsWith(stablePreamble + "\n\n", injected.Content, StringComparison.Ordinal);
+        Assert.NotNull(original.CacheControl);
+    }
+
+    [Fact]
+    public void Apply_TrailingWhitespaceMarkersAreClampedBeforeSkillsAreAppended()
+    {
+        const string stablePreamble = "Stable preamble.";
+        string contentWithWhitespace = stablePreamble + " \t  ";
+        var original = new ChatMessage
+        {
+            Role = "system",
+            Content = contentWithWhitespace,
+            CacheControl = new CacheControlMarker(),
+            ContentCacheBreakpoints = new List<int>
+            {
+                contentWithWhitespace.Length,
+                4,
+                stablePreamble.Length + 1,
+                4,
+            },
+        };
+
+        ChatMessage injected = SkillPrompt.Apply(
+            new List<ChatMessage> { original }, "## Agent skills\nblock body")[0];
+
+        Assert.Equal(new[] { 4, stablePreamble.Length }, injected.ContentCacheBreakpoints);
+        Assert.Null(injected.CacheControl);
+        Assert.Equal(
+            new[] { contentWithWhitespace.Length, 4, stablePreamble.Length + 1, 4 },
+            original.ContentCacheBreakpoints);
+    }
+
+    [Fact]
     public void Apply_NoLeadingPreamble_PrependsASystemMessage()
     {
         var messages = new List<ChatMessage> { new() { Role = "user", Content = "hello" } };
@@ -167,6 +217,8 @@ public class SkillPromptTests : IDisposable
                 Content = "Earlier answer.",
                 RawOutputTokens = new List<int> { 11, 22, 33 },
                 TextFilePaths = new List<string> { "/tmp/notes.txt" },
+                CacheControl = new CacheControlMarker(),
+                ContentCacheBreakpoints = new List<int> { 7 },
             },
         };
 
@@ -175,6 +227,8 @@ public class SkillPromptTests : IDisposable
         Assert.NotSame(messages[1], result[1]);                       // really a copy
         Assert.Equal(new[] { 11, 22, 33 }, result[1].RawOutputTokens);
         Assert.Equal(new[] { "/tmp/notes.txt" }, result[1].TextFilePaths);
+        Assert.Equal("ephemeral", result[1].CacheControl?.Type);
+        Assert.Equal(new[] { 7 }, result[1].ContentCacheBreakpoints);
     }
 
     [Fact]
