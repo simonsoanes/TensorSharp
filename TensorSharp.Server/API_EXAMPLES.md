@@ -5,7 +5,7 @@
 TensorSharp.Server provides three API styles plus a few utility endpoints:
 
 - **Ollama-compatible** (`/api/generate`, `/api/chat/ollama`, `/api/tags`, `/api/show`)
-- **OpenAI-compatible** (`/v1/chat/completions`, `/v1/models`)
+- **OpenAI-compatible** (`/v1/chat/completions`, `/v1/responses`, `/v1/models`)
 - **Web UI** (`/api/chat`, `/api/sessions`, `/api/models`, `/api/models/load`, `/api/upload`, `/api/skills`, `/api/image-edit`, `/api/image-edit/stream`)
 - **Utilities** (`/api/version`, `/api/queue/status`)
 
@@ -20,11 +20,12 @@ Start the server with the exact hosted model via `--model` and, when needed, the
 | Backends | `mlx`, `cuda`, `ggml_metal`, `ggml_cuda`, `ggml_vulkan`, `ggml_cpu`, `cpu`; `/api/models` reports which are available on the host |
 | Concurrency | Autoregressive chat uses the continuous-batching engine. The legacy queue API remains for status/compatibility fields; DiffusionGemma Web UI requests use a separate block-boundary diffusion scheduler. |
 | Generation modes | Autoregressive models stream appended token chunks. DiffusionGemma returns final text on append-only compatibility endpoints and exposes live whole-message denoising previews on Web UI `/api/chat`. |
-| Sessions | Web UI uses per-tab sessions; Ollama/OpenAI compatibility endpoints share the default session |
+| Sessions | Web UI uses per-tab chat sessions. Ollama/OpenAI compatibility endpoints retain their existing default-session inference behavior, but code-execution workspaces never span HTTP requests. |
 | Uploads | `/api/upload` accepts image / video / audio / text / **PDF** files; born-digital PDFs return extracted text, scanned PDFs return page images for vision-capable models (`TS_PDF_MAX_PAGES` caps pages read) |
 | Image editing | Qwen-Image-Edit (`qwen_image`) models are served through `/api/image-edit` and `/api/image-edit/stream`, not the chat endpoints |
 | Video generation | Any video-generation model — MiniMax-H3 (`minimax-h3`), Wan 2.1 / 2.2 (`wan`) — is served through `/api/video-generate`, `/api/video-generate/stream` and `/v1/videos/generations`; MiniMax-H3 returns a 32 kHz stereo `.wav` sidecar alongside the MP4, and `/api/models` advertises what conditioning the loaded checkpoint takes |
-| Agent Skills | Skill directories from `--skills-dir` (or a `skills` folder beside the binary), listed at `/v1/skills` and `/api/skills` and installable as a `.zip` through `POST /api/skills`. Selected per request with `"skills": [...]` on every chat endpoint; the model's own `skills_read` calls are answered inside the server, so clients receive a finished completion. `skills_run` (executing a skill's scripts) is off unless the server was started with `--skills-allow-exec` |
+| Agent Skills | Skill directories from `--skills-dir` (or a `skills` folder beside the binary), listed at `/v1/skills` and `/api/skills` and installable as a `.zip` through `POST /api/skills`. Selected per request with `"skills": [...]` on every chat endpoint. On families with both declaration and output-parser support, the model's own skill calls are answered inside the server, so clients receive a finished completion. No-tool families such as `qwen4exp` receive selected skill instructions inline instead. `skills_run` is off unless the server starts with `--skills-allow-exec`. |
+| Agentic code execution | `--code-exec` adds the in-process `shell`, `read_file`, `edit_file`, `write_file`, and `apply_patch` tools on tool-capable model families. Web UI keeps one workspace per chat session; each OpenAI/Ollama HTTP request gets a private workspace across its internal rounds and the server deletes it after the response. Network and package installation are separate, off-by-default permissions. |
 | Structured outputs | OpenAI `response_format` supports `text`, `json_object`, and `json_schema`; `response_format` (`json_object` / `json_schema`) cannot be combined with `think` or `tools` |
 
 > **Network safety:** the server listens on `0.0.0.0:5000` and has no API-key
@@ -71,7 +72,7 @@ Open the bundled UI at **<http://localhost:5000>** — `GET /` serves `index.htm
 
 ### Already-built or extracted application folder
 
-Run the commands below from the repository root after building; they invoke `TensorSharp.Server/bin/TensorSharp.Server.dll`, whose folder also contains the copied native libraries and `wwwroot/`. There are currently no binary assets attached to the `v3.0.5.0` GitHub release, so do not present a release-archive command as available until an archive is actually published.
+Run the commands below from the repository root after building, or adapt the DLL path to an extracted release archive; the application folder also contains the native libraries and `wwwroot/`. **Status verified 2026-09-01:** [v3.3.0.0](https://github.com/zhongkaifu/TensorSharp/releases/tag/v3.3.0.0) provides ten prebuilt archives — CLI and Server for Windows x64 (CPU/CUDA), Linux x64 (CPU/CUDA), and macOS arm64. Check the [Releases page](https://github.com/zhongkaifu/TensorSharp/releases) for newer versions.
 
 ```bash
 # Text-only model
@@ -121,6 +122,41 @@ model-less status server, but `/api/models/load` cannot select a file that was
 not supplied at startup. For multimodal inference, always pass the projector
 explicitly with `--mmproj`; a bare projector filename is resolved next to the
 model.
+
+### Server-side agentic code execution
+
+Code execution is opt-in. A conservative local start enables the five built-in
+tools while keeping the listener on loopback and leaving generated commands
+offline; Linux needs `bwrap` 0.12.0 or newer, while macOS uses its built-in
+Seatbelt sandbox:
+
+```bash
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll \
+  --model <model.gguf> --backend ggml_cpu --host 127.0.0.1 --code-exec
+```
+
+`--code-exec-allow-install` separately permits validated, host-performed
+pip/npm installs, and `--code-exec-allow-network` gives model-authored commands
+unrestricted host IP-network access. Both are off by default. Windows cannot
+confine filesystem or network access with a Job Object, so code execution there
+also requires the explicit `--code-exec-unconfined` escape hatch; do not use
+that combination on a server reachable by users you do not trust.
+
+The built-in code and skill tools are executed inside TensorSharp and are never
+returned as calls for the API client to service. Caller-defined tools remain
+caller-owned and are returned normally. Web UI conversations retain their
+workspace for the chat session. Each `/v1/chat/completions`, `/v1/responses`,
+or `/api/chat/ollama` HTTP request instead receives a private
+workspace that survives only its internal agent rounds and is deleted after the
+response. Files and host-installed packages are available inside that lifetime;
+do not rely on virtualenv activation, PATH changes, or a resident shell carrying
+between calls.
+
+Captured output files are copied to the server's artifact store and exposed as
+download-only URLs below `/api/code/artifacts/{runId}/...`. Web UI SSE completion
+metadata includes `files: [{name, bytes, url}]`, so a download does not depend on
+the model repeating the link in prose. Full flag and sandbox details are in
+[USAGE](../USAGE.md#code-execution-the-shell-tool).
 
 Backend quick reference:
 
@@ -418,7 +454,10 @@ Only each skill's one-line description costs context up front; the model pulls
 the `SKILL.md` body and any reference files it needs through built-in
 `skills_list` / `skills_read` tools that **the server executes itself**, so the
 response you get back is an ordinary completion rather than a tool call your
-client has to service.
+client has to service. This progressive-disclosure loop requires both tool
+declaration and output-parser support. Qwen 3.8 Flash Next (`qwen4exp`) currently
+has no structured tool parser, so it receives selected skill instructions inline
+and is not offered skill or code-execution tools.
 
 `skills_discovery` is optional and defaults to `true` — the model is also shown
 the names and descriptions of the skills the request did *not* select, so it can
@@ -446,6 +485,11 @@ Skills combine with your own `tools`: the built-in skill tools are merged into
 the list you sent, TensorSharp answers only its own, and a call to one of *your*
 tools comes back to you as usual — with whatever the model read from a skill
 already folded into the conversation.
+
+When the server starts with `--code-exec`, the same in-process loop may also use
+`shell`, `read_file`, `edit_file`, `write_file`, and `apply_patch`. Those built-in
+calls stay inside TensorSharp; see [Server-side agentic code execution](#server-side-agentic-code-execution)
+for workspace, sandbox, network, install, and artifact behavior.
 
 ---
 
@@ -705,9 +749,11 @@ curl -X POST http://localhost:5000/v1/chat/completions \
   }'
 ```
 
-The reply is a normal `chat.completion`. Any `skills_read` calls the model made
-happened inside the server; the OpenAI SDK needs no changes and sees no tool
-call it cannot service.
+The reply is a normal `chat.completion`. On a tool-capable model family, any
+built-in skill or code calls happened inside the server; the OpenAI SDK needs no
+changes and sees no built-in call it cannot service. Caller-defined tools still
+come back normally. Families without a structured tool parser, including
+`qwen4exp`, use the selected-skill inline fallback and are not offered code tools.
 
 ```python
 from openai import OpenAI
@@ -802,8 +848,9 @@ Event shapes:
 | `token` | each generated token (or parsed content chunk when `think`/`tools` are active) | streaming content |
 | `replace`, `diffusionStep`, `diffusionTotal`, `preview` | each DiffusionGemma denoising preview and final replacement | replace the whole assistant message body instead of appending a token |
 | `thinking` | each parsed reasoning chunk (only when the model emits one) | streaming chain-of-thought |
-| `tool_calls` | when the model emits a tool call | array of `{name, arguments}` |
-| `skill_step`, `skill`, `detail`, `ok` | each Agent Skill tool call the server executed while answering | progress trace: which tool ran (`skills_list` / `skills_read` / `skills_run`), on which skill, on which file, and whether it succeeded |
+| `tool_calls` | when the model emits a caller-defined tool call | array of `{name, arguments}`; built-in skill/code calls are executed in process instead |
+| `tool_progress`, `tool`, `text`, `seconds`, `detail` | while an in-process skill/code call is being written or run | transient live activity: phase is `writing`, `running`, or `finished`; the bundled Web UI keeps only a bounded current tail and clears it on `finished` |
+| `skill_step`, `skill`, `detail`, `ok`, `round`, `files` | after each in-process skill or code tool call finishes | completion metadata for the tool, target and result; produced artifacts appear as optional `{name, bytes, url}` entries in `files` |
 | `done`, `tokenCount`, `elapsed`, `tokPerSec`, `aborted`, `error`, `sessionId`, `promptTokens`, `kvReusedTokens`, `kvReusePercent` | last frame | terminal summary |
 
 Sample terminal frame:
@@ -816,6 +863,15 @@ Sample skill-step frame:
 
 ```
 data: {"skill_step":"skills_read","skill":"pdf","detail":"references/forms.md","ok":true}
+```
+
+Sample code-progress and artifact frames:
+
+```
+data: {"tool_progress":"writing","tool":"shell","text":"{\"command\":\"python","seconds":0,"detail":null}
+data: {"tool_progress":"running","tool":"shell","text":"writing report.xlsx\n","seconds":2.1,"detail":"python · 1.8 KB code"}
+data: {"tool_progress":"finished","tool":"shell","text":"","seconds":2.4,"detail":null}
+data: {"skill_step":"shell","skill":null,"detail":null,"ok":true,"round":2,"files":[{"name":"report.xlsx","bytes":18432,"url":"/api/code/artifacts/7f2.../report.xlsx"}]}
 ```
 
 Sample DiffusionGemma preview frame:

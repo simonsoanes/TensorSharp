@@ -6,7 +6,7 @@
 
 [English](README.md) | [中文](README_zh-cn.md)
 
-**面向 GGUF 模型的原生 .NET LLM 推理引擎** —— 覆盖自回归 LLM *与* DiffusionGemma 风格的文本扩散模型，以及 Qwen-Image-Edit 图像编辑、MiniMax-H3 视频 + 原生 32 kHz 立体声音频联合生成（Wan 2.1/2.2 则只生成视频）。提供控制台应用、浏览器聊天界面，以及兼容 Ollama/OpenAI 的 HTTP API。一个纯 .NET 引擎，在相同 GGUF 文件与相同 GPU 上与手工优化的 C++ `llama.cpp` 互有胜负。
+**面向 GGUF 模型的原生 .NET LLM 推理引擎** —— 覆盖自回归 LLM *与* DiffusionGemma 风格的文本扩散模型，以及 Qwen-Image-Edit 图像编辑、MiniMax-H3 视频 + 原生 32 kHz 立体声音频联合生成（Wan 2.1/2.2 则只生成视频）。提供控制台应用、浏览器聊天界面，以及兼容 Ollama/OpenAI 的 HTTP API。一个纯 .NET 引擎，在相同 GGUF 文件与相同 GPU 上与手工优化的 C++ `llama.cpp` 互有胜负。可选的 `TensorSharp.AgentHost` 层还提供 Agent Skills，以及用于沙箱化文件和 shell 操作的、有界进程内“模型→工具”循环。
 
 ## 《From Tensors to Tokens》—— TensorSharp 实战书籍
 
@@ -36,8 +36,8 @@ Zhongkai Fu 所著的 **[From Tensors to Tokens: Building a Multimodal LLM Infer
 - **🌫️ DiffusionGemma 文本扩散。** 基于 Gemma-4 派生 MoE backbone 的分块 EntropyBound 去噪，提供 CLI 参数与 Web UI 实时去噪预览。→ [DiffusionGemma 卡片](docs/models/diffusiongemma_zh-cn.md)
 - **🖼️ 多模态。** 图像 / 视频 / 音频（Gemma 4）；图像输入（Qwen 3.5-family、Mistral 3、Nemotron-H Omni、Muse-Glimmer）；CLI 与 Web UI 支持 PDF。→ [多模态](FEATURES_zh-cn.md#多模态支持)
 - **🛠️ 工具调用与思维链。** Qwen 3.5/3.6-family、Gemma 4、GPT OSS、Nemotron-H、Muse-Glimmer（ATEM 标记）、DeepSeek V4（DSML 标记）均支持多轮工具调用与结构化思维链。→ [功能特性](FEATURES_zh-cn.md)
-- **🧩 Agent Skills（智能体技能）。** 把 CLI 或服务端指向一个技能目录——里面是写给模型看的 `SKILL.md`，外加它所需的脚本、参考文档与素材——然后在任意聊天 API 上用 `"skills": ["pdf"]`、或在 CLI 上用 `--skill` 按请求选中。前期只有一行描述占用上下文；说明正文与参考文件由模型通过内置的 `skills_list` / `skills_read` 工具按需自取，而这两个工具**由 TensorSharp 在进程内自己执行**，因此普通 OpenAI 客户端永远不会收到一个它无法处理的工具调用。注入提示词的文本块是“排序后技能选择”的纯函数，KV 前缀缓存因而能逐轮持续命中；模型给出的每个路径都被限制在该技能自己的目录内；运行技能脚本则默认关闭，除非显式传入 `--skills-allow-exec`。[已公开的开源技能](https://github.com/anthropics/skills)可原样加载。→ [Agent Skills](docs/agent_skills.md)（英文）
-- **🖥️ 沙箱化的代码执行。** 打开 `--code-exec`，模型就拿到一个真正的 shell：它敲一行命令，宿主机在操作系统沙箱里执行，模型读回退出码和命令打印的全部内容——用 heredoc 写个文件、跑起来、grep 一下、装上需要的包、再检查自己的输出。工作目录在整个聊天会话期间持续存在，并与技能脚本共享，因此 `cd`、导出的环境变量、激活的 virtualenv 与装好的包都能从一次调用留到下一次。改文件走 `apply_patch`——一次调用即可创建、修改、删除与重命名多个文件，全有或全无：字节由**宿主机**按锚点写入，锚点要么找得到、要么直接拒绝去猜，而不是让模型把一个自己只记得一半的文件重新敲一遍。默认禁止互联网/IP 联网；显式传入 `--code-exec-allow-network`（或设置非 `0` 的 `TS_CODE_EXEC_ALLOW_NETWORK`）后，每一条模型生成的命令都会获得不受限的宿主 IP 网络访问，而 macOS 与 Linux 上的写入及主目录读取约束仍然生效。Linux 还通过 PID 命名空间约束后代进程；macOS 子进程会继承 Seatbelt，普通进程组也会被清理，但主动脱离进程组的子进程可能在请求结束后继续运行，每次工具结果都会明确报告这一限制。该权限包含局域网/回环服务与 IP 监听套接字，因而生成代码可外传其能读取的宿主数据。macOS 仍拒绝常见的 `/private/tmp/com.apple.launchd*` 路径套接字（但保留系统运行时所需的 Mach lookup 与 DNS 必需的精确 mDNSResponder 路径套接字），Linux 仍隐藏常见的 `/run` 端点，但本地 Unix IPC 并非完整隔离边界：macOS 为兼容性保留共享临时目录内的 Unix IPC，Linux 的宿主网络命名空间可能暴露抽象套接字以及 `/run` 之外的路径名套接字。仅应为可信任务开启联网权限。它与控制技能自带脚本的 `--skills-allow-network` 相互独立，装包也仍是另一项由宿主代为执行的能力；但开启不受限网络后，宿主安装器的包名/域名允许列表无法约束直接下载。代码执行本身默认关闭，而且沙箱不是可选项——宿主机若无法约束进程，该工具就拒绝运行，而不是不加约束地跑起来。Linux 需要 `bwrap` 0.12.0 或更高版本；Windows 仍须显式传入 CLI 与服务端都接受的 `--code-exec-unconfined`，这会有意放开文件系统与网络访问。→ [使用方法](USAGE_zh-cn.md)
+- **🧩 Agent Skills（智能体技能）。** 把 CLI 或服务端指向一个技能目录——里面是写给模型看的 `SKILL.md`，外加它所需的脚本、参考文档与素材——然后在任意聊天 API 上用 `"skills": ["pdf"]`、或在 CLI 上用 `--skill` 按请求选中。选择只限定可达范围与偏好；对支持工具闭环的模型，前期只有名称与描述占用上下文，模型再用内置 `skills_list` / `skills_read` 主动激活并按需读取完整说明，而这些调用**由 TensorSharp 在进程内自己执行**，因此普通 OpenAI 客户端不会收到无法处理的内置工具调用。提示词块是“排序后技能选择”的纯函数，KV 前缀缓存因而能逐轮持续命中；模型给出的路径都被限制在该技能自己的目录内。技能脚本默认关闭；传入 `--skills-allow-exec` 后，默认的 `--skills-sandbox required` 仍要求操作系统沙箱可用，否则拒绝执行。[已公开的开源技能](https://github.com/anthropics/skills)可原样加载。→ [Agent Skills](docs/agent_skills.md)（英文）
+- **🖥️ 沙箱化的代码执行。** 打开 `--code-exec` 后，模型获得一个 patch-first 编码界面：`read_file` 提供有界源码上下文，`edit_file` 做精确字符串修改，`write_file` 只用于新建或有意整文件替换，原子的多文件 `apply_patch` 用于补丁，`shell` 则运行测试与命令。失败诊断若能定位到普通工作区源码，会附上有界源码片段并要求先修最小故障区间、再重跑检查。Web UI / CLI 在整个聊天期间保留工作区；每个 OpenAI / Ollama HTTP 请求则只在自己的内部修复轮次间共享一个私有工作区，并在响应后删除，因此跨请求仍然无状态。开启代码执行时，技能脚本共享同一个请求或聊天工作区；只有技能脚本时仍使用逐次临时目录。互联网/IP 联网默认禁止；`--code-exec-allow-network` 会给模型生成的命令不受限的宿主 IP 网络访问（含局域网、回环与监听套接字），但不会移除 macOS / Linux 的工作区写入与主目录读取约束。它与 `--skills-allow-network` 和宿主代办的装包权限相互独立。代码执行默认关闭，并在 macOS / Linux 上实行“有沙箱才运行”；Linux 需要 `bwrap` 0.12.0+。Windows 必须显式传入 `--code-exec-unconfined`，这会有意放开文件系统与网络访问。→ [使用方法](USAGE_zh-cn.md)
 - **🔌 兼容 Ollama 与 OpenAI 的 API**，外加浏览器聊天 UI——现有工具可直接接入。→ [HTTP API](USAGE_zh-cn.md#http-api)
 - **📄 配置文件 + 自动下载。** 把 CLI/Server 参数写进可复用的 JSON 文件，支持 `${变量}` 与首次运行自动下载模型的 `{ "path", "urls" }` 条目。→ [config/README.md](config/README.md)
 - **🧮 原生量化计算。** Q4_K_M / Q8_0 / MXFP4 / IQ2_XXS / IQ2_S / IQ3_S / IQ3_XXS / IQ4_XS 等直接参与 matmul，无需反量化为 FP32。可运行于 GGML Metal / CUDA / Vulkan、Direct CUDA/cuBLAS、MLX（Apple Silicon）与纯 C# CPU 路径，均带 CPU 回退。MLX 上的 IQ 解码内核把码本与 scale 的读取摊销到整个子块（而非每权重重读一次），使混合 IQ 量化的 30B 在 M5 Pro 上从 3.6 提升到 **14.3 tok/s**（达融合 ggml-metal 图的 67%，输出逐字节一致）。→ [后端](USAGE_zh-cn.md#计算后端)
@@ -46,7 +46,9 @@ Zhongkai Fu 所著的 **[From Tensors to Tokens: Building a Multimodal LLM Infer
 
 ## 快速开始
 
-TensorSharp 面向 .NET 10。全新机器需要安装完整的 **.NET 10 SDK**；只安装 .NET Runtime 无法构建 TensorSharp：
+更愿意使用预构建应用？[v3.3.0.0 Release](https://github.com/zhongkaifu/TensorSharp/releases/tag/v3.3.0.0) 提供自包含的 Windows x64（CPU/CUDA）、Linux x64（CPU/CUDA）与 macOS arm64 CLI / Server 归档。`TensorSharp.AgentHost` 在该标签之后才加入；在后续发行版明确包含它之前，要使用上文的智能体能力请构建当前源码。
+
+源码构建面向 .NET 10。全新开发机器需要安装完整的 **.NET 10 SDK**；只安装 .NET Runtime 无法构建 TensorSharp：
 
 | 平台 | 安装 SDK |
 |---|---|
@@ -164,7 +166,7 @@ dotnet run --project TensorSharp.Server -c Release -- --help
 |---|---|---|---|---|---|
 | DeepSeek V4 Flash | [DeepSeek-V4-Flash-0731](https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF)（284B MoE，分片 GGUF） | — / — / — | ✅ | ✅ | [deepseek4](docs/models/deepseek4_zh-cn.md) |
 | GLM 5.x | [GLM-5.2](https://huggingface.co/unsloth/GLM-5.2-GGUF)（744B-A40B MoE，分片 GGUF）、[GLM-5.3-Flash](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF)（320B MoE，分片 GGUF，+ mmproj） | ✅（5.3-Flash） / — / — | ✅ | ✅ | [glm](docs/models/glm_zh-cn.md) |
-| Qwen 3.8 Flash Next | [Qwen3.8-Flash-Next](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF)（GDN + 注意力混合 MoE，512 专家，分片 GGUF，+ mmproj） | ✅ / — / — | ✅ | ✅ | [qwen38-flash-next](docs/models/qwen38-flash-next_zh-cn.md) |
+| Qwen 3.8 Flash Next | [Qwen3.8-Flash-Next](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF)（GDN + 注意力混合 MoE，512 专家，分片 GGUF，+ mmproj） | ✅ / — / — | ✅ | 否（无解析器） | [qwen38-flash-next](docs/models/qwen38-flash-next_zh-cn.md) |
 | Gemma 4 | [gemma-4-E4B-it](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF)（另有 31B、26B-A4B MoE） | ✅ / ✅ / ✅ | ✅ | ✅ | [gemma4](docs/models/gemma4_zh-cn.md) |
 | Qwen 3.5 / 3.6 | [Qwen3.5-9B](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF)（另有 35B-A3B MoE） | ✅ / — / — | ✅ | ✅ | [qwen35](docs/models/qwen35_zh-cn.md) |
 | GPT OSS | [gpt-oss-20b](https://huggingface.co/ggml-org/gpt-oss-20b-GGUF)（MoE） | — / — / — | ✅ | ✅ | [gptoss](docs/models/gptoss_zh-cn.md) |
@@ -205,7 +207,7 @@ dotnet run --project TensorSharp.Server -c Release -- --help
 |---|---|---|---|---|---|---|---|
 | DeepSeek V4 Flash | `deepseek4` | DeepSeek-V4-Flash（284B MoE，256 专家，压缩稀疏注意力，1M 上下文） | 仅文本 | 支持 | 支持（DSML） | 支持（DSpark 块级草稿，独立 GGUF） | [deepseek4](docs/models/deepseek4_zh-cn.md) |
 | GLM 5.x | `glm-dsa`、`glm5next` | GLM-5.2（744B-A40B MoE，256 专家，MLA + DeepSeek 稀疏注意力，1M 上下文）、GLM-5.3-Flash（320B MoE，288 专家，KDA 线性注意力 + NoPE MLA 与池化索引器） | 仅文本（5.2）、图像（5.3-Flash） | 支持 | 支持（XML 工具调用） | GLM-5.2 支持（内嵌 NextN 块） | [glm](docs/models/glm_zh-cn.md) |
-| Qwen 3.8 Flash Next | `qwen4exp` | Qwen3.8-Flash-Next（混合 MoE，512 专家 / 激活 10 个，48 层中 36 层为 GatedDeltaNet 并与 QSA 索引的全注意力层交错，PLE n-gram 块，×4 超连接） | 图像 | 支持 | 支持 | — | [qwen38-flash-next](docs/models/qwen38-flash-next_zh-cn.md) |
+| Qwen 3.8 Flash Next | `qwen4exp` | Qwen3.8-Flash-Next（混合 MoE，512 专家 / 激活 10 个，48 层中 36 层为 GatedDeltaNet 并与 QSA 索引的全注意力层交错，PLE n-gram 块，×4 超连接） | 图像 | 支持 | 否（无结构化工具输出解析器） | — | [qwen38-flash-next](docs/models/qwen38-flash-next_zh-cn.md) |
 | Gemma 4 | `gemma4` | gemma-4-E4B、gemma-4-31B、gemma-4-26B-A4B（MoE） | 图像、视频、音频 | 支持 | 支持 | 支持（独立草稿 GGUF） | [gemma4](docs/models/gemma4_zh-cn.md) |
 | Qwen 3.5 / 3.6 family | `qwen35`, `qwen35moe`, `qwen3next` | Qwen3.5-9B（混合 Attn+递归）、Qwen3.5/3.6-35B-A3B（MoE） | 图像 | 支持 | 支持 | Qwen 3.6 支持（内嵌 NextN） | [qwen35](docs/models/qwen35_zh-cn.md) |
 | GPT OSS | `gptoss`, `gpt-oss` | gpt-oss-20b（MoE） | 仅文本 | 支持（始终） | 支持 | — | [gptoss](docs/models/gptoss_zh-cn.md) |
@@ -254,7 +256,7 @@ TensorSharp 在 CUDA 的 prefill / 首 token 延迟上明显领先（多轮 pref
 | [开发](DEVELOPMENT_zh-cn.md) | 前置要求、构建原生 GGML/MLX 库、仓库结构、包分层、内部架构与测试工具 |
 | [按模型架构卡片](docs/models/README_zh-cn.md) | 各架构端到端文档（前向图、组件、参数、prefill/decode 优化） |
 | [分页注意力 & 连续批处理](docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING_zh-cn.md) | vLLM 风格的分页 KV 缓存、前缀共享与迭代级调度器 |
-| [Agent Skills](docs/agent_skills.md)（英文） | `SKILL.md` 格式、渐进式披露与其预算、进程内工具循环、路径 / ZIP / 脚本执行的安全模型，以及 HTTP 与 C# 两套接口 |
+| [Agent Skills 与智能体工作](docs/agent_skills.md)（英文） | `SKILL.md` 格式、渐进式披露与其预算、进程内工具循环、沙箱化代码执行、工作区与产物、路径 / ZIP / 执行安全模型，以及 HTTP 与 C# 两套接口 |
 | [投机解码](docs/speculative_decoding.md)（英文） | 三层设计（模型适配层 / 算法 / 草稿权重）、已内置的 `auto` / `draft-head` / `block` / `ngram` 四种算法，以及新增一种算法需要写什么 |
 | [环境变量功能矩阵](docs/env_var_feature_matrix_zh-cn.md) | 哪些高影响运行时开关影响哪些模型、后端与提示类型 |
 | [引擎对比报告](docs/engine_comparison_report.md) | TensorSharp 对比 llama.cpp / stable-diffusion.cpp 的完整逐场景表格 |
@@ -266,13 +268,16 @@ TensorSharp 在 CUDA 的 prefill / 首 token 延迟上明显领先（多轮 pref
 | 范围 | 状态 |
 |---|---|
 | 模型家族 | DeepSeek V4 Flash（`deepseek4`）、GLM 5.x（`glm-dsa`、`glm5next`）、Gemma 4、DiffusionGemma、Qwen 3.5/3.6-family（`qwen35`、`qwen35moe`、`qwen3next`）、Qwen 3.8 Flash Next（`qwen4exp`）、GPT OSS、Nemotron-H（含 Nemotron 3 Nano Omni）、Mistral 3、Muse-Glimmer（`muse-glimmer`、`muse_glimmer`）。图像编辑通过 Qwen-Image-Edit（`qwen_image`、`qwen-image` MMDiT）；音视频联合生成通过 MiniMax-H3（`minimax-h3`、`minimax_h3`），纯视频生成通过 Wan 2.1 / 2.2（`wan`、`wan2.1`、`wan2.2`）。 |
-| 推理宿主 | CLI、交互式 REPL、ASP.NET Core Web UI、Ollama 风格 API、OpenAI Chat Completions 风格 API。 |
+| 推理宿主 | CLI、交互式 REPL、ASP.NET Core Web UI、Ollama 风格 API、OpenAI Chat Completions 风格 API 与 OpenAI Responses 风格 API。 |
 | 后端 | 纯 C# CPU、Direct CUDA/cuBLAS（`cuda`）、MLX Metal（`mlx`）、GGML CPU、GGML Metal、GGML CUDA、GGML Vulkan。DeepSeek V4 另有三套专属的整模型执行器——Direct CUDA、原生 ggml 与纯 C# CPU——都会把权重按层切分到所有可见 GPU（`--tp N` / `TS_DSV4_NGPU` 限定卡数）。视频家族中，Wan 是对后端有限制的那一个：它可运行于各 GGML 后端以及 Direct `cuda` / 纯 C# `cpu` 后端，但不支持 MLX。 |
 | 多模态 | Gemma 4 图像/视频/音频；Qwen 3.5-family、Qwen 3.8 Flash Next、GLM-5.3-Flash、Mistral 3、Nemotron-H Omni、Muse-Glimmer 图像输入；PDF（CLI `--pdf` + Web UI）。媒体*输出*：Qwen-Image-Edit（图像）、MiniMax-H3（H.264 MP4 **外加一份 32 kHz 立体声 `.wav` 旁挂文件**，两者在同一份打包潜变量里一起生成），以及 Wan 2.1 / 2.2（仅 H.264 MP4 视频，文本→视频与图像→视频）。 |
 | 连续批处理 | vLLM 风格分页 KV 缓存、基于内容哈希的前缀共享、迭代级调度器（默认启用，`--no-continuous-batching` 关闭）。分页池常驻主机内存，因此它买到的是内存效率与前缀复用，而不是随并发增长的吞吐。DeepSeek V4 与 GLM 5.x 在同一引擎上通过各自原生的 per-sequence slot 提供服务——压缩后的 MLA 每 token 只有一行缓存，没有可分页的布局——GLM 的批处理融合解码默认启用（设置 `TS_BATCHED_FUSED_DECODE=0` 可切回串行融合 decode；4 路并发下总吞吐 1.81 倍）。Qwen 3.8 Flash Next 出于同样的原因使用逐序列状态持有者——它的 GatedDeltaNet、PLE 与索引器状态同样没有可分页的布局。 |
 | 投机解码 | Qwen 3.6 与 GLM 5.2（两者均内嵌于 checkpoint）以及 Gemma 4（独立草稿 GGUF，通过 `--draft-model` 加载）的 MTP / NextN 草稿头；DeepSeek V4 的 DSpark 块级起草（仅 `cuda` / `ggml_cuda`）与 Muse-Glimmer 的 DFlash 块级起草，两者同样通过 `--draft-model` 加载独立的草稿 GGUF；此外还有一个不需要任何草稿权重的 n-gram（prompt-lookup）投机器，用 `--spec-type ngram` 选择，因而在任何检查点上都能用。每个输出 token 都取自主干的一行 logits，并由本次运行自身配置的采样器抽出，因此输出流与普通 decode 产生的完全相同。默认关闭；内嵌草稿头在 CLI 与服务端两端均以 `--spec` 启用，而对以独立 GGUF 发布的草稿器，传入 `--draft-model` 本身即可启用投机。 |
 | 张量并行 | Direct `cuda` 后端与 GGML CUDA / Vulkan 后端上的 Megatron-LM 列/行并行 TP（`--tp N` / `TENSORSHARP_TP_DEGREE`，CLI 与服务端均支持）；通过点对点 TCP 的多节点分布式 TP（`--tp-node-id` / `--tp-peers`），采用分层 AllReduce，CUDA P2P 不可用时自动回退到主机中转。覆盖全部自回归架构；GGML 上 Gemma 4 与 Qwen 3.5/3.6 使用 MoE 专家并行与融合的按 rank decode/prefill 计算图。GLM 5.x 默认按层切分，但 GGML GPU 后端上的 `--tp N` 会为 GLM-5.2 与 GLM-5.3-Flash 选择仅支持本地单进程的原生 TP（GLM-5.3-Flash 会切 KDA / MLA head 与路由专家隐藏行）。本身不切分权重的架构把同一个 `--tp N` 当作按层切分——每张 GPU 拿一段连续的整层，DeepSeek V4 即是如此；Qwen 3.8 Flash Next（`qwen4exp`）上可用 `TS_Q4E_LAYER_SPLIT=20,28` 覆盖自动均衡，遇到无法满足的切分会直接报错而不是静默忽略。启动时会打印实际采用的模式与每张 GPU 的层数/字节分配；两种模式都不支持的架构会在 stderr 上明说，并改用单卡运行。可选 Redis 支撑的 KV 缓存与 Responses API 存储。 |
-| Agent Skills | 技能目录来自 `--skills-dir`（或二进制旁的 `skills` 目录），也可通过 `POST /api/skills` 在运行期安装。在 `/v1/chat/completions`、`/v1/responses`、`/api/chat`（Ollama）与 `/api/chat`（Web UI）上用 `"skills": [...]` 按请求选中，CLI 上用 `--skill`。渐进式披露由内置的 `skills_list` / `skills_read` 工具承担，并在进程内应答，因此未经改造的 OpenAI 客户端拿到的是一条写完的回复；调用方自己的工具仍然照常回传。脚本执行（`skills_run`）默认关闭，需显式传入 `--skills-allow-exec`。Mistral 3 的聊天格式不承载工具声明，因此改为把技能正文提前写进它的提示词。 |
+| Agent Skills | 技能目录来自 `--skills-dir`（或二进制旁的 `skills` 目录），也可通过 `POST /api/skills` 在运行期安装。在 `/v1/chat/completions`、`/v1/responses`、`/api/chat/ollama`（Ollama）与 `/api/chat`（Web UI）上用 `"skills": [...]` 按请求选中，CLI 上用 `--skill`。支持完整工具闭环的家族只接收元数据，并通过进程内应答的 `skills_list` / `skills_read` 激活说明；调用方自己的工具仍照常回传。脚本执行（`skills_run`）默认关闭。Mistral 3 以及没有可解析工具协议的家族（包括 `qwen4exp`）改为内联选中技能正文，且不提供技能 / 代码工具。 |
+| 智能体代码工作 | 可选的 `--code-exec` 在同一个有界“模型→工具”循环里提供 `read_file`、`edit_file`、`write_file`、`shell` 与原子 `apply_patch`。Web UI / CLI 聊天保留会话工作区；每个 OpenAI / Ollama 请求只在内部修复轮次间保留一个私有工作区，响应后删除。生成文件可作为产物下载。这是单模型的进程内循环；TensorSharp 目前不提供多智能体委派或逐命令审批工作流。 |
+| 沙箱与权限 | 代码执行和技能脚本默认关闭。macOS 使用 Seatbelt，Linux 需要 `bwrap` 0.12.0+；`required` 模式在无法隔离时拒绝运行。Windows 代码执行必须显式传入 `--code-exec-unconfined`，Windows 技能脚本则需以 `--skills-sandbox preferred` 明确接受仅 job-object 的限制。技能脚本联网、代码联网与宿主代办装包是三个独立开关。 |
+| 发行状态（核验于 2026-09-01） | GitHub v3.3.0.0 提供十个自包含 CLI / Server 归档，覆盖 Windows x64 CPU/CUDA、Linux x64 CPU/CUDA 与 macOS arm64。NuGet.org 上的 Tensors、Runtime、Models、GGML/CUDA/MLX 后端、Server 与 CLI 当前为 3.1.2，落后于源码与二进制发行版；AgentHost 与 Distributed 尚未发布包。 |
 | 服务端模型范围 | 通过 `--model` 显式托管单个 GGUF；可通过 `--mmproj` 显式指定投影器；不扫描目录。 |
 | 可观测性 | 结构化每轮日志、队列状态，以及 Web UI / Ollama / OpenAI 中的 KV 缓存复用指标。 |
 

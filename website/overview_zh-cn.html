@@ -39,17 +39,19 @@
   </div>
 
   <h2 id="architecture">架构</h2>
-  <p>TensorSharp 是一个分层系统。每一层都是可独立打包的项目，因此源码使用者只需引用自己需要的部分。当前 Runtime/Models/Backends/CLI/Server 包 ID 尚未发布到 NuGet.org。</p>
+  <p>TensorSharp 是一个分层系统。每一层都是可独立打包的项目，因此源码使用者只需引用自己需要的部分。既有的 TensorSharp 包 ID 已在 NuGet.org 发布到 <code>3.1.2</code>，但这些包落后于当前源码树与 Release；<code>TensorSharp.AgentHost</code> 和 <code>TensorSharp.Distributed</code> 尚未发布。</p>
   <div class="table-scroll">
   <table>
     <thead><tr><th>层</th><th>职责</th></tr></thead>
     <tbody>
       <tr><td><strong>TensorSharp.Core</strong></td><td>核心 <code>Tensor</code> 类型、存储抽象、设备抽象，以及可扩展的运算注册表（<code>Ops</code>）。CPU 实现使用 <code>System.Numerics.Vectors</code> 做 SIMD。</td></tr>
       <tr><td><strong>TensorSharp.Runtime</strong></td><td>GGUF 解析、分词器（SentencePiece / BPE）、聊天模板渲染、采样、输出解析、分页 KV 缓存，以及连续批处理的调度器 / 引擎。提示词的框架化与回复解析现在按家族声明为 <code>ChatProtocolRegistry</code> 中的一份 <code>ChatProtocol</code>，而不再按架构名分支。</td></tr>
+      <tr><td><strong>TensorSharp.AgentHost</strong></td><td>构建在 Runtime 之上的可选智能体层：Agent Skills、模型 / 工具内部循环、沙箱化的脚本与代码执行、持久工作区、文件编辑、依赖安装与产物收集。Runtime 不反向引用它，因此普通推理宿主无需携带智能体机制。</td></tr>
       <tr><td><strong>TensorSharp.Models</strong></td><td><code>ModelBase</code> 以及具体架构与多模态编码器。每个家族都是一个插件——在 <code>BuiltInArchitectures</code> 中注册一份 <code>ModelArchitectureDescriptor</code>；<code>ModelBase.Create()</code> 从 GGUF 元数据自动识别架构，再交给对应描述符的工厂方法。</td></tr>
       <tr><td><strong>TensorSharp.Backends.GGML</strong></td><td>通过原生 C++ 桥接（<code>libGgmlOps</code>）链接 <a href="https://github.com/ggml-org/ggml" target="_blank" rel="noopener">ggml</a> 实现加速运算 —— macOS 上用 Metal，Windows/Linux 上用 CUDA 与 Vulkan，以及原生 CPU。</td></tr>
       <tr><td><strong>TensorSharp.Backends.Cuda</strong></td><td>直接 CUDA 路径：CUDA Driver API、cuBLAS GEMM，以及热点运算的 PTX 内核，并带 CPU 回退。</td></tr>
       <tr><td><strong>TensorSharp.Backends.MLX</strong></td><td>Apple Silicon 的 MLX 路径，封装 <a href="https://github.com/ml-explore/mlx-c" target="_blank" rel="noopener">mlx-c</a>，提供量化、融合与编译内核。</td></tr>
+      <tr><td><strong>TensorSharp.Distributed</strong></td><td>多节点张量并行所用的点对点 TCP 协调层，与模型 / 运行时层分离。</td></tr>
       <tr><td><strong>TensorSharp.Server</strong></td><td>HTTP / 应用层：兼容 Ollama 与 OpenAI 的 REST API、浏览器聊天 UI、上传处理，以及每模型的连续批处理引擎宿主。</td></tr>
       <tr><td><strong>TensorSharp.Cli</strong></td><td>控制台宿主，用于本地提示词、多模态实验、提示词检查、JSONL 批处理工作流、交互式 REPL 与基准测试。</td></tr>
     </tbody>
@@ -77,10 +79,12 @@
     <tbody>
       <tr><td><code>TensorSharp.Core/</code></td><td>张量库、运算、内存、设备抽象、CPU SIMD / 量化内核。</td></tr>
       <tr><td><code>TensorSharp.Runtime/</code></td><td>GGUF、分词器、模板、采样；<code>Paged/</code> KV 原语与 <code>Scheduling/</code> 推理引擎 + MTP 核心。</td></tr>
+      <tr><td><code>TensorSharp.AgentHost/</code></td><td>技能、渐进式披露、有界工具循环、OS 沙箱、会话 / 请求工作区、五个代码工具、依赖安装与生成产物。</td></tr>
       <tr><td><code>TensorSharp.Models/Architecture/</code></td><td>架构插件表：<code>ModelArchitectureDescriptor</code>、<code>ModelArchitectureRegistry</code>、<code>BuiltInArchitectures</code>，以及多模态能力接口。</td></tr>
       <tr><td><code>TensorSharp.Models/Models/&lt;Family&gt;/</code></td><td>每个架构一个文件夹（DeepSeek4、GlmDsa、Gemma4、Qwen35、Qwen4Exp、GptOss、Nemotron、Mistral3、MuseGlimmer、DiffusionGemma、QwenImage、MiniMaxH3、WanVideo）。自回归文本家族各含一个 legacy 与一个批量前向；DeepSeek4 与 GlmDsa 例外，它们使用整模型执行器；媒体家族（DiffusionGemma、QwenImage、MiniMaxH3、WanVideo）走的是扩散管线而非 decode 循环。</td></tr>
       <tr><td><code>TensorSharp.Models/Direct/</code></td><td><code>Direct{Context, Linear, Ops}</code>——Wan 视频网络与 MiniMax-H3 在 <code>cuda</code> / <code>cpu</code> 后端上共用的非 ggml 执行原语。</td></tr>
       <tr><td><code>TensorSharp.GGML.Native/</code></td><td>到 ggml 的原生 C++ 桥接（matmul、融合 transformer 内核、分页注意力、MoE、Mamba2、GatedDeltaNet、扩散）。</td></tr>
+      <tr><td><code>TensorSharp.Distributed/</code></td><td>多节点张量并行使用的 TCP 网格与集合通信。</td></tr>
       <tr><td><code>TensorSharp.Server/</code></td><td>ASP.NET Core 服务器：程序引导、模型服务、推理引擎宿主、聊天流水线、遥测。</td></tr>
       <tr><td><code>docs/</code></td><td>各模型架构卡、分页注意力深入解析、环境变量矩阵、基准矩阵。</td></tr>
     </tbody>
@@ -94,6 +98,7 @@
     <tbody>
       <tr><td>模型家族</td><td>共 <strong>13 个</strong>，由 <code>ModelBase.Create()</code> 依据 GGUF 的 <code>general.architecture</code> 分发：DeepSeek V4 Flash（<code>deepseek4</code>）、GLM 5.x（<code>glm-dsa</code>、<code>glm5next</code>）、Gemma 4（<code>gemma4</code>）、DiffusionGemma（<code>diffusion-gemma</code>、<code>diffusion_gemma</code>）、Qwen 3.5/3.6-family（<code>qwen35</code>、<code>qwen35moe</code>、<code>qwen3next</code>）、Qwen 3.8 Flash Next（<code>qwen4exp</code>）、GPT OSS（<code>gptoss</code>、<code>gpt-oss</code>）、Nemotron-H 含 Nemotron 3 Nano Omni（<code>nemotron_h</code>、<code>nemotron_h_moe</code>）、Mistral 3（<code>mistral3</code>）、Muse-Glimmer（<code>muse-glimmer</code>、<code>muse_glimmer</code>）、Qwen-Image-Edit 图像编辑（<code>qwen_image</code>、<code>qwen-image</code>）、MiniMax-H3 音视频联合生成（<code>minimax-h3</code>、<code>minimax_h3</code>），以及 Wan 2.1 / 2.2 视频生成（<code>wan</code>、<code>wan2.1</code>、<code>wan2.2</code>）。MiniMax-H3 是这条元数据规则的例外：它公开的 GGUF 完全没有元数据，因此 <code>ModelBase.Create()</code> 改用张量表来识别它。→ <a href="models_zh-cn.html#table">支持的架构</a></td></tr>
       <tr><td>推理宿主</td><td>CLI、交互式 REPL、ASP.NET Core Web UI、Ollama 式 API、OpenAI Chat Completions 式 API。</td></tr>
+      <tr><td>智能体工作</td><td><code>TensorSharp.AgentHost</code> 为 Agent Skills 运行有界的单助手工具循环；运维开启 <code>--code-exec</code> 后，还提供 <code>read_file</code>、<code>edit_file</code>、<code>write_file</code>、<code>shell</code> 与 <code>apply_patch</code>。TensorSharp 只执行自己的内置工具；调用方定义的工具仍回传调用方处理。工作区在 Web/CLI 聊天期间持久存在，OpenAI/Ollama 的每个请求则拥有隔离工作区；OS 隔离默认是必需的。这是智能体工具使用，并非子智能体编排或交互式审批服务。→ <a href="agentic_zh-cn.html">智能体工作</a></td></tr>
       <tr><td>后端</td><td>纯 C# CPU、直接 CUDA/cuBLAS（<code>cuda</code>）、MLX Metal（<code>mlx</code>）、GGML CPU、GGML Metal、GGML CUDA、GGML Vulkan。DeepSeek V4 另有三套专属的整模型执行器——Direct CUDA、原生 ggml 与纯 C#——都会把权重按层切分到所有可见 GPU。GLM 5.x（GLM-5.2 与 GLM-5.3-Flash 相同）另有两套：<code>ggml_cuda</code> / <code>ggml_vulkan</code> / <code>ggml_cpu</code> / <code>ggml_metal</code> 上的原生 ggml 执行器（不传 <code>--tp</code> 时按层切分到所有卡；在 GGML GPU 后端上，传入 <code>--tp N</code> 则为 GLM-5.2 与 GLM-5.3-Flash 选择仅支持本地单进程的原生 TP），以及 <code>cpu</code> 与 <code>cuda</code> 上的托管逐算子路径；MLX 不支持它。</td></tr>
       <tr><td>提速手段</td><td>真正决定快慢的往往是<em>选哪个权重</em>，而不是加哪个参数。<strong>MiniMax-H3</strong> 是唯一的例外：它出厂即经 CFG 蒸馏，没有更快的文件可换——<code>--cfg 1.0</code> 下的 4–8 步就是工作点（默认 20 步），而 <code>--width</code> / <code>--height</code> 才是质量与成本之间的主导杠杆（文档给出的起点是 640×384）。<strong>步数蒸馏的 Wan</strong> DiT（文件名含 <code>Turbo</code> / <code>Lightning</code> / <code>lightx2v</code> / <code>FastWan</code> / <code>…-4steps-…</code>）在加载时被自动识别，只跑 4 次无引导 DiT 前向，而非基础配方的 100 次：同一个 1088×832×121 帧的图生视频请求，基础 Wan2.2-TI2V-5B 实测约 3 小时 30 分，Turbo 权重为 17 分 30 秒（M5 Pro、<code>ggml_metal</code>）。Qwen-Image-Edit 的 Lightning LoRA（<code>--qwen-image-lora</code>）同理，把 30 步 CFG 2.5 换成 4–8 步 CFG 1.0。文本模型这边的手段是：选对后端（NVIDIA 用 <code>ggml_cuda</code>，Apple Silicon 用 <code>ggml_metal</code>，CPU 推理用 <code>ggml_cpu</code> 而非纯托管的 <code>cpu</code>）、整模型融合 decode 计算图（GPT OSS 在 A40 上 24 → 154 tok/s）、推测解码、<code>--tp N</code>，以及让放不下的模型跑起来的 <code>--n-cpu-moe</code>。→ <a href="models_zh-cn.html">模型</a> · <a href="benchmarks_zh-cn.html">基准测试</a></td></tr>
       <tr><td>多模态</td><td>Gemma 4 图像/视频/音频；Qwen 3.5-family、Qwen 3.8 Flash Next、GLM-5.3-Flash、Mistral 3、Nemotron-H Omni 与 Muse-Glimmer 图像输入。PDF 文档可经 Web UI 上传或 CLI <code>--pdf</code> 传入（提取文本并内联；扫描页渲染为图像交给视觉模型）。媒体<em>输出</em>：MiniMax-H3（H.264 MP4 <strong>外加一份原生 32 kHz 立体声 <code>.wav</code></strong>，在同一份打包潜变量里一起去噪——文本 → 视频、图像 → 视频、首尾帧、参考 → 视频）、Qwen-Image-Edit（图像），以及 Wan 2.1 / 2.2（只有画面的 H.264 MP4，文本 → 视频与图像 → 视频）。→ <a href="models-video_zh-cn.html#minimax-h3">视频生成</a></td></tr>

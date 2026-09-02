@@ -261,33 +261,34 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cu
 | `--think` | 启用思维链/推理模式。所有系列（含 GLM 5.x）都是按需开启：不加时 GLM 的模板会把推理块立刻闭合（`<think></think>`），模型直接作答；加上后提示里会带上 `Reasoning Effort: Max`，并留下一个未闭合的 `<think>` 交给模型自己收尾。REPL 里用 `/think on\|off` 切换。 |
 | `--tools <path>` | 包含工具/函数定义的 JSON 文件。线格式因系列而异，解析器按架构选取——GLM 5.x 发出的是 XML（`<tool_call>NAME<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>`，每个参数一个元素，非纯字符串的值以 `tojson` 编码）而不是 JSON 主体，服务端会把它解析回常规的 OpenAI 工具调用字段，因此客户端看到的仍是标准形状。 |
 | `--skills-dir <path>` | 扫描 Agent Skills 的目录（可以是装着若干 `SKILL.md` 的文件夹，也可以是单个技能目录）。可重复；按给出的顺序扫描，最深三层。不传时使用二进制文件旁的 `skills` 目录，不存在则创建。传入的路径不存在会在启动时报错并点名该参数。环境变量：`TS_SKILLS_DIR`（以路径分隔符分隔的列表）。 |
-| `--skill <name>` | 为本次运行选中一个技能，名称取自其 `SKILL.md`（也就是它的目录名）。可重复。被选中技能的说明正文在预算允许时会写进提示词；随包文件则始终按需取回。 |
+| `--skill <name>` | 为本次运行选中一个技能，名称取自其 `SKILL.md`（也就是它的目录名）。可重复。对支持工具调用的模型族，选中只会展示技能元数据并把内置技能工具的可达范围限定到该技能，**不会**把 `SKILL.md` 正文直接写入提示词。只有模型族或请求无法使用工具声明时（包括结构化输出请求），才会在预算允许时内联正文作为回退。 |
 | `--list-skills` | 打印技能注册表——名称、描述、来源、随包文件、大小，以及任何加载告警或错误——然后退出。 |
 | `--no-skills` | 彻底关闭 Agent Skills：不扫描、不注入提示词块、不提供工具。环境变量：`TS_NO_SKILLS`（非 `0` 即视为开启）。 |
 | `--skills-no-discovery` | 不向模型展示未被选中的技能。不加时，所有已注册技能的名称与描述都会列出，好让模型自己发现你没想到要点名的那个；加上后，本次运行只看得到 `--skill` 选中的技能。 |
-| `--skills-allow-exec` | 允许模型通过 `skills_run` 工具运行选中技能自带的脚本。**默认关闭，且这就是在执行任意代码**：脚本以子进程形式、用本进程的权限运行，而做出运行决定的是一个正在读别人写的 `SKILL.md` 的模型。可达范围仅限该脚本自己的技能目录，只启动已知解释器（`.py`、`.js`/`.mjs`、`.sh`、`.bash`），不经过 shell，工作目录为该技能自身，进程 60 秒后被杀，stdout / stderr 各截取到 32 KB——但这并不是沙箱。环境变量：`TS_SKILLS_ALLOW_EXEC`（非 `0` 即视为开启）。 |
+| `--skills-allow-exec` | 允许模型通过 `skills_run` 运行选中技能自带的脚本。**默认关闭；开启后应把每个脚本都当作不受信任代码。**TensorSharp 仅调用已知解释器（`.py`、`.js`/`.mjs`、`.sh`、`.bash`），不经过 shell，并会清理环境、限制运行时间与输出、以只读方式挂载技能目录；工作目录是当前 Web/CLI 会话或 OpenAI/Ollama 请求的工作区（未开启代码执行时则是单次调用 scratch 目录）。默认的 `--skills-sandbox required` 会增加操作系统隔离，无法隔离时拒绝执行；除非另传 `--skills-allow-network`，否则网络仍被禁止。环境变量：`TS_SKILLS_ALLOW_EXEC`（非 `0` 即视为开启）。 |
 | `--skills-max-rounds <n>` | 模型在必须作答前可以取用技能内容——或运行、查看并修正代码——的次数，范围 1-64（默认：`8`；开启 `--code-exec` 时为 `24`，因为写程序、运行它并按回溯修正它比读文件需要更多轮次；此处显式设定的值一律按原样使用）。每一轮都是一次完整生成，因此这一项限制的是那种反复把文件名叫错的模型所能造成的开销。预算用尽时会在对话里告知模型，让它用已读到的内容作答，并说明已经完成了哪些部分。环境变量：`TS_SKILLS_MAX_ROUNDS`。 |
-| 技能脚本沙箱 | `required`（宿主机无法隔离时拒绝运行） | `TS_SKILLS_SANDBOX`（`off`/`preferred`/`required`）、`TS_SKILLS_ALLOW_NETWORK` | `--skills-sandbox`、`--skills-allow-network` |
-| `--skills-sandbox <off\|preferred\|required>` | 对技能脚本要求多强的操作系统级隔离。`required`（默认）在没有安全沙箱的宿主机上直接拒绝运行，而不是不加约束地跑；`preferred` 则照跑不误；`off` 只保留进程内限制。macOS 用 `sandbox-exec`；Linux 要求 `bwrap` 0.12.0 或更高版本（旧版存在已知的沙箱搭建阶段符号链接逃逸）；Windows 仅能限制进程树。环境变量：`TS_SKILLS_SANDBOX`。 |
+| `--skills-sandbox <off\|preferred\|required>` | 对技能脚本要求多强的操作系统级隔离。`required`（默认）在没有安全沙箱的宿主机上拒绝运行；`preferred` 表示显式接受较弱隔离；`off` 只保留解释器、环境、时限与输出限制。macOS 使用 `sandbox-exec`；Linux 要求 `bwrap` 0.12.0 或更高版本（旧版存在已知的沙箱搭建阶段符号链接逃逸）。Windows Job Object 只能限制进程树，不能限制文件系统或网络，因此 `required` 会拒绝，必须显式选 `preferred` 才接受这种较弱隔离。环境变量：`TS_SKILLS_SANDBOX`。 |
 | `--skills-allow-network` | 允许沙箱内的技能脚本联网。默认禁止。环境变量：`TS_SKILLS_ALLOW_NETWORK`。 |
-| `--code-exec` | 向模型提供 `shell` 工具：模型敲下一行真正的命令，宿主在操作系统沙箱里执行它，模型读回退出码以及命令打印的一切（stdout 与 stderr 合并在一起）。模型用它来**运行**东西和四处查看——运行程序、用 `rg` 找模式、移动和删除文件、装上需要的包、再检查自己的输出——这正是 OpenAI Codex 与 Claude Code 采用的形状。参数：`command`（必填）、`workdir`（**只对这一次调用**生效）、`timeout_ms`，以及 `run_in_background`——用于那些本来就要一直跑下去的东西，其结果会给出一个日志文件，之后用普通命令去读。随它一起提供的还有四个工具，文件相关的活儿实际上都在这里发生。`read_file`（`path`、`offset`、`limit`）以 `   42 \| 文本` 的形式带行号显示文件当前的字节；重复读一个没有变化的文件时，只会告诉你「没变」，而不会把内容再吐一遍。`edit_file`（`path`、`old_string`、`new_string`、`replace_all`）在一个文件里替换一段确切的文本——这就是 Claude Code 的 `Edit`，参数逐个对应，也正是 Anthropic 公开的 `str_replace_based_edit_tool` 的形状。它必须精确匹配、且只能匹配一次：匹配到两处则拒绝执行，并把每一处的位置指给你；一处都匹配不到，则会把文件里最接近你所写内容的那一段，连同真实行号一起显示出来。`write_file`（`path`、`content`）用于新建文件，或有意地整体替换一个文件——发生整体替换时，宿主会数出有多少行原封不动地又被重打了一遍，并把这个数字告诉模型。`apply_patch` 即 Codex 的 `*** Begin Patch` 信封，可在一次「要么全部生效、要么全不生效」的调用里创建、更新、删除并重命名多个文件；它有两条到达路径——既可以作为工具调用，也可以作为 heredoc 敲进 shell，后者会被宿主拦截，永远不会真的执行。这样切分是照着两个参照实现来的，而不是自创格式：单文件的常见改动用字符串替换，跨文件的原子改动用信封。既然 shell 本来就能用 heredoc 重写任何文件，它们为什么还要存在：因为 heredoc 会把**整个**文件重新发一遍，改三行要付出每一行本来就正确的代码的代价，并且把它们逐行重新掷了一次骰子；也因为落笔的是**宿主**——依据它要么找得到、要么直接拒绝去猜的文本，而不是让模型凭半个记忆把文件重打一遍。`apply_patch` 的匹配引擎是对参考实现 V4A applier 的逐行移植：先精确匹配，否则忽略行尾空白，否则忽略行首行尾空白，再不行就失败——没有相似度打分，也没有「最接近的那一处」。`edit_file` 的匹配阶梯则是两个参照实现所容忍范围的并集——先精确匹配，再把印刷体引号与破折号折算成 ASCII 形式，再解码字面量 `\uXXXX`，最后剥掉行号前缀——第一级以上的每一级只要生效都会写进结果里，并且替换内容会按文件自己的标点风格写回，因此「容忍」永远不会悄悄改动没人要求改的字节。这四个文件工具需要持久化工作区，所以无状态端点只会拿到 shell 一个工具。所有工具都由宿主在进程内应答，任何一个都不会被交回客户端。默认关闭。环境变量：`TS_CODE_EXEC`（非 `0` 即视为开启）。 |
-| `--code-exec-allow-install` | 允许模型把 pip / npm 包装进本会话保留的环境里，让后续命令与技能脚本都能 import；需要 `--code-exec`。这项权限**不会**把套接字交给模型生成的命令。宿主会从识别到的安装命令中读出工具名与包名、完成校验，再用自己构造的参数向量代为安装，只接受预编译 wheel 并禁止安装脚本；随后用 `true` 或 `false` 替换原安装命令，保留 `&&`、`||`、管道和循环的语义。在 `pip install x && python y.py` 中，`y.py` 遵循命令的联网策略：默认离线，只有另行传入 `--code-exec-allow-network` 才可不受限地访问主机网络。会改变软件源的参数、URL 依赖以及宿主无法代为执行的安装器都会被拒绝；`-r requirements.txt` 会逐行读取并校验。环境变量：`TS_CODE_EXEC_ALLOW_INSTALL`。 |
+| `--code-exec` | 向模型提供 `shell`、`read_file`、`edit_file`、`write_file` 与 `apply_patch` 五个工具。`shell` 执行真正的命令行并返回退出码与合并后的 stdout/stderr；文件工具由宿主完成精确读取、替换、整文件写入与原子补丁。五个工具在内部 Agent 轮次中共享同一工作区：Web/CLI 按聊天会话保留；每个 OpenAI Chat、OpenAI Responses 或 Ollama HTTP 请求则获得一个私有工作区，响应结束后删除。只有没有提供工作区的底层直接调用者才只会得到 `shell`。所有内置工具均由宿主进程内应答，不会交回 API 客户端。默认关闭。环境变量：`TS_CODE_EXEC`（非 `0` 即视为开启）。 |
+| `--code-exec-allow-install` | 允许模型把 pip / npm 包装进当前 Web/CLI 会话或 HTTP 请求工作区，让后续命令与技能脚本在该工作区寿命内都能 import；需要 `--code-exec`。这项权限**不会**把套接字交给模型生成的命令。宿主会从识别到的安装命令中读出工具名与包名、完成校验，再用自己构造的参数向量代为安装，只接受预编译 wheel 并禁止安装脚本；随后用 `true` 或 `false` 替换原安装命令，保留 `&&`、`||`、管道和循环的语义。在 `pip install x && python y.py` 中，`y.py` 遵循命令的联网策略：默认离线，只有另行传入 `--code-exec-allow-network` 才可不受限地访问主机网络。会改变软件源的参数、URL 依赖以及宿主无法代为执行的安装器都会被拒绝；`-r requirements.txt` 会逐行读取并校验。环境变量：`TS_CODE_EXEC_ALLOW_INSTALL`。 |
 | `--code-exec-allow-network` | 给予每一条模型生成的命令不受限的宿主 IP 网络访问；生成的代码可以解析 DNS、抓取 URL、跟随重定向、调用远程 API、访问局域网/回环服务并打开 IP 监听套接字。**默认关闭**，且需要 `--code-exec`。macOS 与 Linux 上的写入及主目录读取约束仍保持生效。Linux 还通过 PID 命名空间约束后代进程；macOS 子进程会继承 Seatbelt，普通进程组也会被清理，但主动脱离进程组的子进程可能在请求结束后继续运行，每次工具结果都会明确报告这一限制。macOS 仍拒绝常见的 `/private/tmp/com.apple.launchd*` 路径套接字（但保留系统运行时所需的 Mach lookup 与 DNS 必需的精确 mDNSResponder 路径套接字），Linux 仍隐藏常见的 `/run` 端点，但本地 Unix IPC 并非完整隔离边界：macOS 为兼容性保留共享临时目录内的 Unix IPC，Linux 的宿主网络命名空间可能暴露抽象套接字以及 `/run` 之外的路径名套接字。其他宿主可读文件及 IP 服务因而可能被访问并外传；远程提示词注入与不可信下载也是额外风险。只有不含凭据的宿主 HTTP/SOCKS 代理设置会在此模式下传入。宿主会把不超过 16 MiB 的自定义 CA 包只读取一次，并仅将验证过的公开证书复制到每会话只读快照，因此源路径及其相邻数据不会暴露；认证代理需使用宿主侧无凭据转发器。包名与安装域名允许列表只约束宿主识别并代办的安装；不受限的生成代码仍可直接抓取或执行制品。它与装包权限、以及只控制 `skills_run` 的 `--skills-allow-network` 相互独立。Windows 仍须传入 `--code-exec-unconfined`。环境变量：`TS_CODE_EXEC_ALLOW_NETWORK`（非 `0` 即视为开启）。 |
 | `--code-exec-packages <list>` | 把安装限制在这些包名之内，逗号分隔；其余一律拒绝，并告诉模型允许哪些名字（默认：留空，即不限包名——且无论如何单次安装最多 16 个包）。匹配的是去掉版本后的裸名字，因此模型钉住的版本（`numpy==2.1.0`）仍然匹配名单里的 `numpy`。工具接口变成 shell 时它曾被退休，因为模型自己敲 `pip install` 时，可以用包名白名单看不见的方式写出同一个请求；如今它回来了，因为安装重新由**宿主**执行：宿主是把包名从模型的命令里读出来，而不是去运行那条命令，安装器的参数向量由宿主自己拼出，所以无论请求写成 `pip`、`pip3`、`python -m pip` 还是一个 requirements 文件，这份名单都同样生效。只有配合 `--code-exec-allow-install` 才有意义。启用 `--code-exec-allow-network` 后，该名单不是安全边界：生成代码可绕过宿主安装器，直接抓取或执行制品。 |
+| `--code-exec-install-index <url>` | 让宿主代办的安装使用运维者指定的软件包索引，而不是安装器默认源；模型自己写出的 `--index-url` 仍会被拒绝。索引主机会自动加入安装出口允许列表；镜像若从另一个主机下载文件，还需把该主机列入 `--code-exec-install-domains`。需要 `--code-exec-allow-install`。默认：未设置。环境变量：`TS_CODE_EXEC_INSTALL_INDEX`。 |
 | `--code-exec-install-domains <list>` | **宿主代为执行的装包操作**可以到达的主机，逗号分隔，可用精确名称或 `*.suffix` 通配（默认：`pypi.org,files.pythonhosted.org,registry.npmjs.org`；空值关闭钉选）。macOS Seatbelt 能把安装器钉在单个 loopback 端口上，因此它必须走一次性的 CONNECT 代理且只能访问这些主机；bubblewrap 无法钉住端口，Linux 则依赖宿主构造的参数向量、默认软件源与只装 wheel 的策略。传入 `--code-exec-allow-network` 后，普通生成命令获得的是不受限主机网络访问，不受此安装域名列表约束。环境变量：`TS_CODE_EXEC_INSTALL_DOMAINS`。 |
 | `--code-exec-timeout <seconds>` | 单条命令被杀死前最多可运行的秒数（默认 `120`，而不是旧程序运行器的 30 秒，因为现在装包、跑构建、跑测试用的都是同一个 shell 命令）。单次调用可以用 `timeout_ms` 要求更短或更长，上限 10 分钟；超时的命令会被停掉，但它在此之前打印的一切仍会交给模型——丢掉输出的超时只会让它闭着眼睛把命令再跑一遍。 |
+| `--code-exec-temperature <number>` | 代码执行轮次可选的采样温度，范围 `0` 到 `2`。只改动仍处于 TensorSharp 内置默认值的采样项，因此客户端或运维者显式指定的温度仍优先；负值清除此覆盖。即使未设置温度，代码轮次也会去掉内置的聊天重复惩罚。默认：未设置。 |
 | `--code-exec-shell <path\|name>` | 宿主自己的选择不合适或找不到时，用哪个 shell 来执行命令。默认：macOS 与 Linux 上是 `bash`，其次 `sh`；Windows 上是 PowerShell 7（`pwsh`），其次 Windows PowerShell——在 Windows 上，PATH 里那个裸的 `bash` 会被**故意**拒绝，因为它是 WSL 启动器，经由它执行会把命令送进一个 Linux 虚拟机，而 job object 在 Windows 这一侧握住的只是那个启动器。要在那里用真正的 bash（Git Bash、MSYS2），就用这个参数指到它。模型会被告知自己正在敲的是哪一种方言，因此这一项也会改变它工具说明里的示例。 |
 | `--code-exec-max-output <bytes>` | 一条命令的输出保留并展示给模型的字节数（默认 `32768`）。放不下的部分是从**中间**丢弃的，头尾都保留：构建或测试跑到最后的那一段才是失败所在，而只保留开头的截断丢掉的恰恰是最需要的那一段。 |
 | `--code-exec-unconfined` | 即使操作系统无法隔离，也照样运行模型生成的命令。CLI 与服务端都接受这一显式逃生开关。Windows 必须使用它，因为 job object 只能限制进程树，无法约束文件系统或网络；命令因而会获得本进程账户对两者的访问权限，不受 macOS / Linux 上那个较窄的联网开关约束。不要在不受信任用户可以访问的服务端上启用。 |
 
 **shell 是怎么被用的，又能碰到什么。** 模型的全部工作都走这一行命令：用
 heredoc 写出文件、运行它、grep 它、读自己的回溯再把它改掉——这也正是开启本
-功能后 `--skills-max-rounds` 会从 8 升到 24 的原因。工作目录在整个聊天会话内
-持久保留，并与技能脚本共享，因此 `cd`、导出的环境变量、激活的 virtualenv 以及
-装好的包都会从一次调用留到下一次。这背后并没有常驻的 shell 进程：Seatbelt
-配置在 exec 那一刻就固定了，而单次调用能读到哪些路径要逐次决定，所以每次调用
-都是一个全新的受限进程，由包装脚本通过文件把工作目录与导出的环境变量恢复回来、
-再重新存回去。联网规则属于宿主而不属于模型：命令默认离线，只有运维者显式传入
+功能后 `--skills-max-rounds` 会从 8 升到 24 的原因。Web/CLI 在整个聊天会话内保留
+一个文件工作区；每个 OpenAI Chat、OpenAI Responses 或 Ollama HTTP 请求则在其内部
+工具轮次间保留一个私有工作区，并在响应结束后删除。开启代码执行后，技能脚本共享
+该工作区，因此文件与宿主安装的软件包会在相应会话或请求寿命内可用。每次 shell
+调用仍是全新的受限进程；不要依赖 virtualenv 激活状态、PATH 修改或常驻 shell 在调用
+之间延续。联网规则属于宿主而不属于模型：命令默认离线，只有运维者显式传入
 `--code-exec-allow-network`（或设置 `TS_CODE_EXEC_ALLOW_NETWORK`），每一条模型生成
 的命令才会获得不受限的宿主 IP 网络访问，包括局域网/回环服务与 IP 监听套接字。
 macOS 与 Linux 上的写入及主目录读取约束仍然生效。Linux 还通过 PID 命名空间约束
@@ -547,27 +548,29 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --config config/server-basi
 | `--list-skills` | 打印技能注册表——名称、描述、文件、告警与加载错误——然后退出。 |
 | `--no-skills` | 关闭 Agent Skills：`/v1/skills` 与 `/api/skills` 会报告功能已禁用，请求中的 `skills` 字段不再生效。环境变量：`TS_NO_SKILLS`（非 `0` 即视为开启）。 |
 | `--skills-no-discovery` | 不向模型展示未被选中的技能，于是每个请求只看得到它自己点名的技能。按请求粒度可用 `"skills_discovery": false` 达到同样效果。 |
-| `--skills-allow-exec` | 允许 `skills_run`。**默认关闭。在共享服务器上，这就是一个远程代码执行入口**——技能是别人上传的内容，而决定要不要运行其中某个脚本的，是一个正在读同一个人写的 Markdown 的模型。环境变量：`TS_SKILLS_ALLOW_EXEC`（非 `0` 即视为开启）。 |
+| `--skills-allow-exec` | 允许 `skills_run`。**默认关闭。在共享服务器上，这就是一个远程代码执行入口**——技能是别人上传的内容，而决定要不要运行其中某个脚本的，是一个正在读同一个人写的 Markdown 的模型。脚本只经已知解释器直接运行，不经过 shell；工作目录是当前 Web 会话或私有 OpenAI/Ollama 请求工作区（未开启代码执行时为单次调用 scratch 目录），技能目录只读。默认的 required 沙箱在无法提供安全操作系统隔离时拒绝执行。环境变量：`TS_SKILLS_ALLOW_EXEC`（非 `0` 即视为开启）。 |
 | `--skills-max-rounds <n>` | 模型在必须作答前可以取用技能内容——或运行、查看并修正代码——的次数，范围 1-64（默认：`8`；开启 `--code-exec` 时为 `24`；此处显式设定的值按原样使用）。每一轮都是一次完整生成。环境变量：`TS_SKILLS_MAX_ROUNDS`。 |
-| `--skills-sandbox <off\|preferred\|required>` | 对技能脚本要求多强的操作系统级隔离。`required`（默认）在没有安全沙箱的宿主机上直接拒绝运行，而不是不加约束地跑；`preferred` 则照跑不误；`off` 只保留进程内限制。macOS 用 `sandbox-exec`；Linux 要求 `bwrap` 0.12.0 或更高版本（旧版存在已知的沙箱搭建阶段符号链接逃逸）；Windows 仅能限制进程树。环境变量：`TS_SKILLS_SANDBOX`。 |
+| `--skills-sandbox <off\|preferred\|required>` | 对技能脚本要求多强的操作系统级隔离。`required`（默认）在没有安全沙箱的宿主机上拒绝运行；`preferred` 表示显式接受较弱隔离；`off` 只保留解释器、环境、时限与输出限制。macOS 使用 `sandbox-exec`；Linux 要求 `bwrap` 0.12.0 或更高版本。Windows Job Object 只能限制进程树，因此 `required` 会拒绝，必须显式选 `preferred` 才接受较弱隔离。环境变量：`TS_SKILLS_SANDBOX`。 |
 | `--skills-allow-network` | 允许沙箱内的技能脚本联网。默认禁止。环境变量：`TS_SKILLS_ALLOW_NETWORK`。 |
-| `--code-exec` | 向模型提供 `shell`、`read_file`、`edit_file`、`write_file` 与 `apply_patch` 工具。`shell` 执行真正的命令行并返回退出码与合并后的 stdout/stderr；文件工具由宿主完成精确修改，工作区则在整个聊天会话内持久保留。macOS / Linux 上命令必须在操作系统沙箱内运行；隔离不可用时，除非运维者显式设置 `--code-exec-unconfined`，服务端会拒绝执行。Windows 始终需要这个逃生开关。联网默认另行禁止，只能用 `--code-exec-allow-network` 开启。所有工具都由宿主在进程内应答，不会返回给 API 客户端。默认关闭。环境变量：`TS_CODE_EXEC`（非 `0` 即视为开启）。 |
-| `--code-exec-allow-install` | 允许模型把 pip / npm 包装进该聊天会话的持久环境；需要 `--code-exec`。这项权限**不会**给模型生成的命令套接字。TensorSharp 读取并校验识别到的安装命令，用宿主构造的参数向量执行只装 wheel / 禁止脚本的安装，再把 `true` 或 `false` 代回命令行。后续生成的代码仍然离线，除非另行传入 `--code-exec-allow-network`。环境变量：`TS_CODE_EXEC_ALLOW_INSTALL`。 |
+| `--code-exec` | 向模型提供 `shell`、`read_file`、`edit_file`、`write_file` 与 `apply_patch` 工具。`shell` 执行真正的命令行并返回退出码与合并后的 stdout/stderr；文件工具由宿主完成精确修改。Web UI 每个聊天会话保留一个工作区；每个 OpenAI Chat、OpenAI Responses 与 Ollama HTTP 请求则在其内部工具轮次间使用一个私有工作区，并在响应结束后删除。macOS / Linux 上命令必须在操作系统沙箱内运行；隔离不可用时，除非运维者显式设置 `--code-exec-unconfined`，服务端会拒绝执行。Windows 始终需要这个逃生开关。联网默认另行禁止，只能用 `--code-exec-allow-network` 开启。所有内置工具都由宿主在进程内应答，不会返回给 API 客户端。默认关闭。环境变量：`TS_CODE_EXEC`（非 `0` 即视为开启）。 |
+| `--code-exec-allow-install` | 允许模型把 pip / npm 包装进当前 Web 会话或 HTTP 请求工作区；需要 `--code-exec`。这项权限**不会**给模型生成的命令套接字。TensorSharp 读取并校验识别到的安装命令，用宿主构造的参数向量执行只装 wheel / 禁止脚本的安装，再把 `true` 或 `false` 代回命令行。后续生成的代码仍然离线，除非另行传入 `--code-exec-allow-network`。环境变量：`TS_CODE_EXEC_ALLOW_INSTALL`。 |
 | `--code-exec-allow-network` | 给予每一条模型生成的命令不受限的宿主 IP 网络访问；生成的代码可以解析 DNS、抓取 URL、跟随重定向、调用远程 API、访问局域网/回环服务并打开 IP 监听套接字。**默认关闭**，且需要 `--code-exec`。macOS 与 Linux 上的写入及主目录读取约束仍保持生效。Linux 还通过 PID 命名空间约束后代进程；macOS 子进程会继承 Seatbelt，普通进程组也会被清理，但主动脱离进程组的子进程可能在请求结束后继续运行，每次工具结果都会明确报告这一限制。macOS 仍拒绝常见的 `/private/tmp/com.apple.launchd*` 路径套接字（但保留系统运行时所需的 Mach lookup 与 DNS 必需的精确 mDNSResponder 路径套接字），Linux 仍隐藏常见的 `/run` 端点，但本地 Unix IPC 并非完整隔离边界：macOS 为兼容性保留共享临时目录内的 Unix IPC，Linux 的宿主网络命名空间可能暴露抽象套接字以及 `/run` 之外的路径名套接字。其他宿主可读文件及 IP 服务因而可能被访问并外传；远程提示词注入与不可信下载也是额外风险。只有不含凭据的宿主 HTTP/SOCKS 代理设置会在此模式下传入。宿主会把不超过 16 MiB 的自定义 CA 包只读取一次，并仅将验证过的公开证书复制到每会话只读快照，因此源路径及其相邻数据不会暴露；认证代理需使用宿主侧无凭据转发器。包名与安装域名允许列表只约束宿主识别并代办的安装；不受限的生成代码仍可直接抓取或执行制品。它与 `--code-exec-allow-install`、`--skills-allow-network` 都相互独立。Windows 仍须传入 `--code-exec-unconfined`。环境变量：`TS_CODE_EXEC_ALLOW_NETWORK`（非 `0` 即视为开启）。 |
 | `--code-exec-packages <list>` | 把安装限制在这些包名之内，逗号分隔；其余一律拒绝，并告诉模型允许哪些名字（默认：留空，即不限包名——且无论如何单次安装最多 16 个包）。匹配的是去掉版本后的裸名字，因此模型钉住的版本（`numpy==2.1.0`）仍然匹配名单里的 `numpy`。工具接口变成 shell 时它曾被退休，因为模型自己敲 `pip install` 时，可以用包名白名单看不见的方式写出同一个请求；如今它回来了，因为安装重新由**宿主**执行：宿主是把包名从模型的命令里读出来，而不是去运行那条命令，安装器的参数向量由宿主自己拼出，所以无论请求写成 `pip`、`pip3`、`python -m pip` 还是一个 requirements 文件，这份名单都同样生效。只有配合 `--code-exec-allow-install` 才有意义。启用 `--code-exec-allow-network` 后，该名单不是安全边界：生成代码可绕过宿主安装器，直接抓取或执行制品。 |
+| `--code-exec-install-index <url>` | 让宿主代办的安装使用运维者指定的软件包索引；模型自己写出的改源参数仍会被拒绝。索引主机会自动加入安装出口允许列表；任何独立下载主机需列入 `--code-exec-install-domains`。需要 `--code-exec-allow-install`。默认：未设置。环境变量：`TS_CODE_EXEC_INSTALL_INDEX`。 |
 | `--code-exec-install-domains <list>` | **宿主代为执行的装包操作**可以到达的主机，逗号分隔，可用精确名称或 `*.suffix` 通配（默认：`pypi.org,files.pythonhosted.org,registry.npmjs.org`；空值关闭钉选）。传入 `--code-exec-allow-network` 后，普通生成命令获得的是不受限主机网络访问，不受此安装域名列表约束。环境变量：`TS_CODE_EXEC_INSTALL_DOMAINS`。 |
 | `--code-exec-timeout <seconds>` | 单条命令被杀死前最多可运行的秒数（默认 `120`，而不是旧程序运行器的 30 秒，因为现在装包、跑构建、跑测试用的都是同一个 shell 命令）。单次调用可以用 `timeout_ms` 要求更短或更长，上限 10 分钟；超时的命令会被停掉，但它在此之前打印的一切仍会交给模型——丢掉输出的超时只会让它闭着眼睛把命令再跑一遍。 |
+| `--code-exec-temperature <number>` | 代码执行轮次可选的采样温度，范围 `0` 到 `2`；请求或运维者显式设置的采样仍优先，负值清除此覆盖。无论是否设置温度，代码轮次都会去掉内置的聊天重复惩罚。默认：未设置。 |
 | `--code-exec-shell <path\|name>` | 宿主自己的选择不合适或找不到时，用哪个 shell 来执行命令。默认：macOS 与 Linux 上是 `bash`，其次 `sh`；Windows 上是 PowerShell 7（`pwsh`），其次 Windows PowerShell——在 Windows 上，PATH 里那个裸的 `bash` 会被**故意**拒绝，因为它是 WSL 启动器，经由它执行会把命令送进一个 Linux 虚拟机，而 job object 在 Windows 这一侧握住的只是那个启动器。要在那里用真正的 bash（Git Bash、MSYS2），就用这个参数指到它。模型会被告知自己正在敲的是哪一种方言，因此这一项也会改变它工具说明里的示例。 |
 | `--code-exec-max-output <bytes>` | 一条命令的输出保留并展示给模型的字节数（默认 `32768`）。放不下的部分是从**中间**丢弃的，头尾都保留：构建或测试跑到最后的那一段才是失败所在，而只保留开头的截断丢掉的恰恰是最需要的那一段。 |
 | `--code-exec-unconfined` | 即使操作系统无法隔离，也照样运行模型生成的命令。服务端与 CLI 都接受这一显式逃生开关。Windows 必须使用它，因而文件系统与网络访问都不受约束；不要在不受信任用户可以访问的服务端上启用。 |
 
 **shell 是怎么被用的，又能碰到什么。** 模型对文件与代码的一切操作都走这一行
 命令——写、运行、grep、读回溯、修正——这也正是开启本功能后
-`--skills-max-rounds` 会从 8 升到 24 的原因。工作目录与 shell 状态在该聊天会话
-余下的时间里持久保留，因此 `cd`、导出的环境变量、激活的 virtualenv 以及装好的
-包都会从一次调用留到下一次；但两次调用之间并没有 shell 进程活着：沙箱配置在
-exec 那一刻就固定了，而单次调用能读到哪些路径要逐次决定，所以每次调用都是一个
-全新的受限进程，由包装脚本通过文件把这些状态恢复回来、再重新存回去。联网规则
+`--skills-max-rounds` 会从 8 升到 24 的原因。Web UI 每个聊天会话保留一个文件工作区；
+每个 OpenAI Chat、OpenAI Responses 或 Ollama HTTP 请求则在其内部工具轮次间保留一个
+私有工作区，并在响应结束后删除。文件与宿主安装的软件包会在相应寿命内可用，但每次
+shell 调用仍是全新的受限进程；不要依赖 virtualenv 激活状态、PATH 修改或常驻 shell
+在调用之间延续。联网规则
 属于宿主而不属于模型：命令默认离线，`--code-exec-allow-network` /
 `TS_CODE_EXEC_ALLOW_NETWORK` 则给予每一条生成命令不受限的主机网络访问，包括
 局域网/回环服务与 IP 监听套接字。macOS 与 Linux 上的写入及主目录读取约束仍保持
@@ -1661,6 +1664,8 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model <model.gguf> --back
 | 预先启用的技能 | 无 | — | `--skill <name>`（可重复）；按请求则用 `"skills": [...]` |
 | 向模型展示未选中的技能 | 启用 | — | `--skills-no-discovery`；按请求则用 `"skills_discovery": false` |
 | `skills_run`（运行技能自带脚本） | **关闭** | **`TS_SKILLS_ALLOW_EXEC=1`** | `--skills-allow-exec` |
+| 技能脚本操作系统沙箱 | `required`（无法安全隔离时拒绝） | `TS_SKILLS_SANDBOX` | `--skills-sandbox off\|preferred\|required` |
+| 技能脚本网络访问 | **关闭** | `TS_SKILLS_ALLOW_NETWORK=1` | `--skills-allow-network` |
 | 每轮可取用技能内容（及代码）的次数 | `8`，开启 `--code-exec` 时为 `24`（范围 1-64） | `TS_SKILLS_MAX_ROUNDS` | `--skills-max-rounds N` |
 | 打印注册表后退出 | — | — | `--list-skills` |
 
@@ -1677,8 +1682,10 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model <model.gguf> --back
 | 安装软件包 | **关闭** | **`TS_CODE_EXEC_ALLOW_INSTALL=1`** | `--code-exec-allow-install` |
 | 模型生成命令的不受限主机网络访问 | **关闭** | **`TS_CODE_EXEC_ALLOW_NETWORK=1`** | `--code-exec-allow-network` |
 | 一次安装可以指名的包 | 不限（单次安装最多 16 个） | — | `--code-exec-packages <list>` |
+| 宿主代办安装使用的软件包索引 | 安装器默认值 | `TS_CODE_EXEC_INSTALL_INDEX` | `--code-exec-install-index <url>` |
 | 一次安装可以到达的主机 | `pypi.org`、`files.pythonhosted.org`、`registry.npmjs.org`（传空值 = 不做限制） | `TS_CODE_EXEC_INSTALL_DOMAINS` | `--code-exec-install-domains <list>` |
 | 单条命令的时限 | `120` 秒（单次调用最多可要求 10 分钟） | — | `--code-exec-timeout N` |
+| 代码轮次采样温度 | 未设置；仍会去掉内置重复惩罚 | — | `--code-exec-temperature 0..2`（负值清除） |
 | shell | `bash`，其次 `sh`；Windows 上为 PowerShell | — | `--code-exec-shell <path\|name>` |
 | 单条命令保留的输出 | `32768` 字节，从中间截断 | — | `--code-exec-max-output N` |
 | 操作系统沙箱 | `required`（无法提供文件系统 / IP 网络隔离时拒绝运行） | — | `--code-exec-unconfined`（CLI 与服务端；Windows 必需） |

@@ -19,12 +19,12 @@
   <p class="lede">TensorSharp is a real .NET library, not just an executable. Reference its projects from a source checkout and drive inference directly from your own code when you do not want an HTTP hop.</p>
 
   <h2 id="packages">Project and package boundaries</h2>
-  <p>The repository is split along publishable package boundaries. The names below are project/package IDs, but the current Runtime/Models/Backends/CLI/Server packages are <strong>not available on NuGet.org</strong>.</p>
+  <p>The repository is split along publishable package boundaries. The established TensorSharp package IDs were released through <strong>3.1.2</strong>, but those packages lag the current source tree and server release. <code>TensorSharp.AgentHost</code> and <code>TensorSharp.Distributed</code> are not yet on NuGet.org.</p>
   <div class="table-scroll">
   <table>
-    <thead><tr><th>Package</th><th>Namespace</th><th>Responsibility</th></tr></thead>
+    <thead><tr><th>Project / package</th><th>Namespace</th><th>Responsibility</th></tr></thead>
     <tbody>
-      <tr><td><code>TensorSharp.Core</code></td><td><code>TensorSharp</code></td><td>Tensor primitives, ops, allocators, storage, device abstraction.</td></tr>
+      <tr><td><code>TensorSharp.Core</code> / <code>TensorSharp.Tensors</code></td><td><code>TensorSharp</code></td><td>Tensor primitives, ops, allocators, storage, device abstraction. The NuGet ID differs from the project name.</td></tr>
       <tr><td><code>TensorSharp.Runtime</code></td><td><code>TensorSharp.Runtime</code></td><td>GGUF parsing, tokenizers, prompt rendering, sampling, paged KV cache, continuous-batching scheduler.</td></tr>
       <tr><td><code>TensorSharp.Models</code></td><td><code>TensorSharp.Models</code></td><td><code>ModelBase</code>, architecture implementations, multimodal encoders, batched/paged forward passes.</td></tr>
       <tr><td><code>TensorSharp.Backends.GGML</code></td><td><code>TensorSharp.GGML</code></td><td>GGML-backed execution and native interop.</td></tr>
@@ -32,12 +32,14 @@
       <tr><td><code>TensorSharp.Backends.MLX</code></td><td><code>TensorSharp.MLX</code></td><td>Apple-Silicon MLX backend (mlx-c / Metal).</td></tr>
       <tr><td><code>TensorSharp.Server</code></td><td><code>TensorSharp.Server</code></td><td>ASP.NET Core server, OpenAI/Ollama adapters, inference engine host, web UI.</td></tr>
       <tr><td><code>TensorSharp.Cli</code></td><td><code>TensorSharp.Cli</code></td><td>Console host and debugging / batch tooling.</td></tr>
+      <tr><td><code>TensorSharp.AgentHost</code></td><td><code>TensorSharp.AgentHost.*</code></td><td>Skills, bounded agent loop, five code tools, sandboxes, workspaces, and artifacts. Source-only today.</td></tr>
+      <tr><td><code>TensorSharp.Distributed</code></td><td><code>TensorSharp.Distributed</code></td><td>Peer-to-peer TCP distributed tensor parallelism. Source-only today.</td></tr>
     </tbody>
   </table>
   </div>
   <p>For a typical embedding scenario, reference <code>TensorSharp.Models.csproj</code>; it already references Core, Runtime, and the backend projects. From a sibling application beside the TensorSharp checkout:</p>
   <pre data-lang="bash"><code>dotnet add reference ../TensorSharp/TensorSharp.Models/TensorSharp.Models.csproj</code></pre>
-  <div class="callout warn"><div class="ic">📦</div><p>Do not use <code>dotnet add package TensorSharp.Models</code> yet: no current package with that ID is published on NuGet.org. Source builds compile native GGML/MLX by default; for managed-CPU development pass <code>-p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true</code>, or build the native libraries described under <a href="backends.html#native-build">Backends</a>.</p></div>
+  <div class="callout warn"><div class="ic">📦</div><p>NuGet <code>3.1.2</code> is an older snapshot; use project references when you need the current implementation. AgentHost and Distributed require source references because they have no NuGet package yet. Source builds compile native GGML/MLX by default; for managed-CPU development pass <code>-p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true</code>, or build the native libraries described under <a href="backends.html#native-build">Backends</a>.</p></div>
 
   <h2 id="quickstart">Minimal example — load, generate, decode</h2>
   <p>Every model is loaded the same way: <code>ModelBase.Create()</code> reads the GGUF metadata and instantiates the right architecture. From there you tokenize, run forward passes, sample, and decode.</p>
@@ -172,6 +174,7 @@ Console.WriteLine($"Saved {output.Width}x{output.Height} edited image.");</code>
 
   <h2 id="skills">Agent Skills — <code>SkillsChatClient</code></h2>
   <p>An <a href="features.html#skills">Agent Skill</a> is a folder of model-facing instructions — a <code>SKILL.md</code> plus the scripts, reference documents and assets it refers to — that a model loads only when a task needs it. <code>SkillsChatClient</code> (namespace <code>TensorSharp.AgentHost.Skills</code>, project <code>TensorSharp.AgentHost</code>) is how a .NET application gets them. It calls an OpenAI-compatible chat endpoint over HTTP rather than loading a GGUF in process, so unlike the rest of this page it needs no backend and no <code>TensorSharp.Models</code> reference.</p>
+  <p>On TensorSharp's tool-capable chat formats, selected and discovered skills begin as metadata only; the model reads instructions and bundled files on demand. If the model has no usable tool parser, TensorSharp instead inlines selected skill bodies and withholds the built-in skill/code tools, so the request remains useful without pretending a tool round trip will work.</p>
   <p>It covers the two situations that actually arise, selected with <code>SkillsChatClientOptions.Delivery</code>.</p>
 
   <h3>Against TensorSharp.Server — <code>SkillDelivery.Server</code></h3>
@@ -289,6 +292,11 @@ foreach (SkillToolInvocation call in reply.SkillInvocations)
   </table>
   </div>
   <p>Full reference, including the frontmatter fields, the prompt budget and the security model: <code>docs/agent_skills.md</code>. Open-source skills to start from: <a href="https://github.com/anthropics/skills" target="_blank" rel="noopener">github.com/anthropics/skills</a>.</p>
+
+  <h2 id="agenthost">AgentHost runtime layer</h2>
+  <p><code>TensorSharp.AgentHost</code> is the optional agentic layer over <code>TensorSharp.Runtime</code>; Runtime has no dependency back to it. <code>CodeExecOptions</code>, <code>ShellRunner</code>, and <code>CodeRunnerAdapter</code> implement the five host-owned tools <code>read_file</code>, <code>edit_file</code>, <code>write_file</code>, <code>shell</code>, and <code>apply_patch</code>. File tools are declared only when the host supplies a persistent workspace; a direct caller without one gets <code>shell</code> alone.</p>
+  <p><code>SkillAgentLoop</code> runs a bounded single-assistant loop, executes only TensorSharp-owned skill/code calls, and returns calls to the application's own tools in <code>SkillLoopResult.PendingClientToolCalls</code>. Hosts default to 8 generations, raised to 24 when code tools are offered unless an operator set the bound. <code>SessionWorkspaceManager</code> gives each server session a private workspace; request-only callers get one workspace for that request. Working files, allowed exported environment state, and installed packages persist in that scope, while <code>PATH</code> is rebuilt for every shell call.</p>
+  <div class="callout warn"><div class="ic">🔒</div><p>Code tools are off by default and sandbox mode defaults to <code>required</code>. macOS Seatbelt cannot guarantee cleanup of a deliberately detached child; Linux needs bubblewrap 0.12+; Windows job objects cannot confine files or sockets, so execution requires explicit unconfined mode. These are startup permissions, not per-command approvals, and the loop does not spawn subagents. Structured-output requests inline selected skills and suppress built-in tools. See <a href="agentic.html">Agentic Work</a> for the complete boundary.</p></div>
 
   <h2 id="namespaces">Key types &amp; interfaces</h2>
   <div class="table-scroll">

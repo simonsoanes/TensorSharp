@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>文本与 LLM 模型 — TensorSharp 维基</title>
-  <meta name="description" content="十种文本架构的下载与运行示例，以及多模态输入、思考模式与工具调用。">
+  <meta name="description" content="十种文本架构的下载与运行示例，以及各家族的多模态输入、思考模式与工具调用说明。">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
   <script>try{var t=localStorage.getItem('ts-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.classList.toggle('dark',t==='dark');}catch(e){}</script>
@@ -16,7 +16,7 @@
 <main class="content" id="content">
   <div class="breadcrumb"><a href="index_zh-cn.html">首页</a> › <a href="models_zh-cn.html">支持的模型</a> › 文本与 LLM 模型</div>
   <h1>文本与 LLM 模型</h1>
-  <p class="lede">每种文本架构的下载与运行命令，随后是它们共享的能力：图像、音频与 PDF 输入，思考模式，以及工具调用。</p>
+  <p class="lede">每种文本架构的下载与运行命令，随后按家族说明图像、音频与 PDF 输入、思考模式以及工具调用能力。</p>
 
   <h2 id="download-run">下载并运行</h2>
   <p>运行构建命令前，请先<a href="getting-started_zh-cn.html#install-dotnet">按平台安装并验证 .NET 10 SDK</a>。第一个代码块是已验证的 Gemma 4 E4B 快速上手。所有代码块都使用 Hugging Face CLI（<code>pip install -U huggingface_hub</code>）；其后的各家族代码块假定已完成完整源码构建。从仓库根目录运行；先把问题写入 <code>prompt.txt</code>，并按硬件把 <code>ggml_cuda</code> 换成 <code>ggml_metal</code>、<code>ggml_vulkan</code> 或 <code>ggml_cpu</code>。</p>
@@ -32,7 +32,7 @@ dotnet run --project TensorSharp.Cli -c Release --no-build -- --model models/gem
     --input prompt.txt --max-tokens 300 --backend ggml_cuda
 dotnet run --project TensorSharp.Server -c Release --no-build -- --model models/gemma-4-E4B-it-Q8_0.gguf \
     --backend ggml_cuda</code></pre>
-  <p>Apple Silicon 请省略 CUDA 环境变量并使用 <code>ggml_metal</code>；受支持的 Windows/Linux Vulkan GPU 请改为请求 <code>TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON</code> 并使用 <code>ggml_vulkan</code>。图像、视频或音频输入还需运行 <code>hf download ggml-org/gemma-4-E4B-it-GGUF mmproj-gemma-4-E4B-it-Q8_0.gguf --local-dir models</code>，并传入 <code>--mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf</code>。服务端的浏览器界面位于 <code>http://localhost:5000/index.html</code>。Windows PowerShell 与完整平台语法见<a href="getting-started_zh-cn.html#e4b-fast-lane">快速开始</a>。</p>
+  <p>Apple Silicon 请省略 CUDA 环境变量并使用 <code>ggml_metal</code>；受支持的 Windows/Linux Vulkan GPU 请改为请求 <code>TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON</code> 并使用 <code>ggml_vulkan</code>。图像、视频或音频输入还需运行 <code>hf download ggml-org/gemma-4-E4B-it-GGUF mmproj-gemma-4-E4B-it-Q8_0.gguf --local-dir models</code>，并传入 <code>--mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf</code>。服务端浏览器界面位于 <code>http://localhost:5000/</code>，存活检查为 <code>/health</code>。Windows PowerShell 与完整平台语法见<a href="getting-started_zh-cn.html#e4b-fast-lane">快速开始</a>。</p>
 
   <h3 id="deepseek4">DeepSeek V4 Flash（284B MoE，文本、思考、工具、DSpark）</h3>
   <p>一个 284B 的专家混合模型，配备 128 token 的原始滑动窗口加块压缩注意力（官方宣称 1M 上下文）。它<em>不</em>走通用的逐算子前向：TensorSharp 通过三套专属的整模型执行器之一运行它 —— <code>--backend cuda</code>（Direct CUDA，不依赖 ggml）、<code>--backend ggml_cuda</code> / <code>ggml_vulkan</code>（原生 ggml），以及 <code>--backend cpu</code>（100% 纯 C#，零原生依赖）。三者都会把权重按层切分到所有可见 GPU，因此远大于单卡显存的模型依然跑得起来；<code>--tp N</code>（或 <code>TS_DSV4_NGPU</code>）用来限制使用几张卡。</p>
@@ -127,8 +127,9 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.5-9B-U
 
 dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda --spec</code></pre>
 
-  <h3 id="qwen4exp">Qwen 3.8 Flash Next（混合 MoE，文本 + 图像、思考、工具）</h3>
-  <p>一个混合专家模型，GGUF 架构 id 为 <code>qwen4exp</code>：GatedDeltaNet 递归层与全注意力层交错（其中一部分还挂在 Qwen 稀疏注意力的索引器之后），一个 PLE n-gram 嵌入块，×4 的超连接流，以及 512 专家的 MoE。48 层，隐藏维度 2560，24 个 query 头 / 2 个 KV 头、head_dim 256，词表 248,320，每个 token 从 512 个专家里用 10 个，48 层中有 36 层带 GDN，PLE 在第 1 层。在各 ggml 后端上，整个 token（几乎）作为<strong>一张图</strong>跑完——嵌入、图内 PLE、全部 48 层、最后的混合器与 LM 头——并从按形状索引的已捕获图缓存中回放。视觉走 Qwen3.5-VL 塔，使用 (T,H,W) IMRoPE 位置，因此多图提示与多轮图像会话都可用；只要新提示恰好是缓存前缀的延长，跨轮的 KV 就会被复用（GDN 递归无法回退）。并发请求由按序列的状态持有者承载——每个请求拥有自己的注意力 KV 与索引器缓存、自己的 GDN 与 PLE 状态——因此请求之间的切换只是换一个引用。思考与工具调用都可用。</p>
+  <h3 id="qwen4exp">Qwen 3.8 Flash Next（混合 MoE，文本 + 图像、思考；无法往返工具调用）</h3>
+  <p>一个混合专家模型，GGUF 架构 id 为 <code>qwen4exp</code>：GatedDeltaNet 递归层与全注意力层交错（其中一部分还挂在 Qwen 稀疏注意力的索引器之后），一个 PLE n-gram 嵌入块，×4 的超连接流，以及 512 专家的 MoE。48 层，隐藏维度 2560，24 个 query 头 / 2 个 KV 头、head_dim 256，词表 248,320，每个 token 从 512 个专家里用 10 个，48 层中有 36 层带 GDN，PLE 在第 1 层。在各 ggml 后端上，整个 token（几乎）作为<strong>一张图</strong>跑完——嵌入、图内 PLE、全部 48 层、最后的混合器与 LM 头——并从按形状索引的已捕获图缓存中回放。视觉走 Qwen3.5-VL 塔，使用 (T,H,W) IMRoPE 位置，因此多图提示与多轮图像会话都可用；只要新提示恰好是缓存前缀的延长，跨轮的 KV 就会被复用（GDN 递归无法回退）。并发请求由按序列的状态持有者承载——每个请求拥有自己的注意力 KV 与索引器缓存、自己的 GDN 与 PLE 状态——因此请求之间的切换只是换一个引用。思考可用且始终开启。</p>
+  <div class="callout note"><div class="ic">🧰</div><p><strong>工具状态：</strong><code>qwen4exp</code> 的输出解析器目前无法返回结构化调用，因此不支持通用工具调用。TensorSharp 会对该家族隐藏内置 Agent Skills 与代码执行工具；选中某个 Agent Skill 时，其指令正文会作为回退直接内联到提示词，而不是通过 <code>skills_read</code> 获取。</p></div>
   <pre data-lang="bash"><code># UD-Q2_K_XL 这一档约 73.4 GiB——想要更大或更小可换一个量化目录
 hf download unsloth/Qwen3.8-Flash-Next-GGUF --include "UD-Q2_K_XL/*" --local-dir models
 hf download unsloth/Qwen3.8-Flash-Next-GGUF mmproj-BF16.gguf --local-dir models
@@ -227,7 +228,7 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/diffusiongem
   <p>通过 <code>--think</code>（CLI）、<code>"think": true</code>（Ollama API / Web UI）或浏览器中的思考开关启用。响应会单独暴露推理 —— 例如 Ollama 聊天响应中的 <code>message.thinking</code>。</p>
 
   <h2 id="toolcalling">工具调用 / 函数调用</h2>
-  <p>模型可以调用用户自定义工具，并参与多轮工具调用对话。将工具定义为 JSON，通过 <code>--tools</code>（CLI）或 <code>tools</code> 参数（API）传入。每个架构使用各自的线格式，但输出解析器都会将调用提取为结构化 <code>tool_calls</code>：</p>
+  <p>受支持的模型家族可以调用用户自定义工具，并参与多轮工具调用对话。将工具定义为 JSON，通过 <code>--tools</code>（CLI）或 <code>tools</code> 参数（API）传入。每个受支持架构使用各自的线格式，其输出解析器会将调用提取为结构化 <code>tool_calls</code>：</p>
   <ul>
     <li><strong>Nemotron-H</strong> —— <code>&lt;tool_call&gt;{"name": …, "arguments": {…}}&lt;/tool_call&gt;</code></li>
     <li><strong>Qwen 3.5 / 3.6</strong> —— 同样是 <code>&lt;tool_call&gt;</code> 块，但内容为 XML：<code>&lt;function=NAME&gt;&lt;parameter=key&gt;value&lt;/parameter&gt;&lt;/function&gt;</code>（JSON 形式仍被接受）。</li>
@@ -237,6 +238,7 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/diffusiongem
     <li><strong>GLM 5.x</strong> —— 逐参数标签的 XML：<code>&lt;tool_call&gt;NAME&lt;arg_key&gt;k&lt;/arg_key&gt;&lt;arg_value&gt;v&lt;/arg_value&gt;…&lt;/tool_call&gt;</code>。函数名以裸文本紧跟在开标签之后，每个参数自成一组键值对；模板里用 <code>tojson</code> 渲染过的值会被解析回数字、数组与对象。</li>
     <li><strong>Muse-Glimmer</strong> —— 聊天模板声明的 ATEM XML 标记；解析器会把调用提取成同样的结构化 <code>tool_calls</code>。</li>
   </ul>
+  <p><strong>Qwen 3.8 Flash Next（<code>qwen4exp</code>）不在此列表中：</strong>其输出解析器无法返回工具调用，因此通用客户端工具与内置技能 / 代码工具都会被隐藏；选中的 Agent Skill 指令会作为无工具回退直接内联。</p>
   <p>完整的请求/响应示例与续接循环见 <a href="http-api_zh-cn.html#tools">通过 HTTP 进行工具调用</a>。</p>
 
   <div class="content-footer">

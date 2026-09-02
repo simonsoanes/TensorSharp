@@ -124,8 +124,8 @@ bash build-linux.sh --cuda --cuda-arch='86-real;89-real'</code></pre>
   <p>它会把库写入 <code>TensorSharp.Backends.MLX/Native/dist/</code>。运行时后端会先探测应用目录；用 <code>TENSORSHARP_MLX_LIBRARY</code> 或 <code>TENSORSHARP_MLX_LIBRARY_DIR</code> 指向别处。</p>
 
   <h3 id="binaries">平台二进制发行状态</h3>
-  <div class="callout warn"><div class="ic">⚠️</div><p>当前最新的 <a href="https://github.com/zhongkaifu/TensorSharp/releases/tag/v3.0.5.0" target="_blank" rel="noopener">v3.0.5.0</a> 没有上传应用归档。除非文件已明确列在 <a href="https://github.com/zhongkaifu/TensorSharp/releases" target="_blank" rel="noopener">Releases 页面</a>，否则请从源码构建。</p></div>
-  <p>计划中的发行工作流会在全部必需构建 job 成功后生成以下自包含归档：</p>
+  <div class="callout note"><div class="ic">📦</div><p><strong>状态核验于 2026-09-01：</strong><a href="https://github.com/zhongkaifu/TensorSharp/releases/tag/v3.3.0.0" target="_blank" rel="noopener">v3.3.0.0</a> 已发布十个自包含应用归档：下方五种平台/后端后缀各有一份 TensorSharp.Cli 和一份 TensorSharp.Server 归档。更新版本请查看 <a href="https://github.com/zhongkaifu/TensorSharp/releases" target="_blank" rel="noopener">Releases 页面</a>。</p></div>
+  <p>两个应用均按以下平台/后端矩阵发布：</p>
   <div class="table-scroll">
   <table>
     <thead><tr><th>归档</th><th>捆绑的原生后端</th><th>格式</th></tr></thead>
@@ -138,7 +138,7 @@ bash build-linux.sh --cuda --cuda-arch='86-real;89-real'</code></pre>
     </tbody>
   </table>
   </div>
-  <p class="page-foot-note">这些是计划中的产物名称，并不表示文件目前可下载。文件存在时，<code>-cuda</code> 归档仍需 NVIDIA GPU 与兼容驱动；macOS 归档需要 Apple Silicon。</p>
+  <p class="page-foot-note">v3.3.0.0 的每个后缀都有 CLI 与 Server 两个文件（共十个应用归档）。<code>-cuda</code> 归档仍需 NVIDIA GPU 与兼容驱动；macOS 归档需要 Apple Silicon。仍可选择从源码构建。</p>
 
   <div class="content-footer">
     <a href="getting-started_zh-cn.html">← 快速开始</a>

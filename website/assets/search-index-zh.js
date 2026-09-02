@@ -1,7 +1,7 @@
 /* 中文搜索索引（TensorSharp 维基）。每条：
    t = 标题, p = 页面标签, u = url(+锚点，英文形式，app.js 会本地化为 _zh-cn), s = 摘要, k = 额外关键词。 */
 window.SEARCH_INDEX_ZH = [
-  { t: "TensorSharp 是什么", p: "首页", u: "index.html", s: "面向 GGUF 模型的原生 .NET 大模型推理引擎 —— CLI、Web 服务器，以及兼容 Ollama/OpenAI 的 API。", k: "intro 简介 概览 关于 llm gguf csharp dotnet" },
+  { t: "TensorSharp 是什么", p: "首页", u: "index.html", s: "原生 .NET GGUF 推理引擎 —— CLI、Web UI、兼容 API，以及可选的 AgentHost 技能与模型生成代码沙箱。", k: "intro 简介 概览 关于 llm gguf csharp dotnet agent 智能体 技能 代码执行" },
   { t: "约 30 秒快速上手", p: "首页", u: "index.html#quickstart", s: "克隆仓库、下载经基准验证的 Gemma 4 E4B Q8_0（7.48 GiB），并通过四步可复制命令在原生 GGML CUDA 上运行。", k: "30 秒 begin 开始 教程 第一次 运行 hello gemma e4b q8 cuda" },
   { t: "其他后端与多模态", p: "首页", u: "index.html#quickstart-e4b", s: "在 ggml_metal、ggml_vulkan 或 ggml_cpu 上运行 Gemma 4 E4B，并为图像/视频/音频添加 mmproj 投影器。", k: "gemma4 gemma 4 e4b q8 原生 ggml metal vulkan cpu mmproj 投影器 多模态" },
   { t: "TensorSharp 适合谁", p: "首页", u: "index.html#audience", s: "面向开发者、管理者、CTO、学生与采用本地大模型推理的企业的价值。", k: "audience 受众 商业价值 高管 销售 市场 学生" },
@@ -16,6 +16,14 @@ window.SEARCH_INDEX_ZH = [
   { t: "商业价值", p: "概览", u: "overview.html#business", s: "组织为何运行 TensorSharp：隐私、成本、掌控、私有部署、无按 token 计费。", k: "cost roi 隐私 私有部署 manager cto ceo" },
 
   { t: "功能目录", p: "功能特性", u: "features.html#catalog", s: "多架构、多模态、思考、工具调用、量化、连续批处理、推测解码。", k: "capabilities 能力 列表 全部" },
+
+  { t: "智能体工作流", p: "智能体工作流", u: "agentic.html", s: "TensorSharp.AgentHost 为本地模型、技能、代码与生成产物运行有界的“生成、检查、运行、修复、回答”循环。", k: "agent agentic agenthost workflow 智能体 工作流 自主 编码 工具 当前源码 v3.3.0.0 之后" },
+  { t: "Agent Skills 与渐进式披露", p: "智能体工作流", u: "agentic.html#skills", s: "预先只发送技能名称与描述；支持工具往返的模型通过 skills_read(skill, \"SKILL.md\") 激活说明，再按需读取随包文件。", k: "skills skill.md 元数据 progressive disclosure 渐进式披露 skills_list skills_read 选中 发现 提示词 上下文 2 percent 48 KB" },
+  { t: "五个内置代码工具", p: "智能体工作流", u: "agentic.html#code-tools", s: "--code-exec 默认关闭；开启后提供 read_file、edit_file、write_file、原子 apply_patch 与 shell，并返回有界修复信息。", k: "代码执行 code exec code-exec read_file edit_file write_file apply_patch shell 测试 补丁 精确编辑 修复 语法 诊断" },
+  { t: "智能体工作区与可下载产物", p: "智能体工作流", u: "agentic.html#workspaces", s: "CLI/Web 聊天保留持久工作区；每个 OpenAI/Ollama HTTP 请求在内部轮次间共享隔离工作区并在结束后删除；Web UI 提供生成文件下载。", k: "workspace 工作区 session 会话 request 请求 stateless 无状态 持久 隔离 临时 artifact 产物 文件 下载 标签 code-artifacts runId" },
+  { t: "“沙箱化，否则拒绝”的平台策略", p: "智能体工作流", u: "agentic.html#sandbox", s: "macOS 使用 sandbox-exec；Linux 要求 bwrap 0.12.0+；Windows 代码需要 --code-exec-unconfined，脚本需要 --skills-sandbox preferred。", k: "sandbox 沙箱 security 安全 confinement 隔离 required preferred off seatbelt bubblewrap bwrap windows job object 作业对象 unconfined 非受限 文件系统 主目录 进程树" },
+  { t: "智能体网络与安装控制", p: "智能体工作流", u: "agentic.html#network", s: "模型命令、技能脚本与宿主代执行的软件包安装使用三个彼此独立且默认关闭的授权；命令网络会开放无限制宿主 IP 访问。", k: "code-exec-allow-network skills-allow-network code-exec-allow-install packages 软件包 install 安装 domains 域名 index pip npm 离线 默认拒绝 egress 出站 exfiltration 外泄 lan loopback" },
+  { t: "启动智能体会话", p: "智能体工作流", u: "agentic.html#start", s: "CLI 与 server 的 --skills-dir、--skill、--code-exec 示例；Web UI 位于 /，存活检查位于 /health。", k: "run start 启动 cli server 命令 agent 技能 代码执行 health 健康检查 browser root 根路由" },
 
   { t: "快速开始", p: "快速上手", u: "getting-started.html", s: "环境要求、构建、下载模型，并运行 CLI 或服务器。", k: "install 安装 setup 开始" },
   { t: "安装 .NET 10 SDK", p: "快速上手", u: "getting-started.html#install-dotnet", s: "在 Windows、macOS 或对应 Linux 发行版上安装完整 SDK（不只是运行时），再用 dotnet --list-sdks 验证。", k: "requirements install 安装 setup dotnet 10 sdk runtime 运行时 windows winget macos arm64 x64 linux ubuntu apt 依赖" },
@@ -33,7 +41,7 @@ window.SEARCH_INDEX_ZH = [
   { t: "直接 CUDA 后端", p: "后端", u: "backends.html#cuda", s: "--backend cuda —— 直接 CUDA Driver API + cuBLAS + PTX 内核（纯 C#）。", k: "nvidia ptx cublas 实验" },
   { t: "纯 C# CPU 后端", p: "后端", u: "backends.html#cpu", s: "--backend cpu —— 可移植、无原生依赖；ggml_cpu 提供原生 CPU 内核。", k: "可移植 调试 无 gpu" },
   { t: "构建原生 GGML / MLX 库", p: "后端", u: "backends.html#native-build", s: "build-windows.ps1 / build-linux.sh / build-macos.sh、CUDA 架构检测，以及自动启用的 Vulkan（用 --no-vulkan 退出；Windows 便携 Vulkan 工具链）。", k: "compile 编译 native cmake cuda arch vulkan glslc no-vulkan TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN" },
-  { t: "当前二进制发行状态", p: "后端", u: "backends.html#binaries", s: "最新 v3.0.5.0 只有源码下载，没有上传 CLI/server 应用归档；Release 出现资产前请从源码构建。", k: "release 下载 归档 二进制 预构建 source v3.0.5.0" },
+  { t: "当前二进制发行状态", p: "后端", u: "backends.html#binaries", s: "最新标签 v3.3.0.0 提供 Linux x64 CPU/CUDA、macOS arm64、Windows x64 CPU/CUDA 的预构建 CLI/server 归档；AgentHost 位于更新的当前源码。", k: "release 下载 归档 二进制 预构建 source v3.3.0.0 agenthost 当前源码" },
 
   { t: "支持的模型", p: "模型", u: "models.html#table", s: "DeepSeek V4 Flash、GLM 5.x、Gemma 4、Qwen 3.5 / 3.6 / 3.8 Flash Next、GPT OSS、Nemotron-H、Mistral 3、DiffusionGemma、Muse-Glimmer、Qwen-Image-Edit、MiniMax-H3 视频带音频、Wan 视频。", k: "architectures 架构 家族 deepseek glm glm-dsa glm5 gemma qwen gptoss nemotron mistral 图像 编辑 minimax h3 minimax-h3 minimax_h3 音频 wan 视频" },
   { t: "哪个更快——每个家族最关键的那一项设置", p: "模型", u: "models.html#fast-lane", s: "每个家族中真正决定端到端耗时的那一个检查点、LoRA 或参数。", k: "fast 快 更快 加速 蒸馏 turbo lightning lora draft 推测解码 性能 哪个" },
@@ -76,7 +84,7 @@ window.SEARCH_INDEX_ZH = [
   { t: "MiniMax-H3 的视频参数（CLI）", p: "CLI", u: "cli.html#video", s: "--video-mode、--image、--end-image、--ref-image、--ref-video、--ref-video-audio、--ref-audio、--no-audio、--audio-vae 与 --video-text-encoder；帧数走 17k+5 网格，--cfg 固定 1.0。", k: "cli minimax h3 video-mode ref-image ref-video ref-audio ref-video-audio end-image no-audio audio-vae video-vae video-text-encoder video-te 17k+5 cfg 1.0 wav 独立文件" },
   { t: "视频生成（MiniMax-H3、Wan 2.1 / 2.2）", p: "CLI", u: "cli.html#video", s: "两个视频家族共用一条命令行：MiniMax-H3 输出 MP4 加一个立体声 WAV，Wan 只输出视频，且 Wan 的步数蒸馏检查点按文件名自动识别。", k: "cli 视频 minimax h3 wan turbo 蒸馏 diffusion-steps cfg cfg-cache-stride video-frames fps flow-shift negative-prompt wan-vae wan-te mp4 wav" },
 
-  { t: "启动服务器", p: "服务器", u: "server.html#start", s: "源码 quickstart 必须传 --model；API 位于 localhost:5000，浏览器 UI 位于 /index.html。", k: "dotnet run TensorSharp.Server web 服务器 托管 运行 端口" },
+  { t: "启动服务器", p: "服务器", u: "server.html#start", s: "源码 quickstart 必须传 --model；API 位于 localhost:5000，浏览器 UI 位于 /，纯文本存活检查位于 /health。", k: "dotnet run TensorSharp.Server web 服务器 托管 运行 端口 根路由 health 健康检查 index" },
   { t: "约 30 秒快速开始（Gemma 4 E4B）", p: "服务器", u: "server.html#e4b-fast-lane", s: "克隆、下载 E4B Q8_0，并用 GGML CUDA、Metal、Vulkan 或 ggml_cpu 承载；仅多模态需要 mmproj。", k: "gemma4 e4b 服务器 快速开始 30 秒 原生 ggml 快路径 api" },
   { t: "服务器选项", p: "服务器", u: "server.html#options", s: "--model、--mmproj、--backend、--max-tokens、默认采样、批处理参数。", k: "flags 参数 选项 prefill-chunk-size kv-cache-dtype q4_0 qwen-image-lora lora" },
   { t: "Web UI 功能", p: "服务器", u: "server.html#webui", s: "浏览器聊天：多轮、图像/视频/音频/PDF/文本上传、思考、工具、流式、消息编辑与图像编辑预览。", k: "browser 浏览器 聊天机器人 ui 前端 pdf 图像 编辑" },
@@ -97,7 +105,7 @@ window.SEARCH_INDEX_ZH = [
   { t: "Python 客户端示例", p: "HTTP API", u: "http-api.html#python", s: "requests 与 openai SDK，流式与结构化输出。", k: "python requests openai sdk 客户端" },
 
   { t: "从 C# 使用 TensorSharp", p: "C# 库", u: "code-api.html#quickstart", s: "ModelBase.Create、Tokenizer.Encode、Forward、Sample —— 代码中的解码循环。", k: "library 库 代码 嵌入 nuget dotnet api" },
-  { t: "项目引用 / NuGet 状态", p: "C# 库", u: "code-api.html#packages", s: "当前 Runtime、Models、Backends、Server、CLI 包未发布到 NuGet.org；请从源码引用项目。", k: "nuget 未发布 项目引用 依赖 命名空间" },
+  { t: "项目引用 / NuGet 状态", p: "C# 库", u: "code-api.html#packages", s: "既有 TensorSharp 包已在 NuGet.org 发布到 3.1.2，但落后于当前源码 / Release；AgentHost 与 Distributed 仍仅能从源码引用。", k: "nuget 3.1.2 项目引用 依赖 命名空间 agenthost distributed 源码" },
   { t: "从 C# 使用 DiffusionGemma", p: "C# 库", u: "code-api.html#diffusion", s: "DiffusionGemmaModel + DiffusionGemmaSampler.Generate，配 DiffusionEbParams；Forward() 不支持。", k: "diffusion 扩散 文本 去噪 采样器 entropybound csharp 代码" },
   { t: "从 C# 使用 Qwen-Image-Edit", p: "C# 库", u: "code-api.html#imageedit", s: "QwenImageModel.EditImage(prompt, RgbImage, QwenImageParams)；ImageIO 加载/保存 PNG。", k: "图像 编辑 qwen editimage rgbimage imageio 扩散 csharp 代码" },
   { t: "SamplingConfig", p: "C# 库", u: "code-api.html#sampling", s: "Temperature、TopK、TopP、MinP、惩罚、Seed、StopSequences、MaxTokens。", k: "采样 配置 类 属性" },

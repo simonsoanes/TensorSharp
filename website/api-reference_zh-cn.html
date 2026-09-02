@@ -55,6 +55,16 @@
       <tr><td><code>--system &lt;text&gt;</code> / <code>--system-file &lt;path&gt;</code></td><td>设定系统提示。</td></tr>
       <tr><td><code>--think</code></td><td>启用思考 / 推理模式。</td></tr>
       <tr><td><code>--tools &lt;path&gt;</code></td><td>含工具 / 函数定义的 JSON 文件。</td></tr>
+      <tr><td><code>--skills-dir &lt;path&gt;</code> · <code>--skill &lt;name&gt;</code> · <code>--list-skills</code> · <code>--no-skills</code> · <code>--skills-no-discovery</code></td><td>发现、选择、列出或禁用 Agent Skills，并可限制发现。对支持工具的模型，已选择技能也先只披露元数据，正文按需读取。环境变量 <code>TS_SKILLS_DIR</code> / <code>TS_NO_SKILLS</code>。</td></tr>
+      <tr><td><code>--skills-allow-exec</code> · <code>--skills-sandbox &lt;off|preferred|required&gt;</code> · <code>--skills-allow-network</code></td><td>启用 <code>skills_run</code> 并选择脚本隔离/联网策略。执行和网络默认关闭，沙箱默认 <code>required</code>。macOS 使用 Seatbelt，Linux 需要 bubblewrap 0.12+，Windows 作业对象无法限制文件/网络。</td></tr>
+      <tr><td><code>--skills-max-rounds &lt;1..64&gt;</code></td><td>内部模型/工具轮次上限：默认 8；提供代码执行时为 24；显式取值不变。</td></tr>
+      <tr><td><code>--code-exec</code></td><td>启用服务端拥有的五个智能体工具：<code>read_file</code>、<code>edit_file</code>、<code>write_file</code>、<code>shell</code>、<code>apply_patch</code>。默认关闭；环境变量 <code>TS_CODE_EXEC</code>。</td></tr>
+      <tr><td><code>--code-exec-allow-install</code> · <code>--code-exec-packages &lt;list&gt;</code></td><td>允许宿主代为安装 pip/npm 包，并可限制包名；不会授予生成命令网络访问权。</td></tr>
+      <tr><td><code>--code-exec-install-domains &lt;list&gt;</code> · <code>--code-exec-install-index &lt;url&gt;</code></td><td>安装器主机白名单（默认 <code>pypi.org,files.pythonhosted.org,registry.npmjs.org</code>）与运维方指定的索引。</td></tr>
+      <tr><td><code>--code-exec-allow-network</code></td><td>允许生成命令不受限地使用宿主 IP 网络，包括局域网/回环与监听套接字。默认关闭，且独立于安装和技能联网开关。</td></tr>
+      <tr><td><code>--code-exec-timeout &lt;seconds&gt;</code> · <code>--code-exec-max-output &lt;bytes&gt;</code> · <code>--code-exec-shell &lt;path|name&gt;</code> · <code>--code-exec-temperature &lt;0..2&gt;</code></td><td>命令时限（默认 120 秒）、保留输出上限（32768 字节，中间截断）、shell 覆盖与可选的代码轮温度覆盖（仅替换仍为默认值的请求温度）。只要代码工具可运行，代码轮就始终关闭内置的 <code>1.1</code> 重复惩罚。</td></tr>
+      <tr><td><code>--code-exec-unconfined</code></td><td>在操作系统隔离不足时仍运行。Windows 必须使用；不适合不受信任的宿主用户。</td></tr>
+      <tr><td><code>--code-exec-languages</code></td><td><strong>已移除，启动时会拒绝；没有替代参数。</strong>shell 可访问每次调用时重建的 <code>PATH</code> 上所有解释器，因此宿主改为报告已安装解释器，而不再假装提供语言白名单。</td></tr>
       <tr><td><code>--spec</code> / <code>--no-spec</code></td><td>启用 / 禁用推测解码：草稿器提出接下来的几个 token，主干在一次批量前向中完成校验。每个吐出的 token 仍取自主干的一行、并使用本次运行自己的采样器，因此这只是一条加速路径。必须在<em>模型加载之前</em>传入 —— 正是它告诉 glm-dsa 把约 3 GiB 的 NextN 层调入显存，同时也就挤掉了一部分上下文空间。在草稿块借用主干 LM head 的检查点上（包括 GLM-5.2）不支持 <code>--tp N&gt;1</code>。对内嵌在主干检查点里的草稿器（GLM-5.2、Qwen 3.6 NextN），这是显式的开启开关；用 <code>--draft-model</code> 指定的草稿器无需它即可生效。默认关闭。环境变量 <code>TS_SPEC</code>（或 <code>TS_MTP_SPEC</code>；glm-dsa 还认 <code>TS_GLM_MTP=1/0</code>，其优先级高于前两者）。</td></tr>
       <tr><td><code>--spec-type &lt;name&gt;</code></td><td>用哪种推测<em>算法</em>起草：<code>auto</code>（默认）使用检查点自带的草稿器，<code>draft-head</code> 固定为逐 token 的 NextN/MTP 头，<code>block</code> 固定为块级草稿器，<code>ngram</code> 完全不需要训练好的权重 —— 它在上下文里查找最近几个 token 此前出现的位置，把当时的后续内容作为草稿，因此对每个检查点都有效，在答案会引用提示词的场景（摘要、编辑、翻译、重复性结构化输出、agent 循环）中最强。环境变量 <code>TS_SPEC_TYPE</code>。</td></tr>
       <tr><td><code>--spec-draft &lt;N&gt;</code></td><td>每个推测步最多起草的 token 数（范围 1–64，默认 8；块级草稿器默认取自己训练时的块大小并把取值压到该块大小，DSpark 为 5）。它同时决定加载时原生图缓存的大小，因此要和 <code>--spec</code> 写在<em>同一条</em>命令行上。环境变量 <code>TS_SPEC_DRAFT</code>。</td></tr>
@@ -116,6 +126,11 @@
       <tr><td><code>--draft-model &lt;path&gt;</code></td><td>所有以独立文件发布的草稿器共用的 GGUF 参数（DeepSeek V4 的 DSpark、Muse-Glimmer 的 DFlash、Gemma 4 <code>gemma4-assistant</code>）。由文件自身的 <code>general.architecture</code> 决定加载方式；写出文件名<em>本身</em>就是请求，因此不需要 <code>--spec</code>（显式的 <code>--no-spec</code> 可将其否决）。Qwen 3.6 与 GLM-5.2 把 NextN 块嵌在主干里，不需要该参数；DSpark 在 <code>cuda</code> / <code>ggml_cuda</code> 上对单序列请求生效。环境变量 <code>TS_DSV4_DSPARK</code>。</td></tr>
       <tr><td><code>--prefill-chunk-size &lt;N&gt;</code></td><td>每个调度步的最大 prefill token 数（设置 <code>TS_SCHED_PREFILL_CHUNK</code>）。</td></tr>
       <tr><td><code>--kv-cache-dtype &lt;type&gt;</code></td><td>KV 缓存精度：<code>f32</code>、<code>f16</code>、<code>q8_0</code>、<code>q4_0</code>（默认按后端/模型自动选择；环境变量 <code>KV_CACHE_DTYPE</code>）。</td></tr>
+      <tr><td><code>--skills-dir</code> · <code>--skill</code> · <code>--list-skills</code> · <code>--no-skills</code> · <code>--skills-no-discovery</code></td><td>服务端 Agent Skills 注册表、启动时选择和发现策略；语义与 CLI 相同。</td></tr>
+      <tr><td><code>--skills-allow-exec</code> · <code>--skills-sandbox</code> · <code>--skills-allow-network</code> · <code>--skills-max-rounds</code></td><td>脚本选择加入、隔离/联网策略与 1–64 轮上限。默认：执行/网络关闭，沙箱 <code>required</code>，轮数 8；启用代码执行时为 24。</td></tr>
+      <tr><td><code>--code-exec</code> · <code>--code-exec-allow-install</code> · <code>--code-exec-allow-network</code> · <code>--code-exec-unconfined</code></td><td>启用内置代码工具及独立的安装、联网、无隔离权限。它们都是运维方的启动决策；没有逐命令审批端点。</td></tr>
+      <tr><td><code>--code-exec-packages</code> · <code>--code-exec-install-domains</code> · <code>--code-exec-install-index</code> · <code>--code-exec-timeout</code> · <code>--code-exec-max-output</code> · <code>--code-exec-shell</code> · <code>--code-exec-temperature</code></td><td>包/安装源策略、命令限制、shell 与可选的代码轮温度。只要代码工具可运行，代码轮就会独立于温度参数关闭内置的 <code>1.1</code> 重复惩罚。参见<a href="agentic_zh-cn.html">智能体工作</a>。</td></tr>
+      <tr><td><code>--code-exec-languages</code></td><td><strong>已移除，启动时会拒绝；没有替代参数。</strong>shell 可访问每次调用时重建的 <code>PATH</code> 上所有解释器。</td></tr>
       <tr><td><code>--qwen-image-vae / --qwen-image-vl / --qwen-image-mmproj &lt;path&gt;</code></td><td>覆盖解析到的 Qwen-Image-Edit 伴随 GGUF。</td></tr>
       <tr><td><code>--qwen-image-lora &lt;path&gt;</code></td><td>Qwen-Image-Edit Lightning LoRA，以运行期旁路形式挂在原封不动的量化权重旁边（<strong>不</strong>合并）；去噪步数更少，CFG 1.0。</td></tr>
       <tr><td><code>--video-width &lt;px&gt;</code> / <code>--video-height &lt;px&gt;</code></td><td>请求未给出 <code>width</code>/<code>height</code> 时的默认输出尺寸 —— 最主要的质量杠杆，而且是<em>启动</em>参数，因为浏览器自己不会发送任何尺寸。别名 <code>--width</code> / <code>--height</code>；会向上对齐到模型的网格（MiniMax-H3 为 32 的倍数）。MiniMax-H3 推荐从 640×384 起步；只给出其中一个时，H3 会按条件图像的宽高比推出另一个。</td></tr>
@@ -141,6 +156,8 @@
       <tr><td><code>TENSORSHARP_REPEAT_PENALTY / _PRESENCE_PENALTY / _FREQUENCY_PENALTY / _SEED</code></td><td>默认惩罚与随机种子。</td></tr>
       <tr><td><code>TENSORSHARP_SAMPLING_PRECEDENCE</code></td><td><code>config</code>（默认）或 <code>request</code>：上述取值是否优先于客户端发来的同名参数（= <code>--sampling-precedence</code>）。</td></tr>
       <tr><td><code>TENSORSHARP_LOG_LEVEL / _LOG_DIR / _LOG_FILE</code></td><td>日志级别、目录、文件开关（CLI + 服务器）。</td></tr>
+      <tr><td><code>TS_SKILLS_DIR / TS_NO_SKILLS / TS_SKILLS_ALLOW_EXEC / TS_SKILLS_MAX_ROUNDS / TS_SKILLS_SANDBOX / TS_SKILLS_ALLOW_NETWORK</code></td><td>Agent Skills 根目录、禁用开关、脚本选择加入、轮次上限、沙箱模式和脚本联网选择加入。</td></tr>
+      <tr><td><code>TS_CODE_EXEC / TS_CODE_EXEC_ALLOW_INSTALL / TS_CODE_EXEC_ALLOW_NETWORK / TS_CODE_EXEC_INSTALL_DOMAINS / TS_CODE_EXEC_INSTALL_INDEX</code></td><td>代码工具选择加入、独立的安装/联网授权和宿主安装器来源策略。</td></tr>
       <tr><td><code>DIFFUSION_STEPS / DIFFUSION_MAX_BATCH</code></td><td>DiffusionGemma 每块步数 / 最大批处理请求数。</td></tr>
       <tr><td><code>KV_CACHE_DTYPE</code></td><td>CLI + 服务端 KV 缓存精度：<code>f32</code>、<code>f16</code>、<code>q8_0</code>、<code>q4_0</code>；默认自动（= <code>--kv-cache-dtype</code>）。</td></tr>
       <tr><td><code>TS_SCHED_DISABLE_BATCHED</code></td><td><code>1</code> 强制逐序列 KV 交换（= <code>--no-continuous-batching</code>）。</td></tr>
@@ -197,17 +214,22 @@
   <table class="ref-table">
     <thead><tr><th>方法与路径</th><th>风格</th><th>用途</th></tr></thead>
     <tbody>
-      <tr><td><code>GET /</code></td><td>工具</td><td>纯存活响应。</td></tr>
-      <tr><td><code>GET /index.html</code></td><td>Web UI</td><td>浏览器聊天应用。</td></tr>
+      <tr><td><code>GET /</code> · <code>GET /index.html</code></td><td>Web UI</td><td>存在 <code>wwwroot</code> 时提供浏览器聊天应用；仅在无 UI 部署中，裸 <code>/</code> 才回退为存活响应。</td></tr>
+      <tr><td><code>GET /health</code></td><td>工具</td><td>稳定的纯文本存活响应。</td></tr>
       <tr><td><code>POST /api/generate</code></td><td>Ollama</td><td>单提示补全（流式或非流式）。</td></tr>
       <tr><td><code>POST /api/chat/ollama</code></td><td>Ollama</td><td>多轮对话，可选 think / tools / images。</td></tr>
       <tr><td><code>GET /api/tags</code></td><td>Ollama</td><td>列出托管模型。</td></tr>
       <tr><td><code>POST /api/show</code></td><td>Ollama</td><td>模型信息。</td></tr>
       <tr><td><code>POST /v1/chat/completions</code></td><td>OpenAI</td><td>Chat Completions（流式、工具、response_format）。</td></tr>
+      <tr><td><code>POST /v1/responses</code> · <code>GET /v1/responses/{id}</code></td><td>OpenAI</td><td>Responses API 生成与已存储响应查询。</td></tr>
       <tr><td><code>GET /v1/models</code></td><td>OpenAI</td><td>列出模型。</td></tr>
       <tr><td><code>POST /api/chat</code></td><td>Web UI</td><td>带会话 + KV 复用字段的 SSE 聊天流。</td></tr>
       <tr><td><code>POST /api/sessions</code> · <code>DELETE /api/sessions/{id}</code></td><td>Web UI</td><td>创建 / 销毁每标签页会话。</td></tr>
       <tr><td><code>POST /api/upload</code></td><td>Web UI</td><td>上传图像 / 音频 / 视频 / PDF / 文本文件。</td></tr>
+      <tr><td><code>GET /v1/skills/{name?}</code></td><td>OpenAI</td><td>列出已注册技能，或读取一个包含说明正文的技能描述。</td></tr>
+      <tr><td><code>GET /api/skills</code> · <code>GET /api/skills/{name}</code> · <code>GET /api/skills/{name}/files/{*path}</code></td><td>Web UI</td><td>列出/读取技能并安全获取技能所带文件。</td></tr>
+      <tr><td><code>POST /api/skills</code> · <code>POST /api/skills/rescan</code> · <code>DELETE /api/skills/{name}</code></td><td>Web UI</td><td>安装技能 ZIP、重新扫描根目录或删除已安装技能。</td></tr>
+      <tr><td><code>GET /api/code/artifacts/{runId}</code> · <code>GET /api/code/artifacts/{runId}/{*path}</code></td><td>Web UI</td><td>列出一次代码运行保留的文件，或强制以附件下载一个文件。</td></tr>
       <tr><td><code>POST /api/image-edit</code></td><td>Web UI</td><td>Qwen-Image-Edit 单次编辑（multipart 或 JSON）。</td></tr>
       <tr><td><code>POST /api/image-edit/stream</code></td><td>Web UI</td><td>带实时去噪预览的 SSE 图像编辑。</td></tr>
       <tr><td><code>POST /api/video-generate</code></td><td>Web UI</td><td>用托管模型生成视频（MiniMax-H3、Wan）。JSON <code>{ prompt, width, height, frames, steps, cfg, fps, imagePath, videoMode, generateAudio, endImage, referenceImages, referenceVideos, referenceAudios, referenceVideoAudios }</code> —— <code>videoMode</code>、<code>generateAudio</code>、<code>endImage</code> 与四个 <code>reference*</code> 列表同时接受 snake_case 拼写（两者同时出现时以 camelCase 为准）；其余字段只接受 camelCase，写成 <code>image_path</code> 之类会被静默忽略。<code>referenceVideoAudios</code> 按下标与 <code>referenceVideos</code> 配对，所有文件字段都必须指向此前通过 <code>/api/upload</code> 上传的文件。返回 MP4 的 URL 以及 <code>audioUrl</code>（模型没有产生音轨时为 null）。模型层面的拒绝（检查点不对、关键帧与参考同时给出）会以 400 返回，并<em>原样带上模型自己的报错信息</em>。</td></tr>

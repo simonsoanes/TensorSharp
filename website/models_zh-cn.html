@@ -37,7 +37,7 @@
       <tr><td><strong>GLM 5.x</strong></td><td><code>glm-dsa</code>、<code>glm5next</code></td><td>GLM-5.2（744B-A40B MoE，256 专家，MLA + DeepSeek 稀疏注意力，1M 上下文）；GLM-5.3-Flash（320B，288 个路由专家，45 个主干层里 34 层 KDA 线性注意力，另外 11 层是 NoPE MLA/DSA 配池化索引器）</td><td>5.3-Flash 支持图像（5.2 仅文本）</td><td class="yes">是</td><td class="yes">是（XML 工具调用）</td><td class="no">—</td></tr>
       <tr><td><strong>Gemma 4</strong></td><td><code>gemma4</code></td><td>gemma-4-E4B、12B、31B、26B-A4B (MoE)</td><td>图像、视频、音频</td><td class="yes">是</td><td class="yes">是</td><td class="yes">是（独立草稿）</td></tr>
       <tr><td><strong>Qwen 3.5 / 3.6</strong></td><td><code>qwen35</code>、<code>qwen35moe</code>、<code>qwen3next</code></td><td>Qwen3.5-9B、Qwen3.5/3.6-35B-A3B (MoE)</td><td>图像</td><td class="yes">是</td><td class="yes">是</td><td class="yes">3.6 支持（内嵌 NextN——仅限保留 NextN 块的 GGUF，例如 <code>-MTP-</code> 仓库）</td></tr>
-      <tr><td><strong>Qwen 3.8 Flash Next</strong></td><td><code>qwen4exp</code></td><td>Qwen3.8-Flash-Next（混合 MoE：GatedDeltaNet 递归层与全注意力层交错，其中一部分挂在 Qwen 稀疏注意力的索引器之后；PLE n-gram 嵌入块；×4 超连接流；512 专家、每 token 用 10 个）</td><td>图像</td><td class="yes">是</td><td class="yes">是</td><td class="no">—</td></tr>
+      <tr><td><strong>Qwen 3.8 Flash Next</strong></td><td><code>qwen4exp</code></td><td>Qwen3.8-Flash-Next（混合 MoE：GatedDeltaNet 递归层与全注意力层交错，其中一部分挂在 Qwen 稀疏注意力的索引器之后；PLE n-gram 嵌入块；×4 超连接流；512 专家、每 token 用 10 个）</td><td>图像</td><td class="yes">是</td><td class="no">否——暂没有结构化输出解析器</td><td class="no">—</td></tr>
       <tr><td><strong>GPT OSS</strong></td><td><code>gptoss</code>、<code>gpt-oss</code></td><td>gpt-oss-20b (MoE)</td><td>仅文本</td><td class="yes">是（始终）</td><td class="yes">是</td><td class="no">—</td></tr>
       <tr><td><strong>Nemotron-H</strong></td><td><code>nemotron_h</code>、<code>nemotron_h_moe</code></td><td>Nemotron-H-8B、47B、Nemotron 3 Nano Omni</td><td>图像（Omni）</td><td class="yes">是</td><td class="yes">是</td><td class="no">—</td></tr>
       <tr><td><strong>Mistral 3</strong></td><td><code>mistral3</code></td><td>Mistral-Small-3.1-24B-Instruct</td><td>图像</td><td class="no">否</td><td class="no">否</td><td class="no">—</td></tr>
@@ -71,6 +71,7 @@
     </tbody>
   </table>
   </div>
+  <p class="page-foot-note">工具支持同时要求提示词渲染器与匹配的结构化输出解析器。TensorSharp 目前对 <code>qwen4exp</code> 使用透传解析器，因此不会向 Qwen 3.8 Flash Next 提供调用者定义的工具、Agent Skills 渐进披露工具或代码执行工具；被选中技能的说明会以内联方式回退。</p>
   <p class="page-foot-note">MiniMax-H3、Wan、Qwen-Image-Edit 与 DiffusionGemma 构造时不接受张量并行度，因此 <code>--tp</code> 对它们无效。在视频家族里，Wan 还是唯一会直接拒绝某个后端的：不支持 <code>mlx</code>。MiniMax-H3 —— 生成类家族里最后一个还没有纯托管 CPU 路径的 —— 现在也能完整跑在 <code>--backend cpu</code> 上，即 100% 纯 C#、零原生依赖的那条路径：文生视频、图生视频、首尾帧，以及参考图像、参考片段与参考音轨。它与原生 <code>ggml_cpu</code> 路径的速度是互有快慢，而不是一律更慢。在 Qwen 3.8 Flash Next 上，<code>--tp N</code> 的含义又不一样——它跑的是<strong>按层切分</strong>，每张 GPU 持有一段连续的完整层、不切分任何权重，因此是容量特性而非速度特性：2× A100-80GB、UD-Q2_K_XL（73.4 GiB）下，贪心输出与单卡逐字节相同，显存变成 24.2 + 26.2 GB，prefill（约 1520–1550 t/s）与 decode（约 56 t/s）都没有变化。GLM-5.3-Flash 不传 <code>--tp</code> 时使用按层切分；在 GGML GPU 后端上，<code>--tp N</code> 会选择仅支持本地单进程的原生张量并行。既不支持张量并行、也不支持按层切分的架构，现在会在 stderr 上直说，并只用一张 GPU 运行，而不是让其余的卡白白闲着。</p>
 
   <div class="content-footer">

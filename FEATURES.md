@@ -430,7 +430,7 @@ The output parser (`OutputParser.cs`) automatically extracts tool calls from the
 
 A skill is a folder holding a `SKILL.md` — YAML frontmatter plus Markdown instructions written for the model — together with the scripts, reference documents and assets those instructions refer to. TensorSharp scans one or more skill directories (`--skills-dir`, or a `skills` folder next to the binary), advertises each skill's one-line description to the model, and loads the rest **only when the model asks for it**.
 
-That on-demand part is served by two built-in tools that TensorSharp executes itself, in process:
+That on-demand part is served by built-in tools that TensorSharp executes itself, in process:
 
 - `skills_list()` — every skill reachable in this conversation, with its description and its bundled file paths
 - `skills_read(skill, path, offset)` — one page of one file; `path="SKILL.md"` is the skill's own instructions
@@ -438,15 +438,17 @@ That on-demand part is served by two built-in tools that TensorSharp executes it
 
 Answering those calls inside the engine is what makes the feature work for clients that know nothing about skills: an ordinary OpenAI client sends `"skills": ["pdf"]` and gets back a finished completion, never a tool call it has no implementation for. The caller's *own* tools are never executed — they are returned to the caller as usual.
 
-**Progressive disclosure.** Metadata (name + description) is always visible. The `SKILL.md` body of an explicitly selected skill is written into the prompt when it fits the budget (derived from the context length: a quarter of it, clamped to 1024–48000 approximate tokens), and a selected skill that does not fit is *deferred* — announced by name, description and size, with an instruction to read it. Bundled files are never inlined; only their paths and sizes are listed, and contents come from `skills_read` in 48 KB pages.
+**Progressive disclosure.** On families that can render tool declarations and parse tool output, the prompt contains metadata only — name and description — even for explicitly selected skills. Selection scopes reach and preference; the model activates a skill by calling `skills_read(skill, "SKILL.md")`, at which point the file index is returned too. The metadata budget is about 2% of context, clamped to approximately 1,024–10,000 tokens. Bundled files are never inlined; contents come from `skills_read` in 48 KB pages. The older body budget (one quarter of context, clamped to approximately 1,024–48,000 tokens) is used only by the fallback for a family that cannot complete a tool round trip.
 
 **Prompt shape.** The block is merged into the leading `system`/`developer` message rather than appended as a second one, which is the only injection point every chat template in the repository handles. Its bytes are a pure function of the sorted skill selection — no timestamps, paths or counters — so a conversation re-hashes identically turn to turn and the KV prefix cache keeps matching from block 0.
 
 **Confinement.** Every path the model names is resolved through `SkillPathGuard`, which closes lexical (`..`, absolute, `~`, UNC, drive-qualified), canonical and **symlink** escapes, and confines each skill to its own directory. ZIP installs run every entry through the same guard (zip-slip), enforce size on the decompressed stream, and cap per-entry (64 MB), per-archive (256 MB), entry-count (4096) and compression ratio (200×).
 
-**Script sandbox.** When script execution is enabled, the child runs under `sandbox-exec` on macOS and `bwrap` on Linux — network denied by default, the user's home directory unreadable, writes confined to a per-run scratch directory — plus, on every platform, an interpreter allow-list, no shell, a scrubbed environment that withholds host credentials, a time limit and an output cap. `--skills-allow-network` is the separate opt-in for these bundled scripts; it neither enables nor is enabled by `--code-exec-allow-network`. Windows bounds the process tree through a job object but cannot confine the filesystem or network, and says so: every result names what was *not* enforced. `--skills-sandbox required` (the default) refuses to run scripts on a host that cannot confine them, rather than running them unconfined.
+**Script sandbox.** When script execution is enabled, the child runs under `sandbox-exec` on macOS and `bwrap` 0.12.0+ on Linux — network denied by default, the user's home directory unreadable, writes confined to the working directory — plus, on every platform, an interpreter allow-list, no shell, a scrubbed environment that withholds host credentials, a time limit and an output cap. That directory is the shared request/chat workspace with `--code-exec`, otherwise per-call scratch; the skill itself stays read-only. `--skills-allow-network` is the separate opt-in for these bundled scripts; it neither enables nor is enabled by `--code-exec-allow-network`. Windows bounds the process tree through a job object but cannot confine the filesystem or network, and says so: every result names what was *not* enforced. `--skills-sandbox required` (the default) refuses to run scripts on a host that cannot confine them; Windows therefore needs an explicit `--skills-sandbox preferred` opt-in for its weaker isolation.
 
-**Model families.** Mistral 3's chat format carries no tool declarations, so selected skill bodies are written into the prompt up front and `skills_read` is not offered; it also drops `role: "tool"` messages, so results are fed back as a user turn.
+**Model families.** Mistral 3 carries no tool declarations, while `qwen4exp` and unknown families have no parser for a structured tool round trip. TensorSharp therefore withholds skill/code tools, inlines selected skill bodies, and drops the discovery catalog for these families. Mistral 3 also drops `role: "tool"` messages, so any loop result is fed back as a user turn. Tool support requires both a declaration renderer and an output parser; model reasoning support alone is not enough.
+
+**Structured output.** A request using JSON mode or a JSON schema suppresses the built-in tool loop and inlines selected skill instructions so that schema-constrained output is not interrupted by an internal tool call.
 
 Selecting skills:
 
@@ -455,14 +457,14 @@ Selecting skills:
 dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
     --backend ggml_metal --skills-dir ~/skills --skill pdf --input prompt.txt
 
-# Any chat API — /v1/chat/completions, /v1/responses, /api/chat (Ollama), /api/chat (Web UI)
+# Any chat API — /v1/chat/completions, /v1/responses, /api/chat/ollama (Ollama), /api/chat (Web UI)
 curl -X POST http://localhost:5000/v1/chat/completions -H "Content-Type: application/json" \
   -d '{"model": "gemma-4-E4B-it-Q8_0.gguf",
        "messages": [{"role": "user", "content": "Pull the totals table out of this statement."}],
        "skills": ["pdf"], "skills_discovery": false}'
 ```
 
-The server also exposes the registry itself — `GET /v1/skills`, `GET /api/skills`, `POST /api/skills` (upload a `.zip`), `DELETE /api/skills/{name}` — and `/api/models` reports a `skills` block (`enabled`, `installable`, `count`) so a UI knows whether to offer the control.
+The server also exposes the registry itself — `GET /v1/skills`, `GET /api/skills`, `POST /api/skills` (upload a `.zip`), `DELETE /api/skills/{name}` — and `/api/models` reports a `skills` block (`enabled`, `installable`, `allowScripts`, `count`) so a UI knows whether to offer the control and whether script execution is available.
 
 Full reference, including the frontmatter fields, the budget, the security model and the C# `SkillsChatClient` API: [Agent Skills in TensorSharp](docs/agent_skills.md). Open-source skills to start from: <https://github.com/anthropics/skills>.
 

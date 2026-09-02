@@ -9,7 +9,7 @@
 - **思维链 / 推理模式** —— 通过 `<think>` / `<|channel>thought` / `<|channel>analysis` 标签输出结构化的思维链推理（Qwen 3.5/3.6-family、Qwen 3.8 Flash Next、Gemma 4、GPT OSS、Nemotron-H、Muse-Glimmer、DeepSeek V4、GLM 5.x）
 - **工具调用 / 函数调用** —— 模型可调用用户定义的工具；所有三种 API 风格均支持多轮工具调用对话
 - **Agent Skills（智能体技能）** —— 面向模型的说明文件夹（`SKILL.md` + 脚本 / 参考文档 / 素材），只在任务需要时才加载。每次请求用 `"skills": ["pdf"]`（所有聊天 API）或 CLI 的 `--skill` 选中；其余内容由模型通过内置的 `skills_list` / `skills_read` 工具自取，而这些工具由 TensorSharp 在进程内应答，因此普通 OpenAI 客户端拿到的仍然只是一条写完的回复。→ [Agent Skills（智能体技能）](#agent-skills智能体技能)
-- **代码执行** —— 打开 `--code-exec` 后，模型在一个沙箱化的工作区里驱动真正的 shell：敲一行命令，读回退出码和命令打印的全部内容。该工作区在整个聊天会话期间持续存在，并与技能脚本共享，因此 `cd`、导出的环境变量、装好的包以及先前写下的文件，到下一次调用时都还在；和文件相关的活儿不再走 shell，而是有一套专门的工具：`read_file` 带行号显示文件的真实内容，`edit_file` 在一个文件里替换一段确切的文本，`write_file` 新建文件，`apply_patch` 则一次性、全有或全无地改动多个文件。这正是两个参照实现的形态——常见情形用 Claude Code 的 `Read`/`Edit`/`Write`，需要跨文件原子改动时用 Codex 的 `apply_patch` 信封。之所以这么做，是因为 heredoc 会把*整个*文件重新吐一遍：改一行要付出所有本来就正确的行的代价，并把它们全部重新采样一次。字节由宿主机写入，依据的文本要么精确找到、要么直接拒绝去猜。默认关闭，且需要真正的操作系统沙箱（macOS 用 `sandbox-exec`、Linux 用 `bwrap` 0.12.0+）——宿主机若无法约束进程，该工具就拒绝运行，而不是不加约束地跑起来。模型生成的命令默认也不能访问互联网/IP 网络；显式传入 `--code-exec-allow-network` 或设置 `TS_CODE_EXEC_ALLOW_NETWORK` 后可获得不受限的宿主 IP 网络访问，但 macOS / Linux 上的写入及主目录读取约束仍保持生效。Linux 还通过 PID 命名空间约束后代进程；macOS 子进程会继承 Seatbelt，普通进程组也会被清理，但主动脱离进程组的子进程可能在请求结束后继续运行，每次工具结果都会明确报告这一限制。该权限也包含局域网/回环服务与 IP 监听套接字，并可能暴露生成代码可读取的宿主数据。macOS 仍拒绝常见的 `/private/tmp/com.apple.launchd*` 路径套接字（但保留系统运行时所需的 Mach lookup 与 DNS 必需的精确 mDNSResponder 路径套接字），Linux 仍隐藏常见的 `/run` 端点，但本地 Unix IPC 并非完整隔离边界：macOS 为兼容性保留共享临时目录内的 Unix IPC，Linux 的宿主网络命名空间可能暴露抽象套接字以及 `/run` 之外的路径名套接字。它与 `--skills-allow-network` 相互独立；宿主安装器的包名/域名允许列表无法约束此不受限模式下的直接下载；Windows 仍须显式传入 `--code-exec-unconfined`。
+- **代码执行** —— `--code-exec` 提供 `read_file`、`edit_file`、`write_file`、`shell` 与原子 `apply_patch`：读取有界源码、做最小精确修改、运行测试，再根据带源码片段的诊断修复并验证。Web UI / CLI 为整个聊天保留工作区；每个 OpenAI / Ollama HTTP 请求只在自己的内部工具轮次间保留私有工作区，响应后删除。开启代码执行时技能脚本共享该工作区，否则使用逐次临时目录。功能默认关闭，并在 macOS（Seatbelt）与 Linux（`bwrap` 0.12.0+）上实行“沙箱或拒绝”；Windows 必须显式传入会放开文件与网络约束的 `--code-exec-unconfined`。模型命令默认不能访问 IP 网络；`--code-exec-allow-network` 会授予不受限的宿主 IP 网络访问，且与 `--skills-allow-network`、宿主代办装包三个权限彼此独立。→ [完整安全与工作区说明](docs/agent_skills.md)
 - **量化模型支持** —— 加载 Q4_K_M、Q8_0、F16、MXFP4 等量化格式的 GGUF 文件；执行原生量化矩阵乘法（matmul），无需反量化到 FP32，并且纯 C# CPU 后端在加载大型 GGUF 时也会保持量化权重压缩状态
 - **GPU 加速** —— 通过 GGML 支持 Apple Metal（macOS）、GGML CUDA（Windows/Linux + NVIDIA）和 GGML Vulkan（Windows/Linux + AMD/Intel/NVIDIA），并提供 Direct CUDA/cuBLAS 后端（含 PTX 内核与未覆盖算子的 CPU 回退），以及面向 Apple Silicon 的 MLX 后端（mlx-c / Metal）
 - **优化后的纯 C# CPU 后端** —— 为 GEMM、RMSNorm、RoPE、softmax、融合激活等推理热点路径提供托管快速路径和 SIMD 内核；托管矩阵乘法现在跑在一个常驻的“先自旋后挂起”工作线程池上，而不是每次矩阵乘都开一次 `Parallel.For`——在 122 核主机上 prefill 约 +15%、decode 约 2.8×。→ [纯 C# CPU 后端](#纯-c-cpu-后端)
@@ -349,7 +349,7 @@ Responses API 存储（`TS_RESPONSES_STORE_REDIS_URL`）用于持久化响应。
 
 一个技能就是一个目录，里面放着 `SKILL.md`（YAML frontmatter + 写给模型看的 Markdown 说明），以及这些说明会用到的脚本、参考文档和素材。TensorSharp 扫描一个或多个技能目录（`--skills-dir`，或二进制文件旁边的 `skills` 目录），把每个技能的一行描述展示给模型，其余内容**只在模型主动索取时才加载**。
 
-按需加载由两个内置工具承担，它们由 TensorSharp 在进程内自己执行：
+按需加载由内置工具承担，它们由 TensorSharp 在进程内自己执行：
 
 - `skills_list()` —— 列出本次对话可达的全部技能，含描述与随包文件路径
 - `skills_read(skill, path, offset)` —— 读取某个技能中某个文件的一页；`path="SKILL.md"` 即该技能自身的说明
@@ -357,15 +357,17 @@ Responses API 存储（`TS_RESPONSES_STORE_REDIS_URL`）用于持久化响应。
 
 在引擎内部应答这些调用，正是这个功能对“完全不了解技能”的客户端也成立的原因：普通的 OpenAI 客户端只要发 `"skills": ["pdf"]`，收到的就是一条已经写完的回复，而不是一个它根本无法执行的工具调用。调用方**自己的**工具则从不会被执行——它们照常回传给调用方。
 
-**渐进式披露。** 元数据（名称 + 描述）始终可见。被显式选中的技能，其 `SKILL.md` 正文在预算允许时会写进提示词（预算由上下文长度推出：取四分之一，并夹在约 1024–48000 token 之间）；放不下的选中技能则被**推迟**——仍以名称、描述和大小公布，并附上“先读它”的指示。随包文件永远不会内联，提示词里只列路径与大小，内容由 `skills_read` 按 48 KB 分页取回。
+**渐进式披露。** 对既能渲染工具声明、又能解析工具输出的家族，即使显式选中了技能，提示词也只放名称与描述。选择只限定可达范围与偏好；模型通过 `skills_read(skill, "SKILL.md")` 激活技能，并同时得到文件索引。元数据预算约为上下文的 2%，夹在约 1,024–10,000 token 之间。随包文件永远不会内联，内容由 `skills_read` 按 48 KB 分页取回。旧的正文预算（上下文四分之一，约 1,024–48,000 token）只用于无法完成工具闭环的家族回退路径。
 
 **提示词形态。** 该文本块会并入首条 `system`/`developer` 消息，而不是另起一条——这是本仓库所有聊天模板都能正确处理的唯一注入点。它的每一个字节都是“排序后的技能选择”的纯函数：没有时间戳、没有路径、没有计数，因此同一段对话逐轮哈希结果一致，KV 前缀缓存可以从第 0 块起持续命中。
 
 **边界约束。** 模型给出的每一个路径都要经过 `SkillPathGuard`，它同时封堵词法层（`..`、绝对路径、`~`、UNC、盘符限定）、规范化层与**符号链接**三类逃逸，并把每个技能限制在它自己的目录内。ZIP 安装同样让每个条目走这道关卡（zip-slip），按解压后的字节流校验大小，并设置单文件（64 MB）、整包（256 MB）、条目数（4096）与压缩比（200×）上限。
 
-**脚本沙箱。** 开启脚本执行后，子进程在 macOS 上由 `sandbox-exec`、在 Linux 上由 `bwrap` 约束——默认禁止联网、无法读取用户主目录、写入仅限该次运行的临时暂存目录——此外在所有平台上还有解释器白名单、不经过 shell、清洗过的环境变量（宿主机凭据不会传给脚本）、超时与输出上限。`--skills-allow-network` 是只针对这些随技能提供的脚本的独立联网开关；它既不会开启、也不会被 `--code-exec-allow-network` 开启。Windows 只能通过 job object 限制进程树，无法约束文件系统与网络，并且会如实说明：每次结果都会列出**未被约束**的项。默认的 `--skills-sandbox required` 意味着：宿主机若无法提供隔离，就拒绝运行脚本，而不是不加约束地跑起来。
+**脚本沙箱。** 开启脚本执行后，子进程在 macOS 上由 `sandbox-exec`、在 Linux 上由 `bwrap` 0.12.0+ 约束——默认禁止联网、无法读取用户主目录、写入仅限工作目录——此外在所有平台上还有解释器白名单、不经过 shell、清洗过的环境变量（宿主机凭据不会传给脚本）、超时与输出上限。打开 `--code-exec` 时工作目录是共享的请求 / 聊天工作区，否则是逐次临时目录；技能目录本身保持只读。`--skills-allow-network` 是只针对技能脚本的独立联网开关。Windows 只能通过 job object 限制进程树，无法约束文件系统与网络；默认的 `--skills-sandbox required` 因而会拒绝运行，必须以 `--skills-sandbox preferred` 明确接受较弱隔离。
 
-**模型家族差异。** Mistral 3 的聊天格式不承载工具声明，因此在它上面改为把选中技能的正文直接写进提示词，并且不提供 `skills_read`；它还会丢弃 `role: "tool"` 消息，所以工具结果改以 user 轮回灌。
+**模型家族差异。** Mistral 3 不承载工具声明；`qwen4exp` 与未知家族则没有可完成结构化工具闭环的解析器。TensorSharp 会对这些家族收起技能 / 代码工具、内联选中技能正文，并丢弃发现目录。Mistral 3 还会丢弃 `role: "tool"` 消息，所以循环结果改以 user 轮回灌。工具支持必须同时具备声明渲染器与输出解析器；仅支持推理模式并不等于支持工具。
+
+**结构化输出。** 使用 JSON 模式或 JSON Schema 的请求会抑制内置工具循环，并内联选中技能说明，避免内部工具调用打断受 schema 约束的输出。
 
 选择技能：
 
@@ -374,14 +376,14 @@ Responses API 存储（`TS_RESPONSES_STORE_REDIS_URL`）用于持久化响应。
 dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
     --backend ggml_metal --skills-dir ~/skills --skill pdf --input prompt.txt
 
-# 任意聊天 API —— /v1/chat/completions、/v1/responses、/api/chat（Ollama）、/api/chat（Web UI）
+# 任意聊天 API —— /v1/chat/completions、/v1/responses、/api/chat/ollama（Ollama）、/api/chat（Web UI）
 curl -X POST http://localhost:5000/v1/chat/completions -H "Content-Type: application/json" \
   -d '{"model": "gemma-4-E4B-it-Q8_0.gguf",
        "messages": [{"role": "user", "content": "把这份对账单里的合计表格提取出来。"}],
        "skills": ["pdf"], "skills_discovery": false}'
 ```
 
-服务端同时暴露技能注册表本身 —— `GET /v1/skills`、`GET /api/skills`、`POST /api/skills`（上传 `.zip`）、`DELETE /api/skills/{name}`；`/api/models` 会返回一个 `skills` 块（`enabled`、`installable`、`count`），供前端判断是否要显示相关控件。
+服务端同时暴露技能注册表本身 —— `GET /v1/skills`、`GET /api/skills`、`POST /api/skills`（上传 `.zip`）、`DELETE /api/skills/{name}`；`/api/models` 会返回一个 `skills` 块（`enabled`、`installable`、`allowScripts`、`count`），供前端判断是否要显示相关控件以及脚本执行是否可用。
 
 完整参考（frontmatter 字段、预算、安全模型，以及 C# 的 `SkillsChatClient` API）见 [Agent Skills in TensorSharp](docs/agent_skills.md)。可直接取用的开源技能：<https://github.com/anthropics/skills>。
 

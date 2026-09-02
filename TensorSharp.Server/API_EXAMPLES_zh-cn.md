@@ -5,7 +5,7 @@
 TensorSharp.Server 提供三种 API 风格以及若干工具型接口：
 
 - **兼容 Ollama**（`/api/generate`、`/api/chat/ollama`、`/api/tags`、`/api/show`）
-- **兼容 OpenAI**（`/v1/chat/completions`、`/v1/models`）
+- **兼容 OpenAI**（`/v1/chat/completions`、`/v1/responses`、`/v1/models`）
 - **Web UI**（`/api/chat`、`/api/sessions`、`/api/models`、`/api/models/load`、`/api/upload`、`/api/skills`、`/api/image-edit`、`/api/image-edit/stream`）
 - **工具型接口**（`/api/version`、`/api/queue/status`）
 
@@ -20,11 +20,12 @@ TensorSharp.Server 提供三种 API 风格以及若干工具型接口：
 | 后端 | `mlx`、`cuda`、`ggml_metal`、`ggml_cuda`、`ggml_vulkan`、`ggml_cpu`、`cpu`；`/api/models` 会返回当前主机可用项 |
 | 并发 | 自回归聊天使用连续批处理引擎。旧队列 API 只保留状态 / 兼容字段；DiffusionGemma Web UI 请求使用独立的 block 边界 diffusion scheduler。 |
 | 生成模式 | 自回归模型流式追加 token chunk。DiffusionGemma 在 append-only 兼容端点返回最终文本，在 Web UI `/api/chat` 上提供整条消息替换式实时去噪预览。 |
-| 会话 | Web UI 使用每个浏览器 tab 独立会话；Ollama/OpenAI 兼容端点共享默认会话 |
+| 会话 | Web UI 使用每个浏览器 tab 独立聊天会话。Ollama/OpenAI 兼容端点保留现有的默认推理会话行为，但代码执行工作区绝不会跨 HTTP 请求延续。 |
 | 上传 | `/api/upload` 接受图像 / 视频 / 音频 / 文本 / **PDF** 文件；原生数字 PDF 返回抽取出的文本，扫描版 PDF 在加载了具备视觉能力的模型时返回逐页图像（`TS_PDF_MAX_PAGES` 限制读取页数） |
 | 图像编辑 | Qwen-Image-Edit（`qwen_image`）模型通过 `/api/image-edit` 与 `/api/image-edit/stream` 提供服务，而不是聊天端点 |
 | 视频生成 | 任何视频生成模型 —— MiniMax-H3（`minimax-h3`）、Wan 2.1 / 2.2（`wan`）—— 都通过 `/api/video-generate`、`/api/video-generate/stream` 与 `/v1/videos/generations` 提供服务；MiniMax-H3 在 MP4 之外还会返回一个 32 kHz 立体声 `.wav` 旁挂文件，`/api/models` 会告知当前加载的检查点接受哪些条件输入 |
-| Agent Skills | 技能目录来自 `--skills-dir`（或二进制文件旁的 `skills` 目录），在 `/v1/skills` 与 `/api/skills` 列出，也可通过 `POST /api/skills` 以 `.zip` 安装。所有聊天端点都可用 `"skills": [...]` 按请求选中；模型自己发出的 `skills_read` 调用在服务端内部就被应答，因此客户端拿到的是一条写完的回复。`skills_run`（运行技能自带脚本）只有在启动时传入 `--skills-allow-exec` 才可用 |
+| Agent Skills | 技能目录来自 `--skills-dir`（或二进制文件旁的 `skills` 目录），在 `/v1/skills` 与 `/api/skills` 列出，也可通过 `POST /api/skills` 以 `.zip` 安装。所有聊天端点都可用 `"skills": [...]` 按请求选中。对同时支持工具声明与输出解析的模型族，模型自己的技能调用在服务端内部应答，因此客户端拿到完整回复；`qwen4exp` 等无工具模型族则以内联方式获得选中技能说明。`skills_run` 只有在服务启动时传入 `--skills-allow-exec` 才可用。 |
+| Agent 式代码执行 | `--code-exec` 会为支持工具调用的模型族加入进程内执行的 `shell`、`read_file`、`edit_file`、`write_file` 与 `apply_patch`。Web UI 每个聊天会话保留一个工作区；每个 OpenAI/Ollama HTTP 请求在内部轮次间使用私有工作区，响应结束后由服务删除。联网与安装软件包是相互独立且默认关闭的权限。 |
 | 结构化输出 | OpenAI `response_format` 支持 `text`、`json_object`、`json_schema`；`response_format`（`json_object` / `json_schema`）不能与 `think` 或 `tools` 同时使用 |
 
 > **网络安全：**服务监听 `0.0.0.0:5000`，没有 API Key 身份验证或内置 TLS。
@@ -68,7 +69,7 @@ curl -s http://localhost:5000/v1/chat/completions \
 
 ### 已构建或已解压的应用目录
 
-构建完成后，从仓库根目录运行下面的命令；它们会调用 `TensorSharp.Server/bin/TensorSharp.Server.dll`，同一输出目录也包含复制好的原生库与 `wwwroot/`。目前 `v3.0.5.0` GitHub Release 没有附带二进制资产，因此在真正发布压缩包之前，不应把“下载 Release 压缩包”写成可用路径。
+构建完成后可从仓库根目录运行下面的命令，也可把 DLL 路径改为解压后的发行归档；应用目录同时包含原生库与 `wwwroot/`。**状态核验于 2026-09-01：**[v3.3.0.0](https://github.com/zhongkaifu/TensorSharp/releases/tag/v3.3.0.0) 提供十个预构建归档——Windows x64（CPU/CUDA）、Linux x64（CPU/CUDA）与 macOS arm64 各有 CLI 和 Server。更新版本请查看 [Releases 页面](https://github.com/zhongkaifu/TensorSharp/releases)。
 
 ```bash
 # 仅文本模型
@@ -116,6 +117,35 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model <model.gguf> --host
 推理必须在启动时提供 `--model`。只传 `--backend` 可以启动一个无模型的状态服务，
 但 `/api/models/load` 无法选择启动时未提供的文件。多模态推理始终需要显式传入
 `--mmproj`；只写投影器文件名时，会相对于模型所在目录解析。
+
+### 服务端 Agent 式代码执行
+
+代码执行必须显式开启。下面是一条较保守的本地启动命令：启用五个内置工具，
+同时只监听环回地址，并让模型生成的命令保持离线。Linux 需要 `bwrap` 0.12.0
+或更高版本，macOS 则使用系统自带的 Seatbelt 沙箱：
+
+```bash
+dotnet TensorSharp.Server/bin/TensorSharp.Server.dll \
+  --model <model.gguf> --backend ggml_cpu --host 127.0.0.1 --code-exec
+```
+
+`--code-exec-allow-install` 会另行允许由宿主校验并代办的 pip/npm 安装；
+`--code-exec-allow-network` 则给予模型生成命令不受限的宿主 IP 网络访问。
+两者默认都关闭。Windows 的 Job Object 无法限制文件系统或网络，所以在 Windows
+上还必须显式传入逃生开关 `--code-exec-unconfined`；可由不受信任用户访问的服务端
+不应使用这组配置。
+
+内置代码与技能工具都在 TensorSharp 内部执行，绝不会作为待执行调用返回给 API
+客户端；调用者自己定义的工具仍归调用者所有并照常返回。Web UI 对话在整个聊天会话
+内保留工作区。每个 `/v1/chat/completions`、`/v1/responses`、
+或 `/api/chat/ollama` HTTP 请求则获得一个只在内部 Agent 轮次间
+存活的私有工作区，响应结束后删除。文件与宿主安装的软件包会在这段寿命内可用；
+不要依赖 virtualenv 激活状态、PATH 修改或常驻 shell 在调用之间延续。
+
+捕获到的输出文件会复制到服务端制品存储，并通过
+`/api/code/artifacts/{runId}/...` 下仅供下载的 URL 暴露。Web UI SSE 的完成元数据
+包含 `files: [{name, bytes, url}]`，因此即使模型没有在正文中复述链接，用户也能下载。
+完整参数与沙箱说明见 [USAGE](../USAGE_zh-cn.md#代码执行shell-工具)。
 
 后端速查：
 
@@ -410,7 +440,9 @@ curl -X POST http://localhost:5000/api/chat/ollama \
 加上一个 `skills` 数组，即可指定本次回答应当遵循哪些 Agent Skills。前期只有每个技能
 的一行描述会占用上下文；`SKILL.md` 正文与所需的参考文件由模型通过内置的
 `skills_list` / `skills_read` 工具自取，而这些工具**由服务端自己执行**，因此你拿到的
-是一条普通回复，而不是一个需要客户端去执行的工具调用。
+是一条普通回复，而不是一个需要客户端去执行的工具调用。这套渐进披露循环同时要求
+工具声明与输出解析支持。Qwen 3.8 Flash Next（`qwen4exp`）目前没有结构化工具解析器，
+因此会以内联方式获得选中技能说明，也不会拿到技能或代码执行工具。
 
 `skills_discovery` 可选，默认为 `true` —— 模型还会看到本次请求*没有*选中的那些技能的
 名称与描述，以便自己挑出你没想到要点名的那个。设为 `false` 则把本次请求严格限制在它
@@ -435,6 +467,10 @@ curl -X POST http://localhost:5000/api/chat/ollama \
 技能与你自己的 `tools` 可以共存：内置的技能工具会并入你发来的工具列表，TensorSharp 只
 应答属于它自己的那几个，而对*你的*工具的调用照常回传给你——此时模型从技能里读到的内容
 已经留在对话中。
+
+服务端使用 `--code-exec` 启动后，同一个进程内循环还可使用 `shell`、`read_file`、
+`edit_file`、`write_file` 与 `apply_patch`。这些内置调用始终留在 TensorSharp 内部；
+工作区、沙箱、网络、安装与制品行为见[服务端 Agent 式代码执行](#服务端-agent-式代码执行)。
 
 ---
 
@@ -692,8 +728,10 @@ curl -X POST http://localhost:5000/v1/chat/completions \
   }'
 ```
 
-返回的是一条普通的 `chat.completion`。模型发出的所有 `skills_read` 调用都发生在服务端
-内部；OpenAI SDK 无需做任何改动，也不会看到它无法执行的工具调用。
+返回的是一条普通的 `chat.completion`。对支持工具调用的模型族，所有内置技能或代码
+调用都发生在服务端内部；OpenAI SDK 无需改动，也不会看到它无法执行的内置调用。
+调用者定义的工具仍会照常返回。包括 `qwen4exp` 在内、没有结构化工具解析器的模型族
+使用选中技能内联回退，并且不会获得代码工具。
 
 ```python
 from openai import OpenAI
@@ -783,8 +821,9 @@ curl -N -X POST http://localhost:5000/api/chat \
 | `token` | 每个生成的 token（启用 `think` / `tools` 时为解析后的内容片段） | 流式正文 |
 | `replace`、`diffusionStep`、`diffusionTotal`、`preview` | 每个 DiffusionGemma 去噪预览与最终替换 | 替换整条 assistant 消息，而不是追加 token |
 | `thinking` | 解析到的思维链片段（仅当模型输出含思维链时） | 流式思维链 |
-| `tool_calls` | 模型输出工具调用 | `{name, arguments}` 数组 |
-| `skill_step`、`skill`、`detail`、`ok` | 服务端在作答过程中执行的每一次 Agent Skill 工具调用 | 进度轨迹：跑的是哪个工具（`skills_list` / `skills_read` / `skills_run`）、作用于哪个技能、哪个文件，以及是否成功 |
+| `tool_calls` | 模型输出调用者定义的工具调用 | `{name, arguments}` 数组；内置技能/代码调用改由服务端进程内执行 |
+| `tool_progress`、`tool`、`text`、`seconds`、`detail` | 进程内技能/代码调用正在写出或运行时 | 短暂的实时活动：阶段为 `writing`、`running` 或 `finished`；内置 Web UI 只保留有界的当前尾部，并在 `finished` 时清除 |
+| `skill_step`、`skill`、`detail`、`ok`、`round`、`files` | 每次进程内技能或代码工具调用完成后 | 工具、目标与结果的完成元数据；生成的制品以可选的 `{name, bytes, url}` 条目出现在 `files` 中 |
 | `done`、`tokenCount`、`elapsed`、`tokPerSec`、`aborted`、`error`、`sessionId`、`promptTokens`、`kvReusedTokens`、`kvReusePercent` | 末尾帧 | 终态汇总 |
 
 末尾帧示例：
@@ -797,6 +836,15 @@ data: {"done":true,"tokenCount":187,"elapsed":2.143,"tokPerSec":87.23,"aborted":
 
 ```
 data: {"skill_step":"skills_read","skill":"pdf","detail":"references/forms.md","ok":true}
+```
+
+代码进度与制品帧示例：
+
+```
+data: {"tool_progress":"writing","tool":"shell","text":"{\"command\":\"python","seconds":0,"detail":null}
+data: {"tool_progress":"running","tool":"shell","text":"writing report.xlsx\n","seconds":2.1,"detail":"python · 1.8 KB code"}
+data: {"tool_progress":"finished","tool":"shell","text":"","seconds":2.4,"detail":null}
+data: {"skill_step":"shell","skill":null,"detail":null,"ok":true,"round":2,"files":[{"name":"report.xlsx","bytes":18432,"url":"/api/code/artifacts/7f2.../report.xlsx"}]}
 ```
 
 DiffusionGemma 预览帧示例：

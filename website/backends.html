@@ -124,8 +124,8 @@ bash build-linux.sh --cuda --cuda-arch='86-real;89-real'</code></pre>
   <p>It writes the libraries into <code>TensorSharp.Backends.MLX/Native/dist/</code>. At run time the backend probes the application directory first; point it elsewhere with <code>TENSORSHARP_MLX_LIBRARY</code> or <code>TENSORSHARP_MLX_LIBRARY_DIR</code>.</p>
 
   <h3 id="binaries">Platform binary release status</h3>
-  <div class="callout warn"><div class="ic">⚠️</div><p>The current latest release, <a href="https://github.com/zhongkaifu/TensorSharp/releases/tag/v3.0.5.0" target="_blank" rel="noopener">v3.0.5.0</a>, has no uploaded application archives. Build from source unless an archive is visibly listed on the <a href="https://github.com/zhongkaifu/TensorSharp/releases" target="_blank" rel="noopener">Releases page</a>.</p></div>
-  <p>The release workflow is intended to create the following self-contained archives after every required build job succeeds:</p>
+  <div class="callout note"><div class="ic">📦</div><p><strong>Status verified 2026-09-01:</strong> <a href="https://github.com/zhongkaifu/TensorSharp/releases/tag/v3.3.0.0" target="_blank" rel="noopener">v3.3.0.0</a> publishes ten self-contained application archives: one TensorSharp.Cli and one TensorSharp.Server archive for each of the five platform/backend suffixes below. Check the <a href="https://github.com/zhongkaifu/TensorSharp/releases" target="_blank" rel="noopener">Releases page</a> for newer versions.</p></div>
+  <p>Each application is published for the following platform/backend matrix:</p>
   <div class="table-scroll">
   <table>
     <thead><tr><th>Archive</th><th>Native backend(s) bundled</th><th>Format</th></tr></thead>
@@ -138,7 +138,7 @@ bash build-linux.sh --cuda --cuda-arch='86-real;89-real'</code></pre>
     </tbody>
   </table>
   </div>
-  <p class="page-foot-note">These are intended artifact names, not a claim that the files are currently downloadable. When present, <code>-cuda</code> archives still require an NVIDIA GPU and compatible driver; the macOS archive requires Apple Silicon.</p>
+  <p class="page-foot-note">v3.3.0.0 contains both a CLI and a Server file for every suffix above (ten application archives total). The <code>-cuda</code> archives still require an NVIDIA GPU and compatible driver; the macOS archives require Apple Silicon. Source builds remain available.</p>
 
   <div class="content-footer">
     <a href="getting-started.html">← Getting Started</a>

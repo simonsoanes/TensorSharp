@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>服务器与 Web UI — TensorSharp 维基</title>
-  <meta name="description" content="启动 TensorSharp.Server：浏览器聊天机器人加上兼容 Ollama/OpenAI 的 HTTP 端点，含选项、环境变量与批处理调参。">
+  <meta name="description" content="启动 TensorSharp.Server：浏览器聊天界面、兼容 Ollama/OpenAI 的 HTTP 端点、Agent Skills、沙箱化代码执行与批处理调参。">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
   <script>try{var t=localStorage.getItem('ts-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.classList.toggle('dark',t==='dark');}catch(e){}</script>
@@ -31,12 +31,12 @@ dotnet run --project TensorSharp.Server -c Release --no-build -- --model models/
   <pre data-lang="bash"><code>curl -s http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"gemma-4-E4B-it-Q8_0.gguf","messages":[{"role":"user","content":"Reply with one short hello."}],"max_tokens":32}'</code></pre>
-  <p>API 基址是 <strong><code>http://localhost:5000</code></strong>。内置聊天 UI 位于 <strong><a href="http://localhost:5000/index.html"><code>http://localhost:5000/index.html</code></a></strong>；<code>GET /</code> 是存活检查接口，返回 <code>"TensorSharp.Server is running"</code>。</p>
+  <p>API 基址是 <strong><code>http://localhost:5000</code></strong>。内置 <code>wwwroot/</code> 存在且启用时，<strong><a href="http://localhost:5000/"><code>GET /</code></a></strong> 会返回其中的 <code>index.html</code> 聊天界面。稳定的纯文本存活检查是 <code>GET /health</code>；只有未启用 Web UI 的无界面部署才会让根路径 <code>/</code> 回退为同一个健康响应。</p>
   <div class="callout note"><div class="ic">📌</div><p>推理必须在启动时传入 <code>--model</code>。服务器只托管启动时指定的 GGUF，以及可选且必须显式传入的 <code>--mmproj</code>；它不会扫描模型目录或自动探测投影器。<code>/api/models/load</code> 只能用其他受支持后端重新加载同一启动组合。无模型进程不能在运行时选择 GGUF。默认监听地址是 <code>http://0.0.0.0:5000</code>；<code>--port</code>、<code>--host</code> 与 <code>--urls</code>（环境变量 <code>PORT</code> / <code>HOST</code> / <code>ASPNETCORE_URLS</code>）可以改变它。</p></div>
   <div class="callout warn"><div class="ic">🔐</div><p>服务端没有内置 API Key 身份验证或 TLS，并监听所有网络接口。本机使用时请依靠主机防火墙；需要远程访问时应置于带身份验证的 HTTPS 反向代理之后，不要把 5000 端口直接暴露给不可信网络。</p></div>
 
   <h3>已构建的源码目录</h3>
-  <p>构建完成后，从仓库根目录运行这些命令。它们会调用 <code>TensorSharp.Server/bin/TensorSharp.Server.dll</code>；该输出目录也包含复制好的原生库与 <code>wwwroot/</code>。当前 <code>v3.0.5.0</code> GitHub Release 没有附带二进制压缩包。</p>
+  <p>构建完成后，从仓库根目录运行这些命令。它们会调用 <code>TensorSharp.Server/bin/TensorSharp.Server.dll</code>；该输出目录也包含复制好的原生库与 <code>wwwroot/</code>。当前 <a href="https://github.com/zhongkaifu/TensorSharp/releases/tag/v3.3.0.0" target="_blank" rel="noopener"><code>v3.3.0.0</code> Release</a> 也附带面向受支持平台的自包含 CLI 与服务器压缩包。</p>
   <pre data-lang="bash"><code># Apple Silicon / Metal
 dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf --backend ggml_metal
 
@@ -58,7 +58,7 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf
     --stop "&lt;/s&gt;" --stop "&lt;|endoftext|&gt;"</code></pre>
 
   <h2 id="webui">Web UI 功能</h2>
-  <p>打开 <code>http://localhost:5000/index.html</code>。浏览器界面支持：</p>
+  <p>打开 <code>http://localhost:5000/</code>。浏览器界面支持：</p>
   <ul>
     <li>多轮对话，带流式 token 生成（SSE）。</li>
     <li>每标签页独立的聊天会话 —— 每个标签页拥有自己的跟踪对话历史；请求 KV 块与前缀复用由推理引擎管理。</li>
@@ -71,6 +71,10 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf
     <li>托管视频生成模型（MiniMax-H3 或 Wan）时提供视频生成：输入提示词，附上所加载权重声明支持的条件输入，浏览器通过 SSE 实时显示逐步去噪进度，直到 MP4 出现并提供下载链接。在 MiniMax-H3 上还会同时返回一条 32&nbsp;kHz 立体声音轨 —— 它与画面出自同一次生成。<strong>所有数值仍然来自启动参数</strong> —— 详见下文<a href="#video">视频生成</a>。</li>
     <li>自由滚动 —— 在新 token 流式输出时阅读较早的回复；自动滚动会在回到底部时恢复。</li>
   </ul>
+
+  <h2 id="agentic">Agentic Work 与代码执行</h2>
+  <p>在能够完整往返工具调用的模型家族上，服务器可让<strong>单个模型</strong>在进程内执行「生成 → 工具 → 再生成」循环。Agent Skills 可以在不执行脚本的情况下被发现与读取；运维者需另行传入 <code>--skills-allow-exec</code> 才允许运行技能自带脚本。<code>--code-exec</code> 则显式开启由宿主处理的 <code>read_file</code>、<code>edit_file</code>、<code>write_file</code>、<code>apply_patch</code> 与沙箱化 <code>shell</code> 工具。Web UI 聊天会话会在各轮之间保留私有工作区；无状态 API 请求各自获得隔离的请求工作区，并在结束后删除。</p>
+  <div class="callout warn"><div class="ic">🔒</div><p>执行类工具在运维者开启前保持关闭，但一旦开启，系统不会再逐条命令弹出审批。沙箱模式默认是 <code>required</code>，无法安全隔离时直接拒绝：macOS 使用 Seatbelt，Linux 要求 bubblewrap 0.12.0 或更新版本。Windows Job Object 只能约束后代进程，不能隔离文件系统或网络，因此技能脚本需要显式选择更弱的沙箱模式，而模型生成的命令需要 <code>--code-exec-unconfined</code>。这是 agentic 工具循环，并非多智能体编排。完整参数、模型家族限制、工作区生命周期与安全边界见 <a href="agentic_zh-cn.html">Agentic Work、Skills 与沙箱</a>。</p></div>
 
   <h2 id="video">视频生成：网页界面能设什么，什么只能靠 API</h2>
   <p>托管一个视频生成模型（MiniMax-H3 或 Wan），网页界面就变成了一个视频生成器。这些接口判断的是 <code>IVideoGenerationModel</code> 接缝而不是架构字符串，因此其他模型会返回 <code>400</code> 与 <code>The loaded model is not a video-generation model.</code>。有必要清楚地知道浏览器实际控制了请求中多小的一部分：一次视频任务可能跑几分钟，也可能跑几小时，而浏览器在任务开始后无法再改变这一点。</p>

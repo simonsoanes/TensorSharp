@@ -1,4 +1,4 @@
-# Agent Skills in TensorSharp
+# Agent Skills and agentic code work in TensorSharp
 
 An Agent Skill is a folder of instructions that a model loads when — and only
 when — a task needs it. The folder holds a `SKILL.md` written for the model
@@ -12,8 +12,12 @@ caller sends `"skills": ["pdf"]` on a normal chat request and gets back a
 finished completion; the fetches the model made along the way happened inside
 the server, next to the weights.
 
-Everything described here lives in `TensorSharp.AgentHost/Skills/` and is shared
-by the CLI, `TensorSharp.Server` and the public C# API.
+Everything described here lives in `TensorSharp.AgentHost/Skills/` and
+`TensorSharp.AgentHost/CodeExec/` and is shared by the CLI,
+`TensorSharp.Server` and the public C# API. This is one model in a bounded,
+in-process tool loop. TensorSharp does not implement subagents, multi-agent
+delegation, or an interactive per-command approval queue; the operator grants
+the execution surfaces once at startup, and they remain unavailable otherwise.
 
 ## What a skill is
 
@@ -274,6 +278,12 @@ feature it did not ask for would break a working integration.
 `SkillAgentLoop.RunAsync` drives: generate → answer any skill tool calls in
 process → generate again, until the model stops asking.
 
+With `--code-exec`, the same loop also answers five built-ins: bounded
+`read_file`, exact-match `edit_file`, deliberate whole-file `write_file`,
+`shell`, and atomic multi-file `apply_patch`. These are operator-provided tools,
+not caller tools. They are off by default; enabling them does not imply network
+or package-install permission.
+
 **Why it is in process.** An ordinary OpenAI client sends `skills: ["pdf"]` and
 one user message. If TensorSharp returned `skills_read` as a tool call, that
 client would have no implementation for it and the conversation would stall —
@@ -310,8 +320,10 @@ check") and one final generation runs. Returning a tool-call-only turn to the
 user would show them nothing at all.
 
 Each executed call is reported through `SkillAgentLoopOptions.OnInvocation`,
-which is what the Web UI's `skill_step` SSE frames and the server's structured
-logs are built from.
+which is what the server's structured logs and `skill_step` SSE completion
+metadata are built from. Code tools additionally emit transient
+`tool_progress` phases (`writing`, `running`, `finished`), including produced
+files when a run completes.
 
 ### Streaming
 
@@ -351,8 +363,10 @@ The text is unchanged by streaming it: for the same deterministic request the
 concatenated stream is **byte-identical** to what the non-streaming endpoint
 returns, for single-round, multi-round and no-skills cases alike.
 
-The Web UI additionally carries `skill_step` frames as each lookup completes, so
-the pause while the model reads a file is visible rather than blank.
+The Web UI additionally carries `skill_step` and `tool_progress` frames. It uses
+them for one transient current-activity panel, which is replaced as work moves
+on and cleared when the operation finishes; this is live status, not retained
+execution history. Produced files remain visible as artifact download chips.
 
 ### What a round costs
 
@@ -440,7 +454,7 @@ being built, and **two were dropped because the references do the opposite.**
 | Proposed | Verdict | The citation that settles it |
 |---|---|---|
 | Fix every "success reported for something not done" | **Aligned — and load-bearing** | Both references instruct the model *not* to verify: Codex's `prompt.md` says "Do not waste tokens by re-reading files after calling `apply_patch` on them. The tool call will fail if it didn't work", and Claude Code's `Read` tool says "Do NOT re-read a file you just edited to verify — Edit/Write would have errored". That instruction is only safe if the failure paths are exhaustive |
-| Code-specific sampling | **Not aligned — off by default** | The Agents SDK leaves `temperature`, `top_p`, `frequency_penalty` and `presence_penalty` at `None` and omits them from the request; its only model defaults are keyed on the model *name*, not the task. Claude Code's settings surface has no temperature, top_p or top_k at all — its quality lever is reasoning effort. So `--code-exec-temperature` exists and does nothing unless an operator sets it |
+| Code-specific sampling | **Partly aligned** | Every coding turn removes TensorSharp's built-in `1.1` repetition penalty when it is still at that default, because code legitimately repeats structural tokens. TensorSharp does **not** impose a code temperature by default: `--code-exec-temperature` changes only a temperature still at the built-in default, while an explicit client value wins. This matches the useful part of the references, which do not add a task-specific temperature or repetition penalty. |
 | Prefer Python first | **Not aligned — dropped** | The rule in both is the inverse. Codex's shell guidance is five bullets, two of which steer *away* from Python ("Avoid using Python scripts just to print large file chunks", "prefer `rg`"); Codex also contains one literal "Prefer Python stdlib for portability" — but scoped inside a single skill, never as a global rule. And the log evidence is confounded: 26 of 32 JavaScript failures are one library's option surface, not the language |
 | Check dependencies before running | **Not aligned — rejected** | Claude Code hits `ModuleNotFoundError` in 0.016% of its ~30,400 shell calls, and provisions once per session with a cached setup script rather than checking per run. Installing-and-re-running inside the same call is strictly cheaper than a pre-flight: zero extra rounds against one guaranteed extra round |
 | Tell an environment failure from a code bug | **Aligned — kept and generalised** | This is Claude Code's sandbox escape hatch almost verbatim: the harness names the violation in the result, the model classifies it, and the *same command* is retried with the environment changed — the code is never touched |
@@ -566,8 +580,10 @@ the alphabetically first one.
 ### Running scripts
 
 `skills_run` is off by default and stays off unless someone passes
-`--skills-allow-exec` (or sets `TS_SKILLS_ALLOW_EXEC`). When it is on, the script
-still runs **sandboxed or not at all**.
+`--skills-allow-exec` (or sets `TS_SKILLS_ALLOW_EXEC`). Under the default
+`--skills-sandbox required`, an enabled script still runs **sandboxed or not at
+all**; `preferred` and `off` are explicit operator choices that can weaken that
+guarantee.
 
 **Two layers.** In process, always: the path resolves through `SkillPathGuard` so
 only files inside the skill can be named; the interpreter comes from an
@@ -578,9 +594,10 @@ interpreter is exec'd directly, with no shell parsing the argument list, so `;`,
 environment is reduced to `PATH`, `LANG`, `LC_ALL`, `TZ` and the Windows
 equivalents, so a host credential in `AWS_SECRET_ACCESS_KEY` or `GITHUB_TOKEN`
 never reaches the child; the working directory is outside the skill — with
-`--code-exec` it is the chat session's workspace, the same directory `shell`
-commands run in, so one step's output is the next step's input, and otherwise a
-per-call scratch deleted when the call returns; stdin is closed; the process is
+`--code-exec` it is the Web/CLI chat workspace or the current HTTP request's
+private workspace, the same directory `shell` commands run in, so one step's
+output is the next step's input, and otherwise a per-call scratch deleted when
+the call returns; stdin is closed; the process is
 killed at a 60-second deadline; and stdout and stderr are each captured up to
 32 KB.
 
@@ -603,7 +620,7 @@ must never quietly become *"isolation was skipped"*.
 | Writes confined to the working directory | yes | yes | **no** |
 | Network denied | yes by default | yes by default | **no** |
 | Home directory unreadable | yes | yes | **no** |
-| Process tree bounded | yes | yes | yes |
+| Process tree bounded | **no** — ordinary process groups are stopped, but a deliberately detached child can outlive the request | yes | yes |
 | Available by default | always | only if `bwrap` 0.12.0 or newer is installed | always |
 
 The two network opt-ins are deliberately separate. `--skills-allow-network`
@@ -875,11 +892,18 @@ curl -N -X POST http://localhost:5000/api/chat \
 
 The response is an ordinary completion. Any `skills_read` the model performed
 happened server-side; the client never sees a tool call it cannot service. The
-Web UI stream additionally carries one frame per executed skill tool call:
+Web UI stream additionally carries skill completion metadata; the UI renders
+transient current activity rather than retaining a durable execution trace:
 
 ```
 data: {"skill_step":"skills_read","skill":"pdf","detail":"references/forms.md","ok":true}
 ```
+
+With `--code-exec`, `tool_progress` frames report `writing`, `running`, and
+`finished`; the finished event may include generated files. The server retains
+bounded artifacts for `GET /api/code/artifacts/{runId}` and
+`GET /api/code/artifacts/{runId}/{*path}`, served as downloads with
+`X-Content-Type-Options: nosniff`.
 
 ### HTTP — managing skills
 
@@ -937,7 +961,7 @@ returns `{"error":"…"}`.
 `GET /api/models` grows a nullable block:
 
 ```json
-"skills": { "enabled": true, "installable": true, "count": 7 }
+"skills": { "enabled": true, "installable": true, "allowScripts": false, "count": 7 }
 ```
 
 `null` means this build or this deployment has no skills, and the UI hides the

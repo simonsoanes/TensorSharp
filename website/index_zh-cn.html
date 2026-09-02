@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TensorSharp 维基 — 面向 .NET 的本地 GGUF 大模型推理</title>
-  <meta name="description" content="TensorSharp 是面向 GGUF 模型的原生 .NET 大模型推理引擎：命令行工具、Web 聊天服务器，以及兼容 Ollama / OpenAI 的 HTTP API。">
+  <title>TensorSharp 维基 — 面向 .NET 的本地 GGUF 推理与智能体工作流</title>
+  <meta name="description" content="TensorSharp 是原生 .NET GGUF 推理引擎，提供 CLI、Web UI、兼容 API、Agent Skills，以及可选的模型生成代码沙箱。">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
   <script>try{var t=localStorage.getItem('ts-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.classList.toggle('dark',t==='dark');}catch(e){}</script>
@@ -17,12 +17,13 @@
 
   <section class="hero">
     <div>
-      <span class="pill">⚡ C# · .NET 10 · GGUF · GPU 加速</span>
+      <span class="pill">⚡ C# · .NET 10 · GGUF · AgentHost · GPU 加速</span>
       <h1>TensorSharp</h1>
-      <p class="lede">一个<strong>面向 GGUF 模型的原生 .NET 大模型推理引擎</strong> —— 提供命令行工具、浏览器聊天服务器，以及用于程序化访问的<strong>兼容 Ollama 与 OpenAI 的 API</strong>。</p>
+      <p class="lede">一个<strong>面向 GGUF 模型的原生 .NET 推理引擎</strong> —— 提供 CLI、浏览器聊天、<strong>兼容 Ollama 与 OpenAI 的 API</strong>，以及可选的 AgentHost，用于渐进式技能加载与模型生成代码沙箱。</p>
       <div class="btn-row">
         <a class="btn" href="getting-started_zh-cn.html">开始使用 →</a>
         <a class="btn secondary" href="overview_zh-cn.html">TensorSharp 是什么？</a>
+        <a class="btn secondary" href="agentic_zh-cn.html">智能体工作流</a>
         <a class="btn secondary" href="https://www.amazon.com/dp/B0H9P44QZZ" target="_blank" rel="noopener">阅读本书 ↗</a>
         <a class="btn secondary" href="https://github.com/zhongkaifu/TensorSharp" target="_blank" rel="noopener">GitHub ↗</a>
       </div>
@@ -37,11 +38,13 @@
       <div><span class="c-cm"># 或启动兼容 OpenAI 的 API 服务</span></div>
       <div>dotnet run --project TensorSharp.Server -- \</div>
       <div>&nbsp;&nbsp;--model <span class="c-st">model.gguf</span> --backend <span class="c-ac">cpu</span></div>
-      <div><span class="c-cm"># → http://localhost:5000/index.html</span></div>
+      <div><span class="c-cm"># UI → http://localhost:5000/ · 健康检查 → /health</span></div>
     </div>
   </section>
 
-  <p>一切都运行在<strong>你自己的硬件</strong>上：你的笔记本、工作站或服务器。数据不离开本机，没有按 token 计费，同一套引擎既能完成快速的命令行测试，也能支撑团队内部共享的聊天机器人和生产环境的 REST 接口。本维基是完整指南 —— 从下方选择一个起点，或按 <kbd>/</kbd> 进行搜索。</p>
+  <p>一切都运行在<strong>你自己的硬件</strong>上：你的笔记本、工作站或服务器。推理与智能体工作默认留在本机，没有按 token 计费，同一套引擎既能完成快速的命令行测试，也能支撑团队内部共享的聊天机器人和生产环境的 REST 接口。运维方明确授予任一执行面的网络权限，或接受 Windows 的非受限代码执行模式后，数据才可能离开本机。本维基是完整指南 —— 从下方选择一个起点，或按 <kbd>/</kbd> 进行搜索。</p>
+
+  <div class="callout note"><div class="ic">🏷️</div><p><strong>最新标签版本（核验于 2026-09-01）：</strong><a href="https://github.com/zhongkaifu/TensorSharp/releases/tag/v3.3.0.0" target="_blank" rel="noopener">v3.3.0.0</a>，提供预构建 CLI 与 server 归档。这里记录的 AgentHost 能力位于该标签之后的当前源码中；在后续发行版包含它之前，请构建当前源码。</p></div>
 
   <section class="book-spotlight" aria-labelledby="book-spotlight-title">
     <a class="book-cover-link" href="https://www.amazon.com/dp/B0H9P44QZZ" target="_blank" rel="noopener">
@@ -65,6 +68,7 @@
     <a class="card" href="getting-started_zh-cn.html"><div class="ic">🚀</div><h3>快速开始</h3><p>环境要求、构建、下载模型，并流式输出你的第一个回复。</p></a>
     <a class="card" href="cli_zh-cn.html"><div class="ic">⌨️</div><h3>命令行</h3><p>从 CLI 运行提示词、图像、音频、批处理与基准测试。</p></a>
     <a class="card" href="server_zh-cn.html"><div class="ic">🌐</div><h3>服务器与 Web UI</h3><p>在本机托管浏览器聊天机器人和 HTTP 接口。</p></a>
+    <a class="card" href="agentic_zh-cn.html"><div class="ic">🛠️</div><h3>智能体工作流</h3><p>按需加载技能、运行沙箱代码工具、修复输出并下载生成产物。</p></a>
     <a class="card" href="http-api_zh-cn.html"><div class="ic">🔌</div><h3>HTTP API</h3><p>用 curl、Python 或任意 Ollama / OpenAI 客户端调用它。</p></a>
     <a class="card" href="code-api_zh-cn.html"><div class="ic">🧩</div><h3>C# 库</h3><p>将引擎直接嵌入你的 .NET 应用。</p></a>
     <a class="card" href="api-reference_zh-cn.html"><div class="ic">📚</div><h3>API 参考</h3><p>可搜索的参数、环境变量、端点与类型表。</p></a>
@@ -95,9 +99,9 @@ TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Cli -c R
     </li>
     <li>
       <h3>想要 UI + API？</h3>
-      <p>用同一模型启动服务端。<code>/</code> 是健康检查，浏览器聊天位于 <code>/index.html</code>。</p>
+      <p>用同一模型启动服务端。浏览器聊天位于 <code>/</code>；纯文本存活检查位于 <code>/health</code>。</p>
       <pre data-lang="bash"><code>TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Server -c Release -p:TensorSharpSkipMlxNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --max-tokens 128
-# 打开 http://localhost:5000/index.html</code></pre>
+# 打开 http://localhost:5000/</code></pre>
     </li>
   </ol>
 
@@ -106,7 +110,8 @@ TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Cli -c R
 
   <h2 id="why">为什么选择 TensorSharp？</h2>
   <div class="card-grid">
-    <div class="card"><div class="ic">🔒</div><h3>默认私有</h3><p>推理在你的硬件上进行。提示词、文档和图像永不离开本机。</p></div>
+    <div class="card"><div class="ic">🔒</div><h3>默认私有</h3><p>推理留在你的硬件上。命令与技能脚本默认不可联网；Windows 非受限代码执行是明确的例外。</p></div>
+    <a class="card" href="agentic_zh-cn.html"><div class="ic">🛠️</div><h3>能完成工作的技能</h3><p>AgentHost 预先只公布技能元数据，通过 <code>skills_read</code> 加载说明，并可选择开启五个受工作区约束的文件 / 代码工具，其中 shell 在沙箱内运行。</p></a>
     <div class="card"><div class="ic">💸</div><h3>没有按 token 账单</h3><p>硬件允许多少就跑多少 —— 成本可预测，没有计量 API。</p></div>
     <div class="card"><div class="ic">🔁</div><h3>即插即用兼容</h3><p>支持 Ollama 与 OpenAI 协议，现有工具与 SDK 直接可用。</p></div>
     <a class="card" href="backends_zh-cn.html#cpu"><div class="ic">🖥️</div><h3>随处可运行</h3><p>NVIDIA (CUDA)、AMD / Intel / NVIDIA (Vulkan)、Apple Silicon (Metal/MLX) 或纯 CPU —— 均带自动回退。100% 纯 C# 的 <code>cpu</code> 后端现在把托管矩阵乘交给一个常驻的多核工作线程池：在 122 CPU 的机器上，相比此前逐矩阵乘并行的写法，decode 约 <strong>2.8×</strong>、prefill 约 +15%。</p></a>
@@ -121,7 +126,7 @@ TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Cli -c R
   <p>TensorSharp 面向各类访客。下面是每类人最快的上手路径。</p>
   <div class="audience">
     <div class="a"><h4>初学者与学生</h4><p>从<a href="book_zh-cn.html">配套图书</a>或<a href="glossary_zh-cn.html">术语表与 FAQ</a>开始，再动手完成<a href="getting-started_zh-cn.html">快速开始</a>。</p></div>
-    <div class="a"><h4>开发者</h4><p>直达 <a href="http-api_zh-cn.html">HTTP API</a>、<a href="code-api_zh-cn.html">C# 库</a> 与 <a href="api-reference_zh-cn.html">API 参考</a>。</p></div>
+    <div class="a"><h4>开发者</h4><p>直达<a href="agentic_zh-cn.html">智能体工作流</a>、<a href="http-api_zh-cn.html">HTTP API</a>、<a href="code-api_zh-cn.html">C# 库</a>与<a href="api-reference_zh-cn.html">API 参考</a>。</p></div>
     <div class="a"><h4>资深 / 首席工程师</h4><p>阅读<a href="advanced_zh-cn.html">高级功能</a> —— 分页 KV、连续批处理、推测解码。</p></div>
     <div class="a"><h4>管理者、CTO 与 CEO</h4><p>查看<a href="overview_zh-cn.html#business">商业价值</a>与<a href="overview_zh-cn.html#status">能力矩阵</a>。</p></div>
     <div class="a"><h4>销售与市场</h4><p>使用<a href="features_zh-cn.html">功能目录</a>与<a href="benchmarks_zh-cn.html">基准测试</a>做定位。</p></div>

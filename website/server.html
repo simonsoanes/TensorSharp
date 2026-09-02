@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Server & Web UI — TensorSharp Wiki</title>
-  <meta name="description" content="Start TensorSharp.Server: a browser chatbot plus Ollama/OpenAI-compatible HTTP endpoints, with options, environment variables, and batching tunables.">
+  <meta name="description" content="Start TensorSharp.Server: a browser chatbot plus Ollama/OpenAI-compatible HTTP endpoints, Agent Skills, sandboxed code execution, and batching tunables.">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
   <script>try{var t=localStorage.getItem('ts-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.classList.toggle('dark',t==='dark');}catch(e){}</script>
@@ -31,12 +31,12 @@ dotnet run --project TensorSharp.Server -c Release --no-build -- --model models/
   <pre data-lang="bash"><code>curl -s http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"gemma-4-E4B-it-Q8_0.gguf","messages":[{"role":"user","content":"Reply with one short hello."}],"max_tokens":32}'</code></pre>
-  <p>The API base is <strong><code>http://localhost:5000</code></strong>. Open the bundled chat UI at <strong><a href="http://localhost:5000/index.html"><code>http://localhost:5000/index.html</code></a></strong>; <code>GET /</code> is the liveness endpoint and returns <code>"TensorSharp.Server is running"</code>.</p>
+  <p>The API base is <strong><code>http://localhost:5000</code></strong>. When the bundled <code>wwwroot/</code> is present and enabled, <strong><a href="http://localhost:5000/"><code>GET /</code></a></strong> serves its <code>index.html</code> chat UI. Use <code>GET /health</code> for the stable plain-text liveness check; only a headless deployment with no enabled Web UI falls back to that health response at the bare <code>/</code> route.</p>
   <div class="callout note"><div class="ic">📌</div><p><code>--model</code> is required for inference. The server hosts exactly the startup GGUF and optional, explicitly supplied <code>--mmproj</code>; it does not scan a model directory or auto-detect a projector. <code>/api/models/load</code> can only re-load that same startup pair, optionally on another supported backend. A model-less process cannot choose a GGUF at runtime. The default listen address is <code>http://0.0.0.0:5000</code>; <code>--port</code>, <code>--host</code> and <code>--urls</code> (env <code>PORT</code> / <code>HOST</code> / <code>ASPNETCORE_URLS</code>) move it.</p></div>
   <div class="callout warn"><div class="ic">🔐</div><p>The server has no built-in API-key authentication or TLS and binds every interface. Keep it behind a host firewall for local use, or put an authenticated HTTPS reverse proxy in front of it; do not expose port 5000 directly to an untrusted network.</p></div>
 
   <h3>Already-built source tree</h3>
-  <p>Run these commands from the repository root after building. They invoke <code>TensorSharp.Server/bin/TensorSharp.Server.dll</code>; that output directory also contains the copied native libraries and <code>wwwroot/</code>. The current <code>v3.0.5.0</code> GitHub release has no attached binary archives.</p>
+  <p>Run these commands from the repository root after building. They invoke <code>TensorSharp.Server/bin/TensorSharp.Server.dll</code>; that output directory also contains the copied native libraries and <code>wwwroot/</code>. The current <a href="https://github.com/zhongkaifu/TensorSharp/releases/tag/v3.3.0.0" target="_blank" rel="noopener"><code>v3.3.0.0</code> release</a> also provides attached, self-contained CLI and server archives for supported platforms.</p>
   <pre data-lang="bash"><code># Apple Silicon / Metal
 dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf --backend ggml_metal
 
@@ -58,7 +58,7 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf
     --stop "&lt;/s&gt;" --stop "&lt;|endoftext|&gt;"</code></pre>
 
   <h2 id="webui">Web UI features</h2>
-  <p>Open <code>http://localhost:5000/index.html</code>. The browser interface supports:</p>
+  <p>Open <code>http://localhost:5000/</code>. The browser interface supports:</p>
   <ul>
     <li>Multi-turn chat conversations with streaming token generation (SSE).</li>
     <li>Per-tab chat sessions — each tab owns tracked conversation history; request KV blocks and prefix reuse are owned by the inference engine.</li>
@@ -71,6 +71,10 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model ./models/model.gguf
     <li>Video flow when a video-generation model is hosted — MiniMax-H3 or Wan: type the prompt, attach whatever conditioning the loaded checkpoint advertises, and the browser streams per-step denoise progress over SSE until the MP4 appears with a download link. On MiniMax-H3 a 32&nbsp;kHz stereo soundtrack comes back beside it, generated in the same pass. <strong>Everything numeric still comes from the startup flags</strong> — see <a href="#video">Video generation</a> below.</li>
     <li>Free scrolling — read earlier replies while new tokens stream; auto-scroll resumes at the bottom.</li>
   </ul>
+
+  <h2 id="agentic">Agentic work and code execution</h2>
+  <p>On tool-capable model families, the server can run a <strong>single model</strong> through an in-process generate → tool → generate loop. Agent Skills may be discovered and read without executing scripts; <code>--skills-allow-exec</code> separately opts the operator into bundled skill scripts. <code>--code-exec</code> opts into the host-handled <code>read_file</code>, <code>edit_file</code>, <code>write_file</code>, <code>apply_patch</code>, and sandboxed <code>shell</code> tools. Web UI chat sessions retain a private workspace across rounds, while stateless API requests receive an isolated request workspace that is removed afterward.</p>
+  <div class="callout warn"><div class="ic">🔒</div><p>Executable tools are off until the operator enables them, but there is no per-command approval prompt after that decision. The default sandbox mode is <code>required</code> and fails closed: macOS uses Seatbelt and Linux requires bubblewrap 0.12.0 or newer. Windows Job Objects bound descendants but do not confine filesystem or network access, so skill scripts require an explicit less-safe sandbox mode and model-authored commands require <code>--code-exec-unconfined</code>. This is an agentic tool loop, not multi-agent orchestration. See <a href="agentic.html">Agentic Work, Skills &amp; Sandboxing</a> for the complete flags, model-family limits, workspace lifecycle, and security boundaries.</p></div>
 
   <h2 id="video">Video generation: what the UI sets, and what only the API sets</h2>
   <p>Host a video-generation model — MiniMax-H3 or Wan — and the Web UI turns into a video generator. The endpoints gate on the <code>IVideoGenerationModel</code> seam rather than on an architecture string, so anything else answers <code>400</code> with <code>The loaded model is not a video-generation model.</code> It is worth knowing exactly how little of the request the browser controls, because a video job can run for minutes or for hours and the browser gives you no way to change that mid-flight.</p>
