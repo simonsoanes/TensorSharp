@@ -346,6 +346,7 @@ TensorSharp/
 | `TensorSharp.Backends.GGML` | `TensorSharp.Backends.GGML` | `TensorSharp.GGML` | GGML 执行后端与原生互操作 |
 | `TensorSharp.Backends.Cuda` | `TensorSharp.Backends.Cuda` | `TensorSharp.Cuda` | Direct CUDA 分配器、存储、cuBLAS GEMM、PTX 内核和量化 CUDA 算子 |
 | `TensorSharp.Backends.MLX` | `TensorSharp.Backends.MLX` | `TensorSharp.MLX` | Apple Silicon MLX 后端（mlx-c / Metal），含量化 / 融合 / 编译内核与 MoE 专家 offload |
+| `TensorSharp.Distributed` | `TensorSharp.Distributed` | `TensorSharp.Distributed` | 用于多节点张量并行的点对点 TCP 协调层 |
 | `TensorSharp.Server` | `TensorSharp.Server` | `TensorSharp.Server` | ASP.NET Core 服务、OpenAI/Ollama 适配层、推理引擎宿主与 Web UI |
 | `TensorSharp.Cli` | `TensorSharp.Cli` | `TensorSharp.Cli` | 控制台宿主、调试工具与 JSONL 批处理 |
 
@@ -359,7 +360,7 @@ TensorSharp/
 pwsh ./eng/verify-packages.ps1
 ```
 
-该验证会对上表 7 个公开包运行 `dotnet pack`，并在 `AdvUtils` 等内部依赖泄漏到 `.nuspec`，或 TensorSharp 包依赖了上表之外的分层时失败。
+该验证会对上表公开包运行 `dotnet pack`，并在 `AdvUtils` 等内部依赖泄漏到 `.nuspec`，或 TensorSharp 包依赖了上表之外的分层时失败。
 
 ### 平台二进制发行状态
 
