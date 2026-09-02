@@ -432,6 +432,40 @@ public class ContinuousBatchSchedulerTests
     }
 
     [Fact]
+    public void Engine_RecurrentShorterSibling_NoCheckpointInside_RefillsThenSelfHeals()
+    {
+        // A sibling prompt that shares only the interior blocks of a longer
+        // fused-round chain matches them in the hash index but has no recurrent
+        // checkpoint inside its span - those blocks carry the round-end state, so
+        // adopting them would corrupt output. The safe answer is 0 reuse and a
+        // re-prefill of the whole prefix; after that re-prefill the sibling's own
+        // chain ends on a checkpoint and the identical follow-up reuses it.
+        var model = new RecurrentStubModel("fp-recurrent-sibling", peakToken: 3);
+        var cfg = RecurrentConfig();
+        using var engine = new InferenceEngine(model, cfg, NullLogger.Instance);
+        int[] longPrompt = Enumerable.Range(1, 5 * BlockSize + 5).ToArray();
+        int[] shortPrompt = Enumerable.Range(1, 3 * BlockSize + 5).ToArray();
+
+        var first = NewSequenceFromTokens("sibling-long", longPrompt, maxNew: 1);
+        engine.SubmitRequest(first).Completion.GetAwaiter().GetResult();
+        // One 4-block fused round + the aligned final block: blocks 0..2 are
+        // interior (non-restorable), block 3 and block 4 are the checkpoints.
+        Assert.Equal(new[] { 4 * BlockSize, BlockSize, 5 }, model.ForwardChunkSizes.Take(3).ToArray());
+
+        // Shares blocks 0..2 of that chain: matched but nothing restorable.
+        var sibling = NewSequenceFromTokens("sibling-short", shortPrompt, maxNew: 1);
+        engine.SubmitRequest(sibling).Completion.GetAwaiter().GetResult();
+        Assert.Equal(0, sibling.PrefixCacheReusedTokens);
+        Assert.Equal(new[] { 3 * BlockSize, 5 }, model.ForwardChunkSizes.Skip(4).Take(2).ToArray());
+
+        // Its re-prefill registered a checkpoint at its own end, so the
+        // identical follow-up now reuses the whole prefix.
+        var sibling2 = NewSequenceFromTokens("sibling-short-2", shortPrompt, maxNew: 1);
+        engine.SubmitRequest(sibling2).Completion.GetAwaiter().GetResult();
+        Assert.Equal(3 * BlockSize, sibling2.PrefixCacheReusedTokens);
+    }
+
+    [Fact]
     public void Executor_RecurrentOwnerSwap_PreservesFullCheckpoints_AndRefreshesPartialTail()
     {
         var model = new RecurrentStubModel("fp-recurrent-swap", peakToken: 3);
