@@ -396,6 +396,42 @@ public class ContinuousBatchSchedulerTests
     }
 
     [Fact]
+    public void Engine_RecurrentExplicitBreakpoint_MakesTheMarkedPrefixRestorable()
+    {
+        // A client cache breakpoint lands mid-prompt, capping registration and
+        // adoption at its block boundary. The prefill round must snap there so
+        // the capture records a real recurrent checkpoint; otherwise the marked
+        // blocks stay in the index as non-restorable interior slices and every
+        // follow-up request re-prefills them (the "matched N / restorable 0"
+        // warning instead of a warm cache).
+        var model = new RecurrentStubModel("fp-recurrent-breakpoint", peakToken: 3);
+        var cfg = RecurrentConfig();
+        using var engine = new InferenceEngine(model, cfg, NullLogger.Instance);
+        int[] prompt = Enumerable.Range(1, 5 * BlockSize + 5).ToArray();
+
+        var first = new SequenceState(
+            "bp-a", prompt, maxNewTokens: 1, BlockSize, SamplingConfig.Default,
+            cacheBreakpoints: new[] { 3 * BlockSize });
+        engine.SubmitRequest(first).Completion.GetAwaiter().GetResult();
+
+        // The fused chunk is split AT the breakpoint boundary (3 blocks) so the
+        // capture round ends on a genuine checkpoint, then the tail runs with
+        // the usual final-chunk alignment.
+        Assert.Equal(
+            new[] { 3 * BlockSize, 2 * BlockSize, 5 },
+            model.ForwardChunkSizes.Take(3).ToArray());
+
+        var second = new SequenceState(
+            "bp-b", prompt, maxNewTokens: 1, BlockSize, SamplingConfig.Default,
+            cacheBreakpoints: new[] { 3 * BlockSize });
+        engine.SubmitRequest(second).Completion.GetAwaiter().GetResult();
+
+        // The marked prefix (everything up to the breakpoint) is fully restorable.
+        Assert.Equal(3 * BlockSize, second.PrefixCacheReusedTokens);
+        Assert.Equal(new[] { 2 * BlockSize, 5 }, model.ForwardChunkSizes.Skip(4).Take(2).ToArray());
+    }
+
+    [Fact]
     public void Executor_RecurrentOwnerSwap_PreservesFullCheckpoints_AndRefreshesPartialTail()
     {
         var model = new RecurrentStubModel("fp-recurrent-swap", peakToken: 3);
