@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agentic Work, Skills &amp; Sandboxed Code — TensorSharp Wiki</title>
+  <meta name="description" content="Use TensorSharp AgentHost for progressive-disclosure Agent Skills, sandboxed model-authored code, persistent workspaces, repair loops, and downloadable artifacts.">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+  <script>try{var t=localStorage.getItem('ts-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.classList.toggle('dark',t==='dark');}catch(e){}</script>
+  <script defer src="assets/search-index.js"></script>
+  <script defer src="assets/app.js"></script>
+</head>
+<body data-page="agentic">
+<a class="skip" href="#content">Skip to content</a>
+<main class="content" id="content">
+  <div class="breadcrumb"><a href="index.html">Home</a> › Agentic Work</div>
+  <h1>Agentic Work</h1>
+  <p class="lede">TensorSharp.AgentHost turns a local model response into a bounded <strong>generate → inspect → run → repair → answer</strong> loop. It can load Agent Skills only when they are needed, work with files through five built-in code tools, run checks inside an OS sandbox, and return finished artifacts to an ordinary CLI, Web UI, Ollama, or OpenAI client.</p>
+
+  <div class="callout note"><div class="ic">🏷️</div><p><strong>Release boundary (verified 2026-09-01):</strong> <a href="https://github.com/zhongkaifu/TensorSharp/releases/tag/v3.3.0.0" target="_blank" rel="noopener">v3.3.0.0</a> is the latest tagged release and has prebuilt CLI/server archives. AgentHost was added in the current source after that tag; build the current source until a later release explicitly includes it.</p></div>
+
+  <h2 id="flow">What happens in one turn</h2>
+  <ol class="steps">
+    <li><h3>Advertise capabilities cheaply</h3><p>TensorSharp puts only each reachable skill's name and description in the prompt. A selected skill is preferred and made reachable; selection does <em>not</em> load its instructions.</p></li>
+    <li><h3>Load instructions on demand</h3><p>When a tool-capable model decides a skill applies, it calls <code>skills_read(skill, "SKILL.md")</code>. TensorSharp answers that built-in call in process, appends the result to the same conversation, and generates again.</p></li>
+    <li><h3>Do the work</h3><p>If the operator enabled <code>--code-exec</code>, the model can inspect, edit, create, patch, and test files in a request or chat workspace. Skill scripts can participate too, but only under their separate execution opt-in.</p></li>
+    <li><h3>Return an ordinary answer</h3><p>The client receives the final completion rather than TensorSharp's internal tool calls. A caller's own tools are never executed by TensorSharp; those calls are returned normally for the caller to service.</p></li>
+  </ol>
+  <div class="callout note"><div class="ic">🎯</div><p><strong>Current scope is one model and one in-process tool loop.</strong> TensorSharp does not spawn multiple agents or delegate to subagents, and it has no interactive approval queue before each command. The operator grants or withholds skills, script execution, code execution, networking, and installation when the CLI or server starts; an internal tool then runs under that policy or refuses.</p></div>
+
+  <h2 id="skills">Agent Skills and progressive disclosure</h2>
+  <p>A skill is a directory containing a required <code>SKILL.md</code> plus any scripts, references, and assets its instructions need. TensorSharp follows the Agent Skills specification and can load published skill repositories without rewriting their layout.</p>
+  <pre data-lang="text"><code>pdf/
+├── SKILL.md
+├── scripts/
+│   └── extract_tables.py
+├── references/
+│   └── forms.md
+└── assets/
+    └── template.pdf</code></pre>
+
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Tier</th><th>What reaches the model</th><th>When</th></tr></thead>
+    <tbody>
+      <tr><td>Metadata</td><td><code>name</code> + <code>description</code></td><td>Up front for selected and discoverable skills. This is the normal prompt cost.</td></tr>
+      <tr><td>Instructions</td><td>The complete <code>SKILL.md</code> body</td><td>Only after the model activates it with <code>skills_read(skill, "SKILL.md")</code>.</td></tr>
+      <tr><td>Bundled files</td><td>References, scripts, and assets</td><td>Paths and sizes are indexed; content is fetched only through <code>skills_read</code>, paged at 48 KB.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>The normal metadata block uses about 2% of the context window, clamped to roughly 1,024–10,000 tokens. The old behavior that inlined every selected body is off by default. A model family that cannot carry and parse tool declarations has no opportunity to call <code>skills_read</code>, so TensorSharp instead inlines selected skill bodies within a bounded fallback budget and does not advertise skills it cannot load.</p>
+  <p>The built-in skill tools are <code>skills_list</code> and <code>skills_read</code>. A third tool, <code>skills_run</code>, appears only with <code>--skills-allow-exec</code>. Script execution is off by default and remains separate from model-authored code execution.</p>
+
+  <h2 id="code-tools">Five code tools, off by default</h2>
+  <p><code>--code-exec</code> adds a patch-first coding surface. It does not require a skill, and merely installing or selecting a skill does not turn it on.</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Tool</th><th>Purpose</th><th>Important bound</th></tr></thead>
+    <tbody>
+      <tr><td><code>read_file</code></td><td>Read real workspace bytes with line numbers.</td><td>Bounded output; paths stay inside the workspace.</td></tr>
+      <tr><td><code>edit_file</code></td><td>Replace one exact string in one file.</td><td>Refuses missing or ambiguous matches instead of guessing.</td></tr>
+      <tr><td><code>write_file</code></td><td>Create a file or deliberately replace it whole.</td><td>Confined to the workspace and reports rewrite scope.</td></tr>
+      <tr><td><code>apply_patch</code></td><td>Create, update, rename, or delete several files by anchored hunks.</td><td>Atomic: all hunks apply or none do.</td></tr>
+      <tr><td><code>shell</code></td><td>Run tests, commands, and generated programs.</td><td>Timeout and output caps; sandbox-or-refuse on supported hosts.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Failures are designed to be repairable. A diagnostic that identifies a regular source file in the workspace returns a bounded source excerpt and asks for the smallest exact edit before rerunning. Syntax checks, missing-import installation when allowed, and installed-library API hints reduce avoidable model rounds.</p>
+
+  <h2 id="workspaces">Workspace lifetime and artifacts</h2>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Surface</th><th>Workspace lifetime</th><th>Result</th></tr></thead>
+    <tbody>
+      <tr><td>CLI / interactive chat</td><td>Persistent for the process or chat session.</td><td>One tool call can inspect or repair files written by an earlier call.</td></tr>
+      <tr><td>Bundled Web UI</td><td>Persistent for that Web chat session.</td><td>Live writing/running activity, bounded output, and generated-file download chips.</td></tr>
+      <tr><td>OpenAI and Ollama HTTP chat</td><td>One private workspace across every internal tool round in that request; deleted when the response finishes.</td><td>Repairs work within a request, while separate requests remain stateless.</td></tr>
+      <tr><td><code>skills_run</code> without code execution</td><td>Fresh per-call scratch directory, deleted on return.</td><td>Scripts do not accidentally share state.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>When code execution is enabled, a skill script shares the same request/chat workspace as the five code tools. The server copies produced files into its bounded artifact store; the Web UI exposes safe download links, and artifact responses are sent as attachments with content sniffing disabled.</p>
+
+  <h2 id="sandbox">Sandbox-or-refuse security model</h2>
+  <p>Enabling execution is an operator decision, not a request field. On macOS and Linux, model-authored commands and opted-in skill scripts run with a workspace write boundary, an unreadable home directory, a scrubbed environment, and network denied by default. Paths are also checked in process before the OS sandbox is entered.</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Platform</th><th>Model-authored code</th><th>Skill scripts</th></tr></thead>
+    <tbody>
+      <tr><td>macOS</td><td><code>sandbox-exec</code>; refuses if confinement is unavailable.</td><td>Default <code>--skills-sandbox required</code>; sandboxed or refused.</td></tr>
+      <tr><td>Linux</td><td>Requires <code>bwrap</code> 0.12.0 or newer; otherwise refuses.</td><td>The same safe <code>bwrap</code> requirement under the default <code>required</code> mode.</td></tr>
+      <tr><td>Windows</td><td>No filesystem/network sandbox is implemented. <code>--code-exec-unconfined</code> is required and intentionally grants the process's file and network reach.</td><td>A job object bounds the process tree but not files or sockets. Default <code>required</code> refuses; <code>--skills-sandbox preferred</code> is the explicit weaker opt-in.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="callout warn"><div class="ic">⚠️</div><p><strong>Sandboxed does not mean a disposable VM.</strong> macOS deliberately retains shared <code>/private/tmp</code> compatibility and some local Unix IPC. Seatbelt restrictions pass to children and ordinary process groups are stopped, but a deliberately detached child can outlive the request; every tool result reports that gap. Linux shares parts of the host network namespace even while IP networking is denied. Every reported platform gap matters. Do not enable unconfined execution on a server other people can reach.</p></div>
+
+  <h3 id="network">Network and package installation are separate opt-ins</h3>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Option</th><th>Default</th><th>What it grants</th></tr></thead>
+    <tbody>
+      <tr><td><code>--code-exec-allow-network</code></td><td>Off</td><td>Unrestricted host IP networking for every model-authored command, including LAN/loopback services. It is not domain-filtered.</td></tr>
+      <tr><td><code>--skills-allow-network</code></td><td>Off</td><td>Network for opted-in bundled skill scripts only. It does not affect <code>shell</code>.</td></tr>
+      <tr><td><code>--code-exec-allow-install</code></td><td>Off</td><td>Host-performed recognized pip/npm installs. The host reads and validates package names, uses prebuilt wheels / disabled npm scripts, and removes the install from the model's command.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><code>--code-exec-packages</code>, <code>--code-exec-install-index</code>, and <code>--code-exec-install-domains</code> constrain the host installer. They are not a security boundary after unrestricted command networking is enabled, because generated code can download an artifact directly. The script and code network switches are intentionally independent.</p>
+
+  <h2 id="start">Start an agentic session</h2>
+  <p>Skills can be used without executing code:</p>
+  <pre data-lang="bash"><code>dotnet run --project TensorSharp.Cli -c Release -- \
+  --model models/model.gguf --backend ggml_metal \
+  --skills-dir ./skills --skill pdf -i</code></pre>
+  <p>Add the five code tools explicitly. This example keeps both command networking and package installation off:</p>
+  <pre data-lang="bash"><code>dotnet run --project TensorSharp.Cli -c Release -- \
+  --model models/model.gguf --backend ggml_metal \
+  --skills-dir ./skills --skill pdf --code-exec -i</code></pre>
+  <p>Or host the same loop for the Web UI and compatible APIs:</p>
+  <pre data-lang="bash"><code>dotnet run --project TensorSharp.Server -c Release -- \
+  --model models/model.gguf --backend ggml_cuda \
+  --skills-dir ./skills --code-exec
+
+# Browser UI: http://localhost:5000/
+# Liveness:   http://localhost:5000/health</code></pre>
+  <p>On Linux, install <code>bwrap</code> 0.12.0 or newer first. On Windows, code execution remains unavailable unless the operator deliberately adds <code>--code-exec-unconfined</code>. Do not copy that Windows escape hatch onto a shared server.</p>
+
+  <h2 id="http">Use skills from an ordinary HTTP client</h2>
+  <p>The server must be started with a skills registry. A client then selects skills on the normal chat request; TensorSharp services its own skill/code calls internally and returns the completed response.</p>
+  <pre data-lang="json"><code>{
+  "model": "local",
+  "messages": [
+    { "role": "user", "content": "Extract the tables and summarize the findings." }
+  ],
+  "skills": ["pdf"],
+  "skills_discovery": false,
+  "stream": true
+}</code></pre>
+  <p><code>skills_discovery</code> defaults to <code>true</code>. Code execution has no per-request enable field: the operator either started the host with <code>--code-exec</code> or the five tools are absent. The agent loop allows 8 internal rounds by default, or 24 when code execution is enabled; <code>--skills-max-rounds</code> sets an explicit 1–64 bound.</p>
+
+  <h2 id="compatibility">Model-family limits</h2>
+  <p>The in-process loop requires a model family that can both carry tool declarations and parse tool calls. Families without that round trip receive selected skill instructions inline as a fallback, but are not offered the five code tools. TensorSharp logs the limitation rather than silently pretending code execution is available.</p>
+
+  <div class="content-footer">
+    <a href="server.html">← Server &amp; Web UI</a>
+    <a href="http-api.html">Next: HTTP API →</a>
+  </div>
+</main>
+</body>
+</html>

@@ -335,13 +335,13 @@ TensorSharp/
 
 ## Project / NuGet Package Boundaries
 
-The repository is split along package boundaries so consumers can depend on only the layers they actually need. These are buildable package projects and IDs, but the current Runtime/Models/Backends/CLI/Server packages are **not published on NuGet.org**. Use project references from a source checkout for now; do not copy `dotnet add package TensorSharp.Models` examples until a matching version appears on [NuGet.org](https://www.nuget.org/profiles/TensorSharp).
+The repository is split along package boundaries so consumers can depend on only the layers they actually need. **Status verified 2026-09-01:** [NuGet.org](https://www.nuget.org/profiles/TensorSharp) lists version **3.1.2** of `TensorSharp.Tensors`, `TensorSharp.Runtime`, `TensorSharp.Models`, `TensorSharp.Backends.GGML`, `TensorSharp.Backends.Cuda`, `TensorSharp.Backends.MLX`, `TensorSharp.Server`, and `TensorSharp.Cli`. Those packages lag the current source and v3.3.0.0 application release. `TensorSharp.AgentHost` and `TensorSharp.Distributed` remain buildable package projects but are not yet published, so consumers of those layers need project references from a source checkout.
 
 | Project | NuGet package | Public namespace | Responsibility |
 |---|---|---|---|
 | `TensorSharp.Core` | `TensorSharp.Tensors` | `TensorSharp` | Tensor primitives, ops, allocators, storage, and device abstraction |
 | `TensorSharp.Runtime` | `TensorSharp.Runtime` | `TensorSharp.Runtime` | GGUF parsing, tokenizers, prompt rendering, sampling, output protocol parsing, paged KV cache, continuous-batching scheduler |
-| `TensorSharp.AgentHost` | `TensorSharp.AgentHost` | `TensorSharp.AgentHost` | Agent Skills and code execution (`read_file` + `edit_file` + `write_file` + `shell` + `apply_patch`) with OS sandboxing, per-session workspaces and shell state, and host-classified package installs — built on `TensorSharp.Runtime` |
+| `TensorSharp.AgentHost` | `TensorSharp.AgentHost` | `TensorSharp.AgentHost` | Agent Skills and code execution (`read_file` + `edit_file` + `write_file` + `shell` + `apply_patch`) with OS sandboxing, per-Web/CLI-session and per-HTTP-request workspaces, and host-classified package installs — built on `TensorSharp.Runtime` |
 | `TensorSharp.Models` | `TensorSharp.Models` | `TensorSharp.Models` | `ModelBase`, architecture implementations, multimodal encoders, batched / paged forward passes, and model-side execution helpers |
 | `TensorSharp.Backends.GGML` | `TensorSharp.Backends.GGML` | `TensorSharp.GGML` | GGML-backed execution and native interop |
 | `TensorSharp.Backends.Cuda` | `TensorSharp.Backends.Cuda` | `TensorSharp.Cuda` | Direct CUDA allocator, storage, cuBLAS GEMM, PTX kernels, and quantized CUDA ops |
@@ -380,9 +380,9 @@ git push origin vX.Y.Z.W
 
 ### Platform binary release status
 
-The [`Release Binaries`](.github/workflows/release-binaries.yml) workflow is intended to build self-contained archives of **TensorSharp.Server** and **TensorSharp.Cli** with the .NET 10 runtime and native libraries. However, the current latest release, [v3.0.5.0](https://github.com/zhongkaifu/TensorSharp/releases/tag/v3.0.5.0), has **no uploaded application archives** (only GitHub's automatic source downloads), so users must currently build from source. Do not construct an archive URL from the names below without first confirming that the file is listed on the [Releases page](https://github.com/zhongkaifu/TensorSharp/releases).
+**Status verified 2026-09-01:** [v3.3.0.0](https://github.com/zhongkaifu/TensorSharp/releases/tag/v3.3.0.0) publishes ten self-contained application archives of **TensorSharp.Server** and **TensorSharp.Cli**, including the .NET 10 runtime and native libraries. There is one Server archive and one CLI archive for each of the five platform/backend suffixes below. Check the [Releases page](https://github.com/zhongkaifu/TensorSharp/releases) for newer versions instead of assuming that this stamped version remains latest.
 
-When a release workflow completes successfully, its intended archive matrix is:
+The published v3.3.0.0 archive matrix is:
 
 | Archive suffix | Native backend(s) bundled | Format |
 |---|---|---|

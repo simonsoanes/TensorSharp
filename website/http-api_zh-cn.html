@@ -24,8 +24,8 @@
     <tbody>
       <tr><td><strong>兼容 Ollama</strong></td><td><code>/api/generate</code>、<code>/api/chat/ollama</code>、<code>/api/tags</code>、<code>/api/show</code></td></tr>
       <tr><td><strong>兼容 OpenAI</strong></td><td><code>/v1/chat/completions</code>、<code>/v1/models</code>、<code>/v1/videos/generations</code>、<code>/v1/skills</code></td></tr>
-      <tr><td><strong>Web UI (SSE)</strong></td><td><code>/api/chat</code>、<code>/api/sessions</code>、<code>/api/models</code>、<code>/api/models/load</code>、<code>/api/upload</code>、<code>/api/image-edit</code>、<code>/api/image-edit/stream</code>、<code>/api/video-generate</code>、<code>/api/video-generate/stream</code>、<code>/api/skills</code></td></tr>
-      <tr><td><strong>工具端点</strong></td><td><code>/api/version</code>、<code>/api/queue/status</code></td></tr>
+      <tr><td><strong>Web UI (SSE)</strong></td><td><code>/api/chat</code>、<code>/api/sessions</code>、<code>/api/models</code>、<code>/api/models/load</code>、<code>/api/upload</code>、<code>/api/image-edit</code>、<code>/api/image-edit/stream</code>、<code>/api/video-generate</code>、<code>/api/video-generate/stream</code>、<code>/api/skills</code>、<code>/api/code/artifacts</code></td></tr>
+      <tr><td><strong>工具端点</strong></td><td><code>/health</code>、<code>/api/version</code>、<code>/api/queue/status</code></td></tr>
     </tbody>
   </table>
   </div>
@@ -38,7 +38,7 @@
   <pre data-lang="bash"><code>curl -s http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"gemma-4-E4B-it-Q8_0.gguf","messages":[{"role":"user","content":"Reply with one short hello."}],"max_tokens":32}'</code></pre>
-  <p>浏览器 UI 位于 <a href="http://localhost:5000/index.html"><code>http://localhost:5000/index.html</code></a>；<code>GET /</code> 返回纯文本存活检查。</p>
+  <p>浏览器 UI 位于 <a href="http://localhost:5000"><code>http://localhost:5000/</code></a>：带有 <code>wwwroot</code> 内容时，<code>GET /</code> 直接提供 <code>index.html</code>。<code>GET /health</code> 是稳定的纯文本存活检查；只有不带 UI 的无界面部署才会让 <code>/</code> 回退到同一响应。</p>
 
   <h2 id="ollama">1 · 兼容 Ollama 的 API</h2>
 
@@ -214,6 +214,7 @@ curl -X POST http://localhost:5000/v1/chat/completions \
   <pre data-lang="json"><code>"skills": ["pdf", "xlsx"],
 "skills_discovery": true</code></pre>
   <p><code>skills_discovery</code> 默认为 <code>true</code>：本次请求<em>没有</em>点名的技能，其名称与描述也会展示给模型，好让它自己发现你没想到要点名的那个。设为 <code>false</code> 则把本次请求限制在它列出的技能上。点名一个服务端没有的技能会返回 <code>400</code> —— 用 <a href="#skills-manage"><code>GET /api/skills</code></a> 查看已注册了哪些。</p>
+  <p>对能调用工具的家族，初始提示词只携带元数据，显式选中的技能也一样；模型激活匹配技能时再用 <code>skills_read</code> 读取 <code>SKILL.md</code>。若一个家族无法同时渲染并解析完整工具往返，则改为内联选中技能正文，并丢弃发现目录；当前 <code>qwen4exp</code> 与 Mistral 3 都走这条路径。</p>
   <pre data-lang="bash"><code># 兼容 OpenAI
 curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -240,10 +241,15 @@ curl -N -X POST http://localhost:5000/api/chat \
   -H "Content-Type: application/json" \
   -d '{"messages": [{"role": "user", "content": "总结这份 PDF。"}], "skills": ["pdf"], "maxTokens": 400}'</code></pre>
   <p>返回的是一条普通回复。模型通过内置的 <code>skills_list</code> / <code>skills_read</code> 工具取用技能的其余内容，而这两个工具由服务端<strong>自己</strong>在进程内、紧挨着权重应答，因此客户端永远不会收到一个它无法执行的工具调用，现有的 OpenAI SDK 也无需改动（把这两个字段放进 <code>extra_body</code> 即可）。技能还能与你自己的 <code>tools</code> 共存：技能工具会并入你发来的工具列表，服务端只应答属于它自己的那几个，而对<em>你的</em>工具的调用照常回传——此时模型从技能里读到的内容已经在对话中了。</p>
-  <div class="callout note"><div class="ic">📌</div><p>模型的每一次取用都是一次额外的生成，而<strong>每一轮都是流式的</strong>：渐进式披露循环会自己解析 token 流——它本来就必须解析，因为它要找出并在服务端处理 <code>skills_read</code> 调用——然后在解码的同时把正文与推理转发出去，而把工具调用标记留在自己手里，因此客户端永远不会收到一个它无法处理的调用。在 <code>/api/chat</code> 上，下文的 <code>skill_step</code> 帧会在每次取用完成时标记它，让模型读文件的那段停顿可见而不是一片空白。被选中的技能若已经写进提示词（常见情况），本次请求只跑一轮；其余情况由 <code>--skills-max-rounds</code>（默认 <code>8</code>）设上限。</p></div>
+  <div class="callout note"><div class="ic">📌</div><p>每次内置读取或代码操作都可能引出一次额外生成，而<strong>每一轮都以流式运行</strong>。服务端吞掉自己的工具标记，同时转发解码中的正文 / 推理，因此客户端收到的是完成后的回答，而不是内部调用。<code>--skills-max-rounds</code> 限制循环：默认 <code>8</code>，提供代码执行时自动变为 <code>24</code>；运维显式设置的值始终原样保留。</p></div>
   <p>Web UI 的流式响应会为每一次已执行的技能工具调用推送一帧，随完成即时送出：</p>
-  <pre data-lang="text"><code>data: {"skill_step":"skills_read","skill":"pdf","detail":"references/forms.md","ok":true}</code></pre>
-  <p><code>skill_step</code> 是执行的工具（<code>skills_list</code> / <code>skills_read</code> / <code>skills_run</code>），<code>skill</code> 是它作用的技能，<code>detail</code> 是文件，<code>ok</code> 表示是否成功。→ <a href="#webui-sse">Web UI SSE 协议</a></p>
+  <pre data-lang="text"><code>data: {"skill_step":"skills_read","skill":"pdf","detail":"references/forms.md","ok":true,"round":1,"files":null}</code></pre>
+  <p><code>skill_step</code> 是执行过的内置工具，<code>skill</code>/<code>detail</code> 标识目标，<code>ok</code> 表示成功与否，<code>round</code> 从 1 起算；<code>files</code> 以 <code>{name, bytes, url}</code> 携带生成产物。→ <a href="#webui-sse">Web UI SSE 协议</a></p>
+
+  <h3 id="agentic-http">智能体代码执行</h3>
+  <p>代码执行是服务端启动能力，不是逐请求开关。带上 <code>--code-exec</code> 后，每个能调用工具的聊天接口都可以使用五个服务端自有工具：<code>read_file</code>、<code>edit_file</code>、<code>write_file</code>、<code>shell</code> 与 <code>apply_patch</code>。它们与技能共用同一个有界循环，绝不会转发客户端；调用方定义的工具仍由调用方处理。这里没有逐命令审批 API。→ <a href="agentic_zh-cn.html">参数、沙箱与信任模型</a></p>
+  <p>每个 OpenAI 或 Ollama 请求都得到唯一的私有工作区，在内部轮次之间共享，并在完成、取消或失败后删除。具名 Web UI 会话则跨聊天轮次保留工作区；技能脚本与代码工具共用它。保留的产物可通过 <code>GET /api/code/artifacts/{runId}</code> 列出，并从 <code>GET /api/code/artifacts/{runId}/{*path}</code> 下载；下载始终带 attachment 与 <code>nosniff</code>。</p>
+  <div class="callout warn"><div class="ic">🔒</div><p>脚本与命令执行都默认关闭，OS 沙箱默认 <code>required</code>（要么隔离，要么拒绝）。macOS Seatbelt 与 Linux bubblewrap 0.12+ 会约束写入、主目录读取与默认关闭的网络，但 macOS 无法保证清理故意脱离的子进程。Windows job object 只约束进程树，不能限制文件或网络，因此代码需要显式 <code>--code-exec-unconfined</code>，技能脚本需要 <code>--skills-sandbox preferred</code>。<code>--code-exec-allow-network</code> 赋予生成命令不受限的宿主 IP 网络访问（含 LAN / loopback）；它与宿主代安装、<code>--skills-allow-network</code> 彼此独立。</p></div>
 
   <h3 id="skills-manage">管理技能注册表</h3>
   <p>同一份数据有两种形态：只读、偏 OpenAI 风格的 <code>/v1/skills</code>，以及 Web UI 的 <code>/api/skills</code>——后者额外提供加载错误、单文件读取、上传与删除。</p>
@@ -292,7 +298,7 @@ curl -X DELETE http://localhost:5000/api/skills/pdf   # {"removed":true}</code><
   "modified": "2026-08-29T12:00:00Z"
 }</code></pre>
   <p><code>kind</code> 取值为 <code>script</code> / <code>reference</code> / <code>asset</code> / <code>manifest</code> / <code>other</code>；<code>origin</code> 为 <code>discovered</code> 表示是扫描配置目录发现的，<code>installed</code> 表示是从这里上传的；<code>warnings</code> 收录那些不完全合规但仍然加载成功的问题（<code>name</code> 与目录名不一致、描述超过 1024 字符上限等）。<code>GET /api/models</code> 会以 <code>"skills": {"enabled": true, "installable": true, "count": 7}</code> 报告该功能本身，服务端关闭技能时该字段为 <code>null</code> —— Web UI 正是据此决定要不要显示相关控件。错误遵循服务端按前缀区分的惯例：<code>/v1/*</code> 返回 <code>{"error": {"message": "…", "type": "invalid_request_error"}}</code>，<code>/api/*</code> 返回 <code>{"error": "…"}</code>。</p>
-  <div class="callout warn"><div class="ic">🔒</div><p>上传的技能属于不受信任的内容，因此在落盘之前就会被校验：ZIP 的每一个条目都要经过与模型自身读取相同的那道路径关卡（于是 <code>../../authorized_keys</code> 会被拒绝而不是被写入），大小按解压后的字节流校验而不是按条目声明的长度，并且压缩包一旦超过 4096 个文件、单文件解压超过 64 MB、整包解压超过 256 MB，或压缩比超过 200×，就会被拒收。运行技能自带的脚本（<code>skills_run</code>）默认关闭，除非服务端启动时带了 <code>--skills-allow-exec</code> —— 在共享服务器上，该参数就是一个远程代码执行入口。→ <a href="cli_zh-cn.html#skills">技能相关参数</a></p></div>
+  <div class="callout warn"><div class="ic">🔒</div><p>上传的技能属于不受信任的内容，因此落盘前会校验：ZIP 条目使用与模型读取相同的路径关卡，按解压后大小计数，并限制 4096 个文件、单文件 64 MB、总计 256 MB 与 200× 压缩比。除非服务端带 <code>--skills-allow-exec</code> 启动，否则不会提供 <code>skills_run</code>；在默认 <code>required</code> 策略下，它要么进入合格 OS 沙箱，要么拒绝。这仍是在授权模型选择任意代码，只应放在用户与技能都可信的宿主上。→ <a href="cli_zh-cn.html#skills">技能相关参数</a></p></div>
 
   <h2 id="structured">5 · 结构化输出（JSON schema）</h2>
   <p>OpenAI 的 <code>response_format</code> 接受 <code>text</code>、<code>json_object</code> 与经过校验的 <code>json_schema</code>。服务器会注入严格的 JSON 指令，并在返回前校验输出。JSON 请求还会把<strong>首个采样 token</strong> 约束为以 <code>{</code> 开头的候选，使爱闲聊的模型无法在 JSON 对象前输出散文，流式首 token 时延因此反映 prefill 延迟（<code>TS_JSON_FORCE_OPEN=0</code> 可关闭）。</p>
@@ -322,7 +328,7 @@ curl -X DELETE http://localhost:5000/api/skills/pdf   # {"removed":true}</code><
     },
     "max_tokens": 120
   }'</code></pre>
-  <div class="callout warn"><div class="ic">⚠️</div><p><code>json_schema</code> 不能与 <code>tools</code> 或 <code>think</code> 同时使用。无效 schema 返回 HTTP <code>400</code>；校验失败的输出返回 HTTP <code>422</code>。</p></div>
+  <div class="callout warn"><div class="ic">⚠️</div><p><code>json_schema</code> 不能与调用方的 <code>tools</code> 或 <code>think</code> 同时使用。它可以与 <code>skills</code> 组合，但选中技能正文会被内联，而且该请求不会提供任何内置技能 / 代码工具，因为 schema 约束下无法生成调用标记。无效 schema 返回 HTTP <code>400</code>；校验失败的输出返回 HTTP <code>422</code>。</p></div>
 
   <h2 id="webui-sse">6 · Web UI SSE 协议（<code>/api/chat</code>）</h2>
   <p>这是内置聊天 UI 所用的协议；外部 UI 也可接入同一端点。每个事件都是一个 JSON 对象，以单个 <code>data: …</code> SSE 帧传递。</p>
@@ -336,7 +342,10 @@ curl -N -X POST http://localhost:5000/api/chat \
   -d '{ "messages": [{"role": "user", "content": "Hi"}], "maxTokens": 50, "sessionId": null, "newChat": false, "think": false, "tools": [] }'</code></pre>
   <p>复用相同的 <code>sessionId</code> 会在下一轮把之前的助手 token 拼接进 KV 缓存前缀。终止帧会报告复用情况：</p>
   <pre data-lang="text"><code>data: {"done":true,"tokenCount":187,"elapsed":2.143,"tokPerSec":87.23,"promptTokens":512,"kvReusedTokens":420,"kvReusePercent":82.0}</code></pre>
-  <p>事件字段包括 <code>token</code>（内容）、<code>thinking</code>（推理块）、<code>tool_calls</code>、<code>replace</code>/<code>diffusionStep</code>（DiffusionGemma 预览）、<code>skill_step</code>（<a href="#skills">Agent Skills</a> 取用记录）以及终止的 <code>done</code> 摘要。</p>
+  <p>事件字段包括 <code>token</code>（内容）、<code>thinking</code>（推理块）、调用方的 <code>tool_calls</code>、<code>replace</code>/<code>diffusionStep</code>（DiffusionGemma 预览）、<code>skill_step</code>（已完成内置工具以及 <code>round</code>/<code>files</code>）、<code>tool_progress</code>（临时的 <code>writing</code> / <code>running</code> / <code>finished</code> 活动，含 <code>tool</code>、<code>text</code>、<code>seconds</code>、<code>detail</code>），以及终止的 <code>done</code> 摘要。浏览器完成后会清除活动状态，不构造工具历史记录，但会保留产物下载标签。</p>
+  <pre data-lang="text"><code>data: {"tool_progress":"writing","tool":"shell","text":"Writing code…","seconds":0,"detail":""}
+data: {"tool_progress":"running","tool":"shell","text":"Running…","seconds":2.0,"detail":"python · 2.1 KB"}
+data: {"tool_progress":"finished","tool":"shell","text":"Finished","seconds":2.4,"detail":"exit 0"}</code></pre>
 
   <h3 id="upload">文件上传（<code>/api/upload</code>）</h3>
   <p><code>POST /api/upload</code> 接收 multipart 表单（使用第一个文件），返回存储路径 / URL 与该类型的元数据；随后由 <code>/api/chat</code> 消息引用返回的服务端路径（<code>imagePaths</code>、<code>audioPaths</code> 等）。接受的类型包括：<strong>图像</strong>（<code>.png .jpg .jpeg .gif .webp .bmp .heic .heif</code>）、<strong>视频</strong>（<code>.mp4 .mov .avi .mkv .webm</code>，按 <code>VIDEO_SAMPLE_FPS</code> 抽帧）、<strong>音频</strong>（<code>.mp3 .wav .ogg .flac .m4a</code>）、<strong>PDF</strong> 与<strong>文本 / 代码</strong>文件（以 <code>textContent</code> 完整返回）。数字版 PDF 返回完整提取的 <code>textContent</code>；扫描版 PDF 在托管视觉模型时像视频一样返回页面图像，否则给出 <code>needsVision</code> 警告。<code>TS_PDF_MAX_PAGES</code> 限制读取页数（默认全部）。</p>

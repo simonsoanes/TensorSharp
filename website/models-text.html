@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Text &amp; LLM Models — TensorSharp Wiki</title>
-  <meta name="description" content="Download-and-run recipes for all ten text architectures, plus multimodal input, thinking mode and tool calling.">
+  <meta name="description" content="Download-and-run recipes for all ten text architectures, plus per-family notes for multimodal input, thinking mode and tool calling.">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
   <script>try{var t=localStorage.getItem('ts-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.classList.toggle('dark',t==='dark');}catch(e){}</script>
@@ -16,7 +16,7 @@
 <main class="content" id="content">
   <div class="breadcrumb"><a href="index.html">Home</a> › <a href="models.html">Supported Models</a> › Text &amp; LLM Models</div>
   <h1>Text &amp; LLM Models</h1>
-  <p class="lede">Copy-paste download and run recipes for every text architecture, followed by the capabilities they share: image, audio and PDF input, thinking mode, and tool calling.</p>
+  <p class="lede">Copy-paste download and run recipes for every text architecture, followed by per-family capability notes for image, audio and PDF input, thinking mode, and tool calling.</p>
 
   <h2 id="download-run">Download &amp; run, per family</h2>
   <p>Install and verify the <a href="getting-started.html#install-dotnet">.NET 10 SDK for your platform</a> before running a build command. The first block is the verified Gemma 4 E4B quick start. All blocks use the Hugging Face CLI (<code>pip install -U huggingface_hub</code>); the per-family blocks after the first assume a full source build from the repository root. One-shot CLI text prompts are read from a file via <code>--input</code> (put your question in <code>prompt.txt</code> first — <code>--prompt</code> is reserved for Qwen-Image-Edit). Swap <code>--backend</code> for <code>ggml_metal</code> / <code>ggml_vulkan</code> / <code>ggml_cpu</code> to match your hardware (the CLI default is <code>ggml_cpu</code>).</p>
@@ -32,7 +32,7 @@ dotnet run --project TensorSharp.Cli -c Release --no-build -- --model models/gem
     --input prompt.txt --max-tokens 300 --backend ggml_cuda
 dotnet run --project TensorSharp.Server -c Release --no-build -- --model models/gemma-4-E4B-it-Q8_0.gguf \
     --backend ggml_cuda</code></pre>
-  <p>On Apple Silicon, omit the CUDA environment assignment and use <code>ggml_metal</code>; on a supported Windows/Linux Vulkan GPU, request <code>TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON</code> instead and use <code>ggml_vulkan</code>. For image, video, or audio input, also run <code>hf download ggml-org/gemma-4-E4B-it-GGUF mmproj-gemma-4-E4B-it-Q8_0.gguf --local-dir models</code> and pass <code>--mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf</code>. The server's browser UI is <code>http://localhost:5000/index.html</code>. See <a href="getting-started.html#e4b-fast-lane">Getting Started</a> for Windows PowerShell and full platform syntax.</p>
+  <p>On Apple Silicon, omit the CUDA environment assignment and use <code>ggml_metal</code>; on a supported Windows/Linux Vulkan GPU, request <code>TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON</code> instead and use <code>ggml_vulkan</code>. For image, video, or audio input, also run <code>hf download ggml-org/gemma-4-E4B-it-GGUF mmproj-gemma-4-E4B-it-Q8_0.gguf --local-dir models</code> and pass <code>--mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf</code>. The server's browser UI is <code>http://localhost:5000/</code>; its liveness endpoint is <code>/health</code>. See <a href="getting-started.html#e4b-fast-lane">Getting Started</a> for Windows PowerShell and full platform syntax.</p>
 
   <h3 id="deepseek4">DeepSeek V4 Flash (284B MoE, text, thinking, tools, DSpark)</h3>
   <p>A 284B mixture-of-experts model with a 128-token raw sliding window plus block-compressed attention (1M advertised context). It does <em>not</em> use the generic per-op forward: TensorSharp runs it through one of three dedicated whole-model executors — <code>--backend cuda</code> (direct CUDA, no ggml), <code>--backend ggml_cuda</code> / <code>ggml_vulkan</code> (native ggml), and <code>--backend cpu</code> (100% pure C#, no native dependencies). All of them layer-split the weights across every visible GPU, so a model far bigger than one card still runs; <code>--tp N</code> (or <code>TS_DSV4_NGPU</code>) caps how many GPUs it uses.</p>
@@ -127,8 +127,9 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.5-9B-U
 
 dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda --spec</code></pre>
 
-  <h3 id="qwen4exp">Qwen 3.8 Flash Next (hybrid MoE, text + image, thinking, tools)</h3>
-  <p>A hybrid mixture-of-experts model whose GGUF architecture id is <code>qwen4exp</code>: GatedDeltaNet recurrent layers interleaved with full-attention layers (some behind Qwen Sparse Attention's indexer), a PLE n-gram embedding block, ×4 hyper-connection streams and a 512-expert MoE. 48 layers, hidden size 2560, 24 query / 2 KV heads at head_dim 256, a 248,320-token vocabulary, 10 of the 512 experts used per token, GDN on 36 of the 48 layers and PLE on layer 1. On the GGML backends the whole token runs as (almost) <strong>one graph</strong> — embedding, in-graph PLE, all 48 layers, the final mixer and the LM head — replayed from a shape-keyed cache of captured graphs. Vision rides the Qwen3.5-VL tower with (T,H,W) IMRoPE positions, so multi-image prompts and multi-turn image sessions both work, with KV reused across turns as long as the new prompt extends the cached prefix exactly (the GDN recurrence cannot rewind). Concurrent requests are served through per-sequence state holders — each request owns its attention KV and indexer caches, its GDN and PLE state — so switching between them is a reference swap. Thinking and tool calling both work.</p>
+  <h3 id="qwen4exp">Qwen 3.8 Flash Next (hybrid MoE, text + image, thinking; no tool-call round trip)</h3>
+  <p>A hybrid mixture-of-experts model whose GGUF architecture id is <code>qwen4exp</code>: GatedDeltaNet recurrent layers interleaved with full-attention layers (some behind Qwen Sparse Attention's indexer), a PLE n-gram embedding block, ×4 hyper-connection streams and a 512-expert MoE. 48 layers, hidden size 2560, 24 query / 2 KV heads at head_dim 256, a 248,320-token vocabulary, 10 of the 512 experts used per token, GDN on 36 of the 48 layers and PLE on layer 1. On the GGML backends the whole token runs as (almost) <strong>one graph</strong> — embedding, in-graph PLE, all 48 layers, the final mixer and the LM head — replayed from a shape-keyed cache of captured graphs. Vision rides the Qwen3.5-VL tower with (T,H,W) IMRoPE positions, so multi-image prompts and multi-turn image sessions both work, with KV reused across turns as long as the new prompt extends the cached prefix exactly (the GDN recurrence cannot rewind). Concurrent requests are served through per-sequence state holders — each request owns its attention KV and indexer caches, its GDN and PLE state — so switching between them is a reference swap. Thinking works and is always on.</p>
+  <div class="callout note"><div class="ic">🧰</div><p><strong>Tool status:</strong> generic tool calling is currently unavailable for <code>qwen4exp</code> because its output parser cannot return structured calls. TensorSharp therefore withholds the built-in Agent Skills and code-execution tools for this family; when an Agent Skill is selected, its instruction body is inlined into the prompt as the fallback instead of being fetched through <code>skills_read</code>.</p></div>
   <pre data-lang="bash"><code># ~73.4 GiB for the UD-Q2_K_XL tier — pick a different quant directory for more or less
 hf download unsloth/Qwen3.8-Flash-Next-GGUF --include "UD-Q2_K_XL/*" --local-dir models
 hf download unsloth/Qwen3.8-Flash-Next-GGUF mmproj-BF16.gguf --local-dir models
@@ -227,7 +228,7 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/diffusiongem
   <p>Enable it via <code>--think</code> (CLI), <code>"think": true</code> (Ollama API / Web UI), or the thinking toggle in the browser. Responses expose the reasoning separately — e.g. <code>message.thinking</code> in the Ollama chat response.</p>
 
   <h2 id="toolcalling">Tool calling / function calling</h2>
-  <p>Models can invoke user-defined tools and participate in multi-turn tool-call conversations. Define tools as JSON and pass them via <code>--tools</code> (CLI) or the <code>tools</code> parameter (API). Each architecture uses its own wire format, but the output parser extracts calls into structured <code>tool_calls</code> regardless:</p>
+  <p>Supported model families can invoke user-defined tools and participate in multi-turn tool-call conversations. Define tools as JSON and pass them via <code>--tools</code> (CLI) or the <code>tools</code> parameter (API). Each supported architecture uses its own wire format, and its output parser extracts calls into structured <code>tool_calls</code>:</p>
   <ul>
     <li><strong>Nemotron-H</strong> — <code>&lt;tool_call&gt;{"name": …, "arguments": {…}}&lt;/tool_call&gt;</code></li>
     <li><strong>Qwen 3.5 / 3.6</strong> — the same <code>&lt;tool_call&gt;</code> block with an XML body: <code>&lt;function=NAME&gt;&lt;parameter=key&gt;value&lt;/parameter&gt;&lt;/function&gt;</code> (the JSON form is still accepted).</li>
@@ -237,6 +238,7 @@ dotnet TensorSharp.Server/bin/TensorSharp.Server.dll --model models/diffusiongem
     <li><strong>DeepSeek V4</strong> — DSML markup: the system prompt teaches the syntax and carries one JSON schema per function, and the model answers with <code>&lt;｜DSML｜tool_calls&gt;&lt;｜DSML｜invoke name="NAME"&gt;&lt;｜DSML｜parameter name="key" string="true|false"&gt;value&lt;/｜DSML｜parameter&gt;…</code>.</li>
     <li><strong>GLM 5.x</strong> — XML with per-argument tags: <code>&lt;tool_call&gt;NAME&lt;arg_key&gt;k&lt;/arg_key&gt;&lt;arg_value&gt;v&lt;/arg_value&gt;…&lt;/tool_call&gt;</code>. The function name follows the opening tag as bare text and every argument is its own key/value pair; values the template rendered with <code>tojson</code> are parsed back into numbers, arrays and objects.</li>
   </ul>
+  <p><strong>Qwen 3.8 Flash Next (<code>qwen4exp</code>) is not on this list:</strong> its output parser cannot return tool calls, so generic client tools and built-in skill/code tools are withheld. Selected Agent Skill instructions are inlined as a no-tool fallback.</p>
   <p>See <a href="http-api.html#tools">Tool calling over HTTP</a> for a complete request/response example and the continuation loop.</p>
 
   <div class="content-footer">

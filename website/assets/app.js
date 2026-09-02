@@ -23,6 +23,7 @@
     { group: { en: "Run it", zh: "运行" }, items: [
       { page: "cli",    label: { en: "Command Line (CLI)", zh: "命令行 (CLI)" } },
       { page: "server", label: { en: "Server & Web UI", zh: "服务器与 Web UI" } },
+      { page: "agentic", label: { en: "Agentic Work", zh: "智能体工作流" } },
     ]},
     { group: { en: "Integrate", zh: "集成" }, items: [
       { page: "http-api", label: { en: "HTTP API (Ollama / OpenAI)", zh: "HTTP API (Ollama / OpenAI)" } },

@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-cn">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>智能体工作流、技能与沙箱代码 — TensorSharp 维基</title>
+  <meta name="description" content="使用 TensorSharp AgentHost 的渐进式 Agent Skills、模型生成代码沙箱、持久工作区、修复循环与可下载产物。">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+  <script>try{var t=localStorage.getItem('ts-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.classList.toggle('dark',t==='dark');}catch(e){}</script>
+  <script defer src="assets/search-index-zh.js"></script>
+  <script defer src="assets/app.js"></script>
+</head>
+<body data-page="agentic">
+<a class="skip" href="#content">跳到正文</a>
+<main class="content" id="content">
+  <div class="breadcrumb"><a href="index_zh-cn.html">首页</a> › 智能体工作流</div>
+  <h1>智能体工作流</h1>
+  <p class="lede">TensorSharp.AgentHost 把本地模型的一次回复变成有界的<strong>生成 → 检查 → 运行 → 修复 → 回答</strong>循环。它只在需要时加载 Agent Skills（智能体技能），通过五个内置代码工具处理文件，在操作系统沙箱中运行检查，并向普通 CLI、Web UI、Ollama 或 OpenAI 客户端返回完成的产物。</p>
+
+  <div class="callout note"><div class="ic">🏷️</div><p><strong>版本边界（核验于 2026-09-01）：</strong><a href="https://github.com/zhongkaifu/TensorSharp/releases/tag/v3.3.0.0" target="_blank" rel="noopener">v3.3.0.0</a> 是最新标签版本，并提供预构建 CLI / server 归档。AgentHost 是在该标签之后加入当前源码的；在后续发行版明确包含它之前，请构建当前源码。</p></div>
+
+  <h2 id="flow">一轮请求里发生什么</h2>
+  <ol class="steps">
+    <li><h3>低成本公布能力</h3><p>TensorSharp 在提示词里只放入每个可达技能的名称与描述。选中技能只表示优先使用并允许访问，<em>不会</em>加载其说明正文。</p></li>
+    <li><h3>按需加载说明</h3><p>支持工具往返的模型判断某项技能适用时，会调用 <code>skills_read(skill, "SKILL.md")</code>。TensorSharp 在进程内应答这个内置调用，把结果加入同一段对话，再次生成。</p></li>
+    <li><h3>完成实际工作</h3><p>若运维方启用了 <code>--code-exec</code>，模型便可在请求或聊天工作区中检查、编辑、新建、打补丁并测试文件。技能脚本也能参与，但必须单独选择允许执行。</p></li>
+    <li><h3>返回普通答案</h3><p>客户端收到最终完成结果，而不是 TensorSharp 内部工具调用。调用方自带的工具绝不会由 TensorSharp 执行；这些调用仍会正常返回给调用方处理。</p></li>
+  </ol>
+  <div class="callout note"><div class="ic">🎯</div><p><strong>当前范围是单个模型与单条进程内工具循环。</strong>TensorSharp 不会生成多个智能体，也不会把任务委派给子智能体；每条命令执行前也没有交互式审批队列。运维方在 CLI 或服务器启动时授予或拒绝技能、脚本执行、代码执行、联网与安装能力；之后内置工具只能按该策略运行，否则拒绝。</p></div>
+
+  <h2 id="skills">Agent Skills 与渐进式披露</h2>
+  <p>一个技能就是一个目录：必需的 <code>SKILL.md</code>，加上说明会用到的脚本、参考资料与素材。TensorSharp 遵循 Agent Skills 规范，可直接加载公开技能仓库，无需改写其目录布局。</p>
+  <pre data-lang="text"><code>pdf/
+├── SKILL.md
+├── scripts/
+│   └── extract_tables.py
+├── references/
+│   └── forms.md
+└── assets/
+    └── template.pdf</code></pre>
+
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>层级</th><th>模型会看到什么</th><th>何时看到</th></tr></thead>
+    <tbody>
+      <tr><td>元数据</td><td><code>name</code> + <code>description</code></td><td>选中技能与可发现技能都会预先给出；这就是正常路径的提示词成本。</td></tr>
+      <tr><td>说明</td><td>完整的 <code>SKILL.md</code> 正文</td><td>仅当模型通过 <code>skills_read(skill, "SKILL.md")</code> 激活该技能之后。</td></tr>
+      <tr><td>随包文件</td><td>参考资料、脚本与素材</td><td>只索引路径和大小；内容由 <code>skills_read</code> 按 48 KB 分页读取。</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>正常元数据块约使用上下文窗口的 2%，并限制在大约 1,024–10,000 token。旧版“把所有选中技能正文预先内联”的行为默认关闭。无法携带并解析工具声明的模型家族没有机会调用 <code>skills_read</code>，因此 TensorSharp 会在有界回退预算内直接内联所选技能正文，同时不再宣传根本无法加载的技能。</p>
+  <p>内置技能工具是 <code>skills_list</code> 与 <code>skills_read</code>。只有传入 <code>--skills-allow-exec</code> 才会出现第三个工具 <code>skills_run</code>。技能脚本默认不允许运行，并且始终与模型生成代码的执行权限分开控制。</p>
+
+  <h2 id="code-tools">五个代码工具，默认关闭</h2>
+  <p><code>--code-exec</code> 会加入一套补丁优先的代码工作面。它不要求安装技能；仅安装或选中技能也不会自动开启它。</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>工具</th><th>用途</th><th>关键边界</th></tr></thead>
+    <tbody>
+      <tr><td><code>read_file</code></td><td>按行号读取工作区中的真实字节。</td><td>输出有界；路径必须留在工作区内。</td></tr>
+      <tr><td><code>edit_file</code></td><td>在一个文件中精确替换一段字符串。</td><td>找不到或命中多处时拒绝执行，不做猜测。</td></tr>
+      <tr><td><code>write_file</code></td><td>新建文件，或有意整体替换文件。</td><td>限制在工作区内，并报告重写范围。</td></tr>
+      <tr><td><code>apply_patch</code></td><td>通过带锚点的 hunk 新建、修改、重命名或删除多个文件。</td><td>原子操作：全部 hunk 成功，否则一个也不落地。</td></tr>
+      <tr><td><code>shell</code></td><td>运行测试、命令与生成的程序。</td><td>有超时与输出上限；受支持主机上必须沙箱化，否则拒绝。</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>失败结果专门为后续修复而设计。若诊断定位到工作区内的常规源文件，结果会附上有界的源码片段，并要求先做最小精确修改再重新运行。语法检查、允许时自动补齐缺失依赖、以及从已安装库中探测真实 API，都能减少无意义的模型轮次。</p>
+
+  <h2 id="workspaces">工作区生命周期与产物</h2>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>入口</th><th>工作区生命周期</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>CLI / 交互聊天</td><td>在进程或聊天会话期间持续存在。</td><td>后续工具调用能检查或修复先前调用写下的文件。</td></tr>
+      <tr><td>内置 Web UI</td><td>在该 Web 聊天会话期间持续存在。</td><td>显示实时的编写 / 运行状态、有界输出与生成文件下载标签。</td></tr>
+      <tr><td>OpenAI 与 Ollama HTTP 聊天</td><td>一次请求的所有内部工具轮次共享一个私有工作区；响应结束即删除。</td><td>同一请求内可以反复修复，而不同请求保持无状态。</td></tr>
+      <tr><td>未开启代码执行时的 <code>skills_run</code></td><td>每次调用使用新的临时目录，返回后删除。</td><td>脚本不会意外共享状态。</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>开启代码执行后，技能脚本会与五个代码工具共享同一个请求 / 聊天工作区。服务端会把生成的文件复制到有界产物存储中；Web UI 提供安全下载链接，产物响应始终作为附件发送并禁用内容嗅探。</p>
+
+  <h2 id="sandbox">“沙箱化，否则拒绝”的安全模型</h2>
+  <p>是否允许执行由运维方决定，不是请求字段。在 macOS 与 Linux 上，模型生成命令和已获准的技能脚本默认具有工作区写入边界、不可读的用户主目录、清理后的环境变量，并且不可联网。进入操作系统沙箱之前，进程内还会再次检查路径。</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>平台</th><th>模型生成代码</th><th>技能脚本</th></tr></thead>
+    <tbody>
+      <tr><td>macOS</td><td>使用 <code>sandbox-exec</code>；无法提供隔离时拒绝运行。</td><td>默认 <code>--skills-sandbox required</code>；要么沙箱运行，要么拒绝。</td></tr>
+      <tr><td>Linux</td><td>要求 <code>bwrap</code> 0.12.0 或更高版本；否则拒绝。</td><td>默认 <code>required</code> 模式下同样要求安全版本的 <code>bwrap</code>。</td></tr>
+      <tr><td>Windows</td><td>尚未实现文件系统 / 网络沙箱。必须显式传入 <code>--code-exec-unconfined</code>，这会有意授予该进程可及的文件与网络范围。</td><td>作业对象只能约束进程树，不能限制文件和套接字。默认 <code>required</code> 会拒绝；<code>--skills-sandbox preferred</code> 是明确接受较弱隔离的选择。</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="callout warn"><div class="ic">⚠️</div><p><strong>沙箱并不等于一次性虚拟机。</strong>macOS 为兼容性有意保留共享 <code>/private/tmp</code> 与部分本地 Unix IPC。Seatbelt 限制会传递给子进程，普通进程组也会被停止，但有意脱离的子进程可能活过本次请求；每次工具结果都会报告这一缺口。Linux 即使禁止 IP 网络，也仍共享宿主网络命名空间的某些部分。每项平台缺口都必须认真对待。不要在他人可访问的服务器上启用非受限执行。</p></div>
+
+  <h3 id="network">网络与软件包安装是彼此独立的授权</h3>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>选项</th><th>默认</th><th>授予什么</th></tr></thead>
+    <tbody>
+      <tr><td><code>--code-exec-allow-network</code></td><td>关闭</td><td>让所有模型生成命令使用不受域名过滤的宿主 IP 网络，包括 LAN / loopback 服务。</td></tr>
+      <tr><td><code>--skills-allow-network</code></td><td>关闭</td><td>只为已经获准执行的技能脚本开放网络；不会影响 <code>shell</code>。</td></tr>
+      <tr><td><code>--code-exec-allow-install</code></td><td>关闭</td><td>允许宿主代为执行可识别的 pip / npm 安装。宿主读取并校验包名，只用预构建 wheel / 禁用 npm 脚本，并从模型命令中移除安装部分。</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><code>--code-exec-packages</code>、<code>--code-exec-install-index</code> 与 <code>--code-exec-install-domains</code> 约束的是宿主安装器。一旦开放模型命令的无限制网络，它们就不再是安全边界，因为生成代码可以直接下载产物。技能脚本与代码工具的网络开关有意彼此独立。</p>
+
+  <h2 id="start">启动一个智能体会话</h2>
+  <p>使用技能并不要求执行代码：</p>
+  <pre data-lang="bash"><code>dotnet run --project TensorSharp.Cli -c Release -- \
+  --model models/model.gguf --backend ggml_metal \
+  --skills-dir ./skills --skill pdf -i</code></pre>
+  <p>显式加入五个代码工具。下例仍然关闭命令网络与软件包安装：</p>
+  <pre data-lang="bash"><code>dotnet run --project TensorSharp.Cli -c Release -- \
+  --model models/model.gguf --backend ggml_metal \
+  --skills-dir ./skills --skill pdf --code-exec -i</code></pre>
+  <p>也可以为 Web UI 与兼容 API 托管同一套循环：</p>
+  <pre data-lang="bash"><code>dotnet run --project TensorSharp.Server -c Release -- \
+  --model models/model.gguf --backend ggml_cuda \
+  --skills-dir ./skills --code-exec
+
+# 浏览器 UI：http://localhost:5000/
+# 存活检查：  http://localhost:5000/health</code></pre>
+  <p>Linux 请先安装 <code>bwrap</code> 0.12.0 或更高版本。在 Windows 上，除非运维方有意加入 <code>--code-exec-unconfined</code>，否则代码执行不可用。不要把这个 Windows 逃生开关复制到共享服务器上。</p>
+
+  <h2 id="http">从普通 HTTP 客户端使用技能</h2>
+  <p>服务器启动时必须配置技能注册表。客户端随后在普通聊天请求上选择技能；TensorSharp 在内部处理自己的技能 / 代码调用，并返回完成后的响应。</p>
+  <pre data-lang="json"><code>{
+  "model": "local",
+  "messages": [
+    { "role": "user", "content": "提取表格并总结结论。" }
+  ],
+  "skills": ["pdf"],
+  "skills_discovery": false,
+  "stream": true
+}</code></pre>
+  <p><code>skills_discovery</code> 默认为 <code>true</code>。代码执行没有按请求开启的字段：运维方要么以 <code>--code-exec</code> 启动宿主，要么五个工具根本不会出现。智能体循环默认最多 8 个内部轮次；开启代码执行后默认 24 个；<code>--skills-max-rounds</code> 可明确设置 1–64 的上限。</p>
+
+  <h2 id="compatibility">模型家族限制</h2>
+  <p>进程内循环要求模型家族既能携带工具声明，也能解析工具调用。不支持这种往返的家族会以内联方式获得选中的技能说明作为回退，但不会得到五个代码工具。TensorSharp 会记录这一限制，而不是假装代码执行可用。</p>
+
+  <div class="content-footer">
+    <a href="server_zh-cn.html">← 服务器与 Web UI</a>
+    <a href="http-api_zh-cn.html">下一篇：HTTP API →</a>
+  </div>
+</main>
+</body>
+</html>

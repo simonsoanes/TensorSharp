@@ -257,6 +257,7 @@ dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
       <tr><td><code>--think</code></td><td>启用思考 / 推理模式（思维链）。</td></tr>
       <tr><td><code>--tools &lt;path&gt;</code></td><td>含工具 / 函数定义的 JSON 文件。</td></tr>
       <tr><td><code>--skills-dir &lt;path&gt;</code> · <code>--skill &lt;name&gt;</code></td><td>Agent Skills：面向模型的说明文件夹所在目录，以及本次运行要选中哪些。模型所需的其余内容通过 CLI 自己应答的内置工具取回——完整参数见下方 <a href="#skills">Agent Skills</a>。</td></tr>
+      <tr><td><code>--code-exec</code></td><td>启用 TensorSharp 内置智能体代码工具。默认关闭；完整说明见<a href="#code-exec">智能体工作与代码执行</a>。</td></tr>
       <tr><td><code>--spec</code> · <code>--spec-type &lt;name&gt;</code> · <code>--draft-model &lt;path&gt;</code></td><td>投机解码：由草稿器提议接下来的若干 token，主干用一次批量前向完成验证。默认关闭，且必须在模型加载之前出现在命令行上 —— 完整参数见下方的<a href="#spec">投机解码</a>。</td></tr>
       <tr><td><code>--dump-prompt</code></td><td>渲染提示词 + 分词后退出（不生成）。</td></tr>
       <tr><td><code>--tp &lt;N&gt;</code></td><td>多 GPU 度 —— 在单个进程内把模型跑在 N 张 GPU 上（默认：1）。需要 <code>--backend cuda</code>、<code>ggml_cuda</code> 或 <code>ggml_vulkan</code>；用 <code>TENSORSHARP_TP_DEVICES</code> 指定使用哪几张卡。在多数架构上它是<strong>张量并行</strong>：每一层都被切分到各 rank 上。在走整模型执行器的架构上它另有含义 —— 在 <strong>Qwen 3.8 Flash Next</strong> 上是<strong>按层切分</strong>（每张 GPU 拿一段连续的完整层，不切分任何权重；买的是容量而不是速度 —— 贪心输出与吞吐都不变，只是权重不必再挤进一张卡，<code>TS_Q4E_LAYER_SPLIT=20,28</code> 可覆盖均衡结果），在 <strong>DeepSeek V4 Flash</strong> 上只是限制其自动按层切分使用几张卡。GLM 5.x 不传该参数时使用自动按层切分；在 GGML GPU 后端上，<strong>GLM-5.2</strong> 与 <strong>GLM-5.3-Flash</strong> 都用该参数启用仅支持本地单进程的原生张量并行。两种模式都不支持的架构会在 stderr 上打印提示并只用一张 GPU。→ <a href="distributed_zh-cn.html#vs-layer-split">TP 与按层切分</a></td></tr>
@@ -354,18 +355,20 @@ dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
   <p class="page-foot-note">完整参考（含 <code>--test</code>、<code>--test-templates</code> 与分块 prefill 正确性检查）见 <a href="api-reference_zh-cn.html#cli-flags">API 参考</a> 页。</p>
 
   <h2 id="skills">Agent Skills（智能体技能）</h2>
-  <p>一个技能就是一个目录，里面放着 <code>SKILL.md</code>（YAML frontmatter + 写给模型看的 Markdown 说明），以及这些说明会用到的脚本、参考文档和素材。CLI 扫描一个或多个技能目录，把每个技能的一行描述展示给模型，其余内容只在模型主动索取时才加载——由内置的 <code>skills_list</code> / <code>skills_read</code> 工具承担，而这两个工具由 TensorSharp 在进程内应答。用 <code>--skill</code> 点名的技能，其说明正文在预算允许时会预先写进提示词，因此常见情况不会多出一轮。→ <a href="features_zh-cn.html#skills">功能概览</a> · <a href="http-api_zh-cn.html#skills">通过 HTTP 使用</a> · <a href="code-api_zh-cn.html#skills">在 C# 中使用</a></p>
+  <p>一个技能就是一份 <code>SKILL.md</code> 加上脚本、参考文档与素材。CLI 先展示名称与描述；对于能调用工具的模型，即使显式选中技能，启动时也只放元数据，模型决定使用后再通过 <code>skills_read</code> 读取说明。无法完成工具往返的家族才会把选中技能正文内联。→ <a href="features_zh-cn.html#skills">功能概览</a> · <a href="http-api_zh-cn.html#skills">通过 HTTP 使用</a> · <a href="code-api_zh-cn.html#skills">在 C# 中使用</a> · <a href="agentic_zh-cn.html">智能体架构</a></p>
   <div class="table-scroll">
   <table>
     <thead><tr><th>选项</th><th>说明</th></tr></thead>
     <tbody>
       <tr><td><code>--skills-dir &lt;path&gt;</code></td><td>扫描 Agent Skills 的目录（可以是装着若干 <code>SKILL.md</code> 的文件夹，也可以是单个技能目录）。可重复；按给出的顺序扫描，最深三层。不传时使用二进制文件旁的 <code>skills</code> 目录，不存在则创建。传入的路径不存在会在启动时报错并点名该参数。环境变量：<code>TS_SKILLS_DIR</code>（以路径分隔符分隔的列表）。</td></tr>
-      <tr><td><code>--skill &lt;name&gt;</code></td><td>为本次运行选中一个技能，名称取自其 <code>SKILL.md</code>（也就是它的目录名）。可重复。被选中技能的说明正文在预算允许时会写进提示词；随包文件则始终按需取回。</td></tr>
+      <tr><td><code>--skill &lt;name&gt;</code></td><td>按 <code>SKILL.md</code> 中的名称为本次运行选中技能。可重复。选中会展示其元数据并允许读取；能调用工具的模型仍按需读取正文。</td></tr>
       <tr><td><code>--list-skills</code></td><td>打印技能注册表——名称、描述、来源、随包文件、大小，以及任何加载告警或错误——然后退出。</td></tr>
       <tr><td><code>--no-skills</code></td><td>彻底关闭 Agent Skills：不扫描、不注入提示词块、不提供工具。环境变量：<code>TS_NO_SKILLS</code>（非 <code>0</code> 即视为开启）。</td></tr>
       <tr><td><code>--skills-no-discovery</code></td><td>不向模型展示未被选中的技能。不加时，所有已注册技能的名称与描述都会列出，好让模型自己发现你没想到要点名的那个；加上后，本次运行只看得到 <code>--skill</code> 选中的技能。</td></tr>
-      <tr><td><code>--skills-allow-exec</code></td><td>允许模型通过 <code>skills_run</code> 工具运行选中技能自带的脚本。<strong>默认关闭，且这就是在执行任意代码</strong>：脚本以子进程形式、用本进程的权限运行，而做出运行决定的是一个正在读别人写的 <code>SKILL.md</code> 的模型。可达范围仅限该脚本自己的技能目录，只启动已知解释器（<code>.py</code>、<code>.js</code>/<code>.mjs</code>、<code>.sh</code>、<code>.bash</code>），不经过 shell，工作目录为该技能自身，进程 60 秒后被杀，stdout / stderr 各截取到 32 KB——但这并不是沙箱。环境变量：<code>TS_SKILLS_ALLOW_EXEC</code>（非 <code>0</code> 即视为开启）。</td></tr>
-      <tr><td><code>--skills-max-rounds &lt;n&gt;</code></td><td>模型在必须作答前可以取用技能内容的次数，范围 1–64（默认：<code>8</code>）。每一轮都是一次完整生成，因此这一项限制的是那种反复把文件名叫错的模型所能造成的开销。预算用尽时会在对话里告知模型，让它用已读到的内容作答。环境变量：<code>TS_SKILLS_MAX_ROUNDS</code>。</td></tr>
+      <tr><td><code>--skills-allow-exec</code></td><td>声明 <code>skills_run</code>，允许模型运行选中技能自带的脚本。<strong>默认关闭；这仍是任意代码执行。</strong>路径检查、解释器白名单、清洗环境、关闭 stdin、60 秒期限与 stdout/stderr 各 32 KiB 上限始终生效；OS 隔离由 <code>--skills-sandbox</code> 决定。环境变量：<code>TS_SKILLS_ALLOW_EXEC</code>。</td></tr>
+      <tr><td><code>--skills-sandbox &lt;off|preferred|required&gt;</code></td><td>脚本隔离策略。默认 <code>required</code>，若无法约束写入、网络与主目录读取就拒绝；<code>preferred</code> 可在报告缺口后继续；<code>off</code> 只保留进程内限制。macOS 使用 Seatbelt，Linux 需要 bubblewrap 0.12+；Windows job object 无法约束文件或网络。环境变量：<code>TS_SKILLS_SANDBOX</code>。</td></tr>
+      <tr><td><code>--skills-allow-network</code></td><td>允许技能脚本联网；默认禁止，并与代码执行的联网权限彼此独立。环境变量：<code>TS_SKILLS_ALLOW_NETWORK</code>。</td></tr>
+      <tr><td><code>--skills-max-rounds &lt;n&gt;</code></td><td>内部模型 / 工具生成次数上限，范围 1–64。技能披露默认 <code>8</code>；提供 <code>--code-exec</code> 时自动提高到 <code>24</code>，但显式设置的值原样保留。环境变量：<code>TS_SKILLS_MAX_ROUNDS</code>。</td></tr>
     </tbody>
   </table>
   </div>
@@ -388,7 +391,31 @@ dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
     --model &lt;model.gguf&gt; --backend ggml_metal --skills-dir ~/skills \
     --skills-allow-exec -i</code></pre>
   <p>同样的参数拼写在<a href="#config">配置文件</a>（<code>"skills-dir": ["/srv/skills"]</code>）和 <a href="server_zh-cn.html">TensorSharp.Server</a> 上都成立，因此一份配置文件可以同时驱动两个宿主。多个目录按优先级顺序扫描，安装目录排在最前；两个目录之间的重名会直接报错，而不是靠自动改名解决。在 REPL 里，<code>/skills</code> 与 <code>/skill &lt;name&gt;</code> 对单次会话起同样的作用——见<a href="#repl">交互式 REPL 命令</a>。可直接取用的开源技能：<a href="https://github.com/anthropics/skills" target="_blank" rel="noopener">github.com/anthropics/skills</a>；完整参考见 <code>docs/agent_skills.md</code>。</p>
-  <div class="callout warn"><div class="ic">🔒</div><p><strong>技能属于不受信任的内容。</strong>模型给出的每一个路径都要经过同一道路径关卡，它封堵词法层（<code>..</code>、绝对路径、<code>~</code>、UNC、盘符限定）、规范化层与符号链接三类逃逸；一个技能也永远读不到另一个技能的文件。这道关卡管不住的是 <code>--skills-allow-exec</code>：一旦开启，别人写的文件夹里的脚本就会在宿主机上、以你的账户身份、由模型决定何时运行。在自己的机器上用自己的技能，这正是该参数存在的意义；在共享服务器上，它就是一个远程代码执行入口。</p></div>
+  <div class="callout warn"><div class="ic">🔒</div><p><strong>技能属于不受信任的内容。</strong>模型点名的每条路径都经过词法、规范化与符号链接检查，一个技能不能读取另一个技能。脚本执行仍是运维的信任决定：默认要求沙箱，但 macOS 会开放共享的 <code>/private/tmp</code>，且无法保证清理故意脱离的子进程；Windows 必须改用 <code>preferred</code> 才会运行，因为 job object 无法约束文件或网络。不要在面向不可信用户的共享服务上为不可信技能开启它。</p></div>
+
+  <h2 id="code-exec">智能体工作与代码执行</h2>
+  <p><code>--code-exec</code> 启用有界的单助手模型 / 工具循环。TensorSharp 声明并执行五个内置工具：<code>read_file</code>、<code>edit_file</code>、<code>write_file</code>、<code>shell</code> 与原子化的 <code>apply_patch</code>；通过 <code>--tools</code> 提供的调用方工具仍回传调用方处理。这里没有子智能体运行时，也没有逐命令审批提示；下列启动参数就是运维授权。→ <a href="agentic_zh-cn.html">智能体工作</a></p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>选项</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>--code-exec</code></td><td>提供全部五个内置工具。默认关闭；环境变量 <code>TS_CODE_EXEC</code>。没有持久工作区的直接调用方只能得到 <code>shell</code>，但 CLI 会话会保留工作区。</td></tr>
+      <tr><td><code>--code-exec-allow-install</code></td><td>允许宿主代为执行 pip/npm 安装，写入会话共享环境。默认关闭；不会赋予生成命令联网权限。环境变量：<code>TS_CODE_EXEC_ALLOW_INSTALL</code>。</td></tr>
+      <tr><td><code>--code-exec-packages &lt;list&gt;</code></td><td>识别出的宿主安装器可装的软件包白名单，逗号分隔；空表示任意合法包。命令联网后它不再是出口边界。</td></tr>
+      <tr><td><code>--code-exec-install-domains &lt;list&gt;</code> · <code>--code-exec-install-index &lt;url&gt;</code></td><td>安装器可访问的主机（默认 <code>pypi.org,files.pythonhosted.org,registry.npmjs.org</code>），以及运维指定的软件包索引。</td></tr>
+      <tr><td><code>--code-exec-allow-network</code></td><td>赋予模型生成命令不受限的宿主 IP 网络访问，包括 LAN / loopback 与监听 socket。默认关闭，并与安装权限、<code>--skills-allow-network</code> 相互独立。环境变量：<code>TS_CODE_EXEC_ALLOW_NETWORK</code>。</td></tr>
+      <tr><td><code>--code-exec-timeout &lt;seconds&gt;</code> · <code>--code-exec-max-output &lt;bytes&gt;</code></td><td>单命令默认期限（<code>120</code> 秒；调用最多可请求 10 分钟）与从中间截断的输出上限（<code>32768</code> 字节）。</td></tr>
+      <tr><td><code>--code-exec-shell &lt;path|name&gt;</code></td><td>覆盖自动检测到的 POSIX shell 或 PowerShell 程序。</td></tr>
+      <tr><td><code>--code-exec-temperature &lt;0..2&gt;</code></td><td>可选的代码轮温度覆盖；只替换仍为默认值的温度。只要代码工具可运行，代码轮就会关闭内置的 <code>1.1</code> 重复惩罚，即使未设置此参数也是如此。</td></tr>
+      <tr><td><code>--code-exec-unconfined</code></td><td>在 OS 隔离不足时仍显式运行。Windows 必须使用；切勿为不可信宿主用户开启。</td></tr>
+      <tr><td><code>--code-exec-languages</code></td><td><strong>已移除，启动时会直接拒绝。</strong>没有替代参数：shell 能访问每次重建的 <code>PATH</code> 上所有解释器，因此 TensorSharp 只报告已安装项，不再假装能实施语言白名单。</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <pre data-lang="bash"><code># 持久交互工作区；命令仍默认离线
+dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
+    --model &lt;model.gguf&gt; --backend ggml_metal --code-exec -i</code></pre>
+  <p>CLI 会在整段聊天中保留同一个工作区、当前目录、允许保留的导出环境状态与安装的软件包；技能脚本也与代码工具共用它。<code>PATH</code> 会在每次调用时刻意重建，因此靠修改 <code>PATH</code> 激活虚拟环境不会跨调用保留。每条命令仍是一个新的受约束进程。Linux bubblewrap 0.12+ 会约束写入、主目录读取、网络与后代进程；macOS Seatbelt 约束写入 / 主目录 / 网络，但会报告故意脱离的子进程可能比请求活得更久；Windows 只提供进程树限制，因此在 required 模式下拒绝执行。生成文件以本地路径报告。当前无法返回工具调用的模型——<code>qwen4exp</code>，以及不声明工具的 Mistral 3——不会得到代码工具。</p>
 
   <h2 id="repl">交互式 REPL 命令</h2>
   <p>用 <code>--interactive</code> / <code>-i</code> 启动。任何不以 <code>/</code> 开头的内容都是一轮用户输入；输入 <code>/help</code> 查看列表。提示头显示当前模型、后端、架构、上下文长度、投影器、对话深度与待发送附件。生成时按 <kbd>Ctrl+C</kbd> 中断；在提示符处按 <kbd>Ctrl+C</kbd> 退出。</p>

@@ -335,13 +335,13 @@ TensorSharp/
 
 ## 项目 / NuGet 包分层
 
-仓库按包边界拆成独立层，使用者可以只引用真正需要的部分。这些是可构建的包项目与包 ID，但当前 Runtime/Models/Backends/CLI/Server 包**尚未发布到 NuGet.org**。目前请从源码 checkout 使用项目引用；在 [NuGet.org](https://www.nuget.org/profiles/TensorSharp) 出现匹配版本之前，不要照抄 `dotnet add package TensorSharp.Models` 一类命令。
+仓库按包边界拆成独立层，使用者可以只引用真正需要的部分。**状态核验于 2026-09-01：**[NuGet.org](https://www.nuget.org/profiles/TensorSharp) 已列出 **3.1.2** 版的 `TensorSharp.Tensors`、`TensorSharp.Runtime`、`TensorSharp.Models`、`TensorSharp.Backends.GGML`、`TensorSharp.Backends.Cuda`、`TensorSharp.Backends.MLX`、`TensorSharp.Server` 与 `TensorSharp.Cli`。这些包落后于当前源码与 v3.3.0.0 应用发行版。`TensorSharp.AgentHost` 和 `TensorSharp.Distributed` 仍是可构建的包项目，但尚未发布；使用这两层时仍需从源码 checkout 添加项目引用。
 
 | 项目 | NuGet 包 | 对外 namespace | 职责 |
 |---|---|---|---|
 | `TensorSharp.Core` | `TensorSharp.Tensors` | `TensorSharp` | Tensor 原语、Ops、分配器、存储与设备抽象 |
 | `TensorSharp.Runtime` | `TensorSharp.Runtime` | `TensorSharp.Runtime` | GGUF 解析、分词器、Prompt 渲染、采样、输出协议解析、分页 KV 缓存、连续批处理调度器 |
-| `TensorSharp.AgentHost` | `TensorSharp.AgentHost` | `TensorSharp.AgentHost` | Agent Skills 与代码执行（`read_file` + `edit_file` + `write_file` + `shell` + `apply_patch`），含操作系统级沙箱、会话级工作区与 shell 状态，以及由宿主判定的软件包安装——构建在 `TensorSharp.Runtime` 之上 |
+| `TensorSharp.AgentHost` | `TensorSharp.AgentHost` | `TensorSharp.AgentHost` | Agent Skills 与代码执行（`read_file` + `edit_file` + `write_file` + `shell` + `apply_patch`），含操作系统级沙箱、Web/CLI 会话级与 HTTP 请求级工作区，以及由宿主判定的软件包安装——构建在 `TensorSharp.Runtime` 之上 |
 | `TensorSharp.Models` | `TensorSharp.Models` | `TensorSharp.Models` | `ModelBase`、各模型架构、多模态编码器、批处理 / 分页前向、模型侧执行辅助 |
 | `TensorSharp.Backends.GGML` | `TensorSharp.Backends.GGML` | `TensorSharp.GGML` | GGML 执行后端与原生互操作 |
 | `TensorSharp.Backends.Cuda` | `TensorSharp.Backends.Cuda` | `TensorSharp.Cuda` | Direct CUDA 分配器、存储、cuBLAS GEMM、PTX 内核和量化 CUDA 算子 |
@@ -364,9 +364,9 @@ pwsh ./eng/verify-packages.ps1
 
 ### 平台二进制发行状态
 
-[`Release Binaries`](.github/workflows/release-binaries.yml) 工作流的目标是为 **TensorSharp.Server** 与 **TensorSharp.Cli** 构建包含 .NET 10 运行时及原生库的自包含归档。但是，当前最新的 [v3.0.5.0](https://github.com/zhongkaifu/TensorSharp/releases/tag/v3.0.5.0) **没有上传应用归档**（只有 GitHub 自动生成的源码下载），因此用户目前必须从源码构建。除非先在 [Releases 页面](https://github.com/zhongkaifu/TensorSharp/releases)确认文件确实存在，否则不要根据下方名称自行拼接下载 URL。
+**状态核验于 2026-09-01：**[v3.3.0.0](https://github.com/zhongkaifu/TensorSharp/releases/tag/v3.3.0.0) 已发布 **TensorSharp.Server** 与 **TensorSharp.Cli** 的十个自包含应用归档，内含 .NET 10 运行时与原生库。下方五种平台/后端后缀各有一份 Server 归档和一份 CLI 归档。请到 [Releases 页面](https://github.com/zhongkaifu/TensorSharp/releases)检查更新版本，不要假定这份带日期的状态会永远代表最新发行。
 
-发行工作流成功完成后，计划生成的归档矩阵如下：
+v3.3.0.0 已发布的归档矩阵如下：
 
 | 归档后缀 | 内置的原生后端 | 格式 |
 |---|---|---|
