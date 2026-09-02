@@ -4,6 +4,7 @@
 // This file is part of TensorSharp.
 //
 // TensorSharp is licensed under the BSD-3-Clause license found in the LICENSE file in the root directory of this source tree.
+using System;
 using TensorSharp.Models.Architecture;
 
 namespace TensorSharp.Models
@@ -19,8 +20,24 @@ namespace TensorSharp.Models
             Id = "glm-dsa",
             DisplayName = "GLM-5.x (DeepSeek Sparse Attention) and GLM-5.3-Flash",
             Aliases = new[] { "glm-dsa", "glm_dsa", "glm5next" },
-            Factory = c => new GlmDsaModel(c.GgufPath, c.Backend, c.TpDegree, c.TpGroup),
+            Factory = Create,
             ProjectorFileHints = new[] { "*mmproj*.gguf" },
         };
+
+        private static ModelBase Create(ModelCreateContext context)
+        {
+            // The native whole-model executor owns its local GPU ranks and does
+            // not consume the managed group's cross-node collectives. Accepting
+            // one would make every node run an independent local model while the
+            // CLI advertised distributed TP.
+            if (context.TpGroup != null)
+            {
+                throw new NotSupportedException(
+                    "GLM 5.x tensor parallelism is local/single-process only and cannot use " +
+                    "--tp-node-id/--tp-peers. Use --tp N without the node options.");
+            }
+
+            return new GlmDsaModel(context.GgufPath, context.Backend, context.TpDegree);
+        }
     }
 }

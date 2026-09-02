@@ -47,6 +47,7 @@
 #include "ggml_ops_internal.h"
 
 #include "gguf.h"
+#include "ggml-impl.h" // ggml_graph_view for segmented TP execution
 
 #include <cinttypes>
 #include <cmath>
@@ -60,6 +61,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <string>
 #include <thread>
 #include <vector>
@@ -347,6 +349,49 @@ struct trace_entry
     ggml_tensor * t;
 };
 
+/// GLM owns its backend instances instead of using the process-wide GGML TP
+/// singleton, so its segmented executor owns a communicator for those exact
+/// instances as well.  The ABI is the same one used by ggml's meta backend and
+/// TensorSharp's fused Gemma/Qwen paths (NCCL on CUDA, with the backend's other
+/// transports behind the same entry point).
+struct glm_tp_comm
+{
+    using init_fn_t = void * (*)(ggml_backend_t *, size_t);
+    using free_fn_t = void (*)(void *);
+    using allreduce_fn_t = bool (*)(void *, ggml_tensor **);
+
+    void * ctx = nullptr;
+    free_fn_t free_fn = nullptr;
+    allreduce_fn_t allreduce_fn = nullptr;
+
+    ~glm_tp_comm()
+    {
+        if (ctx && free_fn) free_fn(ctx);
+    }
+
+    bool init(ggml_backend_t * backends, int n)
+    {
+        if (!backends || n < 2 || !backends[0]) return false;
+        ggml_backend_dev_t dev = ggml_backend_get_device(backends[0]);
+        ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
+        if (!reg) return false;
+        auto init_fn = reinterpret_cast<init_fn_t>(
+            ggml_backend_reg_get_proc_address(reg, "ggml_backend_comm_init"));
+        free_fn = reinterpret_cast<free_fn_t>(
+            ggml_backend_reg_get_proc_address(reg, "ggml_backend_comm_free"));
+        allreduce_fn = reinterpret_cast<allreduce_fn_t>(
+            ggml_backend_reg_get_proc_address(reg, "ggml_backend_comm_allreduce_tensor"));
+        if (!init_fn || !allreduce_fn) return false;
+        ctx = init_fn(backends, (size_t) n);
+        return ctx != nullptr;
+    }
+
+    bool allreduce(ggml_tensor ** tensors) const
+    {
+        return ctx && allreduce_fn && allreduce_fn(ctx, tensors);
+    }
+};
+
 /// One token of a batched decode step: which sequence slot it belongs to, where
 /// in that slot's cache it lands, and the per-token inputs whose shape depends
 /// on that slot's length. Everything else in the step — every projection, the
@@ -397,8 +442,21 @@ struct graph_build_result
     std::vector<bd_token> bd;
     std::vector<trace_entry> traces;
 
+    // Fast glm5next TP: one independently allocated graph per rank, cut at the
+    // attention and routed-FFN row-parallel outputs. Rank 0 is this object and
+    // the other ranks live in tp_peers; keeping them under the same cache entry
+    // makes graph-shape eviction atomic across the group.
+    bool tp_fused = false;
+    int tp_rank = -1;
+    ggml_gallocr_t galloc = nullptr;
+    tsg::TpRankPlan tp_plan;
+    std::vector<ggml_tensor *> tp_boundary;
+    std::vector<std::unique_ptr<graph_build_result>> tp_peers;
+
     ~graph_build_result()
     {
+        tp_peers.clear();
+        if (galloc) ggml_gallocr_free(galloc);
         if (sched) ggml_backend_sched_free(sched);
         if (ctx) ggml_free(ctx);
     }
@@ -428,6 +486,10 @@ struct glm_model
     size_t mmap_weight_bytes = 0;
 
     ggml_tensor * tok_embd = nullptr;
+    // Rank-local copies used by the segmented TP path. tok_embd_rank[0] aliases
+    // tok_embd; the remaining entries are separately loaded onto their rank's
+    // GPU so every graph starts from a wholly local residual stream.
+    ggml_tensor * tok_embd_rank[MAX_GPUS] = {};
     ggml_tensor * output_norm = nullptr;
     ggml_tensor * output = nullptr;
 
@@ -459,6 +521,11 @@ struct glm_model
     /// regression or measure what each contributes.
     int tp_shard = 3;
     bool tp_heads() const { return (tp_shard & 1) != 0; }
+    /// Number of adjacent attention heads that must stay together so every
+    /// row-parallel output-projection slice starts and ends on a quantization
+    /// block boundary. GLM-5.3's 128-wide heads and K-quantized output weights
+    /// make this 2; GLM-5.2's 256-wide heads leave it at 1.
+    int tp_head_group = 1;
     /// Cleared when the routed experts' rows do not split on a quantization
     /// block boundary; the experts then stay whole on every rank.
     bool tp_moe_rows = true;
@@ -484,6 +551,13 @@ struct glm_model
     // Probed at load; when false the graph builds the equivalent batched
     // mul_mat instead of bouncing the residual stream through the CPU backend.
     bool hc_native = true;
+
+    // The high-throughput glm5next TP executor. Unsupported configurations keep
+    // using the existing combined multi-backend scheduler graph.
+    bool tp_fused = false;
+    std::unique_ptr<glm_tp_comm> tp_comm;
+    bool tp_comm_reported = false;
+    std::vector<float> tp_host_stage[MAX_GPUS];
 
     // ggml_backend_sched's "a higher-priority backend wants this op" heuristic.
     // It is a win when a host-resident tensor is small enough to stream, and a
@@ -551,11 +625,83 @@ struct glm_model
                 if (mmap_addrs[i]) munmap(mmap_addrs[i], mmap_sizes[i]);
 #endif
         }
+        // A backend communicator refers to the backend instances, so release it
+        // before the loop below destroys those instances.
+        tp_comm.reset();
         for (int i = 0; i < n_backends; i++)
             if (backends[i]) ggml_backend_free(backends[i]);
         if (cpu_threadpool) ggml_threadpool_free(cpu_threadpool);
     }
 };
+
+static void glm_setenv_default(const char * name, const char * value)
+{
+    if (getenv(name) != nullptr) return;
+#if defined(_WIN32)
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 0);
+#endif
+}
+
+/// Initialise the communicator against the backend objects owned by this GLM
+/// model. This deliberately does not touch tsg::g_device_states: the managed
+/// GLM wrapper keeps a lightweight GGML CPU context alive alongside the native
+/// executor, and replacing that process-wide singleton would invalidate it.
+static bool init_glm_tp_comm(glm_model & m)
+{
+    if (m.tp < 2 || m.tp > m.n_gpu) return false;
+    if (const char * ar = getenv("GGML_CUDA_ALLREDUCE"))
+        if (strcmp(ar, "none") == 0) return false;
+
+    ggml_backend_reg_t reg0 = nullptr;
+    for (int r = 0; r < m.tp; r++)
+    {
+        ggml_backend_dev_t dev = ggml_backend_get_device(m.backends[m.rank_device(r)]);
+        ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
+        if (!reg || (reg0 && reg != reg0)) return false;
+        reg0 = reg;
+    }
+
+    // Keep decode-size residual reductions in F32 when the CUDA backend selects
+    // its internal two-rank transport. That transport may use BF16 for large
+    // prefill payloads, where halving transfer bytes is useful; its historical
+    // 1-byte threshold unnecessarily rounded every 16-KiB decode reduction.
+    // NCCL owns its separate datatype policy inside ggml-cuda.
+    glm_setenv_default("GGML_CUDA_AR_BF16_THRESHOLD", "1048576");
+
+#ifdef TSG_GGML_USE_CUDA
+    const char * reg_name = reg0 ? ggml_backend_reg_name(reg0) : nullptr;
+    if (reg_name && strcmp(reg_name, "CUDA") == 0 && getenv("GGML_CUDA_ALLREDUCE") == nullptr)
+    {
+        // The native loader takes the first N devices of the requested backend,
+        // so its rank order is the CUDA ordinal order seen by this process.
+        int devices[MAX_GPUS];
+        for (int r = 0; r < m.tp; r++) devices[r] = r;
+
+        if (getenv("NCCL_P2P_DISABLE") == nullptr &&
+            tsg::tp_probe_cuda_peer_access(devices, m.tp) == 0)
+        {
+            glm_setenv_default("NCCL_P2P_DISABLE", "1");
+            fprintf(stderr, "[glm] TP peer access is non-functional; NCCL will use shared-memory transport\n");
+        }
+        if (tsg::tp_probe_cuda_collective(devices, m.tp) == 0)
+        {
+            // The backend's pinned-host device pipeline is a good two-rank
+            // fallback and still avoids 90 explicit tensor downloads/uploads.
+            glm_setenv_default("GGML_CUDA_ALLREDUCE", m.tp == 2 ? "internal" : "none");
+            fprintf(stderr, m.tp == 2
+                ? "[glm] NCCL probe failed; using the CUDA backend's internal two-rank AllReduce\n"
+                : "[glm] NCCL probe failed; segmented TP will use host-staged reductions\n");
+        }
+    }
+#endif
+
+    std::unique_ptr<glm_tp_comm> comm(new glm_tp_comm());
+    if (!comm->init(m.backends, m.tp)) return false;
+    m.tp_comm = std::move(comm);
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // GGUF helpers
@@ -1095,11 +1241,16 @@ static glm_slot * slot_alloc(glm_model & m)
                 // KDA linear attention keeps a fixed-size recurrent state per
                 // sequence instead of KV rows: the short-conv tail and the
                 // per-head delta-net state, both updated in place by the graph.
-                const int64_t d_inner = (int64_t) m.hp.kda_head_dim * m.hp.kda_n_head;
+                // KDA heads are independent, so TP keeps only this rank's heads
+                // instead of replicating the full recurrent state on every GPU.
+                const int64_t n_head = m.tp > 1 && m.tp_heads()
+                    ? m.layers[(size_t) il].head_first[r + 1] - m.layers[(size_t) il].head_first[r]
+                    : m.hp.kda_n_head;
+                const int64_t d_inner = (int64_t) m.hp.kda_head_dim * n_head;
                 slot->kda_conv[r][il] = ggml_new_tensor_2d(ctxs[d], GGML_TYPE_F32,
                         m.hp.d_conv - 1, 3 * d_inner);
                 slot->kda_ssm[r][il] = ggml_new_tensor_3d(ctxs[d], GGML_TYPE_F32,
-                        m.hp.kda_head_dim, m.hp.kda_head_dim, m.hp.kda_n_head);
+                        m.hp.kda_head_dim, m.hp.kda_head_dim, n_head);
                 ggml_format_name(slot->kda_conv[r][il], "slot%d_kconv.%d.%d", slot->id, r, il);
                 ggml_format_name(slot->kda_ssm[r][il], "slot%d_kssm.%d.%d", slot->id, r, il);
                 continue;
@@ -1248,6 +1399,12 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
     // the layer split, where each layer lives on one device.
     if (tp_req > 1)
     {
+        if (tp_req > MAX_GPUS)
+        {
+            fprintf(stderr, "[glm] --tp %d exceeds this executor's maximum of %d ranks\n",
+                    tp_req, MAX_GPUS);
+            return nullptr;
+        }
         if (tp_req > n_gpu)
         {
             // More ranks than GPUs is not a production configuration — it buys
@@ -1405,11 +1562,6 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
     if (expert_groups > 1 && expert_groups_used != expert_groups)
     {
         fprintf(stderr, "[glm] %d expert groups (top-%d) are not supported\n", expert_groups, expert_groups_used);
-        return nullptr;
-    }
-    if (hp.g5n && m->tp > 1)
-    {
-        fprintf(stderr, "[glm] glm5next tensor parallelism is not wired yet; use the layer split (omit --tp)\n");
         return nullptr;
     }
     if (hp.g5n)
@@ -1577,6 +1729,38 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
         M.is_moe = m->mtp_layer >= hp.n_dense_lead;
     }
 
+    // A row-parallel output projection is sliced along ne0, so each head shard
+    // must begin and end on a whole quantization block. This is automatic for
+    // GLM-5.2's 256-wide value heads. GLM-5.3's KDA heads are 128-wide while
+    // its K-quantized output matrices use 256-element blocks, so those heads
+    // travel in pairs. Compute the requirement from the file instead of baking
+    // either model's current dimensions into the executor.
+    if (m->tp > 1 && m->tp_heads())
+    {
+        int group = 1;
+        const int n_loaded_layers = hp.n_layer + (m->has_mtp ? 1 : 0);
+        for (int il = 0; il < n_loaded_layers; il++)
+        {
+            char name[256];
+            snprintf(name, sizeof(name), "blk.%d.attn_output.weight", il);
+            auto it = sources.find(name);
+            if (it == sources.end()) continue; // the ordinary required-weight check reports this later
+            const int head_width = m->layers[(size_t) il].recurrent ? hp.kda_head_dim : hp.n_embd_head_v;
+            const int block = (int) ggml_blck_size(it->second.type);
+            const int need = block / std::gcd(block, head_width);
+            group = std::lcm(group, need);
+        }
+        if (hp.n_head % group != 0 || hp.n_head / group < m->tp)
+        {
+            fprintf(stderr,
+                    "[glm] --tp %d cannot split %d heads in the %d-head groups required by the "
+                    "output weights' quantization blocks\n",
+                    m->tp, hp.n_head, group);
+            return nullptr;
+        }
+        m->tp_head_group = group;
+    }
+
     // What one layer's caches cost the device that hosts it. Priced into the
     // split so a device packed to the last byte of weights does not fail at
     // slot allocation instead of at load.
@@ -1622,9 +1806,12 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
     // state instead of per-token rows.
     const size_t idx_row_bytes = (hp.indexer_kpool > 0 ? 2 * (size_t) hp.indexer_head_size
                                                        : (size_t) hp.indexer_head_size) * 2;
+    const int max_kda_heads_per_rank = hp.g5n && m->tp > 1 && m->tp_heads()
+        ? shard_first(hp.kda_n_head / m->tp_head_group, m->tp, 1) * m->tp_head_group
+        : hp.kda_n_head;
     const size_t kda_state_bytes = hp.g5n
-        ? ((size_t) (hp.d_conv - 1) * 3 * hp.kda_head_dim * hp.kda_n_head
-           + (size_t) hp.kda_head_dim * hp.kda_head_dim * hp.kda_n_head) * 4
+        ? ((size_t) (hp.d_conv - 1) * 3 * hp.kda_head_dim * max_kda_heads_per_rank
+           + (size_t) hp.kda_head_dim * hp.kda_head_dim * max_kda_heads_per_rank) * 4
         : 0;
     size_t kv_bytes_per_token = 0;
     size_t kv_bytes_fixed = 0;
@@ -1901,19 +2088,33 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
         m->c_ctx[d] = ggml_init(cp);
     }
 
-    // Under tensor parallelism the embedding table and the LM head are not
-    // sharded; they live on rank 0 and the scheduler copies the (tiny) rows.
+    // The LM head remains on rank 0. The segmented glm5next TP path gives every
+    // rank its own embedding table so the independent graphs can construct the
+    // initial residual locally; the scheduler fallback still reads rank 0's
+    // copy exactly as before.
     const int dev_first = m->tp > 1 ? 0 : m->layers[0].device;
     const int dev_last = m->tp > 1 ? 0 : m->layers[(size_t) hp.n_layer - 1].device;
 
     weight_loader WL(*m, sources);
 
     m->tok_embd = WL.full(dev_first, true, "token_embd.weight");
+    m->tok_embd_rank[0] = m->tok_embd;
+    const char * fused_env_early = getenv("TS_GLM_TP_FUSED");
+    const bool load_rank_embeddings = hp.g5n && m->tp > 1 && m->tp <= n_gpu && m->tp_shard == 3 &&
+        n_cpu_moe == 0 && !(fused_env_early && atoi(fused_env_early) == 0) &&
+        !(getenv("TS_GLM_TRACE") && *getenv("TS_GLM_TRACE"));
+    if (load_rank_embeddings)
+    {
+        for (int r = 1; r < m->tp; r++)
+            m->tok_embd_rank[r] = WL.full(m->rank_device(r), true, "token_embd.weight");
+    }
     m->output_norm = WL.full(dev_last, true, "output_norm.weight");
     m->output = WL.full(dev_last, false, "output.weight");
     if (!m->output)   // tied embeddings
         m->output = WL.full(dev_last, true, "token_embd.weight");
     if (!m->tok_embd || !m->output_norm || !m->output) return nullptr;
+    if (load_rank_embeddings)
+        for (int r = 0; r < m->tp; r++) if (!m->tok_embd_rank[r]) return nullptr;
 
     const int n_rank = m->tp;
     // Splitting the routed experts row-wise cuts every down-projection ROW, so a
@@ -1955,7 +2156,9 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
         {
             const bool sh = n_rank > 1 && m->tp_heads();
             const bool se = n_rank > 1 && m->tp_experts();
-            L.head_first[r] = sh ? shard_first(hp.n_head, n_rank, r) : (r == 0 ? 0 : hp.n_head);
+            L.head_first[r] = sh
+                ? shard_first(hp.n_head / m->tp_head_group, n_rank, r) * m->tp_head_group
+                : (r == 0 ? 0 : hp.n_head);
             L.moe_ff_first[r] = se ? shard_first_rot(hp.n_ff_exp / moe_ff_blck, n_rank, r, il) * moe_ff_blck
                                    : (r == 0 ? 0 : hp.n_ff_exp);
         }
@@ -1964,6 +2167,8 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
         {
             glm_layer_weights & W = L.w[r];
             const int d = n_rank > 1 ? m->rank_device(r) : L.device;
+            const int64_t h0 = L.head_first[r];
+            const int64_t hn = L.head_first[r + 1] - h0;
 
             // --- replicated on every rank -------------------------------------
             // Norms, the query/KV down-projections, the router and the indexer
@@ -1987,23 +2192,48 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
 
             if (L.recurrent)
             {
-                // KDA linear attention: the whole layer half is these tensors and
-                // nothing from the MLA set exists in the file.
-                W.kda_wq     = WL.full(d, true, "blk.%d.attn_q.weight", il);
-                W.kda_wk     = WL.full(d, true, "blk.%d.attn_k.weight", il);
-                W.kda_wv     = WL.full(d, true, "blk.%d.attn_v.weight", il);
-                W.kda_wo     = WL.full(d, true, "blk.%d.attn_output.weight", il);
-                W.kda_conv_q = WL.full(d, true, "blk.%d.ssm_conv1d_q.weight", il);
-                W.kda_conv_k = WL.full(d, true, "blk.%d.ssm_conv1d_k.weight", il);
-                W.kda_conv_v = WL.full(d, true, "blk.%d.ssm_conv1d_v.weight", il);
-                W.kda_f_a    = WL.full(d, true, "blk.%d.ssm_f_a.weight", il);
-                W.kda_f_b    = WL.full(d, true, "blk.%d.ssm_f_b.weight", il);
-                W.kda_dt_b   = WL.full(d, true, "blk.%d.ssm_dt.bias", il);
-                W.kda_a      = WL.full(d, true, "blk.%d.ssm_a", il);
-                W.kda_beta   = WL.full(d, true, "blk.%d.ssm_beta.weight", il);
-                W.kda_g_a    = WL.full(d, true, "blk.%d.ssm_g_a.weight", il);
-                W.kda_g_b    = WL.full(d, true, "blk.%d.ssm_g_b.weight", il);
-                W.kda_o_norm = WL.full(d, true, "blk.%d.ssm_norm.weight", il);
+                // KDA is head-separable through the output projection. q/k/v,
+                // the short convolution, decay/gate projections and recurrent
+                // state are column-parallel by head; attn_output is row-parallel
+                // and its rank partials are reduced before the hyper-connection.
+                const int64_t c0 = h0 * hp.kda_head_dim;
+                const int64_t cn = hn * hp.kda_head_dim;
+                if (n_rank > 1 && m->tp_heads())
+                {
+                    W.kda_wq     = WL.slice_hi(d, 1, c0, cn, true, "blk.%d.attn_q.weight", il);
+                    W.kda_wk     = WL.slice_hi(d, 1, c0, cn, true, "blk.%d.attn_k.weight", il);
+                    W.kda_wv     = WL.slice_hi(d, 1, c0, cn, true, "blk.%d.attn_v.weight", il);
+                    W.kda_wo     = WL.slice_lo(d, c0, cn, true, "blk.%d.attn_output.weight", il);
+                    W.kda_conv_q = WL.slice_hi(d, 2, c0, cn, true, "blk.%d.ssm_conv1d_q.weight", il);
+                    W.kda_conv_k = WL.slice_hi(d, 2, c0, cn, true, "blk.%d.ssm_conv1d_k.weight", il);
+                    W.kda_conv_v = WL.slice_hi(d, 2, c0, cn, true, "blk.%d.ssm_conv1d_v.weight", il);
+                    W.kda_f_a    = WL.full(d, true, "blk.%d.ssm_f_a.weight", il);
+                    W.kda_f_b    = WL.slice_hi(d, 1, c0, cn, true, "blk.%d.ssm_f_b.weight", il);
+                    W.kda_dt_b   = WL.slice_lo(d, c0, cn, true, "blk.%d.ssm_dt.bias", il);
+                    W.kda_a      = WL.slice_lo(d, h0, hn, true, "blk.%d.ssm_a", il);
+                    W.kda_beta   = WL.slice_hi(d, 1, h0, hn, true, "blk.%d.ssm_beta.weight", il);
+                    W.kda_g_a    = WL.full(d, true, "blk.%d.ssm_g_a.weight", il);
+                    W.kda_g_b    = WL.slice_hi(d, 1, c0, cn, true, "blk.%d.ssm_g_b.weight", il);
+                    W.kda_o_norm = WL.full(d, true, "blk.%d.ssm_norm.weight", il);
+                }
+                else
+                {
+                    W.kda_wq     = WL.full(d, true, "blk.%d.attn_q.weight", il);
+                    W.kda_wk     = WL.full(d, true, "blk.%d.attn_k.weight", il);
+                    W.kda_wv     = WL.full(d, true, "blk.%d.attn_v.weight", il);
+                    W.kda_wo     = WL.full(d, true, "blk.%d.attn_output.weight", il);
+                    W.kda_conv_q = WL.full(d, true, "blk.%d.ssm_conv1d_q.weight", il);
+                    W.kda_conv_k = WL.full(d, true, "blk.%d.ssm_conv1d_k.weight", il);
+                    W.kda_conv_v = WL.full(d, true, "blk.%d.ssm_conv1d_v.weight", il);
+                    W.kda_f_a    = WL.full(d, true, "blk.%d.ssm_f_a.weight", il);
+                    W.kda_f_b    = WL.full(d, true, "blk.%d.ssm_f_b.weight", il);
+                    W.kda_dt_b   = WL.full(d, true, "blk.%d.ssm_dt.bias", il);
+                    W.kda_a      = WL.full(d, true, "blk.%d.ssm_a", il);
+                    W.kda_beta   = WL.full(d, true, "blk.%d.ssm_beta.weight", il);
+                    W.kda_g_a    = WL.full(d, true, "blk.%d.ssm_g_a.weight", il);
+                    W.kda_g_b    = WL.full(d, true, "blk.%d.ssm_g_b.weight", il);
+                    W.kda_o_norm = WL.full(d, true, "blk.%d.ssm_norm.weight", il);
+                }
             }
             else
             {
@@ -2027,8 +2257,6 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
             }
 
             // --- attention, sharded by head ------------------------------------
-            const int64_t h0 = L.head_first[r];
-            const int64_t hn = L.head_first[r + 1] - h0;
             if (n_rank > 1 && m->tp_heads())
             {
                 W.wq_b = WL.slice_hi(d, 1, h0 * hp.n_embd_head_k, hn * hp.n_embd_head_k, true,
@@ -2390,6 +2618,28 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
         if (const char * e = getenv("TS_GLM_HC_NATIVE")) m->hc_native = atoi(e) != 0;
         fprintf(stderr, "[glm] hyper-connection ops: %s\n",
                 m->hc_native ? "native" : "decomposed (backend has no fused kernel)");
+    }
+
+    if (hp.g5n && m->tp > 1)
+    {
+        const char * why = nullptr;
+        const char * fused_env = getenv("TS_GLM_TP_FUSED");
+        if (fused_env && atoi(fused_env) == 0) why = "disabled by TS_GLM_TP_FUSED=0";
+        else if (m->tp > n_gpu) why = "ranks are oversubscribed on the visible GPUs";
+        else if (m->tp_shard != 3 || !m->tp_experts()) why = "heads and routed-expert rows are not both sharded";
+        else if (n_cpu_moe != 0) why = "CPU MoE offload is active";
+        else if (!m->hc_native) why = "the backend lacks native hyper-connection kernels";
+        else if (getenv("TS_GLM_TRACE") && *getenv("TS_GLM_TRACE")) why = "tensor tracing is active";
+        else
+        {
+            m->tp_fused = true;
+            const bool device_comm = init_glm_tp_comm(*m);
+            fprintf(stderr,
+                    "[glm] TP executor: segmented rank-local graphs, concurrent submission, AllReduce=%s\n",
+                    device_comm ? "backend collective (verified on first use)" : "host staging fallback");
+        }
+        if (why)
+            fprintf(stderr, "[glm] TP executor: combined scheduler fallback (%s)\n", why);
     }
 
     m->op_offload = (n_cpu_moe == 0);
@@ -3309,6 +3559,9 @@ struct graph_builder
     // nothing to execute and are always safe to pin.
     void pin(ggml_tensor * t, int dev)
     {
+        // A segmented TP graph is allocated directly on its one rank backend;
+        // it has no multi-backend scheduler to pin through.
+        if (res.tp_fused) return;
         if (dev < 0 || dev >= m.n_gpu) return;
         if (t->op != GGML_OP_NONE && !ggml_backend_supports_op(m.backends[dev], t)) return;
         ggml_backend_sched_set_tensor_backend(res.sched, t, m.backends[dev]);
@@ -3795,11 +4048,14 @@ struct graph_builder
     // multiplicatively, and the fused gated-delta-net recurrence whose state
     // lives in the slot and is committed in-graph. f, g and beta read the layer
     // input, not the convolved q/k/v.
-    ggml_tensor * build_kda(int il, ggml_tensor * cur)
+    ggml_tensor * build_kda(int il, int rank, ggml_tensor * cur)
     {
-        const glm_layer_weights & LW = m.layers[il].w[0];
+        const glm_layer & L = m.layers[il];
+        const glm_layer_weights & LW = L.w[rank];
         const int64_t hd = hp.kda_head_dim;
-        const int64_t H = hp.kda_n_head;
+        const int64_t H = m.tp > 1 && m.tp_heads()
+            ? L.head_first[rank + 1] - L.head_first[rank]
+            : hp.kda_n_head;
         const int64_t d_inner = hd * H;
         const int64_t dc = hp.d_conv;
 
@@ -3807,7 +4063,7 @@ struct graph_builder
         ggml_tensor * kp = ggml_mul_mat(ctx, LW.kda_wk, cur);
         ggml_tensor * vp = ggml_mul_mat(ctx, LW.kda_wv, cur);
         ggml_tensor * qkv = ggml_concat(ctx, ggml_concat(ctx, qp, kp, 0), vp, 0);   // [3*d_inner, nt]
-        trace("kda_qkv", il, 0, qkv);
+        trace("kda_qkv", il, rank, qkv);
 
         // stored separately in the file, stacked back into one kernel
         ggml_tensor * conv_w = ggml_concat(ctx,
@@ -3816,13 +4072,13 @@ struct graph_builder
                     ggml_reshape_2d(ctx, LW.kda_conv_k, dc, d_inner), 1),
                 ggml_reshape_2d(ctx, LW.kda_conv_v, dc, d_inner), 1);               // [dc, 3*d_inner]
 
-        ggml_tensor * conv_state = slot.kda_conv[0][(size_t) il];                    // [dc-1, 3*d_inner]
+        ggml_tensor * conv_state = slot.kda_conv[rank][(size_t) il];                 // [dc-1, 3*d_inner]
         ggml_tensor * qkv_t = ggml_reshape_3d(ctx, ggml_cont(ctx, ggml_transpose(ctx, qkv)), nt, 3 * d_inner, 1);
         ggml_tensor * conv_in = ggml_concat(ctx, ggml_reshape_3d(ctx, conv_state, dc - 1, 3 * d_inner, 1),
                                             qkv_t, 0);                               // [dc-1+nt, 3*d_inner, 1]
         // SiLU on the conv output, not on the projections
         ggml_tensor * conv_out = ggml_silu(ctx, ggml_ssm_conv(ctx, conv_in, conv_w));   // [3*d_inner, nt]
-        trace("kda_conv", il, 0, conv_out);
+        trace("kda_conv", il, rank, conv_out);
 
         // keep the last dc-1 columns for the next ubatch. The concat above has
         // materialized conv_in, so overwriting the state here cannot disturb it.
@@ -3854,12 +4110,12 @@ struct graph_builder
         g = ggml_sigmoid(ctx, ggml_scale(ctx, g, -1.0f));
         g = ggml_scale(ctx, g, hp.kda_gate_lb);
         ggml_tensor * g4 = ggml_reshape_4d(ctx, g, hd, H, nt, 1);
-        trace("kda_gate", il, 0, g4);
+        trace("kda_gate", il, rank, g4);
 
         ggml_tensor * beta = ggml_sigmoid(ctx, ggml_mul_mat(ctx, LW.kda_beta, cur));
         ggml_tensor * b4 = ggml_reshape_4d(ctx, beta, 1, H, nt, 1);
 
-        ggml_tensor * state = slot.kda_ssm[0][(size_t) il];                          // [hd, hd, H]
+        ggml_tensor * state = slot.kda_ssm[rank][(size_t) il];                       // [hd, hd, H]
         ggml_tensor * s4 = ggml_reshape_4d(ctx, state, hd, hd, H, 1);
 
         ggml_tensor * gdn = ggml_gated_delta_net(ctx, qc, kc, vc, g4, b4, s4, 1);
@@ -3871,7 +4127,7 @@ struct graph_builder
                 ggml_row_size(gdn->type, hd), ggml_row_size(gdn->type, hd * hd),
                 ggml_row_size(gdn->type, attn_elems));
         ggml_build_forward_expand(gf, ggml_cpy(ctx, new_state, state));
-        trace("kda_scan_out", il, 0, core);
+        trace("kda_scan_out", il, rank, core);
 
         // low-rank output gate; RMS over hd with one weight shared by every
         // head, then a plain sigmoid gate (not FusedRMSNormGated's SiLU).
@@ -3879,11 +4135,11 @@ struct graph_builder
         gate = ggml_reshape_3d(ctx, gate, hd, H, nt);
         ggml_tensor * normed = ggml_mul(ctx, ggml_rms_norm(ctx, ggml_cont(ctx, core), hp.rms_eps), LW.kda_o_norm);
         ggml_tensor * gated = ggml_mul(ctx, normed, ggml_sigmoid(ctx, gate));
-        trace("kda_normed", il, 0, gated);
+        trace("kda_normed", il, rank, gated);
 
         ggml_tensor * out2 = ggml_reshape_2d(ctx, ggml_cont(ctx, gated), d_inner, nt);
         ggml_tensor * proj = ggml_mul_mat(ctx, LW.kda_wo, out2);
-        trace("kda_out", il, 0, proj);
+        trace("kda_out", il, rank, proj);
         return proj;
     }
 
@@ -4041,15 +4297,170 @@ struct graph_builder
     }
 
     // ---- the glm5next trunk ----
+
+    /// One wholly rank-local copy of the glm5next trunk. Every nonlinear and
+    /// hyper-connection operation is replicated; only the row-parallel
+    /// attention projection and routed-expert down projection stop the graph.
+    /// The segmented driver AllReduces those F32 partials in place before it
+    /// resumes the following hyper-connection segment on every rank.
+    void build_g5n_rank(int rank)
+    {
+        graph_inputs & inp = res.inp;
+        const int dev = m.rank_device(rank);
+        const int64_t hcm = hp.hc_mult;
+        const int64_t pool = hp.indexer_kpool;
+        const int64_t n_pools = n_kv / pool;
+
+        bool has_mla = false;
+        for (int il = 0; il < hp.n_layer; il++) has_mla = has_mla || !m.layers[il].recurrent;
+        if (has_mla)
+        {
+            const ggml_type mask_type = m.flash_attn ? GGML_TYPE_F16 : GGML_TYPE_F32;
+            char nb[64];
+            snprintf(nb, sizeof(nb), "kq_mask.%d", dev);
+            inp.kq_mask[dev] = new_input(mask_type, n_kv, nt, nb, dev);
+            snprintf(nb, sizeof(nb), "kv_idxs.%d", dev);
+            inp.kv_idxs[dev] = new_input(GGML_TYPE_I64, nt, 0, nb, dev);
+            if (sparse)
+            {
+                snprintf(nb, sizeof(nb), "pool_cells.%d", dev);
+                inp.pool_cells[dev] = new_input(GGML_TYPE_I32, pool * n_pools, 0, nb, dev);
+                snprintf(nb, sizeof(nb), "pool_bias.%d", dev);
+                inp.pool_bias[dev] = new_input(m.fused_lid ? GGML_TYPE_F16 : GGML_TYPE_F32,
+                                               n_pools, nt, nb, dev);
+                snprintf(nb, sizeof(nb), "trail_cells.%d", dev);
+                inp.trail_cells[dev] = new_input(GGML_TYPE_I32, pool, nt, nb, dev);
+                snprintf(nb, sizeof(nb), "trail_vals.%d", dev);
+                inp.trail_vals[dev] = new_input_3d(GGML_TYPE_F32, 1, pool, nt, nb, dev);
+            }
+        }
+
+        {
+            char nb[64];
+            snprintf(nb, sizeof(nb), "inp_tokens.%d", dev);
+            inp.tokens[dev] = new_input(GGML_TYPE_I32, nt, 0, nb, dev);
+            snprintf(nb, sizeof(nb), "inp_pos.%d", dev);
+            inp.pos[dev] = new_input(GGML_TYPE_I32, nt, 0, nb, dev);
+        }
+        if (rank == 0 && res.want_logits)
+            inp.out_ids = new_input(GGML_TYPE_I32, res.n_out, 0, "inp_out_ids", dev);
+
+        ggml_tensor * emb = ggml_get_rows(ctx, m.tok_embd_rank[rank], inp.tokens[dev]);
+        if (res.n_ovr > 0)
+        {
+            inp.embd_rows = new_input(GGML_TYPE_F32, hp.n_embd, res.n_ovr, "embd_rows", dev);
+            inp.embd_idx = new_input(GGML_TYPE_I64, res.n_ovr, 0, "embd_idx", dev);
+            emb = ggml_set_rows(ctx, emb, inp.embd_rows, inp.embd_idx);
+        }
+        ggml_tensor * inpL = ggml_repeat_4d(ctx, ggml_reshape_3d(ctx, emb, hp.n_embd, 1, nt),
+                                            hp.n_embd, hcm, nt, 1);
+
+        for (int il = 0; il < hp.n_layer; il++)
+        {
+            const glm_layer & L = m.layers[il];
+            const glm_layer_weights & W = L.w[rank];
+
+            // ---- attention crossing -------------------------------------
+            ggml_tensor * residual = inpL;
+            ggml_tensor * post = nullptr;
+            ggml_tensor * comb = nullptr;
+            ggml_tensor * hc_cur = build_hc_pre(inpL, W.hc_attn_fn, W.hc_attn_scale, W.hc_attn_base,
+                                                &post, &comb);
+            ggml_build_forward_expand(gf, residual);
+            ggml_build_forward_expand(gf, post);
+            ggml_build_forward_expand(gf, comb);
+
+            ggml_tensor * cur = rms(hc_cur, W.attn_norm);
+            ggml_tensor * partial = nullptr;
+            if (L.recurrent)
+            {
+                partial = build_kda(il, rank, cur);
+            }
+            else
+            {
+                ggml_tensor * qr = rms(ggml_mul_mat(ctx, W.wq_a, cur), W.q_a_norm);
+                ggml_tensor * mask = inp.kq_mask[dev];
+                if (L.indexer_full)
+                {
+                    ggml_tensor * tk = build_indexer_g5n(il, rank, cur, qr, sparse);
+                    if (sparse && tk)
+                        mask = build_topk_mask_g5n(dev, inp.kq_mask[dev], tk,
+                                                   inp.trail_cells[dev], inp.trail_vals[dev]);
+                }
+                partial = build_attention(il, rank, cur, qr, inp.pos[dev], mask, inp.kv_idxs[dev]);
+            }
+            res.tp_plan.ar_tensor.push_back(partial);
+            res.tp_boundary.push_back(partial);
+            inpL = build_hc_post(partial, residual, post, comb);
+
+            // ---- FFN crossing -------------------------------------------
+            residual = inpL;
+            hc_cur = build_hc_pre(inpL, W.hc_ffn_fn, W.hc_ffn_scale, W.hc_ffn_base, &post, &comb);
+            ggml_build_forward_expand(gf, residual);
+            ggml_build_forward_expand(gf, post);
+            ggml_build_forward_expand(gf, comb);
+
+            ggml_tensor * ffn = nullptr;
+            cur = rms(hc_cur, W.ffn_norm);
+            if (!L.is_moe)
+            {
+                // Dense layers are deliberately replicated. They see the same
+                // residual on every rank after the preceding collective.
+                ffn = build_dense_ffn(il, rank, cur);
+            }
+            else
+            {
+                ffn = build_moe(il, rank, cur);
+                // Cut after the routed partial itself. Expanding it now keeps
+                // the replicated shared expert in the following segment, so
+                // every rank evaluates the established arithmetic order:
+                // (routed rank 0 + routed rank 1 + ...) + shared.
+                ggml_build_forward_expand(gf, ffn);
+                res.tp_plan.ar_tensor.push_back(ffn);
+                res.tp_boundary.push_back(ffn);
+                ggml_tensor * shared = build_shexp(il, rank, cur);
+                if (shared) ffn = ggml_add(ctx, ffn, shared);
+            }
+            inpL = build_hc_post(ffn, residual, post, comb);
+        }
+
+        if (rank != 0 || !res.want_logits)
+        {
+            // Non-root ranks still need their final HC post to finish so their
+            // replicated residual is ready for a cached graph's next replay.
+            ggml_build_forward_expand(gf, inpL);
+            return;
+        }
+
+        ggml_tensor * flat = ggml_reshape_2d(ctx, inpL, hcm * hp.n_embd, nt);
+        ggml_tensor * selr = ggml_get_rows(ctx, flat, inp.out_ids);
+        ggml_tensor * x3 = ggml_reshape_3d(ctx, selr, hp.n_embd, hcm, res.n_out);
+        ggml_tensor * out = hc_mean(x3);
+        out = rms(out, m.output_norm);
+        out = ggml_mul_mat(ctx, m.output, out);
+        ggml_set_output(out);
+        ggml_set_name(out, "logits");
+        res.logits = out;
+        ggml_build_forward_expand(gf, out);
+    }
+
     void build_g5n()
     {
+        if (res.tp_fused)
+        {
+            build_g5n_rank(res.tp_rank);
+            return;
+        }
         graph_inputs & inp = res.inp;
         const int64_t hcm = hp.hc_mult;
         const int64_t r = hp.indexer_kpool;
         const int64_t n_pools = n_kv / r;
 
         std::vector<uint8_t> used_dev((size_t) m.n_gpu + 1, 0);
-        for (int il = 0; il < hp.n_layer; il++) used_dev[(size_t) m.layers[il].device] = 1;
+        if (m.tp > 1)
+            for (int rank = 0; rank < m.tp; rank++) used_dev[(size_t) m.rank_device(rank)] = 1;
+        else
+            for (int il = 0; il < hp.n_layer; il++) used_dev[(size_t) m.layers[il].device] = 1;
 
         // Only MLA layers read the mask, the cache indices and the pool inputs;
         // a KDA-only device gets none (an input no node reads is never
@@ -4057,7 +4468,13 @@ struct graph_builder
         const ggml_type mask_type = m.flash_attn ? GGML_TYPE_F16 : GGML_TYPE_F32;
         std::vector<uint8_t> dev_mla((size_t) m.n_gpu + 1, 0);
         for (int il = 0; il < hp.n_layer; il++)
-            if (!m.layers[il].recurrent) dev_mla[(size_t) m.layers[il].device] = 1;
+        {
+            if (m.layers[il].recurrent) continue;
+            if (m.tp > 1 && m.tp_heads())
+                for (int rank = 0; rank < m.tp; rank++) dev_mla[(size_t) m.rank_device(rank)] = 1;
+            else
+                dev_mla[(size_t) (m.tp > 1 ? m.rank_device(0) : m.layers[il].device)] = 1;
+        }
 
         for (int d = 0; d <= m.n_gpu; d++)
         {
@@ -4080,13 +4497,13 @@ struct graph_builder
             }
         }
 
-        const int dev_embd = m.layers[0].device;
+        const int dev_embd = m.tp > 1 ? m.rank_device(0) : m.layers[0].device;
         {
             char nb[64];
             snprintf(nb, sizeof(nb), "inp_tokens.%d", dev_embd);
             inp.tokens[dev_embd] = new_input(GGML_TYPE_I32, nt, 0, nb, dev_embd);
         }
-        const int dev_last = m.layers[(size_t) hp.n_layer - 1].device;
+        const int dev_last = m.tp > 1 ? m.rank_device(0) : m.layers[(size_t) hp.n_layer - 1].device;
         if (res.want_logits)
             inp.out_ids = new_input(GGML_TYPE_I32, res.n_out, 0, "inp_out_ids", dev_last);
 
@@ -4105,76 +4522,99 @@ struct graph_builder
         ggml_tensor * inpL = ggml_repeat_4d(ctx, ggml_reshape_3d(ctx, emb, hp.n_embd, 1, nt),
                                             hp.n_embd, hcm, nt, 1);
 
+        ggml_tensor * part[MAX_GPUS] = {};
+        ggml_tensor * shexp[MAX_GPUS] = {};
+        const int n_attn = m.tp > 1 && m.tp_heads() ? m.tp : 1;
+        const int n_moe = m.tp > 1 && m.tp_experts() ? m.tp : 1;
+
         for (int il = 0; il < hp.n_layer; il++)
         {
             const glm_layer & L = m.layers[il];
             const glm_layer_weights & LW = L.w[0];
-            const int dev = L.device;
+            const int dev = device_of(il, 0);
 
-            if (il > 0 && dev != m.layers[il - 1].device)
+            if (m.tp == 1 && il > 0 && dev != m.layers[il - 1].device)
                 pin(inpL, dev);
 
             // ---- attention crossing ----
             ggml_tensor * residual = inpL;
             ggml_tensor * post = nullptr;
             ggml_tensor * comb = nullptr;
-            ggml_tensor * cur = build_hc_pre(inpL, LW.hc_attn_fn, LW.hc_attn_scale, LW.hc_attn_base,
-                                             &post, &comb);
+            ggml_tensor * hc_cur = build_hc_pre(inpL, LW.hc_attn_fn, LW.hc_attn_scale, LW.hc_attn_base,
+                                                &post, &comb);
             ggml_build_forward_expand(gf, residual);
             ggml_build_forward_expand(gf, post);
             ggml_build_forward_expand(gf, comb);
-            trace("hc_attn_pre", il, 0, cur);
+            trace("hc_attn_pre", il, 0, hc_cur);
 
-            cur = rms(cur, LW.attn_norm);
-            trace("attn_norm", il, 0, cur);
+            for (int rank = 0; rank < n_attn; rank++)
+            {
+                const glm_layer_weights & RW = L.w[rank];
+                const int rank_dev = device_of(il, rank);
+                ggml_tensor * cur = rms(hc_cur, RW.attn_norm);
+                trace("attn_norm", il, rank, cur);
 
-            ggml_tensor * attn = nullptr;
-            if (L.recurrent)
-            {
-                attn = build_kda(il, cur);
-            }
-            else
-            {
-                ggml_tensor * qr = rms(ggml_mul_mat(ctx, LW.wq_a, cur), LW.q_a_norm);
-                trace("qr", il, 0, qr);
-                ggml_tensor * mask = inp.kq_mask[dev];
-                if (L.indexer_full)
+                if (L.recurrent)
                 {
-                    ggml_tensor * tk = build_indexer_g5n(il, 0, cur, qr, sparse);
-                    trace_il = il; trace_rank = 0;
-                    if (sparse && tk)
-                        mask = build_topk_mask_g5n(dev, inp.kq_mask[dev], tk,
-                                                   inp.trail_cells[dev], inp.trail_vals[dev]);
+                    part[rank] = build_kda(il, rank, cur);
                 }
-                attn = build_attention(il, 0, cur, qr, inp.pos[dev], mask, inp.kv_idxs[dev]);
+                else
+                {
+                    ggml_tensor * qr = rms(ggml_mul_mat(ctx, RW.wq_a, cur), RW.q_a_norm);
+                    trace("qr", il, rank, qr);
+                    ggml_tensor * mask = inp.kq_mask[rank_dev];
+                    if (L.indexer_full)
+                    {
+                        ggml_tensor * tk = build_indexer_g5n(il, rank, cur, qr, sparse);
+                        trace_il = il; trace_rank = rank;
+                        if (sparse && tk)
+                            mask = build_topk_mask_g5n(rank_dev, inp.kq_mask[rank_dev], tk,
+                                                       inp.trail_cells[rank_dev], inp.trail_vals[rank_dev]);
+                    }
+                    part[rank] = build_attention(il, rank, cur, qr, inp.pos[rank_dev], mask,
+                                                 inp.kv_idxs[rank_dev]);
+                }
+                trace("attn_out", il, rank, part[rank]);
             }
-            trace("attn_out", il, 0, attn);
 
+            // Both MLA and KDA end in a row-parallel output projection. Reduce
+            // the partial hidden vectors before the nonlinear hyper-connection.
+            ggml_tensor * attn = reduce_ranks(part, n_attn);
             inpL = build_hc_post(attn, residual, post, comb);
             trace("hc_attn_post", il, 0, inpL);
 
             // ---- FFN crossing ----
             residual = inpL;
-            cur = build_hc_pre(inpL, LW.hc_ffn_fn, LW.hc_ffn_scale, LW.hc_ffn_base, &post, &comb);
+            hc_cur = build_hc_pre(inpL, LW.hc_ffn_fn, LW.hc_ffn_scale, LW.hc_ffn_base, &post, &comb);
             // expand before the sublayer so op offload cannot pull the mHC
             // state onto the expert weights' backend
             ggml_build_forward_expand(gf, residual);
             ggml_build_forward_expand(gf, post);
             ggml_build_forward_expand(gf, comb);
 
-            cur = rms(cur, LW.ffn_norm);
-            trace("ffn_norm", il, 0, cur);
-
             ggml_tensor * ffn = nullptr;
             if (!L.is_moe)
             {
+                ggml_tensor * cur = rms(hc_cur, LW.ffn_norm);
+                trace("ffn_norm", il, 0, cur);
                 ffn = build_dense_ffn(il, 0, cur);
             }
             else
             {
-                ffn = build_moe(il, 0, cur);
-                ggml_tensor * sh = build_shexp(il, 0, cur);
-                if (sh) ffn = ggml_add(ctx, ffn, sh);
+                // CPU-offloaded experts stay whole and run once. Otherwise each
+                // rank evaluates its row slice; the shared expert is replicated
+                // and is therefore added exactly once after the reduction.
+                const int n_moe_l = L.cpu_moe ? 1 : n_moe;
+                for (int rank = 0; rank < n_moe_l; rank++)
+                {
+                    ggml_tensor * cur = rms(hc_cur, L.w[rank].ffn_norm);
+                    part[rank] = build_moe(il, rank, cur);
+                    shexp[rank] = rank == 0 ? build_shexp(il, 0, cur) : nullptr;
+                    trace("ffn_norm", il, rank, cur);
+                    trace("moe_out", il, rank, part[rank]);
+                }
+                ffn = reduce_ranks(part, n_moe_l);
+                if (shexp[0]) ffn = ggml_add(ctx, ffn, shexp[0]);
             }
             trace("ffn_out", il, 0, ffn);
 
@@ -4819,16 +5259,21 @@ static graph_build_result * acquire_graph(glm_model & m, glm_slot & slot, int64_
         }
     }
 
-    auto entry = std::unique_ptr<graph_build_result>(new graph_build_result());
-    entry->nt = nt;
-    entry->n_kv = n_kv;
-    entry->n_out = n_out;
-    entry->sparse = sparse;
-    entry->want_logits = want_logits;
-    entry->want_h = want_h;
-    entry->kind = kind;
-    entry->slot_id = slot.id;
-    entry->n_ovr = n_ovr;
+    auto make_entry = [&]()
+    {
+        auto p = std::unique_ptr<graph_build_result>(new graph_build_result());
+        p->nt = nt;
+        p->n_kv = n_kv;
+        p->n_out = n_out;
+        p->sparse = sparse;
+        p->want_logits = want_logits;
+        p->want_h = want_h;
+        p->kind = kind;
+        p->slot_id = slot.id;
+        p->n_ovr = n_ovr;
+        return p;
+    };
+    auto entry = make_entry();
 
     // Node budget. A GLM layer costs ~110 nodes per rank (MoE alone is ~40, the
     // DSA indexer another ~20 on a full layer), so 256 per layer per rank leaves
@@ -4839,6 +5284,103 @@ static graph_build_result * acquire_graph(glm_model & m, glm_slot & slot, int64_
     // The draft block is one layer; give it the same per-layer budget plus the
     // fixed 1024 so its (much smaller) graph never has to share the trunk's.
     const size_t graph_layers = kind == 0 ? (size_t) m.hp.n_layer : 1;
+
+    // The fast path is intentionally narrow. Other graph kinds/configurations
+    // continue below through the mature multi-backend scheduler implementation.
+    const bool use_fused_tp = m.tp_fused && kind == 0 && !want_h;
+    if (use_fused_tp)
+    {
+        const size_t rank_nodes = graph_layers * nodes_per_layer + 1024;
+        bool built = true;
+
+        auto build_rank = [&](graph_build_result & rg, int rank) -> bool
+        {
+            rg.nt = nt;
+            rg.n_kv = n_kv;
+            rg.n_out = n_out;
+            rg.sparse = sparse;
+            rg.want_logits = rank == 0 && want_logits;
+            rg.want_h = false;
+            rg.kind = kind;
+            rg.slot_id = slot.id;
+            rg.n_ovr = n_ovr;
+            rg.tp_fused = true;
+            rg.tp_rank = rank;
+
+            ggml_init_params rp = {
+                ggml_tensor_overhead() * rank_nodes + ggml_graph_overhead_custom(rank_nodes, false),
+                nullptr, true
+            };
+            rg.ctx = ggml_init(rp);
+            if (!rg.ctx) return false;
+            rg.gf = ggml_new_graph_custom(rg.ctx, rank_nodes, false);
+            if (!rg.gf) return false;
+
+            graph_builder gb(m, rg, slot, nt, p0, n_kv, sparse);
+            gb.build();
+
+            rg.tp_plan.graph = rg.gf;
+            if (!tsg::tp_plan_segments(rg.tp_plan, rg.tp_boundary))
+            {
+                fprintf(stderr, "[glm] failed to segment rank %d TP graph\n", rank);
+                return false;
+            }
+
+            ggml_backend_t backend = m.backends[m.rank_device(rank)];
+            const int nn = ggml_graph_n_nodes(rg.gf);
+            for (int i = 0; i < nn; i++)
+            {
+                if (!ggml_backend_supports_op(backend, rg.gf->nodes[i]))
+                {
+                    fprintf(stderr, "[glm] rank %d backend cannot execute TP graph node %s (%s)\n",
+                            rank, rg.gf->nodes[i]->name, ggml_op_name(rg.gf->nodes[i]->op));
+                    return false;
+                }
+            }
+
+            rg.galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+            if (!rg.galloc || !ggml_gallocr_alloc_graph(rg.galloc, rg.gf))
+            {
+                fprintf(stderr, "[glm] failed to allocate rank %d TP graph for nt=%" PRId64
+                                " n_kv=%" PRId64 "\n", rank, nt, n_kv);
+                return false;
+            }
+            return true;
+        };
+
+        built = build_rank(*entry, 0);
+        for (int rank = 1; built && rank < m.tp; rank++)
+        {
+            auto peer = std::unique_ptr<graph_build_result>(new graph_build_result());
+            built = build_rank(*peer, rank);
+            entry->tp_peers.push_back(std::move(peer));
+        }
+        if (built)
+        {
+            const size_t n_seg = entry->tp_plan.seg_end.size();
+            for (const auto & peer : entry->tp_peers)
+                if (peer->tp_plan.seg_end.size() != n_seg) built = false;
+        }
+
+        if (built)
+        {
+            graph_build_result * raw = entry.get();
+            m.graph_cache.push_front(std::move(entry));
+            while ((int) m.graph_cache.size() > m.graph_cache_cap) m.graph_cache.pop_back();
+            if (out_reused) *out_reused = false;
+            return raw;
+        }
+
+        // A backend capability can differ from the load-time probes. Fall back
+        // once for the model instead of failing the request or rebuilding the
+        // same unusable rank graphs for every cache shape.
+        fprintf(stderr, "[glm] segmented TP graph is unavailable; switching to combined scheduler fallback\n");
+        m.tp_fused = false;
+        m.tp_comm.reset();
+        m.graph_cache.clear();
+        entry = make_entry();
+    }
+
     const size_t n_nodes = graph_layers * nodes_per_layer * (size_t) std::max(1, m.tp) + 1024;
     ggml_init_params gp = { ggml_tensor_overhead() * n_nodes + ggml_graph_overhead_custom(n_nodes, false),
                             nullptr, true };
@@ -4871,6 +5413,114 @@ static graph_build_result * acquire_graph(glm_model & m, glm_slot & slot, int64_
     return raw;
 }
 
+static graph_build_result * fused_rank_graph(graph_build_result & root, int rank)
+{
+    return rank == 0 ? &root : root.tp_peers[(size_t) rank - 1].get();
+}
+
+static bool glm_tp_host_reduce(glm_model & m, ggml_tensor ** tensors)
+{
+    const int ranks = m.tp;
+    const int64_t count = ggml_nelements(tensors[0]);
+    if (count <= 0) return true;
+    const size_t bytes = (size_t) count * sizeof(float);
+    std::vector<float *> ptrs((size_t) ranks, nullptr);
+    for (int r = 0; r < ranks; r++)
+    {
+        m.tp_host_stage[r].resize((size_t) count);
+        ptrs[(size_t) r] = m.tp_host_stage[r].data();
+    }
+
+    auto download = [&](int rank)
+    {
+        ggml_backend_t backend = m.backends[m.rank_device(rank)];
+        ggml_backend_synchronize(backend);
+        ggml_backend_tensor_get(tensors[rank], ptrs[(size_t) rank], 0, bytes);
+    };
+    std::vector<std::thread> workers;
+    workers.reserve((size_t) ranks - 1);
+    for (int r = 1; r < ranks; r++) workers.emplace_back(download, r);
+    download(0);
+    for (auto & worker : workers) worker.join();
+
+    tsg::tp_host_allreduce_mt(ptrs.data(), ranks, count);
+
+    workers.clear();
+    auto upload = [&](int rank)
+    {
+        ggml_backend_tensor_set(tensors[rank], ptrs[(size_t) rank], 0, bytes);
+    };
+    for (int r = 1; r < ranks; r++) workers.emplace_back(upload, r);
+    upload(0);
+    for (auto & worker : workers) worker.join();
+    return true;
+}
+
+/// Submit each rank's next local segment before waiting on any of them. The
+/// backend collective consumes the resulting partial tensors in place; after
+/// it completes, every rank resumes from the same reduced residual stream.
+static bool execute_fused_tp(glm_model & m, graph_build_result & root)
+{
+    if (!root.tp_fused || m.tp < 2 || root.tp_peers.size() + 1 != (size_t) m.tp) return false;
+    const size_t n_seg = root.tp_plan.seg_end.size();
+    std::vector<int> begin((size_t) m.tp, 0);
+    std::vector<ggml_tensor *> partial((size_t) m.tp, nullptr);
+
+    for (size_t s = 0; s < n_seg; s++)
+    {
+        for (int rank = 0; rank < m.tp; rank++)
+        {
+            graph_build_result * rg = fused_rank_graph(root, rank);
+            if (!rg || rg->tp_plan.seg_end.size() != n_seg) return false;
+            const int end = rg->tp_plan.seg_end[s];
+            const int start = begin[(size_t) rank];
+            begin[(size_t) rank] = end;
+            if (end <= start) continue;
+            ggml_cgraph view = ggml_graph_view(rg->gf, start, end);
+            ggml_backend_t backend = m.backends[m.rank_device(rank)];
+            if (ggml_backend_graph_compute_async(backend, &view) != GGML_STATUS_SUCCESS)
+            {
+                fprintf(stderr, "[glm] rank %d TP segment %zu compute failed\n", rank, s);
+                return false;
+            }
+        }
+
+        if (s + 1 == n_seg) continue;
+        for (int rank = 0; rank < m.tp; rank++)
+        {
+            graph_build_result * rg = fused_rank_graph(root, rank);
+            if (s >= rg->tp_plan.ar_tensor.size()) return false;
+            partial[(size_t) rank] = rg->tp_plan.ar_tensor[s];
+            if (!partial[(size_t) rank] || partial[(size_t) rank]->type != GGML_TYPE_F32 ||
+                ggml_nelements(partial[(size_t) rank]) != ggml_nelements(partial[0]))
+            {
+                fprintf(stderr, "[glm] invalid rank %d TP reduction tensor at segment %zu\n", rank, s);
+                return false;
+            }
+        }
+
+        bool device = m.tp_comm && m.tp_comm->allreduce(partial.data());
+        if (!device)
+        {
+            // A communicator can decline an unsupported payload. Stop probing
+            // it after the first refusal and use the correct host path for the
+            // remainder of this model's lifetime.
+            m.tp_comm.reset();
+            if (!glm_tp_host_reduce(m, partial.data())) return false;
+        }
+        if (!m.tp_comm_reported)
+        {
+            fprintf(stderr, "[glm] segmented TP reductions active via %s\n",
+                    device ? "backend device collective" : "host staging");
+            m.tp_comm_reported = true;
+        }
+    }
+
+    for (int rank = 0; rank < m.tp; rank++)
+        ggml_backend_synchronize(m.backends[m.rank_device(rank)]);
+    return true;
+}
+
 /// One trunk ubatch.
 ///
 /// `h_out`, when non-null, additionally receives the post-final-norm hidden
@@ -4897,6 +5547,10 @@ static bool forward_ubatch(glm_model & m, const int32_t * tokens, int64_t nt, bo
     if (!gr) return false;
 
     const int64_t n_kv = gr->n_kv;
+    std::vector<graph_build_result *> exec_graphs;
+    exec_graphs.push_back(gr);
+    if (gr->tp_fused)
+        for (auto & peer : gr->tp_peers) exec_graphs.push_back(peer.get());
 
     m.h_tokens.assign(tokens, tokens + nt);
     m.h_pos.resize((size_t) nt);
@@ -4925,22 +5579,23 @@ static bool forward_ubatch(glm_model & m, const int32_t * tokens, int64_t nt, bo
         }
     }
 
+    for (graph_build_result * xgr : exec_graphs)
     for (int d = 0; d <= m.n_gpu; d++)
     {
-        set_input_i32(gr->inp.tokens[d], m.h_tokens.data(), (size_t) nt);
-        set_input_i32(gr->inp.pos[d], m.h_pos.data(), (size_t) nt);
-        if (gr->inp.kv_idxs[d])
-            if (live(gr->inp.kv_idxs[d]))
-                ggml_backend_tensor_set(gr->inp.kv_idxs[d], m.h_kv_idxs.data(), 0, (size_t) nt * sizeof(int64_t));
-        if (gr->inp.kq_mask[d])
+        set_input_i32(xgr->inp.tokens[d], m.h_tokens.data(), (size_t) nt);
+        set_input_i32(xgr->inp.pos[d], m.h_pos.data(), (size_t) nt);
+        if (xgr->inp.kv_idxs[d])
+            if (live(xgr->inp.kv_idxs[d]))
+                ggml_backend_tensor_set(xgr->inp.kv_idxs[d], m.h_kv_idxs.data(), 0, (size_t) nt * sizeof(int64_t));
+        if (xgr->inp.kq_mask[d])
         {
-            if (live(gr->inp.kq_mask[d]))
+            if (live(xgr->inp.kq_mask[d]))
             {
-                if (f16_mask) ggml_backend_tensor_set(gr->inp.kq_mask[d], m.h_mask_f16.data(), 0, m.h_mask_f16.size() * 2);
-                else          ggml_backend_tensor_set(gr->inp.kq_mask[d], m.h_mask_f32.data(), 0, m.h_mask_f32.size() * 4);
+                if (f16_mask) ggml_backend_tensor_set(xgr->inp.kq_mask[d], m.h_mask_f16.data(), 0, m.h_mask_f16.size() * 2);
+                else          ggml_backend_tensor_set(xgr->inp.kq_mask[d], m.h_mask_f32.data(), 0, m.h_mask_f32.size() * 4);
             }
         }
-        if (gr->inp.lid_mask[d])
+        if (xgr->inp.lid_mask[d])
         {
             // The indexer always wants an F16 mask, whatever the attention uses.
             if (!f16_mask)
@@ -4949,19 +5604,23 @@ static bool forward_ubatch(glm_model & m, const int32_t * tokens, int64_t nt, bo
                 for (size_t i = 0; i < m.h_mask_f16.size(); i++)
                     m.h_mask_f16[i] = m.h_mask_f32[i] == 0.0f ? 0 : 0xFC00;
             }
-            if (live(gr->inp.lid_mask[d]))
-                ggml_backend_tensor_set(gr->inp.lid_mask[d], m.h_mask_f16.data(), 0, m.h_mask_f16.size() * 2);
+            if (live(xgr->inp.lid_mask[d]))
+                ggml_backend_tensor_set(xgr->inp.lid_mask[d], m.h_mask_f16.data(), 0, m.h_mask_f16.size() * 2);
         }
     }
-    set_input_i32(gr->inp.out_ids, m.h_out_ids.data(), (size_t) n_out);
+    for (graph_build_result * xgr : exec_graphs)
+        set_input_i32(xgr->inp.out_ids, m.h_out_ids.data(), (size_t) n_out);
 
     if (n_ovr > 0)
     {
-        if (live(gr->inp.embd_rows))
-            ggml_backend_tensor_set(gr->inp.embd_rows, ovr_rows, 0,
-                                    (size_t) n_ovr * m.hp.n_embd * sizeof(float));
-        if (live(gr->inp.embd_idx))
-            ggml_backend_tensor_set(gr->inp.embd_idx, ovr_idx, 0, (size_t) n_ovr * sizeof(int64_t));
+        for (graph_build_result * xgr : exec_graphs)
+        {
+            if (live(xgr->inp.embd_rows))
+                ggml_backend_tensor_set(xgr->inp.embd_rows, ovr_rows, 0,
+                                        (size_t) n_ovr * m.hp.n_embd * sizeof(float));
+            if (live(xgr->inp.embd_idx))
+                ggml_backend_tensor_set(xgr->inp.embd_idx, ovr_idx, 0, (size_t) n_ovr * sizeof(int64_t));
+        }
     }
 
     // glm5next pooled-indexer inputs. Pools are position-aligned windows of
@@ -4979,9 +5638,10 @@ static bool forward_ubatch(glm_model & m, const int32_t * tokens, int64_t nt, bo
         std::vector<float> pbias_f32;
         std::vector<uint16_t> pbias_f16;
         bool want_f16 = false, want_f32 = false;
-        for (int d = 0; d <= m.n_gpu; d++)
-            if (live(gr->inp.pool_bias[d]))
-                (gr->inp.pool_bias[d]->type == GGML_TYPE_F16 ? want_f16 : want_f32) = true;
+        for (graph_build_result * xgr : exec_graphs)
+            for (int d = 0; d <= m.n_gpu; d++)
+                if (live(xgr->inp.pool_bias[d]))
+                    (xgr->inp.pool_bias[d]->type == GGML_TYPE_F16 ? want_f16 : want_f32) = true;
         if (want_f16) pbias_f16.assign((size_t) (n_pools * nt), 0xFC00);
         if (want_f32) pbias_f32.assign((size_t) (n_pools * nt), -INFINITY);
         for (int64_t t = 0; t < nt; t++)
@@ -5005,33 +5665,42 @@ static bool forward_ubatch(glm_model & m, const int32_t * tokens, int64_t nt, bo
             }
         }
 
+        for (graph_build_result * xgr : exec_graphs)
         for (int d = 0; d <= m.n_gpu; d++)
         {
-            if (live(gr->inp.pool_cells[d]))
-                ggml_backend_tensor_set(gr->inp.pool_cells[d], pcells.data(), 0, pcells.size() * sizeof(int32_t));
-            if (live(gr->inp.pool_bias[d]))
+            if (live(xgr->inp.pool_cells[d]))
+                ggml_backend_tensor_set(xgr->inp.pool_cells[d], pcells.data(), 0, pcells.size() * sizeof(int32_t));
+            if (live(xgr->inp.pool_bias[d]))
             {
-                if (gr->inp.pool_bias[d]->type == GGML_TYPE_F16)
-                    ggml_backend_tensor_set(gr->inp.pool_bias[d], pbias_f16.data(), 0, pbias_f16.size() * 2);
+                if (xgr->inp.pool_bias[d]->type == GGML_TYPE_F16)
+                    ggml_backend_tensor_set(xgr->inp.pool_bias[d], pbias_f16.data(), 0, pbias_f16.size() * 2);
                 else
-                    ggml_backend_tensor_set(gr->inp.pool_bias[d], pbias_f32.data(), 0, pbias_f32.size() * 4);
+                    ggml_backend_tensor_set(xgr->inp.pool_bias[d], pbias_f32.data(), 0, pbias_f32.size() * 4);
             }
-            if (live(gr->inp.trail_cells[d]))
-                ggml_backend_tensor_set(gr->inp.trail_cells[d], tcells.data(), 0, tcells.size() * sizeof(int32_t));
-            if (live(gr->inp.trail_vals[d]))
-                ggml_backend_tensor_set(gr->inp.trail_vals[d], tvals.data(), 0, tvals.size() * sizeof(float));
+            if (live(xgr->inp.trail_cells[d]))
+                ggml_backend_tensor_set(xgr->inp.trail_cells[d], tcells.data(), 0, tcells.size() * sizeof(int32_t));
+            if (live(xgr->inp.trail_vals[d]))
+                ggml_backend_tensor_set(xgr->inp.trail_vals[d], tvals.data(), 0, tvals.size() * sizeof(float));
         }
     }
 
     // _async, not the synchronous entry point: the graph is already allocated
     // above (which the synchronous one asserts against), and the explicit
     // synchronize below is where the logits read waits.
-    if (ggml_backend_sched_graph_compute_async(gr->sched, gr->gf) != GGML_STATUS_SUCCESS)
+    if (gr->tp_fused)
+    {
+        if (!execute_fused_tp(m, *gr))
+        {
+            fprintf(stderr, "[glm] segmented TP graph compute failed\n");
+            return false;
+        }
+    }
+    else if (ggml_backend_sched_graph_compute_async(gr->sched, gr->gf) != GGML_STATUS_SUCCESS)
     {
         fprintf(stderr, "[glm] graph compute failed\n");
         return false;
     }
-    ggml_backend_sched_synchronize(gr->sched);
+    if (!gr->tp_fused) ggml_backend_sched_synchronize(gr->sched);
 
     print_traces(gr);
 

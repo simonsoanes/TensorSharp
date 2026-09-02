@@ -92,12 +92,25 @@ public class TensorParallelSupportGateTests
     [InlineData("gemma4")]
     [InlineData("muse-glimmer")]
     [InlineData("glm-dsa")]
+    [InlineData("glm5next")]
     [InlineData("deepseek4")]   // multi-GPU through its own executor, not the TP group
     public void TpCapableArchitectures_AreUntouched(string arch)
     {
         ITensorParallelGroup group = null;
         Assert.Equal(4, Resolve(arch, BackendType.GgmlCuda, 4, ref group, out int layerSplit));
         Assert.Equal(1, layerSplit);
+    }
+
+    [Fact]
+    public void GlmNativeTensorParallelism_RejectsDistributedGroupBeforeModelConstruction()
+    {
+        var context = new ModelCreateContext(
+            "/model-is-not-opened.gguf", BackendType.GgmlCuda, probe: null,
+            tpDegree: 2, tpGroup: new StubTpGroup());
+
+        var error = Assert.Throws<NotSupportedException>(() => Arch("glm5next").Factory(context));
+        Assert.Contains("local/single-process", error.Message, StringComparison.Ordinal);
+        Assert.Contains("--tp-node-id/--tp-peers", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -215,13 +215,13 @@ path used by `ggml_cuda` / `ggml_vulkan` / `ggml_cpu` / `ggml_metal`, and the
 managed per-op path used by `cpu` and `cuda`. None are registered in
 `EnvVarMatrix.All`, so the default TestMatrix sweep does not touch them; the
 full list with context is in the [GLM card](models/glm.md#environment-knobs).
-The tensor-parallel knobs (`TS_GLM_TP_SHARD`, `TS_GLM_TP_OVERSUBSCRIBE`) live
-in the TP table below.
+The tensor-parallel knobs (`TS_GLM_TP_SHARD`, `TS_GLM_TP_OVERSUBSCRIBE`,
+`TS_GLM_TP_FUSED`) live in the TP table below.
 
 | Variable | Applies to | Effect | Baseline | Values swept | In matrix |
 |---|---|---|---|---|---|
 | `TS_GLM_NATIVE` | GLM 5.x | `0` runs the managed per-op path on a GGML backend instead of the native whole-model graph — the A/B that proves the two agree | `1` (native) | `0`, `1` | no |
-| `TS_GLM_NGPU` | GLM 5.x on GGML | How many GPUs the layer split spreads the 78 layers over | `0` (all visible) | `1`, `2`, `3` | no |
+| `TS_GLM_NGPU` | GLM 5.x on GGML | How many GPUs the layer split spreads the trunk layers over | `0` (all visible) | `1`, `2`, `3` | no |
 | `TS_GLM_UBATCH` | GLM 5.x | Prefill micro-batch. `2048` is faster on long prompts when VRAM allows: pp2048 1145.8 vs 918.9 t/s on 3x RTX PRO 6000 | `1024` | `512`, `1024`, `2048` | no |
 | `TS_GLM_THREADS` | GLM 5.x on `ggml_cpu` | CPU-backend thread count (the routed-expert matmul takes its own count from `--cpu-moe-threads`) | min(cores, 32) | — | no |
 | `TS_GLM_FA` | GLM 5.x | `0` disables flash attention and falls back to an explicit `soft_max` chain | `1` (flash) | `0`, `1` | no |
@@ -269,6 +269,7 @@ Vulkan backends (`ggml_cuda`, `ggml_vulkan`). `TENSORSHARP_TP_DEGREE`,
 | `TS_GEMMA4_TP_FUSED_MOE` | Gemma 4 MoE under TP on GGML | `0` falls back from the fused whole-model MoE trunk (Megatron split inside each expert) to the whole-expert per-op path | on (fused trunk) | not registered | no |
 | `TS_GLM_TP_SHARD` | GLM 5.x under TP on GGML | Which halves of the split are applied: `1` heads, `2` routed experts, `3` both. The experts are split row-wise inside every expert rather than by expert id, because `ggml_mul_mat_id` needs a token's selected expert ids to stay distinct | `3` (both) | `1`, `2`, `3` | no |
 | `TS_GLM_TP_OVERSUBSCRIBE` | GLM 5.x under TP on GGML | `1` packs several ranks onto one GPU so the split can be checked for correctness on a single-GPU machine | `0` (one rank per GPU) | `0`, `1` | no |
+| `TS_GLM_TP_FUSED` | GLM-5.3-Flash local TP on GGML | `0` forces the combined scheduler diagnostic fallback instead of concurrent segmented rank-local graphs. The fallback is also selected automatically by CPU MoE, tensor tracing, partial `TS_GLM_TP_SHARD`, oversubscribed ranks, or a backend without native hyper-connection kernels | auto (segmented when eligible) | `0`, `1` | no |
 | `TS_Q4E_LAYER_SPLIT` | Qwen 3.8 Flash Next (`qwen4exp`) multi-GPU layer split under `--tp N` | Explicit layer counts per GPU, comma-separated (e.g. `20,28`), instead of the automatic VRAM balance; throws rather than silently ignoring a value it cannot honour. `--tp N` on this architecture is a layer split, not tensor parallelism — `qwen4exp` shards no weights | automatic (layers bin-packed to each device's free VRAM) | not registered | no |
 | `GGML_CUDA_ALLREDUCE` | local TP, `ggml_cuda` | `nccl` / `internal` / `none` — passed through to ggml's collective selection; setting it explicitly also skips the pre-flight probe | auto (NCCL when the build finds it and it passes the probe) | not registered | no |
 | `TS_GGML_TP_CUDA_GRAPHS` | local TP, `ggml_cuda` | `0` turns CUDA graph capture off for multi-GPU runs. Capture is ON by default under TP because a tensor-parallel token is dozens of small per-rank submissions that replay far more cheaply than they re-issue (4×A40: Qwen3.5-9B tp4 88 → 128.5 tok/s, Qwen3.5-35B-A3B tp2 71.3 → 104.1). It was historically disabled over a capture-poisoning hazard that no longer applies — ggml captures with `cudaStreamCaptureModeRelaxed`. The opt-out is translated into a native `GGML_CUDA_DISABLE_GRAPHS` before the first backend call, because ggml latches that value on first use | capture enabled | not registered | no |
