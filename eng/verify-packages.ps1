@@ -39,6 +39,12 @@ $PublicPackages = @(
         EmbeddedAssemblies = @()
     },
     @{
+        Id = "TensorSharp.AgentHost"
+        Project = "TensorSharp.AgentHost/TensorSharp.AgentHost.csproj"
+        TensorSharpDependencies = @("TensorSharp.Runtime")
+        EmbeddedAssemblies = @()
+    },
+    @{
         Id = "TensorSharp.Backends.Cuda"
         Project = "TensorSharp.Backends.Cuda/TensorSharp.Backends.Cuda.csproj"
         TensorSharpDependencies = @("TensorSharp.Tensors")
@@ -57,6 +63,12 @@ $PublicPackages = @(
         EmbeddedAssemblies = @()
     },
     @{
+        Id = "TensorSharp.Distributed"
+        Project = "TensorSharp.Distributed/TensorSharp.Distributed.csproj"
+        TensorSharpDependencies = @("TensorSharp.Tensors", "TensorSharp.Backends.Cuda")
+        EmbeddedAssemblies = @()
+    },
+    @{
         Id = "TensorSharp.Models"
         Project = "TensorSharp.Models/TensorSharp.Models.csproj"
         TensorSharpDependencies = @("TensorSharp.Tensors", "TensorSharp.Runtime", "TensorSharp.Backends.GGML", "TensorSharp.Backends.Cuda", "TensorSharp.Backends.MLX")
@@ -65,13 +77,13 @@ $PublicPackages = @(
     @{
         Id = "TensorSharp.Server"
         Project = "TensorSharp.Server/TensorSharp.Server.csproj"
-        TensorSharpDependencies = @("TensorSharp.Runtime", "TensorSharp.Models", "TensorSharp.Backends.GGML", "TensorSharp.Backends.Cuda", "TensorSharp.Backends.MLX")
+        TensorSharpDependencies = @("TensorSharp.Runtime", "TensorSharp.AgentHost", "TensorSharp.Models", "TensorSharp.Backends.GGML", "TensorSharp.Backends.Cuda", "TensorSharp.Backends.MLX", "TensorSharp.Distributed")
         EmbeddedAssemblies = @()
     },
     @{
         Id = "TensorSharp.Cli"
         Project = "TensorSharp.Cli/TensorSharp.Cli.csproj"
-        TensorSharpDependencies = @("TensorSharp.Tensors", "TensorSharp.Runtime", "TensorSharp.Models", "TensorSharp.Backends.GGML", "TensorSharp.Backends.MLX")
+        TensorSharpDependencies = @("TensorSharp.Tensors", "TensorSharp.Runtime", "TensorSharp.AgentHost", "TensorSharp.Models", "TensorSharp.Backends.GGML", "TensorSharp.Backends.MLX", "TensorSharp.Distributed")
         EmbeddedAssemblies = @()
     }
 )
