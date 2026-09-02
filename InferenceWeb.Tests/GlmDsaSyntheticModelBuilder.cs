@@ -72,6 +72,136 @@ internal static class GlmDsaSyntheticModelBuilder
         return path;
     }
 
+    /// <summary>
+    /// Write a one-layer glm5next KDA model for native tensor-parallel loader
+    /// tests. The dimensions are deliberately tiny, but preserve the production
+    /// partitioning constraint: a 16-wide KDA head in a Q8_0 output projection
+    /// must travel in two-head groups because Q8_0 has 32-element blocks.
+    /// </summary>
+    public static string WriteGlm5NextTpFixture(
+        string path, int numHeads, bool quantizeAttentionOutput)
+    {
+        const int hidden = 64;
+        const int ffn = 64;
+        const int headDim = 16;
+        const int lowRank = 32;
+        const int conv = 4;
+        const int hc = 4;
+        const int vocab = 128;
+        int dInner = numHeads * headDim;
+
+        if (numHeads <= 0)
+            throw new ArgumentOutOfRangeException(nameof(numHeads));
+        if (quantizeAttentionOutput && dInner % Q8Block != 0)
+            throw new ArgumentException("The Q8_0 fixture's KDA width must contain whole quantization blocks.",
+                nameof(numHeads));
+
+        var tensors = new List<TensorSpec>
+        {
+            Gen("token_embd.weight", 0.02f, hidden, vocab),
+            Gen("output_norm.weight", 0.2f, hidden),
+            Gen("output.weight", 0.02f, hidden, vocab),
+
+            Gen("blk.0.attn_norm.weight", 0.2f, hidden),
+            Gen("blk.0.ffn_norm.weight", 0.2f, hidden),
+
+            Gen("blk.0.hc_attn_fn.weight", 0.02f, hc * hidden, (2 + hc) * hc),
+            Gen("blk.0.hc_attn_scale.weight", 0.02f, 3),
+            Gen("blk.0.hc_attn_base.weight", 0.02f, (2 + hc) * hc),
+            Gen("blk.0.hc_ffn_fn.weight", 0.02f, hc * hidden, (2 + hc) * hc),
+            Gen("blk.0.hc_ffn_scale.weight", 0.02f, 3),
+            Gen("blk.0.hc_ffn_base.weight", 0.02f, (2 + hc) * hc),
+
+            Gen("blk.0.attn_q.weight", 0.02f, hidden, dInner),
+            Gen("blk.0.attn_k.weight", 0.02f, hidden, dInner),
+            Gen("blk.0.attn_v.weight", 0.02f, hidden, dInner),
+            Gen("blk.0.ssm_conv1d_q.weight", 0.02f, conv, 1, dInner),
+            Gen("blk.0.ssm_conv1d_k.weight", 0.02f, conv, 1, dInner),
+            Gen("blk.0.ssm_conv1d_v.weight", 0.02f, conv, 1, dInner),
+            Gen("blk.0.ssm_f_a.weight", 0.02f, hidden, lowRank),
+            Gen("blk.0.ssm_f_b.weight", 0.02f, lowRank, dInner),
+            Gen("blk.0.ssm_dt.bias", 0.02f, dInner),
+            Gen("blk.0.ssm_a", 0.02f, numHeads),
+            Gen("blk.0.ssm_beta.weight", 0.02f, hidden, numHeads),
+            Gen("blk.0.ssm_g_a.weight", 0.02f, hidden, lowRank),
+            Gen("blk.0.ssm_g_b.weight", 0.02f, lowRank, dInner),
+            Gen("blk.0.ssm_norm.weight", 0.2f, headDim),
+
+            Gen("blk.0.ffn_gate.weight", 0.02f, hidden, ffn),
+            Gen("blk.0.ffn_up.weight", 0.02f, hidden, ffn),
+            Gen("blk.0.ffn_down.weight", 0.02f, ffn, hidden),
+        };
+        var attentionOutput = Gen("blk.0.attn_output.weight", 0.02f, dInner, hidden);
+        if (quantizeAttentionOutput)
+            attentionOutput.Type = GgmlType.Q8_0;
+        tensors.Add(attentionOutput);
+
+        const string a = "glm5next";
+        var kv = new List<KvEntry>
+        {
+            new KvStr  { Key = "general.architecture", V = a },
+            new KvStr  { Key = "general.name", V = "tiny-glm5next-tp" },
+            new KvU32  { Key = $"{a}.block_count", V = 1 },
+            new KvU32  { Key = $"{a}.context_length", V = 256 },
+            new KvU32  { Key = $"{a}.embedding_length", V = hidden },
+            new KvU32  { Key = $"{a}.feed_forward_length", V = ffn },
+            new KvU32  { Key = $"{a}.attention.head_count", V = (uint)numHeads },
+            new KvU32Arr { Key = $"{a}.attention.head_count_kv", V = new uint[] { 0 } },
+            new KvF32  { Key = $"{a}.rope.freq_base", V = 10000.0f },
+            new KvF32  { Key = $"{a}.attention.layer_norm_rms_epsilon", V = 1e-6f },
+            new KvF32  { Key = $"{a}.attention.layer_norm_epsilon", V = 1e-6f },
+            new KvU32  { Key = $"{a}.attention.key_length", V = lowRank },
+            new KvU32  { Key = $"{a}.attention.value_length", V = lowRank },
+            new KvU32  { Key = $"{a}.attention.q_lora_rank", V = lowRank },
+            new KvU32  { Key = $"{a}.attention.kv_lora_rank", V = lowRank },
+            new KvU32  { Key = $"{a}.attention.key_length_mla", V = lowRank },
+            new KvU32  { Key = $"{a}.attention.value_length_mla", V = lowRank },
+            new KvU32  { Key = $"{a}.rope.dimension_count", V = 0 },
+
+            // These are required model-level fields even though this fixture's
+            // sole block is dense rather than routed-MoE or MLA.
+            new KvU32  { Key = $"{a}.leading_dense_block_count", V = 1 },
+            new KvU32  { Key = $"{a}.expert_count", V = 4 },
+            new KvU32  { Key = $"{a}.expert_used_count", V = 2 },
+            new KvU32  { Key = $"{a}.expert_feed_forward_length", V = 32 },
+            new KvU32  { Key = $"{a}.expert_group_count", V = 1 },
+            new KvU32  { Key = $"{a}.expert_group_used_count", V = 1 },
+            new KvU32  { Key = $"{a}.expert_gating_func", V = 2 },
+            new KvU32  { Key = $"{a}.attention.indexer.head_count", V = 1 },
+            new KvU32  { Key = $"{a}.attention.indexer.key_length", V = 64 },
+            new KvU32  { Key = $"{a}.attention.indexer.top_k", V = 4 },
+            new KvU32  { Key = $"{a}.attention.indexer.kpool", V = 4 },
+
+            new KvU32  { Key = $"{a}.kda.head_dim", V = headDim },
+            new KvU32  { Key = $"{a}.ssm.conv_kernel", V = conv },
+            new KvF32  { Key = $"{a}.kda.gate_lower_bound", V = -5.0f },
+            new KvU32  { Key = $"{a}.hyper_connection.count", V = hc },
+            new KvU32  { Key = $"{a}.hyper_connection.sinkhorn_iterations", V = 4 },
+            new KvF32  { Key = $"{a}.hyper_connection.epsilon", V = 1e-6f },
+            new KvU32  { Key = $"{a}.vocab_size", V = vocab },
+        };
+
+        var tokens = new List<string>(vocab);
+        foreach (int b in ByteToUnicode(vocab)) tokens.Add(char.ConvertFromUtf32(b));
+        var types = new int[vocab];
+        Array.Fill(types, 1);
+        kv.Add(new KvStr { Key = "tokenizer.ggml.model", V = "gpt2" });
+        kv.Add(new KvStr { Key = "tokenizer.ggml.pre", V = "gpt-2" });
+        kv.Add(new KvStrArr { Key = "tokenizer.ggml.tokens", V = tokens });
+        kv.Add(new KvI32Arr { Key = "tokenizer.ggml.token_type", V = types });
+        kv.Add(new KvStrArr { Key = "tokenizer.ggml.merges", V = Array.Empty<string>() });
+        kv.Add(new KvU32 { Key = "tokenizer.ggml.bos_token_id", V = 'A' });
+        kv.Add(new KvU32 { Key = "tokenizer.ggml.eos_token_id", V = 'Z' });
+        kv.Add(new KvBool { Key = "tokenizer.ggml.add_bos_token", V = false });
+        kv.Add(new KvBool { Key = "tokenizer.ggml.add_eos_token", V = false });
+        kv.Add(new KvU32 { Key = "general.file_type", V = quantizeAttentionOutput ? 7u : 0u });
+        kv.Add(new KvU32 { Key = "general.quantization_version", V = 2 });
+
+        using var fs = new FileStream(path, FileMode.Create, FileAccess.Write);
+        WriteGguf(fs, kv, tensors);
+        return path;
+    }
+
     private enum GgmlType { F32 = 0, Q8_0 = 8 }
 
     private const int Q8Block = 32;

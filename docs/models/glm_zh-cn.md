@@ -108,6 +108,10 @@ token 上比较两个执行器）：
 切分的是层*内部*的权重，于是 decode 时每张卡只需要读 1/N 的权重，而不是依次走完全部。
 切分方式沿用仓库其它模型一致的 Megatron column/row 模式：
 
+GLM 5.x 的原生张量并行执行器对 GLM-5.2 与 GLM-5.3-Flash **都只支持本地单进程**。
+它不会加入跨节点的 `ITensorParallelGroup`，因此 `--tp-node-id` / `--tp-peers`
+不能让这条路径变成分布式运行。
+
 | 部件 | 切法 | 集合通信 |
 |---|---|---|
 | 注意力 head | `attn_q_b` / `attn_k_b` / `attn_v_b` 按列并行，`attn_output` 按行并行 | 每层一次 all-reduce |
@@ -412,6 +416,7 @@ GGUF 宣称 1,048,576 token，但这并不意味着缓存放得下：78 层里�
 | `TS_GLM_MOE_MMAP` | 1 | 置 0 则复制主机端专家，而不是映射 GGUF |
 | `TS_GLM_TP_SHARD` | 3 | 张量并行切法：1 head，2 路由专家，3 两者 |
 | `TS_GLM_TP_OVERSUBSCRIBE` | 0 | 置 1 允许多个张量并行 rank 共用一张 GPU（仅用于正确性测试） |
+| `TS_GLM_TP_FUSED` | 自动 | GLM-5.3 的完整本地 GPU 配置满足条件时使用并发的按 rank 分段计算图；置 0 强制走组合调度器诊断回退。CPU MoE、tracing、部分切分、超额 rank 或缺少原生超连接内核时也会自动回退 |
 | `TS_GLM_BATCHED_DECODE` | 1 | 置 0 让原生侧拒绝所有批量 decode，强制走逐序列路径 |
 | `TS_GLM_TRACE` | — | 层号列表（或 `all`），按 `llama-eval-callback` 的排版打印逐层激活和 |
 | `TS_GLM_BD_DEBUG` | 0 | 置 1 打印每一步批量 decode 的过程（涉及哪些 slot、图是复用还是重建、走到哪一步） |
@@ -455,10 +460,34 @@ KDA 递归状态（卷积尾部 + delta-net 状态，每序列约 150 MB）无�
 新 prompt **恰好扩展**缓存前缀时才复用——与 Qwen 3.5 / 3.6 GDN 家族相同的契约；`Reset`
 会连同位置计数一起清空该状态。
 
+### 原生本地张量并行
+
+不传 `--tp` 时，仍使用跨所有可见 GPU 的自动按层切分。在 GGML GPU 后端上，
+`--tp N` 则使 GLM-5.3-Flash 走原生执行器的本地单进程张量并行计划：
+
+| 部件 | 本地 TP 策略 |
+|---|---|
+| KDA | q/k/v、卷积、衰减/门控投影与递归存储均按 head 列切分；每个 rank 只持有自己的卷积尾部与 delta-net 状态，`attn_output` 按行并行 |
+| MLA + DSA | MLA head 按列切分，`attn_output` 按行并行。池化 indexer 保持复制，因此所有 rank 选到相同的池 |
+| 路由 MoE | 每个被选专家仍全局可见，其隐藏行则被切分（gate/up 列并行、down 行并行）。router 保持复制 |
+| rank 汇合 | 注意力的 rank 局部隐状态会在非线性 Sinkhorn 超连接之前归约。分段快路径先归约路由专家局部输出，再由每个 rank 在本地计算并加入其复制的共享专家，然后进入超连接 |
+| 不切分的工作 | 超连接、池化 indexer、router、norm、稠密层、共享专家与 embedding 都保持不切分。分段路径按 rank 复制这些计算；output norm 与 LM head 留在 rank 0。组合调度器回退路径则只在 rank 0 计算并加入一次共享专家 |
+
+GLM 5.x 的原生 TP 路径在 GGML GPU 后端上对 GLM-5.2 与 GLM-5.3-Flash
+都只支持本地单进程，不支持分布式或跨节点运行。
+
+GLM-5.3-Flash 在默认的完整切分（head 与路由专家隐藏行都切）、每张本地 GPU 一个 rank、
+不启用 CPU MoE 或 tracing、且后端具备原生超连接内核时，会构建按 rank 分段计算图并并发提交。
+路由 MoE 先完成归约，随后每个 rank 在本地计算并加入其复制的共享专家。
+启用 CPU MoE、张量 tracing、部分 `TS_GLM_TP_SHARD` 切分、rank 超额共享 GPU，或后端缺少
+原生超连接内核时，则自动使用组合调度器回退路径；该路径只在 rank 0 计算并加入一次共享专家。
+`TS_GLM_TP_FUSED=0` 可强制使用该回退路径做诊断。
+
 ### 目前能跑什么
 
 - **跨所有可见 GPU 的层切分**（默认）：UD-Q2_K_XL 约 99 GiB，2×96 GB 上热缓存
   约 17 秒装载。
+- **原生本地张量并行**：在 GGML GPU 后端上，传入 `--tp N`；省略该参数仍走默认按层切分。
 - **`--cpu-moe` / `--n-cpu-moe N`** 专家驻留主机内存：可用（前 10 层专家在主机时
   实测解码约 35–40 t/s）。
 - **服务化**：原生逐序列 slot；并发请求轮询式解码（fused 批量解码对 glm5next
@@ -469,9 +498,8 @@ KDA 递归状态（卷积尾部 + delta-net 状态，每序列约 150 MB）无�
   （`TSGgml_GlmVisionEncoderF32`）；投影后的嵌入在原生执行器内覆盖
   `<|image|>` 占位行（`TSGgml_GlmQueueVisionRows`）——文本塔是 NoPE，
   完全不需要 MRoPE 记账。
-- **暂未支持**：`--tp` 张量并行（干净地拒绝；用层切分）与 NextN/MTP 投机
-  （llama.cpp 同样 assert 其 glm5next MTP 图未实现；`--spec` 打印提示后按
-  标准解码服务）。
+- **暂未支持**：NextN/MTP 投机（llama.cpp 同样 assert 其 glm5next MTP 图未实现；
+  `--spec` 打印提示后按标准解码服务）。
 
 ### 实测
 

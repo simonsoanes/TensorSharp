@@ -403,7 +403,7 @@ script gets that error instead of watching a setting be ignored.
 | `--ref-audio <file>` | Reference audio clip. Repeatable; referred to as `<Audio 1>`, `<Audio 2>`, … Resampled to the audio VAE's 32 kHz stereo and truncated to the generated clip's duration. |
 | `--no-audio` | Skip audio decoding on models that generate an audio track jointly with the video (MiniMax-H3), saving the audio VAE's time and memory. Ignored by video-only models. |
 | _(renamed flags)_ | `--wan-vae`, `--wan-te` and `--wan-dit2` became `--video-vae`, `--video-text-encoder` and `--video-dit2` when video generation stopped being Wan-only. The old spellings are still accepted everywhere — on the CLI, on the server, and as config-file keys — so existing configs keep working unchanged. |
-| `--tp <N>` | Multi-GPU degree — how many GPUs to spread the model over in a single process (default: `1`). Which of the two multi-GPU modes you get is the architecture's business, not yours: **tensor parallelism** (the weights split *inside* every layer) where it is implemented, and a **layer split** (whole layers per GPU — capacity, not speed) on Qwen 3.8 Flash Next (`qwen4exp`) and DeepSeek V4. An architecture that supports neither says so on stderr and runs on one GPU. Requires `--backend cuda`, `ggml_cuda`, or `ggml_vulkan`. See [Tensor Parallelism & Distributed Inference](#tensor-parallelism--distributed-inference). |
+| `--tp <N>` | Multi-GPU degree — how many GPUs to spread the model over in a single process (default: `1`). Which of the two multi-GPU modes you get is the architecture's business, not yours: **tensor parallelism** (the weights split *inside* every layer) where it is implemented, and a **layer split** (whole layers per GPU — capacity, not speed) on Qwen 3.8 Flash Next (`qwen4exp`) and DeepSeek V4. GLM 5.x layer-splits when this flag is omitted; on GGML GPU backends the flag selects its native local/single-process TP path for both GLM-5.2 and GLM-5.3-Flash. An architecture that supports neither says so on stderr and runs on one GPU. Requires `--backend cuda`, `ggml_cuda`, or `ggml_vulkan`. See [Tensor Parallelism & Distributed Inference](#tensor-parallelism--distributed-inference). |
 | `--tp-node-id <N>` | This node's 0-based ID for multi-node (distributed) tensor parallelism. Requires `--tp-peers`. |
 | `--tp-peers <list>` | Comma-separated `host:port` list of all nodes in the distributed TP cluster (e.g. `192.168.1.10:9500,192.168.1.11:9500`). Requires `--tp-node-id`. |
 | `--test` | Run built-in tokenizer, ChatML-template, and Ollama-comparison tests |
@@ -569,7 +569,7 @@ Running `TensorSharp.Server` with no arguments prints the full parameter referen
 | `--model <path>` | GGUF file to host (required for inference; when other options are passed without it, the server starts but `/api/models/load` will report no hosted model) |
 | `--mmproj <path>` | Multimodal projector GGUF (resolved relative to the model directory when only a filename is given; pass `none` to disable). Requires `--model`. |
 | `--backend <type>` | Default compute backend: `cpu`, `cuda`, `mlx`, `ggml_cpu`, `ggml_metal`, `ggml_cuda`, or `ggml_vulkan` |
-| `--tp <N>` | Multi-GPU degree — how many local GPUs to spread the hosted model over (default: `1`). Tensor parallelism where the architecture implements it; a layer split (whole layers per GPU — capacity, not speed) on Qwen 3.8 Flash Next (`qwen4exp`) and DeepSeek V4. Requires `--backend cuda`, `ggml_cuda`, or `ggml_vulkan`. Env: `TENSORSHARP_TP_DEGREE`. See [Tensor Parallelism & Distributed Inference](#tensor-parallelism--distributed-inference). |
+| `--tp <N>` | Multi-GPU degree — how many local GPUs to spread the hosted model over (default: `1`). Tensor parallelism where the architecture implements it; a layer split (whole layers per GPU — capacity, not speed) on Qwen 3.8 Flash Next (`qwen4exp`) and DeepSeek V4. GLM 5.x layer-splits when this flag is omitted; on GGML GPU backends the flag selects its native local/single-process TP path for both GLM-5.2 and GLM-5.3-Flash. Requires `--backend cuda`, `ggml_cuda`, or `ggml_vulkan`. Env: `TENSORSHARP_TP_DEGREE`. See [Tensor Parallelism & Distributed Inference](#tensor-parallelism--distributed-inference). |
 | `--tp-node-id <N>` | This node's 0-based ID for multi-node (distributed) tensor parallelism. The server can only be node `0` (the driver that serves HTTP); start worker nodes with `TensorSharp.Cli`. Requires `--tp-peers`. Env: `TENSORSHARP_TP_NODE_ID`. |
 | `--tp-peers <list>` | Comma-separated `host:port` list of all nodes in the distributed TP cluster, ordered by node ID (e.g. `192.168.1.10:9500,192.168.1.11:9500`). Requires `--tp-node-id`. Env: `TENSORSHARP_TP_PEERS`. |
 | `--gpu-device <N>` | Vulkan device index for the `ggml_vulkan` backend on multi-GPU hosts (e.g. an integrated Intel GPU next to a discrete NVIDIA one). Defaults to device 0; use `--list-gpus` to see the indices. Also settable via the `TS_GGML_VULKAN_DEVICE` env var. |
@@ -1465,8 +1465,9 @@ of them is `--tp`.
 **Tensor parallelism (`--tp N`)** puts *every* layer on *every* rank and splits
 the weights *within* each layer, so a decode step reads `1/N` of the bytes per
 device and the ranks all-reduce at each layer boundary. Every architecture in the
-table below marked ✅ supports it, and it is **opt-in** — nothing splits a tensor unless
-you ask.
+table below marked ✅ supports local TP, and it is **opt-in** — nothing splits a
+tensor unless you ask. A ✅ does not by itself claim distributed/cross-node support;
+local-only paths are called out in the notes.
 
 **The layer split** puts *whole layers* on different devices and runs them in
 sequence — device 0 evaluates layers 0..k, hands the hidden state to device 1,
@@ -1492,12 +1493,12 @@ stderr and runs on one GPU, instead of silently leaving the other cards idle.
 
 So on a 3-GPU box, `--backend ggml_cuda` alone gives you all three GPUs on GLM 5.x
 and DeepSeek V4 (layer split) and one GPU on Gemma 4 and Qwen 3.8 Flash Next;
-adding `--tp 3` switches the
-GLM 5.x to tensor parallelism (GLM-5.3-Flash refuses `--tp` and keeps its
-layer split), caps DeepSeek V4's layer split at three devices
+adding `--tp 3` switches GLM 5.x to its local, single-process native tensor
+parallelism (for both GLM-5.2 and GLM-5.3-Flash), caps DeepSeek V4's layer split at three devices
 (there `--tp N` is only a device count — the same thing `TS_DSV4_NGPU` sets), and
-gives Gemma 4 all three GPUs and Qwen 3.8 Flash Next a three-way layer split. On
-GLM 5.x that switch is a downgrade in speed and buys only capacity — see the
+gives Gemma 4 all three GPUs and Qwen 3.8 Flash Next a three-way layer split.
+On the measured GLM-5.2 run that switch is a downgrade in speed and buys only
+capacity — see the
 **What to expect** measurements below.
 
 **Qwen 3.8 Flash Next (`qwen4exp`) is the new one.** `--tp N` there runs a layer
@@ -1588,7 +1589,7 @@ must be reachable between all nodes.
 | Qwen 3.8 Flash Next | layer split | Not tensor parallelism: `--tp N` gives each GPU a contiguous run of whole layers, which is also the only multi-GPU mode llama.cpp offers `qwen4exp` (`-sm row` refuses to load it). Capacity, not speed — 2× A100-80GB on Qwen3.8-Flash-Next-UD-Q2_K_XL (73.4 GiB): greedy output byte-identical to the 1-GPU run (same SHA-256), VRAM 24.2 + 26.2 GB instead of one card holding everything, prefill ~1520-1550 t/s and decode ~56 t/s either way. `TS_Q4E_LAYER_SPLIT=20,28` sets the per-GPU layer counts by hand |
 | GPT OSS | ✅ | Attention sinks, YaRN. Runs on `cuda` and the GGML backends; the GGML path is expert-parallel (whole experts per rank, one batched `ggml_mul_mat_id` dispatch per projection per layer) and falls back to per-expert slicing only when the expert count does not divide the TP degree |
 | Nemotron-H | ✅ | Mamba2 replicated on rank 0, MoE expert slicing. Still walks experts per token per rank on GGML (no expert parallelism yet) |
-| GLM 5.x | ✅ | MLA heads column-parallel (`attn_q_b` / `attn_k_b` / `attn_v_b`) with row-parallel `attn_output`; the 256 routed experts are split **row-wise inside every expert** (column-parallel gate/up, row-parallel down) rather than by expert id, because `ggml_mul_mat_id` needs a token's selected expert ids to stay distinct. Router, norms, the DSA indexer, the shared expert and the 3 dense layers are replicated; two all-reduces per layer. `TS_GLM_TP_SHARD` picks the halves (1 heads, 2 experts, 3 both), `TS_GLM_TP_OVERSUBSCRIBE=1` packs several ranks on one GPU for testing. GGML backends only. GLM-5.3-Flash (`glm5next`) is the exception: it refuses `--tp` and uses its default layer split instead |
+| GLM 5.x | ✅ (local only) | GGML GPU backends only; the native TP path is local/single-process for both GLM-5.2 and GLM-5.3-Flash. GLM-5.2 shards MLA heads and hidden rows inside every routed expert. GLM-5.3-Flash also head-shards KDA with per-rank recurrent state; its MLA heads and routed-expert hidden rows are sharded likewise. Attention partials reduce before each nonlinear Sinkhorn hyper-connection. On GLM-5.3's eligible segmented fast path, routed-MoE partials reduce first, then each rank computes/adds the replicated shared expert locally; hyper-connections, pooled indexer, router, norms, dense layers and embedding also remain unsharded and execute per rank, while output norm / LM head stay on rank 0. CPU MoE, tracing, partial `TS_GLM_TP_SHARD`, oversubscription, or missing native hyper-connection kernels use the combined scheduler fallback, where the shared expert runs once on rank 0; `TS_GLM_TP_FUSED=0` forces that fallback for diagnostics. Omitting `--tp` keeps the default layer split |
 | DiffusionGemma | — | Not applicable (diffusion model) |
 | Qwen-Image-Edit | — | Not applicable (image generation) |
 
@@ -1771,6 +1772,7 @@ The full list, including the debug and A/B knobs, is in the
 | Per-device headroom left for compute buffers | `3072` MB | `TS_GLM_VRAM_RESERVE_MB=N` | — |
 | Context window | advertised length as a **ceiling**, refitted to free VRAM after load | `MAX_CONTEXT=N` makes it a hard limit instead | — (env only) |
 | Tensor-parallel split halves | `3` (heads + routed experts) | `TS_GLM_TP_SHARD` (1 heads, 2 experts, 3 both), `TS_GLM_TP_OVERSUBSCRIBE=1` packs ranks onto one GPU for testing | `--tp N` |
+| GLM-5.3 TP execution | concurrent segmented rank-local graphs when the full local-GPU configuration is eligible | `TS_GLM_TP_FUSED=0` forces the combined scheduler diagnostic fallback; CPU MoE, tracing, partial sharding, oversubscription, or missing native hyper-connection kernels also select it automatically | — |
 | Host-resident experts read from the GGUF mmap | ON | `TS_GLM_MOE_MMAP=0` copies into a private buffer instead | `--n-cpu-moe N` selects the layers |
 | Batched fused decode across sequences | ON | **`TS_BATCHED_FUSED_DECODE=0`** disables it; `TS_GLM_BATCHED_DECODE=0` makes the native side decline it | — |
 | Flash attention / fused lightning indexer | ON | `TS_GLM_FA=0`, `TS_GLM_FUSED_LID=0` fall back to primitives | — |

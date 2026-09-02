@@ -34,9 +34,9 @@
     <li><strong>张量并行（<code>--tp N</code>）</strong>把<em>每一层</em>都放到<em>每个 rank</em> 上，切分的是层<em>内部</em>的权重，于是一次 decode 每张卡只读 <code>1/N</code> 的字节，各 rank 在每个层边界做 all-reduce。它是<strong>按需开启</strong>的 —— 不主动要求，就不会有任何张量被切开 —— 下表里的多数（但已不是全部）架构实现了它。</li>
     <li><strong>按层切分</strong>则是把<em>整层</em>放到不同设备上顺序执行：设备 0 算第 0..k 层，把隐状态交给设备 1，依此类推。切点并不是简单的 <code>n_layer/N</code> —— 加载器会测量每张卡的空闲显存，再做装箱以均衡「占用预算的最大比例」，因此配置不一致的一组卡也能被均匀填满。没有集合通信、层内也不切分，因此在慢速互连上不花额外代价，但同一时刻只有一张卡在忙。</li>
   </ul>
-  <p>按层切分适用于<strong>三个架构</strong>，它们都走各自的整模型执行器。<strong>DeepSeek V4 Flash（<code>deepseek4</code>）与 GLM 5.x（<code>glm-dsa</code>、<code>glm5next</code>）</strong><strong>不加任何参数时就默认如此</strong>：它们会摊到所有可见 GPU 上，因为两者都装不进单卡。<code>TS_DSV4_NGPU</code> 与 <code>TS_GLM_NGPU</code> 用来限制使用几张卡。<strong>Qwen 3.8 Flash Next（<code>qwen4exp</code>）</strong>则是需要你开口的那一个：不传 <code>--tp N</code> 时它只用一张 GPU，而传了之后跑的是按层切分而非张量并行 —— <code>qwen4exp</code> 不切分任何权重，这也是 llama.cpp 为该架构提供的唯一多 GPU 模式（它的 <code>-sm row</code> 拒绝加载这个模型）。GLM-5.3-Flash 则相反：它会干脆拒绝 <code>--tp</code>，继续用默认的按层切分。</p>
+  <p>按层切分适用于<strong>三个架构</strong>，它们都走各自的整模型执行器。<strong>DeepSeek V4 Flash（<code>deepseek4</code>）与 GLM 5.x（<code>glm-dsa</code>、<code>glm5next</code>）</strong><strong>不加任何参数时就默认如此</strong>：它们会摊到所有可见 GPU 上，因为两者都装不进单卡。<code>TS_DSV4_NGPU</code> 与 <code>TS_GLM_NGPU</code> 用来限制使用几张卡。<strong>Qwen 3.8 Flash Next（<code>qwen4exp</code>）</strong>则是需要你开口的那一个：不传 <code>--tp N</code> 时它只用一张 GPU，而传了之后跑的是按层切分而非张量并行 —— <code>qwen4exp</code> 不切分任何权重，这也是 llama.cpp 为该架构提供的唯一多 GPU 模式（它的 <code>-sm row</code> 拒绝加载这个模型）。GLM-5.2 与 GLM-5.3-Flash 不传 <code>--tp</code> 时都继续使用该默认切分；在 GGML GPU 后端上，传入 <code>--tp N</code> 则选择仅支持本地单进程的原生张量并行。</p>
   <p>在<strong>其他所有架构</strong>上，不加 <code>--tp</code> 就是<strong>只用一张 GPU</strong>。通用的逐算子路径与融合图路径都没有自动按层切分 —— 装不下单卡的模型会在加载时失败，而不会被悄悄摊开（那条带具体 <code>--n-cpu-moe N</code> 建议的拒绝信息，只有 DeepSeek V4 与 GLM 5.x 的整模型加载器会打印）。<em>两种模式都不支持</em>的架构现在会在 stderr 上明说并只用一张 GPU，而不是接受 <code>--tp</code> 之后默默让其余卡闲置。</p>
-  <p>所以在一台 3 卡机器上：只写 <code>--backend ggml_cuda</code>，GLM 5.x 与 DeepSeek V4 会用满三张卡（按层切分），Gemma 4 与 Qwen 3.8 Flash Next 只用一张；再加上 <code>--tp 3</code>，GLM-5.2 切换成张量并行，DeepSeek V4 只是把按层切分限制在这 3 张卡上（那里的 <code>--tp N</code> 仅仅是个设备数，等同 <code>TS_DSV4_NGPU</code>），Gemma 4 通过层内切分用上三张卡，Qwen 3.8 Flash Next 则通过把整层摊开用上三张卡。在 GLM-5.2 上这个切换只会更慢，换来的仅仅是容量；在 Qwen 3.8 Flash Next 上按层切分不快也不慢，换来的同样只是容量 —— 见<a href="#performance">实测结果</a>。</p>
+  <p>所以在一台 3 卡机器上：只写 <code>--backend ggml_cuda</code>，GLM 5.x 与 DeepSeek V4 会用满三张卡（按层切分），Gemma 4 与 Qwen 3.8 Flash Next 只用一张；再加上 <code>--tp 3</code>，GLM-5.2 与 GLM-5.3-Flash 都切换到仅支持本地单进程的原生张量并行路径，DeepSeek V4 只是把按层切分限制在这 3 张卡上（那里的 <code>--tp N</code> 仅仅是个设备数，等同 <code>TS_DSV4_NGPU</code>），Gemma 4 通过层内切分用上三张卡，Qwen 3.8 Flash Next 则通过把整层摊开用上三张卡。在 GLM-5.2 上这个切换只会更慢，换来的仅仅是容量；在 Qwen 3.8 Flash Next 上按层切分不快也不慢，换来的同样只是容量 —— 见<a href="#performance">实测结果</a>。</p>
 
   <h2 id="how">张量并行的工作原理</h2>
   <p>每个 transformer block 被改写为一对互补的切分方式，因此每半个 block 只需要一次集合通信：</p>
@@ -96,7 +96,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model model.gguf --backend cuda
   <p>节点通常由人工间隔数秒到数分钟启动，因此先起来的节点会持续重试对外连接（最长 120 秒），而不是在第一次连接被拒绝时就失败。网格建立完成后，每个节点会打印 <code>[TcpCommunicator] Rank r/N connected to all peers.</code>。</p>
 
   <h2 id="architectures">支持的架构</h2>
-  <p>TensorSharp 中几乎每一种自回归架构都可以在 TP 下运行；异构层各有自己的切分策略。<code>--tp</code> 含义不同的那几个会单独标注。</p>
+  <p>TensorSharp 中几乎每一种自回归架构都可以在 TP 下运行；异构层各有自己的切分策略。<code>--tp</code> 含义不同的那几个会单独标注。本表描述本地支持；GLM-5.3-Flash 不声明支持分布式/跨节点 TP。</p>
   <div class="table-scroll">
   <table>
     <thead><tr><th>架构</th><th>TP</th><th>策略 / 说明</th></tr></thead>
@@ -108,7 +108,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model model.gguf --backend cuda
       <tr><td>GPT OSS</td><td class="yes">✅</td><td>MoE 专家切分、attention sink、YaRN。GGML 后端同样可运行，但 GGML 上的 MoE 路径目前仍按 token 逐个遍历专家，尚未使用专家并行。</td></tr>
       <tr><td>Nemotron-H</td><td class="yes">✅</td><td>MoE 专家切分；Mamba2 SSM 层在 rank 0 上计算后广播。GGML 上的 MoE 限制与 GPT OSS 相同。</td></tr>
       <tr><td>DeepSeek V4 Flash</td><td class="yes">✅（按层切分）</td><td>机制不同：DSV4 的整模型执行器是把模型<em>按层</em>切分到各 GPU，而不是切分每个权重，因此没有逐层 AllReduce。<code>--tp N</code> 只是限制切分使用几张 GPU（等同 <code>TS_DSV4_NGPU</code>）；不传参数时使用全部可见设备。切分以单卡最大负载为优化目标，并按各设备固定常驻项的实际落点计入——embedding 表在第一张卡，输出头与整个 DSpark 草稿器在最后一张卡。</td></tr>
-      <tr><td>GLM 5.x</td><td class="yes">✅</td><td>MLA 的头列并行（<code>attn_q_b</code> / <code>attn_k_b</code> / <code>attn_v_b</code>）配行并行 <code>attn_output</code>；256 个路由专家不是按专家 id 划分，而是在<em>每个专家内部</em>按 Megatron 切分（gate/up 列并行、down 行并行），因为 <code>ggml_mul_mat_id</code> 要求同一 token 选中的专家 id 互不相同。router、各处 norm、lightning indexer、共享专家与 3 个稠密层均为复制——每层两次 all-reduce。仅限 GGML 后端；<code>TS_GLM_TP_SHARD</code> 选择切哪一半（1 头、2 专家、3 两者都切），<code>TS_GLM_TP_OVERSUBSCRIBE=1</code> 可把多个 rank 挤在一张卡上做测试。不加 <code>--tp</code> 时，GLM 像 DeepSeek V4 一样按层切分到所有可见 GPU。上述切分仅限 GLM-5.2：<strong>GLM-5.3-Flash（<code>glm5next</code>）会干脆拒绝 <code>--tp</code></strong> —— 它的 KDA 线性注意力层、池化 indexer 与 Sinkhorn 超连接尚无 TP 策略 —— 转而使用按层切分。</td></tr>
+      <tr><td>GLM 5.x</td><td class="yes">✅（仅本地）</td><td>仅限 GGML GPU 后端；GLM-5.2 与 GLM-5.3-Flash 的原生 TP 都只支持本地单进程。GLM-5.2 切 MLA head 与每个路由专家内的隐藏行。GLM-5.3-Flash 还会切 KDA head 并让每个 rank 持有对应的递归状态；其 MLA head 与路由专家隐藏行同样切分。注意力局部输出会在每次非线性 Sinkhorn 超连接之前归约。在 GLM-5.3 满足条件的分段快路径上，路由 MoE 局部输出先归约，随后每个 rank 在本地计算并加入其复制的共享专家；超连接、池化 indexer、router、norm、稠密层与 embedding 保持不切分并按 rank 执行，output norm / LM head 留在 rank 0。CPU MoE、tracing、部分 <code>TS_GLM_TP_SHARD</code> 切分、超额 rank 或缺少原生超连接内核时选择组合调度器回退，其中共享专家只在 rank 0 运行一次；<code>TS_GLM_TP_FUSED=0</code> 可强制该诊断回退。不传 <code>--tp</code> 仍默认按层切分。</td></tr>
       <tr><td>DiffusionGemma</td><td class="no">—</td><td>不适用（文本扩散采样器，非自回归 decode）。</td></tr>
       <tr><td>Qwen-Image-Edit</td><td class="no">—</td><td>不适用（MMDiT 图像生成）。</td></tr>
     </tbody>

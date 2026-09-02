@@ -125,6 +125,11 @@ every one of N GPUs and splits the weights *inside* each layer, so decode reads
 1/N of the weights per device instead of walking all of them in sequence. The split follows the
 Megatron column/row pattern used by the rest of the repo:
 
+The native GLM 5.x tensor-parallel executor is **local and single-process** for
+both GLM-5.2 and GLM-5.3-Flash. It does not join the cross-node
+`ITensorParallelGroup`, so `--tp-node-id` / `--tp-peers` do not make this path
+distributed.
+
 | Piece | Split | Collective |
 |---|---|---|
 | Attention heads | column-parallel `attn_q_b` / `attn_k_b` / `attn_v_b`, row-parallel `attn_output` | one all-reduce per layer |
@@ -501,6 +506,7 @@ shrunk under you.
 | `TS_GLM_MOE_MMAP` | 1 | 0 copies host-resident experts instead of mapping the GGUF |
 | `TS_GLM_TP_SHARD` | 3 | tensor-parallel split: 1 heads, 2 routed experts, 3 both |
 | `TS_GLM_TP_OVERSUBSCRIBE` | 0 | 1 lets tensor-parallel ranks share a GPU (correctness testing only) |
+| `TS_GLM_TP_FUSED` | auto | GLM-5.3 uses concurrent segmented rank-local graphs when the full local-GPU configuration is eligible; 0 forces the combined scheduler diagnostic fallback. CPU MoE, tracing, partial sharding, oversubscription, and missing native hyper-connection kernels also select the fallback automatically |
 | `TS_GLM_BATCHED_DECODE` | 1 | 0 makes the native side decline every batched decode, forcing the per-sequence path |
 | `TS_GLM_TRACE` | — | layer list (or `all`) to dump per-layer activation sums, matching `llama-eval-callback`'s layout |
 | `TS_GLM_BD_DEBUG` | 0 | 1 narrates each batched decode step (which slots, graph reused or rebuilt, how far it got) |
@@ -547,10 +553,39 @@ cannot be rewound, so a cached prefix is only reused when the new prompt
 extends it exactly — the same contract as the Qwen 3.5 / 3.6 GDN family — and
 `Reset` wipes the state along with the position counter.
 
+### Native local tensor parallelism
+
+Omitting `--tp` keeps the automatic layer split across every visible GPU.
+On the GGML GPU backends, `--tp N` instead runs GLM-5.3-Flash through the
+native executor's local, single-process tensor-parallel plan:
+
+| Piece | Local TP strategy |
+|---|---|
+| KDA | Heads are column-sharded through q/k/v, convolution, decay/gate projections and recurrent storage; each rank owns only its conv tail and delta-net state. `attn_output` is row-parallel |
+| MLA + DSA | MLA heads are column-sharded and `attn_output` is row-parallel. The pooled indexer remains replicated so every rank selects the same pools |
+| Routed MoE | Every selected expert remains globally visible, while its hidden rows are sharded (gate/up column-parallel, down row-parallel). The router is replicated |
+| Rank joins | Attention partial hidden vectors are reduced **before** the nonlinear Sinkhorn hyper-connection crossing. On the segmented fast path, routed-expert partials reduce first, then every rank computes and adds its replicated shared expert locally before the hyper-connection |
+| Unsharded work | Hyper-connections, pooled indexer, router, norms, dense layers, shared expert and embedding remain unsharded. The segmented path replicates their computation per rank; output norm and LM head stay on rank 0. The combined scheduler fallback instead computes and adds the shared expert once on rank 0 |
+
+The native GLM 5.x TP path is local/single-process on GGML GPU backends for
+both GLM-5.2 and GLM-5.3-Flash; it does not support distributed or cross-node
+execution.
+
+With GLM-5.3-Flash's default full sharding (heads and routed-expert rows), one
+rank per local GPU, no CPU MoE or tracing, and native hyper-connection kernels,
+the executor builds segmented rank-local graphs and submits the ranks
+concurrently. Routed MoE is reduced first, after which each rank computes and
+adds its replicated shared expert locally. CPU MoE, tensor tracing, partial `TS_GLM_TP_SHARD` settings,
+oversubscribed ranks, or a backend without native hyper-connection kernels use
+the combined scheduler fallback instead; that path computes and adds the shared
+expert once on rank 0. `TS_GLM_TP_FUSED=0` forces the fallback for diagnostics.
+
 ### What runs today
 
 - **Layer split across every visible GPU** (the default): ~99 GiB of
   UD-Q2_K_XL loads across 2×96 GB in ~17 s warm.
+- **Native local tensor parallelism**: pass `--tp N` on a GGML GPU backend;
+  omitting the flag keeps the default layer split.
 - **`--cpu-moe` / `--n-cpu-moe N`** host-resident experts: works (measured
   ~35–40 t/s decode with the first 10 layers' experts on the host).
 - **Serving**: per-sequence native slots, concurrent requests decode
@@ -564,8 +599,7 @@ extends it exactly — the same contract as the Qwen 3.5 / 3.6 GDN family — an
   `<|image|>` placeholder rows inside the native executor
   (`TSGgml_GlmQueueVisionRows`) — the text tower is NoPE, so image tokens
   need no MRoPE bookkeeping.
-- **Not yet**: `--tp` tensor parallelism (cleanly refused; use the layer
-  split) and NextN/MTP speculation (llama.cpp asserts its glm5next MTP graph
+- **Not yet**: NextN/MTP speculation (llama.cpp asserts its glm5next MTP graph
   unimplemented too; `--spec` prints a notice and serves standard decode).
 
 ### Measured

@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.IO;
 using TensorSharp.Models;
 using TensorSharp.Runtime;
@@ -12,9 +13,17 @@ static BackendType ParseBackend(string backend) => backend.ToLowerInvariant() sw
     _ => throw new ArgumentException("Unknown backend. Use cpu, ggml_cpu, ggml_metal, or ggml_cuda.")
 };
 
-if (args.Length < 1)
+if (args.Length is < 1 or > 3)
 {
-    Console.Error.WriteLine("Usage: InferenceEngineSmoke <model.gguf> [backend]");
+    Console.Error.WriteLine("Usage: InferenceEngineSmoke <model.gguf> [backend] [tp-degree]");
+    return 1;
+}
+
+int tpDegree = 1;
+if (args.Length >= 3 &&
+    (!int.TryParse(args[2], NumberStyles.None, CultureInfo.InvariantCulture, out tpDegree) || tpDegree <= 0))
+{
+    Console.Error.WriteLine($"Invalid TP degree '{args[2]}': expected a positive integer.");
     return 1;
 }
 
@@ -27,7 +36,7 @@ if (!File.Exists(modelPath))
 
 BackendType backend = ParseBackend(args.Length >= 2 ? args[1] : "ggml_cpu");
 
-using var model = ModelBase.Create(modelPath, backend);
+using var model = ModelBase.Create(modelPath, backend, tpDegree);
 var tokenIds = model.Tokenizer.Encode("Hello", addSpecial: true);
 float[] logits = model.Forward(tokenIds.ToArray());
 
@@ -49,5 +58,5 @@ foreach (float v in logits)
 }
 
 Console.WriteLine(
-    $"InferenceEngineSmoke passed ({backend}) - vocab={model.Config.VocabSize}, tokens={tokenIds.Count}, topToken={topToken}, logitsHash=0x{hash:X8}");
+    $"InferenceEngineSmoke passed ({backend}, tp={tpDegree}) - vocab={model.Config.VocabSize}, tokens={tokenIds.Count}, topToken={topToken}, logitsHash=0x{hash:X8}");
 return 0;
