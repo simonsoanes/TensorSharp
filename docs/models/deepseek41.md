@@ -350,34 +350,117 @@ An explicit `--layer-split` count must agree with any `TS_DSV4_NGPU` override. S
 devices intended for the run. An explicit `TS_DSV4_NGPU=0` selects visible
 devices automatically and defers rank-count validation to the native loader.
 
-`--tp 8` together with `TS_DSV41_TP=8` enables experimental **routed-MoE tensor
-parallelism** on eight GPUs. `--tp` alone is refused because full-model tensor
-parallelism is not implemented. Do not combine `--layer-split` with
-`TS_DSV41_TP>0`; a pure layer split must keep that setting at `0`. This setting accepts `0` (disabled) or a
+`--tp 8 --backend ggml_cuda` enables **routed-MoE tensor parallelism** on eight
+GPUs directly; `--tp` accepts every degree from `2` through `8`, including `3`,
+`5`, and `6`. No environment opt-in is required. The degree reaches the native
+loader as a per-model argument. `TS_DSV41_TP` remains a legacy entry point;
+if set alongside `--tp`, it must match the requested degree (including rejecting
+`TS_DSV41_TP=0` with `--tp 2..8`). Do not combine `--layer-split` with
+`TS_DSV41_TP>0`; a pure layer split must keep that setting at `0`. The legacy setting accepts `0` (disabled) or a
 rank count from `2` through `8`, which must equal the GPU count selected by
 `--tp` or `TS_DSV4_NGPU`. With automatic GPU selection, the native loader
 checks the count after enumerating visible devices. An invalid value or count
 mismatch is an error.
 
-In this mode, routed-expert gate/up/down matrices are partitioned along the
-FFN intermediate dimension and executed concurrently across all selected
-GPUs. Partial outputs are reduced through host-staged F32 buffers. Attention,
+In this mode, routed-expert gate/up matrices are partitioned along the FFN
+intermediate dimension, and down matrices along their output rows. Each rank
+receives the full SwiGLU activation before its down projection; the disjoint
+output rows are then gathered without summing partial dot products. This keeps
+the down projection's reduction order, avoiding rounding changes that later
+activation quantization can amplify. Quantization blocks are never split, and
+uneven strips rotate across layers to balance storage. CUDA uses reusable pinned
+buffers for input/output transfers. Attention,
 shared experts, and caches retain their layer placement. This is a partial
 tensor-parallel implementation; it does not shard attention or enable
 distributed tensor-parallel groups. Host transfers can limit throughput, so
-this option does not establish a speedup over layer split. The first full Q2_K
-TP quality/performance run has completed and was slower than layer split; see
+this option does not establish a speedup over layer split. The qualified full-checkpoint
+run below was slower than layer split; see also
 the [measured placement profiles](../deepseek41_validation.md#full-checkpoint-routed-moe-tp).
 
-Independent numerical fixtures passed on 2/4/8 GPUs, including quantized
-expert shards and complete-model oracle checks. Those small fixtures do not
-establish that the full Q2_K checkpoint fits on two or four A40s. The VM example
-uses eight; smaller placements require enough CPU expert offload to fit.
+Before uploading a TP layer, its three routed-expert source ranges are read
+sequentially into the page cache with the existing `TS_DSV4_LOAD_THREADS` policy
+(default 16, 64 MiB scratch per reader). Already resident ranges are skipped.
+Only the current layer is prepared, avoiding small, strided network-file page
+faults during rank uploads. `TS_DSV4_WARM_PREAD=0` keeps direct mapped reads for
+this stage. This preparation does not warm the complete checkpoint.
+
+A September 29, 2026 same-build TP6 comparison on the six-A40 VM used
+`TS_DSV4_WARM_PREAD=0,1,1,0` in model-start order. Load times excluding kernel
+warmup were **546.26, 149.61, 157.35, and 510.88 seconds**: disabled/enabled
+medians **528.57/153.48 s**, a descriptive **3.444×** ratio. Each launch required
+zero client-kernel residency across 183.25 GiB of complete pages in all 120
+routed-expert tensors. Settings, checkpoint, source, native library and managed
+runtime stayed fixed; all 129,280 first-prefill logits and the one-token greedy
+check matched exactly, and every process exited cleanly. The fourth cache
+precondition initially left 135 pages resident and prevented launch. A separately
+recorded continuation passed the same zero-page gate on its first attempt and
+supplied the fourth observation; the failed attempt remains preserved. This is
+an interrupted comparison with two starts per setting, not an uninterrupted
+ABBA trial. Partial boundary pages and MooseFS userspace/network/server caches
+were uncontrolled, so the ratio is not a cold-storage or universal speedup.
+
+When NCCL selects `NCCL_P2P_DISABLE=1`, batches of at most 16 tokens use the
+pinned host activation gather; larger batches use the private F32 NCCL gather.
+This threshold follows paired measurements on six PCIe A40s and is not applied
+to P2P-enabled configurations. `TS_DSV41_TP_HOST_TOKENS=0` forces the available
+device gather for comparison; values from 0 through 4096 set the host threshold.
+`TS_GGML_TP_F32_NCCL=0` selects the host fallback for every batch. Both transports
+preserve F32 bits. Device gathering remains ordered on the rank CUDA streams,
+without a separate gate/up completion fence; errors drain every rank before
+returning control to the caller. Full-model throughput must still be measured
+for the chosen placement and transport.
+
+The September 29, 2026 UTC check used six PCIe A40s, the repaired ten-shard
+EngramQ5/Q2_K checkpoint, context 4096, F16 KV, host Engram tables with warming
+disabled, and `NCCL_P2P_DISABLE=1`. Each placement had one process start and five
+identical fixed-input rows: 512 prefill tokens and 128 decode tokens. Candidate native
+`473ee64d…` passed the runtime-file integrity checks; the upstream ggml checkout
+remained unchanged at `353b63b4…`. All three runs produced the same complete
+128-token untimed greedy chain as the original layer-split baseline.
+
+| Placement | First row prefill / decode, tok/s | Median rows 2–5 prefill / decode, tok/s | All five prefill rows, tok/s range | All five decode rows, tok/s range |
+|---|---:|---:|---:|---:|
+| Original `--layer-split 6` | 53.3 / 13.1 | 363.05 / 30.20 | 53.3–502.6 | 13.1–30.3 |
+| `--tp 6`, adaptive host threshold 16 | 19.7 / 9.8 | 209.75 / 19.95 | 19.7–280.7 | 9.8–26.2 |
+| `--tp 6`, forced device gather, threshold 0 | 37.7 / 10.3 | 196.75 / 18.20 | 37.7–302.0 | 10.3–22.8 |
+
+Use `--layer-split 6` for throughput on this VM and workload. The adaptive
+transport's decode median was 1.096× the forced-device median, but the row
+variation and single start per configuration do not establish a stable or
+general speedup. Both TP runs stayed at a sampled 1740 MHz SM clock and P0;
+later rows had no measured major faults. The remaining timing variation was
+not attributed to a specific cause.
+
+During these timing rows, container memory was about 255 GiB for TP versus
+70 GiB for layer split. File cache accounted for about 252 versus 68 GiB;
+anonymous memory was about 1.6–1.7 versus 0.8–0.9 GiB. TP upload scratch is
+bounded, but uploaded routed-weight pages remain in reclaimable file cache:
+`TS_DSV4_LOAD_DROP_CACHE` currently applies to ordinary layer uploads, not
+the private TP uploader. GPU capacity alone therefore does not establish that
+a host-memory limit is sufficient; the observed 255 GiB is not a minimum RAM
+requirement. These sequential loads had different
+source-page residency and are not a controlled loading-latency comparison.
+
+The current output-row implementation passed numerical fixtures on two and six
+A40s, including F32, BF16, F16, Q2_K, Q3_K, Q4_K and Q6_K on two GPUs and real
+repaired-checkpoint expert weights on six. CPU fixtures cover degrees 2 through
+8; seven- and eight-GPU runs were unavailable on the six-GPU validation VM.
+The final `473ee64d…` runtime passed six-GPU HTTP qualification with the repaired
+ten-shard Q2_K/Q5 checkpoint: 16 text responses matched the unchanged layer-split
+baseline exactly, all four strict tool cases and three image cases passed, and
+all 129,280 first-prefill logits were bitwise identical. DSpark and ngram each
+preserved all 96 greedy tokens and the finish reason on text and image inputs.
+Recorded drafted/accepted/verify counts were 49/49/10 for each ngram scenario,
+83/73/19 for text DSpark and 40/22/13 for image DSpark; DSpark exercised seven
+and nine rollbacks respectively. Both HTTP and speculation exited cleanly with
+no runtime-file changes. These counters establish active speculative coverage,
+not a speculative throughput improvement.
+These checks do not establish that the full checkpoint fits on two or four A40s.
 When the historical seven-shard Q2_K Engram tables use host mappings, synchronous warming consumes
 approximately 60 GiB of host page cache before readiness. GPU-resident tables
 skip this warm. Record cold-load and warming time separately from warm throughput.
 
-On CUDA, Q2_K and Q4_K gate/up strips run through TensorSharp's owned
+On CUDA, quantized gate/up and down output strips run through TensorSharp's owned
 quantized strip kernel (`ggml_ops_matmul_quant_strip.cuh`,
 `tsg_matmul_id_quant_pair`): it reads only the rank's weight strip but keeps
 the unsplit launch's stream-k partitions and reduction order, so each strip's
@@ -389,9 +472,10 @@ against the `1e-5` full-weight tolerance). `GgmlOpsDsv41TpTest` keeps the
 strict full-weight reference and its original tolerances as the pass
 criterion, records the same-device partitioned evaluation beside it, and
 `--cuda 1 --quant-strip-only` checks bitwise gate/up equality plus scratch
-growth/failure recovery. Nonaligned strip shapes stay on ggml's route. Narrow
-strips are 15-36% slower per MoE call in the recorded microbenchmarks, so this
-is a correctness change, not a speedup; see
+growth/failure recovery. Nonaligned strip shapes stay on ggml's route. The
+recorded 15-36% narrow-strip MoE slowdown describes the earlier split-down
+implementation, not the current two-gather
+implementation; see
 `docs/validation/qualification-2026-09-16/numerical-tp-chosen-r1/README.md` (local validation evidence, not committed).
 
 If the weights and context do not fit, add `--n-cpu-moe N` to keep the routed
@@ -401,7 +485,7 @@ experts. Attention, routing, and the shared expert remain on the GPU.
 when the tables use host mappings, only selected embedding rows are read and
 transferred for each input batch. CPU MoE offload and layer split are implemented,
 but their throughput must be measured for the chosen hardware
-and context. When combined with `TS_DSV41_TP`, CPU-offloaded leading layers
+and context. When combined with `--tp N`, CPU-offloaded leading layers
 retain whole CPU experts; the remaining layers use the routed-expert shards.
 
 Native `6b3b5ab3…` explicitly assigns shared gate/up/down projections to the
@@ -1020,7 +1104,7 @@ memory rather than VRAM here.
 
 The options that name GPUs behave as follows:
 
-- `TS_DSV41_TP` shards routed-expert dimensions across GPUs. Combined with
+- `--tp N` (or legacy `TS_DSV41_TP`) shards routed-expert dimensions across GPUs. Combined with
   `ggml_cpu` it is refused before the checkpoint is opened, not ignored.
 - `TS_DSV4_NGPU` selects how many GPUs to enumerate. There are none to
   enumerate here, so the loader never reads it; it is neither an error nor a
@@ -1229,8 +1313,8 @@ original output limit retain precedence.
   which has no numerical gate yet; both are correctness and portability paths
   rather than serving ones. `mlx` fails before the weights are read, rather
   than loading V4.1 weights into a graph that does not implement it.
-- Multi-GPU execution defaults to whole-layer placement. `TS_DSV41_TP` enables
-  experimental routed-MoE tensor parallelism with host-staged reduction.
+- Execution uses one GPU by default. `--layer-split N` selects whole-layer
+  placement; `--tp N` selects routed-MoE tensor parallelism with F32 activation/output gathers.
   Attention tensor parallelism and distributed groups are not implemented.
 - Concurrent requests have isolated sequence slots. On the native executor
   with the CUDA fused backend (`--backend ggml_cuda`), their decode steps run

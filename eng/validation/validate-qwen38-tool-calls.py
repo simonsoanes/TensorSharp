@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check actual Qwen3.8 generic calls over the OpenAI HTTP API.
+"""Check actual model-generated generic calls over the OpenAI HTTP API.
 
 Runs streamed/nonstreamed requests with thinking on/off. Saves complete requests
 and responses, checks argument types and exact string content, and feeds the
@@ -144,7 +144,9 @@ def run_case(args, scenario, stream, thinking):
                 "parameters": {"type": "object", "properties": spec["properties"], "required": list(spec["properties"])}}}
         body = {"model": args.model, "messages": [{"role": "user", "content": spec["prompt"]}],
                 "tools": [tool], "tool_choice": "auto", "stream": stream, "think": thinking,
-                "temperature": 0, "max_tokens": 2048, "skills": [], "skills_discovery": False}
+                "temperature": 0, "max_tokens": getattr(args, "max_tokens", 2048), "skills": [], "skills_discovery": False}
+        if getattr(args, "reasoning_effort", None):
+            body["reasoning_effort"] = args.reasoning_effort
         if stream:
             body["stream_options"] = {"include_usage": True}
         first = {}
@@ -185,17 +187,22 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--timeout", default=900, type=float)
     parser.add_argument("--scenarios", default=",".join(SPECS))
+    parser.add_argument("--thinking", choices=("off", "on", "off,on"), default="off,on")
+    parser.add_argument("--max-tokens", type=int, default=2048)
+    parser.add_argument("--reasoning-effort", choices=("low", "medium", "high"))
     args = parser.parse_args()
     scenarios = args.scenarios.split(",")
-    if any(name not in SPECS for name in scenarios):
-        parser.error("Unknown scenario")
+    if any(name not in SPECS for name in scenarios) or len(scenarios) != len(set(scenarios)):
+        parser.error("Scenarios must be unique known names")
+    if args.max_tokens < 1 or args.timeout <= 0:
+        parser.error("max-tokens and timeout must be positive")
     args.model = args.model or hosted_model(args.url, args.timeout)
     report = {"started_at_unix": time.time(), "url": args.url, "model": args.model,
               "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               "run_complete": False, "cases": []}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     for scenario in scenarios:
-        for thinking in (False, True):
+        for thinking in (value == "on" for value in args.thinking.split(",")):
             for stream in (False, True):
                 case = run_case(args, scenario, stream, thinking)
                 report["cases"].append(case)

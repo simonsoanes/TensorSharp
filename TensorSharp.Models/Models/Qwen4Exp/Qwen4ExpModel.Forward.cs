@@ -307,7 +307,7 @@ namespace TensorSharp.Models
             // back to the per-layer loop below.
             long tSpan = Stopwatch.GetTimestamp();
             bool spanDone = TryFusedTokenSpans(res, tokens, seqLen, startPos);
-            if (!spanDone && (_specForwardActive || HasQsa))
+            if (!spanDone && (IsTensorParallel || _specForwardActive || HasQsa))
             {
                 res.Dispose();
                 throw new InvalidOperationException("qwen4exp: speculative token span failed; reset this conversation before retrying.");
@@ -1032,6 +1032,16 @@ namespace TensorSharp.Models
         // attention call the driver makes. Diagnosis only.
         private static readonly bool _driverTrace =
             string.Equals(Environment.GetEnvironmentVariable("TS_Q4E_DRIVER_TRACE"), "1", StringComparison.Ordinal);
+        // Diagnosis only: compare identical span geometry across placement modes
+        // and retain the residuals without changing graph allocation or fusions.
+        private static readonly int _diagnosticSpanLayers =
+            int.TryParse(Environment.GetEnvironmentVariable("TS_Q4E_DEBUG_SPAN_LAYERS"), out int spanLayers)
+                && spanLayers > 0 ? spanLayers : 0;
+        private static readonly string _driverDump = Environment.GetEnvironmentVariable("TS_Q4E_DRIVER_DUMP");
+        private static readonly string _diagnosticSpanInput = Environment.GetEnvironmentVariable("TS_Q4E_DEBUG_SPAN_INPUT");
+        private static readonly int _diagnosticSpanInputLayer =
+            int.TryParse(Environment.GetEnvironmentVariable("TS_Q4E_DEBUG_SPAN_INPUT_LAYER"), out int inputLayer)
+                ? inputLayer : -1;
 
         // TS_Q4E_PHASE=1 prints host-side wall times for a prefill forward.
         private static readonly bool _phaseLog =
@@ -1046,12 +1056,18 @@ namespace TensorSharp.Models
 
         private unsafe void DriverTrace(Tensor res, int seqLen, string what)
         {
-            if (!_driverTrace) return;
+            if (!_driverTrace && string.IsNullOrEmpty(_driverDump)) return;
             float* rp = GetFloatPtr(res);
             long n = (long)seqLen * _hcDim;
             double n2 = 0;
             for (long i = 0; i < n; i++) n2 += (double)rp[i] * rp[i];
             Console.Error.WriteLine($"[q4e-drv] {what} l2={Math.Sqrt(n2):E9}");
+            if (!string.IsNullOrEmpty(_driverDump))
+            {
+                System.IO.Directory.CreateDirectory(_driverDump);
+                using var file = System.IO.File.Create(System.IO.Path.Combine(_driverDump, what + ".f32"));
+                file.Write(new ReadOnlySpan<byte>(rp, checked((int)(n * sizeof(float)))));
+            }
         }
 
         // Fired from the permanent kill-switch catches below. Each latch is
@@ -1206,7 +1222,7 @@ namespace TensorSharp.Models
                 // the attention cut needs TS_Q4E_SPAN_ATTN=0 and the PLE cut needs the
                 // PLE descriptors to fail - so refuse the combination rather than add
                 // an untested placement path.
-                if (LayerSplitDegree > 1 && (!_spanAttnEnabled || !fusePle))
+                if ((LayerSplitDegree > 1 || IsTensorParallel) && (!_spanAttnEnabled || !fusePle))
                 {
                     _tokenGraphUnsupported = true;
                     throw new NotSupportedException(
@@ -1264,7 +1280,8 @@ namespace TensorSharp.Models
                         // passed in - the same hand-off a PLE cut uses - so a seam
                         // costs one 40 KB round trip per decode token and nothing else.
                         bool deviceCut = il < Config.NumLayers && il > begin
-                            && DeviceForLayer(il) != DeviceForLayer(begin);
+                            && (DeviceForLayer(il) != DeviceForLayer(begin)
+                                || (_diagnosticSpanLayers > 0 && il - begin >= _diagnosticSpanLayers));
                         bool cut = il == Config.NumLayers || (_isPle[il] && !fusePle) || attnCut || deviceCut;
                         if (!cut) continue;
                         if (il > begin)
@@ -1296,7 +1313,14 @@ namespace TensorSharp.Models
                                 pleLayerArg = _pleLayerIndex;
                             }
                             long tSpan = Stopwatch.GetTimestamp();
-                            bool ok = GgmlBasicOps.Qwen4ExpTokenSpan(
+                            if (startPos == 0 && begin == _diagnosticSpanInputLayer && !string.IsNullOrEmpty(_diagnosticSpanInput))
+                            {
+                                byte[] input = System.IO.File.ReadAllBytes(_diagnosticSpanInput);
+                                var target = new Span<byte>(GetFloatPtr(res), checked(seqLen * _hcDim * sizeof(float)));
+                                if (input.Length != target.Length) throw new InvalidOperationException("Diagnostic span input shape mismatch.");
+                                input.AsSpan().CopyTo(target);
+                            }
+                            bool ok = ExecuteQwen4ExpSpan(
                                 (IntPtr)fp, (IntPtr)gp, (IntPtr)ap, (IntPtr)kp,
                                 begin, il,
                                 (IntPtr)GetFloatPtr(res), (IntPtr)mp,
@@ -1312,7 +1336,8 @@ namespace TensorSharp.Models
                                 mropePos: mropePtr, mropeSections: sectPtr,
                                 ropePosition: useMrope ? -1 : startPos - _mropeCacheGap,
                                 device: DeviceForLayer(begin),
-                                hiddenOut: last && _specForwardActive ? _specHiddenOutput : IntPtr.Zero,
+                                hiddenOut: last && _specForwardActive ? _specHiddenOutput
+                                    : last && !string.IsNullOrEmpty(_driverDump) ? (IntPtr)GetFloatPtr(res) : IntPtr.Zero,
                                 logitsRows: last && _specForwardActive && _specAllLogitsRows ? seqLen : 1,
                                 qsa: (IntPtr)qp, qsaPositions: (IntPtr)qpositions, qsaPositionCount: _qsaPositionCount);
                             if (ok && last) _spanLogitsValid = true;
@@ -1660,11 +1685,11 @@ namespace TensorSharp.Models
             }
         }
 
-        private unsafe bool TryFillFfnArgs(int il, ref Qwen4ExpFfnArgs a)
+        private unsafe bool TryFillFfnArgs(int il, ref Qwen4ExpFfnArgs a, int rank = 0)
         {
-            if (!_stackedExpertWeights.TryGetValue($"blk.{il}.ffn_gate_exps.weight", out var g)
-                || !_stackedExpertWeights.TryGetValue($"blk.{il}.ffn_up_exps.weight", out var u)
-                || !_stackedExpertWeights.TryGetValue($"blk.{il}.ffn_down_exps.weight", out var d))
+            if (!TryGetQwen4ExpExpert($"blk.{il}.ffn_gate_exps.weight", rank, out var g)
+                || !TryGetQwen4ExpExpert($"blk.{il}.ffn_up_exps.weight", rank, out var u)
+                || !TryGetQwen4ExpExpert($"blk.{il}.ffn_down_exps.weight", rank, out var d))
             {
                 return false;
             }
@@ -1673,9 +1698,9 @@ namespace TensorSharp.Models
                 || !TryResolveQuant($"blk.{il}.hc_ffn_up.weight", out IntPtr hu, out int huT, out long huB)
                 || !TryResolveQuant($"blk.{il}.hc_ffn_inject.weight", out IntPtr hj, out int hjT, out long hjB)
                 || !TryResolveQuant($"blk.{il}.ffn_gate_inp.weight", out IntPtr rt, out int rtT, out long rtB)
-                || !TryResolveQuant($"blk.{il}.ffn_gate_shexp.weight", out IntPtr sg, out int sgT, out long sgB)
-                || !TryResolveQuant($"blk.{il}.ffn_up_shexp.weight", out IntPtr su, out int suT, out long suB)
-                || !TryResolveQuant($"blk.{il}.ffn_down_shexp.weight", out IntPtr sd, out int sdT, out long sdB))
+                || !TryResolveQwen4ExpTpQuant($"blk.{il}.ffn_gate_shexp.weight", rank, out IntPtr sg, out int sgT, out long sgB)
+                || !TryResolveQwen4ExpTpQuant($"blk.{il}.ffn_up_shexp.weight", rank, out IntPtr su, out int suT, out long suB)
+                || !TryResolveQwen4ExpTpQuant($"blk.{il}.ffn_down_shexp.weight", rank, out IntPtr sd, out int sdT, out long sdB))
             {
                 return false;
             }
@@ -1780,6 +1805,7 @@ namespace TensorSharp.Models
                 foreach (var t in _vCache) t?.Dispose();
             if (_idxKCache != null)
                 foreach (var t in _idxKCache) t?.Dispose();
+            DisposeQwen4ExpTensorParallel();
             base.Dispose();
         }
     }

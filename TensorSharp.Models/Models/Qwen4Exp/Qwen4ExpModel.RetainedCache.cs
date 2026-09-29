@@ -392,10 +392,13 @@ namespace TensorSharp.Models
                     foreach (Tensor t in set)
                         if (t != null && storages.Add(t.Storage))
                             bytes = checked(bytes + t.Storage.ByteLength);
+            // TP replicates the recurrent/attention caches on every rank; account
+            // for those replicas before adding host-only metadata and private MTP.
+            if (IsTensorParallel) bytes = checked(bytes * TpDegree);
             if (holder.GdnConvState != null)
                 foreach (float[] ring in holder.GdnConvState)
                     if (ring != null) bytes = checked(bytes + (long)ring.Length * sizeof(float));
-            if (holder.PleConvState != null) bytes = checked(bytes + (long)holder.PleConvState.Length * sizeof(float));
+            if (holder.PleConvState != null) bytes = checked(bytes + (long)holder.PleConvState.Length * sizeof(float) * (IsTensorParallel ? TpDegree : 1));
             if (holder.QsaPositions != null) bytes = checked(bytes + (long)holder.QsaPositions.Length * sizeof(int));
             bytes = checked(bytes + MtpStateBytes((object)holder.GdnConvStateT ?? holder.K));
             return bytes;

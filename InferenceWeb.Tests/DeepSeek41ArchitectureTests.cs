@@ -317,7 +317,7 @@ public class DeepSeek41ArchitectureTests : IDisposable
         var error = Assert.Throws<NotSupportedException>(() =>
             DeepSeek41Architecture.ValidateLoad("missing.gguf", BackendType.GgmlCpu, null, 4));
         Assert.Contains("TS_DSV41_TP", error.Message);
-        Assert.Contains("ggml_cpu", error.Message);
+        Assert.Contains("ggml_cuda", error.Message);
     }
 
     /// <summary>
@@ -453,6 +453,55 @@ public class DeepSeek41ArchitectureTests : IDisposable
         => Assert.Equal(expected, DeepSeek41Architecture.ParseRoutedMoeTensorParallelRanks(value, gpuCount));
 
     [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    [InlineData(7)]
+    [InlineData(8)]
+    public void ExplicitTensorParallelDegreeNeedsNoEnvironmentOptIn(int degree)
+    {
+        Assert.Equal(degree, DeepSeek41Architecture.ResolveRequestedTensorParallelRanks(degree, degree));
+        Assert.True(DeepSeek41Architecture.Descriptor.SupportsNativeTensorParallel(degree, BackendType.GgmlCuda));
+        DeepSeek41Architecture.ValidateLoad("not-opened.gguf", BackendType.GgmlCuda, null,
+            requestedGpuCount: degree, tpDegree: degree);
+        Assert.Null(Environment.GetEnvironmentVariable("TS_DSV41_TP"));
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("2")]
+    [InlineData("8")]
+    public void ExplicitTensorParallelDegreeRefusesConflictingEnvironmentBeforeOpeningWeights(string value)
+    {
+        _env.Set("TS_DSV41_TP", value);
+        Assert.Throws<ArgumentException>(() =>
+            new DeepSeek41Model("not-opened.gguf", BackendType.GgmlCuda, tpDegree: 6));
+    }
+
+    [Fact]
+    public void ExplicitTensorParallelDegreeAcceptsMatchingLegacyEnvironment()
+    {
+        _env.Set("TS_DSV41_TP", "6");
+        Assert.Equal(6, DeepSeek41Architecture.ResolveRequestedTensorParallelRanks(6, 6));
+        Assert.Equal(6, DeepSeek41Architecture.ResolveRequestedTensorParallelRanks(1, 6));
+    }
+
+    [Theory]
+    [InlineData(BackendType.Cuda)]
+    [InlineData(BackendType.Cpu)]
+    [InlineData(BackendType.GgmlCpu)]
+    [InlineData(BackendType.GgmlVulkan)]
+    [InlineData(BackendType.GgmlMetal)]
+    public void ExplicitTensorParallelDegreeRefusesUnsupportedBackendsBeforeOpeningWeights(BackendType backend)
+    {
+        Assert.False(DeepSeek41Architecture.Descriptor.SupportsNativeTensorParallel(6, backend));
+        Assert.Throws<NotSupportedException>(() =>
+            new DeepSeek41Model("not-opened.gguf", backend, tpDegree: 6));
+    }
+
+    [Theory]
     [InlineData("")]
     [InlineData(" ")]
     [InlineData("1")]
@@ -487,7 +536,7 @@ public class DeepSeek41ArchitectureTests : IDisposable
         string message = DeepSeek41Architecture.Descriptor.DescribeMultiGpuPlacement(4);
         Assert.Contains("across 2 GPUs", message);
         Assert.Contains("gate/up/down", message);
-        Assert.Contains("host-staged F32", message);
+        Assert.Contains("F32 activation/output gathers", message);
         Assert.Contains("CPU-offloaded layers", message);
         Assert.Contains("Attention and shared experts retain layer placement", message);
         Assert.DoesNotContain("shards no weights", message);

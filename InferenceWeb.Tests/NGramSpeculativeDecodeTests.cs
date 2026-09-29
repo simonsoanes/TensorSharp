@@ -78,14 +78,16 @@ public class NGramSpeculativeDecodeTests
     [InlineData(64, true, true, true)]
     [InlineData(64, true, false, true)]
     [InlineData(8, false, true, false)]
+    [InlineData(8, false, false, true, 7)] // Qwen: seven drafts plus the anchor are eight verify rows.
+    [InlineData(64, true, false, true, 7)]
     public void HardTargetLimitBoundsExplicitAndDirectAlgorithmsAcrossRollback(
-        int requestedDrafts, bool directAlgorithm, bool persistsAcceptedKv, bool explicitRequest)
+        int requestedDrafts, bool directAlgorithm, bool persistsAcceptedKv, bool explicitRequest, int targetLimit = 5)
     {
         var plainModel = new PeriodicTrunk(period: 7) { MismatchPosition = 35 };
         List<int> plain = PlainGreedy(plainModel, promptLen: 12, count: 96);
         var model = new PeriodicTrunk(period: 7)
         {
-            SpecMaxDraftTokens = 5,
+            SpecMaxDraftTokens = targetLimit,
             SpecPreferredNGramDraftWindow = 64,
             SpecVerifyPersistsAcceptedKv = persistsAcceptedKv,
             MismatchPosition = 35,
@@ -99,23 +101,23 @@ public class NGramSpeculativeDecodeTests
                 MaxDraftTokensExplicit = explicitRequest,
             }, out _)!;
         Assert.NotNull(algorithm);
-        if (!directAlgorithm) Assert.Equal(5, algorithm.MaxDraftTokens);
+        if (!directAlgorithm) Assert.Equal(targetLimit, algorithm.MaxDraftTokens);
         using var execution = new SpeculativeExecution(model, algorithm) { AdaptiveSpeculation = false };
 
         List<int> actual = SpeculativeGreedy(model, execution, promptLen: 12, count: 96);
 
-        Assert.Equal(5, execution.MaxDraftTokens);
+        Assert.Equal(targetLimit, execution.MaxDraftTokens);
         Assert.Equal(plain, actual);
         Assert.Equal(plainModel.CommittedTokens, model.CommittedTokens);
-        Assert.Contains(6, model.VerifyWidths);
-        Assert.All(model.VerifyWidths, width => Assert.InRange(width, 2, 6));
+        Assert.Contains(targetLimit + 1, model.VerifyWidths);
+        Assert.All(model.VerifyWidths, width => Assert.InRange(width, 2, targetLimit + 1));
         Assert.True(execution.Stats.TokensAccepted > 0);
         Assert.True(execution.Stats.RollbackSteps > 0);
         if (persistsAcceptedKv) Assert.Empty(model.ReplayWidths);
         else
         {
             Assert.NotEmpty(model.ReplayWidths);
-            Assert.All(model.ReplayWidths, width => Assert.InRange(width, 1, 5));
+            Assert.All(model.ReplayWidths, width => Assert.InRange(width, 1, targetLimit));
         }
         Assert.Empty(model.ProtocolViolations);
     }

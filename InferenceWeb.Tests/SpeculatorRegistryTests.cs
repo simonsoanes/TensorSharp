@@ -93,6 +93,30 @@ public class SpeculatorRegistryTests
         Assert.Equal(expected, spec.MaxDraftTokens);
     }
 
+    [Theory]
+    [InlineData(false, DraftHeadKind.None, 3)]
+    [InlineData(true, DraftHeadKind.None, 7)]
+    [InlineData(false, DraftHeadKind.PerToken, 3)]
+    [InlineData(true, DraftHeadKind.PerToken, 7)]
+    public void QwenVerifyLimitPreservesTheDefaultAndCapsExplicitNGramAndMtp(
+        bool explicitRequest, DraftHeadKind kind, int expected)
+    {
+        var model = new StubTarget
+        {
+            Kind = kind, PreferredWindow = 3,
+            HardDraftLimit = Qwen4ExpModel.ResolveSpecMaxDraftTokens(BackendType.GgmlCuda),
+        };
+        var options = new SpeculationOptions
+        {
+            Enabled = true,
+            SpeculatorName = kind == DraftHeadKind.None ? SpeculatorRegistry.NGram : SpeculatorRegistry.Auto,
+            MaxDraftTokens = 8, MaxDraftTokensExplicit = explicitRequest,
+        };
+        var speculator = SpeculatorRegistry.Create(model, options, out string decline);
+        Assert.Null(decline);
+        Assert.Equal(expected, speculator.MaxDraftTokens);
+    }
+
     [Fact]
     public void NGram_ServesAModelWithNoDraftHeadAtAll()
     {
@@ -289,6 +313,8 @@ public class SpeculatorRegistryTests
         public DraftHeadKind Kind { get; set; }
         public int BlockSize { get; set; }
         public int PreferredWindow { get; set; }
+        public int HardDraftLimit { get; set; } = int.MaxValue;
+        public int SpecMaxDraftTokens => HardDraftLimit;
         public int SpecPreferredDraftWindow => PreferredWindow;
         public int PreferredNGramWindow { get; set; }
         public int SpecPreferredNGramDraftWindow => PreferredNGramWindow;

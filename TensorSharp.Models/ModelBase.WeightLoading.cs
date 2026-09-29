@@ -32,6 +32,9 @@ namespace TensorSharp.Models
     // preloads, gate+up fusion and requantization. All of it runs once, at load.
     public abstract partial class ModelBase
     {
+        // Sparse host lookup tables can opt out of reading every row at startup.
+        protected virtual bool ShouldPrefaultWeight(GgufTensorInfo info) => true;
+
         protected void LoadWeights()
         {
             // Parallel page-cache warm-up first: everything below (serial
@@ -39,7 +42,7 @@ namespace TensorSharp.Models
             // otherwise reads the file at one-or-two-stream speed, which is the
             // whole cold-load time on network-backed model storage.
             ReadBonsaiMetadata();
-            _gguf.PrefaultFileCache();
+            _gguf.PrefaultFileCache(ShouldPrefaultWeight);
             Console.Write("Loading model weights...");
             int countF32 = 0;
             int countQuant = 0;

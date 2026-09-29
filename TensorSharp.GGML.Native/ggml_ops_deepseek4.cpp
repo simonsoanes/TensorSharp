@@ -2072,9 +2072,12 @@ static bool dsv4_backend_matches(const char * reg_name, const char * want)
 }
 
 static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, int n_ubatch, int n_threads,
-                              const char * dspark_path, int n_cpu_moe_req, const char * backend_name)
+                              const char * dspark_path, int n_cpu_moe_req, const char * backend_name,
+                              int tp_ranks_req = -1)
 {
     auto t_start = std::chrono::steady_clock::now();
+    if (tp_ranks_req < -1 || tp_ranks_req == 1 || tp_ranks_req > 8)
+        throw std::runtime_error("DeepSeek V4.1 tensor parallelism requires 0 (disabled) or 2..8 ranks");
 
     std::unique_ptr<dsv4_model> m(new dsv4_model());
     bool engram_random_advice = false, engram_random_override = false;
@@ -2298,17 +2301,19 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
                     rn ? rn : "selected");
         }
     }
-    int tp_ranks = 0;
+    int tp_ranks = tp_ranks_req < 0 ? 0 : tp_ranks_req;
     if (const char * value = getenv("TS_DSV41_TP"))
     {
         char * end = nullptr;
         const long ranks = strtol(value, &end, 10);
         if (!*value || *end || ranks < 0 || ranks > MAX_GPUS)
             throw std::runtime_error("TS_DSV41_TP must be 0 or the number of participating GPUs (2..8)");
+        if (tp_ranks_req >= 0 && tp_ranks_req != ranks)
+            throw std::runtime_error("TS_DSV41_TP conflicts with the explicitly requested tensor-parallel degree; unset it or use the same degree");
         tp_ranks = (int) ranks;
-        if (tp_ranks && (!hp.v41 || cpu_only || tp_ranks < 2 || tp_ranks != n_gpu))
-            throw std::runtime_error("TS_DSV41_TP requires deepseek41 and must equal its selected GPU count (2..8)");
     }
+    if (tp_ranks && (!hp.v41 || cpu_only || tp_ranks < 2 || tp_ranks != n_gpu))
+        throw std::runtime_error("DeepSeek tensor parallelism requires deepseek41 and must equal its selected GPU count (2..8)");
     auto key = [&](const char * suffix) { return arch + "." + suffix; };
     bool ok = true;
     ok &= gguf_get_u32_key(g0, key("block_count").c_str(), &hp.n_layer);
@@ -2583,11 +2588,12 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
                 const auto & up = sources.at(prefix + "ffn_up_exps.weight");
                 const auto & down = sources.at(prefix + "ffn_down_exps.weight");
                 const auto strips = tsg_dsv41_tp::split_weights(down.ne[0], down.type, tp_ranks, il);
+                const auto output_strips = tsg_dsv41_tp::split_outputs(down.ne[1], tp_ranks, il);
                 for (int d = 0; d < tp_ranks; ++d)
                     tp_bytes[il][d] = strips[d].count *
                         (ggml_row_size(gate.type, gate.ne[0]) * gate.ne[2] +
                          ggml_row_size(up.type, up.ne[0]) * up.ne[2]) +
-                        ggml_row_size(down.type, strips[d].count) * down.ne[1] * down.ne[2];
+                        ggml_row_size(down.type, down.ne[0]) * output_strips[d].count * down.ne[2];
             }
         }
         std::vector<size_t> fixed_bytes((size_t) n_gpu, 0);
@@ -2849,9 +2855,10 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
     {
         std::vector<ggml_backend_dev_t> devices;
         for (int d = 0; d < tp_ranks; ++d) devices.push_back(ggml_backend_get_device(m->backends[d]));
-        m->moe_tp = std::make_unique<tsg_dsv41_tp::executor>(devices, hp.n_expert_used);
+        m->moe_tp = std::make_unique<tsg_dsv41_tp::executor>(devices, hp.n_expert_used,
+            dsv4_warm_pread() ? dsv4_load_thread_count() : 0);
         fprintf(stderr, "[dsv41] routed-MoE tensor parallelism: %d ranks, sharded gate/up/down weights; "
-                "attention and shared experts use layer placement; host-staged F32 reduction\n", tp_ranks);
+                "attention and shared experts use layer placement; exact F32 activation/output gathers\n", tp_ranks);
     }
 
     auto tp_source = [&](int il, const char * suffix)
@@ -6797,6 +6804,25 @@ TSG_EXPORT void * TSGgml_Dsv4LoadModel(const char * gguf_path, int n_gpu, int n_
     catch (const std::exception & e)
     {
         tsg::report_load_refusal("[dsv4] load failed: %s\n", e.what());
+        return nullptr;
+    }
+}
+
+// Explicit parallelism is per load. Keep the older exports above ABI-compatible
+// for existing native clients and their TS_DSV41_TP environment configuration.
+TSG_EXPORT void * TSGgml_Dsv4LoadModelParallel(const char * gguf_path, int n_gpu, int n_ctx, int n_ubatch, int n_threads,
+                                              const char * dspark_path, int n_cpu_moe, const char * backend_name,
+                                              int tp_ranks)
+{
+    tsg::clear_last_error();
+    try
+    {
+        return tsg_dsv4::dsv4_load(gguf_path, n_gpu, n_ctx, n_ubatch, n_threads, dspark_path,
+                                  n_cpu_moe, backend_name, tp_ranks);
+    }
+    catch (const std::exception & e)
+    {
+        tsg::report_load_refusal("[dsv4] parallel load failed: %s\n", e.what());
         return nullptr;
     }
 }

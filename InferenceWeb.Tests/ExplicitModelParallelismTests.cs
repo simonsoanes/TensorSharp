@@ -27,9 +27,7 @@ public sealed class ExplicitModelParallelismTests : IDisposable
     }
 
     [Theory]
-    [InlineData("qwen4exp")]
     [InlineData("deepseek4")]
-    [InlineData("deepseek41")]
     public void LayerOnlyArchitecturesNeverInterpretTpAsPlacement(string architecture)
     {
         var error = Assert.Throws<NotSupportedException>(() => Resolve(architecture, BackendType.GgmlCuda, 2, 1, out _));
@@ -67,8 +65,10 @@ public sealed class ExplicitModelParallelismTests : IDisposable
     [Fact]
     public void NativeDeepSeekExpertTpRetainsExplicitTpDegree()
     {
-        _env.Set("TS_DSV41_TP", "2");
         Assert.Equal(2, Resolve("deepseek41", BackendType.GgmlCuda, 2, 1, out int split));
+        Assert.Equal(1, split);
+        _env.Set("TS_DSV41_TP", "2");
+        Assert.Equal(2, Resolve("deepseek41", BackendType.GgmlCuda, 2, 1, out split));
         Assert.Equal(1, split);
         Assert.Throws<ArgumentException>(() => new DeepSeek41Model("not-opened.gguf", BackendType.GgmlCuda, layerSplitDegree: 2));
     }
@@ -174,7 +174,6 @@ public sealed class ExplicitModelParallelismTests : IDisposable
     [InlineData("glm5next")]
     [InlineData("deepseek4")]
     [InlineData("deepseek41")]
-    [InlineData("qwen4exp")]
     [InlineData("qwen-image")]
     [InlineData("diffusion-gemma")]
     public void DistributedPreflightRejectsExecutorsWithoutCrossNodeCollectives(string architecture)

@@ -39,6 +39,12 @@ namespace TensorSharp.GGML
             int nThreads, string dsparkPath, int nCpuMoe,
             string backendName);
 
+        [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf8)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial IntPtr TSGgml_Dsv4LoadModelParallel(string ggufPath,
+            int nGpu, int nCtx, int nUbatch, int nThreads, string dsparkPath,
+            int nCpuMoe, string backendName, int tensorParallelRanks);
+
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial int TSGgml_Dsv4DsparkBlockSize(IntPtr handle);
@@ -153,15 +159,21 @@ namespace TensorSharp.GGML
         public const int UBatchAuto = -1;
 
         public static IntPtr LoadModel(string ggufPath, int nGpu, int nCtx, int nUbatch, int nThreads,
-            int nCpuMoe = CpuMoeNone, string backendName = null)
-            => TSGgml_Dsv4LoadModel(ggufPath, nGpu, nCtx, nUbatch, nThreads, nCpuMoe, backendName ?? string.Empty);
+            int nCpuMoe = CpuMoeNone, string backendName = null, int tensorParallelRanks = 0)
+            => tensorParallelRanks == 0
+                ? TSGgml_Dsv4LoadModel(ggufPath, nGpu, nCtx, nUbatch, nThreads, nCpuMoe, backendName ?? string.Empty)
+                : TSGgml_Dsv4LoadModelParallel(ggufPath, nGpu, nCtx, nUbatch, nThreads, string.Empty,
+                    nCpuMoe, backendName ?? string.Empty, tensorParallelRanks);
 
         /// <summary>Load with a DSpark drafter GGUF (see the DeepSeek V4 card).
         /// A null/empty path is identical to <see cref="LoadModel"/>.</summary>
         public static IntPtr LoadModelWithDspark(string ggufPath, int nGpu, int nCtx, int nUbatch, int nThreads,
-            string dsparkPath, int nCpuMoe = CpuMoeNone, string backendName = null)
-            => TSGgml_Dsv4LoadModelDspark(ggufPath, nGpu, nCtx, nUbatch, nThreads, dsparkPath ?? string.Empty, nCpuMoe,
-                backendName ?? string.Empty);
+            string dsparkPath, int nCpuMoe = CpuMoeNone, string backendName = null, int tensorParallelRanks = 0)
+            => tensorParallelRanks == 0
+                ? TSGgml_Dsv4LoadModelDspark(ggufPath, nGpu, nCtx, nUbatch, nThreads, dsparkPath ?? string.Empty,
+                    nCpuMoe, backendName ?? string.Empty)
+                : TSGgml_Dsv4LoadModelParallel(ggufPath, nGpu, nCtx, nUbatch, nThreads, dsparkPath ?? string.Empty,
+                    nCpuMoe, backendName ?? string.Empty, tensorParallelRanks);
 
         /// <summary>Tokens the DSpark drafter proposes per block, or 0 when no
         /// drafter is loaded.</summary>

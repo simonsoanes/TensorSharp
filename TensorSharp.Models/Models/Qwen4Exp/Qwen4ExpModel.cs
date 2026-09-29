@@ -99,11 +99,12 @@ namespace TensorSharp.Models
             : base(ggufPath, backend, tpDegree, tpGroup, layerSplitDegree)
         {
             Config = new ModelConfig { Architecture = ArchitectureId };
-            ParseBaseConfig();
-            ParseQwen4ExpConfig();
-            ParseTokenizer();
             try
             {
+                ParseBaseConfig();
+                ParseQwen4ExpConfig();
+                ValidateQwen4ExpTensorParallelMetadata();
+                ParseTokenizer();
                 if (!string.IsNullOrWhiteSpace(draftGgufPath))
                     LoadMtpDraftWeights(draftGgufPath);
 
@@ -123,7 +124,9 @@ namespace TensorSharp.Models
                 // decides which device each weight is uploaded to, and the preload frees
                 // the host copy immediately afterwards so there is no second chance.
                 BuildLayerDeviceMap();
-                PrepareCudaQuantizedWeightsForInference();
+                PrepareQwen4ExpTensorParallel();
+                if (IsTensorParallel) PrepareCudaQuantizedWeightsForInferenceTP();
+                else PrepareCudaQuantizedWeightsForInference();
 
                 int maxContextLength = ResolveConfiguredContextLength();
                 int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
@@ -132,7 +135,9 @@ namespace TensorSharp.Models
             }
             catch
             {
-                DisposeMtpHead();
+                // A constructor that throws has no caller to release its GGUF
+                // mapping, partial shards, device buffers or TP worker group.
+                Dispose();
                 throw;
             }
         }

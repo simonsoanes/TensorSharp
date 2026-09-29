@@ -801,6 +801,11 @@ namespace tsg
     // corrupts (the caller reroutes to the pinned-host "internal" AllReduce),
     // -1 when the probe does not apply (Windows, NCCL absent, disabled).
     int tp_probe_cuda_collective(const int* device_indices, int count);
+    // TensorSharp-owned NCCL F32 transport, without upstream's BF16 narrowing.
+    // 1 = submitted, 0 = unavailable (safe to fall back), -1 = execution failed.
+    // The TP communicator mutex serializes these calls and teardown.
+    int tp_cuda_allreduce_f32(ggml_backend_t* backends, ggml_tensor** tensors, int count);
+    void tp_cuda_allreduce_f32_free();
 
     // Behavioural check that peer copies between the given devices actually
     // deliver data (some hosts advertise P2P that never completes). 1 = ok,
@@ -897,6 +902,11 @@ namespace tsg
 
     struct TpRankPlan
     {
+        // Optional TensorSharp wrapper sharing this rank's underlying device stream.
+        ggml_backend_t backend = nullptr;
+        // Some upstream device collectives compress large F32 tensors to BF16.
+        // Precision-sensitive graph families require exact F32 transport instead.
+        bool allreduce_f32 = false;
         ggml_cgraph* graph = nullptr;
         // Exclusive end node index of each segment; the last entry is n_nodes.
         std::vector<int> seg_end;
@@ -923,6 +933,8 @@ namespace tsg
 
         void clear()
         {
+            backend = nullptr;
+            allreduce_f32 = false;
             graph = nullptr;
             seg_end.clear();
             ar_tensor.clear();

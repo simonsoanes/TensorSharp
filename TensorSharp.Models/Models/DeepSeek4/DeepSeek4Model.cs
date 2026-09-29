@@ -52,7 +52,7 @@ namespace TensorSharp.Models
                 try
                 {
                     DeepSeek41Architecture.ValidateLoad(ggufPath, backend, ResolveDsparkPath(draftModelPath),
-                        Math.Max(tpDegree, layerSplitDegree), tpGroup);
+                        Math.Max(tpDegree, layerSplitDegree), tpGroup, tpDegree);
                 }
                 catch
                 {
@@ -76,6 +76,8 @@ namespace TensorSharp.Models
             {
                 try
                 {
+                    if (tpDegree > 1)
+                        throw new NotSupportedException("DeepSeek V4 does not implement tensor parallelism; use --layer-split N. --tp is supported by DeepSeek V4.1.");
                     DeepSeek4Architecture.RefuseBlockQuantizedKvCache("DeepSeek V4 (Flash)", v41: false);
                 }
                 catch
@@ -166,9 +168,11 @@ namespace TensorSharp.Models
                 // executor still has to pick its devices from the backend the
                 // operator actually asked for.
                 string backendName = BackendRegistryName(backend);
+                int tensorParallelRanks = isV41
+                    ? DeepSeek41Architecture.ResolveRequestedTensorParallelRanks(tpDegree, requestedGpuCount) : 0;
                 _handle = dspark != null
-                    ? GgmlDeepSeek4Native.LoadModelWithDspark(ggufPath, nGpu, maxContext, nUbatch, nThreads, dspark, nCpuMoe, backendName)
-                    : GgmlDeepSeek4Native.LoadModel(ggufPath, nGpu, maxContext, nUbatch, nThreads, nCpuMoe, backendName);
+                    ? GgmlDeepSeek4Native.LoadModelWithDspark(ggufPath, nGpu, maxContext, nUbatch, nThreads, dspark, nCpuMoe, backendName, tensorParallelRanks)
+                    : GgmlDeepSeek4Native.LoadModel(ggufPath, nGpu, maxContext, nUbatch, nThreads, nCpuMoe, backendName, tensorParallelRanks);
                 _nativeDsparkBlock = _handle != IntPtr.Zero && dspark != null
                     ? GgmlDeepSeek4Native.DsparkBlockSize(_handle) : 0;
                 if (_handle == IntPtr.Zero)
@@ -284,9 +288,12 @@ namespace TensorSharp.Models
                 throw new ArgumentException("--layer-split and --tp cannot be combined.");
             if (layerSplitDegree > 1 && backend is not (BackendType.Cuda or BackendType.GgmlCuda or BackendType.GgmlVulkan))
                 throw new NotSupportedException($"DeepSeek --layer-split is unavailable on {backend}.");
-            if (tpDegree > 1 && (backend != BackendType.GgmlCuda ||
-                DeepSeek41Architecture.ResolveRoutedMoeTensorParallelRanks(tpDegree) != tpDegree))
-                throw new NotSupportedException("--tp requires DeepSeek V4.1 routed-MoE tensor parallelism on ggml_cuda with TS_DSV41_TP equal to --tp. Use --layer-split N for whole-layer placement.");
+            if (tpDegree > 1)
+            {
+                if (backend != BackendType.GgmlCuda)
+                    throw new NotSupportedException("--tp requires DeepSeek V4.1 routed-MoE tensor parallelism on ggml_cuda. Use --layer-split N for whole-layer placement.");
+                DeepSeek41Architecture.ResolveRequestedTensorParallelRanks(tpDegree, tpDegree);
+            }
             if (layerSplitDegree > 1 && DeepSeek41Architecture.ResolveRoutedMoeTensorParallelRanks(layerSplitDegree) != 0)
                 throw new ArgumentException("--layer-split selects whole-layer placement only; unset TS_DSV41_TP or set it to 0.");
             // The pure C# executor does not use native GPU placement settings.

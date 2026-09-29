@@ -20,15 +20,10 @@ namespace TensorSharp.Models
             Factory = c => new Qwen4ExpModel(c.GgufPath, c.Backend, c.TpDegree, c.TpGroup, c.LayerSplitDegree, c.DraftModelPath),
             ProjectorFileHints = new[] { "*mmproj*.gguf" },
 
-            // Not tensor-parallel: none of its weights are sharded, and its decode is one
-            // persisted single-device GGML graph per token whose GDN/PLE recurrent state
-            // lives in device buffers owned by a single backend. It CAN spread whole
-            // layers, which is the same and only multi-GPU mode llama.cpp offers for it.
-            MultiGpu = MultiGpuMode.LayerSplit,
-            MultiGpuLimitation =
-                "qwen4exp (Qwen3.8-Flash-Next) has no tensor-parallel path: none of its weights are " +
-                "sharded, and its decode is one persisted single-device GGML graph per token whose " +
-                "GDN/PLE recurrent state lives in device buffers owned by a single backend.",
+            MultiGpu = MultiGpuMode.TensorParallel,
+            SupportsLayerSplit = true,
+            SupportsDistributedTensorParallel = false,
+
         };
     }
 }
