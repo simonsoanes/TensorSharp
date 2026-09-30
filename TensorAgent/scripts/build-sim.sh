@@ -38,8 +38,8 @@ if [[ ! -d "${XCFRAMEWORK}" || "${TENSORAGENT_REBUILD_XCFRAMEWORK:-0}" == "1" ]]
 fi
 
 echo "==> dotnet $(dotnet --version): building TensorAgent.Maui (${CONFIGURATION}, iossimulator-arm64)"
-# TensorSharpIosTargets=true must be on the command line, not only in the app's own
-# csproj: it decides whether TensorSharp.Models builds a net10.0-ios slice at all, and
+# TensorSharpAppleTargets=true must be on the command line, not only in the app's own
+# csproj: it decides whether TensorSharp.Models builds its Apple slices at all, and
 # restore resolves the referenced project's target frameworks before a ProjectReference's
 # AdditionalProperties are applied. Without it, restore writes an assets file with no iOS
 # target and the build fails with NETSDK1005. Several referenced projects intentionally
@@ -50,7 +50,7 @@ dotnet build "${REPO_ROOT}/TensorAgent/src/TensorAgent.Maui/TensorAgent.Maui.csp
     -f net10.0-ios \
     -p:RuntimeIdentifier=iossimulator-arm64 \
     -c "${CONFIGURATION}" \
-    -p:TensorSharpIosTargets=true \
+    -p:TensorSharpAppleTargets=true \
     -m:1 \
     -nologo
 

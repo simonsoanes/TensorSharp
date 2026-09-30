@@ -48,7 +48,9 @@ fi
 
 # boot is a no-op error when already booted; ignore that one case.
 xcrun simctl boot "${SIM_UDID}" 2>/dev/null || true
-open -a Simulator
+# The window is for a person watching; the device boots and runs without it. Xcode 27 as
+# installed here has no Simulator.app for `open` to find, and that must not end the run.
+open -a Simulator 2>/dev/null || echo "note: no Simulator app to open; the simulator runs headless"
 xcrun simctl bootstatus "${SIM_UDID}" -b >/dev/null
 
 echo "==> Installing ${APP} on ${SIM_UDID}"

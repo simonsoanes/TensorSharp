@@ -9,9 +9,13 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
 using System.Text.Json;
+#if IOS
 using Foundation;
+#endif
 using TensorAgent.Maui.Hosting;
+#if IOS
 using UserNotifications;
+#endif
 
 namespace TensorAgent.Maui;
 
@@ -29,7 +33,7 @@ public sealed class MainPage : ContentPage
     private readonly LoopbackWebHost _host;
     private readonly Label _status;
     private readonly WebView _webView;
-    private Platforms.iOS.Dictation? _dictation;
+    private Services.Dictation? _dictation;
 
     /// <summary>
     /// True once the page has told us it finished loading, and false again from the
@@ -37,7 +41,9 @@ public sealed class MainPage : ContentPage
     /// before the first `ready`, silence is normal.
     /// </summary>
     private bool _pageReady;
+#if IOS
     private int _shareNotificationPrompting;
+#endif
 
     public MainPage(LoopbackWebHost host)
     {
@@ -176,7 +182,7 @@ public sealed class MainPage : ContentPage
             return;
         }
 
-        string? failure = await Platforms.iOS.FilePresenter.PresentAsync(
+        string? failure = await Services.FilePresenter.PresentAsync(
             full!, string.IsNullOrWhiteSpace(displayName) ? Path.GetFileName(relative) : displayName);
         if (failure is not null)
             await DisplayAlert("Cannot open", failure, "OK");
@@ -1607,10 +1613,14 @@ public sealed class MainPage : ContentPage
     /// <summary>
     /// Ask contextually, after the first share has arrived, whether future shares may
     /// post a one-tap notification. Permission is requested by the containing app,
-    /// never by the extension running inside another app.
+    /// never by the extension running inside another app. iOS only: the share
+    /// extension, and so the reason to ask, exists only there.
     /// </summary>
     private async Task OfferShareNotificationPermissionAsync()
     {
+#if !IOS
+        await Task.CompletedTask;
+#else
         const string askedKey = "TensorAgentAskedForShareNotifications";
         if (string.Equals(Environment.GetEnvironmentVariable("TENSORAGENT_SHARE_CHECK"), "1", StringComparison.Ordinal)
             || NSUserDefaults.StandardUserDefaults.BoolForKey(askedKey))
@@ -1642,6 +1652,7 @@ public sealed class MainPage : ContentPage
         {
             Volatile.Write(ref _shareNotificationPrompting, 0);
         }
+#endif
     }
 
     /// <summary>
@@ -1856,19 +1867,19 @@ public sealed class MainPage : ContentPage
         // lift before the session exists.
         _dictationStopRequested = false;
 
-        if (!Platforms.iOS.Dictation.IsSupported)
+        if (!Services.Dictation.IsSupported)
         {
-            await Notice("Speech recognition is not available on this device.");
+            await Notice(Services.Dictation.UnsupportedMessage);
             await _webView.EvaluateJavaScriptAsync("window.TensorAgent.dictationEnded()");
             return;
         }
-        if (await Platforms.iOS.Dictation.RequestPermissionsAsync() is { } refused)
+        if (await Services.Dictation.RequestPermissionsAsync() is { } refused)
         {
             // A permission iOS has already stored a "no" for cannot be asked for
             // again, so telling the user to try harder is useless: the only way back
             // is Settings, and the app can open it for them.
-            bool permanent = refused.Contains(Platforms.iOS.Dictation.DeniedMarker, StringComparison.Ordinal);
-            string message = refused.Replace(Platforms.iOS.Dictation.DeniedMarker, string.Empty).Trim();
+            bool permanent = refused.Contains(Services.Dictation.DeniedMarker, StringComparison.Ordinal);
+            string message = refused.Replace(Services.Dictation.DeniedMarker, string.Empty).Trim();
             if (permanent)
                 await NoticeWithSettings(message);
             else
@@ -1877,7 +1888,7 @@ public sealed class MainPage : ContentPage
             return;
         }
 
-        _dictation = new Platforms.iOS.Dictation(_host.App.Settings.Load().SpeechLanguage);
+        _dictation = new Services.Dictation(_host.App.Settings.Load().SpeechLanguage);
         // The finger is very often already gone. On the first ever hold, iOS puts two
         // permission dialogs in front of the user, and tapping Allow means letting go of
         // the message box -- so `dictate-stop` arrives while this method is still inside
@@ -1941,8 +1952,12 @@ public sealed class MainPage : ContentPage
     {
         try
         {
+#if IOS || MACCATALYST
             var url = new Foundation.NSUrl(UIKit.UIApplication.OpenSettingsUrlString);
             UIKit.UIApplication.SharedApplication.OpenUrl(url, new UIKit.UIApplicationOpenUrlOptions(), null);
+#else
+            AppInfo.Current.ShowSettingsUI();
+#endif
         }
         catch (Exception ex) { Console.WriteLine("TensorAgent: open settings failed: " + ex.Message); }
     }
@@ -2089,8 +2104,16 @@ public sealed class MainPage : ContentPage
             Console.WriteLine($"TensorAgent: entry URL {_host.EntryUrl}");
 #endif
             _status.Text =
+#if IOS
                 $"{probe.Backend} · GgmlOps {(probe.MainProgramHandleResolved ? "linked" : "NOT linked")}" +
+#else
+                $"{probe.Backend} · GgmlOps {(probe.NativeLibraryLoaded ? "loaded" : "NOT loaded")}" +
+#endif
+#if IOS || MACCATALYST
                 $" · {probe.GpuName ?? "no Metal device"} · :{_host.Port}";
+#else
+                $" · {probe.Reason} · :{_host.Port}";
+#endif
             // The page says when the model starts and stops working; the display is
             // held awake for exactly that stretch, because on iOS the screen sleeping
             // suspends the app and stops the generation partway.

@@ -4,7 +4,7 @@
 
 ## 当前方向
 
-TensorSharp 是面向 GGUF 模型的原生 .NET 10 推理引擎。当前源码包含 CLI、服务端/Web UI、兼容 HTTP API、AgentHost，以及 TensorAgent iOS/iPadOS 应用。AgentHost 随 CLI 与服务端归档一同发布，也作为 `TensorSharp.AgentHost` NuGet 包发布；TensorAgent 只能从源码构建，因为没有任何发布工作流会构建这个 iOS 应用。`v2026.09.01` 标签之后合入的改动（其中包括 Qwen-Image-2.1、Bonsai2、DiffusionGemma 图像输入与 Jev API、子智能体、Playwright 浏览器技能以及 GB10 发布归档）在下一个标签之前只存在于源码构建中；其中会改变现有配置行为的改动列在[发布说明](#发布说明自上个标签以来的行为变化)中。
+TensorSharp 是面向 GGUF 模型的原生 .NET 10 推理引擎。当前源码包含 CLI、服务端/Web UI、兼容 HTTP API、AgentHost，以及 TensorAgent 应用（iOS/iPadOS，同一个项目还能构建 Mac 与 Windows 桌面版）。AgentHost 随 CLI 与服务端归档一同发布，也作为 `TensorSharp.AgentHost` NuGet 包发布；TensorAgent 只能从源码构建，因为没有任何发布工作流会构建这个应用。`v2026.09.01` 标签之后合入的改动（其中包括 Qwen-Image-2.1、Bonsai2、DiffusionGemma 图像输入与 Jev API、子智能体、Playwright 浏览器技能以及 GB10 发布归档）在下一个标签之前只存在于源码构建中；其中会改变现有配置行为的改动列在[发布说明](#发布说明自上个标签以来的行为变化)中。
 
 ### 嵌入模型与服务
 
@@ -61,6 +61,14 @@ Hadamard 变换。它需要单设备 GGML 后端（`cpu`、`cuda`、`mlx` 与 `-
 ### 发布说明：自上个标签以来的行为变化
 
 `v2026.09.01` 标签之后合入、会改变现有配置行为的改动：
+
+- **TensorAgent 除 iPhone 外还可构建为 Mac 与 Windows 应用。** 应用项目现在以
+  `net10.0-ios;net10.0-maccatalyst` 为目标（在 Windows 机器上为
+  `net10.0-windows10.0.19041.0`），因此构建 iOS 应用也需要安装 `maui-maccatalyst`
+  workload；构建开关 `TensorSharpIosTargets` 更名为 `TensorSharpAppleTargets`（它现在也会构建
+  `TensorSharp.Models` 的 Mac Catalyst 切片）。应用图标与启动画面中的 “TA” 改为矢量轮廓而不是
+  SVG 文本，因为 MAUI 10.0.110 的图像工具遇到任何 `<text>` 都会抛出异常。详见
+  [TensorAgent 桌面版](../TensorAgent/README.md#on-the-desktop-macos-and-windows)。
 
 - **Qwen-Image：只加载 Qwen-Image-2.1。** 更早的 Qwen-Image 与 Qwen-Image-Edit 检查点（例如
   Qwen-Image-Edit-2511）会在加载时被拒绝（退出码 2）。`--qwen-image-lora` 与 `--offload-cpu` 现在是
@@ -218,7 +226,7 @@ Hadamard 变换。它需要单设备 GGML 后端（`cpu`、`cuda`、`mlx` 与 `-
 
 ### TensorAgent 与 iOS
 
-TensorAgent 是使用 .NET MAUI 构建的 iOS/iPadOS 应用，在设备本地运行 TensorSharp 引擎。它把原生 GGML 作为 iOS `.xcframework` 链接进来，在真机上使用 `ggml_metal`，并与 CLI、服务端共享与宿主无关的聊天流水线（`TensorSharp.Chat`）。iOS 目标通过 `TensorSharpIosTargets=true` 启用；它不是独立的数值后端，也不是远程推理服务。
+TensorAgent 是使用 .NET MAUI 构建的 iOS/iPadOS 应用，在设备本地运行 TensorSharp 引擎。它把原生 GGML 作为 iOS `.xcframework` 链接进来，在真机上使用 `ggml_metal`，并与 CLI、服务端共享与宿主无关的聊天流水线（`TensorSharp.Chat`）。Apple 目标（iOS 应用与 Mac 应用）通过 `TensorSharpAppleTargets=true` 启用；它不是独立的数值后端，也不是远程推理服务。
 
 应用包含本地模型下载、保存会话、附件、听写、Agent Skills、有界的进程内智能体工具，以及“Ask TensorAgent”共享扩展——它把其他应用共享过来的文本、链接、网页、图片、影片、音频、PDF 与文档变成一条尚未发送的聊天草稿。由于 iOS 不支持 ASP.NET Core runtime hosting，也不允许运行子进程，TensorAgent 使用进程内 loopback server，以及由运行时提供的 shell/Python/JavaScript 集成。它与桌面端共享的是 API 而不是页面：应用自带手机版 UI，绑定同一套 `WebUiChatService` 与 `SkillsService` 路由。
 
@@ -234,7 +242,8 @@ TensorAgent 是使用 .NET MAUI 构建的 iOS/iPadOS 应用，在设备本地运
 - **投机解码默认开启**（与桌面宿主不同）：Gemma 4 E4B 与 12B 条目在草稿头已下载时使用草稿头，否则应用选择 n-gram 投机。修改该设置会从下一条回复起作用于正在运行的引擎；启动环境中设置的 `TS_SPEC` / `TS_SPEC_TYPE` 仍然优先。
 - **子智能体有开关。** 设置 > Sandbox >“Sub-agents”开启时（默认开启，使用宿主默认上限），支持工具的对话会拿到委派工具；关闭后从下一条消息起不再声明这些工具与协调提示，效果与服务端的 `--no-multi-agent` 相同。手机页面不显示子智能体面板，也没有发布任何设备端实测数据。
 - **桌面宿主。** 当 `TensorAgent.Core` 运行在 macOS、Linux 或 Windows 上时，`AgentExecutionMode.Auto` 以 OS 沙箱下的原生进程运行代码，而不是嵌入式解释器；设置了 `networkHosts` 允许列表时，它会拒绝需要联网的启动，因为进程沙箱无法强制执行该列表。
-- **CI。** PR CI 通过 `InferenceWeb.Tests` 检查应用的项目文件、Info.plist、entitlements、共享扩展与原生导出清单，但不运行 `TensorAgent.Tests`，也没有任何工作流构建 iOS 应用。
+- **桌面应用。** 同一个项目还能构建 Mac 版（Mac Catalyst）与 Windows 版（WinUI，尚未在任何机器上构建或运行过）的 TensorAgent。Mac 版随附桌面引擎库，以 Seatbelt 约束的原生进程运行模型编写的代码，使用引擎的桌面内存默认值，并在模型工作期间阻止 App Nap。在 M5 Pro 上以 Gemma 4 E2B 实测：其解码速度与运行在 CoreCLR 上的同一份宿主代码相差不到 3%，每一轮的首个 token 约晚 60 毫秒，因为 .NET 以 Mono 运行 Mac Catalyst 应用。
+- **CI。** PR CI 通过 `InferenceWeb.Tests` 检查应用的项目文件、Info.plist、entitlements、共享扩展与原生导出清单，但不运行 `TensorAgent.Tests`，也没有任何工作流构建 iOS 或桌面应用。
 
 构建、模拟器、真机、打包与测试详见 [TensorAgent README](../TensorAgent/README.md)，上述三点的实测数据也在其中。
 
@@ -247,7 +256,7 @@ TensorAgent 是使用 .NET MAUI 构建的 iOS/iPadOS 应用，在设备本地运
 | 嵌入模型 | GGUF BERT/XLM-R：Snowflake Arctic Embed L v2.0、all-MiniLM-L6-v2；纯 C# CPU 与原生 GGML CPU/Metal/CUDA，独立 `--embeddings` 服务，OpenAI/Ollama 单条与批量 API。上下文、分词、质量及实测范围见[指南](embeddings_zh-cn.md)。 |
 | 模型家族 | DeepSeek V4 Flash（`deepseek4`）、DeepSeek V4.1 Flash（`deepseek41`）、GLM 5.x（`glm-dsa`、`glm_dsa`、`glm5next`）、Gemma 4、DiffusionGemma、Qwen 3.5/3.6-family（`qwen35`、`qwen35moe`、`qwen3next`）、Qwen 3.8 Flash Next（`qwen4exp`）、Bonsai2 27B（带 PRISM `prism.hadamard.*` 元数据和 PQ2_0 / PTQ1_0 张量的 `qwen35` 文件）、GPT OSS、Nemotron-H（含 Nemotron 3 Nano Omni 与 Nemotron 3.5 Lightning；`nemotron_h`、`nemotron_h_moe`、`nemotron_h_omni`）、Mistral 3（`mistral3`，以及标为 `llama` 的 Mistral Small 3.x 文件）、Hunyuan Dense（`hunyuan-dense`）、Muse-Glimmer（`muse-glimmer`、`muse_glimmer`）。文生图与图像编辑通过 Qwen-Image-2.1（`qwen_image`、`qwen-image`）；音视频联合生成通过 MiniMax-H3（`minimax-h3`、`minimax_h3`），纯视频生成通过 Wan 2.1 / 2.2（`wan`、`wan2.1`、`wan2.2`）。 |
 | 推理宿主 | CLI、交互式 REPL、ASP.NET Core Web UI、Ollama 风格 API、OpenAI Chat Completions 风格 API、OpenAI Responses 风格 API，以及 Jev 类型化决策 API（`POST /v1/systemone`，由已加载的 DiffusionGemma 模型提供，状态支持文本、图像、上传文档、抽样视频帧和已配置 ASR 服务的语音转录；见 [Jev](models/jev_zh-cn.md)）。 |
-| iOS 应用 | TensorAgent 支持 iOS/iPadOS，将 GGML 作为 iOS `.xcframework` 链接，并在真机上使用 `ggml_metal`。它共享与宿主无关的聊天流水线（`TensorSharp.Chat`），但通过进程内 loopback 宿主提供自己的手机版页面——iOS 既没有 ASP.NET Core 运行时包，也不能启动子进程。它支持 iPhone 与 iPad（arm64，iOS 17.0 或更高版本）。应用离开屏幕后这一轮不会丢失（应用不在前台时生成暂停，回到前台后继续）；投机解码与子智能体委派默认开启；共享提示词前缀的 checkpoint 会按模型持久化，使每次启动的第一条消息只需一次恢复而不必完整预填充（在 iPhone 17 Pro Max 上以 Qwen3.5 9B 实测：原本 54 秒的冷启动首条消息，变成 1.2 秒预热加约 0.6 秒的首条消息）；引擎的内存策略也按 iOS jetsam 实际计费的口径来设定。详见 [TensorAgent](../TensorAgent/README.md)。 |
+| TensorAgent 应用 | TensorAgent 支持 iOS/iPadOS，同一个项目还能构建 Mac 版（Mac Catalyst：桌面引擎库、Seatbelt 约束的进程，已实测）与 Windows 版（尚未构建或运行）。在手机上它将 GGML 作为 iOS `.xcframework` 链接，并在真机上使用 `ggml_metal`。它共享与宿主无关的聊天流水线（`TensorSharp.Chat`），但通过进程内 loopback 宿主提供自己的手机版页面——iOS 既没有 ASP.NET Core 运行时包，也不能启动子进程。它支持 iPhone 与 iPad（arm64，iOS 17.0 或更高版本）。应用离开屏幕后这一轮不会丢失（应用不在前台时生成暂停，回到前台后继续）；投机解码与子智能体委派默认开启；共享提示词前缀的 checkpoint 会按模型持久化，使每次启动的第一条消息只需一次恢复而不必完整预填充（在 iPhone 17 Pro Max 上以 Qwen3.5 9B 实测：原本 54 秒的冷启动首条消息，变成 1.2 秒预热加约 0.6 秒的首条消息）；引擎的内存策略也按 iOS jetsam 实际计费的口径来设定。详见 [TensorAgent](../TensorAgent/README.md)。 |
 | 后端 | 纯 C# CPU、Direct CUDA/cuBLAS（`cuda`）、MLX Metal（`mlx`）、GGML CPU、GGML Metal、GGML CUDA、GGML Vulkan。DeepSeek V4 另有三套专属的整模型执行器——Direct CUDA、原生 ggml 与纯 C# CPU——在 GPU 执行器上通过 `--layer-split N` 按整层放置权重（`--layer-split N` 指定卡数）。DeepSeek V4.1 的服务路径是 `ggml_cuda`；`ggml_cpu` 用同一套原生计算图跑标量回退实现，`cpu` 则是纯 C# 的 V4.1 执行器，两者都是正确性与可移植性通道，而非服务通道。`cuda` 用 Direct CUDA 引擎自己的内核运行 V4.1（不经过 ggml），目前还没有数值门禁。`ggml_vulkan` / `ggml_metal` 需要 `TS_DSV41_ALLOW_NON_CUDA_GPU=1`；`mlx` 会直接拒绝该检查点，而不会把 V4.1 的权重塞进并未实现它的计算图。视频家族中，Wan 是对后端有限制的那一个：它可运行于各 GGML 后端以及 Direct `cuda` / 纯 C# `cpu` 后端，但不支持 MLX。Qwen-Image-2.1 只能运行在 GGML 后端上，Bonsai2 需要单设备 GGML 后端。 |
 | 发布构建与 CI | 打标签的发布会构建自包含的 CLI 与服务端归档：Windows x64（CPU/CUDA）、Linux x64（CPU/CUDA）与 macOS arm64。自 `v2026.09.01` 之后，发布工作流还会构建面向 NVIDIA GB10 / DGX Spark 的实验性 `linux-arm64-cuda13-GB10` 归档（CUDA 13、SM121a），它在没有 GPU 的托管 ARM64 runner 上用 Docker 构建；第一个带有该归档的标签发布将是下一个标签。已记录的 GB10 真机冒烟数据是历史数据，早于上游重新集成，不能为当前代码背书（[GB10 构建](../DEVELOPMENT_zh-cn.md#gb10--dgx-spark-构建容器实验性)）。PR CI 在 x64 与 ARM64 Linux 上运行 `InferenceWeb.Tests` 的 CPU 正确性测试与 GB10 容器门禁检查；发往 `main` 的 PR 还会在自托管 CUDA runner 上运行一次引擎对比冒烟测试（Gemma 4 12B，TensorSharp 对比 llama.cpp，`test-matrix.yml`）。PR CI 不运行 `TensorAgent.Tests`，也不构建 iOS 应用。打标签的发布还会推送 `eng/verify-packages.ps1` 所列的 NuGet 包（含 `TensorSharp.AgentHost`）。 |
 | 多模态 | Gemma 4 图像/视频/音频；Qwen 3.5-family（含带配套投影器的 Bonsai2）、Qwen 3.8 Flash Next、GLM-5.3-Flash、Mistral 3、Nemotron-H Omni、Muse-Glimmer、DiffusionGemma 图像输入；Qwen 3.8 Flash Next 的 `video_url` 视频；DeepSeek V4.1 通过视觉伴随文件支持图像与视频；Nemotron-H 只有加载了携带 Parakeet 音频塔的伴随 GGUF 时才支持音频（公开 GGUF 都不附带）；DiffusionGemma 拒绝音频与 `video_url` 视频（Web UI 上传的视频只会以逐帧普通图像的形式送入模型）；PDF（CLI `--pdf` + Web UI）。媒体*输出*：Qwen-Image-2.1（图像，可通过 `--lora` 加载 LoRA 插件，并对文本与参考图 token 默认启用前缀 KV 缓存）、MiniMax-H3（H.264 MP4 **外加一份 32 kHz 立体声 `.wav` 旁挂文件**，两者在同一份打包潜变量里一起生成），以及 Wan 2.1 / 2.2（仅 H.264 MP4 视频，文本→视频与图像→视频）。 |

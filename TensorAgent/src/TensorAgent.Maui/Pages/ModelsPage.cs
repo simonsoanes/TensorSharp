@@ -305,7 +305,7 @@ public sealed class ModelsPage : ContentPage
         }
 
         AppSettings settings = _app.Settings.Load();
-        if (!settings.AllowCellularDownloads && Platforms.iOS.DeviceState.IsOnCellularOnly())
+        if (!settings.AllowCellularDownloads && Services.DeviceState.IsOnCellularOnly())
         {
             await DisplayAlert(
                 "Waiting for Wi-Fi",
@@ -359,7 +359,7 @@ public sealed class ModelsPage : ContentPage
             return;
 
         AppSettings settings = _app.Settings.Load();
-        if (!settings.AllowCellularDownloads && Platforms.iOS.DeviceState.IsOnCellularOnly())
+        if (!settings.AllowCellularDownloads && Services.DeviceState.IsOnCellularOnly())
         {
             await DisplayAlert(
                 "Waiting for Wi-Fi",

@@ -12,7 +12,7 @@ using AVFoundation;
 using Foundation;
 using Speech;
 
-namespace TensorAgent.Maui.Platforms.iOS;
+namespace TensorAgent.Maui.Services;
 
 /// <summary>
 /// Voice input, straight onto Apple's own speech recogniser.
@@ -47,6 +47,9 @@ internal sealed class Dictation : IDisposable
 
     /// <summary>Whether this device has a recogniser for the language dictation would use.</summary>
     public static bool IsSupported => new SFSpeechRecognizer(ResolveLocale(string.Empty)) is { Available: true };
+
+    /// <summary>What the page says when <see cref="IsSupported"/> is false.</summary>
+    public const string UnsupportedMessage = "Speech recognition is not available on this device.";
 
     /// <summary>
     /// The locale to recognise in: the caller's explicit choice, or — for "Auto" — the
@@ -157,7 +160,7 @@ internal sealed class Dictation : IDisposable
             or SFSpeechRecognizerAuthorizationStatus.Restricted)
         {
             return "Speech recognition is turned off for TensorAgent. Turn it on in "
-                + "Settings › TensorAgent › Speech Recognition. " + DeniedMarker;
+                + SettingsPath("Speech Recognition") + ". " + DeniedMarker;
         }
 
         var speech = new TaskCompletionSource<SFSpeechRecognizerAuthorizationStatus>(
@@ -169,13 +172,21 @@ internal sealed class Dictation : IDisposable
         if (AVAudioApplication.SharedInstance.RecordPermission == AVAudioApplicationRecordPermission.Denied)
         {
             return "The microphone is turned off for TensorAgent. Turn it on in "
-                + "Settings › TensorAgent › Microphone. " + DeniedMarker;
+                + SettingsPath("Microphone") + ". " + DeniedMarker;
         }
 
         var microphone = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         AVAudioApplication.RequestRecordPermission(microphone.SetResult);
         return await microphone.Task ? null : "Dictation needs permission to use the microphone. " + DeniedMarker;
     }
+
+    /// <summary>Where the user turns a refused permission back on, on this platform.</summary>
+    private static string SettingsPath(string permission) =>
+#if MACCATALYST
+        "System Settings › Privacy & Security › " + permission;
+#else
+        "Settings › TensorAgent › " + permission;
+#endif
 
     /// <summary>
     /// Listen until <see cref="Stop"/> is called, then return everything recognised.

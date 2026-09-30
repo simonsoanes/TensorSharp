@@ -99,7 +99,9 @@ public sealed class AgentAppHost : IDisposable
         _loggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
         paths.EnsureCreated();
 
-        Settings = new SettingsStore(paths.SettingsFile);
+        Settings = new SettingsStore(
+            paths.SettingsFile,
+            paths.DeviceClass == DeviceClass.Desktop ? AppSettings.DesktopDefaults : null);
         AppSettings settings = Settings.Load();
 
         Models = new ModelStore(paths.ModelsDirectory);
@@ -128,6 +130,7 @@ public sealed class AgentAppHost : IDisposable
         CodeExec = new CodeExecOptions
         {
             Enabled = settings.AllowCodeExecution,
+            Unconfined = settings.AllowUnconfinedExecution,
             AllowNetwork = settings.AllowNetwork,
             AllowInstall = settings.AllowNetwork,
             ScratchDirectory = paths.ScratchDirectory,
@@ -1974,6 +1977,7 @@ public sealed class AgentAppHost : IDisposable
         ArgumentNullException.ThrowIfNull(settings);
 
         CodeExec.Enabled = settings.AllowCodeExecution;
+        CodeExec.Unconfined = settings.AllowUnconfinedExecution;
         CodeExec.AllowNetwork = settings.AllowNetwork;
         CodeExec.AllowInstall = settings.AllowNetwork;
         CodeExec.Timeout = TimeSpan.FromSeconds(Math.Clamp(settings.ToolTimeoutSeconds, 5, 600));
@@ -2100,45 +2104,64 @@ public sealed class AgentAppHost : IDisposable
     {
         string root = Path.Combine(Paths.ScratchDirectory, "selftest-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(root);
+        // The escape probe writes into the user's home directory, which the model's code
+        // must never be able to touch on any platform: the phone's in-process sandbox
+        // allows nothing outside the workspace, and the desktop's Seatbelt profile carves
+        // the home out of everything. Not /tmp, which that profile admits on purpose
+        // (SkillSandbox explains why), so a probe there passed on the phone and failed on a
+        // Mac while both sandboxes did exactly what they should. And not the app's data
+        // directory, which a host may keep under the system temp (a test host does).
+        string escape = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            "tensoragent-selftest-escape-" + Guid.NewGuid().ToString("N")[..8]);
+        // The phone's interpreter is the bundle's own CPython 3.13 with staged wheels,
+        // and checking those is what this was written for. A desktop runs the python3
+        // on the user's PATH, whose version and packages are the user's.
+        bool bundledPython = _embeddedBackend is not null;
         try
         {
-            return new[]
+            var checks = new List<SelfTestResult>
             {
                 Check("shell", new[] { "sh", "-c", "echo hello | tr a-z A-Z" }, root, "HELLO"),
                 Check("shell:files", new[] { "sh", "-c", "printf 'b\na\n' > f.txt && sort f.txt | tr -d '\n'" }, root, "ab"),
                 Check("shell:awk", new[] { "sh", "-c", "echo 'x 2' | awk '{print $2*3}'" }, root, "6"),
-                Check("python", new[] { "python3", "-c", "import sys, json; print(json.dumps({'v': sys.version_info[:2]}))" }, root, "[3, 13]"),
+                Check("python", new[] { "python3", "-c", "import sys, json; print(json.dumps({'v': sys.version_info[:2]}))" }, root,
+                    bundledPython ? "[3, 13]" : "[3, "),
                 Check("python:stdlib", new[] { "python3", "-c", "import re, zipfile, sqlite3; print('stdlib ok')" }, root, "stdlib ok"),
+            };
+            if (bundledPython)
+            {
                 // The packages the bundled skills import. A staged wheel whose compiled
                 // extension did not make it into the bundle imports fine on a laptop
                 // and fails here, which is exactly the failure this catches.
-                Check("python:numpy", new[] { "python3", "-c", "import numpy; print(numpy.arange(3).sum())" }, root, "3"),
-                Check("python:pillow", new[] { "python3", "-c", "from PIL import Image; print(Image.new('RGB', (2, 2)).size)" }, root, "(2, 2)"),
+                checks.Add(Check("python:numpy", new[] { "python3", "-c", "import numpy; print(numpy.arange(3).sum())" }, root, "3"));
+                checks.Add(Check("python:pillow", new[] { "python3", "-c", "from PIL import Image; print(Image.new('RGB', (2, 2)).size)" }, root, "(2, 2)"));
                 // lxml is the one this repository compiles itself (scripts/build-lxml-ios.sh):
                 // seven frameworks that link libxml2 and libxslt statically. Parsing,
                 // XPath and an XSLT transform touch all of etree's linkage at once.
-                Check("python:lxml", new[] { "python3", "-c",
+                checks.Add(Check("python:lxml", new[] { "python3", "-c",
                     "from lxml import etree; d = etree.XML('<r><a n=\"1\"/><a n=\"2\"/></r>'); "
                     + "x = etree.XSLT(etree.XML('<xsl:stylesheet xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\" version=\"1.0\"><xsl:template match=\"/\"><o><xsl:value-of select=\"count(//a)\"/></o></xsl:template></xsl:stylesheet>')); "
-                    + "print(d.xpath('sum(//a/@n)'), etree.tostring(x(d)).decode())" }, root, "3.0 <o>2</o>"),
+                    + "print(d.xpath('sum(//a/@n)'), etree.tostring(x(d)).decode())" }, root, "3.0 <o>2</o>"));
                 // And the two document libraries that exist only because lxml does. Each
                 // writes a file and reads it back, which is the whole of what a model
                 // asks of them.
-                Check("python:pptx", new[] { "python3", "-c",
+                checks.Add(Check("python:pptx", new[] { "python3", "-c",
                     "from pptx import Presentation; p = Presentation(); s = p.slides.add_slide(p.slide_layouts[5]); "
-                    + "s.shapes.title.text = 'ok'; p.save('deck.pptx'); print(len(Presentation('deck.pptx').slides))" }, root, "1"),
-                Check("python:docx", new[] { "python3", "-c",
+                    + "s.shapes.title.text = 'ok'; p.save('deck.pptx'); print(len(Presentation('deck.pptx').slides))" }, root, "1"));
+                checks.Add(Check("python:docx", new[] { "python3", "-c",
                     "import docx; d = docx.Document(); d.add_paragraph('ok'); d.save('note.docx'); "
-                    + "print(len(docx.Document('note.docx').paragraphs))" }, root, "1"),
-                Check("node", new[] { "node", "-e", "console.log([1,2,3].map(n => n * 2).join(','))" }, root, "2,4,6"),
-                Check("node:print", new[] { "node", "-p", "1 + 1" }, root, "2"),
-                Check("sandbox:write", new[] { "sh", "-c", "echo x > /tmp/tensoragent-selftest-escape" }, root, expectFailure: true),
-                Check("sandbox:network", new[] { "sh", "-c", "curl https://example.com" }, root, expectFailure: true),
-            };
+                    + "print(len(docx.Document('note.docx').paragraphs))" }, root, "1"));
+            }
+            checks.Add(Check("node", new[] { "node", "-e", "console.log([1,2,3].map(n => n * 2).join(','))" }, root, "2,4,6"));
+            checks.Add(Check("node:print", new[] { "node", "-p", "1 + 1" }, root, "2"));
+            checks.Add(Check("sandbox:write", new[] { "sh", "-c", "echo x > '" + escape + "'" }, root, expectFailure: true));
+            checks.Add(Check("sandbox:network", new[] { "sh", "-c", "curl https://example.com" }, root, expectFailure: true));
+            return checks;
         }
         finally
         {
             try { Directory.Delete(root, true); } catch (Exception) { /* scratch */ }
+            try { File.Delete(escape); } catch (Exception) { /* only there if the probe escaped */ }
         }
     }
 
@@ -2442,7 +2465,7 @@ public sealed class AgentAppHost : IDisposable
                 }
                 WaitForTheEngineToStop();
 
-                EngineMemoryPolicy.Apply(model, settings);
+                EngineMemoryPolicy.Apply(model, settings, Paths.DeviceClass);
 
                 // Speculative decoding, and the draft head that makes it best: the
                 // catalog's optional companion, handed to the loader the way the CLI's
@@ -2533,6 +2556,13 @@ public sealed class AgentAppHost : IDisposable
     /// deterministically instead of racing a real engine.
     /// </summary>
     internal Func<bool> EngineHasWorkInFlight { get; set; } = () => false;
+
+    /// <summary>
+    /// Whether the engine has a sequence running or waiting right now: a user's turn, the
+    /// prefix-cache warm-up, a sub-agent or a benchmark alike. What a desktop host keeps
+    /// the system from throttling or sleeping for.
+    /// </summary>
+    public bool IsEngineWorking => EngineHasWorkInFlight();
 
     /// <summary>
     /// Whether the engine is still working, straight from its own counters. A component
@@ -2699,6 +2729,13 @@ public sealed record AgentPaths(string DataRoot, string CacheRoot)
     public AgentExecutionMode ExecutionMode { get; init; } = AgentExecutionMode.Auto;
     /// <summary>Physical memory in whole gigabytes, which decides what the catalog offers.</summary>
     public int DeviceMemoryGB { get; init; } = 12;
+
+    /// <summary>
+    /// What kind of machine this is, which decides the engine budget model loads run with
+    /// (<see cref="EngineMemoryPolicy"/>) and the settings a first launch starts from
+    /// (<see cref="AppSettings.DesktopDefaults"/>).
+    /// </summary>
+    public DeviceClass DeviceClass { get; init; } = DeviceClass.Phone;
 
     public string ModelsDirectory => Path.Combine(CacheRoot, "models");
     public string ConversationsDirectory => Path.Combine(DataRoot, "conversations");

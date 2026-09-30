@@ -417,7 +417,7 @@ namespace TensorSharp.AgentHost.Skills
             {
                 EnsureRealDirectory(Root);
                 EnsureRealDirectory(TempDirectory);
-                if (!OperatingSystem.IsMacOS() || Encoding.UTF8.GetByteCount(TempDirectory) <= 48)
+                if (!HostOS.IsMacDesktop || Encoding.UTF8.GetByteCount(TempDirectory) <= 48)
                     return TempDirectory;
                 lock (_gate)
                 {

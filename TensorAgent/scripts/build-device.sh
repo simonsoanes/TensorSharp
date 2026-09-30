@@ -63,7 +63,7 @@ ARGS=(
   -f net10.0-ios
   -p:RuntimeIdentifier=ios-arm64
   -c "${CONFIGURATION}"
-  -p:TensorSharpIosTargets=true
+  -p:TensorSharpAppleTargets=true
   -p:TensorAgentShareExtension="${TENSORAGENT_SHARE_EXTENSION}"
   # AdvUtils, TensorSharp.Runtime and a few siblings write one shared bin/ even
   # though this graph reaches them under more than one property set. Parallel nodes
@@ -100,7 +100,7 @@ if [[ "${CLEAN:-0}" == "1" ]]; then
     dotnet restore "${REPO_ROOT}/TensorAgent/src/TensorAgent.Maui/TensorAgent.Maui.csproj" \
         -r ios-arm64 \
         -p:Configuration="${CONFIGURATION}" \
-        -p:TensorSharpIosTargets=true \
+        -p:TensorSharpAppleTargets=true \
         -p:TensorAgentShareExtension="${TENSORAGENT_SHARE_EXTENSION}" \
         -m:1 \
         -nologo

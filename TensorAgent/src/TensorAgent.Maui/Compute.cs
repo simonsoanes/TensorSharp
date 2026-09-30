@@ -8,7 +8,11 @@
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
+#if IOS || MACCATALYST
 using Metal;
+#else
+using System.Runtime.InteropServices;
+#endif
 using TensorSharp.GGML;
 using TensorSharp.Runtime;
 
@@ -22,7 +26,8 @@ namespace TensorAgent.Maui;
 /// (false for the simulator slice, which build-ios.sh builds CPU-only).</param>
 /// <param name="GpuSupportsApple7">Whether the system Metal device advertises MTLGPUFamilyApple7,
 /// the floor for ggml-metal's simdgroup_matrix kernels.</param>
-/// <param name="GpuName">The Metal device name, or null when there is no Metal device.</param>
+/// <param name="GpuName">The GPU the backend runs on (the Metal device, or the Vulkan device on
+/// Windows), or null when there is none to name.</param>
 /// <param name="Reason">One sentence saying why this backend was picked, for the status bar and logs.</param>
 public sealed record ComputeSelection(
     BackendType Backend,
@@ -41,7 +46,8 @@ public sealed record ComputeSelection(
 /// from side-effect-free probes and never by "try Metal, fall back to CPU":
 /// <see cref="GgmlBasicOps.CanInitializeBackend"/> is a compile-flag check that
 /// creates no MTLDevice, and the Metal family query goes through UIKit's own
-/// device object, which GGML does not see.
+/// device object, which GGML does not see. On Windows the same rule picks between
+/// CUDA, Vulkan and the CPU.
 /// </remarks>
 public static class Compute
 {
@@ -52,6 +58,16 @@ public static class Compute
     public static ComputeSelection Selection => s_selection.Value;
 
     private static ComputeSelection Select()
+    {
+#if IOS || MACCATALYST
+        return SelectApple();
+#else
+        return SelectWindows();
+#endif
+    }
+
+#if IOS || MACCATALYST
+    private static ComputeSelection SelectApple()
     {
         bool metalCompiledIn = GgmlBasicOps.CanInitializeBackend(GgmlBackendType.Metal);
 
@@ -91,4 +107,37 @@ public static class Compute
 
         return new ComputeSelection(BackendType.GgmlCpu, metalCompiledIn, apple7, gpuName, reason);
     }
+#else
+    /// <summary>
+    /// CUDA when the engine was built with it and an NVIDIA driver is installed, then
+    /// Vulkan when the engine was built with it and a Vulkan device exists, then the CPU.
+    /// The CUDA check is the driver's own library rather than a device query because
+    /// asking ggml-cuda for its devices initialises it, and GGML latches the first
+    /// backend it initialises; the Vulkan count is safe to ask, and a GGML build with
+    /// Vulkan but no Vulkan device would otherwise lead with a backend that cannot load.
+    /// </summary>
+    private static ComputeSelection SelectWindows()
+    {
+        if (GgmlBasicOps.CanInitializeBackend(GgmlBackendType.Cuda)
+            && NativeLibrary.TryLoad("nvcuda.dll", out IntPtr driver))
+        {
+            NativeLibrary.Free(driver);
+            return new ComputeSelection(BackendType.GgmlCuda, false, false, null,
+                "ggml-cuda: the engine has CUDA and an NVIDIA driver is installed.");
+        }
+
+        if (GgmlBasicOps.CanInitializeBackend(GgmlBackendType.Vulkan))
+        {
+            int devices = GgmlBasicOps.GetVulkanDeviceCount();
+            if (devices > 0)
+            {
+                return new ComputeSelection(BackendType.GgmlVulkan, false, false, null,
+                    $"ggml-vulkan: {devices} Vulkan device(s) found.");
+            }
+        }
+
+        return new ComputeSelection(BackendType.GgmlCpu, false, false, null,
+            "ggml-cpu: the engine has neither a CUDA driver nor a Vulkan device to run on here.");
+    }
+#endif
 }

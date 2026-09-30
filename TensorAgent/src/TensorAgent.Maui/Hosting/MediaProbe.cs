@@ -8,6 +8,7 @@
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
+#if IOS || MACCATALYST
 using CoreGraphics;
 using CoreImage;
 using Foundation;
@@ -448,3 +449,4 @@ public static class MediaProbe
             throw new InvalidOperationException(message);
     }
 }
+#endif

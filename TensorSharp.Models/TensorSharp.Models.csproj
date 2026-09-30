@@ -1,19 +1,21 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <!-- Desktop consumers build the single net10.0 target exactly as before. The iOS app
-         (TensorAgent) opts into a second net10.0-ios target with
-         -p:TensorSharpIosTargets=true: that target drops the packages with no ios-arm64
-         binaries (Magick.NET, OpenCvSharp) and the Media/Desktop sources that use them,
-         and lands in bin/net10.0-ios/ so the net10.0 output path stays untouched. -->
-    <TargetFramework Condition="'$(TensorSharpIosTargets)' != 'true'">net10.0</TargetFramework>
-    <TargetFrameworks Condition="'$(TensorSharpIosTargets)' == 'true'">net10.0;net10.0-ios</TargetFrameworks>
+    <!-- Desktop consumers build the single net10.0 target exactly as before. The TensorAgent
+         app opts into its two Apple targets, net10.0-ios (iPhone and iPad) and
+         net10.0-maccatalyst (the Mac app), with -p:TensorSharpAppleTargets=true. Those
+         targets drop the packages with no Apple app binaries (Magick.NET, OpenCvSharp) and
+         the Media/Desktop sources that use them in favour of the ImageIO/AVFoundation
+         provider in Media/Apple, and land in bin/<tfm>/ so the net10.0 output path stays
+         untouched. -->
+    <TargetFramework Condition="'$(TensorSharpAppleTargets)' != 'true'">net10.0</TargetFramework>
+    <TargetFrameworks Condition="'$(TensorSharpAppleTargets)' == 'true'">net10.0;net10.0-ios;net10.0-maccatalyst</TargetFrameworks>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <!-- Appending the TFM for the ios target gives both bin\net10.0-ios\ and a separate
-         obj\...\net10.0-ios\ intermediate directory; without it the two targets would
-         overwrite each other's compile outputs. -->
-    <AppendTargetFrameworkToOutputPath Condition="'$(TargetFramework)' == 'net10.0-ios'">true</AppendTargetFrameworkToOutputPath>
+    <!-- Appending the TFM for the Apple targets gives each its own bin\<tfm>\ and
+         obj\...\<tfm>\ intermediate directory; without it the targets would overwrite
+         each other's compile outputs. -->
+    <AppendTargetFrameworkToOutputPath Condition="'$(TargetFramework)' == 'net10.0-ios' Or '$(TargetFramework)' == 'net10.0-maccatalyst'">true</AppendTargetFrameworkToOutputPath>
     <OutputPath>bin\</OutputPath>
-    <SupportedOSPlatformVersion Condition="'$(TargetFramework)' == 'net10.0-ios'">17.0</SupportedOSPlatformVersion>
+    <SupportedOSPlatformVersion Condition="'$(TargetFramework)' == 'net10.0-ios' Or '$(TargetFramework)' == 'net10.0-maccatalyst'">17.0</SupportedOSPlatformVersion>
     <IsPackable>true</IsPackable>
     <Nullable>annotations</Nullable>
     <Description>Model architecture implementations, multimodal encoders, and model execution helpers for TensorSharp.</Description>
@@ -43,12 +45,12 @@
     <PackageReference Include="StbImageSharp" Version="2.30.15" />
     <PackageReference Include="System.Numerics.Tensors" Version="10.0.7" />
   </ItemGroup>
-  <!-- Native media libraries: no ios-arm64 binaries exist for any of them, and both are
-       dynamic libraries an iOS app could not link anyway. Only Media/Desktop/ uses them
-       (MediaLayeringTests enforces this), and that folder is removed from the ios target
-       below rather than #if'd, so a stray native using in shared code fails the ios
-       compile loudly instead of throwing DllNotFoundException on a phone. -->
-  <ItemGroup Condition="'$(TargetPlatformIdentifier)' != 'ios'">
+  <!-- Native media libraries: no ios-arm64 or Mac Catalyst binaries exist for any of them,
+       and both are dynamic libraries an iOS app could not link anyway. Only Media/Desktop/
+       uses them (MediaLayeringTests enforces this), and that folder is removed from the
+       Apple targets below rather than #if'd, so a stray native using in shared code fails
+       the Apple compile loudly instead of throwing DllNotFoundException in the app. -->
+  <ItemGroup Condition="'$(TargetPlatformIdentifier)' != 'ios' And '$(TargetPlatformIdentifier)' != 'maccatalyst'">
     <PackageReference Include="Magick.NET-Q8-AnyCPU" Version="14.16.0" />
     <PackageReference Include="OneWare.OpenCvSharp4.runtime.ubuntu.24.04-x64" Version="4.13.0.18" />
     <PackageReference Include="OneWare.OpenCvSharp4.runtime.ubuntu.24.04-arm64" Version="4.13.0.18" />
@@ -57,7 +59,7 @@
     <PackageReference Include="OneWare.OpenCvSharp4.runtime.win-x64" Version="4.13.0.18" />
     <PackageReference Include="OpenCvSharp4" Version="4.13.0.20260330" />
   </ItemGroup>
-  <ItemGroup Condition="'$(TargetPlatformIdentifier)' == 'ios'">
+  <ItemGroup Condition="'$(TargetPlatformIdentifier)' == 'ios' Or '$(TargetPlatformIdentifier)' == 'maccatalyst'">
     <Compile Remove="Media/Desktop/**" />
   </ItemGroup>
 </Project>

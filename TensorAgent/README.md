@@ -6,9 +6,11 @@ MAUI (`net10.0-ios`) head that links the TensorSharp engine statically, serves i
 own phone-shaped page to a WKWebView from an in-process loopback HTTP server, and
 answers that page's API with the same chat pipeline the desktop uses.
 
-This is the current source implementation of TensorSharp's iOS/iPadOS target.
+This is the current source implementation of TensorSharp's iOS/iPadOS target, and the
+same project builds the desktop app for macOS and Windows (see
+[On the desktop](#on-the-desktop-macos-and-windows)).
 Physical devices use the GGML Metal (`ggml_metal`) backend; build it with
-`TensorSharpIosTargets=true`. It is not a remote client or a separate inference
+`TensorSharpAppleTargets=true`. It is not a remote client or a separate inference
 engine. It targets iPhone and iPad (iOS/iPadOS 17.0 or later, arm64 only); the
 only device run recorded below is an iPhone on iOS 26.6.1, and every built-in
 catalog model needs a device in the 12 GB memory tier or above (see the catalog
@@ -479,7 +481,7 @@ A device build additionally needs a signing identity and provisioning profile:
 ```
 dotnet build TensorAgent/src/TensorAgent.Maui/TensorAgent.Maui.csproj \
     -f net10.0-ios -r ios-arm64 -c Release -m:1 \
-    -p:TensorSharpIosTargets=true -p:CodesignKey="Apple Development: ..."
+    -p:TensorSharpAppleTargets=true -p:CodesignKey="Apple Development: ..."
 ```
 
 `-m:1` keeps the build on one MSBuild node: several referenced projects share one
@@ -488,10 +490,10 @@ passes it too, and besides `SKIP_SIGNING` reads, among others listed in its head
 `CODESIGN_KEY`, `CODESIGN_PROVISION`, `CLEAN=1` (a targeted clean first),
 `NO_INCREMENTAL=1` and `TENSORAGENT_DOTNET_ARGS` (extra `dotnet build` arguments).
 
-`TensorSharpIosTargets=true` must be on the command line rather than only in the
-csproj: it decides whether `TensorSharp.Models` builds a `net10.0-ios` slice at
-all, and restore resolves a referenced project's target frameworks before a
-`ProjectReference`'s `AdditionalProperties` are applied.
+`TensorSharpAppleTargets=true` must be on the command line rather than only in the
+csproj: it decides whether `TensorSharp.Models` builds its `net10.0-ios` and
+`net10.0-maccatalyst` slices at all, and restore resolves a referenced project's
+target frameworks before a `ProjectReference`'s `AdditionalProperties` are applied.
 
 Release device builds keep the engine. It is linked statically and reached through
 `dlsym`, and the Release build's strip step keeps only the symbols on its list, so
@@ -506,6 +508,135 @@ lifecycle with a single window (`UIApplicationSceneManifest` in `Info.plist` and
 `Platforms/iOS/SceneDelegate.cs`), because a build linked against the iOS 27 SDK crashed
 at launch without it. The device run recorded below is on iOS 26.6.1; no run on iOS 27
 is recorded.
+
+## On the desktop: macOS and Windows
+
+The same project builds the desktop app. On a Mac it is the Mac Catalyst head
+(`net10.0-maccatalyst`): the phone's code, running as a Mac app. On Windows it is the
+WinUI head (`net10.0-windows10.0.19041.0`), which only a Windows machine builds. All
+three serve the same page from the same loopback host, and share the catalog, the
+settings, the conversations and the skills. What differs is everything the phone does
+because it is a phone:
+
+| | iPhone and iPad | Mac | Windows |
+| --- | --- | --- | --- |
+| Engine | `GgmlOps.xcframework`, linked statically | `libGgmlOps.dylib` from `build-macos.sh`, in `Contents/MonoBundle` | `GgmlOps.dll` from `build-windows.ps1`, beside the executable |
+| Backends offered | Metal (CPU in the simulator) | Metal, then CPU | CUDA or Vulkan when the engine has it and the machine can run it, then CPU |
+| Code execution | in-process shell, embedded CPython 3.13, JavaScriptCore | real `bash`, `python3`, `node` and `npm` processes, each confined by Seatbelt to the chat's folder | real processes, which Windows cannot confine; offered only after **Run without a sandbox** is turned on in Settings |
+| Skills | the ten `verdicts.json` passes | all twelve | all twelve |
+| Engine budget | measured against jetsam (`EngineMemoryPolicy`) | the engine's defaults | the engine's defaults |
+| First-launch settings | K/V cache Q4, 2,048-token replies, 120 s per command | K/V cache Q8, 8,192-token replies, 300 s (`AppSettings.DesktopDefaults`) | as the Mac |
+| Leaving the screen | the GPU is handed back and the turn waits | the turn carries on; App Nap is held off while the model works | the turn carries on; sleep and power throttling are held off |
+| Files | `Library/Application Support`, `Library/Caches` | `~/Library/Application Support/TensorAgent`, `~/Library/Caches/TensorAgent` | `%LOCALAPPDATA%\TensorAgent\Data`, `...\Cache` |
+
+`DeviceClass.Desktop` on `AgentPaths` is the one switch behind the budget and the
+first-launch settings; every other host, the validation launcher and the benchmarks
+included, stays on `DeviceClass.Phone` unless it asks.
+
+### On a Mac
+
+The Mac head needs the `maui-maccatalyst` workload in the same user-local SDK
+(`dotnet workload install maui-maccatalyst`), CMake and the Xcode command-line tools.
+Measured here with workload set 10.0.401.1 (MAUI 10.0.110, Mac Catalyst SDK 27.0.10722)
+and Xcode 27.0. Then:
+
+```
+TensorAgent/scripts/build-mac.sh     # CONFIGURATION=Release for an LLVM build (about three minutes)
+TensorAgent/scripts/run-mac.sh       # launch from this terminal; stdout also goes to artifacts/tensoragent-mac/app.log
+TensorAgent/scripts/verify-sim.sh artifacts/tensoragent-mac/app.log   # recognises the Mac app by its engine line
+TensorAgent/scripts/chat-e2e.py artifacts/tensoragent-mac/app.log     # answers, tools, image and audio, with TTFT and decode rate
+```
+
+The Debug hooks in the table above work the same way: `run-mac.sh` passes the
+environment straight through. A model is installed as on the phone, from the Models page,
+or by placing the catalog's files under `~/Library/Caches/TensorAgent/models/<id>/`.
+
+- **The engine library is built with the app.** The referenced projects skip their native
+  builds for every head, so `TensorAgentBuildDesktopEngine` runs the backend project's own
+  incremental `build-macos.sh` before the app is compiled; an up-to-date library costs
+  nothing, and a library older than the native sources beside it is never shipped.
+- **No App Sandbox.** The app runs the model's code as real processes and confines each
+  with TensorSharp's Seatbelt profile, which macOS will not apply inside the App Sandbox.
+  So there is no `Platforms/MacCatalyst/Entitlements.plist`, and the build is not a Mac
+  App Store build. Nothing here signs it for distribution either; a Debug or Release build
+  is signed ad hoc for this Mac.
+- **The oldest Mac it runs on** is decided by the engine library, which `build-macos.sh`
+  builds for the building Mac's own macOS unless `MACOSX_DEPLOYMENT_TARGET` says otherwise,
+  not by the app's `SupportedOSPlatformVersion` (Mac Catalyst 17.0, macOS 14).
+- **PATH.** An app started from the Finder or the Dock gets launchd's
+  `/usr/bin:/bin:/usr/sbin:/sbin`, where Homebrew's `node`, `npm` and `python3.13` are not.
+  At startup the app asks the login shell for its PATH and puts it first
+  (`DesktopEnvironment`).
+- **Mono, not CoreCLR.** .NET ships no CoreCLR for Mac Catalyst, so the app's managed code
+  runs on Mono, as the phone's does. Release builds therefore use LLVM, which Mac Catalyst
+  does not get by default (the csproj's `MtouchUseLlvm` explains the measurement).
+
+### On Windows
+
+Build on a Windows machine with the `maui-windows` workload, and CUDA or Vulkan tooling
+if the engine should have them (`TensorSharp.GGML.Native/build-windows.ps1` reads
+`TENSORSHARP_GGML_NATIVE_ENABLE_CUDA` / `_VULKAN` as the desktop hosts do):
+
+```
+dotnet build TensorAgent\src\TensorAgent.Maui\TensorAgent.Maui.csproj -f net10.0-windows10.0.19041.0 -c Release
+TensorAgent\src\TensorAgent.Maui\bin\Release\net10.0-windows10.0.19041.0\win-x64\TensorAgent.Maui.exe
+```
+
+The app is unpackaged and carries the Windows App SDK runtime with it
+(`WindowsPackageType=None`, `WindowsAppSDKSelfContained`). The model's code runs only
+after **Run without a sandbox** is turned on: a job object bounds a process tree but
+confines neither its files nor its network, so the switch is the same explicit choice as
+the server's `--code-exec-unconfined`. The app does not dictate on Windows; Windows' own
+voice typing (Windows+H) writes into the message box.
+
+**Not verified.** No Windows machine was available for this change: the Windows head has
+not been compiled, launched or measured. Its Windows-only sources are
+`Platforms/Windows/` and the `#if WINDOWS` branches.
+
+### Measured on a Mac
+
+M5 Pro, 51.5 GB, macOS 27, Gemma 4 E2B Q8_0 on `ggml_metal`, the in-process
+`SpeculationBench` (`TENSORAGENT_SPEC_BENCH=1`), second pass, medians. The CoreCLR column
+is the same host code in `benchmarks/TensorAgentTtftBench --desktop --scenarios specbench`,
+which is what the desktop server's runtime gives it; the Mac column is the Release app.
+
+| Turn | CoreCLR first token | CoreCLR tok/s | Mac app first token | Mac app tok/s |
+| --- | --- | --- | --- | --- |
+| one word | 87 ms | | 150 ms | |
+| prose, 160 tokens | 81 ms | 77.1 | 144 ms | 74.8 |
+| quote the prompt, 219 tokens | 151 ms | 76.5 | 216 ms | 74.3 |
+| quote its own answer | 81 ms | 76.3 | 144 ms | 74.2 |
+| the same, speculative | 95 ms | 301.5 | 160 ms | 301.1 |
+
+Decode is within 3% of CoreCLR and speculative decoding reaches the same rate. What Mono
+costs is about 60 ms of managed work per turn before the first token. Without LLVM the Mac
+app's steady-state decode was 72.5 tok/s and the first token 20-30% later.
+
+**App Nap.** With the screen locked, five of eight runs of the Mac app had stretches of
+47-58 tok/s where the same code on CoreCLR, in a terminal that macOS never naps, never
+dropped below 73. The app now holds a user-initiated activity while a turn runs or the
+engine has work (`DesktopActivity`); four runs of four afterwards held 74-75 tok/s, and
+`pmset -g assertions` shows "TensorAgent is generating a reply" while it does.
+
+`chat-e2e.py` against the Mac app with the same model: a question, a follow-up at 99.7%
+cache reuse, a new chat from the shared-prefix checkpoint, a 398-token story, a thinking
+turn, a shell command whose output only a real run can know, and the title on an image
+all pass. An audio clip does not, on the phone, the Mac or the desktop server alike: with
+the agent's tools declared (the shell, or the sub-agent tools alone), Gemma 4 E2B and E4B
+answer that they cannot hear it, or reach for `whisper` and `ffmpeg` through the shell. The
+clip does reach the model: the audio embeddings the chat injects are identical to the ones
+`EngineParallelInferenceTests.Gemma4_AudioPrompt` transcribes, and the same request is
+transcribed with no tools, with a single unrelated tool, or after 1,600 tokens of other
+conversation. Telling the model in the message that the recording is attached did not
+change the answer (0 of 3 for each wording tried), so this is recorded as a model
+limitation rather than prompted around: turn off **Run code** and **Sub-agents** for a
+turn that is about an audio clip.
+
+The browser workflow also runs in the Mac app: with Qwen3.5 9B and the network switch on,
+`eng/validation/validate-browser-skill.py --connection` (a file holding the app's
+`tensoragent_token` cookie) had the Playwright skill drive a real headless Chrome through
+a local form, submit the value it read off the page, and return a screenshot of the
+result, in 66 s.
 
 ## Layout
 
@@ -535,8 +666,14 @@ TensorAgent/
     MainPage        the WebView, the attachment row, dictation
     Pages/          models, chats, settings, about
     Hosting/        where the files live on this device; the engine and media probes
+    Services/Apple/ device memory, Quick Look and dictation, for iOS and the Mac app
     Platforms/iOS/  app and scene lifecycle, background downloads and generation,
-                    loopback probe, dictation, Quick Look, share inbox
+                    loopback probe, share inbox
+    Platforms/MacCatalyst/
+                    the Mac app's delegates and Info.plist (no App Sandbox; see below)
+    Platforms/Windows/
+                    the WinUI entry point, and Windows' device memory, file opening
+                    and (absent) dictation
   tests/TensorAgent.Tests/
 ```
 

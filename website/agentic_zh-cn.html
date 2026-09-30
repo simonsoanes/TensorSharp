@@ -49,7 +49,9 @@
     <li><strong>“Ask TensorAgent” 分享扩展</strong>可把其他应用中的网页、照片、文件或文本带进聊天，并提供 Summarize、Key points、Translate 等预设。</li>
   </ul>
   <p>同一个 <code>AgentAppHost</code> 也能运行在 macOS、Linux 与 Windows 上。在这些平台上，<code>AgentExecutionMode.Auto</code>（或 <code>Process</code>）会以原生进程、在桌面 OS 沙箱中运行命令与技能脚本，而不是使用内嵌运行时。设置了 <code>networkHosts</code> 白名单时，这一桌面后端会拒绝需要联网的启动，而不是放宽它无法强制执行的访问范围。</p>
-  <p>构建、模拟器、真机与验证步骤见 <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/TensorAgent/README.md" target="_blank" rel="noopener">TensorAgent README</a>。</p>
+  <h3 id="desktop">Mac 与 Windows 上的 TensorAgent</h3>
+  <p>同一个项目还能构建桌面版 TensorAgent：Mac 应用（Mac Catalyst）与 Windows 应用（WinUI）。桌面应用保留同一个页面、模型目录、会话与技能，并以桌面的约束取代手机的约束。引擎是桌面版 <code>GgmlOps</code> 库（Mac 上使用 <code>ggml_metal</code>；Windows 上在引擎包含且机器能运行时使用 CUDA 或 Vulkan）。模型编写的代码以真实的 <code>bash</code>、<code>python3</code>、<code>node</code> 与浏览器进程运行：在 Mac 上由 Seatbelt 约束；在 Windows 上只有打开<strong>不使用沙箱运行</strong>后才会运行，因为 Windows 无法约束它们。因此所有技能都随应用发布，包括 Playwright 技能。引擎使用桌面内存默认值；生成过程在其他窗口之后仍会继续，模型工作期间会阻止 App Nap 与闲置睡眠。在 M5 Pro 上以 Gemma 4 E2B 实测，Mac 应用的解码速度与运行在 CoreCLR 上的同一份宿主代码相差不到 3%，每一轮的首个 token 约晚 60&nbsp;毫秒，因为 .NET 以 Mono 运行 Mac Catalyst 应用。Windows 应用尚未构建或运行过。</p>
+  <p>构建、模拟器、真机、桌面版与验证步骤见 <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/TensorAgent/README.md" target="_blank" rel="noopener">TensorAgent README</a>。</p>
 
   <h2 id="skills">Agent Skills 与渐进式披露</h2>
   <p>一个技能就是一个目录：必需的 <code>SKILL.md</code>，加上说明会用到的脚本、参考资料与素材。TensorSharp 遵循 Agent Skills 规范，可直接加载公开技能仓库，无需改写其目录布局。</p>

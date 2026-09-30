@@ -52,6 +52,31 @@ public sealed class EngineMemoryPolicyTests : IDisposable
     }
 
     [Fact]
+    public void ADesktopLoadLeavesTheKvKnobsToTheEngineEvenAfterAPhoneLoad()
+    {
+        // The phone's four knobs are the budget of a jetsam limit. The desktop app clears
+        // them so the engine's own defaults apply -- and clears rather than skips, because a
+        // value set by an earlier load in the same process would otherwise outlive it.
+        CatalogModel qwen = Entry("qwen3.5-9b-iq4xs");
+        EngineMemoryPolicy.Apply(qwen, new AppSettings(), DeviceClass.Phone);
+        Assert.NotNull(Environment.GetEnvironmentVariable(EngineMemoryPolicy.KvInitialTokensVariable));
+
+        int context = EngineMemoryPolicy.Apply(qwen, AppSettings.DesktopDefaults(), DeviceClass.Desktop);
+
+        Assert.Null(Environment.GetEnvironmentVariable(EngineMemoryPolicy.KvInitialTokensVariable));
+        Assert.Null(Environment.GetEnvironmentVariable(EngineMemoryPolicy.KvGenerationReserveMaxVariable));
+        Assert.Null(Environment.GetEnvironmentVariable(EngineMemoryPolicy.KvHolderPoolMaxVariable));
+        Assert.Null(Environment.GetEnvironmentVariable(EngineMemoryPolicy.RetainedFusedCacheMaxVariable));
+        Assert.NotEqual(EngineMemoryPolicy.KvInitialTokens,
+            TensorSharp.Runtime.Scheduling.ExecutionOptions.FromEnvironment().KvInitialTokens);
+
+        // What a desktop load still takes from the entry and the settings: the context the
+        // catalog wrote and the K/V precision.
+        Assert.Equal(qwen.ContextLength, context);
+        Assert.Equal("q8_0", Environment.GetEnvironmentVariable(EngineMemoryPolicy.KvCacheDtypeVariable));
+    }
+
+    [Fact]
     public void ThePhonesKvKnobsReachTheEngineOnEveryLoad()
     {
         // Each of these is an engine default written for a machine with memory to spare;

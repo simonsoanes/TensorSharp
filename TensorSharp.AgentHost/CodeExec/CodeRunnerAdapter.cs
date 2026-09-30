@@ -204,8 +204,8 @@ namespace TensorSharp.AgentHost.CodeExec
             // Facts that are stable across sessions, without machine paths or ids in
             // the prompt prefix. The selected sandbox is not a promise that a
             // preferred-mode launch cannot fall back; results report what ran.
-            string platform = OperatingSystem.IsMacOS() ? "macOS (Darwin)"
-                : OperatingSystem.IsIOS() || OperatingSystem.IsMacCatalyst() ? "iOS"
+            string platform = HostOS.IsMacDesktop ? "macOS (Darwin)"
+                : OperatingSystem.IsIOS() ? "iOS"
                 : OperatingSystem.IsAndroid() ? "Android"
                 : OperatingSystem.IsLinux() ? "Linux"
                 : OperatingSystem.IsWindows() ? "Windows" : "other";

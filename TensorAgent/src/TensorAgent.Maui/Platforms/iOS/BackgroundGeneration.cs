@@ -12,6 +12,7 @@ using Foundation;
 using TensorAgent.Core.Hosting;
 using TensorAgent.Core.Sessions;
 using TensorAgent.Core.Settings;
+using TensorAgent.Maui.Services;
 using UIKit;
 
 namespace TensorAgent.Maui.Platforms.iOS;

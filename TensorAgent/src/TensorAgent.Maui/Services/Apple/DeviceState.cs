@@ -12,7 +12,7 @@ using Foundation;
 using System.Runtime.InteropServices;
 using UIKit;
 
-namespace TensorAgent.Maui.Platforms.iOS;
+namespace TensorAgent.Maui.Services;
 
 /// <summary>
 /// The two things the app has to ask the device about, both of which exist because
@@ -40,6 +40,9 @@ internal static class DeviceState
     /// </summary>
     [DllImport("__Internal", EntryPoint = "os_proc_available_memory")]
     private static extern nint OsProcAvailableMemory();
+
+    /// <summary>Installed physical memory, in bytes.</summary>
+    public static long PhysicalMemoryBytes() => (long)NSProcessInfo.ProcessInfo.PhysicalMemory;
 
     public static long AvailableMemoryBytes()
     {
@@ -105,6 +108,43 @@ internal static class DeviceState
             return false;
         }
     }
+
+#if MACCATALYST
+    private static readonly object s_activityGate = new();
+    private static NSObject? s_activity;
+
+    /// <summary>
+    /// Tell macOS the model is working, for exactly as long as it is.
+    ///
+    /// <para>
+    /// App Nap throttles an app none of whose windows can be seen -- minimised, covered by
+    /// another window, or behind a locked screen -- by lowering its threads' priority and
+    /// coalescing its timers, and the engine's host threads are what feed the GPU. MEASURED
+    /// on an M5 Pro with the screen locked, the in-process benchmark on Gemma 4 E2B: stretches
+    /// of 47-58 tok/s where the unthrottled rate is 72-75, in five runs of eight, while the
+    /// same code on CoreCLR in a terminal (never napped) was never slower than 73. A
+    /// user-initiated activity is the documented way to say "this is work the user is waiting
+    /// for"; it also keeps the Mac from idle-sleeping halfway through an answer. The display
+    /// may still sleep: nothing about a generation needs it.
+    /// </para>
+    /// </summary>
+    public static void HoldActivity(bool on)
+    {
+        lock (s_activityGate)
+        {
+            if (on && s_activity is null)
+            {
+                s_activity = NSProcessInfo.ProcessInfo.BeginActivity(
+                    NSActivityOptions.UserInitiated, "TensorAgent is generating a reply");
+            }
+            else if (!on && s_activity is not null)
+            {
+                NSProcessInfo.ProcessInfo.EndActivity(s_activity);
+                s_activity = null;
+            }
+        }
+    }
+#endif
 
     /// <summary>
     /// Keep the screen on, or stop keeping it on.

@@ -6317,12 +6317,14 @@ internal enum GgmlIndexReductionOp
                 return IntPtr.Zero;
             }
 
-            if (OperatingSystem.IsIOS() || OperatingSystem.IsTvOS())
+            if ((OperatingSystem.IsIOS() && !OperatingSystem.IsMacCatalyst()) || OperatingSystem.IsTvOS())
             {
                 // On iOS/iPadOS GgmlOps is a static archive linked into the app
                 // executable (GgmlOps.xcframework via NativeReference with
                 // ForceLoad), so every TSGgml_*/ggml_* symbol lives in the main
                 // program image - there is no separate library to probe for.
+                // Mac Catalyst reports itself as iOS too, but the desktop app ships
+                // the macOS libGgmlOps.dylib in its bundle and loads it below.
                 GgmlNativeLibraryState.MarkLoaded();
                 return NativeLibrary.GetMainProgramHandle();
             }
@@ -6389,7 +6391,7 @@ internal enum GgmlIndexReductionOp
         private static IEnumerable<string> GetCandidateFileNames()
         {
             yield return OperatingSystem.IsWindows() ? "GgmlOps.dll" :
-                OperatingSystem.IsMacOS() ? "libGgmlOps.dylib" :
+                OperatingSystem.IsMacOS() || OperatingSystem.IsMacCatalyst() ? "libGgmlOps.dylib" :
                 "libGgmlOps.so";
         }
 

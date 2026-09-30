@@ -92,7 +92,7 @@ public class MediaLayeringTests
     }
 
     [Fact]
-    public void TheModelsCsproj_KeepsNativePackagesAndDesktopSourcesOffTheIosTarget()
+    public void TheModelsCsproj_KeepsNativePackagesAndDesktopSourcesOffTheAppleTargets()
     {
         string? repoRoot = FindRepoRoot();
         if (repoRoot == null)
@@ -103,11 +103,13 @@ public class MediaLayeringTests
 
         XDocument doc = XDocument.Load(csproj);
 
-        // The ios target is opt-in, so desktop builds keep the single TFM and its output path.
+        // The Apple targets are opt-in, so desktop builds keep the single TFM and its output
+        // path. The TensorAgent app asks for both: net10.0-ios for the phone, and
+        // net10.0-maccatalyst for the Mac app, which uses the same ImageIO/AVFoundation provider.
         XElement? frameworks = doc.Descendants("TargetFrameworks").FirstOrDefault();
         Assert.NotNull(frameworks);
-        Assert.Contains("net10.0-ios", frameworks!.Value);
-        Assert.Contains("TensorSharpIosTargets", (string?)frameworks.Attribute("Condition") ?? string.Empty);
+        Assert.Equal("net10.0;net10.0-ios;net10.0-maccatalyst", frameworks!.Value.Trim());
+        Assert.Contains("TensorSharpAppleTargets", (string?)frameworks.Attribute("Condition") ?? string.Empty);
         XElement? framework = doc.Descendants("TargetFramework").FirstOrDefault();
         Assert.NotNull(framework);
         Assert.Equal("net10.0", framework!.Value);
@@ -120,8 +122,9 @@ public class MediaLayeringTests
                           || include.Contains("OpenCvSharp", StringComparison.OrdinalIgnoreCase);
             if (native)
             {
-                Assert.True(condition.Contains("'$(TargetPlatformIdentifier)' != 'ios'", StringComparison.Ordinal),
-                    $"{include} has no ios-arm64 binaries and must sit in the ItemGroup conditioned off the ios target");
+                Assert.True(condition.Contains("'$(TargetPlatformIdentifier)' != 'ios'", StringComparison.Ordinal)
+                            && condition.Contains("'$(TargetPlatformIdentifier)' != 'maccatalyst'", StringComparison.Ordinal),
+                    $"{include} has no Apple app binaries and must sit in the ItemGroup conditioned off both Apple targets");
             }
             else
             {
@@ -132,7 +135,9 @@ public class MediaLayeringTests
         XElement? removal = doc.Descendants("Compile")
             .FirstOrDefault(c => ((string?)c.Attribute("Remove") ?? string.Empty).Replace('\\', '/') == "Media/Desktop/**");
         Assert.NotNull(removal);
-        Assert.Contains("'$(TargetPlatformIdentifier)' == 'ios'", (string?)removal!.Parent?.Attribute("Condition") ?? string.Empty);
+        string removalCondition = (string?)removal!.Parent?.Attribute("Condition") ?? string.Empty;
+        Assert.Contains("'$(TargetPlatformIdentifier)' == 'ios'", removalCondition);
+        Assert.Contains("'$(TargetPlatformIdentifier)' == 'maccatalyst'", removalCondition);
     }
 
     /// <summary>

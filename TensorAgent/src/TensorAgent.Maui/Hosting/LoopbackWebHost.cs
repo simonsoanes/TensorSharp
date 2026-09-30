@@ -8,7 +8,9 @@
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
+#if IOS || MACCATALYST
 using Foundation;
+#endif
 using Microsoft.Extensions.Logging;
 using TensorAgent.Core.Catalog;
 using TensorAgent.Core.Hosting;
@@ -20,27 +22,39 @@ using TensorSharp.Server;
 namespace TensorAgent.Maui.Hosting;
 
 /// <summary>
-/// The iOS half of the app's host: where the files live on this device, and
+/// The platform half of the app's host: where the files live on this device, and
 /// nothing else.
 ///
 /// <para>
 /// Everything the server actually does — the routes, the chat pipeline, the code
 /// runner, the model catalog — is <see cref="AgentAppHost"/> in the platform-neutral
 /// project, so it can be tested on a development machine. What is left here is the
-/// part that genuinely cannot be: which directory iOS gives an app for data it must
-/// back up, which for files it can re-fetch, how much memory the device has, and
+/// part that genuinely cannot be: which directory the system gives an app for data it
+/// must back up, which for files it can re-fetch, how much memory the device has, and
 /// where the bundle put the Web UI.
+/// </para>
+/// <para>
+/// Three heads build this file. The phone keeps the phone's lifecycle helpers (the GPU
+/// is withdrawn from a background app, a suspended app loses its listening socket,
+/// shares arrive through an App Group) and runs with the engine budget measured on a
+/// 12 GB iPhone. The Mac and Windows apps have none of those constraints: nothing is
+/// suspended when the window loses focus, code runs as real processes the way the
+/// desktop hosts run it, and the engine keeps its desktop defaults.
 /// </para>
 /// </summary>
 public sealed class LoopbackWebHost : IDisposable
 {
     private readonly AgentAppHost _host;
+#if IOS
     private readonly Platforms.iOS.BackgroundDownloads _backgroundDownloads;
     private readonly Platforms.iOS.BackgroundGeneration _backgroundGeneration;
     private readonly Platforms.iOS.ShareInbox _shareInbox;
     private readonly Platforms.iOS.LoopbackLifecycle _loopbackLifecycle;
+#else
+    private readonly Services.DesktopActivity _desktopActivity;
+#endif
 
-    /// <param name="webRoot">The app's own phone Web UI, TensorAgent.Maui/wwwroot, as bundled under webui/.</param>
+    /// <param name="webRoot">The app's own Web UI, TensorAgent.Maui/wwwroot, as bundled under webui/.</param>
     /// <param name="loggerFactory">Where the engine logs; console output is what <c>simctl launch --console</c> shows.</param>
     /// <param name="python">The embedded interpreter, when this build has one.</param>
     /// <param name="javaScript">The embedded JavaScript engine, when this build has one.</param>
@@ -74,6 +88,7 @@ public sealed class LoopbackWebHost : IDisposable
             DevicePaths(), WebRoot, loggerFactory, python, javaScript,
             backends: BackendsFor(Compute.Selection));
 
+#if IOS
         // The one part of a download that needs iOS: staying alive for a while after
         // the user leaves the app, and picking itself up when they come back.
         _backgroundDownloads = new Platforms.iOS.BackgroundDownloads(_host.Downloads);
@@ -82,18 +97,27 @@ public sealed class LoopbackWebHost : IDisposable
         _backgroundGeneration = new Platforms.iOS.BackgroundGeneration(_host);
         _shareInbox = new Platforms.iOS.ShareInbox(_host);
         _loopbackLifecycle = new Platforms.iOS.LoopbackLifecycle(_host);
+#else
+        // A desktop keeps working behind other windows; it only has to say that it is,
+        // or App Nap and idle sleep slow the model down or stop it. See DesktopActivity.
+        _desktopActivity = new Services.DesktopActivity(_host);
+#endif
     }
 
     /// <summary>
-    /// The backend list the page shows, best first. Metal leads when the linked
-    /// engine has it and the GPU can run its kernels; otherwise CPU leads and Metal
-    /// is not offered at all, because offering a backend that cannot initialise is
-    /// worse than offering one fewer.
+    /// The backend list the page shows, best first: the GPU backend
+    /// <see cref="Compute"/> chose, then the CPU. A GPU backend that cannot
+    /// initialise here is not offered at all, because offering a backend that cannot
+    /// initialise is worse than offering one fewer.
     /// </summary>
     private static IReadOnlyList<BackendOption> BackendsFor(ComputeSelection selection)
-        => selection.Backend == BackendType.GgmlMetal
-            ? new[] { new BackendOption("ggml_metal", "GPU (Metal)"), new BackendOption("ggml_cpu", "CPU") }
-            : new[] { new BackendOption("ggml_cpu", "CPU") };
+        => selection.Backend switch
+        {
+            BackendType.GgmlMetal => new[] { new BackendOption("ggml_metal", "GPU (Metal)"), new BackendOption("ggml_cpu", "CPU") },
+            BackendType.GgmlCuda => new[] { new BackendOption("ggml_cuda", "GPU (CUDA)"), new BackendOption("ggml_cpu", "CPU") },
+            BackendType.GgmlVulkan => new[] { new BackendOption("ggml_vulkan", "GPU (Vulkan)"), new BackendOption("ggml_cpu", "CPU") },
+            _ => new[] { new BackendOption("ggml_cpu", "CPU") },
+        };
 
     /// <summary>Where the Web UI is served from, for the startup log.</summary>
     public string WebRoot { get; }
@@ -109,15 +133,21 @@ public sealed class LoopbackWebHost : IDisposable
     public void Start()
     {
         _host.Start();
+#if IOS
         _shareInbox.Start();
+#endif
     }
 
     public void Dispose()
     {
+#if IOS
         _loopbackLifecycle.Dispose();
         _shareInbox.Dispose();
         _backgroundGeneration.Dispose();
         _backgroundDownloads.Dispose();
+#else
+        _desktopActivity.Dispose();
+#endif
         _host.Dispose();
     }
 
@@ -143,19 +173,38 @@ public sealed class LoopbackWebHost : IDisposable
 
     private static AgentPaths DevicePaths()
     {
+#if IOS || MACCATALYST
+        // On a Mac these are ~/Library/Application Support and ~/Library/Caches (the app
+        // is not sandboxed; see Platforms/MacCatalyst/Info.plist), and the split does the
+        // same job: Time Machine skips Caches, so gigabytes of re-downloadable weights
+        // stay out of the user's backups.
         string data = NSSearchPath.GetDirectories(NSSearchPathDirectory.ApplicationSupportDirectory, NSSearchPathDomain.User, true)[0];
         string cache = NSSearchPath.GetDirectories(NSSearchPathDirectory.CachesDirectory, NSSearchPathDomain.User, true)[0];
+        string dataRoot = Path.Combine(data, "TensorAgent");
+        string cacheRoot = Path.Combine(cache, "TensorAgent");
+#else
+        // %LOCALAPPDATA%, not the roaming profile: a roaming profile is copied between
+        // machines at sign-in, which is no place for model weights or scratch space.
+        string local = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TensorAgent");
+        string dataRoot = Path.Combine(local, "Data");
+        string cacheRoot = Path.Combine(local, "Cache");
+#endif
 
-        return new AgentPaths(
-            Path.Combine(data, "TensorAgent"),
-            Path.Combine(cache, "TensorAgent"))
+        return new AgentPaths(dataRoot, cacheRoot)
         {
             DeviceMemoryGB = DeviceMemoryGigabytes(),
-            BundledSkillsDirectory = Path.Combine(NSBundle.MainBundle.BundlePath, "skills"),
+            BundledSkillsDirectory = Path.Combine(AppBundle.ResourceDirectory, "skills"),
+#if IOS
             // The interpreter's standard library is staged into the bundle beside the
             // Python framework, which is where PyConfig's module search paths point.
             PythonRuntimeDirectory = NSBundle.MainBundle.BundlePath,
             SharedInboxDirectory = Platforms.iOS.SharedContainer.InboxDirectory(),
+#else
+            // A desktop has memory to spare: the engine's own defaults size the caches,
+            // not the budget measured against a phone's jetsam limit, and a first launch
+            // starts from the desktop settings (AppSettings.DesktopDefaults).
+            DeviceClass = DeviceClass.Desktop,
+#endif
         };
     }
 
@@ -167,7 +216,7 @@ public sealed class LoopbackWebHost : IDisposable
     /// </summary>
     private static int DeviceMemoryGigabytes()
     {
-        ulong bytes = NSProcessInfo.ProcessInfo.PhysicalMemory;
+        long bytes = Services.DeviceState.PhysicalMemoryBytes();
 
         // ModelCatalog.DeviceMemoryTier is the rule, and this used to be a second,
         // quieter copy of it that disagreed. iOS reports a little UNDER the marketing
@@ -177,14 +226,14 @@ public sealed class LoopbackWebHost : IDisposable
         // all -- on the exact device it is built for. Measured on hardware: the catalog
         // came back empty. The helper does the same job in decimal with the tolerance
         // that under-reporting needs, and is what the tests are written against.
-        int tier = ModelCatalog.DeviceMemoryTier((long)bytes);
+        int tier = ModelCatalog.DeviceMemoryTier(bytes);
         // The tier decides what is OFFERED; the per-process headroom is what decides
         // whether a load survives, and they are different numbers. Both are logged
         // because a jetsam kill leaves no message of its own -- see
         // DeviceState.DescribeMemory and EngineMemoryPolicy.
         Console.WriteLine(
             $"TensorAgent: physical memory {bytes / 1_000_000_000.0:0.00} GB -> catalog tier {tier} GB " +
-            $"({Platforms.iOS.DeviceState.DescribeMemory()})");
+            $"({Services.DeviceState.DescribeMemory()})");
         return tier;
     }
 }

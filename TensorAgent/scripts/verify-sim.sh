@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Simulator E2E check, run from the Mac while the app is running in the
 # simulator (run-sim.sh). The simulator shares the host's network namespace, so
-# the app's loopback listener is reachable from here.
+# the app's loopback listener is reachable from here. It checks the Mac app the same
+# way (run-mac.sh), recognising it by its engine line: the Mac app runs code as real
+# processes, so it is held to the desktop's shell and self-test instead of the phone's.
 #
-# Usage: verify-sim.sh <app stdout log written by run-sim.sh>
+# Usage: verify-sim.sh <app stdout log written by run-sim.sh or run-mac.sh>
 #   The log carries the "entry URL" line (Debug builds only) with the port and
 #   the per-launch token; every /api request must present that token.
 #
@@ -33,6 +35,7 @@ TOKEN="${ENTRY##*token=}"
 AUTH=(-H "Cookie: tensoragent_token=${TOKEN}")
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
+DESKTOP=0
 
 # A PHONE's 127.0.0.1 is the phone's, so none of the API checks can run against a
 # device log -- but everything the app printed about itself still can, and that is most
@@ -95,7 +98,12 @@ if (( API )); then
 # 3. Engine probe: the static link works and no P/Invoke threw.
 ENGINE="$(curl -fsS "${AUTH[@]}" "${BASE}api/agent/engine")"
 grep -q '"engine"' <<<"${ENGINE}" || fail "/api/agent/engine returned no engine line: ${ENGINE}"
-grep -q 'sh (in-process)' <<<"${ENGINE}" || fail "the shell backend is not the in-process one: ${ENGINE}"
+if grep -q '"engine":"native process shell' <<<"${ENGINE}"; then
+    DESKTOP=1
+    echo "    the Mac app: code runs as native processes"
+else
+    grep -q 'sh (in-process)' <<<"${ENGINE}" || fail "the shell backend is not the in-process one: ${ENGINE}"
+fi
 echo "    ${ENGINE}"
 echo "ok  GET /api/agent/engine"
 
@@ -262,7 +270,14 @@ CHECKS="$(grep -o 'selftest .*' "${LOG}" || true)"
 [[ -n "${CHECKS}" ]] || fail "no 'selftest' lines in ${LOG}; the self-test is Debug-only, is this a Debug build?"
 sed 's/^/    /' <<<"${CHECKS}"
 grep -q 'FAIL' <<<"${CHECKS}" && fail "a startup self-test check failed"
-for CHECK in shell python python:stdlib python:numpy python:pillow python:lxml python:pptx python:docx node sandbox:write sandbox:network; do
+# The phone's bundled CPython carries staged wheels the self-test imports; the Mac app
+# runs the python3 on the user's PATH, whose packages are the user's.
+if (( DESKTOP )); then
+    SELFTESTS="shell python python:stdlib node sandbox:write sandbox:network"
+else
+    SELFTESTS="shell python python:stdlib python:numpy python:pillow python:lxml python:pptx python:docx node sandbox:write sandbox:network"
+fi
+for CHECK in ${SELFTESTS}; do
     grep -q "ok   ${CHECK}:" <<<"${CHECKS}" || fail "self-test check '${CHECK}' is missing or did not pass"
 done
 echo "ok  startup self-test: shell, python, node and both sandbox refusals"
@@ -354,7 +369,9 @@ else
     echo "ok  the network switch takes effect on the next command, in both directions"
 fi
 
-if (( API )); then
+if (( API )) && (( DESKTOP )); then
+    echo "All Mac app checks passed."
+elif (( API )); then
     echo "All simulator checks passed."
 else
     echo "All the checks a device log can answer passed (the API half needs the app's own loopback)."

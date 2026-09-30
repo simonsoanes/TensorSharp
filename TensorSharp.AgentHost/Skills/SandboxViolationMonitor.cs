@@ -119,7 +119,7 @@ namespace TensorSharp.AgentHost.Skills
         {
             get
             {
-                if (!OperatingSystem.IsMacOS())
+                if (!HostOS.IsMacDesktop)
                     return null;
                 if (_shared != null)
                     return _shared;
@@ -142,7 +142,7 @@ namespace TensorSharp.AgentHost.Skills
         /// </summary>
         public static SandboxViolationMonitor Start()
         {
-            if (!OperatingSystem.IsMacOS())
+            if (!HostOS.IsMacDesktop)
                 return new SandboxViolationMonitor(null);
 
             try
@@ -211,19 +211,12 @@ namespace TensorSharp.AgentHost.Skills
 
             string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             string interpreterName = SafeBaseName(interpreter);
-            string[] knownChildren = { "python", "node", "sh", "bash", "soffice", "npm" };
 
             var seen = new HashSet<string>(StringComparer.Ordinal);
             var relevant = new List<string>();
             foreach (string line in snapshot)
             {
-                bool ours =
-                    (!string.IsNullOrEmpty(workDirectory) && line.Contains(workDirectory, StringComparison.Ordinal))
-                    || (!string.IsNullOrEmpty(home) && line.Contains(home, StringComparison.Ordinal))
-                    || (!string.IsNullOrEmpty(interpreterName)
-                        && line.Contains(interpreterName, StringComparison.OrdinalIgnoreCase))
-                    || knownChildren.Any(c => line.Contains(c, StringComparison.OrdinalIgnoreCase));
-                if (!ours || IsStartupNoise(line))
+                if (!IsPlausiblyOurs(line, interpreterName, workDirectory, home, IsRunning) || IsStartupNoise(line))
                     continue;
 
                 string compact = CompactDenial(line);
@@ -235,6 +228,85 @@ namespace TensorSharp.AgentHost.Skills
                 }
             }
             return relevant;
+        }
+
+        /// <summary>Interpreters and helpers a run launches, matched against a denial's process name.</summary>
+        private static readonly string[] KnownChildren = { "python", "node", "sh", "bash", "soffice", "npm" };
+
+        /// <summary>
+        /// Whether a denial line plausibly belongs to the run that just ended: the denied
+        /// path is in its workspace, or the denied process is its interpreter or a known
+        /// child -- by the process NAME, which a line starts with ("Python(4121) deny(1)
+        /// ..."). Matching the names anywhere in the line put "sharingd(755) deny(1)
+        /// syscall-unix" into a failed run's stderr, because "sharingd" contains "sh".
+        /// A denial under the user's home counts only from a process that has exited,
+        /// since the run's processes have all exited by the time this is asked; one still
+        /// running is a system daemon's -- UserEventAgent reading ~/Library/HomeKit, seen
+        /// in the same failed run's stderr.
+        /// </summary>
+        internal static bool IsPlausiblyOurs(
+            string line, string interpreterName, string workDirectory, string home, Func<int, bool> isRunning)
+        {
+            if (!string.IsNullOrEmpty(workDirectory) && line.Contains(workDirectory, StringComparison.Ordinal))
+                return true;
+            (string name, int pid) = ProcessOf(line);
+            if (name.Length > 0
+                && (NamesProgram(name, interpreterName) || KnownChildren.Any(child => NamesProgram(name, child))))
+            {
+                return true;
+            }
+            return !string.IsNullOrEmpty(home)
+                   && line.Contains(home, StringComparison.Ordinal)
+                   && !(pid > 0 && isRunning(pid));
+        }
+
+        /// <summary>
+        /// "Python", "python3.13" and "node20" name python and node; "sharingd" does not
+        /// name sh. A version suffix is the only thing allowed after the name.
+        /// </summary>
+        private static bool NamesProgram(string processName, string program)
+        {
+            if (string.IsNullOrEmpty(program) || !processName.StartsWith(program, StringComparison.OrdinalIgnoreCase))
+                return false;
+            for (int i = program.Length; i < processName.Length; i++)
+            {
+                char c = processName[i];
+                if (!char.IsDigit(c) && c != '.' && c != '-')
+                    return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// The "name(pid)" in front of a Seatbelt denial's " deny", or empty when there is
+        /// none. The pid is the LAST parenthesis: a browser helper's name has its own
+        /// ("Google Chrome for Testing Helper (Renderer)(4242) deny(1) ...").
+        /// </summary>
+        private static (string Name, int Pid) ProcessOf(string line)
+        {
+            string message = CompactDenial(line);
+            int deny = message.IndexOf(" deny", StringComparison.Ordinal);
+            if (deny <= 0)
+                return (string.Empty, 0);
+            string process = message[..deny];
+            int open = process.LastIndexOf('(');
+            if (open <= 0 || !process.EndsWith(')'))
+                return (process, 0);
+            int.TryParse(process.AsSpan(open + 1, process.Length - open - 2), out int pid);
+            return (process[..open], pid);
+        }
+
+        private static bool IsRunning(int pid)
+        {
+            try
+            {
+                using Process process = Process.GetProcessById(pid);
+                return !process.HasExited;
+            }
+            catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                return false;
+            }
         }
 
         /// <summary>

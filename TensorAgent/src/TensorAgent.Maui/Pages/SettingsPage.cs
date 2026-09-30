@@ -100,12 +100,22 @@ public sealed class SettingsPage : ContentPage
         _body.Clear();
 
         _body.Add(Section("Sandbox"));
-        _body.Add(Switch(
-            "Run code",
-            "Let the model run shell commands and scripts. Everything runs inside the app, "
-            + "confined to this chat's own folder; it can never write elsewhere on the device.",
+        _body.Add(Switch("Run code", RunCodeDetail,
             settings.AllowCodeExecution,
             on => Apply(s => s.AllowCodeExecution = on)));
+#if WINDOWS
+        // Windows only, and off unless the user turns it on: the job object this platform
+        // offers bounds a process tree but confines neither its files nor its network, so
+        // without this the model is never offered the shell at all. The same explicit
+        // choice as the server's --code-exec-unconfined.
+        _body.Add(Switch(
+            "Run without a sandbox",
+            "Windows cannot confine what a program reads, writes or connects to, so code the "
+            + "model runs could reach anything your account can. Off by default, and while it is "
+            + "off the model is not offered the shell. Turn it on only if you accept that.",
+            settings.AllowUnconfinedExecution,
+            on => Apply(s => s.AllowUnconfinedExecution = on)));
+#endif
 
         _body.Add(Switch(
             "Allow network access",
@@ -189,10 +199,12 @@ public sealed class SettingsPage : ContentPage
             on => Apply(s => s.SpeculativeDecoding = on)));
 
         _body.Add(Section("Downloads"));
+#if IOS
         _body.Add(Switch("Download over cellular",
             "Model files are several gigabytes. Off by default so a download waits for Wi-Fi.",
             settings.AllowCellularDownloads,
             on => { AppSettings s = _app.Settings.Load(); s.AllowCellularDownloads = on; _app.Settings.Save(s); }));
+#endif
         _body.Add(Switch("Include optional files",
             "The image projector and the speculative-decoding draft head. Larger downloads, but "
             + "without the projector a model cannot see pictures.",
@@ -246,6 +258,20 @@ public sealed class SettingsPage : ContentPage
         try { return _app.DescribeEngine(); }
         catch (Exception ex) { return "unavailable (" + ex.GetType().Name + ")"; }
     }
+
+    /// <summary>What "Run code" lets the model do here, which is not the same on every platform.</summary>
+    private const string RunCodeDetail =
+#if IOS
+        "Let the model run shell commands and scripts. Everything runs inside the app, "
+        + "confined to this chat's own folder; it can never write elsewhere on the device.";
+#elif MACCATALYST
+        "Let the model run shell commands, Python and Node as programs on this Mac. The macOS "
+        + "sandbox confines each one: it cannot read your home folder, and it can write only "
+        + "to this chat's own folder and the system's temporary folders.";
+#else
+        "Let the model run shell commands, Python and Node as programs on this PC. Windows "
+        + "cannot confine them, so they run only while \"Run without a sandbox\" is on as well.";
+#endif
 
     private static View Section(string text) => new Label
     {

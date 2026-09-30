@@ -116,7 +116,7 @@ namespace TensorSharp.AgentHost.CodeExec
             // the kernel and System.Diagnostics.Process throws. Answered here, once, as
             // a plain fact rather than as an exception out of ForkWatchdog — everything
             // that runs code on such a host goes through an in-process IShellBackend.
-            if (OperatingSystem.IsIOS() || OperatingSystem.IsTvOS())
+            if (HostOS.IsAppleMobile)
             {
                 process = null;
                 error = $"'{request.FileName}' cannot be started: this platform cannot start programs, "

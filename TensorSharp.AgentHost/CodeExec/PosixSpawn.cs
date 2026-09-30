@@ -127,7 +127,7 @@ namespace TensorSharp.AgentHost.CodeExec
             // unfortunately not ABI-identical: Darwin uses 0x20, Linux 0x01000000.
             const int Pid = 1;
             const int WExited = 0x00000004;
-            int noWait = OperatingSystem.IsMacOS() ? 0x00000020 : 0x01000000;
+            int noWait = HostOS.IsMacDesktop ? 0x00000020 : 0x01000000;
             var info = new byte[256]; // larger than siginfo_t on Darwin and Linux
 
             try
@@ -155,7 +155,7 @@ namespace TensorSharp.AgentHost.CodeExec
             // The symbol exists in iOS's libSystem, so the probe below would say yes —
             // and the kernel then refuses every spawn with an errno. Say no up front:
             // these platforms run code in-process (see IShellBackend), never in a child.
-            if (OperatingSystem.IsIOS() || OperatingSystem.IsTvOS())
+            if (HostOS.IsAppleMobile)
                 return false;
 
             IntPtr fa = Zeroed(OpaqueSize);
@@ -302,7 +302,7 @@ namespace TensorSharp.AgentHost.CodeExec
                     return groupRc;
 
                 short flags = SetPgroup | SetSigDef | SetSigMask;
-                if (OperatingSystem.IsMacOS())
+                if (HostOS.IsMacDesktop)
                     flags |= CloExecDefault;
                 int flagsRc = posix_spawnattr_setflags(attr, flags);
                 if (flagsRc != 0)

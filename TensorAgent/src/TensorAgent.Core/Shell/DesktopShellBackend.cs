@@ -26,8 +26,11 @@ internal sealed class DesktopShellBackend : IShellBackend
 {
     private readonly IShellBackend _inner;
 
+    // Mac Catalyst is the desktop TensorAgent on a Mac: .NET reports it as iOS, but it
+    // is a macOS process that can start children and confine them with Seatbelt.
     internal static bool IsSupported =>
-        OperatingSystem.IsMacOS() || OperatingSystem.IsLinux() || OperatingSystem.IsWindows();
+        OperatingSystem.IsMacOS() || OperatingSystem.IsMacCatalyst()
+        || OperatingSystem.IsLinux() || OperatingSystem.IsWindows();
 
     internal DesktopShellBackend(IShellBackend inner, IReadOnlyList<string> networkHosts)
     {

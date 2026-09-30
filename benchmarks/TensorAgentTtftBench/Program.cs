@@ -32,13 +32,19 @@
 //   --backends a,b            backends to try, best first (default ggml_metal,ggml_cpu)
 //   --no-skills               do not bundle the repository's skills (a much shorter prompt)
 //   --python <root>           a CPython prefix for the in-process shell
-//   --scenarios a,b,c         cold, follow, newchat, think, stop, tool (default: all)
+//   --scenarios a,b,c         cold, follow, newchat, think, stop, tool (default: all); specbench runs the
+//                             app's own in-process SpeculationBench (TENSORAGENT_SPEC_BENCH_TOKENS/_MODES),
+//                             the same code the Mac app runs under TENSORAGENT_SPEC_BENCH=1
 //   --follow N                follow-up turns in the first conversation (default 2)
 //   --max-tokens N            answer budget for the short turns (default 32)
 //   --kv f16|q8_0|q4_0        the K/V cache precision setting (default: the app's default)
 //   --no-spec                 turn the speculative-decoding setting off (on by default), for an A/B
 //   --context N               the context-length setting (default: the catalog entry's)
-//   --chunk N                 TS_SCHED_SOLO_PREFILL_CHUNK (default 1024, as the phone sets it)
+//   --chunk N                 TS_SCHED_SOLO_PREFILL_CHUNK (default 1024, as the phone sets it; unset with --desktop)
+//   --desktop                 run the desktop app's configuration instead of the phone's: the desktop
+//                             engine budget and first-launch settings (DeviceClass.Desktop), real
+//                             python3/node processes rather than the embedded runtimes, and no phone
+//                             prefill chunk. The CoreCLR reference for the Mac and Windows apps.
 //   --device-gb N             the device memory tier to pretend to be (default 16)
 //   --warm                    wait for the host's prefix-cache warm-up before the first turn
 //   --delay <seconds>         wait this long after the load before the first turn (a
@@ -102,8 +108,12 @@ internal static class Program
         string root = opts.Root ?? Path.Combine(Path.GetTempPath(), "tensoragent-ttft-" + Guid.NewGuid().ToString("N"));
         var paths = new AgentPaths(Path.Combine(root, "data"), Path.Combine(root, "cache"))
         {
-            // This benchmark emulates the mobile host, including its embedded runtimes.
-            ExecutionMode = TensorAgent.Core.Shell.AgentExecutionMode.InProcess,
+            // By default this benchmark emulates the mobile host, including its embedded
+            // runtimes; --desktop runs what the desktop app runs.
+            ExecutionMode = opts.Desktop
+                ? TensorAgent.Core.Shell.AgentExecutionMode.Auto
+                : TensorAgent.Core.Shell.AgentExecutionMode.InProcess,
+            DeviceClass = opts.Desktop ? DeviceClass.Desktop : DeviceClass.Phone,
             DeviceMemoryGB = opts.DeviceGb,
             BundledSkillsDirectory = opts.Skills ? RepoSkillsDirectory() : string.Empty,
             PythonRuntimeDirectory = opts.PythonRoot ?? string.Empty,
@@ -146,7 +156,7 @@ internal static class Program
             return 2;
         }
 
-        var settingsStore = new SettingsStore(paths.SettingsFile);
+        var settingsStore = new SettingsStore(paths.SettingsFile, opts.Desktop ? AppSettings.DesktopDefaults : null);
         AppSettings settings = settingsStore.Load();
         settings.SelectedModelId = model.Id;
         if (opts.KvCacheDtype is { Length: > 0 } kv)
@@ -159,12 +169,13 @@ internal static class Program
         settingsStore.Save(settings);
 
         // What MauiProgram sets for the phone. A desktop default of 8192 tokens per solo
-        // prefill pass is not what the app runs.
-        if (Environment.GetEnvironmentVariable("TS_SCHED_SOLO_PREFILL_CHUNK") is not { Length: > 0 })
+        // prefill pass is not what the phone app runs; it is what the desktop app runs.
+        if ((!opts.Desktop || opts.ChunkGiven)
+            && Environment.GetEnvironmentVariable("TS_SCHED_SOLO_PREFILL_CHUNK") is not { Length: > 0 })
             Environment.SetEnvironmentVariable("TS_SCHED_SOLO_PREFILL_CHUNK", opts.Chunk.ToString(CultureInfo.InvariantCulture));
 
         var backends = opts.Backends.Select(b => new TensorSharp.Server.BackendOption(b, b)).ToList();
-        Console.WriteLine($"ttft-bench: {model.Id} ({model.DisplayName}) skills={(opts.Skills ? "on" : "off")} " +
+        Console.WriteLine($"ttft-bench: {model.Id} ({model.DisplayName}) {(opts.Desktop ? "desktop" : "phone")} skills={(opts.Skills ? "on" : "off")} " +
                           $"kv={settings.KvCacheDtype} context={(settings.ContextLength > 0 ? settings.ContextLength : model.ContextLength)} " +
                           $"chunk={Environment.GetEnvironmentVariable("TS_SCHED_SOLO_PREFILL_CHUNK")} device={opts.DeviceGb}GB root={root}");
 
@@ -227,6 +238,9 @@ internal static class Program
                         break;
                     case "restore":
                         await runner.RestoreAsync();
+                        break;
+                    case "specbench":
+                        await new SpeculationBench(host).RunAsync(CancellationToken.None);
                         break;
                     default:
                         Console.Error.WriteLine($"unknown scenario '{scenario}'");
@@ -615,6 +629,8 @@ internal sealed class Options
     public bool NoSpec { get; private set; }
     public int? ContextLength { get; private set; }
     public int Chunk { get; private set; } = 1024;
+    public bool ChunkGiven { get; private set; }
+    public bool Desktop { get; private set; }
     public int DeviceGb { get; private set; } = 16;
     public bool Warm { get; private set; }
 
@@ -655,7 +671,8 @@ internal sealed class Options
                     case "--kv": o.KvCacheDtype = Next(); break;
                     case "--no-spec": o.NoSpec = true; break;
                     case "--context": o.ContextLength = int.Parse(Next(), CultureInfo.InvariantCulture); break;
-                    case "--chunk": o.Chunk = int.Parse(Next(), CultureInfo.InvariantCulture); break;
+                    case "--chunk": o.Chunk = int.Parse(Next(), CultureInfo.InvariantCulture); o.ChunkGiven = true; break;
+                    case "--desktop": o.Desktop = true; break;
                     case "--device-gb": o.DeviceGb = int.Parse(Next(), CultureInfo.InvariantCulture); break;
                     case "--warm": o.Warm = true; break;
                     case "--delay": o.DelaySeconds = double.Parse(Next(), CultureInfo.InvariantCulture); break;
@@ -696,8 +713,8 @@ internal sealed class Options
     private static void Usage()
     {
         Console.Error.WriteLine("usage: TensorAgentTtftBench --model <catalog id> (--source <dir> | --weights <file> [--projector <file>])");
-        Console.Error.WriteLine("       [--backends ggml_metal,ggml_cpu] [--no-skills] [--python <root>] [--scenarios cold,newchat,think,stop,tool,agentic,concurrent,restore]");
-        Console.Error.WriteLine("       [--follow N] [--max-tokens N] [--kv f16|q8_0|q4_0] [--context N] [--chunk N] [--device-gb N] [--warm] [--delay S]");
+        Console.Error.WriteLine("       [--backends ggml_metal,ggml_cpu] [--no-skills] [--python <root>] [--scenarios cold,newchat,think,stop,tool,agentic,concurrent,restore,specbench]");
+        Console.Error.WriteLine("       [--follow N] [--max-tokens N] [--kv f16|q8_0|q4_0] [--context N] [--chunk N] [--desktop] [--device-gb N] [--warm] [--delay S]");
         Console.Error.WriteLine("       [--prompt <text>] [--network] [--agentic-max-tokens N] [--hold S]");
         Console.Error.WriteLine("       [--root <dir>] [--out <file>] [--verbose]");
     }

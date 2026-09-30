@@ -26,8 +26,10 @@ public partial class GgufFile
 
     public void PrefaultFileCache(Func<GgufTensorInfo, bool>? includeTensor)
     {
+        // Phones only: Mac Catalyst reports itself as iOS but is a desktop process
+        // with a desktop page cache, and warming it is what a desktop load wants.
         if (_prefaulted || Environment.GetEnvironmentVariable("TS_GGUF_PREFAULT") == "0" ||
-            OperatingSystem.IsIOS() || OperatingSystem.IsTvOS())
+            (OperatingSystem.IsIOS() && !OperatingSystem.IsMacCatalyst()) || OperatingSystem.IsTvOS())
             return;
         _prefaulted = true;
 

@@ -10,7 +10,7 @@
 
 using Foundation;
 using TensorAgent.Core.Hosting;
-using TensorAgent.Maui.Platforms.iOS;
+using TensorAgent.Maui.Services;
 using UIKit;
 
 namespace TensorAgent.Maui;

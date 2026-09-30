@@ -1,0 +1,57 @@
+<Project>
+  <!--
+    The phone's embedded CPython, as the Mac app's linker must see it.
+
+    TensorAgent.Core declares the CPython C API as __Internal P/Invokes
+    (Python/PythonNative.cs), and the Apple SDKs hand every __Internal entry point to
+    the native linker as a symbol the executable must define (-u). The phone satisfies
+    that by linking Python.framework. The Mac app links no interpreter: it runs python3
+    as a process, the way the desktop hosts do, so nothing on the Mac ever calls these,
+    and SymbolMode="Ignore" takes each one off the linker's list. Without it the Mac
+    link fails with "Undefined symbols: _PyConfig_Clear, ...". The SDK's dlsym switch
+    does not help: on Mac Catalyst the linker lists every __Internal entry point with
+    it set too (measured).
+
+    TensorAgentMauiProjectTests keeps this list equal to PythonNative's DllImports, so
+    a new CPython import fails a test here instead of the Mac link.
+    Names carry no leading underscore: the linker adds one. 36 symbols.
+  -->
+  <ItemGroup Condition="'$(TensorAgentPlatform)' == 'maccatalyst'">
+    <ReferenceNativeSymbol Include="PyCFunction_NewEx" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyConfig_Clear" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyConfig_InitIsolatedConfig" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyConfig_SetBytesString" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyDict_New" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyDict_SetItemString" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyErr_Clear" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyErr_GetRaisedException" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyErr_Occurred" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyErr_SetInterrupt" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyErr_SetString" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyEval_SaveThread" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyGILState_Ensure" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyGILState_Release" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyImport_AddModule" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyLong_AsLong" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyLong_FromSsize_t" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyMem_RawFree" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyObject_CallOneArg" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyObject_GetAttrString" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyObject_SetAttrString" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyObject_Str" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyRun_SimpleString" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyRun_String" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyTuple_GetItem" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyTuple_Size" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyUnicode_AsUTF8AndSize" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyUnicode_FromString" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="PyWideStringList_Append" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="Py_AddPendingCall" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="Py_CompileString" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="Py_DecRef" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="Py_DecodeLocale" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="Py_IncRef" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="Py_InitializeFromConfig" SymbolType="Function" SymbolMode="Ignore" />
+    <ReferenceNativeSymbol Include="Py_IsInitialized" SymbolType="Function" SymbolMode="Ignore" />
+  </ItemGroup>
+</Project>

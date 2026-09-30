@@ -176,7 +176,7 @@ namespace TensorSharp.AgentHost.Skills
 
                 // iOS has no OS sandbox to look for: code runs inside the app, and what
                 // is missing is a backend presenting an in-process runtime that confines.
-                if (OperatingSystem.IsIOS())
+                if (HostOS.IsAppleMobile)
                 {
                     return "this host runs skill scripts in an in-process runtime, and no backend presenting "
                         + "one that confines writes and the network was supplied, and skill scripts are "
@@ -184,7 +184,7 @@ namespace TensorSharp.AgentHost.Skills
                 }
 
                 return "this host provides no OS sandbox (checked: "
-                    + (OperatingSystem.IsMacOS() ? "sandbox-exec"
+                    + (HostOS.IsMacDesktop ? "sandbox-exec"
                        : OperatingSystem.IsLinux() ? "bubblewrap 0.12.0 or newer (install/update bwrap to enable it)"
                        : OperatingSystem.IsWindows() ? "windows job object"
                        : "none for this platform")

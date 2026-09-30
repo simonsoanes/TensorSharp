@@ -12,7 +12,7 @@ using Foundation;
 using QuickLook;
 using UIKit;
 
-namespace TensorAgent.Maui.Platforms.iOS;
+namespace TensorAgent.Maui.Services;
 
 /// <summary>
 /// Shows the user a file the model's own code produced.
