@@ -911,7 +911,11 @@ public sealed class MainPage : ContentPage
             string? typed = await CallBridgeAsync("insertText", new { text = prompt });
             if (typed is null || !typed.Contains("ok", StringComparison.Ordinal))
                 _host.App.TraceBackground("pagecheck FAIL the page refused the prompt: " + (typed ?? "no answer"));
-            await _webView.EvaluateJavaScriptAsync("window.TensorAgent.send(); true");
+            // Blurred after sending: insertText leaves the composer focused, which keeps
+            // the keyboard -- in the simulator, its accessory bar -- over the transcript
+            // in every screenshot this hook exists to take.
+            await _webView.EvaluateJavaScriptAsync(
+                "window.TensorAgent.send(); if (document.activeElement) document.activeElement.blur(); true");
             Console.WriteLine("TensorAgent: demo prompt sent through the Web UI: " + prompt);
             if (string.Equals(Environment.GetEnvironmentVariable("TENSORAGENT_PAGE_BACKGROUND_CHECK"), "1", StringComparison.Ordinal))
             {

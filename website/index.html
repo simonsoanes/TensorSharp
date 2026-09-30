@@ -30,6 +30,45 @@
     </div>
   </section>
 
+  <section aria-labelledby="showcase">
+    <h2 id="showcase">See it running</h2>
+    <p>One engine, four ways to use it. Each screenshot is an unedited capture of a real run on an Apple M5 Pro (48 GB), taken on 2026-09-30; select one to see it full size.</p>
+    <div class="shots-grid">
+      <figure class="shot">
+        <a class="shot-media" href="assets/screenshots/tensorsharp-cli.png"><img src="assets/screenshots/tensorsharp-cli.png" alt="TensorSharp.Cli in a terminal: an interactive chat with Gemma 4 E4B on Metal that reads the project README and answers two questions about it" width="1400" height="1645" loading="lazy"></a>
+        <figcaption>
+          <h3>TensorSharp.Cli</h3>
+          <p>Prompts, attachments, image and video generation, batches and benchmarks from a terminal. Here Gemma 4 E4B reads the project README with <code>/text</code> and answers questions about it at about 40 tokens/s.</p>
+          <a href="cli.html">Command Line →</a>
+        </figcaption>
+      </figure>
+      <figure class="shot">
+        <a class="shot-media" href="assets/screenshots/tensorsharp-webui.png"><img src="assets/screenshots/tensorsharp-webui.png" alt="The TensorSharp Web UI: Qwen3.8 27B compared two mortgages by writing and running a Python script, answered with a table and a recommendation, and offered the script and the CSV as downloads" width="1760" height="1129" loading="lazy"></a>
+        <figcaption>
+          <h3>Web UI chat · TensorSharp.Server.Host</h3>
+          <p>A browser chat and Ollama- and OpenAI-compatible APIs on one port. Here Qwen3.8 27B, started with <code>--code-exec</code>, writes and runs a Python script and hands back its files.</p>
+          <a href="server.html">Server &amp; Web UI →</a>
+        </figcaption>
+      </figure>
+      <figure class="shot">
+        <a class="shot-media" href="assets/screenshots/tensoragent-iphone.png"><img src="assets/screenshots/tensoragent-iphone.png" alt="TensorAgent on an iPhone: Gemma 4 E2B scaled a recipe from 4 to 10 people by running a Python script in the app's built-in Python, and answered with a table" width="603" height="1311" loading="lazy"></a>
+        <figcaption>
+          <h3>TensorAgent on iPhone</h3>
+          <p>A private chat and agent app that runs the model on the device. Here Gemma 4 E2B, in the iPhone simulator, scales a recipe by running a Python script in the app's built-in Python.</p>
+          <a href="agentic.html#ios">TensorAgent for iOS →</a>
+        </figcaption>
+      </figure>
+      <figure class="shot">
+        <a class="shot-media" href="assets/screenshots/tensoragent-mac.png"><img src="assets/screenshots/tensoragent-mac.png" alt="TensorAgent on a Mac: Qwen3.5 9B wrote a Python file with a Roman-numeral converter and unit tests, ran them, fixed the function when the first run failed, and reran until all five tests passed" width="1760" height="1320" loading="lazy"></a>
+        <figcaption>
+          <h3>TensorAgent on the desktop</h3>
+          <p>The same app on the Mac, where the model's code runs as real, sandboxed processes. Here Qwen3.5 9B writes a Python module with unit tests, runs them with the Mac's <code>python3</code>, and fixes its code until they pass.</p>
+          <a href="agentic.html#desktop">TensorAgent on the Mac and Windows →</a>
+        </figcaption>
+      </figure>
+    </div>
+  </section>
+
   <section class="model-overview" aria-labelledby="supported-models">
     <h2 id="supported-models">Supported model families</h2>
     <div class="model-group">

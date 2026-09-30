@@ -1,6 +1,7 @@
 /* 中文搜索索引（TensorSharp 维基）。每条：
    t = 标题, p = 页面标签, u = url(+锚点，英文形式，app.js 会本地化为 _zh-cn), s = 摘要, k = 额外关键词。 */
 window.SEARCH_INDEX_ZH = [
+  { t: "实际运行效果", p: "首页", u: "index.html#showcase", s: "四个程序完成真实任务的截图：终端里的 TensorSharp.Cli、服务器 Web UI、iPhone 上的 TensorAgent，以及 Mac 上的 TensorAgent。", k: "screenshots screenshot demo showcase cli web ui tensoragent iphone mac 截图 演示 运行效果 终端 聊天 桌面 手机" },
   { t: "支持的模型家族", p: "首页", u: "index.html#supported-models", s: "Gemma、Qwen（Qwen 3.5–3.8）、DeepSeek、GLM、Bonsai2、GPT OSS、Nemotron、Mistral、Hunyuan、Muse-Glimmer、DiffusionGemma、Qwen-Image-2.1、MiniMax-H3、Wan 与 BERT/XLM-R 嵌入模型。", k: "models families support snowflake arctic minilm 模型 家族 支持 多模态 文本 图像 视频 嵌入 bonsai2 jev" },
   { t: "嵌入模型与语义检索", p: "嵌入模型", u: "embeddings_zh-cn.html", s: "纯 C# CPU 与原生 GGML CPU/Metal/CUDA；Snowflake Arctic Embed 与 MiniLM：OpenAI/Ollama 嵌入 API、批处理、dimensions、base64、查询前缀与性能验证。", k: "embedding embeddings bert xlm roberta snowflake arctic minilm semantic search vector rag sqlite embed dimensions pooling 嵌入 向量 语义 检索" },
   { t: "TensorSharp 是什么", p: "首页", u: "index.html", s: "原生 .NET GGUF 推理引擎 —— CLI、Web UI、兼容 API，以及可选的 AgentHost：技能、模型生成代码沙箱，以及服务端上的有界子智能体。", k: "intro 简介 概览 关于 llm gguf csharp dotnet agent 智能体 技能 代码执行 子智能体 sub-agents 多智能体 委派" },

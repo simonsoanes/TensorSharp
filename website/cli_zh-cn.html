@@ -17,6 +17,10 @@
   <div class="breadcrumb"><a href="index_zh-cn.html">首页</a> › 命令行 (CLI)</div>
   <h1>命令行 (CLI)</h1>
   <p class="lede"><code>TensorSharp.Cli</code> 是用于本地提示词、多模态实验、提示词检查、JSONL 批处理工作流、交互式 REPL 与内置基准测试的控制台宿主。构建后二进制位于 <code>TensorSharp.Cli/bin/...</code>。</p>
+  <figure class="page-shot">
+    <img src="assets/screenshots/tensorsharp-cli.png" alt="终端中的 TensorSharp.Cli：Gemma 4 E4B 在 Metal 上的交互式聊天，读取项目 README 并回答两个问题，每条回复末尾给出预填充与解码耗时" width="1400" height="1645" loading="lazy">
+    <figcaption>Gemma 4 E4B（Q8_0）运行于 <code>ggml_metal</code> 的交互式聊天（<code>--chat</code>），机器为 Apple M5 Pro。<code>/text</code> 附加了项目 README（40,224 个字符）。两次回答的解码速度都约为每秒 40 个 token；第二轮复用已缓存的 README，首个 token 在 140 毫秒内返回。参见<a href="#repl">交互式 REPL 命令</a>。</figcaption>
+  </figure>
 
   <h2 id="quickstart">约 30 秒快速开始</h2>
   <p>请在 TensorSharp 仓库根目录执行，并先<a href="getting-started_zh-cn.html#install-dotnet"><strong>按平台安装 .NET 10 SDK</strong></a>。已验证的快速开始会构建原生 GGML 后端，并运行仓库基准已验证的 <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener"><code>gemma-4-E4B-it-Q8_0.gguf</code></a>（7.48 GiB）。复制并运行这些命令约需 30 秒；模型下载与首次 restore/构建耗时更长，取决于网络速度与机器性能。原生源码构建还需要 Git、网络访问、CMake 与可用的 C++ 工具链。</p>

@@ -17,6 +17,10 @@
   <div class="breadcrumb"><a href="index.html">Home</a> › Server &amp; Web UI</div>
   <h1>Server &amp; Web UI</h1>
   <p class="lede"><code>TensorSharp.Server.Host</code> (built on the <code>TensorSharp.Server</code> library) is an ASP.NET Core app that hosts a single GGUF model and exposes a browser chat UI plus Ollama- and OpenAI-compatible REST APIs on the same port. The continuous-batching engine handles concurrency.</p>
+  <figure class="page-shot">
+    <img src="assets/screenshots/tensorsharp-webui.png" alt="The TensorSharp Web UI: Qwen3.8 27B compared two mortgages by writing and running a Python script, answered with a table and a recommendation, and offered the script and the CSV as downloads" width="1760" height="1129" loading="lazy">
+    <figcaption>Qwen3.8 27B (UD-Q4_K_XL) on <code>ggml_metal</code>, started with <code>--code-exec</code>, on an Apple M5 Pro. The model wrote a Python script, ran it in the macOS sandbox, checked that both schedules end at a $0 balance, answered with a table, and offered the script and the 540-row CSV as downloads.</figcaption>
+  </figure>
 
   <h2 id="embeddings">Embedding service</h2>
   <p>Start with <code>--model encoder.gguf --embeddings</code> to host Snowflake Arctic Embed L v2.0 or MiniLM. <code>POST /v1/embeddings</code> and <code>POST /api/embed</code> return normalized vectors on pure C# <code>cpu</code> or native <code>ggml_cpu</code> / <code>ggml_metal</code> / <code>ggml_cuda</code>. <a href="embeddings.html">Downloads, APIs, truncation, and retrieval quality →</a></p>
@@ -67,6 +71,8 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/
   <p>Open <code>http://localhost:5000/</code>. The browser interface supports:</p>
   <ul>
     <li>Multi-turn chat conversations with streaming token generation (SSE).</li>
+    <li>Answers rendered from Markdown: tables, code blocks, lists, headings and links. The page builds them as elements rather than parsing the model's text as HTML, so a reply cannot inject markup or script; a link keeps its target only for <code>http(s)</code>, <code>mailto</code> and the server's own file downloads.</li>
+    <li>A stats line under each answer: the tokens the turn generated (reasoning and tool calls included), its wall-clock seconds, the decode speed, and how much of the prompt was served from the KV cache.</li>
     <li>Per-tab chat sessions — each tab owns tracked conversation history; request KV blocks and prefix reuse are owned by the inference engine.</li>
     <li>Image, video, audio, PDF, and text/code uploads for multimodal inference (500 MB per file by default; <code>--upload-max-mb</code> changes the per-file cap, and <code>POST /api/upload</code>'s request-body limit follows it upward — see the upload options below).</li>
     <li>PDF documents: born-digital PDFs have their complete text layer extracted and inlined into the prompt; scanned PDFs fall back to page images for vision-capable models (<code>TS_PDF_MAX_PAGES</code> caps the pages read). The final rendered prompt is checked against the model's actual context window.</li>

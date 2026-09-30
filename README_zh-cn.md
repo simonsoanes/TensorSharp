@@ -8,6 +8,42 @@
 
 **面向 GGUF 模型的原生 .NET LLM 推理引擎** —— 覆盖自回归 LLM *与* DiffusionGemma 风格的文本扩散模型，以及 [Qwen-Image-2.1 图像生成与编辑](docs/models/qwenimage21_zh-cn.md)、MiniMax-H3 视频 + 原生 32 kHz 立体声音频联合生成（Wan 2.1/2.2 则只生成视频）。提供控制台应用、浏览器聊天界面，以及兼容 Ollama/OpenAI 的 HTTP API。.NET 运行时提供纯托管 CPU 与原生加速后端；已发布的对比使用相同 GGUF 文件和硬件。可选的 `TensorSharp.AgentHost` 层还提供 Agent Skills、用于沙箱化文件和 shell 操作的有界进程内“模型→工具”循环，以及有界的自动子智能体委派。
 
+## 实际运行效果
+
+同一个引擎，四种用法。下面每张截图都是真实运行的原样截取，机器为 Apple M5 Pro（48 GB），拍摄于 2026-09-30。
+
+### TensorSharp.Cli：在终端里运行模型
+
+控制台应用在命令行中运行 GGUF 模型：一次性提示词；交互式聊天（`--chat`），可用 `/image`、`/audio`、`/video`、`/text` 附加文件；图像与视频生成；JSONL 批处理；以及内置基准测试。每条聊天回复末尾都会给出预填充与解码耗时。详见[控制台应用指南](USAGE_zh-cn.md#控制台应用)。
+
+<p align="center"><img src="website/assets/screenshots/tensorsharp-cli.png" alt="终端中的 TensorSharp.Cli：Gemma 4 E4B 在 Metal 上的交互式聊天，读取本 README 并回答两个问题，每条回复末尾给出预填充与解码耗时" width="700"></p>
+
+<sub>Gemma 4 E4B（Q8_0）运行于 `ggml_metal` 的交互式聊天。`/text` 附加了本 README（40,224 个字符）。两次回答的解码速度都约为每秒 40 个 token；第二轮复用已缓存的 README，首个 token 在 140 毫秒内返回。</sub>
+
+### TensorSharp.Server.Host：Web UI 聊天与兼容 API
+
+服务器在同一端口上托管一个模型，同时供浏览器聊天和任意 Ollama / OpenAI 客户端使用。Web UI 以 Markdown 流式显示回答，支持上传图像、音频、视频、PDF 与文本，并可按需展开模型的推理过程。以 `--code-exec` 启动时，模型可以在沙箱中编写并运行代码，再把生成的文件交还给你。详见 [Web 应用指南](USAGE_zh-cn.md#web-应用)。
+
+<p align="center"><img src="website/assets/screenshots/tensorsharp-webui.png" alt="TensorSharp Web UI：Qwen3.8 27B 编写并运行 Python 脚本比较两种房贷，用表格和一句建议作答，并提供脚本与还款计划 CSV 下载" width="880"></p>
+
+<sub>Qwen3.8 27B（UD-Q4_K_XL）运行于 `ggml_metal`，以 `--code-exec` 启动。模型编写了 Python 脚本，在 macOS 沙箱中运行，核对两份还款计划都在余额 $0 处结束，并把脚本和 540 行的 CSV 作为下载返回。统计行计入本轮生成的全部 token，包括推理与工具调用。</sub>
+
+### iPhone 上的 TensorAgent：装进口袋的私有智能体
+
+TensorAgent 是基于同一引擎的原生 iPhone / iPad 应用。模型只需下载一次，之后聊天、照片与文件问答、语音输入，以及在内置 Python 和 JavaScript 运行时中完成的智能体任务都在设备上运行；默认情况下没有任何内容离开手机。详见 [TensorAgent README](TensorAgent/README.md)。
+
+<p align="center"><img src="website/assets/screenshots/tensoragent-iphone.png" alt="iPhone 上的 TensorAgent：Gemma 4 E2B 在应用内置的 Python 中运行脚本，把食谱从 4 人份换算为 10 人份，并以表格作答" width="300"></p>
+
+<sub>Gemma 4 E2B（Q8_0）运行在 iPhone 17 Pro 模拟器中。模拟器没有 GPU，因此引擎在那里使用 `ggml_cpu`；在 iPhone 真机上则使用 Metal。模型写了一个简短的脚本，在应用内置的 Python 中运行，并以表格作答。</sub>
+
+### 桌面版 TensorAgent：macOS 与 Windows
+
+同一个工程还能构建 Mac 应用，以及一个尚未构建或运行过的 Windows 应用。在 Mac 上，模型编写的代码以真实的 `bash`、`python3`、`node` 进程运行，并受 macOS 沙箱约束；Playwright 技能还可以驱动浏览器。详见[桌面版 TensorAgent](TensorAgent/README.md#on-the-desktop-macos-and-windows)。
+
+<p align="center"><img src="website/assets/screenshots/tensoragent-mac.png" alt="Mac 上的 TensorAgent：Qwen3.5 9B 编写含罗马数字转换函数与单元测试的 Python 文件并运行，第一次失败后修正函数并重跑，直到五个测试全部通过" width="880"></p>
+
+<sub>Qwen3.5 9B（IQ4_XS）运行于 Metal。模型编写了一个含罗马数字转换函数及其单元测试的 Python 文件，并在 macOS 沙箱中用 Mac 自带的 `python3` 运行。第一次运行失败后，它修正了函数（途中有一个格式错误的补丁被拒绝），重新运行，直到五个测试全部通过。</sub>
+
 ## 支持的模型家族一览
 
 - **文本、推理与多模态 LLM：** [DeepSeek V4 Flash](docs/models/deepseek4_zh-cn.md) / [V4.1 Flash](docs/models/deepseek41_zh-cn.md)、[GLM 5.x](docs/models/glm_zh-cn.md)、[Gemma 4](docs/models/gemma4_zh-cn.md)、[Qwen 3.5 / 3.6 / 3.8 27B](docs/models/qwen35_zh-cn.md)、[Qwen 3.8 Flash Next](docs/models/qwen38-flash-next_zh-cn.md)、[Bonsai2](docs/models/bonsai2_zh-cn.md)（Qwen 家族）、[GPT OSS](docs/models/gptoss_zh-cn.md)、[Nemotron-H](docs/models/nemotron_zh-cn.md)、[Mistral 3](docs/models/mistral3_zh-cn.md)、[Hunyuan Dense](docs/models/hunyuan-dense_zh-cn.md) 与 [Muse-Glimmer](docs/models/muse-glimmer_zh-cn.md)。

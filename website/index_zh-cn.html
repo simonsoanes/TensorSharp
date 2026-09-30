@@ -30,6 +30,45 @@
     </div>
   </section>
 
+  <section aria-labelledby="showcase">
+    <h2 id="showcase">实际运行效果</h2>
+    <p>同一个引擎，四种用法。每张截图都是真实运行的原样截取，机器为 Apple M5 Pro（48 GB），拍摄于 2026-09-30；点击可查看原图。</p>
+    <div class="shots-grid">
+      <figure class="shot">
+        <a class="shot-media" href="assets/screenshots/tensorsharp-cli.png"><img src="assets/screenshots/tensorsharp-cli.png" alt="终端中的 TensorSharp.Cli：Gemma 4 E4B 在 Metal 上的交互式聊天，读取项目 README 并回答两个问题" width="1400" height="1645" loading="lazy"></a>
+        <figcaption>
+          <h3>TensorSharp.Cli</h3>
+          <p>在终端中运行提示词、附件、图像与视频生成、批处理与基准测试。图中 Gemma 4 E4B 用 <code>/text</code> 读取项目 README 并回答相关问题，解码速度约为每秒 40 个 token。</p>
+          <a href="cli.html">命令行 →</a>
+        </figcaption>
+      </figure>
+      <figure class="shot">
+        <a class="shot-media" href="assets/screenshots/tensorsharp-webui.png"><img src="assets/screenshots/tensorsharp-webui.png" alt="TensorSharp Web UI：Qwen3.8 27B 编写并运行 Python 脚本比较两种房贷，用表格和一句建议作答，并提供脚本与 CSV 下载" width="1760" height="1129" loading="lazy"></a>
+        <figcaption>
+          <h3>Web UI 聊天 · TensorSharp.Server.Host</h3>
+          <p>浏览器聊天与兼容 Ollama、OpenAI 的 API 共用一个端口。图中 Qwen3.8 27B 以 <code>--code-exec</code> 启动，编写并运行 Python 脚本，再交回生成的文件。</p>
+          <a href="server.html">服务器与 Web UI →</a>
+        </figcaption>
+      </figure>
+      <figure class="shot">
+        <a class="shot-media" href="assets/screenshots/tensoragent-iphone.png"><img src="assets/screenshots/tensoragent-iphone.png" alt="iPhone 上的 TensorAgent：Gemma 4 E2B 在应用内置的 Python 中运行脚本，把食谱从 4 人份换算为 10 人份，并以表格作答" width="603" height="1311" loading="lazy"></a>
+        <figcaption>
+          <h3>iPhone 上的 TensorAgent</h3>
+          <p>在设备上运行模型的私有聊天与智能体应用。图中 Gemma 4 E2B 在 iPhone 模拟器里，用应用内置的 Python 运行脚本换算食谱。</p>
+          <a href="agentic.html#ios">iOS 版 TensorAgent →</a>
+        </figcaption>
+      </figure>
+      <figure class="shot">
+        <a class="shot-media" href="assets/screenshots/tensoragent-mac.png"><img src="assets/screenshots/tensoragent-mac.png" alt="Mac 上的 TensorAgent：Qwen3.5 9B 编写含罗马数字转换函数与单元测试的 Python 文件并运行，第一次失败后修正函数并重跑，直到五个测试全部通过" width="1760" height="1320" loading="lazy"></a>
+        <figcaption>
+          <h3>桌面版 TensorAgent</h3>
+          <p>同一个应用运行在 Mac 上，模型编写的代码以真实、受沙箱约束的进程运行。图中 Qwen3.5 9B 编写带单元测试的 Python 模块，用 Mac 的 <code>python3</code> 运行，并修正代码直到测试通过。</p>
+          <a href="agentic.html#desktop">Mac 与 Windows 上的 TensorAgent →</a>
+        </figcaption>
+      </figure>
+    </div>
+  </section>
+
   <section class="model-overview" aria-labelledby="supported-models">
     <h2 id="supported-models">支持的模型家族</h2>
     <div class="model-group">

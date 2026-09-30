@@ -17,6 +17,10 @@
   <div class="breadcrumb"><a href="index.html">Home</a> › Command Line (CLI)</div>
   <h1>Command Line (CLI)</h1>
   <p class="lede"><code>TensorSharp.Cli</code> is the console host for local prompts, multimodal experiments, prompt inspection, JSONL batch workflows, the interactive REPL, and built-in benchmarks. The binary lands in <code>TensorSharp.Cli/bin/...</code> after the build.</p>
+  <figure class="page-shot">
+    <img src="assets/screenshots/tensorsharp-cli.png" alt="TensorSharp.Cli in a terminal: an interactive chat with Gemma 4 E4B on Metal that reads the project README and answers two questions about it, each reply ending with its prefill and decode timings" width="1400" height="1645" loading="lazy">
+    <figcaption>Gemma 4 E4B (Q8_0) on <code>ggml_metal</code>, in the interactive chat (<code>--chat</code>) on an Apple M5 Pro. <code>/text</code> attaches the project README (40,224 characters). Both answers decode at about 40 tokens/s, and the second turn reuses the cached README, so its first token arrives in 140 ms. See <a href="#repl">Interactive REPL commands</a>.</figcaption>
+  </figure>
 
   <h2 id="quickstart">Quick start in ~30 seconds</h2>
   <p>Start at the TensorSharp repository root after installing the <a href="getting-started.html#install-dotnet"><strong>.NET 10 SDK for your platform</strong></a>. The verified quick start builds the native GGML backend and runs the repository's benchmark-verified <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener"><code>gemma-4-E4B-it-Q8_0.gguf</code></a> (7.48 GiB). The commands take about 30 seconds to copy and run; the model download and the first restore/build take longer and depend on your connection and machine. A native source build also needs Git, network access, CMake, and a working C++ toolchain.</p>

@@ -23,6 +23,13 @@ recognition wherever the chosen language's recogniser supports it; for a languag
 whose recogniser cannot run on the device, Apple's recogniser may process the audio
 off the device.
 
+<p align="center"><img src="../website/assets/screenshots/tensoragent-iphone.png" alt="TensorAgent on an iPhone: Gemma 4 E2B scaled a recipe from 4 to 10 people by running a Python script in the app's built-in Python, and answered with a table" width="300"></p>
+
+<sub>Gemma 4 E2B (Q8_0) in the iPhone 17 Pro simulator, captured on 2026-09-30. The simulator
+has no GPU, so the engine runs on `ggml_cpu` there; on an iPhone it uses Metal. The model
+wrote a short script, ran it in the app's built-in Python, and answered with the table. The
+Mac app is shown under [On the desktop](#on-the-desktop-macos-and-windows).</sub>
+
 ## What it does
 
 **Chat with the desktop's capabilities, on a page built for a thumb.** The app
@@ -517,6 +524,13 @@ WinUI head (`net10.0-windows10.0.19041.0`), which only a Windows machine builds.
 three serve the same page from the same loopback host, and share the catalog, the
 settings, the conversations and the skills. What differs is everything the phone does
 because it is a phone:
+
+<p align="center"><img src="../website/assets/screenshots/tensoragent-mac.png" alt="TensorAgent on a Mac: Qwen3.5 9B wrote a Python file with a Roman-numeral converter and unit tests, ran them, fixed the function when the first run failed, and reran until all five tests passed" width="880"></p>
+
+<sub>The Mac app with Qwen3.5 9B (IQ4_XS) on Metal, captured on 2026-09-30. The model wrote a
+Python file with a Roman-numeral converter and its unit tests, and ran it with the Mac's own
+`python3` inside the Seatbelt sandbox. The first run failed, so it fixed the function (one
+malformed patch was rejected on the way) and reran until all five tests passed.</sub>
 
 | | iPhone and iPad | Mac | Windows |
 | --- | --- | --- | --- |

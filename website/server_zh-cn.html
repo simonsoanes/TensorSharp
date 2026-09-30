@@ -17,6 +17,10 @@
   <div class="breadcrumb"><a href="index_zh-cn.html">首页</a> › 服务器与 Web UI</div>
   <h1>服务器与 Web UI</h1>
   <p class="lede"><code>TensorSharp.Server.Host</code>（基于 <code>TensorSharp.Server</code> 库）是一个 ASP.NET Core 应用，托管单个 GGUF 模型，并在同一端口上暴露浏览器聊天 UI 以及兼容 Ollama 和 OpenAI 的 REST API。连续批处理引擎负责并发。</p>
+  <figure class="page-shot">
+    <img src="assets/screenshots/tensorsharp-webui.png" alt="TensorSharp Web UI：Qwen3.8 27B 编写并运行 Python 脚本比较两种房贷，用表格和一句建议作答，并提供脚本与 CSV 下载" width="1760" height="1129" loading="lazy">
+    <figcaption>Qwen3.8 27B（UD-Q4_K_XL）运行于 <code>ggml_metal</code>，以 <code>--code-exec</code> 启动，机器为 Apple M5 Pro。模型编写了 Python 脚本，在 macOS 沙箱中运行，核对两份还款计划都在余额 $0 处结束，用表格作答，并提供脚本和 540 行的 CSV 下载。</figcaption>
+  </figure>
 
   <h2 id="embeddings">嵌入服务</h2>
   <p>使用 <code>--model encoder.gguf --embeddings</code>，托管 Snowflake Arctic Embed L v2.0 或 MiniLM。 <code>POST /v1/embeddings</code>、<code>POST /api/embed</code> 返回归一化向量；后端为纯 C# <code>cpu</code> 与原生 <code>ggml_cpu</code> / <code>ggml_metal</code> / <code>ggml_cuda</code>。<a href="embeddings_zh-cn.html">下载、API、截断规则与检索质量 →</a></p>
@@ -67,6 +71,8 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/
   <p>打开 <code>http://localhost:5000/</code>。浏览器界面支持：</p>
   <ul>
     <li>多轮对话，带流式 token 生成（SSE）。</li>
+    <li>回答按 Markdown 渲染：表格、代码块、列表、标题与链接。页面把它们构建为元素，而不是把模型文本当作 HTML 解析，因此回复无法注入标记或脚本；链接只对 <code>http(s)</code>、<code>mailto</code> 与服务器自身的文件下载保留目标地址。</li>
+    <li>每条回答下方的统计行：本轮生成的 token 数（包括推理与工具调用）、墙钟秒数、解码速度，以及提示词中有多少由 KV cache 提供。</li>
     <li>每标签页独立的聊天会话 —— 每个标签页拥有自己的跟踪对话历史；请求 KV 块与前缀复用由推理引擎管理。</li>
     <li>用于多模态推理的图像、视频、音频、PDF 与文本 / 代码上传（默认每个文件最大 500 MB；<code>--upload-max-mb</code> 调整单文件上限，<code>POST /api/upload</code> 的请求体上限会随之调高——见下方上传选项）。</li>
     <li>PDF 文档：原生数字 PDF 会完整抽取文本层并内联到提示词；扫描 PDF 在视觉模型上回退为逐页图像（<code>TS_PDF_MAX_PAGES</code> 限制读取页数）。最终渲染的提示词会根据模型的实际上下文窗口进行检查。</li>
