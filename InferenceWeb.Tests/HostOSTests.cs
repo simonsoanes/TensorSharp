@@ -21,9 +21,9 @@ namespace InferenceWeb.Tests;
 /// The desktop TensorAgent on a Mac is a Mac Catalyst app, and .NET reports Mac Catalyst
 /// as iOS: <see cref="OperatingSystem.IsIOS"/> is true there and
 /// <see cref="OperatingSystem.IsMacOS"/> is false. So a check written the obvious way
-/// treats the Mac app as a phone. Bringing the app up found nine such checks: the
-/// engine resolver looked for a statically linked GgmlOps that is not there, the GGUF
-/// page-cache warm-up was skipped, Seatbelt was never offered, and code execution
+/// treats the Mac app as a phone. Bringing the app up found 22 such checks in 12 files:
+/// the engine resolver looked for a statically linked GgmlOps that is not there, the
+/// GGUF page-cache warm-up was skipped, Seatbelt was never offered, and code execution
 /// refused to start a process at all. <see cref="HostOS"/> answers the two questions
 /// separately; these tests pin its answers and keep new checks honest.
 /// </summary>
