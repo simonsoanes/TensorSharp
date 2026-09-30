@@ -35,8 +35,6 @@ namespace TensorSharp.Models
         public static string ConfiguredDraftHeadPath()
         {
             string path = Environment.GetEnvironmentVariable(SpeculationEnvVars.DraftModel);
-            if (string.IsNullOrWhiteSpace(path))
-                path = Environment.GetEnvironmentVariable(SpeculationEnvVars.LegacyDraftModel);
             return string.IsNullOrWhiteSpace(path) ? null : path.Trim();
         }
 

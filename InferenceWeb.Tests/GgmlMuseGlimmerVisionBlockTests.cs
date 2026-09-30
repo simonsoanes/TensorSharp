@@ -27,17 +27,9 @@ public class GgmlMuseGlimmerVisionBlockTests
     private const float Eps = 1e-5f;
     private const float RopeTheta = 10_000f;
 
-    [Fact]
+    [GgmlFact(BackendType.GgmlCuda)]
     public void MuseGlimmerVisionBlock_Q80_GlobalAndPackedWindowsMatchHostReference()
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND"), "cuda",
-                StringComparison.OrdinalIgnoreCase))
-        {
-            // GGML has one process-global backend. This test is deliberately
-            // opt-in so the default CPU suite remains deterministic.
-            return;
-        }
-
         var context = new GgmlContext(new[] { 0 }, GgmlBackendType.Cuda);
         var allocator = new GgmlAllocator(context, 0);
 

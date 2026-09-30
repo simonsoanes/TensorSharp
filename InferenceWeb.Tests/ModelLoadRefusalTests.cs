@@ -37,7 +37,6 @@ public class ModelLoadRefusalTests : IDisposable
         _dir = Path.Combine(Path.GetTempPath(), "ts-load-refusal-unit-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_dir);
         _env.ClearSpeculationVars();
-        _env.Set("TS_DSV4_DSPARK", null);
     }
 
     public void Dispose()

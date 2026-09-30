@@ -168,6 +168,9 @@ namespace TensorSharp.Cuda.Interop
         public static partial int cuEventSynchronize(IntPtr hEvent);
 
         [LibraryImport(LibName)]
+        public static partial int cuEventElapsedTime(out float pMilliseconds, IntPtr hStart, IntPtr hEnd);
+
+        [LibraryImport(LibName)]
         public static partial int cuStreamWaitEvent(IntPtr hStream, IntPtr hEvent, uint flags);
 
         // ---- Peer-to-Peer (multi-GPU) ----

@@ -1,6 +1,6 @@
 # DeepSeek V4.1 Flash（`deepseek41`）
 
-> **多 GPU 模式选择：** 整层放置使用 `--layer-split N`，支持的张量并行使用 `--tp N`。未配置两种模式时默认单设备。下面的历史命令与测量早于这项默认值变更；多 GPU 启动请加 `--layer-split N`。显式旧变量 `TS_DSV4_NGPU=0` 仍表示全部可见 GPU 自动放置；使用明确并行度时请取消该变量，或设为相同卡数。按层切分仅限单节点。
+> **多 GPU 模式选择：** 整层放置使用 `--layer-split N`，支持的张量并行使用 `--tp N`。未配置两种模式时默认单设备。下面的历史命令与测量早于这项默认值变更；多 GPU 启动请加 `--layer-split N`。按层切分仅限单节点。
 
 [← 返回模型索引](README_zh-cn.md) | [English](deepseek41.md)
 
@@ -36,7 +36,7 @@ TensorSharp 为 V4.1 提供了**运行在 `ggml_cuda` 上的专用推理计算�
 
 已检查修复版全部 1,046 个张量的名称与形状、敏感张量的存储类型，以及分词器/Engram
 元数据的一致性。下载的十个分片均已通过完整文件 SHA-256 校验。`ggml_cuda` 上
-`--layer-split 2` 与实验性路由专家 TP（`--tp 2` 配合 `TS_DSV41_TP=2`）的有限普通/DSpark
+`--layer-split 2` 与实验性路由专家 TP（`--tp 2`）的有限普通/DSpark
 HTTP 检查均已通过。四个服务各完成三个文本检查与一个图像 OCR/颜色检查，均以 EOS
 结束并正常退出。另行进行的普通/DSpark 文本与图像配对检查，在两种模式下均逐一匹配全部
 24 个 token ID 与 `max_tokens` 结束原因，DSpark 实际参与解码且进程正常退出。这些有限
@@ -236,7 +236,7 @@ dotnet build TensorSharp.Server.Host/TensorSharp.Server.Host.csproj -c Release \
   -p:CudaArch=compute_86 -p:TensorSharpSkipGgmlNative=true
 
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 MAX_CONTEXT=65536 \
-  TS_CPU_MOE_THREADS=32 TS_DSV41_TP=0 TS_DSV4_UBATCH=256 \
+  TS_CPU_MOE_THREADS=32 TS_DSV4_UBATCH=256 \
   TS_DSV41_ENGRAM_WARM=0 \
   TS_DSV41_COMPACT_RAW_GATHER=0 KV_CACHE_DTYPE=f16 \
   TS_SCHED_MAX_RUNNING_SEQS=4 TS_SCHED_MAX_BATCHED_TOKENS=4096 \
@@ -260,8 +260,7 @@ CPU 图工作与主机侧归约仍会影响延迟。当前 CLI 也接受 `--cpu-
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 MAX_CONTEXT=65536 \
-  TS_DSV4_NGPU=8 TS_DSV4_UBATCH=1024 KV_CACHE_DTYPE=f16 \
-  TS_CPU_MOE_THREADS=32 TS_DSV41_TP=0 \
+  TS_DSV4_UBATCH=1024 KV_CACHE_DTYPE=f16 TS_CPU_MOE_THREADS=32 \
   TS_DSV41_SPARSE_FA=1 TS_DSV41_COMPACT_RAW_GATHER=1 \
   TS_DSV41_ENGRAM_WARM=1 TS_DSV41_ENGRAM_THREADS=16 TS_DSV4_PERF=1 \
   TS_SCHED_MAX_RUNNING_SEQS=4 TS_SCHED_MAX_BATCHED_TOKENS=4096 \
@@ -289,15 +288,11 @@ V4.1 支持（`3347b06b`）上记录的，当时还没有 TensorSharp 自有的 
 为默认的 32。那台原始主机没有暴露线程池宽度的读取接口，所以 32 并非在那里直接测得。
 请把这个基线与后续显式设置线程数的实验区分开。
 
-`--layer-split 8` 表示**用八张 GPU 做按层切分**。启动诊断会说明采用的放置模式。`--tp N --backend ggml_cuda` 直接启用 routed-MoE 张量并行，支持 2 到 8 的每个度数，无需设置环境变量。旧入口 `TS_DSV41_TP=N` 仍受支持；与 `--tp` 同时设置时必须匹配，否则拒绝加载。`--layer-split` 则不能与非零 `TS_DSV41_TP` 组合。
-TensorSharp 默认按可用显存分配整层。
-`TS_DSV4_NGPU` 覆盖 GPU 数量。用 `CUDA_VISIBLE_DEVICES` 精确指定本次运行使用的设备。
-显式设置 `TS_DSV4_NGPU=0` 表示自动选择可见设备，并把 rank 数校验推迟到原生加载器。
+`--layer-split 8` 表示**用八张 GPU 做按层切分**。启动诊断会说明采用的放置模式。
+TensorSharp 默认按可用显存分配整层。用 `CUDA_VISIBLE_DEVICES` 精确指定本次运行使用的设备。
 
-`--tp 8` 会直接在这八张 GPU 上启用 **routed-MoE 张量并行**。旧环境变量 `TS_DSV41_TP` 接受
-`0`（关闭）或 `2` 到 `8` 的 rank 数，且必须等于 `--tp` 或 `TS_DSV4_NGPU` 选中的 GPU 数。
-自动选择 GPU 时，原生加载器会在枚举可见设备之后再校验数量。取值非法或数量不匹配都会
-报错。
+`--tp 8 --backend ggml_cuda` 会在这八张 GPU 上启用 **routed-MoE 张量并行**；`--tp` 支持 2 到 8 的每个度数（含 3、5、6）。
+该度数作为按模型参数传给原生加载器，且必须等于它选中的 GPU 数。`--tp` 与 `--layer-split` 不能组合。
 
 在这种模式下，路由专家的 gate/up 矩阵沿 FFN 中间维切分，down 矩阵按输出行切分，并在所有
 选中的 GPU 上并发执行。先按 F32 精度拼接完整 SwiGLU 激活，再计算 down 的各输出行，最后
@@ -383,7 +378,7 @@ logits 逐位相同。DSpark 与 ngram 在文本、图像场景都保持全部 9
 `--cpu-moe` 卸载全部路由专家。注意力、路由与共享专家仍在 GPU 上。
 [Engram 表的放置](#engram-表放在哪里)单独选择；使用主机映射时，每个输入批次只读取并
 传输选中的 embedding 行。CPU MoE 卸载与按层切分都已实现，但它们在你所用硬件与上下文下的
-吞吐需要实测。与 `TS_DSV41_TP` 组合时，
+吞吐需要实测。与 `--tp N` 组合时，
 被 CPU 卸载的前置层保留完整的 CPU 专家，其余层使用路由专家分片。
 
 原生版本 `6b3b5ab3…` 显式把共享专家的 gate/up/down 投影指派到该层所在设备。这修正了
@@ -664,8 +659,11 @@ token 下每个分块耗时 35.3–35.7 / 36.9–37.2 / 38.9–39.1 ms，1024 �
   回退会被拒绝。
 
 在八张 A40、Q4_K_M 上实测（`--n-cpu-moe 2`，贪心，提示词后接两轮 `continue`，
-`TS_KV_DEBUG=1`）。分叉点正好落在策略预期的位置——两轮中缓存在那里都是 token 128821
-（`<think>`），而渲染结果是 128822（`</think>`），恰在 `<｜Assistant｜>` 之后一个 token：
+`TS_KV_DEBUG=1`），时间是 2026-09-11，当时 CLI 仍自行规划复用（`KVCache.PlanReuse`，
+`TS_KV_DEBUG` 打印的正是它）。自 2026-09-17 起 CLI 与服务器都走引擎的 Radix 前缀缓存
+（见下文），`TS_KV_DEBUG` 在那里不再打印任何内容。分叉点正好落在策略预期的位置——两轮中
+缓存在那里都是 token 128821（`<think>`），而渲染结果是 128822（`</think>`），恰在
+`<｜Assistant｜>` 之后一个 token：
 
 | 轮次 | 提示词 token | 匹配前缀 | 计划 | prefill |
 |---:|---:|---:|---|---:|
@@ -683,11 +681,41 @@ token 下每个分块耗时 35.3–35.7 / 36.9–37.2 / 38.9–39.1 ms，1024 �
 执行器也不做（它们没有检查点）。关闭 `--think` 时这一切都不需要：没有推理内容被丢弃，
 渲染结果就是缓存的纯追加，复用无需回退。
 
-跨请求时，这种复用由默认模式的 Radix 前缀缓存驱动，每次回退都由原生执行器决定。不额外
-开启时，延续下去的是活动缓存；`TS_DSV41_RETAINED_CACHE=1` 还会保留已结束请求的原生槽位，
-使多个会话都能继续而无需完整重新 prefill。保留量受 `TS_DSV41_RETAINED_CACHE_MB`
-（默认 2048；`0` 或无法解析的值表示不保留）约束，只适用于能够回退的原生执行器，加载了
-DSpark 草稿器时不生效。它默认关闭，本卡片没有记录它的任何实测。
+跨请求时，这种复用由 Radix 前缀缓存驱动——它是默认模式，CLI 与服务器走的都是这条路径。
+结束的一轮作为模型的主缓存（primary）常驻。下一轮思考模式的对话把它回退到整段上一轮回答
+之前来保留它，树在准入时询问模型槽位能否回退到那么远（`CanRewindPrimary`，读取
+`TSGgml_Dsv4SlotCanReuse`：活动环或提示词边界检查点）。被拒绝就完整 prefill，准入日志行会
+说明原因，例如 `Radix prompt reuse for …: 0/2056 tokens; 2056 token(s) to prefill
+(rewinding the cached conversation is declined by the model).` 放置方式不影响规划：
+`--tp`、`--layer-split` 与单卡的规划相同。复用之后至少前向两个提示词 token 的一轮会留下
+新的检查点（能力字段 `MinTailPrefillTokens`），因此重新生成的一轮不会让它之后那一轮失去复用。
+
+以上成立的前提是：这一轮单独运行，且紧随其后的是同一会话的下一轮——CLI 正是这样运行的。
+与其他请求重叠过的一轮运行在按请求分配的槽位上，结束时即被释放；而引擎为任何其他请求执行的
+第一步都会丢弃常驻的主缓存。因此在会话相互重叠的服务器上，除非上一轮结束时没有其他请求在运行、
+且在它之前没有其他请求被接纳，思考模式的一轮会重新 prefill 它的提示词。
+
+2026-09-29 之前，树的捐赠（donation）规则拒绝任何超过 16 个 token 的回退，这一次也不例外，
+因此第一轮之后的每一轮思考对话都没有任何复用（CLI 中显示 `kvPlan=Prefill`；最早在
+`--tp 6` 下被报告）。该规则的用意是把较深的缓存状态留给之后的请求，而不是交给一个只共享
+其开头的请求。但拒绝并不能保住主缓存——引擎执行的下一步无论如何都会丢弃它——所以该规则
+不再约束主缓存。`DeepSeek41ThinkingTurnReuseTests` 用真实的 V4.1 对话模板让这样一段对话
+走完引擎。匹配前缀按构造与上表相同，但上表尚未在真实模型上通过引擎重新测量。
+
+已结束请求的原生槽位也会被保留，使多个会话（包括相互重叠的会话）
+都能继续而无需完整重新 prefill。一个被保留的槽位至多服务之后的一个请求；树允许它**自己的**
+会话在槽位能做到的范围内越过 16 个 token 的规则回退它（`CanMaterialize`，同样的检查点判断）：
+思考模式的一轮总要回退越过上一轮回答，按那条规则被保留的槽位将无法服务任何思考轮次。其他会话
+永远到达不了带作用域的槽位，因此无法取走它。若原生侧拒绝保留某个槽位（预算或设备余量不足），
+结束的那一轮不会被复用，也不会被登记——2026-09-29 之前，失败的尝试会留下一个已被清空却仍被
+登记的主缓存，精确延续的请求随后会从它解码。能够回退的
+原生执行器始终开启保留，只在加载了 DSpark 草稿器时不生效；保留槽位的预算由
+`TS_DSV41_RETAINED_CACHE_MB`（默认 2048）决定，不是正数的值保持默认。2026-09-29 在 6x A40（`--tp 6`，
+Q2_K）上用四个重叠的三轮 Web UI 会话（`eng/validation/parallel-multiturn-webui.py`）实测：没有保留时
+每一轮复用 0 个 token，因为每个结束的槽位在该会话下一轮到来之前就已释放；有保留时每个会话每一轮都
+复用了自己上一轮的提示——开启思考时，第 2 轮复用 167-210 个 token 中的 54-62 个（被丢弃思考内容
+之前的部分会重新渲染），第 3 轮复用第 2 轮的整段提示；关闭思考时分别为 175-200 中的 171-196 与
+307-437 中的 287-417。两种模式下八个会话全部通过答案检查。
 
 原生 V4.1 请求各自拥有独立的 KV 槽位。因此调度器按"每个允许运行的请求一个上下文"来
 计算它那份仅含元数据的块池。调度器默认允许 16 个运行中的请求；示例显式设置
@@ -847,10 +875,8 @@ CPU 后端与 CUDA 一样，直接读取内嵌的 Engram 元数据。下载当�
 
 那些以 GPU 命名的选项在这里的行为如下：
 
-- `TS_DSV41_TP` 是把路由专家的维度切分到多张 GPU 上。与 `ggml_cpu` 组合时，会在打开
+- `--tp N` 是把路由专家的维度切分到多张 GPU 上。与 `ggml_cpu` 组合时，会在打开
   检查点之前被拒绝，而不是被忽略。
-- `TS_DSV4_NGPU` 选择枚举多少张 GPU。这里没有 GPU 可枚举，所以加载器根本不会读它；
-  它既不是错误，也不是拿到多于一个 CPU 设备的办法。
 - CPU 后端会拒绝 `--tp N` 与 `--layer-split N` 的多 GPU 请求。
   那条警告是为 GPU 主机写的，写的是 "Running on ONE GPU"；在这个后端上请读作"一个
   CPU 设备"。
@@ -977,7 +1003,7 @@ JSON 中的字符串与键），同样的保护依然有效。普通历史的格
 兼容性，而不是模型层面的工具选择、推理质量或 JSON 任务准确率。
 
 由于 V4.1 的协议声明了这种延迟触发的语法，Chat Completions 端点允许在开启思考的同时
-使用 `response_format`。这个组合要求启用 JSON 语法约束；`TS_JSON_GRAMMAR=0` 会被拒绝。
+使用 `response_format`。这个组合要求启用 JSON 语法约束。
 若要在一次工具往返之后再请求 JSON 最终答案，请保留工具历史与工具目录，并发送
 `tool_choice: "none"`。进行中的工具生成与 `response_format` 仍然互斥。校验只看 assistant
 的 content 通道；只有推理内容不算最终答案。
@@ -1012,7 +1038,7 @@ V4.1 没有发布任何委派相关的实测结果。
   `--backend ggml_cpu`、`TS_DSV4_FUSED=0`、加载了 DSpark 草稿器或设置
   `TS_BATCHED_FUSED_DECODE=0` 时，仍走逐槽前向调用。
 - V4.1 的 DSpark 投机解码属于实验性功能。加载器只在 `ggml_cuda` 与 `ggml_cpu` 上接受
-  `deepseek41-dspark` 草稿器（`--draft-model` / `TS_DSV4_DSPARK`），在其他执行器上拒绝，
+  `deepseek41-dspark` 草稿器（`--draft-model`），在其他执行器上拒绝，
   V4 的草稿模型也会被拒绝。合成测试（`DeepSeek41DsparkIntegrationTests`）以及真实草稿器在
   `ggml_cuda` 双 GPU 按层切分与实验性路由专家 TP 下的初步文本/图像 HTTP 检查已通过；
   大量磁盘换页下的通用质量与吞吐仍未获验证。另行进行的 24-token 文本/图像配对检查，

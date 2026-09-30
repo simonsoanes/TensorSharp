@@ -32,6 +32,7 @@ namespace InferenceWeb.Tests;
 ///     numerically correct output for a hand-checkable single-sequence
 ///     case.
 /// </summary>
+[Collection(EngineEnvironmentCollection.Name)]
 public class BatchedExecutorTests
 {
     private const int BlockSize = 8;
@@ -249,8 +250,7 @@ public class BatchedExecutorTests
         var cfg = SmallConfig();
         var pool = new BlockPool(
             cfg.NumBlocks, cfg.BlockSize, model.ComputeKVBlockByteSize(cfg.BlockSize));
-        var scheduler = new ContinuousBatchScheduler(
-            cfg, pool, model.KVStateFingerprint, NullLogger.Instance);
+        var scheduler = new ContinuousBatchScheduler(cfg, pool, NullLogger.Instance);
         var executor = new BatchExecutor(model, pool, scheduler, NullLogger.Instance);
 
         var owner = new SequenceState(
@@ -297,8 +297,7 @@ public class BatchedExecutorTests
         var cfg = SmallConfig();
         var pool = new BlockPool(
             cfg.NumBlocks, cfg.BlockSize, model.ComputeKVBlockByteSize(cfg.BlockSize));
-        var scheduler = new ContinuousBatchScheduler(
-            cfg, pool, model.KVStateFingerprint, NullLogger.Instance);
+        var scheduler = new ContinuousBatchScheduler(cfg, pool, NullLogger.Instance);
         var executor = new BatchExecutor(model, pool, scheduler, NullLogger.Instance);
 
         var sequences = Enumerable.Range(0, 3)
@@ -336,8 +335,7 @@ public class BatchedExecutorTests
             var cfg = SmallConfig();
             var pool = new BlockPool(
                 cfg.NumBlocks, cfg.BlockSize, model.ComputeKVBlockByteSize(cfg.BlockSize));
-            var scheduler = new ContinuousBatchScheduler(
-                cfg, pool, model.KVStateFingerprint, NullLogger.Instance);
+            var scheduler = new ContinuousBatchScheduler(cfg, pool, NullLogger.Instance);
             var executor = new BatchExecutor(model, pool, scheduler, NullLogger.Instance);
 
             var sequences = Enumerable.Range(0, 2)
@@ -387,8 +385,7 @@ public class BatchedExecutorTests
         var cfg = SmallConfig();
         var pool = new BlockPool(
             cfg.NumBlocks, cfg.BlockSize, model.ComputeKVBlockByteSize(cfg.BlockSize));
-        var scheduler = new ContinuousBatchScheduler(
-            cfg, pool, model.KVStateFingerprint, NullLogger.Instance);
+        var scheduler = new ContinuousBatchScheduler(cfg, pool, NullLogger.Instance);
         var executor = new BatchExecutor(model, pool, scheduler, NullLogger.Instance);
 
         var owner = new SequenceState(

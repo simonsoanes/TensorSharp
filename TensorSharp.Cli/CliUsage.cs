@@ -403,8 +403,7 @@ namespace TensorSharp.Cli
                     "by itself. Engages on --input, --input-jsonl, --multi-turn-jsonl and --interactive. Not " +
                     "available under --tp N>1 on a checkpoint whose draft block borrows the trunk's LM head, " +
                     "which includes GLM-5.2 and GLM-5.3 non-Flash. GLM-5.3 Flash's native NextN/MTP head is not implemented; " +
-                    "use --spec --spec-type ngram for its supported speculation path. Default: off; env TS_SPEC " +
-                    "(glm-dsa also honours TS_GLM_MTP=1/0, which overrides it).",
+                    "use --spec --spec-type ngram for its supported speculation path. Default: off; env TS_SPEC.",
                     "--model GLM-5.2-UD-IQ2_XXS-00001-of-00006.gguf --backend ggml_cuda --spec --chat"),
                 new OptionHelp("--spec-type <name>",
                     "Which speculation ALGORITHM to draft with. It only chooses the algorithm - it does not turn " +
@@ -514,26 +513,6 @@ namespace TensorSharp.Cli
                     "for a 2-4x smaller cache. Default: auto — the backend/model pick (KV_CACHE_DTYPE env var " +
                     "overrides).",
                     "--kv-cache-dtype q8_0"),
-                new OptionHelp("--paged-kv | --no-paged-kv",
-                    "Configure the standalone paged KV store used by --paged-bench. Default: off. Normal " +
-                    "generation uses the " +
-                    "shared inference engine's Radix KV cache by default, independently of this flag.",
-                    "--paged-kv"),
-                new OptionHelp("--paged-kv-block-size <N>",
-                    "Tokens per paged-KV block. Range: >= 1. Default: 256.",
-                    "--paged-kv-block-size 128"),
-                new OptionHelp("--paged-kv-ram-mb <N>",
-                    "RAM budget for evicted KV blocks, in MB. Range: >= 1. Default: 1024.",
-                    "--paged-kv-ram-mb 2048"),
-                new OptionHelp("--paged-kv-ssd-dir <path>",
-                    "Directory for the SSD spill tier of the paged KV cache. Default: disabled.",
-                    "--paged-kv-ssd-dir /var/ts-kv-spill"),
-                new OptionHelp("--paged-kv-ssd-mb <N>",
-                    "SSD budget for spilled KV blocks, in MB. Range: >= 1. Default: 16384.",
-                    "--paged-kv-ssd-mb 32768"),
-                new OptionHelp("--paged-kv-quant-bits <b>",
-                    "Quantize spilled KV blocks: 0 (off), 2, 4, or 8 bits. Default: 0.",
-                    "--paged-kv-quant-bits 8"),
             }),
             ("Scheduling", new[]
             {
@@ -545,8 +524,7 @@ namespace TensorSharp.Cli
                     "TS_SCHED_PREFIX_CACHE=0 also disables reuse.",
                     "--no-prefix-cache"),
                 new OptionHelp("--continuous-batching | --no-continuous-batching",
-                    "Paged-attention continuous batching across concurrent requests (aliases --paged-batching / " +
-                    "--no-paged-batching). Default: on.",
+                    "Paged-attention continuous batching across concurrent requests. Default: on.",
                     "--no-continuous-batching"),
             }),
             ("Benchmarks and diagnostics", new[]
@@ -594,17 +572,6 @@ namespace TensorSharp.Cli
                 new OptionHelp("--bench-kv-turns <N>",
                     "Number of simulated chat turns for --bench-kvcache. Range: >= 1. Default: 4.",
                     "--bench-kv-turns 8"),
-                new OptionHelp("--paged-bench",
-                    "Benchmark the standalone paged KV store, separately from default Radix generation: pay the full prefill once, then measure how much " +
-                    "a second identical-prefix request recovers. Tune with --paged-bench-prompt / " +
-                    "--paged-bench-trials. Default: off.",
-                    "--paged-bench"),
-                new OptionHelp("--paged-bench-prompt <N>",
-                    "Prompt length (tokens) for --paged-bench. Range: >= 1. Default: 2048.",
-                    "--paged-bench-prompt 4096"),
-                new OptionHelp("--paged-bench-trials <N>",
-                    "Trials for --paged-bench. Range: >= 1. Default: 3.",
-                    "--paged-bench-trials 5"),
                 new OptionHelp("--warmup-runs <N>",
                     "Run the full inference path N times silently before the real pass so JIT/pipeline compilation " +
                     "and allocator growth don't skew timings. Retains the shared system/tool prefix for the real pass " +
@@ -740,18 +707,16 @@ namespace TensorSharp.Cli
                 new OptionHelp("--video-vae <path>",
                     "Video VAE (wan_2.1_vae.safetensors, or Wan2.2_VAE.safetensors for TI2V-5B; " +
                     "minimax_h3_video_vae_fp16.safetensors for MiniMax-H3). Default: same-directory scan next " +
-                    "to the DiT model, VAE/ subfolders included (TS_VIDEO_VAE env var also works). " +
-                    "The former spelling --wan-vae is still accepted.",
+                    "to the DiT model, VAE/ subfolders included (TS_VIDEO_VAE env var also works).",
                     "--video-vae Wan2.2_VAE.safetensors"),
                 new OptionHelp("--video-text-encoder <path>",
                     "Text-encoder GGUF for video generation (UMT5-XXL for Wan, Qwen3-VL-32B for MiniMax-H3). " +
-                    "Default: same-directory scan (TS_VIDEO_TEXT_ENCODER env var also works). Also spelled " +
-                    "--video-te; the former spelling --wan-te is still accepted.",
+                    "Default: same-directory scan (TS_VIDEO_TEXT_ENCODER env var also works).",
                     "--video-text-encoder umt5-xxl-encoder-Q8_0.gguf"),
                 new OptionHelp("--video-dit2 <path>",
                     "Second diffusion expert on dual-expert models (Wan 2.2 A14B's high/low-noise pair). " +
                     "Default: auto-resolved by filename next to the first expert (TS_VIDEO_DIT2 env var also " +
-                    "works). The former spelling --wan-dit2 is still accepted.",
+                    "works).",
                     "--video-dit2 wan2.2_i2v_low_noise.gguf"),
                 new OptionHelp("--audio-vae <path>",
                     "Audio VAE for models that generate an audio track jointly with the video " +
@@ -863,9 +828,7 @@ namespace TensorSharp.Cli
         /// <summary>
         /// Rewrite every documented option to the one spelling <c>Program.MainCore</c>'s switch
         /// matches: the documented, lower-case name, with its value as the next token.
-        /// <c>--Repeat-Last-N=128</c> becomes <c>--repeat-last-n 128</c>, and a legacy name
-        /// both hosts read as another option becomes that option (<c>--wan-vae</c> is
-        /// <c>--video-vae</c>).
+        /// <c>--Repeat-Last-N=128</c> becomes <c>--repeat-last-n 128</c>.
         /// </summary>
         /// <remarks>
         /// The switch matches the exact lower-case spaced spelling and has no unknown-flag
@@ -896,7 +859,7 @@ namespace TensorSharp.Cli
 
                 int equals = arg.IndexOf('=');
                 string name = equals >= 0 ? arg.Substring(0, equals) : arg;
-                if (!shapes.TryGetValue(ConfigFileArgs.CanonicalOptionSpelling(name), out var shape))
+                if (!shapes.TryGetValue(name, out var shape))
                 {
                     result.Add(arg);
                     continue;

@@ -621,7 +621,7 @@ namespace TensorSharp.Models
 
                 // GGML fused dense SwiGLU FFN (norm + gate/up + SiLU·mul + down +
                 // residual) in one graph, keeping the large intermediate on-device.
-                // This is the legacy/per-sequence path used by the CLI and the
+                // This is the per-sequence path used by the CLI and the
                 // server's per-seq fallback; the batched path fuses separately.
                 if (TryFusedDenseSwiGLUFFNInto(hidden, wn[ffnNormIdx], wn[gateUpIdx], wn[downIdx]))
                     return hidden;

@@ -313,9 +313,7 @@ def _build_models(cfg: dict) -> dict:
         steps = m.get("diffusion_steps", 32)
         if is_diffusion:                     # DIFFUSION_STEPS env override
             steps = _env_or("DIFFUSION_STEPS", steps)
-        # `_hf` (the legacy documentation-only repo pointer) is accepted as a
-        # source declaration so older configs download without being rewritten.
-        base = _source_base(m.get("source") if m.get("source") is not None else m.get("_hf"))
+        base = _source_base(m.get("source"))
         urls = {}
         for role, key in (("gguf", "gguf"), ("mmproj", "mmproj"), ("mtp_draft", "mtp_draft")):
             u = _entry_url(m.get(key))
@@ -482,7 +480,7 @@ class BackendSpec:
     backend_id: str                    # e.g. "ggml_cuda", "ggml_vulkan", "cpu"
     display: str                       # column label in the report
     kind: str                          # "gpu" | "cpu"
-    aliases: tuple = ()                # alternate --backends names (e.g. legacy "gpu")
+    aliases: tuple = ()                # alternate --backends names (e.g. "gpu")
     # TensorSharp.Server mapping (ts_backend None = TensorSharp cannot run it).
     ts_backend: Optional[str] = None   # value passed to `--backend`
     ts_extra_args: tuple = ()          # extra server CLI args (e.g. --gpu-device 1)
@@ -574,27 +572,10 @@ def _build_backend(bid: str, b: dict) -> BackendSpec:
 
 def _build_backends(cfg: dict) -> dict:
     raw = cfg.get("backends")
-    if isinstance(raw, dict) and raw:
-        return {bid: _build_backend(bid, b or {}) for bid, b in raw.items()
-                if not bid.startswith("_")}     # "_comment" etc. are not backends
-    # Legacy config form: `backends` is a list of abstract ids (["gpu", "cpu"])
-    # mapped per-engine through the `maps` section. Synthesize the equivalent
-    # registry so old config files keep working unchanged.
-    ids = [str(x) for x in (raw or ["gpu", "cpu"])]
-    maps = cfg.get("maps", {}) or {}
-    ts_map = dict(maps.get("tensorsharp_backend",
-                           {"gpu": "ggml_cuda", "cpu": "ggml_cpu"}))
-    ngl_map = {k: int(v) for k, v in
-               (maps.get("llama_ngl", {"gpu": 999, "cpu": 0})).items()}
-    out: dict = {}
-    for bid in ids:
-        kind = "cpu" if "cpu" in bid.lower() else "gpu"
-        out[bid] = BackendSpec(
-            backend_id=bid, display=bid.upper(), kind=kind,
-            ts_backend=ts_map.get(bid),
-            llama_ngl=ngl_map.get(bid),
-            vllm=(kind == "gpu"))
-    return out
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("config: `backends` must map backend ids to their launch settings")
+    return {bid: _build_backend(bid, b or {}) for bid, b in raw.items()
+            if not bid.startswith("_")}     # "_comment" etc. are not backends
 
 
 BACKENDS: dict = _build_backends(_CFG)
@@ -607,7 +588,7 @@ for _b in BACKENDS.values():
 
 def resolve_backend(name: str) -> Optional[str]:
     """Canonical backend id for a --backends token (case-insensitive, resolves
-    aliases like the legacy `gpu`). Returns None when unknown."""
+    aliases such as `gpu`). Returns None when unknown."""
     if not name:
         return None
     if name in BACKENDS:

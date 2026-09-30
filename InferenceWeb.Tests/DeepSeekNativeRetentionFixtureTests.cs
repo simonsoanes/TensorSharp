@@ -16,9 +16,9 @@ public sealed class DeepSeekNativeRetentionFixtureTests
     public void FailingPostCommitDiagnosticCannotUndoNativeOwnership(string failure)
     {
         string path = TestGates.FindGguf(Environment.GetEnvironmentVariable("TS_TEST_DSV41_FIXTURE_DIR"), "deepseek41-fixture");
-        string[] keys = { "TS_DSV41_RETAINED_CACHE", "TS_DSV41_RETAINED_CACHE_MB", "MAX_CONTEXT",
-            "TS_DSV4_UBATCH", "TS_DSV4_THREADS", "TS_DSV41_ENGRAM_THREADS", "TS_DSV4_FA", "TS_DSV41_TP" };
-        string[] values = { "1", "2048", "512", "3", "2", "2", "0", "0" };
+        string[] keys = { "TS_DSV41_RETAINED_CACHE_MB", "MAX_CONTEXT",
+            "TS_DSV4_UBATCH", "TS_DSV4_THREADS", "TS_DSV41_ENGRAM_THREADS", "TS_DSV4_FA" };
+        string[] values = { "2048", "512", "3", "2", "2", "0", "0" };
         var old = keys.Select(Environment.GetEnvironmentVariable).ToArray();
         try
         {
@@ -72,12 +72,12 @@ public sealed class DeepSeekNativeRetentionFixtureTests
     }
 
     [ModelFact("TS_TEST_DSV41_FIXTURE_DIR", "deepseek41-fixture", GgmlBackend = BackendType.GgmlCpu)]
-    public void RetainedNativeHolderPreservesContinuationAndCanBeReclaimedWithoutASparePrimary()
+    public void RetainedNativeHolderPreservesContinuation_AndOutlivesANewPrimaryWhileMemoryAllows()
     {
         string path = TestGates.FindGguf(Environment.GetEnvironmentVariable("TS_TEST_DSV41_FIXTURE_DIR"), "deepseek41-fixture");
-        string[] keys = { "TS_DSV41_RETAINED_CACHE", "TS_DSV41_RETAINED_CACHE_MB", "MAX_CONTEXT",
-            "TS_DSV4_UBATCH", "TS_DSV4_THREADS", "TS_DSV41_ENGRAM_THREADS", "TS_DSV4_FA", "TS_DSV41_TP" };
-        string[] values = { "1", "2048", "512", "3", "2", "2", "0", "0" };
+        string[] keys = { "TS_DSV41_RETAINED_CACHE_MB", "MAX_CONTEXT",
+            "TS_DSV4_UBATCH", "TS_DSV4_THREADS", "TS_DSV41_ENGRAM_THREADS", "TS_DSV4_FA" };
+        string[] values = { "2048", "512", "3", "2", "2", "0", "0" };
         var old = keys.Select(Environment.GetEnvironmentVariable).ToArray();
         try
         {
@@ -100,8 +100,11 @@ public sealed class DeepSeekNativeRetentionFixtureTests
             Assert.Equal(expected, model.Forward(suffix));
             Assert.True(model.RetainSequenceCache("follow"));
             model.OnSequenceReleased("follow");
-            model.RestorePrimaryCache(); // Reclaims selected retained storage; no spare primary was allocated.
-            Assert.False(model.CanReuseRetainedPrefix("follow", prefix.Length + suffix.Length, prefix.Length));
+            // The CPU device has room for another slot, so the single-stream path gets a new primary and
+            // the retained conversation stays for its next turn (SlotForRequest releases one only when a
+            // device has no room; DeepSeekSlotRetentionTests covers that path).
+            model.RestorePrimaryCache();
+            Assert.True(model.CanReuseRetainedPrefix("follow", prefix.Length + suffix.Length, prefix.Length));
             Assert.True(model.CanReuseLivePrefix(0, 0));
             var unrelated = model.Forward(suffix);
             model.ResetKVCache();

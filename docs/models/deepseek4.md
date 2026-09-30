@@ -1,6 +1,6 @@
 # DeepSeek V4 Flash (`deepseek4`)
 
-> **Multi-GPU selection:** use `--layer-split N` for whole-layer placement or a supported `--tp N` tensor-parallel mode. With neither mode configured, the default is one device. Older commands and measurements below predate that default: migrate multi-GPU launches by adding `--layer-split N`. An explicit legacy `TS_DSV4_NGPU=0` still selects automatic placement over visible GPUs; unset it when using an explicit degree, or set it to that same count. Layer split is single-node only.
+> **Multi-GPU selection:** use `--layer-split N` for whole-layer placement or a supported `--tp N` tensor-parallel mode. With neither mode configured, the default is one device. Older commands and measurements below predate that default: migrate multi-GPU launches by adding `--layer-split N`. Layer split is single-node only.
 
 [← back to model index](README.md) | [中文](deepseek4_zh-cn.md)
 
@@ -29,7 +29,7 @@ DeepSeek V4 has three whole-model executors, reached through `--backend`:
   over a 4x4 matrix) and the lightning indexer still take the scheduler's CPU
   fallback, which is what is left of the Vulkan/CUDA gap. The decomposition is
   worth +34% prefill and +14% decode on Vulkan and is chosen automatically by a
-  load-time `ggml_backend_supports_op` probe (`TS_DSV4_HC_NATIVE=0/1` to A/B).
+  load-time `ggml_backend_supports_op` probe.
 - **`--backend ggml_cpu`**: the same native ggml executor on a single CPU
   compute device, with the architecture-specific ops running their scalar CPU
   kernels. Until V4.1 needed this path, the loader was asked for "any GPU" here
@@ -64,8 +64,7 @@ The native whole-model executor
 - Loads the (split) GGUF directly. `--layer-split N` distributes whole layers
   across N local GPUs, allowing weights larger than one device's VRAM (the
   128 GiB IQ4_XS build needs 2×80GB). With no placement setting the default is
-  one device. Legacy `TS_DSV4_NGPU=0` explicitly selects all visible GPUs; any
-  override must match an explicit layer-split count.
+  one device.
 - Owns all DSV4 KV state on-device: raw SWA ring, CSA/HCA compressed-K caches,
   lightning-indexer cache, and the compressor state rings.
 - Executes prefill/decode ubatches as single ggml graphs via
@@ -339,7 +338,7 @@ size). Start with a small one; move up only if acceptance is your bottleneck.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--draft-model <path>` | none | DSpark drafter GGUF (env `TS_DSV4_DSPARK`) |
+| `--draft-model <path>` | none | DSpark drafter GGUF (env `TS_SPEC_DRAFT_MODEL`) |
 | `--spec-draft <N>` | block size (5) | Cap on tokens drafted per step |
 | `--spec-pmin <p>` | `0.35` | Minimum CUMULATIVE acceptance probability (the product of the confidence head's per-position estimates) for a drafted position to be kept; `0` never gates |
 
@@ -404,18 +403,13 @@ confidence gate is what keeps that trade positive.
 |---|---|---|
 | `MAX_CONTEXT` | 65536 | Context window (caches scale with it; metadata allows 1M) |
 | `TS_DSV4_UBATCH` | 512 on `cpu` / 1024 otherwise | Prefill micro-batch |
-| `TS_DSV4_NGPU` | 1 | Number of GPUs to layer-split across (GPU backends) |
 | `TS_DSV4_VRAM_RESERVE_MB` | estimated per load (at least 2048); 2048 on `cuda` | GPU backends: overrides the VRAM held back per device for the scheduler's compute buffers. Unset, the ggml executor uses 2 GiB plus the lightning-indexer top-k transient and one ubatch of activations, so it grows with `MAX_CONTEXT` and `TS_DSV4_UBATCH`; `--backend cuda` uses a flat 2048. Lower it to offload fewer expert layers; raise it if a long prompt fails to allocate its graph |
 | `TS_N_CPU_MOE` / `TS_CPU_MOE` | 0 (off) | Leading layers whose routed experts stay in system RAM (same as `--n-cpu-moe` / `--cpu-moe`). Off by default; a model that does not fit is refused with the number that would work |
 | `TS_CPU_MOE_THREADS` | all usable CPUs (when offloading) | Worker threads for the host expert matmul on the ggml executors. With offload on, the pool takes `hardware_concurrency` clamped by the affinity mask and the cgroup CPU quota — not the halved default the other MoE architectures use, because a DSV4 offloaded layer reads far more expert bytes per token than theirs do and keeps scaling past that point. `--cpu-moe-threads N` overrides it, and an inherited `TS_CPU_MOE_THREADS` has the final say. Size it to the quota, not to `nproc`: 96 threads on a 23.8-CPU quota measured **25x** slower than 23. On a hosted server, leave the other threads room: the shared MoE pool on gemma-4-26B-A4B (not DSV4) ran 8.2 tok/s at 71 threads against 20.7 at 64 on a 95-CPU quota, so pass `--cpu-moe-threads` below the quota there |
 | `TS_DSV4_LOAD_THREADS` | 16 | `--backend cuda`: reader threads for the stream-to-VRAM loader |
 | `TS_DSV4_LOAD_STATS` | 0 | `--backend cuda`: 1 = per-stage loader timings |
-| `TS_DSV4_STAGED_EXPERTS` | 1 | `--backend cuda`: 0 = per-token expert kernels (A/B) |
-| `TS_CUDA_BF16_MATVEC` | 1 | 0 = single-row BF16 projections via cuBLAS instead of the dedicated matvec (`TS_DSV4_BF16_MATVEC` also accepted) |
 | `TS_DSV4_FA` | 1 | Flash attention (auto-probed, GPU backends) |
 | `TS_DSV4_PERF` | 0 | 1 = tok/s log + DSpark draft phase timings, 2 = per-ubatch stage timing |
-| `TS_DSV4_DSPARK` | — | DSpark drafter GGUF path (same as `--draft-model`) |
-| `TS_DSV4_DSPARK_CAPTURE` | 1 | 0 = skip the drafter's target-feature capture (A/B knob; drafts then go stale and are rejected) |
 | `TS_DSV4_THREADS` | all cores | CPU executor worker threads |
 | `TS_DSV4_MMAP` | 1 | CPU executor: 0 = copy all weights into RAM at load (parallel reads; use when the model sits on a network filesystem) |
 | `TS_DSV4_BUFFER_SHARDS` | — | CPU executor: comma-separated 1-based shard indexes to copy into RAM (mmap the rest) |

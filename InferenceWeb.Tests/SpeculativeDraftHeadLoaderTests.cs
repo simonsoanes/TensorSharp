@@ -31,13 +31,11 @@ public sealed class SpeculativeDraftHeadLoaderTests : IDisposable
         Directory.Delete(_dir, recursive: true);
     }
 
-    [Theory]
-    [InlineData(SpeculationEnvVars.DraftModel)]
-    [InlineData(SpeculationEnvVars.LegacyDraftModel)]
-    public void ConfiguredDraftHeadPath_TrimsEitherEnvironmentSpelling(string variable)
+    [Fact]
+    public void ConfiguredDraftHeadPath_TrimsTheEnvironmentValue()
     {
         string path = Path.Combine(_dir, "draft model.gguf");
-        _env.Set(variable, $"  {path}  ");
+        _env.Set(SpeculationEnvVars.DraftModel, $"  {path}  ");
 
         Assert.Equal(path, SpeculativeDraftHeadLoader.ConfiguredDraftHeadPath());
     }

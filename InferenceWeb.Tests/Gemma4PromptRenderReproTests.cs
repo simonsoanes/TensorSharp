@@ -487,8 +487,16 @@ public class Gemma4PromptRenderReproTests
             firstRoundBreakpoints);
         Assert.Contains("Created game.html", tokenizer.Decode(secondPrompt));
 
-        const string secondRawText =
-            "<|channel>thought\nThe file is ready.<channel|>Done.";
+        // Google's canonical template (2026-07-09) primes `<|channel>thought\n` after a
+        // tool result, so the model's own tokens start inside the open channel; earlier
+        // revisions leave the model to open it. Record the turn as ChatGenerationPipeline
+        // does: the primed opener travels as RawGenerationSuffix and the raw tokens are
+        // only what the model generated. Writing the opener into the raw tokens as well
+        // doubles it, which no sampled turn contains.
+        string secondSuffix = ChatGenerationPipeline.RecordedGenerationSuffix(tokenizer, secondPrompt, "gemma4", enableThinking: true);
+        string secondRawText = secondSuffix.EndsWith("<|channel>thought\n", StringComparison.Ordinal)
+            ? "The file is ready.<channel|>Done."
+            : "<|channel>thought\nThe file is ready.<channel|>Done.";
         List<int> secondRaw = tokenizer.Encode(secondRawText, addSpecial: false);
         var secondLive = new List<int>(secondPrompt);
         secondLive.AddRange(secondRaw);
@@ -502,6 +510,7 @@ public class Gemma4PromptRenderReproTests
                 Thinking = "The file is ready.",
                 RawOutputTokens = secondRaw,
                 RawPromptTrailingWhitespace = secondBoundary,
+                RawGenerationSuffix = secondSuffix,
             },
             new() { Role = "user", Content = "Send the link again." },
         };
@@ -542,7 +551,7 @@ public class Gemma4PromptRenderReproTests
         string? modelPath = FindModel();
         if (modelPath == null) { _output.WriteLine("gemma-4-12b GGUF not found; skipping"); return; }
 
-        BackendType backend = OperatingSystem.IsMacOS() ? BackendType.GgmlMetal : BackendType.GgmlCpu;
+        BackendType backend = TestGates.PinnedGgmlBackend;
         var model = (Gemma4Model)ModelBase.Create(modelPath, backend);
         try
         {
@@ -557,7 +566,7 @@ public class Gemma4PromptRenderReproTests
             // Drive the same continuous-batching engine the server uses.
             var cfg = SchedulerConfig.FromEnvironment();
             using var engine = new InferenceEngine(model, cfg, NullLogger.Instance);
-            var seq = new SequenceState("ff7", promptTokens, maxNewTokens: 64, blockSize: cfg.BlockSize,
+            var seq = new SequenceState("ff7", promptTokens, maxNewTokens: 64, blockSize: engine.PoolStats.blockSize,
                 samplingConfig: SamplingConfig.Greedy);
             var handle = engine.SubmitRequest(seq);
             var outToks = new List<int>();
@@ -594,7 +603,7 @@ public class Gemma4PromptRenderReproTests
         string? modelPath = FindModel();
         if (modelPath == null) { _output.WriteLine("gemma-4-12b GGUF not found; skipping"); return; }
 
-        BackendType backend = OperatingSystem.IsMacOS() ? BackendType.GgmlMetal : BackendType.GgmlCpu;
+        BackendType backend = TestGates.PinnedGgmlBackend;
         var model = (Gemma4Model)ModelBase.Create(modelPath, backend);
         try
         {
@@ -617,7 +626,7 @@ public class Gemma4PromptRenderReproTests
                 var hist = new List<ChatMessage> { new() { Role = "user", Content = q } };
                 var toks = renderer.RenderToTokens(model.Tokenizer, model.Config.ChatTemplate, hist, "gemma4", true);
                 var seq = new SequenceState(Guid.NewGuid().ToString("N"), toks, maxNewTokens: 64,
-                    blockSize: cfg.BlockSize, samplingConfig: SamplingConfig.Greedy);
+                    blockSize: engine.PoolStats.blockSize, samplingConfig: SamplingConfig.Greedy);
                 var handle = engine.SubmitRequest(seq);
                 var outToks = new List<int>();
                 await foreach (var t in handle.Tokens.ReadAllAsync()) outToks.Add(t);
@@ -653,7 +662,7 @@ public class Gemma4PromptRenderReproTests
         string? modelPath = FindModel();
         if (modelPath == null) { _output.WriteLine("gemma-4-12b GGUF not found; skipping"); return; }
 
-        BackendType backend = OperatingSystem.IsMacOS() ? BackendType.GgmlMetal : BackendType.GgmlCpu;
+        BackendType backend = TestGates.PinnedGgmlBackend;
         var model = (Gemma4Model)ModelBase.Create(modelPath, backend);
         try
         {

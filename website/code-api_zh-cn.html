@@ -334,7 +334,7 @@ foreach (SkillToolInvocation call in reply.SkillInvocations)
     </tbody>
   </table>
   </div>
-  <p>其他值得了解的运行时契约：<code>IModelArchitecture</code>、<code>IPromptRenderer</code>（由 <code>GgufPromptRenderer</code> 实现）、<code>IOutputProtocolParser</code>、<code>IMultimodalInjector</code> 以及 <code>IKvBlockCodec</code>（带内置 <code>TurboQuantKvCodec</code>）。</p>
+  <p>其他值得了解的运行时契约：<code>IModelArchitecture</code>、<code>IPromptRenderer</code>（由 <code>GgufPromptRenderer</code> 实现）、<code>IOutputProtocolParser</code> 以及 <code>IMultimodalInjector</code>。</p>
 
   <div class="callout tip"><div class="ic">💡</div><p>对多数应用而言，最简单的集成是运行 <a href="server_zh-cn.html">TensorSharp.Server.Host</a> 并通过<a href="http-api_zh-cn.html">兼容 OpenAI 的 API</a> 调用它 —— 你的应用进程保持干净，并免费获得连续批处理。当你需要进程内控制或自定义解码时，再使用库 API。</p></div>
 

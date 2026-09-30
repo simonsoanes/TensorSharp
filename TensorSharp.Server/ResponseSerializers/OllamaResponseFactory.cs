@@ -21,16 +21,6 @@ namespace TensorSharp.Server.ResponseSerializers;
 /// </summary>
 internal static class OllamaResponseFactory
 {
-    public static object QueueGenerateChunk(string? model, int position, int pending) => new
-    {
-        model,
-        created_at = TimestampNow(),
-        response = "",
-        done = false,
-        queue_position = position,
-        queue_pending = pending,
-    };
-
     public static object GenerateTokenChunk(string model, string piece) => new
     {
         model,
@@ -97,16 +87,6 @@ internal static class OllamaResponseFactory
             prompt_cache_hit_tokens = kvCacheReusedTokens,
             prompt_cache_hit_ratio = ComputeRatio(kvCacheReusedTokens, promptTokens),
         };
-
-    public static object QueueChatChunk(string model, int position, int pending) => new
-    {
-        model,
-        created_at = TimestampNow(),
-        message = new { role = "assistant", content = "" },
-        done = false,
-        queue_position = position,
-        queue_pending = pending,
-    };
 
     public static object ChatRawTokenChunk(string model, string? piece) => new
     {

@@ -118,9 +118,6 @@ namespace TensorSharp.Models
         /// construction in the loader), and the kernel needs the ggml enum value.</summary>
         private const int GgmlTypeF32 = 0;
 
-        private static readonly bool DFlashFusedEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_DFLASH_FUSED"), "0", StringComparison.Ordinal);
-
         /// <summary>
         /// Same backend set as the trunk kernel (see
         /// <c>MuseGlimmerModel.Fused.CanUseFusedForward</c>): CUDA, Vulkan and
@@ -133,7 +130,7 @@ namespace TensorSharp.Models
         /// generation took 46.7 s with `--draft-model` versus 17.7 s without.
         /// </summary>
         private bool CanUseFusedDFlash =>
-            DFlashFusedEnabled && _hasDFlash && !IsTensorParallel &&
+            _hasDFlash && !IsTensorParallel &&
             (_backend == BackendType.GgmlCuda || _backend == BackendType.GgmlVulkan ||
              _backend == BackendType.GgmlMetal);
 

@@ -96,7 +96,7 @@ namespace TensorSharp.Server.Host.Hosting
                     "it. Requires --model. Default: none — pass the matching projector explicitly.",
                     "--mmproj mmproj-gemma-4-E4B-it-Q8_0.gguf"),
                 new OptionHelp("--embeddings",
-                    "Host a GGUF embedding encoder instead of a chat model. Exposes /v1/embeddings, /api/embed, and /api/embeddings. " +
+                    "Host a GGUF embedding encoder instead of a chat model. Exposes /v1/embeddings and /api/embed. " +
                     "Requires --model; supports cpu (pure C#, no native libraries), ggml_cpu, ggml_metal, and ggml_cuda. Chat prefix warmup is skipped.",
                     "--model snowflake-arctic-embed-l-v2.0-q8_0.gguf --embeddings --no-webui"),
                 new OptionHelp("--embedding-threads <N>",
@@ -257,61 +257,19 @@ namespace TensorSharp.Server.Host.Hosting
                     "memory. Default: auto — the backend/model pick (KV_CACHE_DTYPE env var overrides).",
                     "--kv-cache-dtype q8_0"),
             }),
-            // Accepted, because config files and command lines in the wild carry them and a
-            // refusal would stop those servers starting - but no server request path builds
-            // the cache they configure, so the page says so rather than advertising a feature,
-            // and startup warns once naming each one it was given.
-            ("Standalone paged KV cache (accepted, NO EFFECT on the server - only TensorSharp.Cli --paged-bench builds it)", new[]
-            {
-                new OptionHelp("--paged-kv | --no-paged-kv",
-                    "Enable/disable the standalone paged KV cache (RAM/SSD/Redis block tiers with an optional " +
-                    "TurboQuant codec). Accepted for compatibility and inert here: the server never builds that " +
-                    "cache, so no request reads or fills it, and startup logs a warning naming every flag in this " +
-                    "section it was given. Prefix reuse across requests is served by the radix prefix cache, " +
-                    "on by default (see --no-prefix-cache). Default: off.",
-                    "--paged-kv"),
-                new OptionHelp("--paged-kv-block-size <N>",
-                    "Tokens per KV block of the standalone cache. No effect on the server. Default: 256.",
-                    "--paged-kv-block-size 128"),
-                new OptionHelp("--paged-kv-ram-mb <N>",
-                    "RAM budget for evicted KV blocks, in MB. No effect on the server. Default: 1024.",
-                    "--paged-kv-ram-mb 2048"),
-                new OptionHelp("--paged-kv-ssd-dir <path>",
-                    "Directory for the SSD spill tier. No effect on the server. Default: disabled.",
-                    "--paged-kv-ssd-dir D:\\ts-kv-spill"),
-                new OptionHelp("--paged-kv-ssd-mb <N>",
-                    "SSD budget for spilled KV blocks, in MB. No effect on the server. Default: 16384.",
-                    "--paged-kv-ssd-mb 32768"),
-                new OptionHelp("--paged-kv-quant-bits <b>",
-                    "Quantize spilled KV blocks with the TurboQuant codec: 0 (off), 2, 4, or 8 bits per element " +
-                    "(2-bit uses an affine min+scale layout, ~4x smaller than the f16 payload). Validated, then " +
-                    "no effect on the server. Default: 0.",
-                    "--paged-kv-quant-bits 8"),
-                new OptionHelp("--paged-kv-redis-url <url>",
-                    "Redis connection string for the standalone cache's shared KV tier (e.g. localhost:6379). " +
-                    "No effect on the server. Default: disabled.",
-                    "--paged-kv-redis-url localhost:6379"),
-                new OptionHelp("--paged-kv-redis-ttl <min>",
-                    "TTL in minutes for that tier's Redis entries (0 = no TTL). No effect on the server. " +
-                    "Default: 1440.",
-                    "--paged-kv-redis-ttl 60"),
-            }),
             ("Responses API store", new[]
             {
                 new OptionHelp("--redis-url <url>",
                     "Redis connection string for the Responses API store - the stored responses GET " +
                     "/v1/responses/{id} and previous_response_id read back - so they survive a restart and can " +
                     "be shared by several server instances. Without it the store is a bounded in-memory cache. " +
-                    "An already-set TS_RESPONSES_STORE_REDIS_URL env var wins. The flag also fills in the " +
-                    "standalone KV cache's Redis URL (TS_KV_CACHE_REDIS_URL), which the server does not use " +
-                    "(see above). Default: in-memory store.",
+                    "An already-set TS_RESPONSES_STORE_REDIS_URL env var wins. Default: in-memory store.",
                     "--redis-url localhost:6379"),
             }),
             ("Scheduling", new[]
             {
                 new OptionHelp("--continuous-batching | --no-continuous-batching",
-                    "Paged-attention continuous batching across concurrent requests (aliases --paged-batching / " +
-                    "--no-paged-batching). Default: on.",
+                    "Paged-attention continuous batching across concurrent requests. Default: on.",
                     "--no-continuous-batching"),
                 new OptionHelp("--prefill-chunk-size <N>",
                     "Per-request prefill cap while a decode is active; smaller chunks give streaming requests more " +
@@ -444,19 +402,17 @@ namespace TensorSharp.Server.Host.Hosting
                 new OptionHelp("--video-vae <path>",
                     "Video VAE (wan_2.1_vae.safetensors, or Wan2.2_VAE.safetensors for TI2V-5B; " +
                     "minimax_h3_video_vae_fp16.safetensors for MiniMax-H3). Default: same-directory scan next " +
-                    "to the DiT model, VAE/ subfolders included (TS_VIDEO_VAE). The former spelling " +
-                    "--wan-vae is still accepted.",
+                    "to the DiT model, VAE/ subfolders included (TS_VIDEO_VAE).",
                     "--video-vae Wan2.2_VAE.safetensors"),
                 new OptionHelp("--video-text-encoder <path>",
                     "Text-encoder GGUF (UMT5-XXL for Wan, Qwen3-VL-32B for MiniMax-H3). Default: " +
-                    "same-directory scan (TS_VIDEO_TEXT_ENCODER). Also spelled --video-te; the former " +
-                    "spelling --wan-te is still accepted.",
+                    "same-directory scan (TS_VIDEO_TEXT_ENCODER).",
                     "--video-text-encoder umt5-xxl-encoder-Q8_0.gguf"),
                 new OptionHelp("--video-dit2 <path>",
                     "Second diffusion expert on dual-expert models (Wan 2.2 A14B's high/low-noise partner of " +
                     "--model). Default: auto-resolved by name from the same or a sibling folder " +
                     "(TS_VIDEO_DIT2); needed only when the pair is not co-located, or to name it in a " +
-                    "--config file. The former spelling --wan-dit2 is still accepted.",
+                    "--config file.",
                     "--video-dit2 wan2.2_i2v_A14b_low_noise-Q4_K_M.gguf"),
                 new OptionHelp("--audio-vae <path>",
                     "Audio VAE for models that generate an audio track jointly with the video " +
@@ -751,7 +707,7 @@ namespace TensorSharp.Server.Host.Hosting
         /// Every flag token named on the usage page, placeholders stripped.
         ///
         /// Exists so a test can assert the page and the parser agree. They drifted
-        /// twice: <c>--wan-vae</c>/<c>--wan-te</c> and later every <c>--spec*</c>
+        /// twice: two video-companion spellings and later every <c>--spec*</c>
         /// spelling were documented here while ServerOptionsBuilder.ParseArgs
         /// rejected them as unknown options, so the server refused to start on a
         /// flag its own <c>--help</c> advertised.

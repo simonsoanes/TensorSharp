@@ -209,19 +209,88 @@ public class PrefixTreeEvaluateTests
         Assert.Equal(SourceDecline.ModelRefused, plan.TruncationDecline);
         Assert.Equal(0, t.QueuedRefusalCount);   // a truncation refusal does not invalidate the payload
 
-        // Donate-only (DSV4.1): a rewind beyond the donation slack (DEC-14 (f)) rejects the candidate,
-        // one within it donates.
+        // Donate-only (DSV4.1 retained slots): the slot's OWN conversation may rewind it past the donation
+        // slack (DEC-14 (f)) wherever the model can - a thinking turn always rewinds past the previous
+        // answer, and a donate-only slot serves one consumer at most. One within the slack donates as before.
         PrefixTree n = Tk.Tree(Tk.Caps(endState: EndStateSupport.DonateOnly, truncation: TruncationKind.ModelDecides, granularity: 2,
                                        pages: PageSupport.None), validator: validator);
         int sn = Tk.Scope(n);
         Tk.Put(n, Tk.Key(n, conv), 60, sn);
         plan = Tk.Plan(n, Tk.Req(Tk.Key(n, Tk.Cat(Tk.Seq(1, 35), Tk.Seq(900, 5))), sn));
-        Assert.Equal(CandidateKind.None, plan.Kind);
-        Assert.Equal(SourceDecline.DonateOnlyShared, plan.TruncationDecline);
+        Assert.Equal(CandidateKind.TruncatedEndState, plan.Kind);
+        Assert.Equal(34, plan.Length);
+        Assert.Equal(MaterializeMode.DonateEndState, plan.Mode);
         plan = Tk.Plan(n, Tk.Req(Tk.Key(n, Tk.Cat(Tk.Seq(1, 47), Tk.Seq(900, 5))), sn));
         Assert.Equal(CandidateKind.TruncatedEndState, plan.Kind);
         Assert.Equal(46, plan.Length);
         Assert.Equal(MaterializeMode.DonateEndState, plan.Mode);
+        // ...but only where the model reaches (the validator refuses a 40-token rewind)...
+        plan = Tk.Plan(n, Tk.Req(Tk.Key(n, Tk.Cat(Tk.Seq(1, 20), Tk.Seq(900, 5))), sn));
+        Assert.Equal(CandidateKind.None, plan.Kind);
+        Assert.Equal(SourceDecline.ModelRefused, plan.TruncationDecline);
+        // ...and only for its own conversation. Another one that shares the slot's first 34 tokens as a
+        // public prefix never reaches the scoped slot at all (the truncation search visits only public and
+        // own-scope nodes), so it cannot take it whatever the slack says.
+        PrefixTree m = Tk.Tree(Tk.Caps(endState: EndStateSupport.DonateOnly, truncation: TruncationKind.ModelDecides, granularity: 2,
+                                       pages: PageSupport.None), validator: validator);
+        int owner = Tk.Scope(m), other = Tk.Scope(m);
+        Tk.Put(m, Tk.Key(m, conv), 60, owner, p: 34);
+        plan = Tk.Plan(m, Tk.Req(Tk.Key(m, Tk.Cat(Tk.Seq(1, 35), Tk.Seq(900, 5))), other, p: 34));
+        Assert.Equal(CandidateKind.None, plan.Kind);
+        plan = Tk.Plan(m, Tk.Req(Tk.Key(m, Tk.Cat(Tk.Seq(1, 35), Tk.Seq(900, 5))), owner, p: 34));
+        Assert.Equal(MaterializeMode.DonateEndState, plan.Mode);
+        Assert.Equal(34, plan.Length);
+    }
+
+    [Fact]
+    public void ModelDecides_PrimaryADeclineCannotKeep_IsKeptPastTheSlack_WhenTheModelReachesTheTarget()
+    {
+        // DeepSeek V4.1 by default: no retained slots, so the primary is the only state and a decline
+        // loses it at the next step anyway. A thinking turn keeps the previous prompt only by rewinding
+        // past the whole previous answer - here 60 -> 34, 26 > 16 - which the model serves from its
+        // prompt-boundary checkpoint. Before the fix (f) refused it and every such turn reused nothing.
+        var validator = new FakeValidator { PrimaryRule = (payload, target) => target >= 30 };
+        PrefixTree t = Tk.Tree(Tk.Caps(endState: EndStateSupport.None, truncation: TruncationKind.ModelDecides, granularity: 2,
+                                       rewindCap: int.MaxValue, pages: PageSupport.None, adoptPrimary: false), validator: validator);
+        int s = Tk.Scope(t);
+        int[] conv = Tk.Seq(1, 80);
+        RadixNode primary = Tk.Put(t, Tk.Key(t, conv), 60, s, payload: Tk.Primary(t));
+        MatchPlan plan = Tk.Plan(t, Tk.Req(Tk.Key(t, Tk.Cat(Tk.Seq(1, 35), Tk.Seq(900, 5))), s));
+        Assert.Equal(CandidateKind.TruncatedEndState, plan.Kind);
+        Assert.Same(primary, plan.PayloadNode);
+        Assert.Equal(34, plan.Length);
+        Assert.Equal(MaterializeMode.KeepPrimary, plan.Mode);
+        Assert.Equal(1, validator.PrimaryCalls);
+        Assert.Equal(0, validator.Calls);          // a primary's key means nothing to CanMaterialize
+
+        // A target the model cannot reach is declined up front, not promised and then retracted.
+        plan = Tk.Plan(t, Tk.Req(Tk.Key(t, Tk.Cat(Tk.Seq(1, 21), Tk.Seq(900, 5))), s));
+        Assert.Equal(CandidateKind.None, plan.Kind);
+        Assert.Equal(SourceDecline.ModelRefused, plan.TruncationDecline);
+        Assert.Equal(0, t.QueuedRefusalCount);     // the primary itself stays valid
+
+        // Within the slack nothing changes: the model is not asked.
+        int asked = validator.PrimaryCalls;
+        plan = Tk.Plan(t, Tk.Req(Tk.Key(t, Tk.Cat(Tk.Seq(1, 51), Tk.Seq(900, 5))), s));
+        Assert.Equal(MaterializeMode.KeepPrimary, plan.Mode);
+        Assert.Equal(50, plan.Length);
+        Assert.Equal(asked, validator.PrimaryCalls);
+
+        // Another conversation still reaches only the public prefix of it.
+        int other = Tk.Scope(t);
+        plan = Tk.Plan(t, Tk.Req(Tk.Key(t, Tk.Cat(Tk.Seq(1, 35), Tk.Seq(900, 5))), other));
+        Assert.Equal(CandidateKind.None, plan.Kind);
+
+        // A primary a decline DOES keep (it converts, then clones) is still bound by (f).
+        PrefixTree c = Tk.Tree(Tk.Caps(endState: EndStateSupport.CopyAndDonate, truncation: TruncationKind.ModelDecides, granularity: 2,
+                                       rewindCap: int.MaxValue, pages: PageSupport.None, adoptPrimary: true), validator: validator);
+        int sc = Tk.Scope(c);
+        Tk.Put(c, Tk.Key(c, conv), 60, sc, payload: Tk.Primary(c));
+        asked = validator.PrimaryCalls;
+        plan = Tk.Plan(c, Tk.Req(Tk.Key(c, Tk.Cat(Tk.Seq(1, 35), Tk.Seq(900, 5))), sc));
+        Assert.Equal(CandidateKind.TruncatedEndState, plan.Kind);
+        Assert.Equal(MaterializeMode.ConvertPrimaryThenClone, plan.Mode);
+        Assert.Equal(asked, validator.PrimaryCalls);
     }
 
     [Fact]

@@ -100,7 +100,6 @@ namespace TensorSharp.Cuda
             int effectiveAttendLen = circular ? Math.Min(attendLen, cacheSize) : attendLen;
             bool useGroup4D512 =
                 keyIsHalf &&
-                CudaKernels.GqaDecodeGroup4Enabled &&
                 !circular &&
                 hasSinks == 0 &&
                 numQHeads == numKVHeads * 4 &&
@@ -1223,8 +1222,6 @@ namespace TensorSharp.Cuda
             valueStorage.EnsureDeviceCurrent();
             allocator.Context.MakeCurrent();
             bool useGroup4D256 =
-                CudaKernels.GqaPrefillGroup4Enabled &&
-                CudaKernels.GqaPrefillWarpCooperativeEnabled &&
                 numQHeads == numKVHeads * 4 &&
                 headDim == 256 &&
                 seqLen >= 32 &&
@@ -1232,8 +1229,6 @@ namespace TensorSharp.Cuda
                 windowSize <= 512 &&
                 (long)maskStart + seqLen <= kvLen;
             bool useGroup4D512 =
-                CudaKernels.GqaPrefillGroup4Enabled &&
-                CudaKernels.GqaPrefillWarpCooperativeEnabled &&
                 numQHeads == numKVHeads * 4 &&
                 headDim == 512 &&
                 seqLen >= 128 &&
@@ -1241,24 +1236,20 @@ namespace TensorSharp.Cuda
                 windowSize == 0 &&
                 (long)maskStart + seqLen <= kvLen;
             bool useGroup4OnlineD512 =
-                CudaKernels.GqaPrefillGroup4Enabled &&
-                CudaKernels.GqaPrefillWarpCooperativeEnabled &&
                 numQHeads == numKVHeads * 4 &&
                 headDim == 512 &&
                 kvLen > 2048 &&
                 kvLen <= 8192 &&
                 windowSize == 0 &&
                 (long)maskStart + seqLen <= kvLen;
-            // Flash-style tiled kernel: same routing eligibility as the two-pass
-            // group4 kernels it replaces (both f16 and f32 K/V), but the Q tile
-            // is staged once and K/V traffic is amortized across 16-32 score
-            // rows per CTA.
-            if (CudaKernels.GqaPrefillFlashEnabled &&
-                (useGroup4D256 || useGroup4D512 || useGroup4OnlineD512))
+            // Flash-style tiled kernel for the four-Q-heads-per-KV-head shapes (both
+            // f16 and f32 K/V): the Q tile is staged once and K/V traffic is
+            // amortized across 16-32 score rows per CTA.
+            if (useGroup4D256 || useGroup4D512 || useGroup4OnlineD512)
             {
                 // flash2 = flash1 with a larger K chunk (fewer sync rounds); same
                 // f32 math, so it serves both cache dtypes.
-                if (CudaKernels.GqaPrefillFlash2Enabled && kernels.Flash2Supports(headDim))
+                if (kernels.Flash2Supports(headDim))
                 {
                     kernels.LaunchGqaPrefillFlash2Group4(
                         queryPtr, keyPtr, valuePtr, IntPtr.Zero, resultPtr,
@@ -1288,118 +1279,7 @@ namespace TensorSharp.Cuda
                 resultStorage.MarkDeviceModified();
                 return true;
             }
-            if (useGroup4OnlineD512)
-            {
-                if (keyIsHalf)
-                {
-                    kernels.LaunchGqaPrefillAttentionGroup4OnlineD512F16(
-                        queryPtr,
-                        keyPtr,
-                        valuePtr,
-                        resultPtr,
-                        numQHeads,
-                        numKVHeads,
-                        seqLen,
-                        kvLen,
-                        headDim,
-                        maskStart,
-                        windowSize,
-                        scale,
-                        kStride,
-                        allocator.Stream.Handle);
-                }
-                else
-                {
-                    kernels.LaunchGqaPrefillAttentionGroup4OnlineD512F32(
-                        queryPtr,
-                        keyPtr,
-                        valuePtr,
-                        resultPtr,
-                        numQHeads,
-                        numKVHeads,
-                        seqLen,
-                        kvLen,
-                        headDim,
-                        maskStart,
-                        windowSize,
-                        scale,
-                        kStride,
-                        allocator.Stream.Handle);
-                }
-            }
-            else if (useGroup4D512 && keyIsHalf)
-            {
-                kernels.LaunchGqaPrefillAttentionGroup4D512F16(
-                    queryPtr,
-                    keyPtr,
-                    valuePtr,
-                    resultPtr,
-                    numQHeads,
-                    numKVHeads,
-                    seqLen,
-                    kvLen,
-                    headDim,
-                    maskStart,
-                    windowSize,
-                    scale,
-                    kStride,
-                    allocator.Stream.Handle);
-            }
-            else if (useGroup4D512)
-            {
-                kernels.LaunchGqaPrefillAttentionGroup4D512F32(
-                    queryPtr,
-                    keyPtr,
-                    valuePtr,
-                    resultPtr,
-                    numQHeads,
-                    numKVHeads,
-                    seqLen,
-                    kvLen,
-                    headDim,
-                    maskStart,
-                    windowSize,
-                    scale,
-                    kStride,
-                    allocator.Stream.Handle);
-            }
-            else if (useGroup4D256 && keyIsHalf)
-            {
-                kernels.LaunchGqaPrefillAttentionGroup4D256F16(
-                    queryPtr,
-                    keyPtr,
-                    valuePtr,
-                    resultPtr,
-                    numQHeads,
-                    numKVHeads,
-                    seqLen,
-                    kvLen,
-                    headDim,
-                    maskStart,
-                    windowSize,
-                    scale,
-                    kStride,
-                    allocator.Stream.Handle);
-            }
-            else if (useGroup4D256)
-            {
-                kernels.LaunchGqaPrefillAttentionGroup4D256F32(
-                    queryPtr,
-                    keyPtr,
-                    valuePtr,
-                    resultPtr,
-                    numQHeads,
-                    numKVHeads,
-                    seqLen,
-                    kvLen,
-                    headDim,
-                    maskStart,
-                    windowSize,
-                    scale,
-                    kStride,
-                    allocator.Stream.Handle);
-            }
-            else if (keyIsHalf)
+            if (keyIsHalf)
             {
                 kernels.LaunchGqaPrefillAttentionF16(
                     queryPtr,
@@ -1520,15 +1400,13 @@ namespace TensorSharp.Cuda
             // one-CTA-per-(q_head, position) sinks kernels walk the whole
             // visible K/V serially per query (~38 ms per 2k-token layer);
             // the flash tile amortizes K/V across 32 score rows.
-            if (CudaKernels.GqaPrefillFlashEnabled &&
-                CudaKernels.GqaPrefillGroup4Enabled &&
-                numQHeads == numKVHeads * 4 &&
+            if (numQHeads == numKVHeads * 4 &&
                 (headDim == 256 || headDim == 512) &&
                 seqLen >= 16 &&
                 (long)maskStart + seqLen <= kvLen)
             {
                 // flash2 = flash1 with a larger K chunk (fewer sync rounds).
-                if (CudaKernels.GqaPrefillFlash2Enabled && kernels.Flash2Supports(headDim))
+                if (kernels.Flash2Supports(headDim))
                 {
                     kernels.LaunchGqaPrefillFlash2Group4(
                         queryPtr, keyPtr, valuePtr, sinksPtr, resultPtr,
@@ -1670,7 +1548,6 @@ namespace TensorSharp.Cuda
             IntPtr dyn = CudaDecodeDynParams.GetActiveDevicePtr(allocator);
             bool useGroup4D512 =
                 keyIsHalf &&
-                CudaKernels.GqaDecodeGroup4Enabled &&
                 !circular &&
                 numQHeads == numKVHeads * 4 &&
                 headDim == 512;
@@ -1726,7 +1603,6 @@ namespace TensorSharp.Cuda
             }
 
             if (keyIsHalf &&
-                CudaKernels.GqaDecodeGroup4Enabled &&
                 circular &&
                 (attendLen >= cacheSize || attendStart == 0) &&
                 numQHeads == numKVHeads * 4 &&
@@ -1828,7 +1704,6 @@ namespace TensorSharp.Cuda
             // because the model's logical sequence length has grown large.
             bool useGroup4D512 =
                 keyIsHalf &&
-                CudaKernels.GqaDecodeGroup4Enabled &&
                 !circular &&
                 hasSinks == 0 &&
                 numQHeads == numKVHeads * 4 &&
@@ -1846,7 +1721,6 @@ namespace TensorSharp.Cuda
             // lower-overhead single-block kernels.
             bool useGroup4D256Ring =
                 keyIsHalf &&
-                CudaKernels.GqaDecodeGroup4Enabled &&
                 numQHeads == numKVHeads * 4 &&
                 headDim == 256 &&
                 (circular

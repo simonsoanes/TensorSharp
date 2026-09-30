@@ -175,8 +175,10 @@ public class MuseGlimmerKvSnapshotTests
         }
         float[] baseline = (float[])model.Forward(new[] { nextToken }).Clone();
 
-        // 2. Fresh cache, replay the captured blocks, same next token.
-        model.ResetKVCache();
+        // 2. Fresh cache, replay the captured blocks, same next token. Scrambled
+        //    first: a reset keeps the device copies on the GPU backends, so a replay
+        //    that restored nothing would otherwise read the live prefill's rows back.
+        ScrambleCache(model, prefixLen + 1);
         for (int b = 0; b < numBlocks; b++)
         {
             Assert.True(model.TryInjectKVBlock(b * BlockSize, BlockSize, blocks[b]),
@@ -202,7 +204,130 @@ public class MuseGlimmerKvSnapshotTests
             $"Restored logits differ from the live prefill (max |delta| {maxAbs:E3}); the snapshot is lossy.");
     }
 
+    /// <summary>
+    /// The restore above again, at ggml_metal's default: the full layers START at
+    /// 2048 rows, below the 4352-row sliding-window ring, and the prefix is the
+    /// 1536 tokens the server's radix cache reused when the bug showed up. The
+    /// kernel used to address the ring as a [2048]-row flat cache there, so the
+    /// captured blocks held zeros for all 39 sliding-window layers and the
+    /// restored model answered from half its context. (The tests above pin
+    /// MAX_CONTEXT=8192, which sizes the cache past the ring and hid this.)
+    /// </summary>
+    [MuseGlimmerKvFact]
+    public void MuseGlimmer_RestoringAPrefixBelowTheRingCapacity_ReproducesTheLivePrefillLogits()
+    {
+        string modelPath = TryFindModel();
+        Assert.True(modelPath != null, "The model gate admitted this test but no Muse-Glimmer*.gguf was found.");
+
+        using var env = new EnvScope();
+        env.Set("TS_KV_INITIAL_TOKENS", "2048");
+        using var model = ModelBase.Create(modelPath, ResolveBackend());
+
+        const int prefixLen = 6 * BlockSize;
+        int[] tokens = BuildPrompt(model, prefixLen + 1);
+        int nextToken = tokens[prefixLen];
+
+        model.ResetKVCache();
+        model.Forward(tokens.Take(prefixLen).ToArray());
+        long blockBytes = model.ComputeKVBlockByteSize(BlockSize);
+        var blocks = new byte[prefixLen / BlockSize][];
+        for (int b = 0; b < blocks.Length; b++)
+        {
+            blocks[b] = new byte[blockBytes];
+            Assert.True(model.TryExtractKVBlock(b * BlockSize, BlockSize, blocks[b]), $"capture of block {b} failed");
+        }
+        float[] baseline = (float[])model.Forward(new[] { nextToken }).Clone();
+
+        ScrambleCache(model, prefixLen + 1);
+        for (int b = 0; b < blocks.Length; b++)
+            Assert.True(model.TryInjectKVBlock(b * BlockSize, BlockSize, blocks[b]), $"restore of block {b} failed");
+        float[] restored = (float[])model.Forward(new[] { nextToken }).Clone();
+
+        float maxAbs = MaxAbsDiff(baseline, restored);
+        _output.WriteLine($"restored {prefixLen} tokens at the default capacity: max |delta| {maxAbs:E3}, " +
+            $"argmax live={ArgMax(baseline)} restored={ArgMax(restored)}");
+        Assert.True(maxAbs == 0f,
+            $"Restored logits differ from the live prefill (max |delta| {maxAbs:E3}); the snapshot is lossy.");
+    }
+
+    /// <summary>
+    /// Decode across the full layers' first grows (256 -> 512 -> 1024) with the
+    /// real weights and compare every step with a cache that was big enough from
+    /// the start. Before the fix the first grow dropped every row the fused kernel
+    /// had written on the device, and greedy decode fell into a one-token loop -
+    /// on ggml_metal at position 2049, where its default 2048-row cache first grows.
+    /// </summary>
+    [MuseGlimmerKvFact]
+    public void MuseGlimmer_DecodingAcrossACacheGrow_MatchesAPresizedCache()
+    {
+        string modelPath = TryFindModel();
+        Assert.True(modelPath != null, "The model gate admitted this test but no Muse-Glimmer*.gguf was found.");
+
+        const int promptLen = 200, steps = 360;   // positions 200..559: grows at 256 and 512
+        int[] prompt = null;
+        // A bit-exact comparison, so a digest per step stands in for 202K logits.
+        List<(string Digest, int ArgMax)> Run(string initialTokens, int[] forced, out int[] chosen)
+        {
+            using var env = new EnvScope();
+            env.Set("TS_KV_INITIAL_TOKENS", initialTokens);
+            using var model = ModelBase.Create(modelPath, ResolveBackend());
+            prompt ??= BuildPrompt(model, promptLen);
+            model.ResetKVCache();
+            var digests = new List<(string, int)>(steps);
+            chosen = new int[steps];
+            float[] current = model.Forward(prompt);
+            for (int i = 0; i < steps; i++)
+            {
+                var bytes = new byte[current.Length * sizeof(float)];
+                Buffer.BlockCopy(current, 0, bytes, 0, bytes.Length);
+                digests.Add((Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)), ArgMax(current)));
+                chosen[i] = forced != null ? forced[i] : ArgMax(current);
+                if (i + 1 < steps)
+                    current = model.Forward(new[] { chosen[i] });
+            }
+            return digests;
+        }
+
+        var presized = Run("8192", null, out int[] reference);
+        var grown = Run("256", reference, out _);
+
+        for (int i = 0; i < steps; i++)
+        {
+            Assert.True(presized[i].Digest == grown[i].Digest,
+                $"Step {i} (position {promptLen + i}) differs from the presized cache (argmax {presized[i].ArgMax} " +
+                $"vs {grown[i].ArgMax}): the grow lost or moved K/V rows.");
+        }
+        _output.WriteLine($"{steps} decode steps across two grows matched the presized cache exactly.");
+    }
+
     // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Overwrite the first <paramref name="rows"/> positions - host rows AND their
+    /// device copies - with unrelated K/V, then empty the cache again, so a restore
+    /// has to put every row back itself to reproduce the live logits.
+    /// </summary>
+    private static void ScrambleCache(ModelBase model, int rows)
+    {
+        model.ResetKVCache();
+        int[] other = BuildPrompt(model, rows);
+        Array.Reverse(other);
+        model.Forward(other);
+        model.ResetKVCache();
+    }
+
+    private static float MaxAbsDiff(float[] a, float[] b)
+    {
+        Assert.Equal(a.Length, b.Length);
+        float max = 0f;
+        for (int i = 0; i < a.Length; i++)
+        {
+            float d = Math.Abs(a[i] - b[i]);
+            if (float.IsNaN(d)) return float.NaN;
+            if (d > max) max = d;
+        }
+        return max;
+    }
 
     /// <summary>Tile a real tokenization up to <paramref name="length"/> tokens.
     /// Content does not matter here - only that the positions are real.</summary>

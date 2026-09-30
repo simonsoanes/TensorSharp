@@ -2616,11 +2616,6 @@ public sealed class AgentAppHost : IDisposable
                 // and nothing to release. Not a fallback: the engine that would need
                 // shutting down was never there.
             }
-            catch (EntryPointNotFoundException)
-            {
-                // An older GgmlOps without the entry point. Same conclusion, and the
-                // process is already on its way out; there is nowhere left to report.
-            }
         };
     }
 

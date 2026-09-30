@@ -345,8 +345,7 @@ namespace TensorSharp.Models.QwenImage
 
         // The managed attention below reads raw host pointers, so it is limited to the
         // pure-C# backend; every other backend keeps the tensor-op sequence.
-        private bool UseManagedAttention => _backend == BackendType.Cpu &&
-            Environment.GetEnvironmentVariable("TS_QWEN_TE_CPU_ATTN") != "0";
+        private bool UseManagedAttention => _backend == BackendType.Cpu;
 
         /// <summary>
         /// Causal grouped-query attention over the row-major projections: q [seq, H*D],
@@ -470,12 +469,8 @@ namespace TensorSharp.Models.QwenImage
         // selects the packed F32 GEMM instead, reading the quantized weight through
         // QuantRowsPanelSource (each tile dequantized once per forward, with exact F32
         // activations: 1e-6 relative to a double-precision reference per projection, against
-        // ~4e-3 for the 8-bit route). TS_QWEN_TE_CPU_GEMM=0 turns both the packed GEMM and the
-        // vectorized SiLU off, so that TS_QWEN_TE_CPU_GEMM=0 TS_QWEN_TE_CPU_ATTN=0 reproduce the
-        // previous per-op path bit for bit (the RoPE tables and the per-token QK norm are
-        // bit-identical to what they replaced).
-        private static readonly bool CpuGemmOn = Environment.GetEnvironmentVariable("TS_QWEN_TE_CPU_GEMM") != "0";
-        private static readonly bool F32MatmulOn = CpuGemmOn && string.Equals(
+        // ~4e-3 for the 8-bit route).
+        private static readonly bool F32MatmulOn = string.Equals(
             Environment.GetEnvironmentVariable("TS_QWEN_TE_CPU_MATMUL")?.Trim(), "f32", StringComparison.OrdinalIgnoreCase);
 
         // Parity reference for the harness (QwenImageStagesBench text --f64-linear), never set in
@@ -555,12 +550,12 @@ namespace TensorSharp.Models.QwenImage
 
         // gate = silu(gate) * up. Chunked (one delegate per 16K values, not per value) and, with
         // the packed GEMM on the pure-C# backend, vectorized: the vectorized exp is within an ulp
-        // or two of MathF.Exp. Other backends (and TS_QWEN_TE_CPU_GEMM=0) keep the scalar formula.
+        // or two of MathF.Exp. Other backends keep the scalar formula.
         private unsafe void SiluMulInPlace(Tensor gate, Tensor up)
         {
             int n = (int)gate.ElementCount();
             nint gL = (nint)GetFloatPtr(gate), uL = (nint)GetFloatPtr(up);
-            bool vectorized = _backend == BackendType.Cpu && CpuGemmOn;
+            bool vectorized = _backend == BackendType.Cpu;
             const int Chunk = 16 * 1024;
             Parallel.For(0, (n + Chunk - 1) / Chunk, c =>
             {

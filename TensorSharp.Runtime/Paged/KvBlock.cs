@@ -14,15 +14,9 @@ namespace TensorSharp.Runtime.Paged
     /// <c>blockSize</c> tokens worth of K/V state across all model layers,
     /// referenced by zero or more <see cref="SequenceState"/> instances.
     ///
-    /// A block is in one of three states:
-    ///   * Live and owned: <c>RefCount &gt; 0</c>. The block holds the K/V for some
-    ///     active sequence(s). Cannot be evicted.
-    ///   * Cached and free: <c>RefCount == 0 &amp;&amp; ContentHash.HasValue</c>. The block
-    ///     is in the free queue (LRU end) and also indexed by content hash so a
-    ///     future sequence with the same prefix can adopt it for free.
-    ///   * Empty and free: <c>RefCount == 0 &amp;&amp; ContentHash == null</c>. The block
-    ///     has never held content (or its hash was evicted). It is at the front of
-    ///     the free queue and will be handed out first.
+    /// A block is live (<c>RefCount &gt; 0</c>: it holds K/V for some active
+    /// sequence(s), or the prefix cache holds it) or free (<c>RefCount == 0</c>: in the
+    /// free queue, holding nothing).
     ///
     /// Mutation is the <see cref="BlockPool"/>'s responsibility; this type is just
     /// the storage. Bytes for the actual K/V payload live in
@@ -38,14 +32,7 @@ namespace TensorSharp.Runtime.Paged
         /// this block via their <see cref="BlockTable"/>.</summary>
         public int RefCount { get; internal set; }
 
-        /// <summary>When non-null this block is full (every slot occupied) and the
-        /// hash uniquely identifies its content for prefix caching. When null the
-        /// block is either being written into (not yet full) or has been evicted
-        /// from the prefix cache.</summary>
-        public KvBlockHash? ContentHash { get; internal set; }
-
-        /// <summary>Number of valid tokens written into this block (0..blockSize).
-        /// Only full blocks (Used==blockSize) can be hashed into the prefix cache.</summary>
+        /// <summary>Number of valid tokens written into this block (0..blockSize).</summary>
         public int Used { get; internal set; }
 
         /// <summary>
@@ -85,7 +72,6 @@ namespace TensorSharp.Runtime.Paged
         {
             Id = id;
             RefCount = 0;
-            ContentHash = null;
             Used = 0;
             IsRestorablePrefixEnd = true;
         }
@@ -94,7 +80,7 @@ namespace TensorSharp.Runtime.Paged
         public bool IsFree => RefCount == 0;
 
         public override string ToString()
-            => $"KvBlock(id={Id}, refs={RefCount}, used={Used}, restorable={IsRestorablePrefixEnd}, paged={HoldsModelPagedKv}, snapshot={HoldsSnapshotBytes}, hash={(ContentHash.HasValue ? "yes" : "no")})";
+            => $"KvBlock(id={Id}, refs={RefCount}, used={Used}, restorable={IsRestorablePrefixEnd}, paged={HoldsModelPagedKv}, snapshot={HoldsSnapshotBytes})";
     }
 
     /// <summary>

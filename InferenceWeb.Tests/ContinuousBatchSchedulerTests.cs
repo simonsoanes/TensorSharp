@@ -13,11 +13,12 @@ using Microsoft.Extensions.Logging.Abstractions;
 using TensorSharp;
 using TensorSharp.Runtime.Paged;
 using TensorSharp.Runtime.Scheduling;
+using TensorSharp.Runtime.Scheduling.PrefixCache;
 
 namespace InferenceWeb.Tests;
 
 /// <summary>
-/// Unit tests for the new paged KV pool, the continuous-batching scheduler,
+/// Unit tests for the paged KV block pool, the continuous-batching scheduler,
 /// the executor and the engine glue. They use a deterministic
 /// <see cref="StubModel"/> that produces predictable logits and supports the
 /// KV-snapshot contract, so we can drive the engine without loading a real
@@ -63,49 +64,6 @@ public class ContinuousBatchSchedulerTests
         pool.Free(b);
         Assert.Equal(0, b.RefCount);
         Assert.Equal(2, pool.NumFreeBlocks);
-    }
-
-    [Fact]
-    public void BlockPool_RegistersHash_EnablesPrefixHit()
-    {
-        var pool = NewPool(numBlocks: 4);
-        var b = pool.AllocateNew(1)[0];
-        var hash = KvBlockHasher.ComputeBlockHashes(
-            Enumerable.Range(0, BlockSize).ToList(), BlockSize, "fp")[0];
-        pool.RegisterFullBlock(b, hash, BlockSize);
-
-        Assert.True(pool.TryFindByHash(hash, out var found));
-        Assert.Same(b, found);
-    }
-
-    [Fact]
-    public void BlockPool_RestorableDuplicateWins_AndRecyclingStaleDuplicateKeepsMapping()
-    {
-        var pool = NewPool(numBlocks: 2);
-        var blocks = pool.AllocateNew(2);
-        var stale = blocks[0];
-        var checkpoint = blocks[1];
-        var hash = KvBlockHasher.ComputeBlockHashes(
-            Enumerable.Range(0, BlockSize).ToList(), BlockSize, "fp-duplicate")[0];
-
-        pool.RegisterFullBlock(
-            stale, hash, BlockSize, isRestorablePrefixEnd: false);
-        pool.RegisterFullBlock(
-            checkpoint, hash, BlockSize, isRestorablePrefixEnd: true);
-
-        Assert.True(pool.TryFindByHash(hash, out var preferred));
-        Assert.Same(checkpoint, preferred);
-
-        // Recycling the stale duplicate evicts its own metadata.  It must not
-        // unregister the newer checkpoint that now owns the hash-index entry.
-        pool.Free(stale);
-        var recycled = pool.AllocateNew(1)[0];
-        Assert.Same(stale, recycled);
-        Assert.Null(recycled.ContentHash);
-        Assert.Equal(0, recycled.Used);
-        Assert.True(recycled.IsRestorablePrefixEnd);
-        Assert.True(pool.TryFindByHash(hash, out preferred));
-        Assert.Same(checkpoint, preferred);
     }
 
     [Fact]
@@ -177,7 +135,7 @@ public class ContinuousBatchSchedulerTests
             DecodeQuantumTokens = 1,
         };
         var pool = NewPool(cfg.NumBlocks);
-        var sched = new ContinuousBatchScheduler(cfg, pool, "fp-prefill-fill", NullLogger.Instance);
+        var sched = new ContinuousBatchScheduler(cfg, pool, NullLogger.Instance);
         var first = NewSequence("prefill-a", promptLen: 64, maxNew: 4);
         var second = NewSequence("prefill-b", promptLen: 64, maxNew: 4);
         sched.Submit(first);
@@ -211,7 +169,7 @@ public class ContinuousBatchSchedulerTests
             DecodeQuantumTokens = 1,
         };
         var pool = NewPool(cfg.NumBlocks);
-        var sched = new ContinuousBatchScheduler(cfg, pool, "fp-prefill-fair", NullLogger.Instance);
+        var sched = new ContinuousBatchScheduler(cfg, pool, NullLogger.Instance);
         var decoder = NewSequence("decoding", promptLen: 4, maxNew: 16);
         sched.Submit(decoder);
 
@@ -249,8 +207,7 @@ public class ContinuousBatchSchedulerTests
             DecodeQuantumTokens = 1,
         };
         var pool = NewPool(cfg.NumBlocks);
-        var sched = new ContinuousBatchScheduler(
-            cfg, pool, "fp-decode-first", NullLogger.Instance);
+        var sched = new ContinuousBatchScheduler(cfg, pool, NullLogger.Instance);
         var earlierLongPrefill = NewSequence("prefill-first", promptLen: 64, maxNew: 4);
         var laterShortPrompt = NewSequence("decode-second", promptLen: 4, maxNew: 16);
         sched.Submit(earlierLongPrefill);
@@ -292,7 +249,7 @@ public class ContinuousBatchSchedulerTests
             DecodeQuantumTokens = 1,
         };
         var pool = NewPool(cfg.NumBlocks);
-        var sched = new ContinuousBatchScheduler(cfg, pool, "fp-prefill-rotate", NullLogger.Instance);
+        var sched = new ContinuousBatchScheduler(cfg, pool, NullLogger.Instance);
         var decoder = NewSequence("decoding", promptLen: 4, maxNew: 32);
         sched.Submit(decoder);
         var initial = sched.Schedule();
@@ -353,8 +310,7 @@ public class ContinuousBatchSchedulerTests
             DecodeQuantumTokens = 1,
         };
         var pool = NewPool(cfg.NumBlocks);
-        var sched = new ContinuousBatchScheduler(
-            cfg, pool, "fp-preempt-readmit", NullLogger.Instance);
+        var sched = new ContinuousBatchScheduler(cfg, pool, NullLogger.Instance);
         var a = NewSequence("a", promptLen: 8, maxNew: 8);
         var b = NewSequence("b", promptLen: 7, maxNew: 8);
         var c = NewSequence("c", promptLen: 16, maxNew: 8);
@@ -378,134 +334,6 @@ public class ContinuousBatchSchedulerTests
         Assert.Equal(1, sched.WaitingCount);
         Assert.Equal(2, sched.RunningCount);
         Assert.Equal(1, pool.NumFreeBlocks);
-    }
-
-    [Fact]
-    public void Scheduler_RecurrentPrefix_BacktracksToLastRestorableEndpoint()
-    {
-        const string fingerprint = "fp-recurrent-prefix";
-        var pool = NewPool(numBlocks: 12);
-        var sched = NewScheduler(pool, fingerprint, requiresPerBlockCapture: true);
-        int[] prompt = Enumerable.Range(1, 4 * BlockSize + 1).ToArray();
-        var hashes = KvBlockHasher.ComputeBlockHashes(prompt, BlockSize, fingerprint);
-        var cached = pool.AllocateNew(4);
-
-        // Model one 3-block fused prefill followed by a later interior block:
-        // the first two blocks have usable attention slices but their recurrent
-        // payload belongs to a later boundary; block 2 is the last real
-        // checkpoint, while block 3 must not be the adopted endpoint.
-        bool[] restorable = { false, false, true, false };
-        for (int i = 0; i < cached.Length; i++)
-        {
-            pool.RegisterFullBlock(
-                cached[i], hashes[i], BlockSize,
-                isRestorablePrefixEnd: restorable[i]);
-        }
-
-        var seq = NewSequenceFromTokens("reuse", prompt, maxNew: 1);
-        sched.Submit(seq);
-        var step = sched.Schedule();
-
-        Assert.Single(step.ScheduledWork);
-        Assert.Equal(3 * BlockSize, seq.PrefixCacheReusedTokens);
-        Assert.Equal(2, cached[0].RefCount);
-        Assert.Equal(2, cached[1].RefCount);
-        Assert.Equal(2, cached[2].RefCount);
-        Assert.Equal(1, cached[3].RefCount); // scan-only: no leaked Touch past endpoint
-        Assert.Same(cached[0], seq.BlockTable.Blocks[0]);
-        Assert.Same(cached[1], seq.BlockTable.Blocks[1]);
-        Assert.Same(cached[2], seq.BlockTable.Blocks[2]);
-        Assert.DoesNotContain(cached[3], seq.BlockTable.Blocks);
-    }
-
-    [Fact]
-    public void Scheduler_RecurrentPrefix_WithNoRestorableEndpoint_ReusesNothing()
-    {
-        const string fingerprint = "fp-no-recurrent-checkpoint";
-        var pool = NewPool(numBlocks: 8);
-        var sched = NewScheduler(pool, fingerprint, requiresPerBlockCapture: true);
-        int[] prompt = Enumerable.Range(1, 2 * BlockSize + 1).ToArray();
-        var hashes = KvBlockHasher.ComputeBlockHashes(prompt, BlockSize, fingerprint);
-        var cached = pool.AllocateNew(2);
-        for (int i = 0; i < cached.Length; i++)
-        {
-            pool.RegisterFullBlock(
-                cached[i], hashes[i], BlockSize,
-                isRestorablePrefixEnd: false);
-        }
-
-        var seq = NewSequenceFromTokens("reuse-none", prompt, maxNew: 1);
-        sched.Submit(seq);
-        sched.Schedule();
-
-        Assert.Equal(0, seq.PrefixCacheReusedTokens);
-        Assert.All(cached, block => Assert.Equal(1, block.RefCount));
-        Assert.DoesNotContain(cached[0], seq.BlockTable.Blocks);
-        Assert.DoesNotContain(cached[1], seq.BlockTable.Blocks);
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void Scheduler_ExplicitCacheNone_AdoptsNoPrefixBlocks(bool useZeroBreakpoint)
-    {
-        const string fingerprint = "fp-explicit-none-adoption";
-        var pool = NewPool(numBlocks: 8);
-        var sched = NewScheduler(pool, fingerprint);
-        int[] prompt = Enumerable.Range(1, 2 * BlockSize + 1).ToArray();
-        var hashes = KvBlockHasher.ComputeBlockHashes(prompt, BlockSize, fingerprint);
-        var cached = pool.AllocateNew(2);
-        for (int i = 0; i < cached.Length; i++)
-            pool.RegisterFullBlock(cached[i], hashes[i], BlockSize);
-
-        IReadOnlyList<int> explicitNone = useZeroBreakpoint
-            ? new[] { 0 }
-            : Array.Empty<int>();
-        var seq = new SequenceState(
-            $"reuse-none-{useZeroBreakpoint}", prompt, maxNewTokens: 1,
-            BlockSize, SamplingConfig.Default, cacheBreakpoints: explicitNone);
-
-        sched.Submit(seq);
-        var step = sched.Schedule();
-
-        Assert.Single(step.ScheduledWork);
-        Assert.NotNull(seq.CacheBreakpoints);
-        Assert.Equal(0, seq.CacheBreakpointLimit);
-        Assert.Equal(0, seq.PrefixCacheReusedTokens);
-        Assert.All(cached, block => Assert.Equal(1, block.RefCount));
-        Assert.DoesNotContain(cached[0], seq.BlockTable.Blocks);
-        Assert.DoesNotContain(cached[1], seq.BlockTable.Blocks);
-    }
-
-    [Fact]
-    public void Scheduler_ExplicitBreakpoint_CapsPrefixBlockAdoption()
-    {
-        const string fingerprint = "fp-capped-adoption";
-        var pool = NewPool(numBlocks: 12);
-        var sched = NewScheduler(pool, fingerprint);
-        int[] prompt = Enumerable.Range(1, 4 * BlockSize + 1).ToArray();
-        var hashes = KvBlockHasher.ComputeBlockHashes(prompt, BlockSize, fingerprint);
-        var cached = pool.AllocateNew(4);
-        for (int i = 0; i < cached.Length; i++)
-            pool.RegisterFullBlock(cached[i], hashes[i], BlockSize);
-
-        var seq = new SequenceState(
-            "reuse-capped", prompt, maxNewTokens: 1, BlockSize, SamplingConfig.Default,
-            cacheBreakpoints: new[] { 2 * BlockSize });
-
-        sched.Submit(seq);
-        var step = sched.Schedule();
-
-        Assert.Single(step.ScheduledWork);
-        Assert.Equal(2 * BlockSize, seq.PrefixCacheReusedTokens);
-        Assert.Equal(2, cached[0].RefCount);
-        Assert.Equal(2, cached[1].RefCount);
-        Assert.Equal(1, cached[2].RefCount);
-        Assert.Equal(1, cached[3].RefCount);
-        Assert.Same(cached[0], seq.BlockTable.Blocks[0]);
-        Assert.Same(cached[1], seq.BlockTable.Blocks[1]);
-        Assert.DoesNotContain(cached[2], seq.BlockTable.Blocks);
-        Assert.DoesNotContain(cached[3], seq.BlockTable.Blocks);
     }
 
     [Fact]
@@ -647,130 +475,15 @@ public class ContinuousBatchSchedulerTests
     }
 
     [Fact]
-    public async Task Engine_PrefixCacheHit_ReducesUncomputedTokens()
-    {
-        var model = new StubModel("fp-prefix", peakToken: 3);
-        var cfg = SmallConfig();
-        using var engine = new InferenceEngine(model, cfg, NullLogger.Instance);
-
-        // Prime the cache: run a request that produces full blocks.
-        var promptA = Enumerable.Range(10, BlockSize * 2).ToArray();
-        var seqA = NewSequenceFromTokens("rA", promptA, maxNew: 2);
-        await engine.SubmitRequest(seqA).Completion;
-
-        // Same prompt comes in again on a NEW sequence.
-        var seqB = NewSequenceFromTokens("rB", promptA, maxNew: 2);
-        var handleB = engine.SubmitRequest(seqB);
-        await handleB.Completion;
-        // We expect at least one block worth of prefix-cache reuse.
-        Assert.True(seqB.PrefixCacheReusedTokens >= BlockSize,
-            $"Expected >= {BlockSize} prefix-cache tokens, got {seqB.PrefixCacheReusedTokens}");
-    }
-
-    [Fact]
-    public async Task Engine_RecurrentLargePrefill_CachesOnlyExactChunkEndpoints()
-    {
-        var model = new RecurrentStubModel("fp-recurrent-engine", peakToken: 3);
-        var cfg = RecurrentConfig();
-        using var engine = new InferenceEngine(model, cfg, NullLogger.Instance);
-        int[] prompt = Enumerable.Range(1, 5 * BlockSize + 5).ToArray();
-
-        var first = NewSequenceFromTokens("recurrent-a", prompt, maxNew: 1);
-        await engine.SubmitRequest(first).Completion;
-
-        // Keep the high-throughput 32-token fused prefill.  Only the final
-        // prompt chunk is split so position 40 becomes an exact checkpoint.
-        Assert.Equal(
-            new[] { 4 * BlockSize, BlockSize, 5 },
-            model.ForwardChunkSizes.Take(3).ToArray());
-
-        var second = NewSequenceFromTokens("recurrent-b", prompt, maxNew: 1);
-        await engine.SubmitRequest(second).Completion;
-
-        Assert.Equal(5 * BlockSize, second.PrefixCacheReusedTokens);
-        Assert.Equal(new[] { 5, 1 }, model.ForwardChunkSizes.Skip(4).Take(2).ToArray());
-    }
-
-    [Fact]
-    public async Task Engine_RecurrentExplicitBreakpoint_MakesTheMarkedPrefixRestorable()
-    {
-        // A client cache breakpoint lands mid-prompt, capping registration and
-        // adoption at its block boundary. The prefill round must snap there so
-        // the capture records a real recurrent checkpoint; otherwise the marked
-        // blocks stay in the index as non-restorable interior slices and every
-        // follow-up request re-prefills them (the "matched N / restorable 0"
-        // warning instead of a warm cache).
-        var model = new RecurrentStubModel("fp-recurrent-breakpoint", peakToken: 3);
-        var cfg = RecurrentConfig();
-        using var engine = new InferenceEngine(model, cfg, NullLogger.Instance);
-        int[] prompt = Enumerable.Range(1, 5 * BlockSize + 5).ToArray();
-
-        var first = new SequenceState(
-            "bp-a", prompt, maxNewTokens: 1, BlockSize, SamplingConfig.Default,
-            cacheBreakpoints: new[] { 3 * BlockSize });
-        await engine.SubmitRequest(first).Completion;
-
-        // The fused chunk is split AT the breakpoint boundary (3 blocks) so the
-        // capture round ends on a genuine checkpoint, then the tail runs with
-        // the usual final-chunk alignment.
-        Assert.Equal(
-            new[] { 3 * BlockSize, 2 * BlockSize, 5 },
-            model.ForwardChunkSizes.Take(3).ToArray());
-
-        var second = new SequenceState(
-            "bp-b", prompt, maxNewTokens: 1, BlockSize, SamplingConfig.Default,
-            cacheBreakpoints: new[] { 3 * BlockSize });
-        await engine.SubmitRequest(second).Completion;
-
-        // The marked prefix (everything up to the breakpoint) is fully restorable.
-        Assert.Equal(3 * BlockSize, second.PrefixCacheReusedTokens);
-        Assert.Equal(new[] { 2 * BlockSize, 5 }, model.ForwardChunkSizes.Skip(4).Take(2).ToArray());
-    }
-
-    [Fact]
-    public async Task Engine_RecurrentShorterSibling_NoCheckpointInside_RefillsThenSelfHeals()
-    {
-        // A sibling prompt that shares only the interior blocks of a longer
-        // fused-round chain matches them in the hash index but has no recurrent
-        // checkpoint inside its span - those blocks carry the round-end state, so
-        // adopting them would corrupt output. The safe answer is 0 reuse and a
-        // re-prefill of the whole prefix; after that re-prefill the sibling's own
-        // chain ends on a checkpoint and the identical follow-up reuses it.
-        var model = new RecurrentStubModel("fp-recurrent-sibling", peakToken: 3);
-        var cfg = RecurrentConfig();
-        using var engine = new InferenceEngine(model, cfg, NullLogger.Instance);
-        int[] longPrompt = Enumerable.Range(1, 5 * BlockSize + 5).ToArray();
-        int[] shortPrompt = Enumerable.Range(1, 3 * BlockSize + 5).ToArray();
-
-        var first = NewSequenceFromTokens("sibling-long", longPrompt, maxNew: 1);
-        await engine.SubmitRequest(first).Completion;
-        // One 4-block fused round + the aligned final block: blocks 0..2 are
-        // interior (non-restorable), block 3 and block 4 are the checkpoints.
-        Assert.Equal(new[] { 4 * BlockSize, BlockSize, 5 }, model.ForwardChunkSizes.Take(3).ToArray());
-
-        // Shares blocks 0..2 of that chain: matched but nothing restorable.
-        var sibling = NewSequenceFromTokens("sibling-short", shortPrompt, maxNew: 1);
-        await engine.SubmitRequest(sibling).Completion;
-        Assert.Equal(0, sibling.PrefixCacheReusedTokens);
-        Assert.Equal(new[] { 3 * BlockSize, 5 }, model.ForwardChunkSizes.Skip(4).Take(2).ToArray());
-
-        // Its re-prefill registered a checkpoint at its own end, so the
-        // identical follow-up now reuses the whole prefix.
-        var sibling2 = NewSequenceFromTokens("sibling-short-2", shortPrompt, maxNew: 1);
-        await engine.SubmitRequest(sibling2).Completion;
-        Assert.Equal(3 * BlockSize, sibling2.PrefixCacheReusedTokens);
-    }
-
-    [Fact]
     public void Executor_RecurrentOwnerSwap_PreservesFullCheckpoints_AndRefreshesPartialTail()
     {
         var model = new RecurrentStubModel("fp-recurrent-swap", peakToken: 3);
         var cfg = RecurrentConfig();
         var pool = NewPool(numBlocks: cfg.NumBlocks);
-        var sched = new ContinuousBatchScheduler(
-            cfg, pool, model.KVStateFingerprint, NullLogger.Instance,
+        var sched = new ContinuousBatchScheduler(cfg, pool, NullLogger.Instance,
             requiresPerBlockCapture: true);
         var executor = new BatchExecutor(model, pool, sched, NullLogger.Instance);
+        executor.InitializeRadixCache(cfg);
 
         var owner = NewSequence("owner", promptLen: 5 * BlockSize + 5, maxNew: 8);
         sched.Submit(owner);
@@ -810,7 +523,7 @@ public class ContinuousBatchSchedulerTests
         // nothing, or with another prompt's content).
         var model = new SharedLogitsStubModel("fp-shared-logits");
         var pool = NewPool(numBlocks: 16);
-        var sched = new ContinuousBatchScheduler(SmallConfig(), pool, model.KVStateFingerprint, NullLogger.Instance);
+        var sched = new ContinuousBatchScheduler(SmallConfig(), pool, NullLogger.Instance);
         var executor = new BatchExecutor(model, pool, sched, NullLogger.Instance);
 
         var owner = NewSequenceFromTokens("owner", new[] { 1, 2, 3 }, maxNew: 2);
@@ -896,115 +609,6 @@ public class ContinuousBatchSchedulerTests
     }
 
     [Fact]
-    public void Scheduler_ExplicitBreakpoint_RegistersOnlyBlocksInsideTheMarkedPrefix()
-    {
-        const string fingerprint = "fp-explicit-breakpoint";
-        var pool = NewPool(numBlocks: 8);
-        var sched = NewScheduler(pool, fingerprint);
-
-        // 4 full blocks of prompt, with the client marking the end of block 1.
-        int[] prompt = Enumerable.Range(1, 4 * BlockSize).ToArray();
-        var seq = new SequenceState(
-            "bp", prompt.ToList(), maxNewTokens: 1, BlockSize, SamplingConfig.Default,
-            cacheBreakpoints: new List<int> { 2 * BlockSize });
-
-        var blocks = pool.AllocateNew(4);
-        foreach (var b in blocks)
-            seq.BlockTable.AppendBlock(b);
-        seq.AdvanceComputedTokens(prompt.Length);
-
-        sched.OnBlocksCommitted(seq, previousTokens: 0);
-
-        var hashes = KvBlockHasher.ComputeBlockHashes(prompt.ToList(), BlockSize, fingerprint);
-
-        // Blocks 0 and 1 end at or before the breakpoint and are cacheable.
-        Assert.True(pool.TryFindByHash(hashes[0], out _), "Block 0 should be registered.");
-        Assert.True(pool.TryFindByHash(hashes[1], out _), "Block 1 should be registered.");
-
-        // Blocks 2 and 3 lie past it and must stay out of the index.
-        Assert.False(pool.TryFindByHash(hashes[2], out _), "Block 2 is past the breakpoint.");
-        Assert.False(pool.TryFindByHash(hashes[3], out _), "Block 3 is past the breakpoint.");
-    }
-
-    [Fact]
-    public void Scheduler_ExplicitBreakpointMidBlock_DropsTheStraddlingBlock()
-    {
-        const string fingerprint = "fp-breakpoint-midblock";
-        var pool = NewPool(numBlocks: 8);
-        var sched = NewScheduler(pool, fingerprint);
-
-        int[] prompt = Enumerable.Range(1, 3 * BlockSize).ToArray();
-        // A breakpoint halfway through block 1: the index is block-granular, so
-        // block 1 holds tokens from both sides of the mark and is not cacheable.
-        var seq = new SequenceState(
-            "bp-mid", prompt.ToList(), maxNewTokens: 1, BlockSize, SamplingConfig.Default,
-            cacheBreakpoints: new List<int> { BlockSize + (BlockSize / 2) });
-
-        var blocks = pool.AllocateNew(3);
-        foreach (var b in blocks)
-            seq.BlockTable.AppendBlock(b);
-        seq.AdvanceComputedTokens(prompt.Length);
-
-        sched.OnBlocksCommitted(seq, previousTokens: 0);
-
-        var hashes = KvBlockHasher.ComputeBlockHashes(prompt.ToList(), BlockSize, fingerprint);
-        Assert.True(pool.TryFindByHash(hashes[0], out _), "Block 0 ends before the breakpoint.");
-        Assert.False(pool.TryFindByHash(hashes[1], out _), "Block 1 straddles the breakpoint.");
-        Assert.False(pool.TryFindByHash(hashes[2], out _), "Block 2 is past the breakpoint.");
-    }
-
-    [Fact]
-    public void Scheduler_NoExplicitBreakpoints_RegistersEveryFullBlock()
-    {
-        const string fingerprint = "fp-no-breakpoint";
-        var pool = NewPool(numBlocks: 8);
-        var sched = NewScheduler(pool, fingerprint);
-
-        int[] prompt = Enumerable.Range(1, 3 * BlockSize).ToArray();
-        var seq = NewSequenceFromTokens("no-bp", prompt, maxNew: 1);
-
-        var blocks = pool.AllocateNew(3);
-        foreach (var b in blocks)
-            seq.BlockTable.AppendBlock(b);
-        seq.AdvanceComputedTokens(prompt.Length);
-
-        sched.OnBlocksCommitted(seq, previousTokens: 0);
-
-        var hashes = KvBlockHasher.ComputeBlockHashes(prompt.ToList(), BlockSize, fingerprint);
-        for (int i = 0; i < 3; i++)
-            Assert.True(pool.TryFindByHash(hashes[i], out _), $"Block {i} should be registered.");
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void Scheduler_ExplicitCacheNone_RegistersNoBlocks(bool useZeroBreakpoint)
-    {
-        const string fingerprint = "fp-zero-breakpoint";
-        var pool = NewPool(numBlocks: 8);
-        var sched = NewScheduler(pool, fingerprint);
-
-        int[] prompt = Enumerable.Range(1, 2 * BlockSize).ToArray();
-        IReadOnlyList<int> explicitNone = useZeroBreakpoint
-            ? new[] { 0 }
-            : Array.Empty<int>();
-        var seq = new SequenceState(
-            "zero-bp", prompt.ToList(), maxNewTokens: 1, BlockSize, SamplingConfig.Default,
-            cacheBreakpoints: explicitNone);
-        foreach (var block in pool.AllocateNew(2))
-            seq.BlockTable.AppendBlock(block);
-        seq.AdvanceComputedTokens(prompt.Length);
-
-        sched.OnBlocksCommitted(seq, previousTokens: 0);
-
-        var hashes = KvBlockHasher.ComputeBlockHashes(prompt.ToList(), BlockSize, fingerprint);
-        Assert.NotNull(seq.CacheBreakpoints);
-        Assert.Equal(0, seq.CacheBreakpointLimit);
-        Assert.False(pool.TryFindByHash(hashes[0], out _));
-        Assert.False(pool.TryFindByHash(hashes[1], out _));
-    }
-
-    [Fact]
     public void SequenceState_CopiesCacheBreakpoints_SoLaterCallerEditsCannotDrift()
     {
         var supplied = new List<int> { 2 * BlockSize };
@@ -1044,8 +648,7 @@ public class ContinuousBatchSchedulerTests
             EnablePrefixCaching = true,
             DecodeQuantumTokens = BlockSize,
         };
-        return new ContinuousBatchScheduler(
-            cfg, pool, fp, NullLogger.Instance,
+        return new ContinuousBatchScheduler(cfg, pool, NullLogger.Instance,
             requiresPerBlockCapture: requiresPerBlockCapture);
     }
 
@@ -1299,8 +902,22 @@ public class ContinuousBatchSchedulerTests
     /// the same final recurrent position into every block extracted afterwards,
     /// reproducing the hybrid Qwen/Nemotron checkpoint constraint cheaply.
     /// </summary>
-    private sealed class RecurrentStubModel : IModelArchitecture
+    private sealed class RecurrentStubModel : IModelArchitecture, IPageOnlyPrefixCacheModel
     {
+        // A recurrent page family: host-slab pages restorable only where a forward ended.
+        public PrefixCacheCapabilities GetPrefixCacheCapabilities() => new()
+        {
+            Class = FamilyClass.R,
+            NamespaceFingerprint = KVStateFingerprint,
+            EndState = EndStateSupport.None,
+            PrimaryResident = true,
+            Truncation = TruncationKind.None,
+            Pages = PageSupport.A1HostSlab,
+            PagesNeedStateAtEnd = true,
+        };
+
+        public long QuerySpareBytes(ResourceClass cls) => -1;
+
         private readonly string _fp;
         private readonly int _peak;
         private byte[] _tokenState = Array.Empty<byte>();

@@ -11,7 +11,7 @@
 // `ggml_flash_attn_ext` on the contiguous K/V. The Metal/CUDA backend
 // then runs its highly-optimised fused flash-attention kernel.
 //
-// Goes through the same end-to-end path as the legacy single-sequence
+// Goes through the same end-to-end path as the single-sequence
 // `flash_attn_decode_impl`, but extended to accept variable
 // `(num_query_tokens, total_seq_len, first_query_position)` per sequence
 // so the same call covers both decode and prefill-chunk steps. The
@@ -284,7 +284,7 @@ namespace
         // a single cached graph per shape.
         sess.attn_mask = ggml_new_tensor_4d(sess.ctx, GGML_TYPE_F16, padded_kv_len_bucket, num_q, 1, 1);
 
-        // Permute + cont for flash_attn_ext layout (see legacy comments).
+        // Permute + cont for flash_attn_ext layout (see flash_attn_decode_impl).
         ggml_tensor* q_attn = ggml_cont(sess.ctx, ggml_permute(sess.ctx, sess.q_in, 0, 2, 1, 3));
         ggml_tensor* k_attn = ggml_cont(sess.ctx, ggml_permute(sess.ctx, sess.k_in, 0, 2, 1, 3));
         ggml_tensor* v_attn = ggml_cont(sess.ctx, ggml_permute(sess.ctx, sess.v_in, 0, 2, 1, 3));
@@ -466,7 +466,7 @@ namespace
     // for one query token, and we have 42+ such dispatches per token on
     // Gemma 4. A tight scalar loop on the host pointer (which is in
     // unified memory and CPU-cache-resident anyway) avoids the dispatch
-    // entirely. Mirrors the legacy per-seq path's AttentionDecodeCircular.
+    // entirely. Mirrors the per-sequence path's AttentionDecodeCircular.
     int paged_attention_decode_cpu_n1(
         const float* q,             // [num_heads * head_dim] (one query token)
         const float* k_data,        // [seq_len, num_kv_heads, head_dim]
@@ -935,7 +935,7 @@ TSG_EXPORT int TSGgml_PagedAttentionForward(
 // (gpt-oss style). Sinks is a [num_heads] F32 array. Routed through
 // ggml_flash_attn_ext_add_sinks so the native Metal/CUDA flash-attn kernel
 // includes the sink as a virtual position in the softmax denominator —
-// matching the legacy GptOss per-seq AttentionDecodeWithSinks /
+// matching the GptOss per-sequence AttentionDecodeWithSinks /
 // AttentionPrefillWithSinks math, just under the paged-K/V layout.
 // ============================================================================
 TSG_EXPORT int TSGgml_PagedAttentionForwardWithSinks(

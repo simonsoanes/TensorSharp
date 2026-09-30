@@ -5,7 +5,7 @@
 //
 // TensorSharp is licensed under the BSD-3-Clause license found in the LICENSE file in the root directory of this source tree.
 //
-// M0e (radix design D10/P16): a pooled-prefix inject that stops early is a MISS,
+// M0e (radix design D10/P16): a prefix-page inject that stops early is a MISS,
 // never a partial state.
 //
 // BatchExecutor.InjectAllBlocks used to stop at the first block the model refused
@@ -23,6 +23,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using TensorSharp;
 using TensorSharp.Runtime;
 using TensorSharp.Runtime.Scheduling;
+using TensorSharp.Runtime.Scheduling.PrefixCache;
 
 namespace InferenceWeb.Tests;
 
@@ -48,7 +49,7 @@ public sealed class InjectShortfallAccountingTests
         model.RefuseInjectAt = 2 * BlockSize;
         var timing = new ForwardTiming(promptB.Length);
         model.Timings.Add(promptB[0], timing);
-        var b = new SequenceState("b", promptB.ToList(), 6, BlockSize, SamplingConfig.Greedy);
+        var b = new SequenceState("b", promptB.ToList(), 6, BlockSize, SamplingConfig.Greedy, cacheScope: Conversation);
         var completion = await engine.SubmitRequest(b).Completion.WaitAsync(TimeSpan.FromSeconds(20));
 
         Assert.Equal(1, model.RefusedInjects);
@@ -77,7 +78,7 @@ public sealed class InjectShortfallAccountingTests
         await RunAsync(engine, "a", promptA, maxNew: 3);
 
         model.RefuseInjectAt = 0;
-        var b = new SequenceState("b", promptB.ToList(), 5, BlockSize, SamplingConfig.Greedy);
+        var b = new SequenceState("b", promptB.ToList(), 5, BlockSize, SamplingConfig.Greedy, cacheScope: Conversation);
         var completion = await engine.SubmitRequest(b).Completion.WaitAsync(TimeSpan.FromSeconds(20));
 
         Assert.Equal(1, model.RefusedInjects);
@@ -145,7 +146,7 @@ public sealed class InjectShortfallAccountingTests
 
         // c runs alone first (the single-stream path); b arrives while it decodes.
         int decodesBeforeC = model.DecodeForwards;
-        var c = new SequenceState("c", promptC.ToList(), maxNewC, BlockSize, SamplingConfig.Greedy);
+        var c = new SequenceState("c", promptC.ToList(), maxNewC, BlockSize, SamplingConfig.Greedy, cacheScope: "other");
         var hc = engine.SubmitRequest(c);
         var until = DateTime.UtcNow.AddSeconds(20);
         while (model.DecodeForwards - decodesBeforeC < 2 && DateTime.UtcNow < until)
@@ -153,7 +154,7 @@ public sealed class InjectShortfallAccountingTests
         Assert.True(model.DecodeForwards - decodesBeforeC >= 2, "c never started decoding");
 
         model.RefuseInjectAt = 2 * BlockSize;
-        var b = new SequenceState("b", promptB.ToList(), maxNewB, BlockSize, SamplingConfig.Greedy);
+        var b = new SequenceState("b", promptB.ToList(), maxNewB, BlockSize, SamplingConfig.Greedy, cacheScope: Conversation);
         var completionB = await engine.SubmitRequest(b).Completion.WaitAsync(TimeSpan.FromSeconds(30));
         await hc.Completion.WaitAsync(TimeSpan.FromSeconds(30));
 
@@ -191,7 +192,7 @@ public sealed class InjectShortfallAccountingTests
         await RunAsync(engine, "a", promptA, maxNew: 3);
 
         model.RefuseInjectAt = 2 * BlockSize;
-        var b = new SequenceState("b", promptB.ToList(), 6, BlockSize, SamplingConfig.Greedy);
+        var b = new SequenceState("b", promptB.ToList(), 6, BlockSize, SamplingConfig.Greedy, cacheScope: Conversation);
         var completion = await engine.SubmitRequest(b).Completion.WaitAsync(TimeSpan.FromSeconds(20));
 
         Assert.Equal(1, model.RefusedInjects);
@@ -324,9 +325,13 @@ public sealed class InjectShortfallAccountingTests
         return seq.OutputTokens.ToArray();
     }
 
+    /// <summary>One conversation: the radix cache shares a prefix past the public prompt only
+    /// within a scope, and every follow-up here continues the first request's conversation.</summary>
+    private const string Conversation = "conv";
+
     private static async Task<SequenceState> RunAsync(InferenceEngine engine, string id, int[] prompt, int maxNew)
     {
-        var seq = new SequenceState(id, prompt.ToList(), maxNew, BlockSize, SamplingConfig.Greedy);
+        var seq = new SequenceState(id, prompt.ToList(), maxNew, BlockSize, SamplingConfig.Greedy, cacheScope: Conversation);
         var completion = await engine.SubmitRequest(seq).Completion.WaitAsync(TimeSpan.FromSeconds(20));
         Assert.Equal(SequenceStatus.FinishedLengthCapped, completion.Status);
         return seq;
@@ -338,8 +343,26 @@ public sealed class InjectShortfallAccountingTests
     /// position or a stale tail all change the next token. Blocks serialize the rows;
     /// <see cref="RefuseInjectAt"/> refuses the first inject that starts at that token.
     /// </summary>
-    private sealed class HistoryHashModel : IModelArchitecture
+    /// <summary>The radix record of a family whose only reuse is A1 host-slab pages: no
+    /// resident primary, so a follow-up is always rebuilt by injecting pages, the path these
+    /// tests refuse a block on.</summary>
+    private static PrefixCacheCapabilities PageOnly(string fingerprint, bool truncation, bool pagesNeedStateAtEnd = false) => new()
     {
+        Class = FamilyClass.S,
+        NamespaceFingerprint = fingerprint,
+        EndState = EndStateSupport.None,
+        PrimaryResident = false,
+        Truncation = truncation ? TruncationKind.Any : TruncationKind.None,
+        RewindCapTokens = 16,
+        Pages = PageSupport.A1HostSlab,
+        PagesNeedStateAtEnd = pagesNeedStateAtEnd,
+    };
+
+    private sealed class HistoryHashModel : IModelArchitecture, IPageOnlyPrefixCacheModel
+    {
+        public PrefixCacheCapabilities GetPrefixCacheCapabilities() => PageOnly(KVStateFingerprint, truncation: true);
+        public long QuerySpareBytes(ResourceClass cls) => -1;
+
         private readonly List<int> _rows = new();
         private readonly object _gate = new();
 
@@ -464,8 +487,11 @@ public sealed class InjectShortfallAccountingTests
     /// fused contract): a primary cache for the single-stream path and a holder per
     /// bound RequestId. Logits hash every (position, token) row of the ACTIVE cache.
     /// </summary>
-    private sealed class FusedHistoryHashModel : IModelArchitecture, IBatchedPagedModel
+    private sealed class FusedHistoryHashModel : IModelArchitecture, IBatchedPagedModel, IPageOnlyPrefixCacheModel
     {
+        public PrefixCacheCapabilities GetPrefixCacheCapabilities() => PageOnly(KVStateFingerprint, truncation: true);
+        public long QuerySpareBytes(ResourceClass cls) => -1;
+
         private readonly object _gate = new();
         private readonly Dictionary<string, List<int>> _holders = new(StringComparer.Ordinal);
         private List<int> _primary = new();
@@ -620,8 +646,12 @@ public sealed class InjectShortfallAccountingTests
     /// that state AS OF THE EXTRACTION, so an injected prefix resumes from the state
     /// its last block was captured at - exactly the hazard a mid-chunk capture has.
     /// </summary>
-    private sealed class RecurrentHashModel : IModelArchitecture
+    private sealed class RecurrentHashModel : IModelArchitecture, IPageOnlyPrefixCacheModel
     {
+        public PrefixCacheCapabilities GetPrefixCacheCapabilities()
+            => PageOnly(KVStateFingerprint, truncation: false, pagesNeedStateAtEnd: true);
+        public long QuerySpareBytes(ResourceClass cls) => -1;
+
         private readonly object _gate = new();
         private readonly List<int> _rows = new();
         private ulong _state = Seed;

@@ -390,16 +390,13 @@ Mistral 3 是 TensorSharp 中 `IBatchedPagedModel.ForwardBatch` 的**参考实�
 - **基于 `slotMapping` 的 K/V 写入** 把新的 K 与 V 写入层的分页缓冲区在
   `blockId * blockSize + offset` 位置。批处理路径下不再有序列间的 KV 状态
   extract / inject。
-- **三种通过 `TS_PAGED_ATTN_KERNEL` 可选的分页注意力内核**：
-  - `native`（默认）：`TSGgml_PagedAttentionForward` —— 在 C++ 中按序列对
-    分页缓冲区做 memcpy gather，然后派发 `ggml_flash_attn_ext`（即旧单序列
-    路径使用的同一融合 Metal/CUDA flash 注意力内核）。
-  - `tensor`：`TensorPagedAttention.Forward` —— 基于 C# Tensor 的 gather
-    加按序列的 `Ops.AddmmBatch` + `GgmlBasicOps.AttentionSoftmaxWithSinks`。
-    比 `native` 慢，因为按序列重复派发 GPU。
-  - `managed`：`ManagedPagedAttention.Forward` —— 纯 C# 在线 softmax 循环，
-    按 `(seq, head)` 并行化。任意后端上的正确性回退。
-- **视觉嵌入注入** 仍在 per-layer 循环之前（与旧 forward 路径一致）。多模态
+- **按后端选择的分页注意力**：
+  - GGML 后端：`TSGgml_PagedAttentionForward` —— 在 C++ 中按序列对分页缓冲区做
+    memcpy gather，然后派发 `ggml_flash_attn_ext`（即单序列路径使用的同一融合
+    Metal/CUDA flash 注意力内核）。
+  - 其他后端：`ManagedPagedAttention.Forward` —— 纯 C# 在线 softmax 循环，按
+    `(seq, head)` 并行化。
+- **视觉嵌入注入** 仍在 per-layer 循环之前（与单序列 forward 路径一致）。多模态
   请求会被多模态注入器在 prompt 准备阶段串行化；纯文本请求可以并行准备。
 
 **在真实 GGUF 上验证的一致性**
@@ -424,8 +421,8 @@ Mistral 3 是 TensorSharp 中 `IBatchedPagedModel.ForwardBatch` 的**参考实�
 
 **前缀缓存验证**：在同一组长上下文运行中，引擎在 4 个序列间共享了 6 个完整
 prompt 块（`reused=1536`、`hashedCached=3`），首次在真实 GGUF 上端到端验证
-前缀缓存路径。该运行早于 Radix 前缀缓存；Radix 如今是默认的复用模式（Mistral 3 以
-分页家族的身份参与），当时测到的块级哈希共享仍可用 `TS_PREFIX_CACHE_MODE=legacy` 选择。
+前缀缓存路径。该运行早于 Radix 前缀缓存；Radix 取代了当时测到的块级哈希共享（Mistral 3 以
+分页家族的身份参与）。
 
 ## 12. 输出解析器与聊天模板
 

@@ -821,9 +821,9 @@ public sealed class MediaScenarioTests : IDisposable
         Assert.Null(LiveMedia.UnavailableVideo(out LiveMedia.VideoFiles files));
 
         // The Wan companions have no catalog entry to be published from, so they are
-        // named the way the desktop's --wan-vae / --wan-te flags name them.
-        Environment.SetEnvironmentVariable("TS_WAN_VAE", files.Vae);
-        Environment.SetEnvironmentVariable("TS_WAN_TE", files.TextEncoder);
+        // named the way the desktop's --video-vae / --video-text-encoder flags name them.
+        Environment.SetEnvironmentVariable("TS_VIDEO_VAE", files.Vae);
+        Environment.SetEnvironmentVariable("TS_VIDEO_TEXT_ENCODER", files.TextEncoder);
         try
         {
             StartDirect(files.Dit, LiveMedia.Backend("ggml_metal"));
@@ -862,8 +862,8 @@ public sealed class MediaScenarioTests : IDisposable
         }
         finally
         {
-            Environment.SetEnvironmentVariable("TS_WAN_VAE", null);
-            Environment.SetEnvironmentVariable("TS_WAN_TE", null);
+            Environment.SetEnvironmentVariable("TS_VIDEO_VAE", null);
+            Environment.SetEnvironmentVariable("TS_VIDEO_TEXT_ENCODER", null);
         }
     }
 }

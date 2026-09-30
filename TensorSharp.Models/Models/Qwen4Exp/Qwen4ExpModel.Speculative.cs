@@ -25,14 +25,10 @@ namespace TensorSharp.Models
         // chunk's MRoPE positions before Forward consumes them for MTP catch-up.
         public bool SpecSupportsMultimodalPrefill => true;
         public bool SpecTrunkFollowsBoundCache => true;
-        public bool SpeculationProfitable => !_specStateFailed && IsGgmlBackend && _tokenGraphEnabled
-            && !_tokenGraphUnsupported && _spanAttnEnabled && !_fusedGateUpExperts
-            && _fusedFfnEnabled && !_fusedFfnUnsupported
-            && _fusedGdnEnabled && !_fusedGdnUnsupported
-            && _fusedAttnEnabled && !_fusedAttnUnsupported
-            && _gdnMaxLayers < 0 && !_gdnVerify
-            && (_specApiAvailable ??= GgmlBasicOps.Qwen4ExpSpecApiAvailable())
-            && (!HasQsa || (_qsaApiAvailable ??= GgmlBasicOps.Qwen4ExpQsaApiAvailable()));
+        public bool SpeculationProfitable => !_specStateFailed && IsGgmlBackend
+            && !_tokenGraphUnsupported && !_fusedGateUpExperts
+            && !_fusedFfnUnsupported && !_fusedGdnUnsupported && !_fusedAttnUnsupported
+            && !_gdnVerify;
 
         private bool _specForwardActive;
         private bool _specAllLogitsRows;
@@ -43,7 +39,6 @@ namespace TensorSharp.Models
         private object _specSnapshotAttnArgs, _specSnapshotGdnArgs, _specSnapshotPleArgs;
         private SpecMetadata _specMetadata;
         private int _specResetVersion;
-        private bool? _specApiAvailable;
         private bool _specRecurrentRestored;
         private bool _specStateFailed;
 

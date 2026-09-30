@@ -31,14 +31,6 @@ namespace InferenceWeb.Tests;
 /// The corpus below is sized for that case: a catalogue the size of a real MCP
 /// server's, not a single toy tool.
 /// </para>
-/// <para>
-/// <see cref="Parse_KindTolerantVersusLegacyStringOnlyParser"/> A/Bs the current
-/// kind-checked parser against <see cref="LegacyParseOpenAI"/>, a verbatim copy
-/// of the pre-#142 implementation. That implementation threw on half the specs
-/// in this file, so the A/B runs on the all-strings corpus it could still handle
-/// — the only input on which the two are comparable — to show that reading
-/// <see cref="JsonValueKind"/> before each access costs nothing.
-/// </para>
 /// </summary>
 [Trait("Category", "Bench")]
 public class ToolFunctionParserBenchmark
@@ -76,35 +68,9 @@ public class ToolFunctionParserBenchmark
         while (sw.ElapsedMilliseconds < 750)
         {
             Run(StringOnlySpec, 20, ToolFunctionParser.ParseOpenAI);
-            Run(StringOnlySpec, 20, LegacyParseOpenAI);
             Run(MixedKindSpec, 20, ToolFunctionParser.ParseOpenAI);
         }
         return true;
-    }
-
-    [Fact]
-    public void Parse_KindTolerantVersusLegacyStringOnlyParser()
-    {
-        Assert.True(Warmed);
-        Console.WriteLine($"[ToolFunctionParser] corpus: {ToolCount} tools x {ParamsPerTool} params, " +
-                          $"{Encoding.UTF8.GetByteCount(StringOnlySpec) / 1024.0:F1} KB JSON, " +
-                          $"{Rounds} rounds x {ItersPerRound} parses, best round reported");
-
-        var candidates = new (string Label, Func<JsonElement, List<ToolFunction>> Parse)[]
-        {
-            ("legacy (pre-#142, string-only)", LegacyParseOpenAI),
-            ("current (kind-checked)", ToolFunctionParser.ParseOpenAI),
-        };
-        double[] best = BenchAlternating(StringOnlySpec, candidates);
-
-        double legacy = best[0], current = best[1];
-        Console.WriteLine($"[ToolFunctionParser] current / legacy = {current / legacy:F3}x " +
-                          $"({(legacy - current) / legacy * 100:+0.0;-0.0}% faster)");
-
-        // The A/B is only meaningful if both parsers saw the same catalogue.
-        using var doc = JsonDocument.Parse(StringOnlySpec);
-        Assert.Equal(ToolCount, ToolFunctionParser.ParseOpenAI(doc.RootElement).Count);
-        Assert.Equal(ToolCount, LegacyParseOpenAI(doc.RootElement).Count);
     }
 
     [Fact]
@@ -115,8 +81,8 @@ public class ToolFunctionParserBenchmark
                           $"{Encoding.UTF8.GetByteCount(MixedKindSpec) / 1024.0:F1} KB JSON " +
                           $"(integer/boolean enums, union types — the shapes that used to throw)");
 
-        // The same parser over both corpora: the kinds the legacy parser could
-        // not read must not cost materially more than the ones it could.
+        // The same parser over both corpora: integer/boolean enums and union
+        // types must not cost materially more than an all-strings catalogue.
         var candidates = new (string, Func<JsonElement, List<ToolFunction>>)[]
         {
             ("current (all strings)", ToolFunctionParser.ParseOpenAI),
@@ -182,62 +148,9 @@ public class ToolFunctionParserBenchmark
     }
 
     /// <summary>
-    /// The parser exactly as it stood before the issue #142 fix
-    /// (<c>ToolFunctionParser.ParseOpenAI</c>/<c>ParseFunction</c> at commit
-    /// b353392), kept only as the benchmark's baseline. It throws
-    /// <see cref="InvalidOperationException"/> on any tool spec that puts a
-    /// non-string where it expected one, so it can only be run on
-    /// <see cref="StringOnlySpec"/>.
-    /// </summary>
-    private static List<ToolFunction> LegacyParseOpenAI(JsonElement body)
-    {
-        if (!body.TryGetProperty("tools", out var toolsEl) || toolsEl.ValueKind != JsonValueKind.Array)
-            return null;
-
-        var tools = new List<ToolFunction>();
-        foreach (var toolEl in toolsEl.EnumerateArray())
-        {
-            string type = toolEl.TryGetProperty("type", out var t) ? t.GetString() : "function";
-            if (type != "function") continue;
-            if (!toolEl.TryGetProperty("function", out var fnEl)) continue;
-
-            var tf = new ToolFunction
-            {
-                Name = fnEl.TryGetProperty("name", out var n) ? n.GetString() : "",
-                Description = fnEl.TryGetProperty("description", out var d) ? d.GetString() : ""
-            };
-
-            if (fnEl.TryGetProperty("parameters", out var paramsEl))
-            {
-                if (paramsEl.TryGetProperty("properties", out var propsEl) &&
-                    propsEl.ValueKind == JsonValueKind.Object)
-                {
-                    tf.Parameters = new Dictionary<string, ToolParameter>();
-                    foreach (var prop in propsEl.EnumerateObject())
-                    {
-                        var tp = new ToolParameter
-                        {
-                            Type = prop.Value.TryGetProperty("type", out var pt) ? pt.GetString() : "string",
-                            Description = prop.Value.TryGetProperty("description", out var pd) ? pd.GetString() : null
-                        };
-                        if (prop.Value.TryGetProperty("enum", out var enumEl) && enumEl.ValueKind == JsonValueKind.Array)
-                            tp.Enum = enumEl.EnumerateArray().Select(e => e.GetString()).ToList();
-                        tf.Parameters[prop.Name] = tp;
-                    }
-                }
-                if (paramsEl.TryGetProperty("required", out var reqEl) && reqEl.ValueKind == JsonValueKind.Array)
-                    tf.Required = reqEl.EnumerateArray().Select(e => e.GetString()).ToList();
-            }
-
-            tools.Add(tf);
-        }
-        return tools.Count > 0 ? tools : null;
-    }
-
-    /// <summary>
     /// Build an OpenAI Chat Completions <c>tools</c> catalogue. With
-    /// <paramref name="mixedKinds"/> the schemas use the JSON Schema spellings
-    /// that the legacy parser could not read — integer and boolean enums, and
+    /// <paramref name="mixedKinds"/> the schemas use the richer JSON Schema spellings
+    /// — integer and boolean enums, and
     /// <c>"type": ["…", "null"]</c> for nullable fields — while keeping the same
     /// tool and parameter counts so the two corpora stay comparable.
     /// </summary>

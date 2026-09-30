@@ -161,7 +161,7 @@ public class EmbeddingEndpointTests
     }
 
     [Fact]
-    public async Task Ollama_AndLegacy_HaveTheirOwnResponseShapes()
+    public async Task Ollama_HasItsOwnResponseShape()
     {
         var model = new FakeModel();
         var adapter = new EmbeddingAdapter(model, Options());
@@ -172,9 +172,6 @@ public class EmbeddingEndpointTests
         Assert.Equal(10, body.GetProperty("prompt_eval_count").GetInt32());
         Assert.True(body.GetProperty("total_duration").GetInt64() >= 0);
         Assert.Equal(0, body.GetProperty("load_duration").GetInt64());
-        var legacy = Context("/api/embeddings", """{"model":"test-encoder","prompt":"one"}""");
-        await adapter.OllamaLegacyAsync(legacy);
-        Assert.Equal(body.GetProperty("embeddings")[0].GetRawText(), ReadResponse(legacy).GetProperty("embedding").GetRawText());
     }
 
     [Theory]
@@ -247,8 +244,9 @@ public class EmbeddingEndpointTests
             using var response = await client.PostAsJsonAsync(path, new { model = "test-encoder", input = new[] { "one", "two" } });
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         }
-        using var legacy = await client.PostAsJsonAsync("/api/embeddings", new { model = "test-encoder", prompt = "one" });
-        Assert.Equal(HttpStatusCode.OK, legacy.StatusCode);
+        // Ollama's deprecated /api/embeddings is not served.
+        using var removed = await client.PostAsJsonAsync("/api/embeddings", new { model = "test-encoder", prompt = "one" });
+        Assert.Equal(HttpStatusCode.NotFound, removed.StatusCode);
         foreach (string path in new[] { "/v1/models", "/api/tags" })
         {
             string json = await client.GetStringAsync(path);
@@ -284,9 +282,9 @@ public class EmbeddingEndpointTests
         await app.StartAsync();
         string address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
         using var client = new HttpClient { BaseAddress = new Uri(address) };
-        foreach (string path in new[] { "/v1/embeddings", "/api/embed", "/api/embeddings" })
+        foreach (string path in new[] { "/v1/embeddings", "/api/embed" })
         {
-            using var response = await client.PostAsJsonAsync(path, new { model = "test-encoder", input = "one", prompt = "one" });
+            using var response = await client.PostAsJsonAsync(path, new { model = "test-encoder", input = "one" });
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         }
         Assert.Contains("test-encoder", await client.GetStringAsync("/v1/models"));
@@ -302,7 +300,6 @@ public class EmbeddingEndpointTests
     [InlineData("/v1/embeddings", false)]
     [InlineData("/v1/embeddings", true)]
     [InlineData("/api/embed", true)]
-    [InlineData("/api/embeddings", false)]
     [InlineData("/api/show", true)]
     public async Task OversizedJsonBodies_Return413ForContentLengthAndChunkedRequests(string path, bool chunked)
     {

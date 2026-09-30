@@ -22,12 +22,6 @@ namespace TensorSharp.Server.ResponseSerializers
     /// </summary>
     internal static class WebUiSseEvents
     {
-        public static object QueueProgress(int position, int pending) => new
-        {
-            queue_position = position,
-            queue_pending = pending,
-        };
-
         public static object Token(string token) => new { token };
 
         public static object Thinking(string thinking) => new { thinking };

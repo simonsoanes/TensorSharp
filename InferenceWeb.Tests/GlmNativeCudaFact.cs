@@ -30,8 +30,8 @@ public sealed class GlmSnapshotBoundaryTheoryAttribute : TheoryAttribute, ITrait
 
     public GlmSnapshotBoundaryTheoryAttribute()
     {
-        if (Environment.GetEnvironmentVariable("TS_TEST_GLM_SNAPSHOT_BOUNDARY") != "1")
-            Skip = "Requires TS_TEST_GLM_SNAPSHOT_BOUNDARY=1 and a native library built with test hooks.";
+        if (Environment.GetEnvironmentVariable("TS_TEST_GLM_NATIVE_HOOKS") != "1")
+            Skip = "Requires TS_TEST_GLM_NATIVE_HOOKS=1 and a native library built with test hooks.";
     }
 }
 
@@ -42,10 +42,35 @@ public sealed class GlmSnapshotBoundaryCudaTheoryAttribute : TheoryAttribute, IT
 
     public GlmSnapshotBoundaryCudaTheoryAttribute()
     {
-        Skip = Environment.GetEnvironmentVariable("TS_TEST_GLM_SNAPSHOT_BOUNDARY") != "1"
-            ? "Requires TS_TEST_GLM_SNAPSHOT_BOUNDARY=1 and a native library built with test hooks."
+        Skip = Environment.GetEnvironmentVariable("TS_TEST_GLM_NATIVE_HOOKS") != "1"
+            ? "Requires TS_TEST_GLM_NATIVE_HOOKS=1 and a native library built with test hooks."
             : Environment.GetEnvironmentVariable("TS_TEST_GLM_CUDA") != "1"
                 ? "Requires TS_TEST_GLM_CUDA=1 for the native GLM CUDA fixture."
                 : TestGates.CudaSkip;
+    }
+}
+
+[TraitDiscoverer("InferenceWeb.Tests.RequiresTraitDiscoverer", "InferenceWeb.Tests")]
+public sealed class GlmNativeHooksFactAttribute : FactAttribute, ITraitAttribute
+{
+    public string RequiresValue => "NativeTestHooks";
+
+    public GlmNativeHooksFactAttribute()
+    {
+        if (Environment.GetEnvironmentVariable("TS_TEST_GLM_NATIVE_HOOKS") != "1")
+            Skip = "Requires TS_TEST_GLM_NATIVE_HOOKS=1 and a native library built with test hooks.";
+    }
+}
+
+[TraitDiscoverer("InferenceWeb.Tests.RequiresTraitDiscoverer", "InferenceWeb.Tests")]
+public sealed class GlmNativeHooksCudaFactAttribute : FactAttribute, ITraitAttribute
+{
+    public string RequiresValue => "Cuda";
+
+    public GlmNativeHooksCudaFactAttribute(int minimumGpuCount = 1)
+    {
+        Skip = Environment.GetEnvironmentVariable("TS_TEST_GLM_NATIVE_HOOKS") != "1"
+            ? "Requires TS_TEST_GLM_NATIVE_HOOKS=1 and a native library built with test hooks."
+            : new GlmNativeCudaFactAttribute(minimumGpuCount).Skip;
     }
 }

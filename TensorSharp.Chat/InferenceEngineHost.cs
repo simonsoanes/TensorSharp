@@ -21,14 +21,10 @@ namespace TensorSharp.Server
     /// this service tears down the engine, which joins its worker thread and
     /// frees the paged KV block pool.
     ///
-    /// This service is the public substitute for the legacy
-    /// <see cref="InferenceQueue"/>: submission is non-blocking, multiple
-    /// requests run concurrently (with iteration-level fairness), and the
-    /// paged KV pool / continuous-batching scheduler / per-block prefix cache
-    /// all live behind this single entry point. Adapters that haven't yet
-    /// dropped queue-status chunks still take <see cref="InferenceQueue"/>
-    /// tickets, but those tickets grant immediately so the engine remains the
-    /// only real concurrency boundary.
+    /// Submission is non-blocking, multiple requests run concurrently (with
+    /// iteration-level fairness), and the paged KV pool / continuous-batching
+    /// scheduler / prefix cache all live behind this single entry point: the
+    /// engine is the only concurrency boundary.
     /// </summary>
     public sealed class InferenceEngineHost : IDisposable
     {
@@ -150,9 +146,9 @@ namespace TensorSharp.Server
                     _engine.UpdateSpeculation(pending);
                 var poolStats = _engine.PoolStats;
                 _logger.LogInformation(
-                    "InferenceEngine constructed for fingerprint {Fingerprint} (blocks={NumBlocks}, blockSize={BlockSize}, kvCapacityTokens={KvCapacity}, maxBatched={MaxBatched}, prefixCache={PrefixCacheMode}, config={ConfigSource})",
+                    "InferenceEngine constructed for fingerprint {Fingerprint} (blocks={NumBlocks}, blockSize={BlockSize}, kvCapacityTokens={KvCapacity}, maxBatched={MaxBatched}, prefixCache={PrefixCacheActive}, config={ConfigSource})",
                     fp, poolStats.totalBlocks, poolStats.blockSize,
-                    (long)poolStats.totalBlocks * poolStats.blockSize, cfg.MaxNumBatchedTokens, _engine.PrefixCacheMode, cfgSource);
+                    (long)poolStats.totalBlocks * poolStats.blockSize, cfg.MaxNumBatchedTokens, _engine.PrefixCacheActive ? "radix" : "off", cfgSource);
                 return _engine;
             }
         }

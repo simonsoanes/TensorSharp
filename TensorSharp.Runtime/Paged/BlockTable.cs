@@ -26,6 +26,9 @@ namespace TensorSharp.Runtime.Paged
 
         public BlockTable(int blockSize)
         {
+            // A sequence takes the block size its engine resolved (PoolStats.blockSize):
+            // SchedulerConfig.BlockSize is 0 when the model decides.
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(blockSize);
             _blockSize = blockSize;
         }
 

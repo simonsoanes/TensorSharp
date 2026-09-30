@@ -1,6 +1,8 @@
 // Copyright (c) Zhongkai Fu. All rights reserved.
 // Licensed under the BSD-3-Clause license in the repository root.
 using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace TensorSharp.Runtime
 {
@@ -22,10 +24,15 @@ namespace TensorSharp.Runtime
     {
         public ThinkingTokenBudget(int tokenLimit, int endTokenId, bool closeOnRepetition = false,
             int openTokenId = -1, bool openAtStart = true, bool suppressUnopenedEnd = false,
-            Func<int, bool>? closeAtBoundary = null)
+            Func<int, bool>? closeAtBoundary = null, IReadOnlyList<int>? closingTokenIds = null)
         {
             if (tokenLimit <= 0) throw new ArgumentOutOfRangeException(nameof(tokenLimit));
             if (endTokenId < 0) throw new ArgumentOutOfRangeException(nameof(endTokenId));
+            if (closingTokenIds != null)
+                foreach (int id in closingTokenIds)
+                    if (id < 0 || id == endTokenId)
+                        throw new ArgumentException("Closing text tokens must be valid and must not contain the end token.", nameof(closingTokenIds));
+            ClosingTokenIds = closingTokenIds is { Count: > 0 } ? closingTokenIds.ToArray() : Array.Empty<int>();
             if (openTokenId == endTokenId && openTokenId >= 0) throw new ArgumentException("The open and end tokens must differ.", nameof(openTokenId));
             if (openTokenId < 0 && !openAtStart)
                 throw new ArgumentException("A channel with no open token must be open from the start.", nameof(openAtStart));
@@ -70,5 +77,14 @@ namespace TensorSharp.Runtime
         /// answering. Null closes exactly at the limit.
         /// </summary>
         public Func<int, bool>? CloseAtBoundary { get; }
+
+        /// <summary>
+        /// Tokens forced ahead of the end token when the budget closes the channel, or
+        /// empty for a bare close. A bare close leaves the model mid-thought: Qwen3.5-9B,
+        /// cut at 450 tokens, went on reasoning in the answer ("Wait, I need to check the
+        /// word count again"). Qwen's published thinking-budget recipe inserts a sentence
+        /// that hands over to the answer first (see ChatProtocol.ThinkingBudgetClosingText).
+        /// </summary>
+        public IReadOnlyList<int> ClosingTokenIds { get; }
     }
 }

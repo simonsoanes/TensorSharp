@@ -40,13 +40,9 @@ namespace TensorSharp.Models
     // The dequant goes through NativeDequant like DequantMatMulColumns': managed
     // (bit-exact with ggml's) on the pure-C# backend, which sets PreferManaged,
     // and the native ggml dequant on the other backends' host fallbacks.
-    // A/B: TS_CPU_FGEMM=0 (or TS_CPU_QGEMM=0) restores DequantMatMulColumns.
     // ------------------------------------------------------------------
     internal static partial class ManagedQuantizedOps
     {
-        private static readonly bool FGemmEnabled =
-            Environment.GetEnvironmentVariable("TS_CPU_FGEMM") != "0";
-
         private const int FGemmCols = 4;
 
         [ThreadStatic] private static float[] _fgemmScratch;
@@ -65,18 +61,15 @@ namespace TensorSharp.Models
 
         /// <summary>
         /// Float-panel GEMM over any dequantizable weight type. Returns false when
-        /// the path is disabled or the ISA is missing (the caller then runs
-        /// <see cref="DequantMatMulColumns"/>).
+        /// the ISA is missing (the caller then runs <see cref="DequantMatMulColumns"/>).
         /// </summary>
         internal static unsafe bool TryFloatPanelGemm(
             int ggmlType, byte* weights, long rowBytes, int inDim, int outDim,
             float* input, int inputRowStride, int rowCount, float* output, int outputRowStride,
             ParallelOptions options, QGemmIsa isa)
         {
-            if (isa == QGemmIsa.Auto && !FGemmEnabled)
-                return false;
             isa = ResolveQGemmIsa(isa);
-            if (isa == QGemmIsa.Legacy || rowCount <= 0 || outDim <= 0 || inDim <= 0)
+            if (isa == QGemmIsa.PerRow || rowCount <= 0 || outDim <= 0 || inDim <= 0)
                 return false;
             var type = (GgmlTensorType)ggmlType;
             if (!SupportsDequantization(type))

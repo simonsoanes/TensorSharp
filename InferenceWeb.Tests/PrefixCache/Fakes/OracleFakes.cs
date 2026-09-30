@@ -6,6 +6,7 @@
 // TensorSharp is licensed under the BSD-3-Clause license found in the LICENSE file in the root directory of this source tree.
 using System;
 using System.Collections.Generic;
+using TensorSharp.Runtime;
 using TensorSharp.Runtime.Scheduling.PrefixCache;
 
 namespace InferenceWeb.Tests.PrefixCache.Fakes;
@@ -105,6 +106,22 @@ internal static class OracleFakes
         ReuseAcrossMediaSpan = false,
     }, blockSize);
 
+    /// <summary>Nemotron-H on its batched route: pages as <see cref="R2"/>, and concurrent requests forward
+    /// through the batched paged path, where each carries a recurrent state of its own beside its pages. A
+    /// finished sequence's blocks and that state are its conversation's end state, donated at exact length.
+    /// Not one of <see cref="All"/>, the DESIGN §12.3 table.</summary>
+    internal static OracleModel R3(int blockSize = 16) => new(new OracleTraits
+    {
+        Name = "R3",
+        Class = FamilyClass.R,
+        EndState = EndStateSupport.DonateOnly,
+        PagedEndStates = true,
+        Truncation = TruncationKind.None,
+        Pages = PageSupport.Both,
+        PagesNeedStateAtEnd = true,
+        ReuseAcrossMediaSpan = false,
+    }, blockSize);
+
     /// <summary>The ModelDecides span of <see cref="N"/>.</summary>
     internal const int NativeRewindSpan = 8;
 
@@ -125,6 +142,26 @@ internal static class OracleFakes
         Pages = PageSupport.None,
         ReuseAcrossMediaSpan = false,
     }, blockSize);
+
+    /// <summary>DeepSeek V4.1 with a DSpark drafter loaded (its native slots cannot be retained): no retained slots, so the
+    /// primary is its only reusable state; the model decides every rewind and caps none; a rewind reaches
+    /// <see cref="NativeRewindSpan"/> tokens below the head or below the checkpoint its last multi-token
+    /// forward took (the prompt boundary). Not one of <see cref="All"/>, the DESIGN §12.3 table.</summary>
+    internal static OracleModel NLive(int blockSize = 16, int vocab = OracleModel.DefaultVocab, ITokenizer? tokenizer = null) => new(new OracleTraits
+    {
+        Name = "NLive",
+        Class = FamilyClass.N,
+        EndState = EndStateSupport.None,
+        AdoptPrimaryOnDisplacement = false,
+        Truncation = TruncationKind.ModelDecides,
+        TruncationParameter = NativeRewindSpan,
+        TruncationGranularity = 2,
+        RewindCapTokens = int.MaxValue,
+        RewindCheckpoint = true,
+        MinTailPrefillTokens = 2,
+        Pages = PageSupport.None,
+        ReuseAcrossMediaSpan = false,
+    }, blockSize, vocab, tokenizer);
 
     internal static IReadOnlyList<(string Name, Func<OracleModel> Create)> All { get; } = new (string, Func<OracleModel>)[]
     {

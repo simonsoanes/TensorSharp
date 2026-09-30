@@ -90,7 +90,6 @@ namespace TensorSharp.Server
         private readonly int _maxChains;
         private readonly long _maxTokens;
         private long _tokens;
-        private List<ChatMessage> _latestTranscript = new();
 
         public ConversationTranscriptStore(int maxChains, long maxTokens)
         {
@@ -104,13 +103,6 @@ namespace TensorSharp.Server
             get { lock (_lock) return _chains.Count; }
         }
 
-        /// <summary>The render history of the most recently recorded turn plus that turn,
-        /// for diagnostics and the legacy <c>ModelService.TrackedHistory</c> view.</summary>
-        public IReadOnlyList<ChatMessage> LatestTranscript
-        {
-            get { lock (_lock) return _latestTranscript.AsReadOnly(); }
-        }
-
         public void Clear()
         {
             lock (_lock)
@@ -118,7 +110,6 @@ namespace TensorSharp.Server
                 _chains.Clear();
                 _lru.Clear();
                 _tokens = 0;
-                _latestTranscript = new List<ChatMessage>();
             }
         }
 
@@ -235,8 +226,7 @@ namespace TensorSharp.Server
             IReadOnlyList<ChatMessage> history,
             ChatMessage generated,
             EmittedAssistantTurn emitted,
-            string scope,
-            IReadOnlyList<ChatMessage> renderHistoryForDiagnostics = null)
+            string scope)
         {
             if (generated?.RawOutputTokens is not { Count: > 0 } || emitted == null)
                 return;
@@ -329,12 +319,6 @@ namespace TensorSharp.Server
                     foreach (TurnRecord gone in victim.Records)
                         _tokens -= gone.Tokens;
                 }
-
-                var latest = new List<ChatMessage>();
-                if (renderHistoryForDiagnostics != null)
-                    latest.AddRange(renderHistoryForDiagnostics);
-                latest.Add(generated);
-                _latestTranscript = latest;
             }
         }
 

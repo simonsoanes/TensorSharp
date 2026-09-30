@@ -145,8 +145,7 @@ dotnet run --project TensorSharp.Server.Host -c Release -p:TensorSharpSkipMlxNat
 
 TensorSharp.Server.Host、TensorSharp.Cli 与 TensorAgent 默认对下方各表中的所有自回归家族使用共享引擎的 Radix
 KV 前缀缓存（DiffusionGemma 与图像 / 视频模型除外）。它复用公共提示前缀和每个会话的私有状态，并遵守模型与媒体边界；
-投机解码（`--spec`）不会关闭它。设置 `TS_SCHED_PREFIX_CACHE=0` 可关闭运行时前缀复用，
-`TS_PREFIX_CACHE_MODE=legacy` 则选择用于诊断的兼容路径。服务端与 CLI 的 `--no-prefix-cache`
+投机解码（`--spec`）不会关闭它。设置 `TS_SCHED_PREFIX_CACHE=0` 可关闭运行时前缀复用。服务端与 CLI 的 `--no-prefix-cache`
 同样会关闭前缀复用和启动预热；在服务端还会关闭磁盘上的前缀检查点持久化。
 
 两个可执行程序在不带参数或使用 `--help` 启动时，都会打印完整的参数参考——逐项列出说明、默认值、取值范围与示例：
@@ -160,7 +159,7 @@ dotnet run --project TensorSharp.Server.Host -c Release -- --help
 
 ## 文本与代码嵌入
 
-当前源码支持 **Snowflake Arctic Embed L v2.0** 与 **all-MiniLM-L6-v2** 的 GGUF 编码器，通过 OpenAI `/v1/embeddings`、Ollama `/api/embed` 和旧版 `/api/embeddings` 提供归一化向量。以下命令在完成上面的源码构建后启动小型 MiniLM 服务：
+当前源码支持 **Snowflake Arctic Embed L v2.0** 与 **all-MiniLM-L6-v2** 的 GGUF 编码器，通过 OpenAI `/v1/embeddings` 和 Ollama `/api/embed` 提供归一化向量。以下命令在完成上面的源码构建后启动小型 MiniLM 服务：
 
 ```bash
 curl --create-dirs -fL -o models/embeddings/all-MiniLM-L6-v2-Q8_0.gguf \

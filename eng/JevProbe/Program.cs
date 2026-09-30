@@ -499,7 +499,6 @@ static int RunQuality(DiffusionGemmaModel model, BackendType backend, int[] widt
     {
         startedUtc = started, completedUtc = DateTimeOffset.UtcNow, mode = "quality", model = Path.GetFullPath(modelPath),
         backend = backend.ToString(), promptKvCache = model.SupportsPromptKvCache,
-        cpuLegacy = Environment.GetEnvironmentVariable("DIFFUSION_CPU_LEGACY") ?? "0",
         seed = 42, widths, summary, reads,
     }, outputPath);
     return 0;

@@ -9,6 +9,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
 using Microsoft.Extensions.Logging;
+using TensorSharp.Runtime;
 using TensorSharp.Server.Hosting;
 using TensorSharp.Server.Host.Hosting;
 
@@ -17,8 +18,7 @@ namespace InferenceWeb.Tests;
 /// <summary>
 /// What the server says at startup about options it accepts but cannot honour as asked.
 /// Every case here used to be either silent or worded as the opposite of what happened:
-/// the paged-KV flags were logged as "configured" for a cache the server never builds, a
-/// larger --upload-max-mb could never apply past a fixed 500 MB request-body limit (and
+/// a larger --upload-max-mb could never apply past a fixed 500 MB request-body limit (and
 /// raising it for every route let each JSON request buffer that much), an
 /// incomplete --width/--height pair was dropped without a word, and the backend line said
 /// "Falling back" on every launch without --backend and right before a refused load.
@@ -36,15 +36,8 @@ public class ServerStartupWarningsTests : IDisposable
         _env.Set(ServerOptionsBuilder.QwenImageWidthEnvVar, null);
         _env.Set(ServerOptionsBuilder.QwenImageHeightEnvVar, null);
         _env.Set("TS_UPLOAD_MAX_MB", null);
-        foreach (string name in new[]
-                 {
-                     "TS_KV_PAGED_CACHE", "TS_KV_BLOCK_SIZE", "TS_KV_CACHE_MAX_RAM_MB", "TS_KV_CACHE_SSD_DIR",
-                     "TS_KV_CACHE_MAX_SSD_MB", "TS_KV_PAGED_QUANT_BITS", "TS_KV_CACHE_REDIS_URL",
-                     "TS_KV_CACHE_REDIS_TTL_MINUTES",
-                 })
-        {
+        foreach ((string name, _) in RemovedCliFlags.RemovedEnvironmentVariables)
             _env.Set(name, null);
-        }
     }
 
     public void Dispose()
@@ -53,57 +46,67 @@ public class ServerStartupWarningsTests : IDisposable
         try { Directory.Delete(_baseDir, recursive: true); } catch { /* best effort */ }
     }
 
-    // ---- --paged-kv*: accepted, inert, and said so once ----------------------------------
+    // ---- removed options and variables fail startup by name --------------------------------
 
     [Fact]
-    public void InertPagedKvWarning_IsNullWithoutAnyPagedKvFlag()
+    public void EveryRemovedEnvironmentVariable_FailsStartup_NamingWhatToDoInstead()
     {
-        Assert.Null(ServerOptionsBuilder.DescribeInertPagedKvFlags(
-            new[] { "--model", "m.gguf", "--redis-url", "localhost:6379" }, prefixCacheEnabled: true));
-        Assert.Null(ServerOptionsBuilder.DescribeInertPagedKvFlags(Array.Empty<string>(), prefixCacheEnabled: true));
-    }
-
-    [Fact]
-    public void InertPagedKvWarning_NamesEveryFlagOnce_AndWhatServesPrefixReuse()
-    {
-        string[] args =
+        Assert.NotEmpty(RemovedCliFlags.RemovedEnvironmentVariables);
+        foreach ((string name, string advice) in RemovedCliFlags.RemovedEnvironmentVariables)
         {
-            "--paged-kv", "--paged-kv-block-size", "128", "--PAGED-KV-RAM-MB=2048",
-            "--paged-kv-redis-url", "localhost:6379", "--paged-kv", "--No-Paged-Kv",
-        };
-        // Program.cs runs the applier first; the warning must still find every flag after it.
-        Assert.True(ServerOptionsBuilder.ApplyPagedKvCacheCliFlags(args));
+            using var scope = new EnvScope();
+            scope.Set(name, "1");
+            var ex = Assert.Throws<ArgumentException>(RemovedCliFlags.RejectRemovedEnvironment);
+            Assert.StartsWith(name + " was removed: ", ex.Message, StringComparison.Ordinal);
+            Assert.Contains(advice, ex.Message, StringComparison.Ordinal);
+        }
+        RemovedCliFlags.RejectRemovedEnvironment();   // none set: nothing to say
+    }
 
-        string warning = ServerOptionsBuilder.DescribeInertPagedKvFlags(args, prefixCacheEnabled: true);
+    // The registry is only true while nothing reads a name in it: a removed variable that
+    // some path still honours would be refused at startup yet documented nowhere as live.
+    [Fact]
+    public void NoSourceFile_StillReadsARemovedEnvironmentVariable()
+    {
+        string root = FindRepoRoot();
+        string registry = Path.Combine(root, "TensorSharp.Runtime", "RemovedCliFlags.cs");
+        var extensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".cs", ".cpp", ".h", ".hpp", ".cu", ".cuh", ".mm", ".m", ".metal" };
+        var skipped = new[] { "bin", "obj", ".git", "ExternalProjects", "InferenceWeb.Tests", "build", "docs", "artifacts" };
+        var offenders = new List<string>();
+        foreach (string file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+        {
+            if (!extensions.Contains(Path.GetExtension(file)) || file == registry)
+                continue;
+            string relative = Path.GetRelativePath(root, file);
+            if (relative.Split(Path.DirectorySeparatorChar).Any(part => skipped.Contains(part, StringComparer.Ordinal)))
+                continue;
+            string text = File.ReadAllText(file);
+            foreach ((string name, _) in RemovedCliFlags.RemovedEnvironmentVariables)
+            {
+                if (text.Contains("\"" + name + "\"", StringComparison.Ordinal))
+                    offenders.Add($"{relative}: {name}");
+            }
+        }
+        Assert.True(offenders.Count == 0, "removed variables still read:\n" + string.Join("\n", offenders));
+    }
 
-        Assert.NotNull(warning);
-        Assert.StartsWith(
-            "--paged-kv, --paged-kv-block-size, --paged-kv-ram-mb, --paged-kv-redis-url, --no-paged-kv have no effect",
-            warning, StringComparison.Ordinal);
-        Assert.Contains("--paged-bench", warning, StringComparison.Ordinal);
-        Assert.Contains("radix prefix cache, which is on", warning, StringComparison.Ordinal);
-        // The value of a value flag is never mistaken for a flag of its own.
-        Assert.DoesNotContain("localhost", warning, StringComparison.Ordinal);
+    private static string FindRepoRoot()
+    {
+        var here = new DirectoryInfo(AppContext.BaseDirectory);
+        while (here != null && !Directory.Exists(Path.Combine(here.FullName, "TensorSharp.Runtime")))
+            here = here.Parent;
+        return here?.FullName ?? throw new DirectoryNotFoundException("no repository root above " + AppContext.BaseDirectory);
     }
 
     [Fact]
-    public void InertPagedKvWarning_SaysWhenPrefixReuseIsOffToo()
+    public void EveryPagedKvSpelling_IsRefusedByName()
     {
-        string warning = ServerOptionsBuilder.DescribeInertPagedKvFlags(
-            new[] { "--paged-kv-quant-bits", "8" }, prefixCacheEnabled: false);
-
-        Assert.StartsWith("--paged-kv-quant-bits has no effect", warning, StringComparison.Ordinal);
-        Assert.Contains("reuses no prefix at all", warning, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void Build_StillAcceptsEveryPagedKvSpelling()
-    {
-        // Inert is not refused: config files and command lines in the wild carry these.
-        foreach (string flag in ServerOptionsBuilder.PagedKvSwitchFlags)
-            ServerOptionsBuilder.Build(new[] { flag, "--no-skills" }, _baseDir);
-        foreach (string flag in ServerOptionsBuilder.PagedKvValueFlags)
-            ServerOptionsBuilder.Build(new[] { flag, "1", "--no-skills" }, _baseDir);
+        foreach (string flag in new[] { "--paged-kv", "--no-paged-kv", "--paged-kv-ram-mb", "--paged-bench" })
+        {
+            var ex = Assert.Throws<ArgumentException>(() => ServerOptionsBuilder.Build(new[] { flag, "--no-skills" }, _baseDir));
+            Assert.StartsWith(flag + " was removed:", ex.Message, StringComparison.Ordinal);
+            Assert.Contains("radix prefix cache", ex.Message, StringComparison.Ordinal);
+        }
     }
 
     // ---- --upload-max-mb drives the /api/upload request-body limit -----------------------

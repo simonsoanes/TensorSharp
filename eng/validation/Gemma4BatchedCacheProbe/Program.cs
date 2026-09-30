@@ -44,8 +44,6 @@ Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
 File.WriteAllText(output, JsonSerializer.Serialize(new
 {
     Model = Path.GetFullPath(modelPath), ModelBytes = new FileInfo(modelPath).Length, Backend = backendName, Context = 16384, Steps = steps, Pairs = pairs,
-    NativeCapabilities = GgmlBasicOps.Gemma4BatchedDecodeCapabilities().ToString(),
-    CapabilitiesOverride = Environment.GetEnvironmentVariable("TS_GEMMA4_BATCHED_CAPS"),
     AllowFallback = allowFallback, UniformControl = uniformControl, DiagnosticOnly = diagnosticOnly,
     ValidationPassed = !allowFallback && !diagnosticOnly, WarmupsExcluded = true,
     NativePath = module.FileName, NativeSha256 = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(module.FileName))),

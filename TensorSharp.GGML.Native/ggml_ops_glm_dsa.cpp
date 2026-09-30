@@ -616,6 +616,13 @@ struct glm_model
     std::list<std::unique_ptr<graph_build_result>> graph_cache;
     int graph_cache_cap = 8;
 
+    // Slots the managed side retains for finished conversations' next turns,
+    // oldest first (TSGgml_GlmSetReclaimableSlots). A graph that does not fit
+    // frees them in that order before failing (glm_reclaim_for_graph); the ids
+    // it freed wait in `reclaimed` for TSGgml_GlmTakeReclaimedSlots.
+    std::vector<int> reclaimable;
+    std::vector<int> reclaimed;
+
     std::vector<float> logits;
 
     // glm5next vision: embedding rows queued by the managed side to OVERRIDE the
@@ -1232,7 +1239,80 @@ static void gen_hadamard(std::vector<float> & out, int n)
 
 static bool is_pow2(int v) { return v > 0 && (v & (v - 1)) == 0; }
 
-static glm_slot * slot_alloc(glm_model & m)
+// What a sequence slot beyond the planned ones must leave free besides graph
+// room (glm_slot_fits): the loader's 1 GiB driver reserve by default.
+// TS_GLM_SLOT_HEADROOM_MB overrides it for those slots only.
+static size_t glm_driver_reserve_bytes()
+{
+    size_t mb = 1024;
+    if (const char * e = getenv("TS_GLM_SLOT_HEADROOM_MB"))
+    {
+        char * end = nullptr;
+        const long long v = strtoll(e, &end, 10);
+        if (end != e && !*end && v >= 0 && (unsigned long long) v <= SIZE_MAX / (1024 * 1024)) mb = (size_t) v;
+    }
+    return mb * 1024 * 1024;
+}
+
+// Compute-buffer bytes the cached graphs hold on device d, and the largest one.
+static void glm_cached_graph_bytes(glm_model & m, int d, size_t & total, size_t & largest)
+{
+    total = 0;
+    largest = 0;
+    auto add = [&](size_t n) { total += n; largest = std::max(largest, n); };
+    for (const auto & entry : m.graph_cache)
+    {
+        if (entry->sched) add(ggml_backend_sched_get_buffer_size(entry->sched, m.backends[d]));
+        if (entry->galloc && m.rank_device(std::max(0, entry->tp_rank)) == d)
+            add(ggml_gallocr_get_buffer_size(entry->galloc, 0));
+        for (const auto & peer : entry->tp_peers)
+            if (peer->galloc && m.rank_device(peer->tp_rank) == d)
+                add(ggml_gallocr_get_buffer_size(peer->galloc, 0));
+    }
+}
+
+// A sequence slot beyond the ones the context was sized for is opportunistic:
+// each holds a whole context of cache rows, taken from the memory the compute
+// graphs grow into. Admit one only while every device it lands on keeps room
+// for another graph as large as the largest cached one, plus the reserve.
+// GLM-5.3-Flash on a 6x A40 layer split admitted a third extra slot that left
+// device 0 116 MiB short of the new request's own first prefill graph, so the
+// request failed instead of waiting. This is admission, not a promise: a
+// sequence whose context grows toward n_ctx needs graphs this rule does not
+// hold back (TS_GLM_PLAN_SLOTS sizes the context for that many slots).
+static bool glm_slot_fits(glm_model & m, const std::vector<ggml_context *> & ctxs)
+{
+    const size_t reserve = glm_driver_reserve_bytes();
+    for (int d = 0; d < m.n_gpu; d++)
+    {
+        if (!ctxs[(size_t) d] || !ggml_get_first_tensor(ctxs[(size_t) d])) continue;
+        ggml_backend_dev_t dev = ggml_backend_get_device(m.backends[d]);
+        if (!dev || ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU) continue;
+        size_t free_b = 0, total_b = 0;
+        ggml_backend_dev_memory(dev, &free_b, &total_b);
+        if (!total_b) continue;   // unknown memory: the allocation itself decides
+        ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(m.backends[d]);
+        const size_t align = ggml_backend_buft_get_alignment(buft);
+        size_t need = 0;
+        for (ggml_tensor * t = ggml_get_first_tensor(ctxs[(size_t) d]); t; t = ggml_get_next_tensor(ctxs[(size_t) d], t))
+            need = GGML_PAD(need, align) + ggml_backend_buft_get_alloc_size(buft, t);
+        size_t graphs = 0, largest = 0;
+        glm_cached_graph_bytes(m, d, graphs, largest);
+        if (free_b < need || free_b - need < largest + reserve)
+        {
+            fprintf(stderr, "[glm] no room for another sequence slot on device %d: it needs %.0f MiB and must leave "
+                    "%.0f MiB (largest cached graph %.0f + reserve %.0f); %.0f MiB free\n",
+                    d, need / 1048576.0, (largest + reserve) / 1048576.0, largest / 1048576.0,
+                    reserve / 1048576.0, free_b / 1048576.0);
+            return false;
+        }
+    }
+    return true;
+}
+
+// admit: apply glm_slot_fits. The load-time primary slot is the one the context
+// was sized for, so it is allocated without the check.
+static glm_slot * slot_alloc(glm_model & m, bool admit = false)
 {
     auto slot = std::unique_ptr<glm_slot>(new glm_slot());
     slot->id = m.next_slot_id++;
@@ -1295,6 +1375,12 @@ static glm_slot * slot_alloc(glm_model & m)
                 ggml_format_name(slot->idx_k[r][il], "slot%d_idx.%d.%d", slot->id, r, il);
             }
         }
+    }
+
+    if (admit && !glm_slot_fits(m, ctxs))
+    {
+        for (auto c : ctxs) if (c) ggml_free(c);
+        return nullptr;
     }
 
     // One buffer per device for the whole slot; freed with the slot.
@@ -1363,6 +1449,7 @@ static void slot_free(glm_model & m, int slot_id)
     }
 
     m.slots.erase(slot_id);
+    m.reclaimable.erase(std::remove(m.reclaimable.begin(), m.reclaimable.end(), slot_id), m.reclaimable.end());
     // A snapshot of this slot's KDA state describes caches that no longer
     // exist; slot ids are reused, so it must not survive to match a new one.
     if (m.kda_snap.slot_id == slot_id) m.kda_snap.valid = false;
@@ -1373,6 +1460,56 @@ static void slot_free(glm_model & m, int slot_id)
         if (it->ctx) ggml_free(it->ctx);
         it = m.slot_ctxs.erase(it);
     }
+}
+
+#if defined(TSG_GGML_TEST_HOOKS)
+static thread_local int glm_test_graph_alloc_failures = 0;
+#ifndef TSG_TEST_EXPORT
+#define TSG_TEST_EXPORT TSG_EXPORT
+#endif
+// Fixture only: the next `n` graph allocations fail as a full device would.
+TSG_TEST_EXPORT void TSGgml_GlmTestFailGraphAllocs(int n)
+{
+    glm_test_graph_alloc_failures = n;
+}
+#endif
+static bool glm_test_graph_alloc_fault()
+{
+#if defined(TSG_GGML_TEST_HOOKS)
+    if (glm_test_graph_alloc_failures > 0)
+    {
+        glm_test_graph_alloc_failures--;
+        return true;
+    }
+#endif
+    return false;
+}
+
+// A graph that could not be allocated: free the oldest retained slot it does
+// not read, so the caller can build and allocate it again. A retained slot only
+// keeps a finished conversation's next turn cheap, and a running request
+// outranks it here as it does for a new slot (the managed AllocReclaiming).
+// Every slot the admission rule let in may be retained at once, so without
+// this a graph that grows past the reserve (a longer context, a larger batch)
+// failed the request while those slots held the memory. False when none is left.
+static bool glm_reclaim_for_graph(glm_model & m, const int32_t * reads, int n_reads)
+{
+    for (size_t i = 0; i < m.reclaimable.size(); i++)
+    {
+        const int id = m.reclaimable[i];
+        if (std::find(reads, reads + n_reads, id) != reads + n_reads) continue;
+        if (m.active_slot && m.active_slot->id == id) continue;
+        if (!m.slots.count(id))
+        {
+            m.reclaimable.erase(m.reclaimable.begin() + (std::ptrdiff_t) i--);
+            continue;
+        }
+        slot_free(m, id);
+        m.reclaimed.push_back(id);
+        fprintf(stderr, "[glm] freed retained sequence slot %d for a graph that did not fit\n", id);
+        return true;
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1686,8 +1823,8 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
     // --- NextN/MTP draft block -------------------------------------------
     // Loading it costs a whole extra decoder layer (~3 GiB of GLM-5.2 at
     // IQ2_XXS) that also competes with the KV cache for the VRAM the context is
-    // sized against, so it is opt-in: the server sets TS_MTP_SPEC from
-    // --spec before the model loads, and the managed side forwards that as
+    // sized against, so it is opt-in: the hosts set TS_SPEC from --spec
+    // before the model loads, and the managed side forwards that as
     // `load_mtp`. A checkpoint that declares nextn_predict_layers but ships no
     // MTP tensors (a trunk-only re-quantization) loads normally without one.
     if (load_mtp && hp.g5n)
@@ -1742,7 +1879,7 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
         // graph it had a moment ago. These graphs are all tiny next to the
         // 1024-row prefill graph the cache already holds.
         int max_draft = 8;
-        if (const char * e = getenv("TS_MTP_DRAFT")) { int v = atoi(e); if (v > 0 && v <= 64) max_draft = v; }
+        if (const char * e = getenv("TS_SPEC_DRAFT")) { int v = atoi(e); if (v > 0 && v <= 64) max_draft = v; }
         m->graph_cache_cap = std::min(64, 8 + 2 * (max_draft + 1));
     }
     // The draft block lands beside the LM head (it reads the trunk's post-norm
@@ -2182,10 +2319,8 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
 
     m->tok_embd = WL.full(dev_first, true, "token_embd.weight");
     m->tok_embd_rank[0] = m->tok_embd;
-    const char * fused_env_early = getenv("TS_GLM_TP_FUSED");
     const bool load_rank_embeddings = hp.g5n && m->tp > 1 && m->tp <= n_gpu && m->tp_shard == 3 &&
-        n_cpu_moe == 0 && !(fused_env_early && atoi(fused_env_early) == 0) &&
-        !(getenv("TS_GLM_TRACE") && *getenv("TS_GLM_TRACE"));
+        n_cpu_moe == 0 && !(getenv("TS_GLM_TRACE") && *getenv("TS_GLM_TRACE"));
     if (load_rank_embeddings)
     {
         for (int r = 1; r < m->tp; r++)
@@ -2669,8 +2804,6 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
     // --- flash attention / fused indexer probes ---------------------------
     if (n_gpu > 0)
     {
-        const char * fa_env = getenv("TS_GLM_FA");
-        if (!(fa_env && atoi(fa_env) == 0))
         {
             ggml_init_params pp = { 16 * ggml_tensor_overhead() + 4096, nullptr, true };
             ggml_context * pctx = ggml_init(pp);
@@ -2684,8 +2817,6 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
             ggml_free(pctx);
         }
 
-        const char * lid_env = getenv("TS_GLM_FUSED_LID");
-        if (!(lid_env && atoi(lid_env) == 0))
         {
             ggml_init_params pp = { 16 * ggml_tensor_overhead() + 4096, nullptr, true };
             ggml_context * pctx = ggml_init(pp);
@@ -2716,7 +2847,6 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
         m->hc_native = ggml_backend_supports_op(m->backends[0], hpre)
                     && ggml_backend_supports_op(m->backends[0], hpost);
         ggml_free(pctx);
-        if (const char * e = getenv("TS_GLM_HC_NATIVE")) m->hc_native = atoi(e) != 0;
         fprintf(stderr, "[glm] hyper-connection ops: %s\n",
                 m->hc_native ? "native" : "decomposed (backend has no fused kernel)");
     }
@@ -2724,9 +2854,7 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
     if (hp.g5n && m->tp > 1)
     {
         const char * why = nullptr;
-        const char * fused_env = getenv("TS_GLM_TP_FUSED");
-        if (fused_env && atoi(fused_env) == 0) why = "disabled by TS_GLM_TP_FUSED=0";
-        else if (m->tp > n_gpu) why = "ranks are oversubscribed on the visible GPUs";
+        if (m->tp > n_gpu) why = "ranks are oversubscribed on the visible GPUs";
         else if (m->tp_shard != 3 || !m->tp_experts()) why = "heads and routed-expert rows are not both sharded";
         else if (n_cpu_moe != 0) why = "CPU MoE offload is active";
         else if (!m->hc_native) why = "the backend lacks native hyper-connection kernels";
@@ -5247,8 +5375,6 @@ static void print_traces(const graph_build_result * gr)
 static graph_build_result * acquire_batched_graph(glm_model & m, int n, const int32_t * slot_ids,
                                                   const int32_t * positions, bool * out_reused)
 {
-    static const bool topk_enabled = []() { const char * e = getenv("TS_GLM_TOPK"); return !(e && atoi(e) == 0); }();
-
     std::vector<bd_token> want((size_t) n);
     for (int i = 0; i < n; i++)
     {
@@ -5259,7 +5385,7 @@ static graph_build_result * acquire_batched_graph(glm_model & m, int n, const in
         const int64_t n_select = m.hp.indexer_kpool > 0
             ? (int64_t) m.hp.indexer_top_k + m.hp.indexer_kpool - 1
             : (int64_t) m.hp.indexer_top_k;
-        B.sparse = topk_enabled && (B.p + 1) > n_select;
+        B.sparse = (B.p + 1) > n_select;
         if (B.p + 1 > m.n_ctx) return nullptr;
     }
 
@@ -5282,14 +5408,6 @@ static graph_build_result * acquire_batched_graph(glm_model & m, int n, const in
         return raw;
     }
 
-    auto entry = std::unique_ptr<graph_build_result>(new graph_build_result());
-    entry->nt = n;
-    entry->n_kv = 0;
-    entry->n_out = n;
-    entry->want_logits = true;
-    entry->slot_id = -1;
-    entry->bd = want;
-
     size_t nodes_per_layer = 256;
     if (const char * e = getenv("TS_GLM_NODES_PER_LAYER")) { int v = atoi(e); if (v > 0) nodes_per_layer = (size_t) v; }
     // The per-token part of a layer (cache write, scoring, softmax) is built n
@@ -5297,29 +5415,43 @@ static graph_build_result * acquire_batched_graph(glm_model & m, int n, const in
     const size_t n_nodes = (size_t) m.hp.n_layer * nodes_per_layer * (size_t) std::max(1, n) + 1024;
     ggml_init_params gp = { ggml_tensor_overhead() * n_nodes + ggml_graph_overhead_custom(n_nodes, false),
                             nullptr, true };
-    entry->ctx = ggml_init(gp);
-    if (!entry->ctx) return nullptr;
-    entry->gf = ggml_new_graph_custom(entry->ctx, n_nodes, false);
-    entry->sched = ggml_backend_sched_new(m.sched_backends, m.sched_bufts, m.n_sched_backends,
-                                          n_nodes, false, m.op_offload);
-    if (!entry->sched) return nullptr;
 
-    glm_slot & any = *m.slots.at(slot_ids[0]);
-    graph_builder gb(m, *entry, any, n, 0, 0, false);
-    if (m.hp.g5n) gb.build_batched_g5n();
-    else          gb.build_batched();
-
-    if (!ggml_backend_sched_alloc_graph(entry->sched, entry->gf))
+    for (;;)
     {
-        fprintf(stderr, "[glm] failed to allocate a batched graph for n=%d\n", n);
-        return nullptr;
-    }
+        auto entry = std::unique_ptr<graph_build_result>(new graph_build_result());
+        entry->nt = n;
+        entry->n_kv = 0;
+        entry->n_out = n;
+        entry->want_logits = true;
+        entry->slot_id = -1;
+        entry->bd = want;
+        entry->ctx = ggml_init(gp);
+        if (!entry->ctx) return nullptr;
+        entry->gf = ggml_new_graph_custom(entry->ctx, n_nodes, false);
+        entry->sched = ggml_backend_sched_new(m.sched_backends, m.sched_bufts, m.n_sched_backends,
+                                              n_nodes, false, m.op_offload);
+        if (!entry->sched) return nullptr;
 
-    graph_build_result * raw = entry.get();
-    m.graph_cache.push_front(std::move(entry));
-    while ((int) m.graph_cache.size() > m.graph_cache_cap) m.graph_cache.pop_back();
-    if (out_reused) *out_reused = false;
-    return raw;
+        glm_slot & any = *m.slots.at(slot_ids[0]);
+        graph_builder gb(m, *entry, any, n, 0, 0, false);
+        if (m.hp.g5n) gb.build_batched_g5n();
+        else          gb.build_batched();
+
+        if (!glm_test_graph_alloc_fault() && ggml_backend_sched_alloc_graph(entry->sched, entry->gf))
+        {
+            graph_build_result * raw = entry.get();
+            m.graph_cache.push_front(std::move(entry));
+            while ((int) m.graph_cache.size() > m.graph_cache_cap) m.graph_cache.pop_back();
+            if (out_reused) *out_reused = false;
+            return raw;
+        }
+        entry.reset();   // its compute buffers go back before a slot is freed
+        if (!glm_reclaim_for_graph(m, slot_ids, n))
+        {
+            fprintf(stderr, "[glm] failed to allocate a batched graph for n=%d\n", n);
+            return nullptr;
+        }
+    }
 }
 
 /// One decode step for n sequences at once. Every sequence contributes exactly
@@ -5476,7 +5608,6 @@ static graph_build_result * acquire_graph(glm_model & m, glm_slot & slot, int64_
     std::vector<int64_t> decode_row_kv;
     if (m.hp.g5n && nt > 1 && nt <= TSG_PRECISION_DECODE_COLUMNS)
         for (int64_t r = 0; r < nt; ++r) decode_row_kv.push_back(plan_n_kv(m, p0 + r + 1));
-    static const bool topk_enabled = []() { const char * e = getenv("TS_GLM_TOPK"); return !(e && atoi(e) == 0); }();
     // The draft block attends densely, so the indexer's sparsity never applies
     // to it and must not enter its cache key.
     // glm5next selects whole pools plus the query's own trailing pool; below
@@ -5484,7 +5615,7 @@ static graph_build_result * acquire_graph(glm_model & m, glm_slot & slot, int64_
     const int64_t n_select = m.hp.indexer_kpool > 0
         ? (int64_t) m.hp.indexer_top_k + m.hp.indexer_kpool - 1
         : (int64_t) m.hp.indexer_top_k;
-    const bool sparse = kind == 0 && topk_enabled && (p0 + nt) > n_select;
+    const bool sparse = kind == 0 && (p0 + nt) > n_select;
 
     for (auto it = m.graph_cache.begin(); it != m.graph_cache.end(); ++it)
     {
@@ -5537,7 +5668,7 @@ static graph_build_result * acquire_graph(glm_model & m, glm_slot & slot, int64_
     if (use_fused_tp)
     {
         const size_t rank_nodes = graph_layers * nodes_per_layer + 1024;
-        bool built = true;
+        bool rank_out_of_memory = false;
 
         auto build_rank = [&](graph_build_result & rg, int rank) -> bool
         {
@@ -5585,36 +5716,47 @@ static graph_build_result * acquire_graph(glm_model & m, glm_slot & slot, int64_
             }
 
             rg.galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-            if (!rg.galloc || !ggml_gallocr_alloc_graph(rg.galloc, rg.gf))
+            if (!rg.galloc || glm_test_graph_alloc_fault() || !ggml_gallocr_alloc_graph(rg.galloc, rg.gf))
             {
                 fprintf(stderr, "[glm] failed to allocate rank %d TP graph for nt=%" PRId64
                                 " n_kv=%" PRId64 "\n", rank, nt, n_kv);
+                rank_out_of_memory = rg.galloc != nullptr;
                 return false;
             }
             return true;
         };
 
-        built = build_rank(*entry, 0);
-        for (int rank = 1; built && rank < m.tp; rank++)
+        for (;;)
         {
-            auto peer = std::unique_ptr<graph_build_result>(new graph_build_result());
-            built = build_rank(*peer, rank);
-            entry->tp_peers.push_back(std::move(peer));
-        }
-        if (built)
-        {
-            const size_t n_seg = entry->tp_plan.seg_end.size();
-            for (const auto & peer : entry->tp_peers)
-                if (peer->tp_plan.seg_end.size() != n_seg) built = false;
-        }
+            rank_out_of_memory = false;
+            bool built = build_rank(*entry, 0);
+            for (int rank = 1; built && rank < m.tp; rank++)
+            {
+                auto peer = std::unique_ptr<graph_build_result>(new graph_build_result());
+                built = build_rank(*peer, rank);
+                entry->tp_peers.push_back(std::move(peer));
+            }
+            if (built)
+            {
+                const size_t n_seg = entry->tp_plan.seg_end.size();
+                for (const auto & peer : entry->tp_peers)
+                    if (peer->tp_plan.seg_end.size() != n_seg) built = false;
+            }
 
-        if (built)
-        {
-            graph_build_result * raw = entry.get();
-            m.graph_cache.push_front(std::move(entry));
-            while ((int) m.graph_cache.size() > m.graph_cache_cap) m.graph_cache.pop_back();
-            if (out_reused) *out_reused = false;
-            return raw;
+            if (built)
+            {
+                graph_build_result * raw = entry.get();
+                m.graph_cache.push_front(std::move(entry));
+                while ((int) m.graph_cache.size() > m.graph_cache_cap) m.graph_cache.pop_back();
+                if (out_reused) *out_reused = false;
+                return raw;
+            }
+            // Memory, not a capability: free a retained slot and build the
+            // ranks again. With none left, fall through as before.
+            if (!rank_out_of_memory) break;
+            entry = make_entry();   // the partial ranks' buffers go back first
+            const int32_t reads[1] = { slot.id };
+            if (!glm_reclaim_for_graph(m, reads, 1)) break;
         }
 
         // A backend capability can differ from the load-time probes. Fall back
@@ -5630,33 +5772,41 @@ static graph_build_result * acquire_graph(glm_model & m, glm_slot & slot, int64_
     const size_t n_nodes = graph_layers * nodes_per_layer * (size_t) std::max(1, m.tp) + 1024;
     ggml_init_params gp = { ggml_tensor_overhead() * n_nodes + ggml_graph_overhead_custom(n_nodes, false),
                             nullptr, true };
-    entry->ctx = ggml_init(gp);
-    if (!entry->ctx) return nullptr;
-    entry->gf = ggml_new_graph_custom(entry->ctx, n_nodes, false);
-
-    entry->sched = ggml_backend_sched_new(m.sched_backends, m.sched_bufts, m.n_sched_backends,
-                                          n_nodes, false, m.op_offload);
-    if (!entry->sched) return nullptr;
-
-    graph_builder gb(m, *entry, slot, nt, p0, n_kv, sparse);
-    if (kind == 0) gb.build();
-    else           gb.build_mtp();
-
-    // Allocate once, here, and never reset: the allocation (and, on CUDA, the
-    // captured graph) is what makes a cached entry worth keeping. Note this
-    // must not be preceded by ggml_backend_sched_reserve, which resets the
-    // scheduler and would drop the per-device pins build() just set.
-    if (!ggml_backend_sched_alloc_graph(entry->sched, entry->gf))
+    for (;;)
     {
-        fprintf(stderr, "[glm] failed to allocate a graph for nt=%" PRId64 " n_kv=%" PRId64 "\n", nt, n_kv);
-        return nullptr;
-    }
+        if (!entry) entry = make_entry();
+        entry->ctx = ggml_init(gp);
+        if (!entry->ctx) return nullptr;
+        entry->gf = ggml_new_graph_custom(entry->ctx, n_nodes, false);
 
-    graph_build_result * raw = entry.get();
-    m.graph_cache.push_front(std::move(entry));
-    while ((int) m.graph_cache.size() > m.graph_cache_cap) m.graph_cache.pop_back();
-    if (out_reused) *out_reused = false;
-    return raw;
+        entry->sched = ggml_backend_sched_new(m.sched_backends, m.sched_bufts, m.n_sched_backends,
+                                              n_nodes, false, m.op_offload);
+        if (!entry->sched) return nullptr;
+
+        graph_builder gb(m, *entry, slot, nt, p0, n_kv, sparse);
+        if (kind == 0) gb.build();
+        else           gb.build_mtp();
+
+        // Allocate once, here, and never reset: the allocation (and, on CUDA, the
+        // captured graph) is what makes a cached entry worth keeping. Note this
+        // must not be preceded by ggml_backend_sched_reserve, which resets the
+        // scheduler and would drop the per-device pins build() just set.
+        if (!glm_test_graph_alloc_fault() && ggml_backend_sched_alloc_graph(entry->sched, entry->gf))
+        {
+            graph_build_result * raw = entry.get();
+            m.graph_cache.push_front(std::move(entry));
+            while ((int) m.graph_cache.size() > m.graph_cache_cap) m.graph_cache.pop_back();
+            if (out_reused) *out_reused = false;
+            return raw;
+        }
+        entry.reset();   // its compute buffers go back before a slot is freed
+        const int32_t reads[1] = { slot.id };
+        if (!glm_reclaim_for_graph(m, reads, 1))
+        {
+            fprintf(stderr, "[glm] failed to allocate a graph for nt=%" PRId64 " n_kv=%" PRId64 "\n", nt, n_kv);
+            return nullptr;
+        }
+    }
 }
 
 static graph_build_result * fused_rank_graph(graph_build_result & root, int rank)
@@ -6189,9 +6339,6 @@ TSG_EXPORT int TSGgml_GlmForwardBatchedDecode(void * handle, int n, const int32_
     // per-sequence path already handles that case correctly, so the batched
     // graph stays single-rank rather than duplicating the reduction plumbing.
     if (m->tp > 1) return 0;
-    static const bool enabled = []() { const char * e = getenv("TS_GLM_BATCHED_DECODE"); return !(e && atoi(e) == 0); }();
-    if (!enabled) return 0;
-
     try
     {
         return forward_batched_decode(*m, n, slot_ids, tokens, positions, logits_out) ? 1 : 0;
@@ -6253,7 +6400,7 @@ TSG_EXPORT int TSGgml_GlmSlotAlloc(void * handle)
 {
     glm_model * m = (glm_model *) handle;
     if (!m) return -1;
-    glm_slot * s = slot_alloc(*m);
+    glm_slot * s = slot_alloc(*m, /*admit=*/ true);
     return s ? s->id : -1;
 }
 
@@ -6279,6 +6426,30 @@ TSG_EXPORT int TSGgml_GlmSlotFree(void * handle, int slot_id)
     if (!m->active_slot && !m->slots.empty())
         m->active_slot = m->slots.begin()->second.get();
     return 1;
+}
+
+/// The slots the managed side retains for finished conversations, oldest
+/// first, replacing the previous list: what a graph that does not fit may free
+/// (glm_reclaim_for_graph). The active slot and the slots a graph reads are
+/// never freed.
+TSG_EXPORT int TSGgml_GlmSetReclaimableSlots(void * handle, const int32_t * slot_ids, int n)
+{
+    glm_model * m = (glm_model *) handle;
+    if (!m || n < 0 || (n > 0 && !slot_ids)) return 0;
+    m->reclaimable.assign(slot_ids, slot_ids + n);
+    return 1;
+}
+
+/// Hand over the ids of retained slots freed for a graph since the last call,
+/// at most `cap` of them (the rest stay queued); returns how many were written.
+TSG_EXPORT int TSGgml_GlmTakeReclaimedSlots(void * handle, int32_t * out, int cap)
+{
+    glm_model * m = (glm_model *) handle;
+    if (!m || !out || cap <= 0) return 0;
+    const int n = std::min(cap, (int) m->reclaimed.size());
+    std::copy(m->reclaimed.begin(), m->reclaimed.begin() + n, out);
+    m->reclaimed.erase(m->reclaimed.begin(), m->reclaimed.begin() + n);
+    return n;
 }
 
 // ---------------------------------------------------------------------------
@@ -6417,14 +6588,6 @@ static void glm_test_kda_fault(int stage)
 #else
     (void) stage;
 #endif
-}
-
-/// Version of the KDA snapshot API, so a managed build can tell a native
-/// library that predates it apart (and decline speculation on glm5next instead
-/// of failing mid-verify).
-TSG_EXPORT int TSGgml_GlmKdaStateApiVersion(void)
-{
-    return 1;
 }
 
 /// Make sure the snapshot arena mirrors the active slot's state tensors (same

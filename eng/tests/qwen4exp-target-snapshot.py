@@ -103,7 +103,7 @@ def main():
                   native_sha256=op.sha(args.library), sample_sha256=op.sha(args.sample),
                   atol=2e-5, rtol=2e-5, checks=[], calls=[])
     os.environ["TS_GGML_CPU_THREADS"] = "2"
-    report["environment"] = {k: os.environ.get(k) for k in ("TS_GGML_CPU_THREADS", "OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "TS_Q4E_SPAN_STATE")}
+    report["environment"] = {k: os.environ.get(k) for k in ("TS_GGML_CPU_THREADS", "OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS")}
     sample = json.loads(args.sample.read_text())
     target = Target(sample, args.geometry)
     report["geometry"] = dict(name=args.geometry, head_k=target.GK, head_v=target.GV,

@@ -92,7 +92,7 @@ public sealed class GenerationTimingTests : IDisposable
         using var model = new TimingModel(_path) { SampledBatch = sampled };
         var cfg = Config();
         var pool = new BlockPool(cfg.NumBlocks, cfg.BlockSize, model.ComputeKVBlockByteSize(cfg.BlockSize));
-        var scheduler = new ContinuousBatchScheduler(cfg, pool, model.KVStateFingerprint,
+        var scheduler = new ContinuousBatchScheduler(cfg, pool,
             NullLogger.Instance, supportsCrossSequenceKvReuse: false);
         var executor = new BatchExecutor(model, pool, scheduler, NullLogger.Instance);
         var step = new SchedulerOutput();

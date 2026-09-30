@@ -76,8 +76,8 @@ public class GlmDsaSpeculativeModelTests
 
         using var env = new EnvScope();
         // The native loader only pages in the draft block when speculation was
-        // asked for; --mtp-spec sets this before the server loads its model.
-        env.Set("TS_MTP_SPEC", "1");
+        // asked for; --spec sets this before the server loads its model.
+        env.Set("TS_SPEC", "1");
         // GLM-5.2 does not fit two 97 GiB cards without offload, and the server
         // applies this from --n-cpu-moe before its model loads.
         MoeCpuOffloadConfig.ConfigureFromEnvironment();
@@ -366,8 +366,7 @@ public class GlmDsaSpeculativeModelTests
         if (modelPath == null) return;
 
         using var env = new EnvScope();
-        env.Set("TS_MTP_SPEC", "0");
-        env.Set("TS_GLM_MTP", "0");
+        env.Set("TS_SPEC", "0");
         MoeCpuOffloadConfig.ConfigureFromEnvironment();
 
         using var model = ModelBase.Create(modelPath, ResolveBackend());

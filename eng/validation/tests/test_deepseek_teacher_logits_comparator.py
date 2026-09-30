@@ -21,7 +21,7 @@ def fixture(directory, second=None):
              'files': [{'path': 'model.gguf', 'size': 123, 'expected_sha256': 'e' * 64}]}
     load = {'backend': 'CUDA', 'n_gpu': 7, 'n_ctx': 65536, 'n_ubatch': 512, 'n_threads': 32, 'n_cpu_moe': 12}
     plan = {'variants': {name: {'expected_native_sha256': native, 'native_load': load,
-             'environment': {'TS_DSV41_TP': str(degree), 'TS_DSV4_FA': '1', 'TS_DSV41_SPARSE_FA': '1'},
+             'environment': {'TS_DSV4_FA': '1', 'TS_DSV41_SPARSE_FA': '1'},
              'requested_expert_tp_ranks': degree} for name, degree in [('non-tp', 0), ('expert-tp7', 7)]},
             'model': model, 'request_count': 1, 'requests': [{'id': 'request0'}], 'protocol': {'context': 65536},
             'gates': {'existing_fixture_allclose_diagnostic': {'atol': 2e-5, 'rtol': 2e-5}}}

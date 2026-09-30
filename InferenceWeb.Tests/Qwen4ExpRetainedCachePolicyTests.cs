@@ -11,8 +11,9 @@ using TensorSharp.Runtime.Scheduling.PrefixCache;
 
 namespace InferenceWeb.Tests;
 
-/// <summary>The qwen4exp retention budget and its eviction order, on synthetic
-/// holders without a GGUF or a native library. Exactness of the retained /
+/// <summary>The qwen4exp retention budget, on synthetic holders without a GGUF or a
+/// native library: the prefix cache owns eviction, so a holder that does not fit is
+/// refused. Exactness of the retained /
 /// cloned state itself is established on the fixture (Qwen4ExpRetainedCacheTests).</summary>
 public sealed class Qwen4ExpRetainedCachePolicyTests
 {
@@ -32,6 +33,38 @@ public sealed class Qwen4ExpRetainedCachePolicyTests
     }
 
     [Fact]
+    public void UnsetBudget_IsHalfTheMeasuredHeadroom_AndTheFixedFallbackOnlyWhenNothingIsMeasured()
+    {
+        Assert.Equal(1000, Qwen4ExpModel.RetainedBudgetBytes(1000, headroomMeasured: true));
+        Assert.Equal(0, Qwen4ExpModel.RetainedBudgetBytes(0, headroomMeasured: true));   // an explicit 0 still declines
+        Assert.Equal(long.MaxValue, Qwen4ExpModel.RetainedBudgetBytes(-1, headroomMeasured: true));
+        Assert.Equal(Qwen4ExpModel.UnmeasuredRetainedCacheBudgetBytes, Qwen4ExpModel.RetainedBudgetBytes(-1, headroomMeasured: false));
+
+        // Four concurrent conversations on a 4x A40 tensor split: 1318.6 MB holders, 15164 MB of headroom.
+        // The old fixed 4096 MB default refused the fourth, so one conversation lost its reuse every turn.
+        const long holder = 1318L * 1024 * 1024 + 629_146;
+        const long headroom = 15164L * 1024 * 1024;
+        using (var fixedBudget = new Fixture(budgetBytes: 4096L * 1024 * 1024, spareBytes: headroom))
+        {
+            fixedBudget.Model.AttachPrefixCache(new RecordingSink());
+            for (int i = 0; i < 3; i++) { Assert.True(fixedBudget.EnsureBudget(holder)); fixedBudget.Retain("c" + i, holder); }
+            Assert.False(fixedBudget.EnsureBudget(holder));
+        }
+        using (var unset = new Fixture(budgetBytes: -1, spareBytes: headroom))
+        {
+            unset.Model.AttachPrefixCache(new RecordingSink());
+            for (int i = 0; i < 5; i++) { Assert.True(unset.EnsureBudget(holder)); unset.Retain("c" + i, holder); }
+            Assert.False(unset.EnsureBudget(holder));   // half the headroom (7582 MB) is still the ceiling
+        }
+        using (var unmeasured = new Fixture(budgetBytes: -1, spareBytes: null))
+        {
+            unmeasured.Model.AttachPrefixCache(new RecordingSink());
+            for (int i = 0; i < 3; i++) { Assert.True(unmeasured.EnsureBudget(holder)); unmeasured.Retain("c" + i, holder); }
+            Assert.False(unmeasured.EnsureBudget(holder));
+        }
+    }
+
+    [Fact]
     public void Qwen4Exp_AdvertisesExactPrefixReuseOnly()
     {
         // The scheduler's rewind paths key off these: a GDN model must refuse
@@ -43,74 +76,44 @@ public sealed class Qwen4ExpRetainedCachePolicyTests
     }
 
     [Fact]
-    public void Eviction_DropsOldestConversationsFirst_NeverACheckpoint_AndDeclinesWhenNothingFits()
-    {
-        using var fixture = new Fixture(budgetBytes: 1000, spareBytes: long.MaxValue);
-        object older = fixture.Retain("older", bytes: 400, serial: 1);
-        object checkpoint = fixture.Retain("checkpoint", bytes: 300, serial: 2, isCheckpoint: true);
-        object newer = fixture.Retain("newer", bytes: 200, serial: 3);
-
-        // 900 retained; 150 more needs one eviction: the OLDEST conversation goes,
-        // not the checkpoint that is older than "newer".
-        Assert.True(fixture.EnsureBudget(150));
-        Assert.False(fixture.Retained.Contains("older"));
-        Assert.True(fixture.Retained.Contains("checkpoint"));
-        Assert.True(fixture.Retained.Contains("newer"));
-        Fixture.AssertDisposed(older, true);
-        Fixture.AssertDisposed(checkpoint, false);
-        Fixture.AssertDisposed(newer, false);
-
-        // 500 retained now; 600 more evicts "newer" too (300 left) and fits.
-        Assert.True(fixture.EnsureBudget(600));
-        Assert.False(fixture.Retained.Contains("newer"));
-        Assert.True(fixture.Retained.Contains("checkpoint"));
-        Fixture.AssertDisposed(newer, true);
-
-        // Nothing but the checkpoint remains and it is never evicted: a holder that
-        // cannot fit beside it is declined, and the checkpoint stays intact.
-        Assert.False(fixture.EnsureBudget(701));
-        Assert.True(fixture.Retained.Contains("checkpoint"));
-        Fixture.AssertDisposed(checkpoint, false);
-        Assert.True(fixture.EnsureBudget(700));
-
-        // A holder that could not fit even with every conversation gone evicts
-        // nothing on its way to being declined.
-        object survivor = fixture.Retain("survivor", bytes: 100, serial: 4);
-        Assert.False(fixture.EnsureBudget(701));
-        Fixture.AssertDisposed(survivor, false);
-        Assert.True(fixture.Retained.Contains("survivor"));
-    }
-
-    [Fact]
-    public void HalfSpareClamp_EvictsEvenUnderAGenerousConfiguredBudget()
+    public void HalfSpareClamp_RefusesEvenUnderAGenerousConfiguredBudget()
     {
         using var fixture = new Fixture(budgetBytes: long.MaxValue / 4, spareBytes: 2000);
-        object first = fixture.Retain("first", bytes: 600, serial: 1);
-        object second = fixture.Retain("second", bytes: 300, serial: 2);
-        // Limit is spare/2 = 1000: 900 retained, 200 more evicts "first".
-        Assert.True(fixture.EnsureBudget(200));
-        Fixture.AssertDisposed(first, true);
+        object first = fixture.Retain("first", bytes: 600);
+        object second = fixture.Retain("second", bytes: 300);
+        fixture.Model.AttachPrefixCache(new RecordingSink());
+        // Limit is spare/2 = 1000: 900 retained, 200 more does not fit and nothing is evicted for it.
+        Assert.False(fixture.EnsureBudget(200));
+        Assert.True(fixture.EnsureBudget(100));
+        Fixture.AssertDisposed(first, false);
         Fixture.AssertDisposed(second, false);
-        Assert.Single(fixture.Retained);
     }
 
     [Fact]
     public void ZeroBudget_DeclinesWithoutTouchingRetainedHolders()
     {
         using var fixture = new Fixture(budgetBytes: 0, spareBytes: long.MaxValue);
-        object kept = fixture.Retain("kept", bytes: 1, serial: 1);
+        object kept = fixture.Retain("kept", bytes: 1);
+        fixture.Model.AttachPrefixCache(new RecordingSink());
         Assert.False(fixture.EnsureBudget(1));
         Fixture.AssertDisposed(kept, false);
         Assert.True(fixture.Retained.Contains("kept"));
     }
 
     [Fact]
+    public void WithoutThePrefixCache_NothingIsRetained()
+    {
+        using var fixture = new Fixture(budgetBytes: long.MaxValue / 4, spareBytes: long.MaxValue);
+        Assert.False(fixture.EnsureBudget(1));
+    }
+
+    [Fact]
     public void DiscardAndTrim_FreeConversationsAndKeepCheckpoints()
     {
         using var fixture = new Fixture(budgetBytes: long.MaxValue / 4, spareBytes: null);
-        object a = fixture.Retain("a", bytes: 10, serial: 1);
-        object ckpt = fixture.Retain("ckpt", bytes: 10, serial: 2, isCheckpoint: true);
-        object b = fixture.Retain("b", bytes: 10, serial: 3);
+        object a = fixture.Retain("a", bytes: 10);
+        object ckpt = fixture.Retain("ckpt", bytes: 10, isCheckpoint: true);
+        object b = fixture.Retain("b", bytes: 10);
         fixture.Model.DiscardRetainedCache("missing");
         fixture.Model.DiscardRetainedCache("a");
         Fixture.AssertDisposed(a, true);
@@ -128,11 +131,11 @@ public sealed class Qwen4ExpRetainedCachePolicyTests
     public void TreeOwned_RefusesInsteadOfEvicting_AndLeavesEveryRetainedHolderIntact()
     {
         using var fixture = new Fixture(budgetBytes: 1000, spareBytes: long.MaxValue);
-        object older = fixture.Retain("older", bytes: 400, serial: 1);
-        object newer = fixture.Retain("newer", bytes: 500, serial: 2);
+        object older = fixture.Retain("older", bytes: 400);
+        object newer = fixture.Retain("newer", bytes: 500);
         fixture.Model.AttachPrefixCache(new RecordingSink());
 
-        // 900 retained: legacy would evict "older" to fit 150 more; the tree-owned model refuses.
+        // 900 retained: 150 more does not fit and the tree-owned model refuses rather than evicting.
         Assert.False(fixture.EnsureBudget(150));
         Fixture.AssertDisposed(older, false);
         Fixture.AssertDisposed(newer, false);
@@ -144,9 +147,9 @@ public sealed class Qwen4ExpRetainedCachePolicyTests
     public void TreeOwned_TrimReportsEveryHolderItFreesThroughTheSink()
     {
         using var fixture = new Fixture(budgetBytes: long.MaxValue / 4, spareBytes: null);
-        object a = fixture.Retain("pc:1:1", bytes: 10, serial: 1);
-        fixture.Retain("pc:1:2", bytes: 10, serial: 2, isCheckpoint: true);
-        object b = fixture.Retain("pc:1:3", bytes: 10, serial: 3);
+        object a = fixture.Retain("pc:1:1", bytes: 10);
+        fixture.Retain("pc:1:2", bytes: 10, isCheckpoint: true);
+        object b = fixture.Retain("pc:1:3", bytes: 10);
         var sink = new RecordingSink();
         fixture.Model.AttachPrefixCache(sink);
         fixture.Model.TrimIdleMemory();
@@ -158,19 +161,19 @@ public sealed class Qwen4ExpRetainedCachePolicyTests
     }
 
     [Fact]
-    public void Legacy_TrimReportsNothing()
+    public void WithoutThePrefixCache_TrimReportsNothing()
     {
         using var fixture = new Fixture(budgetBytes: long.MaxValue / 4, spareBytes: null);
-        fixture.Retain("a", bytes: 10, serial: 1);
+        fixture.Retain("a", bytes: 10);
         fixture.Model.TrimIdleMemory();
         Assert.Empty(fixture.Retained);   // nothing attached, nothing to report to
     }
 
     [Fact]
-    public void TreeOwned_ACheckpointMayBeDonated_LegacyNever()
+    public void TreeOwned_ACheckpointMayBeDonated_NeverWithoutThePrefixCache()
     {
         using var fixture = new Fixture(budgetBytes: long.MaxValue / 4, spareBytes: null);
-        fixture.Retain("pc:1:1", bytes: 10, serial: 1, isCheckpoint: true);
+        fixture.Retain("pc:1:1", bytes: 10, isCheckpoint: true);
         Assert.False(fixture.Model.TryRebindRetainedCache("pc:1:1", "request"));
         fixture.Model.AttachPrefixCache(new RecordingSink());
         Assert.True(fixture.Model.TryRebindRetainedCache("pc:1:1", "request"));
@@ -181,9 +184,9 @@ public sealed class Qwen4ExpRetainedCachePolicyTests
     public void DiscardRetainedCaches_ReleasesTheBatchAndIgnoresUnknownKeys()
     {
         using var fixture = new Fixture(budgetBytes: long.MaxValue / 4, spareBytes: null);
-        object a = fixture.Retain("pc:1:1", bytes: 10, serial: 1);
-        object b = fixture.Retain("pc:1:2", bytes: 10, serial: 2, isCheckpoint: true);
-        object c = fixture.Retain("pc:1:3", bytes: 10, serial: 3);
+        object a = fixture.Retain("pc:1:1", bytes: 10);
+        object b = fixture.Retain("pc:1:2", bytes: 10, isCheckpoint: true);
+        object c = fixture.Retain("pc:1:3", bytes: 10);
         fixture.Model.DiscardRetainedCaches(new[] { "pc:1:1", "missing", "pc:1:2" }, ReleaseReason.Evicted);
         Fixture.AssertDisposed(a, true);
         Fixture.AssertDisposed(b, true);
@@ -199,13 +202,17 @@ public sealed class Qwen4ExpRetainedCachePolicyTests
         using var fixture = new Fixture(budgetBytes: 4096L * 1024 * 1024, spareBytes: null);
         Set(typeof(ModelBase), fixture.Model, "<Config>k__BackingField", new ModelConfig { NumLayers = 2, NumKVHeads = 1, HiddenSize = 8, NumHeads = 1, Architecture = "qwen4exp" });
         PrefixCacheCapabilities caps = fixture.Model.GetPrefixCacheCapabilities();
-        Assert.Equal(PrefixCacheMode.Tree, caps.Readiness);
         Assert.Equal(FamilyClass.R, caps.Class);
         Assert.Equal(TruncationKind.None, caps.Truncation);
         Assert.False(caps.ReuseAcrossMediaSpan);
         Assert.False(caps.Persistable);
         Assert.Equal(4096L * 1024 * 1024, caps.SubCapBytes.DeviceKv);
         Assert.False(string.IsNullOrEmpty(caps.NamespaceFingerprint));
+
+        // Unset on a backend with no measurable device headroom: the tree has no half-spare cap of its own
+        // for device state, so the fixed fallback stays the sub-cap.
+        Set(typeof(Qwen4ExpModel), fixture.Model, "_retainedCacheBudgetBytes", -1L);
+        Assert.Equal(Qwen4ExpModel.UnmeasuredRetainedCacheBudgetBytes, fixture.Model.GetPrefixCacheCapabilities().SubCapBytes.DeviceKv);
     }
 
     private static void Set(Type type, object target, string name, object value)
@@ -240,14 +247,13 @@ public sealed class Qwen4ExpRetainedCachePolicyTests
             Set(typeof(ModelBase), Model, "<ExecutionPlan>k__BackingField", new BackendExecutionPlan(BackendType.Cpu));
             Set(typeof(ModelBase), Model, "_allocator", _allocator);
             Set(typeof(ModelBase), Model, "_backend", BackendType.Cpu);
-            Set(typeof(Qwen4ExpModel), Model, "_retainedCacheEnabled", true);
             Set(typeof(Qwen4ExpModel), Model, "_retainedCacheBudgetBytes", budgetBytes);
             Set(typeof(Qwen4ExpModel), Model, "_usedSlotBases", new HashSet<int> { 0 });
             Retained = (IDictionary)Activator.CreateInstance(typeof(Dictionary<,>).MakeGenericType(typeof(string), HolderType))!;
             Set(typeof(Qwen4ExpModel), Model, "_retainedFusedHolders", Retained);
         }
 
-        public object Retain(string key, long bytes, long serial, bool isCheckpoint = false)
+        public object Retain(string key, long bytes, bool isCheckpoint = false)
         {
             object holder = RuntimeHelpers.GetUninitializedObject(HolderType);
             Tensor k = NewTensor(1, 4, 2), v = NewTensor(1, 4, 2), conv = NewTensor(2, 3), ssm = NewTensor(1, 2, 2);
@@ -259,7 +265,6 @@ public sealed class Qwen4ExpRetainedCachePolicyTests
             Set(HolderType, holder, "CacheSeqLen", 3);
             Set(HolderType, holder, "KvCapacity", 4);
             Set(HolderType, holder, "RetainedBytes", bytes);
-            Set(HolderType, holder, "RetainedSerial", serial);
             Set(HolderType, holder, "IsCheckpoint", isCheckpoint);
             Set(HolderType, holder, "PleHistory", new List<int>());
             Retained.Add(key, holder);

@@ -33,8 +33,9 @@ using namespace tsg;
 //     from the pre-norms' f_norm_rms_eps;
 //   * SwiGLU (SiLU) rather than GeGLU;
 //   * the folded output applies logit_scale BEFORE the tanh softcap;
-//   * the KV cache is flat (non-circular), so a sliding-window layer just reads
-//     [0, totalSeqLen) and masks everything outside its window.
+//   * the sliding-window layers may keep a small RING cache (swa_cache_size rows,
+//     slot = position % rows) while the full layers stay flat; either way a
+//     sliding-window layer masks everything outside its window.
 //
 // Optional: `capture_*` copies the residual entering selected layers into a host
 // buffer, which is what the DFlash drafter's encoder consumes. Without it DFlash
@@ -490,7 +491,9 @@ TSG_EXPORT int TSGgml_MuseGlimmerModelForward(
             ? capture_count : 0;
         const bool embed_in_graph = tok_embd_data != nullptr && token_ids != nullptr && tok_embd_bytes > 0;
 
-        // Attention spans. The KV cache is FLAT (row i holds absolute position i).
+        // Attention spans. A full layer's cache is FLAT (row i holds absolute
+        // position i); a sliding-window layer's is either flat too or, when
+        // swa_cache_size > 0, a ring (slot p % swa_cache_size holds position p).
         //
         // A FULL layer reads [0, total). A SLIDING-WINDOW layer only ever needs keys
         // in (p - n_swa, p] for its queries, so it reads a MOVING span - which matters
@@ -504,28 +507,47 @@ TSG_EXPORT int TSGgml_MuseGlimmerModelForward(
         auto roundup = [](int v) { return ((v + kMgPersistKvStride - 1) / kMgPersistKvStride) * kMgPersistKvStride; };
         auto rounddown = [](int v) { return (v / kMgPersistKvStride) * kMgPersistKvStride; };
 
-        const bool swa_ring = swa_cache_size > 0 && swa_cache_size < cache_size;
+        // A non-zero swa_cache_size means the caller ALLOCATED every sliding-window
+        // layer as a ring of exactly that many rows: that is the layer's row count
+        // (and head stride) whatever the full layers' capacity is right now. The
+        // ring used to count only while swa_cache_size < cache_size, but on Metal
+        // the full layers START below the ring (2048 vs 4352) and grow on demand, so
+        // the kernel addressed a 4352-row buffer as [cache_size] rows: head 1 landed
+        // inside head 0's slots, moved on every grow, and was not where the host-side
+        // ring code (truncation, KV snapshots) looked for it. Greedy decode fell into
+        // a one-token loop at exactly position 2049, and a 1536-token radix reuse
+        // lost half of every sliding-window layer's context.
+        const bool swa_ring = swa_cache_size > 0;
+        const int swa_rows = swa_ring ? swa_cache_size : cache_size;
         const int window_full = std::min(cache_size, roundup(total_seq_len));
         int swa_start = 0;
-        int window_swa = window_full;
-        if (swa_ring)
-        {
-            // A ring is read whole: its slots are not in position order, so there is
-            // no contiguous sub-span to narrow to. The mask carries the liveness.
-            swa_start = 0;
-            window_swa = swa_cache_size;
-        }
-        else if (sliding_window > 0 && sliding_window < total_seq_len)
+        int window_swa = std::min(swa_rows, roundup(total_seq_len));
+        if (sliding_window > 0 && sliding_window < total_seq_len)
         {
             const int needed_start = std::max(0, total_seq_len - n_tokens - (sliding_window - 1));
             swa_start = rounddown(needed_start);
-            window_swa = std::min(cache_size - swa_start, roundup(total_seq_len - swa_start));
+            window_swa = std::min(swa_rows - swa_start, roundup(total_seq_len - swa_start));
         }
-
-        static const bool mg_persist = [] {
-            const char* e = std::getenv("TS_MUSE_GLIMMER_PERSIST");
-            return e == nullptr || e[0] != '0';
-        }();
+        // How a ring is READ is a performance choice - both ways are exact - and it
+        // deliberately does not depend on the full layers' capacity, so a token sees the
+        // same attention whether the cache started large or grew to its size. Once
+        // positions alias slots (the ring wrapped) it is read whole: the slots are no
+        // longer in position order, and the ring mask carries liveness. Before that,
+        // slot == position, and Metal reads the moving span a flat cache would: its vec
+        // flash-attention kernel does not skip fully-masked blocks, so a whole-ring
+        // decode pays for all 4352 rows (measured 1-3% decode, ~4% prefill at a
+        // 500-token context). CUDA and Vulkan read the ring whole from the first token,
+        // as their default capacity always made them: the fixed shape keeps the
+        // persistent graph (and the CUDA capture) stable, CUDA fills that mask on the
+        // device, and a sub-span would need ggml-cuda's vec-kernel copy.
+        const bool swa_whole_ring = swa_ring &&
+            (total_seq_len > swa_cache_size ||
+             g_backend_type == BACKEND_TYPE_CUDA || g_backend_type == BACKEND_TYPE_VULKAN);
+        if (swa_whole_ring)
+        {
+            swa_start = 0;
+            window_swa = swa_cache_size;
+        }
 
         // Diagnostics only (TS_MUSE_GLIMMER_LAYER_TRACE=1): copy the residual
         // ENTERING every layer, plus the final residual, out of the graph and print a
@@ -563,7 +585,7 @@ TSG_EXPORT int TSGgml_MuseGlimmerModelForward(
         // (the replay path extends that mask by 2 bytes per token instead).
         // Measured on an M5 Pro this is what closes the decode gap to llama.cpp,
         // whose graph-reuse path (llm_graph_result::can_reuse) does the same.
-        const bool can_persist = mg_persist && n_tokens <= kMgMaxPersistTokens &&
+        const bool can_persist = n_tokens <= kMgMaxPersistTokens &&
             (g_backend_type == BACKEND_TYPE_CUDA || g_backend_type == BACKEND_TYPE_VULKAN ||
              g_backend_type == BACKEND_TYPE_METAL || g_backend_type == BACKEND_TYPE_CPU);
 
@@ -615,7 +637,7 @@ TSG_EXPORT int TSGgml_MuseGlimmerModelForward(
             // to the full path.
             std::vector<ggml_fp16_t>& md_swa = dc->mask_host[1];
             std::vector<ggml_fp16_t>& md_full = dc->mask_host[0];
-            if (swa_ring)
+            if (swa_whole_ring)
                 fill_mg_ring_mask(md_swa, window_swa, n_tokens, start_pos, sliding_window);
             else
                 fill_mg_mask(md_swa, window_swa, n_tokens, start_pos, total_seq_len, sliding_window, swa_start);
@@ -694,11 +716,8 @@ TSG_EXPORT int TSGgml_MuseGlimmerModelForward(
         }
 
         MgDecodeCache* mgdc = nullptr;
-        if (mg_persist)
-        {
-            if (can_persist) mgdc = &mg_pool().claim(mg_sig, mg_kc0, n_tokens);
-            else             mg_pool().drop(mg_sig, mg_kc0, n_tokens);
-        }
+        if (can_persist) mgdc = &mg_pool().claim(mg_sig, mg_kc0, n_tokens);
+        else             mg_pool().drop(mg_sig, mg_kc0, n_tokens);
 
         // ---------------- build ----------------
         // Must not exceed ggml_pool's k_pool_buffer_size (32 MB) or acquire()
@@ -740,15 +759,15 @@ TSG_EXPORT int TSGgml_MuseGlimmerModelForward(
         // persistent decode graph keeps decode_input_set_async, which is the
         // CUDA-capture-safe way in and is already cheap at one row.
         // Class 0 (full layers) always has span_start == 0, so the existing causal
-        // kernel applies verbatim. Class 1 needs the ring kernel, and only when the
-        // ring is actually on - the moving-span layout has a non-zero span_start
-        // that neither device kernel models, so that case stays on the host.
+        // kernel applies verbatim. Class 1 needs the ring kernel, and only while the
+        // ring is read whole (wrapped) - the moving-span layout has a non-zero
+        // span_start that neither device kernel models, so that case stays on the host.
         bool device_mask_fill[2] = { false, false };
 #ifdef TSG_GGML_USE_CUDA
         if (g_backend_type == BACKEND_TYPE_CUDA && !can_persist)
         {
             device_mask_fill[0] = true;
-            device_mask_fill[1] = swa_ring;
+            device_mask_fill[1] = swa_whole_ring;
         }
 #endif
         std::vector<ggml_tensor*> layer_attn_mask(num_layers, nullptr);
@@ -901,7 +920,7 @@ TSG_EXPORT int TSGgml_MuseGlimmerModelForward(
                 ggml_set_input(class_mask[mask_cls]);
                 if (!device_mask_fill[mask_cls])
                 {
-                    if (swa_ring && swa)
+                    if (swa_whole_ring && swa)
                         fill_mg_ring_mask(class_mask_data[mask_cls], window, n_tokens, start_pos, sliding_window);
                     else
                         fill_mg_mask(class_mask_data[mask_cls], window, n_tokens, start_pos, total_seq_len,

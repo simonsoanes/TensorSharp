@@ -151,8 +151,7 @@ Qwen3.5 callers retain their existing ABI and tanh-GELU behavior.
 managed erf approximation. The new kernel evaluates erf directly, so the
 comparison is numerical rather than bitwise. Use the companion probe's `vision`
 command to compare the main embedding and all three deepstack embeddings with
-identical image preprocessing. `TS_QWEN35_VENC_FUSED=0` disables transformer
-range fusion independently; CPU and Metal retain their previous execution.
+identical image preprocessing. CPU and Metal retain their previous execution.
 
 ## Conditioning encoder precision
 

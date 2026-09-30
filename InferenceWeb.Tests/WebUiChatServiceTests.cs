@@ -565,7 +565,7 @@ public class WebUiChatServiceTests : IDisposable
     {
         Fixture f = Build();
         var adapter = new WebUiAdapter(
-            f.Model, new InferenceQueue(), f.Sessions, f.Options, f.Uploads, f.Skills,
+            f.Model, f.Sessions, f.Options, f.Uploads, f.Skills,
             codeRunner: null, workspaces: null, codeArtifacts: null, NullLoggerFactory.Instance);
 
         var result = adapter.GetModels();
@@ -609,13 +609,13 @@ public class WebUiChatServiceTests : IDisposable
     }
 
     [Fact]
-    public void QueueStatus_IsIdleBeforeAnyRequest_AndCarriesTheLegacyCount()
+    public void QueueStatus_IsIdleBeforeAnyRequest()
     {
         Fixture f = Build();
 
         Assert.Equal(
-            """{"busy":false,"processing":0,"pending_requests":0,"total_processed":7}""",
-            JsonSerializer.Serialize(f.Service.GetQueueStatus(7)));
+            """{"busy":false,"processing":0,"pending_requests":0,"total_processed":0}""",
+            JsonSerializer.Serialize(f.Service.GetQueueStatus()));
     }
 
     [Fact]
@@ -989,7 +989,7 @@ public class WebUiChatServiceTests : IDisposable
     public async Task UploadAdapter_ReadsEveryMultipartFilePartInOrder()
     {
         Fixture f = Build();
-        var adapter = new WebUiAdapter(f.Model, new InferenceQueue(), f.Sessions, f.Options, f.Uploads,
+        var adapter = new WebUiAdapter(f.Model, f.Sessions, f.Options, f.Uploads,
             f.Skills, null, null, null, NullLoggerFactory.Instance);
         using var multipart = new System.Net.Http.MultipartFormDataContent();
         multipart.Add(new System.Net.Http.StringContent("alpha"), "files", "a.txt");
@@ -1009,7 +1009,7 @@ public class WebUiChatServiceTests : IDisposable
     public async Task UploadAdapter_MalformedMultipartReturns400()
     {
         Fixture f = Build();
-        var adapter = new WebUiAdapter(f.Model, new InferenceQueue(), f.Sessions, f.Options, f.Uploads,
+        var adapter = new WebUiAdapter(f.Model, f.Sessions, f.Options, f.Uploads,
             f.Skills, null, null, null, NullLoggerFactory.Instance);
         var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
         context.Request.ContentType = "multipart/form-data";

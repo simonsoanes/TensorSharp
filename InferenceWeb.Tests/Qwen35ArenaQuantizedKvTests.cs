@@ -40,7 +40,7 @@ using Xunit.Abstractions;
 
 namespace InferenceWeb.Tests;
 
-public class Qwen35ArenaQuantizedKvTests
+public class Qwen35ArenaQuantizedKvTests : IDisposable
 {
     private const string EnvModelDir = "TS_TEST_MODEL_DIR";
 
@@ -52,6 +52,13 @@ public class Qwen35ArenaQuantizedKvTests
 
     private readonly ITestOutputHelper _output;
     public Qwen35ArenaQuantizedKvTests(ITestOutputHelper output) { _output = output; }
+
+    // The test sets the process-wide dtype; put it back exactly, or every later model in
+    // the process gets a q8_0 cache nobody asked for.
+    private readonly KvCacheDtype _restoreDtype = KvCacheDtypeConfig.Current;
+    private readonly bool _restoreExplicit = KvCacheDtypeConfig.IsExplicitlySet;
+
+    public void Dispose() => KvCacheDtypeConfig.RestoreForTests(_restoreDtype, _restoreExplicit);
 
     [ModelFact(EnvModelDir, Qwen35Gguf)]
     public async Task ArenaBatchedDecode_WithQ8KvCache_MatchesSoloDecode()
@@ -65,16 +72,8 @@ public class Qwen35ArenaQuantizedKvTests
         // KvCacheDtypeConfig.Current at construction.
         KvCacheDtypeConfig.Set(KvCacheDtype.Q8_0);
 
-        // Must agree with the assembly-wide pin (GgmlBackendTestInitializer), which
-        // reads the same variable; the native bridge allows one backend per process.
-        BackendType backend =
-            (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "cpu").Trim().ToLowerInvariant() switch
-            {
-                "metal" => BackendType.GgmlMetal,
-                "cuda" => BackendType.GgmlCuda,
-                "vulkan" => BackendType.GgmlVulkan,
-                _ => BackendType.GgmlCpu,
-            };
+        // The process's pinned GGML backend: the native bridge allows one per process.
+        BackendType backend = TestGates.PinnedGgmlBackend;
         _output.WriteLine($"[arena-q8] loading {Path.GetFileName(modelPath)} on {backend} with a q8_0 KV cache");
 
         using var model = ModelBase.Create(modelPath, backend);

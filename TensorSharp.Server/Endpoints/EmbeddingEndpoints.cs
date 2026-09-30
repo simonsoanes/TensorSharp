@@ -17,7 +17,6 @@ public static class EmbeddingEndpoints
     {
         endpoints.MapPost("/v1/embeddings", (HttpContext context, EmbeddingAdapter adapter) => adapter.OpenAIAsync(context));
         endpoints.MapPost("/api/embed", (HttpContext context, EmbeddingAdapter adapter) => adapter.OllamaAsync(context));
-        endpoints.MapPost("/api/embeddings", (HttpContext context, EmbeddingAdapter adapter) => adapter.OllamaLegacyAsync(context));
         endpoints.MapGet("/v1/models", (EmbeddingAdapter adapter) => adapter.ListModels());
         endpoints.MapGet("/api/tags", (EmbeddingAdapter adapter) => adapter.GetTags());
         endpoints.MapGet("/api/models", (EmbeddingAdapter adapter) => adapter.GetWebModels());

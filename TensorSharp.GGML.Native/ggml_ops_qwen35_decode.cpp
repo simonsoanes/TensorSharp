@@ -681,12 +681,7 @@ namespace
         // Metal-only K=1 state alias. The managed descriptor uses
         // delta_state_out as the backing-base pointer and delta_state_in as the
         // state view one attention row later. Every layer re-validates that
-        // relationship before the CPY is removed. Keep an opt-out for
-        // diagnostics and A/B comparisons.
-        static const bool metal_gdn_inplace_state_cfg = [] {
-            const char* e = std::getenv("TS_QWEN35_METAL_GDN_INPLACE_STATE");
-            return !(e != nullptr && e[0] == '0' && e[1] == '\0');
-        }();
+        // relationship before the CPY is removed.
         ggml_backend_buffer_type_t default_buft =
             ggml_backend_get_default_buffer_type(g_backend);
         const std::size_t default_alignment =
@@ -694,14 +689,13 @@ namespace
                 ? ggml_backend_buft_get_alignment(default_buft)
                 : 0;
         const bool try_metal_gdn_inplace_state =
-            metal_gdn_inplace_state_cfg &&
             g_backend_type == BACKEND_TYPE_METAL &&
             !tp_mode &&
             gdnStateSnapshots == 1 &&
             default_alignment != 0 &&
             gdnAttentionBytes % default_alignment == 0;
 
-        // Persistent decode graph: default ON; TS_QWEN35_FD_PERSIST=0 disables.
+        // Persistent decode graph on every GPU backend (the CPU backend rebuilds).
         // Persist mode uses ggml_set_rows (KV write) + a fixed-topology graph that is
         // built once and REPLAYED each token (upload 4 dynamic inputs + graph_compute,
         // no per-token graph rebuild / backend-buffer alloc+free / weight re-upload).
@@ -715,20 +709,14 @@ namespace
         // Persist mode pads the attention window to a fixed stride so the graph is
         // identical token-to-token (CUDA-graph capture); the F16 mask zeroes valid
         // positions and -inf's the padding. Non-persist keeps the exact window.
-        static const bool persist_cfg = []{ const char* e = std::getenv("TS_QWEN35_FD_PERSIST"); return e == nullptr || e[0] != '0'; }();
-        const bool persist = persist_cfg &&
-            (g_backend_type == BACKEND_TYPE_CUDA || g_backend_type == BACKEND_TYPE_VULKAN
-                || g_backend_type == BACKEND_TYPE_METAL);
+        const bool persist =
+            g_backend_type == BACKEND_TYPE_CUDA || g_backend_type == BACKEND_TYPE_VULKAN
+                || g_backend_type == BACKEND_TYPE_METAL;
         // Match llama.cpp's Metal scheduler ordering: enqueue the graph and the
         // logits download back-to-back, then synchronize once. The synchronous
         // wrapper waits after graph execution, forcing a second command-buffer
         // round trip for the download on every generated token.
-        static const bool metal_async_submit_cfg = [] {
-            const char* e = std::getenv("TS_QWEN35_METAL_ASYNC_SUBMIT");
-            return e == nullptr || e[0] != '0';
-        }();
         const bool use_metal_async_submit =
-            metal_async_submit_cfg &&
             g_backend_type == BACKEND_TYPE_METAL &&
             g_async_compute_enabled.load(std::memory_order_acquire);
         // Metal can replay a graph across a much smaller attention-window bucket
@@ -745,12 +733,8 @@ namespace
         // Unlike CUDA graph capture, Metal re-encodes buffer bindings for every
         // compute. Move a normal CPY destination view to the current KV row and
         // avoid the index/scatter work of SET_ROWS, matching llama.cpp's KV store.
-        static const bool metal_kv_cpy_cfg = [] {
-            const char* e = std::getenv("TS_QWEN35_METAL_KV_CPY");
-            return e == nullptr || e[0] != '0';
-        }();
         const bool use_movable_metal_kv_cpy =
-            metal_kv_cpy_cfg && persist &&
+            persist &&
             g_backend_type == BACKEND_TYPE_METAL && !tp_mode;
         // VULKAN CORRECTNESS: the persist path pads the flash-attn KV window to the
         // 256-stride so the graph topology stays constant for replay. On ggml-vulkan a
@@ -766,10 +750,8 @@ namespace
         // That applies the -inf mask through soft_max (so padded positions contribute
         // nothing) using only core, validated Vulkan ops, and keeps the stable padded
         // topology persist needs — restoring the persist perf win (~16 vs ~5.7 tok/s)
-        // with correct output. Non-persist and CUDA keep flash. TS_QWEN35_VULKAN_FLASH=1
-        // forces the (incorrect) flash path on Vulkan persist for A/B debugging only.
-        static const bool vulkan_flash_forced = []{ const char* e = std::getenv("TS_QWEN35_VULKAN_FLASH"); return e != nullptr && e[0] == '1'; }();
-        const bool use_non_flash_attn = persist && g_backend_type == BACKEND_TYPE_VULKAN && !vulkan_flash_forced;
+        // with correct output. Non-persist and CUDA keep flash.
+        const bool use_non_flash_attn = persist && g_backend_type == BACKEND_TYPE_VULKAN;
         const void* sig_disc = layers[0].attn_norm_w;
         // Per-holder identity: first attention layer's KV cache device ptr. With
         // per-request fused-decode holders (Qwen35Model.BindSequenceCache) this is
@@ -2379,16 +2361,6 @@ TSG_EXPORT void TSGgml_Qwen35ResetDecodeCache()
     g_q35dc_pool.reset_all();
 }
 
-// Version of the Qwen3.5 fused-graph position contract. 1: the solo decode
-// (rope_pos_delta), verify (rope_pos_delta) and arena (rope_positions) entry
-// points take the RoPE position separately from the KV index. The managed model
-// checks it once, so a library built before that contract (whose entry points
-// have fewer arguments) is refused instead of being called with a shifted stack.
-TSG_EXPORT int TSGgml_Qwen35RopePositionAbi()
-{
-    return 1;
-}
-
 // ============================================================================
 // TSGgml_Qwen35ModelDecodeBatched
 //
@@ -2419,45 +2391,6 @@ TSG_EXPORT int TSGgml_Qwen35RopePositionAbi()
 // ============================================================================
 namespace
 {
-    // Persistent batched-decode graph cache (single entry) for CUDA-graph capture.
-    // Built ONCE with stable tensor addresses (raw ctx + alloc_ctx_tensors) and
-    // reused across decode steps so ggml-cuda's CUDA-graph capture engages
-    // (key = cgraph->nodes[0]); replays one captured graph instead of relaunching
-    // the whole ~Nlayers*Nseqs-node graph per step (the WDDM per-node launch tax).
-    // Per-step inputs (hidden, positions, slot_mapping, padded gather idx, per-seq
-    // mask, GDN conv/delta state) are uploaded to stable addresses each step; the
-    // KV pools + weights stay in cached device buffers. Dropped + rebuilt when the
-    // shape signature (n_seqs / pad_kv / model) changes or the pools move
-    // (TSGgml_Qwen35ResetBatchedDecodeCache from C#).
-    struct Q35BatchedDecodeCache
-    {
-        bool valid = false;
-        ggml_context* ctx = nullptr;
-        ggml_backend_buffer_t buffer = nullptr;
-        ggml_cgraph* graph = nullptr;
-        ggml_tensor* hidden_t = nullptr;
-        ggml_tensor* hidden_out = nullptr;
-        ggml_tensor* pos_t = nullptr;
-        ggml_tensor* slot_t = nullptr;
-        std::vector<ggml_tensor*> gidx;        // [n_seqs] padded gather idx
-        std::vector<ggml_tensor*> mask;        // [n_seqs] F16 attn mask
-        std::vector<ggml_tensor*> conv_state;  // per recurrent layer
-        std::vector<ggml_tensor*> delta_state; // per recurrent layer
-        std::vector<int> gdn_layer;            // layer index for each gdn state entry
-        const void* sig = nullptr;
-        int num_layers = 0, hidden_size = 0, n_seqs = 0, pad_kv = 0;
-        std::size_t conv_bytes = 0, delta_bytes = 0;
-        void reset()
-        {
-            if (buffer != nullptr) { ggml_backend_buffer_free(buffer); buffer = nullptr; }
-            if (ctx != nullptr) { ggml_free(ctx); ctx = nullptr; }
-            graph = nullptr; valid = false;
-            hidden_t = hidden_out = pos_t = slot_t = nullptr;
-            gidx.clear(); mask.clear(); conv_state.clear(); delta_state.clear(); gdn_layer.clear();
-            sig = nullptr; num_layers = hidden_size = n_seqs = pad_kv = 0; conv_bytes = delta_bytes = 0;
-        }
-    };
-    Q35BatchedDecodeCache g_q35bdc;
 
     inline void bfd_upload_mask(ggml_tensor* mask_t, int pad_kv, int seq_len)
     {
@@ -2512,77 +2445,20 @@ namespace
         const int head_tile = (num_k_heads > 0) ? (num_v_heads / num_k_heads) : 1;
 
         const void* sig = layers[0].attn_norm_w;   // model-instance discriminator
-        // Persistent capturable graph: opt-in (TS_QWEN35_BFD_PERSIST=1). On WDDM
-        // (Windows) the captured replay regresses for this batched graph (the
-        // dynamic paged gather + per-step GDN-state up/downloads force per-step
-        // re-instantiation); on Linux/WSL ggml_cuda (no WDDM per-node tax) the
-        // non-captured graph already runs near the kernel floor, so capture is
-        // left as a knob for experimentation rather than the default.
-        static const bool persist = []{ const char* e = std::getenv("TS_QWEN35_BFD_PERSIST"); return e != nullptr && e[0] == '1'; }();
         const std::size_t convStateBytes = static_cast<std::size_t>(convDim) * conv_dim * n_seqs * sizeof(float);
         const std::size_t deltaStateBytes = static_cast<std::size_t>(head_k_dim) * head_v_dim * num_v_heads * n_seqs * sizeof(float);
 
-        // ===== Persist reuse fast-path: replay the captured graph =====
-        if (persist && g_q35bdc.valid && g_q35bdc.graph != nullptr &&
-            g_q35bdc.sig == sig && g_q35bdc.num_layers == num_layers &&
-            g_q35bdc.hidden_size == H && g_q35bdc.n_seqs == n_seqs && g_q35bdc.pad_kv == pad_kv)
-        {
-            host_read_barrier();
-            ggml_backend_tensor_set(g_q35bdc.hidden_t, hidden_data, 0, static_cast<std::size_t>(H) * T * sizeof(float));
-            ggml_backend_tensor_set(g_q35bdc.pos_t, positions, 0, static_cast<std::size_t>(T) * sizeof(std::int32_t));
-            ggml_backend_tensor_set(g_q35bdc.slot_t, slot_mapping, 0, static_cast<std::size_t>(T) * sizeof(std::int64_t));
-            for (int s = 0; s < n_seqs; s++)
-            {
-                ggml_backend_tensor_set(g_q35bdc.gidx[s], gather_idx + static_cast<std::size_t>(s) * pad_kv, 0, static_cast<std::size_t>(pad_kv) * sizeof(std::int32_t));
-                bfd_upload_mask(g_q35bdc.mask[s], pad_kv, seq_lens[s]);
-            }
-            for (std::size_t gi = 0; gi < g_q35bdc.gdn_layer.size(); ++gi)
-            {
-                int l = g_q35bdc.gdn_layer[gi];
-                ggml_backend_tensor_set(g_q35bdc.conv_state[gi], layers[l].conv_state_in, 0, convStateBytes);
-                ggml_backend_tensor_set(g_q35bdc.delta_state[gi], layers[l].delta_state_in, 0, deltaStateBytes);
-            }
-            ggml_status st = tsg::compute_graph(g_backend, g_q35bdc.graph);
-            if (st != GGML_STATUS_SUCCESS)
-            {
-                set_last_error("Qwen3.5 batched decode: cached graph execution failed.");
-                g_q35bdc.reset();
-                return 0;
-            }
-            finalize_compute_with_download(g_q35bdc.hidden_out, hidden_data, static_cast<std::size_t>(H) * T * sizeof(float));
-            for (std::size_t gi = 0; gi < g_q35bdc.gdn_layer.size(); ++gi)
-            {
-                int l = g_q35bdc.gdn_layer[gi];
-                finalize_compute_with_download(g_q35bdc.conv_state[gi], layers[l].conv_state_out, convStateBytes);
-                finalize_compute_with_download(g_q35bdc.delta_state[gi], layers[l].delta_state_out, deltaStateBytes);
-            }
-            host_read_barrier();
-            return 1;
-        }
-        if (persist) g_q35bdc.reset();
-
         // 32 MB matches the single-seq decode + the pool's max slot size; the
         // metadata-only (no_alloc) ctx needs only ~1-2 MB even for a 40-layer
-        // N-seq graph, so this is ample. Persist uses a raw ctx kept alive in the
-        // cache for capture/replay; non-persist uses the pooled block.
+        // N-seq graph, so this is ample.
         const std::size_t ctx_size = static_cast<std::size_t>(32) * 1024 * 1024;
         PooledContextHandle context;
-        ggml_context* ctx = nullptr;
-        if (persist)
+        if (!context.init(ctx_size))
         {
-            ggml_init_params ip = { ctx_size, nullptr, /*no_alloc=*/true };
-            ctx = ggml_init(ip);
-            if (ctx == nullptr) { set_last_error("Qwen3.5 batched decode: failed to init persist ctx."); return 0; }
+            set_last_error("Qwen3.5 batched decode: failed to acquire ggml context.");
+            return 0;
         }
-        else
-        {
-            if (!context.init(ctx_size))
-            {
-                set_last_error("Qwen3.5 batched decode: failed to acquire ggml context.");
-                return 0;
-            }
-            ctx = context.value;
-        }
+        ggml_context* ctx = context.value;
 
         // --- per-token inputs ---
         ggml_tensor* hidden_t = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, H, T);
@@ -2596,13 +2472,6 @@ namespace
         {
             gidx[s] = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, pad_kv);
             mask[s] = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, pad_kv, 1, 1, 1);
-            if (persist) { ggml_set_input(gidx[s]); ggml_set_input(mask[s]); }
-        }
-        if (persist)
-        {
-            ggml_set_input(hidden_t);
-            ggml_set_input(pos_t);
-            ggml_set_input(slot_t);
         }
 
         struct LayerTensors {
@@ -2657,7 +2526,6 @@ namespace
                 t.ssm_out_w = ggml_new_tensor_2d(ctx, static_cast<ggml_type>(d.ssm_out_type), d.ssm_out_ne0, d.ssm_out_ne1);
                 t.conv_state_in = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, convDim, conv_dim, n_seqs);
                 t.delta_state_in = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, head_k_dim, head_v_dim, num_v_heads, n_seqs);
-                if (persist) { ggml_set_input(t.conv_state_in); ggml_set_input(t.delta_state_in); }
             }
             if (d.is_moe == 0)
             {
@@ -3018,27 +2886,11 @@ namespace
             }
         }
 
-        // Allocate the graph tensors. Persist keeps stable addresses for capture;
-        // Metal shares completed attention workspaces while ordinary tensors
-        // keep unique slots. Non-persist tries gallocr lifetime-packing first.
+        // Allocate the graph tensors: gallocr lifetime-packing first, else one
+        // buffer (Metal shares completed attention workspaces while ordinary
+        // tensors keep unique slots).
         BufferHandle buffer(nullptr);
-        ggml_backend_buffer_t persist_buf = nullptr;
-        if (persist)
-        {
-            vram_log_ctx_breakdown("q35-batched-decode-persist", ctx, 12);
-            persist_buf = (g_backend_type == BACKEND_TYPE_METAL
-                ? alloc_ctx_tensors_with_attention_reuse(ctx, graph, g_backend)
-                : ggml_backend_alloc_ctx_tensors(ctx, g_backend));
-            if (persist_buf == nullptr)
-            {
-                set_last_error("Qwen3.5 batched decode: failed to allocate persist backend buffer.");
-                ggml_free(ctx);
-                return 0;
-            }
-            if (vram_log_enabled())
-                vram_log("q35-batched-decode-persist", static_cast<std::int64_t>(ggml_backend_buffer_get_size(persist_buf)));
-        }
-        else if (!alloc_graph_reuse_gallocr(graph))
+        if (!alloc_graph_reuse_gallocr(graph))
         {
             buffer.value = (g_backend_type == BACKEND_TYPE_METAL
                 ? alloc_ctx_tensors_with_attention_reuse(ctx, graph, g_backend)
@@ -3065,7 +2917,6 @@ namespace
                 "- it is in the context but not in the graph.",
                 ui, u.tensor->name, u.bytes);
             set_last_error(msg);
-            if (persist) { ggml_backend_buffer_free(persist_buf); ggml_free(ctx); }
             return 0;
         }
         host_read_barrier();
@@ -3083,7 +2934,6 @@ namespace
         if (status != GGML_STATUS_SUCCESS)
         {
             set_last_error("Qwen3.5 batched decode: graph execution failed.");
-            if (persist) { ggml_backend_buffer_free(persist_buf); ggml_free(ctx); }
             return 0;
         }
 
@@ -3097,37 +2947,6 @@ namespace
             }
         }
         host_read_barrier();
-
-        if (persist)
-        {
-            g_q35bdc.ctx = ctx;
-            g_q35bdc.buffer = persist_buf;
-            g_q35bdc.graph = graph;
-            g_q35bdc.hidden_t = hidden_t;
-            g_q35bdc.hidden_out = hidden_out;
-            g_q35bdc.pos_t = pos_t;
-            g_q35bdc.slot_t = slot_t;
-            g_q35bdc.gidx = gidx;
-            g_q35bdc.mask = mask;
-            g_q35bdc.conv_state.clear(); g_q35bdc.delta_state.clear(); g_q35bdc.gdn_layer.clear();
-            for (int l = 0; l < num_layers; l++)
-            {
-                if (layers[l].is_recurrent != 0)
-                {
-                    g_q35bdc.conv_state.push_back(lt[l].conv_state_in);
-                    g_q35bdc.delta_state.push_back(lt[l].delta_state_in);
-                    g_q35bdc.gdn_layer.push_back(l);
-                }
-            }
-            g_q35bdc.sig = sig;
-            g_q35bdc.num_layers = num_layers;
-            g_q35bdc.hidden_size = H;
-            g_q35bdc.n_seqs = n_seqs;
-            g_q35bdc.pad_kv = pad_kv;
-            g_q35bdc.conv_bytes = convStateBytes;
-            g_q35bdc.delta_bytes = deltaStateBytes;
-            g_q35bdc.valid = true;
-        }
         clear_last_error();
         return 1;
     }
@@ -3162,11 +2981,3 @@ TSG_EXPORT int TSGgml_Qwen35ModelDecodeBatched(
     catch (...) { set_last_error("Unknown error in Qwen3.5 batched decode."); return 0; }
 }
 
-// Drop the persistent batched-decode graph cache (C# calls this when the device
-// KV pools are reallocated or the model state is reset, since the cached graph
-// pins those device addresses).
-TSG_EXPORT void TSGgml_Qwen35ResetBatchedDecodeCache()
-{
-    std::lock_guard<std::recursive_mutex> lock(q35_decode_mutex());
-    g_q35bdc.reset();
-}

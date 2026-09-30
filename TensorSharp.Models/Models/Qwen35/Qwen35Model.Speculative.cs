@@ -36,11 +36,10 @@ using TensorSharp.Runtime.Speculative;
 
 namespace TensorSharp.Models
 {
-    // IBatchedSpeculativeModel (extends ISpeculativeModel) is the
-    // Runtime-side contract BatchExecutor drives for engine-path speculation;
-    // every member is implemented below or inherited from ModelBase
-    // (CacheSeqLen, MaxContextLength).
-    public partial class Qwen35Model : IBatchedSpeculativeModel
+    // ISpeculativeModel is the Runtime-side contract BatchExecutor drives for
+    // engine-path speculation; every member is implemented below or inherited
+    // from ModelBase (CacheSeqLen, MaxContextLength).
+    public partial class Qwen35Model : ISpeculativeModel
     {
         // NextN/MTP weights (cached once at load; null when the GGUF has no MTP block).
         private QuantizedWeight _mtpEhProjQW;
@@ -448,17 +447,12 @@ namespace TensorSharp.Models
             x.Dispose();
         }
 
-        // Fold the MTP catch-up into the first draft step (llama.cpp's draft-mtp
-        // runs its block over n_accepted + 1 rows). TS_MTP_FOLD_CATCHUP=0 goes back
-        // to a catch-up pass plus a separate first DraftStep.
-        private static readonly bool _mtpFoldCatchUpEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_MTP_FOLD_CATCHUP"), "0", StringComparison.Ordinal);
-
-        /// <summary>Only the NextN/MTP head folds. A DFlash drafter proposes whole
-        /// blocks and its commit is a ring write costing ~1 ms, so there is nothing
-        /// worth folding there.</summary>
+        /// <summary>The MTP catch-up folds into the first draft step (llama.cpp's
+        /// draft-mtp runs its block over n_accepted + 1 rows). Only the NextN/MTP
+        /// head folds: a DFlash drafter proposes whole blocks and its commit is a
+        /// ring write costing ~1 ms, so there is nothing worth folding there.</summary>
         public bool SupportsFusedCatchUpStep
-            => _mtpFoldCatchUpEnabled && HasMtpDraftHead && !HasDFlash;
+            => HasMtpDraftHead && !HasDFlash;
 
         private float[] _mtpFoldNormed;
 
@@ -571,9 +565,9 @@ namespace TensorSharp.Models
             }
 
             // Fast path: run the whole trunk over the N tokens as ONE fused GGML
-            // graph (TSGgml_Qwen35ModelVerify) instead of the op-by-op layer loop.
+            // graph (TSGgml_Qwen35ModelVerifyOwned) instead of the op-by-op layer loop.
             // Writes hAllOut (post-norm hidden) + logitsOut directly; advances KV +
-            // GDN state by N. Env-gated TS_QWEN35_FUSED_VERIFY (default on).
+            // GDN state by N.
             if (TryFusedVerifyTrunk(hidden, startPos, seqLen, hAllOut, logitsOut, allLogitsRows))
             {
                 hidden.Dispose();
@@ -675,8 +669,6 @@ namespace TensorSharp.Models
         private bool TryFusedVerifyTrunk(Tensor hidden, int startPos, int seqLen,
             float[] hAllOut, float[] logitsOut, bool allLogitsRows)
         {
-            if (!_fusedVerifyEnabled)
-                return false;
             int vocab = Config.VocabSize;
             if (allLogitsRows)
             {
@@ -920,24 +912,6 @@ namespace TensorSharp.Models
                 _ropeDelta = 0;
         }
 
-        // ====================================================================
-        // Batched-trunk speculative decoding (IBatchedSpeculativeModel):
-        // trunk passes run through ForwardBatch (paged KV via the sequence's
-        // block table, per-slot GDN state) so speculation rides the same
-        // kernels as the non-speculative batched baseline. The MTP draft head
-        // above is unchanged — it runs on the linear cache at _mtpLayerIdx,
-        // which is private to the speculative context.
-        // ====================================================================
-
-        // Per-slot GDN snapshot used to roll back a partially-rejected verify
-        // batch: per recurrent layer, ONE slot's conv ring buffer + write
-        // index + SSM state + init flag.
-        private float[][] _mtpSlotConvSnapshot;
-        private int[] _mtpSlotConvIdxSnapshot;
-        private float[][] _mtpSlotSsmSnapshot;
-        private bool[] _mtpSlotInitSnapshot;
-        private int _mtpSlotSnapshotSlot = -1;
-
         /// <summary>
         /// MTP speculation is only a throughput WIN when the model's STANDARD
         /// decode is slow enough that drafting + verifying K tokens saves more
@@ -952,9 +926,8 @@ namespace TensorSharp.Models
         /// the model actually has an MTP/NextN head — even on ggml_cuda where the
         /// captured decode (~73 tok/s) may still beat speculation. (Earlier this gated
         /// OFF on ggml_cuda because the op-by-op verify made MTP ~34x slower; the
-        /// fused multi-token verify <see cref="TryFullModelVerify"/>,
-        /// <c>TS_QWEN35_FUSED_VERIFY=1</c>, cuts the verify ~20x and is the path that
-        /// makes spec competitive — long context / large drafts.) The user asked that
+        /// fused multi-token verify <see cref="TryFullModelVerify"/> cuts the verify
+        /// ~20x and is the path that makes spec competitive — long context / large drafts.) The user asked that
         /// the flag be respected regardless, so don't second-guess it here.
         ///
         /// Not gated on <see cref="HasDraftHead"/>: this asks about the TRUNK's
@@ -986,135 +959,8 @@ namespace TensorSharp.Models
         /// steps stay in the verify family - see SpecPlainStepCostsFamilySwitch.
         /// </summary>
         public bool SpecPlainStepUsesForward
-            => IsGgmlBackend && !IsTensorParallel && !HasDFlash && _fullDecodeEnabled && !_fdUnsupported;
+            => IsGgmlBackend && !IsTensorParallel && !HasDFlash && !_fdUnsupported;
 
         public bool SpecPlainStepCostsFamilySwitch => true;
-
-        /// <summary>Batched spec trunk needs the GGML batched paged path (the
-        /// MLX backend keeps GDN state inside opaque per-slot MLX caches the
-        /// snapshot/restore below cannot capture). When the fused multi-token
-        /// verify (<see cref="TryFullModelVerify"/>) is enabled we route spec to the
-        /// LINEAR trunk instead (SpecForward), whose KV/GDN state the fused verify
-        /// reads/writes; the batched paged trunk uses a different (paged) store.</summary>
-        // A DFlash drafter keeps ONE ring for ONE sequence and its catch-up is driven
-        // from the linear trunk's per-row features, so it cannot ride the paged
-        // multi-sequence trunk; those requests take the linear speculative path.
-        public bool SupportsBatchedSpecTrunk => HasMtpDraftHead && !HasDFlash && IsGgmlBackend && IsBatchedPathEnabled() && !_fusedVerifyEnabled;
-
-        public void SpecForwardBatched(SequenceState seq, int[] tokens, int startPos,
-            float[] hAllOut, float[] logitsOut, bool allLogitsRows)
-        {
-            EnterSpecSession();
-            ArgumentNullException.ThrowIfNull(seq);
-            if (tokens == null || tokens.Length == 0)
-                throw new ArgumentException("Tokens must not be empty.", nameof(tokens));
-            // The batched path reads the sequence's committed length for its
-            // attention extents, so every spec pass must start exactly there
-            // (the executor advances the sequence only after the step).
-            if (startPos != seq.NumComputedTokens)
-                throw new InvalidOperationException(
-                    $"SpecForwardBatched at position {startPos} but sequence has {seq.NumComputedTokens} computed tokens.");
-
-            int n = tokens.Length;
-            var bt = seq.BlockTable;
-            if (bt.CapacityTokens < startPos + n)
-                throw new InvalidOperationException(
-                    $"Block table covers {bt.CapacityTokens} tokens but the spec pass needs {startPos + n}.");
-
-            var positions = new System.Collections.Generic.List<int>(n);
-            var slotMapping = new System.Collections.Generic.List<int>(n);
-            for (int i = 0; i < n; i++)
-            {
-                int pos = startPos + i;
-                positions.Add(pos);
-                int blockIdx = pos / bt.BlockSize;
-                slotMapping.Add(bt.Blocks[blockIdx].Id * bt.BlockSize + pos % bt.BlockSize);
-            }
-            var table = new int[bt.NumBlocks];
-            for (int b = 0; b < bt.NumBlocks; b++)
-                table[b] = bt.Blocks[b].Id;
-
-            var ctx = new BatchedForwardContext
-            {
-                Sequences = new System.Collections.Generic.List<SequenceState> { seq },
-                NumScheduledTokens = new System.Collections.Generic.List<int> { n },
-                QueryStartLoc = new System.Collections.Generic.List<int> { 0, n },
-                Positions = positions,
-                SlotMapping = slotMapping,
-                BlockTables = new[] { table },
-                MaxQueryLen = n,
-                MaxSeqLen = startPos + n,
-                OverrideFlatTokens = tokens,
-                CaptureHiddenAll = hAllOut,
-                CaptureLogitsAll = allLogitsRows ? logitsOut : null,
-            };
-
-            var perSeq = ForwardBatch(ctx);
-            if (!allLogitsRows && logitsOut != null)
-                Array.Copy(perSeq[0], logitsOut, Config.VocabSize);
-        }
-
-        public unsafe void SpecSnapshotRecurrentStateSlots(SequenceState seq)
-        {
-            ArgumentNullException.ThrowIfNull(seq);
-            if (_q35GdnSlotConvBuf == null)
-                throw new InvalidOperationException(
-                    "Batched GDN slot state not initialized (no batched forward has run for this sequence yet).");
-
-            int slot = seq.BlockTable.Blocks[0].Id;
-            int layers = Config.NumLayers;
-            _mtpSlotConvSnapshot ??= new float[layers][];
-            _mtpSlotSsmSnapshot ??= new float[layers][];
-            _mtpSlotConvIdxSnapshot ??= new int[layers];
-            _mtpSlotInitSnapshot ??= new bool[layers];
-
-            int ssmLen = _numVHeads * _headVDim * _headKDim;
-            for (int l = 0; l < layers; l++)
-            {
-                if (!_isRecurrent[l])
-                    continue;
-                EnsureGdnSlotAllocated(l, slot);
-                float[] conv = _q35GdnSlotConvBuf[l][slot];
-                if (_mtpSlotConvSnapshot[l] == null || _mtpSlotConvSnapshot[l].Length != conv.Length)
-                    _mtpSlotConvSnapshot[l] = new float[conv.Length];
-                Array.Copy(conv, _mtpSlotConvSnapshot[l], conv.Length);
-                _mtpSlotConvIdxSnapshot[l] = _q35GdnSlotConvWriteIdx[l][slot];
-                _mtpSlotInitSnapshot[l] = _q35GdnSlotInit[l][slot];
-                // Pointer copy into a reused buffer: GetElementsAsFloat would
-                // allocate a fresh ~3 MB array per layer per verify step
-                // (gigabytes of GC churn per request — measured 92 ms/step
-                // vs ~12 ms for the raw copy).
-                if (_mtpSlotSsmSnapshot[l] == null || _mtpSlotSsmSnapshot[l].Length != ssmLen)
-                    _mtpSlotSsmSnapshot[l] = new float[ssmLen];
-                float* src = GetFloatPtr(_q35GdnSlotSsmTensor[l][slot]);
-                fixed (float* dst = _mtpSlotSsmSnapshot[l])
-                    Buffer.MemoryCopy(src, dst, (long)ssmLen * 4, (long)ssmLen * 4);
-            }
-            _mtpSlotSnapshotSlot = slot;
-        }
-
-        public unsafe void SpecRestoreRecurrentStateSlots(SequenceState seq)
-        {
-            ArgumentNullException.ThrowIfNull(seq);
-            int slot = seq.BlockTable.Blocks[0].Id;
-            if (_mtpSlotSnapshotSlot != slot)
-                throw new InvalidOperationException(
-                    $"No recurrent-state snapshot for slot {slot} (snapshot holds slot {_mtpSlotSnapshotSlot}).");
-
-            int ssmLen = _numVHeads * _headVDim * _headKDim;
-            for (int l = 0; l < Config.NumLayers; l++)
-            {
-                if (!_isRecurrent[l])
-                    continue;
-                Array.Copy(_mtpSlotConvSnapshot[l], _q35GdnSlotConvBuf[l][slot], _mtpSlotConvSnapshot[l].Length);
-                _q35GdnSlotConvWriteIdx[l][slot] = _mtpSlotConvIdxSnapshot[l];
-                _q35GdnSlotInit[l][slot] = _mtpSlotInitSnapshot[l];
-                Tensor ssm = _q35GdnSlotSsmTensor[l][slot];
-                float* dst = GetFloatPtr(ssm);
-                fixed (float* src = _mtpSlotSsmSnapshot[l])
-                    Buffer.MemoryCopy(src, dst, (long)ssmLen * 4, (long)ssmLen * 4);
-                InvalidateTensorDeviceCache(ssm);
-            }
-        }
     }
 }

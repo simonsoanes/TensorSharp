@@ -365,19 +365,18 @@ def main():
                                                "TENSORSHARP_TP_DEGREE", "TENSORSHARP_LAYER_SPLIT_DEGREE",
                                                "TENSORSHARP_TP_DEVICES", "TENSORSHARP_LAYER_SPLIT_DEVICES",
                                                "TENSORSHARP_TP_NODE_ID", "TENSORSHARP_TP_PEERS",
-                                               "TS_GLM_NGPU", "TS_GLM_NATIVE", "TS_GLM_TP_SHARD",
-                                               "TS_DSV4_NGPU", "TS_DSV41_TP", "TS_DSV41_TP_HOST_TOKENS", "TS_DSV4_UBATCH", "TS_DSV4_THREADS",
+                                               "TS_GLM_NATIVE", "TS_GLM_TP_SHARD",
+                                               "TS_DSV41_TP_HOST_TOKENS", "TS_DSV4_UBATCH", "TS_DSV4_THREADS",
                                                "TS_DSV4_VRAM_RESERVE_MB", "TS_DSV4_LOAD_THREADS", "TS_DSV4_LOAD_CHUNK_MB",
                                                "TS_DSV41_ENGRAM_DEVICE", "TS_DSV41_ENGRAM_WARM",
                                                "TS_DSV41_ENGRAM_THREADS", "TS_DSV41_ENGRAM_RANDOM",
                                                "TS_SCHED_MAX_BATCHED_TOKENS", "TS_SCHED_SOLO_PREFILL_CHUNK", "TS_SCHED_PREFIX_CACHE",
                                                "TS_CPU_MOE_THREADS", "TS_HOST_MOE_PIN", "TS_N_CPU_MOE", "TS_CPU_MOE",
                                                "TS_SPEC", "TS_SPEC_TYPE", "TS_SPEC_DRAFT", "TS_SPEC_PMIN", "TS_SPEC_DRAFT_MODEL",
-                                               "TS_DSV4_DSPARK",
-                                               "TS_GLM_MTP", "TS_GLM_UBATCH", "TS_GLM_THREADS", "TS_GLM_VRAM_RESERVE_MB",
+                                               "TS_GLM_UBATCH", "TS_GLM_THREADS", "TS_GLM_VRAM_RESERVE_MB",
                                                "TS_GLM_LOAD_THREADS", "TS_GLM_LOAD_CHUNK_MB", "TS_Q4E_LAYER_SPLIT") if k in env}
     for key in ("TS_GGUF_PREFAULT", "TS_GGUF_PREFAULT_THREADS", "TS_GGUF_PREFAULT_RESIDENT",
-                "KV_CACHE_DTYPE", "TS_Q4E_TP", "TS_DSV41_COMPACT_RAW_GATHER", "TS_DSV41_SPARSE_FA",
+                "KV_CACHE_DTYPE", "TS_DSV41_COMPACT_RAW_GATHER", "TS_DSV41_SPARSE_FA",
                 "TS_GGML_TP_F32_NCCL", "GGML_CUDA_ALLREDUCE", "GGML_CUDA_AR_BF16_THRESHOLD",
                 "TS_DSV4_WARM_PREAD", "TS_DSV4_LOAD_DROP_CACHE"):
         if key in env:

@@ -73,7 +73,7 @@ namespace TensorSharp.Server.RequestParsers
                 p.GenerateAudio = ga.GetBoolean();
 
             // Conditioning image for Wan 2.2 image-to-video: either a previously uploaded
-            // file ("imagePath" — the bare server filename from /api/upload, or a legacy
+            // file ("imagePath" — the bare server filename from /api/upload, or an
             // absolute path inside the upload directory) or inline base64 ("image", API
             // flow; a data:...;base64, prefix is accepted).
             if (root.TryGetProperty("imagePath", out var ip) && ip.ValueKind == JsonValueKind.String

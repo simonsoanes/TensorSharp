@@ -171,7 +171,7 @@ def main():
     exported = helper.pinned_json(config['token_export_path'], identity['token_export_sha256'])
     failed_raw = helper.validate_failed_gate(config, identity)
     variant = plan['variants']['non-tp']
-    helper.require(variant['requested_expert_tp_ranks'] == 0 and variant['environment']['TS_DSV41_TP'] == '0', 'TP cannot select baseline continuation')
+    helper.require(variant['requested_expert_tp_ranks'] == 0, 'TP cannot select baseline continuation')
     helper.apply_environment(identity, variant)
     helper.require(not args.output.exists(), 'Use a fresh producer output directory')
     args.output.mkdir(parents=True)

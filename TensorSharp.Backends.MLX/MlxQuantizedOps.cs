@@ -193,13 +193,10 @@ namespace TensorSharp.MLX
                 case (int)GgmlTensorType.Q5_1:
                 case (int)GgmlTensorType.Q8_0:
                 case (int)GgmlTensorType.MXFP4:
-                    return true;
+                // Q4_K and Q5_K are repacked to MLX affine (see CreateQ4KWeight).
                 case (int)GgmlTensorType.Q4_K:
-                    // Repacked to MLX affine by default (PreferAffineKQuant); the raw
-                    // kernel (TS_MLX_KQUANT_AFFINE=0) wraps the mmap zero-copy.
-                    return PreferAffineKQuant;
                 case (int)GgmlTensorType.Q5_K:
-                    return PreferAffineKQuant || !UseRawQ5KKernel();
+                    return true;
                 case (int)GgmlTensorType.Q6_K:
                     return Q6KUsesAffine8(rawBytes);
                 default:
@@ -499,26 +496,6 @@ namespace TensorSharp.MLX
                 MoeExpertOffload.AdvisePagesNotNeeded(entry.HostData, entry.RawBytes);
         }
 
-        private static bool UseRawQ5KKernel()
-        {
-            return !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_Q5K_RAW"), "0", StringComparison.Ordinal);
-        }
-
-        // When true, Q4_K and Q5_K preload into MLX-native AFFINE form (driving the built-in
-        // mlx_quantized_matmul / gather_qmm) instead of the raw GGUF custom Metal kernels. The repack
-        // is a reinterpretation of K-quant, as omlx and mlx-lm store 4/5-bit weights: each 32-element
-        // group becomes scale = d*scaleByte, bias = -dmin*minByte, exactly ggml's dequant (w = scale*q
-        // + bias) up to rounding the group's scale and bias to F16. It is faster in both regimes, not
-        // only for multi-row work: Qwen3.8-27B UD-Q4_K_XL (almost all Q5_K) on an M5 Pro with MLX
-        // 0.32.2 went from 22 to 426 tok/s prefill (pp512) and from 4.1 to 7.6 tok/s decode, with
-        // logits unchanged against ggml_metal (cosine 0.999991 vs 0.999988 raw). The copy costs ~9%
-        // more than the raw bytes and the source pages are released after upload
-        // (PreloadDuplicatesHostMemory). Q6_K stays raw (see below). TS_MLX_KQUANT_AFFINE=0 restores
-        // the raw kernels. The flag is read only at weight-creation time — the per-matmul path keys off
-        // the created weight's Mode, so once a model's weights are preloaded the choice is fixed.
-        public static bool PreferAffineKQuant =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_KQUANT_AFFINE"), "0", StringComparison.Ordinal);
-
         public static bool TryAddmmQuantizedToFloat32(
             Tensor result,
             Tensor input,
@@ -545,7 +522,6 @@ namespace TensorSharp.MLX
         {
             MlxNative.MlxArray inputView = default;
             MlxNative.MlxArray output = default;
-            MlxNative.MlxArray contiguous = default;
             try
             {
                 inputView = inputStorage.CreateArrayView(input);
@@ -596,18 +572,6 @@ namespace TensorSharp.MLX
                     SetDeviceResult(result, output);
                     output = default;
                 }
-                else if (ggmlType == (int)GgmlTensorType.Q4_K && string.Equals(weight.Mode, "q4_k", StringComparison.Ordinal))
-                {
-                    output = MlxNative.Q4KMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
-                    SetDeviceResult(result, output);
-                    output = default;
-                }
-                else if (ggmlType == (int)GgmlTensorType.Q5_K && string.Equals(weight.Mode, "q5_k", StringComparison.Ordinal))
-                {
-                    output = MlxNative.Q5KMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
-                    SetDeviceResult(result, output);
-                    output = default;
-                }
                 else if (ggmlType == (int)GgmlTensorType.Q6_K && string.Equals(weight.Mode, "q6_k", StringComparison.Ordinal))
                 {
                     output = MlxNative.Q6KMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
@@ -616,7 +580,7 @@ namespace TensorSharp.MLX
                 }
                 else
                 {
-                    // Phase 6c fast path: Q8_0 decode (rows == 1) gets a
+                    // Fast path: Q8_0 decode (rows == 1) gets a
                     // custom simdgroup-optimized kernel that's competitive
                     // with — sometimes faster than — mlx_quantized_matmul.
                     // Useful for the LM head, attention output projection,
@@ -625,8 +589,7 @@ namespace TensorSharp.MLX
                     if (rows == 1
                         && ggmlType == (int)GgmlTensorType.Q8_0
                         && (int)ne0 % 32 == 0
-                        && weight.Biases.IsValid
-                        && !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_FUSED_Q8_MATMUL"), "0", StringComparison.Ordinal))
+                        && weight.Biases.IsValid)
                     {
                         try
                         {
@@ -651,20 +614,8 @@ namespace TensorSharp.MLX
                     // used by Forward/Decode. Skip the explicit
                     // mlx_contiguous call (saves ~84 ops/token on Gemma 4
                     // decode at ~5 quantized matmuls per layer × 42 layers).
-                    // TS_MLX_QUANT_MATMUL_CONTIG=1 re-enables the defensive
-                    // copy for backends/shapes where the output may be
-                    // strided.
-                    if (string.Equals(Environment.GetEnvironmentVariable("TS_MLX_QUANT_MATMUL_CONTIG"), "1", StringComparison.Ordinal))
-                    {
-                        contiguous = MlxNative.Contiguous(output);
-                        SetDeviceResult(result, contiguous);
-                        contiguous = default;
-                    }
-                    else
-                    {
-                        SetDeviceResult(result, output);
-                        output = default;
-                    }
+                    SetDeviceResult(result, output);
+                    output = default;
                 }
                 return true;
             }
@@ -672,7 +623,6 @@ namespace TensorSharp.MLX
             {
                 MlxNative.FreeArray(inputView);
                 MlxNative.FreeArray(output);
-                MlxNative.FreeArray(contiguous);
             }
         }
 
@@ -749,9 +699,7 @@ namespace TensorSharp.MLX
                         transpose: true, gateUp.GroupSize, gateUp.Bits, gateUp.Mode);
                     gate = MlxNative.Slice(gateUpOut, new[] { 0, 0 }, new[] { rows, intermediate }, new[] { 1, 1 });
                     up = MlxNative.Slice(gateUpOut, new[] { 0, intermediate }, new[] { rows, 2 * intermediate }, new[] { 1, 1 });
-                    activated = MlxCompiledOps.Disabled
-                        ? SwiGluEager(gate, up)
-                        : MlxCompiledOps.SwiGLU(gate, up);
+                    activated = MlxCompiledOps.SwiGLU(gate, up);
                     downOut = MlxNative.QuantizedMatmul(
                         activated, down.Weight, down.Scales, down.Biases,
                         transpose: true, down.GroupSize, down.Bits, down.Mode);
@@ -849,9 +797,7 @@ namespace TensorSharp.MLX
                     half = MlxNative.Astype(normed, DType.Float16);
                     gateOut = HalfProduct(half, gate, gateType, rows, (int)hidden, intermediate);
                     upOut = HalfProduct(half, up, upType, rows, (int)hidden, intermediate);
-                    activated = MlxCompiledOps.Disabled
-                        ? SwiGluEager(gateOut, upOut)
-                        : MlxCompiledOps.SwiGLU(gateOut, upOut);
+                    activated = MlxCompiledOps.SwiGLU(gateOut, upOut);
                     downOut = HalfProduct(activated, down, downType, rows, intermediate, (int)hidden);
                     downF32 = MlxNative.Astype(downOut, DType.Float32);
                     sum = MlxNative.Binary(MlxNative.MlxBinaryOp.Add, input, downF32);
@@ -909,23 +855,6 @@ namespace TensorSharp.MLX
                 : MlxNative.Q6KDequantMatmul(half, weight.Weight, rows, inDim, outDim, halfOutput: true);
         }
 
-        private static MlxNative.MlxArray SwiGluEager(MlxNative.MlxArray gate, MlxNative.MlxArray up)
-        {
-            MlxNative.MlxArray sigmoid = default;
-            MlxNative.MlxArray silu = default;
-            try
-            {
-                sigmoid = MlxNative.Unary(MlxNative.MlxUnaryOp.Sigmoid, gate);
-                silu = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, gate, sigmoid);
-                return MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, silu, up);
-            }
-            finally
-            {
-                MlxNative.FreeArray(sigmoid);
-                MlxNative.FreeArray(silu);
-            }
-        }
-
         public static bool TryRmsNormAddmmQuantizedToFloat32(
             Tensor result,
             Tensor input,
@@ -964,14 +893,13 @@ namespace TensorSharp.MLX
                 MlxNative.MlxArray normView = default;
                 MlxNative.MlxArray normed = default;
                 MlxNative.MlxArray output = default;
-                MlxNative.MlxArray contiguous = default;
                 MlxNative.MlxArray fused = default;
                 try
                 {
                     inputView = inputStorage.CreateArrayView(input);
                     normView = normStorage.CreateArrayView(normWeight);
 
-                    // Phase 6 fast path: Q8_0 path (Gemma 4 / Q8_0 GGUFs)
+                    // Fast path: Q8_0 (Gemma 4 / Q8_0 GGUFs)
                     // gets a single custom Metal kernel that does
                     // RMSNorm(input) + matmul together using simdgroup
                     // intrinsics. Saves one Metal dispatch per layer ×
@@ -979,8 +907,7 @@ namespace TensorSharp.MLX
                     if (rows == 1
                         && ggmlType == (int)GgmlTensorType.Q8_0
                         && (int)ne0 % 32 == 0
-                        && weight.Biases.IsValid
-                        && !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_FUSED_Q8_RMSNORM_MATMUL"), "0", StringComparison.Ordinal))
+                        && weight.Biases.IsValid)
                     {
                         try
                         {
@@ -995,23 +922,15 @@ namespace TensorSharp.MLX
                         {
                             MlxNative.FreeArray(fused);
                             fused = default;
-                            // Fall through to legacy path.
+                            // Fall through to the unfused path.
                         }
                     }
 
                     normed = MlxNative.FastRmsNorm(inputView, normView, eps);
+                    // The 2D quantized matmul output is already row-major contiguous.
                     output = RunMatmul(normed, weight, ggmlType, rows, (int)ne0, (int)ne1);
-                    if (MatmulOutputNeedsContiguous())
-                    {
-                        contiguous = MlxNative.Contiguous(output);
-                        SetDeviceResult(result, contiguous);
-                        contiguous = default;
-                    }
-                    else
-                    {
-                        SetDeviceResult(result, output);
-                        output = default;
-                    }
+                    SetDeviceResult(result, output);
+                    output = default;
                     return true;
                 }
                 finally
@@ -1020,7 +939,6 @@ namespace TensorSharp.MLX
                     MlxNative.FreeArray(normView);
                     MlxNative.FreeArray(normed);
                     MlxNative.FreeArray(output);
-                    MlxNative.FreeArray(contiguous);
                     MlxNative.FreeArray(fused);
                 }
             });
@@ -1056,16 +974,15 @@ namespace TensorSharp.MLX
                     inputView = inputStorage.CreateArrayView(input);
                     residualView = residualStorage.CreateArrayView(residual);
 
-                    // Phase 6 fast path: Q8_0 (the Gemma 4 / Q8_0 GGUF
+                    // Fast path: Q8_0 (the Gemma 4 / Q8_0 GGUF
                     // path) gets a single custom Metal kernel that does
                     // matmul + residual add together. Saves one Metal
                     // dispatch per layer × 42 layers / token. Falls back
-                    // to the legacy 2-op path on any unsupported shape.
+                    // to the two-op path on any unsupported shape.
                     if (rows == 1
                         && ggmlType == (int)GgmlTensorType.Q8_0
                         && (int)ne0 % 32 == 0
-                        && weight.Biases.IsValid
-                        && !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_FUSED_Q8_ADDMM_ADD"), "0", StringComparison.Ordinal))
+                        && weight.Biases.IsValid)
                     {
                         try
                         {
@@ -1080,7 +997,7 @@ namespace TensorSharp.MLX
                         {
                             MlxNative.FreeArray(fused);
                             fused = default;
-                            // Fall through to legacy path.
+                            // Fall through to the unfused path.
                         }
                     }
 
@@ -1101,247 +1018,8 @@ namespace TensorSharp.MLX
             });
         }
 
-        // Lazily-compiled closure for the Gemma 4 dense decode FFN (and any
-        // model that happens to share the same shape: input [1, hidden],
-        // gate_up Q8_0 weight [hidden, 2·intermediate], gelu-mul split,
-        // down Q8_0 weight [intermediate, hidden], residual add). The
-        // closure captures the {eps, mode, groupSize, bits, halfDim} tuple
-        // — see <see cref="FusedFFNCacheKey"/>. A different model with
-        // different intermediate size or quant params would just compile
-        // its own slot. shapeless=true so MLX specializes per shape
-        // internally.
-        private sealed class FusedFFNClosureSlot
-        {
-            public MlxNative.CompiledClosure Closure;
-        }
-        private static readonly Dictionary<FusedFFNCacheKey, FusedFFNClosureSlot> s_FusedFFNClosures = new();
-
-        private readonly struct FusedFFNCacheKey : IEquatable<FusedFFNCacheKey>
-        {
-            public readonly int GgmlType;
-            public readonly int HalfDim;
-            public readonly int GroupSize;
-            public readonly int Bits;
-            public readonly string Mode;
-            public readonly int EpsBits;
-
-            public FusedFFNCacheKey(int ggmlType, int halfDim, int groupSize, int bits, string mode, float eps)
-            {
-                GgmlType = ggmlType;
-                HalfDim = halfDim;
-                GroupSize = groupSize;
-                Bits = bits;
-                Mode = mode ?? "affine";
-                EpsBits = BitConverter.SingleToInt32Bits(eps);
-            }
-
-            public bool Equals(FusedFFNCacheKey other) =>
-                GgmlType == other.GgmlType && HalfDim == other.HalfDim
-                && GroupSize == other.GroupSize && Bits == other.Bits
-                && string.Equals(Mode, other.Mode, StringComparison.Ordinal)
-                && EpsBits == other.EpsBits;
-
-            public override bool Equals(object obj) => obj is FusedFFNCacheKey o && Equals(o);
-            public override int GetHashCode() => HashCode.Combine(GgmlType, HalfDim, GroupSize, Bits, Mode, EpsBits);
-        }
-
         /// <summary>
-        /// Fused decode-step FFN via <c>mlx_compile</c>. Matches Gemma 4's
-        /// dense MLP block shape:
-        /// <code>
-        ///   normed_pre   = rmsnorm(hidden, ffn_norm_w, eps)
-        ///   gate_up      = normed_pre @ gate_up_w
-        ///   activated    = gelu(gate_up[:, :half]) * gate_up[:, half:]
-        ///   down_out     = activated @ down_w
-        ///   normed_post  = rmsnorm(down_out, post_ffn_norm_w, eps)
-        ///   result       = residual + normed_post
-        /// </code>
-        /// Replaces four separate <c>MlxWorker.Invoke</c> dispatches
-        /// (norm+gate_up matmul + GeluMulSplit + down matmul + post-norm-add)
-        /// with one <c>mlx_closure_apply</c> so MLX pays the per-op
-        /// graph-build cost only once at compile time.
-        ///
-        /// Scoped to Q8_0 weights so the apply-time argument list stays a
-        /// fixed shape (six matmul-component arrays + three norm/IO arrays).
-        /// Returns false for any other quant type so the caller falls back
-        /// to the existing per-op path.
-        /// </summary>
-        public static bool TryFusedGemma4DenseFFNDecode(
-            Tensor residual,
-            Tensor hidden,
-            Tensor preNormWeight, float eps,
-            IntPtr gateUpCacheKey, IntPtr gateUpHostData, int gateUpType, long gateUpNe0, long gateUpNe1, long gateUpBytes,
-            IntPtr downCacheKey, IntPtr downHostData, int downType, long downNe0, long downNe1, long downBytes,
-            Tensor postNormWeight,
-            int halfDim)
-        {
-            if (gateUpType != (int)GgmlTensorType.Q8_0 || downType != (int)GgmlTensorType.Q8_0)
-                return false;
-            if (!CanPreloadQuantizedType(gateUpType) || !CanPreloadQuantizedType(downType))
-                return false;
-            if (halfDim <= 0) return false;
-
-            if (residual == null || hidden == null || preNormWeight == null || postNormWeight == null) return false;
-            if (residual.Storage is not MlxStorage residualStorage) return false;
-            if (hidden.Storage is not MlxStorage hiddenStorage) return false;
-            if (preNormWeight.Storage is not MlxStorage preNormStorage) return false;
-            if (postNormWeight.Storage is not MlxStorage postNormStorage) return false;
-            if (residual.ElementType != DType.Float32 || hidden.ElementType != DType.Float32
-                || preNormWeight.ElementType != DType.Float32 || postNormWeight.ElementType != DType.Float32)
-                return false;
-            if (hidden.DimensionCount != 2 || hidden.Sizes[0] != 1 || hidden.Sizes[1] != gateUpNe0)
-                return false;
-            if (residual.DimensionCount != 2 || residual.Sizes[0] != 1 || residual.Sizes[1] != gateUpNe0)
-                return false;
-            if (preNormWeight.DimensionCount != 1 || preNormWeight.Sizes[0] != gateUpNe0)
-                return false;
-            if (postNormWeight.DimensionCount != 1 || postNormWeight.Sizes[0] != gateUpNe0)
-                return false;
-            if (gateUpNe1 != 2L * halfDim || downNe0 != halfDim || downNe1 != gateUpNe0)
-                return false;
-
-            DeviceWeight gateUpDw = EnsureWeight(residualStorage.DeviceId,
-                gateUpCacheKey, gateUpHostData, gateUpType, gateUpNe0, gateUpNe1, gateUpBytes);
-            DeviceWeight downDw = EnsureWeight(residualStorage.DeviceId,
-                downCacheKey, downHostData, downType, downNe0, downNe1, downBytes);
-
-            var key = new FusedFFNCacheKey(gateUpType, halfDim, gateUpDw.GroupSize, gateUpDw.Bits, gateUpDw.Mode, eps);
-            MlxNative.CompiledClosure closure = EnsureFusedFFNClosure(key);
-
-            return MlxWorker.Shared.Invoke(() =>
-            {
-                MlxNative.MlxArray hiddenView = default;
-                MlxNative.MlxArray preNormView = default;
-                MlxNative.MlxArray postNormView = default;
-                MlxNative.MlxArray residualView = default;
-                MlxNative.MlxArray output = default;
-                MlxNative.MlxArray[] outputs = null;
-                try
-                {
-                    hiddenView = hiddenStorage.CreateArrayView(hidden);
-                    preNormView = preNormStorage.CreateArrayView(preNormWeight);
-                    postNormView = postNormStorage.CreateArrayView(postNormWeight);
-                    residualView = residualStorage.CreateArrayView(residual);
-
-                    outputs = MlxNative.ApplyClosure(closure, new[]
-                    {
-                        hiddenView,
-                        preNormView,
-                        gateUpDw.Weight,
-                        gateUpDw.Scales,
-                        gateUpDw.Biases,
-                        downDw.Weight,
-                        downDw.Scales,
-                        downDw.Biases,
-                        postNormView,
-                        residualView,
-                    });
-
-                    if (outputs == null || outputs.Length == 0) return false;
-                    output = outputs[0];
-                    outputs[0] = default;
-                    SetDeviceResult(residual, output);
-                    output = default;
-                    return true;
-                }
-                catch
-                {
-                    return false;
-                }
-                finally
-                {
-                    MlxNative.FreeArray(hiddenView);
-                    MlxNative.FreeArray(preNormView);
-                    MlxNative.FreeArray(postNormView);
-                    MlxNative.FreeArray(residualView);
-                    MlxNative.FreeArray(output);
-                    if (outputs != null)
-                    {
-                        for (int i = 0; i < outputs.Length; i++)
-                            MlxNative.FreeArray(outputs[i]);
-                    }
-                }
-            });
-        }
-
-        private static MlxNative.CompiledClosure EnsureFusedFFNClosure(FusedFFNCacheKey key)
-        {
-            lock (s_FusedFFNClosures)
-            {
-                if (s_FusedFFNClosures.TryGetValue(key, out var existing) && existing.Closure != null)
-                    return existing.Closure;
-            }
-
-            // Capture key fields as locals so the closure body uses them as
-            // compile-time constants rather than going through hash lookups.
-            int halfDim = key.HalfDim;
-            int groupSize = key.GroupSize;
-            int bits = key.Bits;
-            string mode = key.Mode;
-            float eps = BitConverter.Int32BitsToSingle(key.EpsBits);
-
-            var closure = MlxNative.NewClosure(inputs =>
-            {
-                // Apply-time arg layout: hidden, pre_norm_w,
-                // gate_up_{weight,scales,biases}, down_{...},
-                // post_norm_w, residual.
-                MlxNative.MlxArray hidden = inputs[0];
-                MlxNative.MlxArray preNormW = inputs[1];
-                MlxNative.MlxArray gateUpW = inputs[2];
-                MlxNative.MlxArray gateUpS = inputs[3];
-                MlxNative.MlxArray gateUpB = inputs[4];
-                MlxNative.MlxArray downW = inputs[5];
-                MlxNative.MlxArray downS = inputs[6];
-                MlxNative.MlxArray downB = inputs[7];
-                MlxNative.MlxArray postNormW = inputs[8];
-                MlxNative.MlxArray residual = inputs[9];
-
-                MlxNative.MlxArray normedPre = default;
-                MlxNative.MlxArray gateUp = default;
-                MlxNative.MlxArray activated = default;
-                MlxNative.MlxArray downOut = default;
-                MlxNative.MlxArray normedPost = default;
-                try
-                {
-                    normedPre = MlxNative.FastRmsNorm(hidden, preNormW, eps);
-                    gateUp = MlxNative.QuantizedMatmul(
-                        normedPre, gateUpW, gateUpS, gateUpB,
-                        transpose: true, groupSize, bits, mode);
-                    activated = MlxNative.GeluMulSplit(gateUp, rows: 1, halfDim: halfDim);
-                    downOut = MlxNative.QuantizedMatmul(
-                        activated, downW, downS, downB,
-                        transpose: true, groupSize, bits, mode);
-                    normedPost = MlxNative.FastRmsNorm(downOut, postNormW, eps);
-                    MlxNative.MlxArray result = MlxNative.Binary(
-                        MlxNative.MlxBinaryOp.Add, residual, normedPost);
-                    return new[] { result };
-                }
-                finally
-                {
-                    MlxNative.FreeArray(normedPre);
-                    MlxNative.FreeArray(gateUp);
-                    MlxNative.FreeArray(activated);
-                    MlxNative.FreeArray(downOut);
-                    MlxNative.FreeArray(normedPost);
-                }
-            }, shapeless: true);
-
-            lock (s_FusedFFNClosures)
-            {
-                if (s_FusedFFNClosures.TryGetValue(key, out var existing) && existing.Closure != null)
-                {
-                    // Someone else compiled the same closure while we were
-                    // tracing. Free ours and use theirs.
-                    MlxNative.FreeCompiledClosure(closure);
-                    return existing.Closure;
-                }
-                s_FusedFFNClosures[key] = new FusedFFNClosureSlot { Closure = closure };
-                return closure;
-            }
-        }
-
-        /// <summary>
-        /// Phase 6h fused decode-step Q8 matmul + GELU-tanh + per-element
+        /// Fused decode-step Q8 matmul + GELU-tanh + per-element
         /// multiply. Used by Gemma 4's PLE inp_gate stage:
         /// <c>result = gelu(input @ weight) * gate</c>. Replaces a (Q8
         /// matmul + Ops.GELUMul) pair with one custom Metal dispatch.
@@ -1448,18 +1126,6 @@ namespace TensorSharp.MLX
                     SetDeviceResult(result, dequantized);
                     dequantized = default;
                 }
-                else if (ggmlType == (int)GgmlTensorType.Q4_K && string.Equals(weight.Mode, "q4_k", StringComparison.Ordinal))
-                {
-                    dequantized = MlxNative.Q4KGetRows(weight.Weight, indicesView, (int)indices.Sizes[0], (int)ne0);
-                    SetDeviceResult(result, dequantized);
-                    dequantized = default;
-                }
-                else if (ggmlType == (int)GgmlTensorType.Q5_K && string.Equals(weight.Mode, "q5_k", StringComparison.Ordinal))
-                {
-                    dequantized = MlxNative.Q5KGetRows(weight.Weight, indicesView, (int)indices.Sizes[0], (int)ne0);
-                    SetDeviceResult(result, dequantized);
-                    dequantized = default;
-                }
                 else if (ggmlType == (int)GgmlTensorType.Q6_K && string.Equals(weight.Mode, "q6_k", StringComparison.Ordinal))
                 {
                     dequantized = MlxNative.Q6KGetRows(weight.Weight, indicesView, (int)indices.Sizes[0], (int)ne0);
@@ -1550,10 +1216,6 @@ namespace TensorSharp.MLX
                 return MlxNative.Iq3SMatmul(input, weight.Weight, rows, inDim, outDim);
             if (ggmlType == (int)GgmlTensorType.IQ3_XXS)
                 return MlxNative.Iq3XxsMatmul(input, weight.Weight, rows, inDim, outDim);
-            if (ggmlType == (int)GgmlTensorType.Q4_K && string.Equals(weight.Mode, "q4_k", StringComparison.Ordinal))
-                return MlxNative.Q4KMatmul(input, weight.Weight, rows, inDim, outDim);
-            if (ggmlType == (int)GgmlTensorType.Q5_K && string.Equals(weight.Mode, "q5_k", StringComparison.Ordinal))
-                return MlxNative.Q5KMatmul(input, weight.Weight, rows, inDim, outDim);
             if (ggmlType == (int)GgmlTensorType.Q6_K && string.Equals(weight.Mode, "q6_k", StringComparison.Ordinal))
                 return MlxNative.Q6KMatmul(input, weight.Weight, rows, inDim, outDim);
 
@@ -1608,23 +1270,6 @@ namespace TensorSharp.MLX
                 MlxNative.FreeArray(half);
                 MlxNative.FreeArray(product);
             }
-        }
-
-        private static bool MatmulOutputNeedsContiguous()
-        {
-            // mlx_quantized_matmul produces a row-major contiguous output for
-            // the standard 2D matmul case (input is [rows, inDim], weight is
-            // [outDim, inDim] with transpose=true → output [rows, outDim]) —
-            // so the explicit mlx_contiguous call after the matmul is
-            // redundant for ALL types that go through it. The previously-
-            // listed "custom-kernel" types (IQ4_XS, Q4_K with q4_k mode, ...)
-            // were already known to skip it; the generic fallback path now
-            // skips it too unless TS_MLX_QUANT_MATMUL_CONTIG=1 forces the
-            // defensive copy back on (kept for cases where a future MLX
-            // version changes the output layout for some quantization mode).
-            if (string.Equals(Environment.GetEnvironmentVariable("TS_MLX_QUANT_MATMUL_CONTIG"), "1", StringComparison.Ordinal))
-                return true;
-            return false;
         }
 
         private static bool TryValidateGetRows(
@@ -1711,17 +1356,13 @@ namespace TensorSharp.MLX
                 {
                     (int)GgmlTensorType.Q4_0 => CreateQ4Weight(deviceId, hostData, ne0, ne1, rawBytes, hasExplicitBias: false),
                     (int)GgmlTensorType.Q4_1 => CreateQ4Weight(deviceId, hostData, ne0, ne1, rawBytes, hasExplicitBias: true),
-                    (int)GgmlTensorType.Q4_K => PreferAffineKQuant
-                        ? CreateQ4KWeight(deviceId, hostData, ne0, ne1, rawBytes)
-                        : CreateQ4KRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
+                    (int)GgmlTensorType.Q4_K => CreateQ4KWeight(deviceId, hostData, ne0, ne1, rawBytes),
                     (int)GgmlTensorType.Q5_0 => CreateQ5Weight(deviceId, hostData, ne0, ne1, rawBytes, hasExplicitBias: false),
                     (int)GgmlTensorType.Q5_1 => CreateQ5Weight(deviceId, hostData, ne0, ne1, rawBytes, hasExplicitBias: true),
-                    (int)GgmlTensorType.Q5_K => (PreferAffineKQuant || !UseRawQ5KKernel())
-                        ? CreateQ5KWeight(deviceId, hostData, ne0, ne1, rawBytes)
-                        : CreateQ5KRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
+                    (int)GgmlTensorType.Q5_K => CreateQ5KWeight(deviceId, hostData, ne0, ne1, rawBytes),
                     // Q6_K's natural affine group is 16, which MLX's quantized kernels don't support
-                    // (only 32/64/128), so it stays raw on TensorSharp's kernels by default;
-                    // TS_MLX_Q6K_AFFINE8=1 regroups it to 8-bit/32 (CreateQ6KAffine8Weight).
+                    // (only 32/64/128), so it stays raw on TensorSharp's kernels unless it is too
+                    // large for them (CreateQ6KAffine8Weight regroups it to 8-bit/32).
                     (int)GgmlTensorType.Q6_K => Q6KUsesAffine8(rawBytes)
                         ? CreateQ6KAffine8Weight(deviceId, hostData, ne0, ne1, rawBytes)
                         : CreateQ6KRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
@@ -1874,6 +1515,16 @@ namespace TensorSharp.MLX
                 MlxAffineQ5Bits);
         }
 
+        // Q4_K and Q5_K preload into MLX-native AFFINE form (driving the built-in
+        // mlx_quantized_matmul / gather_qmm) rather than raw GGUF blocks. The repack is a
+        // reinterpretation of K-quant, as omlx and mlx-lm store 4/5-bit weights: each 32-element
+        // group becomes scale = d*scaleByte, bias = -dmin*minByte, exactly ggml's dequant (w = scale*q
+        // + bias) up to rounding the group's scale and bias to F16. Against raw K-quant Metal kernels
+        // it is faster in both regimes: Qwen3.8-27B UD-Q4_K_XL (almost all Q5_K) on an M5 Pro with
+        // MLX 0.32.2 went from 22 to 426 tok/s prefill (pp512) and from 4.1 to 7.6 tok/s decode, with
+        // logits unchanged against ggml_metal (cosine 0.999991 vs 0.999988 raw). The copy costs ~9%
+        // more than the raw bytes and the source pages are released after upload
+        // (PreloadDuplicatesHostMemory). Q6_K stays raw (see Q6KUsesAffine8).
         private static unsafe DeviceWeight CreateQ4KWeight(int deviceId, IntPtr hostData, long ne0, long ne1, long rawBytes)
         {
             if (ne0 <= 0 || ne1 <= 0 || ne0 > int.MaxValue || ne1 > int.MaxValue || ne0 % QK_K != 0)
@@ -2104,10 +1755,9 @@ namespace TensorSharp.MLX
         /// decoded exactly and requantized to 256 levels over the pair's range, which adds at
         /// most half an 8-bit step (range/510) to each weight — about 3% on the RMS of Q6_K's
         /// own rounding error. In exchange the matmul runs on MLX's quantized kernels instead
-        /// of the raw Q6_K kernels. Opt-in (TS_MLX_Q6K_AFFINE8=1, and the load says so): it
-        /// was the default until the raw kernels caught up (see PreferAffine8Q6K), and on
-        /// Qwen3.8-27B Q4_K_M it now prefills 2-3% faster but decodes 8% slower than exact
-        /// Q6_K, because 9 bits per weight is more to read than Q6_K's 6.56.
+        /// of the raw Q6_K kernels. Used only for tensors too large for those kernels (the load
+        /// says so): on Qwen3.8-27B Q4_K_M it prefills 2-3% faster but decodes 8% slower than
+        /// exact Q6_K, because 9 bits per weight is more to read than Q6_K's 6.56.
         /// </summary>
         private static unsafe DeviceWeight CreateQ6KAffine8Weight(int deviceId, IntPtr hostData, long ne0, long ne1, long rawBytes)
         {
@@ -2190,48 +1840,19 @@ namespace TensorSharp.MLX
                 8);
         }
 
-        // Off by default: exact Q6_K now runs on a matrix-vector port of ggml-metal's kernel
-        // for decode and an F16 dequantize + GEMM for prefill (MlxNative.Q6KMatmul), which
-        // on Qwen3.8-27B Q4_K_M decodes at 15.2 tok/s against the regroup's 14.0 and
-        // prefills within 2-3% of it (455/465 vs 470/473 tok/s at pp512/pp4096), in fewer
-        // bytes and without the regroup's rounding. TS_MLX_Q6K_AFFINE8=1 opts back in.
-        // Settable (like PreferAffineKQuant) and read only when a weight is created.
-        public static bool PreferAffine8Q6K =
-            string.Equals(Environment.GetEnvironmentVariable("TS_MLX_Q6K_AFFINE8"), "1", StringComparison.Ordinal);
+        // Exact Q6_K runs on a matrix-vector port of ggml-metal's kernel for decode and an
+        // F16 dequantize + GEMM for prefill (MlxNative.Q6KMatmul), which on Qwen3.8-27B
+        // Q4_K_M decodes at 15.2 tok/s against the 8-bit regroup's 14.0 and prefills within
+        // 2-3% of it (455/465 vs 470/473 tok/s at pp512/pp4096), in fewer bytes and without
+        // the regroup's rounding. Tests set this to reach the regroup, which otherwise runs
+        // only on tensors too large for the raw kernels. Read only when a weight is created.
+        public static bool PreferAffine8Q6K;
 
         /// <summary>
-        /// Whether a Q6_K weight is regrouped to 8-bit affine: when asked to, or when its raw
-        /// bytes pass what one MLX uint8 array can index (the raw kernels' Int32 limit).
+        /// Whether a Q6_K weight is regrouped to 8-bit affine: when a test asks to, or when its
+        /// raw bytes pass what one MLX uint8 array can index (the raw kernels' Int32 limit).
         /// </summary>
         public static bool Q6KUsesAffine8(long rawBytes) => PreferAffine8Q6K || rawBytes > int.MaxValue;
-
-        private static DeviceWeight CreateQ4KRawWeight(int deviceId, IntPtr hostData, long ne0, long ne1, long rawBytes)
-        {
-            return CreateRawKWeight(
-                deviceId,
-                (int)GgmlTensorType.Q4_K,
-                hostData,
-                ne0,
-                ne1,
-                rawBytes,
-                Q4_KBlockBytes,
-                "Q4_K",
-                mode: "q4_k");
-        }
-
-        private static DeviceWeight CreateQ5KRawWeight(int deviceId, IntPtr hostData, long ne0, long ne1, long rawBytes)
-        {
-            return CreateRawKWeight(
-                deviceId,
-                (int)GgmlTensorType.Q5_K,
-                hostData,
-                ne0,
-                ne1,
-                rawBytes,
-                Q5_KBlockBytes,
-                "Q5_K",
-                mode: "q5_k");
-        }
 
         private static DeviceWeight CreateQ6KRawWeight(int deviceId, IntPtr hostData, long ne0, long ne1, long rawBytes)
         {

@@ -22,7 +22,7 @@ namespace TensorSharp.GGML
             int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position,
             int nRot, float ropeBase, float ropeFreqScale, float attnScale,
             int nExpert, int nExpertUsed, int nFf, int nFfSh,
-            float eps, int cacheSlot, int firstFfnOnly, IntPtr head, IntPtr logitsOut,
+            float eps, int cacheSlot, IntPtr head, IntPtr logitsOut,
             IntPtr ple, int pleLayer, IntPtr pleEmb,
             IntPtr mropePos, IntPtr mropeSections, int ropePosition, int device,
             IntPtr hiddenOut, int logitsRows, IntPtr qsa, IntPtr qsaPositions, int qsaPositionCount, out IntPtr plan);
@@ -55,7 +55,7 @@ namespace TensorSharp.GGML
             int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position,
             int nRot, float ropeBase, float ropeFreqScale, float attnScale,
             int nExpert, int nExpertUsed, int nFf, int nFfSh,
-            float eps, int cacheSlot, bool firstFfnOnly = false,
+            float eps, int cacheSlot,
             IntPtr head = default, IntPtr logitsOut = default,
             IntPtr ple = default, int pleLayer = -1, IntPtr pleEmb = default,
             IntPtr mropePos = default, IntPtr mropeSections = default,
@@ -70,7 +70,7 @@ namespace TensorSharp.GGML
                 headKDim, headVDim, nKHeads, nVHeads, dConv,
                 headDim, nHead, nHeadKv, kvCapacity, nKv, position,
                 nRot, ropeBase, ropeFreqScale, attnScale,
-                nExpert, nExpertUsed, nFf, nFfSh, eps, cacheSlot, firstFfnOnly ? 1 : 0,
+                nExpert, nExpertUsed, nFf, nFfSh, eps, cacheSlot,
                 head, logitsOut, ple, pleLayer, pleEmb, mropePos, mropeSections, ropePosition,
                 device, hiddenOut, logitsRows, qsa, qsaPositions, qsaPositionCount, out IntPtr plan) == 0)
                 throw new InvalidOperationException(LastNativeError("Qwen4Exp TP graph build failed."));

@@ -46,9 +46,7 @@ repeatable options — `--stop`, `--skill`, `--lora`,
 `--lora-scale`, `--lora-config`, `--image`, `--ref-image`, `--ref-video`,
 `--ref-audio` and `--ref-video-audio` — keep every file's values and add the
 command line's after them instead, and a download entry under one of them still
-runs. Legacy spellings count as the same option in both directions: `--wan-vae`
-and `--video-vae`; `--wan-te`, `--video-te` and `--video-text-encoder`;
-`--wan-dit2` and `--video-dit2`.
+runs.
 
 ## File format
 

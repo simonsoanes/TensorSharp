@@ -46,7 +46,7 @@ python run_matrix.py --engines tensorsharp --backends ggml_cuda \
     --models gemma4-12b --scenarios text_short,multi_turn
 
 # Same model on several backends (any id from the config's `backends` registry;
-# the legacy aliases gpu / cpu still resolve)
+# a config may also declare aliases such as gpu)
 python run_matrix.py --engines tensorsharp,llamacpp \
     --backends ggml_cuda,ggml_vulkan,ggml_cpu,cpu \
     --models gemma4-12b --scenarios text_short

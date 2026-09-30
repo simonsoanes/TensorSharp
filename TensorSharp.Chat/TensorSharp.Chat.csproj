@@ -13,6 +13,7 @@
     <!-- The chat stack kept the Server's `internal` visibility when it moved out, so the
          hosts that compose it see the same surface the Server always did. -->
     <InternalsVisibleTo Include="TensorSharp.Server" />
+    <InternalsVisibleTo Include="TensorSharp.Cli" />
     <InternalsVisibleTo Include="InferenceWeb.Tests" />
     <InternalsVisibleTo Include="TensorAgent.Core" />
     <InternalsVisibleTo Include="TensorAgent.Tests" />

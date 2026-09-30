@@ -200,7 +200,7 @@ namespace TensorSharp.Models
             // 3. Encoder blocks. Fast path: all 24 blocks as ONE device-resident
             // GGML graph (weights cached on the device across encodes); the
             // managed per-block loop stays as the reference and fallback.
-            bool fused = s_fusedEncoderEnabled && TryWholeEncoderFused(hidden, numPatches, headDim, halfDim,
+            bool fused = TryWholeEncoderFused(hidden, numPatches, headDim, halfDim,
                 rope.CosTable, rope.SinTable);
             if (!fused)
             {
@@ -344,9 +344,6 @@ namespace TensorSharp.Models
             return order;
         }
 
-        // TS_GLM_VENC_FUSED=0 forces the managed per-block path (A/B + kill switch).
-        private static readonly bool s_fusedEncoderEnabled =
-            Environment.GetEnvironmentVariable("TS_GLM_VENC_FUSED") != "0";
         private bool _fusedEncoderUnavailable;
 
         /// <summary>Run all encoder blocks as one native GGML graph. Returns false

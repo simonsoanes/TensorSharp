@@ -5,7 +5,7 @@
 //
 // TensorSharp is licensed under the BSD-3-Clause license found in the LICENSE file in the root directory of this source tree.
 //
-// GptOss batched vs legacy per-seq KV-swap performance bench. Mirrors the
+// GptOss batched vs per-seq KV-swap performance bench. Mirrors the
 // Nemotron / Qwen 3.5 perf benches: warm up once, run scenarios of n=1,3,5
 // parallel sequences, report wall + tps + managed/working-set memory deltas
 // for each path.
@@ -29,13 +29,15 @@ namespace InferenceWeb.Tests;
 public class GptOssBatchedPerfBench
 {
     private const string EnvModelDir = "TS_TEST_MODEL_DIR";
-    private const string OptInVar = "TS_GPTOSS_BATCHED";
+    // --no-continuous-batching's variable: set to 1, every sequence takes the
+    // per-sequence path instead of the batched one.
+    private const string PerSequenceVar = "TS_SCHED_DISABLE_BATCHED";
 
     private readonly ITestOutputHelper _output;
     public GptOssBatchedPerfBench(ITestOutputHelper output) { _output = output; }
 
     [ModelFact("TS_TEST_MODEL_DIR", "gpt-oss|gpt_oss|gptoss")]
-    public Task GptOss_BatchedVsLegacy()
+    public Task GptOss_BatchedVsPerSequence()
         => RunScenarios(new[]
         {
             ("single-seq",     1, 8),
@@ -56,9 +58,9 @@ public class GptOssBatchedPerfBench
         foreach (var (label, n, maxNewTokens) in scenarios)
         {
             var prompts = MakeShortPrompts(n);
-            var legacy  = await RunPath(ctx, prompts, maxNewTokens, optIn: false, warm: false);
+            var perSeq  = await RunPath(ctx, prompts, maxNewTokens, optIn: false, warm: false);
             var batched = await RunPath(ctx, prompts, maxNewTokens, optIn: true,  warm: false);
-            Report(label, n, legacy, batched);
+            Report(label, n, perSeq, batched);
         }
     }
 
@@ -66,7 +68,7 @@ public class GptOssBatchedPerfBench
         BenchContext ctx, List<string> prompts, int maxNewTokens,
         bool optIn, bool warm)
     {
-        Environment.SetEnvironmentVariable(OptInVar, optIn ? "1" : "0");
+        Environment.SetEnvironmentVariable(PerSequenceVar, optIn ? "0" : "1");
         ctx.Model.ResetKVCache();
         ctx.SumLastPromptTokens = 0;
 
@@ -150,21 +152,21 @@ public class GptOssBatchedPerfBench
         return count;
     }
 
-    private void Report(string label, int n, RunStats legacy, RunStats batched)
+    private void Report(string label, int n, RunStats perSeq, RunStats batched)
     {
-        double legacySec  = legacy.Wall.TotalSeconds;
+        double perSeqSec  = perSeq.Wall.TotalSeconds;
         double batchedSec = batched.Wall.TotalSeconds;
-        double legacyTps  = legacySec  > 0 ? legacy.OutputTokens  / legacySec  : 0;
+        double perSeqTps  = perSeqSec  > 0 ? perSeq.OutputTokens  / perSeqSec  : 0;
         double batchedTps = batchedSec > 0 ? batched.OutputTokens / batchedSec : 0;
-        double speedup    = legacySec  > 0 ? legacySec / Math.Max(batchedSec, 1e-9) : 0;
-        double tpsRatio   = legacyTps  > 0 ? batchedTps / legacyTps : 0;
+        double speedup    = perSeqSec  > 0 ? perSeqSec / Math.Max(batchedSec, 1e-9) : 0;
+        double tpsRatio   = perSeqTps  > 0 ? batchedTps / perSeqTps : 0;
 
         _output.WriteLine("");
         _output.WriteLine($"========== [gptoss-perf] {label} (n={n}) ==========");
-        _output.WriteLine($"  legacy  : wall={legacySec,7:F2}s out={legacy.OutputTokens,4} prompt={legacy.PromptTokens,5} tps={legacyTps,6:F2}");
+        _output.WriteLine($"  per-seq : wall={perSeqSec,7:F2}s out={perSeq.OutputTokens,4} prompt={perSeq.PromptTokens,5} tps={perSeqTps,6:F2}");
         _output.WriteLine($"  batched : wall={batchedSec,7:F2}s out={batched.OutputTokens,4} prompt={batched.PromptTokens,5} tps={batchedTps,6:F2}");
         _output.WriteLine($"  speedup : wall {speedup,5:F2}x   tps {tpsRatio,5:F2}x");
-        _output.WriteLine($"  memory legacy : managed peak={MB(legacy.ManagedPeakBytes),7:F1} MiB  delta={MB(legacy.ManagedAfterBytes - legacy.ManagedBeforeBytes),+7:F1} MiB  ws peak={MB(legacy.WorkingSetPeak),7:F1} MiB  delta={MB(legacy.WorkingSetAfter - legacy.WorkingSetBefore),+7:F1} MiB");
+        _output.WriteLine($"  memory per-seq: managed peak={MB(perSeq.ManagedPeakBytes),7:F1} MiB  delta={MB(perSeq.ManagedAfterBytes - perSeq.ManagedBeforeBytes),+7:F1} MiB  ws peak={MB(perSeq.WorkingSetPeak),7:F1} MiB  delta={MB(perSeq.WorkingSetAfter - perSeq.WorkingSetBefore),+7:F1} MiB");
         _output.WriteLine($"  memory batched: managed peak={MB(batched.ManagedPeakBytes),7:F1} MiB  delta={MB(batched.ManagedAfterBytes - batched.ManagedBeforeBytes),+7:F1} MiB  ws peak={MB(batched.WorkingSetPeak),7:F1} MiB  delta={MB(batched.WorkingSetAfter - batched.WorkingSetBefore),+7:F1} MiB");
         _output.WriteLine("");
     }
@@ -195,7 +197,7 @@ public class GptOssBatchedPerfBench
         return Directory.GetFiles(dir, "*.gguf").Where(p =>
         {
             var n = Path.GetFileName(p).ToLowerInvariant();
-            return (n.Contains("gpt-oss|gpt_oss|gptoss") || n.Contains("gpt_oss") || n.Contains("gptoss"))
+            return (n.Contains("gpt-oss") || n.Contains("gpt_oss") || n.Contains("gptoss"))
                 && !n.Contains("mmproj");
         }).OrderBy(p => Path.GetFileName(p)).FirstOrDefault();
     }
@@ -223,8 +225,7 @@ public class GptOssBatchedPerfBench
 
         public BenchContext(string modelPath)
         {
-            BackendType backend = OperatingSystem.IsMacOS()
-                ? BackendType.GgmlMetal : BackendType.GgmlCpu;
+            BackendType backend = TestGates.PinnedGgmlBackend;
             Model = TensorSharp.Models.ModelBase.Create(modelPath, backend);
             Renderer = new KVCachePromptRenderer(new GgufPromptRenderer());
             BlockSize = 256;

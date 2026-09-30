@@ -29,14 +29,9 @@ namespace TensorSharp.Models
     public partial class DeepSeek4Model : ISpeculativeModel
     {
         /// <summary>Path of the DSpark drafter GGUF, if one was configured
-        /// (<c>--draft-model</c> / <c>TS_DSV4_DSPARK</c>).</summary>
+        /// (<c>--draft-model</c>).</summary>
         internal static string ResolveDsparkPath(string explicitPath)
-        {
-            string path = !string.IsNullOrWhiteSpace(explicitPath)
-                ? explicitPath
-                : Environment.GetEnvironmentVariable("TS_DSV4_DSPARK");
-            return string.IsNullOrWhiteSpace(path) ? null : path;
-        }
+            => string.IsNullOrWhiteSpace(explicitPath) ? null : explicitPath;
 
         /// <summary>True when a DSpark drafter is loaded and usable, on either
         /// executor: the direct-CUDA engine or the native ggml one.</summary>

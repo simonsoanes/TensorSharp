@@ -181,7 +181,8 @@ namespace TensorSharp.AgentHost.CodeExec
 
             // Keep reading and patching before the shell: apply_patch handles every
             // modification, from a single line in one file to an atomic multi-file change.
-            // Legacy edit calls remain dispatchable but are not advertised to the model.
+            // edit_file is not advertised, but a call a model makes to it by reflex is still
+            // performed (SkillToolNames.EditFile).
             return new[]
             {
                 ShellTools.DeclareRead(),

@@ -125,17 +125,6 @@ namespace TensorSharp.Models
         /// </summary>
         public void SetHostModel(ModelBase model) => _hostModel = model;
 
-        // TS_MUSE_GLIMMER_GELU_TANH=1 swaps the exact erf-GELU for TensorSharp's
-        // tanh approximation (Ops.GELU). A/B knob: the reference graph uses
-        // ggml_gelu_erf, so the tanh path is a deliberate divergence.
-        private static readonly bool s_geluTanh =
-            Environment.GetEnvironmentVariable("TS_MUSE_GLIMMER_GELU_TANH") == "1";
-
-        // The fused GGML path preserves the reference math while keeping a whole
-        // block on-device. Disable only for parity/performance A/B diagnostics.
-        private static readonly bool s_fusedVisionBlocks =
-            Environment.GetEnvironmentVariable("TS_MUSE_GLIMMER_VENC_FUSED") != "0";
-
         private bool _fusedVisionBlockUnavailable;
 
         // TS_MUSE_GLIMMER_VENC_TRACE=1 prints a checksum of the residual stream at
@@ -202,13 +191,6 @@ namespace TensorSharp.Models
         ///
         /// v.position_embd.weight is excluded: it is a lookup table, not a linear.
         /// </summary>
-        /// <summary>
-        /// TS_MUSE_GLIMMER_VENC_F32=1 forces the (much larger) dequantized-F32
-        /// weight path even on GGML, for A/B-ing the quantized matmuls.
-        /// </summary>
-        private static readonly bool s_forceF32Weights =
-            Environment.GetEnvironmentVariable("TS_MUSE_GLIMMER_VENC_F32") == "1";
-
         private void LoadWeights(GgufFile gguf)
         {
             Console.Write("Loading Muse-Glimmer vision encoder weights...");
@@ -241,7 +223,7 @@ namespace TensorSharp.Models
                 // rest fall through to the dequantized path below.
                 bool keepQuantized = _useNativeAttention
                     || (_mlxDirect && MlxQuantizedOps.CanPreloadQuantizedType((int)info.Type));
-                if (!s_forceF32Weights && keepQuantized
+                if (keepQuantized
                     && info.Type != GgmlTensorType.F32
                     && info.Shape.Length == 2
                     && info.Name != PositionEmbedName
@@ -832,7 +814,7 @@ namespace TensorSharp.Models
             // numerical and allocator coverage there.
             if (!_useNativeAttention || _allocator is not GgmlAllocator ggmlAllocator ||
                 ggmlAllocator.Context.BackendType != GgmlBackendType.Cuda ||
-                !s_fusedVisionBlocks || s_geluTanh || _fusedVisionBlockUnavailable)
+                _fusedVisionBlockUnavailable)
                 return false;
 
             if (!_quantWeights.TryGetValue($"{prefix}.attn_q.weight", out QuantizedWeight q) ||
@@ -845,36 +827,25 @@ namespace TensorSharp.Models
                 return false;
             }
 
-            try
-            {
-                bool ok = GgmlBasicOps.TryMuseGlimmerVisionBlock(
-                    x,
-                    _weights[$"{prefix}.ln1.weight"], _weights[$"{prefix}.ln1.bias"],
-                    q.CacheKey, q.GgmlType, q.Ne0, q.Ne1, q.RawBytes, _weights[$"{prefix}.attn_q.bias"],
-                    k.CacheKey, k.GgmlType, k.Ne0, k.Ne1, k.RawBytes, _weights[$"{prefix}.attn_k.bias"],
-                    v.CacheKey, v.GgmlType, v.Ne0, v.Ne1, v.RawBytes, _weights[$"{prefix}.attn_v.bias"],
-                    o.CacheKey, o.GgmlType, o.Ne0, o.Ne1, o.RawBytes, _weights[$"{prefix}.attn_out.bias"],
-                    _weights[$"{prefix}.ln2.weight"], _weights[$"{prefix}.ln2.bias"],
-                    up.CacheKey, up.GgmlType, up.Ne0, up.Ne1, up.RawBytes, _weights[$"{prefix}.ffn_up.bias"],
-                    down.CacheKey, down.GgmlType, down.Ne0, down.Ne1, down.RawBytes, _weights[$"{prefix}.ffn_down.bias"],
-                    geo.RopePosW, geo.RopePosH, geo.WindowOffsets, isGlobal,
-                    _numHeads, _headDim, _eps, _ropeTheta);
-                if (ok)
-                    return true;
+            bool ok = GgmlBasicOps.TryMuseGlimmerVisionBlock(
+                x,
+                _weights[$"{prefix}.ln1.weight"], _weights[$"{prefix}.ln1.bias"],
+                q.CacheKey, q.GgmlType, q.Ne0, q.Ne1, q.RawBytes, _weights[$"{prefix}.attn_q.bias"],
+                k.CacheKey, k.GgmlType, k.Ne0, k.Ne1, k.RawBytes, _weights[$"{prefix}.attn_k.bias"],
+                v.CacheKey, v.GgmlType, v.Ne0, v.Ne1, v.RawBytes, _weights[$"{prefix}.attn_v.bias"],
+                o.CacheKey, o.GgmlType, o.Ne0, o.Ne1, o.RawBytes, _weights[$"{prefix}.attn_out.bias"],
+                _weights[$"{prefix}.ln2.weight"], _weights[$"{prefix}.ln2.bias"],
+                up.CacheKey, up.GgmlType, up.Ne0, up.Ne1, up.RawBytes, _weights[$"{prefix}.ffn_up.bias"],
+                down.CacheKey, down.GgmlType, down.Ne0, down.Ne1, down.RawBytes, _weights[$"{prefix}.ffn_down.bias"],
+                geo.RopePosW, geo.RopePosH, geo.WindowOffsets, isGlobal,
+                _numHeads, _headDim, _eps, _ropeTheta);
+            if (ok)
+                return true;
 
-                // A geometry/backend rejection is stable for the rest of this
-                // encoder instance. Avoid paying 49 more failed graph builds.
-                _fusedVisionBlockUnavailable = true;
-                return false;
-            }
-            catch (Exception ex) when (ex is EntryPointNotFoundException or DllNotFoundException)
-            {
-                _fusedVisionBlockUnavailable = true;
-                Console.WriteLine("  Vision encoder: fused vision block missing from the loaded GgmlOps " +
-                    $"library ({ex.Message}); using the portable per-op encoder (slower). " +
-                    "Update/rebuild GgmlOps to restore the fused path. Reported once.");
-                return false;
-            }
+            // A geometry/backend rejection is stable for the rest of this
+            // encoder instance. Avoid paying 49 more failed graph builds.
+            _fusedVisionBlockUnavailable = true;
+            return false;
         }
 
         /// <summary>
@@ -1171,17 +1142,10 @@ namespace TensorSharp.Models
         /// <summary>
         /// ggml_gelu_erf: 0.5 * x * (1 + erf(x / sqrt(2))). TensorSharp's Ops.GELU
         /// is the tanh approximation, which is NOT what the reference graph uses,
-        /// so this runs as a host loop. TS_MUSE_GLIMMER_GELU_TANH=1 falls back to
-        /// Ops.GELU for A/B comparison.
+        /// so this runs as a host loop.
         /// </summary>
         private unsafe void GeluErf(Tensor t)
         {
-            if (s_geluTanh)
-            {
-                Ops.GELU(t, t);
-                return;
-            }
-
             long total = t.ElementCount();
             if (total == 0)
                 return;

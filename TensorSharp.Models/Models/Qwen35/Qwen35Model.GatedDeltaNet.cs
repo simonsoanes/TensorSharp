@@ -64,8 +64,7 @@ namespace TensorSharp.Models
         //     sync cost dwarfs the 64-padding waste on CUDA;
         //   - other backends (Metal/CPU): 6 — compute-bound, so the padding
         //     waste matters and the measured crossover sits near 6.
-        // Set GDN_CHUNK_PREFILL_MIN_SEQ_LEN=N to override (e.g. =64 for the
-        // old long-prefill-only behavior, =1000000 to disable). -1 = unset.
+        // GDN_CHUNK_PREFILL_MIN_SEQ_LEN=N overrides the threshold. -1 = unset.
         private static readonly int GdnChunkedPrefillMinSeqLenEnv = ResolveGdnChunkedPrefillMinSeqLen();
 
         private static int ResolveGdnChunkedPrefillMinSeqLen()
@@ -75,10 +74,6 @@ namespace TensorSharp.Models
                 return v;
             return -1;
         }
-
-        private static readonly bool GdnChunkedPrefillDisabledEnv =
-            string.Equals(Environment.GetEnvironmentVariable("GDN_DISABLE_CHUNKED_PREFILL"), "1",
-                StringComparison.Ordinal);
 
         // GDN_VERIFY_CHUNKED=1 enables an inline correctness check that runs
         // BOTH the chunked path and the per-token path on identical starting
@@ -98,10 +93,7 @@ namespace TensorSharp.Models
         // norm + output proj + residual) for one layer over N prompt tokens in ONE
         // cached ggml graph, eliminating the per-layer host round-trips of the
         // chunked path (which on WDDM idle the GPU and downclock it on short prompts).
-        // Default ON for ggml_cuda; set TS_QWEN35_FUSED_REC_PREFILL=0 to A/B against
-        // the chunked path. Falls back transparently on any unsupported geometry.
-        private static readonly bool _useFusedRecPrefill =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_QWEN35_FUSED_REC_PREFILL"), "0", StringComparison.Ordinal);
+        // Falls back transparently to the chunked path on any unsupported geometry.
         private float[] _recPrefillConvIn;  // reusable [convDim * qkvDim] ring->time-major conv state
         private float[] _recPrefillConvOut; // reusable [convDim * qkvDim] post-window conv state download
 
@@ -110,19 +102,11 @@ namespace TensorSharp.Models
         // recurrent-state view a prefix of exactly one attention-output row lets
         // the native graph bind that result and its state input to one backing
         // buffer and update the state in place, removing one 3 MiB CPY per
-        // recurrent layer. TS_QWEN35_METAL_GDN_INPLACE_STATE=0 retains the
-        // separate state-copy path for diagnostics and A/B comparisons.
+        // recurrent layer.
         private readonly bool _useMetalGdnInplaceState;
 
-        internal static bool ShouldUseMetalGdnInplaceState(
-            BackendType backend,
-            bool isTensorParallel,
-            string environmentValue)
-        {
-            return backend == BackendType.GgmlMetal &&
-                !isTensorParallel &&
-                !string.Equals(environmentValue, "0", StringComparison.Ordinal);
-        }
+        internal static bool ShouldUseMetalGdnInplaceState(BackendType backend, bool isTensorParallel)
+            => backend == BackendType.GgmlMetal && !isTensorParallel;
 
         internal static Tensor AllocateGdnDeltaStateTensor(
             IAllocator allocator,
@@ -169,16 +153,6 @@ namespace TensorSharp.Models
             if (state.StorageOffset != 0)
                 GgmlBasicOps.InvalidateHostBuffer(GdnDeltaStateBackingPointer(state));
         }
-
-        // Direct CUDA runs the packed Qwen3.5/Qwen3.6 GDN recurrence on device
-        // instead of downloading the packed projection, conv state, and SSM state
-        // for the managed per-token loop. Set TS_CUDA_QWEN35_GDN_NATIVE=0 to
-        // force the legacy path for A/B benchmarking.
-        private static readonly bool CudaGdnNativeEnabledEnv =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_QWEN35_GDN_NATIVE"), "0",
-                StringComparison.Ordinal) &&
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_QWEN35_GDN_NATIVE"), "false",
-                StringComparison.OrdinalIgnoreCase);
 
         // Tolerance above which the verification mode logs a warning. A few
         // ULPs of drift are normal because the chunked GGML path executes the
@@ -306,7 +280,7 @@ namespace TensorSharp.Models
         // Conservative placeholder until InitGDNBuffers resolves the
         // backend-dependent default (env override > per-backend value).
         private int _gdnChunkPrefillThreshold = GdnChunkSize;
-        private bool _gdnDisableChunkedPrefill = GdnChunkedPrefillDisabledEnv;
+        private bool _gdnDisableChunkedPrefill;
         private long _gdnChunkedTicks;       // Total time spent in the chunked path
         private long _gdnPerTokenTicks;      // Total time spent in the per-token path (prefill only)
         private long _gdnCudaNativeTicks;    // Total time spent in the direct CUDA native GDN path
@@ -750,7 +724,6 @@ namespace TensorSharp.Models
         /// </summary>
         private unsafe bool TryFusedRecLayerPrefill(Tensor hidden, int layer, int seqLen)
         {
-            if (!_useFusedRecPrefill) return false;
             // ggml_cuda AND ggml_metal: the native kernel is backend-agnostic
             // (ggml_ssm_conv + ggml_gated_delta_net + ggml_cpy, NO ggml_set_rows)
             // and allocates a dedicated per-graph buffer (ggml_backend_alloc_ctx_tensors,
@@ -1053,15 +1026,8 @@ namespace TensorSharp.Models
         // hybrid transformer (full-attention + GatedDeltaNet + dense or MoE FFN)
         // as one persistent graph per token, collapsing hundreds of per-operation
         // submissions. CUDA additionally captures the graph; Metal/Vulkan replay
-        // its fixed topology. Falls back on unsupported shapes. Default ON;
-        // TS_QWEN35_FULL_DECODE=0 disables it.
+        // its fixed topology. Falls back on unsupported shapes.
         // ====================================================================
-        private static readonly bool _fullDecodeEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_QWEN35_FULL_DECODE"), "0", StringComparison.Ordinal);
-        // Default-on Metal token-id input. Set to 0 for an exact A/B against the
-        // legacy host-dequantized embedding path while retaining fused decode.
-        private static readonly bool _metalTokenInputEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_QWEN35_METAL_TOKEN_INPUT"), "0", StringComparison.Ordinal);
 
         private Qwen35LayerDecodeArgs[] _fdLayers;
         private IntPtr _fdBindingKCache;
@@ -1195,11 +1161,6 @@ namespace TensorSharp.Models
             // The batched-fused device KV pool is seeded from the host paged pool;
             // any state reset/rebuild must force a re-seed before the next fused decode.
             _bfdPoolSeeded = false;
-            if (_backend == BackendType.GgmlCuda)
-            {
-                GgmlBasicOps.Qwen35ResetBatchedDecodeCache();
-                CountDecodeGraphReset();
-            }
             // CUDA/Vulkan persistent graphs still use their established hard-drop
             // lifecycle. Metal can retain its graph across a logical state change:
             // the next replay receives an explicit reseed flag and uploads the
@@ -1226,11 +1187,10 @@ namespace TensorSharp.Models
         /// (KV reset / capacity grow), NOT on the per-step spec latch.</summary>
         internal void InvalidateVerifyCache()
         {
-            // The device-resident verify state lives in the same buffers; a KV reset/grow
+            // A device-held verify state lives in the same buffers; a KV reset/grow
             // invalidates it, so preserve an in-flight prefill chain before dropping
             // the native slice metadata, then re-seed on the next verify.
             DrainDeviceRecurrentState();
-            _fvStateResident = false;
             if (_backend == BackendType.GgmlCuda || _backend == BackendType.GgmlVulkan
                 || _backend == BackendType.GgmlMetal)
                 GgmlBasicOps.Qwen35ResetVerifyCache(_verifyOwnerId);
@@ -1278,9 +1238,6 @@ namespace TensorSharp.Models
             if (!_fdSpecSessionActive)
                 return;
             DrainDeviceRecurrentState();
-            // The fused decode is about to move the state; the opt-in resident verify
-            // seed (TS_QWEN35_VERIFY_RESIDENT) would otherwise be reused stale.
-            _fvStateResident = false;
             _fdSpecSessionActive = false;
         }
 
@@ -1434,8 +1391,6 @@ namespace TensorSharp.Models
             // graph. CUDA/Vulkan use dynamic SET_ROWS KV writes; Metal moves CPY
             // destination views before replay, avoiding its problematic SET_ROWS
             // shape. GDN recurrence and MoE top-K routing remain device-resident.
-            if (!_fullDecodeEnabled)
-                return FdBail("disabled via TS_QWEN35_FULL_DECODE=0");
             // A decode outside the speculative session ends it (the drain below and
             // the re-seed make the host mirrors authoritative again).
             ExitSpecSession();
@@ -1444,8 +1399,6 @@ namespace TensorSharp.Models
             if (_backend != BackendType.GgmlCuda && _backend != BackendType.GgmlMetal
                 && _backend != BackendType.GgmlVulkan)
                 return FdBail($"backend {_backend} has no fused whole-model decode graph");
-            if (!NativeRopePositionAbiSupported())
-                return FdBail("the native library predates the M-RoPE position argument");
             // Interior Metal prefill chunks can leave GDN state in the verify
             // ping-pong buffer. The decode graph owns different resident-state
             // bindings, so synchronize the authoritative verify state before its
@@ -1464,8 +1417,7 @@ namespace TensorSharp.Models
             (IntPtr ptr, int type, long ne0, long ne1, long bytes) tokenEmbedding = default;
             if (tokenInput)
             {
-                if (!_metalTokenInputEnabled ||
-                    _backend != BackendType.GgmlMetal ||
+                if (_backend != BackendType.GgmlMetal ||
                     tokenId >= Config.VocabSize)
                     return false;
                 if (_quantWeights.TryGetValue("token_embd.weight", out QuantizedWeight tokenQw))
@@ -1820,87 +1772,13 @@ namespace TensorSharp.Models
         // input), appends the N rows to the attention KV cache, and advances every
         // recurrent layer's GDN state (conv ring + delta) by N tokens. Returns
         // false (caller falls back to the op-by-op trunk) on any unsupported shape.
-        // Gated by TS_QWEN35_FUSED_VERIFY (default ON on every GGML GPU backend).
         // Prefill uses the lifetime-packed one-shot graph; all-logits MTP verify
-        // uses the default-on per-(N,window) persistent cache. Set either this flag
-        // or TS_Q35_VERIFY_PERSIST=0 for isolated fallback/A-B testing.
-        private static readonly bool _fusedVerifyEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_QWEN35_FUSED_VERIFY"), "0", StringComparison.Ordinal);
+        // uses the per-(N,window) persistent cache.
         private Qwen35LayerDecodeArgs[] _fvLayers;
         private int[] _fvGdnSlot;
         private IntPtr _fvConvIn;    // unmanaged [numGdnLayers * convDim * qkvDim] ggml layout (pre-window state)
         private IntPtr _fvConvOut;   // unmanaged, same size (post-window state)
         private bool _fvUnsupported;
-
-        // Device-resident verify GDN state (TS_QWEN35_VERIFY_RESIDENT=1, default OFF).
-        // KNOWN-BROKEN, kept off — do not enable without the redesign below. Intent:
-        // keep delta (_deltaStateTensor) device-resident so the verify skips the ~150 MB
-        // delta host round-trip. Two entanglements make it unsafe as-is:
-        //   1. Delta is bound cacheable by its HOST ptr (GetFloatPtr). The verify runs at
-        //      several N shapes (variable draft length), and the host-keyed cacheable
-        //      mirror is re-created PER SHAPE -> divergent device buffers + a freed buffer
-        //      -> ggml_cuda_cpy "invalid argument" crash at longer generations (passes at
-        //      ~16 tokens, faults by ~128). The KV cache avoids this by binding via its
-        //      DEVICE ptr (GetStoragePointer); delta must do the same.
-        //   2. On ggml_cuda the snapshot uses the HOST path (CopyGdnStateOut ->
-        //      EnsureHostReadable), so making the verify device-resident just moves the
-        //      151 MB transfer into the snapshot phase (net ~half saved, ~break-even).
-        // The clean fix is to move GDN snapshot/rollback DEVICE-SIDE natively (per-prefix
-        // gated_delta_net state snapshots, K=N), eliminating both the verify transfer AND
-        // the host snapshot. See memory qwen35-mtp-spec-perf. _fvStateResident latches the
-        // seed; reset on KV reset/grow (InvalidateVerifyCache).
-        /// <summary>
-        /// Device-resident GDN state for the speculative family. Opt-in
-        /// (TS_QWEN35_VERIFY_RESIDENT=1) and currently INCORRECT - do not turn it
-        /// on expecting speed.
-        ///
-        /// <para>It is fast. Measured on Qwen 3.5-0.8B / ggml_cuda it took a
-        /// verify from 246 ms to 17 ms, a state snapshot from 65 ms to 6 ms and a
-        /// plain step on the speculative family from 67 ms to 3.5 ms, by keeping
-        /// the conv and delta state on the device instead of moving ~60 MB per
-        /// call.</para>
-        ///
-        /// <para>It is also wrong, in two ways that were measured rather than
-        /// argued. A resident call updates the state IN PLACE, so the state the
-        /// call started from no longer exists afterwards - which makes
-        /// SpecSnapshotRecurrentState's shortcut ("the live slices ARE the
-        /// snapshot, because a verify only reads them") false, and a rejected
-        /// draft then rolls back to nothing: the stream diverged from plain greedy
-        /// at token 53. Restricting residency to single-token calls, so verifies
-        /// keep separate in/out buffers, does not rescue it either - mixing
-        /// resident and non-resident calls against one graph cache diverged at
-        /// token 2 and gave up the plain-step win as well.</para>
-        ///
-        /// <para>Making this correct needs a real snapshot in resident mode. The
-        /// state is already on the device, so a device-to-device copy is about
-        /// 0.2 ms for 60 MB on an A40 - the 65 ms was the host round trip, not the
-        /// copy. BackendType.Cuda already has that path
-        /// (MtpSnapshotRecurrentStateCudaDevice); ggml_cuda does not.</para>
-        /// </summary>
-        private static readonly bool _fvResidentEnabled =
-            string.Equals(Environment.GetEnvironmentVariable("TS_QWEN35_VERIFY_RESIDENT"), "1", StringComparison.Ordinal);
-        private bool _fvStateResident;
-
-        internal static bool ShouldUseVerifyResidentState(
-            BackendType backend,
-            bool residentEnabled,
-            int nLogitRows,
-            int seqLen)
-        {
-            // Metal decode may bind the GDN result by its backing-base pointer
-            // while an experimental resident verify graph would retain the
-            // offset state-view pointer. Invalidating that view after the verify
-            // download can otherwise leave a cached verify graph holding a freed
-            // buffer. Metal's default host-mode verify remains correct and the
-            // experimental resident mode was never enabled there by default.
-            // Single-token calls only. A multi-row verify updates the state in
-            // place, which destroys the very state a rollback has to restore; see
-            // the note on _fvResidentEnabled.
-            return residentEnabled &&
-                backend != BackendType.GgmlMetal &&
-                seqLen == 1 &&
-                !(nLogitRows > 0 && nLogitRows < seqLen);
-        }
 
         /// <param name="captureData">Optional DFlash residual taps: receives
         /// <paramref name="captureLayers"/>.Length consecutive [hidden, seqLen]
@@ -1909,7 +1787,7 @@ namespace TensorSharp.Models
         // ---- per-token recurrent-state snapshots (see SpecOnVerifyAccepted) ----
 
         /// <summary>Recurrent layers, in the order the native descriptor array lists
-        /// them - the order TSGgml_Qwen35FetchStateSnapshot returns slots in.</summary>
+        /// them - the order TSGgml_Qwen35FetchStateSnapshotOwned returns slots in.</summary>
         private int[] _fvRecurrentLayers;
         private IntPtr[] _fvSnapConvPtrs;
         private IntPtr[] _fvSnapDeltaPtrs;
@@ -1937,18 +1815,15 @@ namespace TensorSharp.Models
         /// device between calls, rather than draining it to the host mirrors and
         /// re-uploading it every step. The native verifier's state-half tracking is
         /// backend independent, so this is a property of what has been measured,
-        /// not of what is possible. TS_QWEN35_SPEC_DEVICE_STATE=0 forces the drain
-        /// back on, which is the switch to try first if a speculative stream ever
-        /// stops matching plain greedy.
+        /// not of what is possible.
         /// </summary>
         private bool SpecKeepsDeviceState =>
-            (_backend == BackendType.GgmlMetal || _backend == BackendType.GgmlCuda) &&
-            Environment.GetEnvironmentVariable("TS_QWEN35_SPEC_DEVICE_STATE") != "0";
+            _backend == BackendType.GgmlMetal || _backend == BackendType.GgmlCuda;
 
         /// <summary>
         /// Backends that keep the captured fused-decode graph across a
-        /// speculative-session transition. Same switch, because a retained graph is
-        /// only safe where the state it is bound to survives the transition.
+        /// speculative-session transition. The same backends, because a retained graph
+        /// is only safe where the state it is bound to survives the transition.
         /// </summary>
         private bool SpecKeepsDecodeGraph => SpecKeepsDeviceState;
 
@@ -1972,15 +1847,12 @@ namespace TensorSharp.Models
             _fvDeviceStateCurrent = false;
         }
 
+        // TS_Q35_VERIFY_SNAPSHOTS=0 restores the pre-verify state copy and re-forwards the
+        // accepted prefix instead of keeping per-row snapshots: the workaround for the
+        // open divergence of verifies wider than eight rows on ggml_cuda
+        // (docs/speculative_decoding.md). The native side reads it too.
         private static readonly bool _fvSnapshotsEnabled =
             !string.Equals(Environment.GetEnvironmentVariable("TS_Q35_VERIFY_SNAPSHOTS"), "0", StringComparison.Ordinal);
-
-        /// Leave the post-window recurrent state on the device and commit it there,
-        /// instead of downloading 151 MB and uploading it again next call. Separable
-        /// from the snapshots themselves because it is the part that also applies to
-        /// the single-row plain steps a speculative session interleaves with verifies.
-        private static readonly bool _fvDeferStateEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_Q35_VERIFY_DEFER_STATE"), "0", StringComparison.Ordinal);
 
         internal unsafe bool TryFullModelVerify(Tensor hidden, int startPos, int seqLen, float[] normedOut, float[] logitsOut, int nLogitRows = -1, int rowOffset = 0,
             float[] captureData = null, int[] captureLayers = null, bool keepDeviceState = false)
@@ -1990,7 +1862,7 @@ namespace TensorSharp.Models
             // cpy views at a graph-baked offset, matching llama.cpp's linear KV-store
             // strategy and avoiding Metal's problematic multi-dimensional set_rows
             // path. Prefill activations use the lifetime-packed reuse gallocr.
-            if (!_fusedVerifyEnabled || _fvUnsupported
+            if (_fvUnsupported
                 || (_backend != BackendType.GgmlCuda && _backend != BackendType.GgmlVulkan
                     && _backend != BackendType.GgmlMetal))
                 return false;
@@ -1999,8 +1871,8 @@ namespace TensorSharp.Models
             // Single-device state only — see the note in TryFullModelDecode.
             if (IsTensorParallel)
                 return false;
-            if (!NativeRopePositionAbiSupported())
-                return FvBail("the native library predates the M-RoPE position argument");
+            if (!IsGgmlBackend)
+                return FvBail("the fused verify graph runs on the GGML backends only");
             // Prefill requests logits for only the last nLogitRows tokens; MTP verify
             // (nLogitRows<=0) needs all seqLen rows. The kernel writes vocab*effLogitRows.
             int effLogitRows = (nLogitRows > 0 && nLogitRows < seqLen) ? nLogitRows : seqLen;
@@ -2106,19 +1978,6 @@ namespace TensorSharp.Models
                 _fvLayers = new Qwen35LayerDecodeArgs[n];
             }
 
-            // Device-resident GDN state only on calls the native runs on its own-slot
-            // persist path (n_logits >= N): all-row MTP verify (nLogitRows <= 0) and
-            // single-token plain/decode (nLogitRows >= seqLen). Prefill / rollback
-            // re-forwards (0 < nLogitRows < seqLen) take the native non-persist path,
-            // whose in-place GDN cpy faults, so they stay in host mode here too. This
-            // predicate must match the native fv_persist gate exactly (see
-            // TSGgml_Qwen35ModelVerify) so both sides agree per call.
-            bool residentThisCall = ShouldUseVerifyResidentState(
-                _backend,
-                _fvResidentEnabled,
-                nLogitRows,
-                seqLen);
-
             float* convInBase = (float*)_fvConvIn;
             float* convOutBase = (float*)_fvConvOut;
             for (int l = 0; l < n; l++)
@@ -2208,11 +2067,8 @@ namespace TensorSharp.Models
                     // device-held verify state lives in the native shared slices, so
                     // the host ring may be stale and this packing and upload -- two
                     // full strided transposes per recurrent layer per token -- is
-                    // both unnecessary and wrong to apply. The separate experimental
-                    // resident mode still seeds on its first call and after
-                    // invalidation.
-                    if (!(SpecKeepsDeviceState && _fvDeviceStateCurrent)
-                        && (!residentThisCall || !_fvStateResident))
+                    // both unnecessary and wrong to apply.
+                    if (!(SpecKeepsDeviceState && _fvDeviceStateCurrent))
                     {
                         float[] ring = _convState[l];
                         int w = _convStateWriteIdx[l];
@@ -2232,9 +2088,7 @@ namespace TensorSharp.Models
                             GgmlBasicOps.InvalidateHostBuffer(deltaPtr);
                     }
                     a.ConvStateIn = (IntPtr)convIn;
-                    // Resident: conv_in == conv_out signals the native to keep the state
-                    // device-resident (in-place); host mode uses a separate out buffer.
-                    a.ConvStateOut = residentThisCall ? (IntPtr)convIn : (IntPtr)convOut;
+                    a.ConvStateOut = (IntPtr)convOut;
                     a.DeltaStateIn = deltaPtr;
                     a.DeltaStateOut = deltaPtr;   // in-place: overwritten with the post-window state
                 }
@@ -2275,7 +2129,7 @@ namespace TensorSharp.Models
             // have recomputed is already on the device and costs one slot fetch.
             // Only the all-rows verify: a prefill chunk is never rolled back, and
             // asking for N snapshots there would size the graph for nothing.
-            int requestedSnapshots = (_fvSnapshotsEnabled && !residentThisCall && nLogitRows <= 0 && seqLen > 1)
+            int requestedSnapshots = (_fvSnapshotsEnabled && nLogitRows <= 0 && seqLen > 1)
                 ? seqLen : 1;
             // Defer the state download on every call the kernel will persist - the
             // all-rows verify AND the single-row plain steps a speculative session
@@ -2285,9 +2139,8 @@ namespace TensorSharp.Models
             // gap to the captured decode. Interior Metal prefill chunks are also
             // non-persisted, but keepDeviceState lets their two shared state halves
             // ping-pong until the final chunk downloads the result.
-            bool deferState = (_fvSnapshotsEnabled && _fvDeferStateEnabled && !residentThisCall
-                    && (nLogitRows <= 0 || seqLen == 1))
-                || (keepDeviceState && _fvDeferStateEnabled && !residentThisCall
+            bool deferState = (_fvSnapshotsEnabled && (nLogitRows <= 0 || seqLen == 1))
+                || (keepDeviceState
                     && _backend == BackendType.GgmlMetal && nLogitRows > 0 && nLogitRows < seqLen);
             int snapshotsUsed = 1;
             // The live state is already correct on the device exactly when the last
@@ -2348,7 +2201,6 @@ namespace TensorSharp.Models
                 // as input directly; the final chunk downloads its result normally.
                 _fvDeviceStateCurrent = true;
                 _fvSnapshotRows = 0;
-                _fvStateResident = false;
                 _kvCacheHostDirty = true;
                 _gdnStateHostDirty = true;
                 return true;
@@ -2364,7 +2216,6 @@ namespace TensorSharp.Models
                 // wants. Nothing below (which drains the post-window state into the
                 // host mirror) applies, and nothing may read that mirror in between.
                 _fvSnapshotRows = seqLen;
-                _fvStateResident = false;
                 _kvCacheHostDirty = true;
                 return true;
             }
@@ -2377,7 +2228,6 @@ namespace TensorSharp.Models
                 // instead of 151 MB down here and 151 MB back up next call.
                 _fvDeviceStateCurrent = false;
                 _fvSnapshotRows = 0;
-                _fvStateResident = false;
                 _kvCacheHostDirty = true;
                 if (!CommitRecurrentStateSnapshot(-1))
                 {
@@ -2391,28 +2241,14 @@ namespace TensorSharp.Models
             _fvDeviceStateCurrent = false;
 
             // Write the post-window GDN state back to the C# (host) representation so the
-            // snapshot / rollback / any op-by-op fallback see the current state.
-            //   host mode: the native already downloaded conv_state_out -> _fvConvOut and
-            //              delta in-place to _deltaStateTensor's host mirror.
-            //   resident:  the native kept conv (_fvConvIn) + delta device-resident in
-            //              place and did NOT download them, so drain them here (DtoH) —
-            //              this is the only per-call transfer (the ~60 MB delta UPLOAD is
-            //              skipped). _fvConvIn holds the post-window conv after the drain.
+            // snapshot / rollback / any op-by-op fallback see the current state: the
+            // native already downloaded conv_state_out -> _fvConvOut and delta in-place
+            // to _deltaStateTensor's host mirror.
             for (int l = 0; l < n; l++)
             {
                 if (!_isRecurrent[l]) continue;
-                float* convSrc = residentThisCall
-                    ? convInBase + (long)_fvGdnSlot[l] * convBlock
-                    : convOutBase + (long)_fvGdnSlot[l] * convBlock;
+                float* convSrc = convOutBase + (long)_fvGdnSlot[l] * convBlock;
                 IntPtr deltaPtr = (IntPtr)GetFloatPtr(_deltaStateTensor[l]);
-                if (residentThisCall)
-                {
-                    GgmlBasicOps.SyncHostBuffer((IntPtr)convSrc, (long)convBlock * sizeof(float));
-                    GgmlBasicOps.SyncHostBuffer(
-                        deltaPtr,
-                        GdnDeltaStateBytes(_deltaStateTensor[l]));
-                    InvalidateTensorDeviceCache(_deltaStateTensor[l]);
-                }
                 float[] ring = _convState[l];
                 for (int t = 0; t < convDim; t++)
                 {
@@ -2421,13 +2257,9 @@ namespace TensorSharp.Models
                         ring[dstBase + ch] = convSrc[ch * convDim + t];
                 }
                 _convStateWriteIdx[l] = 0;
-                if (!residentThisCall && _backend != BackendType.GgmlMetal)
+                if (_backend != BackendType.GgmlMetal)
                     GgmlBasicOps.InvalidateHostBuffer(deltaPtr);
             }
-            // Latch resident-seeded state only for resident calls. A host-mode call
-            // (prefill / rollback) updates the host mirror but NOT the resident device
-            // buffer, so the next resident call must re-seed it (guarded by this flag).
-            _fvStateResident = residentThisCall;
             // Attention K/V remains in GGML's device-copy cache.  GDN state was
             // explicitly downloaded and converted to the host ring above.
             _kvCacheHostDirty = true;
@@ -2560,23 +2392,14 @@ namespace TensorSharp.Models
         /// so the caller falls back to op-by-op AttentionBlock + head on any
         /// unsupported shape/backend.
         /// </summary>
-        // Kill-switch for the fused MTP draft/catch-up block (TS_MTP_FUSED_DRAFT=0
-        // falls back to the op-by-op MTP decoder block). Default ON.
-        private static readonly bool _mtpFusedDraftEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_MTP_FUSED_DRAFT"), "0", StringComparison.Ordinal);
-
         internal unsafe bool TryFusedMtpBlock(Tensor x, int startPos, int seqLen,
             float[] normedOut, float[] logitsOut, int nLogitRows)
         {
             int cachePos = MtpCachePosition(startPos);
-            if (!_mtpFusedDraftEnabled)
-                return false;
-            if (!_fusedVerifyEnabled || _fvUnsupported
+            if (_fvUnsupported
                 || (_backend != BackendType.GgmlCuda && _backend != BackendType.GgmlVulkan))
                 return false;
-            if (!HasDraftHead || x == null || seqLen < 1)
-                return false;
-            if (!NativeRopePositionAbiSupported())
+            if (!HasDraftHead || x == null || seqLen < 1 || !IsGgmlBackend)
                 return false;
             int mtp = _mtpLayerIdx;
             if (mtp < 0 || _isRecurrent[mtp])     // the MTP block is a full-attention layer
@@ -2784,13 +2607,10 @@ namespace TensorSharp.Models
                     && _ssmConv1dW[layer] != null
                     && _ssmDtBiasW[layer] != null
                     && _ssmAW[layer] != null
-                    && _ssmNormW[layer] != null
                     // Prefill uses the packed kernel too, not just decode: the
                     // unpacked path leaves a WRONG recurrent state on MLX, which
-                    // only shows up in the first decode token. See the comment on
-                    // MlxFusedOps.Qwen35GdnPackedKernelsEnabled.
-                    && (seqLen == 1 ||
-                        !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_QWEN35_GDN_PACKED_KERNELS"), "0", StringComparison.Ordinal)))
+                    // only shows up in the first decode token (see MlxFusedOps).
+                    && _ssmNormW[layer] != null)
                 {
                     gated = seqLen == 1 ? _gdnGatedOutT : new Tensor(_allocator, DType.Float32, seqLen, _ssmDInner);
                     ranMlxNativeGdn = _mlxGdnCache[layer].TryRunQwen35Packed(
@@ -2872,7 +2692,10 @@ namespace TensorSharp.Models
                     }
                 }
 
-                if (!ranMlxNativeGdn && CudaGdnNativeEnabledEnv && _backend == BackendType.Cuda)
+                // Direct CUDA runs the packed GDN recurrence on device instead of
+                // downloading the packed projection, conv state and SSM state for
+                // the managed per-token loop.
+                if (!ranMlxNativeGdn && _backend == BackendType.Cuda)
                 {
                     bool reuseDecodePacked = seqLen == 1 && _gdnDecodePackedBuf != null;
                     Tensor cudaPacked = reuseDecodePacked
@@ -3049,8 +2872,7 @@ namespace TensorSharp.Models
             out Tensor gated)
         {
             gated = null;
-            if (!CudaGdnNativeEnabledEnv
-                || _backend != BackendType.Cuda
+            if (_backend != BackendType.Cuda
                 || packedInput == null
                 || _cudaGdnConvStateTensor?[layer] == null
                 || _ssmConv1dW[layer] == null

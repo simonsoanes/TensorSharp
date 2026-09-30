@@ -24,6 +24,8 @@ using Xunit.Abstractions;
 
 namespace InferenceWeb.Tests;
 
+[Collection(EngineEnvironmentCollection.Name)]
+
 public sealed class Qwen35MtpPrefixCacheTests
 {
     private const string ModelEnvironment = "TS_TEST_QWEN35_MTP_MODEL";
@@ -192,7 +194,6 @@ public sealed class Qwen35MtpPrefixCacheTests
             NumBlocks = 64,
             BlockSize = BlockSize,
             EnablePrefixCaching = true,
-            PrefixCacheMode = PrefixCacheMode.Tree,
             StopRepetition = false,
             Speculation = new SpeculationOptions
             {
@@ -204,7 +205,7 @@ public sealed class Qwen35MtpPrefixCacheTests
                 MinDraftProb = zeroConfidenceGate ? 0 : null,
             },
         }, NullLogger.Instance);
-        Assert.Equal(PrefixCacheMode.Tree, engine.PrefixCacheMode);
+        Assert.True(engine.PrefixCacheActive);
         return engine;
     }
 
@@ -254,8 +255,8 @@ public sealed class Qwen35MtpPrefixCacheTests
             // off rather than silently claiming adaptive-policy coverage.
             Assert.True(new SpeculationCostGovernor().Enabled,
                 "Run this fixture in a fresh test process with TS_SPEC_ADAPTIVE=1.");
-            Set("TS_PREFIX_CHECKPOINTS", "1");
-            Set("TS_RETAINED_FUSED_CACHE", "1");
+            Set("TS_PREFIX_CHECKPOINTS_MAX", null);
+            Set("TS_RETAINED_FUSED_CACHE_MAX", null);
             Set("TS_PER_SEQ_FUSED", "1");
             Set("TS_SCHED_DISABLE_BATCHED", "0");
             Set("TS_KV_INITIAL_TOKENS", "512");

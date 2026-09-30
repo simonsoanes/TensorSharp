@@ -57,13 +57,7 @@ public class Gemma4BatchedFusedDecodeParityTests
         string modelPath = FindGemma4();
         if (modelPath == null) { _output.WriteLine("no gemma-4-e4b model; skipping"); return; }
 
-        BackendType backend = (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "cpu").ToLowerInvariant() switch
-        {
-            "cuda" => BackendType.GgmlCuda,
-            "metal" => BackendType.GgmlMetal,
-            "vulkan" => BackendType.GgmlVulkan,
-            _ => BackendType.GgmlCpu,
-        };
+        BackendType backend = TestGates.PinnedGgmlBackend;
         ModelBase model;
         try
         {
@@ -83,8 +77,7 @@ public class Gemma4BatchedFusedDecodeParityTests
             return;
         }
 
-        var caps = GgmlBasicOps.Gemma4BatchedDecodeCapabilities();
-        _output.WriteLine($"[parity] backend={backend} native batched-decode caps={caps}");
+        _output.WriteLine($"[parity] backend={backend}");
 
         // Four prompts; the second is repeated past the 512-token SWA ring so its
         // local layers wrap during the batched steps.
@@ -98,7 +91,6 @@ public class Gemma4BatchedFusedDecodeParityTests
         _output.WriteLine($"[parity] prompt lengths = {string.Join(",", prompts.Select(p => p.Length))}");
 
         const int steps = 12;
-        bool anyFused = false;
         foreach (int n in new[] { 2, 3, 4 })
         {
             var ids = Enumerable.Range(0, n).Select(i => $"parity-{n}-{i}").ToArray();
@@ -173,21 +165,10 @@ public class Gemma4BatchedFusedDecodeParityTests
                 Assert.True(same, $"n={n} seq{i}: batched fused decode diverged from the round-robin decode");
             }
 
-            const GgmlBasicOps.Gemma4BatchedDecodeCaps needed =
-                GgmlBasicOps.Gemma4BatchedDecodeCaps.Ple
-                | GgmlBasicOps.Gemma4BatchedDecodeCaps.KvDonor
-                | GgmlBasicOps.Gemma4BatchedDecodeCaps.SwaWrap;
-            if ((caps & needed) == needed)
-            {
-                // The extended kernel must actually serve every step: a silent
-                // decline would make this a round-robin-vs-round-robin comparison.
-                Assert.Equal(steps - 1, fusedSteps);
-                anyFused = true;
-            }
+            // The batched kernel must actually serve every step: a silent decline
+            // would make this a round-robin-vs-round-robin comparison.
+            Assert.Equal(steps - 1, fusedSteps);
         }
-
-        if (!anyFused)
-            _output.WriteLine("[parity] the native build lacks the extended batched kernel; the batched path declined (nothing proven).");
         _ = g4;
     }
 

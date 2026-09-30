@@ -29,6 +29,7 @@ public class Gemma4CacheResidencyTests
             Environment.GetEnvironmentVariable("TS_TEST_MODEL_DIR"), "gemma-4-e4b");
         Assert.False(string.IsNullOrEmpty(path));
         KvCacheDtype previousDtype = KvCacheDtypeConfig.Current;
+        bool previousExplicit = KvCacheDtypeConfig.IsExplicitlySet;
         try
         {
             KvCacheDtypeConfig.Set(KvCacheDtype.F16);
@@ -98,7 +99,7 @@ public class Gemma4CacheResidencyTests
         }
         finally
         {
-            KvCacheDtypeConfig.Set(previousDtype);
+            KvCacheDtypeConfig.RestoreForTests(previousDtype, previousExplicit);
         }
     }
 

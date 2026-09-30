@@ -994,7 +994,6 @@ TensorAgent uses the radix KV prefix cache by default, through the same engine a
 TensorSharp.Server and TensorSharp.Cli. Prefix lookup respects the model's cache
 capabilities, conversation scope, and media boundaries. The phone's existing
 retention limits still apply, and memory warnings release idle cache payloads.
-`TS_PREFIX_CACHE_MODE=legacy` selects the compatibility path for diagnosis;
 `TS_SCHED_PREFIX_CACHE=0` disables runtime prefix reuse.
 
 Every chat starts from a copy of the model's state at the end of the prompt they all

@@ -69,6 +69,12 @@ namespace TensorSharp.GGML
         private static extern int TSGgml_GlmSlotFree(IntPtr handle, int slotId);
 
         [DllImport(DllName, CallingConvention = Conv)]
+        private static extern int TSGgml_GlmSetReclaimableSlots(IntPtr handle, int[] slotIds, int n);
+
+        [DllImport(DllName, CallingConvention = Conv)]
+        private static extern int TSGgml_GlmTakeReclaimedSlots(IntPtr handle, int[] slotIds, int cap);
+
+        [DllImport(DllName, CallingConvention = Conv)]
         private static extern void TSGgml_GlmFree(IntPtr handle);
 
         [DllImport(DllName, CallingConvention = Conv)]
@@ -98,9 +104,6 @@ namespace TensorSharp.GGML
             float* hRows, int startPos);
 
         // ---- glm5next KDA recurrent-state snapshot (speculative rollback) ----
-
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern int TSGgml_GlmKdaStateApiVersion();
 
         [DllImport(DllName, CallingConvention = Conv)]
         private static extern int TSGgml_GlmKdaStateCapture(IntPtr handle);
@@ -188,6 +191,14 @@ namespace TensorSharp.GGML
         /// <summary>Free a slot's caches and the graphs built against them.</summary>
         public static bool SlotFree(IntPtr handle, int slotId) => TSGgml_GlmSlotFree(handle, slotId) != 0;
 
+        /// <summary>Replace the retained slots, oldest first, that a graph which does not fit may free.</summary>
+        public static bool SetReclaimableSlots(IntPtr handle, int[] slotIds)
+            => TSGgml_GlmSetReclaimableSlots(handle, slotIds, slotIds.Length) != 0;
+
+        /// <summary>Retained slots freed for a graph since the last call, into <paramref name="buffer"/>; how many.</summary>
+        public static int TakeReclaimedSlots(IntPtr handle, int[] buffer)
+            => TSGgml_GlmTakeReclaimedSlots(handle, buffer, buffer.Length);
+
         public static void Free(IntPtr handle) => TSGgml_GlmFree(handle);
 
         // ---- NextN/MTP speculative decoding -------------------------------
@@ -239,17 +250,6 @@ namespace TensorSharp.GGML
 
         // ---- glm5next KDA recurrent-state snapshot (speculative rollback) ----
 
-        /// <summary>True when the loaded native library exports the KDA snapshot
-        /// API. A library that predates it still loads and runs glm5next, but
-        /// cannot undo a partially rejected speculative window, so the model
-        /// declines speculation on it instead of failing mid-verify.</summary>
-        public static bool KdaStateApiAvailable()
-        {
-            try { return TSGgml_GlmKdaStateApiVersion() >= 1; }
-            catch (EntryPointNotFoundException) { return false; }
-            catch (DllNotFoundException) { return false; }
-        }
-
         /// <summary>Copy the active slot's KDA recurrent state (every rank and
         /// layer, device-to-device) into the executor's snapshot arena and record
         /// the slot's position. Taken right before a speculative verify batch.</summary>
@@ -261,16 +261,6 @@ namespace TensorSharp.GGML
         /// invalidated by a reset / free).</summary>
         public static int KdaStateRestore(IntPtr handle) => TSGgml_GlmKdaStateRestore(handle);
 
-        public static bool ResetChecked(IntPtr handle)
-        {
-            try { return TSGgml_GlmResetChecked(handle) != 0; }
-            catch (EntryPointNotFoundException)
-            {
-                // Older libraries cannot arm KDA speculation. Preserve their
-                // existing ordinary reset contract without requiring a rebuild.
-                Reset(handle);
-                return true;
-            }
-        }
+        public static bool ResetChecked(IntPtr handle) => TSGgml_GlmResetChecked(handle) != 0;
     }
 }

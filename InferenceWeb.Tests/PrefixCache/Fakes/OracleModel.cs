@@ -20,7 +20,6 @@ internal sealed record OracleTraits
 {
     public required string Name { get; init; }
     public required FamilyClass Class { get; init; }
-    public PrefixCacheMode Readiness { get; init; } = PrefixCacheMode.Tree;
 
     // End states
     public EndStateSupport EndState { get; init; }
@@ -40,14 +39,29 @@ internal sealed record OracleTraits
     public int TruncationParameter { get; init; }
     public int TruncationGranularity { get; init; } = 1;
     public int RewindCapTokens { get; init; } = 16;
+    public int MinTailPrefillTokens { get; init; } = 1;
     /// <summary>A rewind the rules forbid still "succeeds" and yields a wrong state (Gemma's wrapped ring).</summary>
     public bool ForbiddenRewindCorrupts { get; init; }
+    /// <summary>DeepSeek V4.1's rewind checkpoint: every multi-token forward records where it ended, and a
+    /// ModelDecides rewind may land within the span below that point as well as below the head.</summary>
+    public bool RewindCheckpoint { get; init; }
+    /// <summary>A primary conversion that fails does so AFTER adopting the primary, and releasing what it
+    /// adopted resets it (DeepSeek V4.1 through the holder adapter).</summary>
+    public bool FailedConversionReleasesPrimary { get; init; }
+    /// <summary>Nemotron-H on its batched route: every request also carries a recurrent state of its own (the
+    /// Mamba2 slot) beside its pages, and a finished sequence's end state is its blocks plus that state
+    /// (<see cref="PrefixCacheCapabilities.PagedEndStates"/>).</summary>
+    public bool PagedEndStates { get; init; }
 
     // Pages
     public PageSupport Pages { get; init; }
     public bool PagesNeedStateAtEnd { get; init; }
     public int PageWindowTokens { get; init; }
     public bool SupportsCopyPagedToHolder { get; init; }
+    /// <summary>A lone request's linear cache can move into pages when a second request arrives, which is
+    /// what lets a lone request take the single-sequence fused path; without it every request runs on the
+    /// batched paged path and produces pages from its first forward.</summary>
+    public bool LinearKvMigration { get; init; } = true;
 
     public bool ReuseAcrossMediaSpan { get; init; } = true;
 }
@@ -71,17 +85,20 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
     private readonly Dictionary<string, OracleCache> _holders = new(StringComparer.Ordinal);
     private readonly Dictionary<string, OracleCache> _retained = new(StringComparer.Ordinal);
     private readonly Dictionary<int, ulong> _paged = new();
+    // PagedEndStates: each request's recurrent state on the batched route, and the ones kept for end states.
+    private readonly Dictionary<string, ulong> _slots = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (ulong State, int Tokens)> _keptSlots = new(StringComparer.Ordinal);
     private readonly HashSet<string> _faults = new(StringComparer.Ordinal);
     private OracleCache _primary = new();
     private string? _activeKey;
     private long _serial;
 
-    internal OracleModel(OracleTraits traits, int blockSize = 16, int vocab = DefaultVocab)
+    internal OracleModel(OracleTraits traits, int blockSize = 16, int vocab = DefaultVocab, ITokenizer? tokenizer = null)
     {
         Traits = traits;
         BlockSize = blockSize;
         Config = new ModelConfig { VocabSize = vocab, Architecture = "oracle-" + traits.Name };
-        Tokenizer = new OracleTokenizer(vocab);
+        Tokenizer = tokenizer ?? new OracleTokenizer(vocab);
     }
 
     internal OracleTraits Traits { get; }
@@ -97,7 +114,7 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
 
     private bool Fault(string operation) => _faults.Remove(operation);
 
-    private bool HasHolders => Traits.EndState != EndStateSupport.None;
+    private bool HasHolders => Traits.EndState != EndStateSupport.None && !Traits.PagedEndStates;
     private bool IsNative => Traits.NativeSlotLimit > 0;
     private OracleCache Active => _activeKey == null ? _primary : _holders[_activeKey];
 
@@ -118,6 +135,7 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
             cache.Append(t);
         }
         cache.ForwardBoundaries.Add(cache.Length);
+        if (Traits.RewindCheckpoint && tokens.Length > 1) cache.Checkpoint = cache.Length;
         if (!Traits.DeviceDirtyOnForward) cache.Flush();
         cache.WasBound |= _activeKey != null;
         return OracleHash.Logits(cache.State, Config.VocabSize);
@@ -147,6 +165,17 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
         _ => false,
     };
 
+    /// <summary><see cref="RewindAllowed(int, int)"/> for a specific cache, which can also reach back from
+    /// its checkpoint (<see cref="OracleTraits.RewindCheckpoint"/>), the way dsv41_plan_truncate does.</summary>
+    internal bool RewindAllowed(OracleCache cache, int target)
+        => RewindAllowed(cache.Length, target)
+           || (Traits.RewindCheckpoint && Traits.Truncation == TruncationKind.ModelDecides
+               && cache.Checkpoint >= target && cache.Checkpoint - target <= Traits.TruncationParameter
+               && target % Traits.TruncationGranularity == 0);
+
+    /// <summary>How many times the tree asked about a primary rewind past its donation slack.</summary>
+    internal int PrimaryRewindChecks { get; private set; }
+
     public void TruncateKVCache(int tokenCount)
     {
         if (!TryTruncateKVCache(tokenCount))
@@ -160,7 +189,7 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
         if (tokenCount == cache.Length) return true;
         if (Fault("truncate")) return false;
         if (Traits.Truncation == TruncationKind.None) return false;
-        bool allowed = RewindAllowed(cache.Length, tokenCount);
+        bool allowed = RewindAllowed(cache, tokenCount);
         if (!allowed && !Traits.ForbiddenRewindCorrupts) return false;
         cache.TruncateTo(tokenCount, corrupt: !allowed);
         return true;
@@ -231,8 +260,16 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
                 ulong previous = position == 0
                     ? OracleHash.Seed
                     : _paged.TryGetValue(SlotOf(ctx.BlockTables[s], position - 1), out ulong p) ? p : 0UL;
+                if (Traits.PagedEndStates && position > 0)
+                {
+                    // The recurrent state lives in the request's slot, not in its pages: both have to be the
+                    // conversation's, or the result is wrong.
+                    ulong own = _slots.TryGetValue(seq.RequestId, out ulong r) ? r : 0UL;
+                    previous = own == previous ? own : own ^ OracleHash.Poison;
+                }
                 state = OracleHash.Mix(previous, token, position);
                 _paged[ctx.SlotMapping[q]] = state;
+                if (Traits.PagedEndStates) _slots[seq.RequestId] = state;
             }
             results.Add(OracleHash.Logits(state, Config.VocabSize));
         }
@@ -241,16 +278,17 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
 
     private int SlotOf(int[] blockTable, int position) => blockTable[position / BlockSize] * BlockSize + position % BlockSize;
 
-    public bool SupportsLinearKVMigration => BatchedForwardAvailable;
+    public bool SupportsLinearKVMigration => BatchedForwardAvailable && Traits.LinearKvMigration;
 
     public bool TryMigrateLinearKVToPaged(SequenceState owner, int blockSize)
     {
-        if (!BatchedForwardAvailable || blockSize != BlockSize) return false;
+        if (!SupportsLinearKVMigration || blockSize != BlockSize) return false;
         OracleCache cache = Active;
         if (owner.BlockTable.CapacityTokens < cache.Length) return false;
         int[] table = owner.BlockTable.Blocks.Select(b => b.Id).ToArray();
         for (int pos = 0; pos < cache.Length; pos++)
             _paged[SlotOf(table, pos)] = cache.Chain[pos + 1];
+        if (Traits.PagedEndStates) _slots[owner.RequestId] = cache.State;
         return true;
     }
 
@@ -283,7 +321,7 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
         if (used < Traits.NativeSlotLimit) return;
         var victim = _retained.OrderBy(kv => kv.Value.Serial).Select(kv => kv.Key).FirstOrDefault();
         if (victim == null)
-            throw new InvalidOperationException($"{Traits.Name}: no native slot for {requestId} ({used} of {Traits.NativeSlotLimit} in use)");
+            throw new SequenceSlotUnavailableException($"{Traits.Name}: no native slot for {requestId} ({used} of {Traits.NativeSlotLimit} in use)");
         _retained.Remove(victim);
         ReportedInvalidations.Add((victim, InvalidationReason.NativeSlotReclaimed));
         Sink?.OnPayloadInvalidated(victim, InvalidationReason.NativeSlotReclaimed);
@@ -308,6 +346,7 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
         if (string.IsNullOrEmpty(requestId)) return;
         if (string.Equals(_activeKey, requestId, StringComparison.Ordinal)) _activeKey = null;
         if (_holders.Remove(requestId, out OracleCache? holder)) holder.Retired = true;
+        _slots.Remove(requestId);
     }
 
     public bool SupportsRetainedFusedCache => HasHolders;
@@ -414,7 +453,6 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
     public PrefixCacheCapabilities GetPrefixCacheCapabilities() => new()
     {
         Class = Traits.Class,
-        Readiness = Traits.Readiness,
         NamespaceFingerprint = KVStateFingerprint,
         EndState = Traits.EndState,
         CanCaptureCopy = Traits.CanCaptureCopy,
@@ -425,12 +463,14 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
         TruncationParameter = Traits.TruncationParameter,
         TruncationGranularity = Traits.TruncationGranularity,
         RewindCapTokens = Traits.RewindCapTokens,
+        MinTailPrefillTokens = Traits.MinTailPrefillTokens,
         Pages = Traits.Pages,
         PagesNeedStateAtEnd = Traits.PagesNeedStateAtEnd,
         PageWindowTokens = Traits.PageWindowTokens,
         SupportsCopyPagedToHolder = Traits.SupportsCopyPagedToHolder,
         ReuseAcrossMediaSpan = Traits.ReuseAcrossMediaSpan,
         Persistable = Traits.Persistable,
+        PagedEndStates = Traits.PagedEndStates,
         MaxRetainedNativeSlots = 0,
     };
 
@@ -456,12 +496,21 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
     {
         StateMemberCalls++;
         footprint = default;
+        if (Traits.PagedEndStates)
+        {
+            if (Fault("donate") || string.IsNullOrEmpty(requestId) || string.IsNullOrEmpty(payloadKey) || length <= 0
+                || _keptSlots.ContainsKey(payloadKey) || !_slots.Remove(requestId, out ulong kept))
+                return false;
+            _keptSlots.Add(payloadKey, (kept, length));
+            footprint = MeasureEndState(payloadKey);
+            return true;
+        }
         if (!HasHolders || Fault("donate")) return false;
         if (string.IsNullOrEmpty(requestId) || string.IsNullOrEmpty(payloadKey) || _retained.ContainsKey(payloadKey)) return false;
         if (!_holders.TryGetValue(requestId, out OracleCache? holder) || length <= 0 || length > holder.Length) return false;
         if (length < holder.Length)
         {
-            if (!RewindAllowed(holder.Length, length)) return false;
+            if (!RewindAllowed(holder, length)) return false;
             holder.TruncateTo(length, corrupt: false);
         }
         if (!RetainAs(requestId, payloadKey)) return false;
@@ -473,7 +522,12 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
     {
         StateMemberCalls++;
         footprint = default;
-        if (!Traits.AdoptPrimaryOnDisplacement || Fault("convert")) return false;
+        if (!Traits.AdoptPrimaryOnDisplacement) return false;
+        if (Fault("convert"))
+        {
+            if (Traits.FailedConversionReleasesPrimary) _primary.TruncateTo(0, corrupt: false);
+            return false;
+        }
         if (string.IsNullOrEmpty(payloadKey) || _retained.ContainsKey(payloadKey) || _activeKey != null) return false;
         if (_primary.Length != length || length <= 0) return false;
         OracleCache adopted = _primary;
@@ -488,6 +542,16 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
     public bool TryMaterialize(in MaterializeRequest request)
     {
         StateMemberCalls++;
+        if (Traits.PagedEndStates)
+        {
+            if (request.Op != MaterializeOp.Donate || Fault("donate") || string.IsNullOrEmpty(request.TargetRequestId)
+                || !CanMaterializeCore(request.PayloadKey, request.PayloadTokens, request.TargetTokens)
+                || _slots.ContainsKey(request.TargetRequestId))
+                return false;
+            _slots[request.TargetRequestId] = _keptSlots[request.PayloadKey].State;
+            _keptSlots.Remove(request.PayloadKey);
+            return true;
+        }
         if (!CanMaterializeCore(request.PayloadKey, request.PayloadTokens, request.TargetTokens)) return false;
         if (string.IsNullOrEmpty(request.TargetRequestId) || _holders.ContainsKey(request.TargetRequestId)) return false;
         OracleCache source = _retained[request.PayloadKey];
@@ -521,9 +585,22 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
 
     private bool CanMaterializeCore(string payloadKey, int payloadTokens, int targetTokens)
     {
+        if (Traits.PagedEndStates)
+            return payloadKey != null && _keptSlots.TryGetValue(payloadKey, out var kept)
+                   && kept.Tokens == payloadTokens && targetTokens == payloadTokens;
         if (payloadKey == null || !_retained.TryGetValue(payloadKey, out OracleCache? cache) || cache.Retired) return false;
         if (cache.Length != payloadTokens || targetTokens < 0 || targetTokens > payloadTokens) return false;
-        return targetTokens == payloadTokens || RewindAllowed(payloadTokens, targetTokens);
+        return targetTokens == payloadTokens || RewindAllowed(cache, targetTokens);
+    }
+
+    /// <summary>The live primary decides, like DeepSeek V4.1's <c>SlotCanReuse</c>: its head must be
+    /// <paramref name="cachedTokens"/> and the rewind reachable from the head or the checkpoint.</summary>
+    public bool CanRewindPrimary(int cachedTokens, int targetTokens)
+    {
+        StateMemberCalls++;
+        PrimaryRewindChecks++;
+        if (_activeKey != null || _primary.Length != cachedTokens || targetTokens < 0 || targetTokens > cachedTokens) return false;
+        return targetTokens == cachedTokens || RewindAllowed(_primary, targetTokens);
     }
 
     public void ReleasePayloads(ReadOnlySpan<string> payloadKeys, ReleaseReason reason)
@@ -537,6 +614,7 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
                 cache.Retired = true;
                 released = true;
             }
+            if (key != null && _keptSlots.Remove(key)) released = true;
         }
         if (released) DecodeGraphResets++;   // one reset per batch, never one per payload (DEC-24)
         ReleaseCalls++;
@@ -547,6 +625,8 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
     public PayloadFootprint MeasureEndState(string payloadKey)
     {
         StateMemberCalls++;
+        if (payloadKey != null && _keptSlots.TryGetValue(payloadKey, out var kept))
+            return new PayloadFootprint(kept.Tokens, kept.Tokens, new ResourceVector { StateSnapshot = 1024 }, PositionDelta: 0);
         return payloadKey != null && _retained.TryGetValue(payloadKey, out OracleCache? cache) ? Measure(cache) : default;
     }
 
@@ -639,7 +719,7 @@ internal class OracleModel : IModelArchitecture, IBatchedPagedModel, IPrefixCach
 
     // ------------------------------------------------------------------ IPrefixCacheModelDiagnostics
 
-    public IReadOnlyCollection<string> RetainedPayloadKeys => _retained.Keys.ToArray();
+    public IReadOnlyCollection<string> RetainedPayloadKeys => _retained.Keys.Concat(_keptSlots.Keys).ToArray();
     public int PrivateHolderCount => _holders.Count;
     public int PrimaryCacheLength => _primary.Length;
     public long DecodeGraphResets { get; private set; }

@@ -22,6 +22,7 @@ using TensorSharp.Server.ProtocolAdapters;
 using TensorSharp.Server.Responses;
 using TensorSharp.Runtime.Redis;
 using TensorSharp.Server.Host.Hosting;
+using TensorSharp.Models;
 using TensorSharp.Models.Embeddings;
 
 Console.OutputEncoding = System.Text.Encoding.UTF8;
@@ -106,6 +107,10 @@ try
     // why they went and what to do instead. Checked against the ORIGINAL line, like
     // the code-execution family below.
     TensorSharp.Runtime.RemovedCliFlags.RejectRemoved(originalArgs);
+    // Removed environment variables likewise: nothing reads them any more. The
+    // speculation family keeps its own list, whose entries name their survivor.
+    TensorSharp.Runtime.RemovedCliFlags.RejectRemovedEnvironment();
+    TensorSharp.Runtime.Speculative.SpeculationEnvVars.RejectRemoved();
     // Same reason, for the code-execution family: --code-exec-languages could not be
     // enforced once the tool surface became a shell (a shell reaches every interpreter
     // on PATH), so it is refused by name with the reason rather than being silently
@@ -180,62 +185,58 @@ if (SkillHostOptions.Parse(args).ListOnly)
 
 LogLevel resolvedLogLevel = LoggingSetup.ResolveMinimumLevel();
 string? configuredBackendInput = ServerOptionsBuilder.ReadConfiguredBackendInput(args);
-// Validate the --paged-kv* flags (a bad value still fails startup) and publish them as
-// the TS_KV_* env vars. Nothing on the serving path reads those: the standalone paged
-// KV cache is built only by TensorSharp.Cli --paged-bench, so startup warns once
-// below rather than logging them as configured.
-bool pagedKvFlagsApplied = ServerOptionsBuilder.ApplyPagedKvCacheCliFlags(args);
-ServerOptionsBuilder.ApplyPrefixCacheCliFlag(args);
-// Translate --redis-url into TS_RESPONSES_STORE_REDIS_URL, which backs the Responses
-// API store with Redis. It also fills in TS_KV_CACHE_REDIS_URL, the standalone paged
-// KV cache's tier, which the server never builds (see above).
-bool redisFlagsApplied = ServerOptionsBuilder.ApplyRedisCliFlags(args);
-// Translate --continuous-batching / --no-continuous-batching into env vars
-// that gate BatchExecutor (TS_SCHED_DISABLE_BATCHED) and Qwen3.5 ForwardBatch
-// (TS_QWEN35_BATCHED). Must run before InferenceEngine constructs its
-// BatchExecutor and the per-model batched-paged adapters initialise.
-bool continuousBatchingFlagApplied = ServerOptionsBuilder.ApplyContinuousBatchingCliFlag(args);
-// Translate --spec / --spec-draft / --spec-pmin / --draft-model into the env vars
-// read by SchedulerConfig.FromEnvironment when the engine is constructed.
-bool specFlagsApplied = ServerOptionsBuilder.ApplySpeculativeCliFlags(args);
-// Translate --qwen-image-vae / --qwen-image-vl / --qwen-image-mmproj into the
-// TS_QWEN_IMAGE_* env vars QwenImageModel reads to locate the Qwen-Image-2.1 VAE,
-// Qwen3-VL-8B text encoder and mmproj, and --lora / --lora-scale / --lora-config into
-// TS_LORAS. Must run before the startup model is loaded.
-bool qwenImageFlagsApplied;
+bool redisFlagsApplied, continuousBatchingFlagApplied, specFlagsApplied, qwenImageFlagsApplied,
+    kvCacheDtypeFlagApplied, moeCpuOffloadFlagsApplied, gpuDeviceFlagApplied, tensorParallelFlagsApplied;
 try
 {
+    ServerOptionsBuilder.ApplyPrefixCacheCliFlag(args);
+    // Translate --redis-url into TS_RESPONSES_STORE_REDIS_URL, which backs the Responses
+    // API store with Redis.
+    redisFlagsApplied = ServerOptionsBuilder.ApplyRedisCliFlags(args);
+    // Translate --continuous-batching / --no-continuous-batching into
+    // TS_SCHED_DISABLE_BATCHED, which gates BatchExecutor's batched path. Must run
+    // before InferenceEngine constructs its BatchExecutor.
+    continuousBatchingFlagApplied = ServerOptionsBuilder.ApplyContinuousBatchingCliFlag(args);
+    // Translate --spec / --spec-draft / --spec-pmin / --draft-model into the env vars
+    // read by SchedulerConfig.FromEnvironment when the engine is constructed.
+    specFlagsApplied = ServerOptionsBuilder.ApplySpeculativeCliFlags(args);
+    // Translate --qwen-image-vae / --qwen-image-vl / --qwen-image-mmproj into the
+    // TS_QWEN_IMAGE_* env vars QwenImageModel reads to locate the Qwen-Image-2.1 VAE,
+    // Qwen3-VL-8B text encoder and mmproj, and --lora / --lora-scale / --lora-config into
+    // TS_LORAS. Must run before the startup model is loaded.
     qwenImageFlagsApplied = ServerOptionsBuilder.ApplyQwenImageCompanionCliFlags(args);
+    // Translate --kv-cache-dtype into the process-wide KvCacheDtypeConfig (or honor
+    // the KV_CACHE_DTYPE env var) so block-quantized / half-precision KV caches are
+    // selectable on the server, mirroring the CLI. The fused native decode path used
+    // by the scheduler is the one that supports block-quantized (q8_0 / q4_0) caches.
+    // Must run before the startup model is loaded so InitKVCache sees the choice.
+    TensorSharp.Models.KvCacheDtypeConfig.ConfigureFromEnvironment();
+    kvCacheDtypeFlagApplied = ServerOptionsBuilder.ApplyKvCacheDtypeCliFlag(args);
+    // Translate --n-cpu-moe / --cpu-moe into MoeCpuOffloadConfig (or honor the
+    // TS_N_CPU_MOE / TS_CPU_MOE env vars). Must run before the startup model is
+    // loaded: weight residency is decided while preparing the quantized weights.
+    TensorSharp.Models.MoeCpuOffloadConfig.ConfigureFromEnvironment();
+    moeCpuOffloadFlagsApplied = ServerOptionsBuilder.ApplyMoeCpuOffloadCliFlags(args);
+    // Translate --gpu-device into TS_GGML_VULKAN_DEVICE so multi-GPU hosts can pick
+    // which Vulkan device the ggml_vulkan backend initializes on. Must run before
+    // the startup model is loaded (the device is fixed at first backend init).
+    gpuDeviceFlagApplied = ServerOptionsBuilder.ApplyGpuDeviceCliFlag(args);
+    // Translate --tp / --layer-split and distributed options into the model placement env vars
+    // the model loader reads (ModelBase.Create for the local degree,
+    // DistributedTpConfig for the multi-node pair). Must run before the startup
+    // model is loaded so the very first load is sharded across the GPUs.
+    tensorParallelFlagsApplied = ServerOptionsBuilder.ApplyTensorParallelCliFlags(args);
 }
 catch (Exception ex) when (ex is ArgumentException or IOException)
 {
-    // A missing companion or LoRA file, a --lora-scale without a --lora, a malformed or
-    // undownloadable plug-in: the operator's to fix, reported like Build's errors.
+    // A malformed value (--kv-cache-dtype, --spec-draft, --n-cpu-moe ...), a missing
+    // --draft-model, companion or LoRA file, an undownloadable plug-in: the operator's
+    // to fix, reported like Build's errors. These appliers used to run outside any
+    // handler, so each of them aborted the process with a stack trace instead.
     Console.Error.WriteLine("Configuration error: " + ex.Message);
     Environment.ExitCode = HostExitCodes.ConfigurationError;
     return;
 }
-// Translate --kv-cache-dtype into the process-wide KvCacheDtypeConfig (or honor
-// the KV_CACHE_DTYPE env var) so block-quantized / half-precision KV caches are
-// selectable on the server, mirroring the CLI. The fused native decode path used
-// by the scheduler is the one that supports block-quantized (q8_0 / q4_0) caches.
-// Must run before the startup model is loaded so InitKVCache sees the choice.
-TensorSharp.Models.KvCacheDtypeConfig.ConfigureFromEnvironment();
-bool kvCacheDtypeFlagApplied = ServerOptionsBuilder.ApplyKvCacheDtypeCliFlag(args);
-// Translate --n-cpu-moe / --cpu-moe into MoeCpuOffloadConfig (or honor the
-// TS_N_CPU_MOE / TS_CPU_MOE env vars). Must run before the startup model is
-// loaded: weight residency is decided while preparing the quantized weights.
-TensorSharp.Models.MoeCpuOffloadConfig.ConfigureFromEnvironment();
-bool moeCpuOffloadFlagsApplied = ServerOptionsBuilder.ApplyMoeCpuOffloadCliFlags(args);
-// Translate --gpu-device into TS_GGML_VULKAN_DEVICE so multi-GPU hosts can pick
-// which Vulkan device the ggml_vulkan backend initializes on. Must run before
-// the startup model is loaded (the device is fixed at first backend init).
-bool gpuDeviceFlagApplied = ServerOptionsBuilder.ApplyGpuDeviceCliFlag(args);
-// Translate --tp / --layer-split and distributed options into the model placement env vars
-// the model loader reads (ModelBase.Create for the local degree,
-// DistributedTpConfig for the multi-node pair). Must run before the startup
-// model is loaded so the very first load is sharded across the GPUs.
-bool tensorParallelFlagsApplied = ServerOptionsBuilder.ApplyTensorParallelCliFlags(args);
 
 var builder = WebApplication.CreateBuilder(args);
 LoggingSetup.Configure(builder.Logging, hostingOptions, resolvedLogLevel);
@@ -342,7 +343,6 @@ builder.Services.AddSingleton(sp => new ModelService(sp.GetRequiredService<ILogg
     // attachments, so --upload-max-mb, --upload-quota-mb and --upload-ttl-hours cover it.
     MediaStorage = uploadPolicy,
 });
-builder.Services.AddSingleton<InferenceQueue>();
 builder.Services.AddSingleton<SessionManager>();
 if (hostingOptions.EmbeddingsEnabled)
 {
@@ -425,31 +425,17 @@ if (codeExecOptions.Enabled)
     }
 }
 
-// The --paged-kv* flags used to be logged here as "configured", which read as a KV cache
-// tier being active. The server never builds that cache, so an operator is told once, by
-// name, that the flags do nothing here and what serves prefix reuse instead.
-if (pagedKvFlagsApplied
-    && ServerOptionsBuilder.DescribeInertPagedKvFlags(
-        args,
-        hostingOptions.PrefixCacheEnabled
-            && TensorSharp.Runtime.Scheduling.SchedulerConfig.FromEnvironment().EnablePrefixCaching) is { } inertPagedKv)
-{
-    startupLogger.LogWarning(LogEventIds.HostConfiguration, "{InertPagedKvFlags}", inertPagedKv);
-}
-
 if (redisFlagsApplied)
 {
     startupLogger.LogInformation(LogEventIds.HostConfiguration,
-        "Redis configured via --redis-url: the Responses API store uses {ResponsesRedisUrl}. The server has no Redis " +
-        "KV-cache tier (TS_KV_CACHE_REDIS_URL is read only by TensorSharp.Cli --paged-bench); prefix reuse is the " +
-        "in-process radix prefix cache.",
+        "Redis configured via --redis-url: the Responses API store uses {ResponsesRedisUrl}.",
         Environment.GetEnvironmentVariable("TS_RESPONSES_STORE_REDIS_URL") ?? "(disabled)");
 }
 
 if (specFlagsApplied)
 {
     var schedCfg = TensorSharp.Runtime.Scheduling.SchedulerConfig.FromEnvironment();
-    string? blockDraft = Environment.GetEnvironmentVariable("TS_DSV4_DSPARK");
+    string? blockDraft = SpeculativeDraftHeadLoader.ConfiguredDraftHeadPath();
     startupLogger.LogInformation(LogEventIds.HostConfiguration,
         "Speculative decoding configured via CLI: enabled={Enabled} algorithm={Algorithm} maxDraft={MaxDraft} " +
         "pMin={PMin} draftModel={DraftModel} (engages for solo sequences)",

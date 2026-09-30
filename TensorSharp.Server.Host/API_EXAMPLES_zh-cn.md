@@ -4,7 +4,7 @@
 
 TensorSharp.Server.Host 提供三种 API 风格、一个兼容 Jev 的判定端点以及若干工具型接口：
 
-- **兼容 Ollama**（`/api/generate`、`/api/chat/ollama`、`/api/tags`、`/api/show`、`/api/embed`、`/api/embeddings`）
+- **兼容 Ollama**（`/api/generate`、`/api/chat/ollama`、`/api/tags`、`/api/show`、`/api/embed`）
 - **兼容 OpenAI**（`/v1/chat/completions`、`/v1/responses`、`GET /v1/responses/{id}`、`/v1/models`、`/v1/embeddings`、`/v1/videos/generations`、`/v1/skills`）
 - **兼容 Jev** 的类型化判定（`/v1/systemone`，仅限 DiffusionGemma）
 - **Web UI**（`/api/chat`、`/api/sessions`、`/api/models`、`/api/models/load`、`/api/upload`、`/api/skills`、`/api/image-edit`、`/api/image-edit/stream`、`/api/image-generate`、`/api/image-generate/stream`、`/api/video-generate`、`/api/video-generate/stream`）
@@ -21,8 +21,6 @@ curl http://127.0.0.1:5000/v1/embeddings -H 'Content-Type: application/json' \
   -d '{"model":"all-MiniLM-L6-v2-Q8_0","input":["read a file","open a document"],"encoding_format":"float"}'
 curl http://127.0.0.1:5000/api/embed -H 'Content-Type: application/json' \
   -d '{"model":"all-MiniLM-L6-v2-Q8_0","input":["read a file"],"truncate":false}'
-curl http://127.0.0.1:5000/api/embeddings -H 'Content-Type: application/json' \
-  -d '{"model":"all-MiniLM-L6-v2-Q8_0","prompt":"read a file"}'
 ```
 
 完整字段、token ID 输入、`base64`、`dimensions`、截断规则和检索质量见[嵌入指南](../docs/embeddings_zh-cn.md)。
@@ -34,7 +32,7 @@ curl http://127.0.0.1:5000/api/embeddings -H 'Content-Type: application/json' \
 | 承载模型 | 单个 GGUF 文件，通过 `--model` 选择；请求中的 `model` 必须是该文件名或 basename |
 | 投影器 | 可选单个投影器，通过 `--mmproj` 显式选择；供多模态模型使用 |
 | 后端 | `mlx`、`cuda`、`ggml_metal`、`ggml_cuda`、`ggml_vulkan`、`ggml_cpu`、`cpu`；`/api/models` 会返回当前主机可用项 |
-| 并发 | 自回归聊天使用连续批处理引擎。旧队列 API 只保留状态 / 兼容字段；DiffusionGemma Web UI 请求使用独立的 block 边界 diffusion scheduler。 |
+| 并发 | 自回归聊天使用连续批处理引擎（`/api/queue/status` 报告它的实时负载）；DiffusionGemma Web UI 请求使用独立的 block 边界 diffusion scheduler。 |
 | 生成模式 | 自回归模型流式追加 token chunk。DiffusionGemma 在 append-only 兼容端点返回最终文本，在 Web UI `/api/chat` 上提供整条消息替换式实时去噪预览。 |
 | 会话 | Web UI 使用每个浏览器 tab 独立聊天会话。Ollama/OpenAI 兼容端点保留现有的默认推理会话行为，但代码执行工作区绝不会跨 HTTP 请求延续。 |
 | 上传 | `/api/upload` 接受图像 / 视频 / 音频 / 文本 / **PDF** 文件；原生数字 PDF 返回抽取出的文本，扫描版 PDF 在加载了具备视觉能力的模型时返回逐页图像（`TS_PDF_MAX_PAGES` 限制读取页数） |
@@ -961,8 +959,7 @@ curl http://127.0.0.1:5000/v1/systemone \
 ### 工具型接口
 
 ```bash
-# 兼容旧字段的推理负载快照：并发由连续批处理引擎管理，
-# pending_requests 通常为 0
+# 已加载模型的引擎实时负载：正在处理、等待批处理槽位与已完成的请求数
 curl http://localhost:5000/api/queue/status
 
 # 旧 Ollama 协议版本（硬编码为 0.1.0，并非 TensorSharp Release 版本）
@@ -1026,7 +1023,6 @@ curl -N -X POST http://localhost:5000/api/chat \
 
 | 事件字段 | 触发时机 | 含义 |
 |---|---|---|
-| `queue_position`、`queue_pending` | 请求等待旧队列 shim 时的兼容事件 | 为旧客户端保留的队列位置字段 |
 | `token` | 每个生成的 token（启用 `think` / `tools` 时为解析后的内容片段） | 流式正文 |
 | `replace`、`diffusionStep`、`diffusionTotal`、`preview` | 每个 DiffusionGemma 去噪预览与最终替换 | 替换整条 assistant 消息，而不是追加 token |
 | `thinking` | 解析到的思维链片段（仅当模型输出含思维链时） | 流式思维链 |
@@ -1669,9 +1665,9 @@ print()
 
 注意事项：
 
-- `response_format`（`json_object` 或 `json_schema`）不能与 `tools` 同时使用（HTTP `400`）。只有协议声明了推理结束位置、使 JSON 语法能在该处启用的家族才允许与 `"think": true` 同时使用：GPT-OSS（`final<|message|>`）、DeepSeek V4.1、Qwen 3.8 Flash Next 与 GLM-5.3-Flash（`</think>`）、Gemma 4（`<channel|>`）、Nemotron-H（`</think>`）和 Muse-Glimmer（`to=user<|message|>`）。其他家族对该组合返回 HTTP `400`；设置 `TS_JSON_GRAMMAR=0` 时同样返回 `400`，因为它去掉了该组合所需的延迟语法。
-- `/v1/chat/completions` 上的 `json_object` / `json_schema` 请求在**JSON 语法**约束下解码（语法依据分词器构建，`json_schema` 还依据 schema），会破坏对象的 token 无法被采样，爱闲聊的模型也无法在对象前输出散文。对上述家族，`think: true` 请求要等推理块结束后才启用语法。设置 `TS_JSON_GRAMMAR=0`，或无法为某个 schema 构建语法时（仅限未开启 `think` 的请求；上述家族的 `think: true` 请求会直接失败），服务端回退到旧约束：只把**首个采样 token** 限制为以 `{` 开头的候选；`TS_JSON_FORCE_OPEN=0` 连这一回退也关闭。`/v1/responses` 的 `text.format` 请求只依靠 prompt 指令与校验。
-- 流式 `json_object` 请求会逐 token 流式返回 JSON 对象（自动剥离 Markdown 代码围栏和多余标签），因此首 token 时延（TTFT）反映的是 prefill 延迟。流式 `json_schema`（strict）请求仍会先在服务端缓存并按 schema 归一化，再以单个 chunk 发出。设置 `TS_STRUCTURED_STREAM_BUFFER=1` 可对两者强制使用旧的“全部缓存”行为。非流式请求始终归一化。
+- `response_format`（`json_object` 或 `json_schema`）不能与 `tools` 同时使用（HTTP `400`）。只有协议声明了推理结束位置、使 JSON 语法能在该处启用的家族才允许与 `"think": true` 同时使用：GPT-OSS（`final<|message|>`）、DeepSeek V4.1、Qwen 3.8 Flash Next 与 GLM-5.3-Flash（`</think>`）、Gemma 4（`<channel|>`）、Nemotron-H（`</think>`）和 Muse-Glimmer（`to=user<|message|>`）。其他家族对该组合返回 HTTP `400`。
+- `/v1/chat/completions` 上的 `json_object` / `json_schema` 请求在**JSON 语法**约束下解码（语法依据分词器构建，`json_schema` 还依据 schema），会破坏对象的 token 无法被采样，爱闲聊的模型也无法在对象前输出散文。对上述家族，`think: true` 请求要等推理块结束后才启用语法。无法为某个 schema 构建语法时（仅限未开启 `think` 的请求；上述家族的 `think: true` 请求会直接失败），服务端回退到另一种约束：只把**首个采样 token** 限制为以 `{` 开头的候选。`/v1/responses` 的 `text.format` 请求只依靠 prompt 指令与校验。
+- 流式 `json_object` 请求会逐 token 流式返回 JSON 对象（自动剥离 Markdown 代码围栏和多余标签），因此首 token 时延（TTFT）反映的是 prefill 延迟。流式 `json_schema`（strict）请求仍会先在服务端缓存并按 schema 归一化，再以单个 chunk 发出。非流式请求始终归一化。
 - 非法 schema 返回 HTTP `400`；非流式 / `json_schema` 输出未能通过校验则返回 HTTP `422`（已经开始的 `json_object` 流无法再更改状态码）。
 
 ---

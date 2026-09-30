@@ -8,16 +8,15 @@
 // Per-request sequence slots for the server's continuous-batching engine
 // (the DeepSeek V4 analogue of Gemma4Model.PerSeqCache / Qwen35Model.PerSeqCache).
 //
-// DSV4's whole-model native executor owns every cache on the device (raw SWA
-// rings, CSA/HCA compressed-K caches, compressor state rings, lightning-
-// indexer cache), so the per-request holders live natively as "slots"
-// (TSGgml_Dsv4SlotAlloc/SetActiveSlot/SlotFree): each slot is a full set of
-// per-layer caches plus its own n_past, sharing the model weights and rope
-// tables. Binding a request is a native active-slot switch — no KV bytes
-// move — and each slot's graphs are cached/captured independently (the graph
-// cache keys on the slot id, so concurrent requests replay their own
-// captured CUDA graphs instead of rebuilding or replaying another request's
-// baked cache addresses).
+// DSV4's whole-model executors (the native ggml one and the direct-CUDA engine)
+// own every cache on the device (raw SWA rings, CSA/HCA compressed-K caches,
+// compressor state rings, lightning-indexer cache), so the per-request holders
+// live in the executor as "slots" (IDsv4SlotExecutor): each slot is a full set
+// of per-layer caches plus its own n_past, sharing the model weights and rope
+// tables. Binding a request is an active-slot switch — no KV bytes move. The
+// native executor caches and captures each slot's graphs independently (its
+// graph cache keys on the slot id, so concurrent requests replay their own
+// captured CUDA graphs instead of another request's baked cache addresses).
 //
 // The engine drives this through IBatchedPagedModel's per-sequence fused
 // contract: BindSequenceCache switches slots, AdoptPrimaryCacheToFused hands
@@ -28,7 +27,6 @@
 // are served by interleaving whole-graph per-sequence forwards.
 using System;
 using System.Collections.Generic;
-using TensorSharp.GGML;
 using TensorSharp.Runtime.Scheduling;
 
 namespace TensorSharp.Models
@@ -63,11 +61,11 @@ namespace TensorSharp.Models
 
         private readonly struct NativeSlotRelease : INativeSlotRelease
         {
-            private readonly IntPtr _native;
-            public NativeSlotRelease(IntPtr native) => _native = native;
-            public bool Reset() => GgmlDeepSeek4Native.ResetChecked(_native);
-            public bool Select(int slot) => GgmlDeepSeek4Native.SetActiveSlot(_native, slot);
-            public bool Free(int slot) => GgmlDeepSeek4Native.SlotFree(_native, slot);
+            private readonly IDsv4SlotExecutor _slots;
+            public NativeSlotRelease(IDsv4SlotExecutor slots) => _slots = slots;
+            public bool Reset() => _slots.ResetChecked();
+            public bool Select(int slot) => _slots.SetActiveSlot(slot);
+            public bool Free(int slot) => _slots.SlotFree(slot);
         }
 
         // Constrained value-type dispatch avoids allocating delegates or an
@@ -116,11 +114,11 @@ namespace TensorSharp.Models
             => throw new NotSupportedException(
                 "DeepSeek V4 serves concurrency through per-sequence slots, not ForwardBatch.");
 
-        /// <summary>Concurrent requests are served by the native executor's
-        /// sequence slots (per-request caches + active-slot switching). Only
-        /// the native GPU executor has slots; the pure-C# CPU executor stays
+        /// <summary>Concurrent requests are served by the executor's sequence
+        /// slots (per-request caches + active-slot switching): the native and
+        /// the direct-CUDA executors have them; the pure-C# CPU executor stays
         /// on the serial per-sequence path.</summary>
-        public bool SupportsPerSequenceFusedForward => _handle != IntPtr.Zero;
+        public bool SupportsPerSequenceFusedForward => _slotExecutor != null;
 
         public bool HasFusedSequenceCache(string requestId)
         {
@@ -142,8 +140,8 @@ namespace TensorSharp.Models
                 throw new ArgumentException("RequestId required", nameof(requestId));
             lock (_sync)
             {
-                if (_handle == IntPtr.Zero)
-                    throw new InvalidOperationException("Per-request slots require the native DSV4 executor.");
+                if (_slotExecutor == null)
+                    throw new InvalidOperationException("Per-request slots require the native or direct-CUDA DSV4 executor.");
                 _slotByRequest ??= new Dictionary<string, int>(StringComparer.Ordinal);
 
                 bool fresh = false;
@@ -151,25 +149,25 @@ namespace TensorSharp.Models
                 {
                     // Reserve dictionary storage before changing native ownership.
                     _slotByRequest.EnsureCapacity(_slotByRequest.Count + 1);
-                    if (SupportsRetainedFusedCache && _primarySlot < 0) ReclaimRetainedPrimary();
-                    bool takeEmptyPrimary = SupportsRetainedFusedCache && _primarySlot >= 0
-                        && GgmlDeepSeek4Native.SlotStatus(_handle, _primarySlot, out int head, out _, out bool healthy)
-                        && healthy && head == 0;
-                    slot = takeEmptyPrimary ? _primarySlot : GgmlDeepSeek4Native.SlotAlloc(_handle);
+                    var released = new List<string>();
+                    slot = SlotForRequest(_retainedSlotByRequest, ref _primarySlot, ref _activeSlotKey,
+                        ref _selectedRetainedKey, SupportsRetainedFusedCache, released,
+                        new NativeSlotRetention(_slotExecutor), out bool tookPrimary);
+                    ReportReleased(released);
                     if (slot < 0)
-                        throw new InvalidOperationException(
+                        throw new SequenceSlotUnavailableException(
                             "DSV4 sequence-slot allocation failed (device memory exhausted?).");
                     try { _slotByRequest.Add(requestId, slot); }
                     catch
                     {
-                        if (!takeEmptyPrimary) GgmlDeepSeek4Native.SlotFree(_handle, slot);
+                        if (!tookPrimary) _slotExecutor.SlotFree(slot);
                         throw;
                     }
-                    if (takeEmptyPrimary) _primarySlot = -1;
+                    if (tookPrimary) _primarySlot = -1;
                     fresh = true;
                 }
 
-                if (!GgmlDeepSeek4Native.SetActiveSlot(_handle, slot))
+                if (!_slotExecutor.SetActiveSlot(slot))
                     throw new InvalidOperationException($"DSV4 slot {slot} missing for request {requestId}.");
                 _activeSlotKey = requestId;
                 _selectedRetainedKey = null;
@@ -185,7 +183,7 @@ namespace TensorSharp.Models
             if (string.IsNullOrEmpty(requestId)) return;
             lock (_sync)
             {
-                if (_handle == IntPtr.Zero) return;
+                if (_slotExecutor == null) return;
                 _slotByRequest ??= new Dictionary<string, int>(StringComparer.Ordinal);
                 if (_activeSlotKey != null || _selectedRetainedKey != null || _primarySlot < 0) return;
                 // A selected retained holder is never an adoptable primary.
@@ -203,16 +201,20 @@ namespace TensorSharp.Models
         {
             lock (_sync)
             {
-                if (_handle == IntPtr.Zero || (_activeSlotKey == null && _selectedRetainedKey == null)) return;
-                if (_primarySlot < 0) ReclaimRetainedPrimary();
+                if (_slotExecutor == null || (_activeSlotKey == null && _selectedRetainedKey == null)) return;
                 if (_primarySlot < 0)
                 {
-                    _primarySlot = GgmlDeepSeek4Native.SlotAlloc(_handle);
-                    if (_primarySlot < 0)
-                        throw new InvalidOperationException(
+                    var released = new List<string>();
+                    int slot = SlotForRequest(_retainedSlotByRequest, ref _primarySlot, ref _activeSlotKey,
+                        ref _selectedRetainedKey, SupportsRetainedFusedCache, released,
+                        new NativeSlotRetention(_slotExecutor), out bool tookPrimary);
+                    ReportReleased(released);
+                    if (slot < 0)
+                        throw new SequenceSlotUnavailableException(
                             "DSV4 primary-slot allocation failed (device memory exhausted?).");
+                    if (!tookPrimary) _primarySlot = slot;
                 }
-                if (!GgmlDeepSeek4Native.SetActiveSlot(_handle, _primarySlot))
+                if (!_slotExecutor.SetActiveSlot(_primarySlot))
                     throw new InvalidOperationException($"DSV4 primary slot {_primarySlot} could not be selected.");
                 _activeSlotKey = null;
                 _selectedRetainedKey = null;
@@ -232,7 +234,7 @@ namespace TensorSharp.Models
         {
             lock (_sync)
             {
-                if (_handle == IntPtr.Zero || _slotByRequest == null || HasDraftHead) return false;
+                if (_slotExecutor == null || _slotByRequest == null || HasDraftHead) return false;
                 int n = requestIds.Count;
                 if (n < 2) return false;
 
@@ -247,7 +249,7 @@ namespace TensorSharp.Models
                 if ((long) n * vocab > int.MaxValue) return false;
                 var flat = new float[n * vocab];
 
-                // The native batched graph caps at 8 sequences (its per-slot
+                // The executors cap one batched step (the native graph's per-slot
                 // attention forks are O(n) graph nodes). Above that, run the
                 // step as near-equal windows of <=8 - two weight sweeps for a
                 // double-cap batch still beat that many serial solo sweeps.
@@ -265,7 +267,7 @@ namespace TensorSharp.Models
                 bool ranWhole = false;
                 if (n <= maxPerCall)
                 {
-                    ranWhole = GgmlDeepSeek4Native.ForwardBatchedDecode(_handle, slots, tokens, positions, flat);
+                    ranWhole = _slotExecutor.ForwardBatchedDecode(slots, tokens, positions, flat);
                     if (!ranWhole)
                     {
                         if (n <= 8) return false;
@@ -290,7 +292,7 @@ namespace TensorSharp.Models
                         Array.Copy(tokens, off, ct, 0, len);
                         Array.Copy(positions, off, cp, 0, len);
                         var cf = new float[len * vocab];
-                        if (!GgmlDeepSeek4Native.ForwardBatchedDecode(_handle, cs, ct, cp, cf))
+                        if (!_slotExecutor.ForwardBatchedDecode(cs, ct, cp, cf))
                         {
                             if (c > 0)
                             {
@@ -323,9 +325,9 @@ namespace TensorSharp.Models
         {
             lock (_sync)
             {
-                if (_handle == IntPtr.Zero) return;
+                if (_slotExecutor == null) return;
                 ReleaseNativeSequence(_slotByRequest, requestId, ref _primarySlot, ref _activeSlotKey,
-                    new NativeSlotRelease(_handle));
+                    new NativeSlotRelease(_slotExecutor));
             }
         }
     }

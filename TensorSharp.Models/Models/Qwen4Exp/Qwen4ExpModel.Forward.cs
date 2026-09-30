@@ -296,10 +296,6 @@ namespace TensorSharp.Models
             embd.Dispose();
             PhaseLog(seqLen, "broadcast", tBr);
 
-            // Hand the residual to the device once; the fused halves chain through it
-            // and only the layers still running op-by-op pull it back.
-            _resOnDevice = false;
-
             // The whole token as (almost) one graph: every PLE-free run of layers -
             // both halves of each - chained into a single persisted GGML graph, so a
             // decode token is 2 graph launches instead of 96 and the residual crosses
@@ -331,22 +327,14 @@ namespace TensorSharp.Models
                 // The fallback paths rotate with scalar positions only; running an
                 // image prompt through them would be silently wrong.
                 throw new NotSupportedException(
-                    "qwen4exp image prompts need the token-span path "
-                    + "(TS_Q4E_TOKEN_GRAPH=0 and image inputs cannot be combined).");
+                    "qwen4exp image prompts need the token-span path, which declined this forward.");
             }
-
-            if (!spanDone && _ffnArgs != null && !_fusedFfnUnsupported)
-                ResidualToDevice(res, seqLen);
 
             for (int il = spanDone ? Config.NumLayers : 0; il < Config.NumLayers; il++)
             {
                 long t0 = Stopwatch.GetTimestamp();
                 if (_isPle[il])
-                {
-                    ResidualToHost(res, seqLen);
                     PleLayer(res, tokens, seqLen, startPos, il);
-                    ResidualToDevice(res, seqLen);
-                }
                 long t1 = Stopwatch.GetTimestamp(); Q4ePleTicks += t1 - t0;
 
                 // The recurrent half - mixer, projections, causal conv, the delta-net
@@ -372,7 +360,6 @@ namespace TensorSharp.Models
                         continue;
                     }
                     // FFN fell back; run the op-by-op FFN half below with a fresh mixer.
-                    ResidualToHost(res, seqLen);
                     Tensor injF;
                     Tensor curF = HcMix(res, seqLen,
                         $"blk.{il}.hc_ffn_norm.weight", $"blk.{il}.hc_ffn_down.weight",
@@ -382,7 +369,6 @@ namespace TensorSharp.Models
                     HcCombine(res, ffnF, injF, seqLen);
                     ffnF.Dispose();
                     injF.Dispose();
-                    ResidualToDevice(res, seqLen);
                     continue;
                 }
 
@@ -397,7 +383,6 @@ namespace TensorSharp.Models
                         Q4eMoeTicks += Stopwatch.GetTimestamp() - t1;
                         continue;
                     }
-                    ResidualToHost(res, seqLen);
                     Tensor injA;
                     Tensor curA = HcMix(res, seqLen,
                         $"blk.{il}.hc_ffn_norm.weight", $"blk.{il}.hc_ffn_down.weight",
@@ -407,11 +392,9 @@ namespace TensorSharp.Models
                     HcCombine(res, ffnA, injA, seqLen);
                     ffnA.Dispose();
                     injA.Dispose();
-                    ResidualToDevice(res, seqLen);
                     continue;
                 }
 
-                ResidualToHost(res, seqLen);
                 Tensor inject;
                 Tensor cur = HcMix(res, seqLen,
                     $"blk.{il}.hc_attn_norm.weight", $"blk.{il}.hc_attn_down.weight",
@@ -429,8 +412,6 @@ namespace TensorSharp.Models
                 blockOut.Dispose();
                 inject.Dispose();
                 _ = t3;
-                if (_ffnArgs != null && !_fusedFfnUnsupported)
-                    ResidualToDevice(res, seqLen);
 
                 // The mixer, the experts and the scatter are one graph when the
                 // fused kernel takes the shape - 8 GGML submissions collapsed into
@@ -441,7 +422,6 @@ namespace TensorSharp.Models
                     continue;
                 }
 
-                ResidualToHost(res, seqLen);
                 cur = HcMix(res, seqLen,
                     $"blk.{il}.hc_ffn_norm.weight", $"blk.{il}.hc_ffn_down.weight",
                     $"blk.{il}.hc_ffn_up.weight", $"blk.{il}.hc_ffn_inject.weight", out inject);
@@ -456,8 +436,6 @@ namespace TensorSharp.Models
                 inject.Dispose();
                 Q4eHcTicks += Stopwatch.GetTimestamp() - t5;
             }
-
-            ResidualToHost(res, seqLen);
 
             if (_pendingMRoPEPositions != null)
                 UpdateMropeGap(startPos, seqLen);
@@ -901,27 +879,22 @@ namespace TensorSharp.Models
             InvalidateTensorDeviceCache(res);
         }
 
-        // TS_Q4E_FUSED_ATTN=0 falls back to the op-by-op attention half.
-        private static readonly bool _fusedAttnEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_Q4E_FUSED_ATTN"), "0", StringComparison.Ordinal);
         private bool _fusedAttnUnsupported;
         private Qwen4ExpAttnArgs[] _attnArgs;
         private ushort[] _attnMask;
 
         // Must mirror kQwen4ExpKvStride and q4e_flash_attn_ok in ggml_ops_qwen4exp.cpp.
         private const int KvStride = 256;
-        private static readonly bool FlashAttnEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_Q4E_FLASH_ATTN"), "0", StringComparison.Ordinal);
 
         private static bool UseFlashAttn(DType kvType, int headDim)
         {
-            if (!FlashAttnEnabled || kvType != DType.Float16) return false;
+            if (kvType != DType.Float16) return false;
             return headDim is 64 or 80 or 96 or 112 or 128 or 256;
         }
 
         private unsafe bool TryFusedAttnBlock(Tensor res, int il, int seqLen, int startPos)
         {
-            if (!_fusedAttnEnabled || _fusedAttnUnsupported || !IsGgmlBackend)
+            if (_fusedAttnUnsupported || !IsGgmlBackend)
                 return false;
             // No QSA-budget guard here either - it computes the same dense
             // attention the fallback would, and declining mid-sequence loses the
@@ -942,10 +915,10 @@ namespace TensorSharp.Models
                         Config.HeadDim, Config.NumHeads, Config.NumKVHeads,
                         _kvCacheCapacity, totalLen, startPos,
                         _ropeDimCount, Config.RopeBase, 1.0f / Config.RopeScale, _attnScale,
-                        Config.Eps, cacheSlot: il, resResident: _resOnDevice);
+                        Config.Eps, cacheSlot: il);
                 }
                 if (!ok) { _fusedAttnUnsupported = true; return false; }
-                if (!_resOnDevice) InvalidateTensorDeviceCache(res);
+                InvalidateTensorDeviceCache(res);
                 _kvCacheHostStale = true;
                 _deviceStateAuthoritative = true;
                 return true;
@@ -1017,17 +990,13 @@ namespace TensorSharp.Models
             => TensorComputePrimitives.GetStorageBasePointer(t);
 
         // ------------------------------------------------------------------
-        // The whole token as (almost) one graph. TS_Q4E_TOKEN_GRAPH=0 falls back to
-        // the per-layer fused kernels; those in turn fall back op-by-op.
+        // The whole token as (almost) one graph: a decode token is two graph
+        // launches. Where the span declines, the per-layer fused kernels run
+        // instead; those in turn fall back op-by-op. Uploaded leaf weights carry
+        // the OUTPUT flag: without it gallocr frees them after their last consumer,
+        // the first compute overwrites the small weights (dt/a/ssm-norm, the
+        // attention q/k norms) and every replay reads decayed garbage.
         // ------------------------------------------------------------------
-        // ON by default: a decode token is two graph launches. The long hunt that
-        // once kept this off ended at a single root cause - gallocr frees an
-        // uploaded leaf weight after its last consumer unless it carries the OUTPUT
-        // flag, so the first compute overwrote the small weights (dt/a/ssm-norm,
-        // the attention q/k norms) and every replay read decayed garbage. With the
-        // flag in place every configuration that used to degenerate verifies clean.
-        private static readonly bool _tokenGraphEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_Q4E_TOKEN_GRAPH"), "0", StringComparison.Ordinal);
         // TS_Q4E_DRIVER_TRACE=1 prints the residual L2 after every span and
         // attention call the driver makes. Diagnosis only.
         private static readonly bool _driverTrace =
@@ -1079,13 +1048,6 @@ namespace TensorSharp.Models
                 "continuing on the per-op path (slower). Reported once.");
         }
 
-        // TS_Q4E_SPAN_ATTN=0 cuts the spans at attention layers and runs those
-        // halves through the per-layer kernel - the hybrid that served while
-        // attention-in-span was misdiagnosed as a numeric amplifier. The actual
-        // culprit was the q/k norm weights (1KB gallocr leafs) being freed and
-        // overwritten; with them protected, attention chains into the span.
-        private static readonly bool _spanAttnEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_Q4E_SPAN_ATTN"), "0", StringComparison.Ordinal);
         private bool _tokenGraphUnsupported;
         private byte[] _layerKinds;
         // The final mixer + LM head riding the last span. _spanLogits holds the
@@ -1173,12 +1135,10 @@ namespace TensorSharp.Models
 
         private unsafe bool TryFusedTokenSpans(Tensor res, int[] tokens, int seqLen, int startPos)
         {
-            if (!_tokenGraphEnabled || _tokenGraphUnsupported || !IsGgmlBackend
+            if (_tokenGraphUnsupported || !IsGgmlBackend
                 || _fusedGateUpExperts
-                || !_fusedFfnEnabled || _fusedFfnUnsupported
-                || !_fusedGdnEnabled || _fusedGdnUnsupported
-                || !_fusedAttnEnabled || _fusedAttnUnsupported
-                || _gdnMaxLayers >= 0 || _gdnVerify)
+                || _fusedFfnUnsupported || _fusedGdnUnsupported || _fusedAttnUnsupported
+                || _gdnVerify)
             {
                 return false;
             }
@@ -1214,24 +1174,18 @@ namespace TensorSharp.Models
                 bool fuseHead = EnsureHeadArgs();
                 bool fusePle = EnsurePleArgs();
 
-                // Both of the remaining per-layer cuts run OUTSIDE a span, and only a
-                // span carries the device: the per-layer attention kernel and the host
-                // PleLayer would execute on whatever rank the thread happens to hold
-                // (always 0) while their layer's weights, KV device copy and recurrent
-                // state live on another GPU. Neither is reachable in a default run -
-                // the attention cut needs TS_Q4E_SPAN_ATTN=0 and the PLE cut needs the
-                // PLE descriptors to fail - so refuse the combination rather than add
-                // an untested placement path.
-                if ((LayerSplitDegree > 1 || IsTensorParallel) && (!_spanAttnEnabled || !fusePle))
+                // The host PleLayer cut runs OUTSIDE a span, and only a span carries the
+                // device: PleLayer would execute on whatever rank the thread happens to
+                // hold (always 0) while its layer's weights and state live on another
+                // GPU. It is reached only when the PLE descriptors fail, so refuse the
+                // combination rather than add an untested placement path.
+                if ((LayerSplitDegree > 1 || IsTensorParallel) && !fusePle)
                 {
                     _tokenGraphUnsupported = true;
                     throw new NotSupportedException(
-                        "qwen4exp: a layer split needs every layer inside a token span, but "
-                        + (!_spanAttnEnabled
-                            ? "TS_Q4E_SPAN_ATTN=0 cuts attention out of the span"
-                            : "the PLE block could not be built into the span")
-                        + ". These per-layer paths are single-GPU only. Re-run without --layer-split, "
-                        + "or without TS_Q4E_SPAN_ATTN=0.");
+                        "qwen4exp: a layer split needs every layer inside a token span, but the PLE block "
+                        + "could not be built into the span. That per-layer path is single-GPU only; "
+                        + "re-run without --layer-split.");
                 }
 
                 // Image prompts carry a (T,H,W) IMRoPE position table; the span
@@ -1267,13 +1221,10 @@ namespace TensorSharp.Models
                 fixed (ushort* mp = _attnMask)
                 {
                     int begin = 0, spanIdx = 0;
-                    bool beginFfnOnly = false;
                     for (int il = 0; il <= Config.NumLayers; il++)
                     {
                         // The host-side PLE layer cuts the token into spans - unless
                         // the PLE block rides inside the span, which is the default.
-                        // So does every attention layer unless TS_Q4E_SPAN_ATTN=1.
-                        bool attnCut = il < Config.NumLayers && !_isRecurrent[il] && !_spanAttnEnabled;
                         // LAYER SPLIT: a span runs entirely on one GPU, so the token
                         // is also cut wherever the owning device changes. The residual
                         // crosses the seam through the host buffer it is already
@@ -1282,7 +1233,7 @@ namespace TensorSharp.Models
                         bool deviceCut = il < Config.NumLayers && il > begin
                             && (DeviceForLayer(il) != DeviceForLayer(begin)
                                 || (_diagnosticSpanLayers > 0 && il - begin >= _diagnosticSpanLayers));
-                        bool cut = il == Config.NumLayers || (_isPle[il] && !fusePle) || attnCut || deviceCut;
+                        bool cut = il == Config.NumLayers || (_isPle[il] && !fusePle) || deviceCut;
                         if (!cut) continue;
                         if (il > begin)
                         {
@@ -1330,7 +1281,7 @@ namespace TensorSharp.Models
                                 _kvCacheCapacity, totalLen, startPos,
                                 _ropeDimCount, Config.RopeBase, 1.0f / Config.RopeScale, _attnScale,
                                 _numExperts, _numExpertsUsed, _expertFf, _sharedFf,
-                                Config.Eps, cacheSlot: spanIdx + _seqSlotBase, firstFfnOnly: beginFfnOnly,
+                                Config.Eps, cacheSlot: spanIdx + _seqSlotBase,
                                 head: headPtr, logitsOut: logitsPtr,
                                 ple: plePtr, pleLayer: pleLayerArg, pleEmb: pleEmbPtr,
                                 mropePos: mropePtr, mropeSections: sectPtr,
@@ -1364,38 +1315,16 @@ namespace TensorSharp.Models
                             InvalidateTensorDeviceCache(res);
                         }
                         // `&& !fusePle` MUST match the cut condition above. Without it,
-                        // ANY other reason to cut at a PLE layer - a device boundary, or
-                        // attnCut - ran the HOST PleLayer even though the PLE block is
-                        // also built into the spans, so PLE executed twice and its
-                        // n-gram conv history advanced twice for one token.
+                        // any other reason to cut at a PLE layer - a device boundary - ran
+                        // the HOST PleLayer even though the PLE block is also built into
+                        // the spans, so PLE executed twice and its n-gram conv history
+                        // advanced twice for one token.
                         if (il < Config.NumLayers && _isPle[il] && !fusePle)
                         {
                             long tPle = Stopwatch.GetTimestamp();
                             PleLayer(res, tokens, seqLen, startPos, il);
                             PhaseLog(seqLen, "ple", tPle);
                             begin = il;
-                            beginFfnOnly = false;
-                        }
-                        else if (attnCut)
-                        {
-                            // The attention HALF through the proven per-layer kernel;
-                            // the FFN half of this layer rides at the head of the
-                            // next span instead of costing its own launch.
-                            if (!TryFusedAttnBlock(res, il, seqLen, startPos))
-                            {
-                                _tokenGraphUnsupported = true;
-                                if (ranAnything)
-                                {
-                                    throw new InvalidOperationException(
-                                        "qwen4exp token span: the per-layer attention fallback " +
-                                        "failed mid-token; the next forward runs per-layer.");
-                                }
-                                return false;
-                            }
-                            ranAnything = true;
-                            DriverTrace(res, seqLen, $"attn{il} T={seqLen} pos={startPos}");
-                            begin = il;
-                            beginFfnOnly = true;
                         }
                         else if (deviceCut)
                         {
@@ -1404,7 +1333,6 @@ namespace TensorSharp.Models
                             // the InvalidateTensorDeviceCache above dropped the device
                             // copy, so the next span re-uploads it onto ITS gpu.
                             begin = il;
-                            beginFfnOnly = false;
                         }
                     }
                 }
@@ -1518,75 +1446,13 @@ namespace TensorSharp.Models
             return padded;
         }
 
-        // TS_Q4E_FUSED_GDN=0 falls back to the op-by-op recurrent half.
-        // Keeping the residual in the kernels' device buffer across a layer, so the
-        // fused halves chain without a host round trip each call.
-        //
-        // OFF by default: it measures ~18% on decode (73.3 vs 62.0 t/s) but produces
-        // wrong output, and that does not buy a correctness risk.
-        //
-        // The earlier note here blamed the hand-off with layers still running op-by-op.
-        // That is wrong. Bisected:
-        //
-        //   fused GDN + op-by-op FFN, resident   -> correct
-        //   op-by-op GDN + fused FFN, resident   -> correct
-        //   fused GDN + fused FFN,    resident   -> garbage
-        //
-        // So each kernel's residency is right on its own; it is the two persisted
-        // graphs alternating that breaks. Forcing the residual down to host memory and
-        // back between the two halves does NOT fix it, which rules out both the shared
-        // device buffer hand-off and the residual values themselves - by then the data
-        // has made a full round trip through the host and is provably correct. Also
-        // ruled out: the ggml-cuda graph-uid stamp (TS_Q4E_GRAPH_UID=0 is byte-identical
-        // to =1 here). Something the two kernels share besides the residual is being
-        // disturbed; the shared g_q4e_res_buf binding and ggml-cuda's single captured
-        // graph slot are the two candidates left.
-        //
-        // TS_Q4E_RES_RESIDENT=1 re-enables it for debugging.
-        private static readonly bool _resResidentEnabled =
-            string.Equals(Environment.GetEnvironmentVariable("TS_Q4E_RES_RESIDENT"), "1", StringComparison.Ordinal);
-        private bool _resOnDevice;
-
-        /// <summary>Bring the residual back to the host so op-by-op code can read it.</summary>
-        private unsafe void ResidualToHost(Tensor res, int seqLen)
-        {
-            if (!_resOnDevice) return;
-            long bytes = (long)seqLen * _hcDim * sizeof(float);
-            if (GgmlBasicOps.Qwen4ExpResDownload((IntPtr)GetFloatPtr(res), bytes))
-                InvalidateTensorDeviceCache(res);
-            _resOnDevice = false;
-        }
-
-        /// <summary>Hand the residual to the device so the fused kernels can chain.</summary>
-        private unsafe bool ResidualToDevice(Tensor res, int seqLen)
-        {
-            if (_resOnDevice) return true;
-            // Never under a layer split: g_q4e_res is per-device, so a residual left
-            // resident on one GPU is invisible to the next span on another. The
-            // fallback that calls this is already refused under a split; this is the
-            // second lock on the same door.
-            if (!_resResidentEnabled || !IsGgmlBackend || LayerSplitDegree > 1) return false;
-            long bytes = (long)seqLen * _hcDim * sizeof(float);
-            _resOnDevice = GgmlBasicOps.Qwen4ExpResUpload((IntPtr)GetFloatPtr(res), bytes);
-            return _resOnDevice;
-        }
-
-        private static readonly bool _fusedGdnEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_Q4E_FUSED_GDN"), "0", StringComparison.Ordinal);
         private bool _fusedGdnUnsupported;
-        private static readonly int _gdnMaxLayers =
-            int.TryParse(Environment.GetEnvironmentVariable("TS_Q4E_GDN_MAX_LAYERS"), out int gm) ? gm : -1;
         private Qwen4ExpGdnArgs[] _gdnArgs;
         private Tensor[] _gdnConvStateT;
 
         private unsafe bool TryFusedGdnBlock(Tensor res, int il, int seqLen)
         {
-            if (!_fusedGdnEnabled || _fusedGdnUnsupported || !IsGgmlBackend)
-                return false;
-            // Bisect handle: TS_Q4E_GDN_MAX_LAYERS=N fuses only layers below N and
-            // leaves the rest op-by-op, which separates a per-layer error from one
-            // that only appears once it compounds across 36 of them.
-            if (_gdnMaxLayers >= 0 && il >= _gdnMaxLayers)
+            if (_fusedGdnUnsupported || !IsGgmlBackend)
                 return false;
 
             try
@@ -1598,9 +1464,9 @@ namespace TensorSharp.Models
                     (IntPtr)GetFloatPtr(res),
                     Config.HiddenSize, _hc, _hcLowRank, seqLen,
                     _headKDim, _headVDim, _numKHeads, _numVHeads, _convKernel,
-                    Config.Eps, cacheSlot: il, resResident: _resOnDevice);
+                    Config.Eps, cacheSlot: il);
                 if (!ok) { _fusedGdnUnsupported = true; return false; }
-                if (!_resOnDevice) InvalidateTensorDeviceCache(res);
+                InvalidateTensorDeviceCache(res);
                 _deviceStateAuthoritative = true;
                 return true;
             }
@@ -1648,16 +1514,14 @@ namespace TensorSharp.Models
             return true;
         }
 
-        // TS_Q4E_FUSED_FFN=0 falls back to the op-by-op mixer + MoE + scatter,
-        // which is also the automatic fallback for any shape the kernel declines.
-        private static readonly bool _fusedFfnEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_Q4E_FUSED_FFN"), "0", StringComparison.Ordinal);
+        // The op-by-op mixer + MoE + scatter is the automatic fallback for any shape
+        // the fused kernel declines.
         private bool _fusedFfnUnsupported;
         private Qwen4ExpFfnArgs[] _ffnArgs;
 
         private unsafe bool TryFusedFfnBlock(Tensor res, int il, int seqLen)
         {
-            if (!_fusedFfnEnabled || _fusedFfnUnsupported || !IsGgmlBackend || _fusedGateUpExperts)
+            if (_fusedFfnUnsupported || !IsGgmlBackend || _fusedGateUpExperts)
                 return false;
 
             try
@@ -1668,13 +1532,13 @@ namespace TensorSharp.Models
                     (IntPtr)GetFloatPtr(res),
                     Config.HiddenSize, _hc, _hcLowRank, seqLen,
                     _numExperts, _numExpertsUsed, _expertFf, _sharedFf, Config.Eps,
-                    cacheSlot: il, resResident: _resOnDevice);
+                    cacheSlot: il);
                 if (!ok)
                 {
                     _fusedFfnUnsupported = true;
                     return false;
                 }
-                if (!_resOnDevice) InvalidateTensorDeviceCache(res);
+                InvalidateTensorDeviceCache(res);
                 return true;
             }
             catch (Exception ex)

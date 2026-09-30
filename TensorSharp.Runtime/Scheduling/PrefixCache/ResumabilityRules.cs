@@ -46,6 +46,8 @@ internal sealed class ResumabilityRules
             throw new ArgumentException($"Truncation {caps.Truncation} needs a positive TruncationParameter.", nameof(caps));
         if (caps.SubCapBytes.AnyNegative)
             throw new ArgumentException("SubCapBytes must not be negative.", nameof(caps));
+        if (caps.PagedEndStates && (caps.EndState != EndStateSupport.DonateOnly || caps.CanCaptureCopy))
+            throw new ArgumentException("Paged end states are donated whole: EndState must be DonateOnly, without copies.", nameof(caps));
     }
 
     /// <summary><c>Permitted(node, L) := node.ScopeIx == r.ScopeIx or (node.ScopeIx == 0 and L ≤ publicCap)</c>.</summary>

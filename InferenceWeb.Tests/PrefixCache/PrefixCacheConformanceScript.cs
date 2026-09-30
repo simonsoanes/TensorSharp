@@ -31,7 +31,6 @@ internal sealed record ConformanceSubject
     public int DonateAfter { get; init; } = 3;
     /// <summary>Distance of the in-range rewind (aligned and capped by the family's rules).</summary>
     public int RewindTokens { get; init; } = 4;
-    public PrefixCacheMode ExpectedReadiness { get; init; } = PrefixCacheMode.Legacy;
     /// <summary>False for native-slot families, whose slot bytes the managed side does not measure.</summary>
     public bool PayloadBytesKnown { get; init; } = true;
     /// <summary>When set, reports whether a retained payload is device-authoritative. With
@@ -157,7 +156,6 @@ internal static class PrefixCacheConformanceScript
             Assert.NotNull(_caps);
             Assert.False(string.IsNullOrEmpty(_caps.NamespaceFingerprint), "NamespaceFingerprint must be non-empty (K1a)");
             Assert.Equal(_arch.KVStateFingerprint, _caps.NamespaceFingerprint);
-            Assert.Equal(_s.ExpectedReadiness, _caps.Readiness);
             _rules = new ResumabilityRules(_caps, blockSize: 256, batchedPagedEnabled: false);
             Assert.Equal(Math.Max(1, _arch.KVCacheTruncationGranularity), _caps.TruncationGranularity);
             if (_caps.EndState == EndStateSupport.None)

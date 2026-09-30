@@ -22,9 +22,9 @@ static int Argmax(float[] v)
     return best;
 }
 
-string modelPath = Environment.GetEnvironmentVariable("TS_MTP_MODEL")
+string modelPath = Environment.GetEnvironmentVariable("TS_BENCH_MODEL")
     ?? @"C:\Works\models\mtp\Qwen3.6-27B-UD-IQ2_XXS.gguf";
-BackendType backend = (Environment.GetEnvironmentVariable("TS_MTP_BACKEND") ?? "cuda").ToLowerInvariant() switch
+BackendType backend = (Environment.GetEnvironmentVariable("TS_BENCH_BACKEND") ?? "cuda").ToLowerInvariant() switch
 {
     "ggml_cuda" => BackendType.GgmlCuda,
     "ggml_vulkan" => BackendType.GgmlVulkan,
@@ -32,8 +32,8 @@ BackendType backend = (Environment.GetEnvironmentVariable("TS_MTP_BACKEND") ?? "
     "cpu" => BackendType.Cpu,
     _ => BackendType.Cuda,
 };
-int maxNew = EnvInt("TS_MTP_NEW_TOKENS", 48);
-int maxDraft = EnvInt("TS_MTP_DRAFT", 8);
+int maxNew = EnvInt("TS_BENCH_NEW_TOKENS", 48);
+int maxDraft = EnvInt("TS_SPEC_DRAFT", 8);
 string mode = Environment.GetEnvironmentVariable("TS_BENCH_MODE") ?? "both"; // baseline | spec | both
 
 Console.WriteLine($"[gdn-bench] loading {Path.GetFileName(modelPath)} backend={backend} maxNew={maxNew} draft={maxDraft} mode={mode}");
@@ -46,7 +46,7 @@ if (mode is "concurrent")
     return;
 }
 
-string prompt = Environment.GetEnvironmentVariable("TS_MTP_PROMPT") ??
+string prompt = Environment.GetEnvironmentVariable("TS_BENCH_PROMPT") ??
                 "Write a short story about a robot learning to paint. " +
                 "Once upon a time, in a small workshop at the edge of the city,";
 int[] tokens = model.Tokenizer.Encode(prompt, addSpecial: false).ToArray();
@@ -151,7 +151,7 @@ if (mode is "baseline" or "both")
 if (mode is "spec" or "both")
 {
     var spec = new SpeculativeDecoder(model, maxDraft);
-    string pminEnv = Environment.GetEnvironmentVariable("TS_MTP_PMIN");
+    string pminEnv = Environment.GetEnvironmentVariable("TS_SPEC_PMIN");
     if (!string.IsNullOrEmpty(pminEnv) && float.TryParse(pminEnv, out float pmin))
         spec.MinDraftProb = pmin;
     model.ResetSpecLayerTimings();
@@ -225,8 +225,7 @@ static async Task RunConcurrent(Qwen35Model model, int maxNew)
     using var engine = new InferenceEngine(model, cfg);
 
     Console.WriteLine($"[gdn-bench] concurrent: N={n} maxNew={maxNew} timeout={timeoutSec}s " +
-        $"TS_QWEN35_BATCHED={Environment.GetEnvironmentVariable("TS_QWEN35_BATCHED")} " +
-        $"N1FAST={Environment.GetEnvironmentVariable("TS_BATCHED_N1_FAST_PATH")}");
+        $"TS_SCHED_DISABLE_BATCHED={Environment.GetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED")}");
 
     async Task<(int count, bool timedOut)> RunOne(int i)
     {

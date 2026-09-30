@@ -17,8 +17,10 @@
 //
 // This class parses metadata/tokenizer from the (first) GGUF shard, feeds
 // token batches to the native executor, and returns last-token logits. KV
-// truncation is unsupported (compressed caches ratchet forward), so
-// multi-turn prompts re-prefill; the engine handles that automatically.
+// truncation is V4.1 on the native and direct-CUDA executors
+// (SupportsKVCacheTruncation): it rewinds to the matching prefix of the next
+// turn, which a thinking turn needs because its render drops the previous
+// answer's reasoning. Plain V4 and the pure-C# executor re-prefill.
 using System;
 using TensorSharp.GGML;
 using TensorSharp.Runtime.Scheduling;
@@ -30,11 +32,14 @@ namespace TensorSharp.Models
         private IntPtr _handle;
         private DeepSeek4CpuExecutor _cpuExec;
         private DeepSeek4CudaExecutor _cudaExec;
+        // The executor's sequence slots: the native executor's or the direct-CUDA engine's.
+        // Null on the pure-C# executor, which serves one sequence.
+        private IDsv4SlotExecutor _slotExecutor;
         private readonly object _sync = new object();
-        // The multiple a native KV truncation target must be, or 0 when this load cannot
-        // truncate at all (plain V4, or a V4.1 served by the direct-CUDA or pure-C# executor
-        // rather than the native one). Resolved once: it is a property of the checkpoint's
-        // compression ratios, and SupportsKVCacheTruncation is read on hot scheduler paths.
+        // The multiple a KV truncation target must be, or 0 when this load cannot truncate
+        // at all (plain V4, or the pure-C# executor). Resolved once: it is a property of the
+        // checkpoint's compression ratios, and SupportsKVCacheTruncation is read on hot
+        // scheduler paths.
         private readonly int _truncateAlign;
         protected internal IntPtr NativeHandle => _handle;
         protected object NativeSync => _sync;
@@ -52,7 +57,7 @@ namespace TensorSharp.Models
                 try
                 {
                     DeepSeek41Architecture.ValidateLoad(ggufPath, backend, ResolveDsparkPath(draftModelPath),
-                        Math.Max(tpDegree, layerSplitDegree), tpGroup, tpDegree);
+                        tpGroup, tpDegree);
                 }
                 catch
                 {
@@ -138,6 +143,8 @@ namespace TensorSharp.Models
                     $"Hidden={Config.HiddenSize}, Heads={Config.NumHeads}, HeadDim={Config.KeyLength}, Vocab={Config.VocabSize}" +
                     (dspark != null ? ", DSpark drafter" : string.Empty));
                 _cudaExec = new DeepSeek4CudaExecutor(ggufPath, maxContext, nUbatch, nGpu, dspark, ResolveCpuMoeLayers());
+                _slotExecutor = _cudaExec;
+                _truncateAlign = _cudaExec.TruncateAlign;
             }
             else if (_backend == BackendType.Cpu)
             {
@@ -168,11 +175,11 @@ namespace TensorSharp.Models
                 // executor still has to pick its devices from the backend the
                 // operator actually asked for.
                 string backendName = BackendRegistryName(backend);
-                int tensorParallelRanks = isV41
-                    ? DeepSeek41Architecture.ResolveRequestedTensorParallelRanks(tpDegree, requestedGpuCount) : 0;
-                _handle = dspark != null
-                    ? GgmlDeepSeek4Native.LoadModelWithDspark(ggufPath, nGpu, maxContext, nUbatch, nThreads, dspark, nCpuMoe, backendName, tensorParallelRanks)
-                    : GgmlDeepSeek4Native.LoadModel(ggufPath, nGpu, maxContext, nUbatch, nThreads, nCpuMoe, backendName, tensorParallelRanks);
+                int tensorParallelRanks = isV41 ? DeepSeek41Architecture.ResolveTensorParallelRanks(tpDegree) : 0;
+                if (tensorParallelRanks > 0)
+                    Console.WriteLine(DeepSeek41Architecture.DescribeTensorParallelPlacement(tensorParallelRanks));
+                _handle = GgmlDeepSeek4Native.LoadModel(ggufPath, nGpu, maxContext, nUbatch, nThreads,
+                    dspark, nCpuMoe, backendName, tensorParallelRanks);
                 _nativeDsparkBlock = _handle != IntPtr.Zero && dspark != null
                     ? GgmlDeepSeek4Native.DsparkBlockSize(_handle) : 0;
                 if (_handle == IntPtr.Zero)
@@ -183,6 +190,7 @@ namespace TensorSharp.Models
                 // Zero for plain V4: its compressor overlaps blocks, so a rewind reads state
                 // rows an aligned target does not protect, and the native side declines.
                 _truncateAlign = GgmlDeepSeek4Native.TruncateAlign(_handle);
+                _slotExecutor = new NativeDsv4Slots(_handle);
             }
         }
 
@@ -262,7 +270,7 @@ namespace TensorSharp.Models
         /// The DSpark drafter is implemented twice: inside the direct-CUDA engine
         /// (Dsv4CudaEngine.Dspark.cs, on that engine's own kernels and cache
         /// rings), and inside the native ggml executor
-        /// (<c>LoadModelWithDspark</c>), which this constructor hands it on
+        /// (<c>GgmlDeepSeek4Native.LoadModel</c>'s drafter path), which this constructor hands it on
         /// ggml_cuda and, for V4.1, on ggml_cpu. Every other executor/backend
         /// pairing serves plain decode, so say so instead of silently ignoring
         /// the drafter the operator asked for.
@@ -292,10 +300,8 @@ namespace TensorSharp.Models
             {
                 if (backend != BackendType.GgmlCuda)
                     throw new NotSupportedException("--tp requires DeepSeek V4.1 routed-MoE tensor parallelism on ggml_cuda. Use --layer-split N for whole-layer placement.");
-                DeepSeek41Architecture.ResolveRequestedTensorParallelRanks(tpDegree, tpDegree);
+                DeepSeek41Architecture.ResolveTensorParallelRanks(tpDegree);
             }
-            if (layerSplitDegree > 1 && DeepSeek41Architecture.ResolveRoutedMoeTensorParallelRanks(layerSplitDegree) != 0)
-                throw new ArgumentException("--layer-split selects whole-layer placement only; unset TS_DSV41_TP or set it to 0.");
             // The pure C# executor does not use native GPU placement settings.
             // Keep their validation on the GGML and direct-CUDA paths only.
             if (backend != BackendType.Cpu)
@@ -309,15 +315,7 @@ namespace TensorSharp.Models
             // common model entry point instead of silently capping requests.
             if (requestedDegree > 8)
                 throw new NotSupportedException("The DeepSeek executor supports at most 8 GPUs; reduce --tp or --layer-split.");
-            string raw = Environment.GetEnvironmentVariable("TS_DSV4_NGPU");
-            if (string.IsNullOrWhiteSpace(raw)) return requestedDegree;
-            if (!int.TryParse(raw, out int count) || count < 0)
-                throw new ArgumentException("TS_DSV4_NGPU must be a nonnegative integer (0 selects all visible GPUs).");
-            if (count > 8)
-                throw new NotSupportedException("TS_DSV4_NGPU exceeds the executor's limit of 8 GPUs.");
-            if (requestedDegree > 1 && count != requestedDegree)
-                throw new ArgumentException($"TS_DSV4_NGPU={count} conflicts with the explicitly requested {requestedDegree} GPUs; unset it or use the same count.");
-            return count;
+            return requestedDegree;
         }
 
         private static BackendType NormalizeBackend(BackendType backend)
@@ -382,7 +380,7 @@ namespace TensorSharp.Models
         }
 
         /// <summary>
-        /// Partial KV reuse, on the V4.1 native executor only.
+        /// Partial KV reuse, for V4.1 on the native and direct-CUDA executors.
         ///
         /// <para>Why it matters here: V4.1's chat protocol re-renders a past assistant
         /// turn with its reasoning removed (ordinary chat drops it, per DeepSeek's
@@ -393,15 +391,12 @@ namespace TensorSharp.Models
         /// re-prefills, which turns per-turn prefill into a function of the entire
         /// conversation instead of the newest answer.</para>
         ///
-        /// <para>Why only V4.1, and only native: the native executor can rewind past its
-        /// raw sliding-window ring because every slot carries a checkpoint of the modular
-        /// rings taken at the last prompt boundary (TSGgml_Dsv4Truncate). Plain V4
-        /// compresses OVERLAPPING blocks, so a boundary still reads the previous block's
-        /// state rows and aligning the head to the ratio is not sufficient; the direct-CUDA
-        /// and pure-C# V4.1 executors have no such checkpoint, and their position rewind
-        /// (Dsv4CudaEngine.Rewind) is sized for a rejected speculative block, not a
-        /// conversational one. Those three keep re-prefilling, which is correct, just not
-        /// cheap.</para>
+        /// <para>Why only V4.1: both executors rewind past the raw sliding-window ring because
+        /// every slot carries a checkpoint of the modular rings taken at the last prompt
+        /// boundary (TSGgml_Dsv4Truncate, Dsv4CudaEngine.Truncate). Plain V4 compresses
+        /// OVERLAPPING blocks, so a boundary still reads the previous block's state rows and
+        /// aligning the head to the ratio is not sufficient. Plain V4 and the pure-C# executor,
+        /// which has no checkpoint, keep re-prefilling, which is correct, just not cheap.</para>
         /// </summary>
         public override bool SupportsKVCacheTruncation => _truncateAlign > 0;
 
@@ -431,7 +426,7 @@ namespace TensorSharp.Models
             lock (_sync)
             {
                 if (!SupportsKVCacheTruncation) return false;
-                return GgmlDeepSeek4Native.Truncate(_handle, tokenCount);
+                return _slotExecutor.Truncate(tokenCount);
             }
         }
 
@@ -511,6 +506,7 @@ namespace TensorSharp.Models
         {
             lock (_sync)
             {
+                _slotExecutor = null;
                 if (_cudaExec != null)
                 {
                     _cudaExec.Dispose();

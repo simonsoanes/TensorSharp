@@ -36,7 +36,7 @@ namespace TensorSharp.Runtime.Scheduling
         public int MaxPrefillChunkSize { get; init; } = 256;
 
         /// <summary>Per-step prefill token cap used ONLY when there is no GPU
-        /// contention ÔÇö i.e. at most one sequence is in the system (running +
+        /// contention — i.e. at most one sequence is in the system (running +
         /// waiting &lt;= 1). The small <see cref="MaxPrefillChunkSize"/> exists
         /// purely to let concurrent decode requests interleave at the GPU; for a
         /// lone request it is counter-productive. On GPU backends a chunk that
@@ -55,19 +55,23 @@ namespace TensorSharp.Runtime.Scheduling
         /// its preferred block size that value is used here.</summary>
         public int NumBlocks { get; init; } = 256;
 
-        /// <summary>Block size in tokens. Should match the model's preferred
-        /// block size (we use the existing
-        /// <see cref="PagedKvCacheConfig.BlockSize"/> as the default).</summary>
-        public int BlockSize { get; init; } = 256;
+        /// <summary>Block size in tokens; 0 leaves it to the model
+        /// (<see cref="InferenceEngine"/> picks <see cref="PageFamilyBlockSize"/> for a family whose
+        /// only cross-request reuse is its pages, <see cref="DefaultBlockSize"/> otherwise), which is
+        /// what <see cref="FromEnvironment"/> reports when <c>TS_SCHED_BLOCK_SIZE</c> is unset.</summary>
+        public int BlockSize { get; init; } = DefaultBlockSize;
 
-        /// <summary>Enable LRU-based block eviction of cached prefix blocks
-        /// when the free queue is empty. Default true.</summary>
+        /// <summary>The block size of a family that keeps each conversation's exact state (holders, native
+        /// slots): its pool only accounts for reservations.</summary>
+        public const int DefaultBlockSize = 256;
+
+        /// <summary>The block size of a family whose only cross-request reuse is whole pages.</summary>
+        public const int PageFamilyBlockSize = 16;
+
+        /// <summary>Reuse prompt prefixes across requests through the radix prefix
+        /// cache. Default true; <c>TS_SCHED_PREFIX_CACHE=0</c> / <c>--no-prefix-cache</c>
+        /// turn it off.</summary>
         public bool EnablePrefixCaching { get; init; } = true;
-
-        /// <summary>Radix owns prefix reuse by default. Legacy remains available for
-        /// compatibility diagnostics through <c>TS_PREFIX_CACHE_MODE=legacy</c>.
-        /// <see cref="EnablePrefixCaching"/> disables reuse in either mode.</summary>
-        public PrefixCacheMode PrefixCacheMode { get; init; } = PrefixCacheMode.Tree;
 
         /// <summary>
         /// End a sequence whose output has locked into a loop (see
@@ -101,23 +105,32 @@ namespace TensorSharp.Runtime.Scheduling
         /// <summary>This configuration with a different speculation policy: the
         /// executor swaps it at run time when the host toggles speculation, so the
         /// planner (a pure function of the config) sees the change on the next step.</summary>
-        public SchedulerConfig WithSpeculation(SpeculationOptions speculation) => new()
+        public SchedulerConfig WithSpeculation(SpeculationOptions speculation)
+            => Copy(BlockSize, speculation ?? SpeculationOptions.Disabled);
+
+        /// <summary>This configuration with the block size the engine resolved.</summary>
+        internal SchedulerConfig WithBlockSize(int blockSize) => Copy(blockSize, Speculation);
+
+        private SchedulerConfig Copy(int blockSize, SpeculationOptions speculation) => new()
         {
             MaxNumBatchedTokens = MaxNumBatchedTokens,
             MaxNumRunningSequences = MaxNumRunningSequences,
             MaxPrefillChunkSize = MaxPrefillChunkSize,
             SoloPrefillChunkSize = SoloPrefillChunkSize,
             NumBlocks = NumBlocks,
-            BlockSize = BlockSize,
+            BlockSize = blockSize,
             EnablePrefixCaching = EnablePrefixCaching,
-            PrefixCacheMode = PrefixCacheMode,
             StopRepetition = StopRepetition,
             DecodeQuantumTokens = DecodeQuantumTokens,
-            Speculation = speculation ?? SpeculationOptions.Disabled,
+            Speculation = speculation,
         };
 
         public static SchedulerConfig FromEnvironment()
         {
+            if (!string.IsNullOrEmpty(System.Environment.GetEnvironmentVariable("TS_PREFIX_CACHE_MODE")))
+                throw new System.ArgumentException(
+                    "TS_PREFIX_CACHE_MODE was removed: the radix prefix cache is the only prefix cache. " +
+                    "Unset it; TS_SCHED_PREFIX_CACHE=0 (or --no-prefix-cache) turns prefix caching off.");
             var cfg = new SchedulerConfig
             {
                 MaxNumBatchedTokens = ReadInt("TS_SCHED_MAX_BATCHED_TOKENS", 4096),
@@ -125,9 +138,8 @@ namespace TensorSharp.Runtime.Scheduling
                 MaxPrefillChunkSize = ReadInt("TS_SCHED_PREFILL_CHUNK", 256),
                 SoloPrefillChunkSize = ReadInt("TS_SCHED_SOLO_PREFILL_CHUNK", 8192),
                 NumBlocks = ReadInt("TS_SCHED_NUM_BLOCKS", 256),
-                BlockSize = ReadInt("TS_SCHED_BLOCK_SIZE", 256),
+                BlockSize = ReadInt("TS_SCHED_BLOCK_SIZE", 0),
                 EnablePrefixCaching = ReadBool("TS_SCHED_PREFIX_CACHE", true),
-                PrefixCacheMode = ReadPrefixCacheMode(),
                 StopRepetition = ReadBool("TS_SCHED_STOP_REPETITION", true),
                 DecodeQuantumTokens = ReadInt("TS_SCHED_DECODE_QUANTUM", 256),
                 Speculation = SpeculationOptions.FromEnvironment(),
@@ -141,16 +153,6 @@ namespace TensorSharp.Runtime.Scheduling
             if (!string.IsNullOrEmpty(raw) && int.TryParse(raw, out int v) && v > 0)
                 return v;
             return fallback;
-        }
-
-        private static PrefixCacheMode ReadPrefixCacheMode()
-        {
-            string? raw = System.Environment.GetEnvironmentVariable("TS_PREFIX_CACHE_MODE");
-            if (string.IsNullOrWhiteSpace(raw) || string.Equals(raw.Trim(), "tree", System.StringComparison.OrdinalIgnoreCase))
-                return PrefixCacheMode.Tree;
-            if (string.Equals(raw.Trim(), "legacy", System.StringComparison.OrdinalIgnoreCase))
-                return PrefixCacheMode.Legacy;
-            throw new System.ArgumentException("TS_PREFIX_CACHE_MODE must be 'tree' or 'legacy'.");
         }
 
         // Boolean flag reader that accepts "0"/"1" (and "true"/"false"). Unlike

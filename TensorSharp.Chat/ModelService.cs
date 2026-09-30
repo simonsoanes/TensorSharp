@@ -89,13 +89,6 @@ namespace TensorSharp.Server
         /// speculation (see <see cref="ModelLifecycleService.DraftHeadRefusedByModel"/>).</summary>
         public bool DraftHeadRefusedByModel => _lifecycle.DraftHeadRefusedByModel;
 
-        /// <summary>
-        /// Snapshot of the intrinsic compatibility session's tracked history.
-        /// Session-aware requests use the explicit <see cref="ChatSession"/>
-        /// instance passed to the generation methods.
-        /// </summary>
-        public IReadOnlyList<ChatMessage> TrackedHistory => _intrinsicSession.Transcripts.LatestTranscript;
-
         public bool IsModelAlreadyLoaded(string modelName)
         {
             return _lifecycle.IsModelAlreadyLoaded(modelName);
@@ -216,7 +209,7 @@ namespace TensorSharp.Server
             if (session == null)
                 return;
             // Guard against a concurrent request on the same (e.g. default) session reading/rewriting
-            // TrackedHistory while we clear it.
+            // its transcripts while we clear them.
             // A shared session (the stateless API session, the Web UI default session)
             // holds other clients' conversations too; one client's new chat is simply a
             // request whose history proves no earlier turn, so nothing is cleared there.
@@ -239,7 +232,7 @@ namespace TensorSharp.Server
         }
 
         /// <summary>
-        /// Stream chat inference tokens. Must be called within the InferenceQueue to prevent concurrent access.
+        /// Stream chat inference tokens.
         /// </summary>
         public IAsyncEnumerable<string> ChatStreamAsync(
             List<ChatMessage> history,
@@ -254,7 +247,7 @@ namespace TensorSharp.Server
 
         /// <summary>
         /// Stream chat inference tokens using the given <paramref name="session"/>'s
-        /// tracked history. Must be called within the InferenceQueue.
+        /// tracked history.
         /// </summary>
         public IAsyncEnumerable<string> ChatStreamAsync(
             ChatSession session,
@@ -269,7 +262,7 @@ namespace TensorSharp.Server
         }
 
         /// <summary>
-        /// Stream chat inference tokens with timing metrics. Must be called within the InferenceQueue.
+        /// Stream chat inference tokens with timing metrics.
         /// </summary>
         public IAsyncEnumerable<ChatStreamUpdate>
             ChatStreamWithMetricsAsync(
@@ -424,8 +417,7 @@ namespace TensorSharp.Server
         public virtual bool IsDiffusionModel => _lifecycle.Model is DiffusionGemmaModel;
 
         /// <summary>Stream a DiffusionGemma chat turn as rich denoising updates (live preview canvases +
-        /// final answer + metrics). Used by the Web UI for a live denoising view. Must be called within
-        /// the InferenceQueue.</summary>
+        /// final answer + metrics). Used by the Web UI for a live denoising view.</summary>
         internal IAsyncEnumerable<DiffusionStreamUpdate> DiffusionChatStreamAsync(
             ChatSession session,
             List<ChatMessage> history,
@@ -438,7 +430,7 @@ namespace TensorSharp.Server
         }
 
         /// <summary>
-        /// Stream generate tokens. Must be called within the InferenceQueue to prevent concurrent access.
+        /// Stream generate tokens.
         /// Intended for one-shot completions and does not update session history.
         /// </summary>
         public IAsyncEnumerable<ChatStreamUpdate>

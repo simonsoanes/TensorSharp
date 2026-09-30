@@ -276,6 +276,192 @@ internal static class GlmDsaSyntheticModelBuilder
         return path;
     }
 
+    /// <summary>
+    /// A small glm5next model with the production model's widths where the direct-CUDA engine's
+    /// kernels are specialized: KDA heads 128 wide, a 512-wide MLA latent, a 128-wide indexer key,
+    /// 4 hyper-connection streams over a hidden width whose flattening is a multiple of 256, and
+    /// expert widths that are multiples of 128 (the tensor-core expert kernel's k-step). Four
+    /// trunk layers (KDA with a dense FFN, then MLA, KDA, MLA over 8 routed experts), every
+    /// matrix Q8_0 as in the published checkpoint's dense projections, a SwiGLU clamp, and an
+    /// indexer top-k past any prompt the tests use (the dense attention both engines run there).
+    /// The indexer has 16 heads (the checkpoint has 32): a pool scores exactly 0 when every head's
+    /// dot product is negative, and with two heads a quarter of the pools would, leaving the
+    /// selection mostly to tie order.
+    /// </summary>
+    /// <param name="indexerTopK">Cells the indexer keeps per query once it selects; the default is
+    /// past any prompt the tests use (dense attention), a small value makes the pooled selection
+    /// run from the first ubatch.</param>
+    public static string WriteGlm5NextCudaFixture(string path, int contextLength = 512, int indexerTopK = 2048)
+    {
+        const string a = "glm5next";
+        const int hidden = 256, heads = 2, headDim = 128, lowRank = 64, conv = 4, hc = 4, vocab = 256;
+        const int qLora = 64, kvLora = 512, headK = 128, headV = 128;
+        const int idxHeads = 16, idxDim = 128, experts = 8, used = 2, expertFfn = 256, ffn = 256, layers = 4;
+        int dInner = heads * headDim;
+        var tensors = new List<TensorSpec>
+        {
+            Gen("token_embd.weight", 0.5f, hidden, vocab),
+            Gen("output_norm.weight", 0.5f, hidden),
+            Gen("output.weight", 0.08f, hidden, vocab),
+        };
+        var kvHeads = new uint[layers];
+        for (int l = 0; l < layers; l++)
+        {
+            string p = $"blk.{l}.";
+            tensors.AddRange(new[]
+            {
+                Gen(p + "attn_norm.weight", 0.5f, hidden),
+                Gen(p + "ffn_norm.weight", 0.5f, hidden),
+                Gen(p + "hc_attn_fn.weight", 0.05f, hc * hidden, (2 + hc) * hc),
+                Gen(p + "hc_attn_scale.weight", 0.2f, 3),
+                Gen(p + "hc_attn_base.weight", 0.2f, (2 + hc) * hc),
+                Gen(p + "hc_ffn_fn.weight", 0.05f, hc * hidden, (2 + hc) * hc),
+                Gen(p + "hc_ffn_scale.weight", 0.2f, 3),
+                Gen(p + "hc_ffn_base.weight", 0.2f, (2 + hc) * hc),
+            });
+            if (l % 2 == 0)
+            {
+                tensors.AddRange(new[]
+                {
+                    Gen(p + "attn_q.weight", 0.08f, hidden, dInner),
+                    Gen(p + "attn_k.weight", 0.08f, hidden, dInner),
+                    Gen(p + "attn_v.weight", 0.08f, hidden, dInner),
+                    Gen(p + "ssm_conv1d_q.weight", 0.3f, conv, 1, dInner),
+                    Gen(p + "ssm_conv1d_k.weight", 0.3f, conv, 1, dInner),
+                    Gen(p + "ssm_conv1d_v.weight", 0.3f, conv, 1, dInner),
+                    Gen(p + "ssm_f_a.weight", 0.08f, hidden, lowRank),
+                    Gen(p + "ssm_f_b.weight", 0.08f, lowRank, dInner),
+                    Gen(p + "ssm_dt.bias", 0.5f, dInner),
+                    Gen(p + "ssm_a", 0.5f, heads),
+                    Gen(p + "ssm_beta.weight", 0.08f, hidden, heads),
+                    Gen(p + "ssm_g_a.weight", 0.08f, hidden, lowRank),
+                    Gen(p + "ssm_g_b.weight", 0.08f, lowRank, dInner),
+                    Gen(p + "ssm_norm.weight", 0.5f, headDim),
+                    Gen(p + "attn_output.weight", 0.08f, dInner, hidden),
+                });
+            }
+            else
+            {
+                kvHeads[l] = 1;
+                tensors.AddRange(new[]
+                {
+                    Gen(p + "attn_q_a.weight", 0.08f, hidden, qLora),
+                    Gen(p + "attn_q_a_norm.weight", 0.5f, qLora),
+                    Gen(p + "attn_q_b.weight", 0.08f, qLora, heads * headK),
+                    Gen(p + "attn_kv_a_mqa.weight", 0.08f, hidden, kvLora),
+                    Gen(p + "attn_kv_a_norm.weight", 0.5f, kvLora),
+                    Gen(p + "attn_k_b.weight", 0.08f, headK, kvLora, heads),
+                    Gen(p + "attn_v_b.weight", 0.08f, kvLora, headV, heads),
+                    Gen(p + "attn_output.weight", 0.08f, heads * headV, hidden),
+                    Gen(p + "indexer.attn_q_b.weight", 0.08f, qLora, idxHeads * idxDim),
+                    Gen(p + "indexer.attn_k.weight", 0.08f, hidden, idxDim),
+                    Gen(p + "indexer.k_norm.weight", 0.5f, idxDim),
+                    Gen(p + "indexer.k_norm.bias", 0.05f, idxDim),
+                    Gen(p + "indexer.proj.weight", 0.2f, hidden, idxHeads),
+                    Gen(p + "indexer_compressor_gate.weight", 0.08f, hidden, idxDim),
+                    Gen(p + "indexer_compressor_ape.weight", 0.2f, idxDim, 4),
+                });
+            }
+            if (l == 0)
+            {
+                tensors.AddRange(new[]
+                {
+                    Gen(p + "ffn_gate.weight", 0.08f, hidden, ffn),
+                    Gen(p + "ffn_up.weight", 0.08f, hidden, ffn),
+                    Gen(p + "ffn_down.weight", 0.08f, ffn, hidden),
+                });
+            }
+            else
+            {
+                tensors.AddRange(new[]
+                {
+                    Gen(p + "ffn_gate_inp.weight", 0.3f, hidden, experts),
+                    Gen(p + "exp_probs_b.bias", 0.1f, experts),
+                    Gen(p + "ffn_gate_exps.weight", 0.08f, hidden, expertFfn, experts),
+                    Gen(p + "ffn_up_exps.weight", 0.08f, hidden, expertFfn, experts),
+                    Gen(p + "ffn_down_exps.weight", 0.08f, expertFfn, hidden, experts),
+                    Gen(p + "ffn_gate_shexp.weight", 0.08f, hidden, expertFfn),
+                    Gen(p + "ffn_up_shexp.weight", 0.08f, hidden, expertFfn),
+                    Gen(p + "ffn_down_shexp.weight", 0.08f, expertFfn, hidden),
+                });
+            }
+        }
+        // As the published checkpoint stores them: matrices Q8_0 (the router stays F32), 1D F32.
+        foreach (var t in tensors)
+            if (t.Dims.Length >= 2 && !t.Name.EndsWith("ffn_gate_inp.weight", StringComparison.Ordinal)
+                && !t.Name.Contains("ssm_conv1d", StringComparison.Ordinal)
+                && !t.Name.EndsWith("indexer.proj.weight", StringComparison.Ordinal)
+                && !t.Name.EndsWith("indexer_compressor_ape.weight", StringComparison.Ordinal))
+                t.Type = GgmlType.Q8_0;
+
+        var clamp = new float[layers];
+        Array.Fill(clamp, 10.0f);
+        var kv = new List<KvEntry>
+        {
+            new KvStr  { Key = "general.architecture", V = a },
+            new KvStr  { Key = "general.name", V = "tiny-glm5next-cuda" },
+            new KvU32  { Key = $"{a}.block_count", V = layers },
+            new KvU32  { Key = $"{a}.context_length", V = (uint)contextLength },
+            new KvU32  { Key = $"{a}.embedding_length", V = hidden },
+            new KvU32  { Key = $"{a}.feed_forward_length", V = ffn },
+            new KvU32  { Key = $"{a}.attention.head_count", V = heads },
+            new KvU32Arr { Key = $"{a}.attention.head_count_kv", V = kvHeads },
+            new KvF32  { Key = $"{a}.rope.freq_base", V = 10000.0f },
+            new KvF32  { Key = $"{a}.attention.layer_norm_rms_epsilon", V = 1e-5f },
+            new KvF32  { Key = $"{a}.attention.layer_norm_epsilon", V = 1e-6f },
+            new KvU32  { Key = $"{a}.attention.key_length", V = kvLora },
+            new KvU32  { Key = $"{a}.attention.value_length", V = kvLora },
+            new KvU32  { Key = $"{a}.attention.q_lora_rank", V = qLora },
+            new KvU32  { Key = $"{a}.attention.kv_lora_rank", V = kvLora },
+            new KvU32  { Key = $"{a}.attention.key_length_mla", V = headK },
+            new KvU32  { Key = $"{a}.attention.value_length_mla", V = headV },
+            new KvU32  { Key = $"{a}.rope.dimension_count", V = 0 },
+            new KvU32  { Key = $"{a}.leading_dense_block_count", V = 1 },
+            new KvU32  { Key = $"{a}.expert_count", V = experts },
+            new KvU32  { Key = $"{a}.expert_used_count", V = used },
+            new KvU32  { Key = $"{a}.expert_feed_forward_length", V = expertFfn },
+            new KvU32  { Key = $"{a}.expert_shared_feed_forward_length", V = expertFfn },
+            new KvU32  { Key = $"{a}.expert_shared_count", V = 1 },
+            new KvU32  { Key = $"{a}.expert_group_count", V = 1 },
+            new KvU32  { Key = $"{a}.expert_group_used_count", V = 1 },
+            new KvU32  { Key = $"{a}.expert_gating_func", V = 2 },
+            new KvF32  { Key = $"{a}.expert_weights_scale", V = 2.5f },
+            new KvBool { Key = $"{a}.expert_weights_norm", V = true },
+            new KvF32Arr { Key = $"{a}.swiglu_clamp_exp", V = clamp },
+            new KvF32Arr { Key = $"{a}.swiglu_clamp_shexp", V = clamp },
+            new KvU32  { Key = $"{a}.attention.indexer.head_count", V = idxHeads },
+            new KvU32  { Key = $"{a}.attention.indexer.key_length", V = idxDim },
+            new KvU32  { Key = $"{a}.attention.indexer.top_k", V = (uint)indexerTopK },
+            new KvU32  { Key = $"{a}.attention.indexer.kpool", V = 4 },
+            new KvU32  { Key = $"{a}.kda.head_dim", V = headDim },
+            new KvU32  { Key = $"{a}.ssm.conv_kernel", V = conv },
+            new KvF32  { Key = $"{a}.kda.gate_lower_bound", V = -5.0f },
+            new KvU32  { Key = $"{a}.hyper_connection.count", V = hc },
+            new KvU32  { Key = $"{a}.hyper_connection.sinkhorn_iterations", V = 20 },
+            new KvF32  { Key = $"{a}.hyper_connection.epsilon", V = 1e-6f },
+            new KvU32  { Key = $"{a}.vocab_size", V = vocab },
+        };
+        var tokens = new List<string>(vocab);
+        foreach (int b in ByteToUnicode(vocab)) tokens.Add(char.ConvertFromUtf32(b));
+        var types = new int[vocab];
+        Array.Fill(types, 1);
+        kv.Add(new KvStr { Key = "tokenizer.ggml.model", V = "gpt2" });
+        kv.Add(new KvStr { Key = "tokenizer.ggml.pre", V = "gpt-2" });
+        kv.Add(new KvStrArr { Key = "tokenizer.ggml.tokens", V = tokens });
+        kv.Add(new KvI32Arr { Key = "tokenizer.ggml.token_type", V = types });
+        kv.Add(new KvStrArr { Key = "tokenizer.ggml.merges", V = Array.Empty<string>() });
+        kv.Add(new KvU32 { Key = "tokenizer.ggml.bos_token_id", V = 'A' });
+        kv.Add(new KvU32 { Key = "tokenizer.ggml.eos_token_id", V = 'Z' });
+        kv.Add(new KvBool { Key = "tokenizer.ggml.add_bos_token", V = false });
+        kv.Add(new KvBool { Key = "tokenizer.ggml.add_eos_token", V = false });
+        kv.Add(new KvU32 { Key = "general.file_type", V = 7u });
+        kv.Add(new KvU32 { Key = "general.quantization_version", V = 2 });
+
+        using var fs = new FileStream(path, FileMode.Create, FileAccess.Write);
+        WriteGguf(fs, kv, tensors);
+        return path;
+    }
+
     private enum GgmlType { F32 = 0, Q8_0 = 8 }
 
     private const int Q8Block = 32;
@@ -458,6 +644,15 @@ internal static class GlmDsaSyntheticModelBuilder
         {
             w.Write((uint)9); w.Write((uint)5); w.Write((ulong)V.Count);
             foreach (int v in V) w.Write(v);
+        }
+    }
+    private sealed class KvF32Arr : KvEntry
+    {
+        public IReadOnlyList<float> V;
+        public override void Write(BinaryWriter w)
+        {
+            w.Write((uint)9); w.Write((uint)6); w.Write((ulong)V.Count);
+            foreach (float v in V) w.Write(v);
         }
     }
     private sealed class KvU32Arr : KvEntry

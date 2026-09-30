@@ -1489,11 +1489,6 @@ internal enum GgmlIndexReductionOp
                 // No native library on this host (e.g. a managed-only unit test):
                 // nothing to configure.
             }
-            catch (EntryPointNotFoundException)
-            {
-                // Older GgmlOps without the setter; the native-side backstop in
-                // TSGgml_TensorParallelInit still applies where it can.
-            }
         }
 
         private static void ApplyTensorParallelCudaGraphTunable()
@@ -1726,11 +1721,7 @@ internal enum GgmlIndexReductionOp
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial void TSGgml_ReleaseFusedFfnTpGraphs();
 
-        public static void ReleaseFusedFfnTpGraphs()
-        {
-            try { TSGgml_ReleaseFusedFfnTpGraphs(); }
-            catch (EntryPointNotFoundException) { }
-        }
+        public static void ReleaseFusedFfnTpGraphs() => TSGgml_ReleaseFusedFfnTpGraphs();
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -2262,40 +2253,6 @@ internal enum GgmlIndexReductionOp
             int maxSeqLen, int position,
             float scale, int kvCacheType);
 
-        // Device-resident paged K/V pool. The pool tensors live on the backend
-        // for the model's lifetime; only this step's new rows (scatter) and the
-        // per-sequence row-index vectors (attention) cross the bus.
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial IntPtr TSGgml_PagedKvPoolCreate(
-            int numLayers, int numBlocks, int blockSize, int numKvHeads, int headDim);
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_PagedKvPoolFree(IntPtr handle);
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial long TSGgml_PagedKvPoolBytes(IntPtr handle);
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_PagedKvPoolGrow(IntPtr handle, int newNumBlocks);
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_PagedKvPoolScatter(
-            IntPtr handle, int layer, IntPtr kData, IntPtr vData,
-            IntPtr slotMapping, int numTokens);
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_PagedKvPoolAttention(
-            IntPtr handle, int layer, IntPtr qData, IntPtr outData,
-            IntPtr queryStartLoc, IntPtr seqLens, IntPtr positions,
-            IntPtr blockTableFlat, IntPtr blockTableOffsets,
-            int numSeqs, int numTokens, int numHeads, int slidingWindow, float scale);
-
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial int TSGgml_PagedAttentionForward(
@@ -2446,11 +2403,7 @@ internal enum GgmlIndexReductionOp
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial void TSGgml_Qwen35ReleaseAttentionTpGraphs();
 
-        public static void Qwen35ReleaseAttentionTpGraphs()
-        {
-            try { TSGgml_Qwen35ReleaseAttentionTpGraphs(); }
-            catch (EntryPointNotFoundException) { }
-        }
+        public static void Qwen35ReleaseAttentionTpGraphs() => TSGgml_Qwen35ReleaseAttentionTpGraphs();
 
         public static void Qwen35AttentionLayerPrefill(
             IntPtr hiddenData, int hiddenSize, int seqLen,
@@ -2844,12 +2797,9 @@ internal enum GgmlIndexReductionOp
         /// transient prefill path's ggml context and per-call buffers). Call on
         /// dispose and on KV reset, while the backends are still alive.
         /// </summary>
-        public static void MuseGlimmerReleaseTpGraphs()
-        {
-            try { TSGgml_MuseGlimmerReleaseTpGraphs(); }
-            catch (EntryPointNotFoundException) { }
-        }
+        public static void MuseGlimmerReleaseTpGraphs() => TSGgml_MuseGlimmerReleaseTpGraphs();
 
+        // Token-batched dense decode; cacheSizeArr is [numLayers*nSeqs] in layer-major order.
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial int TSGgml_Gemma4ModelDecodeBatched(
@@ -2873,34 +2823,6 @@ internal enum GgmlIndexReductionOp
             IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr,
             IntPtr logitsData, int vocabSize,
             IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNormData, float logitSoftcap);
-
-        // Extended token-batched dense decode: the v1 signature plus the KV-donor
-        // map, uploaded / in-kernel-gathered PLE (per-row token ids). Probe
-        // TSGgml_Gemma4BatchedDecodeCapabilities before using it.
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Gemma4ModelDecodeBatchedEx(
-            IntPtr hiddenData, int hiddenSize, int numLayers, int nSeqs,
-            IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr,
-            IntPtr[] oArr, IntPtr[] postAttnNormArr,
-            IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr,
-            IntPtr[] kCacheArr, IntPtr[] vCacheArr,
-            int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr,
-            float[] ropeBaseArr, float[] layerScalarArr,
-            int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr,
-            int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr,
-            int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr,
-            int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr,
-            int numHeads, int[] positions,
-            float eps, int slidingWindow,
-            IntPtr ropeFreqFactors, int ropeFreqFactorsLen,
-            int[] ropeNDimsArr,
-            int kvCacheType,
-            IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr,
-            IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr,
-            IntPtr logitsData, int vocabSize,
-            IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
             IntPtr finalNormData, float logitSoftcap,
             int[] kvSourceArr,
             IntPtr pleData, int pleDim,
@@ -2913,47 +2835,6 @@ internal enum GgmlIndexReductionOp
             IntPtr pleModelProjData, int pleModelProjType,
             long pleModelProjNe0, long pleModelProjNe1, long pleModelProjBytes,
             IntPtr pleModelProjNormData);
-
-        // Same ABI as Ex; cacheSizeArr is [numLayers*nSeqs] in layer-major order.
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Gemma4ModelDecodeBatchedEx2(
-            IntPtr hiddenData, int hiddenSize, int numLayers, int nSeqs,
-            IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr,
-            IntPtr[] oArr, IntPtr[] postAttnNormArr,
-            IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr,
-            IntPtr[] kCacheArr, IntPtr[] vCacheArr,
-            int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr,
-            float[] ropeBaseArr, float[] layerScalarArr,
-            int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr,
-            int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr,
-            int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr,
-            int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr,
-            int numHeads, int[] positions,
-            float eps, int slidingWindow,
-            IntPtr ropeFreqFactors, int ropeFreqFactorsLen,
-            int[] ropeNDimsArr,
-            int kvCacheType,
-            IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr,
-            IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr,
-            IntPtr logitsData, int vocabSize,
-            IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNormData, float logitSoftcap,
-            int[] kvSourceArr,
-            IntPtr pleData, int pleDim,
-            IntPtr[] pleGateArr, int[] pleGateTypeArr, long[] pleGateNe0Arr, long[] pleGateNe1Arr, long[] pleGateBytesArr,
-            IntPtr[] pleProjArr, int[] pleProjTypeArr, long[] pleProjNe0Arr, long[] pleProjNe1Arr, long[] pleProjBytesArr,
-            IntPtr[] plePostNormArr,
-            IntPtr pleTokenEmbdData, int pleTokenEmbdType,
-            long pleTokenEmbdNe0, long pleTokenEmbdNe1, long pleTokenEmbdBytes,
-            int[] pleTokenIds,
-            IntPtr pleModelProjData, int pleModelProjType,
-            long pleModelProjNe0, long pleModelProjNe1, long pleModelProjBytes,
-            IntPtr pleModelProjNormData);
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Gemma4BatchedDecodeCapabilities();
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -3587,11 +3468,7 @@ internal enum GgmlIndexReductionOp
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial void TSGgml_Gemma4MoEReleaseVerifyTpGraphs();
 
-        public static void Gemma4MoEReleaseVerifyTpGraphs()
-        {
-            try { TSGgml_Gemma4MoEReleaseVerifyTpGraphs(); }
-            catch (EntryPointNotFoundException) { }
-        }
+        public static void Gemma4MoEReleaseVerifyTpGraphs() => TSGgml_Gemma4MoEReleaseVerifyTpGraphs();
 
         public static bool Gemma4MoEModelVerify(Gemma4MoELayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int startPos, int numTokens,
             byte[] mmIsExcept = null, int tpDegree = 1, IntPtr[] tpPlanOut = null)
@@ -3644,20 +3521,6 @@ internal enum GgmlIndexReductionOp
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial void TSGgml_Qwen35ResetDecodeCache();
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Qwen35RopePositionAbi();
-
-        /// <summary>The Qwen3.5 fused-graph position contract the loaded library
-        /// implements (see TSGgml_Qwen35RopePositionAbi), or 0 for a library built
-        /// before the solo decode, verify and arena entry points took the RoPE
-        /// position separately from the KV index.</summary>
-        public static int Qwen35RopePositionAbi()
-        {
-            try { return TSGgml_Qwen35RopePositionAbi(); }
-            catch (EntryPointNotFoundException) { return 0; }
-        }
 
         // Qwen3.5/3.8 SLOT-STABLE ARENA token-batched decode (the GPT-OSS arena
         // design ported to the hybrid GDN + attention family; see
@@ -3753,11 +3616,7 @@ internal enum GgmlIndexReductionOp
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial void TSGgml_Gemma4ReleaseVerifyTpGraphs();
 
-        public static void Gemma4ReleaseVerifyTpGraphs()
-        {
-            try { TSGgml_Gemma4ReleaseVerifyTpGraphs(); }
-            catch (EntryPointNotFoundException) { }
-        }
+        public static void Gemma4ReleaseVerifyTpGraphs() => TSGgml_Gemma4ReleaseVerifyTpGraphs();
 
         public static void Gemma4ResetDecodeCache() => TSGgml_Gemma4ResetDecodeCache();
 
@@ -3805,12 +3664,6 @@ internal enum GgmlIndexReductionOp
             float eps, float ropeBase, float ropeFreqScale,
             int numExperts, int numExpertsUsed, int expertFf, int sharedFf,
             int normTopk, float expertWeightsScale);
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Qwen35ResetBatchedDecodeCache();
-
-        public static void Qwen35ResetBatchedDecodeCache() => TSGgml_Qwen35ResetBatchedDecodeCache();
 
         public static bool Qwen35ModelDecodeBatched(
             Qwen35LayerDecodeArgs[] layers, int numLayers,
@@ -4011,21 +3864,13 @@ internal enum GgmlIndexReductionOp
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial void TSGgml_Qwen35ReleaseVerifyTpGraphs();
 
-        public static void Qwen35ReleaseVerifyTpGraphs()
-        {
-            try { TSGgml_Qwen35ReleaseVerifyTpGraphs(); }
-            catch (EntryPointNotFoundException) { }
-        }
+        public static void Qwen35ReleaseVerifyTpGraphs() => TSGgml_Qwen35ReleaseVerifyTpGraphs();
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial void TSGgml_Qwen35ReleaseVerifyOwner(long ownerId);
 
-        public static void Qwen35ReleaseVerifyOwner(long ownerId)
-        {
-            try { TSGgml_Qwen35ReleaseVerifyOwner(ownerId); }
-            catch (EntryPointNotFoundException) { }
-        }
+        public static void Qwen35ReleaseVerifyOwner(long ownerId) => TSGgml_Qwen35ReleaseVerifyOwner(ownerId);
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -4140,7 +3985,7 @@ internal enum GgmlIndexReductionOp
             IntPtr resData,
             int nEmbd, int hc, int hcLowRank, int nTokens,
             int nExpert, int nExpertUsed, int nFf, int nFfShared,
-            float eps, int cacheSlot, int resResident);
+            float eps, int cacheSlot);
 
         [LibraryImport(DllName)]
         private static partial int TSGgml_Qwen4ExpGdnBlock(
@@ -4148,7 +3993,7 @@ internal enum GgmlIndexReductionOp
             IntPtr resData,
             int nEmbd, int hc, int hcLowRank, int nTokens,
             int headKDim, int headVDim, int nKHeads, int nVHeads, int dConv,
-            float eps, int cacheSlot, int resResident);
+            float eps, int cacheSlot);
 
         [LibraryImport(DllName)]
         internal static partial void TSGgml_Qwen4ExpResetFfnCache();
@@ -4161,9 +4006,6 @@ internal enum GgmlIndexReductionOp
 
         [LibraryImport(DllName)]
         internal static unsafe partial void TSGgml_Qwen4ExpReleaseSeqState(IntPtr* keys, int n);
-
-        [LibraryImport(DllName)]
-        internal static partial int TSGgml_Qwen4ExpSpecApiVersion();
 
         [LibraryImport(DllName)]
         internal static partial IntPtr TSGgml_Qwen4ExpMtpCreate(ref Qwen4ExpMtpConfig config,
@@ -4225,23 +4067,20 @@ internal enum GgmlIndexReductionOp
         /// </summary>
         public static bool Qwen4ExpFfnBlock(ref Qwen4ExpFfnArgs args, IntPtr resData,
             int nEmbd, int hc, int hcLowRank, int nTokens,
-            int nExpert, int nExpertUsed, int nFf, int nFfShared, float eps, int cacheSlot,
-            bool resResident)
+            int nExpert, int nExpertUsed, int nFf, int nFfShared, float eps, int cacheSlot)
         {
             return TSGgml_Qwen4ExpFfnBlock(ref args, resData,
                 nEmbd, hc, hcLowRank, nTokens,
-                nExpert, nExpertUsed, nFf, nFfShared, eps, cacheSlot,
-                resResident ? 1 : 0) != 0;
+                nExpert, nExpertUsed, nFf, nFfShared, eps, cacheSlot) != 0;
         }
 
         public static bool Qwen4ExpGdnBlock(ref Qwen4ExpGdnArgs args, IntPtr resData,
             int nEmbd, int hc, int hcLowRank, int nTokens,
             int headKDim, int headVDim, int nKHeads, int nVHeads, int dConv,
-            float eps, int cacheSlot, bool resResident)
+            float eps, int cacheSlot)
         {
             return TSGgml_Qwen4ExpGdnBlock(ref args, resData, nEmbd, hc, hcLowRank, nTokens,
-                headKDim, headVDim, nKHeads, nVHeads, dConv, eps, cacheSlot,
-                resResident ? 1 : 0) != 0;
+                headKDim, headVDim, nKHeads, nVHeads, dConv, eps, cacheSlot) != 0;
         }
 
         [LibraryImport(DllName)]
@@ -4252,60 +4091,29 @@ internal enum GgmlIndexReductionOp
             int nEmbd, int hc, int hcLowRank, int nTokens,
             int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position,
             int nRot, float ropeBase, float ropeFreqScale, float attnScale,
-            float eps, int cacheSlot, int resResident);
+            float eps, int cacheSlot);
 
         public static bool Qwen4ExpAttnBlock(ref Qwen4ExpAttnArgs args, IntPtr resData, IntPtr maskData,
             int nEmbd, int hc, int hcLowRank, int nTokens,
             int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position,
             int nRot, float ropeBase, float ropeFreqScale, float attnScale,
-            float eps, int cacheSlot, bool resResident)
+            float eps, int cacheSlot)
         {
             return TSGgml_Qwen4ExpAttnBlock(ref args, resData, maskData, nEmbd, hc, hcLowRank,
                 nTokens, headDim, nHead, nHeadKv, kvCapacity, nKv, position,
-                nRot, ropeBase, ropeFreqScale, attnScale, eps, cacheSlot,
-                resResident ? 1 : 0) != 0;
+                nRot, ropeBase, ropeFreqScale, attnScale, eps, cacheSlot) != 0;
         }
 
         [LibraryImport(DllName)]
         private static partial int TSGgml_Qwen4ExpTokenSpan(
             IntPtr ffn, IntPtr gdn, IntPtr attn, IntPtr kinds,
-            int layerBegin, int layerEnd,
-            IntPtr resData, IntPtr maskData,
-            int nEmbd, int hc, int hcLowRank, int nTokens,
-            int headKDim, int headVDim, int nKHeads, int nVHeads, int dConv,
-            int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position,
-            int nRot, float ropeBase, float ropeFreqScale, float attnScale,
-            int nExpert, int nExpertUsed, int nFf, int nFfSh,
-            float eps, int cacheSlot, int firstFfnOnly,
-            IntPtr head, IntPtr logitsOut,
-            IntPtr ple, int pleLayer, IntPtr pleEmb,
-            IntPtr mropePos, IntPtr mropeSections, int ropePosition,
-            int device);
-
-        [LibraryImport(DllName)]
-        private static partial int TSGgml_Qwen4ExpTokenSpanEx(
-            IntPtr ffn, IntPtr gdn, IntPtr attn, IntPtr kinds,
             int layerBegin, int layerEnd, IntPtr resData, IntPtr maskData,
             int nEmbd, int hc, int hcLowRank, int nTokens,
             int headKDim, int headVDim, int nKHeads, int nVHeads, int dConv,
             int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position,
             int nRot, float ropeBase, float ropeFreqScale, float attnScale,
             int nExpert, int nExpertUsed, int nFf, int nFfSh,
-            float eps, int cacheSlot, int firstFfnOnly, IntPtr head, IntPtr logitsOut,
-            IntPtr ple, int pleLayer, IntPtr pleEmb,
-            IntPtr mropePos, IntPtr mropeSections, int ropePosition, int device,
-            IntPtr hiddenOut, int logitsRows);
-
-        [LibraryImport(DllName)]
-        private static partial int TSGgml_Qwen4ExpTokenSpanQsa(
-            IntPtr ffn, IntPtr gdn, IntPtr attn, IntPtr kinds,
-            int layerBegin, int layerEnd, IntPtr resData, IntPtr maskData,
-            int nEmbd, int hc, int hcLowRank, int nTokens,
-            int headKDim, int headVDim, int nKHeads, int nVHeads, int dConv,
-            int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position,
-            int nRot, float ropeBase, float ropeFreqScale, float attnScale,
-            int nExpert, int nExpertUsed, int nFf, int nFfSh,
-            float eps, int cacheSlot, int firstFfnOnly, IntPtr head, IntPtr logitsOut,
+            float eps, int cacheSlot, IntPtr head, IntPtr logitsOut,
             IntPtr ple, int pleLayer, IntPtr pleEmb,
             IntPtr mropePos, IntPtr mropeSections, int ropePosition, int device,
             IntPtr hiddenOut, int logitsRows, IntPtr qsa, IntPtr qsaPositions, int qsaPositionCount);
@@ -4319,57 +4127,28 @@ internal enum GgmlIndexReductionOp
             int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position,
             int nRot, float ropeBase, float ropeFreqScale, float attnScale,
             int nExpert, int nExpertUsed, int nFf, int nFfSh,
-            float eps, int cacheSlot, bool firstFfnOnly,
+            float eps, int cacheSlot,
             IntPtr head, IntPtr logitsOut,
             IntPtr ple, int pleLayer, IntPtr pleEmb,
             IntPtr mropePos, IntPtr mropeSections, int ropePosition, int device,
-            IntPtr hiddenOut = default, int logitsRows = 1,
-            IntPtr qsa = default, IntPtr qsaPositions = default, int qsaPositionCount = 0)
+            IntPtr hiddenOut, int logitsRows,
+            IntPtr qsa, IntPtr qsaPositions, int qsaPositionCount)
         {
-            if (qsa != IntPtr.Zero)
-                return TSGgml_Qwen4ExpTokenSpanQsa(ffn, gdn, attn, kinds, layerBegin, layerEnd,
-                    resData, maskData, nEmbd, hc, hcLowRank, nTokens,
-                    headKDim, headVDim, nKHeads, nVHeads, dConv,
-                    headDim, nHead, nHeadKv, kvCapacity, nKv, position,
-                    nRot, ropeBase, ropeFreqScale, attnScale,
-                    nExpert, nExpertUsed, nFf, nFfSh, eps, cacheSlot,
-                    firstFfnOnly ? 1 : 0, head, logitsOut, ple, pleLayer, pleEmb,
-                    mropePos, mropeSections, ropePosition, device, hiddenOut, logitsRows, qsa, qsaPositions, qsaPositionCount) != 0;
-            if (hiddenOut != IntPtr.Zero || logitsRows != 1)
-                return TSGgml_Qwen4ExpTokenSpanEx(ffn, gdn, attn, kinds, layerBegin, layerEnd,
-                    resData, maskData, nEmbd, hc, hcLowRank, nTokens,
-                    headKDim, headVDim, nKHeads, nVHeads, dConv,
-                    headDim, nHead, nHeadKv, kvCapacity, nKv, position,
-                    nRot, ropeBase, ropeFreqScale, attnScale,
-                    nExpert, nExpertUsed, nFf, nFfSh, eps, cacheSlot,
-                    firstFfnOnly ? 1 : 0, head, logitsOut, ple, pleLayer, pleEmb,
-                    mropePos, mropeSections, ropePosition, device, hiddenOut, logitsRows) != 0;
             return TSGgml_Qwen4ExpTokenSpan(ffn, gdn, attn, kinds, layerBegin, layerEnd,
                 resData, maskData, nEmbd, hc, hcLowRank, nTokens,
                 headKDim, headVDim, nKHeads, nVHeads, dConv,
                 headDim, nHead, nHeadKv, kvCapacity, nKv, position,
                 nRot, ropeBase, ropeFreqScale, attnScale,
                 nExpert, nExpertUsed, nFf, nFfSh, eps, cacheSlot,
-                firstFfnOnly ? 1 : 0, head, logitsOut, ple, pleLayer, pleEmb,
-                mropePos, mropeSections, ropePosition, device) != 0;
+                head, logitsOut, ple, pleLayer, pleEmb,
+                mropePos, mropeSections, ropePosition, device,
+                hiddenOut, logitsRows, qsa, qsaPositions, qsaPositionCount) != 0;
         }
 
         [LibraryImport(DllName)]
         private static partial int TSGgml_Qwen4ExpCopyQsaCache(IntPtr key, IntPtr destination, long bytes, int device);
         public static bool Qwen4ExpCopyQsaCache(IntPtr key, IntPtr destination, long bytes, int device)
             => TSGgml_Qwen4ExpCopyQsaCache(key, destination, bytes, device) != 0;
-
-        [LibraryImport(DllName)]
-        private static partial int TSGgml_Qwen4ExpResUpload(IntPtr data, long bytes);
-
-        [LibraryImport(DllName)]
-        private static partial int TSGgml_Qwen4ExpResDownload(IntPtr data, long bytes);
-
-        public static bool Qwen4ExpResUpload(IntPtr data, long bytes)
-            => TSGgml_Qwen4ExpResUpload(data, bytes) != 0;
-
-        public static bool Qwen4ExpResDownload(IntPtr data, long bytes)
-            => TSGgml_Qwen4ExpResDownload(data, bytes) != 0;
 
         public static void Qwen4ExpResetFfnCache() => TSGgml_Qwen4ExpResetFfnCache();
 
@@ -4397,31 +4176,6 @@ internal enum GgmlIndexReductionOp
             IntPtr ssmNormW,
             float eps,
             IntPtr outBatched);
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_GatedDeltaNetBatchedStepF32(
-            int numSeqs,
-            [In, Out] GdnBatchedSeqDesc[] seqs,
-            int numTokens,
-            IntPtr packedBatched,
-            int packedDim,
-            int qkvDim,
-            int qkDim,
-            int vDim,
-            int zDim,
-            int numKHeads,
-            int numVHeads,
-            int headKDim,
-            int headVDim,
-            int convKernel,
-            int ssmDInner,
-            IntPtr convWt,
-            IntPtr dtBias,
-            IntPtr aLog,
-            IntPtr ssmNormW,
-            float eps,
-            IntPtr gatedOut);
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -4832,10 +4586,6 @@ internal enum GgmlIndexReductionOp
             {
                 return false;
             }
-            catch (EntryPointNotFoundException)
-            {
-                return false;
-            }
         }
 
         /// <summary>
@@ -4855,21 +4605,10 @@ internal enum GgmlIndexReductionOp
         /// </summary>
         public static void SetVulkanDeviceIndex(int deviceIndex)
         {
-            try
+            if (TSGgml_SetVulkanDeviceIndex(deviceIndex) == 0)
             {
-                if (TSGgml_SetVulkanDeviceIndex(deviceIndex) == 0)
-                {
-                    throw new InvalidOperationException(
-                        GetLastErrorMessage($"Failed to select Vulkan device {deviceIndex}."));
-                }
-            }
-            catch (EntryPointNotFoundException ex)
-            {
-                // Older native bridges hardcode device 0, so requesting it is a no-op.
-                if (deviceIndex == 0)
-                    return;
                 throw new InvalidOperationException(
-                    "The native GGML bridge is out of date and does not support Vulkan device selection. Rebuild `TensorSharp.GGML.Native`.", ex);
+                    GetLastErrorMessage($"Failed to select Vulkan device {deviceIndex}."));
             }
         }
 
@@ -4881,10 +4620,6 @@ internal enum GgmlIndexReductionOp
                 return Math.Max(0, TSGgml_GetVulkanDeviceCount());
             }
             catch (DllNotFoundException)
-            {
-                return 0;
-            }
-            catch (EntryPointNotFoundException)
             {
                 return 0;
             }
@@ -4900,10 +4635,6 @@ internal enum GgmlIndexReductionOp
                     return null;
             }
             catch (DllNotFoundException)
-            {
-                return null;
-            }
-            catch (EntryPointNotFoundException)
             {
                 return null;
             }
@@ -4960,11 +4691,7 @@ internal enum GgmlIndexReductionOp
                 tpDegree, tpPlanOut), "fused_matmul_quant_add");
         }
 
-        public static void ReleaseFusedMatmulAddTpGraphs()
-        {
-            try { TSGgml_ReleaseFusedMatmulAddTpGraphs(); }
-            catch (EntryPointNotFoundException) { }
-        }
+        public static void ReleaseFusedMatmulAddTpGraphs() => TSGgml_ReleaseFusedMatmulAddTpGraphs();
 
         public static void FusedFFNSwiGLUQuant(
             GgmlTensorView2D residual,
@@ -5658,66 +5385,6 @@ internal enum GgmlIndexReductionOp
         /// <param name="positions">[numTokens] absolute position per query token (drives the causal mask).</param>
         /// <param name="blockTableFlat">Concatenated per-sequence block tables.</param>
         /// <param name="blockTableOffsets">[numSeqs] offset of each seq's table inside blockTableFlat.</param>
-        /// <summary>Allocate the device-resident paged K/V pool. Returns
-        /// IntPtr.Zero when the backend could not allocate it (out of VRAM),
-        /// which callers treat as "stay on the host pool".</summary>
-        public static IntPtr PagedKvPoolCreate(
-            int numLayers, int numBlocks, int blockSize, int numKvHeads, int headDim)
-            => TSGgml_PagedKvPoolCreate(numLayers, numBlocks, blockSize, numKvHeads, headDim);
-
-        public static void PagedKvPoolFree(IntPtr handle)
-        {
-            if (handle != IntPtr.Zero) TSGgml_PagedKvPoolFree(handle);
-        }
-
-        public static long PagedKvPoolBytes(IntPtr handle)
-            => handle == IntPtr.Zero ? 0 : TSGgml_PagedKvPoolBytes(handle);
-
-        /// <summary>Grow the pool to hold at least newNumBlocks blocks, copying
-        /// what is already written on device. False means the pool kept its old
-        /// size (typically out of VRAM) and the caller must not write past it.</summary>
-        public static bool PagedKvPoolGrow(IntPtr handle, int newNumBlocks)
-            => handle != IntPtr.Zero && TSGgml_PagedKvPoolGrow(handle, newNumBlocks) != 0;
-
-        /// <summary>Write this step's K/V into the pool at the mapped slots.</summary>
-        public static unsafe void PagedKvPoolScatter(
-            IntPtr handle, int layer, float[] kData, float[] vData, int[] slotMapping, int numTokens)
-        {
-            fixed (float* k = kData)
-            fixed (float* v = vData)
-            fixed (int* sm = slotMapping)
-            {
-                CheckResult(TSGgml_PagedKvPoolScatter(
-                    handle, layer, (IntPtr)k, (IntPtr)v, (IntPtr)sm, numTokens),
-                    "paged_kv_pool_scatter");
-            }
-        }
-
-        /// <summary>Batch flash attention against the device-resident pool. The
-        /// sequence history is gathered on device via ggml_get_rows, so no K/V
-        /// is uploaded per layer.</summary>
-        public static unsafe void PagedKvPoolAttention(
-            IntPtr handle, int layer, float[] qData, float[] outData,
-            int[] queryStartLoc, int[] seqLens, int[] positions,
-            int[] blockTableFlat, int[] blockTableOffsets,
-            int numSeqs, int numTokens, int numHeads, float scale, int slidingWindow = 0)
-        {
-            fixed (float* q = qData)
-            fixed (float* o = outData)
-            fixed (int* qsl = queryStartLoc)
-            fixed (int* sl = seqLens)
-            fixed (int* pos = positions)
-            fixed (int* btf = blockTableFlat)
-            fixed (int* bto = blockTableOffsets)
-            {
-                CheckResult(TSGgml_PagedKvPoolAttention(
-                    handle, layer, (IntPtr)q, (IntPtr)o,
-                    (IntPtr)qsl, (IntPtr)sl, (IntPtr)pos, (IntPtr)btf, (IntPtr)bto,
-                    numSeqs, numTokens, numHeads, slidingWindow, scale),
-                    "paged_kv_pool_attention");
-            }
-        }
-
         public static unsafe void PagedAttentionForward(
             float[] qData,
             float[] pagedKData,
@@ -5993,70 +5660,13 @@ internal enum GgmlIndexReductionOp
         }
 
         /// <summary>True token-batched dense decode: N concurrent sequences, one
-        /// token each, in a single fused graph. Returns false (without throwing)
-        /// when the native kernel declines (e.g. a sequence exceeds the cache
-        /// window) so the caller can fall back to round-robin.</summary>
+        /// token each, in a single fused graph, with the KV-donor map and PLE, either
+        /// uploaded (<paramref name="pleData"/>, [nSeqs][numLayers*pleDim]) or gathered
+        /// in-kernel from the resident quantized table over <paramref name="pleTokenIds"/>
+        /// (one per sequence). <paramref name="cacheSizeArr"/> holds independent
+        /// [numLayers*nSeqs] capacities. Returns false (without throwing) when the
+        /// native kernel declines so the caller can fall back to round-robin.</summary>
         public static bool Gemma4ModelDecodeBatched(
-            IntPtr hiddenData, int hiddenSize, int numLayers, int nSeqs,
-            IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr,
-            IntPtr[] oArr, IntPtr[] postAttnNormArr,
-            IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr,
-            IntPtr[] kCacheArr, IntPtr[] vCacheArr,
-            int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr,
-            float[] ropeBaseArr, float[] layerScalarArr,
-            int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr,
-            int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr,
-            int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr,
-            int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr,
-            int numHeads, int[] positions,
-            float eps, int slidingWindow,
-            IntPtr ropeFreqFactors, int ropeFreqFactorsLen,
-            int[] ropeNDimsArr,
-            int kvCacheType,
-            IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr,
-            IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr,
-            IntPtr logitsData, int vocabSize,
-            IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNormData, float logitSoftcap)
-        {
-            int rc = TSGgml_Gemma4ModelDecodeBatched(
-                hiddenData, hiddenSize, numLayers, nSeqs,
-                attnNormArr, qkvArr, qNormArr, kNormArr,
-                oArr, postAttnNormArr,
-                ffnNormArr, guArr, downArr, postFfnNormArr,
-                kCacheArr, vCacheArr,
-                headDimArr, kvHeadsArr, cacheSizeArr, isLocalArr,
-                ropeBaseArr, layerScalarArr,
-                qkvTypeArr, qkvNe0Arr, qkvNe1Arr, qkvBytesArr,
-                oTypeArr, oNe0Arr, oNe1Arr, oBytesArr,
-                guTypeArr, guNe0Arr, guNe1Arr, guBytesArr,
-                downTypeArr, downNe0Arr, downNe1Arr, downBytesArr,
-                numHeads, positions,
-                eps, slidingWindow,
-                ropeFreqFactors, ropeFreqFactorsLen,
-                ropeNDimsArr,
-                kvCacheType,
-                kArr, kTypeArr, kNe0Arr, kNe1Arr, kBytesArr,
-                vArr, vTypeArr, vNe0Arr, vNe1Arr, vBytesArr,
-                logitsData, vocabSize,
-                lmHeadData, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes,
-                finalNormData, logitSoftcap);
-            return rc != 0;
-        }
-
-        /// <summary>Probes what the native token-batched dense decode supports
-        /// (the bitmask <see cref="GgmlBasicOps.Gemma4BatchedDecodeCaps"/> decodes).
-        /// An older native build without the probe reports 0 (so its callers keep
-        /// the v1 gates) instead of throwing.</summary>
-        public static int Gemma4BatchedDecodeCapabilities()
-        {
-            try { return TSGgml_Gemma4BatchedDecodeCapabilities(); }
-            catch (EntryPointNotFoundException) { return 0; }
-            catch (DllNotFoundException) { return 0; }
-        }
-
-        /// <summary>Original extended batched-decode API. Cache capacities are [numLayers].</summary>
-        public static bool Gemma4ModelDecodeBatchedEx(
             IntPtr hiddenData, int hiddenSize, int numLayers, int nSeqs,
             IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr,
             IntPtr[] oArr, IntPtr[] postAttnNormArr,
@@ -6090,114 +5700,11 @@ internal enum GgmlIndexReductionOp
             long pleModelProjNe0, long pleModelProjNe1, long pleModelProjBytes,
             IntPtr pleModelProjNormData)
         {
-            return Gemma4ModelDecodeBatchedEx(
-                hiddenData, hiddenSize, numLayers, nSeqs, attnNormArr,
-                qkvArr, qNormArr, kNormArr, oArr, postAttnNormArr,
-                ffnNormArr, guArr, downArr, postFfnNormArr, kCacheArr,
-                vCacheArr, headDimArr, kvHeadsArr, cacheSizeArr, isLocalArr,
-                ropeBaseArr, layerScalarArr, qkvTypeArr, qkvNe0Arr, qkvNe1Arr,
-                qkvBytesArr, oTypeArr, oNe0Arr, oNe1Arr, oBytesArr,
-                guTypeArr, guNe0Arr, guNe1Arr, guBytesArr, downTypeArr,
-                downNe0Arr, downNe1Arr, downBytesArr, numHeads, positions,
-                eps, slidingWindow, ropeFreqFactors, ropeFreqFactorsLen, ropeNDimsArr,
-                kvCacheType, kArr, kTypeArr, kNe0Arr, kNe1Arr,
-                kBytesArr, vArr, vTypeArr, vNe0Arr, vNe1Arr,
-                vBytesArr, logitsData, vocabSize, lmHeadData, lmHeadType,
-                lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNormData, logitSoftcap,
-                kvSourceArr, pleData, pleDim, pleGateArr, pleGateTypeArr,
-                pleGateNe0Arr, pleGateNe1Arr, pleGateBytesArr, pleProjArr, pleProjTypeArr,
-                pleProjNe0Arr, pleProjNe1Arr, pleProjBytesArr, plePostNormArr, pleTokenEmbdData,
-                pleTokenEmbdType, pleTokenEmbdNe0, pleTokenEmbdNe1, pleTokenEmbdBytes, pleTokenIds,
-                pleModelProjData, pleModelProjType, pleModelProjNe0, pleModelProjNe1, pleModelProjBytes,
-                pleModelProjNormData,
-                false);
-        }
-
-        /// <summary>Extended token-batched dense decode (see
-        /// <see cref="Gemma4ModelDecodeBatched"/>): adds the KV-donor map and PLE,
-        /// either uploaded (<paramref name="pleData"/>, [nSeqs][numLayers*pleDim])
-        /// or gathered in-kernel from the resident quantized table over
-        /// <paramref name="pleTokenIds"/> (one per sequence). Only callable when
-        /// <see cref="Gemma4BatchedDecodeCapabilities"/> reports support. Ex2 accepts
-        /// independent [numLayers*nSeqs] capacities when <paramref name="perSequenceCacheSizes"/>
-        /// is true; the original Ex ABI uses [numLayers] capacities.</summary>
-        public static bool Gemma4ModelDecodeBatchedEx(
-            IntPtr hiddenData, int hiddenSize, int numLayers, int nSeqs,
-            IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr,
-            IntPtr[] oArr, IntPtr[] postAttnNormArr,
-            IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr,
-            IntPtr[] kCacheArr, IntPtr[] vCacheArr,
-            int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr,
-            float[] ropeBaseArr, float[] layerScalarArr,
-            int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr,
-            int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr,
-            int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr,
-            int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr,
-            int numHeads, int[] positions,
-            float eps, int slidingWindow,
-            IntPtr ropeFreqFactors, int ropeFreqFactorsLen,
-            int[] ropeNDimsArr,
-            int kvCacheType,
-            IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr,
-            IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr,
-            IntPtr logitsData, int vocabSize,
-            IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNormData, float logitSoftcap,
-            int[] kvSourceArr,
-            IntPtr pleData, int pleDim,
-            IntPtr[] pleGateArr, int[] pleGateTypeArr, long[] pleGateNe0Arr, long[] pleGateNe1Arr, long[] pleGateBytesArr,
-            IntPtr[] pleProjArr, int[] pleProjTypeArr, long[] pleProjNe0Arr, long[] pleProjNe1Arr, long[] pleProjBytesArr,
-            IntPtr[] plePostNormArr,
-            IntPtr pleTokenEmbdData, int pleTokenEmbdType,
-            long pleTokenEmbdNe0, long pleTokenEmbdNe1, long pleTokenEmbdBytes,
-            int[] pleTokenIds,
-            IntPtr pleModelProjData, int pleModelProjType,
-            long pleModelProjNe0, long pleModelProjNe1, long pleModelProjBytes,
-            IntPtr pleModelProjNormData, bool perSequenceCacheSizes)
-        {
-            int expectedSizes = perSequenceCacheSizes ? checked(numLayers * nSeqs) : numLayers;
-            // Callers may reuse an oversized array; the native ABI reads only
-            // the required prefix. Preserve that behavior while rejecting
-            // undersized storage.
-            if (cacheSizeArr == null || cacheSizeArr.Length < expectedSizes)
-                throw new ArgumentException("Cache capacities do not match the selected batched decode ABI.", nameof(cacheSizeArr));
-            if (perSequenceCacheSizes)
-            {
-                return TSGgml_Gemma4ModelDecodeBatchedEx2(
-                    hiddenData, hiddenSize, numLayers, nSeqs,
-                    attnNormArr, qkvArr, qNormArr, kNormArr,
-                    oArr, postAttnNormArr,
-                    ffnNormArr, guArr, downArr, postFfnNormArr,
-                    kCacheArr, vCacheArr,
-                    headDimArr, kvHeadsArr, cacheSizeArr, isLocalArr,
-                    ropeBaseArr, layerScalarArr,
-                    qkvTypeArr, qkvNe0Arr, qkvNe1Arr, qkvBytesArr,
-                    oTypeArr, oNe0Arr, oNe1Arr, oBytesArr,
-                    guTypeArr, guNe0Arr, guNe1Arr, guBytesArr,
-                    downTypeArr, downNe0Arr, downNe1Arr, downBytesArr,
-                    numHeads, positions,
-                    eps, slidingWindow,
-                    ropeFreqFactors, ropeFreqFactorsLen,
-                    ropeNDimsArr,
-                    kvCacheType,
-                    kArr, kTypeArr, kNe0Arr, kNe1Arr, kBytesArr,
-                    vArr, vTypeArr, vNe0Arr, vNe1Arr, vBytesArr,
-                    logitsData, vocabSize,
-                    lmHeadData, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes,
-                    finalNormData, logitSoftcap,
-                    kvSourceArr,
-                    pleData, pleDim,
-                    pleGateArr, pleGateTypeArr, pleGateNe0Arr, pleGateNe1Arr, pleGateBytesArr,
-                    pleProjArr, pleProjTypeArr, pleProjNe0Arr, pleProjNe1Arr, pleProjBytesArr,
-                    plePostNormArr,
-                    pleTokenEmbdData, pleTokenEmbdType,
-                    pleTokenEmbdNe0, pleTokenEmbdNe1, pleTokenEmbdBytes,
-                    pleTokenIds,
-                    pleModelProjData, pleModelProjType,
-                    pleModelProjNe0, pleModelProjNe1, pleModelProjBytes,
-                    pleModelProjNormData) != 0;
-            }
-            int rc = TSGgml_Gemma4ModelDecodeBatchedEx(
+            // Callers may reuse an oversized array; the native ABI reads only the
+            // required prefix. Reject undersized storage.
+            if (cacheSizeArr == null || cacheSizeArr.Length < checked(numLayers * nSeqs))
+                throw new ArgumentException("Cache capacities must cover every (layer, sequence).", nameof(cacheSizeArr));
+            return TSGgml_Gemma4ModelDecodeBatched(
                 hiddenData, hiddenSize, numLayers, nSeqs,
                 attnNormArr, qkvArr, qNormArr, kNormArr,
                 oArr, postAttnNormArr,
@@ -6229,8 +5736,7 @@ internal enum GgmlIndexReductionOp
                 pleTokenIds,
                 pleModelProjData, pleModelProjType,
                 pleModelProjNe0, pleModelProjNe1, pleModelProjBytes,
-                pleModelProjNormData);
-            return rc != 0;
+                pleModelProjNormData) != 0;
         }
 
         /// <summary>Fused multi-token verify (the speculative trunk's verify batch).
@@ -6364,42 +5870,6 @@ internal enum GgmlIndexReductionOp
                 convWt, convBias, dtBias, aLog, dData, ssmNormW,
                 eps, outBatched),
                 "nemotron_mamba2_batched_step");
-        }
-
-        // Batched per-token Qwen3.5 GDN step. Runs all (seq, token) pairs for
-        // an active decode/prefill batch in one native call, swapping in the
-        // matching per-slot conv ring + ssm state via the seqs[] descriptors.
-        // The descriptors' ConvWriteIdx field is updated in place — caller
-        // copies it back to its per-slot bookkeeping after the call returns.
-        public static void GatedDeltaNetBatchedStep(
-            GdnBatchedSeqDesc[] seqs,
-            int numTokens,
-            IntPtr packedBatched,
-            int packedDim,
-            int qkvDim,
-            int qkDim,
-            int vDim,
-            int zDim,
-            int numKHeads,
-            int numVHeads,
-            int headKDim,
-            int headVDim,
-            int convKernel,
-            int ssmDInner,
-            IntPtr convWt,
-            IntPtr dtBias,
-            IntPtr aLog,
-            IntPtr ssmNormW,
-            float eps,
-            IntPtr gatedOut)
-        {
-            CheckResult(TSGgml_GatedDeltaNetBatchedStepF32(
-                seqs?.Length ?? 0, seqs, numTokens,
-                packedBatched, packedDim, qkvDim, qkDim, vDim, zDim,
-                numKHeads, numVHeads, headKDim, headVDim,
-                convKernel, ssmDInner,
-                convWt, dtBias, aLog, ssmNormW, eps, gatedOut),
-                "gated_delta_net_batched_step");
         }
 
         public static void NemotronMamba2Prefill(
@@ -6554,7 +6024,6 @@ internal enum GgmlIndexReductionOp
         public static bool IsActiveDeviceIntegrated()
         {
             try { return TSGgml_IsActiveDeviceIntegrated() != 0; }
-            catch (EntryPointNotFoundException) { return false; }
             catch (DllNotFoundException) { return false; }
         }
 

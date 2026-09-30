@@ -668,22 +668,6 @@ namespace TensorSharp.Runtime
             ReadExactlyInto(DataOffset + (long)tensorInfo.Offset, (byte*)dest.ToPointer(), byteCount);
         }
 
-        private unsafe void ReadTensorDataToNativeLegacy(GgufTensorInfo tensorInfo, IntPtr dest, long byteCount)
-        {
-            _stream.Seek(DataOffset + (long)tensorInfo.Offset, SeekOrigin.Begin);
-            byte[] buffer = new byte[Math.Min(byteCount, 8 * 1024 * 1024)];
-            long remaining = byteCount;
-            byte* destPtr = (byte*)dest.ToPointer();
-            while (remaining > 0)
-            {
-                int toRead = (int)Math.Min(remaining, buffer.Length);
-                _stream.ReadExactly(buffer, 0, toRead);
-                System.Runtime.InteropServices.Marshal.Copy(buffer, 0, (IntPtr)destPtr, toRead);
-                destPtr += toRead;
-                remaining -= toRead;
-            }
-        }
-
         public unsafe bool TryGetTensorDataPointer(GgufTensorInfo tensorInfo, out IntPtr dataPtr)
         {
             var owner = OwnerOf(tensorInfo);

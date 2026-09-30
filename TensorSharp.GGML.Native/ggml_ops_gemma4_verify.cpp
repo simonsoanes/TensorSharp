@@ -213,9 +213,8 @@ TSG_EXPORT int TSGgml_Gemma4ModelVerify(
         // dummy columns cost <= 63 columns of extra GEMM work (< 3% at 2k
         // tokens) and their outputs are discarded. Gated to N > 64 so the MTP
         // speculative verify (N <= 16, latency-critical) keeps its exact
-        // shapes. TS_G4_VERIFY_NPAD=0 disables.
-        static const bool g4v_npad_enabled = []{ const char* e = std::getenv("TS_G4_VERIFY_NPAD"); return e == nullptr || e[0] != '0'; }();
-        const bool pad_batch = g4v_npad_enabled && g_backend_type == BACKEND_TYPE_VULKAN && N > 64;
+        // shapes.
+        const bool pad_batch = g_backend_type == BACKEND_TYPE_VULKAN && N > 64;
         const int NQ = pad_batch ? ((N + 63) & ~63) : N;
 
         // The bidirectional-span mask is indexed by chunk position. Every attention
@@ -417,8 +416,7 @@ TSG_EXPORT int TSGgml_Gemma4ModelVerify(
         // case (is_except != nullptr) keeps the host path. dataIdx == -1 in the
         // cache marks a GPU-filled mask (no host data / no upload).
 #ifdef TSG_GGML_USE_CUDA
-        static const bool gpu_mask_enabled = []{ const char* e = std::getenv("TS_G4_GPU_MASK"); return e == nullptr || e[0] != '0'; }();
-        const bool gpu_mask = gpu_mask_enabled && g_backend_type == BACKEND_TYPE_CUDA && is_except == nullptr;
+        const bool gpu_mask = g_backend_type == BACKEND_TYPE_CUDA && is_except == nullptr;
 #else
         const bool gpu_mask = false;
 #endif
@@ -471,7 +469,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelVerify(
         // tile attends only its window slice [tileStart-W, tileEnd) of the fresh K/V.
         // Bidi multimodal spans (is_except) need forward attention past a query tile
         // -> the caller falls back to the full-N flash there.
-        static const bool swa_tiled = []{ const char* e = std::getenv("TS_G4_SWA_TILED"); return e == nullptr || e[0] != '0'; }();
         static const int swa_tile = []{ const char* e = std::getenv("TS_G4_SWA_TILE"); int v = e ? std::atoi(e) : 0; return (v >= 256) ? v : 1024; }();
 
         // Flash-attention KV alignment (Vulkan only). ggml-vulkan's FA dispatch
@@ -486,9 +483,8 @@ TSG_EXPORT int TSGgml_Gemma4ModelVerify(
         // zero-fills the tail rows (finite) and the causal mask already marks
         // ki >= validLen as -inf, so results are unchanged. CUDA handles
         // unaligned KV without a slow path — keep other backends' graphs
-        // unchanged. TS_G4_FLASH_KV_PAD=0 disables.
-        static const bool flash_kv_pad_enabled = []{ const char* e = std::getenv("TS_G4_FLASH_KV_PAD"); return e == nullptr || e[0] != '0'; }();
-        const bool pad_flash_kv = flash_kv_pad_enabled && g_backend_type == BACKEND_TYPE_VULKAN;
+        // unchanged.
+        const bool pad_flash_kv = g_backend_type == BACKEND_TYPE_VULKAN;
         // 64 covers every FA pipeline's block_cols on the shapes used here.
         auto flash_pad_len = [pad_flash_kv](int len) {
             return pad_flash_kv ? ((len + 63) & ~63) : len;
@@ -851,7 +847,7 @@ TSG_EXPORT int TSGgml_Gemma4ModelVerify(
             // overhead would erase the win.
             // maskWindow > 0 implies the swaFresh/swaFreshShared branch above:
             // k_full/v_full hold the fresh chunk's N rows (+ FA-alignment padding).
-            const bool use_tiled = swa_tiled && maskWindow > 0 && is_except == nullptr
+            const bool use_tiled = maskWindow > 0 && is_except == nullptr
                 && N > 2 * swa_tile && attendLen == N;
             if (use_tiled)
             {
@@ -1005,7 +1001,7 @@ TSG_EXPORT int TSGgml_Gemma4ModelVerify(
 
         // Tiled SWA attention adds ~8 nodes (flash + concat + views + mask) per query
         // tile per local layer; budget for it so the graph never overflows.
-        const int swa_tiles = (swa_tiled && NQ > swa_tile) ? ((NQ + swa_tile - 1) / swa_tile) : 1;
+        const int swa_tiles = (NQ > swa_tile) ? ((NQ + swa_tile - 1) / swa_tile) : 1;
         // +16/layer headroom for swaPrev (gather view+cpy, concat, optional dtype cpy).
         const std::size_t graph_size = static_cast<std::size_t>(num_layers) * (208 + static_cast<std::size_t>(swa_tiles) * 8) + 512;
         ggml_cgraph* graph = ggml_new_graph_custom(ctx, graph_size, false);

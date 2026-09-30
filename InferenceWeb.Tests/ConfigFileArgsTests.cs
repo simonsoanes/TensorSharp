@@ -49,28 +49,25 @@ public class ConfigFileArgsTests : IDisposable
         return path;
     }
 
-    // ---- video companion keys, old and new ----------------------------------
-    // Config keys ARE CLI flags (NormalizeFlag just prefixes '--'), so renaming the
-    // companion flags renamed these keys too. Both spellings must expand, or every
-    // config file written before the rename breaks.
+    // ---- video companion keys ------------------------------------------------
+    // Config keys ARE CLI flags (NormalizeFlag just prefixes '--'), so the spellings
+    // removed from the command line are refused as keys too, naming the survivor.
 
-    [Fact]
-    public void Expand_LegacyWanCompanionKeys_StillExpandToFlags()
+    [Theory]
+    [InlineData("wan-vae", "--video-vae")]
+    [InlineData("wan-te", "--video-text-encoder")]
+    [InlineData("wan-dit2", "--video-dit2")]
+    [InlineData("video-te", "--video-text-encoder")]
+    public void Expand_RemovedVideoCompanionKey_NamesTheSurvivingOption(string key, string survivor)
     {
-        string cfg = WriteConfig("""
-        {
-          "model": "wan.gguf",
-          "wan-vae": "vae.safetensors",
-          "wan-te": "umt5.gguf",
-          "wan-dit2": "low_noise.gguf"
-        }
+        string cfg = WriteConfig($$"""
+        { "model": "wan.gguf", {{JsonQuote(key)}}: "companion.safetensors" }
         """);
 
-        var result = ConfigFileArgs.Expand(new[] { "--config", cfg });
+        var ex = Assert.Throws<ArgumentException>(() => ConfigFileArgs.Expand(new[] { "--config", cfg }));
 
-        Assert.Contains("--wan-vae", result);
-        Assert.Contains("--wan-te", result);
-        Assert.Contains("--wan-dit2", result);
+        Assert.Contains($"--{key} was removed:", ex.Message, StringComparison.Ordinal);
+        Assert.Contains($"Use {survivor} instead.", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -94,30 +91,6 @@ public class ConfigFileArgsTests : IDisposable
         Assert.Contains("--audio-vae", result);
     }
 
-    [Fact]
-    public void Expand_ShippedVideoConfigs_UseTheGenericKeys()
-    {
-        // Guard the repo's own presets: they were migrated to the generic keys, and a
-        // stray legacy key here would be silently fine at runtime but inconsistent.
-        string repoRoot = FindRepoRoot();
-        if (repoRoot is null) return;   // running outside a source checkout
-
-        foreach (string name in new[]
-                 {
-                     "wan-video-ti2v-5b.json",
-                     "wan-video-ti2v-5b-turbo.json",
-                     "wan-video-i2v-a14b.json",
-                 })
-        {
-            string path = Path.Combine(repoRoot, "config", name);
-            if (!File.Exists(path)) continue;
-            string text = File.ReadAllText(path);
-            Assert.DoesNotContain("\"wan-vae\"", text);
-            Assert.DoesNotContain("\"wan-te\"", text);
-            Assert.DoesNotContain("\"wan-dit2\"", text);
-        }
-    }
-
     // ---- every shipped config must be startable by BOTH hosts ----------------
     // config/README.md promises "Every file works with both hosts (only
     // host-recognized keys are used)". That promise has teeth on the server: an
@@ -137,17 +110,15 @@ public class ConfigFileArgsTests : IDisposable
         "no-prefix-cache",
         "temperature", "top-k", "top-p", "min-p", "seed", "stop", "sampling-precedence",
         "repeat-penalty", "repeat-last-n", "presence-penalty", "frequency-penalty",
-        "continuous-batching", "no-continuous-batching", "paged-batching", "no-paged-batching",
+        "continuous-batching", "no-continuous-batching",
         "prefill-chunk-size", "kv-cache-dtype", "gpu-device", "tp", "tp-node-id", "tp-peers",
-        "paged-kv", "no-paged-kv", "paged-kv-block-size",
-        "paged-kv-ram-mb", "paged-kv-ssd-dir", "paged-kv-ssd-mb", "paged-kv-quant-bits",
-        "paged-kv-redis-url", "paged-kv-redis-ttl", "redis-url",
+        "redis-url",
         "cpu-moe", "n-cpu-moe", "cpu-moe-threads",
         "spec", "no-spec", "spec-type", "spec-draft", "spec-pmin", "draft-model",
         "qwen-image-vae", "qwen-image-vl", "qwen-image-mmproj",
-        "video-vae", "video-text-encoder", "video-te", "video-dit2", "audio-vae",
+        "video-vae", "video-text-encoder", "video-dit2", "audio-vae",
         "video-width", "video-height", "video-steps", "video-mode", "video-frames", "fps",
-        "wan-vae", "wan-te", "wan-dit2", "width", "height",
+        "width", "height",
         // Qwen-Image-2.1 LoRA plug-ins (LoraCliFlags.Flags): applied by the companion
         // pass and let through the unknown-option trap, spelled the same by the CLI.
         "lora", "lora-scale", "lora-config",
@@ -236,8 +207,7 @@ public class ConfigFileArgsTests : IDisposable
     {
         "model", "mmproj", "draft-model",
         "qwen-image-vae", "qwen-image-vl", "qwen-image-mmproj",
-        "video-vae", "video-text-encoder", "video-te", "video-dit2", "audio-vae",
-        "wan-vae", "wan-te", "wan-dit2",
+        "video-vae", "video-text-encoder", "video-dit2", "audio-vae",
     };
 
     [Fact]
@@ -523,25 +493,6 @@ public class ConfigFileArgsTests : IDisposable
     }
 
     [Fact]
-    public void Expand_CommandLineOverride_UnderALegacySpelling_SkipsTheConfigDownload()
-    {
-        // Both hosts read --wan-vae as --video-vae, so it overrides the entry just the same.
-        using var server = new TinyHttpServer();
-        server.AddFile("/vae.safetensors", new byte[] { 1, 2, 3 });
-        string vae = Path.Combine(_dir, "vae.safetensors");
-        string cfg = WriteConfig($$"""
-        { "video-vae": { "path": {{JsonQuote(vae)}}, "urls": [ {{JsonQuote(server.UrlFor("/vae.safetensors"))}} ] } }
-        """);
-
-        var result = ConfigFileArgs.Expand(
-            new[] { "--config", cfg, "--wan-vae", "mine.safetensors" }, TextWriter.Null, interactiveProgress: false);
-
-        Assert.Equal(new[] { "--wan-vae", "mine.safetensors" }, result);
-        Assert.Equal(0, server.RequestCount("/vae.safetensors"));
-        Assert.False(File.Exists(vae));
-    }
-
-    [Fact]
     public void Expand_OverriddenEntry_IsNeverResolved()
     {
         // Not even its variables: the entry is gone before anything reads it.
@@ -678,13 +629,13 @@ public class ConfigFileArgsTests : IDisposable
     [Fact]
     public void Expand_OverrideNotice_NamesTheCommandLinesSpelling_AndEverySkippedDownload()
     {
-        // The file wrote the legacy key; the command line the current one. The notice names
-        // what the user typed, and the skipped download of the second file is not lost
-        // behind the first file's plain path.
+        // Both files set the option and so does the command line. The notice names what
+        // the user typed, and the skipped download of the second file is not lost behind
+        // the first file's plain path.
         using var server = new TinyHttpServer();
         server.AddFile("/vae.safetensors", new byte[] { 1, 2, 3 });
         string vae = Path.Combine(_dir, "vae.safetensors");
-        string a = WriteConfig("""{ "wan-vae": "local-vae.safetensors" }""", "a.json");
+        string a = WriteConfig("""{ "video-vae": "local-vae.safetensors" }""", "a.json");
         string b = WriteConfig($$"""
         { "video-vae": { "path": {{JsonQuote(vae)}}, "urls": [ {{JsonQuote(server.UrlFor("/vae.safetensors"))}} ] } }
         """, "b.json");

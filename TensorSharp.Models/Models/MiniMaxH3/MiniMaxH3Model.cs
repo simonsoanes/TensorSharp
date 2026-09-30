@@ -57,13 +57,13 @@ namespace TensorSharp.Models.MiniMaxH3
             Partition = MiniMaxH3Config.PartitionFromFileName(ggufPath);
             Config = new ModelConfig { Architecture = ArchitectureId, VocabSize = 0 };
 
-            _tePath = ResolveCompanion("TS_VIDEO_TEXT_ENCODER", "TS_WAN_TE", dir,
+            _tePath = ResolveCompanion("TS_VIDEO_TEXT_ENCODER", dir,
                 new[] { "qwen3vl_32b_minimax_h3-Q4_K_M.gguf" },
                 n => n.Contains("qwen3vl") && n.EndsWith(".gguf"));
-            _vaePath = ResolveCompanion("TS_VIDEO_VAE", "TS_WAN_VAE", dir,
+            _vaePath = ResolveCompanion("TS_VIDEO_VAE", dir,
                 new[] { "minimax_h3_video_vae_fp16.safetensors" },
                 n => n.Contains("video_vae") && n.EndsWith(".safetensors"));
-            _audioVaePath = ResolveCompanion("TS_VIDEO_AUDIO_VAE", null, dir,
+            _audioVaePath = ResolveCompanion("TS_VIDEO_AUDIO_VAE", dir,
                 new[] { "minimax_h3_audio_vae_fp32.safetensors" },
                 n => n.Contains("audio_vae") && n.EndsWith(".safetensors"));
 
@@ -87,15 +87,11 @@ namespace TensorSharp.Models.MiniMaxH3
         public static bool LooksLikeMiniMaxH3(GgufFile gguf) =>
             gguf != null && MiniMaxH3Config.IsMiniMaxH3(gguf.Tensors);
 
-        private static string ResolveCompanion(string envVar, string legacyEnvVar, string dir,
+        private static string ResolveCompanion(string envVar, string dir,
                                                string[] preferred, Func<string, bool> match)
         {
-            foreach (string v in new[] { envVar, legacyEnvVar })
-            {
-                if (v == null) continue;
-                string env = Environment.GetEnvironmentVariable(v);
-                if (!string.IsNullOrWhiteSpace(env) && File.Exists(env)) return env;
-            }
+            string env = Environment.GetEnvironmentVariable(envVar);
+            if (!string.IsNullOrWhiteSpace(env) && File.Exists(env)) return env;
             string parent = Path.GetDirectoryName(dir);
             foreach (var d in new[] { dir, parent })
             {

@@ -2922,7 +2922,7 @@ TSG_EXPORT int TSGgml_FusedPrefillAttentionF32(
     }
 }
 
-// Diffusion compatibility variant. Keep the legacy export's numerical policy
+// Diffusion compatibility variant. Keep the autoregressive export's numerical policy
 // and ABI unchanged for autoregressive models sharing this native primitive.
 // Use the uncached materialized graph: exact extents/default precision preserve
 // the established diffusion attention arithmetic, whereas padding/F32 overrides

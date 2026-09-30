@@ -205,8 +205,6 @@ namespace TensorSharp.Cli
         internal static string ResolveConfiguredDraftModelPath()
         {
             string path = Environment.GetEnvironmentVariable(SpeculationEnvVars.DraftModel);
-            if (string.IsNullOrWhiteSpace(path))
-                path = Environment.GetEnvironmentVariable(SpeculationEnvVars.LegacyDraftModel);
             return string.IsNullOrWhiteSpace(path) ? null : path.Trim();
         }
 
@@ -220,7 +218,9 @@ namespace TensorSharp.Cli
             // instead: the switch below has no unknown-flag trap, so a retired flag in a
             // script would otherwise be silently dropped. The ArgumentException reaches
             // Main's handler, which prints one "Configuration error:" line and exits 1.
+            // Removed environment variables are refused the same way: nothing reads them.
             RemovedCliFlags.RejectRemoved(args);
+            RemovedCliFlags.RejectRemovedEnvironment();
 
             // Parsed BEFORE the switch below and REMOVED from the argument list, the
             // same way the server does it: the code-execution flags are owned by
@@ -280,8 +280,8 @@ namespace TensorSharp.Cli
             MoeCpuOffloadConfig.ConfigureFromEnvironment();
 
             // --spec / --spec-draft / --spec-pmin / --draft-model become the
-            // shared TS_SPEC_* settings (with legacy TS_MTP_* mirrors) before anything
-            // else runs, because the request has to reach
+            // shared TS_SPEC_* settings before anything else runs, because the
+            // request has to reach
             // the LOADER and not just the decode loop: glm-dsa pages its NextN
             // block into VRAM (a whole extra 256-expert layer) only when TS_SPEC
             // is already set, and sizes its graph cache from TS_SPEC_DRAFT. Parsing
@@ -330,19 +330,6 @@ namespace TensorSharp.Cli
             int correctnessDecode = 8;
             bool runKvCacheBenchmark = false;
             int kvCacheBenchTurns = 4;
-            bool runPagedKvBenchmark = false;
-            int pagedKvBenchPrompt = 2048;
-            int pagedKvBenchTrials = 3;
-            // Cross-session paged KV cache knobs. Each flag is plumbed through to
-            // the matching env var so any code that calls
-            // PagedKvCacheConfig.FromEnvironment() picks it up. The CLI
-            // benchmark still exercises the standalone PagedKvCacheManager.
-            bool? pagedKvEnableOverride = null;
-            int? pagedKvBlockSizeOverride = null;
-            long? pagedKvRamMbOverride = null;
-            string pagedKvSsdDirOverride = null;
-            long? pagedKvSsdMbOverride = null;
-            int? pagedKvQuantBitsOverride = null;
             bool runInteractive = false;
             bool noPrefixCache = false;
             // Vulkan GPU selection (multi-GPU hosts, e.g. an integrated Intel GPU
@@ -426,10 +413,10 @@ namespace TensorSharp.Cli
                     case "--negative-prompt": negativePrompt = args[++i]; break;
                     // Companion-network paths. The --wan-* spellings predate the second
                     // video model and stay accepted so existing configs keep working.
-                    case "--video-vae": case "--wan-vae": videoVaePath = args[++i]; break;
-                    case "--video-text-encoder": case "--video-te": case "--wan-te":
+                    case "--video-vae": videoVaePath = args[++i]; break;
+                    case "--video-text-encoder":
                         videoTextEncoderPath = args[++i]; break;
-                    case "--video-dit2": case "--wan-dit2": videoDit2Path = args[++i]; break;
+                    case "--video-dit2": videoDit2Path = args[++i]; break;
                     case "--audio-vae": videoAudioVaePath = args[++i]; break;
                     case "--end-image": endImagePath = args[++i]; break;
                     case "--video-mode": videoMode = args[++i]; break;
@@ -487,31 +474,17 @@ namespace TensorSharp.Cli
                     case "--correct-decode": correctnessDecode = int.Parse(args[++i]); break;
                     case "--bench-kvcache": runKvCacheBenchmark = true; break;
                     case "--bench-kv-turns": kvCacheBenchTurns = int.Parse(args[++i]); break;
-                    case "--paged-bench": runPagedKvBenchmark = true; break;
-                    case "--paged-bench-prompt": pagedKvBenchPrompt = int.Parse(args[++i]); break;
-                    case "--paged-bench-trials": pagedKvBenchTrials = int.Parse(args[++i]); break;
-                    case "--paged-kv":
-                        pagedKvEnableOverride = true;
-                        break;
-                    case "--no-paged-kv":
-                        pagedKvEnableOverride = false;
-                        break;
                     case "--continuous-batching":
-                    case "--paged-batching":
-                        // Paged-attention continuous batching path. Gates two
-                        // env vars: TS_SCHED_DISABLE_BATCHED (scheduler —
-                        // falls through to per-seq KV-swap when set) and
-                        // TS_QWEN35_BATCHED (Qwen3.5 ForwardBatch gate). Both
-                        // default ON; this flag is idempotent with the default
-                        // and kept for explicit operator intent or for
-                        // overriding a previous --no-continuous-batching.
+                        // Paged-attention continuous batching path, gated by
+                        // TS_SCHED_DISABLE_BATCHED (the scheduler falls through to
+                        // the per-seq KV-swap path when set). On by default; this
+                        // flag is idempotent with the default and kept for explicit
+                        // operator intent or for overriding a previous
+                        // --no-continuous-batching.
                         Environment.SetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED", "0");
-                        Environment.SetEnvironmentVariable("TS_QWEN35_BATCHED", "1");
                         break;
                     case "--no-continuous-batching":
-                    case "--no-paged-batching":
                         Environment.SetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED", "1");
-                        Environment.SetEnvironmentVariable("TS_QWEN35_BATCHED", "0");
                         break;
                     case "--no-prefix-cache":
                         // Spelled the same as the server's, because a config file's keys
@@ -519,28 +492,6 @@ namespace TensorSharp.Cli
                         noPrefixCache = true;
                         Environment.SetEnvironmentVariable("TS_SCHED_PREFIX_CACHE", "0");
                         break;
-                    case "--paged-kv-block-size":
-                        pagedKvBlockSizeOverride = int.Parse(args[++i]);
-                        break;
-                    case "--paged-kv-ram-mb":
-                        pagedKvRamMbOverride = long.Parse(args[++i]);
-                        break;
-                    case "--paged-kv-ssd-dir":
-                        pagedKvSsdDirOverride = args[++i];
-                        break;
-                    case "--paged-kv-ssd-mb":
-                        pagedKvSsdMbOverride = long.Parse(args[++i]);
-                        break;
-                    case "--paged-kv-quant-bits":
-                    {
-                        string bitsStr = args[++i];
-                        if (!int.TryParse(bitsStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out int bitsVal))
-                            throw new ArgumentException($"Invalid value for --paged-kv-quant-bits: '{bitsStr}'. Expected 0 (off), 2, 4, or 8.");
-                        if (bitsVal != 0 && bitsVal != 2 && bitsVal != 4 && bitsVal != 8)
-                            throw new ArgumentException($"Invalid value for --paged-kv-quant-bits: {bitsVal}. Expected 0 (off), 2, 4, or 8.");
-                        pagedKvQuantBitsOverride = bitsVal;
-                        break;
-                    }
                     case "--warmup-runs": warmupInferenceRuns = int.Parse(args[++i]); break;
                     case "--diffusion-steps": diffusionSteps = int.Parse(args[++i]); diffusionStepsSet = true; break;
                     case "--diffusion-seed": diffusionSeed = int.Parse(args[++i]); diffusionSeedSet = true; break;
@@ -796,11 +747,6 @@ namespace TensorSharp.Cli
                 _ => throw new ArgumentException($"Unknown backend '{backendStr}'. Use: cpu, cuda, mlx, ggml_cpu, ggml_metal, ggml_cuda, ggml_vulkan"),
             };
 
-            ApplyPagedKvCacheCliOverrides(
-                pagedKvEnableOverride, pagedKvBlockSizeOverride,
-                pagedKvRamMbOverride, pagedKvSsdDirOverride, pagedKvSsdMbOverride,
-                pagedKvQuantBitsOverride);
-
             // Draft-head compatibility depends on the loaded architecture and weights.
             // The model loader reports its specific limitation; TP alone does not
             // imply that a learned drafter (for example DSpark) is unavailable.
@@ -837,9 +783,9 @@ namespace TensorSharp.Cli
             // Video generation: companion overrides. Each path is published under both the
             // generic TS_VIDEO_* name and the historical TS_WAN_* one, so WanVideoModel keeps
             // reading exactly what it always did while new models read the generic names.
-            ApplyVideoCompanionOverride("--video-vae", videoVaePath, "TS_VIDEO_VAE", "TS_WAN_VAE");
-            ApplyVideoCompanionOverride("--video-text-encoder", videoTextEncoderPath, "TS_VIDEO_TEXT_ENCODER", "TS_WAN_TE");
-            ApplyVideoCompanionOverride("--video-dit2", videoDit2Path, "TS_VIDEO_DIT2", "TS_WAN_DIT2");
+            ApplyVideoCompanionOverride("--video-vae", videoVaePath, "TS_VIDEO_VAE");
+            ApplyVideoCompanionOverride("--video-text-encoder", videoTextEncoderPath, "TS_VIDEO_TEXT_ENCODER");
+            ApplyVideoCompanionOverride("--video-dit2", videoDit2Path, "TS_VIDEO_DIT2");
             ApplyVideoCompanionOverride("--audio-vae", videoAudioVaePath, "TS_VIDEO_AUDIO_VAE");
 
             // LoRA plug-ins apply to Qwen-Image-2.1's transformer only. Probe the file's
@@ -1036,9 +982,24 @@ namespace TensorSharp.Cli
 
             if (mmProjPath != null)
             {
-                _log.LogInformation(LogEventIds.HostConfiguration,
-                    "Loading mmproj projector from {MmProj}", mmProjPath);
-                model.MultimodalInjector.LoadProjectors(mmProjPath);
+                // Refused like the model itself: this ran outside that handler, so a projector the
+                // loader rejected (a directory opened as a GGUF) aborted the process with a core dump.
+                try
+                {
+                    string projector = ModelArchitectureRegistry.ResolveProjectorPath(model.Config.Architecture, mmProjPath);
+                    _log.LogInformation(LogEventIds.HostConfiguration,
+                        "Loading mmproj projector from {MmProj}", projector);
+                    model.MultimodalInjector.LoadProjectors(projector);
+                }
+                catch (Exception ex) when (ModelLoadRefusal.TryDescribe(ex, out string projectorRefusal))
+                {
+                    _log.LogError(LogEventIds.ModelLoadFailed,
+                        "Projector load refused: {MmProj}: {Reason}", mmProjPath, projectorRefusal);
+                    _log.LogDebug(LogEventIds.ModelLoadFailed, ex, "Projector load refused: {MmProj}", mmProjPath);
+                    Console.Error.WriteLine(ModelLoadRefusal.FormatErrorLine(projectorRefusal));
+                    Environment.ExitCode = HostExitCodes.ModelLoadRefused;
+                    return;
+                }
             }
             else if (WantsCompanionProjector(mmProjDisabled, imagePath, audioPath, videoPath,
                          model is IVisionCapableModel, model is IAudioCapableModel))
@@ -1082,12 +1043,6 @@ namespace TensorSharp.Cli
             if (runKvCacheBenchmark)
             {
                 RunKvCacheBenchmark(model, kvCacheBenchTurns, maxTokens, samplingConfig, enableThinking);
-                return;
-            }
-
-            if (runPagedKvBenchmark)
-            {
-                RunPagedKvBenchmark(model, pagedKvBenchPrompt, pagedKvBenchTrials);
                 return;
             }
 
@@ -2701,8 +2656,8 @@ namespace TensorSharp.Cli
         /// an untimed greedy chain still verifies deterministic model output.
         ///
         /// Optionally captures the first decode tokens after each prefill so the same
-        /// benchmark can be run twice (e.g. with and without GDN_DISABLE_CHUNKED_PREFILL=1)
-        /// and the outputs compared.
+        /// benchmark can be run twice (e.g. before and after a change) and the outputs
+        /// compared.
         /// </summary>
         static void RunBenchmark(
             ModelBase model,
@@ -2769,13 +2724,8 @@ namespace TensorSharp.Cli
             // model exposes the pipelined-greedy device path use it: each
             // decode step queues the next forward's input embedding from a
             // device-side argmax, eliminating the per-token MLX→CPU sync of
-            // the full [vocab] logits tensor. Opt out with
-            // TS_MLX_PIPELINED_DECODE=0 to force the legacy host-sync path
-            // for A/B comparison.
-            string pipelinedEnv = Environment.GetEnvironmentVariable("TS_MLX_PIPELINED_DECODE");
-            bool usePipelinedGreedy = model.SupportsPipelinedGreedy
-                && !string.Equals(pipelinedEnv, "0", StringComparison.Ordinal)
-                && !string.Equals(pipelinedEnv, "false", StringComparison.OrdinalIgnoreCase);
+            // the full [vocab] logits tensor.
+            bool usePipelinedGreedy = model.SupportsPipelinedGreedy;
 
             for (int run = 0; run < runs; run++)
             {
@@ -3235,251 +3185,6 @@ namespace TensorSharp.Cli
         }
 
         /// <summary>
-        /// Paged KV-cache benchmark. Simulates a cross-session scenario: the first
-        /// user pays the full prefill cost, then a second user arrives with the
-        /// same prompt prefix. Without the paged cache the second user repays the
-        /// full cost; with it, most of the prefill is recovered from RAM blocks.
-        ///
-        /// We measure both halves in-process so the comparison is apples-to-apples
-        /// on the same warm-loaded weights. Memory is read from the manager itself
-        /// (the bytes it has resident) and from <see cref="GC"/> (managed heap).
-        /// </summary>
-        static void RunPagedKvBenchmark(ModelBase model, int promptTokens, int trials)
-        {
-            if (!model.SupportsKVStateSnapshot)
-            {
-                _log.LogError(LogEventIds.CliBenchmark,
-                    "paged-bench: model architecture '{Arch}' does not support KV snapshot. Use GptOss or Mistral3.",
-                    model.Config.Architecture);
-                return;
-            }
-            if (trials <= 0) trials = 1;
-            if (promptTokens <= 0) promptTokens = 2048;
-
-            // Pick up --paged-kv-block-size / --paged-kv-ram-mb / --paged-kv-ssd-* (or
-            // their env var equivalents) so the bench measures the store the operator
-            // configured instead of a hard-coded one. This bench is the only user of the
-            // standalone PagedKvCacheManager: the server accepts the same flags but never
-            // builds one, and normal generation reuses KV through the engine's Radix cache.
-            var envCfg = PagedKvCacheConfig.FromEnvironment();
-            int blockSize = envCfg.BlockSize;
-            int safeBase = Math.Max(0, 1);
-            int vocab = Math.Max(safeBase + 2, model.Config.VocabSize);
-            int[] prompt = new int[promptTokens];
-            var rng = new Random(unchecked((int)0xCAFEBABE));
-            for (int i = 0; i < promptTokens; i++)
-                prompt[i] = rng.Next(safeBase, vocab - 1);
-
-            _log.LogInformation(LogEventIds.CliBenchmark,
-                "paged-bench starting: promptTokens={Prompt} trials={Trials} blockSize={BlockSize} arch={Arch} kvDtype={Dtype}",
-                promptTokens, trials, blockSize, model.Config.Architecture, model.KvCacheDtype);
-
-            // Warm up - resolves Metal JIT, allocator pools, etc., so the first
-            // measurement isn't dominated by setup cost.
-            model.ResetKVCache();
-            model.ForwardRefill(prompt);
-            model.ResetKVCache();
-
-            long warmRss = WorkingSetBytes();
-
-            // ===== Baseline: paged cache disabled =====
-            var baselineMs = new double[trials];
-            for (int t = 0; t < trials; t++)
-            {
-                model.ResetKVCache();
-                var sw = Stopwatch.StartNew();
-                model.ForwardRefill(prompt);
-                sw.Stop();
-                baselineMs[t] = sw.Elapsed.TotalMilliseconds;
-                _log.LogDebug(LogEventIds.CliBenchmark,
-                    "paged-bench baseline trial {Trial}: {Ms:F1} ms", t + 1, baselineMs[t]);
-            }
-            long rssAfterBaseline = WorkingSetBytes();
-
-            // ===== With paged cache: prime the store, then measure restore =====
-            // Start from the env-resolved config so CLI overrides
-            // (--paged-kv-ram-mb, --paged-kv-ssd-dir, ...) carry through. We
-            // force Enabled=true here because the bench is, by definition, a
-            // measurement of the paged path - regardless of whether the user
-            // happened to also pass --paged-kv.
-            var pagedConfig = new PagedKvCacheConfig
-            {
-                Enabled = true,
-                BlockSize = blockSize,
-                MaxRamBytes = envCfg.MaxRamBytes > 0 ? envCfg.MaxRamBytes : 4L * 1024 * 1024 * 1024,
-                SsdDirectory = envCfg.SsdDirectory,
-                MaxSsdBytes = envCfg.MaxSsdBytes,
-            };
-            // Pick up the TurboQuant codec from TS_KV_PAGED_QUANT_BITS
-            // (--paged-kv-quant-bits) so the benchmark measures the block
-            // compression the operator asked for.
-            // FromEnvironment(model) returns null both when the env var is
-            // unset and when the model has recurrent SSM state that
-            // quantization would corrupt (Qwen3.5/3.6 GatedDeltaNet,
-            // Nemotron Mamba2). See TurboQuantKvCodec docs for details.
-            IKvBlockCodec pagedCodec = TurboQuantKvCodec.FromEnvironment(model);
-            if (pagedCodec != null)
-            {
-                _log.LogInformation(LogEventIds.CliBenchmark,
-                    "paged-bench codec={Codec} (bitsPerElement={Bits}, kvDtype={Dtype})",
-                    pagedCodec.Name, pagedCodec.BitsPerElement, model.KVStateElementType);
-            }
-            else if (model.RequiresPerBlockCapture &&
-                     !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("TS_KV_PAGED_QUANT_BITS")))
-            {
-                _log.LogInformation(LogEventIds.CliBenchmark,
-                    "paged-bench codec=passthrough (model {Arch} has RequiresPerBlockCapture=true; TurboQuant disabled to protect recurrent state)",
-                    model.Config.Architecture);
-            }
-            var pagedManager = new PagedKvCacheManager(pagedConfig, model.KVStateFingerprint,
-                Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, pagedCodec);
-            try
-            {
-                // Prime - what the FIRST user pays. Subsequent users get the speedup.
-                // Recurrent models (RequiresPerBlockCapture=true) must be captured at
-                // every block boundary because their running state isn't decomposable
-                // into per-position slices; we chunk the prefill into block-sized
-                // pieces here so each chunk leaves _cacheSeqLen on a block boundary
-                // before Capture extracts the layer state.
-                model.ResetKVCache();
-                var primeSw = Stopwatch.StartNew();
-                if (model.RequiresPerBlockCapture)
-                {
-                    for (int start = 0; start < promptTokens; start += blockSize)
-                    {
-                        int len = Math.Min(blockSize, promptTokens - start);
-                        int[] chunk = new int[len];
-                        Array.Copy(prompt, start, chunk, 0, len);
-                        model.ForwardRefill(chunk);
-                        pagedManager.Capture(model, prompt, start + len);
-                    }
-                }
-                else
-                {
-                    model.ForwardRefill(prompt);
-                    pagedManager.Capture(model, prompt, promptTokens);
-                }
-                primeSw.Stop();
-
-                var pagedStats = pagedManager.GetStats();
-
-                var pagedMs = new double[trials];
-                int restoredTokens = 0;
-                float[] postRestoreLogits = null;
-                for (int t = 0; t < trials; t++)
-                {
-                    model.ResetKVCache();
-                    var sw = Stopwatch.StartNew();
-                    restoredTokens = pagedManager.TryRestorePrefix(model, prompt);
-                    if (restoredTokens < promptTokens)
-                    {
-                        int[] suffix = new int[promptTokens - restoredTokens];
-                        Array.Copy(prompt, restoredTokens, suffix, 0, suffix.Length);
-                        postRestoreLogits = model.ForwardRefill(suffix);
-                    }
-                    else
-                    {
-                        // The restore alone left us no token to forward, so the
-                        // model never produced fresh logits this trial. The
-                        // manager keeps one trailing block specifically to
-                        // avoid this; reaching here means a non-block-aligned
-                        // prompt. Fall back to a single-token forward.
-                        postRestoreLogits = model.Forward(new[] { prompt[promptTokens - 1] });
-                    }
-                    sw.Stop();
-                    pagedMs[t] = sw.Elapsed.TotalMilliseconds;
-                    _log.LogDebug(LogEventIds.CliBenchmark,
-                        "paged-bench paged trial {Trial}: {Ms:F1} ms (restored {Restored}/{Total})",
-                        t + 1, pagedMs[t], restoredTokens, promptTokens);
-                }
-
-                // Quality probe: sample 8 greedy tokens from the last trial's
-                // logits so the user can eyeball whether the codec preserved
-                // generation behaviour. With passthrough vs int4 vs int8 the
-                // token sequences should be identical (or near-identical) if
-                // the codec error stays inside the softmax noise floor.
-                if (postRestoreLogits != null)
-                {
-                    int sampleCount = 8;
-                    var sampled = new int[sampleCount];
-                    int next = SampleGreedyFromLogits(postRestoreLogits, model.Config.VocabSize);
-                    for (int i = 0; i < sampleCount; i++)
-                    {
-                        sampled[i] = next;
-                        float[] logits = model.Forward(new[] { next });
-                        next = SampleGreedyFromLogits(logits, model.Config.VocabSize);
-                    }
-                    _log.LogInformation(LogEventIds.CliBenchmark,
-                        "paged-bench quality probe: sampledTokens=[{Sampled}] (greedy from post-restore logits; same across codecs => quality preserved)",
-                        string.Join(",", sampled));
-                }
-
-                long rssAfterPaged = WorkingSetBytes();
-                double baselineMedian = Median(baselineMs);
-                double pagedMedian = Median(pagedMs);
-                double speedup = pagedMedian > 0 ? baselineMedian / pagedMedian : 0;
-                double pagedTokensPerMs = pagedMedian > 0 ? promptTokens / pagedMedian : 0;
-                double baselineTokensPerMs = baselineMedian > 0 ? promptTokens / baselineMedian : 0;
-
-                _log.LogInformation(LogEventIds.CliBenchmark,
-                    "paged-bench RESULTS arch={Arch} dtype={Dtype} promptTokens={Prompt} blockSize={BlockSize} trials={Trials}",
-                    model.Config.Architecture, model.KvCacheDtype, promptTokens, blockSize, trials);
-                _log.LogInformation(LogEventIds.CliBenchmark,
-                    "paged-bench prefill ms (median of {Trials}): baseline={Baseline:F1} primingFirst={Prime:F1} pagedRestore={Paged:F1} speedup={Speedup:F2}x",
-                    trials, baselineMedian, primeSw.Elapsed.TotalMilliseconds, pagedMedian, speedup);
-                _log.LogInformation(LogEventIds.CliBenchmark,
-                    "paged-bench restored={Restored}/{Prompt} tokens ({Pct:F1}% recovered) tokensPerMs baseline={Bppm:F1} paged={Pppm:F1}",
-                    restoredTokens, promptTokens, 100.0 * restoredTokens / promptTokens, baselineTokensPerMs, pagedTokensPerMs);
-                _log.LogInformation(LogEventIds.CliBenchmark,
-                    "paged-bench memory: paged store={PagedMB:F1} MB ({Blocks} blocks) processRSS warm={WarmRssMB:F0} MB afterBaseline={AfterBaseRssMB:F0} MB afterPaged={AfterPagedRssMB:F0} MB delta={DeltaMB:F0} MB",
-                    pagedStats.ramBytes / 1024.0 / 1024.0, pagedStats.ramBlocks,
-                    warmRss / 1024.0 / 1024.0, rssAfterBaseline / 1024.0 / 1024.0,
-                    rssAfterPaged / 1024.0 / 1024.0, (rssAfterPaged - warmRss) / 1024.0 / 1024.0);
-            }
-            finally
-            {
-                pagedManager.Dispose();
-            }
-        }
-
-        /// <summary>
-        /// Reflect <c>--paged-kv*</c> CLI overrides onto the env vars that
-        /// <see cref="PagedKvCacheConfig.FromEnvironment"/> reads. We funnel
-        /// through env vars (instead of a separate config-passing path) so the
-        /// in-process benchmark, the production session manager, and any future
-        /// reader all see the same configuration without a divergent code path.
-        /// </summary>
-        static void ApplyPagedKvCacheCliOverrides(
-            bool? enable, int? blockSize, long? ramMb, string ssdDir, long? ssdMb, int? quantBits)
-        {
-            if (enable.HasValue)
-                Environment.SetEnvironmentVariable("TS_KV_PAGED_CACHE", enable.Value ? "1" : "0");
-            if (blockSize.HasValue)
-                Environment.SetEnvironmentVariable("TS_KV_BLOCK_SIZE", blockSize.Value.ToString(CultureInfo.InvariantCulture));
-            if (ramMb.HasValue)
-                Environment.SetEnvironmentVariable("TS_KV_CACHE_MAX_RAM_MB", ramMb.Value.ToString(CultureInfo.InvariantCulture));
-            if (ssdDir != null)
-                Environment.SetEnvironmentVariable("TS_KV_CACHE_SSD_DIR", ssdDir);
-            if (ssdMb.HasValue)
-                Environment.SetEnvironmentVariable("TS_KV_CACHE_MAX_SSD_MB", ssdMb.Value.ToString(CultureInfo.InvariantCulture));
-            if (quantBits.HasValue)
-                Environment.SetEnvironmentVariable("TS_KV_PAGED_QUANT_BITS", quantBits.Value.ToString(CultureInfo.InvariantCulture));
-
-            if (enable == true)
-            {
-                var cfg = PagedKvCacheConfig.FromEnvironment();
-                string codecLabel = quantBits.HasValue && quantBits.Value > 0
-                    ? $"turboquant-int{quantBits.Value}"
-                    : "passthrough";
-                _log.LogInformation(LogEventIds.HostConfiguration,
-                    "paged-kv enabled via CLI: blockSize={BlockSize} ramMB={RamMB} ssdDir={SsdDir} maxSsdMB={MaxSsdMB} codec={Codec}",
-                    cfg.BlockSize, cfg.MaxRamBytes / (1024 * 1024),
-                    string.IsNullOrEmpty(cfg.SsdDirectory) ? "(disabled)" : cfg.SsdDirectory,
-                    cfg.MaxSsdBytes / (1024 * 1024), codecLabel);
-            }
-        }
-
-        /// <summary>
         /// Print the Vulkan devices ggml-vulkan can see (index + adapter name) so the
         /// operator knows what to pass to <c>--gpu-device</c> on multi-GPU hosts.
         /// Enumerating spins up the Vulkan instance but no backend/device state.
@@ -3660,15 +3365,14 @@ namespace TensorSharp.Cli
         // Publish a companion-network path under every env var that consumes it. Video
         // models read a generic TS_VIDEO_* name; Wan predates that and reads TS_WAN_*, so
         // both are set and neither model needs to know about the other's naming.
-        static void ApplyVideoCompanionOverride(string flag, string path, params string[] envVars)
+        static void ApplyVideoCompanionOverride(string flag, string path, string envVar)
         {
             if (string.IsNullOrWhiteSpace(path))
                 return;
             if (!File.Exists(path))
                 throw new FileNotFoundException($"{flag} file not found: {path}", path);
             string full = Path.GetFullPath(path);
-            foreach (string envVar in envVars)
-                Environment.SetEnvironmentVariable(envVar, full);
+            Environment.SetEnvironmentVariable(envVar, full);
             _log.LogInformation(LogEventIds.HostConfiguration,
                 "Video companion override {Flag} -> {Path}", flag, full);
         }

@@ -5,11 +5,9 @@
 //
 // TensorSharp is licensed under the BSD-3-Clause license found in the LICENSE file in the root directory of this source tree.
 //
-// Performance benchmark for the Qwen3.5 batched paged-attention path
-// (`TS_QWEN35_BATCHED=1`) vs the per-sequence KV-swap fallback. The
-// fallback fires whenever ForwardBatch throws — flipping the opt-in env
-// var off forces ForwardBatch to bail at the top of the method, which
-// triggers BatchExecutor's per-seq path.
+// Performance benchmark for the Qwen3.5 batched paged-attention path vs
+// the per-sequence KV-swap path; each run picks its path with
+// TS_SCHED_DISABLE_BATCHED (--no-continuous-batching's variable).
 //
 // The Qwen3.5 family is mixed full-attention / GatedDeltaNet — every
 // shipped GGUF has ~75% GDN layers — so the speedup ceiling for the
@@ -37,16 +35,18 @@ namespace InferenceWeb.Tests;
 public class Qwen35BatchedPerfBench
 {
     private const string EnvModelDir = "TS_TEST_MODEL_DIR";
-    private const string OptInVar = "TS_QWEN35_BATCHED";
+    // --no-continuous-batching's variable: set to 1, every sequence takes the
+    // per-sequence path instead of the batched one.
+    private const string PerSequenceVar = "TS_SCHED_DISABLE_BATCHED";
 
     private readonly ITestOutputHelper _output;
     public Qwen35BatchedPerfBench(ITestOutputHelper output) { _output = output; }
 
     // Run a few text-only scenarios back-to-back inside a single model
     // load, since each Qwen3.6-27B load takes ~30s. Each scenario runs
-    // legacy first, then batched, so the numbers are directly comparable.
+    // per-seq first, then batched, so the numbers are directly comparable.
     [ModelFact("TS_TEST_MODEL_DIR", Qwen35Gguf)]
-    public Task Qwen35_BatchedVsLegacy()
+    public Task Qwen35_BatchedVsPerSequence()
         => RunScenarios(new[]
         {
             ("single-seq",     1, 8),
@@ -74,9 +74,9 @@ public class Qwen35BatchedPerfBench
         foreach (var (label, n, maxNewTokens) in scenarios)
         {
             var prompts = MakeShortPrompts(n);
-            var legacy  = await RunPath(ctx, prompts, maxNewTokens, optIn: false, warm: false);
+            var perSeq  = await RunPath(ctx, prompts, maxNewTokens, optIn: false, warm: false);
             var batched = await RunPath(ctx, prompts, maxNewTokens, optIn: true,  warm: false);
-            Report(label, n, legacy, batched);
+            Report(label, n, perSeq, batched);
         }
     }
 
@@ -86,8 +86,7 @@ public class Qwen35BatchedPerfBench
     {
         // Toggle the opt-in. When OFF, Qwen35Model.ForwardBatch throws
         // immediately, BatchExecutor catches and falls through to per-seq.
-        if (optIn) Environment.SetEnvironmentVariable(OptInVar, "1");
-        else       Environment.SetEnvironmentVariable(OptInVar, "0");
+        Environment.SetEnvironmentVariable(PerSequenceVar, optIn ? "0" : "1");
 
         // Drop the model-internal KV cache between runs so each path
         // sees a freshly-allocated cache; without this the per-seq path
@@ -184,18 +183,18 @@ public class Qwen35BatchedPerfBench
         return count;
     }
 
-    private void Report(string label, int n, RunStats legacy, RunStats batched)
+    private void Report(string label, int n, RunStats perSeq, RunStats batched)
     {
-        double legacySec  = legacy.Wall.TotalSeconds;
+        double perSeqSec  = perSeq.Wall.TotalSeconds;
         double batchedSec = batched.Wall.TotalSeconds;
-        double legacyTps  = legacySec  > 0 ? legacy.OutputTokens  / legacySec  : 0;
+        double perSeqTps  = perSeqSec  > 0 ? perSeq.OutputTokens  / perSeqSec  : 0;
         double batchedTps = batchedSec > 0 ? batched.OutputTokens / batchedSec : 0;
-        double speedup    = legacySec  > 0 ? legacySec / Math.Max(batchedSec, 1e-9) : 0;
-        double tpsRatio   = legacyTps  > 0 ? batchedTps / legacyTps : 0;
+        double speedup    = perSeqSec  > 0 ? perSeqSec / Math.Max(batchedSec, 1e-9) : 0;
+        double tpsRatio   = perSeqTps  > 0 ? batchedTps / perSeqTps : 0;
 
         _output.WriteLine("");
         _output.WriteLine($"========== [qwen35-perf] {label} (n={n}) ==========");
-        _output.WriteLine($"  legacy  : wall={legacySec,7:F2}s out={legacy.OutputTokens,4} prompt={legacy.PromptTokens,5} tps={legacyTps,6:F2}");
+        _output.WriteLine($"  per-seq : wall={perSeqSec,7:F2}s out={perSeq.OutputTokens,4} prompt={perSeq.PromptTokens,5} tps={perSeqTps,6:F2}");
         _output.WriteLine($"  batched : wall={batchedSec,7:F2}s out={batched.OutputTokens,4} prompt={batched.PromptTokens,5} tps={batchedTps,6:F2}");
         _output.WriteLine($"  speedup : wall {speedup,5:F2}x   tps {tpsRatio,5:F2}x");
 
@@ -203,7 +202,7 @@ public class Qwen35BatchedPerfBench
         // delta from before→after (the persistent retained set). Working set
         // is dominated by native model weights + KV cache, so deltas across
         // paths are the part that's actually attributable to scratch/scaffold.
-        _output.WriteLine($"  memory legacy : managed peak={MB(legacy.ManagedPeakBytes),7:F1} MiB  delta={MB(legacy.ManagedAfterBytes - legacy.ManagedBeforeBytes),+7:F1} MiB  ws peak={MB(legacy.WorkingSetPeak),7:F1} MiB  delta={MB(legacy.WorkingSetAfter - legacy.WorkingSetBefore),+7:F1} MiB");
+        _output.WriteLine($"  memory per-seq: managed peak={MB(perSeq.ManagedPeakBytes),7:F1} MiB  delta={MB(perSeq.ManagedAfterBytes - perSeq.ManagedBeforeBytes),+7:F1} MiB  ws peak={MB(perSeq.WorkingSetPeak),7:F1} MiB  delta={MB(perSeq.WorkingSetAfter - perSeq.WorkingSetBefore),+7:F1} MiB");
         _output.WriteLine($"  memory batched: managed peak={MB(batched.ManagedPeakBytes),7:F1} MiB  delta={MB(batched.ManagedAfterBytes - batched.ManagedBeforeBytes),+7:F1} MiB  ws peak={MB(batched.WorkingSetPeak),7:F1} MiB  delta={MB(batched.WorkingSetAfter - batched.WorkingSetBefore),+7:F1} MiB");
         _output.WriteLine("");
     }
@@ -267,8 +266,7 @@ public class Qwen35BatchedPerfBench
 
         public BenchContext(string modelPath)
         {
-            BackendType backend = OperatingSystem.IsMacOS()
-                ? BackendType.GgmlMetal : BackendType.GgmlCpu;
+            BackendType backend = TestGates.PinnedGgmlBackend;
             Model = TensorSharp.Models.ModelBase.Create(modelPath, backend);
             Renderer = new KVCachePromptRenderer(new GgufPromptRenderer());
             BlockSize = 256;

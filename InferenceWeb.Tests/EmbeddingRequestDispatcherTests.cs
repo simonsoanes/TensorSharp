@@ -364,10 +364,10 @@ public sealed class EmbeddingRequestDispatcherTests
         var leader = await model.Next();
         var openAI = Context("""{"model":"test-encoder","input":[[3,2],[5,2]],"dimensions":2,"encoding_format":"base64"}""");
         var ollama = Context("""{"model":"test-encoder","input":"hi"}""");
-        var legacy = Context("""{"model":"test-encoder","prompt":"a"}""");
+        var ollamaSecond = Context("""{"model":"test-encoder","input":"a"}""");
         var a = adapter.OpenAIAsync(openAI);
         var b = adapter.OllamaAsync(ollama);
-        var c = adapter.OllamaLegacyAsync(legacy);
+        var c = adapter.OllamaAsync(ollamaSecond);
         leader.Complete();
         var combined = await model.Next();
         Assert.Equal(4, combined.Inputs.Length);
@@ -379,6 +379,6 @@ public sealed class EmbeddingRequestDispatcherTests
         Assert.Equal(8, Convert.FromBase64String(encoded.GetProperty("data")[0].GetProperty("embedding").GetString()!).Length);
         Assert.Equal(2, Response(ollama).GetProperty("prompt_eval_count").GetInt32());
         Assert.Equal(3, Response(ollama).GetProperty("embeddings")[0].GetArrayLength());
-        Assert.Equal(3, Response(legacy).GetProperty("embedding").GetArrayLength());
+        Assert.Equal(3, Response(ollamaSecond).GetProperty("embeddings")[0].GetArrayLength());
     }
 }

@@ -6,14 +6,13 @@
 // TensorSharp is licensed under the BSD-3-Clause license found in the LICENSE file in the root directory of this source tree.
 using System;
 using System.Collections.Generic;
-using System.Diagnostics.CodeAnalysis;
 
 namespace TensorSharp.Runtime.Paged
 {
     /// <summary>
     /// Owner of all physical KV blocks. Mirrors vLLM's <c>BlockPool</c>: a fixed-
-    /// size array of <see cref="KvBlock"/> metadata, a free queue with LRU
-    /// eviction, and a content-hash index used for prefix cache hits.
+    /// size array of <see cref="KvBlock"/> metadata and a free queue. Prefix reuse
+    /// holds blocks through references of its own (the radix prefix cache).
     ///
     /// The pool is not thread-safe; the scheduler is the single owner.
     /// </summary>
@@ -21,7 +20,6 @@ namespace TensorSharp.Runtime.Paged
     {
         private readonly KvBlock[] _blocks;
         private readonly FreeBlockQueue _freeQueue;
-        private readonly BlockHashIndex _hashIndex;
         private readonly PagedKvStorage _storage;
         private readonly int _blockSize;
 
@@ -33,7 +31,6 @@ namespace TensorSharp.Runtime.Paged
             _blockSize = blockSize;
             _blocks = new KvBlock[numBlocks];
             _freeQueue = new FreeBlockQueue();
-            _hashIndex = new BlockHashIndex();
             _storage = new PagedKvStorage(numBlocks, blockByteSize);
 
             for (int i = 0; i < numBlocks; i++)
@@ -52,15 +49,8 @@ namespace TensorSharp.Runtime.Paged
         /// to look up storage bytes during inject/extract.</summary>
         public KvBlock GetBlock(int id) => _blocks[id];
 
-        /// <summary>Look up a block by content hash (prefix cache hit). Returns
-        /// false when the hash isn't indexed.</summary>
-        public bool TryFindByHash(KvBlockHash hash, [NotNullWhen(true)] out KvBlock? block)
-        {
-            return _hashIndex.TryGet(hash, out block);
-        }
-
-        /// <summary>Bump the ref count of a block. Used when a sequence adopts a
-        /// prefix-cache hit block.</summary>
+        /// <summary>Bump the ref count of a block. Used when the prefix cache holds a
+        /// block or a sequence adopts one it holds.</summary>
         public void Touch(KvBlock block)
         {
             if (block.RefCount == 0)
@@ -70,7 +60,7 @@ namespace TensorSharp.Runtime.Paged
 
         /// <summary>Allocate <paramref name="count"/> empty blocks from the free
         /// queue. Returns null when the pool is exhausted (the scheduler will
-        /// then preempt). Each returned block has RefCount=1, Used=0, no hash.</summary>
+        /// then preempt). Each returned block has RefCount=1, Used=0.</summary>
         public KvBlock[]? AllocateNew(int count)
         {
             if (count <= 0) return Array.Empty<KvBlock>();
@@ -81,7 +71,6 @@ namespace TensorSharp.Runtime.Paged
             {
                 KvBlock block = _freeQueue.Dequeue()
                     ?? throw new InvalidOperationException("The free queue became empty during allocation.");
-                EvictHashIfPresent(block);
                 block.RefCount = 1;
                 block.Used = 0;
                 block.IsRestorablePrefixEnd = true;
@@ -95,9 +84,7 @@ namespace TensorSharp.Runtime.Paged
         }
 
         /// <summary>Decrement the ref count of each block. Blocks whose ref count
-        /// hits zero are returned to the free queue (cached blocks at the back so
-        /// their content is still hashable; empty blocks at the back too - the
-        /// queue is LRU so newly-freed blocks are reused last).</summary>
+        /// hits zero return to the back of the free queue and drop their bytes.</summary>
         public void Free(IReadOnlyList<KvBlock?>? blocks)
         {
             if (blocks == null) return;
@@ -111,7 +98,7 @@ namespace TensorSharp.Runtime.Paged
                 if (b.RefCount == 0)
                 {
                     _freeQueue.Enqueue(b);
-                    ReleaseUncachedStorage(b);
+                    ReleaseStorage(b);
                 }
             }
         }
@@ -126,34 +113,17 @@ namespace TensorSharp.Runtime.Paged
             if (block.RefCount == 0)
             {
                 _freeQueue.Enqueue(block);
-                ReleaseUncachedStorage(block);
+                ReleaseStorage(block);
             }
         }
 
-        private void ReleaseUncachedStorage(KvBlock block)
+        private void ReleaseStorage(KvBlock block)
         {
-            // Radix owns a reference while it caches a page. Once its final
-            // reference is gone, no content-hash entry keeps the slab alive.
-            if (block.ContentHash != null) return;
+            // The prefix cache owns a reference while it caches a page, so a block
+            // whose last reference is gone holds nothing anyone can read.
             _storage.ReleaseSlab(block.Id);
             block.HoldsSnapshotBytes = false;
             block.HoldsModelPagedKv = false;
-        }
-
-        /// <summary>Promote a block from "being written" to "full and hashed".
-        /// Called by the executor at every block boundary during prefill / decode.
-        /// </summary>
-        public void RegisterFullBlock(
-            KvBlock block,
-            KvBlockHash hash,
-            int used,
-            bool? isRestorablePrefixEnd = null)
-        {
-            block.Used = used;
-            block.ContentHash = hash;
-            if (isRestorablePrefixEnd.HasValue)
-                block.IsRestorablePrefixEnd = isRestorablePrefixEnd.Value;
-            _hashIndex.Register(hash, block);
         }
 
         /// <summary>Inspect pool state. Used for telemetry and tests.</summary>
@@ -162,28 +132,12 @@ namespace TensorSharp.Runtime.Paged
             return new BlockPoolStats(
                 totalBlocks: _blocks.Length,
                 freeBlocks: _freeQueue.Count,
-                hashedBlocks: _hashIndex.Count,
                 blockSize: _blockSize);
-        }
-
-        private void EvictHashIfPresent(KvBlock block)
-        {
-            if (block.ContentHash is KvBlockHash hash)
-            {
-                _hashIndex.Unregister(hash, block);
-                block.ContentHash = null;
-                block.IsRestorablePrefixEnd = true;
-                block.HoldsSnapshotBytes = false;
-                // Drop the slab too - the new owner will rewrite it on first
-                // capture, and keeping the stale bytes alive wastes memory.
-                _storage.ReleaseSlab(block.Id);
-            }
         }
     }
 
     public readonly record struct BlockPoolStats(
         int totalBlocks,
         int freeBlocks,
-        int hashedBlocks,
         int blockSize);
 }

@@ -329,7 +329,15 @@ public class DeepSeek41ThinkingBudgetTests
     [InlineData("deepseek41", 0, false)]
     [InlineData("nemotron_h_moe", 2, true)]
     [InlineData("deepseek4", 2, false)]
-    [InlineData("qwen35", 2, false)]
+    // Qwen 3.5/3.6/3.8 and GLM 5.x close their block at the budget too (they used to take the
+    // hard stop, which ended the turn with an empty answer).
+    [InlineData("qwen35", 2, true)]
+    [InlineData("qwen35moe", 2, true)]
+    [InlineData("qwen3next", 2, true)]
+    [InlineData("qwen4exp", 2, true)]
+    [InlineData("glm-dsa", 2, true)]
+    [InlineData("glm5next", 2, true)]
+    [InlineData("qwen35", 0, false)]
     public void HostInstallsCapabilityOnlyForSupportedThinkingProtocol(string architecture, int budget, bool expected)
     {
         var tokenizer = new PieceTokenizer();
@@ -340,6 +348,63 @@ public class DeepSeek41ThinkingBudgetTests
         Assert.Equal(expected, result.ThinkingBudget != null);
         Assert.Equal(expected, result.ThinkingBudget?.CloseOnRepetition ?? false);
         Assert.True(result.StopRepetition);
+    }
+
+    [Fact]
+    public async Task ClosingText_IsForwardedAheadOfTheEndToken_ThenTheModelAnswers()
+    {
+        using var model = new ReasoningModel();
+        using var engine = Engine(model);
+        var config = SamplingConfig.Greedy;
+        config.ThinkingBudget = new ThinkingTokenBudget(2, End, closeOnRepetition: true, closingTokenIds: new[] { 5, 6 });
+        var handle = engine.SubmitRequest(Sequence("hand-over", config, 12));
+        int[] output = await Collect(handle);
+        Assert.Equal(new[] { Thought, Thought, 5, 6, End, Answer }, output);
+        Assert.Equal("eos", (await handle.Completion).FinishReason);
+        // The text went through the model like any other token, so the cache holds what was streamed.
+        Assert.Equal(new[] { 5, 6, End }, model.Forwarded.SkipWhile(t => t != 5).Take(3).ToArray());
+    }
+
+    [Theory]
+    [InlineData("qwen35", true)]
+    [InlineData("qwen4exp", true)]
+    [InlineData("glm-dsa", true)]
+    [InlineData("glm5next", true)]
+    [InlineData("deepseek41", false)]
+    public void QwenAndGlm_HandOverToTheAnswerBeforeClosing_OthersCloseBare(string architecture, bool handsOver)
+    {
+        var tokenizer = new CharTokenizer();
+        var result = ChatGenerationPipeline.WithThinkingBudget(SamplingConfig.Greedy, tokenizer, architecture, 64,
+            out bool installed);
+        Assert.True(installed);
+        string text = ChatProtocolRegistry.For(architecture)!.ThinkingBudgetClosingText;
+        Assert.Equal(handsOver, text != null);
+        Assert.Equal(handsOver ? tokenizer.Encode(text!, false).ToArray() : Array.Empty<int>(),
+            result.ThinkingBudget!.ClosingTokenIds.ToArray());
+        // An unrequested channel is only capped, never handed over.
+        Assert.Empty(ChatGenerationPipeline.WithThinkingBudget(SamplingConfig.Greedy, tokenizer, "gemma4", 64,
+            out _, enableThinking: false)?.ThinkingBudget?.ClosingTokenIds ?? Array.Empty<int>());
+    }
+
+    [Theory]
+    [InlineData("qwen35", false)]
+    [InlineData("qwen4exp", false)]
+    [InlineData("glm-dsa", false)]
+    [InlineData("glm5next", true)]   // its template opens <think> with thinking off too
+    public void QwenAndGlm_BudgetARequestedBlock_AndGlm53FlashsAlwaysOpenOne(string architecture, bool alwaysOpen)
+    {
+        var protocol = ChatProtocolRegistry.For(architecture)!;
+        Assert.Equal("</think>", protocol.ThinkingBudgetEndToken);
+        Assert.Null(protocol.ThinkingBudgetOpenToken);   // the prompt opens the block itself
+        Assert.Equal(alwaysOpen, protocol.PromptAlwaysOpensThinking);
+        Assert.Equal(alwaysOpen, ChatGenerationPipeline.ReasonsWhetherAsked(architecture, enableThinking: false));
+        Assert.True(ChatGenerationPipeline.ReasonsWhetherAsked(architecture, enableThinking: true));
+        // A block the request did not ask for, and the prompt did not open, is left alone.
+        var tokenizer = new PieceTokenizer();
+        var original = SamplingConfig.Greedy;
+        Assert.Same(original, ChatGenerationPipeline.WithThinkingBudget(original, tokenizer, architecture, 64,
+            out bool installed, enableThinking: false));
+        Assert.False(installed);
     }
 
     [Fact]
@@ -388,6 +453,21 @@ public class DeepSeek41ThinkingBudgetTests
         await foreach (int token in handle.Tokens.ReadAllAsync(deadline.Token)) result.Add(token);
         await handle.Completion.WaitAsync(deadline.Token);
         return result.ToArray();
+    }
+
+    /// <summary>One token per character, plus the reasoning markers as single tokens.</summary>
+    private sealed class CharTokenizer : ITokenizer
+    {
+        private static readonly string[] Specials = { "<eos>", "<think>", "</think>", "<|channel>", "<channel|>" };
+        public string[] Vocab { get; } = Specials.Concat(Enumerable.Range(0, 128).Select(c => ((char)c).ToString())).ToArray();
+        public int BosTokenId => -1;
+        public int[] EosTokenIds => new[] { 0 };
+        public int VocabSize => Vocab.Length;
+        public List<int> Encode(string text, bool addSpecial = true) => text.Select(c => Specials.Length + c).ToList();
+        public string Decode(List<int> ids) => string.Concat(ids.Select(i => Vocab[i]));
+        public void AppendTokenBytes(int tokenId, List<byte> bytes) => bytes.AddRange(Encoding.UTF8.GetBytes(Vocab[tokenId]));
+        public bool IsEos(int tokenId) => tokenId == 0;
+        public int LookupToken(string token) => Array.IndexOf(Vocab, token);
     }
 
     private sealed class PieceTokenizer : ITokenizer, ISpecialTokenVocabulary

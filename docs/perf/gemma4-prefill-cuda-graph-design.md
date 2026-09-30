@@ -10,8 +10,8 @@ was NOT needed. E4B end-to-end vs llama went 0.78–0.91x → 8k 0.98x, **16k 1.
    at 8k), NOT KV residency (residency is fine — a red herring). The verify graph now reproduces
    the FULL PLE on-device — `(sqrt(ple_dim)·get_rows(per_layer_token_embd, ids) +
    rmsnorm((hidden@per_layer_model_proj)/sqrt(hidden), per_layer_proj_norm)) / sqrt(2)` — from the
-   resident quantized table; only the token-id list is uploaded. `TS_G4_PLE_IN_KERNEL` (default on),
-   text-only, get_rows-safe quant table. Byte-identical (PrefillBench MATCH). This cut the 64k
+   resident quantized table; only the token-id list is uploaded. On by default, text-only, for a
+   get_rows-safe quant table. Byte-identical (PrefillBench MATCH). This cut the 64k
    busy 88%→94.7% and the kernel-floor 1.35x→1.08x.
 2. **KV pre-grow** (`IModelArchitecture.PrepareForPrefill`): pre-size the grow-on-demand global KV
    cache to the prompt length at the first prefill chunk (free at start_pos 0, no committed K/V to
@@ -21,7 +21,7 @@ was NOT needed. E4B end-to-end vs llama went 0.78–0.91x → 8k 0.98x, **16k 1.
 3. **On-GPU causal mask** (Option A below, implemented): `ggml_ops_mask.cu` fills the verify's
    `[kvLen,N]` F16 causal(+windowed) masks straight into their device buffers (fill on stream 0,
    one sync before graph compute) instead of the O(N·kvLen) host fill + H2D upload. Bit-identical,
-   `TS_G4_GPU_MASK` (default on), CUDA text-only. Isolated +4% @8k, +8.7% @64k, +4.4% @128k
+   on by default, CUDA text-only. Isolated +4% @8k, +8.7% @64k, +4.4% @128k
    (mask ∝ kvLen, so it helps most at long context — pushed 128k 0.97x→1.01x).
 
 Remaining 8k/64k at 0.98x (~2%) is fixed per-request overhead (HTTP, first-token, cold graph) +
@@ -172,7 +172,7 @@ for a **multi-token** graph with a **moving KV write** and **bucketed masks**.
 
 **Phase 0 — DONE (2026-06-30). Measured, hypothesis partly revised.**
 Method: env-gated per-phase timers in the verify kernel + nsys on `PrefillBench`
-(`TS_PREFILL_ENGINE_ONLY=1` / `TS_PREFILL_LEGACY_ONLY=1`, `MAX_CONTEXT=65536` to remove cache
+(`TS_PREFILL_ENGINE_ONLY=1` / `TS_PREFILL_FORWARD_REFILL_ONLY=1`, `MAX_CONTEXT=65536` to remove cache
 grows, `--delay/--duration` to capture only a late steady-state window), then interval-union of
 CUPTI kernel+memcpy activity vs wall span.
 

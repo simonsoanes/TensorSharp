@@ -9,6 +9,8 @@ using Xunit.Abstractions;
 
 namespace InferenceWeb.Tests;
 
+[Collection(EngineEnvironmentCollection.Name)]
+
 public sealed class Qwen35QuantizedEmbeddingBatchedDecodeTests
 {
     private const string ModelPattern = "qwen3.8-27b-ud-iq3_xxs";

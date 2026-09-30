@@ -613,7 +613,7 @@ public sealed class Qwen4ExpRetainedCacheTests(ITestOutputHelper output)
     // 0.3155. So on CUDA the bound is 1e-2 - 23x the measured maximum and 32x below
     // that defect - and greedy may differ only at a near-tie no wider than twice
     // the measured difference. Every other backend stays bit-exact above.
-    // Evidence: eng/validation/qwen38_mtp_followup/verify-row-kernels-20260917.
+    // Measured on an A40, 2026-09-17.
     private const double PrefillShapeNoiseBound = 1e-2;
 
     private void AssertWithinPrefillShapeNoise(float[] expected, float[] actual, string what)
@@ -687,8 +687,8 @@ public sealed class Qwen4ExpRetainedCacheTests(ITestOutputHelper output)
     [Qwen4ExpMtpTinyFact]
     public async Task Engine_FollowUpReusesRetainedHolder_AndNewChatsCloneTheCheckpoint()
     {
-        string[] keys = { "TS_RETAINED_FUSED_CACHE", "TS_PER_SEQ_FUSED", "TS_PREFIX_CHECKPOINTS", "TS_PREFIX_CHECKPOINTS_MAX" };
-        string[] values = { "1", "1", "1", "2" };
+        string[] keys = { "TS_RETAINED_FUSED_CACHE_MAX", "TS_PER_SEQ_FUSED", "TS_PREFIX_CHECKPOINTS_MAX" };
+        string[] values = { null, "1", "2" };
         var old = keys.Select(Environment.GetEnvironmentVariable).ToArray();
         try
         {

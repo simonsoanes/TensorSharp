@@ -18,7 +18,6 @@ namespace TensorSharp.Cuda
         public CudaAllocator(int deviceId = 0)
         {
             CudaBackend.Register();
-            bool poolEnabled = !string.Equals(Environment.GetEnvironmentVariable("TENSORSHARP_CUDA_POOL"), "0", StringComparison.Ordinal);
             long maxCachedBytes = ReadPoolLimit("TENSORSHARP_CUDA_POOL_MAX_MB", 512L) * 1024L * 1024L;
             long maxCachedBlockBytes = ReadPoolLimit("TENSORSHARP_CUDA_POOL_MAX_BLOCK_MB", 256L) * 1024L * 1024L;
             // Budget for the global large-block cache (prefill-sized activations;
@@ -30,7 +29,7 @@ namespace TensorSharp.Cuda
             // free VRAM below it, returned blocks go back to the driver instead of
             // into the cache. Prevents the pool from being the thing that tips a
             // nearly-full device (a big model on a small card) into WDDM shared
-            // memory. 0 disables the valve (unbounded caching, the old behaviour).
+            // memory. 0 disables the valve (unbounded caching).
             long minFreeReserveBytes = ReadPoolLimit("TENSORSHARP_CUDA_POOL_MIN_FREE_MB", 256L) * 1024L * 1024L;
 
             CudaContext context = null;
@@ -65,7 +64,7 @@ namespace TensorSharp.Cuda
             pool = new CudaDeviceMemoryPool(
                 maxCachedBytes,
                 maxCachedBlockBytes,
-                poolEnabled,
+                enabled: true,
                 backingAllocate: AllocateDeviceMemory,
                 backingFree: FreeDeviceMemory,
                 largeCachedBytesCap: largeCachedBytes,

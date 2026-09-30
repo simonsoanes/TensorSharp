@@ -146,13 +146,34 @@ namespace TensorSharp.Models.Architecture
         /// families are multimodal.
         /// </summary>
         public static string FindCompanionProjector(string architecture, string modelPath)
-        {
-            if (string.IsNullOrEmpty(modelPath) || !TryGet(architecture, out var descriptor))
-                return null;
-            if (descriptor.ProjectorFileHints.Count == 0)
-                return null;
+            => string.IsNullOrEmpty(modelPath) ? null : FindProjectorIn(architecture, System.IO.Path.GetDirectoryName(modelPath));
 
-            string directory = System.IO.Path.GetDirectoryName(modelPath);
+        /// <summary>
+        /// The projector an <c>--mmproj</c> argument names. A file is used as given. A directory is
+        /// resolved to the family's companion inside it (the <see cref="ModelArchitectureDescriptor.ProjectorFileHints"/>
+        /// the beside-the-model lookup uses): the DeepSeek V4.1 CLI opened
+        /// <c>--mmproj /workspace/models/deepseek/</c> as a GGUF, failed on the magic bytes and aborted with a
+        /// core dump. A directory with no such file throws <see cref="System.IO.FileNotFoundException"/>, a
+        /// load refusal, naming what it looked for.
+        /// </summary>
+        public static string ResolveProjectorPath(string architecture, string mmProjPath)
+        {
+            if (string.IsNullOrWhiteSpace(mmProjPath) || !System.IO.Directory.Exists(mmProjPath))
+                return mmProjPath;
+            string found = FindProjectorIn(architecture, mmProjPath);
+            if (found != null)
+                return found;
+            string hints = TryGet(architecture, out var descriptor) && descriptor.ProjectorFileHints.Count > 0
+                ? string.Join(", ", descriptor.ProjectorFileHints) : "(this architecture names no projector file)";
+            throw new System.IO.FileNotFoundException(
+                $"--mmproj names the directory {mmProjPath}, which holds no {architecture} projector ({hints}); " +
+                "pass the projector file.", mmProjPath);
+        }
+
+        private static string FindProjectorIn(string architecture, string directory)
+        {
+            if (!TryGet(architecture, out var descriptor) || descriptor.ProjectorFileHints.Count == 0)
+                return null;
             if (string.IsNullOrEmpty(directory) || !System.IO.Directory.Exists(directory))
                 return null;
 

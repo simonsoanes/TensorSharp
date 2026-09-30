@@ -94,9 +94,8 @@ namespace TensorSharp.MLX
             if (ElementCount > int.MaxValue)
                 throw new NotSupportedException("MLX storage arrays larger than Int32.MaxValue elements are not supported yet.");
 
-            // Phase 4 attempted to skip the reshape when the incoming array
-            // was already row-contiguous (and stored the multi-dim array
-            // directly as the storage's deviceArray). That broke
+            // Storing a row-contiguous multi-dim array directly as the
+            // storage's deviceArray (skipping the reshape) breaks
             // <see cref="UpdateDeviceSlice"/>, which calls 1D
             // <c>SliceUpdate</c> on <c>deviceArray</c> — mlx errors out
             // with "Invalid number of indices or strides for array with

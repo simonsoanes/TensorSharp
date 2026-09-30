@@ -8,7 +8,7 @@
 |---|---|
 | Provider | Google |
 | GGUF architecture key | `gemma4` |
-| Source class | [`Gemma4Model`](../../TensorSharp.Models/Models/Gemma4/Gemma4Model.cs) (legacy per-seq) + [`Gemma4Model.BatchedForward.cs`](../../TensorSharp.Models/Models/Gemma4/Gemma4Model.BatchedForward.cs) (`IBatchedPagedModel`) |
+| Source class | [`Gemma4Model`](../../TensorSharp.Models/Models/Gemma4/Gemma4Model.cs) (single-sequence) + [`Gemma4Model.BatchedForward.cs`](../../TensorSharp.Models/Models/Gemma4/Gemma4Model.BatchedForward.cs) (`IBatchedPagedModel`) |
 | Vision encoder | [`Gemma4VisionEncoder`](../../TensorSharp.Models/Models/Gemma4/Gemma4VisionEncoder.cs) (SigLIP-style ViT) |
 | Audio encoder | [`Gemma4AudioEncoder`](../../TensorSharp.Models/Models/Gemma4/Gemma4AudioEncoder.cs) (USM-style chunked transformer) |
 | Audio frontend | [`Gemma4AudioPreprocessor`](../../TensorSharp.Models/Models/Gemma4/Gemma4AudioPreprocessor.cs) (16 kHz mono → 128-bin log-mel) |
@@ -17,7 +17,7 @@
 | Modalities | Text, image, video (frame stack), audio |
 | Thinking mode | Yes (`<\|channel>thought ... <channel\|>`) |
 | Tool calling | Yes (`<\|tool_call>call:name{...}<tool_call\|>`) |
-| Batched / paged forward | **Default-on** — `IBatchedPagedModel.ForwardBatch` with per-layer paged K/V (handles dual head dims, KV donor sharing, PLE injection, SWA + global mix). Set `TS_GEMMA4_BATCHED=0` to force the legacy per-seq KV-swap path. See §11. |
+| Batched / paged forward | **Default-on** — `IBatchedPagedModel.ForwardBatch` with per-layer paged K/V (handles dual head dims, KV donor sharing, PLE injection, SWA + global mix). `--no-continuous-batching` forces the per-seq KV-swap path. See §11. |
 | MTP speculative decoding | Optional — loads a separate `gemma4-assistant` EAGLE-style draft GGUF via `--draft-model` (`TS_SPEC_DRAFT_MODEL`); naming the file enables speculation by itself (an explicit `--no-spec` vetoes it). The flag works on **either host**: `TensorSharp.Cli` and `TensorSharp.Server` share [`SpeculativeCliFlags`](../../TensorSharp.Runtime/Speculative/SpeculativeCliFlags.cs). Profitable on ggml backends and the pure-C# `cuda` backend. See §12. |
 | Output parser | `Gemma4OutputParser` |
 
@@ -89,9 +89,9 @@ The fast-path claim is backed by three independent routing details:
   and shared-KV donor handling.
 - Single-token dense decode runs the complete transformer through
   `NativeGemma4ModelDecode` in one GGML graph dispatch.
-- With one scheduled sequence, the default `TS_BATCHED_N1_FAST_PATH=1`
-  scheduler route selects the linear `Forward()` path that reaches that fused
-  whole-model decode instead of the general batched per-op route.
+- With one scheduled sequence, the scheduler's single-sequence route selects the
+  linear `Forward()` path that reaches that fused whole-model decode instead of
+  the general batched per-op route.
 
 See the [engine-comparison report](../engine_comparison_report.md), the measured
 [E4B prefill performance record](../perf/gemma4-prefill-cuda-graph-design.md),
@@ -531,12 +531,10 @@ single GGML graph dispatch with activations device-resident, instead of one
 graph per layer. `CanUseWholeModelPrefillVerify()` gates the path — dense
 models only, including E-series in-kernel PLE and shared-KV donor layers, with
 multimodal chunks eligible at any start position via the kernel's
-bidirectional-span mask (`TS_G4_MM_PREFILL=0` reverts multimodal to the per-op
-path; see [Image and audio turns after a reused prefix](#image-and-audio-turns-after-a-reused-prefix)). SWA-wrapped chunks at `startPos > 0` stay on the fused path through the
-kernel's in-kernel swaPrev gather (`TS_G4_VERIFY_SWAPREV=0` disables).
+bidirectional-span mask (see [Image and audio turns after a reused prefix](#image-and-audio-turns-after-a-reused-prefix)). SWA-wrapped chunks at `startPos > 0` stay on the fused path through the
+kernel's in-kernel swaPrev gather.
 All-MoE variants (e.g. 26B-A4B) have a sibling fused path,
-`CanUseWholeModelMoEPrefillVerify()` / `TryFusedMoEModelVerify()`. Set
-`TS_G4_WHOLE_PREFILL=0` to force the per-op chunked path for A/B. Note that
+`CanUseWholeModelMoEPrefillVerify()` / `TryFusedMoEModelVerify()`. Note that
 block-quantized (`q8_0` / `q4_0`) KV caches *require* this path for
 multi-token prefill — the per-op fallback cannot walk block-quantized cache
 layouts.
@@ -640,8 +638,8 @@ cause, splits its bidirectional attention.
 The per-layer embeddings (PLE) are gathered inside the fused verify graph via
 `ggml_get_rows` on the resident quantized `per_layer_token_embd` table,
 instead of computing them in C# and shuttling the ~88 MB result
-device→host→device every chunk. Default on; `TS_G4_PLE_IN_KERNEL=0` reverts
-to the uploaded path.
+device→host→device every chunk. Checkpoints whose PLE table or projection the
+kernel cannot read keep the uploaded path.
 
 ### KV cache pre-grow (`PrepareForPrefill`)
 
@@ -681,8 +679,7 @@ single GGML graph that performs the entire transformer block in one dispatch:
 8. RMSNorm(post_ffw_norm) + residual + layer_output_scale
 
 Layers with MoE, KV sharing, or active PLE injection fall back to the
-standard per-op C# path. Setting `TS_FUSED_LAYER_PREFILL=0` disables the
-fused path entirely (useful for debugging or A/B benchmarking).
+standard per-op C# path.
 
 ### Chunked prefill
 
@@ -746,11 +743,11 @@ layers. `AttentionDecodeCircular()` traverses the circular buffer for read.
 SWA layers therefore allocate `slidingWindow` slots regardless of context
 length — the resident set is bounded.
 
-### Token-batched fused decode for concurrent requests (`Gemma4ModelDecodeBatchedEx2`)
+### Token-batched fused decode for concurrent requests (`Gemma4ModelDecodeBatched`)
 
 With N >= 2 requests in flight the engine does not round-robin N single-token
 graphs: `Gemma4Model.TryForwardBatchedFusedDecode` decodes one token for every
-sequence in ONE fused graph (`TSGgml_Gemma4ModelDecodeBatchedEx2` in
+sequence in ONE fused graph (`TSGgml_Gemma4ModelDecodeBatched` in
 [`ggml_ops_gemma4_batched.cpp`](../../TensorSharp.GGML.Native/ggml_ops_gemma4_batched.cpp)),
 so every weight is loaded once per step and applied to N tokens. Decode is
 bandwidth-bound, which is where the aggregate throughput comes from. Each
@@ -759,12 +756,8 @@ sequence keeps its own per-request KV holder; the kernel takes the holders as a
 `[hidden, N]`, and runs one single-row flash-attention per sequence over a
 direct view of that sequence's cache window.
 
-The v1 kernel covered dense models without per-layer embeddings, without
-shared-KV layers and only while every sequence fitted its SWA ring, so the
-E2B/E4B checkpoints (PLE dim 256, 18 KV-donor layers, a 512-slot ring most
-chats outgrow) always declined and the server logged "The model declined the
-default batched fused-decode path ... concurrency stays near 1x". The `Ex`
-entry closes those three gaps:
+The kernel covers what the E2B/E4B checkpoints need (PLE dim 256, 18 KV-donor
+layers, a 512-slot ring most chats outgrow):
 
 - **PLE per row.** The per-layer embeddings are gathered *inside* the graph
   from the resident quantized `per_layer_token_embd` table with one
@@ -783,27 +776,13 @@ entry closes those three gaps:
   Global (linear) layers must still fit their cache. A sequence that needs growth
   takes a serial step while other ready sequences can continue batching.
 
-`Ex2` additionally accepts each sequence's actual cache capacity as
+The kernel takes each sequence's actual cache capacity as
 `cache_size_arr[layer * N + seq]`. Retained-prefix clones are intentionally
-smaller than fresh caches, and each request grows independently. The earlier
-uniform-capacity ABI rejected such batches even when every request had enough
-space. The new kernel uses each allocation's real KV-head stride and its own
-padded attention window and mask. It does not expand short children to the
-largest request's allocation. Shared-KV layers use their donor's capacity for
-the same sequence.
-
-The native side reports what it supports through
-`TSGgml_Gemma4BatchedDecodeCapabilities()` (bits: PLE=1, KV donor=2, SWA wrap=4,
-per-sequence cache sizes=8).
-The managed gate keeps the v1 restriction for every bit the loaded native
-library lacks, so an older `libGgmlOps` (no probe symbol) behaves exactly as
-before, and `TSGgml_Gemma4ModelDecodeBatched` keeps its v1 ABI as a thin
-wrapper. The old `Ex` ABI also retains its layer-only capacity array.
-`TS_GEMMA4_BATCHED_CAPS=0` forces the v1 gates for an A/B;
-`TS_GEMMA4_BATCHED_CAPS=7` restores the uniform-capacity gate while retaining
-PLE, shared-KV and SWA-wrap support. These are diagnostic overrides, not flags
-needed to enable batching. Rebuild both the managed server and native `GgmlOps`
-library to use `Ex2`; an older native library continues safely through fallback.
+smaller than fresh caches, and each request grows independently, so the kernel
+uses each allocation's real KV-head stride and its own padded attention window
+and mask. It does not expand short children to the largest request's allocation.
+Shared-KV layers use their donor's capacity for the same sequence.
+`TS_BATCHED_FUSED_DECODE=0` decodes concurrent requests round-robin for an A/B.
 
 Every per-step input (hidden rows,
 positions, per-(layer, seq) `set_rows` write rows, per-sequence F16 masks, the
@@ -831,8 +810,8 @@ continuations of the batched path equal the round-robin single-token decodes
 token for token, and every step ran on the batched kernel.
 
 **Measured** (gemma-4-E4B-it-Q8_0, NVIDIA A40, ggml_cuda, f16 KV, prefill
-chunk 512, 4 running sequences; the round-robin column forces the v1 gates with
-`TS_GEMMA4_BATCHED_CAPS=0`, everything else identical):
+chunk 512, 4 running sequences; the round-robin column declined the batched
+kernel for PLE / shared-KV / wrapped-SWA models, everything else identical):
 
 | Workload | Round-robin (before) | Token-batched (after) | Ratio |
 |---|---:|---:|---:|
@@ -851,7 +830,7 @@ here: the AgentTurnBench `conc` streams (`compare.py`, identical output token
 ids required) and the 12-step in-process parity test match the round-robin
 decode exactly, but over hundreds of greedy tokens a low-margin token can flip
 (`ParityHarness --batched` at 256 steps: one of the sequences in each 2/3/4-way
-set diverged), and the pre-existing v1 kernel does the same on gemma-4-12B
+set diverged), and the batched kernel does the same on gemma-4-12B
 (no PLE, no shared KV) under the identical run — batching changes GEMM shapes
 and therefore rounding, the caveat already documented for the GLM batched
 decode. Through the HTTP server at concurrency 4 even two round-robin runs
@@ -871,35 +850,15 @@ scheduling-dependent, so parity has to be judged in-process.
   Direct CUDA uploads quantized blobs to device memory once and frees the host
   copy.
 
-### Retained holders: the one-block minimum
-
-Under the default radix prefix cache (`TS_PREFIX_CACHE_MODE=tree`) the tree
-decides what a finished request leaves behind, and its minimum is 32 tokens
-(`MinRetainTokens`). The one-block rule below belongs to the legacy
-retained-holder path (`TS_PREFIX_CACHE_MODE=legacy`).
-
-A finished concurrent request's per-request holder is kept for its conversation's next
-turn only when it holds at least one scheduler block (256 tokens by default), by the same
-executor rule Qwen 3.5 uses (`BatchExecutor.TryRetainReleasedFusedCache` and
-`DonateFinishedLiveCacheToRetained`). A shorter conversation re-prefills its whole prompt on
-every turn that runs beside another request; one that runs alone continues from the live
-cache, which has no minimum. Holders do not need the block granularity (they are matched
-token by token and adoption reserves ceil(lcp / BlockSize) placeholder blocks), but lowering
-the minimum failed its exactness validation on Qwen 3.5 on Metal, with a cause not yet
-identified; see [Qwen 3.5, Retained holders: the one-block
-minimum](qwen35.md#retained-holders-the-one-block-minimum). Shorter Gemma 4 holders were not
-validated, so the minimum stays here as well.
-
 ## 11. Batched / paged forward (continuous batching)
 
 Gemma 4 has a full `IBatchedPagedModel.ForwardBatch` port
 ([`Gemma4Model.BatchedForward.cs`](../../TensorSharp.Models/Models/Gemma4/Gemma4Model.BatchedForward.cs))
 that runs through the shared `InferenceEngine` continuous-batching stack
 ([`docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md`](../PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md)).
-Unlike most batched ports, Gemma 4 is enabled **by default**; set
-`TS_GEMMA4_BATCHED=0` to force the legacy per-seq KV-swap path for
-debugging. A solo request already reaches the fused single-graph decode
-through the default N=1 fast path (`TS_BATCHED_N1_FAST_PATH=1`).
+It is enabled **by default**; `--no-continuous-batching` forces the
+per-seq KV-swap path. A solo request already reaches the fused single-graph decode
+through the scheduler's single-sequence route.
 
 Gemma 4 is the hardest model TensorSharp ports to paged batching because
 of three sources of per-layer heterogeneity that the engine assumes is
@@ -949,11 +908,11 @@ The remaining batched-path mechanics mirror Mistral 3:
 - `EngineParallelInferenceTests.Gemma4_ThreeLongGenerationsParallel`
   exercises the multi-sequence batched path through the engine.
 
-**Throughput** (gemma-4-E4B-it-Q8_0, Apple M4 Pro, GgmlMetal — toggling
-`TS_GEMMA4_BATCHED` in-process, see
+**Throughput** (gemma-4-E4B-it-Q8_0, Apple M4 Pro, GgmlMetal — per-seq and
+batched paths in one process, see
 [`Gemma4BatchedPerfBench.cs`](../../InferenceWeb.Tests/Gemma4BatchedPerfBench.cs)):
 
-| Workload | n | Prompt tok | Legacy tps | Batched tps | Speedup |
+| Workload | n | Prompt tok | Per-seq tps | Batched tps | Speedup |
 |---|---|---|---|---|---|
 | Single sequence, short prompt | 1 | 29 | 14.0 | 4.9 | **0.35×** (batched slower) |
 | 5 short prompts parallel | 5 | 142 | 10.2 | 13.5 | **1.32×** |
@@ -985,7 +944,7 @@ Gemma 4 supports **multi-token-prediction (MTP) speculative decoding**
 for solo (non-concurrent) sequences on both hosts. Unlike Qwen 3.6,
 whose NextN block is embedded in the trunk GGUF, the Gemma 4 draft head ships as
 a **separate small `gemma4-assistant` GGUF** loaded with `--draft-model`
-(env `TS_SPEC_DRAFT_MODEL`, legacy `TS_MTP_DRAFT_MODEL`)
+(env `TS_SPEC_DRAFT_MODEL`)
 and attached to the target at startup by
 [`SpeculativeDraftHeadLoader`](../../TensorSharp.Models/SpeculativeDraftHeadLoader.cs).
 Source:
@@ -1041,10 +1000,8 @@ gates whether speculation actually engages:
   gate)** — run fused single-graph kernels: a multi-token
   verify (`NativeGemma4ModelVerify`, or `TryFusedMoEModelVerify` for the 26B-A4B
   MoE) and a fused draft step (`NativeGemma4DraftStep`). On partial acceptance a
-  dense fast-rollback avoids re-running the kept prefix (escape hatch
-  `TS_GMTP_NO_FAST_ROLLBACK=1`). The verify trunk runs the linear path by default
-  for solo speculation; `TS_GMTP_BATCHED_TRUNK=1` opts into the batched paged
-  trunk. `TS_GMTP_NO_FUSED=1` falls back to the per-op path for A/B testing.
+  dense fast-rollback avoids re-running the kept prefix. The verify trunk is the
+  model's linear cache; a shape the fused kernels decline runs per-op.
 - **Direct CUDA (`cuda`, pure C#)** — has no fused kernels, but its per-op verify
   and draft are fully GPU-resident: the draft attends the donor cache on-device,
   global verify attention runs the GQA decode kernel per row against the live

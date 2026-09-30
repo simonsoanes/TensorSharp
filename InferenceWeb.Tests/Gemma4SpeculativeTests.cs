@@ -233,19 +233,19 @@ public class Gemma4SpeculativeTests
         swDecode.Stop();
         double baseTps = (maxNew - 1) / swDecode.Elapsed.TotalSeconds;
 
-        // Per-op baseline (TS_GEMMA4_FORCE_UNFUSED): the trunk's per-token path
+        // Per-op baseline (ForceUnfused): the trunk's per-token path
         // WITHOUT the fused single-token decode kernel — the same kernel family the
         // multi-token verify is forced onto (Gemma 4 has no fused multi-token
         // forward). Comparing spec to this isolates the speculative algorithm's
         // contribution from the fused-decode advantage the production decode enjoys.
-        Environment.SetEnvironmentVariable("TS_GEMMA4_FORCE_UNFUSED", "1");
+        model.ForceUnfused = true;
         model.ResetKVCache();
         logits = model.ForwardRefill(tokens);
         var swUnfused = Stopwatch.StartNew();
         t = Argmax(logits);
         for (int i = 1; i < maxNew; i++) { logits = model.Forward(new[] { t }); t = Argmax(logits); }
         swUnfused.Stop();
-        Environment.SetEnvironmentVariable("TS_GEMMA4_FORCE_UNFUSED", null);
+        model.ForceUnfused = false;
         double baseUnfusedTps = (maxNew - 1) / swUnfused.Elapsed.TotalSeconds;
 
         // Speculative greedy.

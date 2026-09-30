@@ -10,6 +10,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 
 namespace InferenceWeb.Tests;
 
@@ -30,14 +31,13 @@ internal sealed class EnvScope : IDisposable
     }
 
     /// <summary>
-    /// Clear every speculative-decoding variable, in BOTH spellings. A flag
-    /// applied through <c>SpeculativeCliFlags</c> is published twice - under
-    /// <c>TS_SPEC_*</c> for managed readers and <c>TS_MTP_*</c> for the glm-dsa
-    /// native loader - so a test that clears only one spelling still reads the
-    /// other one's leftovers.
+    /// Clear every speculative-decoding variable, and the removed names a
+    /// developer's shell may still export (reading any of them is an error).
     /// </summary>
     public void ClearSpeculationVars()
     {
+        foreach ((string removed, _) in TensorSharp.Runtime.Speculative.SpeculationEnvVars.RemovedNames)
+            Set(removed, null);
         foreach (string name in new[]
                  {
                      TensorSharp.Runtime.Speculative.SpeculationEnvVars.Enabled,
@@ -45,17 +45,6 @@ internal sealed class EnvScope : IDisposable
                      TensorSharp.Runtime.Speculative.SpeculationEnvVars.Draft,
                      TensorSharp.Runtime.Speculative.SpeculationEnvVars.PMin,
                      TensorSharp.Runtime.Speculative.SpeculationEnvVars.DraftModel,
-                     TensorSharp.Runtime.Speculative.SpeculationEnvVars.LegacyEnabled,
-                     TensorSharp.Runtime.Speculative.SpeculationEnvVars.LegacyDraft,
-                     TensorSharp.Runtime.Speculative.SpeculationEnvVars.LegacyPMin,
-                     TensorSharp.Runtime.Speculative.SpeculationEnvVars.LegacyDraftModel,
-                     // --draft-model also publishes architecture-specific loader
-                     // fallbacks. Restore these with the generic variables so a
-                     // CLI test cannot leave the next model load a stale drafter.
-                     "TS_DSV4_DSPARK",
-                     "TS_QWEN35_DFLASH",
-                     "TS_MUSE_GLIMMER_DFLASH",
-                     "TS_NEMOTRON_DFLASH",
                  })
         {
             Set(name, null);
@@ -67,5 +56,48 @@ internal sealed class EnvScope : IDisposable
         foreach (var kv in _originals)
             Environment.SetEnvironmentVariable(kv.Key, kv.Value);
         _originals.Clear();
+    }
+}
+
+/// <summary>
+/// <see cref="EnvScope"/> for variables the NATIVE library reads: sets each one in
+/// the managed environment and in the C runtime's table (libc <c>setenv</c>, the UCRT
+/// <c>_putenv_s</c>), which .NET may keep separately, and restores both on dispose.
+/// </summary>
+internal sealed class NativeEnvScope : IDisposable
+{
+    private readonly Dictionary<string, string?> _originals = new();
+
+    [DllImport("libc", EntryPoint = "setenv", CharSet = CharSet.Ansi)]
+    private static extern int SetEnvUnix(string name, string value, int overwrite);
+
+    [DllImport("libc", EntryPoint = "unsetenv", CharSet = CharSet.Ansi)]
+    private static extern int UnsetEnvUnix(string name);
+
+    [DllImport("ucrtbase", EntryPoint = "_putenv_s", CharSet = CharSet.Ansi)]
+    private static extern int PutEnvWindows(string name, string value);
+
+    public void Set(string name, string? value)
+    {
+        if (!_originals.ContainsKey(name))
+            _originals[name] = Environment.GetEnvironmentVariable(name);
+        SetBoth(name, value);
+    }
+
+    public void Dispose()
+    {
+        foreach (var pair in _originals)
+            SetBoth(pair.Key, pair.Value);
+        _originals.Clear();
+    }
+
+    private static void SetBoth(string name, string? value)
+    {
+        Environment.SetEnvironmentVariable(name, value);
+        int result = OperatingSystem.IsWindows()
+            ? PutEnvWindows(name, value ?? string.Empty)
+            : value == null ? UnsetEnvUnix(name) : SetEnvUnix(name, value, 1);
+        if (result != 0)
+            throw new InvalidOperationException($"Failed to update the native environment variable '{name}'.");
     }
 }

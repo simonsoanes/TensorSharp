@@ -211,26 +211,6 @@ namespace TensorSharp.Models
 
         public KvCacheDtype KvCacheDtype => _kvCacheDtype;
 
-        /// <summary>
-        /// Map the model's KV-cache storage dtype to the codec element type
-        /// the paged tier's optional TurboQuant codec uses to interpret the
-        /// raw block bytes. Block-quantized caches (Q8_0, Q4_0) bypass the codec
-        /// entirely (the bytes are already quantized with their own per-block
-        /// scale, so re-quantizing would compound error for no real shrink).
-        /// Q4_0 maps onto the same passthrough handling as Q8_0 - the codec's
-        /// passthrough branch and <c>FromEnvironment</c> skip are keyed on the
-        /// Q8_0 element type, which means "already block-quantized; leave the
-        /// bytes untouched" regardless of the underlying 4- vs 8-bit width.
-        /// </summary>
-        public virtual KvCodecElementType KVStateElementType => _kvCacheDtype switch
-        {
-            KvCacheDtype.F32 => KvCodecElementType.Float32,
-            KvCacheDtype.F16 => KvCodecElementType.Float16,
-            KvCacheDtype.Q8_0 => KvCodecElementType.Q8_0,
-            KvCacheDtype.Q4_0 => KvCodecElementType.Q8_0,
-            _ => KvCodecElementType.Float32,
-        };
-
         public int MaxContextLength => _maxContextLength;
         public int CacheSeqLen => _cacheSeqLen;
 
@@ -1790,24 +1770,16 @@ namespace TensorSharp.Models
         /// (e.g. 114 MB for a 1024-token chunk) host↔device three times per layer.
         /// Fusing keeps that intermediate resident on the device; only the small
         /// [tokens, hidden] residual crosses the bus. This is the dominant prefill
-        /// cost in the batched paths (matches the legacy per-sequence fast path in
+        /// cost in the batched paths (matches the per-sequence fast path in
         /// Qwen35Model.FFNCachedFused).
         ///
         /// Returns false — leaving <paramref name="residual"/> untouched — when the
         /// backend, weight quantization, or layout does not qualify; callers must
         /// then run the unfused norm+FFN+add chain.
         /// </summary>
-        // A/B switch: TS_DISABLE_FUSED_DENSE_FFN=1 forces the unfused norm+FFN+add
-        // chain so the fused vs unfused paths can be compared on the same build.
-        private static readonly bool _disableFusedDenseFFN =
-            Environment.GetEnvironmentVariable("TS_DISABLE_FUSED_DENSE_FFN") is string s
-            && (s == "1" || string.Equals(s, "true", StringComparison.OrdinalIgnoreCase));
-
         protected bool TryFusedDenseSwiGLUFFNInto(
             Tensor residual, string normWeightName, string gateUpWeightName, string downWeightName)
         {
-            if (_disableFusedDenseFFN)
-                return false;
             if (!IsGgmlBackend || residual == null || residual.DimensionCount != 2)
                 return false;
             if (!_quantWeights.TryGetValue(gateUpWeightName, out var gateUpQW) || gateUpQW == null)
@@ -1842,7 +1814,7 @@ namespace TensorSharp.Models
         /// residual. For models that apply a post-FFN norm to the output before the
         /// residual add (Gemma 4's <c>post_ffw_norm</c>), the caller runs that norm + add
         /// on the small returned tensor while the large [tokens, 2·intermediate] gate_up
-        /// intermediate stays resident on the device — the dominant batched/legacy prefill
+        /// intermediate stays resident on the device — the dominant batched/per-sequence prefill
         /// cost on GGML CUDA. <paramref name="actType"/>: 0 = SiLU (SwiGLU), 1 = GELU tanh
         /// (GeGLU). The fused rms_norm uses the same loaded weight as <see cref="RMSNormOp"/>,
         /// so the result is numerically identical to the unfused chain.
@@ -1853,8 +1825,6 @@ namespace TensorSharp.Models
         protected Tensor TryFusedDenseFFNProject(
             Tensor input, string normWeightName, string gateUpWeightName, string downWeightName, int actType)
         {
-            if (_disableFusedDenseFFN)
-                return null;
             if (!IsGgmlBackend || input == null || input.DimensionCount != 2)
                 return null;
             if (!_quantWeights.TryGetValue(gateUpWeightName, out var gateUpQW) || gateUpQW == null)
@@ -2529,9 +2499,6 @@ namespace TensorSharp.Models
         /// </summary>
         public void YieldGpuComputeLock()
         {
-            // Allow disabling via env var for A/B testing or troubleshooting.
-            if (string.Equals(Environment.GetEnvironmentVariable("TS_ENCODER_YIELD"), "0", StringComparison.Ordinal))
-                return;
             try { Monitor.Exit(GpuComputeLock); }
             catch (SynchronizationLockException) { return; } // not held — nothing to yield
             try

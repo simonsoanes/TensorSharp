@@ -22,7 +22,7 @@ namespace InferenceWeb.Tests;
 /// </summary>
 public class ManagedQuantGemmTests
 {
-    private const float LegacyRelTol = 2e-5f;
+    private const float PerRowRelTol = 2e-5f;
     private readonly ITestOutputHelper _output;
 
     public ManagedQuantGemmTests(ITestOutputHelper output) => _output = output;
@@ -73,9 +73,9 @@ public class ManagedQuantGemmTests
         int inStride = k + 5, outStride = n + 3;
         float[] input = BuildInput(rng, rows, k, inStride);
 
-        float[] legacy = RunAddmm(type, weights, k, n, input, inStride, rows, outStride, QGemmIsa.Legacy);
-        AssertWithinActivationQuantBound(type, weights, k, n, input, inStride, rows, outStride, legacy);
-        AssertPaddingUntouched(legacy, rows, n, outStride);
+        float[] perRow = RunAddmm(type, weights, k, n, input, inStride, rows, outStride, QGemmIsa.PerRow);
+        AssertWithinActivationQuantBound(type, weights, k, n, input, inStride, rows, outStride, perRow);
+        AssertPaddingUntouched(perRow, rows, n, outStride);
     }
 
     [QGemmTheory]
@@ -88,20 +88,20 @@ public class ManagedQuantGemmTests
         int inStride = k + 5, outStride = n + 3;
         float[] input = BuildInput(rng, rows, k, inStride);
 
-        float[] legacy = RunAddmm(type, weights, k, n, input, inStride, rows, outStride, QGemmIsa.Legacy);
-        float legacyScale = MaxAbs(legacy) + 1e-6f;
+        float[] perRow = RunAddmm(type, weights, k, n, input, inStride, rows, outStride, QGemmIsa.PerRow);
+        float perRowScale = MaxAbs(perRow) + 1e-6f;
         foreach (var isa in AvailableGemmIsas())
         {
             float[] actual = RunAddmm(type, weights, k, n, input, inStride, rows, outStride, isa);
-            float err = MaxAbsDiff(legacy, actual) / legacyScale;
-            _output.WriteLine($"{type} rows={rows} K={k} N={n} {isa}: max |gemm - legacy| / max|legacy| = {err:E2}");
-            Assert.True(err <= LegacyRelTol, $"{type} rows={rows} K={k} N={n} {isa}: relative error {err:E2}");
+            float err = MaxAbsDiff(perRow, actual) / perRowScale;
+            _output.WriteLine($"{type} rows={rows} K={k} N={n} {isa}: max |gemm - perRow| / max|perRow| = {err:E2}");
+            Assert.True(err <= PerRowRelTol, $"{type} rows={rows} K={k} N={n} {isa}: relative error {err:E2}");
             AssertPaddingUntouched(actual, rows, n, outStride);
         }
 
         // The public entry (Auto) must agree too, whichever path it picks.
         float[] auto = RunAddmm(type, weights, k, n, input, inStride, rows, outStride, QGemmIsa.Auto);
-        Assert.True(MaxAbsDiff(legacy, auto) / legacyScale <= LegacyRelTol);
+        Assert.True(MaxAbsDiff(perRow, auto) / perRowScale <= PerRowRelTol);
     }
 
     /// <summary>Every output is computed by one kernel call whose summation
@@ -154,7 +154,7 @@ public class ManagedQuantGemmTests
         for (int j = 0; j < jobs; j++)
             expected[j] = jobRows[j] == 0
                 ? new float[jobOut[j] + 2]
-                : RunAddmm(type, weights[j], k, jobOut[j], inputs[j], inStride, jobRows[j], jobOut[j] + 2, QGemmIsa.Legacy);
+                : RunAddmm(type, weights[j], k, jobOut[j], inputs[j], inStride, jobRows[j], jobOut[j] + 2, QGemmIsa.PerRow);
 
         foreach (var isa in AvailableGemmIsas().Append(QGemmIsa.Auto))
         {
@@ -187,7 +187,7 @@ public class ManagedQuantGemmTests
                 float scale = MaxAbs(expected[j]) + 1e-6f;
                 float err = MaxAbsDiff(expected[j], outputs[j]) / scale;
                 _output.WriteLine($"{type} K={k} job {j} rows={jobRows[j]} {isa}: rel err {err:E2}");
-                Assert.True(err <= LegacyRelTol, $"{type} job {j} {isa}: relative error {err:E2}");
+                Assert.True(err <= PerRowRelTol, $"{type} job {j} {isa}: relative error {err:E2}");
             }
         }
     }
@@ -447,28 +447,27 @@ public class ManagedQuantGemmTests
         for (int j = 0; j < jobs; j++)
         {
             if (jobRows[j] == 0) continue;
-            QGemmIsa isa = jobRows[j] < minRows ? QGemmIsa.Legacy : gemmIsa;
+            QGemmIsa isa = jobRows[j] < minRows ? QGemmIsa.PerRow : gemmIsa;
             float[] expected = RunAddmm(type, weights[j], k, n, inputs[j], k, jobRows[j], n, isa);
             Assert.Equal(expected, outputs[j]);
         }
     }
 
     [Fact]
-    public void ResolveQGemmIsa_HonoursSwitchesAndHostIsa()
+    public void ResolveQGemmIsa_HonoursTheSwitchAndHostIsa()
     {
-        static QGemmIsa R(QGemmIsa req, bool enabled, bool noAvx512, bool avx2, bool avx512)
-            => ManagedQuantizedOps.ResolveQGemmIsa(req, enabled, noAvx512, avx2, avx512);
+        static QGemmIsa R(QGemmIsa req, bool noAvx512, bool avx2, bool avx512)
+            => ManagedQuantizedOps.ResolveQGemmIsa(req, noAvx512, avx2, avx512);
 
-        Assert.Equal(QGemmIsa.Avx512, R(QGemmIsa.Auto, true, false, true, true));
-        Assert.Equal(QGemmIsa.Avx2, R(QGemmIsa.Auto, true, true, true, true));      // TS_CPU_DISABLE_AVX512=1
-        Assert.Equal(QGemmIsa.Legacy, R(QGemmIsa.Auto, false, false, true, true));  // TS_CPU_QGEMM=0
-        Assert.Equal(QGemmIsa.Avx2, R(QGemmIsa.Auto, true, false, true, false));    // AVX2-only host
-        Assert.Equal(QGemmIsa.Legacy, R(QGemmIsa.Auto, true, false, false, false)); // ARM64 / no AVX2
-        // explicit requests (tests, benchmarks) ignore the switches, not the host
-        Assert.Equal(QGemmIsa.Avx512, R(QGemmIsa.Avx512, false, true, true, true));
-        Assert.Equal(QGemmIsa.Avx2, R(QGemmIsa.Avx512, true, false, true, false));
-        Assert.Equal(QGemmIsa.Legacy, R(QGemmIsa.Avx2, true, false, false, false));
-        Assert.Equal(QGemmIsa.Legacy, R(QGemmIsa.Legacy, true, false, true, true));
+        Assert.Equal(QGemmIsa.Avx512, R(QGemmIsa.Auto, false, true, true));
+        Assert.Equal(QGemmIsa.Avx2, R(QGemmIsa.Auto, true, true, true));      // TS_CPU_DISABLE_AVX512=1
+        Assert.Equal(QGemmIsa.Avx2, R(QGemmIsa.Auto, false, true, false));    // AVX2-only host
+        Assert.Equal(QGemmIsa.PerRow, R(QGemmIsa.Auto, false, false, false)); // ARM64 / no AVX2
+        // explicit requests (tests, benchmarks) ignore the switch, not the host
+        Assert.Equal(QGemmIsa.Avx512, R(QGemmIsa.Avx512, true, true, true));
+        Assert.Equal(QGemmIsa.Avx2, R(QGemmIsa.Avx512, false, true, false));
+        Assert.Equal(QGemmIsa.PerRow, R(QGemmIsa.Avx2, false, false, false));
+        Assert.Equal(QGemmIsa.PerRow, R(QGemmIsa.PerRow, false, true, true));
     }
 
     // .NET 10.0.8 encodes Avx512F.BroadcastVector256ToVector512(long*/double*)
@@ -560,14 +559,14 @@ public class ManagedQuantGemmTests
         int inStride = k + 7, outStride = n + 2;
         float[] input = BuildInput(rng, rows, k, inStride);
 
-        float[] legacy = RunAddmm(type, weights, k, n, input, inStride, rows, outStride, QGemmIsa.Legacy);
-        float scale = MaxAbs(legacy) + 1e-6f;
+        float[] perRow = RunAddmm(type, weights, k, n, input, inStride, rows, outStride, QGemmIsa.PerRow);
+        float scale = MaxAbs(perRow) + 1e-6f;
         foreach (var isa in AvailableGemmIsas().Append(QGemmIsa.Auto))
         {
             float[] actual = RunAddmm(type, weights, k, n, input, inStride, rows, outStride, isa);
-            float err = MaxAbsDiff(legacy, actual) / scale;
+            float err = MaxAbsDiff(perRow, actual) / scale;
             _output.WriteLine($"{type} rows={rows} K={k} N={n} {isa}: rel err {err:E2}");
-            Assert.True(err <= LegacyRelTol, $"{type} rows={rows} K={k} {isa}: relative error {err:E2}");
+            Assert.True(err <= PerRowRelTol, $"{type} rows={rows} K={k} {isa}: relative error {err:E2}");
             AssertPaddingUntouched(actual, rows, n, outStride);
         }
     }
@@ -664,7 +663,7 @@ public class ManagedQuantGemmTests
                 }
                 double err = Math.Abs(actual[r * outStride + c] - s);
                 Assert.True(err <= bound * 1.01 + 1e-5 * mag + 1e-6,
-                    $"{type} row {r} col {c}: |legacy - reference| = {err} exceeds the activation quantization bound {bound}");
+                    $"{type} row {r} col {c}: |perRow - reference| = {err} exceeds the activation quantization bound {bound}");
             }
         }
     }
@@ -770,14 +769,14 @@ public class ManagedQuantGemmTests
 }
 
 /// <summary>Theory that runs only under the default GEMM routing: batch-size
-/// invariance is what that routing promises, and TS_CPU_QGEMM=0,
-/// TS_CPU_FGEMM=0, TS_CPU_QGEMM_MIN_ROWS or a host without AVX2 give it up.</summary>
+/// invariance is what that routing promises, and a TS_CPU_QGEMM_MIN_ROWS above one
+/// or a host without AVX2 gives it up.</summary>
 public sealed class QGemmDefaultRoutingTheoryAttribute : TheoryAttribute
 {
     public QGemmDefaultRoutingTheoryAttribute()
     {
         if (!ManagedQuantizedOps.QGemmRoutingIsBatchInvariant)
-            Skip = "The GEMM routing is not the default (TS_CPU_QGEMM / TS_CPU_FGEMM / TS_CPU_QGEMM_MIN_ROWS, or no AVX2).";
+            Skip = "The GEMM routing is not the default (TS_CPU_QGEMM_MIN_ROWS, or no AVX2).";
     }
 }
 

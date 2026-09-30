@@ -40,7 +40,7 @@ dotnet run --project TensorSharp.Cli -c Release -- \
   --spec-draft 15 --input prompt.txt --backend ggml_cuda
 ```
 
-`--draft-model` 也可以用环境变量 `TS_MUSE_GLIMMER_DFLASH` 指定。这个模型上的投机解码
+`--draft-model` 也可以用环境变量 `TS_SPEC_DRAFT_MODEL` 指定。这个模型上的投机解码
 离不开该草稿模型：没有它时，`--spec`（包括无权重的 n-gram 草稿器）只提供普通解码。
 
 ### 结构化输出
@@ -98,8 +98,7 @@ dotnet run --project TensorSharp.Cli -c Release -- \
 * **适配器**：6144 -> 4096 -> 4096 -> 6656，中间是 erf GELU，无 bias。
 
 在 GGML 后端上视觉塔的 2D matmul 权重保持 GGUF 量化状态直接送入 `AddmmQuant`。
-把这个塔反量化成 F32 需要约 7.4 GB，会把语言模型常驻的权重挤出显存；
-`TS_MUSE_GLIMMER_VENC_F32=1` 可以恢复 F32 路径用于 A/B 对比。
+把这个塔反量化成 F32 需要约 7.4 GB，会把语言模型常驻的权重挤出显存。
 
 ### 提示词管线
 
@@ -254,7 +253,7 @@ tok/s；decode tok/s **包含**主机上的贪心采样），llama.cpp 的数字
 TensorSharp 的 decode 列*包含*主机贪心采样（llama-bench 的 tg 完全不含采样）；只算
 模型的数字约高 0.5%。本轮优化开始时，decode 比值是 0.94x/0.94x/0.94x，且形状随上下文
 变差（逐 token 的图重建不随任何东西增长，但 O(context) 的掩码重填会）；持久化/重放移植
-是贡献最大的单项 —— 同一二进制、同一会话：2K 上下文时 `TS_MUSE_GLIMMER_PERSIST=0` 的
+是贡献最大的单项 —— 同一二进制、同一会话：2K 上下文时每次调用重建计算图的
 decode 为 19.5 tok/s，走重放路径为 21.3（+9%）。
 
 ### ggml_cpu 对 llama.cpp CPU
@@ -449,7 +448,7 @@ DFlash prefill 塌了 4.4 倍；这个提示停在文档中间，因此续写比
 6. **融合整模型内核现在也在 GgmlCpu 上运行**（它曾是仓库里唯一排除 CPU 的融合内核；
    GPT-OSS 与 Gemma 4 早已包含）。每 token 一张图，取代约 940 次同步的逐算子提交。历史上
    "1024 行融合图在预热时让 CPU 后端崩溃"的问题没有复现 —— 2048 行预热与整套 parity 测试
-   都能通过。`TS_MUSE_GLIMMER_FUSED_CPU=0` 可恢复 CPU 上的逐算子路径。
+   都能通过。
 7. **GgmlCpu 保留统一尺寸的 KV 缓存（不用 SWA 环）。** 环要整体读取（槽位不按位置
    顺序），而 ggml-cpu 的 flash-attention 会计算每一个 KV 列，无论是否被掩掉 —— 因此
    52 层中的 39 层在任何深度都要付出完整 4352 行环的注意力开销，而统一缓存的滑动区间
@@ -470,12 +469,39 @@ DFlash prefill 塌了 4.4 倍；这个提示停在文档中间，因此续写比
    草稿模型的编码器特征；(b) 会悄悄验证过期的草稿 —— 输出仍然正确，但接受率崩塌。两条
    路径现在都在读取之前同步。
 
+### 2026-09-29 的修复改了什么
+
+`ggml_metal` 上的服务端对话，一旦提示加输出超过 2048 token 就陷入无休止的单 token 循环
+（`（（（（`、`respond respond`、一列空代码块），而基数前缀复用可能把一个只剩一半内容的缓存
+交给模型。共三个缺陷，都用 `eng/validation/MuseGlimmerKvGrowProbe` 确定性复现（以预先分配到
+8192 的缓存为基准，teacher-forced 比较 logits）：
+
+1. **内核按全注意力层的容量来寻址环。** 它只在环小于全注意力层缓存时才把滑动窗口层当作环。
+   Metal 上后者起步只有 2048 行，于是 4352 行的环缓冲被当成 `[2048]` 行的平坦缓存写入：
+   KV 头 1 落在头 0 的行里，每次扩容都会移动，截断和 KV 快照也找不到它；绑定大小不一致还让
+   这些层每次设备到主机的同步都悄悄变成空操作，捕获的前缀块里 39 个滑动窗口层全是零。
+   1536 token 的快照恢复或回退会改变随后 300 个贪心 token 中的 37 个。
+2. **扩容复制了过期的主机镜像。** `EnsureCacheCapacity` 在主机上复制全注意力层的行，却没有先
+   取回融合内核写在设备上的行，也从不释放旧的设备副本。在位置 2049，与预分配缓存的 argmax
+   一致率降到 32%（余弦 0.71）：就是那个循环。
+3. **逐序列执行器上换回的长序列会让自己那一步失败。** 有并发请求时（多智能体的父请求和它的
+   子请求），执行器在序列之间轮换模型。超过 4352 token 池化复用上限后被换回的序列会被重置、
+   释放块，而这一步仍然前向它计划好的分块：`AdvanceTokens(256) wants 1 blocks but only 0 are
+   allocated`。现在超过上限的所有者在有工作时保留模型，换入时池无法恢复的部分就地重算。
+
+修复后，在 2048 和 4096 两次扩容、4352 环回卷、分块与拆分 prefill、1536/2560 token 的恢复与
+回退中，贪心与 teacher-forced 结果都与预分配缓存逐位一致。Metal 吞吐不变（深度 256 到 6144，
+修复前后 tg128 都是 20.6-21.0 tok/s，pp 352-370 tok/s）。回归测试：`MuseGlimmerKvGrowTests`
+（在任意 GPU 通道上运行融合内核和环的合成 Muse-Glimmer）、`MuseGlimmerKvSnapshotTests`
+（默认容量下的真实权重）、`PerSequenceSwapPastReuseCapTests` 和
+`PrefixCache/PerSequenceWindowSwapReproTests`。
+
 ### 仍在约束设计的工程笔记
 
 * **为什么要融合：** 逐算子前向每个 token 提交约 600–940 个 GGML 算子，每个都有主机
   可见的开销；本仓库中每个达到 llama.cpp 级 decode 的模型，都是每次前向只跑**一张**
   整模型图（`TSGgml_MuseGlimmerModelForward` —— 全部 52 层、最终 norm、LM head、logit
-  缩放与软上限）。`TS_MUSE_GLIMMER_FUSED=0` 可强制走逐算子路径。
+  缩放与软上限）。
 * **持久、可捕获的图。** decode 图只构建一次且张量地址稳定（用裸 `ggml_init` +
   `ggml_backend_alloc_ctx_tensors`，而不是会按生命周期打包、移动地址的 gallocr）。拓扑
   在步与步之间保持逐字节一致：KV 用 `ggml_set_rows` 写入（写入行号是一个 I64 *输入*），
@@ -493,9 +519,14 @@ DFlash prefill 塌了 4.4 倍；这个提示停在文档中间，因此续写比
 * **SWA 环**（GPU 后端）：52 层中有 39 层永远不会回看超过 2048，因此它们用一个
   `pad(n_swa + chunk + 1, 256)` = 4352 行、按 `position % rows` 索引的环，而不是完整
   上下文的缓存 —— 64K 时是统一缓存的 29%。那个 `+1` 是承重的（不加它时，一个 4651 token
-  的提示在第一个 decode 步就与 llama.cpp 分叉）。内核读整个环（槽位不按位置顺序）；由
-  掩码承载存活性。只有在融合内核可用时环才会启用；如果环已启用而融合前向拒绝执行，逐算子
-  路径会抛异常，而不是悄悄返回错误的 logits。`TS_MUSE_GLIMMER_SWA_RING=0` 恢复统一尺寸。
+  的提示在第一个 decode 步就与 llama.cpp 分叉）。环的布局只由分配决定，与全注意力层当前
+  的容量无关：后者起步较小（Metal 上 2048 行）并按需增长，而环从第一个 token 起就是 4352 行。
+  怎么**读**环是按后端的性能选择，两种读法都是精确的：CUDA 和 Vulkan 读整个环（形状固定，
+  利于持久图和 CUDA 捕获；由掩码承载存活性），Metal 在环回卷之前读与平坦缓存相同的滑动区间、
+  回卷之后读整个环（它的 vec flash-attention 内核不会跳过全掩码块）。两种选择都与缓存容量
+  无关，所以增长过的缓存与一开始就足够大的缓存逐位一致。只有在融合内核可用时环才会启用；
+  如果环已启用而融合前向拒绝执行，逐算子路径会抛异常，而不是悄悄返回错误的 logits。
+  `TS_MUSE_GLIMMER_SWA_RING=0` 恢复统一尺寸。
 * **已回卷的环上，回退深度受余量限制。** 截断缓存只移动写入位置；被回卷覆盖的行
   不会回来，而下一个 query 仍要回看新位置之前完整的一个窗口。因此自缓存上次清空以来序列长度
   一旦超过环的大小，只有满足 `furthest - target <= rows - n_swa - 1` 时才接受回退，其中 `furthest`
@@ -562,33 +593,21 @@ DFlash prefill 塌了 4.4 倍；这个提示停在文档中间，因此续写比
 
 DFlash 投机解码只走单卡路径：`--tp N` > 1 下配置的草稿模型会被拒绝挂载。CLI 会打印警告并按标准解码
 服务；服务端则拒绝启动（退出码 2），因为在服务端无法启用的显式 `--draft-model` 属于致命错误——去掉该参数或
-不用 `--tp` 运行即可。池化的 KV 块快照在
-`--tp` 下同样可用（快照会逐层遍历各 rank 的缓存），因此 `--tp` 下的多轮复用并不只靠
-活跃缓存续接。
+不用 `--tp` 运行即可。KV 块页面在
+`--tp` 下同样可用（快照会逐层遍历各 rank 的缓存），因此 `--tp` 下的多轮复用与单卡相同。
 
 ## 7. 环境变量
 
 | 变量 | 作用 |
 |---|---|
-| `TS_MUSE_GLIMMER_FUSED` | `0` = 在所有后端上关闭融合整模型内核（逐算子 A/B） |
-| `TS_MUSE_GLIMMER_FUSED_CPU` | `0` = 只在 GgmlCpu 上走逐算子路径（2026-08-14 之前的默认行为） |
-| `TS_MUSE_GLIMMER_PERSIST` | `0` = 关闭持久化 / 重放的 decode 图，每次调用重建 |
-| `TS_MUSE_GLIMMER_INGRAPH_EMBED` | `1` = 在任何后端上强制启用图内 embedding 阶段，`0` = 强制关闭（默认：LM head 与 embedding 表绑定时、Metal 与 CPU 上启用） |
-| `TS_MUSE_GLIMMER_DFLASH` | DFlash 草稿模型 GGUF 路径（等同 `--draft-model`） |
-| `TS_MUSE_GLIMMER_VENC_F32` | `1` = 把视觉塔反量化为 F32（A/B；约 7.4 GB） |
-| `TS_MUSE_GLIMMER_VENC_FUSED` | `0` = 关闭 CUDA 融合视觉块 / flash-attention 路径 |
-| `TS_MUSE_GLIMMER_GELU_TANH` | `1` = 视觉塔改用 tanh GELU 近似而非精确 erf |
 | `TS_MUSE_GLIMMER_VENC_TRACE` | `1` = 打印视觉残差流的逐阶段校验和 |
 | `TS_MUSE_GLIMMER_LAYER_TRACE` | `1` = 打印进入每一层的残差校验和（融合与逐算子路径输出相同格式，因此做 diff 就能把分叉定位到某一层） |
 | `TS_MUSE_GLIMMER_LAYER_TRACE_POS` / `_N` / `_DIR` | 第一个追踪的位置 / 追踪多少次前向 / 原始 F32 转储目录 |
-| `TS_MLX_MUSE_GLIMMER_EVAL_EVERY_N_LAYERS` | MLX 逐算子惰性图的 flush 间隔（默认 4，`0` 关闭） |
-| `TS_MLX_PIPELINED_DECODE` | `0` = 关闭 MLX 流水线贪心 decode 快速路径 |
+| `TS_MLX_EVAL_EVERY_N_LAYERS` | MLX 逐算子惰性图的 flush 间隔（Muse-Glimmer 默认 4，`0` 关闭） |
 | `TS_PREFILL_CHUNK` | `ForwardRefill` 的提示分块大小（默认 2048） |
 | `TS_MUSE_GLIMMER_PREFILL_CHUNK` | 每次 prefill 前向的 token 数（默认 2048，`0` 关闭分块） |
 | `TS_MUSE_GLIMMER_SWA_RING` | `0` = 所有层都按完整上下文分配，而不是给 SWA 层用环（GPU 后端；GgmlCpu 始终是统一尺寸） |
 | `TS_MUSE_GLIMMER_SWA_ROWS` | 覆盖 SWA 环的行数（诊断用） |
-| `TS_DFLASH_FUSED` | `0` = 关闭融合 DFlash 草稿模型（逐算子 A/B） |
-| `TS_DFLASH_PERSIST` | `0` = 每步重建 DFlash 图，而不是重放 |
 | `TS_DFLASH_PREFILL_CHUNK` | DFlash prefill 追赶草稿模型时每次**主干**前向的 token 数（默认 1024） |
 | `TS_KV_FATTN_COPY` | `0` = 从不物化填充后的 KV 窗口（会复现 ggml-cuda flash-attention **vec** 故障）；`force` = 总是物化 |
 | `TS_GGML_CPU_THREADS` | 共享 ggml CPU 后端的线程数（默认：全部物理核） |

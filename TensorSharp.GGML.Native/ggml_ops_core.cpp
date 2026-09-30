@@ -56,10 +56,9 @@ namespace ggml_pool
 
     static void* pool_alloc(std::size_t size)
     {
-        if (size == 0 || size > k_pool_buffer_size)
+        if (size == 0)
             return nullptr;
-        void* ptr = std::malloc(size);
-        return ptr;
+        return std::malloc(size);
     }
 
     static void pool_free(void* ptr)
@@ -68,9 +67,12 @@ namespace ggml_pool
             std::free(ptr);
     }
 
+    // A request larger than the standard buffer gets a buffer of its own size,
+    // pooled like the rest when released. Refusing it made every such caller
+    // fail: GPT-OSS's token-batched decode asks for 64 MiB and never ran.
     PoolEntry acquire(std::size_t required_size)
     {
-        if (required_size == 0 || required_size > k_pool_buffer_size)
+        if (required_size == 0)
             return {};
         std::lock_guard<std::mutex> lock(g_pool_mutex);
         for (auto it = g_pool.begin(); it != g_pool.end(); ++it)
@@ -82,10 +84,11 @@ namespace ggml_pool
                 return e;
             }
         }
-        void* ptr = pool_alloc(k_pool_buffer_size);
+        const std::size_t size = std::max(required_size, k_pool_buffer_size);
+        void* ptr = pool_alloc(size);
         if (ptr == nullptr)
             return {};
-        return { ptr, k_pool_buffer_size };
+        return { ptr, size };
     }
 
     void release(PoolEntry e)
@@ -147,7 +150,7 @@ namespace tsg
     // per rank in DeviceState (see ggml_ops_internal.h); the old global names
     // are macros onto the active slot.
 
-    // Async dispatch state. The defaults keep the legacy (eager-sync) behaviour;
+    // Async dispatch state. The default is eager-sync;
     // C# enables async at backend init time via TSGgml_SetAsyncCompute(1).
     std::atomic<bool> g_async_compute_enabled{false};
     std::atomic<bool> g_pending_gpu_work{false};
@@ -516,7 +519,7 @@ namespace tsg
     }
 
     // Create a backend bound to a specific GPU ordinal. device_index < 0 keeps
-    // the legacy "first available device" behaviour.
+    // the "first available device" behaviour.
     ggml_backend_t create_backend_instance_on_device(int backend_type, int device_index)
     {
         if (device_index < 0)
@@ -1753,13 +1756,7 @@ namespace tsg
 
     bool alloc_graph_in_gallocr_slot(ggml_cgraph* graph, ReuseGallocrSlot* slots, const char* log_tag)
     {
-        // Escape hatch (shares the reuse-buffer toggle): TS_GGML_REUSE_COMPUTE_BUF=0
-        // disables both so A/B testing can isolate the persistent allocators.
-        static const bool s_disabled = []() {
-            const char* e = std::getenv("TS_GGML_REUSE_COMPUTE_BUF");
-            return e != nullptr && e[0] == '0';
-        }();
-        if (s_disabled || g_backend == nullptr || graph == nullptr || slots == nullptr)
+        if (g_backend == nullptr || graph == nullptr || slots == nullptr)
             return false;
 
         // Deliberately does NOT reorder for Metal here, even though this is the one
@@ -1886,14 +1883,6 @@ namespace tsg
 
     bool alloc_ctx_tensors_reuse(ggml_context* ctx, ggml_cgraph* graph)
     {
-        // Escape hatch for A/B testing / regression isolation.
-        static const bool s_disabled = []() {
-            const char* e = std::getenv("TS_GGML_REUSE_COMPUTE_BUF");
-            return e != nullptr && e[0] == '0';
-        }();
-        if (s_disabled)
-            return false;
-
         if (g_backend == nullptr || ctx == nullptr)
             return false;
 
@@ -3095,7 +3084,6 @@ extern "C" void TSGgml_Gemma4ResetDecodeCache();
 extern "C" void TSGgml_Qwen35ReleaseVerifyTpGraphs();
 extern "C" void TSGgml_Qwen35ReleaseVerifyGraphsPreserveState();
 extern "C" void TSGgml_Qwen35ResetDecodeCache();
-extern "C" void TSGgml_Qwen35ResetBatchedDecodeCache();
 extern "C" void TSGgml_Qwen35ResetVerifyCache();
 extern "C" void TSGgml_Qwen35ResetVerifyCacheForHostPointer(const void* host_ptr);
 extern "C" void TSGgml_Gemma4ResetBatchedDecodeCache();
@@ -3128,7 +3116,6 @@ TSG_EXPORT void TSGgml_ClearHostBufferCache()
     // their captured graphs pointing at freed device memory.
     TSGgml_WanResetForwardCache();
     TSGgml_Qwen35ResetDecodeCache();
-    TSGgml_Qwen35ResetBatchedDecodeCache();
     // A process-global host-weight eviction must retire every verify graph/TP
     // plan, but another live Qwen35 model may still own the only current copy of
     // its recurrent state. Preserve those owner-private state buffers so its next
@@ -3203,7 +3190,6 @@ TSG_EXPORT void TSGgml_Shutdown()
     // pinned staging buffers that reference every rank's backend.
     tp_comm_free();
     TSGgml_Qwen35ResetDecodeCache();
-    TSGgml_Qwen35ResetBatchedDecodeCache();
     TSGgml_Qwen35ReleaseVerifyTpGraphs();
     forget_cache_keys();
 
@@ -3570,8 +3556,11 @@ TSG_EXPORT void TSGgml_InvalidateHostBuffer(void* ptr)
     TSGgml_Qwen35ArenaResetBatchedDecodeCache();
     TSGgml_Qwen4ExpArenaResetBatchedDecodeCache();
     TSGgml_Qwen35ResetDecodeCache();
-    TSGgml_Qwen35ResetBatchedDecodeCache();
     TSGgml_Qwen35ResetVerifyCacheForHostPointer(ptr);
+    // Muse-Glimmer's persistent decode graphs bind the KV device copies the same
+    // way. Its C# side resets them around its own grow/truncate/inject, but the
+    // per-op fallback invalidates the caches it writes without doing so.
+    TSGgml_MuseGlimmerResetDecodeCache();
 }
 
 TSG_EXPORT int TSGgml_SyncHostBuffer(void* ptr, size_t size)

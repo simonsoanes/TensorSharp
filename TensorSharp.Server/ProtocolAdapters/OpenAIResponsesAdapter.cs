@@ -38,7 +38,6 @@ namespace TensorSharp.Server.ProtocolAdapters;
 public sealed class OpenAIResponsesAdapter
 {
     private readonly ModelService _svc;
-    private readonly InferenceQueue _queue;
     private readonly ServerHostingOptions _options;
     private readonly UploadStoragePolicy _uploads;
     private readonly SkillRegistry _skills;
@@ -49,7 +48,6 @@ public sealed class OpenAIResponsesAdapter
 
     public OpenAIResponsesAdapter(
         ModelService svc,
-        InferenceQueue queue,
         ServerHostingOptions options,
         UploadStoragePolicy uploads,
         SkillRegistry skills,
@@ -59,7 +57,6 @@ public sealed class OpenAIResponsesAdapter
         IResponsesStore store)
     {
         _svc = svc ?? throw new ArgumentNullException(nameof(svc));
-        _queue = queue ?? throw new ArgumentNullException(nameof(queue));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _uploads = uploads ?? throw new ArgumentNullException(nameof(uploads));
         _skills = skills ?? throw new ArgumentNullException(nameof(skills));
@@ -225,18 +222,16 @@ public sealed class OpenAIResponsesAdapter
                     skillPlan.Prompt.Catalog.Count, skillPlan.ToolsOffered);
         }
 
-        using var ticket = _queue.Enqueue(ctx.RequestAborted);
-
         if (stream)
         {
             await StreamResponseAsync(ctx, requestId, modelName!, instructions, maxOutputTokens,
-                inferenceMessages, samplingConfig, effectiveTools, enableThinking, responseFormat, store, ticket,
+                inferenceMessages, samplingConfig, effectiveTools, enableThinking, responseFormat, store,
                 skillPlan, logger).ConfigureAwait(false);
         }
         else
         {
             await CompleteSyncAsync(ctx, requestId, modelName!, instructions, maxOutputTokens,
-                inferenceMessages, samplingConfig, effectiveTools, enableThinking, responseFormat, store, ticket,
+                inferenceMessages, samplingConfig, effectiveTools, enableThinking, responseFormat, store,
                 skillPlan, logger).ConfigureAwait(false);
         }
     }
@@ -297,12 +292,9 @@ public sealed class OpenAIResponsesAdapter
         bool enableThinking,
         StructuredOutputFormat? responseFormat,
         bool store,
-        QueueTicket ticket,
         SkillRequestPlan? skillPlan,
         ILogger skillLogger)
     {
-        await ticket.WaitUntilReadyAsync().ConfigureAwait(false);
-
         if (!HostedModelGuard.TryEnsureHostedModelLoaded(_svc, modelName,
                 _options.StartupModelPath, _options.StartupMmProjPath, _options.DefaultBackend, out string loadError))
         {
@@ -394,11 +386,9 @@ public sealed class OpenAIResponsesAdapter
         bool enableThinking,
         StructuredOutputFormat? responseFormat,
         bool store,
-        QueueTicket ticket,
         SkillRequestPlan? skillPlan,
         ILogger skillLogger)
     {
-        await ticket.WaitUntilReadyAsync().ConfigureAwait(false);
         SseWriter.ApplyHeaders(ctx.Response);
 
         if (!HostedModelGuard.TryEnsureHostedModelLoaded(_svc, modelName,

@@ -69,7 +69,7 @@ namespace TensorSharp.Models
 
                 lock (_nativeSync)
                 {
-                    GgmlGlmNative.QueueVisionRows(_native, data, rows, startPosition);
+                    _exec.QueueVisionRows(data, rows, startPosition);
                 }
             }
             finally

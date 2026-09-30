@@ -1,7 +1,6 @@
 // Copyright (c) Zhongkai Fu. All rights reserved.
 // Licensed under the BSD-3-Clause license in the repository root.
 using System;
-using System.Globalization;
 using System.IO;
 using TensorSharp.Models.Architecture;
 using TensorSharp.Runtime;
@@ -22,15 +21,14 @@ namespace TensorSharp.Models
                 degree is >= 2 and <= 8,
             DescribeMultiGpuPlacement = DescribePlacement,
             LayerSplitBackends = new[] { BackendType.GgmlCuda, BackendType.Cuda },
-            ApplyNativeTunables = c => ValidateLoad(c.GgufPath, c.Backend, c.DraftModelPath,
-                Math.Max(c.TpDegree, c.LayerSplitDegree), c.TpGroup, c.TpDegree),
+            ApplyNativeTunables = c => ValidateLoad(c.GgufPath, c.Backend, c.DraftModelPath, c.TpGroup, c.TpDegree),
             ProjectorFileHints = new[] { "deepseek41.vision.gguf" },
             Factory = c => new DeepSeek41Model(c.GgufPath, c.Backend,
                 c.TpDegree, c.TpGroup, c.DraftModelPath, c.LayerSplitDegree),
         };
 
         internal static void ValidateLoad(string ggufPath, BackendType backend, string draftModelPath,
-            int requestedGpuCount = 1, ITensorParallelGroup tpGroup = null, int tpDegree = 1)
+            ITensorParallelGroup tpGroup = null, int tpDegree = 1)
         {
             // Every backend that has a V4.1 implementation is allowed here:
             // ggml_cuda (the ggml graph), `cuda` (the direct-CUDA engine, which
@@ -65,8 +63,7 @@ namespace TensorSharp.Models
                 throw new NotSupportedException(
                     "DeepSeek V4.1 uses a single-process native executor and does not support distributed tensor-parallel groups. " +
                     "Start without --tp-node-id/--tp-peers.");
-            if ((!string.IsNullOrWhiteSpace(draftModelPath) ||
-                 !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("TS_DSV4_DSPARK"))) &&
+            if (!string.IsNullOrWhiteSpace(draftModelPath) &&
                 backend != BackendType.GgmlCuda && backend != BackendType.GgmlCpu)
                 throw new NotSupportedException(
                     "DeepSeek V4.1 DSpark requires the TensorSharp ggml executor (--backend ggml_cuda or ggml_cpu) " +
@@ -81,10 +78,10 @@ namespace TensorSharp.Models
             // Routed-MoE TP shards expert dimensions across GPUs, so the native
             // loader refuses it under cpu_only. Say so here instead, before a
             // 246 GiB checkpoint is opened.
-            if (ResolveRequestedTensorParallelRanks(tpDegree, requestedGpuCount) > 0 && backend != BackendType.GgmlCuda)
+            if (ResolveTensorParallelRanks(tpDegree) > 0 && backend != BackendType.GgmlCuda)
                 throw new NotSupportedException(
                     "DeepSeek V4.1 routed-MoE tensor parallelism requires --backend ggml_cuda. " +
-                    "Select ggml_cuda, or omit --tp and unset TS_DSV41_TP.");
+                    "Select ggml_cuda, or omit --tp.");
 
             // TS_DSV41_ENGRAM_DEVICE picks where the Engram tables live. The
             // native loader reads it only off cpu_only, so on this backend `=1`
@@ -137,26 +134,14 @@ namespace TensorSharp.Models
             _ => null,
         };
 
-        internal static int ResolveRoutedMoeTensorParallelRanks(int requestedGpuCount)
-            => ParseRoutedMoeTensorParallelRanks(Environment.GetEnvironmentVariable("TS_DSV41_TP"),
-                ResolveSelectedGpuCount(requestedGpuCount));
-
-        // The command-line/API degree is sufficient to enable sharding. Pass it
-        // to the native loader explicitly: changing the managed environment does
-        // not reliably update native getenv and races concurrent model loads.
-        // Preserve the old environment entry point, but reject contradictions.
-        internal static int ResolveRequestedTensorParallelRanks(int tpDegree, int requestedGpuCount)
+        /// <summary>The routed-MoE tensor-parallel rank count the native loader is
+        /// given: <c>--tp</c>'s degree, or 0 (layer placement) without one.</summary>
+        internal static int ResolveTensorParallelRanks(int tpDegree)
         {
             if (tpDegree < 1) throw new ArgumentOutOfRangeException(nameof(tpDegree));
             if (tpDegree > 8)
                 throw new NotSupportedException("DeepSeek V4.1 tensor parallelism supports 2 through 8 GPUs.");
-            string raw = Environment.GetEnvironmentVariable("TS_DSV41_TP");
-            int configured = ParseRoutedMoeTensorParallelRanks(raw, ResolveSelectedGpuCount(requestedGpuCount));
-            if (tpDegree == 1) return configured;
-            if (raw != null && configured != tpDegree)
-                throw new ArgumentException($"TS_DSV41_TP={configured} conflicts with --tp {tpDegree}; " +
-                    "unset it or use the same degree. --tp enables routed-MoE sharding directly.");
-            return tpDegree;
+            return tpDegree > 1 ? tpDegree : 0;
         }
 
         internal static void ValidateDsparkArchitecture(string architecture)
@@ -166,41 +151,16 @@ namespace TensorSharp.Models
                     "DeepSeek V4.1 DSpark requires a deepseek41-dspark artifact; V4 and other draft architectures are incompatible.");
         }
 
-        internal static int ParseRoutedMoeTensorParallelRanks(string raw, int selectedGpuCount)
-        {
-            if (raw == null)
-                return 0;
+        /// <summary>The <c>--layer-split N</c> placement line.</summary>
+        private static string DescribePlacement(int layerSplitDegree)
+            => $"  Multi-GPU: DeepSeek V4.1 uses {layerSplitDegree} GPUs by LAYER SPLIT (whole-layer placement). " +
+               "Use --tp 2..8 for routed-MoE tensor parallelism.";
 
-            // Match the native whole-value strtol check, including its rejection of
-            // empty values and trailing characters. Native remains authoritative
-            // when GPU count is automatic and after visible devices are enumerated.
-            if (!int.TryParse(raw, NumberStyles.AllowLeadingWhite | NumberStyles.AllowLeadingSign,
-                    CultureInfo.InvariantCulture, out int ranks) || ranks < 0 || ranks == 1 || ranks > 8)
-                throw new ArgumentException("TS_DSV41_TP must be 0 (disabled) or an integer from 2 through 8.");
-
-            if (ranks > 0 && selectedGpuCount > 0 && ranks != selectedGpuCount)
-                throw new ArgumentException(
-                    $"TS_DSV41_TP={ranks} must equal the selected GPU count ({selectedGpuCount}); " +
-                    "set TS_DSV41_TP and TS_DSV4_NGPU consistently. --layer-split selects whole-layer placement only.");
-            return ranks;
-        }
-
-        private static int ResolveSelectedGpuCount(int requestedGpuCount)
-            => int.TryParse(Environment.GetEnvironmentVariable("TS_DSV4_NGPU"), out int count)
-                ? Math.Max(0, count) : requestedGpuCount > 1 ? requestedGpuCount : 0;
-
-        private static string DescribePlacement(int requestedGpuCount)
-        {
-            int ranks = ResolveRoutedMoeTensorParallelRanks(requestedGpuCount);
-            int count = ResolveSelectedGpuCount(requestedGpuCount);
-            if (ranks == 0)
-                return $"  Multi-GPU: DeepSeek V4.1 uses {(count > 0 ? count + " GPUs" : "automatically selected visible GPUs")} by LAYER SPLIT (whole-layer placement). " +
-                    "Use --tp 2..8 for routed-MoE tensor parallelism.";
-
-            return $"  Multi-GPU: DeepSeek V4.1 routed-MoE tensor parallelism across {ranks} GPUs: " +
-                "gate/up/down expert dimensions are sharded, with exact F32 activation/output gathers. " +
-                "Attention and shared experts retain layer placement; CPU-offloaded layers retain whole CPU experts. " +
-                "Full attention tensor parallelism and distributed groups are not supported.";
-        }
+        /// <summary>The <c>--tp N</c> placement line.</summary>
+        internal static string DescribeTensorParallelPlacement(int ranks)
+            => $"  Multi-GPU: DeepSeek V4.1 routed-MoE tensor parallelism across {ranks} GPUs: " +
+               "gate/up/down expert dimensions are sharded, with exact F32 activation/output gathers. " +
+               "Attention and shared experts retain layer placement; CPU-offloaded layers retain whole CPU experts. " +
+               "Full attention tensor parallelism and distributed groups are not supported.";
     }
 }

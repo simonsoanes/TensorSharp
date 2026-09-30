@@ -638,7 +638,7 @@ public class FileToolsTests : IDisposable
     }
 
     [Fact]
-    public void TheLegacyOverwriteArgumentIsParsedAsExplicitConfirmation()
+    public void TheUndeclaredOverwriteArgumentIsParsedAsExplicitConfirmation()
     {
         var call = new ToolCall
         {
@@ -692,7 +692,7 @@ public class FileToolsTests : IDisposable
     }
 
     [Fact]
-    public void ExistingTwoArgumentHostCallersRetainLegacyReplacementSemantics()
+    public void HostBuiltRequestsReplaceByDefault()
     {
         var request = new ShellTools.WriteRequest("main.py", "print(2)\n");
 

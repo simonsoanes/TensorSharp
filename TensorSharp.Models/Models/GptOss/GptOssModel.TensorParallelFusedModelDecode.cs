@@ -38,10 +38,6 @@ namespace TensorSharp.Models
     /// </summary>
     public partial class GptOssModel
     {
-        // TS_GPTOSS_TP_FUSED_DECODE=0 falls back to the per-op tensor-parallel chain.
-        private static readonly bool TpFusedModelDecodeEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_GPTOSS_TP_FUSED_DECODE"), "0", StringComparison.Ordinal);
-
         private GptOssLayerDecodeArgs[][] _tpFdLayers;   // [rank][layer]
         private IntPtr[] _tpFdPlans;
         private bool _tpFdChecked;
@@ -108,8 +104,6 @@ namespace TensorSharp.Models
             _tpFdChecked = true;
             _tpFdReady = false;
 
-            if (!TpFusedModelDecodeEnabled) return TpFdBail("TS_GPTOSS_TP_FUSED_DECODE=0");
-            if (!FusedModelDecodeEnabled) return TpFdBail("TS_GPTOSS_MODEL_DECODE=0");
             if (!IsGgmlBackend) return TpFdBail("not a GGML backend");
             if (!IsTensorParallel) return TpFdBail("tensor parallelism is not active");
             if (GlobalTpDegree != TpDegree && TpCrossNodeReducer == null)

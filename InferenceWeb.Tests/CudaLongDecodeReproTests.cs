@@ -24,6 +24,8 @@ using Xunit.Abstractions;
 
 namespace InferenceWeb.Tests;
 
+[Collection(EngineEnvironmentCollection.Name)]
+
 public class CudaLongDecodeReproTests
 {
     private readonly ITestOutputHelper _output;
@@ -83,7 +85,7 @@ public class CudaLongDecodeReproTests
             var cfg = SchedulerConfig.FromEnvironment();
             using var engine = new InferenceEngine(model, cfg, NullLogger.Instance);
             var seq = new SequenceState("repro", promptTokens, maxNewTokens: steps,
-                blockSize: cfg.BlockSize, samplingConfig: SamplingConfig.Greedy);
+                blockSize: engine.PoolStats.blockSize, samplingConfig: SamplingConfig.Greedy);
             var handle = engine.SubmitRequest(seq);
 
             var outToks = new List<int>();

@@ -55,13 +55,13 @@ namespace TensorSharp.Cuda
             public int[] TargetLayerIds;   // dspark.target_layer_ids (target blocks feeding main_proj)
             public LayerDesc[] Stages;     // one per dspark.n_layers, Ratio == 0
 
-            public QuantWeightDesc MainProj;   // [n_target * n_embd, n_embd]
+            public CudaWeightDesc MainProj;   // [n_target * n_embd, n_embd]
             public float[] MainNorm;           // [n_embd]
             public float[] Norm;               // final norm before the shared lm head
             public float[] HcHeadFn, HcHeadScale, HcHeadBase;
 
             public float[] MarkovW1;           // [n_vocab, rank], dequantized (gathered per token)
-            public QuantWeightDesc MarkovW2;   // [rank, n_vocab]
+            public CudaWeightDesc MarkovW2;   // [rank, n_vocab]
             public float[] ConfProj;           // [n_embd + rank]
         }
 
@@ -71,7 +71,7 @@ namespace TensorSharp.Cuda
             public Dev Dev;
             public DsparkDesc Desc;
             public DevLayer[] Stages;
-            public DevQW MainProj, MarkovW2;
+            public DeviceWeight MainProj, MarkovW2;
             public Tensor MainNorm, Norm, HcHeadFn, HcHeadScale, HcHeadBase, MarkovW1, ConfProj;
 
             public int RingRows;           // drafter SWA ring modulus
@@ -97,11 +97,6 @@ namespace TensorSharp.Cuda
         }
 
         private DsparkRt _ds;
-
-        /// <summary>TS_DSV4_DSPARK_CAPTURE=0 skips the target-feature capture
-        /// (A/B knob: the drafter then reads stale features and its proposals
-        /// are rejected, so only the timing is meaningful).</summary>
-        private static readonly bool DsparkCaptureEnabled = EnvInt("TS_DSV4_DSPARK_CAPTURE", 1) != 0;
 
         // Set for the duration of a prefill ForwardSpec: each micro-batch feeds
         // the drafter's ring straight from the on-device capture.
@@ -190,17 +185,17 @@ namespace TensorSharp.Cuda
                 var dst = new DevLayer { Device = _lastDev, Ratio = 0 };
                 dst.ClampExp = src.ClampExp;
                 dst.ClampShexp = src.ClampShexp;
-                dst.WqA = UploadQuant(dev, src.WqA);
-                dst.WqB = UploadQuant(dev, src.WqB);
-                dst.Wkv = UploadQuant(dev, src.Wkv);
-                dst.WoA = UploadQuant(dev, src.WoA);
-                dst.WoB = UploadQuant(dev, src.WoB);
-                dst.GateExps = UploadQuant(dev, src.GateExps);
-                dst.UpExps = UploadQuant(dev, src.UpExps);
-                dst.DownExps = UploadQuant(dev, src.DownExps);
-                dst.GateShexp = UploadQuant(dev, src.GateShexp);
-                dst.UpShexp = UploadQuant(dev, src.UpShexp);
-                dst.DownShexp = UploadQuant(dev, src.DownShexp);
+                dst.WqA = dev.Weights.Place(src.WqA);
+                dst.WqB = dev.Weights.Place(src.WqB);
+                dst.Wkv = dev.Weights.Place(src.Wkv);
+                dst.WoA = dev.Weights.Place(src.WoA);
+                dst.WoB = dev.Weights.Place(src.WoB);
+                dst.GateExps = dev.Weights.Place(src.GateExps);
+                dst.UpExps = dev.Weights.Place(src.UpExps);
+                dst.DownExps = dev.Weights.Place(src.DownExps);
+                dst.GateShexp = dev.Weights.Place(src.GateShexp);
+                dst.UpShexp = dev.Weights.Place(src.UpShexp);
+                dst.DownShexp = dev.Weights.Place(src.DownShexp);
                 dst.ShFf = src.UpShexp.Ne1;
 
                 dst.AttnNorm = UploadF32(dev, src.AttnNorm);
@@ -216,12 +211,12 @@ namespace TensorSharp.Cuda
                 dst.GateInp = UploadF32(dev, src.GateInp);
                 dst.ExpProbsBias = UploadF32(dev, src.ExpProbsBias);
                 dst.FfnNorm = UploadF32(dev, src.FfnNorm);
-                dst.RingK = AllocT(dev, DType.Float16, rt.RingRows, hd);
+                // Its key ring is per sequence (Slot.DsRing).
                 rt.Stages[s] = dst;
             }
 
-            rt.MainProj = UploadQuant(dev, d.MainProj);
-            rt.MarkovW2 = UploadQuant(dev, d.MarkovW2);
+            rt.MainProj = dev.Weights.Place(d.MainProj);
+            rt.MarkovW2 = dev.Weights.Place(d.MarkovW2);
             rt.MainNorm = UploadF32(dev, d.MainNorm);
             rt.Norm = UploadF32(dev, d.Norm);
             rt.HcHeadFn = UploadF32(dev, d.HcHeadFn);
@@ -248,22 +243,11 @@ namespace TensorSharp.Cuda
                 new UIntPtr((ulong)((long)_m.NUbatch * feat * 4L)), 0x1 /*PORTABLE*/).ThrowOnError();
 
             _ds = rt;
-            foreach (var st in rt.Stages)
-                Memset0(st.RingK);
 
             Console.Error.WriteLine(
                 $"[dsv4-cuda] DSpark drafter ready on device {dev.Ordinal}: {d.Stages.Length} stage(s), " +
                 $"block_size={d.BlockSize}, markov_rank={d.MarkovRank}, " +
                 $"target_layers=[{string.Join(",", d.TargetLayerIds)}], noise_token={d.NoiseTokenId}");
-        }
-
-        private void ResetDspark()
-        {
-            if (_ds == null)
-                return;
-            _ds.Dev.MakeCurrent();
-            foreach (var st in _ds.Stages)
-                Memset0(st.RingK);
         }
 
         // -------------------------------------------------------------------
@@ -291,8 +275,11 @@ namespace TensorSharp.Cuda
                 throw new InvalidOperationException("[dsv4-cuda] no DSpark module loaded");
             if (tokens == null || tokens.Length == 0)
                 throw new ArgumentException("empty token batch", nameof(tokens));
-            if (NPast + tokens.Length > _m.NCtx)
-                throw new InvalidOperationException($"[dsv4-cuda] context overflow: n_past={NPast} + {tokens.Length} > n_ctx={_m.NCtx}");
+            Slot slot = _active;
+            if (slot.Failed)
+                throw new InvalidOperationException("[dsv4-cuda] the sequence's last forward failed; reset or free its slot before reuse");
+            if (slot.NPast + tokens.Length > _m.NCtx)
+                throw new InvalidOperationException($"[dsv4-cuda] context overflow: n_past={slot.NPast} + {tokens.Length} > n_ctx={_m.NCtx}");
             if (allLogitsRows && tokens.Length > _m.NUbatch)
                 throw new NotSupportedException("[dsv4-cuda] per-row logits require a single ubatch");
 
@@ -301,18 +288,20 @@ namespace TensorSharp.Cuda
             _dsSelfCatchUp = lastRowOnly;
 
             var sw = _perf > 0 ? Stopwatch.StartNew() : null;
+            slot.Failed = true;
             int done = 0;
             int lastNt = 0;
             while (done < tokens.Length)
             {
                 int nt = Math.Min(_m.NUbatch, tokens.Length - done);
                 bool last = done + nt == tokens.Length;
-                ForwardUbatch(tokens, done, nt, NPast, last ? logitsOut : null,
+                ForwardUbatch(tokens, done, nt, slot.NPast, last ? logitsOut : null,
                     allLogitsRows, lastRowOnly ? null : hAllOut, done);
-                NPast += nt;
+                slot.NPast += nt;
                 done += nt;
                 lastNt = nt;
             }
+            slot.Failed = false;
             _dsSelfCatchUp = false;
 
             if (lastRowOnly && lastNt > 0)
@@ -329,7 +318,6 @@ namespace TensorSharp.Cuda
             {
                 double secs = sw.Elapsed.TotalSeconds;
                 Console.Error.WriteLine($"[dsv4-cuda] spec forward {tokens.Length} tokens in {secs:F3}s ({tokens.Length / secs:F1} tok/s)");
-                ReportStages();
             }
         }
 
@@ -410,10 +398,11 @@ namespace TensorSharp.Cuda
             int keep = rows - firstKept;
             int pos0 = startPos + firstKept;
 
-            foreach (var st in rt.Stages)
+            for (int i = 0; i < rt.Stages.Length; i++)
             {
+                DevLayer st = rt.Stages[i];
                 MatMul(dev, st.Wkv, rt.MainX, dev.KvRaw, keep);
-                dev.DK.DsparkPrep(dev.Q, dev.KvRaw, Ptr(st.KvNorm), Ptr(dev.RopeRaw), Ptr(st.RingK),
+                dev.DK.DsparkPrep(dev.Q, dev.KvRaw, Ptr(st.KvNorm), Ptr(dev.RopeRaw), Ptr(_active.DsRing[i]),
                     pos0, pos0 % rt.RingRows, rt.RingRows, _m.NHead, _m.HeadDim, _m.NRot, _m.RmsEps,
                     keep, kvOnly: true, dev.Stream);
             }
@@ -498,7 +487,7 @@ namespace TensorSharp.Cuda
 
                 HcPre(dev, st, b, attn: true);
                 RmsNorm(dev, dev.Cur, st.AttnNorm, b);
-                DsparkAttention(st, position, b);
+                DsparkAttention(st, _active.DsRing[s], position, b);
                 dev.DK.HcPost(dev.Xs, dev.AttnOut, dev.Post, dev.Comb, dev.XsOut, b, e, dev.Stream);
                 SwapXs(dev);
 
@@ -604,7 +593,7 @@ namespace TensorSharp.Cuda
         /// <paramref name="position"/> .. +B-1 over [committed window | the whole
         /// block], the block part non-causal (mode 3).
         /// </summary>
-        private void DsparkAttention(DevLayer st, int position, int b)
+        private void DsparkAttention(DevLayer st, Tensor ring, int position, int b)
         {
             var rt = _ds;
             var dev = rt.Dev;
@@ -619,7 +608,7 @@ namespace TensorSharp.Cuda
                 position, 0, b, nh, hd, rot, m.RmsEps, b, kvOnly: false, dev.Stream);
 
             float kqScale = 1.0f / MathF.Sqrt(hd);
-            dev.DK.Attention(dev.Q, Ptr(st.RingK), Ptr(rt.BlockKv), null, null, Ptr(st.Sinks), dev.AttnO,
+            dev.DK.Attention(dev.Q, Ptr(ring), Ptr(rt.BlockKv), null, null, Ptr(st.Sinks), dev.AttnO,
                 position - 1, m.NSwa, rt.RingRows, nh, hd, 3, 1, b, kqScale, b, dev.Stream);
 
             int hpg = nh / m.OGroups;
@@ -649,9 +638,13 @@ namespace TensorSharp.Cuda
         /// </summary>
         public void Rewind(int nPast)
         {
-            if (nPast < 0 || nPast > NPast)
+            Slot slot = _active;
+            if (nPast < 0 || nPast > slot.NPast)
                 throw new ArgumentOutOfRangeException(nameof(nPast));
-            NPast = nPast;
+            slot.NPast = nPast;
+            slot.Engram.Length = Math.Min(slot.Engram.Length, nPast);
+            if (slot.CpNPast > nPast)
+                slot.CpNPast = -1;
         }
     }
 }

@@ -136,11 +136,10 @@ def verify_model(model, target, port, threads, dotnet, context_boundaries=False)
             vectors = [row["embedding"] for row in openai["data"]]
             norms = validate_vectors(vectors, dimensions)
             ollama = request(base, "/api/embed", {"model": name, "input": texts})
-            legacy = [request(base, "/api/embeddings", {"model": name, "prompt": text})["embedding"] for text in texts]
             encoded = request(base, "/v1/embeddings", {"model": name, "input": texts, "encoding_format": "base64"})
             decoded = [list(struct.unpack("<" + "f" * dimensions, base64.b64decode(row["embedding"]))) for row in encoded["data"]]
             differences = {}
-            for protocol, rows in (("ollama", ollama["embeddings"]), ("legacy_ollama", legacy), ("openai_base64", decoded)):
+            for protocol, rows in (("ollama", ollama["embeddings"]), ("openai_base64", decoded)):
                 validate_vectors(rows, dimensions)
                 difference = max(abs(a - b) for expected, actual in zip(vectors, rows) for a, b in zip(expected, actual))
                 assert difference < 1e-6, (protocol, difference)

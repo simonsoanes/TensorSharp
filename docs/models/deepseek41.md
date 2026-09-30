@@ -1,6 +1,6 @@
 # DeepSeek V4.1 Flash (`deepseek41`)
 
-> **Multi-GPU selection:** use `--layer-split N` for whole-layer placement or a supported `--tp N` tensor-parallel mode. With neither mode configured, the default is one device. Older commands and measurements below predate that default: migrate multi-GPU launches by adding `--layer-split N`. An explicit legacy `TS_DSV4_NGPU=0` still selects automatic placement over visible GPUs; unset it when using an explicit degree, or set it to that same count. Layer split is single-node only.
+> **Multi-GPU selection:** use `--layer-split N` for whole-layer placement or a supported `--tp N` tensor-parallel mode. With neither mode configured, the default is one device. Older commands and measurements below predate that default: migrate multi-GPU launches by adding `--layer-split N`. Layer split is single-node only.
 
 [← back to model index](README.md) | [中文](deepseek41_zh-cn.md)
 
@@ -43,7 +43,7 @@ The repaired package's headers have been checked for all 1,046 tensor names and
 shapes, the sensitive tensor types, and matching tokenizer/Engram metadata.
 All ten downloaded shards passed full-file SHA-256 verification. Bounded plain
 and DSpark HTTP probes passed with both `--layer-split 2` and experimental
-routed-expert TP (`--tp 2` plus `TS_DSV41_TP=2`) on `ggml_cuda`. Each of the four
+routed-expert TP (`--tp 2`) on `ggml_cuda`. Each of the four
 processes passed three text checks and one image OCR/color check through EOS,
 then shut down cleanly. Separate plain/DSpark text and image pairs matched all 24
 token IDs and `max_tokens` finishes in both modes, with active DSpark and clean
@@ -277,7 +277,7 @@ dotnet build TensorSharp.Server.Host/TensorSharp.Server.Host.csproj -c Release \
   -p:CudaArch=compute_86 -p:TensorSharpSkipGgmlNative=true
 
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 MAX_CONTEXT=65536 \
-  TS_CPU_MOE_THREADS=32 TS_DSV41_TP=0 TS_DSV4_UBATCH=256 \
+  TS_CPU_MOE_THREADS=32 TS_DSV4_UBATCH=256 \
   TS_DSV41_ENGRAM_WARM=0 \
   TS_DSV41_COMPACT_RAW_GATHER=0 KV_CACHE_DTYPE=f16 \
   TS_SCHED_MAX_RUNNING_SEQS=4 TS_SCHED_MAX_BATCHED_TOKENS=4096 \
@@ -307,8 +307,7 @@ recommended new download or a measurement of Q2_K-Q5:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 MAX_CONTEXT=65536 \
-  TS_DSV4_NGPU=8 TS_DSV4_UBATCH=1024 KV_CACHE_DTYPE=f16 \
-  TS_CPU_MOE_THREADS=32 TS_DSV41_TP=0 \
+  TS_DSV4_UBATCH=1024 KV_CACHE_DTYPE=f16 TS_CPU_MOE_THREADS=32 \
   TS_DSV41_SPARSE_FA=1 TS_DSV41_COMPACT_RAW_GATHER=1 \
   TS_DSV41_ENGRAM_WARM=1 TS_DSV41_ENGRAM_THREADS=16 TS_DSV4_PERF=1 \
   TS_SCHED_MAX_RUNNING_SEQS=4 TS_SCHED_MAX_BATCHED_TOKENS=4096 \
@@ -345,22 +344,13 @@ baseline distinct from later explicit-thread experiments.
 
 `--layer-split 8` requests **eight GPUs using layer split**. The
 startup diagnostic states the placement mode. TensorSharp distributes whole
-layers according to available VRAM by default.
-An explicit `--layer-split` count must agree with any `TS_DSV4_NGPU` override. Set `CUDA_VISIBLE_DEVICES` to the exact
-devices intended for the run. An explicit `TS_DSV4_NGPU=0` selects visible
-devices automatically and defers rank-count validation to the native loader.
+layers according to available VRAM by default. Set `CUDA_VISIBLE_DEVICES` to the exact
+devices intended for the run.
 
 `--tp 8 --backend ggml_cuda` enables **routed-MoE tensor parallelism** on eight
-GPUs directly; `--tp` accepts every degree from `2` through `8`, including `3`,
-`5`, and `6`. No environment opt-in is required. The degree reaches the native
-loader as a per-model argument. `TS_DSV41_TP` remains a legacy entry point;
-if set alongside `--tp`, it must match the requested degree (including rejecting
-`TS_DSV41_TP=0` with `--tp 2..8`). Do not combine `--layer-split` with
-`TS_DSV41_TP>0`; a pure layer split must keep that setting at `0`. The legacy setting accepts `0` (disabled) or a
-rank count from `2` through `8`, which must equal the GPU count selected by
-`--tp` or `TS_DSV4_NGPU`. With automatic GPU selection, the native loader
-checks the count after enumerating visible devices. An invalid value or count
-mismatch is an error.
+GPUs; `--tp` accepts every degree from `2` through `8`, including `3`, `5`, and
+`6`. The degree reaches the native loader as a per-model argument and must equal
+the number of GPUs it selects. `--tp` and `--layer-split` cannot be combined.
 
 In this mode, routed-expert gate/up matrices are partitioned along the FFN
 intermediate dimension, and down matrices along their output rows. Each rank
@@ -981,10 +971,13 @@ than of the whole conversation. Two conditions bound it, both stated in
   it off, after which a rewind deeper than the live ring is declined.
 
 Measured on eight A40s with the Q4_K_M release (`--n-cpu-moe 2`, greedy, the
-reported prompt then two `continue` turns, `TS_KV_DEBUG=1`). The divergence lands
-exactly where the policy puts it - in both turns the cache holds token 128821
-(`<think>`) where the render holds 128822 (`</think>`), one token past
-`<｜Assistant｜>`:
+reported prompt then two `continue` turns, `TS_KV_DEBUG=1`), on 2026-09-11, when
+the CLI still planned its own reuse (`KVCache.PlanReuse`, which is what
+`TS_KV_DEBUG` prints). Since 2026-09-17 the CLI and the server both go through the
+engine's radix prefix cache, described below, and `TS_KV_DEBUG` prints nothing
+there. The divergence lands exactly where the policy puts it - in both turns the
+cache holds token 128821 (`<think>`) where the render holds 128822 (`</think>`),
+one token past `<｜Assistant｜>`:
 
 | turn | prompt tokens | matching prefix | plan | prefill |
 |---:|---:|---:|---|---:|
@@ -1008,15 +1001,59 @@ and neither do V4.1's direct-CUDA and pure-C# executors, which have no
 checkpoint. `--think` off needs none of this: without the reasoning drop the
 render is a pure extension of the cache and reuse needs no rewind.
 
-Across requests this reuse is driven by the Radix prefix cache, the default
-mode, with the native executor deciding each rewind. Without further opt-in the
-live cache is what carries over; `TS_DSV41_RETAINED_CACHE=1` additionally keeps
-finished requests' native slots, so more than one conversation can continue
-without a full re-prefill. Retention is bounded by `TS_DSV41_RETAINED_CACHE_MB`
-(default 2048; `0` or an unparsable value declines retention), applies only to
-the native executor — the one that can rewind — and is off while a DSpark
-drafter is loaded. It is off by default, and no measurement of it is recorded
-in this card.
+Across requests this reuse is driven by the radix prefix cache, the default mode
+and the path both the CLI and the server take. A finished turn stays resident as
+the model's primary cache. The next thinking turn keeps it by rewinding it past
+the whole previous answer, and the tree asks the model at admission whether the
+slot reaches that far (`CanRewindPrimary`, which reads `TSGgml_Dsv4SlotCanReuse`:
+the live ring or the prompt-boundary checkpoint). A refusal means a full prefill,
+and the admission line says why, for example `Radix prompt reuse for …: 0/2056
+tokens; 2056 token(s) to prefill (rewinding the cached conversation is declined by
+the model).` Placement plays no part: `--tp`, `--layer-split` and a single GPU plan
+alike. A turn that forwards at least two prompt tokens after its reuse leaves a new
+checkpoint behind (the capability's `MinTailPrefillTokens`), so a regenerated turn
+does not cost the turn after it its reuse.
+
+That holds for a turn that ran alone and is followed by its own conversation's next
+turn, which is how the CLI runs. A turn that overlapped another request ran on a
+per-request slot, which is released when it finishes, and the first step the
+engine runs for any other request discards a resident primary. So on a server whose
+conversations overlap, a thinking turn re-prefills its prompt unless its previous
+turn finished with nothing else running and nothing else was admitted before it.
+
+Until 2026-09-29 the tree's donation rule refused every rewind longer than 16
+tokens, this one included, so every thinking turn after the first reused nothing
+(`kvPlan=Prefill` in the CLI; first reported with `--tp 6`). The rule keeps a deep
+cached state for a later request rather than handing it to a request that shares
+only its beginning. Declining does not keep a primary cache - the next step the
+engine runs discards it either way - so the rule no longer binds one.
+`DeepSeek41ThinkingTurnReuseTests` drives such a conversation through the engine
+with the real V4.1 chat template. The matching prefix is the same as in the table
+above by construction, but the table has not been re-measured through the engine
+on the real model.
+
+Finished requests' native slots are retained as well, so more than one
+conversation can continue without a full re-prefill, including
+conversations whose turns overlap. A retained slot serves at most one later
+request, and the tree lets its own conversation rewind it past the 16-token rule
+wherever the slot can (`CanMaterialize`, the same checkpoint check): a thinking
+turn always has to rewind past the previous answer, so under the rule a retained
+slot could serve no thinking turn at all. Another conversation never reaches a
+scoped slot, so it cannot take one. If the native side refuses to retain a slot (its budget or
+device headroom), the finished turn is not reused and is not advertised either -
+before 2026-09-29 the failed attempt left an emptied primary registered, which an
+exact continuation then decoded from.
+Retention is always on for the native executor, the one that can rewind, except
+while a DSpark drafter is loaded. `TS_DSV41_RETAINED_CACHE_MB` (default 2048)
+sizes the budget of retained slots; a value that is not a positive number keeps
+the default. Measured 2026-09-29 on 6x A40 (`--tp 6`, Q2_K) with four overlapping
+three-turn Web UI conversations (`eng/validation/parallel-multiturn-webui.py`):
+without retention every turn reused 0 tokens, because each finished slot was
+released before the conversation's next turn; with it every conversation reused its own
+previous prompt on every turn - thinking on, turn 2 reused 54-62 tokens of 167-210
+(the answer before the dropped reasoning is re-rendered) and turn 3 the whole
+turn-2 prompt; thinking off, 171-196 of 175-200 and 287-417 of 307-437. All eight
+conversations passed their answer checks in both modes.
 
 Native V4.1 requests own independent KV slots. The scheduler therefore sizes
 its metadata-only block pool for one context per allowed running request.
@@ -1104,11 +1141,8 @@ memory rather than VRAM here.
 
 The options that name GPUs behave as follows:
 
-- `--tp N` (or legacy `TS_DSV41_TP`) shards routed-expert dimensions across GPUs. Combined with
+- `--tp N` shards routed-expert dimensions across GPUs. Combined with
   `ggml_cpu` it is refused before the checkpoint is opened, not ignored.
-- `TS_DSV4_NGPU` selects how many GPUs to enumerate. There are none to
-  enumerate here, so the loader never reads it; it is neither an error nor a
-  way to get more than the one CPU device.
 - Multi-GPU `--tp N` and `--layer-split N` requests are refused on CPU backends.
 - The Engram tables stay host-mapped: the GPU-resident placement described
   above needs a device to place them on. `TS_DSV41_ENGRAM_DEVICE=1` is
@@ -1275,7 +1309,7 @@ tool selection, reasoning quality, or JSON task accuracy.
 
 The Chat Completions endpoint accepts `response_format` with thinking enabled for V4.1
 because its protocol declares that delayed grammar trigger. This combination
-requires JSON grammar enforcement; `TS_JSON_GRAMMAR=0` is rejected. To request a
+requires JSON grammar enforcement. To request a
 JSON final answer after a tool round trip, retain the tool history and catalog
 and send `tool_choice: "none"`. Active tool generation and `response_format`
 remain mutually exclusive. Validation checks the assistant content channel;
@@ -1323,7 +1357,7 @@ original output limit retain precedence.
   `TS_DSV4_FUSED=0`, a loaded DSpark drafter or `TS_BATCHED_FUSED_DECODE=0`
   keeps them on per-slot forward calls.
 - V4.1 DSpark speculative decoding is experimental. The loader accepts a
-  `deepseek41-dspark` drafter (`--draft-model` / `TS_DSV4_DSPARK`) on
+  `deepseek41-dspark` drafter (`--draft-model`) on
   `ggml_cuda` and `ggml_cpu` only, refuses it on every other executor, and
   rejects V4 drafters. Synthetic integration tests
   (`DeepSeek41DsparkIntegrationTests`) and initial trained text/image HTTP

@@ -50,14 +50,12 @@ public sealed class WebUiAdapter
 {
     private readonly WebUiChatService _service;
     private readonly ModelService _svc;
-    private readonly InferenceQueue _queue;
     private readonly ServerHostingOptions _options;
     private readonly UploadStoragePolicy _uploads;
     private readonly ILoggerFactory _loggerFactory;
 
     public WebUiAdapter(
         ModelService svc,
-        InferenceQueue queue,
         SessionManager sessions,
         ServerHostingOptions options,
         UploadStoragePolicy uploads,
@@ -71,7 +69,6 @@ public sealed class WebUiAdapter
             svc, sessions, options, uploads, skills, codeRunner, workspaces, codeArtifacts, loggerFactory,
             CodeArtifactEndpoints.RoutePrefix);
         _svc = svc;
-        _queue = queue ?? throw new ArgumentNullException(nameof(queue));
         _options = options;
         _uploads = uploads;
         _loggerFactory = loggerFactory;
@@ -92,12 +89,7 @@ public sealed class WebUiAdapter
 
     // ---- Queue ------------------------------------------------------------
 
-    public IResult GetQueueStatus()
-    {
-        // The legacy queue's ticket count is what total_processed reported before
-        // the engine completed anything; handed in so the field keeps its value.
-        return Results.Json(_service.GetQueueStatus(_queue.GetStatus().TotalProcessed));
-    }
+    public IResult GetQueueStatus() => Results.Json(_service.GetQueueStatus());
 
     // ---- Sessions ---------------------------------------------------------
 
@@ -107,10 +99,6 @@ public sealed class WebUiAdapter
     {
         try
         {
-            // Keep the legacy queue handshake for the API contract. The queue is a
-            // no-op now; the ticket only feeds the total_processed count.
-            using var ticket = _queue.Enqueue(ctx.RequestAborted);
-            await ticket.WaitUntilReadyAsync().ConfigureAwait(false);
             return Results.Json(await _service.DisposeSessionAsync(id, ctx.RequestAborted).ConfigureAwait(false));
         }
         catch (WebUiRequestRejectedException ex)
@@ -128,8 +116,6 @@ public sealed class WebUiAdapter
         var body = await JsonSerializer.DeserializeAsync<JsonElement>(req.Body).ConfigureAwait(false);
         try
         {
-            using var ticket = _queue.Enqueue(ctx.RequestAborted);
-            await ticket.WaitUntilReadyAsync().ConfigureAwait(false);
             return Results.Json(await _service.LoadModelAsync(body, ctx.RequestAborted).ConfigureAwait(false));
         }
         catch (WebUiRequestRejectedException ex)
@@ -433,7 +419,6 @@ public sealed class WebUiAdapter
         var webUiLogger = _loggerFactory.CreateLogger("TensorSharp.Server.WebUI.Chat");
         var body = await JsonSerializer.DeserializeAsync<JsonElement>(ctx.Request.Body).ConfigureAwait(false);
 
-        using var ticket = _queue.Enqueue(ctx.RequestAborted);
         IAsyncEnumerator<object> frames = _service
             .ChatStreamAsync(body, ctx.RequestAborted)
             .GetAsyncEnumerator(ctx.RequestAborted);

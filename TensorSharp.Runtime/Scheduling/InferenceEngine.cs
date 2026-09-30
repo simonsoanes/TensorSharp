@@ -25,9 +25,9 @@ namespace TensorSharp.Runtime.Scheduling
     /// requests via <see cref="SubmitRequest"/> and consume per-token output
     /// via the returned <see cref="InferenceRequestHandle"/>.
     ///
-    /// Replaces the old FIFO queue plus per-session KV manager: the engine is
-    /// the single coordination point for everything that needs the model's KV
-    /// state, and request lifecycle is per-request rather than per-session.
+    /// The engine is the single coordination point for everything that needs
+    /// the model's KV state, and request lifecycle is per-request rather than
+    /// per-session.
     /// </summary>
     public sealed class InferenceEngine : IDisposable
     {
@@ -54,14 +54,15 @@ namespace TensorSharp.Runtime.Scheduling
         private long _totalForwardTicks;
         private bool _disposed;
 
-        /// <summary>The effective cache owner for this loaded model.</summary>
-        public PrefixCacheMode PrefixCacheMode => _executor.RadixPrefixCacheEnabled
-            ? PrefixCacheMode.Tree : PrefixCacheMode.Legacy;
+        /// <summary>Whether the radix prefix cache serves this loaded model (prefix
+        /// caching is on and the model implements the prefix-cache contract).</summary>
+        public bool PrefixCacheActive => _executor.RadixPrefixCacheEnabled;
 
         public InferenceEngine(IModelArchitecture model, SchedulerConfig cfg, ILogger? logger = null)
         {
             _model = model ?? throw new ArgumentNullException(nameof(model));
             ArgumentNullException.ThrowIfNull(cfg);
+            if (cfg.BlockSize <= 0) cfg = cfg.WithBlockSize(PreferredBlockSize(model));
             _logger = logger ?? NullLogger.Instance;
             _stopRepetition = cfg.StopRepetition;   // cfg is null-checked above
             _nativeSlotContextLimit = UsesNativeDeepSeek41Slots(model) ? Math.Max(0, model.MaxContextLength) : 0;
@@ -69,35 +70,13 @@ namespace TensorSharp.Runtime.Scheduling
             long blockBytes = ComputeBlockByteSize(model, cfg.BlockSize);
             int numBlocks = ResolveEffectiveNumBlocks(model, cfg, _logger);
             _pool = new BlockPool(numBlocks, cfg.BlockSize, blockBytes);
-            _scheduler = new ContinuousBatchScheduler(cfg, _pool, model.KVStateFingerprint ?? string.Empty, logger,
+            _scheduler = new ContinuousBatchScheduler(cfg, _pool, logger,
                 supportsCrossSequenceKvReuse: model.SupportsCrossSequenceKvReuse,
-                maxReusablePrefixTokens: model.MaxReusablePrefixTokens,
-                requiresPerBlockCapture: model.RequiresPerBlockCapture,
-                supportsReuseAcrossMediaSpan: model.SupportsReuseAcrossMediaSpan,
-                canPrefillMediaAfterReusedPrefix: model.CanPrefillMediaAfterReusedPrefix);
+                requiresPerBlockCapture: model.RequiresPerBlockCapture);
             _executor = new BatchExecutor(model, _pool, _scheduler, logger);
             _executor.InitializeRadixCache(cfg);
-            // Let the scheduler plan same-session live-cache continuations through the
-            // executor (which owns the model's live KV-cache state).
-            if (!_executor.RadixPrefixCacheEnabled)
-                _scheduler.AttachLiveCacheContinuation(
-                    _executor.ComputeLiveContinuationLcp,
-                    _executor.TryAdoptLiveCache);
-            // Cross-request prefix reuse for concurrent (per-seq fused) decode:
-            // re-adopt a finished request's complete retained holder (K/V and,
-            // for hybrid models, recurrent state) for a follow-up turn.
-            if (!_executor.RadixPrefixCacheEnabled)
-                _scheduler.AttachFusedCacheContinuation(
-                    _executor.ComputeFusedContinuationLcp,
-                    _executor.TryAdoptFusedContinuation);
-            // So admission can say WHY a turn reused nothing. The mechanisms record
-            // their reasons; only the scheduler knows which one ended up serving the
-            // request, so only it can report the outcome without guessing.
-            _scheduler.AttachReuseDiagnostics(
-                () => _executor.LastLiveContinuationDeclineReason,
-                () => _executor.LastFusedContinuationDeclineReason,
-                () => _executor.LastFusedAdoptionSource,
-                () => _executor.LastBlockedByScopeTokens);
+            // So admission can say WHY a turn reused nothing.
+            _scheduler.AttachReuseDiagnostics(() => _executor.LastFusedContinuationDeclineReason);
             // Shared-prefix checkpoints: end a prefill chunk exactly where the chat
             // layer says the shared prompt ends, so the executor can copy the model's
             // state there and start every later new chat from that copy.
@@ -702,6 +681,12 @@ namespace TensorSharp.Runtime.Scheduling
                 var handle = _handles.TryGetValue(seq.RequestId, out var h) ? h : null;
                 handle?.RecordForwardTime(r);
 
+                if (r.SlotUnavailable)
+                {
+                    _scheduler.DeferForSequenceSlot(seq, output, _model.MaxContextLength);
+                    continue;
+                }
+
                 if (r.Error != null)
                 {
                     LogSpeculationStatsIfAny(seq);
@@ -888,6 +873,22 @@ namespace TensorSharp.Runtime.Scheduling
 
             return numBlocks;
         }
+
+        /// <summary>
+        /// The pool block size when the configuration leaves it to the model. A family whose only
+        /// cross-request reuse is its pages (no per-conversation end state: Hunyuan Dense, Mistral 3,
+        /// Nemotron-H, Muse-Glimmer) reuses whole blocks only, so at 256 tokens every turn recomputed its
+        /// last partial block and a turn shorter than one reused nothing: eight parallel Hunyuan
+        /// conversations reused 0 tokens on their second turn, and at 16 all but the last partial block,
+        /// in 26% less time. A family with end states keeps each conversation's exact state, and its pool
+        /// only accounts for reservations.
+        /// </summary>
+        internal static int PreferredBlockSize(IModelArchitecture model)
+            => model is PrefixCache.IPrefixCacheModel cache
+               && cache.GetPrefixCacheCapabilities() is { EndState: PrefixCache.EndStateSupport.None } caps
+               && caps.Pages != PrefixCache.PageSupport.None
+                ? SchedulerConfig.PageFamilyBlockSize
+                : SchedulerConfig.DefaultBlockSize;
 
         private static bool UsesNativeDeepSeek41Slots(IModelArchitecture model)
             => string.Equals(model.Config?.Architecture, "deepseek41", StringComparison.OrdinalIgnoreCase)

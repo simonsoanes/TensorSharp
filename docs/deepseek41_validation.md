@@ -172,7 +172,7 @@ provides server lifecycle and placement plans. The harness retains `--tp` as
 its **GPU-count sweep**; the explicitly named `ggml_cuda_layer` and
 `ggml_cuda_layer_cpu_moe4` profiles launch the inference server with
 `--layer-split N`. Those are contiguous whole-layer placement, not tensor
-parallelism. The server reserves `--tp N` for tensor parallelism only. `ggml_cuda_true_tp` explicitly sets `TS_DSV41_TP` to
+parallelism. The server reserves `--tp N` for tensor parallelism only. `ggml_cuda_true_tp` passes `--tp N` with
 the requested rank count: every routed expert's gate/up matrices use column
 shards and its down matrix uses matching row shards. Ranks execute concurrently;
 the current reduction stages F32 partial outputs through the host. Attention
@@ -336,9 +336,9 @@ CUDA_VISIBLE_DEVICES=1 dotnet test InferenceWeb.Tests/InferenceWeb.Tests.csproj 
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 ctest --test-dir TensorSharp.GGML.Native/build \
   -R '^deepseek41-moe-tensor-parallel' --output-on-failure
 
-TS_DSV41_TP=8 TS_DSV4_FA=0 TS_DSV4_GATHER=0 \
+TS_DSV4_FA=0 TS_DSV4_GATHER=0 \
   python eng/tests/dsv41-inference.py CUDA_INDEX_FIXTURE_DIRECTORY \
-  --library /absolute/path/to/libGgmlOps.so --backend CUDA --gpus 8 \
+  --library /absolute/path/to/libGgmlOps.so --backend CUDA --gpus 8 --tp 8 \
   --atol 2e-5 --rtol 2e-5 --report validation-cuda-tp8-strict.json
 ```
 
@@ -479,7 +479,7 @@ under batched decode.
 
 ### Routed-MoE tensor parallelism on this checkpoint
 
-`TS_DSV41_TP=8` shards the routed experts evenly, which at Q4_K_M removes the
+`--tp 8` shards the routed experts evenly, which at Q4_K_M removes the
 capacity cliff entirely: 38.3 GiB of shards a rank and **zero** CPU-offloaded
 layers. It is still slower than layer split, because attention, the shared
 expert and the caches keep their layer placement and the partial sums reduce
@@ -489,7 +489,7 @@ two NUMA nodes.
 | eight A40s, Q4_K_M | Prefill tok/s | Decode tok/s | CPU-MoE layers |
 |---|---:|---:|---:|
 | Layer split | 451.8-492.1 | 31.0-32.5 | 1 |
-| `TS_DSV41_TP=8` | 391.9-410.4 | 21.4-22.0 | 0 |
+| `--tp 8` | 391.9-410.4 | 21.4-22.0 | 0 |
 
 Decode splits rise from 62 to 132 per step under TP. This reproduces the Q2_K
 conclusion on a checkpoint where TP has a genuine placement advantage, so it is

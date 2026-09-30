@@ -392,7 +392,7 @@ namespace TensorSharp.Models
                 if (isExpert && canPreload && preloadCopies)
                 {
                     // Repack-kernel expert (Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q8_0 /
-                    // MXFP4, or Q5_K with TS_MLX_Q5K_RAW=0). The MLX preload
+                    // MXFP4 / Q4_K / Q5_K). The MLX preload
                     // would allocate fresh MLX-managed memory and double the
                     // residency cost; offload bypasses that by deferring the
                     // upload to first use and bounding total residency via the
@@ -409,8 +409,8 @@ namespace TensorSharp.Models
 
                 if (isExpert && canPreload && !preloadCopies)
                 {
-                    // Raw-wrap kernel expert (Q4_K / Q6_K, IQ2_XXS / IQ2_S /
-                    // IQ3_S / IQ4_XS, or Q5_K when raw mode is enabled). The
+                    // Raw-wrap kernel expert (Q6_K, IQ2_XXS / IQ2_S /
+                    // IQ3_S / IQ4_XS). The
                     // MLX preload does NOT allocate fresh memory — it just
                     // wraps the GGUF mmap pointer as an MLX array. The
                     // baseline preload path's qw.ReleaseHostData() call after
@@ -448,14 +448,14 @@ namespace TensorSharp.Models
                     regroupedQ6KCount++;
                 }
 
-                // Repack quants (Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/MXFP4/Q5_K-repack)
+                // Repack quants (Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/MXFP4/Q4_K/Q5_K)
                 // were materialised into a fresh MLX-allocator MTLBuffer in
                 // the preload above. The original GGUF/host bytes are now
                 // redundant — releasing them frees the source view and
                 // (when external) lets the OS reclaim those mmap pages.
                 //
-                // Raw-wrap quants (Q4_K, Q6_K, IQ2_XXS, IQ2_S, IQ3_S,
-                // IQ4_XS, IQ4_NL, Q5_K-raw) are wrapped zero-copy via
+                // Raw-wrap quants (Q6_K, IQ2_XXS, IQ2_S, IQ3_S, IQ4_XS,
+                // IQ4_NL) are wrapped zero-copy via
                 // mlx_array_new_data_managed → MTLBuffer-with-bytes-no-copy
                 // pointing at the GGUF mmap. They MUST keep that mmap
                 // alive — calling ReleaseHostData here would (a) lose the
@@ -475,7 +475,7 @@ namespace TensorSharp.Models
             // Stacked-experts views are lazily uploaded by the batched-MoE matmul
             // path (no explicit preload). Register them as offloadable so any
             // repack-kernel batched-MoE uploads are governed by the LRU. For
-            // raw-wrap kernel stacked views (the common case — IQ2_XXS, Q4_K
+            // raw-wrap kernel stacked views (the common case — IQ2_XXS, Q6_K
             // etc.) the LRU does no harm because no MLX-allocator memory is
             // duplicated, and the registration is essentially a no-op there.
             if (offloadEnabled)
@@ -651,6 +651,7 @@ namespace TensorSharp.Models
                 return;
 
             cudaAllocator.LogVram("before direct-CUDA quant weight preload");
+            RefuseQuantizedWeightsThatCannotFit(cudaAllocator);
 
             // When CUDA kernels are unavailable (PTX load failed), device-side
             // quantized matmul/embedding will fail and every op falls back to
@@ -701,6 +702,30 @@ namespace TensorSharp.Models
                 Console.WriteLine($"  Direct CUDA resident quantized weights: {preloadedBytes / 1024 / 1024} MB across {preloadedCount} tensors (host copies released)");
 
             cudaAllocator.LogVram("after direct-CUDA quant weight preload");
+        }
+
+        /// <summary>
+        /// Refuse, before uploading any of them, quantized weights that cannot fit the device's
+        /// free memory. The direct cuda backend keeps the whole model on one device: GLM-5.3-Flash
+        /// (~180 GB) on a 45 GB A40 uploaded for minutes and then aborted the process on a CUDA
+        /// out-of-memory with a core dump. Only the weights are counted, so a model that could fit
+        /// is never refused here; a later out-of-memory stays the genuine error it is.
+        /// </summary>
+        private void RefuseQuantizedWeightsThatCannotFit(CudaAllocator allocator)
+        {
+            long needed = 0;
+            foreach (QuantizedWeight qw in _quantWeights.Values)
+                if (qw.HasHostData && CudaQuantizedOps.SupportsQuantizedType(qw.GgmlType))
+                    needed += qw.RawBytes;
+            long free, total;
+            try { (free, total) = allocator.GetMemoryInfo(); }
+            catch (Exception) { return; }   // unknown: the upload itself decides
+            if (needed <= free)
+                return;
+            throw new ModelLoadRefusedException(
+                $"the model's quantized weights need {needed >> 20} MiB of device memory and the CUDA device has " +
+                $"{free >> 20} MiB free of {total >> 20} MiB. The cuda backend keeps the whole model on one device; " +
+                "use --backend ggml_cuda (with --layer-split N or --tp N for several GPUs) or a smaller quantization.");
         }
 
         // TS_GGML_RETAIN_HOST_WEIGHTS=1 keeps every quantized weight's host copy
@@ -1031,12 +1056,10 @@ namespace TensorSharp.Models
         // (pp4096) tok/s, resident weights 17.9 -> 17.1 GB. Needs a family that can run
         // the pair as two matmuls (SupportsSplitGateUpFfn) and has a half-precision split
         // prefill FFN on MLX (SplitsMixedGateUpOnMlx; without one, prefill lost ~7%).
-        // TS_MLX_MIXED_GATE_UP_SPLIT=0 fuses them as on the other backends.
         protected virtual bool SplitsMixedGateUpOnMlx => false;
 
         private bool KeepMixedGateUpSplitOnMlx =>
-            _backend == BackendType.Mlx && SupportsSplitGateUpFfn && SplitsMixedGateUpOnMlx
-            && !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_MIXED_GATE_UP_SPLIT"), "0", StringComparison.Ordinal);
+            _backend == BackendType.Mlx && SupportsSplitGateUpFfn && SplitsMixedGateUpOnMlx;
 
         protected unsafe void FuseGateUpWeights(int numLayers = 0)
         {
@@ -1299,7 +1322,7 @@ namespace TensorSharp.Models
         {
             if (ex is AggregateException agg)
                 return agg.InnerExceptions.Count > 0 && agg.InnerExceptions.All(IsRequantizeUnavailable);
-            return ex is DllNotFoundException or EntryPointNotFoundException or NotSupportedException;
+            return ex is DllNotFoundException or NotSupportedException;
         }
 
     }

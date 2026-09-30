@@ -162,7 +162,12 @@ namespace TensorSharp.Runtime
             // request installs its grammar with delayed activation instead.
             if (!_channelOpen || _config.Grammar?.IsActive == true)
                 return false;
-            if (_thinkingCloseRequestedAt < 0)
+            long closingFrom;
+            if (_thinkingCloseRequestedAt >= 0)
+            {
+                closingFrom = _thinkingCloseRequestedAt;
+            }
+            else
             {
                 long inChannel = count - _channelStart;
                 if (inChannel < budget.TokenLimit)
@@ -170,8 +175,19 @@ namespace TensorSharp.Runtime
                 if (budget.CloseAtBoundary != null && inChannel < 2L * budget.TokenLimit
                     && !(inChannel > 0 && budget.CloseAtBoundary(tokens![count - 1])))
                     return false;
+                // Where the close began follows from the history alone, so a rollback into the
+                // closing text resumes it instead of starting it again. A boundary close has no
+                // text (it caps an unrequested channel), so it begins where it fires.
+                closingFrom = budget.CloseAtBoundary == null ? (long)_channelStart + budget.TokenLimit : count;
             }
-            token = budget.EndTokenId;
+            // The closing text one token per step, then the end token. History that left the
+            // text (tokens this sampler did not force) closes at once instead.
+            IReadOnlyList<int> text = budget.ClosingTokenIds;
+            long written = count - closingFrom;
+            bool intact = written >= 0 && written < text.Count;
+            for (int i = 0; intact && i < written; i++)
+                intact = tokens![(int)closingFrom + i] == text[i];
+            token = intact ? text[(int)written] : budget.EndTokenId;
             return true;
         }
 

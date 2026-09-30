@@ -11,20 +11,14 @@ using TensorSharp.Runtime.Scheduling.PrefixCache;
 
 namespace InferenceWeb.Tests.PrefixCache;
 
-public class RadixPagedEngineTests : IDisposable
+[Collection(EngineEnvironmentCollection.Name)]
+
+public class RadixPagedEngineTests
 {
     private const int BlockSize = 8;
-    private readonly string? _savedFastPath = Environment.GetEnvironmentVariable("TS_BATCHED_N1_FAST_PATH");
 
-    public RadixPagedEngineTests()
-    {
-        // Exercise real A2 page production, rather than the oracle's optional
-        // primary-cache fast path (primary reuse has separate coverage).
-        Environment.SetEnvironmentVariable("TS_BATCHED_N1_FAST_PATH", "0");
-    }
-
-    public void Dispose() => Environment.SetEnvironmentVariable("TS_BATCHED_N1_FAST_PATH", _savedFastPath);
-
+    // No linear-cache migration keeps every request on the batched path, so these tests exercise real
+    // page production rather than the oracle's primary-cache fast path (primary reuse has separate coverage).
     private static OracleModel Model(PageSupport pages) => new(new OracleTraits
     {
         Name = "engine-pages-" + pages,
@@ -32,6 +26,7 @@ public class RadixPagedEngineTests : IDisposable
         Pages = pages,
         PrimaryResident = false,
         Truncation = TruncationKind.Any,
+        LinearKvMigration = false,
     }, BlockSize);
 
     private static SchedulerConfig Config(int blocks = 16, bool enabled = true) => new()
@@ -69,7 +64,6 @@ public class RadixPagedEngineTests : IDisposable
         Assert.Equal(0, cold.PrefixCacheReusedTokens);
         Assert.Equal(24, warm.PrefixCacheReusedTokens);
         Assert.Equal(cold.OutputTokens, warm.OutputTokens);
-        Assert.Equal(0, engine.PoolStats.hashedBlocks);
 
         int[] branch = prompt.ToArray();
         branch[17] = 100;

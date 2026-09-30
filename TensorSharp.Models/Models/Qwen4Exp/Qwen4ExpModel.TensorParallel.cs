@@ -243,7 +243,7 @@ namespace TensorSharp.Models
             int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position,
             int nRot, float ropeBase, float ropeFreqScale, float attnScale,
             int nExpert, int nExpertUsed, int nFf, int nFfSh,
-            float eps, int cacheSlot, bool firstFfnOnly = false,
+            float eps, int cacheSlot,
             IntPtr head = default, IntPtr logitsOut = default,
             IntPtr ple = default, int pleLayer = -1, IntPtr pleEmb = default,
             IntPtr mropePos = default, IntPtr mropeSections = default,
@@ -275,7 +275,7 @@ namespace TensorSharp.Models
                             headKDim, headVDim, nKHeads, nVHeads, dConv,
                             headDim, nHead, nHeadKv, kvCapacity, nKv, position,
                             nRot, ropeBase, ropeFreqScale, attnScale,
-                            nExpert, nExpertUsed, nFf / TpDegree, nFfSh / TpDegree, eps, cacheSlot, firstFfnOnly,
+                            nExpert, nExpertUsed, nFf / TpDegree, nFfSh / TpDegree, eps, cacheSlot,
                             r == 0 ? head : IntPtr.Zero, r == 0 ? logitsOut : IntPtr.Zero,
                             ple, pleLayer, pleEmb, mropePos, mropeSections, ropePosition,
                             r, r == 0 ? hiddenOut : IntPtr.Zero, logitsRows, qsa, qsaPositions, qsaPositionCount);
@@ -290,7 +290,7 @@ namespace TensorSharp.Models
                 headKDim, headVDim, nKHeads, nVHeads, dConv,
                 headDim, nHead, nHeadKv, kvCapacity, nKv, position,
                 nRot, ropeBase, ropeFreqScale, attnScale,
-                nExpert, nExpertUsed, nFf, nFfSh, eps, cacheSlot, firstFfnOnly,
+                nExpert, nExpertUsed, nFf, nFfSh, eps, cacheSlot,
                 head, logitsOut, ple, pleLayer, pleEmb, mropePos, mropeSections, ropePosition,
                 device, hiddenOut, logitsRows, qsa, qsaPositions, qsaPositionCount);
         }

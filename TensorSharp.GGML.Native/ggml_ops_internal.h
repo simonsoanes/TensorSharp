@@ -382,7 +382,7 @@ namespace tsg
     // Windows WDDM an oversubscribed working set is transparently paged
     // between VRAM and system RAM on every command submission, which measured
     // far slower than explicit per-step streaming for diffusion decode.
-    // 0 = unlimited (legacy behaviour, correct when everything fits).
+    // 0 = unlimited (correct when everything fits).
     // Both guarded by g_host_buffer_cache_mutex.
     // (per-rank; see DeviceState)
 
@@ -744,7 +744,7 @@ namespace tsg
 
     ggml_backend_t create_backend_instance(int backend_type);
     // Create a backend bound to a specific GPU ordinal (tensor parallelism).
-    // device_index < 0 keeps the legacy "first available device" behaviour.
+    // device_index < 0 takes the first available device.
     ggml_backend_t create_backend_instance_on_device(int backend_type, int device_index);
     // Number of GPUs the backend type can address (1 for CPU/Metal).
     int gpu_device_count(int backend_type);

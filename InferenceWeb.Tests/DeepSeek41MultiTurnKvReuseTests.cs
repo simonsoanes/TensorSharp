@@ -19,9 +19,14 @@ namespace InferenceWeb.Tests;
 /// re-prefills the entire conversation every turn.</para>
 ///
 /// <para>No model is loaded. The renderer and <see cref="KVCache"/> decide the plan, which
-/// is where the bug lived; the native side's ability to carry it out is covered by
+/// is where the bug lived in 2026-09; the native side's ability to carry it out is covered by
 /// TensorSharp.GGML.Native/tests/dsv41_truncate_test.cpp and by the live fixture run in
 /// eng/tests/dsv41-inference.py.</para>
+///
+/// <para>Since 2026-09-17 the CLI no longer plans with <see cref="KVCache"/>: it and the server
+/// go through the inference engine's radix prefix cache, which refused this very rewind until
+/// 2026-09-29 while these tests kept passing. <see cref="DeepSeek41ThinkingTurnReuseTests"/> pins
+/// that path; these still pin the render divergence the reuse depends on.</para>
 /// </summary>
 public class DeepSeek41MultiTurnKvReuseTests
 {
@@ -45,9 +50,9 @@ public class DeepSeek41MultiTurnKvReuseTests
     private const string Eos = "<｜end▁of▁sentence｜>";
     private const string Assistant = "<｜Assistant｜>";
 
-    /// <summary>What the CLI does per turn: render the history, forward the suffix the
-    /// plan keeps, then append the generated tokens to the mirror exactly as
-    /// <c>InteractiveSession</c> does (raw ids, no EOS - the CLI breaks on EOS before
+    /// <summary>What the CLI did per turn before it moved onto the engine (2026-09-17): render
+    /// the history, forward the suffix the plan keeps, then append the generated tokens to the
+    /// mirror as <c>InteractiveSession</c> did (raw ids, no EOS - it broke on EOS before
     /// forwarding it).</summary>
     private sealed class Conversation
     {

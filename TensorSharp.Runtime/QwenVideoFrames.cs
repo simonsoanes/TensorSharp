@@ -39,7 +39,7 @@ namespace TensorSharp.Runtime
     /// a frame whose time does not increase starts a new clip, which is how two
     /// <c>video_url</c> parts in one message stay two videos (each clip's sampling starts
     /// at its own first frame). Frames without a source time, including the frames of a
-    /// legacy Web UI video upload, are still images.</para>
+    /// Web UI video upload without timestamps, are still images.</para>
     /// </summary>
     public static class QwenVideoFrames
     {

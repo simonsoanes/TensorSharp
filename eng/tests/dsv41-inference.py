@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--library", type=Path, required=True)
     parser.add_argument("--backend", default="CPU")
     parser.add_argument("--gpus", type=int, default=1)
+    parser.add_argument("--tp", type=int, default=0, help="Routed-MoE tensor-parallel ranks: 0 for layer placement, otherwise equal to --gpus")
     parser.add_argument("--cpu-moe", type=int, default=0, help="Number of initial routed-MoE layers placed on CPU")
     parser.add_argument("--atol", type=float, default=2e-5)
     parser.add_argument("--rtol", type=float, default=2e-5)
@@ -65,9 +66,10 @@ def main():
     expected, expected_other = oracle(tokens), oracle(other)
     lib = ctypes.CDLL(str(args.library.resolve()))
     signatures = {
-        "LoadModel": ([ctypes.c_char_p] + [ctypes.c_int] * 5 + [ctypes.c_char_p], ctypes.c_void_p),
+        "LoadModel": ([ctypes.c_char_p] + [ctypes.c_int] * 4 + [ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int],
+                      ctypes.c_void_p),
         "Forward": ([ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p], ctypes.c_int),
-        "Reset": ([ctypes.c_void_p], None), "Free": ([ctypes.c_void_p], None),
+        "ResetChecked": ([ctypes.c_void_p], ctypes.c_int), "Free": ([ctypes.c_void_p], None),
         "SlotAlloc": ([ctypes.c_void_p], ctypes.c_int),
         "SetActiveSlot": ([ctypes.c_void_p, ctypes.c_int], ctypes.c_int),
         "SlotFree": ([ctypes.c_void_p, ctypes.c_int], ctypes.c_int),
@@ -81,8 +83,12 @@ def main():
         function = getattr(lib, "TSGgml_Dsv4" + name)
         function.argtypes, function.restype = parameters, result
         api[name] = function
+    def reset(handle):
+        if api["ResetChecked"](handle) != 1:
+            raise RuntimeError("native reset was refused")
+    api["Reset"] = reset
     handle = api["LoadModel"](str(args.fixture_dir / "deepseek41-fixture.gguf").encode(),
-                                args.gpus, 256, 32, 2, args.cpu_moe, args.backend.encode())
+                                args.gpus, 256, 32, 2, None, args.cpu_moe, args.backend.encode(), args.tp)
     if not handle:
         raise RuntimeError("Native fixture model load failed")
     checks = []
@@ -267,12 +273,12 @@ def main():
         assert api["SlotFree"](handle, slot) == 0
     finally:
         api["Free"](handle)
-    environment = {name: os.environ.get(name) for name in ("TS_DSV4_FA", "TS_DSV4_GATHER", "TS_DSV41_TP", "TS_DSV41_SPARSE_FA",
+    environment = {name: os.environ.get(name) for name in ("TS_DSV4_FA", "TS_DSV4_GATHER", "TS_DSV41_SPARSE_FA",
                   "TS_DSV41_ENGRAM_THREADS", "TS_DSV41_ENGRAM_WARM", "NVIDIA_TF32_OVERRIDE")}
     long_sparse = long_sparse_case(args, config, api, checks, dumped) if args.long_sparse_tokens else None
     if args.dump_logits:
         np.savez(args.dump_logits, logits=np.stack(dumped))
-    result = dict(backend=args.backend, gpus=args.gpus, cpu_moe=args.cpu_moe, atol=args.atol, rtol=args.rtol,
+    result = dict(backend=args.backend, gpus=args.gpus, tp=args.tp, cpu_moe=args.cpu_moe, atol=args.atol, rtol=args.rtol,
                   environment=environment, checks=checks)
     if long_sparse:
         result["long_sparse"] = long_sparse
@@ -321,7 +327,7 @@ def long_sparse_case(args, config, api, checks, dumped):
             os.environ["TS_DSV41_SPARSE_FA"] = setting
         try:
             handle = api["LoadModel"](str(args.fixture_dir / "deepseek41-fixture.gguf").encode(),
-                                      args.gpus, context, ubatch, 2, args.cpu_moe, args.backend.encode())
+                                      args.gpus, context, ubatch, 2, None, args.cpu_moe, args.backend.encode(), args.tp)
             if not handle:
                 raise RuntimeError("Native fixture model load failed for the long sparse case")
             try:

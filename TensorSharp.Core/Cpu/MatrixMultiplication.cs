@@ -606,7 +606,7 @@ namespace TensorSharp.Cpu
         /// </summary>
         private static unsafe bool TryPackedGemm(float alpha, Tensor a, Tensor b, float beta, Tensor c)
         {
-            if (!CpuSgemm.Enabled || !UsesManagedBlas(a, b, c) || !AllFloat32(a, b, c) ||
+            if (!UsesManagedBlas(a, b, c) || !AllFloat32(a, b, c) ||
                 a.DimensionCount != 2 || b.DimensionCount != 2 || c.DimensionCount != 2)
             {
                 return false;
@@ -648,7 +648,7 @@ namespace TensorSharp.Cpu
         /// <summary>Batched form of <see cref="TryPackedGemm"/> ([batch, M, K] x [batch, K, N]).</summary>
         private static unsafe bool TryPackedGemmBatch(float alpha, Tensor a, Tensor b, float beta, Tensor c)
         {
-            if (!CpuSgemm.Enabled || !UsesManagedBlas(a, b, c) || !AllFloat32(a, b, c) ||
+            if (!UsesManagedBlas(a, b, c) || !AllFloat32(a, b, c) ||
                 a.DimensionCount != 3 || b.DimensionCount != 3 || c.DimensionCount != 3 ||
                 a.Sizes[0] != c.Sizes[0] || b.Sizes[0] != c.Sizes[0])
             {

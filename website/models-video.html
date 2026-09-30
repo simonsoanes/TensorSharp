@@ -200,9 +200,9 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
   <h2 id="video">Wan companions, cost and resolution</h2>
   <p>Wan turns a <strong>prompt</strong> — and, on the Wan 2.2 checkpoints, an <strong>uploaded first frame</strong> — into an H.264 MP4. The <code>--model</code> GGUF is only the DiT; TensorSharp resolves two companions next to it (a <code>VAE/</code>, <code>HighNoise/</code> or <code>LowNoise/</code> subfolder is fine):</p>
   <ul>
-    <li><strong>UMT5-XXL text encoder</strong> — prompt → conditioning (<code>--video-text-encoder</code> / <code>TS_WAN_TE</code>). Released from VRAM before the denoise starts.</li>
-    <li><strong>Causal 3D video VAE</strong> — latent ↔ frames (<code>--video-vae</code> / <code>TS_WAN_VAE</code>). Which one is required is read off the DiT itself, not chosen by you: Wan 2.1 and A14B use <code>wan_2.1_vae</code>; TI2V-5B uses <code>Wan2.2_VAE</code>.</li>
-    <li><strong>The A14B second expert</strong> — the two 14B experts must both be present. Put them in one directory, or in <code>HighNoise/</code> + <code>LowNoise/</code> subdirectories, and the loader pairs them from the file names (<code>--video-dit2</code> on the CLI or the server, or <code>TS_WAN_DIT2</code>, overrides; <code>--wan-dit2</code> is still accepted).</li>
+    <li><strong>UMT5-XXL text encoder</strong> — prompt → conditioning (<code>--video-text-encoder</code> / <code>TS_VIDEO_TEXT_ENCODER</code>). Released from VRAM before the denoise starts.</li>
+    <li><strong>Causal 3D video VAE</strong> — latent ↔ frames (<code>--video-vae</code> / <code>TS_VIDEO_VAE</code>). Which one is required is read off the DiT itself, not chosen by you: Wan 2.1 and A14B use <code>wan_2.1_vae</code>; TI2V-5B uses <code>Wan2.2_VAE</code>.</li>
+    <li><strong>The A14B second expert</strong> — the two 14B experts must both be present. Put them in one directory, or in <code>HighNoise/</code> + <code>LowNoise/</code> subdirectories, and the loader pairs them from the file names (<code>--video-dit2</code> on the CLI or the server, or <code>TS_VIDEO_DIT2</code>, overrides).</li>
   </ul>
   <div class="table-scroll">
   <table>

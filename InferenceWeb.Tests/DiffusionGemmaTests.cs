@@ -68,13 +68,13 @@ public class DiffusionGemmaTests
         return model;
     }
 
-    /// <summary>The backend these tests load: the GPU path on macOS (ggml_metal), ggml_cpu
-    /// elsewhere. TS_TEST_BACKEND overrides it (e.g. ggmlcuda on a Windows/Linux CUDA box, cpu
+    /// <summary>The backend these tests load: the GGML backend this process pins
+    /// (TS_TEST_GGML_BACKEND). TS_TEST_BACKEND overrides it (e.g. ggmlcuda on a Windows/Linux CUDA box, cpu
     /// for the pure-C# backend), mirroring TS_REPRO_BACKEND elsewhere. Shared with
     /// <see cref="DiffusionGemmaDeviceKvFactAttribute"/>, which decides skips at discovery.</summary>
     internal static BackendType TestBackend()
     {
-        BackendType backend = OperatingSystem.IsMacOS() ? BackendType.GgmlMetal : BackendType.GgmlCpu;
+        BackendType backend = TestGates.PinnedGgmlBackend;
         string backendEnv = Environment.GetEnvironmentVariable("TS_TEST_BACKEND");
         if (!string.IsNullOrWhiteSpace(backendEnv))
         {

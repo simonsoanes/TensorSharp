@@ -6,7 +6,7 @@
 |---|---|
 | Provider | Mistral AI |
 | GGUF architecture key | `mistral3`; also `llama` for Mistral Small 3.x files converted before llama.cpp had `mistral3` (see [llama-labelled files](#llama-labelled-files)) |
-| Source class | [`Mistral3Model`](../../TensorSharp.Models/Models/Mistral3/Mistral3Model.cs) (legacy per-seq) + [`Mistral3Model.BatchedForward.cs`](../../TensorSharp.Models/Models/Mistral3/Mistral3Model.BatchedForward.cs) (`IBatchedPagedModel`) |
+| Source class | [`Mistral3Model`](../../TensorSharp.Models/Models/Mistral3/Mistral3Model.cs) (single-sequence) + [`Mistral3Model.BatchedForward.cs`](../../TensorSharp.Models/Models/Mistral3/Mistral3Model.BatchedForward.cs) (`IBatchedPagedModel`) |
 | Vision encoder | [`Mistral3VisionEncoder`](../../TensorSharp.Models/Models/Mistral3/Mistral3VisionEncoder.cs) (Pixtral) |
 | Image processor | [`Mistral3ImageProcessor`](../../TensorSharp.Models/Models/Mistral3/Mistral3ImageProcessor.cs) |
 | Example models | Mistral-Small-3.1-24B-Instruct, Ministral-3-14B-Instruct |
@@ -443,7 +443,7 @@ Key properties:
 
 - **Default-on, no opt-in env var.** Continuous batching for Mistral 3 is
   always available; `--no-continuous-batching` (server and CLI) forces the
-  legacy per-seq KV-swap path for every model, including Mistral 3.
+  per-sequence KV-swap path for every model, including Mistral 3.
 - **Per-layer paged K/V buffers** of layout
   `[numBlocks * blockSize * numKvHeads * headDim]`, lazily grown by
   `EnsurePagedBuffersAllocated`. The "grow" path copies existing K/V into
@@ -460,19 +460,14 @@ Key properties:
 - **K/V scatter via `slotMapping`** writes fresh K and V into the layer's
   paged buffer at `blockId * blockSize + offset`. No KV-state extract /
   inject between sequences in the batched path.
-- **Three paged-attention kernels selectable via `TS_PAGED_ATTN_KERNEL`**:
-  - `native` (default): `TSGgml_PagedAttentionForward` —
-    C++ memcpy gather of K/V from the paged buffer per sequence, then
-    dispatch `ggml_flash_attn_ext` (the same fused Metal/CUDA flash
-    attention kernel the legacy per-seq path uses).
-  - `tensor`: `TensorPagedAttention.Forward` — C# Tensor-based gather plus
-    `Ops.AddmmBatch` + `GgmlBasicOps.AttentionSoftmaxWithSinks` per
-    sequence. Slower than `native` because of repeated GPU dispatches.
-  - `managed`: `ManagedPagedAttention.Forward` — pure-C# online-softmax
-    loop, parallelised over `(seq, head)`. Correctness fallback on any
-    backend.
+- **Paged attention by backend**:
+  - GGML backends: `TSGgml_PagedAttentionForward` — C++ memcpy gather of
+    K/V from the paged buffer per sequence, then `ggml_flash_attn_ext` (the
+    same fused Metal/CUDA flash attention kernel the per-sequence path uses).
+  - Other backends: `ManagedPagedAttention.Forward` — pure-C# online-softmax
+    loop, parallelised over `(seq, head)`.
 - **Vision-embedding injection** runs upstream of the per-layer loop
-  (same path as legacy forward). The multimodal injector serialises
+  (same path as the per-sequence forward). The multimodal injector serialises
   prompt preparation behind a lock for multimodal turns; text-only turns
   prepare in parallel.
 
@@ -502,9 +497,8 @@ has been building toward.
 shared six full prompt blocks across the four sequences
 (`reused=1536`, `hashedCached=3`), exercising the block-hash prefix
 cache end-to-end on a real GGUF. That run predates the Radix prefix cache,
-which is now the default reuse mode (Mistral 3 takes part as a page family);
-the block-hash sharing it measured is still selectable with
-`TS_PREFIX_CACHE_MODE=legacy`.
+which replaced the block-hash sharing it measured (Mistral 3 takes part as a
+page family).
 
 ## 12. Output parser and chat template
 

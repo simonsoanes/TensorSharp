@@ -48,7 +48,7 @@ dotnet run --project TensorSharp.TestMatrix -c Release
 dotnet run --project TensorSharp.TestMatrix -c Release -- \
   --backends ggml_metal,mlx \
   --features short_text,long_text,image \
-  --env-vars KV_CACHE_DTYPE,TS_QWEN35_BATCHED \
+  --env-vars KV_CACHE_DTYPE,TS_SCHED_DISABLE_BATCHED \
   --model-dir /Users/ZhongkaiFu/work/model \
   --results-dir results/dev \
   --report report-dev.md

@@ -29,19 +29,11 @@ namespace TensorSharp.Models
     ///
     /// The kernel writes the KV cache device-side and does NOT mirror it back to
     /// host memory per token, so <see cref="_kvCacheHostDirty"/> is set and any
-    /// host reader (KV snapshot, cache growth, the legacy per-op attention path)
+    /// host reader (KV snapshot, cache growth, the per-op attention path)
     /// goes through <see cref="EnsureKvCacheHostSynchronized"/> first.
     /// </summary>
     public partial class GptOssModel
     {
-        // TS_GPTOSS_MODEL_DECODE=0 falls back to the per-layer fused path.
-        private static readonly bool FusedModelDecodeEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_GPTOSS_MODEL_DECODE"), "0", StringComparison.Ordinal);
-
-        // TS_GPTOSS_MODEL_PREFILL=0 falls back to the per-layer prefill path.
-        private static readonly bool FusedModelPrefillEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_GPTOSS_MODEL_PREFILL"), "0", StringComparison.Ordinal);
-
         private GptOssLayerDecodeArgs[] _modelDecodeArgs;
         private bool _modelDecodeUnavailable;
         private bool _modelPrefillUnavailable;
@@ -116,7 +108,7 @@ namespace TensorSharp.Models
         /// </summary>
         private bool WillUseFusedModelDecode(int seqLen)
         {
-            if (!FusedModelDecodeEnabled || _modelDecodeUnavailable || IsTensorParallel)
+            if (_modelDecodeUnavailable || IsTensorParallel)
                 return false;
             // MoE CPU offload stays on this path: the native graph is segmented at
             // each offloaded layer's router so the host multiplies those experts
@@ -407,7 +399,7 @@ namespace TensorSharp.Models
         /// </summary>
         private bool WillUseFusedModelPrefill(int seqLen)
         {
-            if (!FusedModelPrefillEnabled || _modelPrefillUnavailable || _modelDecodeUnavailable || IsTensorParallel)
+            if (_modelPrefillUnavailable || _modelDecodeUnavailable || IsTensorParallel)
                 return false;
             if (seqLen <= 1 || !IsGgmlBackend || _layerStackedReady == 0)
                 return false;

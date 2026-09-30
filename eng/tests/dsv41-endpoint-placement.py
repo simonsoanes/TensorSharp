@@ -34,8 +34,7 @@ def main():
     lib = ct.CDLL(str(args.library.resolve()))
     ptr, integer = ct.c_void_p, ct.c_int
     signatures = {
-        "Dsv4LoadModel": ([ct.c_char_p] + [integer] * 5 + [ct.c_char_p], ptr),
-        "Dsv4LoadModelDspark": ([ct.c_char_p] + [integer] * 4 + [ct.c_char_p, integer, ct.c_char_p], ptr),
+        "Dsv4LoadModel": ([ct.c_char_p] + [integer] * 4 + [ct.c_char_p, integer, ct.c_char_p, integer], ptr),
         "Dsv4Free": ([ptr], None), "Dsv4ResetChecked": ([ptr], integer),
         "Dsv4Forward": ([ptr, ptr, integer, ptr], integer),
         "Dsv4ForwardSpec": ([ptr, ptr, integer, ptr], integer),
@@ -56,8 +55,7 @@ def main():
         fn.argtypes, fn.restype = parameters, result
         api[name] = fn
     settings = {"TS_DSV4_FA": "0", "TS_DSV4_GATHER": "0", "TS_DSV41_ENGRAM_WARM": "0",
-                "TS_DSV41_ENGRAM_THREADS": "2", "TS_DSV41_REWIND_CHECKPOINT": "1",
-                "TS_DSV41_RETAINED_CACHE": "0", "TS_DSV41_TP": "0"}
+                "TS_DSV41_ENGRAM_THREADS": "2", "TS_DSV41_REWIND_CHECKPOINT": "1"}
     original = {key: os.environ.get(key) for key in (*settings, "TS_DSV4_TEST_ENDPOINT_LAYOUT")}
     checks, runs = [], []
     report = dict(scope="Synthetic endpoint graph correctness; no trained performance claim",
@@ -111,12 +109,11 @@ def main():
                     os.environ.pop("TS_DSV4_TEST_ENDPOINT_LAYOUT", None)
                 else:
                     os.environ["TS_DSV4_TEST_ENDPOINT_LAYOUT"] = layout
-                os.environ["TS_DSV41_TP"] = str(tp)
                 gpus = 1 if layout is None else 2
                 label = f"{'dspark' if head else 'plain'}_{layout or 'single'}_tp{tp}_cpu{offload}"
                 path = str(args.fixture_dir / "deepseek41-fixture.gguf").encode()
-                handle = (api["Dsv4LoadModelDspark"](path, gpus, 256, 32, 2, str(args.head).encode(), offload, b"CUDA")
-                          if head else api["Dsv4LoadModel"](path, gpus, 256, 32, 2, offload, b"CUDA"))
+                handle = api["Dsv4LoadModel"](path, gpus, 256, 32, 2, str(args.head).encode() if head else None,
+                                              offload, b"CUDA", tp)
                 check(label + "_load", bool(handle))
                 vision = None
                 run = dict(name=label)

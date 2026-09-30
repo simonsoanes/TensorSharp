@@ -37,8 +37,9 @@ namespace TensorSharp.Models.WanVideo
     ///     for the TI2V-5B model), and</item>
     ///   <item>the UMT5-XXL text encoder (umt5-xxl-encoder GGUF).</item>
     /// </list>
-    /// Companions resolve next to the DiT GGUF or via the <c>TS_WAN_VAE</c> /
-    /// <c>TS_WAN_TE</c> / <c>TS_WAN_DIT2</c> environment variables. Not an autoregressive
+    /// Companions resolve next to the DiT GGUF or via the <c>TS_VIDEO_VAE</c> /
+    /// <c>TS_VIDEO_TEXT_ENCODER</c> / <c>TS_VIDEO_DIT2</c> environment variables (what
+    /// <c>--video-vae</c> / <c>--video-text-encoder</c> / <c>--video-dit2</c> set). Not an autoregressive
     /// text model; generation is driven through <see cref="GenerateVideo"/>.
     /// Text-to-video works on every variant; supplying <see cref="VideoGenerationParams.Image"/>
     /// generates image-to-video on the Wan 2.2 models (TI2V-5B / I2V-A14B).
@@ -154,7 +155,7 @@ namespace TensorSharp.Models.WanVideo
                 throw new FileNotFoundException(
                     "Wan2.2-I2V-A14B needs BOTH expert GGUFs (…HighNoise… and …LowNoise…). Put them in " +
                     "the same directory (or HighNoise/ + LowNoise/ subdirectories, the QuantStack layout), " +
-                    "or point TS_WAN_DIT2 at the second expert.");
+                    "or name the second expert with --video-dit2 (TS_VIDEO_DIT2).");
 
             // A14B: assign the loaded + companion GGUFs to their denoising phases by name.
             if (_dit2Path != null)
@@ -166,13 +167,13 @@ namespace TensorSharp.Models.WanVideo
             }
 
             bool wan22Vae = Variant == WanVariant.TI2V;
-            _vaePath = ResolveCompanion("TS_WAN_VAE", dir,
+            _vaePath = ResolveCompanion("TS_VIDEO_VAE", dir,
                 wan22Vae
                     ? new[] { "Wan2.2_VAE.safetensors", "wan2.2_vae.safetensors", Path.Combine("VAE", "Wan2.2_VAE.safetensors") }
                     : new[] { "wan_2.1_vae.safetensors", "wan2.1_vae.safetensors", Path.Combine("VAE", "wan_2.1_vae.safetensors") },
                 n => n.Contains("vae") && n.EndsWith(".safetensors")
                      && n.Contains("2.2") == wan22Vae);
-            _tePath = ResolveCompanion("TS_WAN_TE", dir,
+            _tePath = ResolveCompanion("TS_VIDEO_TEXT_ENCODER", dir,
                 new[] { "umt5-xxl-encoder-Q8_0.gguf" },
                 n => (n.Contains("umt5") || n.Contains("t5xxl") || n.Contains("t5-xxl")) && n.EndsWith(".gguf"));
 
@@ -189,7 +190,7 @@ namespace TensorSharp.Models.WanVideo
 
             if (_vaePath == null || _tePath == null)
                 throw new FileNotFoundException(
-                    "Wan video generation needs companion models next to the DiT GGUF (or via TS_WAN_VAE / TS_WAN_TE): " +
+                    "Wan video generation needs companion models next to the DiT GGUF (or via --video-vae / --video-text-encoder): " +
                     (wan22Vae ? "Wan2.2_VAE.safetensors (Wan2.2 TI2V VAE)" : "wan_2.1_vae.safetensors (Comfy-Org/Wan_2.1_ComfyUI_repackaged)") +
                     " and a umt5-xxl encoder GGUF (city96/umt5-xxl-encoder-gguf).");
         }
@@ -211,7 +212,7 @@ namespace TensorSharp.Models.WanVideo
         // and in sibling HighNoise/ / LowNoise/ directories (the QuantStack repo layout).
         private static string ResolveSecondExpert(string ggufPath, string dir)
         {
-            string env = Environment.GetEnvironmentVariable("TS_WAN_DIT2");
+            string env = Environment.GetEnvironmentVariable("TS_VIDEO_DIT2");
             if (!string.IsNullOrWhiteSpace(env) && File.Exists(env)) return env;
 
             string name = Path.GetFileName(ggufPath);

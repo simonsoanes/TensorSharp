@@ -51,14 +51,14 @@ class TeacherPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'SHA256'):
             PLAN.build_plan('latest')
 
-    def test_all_archived_requests_and_only_tp_environment_difference(self):
+    def test_all_archived_requests_and_only_the_tp_degree_differs(self):
         plan = PLAN.build_plan('2' * 64)
         self.assertEqual(plan['request_count'], 113)
         self.assertEqual([s['requests'] for s in plan['sources']], [60, 25, 25, 3])
         self.assertFalse(plan['qualified'])
         a, b = [copy.deepcopy(v) for v in plan['variants'].values()]
-        self.assertEqual(a['environment'].pop('TS_DSV41_TP'), '0')
-        self.assertEqual(b['environment'].pop('TS_DSV41_TP'), '7')
+        self.assertEqual((a['requested_expert_tp_ranks'], b['requested_expert_tp_ranks']), (0, 7))
+        self.assertNotIn('TS_DSV41_TP', a['environment'])
         self.assertEqual(a['environment'], b['environment'])
         self.assertEqual(a['native_load'], b['native_load'])
 

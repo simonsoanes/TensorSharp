@@ -23,7 +23,7 @@ static constexpr const char* kG4MoeVerifyKernel = "Gemma4 MoE model verify";
 // ============================================================================
 // Fused single-layer MoE decode (seqLen == 1): runs an ENTIRE Gemma 4 MoE
 // transformer block as one GGML graph on the device, eliminating the ~18-20
-// per-op C#→GGML dispatches the legacy TransformerBlock issues per MoE layer
+// per-op C#→GGML dispatches the per-op TransformerBlock issues per MoE layer
 // (each of which allocates+frees a Metal buffer and synchronises). Handles:
 //   attn_norm → QKV (fused or separate/mixed-quant) → QK/V-norm → RoPE →
 //   KV-cache write (circular for SWA) → flash_attn → O-proj →
@@ -666,8 +666,6 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecode(
         const int out_count = fold ? vocab_size : H;
 
         // ===== Persist / CUDA-graph capture setup (mirrors dense g_g4dc) =====
-        static const bool g4moe_persist = []{ const char* e = std::getenv("TS_GEMMA4_FD_PERSIST"); return e == nullptr || e[0] != '0'; }();
-
         std::vector<int> pwindow(num_layers, 0);          // padded window length per layer
         std::vector<int> pvalid(num_layers, 0);           // unmasked (valid) length per layer
         std::vector<std::int64_t> pwrite(num_layers, 0);  // set_rows write row per layer
@@ -680,8 +678,8 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecode(
         // (the driver executes the graph after this call returns). Vulkan's
         // set_rows / mul_mat_id / argsort cover everything this graph emits —
         // see the dense TSGgml_Gemma4ModelDecode for the full rationale.
-        bool can_persist = g4moe_persist &&
-            (g_backend_type == BACKEND_TYPE_CUDA || g_backend_type == BACKEND_TYPE_VULKAN);
+        bool can_persist =
+            g_backend_type == BACKEND_TYPE_CUDA || g_backend_type == BACKEND_TYPE_VULKAN;
         {
             auto roundup_stride = [](int v){ return ((v + kG4MoePersistKvStride - 1) / kG4MoePersistKvStride) * kG4MoePersistKvStride; };
             for (int l = 0; l < num_layers; l++)
@@ -700,7 +698,7 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecode(
                     pwindow[l] = std::min(csz, roundup_stride(totalSeqLen)); pvalid[l] = totalSeqLen;
                     pwrite[l] = position;
                     // A global cache that already overflowed can't be expressed as a
-                    // single padded window -> let the legacy per-token path handle it.
+                    // single padded window -> let the non-persist path handle it.
                     if (pvalid[l] > pwindow[l]) { can_persist = false; break; }
                 }
             }
@@ -811,7 +809,7 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecode(
             ctx = context.value;
         }
 
-        // Per-layer persist inputs (created in the build loop; null in legacy mode).
+        // Per-layer persist inputs (created in the build loop; null otherwise).
         std::vector<ggml_tensor*> layer_kv_index(num_layers, nullptr);
 
         // Tensor-parallel cut points: three per layer, one for each row-parallel
@@ -1347,7 +1345,7 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelDecode(
             bind_or_mark(final_norm_t, const_cast<void*>(final_norm_data), static_cast<std::size_t>(H) * sizeof(float), true);
         }
 
-        // Non-persist (legacy / TS_GEMMA4_FD_PERSIST=0) keeps the peak-packed gallocr
+        // Non-persist (Metal, CPU) keeps the peak-packed gallocr
         // (shared with the MoE verify): the bump allocator's footprint is the SUM of
         // every intermediate (~870 MB on the 26B-A4B), which on top of the ~16 GB
         // resident weights/KV would OOM; gallocr packs by tensor LIFETIME (peak).
@@ -1654,8 +1652,7 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelVerify(
         // [*, N] FFN/router/expert intermediates are tile-bounded rather than scaling
         // with N — this is what mirrors llama.cpp's n_ubatch and keeps the gallocr
         // peak (~the residual stream + K/V) under the ~1 GB headroom the 26B-A4B
-        // leaves on a 16 GB card. (The old per-FFN TS_G4_MOE_FFN_TILE loop is
-        // subsumed by the whole-layer tiling; the knob no longer applies.)
+        // leaves on a 16 GB card.
 
         for (int l = 0; l < num_layers; l++)
         {
@@ -1836,8 +1833,7 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelVerify(
         // into tiles bounds the mask to [kLen, qLen<=tile]; for LOCAL (SWA) layers
         // each tile reads only its sliding-window key slice (less compute too),
         // while GLOBAL (full-attention) layers read [0, qe) — bounded mask, same
-        // O(N^2) compute as llama. Both default-on; TS_G4_MOE_ATTN_TILED=0 reverts.
-        static const bool moe_attn_tiled = []{ const char* e = std::getenv("TS_G4_MOE_ATTN_TILED"); return e == nullptr || e[0] != '0'; }();
+        // O(N^2) compute as llama.
         static const int moe_attn_tile = []{ const char* e = std::getenv("TS_G4_MOE_ATTN_TILE"); int v = e ? std::atoi(e) : 0; return (v >= 256) ? v : 1024; }();
         // Unified causal/sliding-window tile mask. gQ is the ABSOLUTE query
         // position (start_pos + tile-local index); ki indexes the key slice that
@@ -1905,9 +1901,9 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelVerify(
             // chunk), otherwise once there are >= 3 query tiles.
             // Bidi multimodal spans need forward attention past a query tile's
             // key slice — keep the full-N attention there (mirrors the dense
-            // verify's swa_tiled fallback), including swaPrev: a media chunk after a
+            // verify's untiled fallback), including swaPrev: a media chunk after a
             // reused prefix attends [prev window ++ chunk] in one flash call.
-            const bool moe_use_tiled = moe_attn_tiled && is_except == nullptr
+            const bool moe_use_tiled = is_except == nullptr
                 && (swaPrev || (N > 2 * moe_attn_tile && (swaFresh || !isLocal)));
             const bool tileQ = moe_use_tiled && separate_qkv;
 
@@ -2312,7 +2308,7 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelVerify(
         // O proj + post-attn + residual + dense FFN + router + experts + concat) ≈ 56
         // nodes; budget for that plus the per-layer full-N K/V projection + the
         // optional swaPrev gather/concat/convert (~128 fixed headroom).
-        const int attnTilesPerLayer = moe_attn_tiled ? ((N + moe_attn_tile - 1) / moe_attn_tile) : 1;
+        const int attnTilesPerLayer = (N + moe_attn_tile - 1) / moe_attn_tile;
         const std::size_t graph_size = static_cast<std::size_t>(num_layers)
             * (128 + static_cast<std::size_t>(attnTilesPerLayer) * 56) + 512;
         pt.mark("build");

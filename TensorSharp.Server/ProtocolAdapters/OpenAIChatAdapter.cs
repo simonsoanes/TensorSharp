@@ -39,7 +39,6 @@ namespace TensorSharp.Server.ProtocolAdapters;
 public sealed partial class OpenAIChatAdapter
 {
     private readonly ModelService _svc;
-    private readonly InferenceQueue _queue;
     private readonly ServerHostingOptions _options;
     private readonly UploadStoragePolicy _uploads;
     private readonly SkillRegistry _skills;
@@ -49,7 +48,6 @@ public sealed partial class OpenAIChatAdapter
 
     public OpenAIChatAdapter(
         ModelService svc,
-        InferenceQueue queue,
         ServerHostingOptions options,
         UploadStoragePolicy uploads,
         SkillRegistry skills,
@@ -58,7 +56,6 @@ public sealed partial class OpenAIChatAdapter
         ILoggerFactory loggerFactory)
     {
         _svc = svc ?? throw new ArgumentNullException(nameof(svc));
-        _queue = queue ?? throw new ArgumentNullException(nameof(queue));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _uploads = uploads ?? throw new ArgumentNullException(nameof(uploads));
         _skills = skills ?? throw new ArgumentNullException(nameof(skills));
@@ -273,17 +270,15 @@ public sealed partial class OpenAIChatAdapter
                     skillPlan.Prompt.Catalog.Count, skillPlan.ToolsOffered, skillPlan.Prompt.ApproximateTokens);
         }
 
-        using var ticket = _queue.Enqueue(ctx.RequestAborted);
-
         if (stream)
         {
             await StreamCompletionAsync(ctx, requestId, modelName!, inferenceMessages, maxTokens,
-                samplingConfig, effectiveTools, openaiThink, responseFormat, ticket, skillPlan, openaiLogger, toolGrammar).ConfigureAwait(false);
+                samplingConfig, effectiveTools, openaiThink, responseFormat, skillPlan, openaiLogger, toolGrammar).ConfigureAwait(false);
         }
         else
         {
             await CompleteSyncAsync(ctx, requestId, modelName!, inferenceMessages, maxTokens,
-                samplingConfig, effectiveTools, openaiThink, responseFormat, ticket, skillPlan, openaiLogger, toolGrammar).ConfigureAwait(false);
+                samplingConfig, effectiveTools, openaiThink, responseFormat, skillPlan, openaiLogger, toolGrammar).ConfigureAwait(false);
         }
     }
 
@@ -302,22 +297,6 @@ public sealed partial class OpenAIChatAdapter
         {
             ctx.Response.StatusCode = 400;
             await ctx.Response.WriteAsJsonAsync(new { error = new { message = "response_format cannot be combined with think=true", type = "invalid_request_error" } }).ConfigureAwait(false);
-            return false;
-        }
-
-        if (openaiThink && delayedThinkingGrammar &&
-            Environment.GetEnvironmentVariable("TS_JSON_GRAMMAR") == "0")
-        {
-            ctx.Response.StatusCode = 400;
-            await ctx.Response.WriteAsJsonAsync(new
-            {
-                error = new
-                {
-                    message =
-                "response_format with think=true requires the delayed JSON grammar; TS_JSON_GRAMMAR=0 disables it.",
-                    type = "invalid_request_error"
-                }
-            }).ConfigureAwait(false);
             return false;
         }
 
@@ -347,13 +326,6 @@ public sealed partial class OpenAIChatAdapter
         return true;
     }
 
-    // Escape hatch to force the legacy "buffer the entire structured response
-    // before sending" behavior (e.g. if a downstream client depends on a
-    // single normalized json_object chunk). Off by default so json_object
-    // streams incrementally.
-    private static bool ForceStructuredStreamBuffer() =>
-        string.Equals(Environment.GetEnvironmentVariable("TS_STRUCTURED_STREAM_BUFFER"), "1", StringComparison.Ordinal);
-
     // Structured output (response_format json_object / json_schema) must
     // produce a JSON object, so constrain the FIRST sampled token to a
     // '{'-opening candidate — the same effect llama.cpp gets from its JSON
@@ -361,7 +333,8 @@ public sealed partial class OpenAIChatAdapter
     // the streaming filter suppresses that preamble, so clients saw
     // seconds of dead air before the first byte (TTFT looked like decode,
     // not prefill), and the buffered/normalized paths threw the preamble
-    // away anyway. TS_JSON_FORCE_OPEN=0 disables.
+    // away anyway. The grammar supersedes it; it applies when no grammar can
+    // be built for the requested format.
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, int[]>
         s_jsonOpenerTokens = [];
     private static readonly string[] s_createValueCallback = ["{", " {", "{\"", "{\n"];
@@ -378,10 +351,9 @@ public sealed partial class OpenAIChatAdapter
     /// and a tool call built on it failed. With a grammar the invalid tokens
     /// are simply not available to sample.
     /// <para>
-    /// Falls back to the old first-token nudge if a grammar cannot be built
-    /// (an exotic schema, say): a request that degrades to the previous
-    /// behaviour is far better than one that 500s. <c>TS_JSON_GRAMMAR=0</c>
-    /// forces that fallback for A/B testing.
+    /// Falls back to the first-token constraint if a grammar cannot be built
+    /// (an exotic schema, say): a request that degrades to that is far better
+    /// than one that 500s.
     /// </para>
     /// </remarks>
     private SamplingConfig? WithStructuredOutputConstraint(
@@ -400,40 +372,37 @@ public sealed partial class OpenAIChatAdapter
             return samplingConfig;
         }
 
-        if (!string.Equals(Environment.GetEnvironmentVariable("TS_JSON_GRAMMAR"), "0", StringComparison.Ordinal))
+        try
         {
-            try
-            {
-                var cache = responseFormat.Kind == StructuredOutputKind.JsonSchema
-                    ? TensorSharp.Runtime.Grammar.GrammarLibrary.ForJsonSchema(responseFormat.SchemaJson, tok)
-                    : TensorSharp.Runtime.Grammar.GrammarLibrary.ForJsonObject(tok);
+            var cache = responseFormat.Kind == StructuredOutputKind.JsonSchema
+                ? TensorSharp.Runtime.Grammar.GrammarLibrary.ForJsonSchema(responseFormat.SchemaJson, tok)
+                : TensorSharp.Runtime.Grammar.GrammarLibrary.ForJsonObject(tok);
 
-                var withGrammar = samplingConfig.Clone();
-                // One constraint per request: it holds the live parse
-                // position, so sharing it across sequences would let them
-                // advance each other's parser.
-                var constraint =
-                    TensorSharp.Runtime.Grammar.GrammarLibrary.NewConstraint(cache, tok);
-                // A model that reasons before it answers must be allowed to
-                // do so: enforcing the schema from token 0 forbids its own
-                // channel header and it answers the shape instead of the
-                // question (see OutputParserFactory.GrammarActivationTrigger).
-                string? trigger = OutputParserFactory.GrammarActivationTrigger(_svc.Architecture, enableThinking);
-                if (trigger != null)
-                    constraint.ActivateAfter(trigger, skipLeadingWhitespace: true);
-                withGrammar.Grammar = constraint;
-                return withGrammar;
-            }
-            catch (Exception ex)
-            {
-                if (enableThinking && !string.IsNullOrEmpty(
-                    ChatProtocolRegistry.For(_svc.Architecture)?.ThinkingGrammarActivationTrigger))
-                    throw new InvalidOperationException("Cannot construct the delayed JSON grammar required for thinking output.", ex);
-                _loggerFactory.CreateLogger("TensorSharp.Server.OpenAI.StructuredOutput")
-                    .LogWarning(ex,
-                        "Could not build a grammar for {Kind}; falling back to the " +
-                        "first-token constraint.", responseFormat.Kind);
-            }
+            var withGrammar = samplingConfig.Clone();
+            // One constraint per request: it holds the live parse
+            // position, so sharing it across sequences would let them
+            // advance each other's parser.
+            var constraint =
+                TensorSharp.Runtime.Grammar.GrammarLibrary.NewConstraint(cache, tok);
+            // A model that reasons before it answers must be allowed to
+            // do so: enforcing the schema from token 0 forbids its own
+            // channel header and it answers the shape instead of the
+            // question (see OutputParserFactory.GrammarActivationTrigger).
+            string? trigger = OutputParserFactory.GrammarActivationTrigger(_svc.Architecture, enableThinking);
+            if (trigger != null)
+                constraint.ActivateAfter(trigger, skipLeadingWhitespace: true);
+            withGrammar.Grammar = constraint;
+            return withGrammar;
+        }
+        catch (Exception ex)
+        {
+            if (enableThinking && !string.IsNullOrEmpty(
+                ChatProtocolRegistry.For(_svc.Architecture)?.ThinkingGrammarActivationTrigger))
+                throw new InvalidOperationException("Cannot construct the delayed JSON grammar required for thinking output.", ex);
+            _loggerFactory.CreateLogger("TensorSharp.Server.OpenAI.StructuredOutput")
+                .LogWarning(ex,
+                    "Could not build a grammar for {Kind}; falling back to the " +
+                    "first-token constraint.", responseFormat.Kind);
         }
 
         return WithJsonFirstTokenConstraint(samplingConfig, responseFormat);
@@ -443,8 +412,6 @@ public sealed partial class OpenAIChatAdapter
         SamplingConfig samplingConfig, StructuredOutputFormat responseFormat)
     {
         if (responseFormat == null || samplingConfig == null)
-            return samplingConfig;
-        if (string.Equals(Environment.GetEnvironmentVariable("TS_JSON_FORCE_OPEN"), "0", StringComparison.Ordinal))
             return samplingConfig;
         var tokenizer = _svc.Model?.Tokenizer;
         if (tokenizer == null)
@@ -492,7 +459,6 @@ public sealed partial class OpenAIChatAdapter
         List<ToolFunction>? openaiTools,
         bool openaiThink,
         StructuredOutputFormat? responseFormat,
-        QueueTicket ticket,
         SkillRequestPlan? skillPlan,
         ILogger skillLogger,
         TensorSharp.Runtime.Grammar.DeepSeek41ToolGrammar? toolGrammar)
@@ -501,28 +467,12 @@ public sealed partial class OpenAIChatAdapter
         // can be schema-normalized before anything is sent to the client. Plain
         // json_object streams incrementally like a normal completion (this is
         // what OpenAI does too) so its time-to-first-token reflects prefill
-        // latency instead of the full decode. TS_STRUCTURED_STREAM_BUFFER=1
-        // restores the legacy buffer-everything behavior for both kinds.
+        // latency instead of the full decode.
         bool bufferForStructured = responseFormat != null
-            && (responseFormat.Kind == StructuredOutputKind.JsonSchema
-                || ForceStructuredStreamBuffer());
+            && responseFormat.Kind == StructuredOutputKind.JsonSchema;
 
         if (!bufferForStructured)
-        {
             SseWriter.ApplyHeaders(ctx.Response);
-
-            while (!ticket.IsReady)
-            {
-                await SseWriter.WriteEventAsync(ctx.Response,
-                    OpenAIResponseFactory.QueueChunk(requestId, modelName, ticket.Position, _queue.PendingCount),
-                    ctx.RequestAborted).ConfigureAwait(false);
-                await ticket.WaitAsync(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
-            }
-        }
-        else
-        {
-            await ticket.WaitUntilReadyAsync().ConfigureAwait(false);
-        }
 
         if (!HostedModelGuard.TryEnsureHostedModelLoaded(_svc, modelName,
                 _options.StartupModelPath, _options.StartupMmProjPath, _options.DefaultBackend, out string loadError))
@@ -796,13 +746,10 @@ public sealed partial class OpenAIChatAdapter
         List<ToolFunction>? openaiTools,
         bool openaiThink,
         StructuredOutputFormat? responseFormat,
-        QueueTicket ticket,
         SkillRequestPlan? skillPlan,
         ILogger skillLogger,
         Runtime.Grammar.DeepSeek41ToolGrammar? toolGrammar)
     {
-        await ticket.WaitUntilReadyAsync().ConfigureAwait(false);
-
         if (!HostedModelGuard.TryEnsureHostedModelLoaded(_svc, modelName,
                 _options.StartupModelPath, _options.StartupMmProjPath, _options.DefaultBackend, out string loadError))
         {

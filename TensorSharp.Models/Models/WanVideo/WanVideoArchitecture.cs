@@ -98,7 +98,6 @@ namespace TensorSharp.Models.WanVideo
                 }
             }
             catch (DllNotFoundException) { /* managed-only host; nothing to configure */ }
-            catch (EntryPointNotFoundException) { /* older GgmlOps without the setter */ }
         }
     }
 }

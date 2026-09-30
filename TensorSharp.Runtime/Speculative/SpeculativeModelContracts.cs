@@ -229,49 +229,6 @@ namespace TensorSharp.Runtime.Speculative
         void SpecRewindCache(int length);
     }
 
-    /// <summary>
-    /// Layer 1, batched variant: serving the speculative TRUNK passes through
-    /// the batched paged path (paged KV via slot mapping, per-slot recurrent
-    /// state) instead of the single live linear cache. This is the
-    /// high-throughput option: the trunk runs on the same kernels as the
-    /// non-speculative batched baseline, composes with prefix caching, and
-    /// transitions gracefully to/from concurrent batches (the sequence's K/V
-    /// always lives in paged storage). A learned draft head itself still runs
-    /// on the linear cache at the draft layer - it is one decoder block whose
-    /// state is private to the speculative context.
-    /// </summary>
-    public interface IBatchedSpeculativeTarget : ISpeculativeTarget
-    {
-        /// <summary>True when the loaded model/backend can serve speculative
-        /// trunk passes through its batched paged path.</summary>
-        bool SupportsBatchedSpecTrunk { get; }
-
-        /// <summary>
-        /// Trunk forward of <paramref name="tokens"/> for ONE sequence through
-        /// the batched paged path. <paramref name="startPos"/> must equal
-        /// <c>seq.NumComputedTokens</c> (the caller advances the sequence only
-        /// after the step completes); the sequence's block table must already
-        /// cover <c>startPos + tokens.Length</c> positions. Captures per-row
-        /// post-final-norm hidden states into <paramref name="hAllOut"/>
-        /// (n*featureSize floats; may be null) and logits into
-        /// <paramref name="logitsOut"/> (n*vocab floats when
-        /// <paramref name="allLogitsRows"/>, else vocab floats for the last row).
-        /// </summary>
-        void SpecForwardBatched(SequenceState seq, int[] tokens, int startPos,
-            float[]? hAllOut, float[] logitsOut, bool allLogitsRows);
-
-        /// <summary>Snapshot the per-slot recurrent (GDN/SSM) state of
-        /// <paramref name="seq"/> before a verify batch.</summary>
-        void SpecSnapshotRecurrentStateSlots(SequenceState seq);
-
-        /// <summary>Restore the per-slot recurrent state captured by
-        /// <see cref="SpecSnapshotRecurrentStateSlots"/>. Paged attention KV
-        /// needs no rewind: reads are bounded by the per-pass sequence length
-        /// and rejected slots are overwritten by the kept-prefix re-forward
-        /// and subsequent steps.</summary>
-        void SpecRestoreRecurrentStateSlots(SequenceState seq);
-    }
-
     /// <summary>How a learned draft head proposes tokens - the one fact the
     /// factory needs to pick the matching <see cref="ISpeculator"/>.</summary>
     public enum DraftHeadKind
@@ -398,8 +355,4 @@ namespace TensorSharp.Runtime.Speculative
     /// <summary>Convenience alias for the common case: a model that is its own
     /// speculative target AND ships its own draft head.</summary>
     public interface ISpeculativeModel : ISpeculativeTarget, IDraftHead { }
-
-    /// <summary>Convenience alias for a model whose speculative trunk can also
-    /// run through the batched paged path.</summary>
-    public interface IBatchedSpeculativeModel : IBatchedSpeculativeTarget, ISpeculativeModel { }
 }

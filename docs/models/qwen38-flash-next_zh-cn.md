@@ -15,9 +15,9 @@ PLE n-gram 嵌入块、×4 hyper-connection 流以及 512 专家的 MoE。GGUF �
 
 在 GGML 后端上，整个 token（几乎）只跑一张图——嵌入、PLE（在图内）、全部 48 层、
 最后的 mixer 以及 LM head——并配一个按形状索引的已捕获图缓存
-（`TS_Q4E_TOKEN_GRAPH=0` 回退到逐层融合 kernel，后者再逐算子回退）。视觉沿用
+（span 放弃时改走逐层融合 kernel，后者再逐算子回退）。视觉沿用
 Qwen3.5-VL 塔，位置用 (T,H,W) IMRoPE；支持多图与多轮图像会话，并在轮次之间复用
-KV（GDN 递归无法回退，因此只有当新 prompt **恰好扩展**已缓存前缀时才复用；见[保留前缀复用](#保留前缀复用)）。在默认的 radix 前缀缓存（`TS_PREFIX_CACHE_MODE=tree`）下，这种复用止于会话中第一个图像或视频 span：该系列尚未声明可跨媒体 span 复用（它保存了一段 M-RoPE 缓存间隙，目前还没有参照位置测试覆盖）。由于该系列只能从长度与匹配长度完全一致的 holder 或检查点续接，之后的轮次最多复用附件之前已存储的检查点（通常是系统提示词），其余部分重新 prefill。`TS_PREFIX_CACHE_MODE=legacy` 选择旧的保留 holder 匹配，这一限制对它不适用。
+KV（GDN 递归无法回退，因此只有当新 prompt **恰好扩展**已缓存前缀时才复用；见[保留前缀复用](#保留前缀复用)）。在 radix 前缀缓存中，这种复用止于会话中第一个图像或视频 span：该系列尚未声明可跨媒体 span 复用（它保存了一段 M-RoPE 缓存间隙，目前还没有参照位置测试覆盖）。由于该系列只能从长度与匹配长度完全一致的 holder 或检查点续接，之后的轮次最多复用附件之前已存储的检查点（通常是系统提示词），其余部分重新 prefill。
 
 思考模式可以开启或关闭。关闭时，助手轮次以已发布模板输出的闭合空块 `<think>\n\n</think>` 开头，重放历史时也保留这一确切后缀，因此缓存前缀仍能匹配。
 
@@ -113,6 +113,10 @@ MP4、WebM 或 MOV data URI（不会抓取远程 URL）：
 完整 checkpoint 的检查是 `benchmarks/engine_comparison/validate_deepseek41_media.py` 的
 `video_order` / `video_timestamp` 场景，对象是挂了 `mmproj-BF16.gguf` 的 Qwen3.8 服务。
 
+## 思考预算
+
+开启思考时，思考内容一旦达到 `TS_THINKING_BUDGET`（`max_tokens` 不小于 512 时默认为其 75%），服务端和交互式 CLI 都会闭合思考块，答案随后在原 `max_tokens` 内生成。`</think>` 是单个训练过的 token（248069），宿主会先写入 Qwen 官方发布的交接句（"Considering the limited time by the user, I have to give the solution based on the thinking directly now."）。2026-09-29 之前该系列没有闭合 token，思考达到预算的轮次会以**空答案**结束（`finish_reason` 为 `thinking_budget`）：在 4x A40（`--tp 4` 与 `--layer-split 4`）上以 `max_tokens` 2000 运行四个并发的三轮会话，通过 0/4，失败的都是空答案轮次。加入交接句后，同样的 `--tp 4` 运行通过 4/4：交接句闭合了四个轮次，每一轮都有答案，每个会话都复用了上一轮（第 3 轮复用 1591-3509 个提示 token 中的 1564-3482 个）。
+
 ## 连续批处理
 
 并发请求通过**逐序列状态持有者**（per-sequence state holders）来服务：每个在飞请求
@@ -145,17 +149,18 @@ MP4、WebM 或 MOV data URI（不会抓取远程 URL）：
   拒绝执行，而不是拷贝陈旧的主机种子。
 - 复用**仅限精确前缀**（`IExactFusedCacheReuse`）：新 prompt 没有逐 token 复现到最后一个的 holder
   不是它的延续，任何部分匹配都会重新 prefill。
-- 保留的会话与检查点共用一个预算 `TS_Q4E_RETAINED_CACHE_MB`（默认 4096，并受实测内存余量限制；
-  `0` 或无法解析的值会拒绝所有保留）。在默认的 radix 前缀缓存下，保留与驱逐由前缀树负责，这个预算只会拒绝放不下的
-  holder（只报告一次）；使用 `TS_PREFIX_CACHE_MODE=legacy` 时，模型会先驱逐最早保留的会话。
-  `TS_Q4E_RETAINED_CACHE=0` 关闭该功能。
+- 保留的会话与检查点共用一个预算 `TS_Q4E_RETAINED_CACHE_MB`（受实测内存余量限制；
+  `0` 或无法解析的值会拒绝所有保留）。未设置时，预算为实测余量的一半（与 Qwen 3.5 对空闲
+  holder 采用的规则相同），只有在无法测得余量时才使用 4096 MB。此前固定的 4096 MB 默认值在
+  4x A40 张量并行下只能容纳四个并发会话中的三个（1.6k token 时每个 holder 1318.6 MB，余量
+  15 GB），其中一个会话每一轮都要重新 prefill。radix 前缀缓存负责保留与驱逐，这个预算只会拒绝放不下的
+  holder（只报告一次）。
 - 它需要完整的 GGML token-span 路径（每一份逐序列状态都驻留在设备上并以 holder 为键），以及原生
   条目可以精确拷贝的 GDN 状态布局。保留在按层切分下可用；检查点在按层切分下被接受，在张量并行下
   被拒绝。
 
 证据（合成 fixture，不代表训练模型的验收或性能）：
-[`eng/validation/qwen38_mtp_followup/retained-cache-20260916`](../../eng/validation/qwen38_mtp_followup/retained-cache-20260916/README.md)
-——`Qwen4ExpRetainedCacheTests` / `Qwen4ExpRetainedCachePolicyTests` 覆盖保留 A/B/A、检查点克隆、投机重绑定、
+`Qwen4ExpRetainedCacheTests` / `Qwen4ExpRetainedCachePolicyTests` 覆盖保留 A/B/A、检查点克隆、投机重绑定、
 预算驱逐、缺失状态拒绝以及 QSA 首次/重置增长，并在 CUDA 上覆盖真实双 GPU 按层切分的检查点生命周期。
 所有关卡在 CPU 上都逐位一致。在单卡 CUDA 上，一次 4 token 的目标验证与 4 次单 token 前向逐位相同
 （`TeacherForcedTargetVerify_…`），以 2–4 为块提交的 32 个 teacher-forced token 在每一行上都与标量解码
@@ -163,8 +168,7 @@ MP4、WebM 或 MOV data URI（不会抓取远程 URL）：
 16 token 的 prefill 再接 4 个 token，在 CUDA 上与一次 20 token 的 prefill 并不逐位相同，因为 prefill 的
 kernel 按批宽度选择：`SharedPrefixChunking_…` 在 CUDA 上把差异上界设为 1e-2（实测 logits 相差 1.7e-4 到
 4.4e-4；它当初要抓的陈旧种子缺陷让 logits 偏移了 0.3155），并且只允许在 top-2 差值不超过实测差异两倍的
-近似平局处改变贪心结果
-（[`verify-row-kernels-20260917`](../../eng/validation/qwen38_mtp_followup/verify-row-kernels-20260917/README.md)）。
+近似平局处改变贪心结果（2026-09-17 在 A40 上实测）。
 
 ## 共享 MTP 头的投机解码
 
@@ -231,8 +235,6 @@ KV 状态相同，logits 仍与逐 token decode 不同。启用 CPU 路径后严
 （2,335–2,338 ms 对 2,324–2,359）不变。在 192 token 的代码复制流上端到端测量（每种 kernel 各 6 轮，所有输出
 都与普通贪心一致），MTP 投机为 83.2 tok/s，此前为 86.5（相对普通 decode 从 1.84 倍变为 1.69 倍）；n-gram 投机为
 73.8，此前为 79.5；普通 decode（49.1 对 47.0）与 prefill（830 对 804 tok/s）没有退化：精确性的代价由投机承担。
-证据以及逐断言诊断：
-[`verify-row-kernels-20260917`](../../eng/validation/qwen38_mtp_followup/verify-row-kernels-20260917/README.md)。
 
 ## 多 GPU
 

@@ -20,7 +20,7 @@
 using namespace tsg;
 
 // ============================================================================
-// TSGgml_Qwen35ModelVerify  --  the N-token sibling of TSGgml_Qwen35ModelDecode.
+// TSGgml_Qwen35ModelVerifyOwned  --  the N-token sibling of TSGgml_Qwen35ModelDecode.
 //
 // MTP speculative decoding verifies a window of (1 + draft) tokens in one trunk
 // pass. The per-op SpecForward fallback runs that pass op-by-op (~1 s/step on
@@ -42,8 +42,8 @@ using namespace tsg;
 // ============================================================================
 namespace
 {
-    // Persistent verify-graph cache (multi-entry, keyed by N + window stride). With
-    // TS_Q35_VERIFY_PERSIST (default ON) the per-(N,window) graph is built ONCE and
+    // Persistent verify-graph cache (multi-entry, keyed by N + window stride). The
+    // per-(N,window) graph is built ONCE and
     // reused, so subsequent verify steps of the same shape only upload the per-call
     // inputs (hidden / pos / kv_index / mask / GDN state) + recompute -> the
     // ~150-580 ms C++ build is amortized AND ggml-cuda can CUDA-graph-capture the
@@ -159,7 +159,7 @@ namespace
     // When a new entry would push the cached total past this budget, the least-
     // recently-used entries are evicted (their buffers freed) first. Default 1.5 GB
     // keeps the two hottest shapes (N=1 and the current draft N) plus a rollback or
-    // two resident; TS_Q35_VERIFY_CACHE_BUDGET_MB overrides (0 = unbounded/legacy).
+    // two resident; TS_Q35_VERIFY_CACHE_BUDGET_MB overrides (0 = unbounded).
     std::int64_t q35_verify_cache_budget_bytes()
     {
         static const std::int64_t budget = []{
@@ -472,7 +472,7 @@ namespace
         // 3D N-row set_rows (heads in ne2) faulting on cgraph reuse; replacing it with a
         // 2D set_rows PER HEAD (llama.cpp's proven KV-write shape) made reuse stable
         // (validated 252 reuses, no crash). Reuse: setup ~8 ms + compute ~12-20 ms vs
-        // ~61 ms non-persist build. TS_Q35_VERIFY_PERSIST=0 forces the rebuild path.
+        // ~61 ms non-persist build.
         constexpr const char* kQ35VerifyKernel = "Qwen3.5 model verify";
         // MoE CPU offload segments this graph, and the persist replay below
         // re-runs the cached graph as ONE submission — which would skip every
@@ -491,9 +491,11 @@ namespace
         // tensors after the fact and only a persisted graph still owns them; only in
         // host state mode, because resident mode updates the state in place; and only
         // when the caller asked for at least two (one is what the plain path already
-        // keeps). TS_Q35_VERIFY_SNAPSHOTS=0 forces the old snapshot/re-forward path.
+        // keeps). TS_Q35_VERIFY_SNAPSHOTS=0 forces the restore-and-re-forward path:
+        // it is the workaround for the open divergence of verifies wider than eight
+        // rows on ggml_cuda (docs/speculative_decoding.md), so it stays until that
+        // is fixed here.
         static const bool fv_snapshots_cfg = []{ const char* e = std::getenv("TS_Q35_VERIFY_SNAPSHOTS"); return e == nullptr || e[0] != '0'; }();
-        static const bool fv_persist_cfg = []{ const char* e = std::getenv("TS_Q35_VERIFY_PERSIST"); return e == nullptr || e[0] != '0'; }();
         // Multimodal MRoPE: per-axis positions (T/H/W/E axis-concatenated, [4N] I32)
         // route the attention RoPE through ggml_rope_multi (interleaved MRoPE, the
         // Qwen3-VL LLM rope). Text prompts keep the plain sequential NeoX rope.
@@ -516,17 +518,8 @@ namespace
         // TP always takes the non-persist path: the plan executes after this
         // call returns, so the context is parked in g_q35v_tp instead, and a
         // prefill-sized graph never repeats its exact shape anyway.
-        // num_layers == 1 is the MTP draft block. It was pinned to the non-persist
-        // path because its captured graph used to deadlock the stream on the third
-        // replay; TS_Q35_MTP_DRAFT_PERSIST=1 re-tests that on the current ggml,
-        // because rebuilding a graph per draft call costs ~3.7 ms of the 6.2 ms a
-        // draft step takes.
-        static const bool mtp_draft_persist = []{
-            const char* e = std::getenv("TS_Q35_MTP_DRAFT_PERSIST");
-            return e != nullptr && e[0] == '1';
-        }();
-        const bool fv_persist = fv_persist_cfg && (n_logits >= N) && !use_mrope
-            && (num_layers > 1 || mtp_draft_persist) && !tp_mode && !any_cpu_moe;
+        const bool fv_persist = (n_logits >= N) && !use_mrope
+            && num_layers > 1 && !tp_mode && !any_cpu_moe;
 
         const std::size_t convStateBytes = static_cast<std::size_t>(convDim) * conv_dim * sizeof(float);
         const std::size_t deltaStateBytes = static_cast<std::size_t>(head_k_dim) * head_v_dim * num_v_heads * sizeof(float);
@@ -1049,15 +1042,9 @@ namespace
         // gated-delta-net kernels rather than materializing them, and ggml-cuda
         // consumes the strides just as ggml-metal does. Doing the same here removes
         // ~170 CONT nodes and their copies from a 64-layer graph. Metal was already
-        // on this path; CUDA/Vulkan joined it after the outputs were checked
-        // byte-identical. TS_Q35_VERIFY_STRIDED_VIEWS=0 restores the materializing
-        // layout if a backend ever disagrees.
-        static const bool strided_views_cfg = []{
-            const char* e = std::getenv("TS_Q35_VERIFY_STRIDED_VIEWS");
-            return e == nullptr || e[0] != '0';
-        }();
-        const bool metal_strided_views = strided_views_cfg
-            && (g_backend_type == BACKEND_TYPE_METAL || g_backend_type == BACKEND_TYPE_CUDA);
+        // on this path; CUDA joined it after the outputs were checked byte-identical.
+        const bool metal_strided_views =
+            g_backend_type == BACKEND_TYPE_METAL || g_backend_type == BACKEND_TYPE_CUDA;
         std::vector<ggml_tensor*> capture_out(cap_count, nullptr);
         for (int l = 0; l < num_layers; l++)
         {
@@ -2332,43 +2319,6 @@ TSG_EXPORT int TSGgml_Qwen35ModelVerifyOwned(
     catch (...) { set_last_error("Unknown error in Qwen3.5 model verify."); return 0; }
 }
 
-// ABI-compatible owner-0 entry point retained for existing native consumers.
-// TensorSharp's managed Qwen35 model uses the Owned variant above.
-TSG_EXPORT int TSGgml_Qwen35ModelVerify(
-    const TSGgmlQwen35LayerDesc* layers, int num_layers,
-    void* hidden_data, int hidden_size, int start_pos, int num_tokens,
-    int num_heads, int num_kv_heads, int head_dim, int cache_size,
-    int rope_n_dims, int rope_mode, int kv_cache_type,
-    int conv_kernel, int head_k_dim, int head_v_dim, int num_k_heads, int num_v_heads,
-    float eps, float rope_base, float rope_freq_scale,
-    int num_experts, int num_experts_used, int expert_ff, int shared_ff,
-    int norm_topk, float expert_weights_scale,
-    void* logits_data, int vocab_size,
-    const void* lm_head_data, int lm_head_type, std::int64_t lm_head_ne0, std::int64_t lm_head_ne1, std::int64_t lm_head_bytes,
-    const void* final_norm_data, void* normed_out, int n_logit_rows,
-    const std::int32_t* mrope_pos, const std::int32_t* mrope_sections,
-    int tp_degree, void** tp_plan_out,
-    float* capture_data, const int* capture_layers, int capture_count,
-    int state_snapshots, int* state_snapshots_used, int device_state_current,
-    int defer_state_download)
-{
-    return TSGgml_Qwen35ModelVerifyOwned(
-        layers, num_layers, hidden_data, hidden_size, start_pos, num_tokens, /*rope_pos_delta=*/0,
-        num_heads, num_kv_heads, head_dim, cache_size,
-        rope_n_dims, rope_mode, kv_cache_type,
-        conv_kernel, head_k_dim, head_v_dim, num_k_heads, num_v_heads,
-        eps, rope_base, rope_freq_scale,
-        num_experts, num_experts_used, expert_ff, shared_ff,
-        norm_topk, expert_weights_scale,
-        logits_data, vocab_size,
-        lm_head_data, lm_head_type, lm_head_ne0, lm_head_ne1, lm_head_bytes,
-        final_norm_data, normed_out, n_logit_rows,
-        mrope_pos, mrope_sections, tp_degree, tp_plan_out,
-        capture_data, capture_layers, capture_count,
-        state_snapshots, state_snapshots_used, device_state_current,
-        defer_state_download, /*owner_id=*/0);
-}
-
 // Fetch ONE per-token recurrent-state snapshot from the verify that just ran.
 //
 // This is the whole point of the snapshots: a partially-rejected draft used to
@@ -2432,13 +2382,6 @@ TSG_EXPORT int TSGgml_Qwen35FetchStateSnapshotOwned(
     }
     catch (const std::exception& ex) { set_last_error(ex.what()); return 0; }
     catch (...) { set_last_error("Unknown error in Qwen3.5 state snapshot fetch."); return 0; }
-}
-
-TSG_EXPORT int TSGgml_Qwen35FetchStateSnapshot(
-    int slot, void** conv_out_arr, void** delta_out_arr, int num_recurrent_layers)
-{
-    return TSGgml_Qwen35FetchStateSnapshotOwned(
-        slot, conv_out_arr, delta_out_arr, num_recurrent_layers, /*owner_id=*/0);
 }
 
 namespace
@@ -2639,12 +2582,6 @@ TSG_EXPORT int TSGgml_Qwen35CommitStateSnapshotOwned(
     catch (...) { set_last_error("Unknown error in Qwen3.5 state commit."); return 0; }
 }
 
-TSG_EXPORT int TSGgml_Qwen35CommitStateSnapshot(int slot, int num_recurrent_layers)
-{
-    return TSGgml_Qwen35CommitStateSnapshotOwned(
-        slot, num_recurrent_layers, /*owner_id=*/0);
-}
-
 // Read the LIVE recurrent state back to the host. The device copy is authoritative
 // while a speculative session keeps committing snapshots into it; anything that has
 // to run the op-by-op recurrent path (a prefill chunk, an unsupported shape, a
@@ -2729,13 +2666,6 @@ TSG_EXPORT int TSGgml_Qwen35DrainDeviceStateOwned(
     catch (...) { set_last_error("Unknown error in Qwen3.5 state drain."); return 0; }
 }
 
-TSG_EXPORT int TSGgml_Qwen35DrainDeviceState(
-    void** conv_out_arr, void** delta_out_arr, int num_recurrent_layers)
-{
-    return TSGgml_Qwen35DrainDeviceStateOwned(
-        conv_out_arr, delta_out_arr, num_recurrent_layers, /*owner_id=*/0);
-}
-
 // Process-wide shutdown hook. Per-model teardown uses Qwen35ReleaseVerifyOwner
 // below so destroying model B cannot free model A's buffers or parked plans.
 TSG_EXPORT void TSGgml_Qwen35ReleaseVerifyTpGraphs()
@@ -2744,7 +2674,7 @@ TSG_EXPORT void TSGgml_Qwen35ReleaseVerifyTpGraphs()
     while (!g_q35v_owners.empty())
         release_qwen35_verify_owner(g_q35v_owners.begin()->first);
     // Entries should already have been released owner by owner. Also clear any
-    // orphan left by a failed/legacy owner-0 build before backend destruction.
+    // orphan left by a failed owner-0 build before backend destruction.
     for (auto& cache : g_q35vc) reset_q35v_cache_entry(cache);
 }
 

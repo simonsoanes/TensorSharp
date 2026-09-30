@@ -23,11 +23,13 @@ namespace TensorSharp.Models
 {
     public partial class GlmDsaModel
     {
-        private IntPtr _native = IntPtr.Zero;
+        /// <summary>The whole-model executor (native ggml, or the direct-CUDA engine); null on the
+        /// managed per-op path.</summary>
+        private IGlmExecutor _exec;
         private readonly object _nativeSync = new object();
 
-        /// <summary>True when this instance is driven by the native executor.</summary>
-        private bool UsesNativeExecutor => _native != IntPtr.Zero;
+        /// <summary>True when a whole-model executor drives this instance.</summary>
+        private bool UsesNativeExecutor => _exec != null;
 
         private static bool IsGgmlBackendType(BackendType backend) =>
             backend == BackendType.GgmlCuda || backend == BackendType.GgmlVulkan ||
@@ -70,16 +72,7 @@ namespace TensorSharp.Models
             // scan treats the request as a cap, so refuse an unrepresentable count.
             if (requested > 8)
                 throw new NotSupportedException("The native GLM executor supports at most 8 GPUs; reduce --tp or --layer-split.");
-            string raw = Environment.GetEnvironmentVariable("TS_GLM_NGPU");
-            if (string.IsNullOrWhiteSpace(raw))
-                return requested;
-            if (!int.TryParse(raw, out int count) || count < 0)
-                throw new ArgumentException("TS_GLM_NGPU must be a nonnegative integer (0 selects all visible GPUs).");
-            if (count > 8)
-                throw new NotSupportedException("TS_GLM_NGPU exceeds the native executor's limit of 8 GPUs.");
-            if (requested > 1 && count != requested)
-                throw new ArgumentException($"TS_GLM_NGPU={count} conflicts with the explicitly requested {requested} GPUs; unset it or use the same count.");
-            return count;
+            return requested;
         }
 
         private static bool NativeRequested(BackendType backend)
@@ -128,6 +121,7 @@ namespace TensorSharp.Models
         {
             // --tp shards weights; --layer-split only changes whole-layer placement.
             int tp = tpDegree > 1 ? tpDegree : 1;
+            _nativeTp = tp;
             int nGpu = ResolveNativeGpuCount(tpDegree, layerSplitDegree);
             int requested = Math.Max(tpDegree, layerSplitDegree);
             if (requested > 1 && backend is BackendType.GgmlCuda or BackendType.GgmlVulkan)
@@ -156,21 +150,22 @@ namespace TensorSharp.Models
             bool ctxIsHardLimit = !string.IsNullOrWhiteSpace(
                 Environment.GetEnvironmentVariable("MAX_CONTEXT"));
 
-            _native = GgmlGlmNative.LoadModel(ggufPath, nGpu, maxContext, nUbatch, nThreads,
+            IntPtr handle = GgmlGlmNative.LoadModel(ggufPath, nGpu, maxContext, nUbatch, nThreads,
                 ResolveCpuMoeLayers(), BackendRegistryName(backend), tp, ctxIsHardLimit,
                 NativeMtpRequested());
-            if (_native == IntPtr.Zero)
+            if (handle == IntPtr.Zero)
                 throw NativeLoadRefused("glm", ggufPath,
                     "TS_GLM_NATIVE=0 selects the per-op path instead of the native executor.");
+            _exec = new NativeGlmExecutor(handle);
 
-            _maxContextLength = GgmlGlmNative.CtxSize(_native);
+            _maxContextLength = _exec.ContextSize;
             // The native loader is the authority on whether the draft block
             // actually made it in: a trunk-only checkpoint, or a device that had
             // no room for the extra layer, both come back without one.
-            HasDraftHead = GgmlGlmNative.HasDraftHead(_native);
+            HasDraftHead = _exec.HasDraftHead;
             if (HasDraftHead)
                 _mtpLayer = _numTrunkLayers;
-            int vocab = GgmlGlmNative.VocabSize(_native);
+            int vocab = _exec.VocabSize;
             if (vocab > 0)
                 Config.VocabSize = vocab;
             _logitsBuffer = new float[Config.VocabSize];
@@ -182,9 +177,13 @@ namespace TensorSharp.Models
             {
                 if (_logitsBuffer == null || _logitsBuffer.Length != Config.VocabSize)
                     _logitsBuffer = new float[Config.VocabSize];
-                if (!GgmlGlmNative.Forward(_native, tokens, _logitsBuffer))
+                BeforeGraphCall();
+                bool ok;
+                try { ok = _exec.Forward(tokens, _logitsBuffer); }
+                finally { AfterGraphCall(); }
+                if (!ok)
                     throw new InvalidOperationException("glm-dsa native forward failed (see stderr).");
-                _cacheSeqLen = GgmlGlmNative.NPast(_native);
+                _cacheSeqLen = _exec.NPast;
                 return _logitsBuffer;
             }
         }
@@ -193,7 +192,7 @@ namespace TensorSharp.Models
         {
             lock (_nativeSync)
             {
-                if (!GgmlGlmNative.ResetChecked(_native))
+                if (!_exec.ResetChecked())
                     throw new InvalidOperationException("glm-dsa native reset failed; slot remains unusable.");
                 _cacheSeqLen = 0;
             }
@@ -216,7 +215,7 @@ namespace TensorSharp.Models
                 return base.TryTruncateKVCacheCore(tokenCount);
             lock (_nativeSync)
             {
-                if (!GgmlGlmNative.Rewind(_native, tokenCount))
+                if (!_exec.Rewind(tokenCount))
                     return false;
                 _cacheSeqLen = tokenCount;
                 return true;
@@ -272,11 +271,8 @@ namespace TensorSharp.Models
             VisionEncoder?.Dispose();
             lock (_nativeSync)
             {
-                if (_native != IntPtr.Zero)
-                {
-                    GgmlGlmNative.Free(_native);
-                    _native = IntPtr.Zero;
-                }
+                _exec?.Dispose();
+                _exec = null;
             }
 
             // The per-op path's caches are this model's own tensors; the base

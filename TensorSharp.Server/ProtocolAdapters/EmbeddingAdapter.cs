@@ -34,9 +34,8 @@ public sealed class EmbeddingAdapter : IDisposable, IAsyncDisposable
     public void Dispose() => _dispatcher.Dispose();
     public ValueTask DisposeAsync() => _dispatcher.DisposeAsync();
 
-    public Task OpenAIAsync(HttpContext context) => EmbedAsync(context, openAI: true, legacy: false);
-    public Task OllamaAsync(HttpContext context) => EmbedAsync(context, openAI: false, legacy: false);
-    public Task OllamaLegacyAsync(HttpContext context) => EmbedAsync(context, openAI: false, legacy: true);
+    public Task OpenAIAsync(HttpContext context) => EmbedAsync(context, openAI: true);
+    public Task OllamaAsync(HttpContext context) => EmbedAsync(context, openAI: false);
 
     public IResult ListModels() => Results.Json(new
     {
@@ -104,7 +103,7 @@ public sealed class EmbeddingAdapter : IDisposable, IAsyncDisposable
         }
     }
 
-    private async Task EmbedAsync(HttpContext context, bool openAI, bool legacy)
+    private async Task EmbedAsync(HttpContext context, bool openAI)
     {
         long started = Stopwatch.GetTimestamp();
         try
@@ -112,9 +111,8 @@ public sealed class EmbeddingAdapter : IDisposable, IAsyncDisposable
             using var document = await ReadBodyAsync(context).ConfigureAwait(false);
             JsonElement body = document.RootElement;
             ValidateModel(body);
-            string inputName = legacy ? "prompt" : "input";
-            if (!body.TryGetProperty(inputName, out JsonElement input))
-                throw Invalid($"{inputName} is required.", inputName);
+            if (!body.TryGetProperty("input", out JsonElement input))
+                throw Invalid("input is required.", "input");
             int dimensions = _model.Dimensions;
             if (body.TryGetProperty("dimensions", out JsonElement dimensionProperty)
                 && dimensionProperty.ValueKind != JsonValueKind.Null)
@@ -138,7 +136,7 @@ public sealed class EmbeddingAdapter : IDisposable, IAsyncDisposable
                     throw Invalid("truncate must be a boolean.", "truncate");
                 truncate = truncateProperty.GetBoolean();
             }
-            var inputs = ParseInputs(input, openAI, legacy, truncate, context);
+            var inputs = ParseInputs(input, openAI, truncate, context);
             EmbeddingBatchResult result = inputs.Count == 0
                 ? new EmbeddingBatchResult(Array.Empty<float[]>(), 0)
                 : await _dispatcher.EmbedAsync(inputs, context.RequestAborted).ConfigureAwait(false);
@@ -151,11 +149,6 @@ public sealed class EmbeddingAdapter : IDisposable, IAsyncDisposable
                     embedding = encoding == "base64" ? (object)EncodeBase64(vector) : vector });
                 await context.Response.WriteAsJsonAsync(new { @object = "list", data, model = _model.ModelName,
                     usage = new { prompt_tokens = result.PromptTokens, total_tokens = result.PromptTokens } },
-                    context.RequestAborted).ConfigureAwait(false);
-            }
-            else if (legacy)
-            {
-                await context.Response.WriteAsJsonAsync(new { embedding = embeddings.FirstOrDefault() ?? Array.Empty<float>() },
                     context.RequestAborted).ConfigureAwait(false);
             }
             else
@@ -245,7 +238,7 @@ public sealed class EmbeddingAdapter : IDisposable, IAsyncDisposable
         // Disposing the wrapper must leave ASP.NET's request stream open.
     }
 
-    private List<int[]> ParseInputs(JsonElement input, bool openAI, bool legacy, bool truncate, HttpContext context)
+    private List<int[]> ParseInputs(JsonElement input, bool openAI, bool truncate, HttpContext context)
     {
         var inputs = new List<int[]>();
         int totalTokens = 0;
@@ -293,7 +286,7 @@ public sealed class EmbeddingAdapter : IDisposable, IAsyncDisposable
                 return inputs; // Ollama's empty-input request keeps the resident model loaded.
             AddText(input);
         }
-        else if (!legacy && input.ValueKind == JsonValueKind.Array)
+        else if (input.ValueKind == JsonValueKind.Array)
         {
             int count = input.GetArrayLength();
             if (count == 0)
@@ -316,9 +309,9 @@ public sealed class EmbeddingAdapter : IDisposable, IAsyncDisposable
             }
         }
         else
-            throw Invalid(legacy ? "prompt must be a string." : openAI
+            throw Invalid(openAI
                 ? "input must be a string, string array, token ID array, or array of token ID arrays."
-                : "input must be a string or string array.", legacy ? "prompt" : "input");
+                : "input must be a string or string array.", "input");
         return inputs;
     }
 

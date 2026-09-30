@@ -50,17 +50,11 @@ public class HunyuanDenseServingTests : IDisposable
         RopeBase = 10000f,
     }.Write(Path.Combine(_dir, "tiny-hunyuan-dense.gguf"));
 
-    /// <summary>Managed CPU by default, so the portable suite needs no native library.
-    /// TS_TEST_GGML_BACKEND=cuda|metal|ggml_cpu runs the same contract on a GGML backend,
-    /// whose device-side tensor caches are what the invalidation after inject protects.</summary>
+    /// <summary>Managed CPU in the cpu lane, so the portable suite needs no native library;
+    /// a GPU lane (TS_TEST_GGML_BACKEND=cuda|metal|vulkan) runs the same contract on its GGML
+    /// backend, whose device-side tensor caches are what the invalidation after inject protects.</summary>
     private static BackendType Backend =>
-        (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "").Trim().ToLowerInvariant() switch
-        {
-            "cuda" or "ggml_cuda" => BackendType.GgmlCuda,
-            "metal" or "ggml_metal" => BackendType.GgmlMetal,
-            "ggml_cpu" => BackendType.GgmlCpu,
-            _ => BackendType.Cpu,
-        };
+        TestGates.PinnedGgmlBackend is BackendType.GgmlCpu ? BackendType.Cpu : TestGates.PinnedGgmlBackend;
 
     private static int ArgMax(float[] logits)
     {
@@ -112,15 +106,15 @@ public class HunyuanDenseServingTests : IDisposable
     [InlineData(false)]
     public async Task HunyuanDense_ConcurrentEngineRequests_MatchEachRequestServedAlone(bool batched)
     {
-        string previous = Environment.GetEnvironmentVariable("TS_HUNYUAN_BATCHED");
-        Environment.SetEnvironmentVariable("TS_HUNYUAN_BATCHED", batched ? null : "0");
+        string previous = Environment.GetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED");
+        Environment.SetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED", batched ? null : "1");
         try
         {
             await RunConcurrentEngineRequests(batched);
         }
         finally
         {
-            Environment.SetEnvironmentVariable("TS_HUNYUAN_BATCHED", previous);
+            Environment.SetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED", previous);
         }
     }
 
@@ -157,8 +151,10 @@ public class HunyuanDenseServingTests : IDisposable
 
         using var model = ModelBase.Create(path, Backend);
         // Batched: one paged ForwardBatch per step over every running sequence.
-        // Not batched: the K/V snapshot path swaps sequences through the linear cache.
-        Assert.Equal(batched, ((IBatchedPagedModel)model).BatchedForwardAvailable);
+        // Not batched (--no-continuous-batching): the K/V snapshot path swaps
+        // sequences through the linear cache.
+        Assert.True(((IBatchedPagedModel)model).BatchedForwardAvailable);
+        Assert.Equal(!batched, ExecutionOptions.FromEnvironment().BatchedPathDisabled);
         var cfg = new SchedulerConfig
         {
             MaxNumBatchedTokens = 256,
@@ -208,8 +204,8 @@ public class HunyuanDenseServingTests : IDisposable
     [InlineData("mistral3", true)]
     public async Task RepeatedLongPrompt_ReusesPrefixBlocks_AndMatchesTheFirstRun(string architecture, bool batched)
     {
-        string previous = Environment.GetEnvironmentVariable("TS_HUNYUAN_BATCHED");
-        Environment.SetEnvironmentVariable("TS_HUNYUAN_BATCHED", batched ? null : "0");
+        string previous = Environment.GetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED");
+        Environment.SetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED", batched ? null : "1");
         try
         {
             var builder = architecture == "mistral3"
@@ -259,7 +255,7 @@ public class HunyuanDenseServingTests : IDisposable
         }
         finally
         {
-            Environment.SetEnvironmentVariable("TS_HUNYUAN_BATCHED", previous);
+            Environment.SetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED", previous);
         }
     }
     /// <summary>
@@ -271,8 +267,8 @@ public class HunyuanDenseServingTests : IDisposable
     [Fact]
     public async Task RepeatedLongPrompt_InAnotherConversation_AdoptsOnlyThePublicPrefix()
     {
-        string previous = Environment.GetEnvironmentVariable("TS_HUNYUAN_BATCHED");
-        Environment.SetEnvironmentVariable("TS_HUNYUAN_BATCHED", null);
+        string previous = Environment.GetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED");
+        Environment.SetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED", null);
         try
         {
             using var model = ModelBase.Create(BuildModel(), Backend);
@@ -311,7 +307,7 @@ public class HunyuanDenseServingTests : IDisposable
         }
         finally
         {
-            Environment.SetEnvironmentVariable("TS_HUNYUAN_BATCHED", previous);
+            Environment.SetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED", previous);
         }
     }
 }

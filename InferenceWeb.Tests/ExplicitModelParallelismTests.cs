@@ -12,8 +12,8 @@ public sealed class ExplicitModelParallelismTests : IDisposable
 
     public ExplicitModelParallelismTests()
     {
-        foreach (string name in new[] { "TS_DSV41_TP", "TS_DSV4_NGPU", "TS_GLM_NGPU", "TS_GLM_NATIVE",
-            "TS_GLM_TP_SHARD", "TENSORSHARP_TP_DEVICES", "TENSORSHARP_LAYER_SPLIT_DEVICES" })
+        foreach (string name in new[] { "TS_GLM_NATIVE", "TS_GLM_TP_SHARD", "TENSORSHARP_TP_DEVICES",
+            "TENSORSHARP_LAYER_SPLIT_DEVICES" })
             _env.Set(name, null);
     }
 
@@ -67,25 +67,16 @@ public sealed class ExplicitModelParallelismTests : IDisposable
     {
         Assert.Equal(2, Resolve("deepseek41", BackendType.GgmlCuda, 2, 1, out int split));
         Assert.Equal(1, split);
-        _env.Set("TS_DSV41_TP", "2");
-        Assert.Equal(2, Resolve("deepseek41", BackendType.GgmlCuda, 2, 1, out split));
-        Assert.Equal(1, split);
-        Assert.Throws<ArgumentException>(() => new DeepSeek41Model("not-opened.gguf", BackendType.GgmlCuda, layerSplitDegree: 2));
     }
 
     [Fact]
-    public void NativeGpuOverridesCannotChangeExplicitDeviceCount()
+    public void NativeGpuCountIsTheExplicitDegree()
     {
         Assert.Equal(1, GlmDsaModel.ResolveNativeGpuCount(1, 1));
-        Assert.Equal(1, DeepSeek4Model.ResolveNativeGpuCount(1));
-        _env.Set("TS_GLM_NGPU", "1");
-        Assert.Throws<ArgumentException>(() => GlmDsaModel.ResolveNativeGpuCount(1, 2));
-        Assert.Throws<ArgumentException>(() => GlmDsaModel.ResolveNativeGpuCount(2, 1));
-        _env.Set("TS_DSV4_NGPU", "1");
-        Assert.Throws<ArgumentException>(() => DeepSeek4Model.ResolveNativeGpuCount(2));
-        _env.Set("TS_GLM_NGPU", "2");
         Assert.Equal(2, GlmDsaModel.ResolveNativeGpuCount(1, 2));
         Assert.Equal(2, GlmDsaModel.ResolveNativeGpuCount(2, 1));
+        Assert.Equal(1, DeepSeek4Model.ResolveNativeGpuCount(1));
+        Assert.Equal(2, DeepSeek4Model.ResolveNativeGpuCount(2));
     }
 
     [Fact]
@@ -94,10 +85,6 @@ public sealed class ExplicitModelParallelismTests : IDisposable
         Assert.Throws<NotSupportedException>(() => GlmDsaModel.ResolveNativeGpuCount(1, 9));
         Assert.Throws<NotSupportedException>(() => GlmDsaModel.ResolveNativeGpuCount(9, 1));
         Assert.Throws<NotSupportedException>(() => DeepSeek4Model.ResolveNativeGpuCount(9));
-        _env.Set("TS_GLM_NGPU", "9");
-        _env.Set("TS_DSV4_NGPU", "9");
-        Assert.Throws<NotSupportedException>(() => GlmDsaModel.ResolveNativeGpuCount(1, 1));
-        Assert.Throws<NotSupportedException>(() => DeepSeek4Model.ResolveNativeGpuCount(1));
     }
 
     [Theory]
@@ -105,38 +92,15 @@ public sealed class ExplicitModelParallelismTests : IDisposable
     [InlineData(BackendType.Cuda, null)]
     [InlineData(BackendType.GgmlCpu, "0")]
     [InlineData(BackendType.GgmlCuda, "0")]
-    public void NativeGpuLimitsAndOverridesDoNotConstrainManagedGlmPaths(BackendType backend, string? native)
+    public void NativeGpuLimitsDoNotConstrainManagedGlmPaths(BackendType backend, string? native)
     {
         _env.Set("TS_GLM_NATIVE", native);
-        _env.Set("TS_GLM_NGPU", "invalid-native-only-setting");
         var validate = typeof(GlmDsaModel).GetMethod("ValidateParallelism",
             System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
         Assert.NotNull(validate);
         // The native executor caps ranks at eight. The managed path must reach
-        // its own topology validation and ignore settings belonging to native.
+        // its own topology validation instead.
         Assert.Equal(backend, validate.Invoke(null, new object[] { backend, 9, null, 1 }));
-    }
-
-    [Theory]
-    [InlineData("invalid-native-only-setting", typeof(ArgumentException))]
-    [InlineData("9", typeof(NotSupportedException))]
-    public void NativeGpuOverridesDoNotConstrainManagedDeepSeekCpu(string setting, Type nativeError)
-    {
-        _env.Set("TS_DSV4_NGPU", setting);
-        var validate = typeof(DeepSeek4Model).GetMethod("ValidateParallelism",
-            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
-        Assert.NotNull(validate);
-        // Exercise the constructor's pre-load validation without allocating a
-        // backend: only the pure C# executor ignores this native placement knob.
-        Assert.Equal(BackendType.Cpu,
-            validate.Invoke(null, new object[] { BackendType.Cpu, 1, null, 1 }));
-        foreach (var backend in new[] { BackendType.Cuda, BackendType.GgmlCuda,
-            BackendType.GgmlVulkan, BackendType.GgmlCpu })
-        {
-            var error = Assert.Throws<System.Reflection.TargetInvocationException>(() =>
-                validate.Invoke(null, new object[] { backend, 1, null, 1 }));
-            Assert.IsType(nativeError, error.InnerException);
-        }
     }
 
     [Fact]

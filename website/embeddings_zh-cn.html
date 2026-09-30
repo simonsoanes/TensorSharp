@@ -42,13 +42,9 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
 
 curl http://127.0.0.1:5000/api/embed \
   -H &#x27;Content-Type: application/json&#x27; \
-  -d &#x27;{&quot;model&quot;:&quot;snowflake-arctic-embed-l-v2.0-q8_0&quot;,&quot;input&quot;:[&quot;query: read a file&quot;,&quot;open a document&quot;],&quot;truncate&quot;:false}&#x27;
-
-curl http://127.0.0.1:5000/api/embeddings \
-  -H &#x27;Content-Type: application/json&#x27; \
-  -d &#x27;{&quot;model&quot;:&quot;snowflake-arctic-embed-l-v2.0-q8_0&quot;,&quot;prompt&quot;:&quot;query: read a file&quot;}&#x27;</code></pre>
+  -d &#x27;{&quot;model&quot;:&quot;snowflake-arctic-embed-l-v2.0-q8_0&quot;,&quot;input&quot;:[&quot;query: read a file&quot;,&quot;open a document&quot;],&quot;truncate&quot;:false}&#x27;</code></pre>
   <p>OpenAI 的 <code>input</code> 接受字符串、字符串数组、一个 token ID 数组或 token ID 数组的数组；token 输入须已包含本模型的特殊 token。<code>encoding_format</code> 为 <code>float</code> 或 <code>base64</code>（小端 float32）。返回索引、向量与 token 用量。每次请求最多 2048 条输入、总计 262144 个 token。嵌入及模型信息查询的 JSON 请求体上限为 16 MiB，超限返回 HTTP 413。</p>
-  <p>OpenAI 拒绝超长输入。Ollama <code>/api/embed</code> 接受字符串或字符串数组，<code>truncate</code> 默认 <code>true</code>，截断保留末尾特殊 token；设为 <code>false</code> 则报错。响应包括 <code>embeddings</code>、纳秒计时和 <code>prompt_eval_count</code>。旧版 <code>/api/embeddings</code> 使用 <code>prompt</code>，返回单个 <code>embedding</code>。</p>
+  <p>OpenAI 拒绝超长输入。Ollama <code>/api/embed</code> 接受字符串或字符串数组，<code>truncate</code> 默认 <code>true</code>，截断保留末尾特殊 token；设为 <code>false</code> 则报错。响应包括 <code>embeddings</code>、纳秒计时和 <code>prompt_eval_count</code>。</p>
   <p>并发调用按 FIFO 顺序合并已等待的请求，每次编码器调用最多 64 条序列与 4096 个 token。第一个请求立即执行，不人为等待；更大的完整请求单独执行。每个调用者保留自己的结果顺序与选项；取消一个调用者不影响仍需结果的其他调用者。见<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/embeddings_zh-cn.md#并发请求">请求调度约定</a>。</p>
   <h2 id="quality">检索质量与性能</h2>
   <p>Snowflake 查询添加 <code>query: </code> 前缀，文档不添加。向量作 L2 归一化，可直接用点积计算余弦相似度。<code>dimensions</code> 截取前若干维后重新归一化；Snowflake 的 Matryoshka 训练支持缩减到 256 维，任意缩减其他模型的维数可能降低质量。MiniLM 上游默认句长短于此 GGUF 的 512 位置容量。代码宜按函数/类边界分块，换模型或分块策略后重建索引。</p>

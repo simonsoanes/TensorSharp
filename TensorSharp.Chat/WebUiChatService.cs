@@ -230,18 +230,11 @@ namespace TensorSharp.Chat
         /// <c>GET /api/queue/status</c>. Real concurrency lives in the per-model
         /// inference engine; its live counters are peeked without side effects
         /// (nothing here may construct the engine), so before a model is loaded or a
-        /// request has run everything reads idle. <paramref name="legacyTotalProcessed"/>
-        /// is what <c>total_processed</c> reports until the engine has completed
-        /// anything: the Server passes its deprecated queue's ticket count so the field
-        /// keeps the value it always had; a host without that shim passes nothing.
+        /// request has run everything reads idle.
         /// </summary>
-        public object GetQueueStatus(long legacyTotalProcessed = 0)
+        public object GetQueueStatus()
         {
             _svc.EngineHost.TryGetLiveStats(out int processing, out int waiting, out long totalCompleted);
-
-            // total_processed kept for API compatibility; sourced from the engine's
-            // completed count (per loaded model) rather than the legacy queue.
-            long totalProcessed = totalCompleted != 0 ? totalCompleted : legacyTotalProcessed;
 
             return new
             {
@@ -250,7 +243,8 @@ namespace TensorSharp.Chat
                 processing,
                 // Requests admitted to the engine but still waiting for a batch slot.
                 pending_requests = waiting,
-                total_processed = totalProcessed,
+                // Requests the loaded model's engine has completed.
+                total_processed = totalCompleted,
             };
         }
 
@@ -839,7 +833,7 @@ namespace TensorSharp.Chat
                 }
 
                 // Scanned / image-only PDF (no selectable text layer).
-                // PdfPageImageExtractor's legacy API opens a byte array. Keep that path
+                // PdfPageImageExtractor opens a byte array. Keep that path
                 // available for ordinary desktop uploads, but refuse an oversized shared
                 // scan before it can duplicate the whole file in a phone process.
                 if (maxInlineTextChars.HasValue && length > SharedScannedPdfMaxBytes)
@@ -1407,7 +1401,7 @@ namespace TensorSharp.Chat
 
         /// <summary>
         /// Read the referenced upload(s) from a JSON edit request into <paramref name="images"/>:
-        /// <c>imagePaths</c> (array, multi-image) or legacy <c>imagePath</c> (single). References
+        /// <c>imagePaths</c> (array, multi-image) or <c>imagePath</c> (single). References
         /// are the bare server filenames returned by <c>/api/upload</c>; absolute paths from older
         /// clients are accepted when they resolve inside the upload directory. Returns an error
         /// message, or null on success.

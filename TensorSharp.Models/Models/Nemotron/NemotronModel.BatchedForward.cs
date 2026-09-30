@@ -15,28 +15,12 @@
 //     (Phase 5; same pattern as Qwen 3.5 Phase 5c reference-swap).
 //   - FFN layers: plain SwiGLU or MoE — token-parallel for SwiGLU; MoE routing
 //     is per-token so it naturally batches.
-//
-// Coverage in Phase 1 (this iteration):
-//   - IBatchedPagedModel interface
-//   - TS_NEMOTRON_BATCHED opt-in env var (default OFF — falls through to the
-//     existing per-seq KV-swap path until later phases land)
-//   - SupportsBatchedMultimodal = false (multimodal stays on per-seq path)
-//   - ForwardBatch throws NotSupportedException so BatchExecutor catches and
-//     falls through to ExecuteStepPerSequence; behaviour unchanged vs today.
-//
-// Subsequent phases (see phase plan in commit history):
-//   Phase 2: per-slot Mamba2 conv + SSM state pool
-//   Phase 3: attention layer batched compute (paged attention)
-//   Phase 4: FFN / MoE batched compute
-//   Phase 5: Mamba2 batched via per-seq state-swap on the existing native kernel
-//   Phase 6: correctness vs legacy + perf bench
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using TensorSharp;
 using TensorSharp.GGML;
 using TensorSharp.MLX;
-using TensorSharp.Models.Paged;
 using TensorSharp.Runtime.Paged;
 using TensorSharp.Runtime.Scheduling;
 
@@ -44,42 +28,26 @@ namespace TensorSharp.Models
 {
     public partial class NemotronModel : IBatchedPagedModel
     {
-        // Default ON. The batched paged-attention path is the only way two
-        // concurrent requests can be served truly in parallel on this model
-        // (the per-sequence fallback forwards at most one sequence per step,
-        // so a second request stalls until the first releases the executor).
-        // Set TS_NEMOTRON_BATCHED=0 (or "false") to force the legacy fallback
-        // for A/B comparison or to investigate a regression.
-        //
-        // Re-read each call so tests can toggle between paths after the model
-        // has already loaded — a static readonly would capture the env var at
-        // class-init time, before tests get a chance to set it.
-        private static bool NemoBatchedOptIn()
-        {
-            string raw = Environment.GetEnvironmentVariable("TS_NEMOTRON_BATCHED");
-            if (string.IsNullOrEmpty(raw)) return true;
-            return raw != "0" && !string.Equals(raw, "false", StringComparison.OrdinalIgnoreCase);
-        }
+        // The batched paged-attention path is the only way two concurrent
+        // requests can be served truly in parallel on this model (the
+        // per-sequence path forwards at most one sequence per step, so a second
+        // request stalls until the first releases the executor).
 
-        // Phase 8: ForwardBatch handles multimodal injection directly (same
-        // row-wise InjectMultimodalEmbeddings the legacy path uses; works on
-        // batched [numTokens, hidden] unchanged). Gate behind the same opt-in
-        // env var as the rest of the batched plumbing so BatchExecutor only
-        // keeps multimodal seqs in this path when the opt-in is on; otherwise
-        // it peels them off to the per-seq fallback.
+        // ForwardBatch handles multimodal injection directly (the same row-wise
+        // InjectMultimodalEmbeddings the per-sequence path uses; works on batched
+        // [numTokens, hidden] unchanged).
         //
         // NOTE: the pending-embeddings list is model-level and doesn't track
         // which sequence each entry belongs to. We trust the upstream engine
         // to serialize multimodal requests (only one sequence at a time has
         // pending embeddings), matching the Mistral 3 batched stance.
-        public bool SupportsBatchedMultimodal => NemoBatchedOptIn();
+        public bool SupportsBatchedMultimodal => true;
 
         /// <summary>Declared availability of the batched path (see
-        /// <see cref="IBatchedPagedModel.BatchedForwardAvailable"/>): follows
-        /// the <c>TS_NEMO_BATCHED</c> opt-out so <c>ExecutionPlanner</c>
-        /// routes to the per-seq fallback up front instead of via a
-        /// NotSupportedException round trip.</summary>
-        public bool BatchedForwardAvailable => NemoBatchedOptIn() && !IsTensorParallel;
+        /// <see cref="IBatchedPagedModel.BatchedForwardAvailable"/>): not under tensor
+        /// parallelism, so <c>ExecutionPlanner</c> routes those runs to the per-seq
+        /// path up front.</summary>
+        public bool BatchedForwardAvailable => !IsTensorParallel;
 
         // ----- Phase 2: per-layer paged K/V + per-slot Mamba2 state pool -----
         //
@@ -355,6 +323,12 @@ namespace TensorSharp.Models
             if (!_nemoMambaSlotByReqId.TryGetValue(requestId, out int slot))
                 return;
             _nemoMambaSlotByReqId.Remove(requestId);
+            FreeMambaSlot(slot);
+        }
+
+        /// <summary>Return a slot to the free pool, marked for re-initialisation by its next tenant.</summary>
+        private void FreeMambaSlot(int slot)
+        {
             _nemoFreeMambaSlots.Push(slot);
 
             // Mark the slot's per-layer state as needing re-init on its next
@@ -419,7 +393,7 @@ namespace TensorSharp.Models
 
         /// <summary>True when the model can migrate a sequence's K/V history
         /// (attention layers) and recurrent state (Mamba2 layers) from the
-        /// legacy per-model arrays into the paged / per-slot stores. Required
+        /// solo per-model arrays into the paged / per-slot stores. Required
         /// so the N=1 fast path can hand off to the batched path when a
         /// second concurrent sequence arrives — without migration the batched
         /// attention kernel would read zeros for the first sequence's
@@ -434,7 +408,7 @@ namespace TensorSharp.Models
             && !_kvCacheDtype.IsBlockQuantized();
 
         /// <summary>Copy <paramref name="owner"/>'s in-progress state out of
-        /// the legacy per-model stores and into the paged / per-slot stores
+        /// the solo per-model stores and into the paged / per-slot stores
         /// the batched path reads from. Handles all three Nemotron-H layer
         /// types:
         ///   - Attention: linear <c>_kvCacheK/V[layer]</c>
@@ -563,12 +537,12 @@ namespace TensorSharp.Models
             // Array.Copy below lands on real allocated buffers. The
             // EnsureNemoSlotAllocated zero-init only runs when init=false,
             // and we overwrite the just-zeroed buffer immediately afterward,
-            // so the net effect is the correct legacy state in the slot.
+            // so the net effect is the correct solo state in the slot.
             EnsureNemoSlotAllocated(layer, slot);
 
-            // The legacy owner may have decoded natively since its host arrays were
+            // The solo owner may have decoded natively since its host arrays were
             // last written; copy what the device actually holds.
-            SyncMamba2HostState(layer, LegacyMamba2Slot);
+            SyncMamba2HostState(layer, SoloMamba2Slot);
 
             float[] srcConv = _convState[layer];
             float[] srcSsm = _ssmState[layer];
@@ -580,7 +554,7 @@ namespace TensorSharp.Models
             if (srcSsm != null && dstSsm != null && srcSsm.Length == dstSsm.Length)
                 Array.Copy(srcSsm, dstSsm, srcSsm.Length);
 
-            // The slot now carries the legacy state, so subsequent batched
+            // The slot now carries the solo state, so subsequent batched
             // calls must NOT zero it on the next first-touch.
             _nemoSlotInit[layer][slot] = true;
 
@@ -618,10 +592,6 @@ namespace TensorSharp.Models
             if (ctx == null) throw new ArgumentNullException(nameof(ctx));
             int numSeqs = ctx.Sequences.Count;
             if (numSeqs == 0) return Array.Empty<float[]>();
-
-            if (!NemoBatchedOptIn())
-                throw new NotSupportedException(
-                    "Nemotron batched: disabled (TS_NEMOTRON_BATCHED=0 set, falling back to per-seq path).");
 
             int numLayers = Config.NumLayers;
 
@@ -681,7 +651,7 @@ namespace TensorSharp.Models
             // multimodal request the row-position lines up with the row in the
             // batched [numTokens, hidden] tensor. InjectMultimodalEmbeddings is
             // a row-wise Narrow+Copy so it works on the batched tensor the same
-            // way it works on a single-seq tensor in the legacy Forward path.
+            // way it works on a single-seq tensor in the single-sequence Forward path.
             if (_pendingVisionEmbeddings.Count > 0 || _pendingAudioEmbeddings.Count > 0)
             {
                 foreach (var (emb, pos) in _pendingVisionEmbeddings)
@@ -737,7 +707,7 @@ namespace TensorSharp.Models
                 // this the MLX queue grows for the entire forward pass and
                 // doesn't start executing until the first host read at the
                 // end, which serialises kernel issue with kernel completion.
-                // Mirrors the same pattern in the legacy Forward path.
+                // Mirrors the same pattern in the single-sequence Forward path.
                 if (isMlx && (layer + 1) % evalEveryN == 0
                     && layer + 1 != numLayers && hiddenStates != null)
                 {
@@ -895,9 +865,8 @@ namespace TensorSharp.Models
         // for continuous batching (each token's experts are picked from
         // its own router logits row).
         //
-        // The legacy prefill optimisations (TryMoEPrefillFusedReluSquared,
-        // TryMoEPrefillBatchedByExpert) trigger automatically when seqLen>1,
-        // so the batched-decode case (n>1, each seq 1 token) gets the
+        // The batched-by-expert prefill (TryMoEPrefillBatchedByExpert) triggers
+        // automatically when seqLen>1, so the batched-decode case (n>1, each seq 1 token) gets the
         // batched-by-expert routed-input path for free instead of the
         // per-step single-token routing.
         private Tensor RunBatchedMoELayer(Tensor hiddenStates, int layer, int numTokens)
@@ -932,7 +901,7 @@ namespace TensorSharp.Models
         //
         // Each seq's slice runs through Mamba2Block which reads/writes
         // _convState[layer], _ssmState[layer], and the native-decode state
-        // tensors. Restored after the loop so any legacy Forward path
+        // tensors. Restored after the loop so any single-sequence Forward path
         // sharing this model sees the original scratch instances.
         //
         // True kernel-level batched Mamba2 (vLLM's mamba_chunk_scan_combined_varlen
@@ -1151,7 +1120,7 @@ namespace TensorSharp.Models
                 // Weight pointers. _mamba2ConvWT[layer] is the transposed conv
                 // weight [dConv, xbcSize] (matches what Mamba2Conv1dStepVectorized
                 // uses); fall back to the raw tensor when the transpose hasn't
-                // been built (legacy fallback).
+                // been built (the fallback).
                 float[] convWT = _mamba2ConvWT?[layer];
                 float* convBiasPtr = _weights.TryGetValue(prefix + "ssm_conv1d.bias", out var cb)
                     ? GetFloatPtr(cb) : null;

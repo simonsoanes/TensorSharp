@@ -23,8 +23,7 @@ namespace TensorSharp.Runtime.Speculative
         /// <summary>Speculative decoding requested. Default OFF - a per-token
         /// head is resident in every checkpoint that ships one, so engaging by
         /// its mere presence would silently change what a plain run does.
-        /// CLI: <c>--spec</c>; env: <c>TS_SPEC</c> /
-        /// <c>TS_MTP_SPEC</c>.</summary>
+        /// CLI: <c>--spec</c>; env: <c>TS_SPEC</c>.</summary>
         public bool Enabled { get; init; }
 
         /// <summary>
@@ -42,8 +41,7 @@ namespace TensorSharp.Runtime.Speculative
         public string SpeculatorName { get; init; } = SpeculatorRegistry.Auto;
 
         /// <summary>Maximum tokens drafted per speculative step (llama.cpp
-        /// n_max). CLI: <c>--spec-draft</c>; env:
-        /// <c>TS_SPEC_DRAFT</c> / <c>TS_MTP_DRAFT</c>.</summary>
+        /// n_max). CLI: <c>--spec-draft</c>; env: <c>TS_SPEC_DRAFT</c>.</summary>
         public int MaxDraftTokens { get; init; } = DefaultMaxDraftTokens;
 
         /// <summary>
@@ -60,8 +58,7 @@ namespace TensorSharp.Runtime.Speculative
         /// (<see cref="ISpeculator.DefaultMinDraftProb"/>). The gates threshold
         /// DIFFERENT quantities per algorithm, so one shared default cannot
         /// serve them all - leave this unset unless the operator asked for a
-        /// specific value. CLI: <c>--spec-pmin</c>; env:
-        /// <c>TS_SPEC_PMIN</c> / <c>TS_MTP_PMIN</c>.
+        /// specific value. CLI: <c>--spec-pmin</c>; env: <c>TS_SPEC_PMIN</c>.
         /// </summary>
         public float? MinDraftProb { get; init; }
 
@@ -87,39 +84,32 @@ namespace TensorSharp.Runtime.Speculative
         public static SpeculationOptions Disabled => new();
 
         /// <summary>
-        /// Read the <c>TS_SPEC_*</c> environment, falling back to the older
-        /// <c>TS_MTP_*</c> spellings. Both are supported for good reason and
-        /// not merely for compatibility: the glm-dsa NATIVE loader reads
-        /// <c>TS_MTP_SPEC</c> and <c>TS_MTP_DRAFT</c> from C++ while the model
-        /// is loading (it decides whether to page a whole extra 256-expert
-        /// decoder layer into VRAM, and sizes its graph cache), so those names
-        /// are a cross-language contract that cannot simply be renamed. Hosts
-        /// write BOTH spellings; readers accept either.
+        /// Read the <c>TS_SPEC_*</c> environment (the glm-dsa native loader reads
+        /// <c>TS_SPEC_DRAFT</c> from C++ as well, to size its graph cache).
         /// </summary>
+        /// <exception cref="ArgumentException">A removed variable is set
+        /// (<see cref="SpeculationEnvVars.RejectRemoved"/>).</exception>
         public static SpeculationOptions FromEnvironment()
         {
-            string? enabledRaw = ReadString(SpeculationEnvVars.Enabled, SpeculationEnvVars.LegacyEnabled);
-            int maxDraftTokens = ReadDraftTokens(
-                SpeculationEnvVars.Draft, SpeculationEnvVars.LegacyDraft,
-                out bool maxDraftTokensExplicit);
+            SpeculationEnvVars.RejectRemoved();
+            string? enabledRaw = ReadString(SpeculationEnvVars.Enabled);
+            int maxDraftTokens = ReadDraftTokens(SpeculationEnvVars.Draft, out bool maxDraftTokensExplicit);
             return new SpeculationOptions
             {
                 Enabled = ReadBool(enabledRaw, false),
                 ExplicitlyDisabled = enabledRaw != null && !ReadBool(enabledRaw, false),
-                SpeculatorName = ReadString(SpeculationEnvVars.Type, null) ?? SpeculatorRegistry.Auto,
+                SpeculatorName = ReadString(SpeculationEnvVars.Type) ?? SpeculatorRegistry.Auto,
                 MaxDraftTokens = maxDraftTokens,
                 // An invalid env value is ignored rather than becoming an
                 // explicit request for the fallback window.
                 MaxDraftTokensExplicit = maxDraftTokensExplicit,
-                MinDraftProb = ReadFloatOrNull(SpeculationEnvVars.PMin, SpeculationEnvVars.LegacyPMin),
+                MinDraftProb = ReadFloatOrNull(SpeculationEnvVars.PMin),
             };
         }
 
-        private static string? ReadString(string name, string? fallbackName)
+        private static string? ReadString(string name)
         {
             string? raw = Environment.GetEnvironmentVariable(name);
-            if (string.IsNullOrWhiteSpace(raw) && fallbackName != null)
-                raw = Environment.GetEnvironmentVariable(fallbackName);
             return string.IsNullOrWhiteSpace(raw) ? null : raw.Trim();
         }
 
@@ -130,9 +120,9 @@ namespace TensorSharp.Runtime.Speculative
             return raw is "1" or "true" or "TRUE" or "True" or "yes" or "on";
         }
 
-        private static int ReadDraftTokens(string name, string fallbackName, out bool explicitlyConfigured)
+        private static int ReadDraftTokens(string name, out bool explicitlyConfigured)
         {
-            string? raw = ReadString(name, fallbackName);
+            string? raw = ReadString(name);
             if (raw != null
                 && int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int v)
                 && v >= 1
@@ -146,12 +136,12 @@ namespace TensorSharp.Runtime.Speculative
             return DefaultMaxDraftTokens;
         }
 
-        private static float? ReadFloatOrNull(string name, string fallbackName)
+        private static float? ReadFloatOrNull(string name)
         {
             // Zero is a real value, not "unset": --spec-pmin 0 means "never gate a
             // draft on confidence", which the removed --spec-draft-conf-min spelling
             // could express and its survivor must keep expressing.
-            string? raw = ReadString(name, fallbackName);
+            string? raw = ReadString(name);
             return raw != null
                    && float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out float v)
                    && float.IsFinite(v)
@@ -164,8 +154,9 @@ namespace TensorSharp.Runtime.Speculative
     /// <summary>
     /// The environment-variable contract. Named constants rather than string
     /// literals because these are read from THREE languages/layers - managed
-    /// hosts, the model loaders, and the glm-dsa native C++ loader - and a typo
-    /// in one of them shows up only as speculation silently not engaging.
+    /// hosts, the model loaders, and the glm-dsa native C++ loader (which reads
+    /// <see cref="Draft"/>) - and a typo in one of them shows up only as
+    /// speculation silently not engaging.
     /// </summary>
     public static class SpeculationEnvVars
     {
@@ -184,17 +175,34 @@ namespace TensorSharp.Runtime.Speculative
         /// <summary>Separate draft-head GGUF for architectures that ship one.</summary>
         public const string DraftModel = "TS_SPEC_DRAFT_MODEL";
 
-        /// <summary>Legacy spelling, ALSO read by the glm-dsa native loader.</summary>
-        public const string LegacyEnabled = "TS_MTP_SPEC";
+        /// <summary>
+        /// Names that used to be read beside the ones above, mapped to their
+        /// replacement. One name per setting: a removed one is an error rather
+        /// than a silent no-op, since "speculation quietly off" is exactly how a
+        /// stale deployment would otherwise fail.
+        /// </summary>
+        public static readonly (string Name, string Survivor)[] RemovedNames =
+        {
+            ("TS_MTP_SPEC", Enabled),
+            ("TS_MTP_DRAFT", Draft),
+            ("TS_MTP_PMIN", PMin),
+            ("TS_MTP_DRAFT_MODEL", DraftModel),
+            // The per-family drafter paths: --draft-model reaches every model factory.
+            ("TS_DSV4_DSPARK", DraftModel),
+            ("TS_QWEN35_DFLASH", DraftModel),
+            ("TS_MUSE_GLIMMER_DFLASH", DraftModel),
+            ("TS_NEMOTRON_DFLASH", DraftModel),
+        };
 
-        /// <summary>Legacy spelling, ALSO read by the glm-dsa native loader
-        /// (it sizes its graph cache from this).</summary>
-        public const string LegacyDraft = "TS_MTP_DRAFT";
-
-        /// <summary>Legacy spelling.</summary>
-        public const string LegacyPMin = "TS_MTP_PMIN";
-
-        /// <summary>Legacy spelling.</summary>
-        public const string LegacyDraftModel = "TS_MTP_DRAFT_MODEL";
+        /// <summary>Throw when a removed variable is set, naming its replacement.</summary>
+        /// <exception cref="ArgumentException">A removed variable is set.</exception>
+        public static void RejectRemoved()
+        {
+            foreach ((string name, string survivor) in RemovedNames)
+            {
+                if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable(name)))
+                    throw new ArgumentException($"{name} was removed; set {survivor} instead.");
+            }
+        }
     }
 }

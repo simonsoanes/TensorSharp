@@ -71,12 +71,11 @@ namespace TensorSharp.Server.Skills
     /// (ggml_metal), a lookup that appends a 7.9 KB skill body reuses 1983 of the
     /// following round's 4197 prompt tokens (47%) — the whole of the previous round,
     /// with only the newly fetched file left to forward — and its time to first token
-    /// drops from 2.3 s to 1.3 s. This needed an engine fix:
-    /// <c>BatchExecutor.ComputeLiveContinuationLcp</c> used to require the live KV
-    /// cache to be an EXACT prefix of the new prompt, and a turn that ends on a
-    /// control token the chat template never re-renders (Gemma 4 answers a tool call by
-    /// emitting <c>&lt;|tool_response&gt;</c>) failed that test by one token and
-    /// re-prefilled everything. It now rewinds a bounded number of trailing tokens.
+    /// drops from 2.3 s to 1.3 s. A turn that ends on a control token the chat template
+    /// never re-renders (Gemma 4 answers a tool call by emitting
+    /// <c>&lt;|tool_response&gt;</c>) differs from the new prompt in its last token; the
+    /// prefix cache rewinds a bounded number of trailing tokens
+    /// (<c>PrefixCacheCapabilities.RewindCapTokens</c>) rather than re-prefilling.
     /// </para>
     /// </summary>
     internal static class SkillChatLoop
@@ -1117,7 +1116,7 @@ namespace TensorSharp.Server.Skills
                 && required.EnforceArguments
                 && !ArgumentListEquals(call, "args", required.DefaultArguments))
             {
-                // ExecuteRun gives `args` precedence over the legacy `arguments`
+                // ExecuteRun gives `args` precedence over the `arguments`
                 // alias. Installing one canonical vector is therefore sufficient even
                 // when a small model emitted both spellings.
                 call.Arguments["args"] = required.DefaultArguments.ToArray();

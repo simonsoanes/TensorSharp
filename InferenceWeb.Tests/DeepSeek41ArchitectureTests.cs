@@ -13,8 +13,6 @@ public class DeepSeek41ArchitectureTests : IDisposable
     public DeepSeek41ArchitectureTests()
     {
         _env.ClearSpeculationVars();
-        _env.Set("TS_DSV41_TP", null);
-        _env.Set("TS_DSV4_NGPU", null);
         _env.Set("TS_DSV41_ENGRAM_DEVICE", null);
         _env.Set("TS_DSV41_ALLOW_NON_CUDA_GPU", null);
     }
@@ -313,10 +311,9 @@ public class DeepSeek41ArchitectureTests : IDisposable
     [Fact]
     public void RoutedMoeTensorParallelIsRefusedOnTheCpuBackend()
     {
-        _env.Set("TS_DSV41_TP", "4");
         var error = Assert.Throws<NotSupportedException>(() =>
-            DeepSeek41Architecture.ValidateLoad("missing.gguf", BackendType.GgmlCpu, null, 4));
-        Assert.Contains("TS_DSV41_TP", error.Message);
+            DeepSeek41Architecture.ValidateLoad("missing.gguf", BackendType.GgmlCpu, null, tpDegree: 4));
+        Assert.Contains("--tp", error.Message);
         Assert.Contains("ggml_cuda", error.Message);
     }
 
@@ -392,7 +389,7 @@ public class DeepSeek41ArchitectureTests : IDisposable
     }
 
     [Fact]
-    public void V4DraftEnvironmentCannotBeAppliedToV41()
+    public void V4DraftFileCannotBeAppliedToV41()
     {
         string path = Path.GetTempFileName();
         try
@@ -414,9 +411,8 @@ public class DeepSeek41ArchitectureTests : IDisposable
                 WriteString(writer, "deepseek4-dspark");
                 while (writer.BaseStream.Position % 32 != 0) writer.Write((byte)0);
             }
-            _env.Set("TS_DSV4_DSPARK", path);
             var error = Assert.Throws<NotSupportedException>(() =>
-                DeepSeek41Architecture.ValidateLoad("missing.gguf", BackendType.GgmlCuda, null));
+                DeepSeek41Architecture.ValidateLoad("missing.gguf", BackendType.GgmlCuda, path));
             Assert.Contains("DSpark", error.Message);
         }
         finally { File.Delete(path); }
@@ -442,15 +438,16 @@ public class DeepSeek41ArchitectureTests : IDisposable
             DeepSeek41Architecture.ValidateLoad("missing.gguf", backend, "v41-draft.gguf"));
 
     [Theory]
-    [InlineData(null, 4, 0)]
-    [InlineData("0", 4, 0)]
-    [InlineData("2", 2, 2)]
-    [InlineData("4", 4, 4)]
-    [InlineData("8", 8, 8)]
-    [InlineData("4", 0, 4)] // Automatic device enumeration is validated natively.
-    [InlineData(" +4", 4, 4)] // Native strtol accepts a leading sign/whitespace.
-    public void RoutedMoeTensorParallelRanksValidateKnownGpuCount(string? value, int gpuCount, int expected)
-        => Assert.Equal(expected, DeepSeek41Architecture.ParseRoutedMoeTensorParallelRanks(value, gpuCount));
+    [InlineData(1, 0)]
+    [InlineData(2, 2)]
+    [InlineData(4, 4)]
+    [InlineData(8, 8)]
+    public void TensorParallelRanksComeFromTheTpDegree(int degree, int expected)
+        => Assert.Equal(expected, DeepSeek41Architecture.ResolveTensorParallelRanks(degree));
+
+    [Fact]
+    public void TensorParallelDegreeAboveEightIsRefused()
+        => Assert.Throws<NotSupportedException>(() => DeepSeek41Architecture.ResolveTensorParallelRanks(9));
 
     [Theory]
     [InlineData(2)]
@@ -460,32 +457,11 @@ public class DeepSeek41ArchitectureTests : IDisposable
     [InlineData(6)]
     [InlineData(7)]
     [InlineData(8)]
-    public void ExplicitTensorParallelDegreeNeedsNoEnvironmentOptIn(int degree)
+    public void ExplicitTensorParallelDegreeReachesTheLoader(int degree)
     {
-        Assert.Equal(degree, DeepSeek41Architecture.ResolveRequestedTensorParallelRanks(degree, degree));
+        Assert.Equal(degree, DeepSeek41Architecture.ResolveTensorParallelRanks(degree));
         Assert.True(DeepSeek41Architecture.Descriptor.SupportsNativeTensorParallel(degree, BackendType.GgmlCuda));
-        DeepSeek41Architecture.ValidateLoad("not-opened.gguf", BackendType.GgmlCuda, null,
-            requestedGpuCount: degree, tpDegree: degree);
-        Assert.Null(Environment.GetEnvironmentVariable("TS_DSV41_TP"));
-    }
-
-    [Theory]
-    [InlineData("0")]
-    [InlineData("2")]
-    [InlineData("8")]
-    public void ExplicitTensorParallelDegreeRefusesConflictingEnvironmentBeforeOpeningWeights(string value)
-    {
-        _env.Set("TS_DSV41_TP", value);
-        Assert.Throws<ArgumentException>(() =>
-            new DeepSeek41Model("not-opened.gguf", BackendType.GgmlCuda, tpDegree: 6));
-    }
-
-    [Fact]
-    public void ExplicitTensorParallelDegreeAcceptsMatchingLegacyEnvironment()
-    {
-        _env.Set("TS_DSV41_TP", "6");
-        Assert.Equal(6, DeepSeek41Architecture.ResolveRequestedTensorParallelRanks(6, 6));
-        Assert.Equal(6, DeepSeek41Architecture.ResolveRequestedTensorParallelRanks(1, 6));
+        DeepSeek41Architecture.ValidateLoad("not-opened.gguf", BackendType.GgmlCuda, null, tpDegree: degree);
     }
 
     [Theory]
@@ -501,66 +477,22 @@ public class DeepSeek41ArchitectureTests : IDisposable
             new DeepSeek41Model("not-opened.gguf", backend, tpDegree: 6));
     }
 
-    [Theory]
-    [InlineData("")]
-    [InlineData(" ")]
-    [InlineData("1")]
-    [InlineData("-2")]
-    [InlineData("9")]
-    [InlineData("2.0")]
-    [InlineData("2x")]
-    [InlineData("2 ")]
-    [InlineData("999999999999999999999999")]
-    public void MalformedRoutedMoeTensorParallelSettingIsRejected(string value)
-    {
-        var error = Assert.Throws<ArgumentException>(() =>
-            DeepSeek41Architecture.ParseRoutedMoeTensorParallelRanks(value, 0));
-        Assert.Contains("TS_DSV41_TP", error.Message);
-    }
-
     [Fact]
-    public void MismatchedRoutedMoeRanksAreRejectedBeforeSidecarOrWeights()
+    public void PlacementMessagesNameTheMode()
     {
-        _env.Set("TS_DSV41_TP", "2");
-        var error = Assert.Throws<ArgumentException>(() =>
-            DeepSeek41Architecture.ValidateLoad("missing.gguf", BackendType.GgmlCuda, null, 4));
-        Assert.Contains("selected GPU count (4)", error.Message);
-    }
-
-    [Fact]
-    public void NativeGpuCountOverrideDeterminesRankValidationAndPlacementMessage()
-    {
-        _env.Set("TS_DSV4_NGPU", "2");
-        _env.Set("TS_DSV41_TP", "2");
-        Assert.Equal(2, DeepSeek41Architecture.ResolveRoutedMoeTensorParallelRanks(4));
-        string message = DeepSeek41Architecture.Descriptor.DescribeMultiGpuPlacement(4);
+        Assert.Contains("4 GPUs by LAYER SPLIT", DeepSeek41Architecture.Descriptor.DescribeMultiGpuPlacement(4));
+        string message = DeepSeek41Architecture.DescribeTensorParallelPlacement(2);
         Assert.Contains("across 2 GPUs", message);
         Assert.Contains("gate/up/down", message);
         Assert.Contains("F32 activation/output gathers", message);
         Assert.Contains("CPU-offloaded layers", message);
         Assert.Contains("Attention and shared experts retain layer placement", message);
         Assert.DoesNotContain("shards no weights", message);
-
-        _env.Set("TS_DSV41_TP", "0");
-        Assert.Contains("2 GPUs by LAYER SPLIT", DeepSeek41Architecture.Descriptor.DescribeMultiGpuPlacement(4));
-    }
-
-    [Theory]
-    [InlineData("0")]
-    [InlineData("-1")]
-    public void ExplicitAutomaticGpuOverrideDefersRankCountCheckToNative(string gpuOverride)
-    {
-        _env.Set("TS_DSV4_NGPU", gpuOverride);
-        _env.Set("TS_DSV41_TP", "8");
-        Assert.Equal(8, DeepSeek41Architecture.ResolveRoutedMoeTensorParallelRanks(2));
-        _env.Set("TS_DSV41_TP", "0");
-        Assert.Contains("automatically selected visible GPUs", DeepSeek41Architecture.Descriptor.DescribeMultiGpuPlacement(2));
     }
 
     [Fact]
     public void NativeRoutedMoeShardingDoesNotCreateManagedCollectives()
     {
-        _env.Set("TS_DSV41_TP", "4");
         TensorSharp.ITensorParallelGroup group = null;
         Assert.Equal(4, ModelBase.ResolveTensorParallelSupport(DeepSeek41Architecture.Descriptor,
             BackendType.GgmlCuda, 4, ref group, out int split));

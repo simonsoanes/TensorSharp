@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Derive HTTP text/media plans from the independently verified model inventory.
 
-This only writes plans. Default multi-GPU GLM and DeepSeek placement remains
-whole-layer splitting; explicitly requested tensor parallelism is a separate
+This only writes plans. Multi-GPU GLM and DeepSeek plans use whole-layer
+placement (--layer-split N); explicitly requested tensor parallelism is a separate
 campaign. Requested settings must be reconciled with native startup banners.
 """
 import argparse
@@ -81,8 +81,9 @@ def main():
                            "KV_CACHE_DTYPE": "f16", "TS_SCHED_MAX_RUNNING_SEQS": "4",
                            "TS_SCHED_MAX_BATCHED_TOKENS": "4096", "TS_SCHED_PREFILL_CHUNK": "512"},
                    "extra_args": ["--no-skills"], "suites": []}
-        if degree > 1 and not model["id"].startswith(("glm", "deepseek")):
-            profile["extra_args"] += ["--tp", str(degree)]
+        if degree > 1:
+            placement = "--layer-split" if model["id"].startswith(("glm", "deepseek")) else "--tp"
+            profile["extra_args"] += [placement, str(degree)]
         if companions:
             profile["extra_args"] += ["--mmproj", companions[0]["path"]]
         common = ["{python}", "{repo}/benchmarks/engine_comparison/validate_inference.py",

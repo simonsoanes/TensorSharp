@@ -488,7 +488,7 @@ namespace TensorSharp.Models
             int audioEndId = _model.Tokenizer.LookupToken("<audio|>");
 
             // The gemma4uv unified embedder declares its own image_mean / image_std
-            // (mean=0, std=1 -> [0,1]); the gemma4v SigLIP path keeps the legacy
+            // (mean=0, std=1 -> [0,1]); the gemma4v SigLIP path keeps the
             // [-1,1] normalization.
             // gemma4v sizes exactly as the reference processor does (scale to the soft-token
             // budget, floor to a multiple of patch*pooling, bicubic stretch-to-fill) -- verified

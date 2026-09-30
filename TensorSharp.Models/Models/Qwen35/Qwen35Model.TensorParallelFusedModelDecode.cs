@@ -53,10 +53,6 @@ namespace TensorSharp.Models
         private bool _tpFdFailed;            // latched: the native side declined once
         private int _tpFdBuiltCapacity = -1;
 
-        /// <summary>Disable with TS_QWEN35_TP_FUSED_DECODE=0.</summary>
-        private static readonly bool _tpFdEnabled =
-            Environment.GetEnvironmentVariable("TS_QWEN35_TP_FUSED_DECODE") != "0";
-
         /// <summary>
         /// Report, once, why the whole-model fused tensor-parallel decode declined.
         /// Declining latches this path off for the process and falls back to the
@@ -120,7 +116,7 @@ namespace TensorSharp.Models
                 return _tpFdReady;
             _tpFdChecked = true;
             _tpFdReady =
-                _tpFdEnabled && IsGgmlBackend && IsTensorParallel
+                IsGgmlBackend && IsTensorParallel
                 // Multi-node keeps this fused schedule: the executor reduces this
                 // node's ranks on-device and then calls back for the cross-node
                 // exchange, so the graph is identical and only the reduction is
@@ -135,14 +131,12 @@ namespace TensorSharp.Models
                 && (TpCrossNodeReducer != null
                     ? GgmlBasicOps.TensorParallelFusedAvailableDistributed(TpDegree)
                     : GgmlBasicOps.TensorParallelFusedAvailable(TpDegree))
-                // The graphs take the M-RoPE delta next to the KV index.
-                && NativeRopePositionAbiSupported();
+                && IsGgmlBackend;
             if (_tpFdReady)
                 _tpFdPlans = new IntPtr[TpDegree];
             else if (IsTensorParallel)
                 TpFdBail(
-                    !_tpFdEnabled ? "disabled via TS_QWEN35_TP_FUSED_DECODE=0"
-                    : !IsGgmlBackend ? $"backend {_backend} has no fused TP decode kernel"
+                    !IsGgmlBackend ? $"backend {_backend} has no fused TP decode kernel"
                     : GlobalTpDegree != TpDegree ? $"multi-node TP (global={GlobalTpDegree}, local={TpDegree}) without a cross-node reducer"
                     : _tpLmHeadKey == null ? "the LM head was not sharded column-parallel (tied embeddings, a vocab that does not divide by the TP degree, or a non-GGML backend)"
                     : !_tpQuantWeights.ContainsKey(_tpLmHeadKey) ? $"no quantized TP shard for the LM head ({_tpLmHeadKey})"
@@ -492,10 +486,6 @@ namespace TensorSharp.Models
         private bool _tpPfFailed;            // latched: the native side declined once
         private bool _tpPfLogged;
 
-        /// <summary>Disable with TS_QWEN35_TP_FUSED_PREFILL=0.</summary>
-        private static readonly bool _tpPfEnabled =
-            Environment.GetEnvironmentVariable("TS_QWEN35_TP_FUSED_PREFILL") != "0";
-
         /// <summary>
         /// Pull the per-rank GDN states back to host memory. The fused decode
         /// (and the per-op GDN kernel) advance the device-resident copies keyed
@@ -581,7 +571,7 @@ namespace TensorSharp.Models
         /// </summary>
         private unsafe bool TryQwen35FusedModelPrefillTP(Tensor hidden, int seqLen, int startPos, float[] logitsOut)
         {
-            if (!_tpPfEnabled || _tpPfFailed || seqLen < 2)
+            if (_tpPfFailed || seqLen < 2)
                 return false;
             if (!TpFusedModelDecodeAvailable() || logitsOut == null || logitsOut.Length < Config.VocabSize)
                 return false;

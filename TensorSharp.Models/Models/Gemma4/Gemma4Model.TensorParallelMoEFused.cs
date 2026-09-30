@@ -60,7 +60,9 @@ namespace TensorSharp.Models
         private IntPtr[] _tpMoePlans;
         private Gemma4MoELayerDecodeArgs[][] _tpMoeArgs;   // [rank][layer]
 
-        /// <summary>Disable with TS_GEMMA4_TP_FUSED_MOE=0.</summary>
+        /// <summary>TS_GEMMA4_TP_FUSED_MOE=0 keeps the whole-expert per-op path and skips
+        /// materializing the rank-local expert slices at load (~10.5 GB and ~36 s on the
+        /// 26B), trading the fused trunk's ~10x decode for that memory and load time.</summary>
         private static readonly bool _tpFusedMoeEnabled =
             Environment.GetEnvironmentVariable("TS_GEMMA4_TP_FUSED_MOE") != "0";
 
@@ -409,8 +411,7 @@ namespace TensorSharp.Models
         {
             if (!_tpMoeFusedReady || logitsOut == null)
                 return false;
-            if (!_fdFoldLmHead
-                || !_weights.TryGetValue("output_norm.weight", out var finalNormT)
+            if (!_weights.TryGetValue("output_norm.weight", out var finalNormT)
                 || !_quantWeights.TryGetValue(_hasTiedOutput ? "token_embd.weight" : "output.weight", out var lmqw))
                 return false;
 

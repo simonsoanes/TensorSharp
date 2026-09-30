@@ -242,12 +242,8 @@ namespace TensorSharp.Server
 
                 // Block drafters go to the factory rather than being attached
                 // afterwards like Gemma 4's draft head: their weights have to be
-                // counted by the layer split and uploaded with the trunk. The
-                // shared --draft-model variables are authoritative; the older
-                // DSpark-only variable remains an env compatibility fallback.
+                // counted by the layer split and uploaded with the trunk.
                 string blockDraftPath = SpeculativeDraftHeadLoader.ConfiguredDraftHeadPath();
-                if (string.IsNullOrWhiteSpace(blockDraftPath))
-                    blockDraftPath = Environment.GetEnvironmentVariable("TS_DSV4_DSPARK");
                 _model = _createModel(modelPath, _backend, tpGroup, blockDraftPath);
 
                 // A worker node (--tp-node-id > 0) spends its life blocked in a
@@ -354,7 +350,9 @@ namespace TensorSharp.Server
 
         private void LoadEncoders(string mmProjPath)
         {
-            _model?.MultimodalInjector.LoadProjectors(mmProjPath);
+            if (_model == null) return;
+            _model.MultimodalInjector.LoadProjectors(
+                TensorSharp.Models.Architecture.ModelArchitectureRegistry.ResolveProjectorPath(_model.Config.Architecture, mmProjPath));
         }
 
         private static BackendType ResolveBackend(string backendStr)

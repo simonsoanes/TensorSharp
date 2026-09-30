@@ -170,7 +170,6 @@ public class UploadRootConfinementTests : IDisposable
 
     private WebUiAdapter Adapter() => new(
         new ModelService(),
-        new InferenceQueue(),
         new SessionManager(),
         Options(),
         new UploadStoragePolicy(_uploadRoot),

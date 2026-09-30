@@ -186,10 +186,8 @@ class ExplicitPlacementConfigTests(unittest.TestCase):
         cfg = load_config(HERE / "benchmark_config_deepseek41.json")
         for name in ("ggml_cuda_layer", "ggml_cuda_layer_cpu_moe4"):
             self.assertEqual(cfg.BACKENDS[name].ts_tp_arg, "--layer-split")
-            self.assertEqual(cfg.BACKENDS[name].ts_env["TS_DSV41_TP"], "0")
-        tensor = cfg.BACKENDS["ggml_cuda_true_tp"]
-        self.assertEqual(tensor.ts_tp_arg, "--tp")
-        self.assertEqual(tensor.ts_env["TS_DSV41_TP"], "{tp}")
+        # --tp alone selects routed-MoE tensor parallelism.
+        self.assertEqual(cfg.BACKENDS["ggml_cuda_true_tp"].ts_tp_arg, "--tp")
 
 
 class Glm53Qwen38ConfigTests(unittest.TestCase):
@@ -206,14 +204,6 @@ class Glm53Qwen38ConfigTests(unittest.TestCase):
         cls.cfg = load_config(cls.CONFIG)
         cls.json = raw(cls.CONFIG)
 
-    def test_tp_device_pool_stays_empty(self):
-        # Filling defaults.tp_devices in pins a tp=1 cell to GPU 0, where none of
-        # these three checkpoints fit — and tp=1 is exactly how both GLM models
-        # are served (their native executor claims every visible GPU itself).
-        # Asserted against the file, since BENCH_TP_DEVICES may override the
-        # loaded value on a developer's box.
-        self.assertEqual(self.json["defaults"]["tp_devices"], [])
-
     def test_qwen38_declares_the_tp_it_cannot_run_without(self):
         # qwen4exp is spread by the SHARED loader, which reads the degree from
         # `--layer-split N`. Without one it is a
@@ -221,27 +211,22 @@ class Glm53Qwen38ConfigTests(unittest.TestCase):
         # skip instead of an OOM.
         self.assertGreater(self.cfg.MODELS["qwen38-flash-next"].min_tp, 1)
 
-    def test_glm_models_are_hosted_at_tp1(self):
-        # The glm native executor takes every visible GPU when no degree is
-        # given, so tp=1 is their placement — and `--tp N` would switch them to
-        # tensor parallelism, which also disables the NextN draft head.
-        for model_id in ("glm53", "glm53-flash"):
-            with self.subTest(model=model_id):
-                self.assertEqual(self.cfg.MODELS[model_id].min_tp, 1)
+    def test_glm_models_declare_the_gpus_their_weights_need(self):
+        # With no placement flag the runtime serves one device, where neither
+        # checkpoint fits; `min_tp` turns that into a recorded skip. (`--tp N`
+        # would switch them to tensor parallelism, which also disables the
+        # NextN draft head.)
+        self.assertGreaterEqual(self.cfg.MODELS["glm53-flash"].min_tp, 3)
+        self.assertGreaterEqual(self.cfg.MODELS["glm53"].min_tp, 6)
 
-    def test_the_two_columns_differ_in_whether_a_degree_is_passed(self):
-        layer = self.cfg.BACKENDS["ggml_cuda_layer"]
-        tp = self.cfg.BACKENDS["ggml_cuda_split"]
-        self.assertEqual(layer.ts_env["TS_GLM_NGPU"], "0")
-        self.assertFalse(self.cfg.ts_tp_supported(layer),
-                         "the layer column must pass no --tp: it is the GLM placement")
-        self.assertTrue(self.cfg.ts_tp_supported(tp),
-                        "the tp column is the only one qwen38-flash-next can run on")
-        # Layer placement on both engines is what makes the qwen column
-        # comparable: `--split-mode layer` is the only multi-GPU mode llama.cpp
-        # has for qwen4exp, and TensorSharp explicitly selects `--layer-split N`.
-        self.assertEqual(tp.ts_tp_arg, "--layer-split")
-        self.assertEqual(tuple(tp.llama_tp_extra_args), ("--split-mode", "layer"))
+    def test_the_layer_split_column_passes_its_degree(self):
+        split = self.cfg.BACKENDS["ggml_cuda_split"]
+        self.assertTrue(self.cfg.ts_tp_supported(split))
+        # Layer placement on both engines is what makes the columns comparable:
+        # `--split-mode layer` is the only multi-GPU mode llama.cpp has for
+        # qwen4exp, and TensorSharp explicitly selects `--layer-split N`.
+        self.assertEqual(split.ts_tp_arg, "--layer-split")
+        self.assertEqual(tuple(split.llama_tp_extra_args), ("--split-mode", "layer"))
 
     def test_qwen38_runs_on_the_explicit_layer_split_column_and_nowhere_else(self):
         model = self.cfg.MODELS["qwen38-flash-next"]
@@ -258,7 +243,7 @@ class Glm53Qwen38ConfigTests(unittest.TestCase):
         # context is MAX_CONTEXT x parallel.
         extra = self.cfg.LLAMA_EXTRA_ARGS
         parallel = int(extra[extra.index("--parallel") + 1])
-        window = int(self.cfg.BACKENDS["ggml_cuda_layer"].ts_env["MAX_CONTEXT"])
+        window = int(self.cfg.BACKENDS["ggml_cuda_split"].ts_env["MAX_CONTEXT"])
         self.assertEqual(self.cfg.LLAMA_CONTEXT_SIZE, window * parallel)
 
     def test_mtp_flags_match_the_checkpoints(self):
@@ -273,8 +258,8 @@ class Glm53Qwen38ConfigTests(unittest.TestCase):
         # glm-dsa publishes no mmproj and GlmDsaModel refuses one, so an `image`
         # cell for glm53 must be a recorded skip, not an attempted run.
         self.assertIsNone(self.cfg.MODELS["glm53"].mmproj)
-        ok, why = self.cfg.applies("tensorsharp", "ggml_cuda_layer", self.cfg.MODELS["glm53"],
-                                   self.cfg.SCENARIOS["image"], tp=1)
+        ok, why = self.cfg.applies("tensorsharp", "ggml_cuda_split", self.cfg.MODELS["glm53"],
+                                   self.cfg.SCENARIOS["image"], tp=8)
         self.assertFalse(ok)
         self.assertIn("image", why)
         for model_id in ("qwen38-flash-next", "glm53-flash"):

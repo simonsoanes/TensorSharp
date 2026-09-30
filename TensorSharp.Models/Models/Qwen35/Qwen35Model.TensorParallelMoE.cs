@@ -52,9 +52,6 @@ namespace TensorSharp.Models
         // Per-rank expert FFN width after the column-parallel split.
         private int _tpMoENFfLocal;
 
-        private static readonly bool s_tpMoePrefillOnDevice =
-            Environment.GetEnvironmentVariable("TS_TP_MOE_PREFILL_ONDEVICE") != "0";
-
         /// <summary>
         /// Build the per-rank expert pointer tables from the TP shards resident on
         /// each rank's GPU. Any gap (a shard that never made it to the device, a
@@ -68,8 +65,7 @@ namespace TensorSharp.Models
             _tpCudaMoETablesReady = true;
             _tpCudaMoEUsable = false;
 
-            if (!IsTensorParallel || _backend != BackendType.Cuda
-                || !s_qwenCudaMoeOnDeviceEnabled || _numExperts <= 0)
+            if (!IsTensorParallel || _backend != BackendType.Cuda || _numExperts <= 0)
                 return;
 
             int tp = TpDegree;
@@ -222,11 +218,10 @@ namespace TensorSharp.Models
             // (ts_moe_router_f32); any other routing must use the host path.
             if (!_normTopKProb || !CanUseTpCudaMoE(layer))
                 return null;
-            // Unlike single-GPU — where prefill falls back to a fast expert-grouped
-            // batched matmul and the on-device kernels are opt-in — the TP fallback
-            // is the naive per-(token, expert) loop, so on-device wins for prefill
-            // too. TS_TP_MOE_PREFILL_ONDEVICE=0 forces the host path.
-            if (seqLen > 1 && (seqLen > CudaMaxGridDim || !s_tpMoePrefillOnDevice))
+            // Unlike single-GPU — where prefill takes a fast expert-grouped batched
+            // matmul — the TP fallback is the naive per-(token, expert) loop, so
+            // on-device wins for prefill too.
+            if (seqLen > CudaMaxGridDim)
                 return null;
             if (_tpGroup.GetAllocator(rank) is not CudaAllocator alloc)
                 return null;

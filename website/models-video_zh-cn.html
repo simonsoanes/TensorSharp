@@ -200,9 +200,9 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
   <h2 id="video">Wan 的伴随文件、成本与分辨率</h2>
   <p>Wan 把<strong>提示词</strong>——在 Wan 2.2 检查点上还可以加一张<strong>上传的首帧图像</strong>——变成 H.264 MP4。<code>--model</code> 指定的 GGUF 只是 DiT，TensorSharp 会在其旁边解析两个伴随文件（放在 <code>VAE/</code>、<code>HighNoise/</code> 或 <code>LowNoise/</code> 子目录中同样可以）：</p>
   <ul>
-    <li><strong>UMT5-XXL 文本编码器</strong> —— 提示词 → 条件向量（<code>--video-text-encoder</code> / <code>TS_WAN_TE</code>）。去噪开始前即从显存释放。</li>
-    <li><strong>因果 3D 视频 VAE</strong> —— 潜变量 ↔ 帧（<code>--video-vae</code> / <code>TS_WAN_VAE</code>）。需要哪一个由 DiT 自身读出，不用你指定：Wan 2.1 与 A14B 使用 <code>wan_2.1_vae</code>，TI2V-5B 使用 <code>Wan2.2_VAE</code>。</li>
-    <li><strong>A14B 的第二个专家</strong> —— 两个 14B 专家必须同时存在。把它们放在同一目录，或放进 <code>HighNoise/</code> 与 <code>LowNoise/</code> 子目录，加载器会依据文件名配对（可用 CLI / 服务端参数 <code>--video-dit2</code> 或 <code>TS_WAN_DIT2</code> 覆盖；旧写法 <code>--wan-dit2</code> 仍可使用）。</li>
+    <li><strong>UMT5-XXL 文本编码器</strong> —— 提示词 → 条件向量（<code>--video-text-encoder</code> / <code>TS_VIDEO_TEXT_ENCODER</code>）。去噪开始前即从显存释放。</li>
+    <li><strong>因果 3D 视频 VAE</strong> —— 潜变量 ↔ 帧（<code>--video-vae</code> / <code>TS_VIDEO_VAE</code>）。需要哪一个由 DiT 自身读出，不用你指定：Wan 2.1 与 A14B 使用 <code>wan_2.1_vae</code>，TI2V-5B 使用 <code>Wan2.2_VAE</code>。</li>
+    <li><strong>A14B 的第二个专家</strong> —— 两个 14B 专家必须同时存在。把它们放在同一目录，或放进 <code>HighNoise/</code> 与 <code>LowNoise/</code> 子目录，加载器会依据文件名配对（可用 CLI / 服务端参数 <code>--video-dit2</code> 或 <code>TS_VIDEO_DIT2</code> 覆盖）。</li>
   </ul>
   <div class="table-scroll">
   <table>

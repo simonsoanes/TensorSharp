@@ -33,6 +33,12 @@
 // primary cache and the engine's live-cache continuation / prefix-cache reuse.
 // RestorePrimaryCache() reinstates the primary cache before any N==1 step that
 // follows a multi-sequence episode.
+//
+// A finished request's holder is retained (RetainSequenceCacheAs) as the prefix
+// cache's end state for its conversation's next turn, which takes it back with
+// TryRebindRetainedCache instead of re-prefilling. The holders read none of the
+// model's pages, so without this every conversation that ran beside another
+// reused nothing on its next turn.
 using System;
 using System.Collections.Generic;
 
@@ -61,6 +67,9 @@ namespace TensorSharp.Models
 
         // Per-request fused-decode cache holders, keyed by RequestId.
         private Dictionary<string, GptOssKvCacheHolder> _fusedHolders;
+        // Finished requests' holders kept for their conversations' next turns,
+        // keyed by the prefix cache's payload key.
+        private Dictionary<string, GptOssKvCacheHolder> _retainedFusedHolders;
         // RequestId whose holder is currently checked out into the active
         // _kvCacheK/_kvCacheV fields, or null when the primary cache is active.
         private string _activeFusedKey;
@@ -101,6 +110,62 @@ namespace TensorSharp.Models
 
         public bool HasFusedSequenceCache(string requestId)
             => requestId != null && _fusedHolders != null && _fusedHolders.ContainsKey(requestId);
+
+        /// <summary>A finished request's holder can be kept for its conversation's next turn wherever
+        /// requests run on holders at all.</summary>
+        public bool SupportsRetainedFusedCache => SupportsPerSequenceFusedForward;
+
+        public bool RetainSequenceCache(string requestId) => RetainSequenceCacheAs(requestId, requestId);
+
+        /// <summary>Move the finished holder of <paramref name="requestId"/> into the retained set under
+        /// <paramref name="key"/> (zero copy). A holder that is checked out is snapshotted first, with the
+        /// primary reinstated, so the active fields never point at a retained holder.</summary>
+        public bool RetainSequenceCacheAs(string requestId, string key)
+        {
+            if (_fusedHolders == null || string.IsNullOrEmpty(requestId) || string.IsNullOrEmpty(key))
+                return false;
+            if (!_fusedHolders.TryGetValue(requestId, out var holder))
+                return false;
+            _retainedFusedHolders ??= new Dictionary<string, GptOssKvCacheHolder>(StringComparer.Ordinal);
+            if (_retainedFusedHolders.ContainsKey(key)) return false;
+            _retainedFusedHolders.EnsureCapacity(checked(_retainedFusedHolders.Count + 1));
+
+            if (string.Equals(_activeFusedKey, requestId, StringComparison.Ordinal))
+            {
+                holder = SnapshotActiveCache();
+                _activeFusedKey = null;
+                if (_primaryHolder != null)
+                {
+                    LoadCacheHolder(_primaryHolder);
+                    _primaryHolder = null;
+                }
+            }
+
+            _retainedFusedHolders.Add(key, holder);
+            _fusedHolders.Remove(requestId);
+            return true;
+        }
+
+        /// <summary>Hand the retained holder <paramref name="retainedKey"/> to <paramref name="newRequestId"/>:
+        /// its next <see cref="BindSequenceCache"/> loads it (not fresh) and continues from its K/V.</summary>
+        public bool TryRebindRetainedCache(string retainedKey, string newRequestId)
+        {
+            if (_retainedFusedHolders == null || string.IsNullOrEmpty(retainedKey) || string.IsNullOrEmpty(newRequestId))
+                return false;
+            if (!_retainedFusedHolders.TryGetValue(retainedKey, out var holder) || holder.K == null)
+                return false;
+            _fusedHolders ??= new Dictionary<string, GptOssKvCacheHolder>(StringComparer.Ordinal);
+            if (_fusedHolders.ContainsKey(newRequestId)
+                || string.Equals(_activeFusedKey, newRequestId, StringComparison.Ordinal))
+                return false;
+            _fusedHolders.EnsureCapacity(checked(_fusedHolders.Count + 1));
+            _fusedHolders.Add(newRequestId, holder);
+            _retainedFusedHolders.Remove(retainedKey);
+            return true;
+        }
+
+        public void DiscardRetainedCache(string requestId)
+            => DiscardRetainedCaches(new[] { requestId }, Runtime.Scheduling.PrefixCache.ReleaseReason.Evicted);
 
         private GptOssKvCacheHolder SnapshotActiveCache() => new GptOssKvCacheHolder
         {
@@ -292,27 +357,34 @@ namespace TensorSharp.Models
             }
 
             _fusedHolders.Remove(requestId);
-            // Bounded by the same knob as Qwen's pool (TS_KV_HOLDER_POOL_MAX): a parked
-            // holder costs its whole K/V allocation for as long as it waits.
-            int poolMax = Runtime.Scheduling.ExecutionOptions.FromEnvironment().KvHolderPoolMax;
-            _holderPool ??= new List<GptOssKvCacheHolder>(Math.Max(1, poolMax));
-            if (_holderPool.Count < poolMax)
+            RecycleOrDisposeHolders(new[] { holder }, dispose: false);
+        }
+
+        /// <summary>
+        /// Park what the pool has room for (TS_KV_HOLDER_POOL_MAX: a parked holder costs its whole K/V
+        /// allocation for as long as it waits) and dispose the rest, or dispose everything when
+        /// <paramref name="dispose"/>. A parked holder's tensors stay alive, so the native decode-graph
+        /// pools (keyed on their host pointers) and device KV windows remain valid. A disposal frees bytes
+        /// the allocator may hand the next holder at the same address, which would replay a graph bound to
+        /// the freed windows, so the captured graphs are dropped - once for the whole batch.
+        /// </summary>
+        private void RecycleOrDisposeHolders(IReadOnlyList<GptOssKvCacheHolder> holders, bool dispose)
+        {
+            int poolMax = dispose ? 0 : Runtime.Scheduling.ExecutionOptions.FromEnvironment().KvHolderPoolMax;
+            bool disposed = false;
+            foreach (GptOssKvCacheHolder holder in holders)
             {
-                // Park the allocation for the next request. The tensors stay
-                // alive, so the native decode-graph pools (keyed on these host
-                // pointers) and their device KV windows remain valid - no reset.
-                _holderPool.Add(holder);
-            }
-            else
-            {
+                if (holder?.K == null) continue;
+                _holderPool ??= new List<GptOssKvCacheHolder>(Math.Max(1, poolMax));
+                if (_holderPool.Count < poolMax)
+                {
+                    _holderPool.Add(holder);
+                    continue;
+                }
                 DisposeHolder(holder);
-                // The native decode-graph pools key entries on the holder's
-                // K-cache pointer. Those bytes are now free and the allocator may
-                // hand the same address to the next holder, which would then
-                // replay a graph bound to the freed windows. Drop the captured
-                // graphs; they rebuild on the next decode.
-                ResetFusedModelDecodeCache();
+                disposed = true;
             }
+            if (disposed) ResetFusedModelDecodeCache();
         }
 
         /// <summary>Free every per-request holder (model teardown).</summary>
@@ -325,6 +397,12 @@ namespace TensorSharp.Models
                         DisposeHolder(kv.Value);
                 _fusedHolders.Clear();
                 _fusedHolders = null;
+            }
+            if (_retainedFusedHolders != null)
+            {
+                foreach (var kv in _retainedFusedHolders)
+                    DisposeHolder(kv.Value);
+                _retainedFusedHolders = null;
             }
             // The parked primary is not referenced by the active fields, so it
             // has to be freed here; the checked-out holder is freed by the normal
@@ -386,8 +464,6 @@ namespace TensorSharp.Models
         {
             if (!IsGgmlBackend || IsTensorParallel || _fusedHolders == null)
                 return false;
-            if (!FusedModelDecodeEnabled)
-                return false;   // TS_GPTOSS_MODEL_DECODE=0 debugs the whole kernel family
             int n = requestIds.Count;
             if (n < 2 || tokens.Length != n || positions.Length != n)
                 return false;

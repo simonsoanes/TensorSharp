@@ -132,28 +132,18 @@ too loose: it makes valid output unreachable and the request fails mid-string.
   skills are allowed and are written into the prompt instead of being offered
   as tools. The prompt instruction and output validation still run alongside
   the grammar, and a non-conforming result returns HTTP 422 on a non-streaming
-  or buffered response (`json_schema`, or `json_object` with
-  `TS_STRUCTURED_STREAM_BUFFER=1`); an unbuffered streamed `json_object` is
-  filtered to the balanced object but not validated.
+  or buffered response (`json_schema`); a streamed `json_object` is filtered to
+  the balanced object but not validated.
 - **`response_format` with `"think": true`** is accepted only on families whose
   protocol declares where the answer starts after reasoning: Gemma 4, Qwen 3.8
   Flash Next (`qwen4exp`), GPT-OSS, Muse-Glimmer, DeepSeek V4.1, GLM-5.3-Flash
   (`glm5next`) and Nemotron-H. The grammar stays idle while the model reasons
   and arms at that marker (for example `</think>`), skipping whitespace after
-  it. Other families return HTTP 400, and so does any `think` request when
-  `TS_JSON_GRAMMAR=0`.
+  it. Other families return HTTP 400.
 - **A schema the compiler cannot turn into a grammar** falls back to the
   first-token nudge, and a warning is logged. The exception is a `think`
   request on the families above, which fails instead, because the delayed
   grammar is required there.
-
-## Controls
-
-| Setting | Effect |
-|---|---|
-| `TS_JSON_GRAMMAR=0` | Fall back to prompt-and-repair (A/B testing) |
-| `TS_JSON_FORCE_OPEN=0` | Disable the first-token nudge used by that fallback |
-| `TS_STRUCTURED_STREAM_BUFFER=1` | Buffer a streamed `json_object` response as well. A streamed `json_schema` response is always buffered and schema-normalized before it is sent; `json_object` streams token by token by default |
 
 ## Using it
 

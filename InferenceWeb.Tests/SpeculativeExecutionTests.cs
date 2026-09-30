@@ -17,6 +17,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using TensorSharp.Models;
 using TensorSharp.Runtime;
 using TensorSharp.Runtime.Scheduling;
+using TensorSharp.Runtime.Scheduling.PrefixCache;
 using TensorSharp.Runtime.Speculative;
 
 namespace InferenceWeb.Tests;
@@ -195,10 +196,8 @@ public class SpeculativeExecutionTests
         Assert.Empty(model.ProtocolViolations);
     }
 
-    [Theory]
-    [InlineData(false)] // linear trunk
-    [InlineData(true)]  // batched (paged) trunk
-    public void EngineSpec_PrefixCaching_EosPastBlockBoundary_FinishesWithoutThrow(bool batchedTrunk)
+    [Fact]
+    public void EngineSpec_PrefixCaching_EosPastBlockBoundary_FinishesWithoutThrow()
     {
         // Production repro (the server enables prefix caching by default): a
         // long speculative generation crosses a generated block boundary, then
@@ -209,7 +208,7 @@ public class SpeculativeExecutionTests
         // used to hash positions past the end of that list and throw
         // ArgumentOutOfRangeException(pos) — the crash this change fixes.
         const int promptLen = 8; // fills block 0 exactly
-        var model = new FakeSpeculativeModel { BatchedTrunkEnabled = batchedTrunk };
+        var model = new FakeSpeculativeModel();
         // EOS = the 7th generated token (output index 6). Its committed
         // position (15) sits just below the block-1 boundary (16), so the
         // accepted draft tail pushes the committed count to/past 16 while the
@@ -224,54 +223,6 @@ public class SpeculativeExecutionTests
         Assert.Equal(7, seq.OutputTokens.Count);
         Assert.Equal(eosToken, seq.OutputTokens[^1]);
         Assert.Equal(ExpectedChain(model, promptLen, 6), seq.OutputTokens.Take(6));
-        Assert.Empty(model.ProtocolViolations);
-    }
-
-    [Fact]
-    public void EngineSpec_BatchedTrunk_GreedyStream_MatchesPlainDecodeAcrossBlockBoundaries()
-    {
-        // Batched-trunk speculation: every trunk pass must go through
-        // SpecForwardBatched (the linear SpecForward stays untouched), the
-        // sequence's K/V is flagged as paged storage, rollbacks use the
-        // per-slot snapshot APIs — and the output stream still equals the
-        // deterministic plain-greedy chain exactly.
-        const int promptLen = 5;
-        const int maxNew = 40;
-
-        var model = new FakeSpeculativeModel { BatchedTrunkEnabled = true };
-        model.DraftWrongPositions.Add(promptLen + 7);
-        model.DraftWrongPositions.Add(promptLen + 19);
-
-        var seq = RunEngineRequest(model, promptLen, maxNew, specEnabled: true);
-
-        Assert.Equal(SequenceStatus.FinishedLengthCapped, seq.Status);
-        Assert.Equal(ExpectedChain(model, promptLen, maxNew), seq.OutputTokens);
-        Assert.NotNull(seq.SpecStats);
-        Assert.True(seq.SpecStats.TokensAccepted > 0, "speculation never accepted a draft");
-        Assert.True(seq.SpecStats.RollbackSteps >= 1, "wrong drafts should have caused a rollback");
-        Assert.True(model.BatchedSpecForwardCalls > 0, "spec trunk never used the batched path");
-        Assert.Equal(0, model.LinearSpecForwardCalls);
-        Assert.True(model.SlotSnapshotCalls > 0, "verify never snapshotted the slot state");
-        Assert.True(model.SlotRestoreCalls >= 1, "rollback never restored the slot state");
-        Assert.True(seq.KvStateInPagedStorage, "batched-trunk steps must mark K/V as paged");
-        Assert.Empty(model.ProtocolViolations);
-    }
-
-    [Fact]
-    public void EngineSpec_BatchedTrunk_EosInsideAcceptedWindow_StopsAndTruncates()
-    {
-        const int promptLen = 5;
-        var model = new FakeSpeculativeModel { BatchedTrunkEnabled = true };
-        int eosToken = model.ExpectedNext(promptLen + 4);
-        model.EosTokenId = eosToken;
-
-        var seq = RunEngineRequest(model, promptLen, maxNewTokens: 32, specEnabled: true);
-
-        Assert.Equal(SequenceStatus.FinishedStopped, seq.Status);
-        Assert.Equal(ExpectedChain(model, promptLen, 5), seq.OutputTokens.Take(5));
-        Assert.Equal(eosToken, seq.OutputTokens[^1]);
-        Assert.Equal(6, seq.OutputTokens.Count);
-        Assert.True(model.BatchedSpecForwardCalls > 0);
         Assert.Empty(model.ProtocolViolations);
     }
 
@@ -292,26 +243,19 @@ public class SpeculativeExecutionTests
     // path (SpeculationProfitable=false, e.g. the pure-C# CUDA backend for
     // Gemma 4). The engine must serve the fast standard decode — never the
     // net-negative per-op spec path — so speculation never engages: no
-    // SpecForward calls (linear OR batched) and no spec stats, with output
+    // SpecForward calls and no spec stats, with output
     // identical to the plain stream. Regression guard for the backend gate.
-    [Theory]
-    [InlineData(false)]   // linear-trunk-capable model
-    [InlineData(true)]    // batched-trunk-capable model
-    public void EngineSpec_UnprofitableBackend_FallsBackToStandardDecode(bool batchedTrunk)
+    [Fact]
+    public void EngineSpec_UnprofitableBackend_FallsBackToStandardDecode()
     {
         const int promptLen = 5;
         const int maxNew = 16;
-        var model = new FakeSpeculativeModel
-        {
-            SpeculationProfitable = false,
-            BatchedTrunkEnabled = batchedTrunk,
-        };
+        var model = new FakeSpeculativeModel { SpeculationProfitable = false };
 
         var seq = RunEngineRequest(model, promptLen, maxNew, specEnabled: true);
 
         Assert.Equal(ExpectedChain(model, promptLen, maxNew), seq.OutputTokens);
         Assert.Equal(0, model.LinearSpecForwardCalls);
-        Assert.Equal(0, model.BatchedSpecForwardCalls);
         Assert.Null(seq.SpecStats);
     }
 
@@ -354,12 +298,13 @@ public class SpeculativeExecutionTests
         using var engine = new InferenceEngine(model, cfg, NullLogger.Instance);
         var greedy = new SamplingConfig { Temperature = 0f, TopK = 0, TopP = 1f, RepetitionPenalty = 1f, PresencePenalty = 0f, FrequencyPenalty = 0f };
 
-        var first = new SequenceState("reuse-1", Enumerable.Range(1, promptLen).ToList(), maxNew, BlockSize, greedy);
+        var first = new SequenceState("reuse-1", Enumerable.Range(1, promptLen).ToList(), maxNew, BlockSize, greedy,
+            cacheScope: "conversation");
         await engine.SubmitRequest(first).Completion;
         Assert.Equal(ExpectedChain(model, promptLen, maxNew), first.OutputTokens);
 
         var prompt2 = Enumerable.Range(1, promptLen).Concat(first.OutputTokens).Concat(new[] { 3, 5 }).ToList();
-        var second = new SequenceState("reuse-2", prompt2, maxNew, BlockSize, greedy);
+        var second = new SequenceState("reuse-2", prompt2, maxNew, BlockSize, greedy, cacheScope: "conversation");
         var completion = await engine.SubmitRequest(second).Completion;
 
         Assert.True(completion.PrefixCacheReusedTokens > 0, "the follow-up should have reused the first request's cache");
@@ -1124,8 +1069,22 @@ public class SpeculativeExecutionTests
         Assert.True(decoder.TokensDrafted > 0);
     }
 
-    private sealed class FakeSpeculativeModel : IBatchedSpeculativeModel
+    private sealed class FakeSpeculativeModel : ISpeculativeModel, IPageOnlyPrefixCacheModel
     {
+        // A page family over a resident primary: what the radix cache needs to resume a
+        // conversation's next turn from this fake.
+        public PrefixCacheCapabilities GetPrefixCacheCapabilities() => new()
+        {
+            Class = FamilyClass.P,
+            NamespaceFingerprint = KVStateFingerprint,
+            EndState = EndStateSupport.None,
+            PrimaryResident = true,
+            Truncation = TruncationKind.None,
+            Pages = PageSupport.A1HostSlab,
+        };
+
+        public long QuerySpareBytes(ResourceClass cls) => -1;
+
         private readonly List<int> _trunk = new();
         private int _recurrentState;       // advances with the trunk
         private int _recurrentSnapshot = -1;
@@ -1144,14 +1103,7 @@ public class SpeculativeExecutionTests
         public int RestoreCalls { get; private set; }
         public int EosTokenId { get; set; } = -1;
 
-        // Batched-trunk bookkeeping: when enabled, the engine must serve
-        // every speculative trunk pass through SpecForwardBatched (the
-        // linear SpecForward must stay untouched).
-        public bool BatchedTrunkEnabled { get; set; }
         public int LinearSpecForwardCalls { get; private set; }
-        public int BatchedSpecForwardCalls { get; private set; }
-        public int SlotSnapshotCalls { get; private set; }
-        public int SlotRestoreCalls { get; private set; }
 
         public FakeSpeculativeModel()
         {
@@ -1167,8 +1119,7 @@ public class SpeculativeExecutionTests
             LowConfidencePositions.Clear();
             ProtocolViolations.Clear();
             SnapshotCalls = RestoreCalls = 0;
-            LinearSpecForwardCalls = BatchedSpecForwardCalls = 0;
-            SlotSnapshotCalls = SlotRestoreCalls = 0;
+            LinearSpecForwardCalls = 0;
             BlockDraftCalls = 0;
         }
 
@@ -1375,42 +1326,6 @@ public class SpeculativeExecutionTests
                 return;
             }
             _trunk.RemoveRange(length, _trunk.Count - length);
-        }
-
-        // ---- IBatchedSpeculativeModel ----
-        public bool SupportsBatchedSpecTrunk => BatchedTrunkEnabled;
-
-        public void SpecForwardBatched(SequenceState seq, int[] tokens, int startPos,
-            float[] hAllOut, float[] logitsOut, bool allLogitsRows)
-        {
-            BatchedSpecForwardCalls++;
-            if (startPos != _trunk.Count)
-                ProtocolViolations.Add($"batched forward at startPos {startPos} but trunk holds {_trunk.Count}");
-            if (seq != null && startPos != seq.NumComputedTokens)
-                ProtocolViolations.Add($"batched forward at startPos {startPos} but sequence has {seq.NumComputedTokens} computed");
-            if (seq != null && seq.BlockTable.CapacityTokens < startPos + tokens.Length)
-                ProtocolViolations.Add($"block table covers {seq.BlockTable.CapacityTokens} tokens but pass needs {startPos + tokens.Length}");
-            ForwardCore(tokens, hAllOut, logitsOut, allLogitsRows);
-        }
-
-        public void SpecSnapshotRecurrentStateSlots(SequenceState seq)
-        {
-            SlotSnapshotCalls++;
-            _recurrentSnapshot = _recurrentState;
-        }
-
-        public void SpecRestoreRecurrentStateSlots(SequenceState seq)
-        {
-            SlotRestoreCalls++;
-            if (_recurrentSnapshot < 0)
-                ProtocolViolations.Add("slot restore without snapshot");
-            _recurrentState = _recurrentSnapshot;
-            // The real batched rollback never rewinds attention KV (reads are
-            // extent-bounded and rejected slots get overwritten); model that
-            // by truncating to the snapshot position so the next pass's
-            // position checks see the rolled-back extent.
-            if (_recurrentSnapshot >= 0 && _recurrentSnapshot <= _trunk.Count)
-                _trunk.RemoveRange(_recurrentSnapshot, _trunk.Count - _recurrentSnapshot);
         }
 
         private sealed class FakeTokenizer : ITokenizer

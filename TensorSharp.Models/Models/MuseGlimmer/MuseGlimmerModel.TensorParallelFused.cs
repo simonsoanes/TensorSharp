@@ -31,7 +31,6 @@
 // gets identical answers. Only rank 0 folds the final norm and the LM head -
 // on the 30B that head is ~1.1 GB, the largest tensor left once the layers are
 // sharded, and replicating it would hand back much of what TP just saved.
-// TS_MUSE_GLIMMER_TP_FUSED=0 forces the per-op TP path for A/B.
 // ---------------------------------------------------------------------------
 using System;
 using System.Collections.Generic;
@@ -65,9 +64,6 @@ namespace TensorSharp.Models
         /// back only when something needs to read the cache through host pointers.
         /// </summary>
         private bool _tpKvDeviceDirty;
-
-        private static readonly bool TpFusedForwardEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_MUSE_GLIMMER_TP_FUSED"), "0", StringComparison.Ordinal);
 
         /// <summary>
         /// True when the fused whole-model graph can be built per rank.
@@ -115,7 +111,7 @@ namespace TensorSharp.Models
             };
 
         internal bool CanUseTpFusedForward =>
-            FusedForwardEnabled && TpFusedForwardEnabled && IsTensorParallel && IsGgmlBackend &&
+            IsTensorParallel && IsGgmlBackend &&
             (_backend == BackendType.GgmlCuda || _backend == BackendType.GgmlVulkan) &&
             // Across nodes the local ranks still reduce on-device and the cluster
             // half of each boundary goes through the cross-node hook, exactly as

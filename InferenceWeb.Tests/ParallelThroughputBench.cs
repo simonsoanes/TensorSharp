@@ -310,7 +310,8 @@ public class ParallelThroughputBench
 
         public BenchEngine(string modelPath)
         {
-            BackendType backend = OperatingSystem.IsMacOS() ? BackendType.GgmlMetal : BackendType.GgmlCpu;
+            // The GGML backend this test process pins (TS_TEST_GGML_BACKEND).
+            BackendType backend = TestGates.PinnedGgmlBackend;
             Model = TensorSharp.Models.ModelBase.Create(modelPath, backend);
             Renderer = new KVCachePromptRenderer(new GgufPromptRenderer());
             BlockSize = 256;

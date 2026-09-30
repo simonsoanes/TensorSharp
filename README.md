@@ -158,8 +158,7 @@ KV prefix cache by default for every autoregressive family in the tables below
 (not DiffusionGemma or the image/video models). It reuses public prompt prefixes
 and each conversation's private state, respecting model and media boundaries;
 speculative decoding (`--spec`) keeps it on.
-Set `TS_SCHED_PREFIX_CACHE=0` to disable runtime prefix reuse, or
-`TS_PREFIX_CACHE_MODE=legacy` to select the compatibility path for diagnosis.
+Set `TS_SCHED_PREFIX_CACHE=0` to disable runtime prefix reuse.
 Server and CLI `--no-prefix-cache` also disable prefix reuse and startup warmup;
 on the server it also turns off the on-disk prefix checkpoints.
 
@@ -174,7 +173,7 @@ Full command reference: **[CLI](USAGE.md#console-application)** · **[Server](US
 
 ## Text and code embeddings
 
-Current source supports **Snowflake Arctic Embed L v2.0** and **all-MiniLM-L6-v2** GGUF encoders, serving normalized vectors through OpenAI `/v1/embeddings`, Ollama `/api/embed`, and legacy `/api/embeddings`. After the source build above, start the small MiniLM service:
+Current source supports **Snowflake Arctic Embed L v2.0** and **all-MiniLM-L6-v2** GGUF encoders, serving normalized vectors through OpenAI `/v1/embeddings` and Ollama `/api/embed`. After the source build above, start the small MiniLM service:
 
 ```bash
 curl --create-dirs -fL -o models/embeddings/all-MiniLM-L6-v2-Q8_0.gguf \

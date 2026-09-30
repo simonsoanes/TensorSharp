@@ -35,16 +35,15 @@ public sealed class OpenAIToolChoiceValidationTests : IDisposable
 
     [Theory]
     [MemberData(nameof(InvalidChoices))]
-    public async Task ImpossibleClientToolChoice_Returns400BeforeQueueOrStreaming(string architecture, bool stream, string scenario)
+    public async Task ImpossibleClientToolChoice_Returns400BeforeAdmissionOrStreaming(string architecture, bool stream, string scenario)
     {
         string choice = scenario == "named-undeclared"
             ? "{\"type\":\"function\",\"function\":{\"name\":\"undeclared_weather_tool\"}}" : "\"required\"";
         string tools = scenario switch { "required-absent" => "", "required-empty" => ",\"tools\":[]", _ => WeatherTools };
-        var (context, queue, service, runner) = await Invoke(architecture, stream, choice, tools);
+        var (context, service, runner) = await Invoke(architecture, stream, choice, tools);
         using (service)
         {
             Assert.Null(service.Model);
-            Assert.Equal(0, queue.TotalProcessed);
             Assert.Equal(0, runner.ExecuteCalls);
             Assert.Equal(StatusCodes.Status400BadRequest, context.Response.StatusCode);
             Assert.StartsWith("application/json", context.Response.ContentType);
@@ -77,11 +76,10 @@ public sealed class OpenAIToolChoiceValidationTests : IDisposable
     [MemberData(nameof(MalformedPolicies))]
     public async Task MalformedPolicy_Returns400BeforeAdmission(string architecture, bool stream, string policy)
     {
-        var (context, queue, service, runner) = await Invoke(architecture, stream, null, WeatherTools + "," + policy);
+        var (context, service, runner) = await Invoke(architecture, stream, null, WeatherTools + "," + policy);
         using (service)
         {
             Assert.Null(service.Model);
-            Assert.Equal(0, queue.TotalProcessed);
             Assert.Equal(0, runner.ExecuteCalls);
             Assert.Equal(StatusCodes.Status400BadRequest, context.Response.StatusCode);
             Assert.StartsWith("application/json", context.Response.ContentType);
@@ -102,11 +100,10 @@ public sealed class OpenAIToolChoiceValidationTests : IDisposable
     public async Task ValidClientChoice_ReachesExistingHostedModelGuard(bool stream, string scenario)
     {
         string choice = scenario == "named" ? "{\"type\":\"function\",\"function\":{\"name\":\"get_weather\"}}" : JsonSerializer.Serialize(scenario);
-        var (context, queue, service, runner) = await Invoke("qwen4exp", stream, choice, WeatherTools);
+        var (context, service, runner) = await Invoke("qwen4exp", stream, choice, WeatherTools);
         using (service)
         {
             Assert.Null(service.Model);
-            Assert.Equal(1, queue.TotalProcessed);
             Assert.Equal(0, runner.ExecuteCalls);
             Assert.Equal(stream ? StatusCodes.Status200OK : StatusCodes.Status404NotFound, context.Response.StatusCode);
             Assert.Contains("not hosted by this server", await Response(context));
@@ -120,11 +117,10 @@ public sealed class OpenAIToolChoiceValidationTests : IDisposable
     [InlineData(true, "auto")]
     public async Task InternalTools_RemainAvailableWithoutClientDeclarations(bool stream, string? choice)
     {
-        var (context, queue, service, runner) = await Invoke("qwen35", stream, choice == null ? null : JsonSerializer.Serialize(choice), "", codeEnabled: true);
+        var (context, service, runner) = await Invoke("qwen35", stream, choice == null ? null : JsonSerializer.Serialize(choice), "", codeEnabled: true);
         using (service)
         {
             Assert.Null(service.Model);
-            Assert.Equal(1, queue.TotalProcessed);
             Assert.Equal(1, runner.DeclareCalls);
             Assert.Equal(0, runner.ExecuteCalls);
             Assert.Equal(stream ? StatusCodes.Status200OK : StatusCodes.Status404NotFound, context.Response.StatusCode);
@@ -139,12 +135,11 @@ public sealed class OpenAIToolChoiceValidationTests : IDisposable
     [InlineData(true, "{\"type\":\"function\",\"function\":{\"name\":\"shell\"}}")]
     public async Task InternalToolCannotSilentlySatisfyExplicitClientContract(bool stream, string choice)
     {
-        var (context, queue, service, runner) = await Invoke("qwen35", stream, choice, "", codeEnabled: true);
+        var (context, service, runner) = await Invoke("qwen35", stream, choice, "", codeEnabled: true);
         using (service)
         {
             Assert.Null(service.Model);
             Assert.Equal(1, runner.DeclareCalls); // a real effective internal tool exists
-            Assert.Equal(0, queue.TotalProcessed);
             Assert.Equal(0, runner.ExecuteCalls);
             Assert.Equal(StatusCodes.Status400BadRequest, context.Response.StatusCode);
             Assert.Contains("at least one client-declared function", await Response(context));
@@ -152,7 +147,7 @@ public sealed class OpenAIToolChoiceValidationTests : IDisposable
     }
 
     private const string WeatherTools = ",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}}]";
-    private async Task<(DefaultHttpContext, InferenceQueue, UnloadedService, RecordingRunner)> Invoke(
+    private async Task<(DefaultHttpContext, UnloadedService, RecordingRunner)> Invoke(
         string architecture, bool stream, string? choice, string tools, bool codeEnabled = false)
     {
         var context = new DefaultHttpContext();
@@ -161,14 +156,13 @@ public sealed class OpenAIToolChoiceValidationTests : IDisposable
         context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(request));
         context.Request.ContentType = "application/json";
         context.Response.Body = new MemoryStream();
-        var queue = new InferenceQueue();
         var service = new UnloadedService(architecture);
         var runner = new RecordingRunner();
         var registry = new SkillRegistry(new SkillRegistryOptions { Roots = Array.Empty<string>() });
         var options = ServerOptionsBuilder.Build(new[] { "--model", Path.Combine(_root, "hosted.gguf"), "--no-skills" }, _root);
-        await new OpenAIChatAdapter(service, queue, options, new UploadStoragePolicy(Path.Combine(_root, "uploads")), registry,
+        await new OpenAIChatAdapter(service, options, new UploadStoragePolicy(Path.Combine(_root, "uploads")), registry,
             codeEnabled ? runner : null, new SessionWorkspaceManager(Path.Combine(_root, "workspaces")), NullLoggerFactory.Instance).ChatCompletionsAsync(context);
-        return (context, queue, service, runner);
+        return (context, service, runner);
     }
     private static async Task<string> Response(DefaultHttpContext context)
     { context.Response.Body.Position = 0; return await new StreamReader(context.Response.Body).ReadToEndAsync(); }

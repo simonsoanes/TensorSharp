@@ -22,7 +22,7 @@ forward (see [Serving](#serving-continuous-batching)).
 | Modalities | Text only |
 | Thinking | No |
 | Tool calling | No — the protocol renders neither tool declarations nor `role: "tool"` results |
-| Batched / paged forward | **Default** — [`HunyuanDenseModel.BatchedForward.cs`](../../TensorSharp.Models/Models/HunyuanDense/HunyuanDenseModel.BatchedForward.cs) (`IBatchedPagedModel`); `TS_HUNYUAN_BATCHED=0` selects the K/V-snapshot swap path |
+| Batched / paged forward | **Default** — [`HunyuanDenseModel.BatchedForward.cs`](../../TensorSharp.Models/Models/HunyuanDense/HunyuanDenseModel.BatchedForward.cs) (`IBatchedPagedModel`); `--no-continuous-batching` selects the K/V-snapshot swap path |
 | Speculative decoding | Not supported |
 | Multi-GPU | Single device. `MultiGpuLimitation` says so on stderr rather than leaving extra GPUs idle in silence |
 | Backends | Every backend, through the generic per-op path: `cpu`, `ggml_cpu`, `ggml_metal`, `ggml_cuda`, `ggml_vulkan`, `cuda`, `mlx` |
@@ -110,14 +110,14 @@ the startup prefix-cache warm-up failing the same way. It now offers both:
 - **Batched paged forward (default).** One `ForwardBatch` packs every
   scheduled token of every running request, scatters K/V into per-layer paged
   buffers through the slot mapping and runs per-request causal attention through
-  the native paged-attention kernel (`TS_PAGED_ATTN_KERNEL`, as for Mistral 3).
+  the native paged-attention kernel (as for Mistral 3).
   The per-layer order is the one above: NeoX RoPE, then per-head Q/K RMSNorm.
   A block-quantized KV cache (`q8_0`/`q4_0`) declines this path, because the
   paged buffers are F32.
 - **K/V-state snapshot.** Every layer is full causal attention over a linear
   cache, so `TryExtractKVBlock` / `TryInjectKVBlock` restore exactly what a
-  fresh prefill writes. With `TS_HUNYUAN_BATCHED=0` (or a block-quantized KV
-  cache) concurrent requests take turns on the single cache by swapping
+  fresh prefill writes. Under `--no-continuous-batching` (or with a
+  block-quantized KV cache) concurrent requests take turns on the single cache by swapping
   snapshots; they are served correctly but serially.
 
 Prefix reuse works on both paths, through the Radix prefix cache (the default

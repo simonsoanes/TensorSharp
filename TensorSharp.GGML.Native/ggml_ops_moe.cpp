@@ -1384,8 +1384,7 @@ namespace
         // forward (the 40×/forward alloc churn was the dominant prefill cost).
         // The reused buffer is grown once to the largest seen graph and kept; it's
         // shared across ops but prefill is serialized under the GPU compute lock.
-        // Falls back to per-call allocation when the reuse path is unavailable
-        // (TS_GGML_REUSE_COMPUTE_BUF=0 / unsupported backend).
+        // Falls back to per-call allocation when the backend has no reuse path.
         BufferHandle backend_buffer(nullptr);
         // A streamed offload graph runs BETWEEN two slices of the outer
         // whole-model graph, whose tensors are placed in the shared reuse
@@ -1810,10 +1809,6 @@ namespace tsg
     {
         static const bool s_on = []() {
             const char* e = std::getenv("TS_HOST_MOE_VERIFY");
-            if (e == nullptr)
-                // Kept for the Qwen3.5 debugging sessions this seam was first
-                // built against; the new name covers every model.
-                e = std::getenv("TS_QWEN35_HOST_MOE_VERIFY");
             return e != nullptr && e[0] == '1';
         }();
         return s_on;

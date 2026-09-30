@@ -190,7 +190,7 @@ public class Mistral3BatchedForwardTests
             .FirstOrDefault(p =>
             {
                 var n = Path.GetFileName(p).ToLowerInvariant();
-                return (n.Contains("ministral|mistral") || n.Contains("mistral"))
+                return (n.Contains("ministral") || n.Contains("mistral"))
                     && !n.Contains("mmproj");
             });
         if (modelPath == null)
@@ -201,7 +201,7 @@ public class Mistral3BatchedForwardTests
         _output.WriteLine($"[mistral3] loading {Path.GetFileName(modelPath)}");
         try
         {
-            BackendType backend = OperatingSystem.IsMacOS() ? BackendType.GgmlMetal : BackendType.GgmlCpu;
+            BackendType backend = TestGates.PinnedGgmlBackend;
             var model = (Mistral3Model)ModelBase.Create(modelPath, backend);
             await Task.Yield();
             return model;

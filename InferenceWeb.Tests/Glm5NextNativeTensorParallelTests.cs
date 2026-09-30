@@ -11,7 +11,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Runtime.InteropServices;
 using TensorSharp;
 using TensorSharp.Models;
 using TensorSharp.Runtime;
@@ -31,9 +30,9 @@ public sealed class Glm5NextNativeTensorParallelTests : IDisposable
         try { Directory.Delete(_dir, recursive: true); } catch (IOException) { }
     }
 
-    private NativeEnvironmentScope NativeCpuTpEnvironment()
+    private NativeEnvScope NativeCpuTpEnvironment()
     {
-        var env = new NativeEnvironmentScope();
+        var env = new NativeEnvScope();
         // The native executor normally requires one GPU per rank. Oversubscription
         // is its explicit test mode; with ggml_cpu both ranks share the CPU backend
         // while exercising the same source slicing and validation code.
@@ -52,7 +51,7 @@ public sealed class Glm5NextNativeTensorParallelTests : IDisposable
         string path = GlmDsaSyntheticModelBuilder.WriteGlm5NextTpFixture(
             Path.Combine(_dir, "aligned.gguf"), numHeads: 4, quantizeAttentionOutput: true);
 
-        using NativeEnvironmentScope env = NativeCpuTpEnvironment();
+        using NativeEnvScope env = NativeCpuTpEnvironment();
         using ModelBase single = ModelBase.Create(path, BackendType.GgmlCpu, tpDegree: 1);
         using ModelBase parallel = ModelBase.Create(path, BackendType.GgmlCpu, tpDegree: 2);
 
@@ -82,7 +81,7 @@ public sealed class Glm5NextNativeTensorParallelTests : IDisposable
         string path = GlmDsaSyntheticModelBuilder.WriteGlm5NextTpFixture(
             Path.Combine(_dir, "unaligned.gguf"), numHeads: 2, quantizeAttentionOutput: true);
 
-        using NativeEnvironmentScope env = NativeCpuTpEnvironment();
+        using NativeEnvScope env = NativeCpuTpEnvironment();
 
         // Establish that the fixture itself is valid; only the two-rank split is
         // impossible. Q8_0 has 32-value blocks, while each KDA head is 16 wide,
@@ -115,55 +114,6 @@ public sealed class Glm5NextNativeTensorParallelTests : IDisposable
             Assert.True(float.IsFinite(expected[i]) && float.IsFinite(actual[i]),
                 $"non-finite logit at {i}: expected={expected[i]}, actual={actual[i]}");
             Assert.InRange(MathF.Abs(expected[i] - actual[i]), 0.0f, tolerance);
-        }
-    }
-
-    /// <summary>
-    /// Environment.SetEnvironmentVariable is sufficient for managed readers,
-    /// but on Unix .NET's environment table is not guaranteed to update libc's
-    /// table after process startup. The native executor reads its diagnostic TP
-    /// switches with getenv(), so keep both views synchronized in this test.
-    /// </summary>
-    private sealed class NativeEnvironmentScope : IDisposable
-    {
-        private readonly Dictionary<string, string?> _originals = new();
-
-        [DllImport("libc", EntryPoint = "setenv", CharSet = CharSet.Ansi, SetLastError = true)]
-        private static extern int SetEnvUnix(string name, string value, int overwrite);
-
-        [DllImport("libc", EntryPoint = "unsetenv", CharSet = CharSet.Ansi, SetLastError = true)]
-        private static extern int UnsetEnvUnix(string name);
-
-        [DllImport("ucrtbase", EntryPoint = "_putenv_s", CharSet = CharSet.Ansi, SetLastError = true)]
-        private static extern int PutEnvWindows(string name, string value);
-
-        public void Set(string name, string? value)
-        {
-            if (!_originals.ContainsKey(name))
-                _originals[name] = Environment.GetEnvironmentVariable(name);
-            SetBoth(name, value);
-        }
-
-        public void Dispose()
-        {
-            foreach (var pair in _originals)
-                SetBoth(pair.Key, pair.Value);
-        }
-
-        private static void SetBoth(string name, string? value)
-        {
-            Environment.SetEnvironmentVariable(name, value);
-            int result;
-            if (OperatingSystem.IsWindows())
-            {
-                result = PutEnvWindows(name, value ?? string.Empty);
-            }
-            else
-            {
-                result = value == null ? UnsetEnvUnix(name) : SetEnvUnix(name, value, overwrite: 1);
-            }
-            if (result != 0)
-                throw new InvalidOperationException($"Failed to update native environment variable '{name}'.");
         }
     }
 }

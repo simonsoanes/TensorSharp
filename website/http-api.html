@@ -22,7 +22,7 @@
   <table>
     <thead><tr><th>Style</th><th>Endpoints</th></tr></thead>
     <tbody>
-      <tr><td><strong>Ollama-compatible</strong></td><td><code>/api/embed</code>, <code>/api/embeddings</code>, <code>/api/generate</code>, <code>/api/chat/ollama</code>, <code>/api/tags</code>, <code>/api/show</code></td></tr>
+      <tr><td><strong>Ollama-compatible</strong></td><td><code>/api/embed</code>, <code>/api/generate</code>, <code>/api/chat/ollama</code>, <code>/api/tags</code>, <code>/api/show</code></td></tr>
       <tr><td><strong>OpenAI-compatible</strong></td><td><code>/v1/embeddings</code>, <code>/v1/chat/completions</code>, <code>/v1/responses</code>, <code>/v1/models</code>, <code>/v1/videos/generations</code>, <code>/v1/skills</code></td></tr>
       <tr><td><strong>Jev-compatible</strong></td><td><code>/v1/systemone</code> (typed decisions on a hosted DiffusionGemma model — <a href="#jev">below</a>)</td></tr>
       <tr><td><strong>Web UI (SSE)</strong></td><td><code>/api/chat</code>, <code>/api/sessions</code>, <code>/api/models</code>, <code>/api/models/load</code>, <code>/api/upload</code>, <code>/api/image-generate</code>, <code>/api/image-generate/stream</code>, <code>/api/image-edit</code>, <code>/api/image-edit/stream</code>, <code>/api/video-generate</code>, <code>/api/video-generate/stream</code>, <code>/api/skills</code>, <code>/api/code/artifacts</code></td></tr>
@@ -35,7 +35,7 @@
   <div class="callout warn"><div class="ic">🔒</div><p>The server has no API-key authentication or built-in TLS and listens on <code>0.0.0.0:5000</code>. Use it on a trusted network or put an authenticating TLS reverse proxy in front of it.</p></div>
 
   <h2 id="embeddings">Embedding service</h2>
-  <p>Start with <code>--model encoder.gguf --embeddings</code> to host Snowflake Arctic Embed L v2.0 or MiniLM. <code>POST /v1/embeddings</code>, <code>POST /api/embed</code> and <code>POST /api/embeddings</code> return normalized vectors on pure C# <code>cpu</code> or native <code>ggml_cpu</code> / <code>ggml_metal</code> / <code>ggml_cuda</code>. <a href="embeddings.html">Downloads, APIs, truncation, and retrieval quality →</a></p>
+  <p>Start with <code>--model encoder.gguf --embeddings</code> to host Snowflake Arctic Embed L v2.0 or MiniLM. <code>POST /v1/embeddings</code> and <code>POST /api/embed</code> return normalized vectors on pure C# <code>cpu</code> or native <code>ggml_cpu</code> / <code>ggml_metal</code> / <code>ggml_cuda</code>. <a href="embeddings.html">Downloads, APIs, truncation, and retrieval quality →</a></p>
 
   <h2 id="quick-call">Quick call after the server starts</h2>
   <p>The server quickstart hosts <code>gemma-4-E4B-it-Q8_0.gguf</code>. Copy this into a second terminal:</p>
@@ -333,7 +333,7 @@ curl -X DELETE http://localhost:5000/api/skills/pdf   # {"removed":true}</code><
   <div class="callout warn"><div class="ic">🔒</div><p>An uploaded skill is untrusted content, and it is validated before anything lands: every ZIP entry uses the same path guard as model reads, decompressed sizes are enforced, and archives are capped at 4096 files, 64 MB per file, 256 MB total and 200× compression. <code>skills_run</code> remains absent unless the server starts with <code>--skills-allow-exec</code>; under the default <code>required</code> policy it runs in a qualifying OS sandbox or refuses. This still authorizes model-selected arbitrary code and belongs only on a host whose users and skills are trusted. → <a href="cli.html#skills">Skill flags</a></p></div>
 
   <h2 id="structured">5 · Structured outputs (JSON schema)</h2>
-  <p>The OpenAI <code>response_format</code> accepts <code>text</code>, <code>json_object</code>, and validated <code>json_schema</code>. The server injects strict JSON instructions and validates the output before returning it. By default it also compiles the schema (or a generic JSON-object grammar) into a <strong>grammar that constrains decoding</strong> token by token. <code>TS_JSON_GRAMMAR=0</code> turns the grammar off; the request then only constrains the <strong>first sampled token</strong> to a <code>{</code>-opening candidate, so chatty models cannot ramble prose before the object (<code>TS_JSON_FORCE_OPEN=0</code> disables that as well).</p>
+  <p>The OpenAI <code>response_format</code> accepts <code>text</code>, <code>json_object</code>, and validated <code>json_schema</code>. The server injects strict JSON instructions and validates the output before returning it. It also compiles the schema (or a generic JSON-object grammar) into a <strong>grammar that constrains decoding</strong> token by token. A schema the grammar cannot express falls back to constraining only the <strong>first sampled token</strong> to a <code>{</code>-opening candidate, so chatty models still cannot ramble prose before the object.</p>
   <pre data-lang="bash"><code>curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
@@ -360,7 +360,7 @@ curl -X DELETE http://localhost:5000/api/skills/pdf   # {"removed":true}</code><
     },
     "max_tokens": 120
   }'</code></pre>
-  <div class="callout warn"><div class="ic">⚠️</div><p><code>json_schema</code> cannot be combined with caller <code>tools</code>. <code>think</code> is refused too, except on families whose reasoning the grammar can wait out — Gemma 4, Qwen 3.8 Flash Next, GPT-OSS, Muse-Glimmer, DeepSeek V4.1, <code>glm5next</code> and Nemotron-H — where the grammar starts once the reasoning ends; with <code>TS_JSON_GRAMMAR=0</code> that combination is refused as well. It can be combined with <code>skills</code>, but the selected skill bodies are inlined and all built-in skill/code tools are suppressed for that request because schema-constrained output cannot emit their call markup. Invalid schemas return HTTP <code>400</code>; outputs that fail validation return HTTP <code>422</code>.</p></div>
+  <div class="callout warn"><div class="ic">⚠️</div><p><code>json_schema</code> cannot be combined with caller <code>tools</code>. <code>think</code> is refused too, except on families whose reasoning the grammar can wait out — Gemma 4, Qwen 3.8 Flash Next, GPT-OSS, Muse-Glimmer, DeepSeek V4.1, <code>glm5next</code> and Nemotron-H — where the grammar starts once the reasoning ends. It can be combined with <code>skills</code>, but the selected skill bodies are inlined and all built-in skill/code tools are suppressed for that request because schema-constrained output cannot emit their call markup. Invalid schemas return HTTP <code>400</code>; outputs that fail validation return HTTP <code>422</code>.</p></div>
 
   <h2 id="webui-sse">6 · Web UI SSE protocol (<code>/api/chat</code>)</h2>
   <p>This is the protocol the bundled chat UI uses; external UIs can plug into the same endpoint. Every event is a JSON object delivered as a single <code>data: …</code> SSE frame.</p>

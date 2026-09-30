@@ -43,13 +43,16 @@ def main():
         parser.error("ubatch must be positive")
     lib = ctypes.CDLL(str(args.library.resolve()))
     load = lib.TSGgml_Dsv4LoadModel
-    load.argtypes = [ctypes.c_char_p] + [ctypes.c_int]*5 + [ctypes.c_char_p]
+    load.argtypes = [ctypes.c_char_p] + [ctypes.c_int]*4 + [ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
     load.restype = ctypes.c_void_p
     forward = lib.TSGgml_Dsv4Forward
     forward.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
     forward.restype = ctypes.c_int
-    reset = lib.TSGgml_Dsv4Reset
-    reset.argtypes, reset.restype = [ctypes.c_void_p], None
+    reset_checked = lib.TSGgml_Dsv4ResetChecked
+    reset_checked.argtypes, reset_checked.restype = [ctypes.c_void_p], ctypes.c_int
+    def reset(handle):
+        if reset_checked(handle) != 1:
+            raise RuntimeError("native reset was refused")
     free = lib.TSGgml_Dsv4Free
     free.argtypes, free.restype = [ctypes.c_void_p], None
     previous = {name: os.environ.get(name) for name in ("TS_DSV4_GATHER", "TS_DSV41_COMPACT_RAW_GATHER")}
@@ -64,7 +67,7 @@ def main():
             os.environ["TS_DSV4_GATHER"] = "1" if enabled else "0"
             os.environ["TS_DSV41_COMPACT_RAW_GATHER"] = "1" if compact else "0"
             handle = load(str(args.fixture_dir / "deepseek41-fixture.gguf").encode(),
-                          args.gpus, max(256, len(tokens)+1), args.ubatch, 2, 0, args.backend.encode())
+                          args.gpus, max(256, len(tokens)+1), args.ubatch, 2, None, 0, args.backend.encode(), 0)
             if not handle:
                 raise RuntimeError("native fixture load failed")
             results = {}

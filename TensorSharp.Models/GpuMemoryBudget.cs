@@ -72,8 +72,7 @@ namespace TensorSharp.Models
 
         /// <summary>
         /// VRAM to keep free for the driver, other processes, and the transient
-        /// allocations our own graph rebuilds make. TS_VRAM_HEADROOM_MB overrides
-        /// (0 disables the policy and restores the fixed-constant behaviour).
+        /// allocations our own graph rebuilds make. TS_VRAM_HEADROOM_MB overrides.
         /// </summary>
         internal static long ResolveHeadroomBytes(long totalBytes)
         {
@@ -88,8 +87,7 @@ namespace TensorSharp.Models
         /// <summary>
         /// Device bytes still available for policy-sized buffers once the headroom
         /// reserve is set aside. False when the backend has no device budget, the
-        /// query fails, or the operator disabled the policy — callers then keep
-        /// their own default untouched.
+        /// query fails — callers then keep their own default untouched.
         /// </summary>
         internal static bool TryGetSpareBytes(BackendType backend, out long spareBytes)
             => TryGetSpareBytes(AppliesTo(backend), out spareBytes);
@@ -106,8 +104,6 @@ namespace TensorSharp.Models
         {
             spareBytes = 0;
             if (!backendApplies)
-                return false;
-            if (string.Equals(Environment.GetEnvironmentVariable("TS_VRAM_HEADROOM_MB"), "0", StringComparison.Ordinal))
                 return false;
             if (!GgmlBasicOps.TryGetDeviceMemoryInfo(out long freeBytes, out long totalBytes) || totalBytes <= 0)
                 return false;

@@ -313,9 +313,7 @@ public sealed class DiffusionGemmaInterleaveTests(Xunit.Abstractions.ITestOutput
     // ---- fallback switches a job latches mid-block (no weights) --------------------------------
 
     private static readonly DiffusionFallbackLatches Fresh = new(
-        FusedDecodeOk: true, FusedLmHeadTailOk: true, DeviceSampleOk: true,
-        MlxFusedDeviceMoeOk: true, MlxFusedDeviceMoeChecked: false,
-        MlxGatherQmmMoeOk: true, MlxGatherQmmMoeChecked: false);
+        FusedDecodeOk: true, FusedLmHeadTailOk: true, DeviceSampleOk: true);
 
     private static DiffusionGemmaModel BareModel()
     {
@@ -346,28 +344,6 @@ public sealed class DiffusionGemmaInterleaveTests(Xunit.Abstractions.ITestOutput
         DiffusionFallbackLatches both = Fresh with { FusedDecodeOk = false, FusedLmHeadTailOk = false };
         Assert.Equal(new[] { Fresh, Fresh, both }, seen);
         Assert.Equal(both, model.FallbackLatches);
-    }
-
-    // A job that runs an opt-in MLX MoE path's one-time self-check before the block does must not mark
-    // the check done for the block: the block runs its own, and both verdicts count after it.
-    [Fact]
-    public void AJobsSelfCheck_DoesNotStandInForTheBlocks()
-    {
-        DiffusionGemmaModel model = BareModel();
-        var handoff = new DiffusionBlockHandoff(model, () =>
-        {
-            if (!model.FallbackLatches.MlxGatherQmmMoeChecked)
-                model.FallbackLatches = model.FallbackLatches with { MlxGatherQmmMoeChecked = true, MlxGatherQmmMoeOk = false };
-        });
-
-        handoff.BeforeForward();
-        Assert.Equal(Fresh, model.FallbackLatches);
-        model.FallbackLatches = model.FallbackLatches with { MlxGatherQmmMoeChecked = true };   // the block's check passes
-        handoff.BeforeForward();
-        Assert.Equal(Fresh with { MlxGatherQmmMoeChecked = true }, model.FallbackLatches);
-        handoff.EndBlock();
-
-        Assert.Equal(Fresh with { MlxGatherQmmMoeChecked = true, MlxGatherQmmMoeOk = false }, model.FallbackLatches);
     }
 
     [Fact]

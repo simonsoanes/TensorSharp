@@ -620,7 +620,7 @@ namespace TensorSharp.AgentHost.Skills
                     string? id = message.ToolCalls![j].Id;
                     if (string.IsNullOrEmpty(id))
                     {
-                        // Legacy callers may have no IDs. Generate wire-only IDs,
+                        // Callers may send no IDs. Generate wire-only IDs,
                         // reserving every explicit ID before choosing fallbacks.
                         do { id = "call_" + (nextId++).ToString(CultureInfo.InvariantCulture); }
                         while (!used.Add(id));
@@ -634,7 +634,7 @@ namespace TensorSharp.AgentHost.Skills
                 int end = i + 1;
                 while (end < messages.Count && messages[end].Role == "tool") end++;
                 var remaining = new List<string>(callIds[i]);
-                // Explicit out-of-order results take precedence over legacy
+                // Explicit out-of-order results take precedence over
                 // positional association, even if an ID-less result comes first.
                 for (int j = i + 1; j < end; j++)
                     if (!string.IsNullOrEmpty(resultIds[j])) remaining.Remove(resultIds[j]!);

@@ -63,13 +63,19 @@ def build_profiles(native_sha256, sparse_source=SPARSE_SOURCE, reference_source=
         profile["native_policy"] = "exact"
         profile["plan_status"] = "prepared-not-executed"
         profile["archived_input"] = copy.deepcopy(sources[source_key])
-        profile["archived_input"]["rebound_fields"] = ["id", "expected_native_sha256", "suite --profile labels"]
+        profile["archived_input"]["rebound_fields"] = ["id", "expected_native_sha256", "suite --profile labels",
+                                                       "extra_args placement flag", "env.TS_DSV41_TP removed"]
         for command in profile["suites"]:
             if "--profile" in command:
                 command[command.index("--profile") + 1] = profile["id"]
+        # The archived launches predate the --tp/--layer-split split: they asked for layer
+        # placement as --tp 7 with TS_DSV41_TP=0. Layer profiles now pass --layer-split 7;
+        # the expert-TP profile keeps --tp 7, which selects routed-MoE tensor parallelism.
+        profile["env"].pop("TS_DSV41_TP", None)
+        args = profile["extra_args"]
+        flag = next(f for f in ("--tp", "--layer-split") if f in args)
+        args[args.index(flag)] = "--tp" if name == "accurate-expert-tp7" else "--layer-split"
         if name == "accurate-expert-tp7":
-            profile["env"]["TS_DSV41_TP"] = "7"
-            profile["archived_input"]["rebound_fields"] += ["env.TS_DSV41_TP"]
             profile["capacity_review"] = {
                 "status": "reviewed-for-first-run-runtime-capacity-unqualified",
                 "gpu_count": 7, "cpu_expert_layers": 12, "max_context": 65536,

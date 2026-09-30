@@ -39,15 +39,12 @@ namespace TensorSharp.Models
     {
         /// <summary>
         /// Path of a DFlash drafter GGUF, if one was configured
-        /// (<c>--draft-model</c> / <c>TS_QWEN35_DFLASH</c>) AND it really is one.
+        /// (<c>--draft-model</c>) AND it really is one.
         /// The same flag also names an MTP-only file for other architectures, so
         /// the architecture string decides rather than the extension.
         /// </summary>
-        internal static string ResolveQwen35DFlashPath(string explicitPath)
+        internal static string ResolveQwen35DFlashPath(string path)
         {
-            string path = !string.IsNullOrWhiteSpace(explicitPath)
-                ? explicitPath
-                : Environment.GetEnvironmentVariable("TS_QWEN35_DFLASH");
             if (string.IsNullOrWhiteSpace(path) || !System.IO.File.Exists(path))
                 return null;
             try
@@ -127,9 +124,6 @@ namespace TensorSharp.Models
         private bool TryDFlashSpecForwardFused(Tensor hidden, int startPos, int seqLen,
             float[] hAllOut, float[] logitsOut, bool allLogitsRows, bool captureAll, bool captureLast)
         {
-            if (!_fusedVerifyEnabled)
-                return false;
-
             int nCap = _dflash.TargetLayerIds.Length;
             int hs = Config.HiddenSize;
             int feat = _dflash.FeatureSize;

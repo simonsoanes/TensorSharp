@@ -15,21 +15,19 @@ image input needs `mmproj-BF16.gguf`: the CLI loads it from beside the model whe
 
 On the GGML backends the whole token runs as (almost) one graph — embedding,
 PLE (in-graph), all 48 layers, the final mixer and the LM head — with a
-shape-keyed cache of captured graphs (`TS_Q4E_TOKEN_GRAPH=0` falls back to
-per-layer fused kernels, which in turn fall back op-by-op). Vision rides the
+shape-keyed cache of captured graphs (where the span declines, per-layer fused
+kernels run instead, and those in turn fall back op-by-op). Vision rides the
 Qwen3.5-VL tower with (T,H,W) IMRoPE positions; multi-image and multi-turn
 image sessions are supported, with KV reuse across turns (the GDN recurrence
 cannot rewind, so a cached prefix is reused only when the new prompt extends
-it exactly; see [Retained-prefix reuse](#retained-prefix-reuse)). With the
-default radix prefix cache (`TS_PREFIX_CACHE_MODE=tree`) that reuse stops at
-the first image or video span of a conversation: the family does not declare
+it exactly; see [Retained-prefix reuse](#retained-prefix-reuse)). In the
+radix prefix cache that reuse stops at the first image or video span of a
+conversation: the family does not declare
 reuse across a media span (it stores an M-RoPE cache gap that no
 reference-position test covers yet). Because this family resumes only from a
 holder or checkpoint of exactly the matched length, a later turn reuses at most
 a stored checkpoint that ends before the attachment (typically the system
 prompt) and re-prefills the rest.
-`TS_PREFIX_CACHE_MODE=legacy` selects the older retained-holder matching, to
-which this limit does not apply.
 
 Thinking can be switched on or off. With it off, the assistant turn opens with
 the closed, empty `<think>\n\n</think>` block the published template emits,
@@ -173,6 +171,22 @@ still images, one span each, as before. The full-checkpoint check is
 `video_order` / `video_timestamp` scenarios against a served Qwen3.8 with its
 `mmproj-BF16.gguf`.
 
+## Thinking budget
+
+With thinking on, a reasoning block that reaches `TS_THINKING_BUDGET` (default
+75% of `max_tokens` from 512 up) is closed and the answer follows inside
+`max_tokens`, in the server and in the interactive CLI. `</think>` is one
+trained token (248069), and ahead of it the host writes Qwen's published
+hand-over sentence ("Considering the limited time by the user, I have to give
+the solution based on the thinking directly now."). Before 2026-09-29 the family
+had no closing token, so a turn whose reasoning reached the budget was stopped
+with an EMPTY answer (`finish_reason` `thinking_budget`): four concurrent
+three-turn conversations with `max_tokens` 2000 on 4x A40 (`--tp 4` and
+`--layer-split 4`) passed 0/4, every failure an empty turn. With the hand-over,
+the same `--tp 4` run passed 4/4: the sentence closed four turns, every turn
+answered, and every conversation reused its previous turn (turn 3: 1564-3482 of
+1591-3509 prompt tokens).
+
 ## Continuous batching
 
 Concurrent requests are served through **per-sequence state holders**: each
@@ -223,12 +237,15 @@ Qwen 3.5 and DeepSeek V4 paths have:
   tokens the new prompt does not reproduce to the last one is not a
   continuation, and every partial match re-prefills.
 - Both retained conversations and checkpoints count against one budget,
-  `TS_Q4E_RETAINED_CACHE_MB` (default 4096, clamped by measured memory
-  headroom; `0` or an unparsable value declines every retention). Under the
-  default radix prefix cache the tree owns retention and eviction, so this
-  budget only refuses a holder that does not fit (reported once); with
-  `TS_PREFIX_CACHE_MODE=legacy` the model evicts the oldest retained
-  conversation first. `TS_Q4E_RETAINED_CACHE=0` disables the feature.
+  `TS_Q4E_RETAINED_CACHE_MB`, clamped by measured memory headroom; `0` or an
+  unparsable value declines every retention. Unset, half the measured headroom
+  is the budget, the rule Qwen 3.5 applies to its idle holders, and 4096 MB
+  applies only where no headroom can be measured. The fixed 4096 MB default this
+  replaced held three of four concurrent conversations on a 4x A40 tensor split
+  (1318.6 MB holders at 1.6k tokens, 15 GB of headroom), so one of them
+  re-prefilled on every turn. The radix prefix cache owns retention and
+  eviction, so this budget only refuses a holder that does not fit (reported
+  once).
 - It needs the complete GGML token-span path (every piece of per-sequence state
   device-resident and keyed by the holder) and a GDN state layout the native
   entry can be copied through exactly. Retention works under a layer split;
@@ -236,8 +253,7 @@ Qwen 3.5 and DeepSeek V4 paths have:
   parallelism.
 
 Evidence (synthetic fixtures, not trained-model acceptance or performance):
-[`eng/validation/qwen38_mtp_followup/retained-cache-20260916`](../../eng/validation/qwen38_mtp_followup/retained-cache-20260916/README.md)
-— `Qwen4ExpRetainedCacheTests` / `Qwen4ExpRetainedCachePolicyTests` cover
+`Qwen4ExpRetainedCacheTests` / `Qwen4ExpRetainedCachePolicyTests` cover
 retained A/B/A, checkpoint clones, speculative rebound, budget eviction,
 missing-state refusal and QSA first/reset growth, and a physical two-GPU
 layer-split checkpoint lifecycle on CUDA. Every gate is bit-exact on CPU. On
@@ -250,8 +266,7 @@ prefill on CUDA, because prefill kernels are chosen by batch width:
 `SharedPrefixChunking_…` bounds that difference at 1e-2 on CUDA (measured
 1.7e-4 to 4.4e-4 in logits; the stale-seed defect it was written for moved them
 by 0.3155) and allows a greedy change only at a near-tie within twice the
-measured difference
-([`verify-row-kernels-20260917`](../../eng/validation/qwen38_mtp_followup/verify-row-kernels-20260917/README.md)).
+measured difference (measured on an A40, 2026-09-17).
 
 ## Speculative decoding with the shared MTP head
 
@@ -353,8 +368,6 @@ code-copy stream (six passes per kernel set, all streams identical to plain gree
 MTP speculation ran at 83.2 tok/s instead of 86.5 (1.69x plain instead of 1.84x) and
 n-gram speculation at 73.8 instead of 79.5, while plain decode (49.1 against 47.0) and
 prefill (830 against 804 tok/s) did not regress: speculation pays for its exactness.
-Evidence and the per-assertion diagnosis:
-[`verify-row-kernels-20260917`](../../eng/validation/qwen38_mtp_followup/verify-row-kernels-20260917/README.md).
 
 ## Multi-GPU
 

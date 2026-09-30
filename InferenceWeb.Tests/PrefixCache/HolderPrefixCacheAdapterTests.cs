@@ -180,7 +180,6 @@ public sealed class HolderPrefixCacheAdapterTests
         public PrefixCacheCapabilities GetPrefixCacheCapabilities() => new()
         {
             Class = FamilyClass.P,
-            Readiness = PrefixCacheMode.Legacy,
             NamespaceFingerprint = "page-only",
             Pages = PageSupport.Both,
         };

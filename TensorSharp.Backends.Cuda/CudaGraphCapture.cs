@@ -294,16 +294,6 @@ namespace TensorSharp.Cuda
     /// </summary>
     public sealed class CudaPrefillGraphCache : IDisposable
     {
-        /// <summary>TS_CUDA_PREFILL_GRAPH=0 disables capture/replay entirely.</summary>
-        public static readonly bool Enabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_PREFILL_GRAPH"), "0", StringComparison.Ordinal);
-
-        /// <summary>TS_CUDA_DECODE_GRAPH=0 disables the per-token decode
-        /// capture/replay (the seqLen==1 layer loop with dynamic parameters);
-        /// prefill graphs are governed separately by TS_CUDA_PREFILL_GRAPH.</summary>
-        public static readonly bool DecodeEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_DECODE_GRAPH"), "0", StringComparison.Ordinal);
-
         private static readonly bool Log =
             string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_PREFILL_GRAPH_LOG"), "1", StringComparison.Ordinal);
 
@@ -346,7 +336,7 @@ namespace TensorSharp.Cuda
             this.allocator = allocator as CudaAllocator;
         }
 
-        public bool IsUsable => Enabled && allocator != null && !disposed;
+        public bool IsUsable => allocator != null && !disposed;
 
         /// <summary>
         /// When a cached graph exists for <paramref name="key"/>, returns (a
