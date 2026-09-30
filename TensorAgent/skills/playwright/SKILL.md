@@ -11,26 +11,27 @@ Treat this skill as CLI-first automation. Do not pivot to `@playwright/test` unl
 
 ## Prerequisite check (required)
 
-Once per workspace, check the operating system and whether `npx` is available (the wrapper depends on it):
+Use the operating system reported by the host's shell tool. Check native
+Node.js 20 or later and npm once per workspace. In **Windows PowerShell**:
 
-```bash
-uname -s
-command -v npx
+```powershell
+node --version
+npm.cmd --version
 ```
 
-If it is not available, pause and ask the user to install Node.js/npm (which provides `npx`). Provide these steps verbatim:
+On **macOS/Linux**:
 
 ```bash
-# Verify Node/npm are installed
 node --version
 npm --version
-
-# If missing, install Node.js/npm, then:
-npm install -g @playwright/cli@0.1.21
-playwright-cli --help
 ```
 
-Once `npx` is present, proceed with the wrapper script. A global install of `playwright-cli` is optional.
+If Node.js/npm is missing, report the missing dependency and ask the user to
+install it for the host operating system, then restart the host so it inherits
+the new PATH. The wrapper needs npm but does not require a global CLI install.
+On Windows, use native `node.exe` and npm; WSL Node/npm run in a different
+environment and cannot provide this desktop login handoff. Do not use `bash`,
+WSL, `uname`, or `command -v` for the Windows workflow.
 
 ## Browser setup (before the first open)
 
@@ -48,8 +49,10 @@ documented need. The CLI reads this project config automatically; its default
 is headless (there is no `--headless` flag). Reuse this setup for later calls.
 
 When `skills_run` is available, invoke the bundled wrapper with
-`skill="playwright"`, `path="scripts/playwright_cli.sh"`, and separate `args`,
-for example `["open", "https://example.com"]`. The host resolves its path.
+`skill="playwright"`, `path="scripts/playwright_cli.mjs"`, and separate `args`,
+for example `["open", "https://example.com"]`. The host resolves its path and
+uses native Node.js. Use this entry point on every operating system. The `.sh`
+wrapper remains available for existing macOS/Linux integrations only.
 
 ## Missing information and user interaction
 
@@ -72,6 +75,10 @@ original request for questions and the final response.
 An automated browser does **not** inherit the user's desktop browser login.
 A named CLI session preserves cookies while it is running; `--persistent`
 saves its own profile across browser restarts, without importing another profile.
+If a new session needs an explicit profile path, use the workspace's reserved
+private directory, for example `--profile=.home/p/linkedin`. Browser profiles
+contain authentication state: keep them outside `output/` and other artifact
+directories, and do not export their contents. Reuse any established profile.
 Reuse the current session with `goto` and verify the visible account identity
 before claiming to browse as the user. Read `references/workflows.md` only if
 login, persistent state, or an existing browser connection is needed.
@@ -102,32 +109,50 @@ Use manual handoff for steps that need the user's direct participation, such as
 CAPTCHA or unavailable sign-in information. When a desktop is available, keep
 that page open with `--headed --persistent`; ask a specific question and wait
 before the dependent action. Identify the page title and site for the user.
-If they cannot find the window, use `tab-list` and `tab-select` to bring the
-existing tab forward; headed launch alone does not prove the window is visible.
+On Windows, confirm that this session was launched through the native `.mjs`
+wrapper, not WSL. If they cannot find the window, use `tab-list` and `tab-select`
+to bring the existing tab forward; headed launch alone does not prove the window
+is visible.
+If Chrome reports `Failed To Create Data Directory`, inspect the profile path.
+A deeply nested Windows workspace can exceed Chrome's path limits. For a new
+session, use a shorter explicit workspace profile, such as
+`--profile=.home/p/linkedin`, and keep that profile with the same
+session. Preserve any existing profile and sign-in state; do not silently switch
+an established account session to an empty profile. See `references/workflows.md`.
 Explain any remaining display limitation instead of insisting they use an
 unseen window. An account-required task must wait for actual sign-in; do not
 substitute anonymous research unless the user agrees.
 
-## Skill path (set once)
+## Skill path (when using the shell directly)
+
+Prefer `skills_run` above. Otherwise set `PWCLI` to the wrapper in the configured
+`--skills-dir`. For a standard user-scoped install on macOS/Linux:
 
 ```bash
-export CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
-export PWCLI="$CODEX_HOME/skills/playwright/scripts/playwright_cli.sh"
+export PWCLI="${CODEX_HOME:-$HOME/.codex}/skills/playwright/scripts/playwright_cli.mjs"
 ```
 
-User-scoped skills install under `$CODEX_HOME/skills` (default: `~/.codex/skills`).
+On Windows PowerShell, use the actual native skill path, for example:
+
+```powershell
+$pwcli = 'C:\path\to\skills\playwright\scripts\playwright_cli.mjs'
+node $pwcli open https://example.com/login --headed --persistent
+```
+
+The examples below use Bash quoting; in PowerShell use `node $pwcli` with separate
+arguments. Do not paste Bash exports or aliases into PowerShell.
 
 ## Quick start
 
 Use the wrapper script:
 
 ```bash
-"$PWCLI" open https://playwright.dev --headed
+node "$PWCLI" open https://playwright.dev --headed
 # Read the linked snapshot to obtain current element refs.
-"$PWCLI" click e15
-"$PWCLI" type "Playwright"
-"$PWCLI" press Enter
-"$PWCLI" screenshot
+node "$PWCLI" click e15
+node "$PWCLI" type "Playwright"
+node "$PWCLI" press Enter
+node "$PWCLI" screenshot
 ```
 
 If the user prefers a global install, this is also valid:
@@ -163,9 +188,9 @@ round. Wait for navigation results before using refs on the new page.
 Minimal loop:
 
 ```bash
-"$PWCLI" open https://example.com
+node "$PWCLI" open https://example.com
 # Read the linked snapshot and choose the actual element ref.
-"$PWCLI" click e3
+node "$PWCLI" click e3
 # Read the new snapshot linked by the interaction.
 ```
 
@@ -183,7 +208,7 @@ produced or when a user action changed the page since the last snapshot.
 Refs can go stale. When a command fails due to a missing ref, snapshot again.
 
 ```bash
-"$PWCLI" snapshot
+node "$PWCLI" snapshot
 # Read the linked file in bounded sections; the wrapper supplies a unique filename.
 ```
 
@@ -192,38 +217,41 @@ Refs can go stale. When a command fails due to a missing ref, snapshot again.
 ### Form fill and submit
 
 ```bash
-"$PWCLI" open https://example.com/form
+node "$PWCLI" open https://example.com/form
 # Read the linked snapshot to obtain the form's actual refs.
-"$PWCLI" fill e1 "user@example.com"
-"$PWCLI" fill e2 "password123"
-"$PWCLI" click e3
+node "$PWCLI" fill e1 "user@example.com"
+node "$PWCLI" fill e2 "password123"
+node "$PWCLI" click e3
 # Read the new snapshot linked by the submission.
 ```
 
 ### Debug a UI flow with traces
 
 ```bash
-"$PWCLI" open https://example.com --headed
-"$PWCLI" tracing-start
+node "$PWCLI" open https://example.com --headed
+node "$PWCLI" tracing-start
 # ...interactions...
-"$PWCLI" tracing-stop
+node "$PWCLI" tracing-stop
 ```
 
 ### Multi-tab work
 
 ```bash
-"$PWCLI" tab-new https://example.com
-"$PWCLI" tab-list
-"$PWCLI" tab-select 0
-"$PWCLI" snapshot
+node "$PWCLI" tab-new https://example.com
+node "$PWCLI" tab-list
+node "$PWCLI" tab-select 0
+node "$PWCLI" snapshot
 ```
 
 ## Wrapper script
 
-The wrapper pins the validated CLI version and prefers npm's local cache, so the CLI can run without a global install or repeated registry checks:
+The wrapper pins the validated CLI version and prefers npm's local cache, so the
+CLI can run without a global install or repeated registry checks. On Windows it
+launches native Node.js with npm's JavaScript entry point and separate arguments;
+the wrapper does not invoke `npx.cmd` through a shell or use WSL:
 
 ```bash
-"$PWCLI" --help
+node "$PWCLI" --help
 ```
 
 Prefer the wrapper unless the repository already standardizes on a global install.
@@ -242,7 +270,7 @@ Open only what you need:
 - Prefer explicit commands over `eval` and `run-code` unless needed.
 - When you do not have a fresh snapshot, use placeholder refs like `eX` and say why; do not bypass refs with `run-code`.
 - Use `--headed` when a visual check will help.
-- When capturing artifacts in this repo, use `output/playwright/` and avoid introducing new top-level artifact folders.
+- When capturing artifacts in this repo, use `output/playwright/` and avoid introducing new top-level artifact folders. Browser profiles belong in the reserved private `.home/p/` directory, never in artifact output.
 - To choose a screenshot path, use `screenshot --filename=output/playwright/verified.png`; the positional argument to `screenshot` is an element ref, not a file path. Create the output directory first if necessary.
 - Default to CLI commands and workflows, not Playwright test specs.
 - For search and summaries, filter results by their titles/snippets, then open relevant posts and read their content before summarizing. Include source links and distinguish posts from comments or your own inference. Attribute claims to their authors; reading a post does not independently verify its claims.

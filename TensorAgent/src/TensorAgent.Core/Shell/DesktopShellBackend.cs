@@ -38,6 +38,7 @@ internal sealed class DesktopShellBackend : IShellBackend
     internal IReadOnlyList<string> NetworkHosts { get; set; }
 
     public string Name => _inner.Name;
+    public bool UsesHostProcesses => _inner.UsesHostProcesses;
     public ShellProgram? Shell => _inner.Shell;
     public ISkillSandbox? Sandbox => _inner.Sandbox;
     public bool CanRun => _inner.CanRun;

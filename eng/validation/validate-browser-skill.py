@@ -359,7 +359,7 @@ def successful_browser_commands(commands):
                 tokens = shlex.split(command["detail"])
         except ValueError:
             continue
-        if not tokens or Path(tokens[0]).name != "playwright_cli.sh":
+        if not tokens or Path(tokens[0].replace("\\", "/")).name not in ("playwright_cli.sh", "playwright_cli.mjs"):
             continue
         remaining = tokens[1:]
         while remaining and remaining[0].startswith("-"):

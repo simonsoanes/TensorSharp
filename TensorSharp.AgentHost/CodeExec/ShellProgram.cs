@@ -183,9 +183,17 @@ namespace TensorSharp.AgentHost.CodeExec
         /// </summary>
         internal static bool IsWslLauncher(string path)
         {
-            string system32 = Environment.GetFolderPath(Environment.SpecialFolder.System);
-            return system32.Length > 0
-                && path.StartsWith(system32, StringComparison.OrdinalIgnoreCase);
+            string name = System.IO.Path.GetFileNameWithoutExtension(path);
+            if (!name.Equals("bash", StringComparison.OrdinalIgnoreCase)
+                && !name.Equals("wsl", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            if (windows.Length == 0)
+                return false;
+            string? directory = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path));
+            return Array.Exists(new[] { "System32", "SysWOW64", "Sysnative" }, candidate =>
+                string.Equals(directory, System.IO.Path.Combine(windows, candidate), StringComparison.OrdinalIgnoreCase));
         }
 
         /// <summary>
