@@ -2338,6 +2338,13 @@ namespace TensorSharp.Chat
             // generation finishes.
             int turnPromptTokens = 0;
             int turnKvReusedTokens = 0;
+            // What the engine generated this turn and how long it spent decoding it. The
+            // skills loop's terminal update already sums its rounds; the retry below adds
+            // its own. The `done` frame reports these, not tokenCount (see
+            // WebUiTurnStats), because tokenCount never sees a tool-using turn's reasoning
+            // or tool calls while the turn's seconds include all of them.
+            long turnEvalTokens = 0;
+            long turnEvalNs = 0;
             // Whether the answer was cut off by the token budget. The UI renders this
             // as a "response was truncated" hint, so a user staring at a sentence that
             // stops mid-word knows to raise max tokens rather than blame the model.
@@ -2408,6 +2415,8 @@ namespace TensorSharp.Chat
                     {
                         turnPromptTokens = update.PromptTokens;
                         turnKvReusedTokens = update.KvCacheReusedTokens;
+                        turnEvalTokens += update.EvalTokens;
+                        turnEvalNs += update.EvalNs;
                         turnTruncated = FinishReasonMapper.IsTruncated(update.FinishReason);
                         turnFinishReason = update.FinishReason;
                         turnRepetitionExplained = update.RepetitionExplained;
@@ -2556,6 +2565,8 @@ namespace TensorSharp.Chat
                         {
                             turnPromptTokens = update.PromptTokens;
                             turnKvReusedTokens = update.KvCacheReusedTokens;
+                            turnEvalTokens += update.EvalTokens;
+                            turnEvalNs += update.EvalNs;
                             turnTruncated = FinishReasonMapper.IsTruncated(update.FinishReason);
                             turnFinishReason = update.FinishReason;
                             turnRepetitionExplained = update.RepetitionExplained;
@@ -2598,7 +2609,7 @@ namespace TensorSharp.Chat
 
             foreach (object frame in FinalFrames(sawParsedUpdate ? null : uiParser, aborted, inferenceError, chatSession, sw, tokenCount,
                 turnPromptTokens, turnKvReusedTokens, turnTruncated, sawContent, turnFinishReason,
-                turnRepetitionExplained))
+                turnRepetitionExplained, turnEvalTokens, turnEvalNs))
             {
                 yield return frame;
             }
@@ -3040,7 +3051,7 @@ namespace TensorSharp.Chat
             IOutputParser uiParser, bool aborted, string inferenceError,
             ChatSession chatSession, Stopwatch sw, int tokenCount, int turnPromptTokens, int turnKvReusedTokens,
             bool truncated, bool sawContent = true, string finishReason = null,
-            bool repetitionExplained = false)
+            bool repetitionExplained = false, long evalTokens = 0, long evalNs = 0)
         {
             if (uiParser != null && !aborted)
             {
@@ -3095,13 +3106,13 @@ namespace TensorSharp.Chat
             // if it ever should; the transcript is not the place for it.
 
             sw.Stop();
-            double tokPerSec = tokenCount > 0 ? tokenCount / sw.Elapsed.TotalSeconds : 0;
+            var (generated, tokPerSec) = WebUiTurnStats.Summarize(evalTokens, evalNs, tokenCount, sw.Elapsed.TotalSeconds);
             // `truncated` is the page's "truncated (max tokens reached)" chip, and a
             // repetition stop is not that: the budget was nowhere near spent. The
             // protocols still call it a length stop (FinishReasonMapper.IsTruncated), which
             // is what stops a client dispatching a half-written tool call; the chip is a
             // sentence shown to a person and it would be a false one.
-            yield return WebUiSseEvents.Done(tokenCount, sw.Elapsed.TotalSeconds, tokPerSec, aborted, inferenceError, chatSession.Id,
+            yield return WebUiSseEvents.Done(generated, sw.Elapsed.TotalSeconds, tokPerSec, aborted, inferenceError, chatSession.Id,
                 turnPromptTokens, turnKvReusedTokens,
                 truncated && !FinishReasonMapper.IsRepetition(finishReason));
         }

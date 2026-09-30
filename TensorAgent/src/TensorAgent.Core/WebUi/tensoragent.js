@@ -156,10 +156,21 @@
   // ---- markdown ------------------------------------------------------------
   // Deliberately small: fenced code, inline code, bold/italic, links, headings
   // and lists. Everything is escaped first, so a model that emits HTML cannot
-  // put nodes into this page.
+  // put nodes into this page -- quotes included, because a link or an image puts
+  // the model's text inside a double-quoted attribute, and an unescaped quote there
+  // let an answer containing ![x" onerror="...](y) run script in the page that holds
+  // the launch token (found 2026-09-30; any page, file or text the model repeats
+  // could carry it).
   function esc(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
+  // Where a link the model wrote may point: the web, mail, or a path on this origin
+  // (a generated file). Anything else -- javascript:, data:, another scheme -- stays
+  // text. An image may only come from this origin: one from anywhere else would be
+  // fetched the moment the answer rendered, whatever the network setting says.
+  var LINK_OK = /^(https?:\/\/|mailto:|\/(?!\/))/i;
+  var IMAGE_OK = /^\/(?!\/)/;
   function render(md) {
     var out = '', rest = String(md == null ? '' : md), fence = /```([a-zA-Z0-9_+-]*)\n([\s\S]*?)(?:```|$)/;
     var m;
@@ -175,15 +186,51 @@
     t = t.replace(/`([^`\n]+)`/g, function (_, c) { return '<code>' + c + '</code>'; });
     t = t.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
     t = t.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
-    // Images before links: an image is a link with a bang in front of it.
-    t = t.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, '<img alt="$1" src="$2">');
-    t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // Images before links: an image is a link with a bang in front of it. Both work
+    // on the escaped text, so what lands in an attribute cannot close it.
+    t = t.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, function (all, alt, src) {
+      if (IMAGE_OK.test(src)) return '<img alt="' + alt + '" src="' + src + '">';
+      return LINK_OK.test(src) ? '<a href="' + src + '" target="_blank" rel="noopener">' + (alt || src) + '</a>' : all;
+    });
+    t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, function (all, label, href) {
+      return LINK_OK.test(href) ? '<a href="' + href + '" target="_blank" rel="noopener">' + label + '</a>' : all;
+    });
     t = t.replace(/^### (.*)$/gm, '<strong>$1</strong>');
     t = t.replace(/^## (.*)$/gm, '<strong>$1</strong>');
     t = t.replace(/^# (.*)$/gm, '<strong>$1</strong>');
-    return t.split(/\n{2,}/).map(function (p) {
-      return '<p>' + p.replace(/\n/g, '<br>') + '</p>';
-    }).join('');
+    return t.split(/\n{2,}/).map(block).join('');
+  }
+  // A GitHub-style table -- a header row, a row of dashes with the same number of
+  // cells, then body rows -- becomes a <table>; the lines around it stay a paragraph.
+  // Models answer comparisons with tables, and this page printed them as rows of
+  // pipes. It runs on text inline() has already escaped and marked up.
+  var TABLE_RULE = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+  function cells(row) {
+    var s = row.trim();
+    if (s.charAt(0) === '|') s = s.slice(1);
+    if (s.charAt(s.length - 1) === '|') s = s.slice(0, -1);
+    return s.split('|').map(function (c) { return c.trim(); });
+  }
+  function block(p) {
+    var lines = p.split('\n');
+    for (var i = 0; i + 1 < lines.length; i++) {
+      if (lines[i].indexOf('|') < 0 || lines[i + 1].indexOf('-') < 0 || !TABLE_RULE.test(lines[i + 1])) continue;
+      var head = cells(lines[i]);
+      if (cells(lines[i + 1]).length !== head.length) continue;
+      var end = i + 2;
+      while (end < lines.length && lines[end].indexOf('|') >= 0) end++;
+      var html = '<table><thead><tr>' + head.map(function (c) { return '<th>' + c + '</th>'; }).join('') + '</tr></thead><tbody>';
+      for (var r = i + 2; r < end; r++) {
+        var row = cells(lines[r]);
+        html += '<tr>' + head.map(function (_, c) { return '<td>' + (row[c] || '') + '</td>'; }).join('') + '</tr>';
+      }
+      return (i > 0 ? paragraph(lines.slice(0, i)) : '') + html + '</tbody></table>'
+        + (end < lines.length ? block(lines.slice(end).join('\n')) : '');
+    }
+    return paragraph(lines);
+  }
+  function paragraph(lines) {
+    return '<p>' + lines.join('<br>') + '</p>';
   }
 
   // ---- attachments, as the transcript holds them ---------------------------

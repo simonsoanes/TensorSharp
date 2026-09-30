@@ -1507,6 +1507,76 @@ public sealed class WebUiPageTests : IDisposable
     /// the model copies into its answer.
     /// </para>
     /// </summary>
+    /// <summary>
+    /// An answer cannot put script into the page. render() writes the model's text into
+    /// innerHTML, and a link or an image puts part of it inside a double-quoted
+    /// attribute; the escape used to leave quotes alone, so an answer containing
+    /// <c>![x" onerror="...](y)</c> ran script in the page that holds the launch token
+    /// (found 2026-09-30, confirmed in Chromium). The model repeats whatever a shared
+    /// page or file says, so the text is not the user's.
+    /// </summary>
+    [Fact]
+    public void AnAnswerCannotPutScriptIntoThePage()
+    {
+        string answer = JsonSerializer.Serialize(
+            "![x\" onerror=\"alert(1)](nope.png) [click](x\"onmouseover=\"alert(2)) [js](javascript:alert(3)) "
+            + "![pixel](https://tracker.example/p.png) [docs](https://example.com/a?b=1&c=2) "
+            + "![chart](/api/code/artifacts/run1/chart.png) [report](/api/code/artifacts/run1/report.pdf)");
+        JsonElement result = Run($$"""
+            R['/api/sessions?conversation=new'] = { sessionId: 's1', conversationId: 'c1', messages: [], think: false, skills: [] };
+            R['/api/chat'] = { __sse: [{ token: {{answer}} }, { done: true, truncated: false }] };
+            """, """
+            __page.byId['text'].value = 'summarise this page';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () {
+              return { html: __page.transcript().map(function (t) { return t.html; }).join('\n') };
+            });
+            """);
+
+        string html = result.GetProperty("html").GetString()!;
+        // Nothing the model wrote closed an attribute or chose a script URL...
+        Assert.DoesNotContain("onerror=\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("onmouseover=\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("href=\"javascript:", html, StringComparison.OrdinalIgnoreCase);
+        // ...and nothing from another origin is fetched as an image: it is a link instead.
+        Assert.DoesNotContain("src=\"https://tracker.example", html, StringComparison.Ordinal);
+        Assert.Contains("<a href=\"https://tracker.example/p.png\"", html, StringComparison.Ordinal);
+        // What an answer legitimately links to still works.
+        Assert.Contains("<a href=\"https://example.com/a?b=1&amp;c=2\"", html, StringComparison.Ordinal);
+        Assert.Contains("<img alt=\"chart\" src=\"/api/code/artifacts/run1/chart.png\">", html, StringComparison.Ordinal);
+        Assert.Contains("<a href=\"/api/code/artifacts/run1/report.pdf\"", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A table in an answer is drawn as one. Models answer comparisons with Markdown
+    /// tables, and the page printed them as rows of pipes -- though its stylesheet had
+    /// table rules waiting for them.
+    /// </summary>
+    [Fact]
+    public void AMarkdownTableInAnAnswerIsDrawnAsATable()
+    {
+        string answer = JsonSerializer.Serialize(
+            "Each person pays:\n| Person | Pays |\n|---|---:|\n| Had drinks | **$70.39** |\n| No drinks | $42.07 |\nThat covers $224.91.");
+        JsonElement result = Run($$"""
+            R['/api/sessions?conversation=new'] = { sessionId: 's1', conversationId: 'c1', messages: [], think: false, skills: [] };
+            R['/api/chat'] = { __sse: [{ token: {{answer}} }, { done: true, truncated: false }] };
+            """, """
+            __page.byId['text'].value = 'split the bill';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () {
+              return { html: __page.transcript().map(function (t) { return t.html; }).join('\n') };
+            });
+            """);
+
+        string html = result.GetProperty("html").GetString()!;
+        Assert.Contains(
+            "<p>Each person pays:</p><table><thead><tr><th>Person</th><th>Pays</th></tr></thead><tbody>"
+            + "<tr><td>Had drinks</td><td><strong>$70.39</strong></td></tr>"
+            + "<tr><td>No drinks</td><td>$42.07</td></tr></tbody></table><p>That covers $224.91.</p>",
+            html, StringComparison.Ordinal);
+        Assert.DoesNotContain("|---|", html, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TappingAGeneratedFileAsksTheAppToOpenItRatherThanNavigating()
     {

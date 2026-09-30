@@ -1030,7 +1030,7 @@ curl -N -X POST http://localhost:5000/api/chat \
 | `tool_progress`、`tool`、`text`、`seconds`、`detail`、`agents` | 进程内技能/代码/子智能体调用正在写出或运行时 | 短暂的实时活动：阶段为 `writing`、`running` 或 `finished`；内置 Web UI 只保留有界的当前尾部，并在 `finished` 时清除。`wait_agent` 处于 `running` 时，`agents` 是本请求中所有子智能体的快照（`agent_id`、`parent_id`、`task`、`agent_type`、`status`、`tool`、`tool_status`、`detail`、`result`、`error`），其他情况下为 `null` |
 | `skill_step`、`agent_id`、`skill`、`detail`、`ok`、`round`、`files` | 每次进程内技能、代码或子智能体工具调用完成后 | 工具、目标与结果的完成元数据；`agent_id` 指明发起调用的智能体（主对话为 `/root`）；生成的制品以可选的 `{name, bytes, url}` 条目出现在 `files` 中 |
 | `artifact_verified`、`files` | 路由式交付工作流（例如 PowerPoint 请求）证明其产出时，仅一次 | 通过宿主结构校验的那一个交付物，以单个 `{name, bytes, url}` 条目给出；这类请求的 `skill_step.files` 保持为空，临时文件因此永远不会被提供下载 |
-| `done`、`tokenCount`、`elapsed`、`tokPerSec`、`aborted`、`truncated`、`error`、`sessionId`、`promptTokens`、`kvReusedTokens`、`kvReusePercent` | 末尾帧 | 终态汇总；`truncated` 为 true 表示回答因 max-tokens 预算用尽而中断（用户中止用 `aborted` 表示） |
+| `done`、`tokenCount`、`elapsed`、`tokPerSec`、`aborted`、`truncated`、`error`、`sessionId`、`promptTokens`、`kvReusedTokens`、`kvReusePercent` | 末尾帧 | 终态汇总：`tokenCount` 计入本轮生成的全部 token（推理、工具调用与回答，跨所有轮次），`elapsed` 是本轮的墙钟秒数（含工具运行时间），`tokPerSec` 是解码速度；`truncated` 为 true 表示回答因 max-tokens 预算用尽而中断（用户中止用 `aborted` 表示） |
 
 末尾帧示例：
 

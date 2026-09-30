@@ -648,8 +648,10 @@ Open `http://localhost:5000` in your browser — the root URL serves the chat UI
 - Tool calling with function definitions
 - Agent Skills: a picker for the skills the server has registered (hidden when the server reports no skills)
 - One live activity panel for the tool step running now, replaced in place and removed when the reply finishes — completed steps are not kept as a transcript. While the model waits on sub-agents (`wait_agent`), the panel shows a collapsible "wait_agent · N sub-agents" section; expanded, it lists one card per sub-agent in the request's tree (id, role, status, task, current tool, result or error)
-- Download chips on the reply for files a `--code-exec` command produced, so getting a file never depends on the model repeating its link
+- Download chips on the reply for files a `--code-exec` command produced, so getting a file never depends on the model repeating its link; a file written by several runs gets one chip, pointing at the latest run's copy
 - Streaming token generation via Server-Sent Events
+- Answers rendered from Markdown (tables, code blocks, lists, headings, links). The page builds them as elements rather than parsing the model's text as HTML, so a reply cannot inject markup or script; a link keeps its target only for `http(s)`, `mailto` and the server's own file downloads
+- A stats line under each answer: the tokens the turn generated (reasoning and tool calls included), its wall-clock seconds, the decode speed, and how much of the prompt the KV cache served
 - DiffusionGemma denoising previews when a `diffusion-gemma` GGUF is hosted (the UI replaces the whole assistant message on each denoising step, then emits the final answer)
 - Qwen-Image-2.1 image generation and editing when a `qwen_image` GGUF is hosted: a prompt alone generates an image, a prompt with attached images edits them, and the picture refreshes in place while it denoises. With a MiniMax-H3 or Wan model hosted, a prompt (plus an optional attached image) generates a video instead of chat text
 - Backward-compatible queue-status events (the engine itself handles concurrency)
