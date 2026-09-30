@@ -158,9 +158,14 @@ test('Windows invocation executes native Node plus JS entry with no shell comman
 });
 
 function subprocessFixture() {
-  const executable = path.join(root, process.platform === 'win32' ? 'node.exe' : 'node');
-  try { linkSync(process.execPath, executable); }
-  catch { copyFileSync(process.execPath, executable); }
+  // Windows resolves npm beside node.exe, so the fixture needs its own node.exe next
+  // to the fake npm. POSIX runs npx from PATH and needs no copy - and a copied Node
+  // cannot start when the binary loads a shared libnode through @rpath (Homebrew).
+  const executable = process.platform === 'win32' ? path.join(root, 'node.exe') : process.execPath;
+  if (process.platform === 'win32') {
+    try { linkSync(process.execPath, executable); }
+    catch { copyFileSync(process.execPath, executable); }
+  }
   const source = `
     const child = require('node:child_process').spawnSync('node', ['-e', 'process.stdout.write("native child")'], { encoding: 'utf8' });
     if (child.status !== 0 || child.stdout !== 'native child') throw new Error('npm descendant could not find native Node');
