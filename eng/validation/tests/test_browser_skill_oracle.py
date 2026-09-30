@@ -269,6 +269,16 @@ class ChatTurnTests(unittest.TestCase):
         commands.append({"tool": "skills_run", "detail": 'scripts/playwright_cli.sh ["close"]', "ok": True})
         self.assertTrue(harness.handoff_command_evidence(commands)["successful_close_after_last_open"])
 
+    def test_native_wrapper_handoff_and_close_are_observed(self):
+        commands = [{"tool": "skills_run", "ok": True,
+                     "detail": 'scripts/playwright_cli.mjs ["open", "http://localhost/login", "--headed", "--persistent"]'}]
+        evidence = harness.handoff_command_evidence(commands)
+        self.assertIsNotNone(evidence["successful_last_open"])
+        self.assertFalse(evidence["successful_close_after_last_open"])
+        commands.append({"tool": "skills_run", "ok": True,
+                         "detail": 'scripts/playwright_cli.mjs ["close"]'})
+        self.assertTrue(harness.handoff_command_evidence(commands)["successful_close_after_last_open"])
+
 
 if __name__ == "__main__":
     unittest.main()

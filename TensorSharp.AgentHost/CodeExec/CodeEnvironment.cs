@@ -57,6 +57,8 @@ namespace TensorSharp.AgentHost.CodeExec
                 Path.Combine(workspace.EnvDirectory, "bin"),
                 Path.Combine(workspace.EnvDirectory, "node_modules", ".bin"),
                 Path.Combine(workspace.WorkDirectory, ".local", "bin"),
+                OperatingSystem.IsWindows()
+                    ? Path.Combine(workspace.WorkDirectory, ".home", ".local", "bin") : string.Empty,
                 hostPath ?? string.Empty,
             }.Where(path => path.Length > 0));
 
@@ -155,13 +157,20 @@ namespace TensorSharp.AgentHost.CodeExec
                 string root = Path.GetFullPath(workspace.WorkDirectory);
                 foreach (string name in names)
                 {
-                    string candidate = Path.Combine(root, ".local", "bin", name);
-                    if (SkillPathGuard.TryResolveSymlinks(root, candidate, out string? resolved, out _)
-                        && resolved != null && IsUsableExecutable(resolved))
+                    // Preserve the work-relative prefix, and also honor $HOME/.local
+                    // when Windows HOME is the shared private .home profile.
+                    string[] prefixes = OperatingSystem.IsWindows()
+                        ? new[] { root, Path.Combine(root, ".home") } : new[] { root };
+                    foreach (string prefix in prefixes)
                     {
-                        path = resolved;
-                        error = null;
-                        return true;
+                        string candidate = Path.Combine(prefix, ".local", "bin", name);
+                        if (SkillPathGuard.TryResolveSymlinks(root, candidate, out string? resolved, out _)
+                            && resolved != null && IsUsableExecutable(resolved))
+                        {
+                            path = resolved;
+                            error = null;
+                            return true;
+                        }
                     }
                 }
             }
@@ -616,8 +625,14 @@ namespace TensorSharp.AgentHost.CodeExec
             // working directory and undo the redirection above for the one language every
             // skill script here is written in.
             environment["TMPDIR"] = environment["TEMP"];
-            environment["LOCALAPPDATA"] = EnsureSubdirectory(home, "Local");
-            environment["APPDATA"] = EnsureSubdirectory(home, "Roaming");
+            // Native Windows applications also resolve these through SHGetFolderPath,
+            // which expands USERPROFILE\AppData rather than reading LOCALAPPDATA.
+            // Keep the environment and the native folder APIs in agreement, and create
+            // the directories: Chrome refuses its automation connection when the
+            // non-creating native lookup cannot determine the default profile location.
+            string appData = EnsureSubdirectory(home, "AppData");
+            environment["LOCALAPPDATA"] = EnsureSubdirectory(appData, "Local");
+            environment["APPDATA"] = EnsureSubdirectory(appData, "Roaming");
 
             // CPython on Windows picks its stdio codec from the console code page, which
             // for a redirected pipe means cp1252. A script that prints one character

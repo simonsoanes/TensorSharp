@@ -84,10 +84,15 @@ namespace TensorSharp.AgentHost.Skills
         /// only — a <c>pip</c> directory the model deliberately creates inside a project it
         /// is building is its own output and must survive.
         /// </para>
+        /// <para>
+        /// <c>.home</c> is the private Windows profile used by both shell commands and
+        /// skills. Its browser profiles, cookies and package caches are runtime state,
+        /// not produced files, even when the snapshot includes hidden directories.
+        /// </para>
         /// </summary>
         private static readonly HashSet<string> PrunedAtRoot = new(StringComparer.Ordinal)
         {
-            "Library", ".jobs", "AppData", "pip",
+            "Library", ".jobs", ".home", "AppData", "pip",
         };
 
         private static readonly HashSet<string>.AlternateLookup<ReadOnlySpan<char>> AnywhereLookup =

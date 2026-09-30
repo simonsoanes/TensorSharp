@@ -38,6 +38,7 @@ public sealed class DesktopAgentHostTests : IDisposable
     {
         AgentAppHost host = CreateHost(network: true);
         Assert.Equal("process", host.Backend.Name);
+        Assert.True(host.Backend.UsesHostProcesses);
         Assert.Same(host.Backend, host.CodeRunner!.Backend);
         Assert.False(CodeEnvironment.IsConfigured);
         Assert.Null(host.JavaScript);
@@ -46,6 +47,27 @@ public sealed class DesktopAgentHostTests : IDisposable
         Assert.Contains("npm", declaration, StringComparison.Ordinal);
         Assert.DoesNotContain("pure-Python wheels", declaration, StringComparison.Ordinal);
         Assert.DoesNotContain("JavaScriptCore", host.DescribeEngine(), StringComparison.Ordinal);
+    }
+
+    [SkippableFact]
+    public void DesktopBackendPreservesTheNativeSkillInterpreterGuard()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "Requires the Windows WSL launcher guard.");
+        var backend = new DesktopShellBackend(new ProcessShellBackend(null, SkillSandboxMode.Off), Array.Empty<string>());
+        string directory = Path.Combine(_root, "skills", "native-probe");
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "SKILL.md"), "---\nname: native-probe\ndescription: Native interpreter probe.\n---\n");
+        File.WriteAllText(Path.Combine(directory, "probe.sh"), "exit 0\n");
+        Skill skill = new SkillRegistry(new SkillRegistryOptions { Roots = new[] { Path.Combine(_root, "skills") } }).Skills.Single();
+        var runner = new SkillScriptRunner(new SkillScriptRunnerOptions
+        {
+            Sandbox = SkillSandboxMode.Off,
+            Backend = backend,
+            Interpreters = new() { [".sh"] = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "bash.exe") },
+        });
+        SkillToolResult result = runner.Run(skill, "probe.sh", Array.Empty<string>());
+        Assert.False(result.Ok);
+        Assert.Contains("WSL launcher", result.Content, StringComparison.Ordinal);
     }
 
     [SkippableFact]

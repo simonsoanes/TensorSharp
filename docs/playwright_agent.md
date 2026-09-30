@@ -34,12 +34,71 @@ The model reads `SKILL.md`, then calls `skills_run` with the actual skill id and
 bundle-relative script path. For example:
 
 ```json
-{"skill":"playwright","path":"scripts/playwright_cli.sh","args":["snapshot"]}
+{"skill":"playwright","path":"scripts/playwright_cli.mjs","args":["snapshot"]}
 ```
 
 Paths such as `$CODEX_HOME/skills/...` in third-party documentation describe that
 agent's installation layout. The host resolves bundled scripts without copying
 or rewriting them. Arguments are passed separately from the executable.
+
+## Windows desktop
+
+Install **Windows Node.js 20 or later with npm** and ensure `node.exe` is on the server's
+PATH before starting it. Node installed only in WSL does not satisfy this
+requirement. In PowerShell, verify `node --version`, `npm.cmd --version`, and
+`node -p process.platform` (must print `win32`). Restart an already running
+server after changing PATH.
+
+Use the native `scripts/playwright_cli.mjs` entry point through `skills_run`.
+It invokes npm's JavaScript entry point using the running Node executable and
+separate arguments, preserving URLs, spaces, quotes, and Unicode without a
+wrapper-built `cmd.exe` command string. npm manages its own CLI shim. The original Bash wrapper remains available
+for POSIX hosts. On Windows, the system `bash.exe` is a WSL launcher; skill
+interpreters now reject it with native-runtime guidance, just as the shell tool
+does. A JavaScript runtime installed in the session's `.local/bin` is also
+resolved by the skill runner.
+
+For a desktop Windows server, keep the explicitly selected
+`--skills-sandbox preferred --code-exec-unconfined` settings. The Windows job
+object does not provide the filesystem/network confinement required by
+`--skills-sandbox required`. This change does not alter that policy.
+
+Open a handoff page with `--headed --persistent` and keep the same CLI session
+and workspace for subsequent calls. The host suppresses command-console windows;
+Playwright controls the browser's own headed window. A server running as a
+service or in a different desktop session cannot display a window on the user's
+desktop merely by adding `--headed`.
+
+The private Windows profile uses the conventional `USERPROFILE\AppData\Local`
+and `USERPROFILE\AppData\Roaming` directories. Both exist before a child starts,
+and `LOCALAPPDATA`/`APPDATA` agree with the native `SHGetFolderPath` lookup.
+Previously that native lookup failed in a fresh workspace; Chrome then refused
+its automation connection because it could not determine the default profile
+location, leaving a blank window. Shell and skill calls now use the same private
+profile. After updating the host, restart it and use a new chat/browser session.
+
+The Windows integration probe uses the real skill runner and a local synthetic
+login form. It checks the browser's process and top-level window visibility,
+bounds, minimized/cloaked state, survival after tool return, authenticated session
+reuse, and session-specific cleanup. It also records repeated launch/action
+timings separately from first package setup:
+
+```powershell
+dotnet run --project eng/validation/WindowsBrowserSkillProbe -c Release -- `
+  --sandbox preferred --output artifacts/windows-browser/new-run
+```
+
+Use a fresh output directory and native Node/npm on PATH. This probe does not
+establish LinkedIn login success, physical user visibility, model behavior, or
+macOS/Linux coverage. Run the model-driven validation below separately.
+
+The native interpreter selection follows
+[Codex's platform-specific shell discovery](https://github.com/openai/codex/blob/9212b3eca86e6eca061b15fe9f8971ca57ebe3c9/codex-rs/shell-command/src/shell_detect.rs).
+Browser session lifetime and launch flags remain owned by the pinned
+[Playwright CLI 0.1.21](https://github.com/microsoft/playwright-cli/tree/74354ecc7a43da16d91a9bc54fa8db8283a3fcf5),
+whose Playwright dependencies are `1.64.0-alpha-1789764292000` and require Node 20
+or newer. TensorSharp does not replace its daemon or move the browser onto a
+private Windows desktop.
 
 ## Runtime setup and macOS
 
@@ -95,6 +154,13 @@ missing information or choices, uses the supplied answer to fill/select the
 relevant controls, verifies the result, and continues the task. This covers
 account details as well as other forms and decisions; supplying values should
 not lead to another instruction to fill the same form manually.
+
+For a new explicit profile, use a short path under the reserved private workspace
+directory, such as `--profile=.home/p/linkedin`. TensorSharp excludes `.home`
+from artifact collection. A profile contains authentication state and must not
+be written under `output/playwright/` or collected with screenshots and reports.
+Preserve the profile of an established account session instead of silently
+switching it to a new empty profile.
 
 When direct user participation is still needed, keep a headed persistent browser
 open and identify the page title/site. Replies in the **same chat** reuse its
