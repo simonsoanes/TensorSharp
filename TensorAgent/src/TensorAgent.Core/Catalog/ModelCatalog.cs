@@ -13,7 +13,10 @@ namespace TensorAgent.Core.Catalog;
 /// <summary>
 /// The built-in model list. Downloadable entries' sizes and hashes were read from the
 /// Hugging Face tree API (LFS object ids) on 2026-09-01 (Bonsai 2 27B on 2026-09-28;
-/// Qwen3.8 27B, Muse-Glimmer 30B and Qwen-Image 2.1 on 2026-09-30),
+/// Qwen3.8 27B, Muse-Glimmer 30B and Qwen-Image 2.1 on 2026-09-30; MiniMax-H3 on
+/// 2026-09-30 from bare clones of unsloth/MiniMax-H3-GGUF at d629413c and
+/// MiniMaxAI/MiniMax-H3 at 42ed227e, their current heads, whose three tokenizer files are
+/// plain git blobs hashed from their bytes),
 /// so a download is verified against the exact bytes the publisher uploaded. A
 /// sideload-only entry would carry the same immutable size/hash identity but
 /// deliberately no URL, for a GGUF that embeds no publisher repository; the app then
@@ -44,6 +47,10 @@ public static class ModelCatalog
 {
     private const string GemmaLicense = "Gemma Terms of Use";
     private const string ApacheLicense = "Apache-2.0";
+    // The denoisers' license. Its "Applicable Territory" excludes the EU, the UK, the
+    // Republic of Korea and the US, which the entries' notes say; the Qwen3-VL text
+    // encoder is Apache-2.0.
+    private const string MiniMaxH3License = "MiniMax H3 Community License";
 
     private static string Hf(string repo, string file) => $"https://huggingface.co/{repo}/resolve/main/{file}";
 
@@ -374,6 +381,84 @@ public static class ModelCatalog
             Notes = "Makes a picture from a description, or edits an attached photo. Needs 24 GB of memory "
                 + "(a Mac).",
         },
+        MiniMaxH3(
+            id: "minimax-h3-fl2va-q4k",
+            displayName: "MiniMax-H3",
+            denoiser: new CatalogFile(CatalogFileRole.Weights, "minimax_h3_fl2va_pruned-Q4_K.gguf",
+                Hf("unsloth/MiniMax-H3-GGUF", "minimax_h3_fl2va_pruned-Q4_K.gguf"),
+                11_420_663_904, "dd948e08ad0ba3c71bd42f368e283dd82e790f5122a63b276e22a3e0283d0c10"),
+            // Photos are keyframes here: one is the clip's first frame, two its first and last.
+            modalities: CatalogModalities.Image,
+            notes: "Makes a short video with its own soundtrack from a description, brings an attached photo to "
+                + "life, or runs between two photos (the first and the last frame)."),
+        MiniMaxH3(
+            id: "minimax-h3-ref2va-q4k",
+            displayName: "MiniMax-H3 References",
+            // The checkpoint is chosen by the "ref2va" in this name (MiniMaxH3Config.PartitionFromFileName).
+            denoiser: new CatalogFile(CatalogFileRole.Weights, "minimax_h3_ref2va_pruned-Q4_K.gguf",
+                Hf("unsloth/MiniMax-H3-GGUF", "minimax_h3_ref2va_pruned-Q4_K.gguf"),
+                11_381_096_544, "2fa5840021cf6967843eaeefde9aaa277e540de02986d5ee3d5b0e6a7a8c9dec"),
+            // Photos, clips and recordings are references for a new scene, up to nine.
+            modalities: CatalogModalities.Image | CatalogModalities.Video | CatalogModalities.Audio,
+            notes: "Makes a short video with its own soundtrack that features the people, things, places or "
+                + "sounds in up to nine attached photos, clips and recordings. Say who or what is in the shot: "
+                + "a reference gives their look, the description puts them in the scene."),
+    };
+
+    /// <summary>
+    /// A MiniMax-H3 entry: one of its two denoisers (it is two checkpoints, not a setting)
+    /// plus the files both share. The shared ones are byte-identical between the entries,
+    /// so a second entry links the first one's copies instead of downloading 24 GB again
+    /// (ModelStore), and only its denoiser is new.
+    /// </summary>
+    private static CatalogModel MiniMaxH3(
+        string id, string displayName, CatalogFile denoiser, CatalogModalities modalities, string notes) => new()
+    {
+        Id = id,
+        DisplayName = displayName,
+        Family = CatalogFamily.MiniMaxH3,
+        Kind = CatalogArchitectureKind.Diffusion,
+        Parameters = "33B audio-video DiT (20B with its AdaLN branches pruned) + Qwen3-VL-32B text encoder",
+        Quantization = "Q4_K (DiT) / Q4_K_M (text encoder)",
+        Files = new[]
+        {
+            denoiser,
+            // Truncated to the 50 layers H3 reads, and carrying the Qwen3-VL vision tower that
+            // presents a photo to the prompt.
+            new CatalogFile(CatalogFileRole.TextEncoder, "qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
+                Hf("unsloth/MiniMax-H3-GGUF", "qwen3vl_32b_minimax_h3-Q4_K_M.gguf"),
+                18_218_065_024, "11e6efe70a57ce7f4838c47bdbd1a1c4b8ce10e2b7747f1b065990b70f4b05fc"),
+            new CatalogFile(CatalogFileRole.Vae, "minimax_h3_video_vae_fp16.safetensors",
+                Hf("unsloth/MiniMax-H3-GGUF", "vae/minimax_h3_video_vae_fp16.safetensors"),
+                5_207_808_496, "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522"),
+            // Required, not optional: without it every clip is silent, and an optional file of
+            // a role the Models page never offers could not be added later.
+            new CatalogFile(CatalogFileRole.AudioVae, "minimax_h3_audio_vae_fp32.safetensors",
+                Hf("unsloth/MiniMax-H3-GGUF", "vae/minimax_h3_audio_vae_fp32.safetensors"),
+                605_254_808, "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"),
+            // The text encoder's GGUF carries no tokenizer. tokenizer_config.json is the only
+            // place its vision markers are defined; without it a photo cannot be placed in the
+            // prompt (MiniMaxH3Pipeline.RequireVisionTokens).
+            new CatalogFile(CatalogFileRole.Tokenizer, "vocab.json",
+                Hf("MiniMaxAI/MiniMax-H3", "processor/vocab.json"),
+                2_776_833, "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"),
+            new CatalogFile(CatalogFileRole.Tokenizer, "merges.txt",
+                Hf("MiniMaxAI/MiniMax-H3", "processor/merges.txt"),
+                1_671_839, "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"),
+            new CatalogFile(CatalogFileRole.Tokenizer, "tokenizer_config.json",
+                Hf("MiniMaxAI/MiniMax-H3", "processor/tokenizer_config.json"),
+                11_003, "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68"),
+        },
+        Modalities = modalities | CatalogModalities.VideoOutput | CatalogModalities.AudioOutput,
+        MinDeviceMemoryGB = 32,
+        // A diffusion model holds no KV cache; the clip's size and length are chosen per
+        // request (VideoTurns).
+        ContextLength = 0,
+        KvCacheDtype = "f16",
+        Sampling = new CatalogSampling(1.0f, 0, 1.0f, 0.0f),
+        License = MiniMaxH3License,
+        Notes = notes + " Needs 32 GB of memory (a Mac). MiniMax's license does not cover use in the EU, the UK, "
+            + "South Korea or the US.",
     };
 
     public static CatalogModel? Find(string id) =>

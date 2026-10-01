@@ -264,14 +264,7 @@ public sealed class AgentAppHost : IDisposable
         CatalogModel? selected = settings.SelectedModelId is { Length: > 0 } selectedId
             ? ModelCatalog.Find(selectedId)
             : null;
-        IReadOnlyDictionary<string, string> companions = DiffusionCompanions.Publish(
-            selected?.Kind == CatalogArchitectureKind.Diffusion ? selected : null, Models);
-        if (companions.Count > 0)
-        {
-            _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation(
-                "image-generation companions: {Companions}",
-                string.Join(", ", companions.Select(c => $"{c.Key}={Path.GetFileName(c.Value)}")));
-        }
+        PublishCompanions(selected);
 
         Chat = new WebUiChatService(
             ModelService, Sessions, Options, Uploads, Skills,
@@ -864,11 +857,11 @@ public sealed class AgentAppHost : IDisposable
             HostLog.LogInformation("not warming the prefix cache: runtime prefix reuse is disabled");
             return;
         }
-        // An image model has no system prompt to share and no engine to warm one with;
-        // asking it for a token only logs a failure after every load (see ImageTurns).
-        if (Chat.LoadedModelMakesImages)
+        // An image or video model has no system prompt to share and no engine to warm one
+        // with; asking it for a token only logs a failure after every load (see ImageTurns).
+        if (Chat.LoadedModelMakesImages || Chat.LoadedModelMakesVideo)
         {
-            HostLog.LogInformation("not warming the prefix cache: the loaded model makes pictures");
+            HostLog.LogInformation("not warming the prefix cache: the loaded model makes pictures or video");
             return;
         }
         // Never beside a turn. The warm-up is opportunistic by definition -- it exists to
@@ -2456,6 +2449,19 @@ public sealed class AgentAppHost : IDisposable
                     throw missing;
                 }
 
+                // A diffusion entry is several files, and the pipeline looks for a missing one
+                // by its name: MiniMax-H3 searches the whole model store and would take
+                // Qwen-Image's text encoder for its own. A half-downloaded set (a relaunch in
+                // the middle of the download restores the remembered choice) must not load and
+                // then fail - or worse, not fail - inside the first picture or clip.
+                if (model.Kind == CatalogArchitectureKind.Diffusion && Models.StateOf(model) != InstallState.Installed)
+                {
+                    var incomplete = new FileNotFoundException(
+                        $"{model.DisplayName} is not completely downloaded yet.", Models.DirectoryFor(model));
+                    SetModelLoad(ModelLoadState.Failed, incomplete.Message);
+                    throw incomplete;
+                }
+
                 // Before the load, not after: the engine reads its context length and KV
                 // dtype when the model is constructed. This is the only funnel for a load
                 // (startup, the Models list, the device hook all arrive here), which is why
@@ -2477,6 +2483,11 @@ public sealed class AgentAppHost : IDisposable
                 WaitForTheEngineToStop();
 
                 EngineMemoryPolicy.Apply(model, settings, Paths.DeviceClass);
+
+                // Every load, not only the one at startup: a diffusion model reads where its
+                // companions are when it is constructed, and switching from one to another at
+                // run time used to leave the first one's paths (or none) for the second.
+                PublishCompanions(model);
 
                 // Speculative decoding, and the draft head that makes it best: the
                 // catalog's optional companion, handed to the loader the way the CLI's
@@ -2506,7 +2517,7 @@ public sealed class AgentAppHost : IDisposable
                     HostLog);
 
                 var refusals = new List<string>();
-                foreach (BackendOption backend in Options.SupportedBackends)
+                foreach (BackendOption backend in BackendsFor(model))
                 {
                     try
                     {
@@ -2540,6 +2551,8 @@ public sealed class AgentAppHost : IDisposable
 
                 if (loaded is null)
                 {
+                    if (refusals.Count == 0)
+                        refusals.Add("no GPU backend in this build, and a video model is not run on the CPU");
                     var refused = new InvalidOperationException(
                         $"{model.DisplayName} could not be loaded on any backend this build offers:"
                         + Environment.NewLine + "  " + string.Join(Environment.NewLine + "  ", refusals));
@@ -2585,6 +2598,11 @@ public sealed class AgentAppHost : IDisposable
     /// </summary>
     private bool EngineIsProcessing()
     {
+        // A picture or a clip is made on the chat service's own worker threads, which the
+        // engine's counters below know nothing about; without this a model switch or a quit
+        // during one freed the weights under a running GPU graph.
+        if (Chat?.IsGeneratingMedia == true)
+            return true;
         try
         {
             if (!ModelService.EngineHost.TryGetLiveStats(out int processing, out int waiting, out _))
@@ -2599,20 +2617,78 @@ public sealed class AgentAppHost : IDisposable
 
     private void WaitForTheEngineToStop()
     {
-        var deadline = Stopwatch.StartNew();
-        while (deadline.Elapsed < EngineDrainTimeout)
+        var waited = Stopwatch.StartNew();
+        while (EngineHasWorkInFlight())
         {
-            if (!EngineHasWorkInFlight())
+            // A cancelled picture or clip stops at its next step, tile or phase, and one
+            // step of a long clip can outlast the engine's drain. Releasing the model under
+            // it is a crash, not a quicker shutdown, so it is given longer.
+            TimeSpan limit = Chat?.IsGeneratingMedia == true ? MediaDrainTimeout : EngineDrainTimeout;
+            if (waited.Elapsed >= limit)
+            {
+                _loggerFactory.CreateLogger("TensorAgent.Host")
+                    .LogWarning("the engine was still working after {Seconds}s; releasing the model anyway",
+                        limit.TotalSeconds);
                 return;
+            }
             Thread.Sleep(25);
         }
-        _loggerFactory.CreateLogger("TensorAgent.Host")
-            .LogWarning("the engine was still working after {Seconds}s; releasing the model anyway",
-                EngineDrainTimeout.TotalSeconds);
     }
 
     /// <summary>How long <see cref="Dispose"/> waits for the engine before releasing the model regardless.</summary>
     public static TimeSpan EngineDrainTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>How long it waits instead when what is still running is a picture or a clip.</summary>
+    public static TimeSpan MediaDrainTimeout { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Stop every turn and the warm-up, and wait no longer than <paramref name="budget"/> for
+    /// the engine to leave the model. Returns whether it did, in which case
+    /// <see cref="Dispose"/> can release the model at once.
+    ///
+    /// <para>For a host that is given a deadline to quit in. A clip stops at its next
+    /// denoising step and one step is several seconds, which can be longer than the
+    /// deadline; a caller told false must not release the model under the graph still
+    /// running.</para>
+    /// </summary>
+    public bool StopWorkWithin(TimeSpan budget)
+    {
+        var waited = Stopwatch.StartNew();
+        Compute.Open();
+        Turns.StopAll();
+        Task warmUp = StopWarmingThePrefixCacheAndWaitAsync();
+        while (waited.Elapsed < budget)
+        {
+            if (warmUp.IsCompleted && !EngineHasWorkInFlight())
+                return true;
+            Thread.Sleep(25);
+        }
+        return false;
+    }
+
+    /// <summary>Point the engine at <paramref name="model"/>'s companion files (and clear every
+    /// other family's), logging what was published. See <see cref="DiffusionCompanions"/>.</summary>
+    private void PublishCompanions(CatalogModel? model)
+    {
+        IReadOnlyDictionary<string, string> companions = DiffusionCompanions.Publish(
+            model?.Kind == CatalogArchitectureKind.Diffusion ? model : null, Models);
+        if (companions.Count > 0)
+        {
+            _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation(
+                "{Model} companions: {Companions}", model!.Id,
+                string.Join(", ", companions.Select(c => $"{c.Key}={Path.GetFileName(c.Value)}")));
+        }
+    }
+
+    /// <summary>
+    /// The backends a load tries, best first. A video entry is never tried on the CPU: a
+    /// clip that takes minutes on the GPU takes hours there, so falling back would hand the
+    /// user a model that looks loaded and answers nothing they would wait for.
+    /// </summary>
+    private IEnumerable<BackendOption> BackendsFor(CatalogModel model) =>
+        model.IsVideoGenerator
+            ? Options.SupportedBackends.Where(b => !string.Equals(b.Value, "ggml_cpu", StringComparison.Ordinal))
+            : Options.SupportedBackends;
 
     private static int _exitHookInstalled;
 
@@ -2648,19 +2724,30 @@ public sealed class AgentAppHost : IDisposable
         if (Interlocked.Exchange(ref _exitHookInstalled, 1) != 0)
             return;
 
-        AppDomain.CurrentDomain.ProcessExit += static (_, _) =>
+        AppDomain.CurrentDomain.ProcessExit += static (_, _) => ReleaseTheEngine();
+    }
+
+    /// <summary>
+    /// The native teardown <see cref="ReleaseTheEngineWhenTheProcessExits"/> runs: every
+    /// buffer the engine still holds is handed back, so the ggml-metal device's destructor
+    /// finds none. For a host that knows the process is ending before
+    /// <see cref="AppDomain.ProcessExit"/> would say so - on Mac Catalyst, where quitting
+    /// ends in AppKit's <c>exit()</c> and Mono raises that event only for a managed
+    /// shutdown, it never fires at all. Dispose the host first: the model has to be
+    /// released before the backend it lives in.
+    /// </summary>
+    public static void ReleaseTheEngine()
+    {
+        try
         {
-            try
-            {
-                GgmlBasicOps.Shutdown();
-            }
-            catch (DllNotFoundException)
-            {
-                // No GgmlOps in this build, so there is no device holding anything
-                // and nothing to release. Not a fallback: the engine that would need
-                // shutting down was never there.
-            }
-        };
+            GgmlBasicOps.Shutdown();
+        }
+        catch (DllNotFoundException)
+        {
+            // No GgmlOps in this build, so there is no device holding anything
+            // and nothing to release. Not a fallback: the engine that would need
+            // shutting down was never there.
+        }
     }
 
     /// <summary>

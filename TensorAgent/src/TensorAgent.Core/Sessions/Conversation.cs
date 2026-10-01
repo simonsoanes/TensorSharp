@@ -37,6 +37,11 @@ public sealed class StoredMessage
     [JsonPropertyName("artifacts")] public List<StoredArtifact>? Artifacts { get; set; }
     /// <summary>Generated image URL for an image-edit turn.</summary>
     [JsonPropertyName("imageUrl")] public string? ImageUrl { get; set; }
+    /// <summary>Generated clip URL for a video turn.</summary>
+    [JsonPropertyName("videoUrl")] public string? VideoUrl { get; set; }
+    /// <summary>The clip's soundtrack, kept only when it is a separate file the page plays
+    /// beside the clip (when the sound is inside the MP4 there is nothing to keep).</summary>
+    [JsonPropertyName("audioUrl")] public string? AudioUrl { get; set; }
 
     /// <summary>Every upload file name (bare names under the uploads root) this message references.</summary>
     [JsonIgnore]
@@ -56,6 +61,8 @@ public sealed class StoredMessage
                     if (a.Frames is not null) foreach (string f in a.Frames) yield return Path.GetFileName(f);
                 }
             if (!string.IsNullOrEmpty(ImageUrl)) yield return Path.GetFileName(ImageUrl);
+            if (!string.IsNullOrEmpty(VideoUrl)) yield return Path.GetFileName(VideoUrl);
+            if (!string.IsNullOrEmpty(AudioUrl)) yield return Path.GetFileName(AudioUrl);
         }
     }
 }

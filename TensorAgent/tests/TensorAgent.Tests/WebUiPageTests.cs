@@ -2596,4 +2596,451 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal("make it night", message.GetProperty("content").GetString());
         Assert.Equal(new[] { "a1.png" }, Strings(message, "stillImagePaths"));
     }
+
+    // ---- a video model (VideoTurns on the host) -----------------------------------------
+
+    // What /api/models reports for MiniMax-H3's two checkpoints. The keyframes one (FL2VA)
+    // starts a clip from a photo and can end it on a second; the references one (Ref2VA)
+    // puts what it is shown into a scene of its own. They share one architecture, so the
+    // page decides everything from `video`.
+    private const string KeyframesVideo = """
+        { family: 'minimax-h3', supportsAudio: true, supportsImageConditioning: true,
+          supportsEndImageConditioning: true, supportsReferenceConditioning: false, maxReferenceImages: 0 }
+        """;
+
+    private const string ReferencesVideo = """
+        { family: 'minimax-h3', supportsAudio: true, supportsImageConditioning: true,
+          supportsEndImageConditioning: false, supportsReferenceConditioning: true, maxReferenceImages: 9 }
+        """;
+
+    private static string VideoModel(string video) => $$"""
+        R['/api/models'] = { loaded: 'minimax-h3-q4k.gguf', architecture: 'minimax-h3',
+                             loadedBackend: 'ggml_metal', visionReady: false, video: {{video}} };
+        """;
+
+    private static string[] Tags(JsonElement turn) =>
+        turn.GetProperty("media").EnumerateArray().Select(m => m.GetProperty("tag").GetString()!).ToArray();
+
+    /// <summary>
+    /// The composer says what the loaded checkpoint can be given, and the two differ: one
+    /// starts a clip from a photo, the other features the photos, clips and sounds it is
+    /// shown. A model that reports no video capability is a chat model, whatever its
+    /// architecture is called.
+    /// </summary>
+    [Theory]
+    [InlineData(KeyframesVideo, "Describe a video… or attach a photo to start it from")]
+    [InlineData(ReferencesVideo, "Describe a video… attach photos, clips or sounds it should feature")]
+    [InlineData("""
+        { family: 'minimax-h3', supportsAudio: true, supportsImageConditioning: false,
+          supportsEndImageConditioning: false, supportsReferenceConditioning: false, maxReferenceImages: 0 }
+        """, "Describe a video…")]
+    [InlineData("null", "Message… or hold to talk")]
+    public void AVideoModelsComposerSaysWhatItsCheckpointCanBeGiven(string video, string expected)
+    {
+        JsonElement result = Run(VideoModel(video), """
+            return { placeholder: __page.byId['text'].placeholder };
+            """);
+
+        Assert.Equal(expected, result.GetProperty("placeholder").GetString());
+    }
+
+    /// <summary>
+    /// A video is filmed from its description; a photo beside it is only where it starts.
+    /// Sent with no words, the file's name would be the whole script, so nothing is sent,
+    /// the user is told what is missing, and the photo stays where it was.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AVideoIsNotSentWithoutADescription(bool withPhoto)
+    {
+        string attach = withPhoto
+            ? "window.TensorAgent.addAttachment({ ok: true, file: 'a1.png', fileName: 'beach.png', mediaType: 'image', url: '/uploads/a1.png' });\n"
+            : string.Empty;
+        JsonElement result = Run(VideoModel(KeyframesVideo), attach + """
+            __page.byId['text'].value = '';
+            __page.byId['send'].dispatch('click');
+            return settle(10).then(function () {
+              return {
+                sent: __page.requests('/api/chat').length,
+                attachments: window.TensorAgent.attachmentCount(),
+                notices: __page.notices(),
+                generating: window.TensorAgent.isGenerating()
+              };
+            });
+            """);
+
+        Assert.False(result.TryGetProperty("error", out JsonElement failure), failure.ToString());
+        Assert.Equal(0, result.GetProperty("sent").GetInt32());
+        Assert.Equal(withPhoto ? 1 : 0, result.GetProperty("attachments").GetInt32());
+        Assert.Equal(new[] { "Describe the video you want, then send." }, Strings(result, "notices"));
+        Assert.False(result.GetProperty("generating").GetBoolean());
+    }
+
+    /// <summary>
+    /// A photo is the clip's first frame, not something the model has to see, so the send
+    /// is not held for the vision re-check a chat model gets. That check would refuse it:
+    /// this model reports no vision file. The photo goes out as a still, which is what
+    /// the host makes a keyframe of.
+    /// </summary>
+    [Fact]
+    public void APhotoAndADescriptionGoToAVideoModelWithoutAVisionCheck()
+    {
+        JsonElement result = Run(VideoModel(KeyframesVideo) + """
+            R['/api/chat'] = { __sse: [{ done: true, sessionId: 's1', truncated: false }] };
+            """, """
+            window.TensorAgent.addAttachment({ ok: true, file: 'a1.png', fileName: 'beach.png',
+                                               mediaType: 'image', url: '/uploads/a1.png' });
+            var modelReads = __page.requests('/api/models').length;
+            __page.byId['text'].value = 'the tide comes in over the sand';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () {
+              return {
+                sent: __page.requests('/api/chat').map(function (c) { return c.body; }),
+                rereads: __page.requests('/api/models').length - modelReads,
+                notices: __page.notices()
+              };
+            });
+            """);
+
+        JsonElement message = Assert.Single(result.GetProperty("sent").EnumerateArray()).GetProperty("messages")[0];
+        Assert.Equal("the tide comes in over the sand", message.GetProperty("content").GetString());
+        Assert.Equal(new[] { "a1.png" }, Strings(message, "stillImagePaths"));
+        Assert.Equal(0, result.GetProperty("rereads").GetInt32());
+        Assert.Empty(Strings(result, "notices"));
+    }
+
+    /// <summary>
+    /// The references checkpoint can be shown all three kinds of thing at once. Each goes
+    /// out under the list the host reads it from, and the clip's frames do not hold the
+    /// send for a vision re-check either.
+    /// </summary>
+    [Fact]
+    public void PhotosClipsAndSoundsAllReachAReferencesVideoModel()
+    {
+        JsonElement result = Run(VideoModel(ReferencesVideo) + """
+            R['/api/chat'] = { __sse: [{ done: true, sessionId: 's1', truncated: false }] };
+            """, """
+            window.TensorAgent.addAttachment({ ok: true, file: 'a1.png', fileName: 'dog.png', mediaType: 'image', url: '/uploads/a1.png' });
+            window.TensorAgent.addAttachment({ ok: true, file: 'a2.mp4', fileName: 'walk.mp4', mediaType: 'video', url: '/uploads/a2.mp4',
+                                               frames: ['a2_0001.png'] });
+            window.TensorAgent.addAttachment({ ok: true, file: 'a3.wav', fileName: 'bark.wav', mediaType: 'audio', url: '/uploads/a3.wav' });
+            __page.byId['text'].value = 'the dog runs along the beach, barking';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () {
+              return { sent: __page.requests('/api/chat').map(function (c) { return c.body; }), notices: __page.notices() };
+            });
+            """);
+
+        JsonElement message = Assert.Single(result.GetProperty("sent").EnumerateArray()).GetProperty("messages")[0];
+        Assert.Equal("the dog runs along the beach, barking", message.GetProperty("content").GetString());
+        Assert.Equal(new[] { "a1.png" }, Strings(message, "stillImagePaths"));
+        Assert.Equal(new[] { "a2.mp4" }, Strings(message, "videoFilePaths"));
+        Assert.Equal(new[] { "a3.wav" }, Strings(message, "audioPaths"));
+        Assert.Empty(Strings(result, "notices"));
+    }
+
+    /// <summary>
+    /// A clip takes minutes, in stages the host names: the description is read, the clip
+    /// denoises step by step, then its frames, its sound and the MP4 are made. The strip
+    /// says each in turn, with about how long is left while it films. The turn ends with
+    /// one player in the bubble and the clip in the history, so the next request does not
+    /// drop it from the saved chat. The sound is inside the MP4 here, so there is nothing
+    /// else to play, whether the frame leaves audioUrl out or sends it as null. Null is
+    /// what the host actually writes, because it keeps nulls in its frames.
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("audioUrl: null, ")]
+    public void AVideoModelsTurnIsOneClipInTheBubbleAndTheHistory(string muxedSound)
+    {
+        JsonElement result = Run(VideoModel(KeyframesVideo) + $$"""
+            R['/api/chat'] = { __sse: [
+              { video_step: 0, video_steps: 3, video_phase: 'text-encode', elapsed: 2.1, eta: -1 },
+              { video_step: 1, video_steps: 3, video_phase: 'denoise', elapsed: 41.2, eta: 210.5 },
+              { video_step: 2, video_steps: 3, video_phase: 'denoise', elapsed: 80.3, eta: 42.4 },
+              { video_step: 3, video_steps: 3, video_phase: 'denoise', elapsed: 119.0, eta: 0 },
+              { video_step: 3, video_steps: 3, video_phase: 'vae-decode', elapsed: 125.6, eta: -1 },
+              { video_step: 3, video_steps: 3, video_phase: 'audio-decode', elapsed: 131.0, eta: -1 },
+              { video_step: 3, video_steps: 3, video_phase: 'encode', elapsed: 133.2, eta: -1 },
+              { videoUrl: '/uploads/video-9b1e4c7d2a6f8e3b5c0d1a2f4e6b8c9d.mp4', {{muxedSound}}
+                width: 640, height: 384, frames: 22, fps: 24, seed: 12345, hasAudio: true },
+              { done: true, sessionId: 's1', tokenCount: 0, elapsed: 133.9, tokPerSec: 0.0, truncated: false }
+            ] };
+            """, """
+            var shownBefore = __page.progress().length;
+            __page.byId['text'].value = 'a lighthouse at dusk, waves breaking below';
+            __page.byId['send'].dispatch('click');
+            return settle(40).then(function () {
+              var turns = __page.transcript();
+              var answer = turns[turns.length - 1];
+              return {
+                sent: __page.requests('/api/chat').map(function (c) { return c.body; }),
+                role: answer.role,
+                media: answer.media,
+                shown: __page.progress().slice(shownBefore),
+                history: window.TensorAgent.history(),
+                generating: window.TensorAgent.isGenerating(),
+                errors: __page.errorNotices()
+              };
+            });
+            """);
+
+        JsonElement sent = Assert.Single(result.GetProperty("sent").EnumerateArray());
+        Assert.Equal("a lighthouse at dusk, waves breaking below", sent.GetProperty("messages")[0].GetProperty("content").GetString());
+
+        Assert.Equal("assistant", result.GetProperty("role").GetString());
+        JsonElement clip = Assert.Single(result.GetProperty("media").EnumerateArray());
+        Assert.Equal("VIDEO", clip.GetProperty("tag").GetString());
+        Assert.Equal("/uploads/video-9b1e4c7d2a6f8e3b5c0d1a2f4e6b8c9d.mp4", clip.GetProperty("src").GetString());
+        Assert.True(clip.GetProperty("controls").GetBoolean());
+        Assert.True(clip.GetProperty("playsInline").GetBoolean());
+        Assert.True(clip.GetProperty("loop").GetBoolean());
+        Assert.Equal("metadata", clip.GetProperty("preload").GetString());
+
+        Assert.Equal(new[]
+        {
+            "Filming…",
+            "Reading the description…",
+            "Filming… step 1 of 3 · about 4 min left",
+            "Filming… step 2 of 3 · about 42 s left",
+            "Filming… step 3 of 3",
+            "Developing the frames…",
+            "Adding the sound…",
+            "Saving the video…",
+        }, Strings(result, "shown"));
+
+        JsonElement history = result.GetProperty("history");
+        Assert.Equal(2, history.GetArrayLength());
+        JsonElement made = history[1];
+        Assert.Equal("assistant", made.GetProperty("role").GetString());
+        Assert.Equal("", made.GetProperty("content").GetString());
+        Assert.Equal("/uploads/video-9b1e4c7d2a6f8e3b5c0d1a2f4e6b8c9d.mp4", made.GetProperty("videoUrl").GetString());
+        Assert.False(made.TryGetProperty("audioUrl", out _), "the sound is inside the MP4, so there is no second file to keep");
+        Assert.False(result.GetProperty("generating").GetBoolean());
+        Assert.Empty(Strings(result, "errors"));
+    }
+
+    /// <summary>
+    /// The time left is said the way a person would say it: minutes past a minute and a
+    /// half, seconds under it, and never "0 s". A stage this page has no name for still
+    /// says it is filming, rather than leaving the last stage's words up.
+    /// </summary>
+    [Fact]
+    public void TheTimeLeftWhileFilmingReadsTheWayAPersonWouldSayIt()
+    {
+        JsonElement result = Run(VideoModel(KeyframesVideo) + """
+            R['/api/chat'] = { __sse: [
+              { video_step: 1, video_steps: 4, video_phase: 'denoise', elapsed: 30, eta: 91 },
+              { video_step: 2, video_steps: 4, video_phase: 'denoise', elapsed: 60, eta: 90 },
+              { video_step: 3, video_steps: 4, video_phase: 'denoise', elapsed: 90, eta: 0.3 },
+              { video_step: 4, video_steps: 4, video_phase: 'interpolate', elapsed: 95, eta: -1 },
+              { videoUrl: '/uploads/video-5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e.mp4', hasAudio: true },
+              { done: true, sessionId: 's1', tokenCount: 0, elapsed: 96, tokPerSec: 0.0, truncated: false }
+            ] };
+            """, """
+            var shownBefore = __page.progress().length;
+            __page.byId['text'].value = 'snow falling on a quiet street';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () {
+              return { shown: __page.progress().slice(shownBefore), generating: window.TensorAgent.isGenerating() };
+            });
+            """);
+
+        Assert.Equal(new[]
+        {
+            "Filming…",
+            "Filming… step 1 of 4 · about 2 min left",
+            "Filming… step 2 of 4 · about 90 s left",
+            "Filming… step 3 of 4 · about 1 s left",
+            "Filming…",
+        }, Strings(result, "shown"));
+        Assert.False(result.GetProperty("generating").GetBoolean());
+    }
+
+    /// <summary>
+    /// When the host keeps the soundtrack as a file of its own instead of inside the MP4,
+    /// the page plays it: one player for the sound, right under the clip, and both files
+    /// in the history.
+    /// </summary>
+    [Fact]
+    public void ASoundtrackKeptAsItsOwnFilePlaysUnderTheClip()
+    {
+        JsonElement result = Run(VideoModel(KeyframesVideo) + """
+            R['/api/chat'] = { __sse: [
+              { video_step: 1, video_steps: 1, video_phase: 'denoise', elapsed: 40, eta: -1 },
+              { videoUrl: '/uploads/video-0a1b2c3d4e5f60718293a4b5c6d7e8f9.mp4',
+                audioUrl: '/uploads/video-0a1b2c3d4e5f60718293a4b5c6d7e8f9.wav',
+                width: 640, height: 384, frames: 22, fps: 24, seed: 7, hasAudio: true },
+              { done: true, sessionId: 's1', tokenCount: 0, elapsed: 61.5, tokPerSec: 0.0, truncated: false }
+            ] };
+            """, """
+            __page.byId['text'].value = 'rain on a tin roof';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () {
+              var turns = __page.transcript();
+              return { answer: turns[turns.length - 1], history: window.TensorAgent.history() };
+            });
+            """);
+
+        JsonElement answer = result.GetProperty("answer");
+        Assert.Equal(new[] { "VIDEO", "AUDIO" }, Tags(answer));
+        JsonElement media = answer.GetProperty("media");
+        Assert.Equal("/uploads/video-0a1b2c3d4e5f60718293a4b5c6d7e8f9.mp4", media[0].GetProperty("src").GetString());
+        Assert.Equal("/uploads/video-0a1b2c3d4e5f60718293a4b5c6d7e8f9.wav", media[1].GetProperty("src").GetString());
+        Assert.True(media[1].GetProperty("controls").GetBoolean());
+        Assert.Equal("metadata", media[1].GetProperty("preload").GetString());
+
+        JsonElement made = result.GetProperty("history")[1];
+        Assert.Equal("/uploads/video-0a1b2c3d4e5f60718293a4b5c6d7e8f9.mp4", made.GetProperty("videoUrl").GetString());
+        Assert.Equal("/uploads/video-0a1b2c3d4e5f60718293a4b5c6d7e8f9.wav", made.GetProperty("audioUrl").GetString());
+    }
+
+    /// <summary>
+    /// The page paints once per read, and a read can carry the words and the clip
+    /// together. The clip goes under the words, so the words are painted first: painted
+    /// after, they would replace what is in the bubble and take the player with them.
+    /// </summary>
+    [Fact]
+    public void AClipGoesUnderTheWordsOfTheSameTurn()
+    {
+        JsonElement result = Run(VideoModel(KeyframesVideo) + """
+            R['/api/chat'] = { __sse: [{ __chunk: [
+              { token: 'Here it is.' },
+              { videoUrl: '/uploads/video-1f2e3d4c5b6a79881f2e3d4c5b6a7988.mp4', hasAudio: true },
+              { done: true, sessionId: 's1', truncated: false }
+            ] }] };
+            """, """
+            __page.byId['text'].value = 'a red kite over a field';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () {
+              var turns = __page.transcript();
+              var answer = turns[turns.length - 1];
+              return { media: answer.media, html: answer.html };
+            });
+            """);
+
+        JsonElement clip = Assert.Single(result.GetProperty("media").EnumerateArray());
+        Assert.Equal("VIDEO", clip.GetProperty("tag").GetString());
+        Assert.Equal("/uploads/video-1f2e3d4c5b6a79881f2e3d4c5b6a7988.mp4", clip.GetProperty("src").GetString());
+        Assert.Contains("Here it is.", result.GetProperty("html").GetString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Leaving the app while a clip is made and coming back re-attaches to the turn, and
+    /// the host replays it from its first frame, all at once, into the same bubble. The
+    /// clip and its sound were already showing; the bubble still ends with one of each,
+    /// and the history with one entry for the turn.
+    /// </summary>
+    [Fact]
+    public void ComingBackToAVideoTurnDoesNotStackASecondPlayer()
+    {
+        JsonElement result = Run(VideoModel(KeyframesVideo) + $$"""
+            var frames = [
+              { video_step: 0, video_steps: 2, video_phase: 'text-encode', elapsed: 2, eta: -1 },
+              { video_step: 1, video_steps: 2, video_phase: 'denoise', elapsed: 40, eta: 38 },
+              { video_step: 2, video_steps: 2, video_phase: 'encode', elapsed: 80, eta: -1 },
+              { videoUrl: '/uploads/video-aa55aa55aa55aa55aa55aa55aa55aa55.mp4',
+                audioUrl: '/uploads/video-aa55aa55aa55aa55aa55aa55aa55aa55.wav',
+                width: 640, height: 384, frames: 22, fps: 24, seed: 9, hasAudio: true }
+            ];
+            R['/api/chat'] = { __status: 200, headers: { {{TurnHeader}} }, body: { __sse: frames, __then: 'hang' } };
+            R['/api/agent/turns'] = { turn: { id: 't1', running: true } };
+            R['/api/agent/turns/t1'] = { __sse: [{ __chunk: frames.concat([
+              { done: true, sessionId: 's1', tokenCount: 0, elapsed: 81, tokPerSec: 0.0, truncated: false }
+            ]) }] };
+            """, """
+            window.TensorAgent.__testing.streamTrustMs(0);
+            __page.byId['text'].value = 'a paper boat in a gutter stream';
+            __page.byId['send'].dispatch('click');
+            return settle(20).then(function () {
+              var before = __page.transcript();
+              document.visibilityState = 'hidden';
+              document.dispatch('visibilitychange', {});
+              document.visibilityState = 'visible';
+              document.dispatch('visibilitychange', {});
+              return wait(500).then(function () {
+                return {
+                  before: before,
+                  after: __page.transcript(),
+                  history: window.TensorAgent.history(),
+                  generating: window.TensorAgent.isGenerating(),
+                  attaches: __page.requests('/api/agent/turns/t1').length
+                };
+              });
+            });
+            """);
+
+        JsonElement before = Assert.Single(Bubbles(result.GetProperty("before")), t => t.GetProperty("role").GetString() == "assistant");
+        Assert.Equal(new[] { "VIDEO", "AUDIO" }, Tags(before));
+        Assert.Equal(1, result.GetProperty("attaches").GetInt32());
+
+        JsonElement after = Assert.Single(Bubbles(result.GetProperty("after")), t => t.GetProperty("role").GetString() == "assistant");
+        Assert.Equal(new[] { "VIDEO", "AUDIO" }, Tags(after));
+        Assert.Equal("/uploads/video-aa55aa55aa55aa55aa55aa55aa55aa55.mp4", after.GetProperty("media")[0].GetProperty("src").GetString());
+        Assert.Equal("/uploads/video-aa55aa55aa55aa55aa55aa55aa55aa55.wav", after.GetProperty("media")[1].GetProperty("src").GetString());
+
+        var history = result.GetProperty("history").EnumerateArray().ToList();
+        Assert.Equal(2, history.Count);
+        Assert.Equal("/uploads/video-aa55aa55aa55aa55aa55aa55aa55aa55.mp4", history[1].GetProperty("videoUrl").GetString());
+        Assert.Equal("/uploads/video-aa55aa55aa55aa55aa55aa55aa55aa55.wav", history[1].GetProperty("audioUrl").GetString());
+        Assert.False(result.GetProperty("generating").GetBoolean());
+    }
+
+    /// <summary>
+    /// A clip comes back with the chat it was made in: the player again, and a player
+    /// for the sound only where the sound was a file of its own. The host sends a saved
+    /// message with every field, null where there is nothing, so the first clip's
+    /// soundtrack arrives as a null and must not become an empty player. The history the
+    /// next request is built from still names both files, so that request does not
+    /// delete them from the saved chat.
+    /// </summary>
+    [Fact]
+    public void AReopenedChatShowsItsClipsAgain()
+    {
+        JsonElement result = Run("""
+            R['/api/agent/conversations'] = { conversations: [{ id: 'saved', title: 'Lighthouse', updatedAt: '2026-09-30T10:00:00Z', messageCount: 4 }] };
+            R['/api/sessions?conversation=saved'] = {
+              sessionId: 's9', conversationId: 'saved', think: false, skills: [],
+              messages: [
+                { role: 'user', content: 'a lighthouse at dusk' },
+                { role: 'assistant', content: '', videoUrl: '/uploads/video-c0ffeec0ffeec0ffeec0ffeec0ffee00.mp4', audioUrl: null },
+                { role: 'user', content: 'the same, with gulls calling' },
+                { role: 'assistant', content: '', videoUrl: '/uploads/video-d00dd00dd00dd00dd00dd00dd00dd00d.mp4',
+                  audioUrl: '/uploads/video-d00dd00dd00dd00dd00dd00dd00dd00d.wav' }
+              ]
+            };
+            R['/api/chat'] = { __sse: [{ token: 'The second one.' }, { done: true, truncated: false }] };
+            """, """
+            var shown = __page.transcript();
+            __page.byId['text'].value = 'Which one has the gulls?';
+            __page.byId['send'].dispatch('click');
+            return settle(20).then(function () {
+              return { shown: shown, sent: __page.requests('/api/chat').map(function (c) { return c.body; }) };
+            });
+            """);
+
+        var turns = Bubbles(result.GetProperty("shown"));
+        Assert.Equal(4, turns.Count);
+        Assert.Equal(new[] { "VIDEO" }, Tags(turns[1]));
+        JsonElement first = turns[1].GetProperty("media")[0];
+        Assert.Equal("/uploads/video-c0ffeec0ffeec0ffeec0ffeec0ffee00.mp4", first.GetProperty("src").GetString());
+        Assert.True(first.GetProperty("controls").GetBoolean());
+        Assert.True(first.GetProperty("playsInline").GetBoolean());
+        Assert.True(first.GetProperty("loop").GetBoolean());
+        Assert.Equal("metadata", first.GetProperty("preload").GetString());
+        Assert.Equal(new[] { "VIDEO", "AUDIO" }, Tags(turns[3]));
+        JsonElement sound = turns[3].GetProperty("media")[1];
+        Assert.Equal("/uploads/video-d00dd00dd00dd00dd00dd00dd00dd00d.wav", sound.GetProperty("src").GetString());
+        Assert.True(sound.GetProperty("controls").GetBoolean());
+        Assert.Equal("metadata", sound.GetProperty("preload").GetString());
+
+        JsonElement messages = Assert.Single(result.GetProperty("sent").EnumerateArray()).GetProperty("messages");
+        Assert.Equal(5, messages.GetArrayLength());
+        Assert.Equal("/uploads/video-c0ffeec0ffeec0ffeec0ffeec0ffee00.mp4", messages[1].GetProperty("videoUrl").GetString());
+        Assert.True(!messages[1].TryGetProperty("audioUrl", out JsonElement noSound) || noSound.ValueKind == JsonValueKind.Null,
+            "the first clip's sound is inside its MP4, so the next request names no soundtrack for it");
+        Assert.Equal("/uploads/video-d00dd00dd00dd00dd00dd00dd00dd00d.mp4", messages[3].GetProperty("videoUrl").GetString());
+        Assert.Equal("/uploads/video-d00dd00dd00dd00dd00dd00dd00dd00d.wav", messages[3].GetProperty("audioUrl").GetString());
+    }
 }

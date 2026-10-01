@@ -9,6 +9,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
 #if IOS || MACCATALYST
+using AVFoundation;
 using CoreGraphics;
 using CoreImage;
 using Foundation;
@@ -75,9 +76,11 @@ public static class MediaProbe
             checks.Add(Check("providers", CheckProviders));
             checks.Add(Check("png-roundtrip", CheckPngRoundTrip));
             checks.Add(Check("png-straight-alpha", CheckStraightAlpha));
+            checks.Add(Check("png-transparent-colour", CheckTransparentColour));
             checks.Add(Check("heic-decode", CheckHeicDecode));
             checks.Add(Check("exif-orientation", CheckExifOrientation));
             checks.Add(Check("mp4-roundtrip", () => CheckMp4RoundTrip(workspace)));
+            checks.Add(Check("mp4-soundtrack", () => CheckMp4Soundtrack(workspace)));
             checks.Add(Check("audio-decode", () => CheckAudioDecode(workspace)));
         }
         catch (Exception ex)
@@ -239,6 +242,117 @@ public static class MediaProbe
         ReadAndVerify(path, new[] { 0, 1, 2, 3 });
         ReadAndVerify(path, new[] { 0, 15, 15, 19 });
         return $"{new FileInfo(path).Length} bytes, {info.FrameCount} frames at {info.Fps:0.##} fps, stepped and sought";
+    }
+
+    /// <summary>
+    /// Write a clip WITH a soundtrack, the way a video model's output is saved, and read it
+    /// back through AVFoundation: one H.264 track and one AAC track at the soundtrack's own
+    /// rate and channel count, lasting as long as the frames, with the index ahead of the
+    /// media so a web view can play it while it loads, and a sound that decodes to
+    /// something audible rather than to silence.
+    /// </summary>
+    private static string CheckMp4Soundtrack(string workspace)
+    {
+        const int count = 24, fps = 24, rate = 32000;
+        string path = Path.Combine(workspace, "probe-av.mp4");
+
+        var frames = new RgbImage[count];
+        for (int i = 0; i < count; i++)
+            frames[i] = MarkerFrame(i % 20);
+        var left = new float[rate];
+        var right = new float[rate];
+        for (int i = 0; i < rate; i++)
+        {
+            left[i] = (float)Math.Sin(2 * Math.PI * 440 * i / rate) * 0.5f;
+            right[i] = (float)Math.Sin(2 * Math.PI * 660 * i / rate) * 0.25f;
+        }
+        var audio = new GeneratedVideoAudio { Channels = new[] { left, right }, SampleRate = rate };
+
+        string codec = MediaCodecs.VideoEncoder.SaveMp4(path, frames, fps, audio, out bool muxed);
+        Require(codec == "h264", $"encoder reported '{codec}', expected h264");
+        Require(muxed, "the encoder wrote the frames without the soundtrack");
+
+        byte[] head = File.ReadAllBytes(path);
+        int moov = TopLevelBox(head, "moov"), mdat = TopLevelBox(head, "mdat");
+        Require(moov >= 0 && mdat >= 0 && moov < mdat, $"the index is not ahead of the media (moov at {moov}, mdat at {mdat})");
+
+        using NSUrl url = NSUrl.FromFilename(path);
+        using var asset = new AVUrlAsset(url, new AVUrlAssetOptions { PreferPreciseDurationAndTiming = true });
+        AVAssetTrack[] video = asset.GetTracks(AVMediaTypes.Video) ?? Array.Empty<AVAssetTrack>();
+        AVAssetTrack[] sound = asset.GetTracks(AVMediaTypes.Audio) ?? Array.Empty<AVAssetTrack>();
+        Require(video.Length == 1 && sound.Length == 1, $"{video.Length} video and {sound.Length} audio tracks, expected one of each");
+        AudioToolbox.AudioStreamBasicDescription? format = sound[0].FormatDescriptions.FirstOrDefault()?.AudioStreamBasicDescription;
+        Require(format is { } f && f.Format == AudioToolbox.AudioFormatType.MPEG4AAC,
+            $"the soundtrack is {format?.Format.ToString() ?? "unreadable"}, not AAC");
+        Require(format!.Value.SampleRate == rate && format.Value.ChannelsPerFrame == 2,
+            $"the soundtrack is {format.Value.SampleRate} Hz x{format.Value.ChannelsPerFrame}, not {rate} Hz stereo");
+        double seconds = asset.Duration.Seconds;
+        Require(Math.Abs(seconds - 1.0) <= 0.05, $"the clip lasts {seconds:0.###} s, not 1 s");
+
+        DecodedAudio decoded = MediaCodecs.Audio.Decode(path);
+        int half = decoded.SampleCount / 2;
+        double rms = Rms(decoded.Channels[0], 0, decoded.SampleCount);
+        // The left tone's RMS is 0.5/sqrt(2) = 0.354; AAC keeps a pure tone close to it.
+        Require(rms > 0.25 && rms < 0.45,
+            $"the decoded left channel's RMS is {rms:0.###}, not the tone's 0.354 ({decoded.SampleCount} samples x"
+            + $"{decoded.ChannelCount} at {decoded.SampleRate} Hz; first half {Rms(decoded.Channels[0], 0, half):0.###}, "
+            + $"second half {Rms(decoded.Channels[0], half, decoded.SampleCount):0.###}; right {Rms(decoded.Channels[^1], 0, decoded.SampleCount):0.###})");
+        return $"{head.Length} bytes, h264 + AAC {format.Value.SampleRate:0} Hz x{format.Value.ChannelsPerFrame}, " +
+               $"{seconds:0.###} s, moov before mdat, decoded RMS {rms:0.###}";
+    }
+
+    private static double Rms(float[] samples, int from, int until)
+    {
+        double sum = 0;
+        for (int i = from; i < until; i++)
+            sum += samples[i] * (double)samples[i];
+        return Math.Sqrt(sum / Math.Max(1, until - from));
+    }
+
+    /// <summary>
+    /// A transparent pixel keeps the colour it was stored with. The pipelines drop alpha and
+    /// take the colour as stored, and a premultiplied decode has none to give back where
+    /// alpha is 0 and a few levels where it is low: a picture with a mostly transparent
+    /// background reached MiniMax-H3 as black blotches. Exact, because a PNG with
+    /// transparency is read as stored rather than drawn.
+    /// </summary>
+    private static string CheckTransparentColour()
+    {
+        byte[] alphas = { 0, 1, 8, 32 };
+        var rgba = new byte[alphas.Length * 4];
+        for (int i = 0; i < alphas.Length; i++)
+        {
+            rgba[i * 4] = 40; rgba[i * 4 + 1] = 120; rgba[i * 4 + 2] = 230; rgba[i * 4 + 3] = alphas[i];
+        }
+
+        byte[] png = MediaCodecs.Image.EncodePng(rgba, alphas.Length, 1, 4);
+        byte[] back = MediaCodecs.Image.DecodeRgba(png, out _, out _);
+        for (int i = 0; i < back.Length; i++)
+            Require(back[i] == rgba[i], $"pixel {i / 4} channel {i % 4} came back {back[i]}, stored {rgba[i]} (alpha {alphas[i / 4]})");
+        return "colour exact at alphas 0/1/8/32";
+    }
+
+    /// <summary>Offset of a top-level MP4 box, or -1.</summary>
+    private static int TopLevelBox(byte[] file, string type)
+    {
+        long at = 0;
+        while (at + 8 <= file.Length)
+        {
+            long size = ((long)file[at] << 24) | ((long)file[at + 1] << 16) | ((long)file[at + 2] << 8) | file[at + 3];
+            string name = System.Text.Encoding.ASCII.GetString(file, (int)at + 4, 4);
+            if (name == type)
+                return (int)at;
+            if (size == 1 && at + 16 <= file.Length)
+            {
+                size = 0;
+                for (int i = 8; i < 16; i++)
+                    size = (size << 8) | file[at + i];
+            }
+            if (size < 8)
+                return -1;
+            at += size;
+        }
+        return -1;
     }
 
     private static void ReadAndVerify(string path, int[] requested)

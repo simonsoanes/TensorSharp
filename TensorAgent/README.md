@@ -13,7 +13,7 @@ Physical devices use the GGML Metal (`ggml_metal`) backend; build it with
 `TensorSharpAppleTargets=true`. It is not a remote client or a separate inference
 engine. It targets iPhone and iPad (iOS/iPadOS 17.0 or later, arm64 only); the
 only device run recorded below is an iPhone on iOS 26.6.1, and every built-in
-catalog model needs a device in the 12 GB memory tier or above, three of them a Mac
+catalog model needs a device in the 12 GB memory tier or above, five of them a Mac
 (see the catalog below). No release workflow builds, signs or publishes the app, so
 follow the source-build instructions below.
 
@@ -49,14 +49,18 @@ identically. The main things the desktop page has that are not here: the phone
 page draws no sub-agent progress panel (it ignores the `agents` field of
 tool-progress frames, and only names the sub-agent tools in words — "Starting
 sub-agent", "Waiting for sub-agents", "Messaging sub-agent", "Stopping sub-agent",
-"Checking sub-agents", or "Preparing …" while the call is being written), it has no image-editing or video-generation UI — those two routes are
-bound, but nothing on the page calls them — and `/api/image-generate`, the route the
-desktop page uses for text-to-image, is not bound at all. The app's own client is
-appended as one script tag at request time; the page file itself is never forked.
+"Checking sub-agents", or "Preparing …" while the call is being written), and it has
+no image or video controls of its own: with Qwen-Image 2.1 or MiniMax-H3 loaded, the
+message itself asks for a picture or a clip, through `/api/chat` (`ImageTurns`,
+`VideoTurns`; see "Pictures" and "Videos" below). So `/api/image-edit` and
+`/api/video-generate` are bound, but nothing on the page calls them, and
+`/api/image-generate`, the route the desktop page uses for text-to-image, is not bound
+at all. The app's own client is appended as one script tag at request time; the page
+file itself is never forked.
 
-**A built-in model catalog.** Eight entries with the exact byte size and SHA-256 of every
-file: five chosen to fit a phone or tablet, and three that only a Mac has the memory for.
-All eight are downloadable; those downloads
+**A built-in model catalog.** Ten entries with the exact byte size and SHA-256 of every
+file: five chosen to fit a phone or tablet, and five that only a Mac has the memory for.
+All ten are downloadable; those downloads
 resume from a kept `.part` after an interruption, are verified before use, and
 belong to the APP rather than to the screen that started one — see "Downloads"
 below. Bonsai 2 27B is the one entry that needs the 16 GB tier (iPads and Macs)
@@ -67,8 +71,11 @@ the roughly 8.5 GB a 12 GB iPhone grants. The PQ2_0 file (7.21 GB) holds the sam
 ternary weights and repacks to about the same size, so the entry downloads the
 smaller PTQ1_0 file. See the [Bonsai2 card](../docs/models/bonsai2.md).
 Qwen3.8 27B and Muse-Glimmer 30B are models a phone could run only at one or two bits,
-offered at four where the memory exists, and Qwen-Image 2.1 makes and edits pictures;
-see [The Mac's own models](#the-macs-own-models) for what each was measured to need.
+offered at four where the memory exists; Qwen-Image 2.1 makes and edits pictures; and the
+two MiniMax-H3 entries, one model in two checkpoints, make short videos with their own
+soundtrack, one from a description or a starting photo, the other around the photos,
+clips and recordings it is given. See [The Mac's own models](#the-macs-own-models) for
+what each was measured to need.
 
 | Model | Modalities | Required artifact(s) | Needs | Source |
 | --- | --- | --- | --- | --- |
@@ -80,6 +87,8 @@ see [The Mac's own models](#the-macs-own-models) for what each was measured to n
 | Qwen3.8 27B (UD-Q4_K_XL) | text; image and video with optional projector | download: 17,559,178,144-byte main GGUF; 927,607,488-byte projector optional | 32 GB | `unsloth/Qwen3.8-27B-GGUF` |
 | Muse-Glimmer 30B (UD-Q4_K_XL) | text; image with optional projector | download: 15,878,222,368-byte main GGUF; 2,051,685,088-byte projector optional | 32 GB | `unsloth/Muse-Glimmer-30B-GGUF` |
 | Qwen-Image 2.1 (Q4_K_M) | text or a photo in, a picture out | download: 4,189,343,904-byte DiT + 5,027,784,800-byte Qwen3-VL-8B text encoder + 675,509,688-byte VAE + 1,159,029,824-byte vision projector | 24 GB | `Abiray/Qwen-Image-2.1-GGUF` + `Qwen/Qwen3-VL-8B-Instruct-GGUF` + `Comfy-Org/Qwen-Image-2.1` |
+| MiniMax-H3 (Q4_K) | text, or one or two photos as the first and last frames, in; a video with its soundtrack out | download: 11,420,663,904-byte denoiser + 18,218,065,024-byte Qwen3-VL-32B text encoder + 5,207,808,496-byte video VAE + 605,254,808-byte audio VAE + 2,776,833-byte `vocab.json`, 1,671,839-byte `merges.txt` and 11,003-byte `tokenizer_config.json` | 32 GB | `unsloth/MiniMax-H3-GGUF` + `MiniMaxAI/MiniMax-H3` (tokenizer files) |
+| MiniMax-H3 References (Q4_K) | text with up to nine photos, clips and recordings to feature in; a video with its soundtrack out | download: 11,381,096,544-byte denoiser, plus the same four companions as MiniMax-H3 (six files, 24.0 GB), linked from it when it is installed rather than downloaded again | 32 GB | `unsloth/MiniMax-H3-GGUF` + `MiniMaxAI/MiniMax-H3` (tokenizer files) |
 
 Each chat entry also carries the context window the app loads it with (8,192 tokens for
 Gemma 4 E2B and E4B, 32,768 for the others), a K/V cache
@@ -91,8 +100,8 @@ Experimental: Bonsai2 has not been validated on iOS.
 The Models page lists every entry, but only one that fits the device's memory tier
 can be loaded: an entry that needs more is shown greyed, marked "Too big" with both
 numbers, rather than hidden. Bonsai 2 27B needs the 16 GB tier, Qwen-Image 2.1 the 24 GB
-tier and Qwen3.8 27B and Muse-Glimmer 30B the 32 GB tier; the other four need the 12 GB
-tier or above. For an installed model
+tier and Qwen3.8 27B, Muse-Glimmer 30B and both MiniMax-H3 entries the 32 GB tier; the
+other four need the 12 GB tier or above. For an installed model
 whose optional projector is missing, "Add vision" downloads just the projector (and
 the draft head, when the entry lists one that is not there yet); once it is on the
 device, "Enable vision" reloads the selected model with it.
@@ -104,6 +113,28 @@ refreshing one picture in place from the small previews the engine sends, and th
 picture stays in the saved chat. The app asks for 1024x1024 (an edit keeps the photo's
 shape at the same area) at the model's own 40 steps, rather than its native 2048x2048,
 which has four times the image tokens.
+
+**Videos.** With MiniMax-H3 loaded, a message describes a short clip, and an attached
+photo is its first frame (two photos, its first and last); with MiniMax-H3 References,
+the photos, clips and recordings attached, up to nine together, are the people, things,
+places and sounds the new scene features. It is the same `/api/chat` turn again
+(`VideoTurns`): the page names each stage ("Reading the description…", "Filming… step N
+of 20 · about X min left", "Developing the frames…", "Adding the sound…", "Saving the
+video…"), then plays the clip inline and looped, with its sound (an AAC track inside the
+MP4), and the clip stays in the saved chat. What a checkpoint cannot use is refused before
+the model starts, in the app's words: a clip or a recording on the keyframes entry names
+MiniMax-H3 References, and a document is refused rather than read as the script. There is
+no size, length or step setting; the app asks for 640x384 (or that area at the photo's
+shape, 608x416 for a 3:2 photo), 22 frames (0.92 s at 24 fps) and the model's own 20
+steps, as the shipped `config/minimax-h3-*.json` do. On an M5 Pro the app made a clip
+from words in 150.0-152.9 s, one from a photo in 216.5-223 s and one around a reference
+photo in 199-210 s. Longer clips cost more than in proportion, because every
+step attends over the whole clip: in the CLI 22 frames took 147.7 s, 39 frames 278.5 s
+and 56 frames 424.4 s. A reference gives a subject's look and the description puts them
+in the scene, so say who or what is in the shot: a description that said only "the
+subject of the picture" produced a garden with nobody in it. The denoisers' license, the
+MiniMax H3 Community License, excludes the EU, the UK, the Republic of Korea and the US
+from its territory, as both entries' notes say; the Qwen3-VL text encoder is Apache-2.0.
 
 **Many chats, kept, and one tap away.** The Web UI holds its history in the page and
 nowhere else, which is fine for a desktop tab and useless on a phone that is suspended
@@ -574,12 +605,25 @@ and Xcode 27.0. Then:
 TensorAgent/scripts/build-mac.sh     # CONFIGURATION=Release for an LLVM build (about three minutes)
 TensorAgent/scripts/run-mac.sh       # launch from this terminal; stdout also goes to artifacts/tensoragent-mac/app.log
 TensorAgent/scripts/verify-sim.sh artifacts/tensoragent-mac/app.log   # recognises the Mac app by its engine line
-TensorAgent/scripts/chat-e2e.py artifacts/tensoragent-mac/app.log     # answers, tools, image and audio, with TTFT and decode rate
+TensorAgent/scripts/chat-e2e.py artifacts/tensoragent-mac/app.log     # answers, tools, image and audio, with TTFT and decode rate;
+                                                                      # pictures and clips with --scenarios (below)
 ```
 
 The Debug hooks in the table above work the same way: `run-mac.sh` passes the
 environment straight through. A model is installed as on the phone, from the Models page,
 or by placing the catalog's files under `~/Library/Caches/TensorAgent/models/<id>/`.
+
+With an image or video model loaded, `chat-e2e.py` checks what the model makes instead:
+`--scenarios draw,edit` with Qwen-Image 2.1, `film,animate` with MiniMax-H3 (from words,
+and from the attached photo as the first frame) and `reference` with MiniMax-H3
+References (the same photo as the subject of a new scene). A picture must stream its
+steps and end as one PNG of the size it reported; a clip must stream its stages in order
+and end as one MP4 the app serves with Range and HEAD, whose video track has the frame
+count, rate and size the turn reported and whose sound, inside the MP4 or in a WAV beside
+it, is 32 kHz stereo as long as the clip. Either must be in the saved chat.
+`scripts/chat-e2e-selftest.py` runs the clip checks against files it makes itself, with
+no app and no model, and reports what this machine cannot run (no cv2, no `afconvert`) as
+skipped, never as passed.
 
 - **The engine library is built with the app.** The referenced projects skip their native
   builds for every head, so `TensorAgentBuildDesktopEngine` runs the backend project's own
@@ -722,6 +766,66 @@ them the edit took 495 s in the app:
   one: the reference photo's encode went from 7.3 to 3.7 s in the CLI and from 77 to 13 s
   in the app, and Gemma 4 E2B's first audio turn from 57 to 9 s.
 
+MiniMax-H3, on 2026-09-30 and 2026-10-01 (ggml `353b63b4`, unmodified): the Debug app
+(Mono) against the CLI (CoreCLR), 22 frames at 20 steps.
+
+| | App | CLI |
+| --- | --- | --- |
+| from words, 640x384 | 150.0-152.9 s over three clips (6.84-6.86 s a step) | 147.7 s (~6.5 s a step) |
+| from a photo, 608x416 | 216.5-223 s (9.5 s a step) | 209.3 s |
+| around one reference photo, 640x384 | 199-210 s (9.2 s a step) | not run |
+
+The app's footprint peaked at 2.24 GB on a photo turn (1.05 GB from words alone), and the
+machine's wired memory at about 20 GB: the denoiser and the video VAE during the decode,
+on top of the ~3.5 GB the system wires anyway. The largest file a stage maps is the
+18.22 GB text encoder, so the tier is 18.22 + 2.24 + 5 GB for macOS = 25.5 GB: 32 GB
+rather than 24 (`CatalogTests.EachDesktopEntryFitsItsTierBesideMacOS`). That fits only
+because the engine now hands the denoiser and both VAEs back before the next clip's text
+encoder runs; it used to keep all three device-resident between clips. Measured on a
+quiet machine, two identical clips from words per arm: peak wired memory 19.1 GB by
+default against 33.3 GB with `TS_H3_KEEP_RESIDENT=1` (the old behaviour, reached in the
+second clip's text phase), for 1.3 s more text conditioning on the second clip (2.8 s
+against 1.5 s). The clips took 151.4 and 148.9 s against 148.4 and 147.4 s, about 1%
+apart and inside the 3 s by which the identical first clips differed between the arms.
+The soundtrack is byte-identical to the CLI's for the same seed; the H.264 frames are
+39.3 dB PSNR at the worst and 39.9 dB on average from the CLI's lossless PNG frames, and
+the AAC track correlates 0.9986 / 0.9988 (left / right) with the WAV. A `WKWebView`
+plays the clip from the app's loopback server: readyState 4, the full duration, one video
+and one audio track (`eng/validation/webview-media-check.swift`).
+
+Fixed along the way, besides the hard links in "Downloads" below:
+
+- **Quitting no longer aborts.** Every quit after any GPU work aborted on
+  `GGML_ASSERT([rsets->data count] == 0)` in ggml-metal's static destructor: Mono raises
+  ProcessExit only for a managed shutdown, and AppKit's quit ends in `exit()`. The Mac
+  app's `WillTerminate` now stops the turns, waits, releases the model and frees the
+  engine. Catalyst gives that callback about 5 s before its watchdog calls `exit()`, and
+  one step of a clip is about 7 s, so a quit mid-clip waits 3 s and then leaves with
+  `_exit`, without destructors, rather than release the model under the GPU. Switching
+  models during a picture or a clip now waits for it too, for up to 5 minutes.
+- **The soundtrack is inside the MP4,** as AAC (two channels, 32 kHz, 128 kbit/s), index
+  first, with the 32 kHz WAV still written beside it. A first version handed AVFoundation
+  a managed array that the encoder read after its wrapper was disposed, and the track
+  carried a ~5 kHz whine at a fifth of the level, different on every run; the memory is
+  now CoreMedia's. The media probe's `mp4-soundtrack` check decodes a tone back.
+- **A transparent PNG reaches the model as stored.** Core Graphics decoded it
+  premultiplied, which keeps none of a pixel's colour where alpha is 0, and a mostly
+  transparent picture reached MiniMax-H3 as black blotches (27% near-black pixels in the
+  first frame, against 0.1% from the CLI). Such a PNG, if it embeds no colour profile, is
+  now read by the managed PNG codec; media-probe check `png-transparent-colour`.
+- **Companions follow every load**, keyed by family, not just the one at startup:
+  switching between Qwen-Image and MiniMax-H3 left the other's paths, and MiniMax-H3's
+  fallback scan of the model store would have taken Qwen-Image's 8B text encoder for its
+  own. A diffusion entry loads only when it is completely downloaded, a video entry is
+  never tried on the CPU backend (a clip that takes minutes on the GPU would take hours),
+  and the prefix-cache warm-up skips video models.
+- **Files answer Range and HEAD.** The loopback server answered every request with 200
+  and the whole file, and Apple's Safari Web Content Guide requires a server that hosts
+  media for iOS to support byte-range requests. It now answers 206 or 416 with
+  Accept-Ranges, and HEAD as RFC 9110 says (a ranged HEAD as an unranged GET, as ASP.NET
+  does). WebKit on macOS played the short clip without ranges as well, so what this buys
+  (seeking, and iOS's media loader) has not been observed in a run.
+
 ## Layout
 
 ```
@@ -735,7 +839,7 @@ TensorAgent/
     Sessions/       conversations, and the recorder that keeps them in step with the page
     Settings/       the two sandbox switches and the rest
     Hosting/        the loopback server, the route table, and AgentAppHost
-    Interop/        the one DllImport resolver CPython and JavaScriptCore share
+    Interop/        the one DllImport resolver CPython and JavaScriptCore share, and hard links
     Shell/          the in-process POSIX shell and the agent host's backends (in-process, desktop)
     Sandbox/        ExecutionPolicy and ConfinedPaths, shared by all three runtimes
     Python/         embedded CPython and the wheel installer
@@ -865,6 +969,13 @@ at a message, not long enough for five gigabytes. What makes that survivable is 
 nothing is ever lost: every file is written through its `.part`, so a transfer the
 system does eventually stop resumes from the byte it reached, and the app restarts it
 by itself when it comes back to the foreground. The user never taps twice.
+
+A file that another installed entry already holds byte for byte (the same pinned size and
+SHA-256) is hard-linked from there rather than downloaded, before the first transfer
+starts, and the Models page counts only what will be fetched: the two MiniMax-H3 entries
+share six files (24.0 GB), so whichever is installed second fetches only its 11.4 GB
+denoiser; measured, its six shared files arrived in 0.1 s with 0 MB transferred and no
+more disk used. Deleting either entry removes only its own names for those files.
 
 **Leaving the APP mid-answer no longer costs the answer.** Leaving the chat is
 `ChatTurnManager`'s problem; leaving TensorAgent altogether is a different problem with a
@@ -1153,6 +1264,14 @@ upload tests in `MediaRoutesTests` pin the other end of "Upload failed (400)" �
 photo whose name has no extension is placed from its own bytes, and something nobody
 can identify is still refused with a sentence a person can read.
 
+No test here makes a MiniMax-H3 clip. `VideoTurnsTests` pin which message becomes which
+request for which checkpoint and how the video service's frames reach the page and the
+saved chat; `MiniMaxH3CatalogTests` that the two entries share every file but the
+denoiser, under the names the engine looks for; `SharedFileLinkTests` that a shared file
+is linked rather than fetched; and `LoopbackRangeTests` the ranges and HEAD, through the
+real routes. The clip itself is checked against the running Mac app by `chat-e2e.py`'s
+`film`, `animate` and `reference` scenarios (see "On a Mac").
+
 ### Measured
 
 Gemma 4 E4B Q8_0, CPU backend, on a development Mac. The point of these numbers is
@@ -1369,14 +1488,16 @@ checked and these were not:
 - **The native picker's own file names.** `UploadNaming` is tested against the shapes
   iOS produces (a stem with no extension, no content type, HEIC and MP4 bytes behind
   the same absent name), but the picker itself has only been run by hand.
-- **Image editing.** `/api/image-edit` remains bound to the same service the desktop
-  uses, but the built-in catalog offers no image-generation checkpoint, the phone page
-  has no control that calls the route, and no image has been generated on iOS.
-  `/api/image-generate`, the desktop page's text-to-image route, is not bound in the
-  app.
-- **Video generation.** The routes exist because they are part of the shared
-  surface. No video model is small enough for the catalog, and the page has no control
-  for it, so nothing offers one.
+- **Pictures on a phone.** The page makes and edits pictures through `/api/chat` with
+  Qwen-Image 2.1, which the catalog offers only on a Mac (24 GB), where it was measured;
+  no image has been generated on iOS. `/api/image-edit` remains bound to the same
+  service the desktop uses, but nothing on the page calls it, and `/api/image-generate`,
+  the desktop page's text-to-image route, is not bound in the app.
+- **Clips on a phone.** The two MiniMax-H3 entries are offered only on a Mac (32 GB),
+  where they were measured. No video model fits a phone, so none is offered there, and
+  no clip has been played by iOS's media loader (WebKit's playback was checked in the
+  Mac app). `/api/video-generate` stays bound as part of the shared surface, but nothing
+  on the page calls it.
 - **Sub-agents on the phone.** Delegation is offered in every chat while the
   "Sub-agents" switch is on (see "Sub-agents, on by default, with a switch"), but no delegated turn on a phone or in the
   simulator is recorded, and nothing has measured what up to three concurrent

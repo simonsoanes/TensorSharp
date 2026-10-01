@@ -33,6 +33,27 @@ namespace TensorSharp.Models.WanVideo
             return MediaCodecs.VideoEncoder.SaveMp4(full, frames, fps);
         }
 
+        /// <summary>Write frames as an MP4 with the soundtrack inside it when the platform's
+        /// encoder can mux one (<paramref name="audioMuxed"/> says whether it did). Returns
+        /// the codec actually used, as <see cref="SaveMp4(string, RgbImage[], int)"/>.</summary>
+        public static string SaveMp4(string path, RgbImage[] frames, int fps,
+                                     TensorSharp.Models.Video.GeneratedVideoAudio audio, out bool audioMuxed)
+        {
+            if (frames == null || frames.Length == 0)
+                throw new ArgumentException("no frames to save", nameof(frames));
+            if (fps <= 0) fps = 16;
+
+            string full = Path.GetFullPath(path);
+            Directory.CreateDirectory(Path.GetDirectoryName(full) ?? ".");
+
+            if (audio is not { ChannelCount: > 0, SampleCount: > 0, SampleRate: > 0 })
+            {
+                audioMuxed = false;
+                return MediaCodecs.VideoEncoder.SaveMp4(full, frames, fps);
+            }
+            return MediaCodecs.VideoEncoder.SaveMp4(full, frames, fps, audio, out audioMuxed);
+        }
+
         /// <summary>Encode to an in-memory MP4 (for server responses). Returns null codec info
         /// via <paramref name="codec"/> as in <see cref="SaveMp4"/>.</summary>
         public static byte[] EncodeMp4(RgbImage[] frames, int fps, out string codec)

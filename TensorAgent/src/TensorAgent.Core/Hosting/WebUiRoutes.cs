@@ -244,8 +244,10 @@ public static class WebUiRoutes
         // route, and it has to exist for the same reason: the page renders an
         // attachment, a frame, an edited image and a generated clip from the URL the
         // API handed back, so a missing mount is not a missing feature but a chat full
-        // of broken images with a 200 behind each one.
-        server.MapGet("/uploads/{*path}", (request, _) => Task.FromResult(ServeUpload(uploadDirectory, request.RouteValues["path"])));
+        // of broken images with a 200 behind each one. Mapped as files, so it takes HEAD
+        // as static files do; the byte ranges a clip plays and seeks with are the file
+        // reply's own.
+        server.MapFiles("/uploads/{*path}", (request, _) => Task.FromResult(ServeUpload(uploadDirectory, request.RouteValues["path"])));
 
         server.MapPost("/api/image-edit", async (request, ct) =>
         {
@@ -763,7 +765,7 @@ public static class WebUiRoutes
         var artifacts = new List<StoredArtifact>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         string? sessionId = null;
-        string? imageUrl = null;
+        string? imageUrl = null, videoUrl = null, audioUrl = null;
 
         await foreach (object frame in frames.ConfigureAwait(false))
         {
@@ -782,16 +784,27 @@ public static class WebUiRoutes
                 thinking.Append(reasoning);
             if (root.TryGetProperty("sessionId", out JsonElement id) && id.GetString() is { Length: > 0 } value)
                 sessionId = value;
-            // An image model's turn may produce nothing else (ImageTurns).
+            // An image or video model's turn may produce nothing else (ImageTurns, VideoTurns).
             if (root.TryGetProperty("imageUrl", out JsonElement picture)
                 && picture.ValueKind == JsonValueKind.String
                 && picture.GetString() is { Length: > 0 } url)
                 imageUrl = url;
+            if (root.TryGetProperty("videoUrl", out JsonElement clip)
+                && clip.ValueKind == JsonValueKind.String
+                && clip.GetString() is { Length: > 0 } filmed)
+            {
+                videoUrl = filmed;
+                audioUrl = root.TryGetProperty("audioUrl", out JsonElement sound)
+                    && sound.ValueKind == JsonValueKind.String
+                    && sound.GetString() is { Length: > 0 } heard
+                        ? heard
+                        : null;
+            }
             CollectArtifacts(root, artifacts, seen);
         }
 
         if (sessionId is not null)
-            recorder.Complete(sessionId, content.ToString(), thinking.ToString(), artifacts, imageUrl);
+            recorder.Complete(sessionId, content.ToString(), thinking.ToString(), artifacts, imageUrl, videoUrl, audioUrl);
     }
 
     /// <summary>

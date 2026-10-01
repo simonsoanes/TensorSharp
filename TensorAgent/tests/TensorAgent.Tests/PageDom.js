@@ -145,6 +145,13 @@
   var activity = document.getElementById('activity');
   var label = element('div'); label.className = 'label'; activity.appendChild(label);
   var tail = element('div'); tail.className = 'tail'; activity.appendChild(tail);
+  // Every label the strip has shown, oldest first. The page clears the strip when a
+  // turn ends, so by the time a test can look, this record is all that is left of it.
+  var labels = [];
+  Object.defineProperty(label, 'textContent', {
+    get: function () { return this._text; },
+    set: function (v) { this._text = v == null ? '' : String(v); if (this._text) labels.push(this._text); },
+  });
 
   // ---- the network ---------------------------------------------------------
   // Answers come from a table the test fills in; every request is recorded, so a
@@ -224,6 +231,9 @@
    *            still waiting rejects with AbortError.
    * `__delay: ms` makes every read take that many real milliseconds, so a test can
    * abort or look at the page in the middle of one.
+   * A frame `{ __chunk: [...frames] }` is several frames in ONE read, which is how a
+   * page that re-attaches is handed everything so far, and the page paints once per
+   * read rather than once per frame.
    */
   function sseBody(spec, signal) {
     var frames = spec.__sse, then = spec.__then || 'end', delay = Number(spec.__delay) || 0;
@@ -248,7 +258,9 @@
           if (i < 0) return; // an abort or a cancel got there first
           if (at < frames.length) {
             waiting.splice(i, 1);
-            resolve({ done: false, value: 'data: ' + JSON.stringify(frames[at++]) + '\n' });
+            var next = frames[at++];
+            var chunk = next && next.__chunk ? next.__chunk : [next];
+            resolve({ done: false, value: chunk.map(function (f) { return 'data: ' + JSON.stringify(f) + '\n'; }).join('') });
           } else if (then === 'reject') {
             waiting.splice(i, 1);
             reject(networkError('Load failed'));
@@ -387,6 +399,8 @@
     errorNotices: function () { return noticeTexts(true); },
     /** Every notice, error or not, oldest first. */
     notices: function () { return noticeTexts(false); },
+    /** Every label the progress strip showed, oldest first. The page writes one only when it changes. */
+    progress: function () { return labels.slice(); },
     /** The transcript as a shape a test can assert on. */
     transcript: function () {
       return document.getElementById('chat').children.map(function (turn) {
@@ -394,7 +408,8 @@
         (function walk(node) {
           node.children.forEach(function (c) {
             if (['IMG', 'AUDIO', 'VIDEO', 'A'].indexOf(c.tagName) >= 0) {
-              media.push({ tag: c.tagName, src: c.src || c.href || '', text: c.textContent, poster: c.poster || '' });
+              media.push({ tag: c.tagName, src: c.src || c.href || '', text: c.textContent, poster: c.poster || '',
+                           controls: !!c.controls, loop: !!c.loop, playsInline: !!c.playsInline, preload: c.preload || '' });
             }
             walk(c);
           });

@@ -33,7 +33,8 @@ namespace TensorSharp.Chat
     /// <summary>
     /// What one video generation produced: the download URLs the Web UI shows, the
     /// file on disk (so a transport that wants to inline the bytes can read it) and
-    /// the geometry the reply reports.
+    /// the geometry the reply reports. <see cref="AudioMuxed"/> is true when the
+    /// soundtrack is also inside the MP4, not only in the sidecar at <see cref="AudioUrl"/>.
     /// </summary>
     public sealed record VideoGenerationResult(
         string Url,
@@ -45,7 +46,8 @@ namespace TensorSharp.Chat
         int Fps,
         long Seed,
         string Codec,
-        double ElapsedSeconds);
+        double ElapsedSeconds,
+        bool AudioMuxed = false);
 
     /// <summary>
     /// The Web UI's request handlers with the transport taken out: queue status,
@@ -1224,6 +1226,30 @@ namespace TensorSharp.Chat
         /// </summary>
         public bool LoadedModelMakesImages => _svc.Model is TensorSharp.Models.QwenImage.QwenImageModel;
 
+        /// <summary>Whether the loaded model makes video clips (see <see cref="LoadedModelMakesImages"/>).</summary>
+        public bool LoadedModelMakesVideo => LoadedVideoModel != null;
+
+        /// <summary>
+        /// The loaded model when it makes video clips, otherwise null: what it can be given
+        /// (keyframes or references, how many, with sound or not) decides how a host turns
+        /// a chat message into a <see cref="VideoGenerateStreamAsync"/> request.
+        /// </summary>
+        public TensorSharp.Models.Video.IVideoGenerationModel LoadedVideoModel =>
+            _svc.Model as TensorSharp.Models.Video.IVideoGenerationModel;
+
+        /// <summary>
+        /// Whether a picture or a clip is being made, or is waiting for the model, right now.
+        ///
+        /// <para>That work runs on worker threads of its own, out of sight of the text
+        /// engine whose counters a host asks before it unloads a model. Unloading under a
+        /// running generation frees weights a GPU graph is still reading, so a host that
+        /// can switch models has to ask this as well. A job counts from the moment it is
+        /// accepted, while it waits behind another, until its worker has left the model.</para>
+        /// </summary>
+        public bool IsGeneratingMedia => Volatile.Read(ref _mediaJobs) > 0;
+
+        private int _mediaJobs;
+
         // Every loadable QwenImageModel is a Qwen-Image-2.1 model: earlier Qwen-Image
         // checkpoints are refused at load, so the model type is the whole check.
         private const string NotAnImageModelError = "The loaded model is not a Qwen-Image-2.1 model.";
@@ -1375,6 +1401,7 @@ namespace TensorSharp.Chat
                 prompt, p.Steps, p.CfgScale, imageBytesList.Count, imageBytesList.Sum(b => (long)b.Length));
             var sw = Stopwatch.StartNew();
             int w, h;
+            Interlocked.Increment(ref _mediaJobs);
             try
             {
                 (w, h) = await Task.Run(() =>
@@ -1397,6 +1424,12 @@ namespace TensorSharp.Chat
                 // client's to fix, so a 400 with the reason rather than a 500.
                 logger.LogWarning(LogEventIds.UploadReceived, "Image request rejected: {Reason}", ex.Message);
                 throw new WebUiRequestRejectedException(400, new { error = ex.Message });
+            }
+            finally
+            {
+                // The awaited worker has left the model (a cancelled request that never
+                // started one has nothing to wait for), so the job is over either way.
+                Interlocked.Decrement(ref _mediaJobs);
             }
             sw.Stop();
             _uploads.RecordFile(outPath);
@@ -1516,6 +1549,7 @@ namespace TensorSharp.Chat
             // disabled previews entirely for auto-step requests (the Web UI default).
             int previewCount = p.Steps > 0 ? Math.Clamp(p.Steps - 1, 0, 8) : 8;
 
+            Interlocked.Increment(ref _mediaJobs);
             var editTask = Task.Run(() =>
             {
                 var sw = Stopwatch.StartNew();
@@ -1564,7 +1598,11 @@ namespace TensorSharp.Chat
                     logger.LogError(LogEventIds.ChatFailed, ex, "Image edit (stream) failed");
                     channel.Writer.TryWrite(new EditFrame { Final = true, Error = ex.Message });
                 }
-                finally { channel.Writer.Complete(); }
+                finally
+                {
+                    Interlocked.Decrement(ref _mediaJobs);
+                    channel.Writer.Complete();
+                }
             }, CancellationToken.None);
 
             // Frames are yielded outside the try below because an iterator may not yield
@@ -1620,8 +1658,10 @@ namespace TensorSharp.Chat
             public int Step, Total;
             public bool Final;
             public string Url;
-            // Sidecar WAV for models that generate an audio track jointly with the video.
+            // Sidecar WAV for models that generate an audio track jointly with the video,
+            // and whether the same track also went inside the MP4.
             public string AudioUrl;
+            public bool AudioMuxed;
             public int Width, Height, Frames, Fps;
             public long Seed;
             public string Codec;
@@ -1698,7 +1738,7 @@ namespace TensorSharp.Chat
                 "Video generate done: {F} frames -> {Url} ({Sec:F1}s)", result.Frames, result.Url, result.ElapsedSeconds);
             return new
             {
-                ok = true, url = result.Url, audioUrl = result.AudioUrl,
+                ok = true, url = result.Url, audioUrl = result.AudioUrl, audioMuxed = result.AudioMuxed,
                 width = result.Width, height = result.Height,
                 frames = result.Frames, fps = result.Fps,
                 seed = result.Seed, codec = result.Codec,
@@ -1728,15 +1768,25 @@ namespace TensorSharp.Chat
             string outPath = Path.Combine(_options.UploadDirectory, outName);
 
             var sw = Stopwatch.StartNew();
-            var result = await Task.Run(() =>
+            Interlocked.Increment(ref _mediaJobs);
+            (TensorSharp.Models.WanVideo.GeneratedVideo video, string codec, bool audioMuxed) result;
+            try
             {
-                lock (_videoGenLock)
+                result = await Task.Run(() =>
                 {
-                    var video = videoModel.GenerateVideo(prompt, p);
-                    string codec = TensorSharp.Models.WanVideo.VideoIO.SaveMp4(outPath, video.Frames, video.Fps);
-                    return (video, codec);
-                }
-            });
+                    lock (_videoGenLock)
+                    {
+                        var video = videoModel.GenerateVideo(prompt, p);
+                        string codec = TensorSharp.Models.WanVideo.VideoIO.SaveMp4(
+                            outPath, video.Frames, video.Fps, video.Audio, out bool audioMuxed);
+                        return (video, codec, audioMuxed);
+                    }
+                });
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _mediaJobs);
+            }
             sw.Stop();
             _uploads.RecordFile(outPath);
 
@@ -1746,7 +1796,7 @@ namespace TensorSharp.Chat
                 url, audioUrl, outPath,
                 result.video.Frames[0].Width, result.video.Frames[0].Height,
                 result.video.Frames.Length, result.video.Fps, result.video.Seed, result.codec,
-                sw.Elapsed.TotalSeconds);
+                sw.Elapsed.TotalSeconds, result.audioMuxed);
         }
 
         // A generation request the loaded model can explain rather than an internal
@@ -1756,9 +1806,10 @@ namespace TensorSharp.Chat
             ex is ArgumentException or InvalidOperationException or NotSupportedException;
 
         // Models that generate audio jointly with the video hand back a track alongside
-        // the frames. It is written as a sidecar WAV rather than muxed into the MP4:
-        // muxing needs an encoder we cannot assume is installed, whereas a WAV always
-        // writes and the client can play or mux it as it likes.
+        // the frames. It is always written as a sidecar WAV, which writes everywhere and
+        // which a client can play or mux as it likes. Where the platform's encoder can
+        // also put the track inside the MP4 (AVAssetWriter on Apple) it does that as well,
+        // and the reply says so; the desktop encoders write the frames alone.
         private string SaveAudioSidecar(TensorSharp.Models.Video.GeneratedVideoAudio audio, string videoName)
         {
             if (audio is not { ChannelCount: > 0, SampleCount: > 0 }) return null;
@@ -1828,6 +1879,7 @@ namespace TensorSharp.Chat
             // threads publish into this channel.
             var channel = Channel.CreateUnbounded<VideoFrame>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
 
+            Interlocked.Increment(ref _mediaJobs);
             var genTask = Task.Run(() =>
             {
                 var sw = Stopwatch.StartNew();
@@ -1835,26 +1887,38 @@ namespace TensorSharp.Chat
                 {
                     lock (_videoGenLock)
                     {
+                        // A request stopped while it waited behind another must not start.
+                        ct.ThrowIfCancellationRequested();
+                        int generatingThread = Environment.CurrentManagedThreadId;
                         p.OnStep = (step, total) =>
                         {
                             if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
                             channel.Writer.TryWrite(new VideoFrame { Step = step, Total = total });
                         };
-                        // Heartbeats and phase transitions. These arrive from a timer
-                        // thread mid-pass, so cancellation is only observed here — the
-                        // OnStep hook above still owns aborting between steps.
-                        p.OnProgress = prog => channel.Writer.TryWrite(new VideoFrame
+                        // Heartbeats and phase transitions. A phase report made on the
+                        // generating thread is also a safe place to stop - before the text
+                        // encoder, between VAE tiles, before the soundtrack - which keeps a
+                        // Stop from waiting out a whole decode. A heartbeat arrives from a
+                        // timer thread mid-pass, where an exception would take the process
+                        // down, so those only report and OnStep owns the rest.
+                        p.OnProgress = prog =>
                         {
-                            Step = prog.Step, Total = prog.TotalSteps, Phase = prog.Phase,
-                            Detail = prog.Detail, Elapsed = prog.ElapsedSeconds, Eta = prog.EtaSeconds,
-                        });
+                            if (ct.IsCancellationRequested && Environment.CurrentManagedThreadId == generatingThread)
+                                throw new OperationCanceledException(ct);
+                            channel.Writer.TryWrite(new VideoFrame
+                            {
+                                Step = prog.Step, Total = prog.TotalSteps, Phase = prog.Phase,
+                                Detail = prog.Detail, Elapsed = prog.ElapsedSeconds, Eta = prog.EtaSeconds,
+                            });
+                        };
                         var video = videoModel.GenerateVideo(prompt, p);
-                        string codec = TensorSharp.Models.WanVideo.VideoIO.SaveMp4(outPath, video.Frames, video.Fps);
+                        string codec = TensorSharp.Models.WanVideo.VideoIO.SaveMp4(
+                            outPath, video.Frames, video.Fps, video.Audio, out bool audioMuxed);
                         _uploads.RecordFile(outPath);
                         channel.Writer.TryWrite(new VideoFrame
                         {
                             Final = true, Url = BuildUploadUrl(outName),
-                            AudioUrl = SaveAudioSidecar(video.Audio, outName),
+                            AudioUrl = SaveAudioSidecar(video.Audio, outName), AudioMuxed = audioMuxed,
                             Width = video.Frames[0].Width, Height = video.Frames[0].Height,
                             Frames = video.Frames.Length, Fps = video.Fps, Seed = video.Seed,
                             Codec = codec, Seconds = sw.Elapsed.TotalSeconds,
@@ -1870,7 +1934,11 @@ namespace TensorSharp.Chat
                     logger.LogError(LogEventIds.ChatFailed, ex, "Video generate (stream) failed");
                     channel.Writer.TryWrite(new VideoFrame { Final = true, Error = ex.Message });
                 }
-                finally { channel.Writer.Complete(); }
+                finally
+                {
+                    Interlocked.Decrement(ref _mediaJobs);
+                    channel.Writer.Complete();
+                }
             }, CancellationToken.None);
 
             while (true)
@@ -1897,7 +1965,8 @@ namespace TensorSharp.Chat
                     else
                         yield return new
                         {
-                            done = true, url = f.Url, audioUrl = f.AudioUrl, width = f.Width, height = f.Height,
+                            done = true, url = f.Url, audioUrl = f.AudioUrl, audioMuxed = f.AudioMuxed,
+                            width = f.Width, height = f.Height,
                             frames = f.Frames, fps = f.Fps, seed = f.Seed, codec = f.Codec,
                             elapsedSeconds = f.Seconds,
                         };

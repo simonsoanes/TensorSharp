@@ -195,8 +195,8 @@ Same machine, same workload, before and after the load-time work in
 Four networks run in sequence, so peak VRAM is `max(...)` rather than the sum — but only
 if each one is handed back before the next arrives, and only if getting the next one onto
 the card is not itself the slow part. On a 16 GB card neither was free. Everything below
-was measured on the RTX 3080 Laptop 16 GB above; `TS_H3_PHASE=1` prints the per-stage
-breakdown these numbers come from.
+except the Metal subsection was measured on the RTX 3080 Laptop 16 GB above;
+`TS_H3_PHASE=1` prints the per-stage breakdown these numbers come from.
 
 ### The denoiser is released before the video VAE loads
 
@@ -209,10 +209,36 @@ whole decode runs at PCIe speed. The decode window sat pinned at 16 041 MiB of a
 The finished denoiser's device residency is now handed back first, when the VAE would not
 fit beside it. Peak VRAM during decode fell to about 5 600 MiB, worth **22 s** at
 640x384. It is a cap, not a policy change: the decision reads actual free VRAM, so a card
-with room keeps the denoiser resident and behaves exactly as before, and non-CUDA GGML
-backends are left alone — a unified-memory device has nothing to hand back. The cost is
-re-uploading the DiT on the *next* request only, since its weights are mmapped GGUF pages
-that are still in RAM. The sibling Qwen-Image pipeline already worked this way.
+with room keeps the denoiser resident and behaves exactly as before. This check runs on
+`ggml_cuda` only; Metal has a release of its own, before the text encoder rather than
+before the VAE ([below](#on-metal-the-previous-clips-networks-are-released-before-the-text-encoder)).
+The cost is re-uploading the DiT on the *next* request only, since its weights are mmapped
+GGUF pages that are still in RAM. The sibling Qwen-Image pipeline already worked this way.
+
+### On Metal, the previous clip's networks are released before the text encoder
+
+The pipeline keeps the denoiser and both VAEs between requests. On Metal every weight they
+bound is a buffer wrapped zero-copy over the mapped file and held resident, which wires its
+pages, so from the second clip on, the 17 GB text encoder ran with ~16 GB of finished
+networks still wired beside it. They are now released before each clip's text encoder
+runs, which keeps the peak at the largest single stage. The pages stay in the file cache,
+so the next bind usually finds them there.
+
+Measured in the TensorAgent Mac app (M5 Pro, 48 GB, macOS 27, a quiet machine): two
+identical text-to-video clips per arm at the app's settings (640x384, 22 frames, 20
+steps), memory sampled every second.
+
+| | Peak system wired | Clip 1 / clip 2 | Clip 2's text conditioning |
+|---|---|---|---|
+| default (released) | **19.1 GB** | 151.4 s / 148.9 s | 2.8 s |
+| `TS_H3_KEEP_RESIDENT=1` (kept, the old behaviour) | 33.3 GB, reached in clip 2's text phase | 148.4 s / 147.4 s | 1.5 s |
+
+That is 14.2 GB less peak wired memory, which is what lets a 32 GB Mac run the set, for
+about 1.3 s more text conditioning on every clip after the first. The totals differ by
+about 1%, inside the 3 s by which the identical first clips varied between the arms, and
+the first clip's output is unchanged. `TS_H3_KEEP_RESIDENT=1` keeps the networks on a
+unified-memory host that has the memory for all of them; discrete GPUs keep the behaviour
+above.
 
 ### The denoiser file is read before it is uploaded
 
@@ -283,12 +309,25 @@ server takes no `--cfg` at all — so the model's own defaults apply.
 
 > **The text-encoder GGUF carries no tokenizer**, and that is the one thing a config
 > cannot fetch for you: auto-download fills in options that are **flags**, and the
-> tokenizer is not one. Put `vocab.json` and `merges.txt`
-> from [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/42ed227ee7df40d41602854ae760620d6eb651fe/processor)
-> beside it, or point `TS_VIDEO_TOKENIZER` at them. Neither published GGUF has any
-> metadata at all, so TensorSharp identifies H3 by its tensors rather than by an
-> architecture string (arch keys `minimax-h3` / `minimax_h3` are accepted when a
-> file does declare one).
+> tokenizer is not one. Put three files from the `processor/` folder of
+> [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/42ed227ee7df40d41602854ae760620d6eb651fe/processor)
+> beside it — `vocab.json`, `merges.txt` and `tokenizer_config.json` — or point
+> `TS_VIDEO_TOKENIZER` at the folder holding them. (The TensorAgent Mac app's catalog
+> entries download all three; see [below](#in-the-tensoragent-mac-app).) Neither
+> published GGUF has any metadata at all, so TensorSharp identifies H3 by its tensors
+> rather than by an architecture string (arch keys `minimax-h3` / `minimax_h3` are
+> accepted when a file does declare one).
+
+> **`tokenizer_config.json` is the easy one to leave out, and pictures need it.** It
+> alone defines `<|vision_start|>`, `<|image_pad|>` and `<|vision_end|>`; they are not
+> in `vocab.json`. Without it each marker is split into ordinary pieces, the prompt
+> comes out *longer* than the placeholders it was built from, and the one-to-one check
+> after tokenizing — which only caught a shorter prompt — passed, so the vision features
+> were written over the wrong positions and the clip quietly ignored the picture. A
+> keyframe request, or a reference request with a photo or a clip in it, is now refused
+> before the vision tower runs, with an error naming the file. Text-to-video never
+> needed it, and neither do references that are all sound recordings: a soundtrack
+> reaches the prompt only as its `<Audio N>:` label.
 
 > **`--cfg 1.0` is required.** H3 is CFG-distilled; above 1.0 it degrades badly and
 > TensorSharp refuses. 4–8 steps is the operating point, so iteration is fast.
@@ -413,7 +452,9 @@ Notes:
   `<Picture 2>`". A clip that arrived with its own soundtrack is presented as
   *two* items and takes an `<Audio n>` label as well as a `<Video n>` one.
 * Say who is in frame. The reference supplies identity; the prompt still has to
-  describe the shot, or you get a well-rendered scene with the subject missing.
+  describe the shot, or you get a well-rendered scene with the subject missing: a
+  prompt that only said "the subject of the picture" produced a garden with nobody
+  in it.
 * A reference can also be a **clip** or a **soundtrack**, not just a still — see
   below.
 
@@ -451,6 +492,10 @@ What happens to a reference clip:
 * It is resampled onto H3's own **24 fps** and pulled down to the 17k+5 frame grid,
   capped at the number of frames being generated. A clip shorter than 5 frames at
   24 fps is rejected.
+* From a clip **file**, only the frames that can be used are extracted, into a
+  temporary folder that is removed once they are loaded; a directory of frames you
+  pass is left alone. It used to extract every frame of the clip as a PNG — 720 for a
+  30-second clip, to use a few dozen — and never delete them.
 * Its canvas comes from its own aspect ratio around a nominal 768 px, capped by
   area and snapped to 32. A source **smaller** than that keeps its own size:
   upscaling invents no detail to reference and costs a great deal — a 448x320 clip
@@ -548,7 +593,10 @@ Measured on the same image-to-video request (M5 Pro, `ggml_metal`, seed 42, 22 f
   124 … — which comes from the video VAE's temporal chunking, not from an
   arbitrary choice: each 5-latent-frame chunk yields 17 pixel frames, on top of a
   5-frame lead-in. Default 22.
-* fps is pinned to 24; any other value is overridden.
+* fps is pinned to 24; any other value is overridden, and the soundtrack follows the
+  24 fps clip too. Its length used to be sized from the *requested* rate — fps 16 on 39
+  frames asked for 98 audio latents instead of 65 — which laid the soundtrack out on a
+  different timeline from the frames it is trimmed to.
 * Clips of any grid length decode correctly: the VAE runs 5 latent frames at a
   time with a 2-frame look-ahead and cross-fades the seams, exactly as the
   reference does. Decoding a long clip in one call instead washes detail out
@@ -588,8 +636,9 @@ curl -s localhost:5000/api/video-generate -H 'content-type: application/json' -d
 }'
 ```
 
-Returns `{ ok, url, audioUrl, width, height, frames, fps, seed, codec, elapsedSeconds }`.
-`audioUrl` is null when the model produced no track. The full field set is `prompt`,
+Returns `{ ok, url, audioUrl, audioMuxed, width, height, frames, fps, seed, codec, elapsedSeconds }`.
+`audioUrl` is null when the model produced no track; `audioMuxed` says whether the MP4
+carries the soundtrack as well ([below](#audio-output)). The full field set is `prompt`,
 `width`, `height`, `frames`, `steps`, `cfg`, `fps`, `seed`, `flowShift`,
 `imagePath` (or inline base64 `image`), `videoMode`, `generateAudio`, `endImage`,
 `referenceImages`, `referenceVideos`, `referenceAudios`, `referenceVideoAudios`;
@@ -604,7 +653,7 @@ prefer camelCase everywhere. `referenceVideoAudios` pairs **by index** with
 `referenceImages` name files previously uploaded through `/api/upload`; paths
 outside the upload directory are rejected. `/v1/videos/generations` shares the same
 parser, so the same seven fields accept snake_case there too (`video_mode`,
-`reference_images`, …); it returns `audio_url` rather than `audioUrl`.
+`reference_images`, …); it returns `audio_url` rather than `audioUrl`, and no mux flag.
 
 A model rejection — the wrong checkpoint for the mode, or keyframes together with
 references — comes back as a **400 carrying the model's own message**, not a generic
@@ -617,15 +666,64 @@ carrying `family` (`minimax-h3`), `supportsAudio`, `supportsImageConditioning`,
 a last frame or up to nine references, instead of pattern-matching an architecture
 string.
 
-Audio is written as a sidecar WAV rather than muxed into the MP4, because muxing
-needs an encoder that may not be installed. To combine them:
+### Audio output
+
+The soundtrack is always written as a sidecar WAV beside the MP4. Whether the MP4
+carries it as well depends on the platform's encoder. The desktop encoders (ffmpeg and
+OpenCV), which the CLI and the server use, write the frames alone, as before, because
+muxing needs an encoder that may not be installed. To combine them:
 
 ```sh
 ffmpeg -i fox.mp4 -i fox.wav -c:v copy -c:a aac fox_with_audio.mp4
 ```
 
+Where the encoder can mux — AVAssetWriter on Apple, which is what the
+[TensorAgent Mac app](#in-the-tensoragent-mac-app) writes with — the MP4 also carries the
+soundtrack as an AAC track (2 channels, 32 kHz, 128 kbit/s) with the index at the front
+of the file, and the reply says `audioMuxed: true`. Measured in the Mac app, that track
+correlates 0.9986 / 0.9988 (left / right) with the WAV.
+
 `--no-audio` (`"generateAudio": false`) skips the audio decode entirely, saving the
 audio VAE's time and memory; video-only models ignore it.
+
+## In the TensorAgent Mac app
+
+The [TensorAgent](../../TensorAgent/README.md) Mac app offers both checkpoints as catalog
+entries at its 32 GB tier: **MiniMax-H3** (`minimax-h3-fl2va-q4k`), where one attached
+photo is the first frame and two are the first and last, and **MiniMax-H3 References**
+(`minimax-h3-ref2va-q4k`), where up to nine photos, clips and sound recordings are
+references for a new scene. Each downloads the whole hash-pinned set, the three tokenizer
+files included: 35.46 GB for the first, 35.42 GB for the second. The six files they share
+(24.0 GB) are byte-identical, so whichever entry is installed second links the first one's
+copies instead of downloading them and fetches only its own 11.4 GB denoiser. A clip is an
+ordinary chat turn. The app asks for the shipped configs' area, length and steps — 640x384,
+or that area at the photo's aspect (608x416 for a 3:2 photo); 22 frames, 0.92 s at 24 fps;
+the model's own 20 steps — and plays the MP4 inline with the soundtrack inside it. The
+denoisers are under the MiniMax H3 Community License, whose Applicable Territory excludes
+the EU, the UK, the Republic of Korea and the US, which the entries' notes say; the
+Qwen3-VL text encoder is Apache-2.0.
+
+Measured on an M5 Pro (48 GB, macOS 27, `ggml_metal`, ggml `353b63b4` unmodified), the
+Debug app (Mono) against the CLI (CoreCLR) on the same files:
+
+| 22 frames, 20 steps | App | CLI |
+|---|---|---|
+| text-to-video, 640x384 | 150.0–152.9 s over three clips, 6.84–6.86 s a step | 147.7 s, ~6.5 s a step |
+| image-to-video, 608x416 | 216.5–223 s, 9.5 s a step | 209.3 s |
+| one reference photo, 640x384 | 199–210 s, 9.2 s a step | - |
+
+The app offers no length setting. Time grows faster than the frame count, because every
+step attends over the whole clip: in the CLI, 39 frames took 278.5 s and 56 frames
+424.4 s, against 147.7 s for 22.
+
+The app's soundtrack is byte-identical to the CLI's for the same seed, since the engine
+path is the same, and its H.264 frames are 39.3 dB minimum / 39.9 dB mean PSNR against the
+CLI's lossless PNG frames. The app's own footprint peaked at 2.24 GB (a photo turn;
+1.05 GB text-only), and system wired memory at ~20 GB during the decode (the denoiser and
+the video VAE, on top of ~3.5 GB the system wires anyway). The tier counts the largest
+network, the 18.22 GB text encoder, plus that footprint plus about 5 GB for macOS:
+25.5 GB, so 32 GB. What the app does around the engine is in
+[TensorAgent's README](../../TensorAgent/README.md#the-macs-own-models).
 
 ## Architecture
 
@@ -700,9 +798,13 @@ multiply to 800, and 32000/800 = the 40 Hz latent rate. Uses alias-free snake
 activations: every nonlinearity is wrapped in a 2× upsample / activate / 2×
 downsample sandwich so it cannot fold high frequencies back into the band.
 
-Unlike the video latent, the audio latent is decoded **as-is** — `latents_mean` /
-`latents_std` are *not* applied. Applying them costs about 15× amplitude and yields
-a track that is spectrally plausible but inaudible.
+Like the video latent, the audio latent is **un-normalized before it is decoded**. The
+denoiser works in a whitened space, so each channel plane is mapped back with
+`x * latents_std + latents_mean` on its way into the decoder, and a reference
+soundtrack's encoded latent is whitened the opposite way before the denoiser sees it.
+`latents_std` averages about 1.9, so skipping the step gives neither silence nor noise
+but a track that is spectrally plausible and merely wrong; see the soundtrack note under
+[Getting good quality](#getting-good-quality).
 
 ## Environment variables
 
@@ -712,6 +814,7 @@ a track that is spectrally plausible but inaudible.
 | `TS_H3_PREFAULT_THREADS` | Read streams for that prefault, default `1` |
 | `TS_H3_PHASE` | `1` = per-stage breakdown — encoder open / trunk / teardown, the prefault, every denoise step, VAE open / decode. The one-line summaries say a phase was slow; this says which half of it |
 | `TS_H3_TE_GROUP` | `<n>` = run the 50-layer text-encoder trunk in groups of `n` layers, handing each group's device copy back after it runs. **Off by default**; any `n` ≥ the layer count reproduces the single whole-trunk call exactly |
+| `TS_H3_KEEP_RESIDENT` | `1` = on Metal, keep the denoiser and both VAEs resident between clips, the old behaviour. **Off by default**: they are released before each clip's text encoder runs, which held peak wired memory at 19.1 GB instead of 33.3 GB on a 48 GB Mac for ~1.3 s more text conditioning ([why](#on-metal-the-previous-clips-networks-are-released-before-the-text-encoder)). Discrete GPUs are unaffected |
 | `TS_H3_TRACE` | `1` = latent and velocity magnitudes for every denoise step |
 
 **Why `TS_H3_PREFAULT=3` is the default.** Mode 3 leaves the read running while the

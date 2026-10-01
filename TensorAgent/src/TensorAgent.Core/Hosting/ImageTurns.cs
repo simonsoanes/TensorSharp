@@ -44,7 +44,8 @@ public static class ImageTurns
 
     /// <summary>
     /// Where a chat turn's frames come from: the image service when the loaded model
-    /// makes pictures, the chat service otherwise.
+    /// makes pictures, the video service (<see cref="VideoTurns"/>) when it makes clips,
+    /// the chat service otherwise.
     ///
     /// <para>
     /// One decision for every caller that answers <c>/api/chat</c> — the route's own
@@ -58,8 +59,8 @@ public static class ImageTurns
         WebUiChatService chat, JsonElement body, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(chat);
-        return chat.LoadedModelMakesImages
-            ? StreamAsync(chat, body, cancellationToken)
+        return chat.LoadedModelMakesImages ? StreamAsync(chat, body, cancellationToken)
+            : chat.LoadedModelMakesVideo ? VideoTurns.StreamAsync(chat, body, cancellationToken)
             : chat.ChatStreamAsync(body, cancellationToken);
     }
 
@@ -78,6 +79,10 @@ public static class ImageTurns
             && body.TryGetProperty("sessionId", out JsonElement id) && id.ValueKind == JsonValueKind.String
                 ? id.GetString()
                 : null;
+        // Held for the whole turn, as a text turn holds it: a shared photo being sent here
+        // must not be discarded underneath the edit. A refusal is thrown before the first
+        // frame, which is what turns it into a status code rather than a stream.
+        using IDisposable? lease = chat.AcquireChatRequestLease?.Invoke(body);
         ImageRequest? request = Read(body);
         if (request is null)
         {

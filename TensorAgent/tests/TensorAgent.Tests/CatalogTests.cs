@@ -18,6 +18,8 @@ public sealed class CatalogTests
             "qwen3.8-27b-q4kxl",
             "muse-glimmer-30b-q4kxl",
             "qwen-image-2.1-q4km",
+            "minimax-h3-fl2va-q4k",
+            "minimax-h3-ref2va-q4k",
         };
 
         Assert.Equal(expected, ModelCatalog.BuiltIn.Select(m => m.Id).ToArray());
@@ -46,7 +48,11 @@ public sealed class CatalogTests
                     Assert.StartsWith("https://huggingface.co/", f.Url);
                     Assert.EndsWith("/resolve/main/" + f.Url.Split("/resolve/main/")[1], f.Url);
                 }
-                Assert.True(f.Bytes > 1_000_000, $"{m.Id}/{f.FileName}: size {f.Bytes}");
+                // A size read from a pointer file (~130 bytes) instead of the object is the
+                // mistake this catches. Loose tokenizer files are genuinely small - MiniMax-H3's
+                // tokenizer_config.json is 11 kB - so they are held to a kilobyte instead.
+                Assert.True(f.Bytes > (f.Role == CatalogFileRole.Tokenizer ? 1_000 : 1_000_000),
+                    $"{m.Id}/{f.FileName}: size {f.Bytes}");
                 Assert.Matches("^[0-9a-f]{64}$", f.Sha256);
                 Assert.False(f.FileName.Contains('/'), $"{m.Id}: file names are bare ({f.FileName})");
             }
@@ -190,6 +196,8 @@ public sealed class CatalogTests
         "qwen3.8-27b-q4kxl",
         "muse-glimmer-30b-q4kxl",
         "qwen-image-2.1-q4km",
+        "minimax-h3-fl2va-q4k",
+        "minimax-h3-ref2va-q4k",
     };
 
     [Fact]
@@ -215,6 +223,8 @@ public sealed class CatalogTests
     [InlineData("qwen3.8-27b-q4kxl", 32)]
     [InlineData("muse-glimmer-30b-q4kxl", 32)]
     [InlineData("qwen-image-2.1-q4km", 24)]
+    [InlineData("minimax-h3-fl2va-q4k", 32)]
+    [InlineData("minimax-h3-ref2va-q4k", 32)]
     public void TheDesktopTiersHoldTheModelsNoPhoneCanRunWell(string id, int tier)
     {
         CatalogModel model = Assert.IsType<CatalogModel>(ModelCatalog.Find(id));
@@ -247,6 +257,13 @@ public sealed class CatalogTests
         ["muse-glimmer-30b-q4kxl"] = (15.88, 10.9, "chat-e2e.py's seven scenarios with the projector, LeanCaches"),
         // The DiT stays mapped through the denoise; the text encoder is released first.
         ["qwen-image-2.1-q4km"] = (4.19, 14.3, "an edit at 1248x832, 40 steps (the CLI's peak footprint)"),
+        // The largest stage is the 18.2 GB text encoder: the denoiser and the VAEs kept from the
+        // previous clip are taken off the device before it runs (MiniMaxH3Pipeline), and wired
+        // memory peaked at 20 GB with the decode (denoiser + video VAE) on top of the system's.
+        // A photo (keyframe or reference) is what takes the footprint to its highest: the
+        // video VAE's encoder converts its kernels to F32 in managed memory.
+        ["minimax-h3-fl2va-q4k"] = (18.22, 2.24, "chat-e2e.py's film and animate in the Mac app, 22 frames, 20 steps"),
+        ["minimax-h3-ref2va-q4k"] = (18.22, 2.23, "chat-e2e.py's reference in the Mac app, 22 frames, 20 steps"),
     };
 
     /// <summary>What macOS and the rest of a desktop keep for themselves.</summary>

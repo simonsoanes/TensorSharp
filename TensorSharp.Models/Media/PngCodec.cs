@@ -92,6 +92,33 @@ namespace TensorSharp.Models.Media
             return 1;
         }
 
+        /// <summary>Whether the PNG carries transparency: an alpha channel (colour types 4 and
+        /// 6) or a tRNS chunk, which gives a grey, truecolour or palette image transparent
+        /// entries.</summary>
+        internal static bool CarriesAlpha(byte[] data) =>
+            ReadHeader(data).ColorType is 4 or 6 || HasChunkBeforeImageData(data, "tRNS");
+
+        /// <summary>Whether a chunk of <paramref name="type"/> comes before the image data, which
+        /// is where every ancillary chunk that changes how the pixels read (iCCP, sRGB, gAMA,
+        /// tRNS, eXIf) has to be.</summary>
+        internal static bool HasChunkBeforeImageData(byte[] data, string type)
+        {
+            long pos = 8;
+            while (pos + 8 <= data.Length)
+            {
+                long length = ((long)data[pos] << 24) | ((long)data[pos + 1] << 16) | ((long)data[pos + 2] << 8) | data[pos + 3];
+                if (pos + 12 + length > data.Length)
+                    return false;
+                string name = System.Text.Encoding.ASCII.GetString(data, (int)pos + 4, 4);
+                if (name == type)
+                    return true;
+                if (name is "IDAT" or "IEND")
+                    return false;
+                pos += 12 + length;
+            }
+            return false;
+        }
+
         private static byte[] DecodeSimple(byte[] data, out int width, out int height)
         {
             using var ms = new MemoryStream(data);

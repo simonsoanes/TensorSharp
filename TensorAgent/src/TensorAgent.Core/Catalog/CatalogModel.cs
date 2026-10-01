@@ -11,22 +11,29 @@
 namespace TensorAgent.Core.Catalog;
 
 /// <summary>What a file in a catalog entry is for. The app loads the weights and hands the
-/// companions to the engine by role (the projector to <c>--mmproj</c>, the Qwen-Image
-/// companions to their environment variables).</summary>
+/// companions to the engine by role (the projector to <c>--mmproj</c>, a diffusion model's
+/// companions to the environment variables its family reads; see DiffusionCompanions).</summary>
 public enum CatalogFileRole
 {
     /// <summary>The GGUF the model is loaded from.</summary>
     Weights,
     /// <summary>Vision/audio projector (mmproj) for a multimodal model.</summary>
     Projector,
-    /// <summary>Qwen-Image-2.1 text encoder GGUF (Qwen3-VL-8B).</summary>
+    /// <summary>A diffusion model's text encoder GGUF (Qwen3-VL-8B for Qwen-Image-2.1,
+    /// Qwen3-VL-32B for MiniMax-H3).</summary>
     TextEncoder,
     /// <summary>Qwen-Image-2.1 vision mmproj (image-grounded conditioning; required for editing).</summary>
     VisionProjector,
-    /// <summary>Qwen-Image-2.1 VAE safetensors.</summary>
+    /// <summary>A diffusion model's image or video VAE safetensors.</summary>
     Vae,
     /// <summary>Speculative-decoding draft head.</summary>
     Draft,
+    /// <summary>MiniMax-H3's audio VAE safetensors, which turns the soundtrack it generates
+    /// into sound (and encodes a reference recording).</summary>
+    AudioVae,
+    /// <summary>One of the loose tokenizer files a text encoder whose GGUF carries no
+    /// tokenizer needs beside it (MiniMax-H3: vocab.json, merges.txt, tokenizer_config.json).</summary>
+    Tokenizer,
 }
 
 /// <summary>One downloadable artifact of a catalog entry.</summary>
@@ -50,12 +57,14 @@ public sealed record CatalogFile(
 
 /// <summary>Model families the catalog knows; used for grouping in the UI and for
 /// family-specific defaults (thinking, sampling).</summary>
-public enum CatalogFamily { Gemma4, Qwen35, Qwen36, Qwen38, QwenImage, GptOss, Bonsai, MuseGlimmer }
+public enum CatalogFamily { Gemma4, Qwen35, Qwen36, Qwen38, QwenImage, GptOss, Bonsai, MuseGlimmer, MiniMaxH3 }
 
 /// <summary>Dense or mixture-of-experts.</summary>
 public enum CatalogArchitectureKind { Dense, MixtureOfExperts, Diffusion }
 
-/// <summary>Input/output modalities an entry supports once its projector is installed.</summary>
+/// <summary>Input/output modalities an entry supports once its projector is installed.
+/// <see cref="Image"/>, <see cref="Audio"/> and <see cref="Video"/> are what it takes in;
+/// the <c>Output</c> flags are what it makes.</summary>
 [Flags]
 public enum CatalogModalities
 {
@@ -64,6 +73,8 @@ public enum CatalogModalities
     Audio = 2,
     Video = 4,
     ImageOutput = 8,
+    VideoOutput = 16,
+    AudioOutput = 32,
 }
 
 /// <summary>Sampling defaults the model card recommends; the app sends them with every
@@ -125,4 +136,5 @@ public sealed record CatalogModel
     public CatalogFile Weights => Files.First(f => f.Role == CatalogFileRole.Weights);
     public CatalogFile? Projector => Files.FirstOrDefault(f => f.Role == CatalogFileRole.Projector);
     public bool IsImageGenerator => Family == CatalogFamily.QwenImage;
+    public bool IsVideoGenerator => Modalities.HasFlag(CatalogModalities.VideoOutput);
 }

@@ -78,8 +78,9 @@ namespace TensorSharp.Models.MiniMaxH3
                     "MiniMax-H3 needs companion models beside the denoiser GGUF (or via " +
                     "--video-text-encoder / --video-vae): the Qwen3-VL-32B text encoder GGUF " +
                     "(unsloth/MiniMax-H3-GGUF) and minimax_h3_video_vae_fp16.safetensors " +
-                    "(Comfy-Org/MiniMax-H3). The text encoder also needs vocab.json and " +
-                    "merges.txt beside it, since its GGUF carries no tokenizer.");
+                    "(Comfy-Org/MiniMax-H3). The text encoder also needs vocab.json, merges.txt " +
+                    "and tokenizer_config.json (MiniMaxAI/MiniMax-H3, processor/) beside it, since " +
+                    "its GGUF carries no tokenizer; a photo or a reference needs the last of them.");
         }
 
         /// <summary>True when the tensor table looks like a MiniMax-H3 denoiser. Used
@@ -245,5 +246,16 @@ namespace TensorSharp.Models.MiniMaxH3
         protected override void ResetKVCacheCore() { }
 
         public override void WarmUpKernels() { }
+
+        // The pipeline keeps the denoiser and both VAEs between requests, each holding
+        // pinned arrays, its own file mapping and the device wraps of its weights.
+        // Without this every unload leaked them, and the Metal wraps still registered
+        // with the device are what ggml-metal asserts on at process exit.
+        public override void Dispose()
+        {
+            _pipeline?.Dispose();
+            _pipeline = null;
+            base.Dispose();
+        }
     }
 }

@@ -3,7 +3,8 @@
 # simulator (run-sim.sh). The simulator shares the host's network namespace, so
 # the app's loopback listener is reachable from here. It checks the Mac app the same
 # way (run-mac.sh), recognising it by its engine line: the Mac app runs code as real
-# processes, so it is held to the desktop's shell and self-test instead of the phone's.
+# processes and offers the desktop's models, so it is held to the desktop's shell,
+# self-test and catalog instead of the phone's.
 #
 # Usage: verify-sim.sh <app stdout log written by run-sim.sh or run-mac.sh>
 #   The log carries the "entry URL" line (Debug builds only) with the port and
@@ -154,6 +155,69 @@ fi
 if (( API )); then
 # 5. The app's own surface: the catalog, the saved chats, the sandbox switches.
 CATALOG="$(curl -fsS "${AUTH[@]}" "${BASE}api/agent/catalog")"
+if (( DESKTOP )); then
+# The Mac app offers the desktop catalog: ModelCatalog.ForDevice at the memory tier it
+# logged at startup (48 GB on the M5 Pro this was written on). The expected list is read
+# from ModelCatalog.cs, in BuiltIn order, so an entry added there is expected here without
+# an edit to this script, and only the architectures the desktop runs are accepted.
+python3 - "${CATALOG}" "${REPO_ROOT}/TensorAgent/src/TensorAgent.Core/Catalog/ModelCatalog.cs" \
+    "$(grep -o 'catalog tier [0-9]* GB' "${LOG}" | tail -1 || true)" <<'PYCHECK' || fail "the catalog does not match ModelCatalog.BuiltIn at this Mac's memory tier"
+import json, re, sys
+models = json.loads(sys.argv[1])['models']
+source = open(sys.argv[2], encoding='utf-8').read()
+# BuiltIn's initializer runs from its declaration to the first line that closes one. An
+# entry in it is written out (new CatalogModel { Id = "...", ... }) or made by a helper
+# from a named id (MiniMaxH3(id: "...", ...)) whose own body sets the tier; splitting on
+# "new CatalogModel" alone read the two MiniMax-H3 entries as part of the entry before
+# them. The patterns are anchored to a line's start, so an entry, an Id or a tier quoted
+# in a comment is never read as one.
+start = source.find('BuiltIn { get; } = new[]')
+end = re.search(r'^\s*};', source[start:], re.M) if start >= 0 else None
+if not end:
+    print("cannot find ModelCatalog.BuiltIn's initializer", file=sys.stderr)
+    sys.exit(1)
+body = source[start:start + end.start()]
+entries = list(re.finditer(r'^\s*new CatalogModel\b|^\s*(\w+)\((?:\s*//[^\n]*)*\s*id: "([^"]+)"', body, re.M))
+built_in = []
+for n, entry in enumerate(entries):
+    block = body[entry.start():entries[n + 1].start() if n + 1 < len(entries) else len(body)]
+    if entry.group(1):
+        ident = entry.group(2)
+        helper = re.search(rf'\bstatic CatalogModel {entry.group(1)}\(', source)
+        tier = helper and re.search(r'^\s*MinDeviceMemoryGB = (\w+),', source[helper.end():], re.M)
+    else:
+        ident = re.search(r'^\s*Id = "([^"]+)",', block, re.M)
+        ident = ident and ident.group(1)
+        tier = re.search(r'^\s*MinDeviceMemoryGB = (\w+),', block, re.M)
+    # (\w+), not (\d+): a helper that took its tier as a parameter must stop the check
+    # here, not send it on to whatever literal comes next in the file.
+    if not ident or not tier or not tier.group(1).isdigit():
+        print(f'cannot read an Id and a MinDeviceMemoryGB from this BuiltIn entry: {block[:160]!r}', file=sys.stderr)
+        sys.exit(1)
+    built_in.append((ident, int(tier.group(1))))
+tiers = dict(built_in)
+logged = re.search(r'catalog tier (\d+) GB', sys.argv[3])
+memory = int(logged.group(1)) if logged else None
+scope = f'ModelCatalog.BuiltIn at the {memory} GB tier' if memory else 'all of ModelCatalog.BuiltIn (the log names no tier)'
+expected_ids = [i for i, t in built_in if memory is None or t <= memory]
+actual_ids = [model['id'] for model in models]
+if actual_ids != expected_ids:
+    print(f'catalog ids are {actual_ids}, expected {expected_ids} ({scope})', file=sys.stderr)
+    unread = [i for i in actual_ids if i not in tiers and f'"{i}"' in body]
+    if unread:
+        print(f'{unread} are in ModelCatalog.BuiltIn in a form this check does not read', file=sys.stderr)
+    sys.exit(1)
+wrong = [(m['id'], m['minDeviceMemoryGB']) for m in models if m['minDeviceMemoryGB'] != tiers[m['id']]]
+if wrong:
+    print(f'catalog device tiers {wrong} differ from ModelCatalog.cs', file=sys.stderr)
+    sys.exit(1)
+kinds = {model['kind'] for model in models}
+if not kinds <= {'Dense', 'Diffusion'}:
+    print(f'catalog architectures are {kinds}', file=sys.stderr)
+    sys.exit(1)
+print(f"    catalog: {len(actual_ids)} entries, {scope}, kinds {sorted(kinds)}")
+PYCHECK
+else
 python3 - "${CATALOG}" <<'PYCHECK' || fail "the catalog does not match the approved reduced model list"
 import json, sys
 models = json.loads(sys.argv[1])['models']
@@ -185,6 +249,7 @@ if kinds != {'Dense'}:
     print(f'catalog architectures are {kinds}', file=sys.stderr)
     sys.exit(1)
 PYCHECK
+fi
 # The two sandbox switches must be PRESENT and readable; their values are the user's,
 # not a default. This container is reused between runs and the settings file survives,
 # so asserting "network is off" here failed the day someone turned it on in the app —
@@ -200,7 +265,11 @@ DOWNLOADS="$(curl -fsS "${AUTH[@]}" "${BASE}api/agent/downloads")"
 grep -q '"downloads"' <<<"${DOWNLOADS}" || fail "/api/agent/downloads shape: ${DOWNLOADS}"
 SKILLS="$(curl -fsS "${AUTH[@]}" "${BASE}api/skills")"
 grep -q '"skills"' <<<"${SKILLS}" || fail "/api/skills shape: ${SKILLS}"
-echo "ok  catalog contains the six approved dense models; the switches and the download list answer"
+if (( DESKTOP )); then
+    echo "ok  catalog is ModelCatalog.BuiltIn at this Mac's memory tier; the switches and the download list answer"
+else
+    echo "ok  catalog contains the six approved dense models; the switches and the download list answer"
+fi
 
 else
     skip_api "the app's own routes"
@@ -291,10 +360,10 @@ MEDIA="$(grep -o 'media probe {.*' "${LOG}" | tail -1 | sed 's/^media probe //')
 [[ -n "${MEDIA}" ]] || fail "no 'media probe' line in ${LOG}; the probe is Debug-only, is this a Debug build?"
 echo "    ${MEDIA}"
 grep -q '"allPassed":true' <<<"${MEDIA}" || fail "media probe reported a failed check: ${MEDIA}"
-for CHECK in providers png-roundtrip png-straight-alpha heic-decode exif-orientation mp4-roundtrip audio-decode; do
+for CHECK in providers png-roundtrip png-straight-alpha png-transparent-colour heic-decode exif-orientation mp4-roundtrip mp4-soundtrack audio-decode; do
     grep -q "\"name\":\"${CHECK}\",\"ok\":true" <<<"${MEDIA}" || fail "media probe check '${CHECK}' is missing or did not pass"
 done
-echo "ok  media probe: HEIC decode, EXIF orientation, MP4 round trip and AVAudioFile all passed"
+echo "ok  media probe: HEIC decode, EXIF orientation, MP4 round trip, MP4 soundtrack and AVAudioFile all passed"
 
 # 9. The composer's own gestures, driven inside the real WebView. This is the only
 #    place the page's JavaScript runs on the engine that will actually run it, and

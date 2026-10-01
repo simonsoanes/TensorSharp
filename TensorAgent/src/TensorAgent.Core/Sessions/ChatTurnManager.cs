@@ -360,7 +360,7 @@ public sealed class ChatTurnManager : IDisposable
         var artifacts = new List<StoredArtifact>();
         var artifactUrls = new HashSet<string>(StringComparer.Ordinal);
         string? sessionId = null;
-        string? imageUrl = null;
+        string? imageUrl = null, videoUrl = null, audioUrl = null;
         ChatTurnState state;
 
         try
@@ -368,7 +368,7 @@ public sealed class ChatTurnManager : IDisposable
             await foreach (object frame in frames(turn.Token).WithCancellation(turn.Token).ConfigureAwait(false))
             {
                 turn.Append(frame, content, MaxBufferedFrames);
-                ReadInto(frame, content, thinking, artifacts, artifactUrls, ref sessionId, ref imageUrl);
+                ReadInto(frame, content, thinking, artifacts, artifactUrls, ref sessionId, ref imageUrl, ref videoUrl, ref audioUrl);
             }
             state = ChatTurnState.Completed;
         }
@@ -410,7 +410,9 @@ public sealed class ChatTurnManager : IDisposable
                     content.ToString(),
                     thinking.ToString(),
                     artifacts.Count == 0 ? null : artifacts,
-                    imageUrl);
+                    imageUrl,
+                    videoUrl,
+                    audioUrl);
             }
             catch (Exception) { /* a lost transcript must not be a crash on a background thread */ }
         }
@@ -438,7 +440,9 @@ public sealed class ChatTurnManager : IDisposable
         List<StoredArtifact> artifacts,
         HashSet<string> artifactUrls,
         ref string? sessionId,
-        ref string? imageUrl)
+        ref string? imageUrl,
+        ref string? videoUrl,
+        ref string? audioUrl)
     {
         try
         {
@@ -501,6 +505,19 @@ public sealed class ChatTurnManager : IDisposable
                 && picture.ValueKind == JsonValueKind.String
                 && picture.GetString() is { Length: > 0 } made)
                 imageUrl = made;
+            // Likewise the clip a video model's turn made, and its soundtrack when that is a
+            // file of its own (VideoTurns); both arrive on the same frame.
+            if (root.TryGetProperty("videoUrl", out JsonElement clip)
+                && clip.ValueKind == JsonValueKind.String
+                && clip.GetString() is { Length: > 0 } filmed)
+            {
+                videoUrl = filmed;
+                audioUrl = root.TryGetProperty("audioUrl", out JsonElement sound)
+                    && sound.ValueKind == JsonValueKind.String
+                    && sound.GetString() is { Length: > 0 } heard
+                        ? heard
+                        : null;
+            }
         }
         catch (JsonException)
         {

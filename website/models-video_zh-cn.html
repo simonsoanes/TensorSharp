@@ -20,22 +20,25 @@
   <div class="callout note"><div class="ic">💡</div><p>这些命令遵循与文本模型示例相同的约定：Hugging Face CLI、从仓库根目录源码构建，并把 <code>--backend</code> 换成与你硬件匹配的值。参见<a href="models-text_zh-cn.html#download-run">按家族下载与运行</a>。</p></div>
 
   <h2 id="minimax-h3">MiniMax-H3（提示词 → 视频<em>带音频</em>）</h2>
-  <p>H3 在<strong>同一个</strong>打包潜变量里对视频和 32&nbsp;kHz 立体声音频一起去噪，所以音轨是模型输出的一部分，而不是事后配上去的。它是 CFG 蒸馏模型，必须用 <code>--cfg 1.0</code>，4–8 步是常用工作点（默认 20 步）。在 M5 Pro 上用 <code>ggml_metal</code>、22 帧、8 步、同一随机种子实测：256×256 比 <code>stable-diffusion.cpp</code> 快 <strong>2.4×</strong>（49.3 s → <strong>20.9 s</strong>），640×384 快 <strong>1.7×</strong>（108.5 s → <strong>63.1 s</strong>）。那是 Apple 芯片；在显存吃紧的 16 GB RTX 3080 Laptop 上，同一组对比的结论正好相反，其中的原因值得先看一眼——见<a href="#h3-speed">两台机器上的速度</a>。需要四个文件，来自两个仓库：</p>
+  <p>H3 在<strong>同一个</strong>打包潜变量里对视频和 32&nbsp;kHz 立体声音频一起去噪，所以音轨是模型输出的一部分，而不是事后配上去的。它是 CFG 蒸馏模型，必须用 <code>--cfg 1.0</code>，4–8 步是常用工作点（默认 20 步）。在 M5 Pro 上用 <code>ggml_metal</code>、22 帧、8 步、同一随机种子实测：256×256 比 <code>stable-diffusion.cpp</code> 快 <strong>2.4×</strong>（49.3 s → <strong>20.9 s</strong>），640×384 快 <strong>1.7×</strong>（108.5 s → <strong>63.1 s</strong>）。那是 Apple 芯片；在显存吃紧的 16 GB RTX 3080 Laptop 上，同一组对比的结论正好相反，其中的原因值得先看一眼——见<a href="#h3-speed">两台机器上的速度</a>。需要四个网络，来自两个仓库，外加第三个仓库里的分词器：</p>
   <pre data-lang="bash"><code># 去噪器 + 文本编码器
 hf download unsloth/MiniMax-H3-GGUF minimax_h3_fl2va_pruned-Q4_K.gguf --local-dir models
 hf download unsloth/MiniMax-H3-GGUF qwen3vl_32b_minimax_h3-Q4_K_M.gguf --local-dir models
 # 两个 VAE
 hf download Comfy-Org/MiniMax-H3 vae/minimax_h3_video_vae_fp16.safetensors --local-dir models
 hf download Comfy-Org/MiniMax-H3 vae/minimax_h3_audio_vae_fp32.safetensors --local-dir models
-# 文本编码器不带分词器——从上游仓库取
-hf download MiniMaxAI/MiniMax-H3 processor/vocab.json processor/merges.txt --local-dir models
+# 文本编码器不带分词器：从上游仓库取三个文件，放在编码器旁边
+curl -L -o models/vocab.json https://huggingface.co/MiniMaxAI/MiniMax-H3/resolve/42ed227ee7df40d41602854ae760620d6eb651fe/processor/vocab.json
+curl -L -o models/merges.txt https://huggingface.co/MiniMaxAI/MiniMax-H3/resolve/42ed227ee7df40d41602854ae760620d6eb651fe/processor/merges.txt
+curl -L -o models/tokenizer_config.json https://huggingface.co/MiniMaxAI/MiniMax-H3/resolve/42ed227ee7df40d41602854ae760620d6eb651fe/processor/tokenizer_config.json
 
 # 文生视频（带音频）。输出 fox.mp4 和 fox.wav
 dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/minimax_h3_fl2va_pruned-Q4_K.gguf \
     --backend ggml_metal --prompt "a red fox trotting through falling snow, cinematic" \
     --width 640 --height 384 --video-frames 22 --diffusion-steps 8 --cfg 1.0 --output fox.mp4</code></pre>
+  <p>分词器文件必须放在编码器旁边，或 <code>TS_VIDEO_TOKENIZER</code> 指向的位置：<code>hf download MiniMaxAI/MiniMax-H3 processor/vocab.json … --local-dir models</code> 会保留 <code>processor/</code> 这一层目录，而加载器从不去那里找。<code>tokenizer_config.json</code> 最容易漏掉，也是唯一定义 <code>&lt;|vision_start|&gt;</code>、<code>&lt;|image_pad|&gt;</code> 与 <code>&lt;|vision_end|&gt;</code> 的文件。文生视频不需要它，参考全是录音的请求也不需要；缺了它，带关键帧、或参考中含照片或视频片段的请求会在视觉塔运行之前被拒绝——以前图片会被放到提示词的错误位置上、悄悄被忽略。</p>
 
-  <p>也可以把四个网络都写进配置文件，让第一次运行自动下载——<code>config/minimax-h3-fl2va.json</code> 用于关键帧，<code>config/minimax-h3-ref2va.json</code> 用于参考。两者只有 <code>model</code> 一项不同，因此文本编码器与两个 VAE 只下载一次并共用（总计约 35.5 GB）。上面那对分词器文件是自动下载唯一补不上的东西，因为它不是一个命令行选项：</p>
+  <p>也可以把四个网络都写进配置文件，让第一次运行自动下载——<code>config/minimax-h3-fl2va.json</code> 用于关键帧，<code>config/minimax-h3-ref2va.json</code> 用于参考。两者只有 <code>model</code> 一项不同，因此文本编码器与两个 VAE 只下载一次并共用（总计约 35.5 GB）。上面那三个分词器文件是自动下载唯一补不上的东西，因为它们不是命令行选项：</p>
   <pre data-lang="bash"><code>dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/minimax-h3-fl2va.json \
     --prompt "a red fox trotting through falling snow, cinematic" --output fox.mp4
 dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/minimax-h3-ref2va.json</code></pre>
@@ -93,7 +96,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/minimax_h3_ref2va_
   <h3 id="h3-length">长度、尺寸，以及长片段的上限</h3>
   <p>宽高向<strong>上</strong>取整到 32 的倍数。帧数向上对齐到 <code>17k+5</code> 网格——5、22、39、56、73、90……——这来自视频 VAE 的时间分块，而不是随意选定的；fps 无论请求写什么都固定为 24。任意网格长度的片段都能正确解码：VAE 每次跑 5 个潜变量帧、带 2 帧前瞻，并对接缝做交叉淡化。反过来，一次性解码长片段会让细节被逐渐冲淡——对着条件照片测量，第 0 帧的相关度从 22 帧时的 0.97 掉到 90 帧时的 0.86——所以分块是正确性要求，而不是优化。只想要画面时用 <code>--no-audio</code> 跳过音频解码，省下音频 VAE 的时间与内存。</p>
   <div class="callout warn"><div class="ic">⚠️</div><p><strong>长片段过去会整片全黑。</strong>H3 在一条不加掩码的打包序列上做双向注意力，因此它的 key 数量就是整段片段——22 帧是 2364 个 token，107 帧是 8646——而所有上游 ggml flash attention 内核都把 softmax 分子保持在 FP16，只留三个比特的余量。107 帧的片段在第一个去噪步就溢出成 NaN，回来时每个像素全黑、每个音频采样被削平，而同一条请求在 73 帧下却完全正常。现在 <code>h3_attend</code> 会按 key 数量取一个 2 的幂预先缩放 V，并在输出上还原——由于注意力对 V 是线性的，这一步是精确的；采样器也不再保存已经发散的片段，而是让请求失败并指出是哪一步，不再写出一个全黑文件。设 <code>TS_H3_TRACE=1</code> 可打印每一步的潜变量与速度幅值。</p></div>
-  <div class="callout note"><div class="ic">💡</div><p>音频写成 MP4 旁边的 <code>.wav</code> 独立文件，而不是混流进去，因为混流需要一个未必装了的编码器；用 <code>ffmpeg -i fox.mp4 -i fox.wav -c:v copy -c:a aac fox_with_audio.mp4</code> 合并。完整说明见 <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/models/minimax-h3_zh-cn.md">MiniMax-H3 模型卡</a>。</p></div>
+  <div class="callout note"><div class="ic">💡</div><p>CLI 和服务端把音频写成 MP4 旁边的 <code>.wav</code> 独立文件，而不是混流进去，因为混流需要一个未必装了的编码器；用 <code>ffmpeg -i fox.mp4 -i fox.wav -c:v copy -c:a aac fox_with_audio.mp4</code> 合并。TensorAgent Mac 应用同样写出这个 <code>.wav</code>，并且因为 Apple 的编码器能混流，还会把音轨作为 AAC 轨道写进 MP4。完整说明见 <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/models/minimax-h3_zh-cn.md">MiniMax-H3 模型卡</a>。</p></div>
 
   <h3 id="h3-speed">两台机器上的速度</h3>
   <p>与 <code>stable-diffusion.cpp</code> 的这组对比——22 帧、8 步、同一随机种子、两个引擎加载同一份权重——在跑过的两台机器上结论不同，而两组数字都值得保留：</p>
@@ -116,6 +119,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/minimax_h3_ref2va_
       <tr><td><code>TS_H3_PREFAULT</code></td><td><code>3</code></td><td>去噪器 prefault：<code>0</code> 关，<code>1</code> 串行，<code>2</code> 与文本条件重叠，<code>3</code> 与上传流水化。</td></tr>
       <tr><td><code>TS_H3_PREFAULT_THREADS</code></td><td><code>1</code></td><td>prefault 使用的读取流数量。</td></tr>
       <tr><td><code>TS_H3_TE_GROUP</code></td><td>关</td><td>取 <em>n</em> 时，把 50 层的文本编码器主干按每 <em>n</em> 层分组运行，每组跑完就释放其设备副本。</td></tr>
+      <tr><td><code>TS_H3_KEEP_RESIDENT</code></td><td>关</td><td>取 <code>1</code> 时，在 Metal 上让去噪器和两个 VAE 在两段片段之间保持常驻，即旧行为。默认会在每段片段的文本编码器运行前释放它们：在 M5 Pro 上的 TensorAgent Mac 应用里，这让 wired 内存峰值保持在 19.1 GB 而不是 33.3 GB，代价是文本条件阶段多约 1.3 秒。独立显卡不受影响。</td></tr>
     </tbody>
   </table>
   </div>
@@ -151,7 +155,7 @@ curl -s http://localhost:5000/api/video-generate -H 'content-type: application/j
   "width": 640, "height": 384, "frames": 22, "steps": 8, "cfg": 1.0,
   "imagePath": "card.jpeg", "videoMode": "i2v"
 }'</code></pre>
-  <p>有三条路由接收这个请求体：<code>POST /api/video-generate</code>、<code>POST /api/video-generate/stream</code>（同样的东西，外加 SSE 进度事件）以及 OpenAI 形状的 <code>POST /v1/videos/generations</code>。三者共用同一个解析器，因此 <code>videoMode</code>、<code>generateAudio</code>、<code>endImage</code>、<code>referenceImages</code>、<code>referenceVideos</code>、<code>referenceAudios</code> 与 <code>referenceVideoAudios</code> 在三条路由上都可用，并且各自还接受下划线写法；<code>referenceVideoAudios</code> 按下标与 <code>referenceVideos</code> 配对。响应里带 <code>audioUrl</code>（OpenAI 路由上是 <code>audio_url</code>），模型没有产生音轨时为 null。所有文件字段都必须指向此前通过 <code>/api/upload</code> 上传的文件，并被限制在上传目录之内。模型层面的拒绝（加载了错误的检查点、关键帧与参考混用）会以 <strong>400 加上模型自己的报错信息</strong>返回，而不是笼统的 500。</p>
+  <p>有三条路由接收这个请求体：<code>POST /api/video-generate</code>、<code>POST /api/video-generate/stream</code>（同样的东西，外加 SSE 进度事件）以及 OpenAI 形状的 <code>POST /v1/videos/generations</code>。三者共用同一个解析器，因此 <code>videoMode</code>、<code>generateAudio</code>、<code>endImage</code>、<code>referenceImages</code>、<code>referenceVideos</code>、<code>referenceAudios</code> 与 <code>referenceVideoAudios</code> 在三条路由上都可用，并且各自还接受下划线写法；<code>referenceVideoAudios</code> 按下标与 <code>referenceVideos</code> 配对。响应里带 <code>audioUrl</code>（OpenAI 路由上是 <code>audio_url</code>），模型没有产生音轨时为 null；除 OpenAI 路由外还带 <code>audioMuxed</code>，表示 MP4 里是否也带着这条音轨。所有文件字段都必须指向此前通过 <code>/api/upload</code> 上传的文件，并被限制在上传目录之内。模型层面的拒绝（加载了错误的检查点、关键帧与参考混用）会以 <strong>400 加上模型自己的报错信息</strong>返回，而不是笼统的 500。</p>
   <p><code>GET /api/models</code> 会返回一个 <code>video</code> 对象——非视频模型一律为 null——其中包含 <code>family</code>（<code>minimax-h3</code>）、<code>supportsAudio</code>、<code>supportsImageConditioning</code>、<code>supportsEndImageConditioning</code>、<code>supportsReferenceConditioning</code> 与 <code>maxReferenceImages</code>。Web UI 正是靠它判断该不该提供首帧、尾帧，或最多九个参考：它根据 <code>supportsReferenceConditioning</code> 启用参考附件控件，并在 <code>maxReferenceImages</code> 处停止添加，而不是去匹配架构字符串。</p>
 
   <h2 id="wan">Wan 2.1 / 2.2（提示词 → 视频、图像 → 视频）</h2>

@@ -384,7 +384,7 @@ public sealed class WebUiRoutesTests : IDisposable
             families.Add(model.GetProperty("family").GetString()!);
             kinds.Add(model.GetProperty("kind").GetString()!);
         }
-        Assert.True(families.SetEquals(new[] { "Gemma4", "Qwen35", "Bonsai", "Qwen38", "MuseGlimmer", "QwenImage" }),
+        Assert.True(families.SetEquals(new[] { "Gemma4", "Qwen35", "Bonsai", "Qwen38", "MuseGlimmer", "QwenImage", "MiniMaxH3" }),
             string.Join(", ", families));
         Assert.True(kinds.SetEquals(new[] { "Dense", "Diffusion" }), string.Join(", ", kinds));
     }

@@ -60,8 +60,9 @@ internal static class AppleMediaRegistration
 /// <list type="bullet">
 /// <item><description>An image <i>with</i> an alpha channel comes back through a premultiplied
 /// Core Graphics context and is un-premultiplied by <see cref="StraightAlpha"/>, because Core
-/// Graphics has no straight-alpha 8-bit RGBA bitmap layout at all. Opaque images — every JPEG,
-/// every HEIC from the camera, every video frame — are exact.</description></item>
+/// Graphics has no straight-alpha 8-bit RGBA bitmap layout at all - except a PNG without an
+/// embedded colour profile, which the managed PNG codec reads exactly as stored. Opaque
+/// images — every JPEG, every HEIC from the camera, every video frame — are exact.</description></item>
 /// <item><description>MP4 export goes through VideoToolbox at a chosen bit rate rather than
 /// ffmpeg at <c>-crf 17</c>; see <c>AppleMediaProvider.Mp4.cs</c>.</description></item>
 /// </list>
@@ -118,6 +119,20 @@ public sealed partial class AppleMediaProvider : IImageCodec, IVideoDecoder, IVi
             throw new NotSupportedException(
                 "Unrecognised image format: the Apple image codec decodes PNG, JPEG, HEIC/HEIF, GIF, BMP, " +
                 "WebP, PSD and TIFF through ImageIO, identified by their magic bytes.");
+        }
+
+        // A PNG with transparency is read by the managed codec, as stored. Core Graphics can
+        // only draw it premultiplied, and 8-bit premultiplied keeps alpha/255 of a pixel's
+        // colour: none at all where alpha is 0, a few levels where it is low. The pipelines
+        // drop alpha and take the colour as stored (ImageIO.Decode), so a picture whose
+        // background is mostly transparent reached MiniMax-H3 as black blotches - MEASURED on
+        // a 1253x836 PNG whose alpha averages 0.43: the clip's background came out burnt
+        // where the desktop's, from the same file, kept its starfield. A PNG that embeds a
+        // colour profile still goes through Core Graphics, which converts it to sRGB.
+        if (format == ImageFormat.Png && PngCodec.CarriesAlpha(file) && !PngCodec.HasChunkBeforeImageData(file, "iCCP"))
+        {
+            byte[] stored = PngCodec.Decode(file, out width, out height);
+            return ExifOrientation.Apply(stored, ref width, ref height, PngCodec.ReadExifOrientation(file));
         }
 
         using NSData data = NSData.FromArray(file);

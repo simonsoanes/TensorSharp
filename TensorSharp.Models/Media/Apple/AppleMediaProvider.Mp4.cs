@@ -21,6 +21,7 @@ using CoreMedia;
 using CoreVideo;
 using Foundation;
 using TensorSharp.Models.QwenImage;
+using TensorSharp.Models.Video;
 
 #nullable enable
 
@@ -45,15 +46,51 @@ public sealed partial class AppleMediaProvider
     /// milliseconds, so a minute means something is genuinely wrong.</summary>
     private static readonly TimeSpan AppendTimeout = TimeSpan.FromSeconds(60);
 
+    /// <summary>AAC rate for the soundtrack of a generated clip. 64 kbit/s per channel is
+    /// transparent for the 32 kHz audio a video model produces and is well inside what the
+    /// encoder accepts at that sample rate.</summary>
+    private const int AacBitRatePerChannel = 64_000;
+
     /// <summary>Write frames as an H.264 MP4 and return <c>"h264"</c>. <paramref name="path"/>
-    /// is a full path whose directory exists (<see cref="TensorSharp.Models.WanVideo.VideoIO.SaveMp4"/>
+    /// is a full path whose directory exists (<see cref="TensorSharp.Models.WanVideo.VideoIO.SaveMp4(string, RgbImage[], int)"/>
     /// sees to both).</summary>
-    public string SaveMp4(string path, RgbImage[] frames, int fps)
+    public string SaveMp4(string path, RgbImage[] frames, int fps) => Write(path, frames, fps, null);
+
+    /// <summary>Write frames as an H.264 MP4 with the soundtrack as an AAC track in the same
+    /// file, so a player plays the clip with its sound and a shared file keeps it.
+    ///
+    /// <para>Should the audio half fail, the clip is written again without it rather than
+    /// lost: <paramref name="audioMuxed"/> is then false, the reason goes to stderr, and the
+    /// caller's sidecar WAV still carries the sound.</para></summary>
+    public string SaveMp4(string path, RgbImage[] frames, int fps, GeneratedVideoAudio? audio, out bool audioMuxed)
+    {
+        audioMuxed = false;
+        if (audio is not { ChannelCount: 1 or 2, SampleCount: > 0, SampleRate: > 0 })
+            return Write(path, frames, fps, null);
+        // Frames that cannot be encoded at all fail here, before the retry below could
+        // blame the soundtrack for them.
+        CheckEncodable(path, frames);
+        try
+        {
+            string codec = Write(path, frames, fps, audio);
+            audioMuxed = true;
+            return codec;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or TimeoutException)
+        {
+            Console.Error.WriteLine(
+                $"[video] could not put the soundtrack inside '{Path.GetFileName(path)}' ({ex.Message}); " +
+                "writing the frames alone.");
+            return Write(path, frames, fps, null);
+        }
+    }
+
+    /// <summary>Refuse frames no MP4 can hold, and return their size.</summary>
+    private static (int Width, int Height) CheckEncodable(string path, RgbImage[] frames)
     {
         if (string.IsNullOrWhiteSpace(path)) throw new ArgumentNullException(nameof(path));
         if (frames == null || frames.Length == 0)
             throw new ArgumentException("no frames to save", nameof(frames));
-        if (fps <= 0) fps = 16;
 
         int width = frames[0].Width;
         int height = frames[0].Height;
@@ -75,6 +112,13 @@ public sealed partial class AppleMediaProvider
                 $"Cannot encode a {width}x{height} MP4: H.264 4:2:0 needs even dimensions. Pad or crop the frames " +
                 "to an even size before saving.");
         }
+        return (width, height);
+    }
+
+    private string Write(string path, RgbImage[] frames, int fps, GeneratedVideoAudio? audio)
+    {
+        var (width, height) = CheckEncodable(path, frames);
+        if (fps <= 0) fps = 16;
 
         // AVAssetWriter refuses to start when the output URL already exists.
         if (File.Exists(path))
@@ -84,6 +128,7 @@ public sealed partial class AppleMediaProvider
         // literal is the documented value of AVFileTypeMPEG4 and keeps the call non-nullable.
         string fileType = (string?)AVFileTypes.Mpeg4.GetConstant() ?? "public.mpeg-4";
         string mediaType = (string?)AVMediaTypes.Video.GetConstant() ?? "vide";
+        string audioType = (string?)AVMediaTypes.Audio.GetConstant() ?? "soun";
 
         using NSUrl url = NSUrl.FromFilename(path);
         AVAssetWriter? writer = AVAssetWriter.FromUrl(url, fileType, out NSError error);
@@ -93,8 +138,16 @@ public sealed partial class AppleMediaProvider
                 $"Could not create an MP4 writer at '{path}': {error?.LocalizedDescription ?? "unknown error"}");
         }
 
+        // Built outside the try so the finally can always reach them.
+        AVAssetWriterInput? audioInput = null;
+        AVAudioFormat? pcm = null;
         try
         {
+            // The index ('moov') goes at the front of the file instead of after the media, so
+            // a web view can start a clip before the whole file has arrived and can seek
+            // with range requests. The desktop encoder asks the same of ffmpeg (+faststart).
+            writer.ShouldOptimizeForNetworkUse = true;
+
             int bitRate = (int)Math.Clamp((long)(width * (double)height * fps * BitsPerPixel), MinBitRate, MaxBitRate);
             var settings = new AVVideoSettingsCompressed
             {
@@ -129,6 +182,29 @@ public sealed partial class AppleMediaProvider
                 throw new InvalidOperationException($"AVAssetWriter refused an H.264 {width}x{height} input.");
             writer.AddInput(input);
 
+            if (audio != null)
+            {
+                audioInput = new AVAssetWriterInput(audioType, new AudioSettings
+                {
+                    Format = AudioToolbox.AudioFormatType.MPEG4AAC,
+                    SampleRate = audio.SampleRate,
+                    NumberChannels = audio.ChannelCount,
+                    EncoderBitRate = AacBitRatePerChannel * audio.ChannelCount,
+                })
+                {
+                    ExpectsMediaDataInRealTime = false,
+                };
+                if (!writer.CanAddInput(audioInput))
+                {
+                    throw new InvalidOperationException(
+                        $"AVAssetWriter refused an AAC {audio.SampleRate} Hz x{audio.ChannelCount} input.");
+                }
+                writer.AddInput(audioInput);
+                // What the PCM handed to the encoder is: the WAV writer's 16-bit samples,
+                // interleaved, so the track inside the file and the sidecar beside it agree.
+                pcm = new AVAudioFormat(AVAudioCommonFormat.PCMInt16, audio.SampleRate, (uint)audio.ChannelCount, true);
+            }
+
             if (!writer.StartWriting())
             {
                 throw new InvalidOperationException(
@@ -136,9 +212,18 @@ public sealed partial class AppleMediaProvider
             }
             writer.StartSessionAtSourceTime(CMTime.Zero);
 
+            long audioWritten = 0;
             for (int i = 0; i < frames.Length; i++)
             {
-                WaitForInput(input, writer, i);
+                // Interleaved as it plays: the sound up to the end of this frame, then the
+                // frame. Offline, the writer holds back whichever input runs too far ahead
+                // of the other, so appending all of one track first would stall it.
+                if (audioInput != null && audio != null && pcm != null)
+                {
+                    long until = Math.Min(audio.SampleCount, (long)Math.Round((i + 1) * (double)audio.SampleRate / fps));
+                    audioWritten = AppendAudio(audioInput, writer, pcm, audio, audioWritten, until);
+                }
+                WaitForInput(input, writer, $"frame {i}");
 
                 // A fresh buffer per frame: the adaptor hands it to VideoToolbox and may still
                 // be holding it when the next append is made, so reuse would be a data race.
@@ -150,6 +235,11 @@ public sealed partial class AppleMediaProvider
                 }
             }
 
+            if (audioInput != null && audio != null && pcm != null)
+            {
+                AppendAudio(audioInput, writer, pcm, audio, audioWritten, audio.SampleCount);
+                audioInput.MarkAsFinished();
+            }
             input.MarkAsFinished();
             writer.EndSessionAtSourceTime(new CMTime(frames.Length, fps));
             FinishWriting(writer, path);
@@ -165,8 +255,64 @@ public sealed partial class AppleMediaProvider
         }
         finally
         {
+            audioInput?.Dispose();
+            pcm?.Dispose();
             writer.Dispose();
         }
+    }
+
+    /// <summary>Append samples <paramref name="from"/>..<paramref name="until"/> of the
+    /// soundtrack as one 16-bit interleaved PCM buffer, for the encoder to turn into AAC.
+    /// Returns where the next append starts.</summary>
+    private static long AppendAudio(
+        AVAssetWriterInput input, AVAssetWriter writer, AVAudioFormat pcm,
+        GeneratedVideoAudio audio, long from, long until)
+    {
+        int count = (int)(until - from);
+        if (count <= 0)
+            return from;
+
+        int channels = audio.ChannelCount;
+        byte[] bytes = new byte[count * channels * 2];
+        int offset = 0;
+        for (long i = from; i < until; i++)
+        {
+            for (int c = 0; c < channels; c++)
+            {
+                // The WavWriter expression exactly: clamp first, because a model overshoots
+                // [-1, 1] now and then and a wrapped int16 is a loud click.
+                float v = Math.Clamp(audio.Channels[c][i], -1f, 1f);
+                short s = (short)Math.Round(v * short.MaxValue, MidpointRounding.AwayFromZero);
+                bytes[offset++] = (byte)(s & 0xFF);
+                bytes[offset++] = (byte)((s >> 8) & 0xFF);
+            }
+        }
+
+        // Memory CoreMedia allocates and owns, with the samples copied in. The encoder reads a
+        // buffer after AppendSampleBuffer has returned, on its own thread, and the convenience
+        // overload that wraps a managed array lets the array go when its wrapper is disposed:
+        // MEASURED, the AAC track then held a 5 kHz whine at a fifth of the tone's level, a
+        // different one on every run, instead of the samples that were handed over.
+        using CMBlockBuffer? block = CMBlockBuffer.FromMemoryBlock(
+            IntPtr.Zero, (nuint)bytes.Length, null, 0, (nuint)bytes.Length,
+            CMBlockBufferFlags.AssureMemoryNow, out CMBlockBufferError blockError);
+        if (block == null || blockError != CMBlockBufferError.None)
+            throw new InvalidOperationException($"CMBlockBufferCreateWithMemoryBlock failed ({blockError}) for the soundtrack.");
+        CMBlockBufferError copyError = block.ReplaceDataBytes(bytes, 0);
+        if (copyError != CMBlockBufferError.None)
+            throw new InvalidOperationException($"CMBlockBufferReplaceDataBytes failed ({copyError}) for the soundtrack.");
+        using CMSampleBuffer? buffer = CMSampleBuffer.CreateReadyWithPacketDescriptions(
+            block, pcm.FormatDescription, count, new CMTime(from, audio.SampleRate), null, out CMSampleBufferError bufferError);
+        if (buffer == null || bufferError != CMSampleBufferError.None)
+            throw new InvalidOperationException($"CMAudioSampleBufferCreate failed ({bufferError}) for the soundtrack.");
+
+        WaitForInput(input, writer, $"the soundtrack at sample {from}");
+        if (!input.AppendSampleBuffer(buffer))
+        {
+            throw new InvalidOperationException(
+                $"AVAssetWriter rejected the soundtrack at sample {from}: {writer.Error?.LocalizedDescription ?? writer.Status.ToString()}");
+        }
+        return until;
     }
 
     /// <summary>
@@ -196,7 +342,7 @@ public sealed partial class AppleMediaProvider
     /// <c>RequestMediaData</c> because <see cref="SaveMp4"/> is a synchronous API called from
     /// a pipeline thread that has nothing else to do; the callback form would need a dispatch
     /// queue and a completion handshake to end up in exactly the same place.</summary>
-    private static void WaitForInput(AVAssetWriterInput input, AVAssetWriter writer, int frameIndex)
+    private static void WaitForInput(AVAssetWriterInput input, AVAssetWriter writer, string what)
     {
         DateTime deadline = DateTime.UtcNow + AppendTimeout;
         while (!input.ReadyForMoreMediaData)
@@ -204,10 +350,10 @@ public sealed partial class AppleMediaProvider
             if (writer.Status is AVAssetWriterStatus.Failed or AVAssetWriterStatus.Cancelled)
             {
                 throw new InvalidOperationException(
-                    $"AVAssetWriter stopped at frame {frameIndex}: {writer.Error?.LocalizedDescription ?? writer.Status.ToString()}");
+                    $"AVAssetWriter stopped at {what}: {writer.Error?.LocalizedDescription ?? writer.Status.ToString()}");
             }
             if (DateTime.UtcNow > deadline)
-                throw new TimeoutException($"The H.264 encoder did not accept frame {frameIndex} within {AppendTimeout.TotalSeconds:0} s.");
+                throw new TimeoutException($"The encoder did not accept {what} within {AppendTimeout.TotalSeconds:0} s.");
             Thread.Sleep(1);
         }
     }

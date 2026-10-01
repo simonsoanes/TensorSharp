@@ -132,14 +132,56 @@ public sealed class LoopbackWebHost : IDisposable
 
     public void Start()
     {
+        _running = this;
         _host.Start();
 #if IOS
         _shareInbox.Start();
 #endif
     }
 
+    /// <summary>The host the app is running, while it is running; see <see cref="ShutDownForTermination"/>.</summary>
+    private static LoopbackWebHost? _running;
+
+    /// <summary>
+    /// Shut the running host down in its own safe order and then hand the engine back, for
+    /// an app that is being quit.
+    ///
+    /// <para>The host is a DI singleton that nothing disposes, and the process-exit net
+    /// (<see cref="AgentAppHost.ReleaseTheEngineWhenTheProcessExits"/>) never fires on a Mac:
+    /// quitting ends in AppKit's <c>exit()</c>, and Mono raises ProcessExit only for a managed
+    /// shutdown. So every quit after the GPU had done any work - a reply, a warm-up, a clip -
+    /// aborted on <c>GGML_ASSERT([rsets-&gt;data count] == 0)</c> in ggml-metal's static
+    /// destructor. A turn still running is stopped and waited for first, as on any
+    /// shutdown, because releasing the model under a GPU graph is a crash too.</para>
+    /// </summary>
+    public static void ShutDownForTermination()
+    {
+        LoopbackWebHost? running = Interlocked.Exchange(ref _running, null);
+        // Mac Catalyst gives applicationWillTerminate about five seconds: past that,
+        // UIKitMacHelper's lifecycle watchdog calls exit() itself. A clip mid-step takes
+        // longer than that to stop (MEASURED: a quit three steps into a 22-frame clip was
+        // ended by the watchdog at 5.7 s and aborted in ggml-metal's destructor), and
+        // neither way out of that is safe: releasing the model under the running graph is a
+        // crash, and exit() runs the destructor on buffers still registered. So the work
+        // gets most of the budget to stop, and if it has not, the process leaves without
+        // the C++ static destructors - the kernel reclaims its memory and its GPU work.
+        if (running is not null && !running._host.StopWorkWithin(TimeSpan.FromSeconds(3)))
+        {
+            Console.WriteLine("TensorAgent: still generating when the app was quit; leaving without releasing the model");
+            Console.Out.Flush();
+            LeaveNow(0);
+        }
+        running?.Dispose();
+        AgentAppHost.ReleaseTheEngine();
+    }
+
+    /// <summary>End the process without running exit()'s handlers (POSIX <c>_exit</c>).</summary>
+    [System.Runtime.InteropServices.DllImport("libSystem.dylib", EntryPoint = "_exit")]
+    private static extern void LeaveNow(int status);
+
     public void Dispose()
     {
+        Interlocked.CompareExchange(ref _running, null, this);
 #if IOS
         _loopbackLifecycle.Dispose();
         _shareInbox.Dispose();

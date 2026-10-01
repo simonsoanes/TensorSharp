@@ -62,6 +62,29 @@ Hadamard 变换。它需要单设备 GGML 后端（`cpu`、`cuda`、`mlx` 与 `-
 
 `v2026.09.01` 标签之后合入、会改变现有配置行为的改动：
 
+- **MiniMax-H3 缺少 `tokenizer_config.json` 时会拒绝照片、以及含照片或视频片段的参考。** 图像、首尾帧与画面参考条件需要把它放在
+  `vocab.json` 与 `merges.txt` 旁边（`MiniMaxAI/MiniMax-H3` 的 `processor/`），因为只有它定义了 `<|vision_start|>`、
+  `<|image_pad|>` 与 `<|vision_end|>`。缺少它时这些标记被拆成普通片段，视觉特征落到错误的提示词位置上，生成的片段
+  悄悄忽略了图片；现在这类请求会在视觉塔运行之前被拒绝，并点名该文件。文生视频从来不需要它。见
+  [MiniMax-H3 卡片](models/minimax-h3_zh-cn.md)。
+- **Metal 上的 MiniMax-H3 在下一段视频的文本编码器运行前交还保留的网络。** 去噪器与两个 VAE 过去在两段视频之间
+  一直驻留在设备上，因此从第二段起，文本编码器运行时旁边还 wire 着约 16 GB 已经用完的网络。在 M5 Pro 上的
+  TensorAgent Mac 应用中实测（每组两段相同的文生视频），先释放它们使峰值 wired 内存从 33.3 GB 降到 19.1 GB，代价是
+  第二段的文本条件阶段多 1.3 秒（2.8 秒对 1.5 秒），两组总耗时相差约 1%。`TS_H3_KEEP_RESIDENT=1` 保留旧行为；
+  独立显卡不受影响。
+- **MiniMax-H3 的音轨始终跟随 24 fps 的画面，无论请求的 fps 是多少。** 画面总以 24 fps 写出，但音频时间轴过去按
+  请求的帧率计算（39 帧、fps 16 时请求了 98 个音频潜变量而不是 65 个），音轨因此按另一条时间轴铺排，与它最后
+  裁剪对齐的画面并不同步。按默认的 24 fps 请求不受影响。
+- **TensorAgent 生成的 MP4 带上了音轨。** 只有 TensorAgent 注册的 Apple 媒体提供程序现在把 MiniMax-H3 的音轨作为
+  AAC 轨道（双声道、32 kHz、128 kbit/s）写进 MP4（索引在前），并仍在旁边写出 32 kHz WAV。服务端与 CLI 的编码器
+  不变（只写画面，外加 WAV 旁挂文件）；`/api/video-generate` 的回复及其流的最后一帧现在带有 `audioMuxed`，在这两个
+  宿主上为 false，音轨在 MP4 内时为 true。
+- **TensorAgent 在 Mac 上提供 MiniMax-H3。** 两个 32 GB 档位的条目——“MiniMax-H3”（关键帧）与
+  “MiniMax-H3 References”——通过普通的聊天回合生成带音轨的短视频。与此同时，Mac 应用在 GPU 工作之后退出不再中止
+  （ggml-metal 静态析构函数中的 `GGML_ASSERT`）；应用按存储的颜色读取未嵌入色彩配置文件的透明 PNG，（近乎）透明的
+  像素不再变黑；另一个已安装条目已持有的文件改用硬链接，不再重新下载；loopback 服务器也会响应 Range 与 HEAD。见
+  [Mac 专属模型](../TensorAgent/README.md#the-macs-own-models)。
+
 - **TensorAgent 除 iPhone 外还可构建为 Mac 与 Windows 应用。** 应用项目现在以
   `net10.0-ios;net10.0-maccatalyst` 为目标（在 Windows 机器上为
   `net10.0-windows10.0.19041.0`），因此构建 iOS 应用也需要安装 `maui-maccatalyst`
@@ -264,7 +287,7 @@ TensorAgent 是使用 .NET MAUI 构建的 iOS/iPadOS 应用，在设备本地运
 | TensorAgent 应用 | TensorAgent 支持 iOS/iPadOS，同一个项目还能构建 Mac 版（Mac Catalyst：桌面引擎库、Seatbelt 约束的进程，已实测）与 Windows 版（尚未构建或运行）。在手机上它将 GGML 作为 iOS `.xcframework` 链接，并在真机上使用 `ggml_metal`。它共享与宿主无关的聊天流水线（`TensorSharp.Chat`），但通过进程内 loopback 宿主提供自己的手机版页面——iOS 既没有 ASP.NET Core 运行时包，也不能启动子进程。它支持 iPhone 与 iPad（arm64，iOS 17.0 或更高版本）。应用离开屏幕后这一轮不会丢失（应用不在前台时生成暂停，回到前台后继续）；投机解码与子智能体委派默认开启；共享提示词前缀的 checkpoint 会按模型持久化，使每次启动的第一条消息只需一次恢复而不必完整预填充（在 iPhone 17 Pro Max 上以 Qwen3.5 9B 实测：原本 54 秒的冷启动首条消息，变成 1.2 秒预热加约 0.6 秒的首条消息）；引擎的内存策略也按 iOS jetsam 实际计费的口径来设定。详见 [TensorAgent](../TensorAgent/README.md)。 |
 | 后端 | 纯 C# CPU、Direct CUDA/cuBLAS（`cuda`）、MLX Metal（`mlx`）、GGML CPU、GGML Metal、GGML CUDA、GGML Vulkan。DeepSeek V4 另有三套专属的整模型执行器——Direct CUDA、原生 ggml 与纯 C# CPU——在 GPU 执行器上通过 `--layer-split N` 按整层放置权重（`--layer-split N` 指定卡数）。DeepSeek V4.1 的服务路径是 `ggml_cuda`；`ggml_cpu` 用同一套原生计算图跑标量回退实现，`cpu` 则是纯 C# 的 V4.1 执行器，两者都是正确性与可移植性通道，而非服务通道。`cuda` 用 Direct CUDA 引擎自己的内核运行 V4.1（不经过 ggml），目前还没有数值门禁。`ggml_vulkan` / `ggml_metal` 需要 `TS_DSV41_ALLOW_NON_CUDA_GPU=1`；`mlx` 会直接拒绝该检查点，而不会把 V4.1 的权重塞进并未实现它的计算图。视频家族中，Wan 是对后端有限制的那一个：它可运行于各 GGML 后端以及 Direct `cuda` / 纯 C# `cpu` 后端，但不支持 MLX。Qwen-Image-2.1 只能运行在 GGML 后端上，Bonsai2 需要单设备 GGML 后端。 |
 | 发布构建与 CI | 打标签的发布会构建自包含的 CLI 与服务端归档：Windows x64（CPU/CUDA）、Linux x64（CPU/CUDA）与 macOS arm64。自 `v2026.09.01` 之后，发布工作流还会构建面向 NVIDIA GB10 / DGX Spark 的实验性 `linux-arm64-cuda13-GB10` 归档（CUDA 13、SM121a），它在没有 GPU 的托管 ARM64 runner 上用 Docker 构建；第一个带有该归档的标签发布将是下一个标签。已记录的 GB10 真机冒烟数据是历史数据，早于上游重新集成，不能为当前代码背书（[GB10 构建](../DEVELOPMENT_zh-cn.md#gb10--dgx-spark-构建容器实验性)）。PR CI 在 x64 与 ARM64 Linux 上运行 `InferenceWeb.Tests` 的 CPU 正确性测试与 GB10 容器门禁检查；发往 `main` 的 PR 还会在自托管 CUDA runner 上运行一次引擎对比冒烟测试（Gemma 4 12B，TensorSharp 对比 llama.cpp，`test-matrix.yml`）。PR CI 不运行 `TensorAgent.Tests`，也不构建 iOS 应用。打标签的发布还会推送 `eng/verify-packages.ps1` 所列的 NuGet 包（含 `TensorSharp.AgentHost`）。 |
-| 多模态 | Gemma 4 图像/视频/音频；Qwen 3.5-family（含带配套投影器的 Bonsai2）、Qwen 3.8 Flash Next、GLM-5.3-Flash、Mistral 3、Nemotron-H Omni、Muse-Glimmer、DiffusionGemma 图像输入；Qwen 3.8 Flash Next 的 `video_url` 视频；DeepSeek V4.1 通过视觉伴随文件支持图像与视频；Nemotron-H 只有加载了携带 Parakeet 音频塔的伴随 GGUF 时才支持音频（公开 GGUF 都不附带）；DiffusionGemma 拒绝音频与 `video_url` 视频（Web UI 上传的视频只会以逐帧普通图像的形式送入模型）；PDF（CLI `--pdf` + Web UI）。媒体*输出*：Qwen-Image-2.1（图像，可通过 `--lora` 加载 LoRA 插件，并对文本与参考图 token 默认启用前缀 KV 缓存）、MiniMax-H3（H.264 MP4 **外加一份 32 kHz 立体声 `.wav` 旁挂文件**，两者在同一份打包潜变量里一起生成），以及 Wan 2.1 / 2.2（仅 H.264 MP4 视频，文本→视频与图像→视频）。 |
+| 多模态 | Gemma 4 图像/视频/音频；Qwen 3.5-family（含带配套投影器的 Bonsai2）、Qwen 3.8 Flash Next、GLM-5.3-Flash、Mistral 3、Nemotron-H Omni、Muse-Glimmer、DiffusionGemma 图像输入；Qwen 3.8 Flash Next 的 `video_url` 视频；DeepSeek V4.1 通过视觉伴随文件支持图像与视频；Nemotron-H 只有加载了携带 Parakeet 音频塔的伴随 GGUF 时才支持音频（公开 GGUF 都不附带）；DiffusionGemma 拒绝音频与 `video_url` 视频（Web UI 上传的视频只会以逐帧普通图像的形式送入模型）；PDF（CLI `--pdf` + Web UI）。媒体*输出*：Qwen-Image-2.1（图像，可通过 `--lora` 加载 LoRA 插件，并对文本与参考图 token 默认启用前缀 KV 缓存）、MiniMax-H3（H.264 MP4 **外加一份 32 kHz 立体声 `.wav` 旁挂文件**，两者在同一份打包潜变量里一起生成；在 Apple 平台的 TensorAgent 中，MP4 本身也带有 AAC 音轨），以及 Wan 2.1 / 2.2（仅 H.264 MP4 视频，文本→视频与图像→视频）。 |
 | 连续批处理 | vLLM 风格分页 KV 缓存、默认启用的 Radix（基数树）前缀缓存（`--no-prefix-cache` / `TS_SCHED_PREFIX_CACHE=0` 关闭全部复用；`--spec` 不会关闭它），覆盖 Qwen 3.5-family、Gemma 4、GLM 5.x、Qwen 3.8 Flash Next、DeepSeek V4 / V4.1、GPT OSS、Mistral 3、Hunyuan Dense、Muse-Glimmer 与 Nemotron-H，但不包括 DiffusionGemma 与媒体生成模型；共享前缀 checkpoint（所有会话共享的那段提示词末尾的状态会被克隆进每个新会话，因此新会话只需重新 prefill 自己的那条消息；适用于 GGML 上的 Gemma 4、Qwen 3.5/3.6 与 Qwen 3.8 Flash Next，宿主还可通过 `IPrefixCheckpointStore` 让 Gemma 4 或 Qwen 3.5-family 的 checkpoint 跨进程重启存活）、迭代级调度器（默认启用，`--no-continuous-batching` 关闭）。分页池常驻主机内存，因此它买到的是内存效率与前缀复用，而不是随并发增长的吞吐。DeepSeek V4 与 GLM 5.x 在同一引擎上通过各自原生的 per-sequence slot 提供服务——压缩后的 MLA 每 token 只有一行缓存，没有可分页的布局——GLM 的批处理融合解码默认启用（设置 `TS_BATCHED_FUSED_DECODE=0` 可切回串行融合 decode；4 路并发下总吞吐 1.81 倍）。Qwen 3.8 Flash Next 出于同样的原因使用逐序列状态持有者——它的 GatedDeltaNet、PLE 与索引器状态同样没有可分页的布局。 |
 | 投机解码 | Qwen 3.6、Qwen 3.8-27B、GLM 5.2 与 GLM-5.3（均内嵌于 checkpoint——GLM-5.3 的 `blk.78` NextN 块本身是完整的，但它没有自己的 LM head，因此投机在单设备或显式 `--layer-split N` 放置模式下生效，不启用张量并行）、Gemma 4（独立草稿 GGUF，通过 `--draft-model` 加载）以及 Qwen 3.8 Flash Next（独立的共享 MTP head GGUF，通过 `--draft-model` 加载，仅限 GGML 后端）的 MTP / NextN 草稿头；DeepSeek V4 的 DSpark 块级起草（仅 `cuda` / `ggml_cuda`）、DeepSeek V4.1 的实验性 `deepseek41-dspark` 草稿器（仅 `ggml_cuda` / `ggml_cpu`，训练模型已在 `ggml_cuda` 双 GPU 按层切分下通过初步文本/图像 HTTP 检查；尚不构成通用质量或吞吐验证）、Muse-Glimmer 与 Qwen 3.8-27B 的 DFlash / DFlash2 块级起草（Nemotron-H 拒绝投机解码：它的 verify 与 decode 内核结果不一致，投机输出会与普通解码不同）——这些都通过 `--draft-model` 加载独立的草稿 GGUF；此外还有一个不需要任何草稿权重的 n-gram（prompt-lookup）投机器，用 `--spec-type ngram` 选择，适用于 Qwen 3.5 家族、Gemma 4、GLM 5.x 与 Qwen 3.8 Flash Next。GPT OSS、Mistral 3 与 Hunyuan Dense 没有投机路径，因此无法使用它；DeepSeek V4 / V4.1 与 Muse-Glimmer 在没有加载各自草稿器时也无法使用。每个输出 token 都取自主干的一行 logits，并由本次运行自身配置的采样器抽出，因此输出流与普通 decode 产生的完全相同。CLI 与服务端默认关闭（TensorAgent 默认开启）；内嵌草稿头在 CLI 与服务端两端均以 `--spec` 启用，而对以独立 GGUF 发布的草稿器，传入 `--draft-model` 本身即可启用投机。 |
 | 张量并行与按层切分 | **张量并行、按层切分与分布式推理** —— `--tp N` / `TENSORSHARP_TP_DEGREE=N` 仅选择张量并行：在每层内部把权重切分到 N 张本地 GPU。`--layer-split N` / `TENSORSHARP_LAYER_SPLIT_DEGREE=N` 为 Qwen 3.8 Flash Next、DeepSeek V4 / V4.1 与 GLM 5.x 选择整层放置。两种模式互斥，不支持的请求会在启动时失败，不会改变模式或静默回到单卡。按层切分仅限本地单节点，主要增加容量。支持分布式的张量并行架构可用 `--tp-node-id` / `--tp-peers` 跨节点；GLM 与 Qwen-Image 的 TP 仍仅限本地。默认单设备。DeepSeek V4.1 的实验性 routed-MoE TP（`--tp N`）不实现注意力 TP 或跨节点执行。→ [多 GPU 模式](../USAGE_zh-cn.md#张量并行与分布式推理) |

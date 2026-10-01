@@ -8,6 +8,7 @@
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 using TensorSharp.Models.QwenImage;
+using TensorSharp.Models.Video;
 
 namespace TensorSharp.Models.Media
 {
@@ -24,5 +25,19 @@ namespace TensorSharp.Models.Media
         /// than writing a file nothing can play.
         /// </summary>
         string SaveMp4(string path, RgbImage[] frames, int fps);
+
+        /// <summary>
+        /// As <see cref="SaveMp4(string, RgbImage[], int)"/>, with the soundtrack a model
+        /// generated alongside the frames (null when it made none) written into the same
+        /// file when the provider can. <paramref name="audioMuxed"/> says whether it was, so a
+        /// caller knows whether the MP4 alone carries the sound. A provider without an audio
+        /// path writes the frames alone, which is what every provider did before this
+        /// overload existed.
+        /// </summary>
+        string SaveMp4(string path, RgbImage[] frames, int fps, GeneratedVideoAudio audio, out bool audioMuxed)
+        {
+            audioMuxed = false;
+            return SaveMp4(path, frames, fps);
+        }
     }
 }

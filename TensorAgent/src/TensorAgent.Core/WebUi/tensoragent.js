@@ -15,7 +15,7 @@
   var modelBtn = $('model'), hold = $('hold'), abc = $('abc');
 
   var state = {
-    model: null, arch: null, backend: null, contextTokens: 0,
+    model: null, arch: null, backend: null, video: null, contextTokens: 0,
     modelContextTokens: 0, visionReady: false,
     acceptsVisionProjector: true,
     visionChecking: false,
@@ -325,6 +325,29 @@
     return link;
   }
 
+  /**
+   * The clip a video model made, and its soundtrack when the host kept that as a file
+   * of its own. Built the same way for a turn as it finishes and for a reopened chat.
+   */
+  function clipNode(src) {
+    var video = document.createElement('video');
+    // Inline, or an iPhone takes it fullscreen the moment it plays. Looped, because a
+    // generated clip lasts only seconds and a single play is easy to miss.
+    // 'metadata' rather than an attachment's 'none': the header of a clip a few seconds
+    // long costs next to nothing to read, and with it read the controls can show the
+    // clip's length before it plays.
+    video.controls = true; video.playsInline = true; video.loop = true;
+    video.preload = 'metadata';
+    if (src) video.src = src;
+    return video;
+  }
+  function soundNode(src) {
+    var audio = document.createElement('audio');
+    audio.controls = true; audio.preload = 'metadata';
+    if (src) audio.src = src;
+    return audio;
+  }
+
   function addTurn(role, content, attachments, extra) {
     clearEmpty();
     var turn = el('div', 'turn ' + (role === 'user' ? 'me' : 'bot'));
@@ -343,6 +366,10 @@
       var made = document.createElement('img');
       made.src = extra.imageUrl; made.alt = 'generated image';
       b.appendChild(made);
+    }
+    if (extra && extra.videoUrl) {
+      b.appendChild(clipNode(extra.videoUrl));
+      if (extra.audioUrl) b.appendChild(soundNode(extra.audioUrl));
     }
     turn.appendChild(b);
     chat.appendChild(turn);
@@ -622,16 +649,34 @@
     state.modelContextTokens = d && typeof d.modelContextTokens === 'number'
       ? d.modelContextTokens : state.contextTokens;
     state.maxTokens = (d && d.defaultMaxTokens) || 2048;
+    // What a video model can be given besides its description. The host reports it
+    // for a video model and null for every other one.
+    state.video = (d && d.video) || null;
     // An image model takes a description, or a photo and what to change about it.
-    text.placeholder = makesImages()
-      ? 'Describe a picture… or attach a photo and say what to change'
-      : 'Message… or hold to talk';
+    text.placeholder = makesVideo() ? videoPlaceholder(state.video)
+      : makesImages()
+        ? 'Describe a picture… or attach a photo and say what to change'
+        : 'Message… or hold to talk';
     paintModelButton();
   }
 
   // Qwen-Image: the host turns a message into a picture rather than an answer
   // (ImageTurns), on the same /api/chat route and turn machinery as a reply.
   function makesImages() { return state.arch === 'qwen_image' || state.arch === 'qwen-image'; }
+
+  // MiniMax-H3: the host films the message instead (VideoTurns), the same way. Known by
+  // the capability the host reports, not by an architecture name: the two checkpoints
+  // share one architecture and take different things.
+  function makesVideo() { return !!state.video; }
+
+  // The keyframes checkpoint starts the clip from a photo (and ends it on a second
+  // one); the references checkpoint puts the people, things and sounds it is shown
+  // into a scene of its own. The composer says which, before anything is attached.
+  function videoPlaceholder(v) {
+    if (v.supportsReferenceConditioning) return 'Describe a video… attach photos, clips or sounds it should feature';
+    if (v.supportsImageConditioning) return 'Describe a video… or attach a photo to start it from';
+    return 'Describe a video…';
+  }
 
   // Three states, not two. The app now loads the model the user last used by itself,
   // and reading four gigabytes off flash takes seconds -- during which "No model yet"
@@ -742,7 +787,7 @@
     (messages || []).forEach(function (m) {
       state.history.push(m);
       addTurn(m.role, displayText(m.content), m.attachments,
-        { artifacts: m.artifacts, imageUrl: m.imageUrl });
+        { artifacts: m.artifacts, imageUrl: m.imageUrl, videoUrl: m.videoUrl, audioUrl: m.audioUrl });
     });
   }
 
@@ -1122,6 +1167,13 @@
       return;
     }
     var t = text.value.trim();
+    // A video is filmed from its description. Photos, clips and sounds are only what it
+    // starts from or features, and sent alone their file names would be the script.
+    if (makesVideo() && !t) {
+      note('send-refused', 'video without a description');
+      notice('Describe the video you want, then send.');
+      return;
+    }
     if (!t && !state.attachments.length) { note('send-refused', 'nothing to send'); return; }
     // A photo with no words would send its file name as the edit instruction.
     if (makesImages() && !t) {
@@ -1145,9 +1197,10 @@
     // Capability can change while this long-lived WKWebView is hidden on the Models
     // page. Re-read it immediately before every image-bearing request, while the
     // composer is still intact. The server repeats this check authoritatively.
-    // Not for an image model: a photo is what it edits, not something it has to see,
-    // and the host refuses an edit itself when the vision file is missing.
-    if (!makesImages() && nextHistory.some(function (m) { return m && m.imagePaths && m.imagePaths.length; })) {
+    // Not for an image or video model: a photo is what it edits or films from, not
+    // something it has to see. The host refuses an edit itself when the vision file is
+    // missing, and checks what a video was given against what its checkpoint takes.
+    if (!makesImages() && !makesVideo() && nextHistory.some(function (m) { return m && m.imagePaths && m.imagePaths.length; })) {
       state.visionChecking = true;
       send.disabled = true;
       // Disable the shared marker in the same event turn as Send. The model-capability
@@ -1698,7 +1751,7 @@
     setGenerating(true);
     // Immediately, before a single byte comes back: the gap between pressing send
     // and the first frame is itself seconds long on a phone.
-    progress(makesImages() ? 'Drawing…' : 'Thinking…');
+    progress(makesVideo() ? 'Filming…' : makesImages() ? 'Drawing…' : 'Thinking…');
 
     var ctrl = new AbortController();
     ctrl.awaitingHeaders = true;
@@ -1803,6 +1856,30 @@
   }
 
   /**
+   * What the strip says while a video model works, by the stage the host reports. A
+   * clip takes minutes, so the denoising stage counts its steps and, once the host can
+   * tell, says about how long is left (its eta is -1 until then).
+   */
+  function filmingLabel(f) {
+    switch (f.video_phase) {
+      case 'text-encode': return 'Reading the description…';
+      case 'denoise':
+        return (f.video_steps ? 'Filming… step ' + f.video_step + ' of ' + f.video_steps : 'Filming…')
+          + timeLeft(Number(f.eta));
+      case 'vae-decode': return 'Developing the frames…';
+      case 'audio-decode': return 'Adding the sound…';
+      case 'encode': return 'Saving the video…';
+      default: return 'Filming…';
+    }
+  }
+  /** Minutes past a minute and a half, whole seconds under it, nothing when unknown. */
+  function timeLeft(s) {
+    if (!(s > 0)) return '';
+    return s > 90 ? ' · about ' + Math.round(s / 60) + ' min left'
+      : ' · about ' + Math.max(1, Math.round(s)) + ' s left';
+  }
+
+  /**
    * Read one event stream into one assistant turn.
    *
    * Shared by the request that starts a generation and by a page attaching to one that
@@ -1813,11 +1890,11 @@
   function read(res, view, ctrl) {
     var answer = '', thinking = '', thinkBox = null, thinkBody = null;
     var steps = '', offered = false, draft = '', restarts = 0, errors = 0;
-    // What this turn PRODUCED: the files its tools wrote, and a picture it made.
-    // Kept so the history entry carries them, because the history is what the next
-    // request rewrites the saved transcript from -- an entry that has forgotten the
-    // PDF erases the PDF from a chat that had one.
-    var made = [], madeSeen = {}, madeImage = null;
+    // What this turn PRODUCED: the files its tools wrote, and a picture or a clip it
+    // made. Kept so the history entry carries them, because the history is what the
+    // next request rewrites the saved transcript from -- an entry that has forgotten
+    // the PDF erases the PDF from a chat that had one.
+    var made = [], madeSeen = {}, madeImage = null, madeVideo = null, madeAudio = null;
     var reader = res.body.getReader(), dec = new TextDecoder(), buf = '';
     // Whether the host said the turn was over. A stream that ends without it did not
     // end because the answer did: the connection went away underneath it.
@@ -1989,6 +2066,20 @@
         if (answerDirty) { view.bubble.innerHTML = render(answer); view.answerSoFar = answer; answerDirty = false; }
         pictureOf(view).src = madeImage;
       }
+      // A video model's turn (VideoTurns on the host): the description is read, the
+      // clip denoises step by step, then its frames, its sound and the MP4 are made.
+      // No preview along the way; the finished clip arrives once, at the end.
+      if (typeof f.video_step === 'number') progress(filmingLabel(f));
+      if (f.videoUrl) {
+        madeVideo = f.videoUrl;
+        // Only when the soundtrack is a file of its own. Normally it is inside the MP4,
+        // and the clip plays it.
+        madeAudio = f.audioUrl || null;
+        // The clip goes under the text, so the text has to be there first.
+        if (answerDirty) { view.bubble.innerHTML = render(answer); view.answerSoFar = answer; answerDirty = false; }
+        clipOf(view).src = madeVideo;
+        if (madeAudio) soundOf(view).src = madeAudio;
+      }
     }
     // The one picture a turn shows, made on first use and made again if a repaint of
     // the bubble's text removed it.
@@ -1999,6 +2090,23 @@
         v.bubble.appendChild(v.picture);
       }
       return v.picture;
+    }
+    // The clip and its soundtrack, one of each per bubble and made the same way. A
+    // re-attach replays every frame from the first into this bubble, the url frame
+    // included, and the bubble must still end with one player, not two.
+    function clipOf(v) {
+      if (!v.clip || v.clip.parentNode !== v.bubble) {
+        v.clip = clipNode();
+        v.bubble.appendChild(v.clip);
+      }
+      return v.clip;
+    }
+    function soundOf(v) {
+      if (!v.sound || v.sound.parentNode !== v.bubble) {
+        v.sound = soundNode();
+        v.bubble.appendChild(v.sound);
+      }
+      return v.sound;
     }
     function finish() {
       if (ctrl && ctrl !== state.abort && state.abort) { note('reader-retired', 'finish'); return; }
@@ -2022,10 +2130,12 @@
       if (thinking) entry.thinking = thinking;
       if (made.length) entry.artifacts = made;
       if (madeImage) entry.imageUrl = madeImage;
+      if (madeVideo) entry.videoUrl = madeVideo;
+      if (madeAudio) entry.audioUrl = madeAudio;
       // Nothing produced is nothing to remember: the host's own record skips an empty
       // turn too, and an empty assistant entry in the history would be sent back to
       // the model as a message it never wrote.
-      if (answer || thinking || made.length || madeImage) state.history.push(entry);
+      if (answer || thinking || made.length || madeImage || madeVideo) state.history.push(entry);
       if (answer) addCopy(view.turn, function () { return answer; });
       setGenerating(false);
       state.abort = null;

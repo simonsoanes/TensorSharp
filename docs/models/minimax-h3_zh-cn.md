@@ -165,8 +165,8 @@ sd.cpp 只是把 MJPEG + PCM 写进 AVI，另外还有 .NET 进程相对原生�
 
 四个网络依次运行，所以显存峰值是 `max(...)` 而不是总和——但前提是每一个都在下一个到来
 之前真正被交还，而且把下一个搬上显卡本身不能成为瓶颈。在 16 GB 的卡上，这两件事都不是
-免费的。下面所有数据都测自上文那台 RTX 3080 Laptop 16 GB；`TS_H3_PHASE=1` 会打印这些
-数字所来自的逐阶段耗时。
+免费的。除 Metal 那一小节外，下面所有数据都测自上文那台 RTX 3080 Laptop 16 GB；
+`TS_H3_PHASE=1` 会打印这些数字所来自的逐阶段耗时。
 
 ### 视频 VAE 加载之前先释放去噪器
 
@@ -177,9 +177,30 @@ sd.cpp 只是把 MJPEG + PCM 写进 AVI，另外还有 .NET 进程相对原生�
 
 现在，当 VAE 无法与去噪器并存时，会先把已经用完的去噪器的设备常驻交还回去。解码期间的
 显存峰值降到约 5 600 MiB，在 640x384 下值 **22 秒**。这是一个上限而不是策略变更：判断
-依据是当前真实的空闲显存，所以显存充裕的卡仍然保持去噪器常驻、行为与以前完全一致；非
-CUDA 的 GGML 后端一律不动——统一内存设备没有什么可交还的。代价只是**下一次**请求要重新
-上传 DiT，而它的权重是仍留在内存里的 mmap GGUF 页。同门的 Qwen-Image 流水线早就这么做了。
+依据是当前真实的空闲显存，所以显存充裕的卡仍然保持去噪器常驻、行为与以前完全一致。
+这项检查只在 `ggml_cuda` 上进行；Metal 有自己的一次释放，时机在文本编码器之前而不是 VAE
+之前（见[下文](#metal-在文本编码器之前释放上一段片段的网络)）。代价只是**下一次**请求要
+重新上传 DiT，而它的权重是仍留在内存里的 mmap GGUF 页。同门的 Qwen-Image 流水线早就这么做了。
+
+### Metal 在文本编码器之前释放上一段片段的网络
+
+流水线会在请求之间保留去噪器和两个 VAE。在 Metal 上，它们绑定的每个权重都是零拷贝包在
+映射文件上、并保持常驻的缓冲区，对应的页因此被钉成 wired 内存；于是从第二段片段起，17 GB
+的文本编码器运行时，旁边还钉着约 16 GB 已经用完的网络。现在它们会在每段片段的文本编码器
+运行之前被释放，峰值因此保持在单个最大阶段。这些页仍留在文件缓存里，下一次绑定通常直接命中。
+
+在 TensorAgent Mac 应用里实测（M5 Pro、48 GB、macOS 27、机器空闲）：每组连续生成两段
+相同的文生视频片段，用应用的设置（640x384、22 帧、20 步），每秒采样一次内存。
+
+| | 系统 wired 内存峰值 | 片段 1 / 片段 2 | 片段 2 的文本条件阶段 |
+|---|---|---|---|
+| 默认（释放） | **19.1 GB** | 151.4 秒 / 148.9 秒 | 2.8 秒 |
+| `TS_H3_KEEP_RESIDENT=1`（保留，即旧行为） | 33.3 GB，出现在片段 2 的文本阶段 | 148.4 秒 / 147.4 秒 | 1.5 秒 |
+
+wired 内存峰值少了 14.2 GB——正是这一点让 32 GB 的 Mac 能跑这套模型——代价是第一段之后的
+每段片段文本条件阶段多约 1.3 秒。总耗时相差约 1%，落在两组之间相同的第一段片段本身约 3 秒
+的波动之内；第一段片段的输出不变。`TS_H3_KEEP_RESIDENT=1` 让内存足够容纳全部网络的统一内存
+主机继续保留它们；独立显卡维持上文的行为。
 
 ### 去噪器文件在上传之前先被顺序读入
 
@@ -244,9 +265,19 @@ TensorSharp.Cli         --config config/minimax-h3-ref2va.json \
 > **文本编码器的 GGUF 不带分词器**，而这恰恰是配置文件唯一没法替你下载的东西：
 > 自动下载只能补齐那些**以命令行选项形式存在**的文件，而分词器不是选项。请把
 > [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/42ed227ee7df40d41602854ae760620d6eb651fe/processor)
-> 里的 `vocab.json` 和 `merges.txt` 放到它旁边，或用 `TS_VIDEO_TOKENIZER` 指向它们。
+> 里 `processor/` 目录下的三个文件——`vocab.json`、`merges.txt` 和 `tokenizer_config.json`
+> ——放到它旁边，或用 `TS_VIDEO_TOKENIZER` 指向存放它们的目录。（TensorAgent Mac 应用的
+> 目录条目会自己下载这三个文件，见[下文](#在-tensoragent-mac-应用里)。）
 > 两个已发布的 GGUF **完全没有元数据**，因此 TensorSharp 靠张量而不是架构字符串来识别
 > H3（文件里确实写了架构名时，接受 `minimax-h3` / `minimax_h3`）。
+
+> **`tokenizer_config.json` 最容易漏掉，而图片离不开它。** 只有它定义了
+> `<|vision_start|>`、`<|image_pad|>` 和 `<|vision_end|>`，`vocab.json` 里没有这三个
+> token。缺了它，每个标记都会被拆成普通的文本片段，提示词比构建它时的占位符**更长**，而
+> 分词后的一一对应检查只能发现提示词变短的情况，于是照样通过——视觉特征被写到错误的位置上，
+> 片段悄悄忽略了图片。现在带关键帧的请求，或参考中含照片或视频片段的请求，会在视觉塔运行
+> 之前就被拒绝，错误信息会点名这个文件。文生视频从来不需要它，参考全是录音的请求也不需要：
+> 音轨只以 `<Audio N>:` 标签进入提示词。
 
 > **必须用 `--cfg 1.0`。** H3 是 CFG 蒸馏模型，超过 1.0 质量会明显劣化，
 > TensorSharp 会直接拒绝。4–8 步是常用工作点，所以迭代很快。
@@ -356,7 +387,8 @@ TensorSharp.Cli --model minimax_h3_ref2va_pruned-Q4_K.gguf --backend ggml_metal 
   可以直接点名："`<Picture 2>` 里的那件夹克"。自带声音的参考视频会被当成**两个**
   条目呈现，除了 `<Video n>` 还会占用一个 `<Audio n>` 编号。
 * 提示词里要写清画面中有谁。参考图提供身份，镜头内容仍然要靠提示词描述，
-  否则会得到一个画得很好、但主体缺席的场景。
+  否则会得到一个画得很好、但主体缺席的场景：一条只写了“the subject of the picture”
+  （图中的主体）的提示词，生成的是一座空无一人的花园。
 * 参考也可以是**视频片段**或**音频**，不限于静态图——见下文。
 
 > **在 Ref2VA 检查点上，普通的 `--image` 会被当作参考图。** 因此只会"上传一张图"的
@@ -390,6 +422,9 @@ TensorSharp.Cli --model minimax_h3_ref2va_pruned-Q4_K.gguf --backend ggml_metal 
 
 * 重采样到 H3 自己的 **24 fps**，并向下对齐到 17k+5 帧网格，且不超过本次生成的帧数。
   24 fps 下不足 5 帧的片段会被拒绝。
+* 对于视频**文件**，只抽取用得上的帧，放进一个临时目录，载入后即删除；你传入的帧目录
+  不会被动。以前会把片段的每一帧都抽成 PNG——30 秒的片段就是 720 张，实际只用几十张——
+  而且从不删除。
 * 画布由它自身的宽高比在 768 px 附近推出，再按面积封顶并对齐到 32。比这更**小**的
   源保持自身尺寸：放大并不会产生可供参考的细节，代价却很大——448x320 的片段若放大到
   1088x768，会带来 5712 个条件 token，而被生成的片段本身只需要 1680 个。
@@ -469,7 +504,9 @@ TensorSharp.Cli --model minimax_h3_ref2va_pruned-Q4_K.gguf --backend ggml_metal 
 * 帧数向上对齐到 **17k+5** 网格——5、22、39、56、73、90、107、124……这来自视频 VAE
   的时间分块，不是随意规定的：每个 5 潜变量帧的分块产出 17 个像素帧，另加 5 帧的
   起始段。默认 22。
-* fps 固定为 24，传别的值会被覆盖。
+* fps 固定为 24，传别的值会被覆盖；音轨也跟随这段 24 fps 的片段。以前音频长度按**请求的**
+  fps 计算——39 帧、fps 16 时要了 98 个音频潜变量帧而不是 65 个——于是音轨铺在一条与它要
+  对齐裁剪的画面不同的时间线上。
 * **任意网格长度的片段都能正确解码**：VAE 每次跑 5 个潜变量帧，带 2 帧前瞻，并对接缝
   做交叉淡化，与参考实现一致。反过来把长片段一次性解码，细节会被逐步冲淡——对着条件
   照片测量，第 0 帧的相关度从 22 帧时的 0.97 掉到 90 帧时的 0.86——所以分块是正确性
@@ -505,8 +542,9 @@ curl -s localhost:5000/api/video-generate -H 'content-type: application/json' -d
 }'
 ```
 
-返回 `{ ok, url, audioUrl, width, height, frames, fps, seed, codec, elapsedSeconds }`。
-模型没有产出音轨时 `audioUrl` 为 null。完整字段为 `prompt`、`width`、`height`、`frames`、
+返回 `{ ok, url, audioUrl, audioMuxed, width, height, frames, fps, seed, codec, elapsedSeconds }`。
+模型没有产出音轨时 `audioUrl` 为 null；`audioMuxed` 表示 MP4 里是否也带着这条音轨
+（见[下文](#音频输出)）。完整字段为 `prompt`、`width`、`height`、`frames`、
 `steps`、`cfg`、`fps`、`seed`、`flowShift`、`imagePath`（或内联 base64 的 `image`）、
 `videoMode`、`generateAudio`、`endImage`、`referenceImages`、`referenceVideos`、
 `referenceAudios`、`referenceVideoAudios`；Wan 的 `negativePrompt`、`sampler`、
@@ -518,7 +556,7 @@ curl -s localhost:5000/api/video-generate -H 'content-type: application/json' -d
 与 `referenceVideos` **按下标**配对，和 `--ref-video-audio` 的按位置配对是同一条规则。`imagePath` / `endImage` /
 `referenceImages` 引用的是之前通过 `/api/upload` 上传的文件；上传目录之外的路径会被拒绝。
 `/v1/videos/generations` 接受同样的字段（可用 snake_case 的同样是那七个：`video_mode`、
-`reference_images` 等），返回 `audio_url`。
+`reference_images` 等），返回 `audio_url`，不带混流标志。
 
 模型侧的拒绝——检查点与模式不匹配，或关键帧与参考同时出现——会以 **400 并带上模型自己
 的错误信息**返回，而不是一个笼统的 500，因此该改成加载哪个文件就写在响应体里。
@@ -528,14 +566,54 @@ curl -s localhost:5000/api/video-generate -H 'content-type: application/json' -d
 `supportsEndImageConditioning`、`supportsReferenceConditioning` 和 `maxReferenceImages`。
 Web UI 正是据此决定要不要提供首帧、尾帧或最多九张参考，而不是去匹配架构字符串。
 
-音频写成独立的 `.wav` 而不是封装进 MP4，因为封装需要一个未必安装的编码器。合并：
+### 音频输出
+
+音轨总会写成 MP4 旁边的独立 WAV；MP4 里是否也带着它，取决于平台的编码器。CLI 和服务端
+用的桌面编码器（ffmpeg 与 OpenCV）照旧只写画面，因为封装需要一个未必安装的编码器。合并：
 
 ```sh
 ffmpeg -i fox.mp4 -i fox.wav -c:v copy -c:a aac fox_with_audio.mp4
 ```
 
+能封装的编码器——Apple 上的 AVAssetWriter，也就是 [TensorAgent Mac 应用](#在-tensoragent-mac-应用里)
+所用的那个——会把音轨作为 AAC 轨道（2 声道、32 kHz、128 kbit/s）一并写进 MP4，索引放在
+文件开头，回复里会带 `audioMuxed: true`。在 Mac 应用里实测，这条轨道与 WAV 的相关度为
+0.9986 / 0.9988（左 / 右）。
+
 `--no-audio`（对应 `"generateAudio": false`）会完全跳过音频解码，省下音频 VAE 的时间和
 内存；纯视频模型会忽略它。
+
+## 在 TensorAgent Mac 应用里
+
+[TensorAgent](../../TensorAgent/README.md) 的 Mac 应用把两个检查点都作为 32 GB 档位的
+目录条目提供：**MiniMax-H3**（`minimax-h3-fl2va-q4k`），附一张照片即为首帧，两张即为首尾帧；
+**MiniMax-H3 References**（`minimax-h3-ref2va-q4k`），最多九个照片、视频片段与录音作为新场景
+的参考。每个条目都下载整套带哈希校验的文件，包括三个分词器文件：前者 35.46 GB，后者
+35.42 GB。两者共用的六个文件（24.0 GB）逐字节相同，所以后安装的那个条目直接链接前一个的
+副本而不是重新下载，只下载自己那个 11.4 GB 的去噪器。一段片段就是一次普通的聊天轮次。
+应用采用随附配置的面积、长度与步数——640x384，或按照片宽高比取同样面积（3:2 的照片是
+608x416）；22 帧，即 24 fps 下 0.92 秒；模型自己的 20 步——并在页面里内嵌播放带音轨的 MP4。
+去噪器采用 MiniMax H3 Community License，其适用地域（Applicable Territory）不包括欧盟、
+英国、韩国和美国，条目说明里写明了这一点；Qwen3-VL 文本编码器是 Apache-2.0。
+
+在 M5 Pro 上实测（48 GB、macOS 27、`ggml_metal`、未修改的 ggml `353b63b4`），Debug 版应用
+（Mono）对比 CLI（CoreCLR），使用同一批文件：
+
+| 22 帧、20 步 | 应用 | CLI |
+|---|---|---|
+| 文生视频，640x384 | 150.0–152.9 秒（三段），每步 6.84–6.86 秒 | 147.7 秒，每步约 6.5 秒 |
+| 图生视频，608x416 | 216.5–223 秒，每步 9.5 秒 | 209.3 秒 |
+| 一张参考照片，640x384 | 199–210 秒，每步 9.2 秒 | - |
+
+应用没有长度设置。耗时增长快于帧数，因为每一步都要对整段片段做注意力：在 CLI 里，39 帧
+用了 278.5 秒，56 帧 424.4 秒，而 22 帧是 147.7 秒。
+
+同一随机种子下，应用的音轨与 CLI 逐字节相同（引擎路径相同）；它的 H.264 画面对 CLI 的
+无损 PNG 帧，PSNR 最低 39.3 dB、平均 39.9 dB。应用自身的内存占用峰值为 2.24 GB（一次带
+照片的轮次；纯文本为 1.05 GB），系统 wired 内存峰值约 20 GB，出现在解码阶段（去噪器加视频
+VAE，另有系统本身就会钉住的约 3.5 GB）。档位按最大的网络——18.22 GB 的文本编码器——加上
+应用占用、再加约 5 GB 给 macOS 计算：25.5 GB，所以是 32 GB。应用在引擎之外做了什么，见
+[TensorAgent 的 README](../../TensorAgent/README.md#the-macs-own-models)。
 
 ## 架构要点
 
@@ -598,8 +676,11 @@ DAC/BigVGAN，32 潜变量通道 → 32 kHz 立体声。上采样倍率 {5,5,2,2
 而 32000/800 正好是 40 Hz 的潜变量帧率。使用无混叠 snake 激活：每个非线性都被夹在
 "2 倍上采样 / 激活 / 2 倍下采样"之间，避免把高频折回带内。
 
-与视频潜变量不同，音频潜变量**原样**送进解码器——**不**应用 `latents_mean` /
-`latents_std`。应用它们会让幅度小约 15 倍，得到一条频谱看似合理、实际几乎听不见的音轨。
+与视频潜变量一样，音频潜变量在解码前要**先反归一化**：去噪器工作在白化空间里，所以每个
+通道平面在送进解码器的路上都按 `x * latents_std + latents_mean` 映射回去；参考音频编码出的
+潜变量则按相反方向白化后才交给去噪器。`latents_std` 平均约 1.9，漏掉这一步既不会得到静音也
+不会得到噪声，而是一条频谱看似合理、其实不对的音轨；见[如何获得高质量](#如何获得高质量)里
+关于音轨的说明。
 
 ## 环境变量
 
@@ -609,6 +690,7 @@ DAC/BigVGAN，32 潜变量通道 → 32 kHz 立体声。上采样倍率 {5,5,2,2
 | `TS_H3_PREFAULT_THREADS` | 该预读使用的读取流数量，默认 `1` |
 | `TS_H3_PHASE` | `1` = 打印逐阶段耗时——编码器 open / 主干 / 拆卸、预读、每一个去噪步、VAE open / 解码。原有的单行汇总只告诉你哪个阶段慢，这个告诉你慢在它的哪一半 |
 | `TS_H3_TE_GROUP` | `<n>` = 把 50 层文本编码器主干按每组 `n` 层运行，每组跑完就交还该组的设备副本。**默认关闭**；任何不小于层数的 `n` 都精确复现原来那次整段单调用 |
+| `TS_H3_KEEP_RESIDENT` | `1` = 在 Metal 上让去噪器和两个 VAE 在片段之间保持常驻，即旧行为。**默认关闭**：它们会在每段片段的文本编码器运行之前释放，在 48 GB 的 Mac 上把 wired 内存峰值压在 19.1 GB 而不是 33.3 GB，代价是文本条件阶段多约 1.3 秒（[原因](#metal-在文本编码器之前释放上一段片段的网络)）。独立显卡不受影响 |
 | `TS_H3_TRACE` | `1` = 打印每个去噪步的潜变量与速度幅度 |
 
 **为什么默认是 `TS_H3_PREFAULT=3`。** 模式 3 让读取在上传进行的同时继续跑。它之所以

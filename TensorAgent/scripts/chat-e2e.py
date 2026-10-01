@@ -14,6 +14,8 @@ API its page uses: the Mac app launched by run-mac.sh, or the simulator by run-s
 Usage:
   chat-e2e.py <app stdout log> [--scenarios fact,follow,newchat,long,think,tool,image,audio]
   chat-e2e.py <app stdout log> --scenarios draw,edit      (an image model, e.g. Qwen-Image 2.1)
+  chat-e2e.py <app stdout log> --scenarios film,animate   (MiniMax-H3, the keyframes entry)
+  chat-e2e.py <app stdout log> --scenarios reference      (MiniMax-H3 References)
               [--media <dir with image.png and sample.wav>] [--out report.json]
   chat-e2e.py --base http://127.0.0.1:5000/ ...   (a TensorSharp.Server, which needs no token)
 
@@ -30,19 +32,38 @@ asks for one from words and `edit` for a change to an attached photo. Each must 
 its denoising steps, end with exactly one picture the app serves as a PNG of the size it
 reported, and leave that picture in the saved conversation.
 
+With MiniMax-H3 loaded it makes clips (VideoTurns): `film` from words, `animate` with
+the attached photo as the first frame, and `reference` with the photo as the subject of
+a new scene. The keyframes and references checkpoints are two catalog entries, and the
+same photo is a first frame to one and a reference to the other, so `animate` runs only
+with the keyframes entry loaded and `reference` only with the references entry (GET
+/api/models says which). Each clip must stream its phases in order through its last
+denoising step and end as exactly one MP4 the app serves with Range and HEAD, whose
+video track has the frame count, rate and size the turn reported and whose sound,
+muxed into the MP4 or a WAV beside it, is 32 kHz stereo as long as the clip; and it
+must be in the saved conversation. Both files are read with the standard library. With
+cv2 importable the middle frame is decoded as well; without it that check is reported
+as skipped, never as passed. chat-e2e-selftest.py runs these checks against files it
+makes itself, with no app.
+
 Exits non-zero when any scenario fails, so it can gate a build.
 """
 import argparse
+import array
 import hashlib
+import io
 import json
+import math
 import os
 import re
 import struct
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
 import uuid
+import wave
 
 
 def entry_from_log(path):
@@ -58,9 +79,10 @@ class App:
         self.base = base if base.endswith("/") else base + "/"
         self.cookie = f"tensoragent_token={token}" if token else None
 
-    def request(self, method, path, body=None, content_type="application/json", timeout=60):
+    def request(self, method, path, body=None, content_type="application/json", timeout=60, extra_headers=None):
         data = None
         headers = {"Cookie": self.cookie} if self.cookie else {}
+        headers.update(extra_headers or {})
         if body is not None:
             data = body if isinstance(body, bytes) else json.dumps(body).encode()
             headers["Content-Type"] = content_type
@@ -85,6 +107,15 @@ class App:
         with self.request("GET", path, timeout=timeout) as response:
             return response.read()
 
+    def raw(self, path, method="GET", headers=None, timeout=60):
+        """Status, headers and body, an error status included: a probe of what a file
+        route answers has to see the 200 that should have been a 206, not an exception."""
+        try:
+            with self.request(method, path, timeout=timeout, extra_headers=headers) as response:
+                return response.status, response.headers, response.read()
+        except urllib.error.HTTPError as ex:
+            return ex.code, ex.headers, ex.read()
+
     def upload(self, path):
         boundary = "----tensoragent" + uuid.uuid4().hex
         name = os.path.basename(path)
@@ -101,6 +132,7 @@ class App:
         first = None
         answer, thinking, tools, error, done = [], [], [], None, {}
         pictures, steps, previews = [], [], 0
+        clips, progress = [], []
         try:
             with self.request("POST", "api/chat", body, timeout=timeout) as response:
                 for raw in response:
@@ -129,6 +161,14 @@ class App:
                         previews += 1 if frame.get("preview") else 0
                     if isinstance(frame.get("imageUrl"), str) and frame["imageUrl"]:
                         pictures.append(frame)
+                    # A video model's turn: progress through its phases, kept with the time
+                    # each frame arrived (the stream is flushed frame by frame), then the clip.
+                    if isinstance(frame.get("video_step"), int):
+                        now = time.monotonic()
+                        first = first or now
+                        progress.append((now - start, frame))
+                    if isinstance(frame.get("videoUrl"), str) and frame["videoUrl"]:
+                        clips.append(frame)
                     if frame.get("error"):
                         error = frame["error"]
                     if frame.get("done") is True:
@@ -136,12 +176,13 @@ class App:
         except (urllib.error.URLError, TimeoutError, ConnectionError) as ex:
             error = f"transport: {ex}"
         total = time.monotonic() - start
+        ttft = (first - start) if first else None
         return {
             "answer": "".join(answer),
             "thinking": "".join(thinking),
             "tools": tools,
             "error": error,
-            "ttft": (first - start) if first else None,
+            "ttft": ttft,
             "total": total,
             "tokens": done.get("tokenCount", 0),
             "tokPerSec": done.get("tokPerSec", 0.0),
@@ -153,6 +194,9 @@ class App:
             "steps": steps,
             "previews": previews,
             "aborted": bool(done.get("aborted")),
+            "clips": clips,
+            "progress": progress,
+            "video": video_timing(progress, ttft, total) if progress or clips else None,
         }
 
 
@@ -167,14 +211,323 @@ def png_size(data):
     return struct.unpack(">II", data[16:24])
 
 
-def main():
+# A video turn's phases, in the order the host reports them.
+VIDEO_PHASES = ("text-encode", "denoise", "vae-decode", "audio-decode", "encode")
+
+
+def video_timing(progress, first_frame, total):
+    """What a video turn felt like: the first progress frame, when each phase began
+    (seconds since the request was sent), and the time a denoising step took, measured
+    between the first frames of the first and last distinct steps."""
+    timeline, phase, arrived, steps = [], None, {}, None
+    for at, frame in progress:
+        name = frame.get("video_phase")
+        if isinstance(name, str) and name != phase:
+            phase = name
+            timeline.append({"phase": name, "at": round(at, 3), "step": frame.get("video_step"),
+                             "elapsed": frame.get("elapsed"), "eta": frame.get("eta")})
+        if name == "denoise":
+            arrived.setdefault(frame["video_step"], at)
+            steps = frame.get("video_steps")
+    per_step = None
+    if len(arrived) >= 2:
+        (k0, t0), (k1, t1) = min(arrived.items()), max(arrived.items())
+        per_step = round((t1 - t0) / (k1 - k0), 3)
+    return {"firstFrame": first_frame, "total": total, "secondsPerStep": per_step,
+            "steps": steps, "timeline": timeline}
+
+
+def progress_problem(progress):
+    """Why a video turn's progress frames break the contract, or "": phases only from
+    VIDEO_PHASES and never going back, and denoising that reached its last step."""
+    phases = [f["video_phase"] for _, f in progress if isinstance(f.get("video_phase"), str)]
+    unknown = sorted(set(phases) - set(VIDEO_PHASES))
+    if unknown:
+        return f"unknown phase(s) {unknown}; the contract's phases are {list(VIDEO_PHASES)}"
+    order = [VIDEO_PHASES.index(p) for p in phases]
+    if any(b < a for a, b in zip(order, order[1:])):
+        seen = [p for i, p in enumerate(phases) if i == 0 or p != phases[i - 1]]
+        return f"the phases went backwards: {' -> '.join(seen)}"
+    denoise = [f for _, f in progress if f.get("video_phase") == "denoise"]
+    if not denoise:
+        return "no denoising step was streamed"
+    last, total = max(f["video_step"] for f in denoise), denoise[-1].get("video_steps")
+    if not total or last != total:
+        return f"denoising stopped at step {last} of {total}"
+    return ""
+
+
+def mp4_boxes(data, start=0, end=None):
+    """(type, body start, body end) of each box from start to end. A box is a 32-bit size
+    and a type; size 1 means a 64-bit size follows, size 0 that the box runs to the end."""
+    end = len(data) if end is None else end
+    pos = start
+    while pos + 8 <= end:
+        size, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        header = 8
+        if size == 1:
+            size, header = struct.unpack(">Q", data[pos + 8:pos + 16])[0], 16
+        elif size == 0:
+            size = end - pos
+        if size < header or pos + size > end:
+            raise ValueError(f"the '{kind.decode('latin-1')}' box at byte {pos} runs past its parent")
+        yield kind.decode("latin-1"), pos + header, pos + size
+        pos += size
+
+
+def mp4_box(data, start, end, *path):
+    """The body (start, end) of the first box down path, or None."""
+    for kind, body, stop in mp4_boxes(data, start, end):
+        if kind == path[0]:
+            return (body, stop) if len(path) == 1 else mp4_box(data, body, stop, *path[1:])
+    return None
+
+
+# The sampling frequencies an AudioSpecificConfig indexes (ISO/IEC 14496-3, 1.6.3.4).
+AAC_RATES = (96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350)
+
+
+def aac_config(data, start, end):
+    """(rate, channels) from the AudioSpecificConfig in an esds box (start, end), or None
+    when it holds none. It sits behind two descriptors, each a tag and a length of one to
+    four 7-bit bytes; channels is 0 when a program config element defines the layout."""
+    def descriptor(pos):
+        tag, size, pos = data[pos], 0, pos + 1
+        for _ in range(4):
+            size, pos = size << 7 | data[pos] & 0x7F, pos + 1
+            if not data[pos - 1] & 0x80:
+                break
+        return tag, size, pos
+
+    tag, _, pos = descriptor(start + 4)  # the ES descriptor, past esds' version and flags
+    if tag != 3:
+        return None
+    flags, pos = data[pos + 2], pos + 3  # past the ES id; then the optional fields it flags
+    pos += 2 if flags & 0x80 else 0
+    pos += 1 + data[pos] if flags & 0x40 else 0
+    pos += 2 if flags & 0x20 else 0
+    tag, _, pos = descriptor(pos)  # the decoder config descriptor
+    if tag != 4:
+        return None
+    tag, size, pos = descriptor(pos + 13)  # past its object type, stream type, buffer size and bit rates
+    if tag != 5:
+        return None
+    config = data[pos:min(pos + size, end)]
+    bits, left = int.from_bytes(config, "big"), 8 * len(config)
+
+    def take(n):
+        nonlocal left
+        left -= n
+        if left < 0:
+            raise ValueError("the AudioSpecificConfig is shorter than its fields")
+        return bits >> left & (1 << n) - 1
+
+    if take(5) == 31:  # an escaped audio object type
+        take(6)
+    index = take(4)
+    if index != 15 and index >= len(AAC_RATES):
+        raise ValueError(f"the AudioSpecificConfig has the reserved frequency index {index}")
+    rate = take(24) if index == 15 else AAC_RATES[index]
+    return rate, take(4)
+
+
+def mp4_tracks(data):
+    """What a player finds in an MP4, read from its box tree with struct alone: per track
+    the handler ('vide', 'soun'), the sample entry, the sample count from stsz and from
+    stts, the size from tkhd, the frame rate, the channels and rate of a sound, and the
+    duration. Raises ValueError (or struct.error, or IndexError on a truncated box) when
+    the tree is not an MP4's."""
+    moov = mp4_box(data, 0, len(data), "moov")
+    mvhd = moov and mp4_box(data, *moov, "mvhd")
+    if not mvhd:
+        raise ValueError("no 'moov' box with an 'mvhd'")
+    # mvhd, mdhd and tkhd start with a version byte; version 1 widens the times to 64 bits.
+    movie_scale = struct.unpack_from(">I", data, mvhd[0] + (20 if data[mvhd[0]] == 1 else 12))[0]
+    tracks = []
+    for kind, start, end in mp4_boxes(data, *moov):
+        if kind != "trak":
+            continue
+        tkhd = mp4_box(data, start, end, "tkhd")
+        mdhd = mp4_box(data, start, end, "mdia", "mdhd")
+        hdlr = mp4_box(data, start, end, "mdia", "hdlr")
+        stbl = mp4_box(data, start, end, "mdia", "minf", "stbl")
+        stsd, stts = stbl and mp4_box(data, *stbl, "stsd"), stbl and mp4_box(data, *stbl, "stts")
+        if not (tkhd and mdhd and hdlr and stsd and stts):
+            raise ValueError("a track without tkhd, mdhd, hdlr, stsd or stts")
+        wide = data[mdhd[0]] == 1
+        scale, duration = struct.unpack_from(">IQ" if wide else ">II", data, mdhd[0] + (20 if wide else 12))
+        # Width and height are tkhd's last eight bytes, 16.16 fixed point, in either version.
+        width, height = struct.unpack_from(">II", data, tkhd[1] - 8)
+        codec = data[stsd[0] + 12:stsd[0] + 16].decode("latin-1")
+        runs = [struct.unpack_from(">II", data, stts[0] + 8 + 8 * i)
+                for i in range(struct.unpack_from(">I", data, stts[0] + 4)[0])]
+        stsz = mp4_box(data, *stbl, "stsz")
+        track = {
+            "handler": data[hdlr[0] + 8:hdlr[0] + 12].decode("latin-1"),
+            "codec": codec,
+            "width": width / 65536,
+            "height": height / 65536,
+            "timescale": scale,
+            "samples": struct.unpack_from(">I", data, stsz[0] + 8)[0] if stsz else None,
+            "timedSamples": sum(n for n, _ in runs),
+            # The usual sample duration, from the longest run of equal ones, so a last frame
+            # a muxer gave a different duration does not move the rate.
+            "fps": round(scale / max(runs)[1], 3) if runs and max(runs)[1] else None,
+            "mediaSeconds": round(duration / scale, 4) if scale else None,
+            "seconds": round(duration / scale, 4) if scale else None,
+        }
+        # What plays is the edit list, in the movie's timescale: an AAC track's media also
+        # holds the encoder's priming (afinfo counts 2112 samples in afconvert's AAC), which
+        # its edit list trims. Without one the media duration is what plays.
+        elst = mp4_box(data, start, end, "edts", "elst")
+        if elst and movie_scale:
+            wide = data[elst[0]] == 1
+            spans = [struct.unpack_from(">Q" if wide else ">I", data, elst[0] + 8 + (20 if wide else 12) * i)[0]
+                     for i in range(struct.unpack_from(">I", data, elst[0] + 4)[0])]
+            track["seconds"] = round(sum(spans) / movie_scale, 4)
+        entry = stsd[0] + 16  # the first sample entry's body, past its size and type
+        if track["handler"] == "soun":
+            version, = struct.unpack_from(">H", data, entry + 8)
+            channels, = struct.unpack_from(">H", data, entry + 16)
+            rate = struct.unpack_from(">I", data, entry + 24)[0] / 65536
+            if version == 2:  # QuickTime's v2 sound description moves both past the legacy fields
+                rate, channels = struct.unpack_from(">dI", data, entry + 32)
+            # For AAC those fields are only a template: AVAssetWriter, configured as the app
+            # configures it, writes channelcount 2 for a mono track that afinfo reads as 1 ch.
+            # A decoder goes by the AudioSpecificConfig in the entry's esds box, so this does.
+            esds = codec == "mp4a" and mp4_box(data, entry + (28, 44, 64)[min(version, 2)],
+                                               stsd[0] + 8 + struct.unpack_from(">I", data, stsd[0] + 8)[0], "esds")
+            config = esds and aac_config(data, *esds)
+            if config:
+                rate, channels = config[0], config[1] or channels
+            track.update(channels=channels, rate=rate)
+        tracks.append(track)
+    return tracks
+
+
+def clip_problem(clip, tracks, video=None):
+    """Why the MP4's tracks are not the clip the turn reported, or "". `video` is the
+    loaded model's capability from GET /api/models."""
+    frames, fps = clip["frames"], clip["fps"]
+    pictures = [t for t in tracks if t["handler"] == "vide"]
+    sounds = [t for t in tracks if t["handler"] == "soun"]
+    if len(pictures) != 1:
+        return f"expected one video track, the MP4 has {len(pictures)}"
+    v = pictures[0]
+    if v["samples"] != frames or v["timedSamples"] != frames:
+        return (f"the video track has {v['samples']} samples ({v['timedSamples']} in its timing table), "
+                f"the turn reported {frames} frames")
+    if v["fps"] is None or abs(v["fps"] - fps) > 0.01:
+        return f"the video track runs at {v['fps']} fps, the turn reported {fps}"
+    if (round(v["width"]), round(v["height"])) != (clip["width"], clip["height"]):
+        return f"the video track is {v['width']:g}x{v['height']:g}, the turn reported {clip['width']}x{clip['height']}"
+    has_audio, separate = clip.get("hasAudio") is True, bool(clip.get("audioUrl"))
+    if video and video.get("supportsAudio") and not has_audio:
+        return "the loaded model makes sound (supportsAudio) but the clip has none"
+    if separate and not has_audio:
+        return "the turn gave an audioUrl for a clip it says has no sound"
+    if sounds and not has_audio:
+        return f"hasAudio is false but the MP4 has {len(sounds)} sound track(s)"
+    if sounds and separate:
+        return "the sound is muxed into the MP4 and is a separate WAV too; the page would play it twice"
+    if has_audio and not separate:
+        if len(sounds) != 1:
+            return f"hasAudio without an audioUrl means the sound is muxed, but the MP4 has {len(sounds)} sound tracks"
+        s = sounds[0]
+        if (s["codec"], s["channels"], s["rate"]) != ("mp4a", 2, 32000):
+            return f"the sound track is {s['codec']}, {s['channels']} channels at {s['rate']:g} Hz; expected mp4a stereo at 32000 Hz"
+        if abs(s["seconds"] - frames / fps) > 0.15:
+            return f"the sound track lasts {s['seconds']:.3f} s, the clip {frames / fps:.3f} s"
+    return ""
+
+
+def wav_facts(data):
+    """Channels, rate, bits, length and RMS (full scale = 1) of a PCM WAV, by the wave
+    module, which raises wave.Error on anything else: Python 3.9's reads only format 1,
+    the one TensorSharp's WavWriter writes, and not afconvert's WAVE_FORMAT_EXTENSIBLE."""
+    with wave.open(io.BytesIO(data)) as w:
+        channels, rate, width, count = w.getnchannels(), w.getframerate(), w.getsampwidth(), w.getnframes()
+        pcm = w.readframes(count)
+    rms = 0.0
+    if width == 2 and len(pcm) >= 2:
+        samples = array.array("h", pcm[:len(pcm) // 2 * 2])
+        if sys.byteorder == "big":
+            samples.byteswap()
+        rms = math.sqrt(sum(s * s for s in samples) / len(samples)) / 32768
+    return {"channels": channels, "rate": rate, "bits": 8 * width,
+            "seconds": round(count / rate, 4) if rate else 0.0, "rms": round(rms, 6)}
+
+
+def wav_problem(facts, seconds):
+    """Why a separate soundtrack is not the clip's, or ""."""
+    if (facts["channels"], facts["rate"], facts["bits"]) != (2, 32000, 16):
+        return (f"the WAV is {facts['channels']} channels at {facts['rate']} Hz, {facts['bits']}-bit; "
+                "expected 16-bit stereo at 32000 Hz")
+    if abs(facts["seconds"] - seconds) > 0.15:
+        return f"the WAV lasts {facts['seconds']:.3f} s, the clip {seconds:.3f} s"
+    if facts["rms"] <= 1e-4:
+        return f"the WAV is silent (RMS {facts['rms']})"
+    return ""
+
+
+def frame_facts(data, frames):
+    """The middle frame as cv2 decodes it: its size and how much its pixels vary, which
+    is what tells a black or flat frame (a VAE or encoder failure the container cannot
+    show) from a picture. None when cv2 is not importable."""
+    try:
+        import cv2
+    except ImportError:
+        return None
+    middle, frame = frames // 2, None
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "clip.mp4")
+        with open(path, "wb") as f:
+            f.write(data)
+        capture = cv2.VideoCapture(path)
+        try:
+            # Read up to the middle rather than seek: whether a seek in an H.264 stream with
+            # reordered frames is frame-exact depends on the backend, and a clip this short
+            # costs nothing to decode.
+            for index in range(middle + 1):
+                ok, frame = capture.read()
+                if not ok:
+                    return {"frame": index, "decoded": False}
+        finally:
+            capture.release()
+    return {"frame": middle, "decoded": True, "width": int(frame.shape[1]), "height": int(frame.shape[0]),
+            "std": round(float(frame.std()), 2)}
+
+
+def range_problem(app, url, whole):
+    """Why the file route would not feed a <video> element, or "". WebKit starts a media
+    load with 'Range: bytes=0-1' and will not play from a server that answers it with the
+    whole file; it then seeks with ranges of its own. HEAD is how a client learns the
+    length without the body."""
+    size = len(whole)
+    status, headers, body = app.raw(url, headers={"Range": "bytes=0-1"})
+    if status != 206 or headers.get("Content-Range") != f"bytes 0-1/{size}" or body != whole[:2]:
+        return (f"Range bytes=0-1 answered {status}, Content-Range {headers.get('Content-Range')!r}, "
+                f"{len(body)} bytes; expected 206, 'bytes 0-1/{size}' and the first 2 bytes")
+    start = size // 2
+    end = min(size - 1, start + 4095)
+    status, headers, body = app.raw(url, headers={"Range": f"bytes={start}-{end}"})
+    if status != 206 or headers.get("Content-Range") != f"bytes {start}-{end}/{size}" or body != whole[start:end + 1]:
+        return (f"Range bytes={start}-{end} answered {status}, Content-Range {headers.get('Content-Range')!r}, "
+                f"{len(body)} bytes, which is not that slice of the file")
+    status, headers, body = app.raw(url, method="HEAD")
+    if status != 200 or headers.get("Content-Length") != str(size) or body:
+        return f"HEAD answered {status} with Content-Length {headers.get('Content-Length')!r}; expected 200 and {size}"
+    return ""
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("log", nargs="?", help="the app's stdout log with the Debug 'entry URL' line")
     parser.add_argument("--base", help="talk to this base URL instead, without a token (a TensorSharp.Server)")
     parser.add_argument("--scenarios", default="fact,follow,newchat,long,think,tool,image,audio")
     parser.add_argument("--media", default=os.environ.get("TS_TEST_MEDIA_DIR", os.path.expanduser("~/work/models/testmedia")))
     parser.add_argument("--out")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.base:
         base, token = args.base, None
@@ -221,8 +574,9 @@ def main():
         if not ok:
             print(f"    why: {why}")
             failures.append(name)
+        # A video turn's raw progress frames stay out: its "video" summary carries them.
         rows.append({"scenario": name, "ok": ok, "why": why,
-                     **{k: v for k, v in result.items() if k not in ("tools", "steps")},
+                     **{k: v for k, v in result.items() if k not in ("tools", "steps", "progress")},
                      "toolEvents": len(result["tools"]), "imageSteps": len(result["steps"])})
         return result
 
@@ -337,7 +691,7 @@ def main():
             row["ok"], row["why"] = False, "the saved conversation has no picture"
             failures.append(name)
             print(f"    why: {row['why']}")
-        else:
+        elif made:
             print(f"    saved: {made[-1]}")
 
     def image_turn(name, prompt, extra=None, input_size=None):
@@ -356,13 +710,168 @@ def main():
         image_turn("edit", "Make the background a deep blue night sky with stars, keep the text unchanged",
                    extra=attach(photo), input_size=png_size(open(photo, "rb").read()))
 
+    def filmed(video, input_size=None):
+        """One clip after its phases and steps, served as an MP4 (and a WAV, when the sound
+        is a separate file) with the facts the turn reported. What was measured is left in
+        the result as "files", so the report carries it beside the verdict."""
+        def check(r):
+            files = r["files"] = {}
+            if r["aborted"]:
+                return False, "the turn ended without a clip (stopped)"
+            if len(r["clips"]) != 1:
+                return False, f"expected exactly one videoUrl, got {len(r['clips'])}"
+            why = progress_problem(r["progress"])
+            if why:
+                return False, why
+            clip = r["clips"][0]
+            frames, fps, url = clip.get("frames"), clip.get("fps"), clip["videoUrl"]
+            numbers = (frames, fps, clip.get("width"), clip.get("height"))
+            if type(frames) is not int or not all(type(n) in (int, float) and n > 0 for n in numbers):
+                return False, f"the clip reports frames, fps, width and height of {numbers}"
+            status, headers, data = app.raw(url)
+            kind = headers.get("Content-Type") or ""
+            files["mp4"] = {"status": status, "contentType": kind, "bytes": len(data)}
+            if status != 200 or not kind.startswith("video/mp4") or data[4:8] != b"ftyp":
+                return False, f"GET {url} answered {status} {kind or 'with no Content-Type'}, not an MP4 with an ftyp box"
+            try:
+                files["mp4"]["tracks"] = mp4_tracks(data)
+            except (ValueError, struct.error, IndexError) as ex:
+                return False, f"{url} does not parse as an MP4: {ex}"
+            why = clip_problem(clip, files["mp4"]["tracks"], video)
+            if why:
+                return False, why
+            if clip.get("audioUrl"):
+                status, headers, sound = app.raw(clip["audioUrl"])
+                kind = headers.get("Content-Type") or ""
+                if status != 200 or not kind.startswith("audio/wav"):
+                    return False, f"GET {clip['audioUrl']} answered {status} {kind or 'with no Content-Type'}, not a WAV"
+                try:
+                    files["wav"] = wav_facts(sound)
+                except (wave.Error, EOFError, struct.error) as ex:
+                    return False, f"{clip['audioUrl']} is not a PCM WAV: {ex}"
+                why = wav_problem(files["wav"], frames / fps)
+                if why:
+                    return False, why
+            frame = files["frame"] = frame_facts(data, frames)
+            if frame is None:
+                files["skipped"] = ["middle-frame decode: cv2 is not importable"]
+            elif not frame["decoded"]:
+                return False, f"cv2 could not decode frame {frame['frame']} of {url}"
+            elif (frame["width"], frame["height"]) != (clip["width"], clip["height"]):
+                return False, (f"the decoded frame is {frame['width']}x{frame['height']}, "
+                               f"the turn reported {clip['width']}x{clip['height']}")
+            elif frame["std"] <= 5:
+                return False, f"the middle frame is blank (pixel std {frame['std']})"
+            why = range_problem(app, url, data)
+            if why:
+                return False, why
+            if input_size:
+                # The host picks a canvas at the photo's shape, on the model's size grid.
+                want, got = input_size[0] / input_size[1], clip["width"] / clip["height"]
+                if abs(want - got) > 0.08:
+                    return False, f"the clip is {clip['width']}x{clip['height']}, not the photo's shape {input_size[0]}x{input_size[1]}"
+            return True, ""
+        return check
+
+    def saved_clip(conversation, name, result):
+        """The clip is in the saved conversation, with its WAV exactly when the stream gave one."""
+        if not conversation or not result["clips"]:
+            return
+        stored = app.json("GET", f"api/agent/conversations/{conversation}")
+        made = [m for m in stored.get("messages") or [] if m.get("role") == "assistant" and m.get("videoUrl")]
+        clip, row, why = result["clips"][0], rows[-1], ""
+        if not made:
+            why = "the saved conversation has no clip"
+        elif made[-1]["videoUrl"] != clip["videoUrl"]:
+            why = f"the saved clip is {made[-1]['videoUrl']}, the turn made {clip['videoUrl']}"
+        elif (made[-1].get("audioUrl") or None) != (clip.get("audioUrl") or None):
+            why = f"the saved audioUrl is {made[-1].get('audioUrl')!r}, the turn gave {clip.get('audioUrl')!r}"
+        if why and row["ok"]:
+            row["ok"], row["why"] = False, why
+            failures.append(name)
+            print(f"    why: {why}")
+        elif made:
+            print(f"    saved: {made[-1]['videoUrl']}" + (f" + {made[-1]['audioUrl']}" if made[-1].get("audioUrl") else ""))
+
+    # The two MiniMax-H3 entries read the same photo differently, a first frame on the
+    # keyframes checkpoint and a reference on the references one, so a scenario run on the
+    # wrong one would pass while testing the other. GET /api/models says which is loaded.
+    def video_model(v):
+        return "" if v else "no video model is loaded (GET /api/models has no video capability)"
+
+    def keyframes_model(v):
+        if v and v.get("supportsImageConditioning") and not v.get("supportsReferenceConditioning"):
+            return ""
+        return video_model(v) or ("needs the MiniMax-H3 keyframes entry (minimax-h3-fl2va-q4k) loaded: "
+                                  "the loaded video model does not take a photo as the first frame")
+
+    def references_model(v):
+        if v and v.get("supportsReferenceConditioning"):
+            return ""
+        return video_model(v) or ("needs the MiniMax-H3 References entry (minimax-h3-ref2va-q4k) loaded: "
+                                  "the loaded video model takes no references")
+
+    def video_turn(name, prompt, needs, photo=None, keep_shape=False):
+        video = app.json("GET", "api/models").get("video")
+        why = needs(video)
+        if why:
+            print(f"--- {name}: FAIL (not run)")
+            print(f"    why: {why}")
+            rows.append({"scenario": name, "ok": False, "why": why})
+            failures.append(name)
+            return
+        session, conversation = app.new_chat()
+        extra = attach(photo) if photo else None
+        input_size = png_size(open(photo, "rb").read()) if photo and keep_shape else None
+        result = turn(name, session, [], prompt, filmed(video, input_size), extra=extra)
+        if result["clips"]:
+            c = result["clips"][0]
+            sound = ("a separate WAV" if c.get("audioUrl") else "muxed") if c.get("hasAudio") else "none"
+            print(f"    clip: {c['videoUrl']} {c.get('width')}x{c.get('height')}, {c.get('frames')} frames "
+                  f"at {c.get('fps')} fps, sound {sound}, seed {c.get('seed')}")
+        timing = result["video"]
+        if timing:
+            rate = (f"{timing['secondsPerStep']:.2f} s a step over {timing['steps']} steps"
+                    if timing["secondsPerStep"] is not None else "no step rate")
+            phases = ", ".join(f"{p['phase']} at {p['at']:.1f}s" for p in timing["timeline"])
+            print(f"    timing: first frame {timing['firstFrame'] or 0:.2f}s, {rate}; {phases or 'no phases'}")
+        files = result.get("files") or {}
+        for t in (files.get("mp4") or {}).get("tracks", []):
+            shape = (f"{t['width']:g}x{t['height']:g}, {t['fps']} fps" if t["handler"] == "vide"
+                     else f"{t.get('channels')} ch at {t.get('rate', 0):g} Hz")
+            print(f"    track: {t['handler']} {t['codec']} {shape}, {t['samples']} samples, {t['seconds']} s")
+        if files.get("wav"):
+            w = files["wav"]
+            print(f"    wav: {w['channels']} ch at {w['rate']} Hz, {w['bits']}-bit, {w['seconds']} s, RMS {w['rms']}")
+        for note in files.get("skipped", []):
+            print(f"    skipped: {note}")
+        saved_clip(conversation, name, result)
+
+    photo = os.path.join(args.media, "image.png")
+    if "film" in wanted:
+        video_turn("film", "A red fox trotting through falling snow, cinematic", video_model)
+    if "animate" in wanted:
+        video_turn("animate", "The scene comes to life: a slow camera push-in, gentle natural motion",
+                   keyframes_model, photo=photo, keep_shape=True)
+    if "reference" in wanted:
+        # Who is in the shot has to be said: the reference supplies how she looks, and a prompt
+        # that only says "the subject of the picture" got a well-made garden with no one in it.
+        video_turn("reference", "The woman from the picture, long dark hair and a blue floral dress, walks "
+                   "through a sunlit garden as the camera slowly circles her",
+                   references_model, photo=photo)
+
+    # A check that could not run is reported as such; it is never counted as a pass.
+    skipped = [f"{row['scenario']}: {note}" for row in rows for note in (row.get("files") or {}).get("skipped", [])]
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
-            json.dump({"base": base, "engine": engine, "rows": rows, "failures": failures}, f, indent=2)
+            json.dump({"base": base, "engine": engine, "rows": rows, "failures": failures, "skipped": skipped},
+                      f, indent=2)
+    for note in skipped:
+        print(f"SKIPPED (not a pass): {note}")
     if failures:
         print(f"FAILED: {', '.join(failures)}")
         return 1
-    print(f"All {len(rows)} chat scenarios passed.")
+    print(f"All {len(rows)} chat scenarios passed" + (f", {len(skipped)} check(s) skipped." if skipped else "."))
     return 0
 
 

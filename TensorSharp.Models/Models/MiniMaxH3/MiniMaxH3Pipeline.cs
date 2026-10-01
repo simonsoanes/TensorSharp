@@ -164,6 +164,7 @@ namespace TensorSharp.Models.MiniMaxH3
             }
 
             // ---- text conditioning (then give the 17 GB encoder back) ----
+            ReleaseKeptNetworksForTheTextEncoder();
             float[] textHidden;
             int textLength;
             // Per-token modality for the AdaLN stream: plain text is modulated as text,
@@ -652,29 +653,50 @@ namespace TensorSharp.Models.MiniMaxH3
         /// onto latent frames.</para></summary>
         private static List<RgbImage> LoadReferenceVideo(string path, int maxFrames)
         {
+            // Only the first `cap` frames can ever be used, and hold-and-drop picks frame i
+            // from i alone, so asking for no more than that reads exactly the same frames.
+            // Asking for all of them wrote every frame of the clip to disk as a PNG - 720 of
+            // them for a 30-second clip - to use a few dozen.
+            int cap = Math.Max(maxFrames, MiniMaxH3Geometry.MinFrames);
             var (files, sourceFps) = MediaHelper.ExtractFramesAtRate(
-                path, MiniMaxH3Geometry.Fps, maxFrames: 0);
-
-            int frames = Math.Min(files.Count, Math.Max(maxFrames, MiniMaxH3Geometry.MinFrames));
-            if (frames < MiniMaxH3Geometry.MinFrames)
-                throw new ArgumentException(
-                    $"'{path}' gives {frames} frames at 24 fps; a reference clip needs at least " +
-                    $"{MiniMaxH3Geometry.MinFrames}.", nameof(path));
-            // Down onto the grid: 5, 22, 39, ... Anything between rungs cannot become a
-            // whole number of latent frames.
-            while (frames % 17 != 5) frames--;
-
-            RgbImage first = QwenImage.ImageIO.Load(files[0]);
-            var (w, h) = ReferenceVideoCanvas(first.Width, first.Height);
-            var clip = new List<RgbImage>(frames);
-            for (int i = 0; i < frames; i++)
+                path, MiniMaxH3Geometry.Fps, maxFrames: cap);
+            // A clip FILE is extracted into a folder of its own, which is ours to remove
+            // once the frames are in memory; a folder of frames was the caller's.
+            string extracted = File.Exists(path) && files.Count > 0 ? Path.GetDirectoryName(files[0]) : null;
+            if (extracted != null && !Path.GetFileName(extracted).StartsWith("refvid_", StringComparison.Ordinal))
+                extracted = null;
+            try
             {
-                RgbImage src = i == 0 ? first : QwenImage.ImageIO.Load(files[i]);
-                clip.Add(src.Width == w && src.Height == h ? src : QwenImage.ImageIO.Resize(src, w, h));
+                int frames = Math.Min(files.Count, cap);
+                if (frames < MiniMaxH3Geometry.MinFrames)
+                    throw new ArgumentException(
+                        $"'{path}' gives {frames} frames at 24 fps; a reference clip needs at least " +
+                        $"{MiniMaxH3Geometry.MinFrames}.", nameof(path));
+                // Down onto the grid: 5, 22, 39, ... Anything between rungs cannot become a
+                // whole number of latent frames.
+                while (frames % 17 != 5) frames--;
+
+                RgbImage first = QwenImage.ImageIO.Load(files[0]);
+                var (w, h) = ReferenceVideoCanvas(first.Width, first.Height);
+                var clip = new List<RgbImage>(frames);
+                for (int i = 0; i < frames; i++)
+                {
+                    RgbImage src = i == 0 ? first : QwenImage.ImageIO.Load(files[i]);
+                    clip.Add(src.Width == w && src.Height == h ? src : QwenImage.ImageIO.Resize(src, w, h));
+                }
+                Console.WriteLine($"  [h3] reference video: {files.Count} frames at 24 fps " +
+                                  $"(source {sourceFps:F2} fps) -> {frames} frames at {w}x{h}");
+                return clip;
             }
-            Console.WriteLine($"  [h3] reference video: {files.Count} frames at 24 fps " +
-                              $"(source {sourceFps:F2} fps) -> {frames} frames at {w}x{h}");
-            return clip;
+            finally
+            {
+                if (extracted != null)
+                {
+                    try { Directory.Delete(extracted, recursive: true); }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
+            }
         }
 
         /// <summary>The reference-clip canvas: aspect ratio around a nominal 768, capped
@@ -798,6 +820,7 @@ namespace TensorSharp.Models.MiniMaxH3
             const string visionStart = "<|vision_start|>";
             const string visionEnd = "<|vision_end|>";
             const string placeholder = "<|image_pad|>";
+            RequireVisionTokens(te.Tokenizer, references);
 
             var builder = new System.Text.StringBuilder();
             var images = new List<MiniMaxH3PromptImage>();
@@ -865,6 +888,35 @@ namespace TensorSharp.Models.MiniMaxH3
                         "the tokenizer is missing the <|image_pad|> special token.");
             }
             return (prompt, images);
+        }
+
+        /// <summary>Refuse to present a picture to a tokenizer that has no vision tokens.
+        ///
+        /// <para>They are not in vocab.json: only tokenizer_config.json's added tokens define
+        /// them. Without that file each marker is split into ordinary text pieces, the prompt
+        /// comes out LONGER than the placeholders it was built from, and the one-to-one check
+        /// after tokenizing (which catches a prompt that is shorter) passes - so the vision
+        /// features were written over the wrong positions and the clip quietly ignored the
+        /// picture. Checked before the vision tower runs, so the failure costs nothing.</para></summary>
+        internal static void RequireVisionTokens(BpeTokenizer tokenizer)
+        {
+            foreach (string marker in new[] { "<|vision_start|>", "<|image_pad|>", "<|vision_end|>" })
+            {
+                if (tokenizer.Encode(marker, addSpecial: false).Count != 1)
+                    throw new InvalidOperationException(
+                        $"the MiniMax-H3 tokenizer has no {marker} token, so a picture cannot be placed in " +
+                        "the prompt. It is defined by tokenizer_config.json (MiniMaxAI/MiniMax-H3, " +
+                        "processor/), which has to sit beside vocab.json and merges.txt.");
+            }
+        }
+
+        /// <summary>The same refusal, for references that show the language model a
+        /// picture: a soundtrack on its own reaches the prompt only as its label, so
+        /// references that are all sounds need no vision markers.</summary>
+        internal static void RequireVisionTokens(BpeTokenizer tokenizer, IReadOnlyList<MiniMaxH3Reference> references)
+        {
+            if (references.Any(reference => reference.Kind != MiniMaxH3ReferenceKind.Audio))
+                RequireVisionTokens(tokenizer);
         }
 
         /// <summary>Format a timestamp exactly as the reference's C++ stream does.
@@ -1158,8 +1210,10 @@ namespace TensorSharp.Models.MiniMaxH3
         /// denoiser stays resident and behaviour is exactly as before, so cards with room pay
         /// nothing. When it does not, the release costs a re-upload of the DiT on the NEXT
         /// request only - the weights are mmapped GGUF pages that are still in RAM - and buys
-        /// back a decode that is not crossing the bus. Non-CUDA GGML backends are left alone:
-        /// unified-memory devices have nothing to hand back.</para></summary>
+        /// back a decode that is not crossing the bus. Other GGML backends are left alone here:
+        /// a unified-memory device has no separate VRAM to fit the VAE into, and its kept
+        /// networks are released before the next text encoder instead
+        /// (<see cref="ReleaseKeptNetworksForTheTextEncoder"/>).</para></summary>
         private void ReleaseDenoiserIfVaeWouldNotFit()
         {
             if (_dit == null || _model.Backend != BackendType.GgmlCuda)
@@ -1170,6 +1224,32 @@ namespace TensorSharp.Models.MiniMaxH3
             if (need <= 0 || spare >= need)
                 return;   // it fits alongside the denoiser; keep it resident
             _dit.ReleaseDeviceResidency();
+        }
+
+        /// <summary>On a unified-memory device, take the denoiser and the VAEs kept from the
+        /// previous request off the device before the text encoder runs.
+        ///
+        /// <para>The pipeline keeps all three between requests, and on Metal every weight
+        /// they bound is a buffer wrapped zero-copy over the mapped file and held resident,
+        /// which wires its pages. So from the second request on the 17 GB encoder ran with
+        /// ~16 GB of finished networks still wired beside it: a 48 GB Mac sat at ~33 GiB of
+        /// weights for the length of the text phase, and a 32 GB one could not hold the set
+        /// at all. Releasing them here keeps the peak at the largest single stage, which is
+        /// what the header of this file always claimed. The pages stay in the file cache, so
+        /// the next bind usually finds them there, and the native graphs are built per call,
+        /// so nothing still points at the old wraps.</para>
+        ///
+        /// <para>Discrete GPUs keep today's behaviour (see
+        /// <see cref="ReleaseDenoiserIfVaeWouldNotFit"/>), and TS_H3_KEEP_RESIDENT=1 keeps the
+        /// networks on a unified-memory host that has the memory for all of them.</para></summary>
+        private void ReleaseKeptNetworksForTheTextEncoder()
+        {
+            if (_model.Backend != BackendType.GgmlMetal
+                || Environment.GetEnvironmentVariable("TS_H3_KEEP_RESIDENT") == "1")
+                return;
+            _dit?.ReleaseDeviceResidency();
+            _vae?.ReleaseDeviceResidency();
+            _audioVae?.ReleaseDeviceResidency();
         }
 
         public void Dispose()
