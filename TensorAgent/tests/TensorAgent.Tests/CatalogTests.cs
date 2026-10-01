@@ -15,6 +15,9 @@ public sealed class CatalogTests
             "gemma-4-12b-iq2m",
             "bonsai-2-27b-ptq1-0",
             "qwen3.5-9b-iq4xs",
+            "qwen3.8-27b-q4kxl",
+            "muse-glimmer-30b-q4kxl",
+            "qwen-image-2.1-q4km",
         };
 
         Assert.Equal(expected, ModelCatalog.BuiltIn.Select(m => m.Id).ToArray());
@@ -48,9 +51,9 @@ public sealed class CatalogTests
                 Assert.False(f.FileName.Contains('/'), $"{m.Id}: file names are bare ({f.FileName})");
             }
             // Keep the recognized tiers narrow so a typo cannot silently expose an
-            // entry on an unintended device class. A future 24 GB entry would remain
-            // hidden from current phones while still using the same gating mechanism.
-            Assert.Contains(m.MinDeviceMemoryGB, new[] { 6, 8, 12, 16, 24 });
+            // entry on an unintended device class. 24 and 32 are the desktop's: no
+            // phone or tablet reaches them, so those entries stay off every one.
+            Assert.Contains(m.MinDeviceMemoryGB, new[] { 6, 8, 12, 16, 24, 32 });
             Assert.NotEmpty(m.License);
         }
     }
@@ -182,17 +185,109 @@ public sealed class CatalogTests
         }
     }
 
+    private static readonly string[] DesktopOnly =
+    {
+        "qwen3.8-27b-q4kxl",
+        "muse-glimmer-30b-q4kxl",
+        "qwen-image-2.1-q4km",
+    };
+
     [Fact]
     public void DeviceTiersHideTheCatalogBelowTwelveGbAndHoldBonsai2ForSixteenGb()
     {
         Assert.Empty(ModelCatalog.ForDevice(8));
         // Bonsai 2 27B is the one 16 GB entry: its repacked weights do not fit a 12 GB phone.
         Assert.Equal(
-            ModelCatalog.BuiltIn.Where(m => m.Id != "bonsai-2-27b-ptq1-0").Select(m => m.Id),
+            ModelCatalog.BuiltIn.Where(m => m.Id != "bonsai-2-27b-ptq1-0" && !DesktopOnly.Contains(m.Id)).Select(m => m.Id),
             ModelCatalog.ForDevice(12).Select(m => m.Id));
         Assert.Equal(
-            ModelCatalog.BuiltIn.Select(m => m.Id),
+            ModelCatalog.BuiltIn.Where(m => !DesktopOnly.Contains(m.Id)).Select(m => m.Id),
             ModelCatalog.ForDevice(16).Select(m => m.Id));
+    }
+
+    /// <summary>
+    /// Qwen3.8 27B, Muse-Glimmer 30B and Qwen-Image 2.1 are offered only where a Mac's
+    /// memory exists (no iPhone or iPad reaches 24 GB): the two chat models from 32 GB,
+    /// the image model from 24. See <see cref="EachDesktopEntryFitsItsTierBesideMacOS"/>
+    /// for the measurements behind each number.
+    /// </summary>
+    [Theory]
+    [InlineData("qwen3.8-27b-q4kxl", 32)]
+    [InlineData("muse-glimmer-30b-q4kxl", 32)]
+    [InlineData("qwen-image-2.1-q4km", 24)]
+    public void TheDesktopTiersHoldTheModelsNoPhoneCanRunWell(string id, int tier)
+    {
+        CatalogModel model = Assert.IsType<CatalogModel>(ModelCatalog.Find(id));
+        Assert.Equal(tier, model.MinDeviceMemoryGB);
+        Assert.Contains(id, DesktopOnly);
+        Assert.DoesNotContain(ModelCatalog.ForDevice(16), m => m.Id == id);
+        Assert.Contains(ModelCatalog.ForDevice(tier), m => m.Id == id);
+        Assert.Contains(ModelCatalog.ForDevice(48), m => m.Id == id);
+        if (tier > 24)
+            Assert.DoesNotContain(ModelCatalog.ForDevice(24), m => m.Id == id);
+    }
+
+    [Fact]
+    public void ADesktopIsOfferedEverythingASmallerDeviceIs()
+    {
+        Assert.Equal(ModelCatalog.BuiltIn.Select(m => m.Id), ModelCatalog.ForDevice(48).Select(m => m.Id));
+    }
+
+    /// <summary>
+    /// What each desktop entry needs, MEASURED in the Mac app on 2026-09-30 (Apple M5 Pro,
+    /// 48 GB, ggml_metal): the mapped files the model reads while it works, and the app's
+    /// footprint at its highest. A Mac has no jetsam to kill the app, so nothing else in
+    /// this file checks a desktop entry; but a dense model reads every weight for every
+    /// token, and once the weights cannot stay resident beside the app and macOS, every
+    /// token pages them back in from disk.
+    /// </summary>
+    private static readonly Dictionary<string, (double ResidentFilesGB, double FootprintGB, string How)> MeasuredOnAMac = new()
+    {
+        ["qwen3.8-27b-q4kxl"] = (17.56, 8.8, "chat-e2e.py's seven scenarios with the projector, LeanCaches"),
+        ["muse-glimmer-30b-q4kxl"] = (15.88, 10.9, "chat-e2e.py's seven scenarios with the projector, LeanCaches"),
+        // The DiT stays mapped through the denoise; the text encoder is released first.
+        ["qwen-image-2.1-q4km"] = (4.19, 14.3, "an edit at 1248x832, 40 steps (the CLI's peak footprint)"),
+    };
+
+    /// <summary>What macOS and the rest of a desktop keep for themselves.</summary>
+    private const double MacOsGB = 5.0;
+
+    [Fact]
+    public void EachDesktopEntryFitsItsTierBesideMacOS()
+    {
+        Assert.Equal(DesktopOnly.OrderBy(id => id), MeasuredOnAMac.Keys.OrderBy(id => id));
+        int[] tiers = { 6, 8, 12, 16, 24, 32 };
+        foreach ((string id, (double files, double footprint, string how)) in MeasuredOnAMac)
+        {
+            CatalogModel model = ModelCatalog.Find(id)!;
+            double need = files + footprint + MacOsGB;
+            Assert.True(need <= model.MinDeviceMemoryGB,
+                $"{id} needs about {need:F1} GB ({how}) but is offered from {model.MinDeviceMemoryGB} GB");
+            // And not offered higher than it needs: the next tier down must really be too small.
+            int below = tiers.Where(t => t < model.MinDeviceMemoryGB).DefaultIfEmpty(0).Max();
+            Assert.True(need > below,
+                $"{id} needs about {need:F1} GB ({how}), which the {below} GB tier already holds");
+        }
+    }
+
+    [Fact]
+    public void TheNewDesktopEntriesUseThePinnedFourBitArtifacts()
+    {
+        CatalogModel qwen = ModelCatalog.Find("qwen3.8-27b-q4kxl")!;
+        Assert.Equal(CatalogFamily.Qwen38, qwen.Family);
+        Assert.Equal("Qwen3.8-27B-UD-Q4_K_XL.gguf", qwen.Weights.FileName);
+        Assert.Equal(17_559_178_144, qwen.Weights.Bytes);
+        Assert.Equal("3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e", qwen.Weights.Sha256);
+        Assert.True(qwen.Projector is { Optional: true });
+
+        CatalogModel muse = ModelCatalog.Find("muse-glimmer-30b-q4kxl")!;
+        Assert.Equal(CatalogFamily.MuseGlimmer, muse.Family);
+        Assert.Equal("Muse-Glimmer-30B-UD-Q4_K_XL.gguf", muse.Weights.FileName);
+        Assert.Equal(15_878_222_368, muse.Weights.Bytes);
+        Assert.Equal("82bece304887a313ece08400bc030f6066c7bff5b906b0cd40308ec8a409fd38", muse.Weights.Sha256);
+        Assert.True(muse.Projector is { Optional: true });
+        // The DFlash drafter verifies greedily and the app samples, so it is not offered.
+        Assert.DoesNotContain(muse.Files, f => f.Role == CatalogFileRole.Draft);
     }
 
     [Theory]

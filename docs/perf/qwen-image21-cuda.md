@@ -138,6 +138,18 @@ Whole-VAE graphs may need substantial activation scratch at large resolutions.
 Paired real-weight encode/decode validation is required in addition to the native
 shortcut tests; passing the shortcut tests alone does not validate image quality.
 
+On Metal the encoder now runs fused as well. Unchanged upstream ggml-metal pads
+only at the end of a dimension, and the average-down shortcut front-pads time, so
+until 2026-09-30 that single PAD node refused the whole encoder graph and every
+Metal edit encoded its reference image on the per-convolution path (the decoder's
+duplicate-up needs no pad and was already fused). Where the backend refuses the
+leading pad, the same tensor is now built as `ggml_fill` zeros concatenated before
+the frame; CPU and CUDA keep `ggml_pad_ext`. Measured on an Apple M5 Pro with the
+Q4_K_M DiT, one 1253x836 reference edited at 1248x832 and 40 steps: VAE encode
+3.6 s to 1.9 s and peak footprint 16.2 to 14.3 GB in the CLI; the edited image is
+63.2 dB PSNR from the per-convolution result (mean absolute difference 0.03 of
+a level). Text-to-image is unaffected (pixel-identical before and after).
+
 ## Reference-image vision encoder
 
 On GGML CUDA, Qwen-Image-2.1 runs a fused transformer range through each
@@ -152,6 +164,13 @@ managed erf approximation. The new kernel evaluates erf directly, so the
 comparison is numerical rather than bitwise. Use the companion probe's `vision`
 command to compare the main embedding and all three deepstack embeddings with
 identical image preprocessing. CPU and Metal retain their previous execution.
+
+That per-block path's linear layers pass each weight to the native matrix multiply
+as a transposed view of its stored rows, the layout `ggml_mul_mat` consumes, on every
+GGML backend. It used to build a contiguous transposed copy first, which on a GGML
+allocator is a single-threaded element loop, and the native side then packed that
+copy back on every call. The result is bit-identical (an edit's output matched to
+the pixel); on Metal the reference-image encode fell from 7.3 s to 3.7 s in the CLI.
 
 ## Conditioning encoder precision
 

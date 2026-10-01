@@ -13,8 +13,8 @@ Physical devices use the GGML Metal (`ggml_metal`) backend; build it with
 `TensorSharpAppleTargets=true`. It is not a remote client or a separate inference
 engine. It targets iPhone and iPad (iOS/iPadOS 17.0 or later, arm64 only); the
 only device run recorded below is an iPhone on iOS 26.6.1, and every built-in
-catalog model needs a device in the 12 GB memory tier or above (see the catalog
-below). No release workflow builds, signs or publishes the app, so
+catalog model needs a device in the 12 GB memory tier or above, three of them a Mac
+(see the catalog below). No release workflow builds, signs or publishes the app, so
 follow the source-build instructions below.
 
 Nothing leaves the phone by default. The model runs locally, the sandbox has no
@@ -54,8 +54,9 @@ bound, but nothing on the page calls them — and `/api/image-generate`, the rou
 desktop page uses for text-to-image, is not bound at all. The app's own client is
 appended as one script tag at request time; the page file itself is never forked.
 
-**A built-in model catalog.** Five dense entries chosen to fit a phone or tablet, with the
-exact byte size and SHA-256 of every file. All five are downloadable; those downloads
+**A built-in model catalog.** Eight entries with the exact byte size and SHA-256 of every
+file: five chosen to fit a phone or tablet, and three that only a Mac has the memory for.
+All eight are downloadable; those downloads
 resume from a kept `.part` after an interruption, are verified before use, and
 belong to the APP rather than to the screen that started one — see "Downloads"
 below. Bonsai 2 27B is the one entry that needs the 16 GB tier (iPads and Macs)
@@ -65,6 +66,9 @@ GGML Q2_0 at load (about 29% more payload), so the 5.95 GB download occupies abo
 the roughly 8.5 GB a 12 GB iPhone grants. The PQ2_0 file (7.21 GB) holds the same
 ternary weights and repacks to about the same size, so the entry downloads the
 smaller PTQ1_0 file. See the [Bonsai2 card](../docs/models/bonsai2.md).
+Qwen3.8 27B and Muse-Glimmer 30B are models a phone could run only at one or two bits,
+offered at four where the memory exists, and Qwen-Image 2.1 makes and edits pictures;
+see [The Mac's own models](#the-macs-own-models) for what each was measured to need.
 
 | Model | Modalities | Required artifact(s) | Needs | Source |
 | --- | --- | --- | --- | --- |
@@ -73,9 +77,12 @@ smaller PTQ1_0 file. See the [Bonsai2 card](../docs/models/bonsai2.md).
 | Gemma 4 12B (UD-IQ2_M) | text; image and video with optional projector | download: 4,213,353,280-byte main GGUF; 175,115,840-byte projector and 465,109,248-byte draft optional | 12 GB | `unsloth/gemma-4-12b-it-GGUF` |
 | Bonsai 2 27B (PTQ1_0) | text; image with optional projector | download: 5,946,648,928-byte main GGUF; 629,246,976-byte projector optional | 16 GB | `prism-ml/Ternary-Bonsai-2-27B-gguf` |
 | Qwen3.5 9B (IQ4_XS) | text; image and video with optional projector | download: 5,168,653,536-byte main GGUF; 918,166,080-byte projector optional | 12 GB | `unsloth/Qwen3.5-9B-GGUF` |
+| Qwen3.8 27B (UD-Q4_K_XL) | text; image and video with optional projector | download: 17,559,178,144-byte main GGUF; 927,607,488-byte projector optional | 32 GB | `unsloth/Qwen3.8-27B-GGUF` |
+| Muse-Glimmer 30B (UD-Q4_K_XL) | text; image with optional projector | download: 15,878,222,368-byte main GGUF; 2,051,685,088-byte projector optional | 32 GB | `unsloth/Muse-Glimmer-30B-GGUF` |
+| Qwen-Image 2.1 (Q4_K_M) | text or a photo in, a picture out | download: 4,189,343,904-byte DiT + 5,027,784,800-byte Qwen3-VL-8B text encoder + 675,509,688-byte VAE + 1,159,029,824-byte vision projector | 24 GB | `Abiray/Qwen-Image-2.1-GGUF` + `Qwen/Qwen3-VL-8B-Instruct-GGUF` + `Comfy-Org/Qwen-Image-2.1` |
 
-Each entry also carries the context window the app loads it with (8,192 tokens for
-Gemma 4 E2B and E4B, 32,768 for the other three), a K/V cache
+Each chat entry also carries the context window the app loads it with (8,192 tokens for
+Gemma 4 E2B and E4B, 32,768 for the others), a K/V cache
 precision that the "KV cache precision" setting overrides, and its model card's
 sampling values (for Bonsai 2 27B, the publisher's thinking-mode recommendation:
 temperature 1.0, top-k 20, top-p 0.95, min-p 0.05). The Bonsai 2 card is marked
@@ -83,11 +90,20 @@ Experimental: Bonsai2 has not been validated on iOS.
 
 The Models page lists every entry, but only one that fits the device's memory tier
 can be loaded: an entry that needs more is shown greyed, marked "Too big" with both
-numbers, rather than hidden. Bonsai 2 27B needs the 16 GB tier; the other four need
-the 12 GB tier or above. For an installed model
+numbers, rather than hidden. Bonsai 2 27B needs the 16 GB tier, Qwen-Image 2.1 the 24 GB
+tier and Qwen3.8 27B and Muse-Glimmer 30B the 32 GB tier; the other four need the 12 GB
+tier or above. For an installed model
 whose optional projector is missing, "Add vision" downloads just the projector (and
 the draft head, when the entry lists one that is not there yet); once it is on the
 device, "Enable vision" reloads the selected model with it.
+
+**Pictures.** With Qwen-Image 2.1 loaded, a message is a description of a picture, or,
+with a photo attached, what to change about it. It is the same `/api/chat` turn, under
+the same turn manager and transcript, as an answer: the page shows the denoising steps,
+refreshing one picture in place from the small previews the engine sends, and the finished
+picture stays in the saved chat. The app asks for 1024x1024 (an edit keeps the photo's
+shape at the same area) at the model's own 40 steps, rather than its native 2048x2048,
+which has four times the image tokens.
 
 **Many chats, kept, and one tap away.** The Web UI holds its history in the page and
 nowhere else, which is fine for a desktop tab and useless on a phone that is suspended
@@ -651,6 +667,60 @@ The browser workflow also runs in the Mac app: with Qwen3.5 9B and the network s
 `tensoragent_token` cookie) had the Playwright skill drive a real headless Chrome through
 a local form, submit the value it read off the page, and return a screenshot of the
 result, in 66 s.
+
+### The Mac's own models
+
+Measured on the same M5 Pro (48 GB) on 2026-09-30, `ggml_metal`, the Debug app, with each
+entry's files downloaded and verified by the app (Qwen3.8 27B's by `curl`, checked against
+the same pins):
+
+| | Qwen3.8 27B (UD-Q4_K_XL) | Muse-Glimmer 30B (UD-Q4_K_XL) |
+| --- | --- | --- |
+| `chat-e2e.py`: fact, follow-up, new chat, story, thinking, shell, image | 7 of 7 | 7 of 7 |
+| plain decode in the app, ~7k-token prompts (the CLI's greedy benchmark at 6,800) | 14.0-14.1 tok/s (14.8) | 15.9-16.0 tok/s (17.2) |
+| speculative decoding in the app | n-gram: prose 0.93x, quoting 1.76-1.90x | declined by the engine on Metal |
+| prompt reuse, follow-up / new chat | 99.7% / 99.6% | 99.8% / 66% |
+| app footprint at its highest, beside the weights | 8.8 GB beside 17.6 GB | 10.9 GB beside 15.9 GB |
+
+The 5-7% plain-decode gap to the CLI was not broken down further; the two differ in
+more than the runtime (the app samples with the card's temperature, top-k and top-p and
+streams through the chat pipeline, where the CLI benchmark takes the argmax). Three
+things were changed for these two models:
+
+- **The phone's cache budget** (`LeanCaches` on both entries). With the engine's desktop
+  defaults the app grew to 18.8 GB beside Qwen3.8 27B's weights over those seven turns,
+  and the machine fell to 0.1 GB free with 10.6 GB compressed; the phone's budget held it
+  at 8.8 GB with the same reuse. The tiers are the weights, that footprint and about 5 GB
+  for macOS, so 32 GB rather than 24.
+- **Only a catalog draft head speculates.** Qwen3.8 27B's GGUF carries its own NextN/MTP
+  layer, which the engine attaches; with it the app decoded slower in every turn shape
+  (prose 0.83x, quoting 0.89-0.93x), because a four-token verify of the dense trunk costs
+  about twice a plain token on Metal. n-gram takes its place (the table).
+- **Muse-Glimmer reasons before it answers, even with thinking off**, and sometimes long:
+  asked for a 250-word story it wrote the story to a file and counted its words with
+  `wc -w` before answering. Its q8_0 cache stayed clean through a 1,542-word answer that
+  grew the full-attention layers past 8,192 rows mid-reply. A new chat reuses only the
+  first 4,352 tokens of the shared prompt, the size of its sliding-window ring (a longer
+  saved prefix cannot be restored into the ring), so its first token takes about 7 s.
+  Its vision tower takes 16 s on a 1260x840 image in the CLI and 24 s in the app.
+
+Qwen-Image 2.1, the same day: a 1024x1024 picture at 40 steps took 324.5 s in the app
+against 318.7 s for the CLI on the same files (7.84 and 7.83 s a step; the rest is the
+eight previews the page shows), and the two pictures are pixel-identical. An edit of a
+1253x836 photo at 1248x832 took 412 s against 399 s. Two engine fixes made that so; before
+them the edit took 495 s in the app:
+
+- **The VAE encoder runs fused on Metal.** Its average-down step front-pads time, which
+  upstream ggml-metal cannot do, and that one node had refused the whole encoder graph, so
+  every Metal edit encoded its photo per convolution. The leading zeros are now a concat
+  where the pad is refused: 3.6 to 1.9 s in the CLI and 18 to 1.6 s in the app, with the
+  edited picture 63 dB from the old one.
+- **Weights are not transposed on the host.** The vision encoder's linear layers built a
+  transposed copy of every weight on first use through a one-float-at-a-time loop (and
+  the native multiply packed it back on every call). They now pass the weight as a
+  transposed view, bit-identical, and that copy is tiled for the encoders that still make
+  one: the reference photo's encode went from 7.3 to 3.7 s in the CLI and from 77 to 13 s
+  in the app, and Gemma 4 E2B's first audio turn from 57 to 9 s.
 
 ## Layout
 

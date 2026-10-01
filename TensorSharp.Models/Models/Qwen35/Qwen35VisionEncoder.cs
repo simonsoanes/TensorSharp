@@ -1150,10 +1150,18 @@ namespace TensorSharp.Models
                 _weights.TryGetValue(biasName, out var cpuBias);
                 return CpuLinear(input, weightName, null, cpuBias);
             }
-            // Derived from the transposed copy, not _weights[weightName]: on the
-            // direct-CUDA path the untransposed original is released once the
-            // transpose exists (see GetOrCreateTransposedWeight).
-            Tensor weightT = GetOrCreateTransposedWeight(weightName);
+            // On a GGML allocator the weight is passed as a transposed VIEW of its own
+            // [out, in] rows, which is the layout ggml_mul_mat consumes: the native addmm
+            // binds it in place (can_map_m2_direct). A contiguous transposed copy made the
+            // host walk every element of every weight on first use -- the GGML copy of a
+            // bare transpose is a single-threaded element loop -- and the native side then
+            // packed that copy back into [out, in] on every call. For a Qwen-Image-2.1
+            // edit that was 62 transposes and most of the reference-image encode: 4 s
+            // under CoreCLR, 69 s in the Mac app, whose managed code runs on Mono.
+            // Elsewhere the transposed copy stays: direct CUDA releases the original
+            // once its transpose exists (see GetOrCreateTransposedWeight).
+            using Tensor weightView = _useNativeAttention ? _weights[weightName].Transpose() : null;
+            Tensor weightT = weightView ?? GetOrCreateTransposedWeight(weightName);
             int seqLen = (int)input.Sizes[0];
             int outDim = (int)weightT.Sizes[1];
 

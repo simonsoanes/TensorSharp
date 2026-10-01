@@ -15,50 +15,21 @@ using TensorAgent.Core.Settings;
 namespace TensorAgent.Tests;
 
 /// <summary>
-/// A representative Qwen-Image-2.1 entry used only by the test assembly.
+/// The Qwen-Image-2.1 entry the diffusion tests exercise: the built-in one.
 ///
 /// <para>
-/// TensorAgent intentionally offers no diffusion checkpoint in its built-in catalog.
-/// The companion publisher is still production infrastructure, though, and needs a
-/// complete multi-file model to exercise it without making a download appear to be
-/// supported. Live media tests also use this fixture to give explicitly supplied local
-/// files the names and roles the pipeline expects. The names, sizes and hashes are the
-/// ones <c>config/qwen-image-2.1.json</c> downloads.
+/// The catalog used to offer no diffusion checkpoint, and this was then a test-only copy of
+/// the files <c>config/qwen-image-2.1.json</c> downloads, so the companion publisher and the
+/// live media routes had a complete multi-file model to run against. The built-in entry is
+/// now that same set, so the tests check what a user actually downloads; live media tests
+/// stage explicitly supplied local files under its role-aware names.
 /// </para>
 /// </summary>
 internal static class DiffusionModelFixture
 {
-    internal static CatalogModel QwenImage21 { get; } = new()
-    {
-        Id = "test-qwen-image-2.1",
-        DisplayName = "Qwen-Image-2.1 test fixture",
-        Family = CatalogFamily.QwenImage,
-        Kind = CatalogArchitectureKind.Diffusion,
-        Parameters = "Qwen-Image-2.1 DiT + Qwen3-VL-8B text encoder",
-        Quantization = "Q4_K_M (DiT) / Q4_K_M (text encoder)",
-        Files = new[]
-        {
-            new CatalogFile(CatalogFileRole.Weights, "qwen_image_2.1_Q4_K_M.gguf", string.Empty,
-                4_189_343_904, "dc956c958fbfa1d5c64ec316d7e865283d17d97a9eb332a4a74a4d63afaae9a5"),
-            new CatalogFile(CatalogFileRole.TextEncoder, "Qwen3VL-8B-Instruct-Q4_K_M.gguf", string.Empty,
-                5_027_784_800, "67d1659bfe71b89d50b45a4ad1a9e5b997e5bb16ce5da66a6a6167abd569e9e2"),
-            new CatalogFile(CatalogFileRole.Vae, "qwen_image_2.1_vae_bf16.safetensors", string.Empty,
-                675_509_688, "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"),
-            // Optional for loading and text-to-image; editing refuses to run without it.
-            new CatalogFile(CatalogFileRole.VisionProjector,
-                "mmproj-Qwen3VL-8B-Instruct-F16.gguf", string.Empty,
-                1_159_029_824, "ca524100ebf825c9a870db1c580d03879e0da0ab2541697e2458e64891cf9d38",
-                Optional: true),
-        },
-        Modalities = CatalogModalities.Image | CatalogModalities.ImageOutput,
-        MinDeviceMemoryGB = 24,
-        ContextLength = 0,
-        KvCacheDtype = "f16",
-        Sampling = new CatalogSampling(1.0f, 0, 1.0f, 0.0f),
-        Experimental = true,
-        License = "Apache-2.0",
-        Notes = "Test-only diffusion fixture; not a built-in TensorAgent model.",
-    };
+    internal static CatalogModel QwenImage21 { get; } =
+        ModelCatalog.Find("qwen-image-2.1-q4km")
+        ?? throw new InvalidOperationException("the built-in Qwen-Image-2.1 entry is missing");
 }
 
 /// <summary>
@@ -79,13 +50,13 @@ public sealed class ProcessEnvironmentCollection
 }
 
 /// <summary>
-/// Whether a representative image-generation model's four files are the four files
-/// the pipeline goes looking for, under names it will recognise.
+/// Whether the built-in image-generation model's four files are the four files the
+/// pipeline goes looking for, under names it will recognise.
 ///
 /// <para>
 /// A companion whose name the pipeline's directory scan does not match can be present
-/// and valid yet still be silently ignored. Keeping a representative definition here
-/// catches that integration failure without requiring a built-in catalog entry.
+/// and valid yet still be silently ignored: the download verifies, and the picture is
+/// made without it or not at all.
 /// </para>
 /// <para>
 /// The scans are stated here rather than called, because they are private to
@@ -160,6 +131,10 @@ public sealed class DiffusionCatalogTests
         // optional is an entry that can finish downloading and then refuse to load.
         Assert.False(model.Files.Single(f => f.Role == CatalogFileRole.Vae).Optional);
         Assert.False(model.Files.Single(f => f.Role == CatalogFileRole.TextEncoder).Optional);
+        // Nor the vision projector: an edit refuses to run without it, and nothing in the
+        // app can fetch this role after the fact (the Models page adds a chat model's
+        // Projector), so an optional one made an editor that could not edit.
+        Assert.False(model.Files.Single(f => f.Role == CatalogFileRole.VisionProjector).Optional);
     }
 
     [Fact]
@@ -269,7 +244,7 @@ public sealed class DiffusionCatalogTests
     public void ACompanionThatWasNeverDownloadedIsClearedRatherThanPointedAt()
     {
         // Companion files may be absent from a partial or deliberately minimal local
-        // installation (the projector is optional), and the environment is
+        // installation (a sideloaded copy without the projector), and the environment is
         // process-wide. Leaving a variable from a previous selection would point the
         // next load at unrelated state.
         Environment.SetEnvironmentVariable("TS_QWEN_IMAGE_MMPROJ", "/somewhere/from/before.gguf");

@@ -38,15 +38,22 @@
       if (this.children.length === 0) return this._text;
       return this.children.map(function (c) { return c.textContent; }).join('');
     },
-    set: function (v) { this._text = v == null ? '' : String(v); this.children = []; },
+    set: function (v) { this._text = v == null ? '' : String(v); detachAll(this); },
   });
   // innerHTML is kept as the raw markup the page produced. The page renders its
   // own Markdown into it, so parsing would only re-implement a browser; what a
   // test needs is what was written, and that is what is stored.
   Object.defineProperty(Element.prototype, 'innerHTML', {
     get: function () { return this._html; },
-    set: function (v) { this._html = v == null ? '' : String(v); this.children = []; this._text = ''; },
+    set: function (v) { this._html = v == null ? '' : String(v); detachAll(this); this._text = ''; },
   });
+
+  // As a browser does: an element whose markup is replaced no longer has a parent,
+  // so a page that keeps a reference to it can tell that it must put it back.
+  function detachAll(parent) {
+    parent.children.forEach(function (c) { c.parentNode = null; });
+    parent.children = [];
+  }
 
   Element.prototype.appendChild = function (child) {
     child.parentNode = this;

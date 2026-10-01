@@ -374,7 +374,7 @@ public sealed class WebUiRoutesTests : IDisposable
     }
 
     [Fact]
-    public async Task TheCatalogSerializesTheRetainedFamiliesAndDenseArchitecture()
+    public async Task TheCatalogSerializesItsFamiliesAndArchitecturesByName()
     {
         JsonElement body = await BodyOf(await _client.GetAsync("/api/agent/catalog"));
         var families = new HashSet<string>(StringComparer.Ordinal);
@@ -384,8 +384,9 @@ public sealed class WebUiRoutesTests : IDisposable
             families.Add(model.GetProperty("family").GetString()!);
             kinds.Add(model.GetProperty("kind").GetString()!);
         }
-        Assert.True(families.SetEquals(new[] { "Gemma4", "Qwen35", "Bonsai" }));
-        Assert.True(kinds.SetEquals(new[] { "Dense" }));
+        Assert.True(families.SetEquals(new[] { "Gemma4", "Qwen35", "Bonsai", "Qwen38", "MuseGlimmer", "QwenImage" }),
+            string.Join(", ", families));
+        Assert.True(kinds.SetEquals(new[] { "Dense", "Diffusion" }), string.Join(", ", kinds));
     }
 
     [Fact]

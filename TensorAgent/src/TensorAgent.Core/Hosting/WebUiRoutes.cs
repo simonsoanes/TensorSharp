@@ -94,7 +94,10 @@ public static class WebUiRoutes
         ArgumentNullException.ThrowIfNull(server);
         ArgumentNullException.ThrowIfNull(chat);
         ArgumentException.ThrowIfNullOrWhiteSpace(uploadDirectory);
-        chatFrames ??= chat.ChatStreamAsync;
+        // An image model answers the same route, under the same turn manager and
+        // recorder, so a picture survives the page being hidden exactly as an answer
+        // does (see ImageTurns).
+        chatFrames ??= (body, ct) => ImageTurns.FramesFor(chat, body, ct);
 
         // ---- chat ---------------------------------------------------------------
         server.MapGet("/api/queue/status", (_, _) => Ok(chat.GetQueueStatus()));
@@ -760,6 +763,7 @@ public static class WebUiRoutes
         var artifacts = new List<StoredArtifact>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         string? sessionId = null;
+        string? imageUrl = null;
 
         await foreach (object frame in frames.ConfigureAwait(false))
         {
@@ -778,11 +782,16 @@ public static class WebUiRoutes
                 thinking.Append(reasoning);
             if (root.TryGetProperty("sessionId", out JsonElement id) && id.GetString() is { Length: > 0 } value)
                 sessionId = value;
+            // An image model's turn may produce nothing else (ImageTurns).
+            if (root.TryGetProperty("imageUrl", out JsonElement picture)
+                && picture.ValueKind == JsonValueKind.String
+                && picture.GetString() is { Length: > 0 } url)
+                imageUrl = url;
             CollectArtifacts(root, artifacts, seen);
         }
 
         if (sessionId is not null)
-            recorder.Complete(sessionId, content.ToString(), thinking.ToString(), artifacts);
+            recorder.Complete(sessionId, content.ToString(), thinking.ToString(), artifacts, imageUrl);
     }
 
     /// <summary>

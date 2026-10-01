@@ -94,6 +94,13 @@ Changes merged after the `v2026.09.01` tag that alter what an existing setup doe
   instead of SVG text, because MAUI 10.0.110's image tooling throws on any `<text>`.
   See [TensorAgent on the desktop](../TensorAgent/README.md#on-the-desktop-macos-and-windows).
 
+- **Qwen-Image-2.1 edits on Metal encode the photo with the fused VAE graph.** Upstream
+  ggml-metal cannot pad the start of a dimension, and the encoder's one front pad had
+  refused the whole graph, so Metal edits encoded their reference image per convolution.
+  The fused encode is about twice as fast (3.6 to 1.9 s for a 1248x832 reference on an
+  M5 Pro) and moves an edit's pixels slightly (63 dB PSNR on that edit);
+  `TS_QWEN21_VAE_FUSED=0` keeps the per-convolution path. Text-to-image is unchanged.
+
 - **Qwen-Image: only Qwen-Image-2.1 loads.** Earlier Qwen-Image and Qwen-Image-Edit
   checkpoints such as Qwen-Image-Edit-2511 are refused at load (exit code 2).
   `--qwen-image-lora` and `--offload-cpu` are now hard errors that say what to do

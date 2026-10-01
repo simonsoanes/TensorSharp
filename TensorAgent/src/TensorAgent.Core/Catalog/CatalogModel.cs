@@ -50,7 +50,7 @@ public sealed record CatalogFile(
 
 /// <summary>Model families the catalog knows; used for grouping in the UI and for
 /// family-specific defaults (thinking, sampling).</summary>
-public enum CatalogFamily { Gemma4, Qwen35, Qwen36, Qwen38, QwenImage, GptOss, Bonsai }
+public enum CatalogFamily { Gemma4, Qwen35, Qwen36, Qwen38, QwenImage, GptOss, Bonsai, MuseGlimmer }
 
 /// <summary>Dense or mixture-of-experts.</summary>
 public enum CatalogArchitectureKind { Dense, MixtureOfExperts, Diffusion }
@@ -95,6 +95,15 @@ public sealed record CatalogModel
     /// <summary>KV cache dtype to request ("f16", "q8_0"); block-quantised caches halve KV memory
     /// where the family's fused paths accept them.</summary>
     public required string KvCacheDtype { get; init; }
+    /// <summary>
+    /// Keep the phone's cache budget on the desktop as well (see
+    /// <see cref="Hosting.EngineMemoryPolicy"/>): caches that start small and grow, at most a
+    /// little of the reply reserved ahead, one finished conversation kept, nothing parked.
+    /// The engine's desktop defaults are written for a machine with memory to spare; for a
+    /// model whose weights take most of a Mac's memory there is none, and they are what
+    /// fills it.
+    /// </summary>
+    public bool LeanCaches { get; init; }
     public required CatalogSampling Sampling { get; init; }
     /// <summary>Whether the family has a thinking channel the app may enable.</summary>
     public bool SupportsThinking { get; init; }

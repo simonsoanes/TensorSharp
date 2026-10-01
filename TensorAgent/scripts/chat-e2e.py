@@ -13,6 +13,7 @@ API its page uses: the Mac app launched by run-mac.sh, or the simulator by run-s
 
 Usage:
   chat-e2e.py <app stdout log> [--scenarios fact,follow,newchat,long,think,tool,image,audio]
+  chat-e2e.py <app stdout log> --scenarios draw,edit      (an image model, e.g. Qwen-Image 2.1)
               [--media <dir with image.png and sample.wav>] [--out report.json]
   chat-e2e.py --base http://127.0.0.1:5000/ ...   (a TensorSharp.Server, which needs no token)
 
@@ -24,6 +25,11 @@ number only a program the model ran can know, the title printed on an image, and
 word spoken in a recording. Every turn also reports what a user feels: the time to the
 first token, the decode rate, and how much of the prompt the cache served.
 
+With an image model loaded the same route makes pictures instead (ImageTurns): `draw`
+asks for one from words and `edit` for a change to an attached photo. Each must stream
+its denoising steps, end with exactly one picture the app serves as a PNG of the size it
+reported, and leave that picture in the saved conversation.
+
 Exits non-zero when any scenario fails, so it can gate a build.
 """
 import argparse
@@ -31,6 +37,7 @@ import hashlib
 import json
 import os
 import re
+import struct
 import sys
 import time
 import urllib.error
@@ -69,6 +76,15 @@ class App:
     def new_session(self):
         return self.json("POST", "api/sessions?conversation=new")["sessionId"]
 
+    def new_chat(self):
+        """A new session and the conversation it is filed under."""
+        created = self.json("POST", "api/sessions?conversation=new")
+        return created["sessionId"], created.get("conversationId")
+
+    def fetch(self, path, timeout=60):
+        with self.request("GET", path, timeout=timeout) as response:
+            return response.read()
+
     def upload(self, path):
         boundary = "----tensoragent" + uuid.uuid4().hex
         name = os.path.basename(path)
@@ -84,6 +100,7 @@ class App:
         start = time.monotonic()
         first = None
         answer, thinking, tools, error, done = [], [], [], None, {}
+        pictures, steps, previews = [], [], 0
         try:
             with self.request("POST", "api/chat", body, timeout=timeout) as response:
                 for raw in response:
@@ -104,6 +121,14 @@ class App:
                         answer = [frame["replace"]]
                     if "skill_step" in frame or "tool_calls" in frame:
                         tools.append(frame)
+                    # An image model's turn: denoising steps (some with a preview), then
+                    # the picture.
+                    if isinstance(frame.get("image_step"), int):
+                        first = first or time.monotonic()
+                        steps.append((frame["image_step"], frame.get("image_steps")))
+                        previews += 1 if frame.get("preview") else 0
+                    if isinstance(frame.get("imageUrl"), str) and frame["imageUrl"]:
+                        pictures.append(frame)
                     if frame.get("error"):
                         error = frame["error"]
                     if frame.get("done") is True:
@@ -124,11 +149,22 @@ class App:
             "reused": done.get("kvReusedTokens", 0),
             "reusePct": done.get("kvReusePercent", 0.0),
             "truncated": done.get("truncated", False),
+            "pictures": pictures,
+            "steps": steps,
+            "previews": previews,
+            "aborted": bool(done.get("aborted")),
         }
 
 
 def squash(text):
     return re.sub(r"\s+", "", text or "").lower()
+
+
+def png_size(data):
+    """Width and height from a PNG's IHDR, or None when the bytes are not a PNG."""
+    if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+        return None
+    return struct.unpack(">II", data[16:24])
 
 
 def main():
@@ -151,6 +187,14 @@ def main():
     try:
         engine = app.json("GET", "api/agent/engine")
         model = engine.get("model") or {}
+        # A launch that was just asked to load a model is still loading it, and a turn sent
+        # now is refused; wait for the load (a few seconds, or longer for a big model's
+        # first read off disk) rather than report that refusal as a failed scenario.
+        deadline = time.monotonic() + 300
+        while model.get("state") == "Loading" and time.monotonic() < deadline:
+            time.sleep(1)
+            engine = app.json("GET", "api/agent/engine")
+            model = engine.get("model") or {}
         print(f"==> {app.base} · {engine.get('engine', '?')}")
         print(f"    model {model.get('id')} {model.get('state')} (prefix cache warm: {model.get('prefixCacheWarm')})")
     except (urllib.error.HTTPError, ValueError):
@@ -177,8 +221,9 @@ def main():
         if not ok:
             print(f"    why: {why}")
             failures.append(name)
-        rows.append({"scenario": name, "ok": ok, "why": why, **{k: v for k, v in result.items() if k != "tools"},
-                     "toolEvents": len(result["tools"])})
+        rows.append({"scenario": name, "ok": ok, "why": why,
+                     **{k: v for k, v in result.items() if k not in ("tools", "steps")},
+                     "toolEvents": len(result["tools"]), "imageSteps": len(result["steps"])})
         return result
 
     def contains(word):
@@ -207,9 +252,14 @@ def main():
         turn("newchat", app.new_session(), [], "What is the largest planet in the solar system? One word.", warm_start)
     if "long" in wanted:
         # The decode rate needs an answer long enough for the first token not to dominate.
+        # The story itself is the check, with room to reason first: a token count alone
+        # passed Muse-Glimmer at 400 tokens, every one of them reasoning and the answer empty.
+        def story(r):
+            words = len(r["answer"].split())
+            return (words >= 150, f"expected a story of about 250 words, got {words} words")
         turn("long", app.new_session(), [],
              "Write a 250-word story about a lighthouse keeper who finds a message in a bottle.",
-             lambda r: (r["tokens"] >= 150, f"expected a long answer, got {r['tokens']} tokens"), max_tokens=400)
+             story, max_tokens=2048)
     if "think" in wanted:
         def reasoned(r):
             if not r["thinking"].strip():
@@ -248,6 +298,63 @@ def main():
         turn("audio", app.new_session(), [], "Transcribe the first sentence of this audio clip.",
              lambda r: ("fox" in r["answer"].lower(), "expected the pangram's 'fox'"),
              extra=attach(os.path.join(args.media, "sample.wav")))
+
+    def drew(input_size=None):
+        """One picture, served as a PNG of the size the turn reported, after its steps."""
+        def check(r):
+            if r["aborted"]:
+                return False, "the turn ended without a picture (stopped)"
+            if len(r["pictures"]) != 1:
+                return False, f"expected exactly one picture, got {len(r['pictures'])}"
+            if not r["steps"]:
+                return False, "no denoising step was streamed"
+            last, total = r["steps"][-1]
+            if total and last != total:
+                return False, f"the steps stopped at {last} of {total}"
+            picture = r["pictures"][0]
+            size = png_size(app.fetch(picture["imageUrl"]))
+            if size is None:
+                return False, f"{picture['imageUrl']} is not a PNG"
+            if size != (picture.get("width"), picture.get("height")):
+                return False, f"the PNG is {size[0]}x{size[1]} but the turn reported {picture.get('width')}x{picture.get('height')}"
+            if input_size:
+                # An edit keeps the photo's shape (to the 32-pixel grid the model works on).
+                want, got = input_size[0] / input_size[1], size[0] / size[1]
+                if abs(want - got) > 0.05:
+                    return False, f"the edit changed the photo's shape: {input_size} -> {size}"
+            return True, ""
+        return check
+
+    def saved(conversation, name):
+        """The picture is in the saved conversation, which is what a reopened chat shows."""
+        if not conversation:
+            return
+        stored = app.json("GET", f"api/agent/conversations/{conversation}")
+        messages = stored.get("messages") or []
+        made = [m.get("imageUrl") for m in messages if m.get("role") == "assistant" and m.get("imageUrl")]
+        row = rows[-1]
+        if not made and row["ok"]:
+            row["ok"], row["why"] = False, "the saved conversation has no picture"
+            failures.append(name)
+            print(f"    why: {row['why']}")
+        else:
+            print(f"    saved: {made[-1]}")
+
+    def image_turn(name, prompt, extra=None, input_size=None):
+        session, conversation = app.new_chat()
+        result = turn(name, session, [], prompt, drew(input_size), extra=extra)
+        if result["pictures"]:
+            p = result["pictures"][0]
+            print(f"    picture: {p['imageUrl']} {p.get('width')}x{p.get('height')}, "
+                  f"{len(result['steps'])} steps ({result['previews']} with a preview)")
+        saved(conversation, name)
+
+    if "draw" in wanted:
+        image_turn("draw", "A red apple on a white table, soft daylight, studio photograph")
+    if "edit" in wanted:
+        photo = os.path.join(args.media, "image.png")
+        image_turn("edit", "Make the background a deep blue night sky with stars, keep the text unchanged",
+                   extra=attach(photo), input_size=png_size(open(photo, "rb").read()))
 
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:

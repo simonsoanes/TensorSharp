@@ -12,7 +12,8 @@ namespace TensorAgent.Core.Catalog;
 
 /// <summary>
 /// The built-in model list. Downloadable entries' sizes and hashes were read from the
-/// Hugging Face tree API (LFS object ids) on 2026-09-01 (Bonsai 2 27B on 2026-09-28),
+/// Hugging Face tree API (LFS object ids) on 2026-09-01 (Bonsai 2 27B on 2026-09-28;
+/// Qwen3.8 27B, Muse-Glimmer 30B and Qwen-Image 2.1 on 2026-09-30),
 /// so a download is verified against the exact bytes the publisher uploaded. A
 /// sideload-only entry would carry the same immutable size/hash identity but
 /// deliberately no URL, for a GGUF that embeds no publisher repository; the app then
@@ -26,6 +27,17 @@ namespace TensorAgent.Core.Catalog;
 /// 12 GB grants an app with the increased-memory entitlement roughly 8.5 GB, which is why
 /// the 12 GB tier tops out around 7.5 GB of weights and everything larger is offered only
 /// to 16 GB iPads.
+/// </para>
+/// <para>
+/// The 24 and 32 GB tiers are the desktop app's (a Mac today; no iPhone or iPad has that
+/// much memory). Their entries are the models a phone can only run as one- or two-bit
+/// quantizations that cost real quality, so they are offered at four bits where the
+/// memory exists rather than squeezed onto a phone. A Mac has no jetsam, so the tier is
+/// what the weights (which a dense model reads in full for every token) plus the app's
+/// measured footprint plus macOS need; below that every token pages the model in from
+/// disk. The two large chat models also keep the phone's cache budget
+/// (<see cref="CatalogModel.LeanCaches"/>), without which the engine's desktop defaults
+/// alone grew the app to 18.8 GB beside Qwen3.8 27B's weights.
 /// </para>
 /// </summary>
 public static class ModelCatalog
@@ -234,6 +246,133 @@ public static class ModelCatalog
             SupportsThinking = true,
             License = ApacheLicense,
             Notes = "Strong general model with vision; the projector is optional and costs ~1.8 GB of memory when loaded.",
+        },
+        new CatalogModel
+        {
+            Id = "qwen3.8-27b-q4kxl",
+            DisplayName = "Qwen3.8 27B",
+            Family = CatalogFamily.Qwen38,
+            Kind = CatalogArchitectureKind.Dense,
+            Parameters = "27B",
+            Quantization = "UD-Q4_K_XL",
+            Files = new[]
+            {
+                new CatalogFile(CatalogFileRole.Weights, "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+                    Hf("unsloth/Qwen3.8-27B-GGUF", "Qwen3.8-27B-UD-Q4_K_XL.gguf"),
+                    17_559_178_144, "3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e"),
+                new CatalogFile(CatalogFileRole.Projector, "mmproj-F16.gguf",
+                    Hf("unsloth/Qwen3.8-27B-GGUF", "mmproj-F16.gguf"),
+                    927_607_488, "cbb841a9ee0636b2ec172f5bb8df2ea8dfeb01e90fe7c6126581d662a0b4e43e", Optional: true),
+            },
+            Modalities = CatalogModalities.Image | CatalogModalities.Video,
+            // 32, not 24: the weights are mapped, not charged, but a dense model reads all
+            // of them for every token, so they must stay resident beside what the app
+            // allocates. MEASURED in the Mac app (M5 Pro, ggml_metal, chat-e2e.py's seven
+            // scenarios with the projector): the footprint peaked at 8.8 GB with
+            // LeanCaches, so 17.6 + 8.8 GB plus macOS is about 31 GB. (The 1-bit build that
+            // fits a phone, UD-IQ1_S at 6.2 GB, was withdrawn on 2026-09-07 for quality.)
+            MinDeviceMemoryGB = 32,
+            // A qwen35 hybrid: one layer in four is full attention and the rest keep a
+            // fixed linear-attention state, so a token costs about 35 KB of K/V at q8_0,
+            // charged twice on Metal. The qwen35 fused graph reads q8_0 at decode parity.
+            ContextLength = 32768,
+            KvCacheDtype = "q8_0",
+            // MEASURED: the engine's desktop defaults grew the app's footprint to 18.8 GB
+            // over the same seven scenarios (the machine fell to 0.1 GB free with 10.6 GB
+            // compressed); the phone's budget held it at 8.8 GB with the same 99.6-99.7%
+            // prompt reuse on follow-ups and new chats.
+            LeanCaches = true,
+            // The publisher's non-thinking settings, as for Qwen3.5 9B: the app starts
+            // with thinking off.
+            Sampling = new CatalogSampling(0.7f, 20, 0.8f, 0.0f),
+            SupportsThinking = true,
+            License = ApacheLicense,
+            Notes = "Qwen's dense 27B at four bits: stronger than the 9B at reasoning, coding and agent work, "
+                + "and slower, since all 27B parameters run for every token. Needs 32 GB of memory (a Mac). "
+                + "Vision is an optional download.",
+        },
+        new CatalogModel
+        {
+            Id = "muse-glimmer-30b-q4kxl",
+            DisplayName = "Muse-Glimmer 30B",
+            Family = CatalogFamily.MuseGlimmer,
+            Kind = CatalogArchitectureKind.Dense,
+            Parameters = "30B",
+            Quantization = "UD-Q4_K_XL",
+            Files = new[]
+            {
+                new CatalogFile(CatalogFileRole.Weights, "Muse-Glimmer-30B-UD-Q4_K_XL.gguf",
+                    Hf("unsloth/Muse-Glimmer-30B-GGUF", "Muse-Glimmer-30B-UD-Q4_K_XL.gguf"),
+                    15_878_222_368, "82bece304887a313ece08400bc030f6066c7bff5b906b0cd40308ec8a409fd38"),
+                new CatalogFile(CatalogFileRole.Projector, "mmproj-Muse-Glimmer-30B-Q8_0.gguf",
+                    Hf("unsloth/Muse-Glimmer-30B-GGUF", "mmproj-Muse-Glimmer-30B-Q8_0.gguf"),
+                    2_051_685_088, "01ff73c95108e1754a4c145176c6d3ba44338942285cb87dcac7f4f193192ea2", Optional: true),
+                // No draft entry: its DFlash drafter verifies greedily against the model,
+                // and the app samples at the card's temperature, so the drafter would buy
+                // nothing here.
+            },
+            Modalities = CatalogModalities.Image,
+            // 32 for the same reason as Qwen3.8 27B: a dense 15.9 GB read for every token
+            // beside the app. MEASURED in the Mac app (M5 Pro, ggml_metal, chat-e2e.py's
+            // seven scenarios): footprint 10.9 GB at its highest, about 8 GB of it the
+            // vision tower, which loads whenever its file is installed.
+            MinDeviceMemoryGB = 32,
+            ContextLength = 32768,
+            // q8_0 MEASURED on ggml_metal: a 1,542-word answer (2,404 tokens) that grew the
+            // full-attention layers past 8,192 rows mid-reply came out clean, at 17.0 tok/s
+            // against the CLI's 17.2.
+            KvCacheDtype = "q8_0",
+            LeanCaches = true,
+            // The model card's recommendation (the GGUF carries no sampling metadata).
+            Sampling = new CatalogSampling(1.0f, 64, 0.95f, 0.0f),
+            SupportsThinking = true,
+            License = ApacheLicense,
+            Notes = "A dense 30B that reads images and calls tools. It reasons in its own channel before "
+                + "answering, even with thinking off. Needs 32 GB of memory (a Mac). Vision is an optional "
+                + "download and takes about 8 GB more memory when it is installed.",
+        },
+        new CatalogModel
+        {
+            // The set config/qwen-image-2.1.json downloads: the DiT is only the diffusion
+            // transformer, and the VAE, the Qwen3-VL-8B text encoder and its vision
+            // projector are separate files (see DiffusionCompanions).
+            Id = "qwen-image-2.1-q4km",
+            DisplayName = "Qwen-Image 2.1",
+            Family = CatalogFamily.QwenImage,
+            Kind = CatalogArchitectureKind.Diffusion,
+            Parameters = "Qwen-Image-2.1 DiT + Qwen3-VL-8B text encoder",
+            Quantization = "Q4_K_M (DiT) / Q4_K_M (text encoder)",
+            Files = new[]
+            {
+                new CatalogFile(CatalogFileRole.Weights, "qwen_image_2.1_Q4_K_M.gguf",
+                    Hf("Abiray/Qwen-Image-2.1-GGUF", "qwen_image_2.1_Q4_K_M.gguf"),
+                    4_189_343_904, "dc956c958fbfa1d5c64ec316d7e865283d17d97a9eb332a4a74a4d63afaae9a5"),
+                new CatalogFile(CatalogFileRole.TextEncoder, "Qwen3VL-8B-Instruct-Q4_K_M.gguf",
+                    Hf("Qwen/Qwen3-VL-8B-Instruct-GGUF", "Qwen3VL-8B-Instruct-Q4_K_M.gguf"),
+                    5_027_784_800, "67d1659bfe71b89d50b45a4ad1a9e5b997e5bb16ce5da66a6a6167abd569e9e2"),
+                new CatalogFile(CatalogFileRole.Vae, "qwen_image_2.1_vae_bf16.safetensors",
+                    Hf("Comfy-Org/Qwen-Image-2.1", "vae/qwen_image_2.1_vae_bf16.safetensors"),
+                    675_509_688, "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"),
+                // Required, unlike a chat model's projector. Making a picture from words
+                // does not use it, but editing a photo refuses to run without it, and an
+                // optional file here could never be added later: the Models page's "add
+                // vision" action fetches a chat model's Projector, not this role. Optional,
+                // a download with optional files switched off made a model that advertises
+                // photo editing and cannot do it.
+                new CatalogFile(CatalogFileRole.VisionProjector, "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+                    Hf("Qwen/Qwen3-VL-8B-Instruct-GGUF", "mmproj-Qwen3VL-8B-Instruct-F16.gguf"),
+                    1_159_029_824, "ca524100ebf825c9a870db1c580d03879e0da0ab2541697e2458e64891cf9d38"),
+            },
+            Modalities = CatalogModalities.Image | CatalogModalities.ImageOutput,
+            MinDeviceMemoryGB = 24,
+            // A diffusion model holds no KV cache; generation size and steps are chosen
+            // per request (ImageTurns).
+            ContextLength = 0,
+            KvCacheDtype = "f16",
+            Sampling = new CatalogSampling(1.0f, 0, 1.0f, 0.0f),
+            License = ApacheLicense,
+            Notes = "Makes a picture from a description, or edits an attached photo. Needs 24 GB of memory "
+                + "(a Mac).",
         },
     };
 

@@ -368,9 +368,8 @@ public sealed class MediaScenarioTests : IDisposable
     }
 
     /// <summary>
-    /// Stage explicitly supplied Qwen-Image-2.1 files under the test fixture's role-aware
-    /// names, publish its companions, and host the DiT directly. This keeps the live
-    /// route coverage without putting a diffusion model in <c>ModelCatalog.BuiltIn</c>.
+    /// Stage explicitly supplied Qwen-Image-2.1 files under the built-in entry's role-aware
+    /// names, publish its companions, and host the DiT directly.
     /// </summary>
     private CatalogModel StartQwenImage(LiveMedia.QwenImageFiles files, string backend)
     {

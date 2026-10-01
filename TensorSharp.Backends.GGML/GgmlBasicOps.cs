@@ -4013,15 +4013,27 @@ namespace TensorSharp.GGML
             // ~16.8M single-float copies for Q alone at 2048 tokens, per attention
             // layer, per chunk, single-threaded.
             //
-            // Genuinely element-strided F32 views (innermost stride != 1 on either
-            // side, e.g. a bare transpose) keep the element loop: callers build
-            // ad-hoc strided F32 tensors whose strides align to nothing coarser
-            // than one float.
+            // A bare 2-D transpose -- a weight's Transpose() made contiguous, which the
+            // vision and audio encoders do once per weight -- is copied in tiles: the
+            // element loop below took it one float at a time on one thread, through an
+            // iterator Mono does not inline. MEASURED in the Mac app (Mono): 0.8 s for one
+            // 4304x1152 weight and 3.4 s for a 4608x4608 one, 57 s of Gemma 4 E2B's first
+            // audio turn. Other genuinely element-strided F32 views (a permuted 3-D view,
+            // say) keep the element loop.
             if (dtype == DType.Float32)
             {
                 if (InnerContiguousExtent(result, src) > 1)
                 {
                     CopyStridedBytes(result, src, resultBuffer, srcBuffer, dtype);
+                    return;
+                }
+
+                if (result.DimensionCount == 2 && src.DimensionCount == 2 && result.IsContiguous()
+                    && src.Sizes[0] == result.Sizes[0] && src.Sizes[1] == result.Sizes[1]
+                    && src.Strides[0] == 1 && src.Strides[1] >= src.Sizes[0])
+                {
+                    CopyTransposedF32((float*)resultBuffer, (float*)srcBuffer,
+                        result.Sizes[0], result.Sizes[1], src.Strides[1]);
                     return;
                 }
 
@@ -4046,6 +4058,39 @@ namespace TensorSharp.GGML
             // For Q8_0 the inner extent must align to the 32-element block
             // boundary so byte offsets stay block-aligned.
             CopyStridedBytes(result, src, resultBuffer, srcBuffer, dtype);
+        }
+
+        /// <summary>
+        /// <c>dst[r, c] = src[r + c * ld]</c> for a row-major <paramref name="rows"/> x
+        /// <paramref name="cols"/> destination: the source's rows are its columns. Square
+        /// tiles keep both sides in cache, and large copies split the tiles over the cores.
+        /// </summary>
+        private static unsafe void CopyTransposedF32(float* dst, float* src, long rows, long cols, long ld)
+        {
+            const long Tile = 32;
+            long rowTiles = (rows + Tile - 1) / Tile;
+            nint d = (nint)dst, s = (nint)src;
+            void CopyRowTile(long tile)
+            {
+                float* to = (float*)d, from = (float*)s;
+                long r0 = tile * Tile, r1 = Math.Min(rows, r0 + Tile);
+                for (long c0 = 0; c0 < cols; c0 += Tile)
+                {
+                    long c1 = Math.Min(cols, c0 + Tile);
+                    for (long c = c0; c < c1; c++)
+                    {
+                        float* column = from + c * ld;
+                        for (long r = r0; r < r1; r++)
+                            to[r * cols + c] = column[r];
+                    }
+                }
+            }
+
+            if (rows * cols >= 1L << 18 && rowTiles > 1)
+                System.Threading.Tasks.Parallel.For(0L, rowTiles, CopyRowTile);
+            else
+                for (long tile = 0; tile < rowTiles; tile++)
+                    CopyRowTile(tile);
         }
 
         /// <summary>

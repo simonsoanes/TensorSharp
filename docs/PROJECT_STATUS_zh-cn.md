@@ -70,6 +70,11 @@ Hadamard 变换。它需要单设备 GGML 后端（`cpu`、`cuda`、`mlx` 与 `-
   SVG 文本，因为 MAUI 10.0.110 的图像工具遇到任何 `<text>` 都会抛出异常。详见
   [TensorAgent 桌面版](../TensorAgent/README.md#on-the-desktop-macos-and-windows)。
 
+- **Metal 上的 Qwen-Image-2.1 编辑改用融合 VAE 图编码照片。** 上游 ggml-metal 不能在维度开头填充，
+  编码器里唯一的前置填充让整张图被拒绝，因此 Metal 上的编辑一直逐个卷积地编码参考图片。融合编码约快一倍
+  （M5 Pro 上 1248x832 的参考图从 3.6 秒降到 1.9 秒），并会轻微改变编辑结果的像素（该次编辑的 PSNR 为 63 dB）；
+  `TS_QWEN21_VAE_FUSED=0` 保留逐卷积路径。文生图不受影响。
+
 - **Qwen-Image：只加载 Qwen-Image-2.1。** 更早的 Qwen-Image 与 Qwen-Image-Edit 检查点（例如
   Qwen-Image-Edit-2511）会在加载时被拒绝（退出码 2）。`--qwen-image-lora` 与 `--offload-cpu` 现在是
   硬错误，并会说明改用什么做法（LoRA 插件用 `--lora`；内存不足时减小 `--width` / `--height`）；`TS_QWEN_IMAGE_LORA` 会被拒绝；LoRA 插件改用 `--lora` / `--lora-scale` /

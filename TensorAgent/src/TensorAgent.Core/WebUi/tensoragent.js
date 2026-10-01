@@ -622,8 +622,16 @@
     state.modelContextTokens = d && typeof d.modelContextTokens === 'number'
       ? d.modelContextTokens : state.contextTokens;
     state.maxTokens = (d && d.defaultMaxTokens) || 2048;
+    // An image model takes a description, or a photo and what to change about it.
+    text.placeholder = makesImages()
+      ? 'Describe a picture… or attach a photo and say what to change'
+      : 'Message… or hold to talk';
     paintModelButton();
   }
+
+  // Qwen-Image: the host turns a message into a picture rather than an answer
+  // (ImageTurns), on the same /api/chat route and turn machinery as a reply.
+  function makesImages() { return state.arch === 'qwen_image' || state.arch === 'qwen-image'; }
 
   // Three states, not two. The app now loads the model the user last used by itself,
   // and reading four gigabytes off flash takes seconds -- during which "No model yet"
@@ -1115,6 +1123,12 @@
     }
     var t = text.value.trim();
     if (!t && !state.attachments.length) { note('send-refused', 'nothing to send'); return; }
+    // A photo with no words would send its file name as the edit instruction.
+    if (makesImages() && !t) {
+      note('send-refused', 'image edit without an instruction');
+      notice('Say what to change about the photo, then send.');
+      return;
+    }
     if (!state.model) {
       note('send-refused', loadingModel() ? 'model loading' : 'no model');
       // Two different answers, because they ask for two different things. A model
@@ -1131,7 +1145,9 @@
     // Capability can change while this long-lived WKWebView is hidden on the Models
     // page. Re-read it immediately before every image-bearing request, while the
     // composer is still intact. The server repeats this check authoritatively.
-    if (nextHistory.some(function (m) { return m && m.imagePaths && m.imagePaths.length; })) {
+    // Not for an image model: a photo is what it edits, not something it has to see,
+    // and the host refuses an edit itself when the vision file is missing.
+    if (!makesImages() && nextHistory.some(function (m) { return m && m.imagePaths && m.imagePaths.length; })) {
       state.visionChecking = true;
       send.disabled = true;
       // Disable the shared marker in the same event turn as Send. The model-capability
@@ -1682,7 +1698,7 @@
     setGenerating(true);
     // Immediately, before a single byte comes back: the gap between pressing send
     // and the first frame is itself seconds long on a phone.
-    progress('Thinking…');
+    progress(makesImages() ? 'Drawing…' : 'Thinking…');
 
     var ctrl = new AbortController();
     ctrl.awaitingHeaders = true;
@@ -1959,14 +1975,30 @@
         madeSeen[file.url] = 1;
         made.push({ name: file.name || file.url, bytes: file.bytes || 0, url: file.url });
       });
+      // An image model's turn (ImageTurns on the host): steps while the picture
+      // denoises, some carrying a small preview, then the finished picture. One <img>
+      // is refreshed in place, so the preview becomes the picture instead of a new
+      // image being stacked under it for every step.
+      if (typeof f.image_step === 'number') {
+        progress(f.image_steps ? 'Drawing… step ' + f.image_step + ' of ' + f.image_steps : 'Drawing…');
+        if (f.preview) pictureOf(view).src = f.preview;
+      }
       if (f.image || f.imageUrl) {
         madeImage = f.imageUrl || f.image;
         // The picture goes under the text, so the text has to be there first.
         if (answerDirty) { view.bubble.innerHTML = render(answer); view.answerSoFar = answer; answerDirty = false; }
-        var img = document.createElement('img');
-        img.src = madeImage;
-        view.bubble.appendChild(img);
+        pictureOf(view).src = madeImage;
       }
+    }
+    // The one picture a turn shows, made on first use and made again if a repaint of
+    // the bubble's text removed it.
+    function pictureOf(v) {
+      if (!v.picture || v.picture.parentNode !== v.bubble) {
+        v.picture = document.createElement('img');
+        v.picture.alt = 'generated image';
+        v.bubble.appendChild(v.picture);
+      }
+      return v.picture;
     }
     function finish() {
       if (ctrl && ctrl !== state.abort && state.abort) { note('reader-retired', 'finish'); return; }

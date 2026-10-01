@@ -2454,4 +2454,146 @@ public sealed class WebUiPageTests : IDisposable
         Assert.False(result.GetProperty("generating").GetBoolean());
     }
 
+    // ---- an image model (ImageTurns on the host) ----------------------------------------
+
+    private const string ImageModel = """
+        R['/api/models'] = { loaded: 'qwen_image_2.1_Q4_K_M.gguf', architecture: 'qwen_image',
+                             loadedBackend: 'ggml_metal', visionReady: false };
+        """;
+
+    /// <summary>
+    /// A picture denoises over tens of steps, and the host sends a small preview with
+    /// some of them. They are one picture getting sharper, so the page refreshes one
+    /// image in place and the finished picture replaces the last preview: the turn ends
+    /// with exactly one image in the bubble, and the history keeps the finished one.
+    /// </summary>
+    [Fact]
+    public void AnImageModelsTurnIsOnePictureThatThePreviewsBecome()
+    {
+        JsonElement result = Run(ImageModel + """
+            R['/api/chat'] = { __sse: [
+              { image_step: 1, image_steps: 3, preview: null },
+              { image_step: 2, image_steps: 3, preview: 'data:image/png;base64,AAAA' },
+              { image_step: 3, image_steps: 3, preview: 'data:image/png;base64,BBBB' },
+              { imageUrl: '/uploads/lighthouse.png', width: 1024, height: 1024 },
+              { done: true, sessionId: 's1', tokenCount: 0, elapsed: 3, tokPerSec: 0, truncated: false }
+            ] };
+            """, """
+            var placeholder = __page.byId['text'].placeholder;
+            __page.byId['text'].value = 'a lighthouse at dusk';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () {
+              var turns = __page.transcript();
+              var answer = turns[turns.length - 1];
+              return {
+                placeholder: placeholder,
+                sent: __page.requests('/api/chat').map(function (c) { return c.body; }),
+                role: answer.role,
+                images: answer.media.filter(function (m) { return m.tag === 'IMG'; }).map(function (m) { return m.src; }),
+                history: window.TensorAgent.history(),
+                generating: window.TensorAgent.isGenerating(),
+                errors: __page.errorNotices()
+              };
+            });
+            """);
+
+        Assert.StartsWith("Describe a picture", result.GetProperty("placeholder").GetString(), StringComparison.Ordinal);
+        JsonElement sent = Assert.Single(result.GetProperty("sent").EnumerateArray());
+        Assert.Equal("a lighthouse at dusk", sent.GetProperty("messages")[0].GetProperty("content").GetString());
+        Assert.Equal("assistant", result.GetProperty("role").GetString());
+        Assert.Equal(new[] { "/uploads/lighthouse.png" }, Strings(result, "images"));
+        JsonElement history = result.GetProperty("history");
+        JsonElement made = history[history.GetArrayLength() - 1];
+        Assert.Equal("assistant", made.GetProperty("role").GetString());
+        Assert.Equal("/uploads/lighthouse.png", made.GetProperty("imageUrl").GetString());
+        Assert.False(result.GetProperty("generating").GetBoolean());
+        Assert.Empty(Strings(result, "errors"));
+    }
+
+    /// <summary>
+    /// The picture is not lost to the answer being painted: a turn that also writes text
+    /// repaints the bubble, and the picture is put back under it.
+    /// </summary>
+    [Fact]
+    public void APictureSurvivesTextPaintedIntoTheSameBubble()
+    {
+        JsonElement result = Run(ImageModel + """
+            R['/api/chat'] = { __sse: [
+              { image_step: 1, image_steps: 1, preview: 'data:image/png;base64,AAAA' },
+              { token: 'Here it is.' },
+              { imageUrl: '/uploads/boat.png', width: 1024, height: 1024 },
+              { done: true, sessionId: 's1', truncated: false }
+            ] };
+            """, """
+            __page.byId['text'].value = 'a blue boat';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () {
+              var turns = __page.transcript();
+              var answer = turns[turns.length - 1];
+              return {
+                images: answer.media.filter(function (m) { return m.tag === 'IMG'; }).map(function (m) { return m.src; }),
+                html: answer.html
+              };
+            });
+            """);
+
+        Assert.Equal(new[] { "/uploads/boat.png" }, Strings(result, "images"));
+        Assert.Contains("Here it is.", result.GetProperty("html").GetString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A photo is an edit, and an edit needs to be told what to change: sent alone, its
+    /// file name would become the instruction. The draft stays as it was.
+    /// </summary>
+    [Fact]
+    public void APhotoWithNoWordsIsNotSentToAnImageModel()
+    {
+        JsonElement result = Run(ImageModel, """
+            window.TensorAgent.addAttachment({ ok: true, file: 'a1.png', fileName: 'street.png',
+                                               mediaType: 'image', url: '/uploads/a1.png' });
+            __page.byId['text'].value = '';
+            __page.byId['send'].dispatch('click');
+            return settle(10).then(function () {
+              return {
+                sent: __page.requests('/api/chat').length,
+                attachments: window.TensorAgent.attachmentCount(),
+                notices: __page.notices()
+              };
+            });
+            """);
+
+        Assert.False(result.TryGetProperty("error", out JsonElement failure), failure.ToString());
+        Assert.Equal(0, result.GetProperty("sent").GetInt32());
+        Assert.Equal(1, result.GetProperty("attachments").GetInt32());
+        Assert.Contains(Strings(result, "notices"), n => n.Contains("Say what to change", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// An image model edits the photo rather than looking at it, so the page does not
+    /// stop the send to re-check for a vision file the way it does for a chat model —
+    /// the host refuses an edit itself when the file is missing — and the photo goes
+    /// out as a still, which is what the host edits.
+    /// </summary>
+    [Fact]
+    public void APhotoAndAnInstructionGoOutAsAnEdit()
+    {
+        JsonElement result = Run(ImageModel + """
+            R['/api/chat'] = { __sse: [
+              { imageUrl: '/uploads/edited.png', width: 1024, height: 768 },
+              { done: true, sessionId: 's1', truncated: false }
+            ] };
+            """, """
+            window.TensorAgent.addAttachment({ ok: true, file: 'a1.png', fileName: 'street.png',
+                                               mediaType: 'image', url: '/uploads/a1.png' });
+            __page.byId['text'].value = 'make it night';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () {
+              return { sent: __page.requests('/api/chat').map(function (c) { return c.body; }) };
+            });
+            """);
+
+        JsonElement message = Assert.Single(result.GetProperty("sent").EnumerateArray()).GetProperty("messages")[0];
+        Assert.Equal("make it night", message.GetProperty("content").GetString());
+        Assert.Equal(new[] { "a1.png" }, Strings(message, "stillImagePaths"));
+    }
 }

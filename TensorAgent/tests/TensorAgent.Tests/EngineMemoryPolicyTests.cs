@@ -76,6 +76,36 @@ public sealed class EngineMemoryPolicyTests : IDisposable
         Assert.Equal("q8_0", Environment.GetEnvironmentVariable(EngineMemoryPolicy.KvCacheDtypeVariable));
     }
 
+    /// <summary>
+    /// A model that takes most of a Mac's memory keeps the phone's budget there too. With
+    /// the engine's desktop defaults Qwen3.8 27B grew the Mac app to 18.8 GB beside its
+    /// 17.6 GB of weights over seven conversations; the phone's budget held it at 8.8 GB
+    /// with the same prompt reuse. Every other entry still leaves the knobs to the engine.
+    /// </summary>
+    [Fact]
+    public void AnEntryThatAsksForLeanCachesKeepsThePhonesBudgetOnTheDesktop()
+    {
+        foreach (string id in new[] { "qwen3.8-27b-q4kxl", "muse-glimmer-30b-q4kxl" })
+        {
+            CatalogModel model = Entry(id);
+            Assert.True(model.LeanCaches);
+            EngineMemoryPolicy.Apply(model, AppSettings.DesktopDefaults(), DeviceClass.Desktop);
+
+            var options = TensorSharp.Runtime.Scheduling.ExecutionOptions.FromEnvironment();
+            Assert.Equal(EngineMemoryPolicy.KvInitialTokens, options.KvInitialTokens);
+            Assert.Equal(EngineMemoryPolicy.KvGenerationReserveMax, options.KvGenerationReserveMax);
+            Assert.Equal(EngineMemoryPolicy.KvHolderPoolMax, options.KvHolderPoolMax);
+            Assert.Equal(EngineMemoryPolicy.RetainedFusedCacheMax, options.RetainedFusedCacheBudget);
+        }
+
+        // And the next load of an ordinary entry clears them again.
+        EngineMemoryPolicy.Apply(Entry("qwen3.5-9b-iq4xs"), AppSettings.DesktopDefaults(), DeviceClass.Desktop);
+        Assert.Null(Environment.GetEnvironmentVariable(EngineMemoryPolicy.KvInitialTokensVariable));
+        Assert.Null(Environment.GetEnvironmentVariable(EngineMemoryPolicy.RetainedFusedCacheMaxVariable));
+        Assert.Equal(new[] { "muse-glimmer-30b-q4kxl", "qwen3.8-27b-q4kxl" },
+            ModelCatalog.BuiltIn.Where(m => m.LeanCaches).Select(m => m.Id).OrderBy(id => id));
+    }
+
     [Fact]
     public void ThePhonesKvKnobsReachTheEngineOnEveryLoad()
     {
@@ -268,8 +298,9 @@ public sealed class EngineMemoryPolicyTests : IDisposable
     [Fact]
     public void TheQwenEntryStillAsksForTheQuantizedCache()
     {
+        // Qwen 3.8 runs the same qwen35 graphs.
         List<CatalogModel> qwen = ModelCatalog.BuiltIn
-            .Where(m => m.Family == CatalogFamily.Qwen35)
+            .Where(m => m.Family is CatalogFamily.Qwen35 or CatalogFamily.Qwen38)
             .ToList();
 
         Assert.NotEmpty(qwen);

@@ -439,7 +439,22 @@ TSG_EXPORT int TSGgml_QwenVaeRun(const TSGgmlQwenVaeDesc* d)
                     r = ggml_reshape_4d(ctx, r, hw, sf * sf, 1, C);
                     // Single-frame causal input is front padded in time. Its
                     // zeros still participate in the channel-group average.
-                    if (tf > 1) r = ggml_pad_ext(ctx, r, 0, 0, 0, 0, int(tf - 1), 0, 0, 0);
+                    if (tf > 1)
+                    {
+                        ggml_tensor* padded = ggml_pad_ext(ctx, r, 0, 0, 0, 0, int(tf - 1), 0, 0, 0);
+                        // Upstream ggml-metal pads only at the end of a dimension, and one
+                        // unsupported node refuses the whole graph below: every Metal edit
+                        // encoded its reference image on the per-convolution path instead.
+                        // The same tensor -- tf-1 slices of zeros, then the frame -- as a
+                        // concat runs there; fill writes its constant whatever r holds, so
+                        // a non-finite frame cannot leak into the zero slices.
+                        if (!ggml_backend_supports_op(g_backend, padded))
+                        {
+                            ggml_tensor* shape = tf == 2 ? r : ggml_repeat_4d(ctx, r, r->ne[0], r->ne[1], tf - 1, r->ne[3]);
+                            padded = ggml_concat(ctx, ggml_fill(ctx, shape, 0.0f), r, 2);
+                        }
+                        r = padded;
+                    }
                     r = ggml_reshape_3d(ctx, r, hw, group, OC);
                     r = ggml_cont(ctx, ggml_permute(ctx, r, 1, 0, 2, 3));
                     slots[op.dst] = ggml_reshape_3d(ctx, ggml_mean(ctx, r), OW, OH, OC);

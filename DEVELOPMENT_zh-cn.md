@@ -701,7 +701,7 @@ bash TensorSharp.Server.Host/testdata/test_multiturn.sh
 
 `TensorSharp.GGML.Native/tests/` 下的 C++ 测试只有在 `TENSORSHARP_GGML_NATIVE_BUILD_TESTS=ON`（默认 `OFF`）时才会构建：向 `build-linux.sh` 或 `build-windows.ps1` 传入 `--tests`（两者也都读取该环境变量）。`build-macos.sh` 只构建库本身，因此在 macOS 上请自行用 `-DTENSORSHARP_GGML_NATIVE_BUILD_TESTS=ON` 配置 CMake。用 `ctest --test-dir <构建目录> -R <名称> --output-on-failure` 运行。登记了跳过返回码的测试（包括 Qwen-Image-2.1 这一组）在设备不可用时报告为已跳过，而不是通过。
 
-示例：`flash-attn-unsupported-shape-fallback`（见上文），以及 Qwen-Image-2.1 这一组——`qwen-image21-whole-graph-cpu` 写出一个合成的显式注意力参考，`qwen-image21-whole-graph-{metal,vulkan,cuda}` 与之对比（包括前缀 KV 缓存与两个 rank 的张量并行切分：CPU 与 Metal 上用回环组；CUDA 与 Vulkan 需要两块 GPU，单 GPU 机器会在通过的测试中打印 `SKIP tensor parallel`，这部分不计为覆盖），另有 `qwen-image21-vae-shortcuts-{cpu,cuda}` 与 `qwen-image21-vae-f32-convolution-metal[-no-mps]`。每个 GPU 变体只有在构建启用了对应后端时才会登记。详见 [TensorSharp.GGML.Native/tests/qwen_image21_tests.md](TensorSharp.GGML.Native/tests/qwen_image21_tests.md)；这些是数值回归测试，不检查图像质量或速度。
+示例：`flash-attn-unsupported-shape-fallback`（见上文），以及 Qwen-Image-2.1 这一组——`qwen-image21-whole-graph-cpu` 写出一个合成的显式注意力参考，`qwen-image21-whole-graph-{metal,vulkan,cuda}` 与之对比（包括前缀 KV 缓存与两个 rank 的张量并行切分：CPU 与 Metal 上用回环组；CUDA 与 Vulkan 需要两块 GPU，单 GPU 机器会在通过的测试中打印 `SKIP tensor parallel`，这部分不计为覆盖），另有 `qwen-image21-vae-shortcuts-{cpu,cuda}` 与 `qwen-image21-vae-f32-convolution-metal[-no-mps]`（后者在 Metal 上同样运行这些捷径用例）。每个 GPU 变体只有在构建启用了对应后端时才会登记。详见 [TensorSharp.GGML.Native/tests/qwen_image21_tests.md](TensorSharp.GGML.Native/tests/qwen_image21_tests.md)；这些是数值回归测试，不检查图像质量或速度。
 
 ### 推理矩阵运行器
 

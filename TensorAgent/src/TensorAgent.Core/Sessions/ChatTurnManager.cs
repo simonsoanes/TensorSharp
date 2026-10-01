@@ -360,6 +360,7 @@ public sealed class ChatTurnManager : IDisposable
         var artifacts = new List<StoredArtifact>();
         var artifactUrls = new HashSet<string>(StringComparer.Ordinal);
         string? sessionId = null;
+        string? imageUrl = null;
         ChatTurnState state;
 
         try
@@ -367,7 +368,7 @@ public sealed class ChatTurnManager : IDisposable
             await foreach (object frame in frames(turn.Token).WithCancellation(turn.Token).ConfigureAwait(false))
             {
                 turn.Append(frame, content, MaxBufferedFrames);
-                ReadInto(frame, content, thinking, artifacts, artifactUrls, ref sessionId);
+                ReadInto(frame, content, thinking, artifacts, artifactUrls, ref sessionId, ref imageUrl);
             }
             state = ChatTurnState.Completed;
         }
@@ -408,7 +409,8 @@ public sealed class ChatTurnManager : IDisposable
                     sessionId,
                     content.ToString(),
                     thinking.ToString(),
-                    artifacts.Count == 0 ? null : artifacts);
+                    artifacts.Count == 0 ? null : artifacts,
+                    imageUrl);
             }
             catch (Exception) { /* a lost transcript must not be a crash on a background thread */ }
         }
@@ -435,7 +437,8 @@ public sealed class ChatTurnManager : IDisposable
         StringBuilder thinking,
         List<StoredArtifact> artifacts,
         HashSet<string> artifactUrls,
-        ref string? sessionId)
+        ref string? sessionId,
+        ref string? imageUrl)
     {
         try
         {
@@ -493,6 +496,11 @@ public sealed class ChatTurnManager : IDisposable
             }
             if (root.TryGetProperty("sessionId", out JsonElement id) && id.GetString() is { Length: > 0 } value)
                 sessionId = value;
+            // The picture an image model's turn made, which may be all it made (ImageTurns).
+            if (root.TryGetProperty("imageUrl", out JsonElement picture)
+                && picture.ValueKind == JsonValueKind.String
+                && picture.GetString() is { Length: > 0 } made)
+                imageUrl = made;
         }
         catch (JsonException)
         {

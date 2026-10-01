@@ -864,6 +864,13 @@ public sealed class AgentAppHost : IDisposable
             HostLog.LogInformation("not warming the prefix cache: runtime prefix reuse is disabled");
             return;
         }
+        // An image model has no system prompt to share and no engine to warm one with;
+        // asking it for a token only logs a failure after every load (see ImageTurns).
+        if (Chat.LoadedModelMakesImages)
+        {
+            HostLog.LogInformation("not warming the prefix cache: the loaded model makes pictures");
+            return;
+        }
         // Never beside a turn. The warm-up is opportunistic by definition -- it exists to
         // save the NEXT message a wait -- so contending with a message already being
         // answered is all cost and no benefit, and on a model that cannot take two
@@ -1157,8 +1164,11 @@ public sealed class AgentAppHost : IDisposable
             long closuresAtStart = Compute.Closures;
             bool poisoned = false;
 
+            // Through ImageTurns.FramesFor, not the chat stream directly: this gate
+            // REPLACES the route's default frame source, so it has to make the same
+            // choice that default makes, or an image model is handed to the text pipeline.
             await using (IAsyncEnumerator<object> frames =
-                Chat.ChatStreamAsync(attemptBody, cancellationToken).GetAsyncEnumerator(cancellationToken))
+                ImageTurns.FramesFor(Chat, attemptBody, cancellationToken).GetAsyncEnumerator(cancellationToken))
             {
                 while (true)
                 {
@@ -2041,7 +2051,8 @@ public sealed class AgentAppHost : IDisposable
         CatalogModel? model = settings.SelectedModelId is { Length: > 0 } id ? ModelCatalog.Find(id) : null;
         string? draftHead = model is null ? null : Models.CompanionPath(model, CatalogFileRole.Draft);
         string note = SpeculationPolicy.PrepareLoad(settings, draftHead);
-        bool draftAttached = ModelService.Model is IDraftHead { HasDraftHead: true };
+        bool draftAttached = SpeculationPolicy.SpeculatesWithDraftHead(
+            draftHead, ModelService.Model is IDraftHead { HasDraftHead: true });
         string algorithm = SpeculationPolicy.ChooseAlgorithm(draftAttached);
         bool live = ModelService.EngineHost.UpdateSpeculation(SpeculationOptions.FromEnvironment());
         string account = $"{note}; algorithm {algorithm}; {(live ? "applied to the running engine" : "no engine standing, applies at the next load")}";
@@ -2501,8 +2512,11 @@ public sealed class AgentAppHost : IDisposable
                     {
                         ModelService.LoadModel(weights, projector, backend.Value);
                         // The engine is built after this, so the algorithm it reads is
-                        // decided here, from whether the draft head really attached.
-                        bool draftAttached = ModelService.Model is IDraftHead { HasDraftHead: true };
+                        // decided here, from whether the catalog's draft head really
+                        // attached (a head built into the weights file does not count:
+                        // see SpeculationPolicy.SpeculatesWithDraftHead).
+                        bool draftAttached = SpeculationPolicy.SpeculatesWithDraftHead(
+                            draftHead, ModelService.Model is IDraftHead { HasDraftHead: true });
                         string algorithm = SpeculationPolicy.ChooseAlgorithm(draftAttached);
                         // Also hand it to the engine host: a settings switch flipped while this
                         // model was loading was remembered with the algorithm chosen before the

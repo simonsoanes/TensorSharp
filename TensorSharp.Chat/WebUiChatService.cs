@@ -1217,6 +1217,13 @@ namespace TensorSharp.Chat
             EnsureImageEditHeadroom(_loggerFactory.CreateLogger("TensorSharp.Server.ImageEdit"), "Image edit rejected: {Reason}");
         }
 
+        /// <summary>
+        /// Whether the loaded model makes pictures rather than text: a host that serves
+        /// both through one chat route (TensorAgent) decides with this which service a
+        /// turn goes to.
+        /// </summary>
+        public bool LoadedModelMakesImages => _svc.Model is TensorSharp.Models.QwenImage.QwenImageModel;
+
         // Every loadable QwenImageModel is a Qwen-Image-2.1 model: earlier Qwen-Image
         // checkpoints are refused at load, so the model type is the whole check.
         private const string NotAnImageModelError = "The loaded model is not a Qwen-Image-2.1 model.";

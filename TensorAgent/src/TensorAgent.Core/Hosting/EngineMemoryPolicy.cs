@@ -179,7 +179,8 @@ public static class EngineMemoryPolicy
         // enough. See the summary on the constants for the numbers. A desktop host
         // clears them instead, so the engine's defaults apply and a phone budget set
         // earlier in the same process cannot outlive it.
-        bool phone = device == DeviceClass.Phone;
+        // The phone's budget, on a phone or for an entry too large to afford the desktop's.
+        bool phone = device == DeviceClass.Phone || model.LeanCaches;
         Environment.SetEnvironmentVariable(KvInitialTokensVariable, phone ? KvInitialTokens.ToString() : null);
         Environment.SetEnvironmentVariable(KvGenerationReserveMaxVariable, phone ? KvGenerationReserveMax.ToString() : null);
         Environment.SetEnvironmentVariable(KvHolderPoolMaxVariable, phone ? KvHolderPoolMax.ToString() : null);
