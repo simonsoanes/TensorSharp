@@ -8,41 +8,14 @@
 
 **Native .NET LLM inference engine for GGUF models** — autoregressive LLMs *and* DiffusionGemma-style text-diffusion, plus [Qwen-Image-2.1 generation and editing](docs/models/qwenimage21.md) and MiniMax-H3 video with native 32 kHz stereo audio (and Wan 2.1/2.2 for video alone). Ships a console app, a browser chat UI, and Ollama/OpenAI-compatible HTTP APIs. The .NET runtime offers managed CPU and native accelerator backends; published comparisons use identical GGUF files and hardware. The optional `TensorSharp.AgentHost` layer adds Agent Skills, a bounded, in-process model-to-tool loop for sandboxed file and shell work, and bounded automatic subagent delegation.
 
-## See it in action
+## Highlights
 
-One engine, four ways to use it. Each screenshot is an unedited capture of a real run on an Apple M5 Pro (48 GB), taken on 2026-09-30.
-
-### TensorSharp.Cli: models in your terminal
-
-The console app runs a GGUF model from the command line: one-shot prompts, an interactive chat (`--chat`) that takes `/image`, `/audio`, `/video` and `/text` attachments, image and video generation, JSONL batches, and built-in benchmarks. Every chat reply ends with its prefill and decode timings. See the [Console Application guide](USAGE.md#console-application).
-
-<p align="center"><img src="website/assets/screenshots/tensorsharp-cli.png" alt="TensorSharp.Cli in a terminal: an interactive chat with Gemma 4 E4B on Metal that reads this README and answers two questions about it, each reply ending with its prefill and decode timings" width="700"></p>
-
-<sub>Gemma 4 E4B (Q8_0) on `ggml_metal`, in the interactive chat. `/text` attaches this README (40,224 characters). Both answers decode at about 40 tokens/s, and the second turn reuses the cached README, so its first token arrives in 140 ms.</sub>
-
-### TensorSharp.Server.Host: Web UI chat and compatible APIs
-
-The server hosts one model for a browser chat and for any Ollama or OpenAI client, on the same port. The Web UI streams Markdown answers, takes image, audio, video, PDF and text uploads, and shows the model's reasoning on request. Started with `--code-exec`, it lets the model write and run code in a sandbox and hands back the files it made. See the [Web Application guide](USAGE.md#web-application).
-
-<p align="center"><img src="website/assets/screenshots/tensorsharp-webui.png" alt="The TensorSharp Web UI: Qwen3.8 27B compared two mortgages by writing and running a Python script, answered with a table and a recommendation, and offered the script and the amortization CSV as downloads" width="880"></p>
-
-<sub>Qwen3.8 27B (UD-Q4_K_XL) on `ggml_metal`, started with `--code-exec`. The model wrote a Python script, ran it in the macOS sandbox, checked that both schedules end at a $0 balance, and returned the script and the 540-row CSV as downloads. The stats line counts every token the turn generated, reasoning and tool calls included.</sub>
-
-### TensorAgent on iPhone: a private agent in your pocket
-
-TensorAgent is a native iPhone and iPad app on the same engine. It downloads a model once, then runs chat, photo and file questions, dictation, and agent work in built-in Python and JavaScript runtimes on the device; by default nothing leaves the phone. See the [TensorAgent README](TensorAgent/README.md).
-
-<p align="center"><img src="website/assets/screenshots/tensoragent-iphone.png" alt="TensorAgent on an iPhone: Gemma 4 E2B scaled a recipe from 4 to 10 people by running a Python script in the app's built-in Python, and answered with a table" width="300"></p>
-
-<sub>Gemma 4 E2B (Q8_0) in the iPhone 17 Pro simulator. The simulator has no GPU, so the engine runs on `ggml_cpu` there; on an iPhone it uses Metal. The model wrote a short script, ran it in the app's built-in Python, and answered with the table.</sub>
-
-### TensorAgent on the desktop: macOS and Windows
-
-The same project builds a Mac app, and a Windows app that has not yet been built or run. On the Mac, the model's code runs as real `bash`, `python3` and `node` processes confined by the macOS sandbox, and the Playwright skill can drive a browser. See [TensorAgent on the desktop](TensorAgent/README.md#on-the-desktop-macos-and-windows).
-
-<p align="center"><img src="website/assets/screenshots/tensoragent-mac.png" alt="TensorAgent on a Mac: Qwen3.5 9B wrote a Python file with a Roman-numeral converter and unit tests, ran them, fixed the function when the first run failed, and reran until all five tests passed" width="880"></p>
-
-<sub>Qwen3.5 9B (IQ4_XS) on Metal. The model wrote a Python file with a Roman-numeral converter and its unit tests, and ran it with the Mac's own `python3` inside the macOS sandbox. The first run failed, so it fixed the function (one malformed patch was rejected on the way) and reran until all five tests passed.</sub>
+- **Local, native .NET inference.** Run GGUF text and multimodal models from the CLI, browser UI, or Ollama/OpenAI-compatible APIs.
+- **Broad model and media support.** Current source covers modern text models, vision/audio input, PDF, image generation/editing, and video generation; see the [model cards](docs/models/README.md).
+- **Text and code embeddings.** GGUF BERT/XLM-R encoders with OpenAI/Ollama batch embedding APIs for Snowflake Arctic Embed and MiniLM; see the [embedding guide](docs/embeddings.md).
+- **Measured performance.** TensorSharp is benchmarked against `llama.cpp` on identical models and hardware. Results are specific to the measured model, backend, and workload. See [Benchmarks](docs/benchmarks.md).
+- **Agentic work, including iOS.** `TensorSharp.AgentHost` adds bounded Agent Skills, code tools, and [automatic subagent delegation](docs/multi_agent.md) with independent contexts, private workspaces, dependency scheduling, and read-only defaults. [TensorAgent](TensorAgent/README.md) brings the same local chat and agent experience to iPhone and iPad using the iOS `ggml_metal` backend.
+- **Production-friendly building blocks.** Continuous batching and the paged, Radix prefix-shared KV cache are on by default; speculative decoding, tensor parallelism, and configurable security boundaries are available when you need them. See [Features](FEATURES.md), [Usage](USAGE.md), and the [current project status](docs/PROJECT_STATUS.md).
 
 ## Supported model families at a glance
 
@@ -51,7 +24,7 @@ The same project builds a Mac app, and a Windows app that has not yet been built
 - **Image generation/editing and video generation:** [Qwen-Image-2.1](docs/models/qwenimage21.md), [MiniMax-H3 (video + stereo audio)](docs/models/minimax-h3.md), and [Wan 2.1 / 2.2](docs/models/wan.md).
 - **Text and code embeddings:** BERT / XLM-R encoders — [Snowflake Arctic Embed L v2.0 and all-MiniLM-L6-v2](docs/embeddings.md).
 
-Backend, modality, feature support, and validation coverage vary by model. See the [model cards](docs/models/README.md), [embedding guide](docs/embeddings.md), and [full architecture matrix](#supported-model-architectures) for details.
+Backend, modality, feature support, and validation coverage vary by model. See the [supported models](docs/supported_models.md) tables, the [model cards](docs/models/README.md), and the [embedding guide](docs/embeddings.md) for details.
 
 ## Learn with the books
 
@@ -64,49 +37,11 @@ Backend, modality, feature support, and validation coverage vary by model. See t
 
 **[Explore both books and their repository reading paths](docs/BOOK.md)**
 
-## Highlights
-
-- **Text and code embeddings.** GGUF BERT/XLM-R encoders with OpenAI/Ollama batch embedding APIs for Snowflake Arctic Embed and MiniLM; see the [embedding guide](docs/embeddings.md).
-- **Local, native .NET inference.** Run GGUF text and multimodal models from the CLI, browser UI, or Ollama/OpenAI-compatible APIs.
-- **Broad model and media support.** Current source covers modern text models, vision/audio input, PDF, image generation/editing, and video generation; see the [model cards](docs/models/README.md).
-- **Measured performance.** TensorSharp is benchmarked against `llama.cpp` on identical models and hardware. Results are specific to the measured model, backend, and workload. See the [benchmark report](docs/engine_comparison_report.md).
-- **Agentic work, including iOS.** `TensorSharp.AgentHost` adds bounded Agent Skills, code tools, and [automatic subagent delegation](docs/multi_agent.md) with independent contexts, private workspaces, dependency scheduling, and read-only defaults. [TensorAgent](TensorAgent/README.md) brings the same local chat and agent experience to iPhone and iPad using the iOS `ggml_metal` backend.
-- **Production-friendly building blocks.** Continuous batching and the paged, Radix prefix-shared KV cache are on by default; speculative decoding, tensor parallelism, and configurable security boundaries are available when you need them. See [Features](FEATURES.md), [Usage](USAGE.md), and the [current project status](docs/PROJECT_STATUS.md).
-
-The detailed implementation notes and historical benchmark claims have moved to the linked documentation so this page stays useful as a starting point.
-
 ## Quick Start
 
 Prefer a prebuilt application? The [Releases page](https://github.com/zhongkaifu/TensorSharp/releases) provides self-contained CLI and Server archives for Windows x64 (CPU/CUDA), Linux x64 (CPU/CUDA), and macOS arm64.
 
-**NVIDIA DGX Spark / GB10:** use the separate experimental **CUDA 13, Linux ARM64**
-[Docker build and archive instructions](DEVELOPMENT.md#gb10--dgx-spark-build-container-experimental).
-Its archives end in `linux-arm64-cuda13-GB10`; they target a single GB10, not
-generic ARM64 GPUs. Tagged releases also publish them, built in Docker on a hosted
-ARM64 runner without a GPU. A historical real-hardware check of CLI and server
-text inference predates the upstream reintegration and does not certify the
-current code; hosted CI rechecks only the CPU and archive paths. The existing x64
-CUDA archives are not suitable for the Spark.
-
-Source builds target .NET 10. On a new development machine, install the full **.NET 10 SDK**—the .NET Runtime alone cannot build TensorSharp:
-
-| Platform | Install the SDK |
-|---|---|
-| **Windows** | In PowerShell, run `winget install Microsoft.DotNet.SDK.10`, or use Microsoft's [.NET installation guide for Windows](https://learn.microsoft.com/en-us/dotnet/core/install/windows). |
-| **macOS** | Use the [.NET 10 SDK installer](https://dotnet.microsoft.com/en-us/download/dotnet/10.0): choose **Arm64** for Apple silicon or **x64** for an Intel Mac. See Microsoft's [macOS instructions](https://learn.microsoft.com/en-us/dotnet/core/install/macos). |
-| **Linux** | Follow Microsoft's [Linux distribution guide](https://learn.microsoft.com/en-us/dotnet/core/install/linux) to configure the correct package source for your distro and install its .NET 10 SDK package (commonly `dotnet-sdk-10.0`). |
-
-Open a new terminal and verify that a `10.0.x` SDK is listed:
-
-```bash
-dotnet --list-sdks
-```
-
-See the [cross-platform .NET install overview](https://learn.microsoft.com/en-us/dotnet/core/install/) or [Development → Prerequisites](DEVELOPMENT.md#prerequisites) for more detail.
-
-Then get running in ~30 seconds on the verified native GGML fast path — Gemma 4 E4B. The other prerequisites are `git`, `curl`, [CMake](https://cmake.org/download/) 3.20+ (the native GGML library is configured and built with it — on Windows, Visual Studio's "C++ CMake tools for Windows" component ships one and the build will find it), and the toolchain for your GPU backend (see [Development → Prerequisites](DEVELOPMENT.md#prerequisites)). The recommended public file is [`gemma-4-E4B-it-Q8_0.gguf`](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/gemma-4-E4B-it-Q8_0.gguf) (7.48 GiB); text-only inference needs no projector.
-
-**Windows + NVIDIA (PowerShell)**
+To build from source you need the full **.NET 10 SDK** ([how to install it](docs/getting_started.md#install-and-first-run)), `git`, `curl`, [CMake](https://cmake.org/download/) 3.20+, and the toolchain for your GPU. Then run the verified [Gemma 4 E4B](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/gemma-4-E4B-it-Q8_0.gguf) model (7.48 GiB). On Windows with an NVIDIA GPU (PowerShell):
 
 ```powershell
 git clone https://github.com/zhongkaifu/TensorSharp.git; Set-Location TensorSharp
@@ -117,191 +52,51 @@ $env:TENSORSHARP_GGML_NATIVE_ENABLE_CUDA = 'ON'
 dotnet run --project TensorSharp.Cli -c Release -p:TensorSharpSkipMlxNative=true -- --model models\gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 128 --backend ggml_cuda
 ```
 
-**macOS (Apple Silicon)** — drop the CUDA env var and use `--backend ggml_metal`.
+On other machines, change the backend (see [Pick a backend](#pick-a-backend)):
 
-**Linux + NVIDIA** — prefix the `dotnet run` with `TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON` and use `--backend ggml_cuda`.
+- **macOS (Apple Silicon):** drop the CUDA environment variable and use `--backend ggml_metal`.
+- **Linux + NVIDIA:** prefix the `dotnet run` with `TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON` and use `--backend ggml_cuda`.
+- **AMD / Intel / NVIDIA Vulkan:** set `TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON` and use `--backend ggml_vulkan`.
 
-**AMD / Intel / NVIDIA Vulkan** — set `TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON` and use `--backend ggml_vulkan`.
-
-**Linux (Ubuntu) + multiple NVIDIA GPUs — tensor parallelism**
-
-Tensor parallelism splits one model across N GPUs. It runs on the direct
-`cuda` backend and on the GGML CUDA / Vulkan backends (`--backend ggml_cuda`,
-`ggml_vulkan`). Use `--tp N` only for tensor parallelism. Use the separate
-`--layer-split N` option for whole-layer placement on Qwen 3.8 Flash Next,
-DeepSeek V4 / V4.1, and GLM 5.x: one contiguous run of whole layers per GPU.
-The modes are mutually exclusive, and unsupported requests fail at startup.
-Layer splitting is local to one node; it cannot use `--tp-node-id` / `--tp-peers`.
-Existing layer-split commands must replace `--tp N` with `--layer-split N`
-(or `TENSORSHARP_LAYER_SPLIT_DEGREE=N`). With neither mode configured, inference uses one device. GLM 5.x accepts
-`--layer-split N` for whole-layer placement and `--tp N` for its native local
-tensor-parallel path on the GGML GPU backends. For Qwen-Image-2.1,
-`--tp N` shards only the diffusion transformer; its text/vision encoders and VAE
-stay on the first GPU. Install the CUDA toolkit first, then:
-
-```bash
-# On RunPod's Ubuntu 24.04 images, point the loader at the CUDA compat libraries first:
-export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH
-# On older Ubuntu releases the .NET 10 SDK comes from the backports PPA:
-add-apt-repository ppa:dotnet/backports
-
-apt update && apt install dotnet-sdk-10.0
-git clone https://github.com/zhongkaifu/TensorSharp.git
-cd TensorSharp
-mkdir models
-wget "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" -O models/gemma-4-E4B-it-Q8_0.gguf
-bash TensorSharp.GGML.Native/build-linux.sh
-dotnet build -c Release
-
-# 2 GPUs in one process
-TensorSharp.Cli/bin/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf \
-    --backend cuda --interactive --max-tokens 20000 --tp 2
-
-# Same thing on the GGML CUDA backend (add TENSORSHARP_TP_DEVICES=0,2 to pick GPUs)
-TensorSharp.Cli/bin/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf \
-    --backend ggml_cuda --interactive --max-tokens 20000 --tp 2
-```
-
-Scale the same model across machines by adding a node ID and the shared peer
-list — 2 nodes × 2 GPUs gives a global TP degree of 4:
-
-```bash
-# Node 0
-TensorSharp.Cli/bin/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf --backend cuda --tp 2 \
-    --tp-node-id 0 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
-# Node 1 (same peer list, different node ID)
-TensorSharp.Cli/bin/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf --backend cuda --tp 2 \
-    --tp-node-id 1 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
-```
-
-`TensorSharp.Server.Host` takes the same `--tp`, `--tp-node-id`, and `--tp-peers`
-flags (or the `TENSORSHARP_TP_*` environment variables); in a multi-node
-cluster the server is node `0` — the driver that serves HTTP — and every other
-node runs a `TensorSharp.Cli` worker. Full reference:
-**[Tensor Parallelism & Distributed Inference](USAGE.md#tensor-parallelism--distributed-inference)**.
-
-
-Host the same model as a server (browser UI at <http://localhost:5000>, plus Ollama/OpenAI APIs):
+Host the same model as a server: a browser chat at <http://localhost:5000> plus Ollama- and OpenAI-compatible APIs.
 
 ```bash
 dotnet run --project TensorSharp.Server.Host -c Release -p:TensorSharpSkipMlxNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --max-tokens 512
 ```
 
-> The server binds `0.0.0.0:5000` by default (change it with `--port` / `--host`, or the `PORT` / `HOST` environment variables; on macOS port 5000 is taken by the AirPlay Receiver) with no built-in auth or TLS — keep it behind a firewall or an authenticated HTTPS reverse proxy. For image/video/audio add the companion [`mmproj-gemma-4-E4B-it-Q8_0.gguf`](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/mmproj-gemma-4-E4B-it-Q8_0.gguf) with `--mmproj`.
+> The server listens on `0.0.0.0:5000` with no built-in authentication or TLS; keep it behind a firewall or an authenticated HTTPS reverse proxy.
 
-TensorSharp.Server.Host, TensorSharp.Cli, and TensorAgent use the shared engine's Radix
-KV prefix cache by default for every autoregressive family in the tables below
-(not DiffusionGemma or the image/video models). It reuses public prompt prefixes
-and each conversation's private state, respecting model and media boundaries;
-speculative decoding (`--spec`) keeps it on.
-Set `TS_SCHED_PREFIX_CACHE=0` to disable runtime prefix reuse.
-Server and CLI `--no-prefix-cache` also disable prefix reuse and startup warmup;
-on the server it also turns off the on-disk prefix checkpoints.
+### Pick a backend
 
-Both executables print their full option reference — description, default, range, and an example per flag — when started with no arguments or with `--help`:
+| Your hardware | Backend |
+|---|---|
+| Apple Silicon (Mac) | `--backend ggml_metal` |
+| Windows / Linux + NVIDIA GPU | `--backend ggml_cuda` |
+| Windows / Linux + AMD / Intel / NVIDIA GPU | `--backend ggml_vulkan` |
+| No GPU | `--backend ggml_cpu` (native kernels), or `--backend cpu` (pure C#, no native dependencies) |
 
-```bash
-dotnet run --project TensorSharp.Cli -c Release -- --help
-dotnet run --project TensorSharp.Server.Host -c Release -- --help
-```
+The [Getting started guide](docs/getting_started.md) has the rest: installing the SDK on each platform, multi-GPU and multi-node runs, NVIDIA DGX Spark, multimodal input, embeddings, and making it fast. Every option is in the [CLI](USAGE.md#console-application) and [Server](USAGE.md#web-application) references, and both programs print them with `--help`.
 
-Full command reference: **[CLI](USAGE.md#console-application)** · **[Server](USAGE.md#web-application)** · more models to download: **[Model Downloads](MODEL_DOWNLOADS.md)** · prefer a config file? **[config/](config/README.md)**.
+## See it in action
 
-## Text and code embeddings
+One engine, four ways to use it, each an unedited capture of a real run.
 
-Current source supports **Snowflake Arctic Embed L v2.0** and **all-MiniLM-L6-v2** GGUF encoders, serving normalized vectors through OpenAI `/v1/embeddings` and Ollama `/api/embed`. After the source build above, start the small MiniLM service:
+<table>
+  <tr>
+    <td align="center" width="50%"><img src="website/assets/screenshots/tensorsharp-cli.png" alt="TensorSharp.Cli in a terminal: an interactive chat with Gemma 4 E4B that reads this README and answers questions about it" width="250"><br><b>TensorSharp.Cli</b><br>Models in your terminal</td>
+    <td align="center" width="50%"><img src="website/assets/screenshots/tensorsharp-webui.png" alt="The TensorSharp Web UI: Qwen3.8 27B compared two mortgages by writing and running a Python script" width="400"><br><b>TensorSharp.Server.Host</b><br>Web UI chat and Ollama/OpenAI-compatible APIs</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="website/assets/screenshots/tensoragent-iphone.png" alt="TensorAgent on an iPhone: Gemma 4 E2B scaled a recipe by running a Python script on the phone" width="140"><br><b>TensorAgent on iPhone</b><br>A private agent that runs the model on the phone</td>
+    <td align="center"><img src="website/assets/screenshots/tensoragent-mac.png" alt="TensorAgent on a Mac: Qwen3.5 9B wrote a Python module with unit tests and fixed it until they passed" width="400"><br><b>TensorAgent on the desktop</b><br>The same app on the Mac, running code in a sandbox</td>
+  </tr>
+</table>
 
-```bash
-curl --create-dirs -fL -o models/embeddings/all-MiniLM-L6-v2-Q8_0.gguf \
-  https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/544f204f2eaa2d71361ffc74d6df7170285b286a/all-MiniLM-L6-v2-Q8_0.gguf
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
-  --model models/embeddings/all-MiniLM-L6-v2-Q8_0.gguf \
-  --embeddings --backend cpu --host 127.0.0.1 --port 5001 --no-webui
-```
-
-```bash
-curl http://127.0.0.1:5001/v1/embeddings -H 'Content-Type: application/json' \
-  -d '{"model":"all-MiniLM-L6-v2-Q8_0","input":["read a file","open a document"]}'
-```
-
-Use `cpu` for 100% pure C# execution without native inference libraries, or `ggml_cpu`, `ggml_metal`, and `ggml_cuda` for native GGML execution; run chat and embedding services separately. See the [embedding guide](docs/embeddings.md) for Snowflake downloads, batching, dimensions, the C# API, tokenization, and performance validation.
-
-## Pick a Backend
-
-Backend support depends on the model architecture. Embedding models support pure C# `cpu` and native `ggml_cpu`, `ggml_metal`, and `ggml_cuda`; see the [status matrix](docs/PROJECT_STATUS.md#status-matrix) for other model-specific limits.
-
-| Your hardware | Recommended backend | Flag | Notes |
-|---|---|---|---|
-| **Apple Silicon (Mac)** | GGML Metal | `--backend ggml_metal` | The server's default on macOS; the CLI defaults to `ggml_cpu` on every OS, so pass the flag there. `--backend mlx` is an alternative Apple-Silicon GPU path. |
-| **Windows / Linux + NVIDIA GPU** | GGML CUDA | `--backend ggml_cuda` | Most-tested NVIDIA path. `--backend cuda` is the direct PTX/cuBLAS backend for experimentation. |
-| **Windows / Linux + AMD / Intel / NVIDIA GPU** | GGML Vulkan | `--backend ggml_vulkan` | Vendor-neutral GPU path via ggml-vulkan. Built automatically when a Vulkan runtime is present; `--no-vulkan` opts out. |
-| **No GPU / portability / debugging** | Pure C# CPU | `--backend cpu` | No native dependencies; matmuls run on a multi-core worker pool. Even DeepSeek V4.1 Flash has a whole-model executor here — it runs on the pure-C# `DeepSeek4CpuExecutor` with no ggml and no GPU, held to the PyTorch oracle `eng/dsv41-reference.py` at `atol=rtol=2e-5` on a five-layer F32 fixture (architectural agreement with the oracle, not parity on the real Q2_K weights), as a correctness and portability path rather than a serving one. For faster CPU inference use `--backend ggml_cpu` (native kernels). |
-
-Full per-backend description: [Usage → Compute Backends](USAGE.md#compute-backends).
-
-## Verified Models
-
-Implemented and exercised by the test/benchmark matrix. Pick a quantization that fits your hardware (Q4_K_M for low memory, Q8_0 for higher quality). More sizes and projector files: [Model Downloads](MODEL_DOWNLOADS.md).
-
-| Family | Example model (GGUF) | Image / Video / Audio | Thinking | Tools | Card |
-|---|---|---|---|---|---|
-| DeepSeek V4.1 Flash | [DeepSeek-V4.1-Flash](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/tree/58d8ac86298fdf85a2440defee08b1abcad32e45) (Q2_K or Q4_K_M shards with embedded Engram; `ggml_cuda` serving path, with `ggml_cpu` a correctness and portability path that still takes the vision companion, and `cuda` and the pure-C# `cpu` executor text-only ones) | ✅ (vision companion) / ✅ (vision companion) / — | ✅ | ✅ | [deepseek41.md](docs/models/deepseek41.md) |
-| DeepSeek V4 Flash | [DeepSeek-V4-Flash-0731](https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF) (284B MoE, split GGUF) | — / — / — | ✅ | ✅ | [deepseek4.md](docs/models/deepseek4.md) |
-| GLM 5.x | [GLM-5.2](https://huggingface.co/unsloth/GLM-5.2-GGUF) (744B-A40B MoE, split GGUF), [GLM-5.3](https://huggingface.co/unsloth/GLM-5.3-GGUF) (256 routed experts, text only; one subdirectory per quant, UD-Q2_K_XL is seven shards / 236.4 GiB — point `--model` at the `-00001-of-00007` shard), [GLM-5.3-Flash](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF) (320B MoE, split GGUF, + mmproj) | ✅ (5.3-Flash only; 5.2 and 5.3 are text only) / — / — | ✅ | ✅ | [glm.md](docs/models/glm.md) |
-| Qwen 3.8 Flash Next | [Qwen3.8-Flash-Next](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) (hybrid GDN + attention MoE, 512 experts, split GGUF, + mmproj) | ✅ / ✅ (`video_url`) / — | ✅ | ✅ | [qwen38-flash-next.md](docs/models/qwen38-flash-next.md) |
-| Gemma 4 | [gemma-4-E4B-it](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF) (also 12B, 31B, 26B-A4B MoE) | ✅ / ✅ / ✅ | ✅ | ✅ | [gemma4.md](docs/models/gemma4.md) |
-| Qwen 3.5 / 3.6 | [Qwen3.5-9B](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) (also 35B-A3B MoE, Qwen3.8-27B) | ✅ / — / — | ✅ | ✅ | [qwen35.md](docs/models/qwen35.md) |
-| Bonsai2 | Local hash-pinned `Ternary-Bonsai-2-27B-PQ2_0.gguf` / `-PTQ1_0.gguf` (dense Qwen 3.5 hybrid with PRISM signed-Hadamard transforms, + mmproj); single-device GGML backends only, validated on Metal | ✅ / — / — | ✅ | ✅ | [bonsai2.md](docs/models/bonsai2.md) |
-| GPT OSS | [gpt-oss-20b](https://huggingface.co/ggml-org/gpt-oss-20b-GGUF) (MoE) | — / — / — | ✅ | ✅ | [gptoss.md](docs/models/gptoss.md) |
-| Nemotron-H | [Nemotron-H-8B](https://huggingface.co/bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF) (also 47B, Omni) | ✅ (Omni) / — / — | ✅ | ✅ | [nemotron.md](docs/models/nemotron.md) |
-| Mistral 3 | [Mistral-Small-3.1-24B](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF) | ✅ / — / — | — | — | [mistral3.md](docs/models/mistral3.md) |
-| Hunyuan Dense | Tencent dense Hunyuan GGUFs (`hunyuan-dense`), e.g. the Hy-MT2 releases | — / — / — | — | — | [hunyuan-dense.md](docs/models/hunyuan-dense.md) |
-| Muse-Glimmer | [Muse-Glimmer-30B](https://huggingface.co/unsloth/Muse-Glimmer-30B-GGUF) (+ mmproj) | ✅ / — / — | ✅ | ✅ | [muse-glimmer.md](docs/models/muse-glimmer.md) |
-| DiffusionGemma | [diffusiongemma-26B-A4B-it](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF) (vision tower from the upstream safetensors shard) | ✅ / — / — | — (not prompted) | — | [diffusiongemma.md](docs/models/diffusiongemma.md) |
-| Qwen-Image-2.1 | [Qwen-Image-2.1 GGUF](https://huggingface.co/Abiray/Qwen-Image-2.1-GGUF) (DiT + dedicated 2.1 VAE + Qwen3-VL-8B); Unsloth's metadata-free Q8_0 DiT also loads, detected from its tensors (for editing, pass its `mmproj-BF16.gguf` with `--qwen-image-mmproj`) | 🖼️ text→image, image editing; RGBA; LoRA plug-ins (`--lora`, incl. 4–8-step distillation) | — | — | [qwenimage21.md](docs/models/qwenimage21.md) |
-| MiniMax-H3 audio+video | [unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF) (denoiser + Qwen3-VL-32B encoder) + [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) (video + audio VAE) | 🎬🔊 text→video, image→video, first/last frame, reference→video (image/clip/audio), **with stereo audio** | — | — | [minimax-h3.md](docs/models/minimax-h3.md) |
-| Wan 2.1 / 2.2 video | [Wan2.2-TI2V-5B](https://huggingface.co/QuantStack/Wan2.2-TI2V-5B-GGUF) (also [T2V-A14B](https://huggingface.co/QuantStack/Wan2.2-T2V-A14B-GGUF), [I2V-A14B](https://huggingface.co/QuantStack/Wan2.2-I2V-A14B-GGUF), [Wan2.1-T2V-14B](https://huggingface.co/city96/Wan2.1-T2V-14B-gguf)) + UMT5-XXL + video VAE · fast lane: [TI2V-5B-Turbo](https://huggingface.co/hum-ma/Wan2.2-TI2V-5B-Turbo-GGUF) (4-step, 25× fewer DiT passes) | 🎬 text→video, image→video | — | — | [wan.md](docs/models/wan.md) |
-
-## Make It Fast
-
-Start with these choices, in order:
-
-1. **Choose the right checkpoint.** For Wan video, use a Turbo/Lightning/4-step distilled GGUF. For Qwen-Image-2.1, add a step-distillation [LoRA plug-in](docs/models/qwenimage21.md#lora-plug-ins) from `config/lora/` (4–8 steps instead of the 40-step default).
-2. **Use the matching backend.** NVIDIA: `ggml_cuda`; Apple Silicon and iOS: `ggml_metal`; CPU: `ggml_cpu` (use managed `cpu` for portability).
-3. **Reduce work before tuning flags.** For H3 use `--cfg 1.0` and 4–8 steps; for media, lower resolution, frame count, or steps.
-4. **Then scale or speculate.** Try `--draft-model` / `--spec`, `--n-cpu-moe`, or `--tp N` when the model or workload calls for it.
-
-See the [performance guide and detailed fast lanes](docs/PROJECT_STATUS.md#make-it-fast), the [model cards](docs/models/README.md), and the [environment-variable matrix](docs/env_var_feature_matrix.md) for trade-offs and measurements.
-
-## Supported Model Architectures
-
-| Architecture | GGUF arch keys | Example Models | Multimodal | Thinking | Tools | MTP spec | Card |
-|---|---|---|---|---|---|---|---|
-| BERT / XLM-R embeddings | `bert` | Snowflake Arctic Embed L v2.0, all-MiniLM-L6-v2 | Text → vectors | — | — | — | [Embedding guide](docs/embeddings.md) |
-| DeepSeek V4.1 Flash | `deepseek41` | DeepSeek-V4.1-Flash (40 layers, 384 routed experts at top-6 plus one shared expert, four residual streams with delayed hyper-connection mixing, Engram n-gram features, 1M declared context) | Text; image and video with the prepared vision companion (`--mmproj`), audio refused | Yes | Yes (spaced DSML, grammar-constrained) | Experimental: loads a `deepseek41-dspark` drafter (`--draft-model`) on `ggml_cuda`/`ggml_cpu`; initial text/image HTTP probes with trained weights passed using two-GPU layer split on `ggml_cuda`; broad quality and throughput remain unqualified (V4 drafters are rejected) | [deepseek41.md](docs/models/deepseek41.md) |
-| DeepSeek V4 Flash | `deepseek4` | DeepSeek-V4-Flash (284B MoE, 256 experts, compressed sparse attention, 1M context) | Text only | Yes | Yes (DSML) | Yes (DSpark block drafter, separate GGUF) | [deepseek4.md](docs/models/deepseek4.md) |
-| GLM 5.x | `glm-dsa`, `glm_dsa`, `glm5next` | GLM-5.2 (744B-A40B MoE, 256 experts, MLA + DeepSeek Sparse Attention, 1M context), [GLM-5.3](docs/models/glm.md#glm-53-glm-dsa) (the same 79-block `glm-dsa` shape as 5.2 — 78 trunk blocks plus one NextN, 256 routed experts at top-8 with one shared expert, MLA with the lightning indexer, rope base 8e6 — so it loads on the GLM-5.2 path with no new code and no new flag; text only), GLM-5.3-Flash (320B MoE, 288 experts, KDA linear attention + NoPE MLA with a pooled indexer) | Text only (5.2 and 5.3), Image (5.3-Flash) | Yes | Yes (XML tool calls) | Yes on GLM-5.2 and GLM-5.3 (embedded NextN block; on 5.3 speculation engages on a single device or explicit `--layer-split N`, without active TP) | [glm.md](docs/models/glm.md) |
-| Qwen 3.8 Flash Next | `qwen4exp` | Qwen3.8-Flash-Next (hybrid MoE, 512 experts / 10 used, GatedDeltaNet on 36 of 48 layers interleaved with QSA-indexed full attention, PLE n-gram block, ×4 hyper-connections) | Image, video (`video_url`) | Yes | Yes (Qwen XML / JSON tool calls) | Yes (shared MTP head, separate GGUF via `--draft-model`; GGML backends) | [qwen38-flash-next.md](docs/models/qwen38-flash-next.md) |
-| Gemma 4 | `gemma4` | gemma-4-E4B, gemma-4-12B, gemma-4-31B, gemma-4-26B-A4B (MoE) | Image, Video, Audio | Yes | Yes | Yes (separate draft GGUF) | [gemma4.md](docs/models/gemma4.md) |
-| Qwen 3.5 / 3.6 family | `qwen35`, `qwen35moe`, `qwen3next` | Qwen3.5-9B (hybrid Attn+Recurrent), Qwen3.5/3.6-35B-A3B (MoE), Qwen3.8-27B (dense hybrid) | Image | Yes | Yes | Yes: embedded NextN on Qwen 3.6 and Qwen 3.8 27B (`--spec`); DFlash2 block drafter on Qwen 3.8 27B (separate GGUF, `--draft-model`) | [qwen35.md](docs/models/qwen35.md) |
-| Bonsai2 (Qwen family) | `qwen35` with `prism.hadamard.*` metadata and PQ2_0 / PTQ1_0 tensors | Ternary-Bonsai-2-27B PQ2_0 / PTQ1_0 (64-layer dense Qwen 3.5 hybrid; weights repacked losslessly to GGML Q2_0 at load; single-device GGML backends only) | Image (companion mmproj) | Yes | Yes | — | [bonsai2.md](docs/models/bonsai2.md) |
-| GPT OSS | `gptoss`, `gpt-oss` | gpt-oss-20b (MoE) | Text only | Yes (always) | Yes | — | [gptoss.md](docs/models/gptoss.md) |
-| Nemotron-H | `nemotron_h`, `nemotron_h_moe`, `nemotron_h_omni` | Nemotron-H-8B/47B (Hybrid SSM-Transformer, MoE), Nemotron 3 Nano Omni, Nemotron 3.5 Lightning 30B-A3B (23 Mamba-2 + 23 MoE + 6 attention) | Image (Omni); audio only with a converted Parakeet audio companion GGUF (`--mmproj` or `TS_NEMOTRON_AUDIO_MMPROJ`), otherwise refused | Yes | Yes | No (refused: verify and decode kernels differ, so speculation would change the output) | [nemotron.md](docs/models/nemotron.md) |
-| Mistral 3 | `mistral3`; also [`llama`-labelled Mistral Small 3.x files](docs/models/mistral3.md#llama-labelled-files) (Tekken tokenizer, `[INST]`/`[SYSTEM_PROMPT]` tokens) | Mistral-Small-3.1-24B-Instruct | Image | No | No | — | [mistral3.md](docs/models/mistral3.md) |
-| Hunyuan Dense | `hunyuan-dense` | Tencent dense Hunyuan decoders, e.g. Hy-MT2 (GQA with per-head QK-norm applied *after* NeoX RoPE, SwiGLU) | Text only | No | No | — | [hunyuan-dense.md](docs/models/hunyuan-dense.md) |
-| Muse-Glimmer | `muse-glimmer`, `muse_glimmer` | Muse-Glimmer-30B (interleaved SWA + NoPE full layers, attention output gate) | Image | Yes | Yes (ATEM) | Yes (DFlash block drafter, separate GGUF) | [muse-glimmer.md](docs/models/muse-glimmer.md) |
-| DiffusionGemma | `diffusion-gemma`, `diffusion_gemma` | diffusion-gemma text-diffusion GGUFs | Image in chat; [Jev](docs/models/jev.md) also accepts documents, sampled video frames and speech through a configured ASR companion | No (not prompted) | No (refused) | — | [diffusiongemma.md](docs/models/diffusiongemma.md) |
-| Qwen-Image-2.1 | `qwen_image`, `qwen-image` (2.1 detected from tensor keys; earlier Qwen-Image / Edit-2511 checkpoints are refused at load) | Qwen-Image-2.1 DiT GGUFs (+ dedicated 2.1 VAE & Qwen3-VL-8B) | Text→image and image editing, RGBA output; LoRA plug-ins; prefix KV cache on by default; DiT tensor parallelism (`--tp`, GGML CUDA/Vulkan; on Vulkan two GPUs measured slower than one) | No | No | — | [qwenimage21.md](docs/models/qwenimage21.md) |
-| MiniMax-H3 | `minimax-h3`, `minimax_h3` (the published GGUFs carry no metadata at all, so they are detected from their tensors) | MiniMax-H3 FL2VA / Ref2VA (19.3B packed audio-video DiT + Qwen3-VL-32B text encoder, video VAE, audio VAE) | Video **+ 32 kHz stereo audio** out (text→video, image→video, first/last frame, reference→video) | No | No | — | [minimax-h3.md](docs/models/minimax-h3.md) |
-| Wan video | `wan`, `wan2.1`, `wan2.2` | Wan 2.1 T2V 1.3B/14B, Wan 2.2 TI2V-5B, Wan 2.2 A14B T2V/I2V (two experts) | Video out (text→video, image→video) | No | No | — | [wan.md](docs/models/wan.md) |
-
-End-to-end per-model documentation (origin, forward graph, components, parameters, prefill/decode optimizations): [architecture cards](docs/models/README.md).
+What each run shows, step by step: [Screenshots](docs/showcase.md).
 
 ## Benchmarks
 
-### Head-to-head vs llama.cpp (engine comparison)
-
-TensorSharp’s .NET runtime and native GGML execution are compared with `llama.cpp` on **identical GGUF files, the same NVIDIA RTX 3080 Laptop GPU (16 GB), and one uniform OpenAI `/v1/chat/completions` surface** — with **both engines measured on their GGML CUDA and Vulkan builds**. Numbers are the **geomean speedup of TensorSharp over llama.cpp on the same backend** (single-stream, greedy, MTP off); **> 1.0× means TensorSharp is faster / lower-latency**. Full per-scenario tables: [`docs/engine_comparison_report.md`](docs/engine_comparison_report.md).
+TensorSharp and `llama.cpp` run identical GGUF files on the same NVIDIA RTX 3080 Laptop GPU (16 GB), each on its GGML CUDA and Vulkan builds. Each number is TensorSharp's speedup over llama.cpp on the same backend (geomean, single-stream, greedy, MTP off); above 1.0× means TensorSharp is faster.
 
 | Model | Backend | decode | prefill | TTFT |
 |---|---|---:|---:|---:|
@@ -314,9 +109,7 @@ TensorSharp’s .NET runtime and native GGML execution are compared with `llama.
 | Qwen 3.6 27B (UD-IQ2_XXS, dense) | CUDA | **1.07×** | 0.96× | 0.95× |
 | Qwen 3.6 27B (UD-IQ2_XXS, dense) | Vulkan | 1.02× | 0.85× | 0.84× |
 
-TensorSharp pulls clearly ahead on CUDA prefill / first-token latency (multi-turn prefill wins on **every** model, up to **1.49×**), holds decode parity-or-better on CUDA, and wins Vulkan decode on the dense 12B (up to **1.32×** on long context) — even at 2-bit IQ2_XXS quantization. The remaining sub-1.0× cells are active optimization targets. The harness also covers tool-calling, structured-output, MTP on/off, and parallel-request scenarios you can run yourself via [`benchmarks/engine_comparison`](benchmarks/engine_comparison). Every cell is in the [full report](docs/engine_comparison_report.md).
-
-Models too large for that 16 GB rig carry their own head-to-head in their card, measured the same way (both engines, same GGUF, same machine, back to back): [GLM-5.2 744B-A40B on 3x RTX PRO 6000](docs/models/glm.md#performance) — TensorSharp leads prefill from ~1k prompt tokens up (pp2048 **1.20×**, pp4096 **1.21×**) and decode by 1.04×, with llama.cpp a few percent ahead on short prefills. The non-Flash [GLM-5.3](docs/models/glm.md#glm-53-glm-dsa) has its own, on 8× A40 46 GB without NVLink (UD-Q2_K_XL, 10,531-token prompt, 300 decode tokens, median of 3, whole-layer placement): decode is a tie at **20.48** tok/s against llama.cpp's 20.28, TensorSharp prefills at 251.6 tok/s and loads the 236.4 GiB checkpoint **2.9× faster** (264 s against 753 s), and the honest gap is time to first token — 41.9 s against 29.0 s, about **1.4× slower**. llama.cpp's prefill tok/s was not recorded for that cell. Full method and per-repeat numbers: `docs/validation/cross-engine-2026-09/README.md` (local validation evidence, not committed). llama.cpp is a valid reference engine for `glm-dsa`, but not for `glm5next` (GLM-5.3-Flash).
+What these numbers mean, how to rerun them, and the head-to-heads of models too large for this GPU: [Benchmarks](docs/benchmarks.md).
 
 ## Documentation
 
@@ -325,6 +118,10 @@ New here? The sections above are all you need to get running. Everything else is
 | Doc | What's inside |
 |---|---|
 | [TensorSharp and TensorAgent book guide](docs/BOOK.md) | Building LLM Inference Engines and Agentic Runtimes from Scratch, plus From Tensors to Tokens: introductions, Amazon links, and repository reading paths |
+| [Getting started](docs/getting_started.md) | The full first-run guide: the .NET SDK on each platform, every backend, multi-GPU and multi-node runs, NVIDIA DGX Spark, embeddings, choosing a backend, and making it fast |
+| [Supported models](docs/supported_models.md) | Verified models and every supported architecture: example GGUFs, modalities, thinking, tools, and speculative decoding |
+| [Benchmarks](docs/benchmarks.md) | TensorSharp against llama.cpp on the same GPU and files, and the head-to-heads of larger models |
+| [Screenshots](docs/showcase.md) | The CLI, the Web UI, and TensorAgent on iPhone and Mac at work, with what each run did |
 | [Model Downloads](MODEL_DOWNLOADS.md) | Per-model `huggingface-cli` download + run quick reference (quant tiers, projectors, companions) |
 | [Usage](USAGE.md) | Full CLI reference (options, interactive REPL, JSONL batch), server hosting, logging, HTTP API examples, backends, and the env-var matrix |
 | [Features](FEATURES.md) | Deep dives on continuous batching, speculative decoding, tool calling, thinking mode, multimodal, MoE, KV codecs, and more |
@@ -344,17 +141,17 @@ New here? The sections above are all you need to get running. Everything else is
 
 ## Current Status
 
-Actively developed, and the source tree runs ahead of the published packages. The short version:
+Actively developed, and the source tree runs ahead of the published packages.
 
 | Area | Where it stands |
 |---|---|
-| Models | A dozen autoregressive families plus text-diffusion, image generation/editing, and video-with-audio generation — see [Supported Model Architectures](#supported-model-architectures). |
-| Inference hosts | CLI, interactive REPL, ASP.NET Core Web UI, Ollama-style API, OpenAI Chat Completions and Responses APIs, and the TensorAgent iOS/iPadOS app. |
+| Models | A dozen autoregressive families plus text diffusion, image generation and editing, and video with audio. See [Supported models](docs/supported_models.md). |
+| Inference hosts | CLI, Web UI, Ollama- and OpenAI-compatible APIs, and the TensorAgent app for iPhone, iPad and Mac. |
 | Backends | Pure C# CPU, direct CUDA/cuBLAS, MLX Metal, and GGML CPU/Metal/CUDA/Vulkan, with per-architecture exceptions. |
-| Serving features | Continuous batching over a paged, prefix-shared KV cache (Radix prefix cache on by default); speculative decoding; single- and multi-node tensor parallelism; structured output; tool calling. |
-| Agentic work | Agent Skills (on by default; `--no-skills` disables them) and optional sandboxed file/shell tools (`--code-exec`), plus bounded automatic subagents, on by default for tool-capable families on the server chat paths and in TensorAgent (`--no-multi-agent` disables delegation on the server, TensorAgent's "Sub-agents" setting in the app; the CLI has none). Subagents use private workspaces, run independent tasks concurrently, and wait for declared dependencies. Mutable worker tools require host opt-in. |
+| Serving features | Continuous batching with a shared prefix cache, speculative decoding, tensor parallelism, structured output, and tool calling. |
+| Agentic work | Agent Skills, sandboxed file and shell tools, and bounded sub-agents. See [Agent Skills](docs/agent_skills.md) and [Multiple agents](docs/multi_agent.md). |
 
-Per-area detail — which architecture runs on which backend, which features each family supports, and the known limits — is in the [status matrix](docs/PROJECT_STATUS.md#status-matrix).
+Per-area detail (which architecture runs on which backend, which features each family supports, and the known limits) is in the [status matrix](docs/PROJECT_STATUS.md#status-matrix).
 
 ## Author
 
