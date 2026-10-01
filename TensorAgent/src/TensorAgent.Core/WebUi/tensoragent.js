@@ -2057,7 +2057,9 @@
       // is refreshed in place, so the preview becomes the picture instead of a new
       // image being stacked under it for every step.
       if (typeof f.image_step === 'number') {
-        progress(f.image_steps ? 'Drawing… step ' + f.image_step + ' of ' + f.image_steps : 'Drawing…');
+        // With LoRA plug-ins the host names them on every step (ImageTurns.Translate).
+        var drawing = f.image_loras && f.image_loras.length ? 'Drawing with ' + f.image_loras.join(' + ') + '…' : 'Drawing…';
+        progress(f.image_steps ? drawing + ' step ' + f.image_step + ' of ' + f.image_steps : drawing);
         if (f.preview) pictureOf(view).src = f.preview;
       }
       if (f.image || f.imageUrl) {
@@ -2222,7 +2224,7 @@
   function openSheet(id) { $('sheet-bg').classList.add('on'); $(id).classList.add('on'); }
   function closeSheets() {
     $('sheet-bg').classList.remove('on');
-    ['attach-sheet', 'skills-sheet', 'model-sheet', 'nav-sheet', 'skill-sheet', 'skill-add-sheet'].forEach(function (s) { $(s).classList.remove('on'); });
+    ['attach-sheet', 'skills-sheet', 'model-sheet', 'nav-sheet', 'skill-sheet', 'skill-add-sheet', 'lora-sheet'].forEach(function (s) { $(s).classList.remove('on'); });
   }
   $('sheet-bg').addEventListener('click', closeSheets);
 
@@ -2349,7 +2351,264 @@
     info.innerHTML = '';
     info.appendChild(el('div', 'skillrow',
       state.model ? (pretty(state.model) + ' · ' + (state.arch || '?') + ' · ' + (state.backend || '')) : 'No model loaded yet.'));
+    var loraBtn = $('open-loras');
+    loraBtn.style.display = makesImages() ? '' : 'none';
+    if (makesImages()) {
+      // Only the names, for the hint: the sheet keeps its own list, which a late answer
+      // here must not replace.
+      fetch('/api/agent/loras').then(function (r) { return r.json(); }).then(function (d) {
+        var on = ((d && d.loras) || []).filter(function (l) { return l.chosen; }).map(function (l) { return l.name; });
+        $('loras-hint').textContent = on.length ? on.join(' + ') : 'speed, style';
+      }).catch(function () { /* the button still opens the sheet, which says what failed */ });
+    }
     openSheet('model-sheet');
+  });
+
+  // ---- LoRA plug-ins (an image model) --------------------------------------
+  //
+  // The plug-ins the host offers for the image model (WebUiRoutes.MapLoras): what is
+  // downloaded, what is on, and how strongly. A change is saved, and the host applies
+  // it to the next picture, so a picture being drawn keeps the plug-ins it started with.
+  var loraPoll = null;
+  // The choice last sent, until the host answers it: a second change made before then
+  // builds on it rather than on the list painted before the first. Saves go one at a
+  // time, in the order they were made, because each one replaces the whole choice; a
+  // list read before the latest save was sent is not painted over its answer.
+  var loraChoice = null;
+  var loraQueue = Promise.resolve();
+  var loraSeq = 0;
+  var loraShape = '';
+  var loraPct = {};
+  function loraSize(bytes) {
+    var mb = (Number(bytes) || 0) / 1e6;
+    return mb >= 1000 ? (mb / 1000).toFixed(1) + ' GB' : Math.round(mb) + ' MB';
+  }
+  function chosenLoras(d) {
+    return ((d && d.chosen) || []).map(function (c) { return { id: c.id, strength: c.strength }; });
+  }
+  function currentLoras() {
+    return loraChoice ? loraChoice.slice() : chosenLoras(state.loras);
+  }
+  // The host checks every change (one speed plug-in, downloaded, a known strength) and
+  // says why it refused, which post() would reduce to a status code.
+  function loraJson(r) {
+    return r.json().then(function (d) {
+      if (!r.ok) throw new Error((d && d.error) || ('HTTP ' + r.status));
+      return d;
+    });
+  }
+  // Said in the sheet, beside the switch that flipped back: a notice would land in the
+  // chat underneath it, where nobody looks while the sheet is open.
+  function loraError(message) {
+    var line = $('lora-error');
+    var inSheet = !!message && $('lora-sheet').classList.contains('on');
+    line.textContent = inSheet ? message : '';
+    line.style.display = inSheet ? '' : 'none';
+    // The sheet scrolls, and the row the user just changed may be far below the line.
+    if (inSheet && typeof line.scrollIntoView === 'function') line.scrollIntoView({ block: 'nearest' });
+    if (message && !inSheet) notice(message, 'error');
+  }
+  function loadLoras(tick) {
+    var seq = loraSeq;
+    return fetch('/api/agent/loras').then(loraJson).then(function (d) {
+      if (seq !== loraSeq || loraChoice) return state.loras;
+      return paintLoras(d, tick);
+    });
+  }
+  // One change at a time, after those before it. `send` returns the host's answer: the
+  // sheet as it now is. Every answer is kept as the latest the host said, and only the
+  // latest change's is painted.
+  function queueLoras(send, failed, isSave) {
+    var seq = ++loraSeq;
+    loraQueue = loraQueue.then(function () {
+      return send().then(function (d) {
+        state.loras = d;
+        if (seq !== loraSeq) return;
+        loraChoice = null;
+        paintLoras(d);
+      }, function (e) {
+        var why = failed + ((e && e.message) || e);
+        if (seq !== loraSeq) {
+          // A later save resends the whole choice and answers for it, so an earlier
+          // save's failure says nothing the user can act on; a removal's does.
+          if (!isSave) loraError(why);
+          return;
+        }
+        loraError(why);
+        loraChoice = null;
+        // The switches back where the host last had them, without waiting on another
+        // request, and then a fresh list.
+        if (state.loras) paintLoras(state.loras);
+        return loadLoras();
+      }).catch(function () { /* the list stays as it was painted */ });
+    });
+    return loraQueue;
+  }
+  function saveLoras(list) {
+    loraChoice = list;
+    return queueLoras(function () {
+      return fetch('/api/agent/loras/choice', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ loras: list }),
+      }).then(loraJson);
+    }, '', true);
+  }
+  function toggleLora(l, on) {
+    loraError('');
+    var d = state.loras || {};
+    var list = currentLoras().filter(function (c) { return c.id !== l.id; });
+    if (on) {
+      // One speed plug-in at a time: two step schedules cannot both apply.
+      if (l.kind === 'Speed') {
+        var speeds = ((d.loras) || []).filter(function (x) { return x.kind === 'Speed'; }).map(function (x) { return x.id; });
+        list = list.filter(function (c) { return speeds.indexOf(c.id) < 0; });
+      }
+      list.push({ id: l.id, strength: l.defaultStrength });
+    }
+    return saveLoras(list);
+  }
+  function setLoraStrength(l, value) {
+    loraError('');
+    return saveLoras(currentLoras().map(function (c) {
+      return c.id === l.id ? { id: c.id, strength: value } : c;
+    }));
+  }
+  function downloadLora(l) {
+    loraError('');
+    return fetch('/api/agent/loras/' + encodeURIComponent(l.id) + '/download', { method: 'POST' })
+      .then(function (r) {
+        // The download belongs to the app, not to this request: the stream is only a
+        // window on it, so the page closes it and follows the job through the list.
+        if (r.body && r.body.cancel) r.body.cancel().catch(function () {});
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return loadLoras();
+      })
+      .catch(function (e) { loraError('The download could not start: ' + ((e && e.message) || e)); });
+  }
+  // Removing a plug-in also turns it off, so it is a change like any other: one made
+  // before the host answers builds on the choice without it, or it would send it back.
+  function removeLora(l) {
+    loraError('');
+    loraChoice = currentLoras().filter(function (c) { return c.id !== l.id; });
+    return queueLoras(function () {
+      return fetch('/api/agent/loras/' + encodeURIComponent(l.id), { method: 'DELETE' })
+        .then(loraJson)
+        .then(function (d) { notice(l.name + ' was removed.'); return d; });
+    }, 'Could not remove ' + l.name + ': ', false);
+  }
+  function loraSwitch(l) {
+    var sw = el('label', 'switch');
+    var box = el('input');
+    box.type = 'checkbox';
+    box.checked = !!l.chosen;
+    box.addEventListener('change', function () { toggleLora(l, box.checked); });
+    sw.appendChild(box);
+    sw.appendChild(el('span', 'track'));
+    return sw;
+  }
+  function loraPercent(l) {
+    var dl = l.download;
+    return Math.round(((dl && dl.progress && dl.progress.fraction) || 0) * 100) + '%';
+  }
+  // What a row shows apart from a running download's percentage.
+  function loraShapeOf(d) {
+    return JSON.stringify(((d && d.loras) || []).map(function (l) {
+      var dl = l.download || {};
+      return [l.id, l.state, !!l.chosen, l.strength, (l.installedBytes || 0) > 0, !!dl.running, dl.state || '', dl.error || ''];
+    }));
+  }
+  function paintLoras(d, tick) {
+    state.loras = d;
+    var list = $('lora-list');
+    var loras = (d && d.loras) || [];
+    var running = loras.some(function (l) { return l.download && l.download.running; });
+    var shape = loraShapeOf(d);
+    // A poll while a download runs moves only its percentage. The rows stay, so a
+    // strength being dragged or a button being pressed is not replaced under the finger.
+    if (tick && shape === loraShape && list.children.length) {
+      loras.forEach(function (l) { if (loraPct[l.id]) loraPct[l.id].textContent = loraPercent(l); });
+      return d;
+    }
+    loraShape = shape;
+    loraPct = {};
+    list.innerHTML = '';
+    if (!loras.length) list.appendChild(el('div', 'notice', 'No LoRA plug-ins are offered for the models on this device.'));
+    loras.forEach(function (l) {
+      var row = el('div', 'skillrow lorarow');
+      row.setAttribute('data-lora', l.id);
+      var meta = el('div', 'meta');
+      meta.appendChild(el('div', 'nm', (l.chosen ? '● ' : '') + l.name + (l.kind === 'Speed' && l.steps ? ' · ' + l.steps + ' steps' : '')));
+      meta.appendChild(el('div', 'ds', l.purpose + (l.trigger ? ' Start the request with "' + l.trigger + '".' : '')));
+      var kind = l.kind === 'Speed' ? 'Speed' : l.kind === 'Edit' ? 'Edits an attached photo' : 'Style';
+      // Its task works only on the model's own steps, so a speed plug-in sits out its edits.
+      if (l.needsModelSteps) kind += ' · keeps the model\'s own steps';
+      meta.appendChild(el('div', 'lic', kind + ' · ' + loraSize(l.totalBytes) + ' · ' + l.license));
+      row.appendChild(meta);
+      var act = el('div', 'act');
+      var dl = l.download;
+      if (dl && dl.running) {
+        var pct = el('span', 'pct', loraPercent(l));
+        loraPct[l.id] = pct;
+        act.appendChild(pct);
+        var stop = el('button', 'mini', 'Stop');
+        stop.addEventListener('click', function () {
+          post('/api/agent/loras/' + encodeURIComponent(l.id) + '/download/cancel', {}).then(function () { return loadLoras(); })
+            .catch(function (e) { loraError('Could not stop the download: ' + ((e && e.message) || e)); });
+        });
+        act.appendChild(stop);
+      } else if (l.state !== 'Installed') {
+        // Turned on, but its files are gone: the next picture is refused until it is
+        // downloaded again or turned off, so both are offered here.
+        if (l.chosen) act.appendChild(loraSwitch(l));
+        var get = el('button', 'mini', 'Download');
+        get.addEventListener('click', function () { downloadLora(l); });
+        act.appendChild(get);
+        // A stopped download's part files are the user's to reclaim without finishing it.
+        if ((l.installedBytes || 0) > 0) {
+          var drop = el('button', 'mini quiet', 'Remove');
+          drop.addEventListener('click', function () { removeLora(l); });
+          act.appendChild(drop);
+        }
+        if (l.chosen) meta.appendChild(el('div', 'err', 'It is turned on, but its files are missing: download it again, or turn it off.'));
+        if (dl && dl.state === 'Failed') meta.appendChild(el('div', 'err', 'The download stopped: ' + (dl.error || 'an error') + '. Download resumes it.'));
+      } else {
+        act.appendChild(loraSwitch(l));
+        var rm = el('button', 'mini quiet', 'Remove');
+        rm.addEventListener('click', function () { removeLora(l); });
+        act.appendChild(rm);
+        if (l.chosen && l.strengthAdjustable) {
+          var strength = el('div', 'strength');
+          var range = el('input');
+          range.type = 'range';
+          range.min = String(d.minStrength);
+          range.max = String(d.maxStrength);
+          range.step = '0.05';
+          range.value = String(l.strength);
+          var shown = el('span', 'val', Math.round(l.strength * 100) + '%');
+          range.addEventListener('input', function () { shown.textContent = Math.round(Number(range.value) * 100) + '%'; });
+          range.addEventListener('change', function () { setLoraStrength(l, Number(range.value)); });
+          strength.appendChild(el('span', 'lbl', 'Strength'));
+          strength.appendChild(range);
+          strength.appendChild(shown);
+          meta.appendChild(strength);
+        }
+      }
+      row.appendChild(act);
+      list.appendChild(row);
+    });
+    if (running && !loraPoll) {
+      loraPoll = setInterval(function () {
+        if (!$('lora-sheet').classList.contains('on')) { clearInterval(loraPoll); loraPoll = null; return; }
+        loadLoras(true).catch(function () {});
+      }, 1000);
+    }
+    if (!running && loraPoll) { clearInterval(loraPoll); loraPoll = null; }
+    return d;
+  }
+  $('open-loras').addEventListener('click', function () {
+    closeSheets();
+    loraError('');
+    loadLoras().then(function () { openSheet('lora-sheet'); })
+      .catch(function (e) { notice('The LoRA plug-ins could not be listed: ' + ((e && e.message) || e), 'error'); });
   });
   $('open-models').addEventListener('click', function () {
     closeSheets();

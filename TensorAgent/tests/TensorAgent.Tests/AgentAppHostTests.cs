@@ -180,6 +180,232 @@ public sealed class AgentAppHostTests : IDisposable
         Assert.True(File.Exists(Path.Combine(prefixCache, newer, "checkpoint.bin")));
     }
 
+    /// <summary>
+    /// The app chooses LoRA plug-ins per picture. A TS_LORAS exported in the shell that
+    /// launched it (run-mac.sh passes the environment through) would apply plug-ins nobody
+    /// chose to every image load, and make the engine warn on every other one.
+    /// </summary>
+    [Fact]
+    public void ALoraListInheritedFromTheEnvironmentIsNotApplied()
+    {
+        string? before = Environment.GetEnvironmentVariable("TS_LORAS");
+        try
+        {
+            Environment.SetEnvironmentVariable("TS_LORAS", "[{\"path\":\"/somewhere/else.safetensors\"}]");
+            _host = new AgentAppHost(Paths);
+            Assert.Null(Environment.GetEnvironmentVariable("TS_LORAS"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TS_LORAS", before);
+        }
+    }
+
+    /// <summary>Puts correctly sized (sparse) files in place, so the store reads the plug-in as installed.</summary>
+    private static void FakeInstall(LoraStore store, string id)
+    {
+        CatalogLora lora = LoraCatalog.Find(id)!;
+        Directory.CreateDirectory(store.DirectoryFor(lora));
+        foreach (LoraFile file in lora.Files)
+        {
+            using FileStream stream = File.Create(store.PathFor(lora, file));
+            stream.SetLength(file.Bytes);
+        }
+    }
+
+    [Fact]
+    public async Task TheLoraSheetListsThePlugInsAndSavesOnlyAChoiceThatCanBeHonoured()
+    {
+        AgentPaths paths = Paths with { DeviceMemoryGB = 48 };
+        _host = new AgentAppHost(paths);
+        _host.Start();
+        _client = new HttpClient { BaseAddress = new Uri(_host.Server.BaseUrl) };
+        _client.DefaultRequestHeaders.Add("Cookie", $"{Core.Hosting.LoopbackServer.TokenCookie}={_host.Server.Token}");
+
+        JsonElement listed = await Get("/api/agent/loras");
+        Assert.Equal(LoraCatalog.BuiltIn.Count, listed.GetProperty("loras").GetArrayLength());
+        Assert.All(listed.GetProperty("loras").EnumerateArray(), l => Assert.Equal("NotInstalled", l.GetProperty("state").GetString()));
+        Assert.Equal(0, listed.GetProperty("chosen").GetArrayLength());
+
+        const string viggle = "qwen-image-2.1-viggle-turbo", pruna = "qwen-image-2.1-pruna-8step", film = "qwen-image-2.1-film-stills";
+        async Task<HttpResponseMessage> Choose(params (string Id, float Strength)[] loras) =>
+            await _client!.PostAsJsonAsync("/api/agent/loras/choice",
+                new { loras = loras.Select(l => new { id = l.Id, strength = l.Strength }).ToArray() });
+
+        HttpResponseMessage refused = await Choose((viggle, 1f));
+        Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
+        Assert.Contains("not downloaded", (await refused.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+
+        FakeInstall(_host.Loras, viggle);
+        FakeInstall(_host.Loras, pruna);
+        FakeInstall(_host.Loras, film);
+        refused = await Choose((viggle, 1f), (pruna, 1f));
+        Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
+        Assert.Contains("both set the number of steps", (await refused.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+
+        HttpResponseMessage saved = await Choose((film, 0.55f), (viggle, 1f));
+        Assert.Equal(HttpStatusCode.OK, saved.StatusCode);
+        Assert.Equal(new[] { new ImageLoraChoice(film, 0.55f), new ImageLoraChoice(viggle, 1f) },
+            new SettingsStore(paths.SettingsFile).Load().ImageLoras);
+        JsonElement state = await Get("/api/agent/loras");
+        JsonElement filmRow = state.GetProperty("loras").EnumerateArray().Single(l => l.GetProperty("id").GetString() == film);
+        Assert.True(filmRow.GetProperty("chosen").GetBoolean());
+        Assert.Equal(0.55f, filmRow.GetProperty("strength").GetSingle());
+        Assert.Equal("Installed", filmRow.GetProperty("state").GetString());
+
+        // Removing a plug-in turns it off as well.
+        HttpResponseMessage removed = await _client!.DeleteAsync($"/api/agent/loras/{film}");
+        Assert.Equal(HttpStatusCode.OK, removed.StatusCode);
+        Assert.Equal(new[] { new ImageLoraChoice(viggle, 1f) }, new SettingsStore(paths.SettingsFile).Load().ImageLoras);
+        Assert.False(Directory.Exists(_host.Loras.DirectoryFor(LoraCatalog.Find(film)!)));
+
+        Assert.Equal(HttpStatusCode.NotFound, (await _client!.DeleteAsync("/api/agent/loras/no-such-plug-in")).StatusCode);
+    }
+
+    private void StartServing(AgentPaths paths)
+    {
+        _host = new AgentAppHost(paths);
+        _host.Start();
+        _client = new HttpClient { BaseAddress = new Uri(_host.Server.BaseUrl) };
+        _client.DefaultRequestHeaders.Add("Cookie", $"{Core.Hosting.LoopbackServer.TokenCookie}={_host.Server.Token}");
+    }
+
+    /// <summary>
+    /// The page saves its other settings by posting back the whole copy it read when it
+    /// loaded. That copy's plug-in choice is older than anything changed in the LoRA sheet
+    /// since, so the save keeps the stored choice: a plug-in turned on stays on, and one
+    /// removed with its files does not come back to refuse every later picture.
+    /// </summary>
+    [Fact]
+    public async Task ASettingsSaveFromThePageKeepsThePlugInsChosenSince()
+    {
+        AgentPaths paths = Paths with { DeviceMemoryGB = 48 };
+        StartServing(paths);
+        const string viggle = "qwen-image-2.1-viggle-turbo", film = "qwen-image-2.1-film-stills";
+        FakeInstall(_host!.Loras, viggle);
+        FakeInstall(_host.Loras, film);
+        JsonElement loaded = await Get("/api/agent/settings");
+        Assert.Equal(0, loaded.GetProperty("imageLoras").GetArrayLength());
+
+        Assert.Equal(HttpStatusCode.OK, (await _client!.PostAsJsonAsync("/api/agent/loras/choice",
+            new { loras = new[] { new { id = viggle, strength = 1f }, new { id = film, strength = 0.6f } } })).StatusCode);
+
+        // The page's copy, from before the choice, with one switch flipped.
+        var stale = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(loaded.GetRawText())!;
+        stale["skillsEnabled"] = JsonSerializer.SerializeToElement(false);
+        HttpClient client = _client!;
+        HttpResponseMessage response = await client.PostAsJsonAsync("/api/agent/settings", stale);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        AppSettings stored = new SettingsStore(paths.SettingsFile).Load();
+        Assert.False(stored.SkillsEnabled);
+        var both = new[] { new ImageLoraChoice(viggle, 1f), new ImageLoraChoice(film, 0.6f) };
+        Assert.Equal(both, stored.ImageLoras);
+        Assert.Equal(2, (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("imageLoras").GetArrayLength());
+
+        // A copy that leaves the choice out, or says null, changes nothing either.
+        stale.Remove("imageLoras");
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/api/agent/settings", stale)).StatusCode);
+        stale["imageLoras"] = JsonSerializer.SerializeToElement<object?>(null);
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/api/agent/settings", stale)).StatusCode);
+        Assert.Equal(both, new SettingsStore(paths.SettingsFile).Load().ImageLoras);
+
+        // Removed in the sheet, then a copy taken while it was on is saved: it stays removed.
+        JsonElement withBoth = await Get("/api/agent/settings");
+        Assert.Equal(HttpStatusCode.OK, (await client.DeleteAsync($"/api/agent/loras/{viggle}")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/api/agent/settings", withBoth)).StatusCode);
+        Assert.Equal(new[] { new ImageLoraChoice(film, 0.6f) }, new SettingsStore(paths.SettingsFile).Load().ImageLoras);
+    }
+
+    /// <summary>
+    /// Every change in the sheet sends the whole choice back, including what this build cannot
+    /// check: a plug-in a newer build sharing the settings chose, and one that is on but whose
+    /// files have gone. Neither blocks the change, and the one whose files are gone can be
+    /// turned off; only what the change adds has to be downloaded.
+    /// </summary>
+    [Fact]
+    public async Task TheSheetCanChangeAChoiceHoldingPlugInsItCannotCheck()
+    {
+        AgentPaths paths = Paths with { DeviceMemoryGB = 48 };
+        const string viggle = "qwen-image-2.1-viggle-turbo", film = "qwen-image-2.1-film-stills", grain = "qwen-image-2.1-grainscape";
+        const string newer = "a-plug-in-from-a-newer-build";
+        var store = new SettingsStore(paths.SettingsFile);
+        AppSettings seeded = store.Load();
+        seeded.ImageLoras = new() { new ImageLoraChoice(newer, 0.8f), new ImageLoraChoice(viggle, 1f) };
+        store.Save(seeded);
+        StartServing(paths);
+        FakeInstall(_host!.Loras, film);
+
+        JsonElement sheet = await Get("/api/agent/loras");
+        JsonElement viggleRow = sheet.GetProperty("loras").EnumerateArray().Single(l => l.GetProperty("id").GetString() == viggle);
+        Assert.True(viggleRow.GetProperty("chosen").GetBoolean());
+        Assert.Equal("NotInstalled", viggleRow.GetProperty("state").GetString());
+
+        // What the page sends to turn Film Stills on: the saved choice, then the change.
+        async Task<HttpResponseMessage> Choose(params object[] loras) =>
+            await _client!.PostAsJsonAsync("/api/agent/loras/choice", new { loras });
+        HttpResponseMessage on = await Choose(new { id = newer, strength = 0.8f }, new { id = viggle, strength = 1f }, new { id = film, strength = 0.7f });
+        Assert.Equal(HttpStatusCode.OK, on.StatusCode);
+        Assert.Equal(new[] { new ImageLoraChoice(viggle, 1f), new ImageLoraChoice(film, 0.7f), new ImageLoraChoice(newer, 0.8f) },
+            store.Load().ImageLoras);
+
+        // Turning off the one whose files are gone.
+        Assert.Equal(HttpStatusCode.OK, (await Choose(new { id = newer, strength = 0.8f }, new { id = film, strength = 0.7f })).StatusCode);
+        Assert.Equal(new[] { new ImageLoraChoice(film, 0.7f), new ImageLoraChoice(newer, 0.8f) }, store.Load().ImageLoras);
+
+        // Something newly turned on still has to be there.
+        HttpResponseMessage refused = await Choose(new { id = film, strength = 0.7f }, new { id = grain, strength = 0.7f });
+        Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
+        Assert.Contains("not downloaded", (await refused.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+
+        // A strength that is not a number is the client's mistake, said as one; none at all is the plug-in's own.
+        refused = await Choose(new { id = film, strength = "0.8" });
+        Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
+        Assert.Contains("must be a number", (await refused.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+        Assert.Equal(HttpStatusCode.OK, (await Choose(new { id = film, strength = (float?)null })).StatusCode);
+        Assert.Equal(new[] { new ImageLoraChoice(film, 0.7f), new ImageLoraChoice(newer, 0.8f) }, store.Load().ImageLoras);
+    }
+
+    [Fact]
+    public async Task ADeviceWithoutTheImageModelIsOfferedNoPlugIns()
+    {
+        _host = new AgentAppHost(Paths with { DeviceMemoryGB = 12 });
+        _host.Start();
+        _client = new HttpClient { BaseAddress = new Uri(_host.Server.BaseUrl) };
+        _client.DefaultRequestHeaders.Add("Cookie", $"{Core.Hosting.LoopbackServer.TokenCookie}={_host.Server.Token}");
+
+        Assert.Equal(0, (await Get("/api/agent/loras")).GetProperty("loras").GetArrayLength());
+    }
+
+    /// <summary>
+    /// A picture whose plug-ins cannot be honoured ends with the reason, not with a picture
+    /// made without them; and the preparation is told whether the picture is an edit.
+    /// </summary>
+    [Fact]
+    public async Task APictureItsPlugInsCannotBeHonouredForIsRefusedWithTheReason()
+    {
+        _host = new AgentAppHost(Paths);
+        var asked = new List<bool>();
+        JsonElement body = JsonDocument.Parse(
+            "{\"sessionId\":\"s-1\",\"messages\":[{\"role\":\"user\",\"content\":\"a red apple\",\"stillImagePaths\":[\"/tmp/photo.png\"]}]}")
+            .RootElement.Clone();
+
+        var frames = new List<JsonElement>();
+        await foreach (object frame in ImageTurns.StreamAsync(_host.Chat, body, CancellationToken.None, editing =>
+        {
+            asked.Add(editing);
+            return ImageTurns.Preparation.Refused("Viggle Turbo is turned on but its files are missing.");
+        }))
+        {
+            frames.Add(JsonSerializer.SerializeToElement(frame));
+        }
+
+        Assert.Equal(new[] { true }, asked);
+        JsonElement only = Assert.Single(frames);
+        Assert.True(only.GetProperty("done").GetBoolean());
+        Assert.Equal("Viggle Turbo is turned on but its files are missing.", only.GetProperty("error").GetString());
+        Assert.Equal("s-1", only.GetProperty("sessionId").GetString());
+    }
+
     [Fact]
     public void ItCreatesEverythingItNeedsAndSeparatesBackedUpDataFromRefetchableFiles()
     {

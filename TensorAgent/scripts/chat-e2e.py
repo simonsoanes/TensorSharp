@@ -49,6 +49,7 @@ makes itself, with no app.
 Exits non-zero when any scenario fails, so it can gate a build.
 """
 import argparse
+import atexit
 import array
 import hashlib
 import io
@@ -131,7 +132,7 @@ class App:
         start = time.monotonic()
         first = None
         answer, thinking, tools, error, done = [], [], [], None, {}
-        pictures, steps, previews = [], [], 0
+        pictures, steps, previews, loras = [], [], 0, []
         clips, progress = [], []
         try:
             with self.request("POST", "api/chat", body, timeout=timeout) as response:
@@ -159,6 +160,9 @@ class App:
                         first = first or time.monotonic()
                         steps.append((frame["image_step"], frame.get("image_steps")))
                         previews += 1 if frame.get("preview") else 0
+                        # The LoRA plug-ins the host says the picture is drawn with.
+                        if isinstance(frame.get("image_loras"), list):
+                            loras = frame["image_loras"]
                     if isinstance(frame.get("imageUrl"), str) and frame["imageUrl"]:
                         pictures.append(frame)
                     # A video model's turn: progress through its phases, kept with the time
@@ -193,6 +197,7 @@ class App:
             "pictures": pictures,
             "steps": steps,
             "previews": previews,
+            "loras": loras,
             "aborted": bool(done.get("aborted")),
             "clips": clips,
             "progress": progress,
@@ -527,6 +532,14 @@ def main(argv=None):
     parser.add_argument("--scenarios", default="fact,follow,newchat,long,think,tool,image,audio")
     parser.add_argument("--media", default=os.environ.get("TS_TEST_MEDIA_DIR", os.path.expanduser("~/work/models/testmedia")))
     parser.add_argument("--out")
+    parser.add_argument("--draw-prompt", default="A red apple on a white table, soft daylight, studio photograph",
+                        help="what the draw scenario asks for")
+    parser.add_argument("--edit-prompt", default="Make the background a deep blue night sky with stars, keep the text unchanged",
+                        help="what the edit scenario asks to change about --edit-photo")
+    parser.add_argument("--edit-photo", help="the photo the edit scenario attaches (default: image.png in --media)")
+    parser.add_argument("--loras", default="",
+                        help="LoRA plug-ins to turn on for draw/edit, as id or id:strength, comma-separated "
+                             "(GET /api/agent/loras lists them); the previous choice is restored afterwards")
     args = parser.parse_args(argv)
 
     if args.base:
@@ -537,6 +550,12 @@ def main(argv=None):
         parser.error("give the app's log, or --base")
     app = App(base, token)
     wanted = [s.strip() for s in args.scenarios.split(",") if s.strip()]
+    # A misspelt scenario used to run nothing and report "All 0 chat scenarios passed".
+    known = {"fact", "follow", "newchat", "long", "think", "tool", "image", "audio",
+             "draw", "edit", "film", "animate", "reference"}
+    unknown = [w for w in wanted if w not in known]
+    if unknown:
+        parser.error(f"unknown scenario(s) {', '.join(unknown)}; known: {', '.join(sorted(known))}")
     try:
         engine = app.json("GET", "api/agent/engine")
         model = engine.get("model") or {}
@@ -555,6 +574,66 @@ def main(argv=None):
         print(f"==> {app.base} (no TensorAgent engine route: a TensorSharp.Server)")
 
     rows, failures = [], []
+
+    # LoRA plug-ins for the picture scenarios, chosen through the app's own route and put back
+    # as they were when the run ends. What each picture must then show: the plug-ins it is drawn
+    # with (an edit-only one is not applied to a picture made from words) and, with a speed
+    # plug-in, its step count instead of the model's 40.
+    lora_plan, previous_loras = None, None
+    if args.loras:
+        offered = {l["id"]: l for l in app.json("GET", "api/agent/loras").get("loras", [])}
+        wanted_loras = []
+        for item in (x.strip() for x in args.loras.split(",") if x.strip()):
+            lora_id, _, strength = item.partition(":")
+            lora = offered.get(lora_id)
+            if lora is None:
+                sys.exit(f"--loras: no plug-in '{lora_id}' (offered: {', '.join(sorted(offered))})")
+            if lora.get("state") != "Installed":
+                sys.exit(f"--loras: {lora_id} is {lora.get('state')}; download it first")
+            wanted_loras.append({"id": lora_id, "strength": float(strength) if strength else lora["defaultStrength"]})
+        previous_loras = app.json("GET", "api/agent/loras").get("chosen", [])
+        # The run's choice drops whatever is on now, and the host takes back only plug-ins
+        # whose files are there: one that is on with its files gone could not be restored.
+        gone = [offered[c["id"]]["name"] for c in previous_loras
+                if c["id"] in offered and offered[c["id"]].get("state") != "Installed"]
+        if gone:
+            sys.exit(f"--loras: {', '.join(gone)} is turned on but not downloaded, so the current choice "
+                     "could not be put back after the run; download it again or turn it off first")
+
+        def restore_loras():
+            """Put the choice from before the run back; False, having said why, when the host refused."""
+            try:
+                app.json("POST", "api/agent/loras/choice", {"loras": previous_loras})
+                return True
+            except urllib.error.HTTPError as e:
+                reason = f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"
+            except (OSError, ValueError) as e:
+                reason = str(e)
+            print(f"WARNING: the LoRA choice from before the run could not be put back ({reason}); "
+                  "set it again in the app's LoRA sheet")
+            return False
+
+        # Put back however the run ends: a failed scenario, an exception or Ctrl-C included.
+        atexit.register(restore_loras)
+        saved = app.json("POST", "api/agent/loras/choice", {"loras": wanted_loras})
+        chosen = [offered[c["id"]] for c in saved.get("chosen", []) if c["id"] in offered]
+        speeds = [l for l in chosen if l["kind"] == "Speed"]
+
+        def applied(editing):
+            used = [l for l in chosen if editing or not l.get("needsPhoto")]
+            # A plug-in that works only at the model's own steps keeps them: the speed one sits out.
+            if any(l.get("needsModelSteps") for l in used):
+                used = [l for l in used if l["kind"] != "Speed"]
+            return [l for l in used if l["kind"] == "Speed"] + [l for l in used if l["kind"] != "Speed"]
+
+        def expected(editing):
+            return [l["name"] for l in applied(editing)]
+
+        def speed_steps(editing):
+            return next((l["steps"] for l in applied(editing) if l["kind"] == "Speed"), None)
+        lora_plan = {"expected": expected, "steps": speed_steps}
+        described = ", ".join("{}@{}".format(c["id"], c["strength"]) for c in saved.get("chosen", []))
+        print(f"    LoRA plug-ins: {described}")
 
     def turn(name, session, history, prompt, check, max_tokens=256, think=False, extra=None):
         message = {"role": "user", "content": prompt}
@@ -653,8 +732,10 @@ def main(argv=None):
              lambda r: ("fox" in r["answer"].lower(), "expected the pangram's 'fox'"),
              extra=attach(os.path.join(args.media, "sample.wav")))
 
-    def drew(input_size=None):
-        """One picture, served as a PNG of the size the turn reported, after its steps."""
+    def drew(editing=False, input_size=None):
+        """One picture, served as a PNG of the size the turn reported, after its steps.
+        `editing` says a photo is attached, which is what decides the plug-ins; `input_size`
+        is the photo's size when it could be read (a PNG), to hold the edit to its shape."""
         def check(r):
             if r["aborted"]:
                 return False, "the turn ended without a picture (stopped)"
@@ -665,6 +746,13 @@ def main(argv=None):
             last, total = r["steps"][-1]
             if total and last != total:
                 return False, f"the steps stopped at {last} of {total}"
+            if lora_plan:
+                want = lora_plan["expected"](editing)
+                if r["loras"] != want:
+                    return False, f"the picture was drawn with {r['loras'] or 'no plug-ins'}, expected {want or 'none'}"
+                steps = lora_plan["steps"](editing)
+                if steps and total != steps:
+                    return False, f"{total} steps, but the speed plug-in runs {steps}"
             picture = r["pictures"][0]
             size = png_size(app.fetch(picture["imageUrl"]))
             if size is None:
@@ -676,6 +764,10 @@ def main(argv=None):
                 want, got = input_size[0] / input_size[1], size[0] / size[1]
                 if abs(want - got) > 0.05:
                     return False, f"the edit changed the photo's shape: {input_size} -> {size}"
+            elif editing:
+                # Only a PNG's size is read here, and a check that did not run is not a pass.
+                r.setdefault("files", {}).setdefault("skipped", []).append(
+                    "the edit's shape is checked only for a PNG photo")
             return True, ""
         return check
 
@@ -694,21 +786,22 @@ def main(argv=None):
         elif made:
             print(f"    saved: {made[-1]}")
 
-    def image_turn(name, prompt, extra=None, input_size=None):
+    def image_turn(name, prompt, extra=None, editing=False, input_size=None):
         session, conversation = app.new_chat()
-        result = turn(name, session, [], prompt, drew(input_size), extra=extra)
+        result = turn(name, session, [], prompt, drew(editing, input_size), extra=extra)
         if result["pictures"]:
             p = result["pictures"][0]
             print(f"    picture: {p['imageUrl']} {p.get('width')}x{p.get('height')}, "
-                  f"{len(result['steps'])} steps ({result['previews']} with a preview)")
+                  f"{len(result['steps'])} steps ({result['previews']} with a preview)"
+                  + (f", LoRA {' + '.join(result['loras'])}" if result["loras"] else ""))
         saved(conversation, name)
 
     if "draw" in wanted:
-        image_turn("draw", "A red apple on a white table, soft daylight, studio photograph")
+        image_turn("draw", args.draw_prompt)
     if "edit" in wanted:
-        photo = os.path.join(args.media, "image.png")
-        image_turn("edit", "Make the background a deep blue night sky with stars, keep the text unchanged",
-                   extra=attach(photo), input_size=png_size(open(photo, "rb").read()))
+        photo = args.edit_photo or os.path.join(args.media, "image.png")
+        image_turn("edit", args.edit_prompt, extra=attach(photo), editing=True,
+                   input_size=png_size(open(photo, "rb").read()))
 
     def filmed(video, input_size=None):
         """One clip after its phases and steps, served as an MP4 (and a WAV, when the sound
@@ -859,6 +952,11 @@ def main(argv=None):
         video_turn("reference", "The woman from the picture, long dark hair and a blue floral dress, walks "
                    "through a sunlit garden as the camera slowly circles her",
                    references_model, photo=photo)
+
+    if previous_loras is not None:
+        atexit.unregister(restore_loras)
+        if not restore_loras():
+            failures.append("restoring the LoRA choice")
 
     # A check that could not run is reported as such; it is never counted as a pass.
     skipped = [f"{row['scenario']}: {note}" for row in rows for note in (row.get("files") or {}).get("skipped", [])]

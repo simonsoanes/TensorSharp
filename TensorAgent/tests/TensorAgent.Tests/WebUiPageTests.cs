@@ -2511,6 +2511,476 @@ public sealed class WebUiPageTests : IDisposable
     }
 
     /// <summary>
+    /// With LoRA plug-ins on, the host names them on every step, and the progress says
+    /// what the picture is drawn with; without them it reads as it always did.
+    /// </summary>
+    [Fact]
+    public void AnImageModelsProgressNamesTheLoraPlugInsItDrawsWith()
+    {
+        JsonElement result = Run(ImageModel + """
+            R['/api/chat'] = { __sse: [
+              { image_step: 1, image_steps: 6, preview: null, image_loras: ['Viggle Turbo', 'Film Stills'] },
+              { image_step: 6, image_steps: 6, preview: null, image_loras: ['Viggle Turbo', 'Film Stills'] },
+              { imageUrl: '/uploads/cafe.png', width: 1024, height: 1024 },
+              { done: true, sessionId: 's1', truncated: false }
+            ] };
+            """, """
+            __page.byId['text'].value = 'a cafe at night';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () { return { progress: __page.progress() }; });
+            """);
+
+        Assert.Contains("Drawing with Viggle Turbo + Film Stills… step 1 of 6", Strings(result, "progress"));
+    }
+
+    /// <summary>
+    /// The LoRA sheet of an image model: every plug-in with what can be done to it, and a
+    /// speed plug-in turned on replacing the one that was on, because two step schedules
+    /// cannot both apply. What the page sends is the whole choice, in order.
+    /// </summary>
+    [Fact]
+    public void TheLoraSheetTurnsOnOneSpeedPlugInAtATime()
+    {
+        JsonElement result = Run(ImageModel + """
+            var lorasState = { loadedModel: 'qwen-image-2.1-q4km', minStrength: 0.1, maxStrength: 1.5,
+              chosen: [{ id: 'pruna', strength: 1 }, { id: 'film', strength: 0.6 }], loras: [
+              { id: 'viggle', name: 'Viggle Turbo', kind: 'Speed', steps: 6, purpose: 'Fast.', license: 'QRL', totalBytes: 679604800,
+                state: 'Installed', defaultStrength: 1, strengthAdjustable: false, chosen: false, strength: 1, download: null },
+              { id: 'pruna', name: 'Pruna 8-Step', kind: 'Speed', steps: 8, purpose: 'Fast.', license: 'QRL', totalBytes: 335606104,
+                state: 'Installed', defaultStrength: 1, strengthAdjustable: false, chosen: true, strength: 1, download: null },
+              { id: 'film', name: 'Film Stills', kind: 'Style', purpose: 'Film.', license: 'QRL', totalBytes: 79743888,
+                state: 'Installed', defaultStrength: 0.7, strengthAdjustable: true, chosen: true, strength: 0.6, download: null },
+              { id: 'grain', name: 'Grainscape', kind: 'Style', purpose: 'Grain.', license: 'QRL', totalBytes: 79743888,
+                state: 'NotInstalled', defaultStrength: 0.7, strengthAdjustable: true, chosen: false, strength: 0.7, download: null } ] };
+            R['/api/agent/loras'] = lorasState;
+            R['/api/agent/loras/choice'] = function () { return { __status: 400, body: { error: 'Viggle Turbo is not downloaded yet.' } }; };
+            """, """
+            __page.byId['model'].dispatch('click');
+            return settle(20).then(function () {
+              var shown = __page.byId['open-loras'].style.display !== 'none';
+              __page.byId['open-loras'].dispatch('click');
+              return settle(20).then(function () {
+                var rows = __page.byId['lora-list'].querySelectorAll('.lorarow');
+                function row(id) { return rows.filter(function (r) { return r.getAttribute('data-lora') === id; })[0]; }
+                function actions(r) { return r.querySelectorAll('BUTTON').map(function (b) { return b.textContent; }); }
+                var box = row('viggle').querySelectorAll('INPUT')[0];
+                box.checked = true;
+                box.dispatch('change');
+                return settle(20).then(function () {
+                  return {
+                    shown: shown,
+                    hint: __page.byId['loras-hint'].textContent,
+                    rows: rows.length,
+                    installedActions: actions(row('viggle')),
+                    missingActions: actions(row('grain')),
+                    sliders: row('film').querySelectorAll('INPUT').length,
+                    sent: __page.requests('/api/agent/loras/choice').map(function (c) { return c.body; }),
+                    sheetError: __page.byId['lora-error'].textContent,
+                    sheetErrorShown: __page.byId['lora-error'].style.display !== 'none',
+                    errors: __page.errorNotices()
+                  };
+                });
+              });
+            });
+            """);
+
+        Assert.True(result.GetProperty("shown").GetBoolean());
+        Assert.Equal("Pruna 8-Step + Film Stills", result.GetProperty("hint").GetString());
+        Assert.Equal(4, result.GetProperty("rows").GetInt32());
+        Assert.Equal(new[] { "Remove" }, Strings(result, "installedActions"));
+        Assert.Equal(new[] { "Download" }, Strings(result, "missingActions"));
+        // The switch and the strength slider of a style that is on.
+        Assert.Equal(2, result.GetProperty("sliders").GetInt32());
+
+        JsonElement sent = Assert.Single(result.GetProperty("sent").EnumerateArray());
+        JsonElement[] loras = sent.GetProperty("loras").EnumerateArray().ToArray();
+        Assert.Equal(new[] { "film", "viggle" }, loras.Select(l => l.GetProperty("id").GetString()));
+        Assert.Equal(0.6, loras[0].GetProperty("strength").GetDouble(), 3);
+        // A refusal is the host's own words, not a status code, said in the sheet beside the
+        // switch that flipped back rather than in the chat underneath it.
+        Assert.Equal("Viggle Turbo is not downloaded yet.", result.GetProperty("sheetError").GetString());
+        Assert.True(result.GetProperty("sheetErrorShown").GetBoolean());
+        Assert.DoesNotContain("Viggle Turbo is not downloaded yet.", Strings(result, "errors"));
+    }
+
+    /// <summary>A sheet of two installed styles, neither on, whose choice route answers with what it was sent.</summary>
+    private const string TwoStyles = """
+        function loraRows(chosen, extra) {
+          function on(id) { return chosen.some(function (c) { return c.id === id; }); }
+          return { loadedModel: 'qwen-image-2.1-q4km', minStrength: 0.1, maxStrength: 1.5, chosen: chosen, loras: [
+            { id: 'film', name: 'Film Stills', kind: 'Style', purpose: 'Film.', license: 'QRL', totalBytes: 79743888,
+              state: 'Installed', installedBytes: 79743888, defaultStrength: 0.7, strengthAdjustable: true, chosen: on('film'), strength: 0.7, download: null },
+            { id: 'grain', name: 'Grainscape', kind: 'Style', purpose: 'Grain.', license: 'QRL', totalBytes: 79743888,
+              state: 'Installed', installedBytes: 79743888, defaultStrength: 0.7, strengthAdjustable: true, chosen: on('grain'), strength: 0.7, download: null }
+          ].concat(extra || []) };
+        }
+        R['/api/agent/loras'] = loraRows([]);
+        R['/api/agent/loras/choice'] = function (call) { return loraRows(call.body.loras); };
+        function openLoras() {
+          __page.byId['model'].dispatch('click');
+          return settle(20).then(function () {
+            __page.byId['open-loras'].dispatch('click');
+            return settle(20);
+          });
+        }
+        function loraRow(id) {
+          return __page.byId['lora-list'].querySelectorAll('.lorarow').filter(function (r) { return r.getAttribute('data-lora') === id; })[0];
+        }
+        """;
+
+    /// <summary>
+    /// Two switches flipped faster than the host answers: the second change builds on the
+    /// first rather than on the list painted before it, so both plug-ins end up on. Each
+    /// save replaces the whole choice, so a second built on the old list would undo the first.
+    /// </summary>
+    [Fact]
+    public void TwoQuickChangesInTheLoraSheetBuildOnEachOther()
+    {
+        JsonElement result = Run(ImageModel + TwoStyles, """
+            return openLoras().then(function () {
+              var film = loraRow('film').querySelectorAll('INPUT')[0];
+              var grain = loraRow('grain').querySelectorAll('INPUT')[0];
+              film.checked = true;
+              film.dispatch('change');
+              grain.checked = true;
+              grain.dispatch('change');
+              return settle(30).then(function () {
+                return {
+                  sent: __page.requests('/api/agent/loras/choice').map(function (c) { return c.body.loras.map(function (l) { return l.id; }).join('+'); }),
+                  names: __page.byId['lora-list'].querySelectorAll('.nm').map(function (n) { return n.textContent; })
+                };
+              });
+            });
+            """);
+
+        Assert.Equal(new[] { "film", "film+grain" }, Strings(result, "sent"));
+        Assert.Equal(new[] { "● Film Stills", "● Grainscape" }, Strings(result, "names"));
+    }
+
+    /// <summary>
+    /// A plug-in that is on but whose files have gone keeps a switch, so it can be turned off
+    /// as the refused picture tells the user to; a stopped download's part files can be
+    /// removed without finishing it; and a removal the host fails is said in the sheet,
+    /// not painted as an empty list and announced as done.
+    /// </summary>
+    [Fact]
+    public void APlugInWhoseFilesAreGoneCanStillBeTurnedOffOrRemoved()
+    {
+        JsonElement result = Run(ImageModel + TwoStyles + """
+            var gone = { id: 'viggle', name: 'Viggle Turbo', kind: 'Speed', steps: 6, purpose: 'Fast.', license: 'QRL', totalBytes: 679604800,
+              state: 'NotInstalled', installedBytes: 0, defaultStrength: 1, strengthAdjustable: false, chosen: true, strength: 1, download: null };
+            var stopped = { id: 'pruna', name: 'Pruna 8-Step', kind: 'Speed', steps: 8, purpose: 'Fast.', license: 'QRL', totalBytes: 335606104,
+              state: 'Partial', installedBytes: 120000000, defaultStrength: 1, strengthAdjustable: false, chosen: false, strength: 1,
+              download: { running: false, state: 'Cancelled' } };
+            R['/api/agent/loras'] = loraRows([{ id: 'newer-build', strength: 0.8 }, { id: 'viggle', strength: 1 }], [gone, stopped]);
+            R['/api/agent/loras/choice'] = function (call) {
+              return loraRows(call.body.loras, [Object.assign({}, gone, { chosen: false }), stopped]);
+            };
+            R['/api/agent/loras/pruna'] = { __status: 500, body: { error: 'The server failed to handle the request.' } };
+            """, """
+            return openLoras().then(function () {
+              function actions(r) { return r.querySelectorAll('BUTTON').map(function (b) { return b.textContent; }); }
+              var viggle = loraRow('viggle');
+              var box = viggle.querySelectorAll('INPUT')[0];
+              var before = {
+                viggleSwitchOn: !!(box && box.checked),
+                viggleActions: actions(viggle),
+                viggleNote: viggle.querySelectorAll('.err').map(function (e) { return e.textContent; }),
+                prunaActions: actions(loraRow('pruna'))
+              };
+              box.checked = false;
+              box.dispatch('change');
+              return settle(20).then(function () {
+                var remove = loraRow('pruna').querySelectorAll('BUTTON').filter(function (b) { return b.textContent === 'Remove'; })[0];
+                remove.dispatch('click');
+                return settle(30).then(function () {
+                  before.sent = __page.requests('/api/agent/loras/choice').map(function (c) { return c.body.loras.map(function (l) { return l.id; }).join('+'); });
+                  before.rowsAfterFailedRemove = __page.byId['lora-list'].querySelectorAll('.lorarow').length;
+                  before.sheetError = __page.byId['lora-error'].textContent;
+                  before.notices = __page.notices();
+                  return before;
+                });
+              });
+            });
+            """);
+
+        Assert.True(result.GetProperty("viggleSwitchOn").GetBoolean());
+        Assert.Equal(new[] { "Download" }, Strings(result, "viggleActions"));
+        Assert.Contains(Strings(result, "viggleNote"), n => n.Contains("files are missing", StringComparison.Ordinal));
+        Assert.Equal(new[] { "Download", "Remove" }, Strings(result, "prunaActions"));
+        // Turned off: the rest of the choice goes back, a newer build's plug-in included.
+        Assert.Equal(new[] { "newer-build" }, Strings(result, "sent"));
+        Assert.Equal(4, result.GetProperty("rowsAfterFailedRemove").GetInt32());
+        Assert.Equal("Could not remove Pruna 8-Step: The server failed to handle the request.", result.GetProperty("sheetError").GetString());
+        Assert.DoesNotContain(Strings(result, "notices"), n => n.Contains("was removed", StringComparison.Ordinal));
+    }
+
+    /// <summary>Requests a test answers itself, in any order: <c>hold(path)</c> makes that route wait.</summary>
+    private const string Held = """
+        var held = [];
+        function hold(path) {
+          R[path] = function (call) {
+            return new Promise(function (answer) { held.push({ path: path, call: call, answer: answer }); });
+          };
+        }
+        function heldFor(path) { return held.filter(function (h) { return h.path === path; }); }
+        function ids(call) { return call.body.loras.map(function (l) { return l.id; }).join('+'); }
+        """;
+
+    /// <summary>
+    /// Each save replaces the whole choice, so they go one at a time, in the order they were
+    /// made: two in flight together could reach the host in the other order and leave the
+    /// first change as the last word.
+    /// </summary>
+    [Fact]
+    public void LoraSavesGoOneAtATimeInTheOrderTheyWereMade()
+    {
+        JsonElement result = Run(ImageModel + TwoStyles + Held, """
+            return openLoras().then(function () {
+              hold('/api/agent/loras/choice');
+              var film = loraRow('film').querySelectorAll('INPUT')[0];
+              var grain = loraRow('grain').querySelectorAll('INPUT')[0];
+              film.checked = true;
+              film.dispatch('change');
+              grain.checked = true;
+              grain.dispatch('change');
+              return settle(20).then(function () {
+                var out = { inFlight: heldFor('/api/agent/loras/choice').length };
+                var first = heldFor('/api/agent/loras/choice')[0];
+                out.first = ids(first.call);
+                first.answer(loraRows(first.call.body.loras));
+                return settle(20).then(function () {
+                  var all = heldFor('/api/agent/loras/choice');
+                  out.afterFirst = all.length;
+                  out.second = all.length > 1 ? ids(all[1].call) : '';
+                  if (all.length > 1) all[1].answer(loraRows(all[1].call.body.loras));
+                  return settle(20).then(function () {
+                    out.names = __page.byId['lora-list'].querySelectorAll('.nm').map(function (n) { return n.textContent; });
+                    return out;
+                  });
+                });
+              });
+            });
+            """);
+
+        Assert.Equal(1, result.GetProperty("inFlight").GetInt32());
+        Assert.Equal("film", result.GetProperty("first").GetString());
+        Assert.Equal(2, result.GetProperty("afterFirst").GetInt32());
+        Assert.Equal("film+grain", result.GetProperty("second").GetString());
+        Assert.Equal(new[] { "● Film Stills", "● Grainscape" }, Strings(result, "names"));
+    }
+
+    /// <summary>
+    /// A list the page asked for before a change was saved, and that arrives after it, is not
+    /// painted: it would put the switch the user just turned on back off.
+    /// </summary>
+    [Fact]
+    public void AListReadBeforeALoraChangeIsNotPaintedOverIt()
+    {
+        JsonElement result = Run(ImageModel + TwoStyles + Held + """
+            var notYet = { id: 'pruna', name: 'Pruna 8-Step', kind: 'Speed', steps: 8, purpose: 'Fast.', license: 'QRL', totalBytes: 335606104,
+              state: 'NotInstalled', installedBytes: 0, defaultStrength: 1, strengthAdjustable: false, chosen: false, strength: 1, download: null };
+            R['/api/agent/loras'] = loraRows([], [notYet]);
+            R['/api/agent/loras/choice'] = function (call) { return loraRows(call.body.loras, [notYet]); };
+            """, """
+            return openLoras().then(function () {
+              hold('/api/agent/loras');
+              // Starting a download reads the list again; that read is held.
+              loraRow('pruna').querySelectorAll('BUTTON').filter(function (b) { return b.textContent === 'Download'; })[0].dispatch('click');
+              return settle(20).then(function () {
+                var film = loraRow('film').querySelectorAll('INPUT')[0];
+                film.checked = true;
+                film.dispatch('change');
+                return settle(20).then(function () {
+                  var stale = heldFor('/api/agent/loras');
+                  stale.forEach(function (h) { h.answer(loraRows([], [notYet])); });
+                  return settle(20).then(function () {
+                    return {
+                      staleReads: stale.length,
+                      names: __page.byId['lora-list'].querySelectorAll('.nm').map(function (n) { return n.textContent; }),
+                      filmOn: loraRow('film').querySelectorAll('INPUT').filter(function (i) { return i.type === 'checkbox'; })[0].checked
+                    };
+                  });
+                });
+              });
+            });
+            """);
+
+        Assert.True(result.GetProperty("staleReads").GetInt32() >= 1);
+        Assert.Contains("● Film Stills", Strings(result, "names"));
+        Assert.True(result.GetProperty("filmOn").GetBoolean());
+    }
+
+    /// <summary>
+    /// A change made while a removal is on its way builds on the choice without the removed
+    /// plug-in. Built on the list painted before, it sent the plug-in back, and the host,
+    /// which had just deleted its files, refused the whole change.
+    /// </summary>
+    [Fact]
+    public void AChangeMadeWhileALoraIsBeingRemovedLeavesItOut()
+    {
+        JsonElement result = Run(ImageModel + TwoStyles + Held + """
+            R['/api/agent/loras'] = loraRows([{ id: 'film', strength: 0.7 }, { id: 'grain', strength: 0.7 }]);
+            """, """
+            return openLoras().then(function () {
+              hold('/api/agent/loras/film');
+              loraRow('film').querySelectorAll('BUTTON').filter(function (b) { return b.textContent === 'Remove'; })[0].dispatch('click');
+              return settle(20).then(function () {
+                var slider = loraRow('grain').querySelectorAll('INPUT').filter(function (i) { return i.type === 'range'; })[0];
+                slider.value = '0.5';
+                slider.dispatch('change');
+                return settle(20).then(function () {
+                  var sentBeforeRemoval = __page.requests('/api/agent/loras/choice').length;
+                  heldFor('/api/agent/loras/film')[0].answer(loraRows([{ id: 'grain', strength: 0.7 }]));
+                  return settle(30).then(function () {
+                    var sent = __page.requests('/api/agent/loras/choice');
+                    return {
+                      sentBeforeRemoval: sentBeforeRemoval,
+                      sent: sent.map(function (c) { return c.body.loras.map(function (l) { return l.id + '@' + l.strength; }).join('+'); })
+                    };
+                  });
+                });
+              });
+            });
+            """);
+
+        Assert.Equal(0, result.GetProperty("sentBeforeRemoval").GetInt32());
+        Assert.Equal(new[] { "grain@0.5" }, Strings(result, "sent"));
+    }
+
+    /// <summary>
+    /// An earlier save that fails, followed by a later one that saves the whole choice,
+    /// leaves no error behind: the later save answered for everything the earlier one sent.
+    /// </summary>
+    [Fact]
+    public void AnEarlierLoraSavesFailureIsNotLeftOnceALaterOneSucceeds()
+    {
+        JsonElement result = Run(ImageModel + TwoStyles + Held, """
+            return openLoras().then(function () {
+              hold('/api/agent/loras/choice');
+              var film = loraRow('film').querySelectorAll('INPUT')[0];
+              var grain = loraRow('grain').querySelectorAll('INPUT')[0];
+              film.checked = true;
+              film.dispatch('change');
+              grain.checked = true;
+              grain.dispatch('change');
+              return settle(20).then(function () {
+                heldFor('/api/agent/loras/choice')[0].answer({ __reject: 'Load failed' });
+                return settle(20).then(function () {
+                  var second = heldFor('/api/agent/loras/choice')[1];
+                  second.answer(loraRows(second.call.body.loras));
+                  return settle(20).then(function () {
+                    return {
+                      sheetError: __page.byId['lora-error'].textContent,
+                      names: __page.byId['lora-list'].querySelectorAll('.nm').map(function (n) { return n.textContent; })
+                    };
+                  });
+                });
+              });
+            });
+            """);
+
+        Assert.Equal("", result.GetProperty("sheetError").GetString());
+        Assert.Equal(new[] { "● Film Stills", "● Grainscape" }, Strings(result, "names"));
+    }
+
+    /// <summary>
+    /// A refused save puts the switches back where the host last had them at once, with the
+    /// host's own words, even when the list cannot be read again: the switch the user flipped
+    /// does not stay on, and the next change does not build on it.
+    /// </summary>
+    [Fact]
+    public void ARefusedLoraSaveRepaintsTheHostsLastAnswerWhenTheReloadFails()
+    {
+        JsonElement result = Run(ImageModel + TwoStyles + Held, """
+            return openLoras().then(function () {
+              hold('/api/agent/loras/choice');
+              var film = loraRow('film').querySelectorAll('INPUT')[0];
+              var grain = loraRow('grain').querySelectorAll('INPUT')[0];
+              film.checked = true;
+              film.dispatch('change');
+              grain.checked = true;
+              grain.dispatch('change');
+              return settle(20).then(function () {
+                // Film Stills is saved, but its answer is not painted: a later change is on its way.
+                heldFor('/api/agent/loras/choice')[0].answer(loraRows([{ id: 'film', strength: 0.7 }]));
+                return settle(20).then(function () {
+                  R['/api/agent/loras'] = { __reject: 'Load failed' };
+                  heldFor('/api/agent/loras/choice')[1].answer({ __status: 400, body: { error: 'Grainscape is not downloaded yet.' } });
+                  return settle(30).then(function () {
+                    function box(id) { return loraRow(id).querySelectorAll('INPUT').filter(function (i) { return i.type === 'checkbox'; })[0]; }
+                    return {
+                      filmOn: box('film').checked,
+                      grainOn: box('grain').checked,
+                      names: __page.byId['lora-list'].querySelectorAll('.nm').map(function (n) { return n.textContent; }),
+                      sheetError: __page.byId['lora-error'].textContent
+                    };
+                  });
+                });
+              });
+            });
+            """);
+
+        Assert.True(result.GetProperty("filmOn").GetBoolean());
+        Assert.False(result.GetProperty("grainOn").GetBoolean());
+        Assert.Equal(new[] { "● Film Stills", "Grainscape" }, Strings(result, "names"));
+        Assert.Equal("Grainscape is not downloaded yet.", result.GetProperty("sheetError").GetString());
+    }
+
+    /// <summary>
+    /// While a plug-in downloads, the sheet polls every second. A tick that moves only the
+    /// percentage leaves every row in place, so a strength slider being dragged on another
+    /// row is not replaced under the finger; the finished download repaints the rows and
+    /// the polling stops.
+    /// </summary>
+    [Fact]
+    public void ADownloadsProgressLeavesTheRowsUnderTheFingerInPlace()
+    {
+        JsonElement result = Run(ImageModel + TwoStyles + """
+            function downloading(fraction) {
+              var running = { id: 'pruna', name: 'Pruna 8-Step', kind: 'Speed', steps: 8, purpose: 'Fast.', license: 'QRL', totalBytes: 335606104,
+                state: 'Partial', installedBytes: 1000, defaultStrength: 1, strengthAdjustable: false, chosen: false, strength: 1,
+                download: fraction === null ? null : { running: true, state: 'Running', progress: { fraction: fraction } } };
+              if (fraction === null) { running.state = 'Installed'; running.installedBytes = 335606104; }
+              return loraRows([{ id: 'film', strength: 0.6 }], [running]);
+            }
+            R['/api/agent/loras'] = downloading(0.25);
+            """, """
+            return openLoras().then(function () {
+              var list = __page.byId['lora-list'];
+              var film = loraRow('film');
+              var slider = film.querySelectorAll('INPUT').filter(function (i) { return i.type === 'range'; })[0];
+              var first = loraRow('pruna').querySelectorAll('.pct')[0].textContent;
+              R['/api/agent/loras'] = downloading(0.5);
+              return wait(1300).then(function () {
+                var during = {
+                  first: first,
+                  second: loraRow('pruna').querySelectorAll('.pct')[0].textContent,
+                  filmRowKept: film.parentNode === list,
+                  sliderKept: slider.parentNode !== null && loraRow('film') === film
+                };
+                R['/api/agent/loras'] = downloading(null);
+                return wait(1300).then(function () {
+                  during.repaintedWhenDone = film.parentNode === null && loraRow('pruna').querySelectorAll('.pct').length === 0;
+                  var polls = __page.requests('/api/agent/loras').length;
+                  return wait(1300).then(function () {
+                    during.pollsAfterDone = __page.requests('/api/agent/loras').length - polls;
+                    return during;
+                  });
+                });
+              });
+            });
+            """);
+
+        Assert.Equal("25%", result.GetProperty("first").GetString());
+        Assert.Equal("50%", result.GetProperty("second").GetString());
+        Assert.True(result.GetProperty("filmRowKept").GetBoolean());
+        Assert.True(result.GetProperty("sliderKept").GetBoolean());
+        Assert.True(result.GetProperty("repaintedWhenDone").GetBoolean());
+        Assert.Equal(0, result.GetProperty("pollsAfterDone").GetInt32());
+    }
+
+    /// <summary>
     /// The picture is not lost to the answer being painted: a turn that also writes text
     /// repaints the bubble, and the picture is put back under it.
     /// </summary>

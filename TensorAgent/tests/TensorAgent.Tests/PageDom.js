@@ -165,7 +165,9 @@
   //                                           TypeError WebKit raises when the
   //                                           connection fails ('Load failed')
   // A function that throws rejects the fetch the same way a browser would, rather
-  // than throwing out of fetch() itself. Nothing here ever throws synchronously.
+  // than throwing out of fetch() itself. Nothing here ever throws synchronously. A
+  // function may also return a promise of any of the above: the request is answered
+  // when the test settles it.
   var routes = {};
   var calls = [];
 
@@ -329,6 +331,15 @@
       if (typeof answer === 'function') answer = answer(record);
     } catch (e) {
       return Promise.reject(e);
+    }
+    // A route function may return a promise: the answer comes when the test settles it,
+    // which is how a test holds one request open while the page makes another, or answers
+    // two of them in the opposite order.
+    if (answer && typeof answer.then === 'function') {
+      return answer.then(function (later) {
+        if (later && later.__reject) throw networkError(later.__reject);
+        return reply(later === null || later === undefined ? {} : later, undefined, undefined, signal);
+      });
     }
     if (answer && answer.__reject) return Promise.reject(networkError(answer.__reject));
     return reply(answer === null || answer === undefined ? {} : answer, undefined, undefined, signal);

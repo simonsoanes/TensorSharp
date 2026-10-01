@@ -114,6 +114,45 @@ picture stays in the saved chat. The app asks for 1024x1024 (an edit keeps the p
 shape at the same area) at the model's own 40 steps, rather than its native 2048x2048,
 which has four times the image tokens.
 
+**LoRA plug-ins.** With Qwen-Image 2.1 loaded, Model > LoRA plug-ins lists twelve LoRAs
+made for it. Each is pinned to a commit and a SHA-256 in `LoraCatalog` and downloaded on its
+own, 80-680 MB, into `Library/Caches/TensorAgent/loras/<id>/`. A switch turns one on, a
+slider sets the strength of a style or an edit (10-150%), and Remove deletes the files and
+turns it off. Speed plug-ins (Viggle Turbo, 6 steps; Pruna 8-Step; Pruna 5-Step; Fun-Acc
+4-Step) replace the model's 40 steps with their own schedule, so only one can be on and
+turning on another turns it off. Styles (Film Stills, Grainscape, Quality Fix) apply to every
+picture. Edits (Detail Enhancer, Natural Exposure, Object Remover, Object Mover, Anime
+Consistency) apply only when a photo is attached, and the sheet shows the phrase a request
+needs for the ones trained on one. The choice is saved (`imageLoras` in the settings) and
+applies from the next picture, never to one being drawn, and the progress line names what
+the picture is drawn with ("Drawing with Viggle Turbo + Film Stills… step 3 of 6"). Object
+Remover works only at the model's own 40 steps, so a speed plug-in sits out the edits it
+applies to; on its own example photos it removed both marked cats but none of the marked
+cars, which is why its row says to check the result. A plug-in that is on but whose files
+have gone refuses the picture with the reason rather than drawing without it, and its row
+keeps the switch that turns it off. Most are under the Qwen Research License
+(non-commercial), Anime Consistency is Apache-2.0, and the authors of Quality Fix and Detail
+Enhancer state none; each row says which.
+
+Measured in the Release app on an M5 Pro, 1024x1024 (`TENSORAGENT_IMAGE_BENCH`): a picture
+from words took 321.5 s at the model's 40 steps and 58.3 s with Viggle Turbo, applying it
+included; 58.8 s with Viggle Turbo and Film Stills, and 60.4 s with Viggle Turbo, Quality Fix
+and Grainscape. Applying a new set took 0.3 s for one or two plug-ins and 1.3 s for those
+three, and a set that does not change costs nothing. In the Debug build Pruna 8-Step took
+79.0 s, Pruna 5-Step 53.6 s and Fun-Acc 4-Step 44.7 s, and an edit of a 1253x836 photo (made
+at 1248x832) 406.2 s, 86.5 s with Viggle Turbo. A plug-in makes each step 5-6% dearer,
+whatever its rank: by the engine's own step timer, a step took 7.8 s without plug-ins, 8.2-8.3 s
+with any one of them, 8.3 s with two and 8.4 s with three. (A few-step schedule's whole
+picture costs a little more a step than that, because most of its steps also decode a
+preview.) Before this was fixed, applying plug-ins took 19-31 s in the Release app and 0.6 s
+in the CLI: on Mono, TensorPrimitives' generic vector operators ran hundreds of times slower
+than on CoreCLR, so `QwenImage21LoraSet` now uses plain loops. Without plug-ins the Debug
+app's picture is bit-identical to the one it made before plug-ins existed, and with them it
+is pixel-identical to the CLI's `--lora` run on the same files. The Release build's pictures
+differ from those by at most 2 levels in 3% of pixels without plug-ins and 5 levels in 5% of
+pixels with Viggle Turbo and Film Stills: Mono's LLVM code generation rounds some arithmetic
+differently, plug-ins or not.
+
 **Videos.** With MiniMax-H3 loaded, a message describes a short clip, and an attached
 photo is its first frame (two photos, its first and last); with MiniMax-H3 References,
 the photos, clips and recordings attached, up to nine together, are the people, things,
@@ -425,7 +464,9 @@ or through `POST /api/agent/settings`: `networkHosts`, a host allow-list for the
 network switch (empty means any host); `contextLength`, an override of the catalog
 entry's window (0 keeps it); `keepAwakeWhileGenerating`, which holds the display awake
 while the model works (on by default); and `defaultSkills`, the skills preselected for
-a new chat (none by default). The Skills master switch is in the page's Skills sheet.
+a new chat (none by default). The Skills master switch is in the page's Skills sheet,
+and `imageLoras`, the LoRA plug-ins every picture is made with, is set from the page's
+LoRA sheet (see "LoRA plug-ins" above).
 
 ## Build and run
 
@@ -515,6 +556,7 @@ These environment variables drive a Debug build from a script, because neither
 | `TENSORAGENT_BACKGROUND_CHECK=1` | ask the host's own model for a long answer (`TENSORAGENT_BACKGROUND_PROMPT`, `TENSORAGENT_BACKGROUND_TOKENS`, 4096) and trace what happens while the app is away; driven by `verify-background.sh` |
 | `TENSORAGENT_PAGE_BACKGROUND_CHECK=1` | the same, through the page and the `TENSORAGENT_DEMO_PROMPT` it sends (`verify-background.sh` with `CHECK=page`) |
 | `TENSORAGENT_SPEC_BENCH=1` | the plain-vs-speculative benchmark (`TENSORAGENT_SPEC_BENCH_MODES`, `TENSORAGENT_SPEC_BENCH_TOKENS`, 160); a Release build honours this one, and `TENSORAGENT_USE_MODEL` with it |
+| `TENSORAGENT_IMAGE_BENCH=1` | the picture benchmark: `TENSORAGENT_IMAGE_BENCH_RUNS` (2) pictures of `TENSORAGENT_IMAGE_BENCH_PROMPT` through the app's own image turn, with the LoRA plug-ins turned on, one `imagebench` line each (also in `logs/imagebench.log`); a Release build honours this one too, and `TENSORAGENT_USE_MODEL` with it |
 | `TENSORAGENT_SKIP_UPLOAD_CHECK=1` | skip the large-upload probe described below |
 
 Two of those exist because the claim they check has no other witness. `TENSORAGENT_NAV_CHECK`
@@ -621,6 +663,13 @@ steps and end as one PNG of the size it reported; a clip must stream its stages 
 and end as one MP4 the app serves with Range and HEAD, whose video track has the frame
 count, rate and size the turn reported and whose sound, inside the MP4 or in a WAV beside
 it, is 32 kHz stereo as long as the clip. Either must be in the saved chat.
+`--loras id[:strength],...` turns LoRA plug-ins on for `draw` and `edit` through the app's
+own route and puts the previous choice back afterwards; each picture must then name the
+plug-ins it was drawn with (an edit-only one is not applied to a picture made from words)
+and, with a speed plug-in, run its step count. `--draw-prompt`, `--edit-prompt` and
+`--edit-photo` replace the default request and photo, for a plug-in that needs its own
+phrase or a photo with red boxes on it. An unknown scenario name is an error rather than
+a run of nothing that reports success.
 `scripts/chat-e2e-selftest.py` runs the clip checks against files it makes itself, with
 no app and no model, and reports what this machine cannot run (no cv2, no `afconvert`) as
 skipped, never as passed.
@@ -1229,6 +1278,14 @@ so rather than passing silently:
 `TENSORAGENT_TEST_BACKEND` chooses the backend for the three media sets: the input
 tests default to the CPU, the image-editing and video-generation ones to Metal.
 
+The LoRA plug-in tests (`LoraCatalogTests`, and the sheet's in `AgentAppHostTests` and
+`WebUiPageTests`) are hermetic: an installed plug-in is files of its pinned sizes. Whether
+the real files load is `InferenceWeb.Tests`' `RealArticleLoras_LoadCompletelyAgainstTheCheckpoint`,
+with `TENSORSHARP_QWEN21_LORA_DIR` pointing at the app's `Library/Caches/TensorAgent/loras`
+and `TENSORSHARP_QWEN21_DIT` at its Qwen-Image transformer GGUF. Its rank-256 Viggle Turbo
+row needs a file the app does not ship, so against that folder it fails with
+FileNotFoundException and the twelve the app offers pass.
+
 None of this runs in CI. `.github/workflows/pr-unit-tests.yml` runs `InferenceWeb.Tests`,
 whose `TensorAgentMauiProjectTests` read the MAUI head's project file, `Info.plist`,
 entitlements, share extension and native export manifest; `TensorAgent.Tests` is not run
@@ -1499,8 +1556,13 @@ checked and these were not:
 - **Pictures on a phone.** The page makes and edits pictures through `/api/chat` with
   Qwen-Image 2.1, which the catalog offers only on a Mac (24 GB), where it was measured;
   no image has been generated on iOS. `/api/image-edit` remains bound to the same
-  service the desktop uses, but nothing on the page calls it, and `/api/image-generate`,
-  the desktop page's text-to-image route, is not bound in the app.
+  service the desktop uses, with the LoRA plug-ins the user chose, but nothing on the page
+  calls it, and `/api/image-generate`, the desktop page's text-to-image route, is not bound
+  in the app.
+- **LoRA plug-ins beyond the prompts tried.** Each of the twelve made pictures in the app
+  from the prompts and photos `chat-e2e.py` sends, and the two box-driven edits were also run
+  on their authors' example photos. Object Remover failed on one of its two. How each fares
+  on other subjects is up to the plug-in, and nothing here measures it.
 - **Clips on a phone.** The two MiniMax-H3 entries are offered only on a Mac (32 GB),
   where they were measured. No video model fits a phone, so none is offered there, and
   no clip has been played by iOS's media loader (WebKit's playback was checked in the

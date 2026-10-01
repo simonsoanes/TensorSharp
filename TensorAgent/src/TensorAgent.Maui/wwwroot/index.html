@@ -505,6 +505,23 @@ body.voice #toggles { display: flex; }
   border-radius: 10px; background: var(--accent); color: #fff; border: 0;
 }
 .hint-block { font-size: 12px; color: var(--muted); margin: 0; }
+/* LoRA plug-ins: a decision per row, so the actions sit on the row itself. */
+.lorarow { cursor: default; }
+.lorarow .ds { display: block; -webkit-line-clamp: unset; }
+.lorarow .lic { font-size: 11px; color: var(--muted); margin-top: 3px; }
+.lorarow .err { font-size: 12px; color: #fca5a5; margin-top: 4px; }
+.lorarow .act { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; flex: 0 0 auto; }
+.lorarow .pct { font-size: 12px; color: var(--muted); }
+.lorarow .strength { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+.lorarow .strength input { flex: 1 1 auto; min-width: 0; accent-color: var(--accent); }
+.lorarow .strength .val { width: 38px; text-align: right; }
+button.mini {
+  font-size: 12px; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--accent-soft); color: var(--text);
+}
+button.mini.quiet { background: transparent; color: var(--muted); }
+#lora-hint { margin-bottom: 6px; }
+#lora-error { font-size: 13px; color: #fca5a5; margin: 0 0 8px; }
 </style>
 </head>
 <body>
@@ -618,7 +635,19 @@ body.voice #toggles { display: flex; }
   <div class="grab"></div>
   <h2>Model</h2>
   <div id="model-info"></div>
+  <!-- Shown while an image model is loaded: its LoRA plug-ins (WebUiRoutes.MapLoras). -->
+  <button class="opt" id="open-loras" style="display:none"><span class="em">🎨</span> LoRA plug-ins<span class="hint" id="loras-hint">speed, style</span></button>
   <button class="opt" id="open-models"><span class="em">📚</span> Manage models<span class="hint">download, switch</span></button>
+</div>
+
+<!-- The image model's LoRA plug-ins: what is downloaded, what is on, and how strongly.
+     A change applies from the next picture; a picture being drawn keeps its own. -->
+<div class="sheet" id="lora-sheet">
+  <div class="grab"></div>
+  <h2>LoRA plug-ins</h2>
+  <p class="hint-block" id="lora-hint">They apply from the next picture. One speed plug-in at a time; styles and edits combine with it.</p>
+  <p id="lora-error" role="alert" style="display:none"></p>
+  <div id="lora-list"></div>
 </div>
 
 <input type="file" id="skill-zip-input" style="display:none" accept=".zip">

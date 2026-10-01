@@ -51,6 +51,9 @@ public static class ModelCatalog
     // Republic of Korea and the US, which the entries' notes say; the Qwen3-VL text
     // encoder is Apache-2.0.
     private const string MiniMaxH3License = "MiniMax H3 Community License";
+    // Qwen-Image 2.1's own license (Qwen/Qwen-Image-2.1, and the GGUF and VAE repackagings
+    // of it): research and evaluation only. Its Qwen3-VL text encoder is Apache-2.0.
+    private const string QwenImageLicense = "Qwen Research License (non-commercial); text encoder Apache-2.0";
 
     private static string Hf(string repo, string file) => $"https://huggingface.co/{repo}/resolve/main/{file}";
 
@@ -377,7 +380,7 @@ public static class ModelCatalog
             ContextLength = 0,
             KvCacheDtype = "f16",
             Sampling = new CatalogSampling(1.0f, 0, 1.0f, 0.0f),
-            License = ApacheLicense,
+            License = QwenImageLicense,
             Notes = "Makes a picture from a description, or edits an attached photo. Needs 24 GB of memory "
                 + "(a Mac).",
         },

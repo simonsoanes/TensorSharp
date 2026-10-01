@@ -8,6 +8,7 @@
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using TensorAgent.Core.Catalog;
@@ -42,7 +43,7 @@ namespace TensorAgent.Core.Hosting;
 /// colliding with something the desktop adds later.
 /// </para>
 /// </summary>
-public static class WebUiRoutes
+public static partial class WebUiRoutes
 {
     /// <summary>
     /// Bind the shared Web UI API. <paramref name="chat"/> and
@@ -82,6 +83,12 @@ public static class WebUiRoutes
     /// this exercise.
     /// </para>
     /// </param>
+    /// <param name="prepareImage">
+    /// The LoRA plug-ins a picture is made with (<see cref="AgentAppHost.PrepareImageTurn"/>),
+    /// or null when the host does not choose them per picture. The edit routes apply it as a
+    /// chat picture does, so the saved choice holds for every picture the app makes: without
+    /// it they would use whatever set the last chat picture left on the model.
+    /// </param>
     public static void MapWebUi(
         this LoopbackServer server,
         WebUiChatService chat,
@@ -89,7 +96,8 @@ public static class WebUiRoutes
         SkillsService? skills = null,
         ConversationRecorder? recorder = null,
         Func<JsonElement, CancellationToken, IAsyncEnumerable<object>>? chatFrames = null,
-        ChatTurnManager? turns = null)
+        ChatTurnManager? turns = null,
+        Func<bool, ImageTurns.Preparation>? prepareImage = null)
     {
         ArgumentNullException.ThrowIfNull(server);
         ArgumentNullException.ThrowIfNull(chat);
@@ -252,10 +260,14 @@ public static class WebUiRoutes
         server.MapPost("/api/image-edit", async (request, ct) =>
         {
             JsonElement body = await request.ReadJsonAsync(ct);
-            return Json(await Guarded(() => chat.ImageEditAsync(body, ct)));
+            if (prepareImage?.Invoke(true) is not { } plan)
+                return Json(await Guarded(() => chat.ImageEditAsync(body, ct)));
+            if (plan.Error is { } refused)
+                return LoopbackResponse.Json(new { error = refused }, 409);
+            return Json(await Guarded(() => chat.ImageEditAsync(body, plan.Specs, ct)));
         });
         server.MapPost("/api/image-edit/stream", async (request, ct) =>
-            LoopbackResponse.Sse(Guarded(chat.ImageEditStreamAsync(await request.ReadJsonAsync(ct), ct)), request.Cancellation));
+            LoopbackResponse.Sse(Guarded(ImageEditFrames(chat, prepareImage, await request.ReadJsonAsync(ct), ct)), request.Cancellation));
         server.MapPost("/api/video-generate", async (request, ct) =>
         {
             JsonElement body = await request.ReadJsonAsync(ct);
@@ -503,8 +515,15 @@ public static class WebUiRoutes
         {
             AppSettings updated = JsonSerializer.Deserialize<AppSettings>(
                 (await request.ReadJsonAsync(ct)).GetRawText(), SseFraming.JsonOptions) ?? new AppSettings();
-            settings.Save(updated);
-            AppSettings saved = settings.Load();
+            // The LoRA sheet's routes own the plug-in choice (MapLoras), which they check as
+            // they save it. The page posts the copy of the settings it read when it loaded, so
+            // taking that copy's choice would undo a plug-in turned on since, or bring back one
+            // removed with its files.
+            AppSettings saved = settings.Update(current =>
+            {
+                updated.ImageLoras = current.ImageLoras;
+                return updated;
+            });
             // Applied, not merely stored. Saving alone is what made "Allow network
             // access" a switch that did nothing until the app was force-quit.
             onSettingsChanged?.Invoke(saved);
@@ -884,6 +903,25 @@ public static class WebUiRoutes
     /// translation, never a reinterpretation: the status and the payload are passed
     /// through untouched so the page sees what the desktop's page sees.
     /// </summary>
+    /// <summary>An edit's frames, made with the plug-ins <paramref name="prepare"/> chooses;
+    /// a choice it refuses ends the stream with the reason, as a chat picture's does.</summary>
+    private static async IAsyncEnumerable<object> ImageEditFrames(
+        WebUiChatService chat, Func<bool, ImageTurns.Preparation>? prepare, JsonElement body,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        ImageTurns.Preparation? plan = prepare?.Invoke(true);
+        if (plan?.Error is { } refused)
+        {
+            yield return new { done = true, error = refused };
+            yield break;
+        }
+        IAsyncEnumerable<object> frames = plan is null
+            ? chat.ImageEditStreamAsync(body, cancellationToken)
+            : chat.ImageEditStreamAsync(body, plan.Specs, cancellationToken);
+        await foreach (object frame in frames.WithCancellation(cancellationToken).ConfigureAwait(false))
+            yield return frame;
+    }
+
     private static async Task<object> Guarded(Func<Task<object>> call)
     {
         try { return await call().ConfigureAwait(false); }

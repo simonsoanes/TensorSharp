@@ -1282,11 +1282,19 @@ namespace TensorSharp.Chat
         /// reference them as "Picture 1", "Picture 2", ... in upload order.
         /// </summary>
         public Task<object> ImageEditAsync(JsonElement body, CancellationToken cancellationToken) =>
-            ImageRequestAsync(body, generate: false, cancellationToken);
+            ImageRequestAsync(body, generate: false, null, cancellationToken);
+
+        /// <summary>
+        /// An edit made with exactly the LoRA plug-ins <paramref name="loras"/>; see
+        /// <see cref="ImageEditStreamAsync(JsonElement, IReadOnlyList{LoraSpec}, CancellationToken)"/>.
+        /// A set that cannot be applied is a 500 with the reason, and the previous set stays.
+        /// </summary>
+        public Task<object> ImageEditAsync(JsonElement body, IReadOnlyList<LoraSpec> loras, CancellationToken cancellationToken) =>
+            ImageRequestAsync(body, generate: false, loras ?? throw new ArgumentNullException(nameof(loras)), cancellationToken);
 
         /// <summary>Text-to-image generation with a Qwen-Image-2.1 model.</summary>
         public Task<object> ImageGenerateAsync(JsonElement body, CancellationToken cancellationToken) =>
-            ImageRequestAsync(body, generate: true, cancellationToken);
+            ImageRequestAsync(body, generate: true, null, cancellationToken);
 
         public void EnsureImageGenerationAvailable()
         {
@@ -1353,7 +1361,8 @@ namespace TensorSharp.Chat
             return prompt;
         }
 
-        private async Task<object> ImageRequestAsync(JsonElement body, bool generate, CancellationToken cancellationToken)
+        private async Task<object> ImageRequestAsync(
+            JsonElement body, bool generate, IReadOnlyList<LoraSpec> loras, CancellationToken cancellationToken)
         {
             var logger = _loggerFactory.CreateLogger("TensorSharp.Server.ImageEdit");
             var model = generate ? RequireImageGenerationModel() : RequireImageEditModel();
@@ -1366,7 +1375,7 @@ namespace TensorSharp.Chat
                 string error = await ReadUploadedImagesAsync(body, images, cancellationToken);
                 if (error != null) throw new WebUiRequestRejectedException(400, new { error });
             }
-            return await RunImageEditAsync(model, prompt, p, images, logger, generate, cancellationToken);
+            return await RunImageEditAsync(model, prompt, p, images, logger, generate, loras, cancellationToken);
         }
 
         /// <summary>The multipart edit route uses the same validation and worker as JSON.</summary>
@@ -1386,13 +1395,46 @@ namespace TensorSharp.Chat
             };
             p.TargetArea = p.ResolveTargetArea();
             ValidateImageParameters(p);
-            return await RunImageEditAsync(model, prompt ?? "", p, images.ToList(), logger, false, cancellationToken);
+            return await RunImageEditAsync(model, prompt ?? "", p, images.ToList(), logger, false, null, cancellationToken);
         }
+
+        /// <summary>
+        /// Swap <paramref name="loras"/> into <paramref name="model"/> unless it already carries
+        /// that set; null means the caller does not choose plug-ins. Called inside
+        /// <see cref="_imageEditLock"/>, so the picture that follows is made with the set it was
+        /// asked with, whatever the request it waited behind used. The model records a set as
+        /// <see cref="LoraCliFlags.Resolve"/> expands it (a plug-in manifest becomes its weights
+        /// and config), so a set given in another form is compared in that one: compared as
+        /// given, it reloaded on every picture.
+        /// </summary>
+        private static void ApplyLoras(
+            TensorSharp.Models.QwenImage.QwenImageModel model, IReadOnlyList<LoraSpec> loras, ILogger logger)
+        {
+            if (loras == null || model.LoraSpecs.SequenceEqual(loras))
+                return;
+            var swap = Stopwatch.StartNew();
+            try
+            {
+                if (model.LoraSpecs.SequenceEqual(LoraCliFlags.Resolve(loras)))
+                    return;
+                model.SetLoras(loras);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                throw new LoraApplyException("The LoRA plug-ins could not be applied: " + ex.Message, ex);
+            }
+            logger.LogInformation(LogEventIds.UploadReceived, "Image request: LoRA plug-ins {Loras} applied in {Seconds:F2}s",
+                loras.Count == 0 ? "(none)" : string.Join(", ", loras.Select(l => Path.GetFileName(l.Path) + "@" + l.Scale)),
+                swap.Elapsed.TotalSeconds);
+        }
+
+        /// <summary>A plug-in set the model refused; the model keeps the set it had.</summary>
+        private sealed class LoraApplyException(string message, Exception inner) : InvalidOperationException(message, inner);
 
         private async Task<object> RunImageEditAsync(
             TensorSharp.Models.QwenImage.QwenImageModel model,
             string prompt, TensorSharp.Models.QwenImage.QwenImageParams p, List<byte[]> imageBytesList, ILogger logger,
-            bool generate, CancellationToken cancellationToken)
+            bool generate, IReadOnlyList<LoraSpec> loras, CancellationToken cancellationToken)
         {
             string outName = $"{(generate ? "generated" : "edit")}-{Guid.NewGuid():N}.png";
             string outPath = Path.Combine(_options.UploadDirectory, outName);
@@ -1410,6 +1452,7 @@ namespace TensorSharp.Chat
                     {
                         cancellationToken.ThrowIfCancellationRequested();
                         var inputs = imageBytesList.ConvertAll(bytes => TensorSharp.Models.QwenImage.ImageIO.Decode(bytes, preserveAlpha: true));
+                        ApplyLoras(model, loras, logger);
                         p.OnStep = (_, _, _) => cancellationToken.ThrowIfCancellationRequested();
                         var output = generate ? model.GenerateImage(prompt, p) : model.EditImage(prompt, inputs, p);
                         TensorSharp.Models.QwenImage.ImageIO.SavePng(outPath, output);
@@ -1424,6 +1467,11 @@ namespace TensorSharp.Chat
                 // client's to fix, so a 400 with the reason rather than a 500.
                 logger.LogWarning(LogEventIds.UploadReceived, "Image request rejected: {Reason}", ex.Message);
                 throw new WebUiRequestRejectedException(400, new { error = ex.Message });
+            }
+            catch (LoraApplyException ex)
+            {
+                logger.LogError(LogEventIds.ChatFailed, ex, "Image request failed");
+                throw new WebUiRequestRejectedException(500, new { error = ex.Message });
             }
             finally
             {
@@ -1490,13 +1538,30 @@ namespace TensorSharp.Chat
         /// already started its response by then, and the page treats both alike.
         /// </summary>
         public IAsyncEnumerable<object> ImageEditStreamAsync(JsonElement body, CancellationToken cancellationToken) =>
-            ImageRequestStreamAsync(body, false, cancellationToken);
+            ImageRequestStreamAsync(body, false, null, cancellationToken);
 
         public IAsyncEnumerable<object> ImageGenerateStreamAsync(JsonElement body, CancellationToken cancellationToken) =>
-            ImageRequestStreamAsync(body, true, cancellationToken);
+            ImageRequestStreamAsync(body, true, null, cancellationToken);
+
+        /// <summary>
+        /// An edit made with exactly the LoRA plug-ins <paramref name="loras"/> (an empty list
+        /// means none), for a host that chooses them per picture rather than at startup
+        /// (<c>--lora</c>). The set is swapped in under the same lock as the run, so a picture
+        /// that waited behind another is made with the set it was asked with, and an unchanged
+        /// set costs nothing. Pass absolute paths: specs are compared as the model records them
+        /// (<see cref="TensorSharp.Models.QwenImage.QwenImageModel.LoraSpecs"/>). A set that
+        /// cannot be applied ends the stream with the reason, and the previous set stays.
+        /// </summary>
+        public IAsyncEnumerable<object> ImageEditStreamAsync(JsonElement body, IReadOnlyList<LoraSpec> loras, CancellationToken cancellationToken) =>
+            ImageRequestStreamAsync(body, false, loras ?? throw new ArgumentNullException(nameof(loras)), cancellationToken);
+
+        /// <summary>A picture from words with exactly the LoRA plug-ins <paramref name="loras"/>;
+        /// see <see cref="ImageEditStreamAsync(JsonElement, IReadOnlyList{LoraSpec}, CancellationToken)"/>.</summary>
+        public IAsyncEnumerable<object> ImageGenerateStreamAsync(JsonElement body, IReadOnlyList<LoraSpec> loras, CancellationToken cancellationToken) =>
+            ImageRequestStreamAsync(body, true, loras ?? throw new ArgumentNullException(nameof(loras)), cancellationToken);
 
         private async IAsyncEnumerable<object> ImageRequestStreamAsync(
-            JsonElement body, bool generate,
+            JsonElement body, bool generate, IReadOnlyList<LoraSpec> loras,
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
             var logger = _loggerFactory.CreateLogger("TensorSharp.Server.ImageEdit");
@@ -1560,6 +1625,7 @@ namespace TensorSharp.Chat
                     {
                         var inputs = imageBytesList.ConvertAll(bytes => TensorSharp.Models.QwenImage.ImageIO.Decode(bytes, preserveAlpha: true));
                         ct.ThrowIfCancellationRequested();
+                        ApplyLoras(editModel, loras, logger);
                         p.PreviewCount = previewCount;
                         p.OnStep = (step, total, preview) =>
                             {

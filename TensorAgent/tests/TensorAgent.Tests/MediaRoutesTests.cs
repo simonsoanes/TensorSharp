@@ -38,6 +38,7 @@ public sealed class MediaRoutesTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "tensoragent-media-" + Guid.NewGuid().ToString("N"));
     private readonly string _uploads;
+    private readonly WebUiChatService _chat;
     private readonly LoopbackServer _server;
     private readonly HttpClient _client;
 
@@ -60,14 +61,14 @@ public sealed class MediaRoutesTests : IDisposable
             fileLoggingEnabled: false,
             samplingDefaults: null);
 
-        var chat = new WebUiChatService(
+        _chat = new WebUiChatService(
             new ModelService(), new SessionManager(), options,
             new UploadStoragePolicy(_uploads), new SkillRegistry(new SkillRegistryOptions()),
             codeRunner: null, workspaces: null, codeArtifacts: null,
             NullLoggerFactory.Instance);
 
         _server = new LoopbackServer(NullLogger.Instance);
-        _server.MapWebUi(chat, _uploads);
+        _server.MapWebUi(_chat, _uploads);
         _server.Start();
 
         _client = new HttpClient { BaseAddress = new Uri(_server.BaseUrl), Timeout = TimeSpan.FromMinutes(2) };
@@ -94,13 +95,15 @@ public sealed class MediaRoutesTests : IDisposable
         => JsonSerializer.Deserialize<JsonElement>(await response.Content.ReadAsStringAsync());
 
     /// <summary>Read a server-sent-event stream into its frames, as the page does.</summary>
-    private async Task<List<JsonElement>> StreamAsync(string route, object body)
+    private Task<List<JsonElement>> StreamAsync(string route, object body) => StreamAsync(_client, route, body);
+
+    private static async Task<List<JsonElement>> StreamAsync(HttpClient client, string route, object body)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, route)
         {
             Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"),
         };
-        using HttpResponseMessage response = await _client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+        using HttpResponseMessage response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
         var frames = new List<JsonElement>();
         await using Stream stream = await response.Content.ReadAsStreamAsync();
         using var reader = new StreamReader(stream);
@@ -384,5 +387,49 @@ public sealed class MediaRoutesTests : IDisposable
             Assert.True(last.GetProperty("done").GetBoolean());
             Assert.False(string.IsNullOrWhiteSpace(last.GetProperty("error").GetString()), $"{route} said nothing");
         }
+    }
+
+    /// <summary>
+    /// In the app, an edit made through these routes uses the LoRA plug-ins the user chose,
+    /// exactly as a picture in the chat does: a choice that cannot be honoured refuses the
+    /// edit with the reason, both routes ask for an edit's plug-ins, and a choice that can
+    /// be honoured goes on to the image service (which, with nothing loaded, says so).
+    /// Without the preparation they used whatever set the last chat picture left behind.
+    /// </summary>
+    [Fact]
+    public async Task TheEditRoutesUseTheHostsLoraChoiceAndRefuseOneItCannotHonour()
+    {
+        const string reason = "Viggle Turbo is turned on but its files are missing.";
+        var asked = new List<bool>();
+        bool refuse = true;
+        using var server = new LoopbackServer(NullLogger.Instance);
+        server.MapWebUi(_chat, _uploads, prepareImage: editing =>
+        {
+            lock (asked) asked.Add(editing);
+            return refuse
+                ? ImageTurns.Preparation.Refused(reason)
+                : ImageTurns.Preparation.Ready(Array.Empty<TensorSharp.Runtime.LoraSpec>(), Array.Empty<string>());
+        });
+        server.Start();
+        using var client = new HttpClient { BaseAddress = new Uri(server.BaseUrl), Timeout = TimeSpan.FromMinutes(2) };
+        client.DefaultRequestHeaders.Add("Cookie", $"{LoopbackServer.TokenCookie}={server.Token}");
+        var body = new { prompt = "make it blue", imagePaths = Array.Empty<string>() };
+
+        HttpResponseMessage refused = await client.PostAsync("/api/image-edit",
+            new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
+        Assert.Equal(reason, (await BodyOf(refused)).GetProperty("error").GetString());
+
+        JsonElement frame = Assert.Single(await StreamAsync(client, "/api/image-edit/stream", body));
+        Assert.True(frame.GetProperty("done").GetBoolean());
+        Assert.Equal(reason, frame.GetProperty("error").GetString());
+
+        refuse = false;
+        HttpResponseMessage served = await client.PostAsync("/api/image-edit",
+            new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.BadRequest, served.StatusCode);
+        Assert.Contains("Qwen-Image-2.1", (await BodyOf(served)).GetProperty("error").GetString(), StringComparison.OrdinalIgnoreCase);
+
+        Assert.Equal(new[] { true, true, true }, asked);
     }
 }
