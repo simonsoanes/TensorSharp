@@ -634,6 +634,14 @@ skipped, never as passed.
   So there is no `Platforms/MacCatalyst/Entitlements.plist`, and the build is not a Mac
   App Store build. Nothing here signs it for distribution either; a Debug or Release build
   is signed ad hoc for this Mac.
+- **Debug and Release are two apps with one set of data.** `bin/Debug/.../TensorAgent.app`
+  and `bin/Release/.../TensorAgent.app` share `~/Library/Application Support/TensorAgent`
+  and `~/Library/Caches/TensorAgent`, but each offers only the catalog it was compiled
+  with, so rebuild the one you open after pulling (`CONFIGURATION=Release build-mac.sh`
+  for the Release one). A launch reclaims the models of entries the catalog has retired
+  (`ModelCatalog.Retired`) and keeps a folder whose id it does not know, which a newer
+  build may have installed; for the same reason it keeps, without loading it, a selected
+  model it does not know.
 - **The oldest Mac it runs on** is decided by the engine library, which `build-macos.sh`
   builds for the building Mac's own macOS unless `MACOSX_DEPLOYMENT_TARGET` says otherwise,
   not by the app's `SupportedOSPlatformVersion` (Mac Catalyst 17.0, macOS 14).

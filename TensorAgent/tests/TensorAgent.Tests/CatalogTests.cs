@@ -409,6 +409,106 @@ public sealed class CatalogTests
         }
     }
 
+    /// <summary>
+    /// What a build OLDER than the catalog that installed a model finds: a folder its own
+    /// catalog has never listed.
+    ///
+    /// <para>
+    /// On a Mac the Debug and Release builds share one models directory. A Release build
+    /// from 2026-09-30, launched after the Debug build had installed the five desktop
+    /// entries added later that day, treated every id it did not know as retired and
+    /// deleted all five. An unknown id is kept now; only a retired one is reclaimed.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void ASweepByAnOlderBuildKeepsTheModelsANewerBuildInstalled()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "ta-skew-" + Guid.NewGuid().ToString("n"));
+        try
+        {
+            // The catalog as it was before the desktop entries existed.
+            CatalogModel[] older = ModelCatalog.BuiltIn.Where(m => !DesktopOnly.Contains(m.Id)).ToArray();
+            var store = new ModelStore(root, catalog: older);
+            foreach (string id in DesktopOnly.Append("gemma-4-12b-iq3xxs"))
+            {
+                Directory.CreateDirectory(Path.Combine(root, id));
+                File.WriteAllBytes(Path.Combine(root, id, "weights.gguf"), new byte[1024]);
+            }
+
+            long freed = store.SweepOrphanedModels();
+
+            Assert.Equal(1024, freed);
+            foreach (string id in DesktopOnly)
+                Assert.True(Directory.Exists(Path.Combine(root, id)), $"a build older than {id} deleted its weights");
+            Assert.False(Directory.Exists(Path.Combine(root, "gemma-4-12b-iq3xxs")));
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// Every id the catalog has ever shipped, built-in or retired. It only grows: a new
+    /// entry's id is added here, and an id that leaves <see cref="ModelCatalog.BuiltIn"/>
+    /// stays here and must move to <see cref="ModelCatalog.Retired"/>.
+    /// </summary>
+    private static readonly string[] Shipped =
+    {
+        "gemma-4-e2b-q8",
+        "gemma-4-e4b-q8",
+        "gemma-4-e4b-q4kxl",
+        "gemma-4-e4b-iq4xs",
+        "gemma-4-12b-q4kxl",
+        "gemma-4-12b-iq3xxs",
+        "gemma-4-12b-iq2m",
+        "gemma-4-26b-a4b-iq2xxs",
+        "gpt-oss-20b-q8",
+        "bonsai-8b-q1-0",
+        "bonsai-27b-q1-0",
+        "bonsai-2-27b-ptq1-0",
+        "qwen3.5-9b-q4kxl",
+        "qwen3.5-9b-iq4xs",
+        "qwen3.6-35b-a3b-iq1m",
+        "qwen3.8-27b-iq2xxs",
+        "qwen3.8-27b-iq1s",
+        "qwen3.8-27b-q4kxl",
+        "muse-glimmer-30b-q4kxl",
+        "qwen-image-edit-2511-q2k",
+        "qwen-image-2.1-q4km",
+        "minimax-h3-fl2va-q4k",
+        "minimax-h3-ref2va-q4k",
+    };
+
+    /// <summary>
+    /// The launch sweep reclaims only <see cref="ModelCatalog.Retired"/> ids
+    /// (<see cref="ASweepByAnOlderBuildKeepsTheModelsANewerBuildInstalled"/>), so an entry
+    /// that simply vanished from the catalog would leave its gigabytes on every device
+    /// that installed it, with no row in the Models list to delete them from. Both
+    /// directions are checked: an id that left without being retired, and an entry added
+    /// without being recorded here.
+    /// </summary>
+    [Fact]
+    public void EveryIdTheCatalogHasShippedIsBuiltInOrRetired()
+    {
+        string[] current = ModelCatalog.BuiltIn.Select(m => m.Id).ToArray();
+        Assert.Empty(current.Intersect(ModelCatalog.Retired, StringComparer.OrdinalIgnoreCase));
+        Assert.Equal(ModelCatalog.Retired.Count, ModelCatalog.Retired.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        foreach (string id in ModelCatalog.Retired)
+            Assert.Matches("^[a-z0-9.-]+$", id);
+
+        var listed = new HashSet<string>(current.Concat(ModelCatalog.Retired), StringComparer.OrdinalIgnoreCase);
+        string[] vanished = Shipped.Where(id => !listed.Contains(id)).ToArray();
+        Assert.True(vanished.Length == 0,
+            $"{string.Join(", ", vanished)} left ModelCatalog.BuiltIn without moving to ModelCatalog.Retired; "
+            + "no launch would ever reclaim the weights installed under that name");
+        string[] unrecorded = listed.Where(id => !Shipped.Contains(id, StringComparer.OrdinalIgnoreCase)).ToArray();
+        Assert.True(unrecorded.Length == 0,
+            $"{string.Join(", ", unrecorded)} is not in CatalogTests.Shipped; add every new entry's id there");
+        Assert.True(ModelCatalog.IsRetired("GEMMA-4-12B-IQ3XXS"));
+        Assert.False(ModelCatalog.IsRetired("gemma-4-12b-iq2m"));
+    }
+
     [Fact]
     public void FindIsCaseInsensitive()
     {

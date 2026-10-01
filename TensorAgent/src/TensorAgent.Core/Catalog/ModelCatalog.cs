@@ -461,6 +461,48 @@ public static class ModelCatalog
             + "South Korea or the US.",
     };
 
+    /// <summary>
+    /// The ids earlier versions of this catalog shipped and this one no longer does: an
+    /// entry re-pointed at another file (the id names the quantization, so
+    /// <c>gemma-4-12b-q4kxl</c> became <c>gemma-4-12b-iq2m</c>) or withdrawn. What is stored
+    /// under one of these names will never be loaded again, and is what the launch sweeps
+    /// reclaim (<see cref="ModelStore.SweepOrphanedModels"/> and the prefix checkpoints).
+    ///
+    /// <para>
+    /// An id in neither list is not reclaimed, because it is not necessarily an old one.
+    /// On a Mac the Debug and Release builds share one models directory, and a build
+    /// older than the catalog that installed a model does not know its id: a Release
+    /// build from the day before, treating every id it did not know as retired, deleted
+    /// the folders of the five entries the Debug build had just installed. So an id
+    /// leaves <see cref="BuiltIn"/> by moving here, and <c>CatalogTests</c> holds every id
+    /// the catalog has shipped so that it fails until one does. A retired id is never
+    /// given to a new entry: every build that retired it would delete that entry's files.
+    /// </para>
+    /// </summary>
+    public static IReadOnlyList<string> Retired { get; } = new[]
+    {
+        // Re-pointed at another file on 2026-09-05; gemma-4-12b-iq3xxs was the 12B between
+        // the Q4_K_XL and today's UD-IQ2_M.
+        "gemma-4-e4b-q4kxl",
+        "gemma-4-12b-q4kxl",
+        "gemma-4-12b-iq3xxs",
+        "qwen3.5-9b-q4kxl",
+        "qwen3.8-27b-iq2xxs",
+        // Withdrawn on 2026-09-07.
+        "gemma-4-e4b-q8",
+        "gemma-4-26b-a4b-iq2xxs",
+        "gpt-oss-20b-q8",
+        "qwen3.6-35b-a3b-iq1m",
+        "qwen3.8-27b-iq1s",
+        "qwen-image-edit-2511-q2k",
+        // Bonsai 1, replaced by Bonsai 2 27B on 2026-09-28.
+        "bonsai-8b-q1-0",
+        "bonsai-27b-q1-0",
+    };
+
+    /// <summary>Whether <paramref name="id"/> is one of the <see cref="Retired"/> ids.</summary>
+    public static bool IsRetired(string id) => Retired.Contains(id, StringComparer.OrdinalIgnoreCase);
+
     public static CatalogModel? Find(string id) =>
         BuiltIn.FirstOrDefault(m => string.Equals(m.Id, id, StringComparison.OrdinalIgnoreCase));
 

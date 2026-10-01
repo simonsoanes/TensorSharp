@@ -127,6 +127,59 @@ public sealed class AgentAppHostTests : IDisposable
         Assert.Null(new SettingsStore(paths.SettingsFile).Load().SelectedModelId);
     }
 
+    /// <summary>
+    /// A remembered model this build does not know and never retired is kept, unloaded,
+    /// rather than cleared: it is most likely a newer build's entry, chosen in the Debug or
+    /// Release build that shares these settings, and clearing it would leave that build
+    /// starting with no model the next time it opens.
+    /// </summary>
+    [Fact]
+    public void AModelANewerBuildChoseIsKeptForIt()
+    {
+        AgentPaths paths = Paths with { DeviceMemoryGB = 12 };
+        paths.EnsureCreated();
+        var settings = new SettingsStore(paths.SettingsFile);
+        AppSettings chosen = settings.Load();
+        chosen.SelectedModelId = "a-newer-builds-entry-q4";
+        settings.Save(chosen);
+
+        _host = new AgentAppHost(paths);
+        _host.Start();
+
+        Assert.Equal(AgentAppHost.ModelLoadState.None, _host.ModelLoad);
+        Assert.Equal("a-newer-builds-entry-q4", new SettingsStore(paths.SettingsFile).Load().SelectedModelId);
+    }
+
+    /// <summary>
+    /// A launch reclaims the weights and prefix checkpoints of a RETIRED entry and keeps
+    /// those of an id it does not know, which a newer build sharing the directories may
+    /// have installed (see CatalogTests.ASweepByAnOlderBuildKeepsTheModelsANewerBuildInstalled).
+    /// </summary>
+    [Fact]
+    public void StartupReclaimsRetiredModelsAndKeepsAnUnknownIdsFiles()
+    {
+        AgentPaths paths = Paths;
+        paths.EnsureCreated();
+        string prefixCache = Path.Combine(paths.CacheRoot, "prefix-cache");
+        const string retired = "gemma-4-12b-iq3xxs";
+        const string newer = "a-newer-builds-entry-q4";
+        Assert.True(ModelCatalog.IsRetired(retired));
+        foreach (string id in new[] { retired, newer })
+        {
+            Directory.CreateDirectory(Path.Combine(paths.ModelsDirectory, id));
+            File.WriteAllBytes(Path.Combine(paths.ModelsDirectory, id, "weights.gguf"), new byte[64]);
+            Directory.CreateDirectory(Path.Combine(prefixCache, id));
+            File.WriteAllBytes(Path.Combine(prefixCache, id, "checkpoint.bin"), new byte[64]);
+        }
+
+        _host = new AgentAppHost(paths);
+
+        Assert.False(Directory.Exists(Path.Combine(paths.ModelsDirectory, retired)));
+        Assert.False(Directory.Exists(Path.Combine(prefixCache, retired)));
+        Assert.True(File.Exists(Path.Combine(paths.ModelsDirectory, newer, "weights.gguf")));
+        Assert.True(File.Exists(Path.Combine(prefixCache, newer, "checkpoint.bin")));
+    }
+
     [Fact]
     public void ItCreatesEverythingItNeedsAndSeparatesBackedUpDataFromRefetchableFiles()
     {

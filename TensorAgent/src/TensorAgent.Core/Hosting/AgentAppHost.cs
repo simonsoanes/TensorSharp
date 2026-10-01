@@ -109,13 +109,14 @@ public sealed class AgentAppHost : IDisposable
         // that now points at a different file. Nothing else can reach them: the Models
         // list is built from the catalog, so a directory no entry claims has no row and
         // no delete button, and it is gigabytes. Swept once per launch, before anything
-        // reads the store.
+        // reads the store. Only RETIRED ids go (ModelCatalog.Retired): an id this build
+        // merely does not know may be a newer build's, sharing this directory.
         Models.SweepOrphanedModels();
-        // And the checkpoints of models the catalog no longer has: a directory no
-        // entry claims has no delete button either.
+        // And the checkpoints of models the catalog has retired: a directory no entry
+        // claims has no delete button either.
         PrefixCheckpointFileStore.SweepOrphans(
             Path.Combine(Paths.CacheRoot, "prefix-cache"),
-            id => ModelCatalog.Find(id) is not null,
+            id => !ModelCatalog.IsRetired(id),
             HostLog);
         // The downloads belong to the APP, not to the model list: a five-gigabyte
         // transfer must not end because the user went back to the chat. See
@@ -1783,10 +1784,22 @@ public sealed class AgentAppHost : IDisposable
         // old one selected holding a name that resolves to nothing. Cleared for the
         // same reason the gated-off case below is: a selection nothing can act on is
         // worse than none, because the picker goes on presenting it as the choice.
+        //
+        // Only a RETIRED id (ModelCatalog.Retired) is cleared. An id this build merely does
+        // not know is most likely a newer build's entry: the Mac's Debug and Release builds
+        // share these settings, and an older one clearing it would leave the newer one
+        // starting at "No model yet". It is kept, unloaded, as the model sweeps keep its files.
         if (ModelCatalog.Find(id) is not { } model)
         {
+            if (!ModelCatalog.IsRetired(id))
+            {
+                _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation(
+                    "the last used model {Model} is not in this build's catalog and was not retired, "
+                    + "so it is most likely a newer build's; keeping the selection", id);
+                return;
+            }
             _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation(
-                "the last used model {Model} is no longer in the catalog; clearing the selection", id);
+                "the last used model {Model} was retired from the catalog; clearing the selection", id);
             settings.SelectedModelId = null;
             Settings.Save(settings);
             return;
