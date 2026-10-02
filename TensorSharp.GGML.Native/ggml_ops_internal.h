@@ -1244,7 +1244,8 @@ namespace tsg
     };
     bool host_moe_compute_segment(const HostMoeSegment& hm, std::vector<float>& out, const char* kernel_name,
                                   HostMoeStagedInputs* staged = nullptr,
-                                  bool allow_device_stream = true);
+                                  bool allow_device_stream = true,
+                                  bool* output_on_device = nullptr);
 
     // One-token routed experts on the host (ggml_ops_host_moe_decode.cpp): ggml's
     // CPU dot kernels on a team woken once per layer instead of a ggml graph per
@@ -1254,6 +1255,17 @@ namespace tsg
     // turns it off for A/B runs.
     bool host_moe_decode_experts(const HostMoeSegment& hm, const float* x, const std::int32_t* ids,
                                  const float* weights, float* out);
+    // Opt-in Qwen4Exp CUDA expert tier: 1 computed, 0 unsupported/disabled,
+    // -1 execution failed. Owns bounded compact quantized slots and graphs.
+    // x/weights both null reads hm.moe_in/hm.weights through CUDA row copies;
+    // IDs stay on the host. out null writes hm.moe_out directly on CUDA;
+    // otherwise the complete result is downloaded into out.
+    int host_moe_cached_experts(const HostMoeSegment& hm, const float* x, const std::int32_t* ids,
+                               const float* weights, float* out, const char* kernel_name);
+    void host_moe_expert_cache_on_drop(const void* ptr);
+    void host_moe_expert_cache_release();
+    void prefetch_mapped_ranges(const std::uint8_t* base,
+                               const std::vector<std::pair<std::size_t, std::size_t>>& ranges);
     void host_moe_decode_release();
     void host_moe_upload_segment(const HostMoeSegment& hm, const float* data);
     void host_moe_zero_segment(const HostMoeSegment& hm);

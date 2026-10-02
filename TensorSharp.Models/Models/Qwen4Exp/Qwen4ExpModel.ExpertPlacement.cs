@@ -9,6 +9,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 using System;
 using TensorSharp.GGML;
+using TensorSharp.Runtime;
 
 namespace TensorSharp.Models
 {
@@ -26,9 +27,10 @@ namespace TensorSharp.Models
     /// rows its tokens route to, and the OS page cache keeps the hot ones.</para>
     ///
     /// <para>Explicit <c>--n-cpu-moe N</c> / <c>--cpu-moe</c> always win. Without
-    /// them, a Metal run whose experts do not fit is planned here: whole layers'
-    /// experts stay on the accelerator while they fit both the working set and the
-    /// RAM the host still needs, and the FIRST layers are offloaded, as llama.cpp's
+    /// them, a Metal or single-device CUDA run whose experts do not fit is
+    /// planned here. Metal also reserves RAM for the host's hot expert pages.
+    /// CUDA can serve offloaded layers through the opt-in selected-expert cache.
+    /// Whole resident layers are kept at the end, as llama.cpp's
     /// <c>--n-cpu-moe</c> does.</para>
     /// </summary>
     public partial class Qwen4ExpModel
@@ -91,6 +93,46 @@ namespace TensorSharp.Models
                 return;
             }
 
+            // CUDA has a separate VRAM pool. Quantized non-expert weights were
+            // preloaded above, but the span still has to bind float weights and
+            // caches. Plan against current free memory rather than total VRAM.
+            // A layer split needs a per-device plan and is left to explicit flags.
+            if (_backend == BackendType.GgmlCuda && !IsTensorParallel && LayerSplitDegree <= 1)
+            {
+                if (!GgmlBasicOps.TryGetDeviceMemoryInfo(out long free, out long total) || total <= 0)
+                    return;
+                var layerBytes = new long[n];
+                var cacheMinimum = new long[n];
+                var cacheAllocationFloor = new long[n];
+                for (int l = 0; l < n; l++)
+                {
+                    layerBytes[l] = LayerExpertBytes(l);
+                    _stackedExpertWeights.TryGetValue($"blk.{l}.ffn_gate_exps.weight", out var gate);
+                    _stackedExpertWeights.TryGetValue($"blk.{l}.ffn_up_exps.weight", out var up);
+                    _stackedExpertWeights.TryGetValue($"blk.{l}.ffn_down_exps.weight", out var down);
+                    if (!_fusedGateUpExperts)
+                        cacheMinimum[l] = MinimumCudaExpertCacheBytes(gate, up, down,
+                            Config.HiddenSize, _expertFf, _numExpertsUsed, _numExperts, out cacheAllocationFloor[l]);
+                }
+                // These tensors were filled directly on the host; their first
+                // device bindings remain pending. Dense quantized preloads are
+                // already reflected in measured free VRAM and are not counted
+                // again. The optional MTP head is preloaded AFTER this plan.
+                long pending = checked(CacheBytes() + (_mtpReady ? 0 : _mtpResidentBytes));
+                foreach (var weight in _weights.Values) pending = checked(pending + weight.Storage.ByteLength);
+                long cacheBudget = ResolveCudaExpertCacheBudget(
+                    Environment.GetEnvironmentVariable("TS_HOST_MOE_EXPERT_CACHE_MB"));
+                ulong cacheLayers = ResolveCudaExpertCacheLayers(
+                    Environment.GetEnvironmentVariable("TS_HOST_MOE_EXPERT_CACHE_LAYERS"));
+                int resident = PlanCudaDeviceExpertLayers(layerBytes, pending, free,
+                    GpuMemoryBudget.ResolveHeadroomBytes(total), cacheBudget, cacheMinimum, cacheLayers, cacheAllocationFloor);
+                for (int l = 0; l < n - resident; l++) _expertOnHost[l] = true;
+                ReportExpertPlacement("planned", $"CUDA free {Gb(free)}, reserved scratch {Gb(DeviceScratchBytes)}" +
+                    (cacheBudget > 0 ? $", expert cache ceiling {Gb(cacheBudget)}" : "") +
+                    "; --n-cpu-moe N overrides");
+                return;
+            }
+
             if (_backend != BackendType.GgmlMetal || IsTensorParallel)
                 return;
             if (!GgmlBasicOps.TryGetDeviceMemoryInfo(out _, out long workingSet) || workingSet <= 0)
@@ -114,6 +156,140 @@ namespace TensorSharp.Models
                 _expertOnHost[l] = true;
             ReportExpertPlacement("planned", $"Metal working set {Gb(workingSet)}, RAM {Gb(ram)}; " +
                 "--n-cpu-moe N overrides");
+        }
+
+        internal static long ResolveCudaExpertCacheBudget(string value)
+            => long.TryParse(value, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out long mb)
+                && mb > 0 && mb <= long.MaxValue / (1L << 20)
+                ? mb * (1L << 20) : 0;
+
+        internal static ulong ResolveCudaExpertCacheLayers(string value)
+            => string.IsNullOrEmpty(value) ? 48
+                : ulong.TryParse(value, System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture, out ulong layers) && layers > 0 ? layers : 0;
+
+        /// <summary>Conservative fit threshold for one native scalar expert-cache graph.
+        /// Zero means the native cache cannot serve this layout. The native helper
+        /// still measures its actual allocator size and validates kernel support.</summary>
+        internal static long MinimumCudaExpertCacheBytes(StackedExpertWeights gate, StackedExpertWeights up,
+            StackedExpertWeights down, int hidden, int ff, int used, int experts)
+            => MinimumCudaExpertCacheBytes(gate, up, down, hidden, ff, used, experts, out _);
+
+        private static long MinimumCudaExpertCacheBytes(StackedExpertWeights gate, StackedExpertWeights up,
+            StackedExpertWeights down, int hidden, int ff, int used, int experts, out long allocationFloor)
+        {
+            allocationFloor = 0;
+            if (hidden <= 0 || ff <= 0 || used <= 0 || used > 64 || used > experts)
+                return 0;
+            var weights = new[] { gate, up, down };
+            var widths = new[] { hidden, hidden, ff };
+            var rows = new[] { ff, ff, hidden };
+            try
+            {
+                long selectedBytes = 0, tails = 0;
+                for (int i = 0; i < weights.Length; i++)
+                {
+                    var weight = weights[i];
+                    if (weight == null || weight.Data == IntPtr.Zero || weight.NumExperts != experts
+                        || weight.PerExpertNe0 != widths[i] || weight.PerExpertNe1 != rows[i]
+                        || !Enum.IsDefined(typeof(GgmlTensorType), (GgmlTensorType)weight.GgmlType)
+                        || weight.GgmlType >= 128)
+                        return 0;
+                    var type = (GgmlTensorType)weight.GgmlType;
+                    long block = GgufFile.GetBlockSize(type), size = GgufFile.GetTypeSize(type);
+                    if (block <= 1 || widths[i] % block != 0) return 0;
+                    long perExpert = checked((long)widths[i] / block * size * rows[i]);
+                    if (checked(perExpert * experts) != weight.TotalRawBytes) return 0;
+                    selectedBytes = checked(selectedBytes + perExpert * used);
+                    // Upstream CUDA pads the end of quantized matrices to 512
+                    // elements, then aligns every graph allocation to 128 bytes.
+                    long padding = (512 - widths[i] % 512) % 512;
+                    tails = checked(tails + padding / block * size);
+                }
+                // Count all graph tensors without assuming any allocator reuse:
+                // gate/up/SiLU/product, down/weighted/add-chain, input/output,
+                // I32 IDs and F32 routes. Reserve alignment for all 256 nodes.
+                long scalars = checked(4L * ff * used + (3L * used + 1) * hidden + 2L * used);
+                allocationFloor = checked((1L << 20) + selectedBytes);
+                return checked(allocationFloor + tails + scalars * sizeof(float) + 256L * 128);
+            }
+            catch (OverflowException) { allocationFloor = 0; return 0; }
+        }
+
+        /// <summary>Trailing whole expert layers that fit CUDA's remaining memory.
+        /// When an opt-in expert cache can serve every layer and the complete
+        /// model does not fit, all layers use the seam. Insufficient or unsupported
+        /// cache layouts preserve whole resident layers, reserving cache quota only
+        /// for offloaded layers whose selected experts can fit it.
+        /// Models that fit keep the uninterrupted all-device graph.</summary>
+        internal static int PlanCudaDeviceExpertLayers(long[] layerExpertBytes, long pendingBytes,
+            long freeBytes, long headroomBytes, long expertCacheBytes,
+            long[] layerCacheMinimumBytes = null, ulong cacheLayers = 48,
+            long[] layerCacheAllocationFloorBytes = null)
+        {
+            ArgumentNullException.ThrowIfNull(layerExpertBytes);
+            if (pendingBytes < 0 || headroomBytes < 0 || expertCacheBytes < 0)
+                throw new ArgumentOutOfRangeException(nameof(pendingBytes));
+            if (layerCacheMinimumBytes != null && layerCacheMinimumBytes.Length != layerExpertBytes.Length)
+                throw new ArgumentException("Cache layouts must match the expert layer count.", nameof(layerCacheMinimumBytes));
+            if (layerCacheAllocationFloorBytes != null && (layerCacheMinimumBytes == null
+                || layerCacheAllocationFloorBytes.Length != layerExpertBytes.Length))
+                throw new ArgumentException("Cache allocation floors must match the cache layouts.", nameof(layerCacheAllocationFloorBytes));
+            foreach (long bytes in layerExpertBytes)
+                if (bytes < 0) throw new ArgumentOutOfRangeException(nameof(layerExpertBytes));
+            if (layerCacheMinimumBytes != null)
+                foreach (long bytes in layerCacheMinimumBytes)
+                    if (bytes < 0) throw new ArgumentOutOfRangeException(nameof(layerCacheMinimumBytes));
+            if (layerCacheAllocationFloorBytes != null)
+                for (int l = 0; l < layerCacheAllocationFloorBytes.Length; l++)
+                    if (layerCacheAllocationFloorBytes[l] < 0 || layerCacheAllocationFloorBytes[l] > layerCacheMinimumBytes[l])
+                        throw new ArgumentOutOfRangeException(nameof(layerCacheAllocationFloorBytes));
+            long available = Math.Max(0, freeBytes);
+            foreach (long reserve in new[] { pendingBytes, headroomBytes, DeviceScratchBytes })
+                available = reserve >= available ? 0 : available - reserve;
+            int Fit(long budget)
+            {
+                int resident = 0;
+                for (int l = layerExpertBytes.Length - 1; l >= 0; l--)
+                {
+                    long bytes = layerExpertBytes[l];
+                    if (bytes > budget) break;
+                    budget -= bytes;
+                    resident++;
+                }
+                return resident;
+            }
+            int count = Fit(available);
+            if (count == layerExpertBytes.Length || expertCacheBytes == 0 || cacheLayers == 0 || layerCacheMinimumBytes == null)
+                return count;
+            long quota = (long)((ulong)expertCacheBytes / cacheLayers);
+            bool CacheFits(int layer) => layerCacheMinimumBytes[layer] > 0 && layerCacheMinimumBytes[layer] <= quota;
+            bool CacheMayAllocate(int layer)
+            {
+                long floor = layerCacheAllocationFloorBytes == null ? layerCacheMinimumBytes[layer] : layerCacheAllocationFloorBytes[layer];
+                return floor > 0 && floor <= quota;
+            }
+            bool all = cacheLayers >= (ulong)layerExpertBytes.Length;
+            for (int l = 0; l < layerExpertBytes.Length; l++) all &= CacheFits(l);
+            if (all) return 0;
+            // A heterogeneous model can cache only some host layers. Charge their
+            // quotas before retaining whole GPU layers, and repeat when that charge
+            // moves another eligible layer to the host. Even a quota below our
+            // conservative threshold can fit the native allocator with reuse;
+            // charge any layer above the necessary payload+workspace floor.
+            // This prevents both tiers spending the same remaining device bytes.
+            for (;;)
+            {
+                int eligible = 0;
+                for (int l = 0; l < layerExpertBytes.Length - count; l++)
+                    if (CacheMayAllocate(l)) eligible++;
+                long reserve = quota == 0 || eligible == 0 ? 0
+                    : eligible > expertCacheBytes / quota ? expertCacheBytes : quota * eligible;
+                int next = Fit(reserve >= available ? 0 : available - reserve);
+                if (next == count) return count;
+                count = next;
+            }
         }
 
         /// <summary>How many trailing layers' experts the accelerator holds. A layer

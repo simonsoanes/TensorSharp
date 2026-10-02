@@ -443,6 +443,120 @@ cache, so it depends on what else the Mac is doing: the same run decoded at
 10.3-11.3 tok/s while other work kept 5 GB compressed. TensorAgent offers this file on
 48 GB Macs ([measured in the app](../../TensorAgent/README.md#the-macs-own-models)).
 
+Single-device `ggml_cuda` also plans expert placement against current free VRAM,
+pending float weights and caches, driver headroom and a 3 GiB graph reserve.
+Explicit `--n-cpu-moe` / `--cpu-moe` settings override this plan. Tensor parallel
+and layer-split runs still require their explicit placement configuration.
+
+An optional CUDA selected-expert cache follows Strata's compact quantized-slot
+approach. It keeps only routed experts in persistent device buffers, preserves
+every selected expert and the router's reduction order, and evicts slots by LRU.
+It uses unchanged upstream ggml kernels and stores the original GGUF bytes.
+Set `TS_HOST_MOE_EXPERT_CACHE_MB` before starting the process; `0` (the default)
+keeps the existing host path. For example, in PowerShell:
+
+```powershell
+$env:TS_HOST_MOE_EXPERT_CACHE_MB = '4096'
+# Start the CLI/server with --backend ggml_cuda and your normal model options.
+```
+
+When automatic placement cannot fit all experts, every layer is eligible, and
+each layer's cache quota fits its selected experts, all expert layers use the host seam
+so each can use compact slots. Otherwise the plan keeps fitting trailing layers
+resident. The default
+`TS_HOST_MOE_EXPERT_CACHE_LAYERS=48` divides the budget among Qwen3.8's layers;
+smaller synthetic checkpoints override it. Eligible bias-free, separately
+quantized gate/up/down SiLU experts use the cache for one through eight rows.
+Short prefill and target-verification blocks replay the scalar graph row by row,
+preserving decode arithmetic and recurrent rollback. Other shapes, backends,
+insufficient budgets or unsupported layouts retain the existing execution path.
+Mapped-weight invalidation and model disposal release the device slots.
+Eligible segments copy activations, routing weights and outputs directly between
+CUDA buffers. Host-MoE debug and GPU verification retain the staged host contract.
+`TS_HOST_MOE_EXPERT_CACHE_OUTPUT_BRIDGE=0` restores output staging for A/B checks;
+`TS_HOST_MOE_EXPERT_CACHE_BRIDGE=0` restores input and output staging.
+`TS_HOST_MOE_EXPERT_CACHE_PREFETCH=1` optionally faults selected cache-miss byte
+ranges in parallel before pageable uploads. It leaves weights evictable, copies
+their original bytes, and defaults off pending cold/warm workload measurements.
+
+The budget covers graph allocations plus a conservative workspace allowance;
+CUDA's shared pool and driver allocations still require additional free VRAM;
+retired CUDA capture objects can persist until upstream's idle sweep, so the
+owned reservation is not total process VRAM or its immediate reduction at unload.
+`TS_HOST_MOE_EXPERT_CACHE_DIAGNOSTICS=1` reports slots, hits, misses and reservation.
+An entry also requires physical free VRAM above the native safety reserve;
+an oversized requested budget can leave some layers using CPU fallback.
+Use `eng/validation/qwen4exp-expert-cache.py` for complete-logit A/B checks and
+`eng/validation/Qwen4ExpExpertCacheProbe/README.md` for commands and timing scope.
+The feature remains opt-in: synthetic performance depends on cache capacity,
+and those fixtures cannot establish trained language quality or performance
+parity with Strata.
+
+On 2026-10-02, the trained UD-IQ1_M checkpoint was tested on an i7-11800H,
+32 GiB RAM and an RTX 3080 Laptop GPU with 16 GiB VRAM, using CUDA 12.6.
+All three shards passed publisher SHA-256 checks at Hugging Face revision
+`38bb39ee97821de2c9009abb7e93950eec396e66`; inference used the NVMe SSD copy.
+TensorSharp used unchanged ggml `353b63b439f27ab2cc19dac97ab1681ba6d2d084`.
+Stock Strata `36fa455e579b23a9c909c2c6fe1bddd9e51cb8ca` used its pinned
+llama.cpp `3cf03257f219afbe7334045ff7c6a06ac68c627d`, native GGUF experts,
+the stock expert profile and an 8 GiB CPU resident budget. Its pack converts
+some dense projections to BF16; cross-engine logits are not claimed bit-exact.
+
+Four independent semantic checks cover integer arithmetic, extraction, a Python
+function and the ordered squares of 1 through 20. All 40 fresh-process arms
+completed at EOS with identical generated IDs across TensorSharp and Strata.
+Context was 512 with F16 KV, thinking off and scalar greedy generation without
+MTP or suffix drafts. Strata's configured verifier capacity was two, with the
+observed target windows all exactly one row and zero drafts. TensorSharp's
+8192/9472 MiB cache budgets produced byte-identical complete final vocabulary
+logits and cached every subsequent scalar layer. Automatic CUDA placement also
+matched explicit host placement on the trained code case.
+
+The 88-token squares answer was repeated with each of the four engines/budgets
+first once. The table gives **median (range)** across those four fresh processes.
+TensorSharp here uses `TS_HOST_MOE_EXPERT_CACHE_MB=9472` (9.25 GiB ceiling).
+
+| Measurement | TensorSharp | Strata |
+|---|---:|---:|
+| Reported decode tokens/s | 11.09 (9.22–14.02) | 10.24 (9.37–10.46) |
+| Whole-process seconds | 16.54 (14.95–19.31) | 62.15 (59.76–66.89) |
+| Sampled device-wide GPU peak, MiB | 14832.5 (14831–14842) | 15729 (15719–15737) |
+| OS peak working set, GiB | 19.74 (19.66–19.82) | 18.51 (18.48–18.53) |
+
+TensorSharp counts 87 subsequent forwards; Strata counts all 88 target runs,
+including the first generated token. Strata's reported TTFT includes resident
+expert setup, while TensorSharp's excludes model construction. Whole-process
+latency includes each engine's loading and output serialization. OS page-cache
+history and clocks were not controlled: these are retained-page-cache runs,
+not cold-storage or warmed-service parity. All prompts exceeded eight rows and
+used TensorSharp's existing CPU expert prefill. Its prompt timing differences
+are not proof of a prefill cache optimization. Short math/extraction decode
+remained slower than Strata; the larger-cache code case was faster. GPU samples
+include desktop memory and can miss transients. Working sets include mapped
+pages; TensorSharp's higher host working set on squares prevents a claim that
+it uses less memory in every tier.
+
+A separate warmed TensorSharp code A/B (one warmup, three measured requests)
+reached median 27.92 tokens/s with direct input/output copies, versus 23.29 with
+input-only copies and 21.97 with full staging. Every variant matched complete
+output IDs and final logits. Prefetch reached 21.43, so it remains off by default.
+This A/B does not compare warmed TensorSharp with fresh Strata. CPU-offloaded
+final logits differ from CUDA (code relative L2 0.09463) despite identical IDs;
+strict CPU numerical parity and broad language quality are not established.
+
+The final native binary (`66e50ad3…`) passed all 11 native tests without skips.
+Qwen/MoE regressions passed 327 CUDA tests (17 skipped) and 319 CPU tests
+(22 skipped); the changed validation tools passed 49 Python tests. Missing
+target/head fixtures, Metal, a QSA opt-in and unavailable multi-GPU scenarios
+remain outside coverage; trained MTP integration and TP classes were excluded.
+The wider historical validation-script suite remains failed on Windows/path
+assumptions, missing September evidence and archived hash mismatches; its
+unmodified modules are recorded separately. No trained vision, long-context,
+perplexity, MTP or multi-GPU quality/performance claim follows from these checks.
+Local evidence is in ignored `docs/validation/qwen38-strata-trained-audit/`,
+`qwen38-trained-transfer-ab-final/` and `strata-qwen38/`. Reusable runners and
+commands remain in `eng/validation/`.
+
 On CUDA, `--n-cpu-moe` serves the same purpose on a GPU too small for the file. On one
 A40 (46 GB) with 12 layers' experts on the host, `ggml_cuda` measured 600 / 30.2 tok/s
 (random tokens, pp512 / tg128) against llama-bench's 466.14 / 18.84 with `-ncmoe 12`.
