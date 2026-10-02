@@ -99,7 +99,7 @@
       <tr><td><code>--n-cpu-moe &lt;N|all&gt;</code>（<code>-ncmoe</code>） · <code>--cpu-moe</code>（<code>-cmoe</code>） · <code>--cpu-moe-threads &lt;N&gt;</code></td><td>把前 N 层（或全部层）的路由 MoE 专家权重留在系统内存，并在 CPU 上计算。所有架构默认均为 0，DeepSeek V4 也不例外。主机线程数默认：可用 CPU 不超过 2 个时为 1，不超过 8 个时为全部减一，否则取一半、上限 64（DeepSeek V4 / V4.1 与 GLM-5.x 的原生执行器在卸载专家后使用全部可用 CPU，GLM-5.x 在无 GPU 的运行中也是如此）。环境变量 <code>TS_N_CPU_MOE</code> / <code>TS_CPU_MOE</code> / <code>TS_CPU_MOE_THREADS</code>。</td></tr>
       <tr><td><code>--no-prefix-cache</code></td><td>关闭 Radix 前缀缓存以及交互式系统/工具提示词预热（同时设置 <code>TS_SCHED_PREFIX_CACHE=0</code>）。前缀缓存默认开启，在 CLI 进程内存中保存。</td></tr>
       <tr><td><code>--continuous-batching / --no-continuous-batching</code></td><td>启用（默认） / 禁用分页连续批处理引擎。</td></tr>
-      <tr><td><code>--benchmark / --bench-prefill / --bench-decode / --bench-runs</code></td><td>合成吞吐基准。<code>--bench-chunked</code> 改用服务端式的分块 prefill；<code>--bench-fixed-tokens</code> 对预定的 decode token 流计时，不做主机端采样。</td></tr>
+      <tr><td><code>--benchmark / --bench-prefill / --bench-decode / --bench-runs</code></td><td>合成吞吐基准。<code>--bench-chunked</code> 改用服务端式的分块 prefill；<code>--bench-fixed-tokens</code> 对预定的 decode token 流计时，不做主机端采样；<code>--bench-random-tokens</code> 像 llama-bench 一样随机抽取 prompt 与 decode 的 token id。</td></tr>
       <tr><td><code>--bench-kvcache / --bench-kv-turns &lt;N&gt;</code></td><td>多轮 KV 缓存复用基准。</td></tr>
       <tr><td><code>--warmup-runs &lt;N&gt;</code></td><td>计时前丢弃的前向次数（默认 0）。</td></tr>
       <tr><td><code>--test / --test-templates &lt;dir&gt;</code></td><td>内置分词器/模板测试；对照 GGUF Jinja2 校验模板。</td></tr>

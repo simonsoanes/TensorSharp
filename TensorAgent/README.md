@@ -13,7 +13,7 @@ Physical devices use the GGML Metal (`ggml_metal`) backend; build it with
 `TensorSharpAppleTargets=true`. It is not a remote client or a separate inference
 engine. It targets iPhone and iPad (iOS/iPadOS 17.0 or later, arm64 only); the
 only device run recorded below is an iPhone on iOS 26.6.1, and every built-in
-catalog model needs a device in the 12 GB memory tier or above, five of them a Mac
+catalog model needs a device in the 12 GB memory tier or above, six of them a Mac
 (see the catalog below). No release workflow builds, signs or publishes the app, so
 follow the source-build instructions below.
 
@@ -58,9 +58,9 @@ message itself asks for a picture or a clip, through `/api/chat` (`ImageTurns`,
 at all. The app's own client is appended as one script tag at request time; the page
 file itself is never forked.
 
-**A built-in model catalog.** Ten entries with the exact byte size and SHA-256 of every
-file: five chosen to fit a phone or tablet, and five that only a Mac has the memory for.
-All ten are downloadable; those downloads
+**A built-in model catalog.** Eleven entries with the exact byte size and SHA-256 of every
+file: five chosen to fit a phone or tablet, and six that only a Mac has the memory for.
+All eleven are downloadable; those downloads
 resume from a kept `.part` after an interruption, are verified before use, and
 belong to the APP rather than to the screen that started one — see "Downloads"
 below. Bonsai 2 27B is the one entry that needs the 16 GB tier (iPads and Macs)
@@ -74,8 +74,11 @@ Qwen3.8 27B and Muse-Glimmer 30B are models a phone could run only at one or two
 offered at four where the memory exists; Qwen-Image 2.1 makes and edits pictures; and the
 two MiniMax-H3 entries, one model in two checkpoints, make short videos with their own
 soundtrack, one from a description or a starting photo, the other around the photos,
-clips and recordings it is given. See [The Mac's own models](#the-macs-own-models) for
-what each was measured to need.
+clips and recordings it is given. Qwen3.8 Flash Next, a 125B mixture of experts (about 6B
+active per token) at two bits, is offered from 48 GB of memory, less than its 78.9 GB file
+(three shards): on a 48 GB Mac the engine keeps 18.3 GB of it resident and reads the rest,
+its n-gram table and 33 layers' experts, from the SSD as tokens need them. See
+[The Mac's own models](#the-macs-own-models) for what each was measured to need.
 
 | Model | Modalities | Required artifact(s) | Needs | Source |
 | --- | --- | --- | --- | --- |
@@ -86,6 +89,7 @@ what each was measured to need.
 | Qwen3.5 9B (IQ4_XS) | text; image and video with optional projector | download: 5,168,653,536-byte main GGUF; 918,166,080-byte projector optional | 12 GB | `unsloth/Qwen3.5-9B-GGUF` |
 | Qwen3.8 27B (UD-Q4_K_XL) | text; image and video with optional projector | download: 17,559,178,144-byte main GGUF; 927,607,488-byte projector optional | 32 GB | `unsloth/Qwen3.8-27B-GGUF` |
 | Muse-Glimmer 30B (UD-Q4_K_XL) | text; image with optional projector | download: 15,878,222,368-byte main GGUF; 2,051,685,088-byte projector optional | 32 GB | `unsloth/Muse-Glimmer-30B-GGUF` |
+| Qwen3.8 Flash Next (UD-Q2_K_XL) | text | download: three shards of 10,946,624, 49,979,779,296 and 28,878,402,944 bytes (78.9 GB) | 48 GB | `unsloth/Qwen3.8-Flash-Next-GGUF` |
 | Qwen-Image 2.1 (Q4_K_M) | text or a photo in, a picture out | download: 4,189,343,904-byte DiT + 5,027,784,800-byte Qwen3-VL-8B text encoder + 675,509,688-byte VAE + 1,159,029,824-byte vision projector | 24 GB | `Abiray/Qwen-Image-2.1-GGUF` + `Qwen/Qwen3-VL-8B-Instruct-GGUF` + `Comfy-Org/Qwen-Image-2.1` |
 | MiniMax-H3 (Q4_K) | text, or one or two photos as the first and last frames, in; a video with its soundtrack out | download: 11,420,663,904-byte denoiser + 18,218,065,024-byte Qwen3-VL-32B text encoder + 5,207,808,496-byte video VAE + 605,254,808-byte audio VAE + 2,776,833-byte `vocab.json`, 1,671,839-byte `merges.txt` and 11,003-byte `tokenizer_config.json` | 32 GB | `unsloth/MiniMax-H3-GGUF` + `MiniMaxAI/MiniMax-H3` (tokenizer files) |
 | MiniMax-H3 References (Q4_K) | text with up to nine photos, clips and recordings to feature in; a video with its soundtrack out | download: 11,381,096,544-byte denoiser, plus the same four companions as MiniMax-H3 (six files, 24.0 GB), linked from it when it is installed rather than downloaded again | 32 GB | `unsloth/MiniMax-H3-GGUF` + `MiniMaxAI/MiniMax-H3` (tokenizer files) |
@@ -94,14 +98,17 @@ Each chat entry also carries the context window the app loads it with (8,192 tok
 Gemma 4 E2B and E4B, 32,768 for the others), a K/V cache
 precision that the "KV cache precision" setting overrides, and its model card's
 sampling values (for Bonsai 2 27B, the publisher's thinking-mode recommendation:
-temperature 1.0, top-k 20, top-p 0.95, min-p 0.05). The Bonsai 2 card is marked
-Experimental: Bonsai2 has not been validated on iOS.
+temperature 1.0, top-k 20, top-p 0.95, min-p 0.05; for Qwen3.8 Flash Next, the
+`general.sampling` values its GGUF carries: temperature 1.0, top-k 20, top-p 0.95,
+min-p 0). The Bonsai 2 card is marked Experimental: Bonsai2 has not been validated on
+iOS. So is Qwen3.8 Flash Next, which reads most of its weights from the SSD: how fast it
+answers depends on what the page cache holds at the time.
 
 The Models page lists every entry, but only one that fits the device's memory tier
 can be loaded: an entry that needs more is shown greyed, marked "Too big" with both
 numbers, rather than hidden. Bonsai 2 27B needs the 16 GB tier, Qwen-Image 2.1 the 24 GB
-tier and Qwen3.8 27B, Muse-Glimmer 30B and both MiniMax-H3 entries the 32 GB tier; the
-other four need the 12 GB tier or above. For an installed model
+tier, Qwen3.8 27B, Muse-Glimmer 30B and both MiniMax-H3 entries the 32 GB tier, and
+Qwen3.8 Flash Next the 48 GB tier; the other four need the 12 GB tier or above. For an installed model
 whose optional projector is missing, "Add vision" downloads just the projector (and
 the draft head, when the entry lists one that is not there yet); once it is on the
 device, "Enable vision" reloads the selected model with it.
@@ -454,7 +461,8 @@ was removed rather than left there implying it was.
 The rest of Settings, with its defaults: the reply output limit (256 to 262,144 new
 tokens, 2,048 by default); KV cache precision (FP16, Q8 or Q4, Q4 by default — it
 overrides the catalog entry's precision and applies at the next model load, and Gemma 4,
-whose attention cannot read a block-quantized cache, uses FP16 whatever it says); the
+whose attention cannot read a block-quantized cache, and Qwen3.8 Flash Next, whose engine
+reads only F16/F32 K/V, use FP16 whatever it says); the
 tool timeout (10 to 600 s in steps of 10, 120 by default); "Show reasoning by default"
 (off); "Speculative decoding" (on, applied to the running engine from the next
 reply — see "Speculative decoding" below); "Download over cellular" (off); and "Include optional files", the
@@ -883,6 +891,37 @@ Fixed along the way, besides the hard links in "Downloads" below:
   does). WebKit on macOS played the short clip without ranges as well, so what this buys
   (seeking, and iOS's media loader) has not been observed in a run.
 
+Qwen3.8 Flash Next, on 2026-10-01 (ggml `353b63b`, unmodified): the Debug app, the three
+shards downloaded, linked into its store and verified, 78.9 GB of weights on a Mac with
+51.5 GB of RAM. The engine planned the placement at load: the first 33 layers' routed
+experts (31.7 GB) run on the host straight from the file mapping, the GPU holds the other
+15 layers' (14.4 GB), and of the 28.8 GB n-gram table only the 16 rows a token needs are
+ever read (see the [model card](../docs/models/qwen38-flash-next.md#larger-than-memory)).
+
+| | Qwen3.8 Flash Next (UD-Q2_K_XL) |
+| --- | --- |
+| `chat-e2e.py`: fact, follow-up, new chat, story, thinking, shell | 5 of 6 (thinking: see below) |
+| plain decode in the app, a 7.2k-token prompt (the CLI, greedy, a 1.8k-token prompt) | 9.9 tok/s (12.8-12.9) |
+| prompt reuse, follow-up / new chat / story / shell | 99.7% / 99.65% / 99.5% / 98.7% |
+| first token, follow-up / new chat / shell | 3.1 s / 3.0 s / 6.9 s |
+| warm-up after a load (the 7.2k-token shared prompt) | 85.2 s |
+| app footprint at its highest, beside the weights | 7.31 GB beside 18.3 GB resident |
+
+- **The thinking scenario failed on the model's own choice.** Asked with thinking on whether
+  91 is prime, it answered "No. 91 = 7 × 13" and wrote no reasoning first. Given harder
+  questions it reasoned in 3 of 3 tries.
+- **The other thinking mode starts cold.** The warm-up follows the "Show reasoning by
+  default" setting, and this template puts its thinking instructions near the top of the
+  system turn, so the two modes share no prefix: the first message in the other mode read
+  its whole 7,243-token prompt, 108 s. That mode is cached from then on.
+- **It depends on the page cache.** In the CLI the same 1.8k-token run decoded at
+  12.8-12.9 tok/s, and at 10.3-11.3 tok/s with the machine at 174 MB free and 5 GB
+  compressed: experts the page cache has dropped come back from the SSD.
+- **The tier.** 18.34 GB of resident weights, the 7.31 GB footprint and 5 GB for macOS make
+  30.7 GB, and the 17.3 GB left must cache at least a third of the 31.7 GB of experts read
+  from the SSD (`CatalogTests.EachDesktopEntryFitsItsTierBesideMacOS`). At 32 GB the
+  30.7 GB would leave too little for that cache, so the entry starts at 48 GB.
+
 ## Layout
 
 ```
@@ -1033,6 +1072,12 @@ starts, and the Models page counts only what will be fetched: the two MiniMax-H3
 share six files (24.0 GB), so whichever is installed second fetches only its 11.4 GB
 denoiser; measured, its six shared files arrived in 0.1 s with 0 MB transferred and no
 more disk used. Deleting either entry removes only its own names for those files.
+
+An entry published as several shards of one model (Qwen3.8 Flash Next's three gguf-split
+files) counts as installed only when every shard is complete. The app refuses to load one
+with a shard missing or short ("Qwen3.8 Flash Next is not completely downloaded yet.")
+rather than hand the engine a first shard whose neighbours are not there, and a launch
+does not restore such an entry as the selected model.
 
 **Leaving the APP mid-answer no longer costs the answer.** Leaving the chat is
 `ChatTurnManager`'s problem; leaving TensorAgent altogether is a different problem with a
@@ -1563,6 +1608,12 @@ checked and these were not:
   from the prompts and photos `chat-e2e.py` sends, and the two box-driven edits were also run
   on their authors' example photos. Object Remover failed on one of its two. How each fares
   on other subjects is up to the plug-in, and nothing here measures it.
+- **Qwen3.8 Flash Next on any other Mac.** It was measured on one 48 GB M5 Pro, in the
+  Debug app. A Mac with more memory gets a different plan from the engine (more layers'
+  experts on the GPU), which nothing here has measured; a Mac with less is not offered it.
+  Nor has the app's own downloader fetched its 78.9 GB: the three shards were downloaded
+  with `curl` and hard-linked into the app's store. How the store counts a split's shards
+  is covered by `Qwen38FlashNextCatalogTests`.
 - **Clips on a phone.** The two MiniMax-H3 entries are offered only on a Mac (32 GB),
   where they were measured. No video model fits a phone, so none is offered there, and
   no clip has been played by iOS's media loader (WebKit's playback was checked in the

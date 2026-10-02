@@ -17,6 +17,7 @@ public sealed class CatalogTests
             "qwen3.5-9b-iq4xs",
             "qwen3.8-27b-q4kxl",
             "muse-glimmer-30b-q4kxl",
+            "qwen3.8-flash-next-q2kxl",
             "qwen-image-2.1-q4km",
             "minimax-h3-fl2va-q4k",
             "minimax-h3-ref2va-q4k",
@@ -57,9 +58,24 @@ public sealed class CatalogTests
                 Assert.False(f.FileName.Contains('/'), $"{m.Id}: file names are bare ({f.FileName})");
             }
             // Keep the recognized tiers narrow so a typo cannot silently expose an
-            // entry on an unintended device class. 24 and 32 are the desktop's: no
+            // entry on an unintended device class. 24, 32 and 48 are the desktop's: no
             // phone or tablet reaches them, so those entries stay off every one.
-            Assert.Contains(m.MinDeviceMemoryGB, new[] { 6, 8, 12, 16, 24, 32 });
+            Assert.Contains(m.MinDeviceMemoryGB, new[] { 6, 8, 12, 16, 24, 32, 48 });
+            // A later shard of a split GGUF is required and carries shard 1's gguf-split
+            // name with its own number: the engine finds it beside shard 1 by that name.
+            var shards = m.Files.Where(f => f.Role == CatalogFileRole.WeightsShard).ToList();
+            if (shards.Count > 0)
+            {
+                Match first = Regex.Match(m.Weights.FileName, @"^(?<prefix>.+)-00001-of-(?<count>\d{5})\.gguf$");
+                Assert.True(first.Success, $"{m.Id}: shards need a -00001-of-NNNNN.gguf first file");
+                Assert.Equal(int.Parse(first.Groups["count"].Value), shards.Count + 1);
+                for (int i = 0; i < shards.Count; i++)
+                {
+                    Assert.False(shards[i].Optional, $"{m.Id}: shard {i + 2} is optional");
+                    Assert.Equal($"{first.Groups["prefix"].Value}-{i + 2:D5}-of-{first.Groups["count"].Value}.gguf",
+                        shards[i].FileName);
+                }
+            }
             Assert.NotEmpty(m.License);
         }
     }
@@ -164,10 +180,12 @@ public sealed class CatalogTests
                 $"{m.Id} is offered at {m.MinDeviceMemoryGB} GB, which grants about "
                 + $"{budget / 1e9:F1} GB, but charges about {anonymous / 1e9:F1} GB of anonymous memory");
 
+            // Every shard counts (the first file alone is a split GGUF's metadata), less only
+            // what the entry declares the engine pages from disk on demand.
             double ceiling = WeightsResidencyCeiling(m.MinDeviceMemoryGB);
-            Assert.True(m.Weights.Bytes < ceiling,
-                $"{m.Id} is offered at {m.MinDeviceMemoryGB} GB but its weights are "
-                + $"{m.Weights.Bytes / 1e9:F1} GB, past the {ceiling / 1e9:F1} GB that device can "
+            Assert.True(m.ResidentWeightsBytes < ceiling,
+                $"{m.Id} is offered at {m.MinDeviceMemoryGB} GB but its resident weights are "
+                + $"{m.ResidentWeightsBytes / 1e9:F1} GB, past the {ceiling / 1e9:F1} GB that device can "
                 + "hold; it would fault every token from flash");
         }
     }
@@ -184,8 +202,8 @@ public sealed class CatalogTests
                 Assert.True(EstimatedAnonymous(m) < JetsamBudget(deviceGB),
                     $"a {deviceGB} GB device is offered {m.Id}, which charges about "
                     + $"{EstimatedAnonymous(m) / 1e9:F1} GB against a {JetsamBudget(deviceGB) / 1e9:F1} GB budget");
-                Assert.True(m.Weights.Bytes < WeightsResidencyCeiling(deviceGB),
-                    $"a {deviceGB} GB device is offered {m.Id}, whose {m.Weights.Bytes / 1e9:F1} GB of "
+                Assert.True(m.ResidentWeightsBytes < WeightsResidencyCeiling(deviceGB),
+                    $"a {deviceGB} GB device is offered {m.Id}, whose {m.ResidentWeightsBytes / 1e9:F1} GB of "
                     + $"weights exceed the {WeightsResidencyCeiling(deviceGB) / 1e9:F1} GB it can hold");
             }
         }
@@ -195,6 +213,7 @@ public sealed class CatalogTests
     {
         "qwen3.8-27b-q4kxl",
         "muse-glimmer-30b-q4kxl",
+        "qwen3.8-flash-next-q2kxl",
         "qwen-image-2.1-q4km",
         "minimax-h3-fl2va-q4k",
         "minimax-h3-ref2va-q4k",
@@ -225,6 +244,7 @@ public sealed class CatalogTests
     [InlineData("qwen-image-2.1-q4km", 24)]
     [InlineData("minimax-h3-fl2va-q4k", 32)]
     [InlineData("minimax-h3-ref2va-q4k", 32)]
+    [InlineData("qwen3.8-flash-next-q2kxl", 48)]
     public void TheDesktopTiersHoldTheModelsNoPhoneCanRunWell(string id, int tier)
     {
         CatalogModel model = Assert.IsType<CatalogModel>(ModelCatalog.Find(id));
@@ -235,6 +255,38 @@ public sealed class CatalogTests
         Assert.Contains(ModelCatalog.ForDevice(48), m => m.Id == id);
         if (tier > 24)
             Assert.DoesNotContain(ModelCatalog.ForDevice(24), m => m.Id == id);
+        if (tier > 32)
+            Assert.DoesNotContain(ModelCatalog.ForDevice(32), m => m.Id == id);
+    }
+
+    /// <summary>
+    /// Paging weights from disk is a property of one architecture's engine, not a way to
+    /// fit any big file: only a mixture of experts on a desktop tier may declare it, and
+    /// never for the whole file.
+    /// </summary>
+    [Fact]
+    public void OnlyADesktopMixtureOfExpertsDeclaresWeightsPagedFromDisk()
+    {
+        foreach (CatalogModel m in ModelCatalog.BuiltIn.Where(m => m.WeightsPagedFromDiskBytes != 0))
+        {
+            Assert.Equal(CatalogArchitectureKind.MixtureOfExperts, m.Kind);
+            Assert.True(m.MinDeviceMemoryGB >= 48, $"{m.Id} pages weights from disk on a {m.MinDeviceMemoryGB} GB device");
+            Assert.InRange(m.WeightsPagedFromDiskBytes, 1, m.WeightsBytes - 1);
+        }
+        Assert.Equal(new[] { "qwen3.8-flash-next-q2kxl" },
+            ModelCatalog.BuiltIn.Where(m => m.WeightsPagedFromDiskBytes != 0).Select(m => m.Id));
+    }
+
+    /// <summary>The residency checks read every shard: a split file that declares nothing paged
+    /// is held to its whole size, not to its 11 MB first file.</summary>
+    [Fact]
+    public void ASplitEntryIsHeldToAllItsShards()
+    {
+        CatalogModel paged = ModelCatalog.Find("qwen3.8-flash-next-q2kxl")!;
+        CatalogModel undeclared = paged with { WeightsPagedFromDiskBytes = 0 };
+        Assert.Equal(78_869_128_864, undeclared.ResidentWeightsBytes);
+        Assert.True(undeclared.ResidentWeightsBytes > WeightsResidencyCeiling(undeclared.MinDeviceMemoryGB));
+        Assert.True(paged.ResidentWeightsBytes < WeightsResidencyCeiling(paged.MinDeviceMemoryGB));
     }
 
     [Fact]
@@ -264,6 +316,11 @@ public sealed class CatalogTests
         // video VAE's encoder converts its kernels to F32 in managed memory.
         ["minimax-h3-fl2va-q4k"] = (18.22, 2.24, "chat-e2e.py's film and animate in the Mac app, 22 frames, 20 steps"),
         ["minimax-h3-ref2va-q4k"] = (18.22, 2.23, "chat-e2e.py's reference in the Mac app, 22 frames, 20 steps"),
+        // Measured 2026-10-01 in the Debug Mac app: the files are what stays resident (the dense
+        // half and the 15 layers' experts the engine keeps on the GPU); the rest is read from the
+        // SSD (CatalogModel.WeightsPagedFromDiskBytes). The footprint is phys_footprint_peak over
+        // the warm-up of the 7.2k-token agent prompt and chat-e2e.py's six text scenarios.
+        ["qwen3.8-flash-next-q2kxl"] = (18.34, 7.31, "chat-e2e.py's text scenarios in the Mac app, phys_footprint_peak"),
     };
 
     /// <summary>What macOS and the rest of a desktop keep for themselves.</summary>
@@ -273,11 +330,26 @@ public sealed class CatalogTests
     public void EachDesktopEntryFitsItsTierBesideMacOS()
     {
         Assert.Equal(DesktopOnly.OrderBy(id => id), MeasuredOnAMac.Keys.OrderBy(id => id));
-        int[] tiers = { 6, 8, 12, 16, 24, 32 };
+        int[] tiers = { 6, 8, 12, 16, 24, 32, 48 };
         foreach ((string id, (double files, double footprint, string how)) in MeasuredOnAMac)
         {
             CatalogModel model = ModelCatalog.Find(id)!;
             double need = files + footprint + MacOsGB;
+            if (model.WeightsPagedFromDiskBytes > 0)
+            {
+                // An entry that pages weights from disk is held to its resident part, and what is
+                // left must still cache a third of the experts it pages (a token reads few rows
+                // of the n-gram table, so that part is left out). The next tier down is not
+                // checked the usual way: a smaller Mac would have to page nearly everything.
+                Assert.Equal(model.ResidentWeightsBytes / 1e9, files, 2);
+                Assert.True(need <= model.MinDeviceMemoryGB,
+                    $"{id} needs about {need:F1} GB resident ({how}) but is offered from {model.MinDeviceMemoryGB} GB");
+                double pagedExperts = (model.WeightsPagedFromDiskBytes - 28_800_138_240) / 1e9;
+                Assert.True(model.MinDeviceMemoryGB - need >= pagedExperts / 3,
+                    $"{id} leaves {model.MinDeviceMemoryGB - need:F1} GB of page cache for {pagedExperts:F1} GB of paged experts");
+                Assert.Equal(tiers.Max(), model.MinDeviceMemoryGB);
+                continue;
+            }
             Assert.True(need <= model.MinDeviceMemoryGB,
                 $"{id} needs about {need:F1} GB ({how}) but is offered from {model.MinDeviceMemoryGB} GB");
             // And not offered higher than it needs: the next tier down must really be too small.
@@ -478,6 +550,7 @@ public sealed class CatalogTests
         "qwen-image-2.1-q4km",
         "minimax-h3-fl2va-q4k",
         "minimax-h3-ref2va-q4k",
+        "qwen3.8-flash-next-q2kxl",
     };
 
     /// <summary>

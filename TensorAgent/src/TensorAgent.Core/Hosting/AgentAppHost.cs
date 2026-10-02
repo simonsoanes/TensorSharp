@@ -1841,6 +1841,17 @@ public sealed class AgentAppHost : IDisposable
             return;
         }
 
+        // A model of several required files (a split GGUF's shards, a diffusion set) whose
+        // first file is present can still be missing the rest: a relaunch in the middle of
+        // its download restores the choice. Loading it would fail inside the engine, naming
+        // a shard file the user never saw.
+        if (model.Files.Count(f => !f.Optional) > 1 && Models.StateOf(model) != InstallState.Installed)
+        {
+            _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation(
+                "the last used model {Model} is not completely downloaded; nothing to load", id);
+            return;
+        }
+
         SetModelLoad(ModelLoadState.Loading, null);
         _ = Task.Run(() =>
         {
@@ -2485,8 +2496,11 @@ public sealed class AgentAppHost : IDisposable
                 // by its name: MiniMax-H3 searches the whole model store and would take
                 // Qwen-Image's text encoder for its own. A half-downloaded set (a relaunch in
                 // the middle of the download restores the remembered choice) must not load and
-                // then fail - or worse, not fail - inside the first picture or clip.
-                if (model.Kind == CatalogArchitectureKind.Diffusion && Models.StateOf(model) != InstallState.Installed)
+                // then fail - or worse, not fail - inside the first picture or clip. The same
+                // holds for a split GGUF: the engine opens the later shards by name and would
+                // refuse with a FileNotFoundException for a file the user never chose.
+                if ((model.Kind == CatalogArchitectureKind.Diffusion || model.Files.Count(f => !f.Optional) > 1)
+                    && Models.StateOf(model) != InstallState.Installed)
                 {
                     var incomplete = new FileNotFoundException(
                         $"{model.DisplayName} is not completely downloaded yet.", Models.DirectoryFor(model));
@@ -2543,9 +2557,17 @@ public sealed class AgentAppHost : IDisposable
                 // weights, so a file made from other weights of the same shape is never
                 // restored. The warm-up that follows reads it back instead of prefilling it,
                 // and a first message sent before the warm-up finds it too.
+                // Every shard is part of the identity: a re-downloaded later shard of a split
+                // GGUF must not restore a checkpoint made from the old bytes. A single-file
+                // entry's identity is unchanged (no shards to add).
+                string?[] identityFiles = new[] { weights }
+                    .Concat(model.WeightFiles.Where(f => f.Role == CatalogFileRole.WeightsShard)
+                        .Select(f => Path.Combine(Models.DirectoryFor(model), f.FileName)))
+                    .Append(projector)
+                    .ToArray();
                 ModelService.EngineHost.PrefixCheckpointStore = new PrefixCheckpointFileStore(
                     Paths.PrefixCheckpointDirectoryFor(model),
-                    PrefixCheckpointFileStore.WeightsIdentityOf(weights, projector),
+                    PrefixCheckpointFileStore.WeightsIdentityOf(identityFiles),
                     HostLog);
 
                 var refusals = new List<string>();

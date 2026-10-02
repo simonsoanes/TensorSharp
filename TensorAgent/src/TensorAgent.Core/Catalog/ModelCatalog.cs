@@ -32,6 +32,10 @@ namespace TensorAgent.Core.Catalog;
 /// to 16 GB iPads.
 /// </para>
 /// <para>
+/// Qwen3.8 Flash Next's three shards were read on 2026-10-01 at unsloth/Qwen3.8-Flash-Next-GGUF
+/// main = 38bb39ee, and checked against a download of that revision.
+/// </para>
+/// <para>
 /// The 24 and 32 GB tiers are the desktop app's (a Mac today; no iPhone or iPad has that
 /// much memory). Their entries are the models a phone can only run as one- or two-bit
 /// quantizations that cost real quality, so they are offered at four bits where the
@@ -41,6 +45,12 @@ namespace TensorAgent.Core.Catalog;
 /// disk. The two large chat models also keep the phone's cache budget
 /// (<see cref="CatalogModel.LeanCaches"/>), without which the engine's desktop defaults
 /// alone grew the app to 18.8 GB beside Qwen3.8 27B's weights.
+/// </para>
+/// <para>
+/// The 48 GB tier holds the one entry whose file is larger than that tier's memory, on purpose:
+/// Qwen3.8 Flash Next reads its n-gram table and most of its experts from the SSD on demand
+/// (<see cref="CatalogModel.WeightsPagedFromDiskBytes"/>), so what has to fit is its resident
+/// half beside the page cache the engine plans for the offloaded experts, not the 79 GB file.
 /// </para>
 /// </summary>
 public static class ModelCatalog
@@ -340,6 +350,55 @@ public static class ModelCatalog
             Notes = "A dense 30B that reads images and calls tools. It reasons in its own channel before "
                 + "answering, even with thinking off. Needs 32 GB of memory (a Mac). Vision is an optional "
                 + "download and takes about 8 GB more memory when it is installed.",
+        },
+        new CatalogModel
+        {
+            Id = "qwen3.8-flash-next-q2kxl",
+            DisplayName = "Qwen3.8 Flash Next",
+            Family = CatalogFamily.Qwen38FlashNext,
+            Kind = CatalogArchitectureKind.MixtureOfExperts,
+            Parameters = "125B (6B active)",
+            Quantization = "UD-Q2_K_XL",
+            // Published as three gguf-split shards in the repo's UD-Q2_K_XL folder; the engine is
+            // pointed at the first and opens the others beside it by name.
+            Files = new[]
+            {
+                new CatalogFile(CatalogFileRole.Weights, "Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf",
+                    Hf("unsloth/Qwen3.8-Flash-Next-GGUF", "UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf"),
+                    10_946_624, "a4f3b21e77353999829f2f767e9ac21ce9c71d29a74f2cc9eda48c9bf23c8b86"),
+                new CatalogFile(CatalogFileRole.WeightsShard, "Qwen3.8-Flash-Next-UD-Q2_K_XL-00002-of-00003.gguf",
+                    Hf("unsloth/Qwen3.8-Flash-Next-GGUF", "UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-00002-of-00003.gguf"),
+                    49_979_779_296, "2e3bf1ee7d2a04e261e9f342a2d968f696cce5941d082b0e434deb9b1edc12c6"),
+                new CatalogFile(CatalogFileRole.WeightsShard, "Qwen3.8-Flash-Next-UD-Q2_K_XL-00003-of-00003.gguf",
+                    Hf("unsloth/Qwen3.8-Flash-Next-GGUF", "UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-00003-of-00003.gguf"),
+                    28_878_402_944, "ec8c106759fdf4f463039c34c0707718d7d8908d53d892bd4f002e71620803f9"),
+            },
+            Modalities = CatalogModalities.Text,
+            // 78.9 GB of weights on a 48 GB Mac, by design: a token reads 16 rows of the 28.8 GB
+            // n-gram table and 10 of each layer's 512 experts, and the engine reads exactly those
+            // from the SSD. On a 48 GiB Mac its planner keeps 15 layers' experts on the GPU and
+            // runs the other 33 layers' (31.7 GB) on the host straight from the mapping; with the
+            // dense half that leaves 18.3 GB resident (see WeightsPagedFromDiskBytes).
+            MinDeviceMemoryGB = 48,
+            // The n-gram table (28,800,138,240 bytes) plus the routed experts of the first 33
+            // layers (32 x 956,825,600 bytes of IQ2_XS/IQ4_NL plus layer 2's IQ3_XXS 1,114,112,000).
+            WeightsPagedFromDiskBytes = 28_800_138_240 + 31_732_531_200,
+            // 12 of the 48 layers hold K/V (two 256-wide heads) plus a 128-wide sparse-attention
+            // index key: about 27 KiB a token in f16.
+            ContextLength = 32768,
+            // f16, not q8_0: the engine's qwen4exp span reads F16/F32 K/V only, and with sparse
+            // attention it has no other path (a q8_0 request is turned into f16 at load).
+            KvCacheDtype = "f16",
+            LeanCaches = true,
+            // The defaults the publisher embedded in the GGUF (general.sampling).
+            Sampling = new CatalogSampling(1.0f, 20, 0.95f, 0.0f),
+            SupportsThinking = true,
+            Experimental = true,
+            License = ApacheLicense,
+            Notes = "Qwen's 125B mixture of experts (6B active per token) at two bits. Needs a 48 GB Mac: "
+                + "the file is 79 GB, and the app reads its experts and its n-gram table from the SSD as "
+                + "tokens need them, so the first answers after loading are slower while those pages warm up. "
+                + "Text only.",
         },
         new CatalogModel
         {

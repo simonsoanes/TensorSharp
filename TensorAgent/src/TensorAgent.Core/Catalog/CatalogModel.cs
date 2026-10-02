@@ -34,6 +34,11 @@ public enum CatalogFileRole
     /// <summary>One of the loose tokenizer files a text encoder whose GGUF carries no
     /// tokenizer needs beside it (MiniMax-H3: vocab.json, merges.txt, tokenizer_config.json).</summary>
     Tokenizer,
+    /// <summary>A later shard of a split weights GGUF (<c>-0000N-of-0000M.gguf</c>). The
+    /// <see cref="Weights"/> file is shard 1, the one the engine is pointed at; it opens the
+    /// others from the same folder by their exact gguf-split names, so every shard is required
+    /// and stored under its published name.</summary>
+    WeightsShard,
 }
 
 /// <summary>One downloadable artifact of a catalog entry.</summary>
@@ -57,7 +62,7 @@ public sealed record CatalogFile(
 
 /// <summary>Model families the catalog knows; used for grouping in the UI and for
 /// family-specific defaults (thinking, sampling).</summary>
-public enum CatalogFamily { Gemma4, Qwen35, Qwen36, Qwen38, QwenImage, GptOss, Bonsai, MuseGlimmer, MiniMaxH3 }
+public enum CatalogFamily { Gemma4, Qwen35, Qwen36, Qwen38, QwenImage, GptOss, Bonsai, MuseGlimmer, MiniMaxH3, Qwen38FlashNext }
 
 /// <summary>Dense or mixture-of-experts.</summary>
 public enum CatalogArchitectureKind { Dense, MixtureOfExperts, Diffusion }
@@ -130,8 +135,24 @@ public sealed record CatalogModel
     public bool Experimental { get; init; }
     public string? Notes { get; init; }
     public required string License { get; init; }
+    /// <summary>
+    /// Bytes of the weights the engine reads from the SSD on demand instead of holding them
+    /// resident: zero for every entry whose weights a token reads in full. Qwen3.8 Flash Next
+    /// declares its n-gram table (a token reads 16 of its 320 M rows) and the routed experts
+    /// the engine offloads on the entry's smallest device (a token reads 10 of each layer's
+    /// 512), which is what lets a 79 GB file run on a 48 GB Mac. The residency checks hold
+    /// <see cref="ResidentWeightsBytes"/> to the device instead of the whole file.
+    /// </summary>
+    public long WeightsPagedFromDiskBytes { get; init; }
 
     public long TotalBytes => Files.Where(f => !f.Optional).Sum(f => f.Bytes);
+    /// <summary>The weights GGUF and its later shards, in shard order.</summary>
+    public IEnumerable<CatalogFile> WeightFiles =>
+        Files.Where(f => f.Role is CatalogFileRole.Weights or CatalogFileRole.WeightsShard);
+    /// <summary>Every byte of the weights, all shards.</summary>
+    public long WeightsBytes => WeightFiles.Sum(f => f.Bytes);
+    /// <summary>The weights a token reads in full: everything not paged from disk on demand.</summary>
+    public long ResidentWeightsBytes => WeightsBytes - WeightsPagedFromDiskBytes;
     public long TotalBytesWithOptional => Files.Sum(f => f.Bytes);
     public CatalogFile Weights => Files.First(f => f.Role == CatalogFileRole.Weights);
     public CatalogFile? Projector => Files.FirstOrDefault(f => f.Role == CatalogFileRole.Projector);

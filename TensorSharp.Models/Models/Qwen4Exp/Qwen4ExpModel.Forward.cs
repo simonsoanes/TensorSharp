@@ -1581,6 +1581,8 @@ namespace TensorSharp.Models
             a.ShGate = sg; a.ShGateType = sgT; a.ShGateBytes = sgB;
             a.ShUp = su; a.ShUpType = suT; a.ShUpBytes = suB;
             a.ShDown = sd; a.ShDownType = sdT; a.ShDownBytes = sdB;
+            // A rank's shard never runs on the host: the plan offloads nothing under TP.
+            a.CpuMoe = IsExpertLayerOnHost(il) ? 1 : 0;
             return true;
         }
 

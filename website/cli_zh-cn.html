@@ -366,6 +366,7 @@ dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
       <tr><td><code>--benchmark</code></td><td>运行合成的 prefill/decode 吞吐基准。</td></tr>
       <tr><td><code>--bench-prefill / --bench-decode / --bench-runs &lt;N&gt;</code></td><td>合成的 prefill 长度、decode 长度与运行次数。</td></tr>
       <tr><td><code>--bench-chunked</code> · <code>--bench-fixed-tokens</code></td><td>让基准的 prefill 走服务端式的分块路径；用预先确定的 token 流计时 decode，不做主机侧贪心采样（便于与 llama-bench 式结果对比）。</td></tr>
+      <tr><td><code>--bench-random-tokens</code></td><td>与 <code>--bench-fixed-tokens</code> 相同，但 prompt 与 decode 的 token id 从整个词表中均匀随机抽取，每次运行换一批（固定种子），与 llama-bench 的取法一致。适用于从磁盘读取按 token 查找表或专家的模型。</td></tr>
       <tr><td><code>--bench-kvcache</code> / <code>--bench-kv-turns &lt;N&gt;</code></td><td>多轮 KV 缓存复用基准（带缓存 vs 强制重置）。</td></tr>
       <tr><td><code>--warmup-runs &lt;N&gt;</code></td><td>计时前丢弃的前向次数（默认：0）。</td></tr>
       <tr><td><code>--log-level &lt;lvl&gt;</code></td><td><code>trace</code>、<code>debug</code>、<code>info</code>、<code>warning</code>、<code>error</code>、<code>critical</code>、<code>off</code>。仅限 CLI：服务端没有 <code>--log-*</code> 参数，改读 <code>TENSORSHARP_LOG_LEVEL</code> / <code>…_LOG_DIR</code> / <code>…_LOG_FILE</code>，CLI 也会把这些环境变量作为默认值。</td></tr>

@@ -48,6 +48,8 @@ namespace TensorSharp.Models
                     throw new NotSupportedException(
                         "Qwen3.8-Flash-Next's MTP draft head is not built on --backend cuda yet; drop --draft-model " +
                         "or run --backend ggml_cuda.");
+                // The direct-CUDA engine has no host-expert seam; the GGML token span does.
+                MoeCpuOffloadConfig.WarnUnsupportedBackend(Qwen4ExpModel.ArchitectureId, "cuda");
                 int maxContext = ResolveConfiguredContextLength();
                 // The checkpoint advertises 262144 tokens: ~7 GiB of attention and indexer rows per
                 // sequence slot. Keep a practical default unless MAX_CONTEXT names one.

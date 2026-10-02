@@ -414,6 +414,7 @@ Linux 仍隐藏常见的 `/run` 端点，但本地 Unix IPC 并非完整隔离�
 | `--bench-kv-turns <N>` | `--bench-kvcache` 使用的对话轮数（默认：4，最多 8） |
 | `--bench-chunked` | 运行分块 prefill 微基准（Gemma 4） |
 | `--bench-fixed-tokens` | 喂入预先确定的 decode token 流并计时，跳过主机侧贪心采样，便于与 llama-bench 对比。仍会报告一条不计时的贪心正确性链 |
+| `--bench-random-tokens` | 与 `--bench-fixed-tokens` 相同，但 prompt 与 decode 的 token id 从整个词表中均匀随机抽取，每次运行都换一批（固定种子），与 llama-bench 的取法一致。适用于按 token 从磁盘读取查找表或专家的模型：重复的 prompt 会让这些数据一直留在缓存里 |
 | `--warmup-runs <N>` | 在对真实文本 / 多模态 prompt 计时前丢弃的前向次数（默认：0） |
 | `--test-chunked-prefill` | 运行分块 prefill 正确性检查（对比分块与非分块 logits） |
 | `--correct-prefill <N>` | `--test-chunked-prefill` 使用的 prompt 长度 |
@@ -1541,11 +1542,33 @@ token）——注意卸载配置离这张卡的 16 GB 有多远，以及 GPT-OSS
   prefill 2048 / decode 64 上实测：`--n-cpu-moe 30` 为 94.7 / 16.4 tok/s，全部常驻
   时为 915.9 / 43.9。这里卸载买到的是「装得下」而不是速度——它腾出的显存把可用
   上下文从 342,272 抬到了 646,400 token。
+* **Qwen 3.8 Flash Next 在 Apple 芯片上自行规划卸载。** 它的 UD-Q2_K_XL 文件有
+  78.9 GB：46.1 GB 路由专家，外加 28.8 GB 的 n-gram 表。未设置时，`ggml_metal` 会在
+  同时满足 Metal 工作集与被卸载层页缓存所需内存的前提下，把整层专家留在 GPU 上，卸载
+  最前面的若干层，并打印计划（`[moe-offload] qwen4exp (planned): ...`）；
+  `--n-cpu-moe N` 可覆盖它。超过这个点再多常驻也不会更快：常驻的一层要占住全部 512 个
+  专家，不论用到与否。n-gram 表从不上传；每个 token 的 16 行按需读取，带随机访问提示，
+  并行完成。在 M5 Pro（48 GB）上同一会话实测随机 token 的 pp512 / tg128：自动规划的切分
+  （15 层专家在 GPU 上）为 147.6 / 21.1 tok/s，16 层为 153.4 / 21.2，此后每多一层 decode
+  都更慢（18 / 20 / 22 层为 20.6 / 20.3 / 19.0）；同一台 Mac 上 llama.cpp 的最佳配置
+  （纯 CPU、12 线程、不做 op offload）为 50.07 / 22.55 tok/s。
+  真实文本（1,818 token 提示词、贪心生成 256 个 token）上 prefill 109.4-115.5 tok/s、
+  decode 12.8-12.9 tok/s，llama-server 为 20.4-22.4 与 13.00-13.24（加 `--no-op-offload`
+  时为 28.8-31.6 与 11.94-12.48）。详见[模型卡片](docs/models/qwen38-flash-next_zh-cn.md#超出内存运行)。
+* **单 token 的主机专家走 TensorSharp 自己的内核。** 用的仍是 ggml 的 CPU 点积，但
+  线程组每层只唤醒一次、算完即休眠，而不是每次调用都要唤醒工作线程的 ggml 图。忙等的
+  线程组在主机侧更快，却让层间的 GPU 段在 Apple 芯片上慢了 1.5-2 倍，所以线程组改为
+  休眠。`TS_HOST_MOE_DECODE=0` 恢复图路径。
+* **流式专家先用多线程预先缺页读入。** 流式传送一层专家的拷贝只在一个线程上读源数据；
+  面对 SSD 背后的映射，在 M5 Pro 上只有 0.7 GB/s，先并发缺页读入后达到 2.3 GB/s。
+  从页锁定区间拷贝时会在相邻专家栈留下的注册边界处切分（一次 `cudaMemcpyAsync` 不能
+  跨越两个注册区间），卸载模型时也会注销它锁定的区间。
 * `TS_HOST_MOE_VERIFY=1` 会在主机链路旁同时构建 GPU 上的专家链路，并报告二者的逐层
   偏差——用于在同样能塞进显存的模型上验证接缝的诊断手段。`TS_HOST_MOE_DEBUG=1` 打印
   分段计划（节点切点）与每个接缝的激活范数。`TS_HOST_MOE_TIMING=1` 报告卸载侧的墙钟
   时间，拆分为每次调用的准备开销与主机矩阵乘——这能告诉你一次慢运行到底慢在专家 GEMM
-  还是它周围的脚手架上。
+  还是它周围的脚手架上；`=3` 把每次 decode 拆成加速器分段、主机专家与上传三部分，
+  `=4` 统计单 token 内核各阶段耗时与工作线程唤醒的延迟。
 
 ## 张量并行与分布式推理
 

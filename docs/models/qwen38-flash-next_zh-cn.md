@@ -236,6 +236,98 @@ KV 状态相同，logits 仍与逐 token decode 不同。启用 CPU 路径后严
 都与普通贪心一致），MTP 投机为 83.2 tok/s，此前为 86.5（相对普通 decode 从 1.84 倍变为 1.69 倍）；n-gram 投机为
 73.8，此前为 79.5；普通 decode（49.1 对 47.0）与 prefill（830 对 804 tok/s）没有退化：精确性的代价由投机承担。
 
+## 超出内存运行
+
+UD-Q2_K_XL 文件共 78.9 GB，分三个分片：28.8 GB 的 n-gram（PLE）表、46.1 GB 的路由专家，以及约
+4 GB 的其余部分。每个 token 只读这张表的 16 行，以及每层 512 个专家中的 10 个，因此 TensorSharp
+能在放不下这个文件的机器上运行它，按 token 的需要从 SSD 读取这两部分。
+
+- **n-gram 表从不上传，也从不拷贝。** 在 GGML 后端上，它留在 GGUF 内存映射里，带随机访问提示
+  （`madvise(MADV_RANDOM)`），每个 token 的 16 行（每行 90 字节）按需并行收集。这正是 llama.cpp
+  `--lazy-mode` 背后的思路，llama.cpp 对超过 4 GiB 的张量默认开启它。这类加载每次都会打印：
+  `PLE n-gram table: 28.8 GB read on demand from the GGUF mapping, 16 rows a token (random-access advice).`
+  直连 `cuda` 引擎同样从映射中读取这些行，并在加载后把整张表预热进页缓存。
+- **最前面若干层的路由专家在主机上运行，同样直接读这份映射。** 在 GGML 的 GPU 后端上由
+  `--n-cpu-moe N` / `--cpu-moe` 选择这些层（在 `ggml_metal` 与 `ggml_cuda` 上实测）。在 `ggml_metal`
+  上两者都未设置时，引擎自行规划切分：在既放得进 Metal 工作集、又给主机层留够页缓存所需内存的前提下，
+  尽量把整层专家留在 GPU 上，其余卸载到主机。在 48 GB 的 M5 Pro 上（51.5 GB 内存、40.2 GB 的 Metal
+  工作集）：
+
+  ```
+  [moe-offload] qwen4exp (planned): routed experts of 33 of 48 layers run on the host from the GGUF mapping (31.7 GB read on demand); the accelerator holds 15 layers' (14.4 GB). Metal working set 40.2 GB, RAM 51.5 GB; --n-cpu-moe N overrides.
+  ```
+
+  常驻的层数超过一定程度后，再多常驻也不会更快：常驻的一层要占住全部 512 个专家，不论用到与否，
+  还会挤占那些从 SSD 读取专家的层所需的页缓存。
+- **Decode** 在 TensorSharp 自己的内核上运行每个主机层的 10 个专家：用的是 ggml 的 CPU 点积，
+  线程组每层只唤醒一次，该层算完即休眠。在 Apple 芯片上，自旋的线程组让层间的 GPU 段慢了
+  1.5-2 倍，所以线程组改为休眠。`TS_HOST_MOE_DECODE=0` 恢复 ggml 图路径。
+- **Prefill** 达到 128 个 token 及以上时（`TS_HOST_MOE_DEVICE_MIN_BATCH`），每个分块把各主机层用到的
+  专家流式送到 GPU，并先用 16 个线程把这些专家的页面缺页读入：在 M5 Pro 上，这一步让 1,818 token 的
+  prefill 从 37.2-38.0 秒缩短到 15.7-16.6 秒，decode 不受影响。
+- **`--backend mlx` 会被直接拒绝**：MLX 没有稀疏注意力 indexer、hyper-connection、n-gram 表以及
+  IQ2_XS/IQ3_XXS 专家的 kernel。请使用 `ggml_metal`。
+
+以下在这台 Mac 上实测（ggml `353b63b`，未修改），对照同一台机器上的 llama.cpp `a868c3e3`。
+llama.cpp 默认把模型全部卸载到 GPU，在这里会失败
+（`Insufficient Memory (kIOGPUCommandBufferCallbackErrorOutOfMemory)`）；它的最佳配置是纯 CPU、
+12 线程，n-gram 表由它的 lazy 模式按需读取。
+
+| 真实文本：1,818 token 的 prompt，贪心生成 256 个 token | prefill tok/s | decode tok/s |
+| --- | --- | --- |
+| TensorSharp `ggml_metal`，自动规划的切分 | 109.4-115.5 | 12.8-12.9 |
+| llama.cpp `-ngl 0 -t 12` | 20.4-22.4 | 13.00-13.24 |
+| llama.cpp `-ngl 0 -t 12 --no-op-offload` | 28.8-31.6 | 11.94-12.48 |
+
+| llama-bench 的方法：随机 token，pp512 / tg128，同一会话 | prefill tok/s | decode tok/s |
+| --- | --- | --- |
+| TensorSharp `ggml_metal`，自动规划的切分（15 层专家在 GPU 上） | 147.6 | 21.1 |
+| TensorSharp `ggml_metal`，`--n-cpu-moe 32`（16 层在 GPU 上） | 153.4 | 21.2 |
+| TensorSharp `ggml_metal`，`--n-cpu-moe 30`（18 层） | 183.9 | 20.6 |
+| TensorSharp `ggml_metal`，`--n-cpu-moe 28`（20 层） | 171.9 | 20.3 |
+| TensorSharp `ggml_metal`，`--n-cpu-moe 26`（22 层） | 80.7 | 19.0 |
+| llama.cpp 纯 CPU，`-t 12 -nopo 1` | 50.07 | 22.55 |
+
+GPU 上放 15 到 16 层时 decode 基本持平（21.1-21.2），超过 16 层后每多一层都更慢；到 22 层时留给主机层的
+页缓存太小，prefill 随之崩落。同一天更早、并非并排测得的数据：自动规划的切分 137.3 / 19.2，llama.cpp
+48.43 / 22.26（两者相隔一个半小时），`--cpu-moe`（GPU 上不放专家）142.3 / 17.5，18 线程的 `ggml_cpu`
+46.1 / 16.6，llama.cpp `-ngl 28 -t 12` 36.64 / 20.06。
+
+在真实文本上，TensorSharp 的 prefill 快 3.5-5 倍、decode 持平；在随机 token 上，prefill 约快 3 倍，
+decode 落后 6%（21.1 对 22.55）。
+在 Metal 上，decode 受限于 ggml-metal 每次 dispatch 的开销（每个 token 约 4,200 次 dispatch，整个 token 为
+单张图时 29.4 ms），外加每个主机接缝约 0.19 ms。真实文本还要为不在页缓存里的专家付出缺页的代价，
+因此速度取决于这台 Mac 同时在做什么：其他工作让 5 GB 内存处于压缩状态时，同样的运行 decode 为
+10.3-11.3 tok/s。TensorAgent 在 48 GB 的 Mac 上提供这个文件
+（[应用内实测](../../TensorAgent/README.md#the-macs-own-models)）。
+
+在 CUDA 上，GPU 放不下这个文件时，`--n-cpu-moe` 起同样的作用。在一张 A40（46 GB）上把 12 层的专家
+放在主机上，`ggml_cuda` 实测 600 / 30.2 tok/s（随机 token，pp512 / tg128），llama-bench 用
+`-ncmoe 12` 为 466.14 / 18.84。
+
+直接 `cuda` 引擎能运行 UD-Q2_K_XL 的 IQ2_XS 与 IQ3_XXS 专家：decode 用从 ggml 点积移植来的逐 token
+kernel，仍以捕获的 CUDA 图运行；prefill 则把这两种布局解码进它的 tensor-core 与寄存器暂存
+（register-staged）分组 kernel。在分组 kernel 接手之前，它对这个文件的 prefill 走最慢的回退路径，
+约 500 tok/s。该引擎没有主机专家接缝，所以 `--n-cpu-moe` 在它上面只打印警告，专家仍留在 GPU 上。
+`--tp N` 会以退出码 2 拒绝这种量化，因为 `ggml_cuda` 的 TP FFN 路径只接受 [多 GPU](#多-gpu) 一节列出的类型；
+请改用 `--layer-split N`。
+
+两张 A40、热态，同样的 1,818 token prompt 与 256 个贪心 token。TensorSharp 以
+`TensorSharp.Server.Host` 加 `--no-multi-agent --no-skills` 运行，每个进程三个请求，每个请求的首行各不相同，
+互不复用前缀；llama-server 关闭 `cache_prompt`，回答两个请求。
+
+| 2x A40，`--layer-split 2`（llama.cpp `-ngl 99`） | prefill tok/s | decode tok/s |
+| --- | --- | --- |
+| TensorSharp `cuda` | 1,612-1,613 | 56.85-56.93 |
+| TensorSharp `ggml_cuda` | 1,174-1,217 | 52.9-53.1 |
+| llama.cpp | 752-963 | 59.04-59.86 |
+
+kernel 刚重新构建后，直接引擎的第一个请求在驱动编译 PTX 期间 prefill 只有 335 tok/s；驱动会缓存
+编译结果。随机 token（pp512 / tg128）下，直接引擎实测 1,222.0 / 61.0，`ggml_cuda` 为 410.9 / 43.2；
+llama-bench 的双 GPU 运行只有 210.74 / 41.99，远低于同一台机器上 llama-server 的数字，因此应以真实
+文本那张表为准。按那张表，TensorSharp 的 prefill 快 1.2-2.1 倍，decode 为 llama.cpp 的 88-90%
+（`ggml_cuda`）与 95-96%（`cuda`）。
+
 ## 多 GPU
 
 `ggml_cuda` 的 `--tp N` 切分每个路由专家及共享专家：gate/up 按中间通道切分，汇集激活后，

@@ -212,7 +212,7 @@ if wrong:
     print(f'catalog device tiers {wrong} differ from ModelCatalog.cs', file=sys.stderr)
     sys.exit(1)
 kinds = {model['kind'] for model in models}
-if not kinds <= {'Dense', 'Diffusion'}:
+if not kinds <= {'Dense', 'MixtureOfExperts', 'Diffusion'}:
     print(f'catalog architectures are {kinds}', file=sys.stderr)
     sys.exit(1)
 print(f"    catalog: {len(actual_ids)} entries, {scope}, kinds {sorted(kinds)}")

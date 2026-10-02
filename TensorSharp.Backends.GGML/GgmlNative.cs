@@ -470,6 +470,10 @@ public struct Gemma4MoELayerDecodeArgs
         public int HcDownType, HcUpType, HcInjectType;
         public int RouterType, GateExpsType, UpExpsType, DownExpsType;
         public int ShGateType, ShUpType, ShDownType;
+
+        /// <summary>Nonzero: this layer's routed experts run on the host, read from
+        /// the GGUF mapping (MoE CPU offload). Only the token span accepts it.</summary>
+        public int CpuMoe;
     }
 
 // Descriptor for the Qwen3.5/3.6 full-model decode kernel

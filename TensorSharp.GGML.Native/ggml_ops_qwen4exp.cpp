@@ -291,6 +291,12 @@ namespace
         std::array<int, TSG_PRECISION_DECODE_COLUMNS> row_kv{};
         int row_kv_count = 0;
         bool row_scope = false;
+        // Span only, MoE CPU offload: one host seam per offloaded layer, the node
+        // index each accelerator segment ends at, and the offloaded layers (part
+        // of the replay key, so a changed placement rebuilds rather than replays).
+        std::vector<tsg::HostMoeSegment> host_moe;
+        std::vector<int> host_moe_seg_end;
+        std::vector<int> host_moe_layers;
 
         // Drop the graph but KEEP the recurrent state: a shape change does this.
         void reset_graph()
@@ -311,6 +317,7 @@ namespace
             mask = nullptr; pos = nullptr; kv_idx = nullptr; n_kv = -1; row_kv_count = 0; row_scope = false;
             rebinds.clear(); gdn_probe.clear();
             span_masks.clear(); span_pos.clear(); span_kvidx.clear();
+            host_moe.clear(); host_moe_seg_end.clear(); host_moe_layers.clear();
         }
 
         // Drop everything including the state: a KV reset does this.
@@ -864,8 +871,14 @@ ggml_tensor* q4e_nodes_ffn(
     ggml_context* ctx, Q4eBinder& bnd,
     const TSGgmlQwen4ExpFfnArgs* a, ggml_tensor* res_in,
     int n_embd, int hc, int hc_low_rank, int T,
-    int n_expert, int n_expert_used, int n_ff, int n_ff_sh, float eps)
+    int n_expert, int n_expert_used, int n_ff, int n_ff_sh, float eps,
+    ggml_cgraph* graph, std::vector<tsg::HostMoeSegment>* host_moe, int layer)
 {
+    const bool cpu_moe = a->cpu_moe != 0;
+    if (cpu_moe && (graph == nullptr || host_moe == nullptr))
+        throw std::invalid_argument("qwen4exp FFN: a layer whose experts run on the host (--n-cpu-moe) needs the token span");
+    if (cpu_moe && g_q4e_tp_partials)
+        throw std::invalid_argument("qwen4exp FFN: host-offloaded experts and tensor parallelism cannot be combined");
     const int hc_dim = hc * n_embd;
     const int tp_degree = g_q4e_tp_partials ? tsg::g_device_count.load(std::memory_order_acquire) : 1;
     const int output_rows = n_embd / tp_degree;
@@ -938,60 +951,133 @@ ggml_tensor* q4e_nodes_ffn(
     q4e_keep_fusion_input(w_sel);
     w_sel = ggml_reshape_3d(ctx, w_sel, 1, n_expert_used, T);
 
-    ggml_tensor* moe_in = ggml_reshape_3d(ctx, mixed, n_embd, 1, T);
-    ggml_tensor* e_up = q4e_tp_projection(ctx, w_up_e, moe_in, sel, full_ff, n_ff, rank * n_ff);
-    ggml_tensor* e_gate = q4e_tp_projection(ctx, w_gate_e, moe_in, sel, full_ff, n_ff, rank * n_ff);
-    ggml_set_name(e_up, "q4e.ffn.expert_up");
-    ggml_set_name(e_gate, "q4e.ffn.expert_gate");
-    ggml_tensor* par = ggml_mul(ctx, ggml_silu(ctx, e_gate), e_up);
-    ggml_set_name(par, "q4e.ffn.expert_activation");
     ggml_tensor* sg = q4e_tp_projection(ctx, w_sh_g, mixed, nullptr, full_shared_ff, n_ff_sh, rank * n_ff_sh);
     ggml_tensor* su = q4e_tp_projection(ctx, w_sh_u, mixed, nullptr, full_shared_ff, n_ff_sh, rank * n_ff_sh);
     ggml_tensor* shared_activation = ggml_mul(ctx, ggml_silu(ctx, sg), su);
-    if (g_q4e_tp_partials)
+    ggml_tensor* moe_out = nullptr;
+    if (cpu_moe)
     {
-        // Gather the channel slices BEFORE the down dot products. Splitting
-        // those dots changes their F32 summation order; subsequent activation
-        // quantization can amplify even a one-ULP change through the MoE stack.
-        // Each rank contributes disjoint channels, so summing zeros is exact.
-        const int rank = tsg::g_active_rank;
-        auto* routed = ggml_pad_ext(ctx, par, rank * n_ff, (tp_degree - rank - 1) * n_ff,
-            0, 0, 0, 0, 0, 0);
-        auto* shared = ggml_pad_ext(ctx, shared_activation, rank * n_ff_sh, (tp_degree - rank - 1) * n_ff_sh,
-            0, 0, 0, 0, 0, 0);
-        auto* gathered = ggml_concat(ctx, ggml_reshape_2d(ctx, routed, full_ff * n_expert_used, T), shared, 0);
-        ggml_set_output(gathered);
-        g_q4e_tp_partials->push_back(gathered);
-        par = ggml_cont(ctx, ggml_view_3d(ctx, gathered, full_ff, n_expert_used, T,
-            full_ff * sizeof(float), gathered->nb[1], 0));
-        shared_activation = ggml_cont(ctx, ggml_view_2d(ctx, gathered, full_shared_ff, T,
-            gathered->nb[1], (size_t)full_ff * n_expert_used * sizeof(float)));
+        // ---- MoE CPU offload seam ----
+        // The host gets exactly what the mul_mat_id chain below would read: the
+        // mixed input and the router's own top-k ids and renormalized weights,
+        // each downloaded as one flat block. A tensor that is already contiguous
+        // is handed over as it is - a view or reshape costs no dispatch, and a
+        // decode token runs this once per offloaded layer - and only the top-k
+        // view of a multi-token batch is copied. Pinning a view's storage as well
+        // as the view keeps the allocator from recycling it before the host reads.
+        auto boundary = [&](ggml_tensor* t) {
+            if (!ggml_is_contiguous(t)) t = ggml_cont(ctx, t);
+            for (ggml_tensor* p = t; p != nullptr; p = p->view_src) ggml_set_output(p);
+            return t;
+        };
+        tsg::HostMoeSegment hm;
+        hm.layer = layer;
+        hm.moe_in = boundary(mixed);                                               // [n_embd, T]
+        hm.sel_ids = boundary(sel);                                                // [n_used, T] i32
+        hm.weights = boundary(ggml_reshape_2d(ctx, w_sel, n_expert_used, T));      // [n_used, T]
+        // The segment ends right after these three. Expand them NOW, before any
+        // node that reads the host's result exists: whatever consumes moe_out
+        // must come later in node order, or it would read last token's value.
+        ggml_build_forward_expand(graph, hm.moe_in);
+        ggml_build_forward_expand(graph, hm.sel_ids);
+        ggml_build_forward_expand(graph, hm.weights);
+
+        // Written by the host between segments: an input (no producer) that is
+        // also an output, so ggml-alloc keeps it for the whole pass.
+        hm.moe_out = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, T);
+        ggml_set_input(hm.moe_out);
+        ggml_set_output(hm.moe_out);
+
+        hm.gate_data = a->gate_exps; hm.gate_type = a->gate_exps_type;
+        hm.gate_ne0 = n_embd; hm.gate_ne1 = n_ff; hm.gate_bytes = a->gate_exps_bytes;
+        hm.up_data = a->up_exps; hm.up_type = a->up_exps_type;
+        hm.up_ne0 = n_embd; hm.up_ne1 = n_ff; hm.up_bytes = a->up_exps_bytes;
+        hm.down_data = a->down_exps; hm.down_type = a->down_exps_type;
+        hm.down_ne0 = n_ff; hm.down_ne1 = n_embd; hm.down_bytes = a->down_exps_bytes;
+        hm.activation = 0;                    // silu(gate) * up
+        hm.num_experts = n_expert;
+        hm.n_used = n_expert_used;
+        hm.n_ff = n_ff;
+        hm.seq_len = T;
+        hm.hidden = n_embd;
+
+        if (tsg::host_moe_verify_enabled())
+        {
+            // TS_HOST_MOE_VERIFY=1: the same chain on the accelerator, for the
+            // seam to compare against. It binds the experts, so diagnostics only.
+            ggml_tensor* vin = ggml_reshape_3d(ctx, mixed, n_embd, 1, T);
+            ggml_tensor* vg = q4e_mul_mat_id(ctx, w_gate_e, vin, sel);
+            ggml_tensor* vu = q4e_mul_mat_id(ctx, w_up_e, vin, sel);
+            ggml_tensor* vd = q4e_mul_mat_id(ctx, w_down_e, ggml_mul(ctx, ggml_silu(ctx, vg), vu), sel);
+            vd = ggml_mul(ctx, vd, w_sel);
+            ggml_tensor* vsum = ggml_view_2d(ctx, vd, n_embd, T, vd->nb[2], 0);
+            for (int k = 1; k < n_expert_used; ++k)
+                vsum = ggml_add(ctx, vsum, ggml_view_2d(ctx, vd, n_embd, T, vd->nb[2], (std::size_t)k * vd->nb[1]));
+            hm.verify_gpu = ggml_cont(ctx, vsum);
+            ggml_set_output(hm.verify_gpu);
+            ggml_build_forward_expand(graph, hm.verify_gpu);
+            bnd.add(w_gate_e, a->gate_exps, (std::size_t)a->gate_exps_bytes);
+            bnd.add(w_up_e, a->up_exps, (std::size_t)a->up_exps_bytes);
+            bnd.add(w_down_e, a->down_exps, (std::size_t)a->down_exps_bytes);
+        }
+
+        host_moe->push_back(hm);
+        moe_out = hm.moe_out;
     }
-    ggml_tensor* experts = q4e_tp_projection(ctx, w_down_e, par, sel, n_embd, output_rows, rank * output_rows);
-    ggml_set_name(experts, "q4e.ffn.expert_down");
-    q4e_keep_fusion_input(experts);   // weighted-reduction fusion inputs: see Q4eRowKernels
-    experts = ggml_mul(ctx, experts, w_sel);
+    else
+    {
+        ggml_tensor* moe_in = ggml_reshape_3d(ctx, mixed, n_embd, 1, T);
+        ggml_tensor* e_up = q4e_tp_projection(ctx, w_up_e, moe_in, sel, full_ff, n_ff, rank * n_ff);
+        ggml_tensor* e_gate = q4e_tp_projection(ctx, w_gate_e, moe_in, sel, full_ff, n_ff, rank * n_ff);
+        ggml_set_name(e_up, "q4e.ffn.expert_up");
+        ggml_set_name(e_gate, "q4e.ffn.expert_gate");
+        ggml_tensor* par = ggml_mul(ctx, ggml_silu(ctx, e_gate), e_up);
+        ggml_set_name(par, "q4e.ffn.expert_activation");
+        if (g_q4e_tp_partials)
+        {
+            // Gather the channel slices BEFORE the down dot products. Splitting
+            // those dots changes their F32 summation order; subsequent activation
+            // quantization can amplify even a one-ULP change through the MoE stack.
+            // Each rank contributes disjoint channels, so summing zeros is exact.
+            const int rank = tsg::g_active_rank;
+            auto* routed = ggml_pad_ext(ctx, par, rank * n_ff, (tp_degree - rank - 1) * n_ff,
+                0, 0, 0, 0, 0, 0);
+            auto* shared = ggml_pad_ext(ctx, shared_activation, rank * n_ff_sh, (tp_degree - rank - 1) * n_ff_sh,
+                0, 0, 0, 0, 0, 0);
+            auto* gathered = ggml_concat(ctx, ggml_reshape_2d(ctx, routed, full_ff * n_expert_used, T), shared, 0);
+            ggml_set_output(gathered);
+            g_q4e_tp_partials->push_back(gathered);
+            par = ggml_cont(ctx, ggml_view_3d(ctx, gathered, full_ff, n_expert_used, T,
+                full_ff * sizeof(float), gathered->nb[1], 0));
+            shared_activation = ggml_cont(ctx, ggml_view_2d(ctx, gathered, full_shared_ff, T,
+                gathered->nb[1], (size_t)full_ff * n_expert_used * sizeof(float)));
+        }
+        ggml_tensor* experts = q4e_tp_projection(ctx, w_down_e, par, sel, n_embd, output_rows, rank * output_rows);
+        ggml_set_name(experts, "q4e.ffn.expert_down");
+        q4e_keep_fusion_input(experts);   // weighted-reduction fusion inputs: see Q4eRowKernels
+        experts = ggml_mul(ctx, experts, w_sel);
 #ifdef TSG_GGML_USE_CUDA
-    if (ggml_backend_is_cuda(g_backend) && T > TSG_PRECISION_DECODE_COLUMNS)
-    {
-        // Span cuts and TP gathers change buffer lifetimes and can enable
-        // CUDA's MoE multiply/add fusion where another layout executes separate
-        // operations. That introduces FMAs and changes rounding before the
-        // next quantized activation. Materialize weighted experts in every
-        // prefill layout so the sum always uses separate multiplies and
-        // sequential adds, independently of allocation and sharding.
-        // CONT is a liveness barrier only here, not a graph-lifetime output.
-        experts = ggml_cont(ctx, experts);
-    }
+        if (ggml_backend_is_cuda(g_backend) && T > TSG_PRECISION_DECODE_COLUMNS)
+        {
+            // Span cuts and TP gathers change buffer lifetimes and can enable
+            // CUDA's MoE multiply/add fusion where another layout executes separate
+            // operations. That introduces FMAs and changes rounding before the
+            // next quantized activation. Materialize weighted experts in every
+            // prefill layout so the sum always uses separate multiplies and
+            // sequential adds, independently of allocation and sharding.
+            // CONT is a liveness barrier only here, not a graph-lifetime output.
+            experts = ggml_cont(ctx, experts);
+        }
 #endif
 
-    ggml_tensor* moe_out = ggml_view_2d(ctx, experts, output_rows, T,
-            experts->nb[2], 0);
-    for (int k = 1; k < n_expert_used; ++k)
-    {
-        ggml_tensor* s = ggml_view_2d(ctx, experts, output_rows, T,
-                experts->nb[2], (std::size_t)k * experts->nb[1]);
-        moe_out = ggml_add(ctx, moe_out, s);
+        moe_out = ggml_view_2d(ctx, experts, output_rows, T,
+                experts->nb[2], 0);
+        for (int k = 1; k < n_expert_used; ++k)
+        {
+            ggml_tensor* s = ggml_view_2d(ctx, experts, output_rows, T,
+                    experts->nb[2], (std::size_t)k * experts->nb[1]);
+            moe_out = ggml_add(ctx, moe_out, s);
+        }
     }
 
     // ---- shared expert, behind its own sigmoid scalar ---------------------
@@ -1030,9 +1116,13 @@ ggml_tensor* q4e_nodes_ffn(
     bnd.add(w_up, a->hc_up, (std::size_t)a->hc_up_bytes);
     bnd.add(w_inject, a->hc_inject, (std::size_t)a->hc_inject_bytes);
     bnd.add(w_router, a->router, (std::size_t)a->router_bytes);
-    bnd.add(w_gate_e, a->gate_exps, (std::size_t)a->gate_exps_bytes);
-    bnd.add(w_up_e, a->up_exps, (std::size_t)a->up_exps_bytes);
-    bnd.add(w_down_e, a->down_exps, (std::size_t)a->down_exps_bytes);
+    if (!cpu_moe)
+    {
+        // An offloaded layer's experts stay unbound: never wrapped, never wired.
+        bnd.add(w_gate_e, a->gate_exps, (std::size_t)a->gate_exps_bytes);
+        bnd.add(w_up_e, a->up_exps, (std::size_t)a->up_exps_bytes);
+        bnd.add(w_down_e, a->down_exps, (std::size_t)a->down_exps_bytes);
+    }
     bnd.add(w_sh_gi, a->sh_gate_inp, (std::size_t)n_embd * sizeof(float));
     bnd.add(w_sh_g, a->sh_gate, (std::size_t)a->sh_gate_bytes);
     bnd.add(w_sh_u, a->sh_up, (std::size_t)a->sh_up_bytes);
@@ -1626,6 +1716,11 @@ TSG_EXPORT int TSGgml_Qwen4ExpFfnBlock(
             set_last_error("qwen4exp FFN block: null args.");
             return 0;
         }
+        if (a->cpu_moe != 0)
+        {
+            set_last_error("qwen4exp FFN block: a layer whose experts run on the host (--n-cpu-moe) runs only inside the token span.");
+            return 0;
+        }
         if (!ensure_backend())
             return 0;
 
@@ -2089,8 +2184,18 @@ static int q4e_token_span_impl(
         }
         const bool tp_mode = tp_plan_out != nullptr;
         if (tp_mode) *tp_plan_out = nullptr;
+        // MoE CPU offload: the layers whose routed experts run on the host. Their
+        // seams cut the graph at node INDICES, so its order must stay as built.
+        std::vector<int> cpu_moe_layers;
+        for (int il = layer_begin; il < layer_end; ++il)
+            if (ffn[il].cpu_moe != 0) cpu_moe_layers.push_back(il);
+        if (!cpu_moe_layers.empty() && tp_mode)
+        {
+            set_last_error("qwen4exp token span: host-offloaded experts (--n-cpu-moe) and tensor parallelism cannot be combined.");
+            return 0;
+        }
         // The collective executor must see the declared FFN boundaries in order.
-        tsg::SuppressGraphReorder keep_order(tp_mode);
+        tsg::SuppressGraphReorder keep_order(tp_mode || !cpu_moe_layers.empty());
         std::vector<ggml_tensor*> tp_partials;
         struct TpBuildScope {
             ~TpBuildScope() { g_q4e_tp_partials = nullptr; g_q4e_tp_matmuls = nullptr; }
@@ -2246,7 +2351,8 @@ static int q4e_token_span_impl(
             && slot->logits_rows == logits_rows
             && slot->export_hidden == (hidden_out != nullptr)
             && slot->sig5 == (const void*)(has_ple ? ple : nullptr)
-            && slot->use_mrope == (use_mrope ? 1 : 0))
+            && slot->use_mrope == (use_mrope ? 1 : 0)
+            && slot->host_moe_layers == cpu_moe_layers)
         {
             ggml_backend_tensor_set(slot->res_in, res_data, 0, res_bytes);
             if (slot->ple_emb_in != nullptr)
@@ -2271,7 +2377,12 @@ static int q4e_token_span_impl(
                 *tp_plan_out = &plan;
                 return 1;
             }
-            if (graph_compute_profiled(slot->precise_backend ? slot->precise_backend : g_backend, slot->graph, kQwen4ExpSpanKernel) != GGML_STATUS_SUCCESS)
+            ggml_backend_t span_backend = slot->precise_backend ? slot->precise_backend : g_backend;
+            const bool replayed = slot->host_moe.empty()
+                ? graph_compute_profiled(span_backend, slot->graph, kQwen4ExpSpanKernel) == GGML_STATUS_SUCCESS
+                : host_moe_execute_segments(slot->graph, slot->host_moe, slot->host_moe_seg_end,
+                      kQwen4ExpSpanKernel, span_backend);
+            if (!replayed)
             {
                 slot->reset_graph();
                 set_last_error("qwen4exp token span: replay failed.");
@@ -2382,6 +2493,7 @@ static int q4e_token_span_impl(
         std::vector<ggml_tensor*> kv_tensors;
         std::vector<ggml_tensor*> trace_res;
         std::vector<ggml_tensor*> probe_nodes;
+        std::vector<tsg::HostMoeSegment> host_moe;
         int attn_seen = 0;
         ggml_tensor* res = res_in;
         bool failed = false;
@@ -2491,9 +2603,12 @@ static int q4e_token_span_impl(
             if (q4e_span_trace()) { ggml_set_output(res); trace_res.push_back(res); }
 
             // ---- FFN half ----
+            // An offloaded layer expands its seam's boundary tensors itself, before
+            // the nodes that read the host's result exist (see q4e_nodes_ffn).
             res = q4e_nodes_ffn(ctx, binder, &ffn[il], res,
                     n_embd, hc, hc_low_rank, T,
-                    n_expert, n_expert_used, n_ff, n_ff_sh, eps);
+                    n_expert, n_expert_used, n_ff, n_ff_sh, eps,
+                    graph, &host_moe, il);
             ggml_build_forward_expand(graph, res);
             if (q4e_span_trace()) { ggml_set_output(res); trace_res.push_back(res); }
         }
@@ -2531,6 +2646,11 @@ static int q4e_token_span_impl(
         if (q4e_dump_nodes)
             for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) ggml_set_output(ggml_graph_node(graph, i));
 #endif
+        // Node cut points for the offloaded layers. It fails when the builder and
+        // the expander disagree, which would otherwise feed the host stale values.
+        std::vector<int> host_moe_seg_end;
+        if (!host_moe_build_segment_ends(graph, host_moe, host_moe_seg_end, kQwen4ExpSpanKernel))
+            return 0;
         const double t_pregal = q4e_phase_log() ? q4e_now_ms() : 0.0;
         ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(g_backend));
         std::unique_ptr<std::remove_pointer_t<ggml_gallocr_t>, decltype(&ggml_gallocr_free)>
@@ -2587,7 +2707,10 @@ static int q4e_token_span_impl(
         }
         else
         {
-        if (graph_compute_profiled(slot->precise_backend ? slot->precise_backend : g_backend, graph, kQwen4ExpSpanKernel) != GGML_STATUS_SUCCESS)
+        ggml_backend_t span_backend = slot->precise_backend ? slot->precise_backend : g_backend;
+        if (host_moe.empty()
+                ? graph_compute_profiled(span_backend, graph, kQwen4ExpSpanKernel) != GGML_STATUS_SUCCESS
+                : !host_moe_execute_segments(graph, host_moe, host_moe_seg_end, kQwen4ExpSpanKernel, span_backend))
         {
             set_last_error("qwen4exp token span: graph compute failed.");
             return 0;
@@ -2702,6 +2825,9 @@ static int q4e_token_span_impl(
         slot->row_kv = row_kv; slot->row_kv_count = row_kv_count; slot->row_scope = row_scope;
         slot->use_mrope = use_mrope ? 1 : 0;
         slot->rebinds = std::move(binder.cached);
+        slot->host_moe = std::move(host_moe);
+        slot->host_moe_seg_end = std::move(host_moe_seg_end);
+        slot->host_moe_layers = std::move(cpu_moe_layers);
         slot->valid = true;
         return 1;
     }
