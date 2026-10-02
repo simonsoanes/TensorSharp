@@ -43,6 +43,18 @@ dotnet build TensorSharp.slnx
 
 解决方案构建默认使用 `Any CPU` 平台（见 `Directory.Solution.props`），因此在 Visual Studio 开发者命令提示符中也能正常工作——这类提示符会向环境导出 `Platform=x64`，否则会把构建引导到不存在的 `Release|x64` 解决方案配置。显式传入的 `-p:Platform=...` 仍然优先。
 
+解决方案也会构建 TensorAgent。其与平台无关的项目（`TensorAgent.Core`、`TensorAgent.Sharing`、`TensorAgent.Tests`）列在解决方案中，在任何操作系统上都会构建。应用本身 `TensorAgent/src/TensorAgent.Maui` 需要 .NET MAUI 工作负载，因此没有列入：解决方案其余部分构建完成后，`Directory.Solution.targets` 另起一个 `dotnet build`，按 `TensorAgent/scripts/build-mac.sh`、`build-sim.sh`、`build-windows.ps1` 的方式构建它（`-p:TensorSharpAppleTargets=true` 与 `-m:1`；Windows 上为 `win-x64`），配置与 SDK 沿用解决方案构建：
+
+| 主机 | 构建的应用头 | 需要 |
+| --- | --- | --- |
+| macOS | Mac 应用（`net10.0-maccatalyst`），在 Apple 芯片上另有 iOS 模拟器应用（`net10.0-ios`） | 运行构建的 SDK 中同时有 `maui-maccatalyst` 与 `maui-ios`（该应用头会 restore 两者）；模拟器应用另需 `GgmlOps.xcframework` 与已暂存的 CPython（[TensorAgent/README.md](TensorAgent/README.md#build-and-run)） |
+| Windows | Windows 应用（`net10.0-windows10.0.19041.0`，`win-x64`） | `maui-windows` |
+| Linux | 无 | |
+
+缺少工作负载时跳过整个应用，缺少模拟器前置文件时只跳过该应用头，并各自给出指明缺少什么的警告；使用 `-p:TensorSharpSkipGgmlNative=true` 且从未构建过引擎库时，桌面应用头同样被跳过。其他导致应用头无法构建的情况（没有 Xcode、已安装工作负载不接受当前 Xcode、编译或链接错误）会使解决方案构建失败，并给出单独构建该应用头的脚本。`-p:TensorSharpSkipTensorAgentApp=true`（或环境变量 `TensorSharpSkipTensorAgentApp=true`）可将应用排除在外。解决方案的重新构建（`--no-incremental`）与 `dotnet clean` 也涵盖该应用，产物位于 `TensorAgent/src/TensorAgent.Maui/bin/<Configuration>/`。
+
+应用的构建只从解决方案构建的命令行继承配置与 `-p:TensorSharpSkipGgmlNative`，并会在自身属性不同时重新构建其引用的引擎项目，因此改变这些项目编译方式的开关（例如 `-p:Version=...`）会在其输出中被覆盖；此类构建请排除应用。只有命令行的解决方案构建会构建该应用：`-graph` 构建与 Visual Studio 自身的解决方案构建都不会。需要签名的真机构建仍使用 `build-device.sh` 与 `deploy-device.sh`。
+
 ### 构建单独应用
 
 ```bash
@@ -660,7 +672,7 @@ span 记账、前缀裁剪、截断、切片——并且不再出现任何模型
 dotnet test InferenceWeb.Tests/InferenceWeb.Tests.csproj
 ```
 
-iOS 应用的宿主有自己的测试项目 `TensorAgent/tests/TensorAgent.Tests`（见 [TensorAgent/README.md](TensorAgent/README.md)）；PR CI 不运行它，不过 `InferenceWeb.Tests` 会检查该应用的项目文件、plist、entitlement 与原生导出清单（`TensorAgentMauiProjectTests`）。
+iOS 应用的宿主有自己的测试项目 `TensorAgent/tests/TensorAgent.Tests`（见 [TensorAgent/README.md](TensorAgent/README.md)），它属于 `TensorSharp.slnx`；PR CI 不运行它，不过 `InferenceWeb.Tests` 会检查该应用的项目文件、plist、entitlement 与原生导出清单（`TensorAgentMauiProjectTests`），以及解决方案构建如何构建该应用（`TensorAgentSolutionBuildTests`）。
 
 #### 测试分组（Test lanes）
 

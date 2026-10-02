@@ -63,6 +63,7 @@ cd TensorSharp</code></pre>
   <h3>Full native / GPU path</h3>
   <p>Build the whole solution when you want GGML CPU, Metal, CUDA, Vulkan, or MLX. The first build compiles the native bridge and can take several minutes; subsequent builds are incremental.</p>
   <pre data-lang="bash"><code>dotnet build TensorSharp.slnx -c Release</code></pre>
+  <p>On macOS and Windows this also builds the TensorAgent app when the .NET SDK running the build has the .NET MAUI workloads, and warns when it does not; add <code>-p:TensorSharpSkipTensorAgentApp=true</code> to leave the app out (<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/DEVELOPMENT.md#build-the-entire-solution" target="_blank" rel="noopener">details</a>).</p>
   <p>Or build just one application:</p>
   <pre data-lang="bash"><code># Console application
 dotnet build TensorSharp.Cli/TensorSharp.Cli.csproj -c Release

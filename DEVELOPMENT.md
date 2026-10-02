@@ -43,6 +43,18 @@ dotnet build TensorSharp.slnx
 
 The solution build defaults to the `Any CPU` platform (`Directory.Solution.props`), so it also works from Visual Studio developer prompts, which export `Platform=x64` into the environment and would otherwise steer the build to a nonexistent `Release|x64` solution configuration. An explicit `-p:Platform=...` still takes precedence.
 
+The solution also builds TensorAgent. Its platform-neutral projects (`TensorAgent.Core`, `TensorAgent.Sharing` and `TensorAgent.Tests`) are listed in it and build on every OS. The app itself, `TensorAgent/src/TensorAgent.Maui`, needs the .NET MAUI workloads, so it is not listed: after the rest of the solution has built, `Directory.Solution.targets` builds it in a separate `dotnet build`, the way `TensorAgent/scripts/build-mac.sh`, `build-sim.sh` and `build-windows.ps1` do (`-p:TensorSharpAppleTargets=true` and `-m:1`; `win-x64` on Windows), with the configuration and the SDK of the solution build:
+
+| Host | App heads built | Needs |
+| --- | --- | --- |
+| macOS | the Mac app (`net10.0-maccatalyst`) and, on Apple silicon, the iOS simulator app (`net10.0-ios`) | `maui-maccatalyst` and `maui-ios` in the SDK that runs the build (the head restores both); for the simulator app also `GgmlOps.xcframework` and the staged CPython ([TensorAgent/README.md](TensorAgent/README.md#build-and-run)) |
+| Windows | the Windows app (`net10.0-windows10.0.19041.0`, `win-x64`) | `maui-windows` |
+| Linux | none | |
+
+A missing workload skips the app, and a missing simulator prerequisite skips that head, each with a warning that names it; with `-p:TensorSharpSkipGgmlNative=true`, a desktop head whose engine library was never built is skipped the same way. Anything else that stops a head (no Xcode, an Xcode the installed workload does not accept, a compile or link error) fails the solution build and names the script that builds that head on its own. `-p:TensorSharpSkipTensorAgentApp=true`, or `TensorSharpSkipTensorAgentApp=true` in the environment, leaves the app out. A rebuild (`--no-incremental`) and `dotnet clean` of the solution include the app, which lands under `TensorAgent/src/TensorAgent.Maui/bin/<Configuration>/`.
+
+The app's build takes only the configuration and `-p:TensorSharpSkipGgmlNative` from the solution build's command line, and it rebuilds the engine projects it references wherever its own properties differ, so a switch that changes how those compile (for example `-p:Version=...`) is undone in their outputs; leave the app out of such builds. Only the command-line solution build builds the app: a `-graph` build and Visual Studio's own solution build do not. Device builds, which need signing, stay with `build-device.sh` and `deploy-device.sh`.
+
 ### Build individual applications
 
 ```bash
@@ -787,7 +799,7 @@ the fused path engages.
 dotnet test InferenceWeb.Tests/InferenceWeb.Tests.csproj
 ```
 
-The iOS app's host has its own project, `TensorAgent/tests/TensorAgent.Tests` (see [TensorAgent/README.md](TensorAgent/README.md)); PR CI does not run it, although `InferenceWeb.Tests` does check the app's project, plist, entitlement and native-export manifests (`TensorAgentMauiProjectTests`).
+The iOS app's host has its own project, `TensorAgent/tests/TensorAgent.Tests` (see [TensorAgent/README.md](TensorAgent/README.md)), which is part of `TensorSharp.slnx`; PR CI does not run it, although `InferenceWeb.Tests` does check the app's project, plist, entitlement and native-export manifests (`TensorAgentMauiProjectTests`) and how the solution build builds the app (`TensorAgentSolutionBuildTests`).
 
 #### Test lanes
 
