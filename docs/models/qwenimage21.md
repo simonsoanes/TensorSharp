@@ -625,11 +625,20 @@ because it ignores the alpha stored in `lora_adapter_metadata`.
 ### Server and C# API
 
 The server loads its `--lora` set at startup and applies it to every generation and
-edit request; per-request LoRA selection is not implemented. A request's `steps`
+edit request; its HTTP requests cannot choose plug-ins. A request's `steps`
 and `cfg` still override a plug-in's recipe. In process,
 `QwenImageModel.SetLoras(IReadOnlyList<LoraSpec>)` replaces the set for later
 requests (an empty list removes it). The new set is validated against the
 transformer immediately, and a failure leaves the previous set in place.
+
+A host that chooses plug-ins per picture passes them to `WebUiChatService`'s
+`ImageGenerateStreamAsync`, `ImageEditStreamAsync` or `ImageEditAsync(body, loras, ct)`.
+The set is swapped in under the same lock as the run, so a picture that waited behind
+another is made with the set it asked for. An unchanged set costs nothing; pass
+absolute paths, which is how the model records the set. The TensorAgent Mac app works this
+way: it offers the twelve plug-ins of [USAGE.md's table](../../USAGE.md#qwen-image-21-lora-plug-ins)
+from its own pinned catalog and applies the user's choice to each picture, its edit routes
+included (see [TensorAgent's README](../../TensorAgent/README.md)).
 
 ### Limitations
 

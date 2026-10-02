@@ -49,8 +49,10 @@ internal static class Qwen4ExpSyntheticModelBuilder
 
     private static readonly ulong[] PleVocab = { 101, 103, 107, 109, 113, 127, 131, 137 };
 
-    /// <summary>Write the checkpoint to <paramref name="path"/>; returns the path.</summary>
-    public static string Write(string path, int indexerTopK = 16, int contextLength = 4096)
+    /// <summary>Write the checkpoint to <paramref name="path"/>; returns the path.
+    /// <paramref name="q2kxlExperts"/> stores the experts as the UD-Q2_K_XL file does instead:
+    /// IQ2_XS gate/up (IQ3_XXS in layer 2) over IQ4_NL down.</summary>
+    public static string Write(string path, int indexerTopK = 16, int contextLength = 4096, bool q2kxlExperts = false)
     {
         const int hcDim = Hc * Hidden;
         const int keyDim = StateSize * KHeads, valueDim = StateSize * VHeads, convDim = 2 * keyDim + valueDim;
@@ -148,6 +150,11 @@ internal static class Qwen4ExpSyntheticModelBuilder
             // and a few layers of Q8_0 down.
             GgmlType gateUp = il == 2 ? GgmlType.IQ4_XS : GgmlType.IQ3_S;
             GgmlType down = il is 2 or 6 ? GgmlType.Q8_0 : GgmlType.IQ4_NL;
+            if (q2kxlExperts)
+            {
+                gateUp = il == 2 ? GgmlType.IQ3_XXS : GgmlType.IQ2_XS;
+                down = GgmlType.IQ4_NL;
+            }
             t.Add(Proj(p + "ffn_gate_inp.weight", Hidden, Experts, GgmlType.F32));
             t.Add(Experts3(p + "ffn_gate_exps.weight", Hidden, ExpertFf, gateUp));
             t.Add(Experts3(p + "ffn_up_exps.weight", Hidden, ExpertFf, gateUp));

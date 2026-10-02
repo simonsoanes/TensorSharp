@@ -109,18 +109,20 @@ public sealed class AgentAppHost : IDisposable
         // that now points at a different file. Nothing else can reach them: the Models
         // list is built from the catalog, so a directory no entry claims has no row and
         // no delete button, and it is gigabytes. Swept once per launch, before anything
-        // reads the store.
+        // reads the store. Only RETIRED ids go (ModelCatalog.Retired): an id this build
+        // merely does not know may be a newer build's, sharing this directory.
         Models.SweepOrphanedModels();
-        // And the checkpoints of models the catalog no longer has: a directory no
-        // entry claims has no delete button either.
+        // And the checkpoints of models the catalog has retired: a directory no entry
+        // claims has no delete button either.
         PrefixCheckpointFileStore.SweepOrphans(
             Path.Combine(Paths.CacheRoot, "prefix-cache"),
-            id => ModelCatalog.Find(id) is not null,
+            id => !ModelCatalog.IsRetired(id),
             HostLog);
         // The downloads belong to the APP, not to the model list: a five-gigabyte
         // transfer must not end because the user went back to the chat. See
         // ModelDownloadManager.
         Downloads = new ModelDownloadManager(Models, _loggerFactory.CreateLogger("TensorAgent.Downloads"));
+        Loras = new LoraStore(Paths.LorasDirectory);
         Conversations = new ConversationStore(paths.ConversationsDirectory);
         Catalog = ModelCatalog.ForDevice(paths.DeviceMemoryGB);
 
@@ -359,7 +361,8 @@ public sealed class AgentAppHost : IDisposable
         // never run beside the prefix-cache warm-up, must not submit GPU work while the
         // app is away, and has to recognise and repair a poisoned engine. See
         // GatedChatFrames.
-        Server.MapWebUi(Chat, Options.UploadDirectory, SkillsService, Recorder, chatFrames: GatedChatFrames, turns: Turns);
+        Server.MapWebUi(Chat, Options.UploadDirectory, SkillsService, Recorder, chatFrames: GatedChatFrames, turns: Turns,
+            prepareImage: PrepareImageTurn);
         // Without this the model's "here is your PDF" link 404s: the runner emits
         // /api/code/artifacts/... and nothing served it. See MapCodeArtifacts.
         Server.MapCodeArtifacts(Artifacts);
@@ -367,6 +370,7 @@ public sealed class AgentAppHost : IDisposable
             Catalog, Models, Conversations, Settings, DescribeEngine, RaisePageEvent, Downloads,
             onSettingsChanged: ApplySettings, describeModel: DescribeModelState, shares: Shares,
             hasShareContainer: () => ShareInbox is not null, discardShare: DiscardPendingShare);
+        Server.MapLoras(this);
     }
 
     public AgentPaths Paths { get; }
@@ -374,6 +378,8 @@ public sealed class AgentAppHost : IDisposable
     public ModelStore Models { get; }
     /// <summary>Every model download this launch started, independent of any screen.</summary>
     public ModelDownloadManager Downloads { get; }
+    /// <summary>The LoRA plug-ins on this device (<see cref="LoraCatalog"/>).</summary>
+    public LoraStore Loras { get; }
     public ConversationStore Conversations { get; }
     public IReadOnlyList<CatalogModel> Catalog { get; }
     public CodeExecOptions CodeExec { get; }
@@ -1161,7 +1167,7 @@ public sealed class AgentAppHost : IDisposable
             // REPLACES the route's default frame source, so it has to make the same
             // choice that default makes, or an image model is handed to the text pipeline.
             await using (IAsyncEnumerator<object> frames =
-                ImageTurns.FramesFor(Chat, attemptBody, cancellationToken).GetAsyncEnumerator(cancellationToken))
+                ImageTurns.FramesFor(Chat, attemptBody, cancellationToken, PrepareImageTurn).GetAsyncEnumerator(cancellationToken))
             {
                 while (true)
                 {
@@ -1751,6 +1757,16 @@ public sealed class AgentAppHost : IDisposable
     /// <summary>Raised whenever <see cref="ModelLoad"/> moves, for native chrome that shows it.</summary>
     public event Action<ModelLoadState>? ModelLoadChanged;
 
+    /// <summary>Forget the selection <paramref name="id"/>, unless another has replaced it since.</summary>
+    private void ClearSelectedModel(string id) =>
+        Settings.Update(settings =>
+        {
+            if (!string.Equals(settings.SelectedModelId, id, StringComparison.Ordinal))
+                return null;
+            settings.SelectedModelId = null;
+            return settings;
+        });
+
     /// <summary>
     /// Load the model the user last used, without being asked.
     ///
@@ -1783,12 +1799,23 @@ public sealed class AgentAppHost : IDisposable
         // old one selected holding a name that resolves to nothing. Cleared for the
         // same reason the gated-off case below is: a selection nothing can act on is
         // worse than none, because the picker goes on presenting it as the choice.
+        //
+        // Only a RETIRED id (ModelCatalog.Retired) is cleared. An id this build merely does
+        // not know is most likely a newer build's entry: the Mac's Debug and Release builds
+        // share these settings, and an older one clearing it would leave the newer one
+        // starting at "No model yet". It is kept, unloaded, as the model sweeps keep its files.
         if (ModelCatalog.Find(id) is not { } model)
         {
+            if (!ModelCatalog.IsRetired(id))
+            {
+                _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation(
+                    "the last used model {Model} is not in this build's catalog and was not retired, "
+                    + "so it is most likely a newer build's; keeping the selection", id);
+                return;
+            }
             _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation(
-                "the last used model {Model} is no longer in the catalog; clearing the selection", id);
-            settings.SelectedModelId = null;
-            Settings.Save(settings);
+                "the last used model {Model} was retired from the catalog; clearing the selection", id);
+            ClearSelectedModel(id);
             return;
         }
 
@@ -1803,8 +1830,7 @@ public sealed class AgentAppHost : IDisposable
             _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation(
                 "{Model} needs a {Needs} GB device and this one reports {Has} GB; clearing the selection",
                 model.Id, model.MinDeviceMemoryGB, Paths.DeviceMemoryGB);
-            settings.SelectedModelId = null;
-            Settings.Save(settings);
+            ClearSelectedModel(id);
             return;
         }
 
@@ -1812,6 +1838,17 @@ public sealed class AgentAppHost : IDisposable
         {
             _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation(
                 "the last used model {Model} is not on this device; nothing to load", id);
+            return;
+        }
+
+        // A model of several required files (a split GGUF's shards, a diffusion set) whose
+        // first file is present can still be missing the rest: a relaunch in the middle of
+        // its download restores the choice. Loading it would fail inside the engine, naming
+        // a shard file the user never saw.
+        if (model.Files.Count(f => !f.Optional) > 1 && Models.StateOf(model) != InstallState.Installed)
+        {
+            _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation(
+                "the last used model {Model} is not completely downloaded; nothing to load", id);
             return;
         }
 
@@ -2054,11 +2091,15 @@ public sealed class AgentAppHost : IDisposable
     }
 
     private int _speculationBenchStarted;
+    private int _imageBenchStarted;
 
     /// <summary>Start the on-device plain-vs-speculative benchmark once, when the
-    /// launch environment asks for it (see <see cref="SpeculationBench"/>).</summary>
+    /// launch environment asks for it (see <see cref="SpeculationBench"/>), or the picture
+    /// benchmark (see <see cref="ImageBench"/>).</summary>
     private void StartSpeculationBenchIfRequested()
     {
+        if (ImageBench.Requested && Interlocked.Exchange(ref _imageBenchStarted, 1) == 0)
+            _ = Task.Run(() => new ImageBench(this).RunAsync(CancellationToken.None));
         if (!SpeculationBench.Requested || Interlocked.Exchange(ref _speculationBenchStarted, 1) != 0)
             return;
         _ = Task.Run(() => new SpeculationBench(this).RunAsync(CancellationToken.None));
@@ -2397,9 +2438,11 @@ public sealed class AgentAppHost : IDisposable
         // fault in a kernel with nothing to do with either of them.
         lock (_modelGate)
         {
-            AppSettings settings = Settings.Load();
-            settings.SelectedModelId = model.Id;
-            Settings.Save(settings);
+            AppSettings settings = Settings.Update(current =>
+            {
+                current.SelectedModelId = model.Id;
+                return current;
+            });
             string weights = Paths.SelectedModelPath(settings);
 
             // The model that is asked for is the one already standing: nothing to load.
@@ -2462,8 +2505,11 @@ public sealed class AgentAppHost : IDisposable
                 // by its name: MiniMax-H3 searches the whole model store and would take
                 // Qwen-Image's text encoder for its own. A half-downloaded set (a relaunch in
                 // the middle of the download restores the remembered choice) must not load and
-                // then fail - or worse, not fail - inside the first picture or clip.
-                if (model.Kind == CatalogArchitectureKind.Diffusion && Models.StateOf(model) != InstallState.Installed)
+                // then fail - or worse, not fail - inside the first picture or clip. The same
+                // holds for a split GGUF: the engine opens the later shards by name and would
+                // refuse with a FileNotFoundException for a file the user never chose.
+                if ((model.Kind == CatalogArchitectureKind.Diffusion || model.Files.Count(f => !f.Optional) > 1)
+                    && Models.StateOf(model) != InstallState.Installed)
                 {
                     var incomplete = new FileNotFoundException(
                         $"{model.DisplayName} is not completely downloaded yet.", Models.DirectoryFor(model));
@@ -2520,9 +2566,17 @@ public sealed class AgentAppHost : IDisposable
                 // weights, so a file made from other weights of the same shape is never
                 // restored. The warm-up that follows reads it back instead of prefilling it,
                 // and a first message sent before the warm-up finds it too.
+                // Every shard is part of the identity: a re-downloaded later shard of a split
+                // GGUF must not restore a checkpoint made from the old bytes. A single-file
+                // entry's identity is unchanged (no shards to add).
+                string?[] identityFiles = new[] { weights }
+                    .Concat(model.WeightFiles.Where(f => f.Role == CatalogFileRole.WeightsShard)
+                        .Select(f => Path.Combine(Models.DirectoryFor(model), f.FileName)))
+                    .Append(projector)
+                    .ToArray();
                 ModelService.EngineHost.PrefixCheckpointStore = new PrefixCheckpointFileStore(
                     Paths.PrefixCheckpointDirectoryFor(model),
-                    PrefixCheckpointFileStore.WeightsIdentityOf(weights, projector),
+                    PrefixCheckpointFileStore.WeightsIdentityOf(identityFiles),
                     HostLog);
 
                 var refusals = new List<string>();
@@ -2687,6 +2741,110 @@ public sealed class AgentAppHost : IDisposable
                 "{Model} companions: {Companions}", model!.Id,
                 string.Join(", ", companions.Select(c => $"{c.Key}={Path.GetFileName(c.Value)}")));
         }
+
+        // The app chooses LoRA plug-ins per picture (PrepareImageTurn), never at load.
+        // A TS_LORAS inherited from the shell that launched the app would apply plug-ins
+        // nobody chose here to every load, and the engine warns on every load of a model
+        // that takes none.
+        string variable = TensorSharp.Runtime.LoraCliFlags.EnvironmentVariable;
+        if (Environment.GetEnvironmentVariable(variable) is { Length: > 0 } inherited)
+        {
+            HostLog.LogWarning(
+                "ignoring {Variable} from the environment ({Value}): the app applies the LoRA plug-ins chosen under LoRAs",
+                variable, inherited);
+            Environment.SetEnvironmentVariable(variable, null);
+        }
+    }
+
+    /// <summary>The catalog entry whose weights the engine has loaded, or null.</summary>
+    private CatalogModel? LoadedCatalogModel()
+    {
+        string? loaded = ModelService.LoadedModelPath;
+        return string.IsNullOrEmpty(loaded)
+            ? null
+            : ModelCatalog.BuiltIn.FirstOrDefault(m => string.Equals(
+                Path.Combine(Paths.ModelsDirectory, m.Id, m.Weights.FileName), loaded, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The LoRA plug-ins the next picture is made with (<see cref="LoraSelection.Plan"/>): the
+    /// image service swaps them in under the same lock as the run, and an unchanged set, which
+    /// is every picture after the first that follows a change, costs nothing. A choice that
+    /// cannot be honoured refuses the picture with the reason.
+    /// </summary>
+    /// <param name="editing">Whether the picture edits an attached photo: a plug-in made only
+    /// for edits is not applied to a picture made from words.</param>
+    internal ImageTurns.Preparation PrepareImageTurn(bool editing)
+    {
+        try
+        {
+            LoraPlan? plan = LoraSelection.Plan(
+                Settings.Load().ImageLoras, LoadedCatalogModel()?.Id, Loras, editing, out string? error);
+            if (plan is null)
+                return ImageTurns.Preparation.Refused(error!);
+            HostLog.LogInformation("this picture is made with LoRA plug-ins: {Loras}{SatOut}",
+                plan.Names.Count == 0 ? "none" : string.Join(", ", plan.Names),
+                plan.SatOut is null ? "" : $" ({plan.SatOut})");
+            return ImageTurns.Preparation.Ready(plan.Specs, plan.Names);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            HostLog.LogWarning(ex, "preparing the LoRA plug-ins failed");
+            return ImageTurns.Preparation.Refused("The LoRA plug-ins could not be prepared: " + ex.Message);
+        }
+    }
+
+    /// <summary>The key a LoRA plug-in's download has in <see cref="Downloads"/>.</summary>
+    public static string LoraDownloadKey(CatalogLora lora) => "lora:" + lora.Id;
+
+    /// <summary>Start the download of a plug-in's files, or rejoin the one running.</summary>
+    public ModelDownloadStatus StartLoraDownload(CatalogLora lora)
+    {
+        ArgumentNullException.ThrowIfNull(lora);
+        return Downloads.Start(LoraDownloadKey(lora), (progress, ct) => Loras.DownloadAsync(lora, progress, ct));
+    }
+
+    /// <summary>
+    /// Save <paramref name="requested"/> as the plug-ins every later picture is made with (see
+    /// <see cref="LoraSelection.Validate"/>), or return null with the reason it was refused.
+    /// </summary>
+    public IReadOnlyList<ImageLoraChoice>? ChooseLoras(IEnumerable<ImageLoraChoice> requested, out string? error)
+    {
+        ArgumentNullException.ThrowIfNull(requested);
+        List<ImageLoraChoice>? chosen = null;
+        string? refusal = null;
+        Settings.Update(settings =>
+        {
+            chosen = LoraSelection.Validate(requested, settings.ImageLoras, Loras, out refusal);
+            if (chosen is null)
+                return null;
+            settings.ImageLoras = chosen;
+            return settings;
+        });
+        error = refusal;
+        if (chosen is null)
+            return null;
+        HostLog.LogInformation("LoRA plug-ins chosen: {Loras}", chosen.Count == 0
+            ? "none"
+            : string.Join(", ", chosen.Select(c => $"{c.Id} ({c.Strength:0.##})")));
+        return chosen;
+    }
+
+    /// <summary>
+    /// Remove a plug-in's files and turn it off. The adapters it already gave the loaded model
+    /// stay until the next picture, which applies the choice without it; they are the engine's
+    /// own copies, so the files can go now.
+    /// </summary>
+    public void DeleteLora(CatalogLora lora)
+    {
+        ArgumentNullException.ThrowIfNull(lora);
+        Downloads.Cancel(LoraDownloadKey(lora));
+        Settings.Update(settings =>
+            settings.ImageLoras.RemoveAll(c => string.Equals(c.Id, lora.Id, StringComparison.OrdinalIgnoreCase)) > 0
+                ? settings
+                : null);
+        Loras.Delete(lora);
+        HostLog.LogInformation("removed the LoRA plug-in {Lora}", lora.Id);
     }
 
     /// <summary>
@@ -2848,6 +3006,9 @@ public sealed record AgentPaths(string DataRoot, string CacheRoot)
     public DeviceClass DeviceClass { get; init; } = DeviceClass.Phone;
 
     public string ModelsDirectory => Path.Combine(CacheRoot, "models");
+    /// <summary>The LoRA plug-ins (<see cref="LoraStore"/>): beside the models, not inside a
+    /// model's own directory, which the store's completeness check walks.</summary>
+    public string LorasDirectory => Path.Combine(CacheRoot, "loras");
     public string ConversationsDirectory => Path.Combine(DataRoot, "conversations");
     public string UploadsDirectory => Path.Combine(CacheRoot, "uploads");
     public string ScratchDirectory => Path.Combine(CacheRoot, "scratch");

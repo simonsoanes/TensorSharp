@@ -369,6 +369,111 @@ MTP speculation ran at 83.2 tok/s instead of 86.5 (1.69x plain instead of 1.84x)
 n-gram speculation at 73.8 instead of 79.5, while plain decode (49.1 against 47.0) and
 prefill (830 against 804 tok/s) did not regress: speculation pays for its exactness.
 
+## Larger than memory
+
+The UD-Q2_K_XL file is 78.9 GB in three shards: a 28.8 GB n-gram (PLE) table, 46.1 GB of
+routed experts and about 4 GB of everything else. A token reads 16 rows of the table and
+10 of each layer's 512 experts, so TensorSharp runs the file on machines that cannot hold
+it and reads those parts from the SSD as tokens need them.
+
+- **The n-gram table is never uploaded or copied.** On the GGML backends it stays in the
+  GGUF memory mapping with random-access advice (`madvise(MADV_RANDOM)`), and a token's 16
+  rows (90 bytes each) are gathered on demand, in parallel. This is the idea behind
+  llama.cpp's `--lazy-mode`, on by default there for tensors over 4 GiB. Every such load
+  logs it:
+  `PLE n-gram table: 28.8 GB read on demand from the GGUF mapping, 16 rows a token (random-access advice).`
+  The direct `cuda` engine reads the rows from the mapping too, and warms the table into
+  the page cache after loading.
+- **The first layers' routed experts run on the host, from the same mapping.**
+  `--n-cpu-moe N` / `--cpu-moe` choose them on the GGML GPU backends (measured on
+  `ggml_metal` and `ggml_cuda`). On `ggml_metal` with neither set, the engine plans the
+  split itself: it keeps whole layers' experts on the GPU while they fit both the Metal
+  working set and the RAM that the host layers need as page cache, and offloads the rest.
+  On an M5 Pro with 48 GB (51.5 GB of RAM, a 40.2 GB Metal working set):
+
+  ```
+  [moe-offload] qwen4exp (planned): routed experts of 33 of 48 layers run on the host from the GGUF mapping (31.7 GB read on demand); the accelerator holds 15 layers' (14.4 GB). Metal working set 40.2 GB, RAM 51.5 GB; --n-cpu-moe N overrides.
+  ```
+
+  Past a point, wiring more layers does not make it faster: a wired layer holds all 512
+  experts, used or not, and takes page cache from the layers that read theirs from the SSD.
+- **Decode** runs each host layer's ten experts on TensorSharp's own kernel: ggml's CPU
+  dot products on a thread team that is woken once per layer and parked when the layer is
+  done. A spinning team slowed the GPU's work between layers 1.5-2x on Apple silicon, so
+  the team sleeps. `TS_HOST_MOE_DECODE=0` restores the ggml graph path.
+- **Prefill** of 128 tokens or more (`TS_HOST_MOE_DEVICE_MIN_BATCH`) streams each host
+  layer's used experts to the GPU per chunk. Their pages are faulted in on 16 threads
+  first: on the M5 Pro that took a 1,818-token prefill from 37.2-38.0 s to 15.7-16.6 s and
+  left decode unchanged.
+- **`--backend mlx` is refused up front**: MLX has no kernels for the sparse-attention
+  indexer, the hyper-connections, the n-gram table or the IQ2_XS/IQ3_XXS experts. Use
+  `ggml_metal`.
+
+Measured on that Mac (ggml `353b63b`, unmodified) against llama.cpp `a868c3e3` on the same
+machine. llama.cpp's default full offload fails there (`Insufficient Memory
+(kIOGPUCommandBufferCallbackErrorOutOfMemory)`); its best configuration was CPU only with
+12 threads, with its lazy mode reading the n-gram table on demand.
+
+| Real text: a 1,818-token prompt, 256 greedy tokens | prefill tok/s | decode tok/s |
+| --- | --- | --- |
+| TensorSharp `ggml_metal`, the planned split | 109.4-115.5 | 12.8-12.9 |
+| llama.cpp `-ngl 0 -t 12` | 20.4-22.4 | 13.00-13.24 |
+| llama.cpp `-ngl 0 -t 12 --no-op-offload` | 28.8-31.6 | 11.94-12.48 |
+
+| llama-bench's method: random tokens, pp512 / tg128, one session | prefill tok/s | decode tok/s |
+| --- | --- | --- |
+| TensorSharp `ggml_metal`, the planned split (15 layers' experts on the GPU) | 147.6 | 21.1 |
+| TensorSharp `ggml_metal`, `--n-cpu-moe 32` (16 on the GPU) | 153.4 | 21.2 |
+| TensorSharp `ggml_metal`, `--n-cpu-moe 30` (18) | 183.9 | 20.6 |
+| TensorSharp `ggml_metal`, `--n-cpu-moe 28` (20) | 171.9 | 20.3 |
+| TensorSharp `ggml_metal`, `--n-cpu-moe 26` (22) | 80.7 | 19.0 |
+| llama.cpp CPU only, `-t 12 -nopo 1` | 50.07 | 22.55 |
+
+Decode is flat from 15 to 16 layers on the GPU (21.1-21.2) and slower with each layer past
+16, and at 22 the page cache left for the host layers is too small and prefill collapses. Runs from earlier
+the same day, not side by side with the rest: the planned split 137.3 / 19.2 and llama.cpp
+48.43 / 22.26 (an hour and a half apart), `--cpu-moe` (no expert on the GPU) 142.3 / 17.5,
+`ggml_cpu` with 18 threads 46.1 / 16.6, and llama.cpp's `-ngl 28 -t 12` 36.64 / 20.06.
+
+TensorSharp prefills real text 3.5-5x faster and random tokens about 3x faster. Decode is
+on par on real text and 6% behind on random tokens (21.1 against 22.55). On Metal, decode
+is bound by ggml-metal's cost per dispatch (about 4,200 dispatches a token, 29.4 ms when
+the whole token is a single graph) plus about 0.19 ms for each host seam. Real text also pays page faults for experts that are not in the page
+cache, so it depends on what else the Mac is doing: the same run decoded at
+10.3-11.3 tok/s while other work kept 5 GB compressed. TensorAgent offers this file on
+48 GB Macs ([measured in the app](../../TensorAgent/README.md#the-macs-own-models)).
+
+On CUDA, `--n-cpu-moe` serves the same purpose on a GPU too small for the file. On one
+A40 (46 GB) with 12 layers' experts on the host, `ggml_cuda` measured 600 / 30.2 tok/s
+(random tokens, pp512 / tg128) against llama-bench's 466.14 / 18.84 with `-ncmoe 12`.
+
+The direct `cuda` engine runs UD-Q2_K_XL's IQ2_XS and IQ3_XXS experts: per-token kernels
+ported from ggml's dot products for decode, which still runs as a captured CUDA graph, and
+the same two layouts decoded into its tensor-core and register-staged grouped kernels for
+prefill. Before the grouped kernels took them, its prefill of this file ran on the slowest
+fallback at about 500 tok/s. The engine has no host-expert seam, so `--n-cpu-moe` there
+prints a warning and keeps the experts on the GPU. `--tp N` refuses this quant with exit
+code 2, because `ggml_cuda`'s TP FFN path takes only the types listed under
+[Multi-GPU](#multi-gpu); use `--layer-split N`.
+
+Both A40s, warm, the same 1,818-token prompt and 256 greedy tokens. TensorSharp ran as
+`TensorSharp.Server.Host` with `--no-multi-agent --no-skills`, three requests per process,
+each with its own first line so that none reused another's prefix; llama-server answered two
+requests with `cache_prompt` off.
+
+| 2x A40, `--layer-split 2` (llama.cpp `-ngl 99`) | prefill tok/s | decode tok/s |
+| --- | --- | --- |
+| TensorSharp `cuda` | 1,612-1,613 | 56.85-56.93 |
+| TensorSharp `ggml_cuda` | 1,174-1,217 | 52.9-53.1 |
+| llama.cpp | 752-963 | 59.04-59.86 |
+
+The direct engine's first request after a fresh kernel build ran its prefill at 335 tok/s
+while the driver compiled the PTX; the driver caches the result. On random tokens
+(pp512 / tg128) the direct engine measured 1,222.0 / 61.0 and `ggml_cuda` 410.9 / 43.2, where
+llama-bench's two-GPU run gave 210.74 / 41.99, far below its own server's numbers on the same
+machine, so the real-text table is the comparison to go by. There, TensorSharp prefills
+1.2-2.1x faster and decodes at 88-90% (`ggml_cuda`) and 95-96% (`cuda`) of llama.cpp's speed.
+
 ## Multi-GPU
 
 `--tp N` on `ggml_cuda` partitions every routed and shared FFN across N local GPUs. Every rank

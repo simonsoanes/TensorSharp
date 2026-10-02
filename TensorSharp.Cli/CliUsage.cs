@@ -551,6 +551,11 @@ namespace TensorSharp.Cli
                     "Feed a predetermined decode-token stream and time inference without host greedy sampling, " +
                     "for llama-bench-style comparison. An untimed greedy correctness chain is still reported. Default: off.",
                     "--benchmark --bench-fixed-tokens"),
+                new OptionHelp("--bench-random-tokens",
+                    "Like --bench-fixed-tokens, but the prompt and decode ids are drawn uniformly from the whole " +
+                    "vocabulary, new ones every run (seeded), as llama-bench draws them. Use it for models whose " +
+                    "per-token tables or experts are read from disk, which a repeating prompt keeps cached. Default: off.",
+                    "--benchmark --bench-random-tokens"),
                 new OptionHelp("--test",
                     "Run the built-in generation smoke-test prompts against the loaded model. Default: off.",
                     "--test"),

@@ -16,7 +16,7 @@ namespace InferenceWeb.Tests;
 /// </summary>
 internal static class SyntheticGguf
 {
-    public enum GgmlType { F32 = 0, F16 = 1, Q8_0 = 8, Q6_K = 14, IQ4_NL = 20, IQ3_S = 21, IQ4_XS = 23, BF16 = 30 }
+    public enum GgmlType { F32 = 0, F16 = 1, Q8_0 = 8, Q6_K = 14, IQ2_XS = 17, IQ3_XXS = 18, IQ4_NL = 20, IQ3_S = 21, IQ4_XS = 23, BF16 = 30 }
 
     private const int Q8Block = 32;
     private const int Q8BlockBytes = 2 + Q8Block;   // f16 scale + 32 int8
@@ -30,6 +30,8 @@ internal static class SyntheticGguf
         GgmlType.Q6_K => (256, 210),     // ql[128], qh[64], int8 scales[16], f16 d
         GgmlType.IQ3_S => (256, 110),    // f16 d, qs[64], qh[8], signs[32], scales[4]
         GgmlType.IQ4_XS => (256, 136),   // f16 d, u16 scales_h, scales_l[4], qs[128]
+        GgmlType.IQ2_XS => (256, 74),    // f16 d, qs[32] u16 (9-bit grid + 7-bit signs), scales[8]
+        GgmlType.IQ3_XXS => (256, 98),   // f16 d, qs[64] grid bytes, 8 u32 of signs + scale
         _ => (1, 0),
     };
 
@@ -140,6 +142,8 @@ internal static class SyntheticGguf
             GgmlType.IQ4_XS => 64f * 16f,    // times a 6-bit sub-scale minus 32
             GgmlType.IQ3_S => 16f * 7f,      // (1 + 2 * 4-bit scale) times grid values up to 15
             GgmlType.Q6_K => 64f * 16f,      // int8 scale times a 6-bit code minus 32
+            GgmlType.IQ2_XS => 25f * 2f,     // grid values 8/25/43 times (0.5 + 4-bit scale) / 4
+            GgmlType.IQ3_XXS => 28f * 4f,    // grid values 4..62 times (0.5 + 4-bit scale) / 2
             _ => 1f,
         };
         for (long b = 0; b < blocks; b++)

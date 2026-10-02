@@ -48,6 +48,7 @@ namespace TensorSharp.Cuda
         private readonly IntPtr moeMma;
         private readonly IntPtr moeGateUpDecode;
         private readonly IntPtr moeDownDecode;
+        private readonly IntPtr denseQ81Rows;
         private readonly IntPtr moeScatterAdd;
         private readonly IntPtr hcMean, hcMixPartials, hcPreFinish;
         private readonly IntPtr dsparkPrep;
@@ -119,6 +120,7 @@ namespace TensorSharp.Cuda
             moeMma = module.GetFunction("ts_dsv4_moe_mma_f32");
             moeGateUpDecode = module.GetFunction("ts_dsv4_moe_gateup_decode_f32");
             moeDownDecode = module.GetFunction("ts_dsv4_moe_down_decode_f32");
+            denseQ81Rows = module.GetFunction("ts_dsv4_dense_q81_rows_f32");
             moeScatterAdd = module.GetFunction("ts_dsv4_moe_scatter_add_f32");
             hcMean = module.GetFunction("ts_dsv4_hc_mean_f32");
             hcMixPartials = module.GetFunction("ts_dsv4_hc_mix_partials_f32");
@@ -541,6 +543,22 @@ namespace TensorSharp.Cuda
             int a4 = wtype, a5 = e, a6 = ff; long a7 = rowBytes;
             void** args = stackalloc void*[] { &a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7 };
             Launch(moeDownDecode, (uint)slots, CeilDiv(e, 32), 1, BlockSize, 0, stream, args);
+        }
+
+        /// <summary>Whether <see cref="DenseQ81Rows"/> decodes this weight layout at this input width:
+        /// the formats the warp-per-row dot handles, at widths of whole 256-value super-blocks.</summary>
+        public static bool DenseQ81RowsSupports(int wtype, int inDim)
+            => inDim > 0 && inDim % 256 == 0 && wtype is 8 or 10 or 11 or 12 or 13 or 14 or 16 or 17 or 18 or 20 or 21 or 23 or 39;
+
+        /// <summary>out[rows, outDim] = act[rows, inDim] x w^T for an input already quantized to q8_1,
+        /// one warp per output row. Reads only the buffers passed, so it can be captured.</summary>
+        public void DenseQ81Rows(IntPtr w, IntPtr act, IntPtr output, int wtype, int outDim, int inDim, long rowBytes,
+            int rows, IntPtr stream)
+        {
+            IntPtr a0 = w, a1 = act, a2 = output;
+            int a3 = wtype, a4 = outDim, a5 = inDim; long a6 = rowBytes;
+            void** args = stackalloc void*[] { &a0, &a1, &a2, &a3, &a4, &a5, &a6 };
+            Launch(denseQ81Rows, CeilDiv(outDim, 32), (uint)rows, 1, BlockSize, 0, stream, args);
         }
 
         public void MoeScatterAdd(Tensor downOut, Tensor rowOfSlot, Tensor wSel, Tensor shexp, Tensor ffnOut,

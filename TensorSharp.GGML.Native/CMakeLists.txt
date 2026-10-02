@@ -301,6 +301,7 @@ set(TSG_GGMLOPS_SOURCES
     ggml_ops_qwen35_gdn_tp.cpp
     ggml_ops_mamba2.cpp
     ggml_ops_moe.cpp
+    ggml_ops_host_moe_decode.cpp
     ggml_ops_deepseek4.cpp
     ggml_ops_deepseek41_tp.cpp
     ggml_ops_deepseek41_vision.cpp

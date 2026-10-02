@@ -158,20 +158,42 @@ public sealed class ModelDownloadManager : IDisposable
     public ModelDownloadStatus Start(CatalogModel model, IReadOnlyCollection<CatalogFileRole>? optionalRoles = null)
     {
         ArgumentNullException.ThrowIfNull(model);
+        return StartJob(model.Id, optionalRoles,
+            (progress, ct, roles) => _store.DownloadAsync(model, progress, ct, roles));
+    }
+
+    /// <summary>
+    /// Start a download that is not a catalog model's (a LoRA plug-in's files, see
+    /// <see cref="LoraStore"/>) under <paramref name="key"/>, or return the running job's
+    /// status: the same lifetime, cancellation and progress as a model's, so it outlives the
+    /// page that started it too. <see cref="ResumeInterrupted"/> leaves it alone (its key is
+    /// no catalog id); starting it again resumes it from its part files.
+    /// </summary>
+    public ModelDownloadStatus Start(string key, Func<IProgress<ModelDownloadProgress>, CancellationToken, Task> download)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(key);
+        ArgumentNullException.ThrowIfNull(download);
+        return StartJob(key, null, (progress, ct, _) => download(progress, ct));
+    }
+
+    private ModelDownloadStatus StartJob(
+        string key, IReadOnlyCollection<CatalogFileRole>? optionalRoles,
+        Func<IProgress<ModelDownloadProgress>, CancellationToken, IReadOnlyCollection<CatalogFileRole>?, Task> download)
+    {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         while (true)
         {
-            if (_jobs.TryGetValue(model.Id, out Job? existing))
+            if (_jobs.TryGetValue(key, out Job? existing))
             {
                 if (existing.Status.IsRunning)
                     return existing.Status;
-                if (!_jobs.TryRemove(new KeyValuePair<string, Job>(model.Id, existing)))
+                if (!_jobs.TryRemove(new KeyValuePair<string, Job>(key, existing)))
                     continue;   // somebody else replaced it; look again
             }
 
-            var job = new Job(model.Id, optionalRoles);
-            if (!_jobs.TryAdd(model.Id, job))
+            var job = new Job(key, optionalRoles);
+            if (!_jobs.TryAdd(key, job))
                 continue;
 
             // The increment's own result, not a second read of the field: the pair
@@ -181,7 +203,7 @@ public sealed class ModelDownloadManager : IDisposable
             if (Interlocked.Increment(ref _running) == 1)
                 BusyChanged?.Invoke(true);
 
-            job.Run(RunAsync(model, job.RequestedOptionalRoles, job));
+            job.Run(RunAsync(key, (progress, ct) => download(progress, ct, job.RequestedOptionalRoles), job));
             return job.Status;
         }
     }
@@ -276,7 +298,7 @@ public sealed class ModelDownloadManager : IDisposable
         }
     }
 
-    private async Task RunAsync(CatalogModel model, IReadOnlyCollection<CatalogFileRole>? optionalRoles, Job job)
+    private async Task RunAsync(string key, Func<IProgress<ModelDownloadProgress>, CancellationToken, Task> download, Job job)
     {
         // Yield first so Start() returns before any of this runs: the caller is a UI
         // thread, and DownloadAsync's first act is a synchronous directory scan.
@@ -284,19 +306,19 @@ public sealed class ModelDownloadManager : IDisposable
         var progress = new Progress<ModelDownloadProgress>(p => job.Report(p, Changed));
         try
         {
-            await _store.DownloadAsync(model, progress, job.Token, optionalRoles).ConfigureAwait(false);
+            await download(progress, job.Token).ConfigureAwait(false);
             job.Finish(DownloadState.Completed, null, Changed);
-            _log.LogInformation("download of {Model} finished", model.Id);
+            _log.LogInformation("download of {Model} finished", key);
         }
         catch (OperationCanceledException)
         {
             job.Finish(DownloadState.Cancelled, null, Changed);
-            _log.LogInformation("download of {Model} was cancelled; the part file is kept", model.Id);
+            _log.LogInformation("download of {Model} was cancelled; the part file is kept", key);
         }
         catch (Exception ex)
         {
             job.Finish(DownloadState.Failed, ex.Message, Changed);
-            _log.LogWarning(ex, "download of {Model} failed", model.Id);
+            _log.LogWarning(ex, "download of {Model} failed", key);
         }
         finally
         {

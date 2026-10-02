@@ -4,6 +4,48 @@ namespace TensorAgent.Tests;
 
 public sealed partial class WebUiPageTests
 {
+    [WebJavaScriptFact]
+    public void MaskedEditWaitsForTheChosenLorasBeforeSending()
+    {
+        JsonElement result = Run(MaskImageModel + TwoStyles + Held + """
+            R['/api/chat'] = { __sse: [
+              { image_step: 1, image_steps: 6, image_loras: ['Film Stills'], preview: 'data:image/png;base64,AAAA' },
+              { imageUrl: '/uploads/result.png' }, { done: true, sessionId: 's1' }
+            ] };
+            """, """
+            window.TensorAgent.addAttachment({ ok: true, file: 'source.png', mediaType: 'image', maskPath: 'mask.png' });
+            __page.byId['text'].value = 'make only the selected area blue';
+            return openLoras().then(function () {
+              hold('/api/agent/loras/choice');
+              var film = loraRow('film').querySelectorAll('INPUT')[0];
+              film.checked = true; film.dispatch('change');
+              __page.byId['sheet-bg'].dispatch('click');
+              __page.byId['send'].dispatch('click');
+              var early = __page.requests('/api/chat').length;
+              var draft = __page.byId['text'].value;
+              return settle(20).then(function () {
+                var pending = heldFor('/api/agent/loras/choice')[0];
+                pending.answer(loraRows(pending.call.body.loras));
+                return settle(20).then(function () {
+                  __page.byId['send'].dispatch('click');
+                  return settle(30).then(function () { return {
+                    early: early, draft: draft, sent: __page.requests('/api/chat'), progress: __page.progress(),
+                    media: __page.transcript().slice(-1)[0].media, errors: __page.errorNotices()
+                  }; });
+                });
+              });
+            });
+            """);
+        Assert.Equal(0, result.GetProperty("early").GetInt32());
+        Assert.Equal("make only the selected area blue", result.GetProperty("draft").GetString());
+        JsonElement message = Assert.Single(result.GetProperty("sent").EnumerateArray()).GetProperty("body").GetProperty("messages")[0];
+        Assert.Equal("mask.png", message.GetProperty("maskPath").GetString());
+        Assert.Equal(new[] { "source.png" }, Strings(message, "stillImagePaths"));
+        Assert.Contains("Drawing with Film Stills… step 1 of 6", Strings(result, "progress"));
+        Assert.Equal("/uploads/result.png", Assert.Single(result.GetProperty("media").EnumerateArray()).GetProperty("src").GetString());
+        Assert.Empty(Strings(result, "errors"));
+    }
+
     private const string MaskImageModel = """
         R['/api/models'] = { loaded: 'qwen-image.gguf', architecture: 'qwen_image', visionReady: true };
         R['/api/upload'] = { ok: true, file: 'selection.png', mediaType: 'image' };

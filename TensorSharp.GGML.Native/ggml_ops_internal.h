@@ -1031,12 +1031,26 @@ namespace tsg
     // extra host memory (the mmap's own pages are locked) and ~65 ms/GiB once.
     // Returns false when pinning is disabled, over budget, or unsupported, in
     // which case the caller simply gets the slower pageable copy.
+    //
+    // host_pin_split cuts [ptr, ptr + bytes) into (offset, length) pieces that
+    // each lie inside ONE registration, or in none. Expert stacks of one mmap
+    // share their boundary pages, so a stack pinned after its neighbour is
+    // registered as separate gap-filling pieces - and a cudaMemcpy* whose source
+    // spans two registrations fails with cudaErrorInvalidValue. Every copy out of
+    // a range that may be pinned goes through it.
 #if defined(TSG_GGML_USE_CUDA)
     bool host_pin_range(const void* ptr, std::size_t bytes);
+    void host_pin_split(const void* ptr, std::size_t bytes,
+                        std::vector<std::pair<std::size_t, std::size_t>>& pieces);
     std::size_t host_pinned_bytes();
     void host_pin_release_all();
 #else
     inline bool host_pin_range(const void*, std::size_t) { return false; }
+    inline void host_pin_split(const void*, std::size_t bytes,
+                               std::vector<std::pair<std::size_t, std::size_t>>& pieces)
+    {
+        pieces.assign(1, {std::size_t(0), bytes});
+    }
     inline std::size_t host_pinned_bytes() { return 0; }
     inline void host_pin_release_all() {}
 #endif
@@ -1203,12 +1217,16 @@ namespace tsg
         const char* kernel_name);
 
     // Execute `graph` as the alternating accelerator/host sequence described
-    // above. `seg_end` must come from host_moe_build_segment_ends.
+    // above. `seg_end` must come from host_moe_build_segment_ends. `backend`
+    // runs the accelerator segments; null means g_backend. A kernel that
+    // computes its graph on a wrapper backend (the qwen4exp span's precise
+    // CUDA backend) passes that one, so the slices see the same kernels.
     bool host_moe_execute_segments(
         ggml_cgraph* graph,
         const std::vector<HostMoeSegment>& segments,
         const std::vector<int>& seg_end,
-        const char* kernel_name);
+        const char* kernel_name,
+        ggml_backend_t backend = nullptr);
 
     // One seam, split so tensor parallelism can reuse it. `compute` downloads
     // the segment's inputs from the ACTIVE rank and leaves the expert result in
@@ -1227,6 +1245,16 @@ namespace tsg
     bool host_moe_compute_segment(const HostMoeSegment& hm, std::vector<float>& out, const char* kernel_name,
                                   HostMoeStagedInputs* staged = nullptr,
                                   bool allow_device_stream = true);
+
+    // One-token routed experts on the host (ggml_ops_host_moe_decode.cpp): ggml's
+    // CPU dot kernels on a team woken once per layer instead of a ggml graph per
+    // layer. Returns false, touching nothing, for a segment it does not cover
+    // (seq_len > 1, biases, fused gate_up, another activation, a type without
+    // CPU dot traits); the caller then keeps the graph path. TS_HOST_MOE_DECODE=0
+    // turns it off for A/B runs.
+    bool host_moe_decode_experts(const HostMoeSegment& hm, const float* x, const std::int32_t* ids,
+                                 const float* weights, float* out);
+    void host_moe_decode_release();
     void host_moe_upload_segment(const HostMoeSegment& hm, const float* data);
     void host_moe_zero_segment(const HostMoeSegment& hm);
 
@@ -1559,6 +1587,13 @@ struct TSGgmlQwen4ExpFfnArgs
     int hc_down_type, hc_up_type, hc_inject_type;
     int router_type, gate_exps_type, up_exps_type, down_exps_type;
     int sh_gate_type, sh_up_type, sh_down_type;
+
+    // Nonzero: this layer's routed experts run on the host, straight from the
+    // GGUF mapping (MoE CPU offload, --n-cpu-moe). The graph never binds the
+    // expert tensors, so they are never wrapped as accelerator buffers - on
+    // ggml-metal a wrapped weight is wired whole while a command buffer uses it.
+    // Only the token span supports it; every other builder refuses the layer.
+    int cpu_moe;
 };
 
 // Per-layer weights for the recurrent (Gated DeltaNet) half of a layer.
@@ -1791,11 +1826,15 @@ void q4e_drop_holder_graphs(const void* attn_base, const void* gdn_base, const v
 // the token span and the arena share them, so the graph a half builds has a
 // single source of truth.
 // ---------------------------------------------------------------------------
+// A layer with cpu_moe set appends its host-MoE seam to `host_moe` and expands
+// the seam's boundary tensors into `graph` before anything reads the host's
+// result; a builder that passes no plan gets an exception for such a layer.
 ggml_tensor* q4e_nodes_ffn(
     ggml_context* ctx, Q4eBinder& bnd,
     const TSGgmlQwen4ExpFfnArgs* a, ggml_tensor* res_in,
     int n_embd, int hc, int hc_low_rank, int T,
-    int n_expert, int n_expert_used, int n_ff, int n_ff_sh, float eps);
+    int n_expert, int n_expert_used, int n_ff, int n_ff_sh, float eps,
+    ggml_cgraph* graph = nullptr, std::vector<tsg::HostMoeSegment>* host_moe = nullptr, int layer = -1);
 
 ggml_tensor* q4e_nodes_gdn(
     ggml_context* ctx, Q4eBinder& bnd,

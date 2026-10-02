@@ -455,6 +455,7 @@ script gets that error instead of watching a setting be ignored.
 | `--bench-kv-turns <N>` | Number of conversation turns for `--bench-kvcache` (default: 4, max: 8) |
 | `--bench-chunked` | Run a chunked-prefill micro-benchmark (Gemma 4) |
 | `--bench-fixed-tokens` | Feed a predetermined decode-token stream and time inference without host greedy sampling, for llama-bench-style comparison. An untimed greedy correctness chain is still reported |
+| `--bench-random-tokens` | Like `--bench-fixed-tokens`, but the prompt and decode ids are drawn uniformly from the whole vocabulary, new ones every run (seeded), as llama-bench draws them. Use it for models whose per-token tables or experts are read from disk, which a repeating prompt keeps cached |
 | `--warmup-runs <N>` | Number of throw-away forward passes before timing real text / multimodal prompts (default: 0) |
 | `--test-chunked-prefill` | Run the chunked-prefill correctness check (compares chunked vs non-chunked logits) |
 | `--correct-prefill <N>` | Prompt length used by `--test-chunked-prefill` |
@@ -1728,13 +1729,44 @@ Notes:
   decode 64: `--n-cpu-moe 30` is 94.7 / 16.4 tok/s against 915.9 / 43.9 fully
   resident. Offload buys the fit here, not the speed — it frees enough VRAM to
   raise the sized context from 342,272 to 646,400 tokens.
+* **Qwen 3.8 Flash Next plans the offload itself on Apple silicon.** Its
+  UD-Q2_K_XL file is 78.9 GB: 46.1 GB of routed experts and a 28.8 GB n-gram
+  table. Unset, `ggml_metal` keeps whole layers' experts on the GPU while they
+  fit both the Metal working set and the RAM the offloaded layers need for their
+  page cache, offloads the first layers and logs the plan (`[moe-offload]
+  qwen4exp (planned): ...`); `--n-cpu-moe N` overrides it. Wiring more is not
+  faster past that point: a wired layer holds all 512 experts, used or not.
+  The n-gram table is never uploaded; a token's 16 rows are read on demand with
+  random-access advice, in parallel. Measured on an M5 Pro (48 GB) in one session,
+  random-token pp512 / tg128 against llama.cpp's best configuration on the same Mac
+  (CPU only, 12 threads, no op offload: 50.07 / 22.55 tok/s): 147.6 / 21.1 tok/s with
+  the planned split (15 layers' experts on the GPU), 153.4 / 21.2 with 16, and decode
+  slower with every layer past that (20.6 / 20.3 / 19.0 with 18 / 20 / 22). On real text (a 1,818-token prompt, 256 greedy
+  tokens) it prefills at 109.4-115.5 tok/s and decodes at 12.8-12.9, against
+  llama-server's 20.4-22.4 and 13.00-13.24 (28.8-31.6 and 11.94-12.48 with
+  `--no-op-offload`). See the
+  [model card](docs/models/qwen38-flash-next.md#larger-than-memory).
+* **One-token host experts run on TensorSharp's own kernel.** ggml's CPU dot
+  products, but on a team woken once per layer and parked as soon as the layer is
+  done, instead of a ggml graph whose workers wake at every call. A busy-waiting
+  team was faster still on the host and slowed the GPU segments between layers
+  1.5-2x on Apple silicon, so the team sleeps. `TS_HOST_MOE_DECODE=0` restores
+  the graph path.
+* **Streamed experts are faulted in on many threads first.** The copy that streams
+  a layer's experts reads its source on one thread; against an SSD-backed mapping
+  that was 0.7 GB/s on an M5 Pro, and 2.3 GB/s once the pages are faulted in
+  concurrently beforehand. A copy out of a page-locked range is split at the
+  registration boundaries the neighbouring stacks leave (one `cudaMemcpyAsync`
+  cannot span two), and unloading a model unregisters its locked ranges.
 * `TS_HOST_MOE_VERIFY=1` builds the on-GPU expert chain alongside the host one
   and reports their per-layer divergence — a diagnostic for validating the seam
   on a model that also fits in VRAM. `TS_HOST_MOE_DEBUG=1` prints the segment
   plan (the node cuts) and each seam's activation norms. `TS_HOST_MOE_TIMING=1`
   reports the offloaded side's wall clock split into per-call setup and host
   matmul, which is what tells you whether a slow run is the expert GEMM or the
-  scaffolding around it.
+  scaffolding around it; `=3` splits each decode pass into accelerator
+  segments, host experts and uploads, and `=4` times the one-token kernel's
+  phases and how late its workers wake.
 
 ## Tensor Parallelism & Distributed Inference
 

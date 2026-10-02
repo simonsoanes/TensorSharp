@@ -11,6 +11,7 @@
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using TensorSharp.Chat;
+using TensorSharp.Runtime;
 
 namespace TensorAgent.Core.Hosting;
 
@@ -55,13 +56,29 @@ public static class ImageTurns
     /// first frame; every unit test passed, because none of them ran the app's wiring.
     /// </para>
     /// </summary>
+    /// <param name="prepare">Asked before a picture is started, with whether it is an edit: the
+    /// LoRA plug-ins it is made with (see <see cref="Preparation"/>). Null for a host that chooses
+    /// none, whose pictures keep whatever set the model was loaded with.</param>
     public static IAsyncEnumerable<object> FramesFor(
-        WebUiChatService chat, JsonElement body, CancellationToken cancellationToken)
+        WebUiChatService chat, JsonElement body, CancellationToken cancellationToken,
+        Func<bool, Preparation>? prepare = null)
     {
         ArgumentNullException.ThrowIfNull(chat);
-        return chat.LoadedModelMakesImages ? StreamAsync(chat, body, cancellationToken)
+        return chat.LoadedModelMakesImages ? StreamAsync(chat, body, cancellationToken, prepare)
             : chat.LoadedModelMakesVideo ? VideoTurns.StreamAsync(chat, body, cancellationToken)
             : chat.ChatStreamAsync(body, cancellationToken);
+    }
+
+    /// <summary>
+    /// The LoRA plug-ins a picture is made with: the engine's specs, applied under the same lock
+    /// as the run, and their names (the page says what it is drawing with). Or why the picture
+    /// cannot be made as the user asked, which ends the turn with that message rather than with
+    /// a picture made without the plug-ins they turned on.
+    /// </summary>
+    public sealed record Preparation(string? Error, IReadOnlyList<LoraSpec> Specs, IReadOnlyList<string> Loras)
+    {
+        public static Preparation Ready(IReadOnlyList<LoraSpec> specs, IReadOnlyList<string> loras) => new(null, specs, loras);
+        public static Preparation Refused(string error) => new(error, Array.Empty<LoraSpec>(), Array.Empty<string>());
     }
 
     /// <summary>
@@ -70,8 +87,10 @@ public static class ImageTurns
     /// <param name="chat">The chat service, with an image model loaded.</param>
     /// <param name="body">The <c>/api/chat</c> request the page sent.</param>
     /// <param name="cancellationToken">Ends the turn; the picture is abandoned.</param>
+    /// <param name="prepare">See <see cref="FramesFor"/>.</param>
     public static async IAsyncEnumerable<object> StreamAsync(
-        WebUiChatService chat, JsonElement body, [EnumeratorCancellation] CancellationToken cancellationToken)
+        WebUiChatService chat, JsonElement body, [EnumeratorCancellation] CancellationToken cancellationToken,
+        Func<bool, Preparation>? prepare = null)
     {
         ArgumentNullException.ThrowIfNull(chat);
 
@@ -100,20 +119,33 @@ public static class ImageTurns
         if (!string.IsNullOrEmpty(sessionId))
             chat.OnChatRequest?.Invoke(sessionId, body);
 
+        Preparation? prepared = prepare?.Invoke(request.Editing);
+        if (prepared?.Error is { } refusal)
+        {
+            yield return new { done = true, error = refusal, sessionId };
+            yield break;
+        }
+
         using JsonDocument payload = JsonDocument.Parse(JsonSerializer.Serialize(request.Payload));
         JsonElement service = payload.RootElement.Clone();
-        IAsyncEnumerable<object> frames = request.Editing
-            ? chat.ImageEditStreamAsync(service, cancellationToken)
-            : chat.ImageGenerateStreamAsync(service, cancellationToken);
+        IAsyncEnumerable<object> frames = (request.Editing, prepared) switch
+        {
+            (true, null) => chat.ImageEditStreamAsync(service, cancellationToken),
+            (false, null) => chat.ImageGenerateStreamAsync(service, cancellationToken),
+            (true, _) => chat.ImageEditStreamAsync(service, prepared.Specs, cancellationToken),
+            (false, _) => chat.ImageGenerateStreamAsync(service, prepared.Specs, cancellationToken),
+        };
 
-        await foreach (object frame in Translate(frames, sessionId, cancellationToken).ConfigureAwait(false))
+        await foreach (object frame in Translate(frames, sessionId, cancellationToken, prepared?.Loras).ConfigureAwait(false))
             yield return frame;
     }
 
-    /// <summary>The image service's frames, as the chat stream's.</summary>
+    /// <summary>The image service's frames, as the chat stream's. A step frame names the LoRA
+    /// plug-ins in use (<c>image_loras</c>) when there are any.</summary>
     internal static async IAsyncEnumerable<object> Translate(
         IAsyncEnumerable<object> frames, string? sessionId,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        [EnumeratorCancellation] CancellationToken cancellationToken = default,
+        IReadOnlyList<string>? loras = null)
     {
         await foreach (object frame in frames.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
@@ -139,6 +171,17 @@ public static class ImageTurns
                 yield break;
             }
 
+            if (loras is { Count: > 0 })
+            {
+                yield return new
+                {
+                    image_step = Number(f, "step"),
+                    image_steps = Number(f, "total"),
+                    preview = Text(f, "image"),
+                    image_loras = loras,
+                };
+                continue;
+            }
             yield return new
             {
                 image_step = Number(f, "step"),

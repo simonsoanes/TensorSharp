@@ -16,6 +16,11 @@
     <EmbeddedResource Include="WebUi\tensoragent.js" />
     <EmbeddedResource Include="..\..\..\TensorSharp.Chat\WebUi\mask-editor.js" LogicalName="TensorAgent.Core.WebUi.mask-editor.js" />
     <EmbeddedResource Include="..\..\..\TensorSharp.Chat\WebUi\mask-editor.css" LogicalName="TensorAgent.Core.WebUi.mask-editor.css" />
+    <!-- The engine's own LoRA plug-in configs. A speed plug-in whose weights do not carry
+         their sampling schedule is handed its config with them (LoraCatalog.RecipeConfig,
+         LoraStore.SpecFor); embedding the repository's files keeps the app on the same
+         schedules the CLI and server use, and LoraCatalogTests keeps the catalog equal to them. -->
+    <EmbeddedResource Include="..\..\..\config\lora\*.json" LogicalName="lora/%(Filename)%(Extension)" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="TensorAgent.Tests" />

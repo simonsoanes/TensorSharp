@@ -355,7 +355,7 @@ public sealed class ModelStore
     }
 
     /// <summary>
-    /// Delete model directories no catalog entry claims, and say how much that freed.
+    /// Delete the model directories of retired catalog entries, and say how much that freed.
     ///
     /// <para>
     /// A directory is named by its entry's id, and an id changes whenever the entry
@@ -365,6 +365,14 @@ public sealed class ModelStore
     /// user cannot delete it: 4.6 GB of a superseded quantization, invisible,
     /// on a device where storage is the scarcest thing there is. This is the only place
     /// that can reclaim it.
+    /// </para>
+    /// <para>
+    /// Only an id the catalog RETIRED is reclaimed (<see cref="ModelCatalog.Retired"/>),
+    /// not every id this build does not know. An unknown id may be a NEWER build's entry:
+    /// on a Mac the Debug and Release builds share this directory, and a Release build
+    /// from the day before, sweeping everything its own catalog did not list, deleted the
+    /// installed models of the five entries the Debug build had just added. Such a
+    /// directory is kept, and said so; the build that knows it shows it again.
     /// </para>
     /// <para>
     /// Checked against the WHOLE catalog rather than what this device is offered
@@ -381,11 +389,13 @@ public sealed class ModelStore
     /// </para>
     /// </summary>
     /// <param name="catalog">The entries whose folders are kept; the store's catalog when null.</param>
+    /// <param name="retired">The ids whose folders are reclaimed; <see cref="ModelCatalog.Retired"/> when null.</param>
     /// <returns>Bytes freed.</returns>
-    public long SweepOrphanedModels(IReadOnlyList<CatalogModel>? catalog = null)
+    public long SweepOrphanedModels(IReadOnlyList<CatalogModel>? catalog = null, IReadOnlyCollection<string>? retired = null)
     {
         var known = new HashSet<string>(
             (catalog ?? _catalog).Select(m => m.Id), StringComparer.OrdinalIgnoreCase);
+        var reclaimable = new HashSet<string>(retired ?? ModelCatalog.Retired, StringComparer.OrdinalIgnoreCase);
 
         long freed = 0;
         IEnumerable<string> directories;
@@ -394,8 +404,16 @@ public sealed class ModelStore
 
         foreach (string directory in directories.ToList())
         {
-            if (known.Contains(Path.GetFileName(directory)))
+            string id = Path.GetFileName(directory);
+            if (known.Contains(id))
                 continue;
+            if (!reclaimable.Contains(id))
+            {
+                Console.WriteLine(
+                    $"TensorAgent: kept {id}: no entry of this build's catalog claims it and none was "
+                    + "retired under that name, so it is most likely a newer build's model");
+                continue;
+            }
             try
             {
                 long bytes = Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
@@ -403,7 +421,7 @@ public sealed class ModelStore
                 Directory.Delete(directory, recursive: true);
                 freed += bytes;
                 Console.WriteLine(
-                    $"TensorAgent: removed {Path.GetFileName(directory)}, which no catalog entry "
+                    $"TensorAgent: removed {id}, which no catalog entry "
                     + $"claims any more ({bytes / (1024.0 * 1024.0 * 1024.0):0.0} GB freed)");
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)

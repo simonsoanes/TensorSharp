@@ -326,6 +326,7 @@ namespace TensorSharp.Cli
             int benchmarkRuns = 1;
             bool benchmarkChunked = false;
             bool benchmarkFixedTokens = false;
+            bool benchmarkRandomTokens = false;
             bool runChunkedPrefillCorrectness = false;
             int correctnessPrefill = 1500;
             int correctnessDecode = 8;
@@ -476,6 +477,7 @@ namespace TensorSharp.Cli
                     case "--bench-runs": benchmarkRuns = int.Parse(args[++i]); break;
                     case "--bench-chunked": benchmarkChunked = true; break;
                     case "--bench-fixed-tokens": benchmarkFixedTokens = true; break;
+                    case "--bench-random-tokens": benchmarkRandomTokens = true; break;
                     case "--test-chunked-prefill": runChunkedPrefillCorrectness = true; break;
                     case "--correct-prefill": correctnessPrefill = int.Parse(args[++i]); break;
                     case "--correct-decode": correctnessDecode = int.Parse(args[++i]); break;
@@ -1039,7 +1041,7 @@ namespace TensorSharp.Cli
             {
                 RunBenchmark(
                     model, benchmarkPrefill, benchmarkDecode, benchmarkRuns,
-                    benchmarkChunked, benchmarkFixedTokens);
+                    benchmarkChunked, benchmarkFixedTokens, benchmarkRandomTokens);
                 return;
             }
 
@@ -2674,8 +2676,11 @@ namespace TensorSharp.Cli
             int decodeTokens,
             int runs,
             bool chunked = false,
-            bool fixedTokens = false)
+            bool fixedTokens = false,
+            bool randomTokens = false)
         {
+            // Random ids are a fixed-token stream too: decode never samples.
+            fixedTokens |= randomTokens;
             if (prefillTokens < 1)
                 throw new ArgumentOutOfRangeException(nameof(prefillTokens), "Benchmark prefill tokens must be at least 1.");
             // 0 is legal and means "prefill only" — the llama-bench `pp<N>` shape.
@@ -2687,7 +2692,7 @@ namespace TensorSharp.Cli
             if (runs < 1)
                 throw new ArgumentOutOfRangeException(nameof(runs), "Benchmark runs must be at least 1.");
 
-            string decodeMode = fixedTokens ? "fixed-inference" : "greedy-e2e";
+            string decodeMode = randomTokens ? "random-inference" : fixedTokens ? "fixed-inference" : "greedy-e2e";
             _log.LogInformation(LogEventIds.CliBenchmark,
                 "inference benchmark starting: prefillTokens={PrefillTokens} decodeTokens={DecodeTokens} runs={Runs} chunked={Chunked} decodeMode={DecodeMode}",
                 prefillTokens, decodeTokens, runs, chunked, decodeMode);
@@ -2712,6 +2717,13 @@ namespace TensorSharp.Cli
                 for (int i = 0; i < decodeTokens; i++)
                     fixedDecodeIds[i] = basisToken + ((prefillTokens + i) % syntheticSpan);
             }
+
+            // --bench-random-tokens: llama-bench's own method, uniform ids over the
+            // whole vocabulary, new ones every run. A model that reads per-token
+            // tables (n-gram embeddings, routed experts paged in from the SSD) is
+            // then measured on rows it has not already cached, which the 17-id
+            // cycle above never exercises. Seeded, so a rerun replays the same ids.
+            Random randomIds = randomTokens ? new Random(20261001) : null;
 
             double bestPrefillMs = double.PositiveInfinity;
             double bestDecodeMs = double.PositiveInfinity;
@@ -2739,6 +2751,13 @@ namespace TensorSharp.Cli
             for (int run = 0; run < runs; run++)
             {
                 model.ResetKVCache();
+                if (randomIds != null)
+                {
+                    for (int i = 0; i < prefillIds.Length; i++)
+                        prefillIds[i] = randomIds.Next(vocab);
+                    for (int i = 0; i < fixedDecodeIds.Length; i++)
+                        fixedDecodeIds[i] = randomIds.Next(vocab);
+                }
 
                 // Prefill timing - choose path based on chunked flag.
                 // Forward(): single non-chunked pass, used by --benchmark default.
@@ -2937,22 +2956,31 @@ namespace TensorSharp.Cli
             int vocab,
             bool usePipelinedGreedy)
         {
+            // --bench-decode 0 (the llama-bench pp<N> shape): nothing to sample. The pipelined
+            // branch below would submit a step and then write sampledTokens[-1].
+            if (decodeTokens <= 0)
+                return Array.Empty<int>();
             int[] sampledTokens = new int[decodeTokens];
             if (usePipelinedGreedy)
             {
                 Tensor pending = model.SubmitGreedyDecodeStep(firstToken);
-                int step = 1;
-                for (; step < decodeTokens; step++)
+                try
                 {
-                    Tensor nextDevice = model.SubmitGreedyDecodeStep(null);
-                    sampledTokens[step - 1] = pending.GetElementsAsInt(1)[0];
-                    pending.Dispose();
-                    pending = nextDevice;
-                }
+                    for (int step = 1; step < decodeTokens; step++)
+                    {
+                        Tensor nextDevice = model.SubmitGreedyDecodeStep(null);
+                        sampledTokens[step - 1] = pending.GetElementsAsInt(1)[0];
+                        pending.Dispose();
+                        pending = nextDevice;
+                    }
 
-                sampledTokens[decodeTokens - 1] = pending.GetElementsAsInt(1)[0];
-                pending.Dispose();
-                model.ResetPipelinedGreedyState();
+                    sampledTokens[decodeTokens - 1] = pending.GetElementsAsInt(1)[0];
+                }
+                finally
+                {
+                    pending.Dispose();
+                    model.ResetPipelinedGreedyState();
+                }
                 return sampledTokens;
             }
 

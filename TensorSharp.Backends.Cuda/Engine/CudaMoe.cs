@@ -66,20 +66,28 @@ namespace TensorSharp.Cuda
     {
         // ggml type ids of the expert weights the kernels take.
         private const int TQ8_0 = 8, TQ2_K = 10, TQ3_K = 11, TQ4_K = 12, TQ5_K = 13, TQ6_K = 14,
-            TIQ2_XXS = 16, TIQ4_NL = 20, TIQ3_S = 21, TIQ4_XS = 23, TMXFP4 = 39;
+            TIQ2_XXS = 16, TIQ2_XS = 17, TIQ3_XXS = 18, TIQ4_NL = 20, TIQ3_S = 21, TIQ4_XS = 23, TMXFP4 = 39;
+
+        /// <summary>Layouts only the warp-per-row kernels decode (the per-token decode kernels and
+        /// the grouped warp kernels a long ubatch falls back to): IQ2_XXS, the DSpark drafter's.</summary>
+        private static bool RowKernelOnlyType(int type) => type == TIQ2_XXS;
 
         /// <summary>The layouts the grouped expert kernels (tensor-core and register-staged)
-        /// decode; IQ2_XXS (the DSpark drafter's) only has the per-token kernels.</summary>
+        /// decode; see <see cref="RowKernelOnlyType"/> for the rest. IQ2_XS and IQ3_XXS are
+        /// Qwen3.8-Flash-Next UD-Q2_K_XL's gate/up experts: on the warp-per-row fallback its
+        /// 1,823-token prefill ran at 500 tok/s on two A40s, against ggml-cuda's 1,174-1,217 and
+        /// 1,612 once these kernels took the two layouts.</summary>
         public static bool GroupedSupportsType(int type)
             => type == TIQ3_S || type == TMXFP4 || type == TQ8_0 || type == TQ6_K || type == TQ5_K || type == TQ4_K
-                || type == TQ3_K || type == TQ2_K || type == TIQ4_NL || type == TIQ4_XS;
+                || type == TQ3_K || type == TQ2_K || type == TIQ4_NL || type == TIQ4_XS
+                || type == TIQ2_XS || type == TIQ3_XXS;
 
         public static void RequireExpertType(string tag, int type)
         {
-            if (!GroupedSupportsType(type) && type != TIQ2_XXS)
+            if (!GroupedSupportsType(type) && !RowKernelOnlyType(type))
             {
                 throw new NotSupportedException(
-                    $"[{tag}] unsupported expert quant type {type} (supported: Q8_0, Q6_K, Q5_K, Q4_K, Q3_K, Q2_K, IQ4_XS, IQ4_NL, IQ3_S, IQ2_XXS, MXFP4)");
+                    $"[{tag}] unsupported expert quant type {type} (supported: Q8_0, Q6_K, Q5_K, Q4_K, Q3_K, Q2_K, IQ4_XS, IQ4_NL, IQ3_S, IQ3_XXS, IQ2_XS, IQ2_XXS, MXFP4)");
             }
         }
 

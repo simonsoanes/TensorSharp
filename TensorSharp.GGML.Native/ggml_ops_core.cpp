@@ -3130,6 +3130,14 @@ TSG_EXPORT void TSGgml_ClearHostBufferCache()
     tsg_cudnn_conv2d_release();
 #endif
     forget_cache_keys();
+    // Host-MoE streaming page-locks the expert stacks it streams (cudaHostRegister
+    // on the GGUF mapping, or on a private copy of it). Like everything else here
+    // the release is process-wide. Left registered, a model's ranges outlive its
+    // unload: the driver keeps them for addresses a later mapping reuses, and the
+    // next copy from there fails with cudaErrorInvalidValue (a second model in one
+    // test process did exactly that). A model still loaded locks its ranges again
+    // at its next streamed prefill.
+    tsg::host_pin_release_all();
 
     // Every rank owns its own device copies; clear all of them.
     for (int r = 0; r < tsg::g_device_count.load(std::memory_order_acquire); ++r)

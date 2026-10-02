@@ -153,9 +153,10 @@ public sealed class SharedFileLinkTests : IDisposable
         Assert.Equal(InstallState.Installed, store.StateOf(pair.A));
         Assert.Equal(InstallState.Installed, store.StateOf(pair.B));
 
-        // A leaves the catalog -- as an entry's id does when it is re-pointed at another
-        // file -- and its folder goes, but B's name for the file it linked from A stays.
-        store.SweepOrphanedModels(new[] { pair.B });
+        // A leaves the catalog for the retired list -- as an entry's id does when it is
+        // re-pointed at another file -- and its folder goes, but B's name for the file it
+        // linked from A stays.
+        store.SweepOrphanedModels(new[] { pair.B }, retired: new[] { pair.A.Id });
 
         Assert.False(Directory.Exists(store.DirectoryFor(pair.A)));
         Assert.Equal(InstallState.Installed, store.StateOf(pair.B));

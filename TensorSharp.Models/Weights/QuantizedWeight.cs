@@ -353,7 +353,49 @@ namespace TensorSharp.Models
             }
         }
 
+        /// <summary>True when this weight's bytes are read from the GGUF file mapping,
+        /// so a page not yet in the page cache is read from disk on first touch.</summary>
+        public bool IsFileBacked => !_ownsBuffer && ViewIsFileBacked;
+
+        /// <summary>
+        /// Tell the kernel this file-mapped view is read at random: a row here, a row
+        /// there, never a run. Without it a page fault also reads ahead a cluster of
+        /// neighbouring pages, and on a table larger than RAM that read-ahead costs SSD
+        /// bandwidth and evicts pages something else still needs. llama.cpp gives the
+        /// tables it reads lazily the same advice (POSIX_MADV_RANDOM in llama-mmap.cpp).
+        /// Returns false when the view is not file-backed, the platform has no
+        /// madvise, or the call fails.
+        /// </summary>
+        public unsafe bool AdviseRandomAccess()
+        {
+            if (!IsFileBacked || Data == IntPtr.Zero || RawBytes <= 0)
+                return false;
+            if (!OperatingSystem.IsMacOS() && !OperatingSystem.IsLinux()
+                && !OperatingSystem.IsIOS() && !OperatingSystem.IsMacCatalyst())
+                return false;
+
+            long pageSize = Environment.SystemPageSize;
+            long address = Data.ToInt64();
+            long alignedAddress = address & ~(pageSize - 1);
+            ulong length = checked((ulong)(RawBytes + (address - alignedAddress)));
+            ulong roundedLength = (length + (ulong)pageSize - 1) & ~((ulong)pageSize - 1);
+            try
+            {
+                return madvise((void*)alignedAddress, (nuint)roundedLength, MadvRandom) == 0;
+            }
+            catch (DllNotFoundException)
+            {
+                return false;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                return false;
+            }
+        }
+
         private const int MadvDontNeed = 4;
+        // MADV_RANDOM is 1 on Darwin and Linux alike.
+        private const int MadvRandom = 1;
 
         [LibraryImport("libc", EntryPoint = "madvise", SetLastError = true)]
         private static unsafe partial int madvise(void* addr, nuint len, int advice);

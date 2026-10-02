@@ -85,7 +85,7 @@ public sealed class EngineMemoryPolicyTests : IDisposable
     [Fact]
     public void AnEntryThatAsksForLeanCachesKeepsThePhonesBudgetOnTheDesktop()
     {
-        foreach (string id in new[] { "qwen3.8-27b-q4kxl", "muse-glimmer-30b-q4kxl" })
+        foreach (string id in new[] { "qwen3.8-27b-q4kxl", "muse-glimmer-30b-q4kxl", "qwen3.8-flash-next-q2kxl" })
         {
             CatalogModel model = Entry(id);
             Assert.True(model.LeanCaches);
@@ -102,7 +102,7 @@ public sealed class EngineMemoryPolicyTests : IDisposable
         EngineMemoryPolicy.Apply(Entry("qwen3.5-9b-iq4xs"), AppSettings.DesktopDefaults(), DeviceClass.Desktop);
         Assert.Null(Environment.GetEnvironmentVariable(EngineMemoryPolicy.KvInitialTokensVariable));
         Assert.Null(Environment.GetEnvironmentVariable(EngineMemoryPolicy.RetainedFusedCacheMaxVariable));
-        Assert.Equal(new[] { "muse-glimmer-30b-q4kxl", "qwen3.8-27b-q4kxl" },
+        Assert.Equal(new[] { "muse-glimmer-30b-q4kxl", "qwen3.8-27b-q4kxl", "qwen3.8-flash-next-q2kxl" },
             ModelCatalog.BuiltIn.Where(m => m.LeanCaches).Select(m => m.Id).OrderBy(id => id));
     }
 

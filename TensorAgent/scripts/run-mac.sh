@@ -14,6 +14,9 @@
 #                             page has loaded
 #   TENSORAGENT_SPEC_BENCH=1  any build: run the in-process decode benchmark after the
 #                             model loads (with TENSORAGENT_USE_MODEL); results in the log
+#   TENSORAGENT_IMAGE_BENCH=1 any build: make pictures with the image model and the LoRA
+#                             plug-ins turned on, timed (TENSORAGENT_IMAGE_BENCH_RUNS, 2;
+#                             TENSORAGENT_IMAGE_BENCH_PROMPT); results in the log
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
