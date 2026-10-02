@@ -47,8 +47,7 @@ public interface IPrefixPayloadSink
 /// <para>Threading: every member runs on the engine worker thread, between steps, except
 /// <see cref="RunImportRead"/> (a lane thread, M7c).</para>
 ///
-/// <para>Inert until attached: in <see cref="PrefixCacheMode.Legacy"/> and
-/// <see cref="PrefixCacheMode.Shadow"/> the engine calls nothing here but
+/// <para>Inert until attached: with prefix caching off the engine calls nothing here but
 /// <see cref="GetPrefixCacheCapabilities"/> (I26), and a model behaves exactly as it did
 /// before it implemented this interface until <see cref="AttachPrefixCache"/> is called.</para>
 /// </summary>
@@ -91,6 +90,14 @@ public interface IPrefixCacheModel
 
     /// <summary>Side-effect free. False means the payload is invalid for this target (P21).</summary>
     bool CanMaterialize(string payloadKey, int payloadTokens, int targetTokens);
+
+    /// <summary>Side-effect free. Whether the primary cache, holding <paramref name="cachedTokens"/>
+    /// tokens, can rewind to <paramref name="targetTokens"/>. The tree asks only for a primary it keeps
+    /// past the donation slack, where the family's declared rules cannot vouch for the depth (DeepSeek
+    /// V4.1 reaches it only from the checkpoint its slot took at the last prompt boundary). True by
+    /// default: the execution-time <c>TryTruncateKVCache</c> still decides, and a refusal there
+    /// re-prefills.</summary>
+    bool CanRewindPrimary(int cachedTokens, int targetTokens) => true;
 
     /// <summary>Batched and idempotent (unknown keys are ignored). Recycles into holder pools
     /// where possible and issues at most one decode-graph reset per call (DEC-24).</summary>

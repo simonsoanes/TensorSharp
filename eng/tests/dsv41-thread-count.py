@@ -22,7 +22,7 @@ def main():
         raise ValueError("This diagnostic accepts only synthetic fixtures")
     lib = ctypes.CDLL(str(args.library.resolve()))
     load = lib.TSGgml_Dsv4LoadModel
-    load.argtypes = [ctypes.c_char_p] + [ctypes.c_int] * 5 + [ctypes.c_char_p]
+    load.argtypes = [ctypes.c_char_p] + [ctypes.c_int] * 4 + [ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
     load.restype = ctypes.c_void_p
     free = lib.TSGgml_Dsv4Free
     free.argtypes, free.restype = [ctypes.c_void_p], None
@@ -30,7 +30,7 @@ def main():
     count.argtypes, count.restype = [ctypes.c_void_p], ctypes.c_int
     setter = lib.TSGgml_SetHostMoeThreads
     setter.argtypes, setter.restype = [ctypes.c_int], None
-    settings = {"TS_CPU_MOE_THREADS": None, "TS_DSV41_TP": "0",
+    settings = {"TS_CPU_MOE_THREADS": None,
                 "TS_DSV41_ENGRAM_THREADS": "1", "TS_DSV41_ENGRAM_WARM": "0"}
     originals = {key: os.environ.get(key) for key in settings}
     checks = []

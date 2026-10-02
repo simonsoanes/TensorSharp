@@ -21,7 +21,7 @@ namespace TensorSharp.Runtime.Scheduling.PrefixCache;
 ///
 /// <para>Implementing this interface changes nothing for a model's existing callers: every member
 /// is new, or reachable only through <see cref="IPrefixCacheModel"/>, which the engine calls only
-/// in <see cref="PrefixCacheMode.Tree"/>.</para>
+/// with prefix caching on.</para>
 /// </summary>
 public interface IHolderPrefixCacheModel : IPrefixCacheModel, IBatchedPagedModel, IModelArchitecture
 {

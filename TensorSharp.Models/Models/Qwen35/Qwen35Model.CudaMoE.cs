@@ -6,7 +6,7 @@ using TensorSharp.Cuda;
 namespace TensorSharp.Models
 {
     // On-device direct-CUDA MoE decode for the Qwen3.5/3.6 MoE architectures. The
-    // legacy MoEForward decode path routed the top-k on host (a DtoH sync of the
+    // host MoEForward decode path routed the top-k on host (a DtoH sync of the
     // router logits) and ran each selected expert as a separate matmul whose output
     // was read back to host for the weighted accumulate — 82% of decode time on
     // Qwen3.6-35B-A3B-IQ2_XXS was these per-expert host round-trips, and they also
@@ -20,20 +20,6 @@ namespace TensorSharp.Models
     // and the ts_moe_* / ts_silu_mul / ts_moe_shared_gated_add kernels.
     public partial class Qwen35Model
     {
-        private static readonly bool s_qwenCudaMoeOnDeviceEnabled =
-            Environment.GetEnvironmentVariable("TS_CUDA_MOE_ONDEVICE") != "0";
-
-        // On-device batched MoE for PREFILL is opt-in (TS_CUDA_MOE_PREFILL_ONDEVICE=1).
-        // It is numerically byte-identical to the host path and removes all per-expert
-        // host round-trips, but the current per-(token,expert) kernels re-read each
-        // expert weight once per routed token with no cross-token batched-GEMM reuse,
-        // so on this hardware it is SLOWER than the host expert-grouped batched-matmul
-        // path (measured ~0.58x on Qwen3.6-35B-A3B-IQ2_XXS, 512-token prefill). Kept
-        // off by default until a weight-reuse batched-GEMM prefill kernel lands; the
-        // decode path (the reported gap) uses the always-on single-token kernels.
-        private static readonly bool s_qwenCudaMoePrefillOnDevice =
-            Environment.GetEnvironmentVariable("TS_CUDA_MOE_PREFILL_ONDEVICE") == "1";
-
         private IntPtr[] _qwenMoEGatePtrTable;   // per layer: device u64[numExperts]
         private IntPtr[] _qwenMoEUpPtrTable;     // per layer: device u64[numExperts]
         private IntPtr[] _qwenMoEDownPtrTable;   // per layer: device u64[numExperts]
@@ -70,11 +56,6 @@ namespace TensorSharp.Models
             if (_backend != BackendType.Cuda || _numExperts <= 0
                 || _allocator is not CudaAllocator cudaAllocator)
                 return;
-            if (!s_qwenCudaMoeOnDeviceEnabled)
-            {
-                WarnQwenCudaMoEUnusable("disabled via TS_CUDA_MOE_ONDEVICE=0");
-                return;
-            }
             // Under TP the expert weights were moved into _tpQuantWeights and the
             // originals these arrays point at are already disposed. The per-rank
             // tables in Qwen35Model.TensorParallelMoE.cs serve that path instead
@@ -300,112 +281,6 @@ namespace TensorSharp.Models
         // CUDA gridDim.y / gridDim.z max; above this the batched prefill kernels
         // cannot launch, so fall back to the host prefill path for that (rare) chunk.
         private const int CudaMaxGridDim = 65535;
-
-        /// <summary>
-        /// Batched on-device MoE for a PREFILL chunk (seqLen == numTokens &gt; 1).
-        /// Mirrors <see cref="TryCudaMoEForwardOnDevice"/> but batched over tokens:
-        /// routing, gate/up, SwiGLU, down and the shared expert all run on device with
-        /// no per-expert host gather/scatter (the dominant cost of the old prefill
-        /// path). Returns the [numTokens, hiddenDim] output, or null to fall back.
-        /// </summary>
-        private Tensor TryCudaMoEForwardPrefillOnDevice(Tensor input, Tensor routerLogits, int layer, int seqLen)
-        {
-            if (seqLen <= 1 || seqLen > CudaMaxGridDim || !CanUseQwenCudaMoEOnDevice(layer))
-                return null;
-
-            int hiddenDim = Config.HiddenSize;
-            int nFf = _expertFfnLength;
-            int nUsed = _numExpertsUsed;
-            int gateUpType = _qwenMoEGateUpType[layer];
-            int downType = _qwenMoEDownType[layer];
-
-            long t0 = Stopwatch.GetTimestamp();
-
-            // Shared expert over ALL tokens (batched dense matmuls) + on-device gate.
-            Tensor sharedDown = null;
-            IntPtr sharedGateVecPtr = IntPtr.Zero;
-            if (_hasSharedExperts != null && layer < _hasSharedExperts.Length && _hasSharedExperts[layer])
-            {
-                Tensor sg = LinearForwardCached(input, _ffnGateShexpQW[layer], _ffnGateShexpF32[layer]);
-                Tensor su = LinearForwardCached(input, _ffnUpShexpQW[layer], _ffnUpShexpF32[layer]);
-                if (sg != null && su != null)
-                {
-                    Ops.SiLUMul(sg, sg, su);
-                    sharedDown = LinearForwardCached(sg, _ffnDownShexpQW[layer], _ffnDownShexpF32[layer]);
-                }
-                su?.Dispose();
-                sg?.Dispose();
-
-                bool sharedGateRequired = sharedDown != null
-                    && _hasSharedExpertGate != null
-                    && layer < _hasSharedExpertGate.Length
-                    && _hasSharedExpertGate[layer];
-                if (sharedGateRequired)
-                {
-                    Tensor sharedGateVec = _ffnGateInpShexpVec != null
-                        && layer < _ffnGateInpShexpVec.Length
-                        ? _ffnGateInpShexpVec[layer]
-                        : null;
-                    if (sharedGateVec != null && sharedGateVec.ElementCount() >= hiddenDim)
-                    {
-                        sharedGateVecPtr = CudaFusedOps.GetDeviceResidentPtr(sharedGateVec);
-                        if (sharedGateVecPtr == IntPtr.Zero)
-                        {
-                            sharedDown.Dispose();
-                            return null;
-                        }
-                    }
-                    else
-                    {
-                        sharedDown.Dispose();
-                        return null;
-                    }
-                }
-            }
-
-            var output = new Tensor(_allocator, DType.Float32, seqLen, hiddenDim);
-            var selected = new Tensor(_allocator, DType.Int32, (long)seqLen * nUsed);
-            var routeW = new Tensor(_allocator, DType.Float32, (long)seqLen * nUsed);
-            var gateOut = new Tensor(_allocator, DType.Float32, (long)seqLen * nUsed, nFf);
-            var upOut = new Tensor(_allocator, DType.Float32, (long)seqLen * nUsed, nFf);
-
-            bool gateUpDp4a = CudaQuantizedOps.IsMoeDp4aEnabledForType(gateUpType)
-                && IsMoeDp4aDimensionSupported(gateUpType, hiddenDim);
-            bool downDp4a = CudaQuantizedOps.IsMoeDp4aEnabledForType(downType)
-                && IsMoeDp4aDimensionSupported(downType, nFf);
-            Tensor moeInputQ8 = null, gateOutQ8 = null;
-            if (gateUpDp4a)
-                moeInputQ8 = new Tensor(_allocator, DType.UInt8, (long)seqLen * (hiddenDim / 32) * CudaFusedOps.Q81BlockBytes);
-            if (downDp4a)
-                gateOutQ8 = new Tensor(_allocator, DType.UInt8, (long)seqLen * nUsed * (nFf / 32) * CudaFusedOps.Q81BlockBytes);
-
-            bool ok = CudaFusedOps.TryMoEExpertFFNPrefillSwiGLU(
-                routerLogits, input, output, selected, routeW, gateOut, upOut,
-                IntPtr.Zero,
-                _qwenMoEGatePtrTable[layer], _qwenMoEUpPtrTable[layer], _qwenMoEDownPtrTable[layer],
-                gateUpType, downType, _numExperts, nUsed, hiddenDim, nFf, seqLen,
-                sharedDown, sharedGateVecPtr,
-                moeInputQ8, gateOutQ8, gateUpDp4a, downDp4a);
-
-            gateOutQ8?.Dispose();
-            moeInputQ8?.Dispose();
-            upOut.Dispose();
-            gateOut.Dispose();
-            routeW.Dispose();
-            selected.Dispose();
-            sharedDown?.Dispose();
-
-            if (!ok)
-            {
-                output.Dispose();
-                return null;
-            }
-
-            routerLogits.Dispose();
-            _linearTicks += Stopwatch.GetTimestamp() - t0;
-            InvalidateTensorDeviceCache(output);
-            return output;
-        }
 
         private static bool IsMoeDp4aDimensionSupported(int type, int inDim)
             => inDim > 0 && (type == 2

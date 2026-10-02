@@ -1,13 +1,13 @@
 // Copyright (c) Zhongkai Fu. All rights reserved.
 // Licensed under the BSD-3-Clause license in the repository root.
 //
-// DeepSeek V4 / V4.1's radix prefix cache: donate-only native slots. Native
-// reuse checks and retention budgets remain authoritative; reclaimed slots are
-// reported to the tree through the attached payload sink.
+// DeepSeek V4 / V4.1's radix prefix cache: donate-only executor slots (native or
+// direct-CUDA). The executor's reuse checks and retention budgets remain
+// authoritative; reclaimed slots are reported to the tree through the attached
+// payload sink.
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using TensorSharp.GGML;
 using TensorSharp.Runtime.Scheduling;
 using TensorSharp.Runtime.Scheduling.PrefixCache;
 
@@ -24,17 +24,21 @@ namespace TensorSharp.Models
             return new PrefixCacheCapabilities
             {
                 Class = FamilyClass.N,
-                Readiness = PrefixCacheMode.Tree,
                 NamespaceFingerprint = KVStateFingerprint,
                 EndState = slots ? EndStateSupport.DonateOnly : EndStateSupport.None,
                 CanCaptureCopy = false,
                 AdoptPrimaryOnDisplacement = slots,
                 PrimaryResident = true,
                 MinRetainTokens = 32,
-                // The native slot decides (SlotCanReuse), aligned to its compressor ratio; own scope only.
+                // The executor's slot decides (SlotCanReuse), aligned to its compressor ratio; own scope only.
                 Truncation = SupportsKVCacheTruncation ? TruncationKind.ModelDecides : TruncationKind.None,
                 TruncationGranularity = Math.Max(1, KVCacheTruncationGranularity),
                 RewindCapTokens = int.MaxValue,
+                // Only a multi-token forward records the rewind checkpoint (ggml_ops_deepseek4.cpp,
+                // Dsv4CudaEngine.Slots.cs), and a rewind truncates away a checkpoint past the new head:
+                // forwarding at least two prompt tokens after any reuse leaves the next thinking turn a
+                // checkpoint to rewind to.
+                MinTailPrefillTokens = SupportsKVCacheTruncation ? 2 : 1,
                 Pages = PageSupport.None,
                 ReuseAcrossMediaSpan = false,
                 Persistable = false,
@@ -66,10 +70,26 @@ namespace TensorSharp.Models
                 && HolderPrefixCacheAdapter.TryConvertPrimary(this, payloadKey, length, out footprint);
         }
 
-        /// <summary>The native slot decides (<see cref="CanReuseRetainedPrefix"/>: its head is
+        /// <summary>The executor's slot decides (<see cref="CanReuseRetainedPrefix"/>: its head is
         /// <paramref name="payloadTokens"/> and the rewind to <paramref name="targetTokens"/> is exact).</summary>
         public bool CanMaterialize(string payloadKey, int payloadTokens, int targetTokens)
             => CanReuseRetainedPrefix(payloadKey, payloadTokens, targetTokens);
+
+        /// <summary>The live primary slot decides (<c>SlotCanReuse</c>): its head must be
+        /// <paramref name="cachedTokens"/> and the rewind exact - inside the raw ring, or served by the
+        /// checkpoint the slot took at its last prompt boundary (dsv41_truncate.h). Every thinking turn
+        /// needs the second kind: its render drops the previous answer's reasoning, so keeping the
+        /// previous prompt means rewinding past the whole answer. Unlike <see cref="CanReuseLivePrefix"/>
+        /// this does not need retention: the primary exists without it (DSpark loaded).</summary>
+        public bool CanRewindPrimary(int cachedTokens, int targetTokens)
+        {
+            lock (_sync)
+            {
+                return _slotExecutor != null && _truncateAlign > 0
+                    && _activeSlotKey == null && _selectedRetainedKey == null && _primarySlot >= 0
+                    && _slotExecutor.SlotCanReuse(_primarySlot, cachedTokens, targetTokens);
+            }
+        }
 
         /// <summary>A slot is never copied, so there is nothing to settle and no clone to allow.</summary>
         public bool SettleForCopy(string payloadKey) => false;
@@ -80,10 +100,10 @@ namespace TensorSharp.Models
             {
                 if (payloadKey == null || _retainedSlotByRequest == null
                     || !_retainedSlotByRequest.TryGetValue(payloadKey, out int slot)
-                    || !GgmlDeepSeek4Native.SlotStatus(_handle, slot, out int head, out _, out _))
+                    || !_slotExecutor.SlotStatus(slot, out int head, out _, out _))
                     return default;
-                // The slot's bytes are native (a full-context cache set plus its graph arena); the managed side
-                // has no query for them yet, so the native SlotCanRetain budget bounds retention (M5e measures).
+                // The slot's bytes are the executor's (a full-context cache set, plus a graph arena on the
+                // native executor); SlotCanRetain's budget bounds retention.
                 return new PayloadFootprint(head, _maxContextLength, default, PositionDelta: 0);
             }
         }
@@ -125,8 +145,8 @@ namespace TensorSharp.Models
             {
                 lock (_sync)
                 {
-                    return _handle != IntPtr.Zero && _primarySlot >= 0
-                           && GgmlDeepSeek4Native.SlotStatus(_handle, _primarySlot, out int head, out _, out _)
+                    return _slotExecutor != null && _primarySlot >= 0
+                           && _slotExecutor.SlotStatus(_primarySlot, out int head, out _, out _)
                         ? head : 0;
                 }
             }

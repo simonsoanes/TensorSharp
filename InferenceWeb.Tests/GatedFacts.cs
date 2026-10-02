@@ -37,6 +37,17 @@ namespace InferenceWeb.Tests
         public static string CudaSkip =>
             CudaAvailable.Value ? null : "Requires a CUDA device.";
 
+        private static readonly Lazy<int> CudaDevices = new(() =>
+        {
+            if (!CudaAvailable.Value) return 0;
+            try { return TensorSharp.Cuda.CudaDevice.GetDeviceCount(); }
+            catch { return 0; }
+        });
+
+        /// <summary>Skip reason for a test that spreads work over <paramref name="count"/> CUDA devices.</summary>
+        public static string CudaDevicesSkip(int count) =>
+            CudaSkip ?? (CudaDevices.Value >= count ? null : $"Requires {count} CUDA devices; {CudaDevices.Value} visible.");
+
         public static string MlxSkip =>
             MlxAvailable.Value ? null : "Requires the MLX native backend.";
 
@@ -247,6 +258,25 @@ namespace InferenceWeb.Tests
             set { _ggmlBackend = value; Skip ??= TestGates.GgmlPinSkip(value); }
         }
         private BackendType _ggmlBackend;
+    }
+
+    /// <summary>
+    /// [Fact] that needs at least <c>devices</c> CUDA devices (a layer split, a tensor-parallel
+    /// group): skips visibly on a box with fewer. Carries Requires=Cuda (and Models with a model
+    /// env var).
+    /// </summary>
+    [TraitDiscoverer("InferenceWeb.Tests.RequiresTraitDiscoverer", "InferenceWeb.Tests")]
+    [AttributeUsage(AttributeTargets.Method)]
+    public sealed class MultiCudaFactAttribute : FactAttribute, ITraitAttribute
+    {
+        public string RequiresValue { get; }
+
+        public MultiCudaFactAttribute(int devices, string modelEnvVar = null, string ggufContains = null)
+        {
+            RequiresValue = modelEnvVar == null ? "Cuda" : "Cuda,Models";
+            Skip = TestGates.CudaDevicesSkip(devices)
+                ?? (modelEnvVar == null ? null : TestGates.ModelSkip(modelEnvVar, ggufContains));
+        }
     }
 
     /// <summary>[Theory] variant of <see cref="CudaFactAttribute"/>.</summary>

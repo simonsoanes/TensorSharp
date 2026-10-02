@@ -25,52 +25,6 @@ public static class EnvVarMatrix
     {
         // Continuous batching / batched forward
         new(
-            Name: "TS_GPTOSS_BATCHED",
-            Category: "BatchedForward",
-            Values: BoolValues,
-            DefaultValue: "0",
-            Notes: "GPT OSS batched forward (opt-in).",
-            AppliesTo: (m, b, f) =>
-                string.Equals(m.Family, "gptoss", StringComparison.OrdinalIgnoreCase)
-                && f.Kind is FeatureKind.Text or FeatureKind.UploadedText or FeatureKind.MultiTurn or FeatureKind.SyntheticDecode),
-
-        new(
-            Name: "TS_QWEN35_BATCHED",
-            Category: "BatchedForward",
-            Values: BoolValues,
-            DefaultValue: "1",
-            Notes: "Qwen 3.5 / 3.6 batched paged-attention forward. Default ON; set to 0 to force the per-seq KV-swap fallback.",
-            AppliesTo: (m, b, f) =>
-                m.Family.StartsWith("qwen35", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(m.Family, "qwen3next", StringComparison.OrdinalIgnoreCase)),
-
-        new(
-            Name: "TS_QWEN35_BATCHED_GDN_NATIVE",
-            Category: "BatchedForward",
-            Values: BoolValues,
-            DefaultValue: "0",
-            Notes: "Native batched GatedDeltaNet kernel for Qwen 3.5 / 3.6.",
-            AppliesTo: (m, b, f) =>
-                m.Family.StartsWith("qwen35", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(m.Family, "qwen3next", StringComparison.OrdinalIgnoreCase)),
-
-        new(
-            Name: "TS_NEMOTRON_BATCHED",
-            Category: "BatchedForward",
-            Values: BoolValues,
-            DefaultValue: "0",
-            Notes: "Nemotron-H batched forward (opt-in).",
-            AppliesTo: (m, b, f) => m.Family.StartsWith("nemotron", StringComparison.OrdinalIgnoreCase)),
-
-        new(
-            Name: "TS_GEMMA4_BATCHED",
-            Category: "BatchedForward",
-            Values: BoolValues,
-            DefaultValue: "1",
-            Notes: "Gemma 4 batched forward (default ON, set 0 to opt out).",
-            AppliesTo: (m, b, f) => string.Equals(m.Family, "gemma4", StringComparison.OrdinalIgnoreCase)),
-
-        new(
             Name: "TS_NEMOTRON_MAMBA2_BATCHED_NATIVE",
             Category: "BatchedForward",
             Values: BoolValues,
@@ -79,19 +33,11 @@ public static class EnvVarMatrix
             AppliesTo: (m, b, f) => m.Family.StartsWith("nemotron", StringComparison.OrdinalIgnoreCase)),
 
         new(
-            Name: "TS_BATCHED_N1_FAST_PATH",
-            Category: "BatchedForward",
-            Values: BoolValues,
-            DefaultValue: "0",
-            Notes: "Use the N=1 fast path through the batched scheduler.",
-            AppliesTo: (m, b, f) => true),
-
-        new(
             Name: "TS_SCHED_DISABLE_BATCHED",
             Category: "BatchedForward",
             Values: BoolValues,
             DefaultValue: "0",
-            Notes: "Fall through to per-seq KV-swap (legacy scheduler).",
+            Notes: "1 forces the per-sequence KV-swap path for every model (--no-continuous-batching).",
             AppliesTo: (m, b, f) => true),
 
         // KV cache
@@ -103,20 +49,6 @@ public static class EnvVarMatrix
             Notes: "Precision of the KV cache. DeepSeek V4 / V4.1 keep F16 caches on every executor and refuse " +
                    "q8_0/q4_0 at load (see docs/models/deepseek41.md), so the sweep skips those families.",
             AppliesTo: (m, b, f) => !m.Family.StartsWith("deepseek4", StringComparison.OrdinalIgnoreCase)),
-
-        // Kept registered so an explicit --env-vars naming it still resolves, but it applies
-        // to nothing: its only reader is the TurboQuant codec of TensorSharp.Cli --paged-bench,
-        // and no matrix runner passes --paged-bench, so each cell ran the baseline generation
-        // path under a KV-codec label. A config whose default_env_vars is empty sweeps
-        // EnvVarMatrix.All, which is how the inert cells kept coming back.
-        new(
-            Name: "TS_KV_PAGED_QUANT_BITS",
-            Category: "KvCache",
-            Values: new[] { "0", "4", "8" },
-            DefaultValue: "0",
-            Notes: "Paged-KV TurboQuant codec bits (0 = off). Read only by TensorSharp.Cli --paged-bench, " +
-                   "which the matrix never runs, so it is never swept.",
-            AppliesTo: (m, b, f) => false),
 
         new(
             Name: "MAX_CONTEXT",
@@ -160,14 +92,6 @@ public static class EnvVarMatrix
                 && f.Id is "long_text" or "uploaded_text" or "pp2048"),
 
         new(
-            Name: "GDN_DISABLE_CHUNKED_PREFILL",
-            Category: "Prefill",
-            Values: BoolValues,
-            DefaultValue: "0",
-            Notes: "Disable GDN chunked prefill (Qwen3next).",
-            AppliesTo: (m, b, f) => string.Equals(m.Family, "qwen3next", StringComparison.OrdinalIgnoreCase)),
-
-        new(
             Name: "TS_GGML_ASYNC_COMPUTE",
             Category: "Prefill",
             Values: BoolValues,
@@ -206,43 +130,9 @@ public static class EnvVarMatrix
             Name: "TS_MLX_BATCHED_MOE_DECODE",
             Category: "MLX",
             Values: BoolValues,
-            DefaultValue: "0",
-            Notes: "MoE decode kernel on MLX (Qwen 3.5 / 3.6).",
-            AppliesTo: (m, b, f) => b.Id == "mlx" && m.Family.StartsWith("qwen35", StringComparison.OrdinalIgnoreCase)),
-
-        new(
-            Name: "TS_MLX_DEVICE_ROUTER",
-            Category: "MLX",
-            Values: BoolValues,
-            DefaultValue: "0",
-            Notes: "Run MoE router on-device on MLX.",
-            AppliesTo: (m, b, f) => b.Id == "mlx" && m.Family.StartsWith("qwen35", StringComparison.OrdinalIgnoreCase)),
-
-        new(
-            Name: "TS_MLX_PIPELINED_DECODE",
-            Category: "MLX",
-            Values: BoolValues,
             DefaultValue: "1",
-            Notes: "Pipelined greedy decode on MLX (device-side argmax + next-embedding lookup). Default ON for greedy decode; set 0 to fall back to per-token host sync.",
-            AppliesTo: (m, b, f) => b.Id == "mlx" && f.Kind != FeatureKind.SyntheticPrefill),
-
-        new(
-            Name: "TS_MLX_DEVICE_KV_COPY",
-            Category: "MLX",
-            Values: BoolValues,
-            DefaultValue: "1",
-            Notes: "On-device KV scatter on MLX.",
-            AppliesTo: (m, b, f) => b.Id == "mlx"),
-
-        new(
-            Name: "TS_MLX_QWEN35_GDN_PACKED_KERNELS",
-            Category: "MLX",
-            Values: BoolValues,
-            DefaultValue: "0",
-            Notes: "Packed GDN kernels on MLX (Qwen 3.5 / 3.6).",
-            AppliesTo: (m, b, f) => b.Id == "mlx"
-                                    && (m.Family.StartsWith("qwen35", StringComparison.OrdinalIgnoreCase)
-                                        || string.Equals(m.Family, "qwen3next", StringComparison.OrdinalIgnoreCase))),
+            Notes: "Batched MoE decode on MLX (Qwen 3.5 / 3.6): one dispatch per projection over the stacked experts. 0 runs the per-expert sequence, which avoids the stacked copy on memory-constrained machines.",
+            AppliesTo: (m, b, f) => b.Id == "mlx" && m.Family.StartsWith("qwen35", StringComparison.OrdinalIgnoreCase)),
     };
 
     public static EnvVarSpec? FindByName(string name)

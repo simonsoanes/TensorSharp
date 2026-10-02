@@ -40,8 +40,7 @@ namespace TensorSharp.MLX
 
         private static bool TryFillStridedBox(Tensor result, float value)
         {
-            if (!StridedBoxCopyEnabled
-                || !TryGetStridedBox(result, out int[] parentShape, out int[] starts, out int[] stops))
+            if (!TryGetStridedBox(result, out int[] parentShape, out int[] starts, out int[] stops))
                 return false;
 
             MlxStorage storage = (MlxStorage)result.Storage;
@@ -234,20 +233,11 @@ namespace TensorSharp.MLX
                 return FallbackTensor("SiLU", writeTarget, src);
 
             MlxNative.MlxArray srcView = default;
-            MlxNative.MlxArray sigmoid = default;
             MlxNative.MlxArray output = default;
             try
             {
                 srcView = GetView(src);
-                if (!MlxCompiledOps.Disabled)
-                {
-                    output = MlxCompiledOps.SiLU(srcView);
-                }
-                else
-                {
-                    sigmoid = MlxNative.Unary(MlxNative.MlxUnaryOp.Sigmoid, srcView);
-                    output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, srcView, sigmoid);
-                }
+                output = MlxCompiledOps.SiLU(srcView);
                 SetDeviceResult(writeTarget, output);
                 output = default;
                 return writeTarget;
@@ -255,7 +245,6 @@ namespace TensorSharp.MLX
             finally
             {
                 MlxNative.FreeArray(srcView);
-                MlxNative.FreeArray(sigmoid);
                 MlxNative.FreeArray(output);
             }
         }
@@ -272,10 +261,7 @@ namespace TensorSharp.MLX
             try
             {
                 srcView = GetView(src);
-                if (!MlxCompiledOps.Disabled)
-                    output = MlxCompiledOps.GeluTanh(srcView);
-                else
-                    output = Gelu(srcView);
+                output = MlxCompiledOps.GeluTanh(srcView);
                 SetDeviceResult(writeTarget, output);
                 output = default;
                 return writeTarget;
@@ -328,24 +314,13 @@ namespace TensorSharp.MLX
             {
                 MlxNative.MlxArray gateView = default;
                 MlxNative.MlxArray upView = default;
-                MlxNative.MlxArray sigmoid = default;
-                MlxNative.MlxArray silu = default;
                 MlxNative.MlxArray output = default;
                 try
                 {
                     gateView = GetView(gate);
                     upView = GetView(up);
-                    if (!MlxCompiledOps.Disabled)
-                    {
-                        // Single fused kernel: silu(gate) * up.
-                        output = MlxCompiledOps.SwiGLU(gateView, upView);
-                    }
-                    else
-                    {
-                        sigmoid = MlxNative.Unary(MlxNative.MlxUnaryOp.Sigmoid, gateView);
-                        silu = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, gateView, sigmoid);
-                        output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, silu, upView);
-                    }
+                    // Single fused kernel: silu(gate) * up.
+                    output = MlxCompiledOps.SwiGLU(gateView, upView);
                     SetDeviceResult(writeTarget, output);
                     output = default;
                 }
@@ -353,8 +328,6 @@ namespace TensorSharp.MLX
                 {
                     MlxNative.FreeArray(gateView);
                     MlxNative.FreeArray(upView);
-                    MlxNative.FreeArray(sigmoid);
-                    MlxNative.FreeArray(silu);
                     MlxNative.FreeArray(output);
                 }
             });
@@ -382,24 +355,13 @@ namespace TensorSharp.MLX
             MlxNative.MlxArray gateUpView = default;
             MlxNative.MlxArray gate = default;
             MlxNative.MlxArray up = default;
-            MlxNative.MlxArray sigmoid = default;
-            MlxNative.MlxArray silu = default;
             MlxNative.MlxArray output = default;
             try
             {
                 gateUpView = GetView(gateUp);
                 gate = MlxNative.Slice(gateUpView, new[] { 0, 0 }, new[] { rows, halfDim }, new[] { 1, 1 });
                 up = MlxNative.Slice(gateUpView, new[] { 0, halfDim }, new[] { rows, halfDim * 2 }, new[] { 1, 1 });
-                if (!MlxCompiledOps.Disabled)
-                {
-                    output = MlxCompiledOps.SwiGLU(gate, up);
-                }
-                else
-                {
-                    sigmoid = MlxNative.Unary(MlxNative.MlxUnaryOp.Sigmoid, gate);
-                    silu = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, gate, sigmoid);
-                    output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, silu, up);
-                }
+                output = MlxCompiledOps.SwiGLU(gate, up);
                 SetDeviceResult(writeTarget, output);
                 output = default;
                 return writeTarget;
@@ -409,8 +371,6 @@ namespace TensorSharp.MLX
                 MlxNative.FreeArray(gateUpView);
                 MlxNative.FreeArray(gate);
                 MlxNative.FreeArray(up);
-                MlxNative.FreeArray(sigmoid);
-                MlxNative.FreeArray(silu);
                 MlxNative.FreeArray(output);
             }
         }
@@ -424,21 +384,12 @@ namespace TensorSharp.MLX
 
             MlxNative.MlxArray gateView = default;
             MlxNative.MlxArray upView = default;
-            MlxNative.MlxArray gelu = default;
             MlxNative.MlxArray output = default;
             try
             {
                 gateView = GetView(gate);
                 upView = GetView(up);
-                if (!MlxCompiledOps.Disabled)
-                {
-                    output = MlxCompiledOps.GeGLU(gateView, upView);
-                }
-                else
-                {
-                    gelu = Gelu(gateView);
-                    output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, gelu, upView);
-                }
+                output = MlxCompiledOps.GeGLU(gateView, upView);
                 SetDeviceResult(writeTarget, output);
                 output = default;
                 return writeTarget;
@@ -447,7 +398,6 @@ namespace TensorSharp.MLX
             {
                 MlxNative.FreeArray(gateView);
                 MlxNative.FreeArray(upView);
-                MlxNative.FreeArray(gelu);
                 MlxNative.FreeArray(output);
             }
         }
@@ -463,21 +413,12 @@ namespace TensorSharp.MLX
             {
                 MlxNative.MlxArray xView = default;
                 MlxNative.MlxArray gateView = default;
-                MlxNative.MlxArray sigmoid = default;
                 MlxNative.MlxArray output = default;
                 try
                 {
                     xView = GetView(x);
                     gateView = GetView(gate);
-                    if (!MlxCompiledOps.Disabled)
-                    {
-                        output = MlxCompiledOps.SigmoidMul(xView, gateView);
-                    }
-                    else
-                    {
-                        sigmoid = MlxNative.Unary(MlxNative.MlxUnaryOp.Sigmoid, gateView);
-                        output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, xView, sigmoid);
-                    }
+                    output = MlxCompiledOps.SigmoidMul(xView, gateView);
                     SetDeviceResult(writeTarget, output);
                     output = default;
                 }
@@ -485,7 +426,6 @@ namespace TensorSharp.MLX
                 {
                     MlxNative.FreeArray(xView);
                     MlxNative.FreeArray(gateView);
-                    MlxNative.FreeArray(sigmoid);
                     MlxNative.FreeArray(output);
                 }
             });
@@ -1160,66 +1100,9 @@ namespace TensorSharp.MLX
             return writeTarget;
         }
 
-        private static MlxNative.MlxArray Gelu(MlxNative.MlxArray input)
-        {
-            MlxNative.MlxArray coeffCubic = default;
-            MlxNative.MlxArray coeffInner = default;
-            MlxNative.MlxArray one = default;
-            MlxNative.MlxArray half = default;
-            MlxNative.MlxArray squared = default;
-            MlxNative.MlxArray cubed = default;
-            MlxNative.MlxArray scaledCubic = default;
-            MlxNative.MlxArray inner = default;
-            MlxNative.MlxArray scaledInner = default;
-            MlxNative.MlxArray tanh = default;
-            MlxNative.MlxArray onePlusTanh = default;
-            MlxNative.MlxArray halfInput = default;
-            MlxNative.MlxArray output = default;
-            try
-            {
-                coeffCubic = MlxNative.NewScalar(0.044715f);
-                coeffInner = MlxNative.NewScalar(0.7978845608f);
-                one = MlxNative.NewScalar(1.0f);
-                half = MlxNative.NewScalar(0.5f);
-
-                squared = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, input, input);
-                cubed = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, squared, input);
-                scaledCubic = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, cubed, coeffCubic);
-                inner = MlxNative.Binary(MlxNative.MlxBinaryOp.Add, input, scaledCubic);
-                scaledInner = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, inner, coeffInner);
-                tanh = MlxNative.Unary(MlxNative.MlxUnaryOp.Tanh, scaledInner);
-                onePlusTanh = MlxNative.Binary(MlxNative.MlxBinaryOp.Add, one, tanh);
-                halfInput = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, input, half);
-                output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, halfInput, onePlusTanh);
-                MlxNative.MlxArray result = output;
-                output = default;
-                return result;
-            }
-            finally
-            {
-                MlxNative.FreeArray(coeffCubic);
-                MlxNative.FreeArray(coeffInner);
-                MlxNative.FreeArray(one);
-                MlxNative.FreeArray(half);
-                MlxNative.FreeArray(squared);
-                MlxNative.FreeArray(cubed);
-                MlxNative.FreeArray(scaledCubic);
-                MlxNative.FreeArray(inner);
-                MlxNative.FreeArray(scaledInner);
-                MlxNative.FreeArray(tanh);
-                MlxNative.FreeArray(onePlusTanh);
-                MlxNative.FreeArray(halfInput);
-                MlxNative.FreeArray(output);
-            }
-        }
-
-        private static readonly bool StridedBoxCopyEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_STRIDED_BOX_COPY"), "0", StringComparison.Ordinal);
-
         private static bool TryCopyIntoStridedBox(Tensor result, Tensor src)
         {
-            if (!StridedBoxCopyEnabled
-                || result?.Storage is not MlxStorage resultStorage
+            if (result?.Storage is not MlxStorage resultStorage
                 || src?.Storage is not MlxStorage
                 || src.DimensionCount != result.DimensionCount
                 || !TryGetStridedBox(result, out int[] parentShape, out int[] starts, out int[] stops))

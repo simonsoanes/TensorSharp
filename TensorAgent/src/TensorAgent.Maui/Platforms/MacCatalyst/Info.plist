@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The Mac app is the phone app's UIKit code running under Mac Catalyst, so it keeps
+	     the phone's single-window scene lifecycle: TensorAgent's shell and host are app
+	     singletons. -->
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleApplication</key>
+			<array>
+				<dict>
+					<key>UISceneConfigurationName</key>
+					<string>__MAUI_DEFAULT_SCENE_CONFIGURATION__</string>
+					<key>UISceneDelegateClassName</key>
+					<string>SceneDelegate</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
+	<key>UIDeviceFamily</key>
+	<array>
+		<integer>2</integer>
+	</array>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>XSAppIconAssets</key>
+	<string>Assets.xcassets/appicon.appiconset</string>
+
+	<!-- The Web UI is served by an in-process HTTP listener on 127.0.0.1, so
+	     App Transport Security must allow plain-http loopback traffic. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+
+	<!-- Usage strings for attaching pictures and audio and for dictation. macOS asks the
+	     user the first time each is used and shows these strings when it does. -->
+	<key>NSCameraUsageDescription</key>
+	<string>TensorAgent uses the camera to take pictures you want the on-device model to look at.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>TensorAgent uses the microphone to dictate messages and to attach audio for the on-device model.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>TensorAgent reads photos and videos you choose to attach to a conversation.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>TensorAgent transcribes your dictation into the message box.</string>
+
+	<!-- No App Sandbox, deliberately, and so no Entitlements.plist beside this file. The
+	     Mac app runs the model's code the way the desktop hosts do: as real python3,
+	     node and npm processes, each confined by TensorSharp's own Seatbelt profile to
+	     the chat's workspace. macOS refuses to apply a Seatbelt profile inside the App
+	     Sandbox, so an app-sandboxed build could run no code at all. -->
+</dict>
+</plist>

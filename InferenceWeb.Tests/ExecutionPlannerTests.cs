@@ -16,6 +16,7 @@ namespace InferenceWeb.Tests;
 /// function, every path combination that used to be emergent control flow in
 /// BatchExecutor.ExecuteStep is directly assertable here, without a model.
 /// </summary>
+[Collection(EngineEnvironmentCollection.Name)]
 public class ExecutionPlannerTests
 {
     private static readonly SchedulerConfig PlainConfig = new();
@@ -63,25 +64,6 @@ public class ExecutionPlannerTests
         Assert.Equal(expected, plan.Selected);
     }
 
-    [Fact]
-    public void LinearMediaCapability_DoesNotEnableBatchedSpeculativeMediaPrefill()
-    {
-        var caps = new ExecutionCapabilities
-        {
-            SupportsSpeculativeTrunk = true,
-            SupportsBatchedSpecTrunk = true,
-            SupportsSpeculativeMultimodalPrefill = true,
-            HasDraftHead = true,
-            SpeculationProfitable = true,
-        };
-        var features = Seqs(1) with { MultimodalPendingCount = 1, SoloHasPendingMultimodal = true };
-
-        var plan = ExecutionPlanner.PlanStep(caps, ExecutionOptions.Default, SpecConfig, features);
-
-        Assert.Equal(ExecutionPathKind.PerSequence, plan.Selected);
-        Assert.Contains(plan.Rejections, r => r.Path == ExecutionPathKind.SpeculativeBatchedTrunk);
-    }
-
     // ----- batched vs fallback -----
 
     [Fact]
@@ -119,8 +101,8 @@ public class ExecutionPlannerTests
     [Fact]
     public void ModelDeclaredBatchedOptOut_SkipsBatchedPaged_WithoutExceptionFallback()
     {
-        // A model whose batched path is opted out (e.g. TS_QWEN35_BATCHED=0)
-        // declares BatchedForwardAvailable=false; the planner must route
+        // A model whose batched path is unavailable (e.g. Gemma 4 with a q8_0 KV
+        // cache) declares BatchedForwardAvailable=false; the planner must route
         // straight to per-seq instead of relying on ForwardBatch throwing.
         var caps = BatchedCaps() with { BatchedForwardAvailable = false };
         var plan = ExecutionPlanner.PlanStep(caps, ExecutionOptions.Default, PlainConfig, Seqs(2));
@@ -180,17 +162,6 @@ public class ExecutionPlannerTests
         var plan = ExecutionPlanner.PlanStep(caps, ExecutionOptions.Default, PlainConfig, features);
 
         Assert.Equal(ExecutionPathKind.BatchedPaged, plan.Selected);
-    }
-
-    [Fact]
-    public void N1FastPathDisabledOverride_StaysOnBatchedPaged()
-    {
-        var options = ExecutionOptions.Default with { BatchedN1FastPathEnabled = false };
-        var plan = ExecutionPlanner.PlanStep(BatchedCaps(), options, PlainConfig, Seqs(1));
-
-        Assert.Equal(ExecutionPathKind.BatchedPaged, plan.Selected);
-        var rejection = Assert.Single(plan.Rejections, r => r.Path == ExecutionPathKind.SingleSequenceFused);
-        Assert.Contains("TS_BATCHED_N1_FAST_PATH", rejection.Reason);
     }
 
     // ----- per-sequence fused concurrency -----
@@ -293,15 +264,6 @@ public class ExecutionPlannerTests
         SupportsSpeculativeTrunk = true,
         HasDraftHead = true,
         SpeculationProfitable = true,
-        SupportsBatchedSpecTrunk = false,
-    };
-
-    private static ExecutionCapabilities SpecBatchedTrunkCaps() => BatchedCaps() with
-    {
-        SupportsSpeculativeTrunk = true,
-        HasDraftHead = true,
-        SpeculationProfitable = true,
-        SupportsBatchedSpecTrunk = true,
     };
 
     [Fact]
@@ -314,23 +276,12 @@ public class ExecutionPlannerTests
     }
 
     [Fact]
-    public void SpecRequested_BatchedTrunkModel_PutsTrunkFirstWithFallbackChain()
-    {
-        var plan = ExecutionPlanner.PlanStep(SpecBatchedTrunkCaps(), ExecutionOptions.Default, SpecConfig, Seqs(1));
-
-        Assert.Equal(ExecutionPathKind.SpeculativeBatchedTrunk, plan.Selected);
-        // Declinable (arming/continuity), so a non-speculative path must follow.
-        Assert.True(plan.Candidates.Count >= 2);
-        Assert.NotEqual(ExecutionPathKind.SpeculativeBatchedTrunk, plan.Candidates[1]);
-    }
-
-    [Fact]
     public void SpecRequested_MultiSequenceStep_ServesNormalPaths()
     {
-        var plan = ExecutionPlanner.PlanStep(SpecBatchedTrunkCaps(), ExecutionOptions.Default, SpecConfig, Seqs(2));
+        var plan = ExecutionPlanner.PlanStep(SpecLinearCaps(), ExecutionOptions.Default, SpecConfig, Seqs(2));
 
         Assert.Equal(ExecutionPathKind.BatchedPaged, plan.Selected);
-        Assert.Contains(plan.Rejections, r => r.Path == ExecutionPathKind.SpeculativeBatchedTrunk);
+        Assert.Contains(plan.Rejections, r => r.Path == ExecutionPathKind.SpeculativePerSequence);
     }
 
     [Fact]
@@ -363,19 +314,6 @@ public class ExecutionPlannerTests
         Assert.Equal(ExecutionPathKind.SingleSequenceFused, plan.Selected);
     }
 
-    [Fact]
-    public void SpecBatchedTrunk_EngagesEvenWhenBatchedPathDisabled()
-    {
-        // Historical behaviour preserved: the MTP routes predate
-        // TS_SCHED_DISABLE_BATCHED and must keep engaging under it; on
-        // decline the step falls to per-seq (batched is disabled).
-        var options = ExecutionOptions.Default with { BatchedPathDisabled = true };
-        var plan = ExecutionPlanner.PlanStep(SpecBatchedTrunkCaps(), options, SpecConfig, Seqs(1));
-
-        Assert.Equal(ExecutionPathKind.SpeculativeBatchedTrunk, plan.Selected);
-        Assert.Equal(ExecutionPathKind.PerSequence, plan.Candidates[^1]);
-    }
-
     // ----- plan invariants and reporting -----
 
     [Fact]
@@ -391,7 +329,6 @@ public class ExecutionPlannerTests
         foreach (var migration in new[] { false, true })
         foreach (var snapshot in new[] { false, true })
         foreach (var mtp in new[] { false, true })
-        foreach (var trunk in new[] { false, true })
         foreach (var disabled in new[] { false, true })
         foreach (var count in new[] { 0, 1, 2 })
         foreach (var mmCount in new[] { 0, 1 })
@@ -408,7 +345,6 @@ public class ExecutionPlannerTests
                 SupportsSpeculativeTrunk = mtp,
                 HasDraftHead = mtp,
                 SpeculationProfitable = mtp,
-                SupportsBatchedSpecTrunk = mtp && trunk,
             };
             var options = ExecutionOptions.Default with { BatchedPathDisabled = disabled };
             var features = new ExecutionStepFeatures
@@ -421,8 +357,7 @@ public class ExecutionPlannerTests
 
             Assert.NotEmpty(plan.Candidates);
             var last = plan.Candidates[^1];
-            Assert.True(
-                last != ExecutionPathKind.SpeculativeBatchedTrunk && last != ExecutionPathKind.BatchedPaged,
+            Assert.True(last != ExecutionPathKind.BatchedPaged,
                 $"plan may end with declinable path {last}: {plan.Describe()}");
             // No duplicate candidates (each path tried at most once).
             Assert.Equal(plan.Candidates.Count, plan.Candidates.Distinct().Count());
@@ -432,13 +367,13 @@ public class ExecutionPlannerTests
     [Fact]
     public void PlanDescribe_ListsSelectedFallbacksAndRejections()
     {
-        var options = ExecutionOptions.Default with { BatchedN1FastPathEnabled = false };
-        var plan = ExecutionPlanner.PlanStep(BatchedCaps(), options, PlainConfig, Seqs(1));
+        var caps = BatchedCaps() with { SupportsLinearKvMigration = false };
+        var plan = ExecutionPlanner.PlanStep(caps, ExecutionOptions.Default, PlainConfig, Seqs(1));
 
         string desc = plan.Describe();
         Assert.Contains("BatchedPaged", desc);
         Assert.Contains("PerSequence", desc);
-        Assert.Contains("TS_BATCHED_N1_FAST_PATH", desc);
+        Assert.Contains("cannot migrate linear KV", desc);
     }
 
     [Fact]
@@ -452,16 +387,15 @@ public class ExecutionPlannerTests
     }
 
     [Fact]
-    public void ExecutionOptions_FromEnvironment_ParsesLegacyFlagSemantics()
+    public void ExecutionOptions_FromEnvironment_ParsesLooseBooleans()
     {
         string prevDisable = Environment.GetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED");
         string prevFused = Environment.GetEnvironmentVariable("TS_BATCHED_FUSED_DECODE");
         try
         {
             Environment.SetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED", "1");
-            // Token-batched fused decode is ON by default now (the arena path
-            // is the serving-throughput baseline); the flag is a loose boolean
-            // kill-switch — only "0"/"false" disables it.
+            // Token-batched fused decode is on by default; only "0"/"false"
+            // turns it off.
             Environment.SetEnvironmentVariable("TS_BATCHED_FUSED_DECODE", "yes");
 
             var options = ExecutionOptions.FromEnvironment();

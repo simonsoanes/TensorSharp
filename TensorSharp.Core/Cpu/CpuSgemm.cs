@@ -35,8 +35,7 @@ namespace TensorSharp.Cpu
     /// Narrow products in the dot layout (small N, A rows and B columns contiguous along K)
     /// skip it too: a register tile padded out to NR columns would mostly multiply zeros.
     ///
-    /// Knobs: TS_CPU_SGEMM=0 routes MatrixMultiplication/DirectOps back to their previous
-    /// loops; TS_CPU_DISABLE_AVX512=1 forces the AVX2 kernel (so it is testable on an AVX-512
+    /// Knobs: TS_CPU_DISABLE_AVX512=1 forces the AVX2 kernel (so it is testable on an AVX-512
     /// host; see <see cref="CpuIsa"/>); TS_CPU_SGEMM_KC / _MC / _NC override the cache blocking for tuning;
     /// TS_CPU_SGEMM_DOT_MAXN sets the widest N of the narrow dot path (0 turns it off).
     /// </summary>
@@ -45,9 +44,6 @@ namespace TensorSharp.Cpu
         /// <summary>Microkernel families. Avx2Wide is the 8x24 ymm tile that needs the 32-register
         /// EVEX file, so it exists only on AVX-512 hardware.</summary>
         internal enum KernelKind { Portable = 0, Avx2 = 1, Avx2Wide = 2, Avx512 = 3 }
-
-        /// <summary>False when TS_CPU_SGEMM=0: callers keep their pre-existing GEMM loops.</summary>
-        public static bool Enabled { get; } = Environment.GetEnvironmentVariable("TS_CPU_SGEMM") != "0";
 
         private static KernelKind _kernel = DefaultKernel();
 

@@ -28,13 +28,12 @@ namespace TensorSharp.Models
         /// The draft block is a whole extra 256-expert decoder layer (~3 GiB of
         /// GLM-5.2 at IQ2_XXS, and it competes with the KV cache for the same
         /// VRAM the loader sizes the context against), so it is only paged in
-        /// when it is going to be used. <c>--spec</c> sets TS_SPEC and the legacy
-        /// TS_MTP_SPEC before the startup model loads; both are honoured here so
-        /// a deployment exporting the documented TS_SPEC directly does not get a
-        /// scheduler that believes speculation is on while the loader never paged
-        /// the block in. TS_GLM_MTP overrides either way for A/B runs.
+        /// when it is going to be used. <c>--spec</c> sets TS_SPEC before the
+        /// startup model loads, and a deployment may export it directly; either
+        /// way the loader pages the block in exactly when the scheduler will
+        /// speculate.
         ///
-        /// The two enable variables are parsed by <see cref="SpeculationOptions"/>
+        /// The enable variable is parsed by <see cref="SpeculationOptions"/>
         /// itself, not re-derived here: the scheduler decides from the same
         /// resolution whether to speculate, and a private "anything but 0 is on"
         /// rule made <c>TS_SPEC=false</c> page the ~3 GiB block in for a
@@ -42,9 +41,6 @@ namespace TensorSharp.Models
         /// </summary>
         internal static bool NativeMtpRequested()
         {
-            string glm = Environment.GetEnvironmentVariable("TS_GLM_MTP");
-            if (!string.IsNullOrEmpty(glm))
-                return glm != "0";
             var options = SpeculationOptions.FromEnvironment();
             // N-gram drafting uses the trunk's verify/rollback path and no
             // learned weights. Loading NextN would consume VRAM for a block
@@ -70,7 +66,11 @@ namespace TensorSharp.Models
                 float[] hBuf = hAllOut != null && hAllOut.LongLength >= needH ? hAllOut : EnsureSpecH(needH);
                 float[] lBuf = logitsOut != null && logitsOut.LongLength >= needL ? logitsOut : EnsureSpecLogits(needL);
 
-                if (!GgmlGlmNative.SpecForward(_native, tokens, hBuf, lBuf, allLogitsRows))
+                BeforeGraphCall();
+                bool ok;
+                try { ok = _exec.SpecForward(tokens, hBuf, lBuf, allLogitsRows); }
+                finally { AfterGraphCall(); }
+                if (!ok)
                     throw new InvalidOperationException("glm-dsa native speculative forward failed (see stderr).");
 
                 if (!ReferenceEquals(hBuf, hAllOut) && hAllOut != null)
@@ -78,7 +78,7 @@ namespace TensorSharp.Models
                 if (!ReferenceEquals(lBuf, logitsOut) && logitsOut != null)
                     Array.Copy(lBuf, 0, logitsOut, 0, Math.Min(logitsOut.LongLength, needL));
 
-                _cacheSeqLen = GgmlGlmNative.NPast(_native);
+                _cacheSeqLen = _exec.NPast;
             }
         }
 
@@ -88,7 +88,11 @@ namespace TensorSharp.Models
             {
                 float[] lBuf = logitsOut ?? EnsureSpecLogits(Config.VocabSize);
                 float[] hBuf = hOut ?? EnsureSpecH(Config.HiddenSize);
-                if (!GgmlGlmNative.DraftStep(_native, token, hPrev, pos, lBuf, hBuf))
+                BeforeGraphCall();
+                bool ok;
+                try { ok = _exec.DraftStep(token, hPrev, pos, lBuf, hBuf); }
+                finally { AfterGraphCall(); }
+                if (!ok)
                     throw new InvalidOperationException("glm-dsa native MTP draft step failed (see stderr).");
             }
         }
@@ -97,7 +101,11 @@ namespace TensorSharp.Models
         {
             lock (_nativeSync)
             {
-                if (!GgmlGlmNative.DraftCatchUp(_native, tokens, hRows, startPos))
+                BeforeGraphCall();
+                bool ok;
+                try { ok = _exec.DraftCatchUp(tokens, hRows, startPos); }
+                finally { AfterGraphCall(); }
+                if (!ok)
                     throw new InvalidOperationException("glm-dsa native MTP catch-up failed (see stderr).");
             }
         }
@@ -106,7 +114,7 @@ namespace TensorSharp.Models
         {
             lock (_nativeSync)
             {
-                if (GgmlGlmNative.Rewind(_native, length))
+                if (_exec.Rewind(length))
                     _cacheSeqLen = length;
             }
         }

@@ -309,6 +309,9 @@ namespace tsg
         }
 
         std::lock_guard<std::mutex> lock(g_tp_comm_mutex);
+#ifdef TSG_GGML_USE_CUDA
+        tp_cuda_allreduce_f32_free();
+#endif
         if (g_tp_comm.ctx != nullptr && g_tp_comm.free_fn != nullptr)
             g_tp_comm.free_fn(g_tp_comm.ctx);
         g_tp_comm.ctx = nullptr;
@@ -675,9 +678,81 @@ namespace tsg
         // Reduce one segment's partials. Returns false only when the collective
         // is genuinely unusable — a per-call refusal (an unsupported shape, say)
         // falls back to summing through the host so the token still completes.
-        bool tp_reduce_segment(ggml_tensor** nodes, int rank_count)
+        bool tp_reduce_segment(ggml_tensor** nodes, int rank_count,
+                               bool exact_f32 = false, bool host_only = false)
         {
-            if (tp_device_allreduce(nodes))
+            if (exact_f32)
+            {
+                // Upstream NCCL silently converts >=32768 F32 elements to BF16
+                // for two ranks (higher thresholds for more ranks). Its NCCL
+                // branch ignores GGML_CUDA_AR_BF16_THRESHOLD. Use zero-copy tensor
+                // views below that threshold, preserving the original device
+                // buffers and streams. No upstream patch or weight conversion.
+                // Also respect the internal transport's configurable threshold;
+                // if it compresses even one float, use our F32 host reduction.
+                for (int r = 0; r < rank_count; ++r)
+                    if (nodes[r]->type != GGML_TYPE_F32 || !ggml_is_contiguous(nodes[r])
+                        || ggml_nelements(nodes[r]) != ggml_nelements(nodes[0]))
+                    {
+                        set_last_error("Exact tensor-parallel reduction requires equal contiguous F32 partials.");
+                        return false;
+                    }
+#ifdef TSG_GGML_USE_CUDA
+                // Reuse the CUDA rank streams and the already-probed transport
+                // selection, but own our NCCL communicator so precision is explicit.
+                // A missing NCCL runtime retains the exact chunked/host fallback.
+                if (tp_comm_ensure())
+                {
+                    ggml_backend_t backends[TSG_MAX_DEVICES];
+                    for (int r = 0; r < rank_count; ++r) backends[r] = dev(r).backend;
+                    std::lock_guard<std::mutex> lock(g_tp_comm_mutex);
+                    const int result = tp_cuda_allreduce_f32(backends, nodes, rank_count);
+                    if (result != 0) return result > 0;
+                }
+#endif
+                // The internal CUDA transport requires 16-byte aligned data
+                // and lengths. Keep each next view aligned as well as staying
+                // below NCCL's smallest compression threshold.
+                int64_t chunk_limit = 32764;
+                const char* threshold = std::getenv("GGML_CUDA_AR_BF16_THRESHOLD");
+                if (threshold && threshold[0])
+                {
+                    const unsigned long long bytes = std::strtoull(threshold, nullptr, 10);
+                    if (bytes > 0) chunk_limit = std::min<int64_t>(chunk_limit, (bytes - 1) / sizeof(float));
+                }
+                chunk_limit -= chunk_limit % 4;
+                if (chunk_limit > 0)
+                {
+                    const int64_t count = ggml_nelements(nodes[0]);
+                    ggml_tensor views[TSG_MAX_DEVICES];
+                    ggml_tensor* pointers[TSG_MAX_DEVICES];
+                    for (int64_t start = 0; start < count; start += chunk_limit)
+                    {
+                        const int64_t length = std::min(chunk_limit, count - start);
+                        for (int r = 0; r < rank_count; ++r)
+                        {
+                            views[r] = *nodes[r];
+                            views[r].ne[0] = length;
+                            views[r].ne[1] = views[r].ne[2] = views[r].ne[3] = 1;
+                            views[r].nb[0] = sizeof(float);
+                            views[r].nb[1] = views[r].nb[2] = views[r].nb[3] = length * sizeof(float);
+                            views[r].data = static_cast<char*>(nodes[r]->data) + start * sizeof(float);
+                            views[r].view_src = nodes[r];
+                            views[r].view_offs = start * sizeof(float);
+                            pointers[r] = &views[r];
+                        }
+                        bool device_compatible = length % 4 == 0;
+                        for (int r = 0; r < rank_count; ++r)
+                            device_compatible &= reinterpret_cast<uintptr_t>(views[r].data) % 16 == 0;
+                        if ((!device_compatible || !tp_device_allreduce(pointers))
+                            && !tp_reduce_segment(pointers, rank_count, false, true))
+                            return false;
+                    }
+                    return true;
+                }
+                host_only = true;
+            }
+            if (!host_only && tp_device_allreduce(nodes))
                 return true;
 
             // Host reduction: drain every rank, sum the partials in RAM, push
@@ -755,6 +830,7 @@ namespace tsg
         {
             if (plans[r] == nullptr || !plans[r]->valid() || plans[r]->seg_end.size() != n_seg ||
                 plans[r]->ar_tensor.size() + 1 != n_seg ||
+                plans[r]->allreduce_f32 != plans[0]->allreduce_f32 ||
                 plans[r]->host_moe.size() != n_host_moe ||
                 (n_host_moe != 0 && plans[r]->host_moe_at.size() + 1 != n_seg))
             {
@@ -783,7 +859,7 @@ namespace tsg
                 if (end <= begin)
                     continue;
                 ggml_cgraph view = ggml_graph_view(plans[r]->graph, begin, end);
-                if (ggml_backend_graph_compute_async(g_backend, &view) != GGML_STATUS_SUCCESS)
+                if (ggml_backend_graph_compute_async(plans[r]->backend ? plans[r]->backend : g_backend, &view) != GGML_STATUS_SUCCESS)
                 {
                     set_last_error("Tensor-parallel segment execution failed.");
                     return false;
@@ -843,7 +919,7 @@ namespace tsg
                     nodes[static_cast<std::size_t>(r)] = plans[r]->ar_tensor[s];
                 // One local rank has nothing to reduce on-node; the cross-node
                 // exchange below is the whole reduction in that configuration.
-                if (rank_count > 1 && !tp_reduce_segment(nodes.data(), rank_count))
+                if (rank_count > 1 && !tp_reduce_segment(nodes.data(), rank_count, plans[0]->allreduce_f32))
                     return false;
 
                 // Multi-node: the local reduce above collapsed this node's

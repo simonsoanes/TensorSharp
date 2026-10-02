@@ -221,12 +221,8 @@ static int gptoss_model_decode_impl(
                           final_norm_data != nullptr && vocab_size > 0;
         const int out_count = fold ? vocab_size : H;
 
-        static const bool gptoss_persist = []{
-            const char* e = std::getenv("TS_GPTOSS_FD_PERSIST");
-            return e == nullptr || e[0] != '0';
-        }();
-        bool can_persist = gptoss_persist &&
-            (g_backend_type == BACKEND_TYPE_CUDA || g_backend_type == BACKEND_TYPE_VULKAN);
+        bool can_persist =
+            g_backend_type == BACKEND_TYPE_CUDA || g_backend_type == BACKEND_TYPE_VULKAN;
 
         // ---- fused tensor parallelism ----
         // Plan mode is requested by PASSING tp_plan_out, not by the degree: a
@@ -1204,7 +1200,7 @@ TSG_EXPORT void TSGgml_GptOssResetDecodeCache()
 
 // Copy the device-resident KV rows [0, rows) back into the host mirror. The
 // whole-model decode graph deliberately never does this per token; anything that
-// reads the host cache (KV snapshot/extract, cache growth, the legacy per-op
+// reads the host cache (KV snapshot/extract, cache growth, the per-op
 // attention path) calls this first. Returns 1 when a window existed, 0 when
 // there was nothing to sync (host is already authoritative).
 TSG_EXPORT int TSGgml_GptOssSyncKvCacheToHost(

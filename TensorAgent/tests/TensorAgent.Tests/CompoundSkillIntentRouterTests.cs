@@ -512,8 +512,11 @@ public sealed class CompoundSkillIntentRouterTests : IDisposable
         Assert.Contains("- research:", messages[0].Content, StringComparison.Ordinal);
         Assert.Contains(TensorAgentSkillRouter.ActivationInstructions, messages[0].Content, StringComparison.Ordinal);
 
+        // The compact route measured 6,186 bytes: the selection preamble with its
+        // handoff guidance, the catalog lines and the research-to-PPTX workflow.
+        // Inlining either body would add another 13 KB, which this bound still catches.
         int promptBytes = Encoding.UTF8.GetByteCount(messages[0].Content);
-        Assert.True(promptBytes < 6_000,
+        Assert.True(promptBytes < 7_000,
             $"The compact route used {promptBytes} prompt bytes; it should not approach the 26 KB skill bodies.");
     }
 

@@ -484,20 +484,16 @@ public static class ServerOptionsBuilder
 
     /// <summary>
     /// Translate <c>--continuous-batching</c> / <c>--no-continuous-batching</c>
-    /// into the two env vars that gate the batched path:
-    /// <c>TS_SCHED_DISABLE_BATCHED</c> (scheduler — falls through to
-    /// per-sequence KV-swap when set) and <c>TS_QWEN35_BATCHED</c>
-    /// (model — Qwen3.5 ForwardBatch gate; default ON, set to 0 to force
-    /// the per-seq fallback). Both default to ON, so operators get
-    /// paged-attention continuous batching without setting any env vars
-    /// and without passing any flag; <c>--continuous-batching</c> is
+    /// into <c>TS_SCHED_DISABLE_BATCHED</c>, which gates the batched path (the
+    /// scheduler falls through to per-sequence KV-swap when set). Batching is on
+    /// by default, so operators get paged-attention continuous batching without
+    /// setting any env var or passing any flag; <c>--continuous-batching</c> is
     /// idempotent with the default, kept for explicit operator intent.
-    /// <c>--no-continuous-batching</c> forces the per-seq path for every
-    /// model.
+    /// <c>--no-continuous-batching</c> forces the per-seq path for every model,
+    /// speculation included.
     ///
-    /// Must run before <see cref="InferenceEngine"/> is constructed because
-    /// <c>BatchExecutor</c> and Qwen3.5's <c>SupportsBatchedMultimodal</c>
-    /// read the env vars at runtime on each step.
+    /// Must run before <see cref="InferenceEngine"/> is constructed; the
+    /// <c>BatchExecutor</c> reads the variable at runtime on each step.
     /// </summary>
     public static bool ApplyContinuousBatchingCliFlag(string[] args)
     {
@@ -508,19 +504,15 @@ public static class ServerOptionsBuilder
         for (int i = 0; i < args.Length; i++)
         {
             string a = args[i];
-            if (string.Equals(a, "--continuous-batching", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(a, "--paged-batching", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(a, "--continuous-batching", StringComparison.OrdinalIgnoreCase))
             {
                 Environment.SetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED", "0");
-                Environment.SetEnvironmentVariable("TS_QWEN35_BATCHED", "1");
                 changed = true;
                 continue;
             }
-            if (string.Equals(a, "--no-continuous-batching", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(a, "--no-paged-batching", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(a, "--no-continuous-batching", StringComparison.OrdinalIgnoreCase))
             {
                 Environment.SetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED", "1");
-                Environment.SetEnvironmentVariable("TS_QWEN35_BATCHED", "0");
                 changed = true;
                 continue;
             }
@@ -682,209 +674,7 @@ public static class ServerOptionsBuilder
         // The speculative-decoding flags mean the same thing in both hosts,
         // so they are parsed and validated in one shared place
         // (TensorSharp.Runtime.Speculative) rather than kept in step by hand.
-        bool changed = SpeculativeCliFlags.Apply(args);
-
-        for (int i = 0; i < args.Length; i++)
-        {
-            // The one --draft-model also has to reach the model FACTORY for the
-            // block drafters that must be resident before the layer split runs
-            // (DeepSeek V4's DSpark, the DFlash / DFlash2 drafters for
-            // Muse-Glimmer and Qwen 3.8). SpeculativeCliFlags.Apply above
-            // already validated the path, published it for the attach-after-load
-            // path, and enabled speculation; these env vars are how the factory
-            // and a runtime model switch see it.
-            //
-            // All THREE are set, because each architecture reads its own and
-            // only the loaded model reads any of them. Setting just the DSpark
-            // one - which is what this did - meant --draft-model was silently
-            // ignored on the server for every DFlash target, the flag's most
-            // common use. A file that is not a block drafter at all (Gemma 4's
-            // per-token assistant head) is simply never read from these: the
-            // loaders probe the GGUF's own declared architecture, so the
-            // operator never has to know which kind their file is.
-            if (SpeculativeCliFlags.TryReadOption(args, ref i, "--draft-model", out string? dsparkOpt))
-            {
-                Environment.SetEnvironmentVariable("TS_DSV4_DSPARK", dsparkOpt);
-                Environment.SetEnvironmentVariable("TS_QWEN35_DFLASH", dsparkOpt);
-                Environment.SetEnvironmentVariable("TS_MUSE_GLIMMER_DFLASH", dsparkOpt);
-                Environment.SetEnvironmentVariable("TS_NEMOTRON_DFLASH", dsparkOpt);
-                changed = true;
-            }
-        }
-        return changed;
-    }
-
-    /// <summary>
-    /// The valueless <c>--paged-kv*</c> spellings <see cref="ApplyPagedKvCacheCliFlags"/>
-    /// accepts. One table, read by the applier's skip in <see cref="ParseArgs"/> and by
-    /// <see cref="DescribeInertPagedKvFlags"/>, so the warning cannot miss a spelling the
-    /// parser accepts.
-    /// </summary>
-    internal static readonly string[] PagedKvSwitchFlags =
-    {
-        "--paged-kv", "--no-paged-kv",
-    };
-
-    /// <summary>The <c>--paged-kv* VALUE</c> options; see <see cref="PagedKvSwitchFlags"/>.</summary>
-    internal static readonly string[] PagedKvValueFlags =
-    {
-        "--paged-kv-block-size", "--paged-kv-ram-mb", "--paged-kv-ssd-dir", "--paged-kv-ssd-mb",
-        "--paged-kv-quant-bits", "--paged-kv-redis-url", "--paged-kv-redis-ttl",
-    };
-
-    /// <summary>
-    /// Translate <c>--paged-kv*</c> CLI flags into the env vars consumed by
-    /// <see cref="PagedKvCacheConfig.FromEnvironment"/>, validating each value. Returns
-    /// true when at least one flag was applied.
-    /// </summary>
-    /// <remarks>
-    /// Nothing on the server reads those variables: the standalone
-    /// <c>PagedKvCacheManager</c> they configure (RAM/SSD/Redis block tiers, the
-    /// TurboQuant codec) is built only by <c>TensorSharp.Cli --paged-bench</c>, and the
-    /// serving path's prefix reuse is the scheduler's radix prefix cache. The flags stay
-    /// accepted - refusing them would stop existing command lines and config files from
-    /// starting - and the host warns once through <see cref="DescribeInertPagedKvFlags"/>
-    /// rather than logging them as configured.
-    /// </remarks>
-    public static bool ApplyPagedKvCacheCliFlags(string[] args)
-    {
-        if (args == null || args.Length == 0)
-            return false;
-
-        bool changed = false;
-        for (int i = 0; i < args.Length; i++)
-        {
-            string a = args[i];
-            if (string.Equals(a, "--paged-kv", StringComparison.OrdinalIgnoreCase))
-            {
-                Environment.SetEnvironmentVariable("TS_KV_PAGED_CACHE", "1");
-                changed = true;
-                continue;
-            }
-            if (string.Equals(a, "--no-paged-kv", StringComparison.OrdinalIgnoreCase))
-            {
-                Environment.SetEnvironmentVariable("TS_KV_PAGED_CACHE", "0");
-                changed = true;
-                continue;
-            }
-            if (TryReadOption(args, ref i, "--paged-kv-block-size", out string? blockSizeOpt))
-            {
-                if (!int.TryParse(blockSizeOpt, NumberStyles.Integer, CultureInfo.InvariantCulture, out int blockSize) || blockSize <= 0)
-                    throw new ArgumentException($"Invalid value for --paged-kv-block-size: '{blockSizeOpt}'.");
-                Environment.SetEnvironmentVariable("TS_KV_BLOCK_SIZE", blockSize.ToString(CultureInfo.InvariantCulture));
-                changed = true;
-                continue;
-            }
-            if (TryReadOption(args, ref i, "--paged-kv-ram-mb", out string? ramOpt))
-            {
-                if (!long.TryParse(ramOpt, NumberStyles.Integer, CultureInfo.InvariantCulture, out long ramMb) || ramMb <= 0)
-                    throw new ArgumentException($"Invalid value for --paged-kv-ram-mb: '{ramOpt}'.");
-                Environment.SetEnvironmentVariable("TS_KV_CACHE_MAX_RAM_MB", ramMb.ToString(CultureInfo.InvariantCulture));
-                changed = true;
-                continue;
-            }
-            if (TryReadOption(args, ref i, "--paged-kv-ssd-dir", out string? ssdDirOpt))
-            {
-                Environment.SetEnvironmentVariable("TS_KV_CACHE_SSD_DIR", ssdDirOpt);
-                changed = true;
-                continue;
-            }
-            if (TryReadOption(args, ref i, "--paged-kv-ssd-mb", out string? ssdMbOpt))
-            {
-                if (!long.TryParse(ssdMbOpt, NumberStyles.Integer, CultureInfo.InvariantCulture, out long ssdMb) || ssdMb <= 0)
-                    throw new ArgumentException($"Invalid value for --paged-kv-ssd-mb: '{ssdMbOpt}'.");
-                Environment.SetEnvironmentVariable("TS_KV_CACHE_MAX_SSD_MB", ssdMb.ToString(CultureInfo.InvariantCulture));
-                changed = true;
-                continue;
-            }
-            if (TryReadOption(args, ref i, "--paged-kv-quant-bits", out string? quantBitsOpt))
-            {
-                // Accepts 0 (explicit off), 2, 4, or 8 - the same set the CLI
-                // takes and the same set TurboQuantKvCodec implements (2-bit
-                // uses its affine min+scale layout rather than the symmetric
-                // one 4/8-bit use). The paged manager gates the codec a second
-                // time on model.RequiresPerBlockCapture, so requesting a codec
-                // on a recurrent-state model still falls back to passthrough at
-                // runtime - the value here just records the operator's intent.
-                if (!int.TryParse(quantBitsOpt, NumberStyles.Integer, CultureInfo.InvariantCulture, out int quantBits))
-                    throw new ArgumentException($"Invalid value for --paged-kv-quant-bits: '{quantBitsOpt}'. Expected 0 (off), 2, 4, or 8.");
-                if (quantBits != 0 && quantBits != 2 && quantBits != 4 && quantBits != 8)
-                    throw new ArgumentException($"Invalid value for --paged-kv-quant-bits: {quantBits}. Expected 0 (off), 2, 4, or 8.");
-                Environment.SetEnvironmentVariable("TS_KV_PAGED_QUANT_BITS", quantBits.ToString(CultureInfo.InvariantCulture));
-                changed = true;
-                continue;
-            }
-            if (TryReadOption(args, ref i, "--paged-kv-redis-url", out string? redisUrlOpt))
-            {
-                Environment.SetEnvironmentVariable("TS_KV_CACHE_REDIS_URL", redisUrlOpt);
-                changed = true;
-                continue;
-            }
-            if (TryReadOption(args, ref i, "--paged-kv-redis-ttl", out string? redisTtlOpt))
-            {
-                if (!int.TryParse(redisTtlOpt, NumberStyles.Integer, CultureInfo.InvariantCulture, out int redisTtl) || redisTtl < 0)
-                    throw new ArgumentException($"Invalid value for --paged-kv-redis-ttl: '{redisTtlOpt}'. Expected minutes (0 = no TTL).");
-                Environment.SetEnvironmentVariable("TS_KV_CACHE_REDIS_TTL_MINUTES", redisTtl.ToString(CultureInfo.InvariantCulture));
-                changed = true;
-                continue;
-            }
-        }
-        return changed;
-    }
-
-    /// <summary>
-    /// The startup warning for <c>--paged-kv*</c> flags, or null when none was given.
-    /// Names every such flag on the line, says that the server never builds the cache they
-    /// configure, and says what serves prefix reuse instead - so an operator who set them
-    /// is told once, instead of reading "configured" and assuming a cache tier exists.
-    /// </summary>
-    /// <param name="args">The command line, after config-file expansion.</param>
-    /// <param name="prefixCacheEnabled">Whether the radix prefix cache is on for this
-    /// process (<c>--no-prefix-cache</c> and <c>TS_SCHED_PREFIX_CACHE=0</c> turn it off).</param>
-    public static string? DescribeInertPagedKvFlags(string[] args, bool prefixCacheEnabled)
-    {
-        if (args == null || args.Length == 0)
-            return null;
-
-        var named = new List<string>();
-        for (int i = 0; i < args.Length; i++)
-        {
-            string? flag = null;
-            foreach (string candidate in PagedKvSwitchFlags)
-            {
-                if (string.Equals(args[i], candidate, StringComparison.OrdinalIgnoreCase))
-                {
-                    flag = candidate;
-                    break;
-                }
-            }
-            if (flag == null)
-            {
-                foreach (string candidate in PagedKvValueFlags)
-                {
-                    if (TryReadOption(args, ref i, candidate, out _))
-                    {
-                        flag = candidate;
-                        break;
-                    }
-                }
-            }
-            if (flag != null && !named.Contains(flag))
-                named.Add(flag);
-        }
-
-        if (named.Count == 0)
-            return null;
-
-        string reuse = prefixCacheEnabled
-            ? "Prefix reuse across requests is served by the radix prefix cache, which is on (--no-prefix-cache turns it off)."
-            : "Prefix reuse across requests is served by the radix prefix cache, and --no-prefix-cache / "
-              + "TS_SCHED_PREFIX_CACHE=0 has turned that off, so this server reuses no prefix at all.";
-        return $"{string.Join(", ", named)} {(named.Count == 1 ? "has" : "have")} no effect on this server: "
-            + "it never builds the standalone paged KV cache these configure (only TensorSharp.Cli --paged-bench "
-            + "does), so no request reads or fills it. "
-            + reuse
-            + " Remove the flag(s) to silence this warning.";
+        return SpeculativeCliFlags.Apply(args);
     }
 
     /// <summary>Disable scheduler prefix reuse when the host's prefix-cache opt-out
@@ -900,15 +690,8 @@ public static class ServerOptionsBuilder
     /// <summary>
     /// Translate <c>--redis-url &lt;url&gt;</c> into
     /// <c>TS_RESPONSES_STORE_REDIS_URL</c>, which backs the Responses API store with
-    /// Redis instead of the bounded in-memory cache - the one thing the flag does on the
-    /// server. It also fills in <c>TS_KV_CACHE_REDIS_URL</c>, the Redis tier of the
-    /// standalone paged KV cache, which only <c>TensorSharp.Cli --paged-bench</c> builds:
-    /// no server request path reads that variable, so that half of the flag is inert here
-    /// (see <see cref="ApplyPagedKvCacheCliFlags"/>).
-    /// If either env var is already set, it is left untouched so that
-    /// split configurations (different Redis instances per subsystem)
-    /// are preserved.
-    /// Returns true when the flag was present.
+    /// Redis instead of the bounded in-memory cache. An already-set variable is left
+    /// untouched. Returns true when the flag was present.
     /// </summary>
     public static bool ApplyRedisCliFlags(string[] args)
     {
@@ -926,8 +709,6 @@ public static class ServerOptionsBuilder
         }
         if (redisUrl == null)
             return false;
-        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("TS_KV_CACHE_REDIS_URL")))
-            Environment.SetEnvironmentVariable("TS_KV_CACHE_REDIS_URL", redisUrl);
         if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("TS_RESPONSES_STORE_REDIS_URL")))
             Environment.SetEnvironmentVariable("TS_RESPONSES_STORE_REDIS_URL", redisUrl);
         return true;
@@ -975,25 +756,16 @@ public static class ServerOptionsBuilder
                 changed = true;
                 continue;
             }
-            // Video-generation companions (same env-var override mechanism). Each path
-            // is published under the generic TS_VIDEO_* name AND the historical TS_WAN_*
-            // one, so WanVideoModel keeps reading what it always did. The --wan-*
-            // spellings predate the second video model and stay accepted; config files
-            // in the wild use them.
-            if (TryReadOption(args, ref i, "--video-vae", out string? videoVaeOpt)
-                || TryReadOption(args, ref i, "--wan-vae", out videoVaeOpt))
+            // Video-generation companions (same env-var override mechanism).
+            if (TryReadOption(args, ref i, "--video-vae", out string? videoVaeOpt))
             {
                 SetQwenImageCompanionEnv("--video-vae", "TS_VIDEO_VAE", videoVaeOpt);
-                SetQwenImageCompanionEnv("--video-vae", "TS_WAN_VAE", videoVaeOpt);
                 changed = true;
                 continue;
             }
-            if (TryReadOption(args, ref i, "--video-text-encoder", out string? videoTeOpt)
-                || TryReadOption(args, ref i, "--video-te", out videoTeOpt)
-                || TryReadOption(args, ref i, "--wan-te", out videoTeOpt))
+            if (TryReadOption(args, ref i, "--video-text-encoder", out string? videoTeOpt))
             {
                 SetQwenImageCompanionEnv("--video-text-encoder", "TS_VIDEO_TEXT_ENCODER", videoTeOpt);
-                SetQwenImageCompanionEnv("--video-text-encoder", "TS_WAN_TE", videoTeOpt);
                 changed = true;
                 continue;
             }
@@ -1001,11 +773,9 @@ public static class ServerOptionsBuilder
             // They are auto-resolved by name when they sit together, but a config file
             // has to be able to name the second one explicitly — that is the only way
             // its auto-download entry can exist at all.
-            if (TryReadOption(args, ref i, "--video-dit2", out string? videoDit2Opt)
-                || TryReadOption(args, ref i, "--wan-dit2", out videoDit2Opt))
+            if (TryReadOption(args, ref i, "--video-dit2", out string? videoDit2Opt))
             {
                 SetQwenImageCompanionEnv("--video-dit2", "TS_VIDEO_DIT2", videoDit2Opt);
-                SetQwenImageCompanionEnv("--video-dit2", "TS_WAN_DIT2", videoDit2Opt);
                 changed = true;
                 continue;
             }
@@ -1474,30 +1244,15 @@ public static class ServerOptionsBuilder
                 continue;
             }
 
-            // Paged-KV flags are consumed by ApplyPagedKvCacheCliFlags(args)
-            // in a separate earlier pass. They still appear in args[] when
-            // ParseArgs walks the list, so recognise + skip them here to
-            // keep them out of the unknown-arg trap below. (Accepted but inert
-            // on the server; the host warns about them once at startup.)
-            if (MatchesAny(args[i], PagedKvSwitchFlags))
-            {
-                continue;
-            }
             // Continuous-batching flags are also consumed by an earlier pass
             // (ApplyContinuousBatchingCliFlag, including --prefill-chunk-size).
             // Skip here so ParseArgs doesn't trip the unknown-arg trap.
             if (string.Equals(args[i], "--continuous-batching", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(args[i], "--paged-batching", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(args[i], "--no-continuous-batching", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(args[i], "--no-paged-batching", StringComparison.OrdinalIgnoreCase))
+                string.Equals(args[i], "--no-continuous-batching", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
             if (TryReadOption(args, ref i, "--prefill-chunk-size", out _))
-            {
-                continue;
-            }
-            if (TryReadAnyOption(args, ref i, PagedKvValueFlags))
             {
                 continue;
             }
@@ -1602,18 +1357,13 @@ public static class ServerOptionsBuilder
             {
                 continue;
             }
-            // Video companions, consumed by the same earlier pass. They were once
-            // missing here, so `--wan-vae`/`--wan-te` — both documented in --help —
-            // reached the unknown-flag trap below and the server refused to start.
-            // Every spelling, old and new, must be listed or that regression returns.
+            // Video companions, consumed by the same earlier pass. Each one must be
+            // listed here too, or it reaches the unknown-flag trap below and the
+            // server refuses to start.
             if (TryReadOption(args, ref i, "--video-vae", out _)
                 || TryReadOption(args, ref i, "--video-text-encoder", out _)
-                || TryReadOption(args, ref i, "--video-te", out _)
                 || TryReadOption(args, ref i, "--video-dit2", out _)
                 || TryReadOption(args, ref i, "--audio-vae", out _)
-                || TryReadOption(args, ref i, "--wan-vae", out _)
-                || TryReadOption(args, ref i, "--wan-te", out _)
-                || TryReadOption(args, ref i, "--wan-dit2", out _)
                 || TryReadOption(args, ref i, "--video-width", out _)
                 || TryReadOption(args, ref i, "--video-height", out _)
                 || TryReadOption(args, ref i, "--video-steps", out _)
@@ -1659,21 +1409,16 @@ public static class ServerOptionsBuilder
             "--temperature", "--top-k", "--top-p", "--min-p",
             "--repeat-penalty", "--repeat-last-n", "--presence-penalty", "--frequency-penalty",
             "--seed", "--stop", "--sampling-precedence",
-            "--paged-kv", "--no-paged-kv",
-            "--paged-kv-block-size", "--paged-kv-ram-mb",
-            "--paged-kv-ssd-dir", "--paged-kv-ssd-mb", "--paged-kv-quant-bits",
-            "--continuous-batching", "--no-continuous-batching",
-            "--paged-batching", "--no-paged-batching", "--prefill-chunk-size",
+            "--continuous-batching", "--no-continuous-batching", "--prefill-chunk-size",
             // Speculative flags come from SpeculativeCliFlags' tables below
             // (appended after this literal) so a new spelling is suggestible
             // the moment it is accepted.
             "--draft-model",
-            "--redis-url", "--paged-kv-redis-url", "--paged-kv-redis-ttl",
+            "--redis-url",
             "--n-cpu-moe", "--cpu-moe", "--cpu-moe-threads",
             "--qwen-image-vae", "--qwen-image-vl", "--qwen-image-mmproj",
-            "--video-vae", "--video-text-encoder", "--video-te", "--video-dit2", "--audio-vae",
+            "--video-vae", "--video-text-encoder", "--video-dit2", "--audio-vae",
             "--video-width", "--video-height", "--video-steps", "--video-mode",
-            "--wan-vae", "--wan-te", "--wan-dit2",
             "--kv-cache-dtype", "--gpu-device", "--list-gpus", "--help",
             "--tp", "--tp-node-id", "--tp-peers",
             "--upload-max-mb", "--upload-quota-mb", "--upload-ttl-hours",

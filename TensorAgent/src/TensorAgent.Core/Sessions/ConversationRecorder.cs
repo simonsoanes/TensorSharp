@@ -128,11 +128,16 @@ public sealed class ConversationRecorder
     /// <param name="content">The assistant's text, as the page assembled it.</param>
     /// <param name="thinking">Its reasoning, when the model produced any.</param>
     /// <param name="artifacts">Files the turn's tools produced, as the page's chips name them.</param>
+    /// <param name="imageUrl">The picture an image model made this turn, which may be all it made.</param>
+    /// <param name="videoUrl">The clip a video model made this turn, likewise.</param>
+    /// <param name="audioUrl">That clip's soundtrack, when it is a separate file rather than inside the clip.</param>
     public void Complete(
         string sessionId, string content, string? thinking = null,
-        IReadOnlyList<StoredArtifact>? artifacts = null)
+        IReadOnlyList<StoredArtifact>? artifacts = null, string? imageUrl = null,
+        string? videoUrl = null, string? audioUrl = null)
     {
-        if (string.IsNullOrEmpty(content) && string.IsNullOrEmpty(thinking) && artifacts is not { Count: > 0 })
+        if (string.IsNullOrEmpty(content) && string.IsNullOrEmpty(thinking) && artifacts is not { Count: > 0 }
+            && string.IsNullOrEmpty(imageUrl) && string.IsNullOrEmpty(videoUrl))
             return;
         try
         {
@@ -155,6 +160,9 @@ public sealed class ConversationRecorder
                 // the answer (a small model repeats a link erratically), so it is written
                 // down here or it is lost the moment the user opens another chat.
                 Artifacts = artifacts is { Count: > 0 } ? new List<StoredArtifact>(artifacts) : null,
+                ImageUrl = string.IsNullOrEmpty(imageUrl) ? null : imageUrl,
+                VideoUrl = string.IsNullOrEmpty(videoUrl) ? null : videoUrl,
+                AudioUrl = string.IsNullOrEmpty(videoUrl) || string.IsNullOrEmpty(audioUrl) ? null : audioUrl,
             });
             _store.Save(conversation);
         }

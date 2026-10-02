@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>TensorSharp Chat</title>
+<link rel="stylesheet" href="/mask-editor.css">
+<script src="/mask-editor.js"></script>
 <style>
 :root {
   --bg: #0f0f0f;
@@ -302,9 +304,13 @@ button.primary:hover { background: var(--accent-hover); }
   line-height: 1.6;
   font-size: 14px;
   max-width: 85%;
-  white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* The message keeps its line breaks -- not the whole bubble, whose markup is built
+   from indented templates: pre-wrap there drew that indentation as blank lines above
+   the reasoning, under a user's message and between the stats and the file chips. */
+.bubble-text { white-space: pre-wrap; }
 
 .message.user .bubble {
   background: var(--user-bg);
@@ -337,29 +343,6 @@ button.primary:hover { background: var(--accent-hover); }
   border-radius: 6px;
   font-size: 12px;
   color: var(--text2);
-}
-
-.queue-indicator {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
-  background: #1e2a42;
-  border: 1px solid #2a3a5a;
-  border-radius: 8px;
-  font-size: 13px;
-  color: var(--accent);
-  margin-bottom: 8px;
-  animation: fadeIn 0.3s ease;
-}
-
-.queue-indicator .queue-spinner {
-  width: 14px;
-  height: 14px;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
 }
 
 @keyframes spin {
@@ -630,6 +613,11 @@ button.primary:hover { background: var(--accent-hover); }
 .attachments {
   display: flex;
   align-items: center;
+  align-content: flex-start;
+  max-height: 40vh;
+  max-height: 40dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   gap: 8px;
   margin-bottom: 8px;
   max-width: var(--chat-shell-max-width);
@@ -684,6 +672,17 @@ button.primary:hover { background: var(--accent-hover); }
    chip. The name stays in the tile's tooltip and alt text. Top left, .kind marks a
    video or a PDF; bottom left, .badge is the "Picture N" order a multi-image edit
    prompt refers to, or a scanned PDF's page count. */
+.image-selection-button,.image-edit-actions button {
+  padding:8px 12px; min-height:40px; border:1px solid var(--border); border-radius:8px;
+  color:var(--text); background:var(--surface2); cursor:pointer; font:inherit;
+}
+.image-selection-button:focus-visible,.image-edit-actions button:focus-visible { outline:2px solid var(--accent); }
+.image-edit-attachment { display:flex; align-items:center; gap:8px; padding:6px; border:1px solid var(--border); border-radius:10px; }
+.image-edit-attachment.editing-target { border-color:var(--accent); }
+.image-selection-controls { display:flex; flex-direction:column; align-items:flex-start; gap:4px; }
+.image-selection-role { font-size:12px; font-weight:600; }
+.image-selection-status { font-size:12px; color:var(--text2); max-width:140px; }
+.image-edit-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
 .attachment-thumb {
   position: relative;
   flex: 0 0 auto;
@@ -1212,6 +1211,61 @@ button.primary:hover { background: var(--accent-hover); }
 
 /* A download link the model wrote into its answer, made clickable at render. */
 .bubble-text a.artifact-link { color: var(--accent); }
+
+/* An answer rendered from Markdown (renderMarkdown). .bubble-text's pre-wrap stays for
+   plain text -- errors, denoising previews -- and a rendered answer lays itself out. */
+.bubble-text.md { display: block; white-space: normal; }
+.bubble-text.md > :first-child { margin-top: 0; }
+.bubble-text.md > :last-child { margin-bottom: 0; }
+.bubble-text.md p { margin: 0 0 0.7em; }
+.bubble-text.md h1, .bubble-text.md h2, .bubble-text.md h3,
+.bubble-text.md h4, .bubble-text.md h5, .bubble-text.md h6 {
+  margin: 1em 0 0.45em;
+  line-height: 1.3;
+  font-weight: 650;
+}
+.bubble-text.md h1 { font-size: 1.3em; }
+.bubble-text.md h2 { font-size: 1.18em; }
+.bubble-text.md h3 { font-size: 1.07em; }
+.bubble-text.md h4, .bubble-text.md h5, .bubble-text.md h6 { font-size: 1em; }
+.bubble-text.md ul, .bubble-text.md ol { margin: 0 0 0.7em; padding-left: 1.6em; }
+.bubble-text.md li { margin: 0.2em 0; }
+.bubble-text.md li > ul, .bubble-text.md li > ol { margin: 0.2em 0 0; }
+.bubble-text.md a { color: var(--accent); }
+.bubble-text.md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  padding: 0.12em 0.38em;
+  border-radius: 5px;
+  background: var(--surface2);
+}
+.bubble-text.md pre {
+  margin: 0 0 0.8em;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #121212;
+  overflow-x: auto;
+  white-space: pre;
+}
+.bubble-text.md pre code { padding: 0; background: none; font-size: 0.86em; }
+.bubble-text.md blockquote {
+  margin: 0 0 0.7em;
+  padding: 0.1em 0 0.1em 0.9em;
+  border-left: 3px solid var(--border);
+  color: var(--text2);
+}
+.bubble-text.md hr { border: 0; border-top: 1px solid var(--border); margin: 1em 0; }
+.bubble-text.md .md-table { overflow-x: auto; margin: 0 0 0.8em; }
+.bubble-text.md table { border-collapse: collapse; }
+.bubble-text.md th, .bubble-text.md td {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.bubble-text.md th { background: var(--surface2); font-weight: 600; }
+.bubble-text.md img { display: block; max-width: 100%; margin: 0.4em 0; border-radius: 8px; }
 </style>
 </head>
 <body>
@@ -1288,6 +1342,7 @@ const autoScrollThreshold = 32;
 
 let chatHistory = [];
 let pendingAttachments = [];
+let activeImageEditTarget = null;
 let isGenerating = false;
 let currentAbortController = null;
 let currentLoadedModel = null;
@@ -1374,32 +1429,10 @@ function renderEmptyState() {
     </div>`;
 }
 
-function legacyStatusBadge(data) {
-  currentLoadedModel = data.loaded || null;
-  currentArchitecture = data.architecture || null;
-  currentVideoCaps = data.video || null;
-
-  if (!currentLoadedModel) {
-    statusBadge.textContent = 'No model configured';
-    statusBadge.classList.remove('loaded');
-    return;
-  }
-
-  let statusText = currentLoadedModel + ' (' + (data.architecture || '?') + ')';
-  if (data.loadedBackend) {
-    statusText += ' · ' + data.loadedBackend;
-  }
-  if (data.loadedMmProj) {
-    statusText += ' + ' + data.loadedMmProj;
-  }
-
-  statusBadge.textContent = statusText;
-  statusBadge.classList.add('loaded');
-}
-
 function updateStatusBadge(data) {
   currentLoadedModel = data.loaded || null;
   currentArchitecture = data.architecture || null;
+  renderAttachments();
   currentVideoCaps = data.video || null;
 
   if (!currentLoadedModel) {
@@ -1476,6 +1509,7 @@ async function disposeCurrentSession() {
 async function clearChat() {
   chatHistory = [];
   pendingAttachments = [];
+  activeImageEditTarget = null;
   attachmentsDiv.innerHTML = '';
   chatContainer.innerHTML = '';
   needsCacheReset = false;
@@ -1568,9 +1602,40 @@ function renderAttachments() {
         title: `Scanned PDF: ${label}`, removeTitle: 'Remove this PDF', page: true };
     }
     const chip = () => buildAttachmentChip(icon, label, idx, name);
-    attachmentsDiv.appendChild(thumb && thumb.url && !att.thumbFailed
+    const selectableImage = att.mediaType === 'image' && isQwenImageModel();
+    const attachmentHost = selectableImage ? document.createElement('div') : attachmentsDiv;
+    if (selectableImage) {
+      attachmentHost.className = 'image-edit-attachment' + (imageNum === 1 ? ' editing-target' : '');
+      attachmentHost.dataset.file = att.file;
+      attachmentHost.setAttribute('role', 'group');
+      attachmentHost.setAttribute('aria-label', 'Picture ' + imageNum + ': ' + name);
+      attachmentsDiv.appendChild(attachmentHost);
+    }
+    attachmentHost.appendChild(thumb && thumb.url && !att.thumbFailed
       ? buildAttachmentThumb(att, idx, name, thumb, chip)
       : chip());
+    if (selectableImage) {
+      const controls = document.createElement('div');
+      controls.className = 'image-selection-controls';
+      const role = document.createElement('span');
+      role.className = 'image-selection-role';
+      role.textContent = imageNum === 1 ? 'Editing target' : 'Reference';
+      controls.appendChild(role);
+      const select = document.createElement('button');
+      select.type = 'button';
+      select.className = 'image-selection-button';
+      select.textContent = att.maskPath ? 'Edit selection' : 'Select area';
+      select.title = 'Save a selection to make this photo the editing target';
+      select.addEventListener('click', () => selectImageArea(att));
+      controls.appendChild(select);
+      if (att.maskPath) {
+        const status = document.createElement('span');
+        status.className = 'image-selection-status';
+        status.textContent = att === activeImageEditTarget ? 'Outside selection protected' : 'Selection saved';
+        controls.appendChild(status);
+      }
+      attachmentHost.appendChild(controls);
+    }
   });
   if (focusSlot >= 0) {
     const removes = attachmentsDiv.querySelectorAll('.remove');
@@ -1633,8 +1698,55 @@ function buildAttachmentThumb(att, idx, name, thumb, chip) {
 }
 
 function removeAttachment(idx) {
+  if (pendingAttachments[idx] === activeImageEditTarget) activeImageEditTarget = null;
   pendingAttachments.splice(idx, 1);
   renderAttachments();
+}
+
+function isQwenImageModel() {
+  return currentArchitecture === 'qwen_image' || currentArchitecture === 'qwen-image';
+}
+
+async function selectImageArea(att) {
+  if (isGenerating || pendingUploadCount) return;
+  pendingUploadCount++;
+  try {
+    if (att.editUnavailableReason) throw new Error(att.editUnavailableReason);
+    if (/\.(heic|heif)$/i.test(att.file || att.fileName || '') && !att.editUrl)
+      throw new Error('Reattach this photo to prepare a full-resolution image for area selection.');
+    const selection = await TensorSharpMaskEditor.open({
+      sourceUrl: att.editUrl || uploadUrlForAttachment(att),
+      maskUrl: att.maskPath ? uploadUrlForAttachment({ file: att.maskPath }) : null,
+      maskFeather: att.maskFeather || 0, maskCrop: !!att.maskCrop
+    });
+    if (!selection || !pendingAttachments.includes(att)) return;
+    if (selection.remove) {
+      delete att.maskPath; delete att.maskFeather; delete att.maskCrop;
+      if (att === activeImageEditTarget) activeImageEditTarget = null;
+    } else {
+      const form = new FormData();
+      form.append('file', selection.blob, 'selection.png');
+      const response = await fetch('/api/upload', { method: 'POST', body: form });
+      const uploaded = await response.json();
+      if (!response.ok || !uploaded.ok || !uploaded.file) throw new Error(uploaded.error || 'Selection upload failed');
+      if (!pendingAttachments.includes(att)) return;
+      att.maskPath = uploaded.file;
+      att.maskFeather = selection.maskFeather;
+      att.maskCrop = selection.maskCrop;
+      // Commit the source change only after its mask is uploaded. Other saved
+      // selections stay with their photos; only the first photo's mask is sent.
+      const targetIndex = pendingAttachments.indexOf(att);
+      pendingAttachments.splice(targetIndex, 1);
+      pendingAttachments.unshift(att);
+      activeImageEditTarget = att;
+    }
+    renderAttachments();
+    messageInput.focus();
+  } catch (error) {
+    alert('Selection error: ' + error.message);
+  } finally {
+    pendingUploadCount--;
+  }
 }
 
 // ---- Agent Skills --------------------------------------------------------
@@ -2246,11 +2358,19 @@ function appendArtifactFiles(assistDiv, files) {
   files.forEach(f => {
     const url = String((f && f.url) || '');
     if (!url.startsWith(ARTIFACT_URL_PREFIX)) return;
-    if (box.querySelector(`a[href="${CSS.escape(url)}"]`)) return;   // one chip per file
-    const a = document.createElement('a');
+    // One chip per file NAME. Every run publishes under its own URL, so a program the
+    // model ran three times used to leave three chips for one file; the latest run's
+    // copy is the one to offer.
+    const name = String((f && f.name) || url.split('/').pop());
+    let a = Array.from(box.querySelectorAll('a')).find(x => x.dataset.name === name);
+    if (!a) {
+      a = document.createElement('a');
+      a.dataset.name = name;
+      a.setAttribute('download', '');
+      box.appendChild(a);
+    }
     a.href = url;
-    a.setAttribute('download', '');
-    a.textContent = '⭳ ' + String((f && f.name) || url.split('/').pop());
+    a.textContent = '⭳ ' + name;
     const size = formatArtifactBytes(f && f.bytes);
     if (size) {
       const span = document.createElement('span');
@@ -2258,42 +2378,286 @@ function appendArtifactFiles(assistDiv, files) {
       span.textContent = size;
       a.appendChild(span);
     }
-    box.appendChild(a);
   });
 }
 
-// Turn the artifact links the model wrote into its answer into real anchors.
-// Handles the markdown form "[name](/api/code/artifacts/...)" and a bare or
-// backticked URL. Built with DOM nodes, never innerHTML: everything except the
-// vetted href stays plain text.
-function renderArtifactLinks(el, text) {
-  const pattern = /\[([^\]\n]{1,200})\]\((\/api\/code\/artifacts\/[^\s)]+)\)|`?(\/api\/code\/artifacts\/[^\s`")\]]+)`?/g;
-  let last = 0, match, found = false;
-  const nodes = [];
-  while ((match = pattern.exec(text)) !== null) {
-    let url = match[2] || match[3];
-    let consumed = match[0].length;
-    if (match[3]) {
-      // A bare URL at the end of a sentence drags its punctuation along; the
-      // markdown form has explicit delimiters and needs no trimming.
-      const trimmed = url.replace(/[.,;:!?]+$/, '');
-      consumed -= (url.length - trimmed.length);
-      url = trimmed;
+// ---- Markdown ---------------------------------------------------------------
+// Models answer in Markdown, and this page used to print it raw: a table arrived as
+// rows of pipes, a heading with its hashes. renderMarkdown draws the subset chat
+// answers use -- fenced and inline code, headings, bold, italic, strikethrough,
+// links, bullet and numbered lists (nested by indentation), block quotes, rules and
+// GitHub-style tables. It builds DOM nodes and never uses innerHTML: every character
+// the model wrote reaches the page in a text node, so a reply that contains HTML
+// shows that HTML as text. A link keeps its href only when that is http(s), mailto
+// or this server's artifact route, and only an artifact becomes an <img>: an image
+// from anywhere else would be fetched the moment the answer rendered.
+const MD_FENCE = /^ {0,3}(`{3,}|~{3,})[ \t]*([\w+#.-]*)/;
+const MD_HEADING = /^ {0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/;
+const MD_RULE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+const MD_QUOTE = /^ {0,3}>[ ]?(.*)$/;
+const MD_ITEM = /^([ \t]*)([-*+]|\d{1,9}[.)])[ \t]+(.*)$/;
+const MD_TABLE_RULE = /^[ \t]*\|?[ \t]*:?-+:?[ \t]*(\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
+const MD_LINK_OK = /^(https?:\/\/|mailto:)/i;
+const MD_IMAGE_FILE = /\.(png|jpe?g|gif|webp|svg)$/i;
+
+function renderMarkdown(el, text) {
+  const root = document.createDocumentFragment();
+  mdBlocks(String(text == null ? '' : text).replace(/\r\n?/g, '\n').split('\n'), root);
+  el.replaceChildren(root);
+  el.classList.add('md');
+}
+
+function mdNode(tag, parent) {
+  const node = document.createElement(tag);
+  parent.appendChild(node);
+  return node;
+}
+
+function mdBlocks(lines, parent) {
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    let m;
+    if (!line.trim()) {
+      i++;
+    } else if ((m = MD_FENCE.exec(line))) {
+      i = mdFence(lines, i, m, parent, 0);
+    } else if ((m = MD_HEADING.exec(line))) {
+      mdInline(m[2], mdNode('h' + m[1].length, parent));
+      i++;
+    } else if (MD_RULE.test(line)) {
+      mdNode('hr', parent);
+      i++;
+    } else if (MD_QUOTE.test(line)) {
+      const quoted = [];
+      while (i < lines.length && (m = MD_QUOTE.exec(lines[i]))) { quoted.push(m[1]); i++; }
+      mdBlocks(quoted, mdNode('blockquote', parent));
+    } else if (MD_ITEM.test(line)) {
+      i = mdList(lines, i, parent);
+    } else if (mdTableAt(lines, i)) {
+      i = mdTable(lines, i, parent);
+    } else {
+      // A paragraph: its lines keep their breaks, and it ends where another block starts.
+      const p = mdNode('p', parent);
+      mdInline(line.trim(), p);
+      for (i++; i < lines.length && lines[i].trim() && !mdStartsBlock(lines, i); i++) {
+        mdNode('br', p);
+        mdInline(lines[i].trim(), p);
+      }
     }
-    if (!url || !url.startsWith(ARTIFACT_URL_PREFIX)) continue;
-    found = true;
-    if (match.index > last) nodes.push(document.createTextNode(text.slice(last, match.index)));
-    const a = document.createElement('a');
-    a.className = 'artifact-link';
-    a.href = url;
-    a.setAttribute('download', '');
-    a.textContent = match[1] || url.split('/').pop();
-    nodes.push(a);
-    last = match.index + consumed;
   }
-  if (!found) { el.textContent = text; return; }
-  if (last < text.length) nodes.push(document.createTextNode(text.slice(last)));
-  el.replaceChildren(...nodes);
+}
+
+function mdStartsBlock(lines, i) {
+  const line = lines[i];
+  return MD_FENCE.test(line) || MD_HEADING.test(line) || MD_RULE.test(line)
+    || MD_QUOTE.test(line) || MD_ITEM.test(line) || mdTableAt(lines, i);
+}
+
+// Up to the closing fence, or to the end while a reply is still streaming. `indent`
+// is how far a fence inside a list item is indented; its lines lose that much.
+function mdFence(lines, i, m, parent, indent) {
+  const close = new RegExp('^[ \\t]*' + (m[1][0] === '`' ? '`' : '~') + '{' + m[1].length + ',}[ \\t]*$');
+  const body = [];
+  for (i++; i < lines.length && !close.test(lines[i]); i++) {
+    const line = lines[i];
+    body.push(line.slice(Math.min(indent, line.length - line.trimStart().length)));
+  }
+  const code = mdNode('code', mdNode('pre', parent));
+  if (m[2]) code.className = 'language-' + m[2];
+  code.textContent = body.join('\n');
+  return i + 1;
+}
+
+// A GitHub table needs a header row and a delimiter row with the same cell count.
+function mdTableAt(lines, i) {
+  if (i + 1 >= lines.length || !lines[i].includes('|')) return false;
+  const rule = lines[i + 1];
+  return rule.includes('-') && MD_TABLE_RULE.test(rule)
+    && mdCells(lines[i]).length === mdCells(rule).length;
+}
+
+function mdCells(row) {
+  let s = row.trim();
+  if (s.startsWith('|')) s = s.slice(1);
+  if (s.endsWith('|') && !s.endsWith('\\|')) s = s.slice(0, -1);
+  const cells = [];
+  let cell = '', inCode = false;
+  for (let k = 0; k < s.length; k++) {
+    const ch = s[k];
+    if (ch === '\\' && s[k + 1] === '|') { cell += '|'; k++; continue; }
+    if (ch === '`') inCode = !inCode;
+    if (ch === '|' && !inCode) { cells.push(cell.trim()); cell = ''; continue; }
+    cell += ch;
+  }
+  cells.push(cell.trim());
+  return cells;
+}
+
+function mdTable(lines, i, parent) {
+  const head = mdCells(lines[i]);
+  const align = mdCells(lines[i + 1]).map(c =>
+    /^:-+:$/.test(c) ? 'center' : /-:$/.test(c) ? 'right' : /^:-/.test(c) ? 'left' : '');
+  const wrap = mdNode('div', parent);
+  wrap.className = 'md-table';
+  const table = mdNode('table', wrap);
+  const row = (cells, tag, section) => {
+    const tr = mdNode('tr', section);
+    head.forEach((_, k) => {
+      const cell = mdNode(tag, tr);
+      if (align[k]) cell.style.textAlign = align[k];
+      mdInline(cells[k] || '', cell);
+    });
+  };
+  row(head, 'th', mdNode('thead', table));
+  const body = mdNode('tbody', table);
+  for (i += 2; i < lines.length && lines[i].trim() && lines[i].includes('|'); i++)
+    row(mdCells(lines[i]), 'td', body);
+  return i;
+}
+
+// Nesting follows indentation. A blank line does not end a list when the next line
+// continues it, and an indented line adds to the deepest open item.
+function mdList(lines, i, parent) {
+  const stack = [];   // { indent, ordered, list, li }, deepest last
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) {
+      let j = i + 1;
+      while (j < lines.length && !lines[j].trim()) j++;
+      if (j < lines.length && (MD_ITEM.test(lines[j]) || /^[ \t]{2,}\S/.test(lines[j]))) { i = j; continue; }
+      break;
+    }
+    const m = MD_ITEM.exec(line);
+    if (m && !MD_RULE.test(line)) {
+      const indent = m[1].replace(/\t/g, '    ').length;
+      const ordered = /\d/.test(m[2]);
+      while (stack.length && indent < stack[stack.length - 1].indent) stack.pop();
+      let top = stack[stack.length - 1];
+      if (!top || indent > top.indent || top.ordered !== ordered) {
+        if (top && indent === top.indent) stack.pop();   // same depth, other kind: a new list
+        const host = stack.length ? stack[stack.length - 1].li : parent;
+        const list = mdNode(ordered ? 'ol' : 'ul', host);
+        const start = parseInt(m[2], 10);
+        if (ordered && start !== 1) list.start = start;
+        top = { indent, ordered, list, li: null };
+        stack.push(top);
+      }
+      top.li = mdNode('li', top.list);
+      mdInline(m[3], top.li);
+      i++;
+      continue;
+    }
+    if (!stack.length || !/^[ \t]+\S/.test(line)) break;   // an unindented line ends the list
+    const li = stack[stack.length - 1].li;
+    const fence = MD_FENCE.exec(line.trimStart());
+    if (fence) {
+      i = mdFence(lines, i, fence, li, line.length - line.trimStart().length);
+    } else {
+      mdNode('br', li);
+      mdInline(line.trim(), li);
+      i++;
+    }
+  }
+  return i;
+}
+
+// A bare URL at the end of a sentence drags its punctuation along. Returns how much
+// of the match the URL really is.
+function mdUrlLength(url) {
+  let end = url.replace(/[.,;:!?'"]+$/, '').length;
+  if (url[end - 1] === ')' && (url.slice(0, end).match(/\(/g) || []).length
+      < (url.slice(0, end).match(/\)/g) || []).length) end--;
+  return end;
+}
+
+function mdArtifact(host, url, label) {
+  const a = mdNode('a', host);
+  a.className = 'artifact-link';
+  a.href = url;
+  a.setAttribute('download', '');
+  a.textContent = label || url.split('/').pop();
+}
+
+function mdLink(host, url, label, isImage, raw) {
+  if (url.startsWith(ARTIFACT_URL_PREFIX)) {
+    if (isImage && MD_IMAGE_FILE.test(url)) {
+      const a = mdNode('a', host);
+      a.href = url;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      const img = mdNode('img', a);
+      img.src = url;
+      img.alt = label;
+      img.loading = 'lazy';
+    } else {
+      mdArtifact(host, url, label);
+    }
+  } else if (MD_LINK_OK.test(url)) {
+    const a = mdNode('a', host);
+    a.href = url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    mdInline(label, a);
+  } else {
+    host.appendChild(document.createTextNode(raw));
+  }
+}
+
+// [pattern, build]; the earliest match wins, and on a tie the rule listed first.
+// A build may return how much of its match it used.
+const MD_INLINE = [
+  [/(`+)(?!`)([\s\S]*?[^`])\1(?!`)/, (m, host) => {
+    // A backticked artifact path is still a download link.
+    const body = m[2].trim();
+    if (body.startsWith(ARTIFACT_URL_PREFIX) && !/\s/.test(body)) mdArtifact(host, body, '');
+    else mdNode('code', host).textContent = m[2];
+  }],
+  [/\\([\\`*_{}\[\]()#+\-.!|~<>$])/, (m, host) => { host.appendChild(document.createTextNode(m[1])); }],
+  [/(!?)\[([^\]\n]{1,300})\]\([ \t]*<?((?:[^\s()<>]|\([^\s()<>]*\))+)>?(?:[ \t]+"[^"\n]*")?[ \t]*\)/,
+    (m, host) => mdLink(host, m[3], m[2], m[1] === '!', m[0])],
+  [/\*\*\*(?=\S)([\s\S]*?\S)\*\*\*/, (m, host) => mdInline(m[1], mdNode('em', mdNode('strong', host)))],
+  [/\*\*(?=\S)([\s\S]*?\S)\*\*/, (m, host) => mdInline(m[1], mdNode('strong', host))],
+  [/(?<![\w\\])__(?=\S)([\s\S]*?\S)__(?!\w)/, (m, host) => mdInline(m[1], mdNode('strong', host))],
+  [/~~(?=\S)([\s\S]*?\S)~~/, (m, host) => mdInline(m[1], mdNode('del', host))],
+  [/(?<![\w*\\])\*(?=[^\s*])([^*\n]*?[^\s*\\])\*(?!\*)/, (m, host) => mdInline(m[1], mdNode('em', host))],
+  [/(?<![\w\\])_(?=[^\s_])([^_\n]*?[^\s_\\])_(?!\w)/, (m, host) => mdInline(m[1], mdNode('em', host))],
+  [/\/api\/code\/artifacts\/[^\s`"'<>()\[\]]+/, (m, host) => {
+    const n = mdUrlLength(m[0]);
+    mdArtifact(host, m[0].slice(0, n), '');
+    return n;
+  }],
+  [/https?:\/\/[^\s<>"'`]+/, (m, host) => {
+    const n = mdUrlLength(m[0]);
+    const a = mdNode('a', host);
+    a.href = m[0].slice(0, n);
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = m[0].slice(0, n);
+    return n;
+  }],
+];
+
+function mdInline(text, host) {
+  let rest = text;
+  while (rest) {
+    let best = null, build = null;
+    for (const [re, fn] of MD_INLINE) {
+      const m = re.exec(rest);
+      if (m && (!best || m.index < best.index)) {
+        best = m;
+        build = fn;
+        if (m.index === 0) break;
+      }
+    }
+    if (!best) {
+      host.appendChild(document.createTextNode(rest));
+      return;
+    }
+    if (best.index > 0) host.appendChild(document.createTextNode(rest.slice(0, best.index)));
+    const used = build(best, host);
+    rest = rest.slice(best.index + (typeof used === 'number' ? used : best[0].length));
+  }
 }
 
 async function sendMessage() {
@@ -2364,6 +2728,13 @@ async function sendMessage() {
 
   if (imagePaths.length > 0) msg.imagePaths = imagePaths;
   if (stillImagePaths.length > 0) msg.stillImagePaths = stillImagePaths;
+  const editSource = attachmentsCopy.find(att => att.mediaType === 'image');
+  if (editSource && editSource === activeImageEditTarget && editSource.maskPath && isQwenImageModel()) {
+    msg.maskPath = editSource.maskPath;
+    msg.maskMode = 'grayscale';
+    msg.maskFeather = editSource.maskFeather || 0;
+    msg.maskCrop = !!editSource.maskCrop;
+  }
   if (videoFilePaths.length > 0) msg.videoFilePaths = videoFilePaths;
   if (audioPaths.length > 0) msg.audioPaths = audioPaths;
   if (textFilePaths.length > 0) msg.textFilePaths = textFilePaths;
@@ -2380,6 +2751,14 @@ async function sendMessage() {
       };
       if (att.frames && att.frames.length) stored.frames = [...att.frames];
       if (att.fileBacked === true) stored.fileBacked = true;
+      if (att.previewUrl) stored.previewUrl = att.previewUrl;
+      if (att.editUrl) stored.editUrl = att.editUrl;
+      if (att.editUnavailableReason) stored.editUnavailableReason = att.editUnavailableReason;
+      if (att.maskPath) {
+        stored.maskPath = att.maskPath;
+        stored.maskFeather = att.maskFeather || 0;
+        stored.maskCrop = !!att.maskCrop;
+      }
       return stored;
     });
   }
@@ -2389,6 +2768,7 @@ async function sendMessage() {
   messageInput.value = '';
   messageInput.style.height = 'auto';
   pendingAttachments = [];
+  activeImageEditTarget = null;
   attachmentsDiv.innerHTML = '';
 
   const empt = chatContainer.querySelector('.empty-state');
@@ -2397,9 +2777,9 @@ async function sendMessage() {
   await requestAssistantResponse();
 }
 
-async function runImageEdit(userMsg, bubbleText, statsDiv, queueDiv) {
-  if (queueDiv) queueDiv.style.display = 'none';
-  const editing = !!(userMsg.imagePaths && userMsg.imagePaths.length);
+async function runImageEdit(userMsg, bubbleText, statsDiv) {
+  const editImages = userMsg.stillImagePaths || userMsg.imagePaths || [];
+  const editing = editImages.length > 0;
   const action = editing ? 'Image edit' : 'Image generation';
   bubbleText.textContent = editing ? 'Starting edit…' : 'Generating image…';
   statsDiv.textContent = action;
@@ -2426,7 +2806,9 @@ async function runImageEdit(userMsg, bubbleText, statsDiv, queueDiv) {
     const res = await fetch(editing ? '/api/image-edit/stream' : '/api/image-generate/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ imagePaths: userMsg.imagePaths, prompt: userMsg.content || '' }),
+      body: JSON.stringify({ imagePaths: editImages,
+        prompt: userMsg.content || '', maskPath: userMsg.maskPath, maskMode: userMsg.maskMode,
+        maskFeather: userMsg.maskFeather, maskCrop: userMsg.maskCrop }),
       signal: currentAbortController.signal
     });
     if (!res.ok) {
@@ -2468,6 +2850,7 @@ async function runImageEdit(userMsg, bubbleText, statsDiv, queueDiv) {
             dl.textContent = '⬇ Download image';
             dl.style.cssText = 'display:inline-block;margin-top:8px;color:var(--accent);';
             bubbleText.appendChild(dl);
+            if (editing) addImageEditActions(bubbleText, img, userMsg, data.url);
             statsDiv.textContent = `${editing ? "Edited" : "Generated"} ${data.width}×${data.height} · ${((performance.now() - t0) / 1000).toFixed(1)}s`;
           }
           scrollChatToBottom();
@@ -2480,6 +2863,43 @@ async function runImageEdit(userMsg, bubbleText, statsDiv, queueDiv) {
   }
 }
 
+function addImageEditActions(host, img, userMsg, resultUrl) {
+  const actions = document.createElement('div');
+  actions.className = 'image-edit-actions';
+  const source = (userMsg.attachments || []).find(att => att.mediaType === 'image') ||
+    { file: (userMsg.stillImagePaths || userMsg.imagePaths)[0], mediaType: 'image' };
+  const compare = document.createElement('button');
+  compare.type = 'button';
+  compare.textContent = 'Show original';
+  compare.setAttribute('aria-pressed', 'false');
+  compare.addEventListener('click', () => {
+    const original = compare.getAttribute('aria-pressed') !== 'true';
+    img.src = original ? (source.editUrl || uploadUrlForAttachment(source)) : resultUrl;
+    img.alt = original ? 'original image' : 'edited image';
+    compare.textContent = original ? 'Show edited' : 'Show original';
+    compare.setAttribute('aria-pressed', String(original));
+  });
+  const again = document.createElement('button');
+  again.type = 'button';
+  again.textContent = 'Edit again';
+  again.addEventListener('click', () => {
+    if (isGenerating || pendingUploadCount) return;
+    // Keep the original canvas and its selection together for reproducible retries.
+    const attachments = (userMsg.attachments || [source]).filter(att => att.mediaType === 'image')
+      .map(att => ({ ...att }));
+    if (userMsg.maskPath && attachments.length) Object.assign(attachments[0], {
+      maskPath: userMsg.maskPath, maskFeather: userMsg.maskFeather, maskCrop: userMsg.maskCrop
+    });
+    pendingAttachments = attachments;
+    activeImageEditTarget = userMsg.maskPath ? attachments[0] : null;
+    messageInput.value = userMsg.content || '';
+    renderAttachments();
+    messageInput.focus();
+  });
+  actions.append(compare, again);
+  host.appendChild(actions);
+}
+
 // "1h 04m" / "7m 12s" / "43s"; '' when the value is missing or not yet known.
 function fmtDuration(s) {
   if (typeof s !== 'number' || !(s > 0)) return '';
@@ -2488,8 +2908,7 @@ function fmtDuration(s) {
   return `${Math.round(s)}s`;
 }
 
-async function runVideoGenerate(userMsg, bubbleText, statsDiv, queueDiv) {
-  if (queueDiv) queueDiv.style.display = 'none';
+async function runVideoGenerate(userMsg, bubbleText, statsDiv) {
   bubbleText.textContent = 'Starting video generation… (this takes a few minutes)';
   // What attached media MEANS depends on the checkpoint, and only the server knows
   // which one is loaded. A reference model (MiniMax-H3 Ref2VA) takes stills, clips
@@ -2631,11 +3050,25 @@ async function requestAssistantResponse() {
   const assistDiv = addAssistantBubble();
   const bubbleText = assistDiv.querySelector('.bubble-text');
   const statsDiv = assistDiv.querySelector('.stats');
-  const queueDiv = assistDiv.querySelector('.queue-indicator');
 
   let fullText = '';
   let fullThinking = '';
   let wasAborted = false;
+  // Tokens arrive faster than frames, so the answer is re-rendered at most once a
+  // frame. Anything that writes the bubble another way cancels a pending render first.
+  let answerFrame = 0;
+  const renderLiveAnswer = () => {
+    if (answerFrame) return;
+    answerFrame = requestAnimationFrame(() => {
+      answerFrame = 0;
+      renderMarkdown(bubbleText, fullText);
+      scrollChatToBottom();
+    });
+  };
+  const cancelLiveAnswer = () => {
+    if (answerFrame) cancelAnimationFrame(answerFrame);
+    answerFrame = 0;
+  };
   // Names of tool calls the server handed back because nothing in process answered
   // them. This page has no tool implementations, so they are reported, never run.
   let forwardedToolCalls = [];
@@ -2648,14 +3081,14 @@ async function requestAssistantResponse() {
     // Qwen image models use the diffusion endpoints; an attachment selects editing.
     const _lastUser = chatHistory[chatHistory.length - 1];
     if ((currentArchitecture === 'qwen_image' || currentArchitecture === 'qwen-image') && _lastUser) {
-      await runImageEdit(_lastUser, bubbleText, statsDiv, queueDiv);
+      await runImageEdit(_lastUser, bubbleText, statsDiv);
       return;
     }
 
     // Video generation: the prompt (plus an optional attached image as the first
     // frame) produces a video, not chat text. Every video architecture routes here.
     if (VIDEO_ARCHITECTURES.has(currentArchitecture) && _lastUser) {
-      await runVideoGenerate(_lastUser, bubbleText, statsDiv, queueDiv);
+      await runVideoGenerate(_lastUser, bubbleText, statsDiv);
       return;
     }
 
@@ -2714,7 +3147,6 @@ async function requestAssistantResponse() {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let queueCleared = false;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -2728,26 +3160,6 @@ async function requestAssistantResponse() {
         if (!line.startsWith('data: ')) continue;
         try {
           const data = JSON.parse(line.slice(6));
-          if (data.queue_position !== undefined) {
-            if (queueDiv) {
-              queueDiv.style.display = 'inline-flex';
-              queueDiv.textContent = '';
-              const spinner = document.createElement('div');
-              spinner.className = 'queue-spinner';
-              queueDiv.appendChild(spinner);
-              const txt = document.createElement('span');
-              txt.textContent = data.queue_position === 1
-                ? 'Next in queue (1 request ahead)'
-                : `Position ${data.queue_position} in queue (${data.queue_position} requests ahead)`;
-              queueDiv.appendChild(txt);
-              scrollChatToBottom();
-            }
-            continue;
-          }
-          if (!queueCleared && queueDiv) {
-            queueDiv.style.display = 'none';
-            queueCleared = true;
-          }
           if (data.thinking) {
             fullThinking += data.thinking;
             let thinkBlock = assistDiv.querySelector('.thinking-block');
@@ -2791,8 +3203,7 @@ async function requestAssistantResponse() {
           }
           if (data.token) {
             fullText += data.token;
-            bubbleText.textContent = fullText;
-            scrollChatToBottom();
+            renderLiveAnswer();
           }
           if (data.replace !== undefined) {
             // DiffusionGemma live denoising preview: each frame refines the whole
@@ -2805,6 +3216,7 @@ async function requestAssistantResponse() {
             scrollChatToBottom();
           }
           if (data.done) {
+            cancelLiveAnswer();
             clearCurrentActivity(assistDiv);
             if (data.sessionId) currentSessionId = data.sessionId;
             if (data.error) {
@@ -2824,9 +3236,9 @@ async function requestAssistantResponse() {
                   : 'No answer was produced. Try sending the message again, or rephrasing it.';
                 bubbleText.style.opacity = '0.75';
               }
-              // Streaming renders plain text; once the answer is complete, any
-              // artifact download links the model wrote become clickable.
-              if (fullText) renderArtifactLinks(bubbleText, fullText);
+              // The finished answer, rendered once more in full: the last frame may
+              // not have drawn the final tokens yet.
+              if (fullText) renderMarkdown(bubbleText, fullText);
               let stats = `${data.tokenCount} tokens \u00B7 ${data.elapsed.toFixed(1)}s \u00B7 ${data.tokPerSec.toFixed(1)} tok/s`;
               if (typeof data.promptTokens === 'number' && data.promptTokens > 0) {
                 const reused = typeof data.kvReusedTokens === 'number' ? data.kvReusedTokens : 0;
@@ -2850,6 +3262,7 @@ async function requestAssistantResponse() {
       wasAborted = true;
       statsDiv.textContent = 'Stopped by user';
     } else {
+      cancelLiveAnswer();
       bubbleText.textContent = 'Error: ' + e.message;
     }
   } finally {
@@ -2874,8 +3287,6 @@ async function requestAssistantResponse() {
     setSendButtonState(false);
     const indicator = assistDiv.querySelector('.typing-indicator');
     if (indicator) indicator.remove();
-    const queueInd = assistDiv.querySelector('.queue-indicator');
-    if (queueInd) queueInd.style.display = 'none';
   }
 }
 
@@ -3042,8 +3453,7 @@ function addAssistantBubble() {
   div.innerHTML = `
     <div class="avatar"><img src="/images/assistant_logo.png" alt=""></div>
     <div class="bubble">
-      <div class="queue-indicator" style="display:none"><div class="queue-spinner"></div><span>Waiting in queue...</span></div>
-      <span class="bubble-text"></span>
+      <div class="bubble-text"></div>
       <div class="typing-indicator"><span></span><span></span><span></span></div>
       <div class="stats"></div>
     </div>`;

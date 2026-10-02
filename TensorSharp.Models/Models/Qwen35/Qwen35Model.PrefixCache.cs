@@ -33,7 +33,6 @@ namespace TensorSharp.Models
             return new PrefixCacheCapabilities
             {
                 Class = FamilyClass.R,
-                Readiness = PrefixCacheMode.Tree,
                 // Backend-qualified on MLX (see CheckpointFingerprint): the checkpoint files
                 // are named from it, and an MLX run must not replace a ggml checkpoint of the
                 // same prompt that it cannot read, or the other way round.

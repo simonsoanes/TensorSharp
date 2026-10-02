@@ -15,21 +15,19 @@ image input needs `mmproj-BF16.gguf`: the CLI loads it from beside the model whe
 
 On the GGML backends the whole token runs as (almost) one graph — embedding,
 PLE (in-graph), all 48 layers, the final mixer and the LM head — with a
-shape-keyed cache of captured graphs (`TS_Q4E_TOKEN_GRAPH=0` falls back to
-per-layer fused kernels, which in turn fall back op-by-op). Vision rides the
+shape-keyed cache of captured graphs (where the span declines, per-layer fused
+kernels run instead, and those in turn fall back op-by-op). Vision rides the
 Qwen3.5-VL tower with (T,H,W) IMRoPE positions; multi-image and multi-turn
 image sessions are supported, with KV reuse across turns (the GDN recurrence
 cannot rewind, so a cached prefix is reused only when the new prompt extends
-it exactly; see [Retained-prefix reuse](#retained-prefix-reuse)). With the
-default radix prefix cache (`TS_PREFIX_CACHE_MODE=tree`) that reuse stops at
-the first image or video span of a conversation: the family does not declare
+it exactly; see [Retained-prefix reuse](#retained-prefix-reuse)). In the
+radix prefix cache that reuse stops at the first image or video span of a
+conversation: the family does not declare
 reuse across a media span (it stores an M-RoPE cache gap that no
 reference-position test covers yet). Because this family resumes only from a
 holder or checkpoint of exactly the matched length, a later turn reuses at most
 a stored checkpoint that ends before the attachment (typically the system
 prompt) and re-prefills the rest.
-`TS_PREFIX_CACHE_MODE=legacy` selects the older retained-holder matching, to
-which this limit does not apply.
 
 Thinking can be switched on or off. With it off, the assistant turn opens with
 the closed, empty `<think>\n\n</think>` block the published template emits,
@@ -173,6 +171,22 @@ still images, one span each, as before. The full-checkpoint check is
 `video_order` / `video_timestamp` scenarios against a served Qwen3.8 with its
 `mmproj-BF16.gguf`.
 
+## Thinking budget
+
+With thinking on, a reasoning block that reaches `TS_THINKING_BUDGET` (default
+75% of `max_tokens` from 512 up) is closed and the answer follows inside
+`max_tokens`, in the server and in the interactive CLI. `</think>` is one
+trained token (248069), and ahead of it the host writes Qwen's published
+hand-over sentence ("Considering the limited time by the user, I have to give
+the solution based on the thinking directly now."). Before 2026-09-29 the family
+had no closing token, so a turn whose reasoning reached the budget was stopped
+with an EMPTY answer (`finish_reason` `thinking_budget`): four concurrent
+three-turn conversations with `max_tokens` 2000 on 4x A40 (`--tp 4` and
+`--layer-split 4`) passed 0/4, every failure an empty turn. With the hand-over,
+the same `--tp 4` run passed 4/4: the sentence closed four turns, every turn
+answered, and every conversation reused its previous turn (turn 3: 1564-3482 of
+1591-3509 prompt tokens).
+
 ## Continuous batching
 
 Concurrent requests are served through **per-sequence state holders**: each
@@ -223,12 +237,15 @@ Qwen 3.5 and DeepSeek V4 paths have:
   tokens the new prompt does not reproduce to the last one is not a
   continuation, and every partial match re-prefills.
 - Both retained conversations and checkpoints count against one budget,
-  `TS_Q4E_RETAINED_CACHE_MB` (default 4096, clamped by measured memory
-  headroom; `0` or an unparsable value declines every retention). Under the
-  default radix prefix cache the tree owns retention and eviction, so this
-  budget only refuses a holder that does not fit (reported once); with
-  `TS_PREFIX_CACHE_MODE=legacy` the model evicts the oldest retained
-  conversation first. `TS_Q4E_RETAINED_CACHE=0` disables the feature.
+  `TS_Q4E_RETAINED_CACHE_MB`, clamped by measured memory headroom; `0` or an
+  unparsable value declines every retention. Unset, half the measured headroom
+  is the budget, the rule Qwen 3.5 applies to its idle holders, and 4096 MB
+  applies only where no headroom can be measured. The fixed 4096 MB default this
+  replaced held three of four concurrent conversations on a 4x A40 tensor split
+  (1318.6 MB holders at 1.6k tokens, 15 GB of headroom), so one of them
+  re-prefilled on every turn. The radix prefix cache owns retention and
+  eviction, so this budget only refuses a holder that does not fit (reported
+  once).
 - It needs the complete GGML token-span path (every piece of per-sequence state
   device-resident and keyed by the holder) and a GDN state layout the native
   entry can be copied through exactly. Retention works under a layer split;
@@ -236,8 +253,7 @@ Qwen 3.5 and DeepSeek V4 paths have:
   parallelism.
 
 Evidence (synthetic fixtures, not trained-model acceptance or performance):
-[`eng/validation/qwen38_mtp_followup/retained-cache-20260916`](../../eng/validation/qwen38_mtp_followup/retained-cache-20260916/README.md)
-— `Qwen4ExpRetainedCacheTests` / `Qwen4ExpRetainedCachePolicyTests` cover
+`Qwen4ExpRetainedCacheTests` / `Qwen4ExpRetainedCachePolicyTests` cover
 retained A/B/A, checkpoint clones, speculative rebound, budget eviction,
 missing-state refusal and QSA first/reset growth, and a physical two-GPU
 layer-split checkpoint lifecycle on CUDA. Every gate is bit-exact on CPU. On
@@ -250,8 +266,7 @@ prefill on CUDA, because prefill kernels are chosen by batch width:
 `SharedPrefixChunking_…` bounds that difference at 1e-2 on CUDA (measured
 1.7e-4 to 4.4e-4 in logits; the stale-seed defect it was written for moved them
 by 0.3155) and allows a greedy change only at a near-tie within twice the
-measured difference
-([`verify-row-kernels-20260917`](../../eng/validation/qwen38_mtp_followup/verify-row-kernels-20260917/README.md)).
+measured difference (measured on an A40, 2026-09-17).
 
 ## Speculative decoding with the shared MTP head
 
@@ -274,7 +289,7 @@ plain/MTP HTTP checks passed 24/24 text requests and 3/3 image scenarios per mod
 including attachment order and image history. This configuration refused retained
 cache admission for lack of headroom, so those follow-ups re-prefilled. Local
 evidence: `docs/validation/model-matrix-20260927/qwen38/SUMMARY.md` (not committed).
-True TP and multi-node execution remain unsupported for this architecture.
+Local tensor parallelism is now available as described below; multi-node execution remains unsupported.
 
 `--draft-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf` attaches the per-token
 MTP block (GGML backends only, and the head must be a single GGUF file, attached
@@ -324,8 +339,16 @@ Routed experts and attention are expanded one
 row at a time, each attention row over exactly the KV window and mask row its
 decode step reads. Graphs of up to 8 tokens, decode included, also keep the inputs
 of two ggml-cuda fusions whose use depends on memory reuse (MoE weighted reduction;
-RMS norm + RoPE) allocated, so those fusions happen at every width. One-token and
-prefill kernels are unchanged. Metal retains its existing graph construction.
+RMS norm + RoPE) allocated, so those fusions happen at every width. One-token
+kernels are unchanged. CUDA prefills longer than 8 tokens materialize weighted
+expert outputs before their sequential sum, preventing allocation-dependent
+FMA fusion from changing rounding between layer and tensor layouts. CPU and
+Metal retain their existing prefill graph construction.
+
+CPU and CUDA cap speculative drafting at seven tokens because verification also
+includes the pending anchor, giving at most eight rows. This hard limit also
+applies to explicit `--spec-draft` values and custom drafters; the default
+preferred window remains three drafts.
 
 The completion tests cover every committed row at widths 1 through 8. CPU also
 needs this construction on macOS ARM: without it, widths 2 and 4 differed from
@@ -345,20 +368,233 @@ code-copy stream (six passes per kernel set, all streams identical to plain gree
 MTP speculation ran at 83.2 tok/s instead of 86.5 (1.69x plain instead of 1.84x) and
 n-gram speculation at 73.8 instead of 79.5, while plain decode (49.1 against 47.0) and
 prefill (830 against 804 tok/s) did not regress: speculation pays for its exactness.
-Evidence and the per-assertion diagnosis:
-[`verify-row-kernels-20260917`](../../eng/validation/qwen38_mtp_followup/verify-row-kernels-20260917/README.md).
+
+## Larger than memory
+
+The UD-Q2_K_XL file is 78.9 GB in three shards: a 28.8 GB n-gram (PLE) table, 46.1 GB of
+routed experts and about 4 GB of everything else. A token reads 16 rows of the table and
+10 of each layer's 512 experts, so TensorSharp runs the file on machines that cannot hold
+it and reads those parts from the SSD as tokens need them.
+
+- **The n-gram table is never uploaded or copied.** On the GGML backends it stays in the
+  GGUF memory mapping with random-access advice (`madvise(MADV_RANDOM)`), and a token's 16
+  rows (90 bytes each) are gathered on demand, in parallel. This is the idea behind
+  llama.cpp's `--lazy-mode`, on by default there for tensors over 4 GiB. Every such load
+  logs it:
+  `PLE n-gram table: 28.8 GB read on demand from the GGUF mapping, 16 rows a token (random-access advice).`
+  The direct `cuda` engine reads the rows from the mapping too, and warms the table into
+  the page cache after loading.
+- **The first layers' routed experts run on the host, from the same mapping.**
+  `--n-cpu-moe N` / `--cpu-moe` choose them on the GGML GPU backends (measured on
+  `ggml_metal` and `ggml_cuda`). On `ggml_metal` with neither set, the engine plans the
+  split itself: it keeps whole layers' experts on the GPU while they fit both the Metal
+  working set and the RAM that the host layers need as page cache, and offloads the rest.
+  On an M5 Pro with 48 GB (51.5 GB of RAM, a 40.2 GB Metal working set):
+
+  ```
+  [moe-offload] qwen4exp (planned): routed experts of 33 of 48 layers run on the host from the GGUF mapping (31.7 GB read on demand); the accelerator holds 15 layers' (14.4 GB). Metal working set 40.2 GB, RAM 51.5 GB; --n-cpu-moe N overrides.
+  ```
+
+  Past a point, wiring more layers does not make it faster: a wired layer holds all 512
+  experts, used or not, and takes page cache from the layers that read theirs from the SSD.
+- **Decode** runs each host layer's ten experts on TensorSharp's own kernel: ggml's CPU
+  dot products on a thread team that is woken once per layer and parked when the layer is
+  done. A spinning team slowed the GPU's work between layers 1.5-2x on Apple silicon, so
+  the team sleeps. `TS_HOST_MOE_DECODE=0` restores the ggml graph path.
+- **Prefill** of 128 tokens or more (`TS_HOST_MOE_DEVICE_MIN_BATCH`) streams each host
+  layer's used experts to the GPU per chunk. Their pages are faulted in on 16 threads
+  first: on the M5 Pro that took a 1,818-token prefill from 37.2-38.0 s to 15.7-16.6 s and
+  left decode unchanged.
+- **`--backend mlx` is refused up front**: MLX has no kernels for the sparse-attention
+  indexer, the hyper-connections, the n-gram table or the IQ2_XS/IQ3_XXS experts. Use
+  `ggml_metal`.
+
+Measured on that Mac (ggml `353b63b`, unmodified) against llama.cpp `a868c3e3` on the same
+machine. llama.cpp's default full offload fails there (`Insufficient Memory
+(kIOGPUCommandBufferCallbackErrorOutOfMemory)`); its best configuration was CPU only with
+12 threads, with its lazy mode reading the n-gram table on demand.
+
+| Real text: a 1,818-token prompt, 256 greedy tokens | prefill tok/s | decode tok/s |
+| --- | --- | --- |
+| TensorSharp `ggml_metal`, the planned split | 109.4-115.5 | 12.8-12.9 |
+| llama.cpp `-ngl 0 -t 12` | 20.4-22.4 | 13.00-13.24 |
+| llama.cpp `-ngl 0 -t 12 --no-op-offload` | 28.8-31.6 | 11.94-12.48 |
+
+| llama-bench's method: random tokens, pp512 / tg128, one session | prefill tok/s | decode tok/s |
+| --- | --- | --- |
+| TensorSharp `ggml_metal`, the planned split (15 layers' experts on the GPU) | 147.6 | 21.1 |
+| TensorSharp `ggml_metal`, `--n-cpu-moe 32` (16 on the GPU) | 153.4 | 21.2 |
+| TensorSharp `ggml_metal`, `--n-cpu-moe 30` (18) | 183.9 | 20.6 |
+| TensorSharp `ggml_metal`, `--n-cpu-moe 28` (20) | 171.9 | 20.3 |
+| TensorSharp `ggml_metal`, `--n-cpu-moe 26` (22) | 80.7 | 19.0 |
+| llama.cpp CPU only, `-t 12 -nopo 1` | 50.07 | 22.55 |
+
+Decode is flat from 15 to 16 layers on the GPU (21.1-21.2) and slower with each layer past
+16, and at 22 the page cache left for the host layers is too small and prefill collapses. Runs from earlier
+the same day, not side by side with the rest: the planned split 137.3 / 19.2 and llama.cpp
+48.43 / 22.26 (an hour and a half apart), `--cpu-moe` (no expert on the GPU) 142.3 / 17.5,
+`ggml_cpu` with 18 threads 46.1 / 16.6, and llama.cpp's `-ngl 28 -t 12` 36.64 / 20.06.
+
+TensorSharp prefills real text 3.5-5x faster and random tokens about 3x faster. Decode is
+on par on real text and 6% behind on random tokens (21.1 against 22.55). On Metal, decode
+is bound by ggml-metal's cost per dispatch (about 4,200 dispatches a token, 29.4 ms when
+the whole token is a single graph) plus about 0.19 ms for each host seam. Real text also pays page faults for experts that are not in the page
+cache, so it depends on what else the Mac is doing: the same run decoded at
+10.3-11.3 tok/s while other work kept 5 GB compressed. TensorAgent offers this file on
+48 GB Macs ([measured in the app](../../TensorAgent/README.md#the-macs-own-models)).
+
+On CUDA, `--n-cpu-moe` serves the same purpose on a GPU too small for the file. On one
+A40 (46 GB) with 12 layers' experts on the host, `ggml_cuda` measured 600 / 30.2 tok/s
+(random tokens, pp512 / tg128) against llama-bench's 466.14 / 18.84 with `-ncmoe 12`.
+
+The direct `cuda` engine runs UD-Q2_K_XL's IQ2_XS and IQ3_XXS experts: per-token kernels
+ported from ggml's dot products for decode, which still runs as a captured CUDA graph, and
+the same two layouts decoded into its tensor-core and register-staged grouped kernels for
+prefill. Before the grouped kernels took them, its prefill of this file ran on the slowest
+fallback at about 500 tok/s. The engine has no host-expert seam, so `--n-cpu-moe` there
+prints a warning and keeps the experts on the GPU. `--tp N` refuses this quant with exit
+code 2, because `ggml_cuda`'s TP FFN path takes only the types listed under
+[Multi-GPU](#multi-gpu); use `--layer-split N`.
+
+Both A40s, warm, the same 1,818-token prompt and 256 greedy tokens. TensorSharp ran as
+`TensorSharp.Server.Host` with `--no-multi-agent --no-skills`, three requests per process,
+each with its own first line so that none reused another's prefix; llama-server answered two
+requests with `cache_prompt` off.
+
+| 2x A40, `--layer-split 2` (llama.cpp `-ngl 99`) | prefill tok/s | decode tok/s |
+| --- | --- | --- |
+| TensorSharp `cuda` | 1,612-1,613 | 56.85-56.93 |
+| TensorSharp `ggml_cuda` | 1,174-1,217 | 52.9-53.1 |
+| llama.cpp | 752-963 | 59.04-59.86 |
+
+The direct engine's first request after a fresh kernel build ran its prefill at 335 tok/s
+while the driver compiled the PTX; the driver caches the result. On random tokens
+(pp512 / tg128) the direct engine measured 1,222.0 / 61.0 and `ggml_cuda` 410.9 / 43.2, where
+llama-bench's two-GPU run gave 210.74 / 41.99, far below its own server's numbers on the same
+machine, so the real-text table is the comparison to go by. There, TensorSharp prefills
+1.2-2.1x faster and decodes at 88-90% (`ggml_cuda`) and 95-96% (`cuda`) of llama.cpp's speed.
 
 ## Multi-GPU
 
-`--layer-split N` on `qwen4exp` runs a **layer split**: each GPU holds a contiguous run
-of whole layers. It is not tensor parallelism — `qwen4exp` shards no weights —
-and it is the same (and only) multi-GPU mode llama.cpp offers this architecture
-(`-sm row` refuses to load it). It is a capacity feature, not a speed feature:
-it is how you fit the model when one card cannot hold it. The layer split is
-available on `ggml_cuda` and `ggml_vulkan`; unsupported backends and distributed
-`--tp-node-id`/`--tp-peers` groups are refused. `--tp N` requests tensor parallelism
-only and is rejected for this architecture; migrate old layer-split commands
-to `--layer-split N` or `TENSORSHARP_LAYER_SPLIT_DEGREE=N`.
+`--tp N` on `ggml_cuda` partitions every routed and shared FFN across N local GPUs. Every rank
+retains all expert IDs. Gate/up projections produce local intermediate channels,
+which are gathered before down projections compute disjoint output rows. A second
+gather assembles those rows before the hyper-connection scatter. Keeping each
+down dot product at its original full width avoids summation-order changes that
+later activation quantization can amplify. Attention, GDN, QSA and PLE run with replicated weights
+and independent state on each rank. The output head runs on rank 0. The image
+and tool-call paths use the same target graph; speculative rollback restores
+GDN and PLE state on every rank. Prefix checkpoints remain disabled under TP.
+The gathers preserve FP32 using TensorSharp's CUDA collective. Fallbacks use
+zero-copy chunks below upstream CUDA's automatic BF16 threshold, or an FP32 host
+sum when a device collective is unavailable. Two collectives per FFN communicate
+more data than splitting the down dot product, preserving numerical fidelity
+without changing ggml.
+
+The intermediate and output widths must divide evenly. Each projection slice
+contains complete output rows and retains the full input quantization blocks.
+Quantized prefill preserves the original MMQ tile and reduction geometry;
+gate/up slices retain overlapping 128-row edge tiles and crop their outputs.
+For the checkpoint's 640 intermediate channels, TP2 stores 384 rows per rank
+for each logical 320-row slice; TP4 stores 256 for each logical 160-row slice.
+Unsupported degrees are refused from GGUF
+metadata before bulk weight loading. The current model path requires CUDA MMQ
+stream-K support and FFN weights in Q2_K, Q3_K, Q4_K, Q6_K, IQ3_S, IQ4_XS,
+IQ4_NL or Q8_0. Full output row counts must be multiples of 128, and down
+output slices must also be multiples of 128. Other FFN types, including
+F32/F16/BF16, and devices/layouts without exact strip kernels are refused;
+the physical device qualification uses NVIDIA A40 GPUs. The expert slices currently require host
+buffers totaling the routed-expert bytes plus these overlapping rows, in addition to the mapped checkpoint;
+these buffers remain alive while the model runs. Loading skips a full prefault
+of the sparse PLE table, whose rows are gathered on demand.
+
+`--layer-split N` remains a separate option: each GPU holds a contiguous run of
+whole layers. It is available on `ggml_cuda` and `ggml_vulkan`. Do not combine
+`--tp` and `--layer-split`; distributed `--tp-node-id`/`--tp-peers` groups are
+unsupported. Older layer-split commands should use `--layer-split N` or
+`TENSORSHARP_LAYER_SPLIT_DEGREE=N`.
+
+The numerical fixture `eng/tests/qwen4exp-tensor-parallel.py` compares two-layer
+spans with unsharded execution, including prefill, replay, QSA, multi-axis
+RoPE, all-logit taps and recurrent rollback. Its quantized mode
+(`--quantized-ffn --tokens 1,2,3,4,5,6,7,8 --rollback-width 8`) passes all 102
+checks on both CUDA TP2 and TP4, including recurrent/QSA/PLE snapshot restoration
+at verify width 8, with zero hidden or logit error. CPU TP4 loopback separately
+passes 42 F32 checks and is correctness-only. The synthetic F32 CUDA TP4 replay
+at width 17 exceeds its existing tolerance (maximum hidden error 3.49e-5);
+F32 FFNs are refused by the public model capability check, and this case is
+not counted as passing.
+`eng/tests/qwen4exp-tp-quantized-ffn.py --hidden 2560` separately covers the real
+640-channel FFN width with IQ3_S/IQ4_NL and IQ4_XS/Q8_0 gate/down weights,
+Q8_0 shared weights, and widths 1 through 8, 17, 31 and 128; CUDA TP2 results are
+bitwise identical with `--require-bitwise`. `eng/ForcedLogitProbe` compares full-model
+logits while forcing identical token histories, so an early greedy mismatch
+cannot hide the numerical error of subsequent decode steps.
+
+On the UD-IQ4_XS checkpoint and NVIDIA A40, TP2 and TP4 each match the stabilized
+plain layer2 execution byte-for-byte over 120 full-vocabulary rows: three text
+prompts, a one-token synthetic prompt and a 128-token synthetic prefill, with
+24 forced steps per case. TP2 uses the same native build (`da25f156`) for
+both paths; TP4 uses native `1ba6d7a4` against the saved `da25f156` plain reference.
+The final HTTP and speculation checks below use native `473ee64d`.
+These runs use unchanged ggml `353b63b439f27ab2cc19dac97ab1681ba6d2d084`.
+Stabilizing CUDA prefill rounding can
+change logits or low-margin greedy choices from older binaries; original
+reference vectors are retained separately and are not claimed as bitwise
+compatible. In the final HTTP comparison with the original binary, the first
+logit vector has relative L2 error 0.0416; 14 of 16 text strings match exactly,
+with punctuation-only differences in the other two. That historical numerical
+comparison does not pass the strict parity gate.
+
+The final CUDA TP2 HTTP run matches same-build layer2 execution on all 16 text
+prompts, four tool round-trips and four image answer turns; its first real
+prefill's 248,320 logits are byte-identical. Learned MTP and n-gram speculation
+each preserve all 96 plain-greedy tokens in both text and image tests. The
+stress configuration uses `TS_SPEC_DRAFT=7 TS_SPEC_PMIN=0`; learned MTP actually
+reaches verify width 8 in both scenarios and exercises rejection rollback.
+All runs exit cleanly, with unchanged runtime binaries verified before and
+after execution.
+
+A separate six-start benchmark used 2× NVIDIA A40, UD-IQ4_XS, context 4096,
+F16 KV, 128-token kernel warmup and two CPU threads. The table preserves both
+starts per mode in execution order. Each process times five fixed-input
+pp512/tg128 repetitions; a separate untimed 128-token greedy chain checks
+correctness. Throughput cells show **first / median of repetitions 2–5 / range
+of all five**, in tokens/s. Loading excludes kernel warmup.
+
+| Mode / start | Load (s) | Warmup (s) | pp512: first / median / range | tg128: first / median / range |
+|---|---:|---:|---|---|
+| Original layer2 / 1 | 64.85 | 20.67 | 259.2 / 406.60 / 259.2–439.7 | 24.9 / 29.45 / 24.9–36.6 |
+| Current layer2 / 1 | 48.98 | 21.51 | 262.7 / 427.75 / 262.7–446.5 | 30.3 / 37.90 / 29.2–38.0 |
+| Current TP2 / 1 | 85.68 | 10.78 | 229.0 / 345.75 / 229.0–358.9 | 22.0 / 24.10 / 18.2–25.9 |
+| Original layer2 / 2 | 68.74 | 22.14 | 255.9 / 419.25 / 234.0–454.1 | 29.2 / 30.40 / 29.2–35.7 |
+| Current TP2 / 2 | 80.22 | 12.56 | 230.3 / 349.15 / 213.9–356.7 | 18.6 / 27.30 / 14.2–34.3 |
+| Current layer2 / 2 | 25.66 | 18.13 | 258.3 / 414.65 / 234.9–422.1 | 30.3 / 33.85 / 30.2–37.8 |
+
+All six processes exit cleanly and pass runtime identity guards. Both current
+layer2 and TP2 starts produce exactly the same full greedy chain. Their
+aggregate steady rates are layer2 **421.20 / 35.875** versus TP2
+**347.45 / 25.70** tokens/s: TP is **17.5% slower for prefill and 28.4% slower
+for decode** on this machine. Attention and recurrent state are replicated;
+two exact-F32 FFN collectives per layer add communication overhead on these
+PCIe GPUs (`NCCL_P2P_DISABLE=1`). Layer splitting is the faster measured option.
+
+The original binary's synthetic greedy chain diverges from all current runs
+at zero-based decode index 50. Its strict compatibility comparison remains
+failed; current/original throughput ratios are not qualified by token parity.
+These are mixed/warm-cache loads without page-cache eviction, and GPU clocks
+are observed rather than locked. The substantial timing and loading variation
+precludes a cold-storage or universal speedup claim.
+
+One additional TP2 diagnostic used the same binaries and settings with
+`GGML_CUDA_ALLREDUCE=internal GGML_CUDA_AR_BF16_THRESHOLD=0`. Its full greedy
+chain and runtime guards passed, but the tradeoff was mixed: pp512
+**216.3 / 309.15 / 202.7–321.4**, tg128 **16.5 / 30.30 / 16.5–40.1**
+(first / steady median / all-five range), load 100.69 s and warmup 10.05 s.
+This single start reduces prefill throughput and does not justify changing the
+default NCCL transport.
+
+The historical measurements below are for **layer splitting**, not tensor parallelism.
 
 Measured on 2× A100-80GB, Qwen3.8-Flash-Next-UD-Q2_K_XL (73.4 GiB):
 
@@ -389,8 +625,8 @@ The published Q8_0 shards carry **no** `nextn`/`mtp` tensors at all, so
 `mtp_supported` is false and `--mtp on` cells are gated out with a reason
 rather than quietly serving standard decode.
 
-And **this model only runs on the column that passes `--layer-split N`**. The section
-above is the reason: the split degree comes from `--layer-split`, so on a backend column
+This historical matrix runs the model on the column that passes `--layer-split N`.
+Its split degree comes from `--layer-split`, so on a backend column
 that passes none, TensorSharp builds a single-device context and all 175.3 GiB
 land on one card. The config therefore gives it a `min_tp` (4, the weights-only
 floor — 8 is the degree the 8×A40 box is meant to use) and the harness records
@@ -405,5 +641,5 @@ python run_matrix.py --config benchmark_config_glm53_qwen38.json \
 ```
 
 That column tells llama.cpp `--split-mode layer` over the same GPUs, so the
-reference column is the same placement on both engines — which for `qwen4exp`
-is the only one either engine has.
+reference column uses the same placement on both engines. It does not measure
+the newer TensorSharp `--tp` implementation.

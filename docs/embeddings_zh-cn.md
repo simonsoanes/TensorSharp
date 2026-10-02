@@ -102,13 +102,9 @@ similarity = sum(a * b for a, b in zip(*vectors))
 curl http://127.0.0.1:5000/api/embed \
   -H 'Content-Type: application/json' \
   -d '{"model":"snowflake-arctic-embed-l-v2.0-q8_0","input":["query: read a file","def read_file(path): return open(path).read()"],"truncate":false,"dimensions":256}'
-
-curl http://127.0.0.1:5000/api/embeddings \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"snowflake-arctic-embed-l-v2.0-q8_0","prompt":"query: read a file"}'
 ```
 
-`/api/embed` 返回 `model`、`embeddings`、`total_duration`、`load_duration`（纳秒）与 `prompt_eval_count`。`truncate` 默认 `true`；设为 `false` 可拒绝超长输入。截断保留最后的分隔 token。旧版 `/api/embeddings` 接受一个 `prompt`，返回一个 `embedding`。
+`/api/embed` 返回 `model`、`embeddings`、`total_duration`、`load_duration`（纳秒）与 `prompt_eval_count`。`truncate` 默认 `true`；设为 `false` 可拒绝超长输入。截断保留最后的分隔 token。
 
 服务保持启动时的模型常驻；请求中的 `keep_alive` 与生成 `options` 不会重新配置或卸载模型。
 

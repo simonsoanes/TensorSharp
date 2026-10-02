@@ -19,71 +19,16 @@ namespace InferenceWeb.Tests;
 public class Qwen35TokenDecodeContractTests
 {
     [Theory]
-    [InlineData(BackendType.GgmlMetal, false, "1", true)]
-    [InlineData(BackendType.GgmlMetal, false, "0", false)]
-    [InlineData(BackendType.GgmlMetal, false, null, true)]
-    [InlineData(BackendType.GgmlMetal, false, "", true)]
-    [InlineData(BackendType.GgmlMetal, true, "1", false)]
-    [InlineData(BackendType.GgmlMetal, true, null, false)]
-    [InlineData(BackendType.GgmlCuda, false, "1", false)]
-    [InlineData(BackendType.GgmlCuda, false, null, false)]
-    [InlineData(BackendType.GgmlVulkan, false, "1", false)]
-    public void MetalGdnInplaceStateGate_DefaultsOnOnlyForSingleDeviceMetal(
+    [InlineData(BackendType.GgmlMetal, false, true)]
+    [InlineData(BackendType.GgmlMetal, true, false)]
+    [InlineData(BackendType.GgmlCuda, false, false)]
+    [InlineData(BackendType.GgmlVulkan, false, false)]
+    public void MetalGdnInplaceStateGate_IsOnOnlyForSingleDeviceMetal(
         BackendType backend,
         bool isTensorParallel,
-        string? environmentValue,
         bool expected)
     {
-        Assert.Equal(
-            expected,
-            Qwen35Model.ShouldUseMetalGdnInplaceState(
-                backend,
-                isTensorParallel,
-                environmentValue));
-    }
-
-    /// <summary>
-    /// Device-resident GDN state is for SINGLE-TOKEN calls only.
-    ///
-    /// <para>A resident call updates the recurrent state in place, so the state
-    /// the call started from no longer exists afterwards. That is harmless for a
-    /// plain decode step, which is never rolled back, and wrong for a multi-row
-    /// verify, whose whole purpose is to be rolled back when a draft is rejected:
-    /// SpecSnapshotRecurrentState takes no copy when the state is device-live
-    /// because "a verify only reads the live slices", which an in-place update
-    /// makes false. Allowing it on verifies made the emitted stream diverge from
-    /// plain greedy at token 53 of a measured run.</para>
-    ///
-    /// <para>Metal stays out entirely: its decode may bind the GDN result by the
-    /// backing-base pointer while a resident verify graph retains the offset
-    /// state-view pointer.</para>
-    /// </summary>
-    [Theory]
-    [InlineData(BackendType.GgmlMetal, true, -1, 4, false)]
-    [InlineData(BackendType.GgmlMetal, true, 4, 4, false)]
-    [InlineData(BackendType.GgmlMetal, true, 1, 1, false)]
-    // Multi-row verify: never resident, whatever the logit-row shape.
-    [InlineData(BackendType.GgmlCuda, true, -1, 4, false)]
-    [InlineData(BackendType.GgmlCuda, true, 4, 4, false)]
-    [InlineData(BackendType.GgmlCuda, true, 1, 4, false)]
-    // Single-token plain/decode steps: resident, which is where the time is.
-    [InlineData(BackendType.GgmlCuda, true, 1, 1, true)]
-    [InlineData(BackendType.GgmlCuda, true, -1, 1, true)]
-    [InlineData(BackendType.GgmlCuda, false, 1, 1, false)]
-    public void VerifyResidentState_IsSingleTokenOnlyAndNeverMetal(
-        BackendType backend,
-        bool residentEnabled,
-        int nLogitRows,
-        int seqLen,
-        bool expected)
-    {
-        Assert.Equal(
-            expected,
-            Qwen35Model.ShouldUseVerifyResidentState(
-                backend,
-                residentEnabled,
-                nLogitRows,
-                seqLen));
+        Assert.Equal(expected, Qwen35Model.ShouldUseMetalGdnInplaceState(backend, isTensorParallel));
     }
 
     [Fact]
@@ -291,15 +236,8 @@ public class Qwen35TokenDecodeContractTests
             StringComparison.Ordinal)..];
         int batchedLock = batched.IndexOf(lockLine, StringComparison.Ordinal);
         int batchedPool = batched.IndexOf("qwen35_model_decode_batched_impl(", StringComparison.Ordinal);
-        int resetStart = batched.IndexOf(
-            "TSG_EXPORT void TSGgml_Qwen35ResetBatchedDecodeCache()",
-            StringComparison.Ordinal);
-        int resetLock = batched.IndexOf(lockLine, resetStart, StringComparison.Ordinal);
-        int resetPool = batched.IndexOf("g_q35bdc.reset();", resetStart, StringComparison.Ordinal);
         Assert.True(batchedLock >= 0 && batchedPool > batchedLock,
-            "Batched decode must lock before entering the retained-pool implementation.");
-        Assert.True(resetStart >= 0 && resetLock > resetStart && resetPool > resetLock,
-            "Batched reset must lock before freeing the retained graph.");
+            "Batched decode must lock before entering the implementation.");
     }
 
     [Fact]
@@ -522,7 +460,6 @@ public class Qwen35TokenDecodeContractTests
         string solo = decode[implStart..implEnd];
         Assert.DoesNotContain("pos_val = position;", solo);
         Assert.Equal(2, solo.Split("std::int32_t pos_val = position + rope_pos_delta;").Length - 1);
-        Assert.Contains("TSG_EXPORT int TSGgml_Qwen35RopePositionAbi()", decode);
 
         string verify = Read("ggml_ops_qwen35_verify.cpp");
         Assert.DoesNotContain("pv[i] = start_pos + i;", verify);

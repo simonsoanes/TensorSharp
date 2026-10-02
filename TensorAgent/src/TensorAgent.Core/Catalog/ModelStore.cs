@@ -11,6 +11,7 @@
 using System.Buffers;
 using System.Security.Cryptography;
 using TensorAgent.Core.Downloads;
+using TensorAgent.Core.Interop;
 
 namespace TensorAgent.Core.Catalog;
 
@@ -27,8 +28,9 @@ public enum InstallState
 
 /// <summary>Progress of a whole entry's download (several files).</summary>
 /// <param name="FileName">The file being transferred now.</param>
-/// <param name="FileIndex">1-based index of that file among the files to fetch.</param>
-/// <param name="FileCount">How many files this download fetches.</param>
+/// <param name="FileIndex">1-based index of that file among the files this download
+/// completes, the linked ones first.</param>
+/// <param name="FileCount">How many files this download completes, by transfer or by link.</param>
 /// <param name="BytesReceived">Bytes on disk across all files of the entry.</param>
 /// <param name="TotalBytes">Bytes the entry needs in total.</param>
 /// <param name="BytesPerSecond">Current rate.</param>
@@ -45,10 +47,24 @@ public readonly record struct ModelDownloadProgress(
 /// (Application Support, excluded from iCloud backup by the app's platform hook), files
 /// stored under their catalog names so the engine's companion discovery (a projector
 /// beside its model, a VAE beside its DiT) works unchanged.
+///
+/// <para>
+/// A file that two entries list is stored once. The MiniMax-H3 keyframes and references
+/// entries share 24.0 GB of companions -- the text encoder, the video and audio VAEs and
+/// the tokenizer files -- and differ only in an 11.4 GB denoiser, so fetching every file
+/// of every entry into its own folder cost 70.9 GB for the pair. A download that finds a
+/// file already complete under another entry links it from there instead (see
+/// <see cref="TryLinkSharedCopy"/>): 46.8 GB for both, and the second install fetches only
+/// its denoiser. Each entry still has every file in its own folder under its own name,
+/// which is what keeps companion discovery, <see cref="Delete"/> and the orphan sweep as
+/// they were: removing a folder removes that entry's names, and the bytes stay on disk for
+/// as long as another entry names them.
+/// </para>
 /// </summary>
 public sealed class ModelStore
 {
     private readonly ResumableDownloader _downloader;
+    private readonly IReadOnlyList<CatalogModel> _catalog;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     /// <summary>Root directory holding one sub-folder per catalog entry.</summary>
@@ -58,12 +74,28 @@ public sealed class ModelStore
     /// excluded from backup). Best effort; exceptions are swallowed.</summary>
     public Action<string>? OnFileCreated { get; set; }
 
-    public ModelStore(string root, ResumableDownloader? downloader = null)
+    /// <summary>
+    /// Makes the hard link through which an entry takes a file another entry already holds:
+    /// <see cref="HardLinks.Create"/>. Replaced only by tests, to fail the way a file system
+    /// without hard links does.
+    /// </summary>
+    internal Action<string, string> CreateHardLink { get; init; } = HardLinks.Create;
+
+    /// <param name="root">Directory holding one sub-folder per catalog entry.</param>
+    /// <param name="downloader">Fetches the files; a default one when null.</param>
+    /// <param name="catalog">
+    /// The entries a download may link a shared file from and whose folders the orphan
+    /// sweep keeps; <see cref="ModelCatalog.BuiltIn"/> when null. The whole catalog, not
+    /// <see cref="ModelCatalog.ForDevice"/>, for the reason <see cref="SweepOrphanedModels"/>
+    /// gives.
+    /// </param>
+    public ModelStore(string root, ResumableDownloader? downloader = null, IReadOnlyList<CatalogModel>? catalog = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(root);
         Root = Path.GetFullPath(root);
         Directory.CreateDirectory(Root);
         _downloader = downloader ?? new ResumableDownloader();
+        _catalog = catalog ?? ModelCatalog.BuiltIn;
     }
 
     public string DirectoryFor(CatalogModel model) => Path.Combine(Root, model.Id);
@@ -115,7 +147,12 @@ public sealed class ModelStore
         return total;
     }
 
-    /// <summary>Bytes still to transfer for the given files (required ones by default).</summary>
+    /// <summary>
+    /// Bytes still to transfer for the given files (required ones by default). A file that
+    /// another entry already holds complete is not counted, because the download links it
+    /// rather than fetching it: with one MiniMax-H3 entry installed, the other is an 11.4 GB
+    /// download, not 35 GB. <see cref="CatalogModel.TotalBytes"/> stays the entry's own size.
+    /// </summary>
     public long RemainingBytes(CatalogModel model, bool includeOptional = false)
     {
         long remaining = 0;
@@ -124,7 +161,7 @@ public sealed class ModelStore
             if (file.Optional && !includeOptional)
                 continue;
             string path = PathFor(model, file);
-            if (IsComplete(path, file))
+            if (IsComplete(path, file) || SharedCopy(model, file) is not null)
                 continue;
             string part = ResumableDownloader.PartPath(path);
             long have = File.Exists(part) ? new FileInfo(part).Length : 0;
@@ -137,7 +174,9 @@ public sealed class ModelStore
     /// Download every required file (and the optional ones named in
     /// <paramref name="optionalRoles"/>) that is not already complete. Files are fetched one
     /// after another - a phone's link is the bottleneck, not the server - and each is
-    /// verified against its SHA-256 before it is renamed into place.
+    /// verified against its SHA-256 before it is renamed into place. A file that another
+    /// entry already holds complete is linked from that copy, before the first transfer
+    /// starts, instead of being fetched (see <see cref="TryLinkSharedCopy"/>).
     /// </summary>
     public async Task DownloadAsync(
         CatalogModel model,
@@ -170,12 +209,34 @@ public sealed class ModelStore
                     pending.Add(file);
             }
 
-            for (int i = 0; i < pending.Count; i++)
+            // Every link is made before the first transfer starts, not as each file's turn
+            // comes. A MiniMax-H3 entry lists its 11.4 GB denoiser first -- an hour at
+            // 25 Mbit/s -- and with the links waiting behind it, deleting the entry that
+            // held the shared copies during that hour meant fetching all 24 GB of them
+            // again. Linked first, the progress also starts from what is already here, so
+            // the time left it implies is the denoiser's, not that of a 35 GB download.
+            var transfers = new List<CatalogFile>(pending.Count);
+            int completed = 0;
+            foreach (CatalogFile file in pending)
             {
-                CatalogFile file = pending[i];
+                string path = PathFor(model, file);
+                if (!TryLinkSharedCopy(model, file, path))
+                {
+                    transfers.Add(file);
+                    continue;
+                }
+                // Nothing to transfer: the whole file arrives at once.
+                doneBefore += file.Bytes;
+                progress?.Report(new ModelDownloadProgress(
+                    file.FileName, ++completed, pending.Count, doneBefore, total, 0, "downloading"));
+                Notify(path);
+            }
+
+            foreach (CatalogFile file in transfers)
+            {
                 string path = PathFor(model, file);
                 long baseBytes = doneBefore;
-                int index = i + 1;
+                int index = ++completed;
                 var fileProgress = new Progress<DownloadProgress>(p =>
                     progress?.Report(new ModelDownloadProgress(
                         file.FileName, index, pending.Count, baseBytes + p.BytesReceived, total, p.BytesPerSecond, p.Phase)));
@@ -281,7 +342,11 @@ public sealed class ModelStore
         }
     }
 
-    /// <summary>Remove every file of the entry, partial downloads included.</summary>
+    /// <summary>
+    /// Remove every file of the entry, partial downloads included. Only this entry's names
+    /// go: a file it shares with another entry is one set of bytes under two names, and
+    /// those bytes stay on disk under the other entry's name, which stays installed.
+    /// </summary>
     public void Delete(CatalogModel model)
     {
         string dir = DirectoryFor(model);
@@ -290,7 +355,7 @@ public sealed class ModelStore
     }
 
     /// <summary>
-    /// Delete model directories no catalog entry claims, and say how much that freed.
+    /// Delete the model directories of retired catalog entries, and say how much that freed.
     ///
     /// <para>
     /// A directory is named by its entry's id, and an id changes whenever the entry
@@ -302,17 +367,35 @@ public sealed class ModelStore
     /// that can reclaim it.
     /// </para>
     /// <para>
+    /// Only an id the catalog RETIRED is reclaimed (<see cref="ModelCatalog.Retired"/>),
+    /// not every id this build does not know. An unknown id may be a NEWER build's entry:
+    /// on a Mac the Debug and Release builds share this directory, and a Release build
+    /// from the day before, sweeping everything its own catalog did not list, deleted the
+    /// installed models of the five entries the Debug build had just added. Such a
+    /// directory is kept, and said so; the build that knows it shows it again.
+    /// </para>
+    /// <para>
     /// Checked against the WHOLE catalog rather than what this device is offered
     /// (<see cref="ModelCatalog.ForDevice"/>), because an entry gated to a larger device
     /// is still a real entry -- deleting weights for a model an iPad can run, because a
     /// phone cannot, would be a data-loss bug wearing a tidy-up's clothes.
     /// </para>
+    /// <para>
+    /// A folder holds names, not bytes. An orphan that a claimed entry linked a shared file
+    /// from, back when the orphan was itself an entry, loses only its own name for that
+    /// file, so the sweep can no more take a file a claimed entry lists than
+    /// <see cref="Delete"/> can. The bytes it reports freed then overstate: they include
+    /// files whose space stays in use under the other name.
+    /// </para>
     /// </summary>
+    /// <param name="catalog">The entries whose folders are kept; the store's catalog when null.</param>
+    /// <param name="retired">The ids whose folders are reclaimed; <see cref="ModelCatalog.Retired"/> when null.</param>
     /// <returns>Bytes freed.</returns>
-    public long SweepOrphanedModels(IReadOnlyList<CatalogModel>? catalog = null)
+    public long SweepOrphanedModels(IReadOnlyList<CatalogModel>? catalog = null, IReadOnlyCollection<string>? retired = null)
     {
         var known = new HashSet<string>(
-            (catalog ?? ModelCatalog.BuiltIn).Select(m => m.Id), StringComparer.OrdinalIgnoreCase);
+            (catalog ?? _catalog).Select(m => m.Id), StringComparer.OrdinalIgnoreCase);
+        var reclaimable = new HashSet<string>(retired ?? ModelCatalog.Retired, StringComparer.OrdinalIgnoreCase);
 
         long freed = 0;
         IEnumerable<string> directories;
@@ -321,8 +404,16 @@ public sealed class ModelStore
 
         foreach (string directory in directories.ToList())
         {
-            if (known.Contains(Path.GetFileName(directory)))
+            string id = Path.GetFileName(directory);
+            if (known.Contains(id))
                 continue;
+            if (!reclaimable.Contains(id))
+            {
+                Console.WriteLine(
+                    $"TensorAgent: kept {id}: no entry of this build's catalog claims it and none was "
+                    + "retired under that name, so it is most likely a newer build's model");
+                continue;
+            }
             try
             {
                 long bytes = Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
@@ -330,7 +421,7 @@ public sealed class ModelStore
                 Directory.Delete(directory, recursive: true);
                 freed += bytes;
                 Console.WriteLine(
-                    $"TensorAgent: removed {Path.GetFileName(directory)}, which no catalog entry "
+                    $"TensorAgent: removed {id}, which no catalog entry "
                     + $"claims any more ({bytes / (1024.0 * 1024.0 * 1024.0):0.0} GB freed)");
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -377,6 +468,87 @@ public sealed class ModelStore
         if (File.Exists(path)) File.Delete(path);
         string part = ResumableDownloader.PartPath(path);
         if (File.Exists(part)) File.Delete(part);
+    }
+
+    /// <summary>
+    /// Give <paramref name="model"/> the copy of <paramref name="file"/> that another entry
+    /// already holds, as a hard link at <paramref name="path"/>. False means download it: no
+    /// other entry has a complete copy, or the link could not be made.
+    ///
+    /// <para>
+    /// The copy is not hashed again. It was verified when it was downloaded, and from then
+    /// on the store trusts a complete file's size, as every other check here does
+    /// (<see cref="IsComplete"/>).
+    /// </para>
+    /// </summary>
+    private bool TryLinkSharedCopy(CatalogModel model, CatalogFile file, string path)
+    {
+        if (SharedCopy(model, file) is not { } source)
+            return false;
+        string sourceName = Path.GetRelativePath(Root, source);
+
+        try
+        {
+            // A wrong-sized file under this name is a broken download, not a copy: the
+            // downloader's first act would be to delete it, and left here it would refuse
+            // the link.
+            if (File.Exists(path))
+                File.Delete(path);
+            CreateHardLink(source, path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Another volume, a file system without hard links, a sandbox that forbids
+            // them: reasons to spend the bandwidth, never reasons to fail the download.
+            Console.WriteLine(
+                $"TensorAgent: could not link {model.Id}/{file.FileName} to {sourceName} ({ex.Message}); downloading it instead");
+            return false;
+        }
+
+        // Removed only once the link exists, so a link that fails keeps the part file and
+        // the download it falls back to resumes from it instead of starting over.
+        string part = ResumableDownloader.PartPath(path);
+        try
+        {
+            if (File.Exists(part))
+                File.Delete(part);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.WriteLine($"TensorAgent: could not remove the stale {part}: {ex.Message}");
+        }
+
+        string size = file.Bytes >= 1L << 30
+            ? $"{file.Bytes / (1024.0 * 1024.0 * 1024.0):0.0} GB"
+            : $"{file.Bytes / (1024.0 * 1024.0):0.##} MB";
+        Console.WriteLine(
+            $"TensorAgent: linked {model.Id}/{file.FileName} to {sourceName} instead of downloading {size} again");
+        return true;
+    }
+
+    /// <summary>
+    /// A complete copy of <paramref name="file"/> held by another entry of the catalog, or
+    /// null. The same artifact is the same SHA-256 and size, whatever either entry names
+    /// it, and complete means what it means everywhere here, the exact size -- so a part
+    /// file, or a truncated copy left by an interrupted transfer, is never linked.
+    /// </summary>
+    private string? SharedCopy(CatalogModel model, CatalogFile file)
+    {
+        foreach (CatalogModel other in _catalog)
+        {
+            if (string.Equals(other.Id, model.Id, StringComparison.OrdinalIgnoreCase))
+                continue;
+            foreach (CatalogFile candidate in other.Files)
+            {
+                if (candidate.Bytes != file.Bytes
+                    || !string.Equals(candidate.Sha256, file.Sha256, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                string path = PathFor(other, candidate);
+                if (IsComplete(path, candidate))
+                    return path;
+            }
+        }
+        return null;
     }
 
     private static bool IsComplete(string path, CatalogFile file) =>

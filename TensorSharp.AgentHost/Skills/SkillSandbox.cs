@@ -205,7 +205,7 @@ namespace TensorSharp.AgentHost.Skills
 
         private static IEnumerable<ISkillSandbox> Candidates()
         {
-            if (OperatingSystem.IsMacOS())
+            if (HostOS.IsMacDesktop)
                 yield return new SeatbeltSandbox();
             if (OperatingSystem.IsLinux())
                 yield return new BubblewrapSandbox();
@@ -241,7 +241,7 @@ namespace TensorSharp.AgentHost.Skills
                 // Not "no OS sandbox": there is no OS sandbox to look for on iOS, and an
                 // operator reading that would go looking for one. What is missing is the
                 // host's own in-process runtime.
-                if (OperatingSystem.IsIOS())
+                if (HostOS.IsAppleMobile)
                     return "no in-process runtime registered: this platform runs code inside the app, "
                          + "and no backend presenting one was supplied";
                 return NoSandboxSummary(
@@ -305,7 +305,7 @@ namespace TensorSharp.AgentHost.Skills
 
         public string Name => "sandbox-exec";
 
-        public bool IsAvailable => OperatingSystem.IsMacOS() && File.Exists(Helper);
+        public bool IsAvailable => HostOS.IsMacDesktop && File.Exists(Helper);
 
         public SkillSandboxCapabilities Capabilities => new(
             ConfinesWrites: true,
@@ -566,7 +566,7 @@ namespace TensorSharp.AgentHost.Skills
 
         private static string? ResolveDarwinTempDirectory()
         {
-            if (!OperatingSystem.IsMacOS()) return null;
+            if (!HostOS.IsMacDesktop) return null;
             var buffer = new StringBuilder(4096);
             nuint length = confstr(65537, buffer, (nuint)buffer.Capacity); // _CS_DARWIN_USER_TEMP_DIR
             if (length == 0 || length > (nuint)buffer.Capacity) return null;

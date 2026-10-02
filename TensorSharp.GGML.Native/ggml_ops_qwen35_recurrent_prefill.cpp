@@ -17,12 +17,12 @@ using namespace tsg;
 // ---------------------------------------------------------------------------
 // Device-resident, single-graph fused prefill for ONE Qwen3.5/Qwen3-Next
 // gated-delta-net (recurrent) layer over N prompt tokens. This is the prefill
-// sibling of the recurrent layer inside TSGgml_Qwen35ModelVerify (the K=N GDN
+// sibling of the recurrent layer inside TSGgml_Qwen35ModelVerifyOwned (the K=N GDN
 // construction): input RMSNorm + packed in-proj (qkv/z/beta/alpha) + ssm_conv
 // + SiLU + L2-norm/head-tile + ggml_gated_delta_net(K=1 over N) + gated RMSNorm
 // + output projection + residual add — ALL in one ggml graph dispatch.
 //
-// Why a dedicated kernel: the legacy per-op chunked prefill path downloads the
+// Why a dedicated kernel: the per-op chunked prefill path downloads the
 // in-projection output to the host, runs Conv1D/SiLU/pack on the CPU, re-uploads
 // staging buffers, runs the scan, then downloads `gated`. On WDDM every one of
 // those per-layer round-trips drains the GPU; on short prompts the GPU never
@@ -156,7 +156,7 @@ TSG_EXPORT int TSGgml_Qwen35RecurrentLayerPrefill(
 {
     try
     {
-        // This legacy cache deliberately shares one graph across every layer
+        // This cache deliberately shares one graph across every layer
         // of the same shape. Bonsai signs and grouped-head permutations are
         // weight-specific, so this graph cannot safely reuse them. The caller
         // falls back to the transform-aware projections without changing any

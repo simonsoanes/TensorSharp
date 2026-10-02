@@ -162,15 +162,6 @@ namespace
     inline DfCachePool& df_inject_pool() { return g_df_inject_pools[tsg::g_active_rank]; }
     inline DfCachePool& df_draft_pool()  { return g_df_draft_pools[tsg::g_active_rank]; }
 
-    bool df_persist_enabled()
-    {
-        static const bool on = [] {
-            const char* e = std::getenv("TS_DFLASH_PERSIST");
-            return e == nullptr || e[0] != '0';
-        }();
-        return on;
-    }
-
     struct DfBinder
     {
         struct Upload { ggml_tensor* t; void* data; std::size_t bytes; };
@@ -287,9 +278,9 @@ TSG_EXPORT int TSGgml_DFlashInject(
         // Metal replays the persistent graph without a capture (every submit
         // re-encodes) but still skips the per-step metadata rebuild, re-binds
         // and gallocr re-plan - same rationale as the trunk kernel.
-        const bool can_persist = df_persist_enabled() &&
-            (g_backend_type == BACKEND_TYPE_CUDA || g_backend_type == BACKEND_TYPE_VULKAN ||
-             g_backend_type == BACKEND_TYPE_METAL);
+        const bool can_persist =
+            g_backend_type == BACKEND_TYPE_CUDA || g_backend_type == BACKEND_TYPE_VULKAN ||
+            g_backend_type == BACKEND_TYPE_METAL;
 
         DfCache* dc = can_persist ? df_inject_pool().find(sig, sig_ring, n_rows) : nullptr;
         if (dc != nullptr && dc->graph != nullptr)
@@ -516,9 +507,9 @@ TSG_EXPORT int TSGgml_DFlashDraftBlock(
         const void* sig = attn_norm_arr[0];
         const void* sig_ring = ring_k_arr[0];
         // Metal is included for the same reason as the inject graph above.
-        const bool can_persist = df_persist_enabled() &&
-            (g_backend_type == BACKEND_TYPE_CUDA || g_backend_type == BACKEND_TYPE_VULKAN ||
-             g_backend_type == BACKEND_TYPE_METAL);
+        const bool can_persist =
+            g_backend_type == BACKEND_TYPE_CUDA || g_backend_type == BACKEND_TYPE_VULKAN ||
+            g_backend_type == BACKEND_TYPE_METAL;
 
         // Mask [kv_len, b]: ring slot s holds ring_slot_pos[s] (or -1 = dead);
         // it is visible to block query i (position positions[i]) when the slot is

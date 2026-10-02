@@ -25,6 +25,12 @@ public sealed class StoredMessage
     [JsonPropertyName("thinking")] public string? Thinking { get; set; }
     [JsonPropertyName("imagePaths")] public List<string>? ImagePaths { get; set; }
     [JsonPropertyName("stillImagePaths")] public List<string>? StillImagePaths { get; set; }
+    [JsonPropertyName("maskPath")] public string? MaskPath { get; set; }
+    [JsonPropertyName("maskMode")] public string? MaskMode { get; set; }
+    [JsonPropertyName("maskInvert")] public bool? MaskInvert { get; set; }
+    [JsonPropertyName("maskFeather")] public int? MaskFeather { get; set; }
+    [JsonPropertyName("maskCrop")] public bool? MaskCrop { get; set; }
+    [JsonPropertyName("maskCropPadding")] public int? MaskCropPadding { get; set; }
     [JsonPropertyName("videoFilePaths")] public List<string>? VideoFilePaths { get; set; }
     [JsonPropertyName("audioPaths")] public List<string>? AudioPaths { get; set; }
     [JsonPropertyName("textFilePaths")] public List<string>? TextFilePaths { get; set; }
@@ -37,6 +43,11 @@ public sealed class StoredMessage
     [JsonPropertyName("artifacts")] public List<StoredArtifact>? Artifacts { get; set; }
     /// <summary>Generated image URL for an image-edit turn.</summary>
     [JsonPropertyName("imageUrl")] public string? ImageUrl { get; set; }
+    /// <summary>Generated clip URL for a video turn.</summary>
+    [JsonPropertyName("videoUrl")] public string? VideoUrl { get; set; }
+    /// <summary>The clip's soundtrack, kept only when it is a separate file the page plays
+    /// beside the clip (when the sound is inside the MP4 there is nothing to keep).</summary>
+    [JsonPropertyName("audioUrl")] public string? AudioUrl { get; set; }
 
     /// <summary>Every upload file name (bare names under the uploads root) this message references.</summary>
     [JsonIgnore]
@@ -48,14 +59,19 @@ public sealed class StoredMessage
                 if (list is not null)
                     foreach (string p in list)
                         yield return Path.GetFileName(p);
+            if (!string.IsNullOrEmpty(MaskPath)) yield return Path.GetFileName(MaskPath);
             if (Attachments is not null)
                 foreach (StoredAttachment a in Attachments)
                 {
                     if (!string.IsNullOrEmpty(a.File)) yield return Path.GetFileName(a.File);
                     if (!string.IsNullOrEmpty(a.PreviewFile)) yield return Path.GetFileName(a.PreviewFile);
+                    if (!string.IsNullOrEmpty(a.EditFile)) yield return Path.GetFileName(a.EditFile);
+                    if (!string.IsNullOrEmpty(a.MaskPath)) yield return Path.GetFileName(a.MaskPath);
                     if (a.Frames is not null) foreach (string f in a.Frames) yield return Path.GetFileName(f);
                 }
             if (!string.IsNullOrEmpty(ImageUrl)) yield return Path.GetFileName(ImageUrl);
+            if (!string.IsNullOrEmpty(VideoUrl)) yield return Path.GetFileName(VideoUrl);
+            if (!string.IsNullOrEmpty(AudioUrl)) yield return Path.GetFileName(AudioUrl);
         }
     }
 }
@@ -70,6 +86,15 @@ public sealed class StoredAttachment
     /// file/code tools instead of being copied into every prompt.</summary>
     [JsonPropertyName("fileBacked")] public bool? FileBacked { get; set; }
     [JsonPropertyName("previewFile")] public string? PreviewFile { get; set; }
+    /// <summary>Browser-decodable original-size image for editing HEIC/HEIF uploads.</summary>
+    [JsonPropertyName("editFile")] public string? EditFile { get; set; }
+    [JsonPropertyName("editUnavailableReason")] public string? EditUnavailableReason { get; set; }
+    [JsonPropertyName("maskPath")] public string? MaskPath { get; set; }
+    [JsonPropertyName("maskMode")] public string? MaskMode { get; set; }
+    [JsonPropertyName("maskInvert")] public bool? MaskInvert { get; set; }
+    [JsonPropertyName("maskFeather")] public int? MaskFeather { get; set; }
+    [JsonPropertyName("maskCrop")] public bool? MaskCrop { get; set; }
+    [JsonPropertyName("maskCropPadding")] public int? MaskCropPadding { get; set; }
     [JsonPropertyName("frames")] public List<string>? Frames { get; set; }
     [JsonPropertyName("pageCount")] public int? PageCount { get; set; }
     [JsonPropertyName("extractedPageCount")] public int? ExtractedPageCount { get; set; }

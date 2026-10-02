@@ -13,7 +13,7 @@ namespace TensorSharp.Cuda
     /// <c>--n-cpu-moe</c> layers.
     /// </summary>
     /// <remarks>
-    /// Inverted like <see cref="IDsv4WeightSource"/>: the managed quantized
+    /// Inverted like <see cref="ICudaWeightSource"/>: the managed quantized
     /// kernels live in TensorSharp.Models, which references this assembly and
     /// not the other way round, so the model layer supplies the implementation.
     /// Called concurrently from the loader only; inference calls it from the

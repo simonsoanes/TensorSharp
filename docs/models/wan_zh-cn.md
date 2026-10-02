@@ -30,9 +30,9 @@ TensorSharp 原生运行 [Wan 2.1](https://github.com/Wan-Video/Wan2.1) 与
 | 组件 | 文件 | 来源 |
 |---|---|---|
 | DiT（`--model` GGUF，`general.architecture = wan`） | 如 `Wan2.2-TI2V-5B-Q8_0.gguf` | [QuantStack/Wan2.2-TI2V-5B-GGUF](https://huggingface.co/QuantStack/Wan2.2-TI2V-5B-GGUF)、[QuantStack/Wan2.2-I2V-A14B-GGUF](https://huggingface.co/QuantStack/Wan2.2-I2V-A14B-GGUF)、[city96/Wan2.1-T2V-14B-gguf](https://huggingface.co/city96/Wan2.1-T2V-14B-gguf) |
-| A14B 第二专家（仅 A14B） | 对应的 `…HighNoise…`/`…LowNoise…` GGUF | 同一仓库（在同级或兄弟目录中按文件名自动查找；`TS_WAN_DIT2` 可覆盖） |
-| UMT5-XXL 文本编码器 | `umt5-xxl-encoder-Q8_0.gguf` | [city96/umt5-xxl-encoder-gguf](https://huggingface.co/city96/umt5-xxl-encoder-gguf)（`--video-text-encoder` / `TS_WAN_TE`） |
-| Wan 2.1 视频 VAE（2.1 + A14B） | `wan_2.1_vae.safetensors` | [Comfy-Org/Wan_2.1_ComfyUI_repackaged](https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/blob/main/split_files/vae/wan_2.1_vae.safetensors)（`--video-vae` / `TS_WAN_VAE`） |
+| A14B 第二专家（仅 A14B） | 对应的 `…HighNoise…`/`…LowNoise…` GGUF | 同一仓库（在同级或兄弟目录中按文件名自动查找；`--video-dit2` / `TS_VIDEO_DIT2` 可覆盖） |
+| UMT5-XXL 文本编码器 | `umt5-xxl-encoder-Q8_0.gguf` | [city96/umt5-xxl-encoder-gguf](https://huggingface.co/city96/umt5-xxl-encoder-gguf)（`--video-text-encoder` / `TS_VIDEO_TEXT_ENCODER`） |
+| Wan 2.1 视频 VAE（2.1 + A14B） | `wan_2.1_vae.safetensors` | [Comfy-Org/Wan_2.1_ComfyUI_repackaged](https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/blob/main/split_files/vae/wan_2.1_vae.safetensors)（`--video-vae` / `TS_VIDEO_VAE`） |
 | Wan 2.2 视频 VAE（TI2V-5B） | `Wan2.2_VAE.safetensors` | [QuantStack/Wan2.2-TI2V-5B-GGUF](https://huggingface.co/QuantStack/Wan2.2-TI2V-5B-GGUF/tree/main/VAE) 内附 |
 
 文本编码器在去噪开始前、（图生视频时）VAE 编码器在 DiT 加载前、DiT 在 VAE 解码前
@@ -322,7 +322,7 @@ F32 —— 旧的、约慢 2 倍的默认值）、`TS_WAN_HEARTBEAT_S`（进度�
 （Metal 上改用 ggml 的卷积下降而非 MPSGraph）、
 `TS_WAN_METAL_TENSOR_API=1|0`（强制开/关 Metal 4 tensor API；14B 级 DiT 默认开启，
 更小的模型默认关闭 —— 见[下文](#metal-4-tensor-api以及不该怎么测它)）、
-`TS_WAN_VAE`/`TS_WAN_TE`/`TS_WAN_DIT2`（配套文件路径）、`TS_FFMPEG`（MP4 导出用的
+`TS_VIDEO_VAE`/`TS_VIDEO_TEXT_ENCODER`/`TS_VIDEO_DIT2`（配套文件路径）、`TS_FFMPEG`（MP4 导出用的
 ffmpeg 路径）、`TS_WAN_DIT_TRACE=<file>`（逐阶段激活统计，用于调试）。
 
 ## 性能

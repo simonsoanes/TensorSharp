@@ -107,9 +107,13 @@ def main():
             config = metadata["config"]
             image_id = manifest["config"]["image_token_id"]
             vocab = config["text_config"]["vocab_size"]
-            model_load = bind(library, "Dsv4LoadModel", [ctypes.c_char_p] + [integer] * 5 + [ctypes.c_char_p], ptr)
+            model_load = bind(library, "Dsv4LoadModel",
+                              [ctypes.c_char_p] + [integer] * 4 + [ctypes.c_char_p, integer, ctypes.c_char_p, integer], ptr)
             model_free = bind(library, "Dsv4Free", [ptr], None)
-            reset = bind(library, "Dsv4Reset", [ptr], None)
+            reset_checked = bind(library, "Dsv4ResetChecked", [ptr])
+            def reset(handle):
+                if reset_checked(handle) != 1:
+                    raise RuntimeError("native reset was refused")
             past = bind(library, "Dsv4NPast", [ptr])
             attach = bind(library, "Dsv41AttachVision", [ptr, ptr])
             forward = bind(library, "Dsv41ForwardVision", [ptr, ptr, ptr, ptr, integer, integer, ptr])
@@ -117,7 +121,7 @@ def main():
             slot_select = bind(library, "Dsv4SetActiveSlot", [ptr, integer])
             slot_free = bind(library, "Dsv4SlotFree", [ptr, integer])
             model = model_load(str(args.text_fixture / "deepseek41-fixture.gguf").encode(),
-                               args.gpus, 256, args.ubatch, 2, args.cpu_moe, args.backend.encode())
+                               args.gpus, 256, args.ubatch, 2, None, args.cpu_moe, args.backend.encode(), 0)
             if not model:
                 raise RuntimeError("Native text fixture load failed")
             try:
@@ -249,7 +253,7 @@ def main():
                   oracle_sdpa_backend=manifest.get("sdpa_backend", "auto"),
                   oracle_linear_f32=manifest.get("linear_f32", False),
                   environment={key: os.getenv(key) for key in
-                  ("TS_DSV4_FA", "TS_DSV4_GATHER", "TS_DSV41_TP", "TS_DSV41_VISION_FA", "TS_DSV41_VISION_BF16_GEMM")}, checks=checks)
+                  ("TS_DSV4_FA", "TS_DSV4_GATHER", "TS_DSV41_VISION_FA", "TS_DSV41_VISION_BF16_GEMM")}, checks=checks)
     path = args.report or args.fixture_dir / f"validation-vision-{args.backend.lower()}.json"
     path.write_text(json.dumps(report, indent=2) + "\n")
     passed = sum(item["passed"] for item in checks)

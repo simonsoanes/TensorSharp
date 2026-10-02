@@ -105,4 +105,23 @@ public sealed class SpeculationPolicyTests : IDisposable
         Assert.Equal(expected, SpeculationPolicy.ChooseAlgorithm(attached, launchType: null));
         Assert.Equal(expected, Environment.GetEnvironmentVariable(SpeculationPolicy.TypeVariable));
     }
+
+    /// <summary>
+    /// Only a draft head the catalog ships makes the app speculate with a head. Qwen3.8
+    /// 27B's weights file carries its own NextN/MTP layer, the engine attaches it, and
+    /// with it the Mac app decoded slower in every turn shape (0.83-0.93x) where n-gram
+    /// gave 1.76-1.90x on the quoting turns agents are made of.
+    /// </summary>
+    [Theory]
+    [InlineData("/models/gemma-4-e4b/mtp-gemma-4-E4B-it-Q8_0.gguf", true, true)]
+    [InlineData("/models/gemma-4-e4b/mtp-gemma-4-E4B-it-Q8_0.gguf", false, false)]
+    [InlineData(null, true, false)]
+    [InlineData(null, false, false)]
+    [InlineData("  ", true, false)]
+    public void OnlyTheCatalogsOwnDraftHeadSelectsAuto(string? catalogHead, bool attached, bool speculatesWithHead)
+    {
+        Assert.Equal(speculatesWithHead, SpeculationPolicy.SpeculatesWithDraftHead(catalogHead, attached));
+        Assert.Equal(speculatesWithHead ? SpeculatorRegistry.Auto : SpeculatorRegistry.NGram,
+            SpeculationPolicy.ChooseAlgorithm(SpeculationPolicy.SpeculatesWithDraftHead(catalogHead, attached), launchType: null));
+    }
 }

@@ -18,8 +18,8 @@ namespace InferenceWeb.Tests;
 
 /// <summary>
 /// Whether the glm-dsa native loader pages its NextN/MTP draft block in. It
-/// decides from the speculation enable variables BEFORE the scheduler exists,
-/// so the two must read those variables the same way: a loader that treated
+/// decides from the speculation enable variable BEFORE the scheduler exists,
+/// so the two must read it the same way: a loader that treated
 /// every non-"0" value as on paged ~3 GiB in for <c>TS_SPEC=false</c> while the
 /// scheduler (which accepts only 1/true/yes/on) never drafted with it.
 /// </summary>
@@ -30,7 +30,6 @@ public sealed class GlmDsaNativeMtpRequestTests : IDisposable
     public GlmDsaNativeMtpRequestTests()
     {
         _env.ClearSpeculationVars();
-        _env.Set("TS_GLM_MTP", null);
     }
 
     public void Dispose() => _env.Dispose();
@@ -53,33 +52,10 @@ public sealed class GlmDsaNativeMtpRequestTests : IDisposable
         Assert.Equal(SchedulerConfig.FromEnvironment().Speculation.Enabled, GlmDsaModel.NativeMtpRequested());
     }
 
-    [Theory]
-    [InlineData("1", true)]
-    [InlineData("false", false)]
-    [InlineData("0", false)]
-    public void LegacyTsMtpSpec_IsHonouredWhenTsSpecIsUnset(string value, bool expected)
-    {
-        _env.Set(SpeculationEnvVars.LegacyEnabled, value);
-
-        Assert.Equal(expected, GlmDsaModel.NativeMtpRequested());
-        Assert.Equal(SchedulerConfig.FromEnvironment().Speculation.Enabled, GlmDsaModel.NativeMtpRequested());
-    }
-
     [Fact]
     public void NoEnableVariable_LeavesTheDraftBlockUnloaded()
     {
         Assert.False(GlmDsaModel.NativeMtpRequested());
-    }
-
-    [Theory]
-    [InlineData("1", "0", true)]
-    [InlineData("0", "1", false)]
-    public void TsGlmMtp_OverridesTheSharedSwitch(string glmMtp, string spec, bool expected)
-    {
-        _env.Set(SpeculationEnvVars.Enabled, spec);
-        _env.Set("TS_GLM_MTP", glmMtp);
-
-        Assert.Equal(expected, GlmDsaModel.NativeMtpRequested());
     }
 
     [Theory]
@@ -93,15 +69,5 @@ public sealed class GlmDsaNativeMtpRequestTests : IDisposable
 
         Assert.True(SchedulerConfig.FromEnvironment().Speculation.Enabled);
         Assert.False(GlmDsaModel.NativeMtpRequested());
-    }
-
-    [Fact]
-    public void ExplicitNativeMtpOverride_CanStillLoadTheHeadWithNgramSelected()
-    {
-        _env.Set(SpeculationEnvVars.Enabled, "1");
-        _env.Set(SpeculationEnvVars.Type, "ngram");
-        _env.Set("TS_GLM_MTP", "1");
-
-        Assert.True(GlmDsaModel.NativeMtpRequested());
     }
 }

@@ -22,7 +22,7 @@
   <table>
     <thead><tr><th>风格</th><th>端点</th></tr></thead>
     <tbody>
-      <tr><td><strong>兼容 Ollama</strong></td><td><code>/api/embed</code>、<code>/api/embeddings</code>、<code>/api/generate</code>、<code>/api/chat/ollama</code>、<code>/api/tags</code>、<code>/api/show</code></td></tr>
+      <tr><td><strong>兼容 Ollama</strong></td><td><code>/api/embed</code>、<code>/api/generate</code>、<code>/api/chat/ollama</code>、<code>/api/tags</code>、<code>/api/show</code></td></tr>
       <tr><td><strong>兼容 OpenAI</strong></td><td><code>/v1/embeddings</code>、<code>/v1/chat/completions</code>、<code>/v1/responses</code>、<code>/v1/models</code>、<code>/v1/videos/generations</code>、<code>/v1/skills</code></td></tr>
       <tr><td><strong>兼容 Jev</strong></td><td><code>/v1/systemone</code>（在托管的 DiffusionGemma 模型上做类型化决策——见<a href="#jev">下文</a>）</td></tr>
       <tr><td><strong>Web UI (SSE)</strong></td><td><code>/api/chat</code>、<code>/api/sessions</code>、<code>/api/models</code>、<code>/api/models/load</code>、<code>/api/upload</code>、<code>/api/image-generate</code>、<code>/api/image-generate/stream</code>、<code>/api/image-edit</code>、<code>/api/image-edit/stream</code>、<code>/api/video-generate</code>、<code>/api/video-generate/stream</code>、<code>/api/skills</code>、<code>/api/code/artifacts</code></td></tr>
@@ -35,7 +35,7 @@
   <div class="callout warn"><div class="ic">🔒</div><p>服务没有 API Key 身份验证或内置 TLS，并监听 <code>0.0.0.0:5000</code>。只应在可信网络中使用，或在前方部署带身份验证与 TLS 的反向代理。</p></div>
 
   <h2 id="embeddings">嵌入服务</h2>
-  <p>使用 <code>--model encoder.gguf --embeddings</code>，托管 Snowflake Arctic Embed L v2.0 或 MiniLM。 <code>POST /v1/embeddings</code>、<code>POST /api/embed</code>、<code>POST /api/embeddings</code> 返回归一化向量；后端为纯 C# <code>cpu</code> 与原生 <code>ggml_cpu</code> / <code>ggml_metal</code> / <code>ggml_cuda</code>。<a href="embeddings_zh-cn.html">下载、API、截断规则与检索质量 →</a></p>
+  <p>使用 <code>--model encoder.gguf --embeddings</code>，托管 Snowflake Arctic Embed L v2.0 或 MiniLM。 <code>POST /v1/embeddings</code>、<code>POST /api/embed</code> 返回归一化向量；后端为纯 C# <code>cpu</code> 与原生 <code>ggml_cpu</code> / <code>ggml_metal</code> / <code>ggml_cuda</code>。<a href="embeddings_zh-cn.html">下载、API、截断规则与检索质量 →</a></p>
 
   <h2 id="quick-call">服务启动后的快速调用</h2>
   <p>服务器快速开始托管 <code>gemma-4-E4B-it-Q8_0.gguf</code>。在第二个终端中粘贴：</p>
@@ -333,7 +333,7 @@ curl -X DELETE http://localhost:5000/api/skills/pdf   # {"removed":true}</code><
   <div class="callout warn"><div class="ic">🔒</div><p>上传的技能属于不受信任的内容，因此落盘前会校验：ZIP 条目使用与模型读取相同的路径关卡，按解压后大小计数，并限制 4096 个文件、单文件 64 MB、总计 256 MB 与 200× 压缩比。除非服务端带 <code>--skills-allow-exec</code> 启动，否则不会提供 <code>skills_run</code>；在默认 <code>required</code> 策略下，它要么进入合格 OS 沙箱，要么拒绝。这仍是在授权模型选择任意代码，只应放在用户与技能都可信的宿主上。→ <a href="cli_zh-cn.html#skills">技能相关参数</a></p></div>
 
   <h2 id="structured">5 · 结构化输出（JSON schema）</h2>
-  <p>OpenAI 的 <code>response_format</code> 接受 <code>text</code>、<code>json_object</code> 与经过校验的 <code>json_schema</code>。服务器会注入严格的 JSON 指令，并在返回前校验输出。默认情况下，它还会把 schema（或通用的 JSON 对象语法）编译成<strong>约束解码的语法</strong>，逐 token 生效。<code>TS_JSON_GRAMMAR=0</code> 关闭该语法；此时请求只把<strong>首个采样 token</strong> 约束为以 <code>{</code> 开头的候选，使爱闲聊的模型无法在 JSON 对象前输出散文（<code>TS_JSON_FORCE_OPEN=0</code> 连这一约束也关闭）。</p>
+  <p>OpenAI 的 <code>response_format</code> 接受 <code>text</code>、<code>json_object</code> 与经过校验的 <code>json_schema</code>。服务器会注入严格的 JSON 指令，并在返回前校验输出。它还会把 schema（或通用的 JSON 对象语法）编译成<strong>约束解码的语法</strong>，逐 token 生效。语法无法表达的 schema 会退回到只把<strong>首个采样 token</strong> 约束为以 <code>{</code> 开头的候选，使爱闲聊的模型仍无法在 JSON 对象前输出散文。</p>
   <pre data-lang="bash"><code>curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
@@ -360,7 +360,7 @@ curl -X DELETE http://localhost:5000/api/skills/pdf   # {"removed":true}</code><
     },
     "max_tokens": 120
   }'</code></pre>
-  <div class="callout warn"><div class="ic">⚠️</div><p><code>json_schema</code> 不能与调用方的 <code>tools</code> 同时使用。<code>think</code> 同样会被拒绝，但语法能等推理结束后再生效的家族除外——Gemma 4、Qwen 3.8 Flash Next、GPT-OSS、Muse-Glimmer、DeepSeek V4.1、<code>glm5next</code> 与 Nemotron-H——在这些家族上语法从推理结束处开始约束；设置 <code>TS_JSON_GRAMMAR=0</code> 时这种组合也会被拒绝。它可以与 <code>skills</code> 组合，但选中技能正文会被内联，而且该请求不会提供任何内置技能 / 代码工具，因为 schema 约束下无法生成调用标记。无效 schema 返回 HTTP <code>400</code>；校验失败的输出返回 HTTP <code>422</code>。</p></div>
+  <div class="callout warn"><div class="ic">⚠️</div><p><code>json_schema</code> 不能与调用方的 <code>tools</code> 同时使用。<code>think</code> 同样会被拒绝，但语法能等推理结束后再生效的家族除外——Gemma 4、Qwen 3.8 Flash Next、GPT-OSS、Muse-Glimmer、DeepSeek V4.1、<code>glm5next</code> 与 Nemotron-H——在这些家族上语法从推理结束处开始约束。它可以与 <code>skills</code> 组合，但选中技能正文会被内联，而且该请求不会提供任何内置技能 / 代码工具，因为 schema 约束下无法生成调用标记。无效 schema 返回 HTTP <code>400</code>；校验失败的输出返回 HTTP <code>422</code>。</p></div>
 
   <h2 id="webui-sse">6 · Web UI SSE 协议（<code>/api/chat</code>）</h2>
   <p>这是内置聊天 UI 所用的协议；外部 UI 也可接入同一端点。每个事件都是一个 JSON 对象，以单个 <code>data: …</code> SSE 帧传递。</p>

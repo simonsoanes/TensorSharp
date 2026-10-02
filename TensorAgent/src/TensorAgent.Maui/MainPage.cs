@@ -9,9 +9,13 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
 using System.Text.Json;
+#if IOS
 using Foundation;
+#endif
 using TensorAgent.Maui.Hosting;
+#if IOS
 using UserNotifications;
+#endif
 
 namespace TensorAgent.Maui;
 
@@ -29,7 +33,7 @@ public sealed class MainPage : ContentPage
     private readonly LoopbackWebHost _host;
     private readonly Label _status;
     private readonly WebView _webView;
-    private Platforms.iOS.Dictation? _dictation;
+    private Services.Dictation? _dictation;
 
     /// <summary>
     /// True once the page has told us it finished loading, and false again from the
@@ -37,7 +41,9 @@ public sealed class MainPage : ContentPage
     /// before the first `ready`, silence is normal.
     /// </summary>
     private bool _pageReady;
+#if IOS
     private int _shareNotificationPrompting;
+#endif
 
     public MainPage(LoopbackWebHost host)
     {
@@ -176,7 +182,7 @@ public sealed class MainPage : ContentPage
             return;
         }
 
-        string? failure = await Platforms.iOS.FilePresenter.PresentAsync(
+        string? failure = await Services.FilePresenter.PresentAsync(
             full!, string.IsNullOrWhiteSpace(displayName) ? Path.GetFileName(relative) : displayName);
         if (failure is not null)
             await DisplayAlert("Cannot open", failure, "OK");
@@ -905,7 +911,11 @@ public sealed class MainPage : ContentPage
             string? typed = await CallBridgeAsync("insertText", new { text = prompt });
             if (typed is null || !typed.Contains("ok", StringComparison.Ordinal))
                 _host.App.TraceBackground("pagecheck FAIL the page refused the prompt: " + (typed ?? "no answer"));
-            await _webView.EvaluateJavaScriptAsync("window.TensorAgent.send(); true");
+            // Blurred after sending: insertText leaves the composer focused, which keeps
+            // the keyboard -- in the simulator, its accessory bar -- over the transcript
+            // in every screenshot this hook exists to take.
+            await _webView.EvaluateJavaScriptAsync(
+                "window.TensorAgent.send(); if (document.activeElement) document.activeElement.blur(); true");
             Console.WriteLine("TensorAgent: demo prompt sent through the Web UI: " + prompt);
             if (string.Equals(Environment.GetEnvironmentVariable("TENSORAGENT_PAGE_BACKGROUND_CHECK"), "1", StringComparison.Ordinal))
             {
@@ -1235,8 +1245,11 @@ public sealed class MainPage : ContentPage
         + "press('pointerdown');setTimeout(function(){press('pointerup');setTimeout(function(){"
         + "add('a-tap-still-types',!document.body.classList.contains('voice'),'a short press switched to voice mode');"
         + "press('pointerdown');setTimeout(function(){"
-        + "add('holding-the-box-gives-hold-to-talk',"
-        + "document.body.classList.contains('voice')&&shown(hold)&&!shown(wrap),"
+        + "var canDictate=window.TensorAgent.canDictate();"
+        + "add('native-handshake',JSON.parse(window.TensorAgent.diagnostics()).native,'the app did not announce its capabilities');"
+        + "add(canDictate?'holding-the-box-gives-hold-to-talk':'unsupported-dictation-keeps-the-box',"
+        + "canDictate?(document.body.classList.contains('voice')&&shown(hold)&&!shown(wrap))"
+        + ":(!document.body.classList.contains('voice')&&!shown(hold)&&shown(wrap)),"
         + "'voice='+document.body.classList.contains('voice')+' hold='+shown(hold)+' box='+shown(wrap));"
         + "back.click();setTimeout(function(){"
         + "add('the-keyboard-button-returns',!document.body.classList.contains('voice')&&shown(wrap),'still in voice mode');"
@@ -1307,7 +1320,7 @@ public sealed class MainPage : ContentPage
 
             // Guarded in JS as well: on the very first appearance the page may not have
             // loaded yet, and there is nothing to refresh until it has.
-            await Tell("nativeReady");
+            await AnnounceNativeReadyAsync();
             await Tell("refreshModel");
             // Settings is a native page and this one outlives it, so a choice made
             // there — "Show reasoning by default", the dictation language — has to be
@@ -1366,6 +1379,16 @@ public sealed class MainPage : ContentPage
     /// <summary>Call one method on the page's bridge, if the page has one yet.</summary>
     private Task<string?> Tell(string method) => _webView.EvaluateJavaScriptAsync(
         $"window.TensorAgent && window.TensorAgent.{method} ? window.TensorAgent.{method}() : false");
+
+    private Task<string?> AnnounceNativeReadyAsync() => CallBridgeAsync("nativeReady", new
+    {
+        dictation = Services.Dictation.IsSupported,
+#if WINDOWS
+        composerHint = "Message… or press Windows+H to dictate",
+#else
+        composerHint = "Message…",
+#endif
+    });
 
     /// <summary>
     /// The loopback server had to move to another port (see
@@ -1607,10 +1630,14 @@ public sealed class MainPage : ContentPage
     /// <summary>
     /// Ask contextually, after the first share has arrived, whether future shares may
     /// post a one-tap notification. Permission is requested by the containing app,
-    /// never by the extension running inside another app.
+    /// never by the extension running inside another app. iOS only: the share
+    /// extension, and so the reason to ask, exists only there.
     /// </summary>
     private async Task OfferShareNotificationPermissionAsync()
     {
+#if !IOS
+        await Task.CompletedTask;
+#else
         const string askedKey = "TensorAgentAskedForShareNotifications";
         if (string.Equals(Environment.GetEnvironmentVariable("TENSORAGENT_SHARE_CHECK"), "1", StringComparison.Ordinal)
             || NSUserDefaults.StandardUserDefaults.BoolForKey(askedKey))
@@ -1642,6 +1669,7 @@ public sealed class MainPage : ContentPage
         {
             Volatile.Write(ref _shareNotificationPrompting, 0);
         }
+#endif
     }
 
     /// <summary>
@@ -1719,15 +1747,27 @@ public sealed class MainPage : ContentPage
     /// </summary>
     private async Task AttachAsync(MediaSource source)
     {
-        FileResult? picked = source switch
+        FileResult? picked;
+        try
         {
-            MediaSource.Library => await MediaPicker.Default.PickPhotoAsync(),
-            MediaSource.Camera when MediaPicker.Default.IsCaptureSupported => await MediaPicker.Default.CapturePhotoAsync(),
-            MediaSource.Camera => throw new NotSupportedException("This device has no camera available to the app."),
-            MediaSource.Video => await MediaPicker.Default.PickVideoAsync(),
-            MediaSource.File => await FilePicker.Default.PickAsync(),
-            _ => null,
-        };
+            picked = source switch
+            {
+                MediaSource.Library => await MediaPicker.Default.PickPhotoAsync(),
+                MediaSource.Camera when MediaPicker.Default.IsCaptureSupported => await MediaPicker.Default.CapturePhotoAsync(),
+                MediaSource.Camera => throw new NotSupportedException("This device has no camera available to the app."),
+                MediaSource.Video => await MediaPicker.Default.PickVideoAsync(),
+                MediaSource.File => await FilePicker.Default.PickAsync(),
+                _ => null,
+            };
+        }
+        catch (Exception ex)
+        {
+            // Picker availability and permission errors happen before there is a file
+            // to upload. This callback runs through an async UI event, so letting the
+            // exception escape can close the app on a desktop without a camera.
+            await Notice("Could not open the attachment picker: " + ex.Message);
+            return;
+        }
         if (picked is null)
             return;
 
@@ -1856,19 +1896,19 @@ public sealed class MainPage : ContentPage
         // lift before the session exists.
         _dictationStopRequested = false;
 
-        if (!Platforms.iOS.Dictation.IsSupported)
+        if (!Services.Dictation.IsSupported)
         {
-            await Notice("Speech recognition is not available on this device.");
+            await Notice(Services.Dictation.UnsupportedMessage);
             await _webView.EvaluateJavaScriptAsync("window.TensorAgent.dictationEnded()");
             return;
         }
-        if (await Platforms.iOS.Dictation.RequestPermissionsAsync() is { } refused)
+        if (await Services.Dictation.RequestPermissionsAsync() is { } refused)
         {
             // A permission iOS has already stored a "no" for cannot be asked for
             // again, so telling the user to try harder is useless: the only way back
             // is Settings, and the app can open it for them.
-            bool permanent = refused.Contains(Platforms.iOS.Dictation.DeniedMarker, StringComparison.Ordinal);
-            string message = refused.Replace(Platforms.iOS.Dictation.DeniedMarker, string.Empty).Trim();
+            bool permanent = refused.Contains(Services.Dictation.DeniedMarker, StringComparison.Ordinal);
+            string message = refused.Replace(Services.Dictation.DeniedMarker, string.Empty).Trim();
             if (permanent)
                 await NoticeWithSettings(message);
             else
@@ -1877,7 +1917,7 @@ public sealed class MainPage : ContentPage
             return;
         }
 
-        _dictation = new Platforms.iOS.Dictation(_host.App.Settings.Load().SpeechLanguage);
+        _dictation = new Services.Dictation(_host.App.Settings.Load().SpeechLanguage);
         // The finger is very often already gone. On the first ever hold, iOS puts two
         // permission dialogs in front of the user, and tapping Allow means letting go of
         // the message box -- so `dictate-stop` arrives while this method is still inside
@@ -1941,8 +1981,12 @@ public sealed class MainPage : ContentPage
     {
         try
         {
+#if IOS || MACCATALYST
             var url = new Foundation.NSUrl(UIKit.UIApplication.OpenSettingsUrlString);
             UIKit.UIApplication.SharedApplication.OpenUrl(url, new UIKit.UIApplicationOpenUrlOptions(), null);
+#else
+            AppInfo.Current.ShowSettingsUI();
+#endif
         }
         catch (Exception ex) { Console.WriteLine("TensorAgent: open settings failed: " + ex.Message); }
     }
@@ -2007,7 +2051,7 @@ public sealed class MainPage : ContentPage
                 {
                     try
                     {
-                        await Tell("nativeReady");
+                        await AnnounceNativeReadyAsync();
                         await Tell("takeShare");
                     }
                     catch (Exception ex) { Console.WriteLine("TensorAgent: nativeReady failed: " + ex.Message); }
@@ -2089,8 +2133,16 @@ public sealed class MainPage : ContentPage
             Console.WriteLine($"TensorAgent: entry URL {_host.EntryUrl}");
 #endif
             _status.Text =
+#if IOS
                 $"{probe.Backend} · GgmlOps {(probe.MainProgramHandleResolved ? "linked" : "NOT linked")}" +
+#else
+                $"{probe.Backend} · GgmlOps {(probe.NativeLibraryLoaded ? "loaded" : "NOT loaded")}" +
+#endif
+#if IOS || MACCATALYST
                 $" · {probe.GpuName ?? "no Metal device"} · :{_host.Port}";
+#else
+                $" · {probe.Reason} · :{_host.Port}";
+#endif
             // The page says when the model starts and stops working; the display is
             // held awake for exactly that stretch, because on iOS the screen sleeping
             // suspends the app and stops the generation partway.

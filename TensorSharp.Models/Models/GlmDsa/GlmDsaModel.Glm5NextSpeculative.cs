@@ -65,17 +65,6 @@ namespace TensorSharp.Models
         /// only moment a rewind below the live position is exact.</summary>
         private bool _g5nSnapRestored;
 
-        private bool? _g5nNativeSnapshotApi;
-
-        /// <summary>
-        /// Whether this glm5next instance can roll a verify batch back. The
-        /// managed path always can; the native executor needs a library that
-        /// exports the KDA snapshot API (an older libGgmlOps loads and forwards
-        /// glm5next fine but cannot undo a rejected window, so speculation is
-        /// declined up front rather than failing mid-verify).
-        /// </summary>
-        private bool Glm5NextRollbackAvailable
-            => !UsesNativeExecutor || (_g5nNativeSnapshotApi ??= GgmlGlmNative.KdaStateApiAvailable());
 
         private void Glm5NextInvalidateSnapshot()
         {
@@ -87,18 +76,13 @@ namespace TensorSharp.Models
         private void Glm5NextSnapshotRecurrentState()
         {
             Glm5NextInvalidateSnapshot();
-            if (!Glm5NextRollbackAvailable)
-                throw new NotSupportedException(
-                    "GLM-5.3-Flash speculative decoding needs the native KDA snapshot API " +
-                    "(TSGgml_GlmKdaStateCapture), which this libGgmlOps does not export. Rebuild the native library.");
-
             if (UsesNativeExecutor)
             {
                 lock (_nativeSync)
                 {
-                    if (!GgmlGlmNative.KdaStateCapture(_native))
+                    if (!_exec.KdaStateCapture())
                         throw new InvalidOperationException("glm5next: native KDA state capture failed (see stderr).");
-                    _g5nSnapPos = GgmlGlmNative.NPast(_native);
+                    _g5nSnapPos = _exec.NPast;
                 }
             }
             else
@@ -137,7 +121,7 @@ namespace TensorSharp.Models
             {
                 lock (_nativeSync)
                 {
-                    int pos = GgmlGlmNative.KdaStateRestore(_native);
+                    int pos = _exec.KdaStateRestore();
                     if (pos < 0 || pos != _g5nSnapPos)
                     {
                         Glm5NextInvalidateSnapshot();

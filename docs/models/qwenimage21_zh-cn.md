@@ -423,10 +423,17 @@ sd.cpp 忽略 `lora_adapter_metadata` 中的 alpha，因此给它的 Pruna 倍�
 
 ### 服务端与 C# API
 
-服务端在启动时加载 `--lora` 插件组，并把它应用到每个生成与编辑请求；尚未实现按请求选择
-LoRA。请求中的 `steps` 与 `cfg` 仍会覆盖插件的配方。在进程内，
+服务端在启动时加载 `--lora` 插件组，并把它应用到每个生成与编辑请求；其 HTTP 请求不能选择
+插件。请求中的 `steps` 与 `cfg` 仍会覆盖插件的配方。在进程内，
 `QwenImageModel.SetLoras(IReadOnlyList<LoraSpec>)` 为之后的请求替换插件组（空列表表示
 移除）。新插件组会立即针对 Transformer 校验，失败时保留原来的插件组。
+
+按图片选择插件的宿主把插件组传给 `WebUiChatService` 的 `ImageGenerateStreamAsync`、
+`ImageEditStreamAsync` 或 `ImageEditAsync(body, loras, ct)`：插件组在与生成相同的锁内替换，
+所以排队等候的图片使用它请求时的插件组；插件组未变时没有开销（请传绝对路径，模型按此记录
+插件组）。TensorAgent 的 Mac 应用即如此：它从自己的固定目录提供
+[USAGE_zh-cn.md 表中](../../USAGE_zh-cn.md#qwen-image-21-lora-插件)的十二个插件，并把用户的选择
+应用到每张图片，包括它的编辑路由（见 [TensorAgent 的 README](../../TensorAgent/README.md)）。
 
 ### 限制
 

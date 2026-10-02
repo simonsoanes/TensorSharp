@@ -301,6 +301,7 @@ set(TSG_GGMLOPS_SOURCES
     ggml_ops_qwen35_gdn_tp.cpp
     ggml_ops_mamba2.cpp
     ggml_ops_moe.cpp
+    ggml_ops_host_moe_decode.cpp
     ggml_ops_deepseek4.cpp
     ggml_ops_deepseek41_tp.cpp
     ggml_ops_deepseek41_vision.cpp
@@ -308,7 +309,6 @@ set(TSG_GGMLOPS_SOURCES
     ggml_ops_glm_dsa.cpp
     ggml_ops_dsv4_fused_cpu.cpp
     ggml_ops_paged_attention.cpp
-    ggml_ops_paged_kv_pool.cpp
     ggml_ops_tensor_parallel.cpp
 )
 if (APPLE AND TENSORSHARP_GGML_NATIVE_ENABLE_METAL)
@@ -540,7 +540,7 @@ if (TENSORSHARP_GGML_NATIVE_BUILD_TESTS)
     set_tests_properties(deepseek41-tp-worker-lifetime PROPERTIES TIMEOUT 30)
 
     add_executable(GgmlOpsDsv41TpTest tests/dsv41_tp_test.cpp ggml_ops_deepseek41_tp.cpp
-        ggml_ops_matmul_precision.cpp)
+        ggml_ops_matmul_precision.cpp ggml_ops_dsv4_fused_cpu.cpp)
     target_compile_definitions(GgmlOpsDsv41TpTest PRIVATE TSG_GGML_TEST_HOOKS)
     target_include_directories(GgmlOpsDsv41TpTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(GgmlOpsDsv41TpTest PRIVATE ggml-cpu ggml-base Threads::Threads)
@@ -549,17 +549,17 @@ if (TENSORSHARP_GGML_NATIVE_BUILD_TESTS)
     if (TENSORSHARP_GGML_NATIVE_ENABLE_CUDA AND NOT WIN32)
         target_compile_definitions(GgmlOpsDsv41TpTest PRIVATE TSG_GGML_USE_CUDA=1)
         target_sources(GgmlOpsDsv41TpTest PRIVATE ggml_ops_dsv4_fused.cu ggml_ops_matmul_precision.cu
-            ggml_ops_attention_precision.cu ggml_ops_q8_precision.cu)
+            ggml_ops_attention_precision.cu ggml_ops_q8_precision.cu ggml_ops_tp_probe.cu)
         target_include_directories(GgmlOpsDsv41TpTest PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}/../ExternalProjects/ggml/src")
-        target_link_libraries(GgmlOpsDsv41TpTest PRIVATE ggml-cuda CUDA::cublas)
+        target_link_libraries(GgmlOpsDsv41TpTest PRIVATE ggml-cuda CUDA::cublas ${CMAKE_DL_LIBS})
         add_test(NAME deepseek41-quantized-strip-projections-cuda
                  COMMAND GgmlOpsDsv41TpTest --cuda 1 --quant-strip-only)
         set_tests_properties(deepseek41-quantized-strip-projections-cuda PROPERTIES
             SKIP_RETURN_CODE 77 TIMEOUT 600)
         # Multi-device tests are explicit: a one-GPU CI lane must not claim
         # that its skipped multi-device checks established tensor parallelism.
-        foreach(TP_RANKS 2 4 7 8)
+        foreach(TP_RANKS 2 3 4 5 6 7 8)
             add_test(NAME deepseek41-moe-tensor-parallel-cuda-${TP_RANKS}
                      COMMAND GgmlOpsDsv41TpTest --cuda ${TP_RANKS})
             set_tests_properties(deepseek41-moe-tensor-parallel-cuda-${TP_RANKS}
@@ -848,4 +848,18 @@ if (TENSORSHARP_GGML_NATIVE_BUILD_TESTS)
                 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 60)
         endif()
     endif()
+endif()
+
+# Standalone optional NCCL row-gather contract: true F32 bit copies, uneven
+# tilings, non-mutating validation failures and communicator lifecycle.
+if (TENSORSHARP_GGML_NATIVE_BUILD_TESTS AND TENSORSHARP_GGML_NATIVE_ENABLE_CUDA AND NOT WIN32)
+    add_executable(GgmlOpsTpCollectiveGatherTest
+        tests/tp_collective_gather_test.cpp ggml_ops_tp_probe.cu)
+    target_compile_definitions(GgmlOpsTpCollectiveGatherTest PRIVATE TSG_GGML_USE_CUDA=1)
+    target_include_directories(GgmlOpsTpCollectiveGatherTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../ExternalProjects/ggml/src")
+    target_link_libraries(GgmlOpsTpCollectiveGatherTest PRIVATE
+        ggml-cuda ggml-cpu ggml-base CUDA::cudart ${CMAKE_DL_LIBS})
+    add_test(NAME cuda-f32-row-gather COMMAND GgmlOpsTpCollectiveGatherTest)
+    set_tests_properties(cuda-f32-row-gather PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
 endif()

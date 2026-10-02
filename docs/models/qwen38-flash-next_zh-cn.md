@@ -15,9 +15,9 @@ PLE n-gram 嵌入块、×4 hyper-connection 流以及 512 专家的 MoE。GGUF �
 
 在 GGML 后端上，整个 token（几乎）只跑一张图——嵌入、PLE（在图内）、全部 48 层、
 最后的 mixer 以及 LM head——并配一个按形状索引的已捕获图缓存
-（`TS_Q4E_TOKEN_GRAPH=0` 回退到逐层融合 kernel，后者再逐算子回退）。视觉沿用
+（span 放弃时改走逐层融合 kernel，后者再逐算子回退）。视觉沿用
 Qwen3.5-VL 塔，位置用 (T,H,W) IMRoPE；支持多图与多轮图像会话，并在轮次之间复用
-KV（GDN 递归无法回退，因此只有当新 prompt **恰好扩展**已缓存前缀时才复用；见[保留前缀复用](#保留前缀复用)）。在默认的 radix 前缀缓存（`TS_PREFIX_CACHE_MODE=tree`）下，这种复用止于会话中第一个图像或视频 span：该系列尚未声明可跨媒体 span 复用（它保存了一段 M-RoPE 缓存间隙，目前还没有参照位置测试覆盖）。由于该系列只能从长度与匹配长度完全一致的 holder 或检查点续接，之后的轮次最多复用附件之前已存储的检查点（通常是系统提示词），其余部分重新 prefill。`TS_PREFIX_CACHE_MODE=legacy` 选择旧的保留 holder 匹配，这一限制对它不适用。
+KV（GDN 递归无法回退，因此只有当新 prompt **恰好扩展**已缓存前缀时才复用；见[保留前缀复用](#保留前缀复用)）。在 radix 前缀缓存中，这种复用止于会话中第一个图像或视频 span：该系列尚未声明可跨媒体 span 复用（它保存了一段 M-RoPE 缓存间隙，目前还没有参照位置测试覆盖）。由于该系列只能从长度与匹配长度完全一致的 holder 或检查点续接，之后的轮次最多复用附件之前已存储的检查点（通常是系统提示词），其余部分重新 prefill。
 
 思考模式可以开启或关闭。关闭时，助手轮次以已发布模板输出的闭合空块 `<think>\n\n</think>` 开头，重放历史时也保留这一确切后缀，因此缓存前缀仍能匹配。
 
@@ -113,6 +113,10 @@ MP4、WebM 或 MOV data URI（不会抓取远程 URL）：
 完整 checkpoint 的检查是 `benchmarks/engine_comparison/validate_deepseek41_media.py` 的
 `video_order` / `video_timestamp` 场景，对象是挂了 `mmproj-BF16.gguf` 的 Qwen3.8 服务。
 
+## 思考预算
+
+开启思考时，思考内容一旦达到 `TS_THINKING_BUDGET`（`max_tokens` 不小于 512 时默认为其 75%），服务端和交互式 CLI 都会闭合思考块，答案随后在原 `max_tokens` 内生成。`</think>` 是单个训练过的 token（248069），宿主会先写入 Qwen 官方发布的交接句（"Considering the limited time by the user, I have to give the solution based on the thinking directly now."）。2026-09-29 之前该系列没有闭合 token，思考达到预算的轮次会以**空答案**结束（`finish_reason` 为 `thinking_budget`）：在 4x A40（`--tp 4` 与 `--layer-split 4`）上以 `max_tokens` 2000 运行四个并发的三轮会话，通过 0/4，失败的都是空答案轮次。加入交接句后，同样的 `--tp 4` 运行通过 4/4：交接句闭合了四个轮次，每一轮都有答案，每个会话都复用了上一轮（第 3 轮复用 1591-3509 个提示 token 中的 1564-3482 个）。
+
 ## 连续批处理
 
 并发请求通过**逐序列状态持有者**（per-sequence state holders）来服务：每个在飞请求
@@ -145,17 +149,18 @@ MP4、WebM 或 MOV data URI（不会抓取远程 URL）：
   拒绝执行，而不是拷贝陈旧的主机种子。
 - 复用**仅限精确前缀**（`IExactFusedCacheReuse`）：新 prompt 没有逐 token 复现到最后一个的 holder
   不是它的延续，任何部分匹配都会重新 prefill。
-- 保留的会话与检查点共用一个预算 `TS_Q4E_RETAINED_CACHE_MB`（默认 4096，并受实测内存余量限制；
-  `0` 或无法解析的值会拒绝所有保留）。在默认的 radix 前缀缓存下，保留与驱逐由前缀树负责，这个预算只会拒绝放不下的
-  holder（只报告一次）；使用 `TS_PREFIX_CACHE_MODE=legacy` 时，模型会先驱逐最早保留的会话。
-  `TS_Q4E_RETAINED_CACHE=0` 关闭该功能。
+- 保留的会话与检查点共用一个预算 `TS_Q4E_RETAINED_CACHE_MB`（受实测内存余量限制；
+  `0` 或无法解析的值会拒绝所有保留）。未设置时，预算为实测余量的一半（与 Qwen 3.5 对空闲
+  holder 采用的规则相同），只有在无法测得余量时才使用 4096 MB。此前固定的 4096 MB 默认值在
+  4x A40 张量并行下只能容纳四个并发会话中的三个（1.6k token 时每个 holder 1318.6 MB，余量
+  15 GB），其中一个会话每一轮都要重新 prefill。radix 前缀缓存负责保留与驱逐，这个预算只会拒绝放不下的
+  holder（只报告一次）。
 - 它需要完整的 GGML token-span 路径（每一份逐序列状态都驻留在设备上并以 holder 为键），以及原生
   条目可以精确拷贝的 GDN 状态布局。保留在按层切分下可用；检查点在按层切分下被接受，在张量并行下
   被拒绝。
 
 证据（合成 fixture，不代表训练模型的验收或性能）：
-[`eng/validation/qwen38_mtp_followup/retained-cache-20260916`](../../eng/validation/qwen38_mtp_followup/retained-cache-20260916/README.md)
-——`Qwen4ExpRetainedCacheTests` / `Qwen4ExpRetainedCachePolicyTests` 覆盖保留 A/B/A、检查点克隆、投机重绑定、
+`Qwen4ExpRetainedCacheTests` / `Qwen4ExpRetainedCachePolicyTests` 覆盖保留 A/B/A、检查点克隆、投机重绑定、
 预算驱逐、缺失状态拒绝以及 QSA 首次/重置增长，并在 CUDA 上覆盖真实双 GPU 按层切分的检查点生命周期。
 所有关卡在 CPU 上都逐位一致。在单卡 CUDA 上，一次 4 token 的目标验证与 4 次单 token 前向逐位相同
 （`TeacherForcedTargetVerify_…`），以 2–4 为块提交的 32 个 teacher-forced token 在每一行上都与标量解码
@@ -163,8 +168,7 @@ MP4、WebM 或 MOV data URI（不会抓取远程 URL）：
 16 token 的 prefill 再接 4 个 token，在 CUDA 上与一次 20 token 的 prefill 并不逐位相同，因为 prefill 的
 kernel 按批宽度选择：`SharedPrefixChunking_…` 在 CUDA 上把差异上界设为 1e-2（实测 logits 相差 1.7e-4 到
 4.4e-4；它当初要抓的陈旧种子缺陷让 logits 偏移了 0.3155），并且只允许在 top-2 差值不超过实测差异两倍的
-近似平局处改变贪心结果
-（[`verify-row-kernels-20260917`](../../eng/validation/qwen38_mtp_followup/verify-row-kernels-20260917/README.md)）。
+近似平局处改变贪心结果（2026-09-17 在 A40 上实测）。
 
 ## 共享 MTP 头的投机解码
 
@@ -180,8 +184,7 @@ embedding，并保留其 MRoPE 位置。prefill 后为重试保留的图像片�
 不包含同步图像准备与编码；这些短文本复制检查不代表通用质量或完整媒体请求延迟。
 另外，普通/MTP HTTP 两种模式各通过 24/24 文本请求与 3/3 图像场景，包含附件顺序与
 历史图像。该配置因余量不足拒绝保留缓存，因此后续轮次重新 prefill。本地证据：
-`docs/validation/model-matrix-20260927/qwen38/SUMMARY.md`（不提交）。该架构仍不支持
-真正的张量并行或跨节点执行。
+`docs/validation/model-matrix-20260927/qwen38/SUMMARY.md`（不提交）。该架构现支持下文所述的本地张量并行；跨节点执行仍不支持。
 
 `--draft-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf` 挂上逐 token 的 MTP 块（仅限 GGML 后端；该头必须是单个 GGUF 文件，并在模型加载时挂上）；它只为从位置 0 开始
 prefill 的单独请求做投机（与其他序列共享的步，以及延续保留 holder 或共享前缀克隆的轮次，都按普通
@@ -214,7 +217,12 @@ verify 的每一行都与其 decode 步不同，logits 最多相差 2.5，48 行
 与 A40 不同，不能全局套用四行分组。路由专家与注意力
 逐行展开，每个注意力行读取的 KV 窗口与 mask 行恰好就是它的 decode 步所读的那些。不超过 8 个 token 的图
 （包括 decode）还会让两个是否融合取决于内存复用的 ggml-cuda 融合（MoE 加权归约；RMS norm + RoPE）的输入
-保持分配，于是这两个融合在任何宽度下都会发生。单 token 与 prefill 的 kernel 不变；Metal 保留现有的图构建方式。
+保持分配，于是这两个融合在任何宽度下都会发生。单 token kernel 不变。CUDA 超过 8 token 的 prefill
+会在顺序求和前物化专家加权输出，避免依赖内存分配的 FMA 融合使层切分与张量切分产生不同舍入。
+CPU 与 Metal 保留现有的 prefill 图构建方式。
+
+CPU 与 CUDA 将每轮草稿限制为 7 个 token；验证还包含待提交的 anchor，合计最多 8 行。
+该硬上限同样约束显式 `--spec-draft` 和自定义 drafter，默认首选窗口仍为 3 个草稿 token。
 
 补充测试现覆盖宽度 1–8 的每一行。macOS ARM CPU 也需要此构建方式：原路径在宽度 2、4 时，虽然保存的 GDN、PLE、
 KV 状态相同，logits 仍与逐 token decode 不同。启用 CPU 路径后严格的 fixture 测试通过；测试耗时不视为性能基准。
@@ -227,16 +235,182 @@ KV 状态相同，logits 仍与逐 token decode 不同。启用 CPU 路径后严
 （2,335–2,338 ms 对 2,324–2,359）不变。在 192 token 的代码复制流上端到端测量（每种 kernel 各 6 轮，所有输出
 都与普通贪心一致），MTP 投机为 83.2 tok/s，此前为 86.5（相对普通 decode 从 1.84 倍变为 1.69 倍）；n-gram 投机为
 73.8，此前为 79.5；普通 decode（49.1 对 47.0）与 prefill（830 对 804 tok/s）没有退化：精确性的代价由投机承担。
-证据以及逐断言诊断：
-[`verify-row-kernels-20260917`](../../eng/validation/qwen38_mtp_followup/verify-row-kernels-20260917/README.md)。
+
+## 超出内存运行
+
+UD-Q2_K_XL 文件共 78.9 GB，分三个分片：28.8 GB 的 n-gram（PLE）表、46.1 GB 的路由专家，以及约
+4 GB 的其余部分。每个 token 只读这张表的 16 行，以及每层 512 个专家中的 10 个，因此 TensorSharp
+能在放不下这个文件的机器上运行它，按 token 的需要从 SSD 读取这两部分。
+
+- **n-gram 表从不上传，也从不拷贝。** 在 GGML 后端上，它留在 GGUF 内存映射里，带随机访问提示
+  （`madvise(MADV_RANDOM)`），每个 token 的 16 行（每行 90 字节）按需并行收集。这正是 llama.cpp
+  `--lazy-mode` 背后的思路，llama.cpp 对超过 4 GiB 的张量默认开启它。这类加载每次都会打印：
+  `PLE n-gram table: 28.8 GB read on demand from the GGUF mapping, 16 rows a token (random-access advice).`
+  直连 `cuda` 引擎同样从映射中读取这些行，并在加载后把整张表预热进页缓存。
+- **最前面若干层的路由专家在主机上运行，同样直接读这份映射。** 在 GGML 的 GPU 后端上由
+  `--n-cpu-moe N` / `--cpu-moe` 选择这些层（在 `ggml_metal` 与 `ggml_cuda` 上实测）。在 `ggml_metal`
+  上两者都未设置时，引擎自行规划切分：在既放得进 Metal 工作集、又给主机层留够页缓存所需内存的前提下，
+  尽量把整层专家留在 GPU 上，其余卸载到主机。在 48 GB 的 M5 Pro 上（51.5 GB 内存、40.2 GB 的 Metal
+  工作集）：
+
+  ```
+  [moe-offload] qwen4exp (planned): routed experts of 33 of 48 layers run on the host from the GGUF mapping (31.7 GB read on demand); the accelerator holds 15 layers' (14.4 GB). Metal working set 40.2 GB, RAM 51.5 GB; --n-cpu-moe N overrides.
+  ```
+
+  常驻的层数超过一定程度后，再多常驻也不会更快：常驻的一层要占住全部 512 个专家，不论用到与否，
+  还会挤占那些从 SSD 读取专家的层所需的页缓存。
+- **Decode** 在 TensorSharp 自己的内核上运行每个主机层的 10 个专家：用的是 ggml 的 CPU 点积，
+  线程组每层只唤醒一次，该层算完即休眠。在 Apple 芯片上，自旋的线程组让层间的 GPU 段慢了
+  1.5-2 倍，所以线程组改为休眠。`TS_HOST_MOE_DECODE=0` 恢复 ggml 图路径。
+- **Prefill** 达到 128 个 token 及以上时（`TS_HOST_MOE_DEVICE_MIN_BATCH`），每个分块把各主机层用到的
+  专家流式送到 GPU，并先用 16 个线程把这些专家的页面缺页读入：在 M5 Pro 上，这一步让 1,818 token 的
+  prefill 从 37.2-38.0 秒缩短到 15.7-16.6 秒，decode 不受影响。
+- **`--backend mlx` 会被直接拒绝**：MLX 没有稀疏注意力 indexer、hyper-connection、n-gram 表以及
+  IQ2_XS/IQ3_XXS 专家的 kernel。请使用 `ggml_metal`。
+
+以下在这台 Mac 上实测（ggml `353b63b`，未修改），对照同一台机器上的 llama.cpp `a868c3e3`。
+llama.cpp 默认把模型全部卸载到 GPU，在这里会失败
+（`Insufficient Memory (kIOGPUCommandBufferCallbackErrorOutOfMemory)`）；它的最佳配置是纯 CPU、
+12 线程，n-gram 表由它的 lazy 模式按需读取。
+
+| 真实文本：1,818 token 的 prompt，贪心生成 256 个 token | prefill tok/s | decode tok/s |
+| --- | --- | --- |
+| TensorSharp `ggml_metal`，自动规划的切分 | 109.4-115.5 | 12.8-12.9 |
+| llama.cpp `-ngl 0 -t 12` | 20.4-22.4 | 13.00-13.24 |
+| llama.cpp `-ngl 0 -t 12 --no-op-offload` | 28.8-31.6 | 11.94-12.48 |
+
+| llama-bench 的方法：随机 token，pp512 / tg128，同一会话 | prefill tok/s | decode tok/s |
+| --- | --- | --- |
+| TensorSharp `ggml_metal`，自动规划的切分（15 层专家在 GPU 上） | 147.6 | 21.1 |
+| TensorSharp `ggml_metal`，`--n-cpu-moe 32`（16 层在 GPU 上） | 153.4 | 21.2 |
+| TensorSharp `ggml_metal`，`--n-cpu-moe 30`（18 层） | 183.9 | 20.6 |
+| TensorSharp `ggml_metal`，`--n-cpu-moe 28`（20 层） | 171.9 | 20.3 |
+| TensorSharp `ggml_metal`，`--n-cpu-moe 26`（22 层） | 80.7 | 19.0 |
+| llama.cpp 纯 CPU，`-t 12 -nopo 1` | 50.07 | 22.55 |
+
+GPU 上放 15 到 16 层时 decode 基本持平（21.1-21.2），超过 16 层后每多一层都更慢；到 22 层时留给主机层的
+页缓存太小，prefill 随之崩落。同一天更早、并非并排测得的数据：自动规划的切分 137.3 / 19.2，llama.cpp
+48.43 / 22.26（两者相隔一个半小时），`--cpu-moe`（GPU 上不放专家）142.3 / 17.5，18 线程的 `ggml_cpu`
+46.1 / 16.6，llama.cpp `-ngl 28 -t 12` 36.64 / 20.06。
+
+在真实文本上，TensorSharp 的 prefill 快 3.5-5 倍、decode 持平；在随机 token 上，prefill 约快 3 倍，
+decode 落后 6%（21.1 对 22.55）。
+在 Metal 上，decode 受限于 ggml-metal 每次 dispatch 的开销（每个 token 约 4,200 次 dispatch，整个 token 为
+单张图时 29.4 ms），外加每个主机接缝约 0.19 ms。真实文本还要为不在页缓存里的专家付出缺页的代价，
+因此速度取决于这台 Mac 同时在做什么：其他工作让 5 GB 内存处于压缩状态时，同样的运行 decode 为
+10.3-11.3 tok/s。TensorAgent 在 48 GB 的 Mac 上提供这个文件
+（[应用内实测](../../TensorAgent/README.md#the-macs-own-models)）。
+
+在 CUDA 上，GPU 放不下这个文件时，`--n-cpu-moe` 起同样的作用。在一张 A40（46 GB）上把 12 层的专家
+放在主机上，`ggml_cuda` 实测 600 / 30.2 tok/s（随机 token，pp512 / tg128），llama-bench 用
+`-ncmoe 12` 为 466.14 / 18.84。
+
+直接 `cuda` 引擎能运行 UD-Q2_K_XL 的 IQ2_XS 与 IQ3_XXS 专家：decode 用从 ggml 点积移植来的逐 token
+kernel，仍以捕获的 CUDA 图运行；prefill 则把这两种布局解码进它的 tensor-core 与寄存器暂存
+（register-staged）分组 kernel。在分组 kernel 接手之前，它对这个文件的 prefill 走最慢的回退路径，
+约 500 tok/s。该引擎没有主机专家接缝，所以 `--n-cpu-moe` 在它上面只打印警告，专家仍留在 GPU 上。
+`--tp N` 会以退出码 2 拒绝这种量化，因为 `ggml_cuda` 的 TP FFN 路径只接受 [多 GPU](#多-gpu) 一节列出的类型；
+请改用 `--layer-split N`。
+
+两张 A40、热态，同样的 1,818 token prompt 与 256 个贪心 token。TensorSharp 以
+`TensorSharp.Server.Host` 加 `--no-multi-agent --no-skills` 运行，每个进程三个请求，每个请求的首行各不相同，
+互不复用前缀；llama-server 关闭 `cache_prompt`，回答两个请求。
+
+| 2x A40，`--layer-split 2`（llama.cpp `-ngl 99`） | prefill tok/s | decode tok/s |
+| --- | --- | --- |
+| TensorSharp `cuda` | 1,612-1,613 | 56.85-56.93 |
+| TensorSharp `ggml_cuda` | 1,174-1,217 | 52.9-53.1 |
+| llama.cpp | 752-963 | 59.04-59.86 |
+
+kernel 刚重新构建后，直接引擎的第一个请求在驱动编译 PTX 期间 prefill 只有 335 tok/s；驱动会缓存
+编译结果。随机 token（pp512 / tg128）下，直接引擎实测 1,222.0 / 61.0，`ggml_cuda` 为 410.9 / 43.2；
+llama-bench 的双 GPU 运行只有 210.74 / 41.99，远低于同一台机器上 llama-server 的数字，因此应以真实
+文本那张表为准。按那张表，TensorSharp 的 prefill 快 1.2-2.1 倍，decode 为 llama.cpp 的 88-90%
+（`ggml_cuda`）与 95-96%（`cuda`）。
 
 ## 多 GPU
 
-`qwen4exp` 上的 `--layer-split N` 跑的是**按层切分**：每张 GPU 持有一段连续的完整层。它不是
-张量并行——`qwen4exp` 不切分任何权重——而且这也正是 llama.cpp 为该架构提供的
-（唯一）多 GPU 模式（`-sm row` 直接拒绝加载）。它是**容量**特性，不是速度特性：
-单卡装不下时靠它把模型装下。按层切分仅在 `ggml_cuda` 与 `ggml_vulkan` 上可用；其他后端会
-拒绝 `--layer-split N`；此架构也会拒绝 `--tp N`（张量并行），旧的按层切分命令需迁移到 `--layer-split N`。分布式的 `--tp-node-id`/`--tp-peers` 组会被拒绝。
+`ggml_cuda` 的 `--tp N` 切分每个路由专家及共享专家：gate/up 按中间通道切分，汇集激活后，
+down 按输出行切分，再汇集输出供 hyper-connection 写回。每个 rank 保留全部专家 ID。
+down 点积保持原始完整宽度，避免求和顺序的微小差异被后续激活量化放大。
+注意力、GDN、QSA、PLE 使用复制的权重及各 rank 独立状态，
+输出头仅在 rank 0 执行。图像与工具调用沿用同一目标图；投机回滚会恢复每个 rank
+的 GDN/PLE 状态。TP 下仍不支持共享前缀检查点，也不支持跨节点执行。
+两次汇集使用 TensorSharp CUDA FP32 collective；回退路径以零复制切片避开
+上游 CUDA 自动 BF16 阈值，设备 collective 不可用时使用 FP32 主机归约。
+两次通信增加数据量以保持数值精度，无需修改 ggml。
+
+FFN 中间宽度和输出宽度必须能被并行度整除；投影按完整输出行切片，保留完整输入量化块。
+量化 prefill 保留原始 MMQ tile 和归约几何，gate/up 切片保留重叠的 128 行边界 tile，再裁剪输出。
+在中间宽度 640 的检查点上，TP2 每个 rank 为逻辑 320 行保存 384 行，TP4 为逻辑 160 行保存 256 行。
+不支持的配置会在批量加载权重前依据 GGUF 元数据拒绝。当前模型路径要求 CUDA MMQ stream-K，
+FFN 类型限于 Q2_K、Q3_K、Q4_K、Q6_K、IQ3_S、IQ4_XS、IQ4_NL 和 Q8_0；完整输出行数及 down 输出切片须为 128 的倍数。
+其他 FFN 类型（包括 F32/F16/BF16）、设备或无法保持归约顺序的布局会明确拒绝；物理 GPU 验证使用 NVIDIA A40。
+专家切片目前另占总路由专家字节数及重叠行的
+主机缓冲区，并保留至模型释放。加载时不再预读整个稀疏 PLE 表，所需行按需读取。
+
+`--layer-split N` 仍表示按完整层连续分配至多个 GPU，仅适用于 `ggml_cuda` 和
+`ggml_vulkan`。不得同时使用 `--tp` 与 `--layer-split`。
+`eng/tests/qwen4exp-tensor-parallel.py` 验证两层 prefill、重放、QSA、多轴 RoPE、
+全部 logits 和多 rank 状态回滚。量化模式
+（`--quantized-ffn --tokens 1,2,3,4,5,6,7,8 --rollback-width 8`）在 CUDA TP2 与 TP4 上均通过全部 102 项检查，
+包含验证宽度 8 的循环状态、QSA 和 PLE 快照恢复，hidden 与 logits 误差均为零。
+CPU TP4 loopback 另行通过全部 42 项 F32 检查，仅用于正确性验证。
+合成 F32 CUDA TP4 的宽度 17 重放超过原有误差门限（hidden 最大误差 3.49e-5）；
+公共模型入口明确拒绝 F32 FFN，此场景不计为通过。
+`eng/tests/qwen4exp-tp-quantized-ffn.py --hidden 2560` 另行验证真实 640 通道宽度、
+IQ3_S/IQ4_NL 与 IQ4_XS/Q8_0 gate/down、Q8_0 共享专家及宽度 1 至 8、17、31、128；
+CUDA TP2 在 `--require-bitwise` 下逐位一致。
+`eng/ForcedLogitProbe` 在固定相同 token 历史下比较完整模型 logits，避免早期贪心
+分歧掩盖后续 decode 的数值误差。
+
+UD-IQ4_XS 检查点在 NVIDIA A40 上，TP2、TP4 各有 120 行完整词表 logits 与稳定舍入后的普通 layer2 执行逐字节一致：
+三个文本 prompt、一个单 token 合成 prompt、一个 128 token 合成 prefill，每例固定历史运行 24 步。
+TP2 两种路径均使用 native `da25f156`；TP4 使用 native `1ba6d7a4`，与保存的 `da25f156` 普通执行参照比较。
+下述最终 HTTP 与投机检查使用 native `473ee64d`。
+所用 ggml 为未修改的 `353b63b439f27ab2cc19dac97ab1681ba6d2d084`。
+CUDA prefill 舍入稳定化可能改变旧二进制的 logits 或低 margin 贪心选择；旧参照向量单独保留，不宣称与旧版逐位兼容。
+最终 HTTP 对比中，与旧二进制的首个 logits 向量相对 L2 误差为 0.0416；16 个文本结果有 14 个完全相同，
+另两个仅有标点差异。该历史数值对比不通过严格一致性门限。
+
+最终 CUDA TP2 HTTP 测试与同版本 layer2 执行在全部 16 个文本 prompt、4 个工具调用往返和 4 个图像回答轮次上一致，
+首个真实 prefill 的 248,320 个 logits 逐字节相同。学习型 MTP 和 n-gram 投机在文本与图像测试中
+均保持全部 96 个普通贪心 token 一致。压力配置为 `TS_SPEC_DRAFT=7 TS_SPEC_PMIN=0`；
+MTP 在两个场景中均实际达到验证宽度 8，并覆盖拒绝回滚。所有进程正常退出，运行前后检查确认二进制未改变。
+
+另一次六进程启动基准使用 2× NVIDIA A40、UD-IQ4_XS、上下文 4096、F16 KV、128 token 内核预热及两个 CPU 线程。
+下表按执行顺序保留每种模式的两次启动。每个进程对固定输入的 pp512/tg128 计时五轮，
+另以不计时的完整 128 token 贪心序列检查正确性。吞吐单元格依次为
+**首轮 / 第 2–5 轮中位数 / 全部五轮范围**，单位 token/s；加载时间不含内核预热。
+
+| 模式 / 启动序号 | 加载（秒） | 预热（秒） | pp512：首轮 / 中位数 / 范围 | tg128：首轮 / 中位数 / 范围 |
+|---|---:|---:|---|---|
+| 旧版 layer2 / 1 | 64.85 | 20.67 | 259.2 / 406.60 / 259.2–439.7 | 24.9 / 29.45 / 24.9–36.6 |
+| 当前 layer2 / 1 | 48.98 | 21.51 | 262.7 / 427.75 / 262.7–446.5 | 30.3 / 37.90 / 29.2–38.0 |
+| 当前 TP2 / 1 | 85.68 | 10.78 | 229.0 / 345.75 / 229.0–358.9 | 22.0 / 24.10 / 18.2–25.9 |
+| 旧版 layer2 / 2 | 68.74 | 22.14 | 255.9 / 419.25 / 234.0–454.1 | 29.2 / 30.40 / 29.2–35.7 |
+| 当前 TP2 / 2 | 80.22 | 12.56 | 230.3 / 349.15 / 213.9–356.7 | 18.6 / 27.30 / 14.2–34.3 |
+| 当前 layer2 / 2 | 25.66 | 18.13 | 258.3 / 414.65 / 234.9–422.1 | 30.3 / 33.85 / 30.2–37.8 |
+
+六个进程均正常退出，并通过运行时文件身份检查。当前 layer2 与 TP2 的两次启动均生成完全相同的完整贪心序列。
+汇总稳态吞吐为 layer2 **421.20 / 35.875**，TP2 **347.45 / 25.70** token/s：
+此机器上 TP 的 **prefill 慢 17.5%，decode 慢 28.4%**。Attention 与循环状态在各 rank 复制，
+每层两次精确 F32 FFN 集合通信增加了这些 PCIe GPU 的通信开销（`NCCL_P2P_DISABLE=1`）。
+本次实测按层切分更快。
+
+旧二进制的合成贪心序列从 decode 下标 50（从零计数）起与全部当前运行产生分歧，
+严格兼容性对比仍然失败；当前与旧版的吞吐比值未通过 token 一致性资格检查。
+这些加载是未清除页缓存的混合/热缓存测量，GPU 时钟仅记录、未锁定。
+明显的计时和加载波动不支持冷存储或普遍加速的结论。
+
+另有一次相同二进制和设置的 TP2 诊断，仅改为
+`GGML_CUDA_ALLREDUCE=internal GGML_CUDA_AR_BF16_THRESHOLD=0`。
+完整贪心序列及运行时检查通过，但性能取舍不一致：pp512
+**216.3 / 309.15 / 202.7–321.4**，tg128 **16.5 / 30.30 / 16.5–40.1**
+（首轮 / 稳态中位数 / 全部五轮范围），加载 100.69 秒、预热 10.05 秒。
+这一次启动的 prefill 更慢，不足以支持更改默认 NCCL 传输。
+
+下列历史性能数据仅对应按层切分。
 
 实测：2× A100-80GB，Qwen3.8-Flash-Next-UD-Q2_K_XL（73.4 GiB）：
 
@@ -275,4 +449,4 @@ python run_matrix.py --config benchmark_config_glm53_qwen38.json \
 ```
 
 那一列会让 llama.cpp 用 `--split-mode layer` 切在同样这些 GPU 上，于是参照列两边是
-同一种放置方式——对 `qwen4exp` 而言，这也是两个引擎各自唯一的多卡模式。
+同一种整层放置方式。这里的历史结果只验证层切分，不代表上文新增张量并行的性能。

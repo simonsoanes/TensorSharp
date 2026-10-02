@@ -160,24 +160,16 @@ namespace TensorSharp.Models
 
     /// <summary>
     /// DiffusionGemma's run-time fallback switches. Each fast path starts enabled and is latched off the
-    /// first time its kernel rejects a layout (the opt-in MLX MoE paths also when their one-time
-    /// self-check fails); every later forward then takes the slower path.
+    /// first time its kernel rejects a layout; every later forward then takes the slower path.
     /// </summary>
     internal readonly record struct DiffusionFallbackLatches(
-        bool FusedDecodeOk, bool FusedLmHeadTailOk, bool DeviceSampleOk,
-        bool MlxFusedDeviceMoeOk, bool MlxFusedDeviceMoeChecked,
-        bool MlxGatherQmmMoeOk, bool MlxGatherQmmMoeChecked)
+        bool FusedDecodeOk, bool FusedLmHeadTailOk, bool DeviceSampleOk)
     {
-        /// <summary>Both sets applied: a path is off if either turned it off, and checked if either
-        /// ran its self-check.</summary>
+        /// <summary>Both sets applied: a path is off if either turned it off.</summary>
         public DiffusionFallbackLatches Merge(DiffusionFallbackLatches other) => new(
             FusedDecodeOk && other.FusedDecodeOk,
             FusedLmHeadTailOk && other.FusedLmHeadTailOk,
-            DeviceSampleOk && other.DeviceSampleOk,
-            MlxFusedDeviceMoeOk && other.MlxFusedDeviceMoeOk,
-            MlxFusedDeviceMoeChecked || other.MlxFusedDeviceMoeChecked,
-            MlxGatherQmmMoeOk && other.MlxGatherQmmMoeOk,
-            MlxGatherQmmMoeChecked || other.MlxGatherQmmMoeChecked);
+            DeviceSampleOk && other.DeviceSampleOk);
     }
 
     /// <summary>
@@ -252,17 +244,12 @@ namespace TensorSharp.Models
         /// written under <see cref="ModelBase.GpuComputeLock"/>, like the forwards that latch them.</summary>
         internal DiffusionFallbackLatches FallbackLatches
         {
-            get => new(_fusedDecodeOk, _fusedLmHeadTailOk, _deviceSampleOk,
-                _moeFusedDeviceOk, _moeFusedDeviceChecked, _moeGatherQmmOk, _moeGatherQmmChecked);
+            get => new(_fusedDecodeOk, _fusedLmHeadTailOk, _deviceSampleOk);
             set
             {
                 _fusedDecodeOk = value.FusedDecodeOk;
                 _fusedLmHeadTailOk = value.FusedLmHeadTailOk;
                 _deviceSampleOk = value.DeviceSampleOk;
-                _moeFusedDeviceOk = value.MlxFusedDeviceMoeOk;
-                _moeFusedDeviceChecked = value.MlxFusedDeviceMoeChecked;
-                _moeGatherQmmOk = value.MlxGatherQmmMoeOk;
-                _moeGatherQmmChecked = value.MlxGatherQmmMoeChecked;
             }
         }
     }

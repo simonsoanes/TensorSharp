@@ -15,20 +15,6 @@ using TensorSharp.Cpu;
 
 namespace TensorSharp.GGML
 {
-    // Per-sequence descriptor for the batched Qwen3.5 GDN native step. Mirrors
-    // GdnBatchedSeqDesc in ggml_ops_gated_delta_net.cpp; layout must stay in
-    // sync with the native struct (32 bytes on 64-bit).
-    [StructLayout(LayoutKind.Sequential)]
-    public struct GdnBatchedSeqDesc
-    {
-        public int   SeqStart;
-        public int   SeqLen;
-        public int   ConvWriteIdx;  // in/out
-        public int   Pad;
-        public IntPtr ConvState;    // float* — [(convKernel-1) * qkvDim]
-        public IntPtr SsmState;     // float* — [numVHeads * headVDim * headKDim]
-    }
-
     // Per-sequence descriptor for the batched Nemotron Mamba2 native step.
     // Mirrors NemoMamba2BatchedSeqDesc in ggml_ops_mamba2.cpp; 32 bytes on 64-bit.
     // No write-index field because the Mamba2 conv state is a FIFO (memmove
@@ -1846,35 +1832,6 @@ namespace TensorSharp.GGML
         /// sequence block table (concatenated flat ints + per-seq offsets).
         /// One Metal/CUDA kernel per sequence per layer.
         /// </summary>
-        /// <summary>Allocate the device-resident paged K/V pool, or
-        /// <see cref="IntPtr.Zero"/> when the backend cannot (no GGML backend,
-        /// out of VRAM). Callers treat Zero as "keep the host pool".</summary>
-        public static IntPtr PagedKvPoolCreate(
-            int numLayers, int numBlocks, int blockSize, int numKvHeads, int headDim)
-            => GgmlNative.PagedKvPoolCreate(numLayers, numBlocks, blockSize, numKvHeads, headDim);
-
-        public static void PagedKvPoolFree(IntPtr handle) => GgmlNative.PagedKvPoolFree(handle);
-
-        public static long PagedKvPoolBytes(IntPtr handle) => GgmlNative.PagedKvPoolBytes(handle);
-
-        public static bool PagedKvPoolGrow(IntPtr handle, int newNumBlocks)
-            => GgmlNative.PagedKvPoolGrow(handle, newNumBlocks);
-
-        /// <summary>Write one step's K/V into the pool at the mapped slots.</summary>
-        public static void PagedKvPoolScatter(
-            IntPtr handle, int layer, float[] kData, float[] vData, int[] slotMapping, int numTokens)
-            => GgmlNative.PagedKvPoolScatter(handle, layer, kData, vData, slotMapping, numTokens);
-
-        /// <summary>Batched flash attention against the device-resident pool.</summary>
-        public static void PagedKvPoolAttention(
-            IntPtr handle, int layer, float[] qData, float[] outData,
-            int[] queryStartLoc, int[] seqLens, int[] positions,
-            int[] blockTableFlat, int[] blockTableOffsets,
-            int numSeqs, int numTokens, int numHeads, float scale, int slidingWindow = 0)
-            => GgmlNative.PagedKvPoolAttention(handle, layer, qData, outData,
-                queryStartLoc, seqLens, positions, blockTableFlat, blockTableOffsets,
-                numSeqs, numTokens, numHeads, scale, slidingWindow);
-
         public static void PagedAttentionForward(
             float[] qData,
             float[] pagedKData,
@@ -2208,8 +2165,6 @@ namespace TensorSharp.GGML
         /// GDN state is re-seeded so the next fused decode rebuilds).</summary>
         public static void Qwen35ResetDecodeCache() => GgmlNative.Qwen35ResetDecodeCache();
 
-        /// <summary>See <see cref="GgmlNative.Qwen35RopePositionAbi"/>.</summary>
-        public static int Qwen35RopePositionAbi() => GgmlNative.Qwen35RopePositionAbi();
 
         /// <summary>Qwen3.5/3.8 slot-stable arena token-batched decode (one fused
         /// graph for N sequences; see ggml_ops_qwen35_batched_arena.cpp). Returns
@@ -2504,20 +2459,20 @@ namespace TensorSharp.GGML
         }
 
         /// <summary>Commit one recurrent-state snapshot into the live device state
-        /// (see TSGgml_Qwen35CommitStateSnapshot).</summary>
+        /// (see TSGgml_Qwen35CommitStateSnapshotOwned).</summary>
         public static bool Qwen35CommitStateSnapshot(
             int slot, int numRecurrentLayers, long ownerId = 0)
             => GgmlNative.Qwen35CommitStateSnapshot(slot, numRecurrentLayers, ownerId);
 
         /// <summary>Read the live device recurrent state back into the host mirrors
-        /// (see TSGgml_Qwen35DrainDeviceState).</summary>
+        /// (see TSGgml_Qwen35DrainDeviceStateOwned).</summary>
         public static bool Qwen35DrainDeviceState(IntPtr[] convOut, IntPtr[] deltaOut,
             int numRecurrentLayers, long ownerId = 0)
             => GgmlNative.Qwen35DrainDeviceState(
                 convOut, deltaOut, numRecurrentLayers, ownerId);
 
         /// <summary>Pull one per-token recurrent-state snapshot out of the verify that
-        /// just ran (see TSGgml_Qwen35FetchStateSnapshot).</summary>
+        /// just ran (see TSGgml_Qwen35FetchStateSnapshotOwned).</summary>
         public static bool Qwen35FetchStateSnapshot(int slot, IntPtr[] convOut, IntPtr[] deltaOut,
             int numRecurrentLayers, long ownerId = 0)
             => GgmlNative.Qwen35FetchStateSnapshot(
@@ -2609,8 +2564,6 @@ namespace TensorSharp.GGML
         /// state [hidden, nTokens] back into <paramref name="hidden"/>; the caller
         /// owns output_norm + per-seq LM head. Returns false when the kernel can't
         /// handle the shape (caller falls back to the op-by-op batched path).</summary>
-        public static void Qwen35ResetBatchedDecodeCache() => GgmlNative.Qwen35ResetBatchedDecodeCache();
-
         public static bool Qwen35ModelDecodeBatched(
             Qwen35LayerDecodeArgs[] layers, int numLayers,
             IntPtr hidden, int hiddenSize, int nTokens, int nSeqs,
@@ -2855,7 +2808,7 @@ namespace TensorSharp.GGML
         /// causal/SWA mask + softmax-with-sinks + attention + output projection
         /// (+bias) + residual add) as a single GGML graph dispatch per layer.
         ///
-        /// Replaces the ~10 separate per-op submissions on the legacy GPT-OSS
+        /// Replaces the ~10 separate per-op submissions on the per-op GPT-OSS
         /// prefill path (each its own Metal command buffer). Mirrors the
         /// llama.cpp graph in src/models/openai-moe-iswa.cpp and the existing
         /// TSGgml_Gemma4LayerPrefill template.
@@ -2944,24 +2897,6 @@ namespace TensorSharp.GGML
         }
 
         /// <summary>
-        /// Fused chunked GatedDeltaNet for Qwen3.5/Qwen3-Next. Runs the prefill recurrent
-        /// path entirely on the GGML backend (Metal/CUDA) so the per-token CPU loop in
-        /// <see cref="GgmlBasicOps"/> consumers is replaced by a single graph dispatch.
-        /// </summary>
-        /// <param name="q">Q tensor [seqLen, numVHeads, headDim] (after K-head expansion).</param>
-        /// <param name="k">K tensor [seqLen, numVHeads, headDim] (after K-head expansion).</param>
-        /// <param name="v">V tensor [seqLen, numVHeads, headDim].</param>
-        /// <param name="z">Pre-output gate tensor [seqLen, numVHeads, headDim].</param>
-        /// <param name="alpha">Raw alpha [seqLen, numVHeads] (before bias and softplus).</param>
-        /// <param name="beta">Raw beta [seqLen, numVHeads] (before sigmoid).</param>
-        /// <param name="state">Recurrent state [numVHeads, headDim, headDim], updated in place.</param>
-        /// <param name="gatedOut">Output [seqLen, numVHeads, headDim], written into.</param>
-        /// <param name="dtBiasData">Per-head bias for alpha [numVHeads].</param>
-        /// <param name="aLogData">Per-head -A_log [numVHeads].</param>
-        /// <param name="ssmNormWData">Per-D RMSNorm weights [headDim].</param>
-        /// <param name="chunkSize">Chunk size (must be a positive power of two).</param>
-        /// <param name="eps">Epsilon used for L2Norm and RMSNorm.</param>
-        /// <summary>
         /// Qwen3.8-Flash-Next fused FFN half-layer: the hyper-connection mixer, the
         /// 512-expert MoE and the scatter back into the 4-wide residual as ONE graph.
         /// Returns false when the backend declines the shape, so the caller can fall
@@ -2969,11 +2904,10 @@ namespace TensorSharp.GGML
         /// </summary>
         public static bool Qwen4ExpFfnBlock(ref Qwen4ExpFfnArgs args, IntPtr resData,
             int nEmbd, int hc, int hcLowRank, int nTokens,
-            int nExpert, int nExpertUsed, int nFf, int nFfShared, float eps, int cacheSlot,
-            bool resResident = false)
+            int nExpert, int nExpertUsed, int nFf, int nFfShared, float eps, int cacheSlot)
         {
             return GgmlNative.Qwen4ExpFfnBlock(ref args, resData, nEmbd, hc, hcLowRank,
-                nTokens, nExpert, nExpertUsed, nFf, nFfShared, eps, cacheSlot, resResident);
+                nTokens, nExpert, nExpertUsed, nFf, nFfShared, eps, cacheSlot);
         }
 
         /// <summary>
@@ -2985,20 +2919,12 @@ namespace TensorSharp.GGML
             int nEmbd, int hc, int hcLowRank, int nTokens,
             int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position,
             int nRot, float ropeBase, float ropeFreqScale, float attnScale,
-            float eps, int cacheSlot, bool resResident = false)
+            float eps, int cacheSlot)
         {
             return GgmlNative.Qwen4ExpAttnBlock(ref args, resData, maskData, nEmbd, hc, hcLowRank,
                 nTokens, headDim, nHead, nHeadKv, kvCapacity, nKv, position,
-                nRot, ropeBase, ropeFreqScale, attnScale, eps, cacheSlot, resResident);
+                nRot, ropeBase, ropeFreqScale, attnScale, eps, cacheSlot);
         }
-
-        /// <summary>Copy the 4-wide residual into the device-resident buffer the fused
-        /// kernels chain through, and back out again.</summary>
-        public static bool Qwen4ExpResUpload(IntPtr data, long bytes)
-            => GgmlNative.Qwen4ExpResUpload(data, bytes);
-
-        public static bool Qwen4ExpResDownload(IntPtr data, long bytes)
-            => GgmlNative.Qwen4ExpResDownload(data, bytes);
 
         /// <summary>
         /// Qwen3.8-Flash-Next fused recurrent half-layer: mixer, projections, causal
@@ -3008,13 +2934,12 @@ namespace TensorSharp.GGML
         public static bool Qwen4ExpGdnBlock(ref Qwen4ExpGdnArgs args, IntPtr resData,
             int nEmbd, int hc, int hcLowRank, int nTokens,
             int headKDim, int headVDim, int nKHeads, int nVHeads, int dConv,
-            float eps, int cacheSlot, bool resResident = false)
+            float eps, int cacheSlot)
         {
             return GgmlNative.Qwen4ExpGdnBlock(ref args, resData, nEmbd, hc, hcLowRank, nTokens,
-                headKDim, headVDim, nKHeads, nVHeads, dConv, eps, cacheSlot, resResident);
+                headKDim, headVDim, nKHeads, nVHeads, dConv, eps, cacheSlot);
         }
 
-        /// <summary>Drop every cached qwen4exp FFN graph (they pin weight bindings).</summary>
         /// <summary>
         /// Qwen3.8-Flash-Next token span: layers [layerBegin, layerEnd) - the
         /// recurrent-or-attention half AND the FFN half of each - as ONE persisted
@@ -3030,7 +2955,7 @@ namespace TensorSharp.GGML
             int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position,
             int nRot, float ropeBase, float ropeFreqScale, float attnScale,
             int nExpert, int nExpertUsed, int nFf, int nFfSh,
-            float eps, int cacheSlot, bool firstFfnOnly = false,
+            float eps, int cacheSlot,
             IntPtr head = default, IntPtr logitsOut = default,
             IntPtr ple = default, int pleLayer = -1, IntPtr pleEmb = default,
             IntPtr mropePos = default, IntPtr mropeSections = default,
@@ -3045,7 +2970,7 @@ namespace TensorSharp.GGML
                 headKDim, headVDim, nKHeads, nVHeads, dConv,
                 headDim, nHead, nHeadKv, kvCapacity, nKv, position,
                 nRot, ropeBase, ropeFreqScale, attnScale,
-                nExpert, nExpertUsed, nFf, nFfSh, eps, cacheSlot, firstFfnOnly,
+                nExpert, nExpertUsed, nFf, nFfSh, eps, cacheSlot,
                 head, logitsOut, ple, pleLayer, pleEmb, mropePos, mropeSections, ropePosition,
                 device, hiddenOut, logitsRows, qsa, qsaPositions, qsaPositionCount);
         }
@@ -3053,6 +2978,7 @@ namespace TensorSharp.GGML
         public static bool Qwen4ExpCopyQsaCache(IntPtr key, IntPtr destination, long bytes, int device)
             => GgmlNative.Qwen4ExpCopyQsaCache(key, destination, bytes, device);
 
+        /// <summary>Drop every cached qwen4exp FFN graph (they pin weight bindings).</summary>
         public static void Qwen4ExpResetFfnCache() => GgmlNative.Qwen4ExpResetFfnCache();
 
         public static void Qwen4ExpInvalidateSeqState(IntPtr key) => GgmlNative.Qwen4ExpInvalidateSeqState(key);
@@ -3064,18 +2990,6 @@ namespace TensorSharp.GGML
         public static IntPtr Qwen4ExpStateSnapshotCreate(IntPtr[] keys, int[] devices,
             IntPtr attn, IntPtr gdn, IntPtr ple)
             => GgmlNative.Qwen4ExpStateSnapshotCreate(keys, devices, attn, gdn, ple);
-        public static bool Qwen4ExpSpecApiAvailable()
-        {
-            try { return GgmlNative.TSGgml_Qwen4ExpSpecApiVersion() >= 1; }
-            catch (EntryPointNotFoundException) { return false; }
-            catch (DllNotFoundException) { return false; }
-        }
-        public static bool Qwen4ExpQsaApiAvailable()
-        {
-            try { return GgmlNative.TSGgml_Qwen4ExpSpecApiVersion() >= 2; }
-            catch (EntryPointNotFoundException) { return false; }
-            catch (DllNotFoundException) { return false; }
-        }
         public static bool Qwen4ExpStateSnapshotCapture(IntPtr handle)
             => GgmlNative.TSGgml_Qwen4ExpStateSnapshotCapture(handle) != 0;
         public static IntPtr Qwen4ExpMtpCreate(ref Qwen4ExpMtpConfig config,
@@ -3093,6 +3007,24 @@ namespace TensorSharp.GGML
         public static void Qwen4ExpStateSnapshotFree(IntPtr handle)
             => GgmlNative.TSGgml_Qwen4ExpStateSnapshotFree(handle);
 
+        /// <summary>
+        /// Fused chunked GatedDeltaNet for Qwen3.5/Qwen3-Next. Runs the prefill recurrent
+        /// path entirely on the GGML backend (Metal/CUDA) so the per-token CPU loop in
+        /// <see cref="GgmlBasicOps"/> consumers is replaced by a single graph dispatch.
+        /// </summary>
+        /// <param name="q">Q tensor [seqLen, numVHeads, headDim] (after K-head expansion).</param>
+        /// <param name="k">K tensor [seqLen, numVHeads, headDim] (after K-head expansion).</param>
+        /// <param name="v">V tensor [seqLen, numVHeads, headDim].</param>
+        /// <param name="z">Pre-output gate tensor [seqLen, numVHeads, headDim].</param>
+        /// <param name="alpha">Raw alpha [seqLen, numVHeads] (before bias and softplus).</param>
+        /// <param name="beta">Raw beta [seqLen, numVHeads] (before sigmoid).</param>
+        /// <param name="state">Recurrent state [numVHeads, headDim, headDim], updated in place.</param>
+        /// <param name="gatedOut">Output [seqLen, numVHeads, headDim], written into.</param>
+        /// <param name="dtBiasData">Per-head bias for alpha [numVHeads].</param>
+        /// <param name="aLogData">Per-head -A_log [numVHeads].</param>
+        /// <param name="ssmNormWData">Per-D RMSNorm weights [headDim].</param>
+        /// <param name="chunkSize">Chunk size (must be a positive power of two).</param>
+        /// <param name="eps">Epsilon used for L2Norm and RMSNorm.</param>
         public static void GatedDeltaNetChunked(
             Tensor q, Tensor k, Tensor v, Tensor z,
             Tensor alpha, Tensor beta,
@@ -3152,37 +3084,6 @@ namespace TensorSharp.GGML
                 dInner, dState, nHead, headDim, nGroup, dConv,
                 convWt, convBias, dtBias, aLog, dData, ssmNormW,
                 eps, outBatched);
-        }
-
-        /// <summary>
-        /// Batched per-token Qwen3.5 GatedDeltaNet step. Runs all (sequence,
-        /// token) pairs in the batched decode/prefill step in one native call,
-        /// indexing each sequence's recurrent conv ring + SSM state via the
-        /// <see cref="GdnBatchedSeqDesc"/> entries. The descriptors' ConvWriteIdx
-        /// field is updated in place; callers copy it back to per-slot bookkeeping.
-        /// </summary>
-        public static void GatedDeltaNetBatchedStep(
-            GdnBatchedSeqDesc[] seqs,
-            int numTokens,
-            IntPtr packedBatched,
-            int packedDim, int qkvDim, int qkDim, int vDim, int zDim,
-            int numKHeads, int numVHeads, int headKDim, int headVDim,
-            int convKernel, int ssmDInner,
-            IntPtr convWt, IntPtr dtBias, IntPtr aLog, IntPtr ssmNormW,
-            float eps,
-            IntPtr gatedOut)
-        {
-            if (seqs == null || seqs.Length == 0)
-                throw new ArgumentException("seqs must be non-empty.", nameof(seqs));
-            if (packedBatched == IntPtr.Zero || gatedOut == IntPtr.Zero)
-                throw new ArgumentException("packedBatched and gatedOut must be non-null.");
-
-            GgmlNative.GatedDeltaNetBatchedStep(
-                seqs, numTokens,
-                packedBatched, packedDim, qkvDim, qkDim, vDim, zDim,
-                numKHeads, numVHeads, headKDim, headVDim,
-                convKernel, ssmDInner,
-                convWt, dtBias, aLog, ssmNormW, eps, gatedOut);
         }
 
         /// <summary>
@@ -3327,8 +3228,6 @@ namespace TensorSharp.GGML
         /// Copy the device-resident recurrent state that <see cref="NemotronMamba2Decode"/>
         /// keeps for <paramref name="stateKey"/> back into the host arrays. Returns false when
         /// the native library has no entry for the key (the host arrays are authoritative).
-        /// Throws <see cref="EntryPointNotFoundException"/> against a native library that
-        /// predates the export.
         /// </summary>
         public static unsafe bool NemotronMamba2DecodeReadState(ulong stateKey, float[] convState, float[] ssmState)
         {
@@ -3418,146 +3317,16 @@ namespace TensorSharp.GGML
                 upArr, upTypeArr, upNe0Arr, upNe1Arr, upBytesArr);
         }
 
-        /// <summary>True token-batched dense decode (N concurrent sequences in one
-        /// fused graph). Returns false when the native kernel declines (sequence
-        /// exceeds the cache window) so the caller falls back to round-robin.</summary>
+        /// <summary>True token-batched dense decode: N concurrent sequences, one token
+        /// each, in one fused graph, with the KV-donor map (<paramref name="kvSourceArr"/>)
+        /// and per-row PLE, gathered in-kernel from the quantized table over
+        /// <paramref name="pleTokenIds"/> (preferred) or uploaded through
+        /// <paramref name="pleData"/> ([nSeqs][numLayers*pleDim] F32).
+        /// <paramref name="cacheSizeArr"/> is [numLayers*nSeqs] in layer-major order:
+        /// every sequence has its own capacities. Returns false when the kernel
+        /// declines (a global layer's cache is too small) so the caller falls back
+        /// to round-robin.</summary>
         public static bool Gemma4ModelDecodeBatched(
-            IntPtr hiddenData, int hiddenSize, int numLayers, int nSeqs,
-            IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr,
-            IntPtr[] oArr, IntPtr[] postAttnNormArr,
-            IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr,
-            IntPtr[] kCacheArr, IntPtr[] vCacheArr,
-            int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr,
-            float[] ropeBaseArr, float[] layerScalarArr,
-            int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr,
-            int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr,
-            int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr,
-            int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr,
-            int numHeads, int[] positions,
-            float eps, int slidingWindow,
-            IntPtr ropeFreqFactors, int ropeFreqFactorsLen,
-            int[] ropeNDimsArr,
-            int kvCacheType,
-            IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr,
-            IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr,
-            IntPtr logitsData, int vocabSize,
-            IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNormData, float logitSoftcap)
-        {
-            return GgmlNative.Gemma4ModelDecodeBatched(
-                hiddenData, hiddenSize, numLayers, nSeqs,
-                attnNormArr, qkvArr, qNormArr, kNormArr,
-                oArr, postAttnNormArr,
-                ffnNormArr, guArr, downArr, postFfnNormArr,
-                kCacheArr, vCacheArr,
-                headDimArr, kvHeadsArr, cacheSizeArr, isLocalArr,
-                ropeBaseArr, layerScalarArr,
-                qkvTypeArr, qkvNe0Arr, qkvNe1Arr, qkvBytesArr,
-                oTypeArr, oNe0Arr, oNe1Arr, oBytesArr,
-                guTypeArr, guNe0Arr, guNe1Arr, guBytesArr,
-                downTypeArr, downNe0Arr, downNe1Arr, downBytesArr,
-                numHeads, positions,
-                eps, slidingWindow,
-                ropeFreqFactors, ropeFreqFactorsLen,
-                ropeNDimsArr,
-                kvCacheType,
-                kArr, kTypeArr, kNe0Arr, kNe1Arr, kBytesArr,
-                vArr, vTypeArr, vNe0Arr, vNe1Arr, vBytesArr,
-                logitsData, vocabSize,
-                lmHeadData, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes,
-                finalNormData, logitSoftcap);
-        }
-
-        /// <summary>Capability bits of the native token-batched dense decode kernel
-        /// (<c>TSGgml_Gemma4BatchedDecodeCapabilities</c>).</summary>
-        [Flags]
-        public enum Gemma4BatchedDecodeCaps
-        {
-            None = 0,
-            /// <summary>Per-layer embeddings (uploaded or gathered in-kernel per row).</summary>
-            Ple = 1,
-            /// <summary>KV-donor (shared-KV) layers via a kv_source map.</summary>
-            KvDonor = 2,
-            /// <summary>Local (SWA) layers past their ring: write pos % cache, read flat.</summary>
-            SwaWrap = 4,
-            /// <summary>Ex2 accepts an independent cache capacity for every (layer, sequence).</summary>
-            PerSequenceCacheSizes = 8,
-        }
-
-        /// <summary>What the native token-batched dense decode supports beyond its
-        /// v1 scope (PLE, KV-donor layers, SWA wrap, per-sequence cache capacities). <see cref="Gemma4BatchedDecodeCaps.None"/>
-        /// on a native build that predates the probe.</summary>
-        public static Gemma4BatchedDecodeCaps Gemma4BatchedDecodeCapabilities()
-            => (Gemma4BatchedDecodeCaps)GgmlNative.Gemma4BatchedDecodeCapabilities();
-
-        /// <summary>Original extended batched-decode API. Cache capacities are [numLayers].</summary>
-        public static bool Gemma4ModelDecodeBatchedEx(
-            IntPtr hiddenData, int hiddenSize, int numLayers, int nSeqs,
-            IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr,
-            IntPtr[] oArr, IntPtr[] postAttnNormArr,
-            IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr,
-            IntPtr[] kCacheArr, IntPtr[] vCacheArr,
-            int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr,
-            float[] ropeBaseArr, float[] layerScalarArr,
-            int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr,
-            int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr,
-            int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr,
-            int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr,
-            int numHeads, int[] positions,
-            float eps, int slidingWindow,
-            IntPtr ropeFreqFactors, int ropeFreqFactorsLen,
-            int[] ropeNDimsArr,
-            int kvCacheType,
-            IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr,
-            IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr,
-            IntPtr logitsData, int vocabSize,
-            IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNormData, float logitSoftcap,
-            int[] kvSourceArr,
-            IntPtr pleData, int pleDim,
-            IntPtr[] pleGateArr, int[] pleGateTypeArr, long[] pleGateNe0Arr, long[] pleGateNe1Arr, long[] pleGateBytesArr,
-            IntPtr[] pleProjArr, int[] pleProjTypeArr, long[] pleProjNe0Arr, long[] pleProjNe1Arr, long[] pleProjBytesArr,
-            IntPtr[] plePostNormArr,
-            IntPtr pleTokenEmbdData = default, int pleTokenEmbdType = 0,
-            long pleTokenEmbdNe0 = 0, long pleTokenEmbdNe1 = 0, long pleTokenEmbdBytes = 0,
-            int[] pleTokenIds = null,
-            IntPtr pleModelProjData = default, int pleModelProjType = 0,
-            long pleModelProjNe0 = 0, long pleModelProjNe1 = 0, long pleModelProjBytes = 0,
-            IntPtr pleModelProjNormData = default)
-        {
-            return Gemma4ModelDecodeBatchedEx(
-                hiddenData, hiddenSize, numLayers, nSeqs, attnNormArr,
-                qkvArr, qNormArr, kNormArr, oArr, postAttnNormArr,
-                ffnNormArr, guArr, downArr, postFfnNormArr, kCacheArr,
-                vCacheArr, headDimArr, kvHeadsArr, cacheSizeArr, isLocalArr,
-                ropeBaseArr, layerScalarArr, qkvTypeArr, qkvNe0Arr, qkvNe1Arr,
-                qkvBytesArr, oTypeArr, oNe0Arr, oNe1Arr, oBytesArr,
-                guTypeArr, guNe0Arr, guNe1Arr, guBytesArr, downTypeArr,
-                downNe0Arr, downNe1Arr, downBytesArr, numHeads, positions,
-                eps, slidingWindow, ropeFreqFactors, ropeFreqFactorsLen, ropeNDimsArr,
-                kvCacheType, kArr, kTypeArr, kNe0Arr, kNe1Arr,
-                kBytesArr, vArr, vTypeArr, vNe0Arr, vNe1Arr,
-                vBytesArr, logitsData, vocabSize, lmHeadData, lmHeadType,
-                lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNormData, logitSoftcap,
-                kvSourceArr, pleData, pleDim, pleGateArr, pleGateTypeArr,
-                pleGateNe0Arr, pleGateNe1Arr, pleGateBytesArr, pleProjArr, pleProjTypeArr,
-                pleProjNe0Arr, pleProjNe1Arr, pleProjBytesArr, plePostNormArr, pleTokenEmbdData,
-                pleTokenEmbdType, pleTokenEmbdNe0, pleTokenEmbdNe1, pleTokenEmbdBytes, pleTokenIds,
-                pleModelProjData, pleModelProjType, pleModelProjNe0, pleModelProjNe1, pleModelProjBytes,
-                pleModelProjNormData,
-                false);
-        }
-
-        /// <summary>Extended token-batched dense decode: <see cref="Gemma4ModelDecodeBatched"/>
-        /// plus the KV-donor map (<paramref name="kvSourceArr"/>) and per-row PLE,
-        /// gathered in-kernel from the quantized table over <paramref name="pleTokenIds"/>
-        /// (preferred) or uploaded through <paramref name="pleData"/>
-        /// ([nSeqs][numLayers*pleDim] F32). With <paramref name="perSequenceCacheSizes"/>,
-        /// <paramref name="cacheSizeArr"/> is [numLayers*nSeqs] in layer-major order
-        /// and the native Ex2 capability is required; otherwise it is [numLayers].
-        /// Returns false when the kernel declines
-        /// (a global layer's cache is too small) so the caller falls back.</summary>
-        public static bool Gemma4ModelDecodeBatchedEx(
             IntPtr hiddenData, int hiddenSize, int numLayers, int nSeqs,
             IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr,
             IntPtr[] oArr, IntPtr[] postAttnNormArr,
@@ -3589,10 +3358,9 @@ namespace TensorSharp.GGML
             int[] pleTokenIds,
             IntPtr pleModelProjData, int pleModelProjType,
             long pleModelProjNe0, long pleModelProjNe1, long pleModelProjBytes,
-            IntPtr pleModelProjNormData,
-            bool perSequenceCacheSizes)
+            IntPtr pleModelProjNormData)
         {
-            return GgmlNative.Gemma4ModelDecodeBatchedEx(
+            return GgmlNative.Gemma4ModelDecodeBatched(
                 hiddenData, hiddenSize, numLayers, nSeqs,
                 attnNormArr, qkvArr, qNormArr, kNormArr,
                 oArr, postAttnNormArr,
@@ -3624,7 +3392,7 @@ namespace TensorSharp.GGML
                 pleTokenIds,
                 pleModelProjData, pleModelProjType,
                 pleModelProjNe0, pleModelProjNe1, pleModelProjBytes,
-                pleModelProjNormData, perSequenceCacheSizes);
+                pleModelProjNormData);
         }
 
         /// <summary>Fused multi-token speculative verify. Returns false when the
@@ -4245,15 +4013,27 @@ namespace TensorSharp.GGML
             // ~16.8M single-float copies for Q alone at 2048 tokens, per attention
             // layer, per chunk, single-threaded.
             //
-            // Genuinely element-strided F32 views (innermost stride != 1 on either
-            // side, e.g. a bare transpose) keep the element loop: callers build
-            // ad-hoc strided F32 tensors whose strides align to nothing coarser
-            // than one float.
+            // A bare 2-D transpose -- a weight's Transpose() made contiguous, which the
+            // vision and audio encoders do once per weight -- is copied in tiles: the
+            // element loop below took it one float at a time on one thread, through an
+            // iterator Mono does not inline. MEASURED in the Mac app (Mono): 0.8 s for one
+            // 4304x1152 weight and 3.4 s for a 4608x4608 one, 57 s of Gemma 4 E2B's first
+            // audio turn. Other genuinely element-strided F32 views (a permuted 3-D view,
+            // say) keep the element loop.
             if (dtype == DType.Float32)
             {
                 if (InnerContiguousExtent(result, src) > 1)
                 {
                     CopyStridedBytes(result, src, resultBuffer, srcBuffer, dtype);
+                    return;
+                }
+
+                if (result.DimensionCount == 2 && src.DimensionCount == 2 && result.IsContiguous()
+                    && src.Sizes[0] == result.Sizes[0] && src.Sizes[1] == result.Sizes[1]
+                    && src.Strides[0] == 1 && src.Strides[1] >= src.Sizes[0])
+                {
+                    CopyTransposedF32((float*)resultBuffer, (float*)srcBuffer,
+                        result.Sizes[0], result.Sizes[1], src.Strides[1]);
                     return;
                 }
 
@@ -4278,6 +4058,39 @@ namespace TensorSharp.GGML
             // For Q8_0 the inner extent must align to the 32-element block
             // boundary so byte offsets stay block-aligned.
             CopyStridedBytes(result, src, resultBuffer, srcBuffer, dtype);
+        }
+
+        /// <summary>
+        /// <c>dst[r, c] = src[r + c * ld]</c> for a row-major <paramref name="rows"/> x
+        /// <paramref name="cols"/> destination: the source's rows are its columns. Square
+        /// tiles keep both sides in cache, and large copies split the tiles over the cores.
+        /// </summary>
+        private static unsafe void CopyTransposedF32(float* dst, float* src, long rows, long cols, long ld)
+        {
+            const long Tile = 32;
+            long rowTiles = (rows + Tile - 1) / Tile;
+            nint d = (nint)dst, s = (nint)src;
+            void CopyRowTile(long tile)
+            {
+                float* to = (float*)d, from = (float*)s;
+                long r0 = tile * Tile, r1 = Math.Min(rows, r0 + Tile);
+                for (long c0 = 0; c0 < cols; c0 += Tile)
+                {
+                    long c1 = Math.Min(cols, c0 + Tile);
+                    for (long c = c0; c < c1; c++)
+                    {
+                        float* column = from + c * ld;
+                        for (long r = r0; r < r1; r++)
+                            to[r * cols + c] = column[r];
+                    }
+                }
+            }
+
+            if (rows * cols >= 1L << 18 && rowTiles > 1)
+                System.Threading.Tasks.Parallel.For(0L, rowTiles, CopyRowTile);
+            else
+                for (long tile = 0; tile < rowTiles; tile++)
+                    CopyRowTile(tile);
         }
 
         /// <summary>

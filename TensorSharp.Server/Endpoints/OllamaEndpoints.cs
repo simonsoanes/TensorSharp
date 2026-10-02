@@ -33,8 +33,6 @@ public static class OllamaEndpoints
             ? embedding.ShowAsync(ctx) : ctx.RequestServices.GetRequiredService<OllamaAdapter>().ShowAsync(ctx));
         endpoints.MapPost("/api/embed", (HttpContext ctx) =>
             EmbeddingHosting.InvokeAsync(ctx, static (adapter, context) => adapter.OllamaAsync(context)));
-        endpoints.MapPost("/api/embeddings", (HttpContext ctx) =>
-            EmbeddingHosting.InvokeAsync(ctx, static (adapter, context) => adapter.OllamaLegacyAsync(context)));
         endpoints.MapPost("/api/generate", (HttpContext ctx, OllamaAdapter adapter) => adapter.GenerateAsync(ctx));
         endpoints.MapPost("/api/chat/ollama", (HttpContext ctx, OllamaAdapter adapter) => adapter.ChatAsync(ctx));
         return endpoints;

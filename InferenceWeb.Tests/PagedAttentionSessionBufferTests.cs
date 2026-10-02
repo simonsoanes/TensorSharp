@@ -42,14 +42,7 @@ public class PagedAttentionSessionBufferTests
     private const int Bucket = 64;       // the cache's smallest padded-KV bucket
     private const int CacheSize = 16;    // kPagedAttnCacheSize
 
-    private static GgmlBackendType ConfiguredBackend() =>
-        (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "cpu").Trim().ToLowerInvariant() switch
-        {
-            "cuda" => GgmlBackendType.Cuda,
-            "metal" => GgmlBackendType.Metal,
-            "vulkan" => GgmlBackendType.Vulkan,
-            _ => GgmlBackendType.Cpu,
-        };
+    private static GgmlBackendType ConfiguredBackend() => TestGates.PinnedGgmlBackendType;
 
     [Fact]
     public void NewSessionOnReusedMemory_IgnoresStalePaddedKeys()

@@ -31,17 +31,6 @@ internal static class OpenAIResponseFactory
         return $"chatcmpl-{Guid.NewGuid():N}"[..30];
     }
 
-    public static object QueueChunk(string requestId, string model, int position, int pending) => new
-    {
-        id = requestId,
-        @object = ChunkObject,
-        model,
-        created = UnixNow(),
-        choices = new[] { new { index = 0, delta = new { role = "assistant", content = "" }, finish_reason = (string?)null } },
-        queue_position = position,
-        queue_pending = pending,
-    };
-
     public static object ContentChunk(string requestId, string model, string contentChunk) => new
     {
         id = requestId,

@@ -17,8 +17,7 @@ namespace InferenceWeb.Tests;
 /// <summary>
 /// Claims the server's --help page made that the code did not back, pinned so they do not
 /// come back: n-gram speculation "works on every model", a heredoc as the way files are
-/// written, a MoE thread default of "one less than the CPUs", a paged KV cache that gives
-/// "prefix reuse across requests" (the server never builds it), a fixed request-body limit,
+/// written, a MoE thread default of "one less than the CPUs", a fixed request-body limit,
 /// a skills search order with the install directory in the wrong place, and an executable
 /// called TensorSharp.Server that does not exist. The flag-set drift guards live in
 /// ServerOptionsBuilderTests; these check what the page SAYS.
@@ -81,12 +80,10 @@ public class ServerUsageAccuracyTests
     }
 
     [Fact]
-    public void PagedKv_IsDescribedAsInert_AndRedisUrlAsTheResponsesStore()
+    public void RedisUrl_IsDescribedAsTheResponsesStore()
     {
         string usage = Usage();
 
-        Assert.DoesNotContain("Cross-session paged KV cache:", usage, StringComparison.Ordinal);
-        Assert.Contains("NO EFFECT on the server", usage, StringComparison.Ordinal);
         Assert.DoesNotContain("for both the KV cache tier and the Responses API store", usage, StringComparison.Ordinal);
         Assert.Contains("Redis connection string for the Responses API store", usage, StringComparison.Ordinal);
     }

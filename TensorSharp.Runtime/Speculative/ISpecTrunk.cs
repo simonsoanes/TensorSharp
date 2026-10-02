@@ -13,15 +13,12 @@ namespace TensorSharp.Runtime.Speculative
 {
     /// <summary>
     /// The trunk backend a speculative execution drives: prompt/verify/plain
-    /// forwards plus recurrent-state snapshot/rollback. Two implementations:
-    /// <see cref="LinearSpecTrunk"/> (the model's live linear cache - the
-    /// standalone decoder and the per-sequence engine fallback) and the
-    /// executor's batched trunk (paged KV + per-slot state via
-    /// <see cref="IBatchedSpeculativeTarget"/>).
+    /// forwards plus recurrent-state snapshot/rollback, implemented by
+    /// <see cref="LinearSpecTrunk"/> over the model's live linear cache (the
+    /// standalone decoder and the per-sequence engine route).
     ///
-    /// Separating this from <see cref="ISpeculativeTarget"/> is what lets one
-    /// draft/verify loop serve both KV regimes: the loop only ever asks for
-    /// "forward these tokens" and "undo back to here".
+    /// The draft/verify loop only ever asks for "forward these tokens" and
+    /// "undo back to here".
     /// </summary>
     public interface ISpecTrunk
     {

@@ -56,7 +56,6 @@ public sealed class PrefixCacheFamilyCoverageTests
 
         PrefixCacheCapabilities caps = ((IPrefixCacheModel)model).GetPrefixCacheCapabilities();
 
-        Assert.Equal(PrefixCacheMode.Tree, caps.Readiness);
         Assert.Equal(model.KVStateFingerprint, caps.NamespaceFingerprint);
         Assert.False(string.IsNullOrWhiteSpace(caps.NamespaceFingerprint));
         Assert.Equal(EndStateSupport.None, caps.EndState);
@@ -89,7 +88,7 @@ public sealed class PrefixCacheFamilyCoverageTests
         }
         Assert.Equal(
             new[] { "DeepSeek41Model", "DeepSeek4Model", "Gemma4Model", "GlmDsaModel", "GptOssModel", "HunyuanDenseModel",
-                    "Mistral3Model", "MuseGlimmerModel", "NemotronModel", "Qwen35Model", "Qwen4ExpModel" },
+                    "Mistral3Model", "MuseGlimmerModel", "NemotronModel", "Qwen35Model", "Qwen4ExpCudaModel", "Qwen4ExpModel" },
             engineServed.Select(t => t.Name).ToArray());
     }
 
@@ -98,15 +97,20 @@ public sealed class PrefixCacheFamilyCoverageTests
     [InlineData(typeof(Qwen35Model))]
     [InlineData(typeof(Qwen4ExpModel))]
     [InlineData(typeof(DeepSeek4Model))]
+    [InlineData(typeof(GptOssModel))]
     public void HolderFamilies_UseTheHolderAdapter(Type family)
         => Assert.True(typeof(IHolderPrefixCacheModel).IsAssignableFrom(family), $"{family.Name} is not an IHolderPrefixCacheModel");
 
     [Theory]
-    [InlineData(typeof(GptOssModel))]
     [InlineData(typeof(Mistral3Model))]
     [InlineData(typeof(HunyuanDenseModel))]
-    [InlineData(typeof(NemotronModel))]
     [InlineData(typeof(MuseGlimmerModel))]
     public void PageFamilies_RefuseEveryEndStateMember(Type family)
         => Assert.True(typeof(IPageOnlyPrefixCacheModel).IsAssignableFrom(family), $"{family.Name} is not an IPageOnlyPrefixCacheModel");
+
+    /// <summary>Nemotron-H keeps each finished batched sequence's Mamba2 slot beside its pool blocks
+    /// (<see cref="PrefixCacheCapabilities.PagedEndStates"/>), so it implements the end-state members itself.</summary>
+    [Fact]
+    public void Nemotron_ImplementsItsBatchedEndStates()
+        => Assert.False(typeof(IPageOnlyPrefixCacheModel).IsAssignableFrom(typeof(NemotronModel)));
 }

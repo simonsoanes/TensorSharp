@@ -669,6 +669,16 @@ namespace TensorSharp.Models.MiniMaxH3
             return new GeneratedVideoAudio { Channels = channels, SampleRate = SampleRate };
         }
 
+        /// <summary>Hand the device copies of the weights back without tearing the VAE down
+        /// (see <see cref="MiniMaxH3DiT.ReleaseDeviceResidency"/>); the next encode or decode
+        /// binds them again from the same host memory.</summary>
+        public void ReleaseDeviceResidency()
+        {
+            if (_disposed) return;
+            foreach (IntPtr ptr in _bound)
+                if (ptr != IntPtr.Zero) GgmlBasicOps.InvalidateHostBuffer(ptr);
+        }
+
         public void Dispose()
         {
             if (_disposed) return;

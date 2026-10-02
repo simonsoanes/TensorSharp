@@ -411,7 +411,7 @@ public sealed class BackgroundGenerationTests : IDisposable
         int loop = host.IndexOf("for (int attempt = 0; ; attempt++)", StringComparison.Ordinal);
         int rebuild = host.IndexOf("RecoverEngineIfNeeded(warmAfterwards: false)", loop, StringComparison.Ordinal);
         int stopAgain = host.IndexOf("StopWarmingThePrefixCacheAndWaitAsync", rebuild, StringComparison.Ordinal);
-        int firstPull = host.IndexOf("Chat.ChatStreamAsync(attemptBody", rebuild, StringComparison.Ordinal);
+        int firstPull = host.IndexOf("ImageTurns.FramesFor(Chat, attemptBody", rebuild, StringComparison.Ordinal);
         Assert.True(rebuild > 0 && stopAgain > 0 && firstPull > 0, "the retry loop has changed shape");
         Assert.True(stopAgain < firstPull, "a warm-up started by another path's rebuild must be stopped before the turn pulls");
     }

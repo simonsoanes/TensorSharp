@@ -88,8 +88,7 @@ namespace TensorSharp.Models
 
         private static int ResolveMlxKvMaterializeInterval()
         {
-            string env = Environment.GetEnvironmentVariable("TS_MLX_MUSE_GLIMMER_KV_MATERIALIZE")
-                         ?? Environment.GetEnvironmentVariable("TS_MLX_KV_MATERIALIZE_INTERVAL");
+            string env = Environment.GetEnvironmentVariable("TS_MLX_KV_MATERIALIZE_INTERVAL");
             if (!string.IsNullOrWhiteSpace(env) && int.TryParse(env, out int v) && v >= 0)
                 return v;
             return 16;
@@ -97,8 +96,7 @@ namespace TensorSharp.Models
 
         private static int ResolveMlxEvalEveryNLayers()
         {
-            string env = Environment.GetEnvironmentVariable("TS_MLX_MUSE_GLIMMER_EVAL_EVERY_N_LAYERS")
-                         ?? Environment.GetEnvironmentVariable("TS_MLX_EVAL_EVERY_N_LAYERS");
+            string env = Environment.GetEnvironmentVariable("TS_MLX_EVAL_EVERY_N_LAYERS");
             if (!string.IsNullOrWhiteSpace(env) && int.TryParse(env, out int v) && v >= 0)
                 return v > 0 ? v : int.MaxValue;   // 0 disables the periodic kick
             return 4;
@@ -172,7 +170,7 @@ namespace TensorSharp.Models
                 InitKVCache(initialCacheLength, maxContextLength);
             }
 
-            // --draft-model, else TS_MUSE_GLIMMER_DFLASH. The drafter's speculative
+            // --draft-model. The drafter's speculative
             // path runs the SINGLE-GPU fused kernel (for its residual capture) and
             // grows the single-GPU KV cache through EnsureCacheCapacity; neither
             // exists under tensor parallelism, so it is not offered there.
@@ -343,19 +341,20 @@ namespace TensorSharp.Models
             // (see RequireUniformCache). CanUseTpFusedForward is the TP twin of
             // CanUseFusedForward, which stays false under --tp on purpose.
             //
-            // GgmlCpu keeps uniform caches: a ring is read WHOLE (its slots are
-            // not in position order), and ggml-cpu's flash-attention evaluates
-            // every KV column, masked or not - so 39 of 52 layers would pay the
-            // full 4352 ring rows of attention at ANY depth, where the uniform
-            // moving span costs pad256(window + chunk) only once the context is
-            // actually that long. The GPU backends keep the ring: their fixed
-            // graph shape is what preserves the persistent graph (and the CUDA
-            // capture), and their flash kernels skip fully-masked blocks.
+            // GgmlCpu keeps uniform caches: once a ring wraps it is read WHOLE (its
+            // slots are no longer in position order), and ggml-cpu's flash-attention
+            // evaluates every KV column, masked or not - so past 4352 tokens 39 of 52
+            // layers would pay the full ring of attention every token, where the
+            // uniform moving span costs pad256(window + chunk). The GPU backends keep
+            // the ring: CUDA and Vulkan read it whole from the first token (the fixed
+            // shape preserves the persistent graph and the CUDA capture, and their
+            // flash kernels skip fully-masked blocks); Metal reads the moving span
+            // until it wraps (see TSGgml_MuseGlimmerModelForward).
             if (!SwaRingEnabled || !(CanUseFusedForward || CanUseTpFusedForward) || _slidingWindow <= 0)
                 return 0;
             // The ring is correct on one GPU and WRONG under tensor parallelism,
-            // and the difference is the KV head count. A ring layer is read
-            // whole (window == rows), so kv_window_needs_cuda_flash_attn_copy
+            // and the difference is the KV head count. On CUDA/Vulkan a ring layer
+            // is read whole (window == rows), so kv_window_needs_cuda_flash_attn_copy
             // takes its "the window IS the cache" early return and never
             // materialises it - which is right when a rank owns every KV head.
             // Split two ways this model holds ONE (32 Q heads over 2 KV heads),
@@ -421,6 +420,10 @@ namespace TensorSharp.Models
             while (newCapacity < requiredSeqLen)
                 newCapacity = Math.Min(_maxContextLength, newCapacity * 2);
 
+            // The captured decode graph baked the old KV device addresses and cache
+            // size; drop it before any of those buffers is freed below.
+            ResetFusedDecodeCache();
+
             DType kvDtype = _kvCacheDtype.ToDType();
             // The ring is sized from the max context at construction and never changes,
             // so a grow only ever re-allocates the FULL-attention layers, and every row
@@ -440,6 +443,20 @@ namespace TensorSharp.Models
 
                 if (_cacheSeqLen > 0)
                 {
+                    // On the GGML backends Ops.Copy is a host memcpy, and the fused
+                    // kernel writes K/V on the device and leaves the host copy stale
+                    // (_fusedKvDirty), so the device rows come back first. Without it
+                    // the grown layer restarted from the stale host copy - the zero
+                    // fill - and the model lost its whole context at the grow: greedy
+                    // decode fell into a one-token loop at position 2049 on ggml_metal
+                    // (initial capacity 2048). The ring layers are not reallocated and
+                    // keep their device copies, so only the layer being copied is
+                    // synced and the flag stays set.
+                    if (_fusedKvDirty)
+                    {
+                        SyncTensorHostCache(_kvCacheK[l]);
+                        SyncTensorHostCache(_kvCacheV[l]);
+                    }
                     int keep = Math.Min(_cacheSeqLen, _kvCacheCapacity);
                     using (var srcK = _kvCacheK[l].Narrow(1, 0, keep))
                     using (var dstK = newK.Narrow(1, 0, keep))
@@ -449,6 +466,17 @@ namespace TensorSharp.Models
                         Ops.Copy(dstV, srcV);
                 }
 
+                // The host copies are authoritative for the new tensors. The GGML host
+                // pool recycles block addresses, and a recycled block can still have a
+                // previous tenant's device copy keyed to it that the next bind would
+                // attach in place of these bytes.
+                InvalidateTensorDeviceCache(newK);
+                InvalidateTensorDeviceCache(newV);
+                // Free the old device copies while their host pointer is still the key:
+                // disposing alone orphans them (a device-memory leak on every grow) and
+                // leaves them to be attached by the block's next tenant.
+                InvalidateTensorDeviceCache(_kvCacheK[l]);
+                InvalidateTensorDeviceCache(_kvCacheV[l]);
                 _kvCacheK[l].Dispose();
                 _kvCacheV[l].Dispose();
                 _kvCacheK[l] = newK;
@@ -456,9 +484,6 @@ namespace TensorSharp.Models
             }
 
             _kvCacheCapacity = newCapacity;
-            // The captured decode graph baked the old KV device addresses and cache
-            // size; replaying it against the reallocated buffers would hang.
-            ResetFusedDecodeCache();
             _fusedProbed = false;
             if (newSwaRows > 0)
             {
@@ -651,11 +676,9 @@ namespace TensorSharp.Models
         /// overwrote. Below the cap a restore is byte-identical to a real prefill (no
         /// row wraps, so every layer addresses linearly).
         ///
-        /// Reuse BEYOND the cap still happens, and correctly, through live-cache
-        /// continuation (BatchExecutor.ComputeLiveContinuationLcp), which keeps the
-        /// model's actual cache between same-session turns instead of rebuilding it.
-        /// That path is only armed for models that report a finite cap, so publishing
-        /// one here is what turns multi-turn reuse on for Muse-Glimmer.
+        /// Reuse BEYOND the cap still happens, and correctly, when the radix prefix cache
+        /// continues the model's primary (live) cache between same-session turns instead
+        /// of rebuilding it.
         /// </summary>
         public override int MaxReusablePrefixTokens
             => _kvSwaRows > 0 ? _kvSwaRows : int.MaxValue;
@@ -897,6 +920,18 @@ namespace TensorSharp.Models
                 return ForwardCore(tokens);
 
             int chunkSize = ResolvePrefillChunkSize();
+            // PrefillWithoutLogits has no ring guard of its own, and the ring is sized
+            // from TS_MUSE_GLIMMER_PREFILL_CHUNK, not TS_PREFILL_CHUNK: a wider refill
+            // chunk would alias two live positions onto one sliding-window slot (the
+            // same limit ForwardCore refuses past).
+            if (_kvSwaRows > 0)
+            {
+                // A ring forced no wider than the window (TS_MUSE_GLIMMER_SWA_ROWS)
+                // cannot take any chunk; ForwardCore reports that.
+                if (_kvSwaRows - _slidingWindow < 1)
+                    return ForwardCore(tokens);
+                chunkSize = Math.Min(chunkSize, _kvSwaRows - _slidingWindow);
+            }
             int lastIdx = tokens.Length - 1;
             if (tokens.Length <= chunkSize)
                 return ForwardCore(tokens);

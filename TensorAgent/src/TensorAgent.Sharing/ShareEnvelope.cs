@@ -150,14 +150,23 @@ public sealed class ShareEnvelopeStore
 
         string ready = Path.Combine(Root, id);
         string claimed = Path.Combine(Root, id + ClaimedSuffix);
+        FileStream? claimLease = null;
         try
         {
+            // Windows can complete two renames from handles opened on the same
+            // directory before either caller moves it. Serialize claimants with
+            // a lease outside the envelope (an open child would prevent its move).
+            // DeleteOnClose also releases the lease after a process crash.
+            if (OperatingSystem.IsWindows())
+                claimLease = new FileStream(Path.Combine(Root, id + ".claim-lock"),
+                    FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose);
             // Never delete an existing claim here. Another reader may still be
             // importing it; deleting that directory was a race that removed its files
             // while it had them open. A claim left by a crashed process is recovered
             // explicitly at the next app start by RecoverClaims().
             if (Directory.Exists(claimed))
             {
+                claimLease?.Dispose();
                 reason = "the share was already taken or is still being imported";
                 return null;
             }
@@ -165,11 +174,19 @@ public sealed class ShareEnvelopeStore
         }
         catch (Exception ex) when (ex is IOException or DirectoryNotFoundException or UnauthorizedAccessException)
         {
+            claimLease?.Dispose();
             // Lost the race, or it was never there. Both are "somebody else has it".
             reason = "the share was already taken or is no longer there";
             return null;
         }
 
+        using (claimLease)
+            return ReadClaim(id, claimed, out reason);
+    }
+
+    private ClaimedShare? ReadClaim(string id, string claimed, out string? reason)
+    {
+        reason = null;
         SharePayload? payload;
         try
         {

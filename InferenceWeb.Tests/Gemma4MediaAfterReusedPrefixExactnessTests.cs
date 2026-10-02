@@ -19,7 +19,7 @@
 // Two prefix lengths: inside Gemma 4's sliding window (512 tokens on E4B), and past it, where
 // the local layers' ring has wrapped and the chunk attends a window gathered from
 // the ring. Each runs on the fused whole-model prefill (which must actually serve
-// the media chunk at P) and on the per-op multimodal path (TS_G4_MM_PREFILL=0),
+// the media chunk at P) and on the per-op multimodal path (FusedMediaPrefillEnabled off),
 // each path compared with its own cold prefill.
 //
 // The tolerance comes from two noise estimates measured in the same row: a text control
@@ -103,13 +103,7 @@ public class Gemma4MediaAfterReusedPrefixExactnessTests
             }
         }
 
-        BackendType backend = (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "cpu")
-            .Trim().ToLowerInvariant() switch
-        {
-            "metal" => BackendType.GgmlMetal,
-            "cuda" => BackendType.GgmlCuda,
-            _ => BackendType.GgmlCpu,
-        };
+        BackendType backend = TestGates.PinnedGgmlBackend;
 
         using var model = (Gemma4Model)ModelBase.Create(modelPath, backend);
         model.MultimodalInjector.LoadProjectors(mmproj);

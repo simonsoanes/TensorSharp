@@ -57,23 +57,12 @@ namespace TensorSharp.Models
         // gpt-oss-20B Q8_0 — and the win grows with kvLen since the host
         // path scales linearly with kvLen on the multi-GB cache download.
         // Override via TS_MLX_SINKS_ATTN_MIN_KV_LEN if a workload regresses.
-        private static readonly int MlxSinksAttnMinKvLen = ResolveMlxSinksAttnMinKvLen();
         // On MLX, attention reads K/V straight out of the cache with MLX's fused SDPA
         // (sinks + sliding window), as mlx-lm does: prefill no longer materialises the
         // scores for a host sinks softmax, and decode uses MLX's split-K vector kernel.
-        // TS_MLX_CACHED_ATTENTION=0 restores the previous paths for A/B.
-        private static readonly bool MlxCachedAttention =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_CACHED_ATTENTION"), "0", StringComparison.Ordinal);
-        private static int ResolveMlxSinksAttnMinKvLen()
-        {
-            string env = Environment.GetEnvironmentVariable("TS_MLX_SINKS_ATTN_MIN_KV_LEN");
-            if (!string.IsNullOrWhiteSpace(env) && int.TryParse(env, out int v) && v > 0)
-                return v;
-            return 1;
-        }
 
         // Decode (seqLen == 1) reuses the fused on-device attention-layer kernel
-        // (TSGgml_GptOssAttentionLayerPrefill) instead of the legacy per-op path
+        // (TSGgml_GptOssAttentionLayerPrefill) instead of the per-op path
         // whose attention runs on the host CPU (KV-cache pull + CPU softmax per
         // layer). The fused kernel collapses RMSNorm + QKV + RoPE + KV append +
         // masked softmax-with-sinks + attention + O-proj + residual into ONE GGML
@@ -81,10 +70,8 @@ namespace TensorSharp.Models
         // lever, since Metal decode is dispatch-overhead bound. It re-uploads the
         // KV prefix [0,startPos) per call, so it is gated by context length to
         // keep that O(context) upload cheap relative to the compute it saves;
-        // longer contexts fall back to the proven host path. Both knobs are
-        // env-tunable (TS_GPTOSS_FUSED_DECODE=0 disables; TS_GPTOSS_FUSED_DECODE_MAX_CTX).
-        private static readonly bool FusedDecodeAttnEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_GPTOSS_FUSED_DECODE"), "0", StringComparison.Ordinal);
+        // longer contexts fall back to the host path. The limit is tunable with
+        // TS_GPTOSS_FUSED_DECODE_MAX_CTX.
         private static readonly int FusedDecodeAttnMaxContext = ResolveFusedDecodeMaxContext();
         private static int ResolveFusedDecodeMaxContext()
         {
@@ -97,7 +84,7 @@ namespace TensorSharp.Models
         // Maximum seqLen the fused on-device attention-layer kernel
         // (TSGgml_GptOssAttentionLayerPrefill) is dispatched at. Above this,
         // Forward() chunks the prompt into <=this-many-token sub-batches so the
-        // attention always runs on the fused path. The legacy per-op fallback
+        // attention always runs on the fused path. The per-op fallback
         // builds an O(seqLen^2) host scores tensor per layer (e.g. a 1253-token
         // prompt = ~200 MB/layer x 24 layers) which is both ~8x slower than the
         // fused kernel AND saturates the Metal working set on Apple Silicon,
@@ -112,27 +99,11 @@ namespace TensorSharp.Models
             return 256;
         }
 
-        // MLX batched MoE FFN via mlx_gather_qmm over the stacked experts
-        // (TryMoEMlxGatherQmm): 3 grouped-GEMM dispatches + 2 fused kernels
-        // per layer instead of the per-active-expert ExpertFFN loop (K
-        // experts x {gate_up matmul, host SwiGLU with 2 device->host syncs,
-        // down matmul} per token). TS_GPTOSS_MLX_MOE_GQMM=0 restores the
-        // per-expert path for an A/B (process restart required — stacked
-        // weights and preload decisions are made once at load).
-        // Mode: 1 (default) batched path on; 0 fully off (legacy per-expert
-        // path with eager per-expert preload — the pre-existing behavior);
-        // 2 diagnostic: preload veto + stacked build as in mode 1 but the
-        // batched compute disabled, so the legacy path runs with lazily
-        // converted per-expert weights.
-        private static readonly int MlxMoeGqmmMode = ResolveMlxMoeGqmmMode();
-        private static int ResolveMlxMoeGqmmMode()
-        {
-            string env = Environment.GetEnvironmentVariable("TS_GPTOSS_MLX_MOE_GQMM");
-            if (int.TryParse(env, out int v) && v >= 0 && v <= 2)
-                return v;
-            return 1;
-        }
-        private static readonly bool MlxMoeGatherQmmEnabled = MlxMoeGqmmMode != 0;
+        // On MLX the MoE FFN runs as a batched mlx_gather_qmm over the stacked
+        // experts (TryMoEMlxGatherQmm): 3 grouped-GEMM dispatches + 2 fused
+        // kernels per layer instead of the per-active-expert ExpertFFN loop
+        // (K experts x {gate_up matmul, host SwiGLU with 2 device->host syncs,
+        // down matmul} per token), which stays as the fallback.
 
         private Tensor[] _kvCacheK;
         private Tensor[] _kvCacheV;
@@ -779,7 +750,7 @@ namespace TensorSharp.Models
             // an F16 KV cache (halves cache memory + bandwidth, byte-identical
             // outputs at 1e-3). The fused prefill kernel and the F16-aware
             // decode loop (AttentionDecodeWithSinksF16 below) handle it
-            // natively. The legacy per-op prefill path (used only when
+            // natively. The per-op prefill path (used only when
             // seqLen > FusedAttnMaxSeqLen, i.e. ubatches > 256) doesn't yet
             // read F16 cache directly via AddmmBatch, so for that path we'd
             // either need to convert on the fly or keep the cache F32. The
@@ -1192,7 +1163,7 @@ namespace TensorSharp.Models
             // + RoPE + KV-cache append + masked-softmax-with-sinks + attention
             // + output projection (+bias) + residual add into ONE ggml_cgraph
             // dispatch. Replaces the ~10 separate per-op submissions in the
-            // legacy Attention() path (each its own Metal command buffer).
+            // per-op Attention() path (each its own Metal command buffer).
             // Mirrors the reference llama.cpp graph in src/models/openai-moe-iswa.cpp
             // and the existing TSGgml_Gemma4LayerPrefill template.
             //
@@ -1203,7 +1174,7 @@ namespace TensorSharp.Models
             // attention layers + N MoE FFN layers in flight exceeds the
             // recommendedMaxWorkingSetSize on Apple Silicon and triggers
             // kIOGPUCommandBufferCallbackErrorOutOfMemory in subsequent kernels.
-            // The legacy per-op path is still competitive at long seqLen
+            // The per-op path is still competitive at long seqLen
             // (each per-op kernel reuses small per-op intermediate buffers
             // via ggml-pool) and remains the default for those. A future
             // wave will rework per-call buffer reuse (e.g. via ggml_gallocr)
@@ -1213,11 +1184,10 @@ namespace TensorSharp.Models
             bool fusedAttnApplied = false;
             // Prefill: fuse 1 < seqLen <= 256. Decode (seqLen == 1): fuse too,
             // gated by context length (the kernel re-uploads the KV prefix per
-            // call) and an env kill-switch — see FusedDecodeAttnEnabled above.
+            // call) - see FusedDecodeAttnMaxContext above.
             bool tryFused = IsGgmlBackend &&
                 ((seqLen > 1 && seqLen <= FusedAttnMaxSeqLen) ||
-                 (seqLen == 1 && FusedDecodeAttnEnabled
-                    && (startPos + seqLen) <= FusedDecodeAttnMaxContext));
+                 (seqLen == 1 && (startPos + seqLen) <= FusedDecodeAttnMaxContext));
             if (tryFused && TryFusedAttnLayerPrefill(hidden, layer, wn, seqLen, startPos))
             {
                 fusedAttnApplied = true;
@@ -1225,7 +1195,7 @@ namespace TensorSharp.Models
 
             if (!fusedAttnApplied)
             {
-                // The legacy per-op attention reads the KV cache from host memory,
+                // The per-op attention reads the KV cache from host memory,
                 // which the whole-model decode graph leaves stale. No-op unless a
                 // fused decode ran since the last sync.
                 EnsureKvCacheHostSynchronized();
@@ -1290,7 +1260,7 @@ namespace TensorSharp.Models
         ///    falling back to the F32 weight path is supported by the C# code
         ///    below so we just refuse the fused path here).
         ///
-        /// Caller is expected to fall back to the legacy per-op path.
+        /// Caller is expected to fall back to the per-op path.
         /// </summary>
         private unsafe bool TryFusedAttnLayerPrefill(
             Tensor hidden, int layer, string[] wn, int seqLen, int startPos)
@@ -1312,7 +1282,7 @@ namespace TensorSharp.Models
             _weights.TryGetValue(wn[4], out var oBias);
 
             // Sliding-window for even layers; full causal for odd layers.
-            // Mirrors the legacy Attention() path's `bool isSWA = (layer % 2 == 0)`.
+            // Mirrors the per-op Attention() path's `bool isSWA = (layer % 2 == 0)`.
             bool isSwa = (layer % 2 == 0);
             float[] sinks = _layerSinks?[layer];
 
@@ -1467,10 +1437,8 @@ namespace TensorSharp.Models
                 // attention via a custom Metal kernel. Avoids the per-layer
                 // device→host KV cache pull that AttentionDecodeWithSinks
                 // triggers via GetFloatPtr/GetHalfPointer. Used at every
-                // kvLen by default: it measured faster than the host SIMD
-                // path even at short kvLen (see MlxSinksAttnMinKvLen).
-                // Threshold tunable via TS_MLX_SINKS_ATTN_MIN_KV_LEN
-                // (default 1).
+                // kvLen: it measured faster than the host SIMD path even at
+                // short kvLen.
                 bool attnOk = false;
                 if (_backend == BackendType.Cuda)
                 {
@@ -1484,7 +1452,7 @@ namespace TensorSharp.Models
                         attendStart, attendLen, _kvCacheCapacity,
                         circular: false, scale);
                 }
-                if (_backend == BackendType.Mlx && MlxCachedAttention)
+                if (_backend == BackendType.Mlx)
                 {
                     // MLX's SDPA vector kernel splits a long cache across threadgroups
                     // (two-pass); the one-threadgroup-per-head sinks kernel below fell
@@ -1500,8 +1468,7 @@ namespace TensorSharp.Models
                 }
                 if (!attnOk
                     && _backend == BackendType.Mlx
-                    && sinks != null
-                    && totalSeqLen >= MlxSinksAttnMinKvLen)
+                    && sinks != null)
                 {
                     Tensor sinksMlx = GetOrCreateSinksMlxTensor(layer, sinks, numHeads);
                     if (sinksMlx != null)
@@ -1539,7 +1506,7 @@ namespace TensorSharp.Models
             kHeads.Dispose();
             vHeads.Dispose();
 
-            if (_backend == BackendType.Mlx && MlxCachedAttention)
+            if (_backend == BackendType.Mlx)
             {
                 Tensor sinksMlx = sinks != null ? GetOrCreateSinksMlxTensor(layer, sinks, numHeads) : null;
                 var cachedAttention = new Tensor(_allocator, DType.Float32, seqLen, numHeads * headDim);
@@ -1964,7 +1931,7 @@ namespace TensorSharp.Models
             // a single dispatch per layer. Mirrors llama.cpp's `build_moe_ffn`
             // and is required to close the prefill gap on MoE models like GPT-OSS.
             //
-            // Skip for very long prefills: with only 32 experts the legacy
+            // Skip for very long prefills: with only 32 experts the
             // batched-by-expert path keeps each per-expert matmul fat (count >> 1)
             // so the per-call ggml graph build / Metal command-buffer overhead
             // of the fused path is no longer a win, and on GPT-OSS specifically
@@ -1990,202 +1957,13 @@ namespace TensorSharp.Models
             if (_backend == BackendType.Mlx
                 && TryMoEMlxGatherQmm(hiddenState, output, routingWeights, selectedExperts, layer, seqLen, hiddenDim))
             {
-                if (MoeMlxSelfCheck)
-                {
-                    using var check = new Tensor(_allocator, DType.Float32, seqLen, hiddenDim);
-                    Ops.Fill(check, 0f);
-                    MoEForwardBatchedLegacy(hiddenState, check, routingWeights, selectedExperts, layer, seqLen, hiddenDim);
-                    int worstToken = ReportMoeMlxSelfCheck(layer, output, check, seqLen, hiddenDim);
-                    if (layer >= 2 && layer <= 3)
-                        DebugArbitrateMoeToken(layer, hiddenState, output, check, routingWeights, selectedExperts, worstToken, hiddenDim);
-                }
                 return;
             }
 
-            MoEForwardBatchedLegacy(hiddenState, output, routingWeights, selectedExperts, layer, seqLen, hiddenDim);
+            MoEForwardBatchedPerExpert(hiddenState, output, routingWeights, selectedExperts, layer, seqLen, hiddenDim);
         }
 
-        // Diagnostic: TS_GPTOSS_MLX_MOE_SELFCHECK=1 recomputes every batched
-        // MLX MoE layer with the per-expert path and prints the deviation.
-        private static readonly bool MoeMlxSelfCheck =
-            string.Equals(Environment.GetEnvironmentVariable("TS_GPTOSS_MLX_MOE_SELFCHECK"), "1", StringComparison.Ordinal);
-
-        // Stage-level diagnostic for the batched MLX MoE path: recompute the
-        // gate / up matmuls, the clamped-SwiGLU activation and the down matmul
-        // for two sampled sorted pair-rows on the host (via ManagedQuantizedOps
-        // row dequantization) and print the max deviation per stage.
-        private unsafe void DebugCheckMoeStages(
-            int layer, Tensor moeInput, Tensor gateSorted, Tensor upSorted, Tensor actSorted, Tensor downSorted,
-            int[] tokenSorted, int[] expertsSorted,
-            StackedExpertWeights gateW, StackedExpertWeights upW, StackedExpertWeights downW,
-            int NK, int ff, int hiddenDim)
-        {
-            float* xPtr = GetFloatPtr(moeInput);
-            float* gPtr = GetFloatPtr(gateSorted);
-            float* uPtr = GetFloatPtr(upSorted);
-            float* aPtr = GetFloatPtr(actSorted);
-            float* dPtr = GetFloatPtr(downSorted);
-            float[] fusedBias = _layerGateUpBiasStacked[layer];
-            float[] downBias = _layerDownBiasStacked?[layer];
-            float[] wRow = new float[Math.Max(ff, hiddenDim)];
-
-            foreach (int i in new[] { 0, NK - 1 })
-            {
-                int t = tokenSorted[i];
-                int e = expertsSorted[i];
-
-                double gateMax = 0, upMax = 0, actMax = 0, downMax = 0;
-                float[] gRef = new float[ff];
-                float[] uRef = new float[ff];
-                long gRowBytes = gateW.PerExpertRawBytes / gateW.PerExpertNe1;
-                long uRowBytes = upW.PerExpertRawBytes / upW.PerExpertNe1;
-                for (int o = 0; o < ff; o++)
-                {
-                    ManagedQuantizedOps.DequantizeToFloat32(gateW.GgmlType,
-                        gateW.Data + (int)(e * gateW.PerExpertRawBytes + o * gRowBytes), wRow, 0, hiddenDim);
-                    float s = 0;
-                    for (int c = 0; c < hiddenDim; c++) s += xPtr[(long)t * hiddenDim + c] * wRow[c];
-                    gRef[o] = s;
-                    gateMax = Math.Max(gateMax, Math.Abs(s - gPtr[(long)i * ff + o]));
-
-                    ManagedQuantizedOps.DequantizeToFloat32(upW.GgmlType,
-                        upW.Data + (int)(e * upW.PerExpertRawBytes + o * uRowBytes), wRow, 0, hiddenDim);
-                    s = 0;
-                    for (int c = 0; c < hiddenDim; c++) s += xPtr[(long)t * hiddenDim + c] * wRow[c];
-                    uRef[o] = s;
-                    upMax = Math.Max(upMax, Math.Abs(s - uPtr[(long)i * ff + o]));
-                }
-
-                float[] actRef = new float[ff];
-                for (int o = 0; o < ff; o++)
-                {
-                    float g = gPtr[(long)i * ff + o] + fusedBias[e * 2 * ff + o];
-                    float u = uPtr[(long)i * ff + o] + fusedBias[e * 2 * ff + ff + o];
-                    float x = MathF.Min(g, SiluLimit);
-                    float y = Math.Clamp(u, -SiluLimit, SiluLimit);
-                    float glu = x / (1.0f + MathF.Exp(-SiluAlpha * x));
-                    actRef[o] = glu * (y + 1.0f);
-                    actMax = Math.Max(actMax, Math.Abs(actRef[o] - aPtr[(long)i * ff + o]));
-                }
-
-                long dRowBytes = downW.PerExpertRawBytes / downW.PerExpertNe1;
-                for (int o = 0; o < hiddenDim; o += 7)
-                {
-                    ManagedQuantizedOps.DequantizeToFloat32(downW.GgmlType,
-                        downW.Data + (int)(e * downW.PerExpertRawBytes + o * dRowBytes), wRow, 0, ff);
-                    float s = 0;
-                    for (int c = 0; c < ff; c++) s += aPtr[(long)i * ff + c] * wRow[c];
-                    downMax = Math.Max(downMax, Math.Abs(s - dPtr[(long)i * hiddenDim + o]));
-                }
-
-                Console.Error.WriteLine(
-                    $"[gpt-oss moe-stagecheck] layer {layer} pair {i} (token {t}, expert {e}): " +
-                    $"gateMax={gateMax:E3} upMax={upMax:E3} actMax={actMax:E3} downMax={downMax:E3}");
-            }
-        }
-
-        private unsafe int ReportMoeMlxSelfCheck(int layer, Tensor batched, Tensor reference, int seqLen, int hiddenDim)
-        {
-            float* a = GetFloatPtr(batched);
-            float* b = GetFloatPtr(reference);
-            long n = (long)seqLen * hiddenDim;
-            double maxAbs = 0, sumMag = 0;
-            long maxIdx = 0;
-            for (long i = 0; i < n; i++)
-            {
-                double diff = Math.Abs((double)a[i] - b[i]);
-                if (diff > maxAbs) { maxAbs = diff; maxIdx = i; }
-                sumMag += Math.Abs(b[i]);
-            }
-            Console.Error.WriteLine(
-                $"[gpt-oss moe-selfcheck] layer {layer} seq {seqLen}: maxAbsDiff={maxAbs:E3} at {maxIdx} " +
-                $"(batched={a[maxIdx]:F6} ref={b[maxIdx]:F6}), meanRefMag={sumMag / n:E3}");
-            return (int)(maxIdx / hiddenDim);
-        }
-
-        // Arbitration: compute one token's MoE output entirely on the host from
-        // the raw GGUF bytes (dequant matmuls + clamped SwiGLU + biases +
-        // routing-weighted sum) and report how far the batched MLX result and
-        // the per-expert legacy result each are from that ground truth.
-        private unsafe void DebugArbitrateMoeToken(
-            int layer, Tensor hiddenState, Tensor batched, Tensor legacy,
-            float[] routingWeights, int[] selectedExperts, int token, int hiddenDim)
-        {
-            int ff = _expertFfnLength;
-            int K = _numExpertsUsed;
-            var gateW = _layerStackedGate[layer];
-            var upW = _layerStackedUp[layer];
-            var downW = _layerStackedDown[layer];
-            float[] fusedBias = _layerGateUpBiasStacked[layer];
-            float[] downBias = _layerDownBiasStacked?[layer];
-            float* xPtr = GetFloatPtr(hiddenState) + (long)token * hiddenDim;
-
-            float[] outRef = new float[hiddenDim];
-            float[] wRow = new float[Math.Max(ff, hiddenDim)];
-            float[] act = new float[ff];
-            long gRowBytes = gateW.PerExpertRawBytes / gateW.PerExpertNe1;
-            long uRowBytes = upW.PerExpertRawBytes / upW.PerExpertNe1;
-            long dRowBytes = downW.PerExpertRawBytes / downW.PerExpertNe1;
-
-            for (int k = 0; k < K; k++)
-            {
-                int e = selectedExperts[token * K + k];
-                float w = routingWeights[token * K + k];
-                for (int o = 0; o < ff; o++)
-                {
-                    ManagedQuantizedOps.DequantizeToFloat32(gateW.GgmlType,
-                        gateW.Data + (int)(e * gateW.PerExpertRawBytes + o * gRowBytes), wRow, 0, hiddenDim);
-                    float g = 0;
-                    for (int c = 0; c < hiddenDim; c++) g += xPtr[c] * wRow[c];
-                    g += fusedBias[e * 2 * ff + o];
-
-                    ManagedQuantizedOps.DequantizeToFloat32(upW.GgmlType,
-                        upW.Data + (int)(e * upW.PerExpertRawBytes + o * uRowBytes), wRow, 0, hiddenDim);
-                    float u = 0;
-                    for (int c = 0; c < hiddenDim; c++) u += xPtr[c] * wRow[c];
-                    u += fusedBias[e * 2 * ff + ff + o];
-
-                    float x = MathF.Min(g, SiluLimit);
-                    float y = Math.Clamp(u, -SiluLimit, SiluLimit);
-                    act[o] = (x / (1.0f + MathF.Exp(-SiluAlpha * x))) * (y + 1.0f);
-                }
-                for (int o = 0; o < hiddenDim; o++)
-                {
-                    ManagedQuantizedOps.DequantizeToFloat32(downW.GgmlType,
-                        downW.Data + (int)(e * downW.PerExpertRawBytes + o * dRowBytes), wRow, 0, ff);
-                    float s = 0;
-                    for (int c = 0; c < ff; c++) s += act[c] * wRow[c];
-                    if (downBias != null) s += downBias[e * hiddenDim + o];
-                    outRef[o] += w * s;
-                }
-            }
-
-            float* bPtr = GetFloatPtr(batched) + (long)token * hiddenDim;
-            float* lPtr = GetFloatPtr(legacy) + (long)token * hiddenDim;
-            double batchedMax = 0, legacyMax = 0;
-            int batchedIdx = 0, legacyIdx = 0;
-            for (int o = 0; o < hiddenDim; o++)
-            {
-                double db = Math.Abs(bPtr[o] - outRef[o]);
-                double dl = Math.Abs(lPtr[o] - outRef[o]);
-                if (db > batchedMax) { batchedMax = db; batchedIdx = o; }
-                if (dl > legacyMax) { legacyMax = dl; legacyIdx = o; }
-            }
-            var experts = new System.Text.StringBuilder();
-            var weights = new System.Text.StringBuilder();
-            for (int k = 0; k < K; k++)
-            {
-                if (k > 0) { experts.Append(','); weights.Append(','); }
-                experts.Append(selectedExperts[token * K + k]);
-                weights.Append(routingWeights[token * K + k].ToString("F4"));
-            }
-            Console.Error.WriteLine(
-                $"[gpt-oss moe-arbiter] layer {layer} token {token}: batched-vs-cpu max={batchedMax:E3} at {batchedIdx} " +
-                $"(batched={bPtr[batchedIdx]:F6} cpu={outRef[batchedIdx]:F6}); legacy-vs-cpu max={legacyMax:E3} at {legacyIdx} " +
-                $"(legacy={lPtr[legacyIdx]:F6} cpu={outRef[legacyIdx]:F6}); experts=[{experts}] weights=[{weights}]");
-        }
-
-        private unsafe void MoEForwardBatchedLegacy(Tensor hiddenState, Tensor output,
+        private unsafe void MoEForwardBatchedPerExpert(Tensor hiddenState, Tensor output,
             float[] routingWeights, int[] selectedExperts, int layer, int seqLen, int hiddenDim)
         {
             float* inputPtr = GetFloatPtr(hiddenState);
@@ -2273,7 +2051,7 @@ namespace TensorSharp.Models
         /// Returns true on success (output has been written; routingWeights
         /// scaling is applied by the kernel). Returns false when the kernel
         /// can't handle the layout and the caller should fall back to the
-        /// legacy batched-by-expert path.
+        /// per-expert batched path.
         /// </summary>
         private unsafe bool TryMoEPrefillFused(
             Tensor hiddenState,
@@ -2348,15 +2126,13 @@ namespace TensorSharp.Models
         // token on gpt-oss-20b, with the GPU idle while the host sorts and builds the rest of
         // the layer. Here the top-K, the softmax over the selected logits (MoERoute's
         // semantics) and the expert indices stay on the device and feed gather_qmm directly,
-        // as omlx / mlx-lm route. TS_MLX_DEVICE_MOE_ROUTING=0 restores host routing.
-        private static readonly bool MlxDeviceMoeRouting =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_DEVICE_MOE_ROUTING"), "0", StringComparison.Ordinal);
+        // as omlx / mlx-lm route.
         private Tensor _moeDecodeRowZeros;   // [K] int32: every pair reads row 0 (the one token)
         private Tensor _moeDecodeArange;     // [K] int32: pair k is row k
 
         private Tensor TryMoEForwardDeviceRoutedMlx(Tensor hiddenState, int layer, string[] wn)
         {
-            if (!MlxDeviceMoeRouting || MlxMoeGqmmMode != 1 || _layerStackedReady == 0)
+            if (_layerStackedReady == 0)
                 return null;
             var gateW = _layerStackedGate?[layer];
             var upW = _layerStackedUp?[layer];
@@ -2467,7 +2243,7 @@ namespace TensorSharp.Models
             int seqLen,
             int hiddenDim)
         {
-            if (MlxMoeGqmmMode != 1 || _layerStackedReady == 0)
+            if (_layerStackedReady == 0)
                 return false;
 
             var gateW = _layerStackedGate?[layer];
@@ -2593,12 +2369,6 @@ namespace TensorSharp.Models
                             sortedIndices: sortedRhs))
                         return false;
 
-                    if (MoeMlxSelfCheck && seqLen > 1 && layer >= 2 && layer <= 3)
-                    {
-                        DebugCheckMoeStages(layer, moeInput, gateSorted, upSorted, actSorted, downSorted,
-                            tokenSorted, expertsSorted, gateW, upW, downW, NK, ff, hiddenDim);
-                    }
-
                     return MlxFusedOps.TryMoeBiasWeightedSum(output, downSorted,
                         _moeDownBiasMlx != null ? _moeDownBiasMlx[layer] : null,
                         expertsSortedT, invOrderT, pairWeightsT, K);
@@ -2627,13 +2397,12 @@ namespace TensorSharp.Models
         /// layer at model-load time so the first prefill doesn't pay the
         /// multi-GB MXFP4/Q8_0 repack (the per-layer stacks are cached inside
         /// MlxQuantizedOps and reused by every TryMoEMlxGatherQmm call).
-        /// No-op off-MLX, under TP, with the kill switch set, or for layers
+        /// No-op off-MLX, under TP, or for layers
         /// the stacked path can't serve (those keep the lazy/fallback flow).
         /// </summary>
         private void PrepareMlxStackedMoeWeights()
         {
             if (_backend != BackendType.Mlx
-                || !MlxMoeGatherQmmEnabled
                 || IsTensorParallel
                 || _layerStackedReady == 0
                 || _allocator is not MlxAllocator mlxAllocator)
@@ -2708,8 +2477,7 @@ namespace TensorSharp.Models
         /// </summary>
         protected override bool ShouldPreloadMlxQuantWeightToDevice(string weightName, QuantizedWeight weight)
         {
-            if (MlxMoeGatherQmmEnabled
-                && !IsTensorParallel
+            if (!IsTensorParallel
                 && _layerStackedReady != 0
                 && MlxQuantizedOps.SupportsStackedAffine(weight.GgmlType)
                 && (_stackedExpertMemberNames.Contains(weightName)

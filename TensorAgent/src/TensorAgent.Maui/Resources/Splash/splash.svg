@@ -1,4 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
   <rect x="16" y="16" width="96" height="96" rx="20" fill="none" stroke="#7c9cff" stroke-width="8"/>
-  <text x="64" y="78" font-family="Helvetica, Arial, sans-serif" font-size="40" font-weight="700" fill="#e6ecff" text-anchor="middle">TA</text>
+  <!-- "TA" as outlines rather than <text>. The build renders this file into the app's
+       icons, and <text> made that depend on the build machine's fonts and on the
+       renderer's font support: MAUI 10.0.110's Resizetizer throws a
+       MissingMethodException on any <text> with a font weight. -->
+  <path fill="#e6ecff" fill-rule="evenodd" transform="translate(64 78) scale(0.285714) translate(-228 -262)" d="M141.3 180.0 L141.3 161.5 L223.0 161.5 L223.0 180.0 L192.7 180.0 L192.7 262.0 L171.6 262.0 L171.6 180.0 Z M219.2 262.0 L253.3 161.5 L280.7 161.5 L314.7 262.0 L293.2 262.0 L286.8 243.0 L247.2 243.0 L240.8 262.0 Z M253.1 225.3 L267.0 183.6 L280.9 225.3 Z"/>
 </svg>

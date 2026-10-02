@@ -23,16 +23,11 @@ namespace TensorSharp.Cpu
     /// vectorized Vector512/256/128.Exp and tanh uses TensorPrimitives (a few ULP from MathF).
     /// Work is split on <see cref="CpuParallel"/> by element count, never by thread count: a
     /// [70, 2816] residual add stays on the calling thread, a [256, 262144] logit softcap is
-    /// spread over every worker. Formulas and operation order match the scalar code they
-    /// replace, so apart from the transcendental approximations results are bit-identical.
-    ///
-    /// TS_CPU_SIMD_ELEMENTWISE=0 keeps TensorApplyCPU on its previous loops for A/B runs.
+    /// spread over every worker. Formulas and operation order match the scalar formulas, so
+    /// apart from the transcendental approximations results are bit-identical to them.
     /// </summary>
     internal static unsafe class CpuKernels
     {
-        /// <summary>False when TS_CPU_SIMD_ELEMENTWISE=0.</summary>
-        public static bool Enabled { get; } = Environment.GetEnvironmentVariable("TS_CPU_SIMD_ELEMENTWISE") != "0";
-
         /// <summary>Use 512-bit vectors (tests pin it off to cover the 256-bit path).</summary>
         internal static bool Use512 { get; set; } = CpuIsa.Avx512;
 

@@ -18,39 +18,20 @@ namespace TensorSharp.Runtime.Speculative
     ///
     /// The env var - not a parsed value object - is the contract here because
     /// the request has to reach places the flags cannot: the glm-dsa NATIVE
-    /// loader sizes its graph cache from <c>TS_MTP_DRAFT</c> - from C++, while
+    /// loader sizes its graph cache from <c>TS_SPEC_DRAFT</c> - from C++, while
     /// the model is loading, long before any decoder object exists - and the
-    /// managed side of the same loader reads <c>TS_MTP_SPEC</c> to decide
-    /// whether to page the NextN block into VRAM at all (a whole extra
-    /// 256-expert decoder layer). Hosts must therefore apply these BEFORE they
-    /// construct the model, and every value is still published under BOTH the
-    /// current <c>TS_SPEC_*</c> name and the legacy <c>TS_MTP_*</c> one the
-    /// native loader reads. Only the ENV spellings are dual: the flag surface
-    /// is one name per concept, and a removed spelling errors with a pointer
-    /// to its replacement instead of being accepted or silently ignored.
+    /// managed side of the same loader reads <c>TS_SPEC</c> to decide whether
+    /// to page the NextN block into VRAM at all (a whole extra 256-expert
+    /// decoder layer). Hosts must therefore apply these BEFORE they construct
+    /// the model. One name per concept, for flags and variables alike: a
+    /// removed spelling errors with a pointer to its replacement instead of
+    /// being accepted or silently ignored.
     ///
     /// Shared by <c>TensorSharp.Server</c> and <c>TensorSharp.Cli</c> so the two
     /// hosts cannot drift on flag names, validation or defaults.
     /// </summary>
     public static class SpeculativeCliFlags
     {
-        /// <summary>Set to <c>1</c>/<c>0</c> by <c>--spec</c>/<c>--no-spec</c>.</summary>
-        public const string SpecEnvVar = SpeculationEnvVars.LegacyEnabled;
-
-        /// <summary>Maximum tokens drafted per speculative step (<c>--spec-draft</c>).</summary>
-        public const string DraftEnvVar = SpeculationEnvVars.LegacyDraft;
-
-        /// <summary>Minimum draft confidence to keep a drafted token (<c>--spec-pmin</c>).</summary>
-        public const string PMinEnvVar = SpeculationEnvVars.LegacyPMin;
-
-        /// <summary>Draft GGUF the operator named on <c>--draft-model</c>, for the
-        /// attach-after-load path (a per-token head such as Gemma 4's assistant, or
-        /// a DFlash drafter picked up on a runtime model switch).</summary>
-        public const string DraftModelEnvVar = SpeculationEnvVars.LegacyDraftModel;
-
-        /// <summary>Speculation algorithm (<c>--spec-type</c>).</summary>
-        public const string TypeEnvVar = SpeculationEnvVars.Type;
-
         /// <summary>
         /// Every valueless switch <see cref="Apply"/> consumes.
         ///
@@ -135,6 +116,7 @@ namespace TensorSharp.Runtime.Speculative
                 return false;
 
             RejectRemoved(args);
+            SpeculationEnvVars.RejectRemoved();
 
             bool changed = false;
             bool explicitOnOff = false;
@@ -144,14 +126,14 @@ namespace TensorSharp.Runtime.Speculative
                 string a = args[i];
                 if (IsFlag(a, "--spec"))
                 {
-                    SetBoth(SpeculationEnvVars.Enabled, SpeculationEnvVars.LegacyEnabled, "1");
+                    Environment.SetEnvironmentVariable(SpeculationEnvVars.Enabled, "1");
                     explicitOnOff = true;
                     changed = true;
                     continue;
                 }
                 if (IsFlag(a, "--no-spec"))
                 {
-                    SetBoth(SpeculationEnvVars.Enabled, SpeculationEnvVars.LegacyEnabled, "0");
+                    Environment.SetEnvironmentVariable(SpeculationEnvVars.Enabled, "0");
                     explicitOnOff = true;
                     changed = true;
                     continue;
@@ -176,8 +158,7 @@ namespace TensorSharp.Runtime.Speculative
                         throw new ArgumentException(
                             $"Invalid value for --spec-draft: '{draftOpt}'. Expected an integer in [1, {MaxDraftTokens}].");
                     }
-                    SetBoth(SpeculationEnvVars.Draft, SpeculationEnvVars.LegacyDraft,
-                        draft.ToString(CultureInfo.InvariantCulture));
+                    Environment.SetEnvironmentVariable(SpeculationEnvVars.Draft, draft.ToString(CultureInfo.InvariantCulture));
                     changed = true;
                     continue;
                 }
@@ -191,8 +172,7 @@ namespace TensorSharp.Runtime.Speculative
                             $"Invalid value for --spec-pmin: '{pminOpt}'. Expected a probability in [0, 1] "
                             + "(0 disables the confidence gate).");
                     }
-                    SetBoth(SpeculationEnvVars.PMin, SpeculationEnvVars.LegacyPMin,
-                        pmin.ToString(CultureInfo.InvariantCulture));
+                    Environment.SetEnvironmentVariable(SpeculationEnvVars.PMin, pmin.ToString(CultureInfo.InvariantCulture));
                     changed = true;
                     continue;
                 }
@@ -209,7 +189,7 @@ namespace TensorSharp.Runtime.Speculative
                 {
                     if (string.IsNullOrWhiteSpace(draftModelOpt) || !File.Exists(draftModelOpt))
                         throw new ArgumentException($"--draft-model file not found: '{draftModelOpt}'.");
-                    SetBoth(SpeculationEnvVars.DraftModel, SpeculationEnvVars.LegacyDraftModel, draftModelOpt);
+                    Environment.SetEnvironmentVariable(SpeculationEnvVars.DraftModel, draftModelOpt);
                     draftModelNamed = true;
                     changed = true;
                     continue;
@@ -222,7 +202,7 @@ namespace TensorSharp.Runtime.Speculative
             // server silently did not). An explicit --spec/--no-spec anywhere on
             // the line still wins - the operator said so in words.
             if (draftModelNamed && !explicitOnOff)
-                SetBoth(SpeculationEnvVars.Enabled, SpeculationEnvVars.LegacyEnabled, "1");
+                Environment.SetEnvironmentVariable(SpeculationEnvVars.Enabled, "1");
 
             return changed;
         }
@@ -303,14 +283,5 @@ namespace TensorSharp.Runtime.Speculative
 
         private static bool IsFlag(string arg, string option)
             => string.Equals(arg, option, StringComparison.OrdinalIgnoreCase);
-
-        /// <summary>Publish under both spellings: managed readers prefer
-        /// <c>TS_SPEC_*</c>, the glm-dsa native loader only knows
-        /// <c>TS_MTP_*</c>.</summary>
-        private static void SetBoth(string name, string legacyName, string value)
-        {
-            Environment.SetEnvironmentVariable(name, value);
-            Environment.SetEnvironmentVariable(legacyName, value);
-        }
     }
 }

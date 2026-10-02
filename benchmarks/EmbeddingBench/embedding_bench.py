@@ -200,8 +200,6 @@ def correctness(url, model, is_tensorsharp, reference_min_batch_cosine=.9999):
         assert min(cosine(a,b) for a,b in zip(vectors,ollama["embeddings"])) > .99999
         assert ollama["prompt_eval_count"] == usage["prompt_tokens"]
         assert ollama["total_duration"] > 0
-        status, legacy = request(url, "/api/embeddings", dict(model=model,prompt=TEXTS[0]))
-        assert status == 200 and cosine(legacy["embedding"],singles[0]) > .99999
         encoded, _ = embedding(url,model,TEXTS[0],encoding_format="base64")
         decoded = list(struct.unpack("<"+"f"*dim,base64.b64decode(encoded[0])))
         assert max(abs(a-b) for a,b in zip(decoded,singles[0])) < 1e-7
@@ -224,7 +222,7 @@ def correctness(url, model, is_tensorsharp, reference_min_batch_cosine=.9999):
             concurrent_rows = list(pool.map(lambda text: embedding(url,model,text)[0][0],TEXTS[:8]))
         assert min(cosine(a,b) for a,b in zip(singles,concurrent_rows)) > .9999
         extra = dict(invalid_requests=len(invalid),concurrent_requests=8,
-                     protocols=["OpenAI float","OpenAI base64","Ollama embed","Ollama legacy"],
+                     protocols=["OpenAI float","OpenAI base64","Ollama embed"],
                      dimensions_tested=min(256,dim))
     return dict(dimensions=dim,vectors=vectors,single_vectors=singles,
                 usage=usage,batch_min_cosine=min(batch_cosines),batch_consistency_gate=consistency_gate,

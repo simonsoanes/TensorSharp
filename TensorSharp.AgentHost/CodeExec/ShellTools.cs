@@ -571,7 +571,8 @@ namespace TensorSharp.AgentHost.CodeExec
         public const int DefaultReadLines = 400;
 
         /// <summary>
-        /// Declare the legacy <c>edit_file</c> API, which is not advertised by the host.
+        /// Declare the <c>edit_file</c> API. The host does not advertise it: it performs the
+        /// calls models make to it by reflex (<see cref="SkillToolNames.EditFile"/>).
         ///
         /// <para>
         /// Short on purpose. The entire output obligation is two strings, and the two
@@ -828,13 +829,11 @@ namespace TensorSharp.AgentHost.CodeExec
         public readonly record struct WriteRequest(string Path, string Content)
         {
             /// <summary>
-            /// Explicit confirmation that an existing file should be discarded in full.
-            /// Kept outside the positional contract so existing compiled callers retain
-            /// the original constructor and two-value deconstruction shape.
+            /// Whether an existing file may be discarded in full. Host code that builds a
+            /// request directly replaces by default; tool JSON is parsed explicitly in
+            /// <see cref="TryReadWrite"/>, where an omitted flag is false and therefore
+            /// protects model-authored repairs.
             /// </summary>
-            // Direct host callers using the original two-argument API retain its
-            // replacement semantics. Tool JSON is parsed explicitly below, where an
-            // omitted flag is false and therefore protects model-authored repairs.
             public bool Overwrite { get; init; } = true;
         }
 

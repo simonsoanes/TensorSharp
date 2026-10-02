@@ -193,15 +193,6 @@ namespace TensorSharp.Runtime
         long ComputeKVBlockByteSize(int tokenCount) => 0;
 
         /// <summary>
-        /// Element type of the bytes returned by <see cref="TryExtractKVBlock"/> /
-        /// consumed by <see cref="TryInjectKVBlock"/>. Used by the paged tier's
-        /// optional TurboQuant codec to decide how to interpret the raw payload
-        /// before re-quantizing it. Defaults to <see cref="KvCodecElementType.Float32"/>;
-        /// models with F16 or Q8_0 caches should override.
-        /// </summary>
-        KvCodecElementType KVStateElementType => KvCodecElementType.Float32;
-
-        /// <summary>
         /// Whether this architecture must be snapshotted at every block boundary
         /// DURING prefill, rather than once at the end. Recurrent / SSM layers
         /// (Qwen 3.5 GatedDeltaNet, Nemotron Mamba2) need this because the running
@@ -273,7 +264,7 @@ namespace TensorSharp.Runtime
         /// Prepare media embeddings for a request and expand any media-placeholder tokens.
         /// When <paramref name="requestId"/> is provided the prepared embeddings are stored
         /// in a per-request bucket so concurrent requests don't clobber each other; when null
-        /// (legacy single-threaded path) they go into a shared default bucket.
+        /// (the single-threaded path) they go into a shared default bucket.
         /// </summary>
         List<int> ProcessPromptTokens(List<ChatMessage> history, List<int> inputTokens, string? requestId = null);
 

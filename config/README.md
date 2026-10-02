@@ -46,9 +46,7 @@ repeatable options — `--stop`, `--skill`, `--lora`,
 `--lora-scale`, `--lora-config`, `--image`, `--ref-image`, `--ref-video`,
 `--ref-audio` and `--ref-video-audio` — keep every file's values and add the
 command line's after them instead, and a download entry under one of them still
-runs. Legacy spellings count as the same option in both directions: `--wan-vae`
-and `--video-vae`; `--wan-te`, `--video-te` and `--video-text-encoder`;
-`--wan-dit2` and `--video-dit2`.
+runs.
 
 ## File format
 
@@ -167,8 +165,8 @@ how far along it is. See [`auto-download.json`](auto-download.json).
 
 Every example uses **real, public, ungated** Hugging Face URLs, so the files
 auto-download to their local `path` on the first run and are reused afterward.
-The one exception is the MiniMax-H3 tokenizer (`vocab.json` + `merges.txt`),
-which you place by hand; see [below](#video-generation-with-sound-minimax-h3).
+The one exception is the MiniMax-H3 tokenizer (`vocab.json`, `merges.txt` and
+`tokenizer_config.json`), which you place by hand; see [below](#video-generation-with-sound-minimax-h3).
 If you already have a file at that `path`, it is used as-is (no download).
 
 | File | Model(s) | Shows |
@@ -451,12 +449,17 @@ Notes:
 - **Drop the `audio-vae` entry and you still get video**, just silent — that entry is
   what decodes the audio half of the latent.
 - **The text encoder ships no tokenizer**, and auto-download cannot fill that gap: it
-  only resolves options that are flags, and the tokenizer is not one. Put `vocab.json`
-  and `merges.txt` from
+  only resolves options that are flags, and the tokenizer is not one. Put `vocab.json`,
+  `merges.txt` and `tokenizer_config.json` from
   [MiniMaxAI/MiniMax-H3/processor](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/42ed227ee7df40d41602854ae760620d6eb651fe/processor)
   (the config comments give pinned `curl` lines)
   next to the encoder GGUF in `${modelRoot}`, or point `TS_VIDEO_TOKENIZER` at the
-  folder holding them. Without them the run stops when the encoder loads.
+  folder holding them. Without the first two the run stops when the encoder loads.
+  Without `tokenizer_config.json` text-to-video still runs, and so do references that
+  are all sound recordings, but a keyframe, or a photo or clip reference, is refused
+  before the vision tower runs: that file alone defines `<|vision_start|>`,
+  `<|image_pad|>` and `<|vision_end|>`, and without them the picture used to be placed
+  over the wrong prompt positions and quietly ignored.
 - **Steps and guidance are host-specific, so no shipped config sets them.** The server
   takes `--video-steps N` and has no `--cfg` at all; the CLI takes `--diffusion-steps N`
   and `--cfg`. A flag the server does not know is not ignored — it refuses to start —

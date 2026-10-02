@@ -19,7 +19,7 @@ static void Usage()
 {
     Console.Error.WriteLine("conv [avx512|avx2|portable|all] [reps=3] [--scalar]       VAE conv layers: packed GEMM vs scalar");
     Console.Error.WriteLine("vae <vae.safetensors> <cpu|scalar|ggml_cpu> <decode|encode|roundtrip> <W> <H> <outPrefix> [--image png] [--reps N]");
-    Console.Error.WriteLine("    [--latent file.f32] [--no-pool]   decode input (default: seeded noise); --no-pool: TS_QWEN_VAE_POOL=0 (A/B)");
+    Console.Error.WriteLine("    [--latent file.f32] [--no-pool]   decode input (default: seeded noise); --no-pool: VAE feature pool off (A/B)");
     Console.Error.WriteLine("text <Qwen3VL.gguf> <cpu|ggml_cpu> <out.f32> [--prompt text] [--reps N] [--f64-linear]");
     Console.Error.WriteLine("     --f64-linear (cpu): every projection summed in double over exact weights - the parity reference");
     Console.Error.WriteLine("vision <mmproj.gguf> <cpu|ggml_cpu> <outPrefix> [--image png] [--size WxH] [--reps N]");

@@ -143,16 +143,11 @@ similarity = sum(a * b for a, b in zip(*vectors))
 curl http://127.0.0.1:5000/api/embed \
   -H 'Content-Type: application/json' \
   -d '{"model":"snowflake-arctic-embed-l-v2.0-q8_0","input":["query: read a file","def read_file(path): return open(path).read()"],"truncate":false,"dimensions":256}'
-
-curl http://127.0.0.1:5000/api/embeddings \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"snowflake-arctic-embed-l-v2.0-q8_0","prompt":"query: read a file"}'
 ```
 
 `/api/embed` returns `model`, `embeddings`, `total_duration`, `load_duration`
 (nanoseconds), and `prompt_eval_count`. `truncate` defaults to `true`; set it
 to `false` to reject overflow. Truncation preserves the final separator token.
-The legacy `/api/embeddings` accepts one `prompt` and returns one `embedding`.
 The service keeps its startup model resident; per-request `keep_alive` and
 generation `options` do not reconfigure or unload it.
 

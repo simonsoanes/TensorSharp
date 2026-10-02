@@ -276,7 +276,6 @@ internal static class Bench
     private static PrefixCacheCapabilities Caps() => new()
     {
         Class = FamilyClass.R,
-        Readiness = PrefixCacheMode.Legacy,
         NamespaceFingerprint = "radix-tree-bench",
         EndState = EndStateSupport.CopyAndDonate,
         CanCaptureCopy = true,

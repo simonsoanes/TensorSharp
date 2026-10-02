@@ -156,8 +156,7 @@ public sealed unsafe class DiffusionGemmaQuantContractTests
     }
 
     // The two entry points must agree too: the pruned last decode layer projects a row or two through
-    // the single-call linear while the unified forward sends the same row through it with many, and
-    // the per-stage A/B switches (DIFFUSION_CPU_LEGACY_PROJ/_MOE) swap one entry point for the other.
+    // the single-call linear while the unified forward sends the same row through it with many.
     [Theory]
     [MemberData(nameof(Types))]
     public void Batch_MatchesTheSingleCall(GgmlTensorType type)

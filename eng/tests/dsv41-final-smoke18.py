@@ -60,7 +60,7 @@ def validate_reference_logits(reference, summary):
 def normalized_environment(source):
     environment = source.copy()
     removed = [key for key in environment if key.startswith(("TS_DSV4_", "TS_DSV41_", "GGML_"))]
-    removed += ["TS_DSV41_TRACE_DIR", "TS_DSV4_HC_NATIVE", "NVIDIA_TF32_OVERRIDE"]
+    removed += ["TS_DSV41_TRACE_DIR", "NVIDIA_TF32_OVERRIDE"]
     for key in removed:
         environment.pop(key, None)
     return environment, removed
@@ -139,7 +139,7 @@ def main():
         raise ValueError("Reference logits are not finite")
     norm_tolerance = validate_reference_logits(reference, reference_summary)
     environment, removed = normalized_environment(os.environ)
-    settings = dict(CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7", TS_DSV41_TP="0", TS_DSV4_FA="1",
+    settings = dict(CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7", TS_DSV4_FA="1",
                     TS_DSV4_FUSED="1", TS_DSV4_GATHER="1", TS_DSV41_SPARSE_FA="0",
                     TS_DSV41_COMPACT_RAW_GATHER="0", TS_CPU_MOE_THREADS="24",
                     TS_DSV41_ENGRAM_THREADS="16", TS_DSV41_ENGRAM_WARM="0")

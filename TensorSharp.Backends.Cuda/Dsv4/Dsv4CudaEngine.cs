@@ -45,34 +45,16 @@ namespace TensorSharp.Cuda
         private const int Q81BlockBytes = 36;
 
         // ggml type ids this engine dispatches on
-        private const int TF32 = 0, TF16 = 1, TQ8_0 = 8, TQ2_K = 10, TQ6_K = 14, TIQ2_XXS = 16, TIQ3_S = 21, TBF16 = 30, TMXFP4 = 39;
-
-        public struct QuantWeightDesc
-        {
-            /// <summary>Host staging pointer. Zero when the weight streams
-            /// straight from <see cref="Source"/> into VRAM.</summary>
-            public IntPtr HostPtr;
-            /// <summary>Byte source the upload reads from when
-            /// <see cref="HostPtr"/> is zero (the GGUF shard, normally).</summary>
-            public IDsv4WeightSource Source;
-            public long SourceOffset;
-            public int GgmlType;
-            public int Ne0;
-            public int Ne1;
-            public int Ne2;
-            public long RowBytes;
-            public string Name;
-            public bool IsValid => HostPtr != IntPtr.Zero || Source != null;
-            public long TotalBytes => (long)Ne1 * Math.Max(1, Ne2) * RowBytes;
-        }
+        private const int TF32 = 0, TF16 = 1, TQ8_0 = 8, TQ2_K = 10, TQ3_K = 11, TQ4_K = 12, TQ5_K = 13, TQ6_K = 14,
+            TIQ2_XXS = 16, TIQ3_S = 21, TBF16 = 30, TMXFP4 = 39;
 
         public sealed class LayerDesc
         {
             public int Ratio;
             public float ClampExp, ClampShexp;
-            public QuantWeightDesc WqA, WqB, Wkv, WoA, WoB;
-            public QuantWeightDesc CompWkv, CompWgate, IdxProj, IdxQB, IdxCompWkv, IdxCompWgate;
-            public QuantWeightDesc GateExps, UpExps, DownExps, GateShexp, UpShexp, DownShexp;
+            public CudaWeightDesc WqA, WqB, Wkv, WoA, WoB;
+            public CudaWeightDesc CompWkv, CompWgate, IdxProj, IdxQB, IdxCompWkv, IdxCompWgate;
+            public CudaWeightDesc GateExps, UpExps, DownExps, GateShexp, UpShexp, DownShexp;
             public float[] AttnNorm, QANorm, KvNorm, Sinks;
             public float[] HcAttnFn, HcAttnScale, HcAttnBase, HcFfnFn, HcFfnScale, HcFfnBase;
             public float[] CompApe, CompNorm, IdxCompApe, IdxCompNorm;
@@ -86,11 +68,14 @@ namespace TensorSharp.Cuda
             public int KvSource = -1, IndexSource = -1;
             /// <summary>V4.1 projects the compressed latent into the indexer's key
             /// space instead of running a second compressor for it.</summary>
-            public QuantWeightDesc IndexerK;
+            public CudaWeightDesc IndexerK;
             public float[] IndexerKNorm;
             /// <summary>Index into the GGUF's table list, or -1.</summary>
             public int EngramIndex = -1;
-            public QuantWeightDesc EngramWkv;
+            public CudaWeightDesc EngramWkv;
+            /// <summary>The layer's Engram table, uploaded when the split can hold it
+            /// (<see cref="EngramResident"/>); the host gathers from its mapping otherwise.</summary>
+            public CudaWeightDesc EngramTable;
             public float[] EngramQ, EngramK;
         }
 
@@ -103,7 +88,7 @@ namespace TensorSharp.Cuda
             public float RmsEps, HcEps, ExpertWeightsScale;
             public bool ExpertWeightsNorm;
             public int NCtx, NUbatch;
-            public QuantWeightDesc TokEmbd, Output;
+            public CudaWeightDesc TokEmbd, Output;
             /// <summary>Host quantized matmul for <c>--n-cpu-moe</c> layers; see
             /// <see cref="IDsv4HostMatMul"/>. Required only when the engine
             /// decides to offload (it will say so and throw if it is null).</summary>
@@ -128,46 +113,31 @@ namespace TensorSharp.Cuda
             public DsparkDesc Dspark;
         }
 
-        internal sealed class UploadJob
-        {
-            public IntPtr Dst;
-            public IDsv4WeightSource Src;
-            public long SrcOffset;
-            public long Bytes;
-        }
-
-        private struct DevQW
-        {
-            public IntPtr Ptr;
-            public int Type;
-            public int Ne0;
-            public int Ne1;
-            public long RowBytes;
-        }
-
         private sealed class DevLayer
         {
             public int Device;
             public int Ratio;
             public float ClampExp, ClampShexp;
-            public DevQW WqA, WqB, Wkv, WoA, WoB;
-            public DevQW CompWkv, CompWgate, IdxProj, IdxQB, IdxCompWkv, IdxCompWgate;
-            public DevQW GateExps, UpExps, DownExps, GateShexp, UpShexp, DownShexp;
-            // Small dense tensors and the KV/compressor caches are allocator-owned
-            // Tensors (the arena now holds only the packed quantized weights), so
-            // the shared Ops can consume them directly.
+            public DeviceWeight WqA, WqB, Wkv, WoA, WoB;
+            public DeviceWeight CompWkv, CompWgate, IdxProj, IdxQB, IdxCompWkv, IdxCompWgate;
+            public DeviceWeight GateExps, UpExps, DownExps, GateShexp, UpShexp, DownShexp;
+            // Small dense tensors are allocator-owned Tensors (the arena holds only
+            // the packed quantized weights), so the shared Ops can consume them
+            // directly. The caches belong to each sequence's slot.
             public Tensor AttnNorm, QANorm, KvNorm, Sinks;
             public Tensor HcAttnFn, HcAttnScale, HcAttnBase, HcFfnFn, HcFfnScale, HcFfnBase;
             public Tensor CompApe, CompNorm, IdxCompApe, IdxCompNorm;
             public Tensor GateInp, ExpProbsBias, FfnNorm, Tid2Eid;
-            public Tensor RingK, CompK, LidK;
-            public Tensor HistKv, HistScore, LidHistKv, LidHistScore;
             public int ShFf;
 
             // ---- V4.1 ----
             public int KvSource = -1, IndexSource = -1, EngramIndex = -1;
-            public DevQW IndexerK, EngramWkv;
+            public DeviceWeight IndexerK, EngramWkv, EngramTable;
             public Tensor IndexerKNorm, EngramQ, EngramK;
+            // This Engram layer's own pinned staging, and the event recorded after the copy out
+            // of it: the host fills the staging while the device may still be copying the last
+            // fill, so each layer needs its own and must wait for that copy before refilling.
+            public IntPtr EngramPinned, EngramCopied;
         }
 
         private sealed class Dev
@@ -176,17 +146,13 @@ namespace TensorSharp.Cuda
             public CudaAllocator Alloc;
             public Dsv4Kernels DK;
             public IntPtr Event;
-            // One allocator-owned byte tensor per device holding every packed
-            // quantized weight assigned to it; ArenaTake bump-allocates inside it.
-            // A single block keeps the ~7k weight tensors from each paying an
-            // allocation-granularity tax (and keeps upload segments contiguous).
-            public Tensor Arena;
-            public IntPtr ArenaBase;
-            public long ArenaBytes;
-            public long ArenaUsed;
+            // Every packed quantized weight assigned to this device (see CudaWeightArena).
+            public CudaWeightArena Weights;
             public Tensor RopeRaw, RopeComp;
             public bool NeedsTokens;
             public Tensor TokensDev0, TokensDev1;
+            // Each row's position in a batched decode step (one row per sequence).
+            public Tensor Positions;
             public IntPtr TokEv0, TokEv1; // guards pinned-buffer reuse per parity
             // Layer-boundary handoff staging: this device's outgoing hidden
             // streams go DtoH into BoundaryPinned on this device's stream, then
@@ -197,19 +163,26 @@ namespace TensorSharp.Cuda
             public IntPtr BoundaryPinned;
             public IntPtr XsReadyEv;   // recorded on this stream after the DtoH
             public IntPtr CopyDoneEv;  // recorded on the DST stream after the HtoD
+            // V4.1 state the next device's layers read (Dsv4CudaEngine.LayerSplit.cs), staged
+            // through the same event chain as the streams.
+            public IntPtr StatePinned;
+            public long StatePinnedBytes;
 
             // Scratch. Every buffer is an allocator-owned Tensor so it comes out
             // of the shared CudaAllocator pool and is visible to its VRAM
             // accounting; the DSV4-specific kernels take the raw device pointer
             // via Ptr(), the shared Ops take the Tensor (or a per-ubatch row view).
             public Tensor Xs, XsOut, Cur, Inv, Mixes, Pre, Post, Comb;
+            /// <summary>The decode-size hyper-connection pre-block's per-slice partials.</summary>
+            public Tensor HcPartials;
             public Tensor Qr, Q, KvRaw, StKv, StScore, LidStKv, LidStScore;
             public Tensor Iq, Iw, IdxScores, TopkIdx, TopkCnt;
             // V4.1: the delayed hyper-connection gates (a block collapses the
             // streams with the PREVIOUS block's gates), the compressed latent
             // being built, the candidate mask, and the Engram staging.
             public Tensor PreAttn, PreFfn, Latent, LatentK, CandMask, EngramLookup, EngramKv;
-            public IntPtr EngramPinned;
+            // The selected Engram rows of a device-resident table, [nt, columns].
+            public Tensor EngramRows;
             public Tensor AttnO, OGrouped, OGroupedOut, OG, AttnOut, FfnOut;
             public Tensor RouterLogits, Sel, SelW, Counts, Offsets, Cursors, RowOfSlot, SlotToken;
             public Tensor ActQ8A, ActQ8B, ExpGate, ExpUp, ExpDown, ShGate, ShUp, ShDown;
@@ -217,12 +190,9 @@ namespace TensorSharp.Cuda
             // kernels (A = per-token rows into gate/up, B = packed rows into down)
             public Tensor SplitQsA, SplitDA, SplitQsB, SplitDB;
             public Tensor Logits;
+            // Partial sums of the split small-row GEMV (the hyper-connection mixes).
+            public Tensor GemvScratch;
             public List<Tensor> OwnedTensors = new List<Tensor>();
-            // Weights that stream from disk: planned during the (I/O-free)
-            // arena-layout pass, then transferred by the loader thread pool.
-            public List<UploadJob> UploadPlan = new List<UploadJob>();
-            public UploadJob[] UploadJobs;
-            public int UploadCursor;
 
             public IntPtr Stream => Alloc.Stream.Handle;
             public void MakeCurrent() => Alloc.Context.MakeCurrent();
@@ -235,8 +205,8 @@ namespace TensorSharp.Cuda
         private readonly int _compRowsCsa;
         private readonly int _compRowsHca;
         private readonly int _lastDev;
-        private DevQW _outputQW;
-        private DevQW _tokEmbdQW;
+        private DeviceWeight _outputQW;
+        private DeviceWeight _tokEmbdQW;
         private Tensor _outputNorm, _hcHeadFn, _hcHeadScale, _hcHeadBase;
         private IntPtr _pinnedTokens0, _pinnedTokens1;
         // Logits leave the device through PINNED staging: a device-to-host copy
@@ -246,9 +216,15 @@ namespace TensorSharp.Cuda
         private IntPtr _pinnedLogits;
         private int _chunkParity;
         private readonly int _perf;
+        private readonly CudaStageTimer _stages;
         private readonly bool _syncDebug;
 
-        public int NPast { get; private set; }
+        /// <summary>Head of the active slot.</summary>
+        public int NPast => _active.NPast;
+
+        /// <summary>Whether V4.1's Engram tables are in VRAM (gathered on the device) rather than
+        /// host mappings the executor gathers from.</summary>
+        public bool EngramResident { get; private set; }
         public int ContextSize => _m.NCtx;
 
         /// <summary>Prefill micro-batch the engine chunks by. Speculative prefill
@@ -272,6 +248,7 @@ namespace TensorSharp.Cuda
                 throw new NotSupportedException($"DSV4 CUDA engine supports at most 16 experts per token, got {m.NExpertUsed}.");
 
             _perf = EnvInt("TS_DSV4_PERF", 0);
+            _stages = new CudaStageTimer("dsv4-cuda", _perf, StageNames);
             _syncDebug = EnvInt("TS_DSV4_CUDA_SYNCDBG", 0) != 0;
 
             // The model layer coerces DSV4's backend to Cpu (it only needs a cheap
@@ -293,6 +270,12 @@ namespace TensorSharp.Cuda
             // NUbatch of headroom; the compressor state rings do not).
             _maxDraft = m.Dspark != null ? m.Dspark.BlockSize : 0;
             _ringRaw = Pad(m.NSwa + m.NUbatch, 256);
+            // V4.1 compresses disjoint blocks, so a head aligned to every ratio reads nothing a
+            // rewind dropped; a query at the new head reads the raw window (head - n_swa, head],
+            // which the ring still holds while the head moved back at most _rewindSpan.
+            TruncateAlign = ComputeTruncateAlign(m);
+            _rewindCheckpoint = m.V41;
+            _rewindSpan = m.V41 ? Math.Max(0, _ringRaw - m.NSwa + 1) : 0;
             // V4.1 compresses at ratios 1 and 2 rather than 4 and 128, so the
             // same two row counts stand for a different pair of groups.
             _compRowsCsa = m.NCtx / (m.V41 ? 2 : CsaRatio) + 1;
@@ -314,29 +297,74 @@ namespace TensorSharp.Cuda
             }
 
             // ---- layer placement: contiguous ranges balanced by quantized bytes ----
-            var layerBytes = new long[m.NLayer];
+            // V4.1's Engram tables (tens of GiB) go to VRAM with their layers when the split holds
+            // them without offloading more experts, as ggml_cuda places them; the host gathers the
+            // rows a token selects from its mapping otherwise.
             var layerExpBytes = new long[m.NLayer];
-            long totalBytes = 0;
             for (int il = 0; il < m.NLayer; il++)
             {
                 var L = m.Layers[il];
-                long b = 0;
-                foreach (var qw in EnumerateQuantWeights(L))
-                    b += qw.TotalBytes;
-                layerBytes[il] = b;
                 layerExpBytes[il] = L.GateExps.TotalBytes + L.UpExps.TotalBytes + L.DownExps.TotalBytes;
-                totalBytes += b;
+            }
+            long[] LayerBytes()
+            {
+                var bytes = new long[m.NLayer];
+                for (int il = 0; il < m.NLayer; il++)
+                    foreach (var qw in EnumerateQuantWeights(m.Layers[il]))
+                        bytes[il] += qw.TotalBytes;
+                return bytes;
             }
 
             long dsparkBytes = DsparkBytes(m.Dspark);
             var assignment = new int[m.NLayer];
-            _nCpuMoe = PlaceLayers(m, useDevs, layerBytes, layerExpBytes, dsparkBytes, nCpuMoe, assignment);
+            EngramResident = m.V41 && Array.Exists(m.Layers, L => L.EngramTable.IsValid);
+            long[] layerBytes;
+            if (EngramResident)
+            {
+                var hostAssignment = new int[m.NLayer];
+                int hostOffload;
+                EngramResident = false;
+                try { hostOffload = PlaceLayers(m, useDevs, LayerBytes(), layerExpBytes, dsparkBytes, nCpuMoe, hostAssignment); }
+                catch (InvalidOperationException) { hostOffload = int.MaxValue; }
+                EngramResident = true;
+                try
+                {
+                    _nCpuMoe = PlaceLayers(m, useDevs, LayerBytes(), layerExpBytes, dsparkBytes, nCpuMoe, assignment);
+                    EngramResident = _nCpuMoe <= hostOffload;
+                }
+                catch (InvalidOperationException)
+                {
+                    EngramResident = false;
+                }
+                if (!EngramResident)
+                {
+                    if (hostOffload == int.MaxValue)
+                        _nCpuMoe = PlaceLayers(m, useDevs, LayerBytes(), layerExpBytes, dsparkBytes, nCpuMoe, assignment);
+                    else
+                    {
+                        Array.Copy(hostAssignment, assignment, assignment.Length);
+                        _nCpuMoe = hostOffload;
+                    }
+                    Console.Error.WriteLine("[dsv4-cuda] Engram tables stay host mappings: the split cannot hold them " +
+                        "beside the model without offloading more experts");
+                }
+                layerBytes = LayerBytes();
+            }
+            else
+            {
+                layerBytes = LayerBytes();
+                _nCpuMoe = PlaceLayers(m, useDevs, layerBytes, layerExpBytes, dsparkBytes, nCpuMoe, assignment);
+            }
+            long totalBytes = 0;
+            foreach (long b in layerBytes)
+                totalBytes += b;
             _hostMatMul = m.HostMatMul;
             if (_nCpuMoe > 0 && _hostMatMul == null)
                 throw new InvalidOperationException(
                     "[dsv4-cuda] routed-expert CPU offload is required to fit this model but no host matmul was " +
                     "supplied (ModelDesc.HostMatMul).");
             _lastDev = useDevs - 1;
+            PlanBoundaries(m, assignment);
 
             // per-device boundary staging (pinned + events)
             long xsBytes = (long)m.NUbatch * HC * m.NEmbd * 4;
@@ -367,11 +395,8 @@ namespace TensorSharp.Cuda
 
             for (int d = 0; d < useDevs; d++)
             {
-                var dev = _devs[d];
-                dev.ArenaBytes = Math.Max(arenaNeed[d], 256);
-                dev.Arena = AllocT(_devs[d], DType.UInt8, dev.ArenaBytes);
-                dev.ArenaBase = Ptr(dev.Arena);
-                dev.ArenaUsed = 0;
+                _devs[d].MakeCurrent();
+                _devs[d].Weights = new CudaWeightArena(_devs[d].Alloc, arenaNeed[d]);
             }
 
             // ---- upload weights (parallel across devices) ----
@@ -394,10 +419,10 @@ namespace TensorSharp.Cuda
                 foreach (int il in perDevLayers[d])
                     UploadLayer(dev, il);
                 if (d == 0)
-                    _tokEmbdQW = UploadQuant(dev, m.TokEmbd);
+                    _tokEmbdQW = dev.Weights.Place(m.TokEmbd);
                 if (d == _lastDev)
                 {
-                    _outputQW = UploadQuant(dev, m.Output);
+                    _outputQW = dev.Weights.Place(m.Output);
                     _outputNorm = UploadF32(dev, m.OutputNorm);
                     _hcHeadFn = UploadF32(dev, m.HcHeadFn);
                     _hcHeadScale = UploadF32(dev, m.HcHeadScale);
@@ -414,7 +439,7 @@ namespace TensorSharp.Cuda
 
             // Weights sourced from disk were only *placed* above; move the bytes
             // now, with the reader concurrency the filesystem actually likes.
-            RunStreamedUploads();
+            CudaWeightArena.StreamAll(Array.ConvertAll(_devs, d => d.Weights), "dsv4-cuda");
 
             // ---- scratch + tokens + logits ----
             for (int d = 0; d < useDevs; d++)
@@ -452,7 +477,8 @@ namespace TensorSharp.Cuda
             long logitRows = m.Dspark != null ? m.Dspark.BlockSize + 1 : 1;
             CudaDriverApi.cuMemHostAlloc(out _pinnedLogits, new UIntPtr((ulong)(logitRows * m.NVocab * 4L)), 0x1).ThrowOnError();
 
-            Reset();
+            // Slot 0 serves the single-sequence path; the server allocates more per request.
+            _active = CreateSlot();
 
             double gib = totalBytes / (1024.0 * 1024 * 1024);
             Console.Error.WriteLine(
@@ -619,6 +645,20 @@ namespace TensorSharp.Cuda
             int ratio = m.Layers[il].Ratio;
             int hd = m.HeadDim;
             long b = (long)_ringRaw * hd * 2;                 // RingK (F16)
+            if (m.V41)
+            {
+                // Every V4.1 slot also keeps the rewind checkpoint's shadows of the modular
+                // rings, and only a ratio group's source layer owns the group's caches.
+                b *= 2;
+                if (ratio != 0 && m.Layers[il].KvSource == il)
+                {
+                    long rows = V41Rows(ratio);
+                    b += rows * hd * 2 + rows * m.IdxHeadSize * 2;       // CompK + LidK (F16)
+                    if (ratio > 1)
+                        b += 2L * 2 * V41StateRows(ratio) * hd * 4;      // Hist kv+score and shadows (F32)
+                }
+                return b;
+            }
             if (ratio == CsaRatio)
             {
                 b += (long)_compRowsCsa * hd * 2;             // CompK  (F16)
@@ -670,7 +710,7 @@ namespace TensorSharp.Cuda
         /// <param name="skipRoutedExperts"><c>--n-cpu-moe</c>: this layer's
         /// stacked expert tensors never reach VRAM, so they must not be counted
         /// into the arena or planned for upload either.</param>
-        private IEnumerable<QuantWeightDesc> EnumerateQuantWeights(LayerDesc l, bool skipRoutedExperts = false)
+        private IEnumerable<CudaWeightDesc> EnumerateQuantWeights(LayerDesc l, bool skipRoutedExperts = false)
         {
             yield return l.WqA;
             yield return l.WqB;
@@ -688,6 +728,7 @@ namespace TensorSharp.Cuda
             // overflows the arena rather than being quietly skipped.
             if (l.IndexerK.IsValid) yield return l.IndexerK;
             if (l.EngramWkv.IsValid) yield return l.EngramWkv;
+            if (EngramResident && l.EngramTable.IsValid) yield return l.EngramTable;
             if (!skipRoutedExperts)
             {
                 yield return l.GateExps;
@@ -697,190 +738,6 @@ namespace TensorSharp.Cuda
             yield return l.GateShexp;
             yield return l.UpShexp;
             yield return l.DownShexp;
-        }
-
-        // ---- arena sub-allocation + upload helpers (device context must be current) ----
-
-        private static IntPtr ArenaTake(Dev dev, long bytes)
-        {
-            long aligned = Align(bytes);
-            if (dev.ArenaUsed + aligned > dev.ArenaBytes)
-                throw new InvalidOperationException($"[dsv4-cuda] arena overflow on device {dev.Ordinal}");
-            IntPtr p = (IntPtr)((long)dev.ArenaBase + dev.ArenaUsed);
-            dev.ArenaUsed += aligned;
-            return p;
-        }
-
-        private static DevQW UploadQuant(Dev dev, in QuantWeightDesc qw)
-        {
-            if (!qw.IsValid)
-                return default;
-            long bytes = qw.TotalBytes;
-            IntPtr p = ArenaTake(dev, bytes);
-            if (qw.HostPtr != IntPtr.Zero)
-            {
-                CudaDriverApi.cuMemcpyHtoD(p, qw.HostPtr, new UIntPtr((ulong)bytes)).ThrowOnError();
-            }
-            else
-            {
-                // Planned now, transferred later by RunStreamedUploads so that
-                // the (slow) reads run wide instead of one tensor at a time.
-                // Split into segments so several loader threads can share one
-                // multi-hundred-MB expert stack.
-                for (long off = 0; off < bytes; off += UploadSegmentBytes)
-                {
-                    dev.UploadPlan.Add(new UploadJob
-                    {
-                        Dst = (IntPtr)((long)p + off),
-                        Src = qw.Source,
-                        SrcOffset = qw.SourceOffset + off,
-                        Bytes = Math.Min(UploadSegmentBytes, bytes - off),
-                    });
-                }
-            }
-            return new DevQW { Ptr = p, Type = qw.GgmlType, Ne0 = qw.Ne0, Ne1 = qw.Ne1, RowBytes = qw.RowBytes };
-        }
-
-        // Loader tuning. The read side is the bottleneck on network filesystems
-        // and its throughput is *not* monotonic in thread count -- MooseFS/FUSE
-        // peaks around 8-32 concurrent readers and falls off a cliff above that
-        // (2.4 GB/s at 16 threads vs 1.0 GB/s at 96), so the pool is explicitly
-        // bounded rather than left to the thread pool's discretion.
-        private static readonly int LoaderThreads = Math.Max(1, EnvInt("TS_DSV4_LOAD_THREADS", 16));
-        private static readonly int LoaderChunkBytes = Math.Max(1 << 20, EnvInt("TS_DSV4_LOAD_CHUNK_MB", 16) << 20);
-        private const long UploadSegmentBytes = 128L << 20;
-        private static readonly bool LoaderStats = EnvInt("TS_DSV4_LOAD_STATS", 0) != 0;
-        private static long _loaderReadTicks;
-        private static long _loaderCopyTicks;
-
-        /// <summary>
-        /// Streams every planned weight from its GGUF shard into VRAM: bounded
-        /// pool of reader threads, each double-buffering through pinned host
-        /// chunks so the file read of chunk N+1 overlaps the HtoD of chunk N.
-        /// </summary>
-        private void RunStreamedUploads()
-        {
-            long total = 0;
-            int jobCount = 0;
-            foreach (var dev in _devs)
-            {
-                dev.UploadJobs = dev.UploadPlan.ToArray();
-                dev.UploadPlan = null;
-                dev.UploadCursor = 0;
-                jobCount += dev.UploadJobs.Length;
-                foreach (var j in dev.UploadJobs)
-                    total += j.Bytes;
-            }
-            if (jobCount == 0)
-                return;
-
-            var sw = Stopwatch.StartNew();
-            int perDev = Math.Max(1, LoaderThreads / _devs.Length);
-            var errors = new List<Exception>();
-            var threads = new List<System.Threading.Thread>(perDev * _devs.Length);
-
-            foreach (var devLocal in _devs)
-            {
-                var dev = devLocal;
-                if (dev.UploadJobs.Length == 0)
-                    continue;
-                for (int w = 0; w < perDev; w++)
-                {
-                    var t = new System.Threading.Thread(() =>
-                    {
-                        try
-                        {
-                            StreamUploadWorker(dev);
-                        }
-                        catch (Exception ex)
-                        {
-                            lock (errors)
-                                errors.Add(ex);
-                        }
-                    });
-                    t.IsBackground = true;
-                    threads.Add(t);
-                    t.Start();
-                }
-            }
-            foreach (var t in threads)
-                t.Join();
-            if (errors.Count > 0)
-                throw new AggregateException("[dsv4-cuda] weight streaming failed", errors);
-
-            double gib = total / (1024.0 * 1024 * 1024);
-            Console.Error.WriteLine($"[dsv4-cuda] streamed {gib:F1} GiB of weights into VRAM in " +
-                $"{sw.Elapsed.TotalSeconds:F1}s ({gib / Math.Max(0.001, sw.Elapsed.TotalSeconds):F2} GiB/s, " +
-                $"{threads.Count} readers)");
-            if (LoaderStats)
-            {
-                double readS = System.Threading.Interlocked.Read(ref _loaderReadTicks) / (double)Stopwatch.Frequency;
-                double copyS = System.Threading.Interlocked.Read(ref _loaderCopyTicks) / (double)Stopwatch.Frequency;
-                Console.Error.WriteLine($"[dsv4-cuda]   thread-seconds: read {readS:F1}s " +
-                    $"({gib / Math.Max(0.001, readS) * threads.Count:F2} GiB/s aggregate), copy-wait {copyS:F1}s");
-            }
-        }
-
-        private static void StreamUploadWorker(Dev dev)
-        {
-            dev.MakeCurrent();
-            int chunk = LoaderChunkBytes;
-            IntPtr stream = IntPtr.Zero;
-            var bufs = new IntPtr[2];
-            var evs = new IntPtr[2];
-            var pending = new bool[2];
-            try
-            {
-                CudaDriverApi.cuStreamCreate(out stream, 0x1 /*NON_BLOCKING*/).ThrowOnError();
-                for (int i = 0; i < 2; i++)
-                {
-                    CudaDriverApi.cuMemHostAlloc(out bufs[i], new UIntPtr((ulong)chunk), 0x1 /*PORTABLE*/).ThrowOnError();
-                    CudaDriverApi.cuEventCreate(out evs[i], 0x02 /*DISABLE_TIMING*/).ThrowOnError();
-                }
-
-                var jobs = dev.UploadJobs;
-                int slot = 0;
-                while (true)
-                {
-                    int idx = System.Threading.Interlocked.Increment(ref dev.UploadCursor) - 1;
-                    if (idx >= jobs.Length)
-                        break;
-                    var job = jobs[idx];
-                    for (long done = 0; done < job.Bytes; )
-                    {
-                        long n = Math.Min(chunk, job.Bytes - done);
-                        // Reclaim the staging buffer only once its copy retired.
-                        if (pending[slot])
-                        {
-                            long tc = LoaderStats ? Stopwatch.GetTimestamp() : 0;
-                            CudaDriverApi.cuEventSynchronize(evs[slot]).ThrowOnError();
-                            if (LoaderStats)
-                                System.Threading.Interlocked.Add(ref _loaderCopyTicks, Stopwatch.GetTimestamp() - tc);
-                            pending[slot] = false;
-                        }
-                        long t0 = LoaderStats ? Stopwatch.GetTimestamp() : 0;
-                        job.Src.Read(job.SrcOffset + done, bufs[slot], n);
-                        if (LoaderStats)
-                            System.Threading.Interlocked.Add(ref _loaderReadTicks, Stopwatch.GetTimestamp() - t0);
-                        CudaDriverApi.cuMemcpyHtoDAsync((IntPtr)((long)job.Dst + done), bufs[slot],
-                            new UIntPtr((ulong)n), stream).ThrowOnError();
-                        CudaDriverApi.cuEventRecord(evs[slot], stream).ThrowOnError();
-                        pending[slot] = true;
-                        done += n;
-                        slot ^= 1;
-                    }
-                }
-                CudaDriverApi.cuStreamSynchronize(stream).ThrowOnError();
-            }
-            finally
-            {
-                for (int i = 0; i < 2; i++)
-                {
-                    if (evs[i] != IntPtr.Zero) CudaDriverApi.cuEventDestroy(evs[i]);
-                    if (bufs[i] != IntPtr.Zero) CudaDriverApi.cuMemFreeHost(bufs[i]);
-                }
-                if (stream != IntPtr.Zero) CudaDriverApi.cuStreamDestroy(stream);
-            }
         }
 
         /// <summary>Small dense tensor (norm/gate/table) as an allocator-owned
@@ -913,40 +770,42 @@ namespace TensorSharp.Cuda
             dst.ClampExp = src.ClampExp;
             dst.ClampShexp = src.ClampShexp;
 
-            dst.WqA = UploadQuant(dev, src.WqA);
-            dst.WqB = UploadQuant(dev, src.WqB);
-            dst.Wkv = UploadQuant(dev, src.Wkv);
-            dst.WoA = UploadQuant(dev, src.WoA);
-            dst.WoB = UploadQuant(dev, src.WoB);
-            dst.CompWkv = UploadQuant(dev, src.CompWkv);
-            dst.CompWgate = UploadQuant(dev, src.CompWgate);
-            dst.IdxProj = UploadQuant(dev, src.IdxProj);
-            dst.IdxQB = UploadQuant(dev, src.IdxQB);
-            dst.IdxCompWkv = UploadQuant(dev, src.IdxCompWkv);
-            dst.IdxCompWgate = UploadQuant(dev, src.IdxCompWgate);
+            dst.WqA = dev.Weights.Place(src.WqA);
+            dst.WqB = dev.Weights.Place(src.WqB);
+            dst.Wkv = dev.Weights.Place(src.Wkv);
+            dst.WoA = dev.Weights.Place(src.WoA);
+            dst.WoB = dev.Weights.Place(src.WoB);
+            dst.CompWkv = dev.Weights.Place(src.CompWkv);
+            dst.CompWgate = dev.Weights.Place(src.CompWgate);
+            dst.IdxProj = dev.Weights.Place(src.IdxProj);
+            dst.IdxQB = dev.Weights.Place(src.IdxQB);
+            dst.IdxCompWkv = dev.Weights.Place(src.IdxCompWkv);
+            dst.IdxCompWgate = dev.Weights.Place(src.IdxCompWgate);
             // V4.1: the indexer's K projection off the compressed latent, and the
             // Engram projection. Both are default-valued on layers that do not
             // carry them, which UploadQuant passes through unchanged.
-            dst.IndexerK = UploadQuant(dev, src.IndexerK);
-            dst.EngramWkv = UploadQuant(dev, src.EngramWkv);
+            dst.IndexerK = dev.Weights.Place(src.IndexerK);
+            dst.EngramWkv = dev.Weights.Place(src.EngramWkv);
+            if (EngramResident)
+                dst.EngramTable = dev.Weights.Place(src.EngramTable);
             if (il < _nCpuMoe)
             {
                 // --n-cpu-moe: the stacked experts stay in system RAM and their
                 // FFN runs on the host (Dsv4CudaEngine.HostMoe.cs). Leaving the
-                // DevQW entries invalid is deliberate — MoeFfn dispatches on
+                // DeviceWeight entries invalid is deliberate — MoeFfn dispatches on
                 // _hostMoe[il], and a stray device read would be a null deref
                 // rather than silently wrong output.
                 _hostMoe[il] = LoadHostExperts(src);
             }
             else
             {
-                dst.GateExps = UploadQuant(dev, src.GateExps);
-                dst.UpExps = UploadQuant(dev, src.UpExps);
-                dst.DownExps = UploadQuant(dev, src.DownExps);
+                dst.GateExps = dev.Weights.Place(src.GateExps);
+                dst.UpExps = dev.Weights.Place(src.UpExps);
+                dst.DownExps = dev.Weights.Place(src.DownExps);
             }
-            dst.GateShexp = UploadQuant(dev, src.GateShexp);
-            dst.UpShexp = UploadQuant(dev, src.UpShexp);
-            dst.DownShexp = UploadQuant(dev, src.DownShexp);
+            dst.GateShexp = dev.Weights.Place(src.GateShexp);
+            dst.UpShexp = dev.Weights.Place(src.UpShexp);
+            dst.DownShexp = dev.Weights.Place(src.DownShexp);
             dst.ShFf = src.UpShexp.Ne1;
 
             dst.AttnNorm = UploadF32(dev, src.AttnNorm);
@@ -968,10 +827,7 @@ namespace TensorSharp.Cuda
             dst.FfnNorm = UploadF32(dev, src.FfnNorm);
             dst.Tid2Eid = UploadI32(dev, src.Tid2Eid);
 
-            // Caches: F16 key rows (parity with the native executor / llama.cpp),
-            // F32 compressor state rings. Allocator-owned, one tensor each.
-            int hd = _m.HeadDim;
-            dst.RingK = AllocT(dev, DType.Float16, _ringRaw, hd);
+            // The caches are each sequence's own (AllocSlotLayer).
             if (_m.V41)
             {
                 dst.KvSource = src.KvSource;
@@ -980,35 +836,6 @@ namespace TensorSharp.Cuda
                 dst.IndexerKNorm = UploadF32(dev, src.IndexerKNorm);
                 dst.EngramQ = UploadF32(dev, src.EngramQ);
                 dst.EngramK = UploadF32(dev, src.EngramK);
-                // Only the per-ratio source layer owns the shared caches; every
-                // other compressed layer in its group reads them.
-                if (dst.Ratio != 0 && dst.KvSource == il)
-                {
-                    int rows = V41Rows(dst.Ratio);
-                    dst.CompK = AllocT(dev, DType.Float16, rows, hd);
-                    dst.LidK = AllocT(dev, DType.Float16, rows, _m.IdxHeadSize);
-                    if (dst.Ratio > 1)
-                    {
-                        dst.HistKv = AllocF32(dev, dst.Ratio, hd);
-                        dst.HistScore = AllocF32(dev, dst.Ratio, hd);
-                    }
-                }
-                return;
-            }
-            if (dst.Ratio == CsaRatio)
-            {
-                dst.CompK = AllocT(dev, DType.Float16, _compRowsCsa, hd);
-                dst.LidK = AllocT(dev, DType.Float16, _compRowsCsa, _m.IdxHeadSize);
-                dst.HistKv = AllocF32(dev, 2L * CsaRatio + _maxDraft, 2L * hd);
-                dst.HistScore = AllocF32(dev, 2L * CsaRatio + _maxDraft, 2L * hd);
-                dst.LidHistKv = AllocF32(dev, 2L * CsaRatio + _maxDraft, 2L * _m.IdxHeadSize);
-                dst.LidHistScore = AllocF32(dev, 2L * CsaRatio + _maxDraft, 2L * _m.IdxHeadSize);
-            }
-            else if (dst.Ratio == HcaRatio)
-            {
-                dst.CompK = AllocT(dev, DType.Float16, _compRowsHca, hd);
-                dst.HistKv = AllocF32(dev, HcaRatio + _maxDraft, hd);
-                dst.HistScore = AllocF32(dev, HcaRatio + _maxDraft, hd);
             }
         }
 
@@ -1073,6 +900,7 @@ namespace TensorSharp.Cuda
             dev.Cur = AllocF32(dev, nt, e);
             dev.Inv = AllocF32(dev, nt);
             dev.Mixes = AllocF32(dev, nt, HcMixDim);
+            dev.HcPartials = AllocF32(dev, MaxBatchedDecodeRows, HC * m.NEmbd / Dsv4Kernels.HcSlice * Dsv4Kernels.HcPartialFloats);
             dev.Pre = AllocF32(dev, nt, HC);
             dev.Post = AllocF32(dev, nt, HC);
             dev.Comb = AllocF32(dev, nt, HC * HC);
@@ -1109,10 +937,19 @@ namespace TensorSharp.Cuda
                     long cols = (long)m.Engram.HashColumns * m.Engram.HeadDim;
                     dev.EngramLookup = AllocF32(dev, nt, cols);
                     dev.EngramKv = AllocF32(dev, nt, (long)(HC + 1) * e);
-                    CudaDriverApi.cuMemHostAlloc(out dev.EngramPinned, new UIntPtr((ulong)(nt * cols * 4)), 0x1 /*PORTABLE*/).ThrowOnError();
+                    if (EngramResident)
+                        dev.EngramRows = AllocI32(dev, nt, m.Engram.HashColumns);
+                    foreach (DevLayer layer in _layers)
+                    {
+                        if (layer.Device != dev.Ordinal || layer.EngramIndex < 0)
+                            continue;
+                        CudaDriverApi.cuMemHostAlloc(out layer.EngramPinned, new UIntPtr((ulong)(nt * cols * 4)), 0x1 /*PORTABLE*/).ThrowOnError();
+                        CudaDriverApi.cuEventCreate(out layer.EngramCopied, 0x02 /*DISABLE_TIMING*/).ThrowOnError();
+                    }
                 }
             }
             dev.FfnOut = AllocF32(dev, nt, e);
+            dev.GemvScratch = AllocF32(dev, Dsv4Kernels.GemvScratchFloats);
             dev.RouterLogits = AllocF32(dev, nt, m.NExpert);
             dev.Sel = AllocI32(dev, nt, m.NExpertUsed);
             dev.SelW = AllocF32(dev, nt, m.NExpertUsed);
@@ -1166,31 +1003,11 @@ namespace TensorSharp.Cuda
         // Reset / caches
         // -------------------------------------------------------------------
 
+        /// <summary>Clears the active slot back to position 0. Weights and other slots are untouched.</summary>
         public void Reset()
         {
-            foreach (var dev in _devs)
-            {
-                dev.MakeCurrent();
-                CudaDriverApi.cuStreamSynchronize(dev.Stream);
-            }
-            for (int il = 0; il < _m.NLayer; il++)
-            {
-                var L = _layers[il];
-                _devs[L.Device].MakeCurrent();
-                Memset0(L.RingK);
-                Memset0(L.CompK);
-                Memset0(L.LidK);
-                Memset0(L.HistKv);
-                Memset0(L.HistScore);
-                Memset0(L.LidHistKv);
-                Memset0(L.LidHistScore);
-            }
-            ResetDspark();
-            // Engram lookbacks reach earlier positions, so the hash history has
-            // to go when the sequence does.
-            _m.Engram?.ResetEngram();
+            ClearSlot(_active);
             _v41CandActive = false;
-            NPast = 0;
         }
 
         private static void Memset0(Tensor t)
@@ -1210,24 +1027,33 @@ namespace TensorSharp.Cuda
         {
             if (tokens == null || tokens.Length == 0)
                 throw new ArgumentException("empty token batch", nameof(tokens));
-            if (NPast + tokens.Length > _m.NCtx)
-                throw new InvalidOperationException($"[dsv4-cuda] context overflow: n_past={NPast} + {tokens.Length} > n_ctx={_m.NCtx}");
+            Slot slot = _active;
+            if (slot.Failed)
+                throw new InvalidOperationException("[dsv4-cuda] the sequence's last forward failed; reset or free its slot before reuse");
+            if (slot.NPast + tokens.Length > _m.NCtx)
+                throw new InvalidOperationException($"[dsv4-cuda] context overflow: n_past={slot.NPast} + {tokens.Length} > n_ctx={_m.NCtx}");
 
             var sw = Stopwatch.StartNew();
+            long start = Stopwatch.GetTimestamp();
+            slot.Failed = true;
             int done = 0;
             while (done < tokens.Length)
             {
                 int nt = Math.Min(_m.NUbatch, tokens.Length - done);
                 bool last = done + nt == tokens.Length;
-                ForwardUbatch(tokens, done, nt, NPast, last ? logitsOut : null, false, null, 0);
-                NPast += nt;
+                ForwardUbatch(tokens, done, nt, slot.NPast, last ? logitsOut : null, false, null, 0);
+                slot.NPast += nt;
                 done += nt;
             }
+            slot.Failed = false;
+            // Only a multi-token forward ends at a prompt boundary.
+            if (tokens.Length > 1)
+                CheckpointActiveSlot();
             if (_perf > 0)
             {
                 double secs = sw.Elapsed.TotalSeconds;
-                Console.Error.WriteLine($"[dsv4-cuda] forward {tokens.Length} tokens in {secs:F3}s ({tokens.Length / secs:F1} tok/s)");
-                ReportStages();
+                Console.Error.WriteLine($"[dsv4-cuda] forward {tokens.Length} tokens in {secs:F3}s ({tokens.Length / secs:F1} tok/s), "
+                    + $"host issue {IssueMs(start):F1}ms");
             }
         }
 
@@ -1240,47 +1066,22 @@ namespace TensorSharp.Cuda
                 throw new InvalidOperationException($"[dsv4-cuda] CUDA error {rc} after {stage} on device {dev.Ordinal}");
         }
 
-        // TS_DSV4_PERF>=2: per-stage wall time. Each Stage() call synchronizes
-        // the device stream, so the totals are serialized-stage times (they sum
-        // to more than a pipelined step) -- use them to rank stages, not to
-        // predict throughput.
+        // TS_DSV4_PERF=2 / 3: per-stage time, synchronized host time or GPU time (see CudaStageTimer).
         private static readonly string[] StageNames =
         {
             "embed", "hc", "attnproj", "comp", "idx", "attncore", "outproj",
             "router", "experts", "shexp", "lmhead", "boundary",
         };
-        private readonly long[] _stageTicks = new long[12];
-        private long _stageT0;
+        // TS_DSV4_PERF>=1: when the host had queued the whole step (the last launch before the
+        // logits sync). Close to the step's wall time = the step is bound by launch overhead.
+        private long _issueEnd;
 
-        private void StageBegin()
-        {
-            if (_perf >= 2)
-                _stageT0 = Stopwatch.GetTimestamp();
-        }
+        private double IssueMs(long start)
+            => _issueEnd > start ? (_issueEnd - start) * 1000.0 / Stopwatch.Frequency : 0;
 
-        private void StageEnd(Dev dev, int stage)
-        {
-            if (_perf < 2)
-                return;
-            CudaDriverApi.cuStreamSynchronize(dev.Stream);
-            _stageTicks[stage] += Stopwatch.GetTimestamp() - _stageT0;
-            _stageT0 = Stopwatch.GetTimestamp();
-        }
+        private void StageBegin(Dev dev) => _stages.SpanStart(dev.Alloc.Context, dev.Stream);
 
-        private void ReportStages()
-        {
-            if (_perf < 2)
-                return;
-            var sb = new System.Text.StringBuilder("[dsv4-cuda]   stages:");
-            for (int i = 0; i < _stageTicks.Length; i++)
-            {
-                if (_stageTicks[i] == 0)
-                    continue;
-                sb.Append($" {StageNames[i]}={_stageTicks[i] * 1000.0 / Stopwatch.Frequency:F1}ms");
-                _stageTicks[i] = 0;
-            }
-            Console.Error.WriteLine(sb.ToString());
-        }
+        private void StageEnd(Dev dev, int stage) => _stages.End(dev.Alloc.Context, dev.Stream, stage);
 
         // TS_DSV4_CUDA_DEBUG=1: print the first values of layer-0 stage outputs
         // (paired with TS_DSV4_CPU_DEBUG=1 prints in DeepSeek4CpuExecutor for
@@ -1346,8 +1147,11 @@ namespace TensorSharp.Cuda
         /// speculative verify) instead of only the last.</param>
         /// <param name="hAllOut">When set, receives the DSpark target features of
         /// every row, starting at row <paramref name="hRowOff"/>.</param>
+        /// <param name="batch">A batched decode step: row i is its own sequence at its
+        /// own position, and <paramref name="p0"/> is unused. Null for a ubatch of the
+        /// active slot at positions p0, p0 + 1, ...</param>
         private void ForwardUbatch(int[] tokens, int tokOff, int nt, int p0, float[] logitsOut,
-            bool allLogitsRows, float[] hAllOut, int hRowOff)
+            bool allLogitsRows, float[] hAllOut, int hRowOff, DecodeBatch batch = null)
         {
             var m = _m;
             int e = m.NEmbd;
@@ -1379,14 +1183,29 @@ namespace TensorSharp.Cuda
             // A candidate mask belongs to one ubatch; a stale one would prune the
             // next ubatch's queries against the previous ubatch's scores.
             _v41CandActive = false;
+            _committed.Clear();
             _traceP0 = p0;
+            if (batch != null)
+                StagePositions(batch);
             if (m.V41 && m.Engram != null)
-                m.Engram.BeginEngramUbatch(new ReadOnlySpan<int>(tokens, tokOff, nt), p0);
+            {
+                if (batch == null)
+                {
+                    m.Engram.BeginEngramUbatch(_active.Engram, new ReadOnlySpan<int>(tokens, tokOff, nt), p0);
+                }
+                else
+                {
+                    var histories = new Dsv41EngramHistory[nt];
+                    for (int i = 0; i < nt; i++)
+                        histories[i] = batch.Rows[i].Engram;
+                    m.Engram.BeginEngramRows(histories, new ReadOnlySpan<int>(tokens, tokOff, nt), batch.Positions);
+                }
+            }
 
             // embedding on device 0
             var dev0 = _devs[0];
             dev0.MakeCurrent();
-            StageBegin();
+            StageBegin(dev0);
             dev0.DK.Embed(_tokEmbdQW.Ptr, TokensOf(dev0), dev0.Xs, _tokEmbdQW.Type, _tokEmbdQW.RowBytes, nt, e, dev0.Stream);
             StageEnd(dev0, 0);
             CheckSync(dev0, "embed");
@@ -1414,10 +1233,14 @@ namespace TensorSharp.Cuda
                     // is the supported multi-GPU pattern.
                     src.MakeCurrent();
                     CudaDriverApi.cuMemcpyDtoHAsync(src.BoundaryPinned, Ptr(src.Xs), copyBytes, src.Stream).ThrowOnError();
+                    var state = StageBoundaryState(src, dst, nt);
+                    StageEnd(src, 11);
                     CudaDriverApi.cuEventRecord(src.XsReadyEv, src.Stream).ThrowOnError();
                     dst.MakeCurrent();
                     CudaDriverApi.cuStreamWaitEvent(dst.Stream, src.XsReadyEv, 0).ThrowOnError();
+                    StageBegin(dst);
                     CudaDriverApi.cuMemcpyHtoDAsync(Ptr(dst.Xs), src.BoundaryPinned, copyBytes, dst.Stream).ThrowOnError();
+                    UnstageBoundaryState(src, dst, state);
                     CudaDriverApi.cuEventRecord(dst.CopyDoneEv, dst.Stream).ThrowOnError();
                     src.MakeCurrent();
                     CudaDriverApi.cuStreamWaitEvent(src.Stream, dst.CopyDoneEv, 0).ThrowOnError();
@@ -1442,21 +1265,24 @@ namespace TensorSharp.Cuda
                 HcPre(dev, L, nt, attn: true,
                     delayed: m.V41 ? (il == 0 ? null : dev.PreFfn) : null,
                     publish: m.V41 ? dev.PreAttn : null,
-                    meanCollapse: m.V41 && il == 0);
+                    meanCollapse: m.V41 && il == 0,
+                    normW: dbg ? null : L.AttnNorm);
                 if (dbg)
                 {
                     Dump(dev, "L0.attn.mixes", dev.Mixes);
                     Dump(dev, "L0.attn.pre", dev.Pre, 4);
                     Dump(dev, "L0.attn.comb", dev.Comb, 8);
                     Dump(dev, "L0.attn.cur", dev.Cur);
+                    RmsNorm(dev, dev.Cur, L.AttnNorm, nt);
                 }
-                RmsNorm(dev, dev.Cur, L.AttnNorm, nt);
                 StageEnd(dev, 1);
                 if (dbg)
                     Dump(dev, "L0.attn.cur_norm", dev.Cur);
                 Trace(dev, TraceLayer(il, "attn_input"), dev.Cur, (long)nt * e);
                 CheckSync(dev, $"hc_pre_attn L{il}");
-                if (m.V41)
+                if (batch != null)
+                    AttentionRows(dev, L, il, nt, batch);
+                else if (m.V41)
                     AttentionV41(dev, L, il, nt, p0);
                 else
                     Attention(dev, L, il, nt, p0, TokensOf(dev));
@@ -1473,8 +1299,8 @@ namespace TensorSharp.Cuda
                 // ---- FFN super-block ----
                 HcPre(dev, L, nt, attn: false,
                     delayed: m.V41 ? dev.PreAttn : null,
-                    publish: m.V41 ? dev.PreFfn : null);
-                RmsNorm(dev, dev.Cur, L.FfnNorm, nt);
+                    publish: m.V41 ? dev.PreFfn : null,
+                    normW: L.FfnNorm);
                 Trace(dev, TraceLayer(il, "ffn_input"), dev.Cur, (long)nt * e);
                 StageEnd(dev, 1);
                 MoeFfn(dev, L, il, nt, TokensOf(dev));
@@ -1491,20 +1317,17 @@ namespace TensorSharp.Cuda
 
                 // DSpark reads the mean over this block's output streams for a
                 // few late layers; capture them into the drafter's feature row.
-                if (_ds != null && (hAllOut != null || _dsSelfCatchUp) && DsparkCaptureEnabled && _ds.CaptureSlot[il] >= 0)
+                if (_ds != null && (hAllOut != null || _dsSelfCatchUp) && _ds.CaptureSlot[il] >= 0)
                 {
                     dev.DK.HcMean(dev.Xs, _ds.CapH, nt, e, DsparkFeatureSize, _ds.CaptureSlot[il] * e, dev.Stream);
                     CheckSync(dev, $"dspark capture L{il}");
                 }
             }
 
-            if (DsparkCaptureEnabled)
-            {
-                if (_dsSelfCatchUp)
-                    DsparkWriteRingFromCapture(nt, p0);
-                else if (hAllOut != null)
-                    DsparkCaptureOut(nt, hAllOut, hRowOff);
-            }
+            if (_dsSelfCatchUp)
+                DsparkWriteRingFromCapture(nt, p0);
+            else if (hAllOut != null)
+                DsparkCaptureOut(nt, hAllOut, hRowOff);
 
             if (logitsOut != null)
             {
@@ -1513,7 +1336,8 @@ namespace TensorSharp.Cuda
                     throw new InvalidOperationException("[dsv4-cuda] output head is not on the final layer device");
                 dev.MakeCurrent();
                 int headRows = allLogitsRows ? nt : 1;
-                Tensor logitsDst = allLogitsRows ? _specLogits : dev.Logits;
+                Tensor logitsDst = batch != null ? _batchLogits : allLogitsRows ? _specLogits : dev.Logits;
+                IntPtr pinnedLogits = batch != null ? _pinnedBatchLogits : _pinnedLogits;
                 if (m.V41)
                 {
                     // V4.1 has no head mixer: the last layer's FFN block already
@@ -1534,10 +1358,13 @@ namespace TensorSharp.Cuda
                 StageEnd(dev, 10);
                 Dump(dev, "head.logits", logitsDst, 8);
                 long logitCount = (long)headRows * m.NVocab;
-                CudaDriverApi.cuMemcpyDtoHAsync(_pinnedLogits, Ptr(logitsDst), new UIntPtr((ulong)logitCount * 4UL), dev.Stream).ThrowOnError();
+                CudaDriverApi.cuMemcpyDtoHAsync(pinnedLogits, Ptr(logitsDst), new UIntPtr((ulong)logitCount * 4UL), dev.Stream).ThrowOnError();
+                if (_perf > 0)
+                    _issueEnd = Stopwatch.GetTimestamp();
                 CudaDriverApi.cuStreamSynchronize(dev.Stream).ThrowOnError();
                 fixed (float* dst = logitsOut)
-                    Buffer.MemoryCopy((void*)_pinnedLogits, dst, logitsOut.LongLength * 4L, logitCount * 4L);
+                    Buffer.MemoryCopy((void*)pinnedLogits, dst, logitsOut.LongLength * 4L, logitCount * 4L);
+                _stages.Report();
             }
         }
 
@@ -1560,14 +1387,26 @@ namespace TensorSharp.Cuda
         /// a plain stream mean instead. Publishing happens into
         /// <paramref name="publish"/> after the collapse, so the two buffers
         /// never alias.</param>
+        /// <param name="normW">When set, Cur leaves RMS normed with it, and a decode-size batch takes the
+        /// two-kernel pre-block. (Longer ubatches keep cuBLAS for the F32 mixes: at 512 rows the
+        /// two-kernel form reads hc_fn from L2 once per row slice, and prefill measured 1.5% slower.)</param>
         private void HcPre(Dev dev, DevLayer l, int nt, bool attn,
-            Tensor delayed = null, Tensor publish = null, bool meanCollapse = false)
+            Tensor delayed = null, Tensor publish = null, bool meanCollapse = false, Tensor normW = null)
         {
             var m = _m;
             int flatDim = HC * m.NEmbd;
             Tensor fn = attn ? l.HcAttnFn : l.HcFfnFn;
             Tensor scale = attn ? l.HcAttnScale : l.HcFfnScale;
             Tensor baseW = attn ? l.HcAttnBase : l.HcFfnBase;
+
+            if (normW != null && nt <= MaxBatchedDecodeRows && flatDim % Dsv4Kernels.HcSlice == 0)
+            {
+                dev.DK.HcMixPartials(dev.Xs, Ptr(fn), 0, dev.HcPartials, flatDim, nt, dev.Stream);
+                dev.DK.HcPreFinish(dev.HcPartials, flatDim / Dsv4Kernels.HcSlice, dev.Xs, Ptr(scale), Ptr(baseW), Ptr(normW),
+                    dev.Pre, dev.Post, dev.Comb, delayed, meanCollapse, publish, dev.Cur, m.NEmbd, nt,
+                    m.HcSinkhornIters, m.HcEps, m.RmsEps, dev.Stream);
+                return;
+            }
 
             dev.DK.HcRms(dev.Xs, dev.Inv, nt, flatDim, m.RmsEps, dev.Stream);
             // mixes = hc_fn (F32 [24, flatDim]) x flat streams
@@ -1583,6 +1422,8 @@ namespace TensorSharp.Cuda
             if (publish != null)
                 CudaDriverApi.cuMemcpyDtoDAsync(Ptr(publish), Ptr(dev.Pre),
                     new UIntPtr((ulong)((long)nt * HC * 4)), dev.Stream).ThrowOnError();
+            if (normW != null)
+                RmsNorm(dev, dev.Cur, normW, nt);
         }
 
         // -------------------------------------------------------------------
@@ -1594,6 +1435,7 @@ namespace TensorSharp.Cuda
             var m = _m;
             int e = m.NEmbd, nh = m.NHead, hd = m.HeadDim, rot = m.NRot;
             bool comp = l.Ratio != 0;
+            SlotLayer c = _active.Layers[il];
             IntPtr ropeTab = Ptr(comp ? dev.RopeComp : dev.RopeRaw);
 
             // q = wq_b(rms(wq_a(cur))), kv = wkv(cur)
@@ -1606,12 +1448,12 @@ namespace TensorSharp.Cuda
             MatMul(dev, l.Wkv, dev.Cur, dev.KvRaw, nt);
             if (dbg)
                 Dump(dev, "L0.kv_raw", dev.KvRaw);
-            dev.DK.AttnPrep(dev.Q, dev.KvRaw, Ptr(l.KvNorm), ropeTab, Ptr(l.RingK), p0, _ringRaw, nh, hd, rot, m.RmsEps, nt, dev.Stream);
+            dev.DK.AttnPrep(dev.Q, dev.KvRaw, Ptr(l.KvNorm), ropeTab, Ptr(c.RingK), p0, _ringRaw, nh, hd, rot, m.RmsEps, nt, dev.Stream);
             StageEnd(dev, 2);
             if (dbg)
             {
                 Dump(dev, "L0.q_prep", dev.Q);
-                DumpF16(dev, "L0.ring0", l.RingK);
+                DumpF16(dev, "L0.ring0", c.RingK);
             }
             CheckSync(dev, $"attn_prep L{il}");
 
@@ -1623,14 +1465,14 @@ namespace TensorSharp.Cuda
                 MatMul(dev, l.CompWgate, dev.Cur, dev.StScore, nt);
                 dev.DK.ApeAdd(dev.StScore, Ptr(l.CompApe), p0, CsaRatio, nt, cw, dev.Stream);
                 RunCompressor(dev, nt, p0, CsaRatio, 2, hd, 2 * CsaRatio + _maxDraft, cw,
-                    dev.StKv, dev.StScore, l.HistKv, l.HistScore, l.CompNorm, l.CompK, dev.RopeComp);
+                    dev.StKv, dev.StScore, c.HistKv, c.HistScore, l.CompNorm, c.CompK, dev.RopeComp);
 
                 int lcw = 2 * m.IdxHeadSize;
                 MatMul(dev, l.IdxCompWkv, dev.Cur, dev.LidStKv, nt);
                 MatMul(dev, l.IdxCompWgate, dev.Cur, dev.LidStScore, nt);
                 dev.DK.ApeAdd(dev.LidStScore, Ptr(l.IdxCompApe), p0, CsaRatio, nt, lcw, dev.Stream);
                 RunCompressor(dev, nt, p0, CsaRatio, 2, m.IdxHeadSize, 2 * CsaRatio + _maxDraft, lcw,
-                    dev.LidStKv, dev.LidStScore, l.LidHistKv, l.LidHistScore, l.IdxCompNorm, l.LidK, dev.RopeComp);
+                    dev.LidStKv, dev.LidStScore, c.LidHistKv, c.LidHistScore, l.IdxCompNorm, c.LidK, dev.RopeComp);
                 StageEnd(dev, 3);
                 CheckSync(dev, $"compress L{il}");
 
@@ -1642,7 +1484,7 @@ namespace TensorSharp.Cuda
                     MatMul(dev, l.IdxProj, dev.Cur, dev.Iw, nt);
                     float iwScale = 1.0f / MathF.Sqrt((float)m.IdxHeadSize * m.IdxNHead);
                     dev.DK.IdxPrep(dev.Iq, dev.Iw, Ptr(dev.RopeComp), p0, m.IdxNHead, m.IdxHeadSize, rot, iwScale, nt, dev.Stream);
-                    dev.DK.IdxScores(dev.Iq, dev.Iw, Ptr(l.LidK), dev.IdxScores, p0, CsaRatio, m.IdxNHead, m.IdxHeadSize,
+                    dev.DK.IdxScores(dev.Iq, dev.Iw, Ptr(c.LidK), dev.IdxScores, p0, CsaRatio, m.IdxNHead, m.IdxHeadSize,
                         nt, _compRowsCsa, maxVis, dev.Stream);
                     dev.DK.TopK(dev.IdxScores, dev.TopkIdx, dev.TopkCnt, p0, CsaRatio, m.IdxTopK, _compRowsCsa, nt, dev.Stream);
                     StageEnd(dev, 4);
@@ -1660,14 +1502,14 @@ namespace TensorSharp.Cuda
                 MatMul(dev, l.CompWgate, dev.Cur, dev.StScore, nt);
                 dev.DK.ApeAdd(dev.StScore, Ptr(l.CompApe), p0, HcaRatio, nt, hd, dev.Stream);
                 RunCompressor(dev, nt, p0, HcaRatio, 1, hd, HcaRatio + _maxDraft, hd,
-                    dev.StKv, dev.StScore, l.HistKv, l.HistScore, l.CompNorm, l.CompK, dev.RopeComp);
+                    dev.StKv, dev.StScore, c.HistKv, c.HistScore, l.CompNorm, c.CompK, dev.RopeComp);
                 StageEnd(dev, 3);
                 CheckSync(dev, $"compress L{il}");
                 mode = 2;
             }
 
             float kqScale = 1.0f / MathF.Sqrt(hd);
-            dev.DK.Attention(dev.Q, Ptr(l.RingK), Ptr(l.CompK), dev.TopkIdx, dev.TopkCnt, Ptr(l.Sinks), dev.AttnO,
+            dev.DK.Attention(dev.Q, Ptr(c.RingK), Ptr(c.CompK), dev.TopkIdx, dev.TopkCnt, Ptr(l.Sinks), dev.AttnO,
                 p0, m.NSwa, _ringRaw, nh, hd, mode, l.Ratio == 0 ? 1 : l.Ratio, m.IdxTopK, kqScale, nt, dev.Stream);
             StageEnd(dev, 5);
             if (dbg)
@@ -1678,12 +1520,18 @@ namespace TensorSharp.Cuda
             int hpg = nh / m.OGroups;
             dev.DK.AttnFinish(dev.AttnO, ropeTab, dev.OGrouped, p0, nh, hd, rot, hpg, nt, dev.Stream);
 
-            int groupDim = hpg * hd;
-            int oCat = m.OGroups * m.OLoraRank;
-            // quantize the whole grouped layout once ([G*nt, groupDim] rows), then
-            // run one matmul per group against the matching WoA row block.
+            OutProjectionGroups(dev, l, nt);
+            CheckSync(dev, $"out_proj L{il}");
+        }
+
+        /// <summary>The grouped LoRA output projection over OGrouped ([G, nt, groupDim]):
+        /// one matmul per group against its WoA row block, then WoB over the regrouped rows.</summary>
+        private void OutProjectionGroups(Dev dev, DevLayer l, int nt)
+        {
+            var m = _m;
+            int groupDim = m.NHead / m.OGroups * m.HeadDim;
             var woA = l.WoA;
-            if (nt == 1 && woA.Type == TBF16 && CudaQuantizedOps.Bf16MatvecEnabled && (groupDim & 7) == 0)
+            if (nt == 1 && woA.Type == TBF16 && (groupDim & 7) == 0)
             {
                 // Decode: the 8 group matvecs are ~11us each, so folding them
                 // into one grid saves more in launch gaps than it costs.
@@ -1705,7 +1553,6 @@ namespace TensorSharp.Cuda
             dev.DK.Regroup(dev.OGroupedOut, dev.OG, m.OGroups, nt, m.OLoraRank, dev.Stream);
             MatMul(dev, l.WoB, dev.OG, dev.AttnOut, nt);
             StageEnd(dev, 6);
-            CheckSync(dev, $"out_proj L{il}");
         }
 
         // -------------------------------------------------------------------
@@ -1726,12 +1573,13 @@ namespace TensorSharp.Cuda
             int e = m.NEmbd, nh = m.NHead, hd = m.HeadDim, rot = m.NRot;
             int ratio = l.Ratio;
             IntPtr ropeTab = Ptr(ratio != 0 ? dev.RopeComp : dev.RopeRaw);
+            SlotLayer c = _active.Layers[il];
 
             MatMul(dev, l.WqA, dev.Cur, dev.Qr, nt);
             RmsNorm(dev, dev.Qr, l.QANorm, nt);
             MatMul(dev, l.WqB, dev.Qr, dev.Q, nt);
             MatMul(dev, l.Wkv, dev.Cur, dev.KvRaw, nt);
-            dev.DK.V41AttnPrep(dev.Q, dev.KvRaw, Ptr(l.KvNorm), ropeTab, Ptr(l.RingK),
+            dev.DK.V41AttnPrep(dev.Q, dev.KvRaw, Ptr(l.KvNorm), ropeTab, Ptr(c.RingK),
                 p0, _ringRaw, nh, hd, rot, m.RmsEps, nt, dev.Stream);
             Trace(dev, TraceLayer(il, "q"), dev.Q, (long)nt * nh * hd);
             Trace(dev, TraceLayer(il, "raw_k"), dev.KvRaw, (long)nt * hd);
@@ -1754,9 +1602,9 @@ namespace TensorSharp.Cuda
                 mode = 1;   // the selection published by this group's index source
             }
 
-            DevLayer source = ratio != 0 ? _layers[l.KvSource] : l;
+            Tensor comp = ratio != 0 ? CompKOn(_active, l.KvSource, dev) : null;
             float kqScale = 1.0f / MathF.Sqrt(hd);
-            dev.DK.Attention(dev.Q, Ptr(l.RingK), Ptr(source.CompK), dev.TopkIdx, dev.TopkCnt, Ptr(l.Sinks), dev.AttnO,
+            dev.DK.Attention(dev.Q, Ptr(c.RingK), Ptr(comp), dev.TopkIdx, dev.TopkCnt, Ptr(l.Sinks), dev.AttnO,
                 p0, m.NSwa, _ringRaw, nh, hd, mode, ratio == 0 ? 1 : ratio, m.IdxTopK, kqScale, nt, dev.Stream);
             StageEnd(dev, 5);
             CheckSync(dev, $"v41_attn_core L{il}");
@@ -1770,6 +1618,7 @@ namespace TensorSharp.Cuda
         {
             var m = _m;
             int hd = m.HeadDim, id = m.IdxHeadSize;
+            SlotLayer c = _active.Layers[l.KvSource];
 
             MatMul(dev, l.CompWkv, dev.Cur, dev.StKv, nt);
             if (ratio > 1)
@@ -1784,8 +1633,8 @@ namespace TensorSharp.Cuda
 
             if (nBlocks > 0)
             {
-                dev.DK.V41Compress(dev.StKv, dev.StScore, Ptr(l.HistKv), Ptr(l.HistScore), Ptr(l.CompNorm),
-                    dev.Latent, firstBoundary, nBlocks, p0, ratio, hd, m.RmsEps, dev.Stream);
+                dev.DK.V41Compress(dev.StKv, dev.StScore, Ptr(c.HistKv), Ptr(c.HistScore), Ptr(l.CompNorm),
+                    dev.Latent, firstBoundary, nBlocks, p0, ratio, V41StateRows(ratio), hd, m.RmsEps, dev.Stream);
 
                 using (Tensor latentRows = Rows(dev.Latent, nBlocks))
                 using (Tensor keyRows = Rows(dev.LatentK, nBlocks))
@@ -1794,20 +1643,21 @@ namespace TensorSharp.Cuda
                     RmsNorm(dev, keyRows, l.IndexerKNorm, nBlocks);
                 }
 
-                dev.DK.V41Commit(dev.LatentK, Ptr(dev.RopeComp), Ptr(l.LidK),
+                dev.DK.V41Commit(dev.LatentK, Ptr(dev.RopeComp), Ptr(c.LidK),
                     firstBoundary, nBlocks, ratio, id, m.NRot, 1, dev.Stream);
-                dev.DK.V41Commit(dev.Latent, Ptr(dev.RopeComp), Ptr(l.CompK),
+                dev.DK.V41Commit(dev.Latent, Ptr(dev.RopeComp), Ptr(c.CompK),
                     firstBoundary, nBlocks, ratio, hd, m.NRot, 2, dev.Stream);
+                NoteCommitted(l.KvSource, _active, firstBoundary, ratio, nBlocks);
             }
 
             if (ratio > 1)
-                dev.DK.V41Persist(dev.StKv, dev.StScore, Ptr(l.HistKv), Ptr(l.HistScore), p0, nt, ratio, hd, dev.Stream);
+                dev.DK.V41Persist(dev.StKv, dev.StScore, Ptr(c.HistKv), Ptr(c.HistScore), p0, nt, V41StateRows(ratio), hd, dev.Stream);
         }
 
         private void BuildIndexerV41(Dev dev, DevLayer l, int il, int nt, int p0, int ratio)
         {
             var m = _m;
-            DevLayer source = _layers[l.KvSource];
+            Tensor lidK = LidKOn(_active, l.KvSource, dev);
             int rows = dev.IdxScores.Sizes[1] is long c ? (int)c : 0;
 
             MatMul(dev, l.IdxQB, dev.Qr, dev.Iq, nt);
@@ -1820,7 +1670,7 @@ namespace TensorSharp.Cuda
             // layer left standing for the layers after it.
             bool prune = _v41CandActive && il > m.CandidateSource;
             int maxVis = (int)(((long)p0 + nt) / ratio);
-            dev.DK.V41IdxScores(dev.Iq, dev.Iw, Ptr(source.LidK), prune ? Ptr(dev.CandMask) : IntPtr.Zero,
+            dev.DK.V41IdxScores(dev.Iq, dev.Iw, Ptr(lidK), prune ? Ptr(dev.CandMask) : IntPtr.Zero,
                 dev.IdxScores, p0, ratio, m.IdxNHead, m.IdxHeadSize, rows, maxVis, nt, dev.Stream);
 
             if (il == m.CandidateSource)
@@ -1843,36 +1693,42 @@ namespace TensorSharp.Cuda
             // p0, not 0: the inverse rotation has to undo the rotation each token
             // was given at its OWN absolute position.
             dev.DK.AttnFinish(dev.AttnO, ropeTab, dev.OGrouped, p0, nh, hd, m.NRot, hpg, nt, dev.Stream);
-
-            int groupDim = hpg * hd;
-            int oCat = m.OGroups * m.OLoraRank;
-            var woA = l.WoA;
-            for (int g = 0; g < m.OGroups; g++)
-            {
-                var slice = woA;
-                slice.Ptr = (IntPtr)((long)woA.Ptr + (long)g * m.OLoraRank * woA.RowBytes);
-                slice.Ne1 = m.OLoraRank;
-                using Tensor input = Block(dev.OGrouped, (long)g * nt, nt, groupDim);
-                using Tensor output = Block(dev.OGroupedOut, (long)g * nt, nt, m.OLoraRank);
-                MatMul(dev, slice, input, output, nt);
-            }
-            dev.DK.Regroup(dev.OGroupedOut, dev.OG, m.OGroups, nt, m.OLoraRank, dev.Stream);
-            MatMul(dev, l.WoB, dev.OG, dev.AttnOut, nt);
-            StageEnd(dev, 6);
+            OutProjectionGroups(dev, l, nt);
         }
 
         /// <summary>
-        /// Gathers this ubatch's Engram rows for one layer and folds them into
-        /// the residual. The table stays on the host: the executor hashes and
-        /// dequantizes the selected rows, and only those cross the bus.
+        /// Gathers this ubatch's Engram rows for one layer and folds them into the residual. The
+        /// executor hashes the token history into row indices; a device-resident table is gathered
+        /// on the device from those, a host-mapped one is dequantized by the executor and its rows
+        /// cross the bus.
         /// </summary>
+        /// <remarks>The host runs ahead of the device, so the copy out of the staging queued for
+        /// the previous fill (the last ubatch, or another Engram layer on this device) may not have
+        /// run yet: refilling a shared staging handed that copy this layer's rows. Each layer
+        /// fills its own staging, after the copy out of its last fill has run.</remarks>
         private void EngramLayer(Dev dev, DevLayer l, int nt)
         {
             var m = _m;
-            long cols = (long)m.Engram.HashColumns * m.Engram.HeadDim;
-            m.Engram.GatherEngramRows(l.EngramIndex, nt, (float*)dev.EngramPinned);
-            CudaDriverApi.cuMemcpyHtoDAsync(Ptr(dev.EngramLookup), dev.EngramPinned,
-                new UIntPtr((ulong)(nt * cols * 4)), dev.Stream).ThrowOnError();
+            int columns = m.Engram.HashColumns;
+            long cols = (long)columns * m.Engram.HeadDim;
+            CudaDriverApi.cuEventSynchronize(l.EngramCopied).ThrowOnError();
+            if (l.EngramTable.Ptr != IntPtr.Zero)
+            {
+                // Device-resident table: only the selected row indices cross the bus.
+                m.Engram.CopyEngramRowIndices(l.EngramIndex, nt, (int*)l.EngramPinned);
+                CudaDriverApi.cuMemcpyHtoDAsync(Ptr(dev.EngramRows), l.EngramPinned,
+                    new UIntPtr((ulong)((long)nt * columns * 4)), dev.Stream).ThrowOnError();
+                CudaDriverApi.cuEventRecord(l.EngramCopied, dev.Stream).ThrowOnError();
+                dev.DK.V41EngramGather(l.EngramTable.Ptr, l.EngramTable.Type, l.EngramTable.RowBytes,
+                    dev.EngramRows, dev.EngramLookup, columns, m.Engram.HeadDim, nt, dev.Stream);
+            }
+            else
+            {
+                m.Engram.GatherEngramRows(l.EngramIndex, nt, (float*)l.EngramPinned);
+                CudaDriverApi.cuMemcpyHtoDAsync(Ptr(dev.EngramLookup), l.EngramPinned,
+                    new UIntPtr((ulong)(nt * cols * 4)), dev.Stream).ThrowOnError();
+                CudaDriverApi.cuEventRecord(l.EngramCopied, dev.Stream).ThrowOnError();
+            }
             MatMul(dev, l.EngramWkv, dev.EngramLookup, dev.EngramKv, nt);
             dev.DK.V41EngramGate(dev.Xs, dev.EngramKv, Ptr(l.EngramQ), Ptr(l.EngramK),
                 HC, m.NEmbd, m.RmsEps, nt, dev.Stream);
@@ -1963,22 +1819,30 @@ namespace TensorSharp.Cuda
             RequireExpertType(guType);
             RequireExpertType(downType);
 
-            bool staged = StagedExpertsEnabled && nt > 1
+            // Up to MaxBatchedDecodeRows tokens (a decode step, a batched decode step, a verify
+            // window) run the decode kernels once per (token, selected expert) slot, so every token
+            // computes exactly what it computes alone. Longer ubatches group the slots by expert and
+            // run on tensor cores when the widths allow, else through the register-staged kernels.
+            bool perSlot = nt <= MaxBatchedDecodeRows;
+            bool mma = !perSlot
+                && StagedSupportsType(guType) && StagedSupportsType(downType)
+                && e % Dsv4Kernels.MoeMmaK == 0 && ff % Dsv4Kernels.MoeMmaK == 0;
+            bool staged = !perSlot && !mma
                 && StagedSupportsType(guType) && StagedSupportsType(downType)
                 && Dsv4Kernels.StagedSupports(e) && Dsv4Kernels.StagedSupports(ff);
             if (staged)
                 QuantizeQ81Split(dev, dev.Cur, dev.SplitQsA, dev.SplitDA, e, nt);
-            else
+            else if (!mma)
                 QuantizeQ81(dev, dev.Cur, dev.ActQ8A, e, nt);
-            if (nt == 1)
+            if (perSlot)
             {
                 dev.DK.MoeGateUpDecode(l.GateExps.Ptr, l.UpExps.Ptr, dev.ActQ8A, dev.Sel,
-                    dev.ExpGate, dev.ExpUp, guType, ff, e, l.GateExps.RowBytes, nUsed, dev.Stream);
-                SwigluClamp(dev.ExpGate, dev.ExpUp, (long)nUsed * ff, l.ClampExp);
-                QuantizeQ81(dev, dev.ExpGate, dev.ActQ8B, ff, nUsed);
+                    dev.ExpGate, dev.ExpUp, guType, ff, e, l.GateExps.RowBytes, nt, nUsed, dev.Stream);
+                SwigluClamp(dev.ExpGate, dev.ExpUp, (long)s * ff, l.ClampExp);
+                QuantizeQ81(dev, dev.ExpGate, dev.ActQ8B, ff, s);
                 dev.DK.MoeDownDecode(l.DownExps.Ptr, dev.ActQ8B, dev.Sel, dev.ExpDown,
-                    downType, e, ff, l.DownExps.RowBytes, nUsed, dev.Stream);
-                dev.DK.MoeScatterAdd(dev.ExpDown, null, dev.SelW, dev.ShDown, dev.FfnOut, 1, nUsed, e, dev.Stream);
+                    downType, e, ff, l.DownExps.RowBytes, s, dev.Stream);
+                dev.DK.MoeScatterAdd(dev.ExpDown, null, dev.SelW, dev.ShDown, dev.FfnOut, nt, nUsed, e, dev.Stream);
             }
             else
             {
@@ -1989,11 +1853,18 @@ namespace TensorSharp.Cuda
                 dev.DK.MoeScan(dev.Counts, dev.Offsets, dev.Cursors, nEx, dev.Stream);
                 dev.DK.MoeScatter(dev.Sel, dev.Cursors, dev.RowOfSlot, dev.SlotToken, s, nUsed, dev.Stream);
 
+                if (mma)
+                {
+                    dev.DK.MoeMma(l.GateExps.Ptr, l.UpExps.Ptr, dev.Cur, dev.Counts, dev.Offsets, dev.SlotToken,
+                        dev.ExpGate, dev.ExpUp, guType, ff, e, l.GateExps.RowBytes, nEx, dev.Stream);
+                    SwigluClamp(dev.ExpGate, dev.ExpUp, (long)s * ff, l.ClampExp);
+                    dev.DK.MoeMma(l.DownExps.Ptr, IntPtr.Zero, dev.ExpGate, dev.Counts, dev.Offsets, null,
+                        dev.ExpDown, null, downType, e, ff, l.DownExps.RowBytes, nEx, dev.Stream);
+                }
                 // Staged-weight kernels decode each expert weight row once into
                 // registers and reuse it across the expert's member tokens; the
-                // per-token kernels re-decode per (row, token), which dominated
-                // prefill.
-                if (staged)
+                // per-token kernels re-decode per (row, token).
+                else if (staged)
                 {
                     dev.DK.MoeGateUpStaged(l.GateExps.Ptr, l.UpExps.Ptr, dev.SplitQsA, dev.SplitDA,
                         dev.Counts, dev.Offsets, dev.SlotToken,
@@ -2035,26 +1906,20 @@ namespace TensorSharp.Cuda
             return flat.Narrow(0, 0, n);
         }
 
-        // Register-staged expert kernels for prefill (TS_DSV4_STAGED_EXPERTS=0
-        // reverts to the per-token kernels for A/B).
-        private static readonly bool StagedExpertsEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_DSV4_STAGED_EXPERTS"), "0", StringComparison.Ordinal);
-
         private static void RequireExpertType(int type)
         {
-            if (type != TIQ3_S && type != TMXFP4 && type != TQ8_0 && type != TQ6_K
-                && type != TIQ2_XXS && type != TQ2_K)
+            if (!StagedSupportsType(type) && type != TIQ2_XXS)
             {
                 throw new NotSupportedException(
-                    $"[dsv4-cuda] unsupported expert quant type {type} (supported: Q8_0, Q6_K, Q2_K, IQ3_S, IQ2_XXS, MXFP4)");
+                    $"[dsv4-cuda] unsupported expert quant type {type} (supported: Q8_0, Q6_K, Q5_K, Q4_K, Q3_K, Q2_K, IQ3_S, IQ2_XXS, MXFP4)");
             }
         }
 
-        /// <summary>The register-staged expert kernels decode a fixed set of
-        /// weight layouts; the low-bit types (used by the DSpark drafter) only
-        /// have the per-token path.</summary>
+        /// <summary>The layouts the grouped expert kernels (tensor-core and register-staged)
+        /// decode; IQ2_XXS, used by the DSpark drafter, only has the per-token path.</summary>
         private static bool StagedSupportsType(int type)
-            => type == TIQ3_S || type == TMXFP4 || type == TQ8_0 || type == TQ6_K;
+            => type == TIQ3_S || type == TMXFP4 || type == TQ8_0 || type == TQ6_K || type == TQ5_K || type == TQ4_K
+                || type == TQ3_K || type == TQ2_K;
 
         // -------------------------------------------------------------------
         // dense matmul dispatch
@@ -2081,9 +1946,11 @@ namespace TensorSharp.Cuda
         /// The kernel choice (dp4a matvec, MMQ int8 GEMM, dequant-to-F16 + cuBLAS,
         /// BF16 tensor cores, ...) is NOT decided here: it is the shared routing in
         /// CudaQuantizedOps, so DSV4 gets exactly the same tuning as every other
-        /// direct-CUDA model and there is one implementation to maintain.
+        /// direct-CUDA model and there is one implementation to maintain. The engine
+        /// asks for row-invariant kernels, so a batched decode step computes each
+        /// sequence's row exactly as that sequence's own one-token forward does.
         /// </summary>
-        private void MatMul(Dev dev, in DevQW w, Tensor input, Tensor output, int rows)
+        private void MatMul(Dev dev, in DeviceWeight w, Tensor input, Tensor output, int rows)
         {
             // Scratch buffers are sized for the WIDEST user on this device (the
             // shared expert's ff differs per layer, compressor widths differ
@@ -2091,13 +1958,18 @@ namespace TensorSharp.Cuda
             // blocks at the front of the buffer, not full-width row views.
             using Tensor a = Block(input, 0, rows, w.Ne0);
             using Tensor r = Block(output, 0, rows, w.Ne1);
-            CudaQuantizedOps.AddmmResidentToFloat32(r, a, w.Ptr, w.Type, w.Ne0, w.Ne1);
+            CudaQuantizedOps.AddmmResidentToFloat32(r, a, w.Ptr, w.Type, w.Ne0, w.Ne1, rowInvariant: true);
         }
 
         /// <summary>Dense F32 weight (MoE router, hyper-connection mixer) held in
         /// the arena rather than as a tensor: same shared routing, type F32.</summary>
         private void MatMulF32(Dev dev, IntPtr wF32, Tensor input, Tensor output, int inDim, int outDim, int rows)
         {
+            if (rows <= Dsv4Kernels.GemvMaxRows)
+            {
+                dev.DK.Gemv(Ptr(input), wF32, Ptr(output), inDim, outDim, rows, dev.Stream, Ptr(dev.GemvScratch));
+                return;
+            }
             using Tensor a = Block(input, 0, rows, inDim);
             using Tensor r = Block(output, 0, rows, outDim);
             CudaQuantizedOps.AddmmResidentToFloat32(r, a, wF32, TF32, inDim, outDim);
@@ -2105,7 +1977,10 @@ namespace TensorSharp.Cuda
 
         public void Dispose()
         {
+            _stages.Dispose();
             FreeHostMoeBuffers();
+            // Slot caches come out of the device allocators, so they go before the allocators do.
+            FreeSlots();
             foreach (var dev in _devs)
             {
                 if (dev == null)
@@ -2120,6 +1995,7 @@ namespace TensorSharp.Cuda
                     foreach (var t in dev.OwnedTensors)
                         t.Dispose();
                     dev.OwnedTensors.Clear();
+                    dev.Weights?.Dispose();
                     if (dev.Event != IntPtr.Zero)
                         CudaDriverApi.cuEventDestroy(dev.Event);
                     if (dev.TokEv0 != IntPtr.Zero)
@@ -2138,6 +2014,23 @@ namespace TensorSharp.Cuda
                 catch
                 {
                     // teardown must not throw
+                }
+            }
+            foreach (var dev in _devs)
+            {
+                if (dev != null && dev.StatePinned != IntPtr.Zero)
+                    CudaDriverApi.cuMemFreeHost(dev.StatePinned);
+            }
+            if (_layers != null)
+            {
+                foreach (var layer in _layers)
+                {
+                    if (layer == null)
+                        continue;
+                    if (layer.EngramPinned != IntPtr.Zero)
+                        CudaDriverApi.cuMemFreeHost(layer.EngramPinned);
+                    if (layer.EngramCopied != IntPtr.Zero)
+                        CudaDriverApi.cuEventDestroy(layer.EngramCopied);
                 }
             }
             if (_pinnedTokens0 != IntPtr.Zero) CudaDriverApi.cuMemFreeHost(_pinnedTokens0);

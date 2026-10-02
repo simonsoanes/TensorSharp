@@ -25,10 +25,15 @@ public sealed class StalePrefixMatchException : InvalidOperationException
     public long TreeVersion { get; }
 }
 
-/// <summary>Side-effect-free payload check (<c>IPrefixCacheModel.CanMaterialize</c>, M2). Tree mode only.</summary>
+/// <summary>Side-effect-free payload check (<c>IPrefixCacheModel.CanMaterialize</c>, M2).</summary>
 internal interface IPayloadValidator
 {
     bool CanMaterialize(string payloadKey, int payloadTokens, int targetTokens);
+
+    /// <summary>Whether the primary cache, holding <paramref name="payloadTokens"/>, rewinds to
+    /// <paramref name="targetTokens"/> (<c>IPrefixCacheModel.CanRewindPrimary</c>). Asked only for a
+    /// rewind past the donation slack, which the family's rules alone cannot vouch for.</summary>
+    bool CanRewindPrimary(int payloadTokens, int targetTokens) => true;
 }
 
 /// <summary>
@@ -65,7 +70,7 @@ internal sealed class PrefixTreeOptions
     public bool StrictReceipts { get; init; }
 #endif
     public IPrefixTreePageHost? PageHost { get; init; }
-    public IPayloadValidator? PayloadValidator { get; init; }          // null = Legacy/Shadow (no model calls)
+    public IPayloadValidator? PayloadValidator { get; init; }          // null = no model calls (tests, benches)
     public Func<ResourceClass, long>? QuerySpareBytes { get; init; }   // −1 = unknown
     public ResourceVector OptionCapBytes { get; init; }                // 0 = auto; no env var feeds it (tests, RadixTreeBench)
     public long HostRamBytes { get; init; }                            // auto HostKv cap = 25%; 0 = unknown
@@ -728,7 +733,17 @@ internal sealed class PrefixTree
             SetDeclineIfNone(plan, CandidateKind.TruncatedEndState, SourceDecline.ModelRefused);
             return default;
         }
-        MaterializeMode mode = DonationDecision(d, target, primary, waiting);
+        // A primary kept past the donation slack (see PrimarySurvivesDecline) rewinds further than
+        // the family's rules can vouch for - DeepSeek V4.1 reaches it only through the checkpoint its
+        // slot took at the last prompt boundary. Ask the model now, so admission does not announce
+        // reuse that the execution-time TryTruncateKVCache would retract.
+        if (primary && d.Depth - target > _options.DonateTruncateSlackTokens && !PrimarySurvivesDecline
+            && _options.PayloadValidator is not null && !_options.PayloadValidator.CanRewindPrimary(d.Depth, target))
+        {
+            SetDeclineIfNone(plan, CandidateKind.TruncatedEndState, SourceDecline.ModelRefused);
+            return default;
+        }
+        MaterializeMode mode = DonationDecision(d, target, primary, waiting, r.ScopeIx);
         if (mode == MaterializeMode.None)
         {
             SetDeclineIfNone(plan, CandidateKind.TruncatedEndState, SourceDecline.DonateOnlyShared);
@@ -752,22 +767,50 @@ internal sealed class PrefixTree
     /// Donation decision (§5.3.4, P8 + DEC-14). Returns the mode, or <see cref="MaterializeMode.None"/>
     /// when the candidate is rejected (a donate-only payload that cannot be donated).
     /// </summary>
-    internal MaterializeMode DonationDecision(RadixNode x, int length, bool primary, IWaitingPlanView? waiting)
+    internal MaterializeMode DonationDecision(RadixNode x, int length, bool primary, IWaitingPlanView? waiting, int requestScope = -1)
     {
-        bool donatable = DonationConditionsHold(x, length, primary, waiting);
+        bool donatable = DonationConditionsHold(x, length, primary, waiting, requestScope);
         if (primary)
         {
             if (donatable) return MaterializeMode.KeepPrimary;
-            return Caps.AdoptPrimaryOnDisplacement && Caps.EndState == EndStateSupport.CopyAndDonate
-                ? MaterializeMode.ConvertPrimaryThenClone
-                : MaterializeMode.None;
+            return PrimarySurvivesDecline ? MaterializeMode.ConvertPrimaryThenClone : MaterializeMode.None;
         }
         if (donatable) return MaterializeMode.DonateEndState;
         return Caps.EndState == EndStateSupport.CopyAndDonate ? MaterializeMode.CloneEndState : MaterializeMode.None;
     }
 
-    /// <summary>Conditions (a)-(f). For a PrimaryResident, (e) reads <c>Caps.PrimaryResident</c>.</summary>
-    internal bool DonationConditionsHold(RadixNode x, int length, bool primary, IWaitingPlanView? waiting)
+    /// <summary>
+    /// Whether declining a PrimaryResident keeps it: only a family that can convert the primary into
+    /// an end state and clone it (<see cref="MaterializeMode.ConvertPrimaryThenClone"/>). Any other
+    /// primary is gone at the next executed step whether it is donated or not (BatchExecutor.ExecuteStep
+    /// invalidates it before it runs anything), so the donation slack (f), which exists to keep a deep
+    /// payload for a later request, protects nothing for it and only costs the prefix. That is every
+    /// DeepSeek V4.1 thinking turn: the render drops the previous answer's reasoning, so the next
+    /// prompt diverges one token after its <c>&lt;|Assistant|&gt;</c> and keeping the previous prompt
+    /// means rewinding past the whole answer.
+    /// </summary>
+    private bool PrimarySurvivesDecline =>
+        Caps.AdoptPrimaryOnDisplacement && Caps.EndState == EndStateSupport.CopyAndDonate;
+
+    /// <summary>
+    /// Whether the donation slack (f) is waived for a rewind of <paramref name="x"/>. The slack keeps a deep
+    /// payload for a later request. That buys nothing when declining does not keep the payload (a primary
+    /// that cannot convert, <see cref="PrimarySurvivesDecline"/>), and it is backwards when the request IS
+    /// that later request: a donate-only end state (DeepSeek V4.1's and GLM's retained slots, GPT-OSS's
+    /// holders) serves at most one consumer, and a conversation's next turn rewinds past the previous answer
+    /// whenever the template re-renders it differently (a dropped thinking or analysis channel), so under (f)
+    /// it served no such turn at all. Whether the rewind itself is allowed stays with the truncation rules,
+    /// the rewind cap and the model (CanMaterialize); another conversation still reaches only the public
+    /// prefix.
+    /// </summary>
+    private bool SlackWaived(RadixNode x, bool primary, int requestScope)
+        => primary
+            ? !PrimarySurvivesDecline
+            : Caps.EndState == EndStateSupport.DonateOnly && requestScope == x.ScopeIx;
+
+    /// <summary>Conditions (a)-(f). For a PrimaryResident, (e) reads <c>Caps.PrimaryResident</c>. (f) is waived
+    /// where holding to it keeps nothing worth keeping (<see cref="SlackWaived"/>).</summary>
+    internal bool DonationConditionsHold(RadixNode x, int length, bool primary, IWaitingPlanView? waiting, int requestScope = -1)
     {
         if (x.Children.Count != 0) return false;                                              // (a)
         if (x.LockRef != 0 || x.StateLockRef != 0 || x.PinRef != 0) return false;             // (b)
@@ -775,7 +818,8 @@ internal sealed class PrefixTree
         if (primary ? !Caps.PrimaryResident                                                   // (e)
                     : Caps.EndState != EndStateSupport.DonateOnly && Caps.EndState != EndStateSupport.CopyAndDonate)
             return false;
-        if (x.Depth - length > _options.DonateTruncateSlackTokens) return false;              // (f)
+        if (x.Depth - length > _options.DonateTruncateSlackTokens                             // (f)
+            && !SlackWaived(x, primary, requestScope)) return false;
         ScopeRecord rec = Scopes[x.ScopeIx];                                                  // (d)
         if (rec.WaitingRequests > 1)
         {

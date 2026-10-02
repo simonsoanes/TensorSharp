@@ -238,7 +238,7 @@ public sealed class NetworkScenarioTests : IDisposable
         Assert.Equal("true\n", result.Stdout);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void NodeFetchIsRefusedWithTheSharedWordingWhenTheNetworkIsOff()
     {
         ExecutionResult result = Run(

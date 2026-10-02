@@ -122,7 +122,6 @@ namespace TensorSharp.GGML
         {
             try { return Math.Max(0, TSGgml_GetGpuDeviceCount((int)backendType)); }
             catch (DllNotFoundException) { return 0; }
-            catch (EntryPointNotFoundException) { return 0; }
         }
 
         /// <summary>Adapter name of a GPU, or null when unavailable.</summary>
@@ -138,7 +137,6 @@ namespace TensorSharp.GGML
                 return System.Text.Encoding.UTF8.GetString(buffer, 0, len);
             }
             catch (DllNotFoundException) { return null; }
-            catch (EntryPointNotFoundException) { return null; }
         }
 
         /// <summary>
@@ -214,16 +212,14 @@ namespace TensorSharp.GGML
 
         public static int TensorParallelDegree()
         {
-            try { return Math.Max(1, TSGgml_GetTensorParallelDegree()); }
-            catch (EntryPointNotFoundException) { return 1; }
+            return Math.Max(1, TSGgml_GetTensorParallelDegree());
         }
 
         /// <summary>True when a backend collective is available, including a pinned-host
         /// pipeline. The native startup diagnostics identify the actual transport.</summary>
         public static bool TensorParallelHasDeviceAllReduce()
         {
-            try { return TSGgml_TensorParallelHasDeviceAllReduce() != 0; }
-            catch (EntryPointNotFoundException) { return false; }
+            return TSGgml_TensorParallelHasDeviceAllReduce() != 0;
         }
 
         /// <summary>
@@ -307,16 +303,14 @@ namespace TensorSharp.GGML
         /// </summary>
         public static bool TensorParallelFusedAvailable(int rankCount)
         {
-            try { return TSGgml_TensorParallelFusedAvailable(rankCount) != 0; }
-            catch (EntryPointNotFoundException) { return false; }
+            return TSGgml_TensorParallelFusedAvailable(rankCount) != 0;
         }
 
         /// <summary>Fused availability for a DISTRIBUTED run: one local rank per
         /// node is valid there, because the reduction spans nodes.</summary>
         public static bool TensorParallelFusedAvailableDistributed(int rankCount)
         {
-            try { return TSGgml_TensorParallelFusedAvailableDistributed(rankCount) != 0; }
-            catch (EntryPointNotFoundException) { return false; }
+            return TSGgml_TensorParallelFusedAvailableDistributed(rankCount) != 0;
         }
 
         /// <summary>

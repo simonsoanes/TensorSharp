@@ -207,11 +207,35 @@ public class WorkspaceWalkCostTests : IDisposable
     }
 
     [Fact]
+    public void ThePrivateWindowsHome_IsPrunedOnlyAtTheWorkspaceRoot()
+    {
+        SessionWorkspace workspace = Workspace("private-home");
+        string profile = Path.Combine(workspace.WorkDirectory, ".home", "AppData", "Local", "browser");
+        Directory.CreateDirectory(profile);
+        File.WriteAllText(Path.Combine(profile, "Cookies"), "synthetic private session state");
+        string userDirectory = Path.Combine(workspace.WorkDirectory, "docs", ".home");
+        Directory.CreateDirectory(userDirectory);
+        File.WriteAllText(Path.Combine(userDirectory, "notes.txt"), "user document");
+        File.WriteAllText(Path.Combine(workspace.WorkDirectory, "report.txt"), "result");
+
+        // Do not mark .home hidden here: pruning must depend on its runtime role,
+        // not a platform-specific attribute, and nested user output still exists.
+        Assert.Equal(new[] { "docs/.home/notes.txt", "report.txt" },
+            workspace.SnapshotWorkFiles().Keys.OrderBy(k => k, StringComparer.Ordinal));
+        Assert.Equal(new[] { "docs/.home/notes.txt", "report.txt" },
+            workspace.ListFiles().Select(f => f.Path));
+        Assert.True(CodeArtifactStore.IsRuntimeJunk(".home/AppData/Local/browser/Cookies"));
+        Assert.False(CodeArtifactStore.IsRuntimeJunk("docs/.home/notes.txt"));
+
+        IReadOnlyList<CodeArtifact> captured = Store("private-home-artifacts").Capture(
+            "run0000000000000c", workspace.WorkDirectory, (id, relative, full) => full, out _);
+        Assert.Contains(captured, a => a.Path == "report.txt");
+        Assert.DoesNotContain(captured, a => a.Path.StartsWith(".home/", StringComparison.Ordinal));
+    }
+
+    [NativePosixFact]
     public void ASymlinkLoopInTheWorkspace_DoesNotMultiplyTheWalk()
     {
-        if (OperatingSystem.IsWindows())
-            return; // creating a symbolic link needs a privilege the test host may not have
-
         // `ln -s . loop` is one ordinary command inside a directory the model is
         // allowed to write. A walk that follows it re-walks the workspace once per
         // level until the kernel's symlink limit stops it: measured at 3,747 entries
@@ -237,6 +261,30 @@ public class WorkspaceWalkCostTests : IDisposable
         Assert.Equal(
             new[] { ".env", "app.py" },
             workspace.SnapshotWorkFiles().Keys.OrderBy(k => k, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void AHiddenProfileDirectory_IsNotCaptured_ButItsSiblingSnapshotIs()
+    {
+        SessionWorkspace workspace = Workspace("hidden-profile");
+        string output = Path.Combine(workspace.WorkDirectory, "output", "playwright");
+        // Windows permits hiding an existing profile without renaming it or
+        // restarting its browser. POSIX represents the same attribute by name.
+        string profileName = OperatingSystem.IsWindows() ? "linkedin" : ".linkedin";
+        string profile = Path.Combine(output, "p", profileName);
+        string nested = Path.Combine(profile, "Default", "Network");
+        Directory.CreateDirectory(nested);
+        File.WriteAllText(Path.Combine(nested, "synthetic-state.bin"), "fixture state, no credentials");
+        File.WriteAllText(Path.Combine(output, "snapshot.yml"), "- heading: Signed in");
+        if (OperatingSystem.IsWindows())
+            File.SetAttributes(profile, File.GetAttributes(profile) | FileAttributes.Hidden);
+        Assert.True((File.GetAttributes(profile) & FileAttributes.Hidden) != 0);
+
+        IReadOnlyList<CodeArtifact> captured = Store("hidden-profile-artifacts").Capture(
+            "run0000000000000d", workspace.WorkDirectory, (id, relative, full) => full, out var skipped);
+
+        Assert.Equal(new[] { "output/playwright/snapshot.yml" }, captured.Select(a => a.Path));
+        Assert.Empty(skipped);
     }
 
     /// <summary>A store that already holds <paramref name="runs"/> runs of 20 files.</summary>

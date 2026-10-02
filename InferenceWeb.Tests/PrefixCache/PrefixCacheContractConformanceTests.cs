@@ -43,7 +43,6 @@ public sealed partial class PrefixCacheContractConformanceTests
         DecodeTokens = 12,
         DonateAfter = 4,
         RewindTokens = 6,
-        ExpectedReadiness = PrefixCacheMode.Tree,
         PayloadBytesKnown = true,
         PayloadDeviceDirty = model switch
         {

@@ -24,13 +24,7 @@ public class Gemma4TruncateExactnessTests
     {
         string path = TestGates.FindGguf(Environment.GetEnvironmentVariable("TS_TEST_MODEL_DIR"), "gemma-4-e4b");
         Assert.False(string.IsNullOrEmpty(path));
-        BackendType backend = (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "cpu")
-            .Trim().ToLowerInvariant() switch
-            {
-                "cuda" => BackendType.GgmlCuda,
-                "metal" => BackendType.GgmlMetal,
-                _ => BackendType.GgmlCpu,
-            };
+        BackendType backend = TestGates.PinnedGgmlBackend;
         // The wrapped cases reach ~3 windows: pin the context instead of inheriting a lane's MAX_CONTEXT.
         using var env = new EnvScope();
         env.Set("MAX_CONTEXT", "4096");

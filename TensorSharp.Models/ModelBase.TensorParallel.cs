@@ -1227,6 +1227,8 @@ namespace TensorSharp.Models
             foreach (var kv in _quantWeights)
             {
                 if (kv.Value == null) continue;
+                // Host-only lookup tables and stacked expert views are not replicated device weights.
+                if (!ShouldPreloadCudaQuantWeightToDevice(kv.Key)) continue;
                 if (IsSupersededByTpShard(kv.Key))
                 {
                     supersededCount++;

@@ -5,7 +5,7 @@
 //
 // TensorSharp is licensed under the BSD-3-Clause license found in the LICENSE file in the root directory of this source tree.
 //
-// Nemotron 3 batched paged-attention correctness vs the legacy per-seq KV-swap.
+// Nemotron 3 batched paged-attention correctness vs the per-seq KV-swap.
 // Mirror of Qwen35BatchedCorrectnessTests: greedy sampling on both paths for the
 // same prompt, assert at least 50% prefix match across the first several tokens
 // (some FP drift is expected with batched-path numerical reordering; structural
@@ -30,13 +30,15 @@ namespace InferenceWeb.Tests;
 public class NemotronBatchedCorrectnessTests
 {
     private const string EnvModelDir = "TS_TEST_MODEL_DIR";
-    private const string OptInVar = "TS_NEMOTRON_BATCHED";
+    // --no-continuous-batching's variable: set to 1, every sequence takes the
+    // per-sequence path instead of the batched one.
+    private const string PerSequenceVar = "TS_SCHED_DISABLE_BATCHED";
 
     private readonly ITestOutputHelper _output;
     public NemotronBatchedCorrectnessTests(ITestOutputHelper output) { _output = output; }
 
     [ModelFact("TS_TEST_MODEL_DIR", "nemotron")]
-    public async Task Nemotron_Greedy_LegacyAndBatchedAgree()
+    public async Task Nemotron_Greedy_PerSequenceAndBatchedAgree()
     {
         var modelPath = FindNemotron();
         if (modelPath == null) { _output.WriteLine("[nemo-corr] no model; skipping"); return; }
@@ -61,29 +63,29 @@ public class NemotronBatchedCorrectnessTests
             // sees a freshly-zeroed cache; without this state from path A leaks
             // into path B.
             ctx.Model.ResetKVCache();
-            var legacyTokens = await GenerateGreedy(ctx, prompt, maxNewTokens, optIn: false);
+            var perSeqTokens = await GenerateGreedy(ctx, prompt, maxNewTokens, optIn: false);
 
             ctx.Model.ResetKVCache();
             var batchedTokens = await GenerateGreedy(ctx, prompt, maxNewTokens, optIn: true);
 
             int matchPrefix = 0;
-            int compareLen = Math.Min(legacyTokens.Count, batchedTokens.Count);
+            int compareLen = Math.Min(perSeqTokens.Count, batchedTokens.Count);
             for (int i = 0; i < compareLen; i++)
             {
-                if (legacyTokens[i] == batchedTokens[i]) matchPrefix++;
+                if (perSeqTokens[i] == batchedTokens[i]) matchPrefix++;
                 else break;
             }
             totalCompared += compareLen;
             totalMatching += matchPrefix;
 
-            string legacyText = ctx.Model.Tokenizer.Decode(legacyTokens);
+            string perSeqText = ctx.Model.Tokenizer.Decode(perSeqTokens);
             string batchedText = ctx.Model.Tokenizer.Decode(batchedTokens);
             _output.WriteLine(
                 $"[nemo-corr] prompt=\"{Trim(prompt, 50)}\" " +
-                $"legacy=[{string.Join(",", legacyTokens)}] " +
+                $"perSeq=[{string.Join(",", perSeqTokens)}] " +
                 $"batched=[{string.Join(",", batchedTokens)}] " +
                 $"matchPrefix={matchPrefix}/{compareLen}");
-            _output.WriteLine($"  legacy:  \"{Trim(legacyText, 60)}\"");
+            _output.WriteLine($"  per-seq: \"{Trim(perSeqText, 60)}\"");
             _output.WriteLine($"  batched: \"{Trim(batchedText, 60)}\"");
         }
 
@@ -91,12 +93,12 @@ public class NemotronBatchedCorrectnessTests
         _output.WriteLine($"[nemo-corr] overall prefix-match {totalMatching}/{totalCompared} = {matchRate:P0}");
 
         Xunit.Assert.True(matchRate >= 0.5,
-            $"Legacy/batched prefix-match rate {matchRate:P0} below 50% — structural divergence suspected.");
+            $"Per-sequence/batched prefix-match rate {matchRate:P0} below 50% — structural divergence suspected.");
     }
 
     private async Task<List<int>> GenerateGreedy(CorrCtx ctx, string prompt, int maxNewTokens, bool optIn)
     {
-        Environment.SetEnvironmentVariable(OptInVar, optIn ? "1" : "0");
+        Environment.SetEnvironmentVariable(PerSequenceVar, optIn ? "0" : "1");
 
         var history = new List<ChatMessage> { new() { Role = "user", Content = prompt } };
         var tokens = ctx.Renderer.RenderToTokens(
@@ -129,7 +131,7 @@ public class NemotronBatchedCorrectnessTests
         return Directory.GetFiles(dir, "*.gguf").Where(p =>
         {
             var n = Path.GetFileName(p).ToLowerInvariant();
-            return n.Contains("nemotron") && !n.Contains("mmproj");
+            return n.Contains("nemotron") && !n.Contains("mmproj") && !n.StartsWith("mtp-");
         }).OrderBy(p => Path.GetFileName(p)).FirstOrDefault();
     }
 

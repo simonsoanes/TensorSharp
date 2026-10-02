@@ -31,6 +31,8 @@ using Xunit.Abstractions;
 
 namespace InferenceWeb.Tests;
 
+[Collection(EngineEnvironmentCollection.Name)]
+
 public class Qwen35HolderSpeculationTests
 {
     private const string EnvModelDir = "TS_TEST_MODEL_DIR";
@@ -49,17 +51,11 @@ public class Qwen35HolderSpeculationTests
         string dir = Environment.GetEnvironmentVariable(EnvModelDir);
         string modelPath = dir == null ? null : TestGates.FindGguf(dir, "qwen3.5-9b-iq4_xs|qwen3.5-9b-q8_0");
         if (modelPath == null) { _output.WriteLine("no qwen3.5-9b model; skipping"); return; }
-        BackendType backend = (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "cpu")
-            .Trim().ToLowerInvariant() switch
-        {
-            "metal" => BackendType.GgmlMetal,
-            "cuda" => BackendType.GgmlCuda,
-            _ => BackendType.GgmlCpu,
-        };
+        BackendType backend = TestGates.PinnedGgmlBackend;
 
-        string prevRetained = Environment.GetEnvironmentVariable("TS_RETAINED_FUSED_CACHE");
+        string prevRetained = Environment.GetEnvironmentVariable("TS_RETAINED_FUSED_CACHE_MAX");
         string prevPerSeq = Environment.GetEnvironmentVariable("TS_PER_SEQ_FUSED");
-        Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE", "1");
+        Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE_MAX", null);
         Environment.SetEnvironmentVariable("TS_PER_SEQ_FUSED", "1");
         try
         {
@@ -89,8 +85,12 @@ public class Qwen35HolderSpeculationTests
             int[] other = model.Tokenizer.Encode("List five rivers of Europe, one per line:").ToArray();
             async Task<(List<int> t1, List<int> t2, SequenceState seq1, SequenceState seq2, InferenceCompletion c2)> ConversationAsync(string tag)
             {
-                var s1 = new SequenceState($"{tag}-1", turn1.ToList(), 24, cfg.BlockSize, SamplingConfig.Greedy);
-                var sOther = new SequenceState($"{tag}-other", other.ToList(), 24, cfg.BlockSize, SamplingConfig.Greedy);
+                // The follow-up continues its own conversation's retained holder: the
+                // Radix cache reuses a finished turn only within its conversation scope.
+                var s1 = new SequenceState($"{tag}-1", turn1.ToList(), 24, cfg.BlockSize, SamplingConfig.Greedy,
+                    cacheScope: tag);
+                var sOther = new SequenceState($"{tag}-other", other.ToList(), 24, cfg.BlockSize, SamplingConfig.Greedy,
+                    cacheScope: tag + "-other");
                 var h1 = engine.SubmitRequest(s1);
                 var hOther = engine.SubmitRequest(sOther);
                 var r1 = DrainAsync(h1);
@@ -98,7 +98,8 @@ public class Qwen35HolderSpeculationTests
                 await Task.WhenAll(r1, rOther);
                 var (_, out1) = await r1;
                 var prompt2 = turn1.Concat(out1).Concat(followUp).ToList();
-                var s2 = new SequenceState($"{tag}-2", prompt2, 96, cfg.BlockSize, SamplingConfig.Greedy);
+                var s2 = new SequenceState($"{tag}-2", prompt2, 96, cfg.BlockSize, SamplingConfig.Greedy,
+                    cacheScope: tag);
                 var (c2, out2) = await DrainAsync(engine.SubmitRequest(s2));
                 return (out1, out2, s1, s2, c2);
             }
@@ -133,7 +134,7 @@ public class Qwen35HolderSpeculationTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE", prevRetained);
+            Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE_MAX", prevRetained);
             Environment.SetEnvironmentVariable("TS_PER_SEQ_FUSED", prevPerSeq);
         }
     }

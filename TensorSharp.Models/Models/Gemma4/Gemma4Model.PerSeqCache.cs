@@ -245,7 +245,7 @@ namespace TensorSharp.Models
 
         /// <summary>Reinstate the primary cache as the model's active cache.
         /// Invoked by the executor before an N==1 step that follows a fused
-        /// episode so the legacy single-sequence path (which resets/injects the
+        /// episode so the single-sequence path (which resets/injects the
         /// active cache in place) never clobbers a concurrent request's holder.
         /// No-op when the primary cache is already active.</summary>
         public void RestorePrimaryCache()

@@ -338,8 +338,6 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecode(
         // layer's PADDED attention window, its valid (unmasked) length, and the KV
         // write row, then either replay the cached graph or fall through to build
         // a fresh persistent one.
-        static const bool g4_persist = []{ const char* e = std::getenv("TS_GEMMA4_FD_PERSIST"); return e == nullptr || e[0] != '0'; }();
-
         std::vector<int> pwindow(num_layers, 0);          // padded window length per layer
         std::vector<int> pvalid(num_layers, 0);           // unmasked length per layer
         std::vector<std::int64_t> pwrite(num_layers, 0);  // set_rows write row per layer
@@ -354,23 +352,14 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecode(
         // per-token rebuild + bind + gallocr work (~1 ms/token measured) and lets
         // ggml-vulkan's rope+view+set_rows subgraph fusion apply. Vulkan's
         // set_rows covers every KV dtype used here (F32/F16/BF16/Q8_0/Q4_0).
-        // TS_GEMMA4_METAL_PERSIST=1 re-tests the Metal ggml_set_rows crash described
-        // above. On the current vendored ggml it no longer reproduces: the graph
-        // builds, replays, and decodes byte-identically. It stays OFF anyway,
-        // because the thing it was supposed to buy is not there — measured on
-        // gemma-4-E4B Q8_0 / M5 Pro, 46.4 tok/s off against 46.6 on, i.e. the
-        // per-token rebuild is ~0.4% of a decode step, not the ~1 ms/token it
+        // On the current vendored ggml the Metal set_rows crash no longer
+        // reproduces, but persist would not buy anything there: measured on
+        // gemma-4-E4B Q8_0 / M5 Pro, 46.4 tok/s without against 46.6 with, i.e.
+        // the per-token rebuild is ~0.4% of a decode step, not the ~1 ms/token it
         // costs on Vulkan. Decode here is bandwidth-bound on the weights (7.6 GB
         // per token at ~350 GB/s), so there is nothing for a cached graph to win.
-        // Left as an A/B lever rather than a default: flipping a path that once
-        // SIGSEGV'd needs a better reason than noise.
-        static const bool s_metalPersistProbe = []{
-            const char* e = std::getenv("TS_GEMMA4_METAL_PERSIST");
-            return e != nullptr && e[0] == '1';
-        }();
-        bool can_persist = g4_persist &&
-            (g_backend_type == BACKEND_TYPE_CUDA || g_backend_type == BACKEND_TYPE_VULKAN ||
-             (s_metalPersistProbe && g_backend_type == BACKEND_TYPE_METAL));
+        bool can_persist =
+            g_backend_type == BACKEND_TYPE_CUDA || g_backend_type == BACKEND_TYPE_VULKAN;
         {
             auto roundup_stride = [](int v){ return ((v + kG4PersistKvStride - 1) / kG4PersistKvStride) * kG4PersistKvStride; };
             for (int l = 0; l < num_layers; l++)
@@ -388,7 +377,7 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecode(
                 }
                 pwrite[l] = li[l].isLocal ? (position % csz) : position;
                 // A global cache that already overflowed can't be expressed as a
-                // single padded window -> let the legacy per-op path handle it.
+                // single padded window -> let the non-persist path handle it.
                 if (!li[l].isShared && pvalid[l] > pwindow[l]) { can_persist = false; break; }
             }
         }
@@ -410,7 +399,7 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecode(
         // concurrent requests each replay their own captured graph instead of one
         // shared entry that rebuilds on every switch. find() already matched
         // sig_disc + sig_kcache0, so only the finer shape fields are checked here.
-        G4DecodeCache* dc = (can_persist && g4_persist) ? g4dc_pool().find(g4_sig, g4_kc0) : nullptr;
+        G4DecodeCache* dc = can_persist ? g4dc_pool().find(g4_sig, g4_kc0) : nullptr;
         if (dc != nullptr && dc->graph != nullptr &&
             dc->num_layers == num_layers && dc->hidden_size == hidden_size &&
             dc->ple_dim == ple_dim && dc->ple_gather == ple_gather &&
@@ -479,15 +468,12 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecode(
         // Miss -> (re)build. Claim this request's slot (reset in place / evict LRU)
         // for a persistable call; otherwise drop any stale entry for this identity.
         G4DecodeCache* g4dc = nullptr;
-        if (g4_persist)
-        {
-            if (can_persist) g4dc = &g4dc_pool().claim(g4_sig, g4_kc0);
-            else             g4dc_pool().drop(g4_sig, g4_kc0);
-        }
+        if (can_persist) g4dc = &g4dc_pool().claim(g4_sig, g4_kc0);
+        else             g4dc_pool().drop(g4_sig, g4_kc0);
 
 
         // Create GGML context. Persist mode uses a raw no_alloc ctx kept alive in
-        // g_g4dc (stable tensor addresses for capture); legacy uses the pool.
+        // g_g4dc (stable tensor addresses for capture); otherwise the pool.
         const std::size_t ctx_size = 32 * 1024 * 1024;
         PooledContextHandle context;
         ggml_context* ctx = nullptr;
@@ -507,7 +493,7 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecode(
             ctx = context.value;
         }
 
-        // Per-layer persist inputs (created in the build loop below; null in legacy).
+        // Per-layer persist inputs (created in the build loop below; null otherwise).
         std::vector<ggml_tensor*> layer_kv_index(num_layers, nullptr);
 
         ggml_tensor* current = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hidden_size);
@@ -519,7 +505,7 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecode(
 
         // PLE input: either gathered in-kernel from the resident quantized table
         // (ple_gather; per-token input = the token id) or uploaded as an F32
-        // buffer computed by C#'s ComputePLE (legacy path).
+        // buffer computed by C#'s ComputePLE.
         const int total_ple_dim = num_layers * ple_dim;
         ggml_tensor* ple_input = nullptr;
         ggml_tensor* ple_table_t = nullptr;

@@ -1133,6 +1133,16 @@ namespace TensorSharp.Models.MiniMaxH3
                     latent[i + c] = latent[i + c] * LatentsStd[c] + LatentsMean[c];
         }
 
+        /// <summary>Hand the device copies of the VAE's weights back without tearing it down,
+        /// exactly as <see cref="MiniMaxH3DiT.ReleaseDeviceResidency"/> does for the denoiser:
+        /// the host pointers stay valid and the next encode or decode binds them again.</summary>
+        public void ReleaseDeviceResidency()
+        {
+            if (_disposed) return;
+            foreach (IntPtr ptr in _bound)
+                if (ptr != IntPtr.Zero) GgmlBasicOps.InvalidateHostBuffer(ptr);
+        }
+
         public void Dispose()
         {
             if (_disposed) return;

@@ -22,18 +22,31 @@ class DeepSeekProfileTests(unittest.TestCase):
         original = deepseek.read_archived(deepseek.SPARSE_SOURCE, deepseek.SPARSE_SHA256)
         reference = deepseek.read_archived(deepseek.REFERENCE_SOURCE, deepseek.REFERENCE_SHA256, report=True)
         self.assertEqual(len(profiles), 3)
+
+        def placement(args):
+            flag = next(f for f in ("--tp", "--layer-split") if f in args)
+            rest = [a for i, a in enumerate(args) if i not in (args.index(flag), args.index(flag) + 1)]
+            return flag, args[args.index(flag) + 1], rest
+
+        def without_tp(env):
+            return {key: value for key, value in env.items() if key != "TS_DSV41_TP"}
+
+        _, original_degree, original_rest = placement(original["extra_args"])
         for name, profile in profiles.items():
             self.assertEqual(profile["expected_native_sha256"], "a" * 64)
             self.assertEqual(profile["native_policy"], "exact")
-            self.assertEqual(profile["extra_args"], original["extra_args"])
+            # Layer profiles pass --layer-split; the expert-TP profile passes --tp.
+            flag, degree, rest = placement(profile["extra_args"])
+            self.assertEqual(flag, "--tp" if name == "accurate-expert-tp7" else "--layer-split")
+            self.assertEqual((degree, rest), (original_degree, original_rest))
             self.assertEqual(deepseek.normalized_suites(profile), deepseek.normalized_suites(original))
             self.assertEqual(len(profile["suites"]), 9)
             self.assertEqual(profile["before_suites"], original["before_suites"])
             self.assertEqual(profile["before_suites_quiet_seconds"], original["before_suites_quiet_seconds"])
-        self.assertEqual(profiles["accurate-layer7"]["env"], original["env"])
-        self.assertEqual(profiles["decomposed-control-layer7"]["env"], reference["env"])
+        self.assertEqual(profiles["accurate-layer7"]["env"], without_tp(original["env"]))
+        self.assertEqual(profiles["decomposed-control-layer7"]["env"], without_tp(reference["env"]))
         tp = profiles["accurate-expert-tp7"]
-        self.assertEqual(tp["env"], {**original["env"], "TS_DSV41_TP": "7"})
+        self.assertEqual(tp["env"], without_tp(original["env"]))
         self.assertEqual(tp["capacity_review"]["max_running_sequences"], 4)
         self.assertEqual(tp["capacity_review"]["max_context"], 65536)
         self.assertEqual(tp["suites"][3][tp["suites"][3].index("--scenarios") + 1], "long_8k,long_32k,long_64k")

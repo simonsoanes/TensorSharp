@@ -305,7 +305,7 @@ public sealed class ModelsPage : ContentPage
         }
 
         AppSettings settings = _app.Settings.Load();
-        if (!settings.AllowCellularDownloads && Platforms.iOS.DeviceState.IsOnCellularOnly())
+        if (!settings.AllowCellularDownloads && Services.DeviceState.IsOnCellularOnly())
         {
             await DisplayAlert(
                 "Waiting for Wi-Fi",
@@ -359,7 +359,7 @@ public sealed class ModelsPage : ContentPage
             return;
 
         AppSettings settings = _app.Settings.Load();
-        if (!settings.AllowCellularDownloads && Platforms.iOS.DeviceState.IsOnCellularOnly())
+        if (!settings.AllowCellularDownloads && Services.DeviceState.IsOnCellularOnly())
         {
             await DisplayAlert(
                 "Waiting for Wi-Fi",
@@ -547,7 +547,8 @@ public sealed class ModelRow : BindableObject
         + (string.IsNullOrWhiteSpace(Model.Notes) ? string.Empty
             : "\n" + (Model.Experimental ? "Experimental: " : string.Empty) + Model.Notes);
 
-    /// <summary>Every input this entry accepts, not just images.</summary>
+    /// <summary>Every input this entry accepts, not just images, and for a model that makes
+    /// pictures or clips rather than text, what it makes.</summary>
     private string Reads
     {
         get
@@ -556,8 +557,11 @@ public sealed class ModelRow : BindableObject
             if (Model.Modalities.HasFlag(CatalogModalities.Image)) parts.Add("images");
             if (Model.Modalities.HasFlag(CatalogModalities.Audio)) parts.Add("audio");
             if (Model.Modalities.HasFlag(CatalogModalities.Video)) parts.Add("video");
-            if (Model.Kind == CatalogArchitectureKind.Diffusion) return "a prompt, and makes pictures";
-            return string.Join(", ", parts);
+            if (Model.Kind != CatalogArchitectureKind.Diffusion) return string.Join(", ", parts);
+            string makes = Model.IsVideoGenerator
+                ? Model.Modalities.HasFlag(CatalogModalities.AudioOutput) ? "makes video clips with sound" : "makes video clips"
+                : "makes pictures";
+            return parts.Count == 1 ? $"a prompt, and {makes}" : $"a prompt and {string.Join(", ", parts.Skip(1))}, and {makes}";
         }
     }
 
@@ -611,7 +615,9 @@ public sealed class ModelRow : BindableObject
         Fraction = p.Fraction;
         string speed = p.BytesPerSecond > 1 ? $" · {p.BytesPerSecond / 1e6:0.0} MB/s" : string.Empty;
         string eta = p.Eta is { } left ? $" · {Math.Round(left.TotalMinutes)} min left" : string.Empty;
-        Status = $"{p.Phase} {p.FileIndex + 1}/{p.FileCount} · {Gb(p.BytesReceived)}/{Gb(p.TotalBytes)} GB{speed}{eta}";
+        // FileIndex is already 1-based (ModelDownloadProgress); adding one more showed the
+        // first of seven files as "2/7" and a finished download as "8/7".
+        Status = $"{p.Phase} {p.FileIndex}/{p.FileCount} · {Gb(p.BytesReceived)}/{Gb(p.TotalBytes)} GB{speed}{eta}";
     }
 
     public void Finish(ModelStore store)
@@ -676,6 +682,11 @@ public sealed class ModelRow : BindableObject
         {
             InstallState.Installed => $"On this device · {Gb(store.InstalledBytes(Model))} GB · {Model.License}",
             InstallState.Partial => $"Partly downloaded · {Gb(store.RemainingBytes(Model))} GB still to fetch",
+            // What the download will actually move: files another installed entry already
+            // holds are linked, not fetched (the second MiniMax-H3 checkpoint is its 11 GB
+            // denoiser, not 35 GB).
+            _ when store.RemainingBytes(Model) is long fetch && fetch < Model.TotalBytes =>
+                $"Not downloaded · {Gb(fetch)} GB to fetch, the rest already on this device · {Model.License}",
             _ => $"Not downloaded · {Gb(Model.TotalBytes)} GB · {Model.License}",
         };
     }

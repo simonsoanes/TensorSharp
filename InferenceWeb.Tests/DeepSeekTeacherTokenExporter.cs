@@ -81,8 +81,7 @@ internal static class DeepSeekTeacherTokenExporter
         if (format != null)
         {
             if (effectiveTools is { Count: > 0 }) throw new InvalidDataException("response_format cannot be combined with tools");
-            if (thinking && (string.IsNullOrEmpty(ChatProtocolRegistry.For("deepseek41")?.ThinkingGrammarActivationTrigger)
-                || Environment.GetEnvironmentVariable("TS_JSON_GRAMMAR") == "0"))
+            if (thinking && string.IsNullOrEmpty(ChatProtocolRegistry.For("deepseek41")?.ThinkingGrammarActivationTrigger))
                 throw new InvalidDataException("Thinking structured output requires the delayed JSON grammar.");
             var valid = StructuredOutputValidator.ValidateSchema(format);
             if (!valid.IsValid) throw new InvalidDataException(valid.ErrorMessage);
@@ -233,7 +232,6 @@ internal static class DeepSeekTeacherTokenExporter
             && settings.GetProperty("default_max_tokens").GetInt32() == 20000 && !settings.GetProperty("max_tokens_pinned").GetBoolean()
             && !settings.GetProperty("skills_enabled").GetBoolean() && !settings.GetProperty("sampling_defaults_pinned").GetBoolean()
             && settings.GetProperty("fresh_history_tracking").GetBoolean() && !settings.GetProperty("json_grammar_disabled").GetBoolean(), "Reviewed server preprocessing settings changed.");
-        Require(Environment.GetEnvironmentVariable("TS_JSON_GRAMMAR") != "0", "JSON grammar environment differs from the pinned profile.");
         var before = AuditIdentity(config);
         var source = config.GetProperty("tokenizer_source");
         var firstShard = plan.GetProperty("model").GetProperty("files")[0];

@@ -148,7 +148,7 @@ public static class EngineMemoryPolicy
     /// state one (the diffusion entries, which hold no KV cache) and the GGUF's own
     /// value is left alone.
     /// </summary>
-    public static int Apply(CatalogModel model, AppSettings? settings)
+    public static int Apply(CatalogModel model, AppSettings? settings, DeviceClass device = DeviceClass.Phone)
     {
         ArgumentNullException.ThrowIfNull(model);
 
@@ -176,11 +176,15 @@ public static class EngineMemoryPolicy
         // What the engine may keep besides the cache in use, and how much it commits
         // ahead of a request. Read by the engine on every step and by the model at
         // construction, so setting them here -- before the load, on every load -- is
-        // enough. See the summary on the constants for the numbers.
-        Environment.SetEnvironmentVariable(KvInitialTokensVariable, KvInitialTokens.ToString());
-        Environment.SetEnvironmentVariable(KvGenerationReserveMaxVariable, KvGenerationReserveMax.ToString());
-        Environment.SetEnvironmentVariable(KvHolderPoolMaxVariable, KvHolderPoolMax.ToString());
-        Environment.SetEnvironmentVariable(RetainedFusedCacheMaxVariable, RetainedFusedCacheMax.ToString());
+        // enough. See the summary on the constants for the numbers. A desktop host
+        // clears them instead, so the engine's defaults apply and a phone budget set
+        // earlier in the same process cannot outlive it.
+        // The phone's budget, on a phone or for an entry too large to afford the desktop's.
+        bool phone = device == DeviceClass.Phone || model.LeanCaches;
+        Environment.SetEnvironmentVariable(KvInitialTokensVariable, phone ? KvInitialTokens.ToString() : null);
+        Environment.SetEnvironmentVariable(KvGenerationReserveMaxVariable, phone ? KvGenerationReserveMax.ToString() : null);
+        Environment.SetEnvironmentVariable(KvHolderPoolMaxVariable, phone ? KvHolderPoolMax.ToString() : null);
+        Environment.SetEnvironmentVariable(RetainedFusedCacheMaxVariable, phone ? RetainedFusedCacheMax.ToString() : null);
 
         Console.WriteLine(
             $"TensorAgent: engine budget for {model.Id} -- context {(context > 0 ? context.ToString() : "from GGUF")}, " +
@@ -188,8 +192,10 @@ public static class EngineMemoryPolicy
             + (string.Equals(dtype, model.KvCacheDtype, StringComparison.OrdinalIgnoreCase)
                 ? string.Empty
                 : $" (setting; this entry asks for {model.KvCacheDtype})")
-            + $"; caches start at {KvInitialTokens} tokens, pre-reserve at most {KvGenerationReserveMax} of reply, "
-            + $"{RetainedFusedCacheMax} finished conversation kept, {KvHolderPoolMax} parked");
+            + (phone
+                ? $"; caches start at {KvInitialTokens} tokens, pre-reserve at most {KvGenerationReserveMax} of reply, "
+                  + $"{RetainedFusedCacheMax} finished conversation kept, {KvHolderPoolMax} parked"
+                : "; desktop budget: the engine's defaults size the caches and what is kept for reuse"));
 
         return context;
     }

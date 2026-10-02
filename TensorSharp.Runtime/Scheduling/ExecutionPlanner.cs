@@ -60,9 +60,10 @@ namespace TensorSharp.Runtime.Scheduling
             int textCount = features.SequenceCount - multimodalCount;
 
             // ---- Speculative decoding ----
-            // Deliberately NOT gated on options.BatchedPathDisabled: the
-            // speculative routes predate that switch and must keep engaging
-            // under it.
+            // The linear-trunk route engages whether or not the batched path is
+            // switched off; the batched paged trunk is a batched route, so with
+            // the batched path off (--no-continuous-batching) a model that has one
+            // speculates on its linear trunk instead.
             if (config.Speculation.Enabled)
             {
                 if (!caps.SupportsSpeculativeTrunk)
@@ -95,23 +96,6 @@ namespace TensorSharp.Runtime.Scheduling
                     rejections.Add(new ExecutionPathRejection(
                         ExecutionPathKind.SpeculativePerSequence,
                         "speculation unprofitable on this backend; serving standard decode"));
-                }
-                else if (caps.SupportsBatchedSpecTrunk)
-                {
-                    // Batched-trunk models never take the per-sequence detour:
-                    // if the trunk declines, the normal batched path serves the
-                    // step (keeps K/V in paged storage).
-                    if (!solo)
-                        rejections.Add(new ExecutionPathRejection(
-                            ExecutionPathKind.SpeculativeBatchedTrunk, "multi-sequence step"));
-                    else if (features.SoloHasPendingMultimodal)
-                        rejections.Add(new ExecutionPathRejection(
-                            ExecutionPathKind.SpeculativeBatchedTrunk, "pending multimodal embeddings need the per-seq inject hook"));
-                    else if (fusedResident)
-                        rejections.Add(new ExecutionPathRejection(
-                            ExecutionPathKind.SpeculativeBatchedTrunk, "sequence lives in a per-request fused cache"));
-                    else
-                        candidates.Add(ExecutionPathKind.SpeculativeBatchedTrunk); // declinable (arming/continuity)
                 }
                 else
                 {
@@ -150,9 +134,8 @@ namespace TensorSharp.Runtime.Scheduling
                 if (!wanted)
                 {
                     // Solo never-fused sequences intentionally fall through to
-                    // the N=1 fast path / batched path (keeps prefix-cache
-                    // reuse and live-cache continuation) — not a rejection
-                    // worth logging.
+                    // the N=1 fast path / batched path — not a rejection worth
+                    // logging.
                 }
                 else if (!options.PerSeqFusedEnabled)
                 {
@@ -178,10 +161,7 @@ namespace TensorSharp.Runtime.Scheduling
             {
                 if (solo)
                 {
-                    if (!options.BatchedN1FastPathEnabled)
-                        rejections.Add(new ExecutionPathRejection(
-                            ExecutionPathKind.SingleSequenceFused, "disabled via TS_BATCHED_N1_FAST_PATH=0"));
-                    else if (!caps.SupportsLinearKvMigration)
+                    if (!caps.SupportsLinearKvMigration)
                         rejections.Add(new ExecutionPathRejection(
                             ExecutionPathKind.SingleSequenceFused,
                             "model cannot migrate linear KV to paged storage (a second request would corrupt attention)"));
@@ -267,8 +247,6 @@ namespace TensorSharp.Runtime.Scheduling
             sb.Append("\nN=1 single-sequence fused fast path: ");
             if (!caps.SupportsBatchedPagedAttention)
                 sb.Append("n/a (no batched contract)");
-            else if (!options.BatchedN1FastPathEnabled)
-                sb.Append("disabled (TS_BATCHED_N1_FAST_PATH=0)");
             else if (!caps.SupportsLinearKvMigration)
                 sb.Append("unavailable (no linear->paged KV migration)");
             else
@@ -291,8 +269,7 @@ namespace TensorSharp.Runtime.Scheduling
                 sb.Append("requested but unprofitable on this backend (serving standard decode)");
             else
             {
-                sb.Append("available (algorithm=").Append(config.Speculation.SpeculatorName)
-                  .Append(caps.SupportsBatchedSpecTrunk ? ", trunk=batched)" : ", trunk=linear)");
+                sb.Append("available (algorithm=").Append(config.Speculation.SpeculatorName).Append(')');
             }
 
             sb.Append("\nKV snapshot/swap fallback: ");
@@ -310,10 +287,10 @@ namespace TensorSharp.Runtime.Scheduling
                 sb.Append("n/a for this model");
             else if (!caps.SupportsRetainedFusedCache)
                 sb.Append("unavailable (model does not support retained holders)");
-            else if (!options.RetainedFusedCacheEnabled)
-                sb.Append("disabled (TS_RETAINED_FUSED_CACHE=0)");
+            else if (options.RetainedFusedCacheBudget == 0)
+                sb.Append("off (TS_RETAINED_FUSED_CACHE_MAX=0)");
             else
-                sb.Append("on (budget=").Append(options.RetainedFusedCacheBudget).Append(')');
+                sb.Append("on (budget=").Append(options.RetainedFusedCacheBudgetFor(config.MaxNumRunningSequences)).Append(')');
 
             string overrides = options.DescribeOverrides();
             if (!string.IsNullOrEmpty(overrides))
@@ -332,8 +309,7 @@ namespace TensorSharp.Runtime.Scheduling
             // unserved; PerSequence never declines, SpeculativePerSequence /
             // PerSequenceFused / SingleSequenceFused / MixedMultimodalSplit
             // are terminal by construction.
-            if (candidates.Count == 0 || candidates[^1] == ExecutionPathKind.SpeculativeBatchedTrunk
-                || candidates[^1] == ExecutionPathKind.BatchedPaged)
+            if (candidates.Count == 0 || candidates[^1] == ExecutionPathKind.BatchedPaged)
             {
                 candidates.Add(ExecutionPathKind.PerSequence);
             }

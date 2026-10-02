@@ -33,6 +33,8 @@ using Xunit.Abstractions;
 
 namespace InferenceWeb.Tests;
 
+[Collection(EngineEnvironmentCollection.Name)]
+
 public class PrefixCheckpointExactnessTests
 {
     private const string EnvModelDir = "TS_TEST_MODEL_DIR";
@@ -55,18 +57,13 @@ public class PrefixCheckpointExactnessTests
         string modelPath = dir == null ? null : TestGates.FindGguf(dir, ggufContains);
         if (modelPath == null) { _output.WriteLine($"no {ggufContains} model; skipping"); return; }
 
-        BackendType backend = (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "cpu")
-            .Trim().ToLowerInvariant() switch
-        {
-            "metal" => BackendType.GgmlMetal,
-            "cuda" => BackendType.GgmlCuda,
-            _ => BackendType.GgmlCpu,
-        };
+        BackendType backend = TestGates.PinnedGgmlBackend;
 
-        string prevCheckpoints = Environment.GetEnvironmentVariable("TS_PREFIX_CHECKPOINTS");
-        string prevRetained = Environment.GetEnvironmentVariable("TS_RETAINED_FUSED_CACHE");
-        Environment.SetEnvironmentVariable("TS_PREFIX_CHECKPOINTS", "1");
-        Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE", "1");
+        // Default budgets: an ambient 0 would turn checkpoints or retention off.
+        string prevCheckpoints = Environment.GetEnvironmentVariable("TS_PREFIX_CHECKPOINTS_MAX");
+        string prevRetained = Environment.GetEnvironmentVariable("TS_RETAINED_FUSED_CACHE_MAX");
+        Environment.SetEnvironmentVariable("TS_PREFIX_CHECKPOINTS_MAX", null);
+        Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE_MAX", null);
         try
         {
             using var model = TensorSharp.Models.ModelBase.Create(modelPath, backend);
@@ -96,7 +93,7 @@ public class PrefixCheckpointExactnessTests
             int reusedByB;
             using (var engine = new InferenceEngine(model, Config(), NullLogger.Instance))
             {
-                Assert.Equal(PrefixCacheMode.Tree, engine.PrefixCacheMode);
+                Assert.True(engine.PrefixCacheActive);
                 var warmup = await GenerateAsync(engine, prefix, prefix.Count, "startup-warmup", maxTokens: 1);
                 Assert.Equal(0, warmup.completion.PrefixCacheReusedTokens);
                 Assert.Single(warmup.output);
@@ -153,8 +150,8 @@ public class PrefixCheckpointExactnessTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("TS_PREFIX_CHECKPOINTS", prevCheckpoints);
-            Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE", prevRetained);
+            Environment.SetEnvironmentVariable("TS_PREFIX_CHECKPOINTS_MAX", prevCheckpoints);
+            Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE_MAX", prevRetained);
         }
     }
 

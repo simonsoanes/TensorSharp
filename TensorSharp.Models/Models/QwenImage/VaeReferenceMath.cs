@@ -87,8 +87,8 @@ namespace TensorSharp.Models.QwenImage
 
         // General 2D convolution. weight is OC*IC*KH*KW row-major (oc,ic,kh,kw).
         // Internal (with TryGpuConv2dMaybeTiled) for QwenVaeConvTilingTests. Off the device it
-        // runs the packed-GEMM convolution (VaeCpuOps), or the scalar loop with
-        // TS_QWEN_VAE_CPU=scalar.
+        // runs the packed-GEMM convolution (VaeCpuOps), or the scalar loop when a test sets
+        // UseScalarCpu.
         internal static Feature Conv2d(Feature x, float[] weight, int OC, int IC, int KH, int KW,
             float[] bias, int strideH, int strideW, int padT, int padB, int padL, int padR)
         {

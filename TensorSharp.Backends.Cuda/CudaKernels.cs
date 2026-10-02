@@ -59,12 +59,6 @@ namespace TensorSharp.Cuda
         private readonly IntPtr wanUpsample2xF32;
         private readonly IntPtr gqaPrefillAttentionF32;
         private readonly IntPtr gqaPrefillAttentionF16;
-        private readonly IntPtr gqaPrefillAttentionGroup4D256F32;
-        private readonly IntPtr gqaPrefillAttentionGroup4D256F16;
-        private readonly IntPtr gqaPrefillAttentionGroup4D512F32;
-        private readonly IntPtr gqaPrefillAttentionGroup4D512F16;
-        private readonly IntPtr gqaPrefillAttentionGroup4OnlineD512F32;
-        private readonly IntPtr gqaPrefillAttentionGroup4OnlineD512F16;
         private readonly IntPtr gqaPrefillFlashGroup4D256F16;
         private readonly IntPtr gqaPrefillFlashGroup4D512F16;
         private readonly IntPtr gqaPrefillFlashGroup4D256F32;
@@ -132,16 +126,19 @@ namespace TensorSharp.Cuda
         private readonly IntPtr quantMatmulQ40BatchedF32;
         private readonly IntPtr quantMatmulQ40Dp4aF32;
         private readonly IntPtr quantMatmulQ80SingleF32;
-        private readonly IntPtr quantMatmulQ80VecF32;
+        // ts_q80_vec_rows, one instantiation per row bound (1, 4, 8, 16).
+        private readonly IntPtr[] quantMatmulQ80Vec;
+        private readonly IntPtr[] quantMatmulQ80Warp;
+        private readonly IntPtr[] quantMatmulLowKDp4aF32;
         private readonly IntPtr quantMatmulQ4KDp4aF32;
         private readonly IntPtr quantMatmulQ5KDp4aF32;
         private readonly IntPtr quantMatmulQ6KDp4aF32;
+        private readonly IntPtr[] quantMatmulQ6KDp4aRows;
         private readonly IntPtr quantMatmulQ80MmqF32;
         private readonly IntPtr quantMatmulQ80Mmq2F32;
         private readonly IntPtr quantizeQ81SplitRowsF32;
         private readonly IntPtr quantMatmulQ80F32;
         private readonly IntPtr quantMatmulQ80Dp4aF32;
-        private readonly IntPtr quantMatmulQ80MmaF32;
         private readonly IntPtr quantizeQ81RowsF32;
         private readonly IntPtr quantizeQ81RowsWarpF32;
         private readonly IntPtr dequantWeightF16;
@@ -156,37 +153,6 @@ namespace TensorSharp.Cuda
         public const int Q81BlockBytes = 36;
         public const int Q8Dp4aTileRows = 4;   // matches TS_Q8_DP4A_ROWS in the kernel
         public const int Q40Dp4aTileRows = 4;  // matches TS_Q40_DP4A_ROWS in the kernel
-        // Multi-row Q8_0 uses the block-tile dp4a kernel by default;
-        // TS_CUDA_Q8_DP4A=0 reverts to the scalar 4-row block-reduce kernel (A/B).
-        public static readonly bool Q8Dp4aEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_Q8_DP4A"), "0", StringComparison.Ordinal);
-        // Opt-in tensor-core (wmma int8 MMA) multi-row Q8_0 path: TS_CUDA_Q8_MMA=1.
-        public static readonly bool Q8MmaEnabled =
-            string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_Q8_MMA"), "1", StringComparison.Ordinal);
-        // The GQA prefill QK phase maps one warp to each key for coalesced Q/K loads.
-        // TS_CUDA_GQA_PREFILL_WARP=0 keeps the legacy one-thread-per-key path for A/B.
-        public static readonly bool GqaPrefillWarpCooperativeEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_GQA_PREFILL_WARP"), "0", StringComparison.Ordinal);
-        // Gemma 4 local attention has four Q heads per KV head, d=256, and a
-        // bounded sliding window.  Share each K/V load across the four heads.
-        // TS_CUDA_GQA_PREFILL_GROUP4=0 keeps the generic warp kernel for A/B.
-        public static readonly bool GqaPrefillGroup4Enabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_GQA_PREFILL_GROUP4"), "0", StringComparison.Ordinal);
-        // Flash-style tiled prefill attention (f16 K/V, group4): stages the Q
-        // tile in shared memory once and walks K/V with an online softmax, so
-        // K/V traffic is amortized over 4x-8x more score rows than the two-pass
-        // group4 kernels. TS_CUDA_FLASH_PREFILL=0 keeps the two-pass kernels
-        // for A/B.
-        public static readonly bool GqaPrefillFlashEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_FLASH_PREFILL"), "0", StringComparison.Ordinal);
-        // flash2: thread-per-score QK (no warp-shuffle reduction, transposed-K
-        // shared staging). Default on; TS_CUDA_FLASH2=0 reverts to flash1 for A/B.
-        public static readonly bool GqaPrefillFlash2Enabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_FLASH2"), "0", StringComparison.Ordinal);
-        // Gemma 4 local/global decode has four d=256/d=512 Q heads sharing each
-        // F16 KV head. Share coalesced K/V reads across the group (ggml-style GQA).
-        public static readonly bool GqaDecodeGroup4Enabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_GQA_DECODE_GROUP4"), "0", StringComparison.Ordinal);
         private readonly IntPtr quantGetRowsF32;
 
         private CudaKernels(CudaModule module)
@@ -244,14 +210,6 @@ namespace TensorSharp.Cuda
             WarnOptionalKernelsMissing(missingOptional);
             gqaPrefillAttentionF32 = module.GetFunction("ts_gqa_prefill_attention_f32");
             gqaPrefillAttentionF16 = module.GetFunction("ts_gqa_prefill_attention_f16");
-            gqaPrefillAttentionGroup4D256F32 = module.GetFunction("ts_gqa_prefill_attention_group4_d256_f32");
-            gqaPrefillAttentionGroup4D256F16 = module.GetFunction("ts_gqa_prefill_attention_group4_d256_f16");
-            gqaPrefillAttentionGroup4D512F32 = module.GetFunction("ts_gqa_prefill_attention_group4_d512_f32");
-            gqaPrefillAttentionGroup4D512F16 = module.GetFunction("ts_gqa_prefill_attention_group4_d512_f16");
-            gqaPrefillAttentionGroup4OnlineD512F32 =
-                module.GetFunction("ts_gqa_prefill_attention_group4_online_d512_f32");
-            gqaPrefillAttentionGroup4OnlineD512F16 =
-                module.GetFunction("ts_gqa_prefill_attention_group4_online_d512_f16");
             gqaPrefillFlashGroup4D256F16 =
                 module.GetFunction("ts_gqa_prefill_flash_group4_d256_f16");
             gqaPrefillFlashGroup4D512F16 =
@@ -326,15 +284,23 @@ namespace TensorSharp.Cuda
             quantMatmulQ40BatchedF32 = module.GetFunction("ts_quant_matmul_q4_0_batched_f32");
             quantMatmulQ40Dp4aF32 = module.GetFunction("ts_quant_matmul_q4_0_dp4a_f32");
             quantMatmulQ80SingleF32 = module.GetFunction("ts_quant_matmul_q8_0_single_f32");
-            quantMatmulQ80VecF32 = module.GetFunction("ts_quant_matmul_q8_0_vec_f32");
+            quantMatmulQ80Vec = RowBoundFunctions(module, "ts_quant_matmul_q8_0_vec_f32");
+            quantMatmulQ80Warp = RowBoundFunctions(module, "ts_quant_matmul_q8_0_warp_f32");
+            quantMatmulLowKDp4aF32 = LowKFunctions(module, "ts_quant_matmul_lowk_dp4a_f32");
             quantMatmulQ4KDp4aF32 = module.GetFunction("ts_quant_matmul_q4k_dp4a_f32");
             quantMatmulQ5KDp4aF32 = module.GetFunction("ts_quant_matmul_q5k_dp4a_f32");
             quantMatmulQ6KDp4aF32 = module.GetFunction("ts_quant_matmul_q6k_dp4a_f32");
+            quantMatmulQ6KDp4aRows = new[]
+            {
+                quantMatmulQ6KDp4aF32,
+                module.GetFunction("ts_quant_matmul_q6k_dp4a_rows_f32_4"),
+                module.GetFunction("ts_quant_matmul_q6k_dp4a_rows_f32_8"),
+                module.GetFunction("ts_quant_matmul_q6k_dp4a_rows_f32_16"),
+            };
             quantMatmulQ80MmqF32 = module.GetFunction("ts_quant_matmul_q8_0_mmq_f32");
             quantMatmulQ80Mmq2F32 = module.GetFunction("ts_quant_matmul_q8_0_mmq2_f32");
             quantMatmulQ80F32 = module.GetFunction("ts_quant_matmul_q8_0_f32");
             quantMatmulQ80Dp4aF32 = module.GetFunction("ts_quant_matmul_q8_0_dp4a_f32");
-            quantMatmulQ80MmaF32 = module.GetFunction("ts_quant_matmul_q8_0_mma_f32");
             quantizeQ81RowsF32 = module.GetFunction("ts_quantize_q8_1_rows_f32");
             quantizeQ81RowsWarpF32 = module.GetFunction("ts_quantize_q8_1_rows_warp_f32");
             quantizeQ81SplitRowsF32 = module.GetFunction("ts_quantize_q8_1_split_rows_f32");
@@ -664,7 +630,9 @@ namespace TensorSharp.Cuda
             // parallel RMS+gate). The single-kernel path below walks the sequence
             // with block-wide barriers per token and only numVHeads blocks in
             // flight, which is latency-bound for long windows.
-            if (GdnPrefillSplitEnabled && seqLen >= 8 && headKDim == 128 && (headVDim & 31) == 0)
+            // Split (3-phase) prefill where its shape holds; the single-kernel
+            // sequential walk serves the rest.
+            if (seqLen >= 8 && headKDim == 128 && (headVDim & 31) == 0)
             {
                 LaunchQwen35GdnPrefillSplit(
                     packed, convState, ssmState, convWeight, dtBias, aLog, ssmNorm, output,
@@ -697,11 +665,6 @@ namespace TensorSharp.Cuda
             };
             Launch(qwen35GdnUpdateConvStateF32, Grid(updateCount), 1, 1, BlockSize, 1, 1, 0, stream, updateArgs);
         }
-
-        // Split (3-phase) GDN prefill path; TS_CUDA_GDN_PREFILL_SPLIT=0 pins the
-        // legacy single-kernel sequential walk for A/B comparison.
-        internal static readonly bool GdnPrefillSplitEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_GDN_PREFILL_SPLIT"), "0", StringComparison.Ordinal);
 
         // Token window per split-GDN pass; bounds the conv/core scratch size.
         private const int GdnSplitMaxWindow = 512;
@@ -1074,7 +1037,7 @@ namespace TensorSharp.Cuda
             Launch(rmsNormF32, (uint)rows, 1, 1, BlockSize, 1, 1, 0, stream, args);
         }
 
-        // residual[row,i] += rms_norm(input[row], alpha)[i] ÔÇö fused norm + residual add.
+        // residual[row,i] += rms_norm(input[row], alpha)[i] — fused norm + residual add.
         public void LaunchRMSNormResidualAddF32(IntPtr input, IntPtr alpha, IntPtr residual, int rows, int cols, float eps, IntPtr stream)
         {
             IntPtr inputArg = input;
@@ -1192,12 +1155,10 @@ namespace TensorSharp.Cuda
             int windowSizeArg = windowSize;
             float scaleArg = scale;
             int kvStrideArg = kvStride;
-            int warpCooperativeArg = GqaPrefillWarpCooperativeEnabled ? 1 : 0;
             void** args = stackalloc void*[]
             {
                 &queryArg, &keyArg, &valueArg, &outputArg, &numQHeadsArg, &numKVHeadsArg,
-                &seqLenArg, &kvLenArg, &headDimArg, &maskStartArg, &windowSizeArg, &scaleArg, &kvStrideArg,
-                &warpCooperativeArg
+                &seqLenArg, &kvLenArg, &headDimArg, &maskStartArg, &windowSizeArg, &scaleArg, &kvStrideArg
             };
             Launch(gqaPrefillAttentionF32, (uint)numQHeads, (uint)seqLen, 1, BlockSize, 1, 1, (uint)(kvLen * sizeof(float)), stream, args);
         }
@@ -1231,203 +1192,12 @@ namespace TensorSharp.Cuda
             int windowSizeArg = windowSize;
             float scaleArg = scale;
             int kvStrideArg = kvStride;
-            int warpCooperativeArg = GqaPrefillWarpCooperativeEnabled ? 1 : 0;
             void** args = stackalloc void*[]
             {
                 &queryArg, &keyArg, &valueArg, &outputArg, &numQHeadsArg, &numKVHeadsArg,
-                &seqLenArg, &kvLenArg, &headDimArg, &maskStartArg, &windowSizeArg, &scaleArg, &kvStrideArg,
-                &warpCooperativeArg
+                &seqLenArg, &kvLenArg, &headDimArg, &maskStartArg, &windowSizeArg, &scaleArg, &kvStrideArg
             };
             Launch(gqaPrefillAttentionF16, (uint)numQHeads, (uint)seqLen, 1, BlockSize, 1, 1, (uint)(kvLen * sizeof(float)), stream, args);
-        }
-
-        public void LaunchGqaPrefillAttentionGroup4D256F32(
-            IntPtr query,
-            IntPtr key,
-            IntPtr value,
-            IntPtr output,
-            int numQHeads,
-            int numKVHeads,
-            int seqLen,
-            int kvLen,
-            int headDim,
-            int maskStart,
-            int windowSize,
-            float scale,
-            int kvStride,
-            IntPtr stream)
-        {
-            LaunchGqaPrefillAttentionGroup4D256(
-                gqaPrefillAttentionGroup4D256F32,
-                query, key, value, output,
-                numQHeads, numKVHeads, seqLen, kvLen, headDim,
-                maskStart, windowSize, scale, kvStride, stream);
-        }
-
-        public void LaunchGqaPrefillAttentionGroup4D256F16(
-            IntPtr query,
-            IntPtr key,
-            IntPtr value,
-            IntPtr output,
-            int numQHeads,
-            int numKVHeads,
-            int seqLen,
-            int kvLen,
-            int headDim,
-            int maskStart,
-            int windowSize,
-            float scale,
-            int kvStride,
-            IntPtr stream)
-        {
-            LaunchGqaPrefillAttentionGroup4D256(
-                gqaPrefillAttentionGroup4D256F16,
-                query, key, value, output,
-                numQHeads, numKVHeads, seqLen, kvLen, headDim,
-                maskStart, windowSize, scale, kvStride, stream);
-        }
-
-        public void LaunchGqaPrefillAttentionGroup4D512F32(
-            IntPtr query,
-            IntPtr key,
-            IntPtr value,
-            IntPtr output,
-            int numQHeads,
-            int numKVHeads,
-            int seqLen,
-            int kvLen,
-            int headDim,
-            int maskStart,
-            int windowSize,
-            float scale,
-            int kvStride,
-            IntPtr stream)
-        {
-            LaunchGqaPrefillAttentionGroup4D512(
-                gqaPrefillAttentionGroup4D512F32,
-                query, key, value, output,
-                numQHeads, numKVHeads, seqLen, kvLen, headDim,
-                maskStart, windowSize, scale, kvStride, stream);
-        }
-
-        public void LaunchGqaPrefillAttentionGroup4D512F16(
-            IntPtr query,
-            IntPtr key,
-            IntPtr value,
-            IntPtr output,
-            int numQHeads,
-            int numKVHeads,
-            int seqLen,
-            int kvLen,
-            int headDim,
-            int maskStart,
-            int windowSize,
-            float scale,
-            int kvStride,
-            IntPtr stream)
-        {
-            LaunchGqaPrefillAttentionGroup4D512(
-                gqaPrefillAttentionGroup4D512F16,
-                query, key, value, output,
-                numQHeads, numKVHeads, seqLen, kvLen, headDim,
-                maskStart, windowSize, scale, kvStride, stream);
-        }
-
-        public void LaunchGqaPrefillAttentionGroup4OnlineD512F32(
-            IntPtr query,
-            IntPtr key,
-            IntPtr value,
-            IntPtr output,
-            int numQHeads,
-            int numKVHeads,
-            int seqLen,
-            int kvLen,
-            int headDim,
-            int maskStart,
-            int windowSize,
-            float scale,
-            int kvStride,
-            IntPtr stream)
-        {
-            LaunchGqaPrefillAttentionGroup4OnlineD512(
-                gqaPrefillAttentionGroup4OnlineD512F32,
-                query, key, value, output,
-                numQHeads, numKVHeads, seqLen, kvLen, headDim,
-                maskStart, windowSize, scale, kvStride, stream);
-        }
-
-        public void LaunchGqaPrefillAttentionGroup4OnlineD512F16(
-            IntPtr query,
-            IntPtr key,
-            IntPtr value,
-            IntPtr output,
-            int numQHeads,
-            int numKVHeads,
-            int seqLen,
-            int kvLen,
-            int headDim,
-            int maskStart,
-            int windowSize,
-            float scale,
-            int kvStride,
-            IntPtr stream)
-        {
-            LaunchGqaPrefillAttentionGroup4OnlineD512(
-                gqaPrefillAttentionGroup4OnlineD512F16,
-                query, key, value, output,
-                numQHeads, numKVHeads, seqLen, kvLen, headDim,
-                maskStart, windowSize, scale, kvStride, stream);
-        }
-
-        private void LaunchGqaPrefillAttentionGroup4OnlineD512(
-            IntPtr function,
-            IntPtr query,
-            IntPtr key,
-            IntPtr value,
-            IntPtr output,
-            int numQHeads,
-            int numKVHeads,
-            int seqLen,
-            int kvLen,
-            int headDim,
-            int maskStart,
-            int windowSize,
-            float scale,
-            int kvStride,
-            IntPtr stream)
-        {
-            IntPtr queryArg = query;
-            IntPtr keyArg = key;
-            IntPtr valueArg = value;
-            IntPtr outputArg = output;
-            int numQHeadsArg = numQHeads;
-            int numKVHeadsArg = numKVHeads;
-            int seqLenArg = seqLen;
-            int kvLenArg = kvLen;
-            int headDimArg = headDim;
-            int maskStartArg = maskStart;
-            int windowSizeArg = windowSize;
-            float scaleArg = scale;
-            int kvStrideArg = kvStride;
-            void** args = stackalloc void*[]
-            {
-                &queryArg, &keyArg, &valueArg, &outputArg,
-                &numQHeadsArg, &numKVHeadsArg, &seqLenArg, &kvLenArg,
-                &headDimArg, &maskStartArg, &windowSizeArg, &scaleArg,
-                &kvStrideArg
-            };
-            const int onlineBlockSize = 128;
-            Launch(
-                function,
-                (uint)numKVHeads,
-                (uint)seqLen,
-                1,
-                onlineBlockSize,
-                1,
-                1,
-                0,
-                stream,
-                args);
         }
 
         /// <summary>Queries per CTA of the flash prefill kernels; must match the
@@ -1577,92 +1347,6 @@ namespace TensorSharp.Cuda
             }
         }
 
-        private void LaunchGqaPrefillAttentionGroup4D512(
-            IntPtr function,
-            IntPtr query,
-            IntPtr key,
-            IntPtr value,
-            IntPtr output,
-            int numQHeads,
-            int numKVHeads,
-            int seqLen,
-            int kvLen,
-            int headDim,
-            int maskStart,
-            int windowSize,
-            float scale,
-            int kvStride,
-            IntPtr stream)
-        {
-            IntPtr queryArg = query;
-            IntPtr keyArg = key;
-            IntPtr valueArg = value;
-            IntPtr outputArg = output;
-            int numQHeadsArg = numQHeads;
-            int numKVHeadsArg = numKVHeads;
-            int seqLenArg = seqLen;
-            int kvLenArg = kvLen;
-            int headDimArg = headDim;
-            int maskStartArg = maskStart;
-            int windowSizeArg = windowSize;
-            float scaleArg = scale;
-            int kvStrideArg = kvStride;
-            void** args = stackalloc void*[]
-            {
-                &queryArg, &keyArg, &valueArg, &outputArg, &numQHeadsArg, &numKVHeadsArg,
-                &seqLenArg, &kvLenArg, &headDimArg, &maskStartArg, &windowSizeArg, &scaleArg,
-                &kvStrideArg
-            };
-            uint sharedBytes = (uint)(4 * kvLen * sizeof(float));
-            Launch(
-                function, (uint)numKVHeads, (uint)seqLen, 1,
-                BlockSize, 1, 1, sharedBytes, stream, args);
-        }
-
-        private void LaunchGqaPrefillAttentionGroup4D256(
-            IntPtr function,
-            IntPtr query,
-            IntPtr key,
-            IntPtr value,
-            IntPtr output,
-            int numQHeads,
-            int numKVHeads,
-            int seqLen,
-            int kvLen,
-            int headDim,
-            int maskStart,
-            int windowSize,
-            float scale,
-            int kvStride,
-            IntPtr stream)
-        {
-            IntPtr queryArg = query;
-            IntPtr keyArg = key;
-            IntPtr valueArg = value;
-            IntPtr outputArg = output;
-            int numQHeadsArg = numQHeads;
-            int numKVHeadsArg = numKVHeads;
-            int seqLenArg = seqLen;
-            int kvLenArg = kvLen;
-            int headDimArg = headDim;
-            int maskStartArg = maskStart;
-            int windowSizeArg = windowSize;
-            float scaleArg = scale;
-            int kvStrideArg = kvStride;
-            void** args = stackalloc void*[]
-            {
-                &queryArg, &keyArg, &valueArg, &outputArg, &numQHeadsArg, &numKVHeadsArg,
-                &seqLenArg, &kvLenArg, &headDimArg, &maskStartArg, &windowSizeArg, &scaleArg,
-                &kvStrideArg
-            };
-            const int queryTile = 2;
-            int scoreStride = Math.Min(kvLen, windowSize + queryTile - 1);
-            uint sharedBytes = (uint)(4 * queryTile * scoreStride * sizeof(float));
-            Launch(
-                function, (uint)numKVHeads, (uint)((seqLen + queryTile - 1) / queryTile), 1,
-                BlockSize, 1, 1, sharedBytes, stream, args);
-        }
-
         public void LaunchGqaPrefillAttentionSinksF32(
             IntPtr query,
             IntPtr keyCache,
@@ -1696,13 +1380,11 @@ namespace TensorSharp.Cuda
             int windowSizeArg = windowSize;
             float scaleArg = scale;
             int hasSinksArg = hasSinks;
-            int warpCooperativeArg = GqaPrefillWarpCooperativeEnabled ? 1 : 0;
             void** args = stackalloc void*[]
             {
                 &queryArg, &keyCacheArg, &valueCacheArg, &sinksArg, &outputArg,
                 &numQHeadsArg, &numKVHeadsArg, &seqLenArg, &kvLenArg, &cacheSizeArg,
-                &headDimArg, &maskStartArg, &windowSizeArg, &scaleArg, &hasSinksArg,
-                &warpCooperativeArg
+                &headDimArg, &maskStartArg, &windowSizeArg, &scaleArg, &hasSinksArg
             };
             Launch(gqaPrefillAttentionSinksF32, (uint)numQHeads, (uint)seqLen, 1, BlockSize, 1, 1, (uint)(kvLen * sizeof(float)), stream, args);
         }
@@ -1740,13 +1422,11 @@ namespace TensorSharp.Cuda
             int windowSizeArg = windowSize;
             float scaleArg = scale;
             int hasSinksArg = hasSinks;
-            int warpCooperativeArg = GqaPrefillWarpCooperativeEnabled ? 1 : 0;
             void** args = stackalloc void*[]
             {
                 &queryArg, &keyCacheArg, &valueCacheArg, &sinksArg, &outputArg,
                 &numQHeadsArg, &numKVHeadsArg, &seqLenArg, &kvLenArg, &cacheSizeArg,
-                &headDimArg, &maskStartArg, &windowSizeArg, &scaleArg, &hasSinksArg,
-                &warpCooperativeArg
+                &headDimArg, &maskStartArg, &windowSizeArg, &scaleArg, &hasSinksArg
             };
             Launch(gqaPrefillAttentionSinksF16, (uint)numQHeads, (uint)seqLen, 1, BlockSize, 1, 1, (uint)(kvLen * sizeof(float)), stream, args);
         }
@@ -2573,7 +2253,7 @@ namespace TensorSharp.Cuda
 
         /// <summary>
         /// Fused QK-RMSNorm + NeoX RoPE kernel.  Normalizes each row via RMSNorm,
-        /// then applies NeoX rotary position embeddings in-place ÔÇö all in a single
+        /// then applies NeoX rotary position embeddings in-place — all in a single
         /// kernel launch with one shared-memory pass.
         /// </summary>
         /// <param name="data">Q or K tensor [rows, cols], modified in-place.</param>
@@ -3146,7 +2826,7 @@ namespace TensorSharp.Cuda
 
         // Quantize `rows` activation rows ([rows, inDim] f32) to q8_1 into
         // `outScratch` (rows * inDim/32 ts_block_q8_1). The default warp path
-        // assigns one 32-lane warp to each 32-value block; the legacy path keeps
+        // assigns one 32-lane warp to each 32-value block; the per-thread reference path keeps
         // one thread per block for controlled A/B comparisons.
         public void LaunchQuantizeQ81Rows(
             IntPtr input, IntPtr outScratch, int inDim, int rows, IntPtr stream, bool warpCooperative)
@@ -3247,15 +2927,74 @@ namespace TensorSharp.Cuda
         // Single-row Q8_0 dp4a matvec: four warps cooperate on each output
         // column over the pre-quantized q8_1 activation row.
         public void LaunchQuantMatmulQ80Vec(IntPtr weights, IntPtr xqScratch, IntPtr output, int inDim, int outDim, IntPtr stream)
+            => LaunchQuantMatmulQ80VecRows(weights, xqScratch, output, inDim, outDim, 1, stream);
+
+        /// <summary>The small-batch kernels come in one instantiation per row bound (1, 4, 8, 16):
+        /// the single-row decode kernel carries no batch accumulators, and every instantiation
+        /// computes a row the same way, so a row's result does not depend on the launch it ran in.</summary>
+        private static IntPtr[] RowBoundFunctions(CudaModule module, string name) => new[]
+        {
+            module.GetFunction(name + "_1"), module.GetFunction(name + "_4"),
+            module.GetFunction(name + "_8"), module.GetFunction(name + "_16"),
+        };
+
+        /// <summary>Q2_K instantiations at [0..3], Q3_K at [4..7] (row bounds 1, 4, 8, 16).</summary>
+        private static IntPtr[] LowKFunctions(CudaModule module, string name)
+        {
+            var q2 = RowBoundFunctions(module, name + "_q2");
+            var q3 = RowBoundFunctions(module, name + "_q3");
+            return new[] { q2[0], q2[1], q2[2], q2[3], q3[0], q3[1], q3[2], q3[3] };
+        }
+
+        private static int LowKIndex(int ggmlType, int rows) => (ggmlType == 11 ? 4 : 0) + RowBoundIndex(rows);
+
+        internal static int RowBoundIndex(int rows) => rows <= 1 ? 0 : rows <= 4 ? 1 : rows <= 8 ? 2 : 3;
+
+        /// <summary>Rows the row-invariant Q8_0 matvec takes in one launch.</summary>
+        public const int Q80VecMaxRows = 16;
+
+        /// <summary>Q8_0 matvec over 2..<see cref="Q80VecMaxRows"/> q8_1 activation rows: each row
+        /// accumulates exactly as <see cref="LaunchQuantMatmulQ80Vec"/> computes a single row.</summary>
+        /// <summary>Q8_0 matvec over 1..16 q8_1 activation rows, a CTA per output column; each row's
+        /// result is the same whatever the row count.</summary>
+        public void LaunchQuantMatmulQ80VecRows(IntPtr weights, IntPtr xqScratch, IntPtr output, int inDim, int outDim,
+            int rows, IntPtr stream)
         {
             IntPtr weightsArg = weights;
             IntPtr xqArg = xqScratch;
             IntPtr outputArg = output;
             int inDimArg = inDim;
             int outDimArg = outDim;
-            void** args = stackalloc void*[] { &weightsArg, &xqArg, &outputArg, &inDimArg, &outDimArg };
-            const int vecBlockSize = 128;
-            Launch(quantMatmulQ80VecF32, (uint)outDim, 1, 1, vecBlockSize, 1, 1, 0, stream, args);
+            int rowsArg = rows;
+            void** args = stackalloc void*[] { &weightsArg, &xqArg, &outputArg, &inDimArg, &outDimArg, &rowsArg };
+            // Short rows (a few 32-value blocks) take a warp per column, eight columns per CTA: the
+            // CTA-per-column kernel leaves most of its lanes idle on them. Chosen by shape alone, so
+            // a row computes alike alone and batched.
+            if (inDim < Q80WarpMaxInDim)
+                Launch(quantMatmulQ80Warp[RowBoundIndex(rows)], (uint)((outDim + 7) / 8), 1, 1, 256, 1, 1, 0, stream, args);
+            else
+                Launch(quantMatmulQ80Vec[RowBoundIndex(rows)], (uint)outDim, 1, 1, 128, 1, 1, 0, stream, args);
+        }
+
+        /// <summary>Input widths below which the Q8_0 matvec runs a warp per column.</summary>
+        public const int Q80WarpMaxInDim = 1024;
+
+        /// <summary>Rows the Q2_K/Q3_K matvec takes in one launch.</summary>
+        public const int LowKMaxRows = 16;
+
+        /// <summary>Q2_K or Q3_K matvec over 1..<see cref="LowKMaxRows"/> q8_1 activation rows (dp4a);
+        /// each row's result is the same whatever the row count.</summary>
+        public void LaunchQuantMatmulLowKDp4a(int ggmlType, IntPtr weights, IntPtr xqScratch, IntPtr output,
+            int inDim, int outDim, int rows, IntPtr stream)
+        {
+            IntPtr weightsArg = weights;
+            IntPtr xqArg = xqScratch;
+            IntPtr outputArg = output;
+            int inDimArg = inDim;
+            int outDimArg = outDim;
+            int rowsArg = rows;
+            void** args = stackalloc void*[] { &weightsArg, &xqArg, &outputArg, &inDimArg, &outDimArg, &rowsArg };
+            Launch(quantMatmulLowKDp4aF32[LowKIndex(ggmlType, rows)], (uint)outDim, 1, 1, 128, 1, 1, 0, stream, args);
         }
 
         public void LaunchQuantMatmulQ4KDp4a(IntPtr weights, IntPtr xqScratch, IntPtr output, int inDim, int outDim, IntPtr stream)
@@ -3292,6 +3031,25 @@ namespace TensorSharp.Cuda
             void** args = stackalloc void*[] { &weightsArg, &xqArg, &outputArg, &inDimArg, &outDimArg };
             const int vecBlockSize = 128;
             Launch(quantMatmulQ6KDp4aF32, (uint)outDim, 1, 1, vecBlockSize, 1, 1, 0, stream, args);
+        }
+
+        /// <summary>Q6_K matvec over 1..16 q8_1 activation rows (dp4a); each row's result is the same
+        /// whatever the row count, and one row is <see cref="LaunchQuantMatmulQ6KDp4a"/>.</summary>
+        public void LaunchQuantMatmulQ6KDp4aRows(IntPtr weights, IntPtr xqScratch, IntPtr output, int inDim, int outDim, int rows, IntPtr stream)
+        {
+            if (rows == 1)
+            {
+                LaunchQuantMatmulQ6KDp4a(weights, xqScratch, output, inDim, outDim, stream);
+                return;
+            }
+            IntPtr weightsArg = weights;
+            IntPtr xqArg = xqScratch;
+            IntPtr outputArg = output;
+            int inDimArg = inDim;
+            int outDimArg = outDim;
+            int rowsArg = rows;
+            void** args = stackalloc void*[] { &weightsArg, &xqArg, &outputArg, &inDimArg, &outDimArg, &rowsArg };
+            Launch(quantMatmulQ6KDp4aRows[RowBoundIndex(rows)], (uint)outDim, 1, 1, 128, 1, 1, 0, stream, args);
         }
 
         // Block-tile dp4a Q8_0 GEMM: weights (q8_0) x pre-quantized q8_1 activations
@@ -3342,21 +3100,6 @@ namespace TensorSharp.Cuda
             uint gridX = (uint)((outDim + 63) / 64);    // TS_MMQ_N
             uint gridY = (uint)((rows + 127) / 128);    // TS_MMQ_M
             Launch(quantMatmulQ80Mmq2F32, gridX, gridY, 1, BlockSize, 1, 1, 0, stream, args);
-        }
-
-        // Tensor-core (wmma int8 MMA) Q8_0 GEMM: one warp per 16x16 output tile.
-        public void LaunchQuantMatmulQ80Mma(IntPtr weights, IntPtr xqScratch, IntPtr output, int inDim, int outDim, int rows, IntPtr stream)
-        {
-            IntPtr weightsArg = weights;
-            IntPtr xqArg = xqScratch;
-            IntPtr outputArg = output;
-            int inDimArg = inDim;
-            int outDimArg = outDim;
-            int rowsArg = rows;
-            void** args = stackalloc void*[] { &weightsArg, &xqArg, &outputArg, &inDimArg, &outDimArg, &rowsArg };
-            uint gridX = (uint)((outDim + 15) / 16);
-            uint gridY = (uint)((rows + 15) / 16);
-            Launch(quantMatmulQ80MmaF32, gridX, gridY, 1, 32, 1, 1, 0, stream, args);   // one warp / tile
         }
 
         public void LaunchQuantGetRowsF32(IntPtr weights, IntPtr indices, IntPtr output, int type, int cols, int rows, int indicesAreInt32, IntPtr stream)

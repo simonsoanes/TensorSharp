@@ -13,9 +13,8 @@ the model's declared source into exactly that path, so a subsequent
 
 Sources are declared per model as `"source": "<hf-repo-id>"` (or
 `{"hf_repo": ..., "revision": ...}`, or a direct base URL), with optional
-per-file `{"path": ..., "url": ...}` overrides; the legacy `_hf` field is
-accepted as a source too. Files already present are skipped, so this is cheap
-to re-run.
+per-file `{"path": ..., "url": ...}` overrides. Files already present are
+skipped, so this is cheap to re-run.
 
 Usage:
     python download_models.py [--config benchmark_config_ci.json] \

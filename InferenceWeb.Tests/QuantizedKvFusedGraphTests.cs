@@ -99,7 +99,7 @@ public class QuantizedKvFusedGraphTests
     ///
     /// <para>
     /// TS_KVQ_MODEL=&lt;gguf&gt; selects the weights, TS_KVQ_BACKEND the backend
-    /// (default ggml_metal). Skipped when unset.
+    /// (default: the process's pinned GGML backend, TS_TEST_GGML_BACKEND). Skipped when unset.
     /// </para>
     /// </summary>
     [ModelFact("TS_KVQ_MODEL")]
@@ -112,15 +112,17 @@ public class QuantizedKvFusedGraphTests
             return;
         }
 
-        BackendType backend = (Environment.GetEnvironmentVariable("TS_KVQ_BACKEND") ?? "ggml_metal").ToLowerInvariant() switch
+        BackendType backend = Environment.GetEnvironmentVariable("TS_KVQ_BACKEND")?.ToLowerInvariant() switch
         {
+            "ggml_metal" or "metal" => BackendType.GgmlMetal,
             "ggml_cuda" or "cuda" => BackendType.GgmlCuda,
             "ggml_cpu" or "cpu" => BackendType.GgmlCpu,
-            _ => BackendType.GgmlMetal,
+            _ => TestGates.PinnedGgmlBackend,
         };
         const int steps = 12;
 
         KvCacheDtype restore = KvCacheDtypeConfig.Current;
+        bool restoreExplicit = KvCacheDtypeConfig.IsExplicitlySet;
         try
         {
             int[] reference;
@@ -156,7 +158,7 @@ public class QuantizedKvFusedGraphTests
         }
         finally
         {
-            KvCacheDtypeConfig.Set(restore);
+            KvCacheDtypeConfig.RestoreForTests(restore, restoreExplicit);
         }
     }
 

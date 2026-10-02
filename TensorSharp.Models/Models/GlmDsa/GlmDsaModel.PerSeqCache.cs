@@ -27,6 +27,7 @@ using System;
 using System.Collections.Generic;
 using TensorSharp.GGML;
 using TensorSharp.Runtime.Scheduling;
+using TensorSharp.Runtime.Scheduling.PrefixCache;
 
 namespace TensorSharp.Models
 {
@@ -38,6 +39,14 @@ namespace TensorSharp.Models
         // Set when a mid-step chunked batched call failed once; large
         // batches then decline outright (see TryForwardBatchedFusedDecode).
         private bool _batchedChunkingLatched;
+        // Native tensor-parallel degree (1 = layer split or one device).
+        private int _nativeTp = 1;
+
+        /// <summary>The native executor declines every token-batched decode under tensor parallelism
+        /// (TSGgml_GlmForwardBatchedDecode); the executor's once-per-run warning quotes this.</summary>
+        public string BatchedFusedDecodeDeclineReason => _nativeTp > 1
+            ? $"GLM's token-batched decode runs on a layer split only; under --tp {_nativeTp} each sequence decodes through its own captured graph"
+            : null;
         // Native slot serving the single-stream (N==1) path. Slot 0 at load;
         // replaced when AdoptPrimaryCacheToFused hands slot 0 to a request.
         private int _primarySlot;
@@ -56,7 +65,7 @@ namespace TensorSharp.Models
         /// <summary>Concurrent requests are served by the native executor's
         /// sequence slots. Only the native executor has slots; the managed
         /// per-op path stays on the serial per-sequence route.</summary>
-        public bool SupportsPerSequenceFusedForward => _native != IntPtr.Zero;
+        public bool SupportsPerSequenceFusedForward => _exec != null;
 
         public bool HasFusedSequenceCache(string requestId)
         {
@@ -78,25 +87,29 @@ namespace TensorSharp.Models
                 throw new ArgumentException("RequestId required", nameof(requestId));
             lock (_nativeSync)
             {
-                if (_native == IntPtr.Zero)
+                if (_exec == null)
                     throw new InvalidOperationException("Per-request slots require the native GLM executor.");
                 _slotByRequest ??= new Dictionary<string, int>(StringComparer.Ordinal);
 
                 bool fresh = false;
                 if (!_slotByRequest.TryGetValue(requestId, out int slot))
                 {
-                    slot = GgmlGlmNative.SlotAlloc(_native);
+                    // Memory full: the idle primary first (its contents are nobody's during a fused step),
+                    // then a retained conversation's slot (a cached next turn is lost).
+                    slot = _exec.SlotAlloc();
+                    if (slot < 0) slot = SlotRetention.TakeIdlePrimary(_slotByRequest, ref _primarySlot, _activeSlotKey, new ExecutorGlmSlotStore(_exec));
+                    if (slot < 0 && _retainedSlots is { Count: > 0 }) slot = AllocSlotReclaimingRetained();
                     if (slot < 0)
-                        throw new InvalidOperationException(
-                            "GLM sequence-slot allocation failed (device memory exhausted?).");
+                        throw new SequenceSlotUnavailableException(
+                            "GLM has no device memory for another sequence slot.");
                     _slotByRequest[requestId] = slot;
                     fresh = true;
                 }
 
-                if (!GgmlGlmNative.SetActiveSlot(_native, slot))
+                if (!_exec.SetActiveSlot(slot))
                     throw new InvalidOperationException($"GLM slot {slot} missing for request {requestId}.");
                 _activeSlotKey = requestId;
-                _cacheSeqLen = GgmlGlmNative.NPast(_native);
+                _cacheSeqLen = _exec.NPast;
                 return fresh;
             }
         }
@@ -109,7 +122,7 @@ namespace TensorSharp.Models
             if (string.IsNullOrEmpty(requestId)) return;
             lock (_nativeSync)
             {
-                if (_native == IntPtr.Zero) return;
+                if (_exec == null) return;
                 _slotByRequest ??= new Dictionary<string, int>(StringComparer.Ordinal);
                 if (_activeSlotKey != null) return;   // a request slot is already checked out
                 if (_slotByRequest.ContainsKey(requestId)) return;
@@ -120,24 +133,35 @@ namespace TensorSharp.Models
             }
         }
 
+        /// <summary>A new slot, reclaiming idle retained ones when memory has no room (see AllocReclaiming);
+        /// the prefix cache learns of each through the sink before its next tree read.</summary>
+        private int AllocSlotReclaimingRetained()
+        {
+            var reclaimed = new List<string>(0);
+            int slot = SlotRetention.AllocReclaiming(_retainedSlots, new ExecutorGlmSlotStore(_exec), reclaimed);
+            foreach (string key in reclaimed)
+                _prefixCacheSink?.OnPayloadInvalidated(key, InvalidationReason.NativeSlotReclaimed);
+            return slot;
+        }
+
         /// <summary>Reinstate the single-stream slot as the native active slot
         /// before an N==1 step that follows a concurrent episode.</summary>
         public void RestorePrimaryCache()
         {
             lock (_nativeSync)
             {
-                if (_native == IntPtr.Zero || _activeSlotKey == null) return;
+                if (_exec == null || _activeSlotKey == null) return;
                 if (_primarySlot < 0)
                 {
-                    _primarySlot = GgmlGlmNative.SlotAlloc(_native);
+                    _primarySlot = AllocSlotReclaimingRetained();
                     if (_primarySlot < 0)
-                        throw new InvalidOperationException(
+                        throw new SequenceSlotUnavailableException(
                             "GLM primary-slot allocation failed (device memory exhausted?).");
                 }
-                if (!GgmlGlmNative.SetActiveSlot(_native, _primarySlot))
+                if (!_exec.SetActiveSlot(_primarySlot))
                     throw new InvalidOperationException($"GLM primary slot {_primarySlot} missing.");
                 _activeSlotKey = null;
-                _cacheSeqLen = GgmlGlmNative.NPast(_native);
+                _cacheSeqLen = _exec.NPast;
             }
         }
 
@@ -152,7 +176,7 @@ namespace TensorSharp.Models
         {
             lock (_nativeSync)
             {
-                if (_native == IntPtr.Zero || _slotByRequest == null) return false;
+                if (_exec == null || _slotByRequest == null) return false;
                 int n = requestIds.Count;
                 if (n < 2) return false;
 
@@ -166,52 +190,12 @@ namespace TensorSharp.Models
                 int vocab = Config.VocabSize;
                 if ((long) n * vocab > int.MaxValue) return false;
                 var flat = new float[n * vocab];
-
-                // The native batched graph caps at 16 sequences (its per-slot
-                // attention forks are O(n) graph nodes). Above that, run the
-                // step as near-equal windows of <=16 - two weight sweeps for a
-                // double-cap batch still beat that many serial solo sweeps.
-                // Windows are sized so none is ever 1 (native needs n>=2). A
-                // failure AFTER the first window would leave earlier slots
-                // advanced while the engine retries the whole step, and the
-                // native position gates would then error those sequences
-                // visibly - so on any mid-step failure, latch chunking off and
-                // decline.
-                const int MaxPerCall = 16;
-                if (n <= MaxPerCall)
+                BeforeGraphCall();
+                try
                 {
-                    if (!GgmlGlmNative.ForwardBatchedDecode(_native, slots, tokens, positions, flat))
-                        return false;
+                    if (!ForwardBatchedDecodeChunks(slots, tokens, positions, flat, vocab)) return false;
                 }
-                else
-                {
-                    if (_batchedChunkingLatched) return false;
-                    int chunks = (n + MaxPerCall - 1) / MaxPerCall;
-                    int baseSize = n / chunks, rem = n % chunks;
-                    int off = 0;
-                    for (int c = 0; c < chunks; c++)
-                    {
-                        int len = baseSize + (c < rem ? 1 : 0);
-                        var cs = new int[len]; var ct = new int[len]; var cp = new int[len];
-                        Array.Copy(slots, off, cs, 0, len);
-                        Array.Copy(tokens, off, ct, 0, len);
-                        Array.Copy(positions, off, cp, 0, len);
-                        var cf = new float[len * vocab];
-                        if (!GgmlGlmNative.ForwardBatchedDecode(_native, cs, ct, cp, cf))
-                        {
-                            if (c > 0)
-                            {
-                                _batchedChunkingLatched = true;
-                                Console.Error.WriteLine(
-                                    "[glm batched-decode] chunk " + (c + 1) + "/" + chunks +
-                                    " failed mid-step; chunked batching disabled");
-                            }
-                            return false;
-                        }
-                        Array.Copy(cf, 0, flat, (long) off * vocab, (long) len * vocab);
-                        off += len;
-                    }
-                }
+                finally { AfterGraphCall(); }
 
                 for (int i = 0; i < n; i++)
                 {
@@ -223,13 +207,60 @@ namespace TensorSharp.Models
             }
         }
 
+        /// <summary>One batched decode step for <paramref name="slots"/>, in windows of at most 16 sequences.</summary>
+        private bool ForwardBatchedDecodeChunks(int[] slots, int[] tokens, int[] positions, float[] flat, int vocab)
+        {
+            // The native batched graph caps at 16 sequences (its per-slot
+            // attention forks are O(n) graph nodes). Above that, run the
+            // step as near-equal windows of <=16 - two weight sweeps for a
+            // double-cap batch still beat that many serial solo sweeps.
+            // Windows are sized so none is ever 1 (native needs n>=2). A
+            // failure AFTER the first window would leave earlier slots
+            // advanced while the engine retries the whole step, and the
+            // native position gates would then error those sequences
+            // visibly - so on any mid-step failure, latch chunking off and
+            // decline.
+            const int MaxPerCall = 16;
+            int n = slots.Length;
+            if (n <= MaxPerCall)
+                return _exec.ForwardBatchedDecode(slots, tokens, positions, flat);
+
+            if (_batchedChunkingLatched) return false;
+            int chunks = (n + MaxPerCall - 1) / MaxPerCall;
+            int baseSize = n / chunks, rem = n % chunks;
+            int off = 0;
+            for (int c = 0; c < chunks; c++)
+            {
+                int len = baseSize + (c < rem ? 1 : 0);
+                var cs = new int[len]; var ct = new int[len]; var cp = new int[len];
+                Array.Copy(slots, off, cs, 0, len);
+                Array.Copy(tokens, off, ct, 0, len);
+                Array.Copy(positions, off, cp, 0, len);
+                var cf = new float[len * vocab];
+                if (!_exec.ForwardBatchedDecode(cs, ct, cp, cf))
+                {
+                    if (c > 0)
+                    {
+                        _batchedChunkingLatched = true;
+                        Console.Error.WriteLine(
+                            "[glm batched-decode] chunk " + (c + 1) + "/" + chunks +
+                            " failed mid-step; chunked batching disabled");
+                    }
+                    return false;
+                }
+                Array.Copy(cf, 0, flat, (long) off * vocab, (long) len * vocab);
+                off += len;
+            }
+            return true;
+        }
+
         /// <summary>Free a finished/aborted request's slot (its caches and any
         /// graphs captured against them).</summary>
         public void OnSequenceReleased(string requestId)
         {
             lock (_nativeSync)
             {
-                if (_native == IntPtr.Zero
+                if (_exec == null
                     || _slotByRequest == null
                     || string.IsNullOrEmpty(requestId)
                     || !_slotByRequest.TryGetValue(requestId, out int slot))
@@ -239,13 +270,20 @@ namespace TensorSharp.Models
 
                 if (string.Equals(_activeSlotKey, requestId, StringComparison.Ordinal))
                 {
-                    // The released slot is active; reinstate the primary first
-                    // (the native side refuses to free the active slot).
+                    if (_primarySlot < 0)
+                    {
+                        // A request holds the primary: this slot becomes it (see ReleaseActiveSlotAsPrimary).
+                        if (SlotRetention.ReleaseActiveSlotAsPrimary(_slotByRequest, requestId, ref _primarySlot, ref _activeSlotKey,
+                                new ExecutorGlmSlotStore(_exec)))
+                            _cacheSeqLen = 0;
+                        return;
+                    }
+                    // Reinstate the primary before freeing the active slot.
                     RestorePrimaryCache();
                 }
 
                 _slotByRequest.Remove(requestId);
-                GgmlGlmNative.SlotFree(_native, slot);
+                _exec.SlotFree(slot);
             }
         }
     }

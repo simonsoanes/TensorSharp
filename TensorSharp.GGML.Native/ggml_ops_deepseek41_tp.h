@@ -28,30 +28,34 @@ struct strip
     int64_t count = 0;
 };
 
-// A contiguous, complete tiling in down-projection quantization blocks.
-// Rotating the extra blocks by layer balances V4.1's nine Q2_K blocks.
+// A contiguous, complete tiling in aligned blocks.
+// Rotating the extra blocks by layer balances uneven V4.1 strips.
 // Unquantized strips also honor ggml CUDA's two-element vector alignment.
 std::vector<strip> split(int64_t width, int64_t block, int ranks, int layer);
 
 // Prefer 64-channel floating-point strips where possible. This keeps BF16/F16
-// gate/up rows and down inner dimensions eligible for the same matrix path as
-// the full tensor, avoiding shape-dependent activation rounding. Use this for
+// gate/up rows eligible for the same matrix path as the full tensor, avoiding
+// shape-dependent activation rounding. Use this for
 // both upload layout and loader memory pricing. Quantized/F32 layouts retain
 // their original block policy; small floating tensors retain vector alignment.
 std::vector<strip> split_weights(int64_t width, ggml_type down_type, int ranks, int layer);
+std::vector<strip> split_outputs(int64_t width, int ranks, int layer);
 
 class executor
 {
 public:
     // Each rank owns a separate backend queue for the supplied device. CPU
     // devices are accepted for the independent numerical regression test.
-    executor(const std::vector<ggml_backend_dev_t> & devices, int used_experts);
+    // Sequential pread warms only the current layer before its strided copies.
+    // Zero preserves direct reads; the native loader supplies its warm policy.
+    executor(const std::vector<ggml_backend_dev_t> & devices, int used_experts, int load_threads = 16);
     ~executor();
     executor(const executor &) = delete;
     executor & operator=(const executor &) = delete;
 
-    // Load only each rank's column-parallel gate/up and row-parallel down
-    // strips. No full expert tensor is allocated on any participating rank.
+    // Shard gate/up intermediate rows and down output rows. Gather activations
+    // between projections to retain the complete down reduction dimension.
+    // No full expert tensor is allocated on any participating rank.
     void add_layer(int layer, const source & gate, const source & up,
                    const source & down, float clamp_limit);
     bool has_layer(int layer) const;
@@ -73,6 +77,10 @@ public:
 #if defined(TSG_GGML_TEST_HOOKS)
     void test_set_position(int64_t position);
     void test_single_fanout(bool enabled);
+    void test_pinned_staging(bool enabled);
+    void test_pipelined_upload(bool enabled);
+    void test_device_gather(bool enabled);
+    void test_gate_fence(bool enabled);
 #endif
 
 private:

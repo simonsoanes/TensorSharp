@@ -1,0 +1,24 @@
+.ts-mask-modal { position:fixed; inset:0; z-index:10000; display:flex; align-items:center; justify-content:center; background:#000b; padding:12px; color:#eef1f7; font:14px/1.4 system-ui,sans-serif; overscroll-behavior:contain; }
+.ts-mask-panel { box-sizing:border-box; display:flex; flex-direction:column; gap:10px; width:min(1100px,100%); height:min(900px,100%); max-height:100dvh; padding:20px; border:1px solid #485163; border-radius:16px; background:#1b202b; box-shadow:0 12px 60px #0008; }
+.ts-mask-panel h2 { margin:0; font-size:20px; color:#fff; }
+.ts-mask-help,.ts-mask-status { margin:0; color:#cbd2df; }
+.ts-mask-toolbar,.ts-mask-options,.ts-mask-actions { display:flex; align-items:center; flex-wrap:wrap; gap:10px; }
+.ts-mask-panel button { min-height:42px; border:1px solid #5c687c; border-radius:8px; padding:8px 14px; background:#293243; color:#fff; font:inherit; cursor:pointer; }
+.ts-mask-panel button:focus-visible,.ts-mask-panel input:focus-visible { outline:3px solid #76b6ff; outline-offset:2px; }
+.ts-mask-panel button[aria-pressed=true],.ts-mask-panel .ts-mask-primary { border-color:#74b8ff; background:#225d9c; }
+.ts-mask-panel button:disabled { opacity:.5; cursor:default; }
+.ts-mask-control { display:flex; align-items:center; flex-wrap:wrap; gap:5px; }
+.ts-mask-control input { width:100px; }
+.ts-mask-control span { min-width:28px; }
+.ts-mask-options label { display:flex; align-items:center; gap:6px; }
+.ts-mask-options input[type=number] { width:64px; padding:6px; background:#293243; border:1px solid #5c687c; border-radius:5px; color:#fff; font:inherit; }
+.ts-mask-options input[type=checkbox] { width:20px; height:20px; }
+.ts-mask-viewport { flex:1; min-height:140px; overflow:auto; overscroll-behavior:contain; background:repeating-conic-gradient(#202631 0% 25%,#292f3a 0% 50%) 50%/20px 20px; border:1px solid #485163; border-radius:8px; padding:10px; }
+.ts-mask-stage { position:relative; margin:auto; flex-shrink:0; }
+.ts-mask-source,.ts-mask-canvas { position:absolute; inset:0; width:100%; height:100%; max-width:none; max-height:none; border-radius:0; }
+.ts-mask-source { object-fit:fill; user-select:none; -webkit-user-drag:none; }
+.ts-mask-canvas { opacity:.55; cursor:crosshair; touch-action:none; }
+.ts-mask-actions { justify-content:flex-end; }
+.image-edit-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+.image-edit-actions button { min-height:42px; cursor:pointer; }
+@media(max-width:600px) { .ts-mask-modal { padding:0; } .ts-mask-panel { height:100%; padding:12px; padding-bottom:max(12px,env(safe-area-inset-bottom)); border-radius:0; gap:8px; } .ts-mask-panel h2 { font-size:18px; } .ts-mask-toolbar { gap:6px; } .ts-mask-control { font-size:12px; } .ts-mask-control input { width:78px; } .ts-mask-help,.ts-mask-status,.ts-mask-options { font-size:12px; } }

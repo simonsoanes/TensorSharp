@@ -20,7 +20,6 @@
 using System;
 using System.Collections.Generic;
 using TensorSharp;
-using TensorSharp.Models.Paged;
 using TensorSharp.Runtime.Paged;
 using TensorSharp.Runtime.Scheduling;
 
@@ -36,12 +35,9 @@ namespace TensorSharp.Models
         /// <summary>
         /// The paged buffers are F32 and the engine migrates nothing into them from a
         /// block-quantized linear cache, so a q8_0/q4_0 KV cache keeps the snapshot path
-        /// (which serves those dtypes byte-exactly) instead. TS_HUNYUAN_BATCHED=0 forces
-        /// the snapshot path for A/B comparison.
+        /// (which serves those dtypes byte-exactly) instead.
         /// </summary>
-        public bool BatchedForwardAvailable =>
-            !_kvCacheDtype.IsBlockQuantized() &&
-            !string.Equals(Environment.GetEnvironmentVariable("TS_HUNYUAN_BATCHED"), "0", StringComparison.Ordinal);
+        public bool BatchedForwardAvailable => !_kvCacheDtype.IsBlockQuantized();
 
         public IReadOnlyList<float[]> ForwardBatch(BatchedForwardContext ctx)
         {
@@ -106,8 +102,9 @@ namespace TensorSharp.Models
 
             using Tensor positionsTensorQ = BuildRoPEPositionsTensor(positions, numHeads);
             using Tensor positionsTensorK = BuildRoPEPositionsTensor(positions, numKvHeads);
-            PagedAttentionKernel kernel = ResolvePagedAttentionKernel();
-            (int[] blockTableFlat, int[] blockTableOffsets) = kernel == PagedAttentionKernel.Native && IsGgmlBackend
+            // The native paged attention on the GGML backends, the managed online
+            // softmax elsewhere.
+            (int[] blockTableFlat, int[] blockTableOffsets) = IsGgmlBackend
                 ? FlattenBlockTables(ctx.BlockTables)
                 : (null, null);
 
@@ -161,15 +158,6 @@ namespace TensorSharp.Models
                         blockTableFlat, blockTableOffsets,
                         numSeqs, numTokens, numHeads, numKvHeads, headDim,
                         _pagedBlockSize, scale);
-                }
-                else if (kernel == PagedAttentionKernel.Tensor)
-                {
-                    TensorPagedAttention.Forward(
-                        _allocator, IsGgmlBackend,
-                        qFlat, _pagedKBuf[layer], _pagedVBuf[layer], attnFlat,
-                        numTokens, numHeads, numKvHeads, headDim, _pagedBlockSize,
-                        queryStartLoc, seqLens, positions, ctx.BlockTables, numSeqs,
-                        scale, causal: true);
                 }
                 else
                 {
@@ -245,21 +233,6 @@ namespace TensorSharp.Models
             Tensor flat = normed.View(numTokens, numHeads * headDim);
             normed.Dispose();
             return flat;
-        }
-
-        private enum PagedAttentionKernel { Native, Tensor, Managed }
-
-        /// <summary>Same switch and spellings as Mistral 3: TS_PAGED_ATTN_KERNEL.</summary>
-        private static PagedAttentionKernel ResolvePagedAttentionKernel()
-        {
-            string raw = Environment.GetEnvironmentVariable("TS_PAGED_ATTN_KERNEL");
-            if (string.IsNullOrEmpty(raw)) return PagedAttentionKernel.Native;
-            return raw.Trim().ToLowerInvariant() switch
-            {
-                "tensor" or "gpu" or "addmm" => PagedAttentionKernel.Tensor,
-                "managed" or "scalar" or "0" or "false" => PagedAttentionKernel.Managed,
-                _ => PagedAttentionKernel.Native,
-            };
         }
 
         private static (int[] flat, int[] offsets) FlattenBlockTables(int[][] tables)

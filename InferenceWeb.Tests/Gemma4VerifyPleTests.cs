@@ -14,7 +14,6 @@ namespace InferenceWeb.Tests;
 public class Gemma4VerifyPleTests
 {
     private const string ModelVariable = "TS_GMTP_TARGET";
-    private const string VerifyPleVariable = "TS_GMTP_PLE_IN_KERNEL";
     private readonly ITestOutputHelper _output;
 
     public Gemma4VerifyPleTests(ITestOutputHelper output) => _output = output;
@@ -92,61 +91,53 @@ public class Gemma4VerifyPleTests
         string path = Environment.GetEnvironmentVariable(ModelVariable);
         Assert.True(File.Exists(path), $"{ModelVariable} must name a Gemma 4 E-series GGUF file.");
         BackendType backend = ReadBackend();
-        string savedSwitch = Environment.GetEnvironmentVariable(VerifyPleVariable);
-        using var nativeEnvironment = new NativeEnvironmentScope();
-        try
+        using var nativeEnvironment = new NativeEnvScope();
+        using ModelBase loaded = ModelBase.Create(path, backend);
+        Gemma4Model model = Assert.IsType<Gemma4Model>(loaded);
+        var target = (ISpeculativeTarget)model;
+
+        foreach (int promptLength in new[] { 509, 520, 1024 })
         {
-            using ModelBase loaded = ModelBase.Create(path, backend);
-            Gemma4Model model = Assert.IsType<Gemma4Model>(loaded);
-            var target = (ISpeculativeTarget)model;
-
-            foreach (int promptLength in new[] { 509, 520, 1024 })
+            int[] prompt = BuildPrompt(model, promptLength);
+            foreach (int rows in new[] { 1, 2, 3, 8 })
             {
-                int[] prompt = BuildPrompt(model, promptLength);
-                foreach (int rows in new[] { 1, 2, 3, 8 })
-                {
-                    // Hold token IDs and prefill identical. Compare the original
-                    // graph with resident PLE, then isolate donor-window reuse
-                    // with PLE unchanged and require bitwise equality.
-                    int[] tokens = prompt.AsSpan(prompt.Length - rows).ToArray();
-                    var reference = Run(false, false);
-                    var resident = Run(true, false);
-                    var shared = Run(true, true);
-                    string label = $"prompt={promptLength}, rows={rows}";
-                    AssertClose(reference.hidden, resident.hidden, label + " hidden");
-                    AssertClose(reference.logits, resident.logits, label + " logits");
-                    Assert.True(MemoryMarshal.Cast<float, int>(resident.hidden.AsSpan()).SequenceEqual(
-                        MemoryMarshal.Cast<float, int>(shared.hidden.AsSpan())), label + " shared KV hidden differs bitwise");
-                    Assert.True(MemoryMarshal.Cast<float, int>(resident.logits.AsSpan()).SequenceEqual(
-                        MemoryMarshal.Cast<float, int>(shared.logits.AsSpan())), label + " shared KV logits differs bitwise");
-                    _output.WriteLine(label + ": shared KV hidden/logits match bitwise");
-                    int vocab = model.Config.VocabSize;
-                    for (int row = 0; row < rows; row++)
-                        Assert.Equal(Argmax(reference.logits.AsSpan(row * vocab, vocab)),
-                            Argmax(resident.logits.AsSpan(row * vocab, vocab)));
+                // Hold token IDs and prefill identical. Compare the original
+                // graph with resident PLE, then isolate donor-window reuse
+                // with PLE unchanged and require bitwise equality.
+                int[] tokens = prompt.AsSpan(prompt.Length - rows).ToArray();
+                var reference = Run(false, false);
+                var resident = Run(true, false);
+                var shared = Run(true, true);
+                string label = $"prompt={promptLength}, rows={rows}";
+                AssertClose(reference.hidden, resident.hidden, label + " hidden");
+                AssertClose(reference.logits, resident.logits, label + " logits");
+                Assert.True(MemoryMarshal.Cast<float, int>(resident.hidden.AsSpan()).SequenceEqual(
+                    MemoryMarshal.Cast<float, int>(shared.hidden.AsSpan())), label + " shared KV hidden differs bitwise");
+                Assert.True(MemoryMarshal.Cast<float, int>(resident.logits.AsSpan()).SequenceEqual(
+                    MemoryMarshal.Cast<float, int>(shared.logits.AsSpan())), label + " shared KV logits differs bitwise");
+                _output.WriteLine(label + ": shared KV hidden/logits match bitwise");
+                int vocab = model.Config.VocabSize;
+                for (int row = 0; row < rows; row++)
+                    Assert.Equal(Argmax(reference.logits.AsSpan(row * vocab, vocab)),
+                        Argmax(resident.logits.AsSpan(row * vocab, vocab)));
 
-                    (float[] hidden, float[] logits) Run(bool residentPle, bool reuseSharedKv)
-                    {
-                        nativeEnvironment.Set("TS_GMTP_REUSE_KV", "0");
-                        model.ResetKVCache();
-                        model.ForwardRefill(prompt);
-                        Assert.Equal(promptLength, target.CacheSeqLen);
-                        long gathersBefore = GatherCount(model);
-                        Environment.SetEnvironmentVariable(VerifyPleVariable, residentPle ? "1" : "0");
-                        nativeEnvironment.Set("TS_GMTP_REUSE_KV", reuseSharedKv ? "1" : "0");
-                        var hidden = new float[rows * model.Config.HiddenSize];
-                        var logits = new float[rows * model.Config.VocabSize];
-                        target.SpecForward(tokens, hidden, logits, allLogitsRows: true);
-                        Assert.Equal(promptLength + rows, target.CacheSeqLen);
-                        Assert.Equal(gathersBefore + (residentPle && rows > 1 ? 1 : 0), GatherCount(model));
-                        return (hidden, logits);
-                    }
+                (float[] hidden, float[] logits) Run(bool residentPle, bool reuseSharedKv)
+                {
+                    nativeEnvironment.Set("TS_GMTP_REUSE_KV", "0");
+                    model.ResetKVCache();
+                    model.ForwardRefill(prompt);
+                    Assert.Equal(promptLength, target.CacheSeqLen);
+                    long gathersBefore = GatherCount(model);
+                    model.GatherPleInVerify = residentPle;
+                    nativeEnvironment.Set("TS_GMTP_REUSE_KV", reuseSharedKv ? "1" : "0");
+                    var hidden = new float[rows * model.Config.HiddenSize];
+                    var logits = new float[rows * model.Config.VocabSize];
+                    target.SpecForward(tokens, hidden, logits, allLogitsRows: true);
+                    Assert.Equal(promptLength + rows, target.CacheSeqLen);
+                    Assert.Equal(gathersBefore + (residentPle && rows > 1 ? 1 : 0), GatherCount(model));
+                    return (hidden, logits);
                 }
             }
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(VerifyPleVariable, savedSwitch);
         }
     }
 
@@ -159,7 +150,6 @@ public class Gemma4VerifyPleTests
         QuantizedWeight projection = model.PleProjection;
         Assert.NotNull(projection);
         float savedScale = projection.Scale;
-        string savedSwitch = Environment.GetEnvironmentVariable(VerifyPleVariable);
         var target = (ISpeculativeTarget)model;
         int[] prompt = BuildPrompt(model, 64);
         int[] tokens = prompt.AsSpan(prompt.Length - 3).ToArray();
@@ -187,7 +177,6 @@ public class Gemma4VerifyPleTests
         finally
         {
             projection.Scale = savedScale;
-            Environment.SetEnvironmentVariable(VerifyPleVariable, savedSwitch);
         }
 
         (float[] hidden, float[] logits) Run(bool requestGather, bool expectedGather)
@@ -195,7 +184,7 @@ public class Gemma4VerifyPleTests
             model.ResetKVCache();
             model.ForwardRefill(prompt);
             long gathersBefore = GatherCount(model);
-            Environment.SetEnvironmentVariable(VerifyPleVariable, requestGather ? "1" : "0");
+            model.GatherPleInVerify = requestGather;
             var hidden = new float[tokens.Length * model.Config.HiddenSize];
             var logits = new float[tokens.Length * model.Config.VocabSize];
             target.SpecForward(tokens, hidden, logits, allLogitsRows: true);
@@ -214,50 +203,9 @@ public class Gemma4VerifyPleTests
     // Native diagnostic switches use getenv. Keep libc's table synchronized
     // with .NET's table, as in Glm5NextNativeTensorParallelTests; changing only
     // the managed environment could leave this A/B test on one native path.
-    private sealed class NativeEnvironmentScope : IDisposable
-    {
-        private readonly Dictionary<string, string> _originals = new();
-
-        [DllImport("libc", EntryPoint = "setenv", CharSet = CharSet.Ansi)]
-        private static extern int SetEnvUnix(string name, string value, int overwrite);
-
-        [DllImport("libc", EntryPoint = "unsetenv", CharSet = CharSet.Ansi)]
-        private static extern int UnsetEnvUnix(string name);
-
-        [DllImport("ucrtbase", EntryPoint = "_putenv_s", CharSet = CharSet.Ansi)]
-        private static extern int PutEnvWindows(string name, string value);
-
-        public void Set(string name, string value)
-        {
-            if (!_originals.ContainsKey(name))
-                _originals[name] = Environment.GetEnvironmentVariable(name);
-            SetBoth(name, value);
-        }
-
-        public void Dispose()
-        {
-            foreach (var pair in _originals)
-                SetBoth(pair.Key, pair.Value);
-        }
-
-        private static void SetBoth(string name, string value)
-        {
-            Environment.SetEnvironmentVariable(name, value);
-            int result = OperatingSystem.IsWindows()
-                ? PutEnvWindows(name, value ?? string.Empty)
-                : value == null ? UnsetEnvUnix(name) : SetEnvUnix(name, value, 1);
-            Assert.Equal(0, result);
-        }
-    }
 
     private static BackendType ReadBackend()
-        => (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "cpu").ToLowerInvariant() switch
-        {
-            "metal" => BackendType.GgmlMetal,
-            "cuda" => BackendType.GgmlCuda,
-            "vulkan" => BackendType.GgmlVulkan,
-            _ => BackendType.GgmlCpu,
-        };
+        => TestGates.PinnedGgmlBackend;
 
     private void AssertClose(float[] reference, float[] actual, string label)
     {

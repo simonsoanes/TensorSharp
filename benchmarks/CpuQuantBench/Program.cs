@@ -5,16 +5,15 @@
 //   dotnet run -c Release --project benchmarks/CpuQuantBench gemm all 256    # shapes with M <= 256
 //   dotnet run -c Release --project benchmarks/CpuQuantBench gemm decode     # DRAM-bound M = 1 matvecs [type]
 //   dotnet run -c Release --project benchmarks/CpuQuantBench batch           # MoE: many jobs in one call
-//   dotnet run -c Release --project benchmarks/CpuQuantBench legacy [quant]  # per-row path GB/s table
-//   dotnet run -c Release --project benchmarks/CpuQuantBench q4_k            # = legacy q4_k (old syntax)
+//   dotnet run -c Release --project benchmarks/CpuQuantBench perrow [quant]  # per-row path GB/s table
 //   dotnet run -c Release --project benchmarks/CpuQuantBench dg <gguf> cpu|ggml_cpu [reps] [width] [multi|step]
 //
-// "gemm" runs every (M, K, N) shape through the old per-row path (Legacy) and
-// the multi-row GEMM (AVX-512 and AVX2 kernels) in ONE process, checks the new
-// results against the old ones, and reports GOPS = 2*M*N*K / s (plus weight
+// "gemm" runs every (M, K, N) shape through the per-row path (PerRow) and
+// the multi-row GEMM (AVX-512 and AVX2 kernels) in ONE process, checks the GEMM
+// results against the per-row ones, and reports GOPS = 2*M*N*K / s (plus weight
 // GB/s at M = 1, where the matmul is bandwidth-bound). Dequant-only types
 // (Q3_K, IQ*, BF16/F16) compare DequantMatMulColumns with the float panel.
-// With TS_CPU_DISABLE_AVX512=1 the Legacy column is the per-row path's AVX2
+// With TS_CPU_DISABLE_AVX512=1 the PerRow column is the per-row path's AVX2
 // form as well (the GEMM columns always force their kernel set).
 //
 // "gemm decode" rotates each shape over enough weight copies (>= 160 MB) that
@@ -22,15 +21,15 @@
 // results decided that single rows take the GEMM for every type (see
 // QGemmMinRows in ManagedQuantGemm.cs).
 //
-// "legacy" is the original table: effective weight-read bandwidth of the
+// "perrow" is the effective weight-read bandwidth of the
 // per-row path per quant type for rowCount 1 and 4, next to what the default
 // (Auto) routing does with the same call. Decode tok/s for a model is
 // ~ (bytes read per token) / (GB/s here).
 //
 // "dg" profiles DiffusionGemma end to end (structured read or one 256-canvas
 // diffusion step) with the model's per-stage forward timing; run it with
-// TS_CPU_QGEMM=0 for the old path, or TS_CPU_QGEMM_VERIFY=1 to recompute every
-// GEMM of the forward through the per-row path and print the worst difference.
+// TS_CPU_QGEMM_VERIFY=1 to recompute every GEMM of the forward through the
+// per-row path and print the worst difference.
 using System.Diagnostics;
 using TensorSharp.Models;
 using TensorSharp.Runtime;
@@ -43,8 +42,8 @@ if (mode == "dg")
 NativeDequant.PreferManaged = true;   // dequant stays in managed code, as on the cpu backend
 switch (mode)
 {
-    case "legacy":
-        RunLegacyTable(args.Length > 1 ? args[1].ToLowerInvariant() : null);
+    case "perrow":
+        RunPerRowTable(args.Length > 1 ? args[1].ToLowerInvariant() : null);
         return 0;
     case "batch":
         RunBatchTable();
@@ -54,24 +53,17 @@ switch (mode)
         string typeFilter = args.Length > 1 ? args[1].ToLowerInvariant() : "all";
         bool decode = typeFilter == "decode";
         int maxM = args.Length > 2 && !decode ? int.Parse(args[2]) : int.MaxValue;
-        bool skipLegacyBig = Environment.GetEnvironmentVariable("QBENCH_SKIP_LEGACY_BIG") == "1";
-        RunGemmTable(typeFilter, maxM, skipLegacyBig, decode && args.Length > 2 ? args[2].ToLowerInvariant() : null);
+        bool skipPerRowBig = Environment.GetEnvironmentVariable("QBENCH_SKIP_PERROW_BIG") == "1";
+        RunGemmTable(typeFilter, maxM, skipPerRowBig, decode && args.Length > 2 ? args[2].ToLowerInvariant() : null);
         return 0;
     }
     default:
-        // The original command line was `CpuQuantBench <quant>` for one row of
-        // the GB/s table; keep that meaning instead of running the whole GEMM table.
-        if (LegacyQuants().Any(q => q.name == NormalizeQuant(mode)))
-        {
-            RunLegacyTable(mode);
-            return 0;
-        }
         Console.Error.WriteLine($"unknown mode '{args[0]}'. Modes: gemm [type|all|decode] [maxM] | batch | " +
-                                "legacy [quant] | <quant> | dg <gguf> cpu|ggml_cpu [reps] [width] [multi|step]");
+                                "perrow [quant] | dg <gguf> cpu|ggml_cpu [reps] [width] [multi|step]");
         return 2;
 }
 
-static void RunGemmTable(string typeFilter, int maxM, bool skipLegacyBig, string decodeType)
+static void RunGemmTable(string typeFilter, int maxM, bool skipPerRowBig, string decodeType)
 {
     var dg = new (int m, int k, int n)[] { (1, 2816, 1408), (2, 2816, 1408), (4, 2816, 1408), (70, 2816, 2112), (70, 2816, 4096) };
     var dgDown = new (int m, int k, int n)[] { (1, 704, 2816), (2, 704, 2816), (8, 704, 2816), (70, 2112, 2816) };
@@ -118,8 +110,8 @@ static void RunGemmTable(string typeFilter, int maxM, bool skipLegacyBig, string
                       $"avx2={ManagedQuantizedOps.QGemmAvx2Supported} TS_CPU_DISABLE_AVX512=" +
                       $"{Environment.GetEnvironmentVariable("TS_CPU_DISABLE_AVX512") ?? "-"}" +
                       (rotateBytes > 0 ? $" rotating >= {rotateBytes >> 20} MB of weights per shape" : ""));
-    Console.WriteLine($"{"type",-7} {"M",5} {"K",6} {"N",6} | {"legacy ms",10} {"GOPS",7} | {"avx512 ms",10} {"GOPS",7} {"x",6} | " +
-                      $"{"avx2 ms",10} {"GOPS",7} {"x",6} | {"relErr512",9} {"relErr2",9} | GB/s legacy/512/avx2");
+    Console.WriteLine($"{"type",-7} {"M",5} {"K",6} {"N",6} | {"perRow ms",10} {"GOPS",7} | {"avx512 ms",10} {"GOPS",7} {"x",6} | " +
+                      $"{"avx2 ms",10} {"GOPS",7} {"x",6} | {"relErr512",9} {"relErr2",9} | GB/s perRow/512/avx2");
     foreach (var (type, shapes) in plan)
     {
         if (typeFilter != "all" && !type.ToString().Equals(typeFilter.Replace("_", ""), StringComparison.OrdinalIgnoreCase)
@@ -128,12 +120,12 @@ static void RunGemmTable(string typeFilter, int maxM, bool skipLegacyBig, string
         foreach (var (m, k, n) in shapes)
         {
             if (m > maxM) continue;
-            RunShape(type, m, k, n, skipLegacyBig && (long)m * n * k > 20_000_000_000L, rotateBytes);
+            RunShape(type, m, k, n, skipPerRowBig && (long)m * n * k > 20_000_000_000L, rotateBytes);
         }
     }
 }
 
-static unsafe void RunShape(GgmlTensorType type, int m, int k, int n, bool skipLegacy, long rotateBytes)
+static unsafe void RunShape(GgmlTensorType type, int m, int k, int n, bool skipPerRow, long rotateBytes)
 {
     var rng = new Random(1234 + (int)type * 17 + k + n);
     long weightBytes = NativeDequant.RowSize((int)type, k) * n;
@@ -144,7 +136,7 @@ static unsafe void RunShape(GgmlTensorType type, int m, int k, int n, bool skipL
     float[] input = new float[(long)m * k];
     for (long i = 0; i < input.Length; i++)
         input[i] = 0.08f * MathF.Sin(i * 0.011f) + 0.02f * (float)(rng.NextDouble() - 0.5);
-    float[] outLegacy = new float[(long)m * n];
+    float[] outPerRow = new float[(long)m * n];
     float[] out512 = new float[(long)m * n];
     float[] out2 = new float[(long)m * n];
     double flops = 2.0 * m * n * k;
@@ -153,7 +145,7 @@ static unsafe void RunShape(GgmlTensorType type, int m, int k, int n, bool skipL
     try
     {
         fixed (float* x = input)
-        fixed (float* oL = outLegacy)
+        fixed (float* oL = outPerRow)
         fixed (float* o5 = out512)
         fixed (float* o2 = out2)
         {
@@ -168,16 +160,16 @@ static unsafe void RunShape(GgmlTensorType type, int m, int k, int n, bool skipL
             }
 
             float* oLp = oL, o5p = o5, o2p = o2;
-            double tL = skipLegacy ? double.NaN : Time(() => Run(oLp, QGemmIsa.Legacy), flops);
+            double tL = skipPerRow ? double.NaN : Time(() => Run(oLp, QGemmIsa.PerRow), flops);
             double t5 = Time(() => Run(o5p, QGemmIsa.Avx512), flops);
             double t2 = Time(() => Run(o2p, QGemmIsa.Avx2), flops);
-            if (!skipLegacy) Run(oLp, QGemmIsa.Legacy, 0);
+            if (!skipPerRow) Run(oLp, QGemmIsa.PerRow, 0);
             Run(o5p, QGemmIsa.Avx512, 0);
             Run(o2p, QGemmIsa.Avx2, 0);
-            if (skipLegacy)
-                outLegacy.AsSpan().Clear();
-            float e5 = skipLegacy ? float.NaN : RelErr(outLegacy, out512);
-            float e2 = RelErr(skipLegacy ? out512 : outLegacy, out2);
+            if (skipPerRow)
+                outPerRow.AsSpan().Clear();
+            float e5 = skipPerRow ? float.NaN : RelErr(outPerRow, out512);
+            float e2 = RelErr(skipPerRow ? out512 : outPerRow, out2);
             string gbs = m == 1
                 ? $"{weightBytes / tL / 1e9,6:F1} /{weightBytes / t5 / 1e9,6:F1} /{weightBytes / t2 / 1e9,6:F1}"
                 : "";
@@ -199,12 +191,12 @@ static string Name(GgmlTensorType t) => t.ToString().ToLowerInvariant();
 //     (DiffusionGemma's shapes: gate_up 2816 -> 1408 Q4_K, down 704 -> 2816 Q5_0 / Q8_0);
 //   decode: 8 jobs of ONE row (top-8 routing of a single token) - gate_up jobs share
 //     one input, down jobs each have their own.
-// Legacy per-row batch vs the default routing (Auto) and the forced kernel sets.
+// Per-row batch vs the default routing (Auto) and the forced kernel sets.
 // "quant ms" is the serial cost of quantizing the batch's rows (what the parallel
 // quantization dispatch of a prefill-sized batch saves).
 static unsafe void RunBatchTable()
 {
-    Console.WriteLine($"{"case",-8} {"type",-5} {"K",6} {"N",6} {"jobs",5} {"rows",6} | {"legacy ms",10} | {"auto ms",9} {"x",6} | " +
+    Console.WriteLine($"{"case",-8} {"type",-5} {"K",6} {"N",6} {"jobs",5} {"rows",6} | {"perRow ms",10} | {"auto ms",9} {"x",6} | " +
                       $"{"avx512 ms",10} {"x",6} | {"avx2 ms",9} {"x",6} | {"relErrAuto",10} | {"quant ms",8}");
     foreach (var (type, k, n) in new[] { (GgmlTensorType.Q4_K, 2816, 1408), (GgmlTensorType.Q5_0, 704, 2816), (GgmlTensorType.Q8_0, 704, 2816) })
         RunBatch("prefill", type, k, n, 128, rng => 1 + rng.Next(0, 16), sharedInput: false);
@@ -257,7 +249,7 @@ static unsafe void RunBatch(string label, GgmlTensorType type, int k, int n, int
     }
     var jl = Jobs(outs[0]); var ja = Jobs(outs[1]); var j5 = Jobs(outs[2]); var j2 = Jobs(outs[3]);
     double flops = 2.0 * totalRows * n * k;
-    double tL = Time(() => ManagedQuantizedOps.TryAddmmQuantizedBatch((int)type, k, k, jl, null, QGemmIsa.Legacy), flops);
+    double tL = Time(() => ManagedQuantizedOps.TryAddmmQuantizedBatch((int)type, k, k, jl, null, QGemmIsa.PerRow), flops);
     double tA = Time(() => ManagedQuantizedOps.TryAddmmQuantizedBatch((int)type, k, k, ja, null, QGemmIsa.Auto), flops);
     double t5 = Time(() => ManagedQuantizedOps.TryAddmmQuantizedBatch((int)type, k, k, j5, null, QGemmIsa.Avx512), flops);
     double t2 = Time(() => ManagedQuantizedOps.TryAddmmQuantizedBatch((int)type, k, k, j2, null, QGemmIsa.Avx2), flops);
@@ -365,7 +357,7 @@ static byte[] BuildRandom(Random rng, GgmlTensorType type, int outDim, int inDim
     }
 }
 
-static (string name, GgmlTensorType type)[] LegacyQuants() => new[]
+static (string name, GgmlTensorType type)[] PerRowQuants() => new[]
 {
     ("q4_0", GgmlTensorType.Q4_0),
     ("q8_0", GgmlTensorType.Q8_0),
@@ -383,25 +375,25 @@ static string NormalizeQuant(string name)
     return name.Length == 3 && name[0] == 'q' ? $"{name.Substring(0, 2)}_{name[2]}" : name;
 }
 
-static void RunLegacyTable(string filter)
+static void RunPerRowTable(string filter)
 {
     filter = NormalizeQuant(filter);
     int inDim = 4096, outDim = 4096, iters = 200;
     Console.WriteLine($"cores={Environment.ProcessorCount}  matmul={inDim}x{outDim}  (per-row path, then the default routing)");
     Console.WriteLine($"{"quant",-6} {"rows",4}  {"GB/s",8}  {"ms/call",9}  {"relErr",9} | {"auto GB/s",9}  {"ms/call",9}  {"relErr",9}");
-    foreach (var (name, type) in LegacyQuants())
+    foreach (var (name, type) in PerRowQuants())
     {
         if (filter != null && name != filter) continue;
         foreach (int rows in new[] { 1, 4 })
         {
-            var (gbps, ms, err) = BenchLegacy(type, inDim, outDim, rows, iters, QGemmIsa.Legacy);
-            var (gbpsA, msA, errA) = BenchLegacy(type, inDim, outDim, rows, iters, QGemmIsa.Auto);
+            var (gbps, ms, err) = BenchPerRow(type, inDim, outDim, rows, iters, QGemmIsa.PerRow);
+            var (gbpsA, msA, errA) = BenchPerRow(type, inDim, outDim, rows, iters, QGemmIsa.Auto);
             Console.WriteLine($"{name,-6} {rows,4}  {gbps,8:F1}  {ms,9:F3}  {err,9:E2} | {gbpsA,9:F1}  {msA,9:F3}  {errA,9:E2}");
         }
     }
 }
 
-static unsafe (double gbps, double msPerCall, float maxRelErr) BenchLegacy(
+static unsafe (double gbps, double msPerCall, float maxRelErr) BenchPerRow(
     GgmlTensorType type, int inDim, int outDim, int rows, int iters, QGemmIsa isa)
 {
     var rng = new Random(12345 + (int)type);

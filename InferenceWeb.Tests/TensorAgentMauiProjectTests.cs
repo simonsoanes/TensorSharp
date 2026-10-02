@@ -19,18 +19,20 @@ using Xunit;
 namespace InferenceWeb.Tests;
 
 /// <summary>
-/// Drift guards for the TensorAgent iOS head (TensorAgent/src/TensorAgent.Maui).
+/// Drift guards for the TensorAgent app (TensorAgent/src/TensorAgent.Maui): the iOS
+/// head, and the Mac Catalyst and Windows desktop heads built from the same project.
 ///
 /// <para>
-/// The head cannot be referenced from a net10.0 test project (it targets
-/// net10.0-ios and needs the maui-ios workload), and the facts that make it
-/// work are all declarative: the static NativeReference to the GgmlOps
-/// xcframework with the exported_symbol linker flags, the phone-specific Web UI
-/// bundled from the app's own wwwroot, the loopback ATS exception,
-/// and the device-only memory entitlements. Each of these was hit for real
-/// while bringing the app up, and each fails silently when removed - the
-/// project still builds, and the app then dies at first P/Invoke or shows a
-/// blank WebView. So the tests read the project files as XML and pin them.
+/// The heads cannot be referenced from a net10.0 test project (they target
+/// net10.0-ios, net10.0-maccatalyst and net10.0-windows and need the MAUI workloads),
+/// and the facts that make them work are all declarative: the static NativeReference
+/// to the GgmlOps xcframework with the exported_symbol linker flags, the desktop
+/// engine library shipped beside the Mac and Windows apps, the Web UI bundled from
+/// the app's own wwwroot, the loopback ATS exception, and the device-only memory
+/// entitlements. Each of these was hit for real while bringing an app up, and each
+/// fails silently when removed - the project still builds, and the app then dies at
+/// first P/Invoke or shows a blank WebView. So the tests read the project files as
+/// XML and pin them.
 /// </para>
 /// </summary>
 public class TensorAgentMauiProjectTests
@@ -69,6 +71,13 @@ public class TensorAgentMauiProjectTests
 
     private static string? Property(XDocument doc, string name) =>
         doc.Descendants(Ns + name).Select(e => e.Value.Trim()).FirstOrDefault();
+
+    /// <summary>The condition on an item's own element or on its ItemGroup, whichever it has.</summary>
+    private static string ConditionOf(XElement item) =>
+        item.Attribute("Condition")?.Value ?? item.Parent?.Attribute("Condition")?.Value ?? string.Empty;
+
+    private static bool IsFor(XElement item, string platform) =>
+        ConditionOf(item).Contains($"'$(TensorAgentPlatform)' == '{platform}'", StringComparison.Ordinal);
 
     [Fact]
     public void Solution_ListsTheMauiHead()
@@ -134,16 +143,27 @@ public class TensorAgentMauiProjectTests
     }
 
     [Fact]
-    public void Head_TargetsIosWithTheAgreedIdentity()
+    public void Head_TargetsIosAndTheTwoDesktopsWithTheAgreedIdentity()
     {
         XDocument doc = Csproj;
-        Assert.Equal("net10.0-ios", Property(doc, "TargetFramework"));
+        XElement[] frameworks = doc.Descendants(Ns + "TargetFrameworks").ToArray();
+        Assert.Equal(2, frameworks.Length);
+        // Every non-Windows host builds the two Apple heads; a Windows host builds the
+        // Windows head alone, so neither needs the other's workloads.
+        XElement apple = Assert.Single(frameworks, e => e.Value.Trim() == "net10.0-ios;net10.0-maccatalyst");
+        Assert.Contains("!$([MSBuild]::IsOSPlatform('windows'))", apple.Attribute("Condition")?.Value ?? string.Empty);
+        XElement windows = Assert.Single(frameworks, e => e.Value.Trim() == "net10.0-windows10.0.19041.0");
+        Assert.StartsWith("$([MSBuild]::IsOSPlatform('windows'))", windows.Attribute("Condition")?.Value ?? string.Empty);
+        Assert.Empty(doc.Descendants(Ns + "TargetFramework"));
+        Assert.Equal("$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)'))", Property(doc, "TensorAgentPlatform"));
         Assert.Equal("true", Property(doc, "UseMaui"));
         Assert.Equal("ai.tensorsharp.tensoragent", Property(doc, "ApplicationId"));
         Assert.Equal("TensorAgent", Property(doc, "ApplicationTitle"));
         // Must match build-ios.sh's deployment target or the static archive
         // refuses to link.
         Assert.Equal("17.0", Property(doc, "SupportedOSPlatformVersion"));
+        XElement ios = Assert.Single(doc.Descendants(Ns + "SupportedOSPlatformVersion"), e => IsFor(e, "ios"));
+        Assert.Equal("17.0", ios.Value.Trim());
         Assert.Equal("partial", Property(doc, "TrimMode"));
         Assert.Equal("true", Property(doc, "JsonSerializerIsReflectionEnabledByDefault"));
         Assert.Equal("true", Property(doc, "TensorSharpSkipGgmlNative"));
@@ -159,6 +179,8 @@ public class TensorAgentMauiProjectTests
         XElement native = Assert.Single(Csproj.Descendants(Ns + "NativeReference"),
             e => e.Attribute("Include")!.Value.Replace('\\', '/').Contains("GgmlOps.xcframework", StringComparison.Ordinal));
         Assert.EndsWith("TensorSharp.GGML.Native/build-ios/GgmlOps.xcframework", native.Attribute("Include")!.Value.Replace('\\', '/'));
+        // The xcframework is the phone's alone: the Mac head loads the desktop dylib.
+        Assert.True(IsFor(native, "ios"), ConditionOf(native));
         Assert.Equal("Static", native.Attribute("Kind")?.Value);
         Assert.Equal("True", native.Attribute("ForceLoad")?.Value);
         Assert.Equal("True", native.Attribute("IsCxx")?.Value);
@@ -489,7 +511,7 @@ public class TensorAgentMauiProjectTests
         // its first step. The csproj excludes such a skill by name because MSBuild cannot
         // read verdicts.json; this keeps the two equal.
         XElement bundle = Assert.Single(Csproj.Descendants(Ns + "BundleResource"),
-            e => e.Attribute("Include")!.Value.Replace('\\', '/') == "../../skills/**/*");
+            e => e.Attribute("Include")!.Value.Replace('\\', '/') == "../../skills/**/*" && IsFor(e, "ios"));
         Assert.StartsWith("skills/", bundle.Attribute("Link")?.Value.Replace('\\', '/'));
 
         string[] excludes = (bundle.Attribute("Exclude")?.Value ?? string.Empty)
@@ -548,6 +570,157 @@ public class TensorAgentMauiProjectTests
 
         // And the other direction: a skill the verifier passed must actually ship.
         Assert.Equal(passed, bundled);
+    }
+
+    [Fact]
+    public void DesktopHeads_BundleEverySkillBecauseTheyRunRealProcesses()
+    {
+        // The verdicts are about what the phone's in-app interpreters can run. The Mac and
+        // Windows apps run skills with real python3, node, npm and browsers, as the desktop
+        // hosts do, so the skills the phone excludes are exactly the ones they are for.
+        XDocument doc = Csproj;
+        XElement mac = Assert.Single(doc.Descendants(Ns + "BundleResource"),
+            e => e.Attribute("Include")!.Value.Replace('\\', '/') == "../../skills/**/*" && IsFor(e, "maccatalyst"));
+        XElement windows = Assert.Single(doc.Descendants(Ns + "Content"),
+            e => e.Attribute("Include")!.Value.Replace('\\', '/') == "../../skills/**/*" && IsFor(e, "windows"));
+        Assert.Equal("PreserveNewest", windows.Attribute("CopyToOutputDirectory")?.Value);
+
+        foreach (XElement item in new[] { mac, windows })
+        {
+            Assert.StartsWith("skills/", item.Attribute("Link")?.Value.Replace('\\', '/'));
+            string[] excludes = (item.Attribute("Exclude")?.Value ?? string.Empty)
+                .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(pattern => pattern.Replace('\\', '/'))
+                .OrderBy(pattern => pattern, StringComparer.Ordinal)
+                .ToArray();
+            Assert.Equal(new[]
+            {
+                "../../skills/**/__pycache__/**/*",
+                "../../skills/**/node_modules/**/*",
+                "../../skills/verdicts.json",
+            }, excludes);
+        }
+
+        // And the Web UI beside them, from the same wwwroot.
+        Assert.Single(doc.Descendants(Ns + "Content"),
+            e => e.Attribute("Include")!.Value.Replace('\\', '/') == "wwwroot/**/*" && IsFor(e, "windows"));
+    }
+
+    [Fact]
+    public void MacHead_ShipsTheDesktopEngineAndBuildsItBeforeTheApp()
+    {
+        XDocument doc = Csproj;
+        XElement dylib = Assert.Single(doc.Descendants(Ns + "NativeReference"),
+            e => e.Attribute("Include")!.Value.Replace('\\', '/').EndsWith("/libGgmlOps.dylib", StringComparison.Ordinal));
+        Assert.True(IsFor(dylib, "maccatalyst"), ConditionOf(dylib));
+        Assert.Equal("Dynamic", dylib.Attribute("Kind")?.Value);
+        Assert.Contains("$(TensorAgentGgmlNativeDir)", dylib.Attribute("Include")!.Value, StringComparison.Ordinal);
+        Assert.Contains(doc.Descendants(Ns + "TensorAgentGgmlNativeDir"),
+            e => e.Value.Replace('\\', '/').EndsWith("TensorSharp.GGML.Native/build", StringComparison.Ordinal));
+
+        // The referenced projects skip their native builds for every head, so the desktop
+        // library is built here, through the backend project's own incremental targets,
+        // before anything is compiled against it.
+        XElement target = Assert.Single(doc.Descendants(Ns + "Target"),
+            e => e.Attribute("Name")?.Value == "TensorAgentBuildDesktopEngine");
+        Assert.Equal("BeforeBuild", target.Attribute("BeforeTargets")?.Value);
+        string condition = target.Attribute("Condition")?.Value ?? string.Empty;
+        Assert.Contains("maccatalyst", condition, StringComparison.Ordinal);
+        Assert.Contains("windows", condition, StringComparison.Ordinal);
+        XElement build = Assert.Single(target.Elements(Ns + "MSBuild"));
+        Assert.EndsWith("TensorSharp.Backends.GGML/TensorSharp.Backends.GGML.csproj",
+            build.Attribute("Projects")!.Value.Replace('\\', '/'), StringComparison.Ordinal);
+        Assert.Equal("BuildGgmlNativeUnix;BuildGgmlNativeWindows", build.Attribute("Targets")?.Value);
+        Assert.Equal("TensorSharpSkipGgmlNative=false", build.Attribute("Properties")?.Value);
+        string removed = build.Attribute("RemoveProperties")?.Value ?? string.Empty;
+        Assert.Contains("TargetFramework", removed.Split(';'));
+        Assert.Contains("RuntimeIdentifier", removed.Split(';'));
+
+        // Same global properties for both Apple heads, so a build of both never asks for
+        // one referenced project twice with different sets.
+        Assert.Contains("TensorSharpAppleTargets=true", string.Join(";", doc.Descendants(Ns + "TensorSharpNativeSkipProperties").Select(e => e.Value)));
+
+        // The phone's strip list stays the phone's.
+        XElement import = Assert.Single(doc.Descendants(Ns + "Import"),
+            e => e.Attribute("Project")?.Value == "GgmlExportedSymbols.targets");
+        Assert.True(IsFor(import, "ios"), ConditionOf(import));
+    }
+
+    [Fact]
+    public void MacHead_IgnoresExactlyTheEmbeddedPythonImports()
+    {
+        // The Apple SDKs hand every __Internal P/Invoke to the native linker as a symbol
+        // the executable must define. The phone links Python.framework; the Mac app links
+        // no interpreter, so each CPython import is marked Ignore there, and a new one
+        // missing from the list fails the Mac link with "Undefined symbols".
+        XElement import = Assert.Single(Csproj.Descendants(Ns + "Import"),
+            e => e.Attribute("Project")?.Value == "EmbeddedPythonSymbols.targets");
+        Assert.True(IsFor(import, "maccatalyst"), ConditionOf(import));
+
+        XDocument symbols = XDocument.Load(Path.Combine(MauiDir, "EmbeddedPythonSymbols.targets"));
+        XElement[] items = symbols.Descendants(Ns + "ReferenceNativeSymbol").ToArray();
+        Assert.All(items, item =>
+        {
+            Assert.Equal("Ignore", item.Attribute("SymbolMode")?.Value);
+            Assert.Equal("Function", item.Attribute("SymbolType")?.Value);
+            Assert.True(IsFor(item, "maccatalyst"), ConditionOf(item));
+        });
+
+        string source = File.ReadAllText(Path.Combine(RepoRoot, "TensorAgent", "src", "TensorAgent.Core", "Python", "PythonNative.cs"));
+        Assert.Contains("internal const string LibraryName = \"__Internal\";", source, StringComparison.Ordinal);
+        var import_ = new Regex(
+            @"\[DllImport\(LibraryName[^\]]*\]\s*(?:internal|private|public)\s+static\s+extern\s+[\w<>\*\[\], ]+?\s+(\w+)\s*\(",
+            RegexOptions.CultureInvariant);
+        string[] imports = import_.Matches(source).Select(m => m.Groups[1].Value)
+            .Distinct(StringComparer.Ordinal).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+        Assert.NotEmpty(imports);
+        Assert.Equal(imports, items.Select(i => i.Attribute("Include")!.Value).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+    }
+
+    [Fact]
+    public void MacHead_AllowsLoopbackHttpAndIsNotAppSandboxed()
+    {
+        string plist = File.ReadAllText(Path.Combine(MauiDir, "Platforms", "MacCatalyst", "Info.plist"));
+        Assert.Contains("<key>NSAllowsLocalNetworking</key>", plist);
+        Assert.Contains("<string>SceneDelegate</string>", plist);
+        foreach (string key in new[]
+                 {
+                     "NSCameraUsageDescription",
+                     "NSMicrophoneUsageDescription",
+                     "NSPhotoLibraryUsageDescription",
+                     "NSSpeechRecognitionUsageDescription",
+                 })
+        {
+            Assert.Contains($"<key>{key}</key>", plist);
+        }
+
+        // An Entitlements.plist beside it is what MAUI signs the app with, and the App
+        // Sandbox there would stop every command: a process inside the App Sandbox
+        // cannot apply the Seatbelt profile the desktop backend confines code with.
+        Assert.False(File.Exists(Path.Combine(MauiDir, "Platforms", "MacCatalyst", "Entitlements.plist")));
+        Assert.DoesNotContain(Csproj.Descendants(Ns + "CodesignEntitlements"),
+            e => e.Value.Contains("MacCatalyst", StringComparison.Ordinal));
+        foreach (string file in new[] { "AppDelegate.cs", "Program.cs", "SceneDelegate.cs" })
+            Assert.True(File.Exists(Path.Combine(MauiDir, "Platforms", "MacCatalyst", file)), file);
+    }
+
+    [Fact]
+    public void WindowsHead_IsAnUnpackagedAppThatShipsItsEngine()
+    {
+        XDocument doc = Csproj;
+        XElement packaging = Assert.Single(doc.Descendants(Ns + "WindowsPackageType"));
+        Assert.Equal("None", packaging.Value.Trim());
+        Assert.True(IsFor(packaging, "windows"));
+        Assert.Equal("true", Assert.Single(doc.Descendants(Ns + "WindowsAppSDKSelfContained")).Value.Trim());
+
+        XElement ship = Assert.Single(doc.Descendants(Ns + "Target"),
+            e => e.Attribute("Name")?.Value == "TensorAgentShipWindowsEngine");
+        Assert.Equal("TensorAgentBuildDesktopEngine", ship.Attribute("AfterTargets")?.Value);
+        Assert.Contains(ship.Descendants(Ns + "Content"), e => e.Attribute("Link")?.Value == "GgmlOps.dll");
+        Assert.Single(ship.Descendants(Ns + "Error"));
+
+        foreach (string file in new[] { "App.xaml", "App.xaml.cs", "app.manifest", "DeviceState.cs", "FilePresenter.cs", "Dictation.cs" })
+            Assert.True(File.Exists(Path.Combine(MauiDir, "Platforms", "Windows", file)), file);
     }
 
     [Fact]

@@ -34,9 +34,7 @@ int pairs = int.Parse(Option("--pairs", "3"));
 if (steps is < 1 or > 256 || pairs is < 1 or > 20)
     throw new ArgumentException("Use 1..256 steps and 1..20 pairs.");
 Environment.SetEnvironmentVariable("MAX_CONTEXT", "8192");
-Environment.SetEnvironmentVariable("TS_PREFIX_CHECKPOINTS", "1");
 Environment.SetEnvironmentVariable("TS_PREFIX_CHECKPOINTS_MAX", "2");
-Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE", "1");
 KvCacheDtypeConfig.ConfigureFromEnvironment();
 var runs = new List<WorkflowRun>();
 var failures = new List<string>();
@@ -241,7 +239,7 @@ static SchedulerConfig Config() => new()
     MaxNumBatchedTokens = 4096, MaxNumRunningSequences = 4,
     MaxPrefillChunkSize = 256, SoloPrefillChunkSize = 8192,
     NumBlocks = 256, BlockSize = 256, EnablePrefixCaching = true,
-    PrefixCacheMode = PrefixCacheMode.Tree, StopRepetition = false, DecodeQuantumTokens = 256,
+    StopRepetition = false, DecodeQuantumTokens = 256,
 };
 
 static async Task RunCase(ModelBase model, FixtureSet fixtures, WorkflowRun run, int steps, bool warmChecks, Action persist)

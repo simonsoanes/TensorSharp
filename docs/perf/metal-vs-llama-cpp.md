@@ -187,7 +187,7 @@ CUDA/Vulkan over a `ggml_set_rows` crash on Metal. On the current vendored ggml
 the crash no longer reproduces and the output is byte-identical — but it is worth
 **+0.4%** (46.4 → 46.6 tok/s), not the ~1 ms/token it saves on Vulkan, because
 decode here is bandwidth-bound on the weights (7.6 GB per token at ~350 GB/s).
-Left off, reachable with `TS_GEMMA4_METAL_PERSIST=1`.
+Left off: Metal takes the non-persist path.
 
 ## One correctness bug found on the way
 
@@ -231,6 +231,5 @@ TS_GGML_LOG_DEBUG=1 GGML_METAL_GRAPH_DEBUG=2 dotnet TensorSharp.Cli.dll \
 # A/B levers
 TS_METAL_GRAPH_OPTIMIZE=0    # ggml's Metal node reorder, off
 TS_SWA_DECODE_FLAT=0         # rotated sliding-window read, restored
-TS_GEMMA4_METAL_PERSIST=1    # persistent decode graph on Metal, on
 GGML_METAL_FUSION_DISABLE=1  # ggml-metal op fusion, off (proves fusion is lossless)
 ```

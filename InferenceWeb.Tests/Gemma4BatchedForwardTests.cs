@@ -17,7 +17,7 @@
 // falls back to the per-seq KV-swap path - meaning these tests are
 // genuinely meaningful: they fire ForwardBatch and require it to
 // either compute the right answer OR cleanly fall back. Either way
-// the engine produces the same logits as the legacy single-sequence
+// the engine produces the same logits as the per-op single-sequence
 // forward.
 using System;
 using System.Collections.Generic;
@@ -39,7 +39,7 @@ public class Gemma4BatchedForwardTests
     public Gemma4BatchedForwardTests(ITestOutputHelper output) { _output = output; }
 
     [ModelFact("TS_TEST_MODEL_DIR", "gemma-4-e4b")]
-    public Task Gemma4_BatchSize1_ForwardBatchEitherMatchesLegacyOrThrows()
+    public Task Gemma4_BatchSize1_ForwardBatchEitherMatchesPerOpOrThrows()
         => RunCorrectnessTest();
 
     private async Task RunCorrectnessTest()
@@ -47,8 +47,6 @@ public class Gemma4BatchedForwardTests
         var model = await TryLoadGemma4();
         if (model == null) return;
 
-        string prevFusedPrefill = Environment.GetEnvironmentVariable("TS_FUSED_LAYER_PREFILL");
-        string prevForceUnfused = Environment.GetEnvironmentVariable("TS_GEMMA4_FORCE_UNFUSED");
         try
         {
             // Use a prompt the model has a CONFIDENT continuation for, so the
@@ -59,16 +57,15 @@ public class Gemma4BatchedForwardTests
             const int blockSize = 16;
 
             // Disable the fused-prefill kernel AND the fused decode path so the
-            // legacy comparison is apples-to-apples with batched.
-            // TS_GEMMA4_FORCE_UNFUSED=1 also forces a CPU sync after every layer
-            // in the legacy TransformerBlock - that determinism is what makes the
-            // batched-vs-legacy comparison reproducible run-to-run.
-            Environment.SetEnvironmentVariable("TS_FUSED_LAYER_PREFILL", "0");
-            Environment.SetEnvironmentVariable("TS_GEMMA4_FORCE_UNFUSED", "1");
+            // per-op comparison is apples-to-apples with batched. ForceUnfused also
+            // forces a CPU sync after every layer in the per-op TransformerBlock -
+            // that determinism is what makes the batched-vs-per-op comparison
+            // reproducible run-to-run.
+            model.ForceUnfused = true;
 
             model.ResetKVCache();
-            var legacyLogits = model.Forward(prompt);
-            int legacyTop1 = ArgMax(legacyLogits);
+            var perOpLogits = model.Forward(prompt);
+            int perOpTop1 = ArgMax(perOpLogits);
 
             var pool = new BlockPool(numBlocks: 8, blockSize: blockSize,
                 blockByteSize: model.ComputeKVBlockByteSize(blockSize));
@@ -91,53 +88,47 @@ public class Gemma4BatchedForwardTests
 
             Assert.Single(perSeqLogits);
             int batchedTop1 = ArgMax(perSeqLogits[0]);
-            string legacyTok = model.Tokenizer.Decode(new System.Collections.Generic.List<int> { legacyTop1 });
+            string perOpTok = model.Tokenizer.Decode(new System.Collections.Generic.List<int> { perOpTop1 });
             string batchedTok = model.Tokenizer.Decode(new System.Collections.Generic.List<int> { batchedTop1 });
-            _output.WriteLine($"[gemma4] legacy top-1 = {legacyTop1} '{legacyTok}', batched top-1 = {batchedTop1} '{batchedTok}'");
+            _output.WriteLine($"[gemma4] per-op top-1 = {perOpTop1} '{perOpTok}', batched top-1 = {batchedTop1} '{batchedTok}'");
 
             // Verify the two paths agree on the LOGIT VECTOR up to FP noise.
             // Comparing per-token argmax is too sensitive: across 42 layers of
             // SWA + GQA + PLE + KV-donor sharing, accumulated FP rounding can
-            // flip top-1 on a low-confidence prompt (the legacy itself isn't
+            // flip top-1 on a low-confidence prompt (the per-op path itself isn't
             // bit-deterministic across Metal kernel launches). A cosine-style
             // numerical match catches real correctness bugs without the noise.
-            var legacyVec = legacyLogits;
+            var perOpVec = perOpLogits;
             var batchedVec = perSeqLogits[0];
-            Assert.Equal(legacyVec.Length, batchedVec.Length);
+            Assert.Equal(perOpVec.Length, batchedVec.Length);
             double dot = 0, normL = 0, normB = 0;
-            for (int i = 0; i < legacyVec.Length; i++)
+            for (int i = 0; i < perOpVec.Length; i++)
             {
-                dot   += (double)legacyVec[i] * batchedVec[i];
-                normL += (double)legacyVec[i] * legacyVec[i];
+                dot   += (double)perOpVec[i] * batchedVec[i];
+                normL += (double)perOpVec[i] * perOpVec[i];
                 normB += (double)batchedVec[i] * batchedVec[i];
             }
             double cosine = dot / (Math.Sqrt(normL) * Math.Sqrt(normB) + 1e-12);
             _output.WriteLine($"[gemma4] logit cosine similarity = {cosine:F6}");
 
             // Also report top-5 overlap as a softer secondary signal.
-            var legacyTop5 = TopK(legacyLogits, 5);
+            var perOpTop5 = TopK(perOpLogits, 5);
             var batchedTop5 = TopK(perSeqLogits[0], 5);
-            _output.WriteLine($"[gemma4] legacy top-5  = {string.Join(",", legacyTop5)}");
+            _output.WriteLine($"[gemma4] per-op top-5  = {string.Join(",", perOpTop5)}");
             _output.WriteLine($"[gemma4] batched top-5 = {string.Join(",", batchedTop5)}");
             int overlap = 0;
-            foreach (var t in batchedTop5) if (legacyTop5.Contains(t)) overlap++;
+            foreach (var t in batchedTop5) if (perOpTop5.Contains(t)) overlap++;
             _output.WriteLine($"[gemma4] top-5 overlap = {overlap}/5");
 
             // Real bugs show cosine well below 0.98 (the L24-shared bug we
             // hit produced ~0.91 - that's the case the ggml_cont-on-Q-permute
             // fix in TSGgml_PagedAttentionForward addressed). 0.99 is the
             // tightest threshold that tolerates Metal's run-to-run FP
-            // variation in the legacy path on uncertain prompts.
+            // variation in the per-op path on uncertain prompts.
             Assert.True(cosine >= 0.99, $"logit cosine was {cosine:F6} (< 0.99) — likely a real bug");
         }
         finally
         {
-            // These two overrides used to leak out of the test: collections run serially
-            // in one process (TestAssemblyConfig), so every test scheduled after this one
-            // silently inherited "no fused prefill, force unfused Gemma 4" and measured or
-            // compared a path it never asked for.
-            Environment.SetEnvironmentVariable("TS_FUSED_LAYER_PREFILL", prevFusedPrefill);
-            Environment.SetEnvironmentVariable("TS_GEMMA4_FORCE_UNFUSED", prevForceUnfused);
             model.Dispose();
         }
     }
@@ -184,7 +175,7 @@ public class Gemma4BatchedForwardTests
         _output.WriteLine($"[gemma4] loading {Path.GetFileName(modelPath)}");
         try
         {
-            BackendType backend = OperatingSystem.IsMacOS() ? BackendType.GgmlMetal : BackendType.GgmlCpu;
+            BackendType backend = TestGates.PinnedGgmlBackend;
             var model = (Gemma4Model)ModelBase.Create(modelPath, backend);
             await Task.Yield();
             return model;

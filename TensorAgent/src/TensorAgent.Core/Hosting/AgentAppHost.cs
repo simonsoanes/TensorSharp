@@ -99,7 +99,9 @@ public sealed class AgentAppHost : IDisposable
         _loggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
         paths.EnsureCreated();
 
-        Settings = new SettingsStore(paths.SettingsFile);
+        Settings = new SettingsStore(
+            paths.SettingsFile,
+            paths.DeviceClass == DeviceClass.Desktop ? AppSettings.DesktopDefaults : null);
         AppSettings settings = Settings.Load();
 
         Models = new ModelStore(paths.ModelsDirectory);
@@ -107,18 +109,20 @@ public sealed class AgentAppHost : IDisposable
         // that now points at a different file. Nothing else can reach them: the Models
         // list is built from the catalog, so a directory no entry claims has no row and
         // no delete button, and it is gigabytes. Swept once per launch, before anything
-        // reads the store.
+        // reads the store. Only RETIRED ids go (ModelCatalog.Retired): an id this build
+        // merely does not know may be a newer build's, sharing this directory.
         Models.SweepOrphanedModels();
-        // And the checkpoints of models the catalog no longer has: a directory no
-        // entry claims has no delete button either.
+        // And the checkpoints of models the catalog has retired: a directory no entry
+        // claims has no delete button either.
         PrefixCheckpointFileStore.SweepOrphans(
             Path.Combine(Paths.CacheRoot, "prefix-cache"),
-            id => ModelCatalog.Find(id) is not null,
+            id => !ModelCatalog.IsRetired(id),
             HostLog);
         // The downloads belong to the APP, not to the model list: a five-gigabyte
         // transfer must not end because the user went back to the chat. See
         // ModelDownloadManager.
         Downloads = new ModelDownloadManager(Models, _loggerFactory.CreateLogger("TensorAgent.Downloads"));
+        Loras = new LoraStore(Paths.LorasDirectory);
         Conversations = new ConversationStore(paths.ConversationsDirectory);
         Catalog = ModelCatalog.ForDevice(paths.DeviceMemoryGB);
 
@@ -128,6 +132,7 @@ public sealed class AgentAppHost : IDisposable
         CodeExec = new CodeExecOptions
         {
             Enabled = settings.AllowCodeExecution,
+            Unconfined = settings.AllowUnconfinedExecution,
             AllowNetwork = settings.AllowNetwork,
             AllowInstall = settings.AllowNetwork,
             ScratchDirectory = paths.ScratchDirectory,
@@ -261,14 +266,7 @@ public sealed class AgentAppHost : IDisposable
         CatalogModel? selected = settings.SelectedModelId is { Length: > 0 } selectedId
             ? ModelCatalog.Find(selectedId)
             : null;
-        IReadOnlyDictionary<string, string> companions = DiffusionCompanions.Publish(
-            selected?.Kind == CatalogArchitectureKind.Diffusion ? selected : null, Models);
-        if (companions.Count > 0)
-        {
-            _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation(
-                "image-generation companions: {Companions}",
-                string.Join(", ", companions.Select(c => $"{c.Key}={Path.GetFileName(c.Value)}")));
-        }
+        PublishCompanions(selected);
 
         Chat = new WebUiChatService(
             ModelService, Sessions, Options, Uploads, Skills,
@@ -363,7 +361,8 @@ public sealed class AgentAppHost : IDisposable
         // never run beside the prefix-cache warm-up, must not submit GPU work while the
         // app is away, and has to recognise and repair a poisoned engine. See
         // GatedChatFrames.
-        Server.MapWebUi(Chat, Options.UploadDirectory, SkillsService, Recorder, chatFrames: GatedChatFrames, turns: Turns);
+        Server.MapWebUi(Chat, Options.UploadDirectory, SkillsService, Recorder, chatFrames: GatedChatFrames, turns: Turns,
+            prepareImage: PrepareImageTurn);
         // Without this the model's "here is your PDF" link 404s: the runner emits
         // /api/code/artifacts/... and nothing served it. See MapCodeArtifacts.
         Server.MapCodeArtifacts(Artifacts);
@@ -371,6 +370,7 @@ public sealed class AgentAppHost : IDisposable
             Catalog, Models, Conversations, Settings, DescribeEngine, RaisePageEvent, Downloads,
             onSettingsChanged: ApplySettings, describeModel: DescribeModelState, shares: Shares,
             hasShareContainer: () => ShareInbox is not null, discardShare: DiscardPendingShare);
+        Server.MapLoras(this);
     }
 
     public AgentPaths Paths { get; }
@@ -378,6 +378,8 @@ public sealed class AgentAppHost : IDisposable
     public ModelStore Models { get; }
     /// <summary>Every model download this launch started, independent of any screen.</summary>
     public ModelDownloadManager Downloads { get; }
+    /// <summary>The LoRA plug-ins on this device (<see cref="LoraCatalog"/>).</summary>
+    public LoraStore Loras { get; }
     public ConversationStore Conversations { get; }
     public IReadOnlyList<CatalogModel> Catalog { get; }
     public CodeExecOptions CodeExec { get; }
@@ -861,6 +863,13 @@ public sealed class AgentAppHost : IDisposable
             HostLog.LogInformation("not warming the prefix cache: runtime prefix reuse is disabled");
             return;
         }
+        // An image or video model has no system prompt to share and no engine to warm one
+        // with; asking it for a token only logs a failure after every load (see ImageTurns).
+        if (Chat.LoadedModelMakesImages || Chat.LoadedModelMakesVideo)
+        {
+            HostLog.LogInformation("not warming the prefix cache: the loaded model makes pictures or video");
+            return;
+        }
         // Never beside a turn. The warm-up is opportunistic by definition -- it exists to
         // save the NEXT message a wait -- so contending with a message already being
         // answered is all cost and no benefit, and on a model that cannot take two
@@ -1154,8 +1163,11 @@ public sealed class AgentAppHost : IDisposable
             long closuresAtStart = Compute.Closures;
             bool poisoned = false;
 
+            // Through ImageTurns.FramesFor, not the chat stream directly: this gate
+            // REPLACES the route's default frame source, so it has to make the same
+            // choice that default makes, or an image model is handed to the text pipeline.
             await using (IAsyncEnumerator<object> frames =
-                Chat.ChatStreamAsync(attemptBody, cancellationToken).GetAsyncEnumerator(cancellationToken))
+                ImageTurns.FramesFor(Chat, attemptBody, cancellationToken, PrepareImageTurn).GetAsyncEnumerator(cancellationToken))
             {
                 while (true)
                 {
@@ -1745,6 +1757,16 @@ public sealed class AgentAppHost : IDisposable
     /// <summary>Raised whenever <see cref="ModelLoad"/> moves, for native chrome that shows it.</summary>
     public event Action<ModelLoadState>? ModelLoadChanged;
 
+    /// <summary>Forget the selection <paramref name="id"/>, unless another has replaced it since.</summary>
+    private void ClearSelectedModel(string id) =>
+        Settings.Update(settings =>
+        {
+            if (!string.Equals(settings.SelectedModelId, id, StringComparison.Ordinal))
+                return null;
+            settings.SelectedModelId = null;
+            return settings;
+        });
+
     /// <summary>
     /// Load the model the user last used, without being asked.
     ///
@@ -1777,12 +1799,23 @@ public sealed class AgentAppHost : IDisposable
         // old one selected holding a name that resolves to nothing. Cleared for the
         // same reason the gated-off case below is: a selection nothing can act on is
         // worse than none, because the picker goes on presenting it as the choice.
+        //
+        // Only a RETIRED id (ModelCatalog.Retired) is cleared. An id this build merely does
+        // not know is most likely a newer build's entry: the Mac's Debug and Release builds
+        // share these settings, and an older one clearing it would leave the newer one
+        // starting at "No model yet". It is kept, unloaded, as the model sweeps keep its files.
         if (ModelCatalog.Find(id) is not { } model)
         {
+            if (!ModelCatalog.IsRetired(id))
+            {
+                _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation(
+                    "the last used model {Model} is not in this build's catalog and was not retired, "
+                    + "so it is most likely a newer build's; keeping the selection", id);
+                return;
+            }
             _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation(
-                "the last used model {Model} is no longer in the catalog; clearing the selection", id);
-            settings.SelectedModelId = null;
-            Settings.Save(settings);
+                "the last used model {Model} was retired from the catalog; clearing the selection", id);
+            ClearSelectedModel(id);
             return;
         }
 
@@ -1797,8 +1830,7 @@ public sealed class AgentAppHost : IDisposable
             _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation(
                 "{Model} needs a {Needs} GB device and this one reports {Has} GB; clearing the selection",
                 model.Id, model.MinDeviceMemoryGB, Paths.DeviceMemoryGB);
-            settings.SelectedModelId = null;
-            Settings.Save(settings);
+            ClearSelectedModel(id);
             return;
         }
 
@@ -1806,6 +1838,17 @@ public sealed class AgentAppHost : IDisposable
         {
             _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation(
                 "the last used model {Model} is not on this device; nothing to load", id);
+            return;
+        }
+
+        // A model of several required files (a split GGUF's shards, a diffusion set) whose
+        // first file is present can still be missing the rest: a relaunch in the middle of
+        // its download restores the choice. Loading it would fail inside the engine, naming
+        // a shard file the user never saw.
+        if (model.Files.Count(f => !f.Optional) > 1 && Models.StateOf(model) != InstallState.Installed)
+        {
+            _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation(
+                "the last used model {Model} is not completely downloaded; nothing to load", id);
             return;
         }
 
@@ -1974,6 +2017,7 @@ public sealed class AgentAppHost : IDisposable
         ArgumentNullException.ThrowIfNull(settings);
 
         CodeExec.Enabled = settings.AllowCodeExecution;
+        CodeExec.Unconfined = settings.AllowUnconfinedExecution;
         CodeExec.AllowNetwork = settings.AllowNetwork;
         CodeExec.AllowInstall = settings.AllowNetwork;
         CodeExec.Timeout = TimeSpan.FromSeconds(Math.Clamp(settings.ToolTimeoutSeconds, 5, 600));
@@ -2037,7 +2081,8 @@ public sealed class AgentAppHost : IDisposable
         CatalogModel? model = settings.SelectedModelId is { Length: > 0 } id ? ModelCatalog.Find(id) : null;
         string? draftHead = model is null ? null : Models.CompanionPath(model, CatalogFileRole.Draft);
         string note = SpeculationPolicy.PrepareLoad(settings, draftHead);
-        bool draftAttached = ModelService.Model is IDraftHead { HasDraftHead: true };
+        bool draftAttached = SpeculationPolicy.SpeculatesWithDraftHead(
+            draftHead, ModelService.Model is IDraftHead { HasDraftHead: true });
         string algorithm = SpeculationPolicy.ChooseAlgorithm(draftAttached);
         bool live = ModelService.EngineHost.UpdateSpeculation(SpeculationOptions.FromEnvironment());
         string account = $"{note}; algorithm {algorithm}; {(live ? "applied to the running engine" : "no engine standing, applies at the next load")}";
@@ -2046,11 +2091,15 @@ public sealed class AgentAppHost : IDisposable
     }
 
     private int _speculationBenchStarted;
+    private int _imageBenchStarted;
 
     /// <summary>Start the on-device plain-vs-speculative benchmark once, when the
-    /// launch environment asks for it (see <see cref="SpeculationBench"/>).</summary>
+    /// launch environment asks for it (see <see cref="SpeculationBench"/>), or the picture
+    /// benchmark (see <see cref="ImageBench"/>).</summary>
     private void StartSpeculationBenchIfRequested()
     {
+        if (ImageBench.Requested && Interlocked.Exchange(ref _imageBenchStarted, 1) == 0)
+            _ = Task.Run(() => new ImageBench(this).RunAsync(CancellationToken.None));
         if (!SpeculationBench.Requested || Interlocked.Exchange(ref _speculationBenchStarted, 1) != 0)
             return;
         _ = Task.Run(() => new SpeculationBench(this).RunAsync(CancellationToken.None));
@@ -2098,47 +2147,75 @@ public sealed class AgentAppHost : IDisposable
     /// </summary>
     public IReadOnlyList<SelfTestResult> SelfTest()
     {
+        if (Backend.UsesHostProcesses && OperatingSystem.IsWindows())
+        {
+            // These probes run POSIX commands and require file/network confinement.
+            // Windows offers neither contract here. A refused launch must not be
+            // reported as a passing sandbox check, or as a broken interpreter.
+            return new[] { new SelfTestResult("process:sandbox", false,
+                "POSIX sandbox probes are unavailable on Windows; native tools require explicit unconfined execution.",
+                Skipped: true) };
+        }
         string root = Path.Combine(Paths.ScratchDirectory, "selftest-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(root);
+        // The escape probe writes into the user's home directory, which the model's code
+        // must never be able to touch on any platform: the phone's in-process sandbox
+        // allows nothing outside the workspace, and the desktop's Seatbelt profile carves
+        // the home out of everything. Not /tmp, which that profile admits on purpose
+        // (SkillSandbox explains why), so a probe there passed on the phone and failed on a
+        // Mac while both sandboxes did exactly what they should. And not the app's data
+        // directory, which a host may keep under the system temp (a test host does).
+        string escape = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            "tensoragent-selftest-escape-" + Guid.NewGuid().ToString("N")[..8]);
+        // The phone's interpreter is the bundle's own CPython 3.13 with staged wheels,
+        // and checking those is what this was written for. A desktop runs the python3
+        // on the user's PATH, whose version and packages are the user's.
+        bool bundledPython = _embeddedBackend is not null;
         try
         {
-            return new[]
+            var checks = new List<SelfTestResult>
             {
                 Check("shell", new[] { "sh", "-c", "echo hello | tr a-z A-Z" }, root, "HELLO"),
                 Check("shell:files", new[] { "sh", "-c", "printf 'b\na\n' > f.txt && sort f.txt | tr -d '\n'" }, root, "ab"),
                 Check("shell:awk", new[] { "sh", "-c", "echo 'x 2' | awk '{print $2*3}'" }, root, "6"),
-                Check("python", new[] { "python3", "-c", "import sys, json; print(json.dumps({'v': sys.version_info[:2]}))" }, root, "[3, 13]"),
+                Check("python", new[] { "python3", "-c", "import sys, json; print(json.dumps({'v': sys.version_info[:2]}))" }, root,
+                    bundledPython ? "[3, 13]" : "[3, "),
                 Check("python:stdlib", new[] { "python3", "-c", "import re, zipfile, sqlite3; print('stdlib ok')" }, root, "stdlib ok"),
+            };
+            if (bundledPython)
+            {
                 // The packages the bundled skills import. A staged wheel whose compiled
                 // extension did not make it into the bundle imports fine on a laptop
                 // and fails here, which is exactly the failure this catches.
-                Check("python:numpy", new[] { "python3", "-c", "import numpy; print(numpy.arange(3).sum())" }, root, "3"),
-                Check("python:pillow", new[] { "python3", "-c", "from PIL import Image; print(Image.new('RGB', (2, 2)).size)" }, root, "(2, 2)"),
+                checks.Add(Check("python:numpy", new[] { "python3", "-c", "import numpy; print(numpy.arange(3).sum())" }, root, "3"));
+                checks.Add(Check("python:pillow", new[] { "python3", "-c", "from PIL import Image; print(Image.new('RGB', (2, 2)).size)" }, root, "(2, 2)"));
                 // lxml is the one this repository compiles itself (scripts/build-lxml-ios.sh):
                 // seven frameworks that link libxml2 and libxslt statically. Parsing,
                 // XPath and an XSLT transform touch all of etree's linkage at once.
-                Check("python:lxml", new[] { "python3", "-c",
+                checks.Add(Check("python:lxml", new[] { "python3", "-c",
                     "from lxml import etree; d = etree.XML('<r><a n=\"1\"/><a n=\"2\"/></r>'); "
                     + "x = etree.XSLT(etree.XML('<xsl:stylesheet xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\" version=\"1.0\"><xsl:template match=\"/\"><o><xsl:value-of select=\"count(//a)\"/></o></xsl:template></xsl:stylesheet>')); "
-                    + "print(d.xpath('sum(//a/@n)'), etree.tostring(x(d)).decode())" }, root, "3.0 <o>2</o>"),
+                    + "print(d.xpath('sum(//a/@n)'), etree.tostring(x(d)).decode())" }, root, "3.0 <o>2</o>"));
                 // And the two document libraries that exist only because lxml does. Each
                 // writes a file and reads it back, which is the whole of what a model
                 // asks of them.
-                Check("python:pptx", new[] { "python3", "-c",
+                checks.Add(Check("python:pptx", new[] { "python3", "-c",
                     "from pptx import Presentation; p = Presentation(); s = p.slides.add_slide(p.slide_layouts[5]); "
-                    + "s.shapes.title.text = 'ok'; p.save('deck.pptx'); print(len(Presentation('deck.pptx').slides))" }, root, "1"),
-                Check("python:docx", new[] { "python3", "-c",
+                    + "s.shapes.title.text = 'ok'; p.save('deck.pptx'); print(len(Presentation('deck.pptx').slides))" }, root, "1"));
+                checks.Add(Check("python:docx", new[] { "python3", "-c",
                     "import docx; d = docx.Document(); d.add_paragraph('ok'); d.save('note.docx'); "
-                    + "print(len(docx.Document('note.docx').paragraphs))" }, root, "1"),
-                Check("node", new[] { "node", "-e", "console.log([1,2,3].map(n => n * 2).join(','))" }, root, "2,4,6"),
-                Check("node:print", new[] { "node", "-p", "1 + 1" }, root, "2"),
-                Check("sandbox:write", new[] { "sh", "-c", "echo x > /tmp/tensoragent-selftest-escape" }, root, expectFailure: true),
-                Check("sandbox:network", new[] { "sh", "-c", "curl https://example.com" }, root, expectFailure: true),
-            };
+                    + "print(len(docx.Document('note.docx').paragraphs))" }, root, "1"));
+            }
+            checks.Add(Check("node", new[] { "node", "-e", "console.log([1,2,3].map(n => n * 2).join(','))" }, root, "2,4,6"));
+            checks.Add(Check("node:print", new[] { "node", "-p", "1 + 1" }, root, "2"));
+            checks.Add(Check("sandbox:write", new[] { "sh", "-c", "echo x > '" + escape + "'" }, root, expectFailure: true));
+            checks.Add(Check("sandbox:network", new[] { "sh", "-c", "curl https://example.com" }, root, expectFailure: true));
+            return checks;
         }
         finally
         {
             try { Directory.Delete(root, true); } catch (Exception) { /* scratch */ }
+            try { File.Delete(escape); } catch (Exception) { /* only there if the probe escaped */ }
         }
     }
 
@@ -2361,9 +2438,11 @@ public sealed class AgentAppHost : IDisposable
         // fault in a kernel with nothing to do with either of them.
         lock (_modelGate)
         {
-            AppSettings settings = Settings.Load();
-            settings.SelectedModelId = model.Id;
-            Settings.Save(settings);
+            AppSettings settings = Settings.Update(current =>
+            {
+                current.SelectedModelId = model.Id;
+                return current;
+            });
             string weights = Paths.SelectedModelPath(settings);
 
             // The model that is asked for is the one already standing: nothing to load.
@@ -2422,6 +2501,22 @@ public sealed class AgentAppHost : IDisposable
                     throw missing;
                 }
 
+                // A diffusion entry is several files, and the pipeline looks for a missing one
+                // by its name: MiniMax-H3 searches the whole model store and would take
+                // Qwen-Image's text encoder for its own. A half-downloaded set (a relaunch in
+                // the middle of the download restores the remembered choice) must not load and
+                // then fail - or worse, not fail - inside the first picture or clip. The same
+                // holds for a split GGUF: the engine opens the later shards by name and would
+                // refuse with a FileNotFoundException for a file the user never chose.
+                if ((model.Kind == CatalogArchitectureKind.Diffusion || model.Files.Count(f => !f.Optional) > 1)
+                    && Models.StateOf(model) != InstallState.Installed)
+                {
+                    var incomplete = new FileNotFoundException(
+                        $"{model.DisplayName} is not completely downloaded yet.", Models.DirectoryFor(model));
+                    SetModelLoad(ModelLoadState.Failed, incomplete.Message);
+                    throw incomplete;
+                }
+
                 // Before the load, not after: the engine reads its context length and KV
                 // dtype when the model is constructed. This is the only funnel for a load
                 // (startup, the Models list, the device hook all arrive here), which is why
@@ -2442,7 +2537,12 @@ public sealed class AgentAppHost : IDisposable
                 }
                 WaitForTheEngineToStop();
 
-                EngineMemoryPolicy.Apply(model, settings);
+                EngineMemoryPolicy.Apply(model, settings, Paths.DeviceClass);
+
+                // Every load, not only the one at startup: a diffusion model reads where its
+                // companions are when it is constructed, and switching from one to another at
+                // run time used to leave the first one's paths (or none) for the second.
+                PublishCompanions(model);
 
                 // Speculative decoding, and the draft head that makes it best: the
                 // catalog's optional companion, handed to the loader the way the CLI's
@@ -2466,20 +2566,31 @@ public sealed class AgentAppHost : IDisposable
                 // weights, so a file made from other weights of the same shape is never
                 // restored. The warm-up that follows reads it back instead of prefilling it,
                 // and a first message sent before the warm-up finds it too.
+                // Every shard is part of the identity: a re-downloaded later shard of a split
+                // GGUF must not restore a checkpoint made from the old bytes. A single-file
+                // entry's identity is unchanged (no shards to add).
+                string?[] identityFiles = new[] { weights }
+                    .Concat(model.WeightFiles.Where(f => f.Role == CatalogFileRole.WeightsShard)
+                        .Select(f => Path.Combine(Models.DirectoryFor(model), f.FileName)))
+                    .Append(projector)
+                    .ToArray();
                 ModelService.EngineHost.PrefixCheckpointStore = new PrefixCheckpointFileStore(
                     Paths.PrefixCheckpointDirectoryFor(model),
-                    PrefixCheckpointFileStore.WeightsIdentityOf(weights, projector),
+                    PrefixCheckpointFileStore.WeightsIdentityOf(identityFiles),
                     HostLog);
 
                 var refusals = new List<string>();
-                foreach (BackendOption backend in Options.SupportedBackends)
+                foreach (BackendOption backend in BackendsFor(model))
                 {
                     try
                     {
                         ModelService.LoadModel(weights, projector, backend.Value);
                         // The engine is built after this, so the algorithm it reads is
-                        // decided here, from whether the draft head really attached.
-                        bool draftAttached = ModelService.Model is IDraftHead { HasDraftHead: true };
+                        // decided here, from whether the catalog's draft head really
+                        // attached (a head built into the weights file does not count:
+                        // see SpeculationPolicy.SpeculatesWithDraftHead).
+                        bool draftAttached = SpeculationPolicy.SpeculatesWithDraftHead(
+                            draftHead, ModelService.Model is IDraftHead { HasDraftHead: true });
                         string algorithm = SpeculationPolicy.ChooseAlgorithm(draftAttached);
                         // Also hand it to the engine host: a settings switch flipped while this
                         // model was loading was remembered with the algorithm chosen before the
@@ -2503,6 +2614,8 @@ public sealed class AgentAppHost : IDisposable
 
                 if (loaded is null)
                 {
+                    if (refusals.Count == 0)
+                        refusals.Add("no GPU backend in this build, and a video model is not run on the CPU");
                     var refused = new InvalidOperationException(
                         $"{model.DisplayName} could not be loaded on any backend this build offers:"
                         + Environment.NewLine + "  " + string.Join(Environment.NewLine + "  ", refusals));
@@ -2535,12 +2648,24 @@ public sealed class AgentAppHost : IDisposable
     internal Func<bool> EngineHasWorkInFlight { get; set; } = () => false;
 
     /// <summary>
+    /// Whether the engine has a sequence running or waiting right now: a user's turn, the
+    /// prefix-cache warm-up, a sub-agent or a benchmark alike. What a desktop host keeps
+    /// the system from throttling or sleeping for.
+    /// </summary>
+    public bool IsEngineWorking => EngineHasWorkInFlight();
+
+    /// <summary>
     /// Whether the engine is still working, straight from its own counters. A component
     /// that cannot say what it is doing is not a reason to keep the app open; the wait
     /// is a precaution, not a contract, so an engine that will not answer reads as idle.
     /// </summary>
     private bool EngineIsProcessing()
     {
+        // A picture or a clip is made on the chat service's own worker threads, which the
+        // engine's counters below know nothing about; without this a model switch or a quit
+        // during one freed the weights under a running GPU graph.
+        if (Chat?.IsGeneratingMedia == true)
+            return true;
         try
         {
             if (!ModelService.EngineHost.TryGetLiveStats(out int processing, out int waiting, out _))
@@ -2555,20 +2680,182 @@ public sealed class AgentAppHost : IDisposable
 
     private void WaitForTheEngineToStop()
     {
-        var deadline = Stopwatch.StartNew();
-        while (deadline.Elapsed < EngineDrainTimeout)
+        var waited = Stopwatch.StartNew();
+        while (EngineHasWorkInFlight())
         {
-            if (!EngineHasWorkInFlight())
+            // A cancelled picture or clip stops at its next step, tile or phase, and one
+            // step of a long clip can outlast the engine's drain. Releasing the model under
+            // it is a crash, not a quicker shutdown, so it is given longer.
+            TimeSpan limit = Chat?.IsGeneratingMedia == true ? MediaDrainTimeout : EngineDrainTimeout;
+            if (waited.Elapsed >= limit)
+            {
+                _loggerFactory.CreateLogger("TensorAgent.Host")
+                    .LogWarning("the engine was still working after {Seconds}s; releasing the model anyway",
+                        limit.TotalSeconds);
                 return;
+            }
             Thread.Sleep(25);
         }
-        _loggerFactory.CreateLogger("TensorAgent.Host")
-            .LogWarning("the engine was still working after {Seconds}s; releasing the model anyway",
-                EngineDrainTimeout.TotalSeconds);
     }
 
     /// <summary>How long <see cref="Dispose"/> waits for the engine before releasing the model regardless.</summary>
     public static TimeSpan EngineDrainTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>How long it waits instead when what is still running is a picture or a clip.</summary>
+    public static TimeSpan MediaDrainTimeout { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Stop every turn and the warm-up, and wait no longer than <paramref name="budget"/> for
+    /// the engine to leave the model. Returns whether it did, in which case
+    /// <see cref="Dispose"/> can release the model at once.
+    ///
+    /// <para>For a host that is given a deadline to quit in. A clip stops at its next
+    /// denoising step and one step is several seconds, which can be longer than the
+    /// deadline; a caller told false must not release the model under the graph still
+    /// running.</para>
+    /// </summary>
+    public bool StopWorkWithin(TimeSpan budget)
+    {
+        var waited = Stopwatch.StartNew();
+        Compute.Open();
+        Turns.StopAll();
+        Task warmUp = StopWarmingThePrefixCacheAndWaitAsync();
+        while (waited.Elapsed < budget)
+        {
+            if (warmUp.IsCompleted && !EngineHasWorkInFlight())
+                return true;
+            Thread.Sleep(25);
+        }
+        return false;
+    }
+
+    /// <summary>Point the engine at <paramref name="model"/>'s companion files (and clear every
+    /// other family's), logging what was published. See <see cref="DiffusionCompanions"/>.</summary>
+    private void PublishCompanions(CatalogModel? model)
+    {
+        IReadOnlyDictionary<string, string> companions = DiffusionCompanions.Publish(
+            model?.Kind == CatalogArchitectureKind.Diffusion ? model : null, Models);
+        if (companions.Count > 0)
+        {
+            _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation(
+                "{Model} companions: {Companions}", model!.Id,
+                string.Join(", ", companions.Select(c => $"{c.Key}={Path.GetFileName(c.Value)}")));
+        }
+
+        // The app chooses LoRA plug-ins per picture (PrepareImageTurn), never at load.
+        // A TS_LORAS inherited from the shell that launched the app would apply plug-ins
+        // nobody chose here to every load, and the engine warns on every load of a model
+        // that takes none.
+        string variable = TensorSharp.Runtime.LoraCliFlags.EnvironmentVariable;
+        if (Environment.GetEnvironmentVariable(variable) is { Length: > 0 } inherited)
+        {
+            HostLog.LogWarning(
+                "ignoring {Variable} from the environment ({Value}): the app applies the LoRA plug-ins chosen under LoRAs",
+                variable, inherited);
+            Environment.SetEnvironmentVariable(variable, null);
+        }
+    }
+
+    /// <summary>The catalog entry whose weights the engine has loaded, or null.</summary>
+    private CatalogModel? LoadedCatalogModel()
+    {
+        string? loaded = ModelService.LoadedModelPath;
+        return string.IsNullOrEmpty(loaded)
+            ? null
+            : ModelCatalog.BuiltIn.FirstOrDefault(m => string.Equals(
+                Path.Combine(Paths.ModelsDirectory, m.Id, m.Weights.FileName), loaded, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The LoRA plug-ins the next picture is made with (<see cref="LoraSelection.Plan"/>): the
+    /// image service swaps them in under the same lock as the run, and an unchanged set, which
+    /// is every picture after the first that follows a change, costs nothing. A choice that
+    /// cannot be honoured refuses the picture with the reason.
+    /// </summary>
+    /// <param name="editing">Whether the picture edits an attached photo: a plug-in made only
+    /// for edits is not applied to a picture made from words.</param>
+    internal ImageTurns.Preparation PrepareImageTurn(bool editing)
+    {
+        try
+        {
+            LoraPlan? plan = LoraSelection.Plan(
+                Settings.Load().ImageLoras, LoadedCatalogModel()?.Id, Loras, editing, out string? error);
+            if (plan is null)
+                return ImageTurns.Preparation.Refused(error!);
+            HostLog.LogInformation("this picture is made with LoRA plug-ins: {Loras}{SatOut}",
+                plan.Names.Count == 0 ? "none" : string.Join(", ", plan.Names),
+                plan.SatOut is null ? "" : $" ({plan.SatOut})");
+            return ImageTurns.Preparation.Ready(plan.Specs, plan.Names);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            HostLog.LogWarning(ex, "preparing the LoRA plug-ins failed");
+            return ImageTurns.Preparation.Refused("The LoRA plug-ins could not be prepared: " + ex.Message);
+        }
+    }
+
+    /// <summary>The key a LoRA plug-in's download has in <see cref="Downloads"/>.</summary>
+    public static string LoraDownloadKey(CatalogLora lora) => "lora:" + lora.Id;
+
+    /// <summary>Start the download of a plug-in's files, or rejoin the one running.</summary>
+    public ModelDownloadStatus StartLoraDownload(CatalogLora lora)
+    {
+        ArgumentNullException.ThrowIfNull(lora);
+        return Downloads.Start(LoraDownloadKey(lora), (progress, ct) => Loras.DownloadAsync(lora, progress, ct));
+    }
+
+    /// <summary>
+    /// Save <paramref name="requested"/> as the plug-ins every later picture is made with (see
+    /// <see cref="LoraSelection.Validate"/>), or return null with the reason it was refused.
+    /// </summary>
+    public IReadOnlyList<ImageLoraChoice>? ChooseLoras(IEnumerable<ImageLoraChoice> requested, out string? error)
+    {
+        ArgumentNullException.ThrowIfNull(requested);
+        List<ImageLoraChoice>? chosen = null;
+        string? refusal = null;
+        Settings.Update(settings =>
+        {
+            chosen = LoraSelection.Validate(requested, settings.ImageLoras, Loras, out refusal);
+            if (chosen is null)
+                return null;
+            settings.ImageLoras = chosen;
+            return settings;
+        });
+        error = refusal;
+        if (chosen is null)
+            return null;
+        HostLog.LogInformation("LoRA plug-ins chosen: {Loras}", chosen.Count == 0
+            ? "none"
+            : string.Join(", ", chosen.Select(c => $"{c.Id} ({c.Strength:0.##})")));
+        return chosen;
+    }
+
+    /// <summary>
+    /// Remove a plug-in's files and turn it off. The adapters it already gave the loaded model
+    /// stay until the next picture, which applies the choice without it; they are the engine's
+    /// own copies, so the files can go now.
+    /// </summary>
+    public void DeleteLora(CatalogLora lora)
+    {
+        ArgumentNullException.ThrowIfNull(lora);
+        Downloads.Cancel(LoraDownloadKey(lora));
+        Settings.Update(settings =>
+            settings.ImageLoras.RemoveAll(c => string.Equals(c.Id, lora.Id, StringComparison.OrdinalIgnoreCase)) > 0
+                ? settings
+                : null);
+        Loras.Delete(lora);
+        HostLog.LogInformation("removed the LoRA plug-in {Lora}", lora.Id);
+    }
+
+    /// <summary>
+    /// The backends a load tries, best first. A video entry is never tried on the CPU: a
+    /// clip that takes minutes on the GPU takes hours there, so falling back would hand the
+    /// user a model that looks loaded and answers nothing they would wait for.
+    /// </summary>
+    private IEnumerable<BackendOption> BackendsFor(CatalogModel model) =>
+        model.IsVideoGenerator
+            ? Options.SupportedBackends.Where(b => !string.Equals(b.Value, "ggml_cpu", StringComparison.Ordinal))
+            : Options.SupportedBackends;
 
     private static int _exitHookInstalled;
 
@@ -2604,24 +2891,30 @@ public sealed class AgentAppHost : IDisposable
         if (Interlocked.Exchange(ref _exitHookInstalled, 1) != 0)
             return;
 
-        AppDomain.CurrentDomain.ProcessExit += static (_, _) =>
+        AppDomain.CurrentDomain.ProcessExit += static (_, _) => ReleaseTheEngine();
+    }
+
+    /// <summary>
+    /// The native teardown <see cref="ReleaseTheEngineWhenTheProcessExits"/> runs: every
+    /// buffer the engine still holds is handed back, so the ggml-metal device's destructor
+    /// finds none. For a host that knows the process is ending before
+    /// <see cref="AppDomain.ProcessExit"/> would say so - on Mac Catalyst, where quitting
+    /// ends in AppKit's <c>exit()</c> and Mono raises that event only for a managed
+    /// shutdown, it never fires at all. Dispose the host first: the model has to be
+    /// released before the backend it lives in.
+    /// </summary>
+    public static void ReleaseTheEngine()
+    {
+        try
         {
-            try
-            {
-                GgmlBasicOps.Shutdown();
-            }
-            catch (DllNotFoundException)
-            {
-                // No GgmlOps in this build, so there is no device holding anything
-                // and nothing to release. Not a fallback: the engine that would need
-                // shutting down was never there.
-            }
-            catch (EntryPointNotFoundException)
-            {
-                // An older GgmlOps without the entry point. Same conclusion, and the
-                // process is already on its way out; there is nowhere left to report.
-            }
-        };
+            GgmlBasicOps.Shutdown();
+        }
+        catch (DllNotFoundException)
+        {
+            // No GgmlOps in this build, so there is no device holding anything
+            // and nothing to release. Not a fallback: the engine that would need
+            // shutting down was never there.
+        }
     }
 
     /// <summary>
@@ -2679,9 +2972,9 @@ public sealed class AgentAppHost : IDisposable
 }
 
 /// <summary>One self-test check: what was tried, whether it behaved, and what it said.</summary>
-public sealed record SelfTestResult(string Name, bool Ok, string Detail)
+public sealed record SelfTestResult(string Name, bool Ok, string Detail, bool Skipped = false)
 {
-    public override string ToString() => $"{(Ok ? "ok  " : "FAIL")} {Name}: {Detail}";
+    public override string ToString() => $"{(Skipped ? "SKIP" : Ok ? "ok  " : "FAIL")} {Name}: {Detail}";
 }
 
 /// <summary>
@@ -2705,7 +2998,17 @@ public sealed record AgentPaths(string DataRoot, string CacheRoot)
     /// <summary>Physical memory in whole gigabytes, which decides what the catalog offers.</summary>
     public int DeviceMemoryGB { get; init; } = 12;
 
+    /// <summary>
+    /// What kind of machine this is, which decides the engine budget model loads run with
+    /// (<see cref="EngineMemoryPolicy"/>) and the settings a first launch starts from
+    /// (<see cref="AppSettings.DesktopDefaults"/>).
+    /// </summary>
+    public DeviceClass DeviceClass { get; init; } = DeviceClass.Phone;
+
     public string ModelsDirectory => Path.Combine(CacheRoot, "models");
+    /// <summary>The LoRA plug-ins (<see cref="LoraStore"/>): beside the models, not inside a
+    /// model's own directory, which the store's completeness check walks.</summary>
+    public string LorasDirectory => Path.Combine(CacheRoot, "loras");
     public string ConversationsDirectory => Path.Combine(DataRoot, "conversations");
     public string UploadsDirectory => Path.Combine(CacheRoot, "uploads");
     public string ScratchDirectory => Path.Combine(CacheRoot, "scratch");

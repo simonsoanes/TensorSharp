@@ -47,7 +47,7 @@ namespace TensorSharp.Cuda
             return CudaKernelOps.TryNeoxRopeFlat(data, cosTable, sinTable, numHeads, seq, headDim, ropeHalf);
         }
 
-        /// <summary>Sync the NULL (default) CUDA stream ÔÇö ensures all pending
+        /// <summary>Sync the NULL (default) CUDA stream — ensures all pending
         /// kernels launched on it have completed.</summary>
         public static void SyncNullStream()
         {
@@ -1235,7 +1235,7 @@ namespace TensorSharp.Cuda
         ///   4. Launch the GDN packed kernel with packed (device) + ssmState /
         ///      convWeight / dtBias / aLog / ssmNorm (CUDA UVA device pointers from
         ///      ggml_cuda) + convState (CudaStorage, device) + resultDevOrUva
-        ///      (gated tensor's UVA device pointer ÔÇö kernel writes directly, no DtoH).
+        ///      (gated tensor's UVA device pointer — kernel writes directly, no DtoH).
         ///   5. cuStreamSynchronize + cuMemFree all scratch.
         ///
         /// The caller is responsible for providing F32 contiguous host buffers for
@@ -1301,7 +1301,7 @@ namespace TensorSharp.Cuda
             //    - packedDev is device scratch (cuMemAlloc).
             //    - ssmState/convWeight/dtBias/aLog/ssmNorm are CUDA UVA device
             //      pointers (ggml allocates model weights in CUDA device memory).
-            //    - resultDevOrUva is the gated tensor's UVA device pointer ÔÇö the
+            //    - resultDevOrUva is the gated tensor's UVA device pointer — the
             //      kernel writes directly to it, no DtoH copy needed.
             //    - convState is CudaStorage device memory.
             kernels.LaunchQwen35GatedDeltaNetPackedF32(
@@ -1340,8 +1340,8 @@ namespace TensorSharp.Cuda
         /// <summary>
         /// GQA decode attention bridge for GgmlStorage-backed tensors on GgmlCuda.
         /// Allocates CudaStorage scratch buffers on <paramref name="allocator"/>,
-        /// copies GgmlStorage host data ÔåÆ device via cuMemcpyHtoDAsync, launches the
-        /// kernel, and copies the result back device ÔåÆ host via cuMemcpyDtoHAsync.
+        /// copies GgmlStorage host data → device via cuMemcpyHtoDAsync, launches the
+        /// kernel, and copies the result back device → host via cuMemcpyDtoHAsync.
         /// </summary>
         public static bool TryGqaDecodeAttentionGgmlCuda(
             Tensor result,
@@ -1391,7 +1391,7 @@ namespace TensorSharp.Cuda
             System.IntPtr vPtr = vDev.DeviceBuffer;
             System.IntPtr rPtr = rDev.DeviceBuffer;
 
-            // Async copies host ÔåÆ device
+            // Async copies host → device
             Interop.CudaDriverApi.cuMemcpyHtoDAsync(qPtr, qHost, (System.UIntPtr)(ulong)qBytes, stream);
             Interop.CudaDriverApi.cuMemcpyHtoDAsync(kPtr, kHost, (System.UIntPtr)(ulong)kvBytes, stream);
             Interop.CudaDriverApi.cuMemcpyHtoDAsync(vPtr, vHost, (System.UIntPtr)(ulong)kvBytes, stream);

@@ -74,13 +74,15 @@ namespace TensorSharp.Models
             bool a1 = SupportsKVStateSnapshot && SupportsCrossSequenceKvReuse;
             // Model-paged attention rows do not contain the recurrent state required
             // at a restorable boundary. Those families must use complete host slabs.
+            // Nothing writes model-paged rows while the batched path is switched off
+            // (--no-continuous-batching).
             bool a2 = !pagesNeedStateAtEnd
+                && !TensorSharp.Runtime.Scheduling.ExecutionOptions.FromEnvironment().BatchedPathDisabled
                 && this is TensorSharp.Runtime.Scheduling.IBatchedPagedModel paged && paged.BatchedForwardAvailable;
             PageSupport pages = a1 && a2 ? PageSupport.Both : a1 ? PageSupport.A1HostSlab : a2 ? PageSupport.A2ModelPaged : PageSupport.None;
             return new PrefixCacheCapabilities
             {
                 Class = familyClass,
-                Readiness = PrefixCacheMode.Tree,
                 NamespaceFingerprint = KVStateFingerprint,
                 EndState = EndStateSupport.None,
                 PrimaryResident = true,

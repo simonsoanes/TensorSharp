@@ -56,6 +56,8 @@ internal sealed class OracleCache
     internal readonly HashSet<int> ForwardBoundaries = new() { 0 };
 
     internal int Length => Chain.Count - 1;
+    /// <summary>Where the last multi-token forward ended (<see cref="OracleTraits.RewindCheckpoint"/>), or -1.</summary>
+    internal int Checkpoint = -1;
     /// <summary>Length whose state the host copy holds; below <see cref="Length"/> the device is authoritative.</summary>
     internal int HostLength;
     internal int RopeDelta;
@@ -83,6 +85,7 @@ internal sealed class OracleCache
         Chain.RemoveRange(n + 1, Chain.Count - n - 1);
         ForwardBoundaries.RemoveWhere(b => b > n);
         ForwardBoundaries.Add(n);
+        if (Checkpoint > n) Checkpoint = -1;   // the native truncate drops a checkpoint past the new head
         if (corrupt) Chain[n] ^= OracleHash.Poison;
         HostLength = Length;
     }
@@ -91,7 +94,7 @@ internal sealed class OracleCache
     /// host bytes, exactly what a real family's copy of an unsettled holder would read.</summary>
     internal OracleCache CopyHost()
     {
-        var copy = new OracleCache { RopeDelta = RopeDelta };
+        var copy = new OracleCache { RopeDelta = RopeDelta, Checkpoint = Checkpoint };
         copy.Chain.Clear();
         for (int i = 0; i <= Length; i++)
             copy.Chain.Add(i <= HostLength ? Chain[i] : Chain[i] ^ OracleHash.Poison);

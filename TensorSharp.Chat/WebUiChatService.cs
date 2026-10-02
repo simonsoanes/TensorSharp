@@ -33,7 +33,8 @@ namespace TensorSharp.Chat
     /// <summary>
     /// What one video generation produced: the download URLs the Web UI shows, the
     /// file on disk (so a transport that wants to inline the bytes can read it) and
-    /// the geometry the reply reports.
+    /// the geometry the reply reports. <see cref="AudioMuxed"/> is true when the
+    /// soundtrack is also inside the MP4, not only in the sidecar at <see cref="AudioUrl"/>.
     /// </summary>
     public sealed record VideoGenerationResult(
         string Url,
@@ -45,7 +46,8 @@ namespace TensorSharp.Chat
         int Fps,
         long Seed,
         string Codec,
-        double ElapsedSeconds);
+        double ElapsedSeconds,
+        bool AudioMuxed = false);
 
     /// <summary>
     /// The Web UI's request handlers with the transport taken out: queue status,
@@ -230,18 +232,11 @@ namespace TensorSharp.Chat
         /// <c>GET /api/queue/status</c>. Real concurrency lives in the per-model
         /// inference engine; its live counters are peeked without side effects
         /// (nothing here may construct the engine), so before a model is loaded or a
-        /// request has run everything reads idle. <paramref name="legacyTotalProcessed"/>
-        /// is what <c>total_processed</c> reports until the engine has completed
-        /// anything: the Server passes its deprecated queue's ticket count so the field
-        /// keeps the value it always had; a host without that shim passes nothing.
+        /// request has run everything reads idle.
         /// </summary>
-        public object GetQueueStatus(long legacyTotalProcessed = 0)
+        public object GetQueueStatus()
         {
             _svc.EngineHost.TryGetLiveStats(out int processing, out int waiting, out long totalCompleted);
-
-            // total_processed kept for API compatibility; sourced from the engine's
-            // completed count (per loaded model) rather than the legacy queue.
-            long totalProcessed = totalCompleted != 0 ? totalCompleted : legacyTotalProcessed;
 
             return new
             {
@@ -250,7 +245,8 @@ namespace TensorSharp.Chat
                 processing,
                 // Requests admitted to the engine but still waiting for a batch slot.
                 pending_requests = waiting,
-                total_processed = totalProcessed,
+                // Requests the loaded model's engine has completed.
+                total_processed = totalCompleted,
             };
         }
 
@@ -566,7 +562,8 @@ namespace TensorSharp.Chat
         ///
         /// <para>
         /// The reply shape depends on what the file is: an image (HEIC/HEIF gain a PNG
-        /// <c>previewUrl</c> because no browser renders them), a video (frames are
+        /// <c>previewUrl</c> and a full-resolution <c>editUrl</c> within the selection
+        /// editor's limits because browsers cannot render them), a video (frames are
         /// extracted next to it, named after its GUID, so the Web UI can reference them
         /// by bare name), a text file (full content, never truncated, except CSV tables,
         /// which stay file-backed), or a PDF (its text layer; a scanned PDF falls back
@@ -839,7 +836,7 @@ namespace TensorSharp.Chat
                 }
 
                 // Scanned / image-only PDF (no selectable text layer).
-                // PdfPageImageExtractor's legacy API opens a byte array. Keep that path
+                // PdfPageImageExtractor opens a byte array. Keep that path
                 // available for ordinary desktop uploads, but refuse an oversized shared
                 // scan before it can duplicate the whole file in a phone process.
                 if (maxInlineTextChars.HasValue && length > SharedScannedPdfMaxBytes)
@@ -955,40 +952,74 @@ namespace TensorSharp.Chat
             // fine (Magick.NET), but no mainstream browser renders them in <img> — and the
             // default static-file content-type provider doesn't even serve the extension —
             // so the chat bubble showed a blank/broken preview. Convert a lightweight PNG
-            // preview at upload time; the Web UI displays previewUrl while path (the
-            // original file, full fidelity) is what the edit/vision pipelines consume.
+            // preview at upload time. Masks must use a separate full-resolution PNG:
+            // the preview can be smaller than the original the pipeline consumes.
             if (mediaType == "image" && ext is ".heic" or ".heif")
             {
+                string previewName = Path.GetFileNameWithoutExtension(safeFileName) + "-preview.png";
+                string previewPath = Path.Combine(_options.UploadDirectory, previewName);
+                string editName = Path.GetFileNameWithoutExtension(safeFileName) + "-edit.png";
+                string editPath = Path.Combine(_options.UploadDirectory, editName);
+                string editSourceName = null;
+                string editUnavailableReason = null;
                 try
                 {
-                    string previewName = Path.GetFileNameWithoutExtension(safeFileName) + "-preview.png";
-                    string previewPath = Path.Combine(_options.UploadDirectory, previewName);
                     await Task.Run(() =>
                     {
-                        var img = TensorSharp.Models.QwenImage.ImageIO.Load(savePath);
+                        var img = TensorSharp.Models.QwenImage.ImageIO.Load(savePath, preserveAlpha: true);
                         const long previewArea = 768L * 768;   // plenty for the ~300 px bubble preview
-                        if ((long)img.Width * img.Height > previewArea)
-                            img = TensorSharp.Models.QwenImage.ImageIO.ResizeToArea(img, previewArea, multiple: 1);
-                        TensorSharp.Models.QwenImage.ImageIO.SavePng(previewPath, img);
-                    });
-                    _uploads.RecordFile(previewPath);
-                    TrackDerivedFiles(storedFiles, new[] { previewPath });
-                    return TrackUpload(new
-                    {
-                        ok = true,
-                        file = safeFileName,
-                        url = uploadUrl,
-                        previewUrl = BuildUploadUrl(previewName),
-                        mediaType,
-                        fileName = originalFileName,
-                    }, storedFiles);
+                        bool resizePreview = (long)img.Width * img.Height > previewArea;
+                        var preview = resizePreview
+                            ? TensorSharp.Models.QwenImage.ImageIO.ResizeToArea(img, previewArea, multiple: 1)
+                            : img;
+                        TensorSharp.Models.QwenImage.ImageIO.SavePng(previewPath, preview);
+                        if (SupportsImageSelectionSize(img.Width, img.Height))
+                        {
+                            // Reuse the full decode already needed for the thumbnail.
+                            // Small photos can use that same PNG without another file.
+                            if (resizePreview) TensorSharp.Models.QwenImage.ImageIO.SavePng(editPath, img);
+                            editSourceName = resizePreview ? editName : previewName;
+                        }
+                        else editUnavailableReason = ImageSelectionSizeLimitMessage;
+                    }, cancellationToken);
+                    cancellationToken.ThrowIfCancellationRequested();
                 }
+                catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
                     uploadLogger.LogWarning(LogEventIds.UploadReceived,
-                        "HEIC preview conversion failed for {FileName}: {Error} (chat preview will be blank; the edit itself is unaffected)",
+                        "HEIC browser image conversion failed for {FileName}: {Error}",
                         originalFileName, ex.Message);
+                    // Conversion is optional for upload, but a failed/partial PNG
+                    // must never be used as a differently sized editing canvas.
+                    foreach (string derivedPath in new[] { previewPath, editPath })
+                    {
+                        try { File.Delete(derivedPath); } catch { /* best effort */ }
+                    }
+                    return TrackUpload(new
+                    {
+                        ok = true, file = safeFileName, url = uploadUrl, mediaType, fileName = originalFileName,
+                        editUnavailableReason = "A full-resolution image for area selection could not be prepared. Reattach this photo as PNG or JPEG.",
+                    }, storedFiles);
                 }
+                _uploads.RecordFile(previewPath);
+                TrackDerivedFiles(storedFiles, new[] { previewPath });
+                if (editSourceName == editName)
+                {
+                    _uploads.RecordFile(editPath);
+                    TrackDerivedFiles(storedFiles, new[] { editPath });
+                }
+                return TrackUpload(new
+                {
+                    ok = true,
+                    file = safeFileName,
+                    url = uploadUrl,
+                    previewUrl = BuildUploadUrl(previewName),
+                    editUrl = editSourceName == null ? null : BuildUploadUrl(editSourceName),
+                    editUnavailableReason,
+                    mediaType,
+                    fileName = originalFileName,
+                }, storedFiles);
             }
 
             return TrackUpload(
@@ -1223,6 +1254,37 @@ namespace TensorSharp.Chat
             EnsureImageEditHeadroom(_loggerFactory.CreateLogger("TensorSharp.Server.ImageEdit"), "Image edit rejected: {Reason}");
         }
 
+        /// <summary>
+        /// Whether the loaded model makes pictures rather than text: a host that serves
+        /// both through one chat route (TensorAgent) decides with this which service a
+        /// turn goes to.
+        /// </summary>
+        public bool LoadedModelMakesImages => _svc.Model is TensorSharp.Models.QwenImage.QwenImageModel;
+
+        /// <summary>Whether the loaded model makes video clips (see <see cref="LoadedModelMakesImages"/>).</summary>
+        public bool LoadedModelMakesVideo => LoadedVideoModel != null;
+
+        /// <summary>
+        /// The loaded model when it makes video clips, otherwise null: what it can be given
+        /// (keyframes or references, how many, with sound or not) decides how a host turns
+        /// a chat message into a <see cref="VideoGenerateStreamAsync"/> request.
+        /// </summary>
+        public TensorSharp.Models.Video.IVideoGenerationModel LoadedVideoModel =>
+            _svc.Model as TensorSharp.Models.Video.IVideoGenerationModel;
+
+        /// <summary>
+        /// Whether a picture or a clip is being made, or is waiting for the model, right now.
+        ///
+        /// <para>That work runs on worker threads of its own, out of sight of the text
+        /// engine whose counters a host asks before it unloads a model. Unloading under a
+        /// running generation frees weights a GPU graph is still reading, so a host that
+        /// can switch models has to ask this as well. A job counts from the moment it is
+        /// accepted, while it waits behind another, until its worker has left the model.</para>
+        /// </summary>
+        public bool IsGeneratingMedia => Volatile.Read(ref _mediaJobs) > 0;
+
+        private int _mediaJobs;
+
         // Every loadable QwenImageModel is a Qwen-Image-2.1 model: earlier Qwen-Image
         // checkpoints are refused at load, so the model type is the whole check.
         private const string NotAnImageModelError = "The loaded model is not a Qwen-Image-2.1 model.";
@@ -1248,18 +1310,28 @@ namespace TensorSharp.Chat
 
         /// <summary>
         /// <c>POST /api/image-edit</c> with a JSON body: <c>{ imagePaths[] | imagePath,
-        /// prompt, steps?, cfg?, seed?, targetArea? }</c> where the paths are the bare
+        /// prompt, steps?, cfg?, seed?, targetArea?, maskPath?, maskMode?, maskInvert?,
+        /// maskFeather?, maskCrop?, maskCropPadding? }</c> where the paths are the bare
         /// server file names <c>/api/upload</c> returned. Runs the loaded Qwen-Image-2.1
         /// model and returns <c>{ ok, url, width, height, elapsedSeconds }</c>. With
         /// multiple images the first drives the output geometry and the prompt can
-        /// reference them as "Picture 1", "Picture 2", ... in upload order.
+        /// reference them as "Picture 1", "Picture 2", ... in upload order. A mask applies
+        /// only to the first image and retains its original canvas and unselected pixels.
         /// </summary>
         public Task<object> ImageEditAsync(JsonElement body, CancellationToken cancellationToken) =>
-            ImageRequestAsync(body, generate: false, cancellationToken);
+            ImageRequestAsync(body, generate: false, null, cancellationToken);
+
+        /// <summary>
+        /// An edit made with exactly the LoRA plug-ins <paramref name="loras"/>; see
+        /// <see cref="ImageEditStreamAsync(JsonElement, IReadOnlyList{LoraSpec}, CancellationToken)"/>.
+        /// A set that cannot be applied is a 500 with the reason, and the previous set stays.
+        /// </summary>
+        public Task<object> ImageEditAsync(JsonElement body, IReadOnlyList<LoraSpec> loras, CancellationToken cancellationToken) =>
+            ImageRequestAsync(body, generate: false, loras ?? throw new ArgumentNullException(nameof(loras)), cancellationToken);
 
         /// <summary>Text-to-image generation with a Qwen-Image-2.1 model.</summary>
         public Task<object> ImageGenerateAsync(JsonElement body, CancellationToken cancellationToken) =>
-            ImageRequestAsync(body, generate: true, cancellationToken);
+            ImageRequestAsync(body, generate: true, null, cancellationToken);
 
         public void EnsureImageGenerationAvailable()
         {
@@ -1291,6 +1363,17 @@ namespace TensorSharp.Chat
                 p.TargetArea = body.TryGetProperty("targetArea", out var area)
                     ? area.GetInt64() : p.ResolveTargetArea();
                 if (body.TryGetProperty("negativePrompt", out var negative)) p.NegativePrompt = negative.GetString() ?? " ";
+                if (body.TryGetProperty("maskMode", out var mode))
+                    p.MaskMode = mode.GetString()?.ToLowerInvariant() switch
+                    {
+                        "grayscale" => TensorSharp.Models.QwenImage.QwenImageMaskMode.Grayscale,
+                        "alpha" => TensorSharp.Models.QwenImage.QwenImageMaskMode.Alpha,
+                        _ => throw new WebUiRequestRejectedException(400, new { error = "maskMode must be grayscale (white edits) or alpha (transparent edits)." }),
+                    };
+                if (body.TryGetProperty("maskInvert", out var invert)) p.MaskInvert = invert.GetBoolean();
+                if (body.TryGetProperty("maskFeather", out var feather)) p.MaskFeather = feather.GetInt32();
+                if (body.TryGetProperty("maskCrop", out var crop)) p.MaskCrop = crop.GetBoolean();
+                if (body.TryGetProperty("maskCropPadding", out var padding)) p.MaskCropPadding = padding.GetInt32();
             }
             catch (Exception ex) when (ex is InvalidOperationException or FormatException or OverflowException)
             {
@@ -1304,6 +1387,8 @@ namespace TensorSharp.Chat
         {
             if (p.Steps < 0 || !float.IsFinite(p.CfgScale) || p.CfgScale < 0 || p.TargetArea <= 0)
                 throw new WebUiRequestRejectedException(400, new { error = "steps and cfg must be nonnegative; targetArea must be positive." });
+            if (p.MaskFeather is < 0 or > 1024 || p.MaskCropPadding is < 0 or > 16384)
+                throw new WebUiRequestRejectedException(400, new { error = "maskFeather must be between 0 and 1024; maskCropPadding must be between 0 and 16384 source pixels." });
             const int alignment = 32;
             if (p.Width < 0 || p.Height < 0 || (p.Width == 0) != (p.Height == 0)
                 || p.Width % alignment != 0 || p.Height % alignment != 0)
@@ -1312,11 +1397,15 @@ namespace TensorSharp.Chat
 
         internal static string ParseImagePrompt(JsonElement body, bool generate)
         {
+            if (body.ValueKind != JsonValueKind.Object)
+                throw new WebUiRequestRejectedException(400, new { error = "Expected a JSON object." });
             if (body.TryGetProperty("prompt", out var value) && value.ValueKind != JsonValueKind.String)
                 throw new WebUiRequestRejectedException(400, new { error = "prompt must be a string." });
             string prompt = value.ValueKind == JsonValueKind.String ? value.GetString() : "";
             if (generate && string.IsNullOrWhiteSpace(prompt))
                 throw new WebUiRequestRejectedException(400, new { error = "Text-to-image generation requires a nonempty prompt." });
+            if (generate && HasMaskFields(body))
+                throw new WebUiRequestRejectedException(400, new { error = "Masks require an input image and /api/image-edit." });
             if (generate && ((body.TryGetProperty("imagePaths", out var images)
                     && images.ValueKind != JsonValueKind.Null
                     && (images.ValueKind != JsonValueKind.Array || images.GetArrayLength() > 0))
@@ -1326,7 +1415,8 @@ namespace TensorSharp.Chat
             return prompt;
         }
 
-        private async Task<object> ImageRequestAsync(JsonElement body, bool generate, CancellationToken cancellationToken)
+        private async Task<object> ImageRequestAsync(
+            JsonElement body, bool generate, IReadOnlyList<LoraSpec> loras, CancellationToken cancellationToken)
         {
             var logger = _loggerFactory.CreateLogger("TensorSharp.Server.ImageEdit");
             var model = generate ? RequireImageGenerationModel() : RequireImageEditModel();
@@ -1338,11 +1428,29 @@ namespace TensorSharp.Chat
             {
                 string error = await ReadUploadedImagesAsync(body, images, cancellationToken);
                 if (error != null) throw new WebUiRequestRejectedException(400, new { error });
+                await ReadUploadedMaskAsync(body, p, cancellationToken);
             }
-            return await RunImageEditAsync(model, prompt, p, images, logger, generate, cancellationToken);
+            return await RunImageEditAsync(model, prompt, p, images, logger, generate, loras, cancellationToken);
         }
 
         /// <summary>The multipart edit route uses the same validation and worker as JSON.</summary>
+        public async Task<object> ImageEditAsync(
+            JsonElement parameters, IReadOnlyList<byte[]> images, byte[] mask, CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(images);
+            if (images.Count == 0)
+                throw new WebUiRequestRejectedException(400, new { error = "No image uploaded (field 'image')." });
+            var logger = _loggerFactory.CreateLogger("TensorSharp.Server.ImageEdit");
+            var model = RequireImageEditModel();
+            EnsureImageEditHeadroom(logger, "Image edit rejected: {Reason}");
+            var p = ParseImageParameters(parameters);
+            string prompt = ParseImagePrompt(parameters, generate: false);
+            ValidateMaskPresence(parameters, mask != null);
+            if (mask != null) p.Mask = DecodeRequestImage(mask, "mask");
+            return await RunImageEditAsync(model, prompt, p, images.ToList(), logger, false, null, cancellationToken);
+        }
+
+        /// <summary>Compatibility overload for callers supplying decoded multipart fields.</summary>
         public async Task<object> ImageEditAsync(
             string prompt, int steps, float cfg, long seed, long targetArea, IReadOnlyList<byte[]> images, CancellationToken cancellationToken,
             int width = 0, int height = 0, string negativePrompt = null)
@@ -1359,13 +1467,46 @@ namespace TensorSharp.Chat
             };
             p.TargetArea = p.ResolveTargetArea();
             ValidateImageParameters(p);
-            return await RunImageEditAsync(model, prompt ?? "", p, images.ToList(), logger, false, cancellationToken);
+            return await RunImageEditAsync(model, prompt ?? "", p, images.ToList(), logger, false, null, cancellationToken);
         }
+
+        /// <summary>
+        /// Swap <paramref name="loras"/> into <paramref name="model"/> unless it already carries
+        /// that set; null means the caller does not choose plug-ins. Called inside
+        /// <see cref="_imageEditLock"/>, so the picture that follows is made with the set it was
+        /// asked with, whatever the request it waited behind used. The model records a set as
+        /// <see cref="LoraCliFlags.Resolve"/> expands it (a plug-in manifest becomes its weights
+        /// and config), so a set given in another form is compared in that one: compared as
+        /// given, it reloaded on every picture.
+        /// </summary>
+        private static void ApplyLoras(
+            TensorSharp.Models.QwenImage.QwenImageModel model, IReadOnlyList<LoraSpec> loras, ILogger logger)
+        {
+            if (loras == null || model.LoraSpecs.SequenceEqual(loras))
+                return;
+            var swap = Stopwatch.StartNew();
+            try
+            {
+                if (model.LoraSpecs.SequenceEqual(LoraCliFlags.Resolve(loras)))
+                    return;
+                model.SetLoras(loras);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                throw new LoraApplyException("The LoRA plug-ins could not be applied: " + ex.Message, ex);
+            }
+            logger.LogInformation(LogEventIds.UploadReceived, "Image request: LoRA plug-ins {Loras} applied in {Seconds:F2}s",
+                loras.Count == 0 ? "(none)" : string.Join(", ", loras.Select(l => Path.GetFileName(l.Path) + "@" + l.Scale)),
+                swap.Elapsed.TotalSeconds);
+        }
+
+        /// <summary>A plug-in set the model refused; the model keeps the set it had.</summary>
+        private sealed class LoraApplyException(string message, Exception inner) : InvalidOperationException(message, inner);
 
         private async Task<object> RunImageEditAsync(
             TensorSharp.Models.QwenImage.QwenImageModel model,
             string prompt, TensorSharp.Models.QwenImage.QwenImageParams p, List<byte[]> imageBytesList, ILogger logger,
-            bool generate, CancellationToken cancellationToken)
+            bool generate, IReadOnlyList<LoraSpec> loras, CancellationToken cancellationToken)
         {
             string outName = $"{(generate ? "generated" : "edit")}-{Guid.NewGuid():N}.png";
             string outPath = Path.Combine(_options.UploadDirectory, outName);
@@ -1374,6 +1515,7 @@ namespace TensorSharp.Chat
                 prompt, p.Steps, p.CfgScale, imageBytesList.Count, imageBytesList.Sum(b => (long)b.Length));
             var sw = Stopwatch.StartNew();
             int w, h;
+            Interlocked.Increment(ref _mediaJobs);
             try
             {
                 (w, h) = await Task.Run(() =>
@@ -1381,7 +1523,9 @@ namespace TensorSharp.Chat
                     lock (_imageEditLock)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
-                        var inputs = imageBytesList.ConvertAll(bytes => TensorSharp.Models.QwenImage.ImageIO.Decode(bytes, preserveAlpha: true));
+                        var inputs = imageBytesList.ConvertAll(bytes => DecodeRequestImage(bytes, "image"));
+                        ValidateImageMaskGeometry(p, inputs);
+                        ApplyLoras(model, loras, logger);
                         p.OnStep = (_, _, _) => cancellationToken.ThrowIfCancellationRequested();
                         var output = generate ? model.GenerateImage(prompt, p) : model.EditImage(prompt, inputs, p);
                         TensorSharp.Models.QwenImage.ImageIO.SavePng(outPath, output);
@@ -1397,6 +1541,17 @@ namespace TensorSharp.Chat
                 logger.LogWarning(LogEventIds.UploadReceived, "Image request rejected: {Reason}", ex.Message);
                 throw new WebUiRequestRejectedException(400, new { error = ex.Message });
             }
+            catch (LoraApplyException ex)
+            {
+                logger.LogError(LogEventIds.ChatFailed, ex, "Image request failed");
+                throw new WebUiRequestRejectedException(500, new { error = ex.Message });
+            }
+            finally
+            {
+                // The awaited worker has left the model (a cancelled request that never
+                // started one has nothing to wait for), so the job is over either way.
+                Interlocked.Decrement(ref _mediaJobs);
+            }
             sw.Stop();
             _uploads.RecordFile(outPath);
             string url = BuildUploadUrl(outName);
@@ -1407,7 +1562,7 @@ namespace TensorSharp.Chat
 
         /// <summary>
         /// Read the referenced upload(s) from a JSON edit request into <paramref name="images"/>:
-        /// <c>imagePaths</c> (array, multi-image) or legacy <c>imagePath</c> (single). References
+        /// <c>imagePaths</c> (array, multi-image) or <c>imagePath</c> (single). References
         /// are the bare server filenames returned by <c>/api/upload</c>; absolute paths from older
         /// clients are accepted when they resolve inside the upload directory. Returns an error
         /// message, or null on success.
@@ -1415,12 +1570,23 @@ namespace TensorSharp.Chat
         internal async Task<string> ReadUploadedImagesAsync(JsonElement root, List<byte[]> images, CancellationToken ct)
         {
             var paths = new List<string>();
-            if (root.TryGetProperty("imagePaths", out var ips) && ips.ValueKind == JsonValueKind.Array)
+            if (root.TryGetProperty("imagePaths", out var ips))
+            {
+                if (ips.ValueKind != JsonValueKind.Array)
+                    return "imagePaths must be an array of uploaded file names.";
                 foreach (var el in ips.EnumerateArray())
+                {
                     if (el.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(el.GetString()))
                         paths.Add(el.GetString());
-            if (paths.Count == 0 && root.TryGetProperty("imagePath", out var ip) && ip.ValueKind == JsonValueKind.String)
+                    else return "imagePaths must contain nonempty uploaded file names.";
+                }
+            }
+            if (paths.Count == 0 && root.TryGetProperty("imagePath", out var ip))
+            {
+                if (ip.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(ip.GetString()))
+                    return "imagePath must reference a previously uploaded file.";
                 paths.Add(ip.GetString());
+            }
             if (paths.Count == 0)
                 return "imagePath (or imagePaths) must reference a previously uploaded file.";
 
@@ -1431,6 +1597,60 @@ namespace TensorSharp.Chat
                 images.Add(await File.ReadAllBytesAsync(full, ct));
             }
             return null;
+        }
+
+        private static bool HasMaskFields(JsonElement body) =>
+            body.TryGetProperty("maskPath", out _) || body.TryGetProperty("maskMode", out _)
+            || body.TryGetProperty("maskInvert", out _) || body.TryGetProperty("maskFeather", out _)
+            || body.TryGetProperty("maskCrop", out _) || body.TryGetProperty("maskCropPadding", out _);
+
+        internal static void ValidateMaskPresence(JsonElement body, bool hasMask)
+        {
+            if (!hasMask && HasMaskFields(body))
+                throw new WebUiRequestRejectedException(400, new { error = "Mask options require maskPath (JSON) or a mask file (multipart)." });
+        }
+
+        internal async Task ReadUploadedMaskAsync(JsonElement body, TensorSharp.Models.QwenImage.QwenImageParams p, CancellationToken ct)
+        {
+            bool hasMask = body.TryGetProperty("maskPath", out var maskPath);
+            ValidateMaskPresence(body, hasMask);
+            if (!hasMask) return;
+            if (maskPath.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(maskPath.GetString())
+                || !UploadFileReference.TryResolve(_options.UploadDirectory, maskPath.GetString(), out string full)
+                || !File.Exists(full))
+                throw new WebUiRequestRejectedException(400, new { error = "maskPath must reference a previously uploaded file." });
+            var info = new FileInfo(full);
+            if (info.Length == 0 || info.Length > _uploads.MaxFileBytes)
+                throw new WebUiRequestRejectedException(400, new { error = "Mask is empty or exceeds the upload size limit." });
+            p.Mask = DecodeRequestImage(await File.ReadAllBytesAsync(full, ct), "mask");
+        }
+
+        private static TensorSharp.Models.QwenImage.RgbImage DecodeRequestImage(byte[] bytes, string field)
+        {
+            try { return TensorSharp.Models.QwenImage.ImageIO.Decode(bytes, preserveAlpha: true); }
+            catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException)
+            { throw new WebUiRequestRejectedException(400, new { error = $"Cannot decode {field} image: {ex.Message}" }); }
+        }
+
+        // Keep these bounds aligned with WebUi/mask-editor.js before allocating
+        // a native-resolution browser canvas or creating its HEIC companion PNG.
+        internal const string ImageSelectionSizeLimitMessage =
+            "The selection editor supports images up to 16 megapixels and 8192 pixels per side.";
+
+        internal static bool SupportsImageSelectionSize(int width, int height) =>
+            width > 0 && height > 0 && width <= 8192 && height <= 8192 && (long)width * height <= 16777216;
+
+        private static void ValidateImageMaskGeometry(TensorSharp.Models.QwenImage.QwenImageParams p,
+            IReadOnlyList<TensorSharp.Models.QwenImage.RgbImage> images)
+        {
+            if (p.Mask == null) return;
+            if (images.Count == 0)
+                throw new ArgumentException("A mask requires a first reference image to edit.");
+            var source = images[0];
+            // Match the runtime's geometry check before a per-request adapter selection
+            // mutates the model. The pipeline still owns mask preparation and pooling.
+            if (source.Width <= 0 || source.Height <= 0 || p.Mask.Width != source.Width || p.Mask.Height != source.Height)
+                throw new ArgumentException("The mask must have exactly the same width and height as the first reference image.");
         }
 
         // A live denoising frame surfaced from the edit worker to the stream: a progress tick
@@ -1456,13 +1676,30 @@ namespace TensorSharp.Chat
         /// already started its response by then, and the page treats both alike.
         /// </summary>
         public IAsyncEnumerable<object> ImageEditStreamAsync(JsonElement body, CancellationToken cancellationToken) =>
-            ImageRequestStreamAsync(body, false, cancellationToken);
+            ImageRequestStreamAsync(body, false, null, cancellationToken);
 
         public IAsyncEnumerable<object> ImageGenerateStreamAsync(JsonElement body, CancellationToken cancellationToken) =>
-            ImageRequestStreamAsync(body, true, cancellationToken);
+            ImageRequestStreamAsync(body, true, null, cancellationToken);
+
+        /// <summary>
+        /// An edit made with exactly the LoRA plug-ins <paramref name="loras"/> (an empty list
+        /// means none), for a host that chooses them per picture rather than at startup
+        /// (<c>--lora</c>). The set is swapped in under the same lock as the run, so a picture
+        /// that waited behind another is made with the set it was asked with, and an unchanged
+        /// set costs nothing. Pass absolute paths: specs are compared as the model records them
+        /// (<see cref="TensorSharp.Models.QwenImage.QwenImageModel.LoraSpecs"/>). A set that
+        /// cannot be applied ends the stream with the reason, and the previous set stays.
+        /// </summary>
+        public IAsyncEnumerable<object> ImageEditStreamAsync(JsonElement body, IReadOnlyList<LoraSpec> loras, CancellationToken cancellationToken) =>
+            ImageRequestStreamAsync(body, false, loras ?? throw new ArgumentNullException(nameof(loras)), cancellationToken);
+
+        /// <summary>A picture from words with exactly the LoRA plug-ins <paramref name="loras"/>;
+        /// see <see cref="ImageEditStreamAsync(JsonElement, IReadOnlyList{LoraSpec}, CancellationToken)"/>.</summary>
+        public IAsyncEnumerable<object> ImageGenerateStreamAsync(JsonElement body, IReadOnlyList<LoraSpec> loras, CancellationToken cancellationToken) =>
+            ImageRequestStreamAsync(body, true, loras ?? throw new ArgumentNullException(nameof(loras)), cancellationToken);
 
         private async IAsyncEnumerable<object> ImageRequestStreamAsync(
-            JsonElement body, bool generate,
+            JsonElement body, bool generate, IReadOnlyList<LoraSpec> loras,
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
             var logger = _loggerFactory.CreateLogger("TensorSharp.Server.ImageEdit");
@@ -1490,7 +1727,10 @@ namespace TensorSharp.Chat
                 p = ParseImageParameters(body);
                 prompt = ParseImagePrompt(body, generate);
                 if (!generate)
+                {
                     parseError = await ReadUploadedImagesAsync(body, imageBytesList, ct);
+                    if (parseError == null) await ReadUploadedMaskAsync(body, p, ct);
+                }
             }
             catch (WebUiRequestRejectedException ex) { parseError = ex.Message; }
             catch (Exception ex) { parseError = "Bad request: " + ex.Message; }
@@ -1515,6 +1755,7 @@ namespace TensorSharp.Chat
             // disabled previews entirely for auto-step requests (the Web UI default).
             int previewCount = p.Steps > 0 ? Math.Clamp(p.Steps - 1, 0, 8) : 8;
 
+            Interlocked.Increment(ref _mediaJobs);
             var editTask = Task.Run(() =>
             {
                 var sw = Stopwatch.StartNew();
@@ -1523,8 +1764,10 @@ namespace TensorSharp.Chat
                     // The model is not thread-safe; serialize edit requests (shared with ImageEditAsync).
                     lock (_imageEditLock)
                     {
-                        var inputs = imageBytesList.ConvertAll(bytes => TensorSharp.Models.QwenImage.ImageIO.Decode(bytes, preserveAlpha: true));
+                        var inputs = imageBytesList.ConvertAll(bytes => DecodeRequestImage(bytes, "image"));
                         ct.ThrowIfCancellationRequested();
+                        ValidateImageMaskGeometry(p, inputs);
+                        ApplyLoras(editModel, loras, logger);
                         p.PreviewCount = previewCount;
                         p.OnStep = (step, total, preview) =>
                             {
@@ -1563,7 +1806,11 @@ namespace TensorSharp.Chat
                     logger.LogError(LogEventIds.ChatFailed, ex, "Image edit (stream) failed");
                     channel.Writer.TryWrite(new EditFrame { Final = true, Error = ex.Message });
                 }
-                finally { channel.Writer.Complete(); }
+                finally
+                {
+                    Interlocked.Decrement(ref _mediaJobs);
+                    channel.Writer.Complete();
+                }
             }, CancellationToken.None);
 
             // Frames are yielded outside the try below because an iterator may not yield
@@ -1619,8 +1866,10 @@ namespace TensorSharp.Chat
             public int Step, Total;
             public bool Final;
             public string Url;
-            // Sidecar WAV for models that generate an audio track jointly with the video.
+            // Sidecar WAV for models that generate an audio track jointly with the video,
+            // and whether the same track also went inside the MP4.
             public string AudioUrl;
+            public bool AudioMuxed;
             public int Width, Height, Frames, Fps;
             public long Seed;
             public string Codec;
@@ -1697,7 +1946,7 @@ namespace TensorSharp.Chat
                 "Video generate done: {F} frames -> {Url} ({Sec:F1}s)", result.Frames, result.Url, result.ElapsedSeconds);
             return new
             {
-                ok = true, url = result.Url, audioUrl = result.AudioUrl,
+                ok = true, url = result.Url, audioUrl = result.AudioUrl, audioMuxed = result.AudioMuxed,
                 width = result.Width, height = result.Height,
                 frames = result.Frames, fps = result.Fps,
                 seed = result.Seed, codec = result.Codec,
@@ -1727,15 +1976,25 @@ namespace TensorSharp.Chat
             string outPath = Path.Combine(_options.UploadDirectory, outName);
 
             var sw = Stopwatch.StartNew();
-            var result = await Task.Run(() =>
+            Interlocked.Increment(ref _mediaJobs);
+            (TensorSharp.Models.WanVideo.GeneratedVideo video, string codec, bool audioMuxed) result;
+            try
             {
-                lock (_videoGenLock)
+                result = await Task.Run(() =>
                 {
-                    var video = videoModel.GenerateVideo(prompt, p);
-                    string codec = TensorSharp.Models.WanVideo.VideoIO.SaveMp4(outPath, video.Frames, video.Fps);
-                    return (video, codec);
-                }
-            });
+                    lock (_videoGenLock)
+                    {
+                        var video = videoModel.GenerateVideo(prompt, p);
+                        string codec = TensorSharp.Models.WanVideo.VideoIO.SaveMp4(
+                            outPath, video.Frames, video.Fps, video.Audio, out bool audioMuxed);
+                        return (video, codec, audioMuxed);
+                    }
+                });
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _mediaJobs);
+            }
             sw.Stop();
             _uploads.RecordFile(outPath);
 
@@ -1745,7 +2004,7 @@ namespace TensorSharp.Chat
                 url, audioUrl, outPath,
                 result.video.Frames[0].Width, result.video.Frames[0].Height,
                 result.video.Frames.Length, result.video.Fps, result.video.Seed, result.codec,
-                sw.Elapsed.TotalSeconds);
+                sw.Elapsed.TotalSeconds, result.audioMuxed);
         }
 
         // A generation request the loaded model can explain rather than an internal
@@ -1755,9 +2014,10 @@ namespace TensorSharp.Chat
             ex is ArgumentException or InvalidOperationException or NotSupportedException;
 
         // Models that generate audio jointly with the video hand back a track alongside
-        // the frames. It is written as a sidecar WAV rather than muxed into the MP4:
-        // muxing needs an encoder we cannot assume is installed, whereas a WAV always
-        // writes and the client can play or mux it as it likes.
+        // the frames. It is always written as a sidecar WAV, which writes everywhere and
+        // which a client can play or mux as it likes. Where the platform's encoder can
+        // also put the track inside the MP4 (AVAssetWriter on Apple) it does that as well,
+        // and the reply says so; the desktop encoders write the frames alone.
         private string SaveAudioSidecar(TensorSharp.Models.Video.GeneratedVideoAudio audio, string videoName)
         {
             if (audio is not { ChannelCount: > 0, SampleCount: > 0 }) return null;
@@ -1827,6 +2087,7 @@ namespace TensorSharp.Chat
             // threads publish into this channel.
             var channel = Channel.CreateUnbounded<VideoFrame>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
 
+            Interlocked.Increment(ref _mediaJobs);
             var genTask = Task.Run(() =>
             {
                 var sw = Stopwatch.StartNew();
@@ -1834,26 +2095,38 @@ namespace TensorSharp.Chat
                 {
                     lock (_videoGenLock)
                     {
+                        // A request stopped while it waited behind another must not start.
+                        ct.ThrowIfCancellationRequested();
+                        int generatingThread = Environment.CurrentManagedThreadId;
                         p.OnStep = (step, total) =>
                         {
                             if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
                             channel.Writer.TryWrite(new VideoFrame { Step = step, Total = total });
                         };
-                        // Heartbeats and phase transitions. These arrive from a timer
-                        // thread mid-pass, so cancellation is only observed here — the
-                        // OnStep hook above still owns aborting between steps.
-                        p.OnProgress = prog => channel.Writer.TryWrite(new VideoFrame
+                        // Heartbeats and phase transitions. A phase report made on the
+                        // generating thread is also a safe place to stop - before the text
+                        // encoder, between VAE tiles, before the soundtrack - which keeps a
+                        // Stop from waiting out a whole decode. A heartbeat arrives from a
+                        // timer thread mid-pass, where an exception would take the process
+                        // down, so those only report and OnStep owns the rest.
+                        p.OnProgress = prog =>
                         {
-                            Step = prog.Step, Total = prog.TotalSteps, Phase = prog.Phase,
-                            Detail = prog.Detail, Elapsed = prog.ElapsedSeconds, Eta = prog.EtaSeconds,
-                        });
+                            if (ct.IsCancellationRequested && Environment.CurrentManagedThreadId == generatingThread)
+                                throw new OperationCanceledException(ct);
+                            channel.Writer.TryWrite(new VideoFrame
+                            {
+                                Step = prog.Step, Total = prog.TotalSteps, Phase = prog.Phase,
+                                Detail = prog.Detail, Elapsed = prog.ElapsedSeconds, Eta = prog.EtaSeconds,
+                            });
+                        };
                         var video = videoModel.GenerateVideo(prompt, p);
-                        string codec = TensorSharp.Models.WanVideo.VideoIO.SaveMp4(outPath, video.Frames, video.Fps);
+                        string codec = TensorSharp.Models.WanVideo.VideoIO.SaveMp4(
+                            outPath, video.Frames, video.Fps, video.Audio, out bool audioMuxed);
                         _uploads.RecordFile(outPath);
                         channel.Writer.TryWrite(new VideoFrame
                         {
                             Final = true, Url = BuildUploadUrl(outName),
-                            AudioUrl = SaveAudioSidecar(video.Audio, outName),
+                            AudioUrl = SaveAudioSidecar(video.Audio, outName), AudioMuxed = audioMuxed,
                             Width = video.Frames[0].Width, Height = video.Frames[0].Height,
                             Frames = video.Frames.Length, Fps = video.Fps, Seed = video.Seed,
                             Codec = codec, Seconds = sw.Elapsed.TotalSeconds,
@@ -1869,7 +2142,11 @@ namespace TensorSharp.Chat
                     logger.LogError(LogEventIds.ChatFailed, ex, "Video generate (stream) failed");
                     channel.Writer.TryWrite(new VideoFrame { Final = true, Error = ex.Message });
                 }
-                finally { channel.Writer.Complete(); }
+                finally
+                {
+                    Interlocked.Decrement(ref _mediaJobs);
+                    channel.Writer.Complete();
+                }
             }, CancellationToken.None);
 
             while (true)
@@ -1896,7 +2173,8 @@ namespace TensorSharp.Chat
                     else
                         yield return new
                         {
-                            done = true, url = f.Url, audioUrl = f.AudioUrl, width = f.Width, height = f.Height,
+                            done = true, url = f.Url, audioUrl = f.AudioUrl, audioMuxed = f.AudioMuxed,
+                            width = f.Width, height = f.Height,
                             frames = f.Frames, fps = f.Fps, seed = f.Seed, codec = f.Codec,
                             elapsedSeconds = f.Seconds,
                         };
@@ -2344,6 +2622,13 @@ namespace TensorSharp.Chat
             // generation finishes.
             int turnPromptTokens = 0;
             int turnKvReusedTokens = 0;
+            // What the engine generated this turn and how long it spent decoding it. The
+            // skills loop's terminal update already sums its rounds; the retry below adds
+            // its own. The `done` frame reports these, not tokenCount (see
+            // WebUiTurnStats), because tokenCount never sees a tool-using turn's reasoning
+            // or tool calls while the turn's seconds include all of them.
+            long turnEvalTokens = 0;
+            long turnEvalNs = 0;
             // Whether the answer was cut off by the token budget. The UI renders this
             // as a "response was truncated" hint, so a user staring at a sentence that
             // stops mid-word knows to raise max tokens rather than blame the model.
@@ -2414,6 +2699,8 @@ namespace TensorSharp.Chat
                     {
                         turnPromptTokens = update.PromptTokens;
                         turnKvReusedTokens = update.KvCacheReusedTokens;
+                        turnEvalTokens += update.EvalTokens;
+                        turnEvalNs += update.EvalNs;
                         turnTruncated = FinishReasonMapper.IsTruncated(update.FinishReason);
                         turnFinishReason = update.FinishReason;
                         turnRepetitionExplained = update.RepetitionExplained;
@@ -2562,6 +2849,8 @@ namespace TensorSharp.Chat
                         {
                             turnPromptTokens = update.PromptTokens;
                             turnKvReusedTokens = update.KvCacheReusedTokens;
+                            turnEvalTokens += update.EvalTokens;
+                            turnEvalNs += update.EvalNs;
                             turnTruncated = FinishReasonMapper.IsTruncated(update.FinishReason);
                             turnFinishReason = update.FinishReason;
                             turnRepetitionExplained = update.RepetitionExplained;
@@ -2604,7 +2893,7 @@ namespace TensorSharp.Chat
 
             foreach (object frame in FinalFrames(sawParsedUpdate ? null : uiParser, aborted, inferenceError, chatSession, sw, tokenCount,
                 turnPromptTokens, turnKvReusedTokens, turnTruncated, sawContent, turnFinishReason,
-                turnRepetitionExplained))
+                turnRepetitionExplained, turnEvalTokens, turnEvalNs))
             {
                 yield return frame;
             }
@@ -3046,7 +3335,7 @@ namespace TensorSharp.Chat
             IOutputParser uiParser, bool aborted, string inferenceError,
             ChatSession chatSession, Stopwatch sw, int tokenCount, int turnPromptTokens, int turnKvReusedTokens,
             bool truncated, bool sawContent = true, string finishReason = null,
-            bool repetitionExplained = false)
+            bool repetitionExplained = false, long evalTokens = 0, long evalNs = 0)
         {
             if (uiParser != null && !aborted)
             {
@@ -3101,13 +3390,13 @@ namespace TensorSharp.Chat
             // if it ever should; the transcript is not the place for it.
 
             sw.Stop();
-            double tokPerSec = tokenCount > 0 ? tokenCount / sw.Elapsed.TotalSeconds : 0;
+            var (generated, tokPerSec) = WebUiTurnStats.Summarize(evalTokens, evalNs, tokenCount, sw.Elapsed.TotalSeconds);
             // `truncated` is the page's "truncated (max tokens reached)" chip, and a
             // repetition stop is not that: the budget was nowhere near spent. The
             // protocols still call it a length stop (FinishReasonMapper.IsTruncated), which
             // is what stops a client dispatching a half-written tool call; the chip is a
             // sentence shown to a person and it would be a false one.
-            yield return WebUiSseEvents.Done(tokenCount, sw.Elapsed.TotalSeconds, tokPerSec, aborted, inferenceError, chatSession.Id,
+            yield return WebUiSseEvents.Done(generated, sw.Elapsed.TotalSeconds, tokPerSec, aborted, inferenceError, chatSession.Id,
                 turnPromptTokens, turnKvReusedTokens,
                 truncated && !FinishReasonMapper.IsRepetition(finishReason));
         }

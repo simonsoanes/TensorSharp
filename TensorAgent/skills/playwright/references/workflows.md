@@ -2,7 +2,10 @@
 
 Use the wrapper script and read each newly linked snapshot. Request a fresh
 snapshot when none was produced or the page changed outside the last command.
-Assume `PWCLI` is set and `pwcli` is an alias for `"$PWCLI"`.
+Use `skills_run` with `path="scripts/playwright_cli.mjs"` on every operating
+system, or the native Node.js `pwcli` shell function in `references/cli.md`.
+On Windows, run the `.mjs` wrapper with native `node.exe`; do not use Bash/WSL
+for a browser that the user needs to see.
 Keep commands in the workspace root so project config and session identity are
 stable. Save screenshots under `output/playwright/` using `--filename`.
 
@@ -64,7 +67,8 @@ pwcli --session marketing open https://example.com
 pwcli --session checkout open https://example.com/checkout
 ```
 
-Or set the session once:
+Or set the session once (Bash; in PowerShell use
+`$env:PLAYWRIGHT_CLI_SESSION = 'checkout'`):
 
 ```bash
 export PLAYWRIGHT_CLI_SESSION=checkout
@@ -100,6 +104,20 @@ Minimal example:
 
 - If an element ref fails, run `pwcli snapshot` again and retry.
 - If the page looks wrong, re-open with `--headed` and resize the window.
+- If a Windows login window is missing, check that the launch used native
+  Node.js via `scripts/playwright_cli.mjs`, then inspect `tab-list` and select
+  the login tab. A WSL process or a successful headless launch is not evidence
+  of a visible Windows browser. Use `open <login-url> --headed --persistent`
+  in the same named native session for manual handoff and leave it open.
+- If Chrome reports `Failed To Create Data Directory`, inspect the reported
+  user-data directory. Deep Windows workspace paths can exceed Chrome's path
+  limits. For a new session, supply a short workspace profile explicitly:
+  `pwcli --session linkedin open <login-url> --headed --profile=.home/p/linkedin`.
+  `--profile` enables persistence; reuse that profile for later opens of the
+  same session. Keep separate profiles for separate sessions and browser types.
+  Preserve an existing profile and its login state; do not silently replace it
+  with an empty profile. If the workspace itself is too long, use a shorter
+  workspace location. The wrapper preserves caller profile/configuration choices.
 - If a flow depends on prior state, use a named `--session`.
 - On macOS under `sandbox-exec`, create the `chromiumSandbox:false` project
   configuration described in SKILL.md before launching. A failed browser
@@ -126,6 +144,12 @@ pwcli snapshot
 # Read the snapshot and verify the visible account, then navigate in this session.
 pwcli goto https://example.com/search
 ```
+
+When specifying a new profile explicitly, use the reserved private workspace
+directory, such as `--profile=.home/p/linkedin`. Never store a browser profile
+under `output/` or another artifact directory: it contains authentication state
+and must not be collected as a deliverable. Keep using an established profile
+instead of replacing it with a new empty one.
 
 Keep using the same CLI session and workspace. A persistent profile belongs to
 that workspace; a new chat workspace does not automatically inherit it. Do not

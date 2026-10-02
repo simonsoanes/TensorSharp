@@ -1,6 +1,6 @@
 # DeepSeek V4 Flash（`deepseek4`）
 
-> **多 GPU 模式选择：** 整层放置使用 `--layer-split N`，支持的张量并行使用 `--tp N`。未配置两种模式时默认单设备。下面的历史命令与测量早于这项默认值变更；多 GPU 启动请加 `--layer-split N`。显式旧变量 `TS_DSV4_NGPU=0` 仍表示全部可见 GPU 自动放置；使用明确并行度时请取消该变量，或设为相同卡数。按层切分仅限单节点。
+> **多 GPU 模式选择：** 整层放置使用 `--layer-split N`，支持的张量并行使用 `--tp N`。未配置两种模式时默认单设备。下面的历史命令与测量早于这项默认值变更；多 GPU 启动请加 `--layer-split N`。按层切分仅限单节点。
 
 [← 返回模型索引](README_zh-cn.md) | [English](deepseek4.md)
 
@@ -25,7 +25,7 @@ DeepSeek V4 有三套整模型执行器：
   加速器上；`hc_comb`（对 4x4 矩阵做 20 次迭代的 Sinkhorn）与 lightning indexer 仍走
   调度器的 CPU 回退，这就是 Vulkan 与 CUDA 之间剩下的差距。该分解在 Vulkan 上让
   prefill 提升 34%、decode 提升 14%，由加载时的 `ggml_backend_supports_op` 探测自动
-  选择（`TS_DSV4_HC_NATIVE=0/1` 可做 A/B）。
+  选择。
 - **`--backend ggml_cpu`**：同一个原生 ggml 执行器，只用一个 CPU 计算设备，架构
   专属算子走各自的标量 CPU 内核。它确实跑在 CPU 上（此前在有 CUDA 的机器上会悄悄
   改用 GPU），并在 stderr 上说明一次；要用 GPU 请传 `--backend ggml_cuda`。V4 在这个
@@ -50,7 +50,6 @@ MoE 内核——才留在 DeepSeek V4 的文件里。
 
 - 直接加载（分片的）GGUF。`--layer-split N` 把整层分配到 N 张本地 GPU，
   以承载大于单卡显存的模型（128 GiB 的 IQ4_XS 构建需要 2×80GB）。未配置时默认单设备。
-  旧变量 `TS_DSV4_NGPU=0` 显式选择全部可见 GPU；若同时设置新参数，两者卡数必须一致。
 - 在设备上持有全部 DSV4 KV 状态：原始 SWA 环、CSA/HCA 压缩 K 缓存、lightning
   indexer 缓存，以及压缩器状态环。
 - 通过 `ggml_backend_sched` 把 prefill/decode 的每个 ubatch 作为单张 ggml 计算图
@@ -289,7 +288,7 @@ checkpoint 中的路由专家以 FP4 加每 32 个元素一个 E8M0 scale 存储
 
 | 参数 | 默认值 | 含义 |
 |---|---|---|
-| `--draft-model <path>` | 无 | DSpark 草稿器 GGUF（环境变量 `TS_DSV4_DSPARK`） |
+| `--draft-model <path>` | 无 | DSpark 草稿器 GGUF（环境变量 `TS_SPEC_DRAFT_MODEL`） |
 | `--spec-draft <N>` | 块大小（5） | 每步最多起草的 token 数 |
 | `--spec-pmin <p>` | `0.35` | 保留某个起草位置所需的最小**累积**接受概率（置信度头各位置估计值的乘积）；`0` 表示从不设阈 |
 
@@ -345,18 +344,13 @@ Prefill 保持持平（10K 提示词上 831 对 835 tok/s）。接受率——�
 |---|---|---|
 | `MAX_CONTEXT` | 65536 | 上下文窗口（缓存随之伸缩；元数据允许 1M） |
 | `TS_DSV4_UBATCH` | `cpu` 为 512，其他为 1024 | Prefill 微批大小 |
-| `TS_DSV4_NGPU` | 全部 | 按层切分所使用的 GPU 数量（GPU 后端） |
 | `TS_DSV4_VRAM_RESERVE_MB` | 按每次加载估算（至少 2048）；`cuda` 上为 2048 | GPU 后端：覆盖每张卡为调度器计算缓冲区保留的显存。不设置时，ggml 执行器取 2 GiB 加上 lightning indexer top-k 的临时开销与一个 ubatch 的激活，随 `MAX_CONTEXT` 与 `TS_DSV4_UBATCH` 增长；`--backend cuda` 固定为 2048。调低可少卸载几层专家；长提示词分配计算图失败时调高 |
 | `TS_N_CPU_MOE` / `TS_CPU_MOE` | 0（关闭） | 路由专家留在系统内存中的前置层数（等同于 `--n-cpu-moe` / `--cpu-moe`）。默认关闭；放不下的模型会被拒绝，并给出能装下的层数 |
 | `TS_CPU_MOE_THREADS` | 全部可用 CPU（卸载时） | ggml 执行器上主机专家矩阵乘的工作线程数。开启卸载时，线程池取 `hardware_concurrency` 再按亲和性掩码与 cgroup CPU 配额收紧——不像其他 MoE 架构那样减半，因为 DSV4 每个被卸载的层每 token 读取的专家字节远多于它们，且在那之后仍能继续扩展。`--cpu-moe-threads N` 可覆盖它，继承自启动环境的 `TS_CPU_MOE_THREADS` 优先级最高。请按配额而不是 `nproc` 来设：在 23.8 CPU 的配额下，96 线程比 23 线程实测慢 **25 倍**。在服务端部署时要给其他线程留出余地：在 95 CPU 的配额下，gemma-4-26B-A4B（不是 DSV4）上的共享 MoE 线程池在 71 线程时为 8.2 tok/s，64 线程时为 20.7，因此在那种环境下请用 `--cpu-moe-threads` 设一个低于配额的值 |
 | `TS_DSV4_LOAD_THREADS` | 16 | `--backend cuda`：流式写显存加载器的读取线程数 |
 | `TS_DSV4_LOAD_STATS` | 0 | `--backend cuda`：1 = 打印各阶段加载耗时 |
-| `TS_DSV4_STAGED_EXPERTS` | 1 | `--backend cuda`：0 = 逐 token 的专家内核（用于 A/B） |
-| `TS_CUDA_BF16_MATVEC` | 1 | 0 = 单行 BF16 投影改用 cuBLAS 而非专用 matvec（也接受 `TS_DSV4_BF16_MATVEC`） |
 | `TS_DSV4_FA` | 1 | Flash attention（GPU 后端，自动探测） |
 | `TS_DSV4_PERF` | 0 | 1 = 打印 tok/s 与 DSpark 起草阶段耗时，2 = 每个 ubatch 的分阶段计时 |
-| `TS_DSV4_DSPARK` | — | DSpark 草稿器 GGUF 路径（等同于 `--draft-model`） |
-| `TS_DSV4_DSPARK_CAPTURE` | 1 | 0 = 跳过草稿器的目标特征捕获（A/B 开关；此时草稿会过期并被拒绝） |
 | `TS_DSV4_THREADS` | 全部核心 | CPU 执行器的工作线程数 |
 | `TS_DSV4_MMAP` | 1 | CPU 执行器：0 = 加载时把全部权重拷入内存（并行读取；模型位于网络文件系统时适用） |
 | `TS_DSV4_BUFFER_SHARDS` | — | CPU 执行器：以逗号分隔的 1 基分片序号，指定拷入内存的分片（其余仍用 mmap） |

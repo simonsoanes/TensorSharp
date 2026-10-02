@@ -22,7 +22,10 @@ namespace TensorAgent.Maui.Hosting;
 /// <param name="GgmlCpuAvailable"><c>TSGgml_CanInitializeBackend(Cpu)</c> through the public managed API.</param>
 /// <param name="GgmlMetalAvailable"><c>TSGgml_CanInitializeBackend(Metal)</c> through the public managed API.</param>
 /// <param name="MainProgramHandleResolved">Whether <c>TSGgml_CanInitializeBackend</c> can be found by dlsym in the
-/// main program image, i.e. the static link plus the exported_symbol linker flags worked.</param>
+/// main program image, i.e. the static link plus the exported_symbol linker flags worked. Only the phone links
+/// the engine statically; the desktop heads load it as a library and report <paramref name="NativeLibraryLoaded"/>.</param>
+/// <param name="NativeLibraryLoaded">Whether the GgmlOps resolver has loaded the engine, from the main program
+/// image on the phone or from the library shipped beside the desktop app.</param>
 /// <param name="GgmlVersionOrError">A one-line description of the successful native round trip, or the
 /// exception (type and message) the first P/Invoke threw.</param>
 /// <param name="EngineAssemblies">Name and version of every TensorSharp engine assembly that loaded.</param>
@@ -33,15 +36,17 @@ public sealed record EngineProbeResult(
     bool GgmlCpuAvailable,
     bool GgmlMetalAvailable,
     bool MainProgramHandleResolved,
+    bool NativeLibraryLoaded,
     string GgmlVersionOrError,
     IReadOnlyList<string> EngineAssemblies,
     string? GpuName,
     string Reason);
 
 /// <summary>
-/// Proves, cheaply and without touching GGML's backend slot, that the statically
-/// linked GgmlOps archive is reachable from managed code and that the engine
-/// assemblies load under the AOT/trimmed runtime.
+/// Proves, cheaply and without touching GGML's backend slot, that the engine (the
+/// statically linked GgmlOps archive on the phone, the GgmlOps library beside a
+/// desktop app) is reachable from managed code and that the engine assemblies load
+/// under the trimmed runtime.
 /// </summary>
 public static class EngineProbe
 {
@@ -85,9 +90,15 @@ public static class EngineProbe
             selection = Compute.Selection;
             ggmlVersionOrError =
                 $"ok: {ProbeExport}(Cpu)={cpu}, (Metal)={metal}; " +
+#if IOS
                 (handleResolved
                     ? "TSGgml_* resolved from the main program image."
                     : "resolver reached GgmlOps although dlsym on the main program image did not find " + ProbeExport + ".");
+#else
+                (GgmlBasicOps.IsNativeLibraryLoaded
+                    ? "TSGgml_* resolved from the GgmlOps library shipped with the app."
+                    : "the P/Invokes answered, but the resolver never recorded loading GgmlOps.");
+#endif
         }
         catch (Exception ex)
         {
@@ -98,6 +109,7 @@ public static class EngineProbe
                 GgmlCpuAvailable: false,
                 GgmlMetalAvailable: false,
                 MainProgramHandleResolved: handleResolved,
+                NativeLibraryLoaded: GgmlBasicOps.IsNativeLibraryLoaded,
                 GgmlVersionOrError: ggmlVersionOrError,
                 EngineAssemblies: assemblies,
                 GpuName: null,
@@ -109,6 +121,7 @@ public static class EngineProbe
             GgmlCpuAvailable: cpu,
             GgmlMetalAvailable: metal,
             MainProgramHandleResolved: handleResolved,
+            NativeLibraryLoaded: GgmlBasicOps.IsNativeLibraryLoaded,
             GgmlVersionOrError: ggmlVersionOrError,
             EngineAssemblies: assemblies,
             GpuName: selection.GpuName,

@@ -334,7 +334,7 @@ foreach (SkillToolInvocation call in reply.SkillInvocations)
     </tbody>
   </table>
   </div>
-  <p>Other runtime contracts worth knowing: <code>IModelArchitecture</code>, <code>IPromptRenderer</code> (implemented by <code>GgufPromptRenderer</code>), <code>IOutputProtocolParser</code>, <code>IMultimodalInjector</code>, and <code>IKvBlockCodec</code> (with the built-in <code>TurboQuantKvCodec</code>).</p>
+  <p>Other runtime contracts worth knowing: <code>IModelArchitecture</code>, <code>IPromptRenderer</code> (implemented by <code>GgufPromptRenderer</code>), <code>IOutputProtocolParser</code>, and <code>IMultimodalInjector</code>.</p>
 
   <div class="callout tip"><div class="ic">💡</div><p>For most applications the easiest integration is to run <a href="server.html">TensorSharp.Server.Host</a> and call it over the <a href="http-api.html">OpenAI-compatible API</a> — you keep your app process clean and get continuous batching for free. Reach for the library API when you need in-process control or custom decoding.</p></div>
 

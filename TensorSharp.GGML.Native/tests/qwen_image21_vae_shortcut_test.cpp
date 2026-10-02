@@ -395,12 +395,12 @@ int main(int argc, char** argv) {
             std::printf("SKIP: %s backend unavailable: %s\n", backend_name, TSGgml_GetLastError());
             TSGgml_Shutdown(); return 77;
         }
-        // Metal's temporal shortcut graph is not supported by upstream ggml.
-        // Its dedicated CTests cover wide F32 convolutions only; do not report
-        // the CPU/CUDA shortcut or narrow-normalization fixtures as tested there.
-        if (!metal) {
-            literal_cases(); synthetic_cases(); invalid_cases(); high_range_convolution_cases();
-        }
+        // The temporal shortcuts run on Metal too: upstream ggml-metal pads only at
+        // the end of a dimension, so the average-down's leading zero slices are built
+        // as a concat there (TSG_VAE_AVERAGE_DOWN21). The narrow-normalization fixture
+        // stays CPU/CUDA only; do not report it as tested on Metal.
+        literal_cases(); synthetic_cases(); invalid_cases();
+        if (!metal) high_range_convolution_cases();
         high_range_matrix_convolution_cases();
         if (missing_cudnn) {
 #if defined(_WIN32)
@@ -416,7 +416,7 @@ int main(int argc, char** argv) {
 #endif
         }
         TSGgml_ReleaseReuseComputeBuffers();
-        if (!metal) literal_cases();
+        literal_cases();
         high_range_matrix_convolution_cases(); // recreate vendor graphs/staging after scratch release
         TSGgml_Shutdown();
         TSGgml_Shutdown(); // teardown must also be safe with no cuDNN handle
@@ -427,8 +427,8 @@ int main(int argc, char** argv) {
         if (g_fused_high_range_skipped)
             std::printf("SKIP %s: %d fused whole-VAE high-range case(s); TensorSharp runs the per-convolution path on this "
                 "backend (not counted as coverage)\n", backend_name, g_fused_high_range_skipped);
-        std::printf("PASS %s: %sF32 convolution above the F16 range, scratch release and backend recreation\n",
-            backend_name, metal ? "" : "VAE2.1 shortcuts, shape/reuse recovery and ");
+        std::printf("PASS %s: VAE2.1 shortcuts, %sF32 convolution above the F16 range, scratch release and backend recreation\n",
+            backend_name, metal ? "" : "shape/reuse recovery and ");
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "FAIL: %s\n", error.what());

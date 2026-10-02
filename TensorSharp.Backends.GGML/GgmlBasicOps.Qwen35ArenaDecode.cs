@@ -11,11 +11,6 @@ namespace TensorSharp.GGML
 {
     public partial class GgmlBasicOps
     {
-        /// <summary>Whether the loaded library accepts host-gathered F32
-        /// embeddings for Qwen3.5/3.8 arena batched decode.</summary>
-        public static bool SupportsQwen35ArenaHiddenDecode()
-            => GgmlNative.SupportsQwen35ArenaHiddenDecode();
-
         /// <summary>Host embeddings are F32 [nSeqs, hiddenSize] in caller
         /// sequence order. Pass zero to use the original device GET_ROWS ABI.
         /// Returns 1 for success, 0 for a safe pre-compute decline, and -1 for

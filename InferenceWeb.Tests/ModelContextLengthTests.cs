@@ -1,6 +1,8 @@
 using TensorSharp.Runtime.Scheduling;
 namespace InferenceWeb.Tests;
 
+[Collection(EngineEnvironmentCollection.Name)]
+
 public class ModelContextLengthTests
 {
     [Fact]

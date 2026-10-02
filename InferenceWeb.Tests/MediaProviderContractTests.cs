@@ -117,6 +117,42 @@ public class MediaProviderContractTests : IDisposable
         Assert.Equal(magick, ImageProcessorUtils.DecodeImageToRGBA(png, out _, out _));
     }
 
+    [Fact]
+    public void Png_TransparentPixelsKeepTheirStoredColour_AndTransparencyIsDetected()
+    {
+        // The generative pipelines drop alpha and read the colour as stored (ImageIO.Decode),
+        // so the colour under alpha 0 or a low alpha is what a model sees. Magick keeps it and
+        // so does the managed codec - which is why the Apple provider reads a PNG with
+        // transparency through the latter instead of drawing it premultiplied, where a
+        // mostly transparent picture reached MiniMax-H3 as black blotches.
+        byte[] rgba = { 40, 120, 230, 0, 40, 120, 230, 1, 40, 120, 230, 8, 200, 10, 10, 255 };
+        byte[] png = Managed.EncodePng(rgba, 4, 1, 4);
+        Assert.Equal(rgba, Managed.DecodeRgba(png, out _, out _));
+        Assert.Equal(rgba, Desktop.DecodeRgba(png, out _, out _));
+
+        Assert.True(PngCodec.CarriesAlpha(png));
+        Assert.False(PngCodec.CarriesAlpha(Managed.EncodePng(new byte[] { 1, 2, 3, 4, 5, 6 }, 2, 1, 3)));
+
+        // A colour profile is found where the spec puts it - before the image data - and only there.
+        Assert.False(PngCodec.HasChunkBeforeImageData(png, "iCCP"));
+        Assert.True(PngCodec.HasChunkBeforeImageData(InsertAfterHeader(png, "iCCP", new byte[] { 0x73, 0x52, 0x47, 0x42, 0, 0 }), "iCCP"));
+        Assert.True(PngCodec.HasChunkBeforeImageData(InsertAfterHeader(png, "tRNS", new byte[] { 0, 0 }), "tRNS"));
+    }
+
+    /// <summary>A copy of <paramref name="png"/> with one more chunk right after IHDR.</summary>
+    private static byte[] InsertAfterHeader(byte[] png, string type, byte[] payload)
+    {
+        const int afterHeader = 8 + 12 + 13;   // signature + IHDR (length, type, 13 bytes, CRC)
+        var chunk = new byte[12 + payload.Length];
+        chunk[0] = (byte)(payload.Length >> 24); chunk[1] = (byte)(payload.Length >> 16);
+        chunk[2] = (byte)(payload.Length >> 8); chunk[3] = (byte)payload.Length;
+        System.Text.Encoding.ASCII.GetBytes(type).CopyTo(chunk, 4);
+        payload.CopyTo(chunk, 8);
+        uint crc = PngCodec.ChunkCrc(type, payload);
+        chunk[^4] = (byte)(crc >> 24); chunk[^3] = (byte)(crc >> 16); chunk[^2] = (byte)(crc >> 8); chunk[^1] = (byte)crc;
+        return png[..afterHeader].Concat(chunk).Concat(png[afterHeader..]).ToArray();
+    }
+
     // ---- images: JPEG and EXIF -------------------------------------------------------
 
     [Fact]

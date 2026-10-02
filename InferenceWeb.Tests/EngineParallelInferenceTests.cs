@@ -9,8 +9,12 @@
 // GGUF models. Loading and running a real model is expensive (multi-second
 // startup, multi-second per request), so these tests are opt-in: set the
 // environment variable TS_TEST_MODEL_DIR to a directory containing the
-// required GGUFs (Gemma 4, Qwen 3.6, Nemotron 3) and they will run. Otherwise
-// they short-circuit with a console message and pass trivially.
+// required GGUFs (Gemma 4, Qwen 3.6, Nemotron 3) and they will run. The media
+// tests also need the projector next to the model and the fixtures
+// eng/make-test-media.sh writes (TS_TEST_MEDIA_DIR, default ~/work/models/testmedia).
+// A test whose model, projector or media file is missing is reported as skipped,
+// with the reason, at discovery (ParallelModelFact) - never as a pass. The model
+// runs on the lane's pinned GGML backend (TS_TEST_GGML_BACKEND).
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -29,6 +33,12 @@ public class EngineParallelInferenceTests
 {
     private const string EnvModelDir = "TS_TEST_MODEL_DIR";
 
+    // The E4B projector under its llama.cpp name (mmproj-gemma-4-E4B-it-BF16.gguf,
+    // ...-Q8_0.gguf) or a renamed copy (gemma-4-E4B-mmproj-F16.gguf). FindFirst takes
+    // the first match in name order, so a folder with several quantizations uses BF16.
+    // Declared before Manifests: static initializers run in textual order.
+    private static readonly string[] Gemma4E4BProjectors = { "mmproj-gemma-4-E4B", "gemma-4-E4B-mmproj", "gemma-4-mmproj" };
+
     private static readonly Dictionary<string, ModelManifest> Manifests = new(StringComparer.OrdinalIgnoreCase)
     {
         ["gemma4"] = new ModelManifest(
@@ -36,17 +46,17 @@ public class EngineParallelInferenceTests
             // The "-assistant" variant and llama.cpp's "mmproj-<model>" projector
             // ship under the same name; exclude both (the projector is a clip GGUF).
             ExcludePatterns: new[] { "assistant", "mmproj" },
-            MmprojPatterns: new[] { "gemma-4-mmproj" }),
+            MmprojPatterns: Gemma4E4BProjectors),
         // The exact E4B build from the q4_0 KV-cache reuse bug report
         // (gemma-4-E4B-it-uncensored-Q8_0.gguf). Matches any E4B "it" GGUF;
         // excludes the tiny assistant/mmproj sidecars.
         ["gemma4-e4b"] = new ModelManifest(
             ModelPatterns: new[] { "gemma-4-E4B-it" },
             ExcludePatterns: new[] { "assistant", "mmproj" },
-            MmprojPatterns: new[] { "gemma-4-mmproj" }),
+            MmprojPatterns: Gemma4E4BProjectors),
         // The user-reported repro runs the 12B QAT build on ggml_cuda. Matches the
         // exact files from the bug report; set TS_TEST_MODEL_DIR to their folder and
-        // TS_TEST_BACKEND=ggml_cuda to exercise the concurrent fused-decode path.
+        // TS_TEST_GGML_BACKEND=cuda to exercise the concurrent fused-decode path.
         ["gemma4-12b"] = new ModelManifest(
             ModelPatterns: new[] { "gemma-4-12B-it-qat", "gemma-4-12B-it" },
             ExcludePatterns: new[] { "mmproj", "MTP", "assistant" },
@@ -80,10 +90,66 @@ public class EngineParallelInferenceTests
             MmprojPatterns: new[] { "Ministral-3-14B-Instruct-2512-BF16-mmproj", "Mistral-3-mmproj" }),
     };
 
+    // The fixtures eng/make-test-media.sh writes: the repo banner (image.png), a spoken
+    // pangram (sample.wav) and a slow zoom on the banner (sample.mp4). Each media test
+    // asserts content only a model that received the media can produce - the banner's
+    // title, the pangram's "fox" - as the test matrix's media cells do.
+    private const string EnvMediaDir = "TS_TEST_MEDIA_DIR";
+
+    private static string MediaPath(string media)
+    {
+        string dir = Environment.GetEnvironmentVariable(EnvMediaDir)
+            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "work", "models", "testmedia");
+        return Path.Combine(dir, media switch
+        {
+            "image" => "image.png",
+            "audio" => "sample.wav",
+            "video" => "sample.mp4",
+            _ => throw new ArgumentOutOfRangeException(nameof(media), media, null),
+        });
+    }
+
+    // The banner's title as a model that saw image.png or sample.mp4 writes it
+    // ("TensorSharp", "Tensor Sharp", "TENSORSHARP").
+    private static bool NamesTheBannerTitle(string text)
+        => (text ?? string.Empty).Replace(" ", string.Empty).Contains("tensorsharp", StringComparison.OrdinalIgnoreCase);
+
     private readonly ITestOutputHelper _output;
     public EngineParallelInferenceTests(ITestOutputHelper output) { _output = output; }
 
-    [Fact] public Task Gemma4_FiveTextPromptsParallel() => RunTextParallel("gemma4", numRequests: 5);
+    /// <summary>
+    /// A real-model test of this class: skipped at discovery, with the reason, unless
+    /// TS_TEST_MODEL_DIR holds the model the manifest entry <c>key</c> names (and, for a
+    /// media test, its projector and the media fixture). The skip used to be a silent
+    /// return inside the test, so a lane without the model reported a pass - which is
+    /// how a broken 12B concurrent-reuse repro went unnoticed.
+    /// </summary>
+    private sealed class ParallelModelFactAttribute : FactAttribute
+    {
+        public ParallelModelFactAttribute(string key, string media = null)
+            => Skip = SkipReason(key, media);
+    }
+
+    private static string SkipReason(string key, string media)
+    {
+        string dir = Environment.GetEnvironmentVariable(EnvModelDir);
+        if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
+            return $"Requires model weights ({EnvModelDir} not set or missing).";
+        if (!Manifests.TryGetValue(key, out var manifest))
+            return $"No model manifest for '{key}'.";
+        if (FindFirst(dir, manifest.ModelPatterns, manifest.ExcludePatterns) == null)
+            return $"Requires model weights (no '{string.Join("' / '", manifest.ModelPatterns)}' GGUF under {EnvModelDir}).";
+        if (media == null)
+            return null;
+        if (manifest.MmprojPatterns == null || FindFirst(dir, manifest.MmprojPatterns, null) == null)
+            return $"Requires the '{key}' projector under {EnvModelDir}.";
+        string file = MediaPath(media);
+        return File.Exists(file)
+            ? null
+            : $"Requires the {media} fixture {file} (eng/make-test-media.sh writes it; {EnvMediaDir} names its folder).";
+    }
+
+    [ParallelModelFact("gemma4")] public Task Gemma4_FiveTextPromptsParallel() => RunTextParallel("gemma4", numRequests: 5);
     // Repro for the user-reported bug: two long-generation parallel
     // requests (where each output >> Gemma 4's 512-token SWA window) plus
     // a third request submitted while the first two are still mid-decode.
@@ -93,40 +159,40 @@ public class EngineParallelInferenceTests
     // null once SupportsKVStateSnapshot flipped to false on cache wrap).
     // Post-fix: ForwardBatch is the default Gemma 4 path so KV swap +
     // snapshot are never needed.
-    [Fact] public Task Gemma4_ThreeLongGenerationsParallel() => RunLongGenerationParallel("gemma4");
+    [ParallelModelFact("gemma4")] public Task Gemma4_ThreeLongGenerationsParallel() => RunLongGenerationParallel("gemma4");
     // Repro for the user-reported "vision encoder + parallel text aborts
     // the process" crash. Pre-fix, the chat pipeline's vision-encoder GGML
     // ops on the request thread raced the engine worker's batched-forward
     // GGML ops on the GPU, and ggml_metal_synchronize would abort with a
     // command-buffer-status=1/2 fatal error. Post-fix, both call sites
     // take ModelBase.GpuComputeLock so they serialise.
-    [Fact] public Task Gemma4_ImageAndTextSimultaneous() => RunImageAndTextSimultaneous("gemma4");
-    [Fact] public Task Qwen36_FiveTextPromptsParallel() => RunTextParallel("qwen36", numRequests: 5);
+    [ParallelModelFact("gemma4", "image")] public Task Gemma4_ImageAndTextSimultaneous() => RunImageAndTextSimultaneous("gemma4");
+    [ParallelModelFact("qwen36")] public Task Qwen36_FiveTextPromptsParallel() => RunTextParallel("qwen36", numRequests: 5);
     // Phase 3 verification: same flow on the 35B-A3B MoE GGUF — exercises the
     // batched MoE FFN dispatch added in Qwen35Model.BatchedForward.cs.
     // Tiny budget (2 prompts × 6 new tokens) because IQ2_XXS dequantization +
     // 256-expert routing per layer is slow on CPU/Metal; the test exists to
     // verify the code path runs, not for performance comparison.
-    [Fact] public Task Qwen36MoE_FiveTextPromptsParallel() => RunTextParallel("qwen36moe", numRequests: 2, maxNewTokensOverride: 6);
-    [Fact] public Task Nemotron3_FiveTextPromptsParallel() => RunTextParallel("nemotron3", numRequests: 5);
+    [ParallelModelFact("qwen36moe")] public Task Qwen36MoE_FiveTextPromptsParallel() => RunTextParallel("qwen36moe", numRequests: 2, maxNewTokensOverride: 6);
+    [ParallelModelFact("nemotron3")] public Task Nemotron3_FiveTextPromptsParallel() => RunTextParallel("nemotron3", numRequests: 5);
     // Mistral 3 runs through the TRUE batched-paged path (ExecuteStepBatched),
     // not the per-sequence KV swap fallback. Smaller maxNewTokens budget
     // because the managed paged-attention kernel is unoptimised C#; raise
     // once the GPU/native kernel lands.
-    [Fact] public Task Mistral3_FourTextPromptsParallelBatched() => RunTextParallel("mistral3", numRequests: 4, maxNewTokensOverride: 8);
+    [ParallelModelFact("mistral3")] public Task Mistral3_FourTextPromptsParallelBatched() => RunTextParallel("mistral3", numRequests: 4, maxNewTokensOverride: 8);
     // Long-context variant: pads each prompt to ~512 tokens of repeated
     // text so the per-layer paged attention compute actually dominates
     // over the gather + GPU-launch overhead. This is where the GPU paged
     // kernel is expected to outperform the managed scalar kernel.
-    [Fact] public Task Mistral3_FourLongPromptsParallelBatched() => RunLongContextParallel("mistral3");
+    [ParallelModelFact("mistral3")] public Task Mistral3_FourLongPromptsParallelBatched() => RunLongContextParallel("mistral3");
 
-    [Fact] public Task Gemma4_PrefixCacheHitAcceleratesSecondRequest() => RunPrefixCacheBench("gemma4");
+    [ParallelModelFact("gemma4")] public Task Gemma4_PrefixCacheHitAcceleratesSecondRequest() => RunPrefixCacheBench("gemma4");
     // Direct repro for the low-kvReusePercent bug: a long first turn (whose
     // K/V state wraps the SWA circular cache) followed by a same-session
     // follow-up. Pre-fix, prefix-cache reuse capped at one sliding window
     // (~10-20% for long histories); post-fix the per-seq extract/inject use
     // modular SWA addressing so the whole history is reusable.
-    [Fact] public Task Gemma4_SwaPrefixCacheReuseAcrossLongTurn() => RunSwaPrefixReuseRepro("gemma4");
+    [ParallelModelFact("gemma4")] public Task Gemma4_SwaPrefixCacheReuseAcrossLongTurn() => RunSwaPrefixReuseRepro("gemma4");
     // Direct repro for the user-reported "KV cache reuse ratio is 0 after a
     // concurrent round" bug. Two conversations run in PARALLEL (so they take the
     // per-sequence FUSED concurrent-decode path, which keeps each request's K/V in
@@ -135,34 +201,35 @@ public class EngineParallelInferenceTests
     // pool (and live-cache continuation is single-stream only) so reuse == 0 and
     // each re-prefilled the whole conversation. Post-fix: the finished holders are
     // retained and re-adopted, so the follow-ups reuse the whole prefix.
-    [Fact] public Task Gemma4_ConcurrentSwaPrefixReuseAcrossTurns() => RunConcurrentSwaPrefixReuseRepro("gemma4-12b");
+    [ParallelModelFact("gemma4-12b")] public Task Gemma4_ConcurrentSwaPrefixReuseAcrossTurns() => RunConcurrentSwaPrefixReuseRepro("gemma4-12b");
     // Real-model repro for the reported bug: with --kv-cache-dtype q4_0 a
     // same-session follow-up ("请继续") after a long first turn reused 0 KV
     // tokens (re-prefilling the whole conversation), while f16 reused nearly
     // all of it. Both variants must now reuse the full prefix via live-cache
-    // continuation. Needs TS_TEST_MODEL_DIR=<dir with gemma-4-E4B-it*.gguf> and
-    // TS_TEST_BACKEND=ggml_cuda (block-quant live KV needs the fused CUDA path).
-    [Fact] public Task Gemma4E4B_Q4_0_LongTurnPrefixReuse() => RunKvDtypeLongPromptReuseRepro("gemma4-e4b", KvCacheDtype.Q4_0);
-    [Fact] public Task Gemma4E4B_F16_LongTurnPrefixReuse() => RunKvDtypeLongPromptReuseRepro("gemma4-e4b", KvCacheDtype.F16);
-    [Fact] public Task Gemma4E4B_Q8_0_LongTurnPrefixReuse() => RunKvDtypeLongPromptReuseRepro("gemma4-e4b", KvCacheDtype.Q8_0);
-    [Fact] public Task Qwen36_PrefixCacheHitAcceleratesSecondRequest() => RunPrefixCacheBench("qwen36");
-    [Fact] public Task Nemotron3_PrefixCacheHitAcceleratesSecondRequest() => RunPrefixCacheBench("nemotron3");
+    // continuation. Needs TS_TEST_MODEL_DIR=<dir with gemma-4-E4B-it*.gguf>. Gemma 4
+    // declines a block-quantized cache and loads f16, so the q4_0 and q8_0 rows check
+    // that the fallback keeps long-turn reuse.
+    [ParallelModelFact("gemma4-e4b")] public Task Gemma4E4B_Q4_0_LongTurnPrefixReuse() => RunKvDtypeLongPromptReuseRepro("gemma4-e4b", KvCacheDtype.Q4_0);
+    [ParallelModelFact("gemma4-e4b")] public Task Gemma4E4B_F16_LongTurnPrefixReuse() => RunKvDtypeLongPromptReuseRepro("gemma4-e4b", KvCacheDtype.F16);
+    [ParallelModelFact("gemma4-e4b")] public Task Gemma4E4B_Q8_0_LongTurnPrefixReuse() => RunKvDtypeLongPromptReuseRepro("gemma4-e4b", KvCacheDtype.Q8_0);
+    [ParallelModelFact("qwen36")] public Task Qwen36_PrefixCacheHitAcceleratesSecondRequest() => RunPrefixCacheBench("qwen36");
+    [ParallelModelFact("nemotron3")] public Task Nemotron3_PrefixCacheHitAcceleratesSecondRequest() => RunPrefixCacheBench("nemotron3");
 
-    [Fact] public Task Gemma4_ImagePromptThenTextParallel() => RunMixedMultimodal("gemma4");
-    [Fact] public Task Qwen36_ImagePromptThenTextParallel() => RunMixedMultimodal("qwen36");
-    [Fact] public Task Nemotron3_ImagePromptThenTextParallel() => RunMixedMultimodal("nemotron3");
+    [ParallelModelFact("gemma4", "image")] public Task Gemma4_ImagePromptThenTextParallel() => RunMixedMultimodal("gemma4");
+    [ParallelModelFact("qwen36", "image")] public Task Qwen36_ImagePromptThenTextParallel() => RunMixedMultimodal("qwen36");
+    [ParallelModelFact("nemotron3", "image")] public Task Nemotron3_ImagePromptThenTextParallel() => RunMixedMultimodal("nemotron3");
 
-    [Fact] public Task Gemma4_AudioPrompt() => RunAudioSmoke("gemma4");
-    [Fact] public Task Nemotron3_AudioPrompt() => RunAudioSmoke("nemotron3");
+    [ParallelModelFact("gemma4", "audio")] public Task Gemma4_AudioPrompt() => RunAudioSmoke("gemma4");
+    [ParallelModelFact("nemotron3", "audio")] public Task Nemotron3_AudioPrompt() => RunAudioSmoke("nemotron3");
 
-    [Fact] public Task Gemma4_VideoPrompt() => RunVideoSmoke("gemma4");
-    [Fact] public Task Nemotron3_VideoPrompt() => RunVideoSmoke("nemotron3");
+    [ParallelModelFact("gemma4", "video")] public Task Gemma4_VideoPrompt() => RunVideoSmoke("gemma4");
+    [ParallelModelFact("nemotron3", "video")] public Task Nemotron3_VideoPrompt() => RunVideoSmoke("nemotron3");
 
     // ---- core flows ----
 
     private async Task RunTextParallel(string key, int numRequests, int maxNewTokensOverride = 24)
     {
-        if (!TryLoad(key, out var ctx)) return;
+        var ctx = Load(key);
         using (ctx)
         {
             // Report which path the executor will actually use. The
@@ -192,16 +259,15 @@ public class EngineParallelInferenceTests
 
     private async Task RunLongContextParallel(string key)
     {
-        if (!TryLoad(key, out var ctx)) return;
+        var ctx = Load(key);
         using (ctx)
         {
             bool modelSupportsBatched = ctx.Model is TensorSharp.Runtime.Scheduling.IBatchedPagedModel;
             string disableRaw = Environment.GetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED");
             bool forceDisabled = !string.IsNullOrEmpty(disableRaw) && disableRaw != "0"
                 && disableRaw.ToLowerInvariant() != "false";
-            string kernelHint = Environment.GetEnvironmentVariable("TS_PAGED_ATTN_KERNEL") ?? "(default tensor)";
             string path = (modelSupportsBatched && !forceDisabled)
-                ? $"batched (IBatchedPagedModel, kernel={kernelHint})"
+                ? "batched (IBatchedPagedModel)"
                 : "per-sequence KV swap";
             _output.WriteLine($"[{key}] long-context dispatch path = {path}");
 
@@ -234,7 +300,7 @@ public class EngineParallelInferenceTests
 
     private async Task RunLongGenerationParallel(string key)
     {
-        if (!TryLoad(key, out var ctx)) return;
+        var ctx = Load(key);
         using (ctx)
         {
             // The bug repro requires generations that EXCEED Gemma 4's
@@ -289,20 +355,11 @@ public class EngineParallelInferenceTests
 
     private async Task RunImageAndTextSimultaneous(string key)
     {
-        if (!TryLoad(key, out var ctx)) return;
+        var ctx = Load(key);
         using (ctx)
         {
-            if (string.IsNullOrEmpty(ctx.MmprojPath))
-            {
-                _output.WriteLine($"[{key}] no mmproj; skipping");
-                return;
-            }
-            string imagePath = "/Users/ZhongkaiFu/Downloads/apple.png";
-            if (!File.Exists(imagePath))
-            {
-                _output.WriteLine($"[{key}] apple.png missing in Downloads; skipping");
-                return;
-            }
+            Assert.False(string.IsNullOrEmpty(ctx.MmprojPath), $"[{key}] the projector did not load");
+            string imagePath = MediaPath("image");
 
             // Fire two text requests and one image request simultaneously.
             // The image request runs the vision encoder on the request
@@ -312,12 +369,12 @@ public class EngineParallelInferenceTests
             // covers the per-request injector bucketing fix: if image
             // embeddings get consumed by the wrong sequence's Forward()
             // (the pre-fix model-shared-state bug), the image response
-            // contains no recognisable description.
+            // cannot name the banner's title.
             var tasks = new List<Task<RequestResult>>
             {
                 SubmitTextPrompt(ctx, "请详细介绍最终幻想7。", maxNewTokens: 64, "text-ff7"),
                 SubmitTextPrompt(ctx, "请详细介绍时间简史。", maxNewTokens: 64, "text-history"),
-                SubmitImagePrompt(ctx, imagePath, "What is in this image? Answer in one short phrase, in English.", maxNewTokens: 24),
+                SubmitImagePrompt(ctx, imagePath, "What is the large title written in this image? Answer with the title only.", maxNewTokens: 24),
             };
             var results = await Task.WhenAll(tasks);
 
@@ -331,17 +388,12 @@ public class EngineParallelInferenceTests
                 if (r.RequestId.StartsWith("img-", StringComparison.Ordinal)) imageResult = r;
             }
 
-            // Verify the model actually saw the apple image. Pre-fix the
-            // engine path never queued vision embeddings into the model,
-            // so the model would see only placeholder tokens and produce
-            // text unrelated to apples/fruit.
+            // Verify the model actually read the banner. Pre-fix the engine
+            // path never queued vision embeddings into the model, so the
+            // model saw only placeholder tokens and could not name the title.
             Assert.NotNull(imageResult);
-            string lowerText = imageResult.OutputText?.ToLowerInvariant() ?? string.Empty;
-            bool mentionsApple = lowerText.Contains("apple") || lowerText.Contains("fruit") ||
-                                 lowerText.Contains("red") || imageResult.OutputText?.Contains("苹果") == true ||
-                                 imageResult.OutputText?.Contains("水果") == true;
-            Assert.True(mentionsApple,
-                $"image request output \"{imageResult.OutputText}\" doesn't mention apple/fruit - " +
+            Assert.True(NamesTheBannerTitle(imageResult.OutputText),
+                $"image request output \"{imageResult.OutputText}\" doesn't name the banner's title (TensorSharp) - " +
                 "vision embeddings probably weren't injected (engine-path multimodal bug).");
         }
     }
@@ -372,7 +424,7 @@ public class EngineParallelInferenceTests
 
     private async Task RunKvDtypeLongPromptReuseReproCore(string key, TensorSharp.Models.KvCacheDtype kvDtype)
     {
-        if (!TryLoad(key, out var ctx)) return;
+        var ctx = Load(key);
         using (ctx)
         {
             // Gemma 4 declines a block-quantized K/V cache on every attention path
@@ -388,8 +440,8 @@ public class EngineParallelInferenceTests
             var sampling = SamplingConfig.Greedy;
 
             // Build a long first-turn user message (~2.4k tokens of deterministic
-            // filler) so turn-1 K/V comfortably exceeds the SWA window and only
-            // live-cache continuation (not the window-capped pool) can reuse it.
+            // filler) so turn-1 K/V comfortably exceeds the SWA window and only the
+            // conversation's retained end state (not window-capped pages) can reuse it.
             var sb = new System.Text.StringBuilder();
             sb.Append("请阅读下面这段材料，然后用中文简要总结它的主要内容。\n\n");
             for (int i = 0; i < 120; i++)
@@ -401,7 +453,7 @@ public class EngineParallelInferenceTests
                 new ChatMessage { Role = "user", Content = longText },
             };
             var sw1 = Stopwatch.StartNew();
-            var (t1, t1RawTokens) = await SubmitWithHistoryCapturingTokens(ctx, turn1History, maxNewTokens: 40, "kvq-turn1", sampling);
+            var (t1, t1Reply) = await SubmitWithHistoryCapturingTokens(ctx, turn1History, maxNewTokens: 40, "kvq-turn1", sampling, "kvq");
             sw1.Stop();
             _output.WriteLine($"[{key}] turn1: prompt={t1.PromptTokenCount} reused={t1.PrefixCacheReusedTokens} out={t1.OutputTokenCount} wall={sw1.Elapsed.TotalMilliseconds:F0}ms");
             Assert.True(t1.PromptTokenCount > window,
@@ -413,11 +465,11 @@ public class EngineParallelInferenceTests
             var turn2History = new List<ChatMessage>
             {
                 new ChatMessage { Role = "user", Content = longText },
-                new ChatMessage { Role = "assistant", Content = t1.OutputText, RawOutputTokens = t1RawTokens },
+                t1Reply,
                 new ChatMessage { Role = "user", Content = "请继续" },
             };
             var sw2 = Stopwatch.StartNew();
-            var (t2, _) = await SubmitWithHistoryCapturingTokens(ctx, turn2History, maxNewTokens: 40, "kvq-turn2", sampling);
+            var (t2, _) = await SubmitWithHistoryCapturingTokens(ctx, turn2History, maxNewTokens: 40, "kvq-turn2", sampling, "kvq");
             sw2.Stop();
 
             double t2Pct = t2.PromptTokenCount > 0 ? 100.0 * t2.PrefixCacheReusedTokens / t2.PromptTokenCount : 0;
@@ -439,7 +491,7 @@ public class EngineParallelInferenceTests
 
     private async Task RunSwaPrefixReuseRepro(string key)
     {
-        if (!TryLoad(key, out var ctx)) return;
+        var ctx = Load(key);
         using (ctx)
         {
             var sampling = SamplingConfig.Greedy;
@@ -450,7 +502,7 @@ public class EngineParallelInferenceTests
             {
                 new ChatMessage { Role = "user", Content = "请详细介绍最终幻想7" },
             };
-            var (t1, t1RawTokens) = await SubmitWithHistoryCapturingTokens(ctx, turn1History, maxNewTokens: 600, "turn1", sampling);
+            var (t1, t1Reply) = await SubmitWithHistoryCapturingTokens(ctx, turn1History, maxNewTokens: 600, "turn1", sampling, "ff7");
             _output.WriteLine($"[{key}] turn1: prompt={t1.PromptTokenCount} reused={t1.PrefixCacheReusedTokens} out={t1.OutputTokenCount}");
 
             // Turn 2: same session, follow-up "还有吗" appended after turn 1's output.
@@ -460,22 +512,22 @@ public class EngineParallelInferenceTests
             var turn2History = new List<ChatMessage>
             {
                 new ChatMessage { Role = "user", Content = "请详细介绍最终幻想7" },
-                new ChatMessage { Role = "assistant", Content = t1.OutputText, RawOutputTokens = t1RawTokens },
+                t1Reply,
                 new ChatMessage { Role = "user", Content = "还有吗" },
             };
-            var (t2, t2RawTokens) = await SubmitWithHistoryCapturingTokens(ctx, turn2History, maxNewTokens: 200, "turn2", sampling);
+            var (t2, t2Reply) = await SubmitWithHistoryCapturingTokens(ctx, turn2History, maxNewTokens: 200, "turn2", sampling, "ff7");
             _output.WriteLine($"[{key}] turn2: prompt={t2.PromptTokenCount} reused={t2.PrefixCacheReusedTokens} out={t2.OutputTokenCount}");
 
             // Turn 3: "请继续"
             var turn3History = new List<ChatMessage>
             {
                 new ChatMessage { Role = "user", Content = "请详细介绍最终幻想7" },
-                new ChatMessage { Role = "assistant", Content = t1.OutputText, RawOutputTokens = t1RawTokens },
+                t1Reply,
                 new ChatMessage { Role = "user", Content = "还有吗" },
-                new ChatMessage { Role = "assistant", Content = t2.OutputText, RawOutputTokens = t2RawTokens },
+                t2Reply,
                 new ChatMessage { Role = "user", Content = "请继续" },
             };
-            var (t3, _) = await SubmitWithHistoryCapturingTokens(ctx, turn3History, maxNewTokens: 200, "turn3", sampling);
+            var (t3, _) = await SubmitWithHistoryCapturingTokens(ctx, turn3History, maxNewTokens: 200, "turn3", sampling, "ff7");
             _output.WriteLine($"[{key}] turn3: prompt={t3.PromptTokenCount} reused={t3.PrefixCacheReusedTokens} out={t3.OutputTokenCount}");
 
             // Pre-fix: t2.PrefixCacheReusedTokens ≈ slidingWindow (512), giving 10-30% reuse for a long history.
@@ -498,7 +550,7 @@ public class EngineParallelInferenceTests
 
     private async Task RunConcurrentSwaPrefixReuseRepro(string key)
     {
-        if (!TryLoad(key, out var ctx)) return;
+        var ctx = Load(key);
         using (ctx)
         {
             var sampling = SamplingConfig.Greedy;
@@ -509,9 +561,9 @@ public class EngineParallelInferenceTests
             int round2Tokens = EnvInt("TS_REPRO_ROUND2_TOKENS", 200);
 
             // ---- Round 1: two distinct conversations, IN PARALLEL. ----
-            // Long generation (> Gemma 4's 512-token SWA window) so the only path
-            // that can reuse the prefix later is live/retained continuation, not the
-            // window-capped pool. Running both at once forces the per-seq fused path.
+            // Long generation (> Gemma 4's 512-token SWA window) so the only thing
+            // that can reuse the prefix later is each conversation's retained end
+            // state. Running both at once forces the per-seq fused path.
             var histA1 = new List<ChatMessage>
             {
                 new ChatMessage { Role = "user", Content = "请详细介绍最终幻想7" },
@@ -521,12 +573,12 @@ public class EngineParallelInferenceTests
                 new ChatMessage { Role = "user", Content = "请详细介绍时间简史" },
             };
             var sw1 = Stopwatch.StartNew();
-            var t1Task = SubmitWithHistoryCapturingTokens(ctx, histA1, maxNewTokens: round1Tokens, "A1", sampling);
-            var t1bTask = SubmitWithHistoryCapturingTokens(ctx, histB1, maxNewTokens: round1Tokens, "B1", sampling);
+            var t1Task = SubmitWithHistoryCapturingTokens(ctx, histA1, maxNewTokens: round1Tokens, "A1", sampling, "A");
+            var t1bTask = SubmitWithHistoryCapturingTokens(ctx, histB1, maxNewTokens: round1Tokens, "B1", sampling, "B");
             await Task.WhenAll(t1Task, t1bTask);
             sw1.Stop();
-            var (a1, a1Tokens) = t1Task.Result;
-            var (b1, b1Tokens) = t1bTask.Result;
+            var (a1, a1Reply) = t1Task.Result;
+            var (b1, b1Reply) = t1bTask.Result;
             _output.WriteLine($"[{key}] round1 parallel: A prompt={a1.PromptTokenCount} out={a1.OutputTokenCount} | " +
                 $"B prompt={b1.PromptTokenCount} out={b1.OutputTokenCount} | wall={sw1.Elapsed.TotalMilliseconds:F0}ms");
 
@@ -534,18 +586,18 @@ public class EngineParallelInferenceTests
             var histA2 = new List<ChatMessage>
             {
                 new ChatMessage { Role = "user", Content = "请详细介绍最终幻想7" },
-                new ChatMessage { Role = "assistant", Content = a1.OutputText, RawOutputTokens = a1Tokens },
+                a1Reply,
                 new ChatMessage { Role = "user", Content = "请继续" },
             };
             var histB2 = new List<ChatMessage>
             {
                 new ChatMessage { Role = "user", Content = "请详细介绍时间简史" },
-                new ChatMessage { Role = "assistant", Content = b1.OutputText, RawOutputTokens = b1Tokens },
+                b1Reply,
                 new ChatMessage { Role = "user", Content = "请继续" },
             };
             var sw2 = Stopwatch.StartNew();
-            var t2Task = SubmitWithHistoryCapturingTokens(ctx, histA2, maxNewTokens: round2Tokens, "A2", sampling);
-            var t2bTask = SubmitWithHistoryCapturingTokens(ctx, histB2, maxNewTokens: round2Tokens, "B2", sampling);
+            var t2Task = SubmitWithHistoryCapturingTokens(ctx, histA2, maxNewTokens: round2Tokens, "A2", sampling, "A");
+            var t2bTask = SubmitWithHistoryCapturingTokens(ctx, histB2, maxNewTokens: round2Tokens, "B2", sampling, "B");
             await Task.WhenAll(t2Task, t2bTask);
             sw2.Stop();
             var (a2, _) = t2Task.Result;
@@ -578,12 +630,24 @@ public class EngineParallelInferenceTests
         }
     }
 
-    private async Task<(RequestResult result, List<int> rawTokens)> SubmitWithHistoryCapturingTokens(
+    // A turn of a multi-turn conversation, run as the chat pipeline runs one: the Radix
+    // cache reuses a finished turn only for a later request of the same conversation
+    // (cacheScope; unscoped requests share only a public prefix), and the reply comes
+    // back as the pipeline records it - the raw tokens the cache holds plus the framing
+    // the generation prompt ended with (Gemma 4's empty thought channel, the boundary
+    // whitespace), which the template does not re-emit for a past turn. A reply without
+    // that framing diverges from the cache right after the turn header, and continuing
+    // the conversation's retained state would mean rewinding the whole answer.
+    private async Task<(RequestResult result, ChatMessage reply)> SubmitWithHistoryCapturingTokens(
         EngineContext ctx, List<ChatMessage> history, int maxNewTokens, string reqId,
-        SamplingConfig sampling = null)
+        SamplingConfig sampling, string conversation)
     {
-        var tokens = RenderTokens(ctx, history);
-        var seq = new SequenceState(reqId, tokens, maxNewTokens, ctx.BlockSize, sampling ?? SamplingConfig.Default);
+        string arch = ctx.Model.Config?.Architecture ?? string.Empty;
+        var tokens = ctx.Renderer.RenderToTokens(
+            ctx.Model.Tokenizer, ctx.Model.Config?.ChatTemplate, history, arch,
+            addGenerationPrompt: true, out _, out string trailingWhitespace, tools: null, enableThinking: false);
+        var seq = new SequenceState(reqId, tokens, maxNewTokens, ctx.BlockSize, sampling ?? SamplingConfig.Default,
+            cacheScope: conversation);
         var handle = ctx.Engine.SubmitRequest(seq);
         var outputTokens = await DrainHandle(handle);
         var completion = await handle.Completion;
@@ -595,12 +659,21 @@ public class EngineParallelInferenceTests
             PrefixCacheReusedTokens = completion.PrefixCacheReusedTokens,
             PromptTokenCount = completion.PromptTokenCount,
         };
-        return (result, outputTokens);
+        var reply = new ChatMessage
+        {
+            Role = "assistant",
+            Content = result.OutputText,
+            RawOutputTokens = outputTokens,
+            RawPromptTrailingWhitespace = trailingWhitespace,
+            RawGenerationSuffix = TensorSharp.Server.ChatGenerationPipeline.RecordedGenerationSuffix(
+                ctx.Model.Tokenizer, tokens, arch, enableThinking: false),
+        };
+        return (result, reply);
     }
 
     private async Task RunPrefixCacheBench(string key)
     {
-        if (!TryLoad(key, out var ctx)) return;
+        var ctx = Load(key);
         using (ctx)
         {
             const string system = "You are a helpful, concise assistant. Answer in one sentence.\n\n";
@@ -621,36 +694,22 @@ public class EngineParallelInferenceTests
 
     private async Task RunMixedMultimodal(string key)
     {
-        if (!TryLoad(key, out var ctx)) return;
+        var ctx = Load(key);
         using (ctx)
         {
-            if (string.IsNullOrEmpty(ctx.MmprojPath))
-            {
-                _output.WriteLine($"[{key}] no mmproj available, skipping image test");
-                return;
-            }
-
-            string imagePath = "/Users/ZhongkaiFu/Downloads/apple.png";
-            if (!File.Exists(imagePath))
-            {
-                _output.WriteLine("apple.png missing in Downloads; image test skipped");
-                return;
-            }
+            Assert.False(string.IsNullOrEmpty(ctx.MmprojPath), $"[{key}] the projector did not load");
+            string imagePath = MediaPath("image");
 
             var sw = Stopwatch.StartNew();
-            var imageResp = await SubmitImagePrompt(ctx, imagePath, "What is the main object in this picture? Answer in one short phrase.", maxNewTokens: 24);
+            var imageResp = await SubmitImagePrompt(ctx, imagePath, "What is the large title written in this picture? Answer with the title only.", maxNewTokens: 24);
             _output.WriteLine($"[{key}] image: {imageResp.OutputTokenCount} out tokens in {sw.Elapsed.TotalMilliseconds:F0}ms — \"{Truncate(imageResp.OutputText, 80)}\"");
             Assert.True(imageResp.OutputTokenCount > 0);
-            // The apple.png image is unambiguously an apple. If the model is
-            // actually seeing vision content (not just the bare <|image_pad|>
-            // placeholders), the response should mention apple/fruit/red. This
+            // Only a model that sees the vision content (not just the bare
+            // <|image_pad|> placeholders) can read the banner's title. This
             // assertion catches regressions where the image embeddings or
             // MRoPE positions get dropped silently.
-            string lowerImg = imageResp.OutputText?.ToLowerInvariant() ?? string.Empty;
-            bool mentionsApple = lowerImg.Contains("apple") || lowerImg.Contains("fruit") ||
-                                 lowerImg.Contains("red");
-            Assert.True(mentionsApple,
-                $"{key} image response \"{imageResp.OutputText}\" doesn't mention apple/fruit/red - " +
+            Assert.True(NamesTheBannerTitle(imageResp.OutputText),
+                $"{key} image response \"{imageResp.OutputText}\" doesn't name the banner's title (TensorSharp) - " +
                 "vision embeddings or MRoPE positions probably weren't injected correctly.");
 
             // Now submit text prompts concurrently with no multimodal state pollution.
@@ -663,59 +722,55 @@ public class EngineParallelInferenceTests
 
     private async Task RunAudioSmoke(string key)
     {
-        if (!TryLoad(key, out var ctx)) return;
+        var ctx = Load(key);
         using (ctx)
         {
-            string audioPath = "/Users/ZhongkaiFu/Downloads/obama_first_45_secs.mp3";
-            if (string.IsNullOrEmpty(ctx.MmprojPath) || !File.Exists(audioPath))
-            {
-                _output.WriteLine($"[{key}] audio prerequisites missing; skipping");
-                return;
-            }
-            var resp = await SubmitAudioPrompt(ctx, audioPath, "Summarize this audio in one sentence.", maxNewTokens: 24);
+            Assert.False(string.IsNullOrEmpty(ctx.MmprojPath), $"[{key}] the projector did not load");
+            string audioPath = MediaPath("audio");
+            var resp = await SubmitAudioPrompt(ctx, audioPath, "Transcribe the first sentence of this audio clip.", maxNewTokens: 32);
             _output.WriteLine($"[{key}] audio: {resp.OutputTokenCount} out tokens — \"{Truncate(resp.OutputText, 80)}\"");
-            Assert.True(resp.OutputTokenCount > 0);
+            // sample.wav speaks "The quick brown fox jumps over the lazy dog near the river bank".
+            Assert.True(resp.OutputText?.Contains("fox", StringComparison.OrdinalIgnoreCase) == true,
+                $"[{key}] audio output \"{resp.OutputText}\" doesn't transcribe the pangram - the clip probably never reached the encoder.");
         }
     }
 
     private async Task RunVideoSmoke(string key)
     {
-        if (!TryLoad(key, out var ctx)) return;
+        var ctx = Load(key);
         using (ctx)
         {
-            string videoPath = "/Users/ZhongkaiFu/Downloads/concert.mp4";
-            if (string.IsNullOrEmpty(ctx.MmprojPath) || !File.Exists(videoPath))
-            {
-                _output.WriteLine($"[{key}] video prerequisites missing; skipping");
-                return;
-            }
+            Assert.False(string.IsNullOrEmpty(ctx.MmprojPath), $"[{key}] the projector did not load");
+            string videoPath = MediaPath("video");
 
-            // Treat the video as a single frame extracted by the model's image pipeline.
-            // Most TensorSharp models accept videos as a series of image frames via
-            // ImagePaths + IsVideo=true; we send the raw path here and let the
-            // injector handle decoding. If a model can't parse mp4 the multimodal
-            // injector returns no embeddings and the test degrades gracefully.
-            var history = new List<ChatMessage>
-            {
-                new ChatMessage
-                {
-                    Role = "user",
-                    Content = "Describe the scene in this video in one short sentence.",
-                    ImagePaths = new List<string> { videoPath },
-                    IsVideo = true,
-                }
-            };
-
+            // A video goes in as its frames, the way the CLI and the upload endpoint
+            // send it: PNGs sampled at 1 fps in ImagePaths, with IsVideo=true. The
+            // injector decodes images only; handed the .mp4 itself it throws.
+            List<string> frames = MediaHelper.ExtractVideoFrames(videoPath);
+            Assert.NotEmpty(frames);
             try
             {
+                var history = new List<ChatMessage>
+                {
+                    new ChatMessage
+                    {
+                        Role = "user",
+                        Content = "What is the large title shown in this video? Answer with the title only.",
+                        ImagePaths = frames,
+                        IsVideo = true,
+                    }
+                };
+
                 var resp = await SubmitWithHistory(ctx, history, maxNewTokens: 20, "video");
-                _output.WriteLine($"[{key}] video: {resp.OutputTokenCount} out — \"{Truncate(resp.OutputText, 80)}\"");
-                Assert.True(resp.OutputTokenCount > 0);
+                _output.WriteLine($"[{key}] video ({frames.Count} frames): {resp.OutputTokenCount} out — \"{Truncate(resp.OutputText, 80)}\"");
+                Assert.True(NamesTheBannerTitle(resp.OutputText),
+                    $"[{key}] video output \"{resp.OutputText}\" doesn't name the banner's title (TensorSharp) - the frames probably never reached the encoder.");
             }
-            catch (Exception ex)
+            finally
             {
-                // Video decoding may not be supported by this model build; record but don't fail.
-                _output.WriteLine($"[{key}] video test soft-failed: {ex.Message}");
+                try { Directory.Delete(Path.GetDirectoryName(frames[0])!, recursive: true); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
             }
         }
     }
@@ -895,43 +950,27 @@ public class EngineParallelInferenceTests
         return s.Length <= maxLen ? s : s.Substring(0, maxLen) + "...";
     }
 
-    private bool TryLoad(string key, out EngineContext ctx)
+    /// <summary>Load the manifest entry's model; <see cref="ParallelModelFactAttribute"/> has
+    /// already skipped the test when it is absent. A model that is present but does not
+    /// load is a failure, not a skip.</summary>
+    private EngineContext Load(string key)
     {
-        ctx = null;
         string dir = Environment.GetEnvironmentVariable(EnvModelDir);
-        if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
-        {
-            _output.WriteLine($"[{key}] {EnvModelDir} not set (or directory missing); test skipped");
-            return false;
-        }
-
-        if (!Manifests.TryGetValue(key, out var manifest))
-        {
-            _output.WriteLine($"[{key}] no manifest registered; test skipped");
-            return false;
-        }
-
+        var manifest = Manifests[key];
         string modelPath = FindFirst(dir, manifest.ModelPatterns, manifest.ExcludePatterns);
-        if (modelPath == null)
-        {
-            _output.WriteLine($"[{key}] no model file matching {string.Join("/", manifest.ModelPatterns)} under {dir}; skipped");
-            return false;
-        }
+        Assert.NotNull(modelPath);
         string mmproj = manifest.MmprojPatterns != null ? FindFirst(dir, manifest.MmprojPatterns, null) : null;
-
         _output.WriteLine($"[{key}] loading {Path.GetFileName(modelPath)} (mmproj={Path.GetFileName(mmproj ?? "")})");
-        // A model that is present but does not load is a failure, not a skip: the
-        // old catch-and-return turned "A different GGML backend was already
-        // initialized" into a passing test on every lane that pinned another backend.
-        ctx = new EngineContext(modelPath, mmproj);
-        return true;
+        return new EngineContext(modelPath, mmproj);
     }
 
     private static string FindFirst(string dir, IEnumerable<string> patterns, string[] excludePatterns)
     {
+        var files = Directory.GetFiles(dir, "*.gguf");
+        Array.Sort(files, StringComparer.Ordinal);
         foreach (var p in patterns)
         {
-            foreach (var f in Directory.GetFiles(dir, "*.gguf"))
+            foreach (var f in files)
             {
                 string name = Path.GetFileName(f);
                 if (!name.Contains(p, StringComparison.OrdinalIgnoreCase))
@@ -971,7 +1010,7 @@ public class EngineParallelInferenceTests
             $"[{ctx.Model.Config?.Architecture ?? "?"}] {label} " +
             $"n={n} promptTokens={totalPrompt} outTokens={totalTokens} reused={totalReused} " +
             $"wall={sec:F2}s tps={tps:F1} " +
-            $"poolFree={stats.freeBlocks}/{stats.totalBlocks} hashedCached={stats.hashedBlocks}");
+            $"poolFree={stats.freeBlocks}/{stats.totalBlocks}");
     }
 
     private sealed record ModelManifest(
@@ -1011,7 +1050,7 @@ public class EngineParallelInferenceTests
                 if (int.TryParse(Environment.GetEnvironmentVariable("MAX_CONTEXT"), out int configured)
                     && configured > 0 && configured < MinimumContext)
                     env.Set("MAX_CONTEXT", MinimumContext.ToString(System.Globalization.CultureInfo.InvariantCulture));
-                Model = TensorSharp.Models.ModelBase.Create(modelPath, ResolveBackend());
+                Model = TensorSharp.Models.ModelBase.Create(modelPath, TestGates.PinnedGgmlBackend);
             }
             if (!string.IsNullOrEmpty(mmprojPath) && File.Exists(mmprojPath))
             {
@@ -1031,26 +1070,6 @@ public class EngineParallelInferenceTests
                 DecodeQuantumTokens = BlockSize,
             };
             Engine = new InferenceEngine(Model, cfg, NullLogger.Instance);
-        }
-
-        // Default to the process's pinned GGML backend (TS_TEST_GGML_BACKEND: the
-        // native bridge takes one backend per process, so any other default fails
-        // to initialize), but let TS_TEST_BACKEND override (e.g. ggml_cuda) so the
-        // parallel/repro tests can exercise the per-sequence fused concurrent-decode
-        // path on a CUDA box like the bug report's setup.
-        private static BackendType ResolveBackend()
-        {
-            string b = Environment.GetEnvironmentVariable("TS_TEST_BACKEND");
-            if (!string.IsNullOrEmpty(b))
-            {
-                if (b.Equals("ggml_cuda", StringComparison.OrdinalIgnoreCase) || b.Equals("cuda", StringComparison.OrdinalIgnoreCase))
-                    return BackendType.GgmlCuda;
-                if (b.Equals("ggml_metal", StringComparison.OrdinalIgnoreCase) || b.Equals("metal", StringComparison.OrdinalIgnoreCase))
-                    return BackendType.GgmlMetal;
-                if (b.Equals("ggml_cpu", StringComparison.OrdinalIgnoreCase) || b.Equals("cpu", StringComparison.OrdinalIgnoreCase))
-                    return BackendType.GgmlCpu;
-            }
-            return TestGates.PinnedGgmlBackend;
         }
 
         public void Dispose()

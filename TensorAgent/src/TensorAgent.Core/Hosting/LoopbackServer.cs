@@ -8,7 +8,9 @@
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
+using System.Buffers;
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -70,6 +72,22 @@ public abstract class LoopbackResponse
 {
     public abstract Task WriteAsync(HttpListenerResponse response, CancellationToken ct);
 
+    /// <summary>
+    /// What the server calls, with the request the reply answers. Two things depend on
+    /// it: a HEAD gets the status and headers its GET would and no body, and a file sends
+    /// only the bytes a Range asks for. A stream cares about neither.
+    /// </summary>
+    internal virtual Task WriteAsync(HttpListenerContext context, CancellationToken ct) => WriteAsync(context.Response, ct);
+
+    /// <summary>
+    /// HttpListener does not leave a HEAD's body off by itself: the managed listener
+    /// macOS and iOS run puts whatever it is given on the wire after the headers, where
+    /// the client reads it as the start of the next response on that connection
+    /// (measured, .NET 10 on macOS). So every reply that has a body checks.
+    /// </summary>
+    private static bool IsHead(HttpListenerRequest request) =>
+        string.Equals(request.HttpMethod, "HEAD", StringComparison.OrdinalIgnoreCase);
+
     public static LoopbackResponse Json(object payload, int status = 200) => new JsonResponse(payload, status);
     public static LoopbackResponse Text(string text, int status = 200, string contentType = "text/plain; charset=utf-8") => new TextResponse(text, status, contentType);
 
@@ -111,55 +129,197 @@ public abstract class LoopbackResponse
     /// </summary>
     internal static readonly TimeSpan DefaultKeepAlive = TimeSpan.FromSeconds(5);
 
-    private sealed class JsonResponse(object payload, int status) : LoopbackResponse
+    /// <summary>A reply whose whole body is in memory: JSON, text, or exact bytes.</summary>
+    private abstract class BufferedResponse(int status, string contentType) : LoopbackResponse
     {
-        public override async Task WriteAsync(HttpListenerResponse response, CancellationToken ct)
-        {
-            byte[] body = JsonSerializer.SerializeToUtf8Bytes(payload, SseFraming.JsonOptions);
-            response.StatusCode = status;
-            response.ContentType = "application/json; charset=utf-8";
-            response.ContentLength64 = body.Length;
-            await response.OutputStream.WriteAsync(body, ct).ConfigureAwait(false);
-        }
-    }
+        protected abstract byte[] Body();
 
-    private sealed class TextResponse(string text, int status, string contentType) : LoopbackResponse
-    {
-        public override async Task WriteAsync(HttpListenerResponse response, CancellationToken ct)
+        public override Task WriteAsync(HttpListenerResponse response, CancellationToken ct) =>
+            WriteAsync(response, withBody: true, ct);
+
+        internal override Task WriteAsync(HttpListenerContext context, CancellationToken ct) =>
+            WriteAsync(context.Response, withBody: !IsHead(context.Request), ct);
+
+        private async Task WriteAsync(HttpListenerResponse response, bool withBody, CancellationToken ct)
         {
-            byte[] body = Encoding.UTF8.GetBytes(text);
+            byte[] body = Body();
             response.StatusCode = status;
             response.ContentType = contentType;
             response.ContentLength64 = body.Length;
-            await response.OutputStream.WriteAsync(body, ct).ConfigureAwait(false);
+            if (withBody)
+                await response.OutputStream.WriteAsync(body, ct).ConfigureAwait(false);
         }
     }
 
-    private sealed class BytesResponse(byte[] body, string contentType, int status) : LoopbackResponse
+    private sealed class JsonResponse(object payload, int status) : BufferedResponse(status, "application/json; charset=utf-8")
     {
-        public override async Task WriteAsync(HttpListenerResponse response, CancellationToken ct)
-        {
-            response.StatusCode = status;
-            response.ContentType = contentType;
-            response.ContentLength64 = body.Length;
-            await response.OutputStream.WriteAsync(body, ct).ConfigureAwait(false);
-        }
+        protected override byte[] Body() => JsonSerializer.SerializeToUtf8Bytes(payload, SseFraming.JsonOptions);
     }
 
+    private sealed class TextResponse(string text, int status, string contentType) : BufferedResponse(status, contentType)
+    {
+        protected override byte[] Body() => Encoding.UTF8.GetBytes(text);
+    }
+
+    private sealed class BytesResponse(byte[] body, string contentType, int status) : BufferedResponse(status, contentType)
+    {
+        protected override byte[] Body() => body;
+    }
+
+    /// <summary>
+    /// A file from disk: all of it, or the one byte range the request asks for.
+    ///
+    /// <para>
+    /// Ranges are what make a generated clip playable. WebKit hands a
+    /// <c>&lt;video&gt;</c> or <c>&lt;audio&gt;</c> to AVFoundation, which opens with
+    /// <c>Range: bytes=0-1</c>, takes the size from the 206's Content-Range, and seeks
+    /// with more ranges; a server that answers 200 with the whole file every time is
+    /// one it will not play from. The desktop gets this from ASP.NET's static files and
+    /// <c>Results.File(enableRangeProcessing: true)</c>; here it is this class, so every
+    /// route that answers with a file honours a range however it was mapped.
+    /// </para>
+    /// <para>
+    /// One range (RFC 9110 §14.1.2): <c>bytes=a-b</c>, <c>bytes=a-</c>, or the suffix
+    /// <c>bytes=-n</c>. Several ranges, or a header that does not parse, get the whole
+    /// file, which the RFC allows and ASP.NET does too. So does another unit, which the
+    /// RFC requires (§14.2) and ASP.NET does not: it serves <c>items=0-1</c> as bytes
+    /// (measured, .NET 10).
+    /// </para>
+    /// </summary>
     private sealed class FileResponse(string path, string contentType, bool attachment, string? downloadName) : LoopbackResponse
     {
-        public override async Task WriteAsync(HttpListenerResponse response, CancellationToken ct)
+        public override Task WriteAsync(HttpListenerResponse response, CancellationToken ct) =>
+            WriteAsync(response, range: null, withBody: true, ct);
+
+        // A HEAD gets the headers an unranged GET would: RFC 9110 §14.2 defines ranges for
+        // GET alone and requires a server to ignore one on any other method, which is also
+        // what ASP.NET does (measured, .NET 10). No ETag or Last-Modified is ever sent, so
+        // an If-Range has nothing it could match, and RFC 9110 §13.1.5 then requires the
+        // whole file.
+        internal override Task WriteAsync(HttpListenerContext context, CancellationToken ct) =>
+            WriteAsync(context.Response,
+                IsHead(context.Request) || context.Request.Headers["If-Range"] is not null ? null : context.Request.Headers["Range"],
+                withBody: !IsHead(context.Request), ct);
+
+        private async Task WriteAsync(HttpListenerResponse response, string? range, bool withBody, CancellationToken ct)
         {
-            var info = new FileInfo(path);
-            response.StatusCode = 200;
-            response.ContentType = contentType;
-            response.ContentLength64 = info.Length;
+            // Opened before anything is promised, so the length the headers carry is the
+            // length of the stream that is copied.
+            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, useAsync: true);
+            long size = stream.Length;
             response.Headers["X-Content-Type-Options"] = "nosniff";
             response.Headers["Cache-Control"] = "no-cache";
+            response.Headers["Accept-Ranges"] = "bytes";
+
+            Slice slice = Select(range, size, out long first, out long last);
+            if (slice == Slice.Unsatisfiable)
+            {
+                response.StatusCode = 416;
+                response.Headers["Content-Range"] = $"bytes */{size}";
+                response.ContentLength64 = 0;
+                return;
+            }
+
+            response.ContentType = contentType;
             if (attachment)
-                response.Headers["Content-Disposition"] = "attachment; filename=\"" + (downloadName ?? info.Name).Replace("\"", "") + "\"";
-            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, useAsync: true);
-            await stream.CopyToAsync(response.OutputStream, ct).ConfigureAwait(false);
+                response.Headers["Content-Disposition"] = "attachment; filename=\"" + (downloadName ?? Path.GetFileName(path)).Replace("\"", "") + "\"";
+            response.StatusCode = slice == Slice.Partial ? 206 : 200;
+            if (slice == Slice.Partial)
+                response.Headers["Content-Range"] = $"bytes {first}-{last}/{size}";
+            response.ContentLength64 = last - first + 1;
+            if (!withBody || last < first)
+                return;
+
+            // A seek: the bytes before the range are never read, so a jump to the end of a
+            // long clip costs what its first two bytes did.
+            stream.Position = first;
+            await CopyAsync(stream, response, last - first + 1, ct).ConfigureAwait(false);
+        }
+
+        private enum Slice { Whole, Partial, Unsatisfiable }
+
+        /// <summary>
+        /// What a Range header asks of a file of <paramref name="size"/> bytes, as the
+        /// inclusive byte positions <paramref name="first"/>..<paramref name="last"/>.
+        /// </summary>
+        private static Slice Select(string? header, long size, out long first, out long last)
+        {
+            first = 0;
+            last = size - 1;
+            if (header is null)
+                return Slice.Whole;
+
+            // Units are case-insensitive; whitespace around '=' and '-' is tolerated, as
+            // ASP.NET's parser tolerates it.
+            ReadOnlySpan<char> value = header.AsSpan().Trim();
+            int equals = value.IndexOf('=');
+            if (equals < 0 || !value[..equals].TrimEnd().Equals("bytes", StringComparison.OrdinalIgnoreCase))
+                return Slice.Whole;
+            ReadOnlySpan<char> spec = value[(equals + 1)..];
+            int dash = spec.IndexOf('-');
+            if (dash < 0 || spec.Contains(','))
+                return Slice.Whole;
+            ReadOnlySpan<char> from = spec[..dash].Trim(), to = spec[(dash + 1)..].Trim();
+
+            long end = 0;
+            if (to.Length > 0 && !Digits(to, out end))
+                return Slice.Whole;
+            if (from.Length == 0)
+            {
+                // The last n bytes. Zero of them is unsatisfiable; more than the file has
+                // is all of it; and an empty file has no range to send, though the RFC
+                // calls a non-zero suffix satisfiable, so it gets the (empty) whole.
+                if (to.Length == 0)
+                    return Slice.Whole;
+                if (end == 0)
+                    return Slice.Unsatisfiable;
+                if (size == 0)
+                    return Slice.Whole;
+                first = Math.Max(0, size - end);
+                return Slice.Partial;
+            }
+            // An end before the start makes the header invalid, so it is ignored.
+            if (!Digits(from, out long start) || (to.Length > 0 && end < start))
+                return Slice.Whole;
+            if (start >= size)
+                return Slice.Unsatisfiable;
+            first = start;
+            if (to.Length > 0)
+                last = Math.Min(end, size - 1);
+            return Slice.Partial;
+        }
+
+        // RFC 9110's 1*DIGIT: no sign, no spaces; a number too big for a long is malformed.
+        private static bool Digits(ReadOnlySpan<char> text, out long value) =>
+            long.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out value);
+
+        /// <summary>
+        /// Exactly <paramref name="count"/> bytes, which is what Content-Length promised.
+        /// A file that turns out shorter ends the connection rather than the response: a
+        /// body that stops early on a kept-alive connection is read by the client as the
+        /// start of the next response.
+        /// </summary>
+        private static async Task CopyAsync(FileStream source, HttpListenerResponse response, long count, CancellationToken ct)
+        {
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(1 << 16);
+            try
+            {
+                while (count > 0)
+                {
+                    int read = await source.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, count)), ct).ConfigureAwait(false);
+                    if (read == 0)
+                    {
+                        response.Abort();
+                        return;
+                    }
+                    await response.OutputStream.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+                    count -= read;
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
     }
 
@@ -337,9 +497,9 @@ public delegate Task<LoopbackResponse?> LoopbackHandler(LoopbackRequest request,
 /// <summary>
 /// A tiny HTTP server on 127.0.0.1 for the WebView to talk to, built on the managed
 /// <see cref="HttpListener"/> (iOS has no ASP.NET Core). It knows how to do exactly what
-/// the Web UI needs: JSON in/out, multipart uploads, static files, SSE streams, and a
-/// per-launch secret so another app on the device cannot drive the model through the
-/// loopback port.
+/// the Web UI needs: JSON in/out, multipart uploads, static files (with the byte ranges a
+/// media element plays from), SSE streams, and a per-launch secret so another app on the
+/// device cannot drive the model through the loopback port.
 ///
 /// <para>
 /// The secret travels as a cookie set by the first <c>GET /?token=…</c> the app itself
@@ -419,6 +579,24 @@ public sealed class LoopbackServer : IDisposable
     public void MapGet(string pattern, LoopbackHandler handler) => Map("GET", pattern, handler);
     public void MapPost(string pattern, LoopbackHandler handler) => Map("POST", pattern, handler);
     public void MapDelete(string pattern, LoopbackHandler handler) => Map("DELETE", pattern, handler);
+
+    /// <summary>
+    /// A GET route that serves files, opened to HEAD as well: the same handler answers,
+    /// and the reply goes out with the status and headers the GET would get and no body.
+    ///
+    /// <para>
+    /// Opt-in, route by route, because the handler runs for a HEAD. Looking up a file
+    /// has no side effects; much of the API does, or streams, so every other route
+    /// refuses HEAD with 405 -- which is also what the desktop's minimal APIs answer,
+    /// while its static files take HEAD as this does. Ranges need nothing here: every
+    /// file reply honours one, however it was mapped.
+    /// </para>
+    /// </summary>
+    public void MapFiles(string pattern, LoopbackHandler handler)
+    {
+        Map("GET", pattern, handler);
+        Map("HEAD", pattern, handler);
+    }
 
     public void Start()
     {
@@ -514,7 +692,7 @@ public sealed class LoopbackServer : IDisposable
             }
             if (!authorised)
             {
-                await LoopbackResponse.Json(new { error = "forbidden" }, 403).WriteAsync(response, _cts.Token).ConfigureAwait(false);
+                await LoopbackResponse.Json(new { error = "forbidden" }, 403).WriteAsync(ctx, _cts.Token).ConfigureAwait(false);
                 return;
             }
 
@@ -531,18 +709,26 @@ public sealed class LoopbackServer : IDisposable
                 result = await handler(request, perRequest.Token).ConfigureAwait(false);
                 if (result is not null)
                 {
-                    await result.WriteAsync(response, perRequest.Token).ConfigureAwait(false);
+                    await result.WriteAsync(ctx, perRequest.Token).ConfigureAwait(false);
                     return;
                 }
             }
 
+            // A HEAD reaches only the routes MapFiles opened to it. A path some other
+            // route answers refuses it, before the static root is asked, so that a HEAD
+            // can never describe a file the same path's GET would not serve.
+            if (method == "HEAD" && AllowedInsteadOfHead(path) is { } allowed)
+            {
+                response.Headers["Allow"] = allowed;
+                result = LoopbackResponse.Json(new { error = "method not allowed" }, 405);
+            }
             result ??= TryStatic(method, path);
             result ??= LoopbackResponse.Json(new { error = "not found" }, 404);
-            await result.WriteAsync(response, _cts.Token).ConfigureAwait(false);
+            await result.WriteAsync(ctx, _cts.Token).ConfigureAwait(false);
         }
         catch (LoopbackHttpException ex)
         {
-            try { await LoopbackResponse.Json(ex.Payload, ex.StatusCode).WriteAsync(response, _cts.Token).ConfigureAwait(false); }
+            try { await LoopbackResponse.Json(ex.Payload, ex.StatusCode).WriteAsync(ctx, _cts.Token).ConfigureAwait(false); }
             catch { /* client gone */ }
         }
         catch (OperationCanceledException)
@@ -572,7 +758,7 @@ public sealed class LoopbackServer : IDisposable
             try
             {
                 if (!response.SendChunked && response.ContentLength64 == 0)
-                    await LoopbackResponse.Json(new { error = "The server failed to handle the request." }, 500).WriteAsync(response, _cts.Token).ConfigureAwait(false);
+                    await LoopbackResponse.Json(new { error = "The server failed to handle the request." }, 500).WriteAsync(ctx, _cts.Token).ConfigureAwait(false);
             }
             catch { /* headers already sent */ }
         }
@@ -800,9 +986,31 @@ public sealed class LoopbackServer : IDisposable
         return false;
     }
 
+    /// <summary>
+    /// The methods the routes matching <paramref name="path"/> do answer, for the Allow
+    /// header of a refused HEAD. Null when no route claims the path, or when one opened
+    /// to HEAD fell through -- its GET would fall through the same way, to the static
+    /// root or the 404.
+    /// </summary>
+    private string? AllowedInsteadOfHead(string path)
+    {
+        var methods = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (var (m, pattern, _) in _routes)
+        {
+            if (!pattern.TryMatch(path, out _))
+                continue;
+            if (m == "HEAD")
+                return null;
+            methods.Add(m);
+        }
+        return methods.Count == 0 ? null : string.Join(", ", methods);
+    }
+
     private LoopbackResponse? TryStatic(string method, string path)
     {
-        if (method != "GET" || StaticRoot is null)
+        // The bundle is files, so a HEAD of it is answered too: from the same reply, with
+        // the body left off.
+        if (method is not ("GET" or "HEAD") || StaticRoot is null)
             return null;
         string relative = path == "/" ? "index.html" : path.TrimStart('/');
         if (relative.Contains("..", StringComparison.Ordinal))
@@ -814,6 +1022,15 @@ public sealed class LoopbackServer : IDisposable
         // the bundle so it can never drift from the code that expects it.
         if (relative == CompanionScriptName)
             return LoopbackResponse.Text(CompanionScript.Value, contentType: "text/javascript; charset=utf-8");
+        if (relative is "mask-editor.js" or "mask-editor.css")
+        {
+            using Stream stream = typeof(LoopbackServer).Assembly
+                .GetManifestResourceStream("TensorAgent.Core.WebUi." + relative)
+                ?? throw new InvalidOperationException("Missing shared selection editor asset: " + relative);
+            using var reader = new StreamReader(stream);
+            return LoopbackResponse.Text(reader.ReadToEnd(), contentType: relative.EndsWith(".css", StringComparison.Ordinal)
+                ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8");
+        }
 
         if (!File.Exists(full))
             return null;
@@ -860,7 +1077,8 @@ public sealed class LoopbackServer : IDisposable
     private static byte[] WithCompanionScript(string indexPath)
     {
         byte[] html = File.ReadAllBytes(indexPath);
-        byte[] tag = Encoding.UTF8.GetBytes("\n<script src=\"/" + CompanionScriptName + "\"></script>\n");
+        byte[] tag = Encoding.UTF8.GetBytes("\n<link rel=\"stylesheet\" href=\"/mask-editor.css\">\n"
+            + "<script src=\"/mask-editor.js\"></script>\n<script src=\"/" + CompanionScriptName + "\"></script>\n");
         ReadOnlySpan<byte> close = "</body>"u8;
 
         int at = html.AsSpan().LastIndexOf(close);

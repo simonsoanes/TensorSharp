@@ -291,7 +291,11 @@ body { display: flex; flex-direction: column; }
   padding: 8px 10px calc(8px + var(--safe-bottom));
 }
 
-#chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+#chips {
+  display: flex; flex-wrap: wrap; align-content: flex-start; gap: 6px; margin-bottom: 6px;
+  max-height: min(320px, calc(var(--vh) * .4)); overflow-y: auto;
+  overscroll-behavior: contain;
+}
 #chips:empty { display: none; }
 .chip {
   display: flex; align-items: center; gap: 6px;
@@ -304,6 +308,28 @@ body { display: flex; flex-direction: column; }
 .chip .ic { width: 34px; height: 34px; display: grid; place-items: center; font-size: 17px; }
 .chip .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip .x { background: none; border: 0; color: var(--muted); font-size: 15px; padding: 0 2px; }
+.chip.editable-image { display: grid; grid-template-columns: 34px minmax(0, 1fr) 32px; width: 280px; max-width: 100%; }
+.chip.editable-image img { grid-column: 1; grid-row: 1; }
+.chip.editable-image .mask-select { grid-column: 1 / -1; grid-row: 2; }
+.chip.editable-image .image-details { grid-column: 2; grid-row: 1; }
+.chip.editable-image .x { grid-column: 3; grid-row: 1; }
+.chip.editable-image img, .chip.editable-image .mask-select, .chip.editable-image .x { flex-shrink: 0; }
+.chip.editable-image .nm { min-width: 0; }
+.chip.editable-image .image-details { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.chip .image-edit-source, .chip .image-reference { font-size: 10px; line-height: 14px; white-space: nowrap; }
+.chip .image-edit-source { color: var(--accent); font-weight: 600; }
+.chip .image-reference { color: var(--muted); }
+.chip .mask-select {
+  min-height: 44px; padding: 0 10px; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--accent-soft); color: var(--text); font: inherit; cursor: pointer;
+}
+.chip .mask-select:disabled { opacity: .5; cursor: default; }
+.chip.editable-image .x { min-width: 32px; min-height: 44px; }
+.image-selection-hint {
+  width: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px;
+  font-size: 12px; color: var(--muted);
+}
+.image-selection-hint .notice-action { margin: 0; min-height: 44px; }
 
 #skillchips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 #skillchips:empty { display: none; }
@@ -505,6 +531,23 @@ body.voice #toggles { display: flex; }
   border-radius: 10px; background: var(--accent); color: #fff; border: 0;
 }
 .hint-block { font-size: 12px; color: var(--muted); margin: 0; }
+/* LoRA plug-ins: a decision per row, so the actions sit on the row itself. */
+.lorarow { cursor: default; }
+.lorarow .ds { display: block; -webkit-line-clamp: unset; }
+.lorarow .lic { font-size: 11px; color: var(--muted); margin-top: 3px; }
+.lorarow .err { font-size: 12px; color: #fca5a5; margin-top: 4px; }
+.lorarow .act { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; flex: 0 0 auto; }
+.lorarow .pct { font-size: 12px; color: var(--muted); }
+.lorarow .strength { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+.lorarow .strength input { flex: 1 1 auto; min-width: 0; accent-color: var(--accent); }
+.lorarow .strength .val { width: 38px; text-align: right; }
+button.mini {
+  font-size: 12px; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--accent-soft); color: var(--text);
+}
+button.mini.quiet { background: transparent; color: var(--muted); }
+#lora-hint { margin-bottom: 6px; }
+#lora-error { font-size: 13px; color: #fca5a5; margin: 0 0 8px; }
 </style>
 </head>
 <body>
@@ -618,7 +661,19 @@ body.voice #toggles { display: flex; }
   <div class="grab"></div>
   <h2>Model</h2>
   <div id="model-info"></div>
+  <!-- Shown while an image model is loaded: its LoRA plug-ins (WebUiRoutes.MapLoras). -->
+  <button class="opt" id="open-loras" style="display:none"><span class="em">🎨</span> LoRA plug-ins<span class="hint" id="loras-hint">speed, style</span></button>
   <button class="opt" id="open-models"><span class="em">📚</span> Manage models<span class="hint">download, switch</span></button>
+</div>
+
+<!-- The image model's LoRA plug-ins: what is downloaded, what is on, and how strongly.
+     A change applies from the next picture; a picture being drawn keeps its own. -->
+<div class="sheet" id="lora-sheet">
+  <div class="grab"></div>
+  <h2>LoRA plug-ins</h2>
+  <p class="hint-block" id="lora-hint">They apply from the next picture. One speed plug-in at a time; styles and edits combine with it.</p>
+  <p id="lora-error" role="alert" style="display:none"></p>
+  <div id="lora-list"></div>
 </div>
 
 <input type="file" id="skill-zip-input" style="display:none" accept=".zip">

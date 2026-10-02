@@ -53,7 +53,7 @@ public sealed class InferenceEngineHostRebuildTests : IDisposable
         InferenceEngine first = host.TryGetEngine();
         Assert.NotNull(first);
         Assert.Same(created[0], first.Model);
-        Assert.Equal(PrefixCacheMode.Tree, first.PrefixCacheMode);
+        Assert.True(first.PrefixCacheActive);
         Assert.Equal(1, created[0].PrefixCacheAttachments);
         // Unchanged model: the standing engine is reused.
         Assert.Same(first, host.TryGetEngine());
@@ -70,7 +70,7 @@ public sealed class InferenceEngineHostRebuildTests : IDisposable
         Assert.NotSame(first, second);
         Assert.Same(created[1], second.Model);
         Assert.Same(second, host.TryGetEngine());
-        Assert.Equal(PrefixCacheMode.Tree, second.PrefixCacheMode);
+        Assert.True(second.PrefixCacheActive);
         Assert.Equal(1, created[1].PrefixCacheAttachments);
     }
 

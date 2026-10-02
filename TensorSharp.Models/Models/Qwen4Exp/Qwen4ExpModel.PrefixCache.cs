@@ -28,7 +28,6 @@ namespace TensorSharp.Models
             return new PrefixCacheCapabilities
             {
                 Class = FamilyClass.R,
-                Readiness = PrefixCacheMode.Tree,
                 NamespaceFingerprint = KVStateFingerprint,
                 EndState = holders ? EndStateSupport.CopyAndDonate : EndStateSupport.None,
                 CanCaptureCopy = holders && SupportsPrefixCheckpoints,
@@ -41,7 +40,12 @@ namespace TensorSharp.Models
                 // It stores an M-RoPE cache gap; no reference-position test exists yet (§15.2 Q6).
                 ReuseAcrossMediaSpan = false,
                 Persistable = false,
-                SubCapBytes = new ResourceVector { DeviceKv = Math.Max(0, _retainedCacheBudgetBytes) },
+                // Unset, the tree's own half-spare cap bounds holders (0 = no sub-cap), as it does Qwen 3.5's.
+                SubCapBytes = new ResourceVector
+                {
+                    DeviceKv = _retainedCacheBudgetBytes >= 0 ? _retainedCacheBudgetBytes
+                        : GpuMemoryBudget.TryGetReservationSpareBytes(_backend, out _) ? 0 : UnmeasuredRetainedCacheBudgetBytes,
+                },
             };
         }
 

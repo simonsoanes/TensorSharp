@@ -2,7 +2,6 @@
 #include <float.h>
 #include <math.h>
 #include <stdint.h>
-#include <mma.h>   // nvcuda::wmma int8 tensor-core MMA (sm_72+ / compute_86)
 
 // IQ2_XXS dequant lookup tables, vendored from ggml-org/ggml so the CUDA backend
 // builds without the upstream ggml checkout (see tensorsharp_iq2xxs_tables.cuh).
@@ -2093,7 +2092,7 @@ extern "C" __global__ void ts_scaled_dot_product_attention_f32(
 // kv_stride is the per-kv-head element stride of key/value: it equals kv_len for a
 // CONTIGUOUS [num_kv_heads, kv_len, head_dim] tensor (the seq-heads case), or the
 // cache capacity for the LIVE cache [num_kv_heads, cache_size, head_dim] read in
-// place (global full-attention verify ÔÇö kv_len <= kv_stride logical positions).
+// place (global full-attention verify — kv_len <= kv_stride logical positions).
 __device__ __forceinline__ float ts_gqa_prefill_cache_to_float(float v)
 {
     return v;
@@ -2121,540 +2120,13 @@ __device__ __forceinline__ float ts_gqa_prefill_warp_dot(
     return dot;
 }
 
-// Gemma 4 E4B's local-attention shape is fixed at four Q heads per KV head,
-// d=256 and a <=512-token sliding window.  Tile four adjacent query positions
-// into one CTA as well as all four heads in a GQA group.  The old specialization
-// used one CTA per query position and consequently re-read the same 512 K/V rows
-// four times.  This tile loads each K/V element once and applies it to eight
-// query rows, which is the same reuse principle as a small flash-attention tile.
-//
-// The compact shared score matrix contains 4 heads * 2 queries and at most
-// window+1 key positions.  At the production 512-token window that is 16.1 KiB,
-// comfortably below the 48-KiB per-block limit on the oldest supported devices.
-#define TS_GQA_GROUP4_Q_TILE 2
-template <typename cache_t>
-__device__ __forceinline__ void ts_gqa_prefill_attention_group4_d256_impl(
-    const float* query,
-    const cache_t* key,
-    const cache_t* value,
-    float* output,
-    int num_q_heads,
-    int num_kv_heads,
-    int seq_len,
-    int kv_len,
-    int head_dim,
-    int mask_start,
-    int window_size,
-    float scale,
-    int kv_stride,
-    float* scores)
-{
-    constexpr int group_size = 4;
-    constexpr int fixed_head_dim = 256;
-
-    int kv_head = blockIdx.x;
-    int q_start = blockIdx.y * TS_GQA_GROUP4_Q_TILE;
-    if (kv_head >= num_kv_heads || q_start >= seq_len ||
-        num_q_heads != num_kv_heads * group_size ||
-        head_dim != fixed_head_dim || window_size <= 0)
-    {
-        return;
-    }
-
-    int q_count = min(TS_GQA_GROUP4_Q_TILE, seq_len - q_start);
-    int first_visible = mask_start + q_start;
-    int last_visible = first_visible + q_count - 1;
-    int min_visible = max(0, first_visible - window_size + 1);
-    int max_visible = min(last_visible, kv_len - 1);
-    if (min_visible > max_visible)
-        return;
-
-    int score_count = max_visible - min_visible + 1;
-    int score_stride = min(kv_len, window_size + TS_GQA_GROUP4_Q_TILE - 1);
-    int q_head_base = kv_head * group_size;
-    int score_rows = q_count * group_size;
-
-    int lane = threadIdx.x & 31;
-    int warp = threadIdx.x >> 5;
-    int num_warps = blockDim.x >> 5;
-
-    // One warp owns one key at a time.  A lane loads K[d] once and applies it
-    // to the 4-head x up-to-4-query tile before independent warp reductions.
-    for (int t = warp; t < score_count; t += num_warps)
-    {
-        int k_pos = min_visible + t;
-        const cache_t* k =
-            key + ((size_t)kv_head * kv_stride + k_pos) * fixed_head_dim;
-        float dots[TS_GQA_GROUP4_Q_TILE * group_size] = { 0.0f };
-#pragma unroll
-        for (int d = lane; d < fixed_head_dim; d += 32)
-        {
-            float kv = ts_gqa_prefill_cache_to_float(k[d]);
-#pragma unroll
-            for (int qi = 0; qi < TS_GQA_GROUP4_Q_TILE; qi++)
-            {
-                if (qi >= q_count)
-                    continue;
-#pragma unroll
-                for (int h = 0; h < group_size; h++)
-                {
-                    const float* q =
-                        query + ((size_t)(q_head_base + h) * seq_len + q_start + qi) * fixed_head_dim;
-                    dots[qi * group_size + h] += q[d] * kv;
-                }
-            }
-        }
-#pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1)
-        {
-#pragma unroll
-            for (int r = 0; r < TS_GQA_GROUP4_Q_TILE * group_size; r++)
-                dots[r] += __shfl_down_sync(0xFFFFFFFF, dots[r], offset);
-        }
-        if (lane == 0)
-        {
-#pragma unroll
-            for (int qi = 0; qi < TS_GQA_GROUP4_Q_TILE; qi++)
-            {
-                if (qi >= q_count)
-                    continue;
-                int visible = first_visible + qi;
-                int row_min = max(0, visible - window_size + 1);
-                bool allowed = k_pos >= row_min && k_pos <= min(visible, kv_len - 1);
-#pragma unroll
-                for (int h = 0; h < group_size; h++)
-                {
-                    int r = qi * group_size + h;
-                    scores[r * score_stride + t] =
-                        allowed ? dots[r] * scale : -FLT_MAX;
-                }
-            }
-        }
-    }
-    __syncthreads();
-
-    // Normalize all score rows concurrently. Store normalized probabilities so
-    // the V phase avoids reapplying inv_sum for every output dimension.
-    for (int r = warp; r < score_rows; r += num_warps)
-    {
-        float* row = scores + r * score_stride;
-        float max_v = -FLT_MAX;
-        for (int t = lane; t < score_count; t += 32)
-            max_v = fmaxf(max_v, row[t]);
-#pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1)
-            max_v = fmaxf(max_v, __shfl_down_sync(0xFFFFFFFF, max_v, offset));
-        max_v = __shfl_sync(0xFFFFFFFF, max_v, 0);
-
-        float sum = 0.0f;
-        for (int t = lane; t < score_count; t += 32)
-        {
-            float p = expf(row[t] - max_v);
-            row[t] = p;
-            sum += p;
-        }
-#pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1)
-            sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
-        sum = __shfl_sync(0xFFFFFFFF, sum, 0);
-        float inv_sum = sum > 0.0f ? 1.0f / sum : 0.0f;
-        for (int t = lane; t < score_count; t += 32)
-            row[t] *= inv_sum;
-    }
-    __syncthreads();
-
-    // d=256 matches the 256-thread block, so every thread owns one V column.
-    // It fetches V[d] once per key and updates the full query/head tile.
-    int d = threadIdx.x;
-    if (d < fixed_head_dim)
-    {
-        float acc[TS_GQA_GROUP4_Q_TILE * group_size] = { 0.0f };
-        const cache_t* v =
-            value + ((size_t)kv_head * kv_stride + min_visible) * fixed_head_dim + d;
-        for (int t = 0; t < score_count; t++, v += fixed_head_dim)
-        {
-            float vv = ts_gqa_prefill_cache_to_float(*v);
-#pragma unroll
-            for (int r = 0; r < TS_GQA_GROUP4_Q_TILE * group_size; r++)
-            {
-                if (r < score_rows)
-                    acc[r] += scores[r * score_stride + t] * vv;
-            }
-        }
-
-#pragma unroll
-        for (int qi = 0; qi < TS_GQA_GROUP4_Q_TILE; qi++)
-        {
-            if (qi >= q_count)
-                continue;
-            size_t out_base =
-                ((size_t)(q_start + qi) * num_q_heads + q_head_base) * fixed_head_dim + d;
-#pragma unroll
-            for (int h = 0; h < group_size; h++)
-                output[out_base + (size_t)h * fixed_head_dim] = acc[qi * group_size + h];
-        }
-    }
-}
-
-extern "C" __global__ void ts_gqa_prefill_attention_group4_d256_f32(
-    const float* query,
-    const float* key,
-    const float* value,
-    float* output,
-    int num_q_heads,
-    int num_kv_heads,
-    int seq_len,
-    int kv_len,
-    int head_dim,
-    int mask_start,
-    int window_size,
-    float scale,
-    int kv_stride)
-{
-    extern __shared__ float scores[];
-    ts_gqa_prefill_attention_group4_d256_impl(
-        query, key, value, output, num_q_heads, num_kv_heads,
-        seq_len, kv_len, head_dim, mask_start, window_size, scale, kv_stride,
-        scores);
-}
-
-extern "C" __global__ void ts_gqa_prefill_attention_group4_d256_f16(
-    const float* query,
-    const half* key,
-    const half* value,
-    float* output,
-    int num_q_heads,
-    int num_kv_heads,
-    int seq_len,
-    int kv_len,
-    int head_dim,
-    int mask_start,
-    int window_size,
-    float scale,
-    int kv_stride)
-{
-    extern __shared__ float scores[];
-    ts_gqa_prefill_attention_group4_d256_impl(
-        query, key, value, output, num_q_heads, num_kv_heads,
-        seq_len, kv_len, head_dim, mask_start, window_size, scale, kv_stride,
-        scores);
-}
-
-// Gemma 4 global attention uses the same four-query-head GQA group as local
-// attention, but d=512 and no sliding window. One CTA computes all four query
-// heads for a (query position, KV head) pair, so every K/V value is fetched once
-// instead of four times by the generic one-CTA-per-query-head kernel. The score
-// workspace is 4*kv_len floats; dispatch caps kv_len at 2048 (32 KiB).
-template <typename cache_t>
-__device__ __forceinline__ void ts_gqa_prefill_attention_group4_d512_impl(
-    const float* query,
-    const cache_t* key,
-    const cache_t* value,
-    float* output,
-    int num_q_heads,
-    int num_kv_heads,
-    int seq_len,
-    int kv_len,
-    int head_dim,
-    int mask_start,
-    int window_size,
-    float scale,
-    int kv_stride,
-    float* scores)
-{
-    constexpr int group_size = 4;
-    constexpr int fixed_head_dim = 512;
-
-    int kv_head = blockIdx.x;
-    int q_pos = blockIdx.y;
-    if (kv_head >= num_kv_heads || q_pos >= seq_len ||
-        num_q_heads != num_kv_heads * group_size ||
-        head_dim != fixed_head_dim || window_size != 0 || kv_len > 2048)
-    {
-        return;
-    }
-
-    int visible = min(mask_start + q_pos, kv_len - 1);
-    int score_count = visible + 1;
-    if (score_count <= 0)
-        return;
-
-    int q_head_base = kv_head * group_size;
-    int lane = threadIdx.x & 31;
-    int warp = threadIdx.x >> 5;
-    int num_warps = blockDim.x >> 5;
-
-    // One warp owns one key at a time. K[d] is shared across all four query
-    // heads before the four independent warp reductions.
-    for (int k_pos = warp; k_pos < score_count; k_pos += num_warps)
-    {
-        const cache_t* k =
-            key + ((size_t)kv_head * kv_stride + k_pos) * fixed_head_dim;
-        float dots[group_size] = { 0.0f };
-#pragma unroll
-        for (int d = lane; d < fixed_head_dim; d += 32)
-        {
-            float kv = ts_gqa_prefill_cache_to_float(k[d]);
-#pragma unroll
-            for (int h = 0; h < group_size; h++)
-            {
-                const float* q =
-                    query + ((size_t)(q_head_base + h) * seq_len + q_pos) * fixed_head_dim;
-                dots[h] += q[d] * kv;
-            }
-        }
-#pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1)
-        {
-#pragma unroll
-            for (int h = 0; h < group_size; h++)
-                dots[h] += __shfl_down_sync(0xFFFFFFFF, dots[h], offset);
-        }
-        if (lane == 0)
-        {
-#pragma unroll
-            for (int h = 0; h < group_size; h++)
-                scores[h * kv_len + k_pos] = dots[h] * scale;
-        }
-    }
-    __syncthreads();
-
-    // Four warps normalize the four query-head score rows concurrently.
-    if (warp < group_size)
-    {
-        float* row = scores + warp * kv_len;
-        float max_v = -FLT_MAX;
-        for (int k_pos = lane; k_pos < score_count; k_pos += 32)
-            max_v = fmaxf(max_v, row[k_pos]);
-#pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1)
-            max_v = fmaxf(max_v, __shfl_down_sync(0xFFFFFFFF, max_v, offset));
-        max_v = __shfl_sync(0xFFFFFFFF, max_v, 0);
-
-        float sum = 0.0f;
-        for (int k_pos = lane; k_pos < score_count; k_pos += 32)
-        {
-            float p = expf(row[k_pos] - max_v);
-            row[k_pos] = p;
-            sum += p;
-        }
-#pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1)
-            sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
-        sum = __shfl_sync(0xFFFFFFFF, sum, 0);
-        float inv_sum = sum > 0.0f ? 1.0f / sum : 0.0f;
-        for (int k_pos = lane; k_pos < score_count; k_pos += 32)
-            row[k_pos] *= inv_sum;
-    }
-    __syncthreads();
-
-    // Each thread owns two output dimensions. V[d] is reused for all four
-    // query heads, cutting the dominant global-memory traffic by 4x.
-    for (int d = threadIdx.x; d < fixed_head_dim; d += blockDim.x)
-    {
-        float acc[group_size] = { 0.0f };
-        const cache_t* v =
-            value + (size_t)kv_head * kv_stride * fixed_head_dim + d;
-        for (int k_pos = 0; k_pos < score_count; k_pos++, v += fixed_head_dim)
-        {
-            float vv = ts_gqa_prefill_cache_to_float(*v);
-#pragma unroll
-            for (int h = 0; h < group_size; h++)
-                acc[h] += scores[h * kv_len + k_pos] * vv;
-        }
-
-        size_t out_base =
-            ((size_t)q_pos * num_q_heads + q_head_base) * fixed_head_dim + d;
-#pragma unroll
-        for (int h = 0; h < group_size; h++)
-            output[out_base + (size_t)h * fixed_head_dim] = acc[h];
-    }
-}
-
-extern "C" __global__ void ts_gqa_prefill_attention_group4_d512_f32(
-    const float* query,
-    const float* key,
-    const float* value,
-    float* output,
-    int num_q_heads,
-    int num_kv_heads,
-    int seq_len,
-    int kv_len,
-    int head_dim,
-    int mask_start,
-    int window_size,
-    float scale,
-    int kv_stride)
-{
-    extern __shared__ float scores[];
-    ts_gqa_prefill_attention_group4_d512_impl(
-        query, key, value, output, num_q_heads, num_kv_heads,
-        seq_len, kv_len, head_dim, mask_start, window_size, scale, kv_stride,
-        scores);
-}
-
-extern "C" __global__ void ts_gqa_prefill_attention_group4_d512_f16(
-    const float* query,
-    const half* key,
-    const half* value,
-    float* output,
-    int num_q_heads,
-    int num_kv_heads,
-    int seq_len,
-    int kv_len,
-    int head_dim,
-    int mask_start,
-    int window_size,
-    float scale,
-    int kv_stride)
-{
-    extern __shared__ float scores[];
-    ts_gqa_prefill_attention_group4_d512_impl(
-        query, key, value, output, num_q_heads, num_kv_heads,
-        seq_len, kv_len, head_dim, mask_start, window_size, scale, kv_stride,
-        scores);
-}
-
-// Long-context d=512 variant. One warp owns one query head and maintains a
-// numerically stable online softmax while walking the visible K/V rows. This
-// removes the 4*kv_len score workspace (and its 2,048-token shared-memory
-// ceiling) while keeping Q and the output accumulators resident in registers.
-// The four warps read the same GQA K/V row together, so the duplicate loads hit
-// the same cache lines even though each warp advances its own softmax state.
-template <typename cache_t>
-__device__ __forceinline__ void ts_gqa_prefill_attention_group4_online_d512_impl(
-    const float* query,
-    const cache_t* key,
-    const cache_t* value,
-    float* output,
-    int num_q_heads,
-    int num_kv_heads,
-    int seq_len,
-    int kv_len,
-    int head_dim,
-    int mask_start,
-    int window_size,
-    float scale,
-    int kv_stride)
-{
-    constexpr int group_size = 4;
-    constexpr int fixed_head_dim = 512;
-    constexpr int values_per_lane = fixed_head_dim / 32;
-
-    const int kv_head = blockIdx.x;
-    const int q_pos = blockIdx.y;
-    const int warp = threadIdx.x >> 5;
-    const int lane = threadIdx.x & 31;
-    if (kv_head >= num_kv_heads || q_pos >= seq_len ||
-        warp >= group_size ||
-        num_q_heads != num_kv_heads * group_size ||
-        head_dim != fixed_head_dim || window_size != 0)
-    {
-        return;
-    }
-
-    const int visible = min(mask_start + q_pos, kv_len - 1);
-    if (visible < 0)
-        return;
-
-    const int q_head = kv_head * group_size + warp;
-    const float* q =
-        query + ((size_t)q_head * seq_len + q_pos) * fixed_head_dim;
-    float q_values[values_per_lane];
-    float acc[values_per_lane] = { 0.0f };
-#pragma unroll
-    for (int i = 0; i < values_per_lane; i++)
-        q_values[i] = q[lane + i * 32];
-
-    float running_max = -FLT_MAX;
-    float running_sum = 0.0f;
-    for (int k_pos = 0; k_pos <= visible; k_pos++)
-    {
-        const cache_t* k =
-            key + ((size_t)kv_head * kv_stride + k_pos) * fixed_head_dim;
-        float dot = 0.0f;
-#pragma unroll
-        for (int i = 0; i < values_per_lane; i++)
-            dot = fmaf(q_values[i],
-                ts_gqa_prefill_cache_to_float(k[lane + i * 32]), dot);
-#pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1)
-            dot += __shfl_down_sync(0xFFFFFFFF, dot, offset);
-        dot = __shfl_sync(0xFFFFFFFF, dot, 0) * scale;
-
-        const float next_max = fmaxf(running_max, dot);
-        const float old_scale =
-            running_max == -FLT_MAX ? 0.0f : expf(running_max - next_max);
-        const float new_scale = expf(dot - next_max);
-        const cache_t* v =
-            value + ((size_t)kv_head * kv_stride + k_pos) * fixed_head_dim;
-#pragma unroll
-        for (int i = 0; i < values_per_lane; i++)
-        {
-            const float vv =
-                ts_gqa_prefill_cache_to_float(v[lane + i * 32]);
-            acc[i] = fmaf(new_scale, vv, old_scale * acc[i]);
-        }
-        running_sum = fmaf(old_scale, running_sum, new_scale);
-        running_max = next_max;
-    }
-
-    const float inv_sum = running_sum > 0.0f ? 1.0f / running_sum : 0.0f;
-    float* out =
-        output + ((size_t)q_pos * num_q_heads + q_head) * fixed_head_dim;
-#pragma unroll
-    for (int i = 0; i < values_per_lane; i++)
-        out[lane + i * 32] = acc[i] * inv_sum;
-}
-
-extern "C" __global__ void ts_gqa_prefill_attention_group4_online_d512_f32(
-    const float* query,
-    const float* key,
-    const float* value,
-    float* output,
-    int num_q_heads,
-    int num_kv_heads,
-    int seq_len,
-    int kv_len,
-    int head_dim,
-    int mask_start,
-    int window_size,
-    float scale,
-    int kv_stride)
-{
-    ts_gqa_prefill_attention_group4_online_d512_impl(
-        query, key, value, output, num_q_heads, num_kv_heads,
-        seq_len, kv_len, head_dim, mask_start, window_size, scale, kv_stride);
-}
-
-extern "C" __global__ void ts_gqa_prefill_attention_group4_online_d512_f16(
-    const float* query,
-    const half* key,
-    const half* value,
-    float* output,
-    int num_q_heads,
-    int num_kv_heads,
-    int seq_len,
-    int kv_len,
-    int head_dim,
-    int mask_start,
-    int window_size,
-    float scale,
-    int kv_stride)
-{
-    ts_gqa_prefill_attention_group4_online_d512_impl(
-        query, key, value, output, num_q_heads, num_kv_heads,
-        seq_len, kv_len, head_dim, mask_start, window_size, scale, kv_stride);
-}
-
 // ---------------------------------------------------------------------------
 // Flash-style tiled GQA prefill attention (f16 K/V, group-of-4 query heads).
 //
-// The older group4 prefill kernels above process at most 4 queries per CTA and
-// re-read the query vectors from GLOBAL memory for every visible key, so a
-// 2048-token Gemma prefill spent 6.7 ms per SWA layer / 26 ms per global layer
-// on this GPU. This kernel follows the ggml_cuda flash-attention structure
-// instead:
+// A two-pass kernel that processes at most 4 queries per CTA re-reads the query
+// vectors from GLOBAL memory for every visible key (a 2048-token Gemma prefill
+// spent 6.7 ms per SWA layer / 26 ms per global layer that way). This kernel
+// follows the ggml_cuda flash-attention structure instead:
 //   * one CTA owns a (kv_head, QROWS-query) tile; its 4*QROWS score rows share
 //     every K/V row the CTA reads;
 //   * the Q tile is staged in shared memory ONCE (f32, no precision change);
@@ -2663,11 +2135,10 @@ extern "C" __global__ void ts_gqa_prefill_attention_group4_online_d512_f16(
 //     kernel has no window-size or kv_len ceiling from shared memory;
 //   * K is read with half2 loads by a warp per (key, query) task; V is read
 //     once per CTA with thread-per-column coalesced rows.
-// Numerics match the two-pass kernels to FP-reassociation order (same
-// f16->f32 promotion of K/V, f32 accumulation, exp in f32).
+// Numerics match the generic GQA prefill kernels to FP-reassociation order
+// (same f16->f32 promotion of K/V, f32 accumulation, exp in f32).
 //
-// The causal/SWA mask matches ts_gqa_prefill_attention_group4_d256_impl:
-// row qi attends k in [max(0, mask_start+q0+qi-window+1), min(mask_start+q0+qi,
+// The causal/SWA mask: row qi attends k in [max(0, mask_start+q0+qi-window+1), min(mask_start+q0+qi,
 // kv_len-1)] for window>0, and [0, min(mask_start+q0+qi, kv_len-1)] for
 // window==0. Requires blockDim.x == 256.
 #define TS_FLASH_KCHUNK 32
@@ -3311,8 +2782,7 @@ extern "C" __global__ void ts_gqa_prefill_attention_f32(
     int mask_start,
     int window_size,
     float scale,
-    int kv_stride,
-    int warp_cooperative)
+    int kv_stride)
 {
     int q_head = blockIdx.x;
     int q_pos = blockIdx.y;
@@ -3331,31 +2801,15 @@ extern "C" __global__ void ts_gqa_prefill_attention_f32(
     extern __shared__ float scores[];
 
     float max_v = -FLT_MAX;
-    if (warp_cooperative)
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+    int num_warps = blockDim.x >> 5;
+    for (int k_pos = min_visible + warp; k_pos <= max_visible; k_pos += num_warps)
     {
-        int lane = threadIdx.x & 31;
-        int warp = threadIdx.x >> 5;
-        int num_warps = blockDim.x >> 5;
-        for (int k_pos = min_visible + warp; k_pos <= max_visible; k_pos += num_warps)
+        const float* k = key + ((size_t)kv_head * kv_stride + k_pos) * head_dim;
+        float dot = ts_gqa_prefill_warp_dot(q, k, head_dim);
+        if (lane == 0)
         {
-            const float* k = key + ((size_t)kv_head * kv_stride + k_pos) * head_dim;
-            float dot = ts_gqa_prefill_warp_dot(q, k, head_dim);
-            if (lane == 0)
-            {
-                float score = dot * scale;
-                max_v = fmaxf(max_v, score);
-                scores[k_pos] = score;
-            }
-        }
-    }
-    else
-    {
-        for (int k_pos = min_visible + threadIdx.x; k_pos <= max_visible; k_pos += blockDim.x)
-        {
-            const float* k = key + ((size_t)kv_head * kv_stride + k_pos) * head_dim;
-            float dot = 0.0f;
-            for (int d = 0; d < head_dim; d++)
-                dot += q[d] * k[d];
             float score = dot * scale;
             max_v = fmaxf(max_v, score);
             scores[k_pos] = score;
@@ -3571,8 +3025,7 @@ extern "C" __global__ void ts_gqa_prefill_attention_f16(
     int mask_start,
     int window_size,
     float scale,
-    int kv_stride,
-    int warp_cooperative)
+    int kv_stride)
 {
     int q_head = blockIdx.x;
     int q_pos = blockIdx.y;
@@ -3591,31 +3044,15 @@ extern "C" __global__ void ts_gqa_prefill_attention_f16(
     extern __shared__ float scores[];
 
     float max_v = -FLT_MAX;
-    if (warp_cooperative)
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+    int num_warps = blockDim.x >> 5;
+    for (int k_pos = min_visible + warp; k_pos <= max_visible; k_pos += num_warps)
     {
-        int lane = threadIdx.x & 31;
-        int warp = threadIdx.x >> 5;
-        int num_warps = blockDim.x >> 5;
-        for (int k_pos = min_visible + warp; k_pos <= max_visible; k_pos += num_warps)
+        const half* k = key + ((size_t)kv_head * kv_stride + k_pos) * head_dim;
+        float dot = ts_gqa_prefill_warp_dot(q, k, head_dim);
+        if (lane == 0)
         {
-            const half* k = key + ((size_t)kv_head * kv_stride + k_pos) * head_dim;
-            float dot = ts_gqa_prefill_warp_dot(q, k, head_dim);
-            if (lane == 0)
-            {
-                float score = dot * scale;
-                max_v = fmaxf(max_v, score);
-                scores[k_pos] = score;
-            }
-        }
-    }
-    else
-    {
-        for (int k_pos = min_visible + threadIdx.x; k_pos <= max_visible; k_pos += blockDim.x)
-        {
-            const half* k = key + ((size_t)kv_head * kv_stride + k_pos) * head_dim;
-            float dot = 0.0f;
-            for (int d = 0; d < head_dim; d++)
-                dot += q[d] * __half2float(k[d]);
             float score = dot * scale;
             max_v = fmaxf(max_v, score);
             scores[k_pos] = score;
@@ -3671,8 +3108,7 @@ extern "C" __global__ void ts_gqa_prefill_attention_sinks_f32(
     int mask_start,
     int window_size,
     float scale,
-    int has_sinks,
-    int warp_cooperative)
+    int has_sinks)
 {
     int q_head = blockIdx.x;
     int q_pos = blockIdx.y;
@@ -3691,31 +3127,15 @@ extern "C" __global__ void ts_gqa_prefill_attention_sinks_f32(
     extern __shared__ float scores[];
 
     float max_v = has_sinks ? sinks[q_head] : -FLT_MAX;
-    if (warp_cooperative)
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+    int num_warps = blockDim.x >> 5;
+    for (int k_pos = min_visible + warp; k_pos <= max_visible; k_pos += num_warps)
     {
-        int lane = threadIdx.x & 31;
-        int warp = threadIdx.x >> 5;
-        int num_warps = blockDim.x >> 5;
-        for (int k_pos = min_visible + warp; k_pos <= max_visible; k_pos += num_warps)
+        const float* k = key_cache + ((size_t)kv_head * cache_size + k_pos) * head_dim;
+        float dot = ts_gqa_prefill_warp_dot(q, k, head_dim);
+        if (lane == 0)
         {
-            const float* k = key_cache + ((size_t)kv_head * cache_size + k_pos) * head_dim;
-            float dot = ts_gqa_prefill_warp_dot(q, k, head_dim);
-            if (lane == 0)
-            {
-                float score = dot * scale;
-                max_v = fmaxf(max_v, score);
-                scores[k_pos] = score;
-            }
-        }
-    }
-    else
-    {
-        for (int k_pos = min_visible + threadIdx.x; k_pos <= max_visible; k_pos += blockDim.x)
-        {
-            const float* k = key_cache + ((size_t)kv_head * cache_size + k_pos) * head_dim;
-            float dot = 0.0f;
-            for (int d = 0; d < head_dim; d++)
-                dot += q[d] * k[d];
             float score = dot * scale;
             max_v = fmaxf(max_v, score);
             scores[k_pos] = score;
@@ -3771,8 +3191,7 @@ extern "C" __global__ void ts_gqa_prefill_attention_sinks_f16(
     int mask_start,
     int window_size,
     float scale,
-    int has_sinks,
-    int warp_cooperative)
+    int has_sinks)
 {
     int q_head = blockIdx.x;
     int q_pos = blockIdx.y;
@@ -3791,31 +3210,15 @@ extern "C" __global__ void ts_gqa_prefill_attention_sinks_f16(
     extern __shared__ float scores[];
 
     float max_v = has_sinks ? sinks[q_head] : -FLT_MAX;
-    if (warp_cooperative)
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+    int num_warps = blockDim.x >> 5;
+    for (int k_pos = min_visible + warp; k_pos <= max_visible; k_pos += num_warps)
     {
-        int lane = threadIdx.x & 31;
-        int warp = threadIdx.x >> 5;
-        int num_warps = blockDim.x >> 5;
-        for (int k_pos = min_visible + warp; k_pos <= max_visible; k_pos += num_warps)
+        const half* k = key_cache + ((size_t)kv_head * cache_size + k_pos) * head_dim;
+        float dot = ts_gqa_prefill_warp_dot(q, k, head_dim);
+        if (lane == 0)
         {
-            const half* k = key_cache + ((size_t)kv_head * cache_size + k_pos) * head_dim;
-            float dot = ts_gqa_prefill_warp_dot(q, k, head_dim);
-            if (lane == 0)
-            {
-                float score = dot * scale;
-                max_v = fmaxf(max_v, score);
-                scores[k_pos] = score;
-            }
-        }
-    }
-    else
-    {
-        for (int k_pos = min_visible + threadIdx.x; k_pos <= max_visible; k_pos += blockDim.x)
-        {
-            const half* k = key_cache + ((size_t)kv_head * cache_size + k_pos) * head_dim;
-            float dot = 0.0f;
-            for (int d = 0; d < head_dim; d++)
-                dot += q[d] * __half2float(k[d]);
             float score = dot * scale;
             max_v = fmaxf(max_v, score);
             scores[k_pos] = score;
@@ -5029,7 +4432,7 @@ extern "C" __global__ void ts_neox_rope_head_first_f32(
 }
 
 // NeoX RoPE for the FLAT [seq_len, num_heads * head_dim] layout (element (s,h,j)
-// at (s*num_heads + h)*head_dim + j) ÔÇö the layout Gemma 4's q/k carry before
+// at (s*num_heads + h)*head_dim + j) — the layout Gemma 4's q/k carry before
 // ReshapeToHeads. Same rotation/table indexing as the head-first kernel; only the
 // element address differs. cos/sin tables are [seq_len, rope_half] (rope_half =
 // partial-rotary-dims/2, with per-frequency rope_freqs.weight already baked in),
@@ -5352,8 +4755,8 @@ extern "C" __global__ void ts_quant_matmul_f32(
 // column instead of ts_quant_matmul_f32's four-columns-per-block split. Same
 // blockDim.x thread budget per column as that kernel, but a single
 // block_reduce_sum (no repeated __syncthreads()-separated reductions) and no
-// row-tile machinery (nothing to amortize with only one row) -- see the
-// TS_CUDA_QMM_VEC call site for why this beats both ts_quant_matmul_f32 (whose
+// row-tile machinery (nothing to amortize with only one row) -- see its call
+// site in CudaQuantizedOps for why this beats both ts_quant_matmul_f32 (whose
 // 4-way column split still costs 4 serialized block reductions) and
 // ts_quant_matmul_batched_f32 (whose one-warp-per-column split under-uses the
 // SM for a single row on wide tensors).
@@ -5387,7 +4790,7 @@ extern "C" __global__ void ts_quant_matmul_vec_f32(
 // grid.y = ceil(rows/TILE) covers the rest. Kept small (matches the 4-row
 // ts_quant_matmul_q8_0_f32 tiling) so the accumulators stay in registers.
 // Weight memory traffic / dequant work drops from B x to ceil(B/TILE) x.
-// (Q4_0 ÔÇö the dominant dense quant ÔÇö has its own row-tiled kernel,
+// (Q4_0 — the dominant dense quant — has its own row-tiled kernel,
 // ts_quant_matmul_q4_0_batched_f32, that covers a full draft window in one pass.)
 #define TS_QMM_ROW_TILE 4
 
@@ -6002,7 +5405,7 @@ extern "C" __global__ void ts_quantize_q8_1_rows_f32(
 }
 
 // Decode-oriented q8_1 activation quantizer: one warp cooperatively handles one
-// 32-value block. The legacy kernel above assigns an entire block to one thread,
+// 32-value block. The reference kernel above assigns an entire block to one thread,
 // serializing 32 loads and stores while neighboring lanes walk different,
 // 128-byte-strided blocks. This mapping makes the input and q-byte accesses
 // coalesced and exposes all 32 values to the SM at once.
@@ -6024,7 +5427,7 @@ extern "C" __global__ void ts_quantize_q8_1_rows_warp_f32(
         return;
 
     float x = input[(size_t)warp_idx * TS_QK8_1 + lane];
-    // Starting from zero preserves the legacy fmaxf behavior for NaN inputs.
+    // Starting from zero preserves the reference kernel's fmaxf behavior for NaN inputs.
     float amax = fmaxf(0.0f, fabsf(x));
 #pragma unroll
     for (int offset = 16; offset > 0; offset >>= 1)
@@ -6111,13 +5514,13 @@ extern "C" __global__ void ts_quantize_q8_1_split_rows_f32(
     d_out[idx] = __half2float(__float2half_rn(d));
 }
 
-// Block-tile dp4a (int8-MMA) Q8_0 GEMM ÔÇö the fast multi-row path for the MTP verify
+// Block-tile dp4a (int8-MMA) Q8_0 GEMM — the fast multi-row path for the MTP verify
 // window (rows 2-8). The scalar block-reduce kernels above are compute-bound on the
 // big FFN matmuls (measured ~78% of verify GPU time). This kernel:
 //   * 256 threads compute a TS_Q8_DP4A_ROWS x TS_Q8_DP4A_COLS output tile;
 //   * reads the pre-quantized q8_1 activations (xq) from global (L2-cached; quantized
 //     once by ts_quantize_q8_1_rows_f32), weight read once per row-tile;
-//   * each thread strides the dp4a-GROUPS (4 elements) of in_dim ÔÇö full parallelism
+//   * each thread strides the dp4a-GROUPS (4 elements) of in_dim — full parallelism
 //     even for small in_dim (gate_up). Q8_0 is symmetric so the per-32-block scale
 //     d_w*d_act is constant within a block and can be applied per group (exact);
 //   * a SINGLE fused block reduction combines all ROWS*COLS partials (one
@@ -6157,7 +5560,7 @@ extern "C" __global__ void ts_quant_matmul_q8_0_dp4a_f32(
         int ib = g >> 3;
         int gib = g & 7;
 
-        // Load each row's activation group + scale ONCE (reused across all columns) ÔÇö
+        // Load each row's activation group + scale ONCE (reused across all columns) —
         // the activation is identical for every output column of this tile.
         int   a4[TS_Q8_DP4A_ROWS];
         float dact[TS_Q8_DP4A_ROWS];
@@ -6719,19 +6122,21 @@ extern "C" __global__ void __launch_bounds__(TS_MMQ_THREADS, 2) ts_quant_matmul_
 #endif
 }
 
-// Single-row (decode) Q8_0 matvec: four warps cooperate on one output column,
-// following ggml MMVQ's four-adjacent-lanes-per-Q8-block mapping. A 4-lane
-// group owns one 32-element block and each lane evaluates two dp4a groups
-// (8 values), so 128 threads issue coalesced loads across 32 consecutive
-// blocks instead of 32 lanes each serializing all eight dp4a instructions for
-// one block. The final CTA reduction is small relative to the improved weight
-// bandwidth. The activation is pre-quantized once to q8_1, as in ggml.
-extern "C" __global__ void ts_quant_matmul_q8_0_vec_f32(
+// Q8_0 matvec for 1..16 activation rows (decode, batched decode, verify windows), as ggml MMVQ
+// maps it: a CTA of four warps per output column, four adjacent lanes on each 32-value block, two
+// ints each, against the activation pre-quantized once to q8_1. Every row runs the same
+// accumulation whatever the row count (the weight words are loaded once and reused across the
+// rows), so a row's result does not depend on how many rows share the launch; the one-row decode
+// kernel is this body at MAXR = 1. (Measured on the A40 and rejected: a warp per column with four
+// columns per CTA, slower at every row count; two columns per CTA, slower on GLM-5.3's shapes.)
+template <int MAXR>
+__device__ __forceinline__ void ts_q80_vec_rows(
     const uint8_t* weights,
     const ts_block_q8_1* xq,
     float* output,
     int in_dim,
-    int out_dim)
+    int out_dim,
+    int rows)
 {
     int col = blockIdx.x;
     if (col >= out_dim)
@@ -6740,32 +6145,127 @@ extern "C" __global__ void ts_quant_matmul_q8_0_vec_f32(
     int q8_blocks = in_dim / 32;
     const uint8_t* w_row = weights + (size_t)col * (size_t)q8_blocks * 34;
 
-    float acc = 0.0f;
-    int lane_in_block = threadIdx.x & 3;
-    int block_group = threadIdx.x >> 2;
-    int groups_per_cta = blockDim.x >> 2;
-    for (int ib = block_group; ib < q8_blocks; ib += groups_per_cta)
+    float acc[MAXR];
+#pragma unroll
+    for (int r = 0; r < MAXR; r++)
+        acc[r] = 0.0f;
+    int g = (threadIdx.x & 3) * 2;
+    for (int ib = threadIdx.x >> 2; ib < q8_blocks; ib += blockDim.x >> 2)
     {
         const uint8_t* wblk = w_row + (size_t)ib * 34;
         float dw = __half2float(*reinterpret_cast<const half*>(wblk));
-        const ts_block_q8_1* ablk = &xq[ib];
-        float dact = __half2float(ablk->d);
-        int g = lane_in_block * 2;
-        int s = dp4a_i8(
-            get_int_b2(wblk + 2, g),
-            get_int_b4(ablk->qs, g),
-            0);
-        s = dp4a_i8(
-            get_int_b2(wblk + 2, g + 1),
-            get_int_b4(ablk->qs, g + 1),
-            s);
-        acc += dw * dact * (float)s;
+        int w0 = get_int_b2(wblk + 2, g);
+        int w1 = get_int_b2(wblk + 2, g + 1);
+#pragma unroll
+        for (int r = 0; r < MAXR; r++)
+        {
+            if (r >= rows)
+                break;
+            const ts_block_q8_1* ablk = &xq[(size_t)r * q8_blocks + ib];
+            float dact = __half2float(ablk->d);
+            int s = dp4a_i8(w0, get_int_b4(ablk->qs, g), 0);
+            s = dp4a_i8(w1, get_int_b4(ablk->qs, g + 1), s);
+            acc[r] += dw * dact * (float)s;
+        }
     }
 
-    acc = block_reduce_sum(acc);
-    if (threadIdx.x == 0)
-        output[col] = acc;
+#pragma unroll
+    for (int r = 0; r < MAXR; r++)
+    {
+        if (r >= rows)
+            break;
+        float sum = block_reduce_sum(acc[r]);
+        if (threadIdx.x == 0)
+            output[(size_t)r * out_dim + col] = sum;
+        if (MAXR > 1)
+            __syncthreads();   // block_reduce_sum's scratch is reused by the next row
+    }
 }
+
+extern "C" __global__ void ts_quant_matmul_q8_0_vec_f32_1(
+    const uint8_t* weights, const ts_block_q8_1* xq, float* output, int in_dim, int out_dim, int rows)
+{ ts_q80_vec_rows<1>(weights, xq, output, in_dim, out_dim, rows); }
+extern "C" __global__ void ts_quant_matmul_q8_0_vec_f32_4(
+    const uint8_t* weights, const ts_block_q8_1* xq, float* output, int in_dim, int out_dim, int rows)
+{ ts_q80_vec_rows<4>(weights, xq, output, in_dim, out_dim, rows); }
+extern "C" __global__ void ts_quant_matmul_q8_0_vec_f32_8(
+    const uint8_t* weights, const ts_block_q8_1* xq, float* output, int in_dim, int out_dim, int rows)
+{ ts_q80_vec_rows<8>(weights, xq, output, in_dim, out_dim, rows); }
+extern "C" __global__ void ts_quant_matmul_q8_0_vec_f32_16(
+    const uint8_t* weights, const ts_block_q8_1* xq, float* output, int in_dim, int out_dim, int rows)
+{ ts_q80_vec_rows<16>(weights, xq, output, in_dim, out_dim, rows); }
+
+// Q8_0 matvec for short input rows (fewer than 1024 values: a hyper-connection bottleneck's up
+// projection, a shared expert's down projection). There the kernel above keeps most of its 32 lane
+// groups idle on the few blocks a row has, and launches a CTA per column: 10240 CTAs for a 320-wide
+// row. Here eight warps per CTA take a column each, four lanes on each 32-value block, two ints each;
+// every row runs the same accumulation whatever the row count, as above.
+template <int MAXR>
+__device__ __forceinline__ void ts_q80_warp_rows(
+    const uint8_t* weights,
+    const ts_block_q8_1* xq,
+    float* output,
+    int in_dim,
+    int out_dim,
+    int rows)
+{
+    const int lane = threadIdx.x & 31;
+    const int col = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
+    if (col >= out_dim)
+        return;
+
+    const int q8_blocks = in_dim / 32;
+    const uint8_t* w_row = weights + (size_t)col * (size_t)q8_blocks * 34;
+    float acc[MAXR];
+#pragma unroll
+    for (int r = 0; r < MAXR; r++)
+        acc[r] = 0.0f;
+    const int g = (lane & 3) * 2;
+    for (int ib = lane >> 2; ib < q8_blocks; ib += 8)
+    {
+        const uint8_t* wblk = w_row + (size_t)ib * 34;
+        float dw = __half2float(*reinterpret_cast<const half*>(wblk));
+        int w0 = get_int_b2(wblk + 2, g);
+        int w1 = get_int_b2(wblk + 2, g + 1);
+#pragma unroll
+        for (int r = 0; r < MAXR; r++)
+        {
+            if (r >= rows)
+                break;
+            const ts_block_q8_1* ablk = &xq[(size_t)r * q8_blocks + ib];
+            float dact = __half2float(ablk->d);
+            int sumi = dp4a_i8(w0, get_int_b4(ablk->qs, g), 0);
+            sumi = dp4a_i8(w1, get_int_b4(ablk->qs, g + 1), sumi);
+            acc[r] += dw * dact * (float)sumi;
+        }
+    }
+
+#pragma unroll
+    for (int r = 0; r < MAXR; r++)
+    {
+        if (r >= rows)
+            break;
+        float sum = acc[r];
+#pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1)
+            sum += __shfl_xor_sync(0xFFFFFFFF, sum, offset);
+        if (lane == 0)
+            output[(size_t)r * out_dim + col] = sum;
+    }
+}
+
+extern "C" __global__ void ts_quant_matmul_q8_0_warp_f32_1(
+    const uint8_t* weights, const ts_block_q8_1* xq, float* output, int in_dim, int out_dim, int rows)
+{ ts_q80_warp_rows<1>(weights, xq, output, in_dim, out_dim, rows); }
+extern "C" __global__ void ts_quant_matmul_q8_0_warp_f32_4(
+    const uint8_t* weights, const ts_block_q8_1* xq, float* output, int in_dim, int out_dim, int rows)
+{ ts_q80_warp_rows<4>(weights, xq, output, in_dim, out_dim, rows); }
+extern "C" __global__ void ts_quant_matmul_q8_0_warp_f32_8(
+    const uint8_t* weights, const ts_block_q8_1* xq, float* output, int in_dim, int out_dim, int rows)
+{ ts_q80_warp_rows<8>(weights, xq, output, in_dim, out_dim, rows); }
+extern "C" __global__ void ts_quant_matmul_q8_0_warp_f32_16(
+    const uint8_t* weights, const ts_block_q8_1* xq, float* output, int in_dim, int out_dim, int rows)
+{ ts_q80_warp_rows<16>(weights, xq, output, in_dim, out_dim, rows); }
 
 // dp4a (int8) Q4_K single-token decode matvec. The generic scalar path
 // (ts_quant_matmul_vec_f32 -> qvalue_at) re-parses the Q4_K super-block header
@@ -6781,7 +6281,7 @@ extern "C" __global__ void ts_quant_matmul_q8_0_vec_f32(
 // Layout mirrors ts_quant_matmul_q8_0_vec_f32: 4 threads cooperate on one
 // 32-value block (8 ints, 2 per thread). Numerically within the 8-bit activation
 // round-trip of the scalar dequant path (same tolerance as the Q4_0/Q8_0 dp4a
-// paths); TS_CUDA_Q4K_DP4A=0 reverts to the exact scalar kernel.
+// paths); the tests pin the exact scalar kernel (Q4KDp4aEnabled) as reference.
 extern "C" __global__ void ts_quant_matmul_q4k_dp4a_f32(
     const uint8_t* weights,
     const ts_block_q8_1* xq,
@@ -6842,6 +6342,131 @@ extern "C" __global__ void ts_quant_matmul_q4k_dp4a_f32(
     if (threadIdx.x == 0)
         output[col] = acc;
 }
+
+// The signed 6-bit scale of 16-value sub-block `is` of a Q3_K superblock: the
+// low four bits of scales 0-7 and 8-15 are the low and high nibbles of bytes
+// 0-7, their top two bits pairs of bytes 8-11 (ggml's kmask1/kmask2 unpack).
+__device__ __forceinline__ int ts_q3k_scale(const uint8_t* scales, int is)
+{
+    const int lo4 = is < 8 ? (scales[is] & 0xF) : (scales[is - 8] >> 4);
+    const int hi2 = (scales[8 + (is & 3)] >> (2 * (is >> 2))) & 3;
+    return (lo4 | (hi2 << 4)) - 32;
+}
+
+#define TS_LOWK_MAX_ROWS 16
+
+// One instantiation per quant type and row bound: the single-row decode kernel carries no batch
+// accumulators or other type's decode, and every instantiation computes a row the same way.
+#define TS_LOWK_KERNEL(NAME, IMPL, XT, R, Q3, SUFFIX)                                                     \
+    extern "C" __global__ void NAME##SUFFIX(const uint8_t* w, const XT* x, float* o, int in_dim, int out_dim, int rows) \
+    { IMPL<R, Q3>(w, x, o, in_dim, out_dim, rows); }
+#define TS_LOWK_KERNELS(NAME, IMPL, XT)                   \
+    TS_LOWK_KERNEL(NAME, IMPL, XT, 1, false, _q2_1)       \
+    TS_LOWK_KERNEL(NAME, IMPL, XT, 4, false, _q2_4)       \
+    TS_LOWK_KERNEL(NAME, IMPL, XT, 8, false, _q2_8)       \
+    TS_LOWK_KERNEL(NAME, IMPL, XT, 16, false, _q2_16)     \
+    TS_LOWK_KERNEL(NAME, IMPL, XT, 1, true, _q3_1)        \
+    TS_LOWK_KERNEL(NAME, IMPL, XT, 4, true, _q3_4)        \
+    TS_LOWK_KERNEL(NAME, IMPL, XT, 8, true, _q3_8)        \
+    TS_LOWK_KERNEL(NAME, IMPL, XT, 16, true, _q3_16)
+
+// Q2_K / Q3_K matvec over 1..16 globally quantized q8_1 activation rows (decode, batched decode,
+// verify windows) with dp4a vec-dots, as ggml's mul_mat_vec_q computes them: one CTA per output
+// column, four threads per 32-value sub-block, eight values (two ints) each. The weight ints of a
+// sub-block are decoded once and dotted against every row, and each row's sum follows the same
+// order whatever the row count, so a sequence decodes identically alone and batched. (F32
+// activations were tried: DeepSeek V4.1's Q2_K checkpoint scored the same over 22 paired
+// perplexity chunks, at the same speed and four times the activation traffic.)
+//   block_q2_K (84 B / 256 values): scales[16] (low nibble scale, high nibble min per 16 values),
+//     qs[64] (2-bit fields), d, dmin; the min term needs the sum of the thread's activations,
+//     which a dp4a against ones gives.
+//   block_q3_K (110 B, 2-byte aligned): hmask[32], qs[64], scales[12], d; a value is its 2-bit
+//     field minus 4 where its hmask bit is clear.
+template <int MAXR, bool Q3>
+__device__ __forceinline__ void ts_lowk_dp4a_rows(
+    const uint8_t* weights,
+    const ts_block_q8_1* xq,
+    float* output,
+    int in_dim,
+    int out_dim,
+    int rows)
+{
+    int col = blockIdx.x;
+    if (col >= out_dim)
+        return;
+
+    const int block_bytes = Q3 ? 110 : 84;
+    int n_super = in_dim / 256;
+    int n_sub = in_dim / 32;
+    const uint8_t* w_row = weights + (size_t)col * (size_t)n_super * block_bytes;
+
+    int t = threadIdx.x & 3;
+    int block_group = threadIdx.x >> 2;
+    int groups_per_cta = blockDim.x >> 2;
+    float acc[MAXR];
+#pragma unroll
+    for (int r = 0; r < MAXR; ++r)
+        acc[r] = 0.0f;
+
+    for (int ib = block_group; ib < n_sub; ib += groups_per_cta)
+    {
+        const uint8_t* sblock = w_row + (size_t)(ib >> 3) * block_bytes;
+        const int g = ib & 7, gh = g >> 2, j = g & 3;
+        int w[2];
+        float dScale, dMin = 0.0f;
+        if (Q3)
+        {
+            const uint8_t* qs = sblock + 32 + gh * 32;
+            const int bit = gh * 4 + j;
+#pragma unroll
+            for (int k = 0; k < 2; ++k)
+            {
+                const int q2 = (get_int_b2(qs, 2 * t + k) >> (2 * j)) & 0x03030303;
+                const int hb = (get_int_b2(sblock, 2 * t + k) >> bit) & 0x01010101;
+                w[k] = __vsubss4(q2, (hb ^ 0x01010101) << 2);
+            }
+            dScale = __half2float(*reinterpret_cast<const half*>(sblock + 108))
+                   * (float)ts_q3k_scale(sblock + 96, gh * 8 + j * 2 + (t >> 1));
+        }
+        else
+        {
+            const uint8_t* qs = sblock + 16 + gh * 32;
+#pragma unroll
+            for (int k = 0; k < 2; ++k)
+                w[k] = (get_int_b4(qs, 2 * t + k) >> (2 * j)) & 0x03030303;
+            const uint8_t sc = sblock[gh * 8 + j * 2 + (t >> 1)];
+            dScale = __half2float(*reinterpret_cast<const half*>(sblock + 80)) * (float)(sc & 0xF);
+            dMin = __half2float(*reinterpret_cast<const half*>(sblock + 82)) * (float)(sc >> 4);
+        }
+#pragma unroll
+        for (int r = 0; r < MAXR; ++r)
+        {
+            if (r >= rows)
+                break;
+            const ts_block_q8_1* ablk = &xq[(size_t)r * n_sub + ib];
+            const int a0 = get_int_b4(ablk->qs, 2 * t), a1 = get_int_b4(ablk->qs, 2 * t + 1);
+            const int sumi = dp4a_i8(w[1], a1, dp4a_i8(w[0], a0, 0));
+            float v = dScale * (float)sumi;
+            if (!Q3)
+                v -= dMin * (float)dp4a_i8(0x01010101, a1, dp4a_i8(0x01010101, a0, 0));
+            acc[r] += __half2float(ablk->d) * v;
+        }
+    }
+
+#pragma unroll
+    for (int r = 0; r < MAXR; ++r)
+    {
+        if (r >= rows)
+            break;
+        const float sum = block_reduce_sum(acc[r]);
+        if (threadIdx.x == 0)
+            output[(size_t)r * out_dim + col] = sum;
+        if (MAXR > 1)
+            __syncthreads();   // block_reduce_sum's scratch is reused by the next row
+    }
+}
+
+TS_LOWK_KERNELS(ts_quant_matmul_lowk_dp4a_f32, ts_lowk_dp4a_rows, ts_block_q8_1)
 
 // Decode-only Q5_K matvec over one globally quantized q8_1 activation row.
 // Q5_K uses the same eight 32-value sub-block scales/mins as Q4_K, plus one
@@ -6908,15 +6533,19 @@ extern "C" __global__ void ts_quant_matmul_q5k_dp4a_f32(
         output[col] = acc;
 }
 
-// Decode-only Q6_K matvec. Each q8_1 block spans two independently scaled
-// 16-value Q6_K groups. A four-thread group reconstructs the signed 6-bit
-// values in packed bytes and executes two dp4a instructions per thread.
-extern "C" __global__ void ts_quant_matmul_q6k_dp4a_f32(
+// Q6_K matvec over 1..16 globally quantized q8_1 activation rows (decode, batched decode, verify
+// windows). Each q8_1 block spans two independently scaled 16-value Q6_K groups; a four-thread
+// group reconstructs the signed 6-bit values in packed bytes once per sub-block and executes two
+// dp4a instructions per thread for every row. Each row's sum follows the same order whatever the
+// row count, so a sequence decodes identically alone and batched (the LM head of a batched step).
+template <int MAXR>
+__device__ __forceinline__ void ts_q6k_dp4a_rows(
     const uint8_t* weights,
     const ts_block_q8_1* xq,
     float* output,
     int in_dim,
-    int out_dim)
+    int out_dim,
+    int rows)
 {
     int col = blockIdx.x;
     if (col >= out_dim)
@@ -6926,7 +6555,10 @@ extern "C" __global__ void ts_quant_matmul_q6k_dp4a_f32(
     int n_sub = in_dim / 32;
     const uint8_t* w_row = weights + (size_t)col * (size_t)n_super * 210;
 
-    float acc = 0.0f;
+    float acc[MAXR];
+#pragma unroll
+    for (int r = 0; r < MAXR; ++r)
+        acc[r] = 0.0f;
     int lane_in_block = threadIdx.x & 3;
     int block_group = threadIdx.x >> 2;
     int groups_per_cta = blockDim.x >> 2;
@@ -6948,7 +6580,6 @@ extern "C" __global__ void ts_quant_matmul_q6k_dp4a_f32(
         int ql_shift = group >= 2 ? 4 : 0;
         int qh_shift = group * 2;
 
-        const ts_block_q8_1* ablk = &xq[ib];
         int g = lane_in_block * 2;
         // block_q6_K is 210 bytes, so odd super-blocks are only 2-byte
         // aligned. Assemble these packed words bytewise rather than issuing
@@ -6959,19 +6590,52 @@ extern "C" __global__ void ts_quant_matmul_q6k_dp4a_f32(
                  | (((read_u32_unaligned(qh_group + 4 * (g + 1)) >> qh_shift) & 0x03030303) << 4);
         int w0 = __vsubss4(raw0, 0x20202020);
         int w1 = __vsubss4(raw1, 0x20202020);
-        int sumi = dp4a_i8(w0, get_int_b4(ablk->qs, g), 0);
-        sumi = dp4a_i8(w1, get_int_b4(ablk->qs, g + 1), sumi);
-
         int sc = scales[half_idx * 8 + group * 2 + (lane_in_block >= 2 ? 1 : 0)];
-        acc += d_sb * (float)sc * __half2float(ablk->d) * (float)sumi;
+
+#pragma unroll
+        for (int r = 0; r < MAXR; ++r)
+        {
+            if (r >= rows)
+                break;
+            const ts_block_q8_1* ablk = &xq[(size_t)r * n_sub + ib];
+            int sumi = dp4a_i8(w0, get_int_b4(ablk->qs, g), 0);
+            sumi = dp4a_i8(w1, get_int_b4(ablk->qs, g + 1), sumi);
+            acc[r] += d_sb * (float)sc * __half2float(ablk->d) * (float)sumi;
+        }
     }
 
-    acc = block_reduce_sum(acc);
-    if (threadIdx.x == 0)
-        output[col] = acc;
+#pragma unroll
+    for (int r = 0; r < MAXR; ++r)
+    {
+        if (r >= rows)
+            break;
+        const float sum = block_reduce_sum(acc[r]);
+        if (threadIdx.x == 0)
+            output[(size_t)r * out_dim + col] = sum;
+        if (MAXR > 1)
+            __syncthreads();   // block_reduce_sum's scratch is reused by the next row
+    }
 }
 
-// dp4a (int8) Q4_0 GEMM ÔÇö the fast path for BOTH single-token decode (rows == 1)
+// Decode-only Q6_K matvec over one row: the one-row instantiation.
+extern "C" __global__ void ts_quant_matmul_q6k_dp4a_f32(
+    const uint8_t* weights,
+    const ts_block_q8_1* xq,
+    float* output,
+    int in_dim,
+    int out_dim)
+{
+    ts_q6k_dp4a_rows<1>(weights, xq, output, in_dim, out_dim, 1);
+}
+
+extern "C" __global__ void ts_quant_matmul_q6k_dp4a_rows_f32_4(const uint8_t* w, const ts_block_q8_1* x, float* o, int in_dim, int out_dim, int rows)
+{ ts_q6k_dp4a_rows<4>(w, x, o, in_dim, out_dim, rows); }
+extern "C" __global__ void ts_quant_matmul_q6k_dp4a_rows_f32_8(const uint8_t* w, const ts_block_q8_1* x, float* o, int in_dim, int out_dim, int rows)
+{ ts_q6k_dp4a_rows<8>(w, x, o, in_dim, out_dim, rows); }
+extern "C" __global__ void ts_quant_matmul_q6k_dp4a_rows_f32_16(const uint8_t* w, const ts_block_q8_1* x, float* o, int in_dim, int out_dim, int rows)
+{ ts_q6k_dp4a_rows<16>(w, x, o, in_dim, out_dim, rows); }
+
+// dp4a (int8) Q4_0 GEMM — the fast path for BOTH single-token decode (rows == 1)
 // and the MTP verify window (rows 2-9) on the dominant dense quant. Mirrors the
 // Q8_0 dp4a kernel above (256 threads compute a ROWS x COLS output tile from the
 // pre-quantized q8_1 activations) but unpacks Q4_0 nibbles and carries the -8
@@ -7099,131 +6763,23 @@ extern "C" __global__ void ts_quant_matmul_q4_0_dp4a_f32(
     }
 }
 
-// Tensor-core (wmma int8 MMA) Q8_0 GEMM: output[M,N] = act[M,K] x weight[N,K]^T,
-// weight Q8_0 (int8 + per-32-block f16 scale), act pre-quantized to q8_1 (xq, int8 +
-// per-block scale). One WARP computes a 16x16 (M-tile x N-tile) output tile. M<16 is
-// padded with zeros (verify window is small); the int8 m16n16k16 MMA does 16 rows
-// regardless. Per Q8_0 32-block (= 2 k16 MMAs) the int32 dot is exact within the block
-// (one scale), so we accumulate int32 for the block, then scale element (m,n) by
-// d_w[n,block] * d_act[m,block] into a float accumulator (the scale is constant within
-// the block). Numerically equals the dp4a path (same q8_1 quantization + int dot).
-#define TS_MMA_TILE 16
-extern "C" __global__ void ts_quant_matmul_q8_0_mma_f32(
-    const uint8_t* weights,
-    const ts_block_q8_1* xq,
-    float* output,
-    int in_dim,
-    int out_dim,
-    int rows)
-{
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 720)
-    // int8 tensor-core (wmma m16n16k16) MMA requires sm_72+. For older targets
-    // (e.g. the compute_61 fallback when GPU arch detection is unavailable),
-    // nvcuda::wmma is not declared, so compile an empty stub: the symbol still
-    // exists for module.GetFunction, and the host only ever launches this kernel
-    // when the opt-in TS_CUDA_Q8_MMA path runs on tensor-core hardware.
-    using namespace nvcuda;
-    int n0 = blockIdx.x * TS_MMA_TILE;
-    int m0 = blockIdx.y * TS_MMA_TILE;
-    if (n0 >= out_dim || m0 >= rows)
-        return;
-
-    int q8_blocks = in_dim / TS_QK8_1;        // 32 elems / block
-    int row_bytes = q8_blocks * 34;           // Q8_0 row stride
-    int lane = threadIdx.x & 31;
-
-    __shared__ int8_t smem_a[TS_MMA_TILE * TS_MMA_TILE];   // act tile [m][k]
-    __shared__ int8_t smem_b[TS_MMA_TILE * TS_MMA_TILE];   // weight tile [n][k]
-    __shared__ int    smem_i32[TS_MMA_TILE * TS_MMA_TILE]; // block int32 dot [m][n]
-    __shared__ float  smem_facc[TS_MMA_TILE * TS_MMA_TILE];// float accumulator [m][n]
-    __shared__ float  smem_dw[TS_MMA_TILE];                // weight block scales (per n)
-    __shared__ float  smem_dact[TS_MMA_TILE];              // act block scales (per m)
-
-    for (int i = lane; i < TS_MMA_TILE * TS_MMA_TILE; i += 32)
-        smem_facc[i] = 0.0f;
-    __syncwarp();
-
-    wmma::fragment<wmma::matrix_a, 16, 16, 16, int8_t, wmma::row_major> a_frag;
-    wmma::fragment<wmma::matrix_b, 16, 16, 16, int8_t, wmma::col_major> b_frag;
-    wmma::fragment<wmma::accumulator, 16, 16, 16, int> acc_frag;
-
-    for (int b = 0; b < q8_blocks; b++)
-    {
-        wmma::fill_fragment(acc_frag, 0);
-
-        // 32 elems/block = 2 k16 MMA steps; accumulate int32 within the block.
-        for (int k16 = 0; k16 < 2; k16++)
-        {
-            int koff = k16 * 16;
-            for (int i = lane; i < TS_MMA_TILE * TS_MMA_TILE; i += 32)
-            {
-                int r = i >> 4;          // m for A, n for B
-                int kk = i & 15;
-                // A: act[m0+r][block b, koff+kk]
-                int am = m0 + r;
-                smem_a[i] = (am < rows)
-                    ? xq[(size_t)am * q8_blocks + b].qs[koff + kk] : (int8_t)0;
-                // B: weight[n0+r][block b, koff+kk]  (int8 at +2 in the 34B block)
-                int bn = n0 + r;
-                smem_b[i] = (bn < out_dim)
-                    ? (int8_t)weights[(size_t)bn * row_bytes + (size_t)b * 34 + 2 + koff + kk] : (int8_t)0;
-            }
-            __syncwarp();
-            wmma::load_matrix_sync(a_frag, smem_a, 16);
-            wmma::load_matrix_sync(b_frag, smem_b, 16);
-            wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
-            __syncwarp();
-        }
-
-        wmma::store_matrix_sync(smem_i32, acc_frag, 16, wmma::mem_row_major);
-
-        // Per-block scales: d_w[n] (weight f16 scale at the block start), d_act[m].
-        for (int i = lane; i < TS_MMA_TILE; i += 32)
-        {
-            int bn = n0 + i;
-            smem_dw[i] = (bn < out_dim)
-                ? __half2float(*reinterpret_cast<const half*>(weights + (size_t)bn * row_bytes + (size_t)b * 34)) : 0.0f;
-            int am = m0 + i;
-            smem_dact[i] = (am < rows) ? __half2float(xq[(size_t)am * q8_blocks + b].d) : 0.0f;
-        }
-        __syncwarp();
-
-        for (int i = lane; i < TS_MMA_TILE * TS_MMA_TILE; i += 32)
-        {
-            int m = i >> 4, n = i & 15;
-            smem_facc[i] += (float)smem_i32[i] * smem_dw[n] * smem_dact[m];
-        }
-        __syncwarp();
-    }
-
-    for (int i = lane; i < TS_MMA_TILE * TS_MMA_TILE; i += 32)
-    {
-        int m = i >> 4, n = i & 15;
-        if (m0 + m < rows && n0 + n < out_dim)
-            output[(size_t)(m0 + m) * out_dim + (n0 + n)] = smem_facc[i];
-    }
-#else
-    (void)weights; (void)xq; (void)output; (void)in_dim; (void)out_dim; (void)rows;
-#endif
-}
-
 // =====================================================================
-// ts_qk_norm_rope_neox_f32 ÔÇö Fused QK-RMSNorm + NeoX RoPE
+// ts_qk_norm_rope_neox_f32 — Fused QK-RMSNorm + NeoX RoPE
 // =====================================================================
 // Fuses per-head RMSNorm and NeoX rotary position embeddings into a
 // single kernel pass.  Eliminates the intermediate global-memory write
 // of the normalized Q/K tensor and the separate RoPE kernel launch.
 //
-// Grid:  (rows,)       ÔÇö one block per row (= seqLen * numHeads)
-// Block: (BlockSize,)  ÔÇö 256 threads
-// Shared: cols * sizeof(float)  ÔÇö for normalized values + RoPE rotation
+// Grid:  (rows,)       — one block per row (= seqLen * numHeads)
+// Block: (BlockSize,)  — 256 threads
+// Shared: cols * sizeof(float)  — for normalized values + RoPE rotation
 //
 // rows    = seqLen * numHeads  (or seqLen * kvHeads)
 // cols    = headDim            (must match rope_dims for full rotation)
 // rope_half = rope_dims / 2    (number of rotary pairs)
 // eps     = RMSNorm epsilon
 // rope_base, rope_freq_scale = RoPE frequency parameters
-// positions = int32 [rows]     ÔÇö token position for each row
+// positions = int32 [rows]     — token position for each row
 // =====================================================================
 extern "C" __global__ void ts_qk_norm_rope_neox_f32(
     float* data,
@@ -7305,7 +6861,7 @@ extern "C" __global__ void ts_qk_norm_rope_neox_f32(
 }
 
 // =====================================================================
-// ts_qwen35_gdn_fused_f32 ÔÇö Fused pack + GDN kernel
+// ts_qwen35_gdn_fused_f32 — Fused pack + GDN kernel
 // =====================================================================
 // Reads directly from raw projection buffers (qkv, z, beta, alpha)
 // instead of a pre-packed buffer.  Eliminates the separate

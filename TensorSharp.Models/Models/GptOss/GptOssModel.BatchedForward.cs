@@ -23,12 +23,10 @@
 //   - Per-layer paged K/V buffers (single kvDim — GptOss doesn't vary per layer)
 //   - Batched attention with sinks via ManagedPagedAttention.ForwardWithSinks
 //   - Batched MoE via MoEForward(numTokens) (matches Nemotron Phase 7 pattern)
-//   - Default ON; TS_GPTOSS_BATCHED=0 withdraws it for A/B comparison
 using System;
 using System.Collections.Generic;
 using TensorSharp;
 using TensorSharp.GGML;
-using TensorSharp.Models.Paged;
 using TensorSharp.Runtime.Paged;
 using TensorSharp.Runtime.Scheduling;
 
@@ -36,40 +34,21 @@ namespace TensorSharp.Models
 {
     public partial class GptOssModel : IBatchedPagedModel
     {
-        // Default ON. On GGML backends without tensor parallelism concurrent
-        // requests are served by the per-request KV holders and the
-        // token-batched fused decode (GptOssModel.PerSeqCache.cs), which do not
-        // read this switch. Elsewhere this batched paged-attention path is the
-        // only way two concurrent requests run truly in parallel: the legacy
-        // per-sequence fallback forwards at most one sequence per step, so a
-        // second request stalls until the first releases the executor.
-        // Correctness was previously validated against the legacy path by
-        // GptOssBatchedCorrectnessTests with TS_GPTOSS_BATCHED=1. Set
-        // TS_GPTOSS_BATCHED=0 (or "false") to force the legacy fallback for
-        // A/B comparison or to investigate a regression.
-        //
-        // Method getter (not static readonly) so tests can toggle after class
-        // load — a static readonly would capture the env var at class-init
-        // time, which is before tests get a chance to set it (same gotcha
-        // that bit Nemotron). Mirrors Qwen 3.5's pattern.
-        private static bool GptOssBatchedOptIn()
-        {
-            string raw = Environment.GetEnvironmentVariable("TS_GPTOSS_BATCHED");
-            if (string.IsNullOrEmpty(raw)) return true;
-            return raw != "0" && !string.Equals(raw, "false", StringComparison.OrdinalIgnoreCase);
-        }
+        // On GGML backends without tensor parallelism concurrent requests are
+        // served by the per-request KV holders and the token-batched fused decode
+        // (GptOssModel.PerSeqCache.cs). Elsewhere this batched paged-attention
+        // path is the only way two concurrent requests run truly in parallel: the
+        // per-sequence path forwards at most one sequence per step, so a second
+        // request stalls until the first releases the executor.
 
-        // GptOss is text-only (no vision/audio), so SupportsBatchedMultimodal
-        // is a non-issue — set to match the opt-in for symmetry with the other
-        // batched models.
-        public bool SupportsBatchedMultimodal => GptOssBatchedOptIn();
+        // GptOss is text-only (no vision/audio): nothing multimodal ever reaches it.
+        public bool SupportsBatchedMultimodal => true;
 
         /// <summary>Declared availability of the batched path (see
-        /// <see cref="IBatchedPagedModel.BatchedForwardAvailable"/>): follows
-        /// the <c>TS_GPTOSS_BATCHED</c> opt-out so <c>ExecutionPlanner</c>
-        /// routes to the per-seq fallback up front instead of via a
-        /// NotSupportedException round trip.</summary>
-        public bool BatchedForwardAvailable => GptOssBatchedOptIn() && !IsTensorParallel;
+        /// <see cref="IBatchedPagedModel.BatchedForwardAvailable"/>): not under tensor
+        /// parallelism, so <c>ExecutionPlanner</c> routes those runs to the per-seq
+        /// path up front.</summary>
+        public bool BatchedForwardAvailable => !IsTensorParallel;
 
         // Per-layer paged K/V buffers (vLLM block layout:
         // [numBlocks * blockSize * numKvHeads * headDim] per layer).
@@ -83,10 +62,6 @@ namespace TensorSharp.Models
             if (ctx == null) throw new ArgumentNullException(nameof(ctx));
             int numSeqs = ctx.Sequences.Count;
             if (numSeqs == 0) return Array.Empty<float[]>();
-
-            if (!GptOssBatchedOptIn())
-                throw new NotSupportedException(
-                    "GptOss batched: disabled (TS_GPTOSS_BATCHED=0 set, falling back to per-seq path).");
 
             int hidden = Config.HiddenSize;
             int numHeads = Config.NumHeads;
@@ -243,7 +218,7 @@ namespace TensorSharp.Models
             normed.Dispose();
 
             // NeoX RoPE + YaRN with per-token positions (passes the same YaRN
-            // params the legacy ApplyRoPEInPlace uses).
+            // params the single-sequence ApplyRoPEInPlace uses).
             qTensor = ApplyBatchedRoPE(qTensor, positionsTensorQ, numTokens, numHeads, headDim);
             kTensor = ApplyBatchedRoPE(kTensor, positionsTensorK, numTokens, numKvHeads, headDim);
 
@@ -256,20 +231,14 @@ namespace TensorSharp.Models
             kTensor.Dispose();
             vTensor.Dispose();
 
-            // Paged attention with sinks. Phase 9: prefer the native kernel
+            // Paged attention with sinks: the native kernel
             // (TSGgml_PagedAttentionForwardWithSinks → ggml_flash_attn_ext +
-            // ggml_flash_attn_ext_add_sinks on Metal/CUDA) when the GGML
-            // backend is active. Falls back to managed-C# online softmax with
-            // sinks on non-GGML backends (or by setting
-            // TS_GPTOSS_PAGED_ATTN_MANAGED=1 for A/B testing).
+            // ggml_flash_attn_ext_add_sinks on Metal/CUDA) on GGML backends,
+            // managed-C# online softmax with sinks elsewhere.
             float[] qFlat = qTensor.GetElementsAsFloat(numTokens * qDim);
             qTensor.Dispose();
             float[] attnFlat = new float[numTokens * qDim];
-            bool useNative = IsGgmlBackend
-                && !string.Equals(
-                    Environment.GetEnvironmentVariable("TS_GPTOSS_PAGED_ATTN_MANAGED"),
-                    "1", StringComparison.Ordinal);
-            if (useNative)
+            if (IsGgmlBackend)
             {
                 var (blockTableFlat, blockTableOffsets) = FlattenBlockTables(blockTables);
                 TensorSharp.GGML.GgmlBasicOps.PagedAttentionForwardWithSinks(
@@ -300,7 +269,7 @@ namespace TensorSharp.Models
             int numTokens, int numHeads, int headDim)
         {
             using var reshaped = data.View(1, numTokens, numHeads, headDim);
-            // YaRN params match the legacy ApplyRoPEInPlace: nDims=headDim,
+            // YaRN params match the single-sequence ApplyRoPEInPlace: nDims=headDim,
             // mode=2 (NeoX), origCtx=Config.OriginalContextLength, scale=1/RopeScale,
             // extFactor=1, attnFactor=1, betaFast=32, betaSlow=1.
             Tensor result = Ops.RoPEEx(
@@ -343,7 +312,7 @@ namespace TensorSharp.Models
         }
 
         /// <summary>True when the model can migrate a sequence's K/V history
-        /// from the legacy linear cache (where <c>Forward()</c> writes it)
+        /// from the linear cache (where <c>Forward()</c> writes it)
         /// into paged storage (where <c>ForwardBatch</c> reads from). Required
         /// so the N=1 fast path can hand off to the batched path when a
         /// second concurrent sequence arrives — without migration the batched

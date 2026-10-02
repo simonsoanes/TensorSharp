@@ -50,7 +50,12 @@ class Ffn(C.Structure):
     _fields_ = fields("hc_norm hc_down hc_up hc_inject router gate_exps up_exps down_exps "
                       "sh_gate_inp sh_gate sh_up sh_down",
                       "hc_down hc_up hc_inject router gate_exps up_exps down_exps sh_gate sh_up sh_down",
-                      "hc_down hc_up hc_inject router gate_exps up_exps down_exps sh_gate sh_up sh_down")
+                      "hc_down hc_up hc_inject router gate_exps up_exps down_exps sh_gate sh_up sh_down") + [("cpu_moe", I)]
+
+
+# TSGgmlQwen4ExpFfnArgs appends the host-expert flag after its type fields.
+# MTP keeps this zero; omitting it makes native code read beyond the descriptor.
+assert Ffn.cpu_moe.offset == 216 and C.sizeof(Ffn) == 224
 
 
 class Head(C.Structure):

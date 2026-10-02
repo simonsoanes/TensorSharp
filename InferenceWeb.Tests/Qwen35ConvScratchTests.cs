@@ -40,13 +40,7 @@ public class Qwen35ConvScratchTests
         string dir = Environment.GetEnvironmentVariable(EnvModelDir);
         string modelPath = dir == null ? null : TestGates.FindGguf(dir, ModelPattern);
         if (modelPath == null) { _output.WriteLine("no qwen3.5-9b model; skipping"); return; }
-        BackendType backend = (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "cpu")
-            .Trim().ToLowerInvariant() switch
-        {
-            "metal" => BackendType.GgmlMetal,
-            "cuda" => BackendType.GgmlCuda,
-            _ => BackendType.GgmlCpu,
-        };
+        BackendType backend = TestGates.PinnedGgmlBackend;
         if (backend is not (BackendType.GgmlMetal or BackendType.GgmlCuda))
         {
             _output.WriteLine($"{backend} has no whole-model decode; not applicable");

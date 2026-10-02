@@ -93,14 +93,14 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
 
     // ---- the engine itself -------------------------------------------------------------
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void TheFrameworkIsActuallyPresent()
     {
         Assert.True(_engine.IsAvailable, _engine.UnavailableReason);
         Assert.Null(_engine.UnavailableReason);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void EvaluatesAnExpressionAndExitsZero()
     {
         ExecutionResult result = Eval("const x = 6 * 7; console.log(x);");
@@ -112,7 +112,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Equal(_work, result.WorkingDirectory);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void RunsAScriptFromAFile()
     {
         Write("main.js", "console.log('from a file');\nconsole.log(__filename.endsWith('main.js'));\n");
@@ -121,7 +121,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Equal("from a file\ntrue\n", result.Stdout);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void ScriptsCanBeDisabledByPolicy()
     {
         ExecutionResult result = Eval("console.log(1)", Context(Policy(scripts: false)));
@@ -131,7 +131,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
 
     // ---- console -----------------------------------------------------------------------
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void ConsoleFormatsTheCommonCasesLikeNode()
     {
         Assert.Equal("plain string\n", Stdout("console.log('plain string')"));
@@ -144,7 +144,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Equal("a b\n", Stdout("console.log('a', 'b')"));
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void ConsoleErrorAndWarnGoToStandardError()
     {
         ExecutionResult result = Eval("console.log('out'); console.error('bad'); console.warn('careful');");
@@ -153,7 +153,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Equal("bad\ncareful\n", result.Stderr);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void OutputIsStreamedLineByLineToTheTap()
     {
         var lines = new List<string>();
@@ -164,7 +164,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
 
     // ---- errors ------------------------------------------------------------------------
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void AnUncaughtThrowExitsNonZeroWithANodeShapedStack()
     {
         Write("boom.js", "function inner() { throw new TypeError('exploded'); }\nfunction outer() { inner(); }\nouter();\n");
@@ -178,7 +178,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Contains("boom.js:1", result.Stderr, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void ThrowingANonErrorStillReports()
     {
         ExecutionResult result = Eval("throw 'just a string';");
@@ -186,7 +186,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Contains("just a string", result.Stderr, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void AnErrorInATimerEndsTheRun()
     {
         ExecutionResult result = Eval("setTimeout(() => { throw new Error('late'); }, 1);");
@@ -196,7 +196,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
 
     // ---- process -----------------------------------------------------------------------
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void ProcessArgvNamesNodeThenTheScriptThenTheArguments()
     {
         Write("args.js", "console.log(JSON.stringify(process.argv));");
@@ -210,7 +210,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Equal(new[] { "alpha", "beta" }, argv[2..]);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void ProcessEnvIsReadableAndComesBackOut()
     {
         var environment = new Dictionary<string, string> { ["GREETING"] = "hello", ["HOME"] = _work };
@@ -224,7 +224,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Equal("hello", result.Environment["GREETING"]);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void ProcessExitStopsTheScriptAndSetsTheStatus()
     {
         ExecutionResult result = Eval("console.log('before'); process.exit(3); console.log('after');");
@@ -234,7 +234,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.DoesNotContain("after", result.Stdout, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void ProcessExitFromATimerStopsTheLoop()
     {
         ExecutionResult result = Eval("setTimeout(() => process.exit(7), 1); setInterval(() => console.log('tick'), 5);");
@@ -242,7 +242,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.False(result.TimedOut);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void ProcessBasicsAreThere()
     {
         Assert.Equal("ios\n", Stdout("console.log(process.platform)"));
@@ -252,7 +252,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Equal("to stderr", result.Stderr);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void StandardInputIsReadable()
     {
         ExecutionResult result = Eval("console.log(process.stdin.read().trim().toUpperCase())",
@@ -263,7 +263,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
 
     // ---- fs ----------------------------------------------------------------------------
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void FileWritesInsideTheWorkRootSucceed()
     {
         ExecutionResult result = Eval(
@@ -278,7 +278,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Equal("hello again", File.ReadAllText(Path.Combine(_work, "note.txt")));
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void AWriteOutsideTheWorkRootIsRefusedWithThePolicysOwnWording()
     {
         string target = Path.Combine(_outside, "stolen.txt").Replace("\\", "/");
@@ -295,7 +295,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.False(File.Exists(Path.Combine(_outside, "stolen.txt")));
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void AReadOutsideTheWorkRootIsRefused()
     {
         File.WriteAllText(Path.Combine(_outside, "secret.txt"), "top secret");
@@ -310,7 +310,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.DoesNotContain("top secret", result.Stdout, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void ASymlinkPointingOutOfTheWorkspaceIsRefused()
     {
         File.WriteAllText(Path.Combine(_outside, "secret.txt"), "top secret");
@@ -331,7 +331,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Contains("exists=false", result.Stdout, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void ASymlinkedDirectoryCannotBeWrittenThrough()
     {
         string link = Path.Combine(_work, "out");
@@ -346,7 +346,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.False(File.Exists(Path.Combine(_outside, "planted.txt")));
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void DirectoriesAndStatsAndRemoval()
     {
         ExecutionResult result = Eval(
@@ -365,7 +365,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Equal("[\"a.txt\",\"b.txt\"]\n4 true false\ntrue\nfalse\n", result.Stdout);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void MissingFilesRaiseEnoent()
     {
         ExecutionResult result = Eval(
@@ -376,7 +376,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Contains("no such file or directory", result.Stdout, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void FsPromisesWork()
     {
         ExecutionResult result = Eval(
@@ -392,7 +392,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Equal("via promises\nrejected:ENOENT\n", result.Stdout);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void ReadingWithoutAnEncodingGivesABuffer()
     {
         ExecutionResult result = Eval(
@@ -407,7 +407,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
 
     // ---- path and os -------------------------------------------------------------------
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void PathBehavesLikeNodesPosixPath()
     {
         Assert.Equal("a/b/c\n", Stdout("const p=require('path'); console.log(p.join('a','b','c'))"));
@@ -428,7 +428,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Equal(_work + "/here\n", Stdout("const p=require('path'); console.log(p.resolve('here'))"));
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void OsReportsTheSandboxsOwnDirectories()
     {
         Assert.Equal("ios\n", Stdout("console.log(require('os').platform())"));
@@ -439,7 +439,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
 
     // ---- require -----------------------------------------------------------------------
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void RequireLoadsARelativeFileInACommonJsWrapper()
     {
         Write("lib/greet.js",
@@ -457,7 +457,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Equal("hello world\ntrue true\nundefined\n", result.Stdout);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void RequireResolvesWithoutAnExtensionAndCachesTheModule()
     {
         Write("counter.js", "let n = 0;\nmodule.exports = function () { return ++n; };\n");
@@ -472,7 +472,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Equal("true 1 2 3\n", result.Stdout);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void RequireLoadsAnIndexFileAndJson()
     {
         Write("pkg/index.js", "module.exports = { name: 'pkg' };\n");
@@ -484,7 +484,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Equal("pkg 42\n", result.Stdout);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void RequireOfAnNpmModuleSaysThisHostHasNoNpm()
     {
         ExecutionResult result = Eval("require('http');");
@@ -494,7 +494,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Contains("fs, path, os", result.Stderr, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void RequireOfAnUnknownPackageIsAlsoNamed()
     {
         ExecutionResult result = Eval("try { require('lodash'); } catch (e) { console.log(e.code, e.message); }");
@@ -503,7 +503,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Contains("lodash", result.Stdout, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void RequireOfAFileOutsideTheWorkspaceIsRefused()
     {
         File.WriteAllText(Path.Combine(_outside, "evil.js"), "module.exports = 'pwned';\n");
@@ -516,7 +516,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Equal("refused:EACCES\n", result.Stdout);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void AModuleThatThrowsPropagatesItsOwnError()
     {
         Write("bad.js", "throw new RangeError('module blew up');\n");
@@ -529,7 +529,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
 
     // ---- timers, microtasks, promises --------------------------------------------------
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void TimersRunInDeadlineOrderAfterTheSynchronousScript()
     {
         ExecutionResult result = Eval(
@@ -543,7 +543,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Equal("sync,t1,t20\n", result.Stdout);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void MicrotasksDrainBeforeTimers()
     {
         ExecutionResult result = Eval(
@@ -557,7 +557,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Equal("sync,promise,micro,timer\n", result.Stdout);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void AsyncAwaitAcrossATimerCompletes()
     {
         ExecutionResult result = Eval(
@@ -568,7 +568,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Equal("one\ntwo\n", result.Stdout);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void ClearTimeoutCancelsAndClearIntervalStops()
     {
         ExecutionResult result = Eval(
@@ -582,7 +582,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.DoesNotContain("SHOULD NOT RUN", result.Stdout, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void APromiseThatNeverSettlesEndsAtTheDeadlineInsteadOfHanging()
     {
         var clock = Stopwatch.StartNew();
@@ -600,7 +600,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
 
     // ---- the timeout, and whether a runaway loop is really stoppable --------------------
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void TheExecutionTimeLimitSymbolResolves()
     {
         // If this ever goes false on a future OS, the next test documents what the
@@ -614,7 +614,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
     /// calls nothing and never leaves optimized code, so nothing but a real
     /// interrupt can end it — which is exactly why it is the loop worth testing.
     /// </summary>
-    [Theory]
+    [AppleJavaScriptTheory]
     [InlineData("while (true) {}")]
     [InlineData("let n = 0; while (true) { n++; }")]
     [InlineData("while (true) { Math.sqrt(2); }")]
@@ -634,7 +634,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.DoesNotContain("cannot preempt", result.Stderr, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void ARunawayLoopInsideATimerIsAlsoStopped()
     {
         var clock = Stopwatch.StartNew();
@@ -647,7 +647,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.True(clock.Elapsed < TimeSpan.FromSeconds(2), $"took {clock.Elapsed}");
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void ARunawayLoopInsideARequiredModuleIsStopped()
     {
         Write("spin.js", "while (true) {}\n");
@@ -662,7 +662,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
 
     // ---- network -----------------------------------------------------------------------
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void FetchIsDefinedAndThrowsThePolicysNetworkMessageWhenTheNetworkIsOff()
     {
         ExecutionResult result = Eval(
@@ -673,7 +673,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Equal("function\n" + ExecutionPolicy.NetworkDisabledMessage + "\n", result.Stdout);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void AnAwaitedFetchRejectsWithTheSameSentence()
     {
         ExecutionResult result = Eval(
@@ -682,7 +682,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Equal("caught: " + ExecutionPolicy.NetworkDisabledMessage + "\n", result.Stdout);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void FetchExistsWhenTheNetworkIsOnButStillHonoursTheHostAllowList()
     {
         var policy = Policy(network: true) with { NetworkHosts = new[] { "example.com" } };
@@ -696,7 +696,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
 
     // ---- text, buffers, encodings ------------------------------------------------------
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void BufferAndTextEncoderCoverWhatScriptsUse()
     {
         Assert.Equal("aGVsbG8=\n", Stdout("console.log(Buffer.from('hello').toString('base64'))"));
@@ -710,7 +710,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
 
     // ---- syntax check ------------------------------------------------------------------
 
-    [Fact]
+    [AppleJavaScriptFact]
     public async Task SyntaxCheckPassesOnValidSource()
     {
         string path = Write("ok.js", "const a = 1;\nmodule.exports = a;\n");
@@ -719,7 +719,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Null(result.Message);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public async Task SyntaxCheckAcceptsATopLevelReturn()
     {
         // Legal in a CommonJS module, so `node --check` accepts it and so does this.
@@ -728,7 +728,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.True(result.Ok, result.Message);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public async Task SyntaxCheckReportsPathAndLine()
     {
         string path = Write("broken.js", "const a = 1;\nconst b = ;\nconst c = 3;\n");
@@ -741,7 +741,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
 
     // ---- output bounds -----------------------------------------------------------------
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void OutputIsCappedAtThePolicysLimit()
     {
         ExecutionResult result = Eval(
@@ -756,7 +756,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Contains("line 3999 ", result.Stdout, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void ACircularObjectPrintsSomethingRatherThanCrashing()
     {
         // JSON.stringify refuses a cycle; console.log must still come back.
@@ -765,7 +765,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.Contains("after", result.Stdout, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void AnErrorObjectPrintsItsNameMessageAndStack()
     {
         ExecutionResult result = Eval("function f(){ return new Error('inspect me'); } console.log(f());");
@@ -773,7 +773,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
         Assert.StartsWith("Error: inspect me\n    at ", result.Stdout, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void CancellingTheRunThrows()
     {
         using var cancellation = new CancellationTokenSource();
@@ -785,7 +785,7 @@ public sealed class JavaScriptCoreEngineTests : IDisposable
 
     // ---- isolation ---------------------------------------------------------------------
 
-    [Fact]
+    [AppleJavaScriptFact]
     public void EachRunGetsAFreshVirtualMachine()
     {
         Assert.Equal("undefined\n", Stdout("globalThis.leaked = 'x'; console.log(typeof globalThis.previous)"));

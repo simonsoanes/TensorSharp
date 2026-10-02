@@ -27,10 +27,23 @@ namespace TensorSharp.Models.QwenImage
             if (p.Steps < 0 || !float.IsFinite(p.CfgScale) || p.CfgScale < 0)
                 throw new ArgumentException("Steps and CFG must be finite and nonnegative (zero selects the model default).");
             foreach (var input in inputs) ArgumentNullException.ThrowIfNull(input);
+            var mask = QwenImageEditMask.Create(p, inputs.Length > 0 ? inputs[0] : null);
+            var (width, height) = ResolveDimensions(p, inputs.Length > 0 ? inputs[0] : null, _model.Backend);
+            if (mask?.IsEmpty == true)
+            {
+                Console.WriteLine("Qwen-Image-2.1: empty edit mask; returning the original image without inference.");
+                return mask.UnchangedCopy();
+            }
+            if (mask != null)
+            {
+                (width, height) = mask.SamplingDimensions(width, height);
+                // Keep every additional reference in its original coordinate system.
+                // The first reference supplies the masked canvas or selected crop.
+                inputs = (RgbImage[])inputs.Clone();
+                inputs[0] = mask.Reference;
+            }
             if (inputs.Length > 0 && _model.MmprojPath == null)
                 throw new InvalidOperationException("Qwen-Image-2.1 editing requires the Qwen3-VL-8B vision projector; set --qwen-image-mmproj or TS_QWEN_IMAGE_MMPROJ.");
-
-            var (width, height) = ResolveDimensions(p, inputs.Length > 0 ? inputs[0] : null, _model.Backend);
             // A LoRA plug-in's recipe (a step-distilled adapter's trained schedule) supplies
             // the defaults; explicit steps / CFG still win.
             var recipe = _model.Loras?.Recipe;
@@ -54,6 +67,9 @@ namespace TensorSharp.Models.QwenImage
                 phase.Restart();
             }
             Console.WriteLine($"Qwen-Image-2.1: {width}x{height}, {steps} steps, CFG {cfg}, seed {p.Seed}, {inputs.Length} reference(s)");
+            if (mask != null)
+                Console.WriteLine($"  [qwen21-mask] {p.MaskMode.ToString().ToLowerInvariant()}, canvas {mask.Source.Width}x{mask.Source.Height}, " +
+                    $"region {mask.X},{mask.Y},{mask.Width},{mask.Height}, feather {p.MaskFeather}; exact protected pixels");
             if (UsesHostCpuAutomaticSize(p, _model.Backend))
                 Console.WriteLine($"  automatic size on the cpu backend: {width}x{height} (about " +
                     $"{HostCpuAutomaticArea / (1024 * 1024)} MP). The native 2048x2048 area has four times the tokens and takes " +
@@ -67,6 +83,8 @@ namespace TensorSharp.Models.QwenImage
                 var refTokens = new float[inputs.Length][];
                 var refHeights = new int[inputs.Length];
                 var refWidths = new int[inputs.Length];
+                float[] sourceTokens = null;
+                float[] latentMask = mask?.LatentWeights(w, h);
                 for (int i = 0; i < inputs.Length; i++)
                 {
                     // Vision and VAE must see the SAME geometry: one image slot expands
@@ -77,6 +95,15 @@ namespace TensorSharp.Models.QwenImage
                     refHeights[i] = latent.Height;
                     refWidths[i] = latent.Width;
                     refTokens[i] = ToTokens(latent.Data, latent.Height, latent.Width);
+                    if (i == 0 && mask != null && !mask.IsFull && rw == width && rh == height)
+                        sourceTokens = refTokens[i];
+                }
+                if (mask != null && !mask.IsFull && sourceTokens == null)
+                {
+                    // Reference conditioning is capped at 1MP; flow reinjection needs the
+                    // canvas encoded at the ACTUAL sampling size, with the same crop transform.
+                    var encodedSource = Vae.Encode(ImageIO.Resize(mask.Reference, width, height));
+                    sourceTokens = ToTokens(encodedSource.Data, encodedSource.Height, encodedSource.Width);
                 }
                 if (refs.Length > 0) Phase("VAE encode");
 
@@ -99,6 +126,9 @@ namespace TensorSharp.Models.QwenImage
                 if (!_model.UsesGgml) GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: false);
 
                 float[] latents = ToTokens(QwenImage21Sampling.Noise(checked(sequence * 64), p.Seed), h, w);
+                float[] maskNoise = sourceTokens == null ? null : (float[])latents.Clone();
+                if (sourceTokens != null)
+                    QwenImageEditMask.Reinject(latents, sourceTokens, maskNoise, latentMask, sigmas[0]);
                 // Text and reference tokens are modulated at t=0, so their K/V are the
                 // same at every step: the first step stores them per CFG branch and the
                 // rest compute only the target image. Released before VAE decoding.
@@ -127,6 +157,8 @@ namespace TensorSharp.Models.QwenImage
                                 throw new InvalidOperationException($"Qwen-Image-2.1 produced a non-finite velocity at step {step + 1}.");
                             latents[j] += dt * velocity[j];
                         }
+                        if (sourceTokens != null)
+                            QwenImageEditMask.Reinject(latents, sourceTokens, maskNoise, latentMask, sigmas[step + 1]);
                         if (step == 0)
                         {
                             ReportPrefixCache(positiveCache, "conditional", Dit.TensorParallelRanks);
@@ -142,7 +174,14 @@ namespace TensorSharp.Models.QwenImage
                             // still contains noise at sigma_next; x0 = x_next -
                             // sigma_next * velocity is the denoised flow estimate.
                             // Keep the sampling state unchanged by the preview.
-                            try { preview = DecodePreview(QwenImage21Sampling.PreviewLatents(latents, velocity, sigmas[step + 1]), h, w); }
+                            try
+                            {
+                                var previewTokens = QwenImage21Sampling.PreviewLatents(latents, velocity, sigmas[step + 1]);
+                                if (sourceTokens != null)
+                                    QwenImageEditMask.Reinject(previewTokens, sourceTokens, maskNoise, latentMask, 0f);
+                                preview = DecodePreview(previewTokens, h, w);
+                                if (mask != null) preview = mask.Composite(preview);
+                            }
                             catch (Exception error) when (error is not OperationCanceledException)
                             {
                                 Console.WriteLine($"  [qwen21] preview decode skipped: {error.Message}");
@@ -163,6 +202,7 @@ namespace TensorSharp.Models.QwenImage
                 ReleaseComputeBuffers();
                 _dit?.ReleaseScratch();
                 var output = Vae.Decode(new VaeLatent(64, h, w, ToChannels(latents, h, w)));
+                if (mask != null) output = mask.Composite(output);
                 Phase("VAE decode");
                 Console.WriteLine($"  [qwen21-timing] total: {total.Elapsed.TotalSeconds:F3}s");
                 return output;

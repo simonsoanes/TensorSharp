@@ -93,7 +93,7 @@ namespace TensorSharp.Models
         // NeoX RoPE cos/sin lookup table cached across global layers.
         // The table depends only on (seqLen, startPos, freqs) which are
         // identical for all global layers in a forward pass, eliminating
-        // ~35M MathF.Cos/Sin calls per chunk (~700ms ÔåÆ ~5ms).
+        // ~35M MathF.Cos/Sin calls per chunk (~700ms → ~5ms).
         private float[] _neoXRopeCos, _neoXRopeSin;
         private int _neoXRopeCacheSeqLen, _neoXRopeCacheStartPos = -1;
         private float[] _neoXRopeCacheFreqs;
@@ -210,20 +210,18 @@ namespace TensorSharp.Models
         // ffn_down_exps.scale / ffn_gate_inp.per_expert_scale) into the
         // routing weights so the native kernel stays activation-agnostic.
         // Null entries mean the layer is either non-MoE or its expert weights
-        // aren't in a stacked layout (e.g. F32 fallback) and the legacy
+        // aren't in a stacked layout (e.g. F32 fallback) and the
         // batched-by-expert C# path is used instead.
         private StackedExpertWeights[] _layerStackedGate;
         private StackedExpertWeights[] _layerStackedUp;
         private StackedExpertWeights[] _layerStackedDown;
         private float[][] _layerPerExpertScale;
 
-        // On-device direct-CUDA MoE decode (TS_CUDA_MOE_ONDEVICE=0 to disable). Runs
-        // routing + the expert FFN entirely on the GPU so the MoE decode layer loop
-        // is CUDA-graph capturable (see TryCudaMoEForwardOnDevice / the ts_moe_*
-        // kernels). Per-layer device pointer tables address the resident per-expert
-        // gate_up / down weights by the on-device expert id.
-        private static readonly bool s_cudaMoeOnDeviceEnabled =
-            Environment.GetEnvironmentVariable("TS_CUDA_MOE_ONDEVICE") != "0";
+        // On-device direct-CUDA MoE decode. Runs routing + the expert FFN entirely
+        // on the GPU so the MoE decode layer loop is CUDA-graph capturable (see
+        // TryCudaMoEForwardOnDevice / the ts_moe_* kernels). Per-layer device pointer
+        // tables address the resident per-expert gate_up / down weights by the
+        // on-device expert id.
         private IntPtr[] _cudaMoEGateUpPtrTable;   // per layer: device u64[numExperts]
         private IntPtr[] _cudaMoEDownPtrTable;      // per layer: device u64[numExperts]
         private IntPtr[] _cudaMoEScalePtr;          // per layer: device f32[numExperts] or Zero
@@ -236,50 +234,33 @@ namespace TensorSharp.Models
         private bool _canUseFusedDecode;
         // Gates the model-wide single-graph decode kernel (NativeGemma4ModelDecode).
         // When any layer is MoE this stays false because the model-wide kernel has
-        // no MoE branch ÔÇö but per-layer fused prefill/decode (gated by
+        // no MoE branch — but per-layer fused prefill/decode (gated by
         // _canUseFusedDecode + HasMoE(l) at the call site) is still allowed for
         // the dense layers, recovering the speedup on the dense majority of an
         // MoE Gemma 4 model. Kept as a separate flag so a future MoE-aware
         // model-wide kernel can flip this on independently.
         private bool _canUseFusedFullModelDecode;
         // Gates the fused single-graph MoE-layer decode kernel
-        // (TSGgml_Gemma4MoELayerDecode). Disable via TS_GGML_MOE_FUSED_DECODE=0
-        // for A/B comparison against the per-op TransformerBlock path. Flipped
-        // off at runtime if the kernel ever throws (graceful degradation).
+        // (TSGgml_Gemma4MoELayerDecode). Flipped off at runtime if the kernel ever
+        // throws (graceful degradation), which leaves the per-op TransformerBlock path.
         // MoE CPU offload stays on this path too: both the per-layer kernel and
         // the whole-model graph below segment at the offloaded layers' routers so
         // the host multiplies those experts (see tsg::HostMoeSegment).
-        private bool _moeFusedDecodeEnabled =
-            Environment.GetEnvironmentVariable("TS_GGML_MOE_FUSED_DECODE") != "0";
+        private bool _moeFusedDecodeEnabled = true;
         // Model-wide MoE decode (TSGgml_Gemma4MoEModelDecode): runs the whole
         // transformer as ONE fused GGML graph per token instead of one graph per
         // layer, amortising the per-layer build/encode/sync that leaves the GPU
-        // idle (~60% util) for MoE Gemma 4. Disable via TS_GEMMA4_MOE_MODEL_DECODE=0.
+        // idle (~60% util) for MoE Gemma 4.
         // MoE CPU offload stays ON this path: the native graph is segmented at
         // each offloaded layer's router so the host multiplies those experts
         // while attention, norms, the dense FFN and the LM head keep running as
         // one fused graph (see tsg::HostMoeSegment).
-        private static readonly bool s_MoeModelDecodeEnabled =
-            Environment.GetEnvironmentVariable("TS_GEMMA4_MOE_MODEL_DECODE") != "0";
-
-        // Flash attention for the global-layer chunk-2+ (linear-cache) prefill path
-        // on GGML backends, replacing the materialized [numHeads, seqLen, kvLen]
-        // score-matrix path. TS_GEMMA4_FLASH_GLOBAL=0 forces the legacy materialized
-        // path (A/B / debugging). See FullAttention.
-        private static readonly bool _gemma4FlashGlobalChunk =
-            Environment.GetEnvironmentVariable("TS_GEMMA4_FLASH_GLOBAL") != "0";
-
-        // Read K/V straight from the F16 cache (no per-chunk F16->F32 dequant) in the
-        // global-chunk flash path. TS_GEMMA4_FLASH_F16KV=0 forces the F32-dequant
-        // path (A/B). See FullAttention.
-        private static readonly bool _gemma4FlashF16KV =
-            Environment.GetEnvironmentVariable("TS_GEMMA4_FLASH_F16KV") != "0";
         private bool _canUseFusedMoEModelDecode;
         private bool _moeModelDecodeChecked;
         private bool _moeModelDecodeDisabled;
         private Gemma4MoELayerDecodeArgs[] _moeModelArgs;
         // Model-wide MoE multi-token VERIFY (TSGgml_Gemma4MoEModelVerify): the MTP
-        // speculative verify batch (seqLen>1) as ONE fused graph ÔÇö the throughput
+        // speculative verify batch (seqLen>1) as ONE fused graph — the throughput
         // fix that makes spec pay off on MoE Gemma 4. Separate disable flag so a
         // verify-kernel issue degrades to the per-op verify without killing decode.
         private bool _moeModelVerifyDisabled;
@@ -298,80 +279,65 @@ namespace TensorSharp.Models
         // [1, _pleDim * numLayers] per-layer-input tensor for the same step
         // (computed via the same device get_rows on per_layer_token_embd).
         // When set, SubmitGreedyDecodeStep uses them instead of looking up
-        // host ints ÔÇö so the inference loop can queue step N+1's forward
+        // host ints — so the inference loop can queue step N+1's forward
         // BEFORE syncing step N's predicted token to host. See
         // SubmitGreedyDecodeStep below for details.
         private Tensor _pipelineNextInputHidden;
         private Tensor _pipelineNextPLE;
 
-        // Set by Attention() when the fused MLX QKV preprocess kernel ran
-        // (Q/K/V split + RMSNorm + Q/K NeoX RoPE in one Metal dispatch). The
-        // RoPE block further down then skips its own Q/K RoPE since the
-        // kernel already applied it. Reset at the start of every Attention
-        // call so it doesn't leak across layers.
-        private bool _attnFusedDecodePreprocessApplied;
         private static readonly int MlxEvalEveryNLayers = ResolveMlxEvalEveryNLayers();
         private static readonly int MlxLocalKvMaterializeInterval = ResolveMlxLocalKvMaterializeInterval();
-        private static readonly bool MlxEvalDecodeLayerBoundaries =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_GEMMA4_EVAL_DECODE_LAYER_BOUNDARIES"), "0", StringComparison.Ordinal);
-        private static readonly bool MlxBaselineSyncLayerEval =
-            string.Equals(Environment.GetEnvironmentVariable("TS_MLX_BASELINE_ASYNC_LAYER"), "1", StringComparison.Ordinal);
 
         public Gemma4VisionEncoder VisionEncoder => _visionEncoder;
         public Gemma4AudioEncoder AudioEncoder => _audioEncoder;
 
         private static int ResolveMlxEvalEveryNLayers()
         {
-            string env = Environment.GetEnvironmentVariable("TS_MLX_GEMMA4_EVAL_EVERY_N_LAYERS")
-                         ?? Environment.GetEnvironmentVariable("TS_MLX_EVAL_EVERY_N_LAYERS");
+            string env = Environment.GetEnvironmentVariable("TS_MLX_EVAL_EVERY_N_LAYERS");
             if (!string.IsNullOrWhiteSpace(env) && int.TryParse(env, out int v) && v >= 0)
                 return v;
-            // Phase 7: every 4 layers, kick MLX's accumulated graph via
-            // mlx_async_eval. Without this MLX builds the whole 42-layer
-            // dependency chain in lazy form and the GPU sits idle until the
-            // host-side host sync at LM-head triggers evaluation ÔÇö i.e.
-            // GPU/CPU work is serialized rather than overlapped. Periodic
-            // async_eval lets the GPU start the front half of the layer
-            // stack while the host is still queueing the back half.
+            // Every 4 layers, kick MLX's accumulated graph via mlx_async_eval.
+            // Without this MLX builds the whole 42-layer dependency chain in
+            // lazy form and the GPU sits idle until the host sync at the LM
+            // head triggers evaluation, i.e. GPU/CPU work is serialized rather
+            // than overlapped. Periodic async_eval lets the GPU start the front
+            // half of the layer stack while the host is still queueing the back
+            // half.
             //
             // Sweep on gemma-4-E4B Q8_0 (42 layers, 256 prefill / 128 decode):
-            //   N=0  (disabled)  ÔåÆ 41.87 ms/tok
-            //   N=3              ÔåÆ 40.03 ms/tok
-            //   N=4              ÔåÆ 39.19 ms/tok  ÔåÉ best
-            //   N=5              ÔåÆ 41.21 ms/tok
-            //   N=7              ÔåÆ 40.10 ms/tok
-            //   N=14             ÔåÆ 40.52 ms/tok
-            //   N=42 (once/tok)  ÔåÆ 42.82 ms/tok
+            //   N=0  (disabled)  -> 41.87 ms/tok
+            //   N=3              -> 40.03 ms/tok
+            //   N=4              -> 39.19 ms/tok  <- best
+            //   N=5              -> 41.21 ms/tok
+            //   N=7              -> 40.10 ms/tok
+            //   N=14             -> 40.52 ms/tok
+            //   N=42 (once/tok)  -> 42.82 ms/tok
             //
-            // Best win comes from NÔëê4 (~11 evals per token). Smaller N
-            // wastes dispatches; larger N leaves more of the stack
-            // un-pipelined. The pre-Phase-6 default was 8, then 0 because
-            // the kernels' tree reductions hid the pipelining gain; now
-            // with simdgroup-fast kernels the bottleneck shifts to CPU/GPU
-            // overlap and async_eval becomes a real win.
+            // N~4 (~11 evals per token) wins: smaller N wastes dispatches,
+            // larger N leaves more of the stack un-pipelined. The win needs the
+            // simdgroup-fast kernels: with tree reductions the kernels hid the
+            // pipelining gain and the bottleneck was not CPU/GPU overlap.
             return 4;
         }
 
         private static int ResolveMlxLocalKvMaterializeInterval()
         {
-            string env = Environment.GetEnvironmentVariable("TS_MLX_GEMMA4_LOCAL_KV_MATERIALIZE_INTERVAL")
-                         ?? Environment.GetEnvironmentVariable("TS_MLX_LOCAL_KV_MATERIALIZE_INTERVAL");
+            string env = Environment.GetEnvironmentVariable("TS_MLX_LOCAL_KV_MATERIALIZE_INTERVAL");
             if (!string.IsNullOrWhiteSpace(env) && int.TryParse(env, out int v) && v >= 0)
                 return v;
             // The materialize check fires whenever (startPos + 1 + layer) is a
             // multiple of this interval. Disabled by default for the standard
-            // <c>Forward</c> path used by the server engine ÔÇö the per-token
+            // <c>Forward</c> path used by the server engine: the per-token
             // LM-head host sync (<c>GetFloatPtr</c> on the logits tensor)
             // already materializes the K/V slice_update chain through the
             // attention dependency, so an additional periodic materialize
-            // is pure overhead. A sweep at interval Ôêê {0, 8, 32, 64, 128}
-            // showed interval=8 (previous default) costing ~1.5 ms/token
-            // vs. interval=0 with no observable benefit even at long
-            // decodes (256ÔÇô512 tokens). Re-enable via the env var when
-            // running the pipelined greedy decode path (<c>SubmitGreedyDecodeStep</c>),
-            // which only host-syncs a 1-int argmax per step and therefore
-            // does need a periodic graph drain to keep chain depth bounded
-            // ÔÇö a value of 128 is a reasonable starting point there.
+            // is pure overhead. A sweep at interval in {0, 8, 32, 64, 128}
+            // showed interval=8 costing ~1.5 ms/token vs. interval=0 with no
+            // observable benefit even at long decodes (256-512 tokens). Set
+            // the variable when running the pipelined greedy decode path
+            // (<c>SubmitGreedyDecodeStep</c>), which only host-syncs a 1-int
+            // argmax per step and therefore does need a periodic graph drain
+            // to keep chain depth bounded; 128 is a reasonable starting point.
             return 0;
         }
 
@@ -574,7 +540,7 @@ namespace TensorSharp.Models
         /// from the per-layer stacked-expert device buffer (one device copy per
         /// <c>*_exps</c> tensor, uploaded on first use and cached by host pointer).
         /// Giving each per-expert split view its own device copy as well would put a
-        /// second full copy of every expert in VRAM ÔÇö for the 26B-A4B that is an
+        /// second full copy of every expert in VRAM — for the 26B-A4B that is an
         /// extra ~12 GB and the cause of the load-time CUDA OOM. Skip them; the host
         /// view stays mapped so the rare per-op fallback can still reach the bytes.
         /// </summary>
@@ -912,7 +878,7 @@ namespace TensorSharp.Models
         // Grow the global-attention layers' KV cache to fit requiredSeqLen
         // (doubling, capped at _maxContextLength). SWA layers are left alone
         // because they wrap circularly within _slidingWindow and never need
-        // more storage. Donor-shared layers track their donor ÔÇö we only
+        // more storage. Donor-shared layers track their donor — we only
         // resize each underlying cache once and update the alias entries.
         private void EnsureCacheCapacity(int requiredSeqLen)
         {
@@ -953,7 +919,7 @@ namespace TensorSharp.Models
             for (int l = 0; l < Config.NumLayers; l++)
             {
                 if (_kvDonorMap.ContainsKey(l)) continue;
-                if (IsLocalLayer(l)) continue;          // SWA ÔÇö never grows
+                if (IsLocalLayer(l)) continue;          // SWA — never grows
                 if (!resized.Add(l)) continue;
 
                 int kvHeads = KVHeadsForLayer(l);
@@ -1010,7 +976,7 @@ namespace TensorSharp.Models
             // BuildGemma4DecodeArrays cached the K/V host pointers and capacity
             // for the fused per-layer / full-model decode kernels at model load
             // time. Those pointers refer to the storage we just disposed, so
-            // refresh them to the new tensors ÔÇö otherwise the next layer kernel
+            // refresh them to the new tensors — otherwise the next layer kernel
             // hands GGML a freed pointer and Metal reports "buffer is nil" for
             // every K/V-derived intermediate.
             RefreshDecodeArraysKvCache();
@@ -1130,9 +1096,9 @@ namespace TensorSharp.Models
         // were random text). Within the window the pooled snapshot is correct.
         //
         // MaxReusablePrefixTokens caps the POOLED path at the window. Reuse BEYOND the
-        // window is still achieved - correctly - via live-cache continuation
-        // (BatchExecutor.ComputeLiveContinuationLcp), which keeps the model's actual
-        // live cache between same-session turns instead of reconstructing it.
+        // window is still achieved - correctly - when the radix prefix cache continues the
+        // model's primary (live) cache between same-session turns instead of
+        // reconstructing it.
         public override bool SupportsCrossSequenceKvReuse => true;
 
         public override int MaxReusablePrefixTokens =>
@@ -1317,7 +1283,7 @@ namespace TensorSharp.Models
             // which costs ~25┬Ás per round-trip. Decode dispatches ~600 MLX
             // calls per token across 42 layers, so the per-call hand-off
             // dwarfs actual compute. Wrapping the whole forward in one Invoke
-            // moves ALL nested ops onto the worker thread ÔÇö they detect
+            // moves ALL nested ops onto the worker thread — they detect
             // IsOnWorkerThread and run inline, eliminating ~15 ms / token of
             // queue overhead. Other backends are unaffected.
             if (_backend == BackendType.Mlx && !MlxWorker.Shared.IsOnWorkerThread)
@@ -1338,14 +1304,9 @@ namespace TensorSharp.Models
 
             EnsureCacheCapacity(startPos + seqLen);
 
-            // The batched-vs-legacy comparison sets TS_GEMMA4_FORCE_UNFUSED=1 to make the
-            // legacy path fully deterministic (no fused layer prefill, no fused decode).
-            // This used to answer that by WRITING TS_FUSED_LAYER_PREFILL=0 into the
-            // process environment from inside a forward pass and never restoring it, so
-            // one Gemma 4 model asked to run unfused permanently disabled fused layer
-            // prefill for every other model in the process - including other
-            // architectures, and including after this model was disposed. It is a
-            // per-instance decision, so keep it on the instance.
+            // The batched-vs-per-op comparison sets ForceUnfused to make the per-op path
+            // fully deterministic (no fused layer prefill, no fused decode). It is a
+            // per-instance decision, so it lives on the instance.
             bool _g4ForceUnfused = ForceUnfused;
             if (_g4ForceUnfused)
                 useFusedDecode = false;
@@ -1388,7 +1349,7 @@ namespace TensorSharp.Models
             }
 
             // Whole-model multi-token prefill (one fused GGML graph for all
-            // layers, activations device-resident) ÔÇö see CanUseWholeModelPrefillVerify.
+            // layers, activations device-resident) — see CanUseWholeModelPrefillVerify.
             bool useWholeModelPrefill = CanUseWholeModelPrefillVerify(startPos, seqLen, exceptPositions);
 
             // When the dense verify will run and can gather PLE in-kernel, skip the
@@ -1421,7 +1382,7 @@ namespace TensorSharp.Models
             // Any multi-token forward (prefill) grows ggml-cuda's compute scratch
             // pool, which can move the device addresses baked into the persistent
             // CUDA-graph-captured decode graphs. Drop them so the next fused decode
-            // rebuilds + re-captures against the current pool ÔÇö otherwise replaying a
+            // rebuilds + re-captures against the current pool — otherwise replaying a
             // stale captured graph HANGS (spins on the host with the GPU idle). This
             // backstops the resets in PrefillWithoutLogits/ResetKVCache/BatchedForward
             // for any prefill that reaches Forward directly (e.g. the CLI's single
@@ -1439,7 +1400,7 @@ namespace TensorSharp.Models
             // cache on-device and keeps the whole token resident, exactly like the
             // dense useFusedDecode path. Without this predicate the guard below would
             // fall through and copy the ENTIRE KV cache device->host every decode
-            // token (~360 MB / ~40 ms over PCIe on the 26B-A4B) ÔÇö which dwarfed the
+            // token (~360 MB / ~40 ms over PCIe on the 26B-A4B) — which dwarfed the
             // ~11 ms fused decode and was the real bottleneck (decode stuck ~19 tok/s
             // even with the captured graph). Skipping it lifts decode toward the
             // kernel floor.
@@ -1494,7 +1455,7 @@ namespace TensorSharp.Models
                 // Whole MoE transformer ran as ONE fused GGML graph (one
                 // dispatch/sync this token instead of one per layer). When
                 // decodeFolded is true the graph also produced the logits (final
-                // norm + lm_head + softcap folded in) ÔåÆ the C# LM-head tail is
+                // norm + lm_head + softcap folded in) → the C# LM-head tail is
                 // skipped. _kvCacheHostDirty is set inside TryFusedMoEModelDecode.
                 // This branch is skipped (per-layer loop below runs) when the shape
                 // is unsupported or the model-wide kernel is disabled.
@@ -1508,7 +1469,7 @@ namespace TensorSharp.Models
                     EnsureKvCacheHostSynchronized();
 
                 // The dense verify (or fused decode) bailed after we skipped ComputePLE
-                // for the in-kernel gather (rare) ÔÇö compute the PLE now so the per-op
+                // for the in-kernel gather (rare) — compute the PLE now so the per-op
                 // path below has it. Only fires in that case: otherwise perLayerInputs
                 // was already computed (or _pleDim == 0).
                 if (perLayerInputs == null && _pleDim > 0)
@@ -1541,7 +1502,7 @@ namespace TensorSharp.Models
                 // donor's freshly-computed K/V to a host buffer so KV-shared
                 // layers see the full chunk's K/V rather than a partial rolling
                 // cache. Real-world prompts get a 45-50% speedup (chunked) over
-                // the per-op C# path. Set TS_FUSED_LAYER_PREFILL=0 to disable.
+                // the per-op C# path.
                 if (CanUseCudaDecodeGraph(seqLen, exceptPositions, _g4ForceUnfused))
                 {
                     hidden = RunCudaDecodeLayerLoop(hidden, startPos, ref perLayerInputs);
@@ -1677,7 +1638,7 @@ namespace TensorSharp.Models
         //
         // Standard Forward(int[]) builds the layer graph, then host-syncs the
         // [1, vocab] logits tensor (256K floats for gemma-4) at the LM head
-        // before returning. The sync drains all queued MLX kernels ÔÇö pure
+        // before returning. The sync drains all queued MLX kernels — pure
         // GPU-idle wait from the host's perspective, ~30+ ms per token on
         // gemma-4-E4B Q8_0.
         //
@@ -1688,7 +1649,7 @@ namespace TensorSharp.Models
         // that same int tensor. The caller (CLI inference loop) can submit
         // step N+1 BEFORE host-syncing step N's predicted int, so the LM
         // head + sync wait at the end of step N overlaps with step N+1's
-        // first kernels ÔÇö the textbook pipelined decode pattern that
+        // first kernels — the textbook pipelined decode pattern that
         // ollama's mlxrunner uses.
         //
         // Greedy only: top-K / temperature sampling still needs the full
@@ -1722,7 +1683,7 @@ namespace TensorSharp.Models
             {
                 // Begin path: starting from a host int (sampled from prefill
                 // logits via the CPU sampler). Drop any cached pipeline state
-                // ÔÇö we're re-seeding the chain.
+                // — we're re-seeding the chain.
                 if (_pipelineNextInputHidden != null) { _pipelineNextInputHidden.Dispose(); _pipelineNextInputHidden = null; }
                 if (_pipelineNextPLE != null) { _pipelineNextPLE.Dispose(); _pipelineNextPLE = null; }
 
@@ -1751,7 +1712,7 @@ namespace TensorSharp.Models
                     "Call with firstTokenForBegin set after prefill before any null-token continuations.");
             }
 
-            // Run the layer stack. Same shape as the decode path in Forward ÔÇö
+            // Run the layer stack. Same shape as the decode path in Forward —
             // no chunked prefill, no fused-layer-prefill (which only fires for
             // GGML anyway), no SWA prev-window gather (decode reads the rolling
             // cache directly).
@@ -1781,7 +1742,7 @@ namespace TensorSharp.Models
             if (_finalLogitSoftcap > 0f)
                 ApplyLogitSoftcap(logitsTensor);
 
-            // Device argmax ÔåÆ [1] int32. Stays on device ÔÇö this is the handle
+            // Device argmax → [1] int32. Stays on device — this is the handle
             // we return; the caller defers .GetElementsAsInt() until AFTER
             // submitting the next step.
             var deviceToken = new Tensor(_allocator, DType.Int32, 1);
@@ -1816,7 +1777,7 @@ namespace TensorSharp.Models
                 // Device path unsupported (no MLX, or non-quantized embedding
                 // table). Sync the token to host and rebuild via the standard
                 // path. This eats the pipeline win for THIS step but keeps
-                // correctness ÔÇö and is rare in practice for our supported
+                // correctness — and is rare in practice for our supported
                 // gemma-4 GGUFs (token_embd is always quantized).
                 int hostTok = deviceToken.GetElementsAsInt(1)[0];
                 nextHidden.Dispose();
@@ -1839,7 +1800,7 @@ namespace TensorSharp.Models
                 // deviceToken in the caller's loop would drain this implicitly,
                 // but an explicit async-eval gives MLX a chance to schedule
                 // and start the work before the host issues the next
-                // SubmitGreedyDecodeStep ÔÇö that's the pipeline overlap.
+                // SubmitGreedyDecodeStep — that's the pipeline overlap.
                 MlxFusedOps.TryAsyncEvaluate(_pipelineNextInputHidden);
                 if (_pipelineNextPLE != null)
                     MlxFusedOps.TryAsyncEvaluate(_pipelineNextPLE);
@@ -1853,7 +1814,7 @@ namespace TensorSharp.Models
 
         // Device-side equivalent of Embedding(int[]) for a single [1] int32
         // device tensor. Reuses MlxQuantizedOps.TryGetRowsQuantizedToFloat32
-        // ÔÇö same path Embedding(int[]) takes for MLX-quantized token_embd.
+        // — same path Embedding(int[]) takes for MLX-quantized token_embd.
         // Returns false (and leaves outHidden zero-initialized) if the
         // backend or weight type doesn't support a device get_rows.
         private bool TryComputeNextInputEmbeddingDevice(Tensor outHidden, Tensor deviceTokenInt)
@@ -1886,7 +1847,7 @@ namespace TensorSharp.Models
         // already-scaled hidden tensor for the projection. Returns the
         // combined [1, _pleDim * numLayers] tensor or null if PLE is
         // disabled or all paths fall back to host. Note: any failure
-        // here is fine ÔÇö the caller will fall back to host PLE on the
+        // here is fine — the caller will fall back to host PLE on the
         // next call.
         private Tensor ComputeNextPLEDevice(Tensor deviceTokenInt, Tensor hidden)
         {
@@ -1917,7 +1878,7 @@ namespace TensorSharp.Models
                 }
             }
 
-            // Projection branch ÔÇö same shape as ComputePLE.
+            // Projection branch — same shape as ComputePLE.
             Tensor pleProj = LinearForward(hidden, "per_layer_model_proj.weight");
             if (pleProj != null)
             {
@@ -1963,7 +1924,7 @@ namespace TensorSharp.Models
             // 2048 is the memory-safe ceiling for the full-attention score tensor
             // (~numHeads ├ù chunk ├ù totalKv ├ù 4B). We floor at it (not window*2) so a
             // single start_pos==0 chunk covers typical long prompts even on
-            // small-window models (e.g. E-series, window 512) ÔÇö that first chunk runs
+            // small-window models (e.g. E-series, window 512) — that first chunk runs
             // entirely through the fused whole-model verify kernel (one GGML graph),
             // whereas a smaller chunk would push the remainder into a start_pos>0
             // chunk that falls back to the per-op path. See CanUseWholeModelPrefillVerify.
@@ -2098,9 +2059,9 @@ namespace TensorSharp.Models
                 perLayerInputs = ComputePLE(tokens, hidden, seqLen);
 
             // Whole-model multi-token prefill (one fused GGML graph for all
-            // layers, activations device-resident) ÔÇö see CanUseWholeModelPrefillVerify.
+            // layers, activations device-resident) — see CanUseWholeModelPrefillVerify.
             bool useWholeModelPrefill = CanUseWholeModelPrefillVerify(startPos, seqLen, exceptPositions);
-            // All-MoE sibling (e.g. 26B-A4B) ÔÇö see CanUseWholeModelMoEPrefillVerify.
+            // All-MoE sibling (e.g. 26B-A4B) — see CanUseWholeModelMoEPrefillVerify.
             bool useWholeModelMoEPrefill = !useWholeModelPrefill
                 && CanUseWholeModelMoEPrefillVerify(startPos, seqLen, exceptPositions);
 
@@ -2269,9 +2230,7 @@ namespace TensorSharp.Models
                 exceptPositions != null ||
                 forceUnfused ||
                 _kvCacheK == null ||
-                _kvCacheV == null ||
-                !CudaPrefillGraphCache.Enabled ||
-                !CudaPrefillGraphCache.DecodeEnabled)
+                _kvCacheV == null)
             {
                 return false;
             }
@@ -2279,9 +2238,9 @@ namespace TensorSharp.Models
             // MoE layers are graphable only when the on-device MoE decode path is
             // active: it runs routing + the expert FFN as device kernels (no host
             // readback of the router logits, no host gather/scatter), so the whole
-            // decode layer loop can be captured. Without it (tables unavailable, or
-            // TS_CUDA_MOE_ONDEVICE=0) the host MoERoute sync is not capturable, so
-            // fall back to the per-op decode loop.
+            // decode layer loop can be captured. Without it (tables unavailable) the
+            // host MoERoute sync is not capturable, so fall back to the per-op decode
+            // loop.
             if (_numExperts > 0 && !AllMoELayersOnDeviceCapable())
                 return false;
 
@@ -2665,7 +2624,7 @@ namespace TensorSharp.Models
             {
                 // MoE Gemma 4 (e.g. gemma-4-26B-A4B) cannot use the model-wide
                 // single-graph decode kernel (NativeGemma4ModelDecode) because
-                // that kernel has no MoE branch ÔÇö it would need to embed a
+                // that kernel has no MoE branch — it would need to embed a
                 // ggml_mul_mat_id-based MoE FFN inside its giant graph. Until
                 // that lands, leave _canUseFusedFullModelDecode = false so the
                 // forward path falls back to the per-layer dispatch loop.
@@ -2675,7 +2634,7 @@ namespace TensorSharp.Models
                 // fused prefill / decode kernel (TSGgml_Gemma4LayerPrefill) is
                 // available to the dense layers in the model. The per-layer
                 // call site is guarded by !HasMoE(l), so MoE layers fall
-                // through to the C# TransformerBlock ÔÇö which now itself runs
+                // through to the C# TransformerBlock — which now itself runs
                 // the post-MoE-norm + residual add through the fused
                 // Gemma4MoEGEGLUResidual kernel rather than two extra device
                 // dispatches. Net effect: the dense majority of layers gets
@@ -2684,7 +2643,7 @@ namespace TensorSharp.Models
                 _canUseFusedFullModelDecode = false;
 
                 // The C# MoE / managed-attention fallback path mixes CPU loads
-                // / stores with device kernels ÔÇö for example the legacy
+                // / stores with device kernels — for example the
                 // per-expert FFNGelu loop in MoEForward builds `batchInput`
                 // via Buffer.MemoryCopy on the host pointer and then
                 // immediately dispatches FFNGelu on the device. The Metal
@@ -2719,7 +2678,7 @@ namespace TensorSharp.Models
             // and the following RMSNorm / attention op reads them on the GPU.
             // Under Metal async compute there is no host-write barrier, so that
             // GPU op can run against a stale device buffer and silently drop the
-            // prompt's contribution to the residual stream ÔÇö the model then emits
+            // prompt's contribution to the residual stream — the model then emits
             // coherent but off-topic text (e.g. defining a word lifted from the
             // prompt instead of answering it). This bites dense, non-KV-shared
             // builds such as gemma-4-12b-it whose global layers take the CPU-write
@@ -2733,7 +2692,7 @@ namespace TensorSharp.Models
             // Verify all *non-MoE* layers expose the quantized attention
             // projection weights the fused kernel needs. MoE layers are
             // dispatched via the C# TransformerBlock so they don't need the
-            // precomputed arrays ÔÇö the loop below leaves their Qkv slot at
+            // precomputed arrays — the loop below leaves their Qkv slot at
             // IntPtr.Zero and the per-layer call site bails on HasMoE(l)
             // before touching it.
             //
@@ -2741,7 +2700,7 @@ namespace TensorSharp.Models
             //   * fused  : attn_qkv.weight  (Q/K/V share one ggml type)
             //   * separate: attn_q + attn_k + attn_v.weight  (mixed-quant
             //     models such as UD-IQ2_M where Q/K/V carry different types
-            //     and cannot be fused ÔÇö the kernel runs three matmuls)
+            //     and cannot be fused — the kernel runs three matmuls)
             // Shared (KV-donor-following) layers only project Q. If a dense
             // layer is missing even the separate set, disable fused dispatch
             // entirely to keep the dispatch decision simple.
@@ -3019,11 +2978,9 @@ namespace TensorSharp.Models
         }
 
         // Default-on gate for folding the final-norm + lm_head (+ logit softcap)
-        // into the captured single-graph decode so the whole token ÔÇö including the
-        // 262K-vocab projection ÔÇö is one CUDA-graph replay (no separate per-token
-        // lm_head graph_compute + sync). Disable with TS_GEMMA4_FD_FOLD_LMHEAD=0.
-        private static readonly bool _fdFoldLmHead =
-            Environment.GetEnvironmentVariable("TS_GEMMA4_FD_FOLD_LMHEAD") != "0";
+        // into the captured single-graph decode so the whole token — including the
+        // 262K-vocab projection — is one CUDA-graph replay (no separate per-token
+        // lm_head graph_compute + sync).
 
         /// <summary>Lazily (re)allocate the vocab-sized logits buffer the folded
         /// fused-decode path writes into, and return it.</summary>
@@ -3098,7 +3055,7 @@ namespace TensorSharp.Models
             bool fold = false;
             IntPtr lmHeadKey = IntPtr.Zero; int lmHeadType = 0; long lmHeadNe0 = 0, lmHeadNe1 = 0, lmHeadBytes = 0;
             IntPtr finalNormPtr = IntPtr.Zero;
-            if (foldLogitsOut != null && _fdFoldLmHead
+            if (foldLogitsOut != null
                 && _weights.TryGetValue("output_norm.weight", out var finalNormT)
                 && _quantWeights.TryGetValue(_hasTiedOutput ? "token_embd.weight" : "output.weight", out var lmqw))
             {
@@ -3194,18 +3151,6 @@ namespace TensorSharp.Models
             return true;
         }
 
-        // Probed once per process: what the native token-batched decode kernel
-        // supports beyond its v1 scope. Set TS_GEMMA4_BATCHED_CAPS=0 to force the
-        // v1 gates (PLE / KV-donor / wrap models round-robin) for an A/B.
-        private static readonly Lazy<GgmlBasicOps.Gemma4BatchedDecodeCaps> s_batchedDecodeCaps = new(() =>
-        {
-            var env = Environment.GetEnvironmentVariable("TS_GEMMA4_BATCHED_CAPS");
-            if (env != null && int.TryParse(env, out int forced))
-                return (GgmlBasicOps.Gemma4BatchedDecodeCaps)forced;
-            return GgmlBasicOps.Gemma4BatchedDecodeCapabilities();
-        });
-        private static GgmlBasicOps.Gemma4BatchedDecodeCaps BatchedDecodeCaps => s_batchedDecodeCaps.Value;
-
         // Tests force collection after extracting the raw input pointer. A weak
         // reference observes the owner without extending its lifetime itself.
         internal Action<WeakReference<Storage>> BeforeBatchedDecodeNativeForTest { get; set; }
@@ -3240,18 +3185,14 @@ namespace TensorSharp.Models
         /// <summary>
         /// TRUE token-batched dense decode: decode one token for each of N
         /// concurrent sequences in ONE fused graph (one compute buffer, weights
-        /// loaded once) via <see cref="GgmlBasicOps.Gemma4ModelDecodeBatched"/>
-        /// (or its <c>Ex</c> form when the native build supports PLE / KV-donor /
-        /// SWA wrap, which the E2B/E4B family needs).
+        /// loaded once) via <see cref="GgmlBasicOps.Gemma4ModelDecodeBatched"/>,
+        /// which also covers what the E2B/E4B family needs (PLE dim 256, 18
+        /// shared-KV layers, and a 512-slot SWA ring that most chats outgrow).
         /// Each sequence decodes through its own per-request KV holder. Returns
         /// false (caller falls back to the round-robin per-seq path) when any
         /// precondition fails: dense fused-decode eligible, folded quantized lm_head
-        /// available, all holders present, every global
-        /// (linear) cache large enough for its sequence, and — for what the native
-        /// kernel reports it cannot do (<see cref="GgmlBasicOps.Gemma4BatchedDecodeCapabilities"/>,
-        /// e.g. an older native build) — no PLE, no KV-donor layers, no SWA wrap.
-        /// The E2B/E4B family needs all three: PLE dim 256, 18 shared-KV layers, and
-        /// a 512-slot SWA ring that most chats outgrow.
+        /// available, all holders present, and every global (linear) cache large
+        /// enough for its sequence.
         /// On success writes each sequence's logits into <paramref name="outLogits"/>
         /// and advances its holder length.
         /// </summary>
@@ -3263,14 +3204,7 @@ namespace TensorSharp.Models
             if (!IsGgmlBackend) return DeclineBatchedFusedDecode("requires a GGML backend");
             if (_decodeArrays == null || _fusedHolders == null)
                 return DeclineBatchedFusedDecode("decode descriptors or sequence caches are not initialized");
-            var batchedCaps = BatchedDecodeCaps;
             bool batchedPle = _pleDim != 0;
-            bool batchedKvDonor = _kvDonorMap.Count != 0;
-            if (batchedPle && (batchedCaps & GgmlBasicOps.Gemma4BatchedDecodeCaps.Ple) == 0)
-                return DeclineBatchedFusedDecode("native library lacks batched per-layer embeddings");
-            if (batchedKvDonor && (batchedCaps & GgmlBasicOps.Gemma4BatchedDecodeCaps.KvDonor) == 0)
-                return DeclineBatchedFusedDecode("native library lacks batched shared-KV layers");
-            bool batchedSwaWrap = (batchedCaps & GgmlBasicOps.Gemma4BatchedDecodeCaps.SwaWrap) != 0;
 
             // MoE vs dense: an all-MoE model (e.g. 26B-A4B) routes through the MoE
             // batched kernel; otherwise the dense one. Prime the lazy MoE flag.
@@ -3289,7 +3223,7 @@ namespace TensorSharp.Models
                 // The MoE batched-decode kernel (TSGgml_Gemma4MoEModelDecodeBatched)
                 // is functionally CORRECT (coherent output; it diverges from the
                 // single-stream greedy reference only via benign batched-vs-single FP
-                // differences that flip a discrete MoE-router expert pick ÔÇö inherent
+                // differences that flip a discrete MoE-router expert pick — inherent
                 // to batched MoE decode, as in llama.cpp). The blocker is PERFORMANCE
                 // on a 16GB card: the 26B (13.5GB) + resident experts leave no room
                 // for N KV holders + batched activations + the capture buffer, so it
@@ -3297,7 +3231,7 @@ namespace TensorSharp.Models
                 // (own-slot persist ~22, eager ~46 vs round-robin ~49 tok/s). A
                 // VRAM-frugal packed gallocr was tried (ran FAST, ~99 t/s = 2x
                 // round-robin) but produced GARBAGE under this fork's CUDA-graph
-                // capture ÔÇö gallocr slot-reuse is incompatible with the captured
+                // capture — gallocr slot-reuse is incompatible with the captured
                 // graph (own-slot works because it never reuses). So capture-safe =
                 // own-slot = too big for the 26B on 16GB. Would help only with more
                 // VRAM headroom or a unified-KV redesign.
@@ -3313,7 +3247,6 @@ namespace TensorSharp.Models
                 return DeclineBatchedFusedDecode("batch arrays must have the same length of at least two");
 
             // Folded quantized lm_head (this kernel requires the fold).
-            if (!_fdFoldLmHead) return DeclineBatchedFusedDecode("folded output projection is disabled");
             // The batched kernel takes only the FUSED gate_up weight. When the fusion
             // was declined to save the copy (see BuildGemma4DecodeArrays) there is no
             // such weight, so this path declines and the caller round-robins through
@@ -3336,13 +3269,11 @@ namespace TensorSharp.Models
                 if (!_fusedHolders.TryGetValue(requestIds[s], out holders[s]) || holders[s].K == null)
                     return DeclineBatchedFusedDecode("a requested sequence cache is unavailable");
 
-            // Ex2 uses each holder's real capacity/strides. Compact prefix clones
-            // can therefore batch with larger or independently grown caches,
-            // without expanding them or treating their buffers as equally sized.
-            // Older native libraries and the separate MoE ABI still require
-            // uniform capacities; retain the safe fallback for those libraries.
-            bool perSequenceCacheSizes = !isMoE
-                && (batchedCaps & GgmlBasicOps.Gemma4BatchedDecodeCaps.PerSequenceCacheSizes) != 0;
+            // The dense kernel uses each holder's real capacity/strides. Compact prefix
+            // clones can therefore batch with larger or independently grown caches,
+            // without expanding them or treating their buffers as equally sized. The
+            // separate MoE ABI still requires uniform capacities.
+            bool perSequenceCacheSizes = !isMoE;
             var cacheSize = holders[0].Sizes;
             var a = _decodeArrays;
             for (int s = 0; s < N; s++)
@@ -3351,17 +3282,15 @@ namespace TensorSharp.Models
                 for (int l = 0; l < numLayers; l++)
                 {
                     if (!perSequenceCacheSizes && hz[l] != cacheSize[l])
-                        return DeclineBatchedFusedDecode(isMoE
-                            ? "the MoE batched kernel requires uniform KV-cache capacities"
-                            : "unequal KV-cache capacities require the newer native per-sequence batched kernel; rebuild GgmlOps");
-                    if (positions[s] < 0 || (positions[s] >= hz[l] && !(batchedSwaWrap && a.IsLocal[l] != 0)))
+                        return DeclineBatchedFusedDecode("the MoE batched kernel requires uniform KV-cache capacities");
+                    if (positions[s] < 0 || (positions[s] >= hz[l] && a.IsLocal[l] == 0))
                         return DeclineBatchedFusedDecode("a sequence needs cache growth or unsupported sliding-window wrap");
                 }
             }
 
             // Canonicalise the sequence order by RequestId so the native persist
             // pool key (the SET of per-request KV caches) is STABLE across steps
-            // regardless of scheduler ordering ÔÇö required for CUDA-graph capture
+            // regardless of scheduler ordering — required for CUDA-graph capture
             // hits. We build everything in sorted order and un-permute the logits.
             var order = new int[N];
             for (int s = 0; s < N; s++) order[s] = s;
@@ -3471,15 +3400,10 @@ namespace TensorSharp.Models
                         lmqw.CacheKey, lmqw.GgmlType, lmqw.Ne0, lmqw.Ne1, lmqw.RawBytes,
                         finalNormPtr, _finalLogitSoftcap);
                 }
-                else if (batchedCaps != GgmlBasicOps.Gemma4BatchedDecodeCaps.None)
+                else
                 {
-                    // Native build with the extended kernel: KV-donor map + PLE +
-                    // SWA wrap are all handled in-graph. (A forced TS_GEMMA4_BATCHED_CAPS
-                    // against a native build without the entry declines instead of
-                    // throwing, exactly like a probe that reported None.)
-                    try
-                    {
-                    ok = GgmlBasicOps.Gemma4ModelDecodeBatchedEx(
+                    // KV-donor map + PLE + SWA wrap are all handled in-graph.
+                    ok = GgmlBasicOps.Gemma4ModelDecodeBatched(
                         (IntPtr)hiddenPtr, Config.HiddenSize, numLayers, N,
                         a.AttnNorm, a.Qkv, a.QNorm, a.KNorm,
                         a.O, a.PostAttnNorm,
@@ -3509,44 +3433,12 @@ namespace TensorSharp.Models
                         pleTableData, pleTableType, pleTableNe0, pleTableNe1, pleTableBytes,
                         pleIds,
                         pleProjWData, pleProjWType, pleProjWNe0, pleProjWNe1, pleProjWBytes,
-                        pleProjNormData, perSequenceCacheSizes: perSequenceCacheSizes);
-                    }
-                    catch (EntryPointNotFoundException)
-                    {
-                        ok = false;
-                    }
-                }
-                else
-                {
-                    // v1 native ABI (no PLE / KV-donor / wrap; the gates above
-                    // already guaranteed none of them is needed).
-                    ok = GgmlBasicOps.Gemma4ModelDecodeBatched(
-                        (IntPtr)hiddenPtr, Config.HiddenSize, numLayers, N,
-                        a.AttnNorm, a.Qkv, a.QNorm, a.KNorm,
-                        a.O, a.PostAttnNorm,
-                        a.FfnNorm, a.Gu, a.Down, a.PostFfnNorm,
-                        kCache, vCache,
-                        a.HeadDim, a.KvHeads, cacheSize, a.IsLocal,
-                        a.RopeBase, a.LayerScalar,
-                        a.QkvType, a.QkvNe0, a.QkvNe1, a.QkvBytes,
-                        a.OType, a.ONe0, a.ONe1, a.OBytes,
-                        a.GuType, a.GuNe0, a.GuNe1, a.GuBytes,
-                        a.DownType, a.DownNe0, a.DownNe1, a.DownBytes,
-                        Config.NumHeads, posSorted,
-                        Config.Eps, _slidingWindow,
-                        freqFactorsPtr, freqFactorsLen,
-                        a.RopeNDims,
-                        _kvCacheDtype.GgmlType(),
-                        a.K, a.KType, a.KNe0, a.KNe1, a.KBytes,
-                        a.V, a.VType, a.VNe0, a.VNe1, a.VBytes,
-                        (IntPtr)lp, vocab,
-                        lmqw.CacheKey, lmqw.GgmlType, lmqw.Ne0, lmqw.Ne1, lmqw.RawBytes,
-                        finalNormPtr, _finalLogitSoftcap);
+                        pleProjNormData);
                 }
             }
             pleRows?.Dispose();
 
-            if (!ok) return DeclineBatchedFusedDecode("native batched graph declined or its entry point is unavailable");
+            if (!ok) return DeclineBatchedFusedDecode("native batched graph declined");
 
             // Distribute per-seq logits (un-permute) and advance each holder.
             for (int s = 0; s < N; s++)
@@ -3570,18 +3462,16 @@ namespace TensorSharp.Models
         /// whole dense transformer over <paramref name="n"/> tokens at positions
         /// [<paramref name="startPos"/>, startPos+n) as ONE GGML graph (the
         /// multi-token sibling of <see cref="NativeGemma4ModelDecode"/>).
-        /// <paramref name="hidden"/> is [n, hidden_size] in/out ÔÇö on return it holds
+        /// <paramref name="hidden"/> is [n, hidden_size] in/out — on return it holds
         /// the layer-stack output (pre output_norm) for all n rows. Returns false
-        /// (caller falls back to the per-op path) when the native kernel declines ÔÇö
+        /// (caller falls back to the per-op path) when the native kernel declines —
         /// e.g. total length exceeds the SWA window so the circular cache has wrapped.
         /// </summary>
         /// <summary>True when the fused kernels can fold the output norm, the LM head
         /// and the logit softcap into their graph: a quantized output weight (tied
-        /// token_embd or output.weight) plus the F32 output_norm, and the fold not
-        /// switched off.</summary>
+        /// token_embd or output.weight) plus the F32 output_norm.</summary>
         private bool CanFoldLmHead
-            => _fdFoldLmHead
-               && _weights.ContainsKey("output_norm.weight")
+            => _weights.ContainsKey("output_norm.weight")
                && _quantWeights.TryGetValue(_hasTiedOutput ? "token_embd.weight" : "output.weight", out var lmqw)
                && lmqw.CacheKey != IntPtr.Zero
                && lmqw.Ne1 == Config.VocabSize          // the graph writes [vocab x N]
@@ -3751,21 +3641,10 @@ namespace TensorSharp.Models
                 System.Threading.Interlocked.Increment(ref _fusedMediaPrefillChunksAfterPrefix);
         }
 
-        // Gates the whole-model multi-token prefill path. Default on; set
-        // TS_G4_WHOLE_PREFILL=0 to force the per-op chunked path for A/B.
-        private static readonly bool s_wholeModelPrefillEnabled =
-            Environment.GetEnvironmentVariable("TS_G4_WHOLE_PREFILL") != "0";
-
-        // Route multimodal (image/audio) prefill through the fused whole-model
-        // verify kernel too, using its bidirectional-span mask. Default on; set
-        // TS_G4_MM_PREFILL=0 to keep multimodal on the per-op path for A/B.
-        private static readonly bool s_wholeModelMMPrefillEnabled =
-            Environment.GetEnvironmentVariable("TS_G4_MM_PREFILL") != "0";
-
-        /// <summary>This instance's TS_G4_MM_PREFILL: whether image/audio prefill chunks
-        /// may use the fused whole-model kernels. Tests switch it off to compare the
+        /// <summary>Whether image/audio prefill chunks may use the fused whole-model
+        /// kernels (their bidirectional-span mask). Tests switch it off to compare the
         /// per-op multimodal path against itself.</summary>
-        internal bool FusedMediaPrefillEnabled { get; set; } = s_wholeModelMMPrefillEnabled;
+        internal bool FusedMediaPrefillEnabled { get; set; } = true;
 
         // Allow the whole-model verify kernel to serve SWA-wrapped chunks at
         // start_pos>0 via its in-kernel swaPrev gather (the previous window is read
@@ -3773,19 +3652,13 @@ namespace TensorSharp.Models
         // the fresh chunk). This keeps long / multi-turn prefill on the fast 1-graph
         // on-device path instead of the per-op chunked tail (measured ~7.7x on a 43k
         // prompt). Without it, every chunk past the first (start_pos>0) whose SWA
-        // window has wrapped falls back to the slow per-op path. Default on; set
-        // TS_G4_VERIFY_SWAPREV=0 to force the per-op path for the wrapped tail.
-        private static readonly bool s_verifySwaPrevEnabled =
-            Environment.GetEnvironmentVariable("TS_G4_VERIFY_SWAPREV") != "0";
+        // window has wrapped falls back to the slow per-op path.
 
         // Gather the per-layer embeddings (PLE) INSIDE the fused verify/decode graph
         // via ggml_get_rows on the resident quantized per_layer_token_embd table,
         // instead of computing them in C# (on-device get_rows) and shuttling the
         // gathered per-layer embeddings device->host (GetFloatPtr sync) then
-        // host->device (kernel upload) every chunk/token. Default on; set
-        // TS_G4_PLE_IN_KERNEL=0 to revert to the uploaded path.
-        private static readonly bool s_pleInKernelEnabled =
-            Environment.GetEnvironmentVariable("TS_G4_PLE_IN_KERNEL") != "0";
+        // host->device (kernel upload) every chunk/token.
 
         /// <summary>Whether the in-kernel PLE gather is usable this run: GGML backend,
         /// a quantized per_layer_token_embd table whose type ggml's get_rows supports
@@ -3796,7 +3669,7 @@ namespace TensorSharp.Models
         /// result stays byte-exact.</summary>
         private bool CanGatherPleInKernel()
         {
-            if (!s_pleInKernelEnabled || !IsGgmlBackend || _pleDim <= 0) return false;
+            if (!IsGgmlBackend || _pleDim <= 0) return false;
             if (!_quantWeights.TryGetValue("per_layer_token_embd.weight", out var tok)
                 || !CanUseGgmlQuantizedGetRows(tok.GgmlType)
                 || tok.DevicePreloadTooLarge)
@@ -3820,15 +3693,15 @@ namespace TensorSharp.Models
         /// <summary>
         /// Whether a dense Gemma 4 prefill chunk can run through the fused
         /// whole-model multi-token kernel (<see cref="NativeGemma4ModelVerify"/>)
-        /// ÔÇö ONE GGML graph for all layers, activations device-resident. This
+        /// — ONE GGML graph for all layers, activations device-resident. This
         /// replaces the per-op dispatch loop whose ~90%-idle GPU (host round-trip
         /// per op) is the dominant CUDA prefill cost.
         ///
         /// Correctness invariant, per layer, for <c>totalSeqLen = startPos + seqLen</c>:
         ///   * Global (linear-cache) layers: <c>totalSeqLen &lt;= cacheSize</c> so the
-        ///     cache spans the whole sequence (pure causal ÔÇö what the kernel computes).
+        ///     cache spans the whole sequence (pure causal — what the kernel computes).
         ///   * SWA (local) layers: either <c>totalSeqLen &lt;= cacheSize</c> (window has
-        ///     NOT wrapped ÔåÆ pure causal over the cache), OR <c>startPos == 0</c> with
+        ///     NOT wrapped → pure causal over the cache), OR <c>startPos == 0</c> with
         ///     no shared-KV layers, in which case the kernel attends over the FRESH
         ///     chunk K/V (all N positions) with a sliding-window mask (its swaFresh
         ///     path), correct for any N. The start_pos==0 restriction holds because
@@ -3841,11 +3714,9 @@ namespace TensorSharp.Models
         /// </summary>
         private bool CanUseWholeModelPrefillVerify(int startPos, int seqLen, HashSet<int> exceptPositions)
         {
-            if (!s_wholeModelPrefillEnabled) return false;
             if (!IsGgmlBackend || seqLen <= 1) return false;
             // Multimodal (image/audio soft tokens): the kernel's bidirectional-span
-            // mask covers the chunk at any startPos (TS_G4_MM_PREFILL=0 keeps
-            // multimodal chunks on the per-op path for A/B).
+            // mask covers the chunk at any startPos.
             if (exceptPositions != null && !FusedMediaPrefillEnabled) return false;
             if (_decodeArrays == null || !_canUseFusedFullModelDecode) return false; // dense only (no MoE)
             if (FusedGraphRejectsKvDtype) return false;
@@ -3856,15 +3727,13 @@ namespace TensorSharp.Models
             // at start_pos>0 over [prev window ++ fresh chunk] where the prev window is
             // gathered in-kernel from the rolling cache before this chunk overwrites it
             // (swaPrev). Both cover non-shared (own K/V) and shared (KV-donor) SWA
-            // layers. swaPrev requires the kill-switch on; without it, start_pos>0
-            // SWA-wrapped chunks fall back to the per-op path.
-            bool swaWrapOk = startPos == 0 || s_verifySwaPrevEnabled;
+            // layers.
             var a = _decodeArrays;
             for (int l = 0; l < Config.NumLayers; l++)
             {
                 if (totalSeqLen <= a.CacheSize[l]) continue;       // no wrap / fits
                 bool isLocal = a.IsLocal[l] != 0;
-                if (!isLocal || !swaWrapOk) return false;          // global overflow, or SWA wrap with swaPrev disabled
+                if (!isLocal) return false;                        // global overflow
                 // Shared SWA layer: the kernel attends the donor's fresh full K/V (and,
                 // at start_pos>0, the donor's retained prev window), which only exist
                 // when the donor is a non-shared layer (computes its own K/V). A donor
@@ -3878,7 +3747,7 @@ namespace TensorSharp.Models
         /// <summary>
         /// Whether an all-MoE Gemma 4 prefill chunk (e.g. 26B-A4B) can run through
         /// the fused whole-model multi-token kernel <c>TSGgml_Gemma4MoEModelVerify</c>
-        /// (<see cref="TryFusedMoEModelVerify"/>) ÔÇö ONE GGML graph for all layers
+        /// (<see cref="TryFusedMoEModelVerify"/>) — ONE GGML graph for all layers
         /// (attention + dense FFN + in-graph-routed experts), activations
         /// device-resident, instead of the per-op dispatch loop whose ~90%-idle GPU
         /// (a host round-trip per op) is the dominant MoE CUDA prefill cost.
@@ -3887,10 +3756,10 @@ namespace TensorSharp.Models
         /// (local) layers read the circular window cache, which is only correct when
         /// the window has NOT wrapped. So the gate requires the strict no-wrap bound
         /// <c>startPos + seqLen &lt;= cacheSize[l]</c> for EVERY layer:
-        ///   * Global (linear cache): the cache spans the whole sequence ÔåÆ pure causal.
+        ///   * Global (linear cache): the cache spans the whole sequence → pure causal.
         ///   * SWA (local, cacheSize == slidingWindow): no wrap means the circular
         ///     cache holds every position so far, and because totalSeqLen &lt;= window
-        ///     each query's window covers its whole causal prefix ÔåÆ causal == windowed
+        ///     each query's window covers its whole causal prefix → causal == windowed
         ///     (the kernel's plain-causal mask is exact).
         /// Longer prompts / later chunks (totalSeqLen &gt; window) fall back to the
         /// per-op chunked path. Multimodal spans (exceptPositions) run through the
@@ -3899,12 +3768,11 @@ namespace TensorSharp.Models
         /// </summary>
         private bool CanUseWholeModelMoEPrefillVerify(int startPos, int seqLen, HashSet<int> exceptPositions)
         {
-            if (!s_wholeModelPrefillEnabled) return false;
             if (!IsGgmlBackend || seqLen <= 1) return false;
             // Multimodal bidirectional spans: the kernel's mask covers the chunk at
             // any startPos (mirrors the dense gate).
             if (exceptPositions != null && !FusedMediaPrefillEnabled) return false;
-            if (_moeModelVerifyDisabled || !s_MoeModelDecodeEnabled) return false;
+            if (_moeModelVerifyDisabled) return false;
             if (FusedGraphRejectsKvDtype) return false;
 
             // Mirror the fused MoE decode eligibility (all-MoE, no PLE, no KV donor,
@@ -3941,13 +3809,13 @@ namespace TensorSharp.Models
 
         /// <summary>
         /// Decode (seqLen == 1) one entire Gemma 4 MoE transformer block as a
-        /// single fused GGML graph: attention (norm ÔåÆ QKV ÔåÆ QK/V-norm ÔåÆ RoPE ÔåÆ
-        /// KV-cache write ÔåÆ flash attention ÔåÆ O-proj ÔåÆ post-attn-norm ÔåÆ residual)
+        /// single fused GGML graph: attention (norm → QKV → QK/V-norm → RoPE →
+        /// KV-cache write → flash attention → O-proj → post-attn-norm → residual)
         /// + dense shared FFN + in-graph-routed experts + post norms/residual.
         ///
         /// Replaces the ~18-20 per-op dispatches that the C# TransformerBlock
-        /// issues per MoE layer ÔÇö each of which allocates+frees a Metal buffer
-        /// and forces a queue synchronise ÔÇö with ONE device graph. This is the
+        /// issues per MoE layer — each of which allocates+frees a Metal buffer
+        /// and forces a queue synchronise — with ONE device graph. This is the
         /// dominant decode bottleneck for MoE Gemma 4 (attention runs on the CPU
         /// in the per-op path and grows with KV length). Returns false (caller
         /// falls back to TransformerBlock) when any required weight is missing or
@@ -4098,7 +3966,7 @@ namespace TensorSharp.Models
                 return false;
             }
             // The kernel writes K/V into the device-local cached buffer (bound
-            // with USAGE_COMPUTE), so the host copy is now stale ÔÇö mark dirty so
+            // with USAGE_COMPUTE), so the host copy is now stale — mark dirty so
             // any later host read of the cache syncs first (mirrors the fused
             // full-model decode path).
             _kvCacheHostDirty = true;
@@ -4106,7 +3974,7 @@ namespace TensorSharp.Models
         }
 
         /// <summary>Decode the ENTIRE MoE transformer as one fused GGML graph
-        /// (<c>TSGgml_Gemma4MoEModelDecode</c>) ÔÇö a single dispatch/sync per token
+        /// (<c>TSGgml_Gemma4MoEModelDecode</c>) — a single dispatch/sync per token
         /// instead of one per layer, which keeps the GPU saturated (the per-layer
         /// path leaves it idle in the inter-layer graph-build/encode gaps). Returns
         /// false (caller falls back to the per-layer loop) when the model shape
@@ -4121,7 +3989,7 @@ namespace TensorSharp.Models
         private bool WillUseFusedMoEModelDecode(int seqLen, HashSet<int> exceptPositions, Tensor perLayerInputs)
         {
             if (seqLen != 1 || exceptPositions != null || perLayerInputs != null) return false;
-            if (_moeModelDecodeDisabled || !s_MoeModelDecodeEnabled) return false;
+            if (_moeModelDecodeDisabled) return false;
             if (!_moeModelDecodeChecked)
             {
                 _moeModelDecodeChecked = true;
@@ -4136,7 +4004,7 @@ namespace TensorSharp.Models
         private unsafe bool TryFusedMoEModelDecode(Tensor hidden, int startPos, float[] foldLogitsOut, out bool folded)
         {
             folded = false;
-            if (_moeModelDecodeDisabled || !s_MoeModelDecodeEnabled) return false;
+            if (_moeModelDecodeDisabled) return false;
             if (!_moeModelDecodeChecked)
             {
                 _moeModelDecodeChecked = true;
@@ -4173,7 +4041,7 @@ namespace TensorSharp.Models
             bool doFold = false;
             IntPtr lmHeadKey = IntPtr.Zero; int lmHeadType = 0; long lmHeadNe0 = 0, lmHeadNe1 = 0, lmHeadBytes = 0;
             IntPtr finalNormPtr = IntPtr.Zero;
-            if (foldLogitsOut != null && _fdFoldLmHead
+            if (foldLogitsOut != null
                 && _weights.TryGetValue("output_norm.weight", out var finalNormT)
                 && _quantWeights.TryGetValue(_hasTiedOutput ? "token_embd.weight" : "output.weight", out var lmqw))
             {
@@ -4217,7 +4085,7 @@ namespace TensorSharp.Models
 
         /// <summary>Run the MTP speculative VERIFY batch (<paramref name="n"/> tokens
         /// at positions [<paramref name="startPos"/>, startPos+n)) for an all-MoE
-        /// model as ONE fused GGML graph (<c>TSGgml_Gemma4MoEModelVerify</c>) ÔÇö the
+        /// model as ONE fused GGML graph (<c>TSGgml_Gemma4MoEModelVerify</c>) — the
         /// multi-token sibling of <see cref="TryFusedMoEModelDecode"/>. On success
         /// <paramref name="hidden"/> holds the per-row layer-stack output (pre
         /// output_norm). Returns false (caller falls back to the per-op verify) when
@@ -4225,7 +4093,7 @@ namespace TensorSharp.Models
         /// too small for the sequence, or the kernel throws.</summary>
         private unsafe bool TryFusedMoEModelVerify(Tensor hidden, int startPos, int n, HashSet<int> exceptPositions = null)
         {
-            if (_moeModelVerifyDisabled || !s_MoeModelDecodeEnabled) return false;
+            if (_moeModelVerifyDisabled) return false;
             if (!_moeModelDecodeChecked)
             {
                 _moeModelDecodeChecked = true;
@@ -4337,7 +4205,7 @@ namespace TensorSharp.Models
 
             // Correctness guard: the fused per-layer prefill kernel
             // (TSGgml_Gemma4LayerPrefill) miscomputes sliding-window attention for
-            // SWA (local) layers once the sequence reaches past the window ÔÇö query
+            // SWA (local) layers once the sequence reaches past the window — query
             // positions p >= slidingWindow must have their early keys masked out,
             // and the fused kernel's windowed path corrupts the hidden state, so
             // the model emits garbage for any prompt longer than the window.
@@ -4354,9 +4222,9 @@ namespace TensorSharp.Models
             // Keep multi-token prefill (seqLen > 1) entirely on the per-op path
             // (TransformerBlock -> FusedPrefillAttention, which masks the window
             // correctly and is verified correct at every length). Single-token
-            // decode (seqLen == 1) is unaffected ÔÇö it is served by the fused
+            // decode (seqLen == 1) is unaffected — it is served by the fused
             // full-model decode kernel (NativeGemma4ModelDecode) over the circular
-            // cache, never this per-layer prefill path ÔÇö so generation speed is
+            // cache, never this per-layer prefill path — so generation speed is
             // unchanged; only multi-token prefill loses the per-layer graph fusion.
             if (seqLen > 1)
                 return false;
@@ -4709,13 +4577,6 @@ namespace TensorSharp.Models
 
         #endregion
 
-        // Escape hatch for the fused Q8 matmul+GeluMul per-layer-embedding gate on
-        // MLX (TS_MLX_FUSED_PLE_GATE=0 falls back to the unfused op chain). Read
-        // once: this sits in the per-layer decode path, so an env lookup here
-        // would run NumLayers times per token.
-        private static readonly bool MlxFusedPleGateEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_FUSED_PLE_GATE"), "0", StringComparison.Ordinal);
-
         private bool HasMoE(int layer)
         {
             if (_numExperts == 0) return false;
@@ -4735,18 +4596,13 @@ namespace TensorSharp.Models
 
         /// <summary>
         /// Force the fully unfused (and therefore fully deterministic) path for this
-        /// model instance: no fused layer prefill, no fused decode. Read per forward
-        /// because the batched-vs-legacy comparison flips it between two calls on the
-        /// same instance; it is one environment read per forward, off the per-token
-        /// kernel path.
+        /// model instance: no fused layer prefill, no fused decode. Tests set it to
+        /// compare the batched path against the per-op one; it is read per forward.
         /// </summary>
-        private static bool ForceUnfused =>
-            Environment.GetEnvironmentVariable("TS_GEMMA4_FORCE_UNFUSED") == "1";
+        internal bool ForceUnfused { get; set; }
 
-        /// <summary>Fused layer prefill, unless this instance was forced unfused or the
-        /// operator disabled it with TS_FUSED_LAYER_PREFILL=0.</summary>
-        private static bool UseFusedLayerPrefill =>
-            !ForceUnfused && Environment.GetEnvironmentVariable("TS_FUSED_LAYER_PREFILL") != "0";
+        /// <summary>Fused layer prefill, unless this instance was forced unfused.</summary>
+        private bool UseFusedLayerPrefill => !ForceUnfused;
 
         private Tensor TransformerBlock(Tensor hidden, int layer, int seqLen, int startPos,
             bool isShared, Tensor perLayerInput, HashSet<int> exceptPositions = null)
@@ -4813,10 +4669,10 @@ namespace TensorSharp.Models
                     postMoeNormKey = $"{prefix}.ffn_post_norm_2.weight";
 
                 // Try the residual-fused MoE GEGLU kernel: one dispatch performs
-                // moe_ffn(...) ÔåÆ rms_norm(post_norm_2) ÔåÆ add into mlpOut. This
+                // moe_ffn(...) → rms_norm(post_norm_2) → add into mlpOut. This
                 // collapses three device dispatches (MoEForward + RMSNorm +
                 // Add) into one, mirroring Qwen 3.5's MoEExpertsSwiGLUResidual
-                // pattern. Falls back to the legacy split path when the
+                // pattern. Falls back to the unfused split path when the
                 // stacked expert weights aren't built (e.g. F32-only model)
                 // or when the kernel rejects the layout.
                 // Direct-CUDA decode: fully on-device MoE (routing + expert FFN) so
@@ -4864,48 +4720,15 @@ namespace TensorSharp.Models
                     postFfnNormKey = $"{prefix}.ffn_post_norm.weight";
 
 
-                // Single-closure FFN: pre-norm + gate_up matmul + GeluMulSplit
-                // + down matmul + post-norm + residual add all in one
-                // mlx_closure_apply via mlx_compile. Implemented to test the
-                // hypothesis that bundling 4 separate MLX ops into one
-                // compiled closure would skip per-op graph-build overhead
-                // and improve decode throughput. **Result: neutral-to-slightly
-                // negative.** On Gemma 4 E4B Q8_0, decode best went from
-                // 52.76 ms/tok (per-op path) to 53.33 ms/tok (fused
-                // closure) ÔÇö mlx_compile fuses adjacent element-wise ops
-                // but can't fuse matmuls, so the dominant per-op cost
-                // (graph-build for each quantized_matmul kernel) is paid
-                // either way; the closure's own apply-time bookkeeping
-                // ate the small theoretical saving.
-                //
-                // Kept committed (gated off by default) for future
-                // benchmarking on larger models or non-Q8_0 quant paths
-                // where the trade may be different. Set TS_MLX_FUSED_FFN=1
-                // to engage.
-                bool fusedFFNDone = false;
-                if (seqLen == 1
-                    && _backend == BackendType.Mlx
-                    && string.Equals(Environment.GetEnvironmentVariable("TS_MLX_FUSED_FFN"), "1", StringComparison.Ordinal)
-                    && TryFusedDenseFFNDecode(attnOut, prefix, postFfnNormKey))
-                {
-                    // attnOut now holds (residual + post_norm(ffn_out)). It
-                    // is the layer's running residual stream and matches the
-                    // shape of the per-op result below.
-                    fusedFFNDone = true;
-                }
+                var ffnOut = FFNGeluWithOptionalNorm(attnOut, $"{prefix}.ffn_norm.weight",
+                    $"{prefix}.ffn_gate_up.weight", $"{prefix}.ffn_down.weight", seqLen);
 
-                if (!fusedFFNDone)
+                if (!TryRmsNormAddInPlaceMlx(attnOut, ffnOut, postFfnNormKey))
                 {
-                    var ffnOut = FFNGeluWithOptionalNorm(attnOut, $"{prefix}.ffn_norm.weight",
-                        $"{prefix}.ffn_gate_up.weight", $"{prefix}.ffn_down.weight", seqLen);
-
-                    if (!TryRmsNormAddInPlaceMlx(attnOut, ffnOut, postFfnNormKey))
-                    {
-                        Ops.RMSNorm(ffnOut, ffnOut, _weights[postFfnNormKey], null, Config.Eps);
-                        Ops.Add(attnOut, attnOut, ffnOut);
-                    }
-                    ffnOut.Dispose();
+                    Ops.RMSNorm(ffnOut, ffnOut, _weights[postFfnNormKey], null, Config.Eps);
+                    Ops.Add(attnOut, attnOut, ffnOut);
                 }
+                ffnOut.Dispose();
                 result = attnOut;
             }
 
@@ -4930,8 +4753,7 @@ namespace TensorSharp.Models
                     && perLayerInput.ElementCount() == inpGateQw.Ne1)
                 {
                     var fusedGate = new Tensor(_allocator, DType.Float32, 1, (int)inpGateQw.Ne1);
-                    if (MlxFusedPleGateEnabled
-                        && MlxQuantizedOps.TryFusedQ8MatmulGeluMul(
+                    if (MlxQuantizedOps.TryFusedQ8MatmulGeluMul(
                             fusedGate, result, perLayerInput,
                             inpGateQw.EnsureDeviceCacheKey(), inpGateQw.Data,
                             inpGateQw.GgmlType, inpGateQw.Ne0, inpGateQw.Ne1, inpGateQw.RawBytes))
@@ -4994,7 +4816,7 @@ namespace TensorSharp.Models
             _cudaMoETablesReady = true;
             _cudaMoEUsable = false;
 
-            if (_backend != BackendType.Cuda || !s_cudaMoeOnDeviceEnabled
+            if (_backend != BackendType.Cuda
                 || _numExperts <= 0 || _allocator is not CudaAllocator cudaAllocator)
                 return;
 
@@ -5245,7 +5067,7 @@ namespace TensorSharp.Models
             // dominant MoE decode bottleneck (sequential per-token / per-
             // selected-expert FFNs). Gated by IsGgmlBackend + availability of
             // stacked expert weights (built at load time for quantized MoE
-            // tensors; F32-only models fall through to the legacy path).
+            // tensors; F32-only models fall through to the per-expert path).
             // _layerStackedUp is null when the GGUF ships a pre-fused
             // ffn_gate_up_exps.weight; in that case the kernel handles the
             // split internally.
@@ -5261,7 +5083,7 @@ namespace TensorSharp.Models
                 }
             }
 
-            // Legacy batched-by-expert fallback (still better than per-token
+            // Batched-by-expert fallback (still better than per-token
             // per-expert matmuls: at most numExperts batched matmuls per
             // MoE layer).
             Ops.Fill(output, 0f);
@@ -5361,7 +5183,7 @@ namespace TensorSharp.Models
         /// single graph dispatch per MoE layer (3 <c>ggml_mul_mat_id</c> ops
         /// plus the GEGLU fused-op + expert aggregation) regardless of token
         /// count, which is especially valuable on the decode path where
-        /// <paramref name="seqLen"/> = 1 and the legacy batched path
+        /// <paramref name="seqLen"/> = 1 and the batched-by-expert path
         /// degenerates into <see cref="_numExpertsUsed"/> single-row matmuls.
         /// </summary>
         /// <remarks>
@@ -5412,7 +5234,7 @@ namespace TensorSharp.Models
             // moeInput is the output of RMSNormOp(hiddenState, moeNormKey) and
             // is guaranteed Float32 + contiguous. If a future refactor ever
             // changes that invariant, the NotSupportedException catch below
-            // falls the call back to the legacy batched path.
+            // falls the call back to the batched-by-expert path.
             // For the pre-fused gate_up layout pass IntPtr.Zero + zeros for the
             // up weight metadata; the native kernel uses that as the signal
             // to consume gateW as a 2*n_ff block and skip the second matmul.
@@ -5583,10 +5405,10 @@ namespace TensorSharp.Models
         /// On success <paramref name="residual"/> already contains
         /// <c>residual + rms_norm(moe_ffn(hiddenState), eps) * post_norm_w</c>
         /// and the caller proceeds directly to the post-FFN norm. On failure
-        /// the caller falls back to the legacy 3-dispatch sequence.
+        /// the caller falls back to the 3-dispatch sequence.
         /// </summary>
         /// <param name="hiddenState">Attention residual (input to the MoE block).</param>
-        /// <param name="residual">Dense FFN output (post_ffw_norm_1) ÔÇö written in place.</param>
+        /// <param name="residual">Dense FFN output (post_ffw_norm_1) — written in place.</param>
         /// <param name="layer">Layer index for weight lookup.</param>
         /// <param name="prefix">"blk.{layer}" prefix for tensor lookup.</param>
         /// <param name="seqLen">Number of tokens in the chunk (1 for decode).</param>
@@ -5604,7 +5426,7 @@ namespace TensorSharp.Models
 
             // Same gating as TryMoEFusedGEGLU: requires the GGML backend and
             // the stacked-experts cache populated by CacheMoEStackedWeights.
-            // Falls back to the legacy split path on any miss so quantization
+            // Falls back to the unfused split path on any miss so quantization
             // / weight-layout edge cases don't degrade correctness.
             if (!IsGgmlBackend
                 || _layerStackedGate == null
@@ -6056,7 +5878,7 @@ namespace TensorSharp.Models
             // graph, keeping the large [tokens, 2┬Àintermediate] activation on-device
             // (the dominant prefill cost on GGML CUDA). Returns the FFN output; the
             // caller applies Gemma's post_ffw_norm + residual add. Covers both the
-            // batched (server, dense layers) and legacy/per-seq (CLI, MoE-fallback
+            // batched (server, dense layers) and per-sequence (CLI, MoE-fallback
             // dense layers) paths since both route through here.
             var fusedProj = TryFusedDenseFFNProject(input, normWeightName, gateUpWeightName, downWeightName, actType: 1);
             if (fusedProj != null)
@@ -6117,7 +5939,7 @@ namespace TensorSharp.Models
             {
                 BackendType.Mlx => MlxFusedOps.TryRmsNormAddInPlace(residual, input, normW, Config.Eps),
                 BackendType.Cuda => CudaFusedOps.TryRmsNormResidualAdd(residual, input, normW, Config.Eps),
-                BackendType.GgmlCuda or BackendType.GgmlMetal or BackendType.GgmlCpu when _ggmlFusedNormAdd
+                BackendType.GgmlCuda or BackendType.GgmlMetal or BackendType.GgmlCpu
                     => TryGgmlRmsNormResidualAdd(residual, input, normW),
                 _ => false,
             };
@@ -6125,11 +5947,8 @@ namespace TensorSharp.Models
 
         // GGML fused RMSNorm + residual add (residual += rms_norm(input, normW)).
         // Collapses the Ops.RMSNorm + Ops.Add pair at Gemma's 3 post-norm-add sites
-        // per layer into one dispatch. TS_GGML_FUSED_NORM_ADD=0 forces the unfused
-        // pair (A/B). try/catch keeps the Try-semantics: any unsupported layout
-        // falls back to the per-op path.
-        private static readonly bool _ggmlFusedNormAdd =
-            Environment.GetEnvironmentVariable("TS_GGML_FUSED_NORM_ADD") != "0";
+        // per layer into one dispatch. try/catch keeps the Try-semantics: any
+        // unsupported layout falls back to the per-op path.
 
         private bool TryGgmlRmsNormResidualAdd(Tensor residual, Tensor input, Tensor normW)
         {
@@ -6154,9 +5973,9 @@ namespace TensorSharp.Models
         // unfused PLE; all 16 backend tests pass) and ~+7% at moderate context (8K).
         // Kept off by default as a precaution: during testing an intermittent
         // cudaErrorInitializationError appeared on the engine worker thread at long
-        // context (16K, near GPU capacity). It is NOT root-caused to this kernel ÔÇö it
+        // context (16K, near GPU capacity). It is NOT root-caused to this kernel — it
         // also reproduces with this flag OFF and disappears when the GPU is idle, so it
-        // looks like memory-pressure / driver-state flakiness rather than a bug here ÔÇö
+        // looks like memory-pressure / driver-state flakiness rather than a bug here —
         // but until it's confirmed clean on a fresh environment we don't expose the
         // server path to even a possible aggravation for a small gain. Enable it for
         // moderate-context workloads where it's a stable win.
@@ -6205,15 +6024,13 @@ namespace TensorSharp.Models
         {
             if (_backend != BackendType.Mlx || MlxEvalEveryNLayers <= 0)
                 return;
-            if (seqLen == 1 && !MlxEvalDecodeLayerBoundaries)
-                return;
             if ((layer + 1) % MlxEvalEveryNLayers != 0 && layer + 1 != Config.NumLayers)
                 return;
 
             // Async at intermediate boundaries lets Metal keep issuing the next
             // layer's commands while earlier graphs are still completing.
             // The final layer must sync because the LM head reads hidden on host.
-            if (MlxBaselineSyncLayerEval || layer + 1 == Config.NumLayers)
+            if (layer + 1 == Config.NumLayers)
                 MlxFusedOps.TryEvaluate(hidden);
             else
                 MlxFusedOps.TryAsyncEvaluate(hidden);
@@ -6368,7 +6185,6 @@ namespace TensorSharp.Models
         private Tensor Attention(Tensor input, int layer, string prefix, int seqLen, int startPos, bool isShared, HashSet<int> exceptPositions = null)
         {
             long t0 = Stopwatch.GetTimestamp();
-            _attnFusedDecodePreprocessApplied = false;
             bool isLocal = IsLocalLayer(layer);
             int hd = HeadDimForLayer(layer);
             int kvHeads = KVHeadsForLayer(layer);
@@ -6414,54 +6230,31 @@ namespace TensorSharp.Models
                 Tensor qkv = LinearForward(input, qkvName);
                 int vDim = (int)qkv.Sizes[1] - qDim - kDim;
 
-                // Fused QKV preprocess kernel (TryFusedDecodeQkvPreprocess
-                // ÔåÆ TryGemma4QkvPreprocessDecode). Phase 6f rewrote it with
-                // simdgroup reductions but still perf-neutral / slightly
-                // negative on Gemma 4 E4B ÔÇö the kernel runs only
-                // (NumHeads + 2*NumKVHeads) = 12 threadgroups, under-
-                // saturating the GPU vs the per-op path's ~22 threadgroups
-                // across 5 separate launches. Kept gated off as opt-in for
-                // models with more heads. Set TS_MLX_FUSED_QKV_PREP=1 to
-                // engage.
-                bool fusedDone = false;
-                if (seqLen == 1
-                    && _backend == BackendType.Mlx
-                    && vDim == kDim
-                    && string.Equals(Environment.GetEnvironmentVariable("TS_MLX_FUSED_QKV_PREP"), "1", StringComparison.Ordinal)
-                    && TryFusedDecodeQkvPreprocess(qkv, prefix, isLocal, hd, kvHeads, qDim, startPos, out q, out k, out v))
+                if (seqLen == 1)
                 {
-                    qkv.Dispose();
-                    fusedDone = true;
+                    q = qkv.Narrow(1, 0, qDim);
+                    k = qkv.Narrow(1, qDim, kDim);
+                    v = qkv.Narrow(1, qDim + kDim, vDim);
                 }
                 else
                 {
-                    if (seqLen == 1)
-                    {
-                        q = qkv.Narrow(1, 0, qDim);
-                        k = qkv.Narrow(1, qDim, kDim);
-                        v = qkv.Narrow(1, qDim + kDim, vDim);
-                    }
-                    else
-                    {
-                        q = SliceColumnsContiguous(qkv, 0, qDim);
-                        k = SliceColumnsContiguous(qkv, qDim, kDim);
-                        v = SliceColumnsContiguous(qkv, qDim + kDim, vDim);
-                    }
-                    qkv.Dispose();
-
-                    if (seqLen == 1)
-                    {
-                        RMSNormInPlace(q, _weights[$"{prefix}.attn_q_norm.weight"], Config.NumHeads, hd, Config.Eps);
-                        RMSNormInPlace(k, _weights[$"{prefix}.attn_k_norm.weight"], kvHeads, hd, Config.Eps);
-                    }
-                    else
-                    {
-                        q = ApplyBatchRMSNorm(q, $"{prefix}.attn_q_norm.weight", Config.NumHeads, seqLen, hd);
-                        k = ApplyBatchRMSNorm(k, $"{prefix}.attn_k_norm.weight", kvHeads, seqLen, hd);
-                    }
-                    ApplyUnweightedRMSNorm(v, kvHeads, hd, seqLen);
+                    q = SliceColumnsContiguous(qkv, 0, qDim);
+                    k = SliceColumnsContiguous(qkv, qDim, kDim);
+                    v = SliceColumnsContiguous(qkv, qDim + kDim, vDim);
                 }
-                _attnFusedDecodePreprocessApplied = fusedDone;
+                qkv.Dispose();
+
+                if (seqLen == 1)
+                {
+                    RMSNormInPlace(q, _weights[$"{prefix}.attn_q_norm.weight"], Config.NumHeads, hd, Config.Eps);
+                    RMSNormInPlace(k, _weights[$"{prefix}.attn_k_norm.weight"], kvHeads, hd, Config.Eps);
+                }
+                else
+                {
+                    q = ApplyBatchRMSNorm(q, $"{prefix}.attn_q_norm.weight", Config.NumHeads, seqLen, hd);
+                    k = ApplyBatchRMSNorm(k, $"{prefix}.attn_k_norm.weight", kvHeads, seqLen, hd);
+                }
+                ApplyUnweightedRMSNorm(v, kvHeads, hd, seqLen);
             }
             else
             {
@@ -6495,10 +6288,9 @@ namespace TensorSharp.Models
                 }
             }
 
-            // Apply NeoX-style RoPE (skipped for global fast path - already
-            // applied; also skipped for fused MLX decode preprocess, which
-            // bakes RoPE into the same kernel as the Q/K/V norms).
-            if (!_useGlobalFastPath && !_attnFusedDecodePreprocessApplied)
+            // Apply NeoX-style RoPE (skipped for the global fast path, which
+            // already applied it).
+            if (!_useGlobalFastPath)
             {
                 float[] freqs = isLocal ? _ropeFreqsLocal : _ropeFreqsGlobal;
                 if (seqLen == 1)
@@ -6553,7 +6345,7 @@ namespace TensorSharp.Models
                     // unbounded slice_update chain that MLX's lazy graph
                     // builds up one node per decode step. Without this,
                     // each subsequent attention read has to walk the chain
-                    // back to the original tensor ÔÇö fine for the first few
+                    // back to the original tensor — fine for the first few
                     // hundred tokens, catastrophic after ~500 (chain depth
                     // grows linearly in decode step count). Originally this
                     // fired only for SWA (local) layers because they were
@@ -6730,24 +6522,11 @@ namespace TensorSharp.Models
                 bool useWindowedAttn = isLocal && kvIsSeqHeads && seqLen > _slidingWindow * 4
                     && exceptPositions == null && !cudaFusedCanWindow;
 
-                // Fused prefill attention: run Q*K^T ÔåÆ mask ÔåÆ softmax ÔåÆ *V as a
+                // Fused prefill attention: run Q*K^T → mask → softmax → *V as a
                 // a fused backend kernel where available, eliminating several dispatches
                 // when there are no special mask exceptions (multimodal tokens).
                 bool canUseFusedPrefillAttn = !useWindowedAttn && kvIsSeqHeads && exceptPositions == null;
                 result = null;
-
-                // Full global attention has enough arithmetic intensity to benefit from
-                // cuBLAS once the prompt has a few hundred rows. Expand grouped K/V
-                // on-device, then use batched GEMMs around the fused causal softmax.
-                // Route this before the scalar CUDA fused kernel for both compact
-                // current-chunk K/V and the strided live cache.
-                if (_backend == BackendType.Cuda && !isLocal && exceptPositions == null
-                    && TryGlobalMaterializedAttentionCuda(qHeads, kvSrcK, kvSrcV,
-                        Config.NumHeads, kvHeads, hd, seqLen, kvLen,
-                        checked((int)kvSrcK.Sizes[1]), out result))
-                {
-                    qHeads.Dispose();
-                }
 
                 if (result == null && IsGgmlBackend && canUseFusedPrefillAttn)
                 {
@@ -6819,15 +6598,14 @@ namespace TensorSharp.Models
                         Config.NumHeads, kvHeads, seqLen, hd);
                     qHeads.Dispose();
                 }
-                else if (result == null && IsGgmlBackend && exceptPositions == null
-                         && _gemma4FlashGlobalChunk)
+                else if (result == null && IsGgmlBackend && exceptPositions == null)
                 {
                     // Global-layer chunk-2+ (and any non-seq-heads) path on the
                     // GGML backend. The K/V come from the linear cache
                     // (kvIsSeqHeads == false), so the seq-heads fused-prefill
-                    // branch above didn't fire. The legacy fallback below
-                    // materializes an [numHeads, seqLen, kvLen] score tensor +
-                    // softmax ÔÇö O(n┬▓) memory and the dominant long-prompt prefill
+                    // branch above didn't fire. The materialized fallback below
+                    // builds an [numHeads, seqLen, kvLen] score tensor +
+                    // softmax — O(n²) memory and the dominant long-prompt prefill
                     // cost (it grows from ~40% of prefill at one chunk to >55% at
                     // 8K). Dequantize + GQA-expand the cache once (same buffers
                     // the materialized path used) and run flash attention over it,
@@ -6837,10 +6615,10 @@ namespace TensorSharp.Models
                     int windowSize = isLocal ? _slidingWindow : 0;
                     int maskStart = kvLen - seqLen;
                     result = new Tensor(_allocator, DType.Float32, seqLen, Config.NumHeads * hd);
-                    if (_gemma4FlashF16KV && !ownsKvSrc
+                    if (!ownsKvSrc
                         && kvSrcK.ElementType == DType.Float16 && kvSrcV.ElementType == DType.Float16)
                     {
-                        // Read K/V straight from the F16 cache ÔÇö no per-chunk F16->F32
+                        // Read K/V straight from the F16 cache — no per-chunk F16->F32
                         // dequant round-trip. The kernel reads the leading kvLen rows of
                         // each head from the [kvHeads, cacheLen, hd] cache and does GQA
                         // in-kernel (numKvHeads = kvHeads). mul_mat accumulates in F32, so
@@ -7013,7 +6791,7 @@ namespace TensorSharp.Models
 
         /// <summary>
         /// Fused QKV split + transpose to head-first layout in a single strided
-        /// copy. Combines the NarrowÔåÆNewContiguous and ViewÔåÆTransposeÔåÆNewContiguous
+        /// copy. Combines the Narrow→NewContiguous and View→Transpose→NewContiguous
         /// steps, eliminating one full tensor copy per projection.
         /// </summary>
         private Tensor SliceColumnsContiguous(Tensor src, int colOffset, int width)
@@ -7280,103 +7058,6 @@ namespace TensorSharp.Models
             return data;
         }
 
-        /// <summary>
-        /// Decode-step fast path: a single mlx_compile closure does the
-        /// dense FFN block (pre-norm + gate_up matmul + GeluMulSplit + down
-        /// matmul + post-norm + residual add) in one
-        /// <c>mlx_closure_apply</c>. Returns false (and the caller falls
-        /// back to the per-op path) when the layer's quant types / shape
-        /// aren't covered. Requires the Q8_0 gate_up/down weight pair the
-        /// dense Gemma 4 decode path uses.
-        /// </summary>
-        private bool TryFusedDenseFFNDecode(Tensor residual, string prefix, string postFfnNormKey)
-        {
-            if (!_quantWeights.TryGetValue($"{prefix}.ffn_gate_up.weight", out var gateUpQw)) return false;
-            if (!_quantWeights.TryGetValue($"{prefix}.ffn_down.weight", out var downQw)) return false;
-            if (!_weights.TryGetValue($"{prefix}.ffn_norm.weight", out var preNormW)) return false;
-            if (!_weights.TryGetValue(postFfnNormKey, out var postNormW)) return false;
-
-            int halfDim = (int)(gateUpQw.Ne1 / 2);
-            return MlxQuantizedOps.TryFusedGemma4DenseFFNDecode(
-                residual,
-                residual,
-                preNormW, Config.Eps,
-                gateUpQw.EnsureDeviceCacheKey(), gateUpQw.Data, gateUpQw.GgmlType, gateUpQw.Ne0, gateUpQw.Ne1, gateUpQw.RawBytes,
-                downQw.EnsureDeviceCacheKey(), downQw.Data, downQw.GgmlType, downQw.Ne0, downQw.Ne1, downQw.RawBytes,
-                postNormW,
-                halfDim);
-        }
-
-        /// <summary>
-        /// Decode-step fast path: one Metal kernel does Q/K/V split +
-        /// RMSNorm + Q/K NeoX RoPE. On success returns
-        /// <c>q</c> [1, NumHeads*headDim] flat,
-        /// <c>k</c> [kvHeads, 1, headDim] head-first (cache-write ready),
-        /// <c>v</c> [kvHeads, 1, headDim] head-first.
-        /// Returns false when the kernel declines (e.g. unsupported headDim,
-        /// missing norm weights) ÔÇö the caller falls back to the per-op path.
-        /// </summary>
-        private bool TryFusedDecodeQkvPreprocess(
-            Tensor qkv, string prefix, bool isLocal,
-            int headDim, int kvHeads, int qDim, int startPos,
-            out Tensor q, out Tensor k, out Tensor v)
-        {
-            q = null; k = null; v = null;
-
-            // Norm weights must exist and be on the device.
-            if (!_weights.TryGetValue($"{prefix}.attn_q_norm.weight", out var qNormW)) return false;
-            if (!_weights.TryGetValue($"{prefix}.attn_k_norm.weight", out var kNormW)) return false;
-
-            float[] freqs = isLocal ? _ropeFreqsLocal : _ropeFreqsGlobal;
-            int rotHalf = freqs.Length;
-            if (rotHalf <= 0 || rotHalf * 2 > headDim) return false;
-
-            // Build cos/sin tables for the scalar decode position.
-            SelectNeoXRopeSlot(freqs);
-            int tableSize = rotHalf;
-            if (_neoXRopeCos == null || _neoXRopeCos.Length != tableSize)
-            {
-                _neoXRopeCos = new float[tableSize];
-                _neoXRopeSin = new float[tableSize];
-            }
-            bool rebuiltTables = false;
-            if (_neoXRopeCacheSeqLen != 1 || _neoXRopeCacheStartPos != startPos || _neoXRopeCacheFreqs != freqs)
-            {
-                for (int j = 0; j < rotHalf; j++)
-                {
-                    float angle = startPos * freqs[j];
-                    _neoXRopeCos[j] = MathF.Cos(angle);
-                    _neoXRopeSin[j] = MathF.Sin(angle);
-                }
-                _neoXRopeCacheSeqLen = 1;
-                _neoXRopeCacheStartPos = startPos;
-                _neoXRopeCacheFreqs = freqs;
-                rebuiltTables = true;
-            }
-            if (!EnsureNeoXRopeDeviceTables(1, startPos, freqs, rebuiltTables)) return false;
-
-            var qResult = new Tensor(_allocator, DType.Float32, 1, qDim);
-            var kResult = new Tensor(_allocator, DType.Float32, kvHeads, 1, headDim);
-            var vResult = new Tensor(_allocator, DType.Float32, kvHeads, 1, headDim);
-
-            if (!MlxFusedOps.TryGemma4QkvPreprocessDecode(
-                    qResult, kResult, vResult,
-                    qkv, qNormW, kNormW,
-                    _neoXRopeCosTensor, _neoXRopeSinTensor,
-                    Config.NumHeads, kvHeads, headDim, rotHalf, Config.Eps))
-            {
-                qResult.Dispose();
-                kResult.Dispose();
-                vResult.Dispose();
-                return false;
-            }
-
-            q = qResult;
-            k = kResult;
-            v = vResult;
-            return true;
-        }
-
         private unsafe void ApplyNeoXRoPEDecode(Tensor data, int numHeads, int headDim, int position, float[] freqs)
         {
             int ropeHalf = freqs.Length;
@@ -7514,97 +7195,14 @@ namespace TensorSharp.Models
         // Max query rows routed to the global live-cache prefill attention. The fused
         // GQA kernel reads the F16 cache in place and does GQA + causal masking in one
         // launch (no ExpandKVHeads / score-matrix materialization), and is numerically
-        // identical to the legacy path — so it is the right choice for chunked-prefill
+        // identical to the per-op path — so it is the right choice for chunked-prefill
         // chunk 2+ (kvIsSeqHeads == false) too, not just the small MTP verify window.
         // Without it, global chunk-2 layers fell to the materialized fallback whose
         // ExpandKVHeads (repeat_interleave) runs on the CPU and dominated long-prompt
         // prefill (7s+ of CPU fallback on a 3k-token prompt; see PrefillBench). The
         // kernel itself caps kvLen at 8192 and declines beyond that, so sequences past
-        // the cap still fall through to the legacy path.
+        // the cap still fall through to the per-op path.
         private const int GlobalLiveCacheAttnMaxSeqLen = 8192;
-
-        private const int GlobalMaterializedAttnMinSeqLen = 256;
-        private const int GlobalMaterializedAttnMaxSeqLen = 2048;
-        private const long GlobalMaterializedAttnMaxScoreBytes = 192L * 1024 * 1024;
-        private static readonly bool GlobalMaterializedAttnEnabled =
-            string.Equals(
-                Environment.GetEnvironmentVariable("TS_CUDA_GEMMA4_GLOBAL_GEMM_ATTN"),
-                "1",
-                StringComparison.Ordinal);
-
-        // Experimental GEMM-based global attention for medium/large prefill chunks
-        // (opt in with TS_CUDA_GEMMA4_GLOBAL_GEMM_ATTN=1):
-        //   Q [H,S,D] * K^T [H,D,K] -> scores [H,S,K]
-        //   fused causal mask + softmax
-        //   scores [H,S,K] * V [H,K,D] -> output [H,S,D]
-        // K/V expansion (including F16->F32) is a single CUDA kernel and never
-        // synchronizes through host memory. The bounded score workspace avoids the
-        // quadratic-memory cliff; larger contexts use the flash-style path below.
-        private bool TryGlobalMaterializedAttentionCuda(
-            Tensor qHeads,
-            Tensor kCache,
-            Tensor vCache,
-            int numHeads,
-            int kvHeads,
-            int headDim,
-            int seqLen,
-            int kvLen,
-            int cacheLen,
-            out Tensor result)
-        {
-            result = null;
-            if (!GlobalMaterializedAttnEnabled ||
-                _backend != BackendType.Cuda ||
-                qHeads == null ||
-                kCache == null ||
-                vCache == null ||
-                seqLen < GlobalMaterializedAttnMinSeqLen ||
-                seqLen > GlobalMaterializedAttnMaxSeqLen ||
-                kvLen < seqLen ||
-                kvLen > cacheLen ||
-                kvLen > 8192 ||
-                numHeads <= 0 ||
-                kvHeads <= 0 ||
-                numHeads % kvHeads != 0)
-            {
-                return false;
-            }
-
-            long scoreElements = (long)numHeads * seqLen * kvLen;
-            if (scoreElements > int.MaxValue ||
-                scoreElements * sizeof(float) > GlobalMaterializedAttnMaxScoreBytes)
-            {
-                return false;
-            }
-
-            int groupSize = numHeads / kvHeads;
-            using var scores = new Tensor(
-                _allocator, DType.Float32, numHeads, seqLen, kvLen);
-
-            using (Tensor kExpanded = ExpandKVHeads(kCache, groupSize, kvLen))
-            using (Tensor kT = kExpanded.Transpose(1, 2))
-            {
-                Ops.AddmmBatch(scores, 0f, scores, 1f, qHeads, kT);
-            }
-
-            int maskStart = kvLen - seqLen;
-            if (!CudaFusedOps.TryAttentionSoftmaxWithSinks(
-                    scores, null, numHeads, seqLen, kvLen,
-                    maskStart, windowSize: 0, scale: 1f))
-            {
-                return false;
-            }
-
-            using var attnOut = new Tensor(
-                _allocator, DType.Float32, numHeads, seqLen, headDim);
-            using (Tensor vExpanded = ExpandKVHeads(vCache, groupSize, kvLen))
-            {
-                Ops.AddmmBatch(attnOut, 0f, attnOut, 1f, scores, vExpanded);
-            }
-
-            result = ReshapeFromHeadsEx(attnOut, numHeads, seqLen, headDim);
-            return true;
-        }
 
         // Global (full-attention) multi-row attention on CUDA in ONE launch against
         // the LIVE linear cache (no per-row decode loop, no ExpandKVHeads/score-tensor
@@ -7612,7 +7210,7 @@ namespace TensorSharp.Models
         // [numKVHeads, cacheLen, headDim] in place via kvStride=cacheLen, attending the
         // first kvLen positions causally (mask_start = kvLen - seqLen). qHeads is the
         // head-first query [numHeads, seqLen, headDim]; result is flat
-        // [seqLen, numHeads*headDim]. Numerically identical to the legacy
+        // [seqLen, numHeads*headDim]. Numerically identical to the per-op
         // ExpandKVHeads + batched-matmul + softmax path (full causal, no SWA window).
         private bool TryGlobalLiveCacheAttentionCuda(
             Tensor qHeads, Tensor kCache, Tensor vCache, int numHeads, int kvHeads, int headDim,

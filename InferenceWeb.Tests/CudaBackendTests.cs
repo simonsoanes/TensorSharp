@@ -675,8 +675,7 @@ public class CudaBackendTests
     {
         using var allocator = new CudaAllocator();
         using var cache = new CudaPrefillGraphCache(allocator);
-        if (!cache.IsUsable)
-            return; // TS_CUDA_PREFILL_GRAPH=0
+        Assert.True(cache.IsUsable);
 
         const int n = 4096;
         float[] weightVals = new float[n];
@@ -783,8 +782,7 @@ public class CudaBackendTests
     {
         using var allocator = new CudaAllocator();
         using var cache = new CudaPrefillGraphCache(allocator);
-        if (!cache.IsUsable)
-            return; // TS_CUDA_PREFILL_GRAPH=0
+        Assert.True(cache.IsUsable);
 
         using var dyn = new CudaDecodeDynParams(allocator);
         Assert.True(dyn.IsValid);
@@ -2393,6 +2391,193 @@ public class CudaBackendTests
         {
             CudaQuantizedOps.Q5KDp4aEnabled = savedQ5K;
             CudaQuantizedOps.Q6KDp4aEnabled = savedQ6K;
+            Marshal.FreeHGlobal(host);
+        }
+    }
+
+    /// <summary>
+    /// Q8_0 asked for row invariance (the DeepSeek engine's batched decode): 2 to 16 rows take the
+    /// matvec instead of the int8 MMA GEMM, and every row comes out bit-identical to the same row
+    /// computed alone, while matching the dequantized weights to the q8_1 activation rounding.
+    /// </summary>
+    [CudaTheory]
+    [InlineData(2)]
+    [InlineData(7)]
+    [InlineData(16)]
+    public void CudaResidentMatmul_Q8_0RowInvariant_EveryRowAnswersAsAlone(int rows)
+    {
+        const int inDim = 512;
+        const int outDim = 9;
+        int blocks = outDim * inDim / 32;
+        byte[] weights = new byte[blocks * 34];
+        for (int b = 0; b < blocks; b++)
+        {
+            WriteHalf(weights, b * 34, 0.0078125f + (b % 7) * 0.00390625f);
+            for (int i = 0; i < 32; i++)
+                weights[b * 34 + 2 + i] = (byte)((b * 37 + i * 11 + 5) & 0xFF);
+        }
+        float[,] input = new float[rows, inDim];
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < inDim; c++)
+                input[r, c] = MathF.Sin((c + 3) * 0.023f - r) + 0.5f * MathF.Cos((c + 1) * 0.011f * (r + 1));
+
+        using var allocator = new CudaAllocator();
+        using var weightTensor = Tensor.FromArray(allocator, weights);
+        weightTensor.Storage.EnsureDeviceCurrent();   // raw pointer below: the host mirror is uploaded lazily
+        IntPtr weightPtr = ((CudaStorage)weightTensor.Storage).DevicePtrAtElement(weightTensor.StorageOffset);
+        float[] Run(float[,] x)
+        {
+            int n = x.GetLength(0);
+            using var inputTensor = Tensor.FromArray(allocator, x);
+            using var output = new Tensor(allocator, DType.Float32, n, outDim);
+            CudaQuantizedOps.AddmmResidentToFloat32(output, inputTensor, weightPtr, (int)GgmlTensorType.Q8_0,
+                inDim, outDim, rowInvariant: true);
+            return output.GetElementsAsFloat(n * outDim);
+        }
+
+        float[] all = Run(input);
+        float[] expected = DequantizedMatmulQ80(weights, outDim, inDim, QuantizeDequantizeQ8_1StoredScale(input), rows);
+        float maxAbs = expected.Max(MathF.Abs);
+        AssertClose(expected, all, 1e-4f * MathF.Max(1.0f, maxAbs));
+        for (int r = 0; r < rows; r++)
+        {
+            var one = new float[1, inDim];
+            for (int c = 0; c < inDim; c++)
+                one[0, c] = input[r, c];
+            Assert.Equal(all.AsSpan(r * outDim, outDim).ToArray(), Run(one));
+        }
+    }
+
+    /// <summary>
+    /// Q6_K asked for row invariance (a batched decode step's LM head): 2 to 16 rows take the one-row
+    /// dp4a kernel's arithmetic rather than the generic multi-row kernel, which reads F32 activations,
+    /// so every row comes out bit-identical to the same row computed alone, and matches ggml's own
+    /// dequantization of the weights to the q8_1 activation rounding.
+    /// </summary>
+    [CudaTheory]
+    [InlineData(2)]
+    [InlineData(7)]
+    [InlineData(16)]
+    public void CudaResidentMatmul_Q6_KRowInvariant_EveryRowAnswersAsAlone(int rows)
+    {
+        const int inDim = 512;
+        const int outDim = 9;
+        int blocks = outDim * inDim / 256;
+        byte[] weights = new byte[blocks * 210];
+        for (int b = 0; b < blocks; b++)
+        {
+            for (int i = 0; i < 208; i++)
+                weights[b * 210 + i] = (byte)((b * 41 + i * 13 + 3) & 0xFF);
+            WriteHalf(weights, b * 210 + 208, 0.0009765625f + (b % 5) * 0.00048828125f);
+        }
+        float[,] input = new float[rows, inDim];
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < inDim; c++)
+                input[r, c] = MathF.Sin((c + 5) * 0.019f - r) + 0.5f * MathF.Cos((c + 2) * 0.013f * (r + 1));
+
+        using var allocator = new CudaAllocator();
+        using var weightTensor = Tensor.FromArray(allocator, weights);
+        weightTensor.Storage.EnsureDeviceCurrent();   // raw pointer below: the host mirror is uploaded lazily
+        IntPtr weightPtr = ((CudaStorage)weightTensor.Storage).DevicePtrAtElement(weightTensor.StorageOffset);
+        float[] Run(float[,] x)
+        {
+            int n = x.GetLength(0);
+            using var inputTensor = Tensor.FromArray(allocator, x);
+            using var output = new Tensor(allocator, DType.Float32, n, outDim);
+            CudaQuantizedOps.AddmmResidentToFloat32(output, inputTensor, weightPtr, (int)GgmlTensorType.Q6_K,
+                inDim, outDim, rowInvariant: true);
+            return output.GetElementsAsFloat(n * outDim);
+        }
+
+        float[] all = Run(input);
+        float[] expected = DequantizedMatmulNative(weights, GgmlTensorType.Q6_K, outDim, inDim,
+            QuantizeDequantizeQ8_1StoredScale(input));
+        float maxAbs = expected.Max(MathF.Abs);
+        AssertClose(expected, all, 1e-4f * MathF.Max(1.0f, maxAbs));
+        for (int r = 0; r < rows; r++)
+        {
+            var one = new float[1, inDim];
+            for (int c = 0; c < inDim; c++)
+                one[0, c] = input[r, c];
+            Assert.Equal(all.AsSpan(r * outDim, outDim).ToArray(), Run(one));
+        }
+    }
+
+    /// <summary>
+    /// The Q2_K and Q3_K matvec (1 to 16 rows) against ggml's own dequantization:
+    /// every byte of the blocks varies, so every scale nibble, min, hmask bit and 2-bit field position
+    /// is exercised. Each row must also come out bit-identical to the same row computed alone:
+    /// batched decode relies on a row not depending on its batchmates.
+    /// </summary>
+    [CudaTheory]
+    [InlineData((int)GgmlTensorType.Q2_K, 1)]
+    [InlineData((int)GgmlTensorType.Q2_K, 3)]
+    [InlineData((int)GgmlTensorType.Q2_K, 16)]
+    [InlineData((int)GgmlTensorType.Q3_K, 1)]
+    [InlineData((int)GgmlTensorType.Q3_K, 3)]
+    [InlineData((int)GgmlTensorType.Q3_K, 16)]
+    public void CudaQuantizedMatmul_LowKQuantMatchesDequantizedReference_RowByRow(int ggmlType, int rows)
+    {
+        const int inDim = 512;
+        const int outDim = 7;
+        int blockBytes = ggmlType == (int)GgmlTensorType.Q2_K ? 84 : 110;
+        int halfAt = ggmlType == (int)GgmlTensorType.Q2_K ? 80 : 108;
+        int blocks = outDim * inDim / 256;
+        byte[] weights = new byte[blocks * blockBytes];
+        for (int b = 0; b < blocks; b++)
+        {
+            int offset = b * blockBytes;
+            for (int i = 0; i < halfAt; i++)
+                weights[offset + i] = (byte)((b * 29 + i * 13 + 7) & 0xFF);
+            WriteHalf(weights, offset + halfAt, 0.0625f + (b % 5) * 0.03125f);
+            if (ggmlType == (int)GgmlTensorType.Q2_K)
+                WriteHalf(weights, offset + 82, 0.015625f + (b % 3) * 0.0078125f);
+        }
+        float[,] input = new float[rows, inDim];
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < inDim; c++)
+                input[r, c] = MathF.Sin((c + 1) * 0.017f + r) + 0.375f * MathF.Cos((c + 11) * 0.029f - r);
+
+        IntPtr host = Marshal.AllocHGlobal(weights.Length);
+        IntPtr cacheKey = new(0x766100 + ggmlType);
+        try
+        {
+            Marshal.Copy(weights, 0, host, weights.Length);
+            using var allocator = new CudaAllocator();
+            CudaQuantizedOps.PreloadQuantizedWeight(allocator, cacheKey, host, ggmlType, inDim, outDim, weights.Length);
+            try
+            {
+                float[] Run(float[,] x)
+                {
+                    int n = x.GetLength(0);
+                    using var inputTensor = Tensor.FromArray(allocator, x);
+                    using var output = new Tensor(allocator, DType.Float32, n, outDim);
+                    Assert.True(CudaQuantizedOps.TryAddmmQuantizedToFloat32(
+                        output, inputTensor, cacheKey, IntPtr.Zero, ggmlType, inDim, outDim, weights.Length));
+                    return output.GetElementsAsFloat(n * outDim);
+                }
+
+                float[] all = Run(input);
+                // The kernel rounds the activations to q8_1 for its dp4a vec-dots.
+                float[] expected = DequantizedMatmulNative(weights, (GgmlTensorType)ggmlType, outDim, inDim,
+                    QuantizeDequantizeQ8_1StoredScale(input));
+                float maxAbs = expected.Max(MathF.Abs);
+                AssertClose(expected, all, 1e-4f * MathF.Max(1.0f, maxAbs));
+                for (int r = 0; r < rows; r++)
+                {
+                    var one = new float[1, inDim];
+                    for (int c = 0; c < inDim; c++)
+                        one[0, c] = input[r, c];
+                    Assert.Equal(all.AsSpan(r * outDim, outDim).ToArray(), Run(one));
+                }
+            }
+            finally
+            {
+                CudaQuantizedOps.ReleaseQuantizedWeight(allocator, cacheKey);
+            }
+        }
+        finally
+        {
             Marshal.FreeHGlobal(host);
         }
     }

@@ -27,19 +27,10 @@ namespace TensorSharp.MLX
         private static MlxStream cachedDefaultStream;
         private static int cachedDefaultStreamDevice = -1;
         private static string lastError = string.Empty;
-        // A/B benchmark toggles. Defaults are the optimized paths; set the
-        // env var to "1" to fall back to the pre-optimization behavior so
-        // you can measure each change independently with the same binary.
-        private static readonly bool DisableStreamCache =
-            string.Equals(Environment.GetEnvironmentVariable("TS_MLX_BASELINE_STREAM"), "1", StringComparison.Ordinal);
-        private static readonly bool DisableFreeDispatch =
-            string.Equals(Environment.GetEnvironmentVariable("TS_MLX_BASELINE_FREE"), "1", StringComparison.Ordinal);
         private static MlxFastMetalKernel iq4XsMatmulKernel;
         private static MlxFastMetalKernel iq4XsMatmulSimdgroupKernel;
         private static MlxFastMetalKernel iq4XsMatmul4Kernel;
-        private static MlxFastMetalKernel iq4XsMatmul4SimdKernel;
         private static MlxFastMetalKernel iq4XsMatmulRowsKernel;
-        private static MlxFastMetalKernel iq4XsMatmulRows2Kernel;
         private static MlxFastMetalKernel iq4XsGetRowsKernel;
         // IQ4_NL ("4-bit non-linear") matmul. Block layout per ggml-common.h:
         //   struct block_iq4_nl { ggml_half d; uint8_t qs[QK4_NL/2]; }
@@ -72,13 +63,6 @@ namespace TensorSharp.MLX
         private static MlxFastMetalKernel iq3XxsMatmulKernel;
         private static MlxFastMetalKernel iq3XxsMatmulSimdgroupKernel;
         private static MlxFastMetalKernel iq3XxsGetRowsKernel;
-        private static MlxFastMetalKernel q4KMatmulKernel;
-        private static MlxFastMetalKernel q4KMatmulSimdgroupKernel;
-        private static MlxFastMetalKernel q4KGetRowsKernel;
-        private static MlxFastMetalKernel q5KMatmulKernel;
-        private static MlxFastMetalKernel q5KMatmulSimdgroupKernel;
-        private static MlxFastMetalKernel q5KMatmul4Kernel;
-        private static MlxFastMetalKernel q5KGetRowsKernel;
         private static MlxFastMetalKernel q6KMatmulKernel;
         private static MlxFastMetalKernel q6KMatmulSimdgroupKernel;
         private static MlxFastMetalKernel q6KMatmul4Kernel;
@@ -90,12 +74,9 @@ namespace TensorSharp.MLX
         private static MlxFastMetalKernel gatedDeltaKernel;
         private static MlxFastMetalKernel gatedDeltaT1Kernel;
         private static MlxFastMetalKernel gatedDeltaBlockedKernel;
-        private static readonly bool GatedDeltaBlockedEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_GDN_BLOCKED"), "0", StringComparison.Ordinal);
         private static MlxFastMetalKernel qwen35GdnPreprocessKernel;
         private static MlxFastMetalKernel qwen35GdnPackedPreprocessKernel;
         private static MlxFastMetalKernel qwen35GdnPostprocessKernel;
-        private static MlxFastMetalKernel headDim256AttentionKernel;
         private static MlxFastMetalKernel scatterAddWeightedRowsKernel;
         private static MlxFastMetalKernel rmsNormAddKernel;
         private static MlxFastMetalKernel addRmsNormKernel;
@@ -104,20 +85,16 @@ namespace TensorSharp.MLX
         private static MlxFastMetalKernel neoXRopeKernel;
         private static MlxFastMetalKernel circularDecodeAttentionKernel;
         private static MlxFastMetalKernel decodeAttentionWithSinksKernel;
-        private static MlxFastMetalKernel gemma4QkvPreprocessDecodeKernel;
         private static MlxFastMetalKernel q8AddmmAddKernel;
         private static MlxFastMetalKernel q8RmsNormMatmulKernel;
         private static MlxFastMetalKernel q8MatmulKernel;
-        private static MlxFastMetalKernel decodeAttentionHeadDim512Kernel;
         private static MlxFastMetalKernel q8MatmulGeluMulKernel;
         private static MlxFastMetalKernel swigluOaiGatherBiasKernel;
         private static MlxFastMetalKernel moeBiasWeightedSumKernel;
         private static bool iq4XsMatmulKernelDisabled;
         private static bool iq4XsMatmulSimdgroupKernelDisabled;
         private static bool iq4XsMatmul4KernelDisabled;
-        private static bool iq4XsMatmul4SimdKernelDisabled;
         private static bool iq4XsMatmulRowsKernelDisabled;
-        private static bool iq4XsMatmulRows2KernelDisabled;
         private static bool iq4XsGetRowsKernelDisabled;
         private static bool iq4NlMatmulKernelDisabled;
         private static bool iq4NlMatmulRowsKernelDisabled;
@@ -138,13 +115,6 @@ namespace TensorSharp.MLX
         private static bool iq3XxsMatmulKernelDisabled;
         private static bool iq3XxsMatmulSimdgroupKernelDisabled;
         private static bool iq3XxsGetRowsKernelDisabled;
-        private static bool q4KMatmulKernelDisabled;
-        private static bool q4KMatmulSimdgroupKernelDisabled;
-        private static bool q4KGetRowsKernelDisabled;
-        private static bool q5KMatmulKernelDisabled;
-        private static bool q5KMatmulSimdgroupKernelDisabled;
-        private static bool q5KMatmul4KernelDisabled;
-        private static bool q5KGetRowsKernelDisabled;
         private static bool q6KMatmulKernelDisabled;
         private static bool q6KMatmulSimdgroupKernelDisabled;
         private static bool q6KMatmul4KernelDisabled;
@@ -159,7 +129,6 @@ namespace TensorSharp.MLX
         private static bool qwen35GdnPreprocessKernelDisabled;
         private static bool qwen35GdnPackedPreprocessKernelDisabled;
         private static bool qwen35GdnPostprocessKernelDisabled;
-        private static bool headDim256AttentionKernelDisabled;
         private static bool scatterAddWeightedRowsKernelDisabled;
         private static bool rmsNormAddKernelDisabled;
         private static bool addRmsNormKernelDisabled;
@@ -168,11 +137,9 @@ namespace TensorSharp.MLX
         private static bool neoXRopeKernelDisabled;
         private static bool circularDecodeAttentionKernelDisabled;
         private static bool decodeAttentionWithSinksKernelDisabled;
-        private static bool gemma4QkvPreprocessDecodeKernelDisabled;
         private static bool q8AddmmAddKernelDisabled;
         private static bool q8RmsNormMatmulKernelDisabled;
         private static bool q8MatmulKernelDisabled;
-        private static bool decodeAttentionHeadDim512KernelDisabled;
         private static bool q8MatmulGeluMulKernelDisabled;
         private static bool swigluOaiGatherBiasKernelDisabled;
         private static bool moeBiasWeightedSumKernelDisabled;
@@ -878,56 +845,6 @@ inline float tensorsharp_dot8_iq3_s(const device uchar * block, int within_block
 ";
 
         private const string KQuantHelpersHeader = @"
-inline void tensorsharp_get_scale_min_k4(int index, const device uchar * packed, thread int & scale, thread int & minv) {
-    if (index < 4) {
-        scale = packed[index] & 63;
-        minv = packed[index + 4] & 63;
-    } else {
-        scale = (packed[index + 4] & 0x0f) | ((packed[index - 4] >> 6) << 4);
-        minv = (packed[index + 4] >> 4) | ((packed[index] >> 6) << 4);
-    }
-}
-
-inline float tensorsharp_dequant_q4k(const device uchar * block, int within_block) {
-    int group = within_block >> 5;
-    int within_32 = within_block & 31;
-    int pair_index = group >> 1;
-    bool high_nibble = (group & 1) != 0;
-
-    int scale_byte = 0;
-    int min_byte = 0;
-    tensorsharp_get_scale_min_k4(group, block + 4, scale_byte, min_byte);
-
-    const half d_half = *reinterpret_cast<const device half *>(block);
-    const half min_half = *reinterpret_cast<const device half *>(block + 2);
-    const uchar packed = block[16 + pair_index * 32 + within_32];
-    const int q = high_nibble ? ((packed >> 4) & 0x0f) : (packed & 0x0f);
-    const half scale_h = d_half * static_cast<half>(scale_byte);
-    const half min_h = min_half * static_cast<half>(min_byte);
-    return static_cast<float>(scale_h) * static_cast<float>(q) - static_cast<float>(min_h);
-}
-
-inline float tensorsharp_dequant_q5k(const device uchar * block, int within_block) {
-    int group = within_block >> 5;
-    int within_32 = within_block & 31;
-    int pair_index = group >> 1;
-    bool high_nibble = (group & 1) != 0;
-
-    int scale_byte = 0;
-    int min_byte = 0;
-    tensorsharp_get_scale_min_k4(group, block + 4, scale_byte, min_byte);
-
-    const half d_half = *reinterpret_cast<const device half *>(block);
-    const half min_half = *reinterpret_cast<const device half *>(block + 2);
-    const uchar packed = block[48 + pair_index * 32 + within_32];
-    const int lo4 = high_nibble ? ((packed >> 4) & 0x0f) : (packed & 0x0f);
-    const int bit5 = (block[16 + within_32] >> group) & 1;
-    const int q = lo4 | (bit5 << 4);
-    const half scale_h = d_half * static_cast<half>(scale_byte);
-    const half min_h = min_half * static_cast<half>(min_byte);
-    return static_cast<float>(scale_h) * static_cast<float>(q) - static_cast<float>(min_h);
-}
-
 inline float tensorsharp_dequant_q6k(const device uchar * block, int within_block) {
     const device uchar * ql = block;
     const device uchar * qh = block + 128;
@@ -954,141 +871,8 @@ inline float tensorsharp_dequant_q6k(const device uchar * block, int within_bloc
 }
 ";
 
-        // Phase 8: simdgroup-fast reduction. Replaces the 8-barrier tree
-        // reduction with a single barrier + simd_sum, matching the pattern
-        // proven on Q8 in Phase 6. Same kernel structure: one threadgroup
-        // per (out_col, row_idx), each thread strides through the input.
-        private const string Q4KMatmulSource = @"
-auto tid = thread_position_in_threadgroup.x;
-auto out_col = thread_position_in_grid.y;
-auto row_idx = thread_position_in_grid.z;
-auto simd_lane = tid & 31u;
-auto simd_id = tid >> 5;
-threadgroup float simd_partial[8];
-
-float sum = 0.0f;
-for (int k = static_cast<int>(tid); k < InDim; k += 256) {
-    int block_in_row = k >> 8;
-    int within_block = k & 255;
-    auto block = w + (out_col * BlocksPerRow + block_in_row) * 144;
-    sum += x[row_idx * InDim + k] * tensorsharp_dequant_q4k(block, within_block);
-}
-
-float simd_total = simd_sum(sum);
-if (simd_lane == 0) simd_partial[simd_id] = simd_total;
-threadgroup_barrier(mem_flags::mem_threadgroup);
-float lane_v = simd_lane < 8u ? simd_partial[simd_lane] : 0.0f;
-float final_sum = simd_sum(lane_v);
-
-if (tid == 0) {
-    y[row_idx * OutDim + out_col] = final_sum;
-}
-";
-
-        // Phase 8: simdgroup-fast reduction (same pattern as Q4KMatmul).
-        private const string Q5KMatmulSource = @"
-auto tid = thread_position_in_threadgroup.x;
-auto out_col = thread_position_in_grid.y;
-auto row_idx = thread_position_in_grid.z;
-auto simd_lane = tid & 31u;
-auto simd_id = tid >> 5;
-threadgroup float simd_partial[8];
-
-float sum = 0.0f;
-for (int k = static_cast<int>(tid); k < InDim; k += 256) {
-    int block_in_row = k >> 8;
-    int within_block = k & 255;
-    auto block = w + (out_col * BlocksPerRow + block_in_row) * 176;
-    sum += x[row_idx * InDim + k] * tensorsharp_dequant_q5k(block, within_block);
-}
-
-float simd_total = simd_sum(sum);
-if (simd_lane == 0) simd_partial[simd_id] = simd_total;
-threadgroup_barrier(mem_flags::mem_threadgroup);
-float lane_v = simd_lane < 8u ? simd_partial[simd_lane] : 0.0f;
-float final_sum = simd_sum(lane_v);
-
-if (tid == 0) {
-    y[row_idx * OutDim + out_col] = final_sum;
-}
-";
-
-        // Phase 8: simdgroup-fast reduction across 4 output cols per
-        // threadgroup. Each col gets its own simd_partial slot.
-        private const string Q5KMatmul4Source = @"
-auto tid = thread_position_in_threadgroup.x;
-auto col_group = thread_position_in_grid.y;
-int base_col = static_cast<int>(col_group) * 4;
-auto simd_lane = tid & 31u;
-auto simd_id = tid >> 5;
-threadgroup float simd_partial[4][8];
-
-float sum0 = 0.0f;
-float sum1 = 0.0f;
-float sum2 = 0.0f;
-float sum3 = 0.0f;
-
-for (int k = static_cast<int>(tid); k < InDim; k += 256) {
-    const float xv = x[k];
-    int block_in_row = k >> 8;
-    int within_block = k & 255;
-
-    if (base_col < OutDim) {
-        auto block0 = w + (base_col * BlocksPerRow + block_in_row) * 176;
-        sum0 += xv * tensorsharp_dequant_q5k(block0, within_block);
-    }
-    if (base_col + 1 < OutDim) {
-        auto block1 = w + ((base_col + 1) * BlocksPerRow + block_in_row) * 176;
-        sum1 += xv * tensorsharp_dequant_q5k(block1, within_block);
-    }
-    if (base_col + 2 < OutDim) {
-        auto block2 = w + ((base_col + 2) * BlocksPerRow + block_in_row) * 176;
-        sum2 += xv * tensorsharp_dequant_q5k(block2, within_block);
-    }
-    if (base_col + 3 < OutDim) {
-        auto block3 = w + ((base_col + 3) * BlocksPerRow + block_in_row) * 176;
-        sum3 += xv * tensorsharp_dequant_q5k(block3, within_block);
-    }
-}
-
-float s0 = simd_sum(sum0);
-float s1 = simd_sum(sum1);
-float s2 = simd_sum(sum2);
-float s3 = simd_sum(sum3);
-if (simd_lane == 0) {
-    simd_partial[0][simd_id] = s0;
-    simd_partial[1][simd_id] = s1;
-    simd_partial[2][simd_id] = s2;
-    simd_partial[3][simd_id] = s3;
-}
-threadgroup_barrier(mem_flags::mem_threadgroup);
-
-float lane_v0 = simd_lane < 8u ? simd_partial[0][simd_lane] : 0.0f;
-float lane_v1 = simd_lane < 8u ? simd_partial[1][simd_lane] : 0.0f;
-float lane_v2 = simd_lane < 8u ? simd_partial[2][simd_lane] : 0.0f;
-float lane_v3 = simd_lane < 8u ? simd_partial[3][simd_lane] : 0.0f;
-float final0 = simd_sum(lane_v0);
-float final1 = simd_sum(lane_v1);
-float final2 = simd_sum(lane_v2);
-float final3 = simd_sum(lane_v3);
-
-if (tid == 0) {
-    if (base_col < OutDim) {
-        y[base_col] = final0;
-    }
-    if (base_col + 1 < OutDim) {
-        y[base_col + 1] = final1;
-    }
-    if (base_col + 2 < OutDim) {
-        y[base_col + 2] = final2;
-    }
-    if (base_col + 3 < OutDim) {
-        y[base_col + 3] = final3;
-    }
-}
-";
-
-        // Phase 8: simdgroup-fast reduction (same pattern as Q4KMatmul).
+        // Simdgroup-fast reduction: one barrier and a simd_sum instead of an
+        // 8-barrier tree reduction.
         private const string Q6KMatmulSource = @"
 auto tid = thread_position_in_threadgroup.x;
 auto out_col = thread_position_in_grid.y;
@@ -1116,7 +900,7 @@ if (tid == 0) {
 }
 ";
 
-        // Phase 8: simdgroup-fast reduction across 4 output cols per
+        // Simdgroup-fast reduction across 4 output cols per
         // threadgroup. Each col gets its own simd_partial slot.
         private const string Q6KMatmul4Source = @"
 auto tid = thread_position_in_threadgroup.x;
@@ -1417,34 +1201,6 @@ o[0] = half(dl * kIq4NlValues[q & 0xfu]);
 o[16] = half(dl * kIq4NlValues[q >> 4]);
 ";
 
-        private const string Q4KGetRowsSource = @"
-auto col = thread_position_in_grid.x;
-auto out_row = thread_position_in_grid.y;
-if (col >= InDim) {
-    return;
-}
-
-int weight_row = indices[out_row];
-int block_in_row = col >> 8;
-int within_block = col & 255;
-auto block = w + (weight_row * BlocksPerRow + block_in_row) * 144;
-y[out_row * InDim + col] = tensorsharp_dequant_q4k(block, within_block);
-";
-
-        private const string Q5KGetRowsSource = @"
-auto col = thread_position_in_grid.x;
-auto out_row = thread_position_in_grid.y;
-if (col >= InDim) {
-    return;
-}
-
-int weight_row = indices[out_row];
-int block_in_row = col >> 8;
-int within_block = col & 255;
-auto block = w + (weight_row * BlocksPerRow + block_in_row) * 176;
-y[out_row * InDim + col] = tensorsharp_dequant_q5k(block, within_block);
-";
-
         private const string Q6KGetRowsSource = @"
 auto col = thread_position_in_grid.x;
 auto out_row = thread_position_in_grid.y;
@@ -1740,8 +1496,8 @@ out_y[out_row * HiddenDim + col] = value;
 ";
 
         private const string RmsNormAddSource = @"
-// Phase 6e: simdgroup-fast reduction. Drops the 8-barrier tree reduction
-// to a single barrier across the 8 per-simdgroup sums.
+// Simdgroup-fast reduction: a single barrier across the 8 per-simdgroup
+// sums instead of an 8-barrier tree reduction.
 auto tid = thread_position_in_threadgroup.x;
 auto row = thread_position_in_grid.y;
 auto simd_lane = tid & 31u;
@@ -1777,7 +1533,7 @@ for (int col = static_cast<int>(tid); col < HiddenDim; col += 256) {
         //   updated_residual = residual_in + input
         //   normed_out      = RmsNorm(updated_residual, norm_weight)
         private const string AddRmsNormSource = @"
-// Phase 6e: simdgroup-fast reduction.
+// Simdgroup-fast reduction.
 auto tid = thread_position_in_threadgroup.x;
 auto row = thread_position_in_grid.y;
 auto simd_lane = tid & 31u;
@@ -2326,7 +2082,8 @@ if (tid == 0) {
 }
 ";
 
-        // Phase 8: simdgroup-fast reduction (same pattern as Q4KMatmul).
+        // Simdgroup-fast reduction: one barrier and a simd_sum instead of an
+        // 8-barrier tree reduction.
         private const string Iq4XsMatmulSource = @"
 auto tid = thread_position_in_threadgroup.x;
 auto out_col = thread_position_in_grid.y;
@@ -2369,7 +2126,8 @@ if (tid == 0) {
 }
 ";
 
-        // Phase 8: simdgroup-fast reduction (same pattern as Q4KMatmul).
+        // Simdgroup-fast reduction: one barrier and a simd_sum instead of an
+        // 8-barrier tree reduction.
         private const string Iq4XsMatmul4Source = @"
 auto tid = thread_position_in_threadgroup.x;
 auto col_group = thread_position_in_grid.y;
@@ -2443,54 +2201,6 @@ if (tid == 0) {
 }
 ";
 
-        // Iq4XsMatmul4 variant rewritten around simd_sum to eliminate the
-        // 8-stage threadgroup reduction (and its 8 barriers) of the legacy
-        // kernel. Threadgroup memory shrinks from 4 KiB → 0; the reduction
-        // becomes a single 32-lane simd_sum executed in parallel inside
-        // each simdgroup. Mirrors the GDN core kernel layout (see
-        // `GatedDeltaStepSource` / `GatedDeltaSource` for prior art).
-        //
-        // Layout:
-        //   - Threadgroup = 128 threads = 4 simdgroups.
-        //   - Each simdgroup handles 1 output column.
-        //   - 4 output columns per threadgroup, matching the legacy kernel
-        //     so the dispatch grid in y stays at ceil(OutDim/4).
-        //   - Each thread sums InDim/32 weight×activation products, then
-        //     simd_sum collapses the 32 lanes into one scalar.
-        //
-        // Bandwidth note: the original kernel loads x[k] once per thread
-        // and reuses it across all 4 partial sums. Here each simdgroup
-        // re-reads x for its own column, so x is fetched 4× per
-        // threadgroup instead of 1×. The L2 absorbs that — x is tiny
-        // (5–10 KB per matmul on this model) and the simdgroups in a
-        // threadgroup execute in lockstep, so the first simdgroup warms
-        // L1 for the next three.
-        private const string Iq4XsMatmul4SimdSource = @"
-auto tid_in_sg = thread_index_in_simdgroup;
-auto sg_id = simdgroup_index_in_threadgroup;
-auto col_group = thread_position_in_grid.y;
-int base_col = static_cast<int>(col_group) * 4;
-int out_col = base_col + static_cast<int>(sg_id);
-
-if (out_col >= OutDim) {
-    return;
-}
-
-float sum = 0.0f;
-for (int k = static_cast<int>(tid_in_sg); k < InDim; k += 32) {
-    int block_in_row = k >> 8;
-    int within_block = k & 255;
-    auto block = w + (out_col * BlocksPerRow + block_in_row) * 136;
-    sum += x[k] * tensorsharp_dequant_iq4xs(block, within_block);
-}
-
-sum = simd_sum(sum);
-
-if (tid_in_sg == 0) {
-    y[out_col] = sum;
-}
-";
-
         private const string Iq4XsMatmulRowsSource = @"
 auto tid = thread_position_in_threadgroup.x;
 auto out_col = thread_position_in_grid.y;
@@ -2546,70 +2256,6 @@ if (tid == 0) {
 }
 ";
 
-        private const string Iq4XsMatmulRows2Source = @"
-auto tid = thread_position_in_threadgroup.x;
-auto col_group = thread_position_in_grid.y;
-int base_col = static_cast<int>(col_group) * 2;
-threadgroup float partial0[Rows][256];
-threadgroup float partial1[Rows][256];
-float sums0[Rows];
-float sums1[Rows];
-
-for (int r = 0; r < Rows; r++) {
-    sums0[r] = 0.0f;
-    sums1[r] = 0.0f;
-}
-
-for (int k = static_cast<int>(tid); k < InDim; k += 256) {
-    int block_in_row = k >> 8;
-    int within_block = k & 255;
-
-    float weight0 = 0.0f;
-    float weight1 = 0.0f;
-    if (base_col < OutDim) {
-        auto block0 = w + (base_col * BlocksPerRow + block_in_row) * 136;
-        weight0 = tensorsharp_dequant_iq4xs(block0, within_block);
-    }
-    if (base_col + 1 < OutDim) {
-        auto block1 = w + ((base_col + 1) * BlocksPerRow + block_in_row) * 136;
-        weight1 = tensorsharp_dequant_iq4xs(block1, within_block);
-    }
-
-    for (int r = 0; r < Rows; r++) {
-        float xv = x[r * InDim + k];
-        sums0[r] += xv * weight0;
-        sums1[r] += xv * weight1;
-    }
-}
-
-for (int r = 0; r < Rows; r++) {
-    partial0[r][tid] = sums0[r];
-    partial1[r][tid] = sums1[r];
-}
-threadgroup_barrier(mem_flags::mem_threadgroup);
-
-for (uint stride = 128; stride > 0; stride >>= 1) {
-    if (tid < stride) {
-        for (int r = 0; r < Rows; r++) {
-            partial0[r][tid] += partial0[r][tid + stride];
-            partial1[r][tid] += partial1[r][tid + stride];
-        }
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-}
-
-if (tid == 0) {
-    for (int r = 0; r < Rows; r++) {
-        if (base_col < OutDim) {
-            y[r * OutDim + base_col] = partial0[r][0];
-        }
-        if (base_col + 1 < OutDim) {
-            y[r * OutDim + base_col + 1] = partial1[r][0];
-        }
-    }
-}
-";
-
         private const string Iq4XsGetRowsSource = @"
 auto col = thread_position_in_grid.x;
 auto out_row = thread_position_in_grid.y;
@@ -2649,32 +2295,27 @@ y[out_row * InDim + col] = static_cast<float>(d_half) * static_cast<float>(ls - 
         // through simd_sum. Only rows < Iq2XxsMatmulSimdgroupMinRows reach
         // here; prefill goes to the simdgroup_matrix kernels.
         //
-        // DOT8 (default): each thread takes 8 CONSECUTIVE weights per step, so
-        // the super-block header loads and the 256/1024-entry codebook lookup
-        // are paid once per 8 values instead of once per value - the same
-        // amortization ggml-metal's iq kernels do over a 32-value sub-block.
-        // The legacy per-element body ran the Muse-Glimmer-30B-UD-IQ2_XXS
-        // decode FFN (IQ2_S gate/up + IQ3_XXS down, 74% of the token's weight
-        // bytes) at ~34 GB/s against a ~205 GB/s memory roofline; the token was
-        // 98% GPU wait with no host thread busy, so the cost was the dequant
-        // instruction stream, not bandwidth or scheduling.
-        //
-        // TS_MLX_IQ_DECODE_DOT8=0 restores the per-element body for an A/B.
-        private static readonly bool IQuantDecodeDot8Enabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_IQ_DECODE_DOT8"), "0", StringComparison.Ordinal);
+        // Each thread takes 8 CONSECUTIVE weights per step, so the super-block
+        // header loads and the 256/1024-entry codebook lookup are paid once per
+        // 8 values instead of once per value - the same amortization
+        // ggml-metal's iq kernels do over a 32-value sub-block. A per-element
+        // body ran the Muse-Glimmer-30B-UD-IQ2_XXS decode FFN (IQ2_S gate/up +
+        // IQ3_XXS down, 74% of the token's weight bytes) at ~34 GB/s against a
+        // ~205 GB/s memory roofline; the token was 98% GPU wait with no host
+        // thread busy, so the cost was the dequant instruction stream, not
+        // bandwidth or scheduling.
 
         /// <summary>
         /// Emit the decode matmul body for one IQ quant type.
         /// <paramref name="blockBytes"/> is the GGUF super-block stride (256
-        /// weights per block for every type here), and the DOT8 body relies on
+        /// weights per block for every type here), and the body relies on
         /// the dispatch guard that InDim is a multiple of 256 - so every
         /// 8-element group lands inside one super-block and starts on a
         /// multiple of 8, which is what lets one codebook entry cover it.
         /// </summary>
-        private static string BuildIQuantMatmulSource(string dot8Helper, string scalarHelper, int blockBytes)
+        private static string BuildIQuantMatmulSource(string dot8Helper, int blockBytes)
         {
-            string reduction = IQuantDecodeDot8Enabled
-                ? $@"
+            string reduction = $@"
 float sum = 0.0f;
 for (int base_k = static_cast<int>(tid) * 8; base_k < InDim; base_k += 256 * 8) {{
     int block_in_row = base_k >> 8;
@@ -2686,14 +2327,6 @@ for (int base_k = static_cast<int>(tid) * 8; base_k < InDim; base_k += 256 * 8) 
         xv[j] = x[xbase + j];
     }}
     sum += {dot8Helper}(block, within_block, xv);
-}}"
-                : $@"
-float sum = 0.0f;
-for (int k = static_cast<int>(tid); k < InDim; k += 256) {{
-    int block_in_row = k >> 8;
-    int within_block = k & 255;
-    auto block = w + (out_col * BlocksPerRow + block_in_row) * {blockBytes};
-    sum += x[static_cast<int>(row_idx) * InDim + k] * {scalarHelper}(block, within_block);
 }}";
 
             return $@"
@@ -2718,13 +2351,13 @@ if (tid == 0) {{
         }
 
         private static readonly string Iq2XxsMatmulSource =
-            BuildIQuantMatmulSource("tensorsharp_dot8_iq2_xxs", "tensorsharp_dequant_iq2_xxs", 66);
+            BuildIQuantMatmulSource("tensorsharp_dot8_iq2_xxs", 66);
 
         // IQ2_XXS matmul using Apple's simdgroup_matrix hardware
         // primitives. For batches >= 8 each SIMD group computes an
         // 8×8 output tile and (crucially) DEQUANTS its 8 weight
         // rows ONCE per K-chunk — reused across all 8 input rows in
-        // the tile. The legacy per-output kernel dequants W rows
+        // the tile. The per-output kernel (smaller batches) dequants W rows
         // independently per input row, so total dequant work is
         // O(M·B·K). The simdgroup variant is O(M·K·B/8), an 8× cut
         // in the dequant pass for prefill (the matmul itself is
@@ -2969,7 +2602,7 @@ if (tid == 0) {
 
 
         private static readonly string Iq2SMatmulSource =
-            BuildIQuantMatmulSource("tensorsharp_dot8_iq2_s", "tensorsharp_dequant_iq2_s", 82);
+            BuildIQuantMatmulSource("tensorsharp_dot8_iq2_s", 82);
 
         private const string Iq2SGetRowsSource = @"
 auto col = thread_position_in_grid.x;
@@ -2985,9 +2618,10 @@ auto block = w + (weight_row * BlocksPerRow + block_in_row) * 82;
 y[out_row * InDim + col] = tensorsharp_dequant_iq2_s(block, within_block);
 ";
 
-        // Phase 8: simdgroup-fast reduction (same pattern as Q4KMatmul).
+        // Simdgroup-fast reduction: one barrier and a simd_sum instead of an
+        // 8-barrier tree reduction.
         private static readonly string Iq3SMatmulSource =
-            BuildIQuantMatmulSource("tensorsharp_dot8_iq3_s", "tensorsharp_dequant_iq3_s", 110);
+            BuildIQuantMatmulSource("tensorsharp_dot8_iq3_s", 110);
 
         private const string Iq3SGetRowsSource = @"
 auto col = thread_position_in_grid.x;
@@ -3007,7 +2641,7 @@ y[out_row * InDim + col] = tensorsharp_dequant_iq3_s(block, within_block);
         // the IQ3_S kernel above; only the 98-byte super-block stride and the
         // dequant helper differ.
         private static readonly string Iq3XxsMatmulSource =
-            BuildIQuantMatmulSource("tensorsharp_dot8_iq3_xxs", "tensorsharp_dequant_iq3_xxs", 98);
+            BuildIQuantMatmulSource("tensorsharp_dot8_iq3_xxs", 98);
 
         private const string Iq3XxsGetRowsSource = @"
 auto col = thread_position_in_grid.x;
@@ -3021,54 +2655,6 @@ int block_in_row = col >> 8;
 int within_block = col & 255;
 auto block = w + (weight_row * BlocksPerRow + block_in_row) * 98;
 y[out_row * InDim + col] = tensorsharp_dequant_iq3_xxs(block, within_block);
-";
-
-        private const string HeadDim256AttentionSource = @"
-auto tid = thread_position_in_threadgroup.x;
-auto head = thread_position_in_grid.y;
-auto q_pos = thread_position_in_grid.z;
-threadgroup float partial[256];
-
-const int group_size = NumHeads / NumKVHeads;
-const int kv_head = head / group_size;
-const int causal_limit_raw = Causal == 0 ? (KvLen - 1) : (MaskStart + static_cast<int>(q_pos));
-const int causal_limit = causal_limit_raw < KvLen ? causal_limit_raw : (KvLen - 1);
-
-float max_score = -3.4028234663852886e+38f;
-float normalizer = 0.0f;
-float acc = 0.0f;
-
-for (int t = 0; t < KvLen; t++) {
-    float dot_part = 0.0f;
-    if (t <= causal_limit) {
-        dot_part = q[(head * QLen + q_pos) * 256 + tid] *
-            k[(kv_head * KvLen + t) * 256 + tid];
-    }
-
-    partial[tid] = dot_part;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    for (uint stride = 128; stride > 0; stride >>= 1) {
-        if (tid < stride) {
-            partial[tid] += partial[tid + stride];
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-
-    if (t <= causal_limit) {
-        const float score = partial[0] * scale_value;
-        const float new_max = score > max_score ? score : max_score;
-        const float old_scale = metal::fast::exp(max_score - new_max);
-        const float score_scale = metal::fast::exp(score - new_max);
-        acc = acc * old_scale + score_scale * v[(kv_head * KvLen + t) * 256 + tid];
-        normalizer = normalizer * old_scale + score_scale;
-        max_score = new_max;
-    }
-
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-}
-
-y[(q_pos * NumHeads + head) * 256 + tid] = acc / normalizer;
 ";
 
         // Decode attention with optional attention sinks and sliding-window
@@ -3144,66 +2730,16 @@ if (tid < HeadDim) {
 }
 ";
 
-        // Phase 6g: decode attention for Gemma 4 global layers
-        // (head_dim = 512, non-circular). Mirrors the simdgroup-fast pattern
-        // used by CircularDecodeAttention but without the SWA wrap logic
-        // and with 16 simdgroups (HeadDim / SIMD_WIDTH = 512/32). Replaces
-        // the route through MLX's mlx_fast_scaled_dot_product_attention
-        // for Gemma 4's 7 global layers per token. Avoids the
-        // `kCache.Narrow + TryRunHeadFirstAttention` chain entirely.
-        private const string DecodeAttentionHeadDim512Source = @"
-auto tid = thread_position_in_threadgroup.x;
-auto head = thread_position_in_grid.y;
-auto simd_lane = tid & 31u;
-auto simd_id = tid >> 5;
-threadgroup float simd_partial[16];
-
-const int group_size = NumHeads / NumKVHeads;
-const int kv_head = head / group_size;
-
-float max_score = -3.4028234663852886e+38f;
-float normalizer = 0.0f;
-float acc = 0.0f;
-
-float qv = q[head * HeadDim + tid];
-
-for (int t = 0; t < AttendLen; t++) {
-    int k_off = (kv_head * CacheLen + t) * HeadDim + tid;
-    float kv = static_cast<float>(k_cache[k_off]);
-    float dot_part = qv * kv;
-
-    float simd_total = simd_sum(dot_part);
-    if (simd_lane == 0) simd_partial[simd_id] = simd_total;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float lane_v = simd_lane < 16u ? simd_partial[simd_lane] : 0.0f;
-    float dot = simd_sum(lane_v);
-
-    const float score = dot * scale_value;
-    const float new_max = score > max_score ? score : max_score;
-    const float old_scale = metal::fast::exp(max_score - new_max);
-    const float score_scale = metal::fast::exp(score - new_max);
-    int v_off = (kv_head * CacheLen + t) * HeadDim + tid;
-    acc = acc * old_scale + score_scale * static_cast<float>(v_cache[v_off]);
-    normalizer = normalizer * old_scale + score_scale;
-    max_score = new_max;
-
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-}
-
-y[head * HeadDim + tid] = acc / normalizer;
-";
-
         private const string CircularDecodeAttentionSource = @"
 auto tid = thread_position_in_threadgroup.x;
 auto head = thread_position_in_grid.y;
 auto simd_lane = tid & 31u;
 auto simd_id = tid >> 5;
-// Phase 6d: replaced the 8-barrier threadgroup-tree reduction (which
-// fired AttendLen times per kernel = up to 512 × 8 = 4096 barriers /
-// dispatch) with a simdgroup-fast reduction (simd_sum + a single
-// 8-element broadcast through shared memory). Drops per-position
-// barrier count from 8 to 1 and recovers most of the per-attention-
-// step GPU time on Apple Silicon.
+// Simdgroup-fast reduction (simd_sum + a single 8-element broadcast
+// through shared memory) rather than an 8-barrier threadgroup-tree
+// reduction, which would fire AttendLen times per kernel (up to
+// 512 × 8 = 4096 barriers / dispatch). One barrier per position
+// recovers most of the per-attention-step GPU time on Apple Silicon.
 threadgroup float simd_partial[8];
 
 const int group_size = NumHeads / NumKVHeads;
@@ -3428,7 +2964,7 @@ if (simd_id == 0) {
 }
 ";
 
-        // ===== Phase 6 custom Metal kernels =====
+        // ===== Fused Q8 custom Metal kernels =====
         //
         // These kernels collapse the existing two-step
         // {mlx_quantized_matmul + mlx_binary_add} and
@@ -3503,117 +3039,6 @@ if (simd_id == 0) {
     if (simd_lane == 0) {
         y[out_col] = residual[out_col] + final_sum;
     }
-}
-";
-
-        // Fused Gemma 4 decode-step QKV preprocessing kernel. Replaces the
-        // following 5 separate MLX dispatches per attention layer:
-        //   1. RMSNorm on Q  (per-head, weighted by attn_q_norm.weight)
-        //   2. RMSNorm on K  (per-head, weighted by attn_k_norm.weight)
-        //   3. unweighted RMSNorm on V
-        //   4. NeoX RoPE on Q
-        //   5. NeoX RoPE on K
-        // with a single Metal kernel that does all of them in one dispatch.
-        //
-        // Input layout (`qkv`, flat, after the fused norm+QKV matmul):
-        //   qkv[0 ..              NumHeads*HeadDim)               – Q
-        //   qkv[NumHeads*HeadDim ..(NumHeads+NumKVHeads)*HeadDim) – K
-        //   qkv[(NumHeads+NumKVHeads)*HeadDim .. end)            – V
-        //
-        // Outputs (3):
-        //   q_out  [1, NumHeads * HeadDim]            – Q post-norm + RoPE, flat
-        //   k_out  [NumKVHeads, 1, HeadDim]           – K post-norm + RoPE, head-first
-        //   v_out  [NumKVHeads, 1, HeadDim]           – V post-norm (unweighted), head-first
-        //
-        // Grid: (HeadDim, NumHeads + 2*NumKVHeads, 1) – one threadgroup per output row.
-        // Threadgroup: (HeadDim, 1, 1) – collaborative RMS reduction per row.
-        //
-        // Restrictions:
-        //   * HeadDim ≤ 512 and a power of two (256 SWA / 512 global covered).
-        //   * Per-token decode only (seqLen == 1).
-        //   * cos_table / sin_table indexed by `col` (already pre-built for the
-        //     scalar position; no per-position stride).
-        private const string Gemma4QkvPreprocessDecodeSource = @"
-threadgroup float row_buf[512];
-threadgroup float simd_partial[16];
-
-auto tid = thread_position_in_threadgroup.x;
-auto row = thread_position_in_grid.y;
-auto simd_lane = tid & 31u;
-auto simd_id = tid >> 5;
-
-int kind;
-int head;
-if (row < uint(NumHeads)) {
-    kind = 0;
-    head = static_cast<int>(row);
-} else if (row < uint(NumHeads + NumKVHeads)) {
-    kind = 1;
-    head = static_cast<int>(row) - NumHeads;
-} else {
-    kind = 2;
-    head = static_cast<int>(row) - NumHeads - NumKVHeads;
-}
-
-int input_offset;
-if (kind == 0) {
-    input_offset = head * HeadDim + static_cast<int>(tid);
-} else if (kind == 1) {
-    input_offset = NumHeads * HeadDim + head * HeadDim + static_cast<int>(tid);
-} else {
-    input_offset = (NumHeads + NumKVHeads) * HeadDim + head * HeadDim + static_cast<int>(tid);
-}
-
-float x = qkv[input_offset];
-
-// Phase 6f: simdgroup-fast reduction. The tree-reduction (HeadDim/2 → 1
-// barriers per iteration, ~9 barriers for HeadDim=512) is now one barrier
-// + a cross-simdgroup broadcast through `simd_partial`.
-float simd_sq = simd_sum(x * x);
-if (simd_lane == 0) simd_partial[simd_id] = simd_sq;
-threadgroup_barrier(mem_flags::mem_threadgroup);
-uint n_simd = uint(HeadDim) >> 5;  // simdgroup count = HeadDim / 32
-float lane_v = simd_lane < n_simd ? simd_partial[simd_lane] : 0.0f;
-float total_sq = simd_sum(lane_v);
-
-float rms = metal::fast::rsqrt(total_sq / float(HeadDim) + eps_value);
-
-float w;
-if (kind == 0) {
-    w = q_norm_w[tid];
-} else if (kind == 1) {
-    w = k_norm_w[tid];
-} else {
-    w = 1.0f;
-}
-float normed = x * rms * w;
-row_buf[tid] = normed;
-threadgroup_barrier(mem_flags::mem_threadgroup);
-
-float result = normed;
-if (kind != 2) {
-    if (tid < uint(RotHalf)) {
-        float x0 = row_buf[tid];
-        float x1 = row_buf[tid + uint(RotHalf)];
-        float c = cos_table[tid];
-        float s = sin_table[tid];
-        result = x0 * c - x1 * s;
-    } else if (tid < uint(RotHalf * 2)) {
-        int j = static_cast<int>(tid) - RotHalf;
-        float x0 = row_buf[j];
-        float x1 = row_buf[tid];
-        float c = cos_table[j];
-        float s = sin_table[j];
-        result = x0 * s + x1 * c;
-    }
-}
-
-if (kind == 0) {
-    q_out[head * HeadDim + static_cast<int>(tid)] = result;
-} else if (kind == 1) {
-    k_out[head * HeadDim + static_cast<int>(tid)] = result;
-} else {
-    v_out[head * HeadDim + static_cast<int>(tid)] = result;
 }
 ";
 
@@ -3842,10 +3267,7 @@ if (kind == 0) {
                 _ = mlx_array_free(array);
                 return;
             }
-            if (DisableFreeDispatch)
-                MlxWorker.Shared.Invoke(() => _ = mlx_array_free(array));
-            else
-                MlxWorker.Shared.Dispatch(() => _ = mlx_array_free(array));
+            MlxWorker.Shared.Dispatch(() => _ = mlx_array_free(array));
         }
 
         internal static MlxArray Astype(MlxArray array, DType dtype)
@@ -4514,67 +3936,6 @@ if (kind == 0) {
             });
         }
 
-        internal static MlxArray HeadDim256Attention(
-            MlxArray qHeads,
-            MlxArray kHeads,
-            MlxArray vHeads,
-            int numHeads,
-            int numKVHeads,
-            int qLen,
-            int kvLen,
-            int maskStart,
-            bool causal,
-            float scale)
-        {
-            if (!qHeads.IsValid || !kHeads.IsValid || !vHeads.IsValid)
-                throw new ArgumentException("MLX attention inputs must be valid arrays.");
-            if (numHeads <= 0 || numKVHeads <= 0 || numHeads % numKVHeads != 0 || qLen <= 0 || kvLen <= 0)
-                throw new ArgumentOutOfRangeException(nameof(qLen), "Invalid MLX attention dimensions.");
-
-            return MlxWorker.Shared.Invoke(() =>
-            {
-                MlxFastMetalKernel kernel = EnsureHeadDim256AttentionKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                MlxArray scaleArray = default;
-                try
-                {
-                    AddTemplateInt(config, "NumHeads", numHeads);
-                    AddTemplateInt(config, "NumKVHeads", numKVHeads);
-                    AddTemplateInt(config, "QLen", qLen);
-                    AddTemplateInt(config, "KvLen", kvLen);
-                    AddTemplateInt(config, "MaskStart", maskStart);
-                    AddTemplateInt(config, "Causal", causal ? 1 : 0);
-                    int[] shape = { qLen, numHeads * 256 };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring MLX headDim256 attention output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, numHeads, qLen), "configuring MLX headDim256 attention grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring MLX headDim256 attention threadgroup");
-
-                    scaleArray = mlx_array_new_float32(scale);
-                    inputs = CreateVectorArray(qHeads, kHeads, vHeads, scaleArray);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running MLX headDim256 attention");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("MLX headDim256 attention produced no output.");
-
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading MLX headDim256 attention output");
-                    return result;
-                }
-                finally
-                {
-                    if (scaleArray.IsValid)
-                        _ = mlx_array_free(scaleArray);
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
-        }
-
         // Decode attention with per-head attention sinks (and optional
         // sliding-window mask). Used by GPT-OSS-style models. Reuses the
         // same caller convention as CircularDecodeAttention but adds a
@@ -4651,99 +4012,6 @@ if (kind == 0) {
                         _ = mlx_fast_metal_kernel_config_free(config);
                 }
             });
-        }
-
-        /// <summary>
-        /// Fused Gemma 4 decode-step QKV preprocessing. See
-        /// <see cref="Gemma4QkvPreprocessDecodeSource"/> for the kernel
-        /// semantics. Replaces ~5 separate MLX dispatches per attention
-        /// layer (Q-norm, K-norm, V-norm, Q-RoPE, K-RoPE) with one.
-        /// </summary>
-        internal static void Gemma4QkvPreprocessDecode(
-            MlxArray qkv,
-            MlxArray qNormW,
-            MlxArray kNormW,
-            MlxArray cosTable,
-            MlxArray sinTable,
-            int numHeads,
-            int numKVHeads,
-            int headDim,
-            int rotHalf,
-            float eps,
-            out MlxArray qOut,
-            out MlxArray kOut,
-            out MlxArray vOut)
-        {
-            qOut = default;
-            kOut = default;
-            vOut = default;
-
-            if (!qkv.IsValid || !qNormW.IsValid || !kNormW.IsValid || !cosTable.IsValid || !sinTable.IsValid)
-                throw new ArgumentException("MLX Gemma4 QKV preprocess decode requires valid input arrays.");
-            if (numHeads <= 0 || numKVHeads <= 0 || numHeads % numKVHeads != 0
-                || headDim <= 0 || headDim > 512
-                || (headDim & (headDim - 1)) != 0
-                || rotHalf <= 0 || rotHalf * 2 > headDim)
-            {
-                throw new ArgumentOutOfRangeException(nameof(headDim),
-                    "Gemma4 QKV preprocess decode requires HeadDim ≤ 512 power-of-two and RotHalf*2 ≤ HeadDim.");
-            }
-
-            MlxArray qResult = default;
-            MlxArray kResult = default;
-            MlxArray vResult = default;
-            MlxWorker.Shared.Invoke(() =>
-            {
-                MlxFastMetalKernel kernel = EnsureGemma4QkvPreprocessDecodeKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                MlxArray epsArray = default;
-                try
-                {
-                    AddTemplateInt(config, "NumHeads", numHeads);
-                    AddTemplateInt(config, "NumKVHeads", numKVHeads);
-                    AddTemplateInt(config, "HeadDim", headDim);
-                    AddTemplateInt(config, "RotHalf", rotHalf);
-
-                    int[] qShape = { 1, numHeads * headDim };
-                    int[] kShape = { numKVHeads, 1, headDim };
-                    int[] vShape = { numKVHeads, 1, headDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, qShape, (nuint)qShape.Length, ToMlxDtype(DType.Float32)), "configuring Gemma4 QKV preprocess q output");
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, kShape, (nuint)kShape.Length, ToMlxDtype(DType.Float32)), "configuring Gemma4 QKV preprocess k output");
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, vShape, (nuint)vShape.Length, ToMlxDtype(DType.Float32)), "configuring Gemma4 QKV preprocess v output");
-
-                    int totalRows = numHeads + 2 * numKVHeads;
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, headDim, totalRows, 1), "configuring Gemma4 QKV preprocess grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, headDim, 1, 1), "configuring Gemma4 QKV preprocess threadgroup");
-
-                    epsArray = mlx_array_new_float32(eps);
-                    inputs = CreateVectorArray(qkv, qNormW, kNormW, cosTable, sinTable, epsArray);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running Gemma4 QKV preprocess decode kernel");
-                    if (mlx_vector_array_size(outputs) < 3)
-                        throw new InvalidOperationException("Gemma4 QKV preprocess decode kernel produced fewer than 3 outputs.");
-
-                    Check(mlx_vector_array_get(out qResult, outputs, 0), "reading Gemma4 QKV preprocess q output");
-                    Check(mlx_vector_array_get(out kResult, outputs, 1), "reading Gemma4 QKV preprocess k output");
-                    Check(mlx_vector_array_get(out vResult, outputs, 2), "reading Gemma4 QKV preprocess v output");
-                }
-                finally
-                {
-                    if (epsArray.IsValid)
-                        _ = mlx_array_free(epsArray);
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
-
-            qOut = qResult;
-            kOut = kResult;
-            vOut = vResult;
         }
 
         internal static MlxArray CircularDecodeAttention(
@@ -4879,23 +4147,6 @@ if (kind == 0) {
             {
                 MlxArray result;
                 Check(mlx_take_axis(out result, input, indices, axis, DefaultStream()), "running MLX take_axis");
-                return result;
-            });
-        }
-
-        // Per-row (take_along_axis) gather: for a 2D [R, C] input and a [R, K] index array,
-        // result[r, j] = input[r, indices[r, j]] (axis = 1). Unlike TakeAxis (mx.take, which
-        // gathers the SAME columns for every row), this gathers a different set per row — the
-        // primitive needed for a batched MoE router's per-token top-K logit gather.
-        internal static MlxArray TakeAlongAxis(MlxArray input, MlxArray indices, int axis)
-        {
-            if (!input.IsValid || !indices.IsValid)
-                throw new ArgumentException("MLX take_along_axis inputs must be valid arrays.");
-
-            return MlxWorker.Shared.Invoke(() =>
-            {
-                MlxArray result;
-                Check(mlx_take_along_axis(out result, input, indices, axis, DefaultStream()), "running MLX take_along_axis");
                 return result;
             });
         }
@@ -5379,8 +4630,8 @@ if (kind == 0) {
             });
         }
 
-        // Cache the small set of mode strings ("affine", "mxfp4", "q4_k",
-        // "q5_k") used by quantized matmul / dequantize so the hot path
+        // Cache the small set of mode strings ("affine", "mxfp4") used by
+        // quantized matmul / dequantize so the hot path
         // doesn't pay Marshal.StringToHGlobalAnsi + FreeHGlobal per call
         // (~1µs × ~5 quantized matmuls per layer × 42 layers = ~0.2ms/token).
         // The native callee only reads the bytes, never frees them, so a
@@ -5457,12 +4708,9 @@ if (kind == 0) {
         }
 
         // Rows up to which IQ4_XS runs as matrix-vector products (the ggml port).
-        // TS_MLX_IQ4XS_MATVEC_MAX_ROWS=0 restores the older kernels. Settable for tests.
+        // Above them, IQ4_XS takes the F16 dequantize + GEMM path of Q6_K
+        // (DequantF16Matmul). Settable for tests.
         internal static int Iq4XsMatvecMaxRows = ResolveMatvecMaxRows("TS_MLX_IQ4XS_MATVEC_MAX_ROWS");
-        // Above the matrix-vector rows, IQ4_XS takes the F16 dequantize + GEMM path of
-        // Q6_K (DequantF16Matmul). TS_MLX_IQ4XS_DEQUANT_GEMM=0 keeps the older kernel.
-        private static readonly bool Iq4XsDequantGemm =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_IQ4XS_DEQUANT_GEMM"), "0", StringComparison.Ordinal);
 
         internal static MlxArray Iq4XsMatmul(MlxArray input, MlxArray rawWeight, int rows, int inDim, int outDim)
         {
@@ -5480,7 +4728,7 @@ if (kind == 0) {
                 {
                 }
             }
-            else if (Iq4XsDequantGemm)
+            else
             {
                 try
                 {
@@ -5490,54 +4738,15 @@ if (kind == 0) {
                 {
                 }
             }
-            if (rows == 1 && !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_IQ4XS_MATMUL4"), "0", StringComparison.Ordinal))
-            {
-                // Two kernels are available for decode (rows==1):
-                //
-                //   - Iq4XsMatmul4Cols (default): 256 threads / threadgroup,
-                //     4 output cols per threadgroup, threadgroup-memory
-                //     reduction with 8 barriers. The legacy implementation.
-                //
-                //   - Iq4XsMatmul4ColsSimd: 128 threads / threadgroup,
-                //     4 simdgroups, simd_sum reduction (no barriers, no
-                //     shared memory). Cleaner code, eliminates ~8 barriers
-                //     per output column. On the M4 Pro / 27B-IQ4_XS
-                //     benchmark the two were within 1% of each other —
-                //     the matmul is memory-bandwidth bound (we hit ~30%
-                //     of M4 Pro peak BW, which both kernels saturate
-                //     equally). Kept opt-in via TS_MLX_IQ4XS_MATMUL4_SIMD=1
-                //     so future Metal/MLX toolchains that benefit more
-                //     from the cleaner reduction can flip it on without
-                //     a code change.
-                bool useSimd = string.Equals(
-                    Environment.GetEnvironmentVariable("TS_MLX_IQ4XS_MATMUL4_SIMD"),
-                    "1", StringComparison.Ordinal);
-                if (useSimd)
-                {
-                    try
-                    {
-                        return Iq4XsMatmul4ColsSimd(input, rawWeight, inDim, outDim);
-                    }
-                    catch (Exception)
-                    {
-                        // Fall through to legacy kernel.
-                    }
-                }
 
+            // The kernels below run only when the paths above decline.
+            if (rows == 1)
+            {
+                // 256 threads / threadgroup, 4 output cols per threadgroup,
+                // threadgroup-memory reduction.
                 try
                 {
                     return Iq4XsMatmul4Cols(input, rawWeight, inDim, outDim);
-                }
-                catch (Exception)
-                {
-                }
-            }
-
-            if (rows > 1 && rows <= Iq4XsBatchedRows2Max())
-            {
-                try
-                {
-                    return Iq4XsMatmulRows2Cols(input, rawWeight, rows, inDim, outDim);
                 }
                 catch (Exception)
                 {
@@ -5553,7 +4762,7 @@ if (kind == 0) {
             // Threshold the same as IQ2_XXS (rows >= 8) but in practice
             // we get here only when rows > Iq4XsBatchedRowsMax() = 24,
             // so the simdgroup variant always runs at large batch.
-            if (rows >= Iq2XxsMatmulSimdgroupMinRows && !Iq2XxsMatmulSimdgroupDisabled)
+            if (rows >= Iq2XxsMatmulSimdgroupMinRows)
             {
                 try { return Iq4XsMatmulSimdgroup(input, rawWeight, rows, inDim, outDim); }
                 catch (NotSupportedException) { }
@@ -5702,60 +4911,6 @@ if (kind == 0) {
         }
 
 
-        // simd_sum-based 4-col matmul. See Iq4XsMatmul4SimdSource for the
-        // kernel; grid is the same as the legacy kernel (ceil(OutDim/4)
-        // threadgroups in y) but threadgroup size shrinks from 256 → 128
-        // threads (= 4 simdgroups) since each simdgroup now owns one
-        // output column and reduces via simd_sum instead of cooperating
-        // with the rest of the threadgroup through shared memory.
-        private static MlxArray Iq4XsMatmul4ColsSimd(MlxArray input, MlxArray rawWeight, int inDim, int outDim)
-        {
-            if (!input.IsValid || !rawWeight.IsValid)
-                throw new ArgumentException("IQ4_XS simd_sum 4-column matmul requires valid input and raw weight arrays.");
-            if (inDim <= 0 || outDim <= 0 || inDim % 256 != 0)
-                throw new ArgumentOutOfRangeException(nameof(inDim), "IQ4_XS simd_sum 4-column matmul requires positive dimensions and input dim aligned to 256.");
-
-            return MlxWorker.Shared.Invoke(() =>
-            {
-                MlxFastMetalKernel kernel = EnsureIq4XsMatmul4SimdKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    int[] shape = { 1, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ4_XS simd 4-column matmul output");
-                    // 128 threads (= 4 simdgroups) per threadgroup; each
-                    // simdgroup owns one of the 4 output cols. Grid in y
-                    // is ceil(OutDim/4) so the dispatch shape matches the
-                    // legacy kernel exactly.
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 128, (outDim + 3) / 4, 1), "configuring IQ4_XS simd 4-column matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 128, 1, 1), "configuring IQ4_XS simd 4-column matmul threadgroup");
-
-                    inputs = CreateVectorArray(input, rawWeight);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ4_XS simd 4-column matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("IQ4_XS simd 4-column matmul produced no output.");
-
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading IQ4_XS simd 4-column matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
-        }
-
         private static MlxArray Iq4XsMatmul4Cols(MlxArray input, MlxArray rawWeight, int inDim, int outDim)
         {
             if (!input.IsValid || !rawWeight.IsValid)
@@ -5840,64 +4995,13 @@ if (kind == 0) {
             });
         }
 
-        private static MlxArray Iq4XsMatmulRows2Cols(MlxArray input, MlxArray rawWeight, int rows, int inDim, int outDim)
-        {
-            return MlxWorker.Shared.Invoke(() =>
-            {
-                MlxFastMetalKernel kernel = EnsureIq4XsMatmulRows2Kernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    AddTemplateInt(config, "Rows", rows);
-                    int[] shape = { rows, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ4_XS 2-column batched matmul output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, (outDim + 1) / 2, 1), "configuring IQ4_XS 2-column batched matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring IQ4_XS 2-column batched matmul threadgroup");
-
-                    inputs = CreateVectorArray(input, rawWeight);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ4_XS 2-column batched matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("IQ4_XS 2-column batched matmul produced no output.");
-
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading IQ4_XS 2-column batched matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
-        }
-
         private static int Iq4XsBatchedRowsMax()
         {
             string env = Environment.GetEnvironmentVariable("TS_MLX_IQ4XS_BATCHED_ROWS_MAX");
             if (!string.IsNullOrWhiteSpace(env) && int.TryParse(env, out int parsed))
                 return Math.Clamp(parsed, 0, 24);
 
-            if (string.Equals(Environment.GetEnvironmentVariable("TS_MLX_IQ4XS_BATCHED_ROWS"), "0", StringComparison.Ordinal))
-                return 0;
-
             return 24;
-        }
-
-        private static int Iq4XsBatchedRows2Max()
-        {
-            if (!string.Equals(Environment.GetEnvironmentVariable("TS_MLX_IQ4XS_BATCHED_COLS"), "1", StringComparison.Ordinal))
-                return 0;
-
-            return Math.Min(Iq4XsBatchedRowsMax(), 16);
         }
 
         internal static MlxArray Iq4XsGetRows(MlxArray rawWeight, MlxArray indices, int rows, int inDim)
@@ -5950,8 +5054,6 @@ if (kind == 0) {
             int.TryParse(Environment.GetEnvironmentVariable("TS_MLX_IQ2XXS_SG_MIN_ROWS"), out int parsed) && parsed > 0
                 ? parsed
                 : 8;
-        private static readonly bool Iq2XxsMatmulSimdgroupDisabled =
-            string.Equals(Environment.GetEnvironmentVariable("TS_MLX_IQ2XXS_DISABLE_SG"), "1", StringComparison.Ordinal);
 
         internal static MlxArray Iq2XxsMatmul(MlxArray input, MlxArray rawWeight, int rows, int inDim, int outDim)
         {
@@ -5965,7 +5067,7 @@ if (kind == 0) {
             // hardware matrix-multiply for the FMA. Decode (rows < 8)
             // keeps the per-output kernel — the simdgroup kernel would
             // pad to 8 rows and waste 7/8 of the compute.
-            if (rows >= Iq2XxsMatmulSimdgroupMinRows && !Iq2XxsMatmulSimdgroupDisabled)
+            if (rows >= Iq2XxsMatmulSimdgroupMinRows)
             {
                 try
                 {
@@ -6411,7 +5513,7 @@ if (kind == 0) {
 
         internal static MlxArray Iq2SMatmul(MlxArray input, MlxArray rawWeight, int rows, int inDim, int outDim)
         {
-            if (rows >= Iq2XxsMatmulSimdgroupMinRows && !Iq2XxsMatmulSimdgroupDisabled)
+            if (rows >= Iq2XxsMatmulSimdgroupMinRows)
             {
                 try { return Iq2SMatmulSimdgroup(input, rawWeight, rows, inDim, outDim); }
                 catch (NotSupportedException) { }
@@ -6431,7 +5533,7 @@ if (kind == 0) {
 
         internal static MlxArray Iq3SMatmul(MlxArray input, MlxArray rawWeight, int rows, int inDim, int outDim)
         {
-            if (rows >= Iq2XxsMatmulSimdgroupMinRows && !Iq2XxsMatmulSimdgroupDisabled)
+            if (rows >= Iq2XxsMatmulSimdgroupMinRows)
             {
                 try { return Iq3SMatmulSimdgroup(input, rawWeight, rows, inDim, outDim); }
                 catch (NotSupportedException) { }
@@ -6451,7 +5553,7 @@ if (kind == 0) {
 
         internal static MlxArray Iq3XxsMatmul(MlxArray input, MlxArray rawWeight, int rows, int inDim, int outDim)
         {
-            if (rows >= Iq2XxsMatmulSimdgroupMinRows && !Iq2XxsMatmulSimdgroupDisabled)
+            if (rows >= Iq2XxsMatmulSimdgroupMinRows)
             {
                 try { return Iq3XxsMatmulSimdgroup(input, rawWeight, rows, inDim, outDim); }
                 catch (NotSupportedException) { }
@@ -6569,50 +5671,8 @@ if (kind == 0) {
             });
         }
 
-        internal static MlxArray Q4KMatmul(MlxArray input, MlxArray rawWeight, int rows, int inDim, int outDim)
-        {
-            if (rows >= Iq2XxsMatmulSimdgroupMinRows && !Iq2XxsMatmulSimdgroupDisabled)
-            {
-                try { return Q4KMatmulSimdgroup(input, rawWeight, rows, inDim, outDim); }
-                catch (NotSupportedException) { }
-            }
-            return KQuantMatmul(input, rawWeight, rows, inDim, outDim, EnsureQ4KMatmulKernel, "Q4_K");
-        }
-
-        internal static MlxArray Q4KMatmulSimdgroup(MlxArray input, MlxArray rawWeight, int rows, int inDim, int outDim)
-        {
-            return IQuantMatmulSimdgroup(input, rawWeight, rows, inDim, outDim, EnsureQ4KMatmulSimdgroupKernel, "Q4_K");
-        }
-
-        internal static MlxArray Q5KMatmul(MlxArray input, MlxArray rawWeight, int rows, int inDim, int outDim)
-        {
-            if (rows == 1 && !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_Q5K_MATMUL4"), "0", StringComparison.Ordinal))
-            {
-                try
-                {
-                    return Q5KMatmul4Cols(input, rawWeight, inDim, outDim);
-                }
-                catch (Exception)
-                {
-                }
-            }
-
-            if (rows >= Iq2XxsMatmulSimdgroupMinRows && !Iq2XxsMatmulSimdgroupDisabled)
-            {
-                try { return Q5KMatmulSimdgroup(input, rawWeight, rows, inDim, outDim); }
-                catch (NotSupportedException) { }
-            }
-            return KQuantMatmul(input, rawWeight, rows, inDim, outDim, EnsureQ5KMatmulKernel, "Q5_K");
-        }
-
-        internal static MlxArray Q5KMatmulSimdgroup(MlxArray input, MlxArray rawWeight, int rows, int inDim, int outDim)
-        {
-            return IQuantMatmulSimdgroup(input, rawWeight, rows, inDim, outDim, EnsureQ5KMatmulSimdgroupKernel, "Q5_K");
-        }
-
         // Rows up to which Q6_K runs as matrix-vector products (the ggml port), one
-        // pass over the weight per row. TS_MLX_Q6K_MATVEC_MAX_ROWS=0 restores the
-        // older kernels. Settable so tests can reach those kernels too.
+        // pass over the weight per row. Settable for tests.
         internal static int Q6KMatvecMaxRows = ResolveMatvecMaxRows("TS_MLX_Q6K_MATVEC_MAX_ROWS");
 
         private static int ResolveMatvecMaxRows(string variable)
@@ -6624,11 +5684,9 @@ if (kind == 0) {
         // Above Q6KMatvecMaxRows (and Iq4XsMatvecMaxRows), the raw weight is dequantized
         // to F16 in slices of at most this many bytes and multiplied by MLX's GEMM.
         // Against an 8-bit affine quantized_matmul (M5 Pro, MLX 0.32.2): +11-26% per
-        // matmul at 512 rows, 7% faster at 2048. TS_MLX_Q6K_DEQUANT_GEMM=0 keeps the
-        // older Q6_K kernels. Settable so a test can force several slices.
+        // matmul at 512 rows, 7% faster at 2048. Settable so a test can force
+        // several slices.
         internal static long DequantSliceBytes = 256L * 1024 * 1024;
-        private static readonly bool Q6KDequantGemm =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_Q6K_DEQUANT_GEMM"), "0", StringComparison.Ordinal);
 
         internal static MlxArray Q6KMatmul(MlxArray input, MlxArray rawWeight, int rows, int inDim, int outDim)
         {
@@ -6642,7 +5700,7 @@ if (kind == 0) {
                 {
                 }
             }
-            else if (rows > Q6KMatvecMaxRows && Q6KDequantGemm)
+            else if (rows > Q6KMatvecMaxRows)
             {
                 try
                 {
@@ -6653,7 +5711,8 @@ if (kind == 0) {
                 }
             }
 
-            if (rows == 1 && !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_Q6K_MATMUL4"), "0", StringComparison.Ordinal))
+            // The kernels below run only when the paths above decline.
+            if (rows == 1)
             {
                 try
                 {
@@ -6664,7 +5723,7 @@ if (kind == 0) {
                 }
             }
 
-            if (rows >= Iq2XxsMatmulSimdgroupMinRows && !Iq2XxsMatmulSimdgroupDisabled)
+            if (rows >= Iq2XxsMatmulSimdgroupMinRows)
             {
                 try { return Q6KMatmulSimdgroup(input, rawWeight, rows, inDim, outDim); }
                 catch (NotSupportedException) { }
@@ -6680,50 +5739,6 @@ if (kind == 0) {
         internal static MlxArray Iq4XsMatmulSimdgroup(MlxArray input, MlxArray rawWeight, int rows, int inDim, int outDim)
         {
             return IQuantMatmulSimdgroup(input, rawWeight, rows, inDim, outDim, EnsureIq4XsMatmulSimdgroupKernel, "IQ4_XS");
-        }
-
-        private static MlxArray Q5KMatmul4Cols(MlxArray input, MlxArray rawWeight, int inDim, int outDim)
-        {
-            if (!input.IsValid || !rawWeight.IsValid)
-                throw new ArgumentException("Q5_K 4-column matmul requires valid input and raw weight arrays.");
-            if (inDim <= 0 || outDim <= 0 || inDim % 256 != 0)
-                throw new ArgumentOutOfRangeException(nameof(inDim), "Q5_K 4-column matmul requires positive dimensions and input dim aligned to 256.");
-
-            return MlxWorker.Shared.Invoke(() =>
-            {
-                MlxFastMetalKernel kernel = EnsureQ5KMatmul4Kernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    int[] shape = { 1, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring Q5_K 4-column matmul output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, (outDim + 3) / 4, 1), "configuring Q5_K 4-column matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring Q5_K 4-column matmul threadgroup");
-
-                    inputs = CreateVectorArray(input, rawWeight);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running Q5_K 4-column matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("Q5_K 4-column matmul produced no output.");
-
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading Q5_K 4-column matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
         }
 
         /// <summary>
@@ -6948,16 +5963,6 @@ if (kind == 0) {
             });
         }
 
-        internal static MlxArray Q4KGetRows(MlxArray rawWeight, MlxArray indices, int rows, int inDim)
-        {
-            return KQuantGetRows(rawWeight, indices, rows, inDim, EnsureQ4KGetRowsKernel, "Q4_K");
-        }
-
-        internal static MlxArray Q5KGetRows(MlxArray rawWeight, MlxArray indices, int rows, int inDim)
-        {
-            return KQuantGetRows(rawWeight, indices, rows, inDim, EnsureQ5KGetRowsKernel, "Q5_K");
-        }
-
         internal static MlxArray Q6KGetRows(MlxArray rawWeight, MlxArray indices, int rows, int inDim)
         {
             return KQuantGetRows(rawWeight, indices, rows, inDim, EnsureQ6KGetRowsKernel, "Q6_K");
@@ -6991,16 +5996,13 @@ if (kind == 0) {
             // For the seqLen==1 decode case, route to the T=1-specialized
             // kernel which drops the outer time loop and hoists the per-
             // head g/beta and per-(head, dv) v scalars outside the dot-
-            // product loops. Gated by TS_MLX_DISABLE_GDN_T1=1 for A/B.
-            bool useT1Kernel = seqLen == 1
-                && !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_DISABLE_GDN_T1"), "1", StringComparison.Ordinal);
+            // product loops.
+            bool useT1Kernel = seqLen == 1;
             // Prefill takes the blocked kernel wherever its fixed thread layout fits
-            // (see GatedDeltaBlockedSource). TS_MLX_GDN_BLOCKED=0 restores the
-            // per-row kernel for A/B.
+            // (see GatedDeltaBlockedSource), the per-row kernel elsewhere.
             bool useBlockedKernel = seqLen > 1
                 && keyDim == 128
-                && valueDim % 32 == 0
-                && GatedDeltaBlockedEnabled;
+                && valueDim % 32 == 0;
 
             MlxArray yResult = default;
             MlxArray stateResult = default;
@@ -7539,18 +6541,15 @@ if (kind == 0) {
             // implementation did) cost a device_new + device_free round trip per
             // call. Cache it once per device so the hot path is a single read.
             int desiredDevice = initializedDevice >= 0 ? initializedDevice : 0;
-            if (!DisableStreamCache && cachedDefaultStreamDevice == desiredDevice)
+            if (cachedDefaultStreamDevice == desiredDevice)
                 return cachedDefaultStream;
 
             MlxDevice device = mlx_device_new_type(MlxGpu, desiredDevice);
             try
             {
                 Check(mlx_get_default_stream(out MlxStream stream, device), "getting MLX default stream");
-                if (!DisableStreamCache)
-                {
-                    cachedDefaultStream = stream;
-                    cachedDefaultStreamDevice = desiredDevice;
-                }
+                cachedDefaultStream = stream;
+                cachedDefaultStreamDevice = desiredDevice;
                 return stream;
             }
             finally
@@ -7709,31 +6708,6 @@ if (kind == 0) {
             }
         }
 
-        private static MlxFastMetalKernel EnsureIq4XsMatmul4SimdKernel()
-        {
-            lock (fastKernelSync)
-            {
-                if (iq4XsMatmul4SimdKernel.IsValid)
-                    return iq4XsMatmul4SimdKernel;
-                if (iq4XsMatmul4SimdKernelDisabled)
-                    throw new NotSupportedException("MLX IQ4_XS simd_sum 4-column matmul kernel was disabled after initialization failed.");
-
-                iq4XsMatmul4SimdKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq4xs_matmul4_simd",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Iq4XsMatmul4SimdSource,
-                    Iq4XsHelpersHeader);
-                if (!iq4XsMatmul4SimdKernel.IsValid)
-                {
-                    iq4XsMatmul4SimdKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ4_XS simd_sum 4-column matmul kernel.");
-                }
-
-                return iq4XsMatmul4SimdKernel;
-            }
-        }
-
         private static MlxFastMetalKernel EnsureIq4XsMatmulRowsKernel()
         {
             lock (fastKernelSync)
@@ -7756,31 +6730,6 @@ if (kind == 0) {
                 }
 
                 return iq4XsMatmulRowsKernel;
-            }
-        }
-
-        private static MlxFastMetalKernel EnsureIq4XsMatmulRows2Kernel()
-        {
-            lock (fastKernelSync)
-            {
-                if (iq4XsMatmulRows2Kernel.IsValid)
-                    return iq4XsMatmulRows2Kernel;
-                if (iq4XsMatmulRows2KernelDisabled)
-                    throw new NotSupportedException("MLX IQ4_XS 2-column batched matmul kernel was disabled after initialization failed.");
-
-                iq4XsMatmulRows2Kernel = CreateFastMetalKernel(
-                    "tensorsharp_iq4xs_matmul_rows2",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Iq4XsMatmulRows2Source,
-                    Iq4XsHelpersHeader);
-                if (!iq4XsMatmulRows2Kernel.IsValid)
-                {
-                    iq4XsMatmulRows2KernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ4_XS 2-column batched matmul kernel.");
-                }
-
-                return iq4XsMatmulRows2Kernel;
             }
         }
 
@@ -8087,16 +7036,6 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 "tensorsharp_iq4xs_matmul_sg", "tensorsharp_dequant_iq4xs", 136,
                 Iq4XsHelpersHeader, "IQ4_XS");
 
-        private static MlxFastMetalKernel EnsureQ4KMatmulSimdgroupKernel() =>
-            EnsureSgKernel(ref q4KMatmulSimdgroupKernel, ref q4KMatmulSimdgroupKernelDisabled,
-                "tensorsharp_q4k_matmul_sg", "tensorsharp_dequant_q4k", 144,
-                KQuantHelpersHeader, "Q4_K");
-
-        private static MlxFastMetalKernel EnsureQ5KMatmulSimdgroupKernel() =>
-            EnsureSgKernel(ref q5KMatmulSimdgroupKernel, ref q5KMatmulSimdgroupKernelDisabled,
-                "tensorsharp_q5k_matmul_sg", "tensorsharp_dequant_q5k", 176,
-                KQuantHelpersHeader, "Q5_K");
-
         private static MlxFastMetalKernel EnsureQ6KMatmulSimdgroupKernel() =>
             EnsureSgKernel(ref q6KMatmulSimdgroupKernel, ref q6KMatmulSimdgroupKernelDisabled,
                 "tensorsharp_q6k_matmul_sg", "tensorsharp_dequant_q6k", 210,
@@ -8348,131 +7287,6 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 }
 
                 return iq3XxsGetRowsKernel;
-            }
-        }
-
-        private static MlxFastMetalKernel EnsureQ4KMatmulKernel()
-        {
-            lock (fastKernelSync)
-            {
-                if (q4KMatmulKernel.IsValid)
-                    return q4KMatmulKernel;
-                if (q4KMatmulKernelDisabled)
-                    throw new NotSupportedException("MLX Q4_K matmul kernel was disabled after initialization failed.");
-
-                q4KMatmulKernel = CreateFastMetalKernel(
-                    "tensorsharp_q4k_matmul",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Q4KMatmulSource,
-                    KQuantHelpersHeader);
-                if (!q4KMatmulKernel.IsValid)
-                {
-                    q4KMatmulKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Q4_K matmul kernel.");
-                }
-
-                return q4KMatmulKernel;
-            }
-        }
-
-        private static MlxFastMetalKernel EnsureQ4KGetRowsKernel()
-        {
-            lock (fastKernelSync)
-            {
-                if (q4KGetRowsKernel.IsValid)
-                    return q4KGetRowsKernel;
-                if (q4KGetRowsKernelDisabled)
-                    throw new NotSupportedException("MLX Q4_K get_rows kernel was disabled after initialization failed.");
-
-                q4KGetRowsKernel = CreateFastMetalKernel(
-                    "tensorsharp_q4k_get_rows",
-                    new[] { "w", "indices" },
-                    new[] { "y" },
-                    Q4KGetRowsSource,
-                    KQuantHelpersHeader);
-                if (!q4KGetRowsKernel.IsValid)
-                {
-                    q4KGetRowsKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Q4_K get_rows kernel.");
-                }
-
-                return q4KGetRowsKernel;
-            }
-        }
-
-        private static MlxFastMetalKernel EnsureQ5KMatmulKernel()
-        {
-            lock (fastKernelSync)
-            {
-                if (q5KMatmulKernel.IsValid)
-                    return q5KMatmulKernel;
-                if (q5KMatmulKernelDisabled)
-                    throw new NotSupportedException("MLX Q5_K matmul kernel was disabled after initialization failed.");
-
-                q5KMatmulKernel = CreateFastMetalKernel(
-                    "tensorsharp_q5k_matmul",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Q5KMatmulSource,
-                    KQuantHelpersHeader);
-                if (!q5KMatmulKernel.IsValid)
-                {
-                    q5KMatmulKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Q5_K matmul kernel.");
-                }
-
-                return q5KMatmulKernel;
-            }
-        }
-
-        private static MlxFastMetalKernel EnsureQ5KMatmul4Kernel()
-        {
-            lock (fastKernelSync)
-            {
-                if (q5KMatmul4Kernel.IsValid)
-                    return q5KMatmul4Kernel;
-                if (q5KMatmul4KernelDisabled)
-                    throw new NotSupportedException("MLX Q5_K 4-column matmul kernel was disabled after initialization failed.");
-
-                q5KMatmul4Kernel = CreateFastMetalKernel(
-                    "tensorsharp_q5k_matmul4",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Q5KMatmul4Source,
-                    KQuantHelpersHeader);
-                if (!q5KMatmul4Kernel.IsValid)
-                {
-                    q5KMatmul4KernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Q5_K 4-column matmul kernel.");
-                }
-
-                return q5KMatmul4Kernel;
-            }
-        }
-
-        private static MlxFastMetalKernel EnsureQ5KGetRowsKernel()
-        {
-            lock (fastKernelSync)
-            {
-                if (q5KGetRowsKernel.IsValid)
-                    return q5KGetRowsKernel;
-                if (q5KGetRowsKernelDisabled)
-                    throw new NotSupportedException("MLX Q5_K get_rows kernel was disabled after initialization failed.");
-
-                q5KGetRowsKernel = CreateFastMetalKernel(
-                    "tensorsharp_q5k_get_rows",
-                    new[] { "w", "indices" },
-                    new[] { "y" },
-                    Q5KGetRowsSource,
-                    KQuantHelpersHeader);
-                if (!q5KGetRowsKernel.IsValid)
-                {
-                    q5KGetRowsKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Q5_K get_rows kernel.");
-                }
-
-                return q5KGetRowsKernel;
             }
         }
 
@@ -8801,31 +7615,6 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
             }
         }
 
-        private static MlxFastMetalKernel EnsureHeadDim256AttentionKernel()
-        {
-            lock (fastKernelSync)
-            {
-                if (headDim256AttentionKernel.IsValid)
-                    return headDim256AttentionKernel;
-                if (headDim256AttentionKernelDisabled)
-                    throw new NotSupportedException("MLX headDim256 attention kernel was disabled after initialization failed.");
-
-                headDim256AttentionKernel = CreateFastMetalKernel(
-                    "tensorsharp_head_dim_256_attention",
-                    new[] { "q", "k", "v", "scale_value" },
-                    new[] { "y" },
-                    HeadDim256AttentionSource,
-                    string.Empty);
-                if (!headDim256AttentionKernel.IsValid)
-                {
-                    headDim256AttentionKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX headDim256 attention kernel.");
-                }
-
-                return headDim256AttentionKernel;
-            }
-        }
-
         private static MlxFastMetalKernel EnsureCircularDecodeAttentionKernel()
         {
             lock (fastKernelSync)
@@ -8876,31 +7665,6 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
             }
         }
 
-        private static MlxFastMetalKernel EnsureGemma4QkvPreprocessDecodeKernel()
-        {
-            lock (fastKernelSync)
-            {
-                if (gemma4QkvPreprocessDecodeKernel.IsValid)
-                    return gemma4QkvPreprocessDecodeKernel;
-                if (gemma4QkvPreprocessDecodeKernelDisabled)
-                    throw new NotSupportedException("MLX Gemma4 QKV preprocess decode kernel was disabled after initialization failed.");
-
-                gemma4QkvPreprocessDecodeKernel = CreateFastMetalKernel(
-                    "tensorsharp_gemma4_qkv_preprocess_decode",
-                    new[] { "qkv", "q_norm_w", "k_norm_w", "cos_table", "sin_table", "eps_value" },
-                    new[] { "q_out", "k_out", "v_out" },
-                    Gemma4QkvPreprocessDecodeSource,
-                    string.Empty);
-                if (!gemma4QkvPreprocessDecodeKernel.IsValid)
-                {
-                    gemma4QkvPreprocessDecodeKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Gemma4 QKV preprocess decode kernel.");
-                }
-
-                return gemma4QkvPreprocessDecodeKernel;
-            }
-        }
-
         private static MlxFastMetalKernel EnsureQ8AddmmAddKernel()
         {
             lock (fastKernelSync)
@@ -8924,94 +7688,6 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
 
                 return q8AddmmAddKernel;
             }
-        }
-
-        private static MlxFastMetalKernel EnsureDecodeAttentionHeadDim512Kernel()
-        {
-            lock (fastKernelSync)
-            {
-                if (decodeAttentionHeadDim512Kernel.IsValid)
-                    return decodeAttentionHeadDim512Kernel;
-                if (decodeAttentionHeadDim512KernelDisabled)
-                    throw new NotSupportedException("MLX head_dim=512 decode attention kernel was disabled after initialization failed.");
-
-                decodeAttentionHeadDim512Kernel = CreateFastMetalKernel(
-                    "tensorsharp_decode_attention_head_dim_512",
-                    new[] { "q", "k_cache", "v_cache", "scale_value", "AttendLen" },
-                    new[] { "y" },
-                    DecodeAttentionHeadDim512Source,
-                    string.Empty);
-                if (!decodeAttentionHeadDim512Kernel.IsValid)
-                {
-                    decodeAttentionHeadDim512KernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX head_dim=512 decode attention kernel.");
-                }
-
-                return decodeAttentionHeadDim512Kernel;
-            }
-        }
-
-        /// <summary>
-        /// Decode attention for head_dim = 512 (Gemma 4 global layers).
-        /// Non-circular. Uses simdgroup-fast online-softmax structure
-        /// matching <see cref="CircularDecodeAttentionSource"/>.
-        /// </summary>
-        internal static MlxArray DecodeAttentionHeadDim512(
-            MlxArray qFlat,
-            MlxArray kCache,
-            MlxArray vCache,
-            int numHeads,
-            int numKVHeads,
-            int headDim,
-            int cacheLen,
-            int attendLen,
-            float scale)
-        {
-            if (!qFlat.IsValid || !kCache.IsValid || !vCache.IsValid)
-                throw new ArgumentException("MLX head_dim=512 decode attention inputs must be valid arrays.");
-            if (numHeads <= 0 || numKVHeads <= 0 || numHeads % numKVHeads != 0
-                || headDim != 512 || cacheLen <= 0 || attendLen <= 0 || attendLen > cacheLen)
-                throw new ArgumentOutOfRangeException(nameof(headDim), "head_dim=512 decode attention requires HeadDim==512 and valid dims.");
-
-            return MlxWorker.Shared.Invoke(() =>
-            {
-                MlxFastMetalKernel kernel = EnsureDecodeAttentionHeadDim512Kernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                MlxArray scaleArray = default; MlxArray attendLenArray = default;
-                try
-                {
-                    AddTemplateInt(config, "NumHeads", numHeads);
-                    AddTemplateInt(config, "NumKVHeads", numKVHeads);
-                    AddTemplateInt(config, "HeadDim", headDim);
-                    AddTemplateInt(config, "CacheLen", cacheLen);
-
-                    int[] shape = { 1, numHeads * headDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring head_dim=512 decode attention output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, headDim, numHeads, 1), "configuring head_dim=512 decode attention grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, headDim, 1, 1), "configuring head_dim=512 decode attention threadgroup");
-
-                    scaleArray = mlx_array_new_float32(scale);
-                    attendLenArray = mlx_array_new_int(attendLen);
-                    inputs = CreateVectorArray(qFlat, kCache, vCache, scaleArray, attendLenArray);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running head_dim=512 decode attention");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("head_dim=512 decode attention kernel produced no output.");
-
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading head_dim=512 decode attention output");
-                    return result;
-                }
-                finally
-                {
-                    if (scaleArray.IsValid) _ = mlx_array_free(scaleArray);
-                    if (attendLenArray.IsValid) _ = mlx_array_free(attendLenArray);
-                    if (inputs.IsValid) _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid) _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid) _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
         }
 
         private static MlxFastMetalKernel EnsureQ8MatmulGeluMulKernel()
@@ -10343,10 +9019,6 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
         [LibraryImport(LibraryName, EntryPoint = "mlx_take_axis")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial int mlx_take_axis(out MlxArray result, MlxArray input, MlxArray indices, int axis, MlxStream stream);
-
-        [LibraryImport(LibraryName, EntryPoint = "mlx_take_along_axis")]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int mlx_take_along_axis(out MlxArray result, MlxArray input, MlxArray indices, int axis, MlxStream stream);
 
         [LibraryImport(LibraryName, EntryPoint = "mlx_argmax_axis")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]

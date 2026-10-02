@@ -33,7 +33,6 @@ public class ApiModelsResponseTests : IDisposable
         string modelDir = Path.Combine(_baseDir, "secret-model-location");
         var adapter = new WebUiAdapter(
             new ModelService(),
-            new InferenceQueue(),
             new SessionManager(),
             new ServerHostingOptions(
                 startupModelPath: Path.Combine(modelDir, "foo.gguf"),

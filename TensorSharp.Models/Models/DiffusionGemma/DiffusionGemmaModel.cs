@@ -155,35 +155,6 @@ namespace TensorSharp.Models
         private float[][] _perExpertScale;               // per-layer ffn_down_exps.scale
         private bool _fusedMoeAvailable;
 
-        // MLX fused MoE via mlx_gather_qmm: one batched (expert-sorted) gather_qmm (gate_up) + GEGLU + one
-        // gather_qmm (down) over stacked MLX-affine experts — the MLX analogue of GGML's mul_mat_id.
-        // Correct (self-checked at runtime: cosine 1.0 vs the per-expert path), but measured NOT faster than
-        // the per-expert affine path for this model's MoE shape: 256 canvas tokens × top-8 over 128 experts
-        // leaves only ~16 tokens/expert, so the per-expert path already issues efficient grouped GEMMs and
-        // the MoE is small-GEMM compute-bound — gather_qmm's sort/unsort overhead offsets its dispatch
-        // savings (M=1 ~3900 ms, sorted ~3635 ms, per-expert affine ~3450 ms / decode step). Hence OFF by
-        // default. Opt in with TS_MLX_MOE_GATHER_QMM=1 (it can win for larger canvases / fewer experts where
-        // per-expert batches are bigger). The one-time self-check disables it permanently if it ever diverges.
-        private readonly bool _moeGatherQmmEnabled = Environment.GetEnvironmentVariable("TS_MLX_MOE_GATHER_QMM") == "1";
-        private bool _moeGatherQmmOk = true;
-        private bool _moeGatherQmmChecked;
-
-        // MLX FULLY-ON-DEVICE fused MoE: routing (top-K) AND the expert FFN run on-device with NO host read,
-        // so the entire decode forward stays device-resident — the MLX port of GGML's fused single-graph
-        // decode. CORRECT (self-check cosine 1.0) but measured NOT faster (~4030 vs ~3450 ms/step for the
-        // per-expert affine path), because unlike GGML — where fusion into ONE C++ graph / Metal command
-        // buffer removes ALL per-op host/native overhead (its 4x: per-op 2650 -> fused 640 ms) — MLX still
-        // builds its graph op-by-op through the worker thread, so that overhead remains even when the forward
-        // collapses to one lazy eval; and a device-resident router forces the M=1 (GEMV) gather_qmm whose
-        // penalty offsets the (small) per-layer-sync saving. So OFF by default; opt in with
-        // TS_MLX_FUSED_DEVICE_MOE=1. Matching GGML on MLX needs mlx_compile of the whole forward or a custom
-        // Metal megakernel (i.e. reimplementing GGML's kernel) — not a cheap port. One-time self-check.
-        private readonly bool _moeFusedDeviceEnabled = Environment.GetEnvironmentVariable("TS_MLX_FUSED_DEVICE_MOE") == "1";
-        private bool _moeFusedDeviceOk = true;
-        private bool _moeFusedDeviceChecked;
-        private Tensor _moeLhsGateConst, _moeLhsArangeConst;   // host-built once: [N*K] gather_qmm lhs indices
-        private int _moeConstNK = -1;
-
         // cached ones tensors for unweighted RMSNorm, keyed by dim
         private readonly Dictionary<int, Tensor> _onesByDim = new();
 
@@ -260,7 +231,7 @@ namespace TensorSharp.Models
         /// <summary>Whether prompt-KV caching is active: the sampler calls <see cref="PrefillPrompt"/>
         /// once per block then <see cref="DecodeCanvas"/> per step. Available on the device-glue (GPU)
         /// backends and on the pure-C# CPU backend (host glue, DiffusionGemmaModel.Cpu.cs); the setter is
-        /// a no-op on the remaining backends (ggml_cpu, and cpu under DIFFUSION_CPU_LEGACY=1).</summary>
+        /// a no-op on the remaining backend (ggml_cpu).</summary>
         public bool SupportsPromptKvCache
         {
             get => _pkvEnabled;
@@ -305,26 +276,6 @@ namespace TensorSharp.Models
             _maxContextLength = ResolveConfiguredContextLength();
 
             ParseTokenizer();
-
-            // MLX: DiffusionGemma always runs the MULTI-ROW regime (it denoises a C=256 canvas every
-            // step), where MLX's raw GGUF K-quant Metal kernels are poorly tuned (~150 GFLOP/s — they are
-            // written for rows==1 autoregressive decode). Preload K-quant weights into MLX-native AFFINE
-            // form instead, so every matmul (attention projections, dense FFN, per-expert MoE, lm_head)
-            // runs on Apple's fast built-in mlx_quantized_matmul. The affine repack is LOSSLESS for
-            // K-quant (per-32 group scale=d*scaleByte, bias=-dmin*minByte is exactly ggml's dequant), so
-            // accuracy is unchanged. Opt out with TS_MLX_KQUANT_AFFINE=0.
-            // NOTE: this is intentionally not restored after load. MLX weights are created lazily on first
-            // matmul (not eagerly in LoadWeights), and the per-matmul path keys off the *created* weight's
-            // Mode — so the flag must stay set through the first forward for the K-quants to materialize in
-            // affine form. The only side effect is that a subsequently-loaded autoregressive MLX model in the
-            // same process would also get affine K-quants (lossless; its rows==1 decode may marginally prefer
-            // the raw custom kernels). For the common single-model process this is a no-op. Force off with
-            // TS_MLX_KQUANT_AFFINE=0.
-            if (backend == BackendType.Mlx &&
-                Environment.GetEnvironmentVariable("TS_MLX_KQUANT_AFFINE") != "0")
-            {
-                MlxQuantizedOps.PreferAffineKQuant = true;
-            }
 
             LoadWeights();
 
@@ -607,7 +558,7 @@ namespace TensorSharp.Models
             {
                 // Cap incidental device copies (prompt K/V, decode masks, activations bound by per-op
                 // kernels) so they cannot push VRAM past physical either. When everything fits there is
-                // no oversubscription risk, so the legacy unlimited behaviour is kept.
+                // no oversubscription risk, so it stays unlimited.
                 GgmlBasicOps.SetDeviceCopyBudget(copyBudgetMb * 1024 * 1024);
             }
             Console.WriteLine(
@@ -663,7 +614,7 @@ namespace TensorSharp.Models
             _swForward.Start();
             int C = tokens.Length - promptLen;
             using Tensor hidden = ForwardCanvasHidden(tokens, promptLen, scPrevLogits, scUse, prevTempInv);
-            if (CpuFastPaths && !CpuLegacyAll)
+            if (CpuFastPaths)
             {
                 float[] cpuLogits = CpuLmHead(hidden, 0, C, pooled: true);
                 if (cpuLogits != null)
@@ -835,7 +786,7 @@ namespace TensorSharp.Models
 
         private Tensor DenseMlp(Tensor input, string prefix, int N)
         {
-            if (CpuFastPaths && !CpuLegacyProj)
+            if (CpuFastPaths)
             {
                 Tensor fused = CpuDenseMlp(input, prefix, N);
                 if (fused != null) return fused;
@@ -858,7 +809,7 @@ namespace TensorSharp.Models
         private Tensor Attention(Tensor input, int layer, string prefix, int N, int P)
         {
             // Pure-C# backend: fused Q/K/V dispatch + fused norm/RoPE + the tiled SIMD attention.
-            if (CpuFastPaths && !CpuLegacyAttn)
+            if (CpuFastPaths)
                 return CpuUnifiedAttention(input, layer, prefix, N, P);
 
             bool local = _isLocal[layer];
@@ -2133,34 +2084,6 @@ namespace TensorSharp.Models
             using var moeInput = RMSNormOp(attnOut, $"{prefix}.pre_ffw_norm_2.weight");  // [N, D]
             var output = new Tensor(_allocator, DType.Float32, N, D);
 
-            // MLX FULLY-ON-DEVICE fused MoE (on-device routing + gather_qmm FFN, NO host read) — keeps the
-            // whole decode forward device-resident so MLX evaluates all layers as one lazy graph (the MLX
-            // port of GGML's fused single-graph decode, whose ~4x comes from killing the per-layer host
-            // round-trip). Self-checked once vs the per-expert path; falls back permanently on divergence.
-            if (_backend == BackendType.Mlx && _moeFusedDeviceEnabled && _moeFusedDeviceOk)
-            {
-                if (!_moeFusedDeviceChecked)
-                {
-                    _moeFusedDeviceChecked = true;
-                    var (rwChk, seChk) = MoERoute(attnOut, prefix, N);
-                    using var fdRef = new Tensor(_allocator, DType.Float32, N, D);
-                    bool refOk = TryMoEMlx(moeInput, fdRef, seChk, rwChk, layer, prefix, N, D);
-                    bool fOk = refOk && TryMoEFusedOnDeviceMlx(attnOut, moeInput, output, layer, N, D);
-                    double cos = fOk ? CosineSimilarity(output, fdRef, (long)N * D) : 0;
-                    _moeFusedDeviceOk = fOk && cos >= 0.999;
-                    Console.WriteLine($"  [MLX fused on-device MoE] self-check cosine={cos:F6} -> {(_moeFusedDeviceOk ? "ENABLED" : "DISABLED (per-expert fallback)")}");
-                    if (_moeFusedDeviceOk) return output;
-                    Ops.Copy(output, fdRef);
-                    return output;
-                }
-                if (TryMoEFusedOnDeviceMlx(attnOut, moeInput, output, layer, N, D))
-                    return output;
-                _moeFusedDeviceOk = false;   // latched: this branch never runs again
-                Console.WriteLine($"  [MLX fused on-device MoE] kernel rejected layer {layer} after passing the " +
-                    "self-check; fused on-device MoE disabled for the rest of the run, using the per-expert " +
-                    "fallback (per-layer host round-trips return). Reported once.");
-            }
-
             long tr = Stopwatch.GetTimestamp();
             (float[] routingWeights, int[] selectedExperts) = MoERoute(attnOut, prefix, N);
             _tMoeRoute += Stopwatch.GetTimestamp() - tr;
@@ -2173,39 +2096,13 @@ namespace TensorSharp.Models
                 return output;
             }
 
-            // MLX fast path: ONE fused gather_qmm over the layer's stacked experts (vs 128 per-expert
-            // matmuls). Self-checked once against the per-expert path; falls back permanently if it
-            // rejects or diverges.
-            if (_backend == BackendType.Mlx && _moeGatherQmmEnabled && _moeGatherQmmOk)
-            {
-                if (!_moeGatherQmmChecked)
-                {
-                    _moeGatherQmmChecked = true;
-                    using var reference = new Tensor(_allocator, DType.Float32, N, D);
-                    bool refOk = TryMoEMlx(moeInput, reference, selectedExperts, routingWeights, layer, prefix, N, D);
-                    bool fusedOk = refOk && TryMoEGatherQmmMlx(moeInput, output, selectedExperts, routingWeights, layer, N, D);
-                    double cos = fusedOk ? CosineSimilarity(output, reference, (long)N * D) : 0;
-                    _moeGatherQmmOk = fusedOk && cos >= 0.999;
-                    Console.WriteLine($"  [MLX gather_qmm MoE] self-check cosine={cos:F6} -> {(_moeGatherQmmOk ? "ENABLED" : "DISABLED (per-expert fallback)")}");
-                    if (_moeGatherQmmOk) return output;
-                    Ops.Copy(output, reference);   // use the verified per-expert result this step
-                    return output;
-                }
-                if (TryMoEGatherQmmMlx(moeInput, output, selectedExperts, routingWeights, layer, N, D))
-                    return output;
-                _moeGatherQmmOk = false;   // latched: this branch never runs again
-                Console.WriteLine($"  [MLX gather_qmm MoE] kernel rejected layer {layer} after passing the " +
-                    "self-check; gather_qmm MoE disabled for the rest of the run, using the per-expert " +
-                    "fallback. Reported once.");
-            }
-
             // MLX device path: per-expert gather -> FFN -> weighted scatter-add, all on-device.
             if (_backend == BackendType.Mlx &&
                 TryMoEMlx(moeInput, output, selectedExperts, routingWeights, layer, prefix, N, D))
                 return output;
 
             // Pure-C# backend: every expert's projections batched into two dispatches.
-            if (CpuFastPaths && !CpuLegacyMoe &&
+            if (CpuFastPaths &&
                 CpuMoEFfn(moeInput, output, selectedExperts, routingWeights, layer, N, D))
             {
                 _tMoeFfn += Stopwatch.GetTimestamp() - tf;
@@ -2355,171 +2252,6 @@ namespace TensorSharp.Models
             return true;
         }
 
-        /// <summary>Fused MLX MoE FFN via mlx_gather_qmm over the layer's stacked experts. Computes, for
-        /// each of the N canvas tokens routed to its K experts: gate_up = gather_qmm(x, gateUpStack)[N*K,2ff],
-        /// geglu = gelu(gate)*up [N*K,ff], down = gather_qmm(geglu, downStack)[N*K,D], then the routing-weighted
-        /// sum over K (with the per-expert down scale folded in) via one batched matmul -> [N, D]. Numerically
-        /// equivalent to the per-expert path (same affine expert weights, just batched). Returns false to fall
-        /// back if any storage/type is unsupported or a kernel rejects the layout.</summary>
-        private unsafe bool TryMoEGatherQmmMlx(Tensor moeInput, Tensor output,
-            int[] selectedExperts, float[] routingWeights, int layer, int N, int D)
-        {
-            var gateUp = _stackedGateUp[layer];
-            var down = _stackedDown[layer];
-            if (gateUp == null || down == null) return false;
-            int E = _numExperts;
-            int K = _numExpertsUsed;
-            int ff = _expertFfn;
-            int NK = N * K;
-
-            // Sort the (token, expert) pairs by expert so each expert's weight is loaded ONCE and serves its
-            // consecutive rows as a GEMM (sorted_indices=true) — the key to beating the per-expert path,
-            // which already groups ~N*K/E tokens per expert. Without sorting, gather_qmm reloads the expert
-            // weight per row (GEMV-bound) and is slower. Sort is on the host (NK is tiny, ~2048).
-            int[] order = new int[NK];
-            for (int i = 0; i < NK; i++) order[i] = i;
-            Array.Sort(order, (a, b) => selectedExperts[a].CompareTo(selectedExperts[b]));   // stable enough
-            int[] expertsSorted = new int[NK];   // rhs (sorted, non-decreasing) for both projections
-            int[] tokenSorted = new int[NK];     // lhs for gate_up: the token of each sorted pair
-            int[] invOrder = new int[NK];        // unsort map: invOrder[originalPair] = sorted position
-            int[] arangeNK = new int[NK];        // lhs for down: each sorted geglu row uses itself
-            for (int i = 0; i < NK; i++)
-            {
-                int p = order[i];
-                expertsSorted[i] = selectedExperts[p];
-                tokenSorted[i] = p / K;
-                invOrder[p] = i;
-                arangeNK[i] = i;
-            }
-
-            // routing weight per ORIGINAL (n,k), with the per-expert post-down scale folded in (matches TryMoEMlx).
-            float[] perExpertScale = _perExpertScale[layer];
-            float[] w = routingWeights;
-            if (perExpertScale != null)
-            {
-                w = new float[NK];
-                for (int nk = 0; nk < NK; nk++) w[nk] = routingWeights[nk] * perExpertScale[selectedExperts[nk]];
-            }
-
-            using var tokenSortedT = CreateIntTensor(tokenSorted, NK);
-            using var expertsSortedT = CreateIntTensor(expertsSorted, NK);
-            using var arangeT = CreateIntTensor(arangeNK, NK);
-            using var invOrderT = CreateIntTensor(invOrder, NK);
-            using var input3 = moeInput.View(N, 1, D);                       // [N,1,in] (M=1)
-
-            // gate_up: sorted rows -> grouped GEMM per expert. Output in SORTED order.
-            using var gateUpSorted = new Tensor(_allocator, DType.Float32, NK, 2 * ff);
-            if (!MlxQuantizedOps.TryGatherQmm(gateUpSorted, input3, tokenSortedT, expertsSortedT,
-                    gateUp.Data, gateUp.Data, gateUp.GgmlType, gateUp.PerExpertNe0, gateUp.PerExpertNe1, E, gateUp.TotalRawBytes,
-                    sortedIndices: true))
-                return false;
-
-            using var gegluSorted = new Tensor(_allocator, DType.Float32, NK, ff);
-            if (!MlxFusedOps.TryGeluMulSplit(gegluSorted, gateUpSorted, ff)) return false;
-
-            using var gegluSorted3 = gegluSorted.View(NK, 1, ff);
-            using var downSorted = new Tensor(_allocator, DType.Float32, NK, D);
-            if (!MlxQuantizedOps.TryGatherQmm(downSorted, gegluSorted3, arangeT, expertsSortedT,
-                    down.Data, down.Data, down.GgmlType, down.PerExpertNe0, down.PerExpertNe1, E, down.TotalRawBytes,
-                    sortedIndices: true))
-                return false;
-
-            // Unsort the down output back to original (n,k) order: downOrig[p] = downSorted[invOrder[p]].
-            using var downOrig = new Tensor(_allocator, DType.Float32, NK, D);
-            if (!MlxFusedOps.TryGatherRows(downOrig, downSorted, invOrderT)) return false;
-
-            // routing-weighted sum over the K experts: out[N,1,D] = w[N,1,K] @ down[N,K,D].
-            using var wT = CreateFloatTensor(w, N, 1, K);
-            using var downB = downOrig.View(N, K, D);
-            using var outB = output.View(N, 1, D);
-            Ops.AddmmBatch(outB, 0f, outB, 1f, wT, downB);
-            InvalidateTensorDeviceCache(output);
-            return true;
-        }
-
-        /// <summary>FULLY-ON-DEVICE MLX MoE: routes (top-K) AND runs the expert FFN with NO host read, so
-        /// the decode forward stays device-resident and MLX evaluates the whole layer stack as one lazy
-        /// graph. Router: rms_norm_noscale(attnOut)·(1/sqrt(D))·gate_inp_scale → gate_inp matmul → on-device
-        /// batched top-K (argpartition + take_along_axis + softmax) → device idx[N,K] + weights[N,K]. FFN:
-        /// gather_qmm(gate_up) → GEGLU → gather_qmm(down, per-expert scale folded into the stacked affine)
-        /// → routing-weighted sum. Equivalent to the per-expert path (self-checked). Returns false to fall
-        /// back if any op rejects the layout.</summary>
-        private unsafe bool TryMoEFusedOnDeviceMlx(Tensor attnOut, Tensor moeInput, Tensor output, int layer, int N, int D)
-        {
-            var gateUp = _stackedGateUp[layer];
-            var down = _stackedDown[layer];
-            if (gateUp == null || down == null) return false;
-            int E = _numExperts, K = _numExpertsUsed, ff = _expertFfn, NK = N * K;
-            float eps = Config.Eps;
-            string prefix = $"blk.{layer}";
-
-            // ---- on-device router (mirrors MoERoute's device pre-processing; top-K stays on device) ----
-            using var routerNormed = Ops.NewContiguous(attnOut);
-            Ops.RMSNorm(routerNormed, routerNormed, GetOnes(D), null, eps);   // unweighted rms_norm
-            Ops.Mul(routerNormed, routerNormed, 1f / MathF.Sqrt(D));
-            if (_weights.TryGetValue($"{prefix}.ffn_gate_inp.scale", out var gscale))
-                Ops.Mul(routerNormed, routerNormed, gscale);
-            using var scores = LinearForward(routerNormed, $"{prefix}.ffn_gate_inp.weight");   // [N, E]
-            using var idx = new Tensor(_allocator, DType.Int32, N, K);
-            using var weights = new Tensor(_allocator, DType.Float32, N, K);
-            if (!MlxFusedOps.TryBatchedMoeRouterTopK(scores, idx, weights)) return false;
-
-            // ---- on-device FFN via gather_qmm over the stacked experts ----
-            var (lhsGate, lhsArange) = GetMoEConstIndices(N, K);
-            using var idxFlat = idx.View(NK);                       // [N*K] int32 (rhs = chosen expert per pair)
-            using var input3 = moeInput.View(N, 1, D);              // [N,1,in] (M=1)
-            using var gateUpOut = new Tensor(_allocator, DType.Float32, NK, 2 * ff);
-            if (!MlxQuantizedOps.TryGatherQmm(gateUpOut, input3, lhsGate, idxFlat,
-                    gateUp.Data, gateUp.Data, gateUp.GgmlType, gateUp.PerExpertNe0, gateUp.PerExpertNe1, E, gateUp.TotalRawBytes))
-                return false;
-            using var geglu = new Tensor(_allocator, DType.Float32, NK, ff);
-            if (!MlxFusedOps.TryGeluMulSplit(geglu, gateUpOut, ff)) return false;
-            using var geglu3 = geglu.View(NK, 1, ff);
-            using var downOut = new Tensor(_allocator, DType.Float32, NK, D);
-            if (!MlxQuantizedOps.TryGatherQmm(downOut, geglu3, lhsArange, idxFlat,
-                    down.Data, down.Data, down.GgmlType, down.PerExpertNe0, down.PerExpertNe1, E, down.TotalRawBytes,
-                    perExpertScale: _perExpertScale[layer]))   // per-expert down scale folded into the stacked affine
-                return false;
-
-            // routing-weighted sum over the K experts: out[N,1,D] = w[N,1,K] @ down[N,K,D] (w device, no host read).
-            using var wView = weights.View(N, 1, K);
-            using var downB = downOut.View(N, K, D);
-            using var outB = output.View(N, 1, D);
-            Ops.AddmmBatch(outB, 0f, outB, 1f, wView, downB);
-            InvalidateTensorDeviceCache(output);
-            return true;
-        }
-
-        /// <summary>Cached host-built constant gather_qmm lhs index tensors [N*K]: lhsGate[nk]=nk/K (the
-        /// token n that pair nk belongs to, for the shared gate_up input) and lhsArange[nk]=nk (each down
-        /// row uses its own GEGLU output). Constant (routing-independent), so built once and reused.</summary>
-        private (Tensor lhsGate, Tensor lhsArange) GetMoEConstIndices(int N, int K)
-        {
-            int NK = N * K;
-            if (_moeConstNK != NK)
-            {
-                _moeLhsGateConst?.Dispose(); _moeLhsArangeConst?.Dispose();
-                int[] lhsGate = new int[NK];
-                int[] lhsArange = new int[NK];
-                for (int nk = 0; nk < NK; nk++) { lhsGate[nk] = nk / K; lhsArange[nk] = nk; }
-                _moeLhsGateConst = CreateIntTensor(lhsGate, NK);
-                _moeLhsArangeConst = CreateIntTensor(lhsArange, NK);
-                _moeConstNK = NK;
-            }
-            return (_moeLhsGateConst, _moeLhsArangeConst);
-        }
-
-        /// <summary>Cosine similarity between the first <paramref name="n"/> elements of two tensors (host
-        /// read). Used by the one-time gather_qmm MoE self-check.</summary>
-        private double CosineSimilarity(Tensor a, Tensor b, long n)
-        {
-            float[] av = a.GetElementsAsFloat((int)n);
-            float[] bv = b.GetElementsAsFloat((int)n);
-            double dot = 0, na = 0, nb = 0;
-            for (long i = 0; i < n; i++) { double x = av[i], y = bv[i]; dot += x * y; na += x * x; nb += y * y; }
-            return dot / (Math.Sqrt(na) * Math.Sqrt(nb) + 1e-12);
-        }
-
         private Tensor ExpertFFN(Tensor input, string prefix, int expert, int cnt)
         {
             // gate_up are fused in this checkpoint: ffn_gate_up_exps.{e}.weight -> [cnt, 2*expertFfn]
@@ -2549,7 +2281,7 @@ namespace TensorSharp.Models
 
             int E = _numExperts;
             int K = _numExpertsUsed;
-            float[] scoresArr = CpuFastPaths && !CpuLegacyRouter ? CpuRouterScores(normed, prefix, N) : null;
+            float[] scoresArr = CpuFastPaths ? CpuRouterScores(normed, prefix, N) : null;
             if (scoresArr == null)
             {
                 using var scores = LinearForward(normed, $"{prefix}.ffn_gate_inp.weight");  // [N, numExperts]
@@ -2840,8 +2572,6 @@ namespace TensorSharp.Models
             _maskGlobal?.Dispose();
             _decodeMaskLocal?.Dispose();
             _decodeMaskGlobal?.Dispose();
-            _moeLhsGateConst?.Dispose();
-            _moeLhsArangeConst?.Dispose();
             // Reclaim the GGML device-buffer-cache entries for the prompt K/V (see AllocPromptStore /
             // ReleasePromptKvTensor) before disposing their host storage, so the cached device-local
             // copies are freed rather than orphaned.

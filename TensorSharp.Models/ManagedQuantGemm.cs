@@ -44,9 +44,6 @@ namespace TensorSharp.Models
     // (row, column) pair - float scales, and for Q4_K/Q5_K the d8 * bsum
     // products that carry the K-quant min term.
     //
-    // A/B: TS_CPU_QGEMM=0 restores the pre-GEMM managed matmul as a whole: the
-    // per-row path, DequantMatMulColumns, and the scalar activation quantizer,
-    // scalar Q5_0 dot and scalar F16/BF16 dequant that were vectorized with it.
     // TS_CPU_DISABLE_AVX512=1 runs every AVX-512 path of ManagedQuantizedOps
     // (GEMM kernels, quantizer, per-row Q4_0/Q8_0 dots, MaxAbs) in its AVX2
     // form, so the AVX2 path can be tested on an AVX-512 machine; the ISA flags
@@ -64,12 +61,13 @@ namespace TensorSharp.Models
     internal static partial class ManagedQuantizedOps
     {
         /// <summary>Kernel selection for the multi-row GEMM. <see cref="Auto"/>
-        /// honours the TS_CPU_QGEMM / TS_CPU_DISABLE_AVX512 switches; the others
-        /// exist so tests and benchmarks can compare paths in one process.</summary>
+        /// honours TS_CPU_DISABLE_AVX512; the others exist so tests and benchmarks can
+        /// compare paths in one process. <see cref="PerRow"/> is the per-row dot path
+        /// that hosts without AVX2+FMA (ARM64 included) run.</summary>
         internal enum QGemmIsa
         {
             Auto = 0,
-            Legacy = 1,
+            PerRow = 1,
             Avx2 = 2,
             Avx512 = 3,
         }
@@ -90,8 +88,6 @@ namespace TensorSharp.Models
             Q0Signed,
         }
 
-        private static readonly bool QGemmEnabled =
-            Environment.GetEnvironmentVariable("TS_CPU_QGEMM") != "0";
         // Smallest row count that takes the GEMM: one, for every type. Each
         // output of the GEMM goes through the same operations whatever the
         // height of the tile it lands in, so a row's result is independent of
@@ -114,10 +110,10 @@ namespace TensorSharp.Models
 
         /// <summary>True when every row count of every GEMM type (and of the
         /// float panel's) takes the GEMM - the condition for the batch-size
-        /// invariance above. TS_CPU_QGEMM=0, TS_CPU_FGEMM=0, a
-        /// TS_CPU_QGEMM_MIN_ROWS above one or a host without AVX2 give it up.</summary>
+        /// invariance above. A TS_CPU_QGEMM_MIN_ROWS above one or a host without AVX2
+        /// gives it up.</summary>
         internal static bool QGemmRoutingIsBatchInvariant =>
-            QGemmMinRowsOverride <= 1 && FGemmEnabled && ResolveQGemmIsa(QGemmIsa.Auto) != QGemmIsa.Legacy;
+            QGemmMinRowsOverride <= 1 && ResolveQGemmIsa(QGemmIsa.Auto) != QGemmIsa.PerRow;
         // Minimum multiply-accumulates per parallel task. ~1M MACs is ~50 us on
         // one core here - big enough to bury the pool dispatch, small enough that
         // an MoE expert (4 rows x 2816 x 1408 = 16M MACs) still fans out.
@@ -139,27 +135,26 @@ namespace TensorSharp.Models
 
         internal static bool QGemmAvx512Supported => QGemmAvx2Supported && CpuIsa.HasAvx512;
 
-        /// <summary>Concrete kernel set for a request: Legacy when the GEMM is
-        /// switched off or the ISA is missing.</summary>
+        /// <summary>Concrete kernel set for a request: PerRow when the ISA is missing.</summary>
         internal static QGemmIsa ResolveQGemmIsa(QGemmIsa requested)
-            => ResolveQGemmIsa(requested, QGemmEnabled, CpuIsa.Avx512DisabledByEnv, QGemmAvx2Supported, QGemmAvx512Supported);
+            => ResolveQGemmIsa(requested, CpuIsa.Avx512DisabledByEnv, QGemmAvx2Supported, QGemmAvx512Supported);
 
         /// <summary>The routing rule itself, with the switches and the host's ISA
         /// as arguments (tests check it without touching process state).
         /// Explicit Avx2/Avx512 requests ignore the switches.</summary>
         internal static QGemmIsa ResolveQGemmIsa(
-            QGemmIsa requested, bool enabled, bool avx512Disabled, bool avx2Supported, bool avx512Supported)
+            QGemmIsa requested, bool avx512Disabled, bool avx2Supported, bool avx512Supported)
         {
             switch (requested)
             {
-                case QGemmIsa.Legacy:
-                    return QGemmIsa.Legacy;
+                case QGemmIsa.PerRow:
+                    return QGemmIsa.PerRow;
                 case QGemmIsa.Avx512:
-                    return avx512Supported ? QGemmIsa.Avx512 : avx2Supported ? QGemmIsa.Avx2 : QGemmIsa.Legacy;
+                    return avx512Supported ? QGemmIsa.Avx512 : avx2Supported ? QGemmIsa.Avx2 : QGemmIsa.PerRow;
                 case QGemmIsa.Avx2:
-                    return avx2Supported ? QGemmIsa.Avx2 : QGemmIsa.Legacy;
+                    return avx2Supported ? QGemmIsa.Avx2 : QGemmIsa.PerRow;
                 default:
-                    if (!enabled || !avx2Supported) return QGemmIsa.Legacy;
+                    if (!avx2Supported) return QGemmIsa.PerRow;
                     return avx512Supported && !avx512Disabled ? QGemmIsa.Avx512 : QGemmIsa.Avx2;
             }
         }
@@ -242,7 +237,7 @@ namespace TensorSharp.Models
             if (family == QGemmFamily.None || rowCount <= 0 || outDim <= 0)
                 return false;
             isa = ResolveQGemmIsa(isa);
-            if (isa == QGemmIsa.Legacy)
+            if (isa == QGemmIsa.PerRow)
                 return false;
 
             int actStride = QGemmActRowBytes(family, inDim);
@@ -292,7 +287,7 @@ namespace TensorSharp.Models
         }
 
         /// <summary>TS_CPU_QGEMM_VERIFY: compare a finished GEMM with the per-row path.</summary>
-        private static unsafe void VerifyQGemmAgainstLegacy(
+        private static unsafe void VerifyQGemmAgainstPerRow(
             string what, int ggmlType, IntPtr weights, int inDim, int outDim, float* input, int inputRowStride,
             int rowCount, float* output, int outputRowStride, bool floatPanel)
         {
@@ -310,7 +305,7 @@ namespace TensorSharp.Models
                 else
                 {
                     TryAddmmQuantizedToFloat32(ggmlType, weights, inDim, outDim, input, inputRowStride, rowCount,
-                        r, outDim, null, QGemmIsa.Legacy);
+                        r, outDim, null, QGemmIsa.PerRow);
                 }
             }
             double maxRef = 1e-30, maxDiff = 0;
@@ -330,7 +325,7 @@ namespace TensorSharp.Models
                     _qgemmVerifyWorst = Math.Max(_qgemmVerifyWorst, rel);
                     Console.Error.WriteLine(
                         $"[qgemm-verify] {what} {(GgmlTensorType)ggmlType} M={rowCount} K={inDim} N={outDim}: " +
-                        $"max|new-legacy|/max|legacy| = {rel:E2} (worst so far {_qgemmVerifyWorst:E2})");
+                        $"max|gemm-perRow|/max|perRow| = {rel:E2} (worst so far {_qgemmVerifyWorst:E2})");
                 }
             }
         }
@@ -432,7 +427,7 @@ namespace TensorSharp.Models
             if (family == QGemmFamily.None)
                 return false;
             isa = ResolveQGemmIsa(isa);
-            if (isa == QGemmIsa.Legacy)
+            if (isa == QGemmIsa.PerRow)
                 return false;
 
             // --- quantize each DISTINCT input block once (same rule as the per-row batch) ---
@@ -700,15 +695,12 @@ namespace TensorSharp.Models
         /// 16-value group, for the per-row quantizers (QuantizeF32ToQ8_0/_K, which
         /// the Q8_0 KV-cache writer shares). Bit-identical to the scalar
         /// <c>ClampToInt8(MathF.Round(x * invScale))</c> for every input, NaN
-        /// and infinities included (see the SIMD variants). TS_CPU_QGEMM=0 runs
-        /// the scalar loop itself.
+        /// and infinities included (see the SIMD variants).
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static unsafe void QuantizeInt8Groups16(float* x, float invScale, sbyte* q, int n, int* groupSums)
         {
-            if (!QGemmEnabled)
-                QuantizeInt8Groups16Scalar(x, invScale, q, n, groupSums);
-            else if (CpuIsa.Avx512)
+            if (CpuIsa.Avx512)
                 QuantizeInt8Groups16Avx512(x, invScale, q, n, groupSums);
             else if (Avx2.IsSupported)
                 QuantizeInt8Groups16Avx2(x, invScale, q, n, groupSums);

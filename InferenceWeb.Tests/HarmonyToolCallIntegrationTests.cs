@@ -194,7 +194,7 @@ public class HarmonyToolCallIntegrationTests
         return Directory.GetFiles(dir, "*.gguf").Where(p =>
         {
             var n = Path.GetFileName(p).ToLowerInvariant();
-            return (n.Contains("gpt-oss|gpt_oss|gptoss") || n.Contains("gpt_oss") || n.Contains("gptoss"))
+            return (n.Contains("gpt-oss") || n.Contains("gpt_oss") || n.Contains("gptoss"))
                 && !n.Contains("mmproj");
         }).OrderBy(p => Path.GetFileName(p)).FirstOrDefault();
     }
@@ -208,8 +208,7 @@ public class HarmonyToolCallIntegrationTests
 
         public Ctx(string modelPath)
         {
-            BackendType backend = OperatingSystem.IsMacOS()
-                ? BackendType.GgmlMetal : BackendType.GgmlCpu;
+            BackendType backend = TestGates.PinnedGgmlBackend;
             Model = TensorSharp.Models.ModelBase.Create(modelPath, backend);
             Renderer = new KVCachePromptRenderer(new GgufPromptRenderer());
             BlockSize = 256;

@@ -11,22 +11,34 @@
 namespace TensorAgent.Core.Catalog;
 
 /// <summary>What a file in a catalog entry is for. The app loads the weights and hands the
-/// companions to the engine by role (the projector to <c>--mmproj</c>, the Qwen-Image
-/// companions to their environment variables).</summary>
+/// companions to the engine by role (the projector to <c>--mmproj</c>, a diffusion model's
+/// companions to the environment variables its family reads; see DiffusionCompanions).</summary>
 public enum CatalogFileRole
 {
     /// <summary>The GGUF the model is loaded from.</summary>
     Weights,
     /// <summary>Vision/audio projector (mmproj) for a multimodal model.</summary>
     Projector,
-    /// <summary>Qwen-Image-2.1 text encoder GGUF (Qwen3-VL-8B).</summary>
+    /// <summary>A diffusion model's text encoder GGUF (Qwen3-VL-8B for Qwen-Image-2.1,
+    /// Qwen3-VL-32B for MiniMax-H3).</summary>
     TextEncoder,
     /// <summary>Qwen-Image-2.1 vision mmproj (image-grounded conditioning; required for editing).</summary>
     VisionProjector,
-    /// <summary>Qwen-Image-2.1 VAE safetensors.</summary>
+    /// <summary>A diffusion model's image or video VAE safetensors.</summary>
     Vae,
     /// <summary>Speculative-decoding draft head.</summary>
     Draft,
+    /// <summary>MiniMax-H3's audio VAE safetensors, which turns the soundtrack it generates
+    /// into sound (and encodes a reference recording).</summary>
+    AudioVae,
+    /// <summary>One of the loose tokenizer files a text encoder whose GGUF carries no
+    /// tokenizer needs beside it (MiniMax-H3: vocab.json, merges.txt, tokenizer_config.json).</summary>
+    Tokenizer,
+    /// <summary>A later shard of a split weights GGUF (<c>-0000N-of-0000M.gguf</c>). The
+    /// <see cref="Weights"/> file is shard 1, the one the engine is pointed at; it opens the
+    /// others from the same folder by their exact gguf-split names, so every shard is required
+    /// and stored under its published name.</summary>
+    WeightsShard,
 }
 
 /// <summary>One downloadable artifact of a catalog entry.</summary>
@@ -50,12 +62,14 @@ public sealed record CatalogFile(
 
 /// <summary>Model families the catalog knows; used for grouping in the UI and for
 /// family-specific defaults (thinking, sampling).</summary>
-public enum CatalogFamily { Gemma4, Qwen35, Qwen36, Qwen38, QwenImage, GptOss, Bonsai }
+public enum CatalogFamily { Gemma4, Qwen35, Qwen36, Qwen38, QwenImage, GptOss, Bonsai, MuseGlimmer, MiniMaxH3, Qwen38FlashNext }
 
 /// <summary>Dense or mixture-of-experts.</summary>
 public enum CatalogArchitectureKind { Dense, MixtureOfExperts, Diffusion }
 
-/// <summary>Input/output modalities an entry supports once its projector is installed.</summary>
+/// <summary>Input/output modalities an entry supports once its projector is installed.
+/// <see cref="Image"/>, <see cref="Audio"/> and <see cref="Video"/> are what it takes in;
+/// the <c>Output</c> flags are what it makes.</summary>
 [Flags]
 public enum CatalogModalities
 {
@@ -64,6 +78,8 @@ public enum CatalogModalities
     Audio = 2,
     Video = 4,
     ImageOutput = 8,
+    VideoOutput = 16,
+    AudioOutput = 32,
 }
 
 /// <summary>Sampling defaults the model card recommends; the app sends them with every
@@ -95,6 +111,15 @@ public sealed record CatalogModel
     /// <summary>KV cache dtype to request ("f16", "q8_0"); block-quantised caches halve KV memory
     /// where the family's fused paths accept them.</summary>
     public required string KvCacheDtype { get; init; }
+    /// <summary>
+    /// Keep the phone's cache budget on the desktop as well (see
+    /// <see cref="Hosting.EngineMemoryPolicy"/>): caches that start small and grow, at most a
+    /// little of the reply reserved ahead, one finished conversation kept, nothing parked.
+    /// The engine's desktop defaults are written for a machine with memory to spare; for a
+    /// model whose weights take most of a Mac's memory there is none, and they are what
+    /// fills it.
+    /// </summary>
+    public bool LeanCaches { get; init; }
     public required CatalogSampling Sampling { get; init; }
     /// <summary>Whether the family has a thinking channel the app may enable.</summary>
     public bool SupportsThinking { get; init; }
@@ -110,10 +135,27 @@ public sealed record CatalogModel
     public bool Experimental { get; init; }
     public string? Notes { get; init; }
     public required string License { get; init; }
+    /// <summary>
+    /// Bytes of the weights the engine reads from the SSD on demand instead of holding them
+    /// resident: zero for every entry whose weights a token reads in full. Qwen3.8 Flash Next
+    /// declares its n-gram table (a token reads 16 of its 320 M rows) and the routed experts
+    /// the engine offloads on the entry's smallest device (a token reads 10 of each layer's
+    /// 512), which is what lets a 79 GB file run on a 48 GB Mac. The residency checks hold
+    /// <see cref="ResidentWeightsBytes"/> to the device instead of the whole file.
+    /// </summary>
+    public long WeightsPagedFromDiskBytes { get; init; }
 
     public long TotalBytes => Files.Where(f => !f.Optional).Sum(f => f.Bytes);
+    /// <summary>The weights GGUF and its later shards, in shard order.</summary>
+    public IEnumerable<CatalogFile> WeightFiles =>
+        Files.Where(f => f.Role is CatalogFileRole.Weights or CatalogFileRole.WeightsShard);
+    /// <summary>Every byte of the weights, all shards.</summary>
+    public long WeightsBytes => WeightFiles.Sum(f => f.Bytes);
+    /// <summary>The weights a token reads in full: everything not paged from disk on demand.</summary>
+    public long ResidentWeightsBytes => WeightsBytes - WeightsPagedFromDiskBytes;
     public long TotalBytesWithOptional => Files.Sum(f => f.Bytes);
     public CatalogFile Weights => Files.First(f => f.Role == CatalogFileRole.Weights);
     public CatalogFile? Projector => Files.FirstOrDefault(f => f.Role == CatalogFileRole.Projector);
     public bool IsImageGenerator => Family == CatalogFamily.QwenImage;
+    public bool IsVideoGenerator => Modalities.HasFlag(CatalogModalities.VideoOutput);
 }

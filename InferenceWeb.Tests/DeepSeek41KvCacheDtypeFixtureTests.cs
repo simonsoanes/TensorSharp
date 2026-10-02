@@ -8,10 +8,19 @@ namespace InferenceWeb.Tests;
 
 public sealed class DeepSeek41TinyFixtureFactAttribute : FactAttribute
 {
+    private BackendType _ggmlBackend;
+
     public DeepSeek41TinyFixtureFactAttribute()
     {
         if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("TS_TEST_DSV41_TARGET")))
             Skip = "Requires TS_TEST_DSV41_TARGET: the tiny DeepSeek V4.1 fixture GGUF (including embedded Engram metadata).";
+    }
+
+    /// <summary>The GGML backend the test constructs; skips unless the process pins it (<see cref="TestGates.GgmlPinSkip"/>).</summary>
+    public BackendType GgmlBackend
+    {
+        get => _ggmlBackend;
+        set { _ggmlBackend = value; Skip ??= TestGates.GgmlPinSkip(value); }
     }
 }
 
@@ -43,8 +52,8 @@ public sealed class DeepSeek41KvCacheDtypeFixtureTests : IDisposable
         foreach (var (key, value) in new Dictionary<string, string>
         {
             ["MAX_CONTEXT"] = "1024", ["TS_DSV4_UBATCH"] = "32", ["TS_DSV4_THREADS"] = "2",
-            ["TS_DSV41_TP"] = "0", ["TS_DSV41_ENGRAM_THREADS"] = "2", ["TS_DSV41_ENGRAM_WARM"] = "0",
-            ["TS_DSV41_RETAINED_CACHE"] = "0", ["TS_DSV41_REWIND_CHECKPOINT"] = "1",
+            ["TS_DSV41_ENGRAM_THREADS"] = "2", ["TS_DSV41_ENGRAM_WARM"] = "0",
+            ["TS_DSV41_REWIND_CHECKPOINT"] = "1",
         })
         {
             _restoreEnv[key] = Environment.GetEnvironmentVariable(key);
@@ -61,7 +70,7 @@ public sealed class DeepSeek41KvCacheDtypeFixtureTests : IDisposable
 
     private static string Target => Environment.GetEnvironmentVariable("TS_TEST_DSV41_TARGET")!;
 
-    [DeepSeek41TinyFixtureFact]
+    [DeepSeek41TinyFixtureFact(GgmlBackend = BackendType.GgmlCpu)]
     public void BlockQuantizedRequestIsRefusedBeforeTheNativeLoad()
     {
         foreach (KvCacheDtype dtype in new[] { KvCacheDtype.Q8_0, KvCacheDtype.Q4_0 })
@@ -77,7 +86,7 @@ public sealed class DeepSeek41KvCacheDtypeFixtureTests : IDisposable
         }
     }
 
-    [DeepSeek41TinyFixtureFact]
+    [DeepSeek41TinyFixtureFact(GgmlBackend = BackendType.GgmlCpu)]
     public void FloatRequestsLoadAndReportTheF16TheExecutorUses()
     {
         float[]? reference = null;

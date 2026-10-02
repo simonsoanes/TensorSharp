@@ -2072,9 +2072,12 @@ static bool dsv4_backend_matches(const char * reg_name, const char * want)
 }
 
 static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, int n_ubatch, int n_threads,
-                              const char * dspark_path, int n_cpu_moe_req, const char * backend_name)
+                              const char * dspark_path, int n_cpu_moe_req, const char * backend_name,
+                              int tp_ranks)
 {
     auto t_start = std::chrono::steady_clock::now();
+    if (tp_ranks < 0 || tp_ranks == 1 || tp_ranks > 8)
+        throw std::runtime_error("DeepSeek V4.1 tensor parallelism requires 0 (disabled) or 2..8 ranks");
 
     std::unique_ptr<dsv4_model> m(new dsv4_model());
     bool engram_random_advice = false, engram_random_override = false;
@@ -2298,17 +2301,8 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
                     rn ? rn : "selected");
         }
     }
-    int tp_ranks = 0;
-    if (const char * value = getenv("TS_DSV41_TP"))
-    {
-        char * end = nullptr;
-        const long ranks = strtol(value, &end, 10);
-        if (!*value || *end || ranks < 0 || ranks > MAX_GPUS)
-            throw std::runtime_error("TS_DSV41_TP must be 0 or the number of participating GPUs (2..8)");
-        tp_ranks = (int) ranks;
-        if (tp_ranks && (!hp.v41 || cpu_only || tp_ranks < 2 || tp_ranks != n_gpu))
-            throw std::runtime_error("TS_DSV41_TP requires deepseek41 and must equal its selected GPU count (2..8)");
-    }
+    if (tp_ranks && (!hp.v41 || cpu_only || tp_ranks < 2 || tp_ranks != n_gpu))
+        throw std::runtime_error("DeepSeek tensor parallelism requires deepseek41 and must equal its selected GPU count (2..8)");
     auto key = [&](const char * suffix) { return arch + "." + suffix; };
     bool ok = true;
     ok &= gguf_get_u32_key(g0, key("block_count").c_str(), &hp.n_layer);
@@ -2583,11 +2577,12 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
                 const auto & up = sources.at(prefix + "ffn_up_exps.weight");
                 const auto & down = sources.at(prefix + "ffn_down_exps.weight");
                 const auto strips = tsg_dsv41_tp::split_weights(down.ne[0], down.type, tp_ranks, il);
+                const auto output_strips = tsg_dsv41_tp::split_outputs(down.ne[1], tp_ranks, il);
                 for (int d = 0; d < tp_ranks; ++d)
                     tp_bytes[il][d] = strips[d].count *
                         (ggml_row_size(gate.type, gate.ne[0]) * gate.ne[2] +
                          ggml_row_size(up.type, up.ne[0]) * up.ne[2]) +
-                        ggml_row_size(down.type, strips[d].count) * down.ne[1] * down.ne[2];
+                        ggml_row_size(down.type, down.ne[0]) * output_strips[d].count * down.ne[2];
             }
         }
         std::vector<size_t> fixed_bytes((size_t) n_gpu, 0);
@@ -2849,9 +2844,10 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
     {
         std::vector<ggml_backend_dev_t> devices;
         for (int d = 0; d < tp_ranks; ++d) devices.push_back(ggml_backend_get_device(m->backends[d]));
-        m->moe_tp = std::make_unique<tsg_dsv41_tp::executor>(devices, hp.n_expert_used);
+        m->moe_tp = std::make_unique<tsg_dsv41_tp::executor>(devices, hp.n_expert_used,
+            dsv4_warm_pread() ? dsv4_load_thread_count() : 0);
         fprintf(stderr, "[dsv41] routed-MoE tensor parallelism: %d ranks, sharded gate/up/down weights; "
-                "attention and shared experts use layer placement; host-staged F32 reduction\n", tp_ranks);
+                "attention and shared experts use layer placement; exact F32 activation/output gathers\n", tp_ranks);
     }
 
     auto tp_source = [&](int il, const char * suffix)
@@ -3378,7 +3374,7 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
     // ~2x Vulkan deficit. Both ops are exactly a batched mul_mat over the
     // stream axis, so where the fused op is missing the graph builds the
     // equivalent out of primitives every backend has and the whole layer stays
-    // on the accelerator. TS_DSV4_HC_NATIVE=0 forces the decomposition (A/B).
+    // on the accelerator.
     {
         ggml_init_params pp = { 16 * ggml_tensor_overhead() + 4096, nullptr, true };
         ggml_context * pctx = ggml_init(pp);
@@ -3392,10 +3388,6 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
         m->hc_native = ggml_backend_supports_op(m->backends[0], pre)
                     && ggml_backend_supports_op(m->backends[0], post);
         ggml_free(pctx);
-        // Symmetric override so the two paths can be A/B'd on one backend:
-        // 0 forces the decomposition, 1 forces the fused op (which, where the
-        // backend has no kernel, means the scheduler's CPU fallback).
-        if (const char * e = getenv("TS_DSV4_HC_NATIVE")) m->hc_native = atoi(e) != 0;
         fprintf(stderr, "[dsv4] hyper-connection ops: %s\n",
                 m->hc_native ? "native" : "decomposed (backend has no fused kernel)");
     }
@@ -6769,30 +6761,20 @@ static int dsv4_dspark_draft(dsv4_model & m, int32_t anchor_token, int64_t posit
 // backend_name: ggml backend registry name to take GPU devices from ("CUDA",
 // "Vulkan", ...); null/empty takes any GPU. GgmlOps links every backend it was
 // built with, so without it the caller's --backend choice is not honored.
-TSG_EXPORT void * TSGgml_Dsv4LoadModelDspark(const char * gguf_path, int n_gpu, int n_ctx, int n_ubatch, int n_threads,
-                                             const char * dspark_path, int n_cpu_moe, const char * backend_name)
-{
-    // A stale error from an earlier op must not be reported as this load's reason.
-    tsg::clear_last_error();
-    try
-    {
-        return tsg_dsv4::dsv4_load(gguf_path, n_gpu, n_ctx, n_ubatch, n_threads, dspark_path, n_cpu_moe, backend_name);
-    }
-    catch (const std::exception & e)
-    {
-        tsg::report_load_refusal("[dsv4] DSpark load failed: %s\n", e.what());
-        return nullptr;
-    }
-}
-
+// dspark_path: the DSpark drafter GGUF, or null/empty for none.
+// tp_ranks: 0 for layer placement, or 2..8 routed-MoE tensor-parallel ranks
+// (V4.1 only; must equal the selected GPU count).
 TSG_EXPORT void * TSGgml_Dsv4LoadModel(const char * gguf_path, int n_gpu, int n_ctx, int n_ubatch, int n_threads,
-                                       int n_cpu_moe, const char * backend_name)
+                                       const char * dspark_path, int n_cpu_moe, const char * backend_name,
+                                       int tp_ranks)
 {
     // A stale error from an earlier op must not be reported as this load's reason.
     tsg::clear_last_error();
     try
     {
-        return tsg_dsv4::dsv4_load(gguf_path, n_gpu, n_ctx, n_ubatch, n_threads, nullptr, n_cpu_moe, backend_name);
+        return tsg_dsv4::dsv4_load(gguf_path, n_gpu, n_ctx, n_ubatch, n_threads,
+                                  dspark_path && *dspark_path ? dspark_path : nullptr,
+                                  n_cpu_moe, backend_name, tp_ranks);
     }
     catch (const std::exception & e)
     {
@@ -7030,8 +7012,9 @@ TSG_EXPORT int TSGgml_Dsv4Forward(void * handle, const int32_t * tokens, int n_t
 #include "ggml_ops_deepseek41_vision_text.inc"
 
 // Resets the ACTIVE slot's caches to position 0. Weights, rope tables and
-// other slots are untouched.
-TSG_EXPORT void TSGgml_Dsv4Reset(void * handle)
+// other slots are untouched. Exported only through TSGgml_Dsv4ResetChecked,
+// which reports a slot the reset could not restore.
+static void dsv4_reset_active_slot(void * handle)
 {
     if (!handle) return;
     auto * m = (tsg_dsv4::dsv4_model *) handle;
@@ -7056,14 +7039,13 @@ TSG_EXPORT void TSGgml_Dsv4Reset(void * handle)
     }
 }
 
-// Slot inspection never selects a different slot or mutates continuation state.
-// The legacy void Reset ABI remains available; managed ownership transfers use
-// this checked form for every architecture, including V4 with a DSpark drafter.
+// Managed ownership transfers reset through this checked form for every
+// architecture, including V4 with a DSpark drafter.
 TSG_EXPORT int TSGgml_Dsv4ResetChecked(void * handle)
 {
     auto * m = (tsg_dsv4::dsv4_model *) handle;
     if (!m || !m->active_slot) return 0;
-    TSGgml_Dsv4Reset(handle);
+    dsv4_reset_active_slot(handle);
     return !m->active_slot->v41_failed && m->active_slot->n_past == 0;
 }
 
@@ -7103,17 +7085,13 @@ TSG_EXPORT int TSGgml_Dsv4SlotReleaseGraphs(void * handle, int slot_id)
     catch (...) { return 0; }
 }
 
-// Admission uses the actual full-context slot buffers, not prefix length. All
-// slots in this model have the same geometry. Charging every graph once is
-// conservative when some belong to active requests. This never trims a graph.
-TSG_EXPORT int TSGgml_Dsv4SlotCanRetain(void * handle, int slot_id,
-    int retained_count, uint64_t budget_per_device)
+// Whether `slot`'s buffers fit `retained_count` + 1 times inside the per-device
+// budget and, on an accelerator, beside the largest compute graph and the
+// reserve in what the device has free. All slots of a model have the same
+// geometry, so any slot prices another. `label` names the caller in the log.
+static int dsv4_slot_fits(tsg_dsv4::dsv4_model * m, const tsg_dsv4::dsv4_slot & slot,
+    int retained_count, uint64_t budget_per_device, const char * label, bool log_accepted)
 {
-    int head = 0, checkpoint = -1, healthy = 0;
-    if (retained_count < 0 || !TSGgml_Dsv4SlotStatus(handle, slot_id, &head, &checkpoint, &healthy) ||
-        !healthy || head <= 0) return 0;
-    auto * m = (tsg_dsv4::dsv4_model *) handle;
-    const auto & slot = *m->slots.find(slot_id)->second;
     uint64_t reserve = 1024ULL * 1024 * 1024;
     if (const char * e = getenv("TS_DSV4_GRAPH_CACHE_HEADROOM_MB"))
     {
@@ -7157,10 +7135,11 @@ TSG_EXPORT int TSGgml_Dsv4SlotCanRetain(void * handle, int slot_id,
             }
             const bool fits = dsv41_retention_fits(bytes, graphs, largest, (uint64_t) retained_count,
                 budget_per_device, accelerator, free_bytes, reserve);
-            fprintf(stderr, "[dsv41 retain-admission] slot=%d device=%d accelerator=%d "
+            if (fits && !log_accepted) continue;
+            fprintf(stderr, "[dsv41 %s] slot=%d device=%d accelerator=%d "
                 "cache_bytes=%llu all_graph_bytes=%llu largest_graph_bytes=%llu retained=%d "
                 "budget_bytes=%llu free_bytes=%llu reserve_bytes=%llu accepted=%d\n",
-                slot_id, d, accelerator, (unsigned long long) bytes,
+                label, slot.id, d, accelerator, (unsigned long long) bytes,
                 (unsigned long long) graphs, (unsigned long long) largest, retained_count,
                 (unsigned long long) budget_per_device, (unsigned long long) free_bytes,
                 (unsigned long long) reserve, fits);
@@ -7169,6 +7148,32 @@ TSG_EXPORT int TSGgml_Dsv4SlotCanRetain(void * handle, int slot_id,
         return 1;
     }
     catch (...) { return 0; }
+}
+
+// Admission uses the actual full-context slot buffers, not prefix length. All
+// slots in this model have the same geometry. Charging every graph once is
+// conservative when some belong to active requests. This never trims a graph.
+TSG_EXPORT int TSGgml_Dsv4SlotCanRetain(void * handle, int slot_id,
+    int retained_count, uint64_t budget_per_device)
+{
+    int head = 0, checkpoint = -1, healthy = 0;
+    if (retained_count < 0 || !TSGgml_Dsv4SlotStatus(handle, slot_id, &head, &checkpoint, &healthy) ||
+        !healthy || head <= 0) return 0;
+    auto * m = (tsg_dsv4::dsv4_model *) handle;
+    return dsv4_slot_fits(m, *m->slots.find(slot_id)->second, retained_count, budget_per_device,
+        "retain-admission", true);
+}
+
+// Whether one more slot fits on every device beside the largest compute graph
+// and the reserve. A request that needs a slot takes a new one while this holds
+// and makes room by releasing a retained conversation only when it does not:
+// retained conversations are what the next turns reuse, and running out of
+// device memory for a graph is not recoverable.
+TSG_EXPORT int TSGgml_Dsv4SlotCanAlloc(void * handle)
+{
+    auto * m = (tsg_dsv4::dsv4_model *) handle;
+    if (!m || !m->active_slot) return 0;
+    return dsv4_slot_fits(m, *m->active_slot, 0, UINT64_MAX, "slot-admission", false);
 }
 
 // Allocate a new sequence slot (own caches, shared weights). Returns the slot
@@ -7600,7 +7605,7 @@ TSG_TEST_EXPORT int TSGgml_Dsv4TestExecutionBoundary(int v41, int api, int failu
                 std::all_of(std::begin(drafted), std::end(drafted),
                     [](int32_t value) { return value == 12345; });
         }
-        TSGgml_Dsv4Reset(&model);
+        dsv4_reset_active_slot(&model);
         observed[7] = model.active_slot->v41_failed;
         observed[8] = model.active_slot->n_past;
         observed[9] = (int) model.graph_cache.size();
@@ -7668,7 +7673,7 @@ TSG_TEST_EXPORT int TSGgml_Dsv4TestResetTruncateBoundary(int api, int failure, i
         dsv4_test_boundary_failure = failure;
         dsv4_test_boundary_stage = api == 2 ? 2 : 1;
         dsv4_test_boundary_visits = 0;
-        if (api == 0) { TSGgml_Dsv4Reset(&model); observed[0] = 0; }
+        if (api == 0) { dsv4_reset_active_slot(&model); observed[0] = 0; }
         else if (api >= 3) observed[0] = TSGgml_Dsv4ResetChecked(&model);
         else observed[0] = TSGgml_Dsv4Truncate(&model, api == 1 ? 0 : 10);
         observed[1] = slot->v41_failed;

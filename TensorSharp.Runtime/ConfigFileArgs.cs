@@ -108,25 +108,6 @@ namespace TensorSharp.Runtime
             "--image", "--ref-image", "--ref-video", "--ref-audio", "--ref-video-audio",
         };
 
-        // Legacy spellings both hosts still read as the SAME option (their parsers match
-        // them in one case / one condition), so a command-line value under either
-        // spelling overrides a config entry written under the other. First = canonical.
-        private static readonly string[][] SameOptionSpellings =
-        {
-            new[] { "--video-vae", "--wan-vae" },
-            new[] { "--video-text-encoder", "--video-te", "--wan-te" },
-            new[] { "--video-dit2", "--wan-dit2" },
-            new[] { "--continuous-batching", "--paged-batching" },
-            new[] { "--no-continuous-batching", "--no-paged-batching" },
-        };
-
-        /// <summary>
-        /// The spelling both hosts treat <paramref name="flag"/> as, for the legacy names
-        /// they still read as another option (<c>--wan-vae</c> is <c>--video-vae</c>);
-        /// any other flag comes back unchanged. Matched case-insensitively.
-        /// </summary>
-        public static string CanonicalOptionSpelling(string flag) => CanonicalFlag(flag);
-
         private static readonly JsonDocumentOptions ParseOptions = new JsonDocumentOptions
         {
             AllowTrailingCommas = true,
@@ -231,8 +212,8 @@ namespace TensorSharp.Runtime
         }
 
         /// <summary>
-        /// The options <paramref name="args"/> sets, by canonical spelling, each mapped to
-        /// the spelling the command line used: every token that starts with <c>--</c>, up to
+        /// The options <paramref name="args"/> sets, each mapped to the spelling the command
+        /// line used: every token that starts with <c>--</c>, up to
         /// an <c>=</c> when it has one — the spaced and the joined spelling, matched
         /// case-insensitively as the server's and the shared option parsers match them.
         /// </summary>
@@ -245,13 +226,13 @@ namespace TensorSharp.Runtime
                     continue;
                 int equals = arg.IndexOf('=');
                 string name = equals >= 0 ? arg.Substring(0, equals) : arg;
-                options.TryAdd(CanonicalFlag(name), name);
+                options.TryAdd(name, name);
             }
             return options;
         }
 
         /// <summary>
-        /// The replacing options a file sets, by canonical spelling: every entry that
+        /// The replacing options a file sets: every entry that
         /// contributes tokens (a <c>false</c> switch or an empty array sets nothing, so it
         /// cannot beat an earlier file's value).
         /// </summary>
@@ -264,22 +245,9 @@ namespace TensorSharp.Runtime
                     continue;
                 string flag = NormalizeFlag(file.FullPath, property.Name);
                 if (!AccumulatingFlags.Contains(flag))
-                    options.Add(CanonicalFlag(flag));
+                    options.Add(flag);
             }
             return options;
-        }
-
-        private static string CanonicalFlag(string flag)
-        {
-            foreach (string[] spellings in SameOptionSpellings)
-            {
-                foreach (string spelling in spellings)
-                {
-                    if (string.Equals(flag, spelling, StringComparison.OrdinalIgnoreCase))
-                        return spellings[0];
-                }
-            }
-            return flag;
         }
 
         // A false/null switch or an empty array contributes no tokens, so it neither sets
@@ -310,12 +278,12 @@ namespace TensorSharp.Runtime
 
         private sealed class ExpandContext
         {
-            // Canonical option -> the spelling the command line used. Null outside Expand
+            // Option -> the spelling the command line used. Null outside Expand
             // (ResolveFileEntry resolves one entry and overrides nothing).
             private readonly Dictionary<string, string>? _commandLineOptions;
             // Per file, in --config order: the path and the replacing options it sets.
             private readonly List<(string Path, HashSet<string> Options)> _files = new();
-            // Canonical option -> the entries dropped for it, in the order they were met.
+            // Option -> the entries dropped for it, in the order they were met.
             private readonly Dictionary<string, List<(string Path, bool Download)>> _dropped =
                 new(StringComparer.OrdinalIgnoreCase);
             private readonly List<string> _droppedOrder = new();
@@ -343,12 +311,11 @@ namespace TensorSharp.Runtime
             {
                 if (_commandLineOptions == null || AccumulatingFlags.Contains(flag))
                     return false;
-                string canonical = CanonicalFlag(flag);
-                if (_commandLineOptions.ContainsKey(canonical))
+                if (_commandLineOptions.ContainsKey(flag))
                     return true;
                 for (int f = fileIndex + 1; f < _files.Count; f++)
                 {
-                    if (_files[f].Options.Contains(canonical))
+                    if (_files[f].Options.Contains(flag))
                         return true;
                 }
                 return false;
@@ -359,12 +326,11 @@ namespace TensorSharp.Runtime
             {
                 if (!EmitsTokens(value))
                     return;
-                string canonical = CanonicalFlag(flag);
-                if (!_dropped.TryGetValue(canonical, out var entries))
+                if (!_dropped.TryGetValue(flag, out var entries))
                 {
                     entries = new List<(string Path, bool Download)>();
-                    _dropped[canonical] = entries;
-                    _droppedOrder.Add(canonical);
+                    _dropped[flag] = entries;
+                    _droppedOrder.Add(flag);
                 }
                 entries.Add((configPath, NamesADownload(value)));
             }
@@ -375,9 +341,9 @@ namespace TensorSharp.Runtime
             /// </summary>
             public void ReportOverrides()
             {
-                foreach (string canonical in _droppedOrder)
+                foreach (string option in _droppedOrder)
                 {
-                    List<(string Path, bool Download)> entries = _dropped[canonical];
+                    List<(string Path, bool Download)> entries = _dropped[option];
                     string losers = Quoted(entries.Select(e => e.Path));
                     string[] downloads = entries.Where(e => e.Download).Select(e => e.Path).ToArray();
                     string skipped = downloads.Length == 0
@@ -387,7 +353,7 @@ namespace TensorSharp.Runtime
                             : $"; the download entry in {Quoted(downloads)} is skipped, so nothing is fetched for it";
                     string valueFrom = entries.Count == 1 ? "the value from " + losers + " is" : "the values from " + losers + " are";
 
-                    if (_commandLineOptions != null && _commandLineOptions.TryGetValue(canonical, out string? typed))
+                    if (_commandLineOptions != null && _commandLineOptions.TryGetValue(option, out string? typed))
                     {
                         Log.WriteLine(
                             $"[config] {typed} is set on the command line, so {valueFrom} ignored and the " +
@@ -395,9 +361,9 @@ namespace TensorSharp.Runtime
                     }
                     else
                     {
-                        string winner = Path.GetFileName(_files.Last(f => f.Options.Contains(canonical)).Path);
+                        string winner = Path.GetFileName(_files.Last(f => f.Options.Contains(option)).Path);
                         Log.WriteLine(
-                            $"[config] {canonical.ToLowerInvariant()} is set again by the later '{winner}', so " +
+                            $"[config] {option.ToLowerInvariant()} is set again by the later '{winner}', so " +
                             $"{valueFrom} ignored and '{winner}' wins{skipped}.");
                     }
                 }

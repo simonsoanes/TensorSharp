@@ -4,7 +4,7 @@
   "backend": "ggml_cuda",
   "port": 5100,
   "extra_args": [
-    "--tp",
+    "--layer-split",
     "5",
     "--cpu-moe-threads",
     "24",
@@ -14,7 +14,6 @@
     "CUDA_VISIBLE_DEVICES": "0,1,2,3,4",
     "MAX_CONTEXT": "65536",
     "TS_DSV4_UBATCH": "512",
-    "TS_DSV41_TP": "0",
     "TS_DSV41_ENGRAM_WARM": "1",
     "TS_DSV41_SPARSE_FA": "1",
     "TS_DSV41_COMPACT_RAW_GATHER": "1",

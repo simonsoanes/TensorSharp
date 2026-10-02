@@ -124,15 +124,8 @@ namespace TensorSharp.Models.Direct
         /// what every existing direct model (the Wan VAE especially) already uses.
         /// </summary>
         internal bool UseManagedQuantOnCpu =>
-            QuantWeightsOnCpu &&
             _host != IntPtr.Zero &&
             ManagedQuantizedOps.SupportsCpuQuantizedStorage((GgmlTensorType)_type);
-
-        /// <summary>TS_DIRECT_QUANT_WEIGHTS=0 restores the previous behaviour (expand
-        /// every quantized weight to F32 once at load and run a plain GEMM), so the
-        /// two can be compared for numeric drift in one binary.</summary>
-        private static readonly bool QuantWeightsOnCpu =
-            Environment.GetEnvironmentVariable("TS_DIRECT_QUANT_WEIGHTS") != "0";
 
         private DirectLinear(DirectContext ctx, IntPtr host, IntPtr ownedHost, int type,
                                 long ne0, long ne1, long bytes, Tensor bias, bool prescale)
@@ -354,88 +347,34 @@ namespace TensorSharp.Models.Direct
         // ---- CPU GEMM --------------------------------------------------------------
         // Both orientations the direct paths need (the VAE im2col convs, attention)
         // run on the packed register-tiled CpuSgemm, which takes the operands'
-        // row strides as they are (narrowed/head views need no copy). TS_CPU_SGEMM=0
-        // restores the previous row-parallel dot/saxpy loops below for A/B runs.
+        // strides as they are (narrowed/head views need no copy). C must have
+        // contiguous rows.
 
         /// <summary>C[m,n] = beta*C + alpha * A[m,k] x B[n,k]^T (dot form; both row-major;
         /// C may be a contiguous-row view — row stride taken from its Strides).</summary>
         public static unsafe void CpuGemmABt(Tensor a, Tensor b, Tensor c, float alpha, float beta)
         {
-            if (CpuSgemm.Enabled && a.Strides[1] == 1 && b.Strides[1] == 1 && c.Strides[1] == 1)
-            {
-                CpuSgemm.Gemm(checked((int)a.Sizes[0]), checked((int)b.Sizes[0]), checked((int)a.Sizes[1]), alpha,
-                    (float*)CpuNativeHelpers.GetBufferStart(a), a.Strides[0], 1,
-                    (float*)CpuNativeHelpers.GetBufferStart(b), 1, b.Strides[0],
-                    beta, (float*)CpuNativeHelpers.GetBufferStart(c), c.Strides[0]);
-                return;
-            }
-
-            long m = a.Sizes[0], k = a.Sizes[1], n = b.Sizes[0];
-            long aStride = a.Strides[0], cStride = c.Strides[0];
-            float* pa = (float*)CpuNativeHelpers.GetBufferStart(a);
-            float* pb = (float*)CpuNativeHelpers.GetBufferStart(b);
-            float* pc = (float*)CpuNativeHelpers.GetBufferStart(c);
-            int vw = System.Numerics.Vector<float>.Count;
-            RowsParallel(m, i =>
-            {
-                float* ar = pa + i * aStride;
-                float* cr = pc + i * cStride;
-                for (long j = 0; j < n; j++)
-                {
-                    float* br = pb + j * k;
-                    var acc = System.Numerics.Vector<float>.Zero;
-                    long t = 0;
-                    for (; t + vw <= k; t += vw)
-                        acc += new System.Numerics.Vector<float>(new ReadOnlySpan<float>(ar + t, vw))
-                             * new System.Numerics.Vector<float>(new ReadOnlySpan<float>(br + t, vw));
-                    float sum = System.Numerics.Vector.Dot(acc, System.Numerics.Vector<float>.One);
-                    for (; t < k; t++) sum += ar[t] * br[t];
-                    sum *= alpha;
-                    cr[j] = beta == 0f ? sum : beta * cr[j] + sum;
-                }
-            });
+            RequireContiguousRows(c);
+            CpuSgemm.Gemm(checked((int)a.Sizes[0]), checked((int)b.Sizes[0]), checked((int)a.Sizes[1]), alpha,
+                (float*)CpuNativeHelpers.GetBufferStart(a), a.Strides[0], a.Strides[1],
+                (float*)CpuNativeHelpers.GetBufferStart(b), b.Strides[1], b.Strides[0],
+                beta, (float*)CpuNativeHelpers.GetBufferStart(c), c.Strides[0]);
         }
 
         /// <summary>C[m,n] = beta*C + alpha * A[m,k] x B[k,n] (saxpy form; both row-major).</summary>
         public static unsafe void CpuGemmAB(Tensor a, Tensor b, Tensor c, float alpha, float beta)
         {
-            if (CpuSgemm.Enabled && a.Strides[1] == 1 && b.Strides[1] == 1 && c.Strides[1] == 1)
-            {
-                CpuSgemm.Gemm(checked((int)a.Sizes[0]), checked((int)b.Sizes[1]), checked((int)a.Sizes[1]), alpha,
-                    (float*)CpuNativeHelpers.GetBufferStart(a), a.Strides[0], 1,
-                    (float*)CpuNativeHelpers.GetBufferStart(b), b.Strides[0], 1,
-                    beta, (float*)CpuNativeHelpers.GetBufferStart(c), c.Strides[0]);
-                return;
-            }
+            RequireContiguousRows(c);
+            CpuSgemm.Gemm(checked((int)a.Sizes[0]), checked((int)b.Sizes[1]), checked((int)a.Sizes[1]), alpha,
+                (float*)CpuNativeHelpers.GetBufferStart(a), a.Strides[0], a.Strides[1],
+                (float*)CpuNativeHelpers.GetBufferStart(b), b.Strides[0], b.Strides[1],
+                beta, (float*)CpuNativeHelpers.GetBufferStart(c), c.Strides[0]);
+        }
 
-            long m = a.Sizes[0], k = a.Sizes[1], n = b.Sizes[1];
-            long aStride = a.Strides[0], cStride = c.Strides[0];
-            float* pa = (float*)CpuNativeHelpers.GetBufferStart(a);
-            float* pb = (float*)CpuNativeHelpers.GetBufferStart(b);
-            float* pc = (float*)CpuNativeHelpers.GetBufferStart(c);
-            int vw = System.Numerics.Vector<float>.Count;
-            RowsParallel(m, i =>
-            {
-                float* ar = pa + i * aStride;
-                float* cr = pc + i * cStride;
-                if (beta == 0f) new Span<float>(cr, checked((int)n)).Clear();
-                else if (beta != 1f) for (long j = 0; j < n; j++) cr[j] *= beta;
-                for (long t = 0; t < k; t++)
-                {
-                    float av = ar[t] * alpha;
-                    if (av == 0f) continue;
-                    float* br = pb + t * n;
-                    var vA = new System.Numerics.Vector<float>(av);
-                    long j = 0;
-                    for (; j + vw <= n; j += vw)
-                    {
-                        var vc = new System.Numerics.Vector<float>(new ReadOnlySpan<float>(cr + j, vw));
-                        var vb = new System.Numerics.Vector<float>(new ReadOnlySpan<float>(br + j, vw));
-                        (vc + vA * vb).CopyTo(new Span<float>(cr + j, vw));
-                    }
-                    for (; j < n; j++) cr[j] += av * br[j];
-                }
-            });
+        private static void RequireContiguousRows(Tensor c)
+        {
+            if (c.Strides[1] != 1)
+                throw new ArgumentException("The GEMM output must have contiguous rows (unit column stride).", nameof(c));
         }
 
         // ---- rowwise vector ops ----------------------------------------------------
@@ -457,13 +396,7 @@ namespace TensorSharp.Models.Direct
             long rows = t.Sizes[0], cols = t.Sizes[1];
             float* p = (float*)CpuNativeHelpers.GetBufferStart(t);
             float* b = (float*)CpuNativeHelpers.GetBufferStart(bias);
-            bool simd = CpuKernels.Enabled;
-            RowsParallel(rows, r =>
-            {
-                float* row = p + r * cols;
-                if (simd) { RowAddSimd(row, row, b, cols); return; }
-                for (long c = 0; c < cols; c++) row[c] += b[c];
-            });
+            RowsParallel(rows, r => RowAddSimd(p + r * cols, p + r * cols, b, cols));
         }
 
         /// <summary>AdaLN modulation y[r, c] = x[r, c] * (1 + scale[c]) + shift[c] over
@@ -484,14 +417,10 @@ namespace TensorSharp.Models.Direct
                 float* py = (float*)CpuNativeHelpers.GetBufferStart(y);
                 float* ps = (float*)CpuNativeHelpers.GetBufferStart(shift);
                 float* pc = (float*)CpuNativeHelpers.GetBufferStart(scale);
-                bool simd = CpuKernels.Enabled;
                 RowsParallel(rowCount, rr =>
                 {
                     long r = rowFrom + rr;
-                    float* rx = px + r * cols;
-                    float* ry = py + r * cols;
-                    if (simd) { ModulateRowSimd(ry, rx, pc, ps, cols); return; }
-                    for (long c = 0; c < cols; c++) ry[c] = rx[c] * (1f + pc[c]) + ps[c];
+                    ModulateRowSimd(py + r * cols, px + r * cols, pc, ps, cols);
                 });
             }
         }
@@ -512,14 +441,10 @@ namespace TensorSharp.Models.Direct
                 float* px = (float*)CpuNativeHelpers.GetBufferStart(x);
                 float* pv = (float*)CpuNativeHelpers.GetBufferStart(v);
                 float* pg = (float*)CpuNativeHelpers.GetBufferStart(gate);
-                bool simd = CpuKernels.Enabled;
                 RowsParallel(rowCount, rr =>
                 {
                     long r = rowFrom + rr;
-                    float* rx = px + r * cols;
-                    float* rv = pv + r * cols;
-                    if (simd) { GateAddRowSimd(rx, rv, pg, cols); return; }
-                    for (long c = 0; c < cols; c++) rx[c] += rv[c] * pg[c];
+                    GateAddRowSimd(px + r * cols, pv + r * cols, pg, cols);
                 });
             }
         }
@@ -539,18 +464,12 @@ namespace TensorSharp.Models.Direct
                 long rows = x.Sizes[0], cols = x.Sizes[1];
                 float* px = (float*)CpuNativeHelpers.GetBufferStart(x);
                 float* pg = (float*)CpuNativeHelpers.GetBufferStart(gain);
-                bool simd = CpuKernels.Enabled;
-                RowsParallel(rows, r =>
-                {
-                    float* rx = px + r * cols;
-                    if (simd) { RowMulSimd(rx, pg, cols); return; }
-                    for (long c = 0; c < cols; c++) rx[c] *= pg[c];
-                });
+                RowsParallel(rows, r => RowMulSimd(px + r * cols, pg, cols));
             }
         }
 
-        // Vector forms of the row loops above (TS_CPU_SIMD_ELEMENTWISE=0 keeps the scalar
-        // loops). Same operations in the same order and no FMA contraction, so bit-identical.
+        // Vector forms of the row ops above: the same operations in the same order as the scalar
+        // formula and no FMA contraction, so bit-identical to it.
 
         [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveOptimization)]
         private static unsafe void RowAddSimd(float* dst, float* x, float* b, long cols)
@@ -761,13 +680,12 @@ namespace TensorSharp.Models.Direct
         /// in L2, + bias, row softmax, then O_blk = P V written straight into the output columns.
         /// With enough blocks for the pool each runs single-threaded (no barriers between the
         /// GEMMs and the softmax); otherwise the blocks run in turn on the parallel GEMM. Same
-        /// arithmetic as the chunked path it replaces. TS_CPU_SGEMM=0 keeps that path.
+        /// arithmetic as the chunked path, which still serves the layouts this one declines.
         /// </summary>
         private static unsafe bool TryCpuBlockedAttention(Tensor outT, Tensor q, Tensor k, Tensor v, Tensor bias,
                                                           int heads, int sq, int sk, int hd, float scale)
         {
-            if (!CpuSgemm.Enabled || !CpuKernels.Enabled ||
-                q.DimensionCount != 2 || k.DimensionCount != 2 || v.DimensionCount != 2 ||
+            if (q.DimensionCount != 2 || k.DimensionCount != 2 || v.DimensionCount != 2 ||
                 q.Strides[1] != 1 || k.Strides[1] != 1 || v.Strides[1] != 1 || outT.Strides[1] != 1 ||
                 (bias != null && (bias.DimensionCount != 3 || bias.Strides[2] != 1)))
             {

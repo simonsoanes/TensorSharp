@@ -18,11 +18,10 @@
 //     batched path branches off the existing _layerQkvFused[] flag.
 //   * Vision embeddings (Pixtral) are injected into the embedded hidden
 //     state by position, before the per-layer loop - identical to the
-//     legacy forward.
+//     single-sequence forward.
 using System;
 using System.Collections.Generic;
 using TensorSharp;
-using TensorSharp.Models.Paged;
 using TensorSharp.Runtime.Paged;
 using TensorSharp.Runtime.Scheduling;
 
@@ -107,7 +106,7 @@ namespace TensorSharp.Models
 
             // Embed.
             Tensor hiddenStates = Embedding(flatTokens);
-            // Vision injection: identical to the legacy path; multimodal
+            // Vision injection: identical to the single-sequence path; multimodal
             // requests must be prepared serially upstream.
             if (_pendingVisionEmbeddingsList.Count > 0)
             {
@@ -182,17 +181,13 @@ namespace TensorSharp.Models
                 k.Dispose();
                 v.Dispose();
 
-                // Per-sequence paged attention. Three kernels available:
-                //   - native (default on GGML backends): C++ gather + ggml_flash_attn_ext
-                //   - tensor: C# tensor-based gather + Ops.AddmmBatch + AttentionSoftmaxWithSinks
-                //   - managed: pure-C# online-softmax scalar fallback
-                //
-                // Choose via TS_PAGED_ATTN_KERNEL={native|tensor|managed}.
+                // Per-sequence paged attention: the native kernel (C++ gather +
+                // ggml_flash_attn_ext) on the GGML backends, the pure-C# online-softmax
+                // fallback elsewhere.
                 float[] qFlat = q.GetElementsAsFloat(numTokens * qDim);
                 q.Dispose();
                 float[] attnFlat = new float[numTokens * qDim];
-                var kernel = ResolvePagedAttentionKernel();
-                if (kernel == PagedAttentionKernel.Native && IsGgmlBackend)
+                if (IsGgmlBackend)
                 {
                     // Build the concatenated block-table layout the native
                     // entry point expects (the engine gives us int[][]).
@@ -203,15 +198,6 @@ namespace TensorSharp.Models
                         blockTableFlat, blockTableOffsets,
                         numSeqs, numTokens, numHeads, numKvHeads, headDim,
                         _pagedBlockSize, scale);
-                }
-                else if (kernel == PagedAttentionKernel.Tensor)
-                {
-                    TensorPagedAttention.Forward(
-                        _allocator, IsGgmlBackend,
-                        qFlat, _pagedKBuf[layer], _pagedVBuf[layer], attnFlat,
-                        numTokens, numHeads, numKvHeads, headDim, _pagedBlockSize,
-                        queryStartLoc, seqLens, positions, ctx.BlockTables, numSeqs,
-                        scale, causal: true);
                 }
                 else
                 {
@@ -294,7 +280,7 @@ namespace TensorSharp.Models
         }
 
         /// <summary>
-        /// Per-token YaRN position-dependent Q scaling. The legacy single-
+        /// Per-token YaRN position-dependent Q scaling. The single-
         /// sequence path scales each row using <c>position = startPos + s</c>;
         /// in the batched path each token carries its own absolute position
         /// via <paramref name="positions"/>.
@@ -309,32 +295,6 @@ namespace TensorSharp.Models
                 float posScale = 1.0f + _ropeScalingBeta * MathF.Log(1.0f + interval);
                 if (MathF.Abs(posScale - 1.0f) < 1e-7f) continue;
                 VecScale(ptr + (long)t * qDim, posScale, qDim);
-            }
-        }
-
-        private enum PagedAttentionKernel { Native, Tensor, Managed }
-
-        private static PagedAttentionKernel ResolvePagedAttentionKernel()
-        {
-            string raw = Environment.GetEnvironmentVariable("TS_PAGED_ATTN_KERNEL");
-            if (string.IsNullOrEmpty(raw)) return PagedAttentionKernel.Native; // default
-            switch (raw.Trim().ToLowerInvariant())
-            {
-                case "native":
-                case "ggml":
-                case "flash":
-                    return PagedAttentionKernel.Native;
-                case "tensor":
-                case "gpu":
-                case "addmm":
-                    return PagedAttentionKernel.Tensor;
-                case "managed":
-                case "scalar":
-                case "0":
-                case "false":
-                    return PagedAttentionKernel.Managed;
-                default:
-                    return PagedAttentionKernel.Native;
             }
         }
 

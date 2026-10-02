@@ -9,11 +9,10 @@
 // implicit-im2col packed SGEMM (CpuPackedGemm) against weights packed once per layer, the
 // mid-block attention is two GEMMs per query block with a streaming softmax in between, and
 // the channel norm, SiLU, residual add and resampling passes are vectorized and spread over
-// a worker pool. The scalar loops in VaeReferenceMath stay the oracle: TS_QWEN_VAE_CPU=scalar
-// runs them instead (A/B), and the tests compare the two. That switch restores the original
-// convolution, attention and SiLU loops, i.e. the original numerics bit for bit; the norm, add
-// and resampling passes are shared by both modes (they are bit-identical to the loops they
-// replaced, only faster), so a scalar-mode timing slightly understates the old path's.
+// a worker pool. The scalar loops in VaeReferenceMath stay the oracle the tests compare the
+// fast path against (VaeReferenceMath.UseScalarCpu): the original convolution, attention and
+// SiLU loops, i.e. the original numerics bit for bit; the norm, add and resampling passes are
+// shared by both modes (they are bit-identical to the loops they replaced, only faster).
 //
 // Numerics: the GEMM accumulates each output with one FMA per k in k order (~1e-6 relative
 // to the scalar loop per layer, 130+ dB PSNR for a whole decode), and that order does not
@@ -30,9 +29,10 @@ namespace TensorSharp.Models.QwenImage
 {
     internal static unsafe partial class VaeReferenceMath
     {
-        // TS_QWEN_VAE_CPU=scalar restores the original scalar convolution / attention / SiLU
-        // loops on the managed path (A/B switch and oracle; see the file header).
-        internal static bool UseScalarCpu = Environment.GetEnvironmentVariable("TS_QWEN_VAE_CPU") == "scalar";
+        // Runs the original scalar convolution / attention / SiLU loops on the managed path:
+        // the oracle tests and QwenImageStagesBench compare the fast path against (never set in
+        // production; see the file header).
+        internal static bool UseScalarCpu;
 
         /// <summary>The managed fast path is active: no device convolution, not forced scalar.
         /// Tracing keeps the unfused per-op sequence so every traced tensor still exists.</summary>

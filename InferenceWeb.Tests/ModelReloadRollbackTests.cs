@@ -20,7 +20,6 @@ public class ModelReloadRollbackTests : IDisposable
         _dir = Path.Combine(Path.GetTempPath(), $"ts-reload-rollback-{Guid.NewGuid():N}");
         Directory.CreateDirectory(_dir);
         _env.ClearSpeculationVars();
-        _env.Set("TS_DSV4_DSPARK", null);
     }
 
     public void Dispose()
@@ -29,29 +28,12 @@ public class ModelReloadRollbackTests : IDisposable
         Directory.Delete(_dir, recursive: true);
     }
 
-    [Theory]
-    [InlineData(SpeculationEnvVars.DraftModel)]
-    [InlineData(SpeculationEnvVars.LegacyDraftModel)]
-    public void GenericDraftModelEnvironment_ReachesFactoryTimeDrafterLoad(string variable)
-    {
-        string modelPath = WriteMinimalGguf("model.gguf");
-        string draftPath = WriteMinimalGguf("draft.gguf");
-        _env.Set(variable, draftPath);
-        var factory = new ScriptedFactory();
-        factory.Enqueue(path => new FakeModel(path));
-
-        using var svc = NewService(factory);
-        svc.LoadModel(modelPath, null, "cpu");
-
-        Assert.Equal(draftPath, Assert.Single(factory.DraftPaths));
-    }
-
     [Fact]
-    public void LegacyDsparkEnvironment_RemainsFactoryTimeFallback()
+    public void GenericDraftModelEnvironment_ReachesFactoryTimeDrafterLoad()
     {
         string modelPath = WriteMinimalGguf("model.gguf");
         string draftPath = WriteMinimalGguf("draft.gguf");
-        _env.Set("TS_DSV4_DSPARK", draftPath);
+        _env.Set(SpeculationEnvVars.DraftModel, draftPath);
         var factory = new ScriptedFactory();
         factory.Enqueue(path => new FakeModel(path));
 

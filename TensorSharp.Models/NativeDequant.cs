@@ -35,8 +35,7 @@ namespace TensorSharp.Models
             Console.Error.WriteLine(
                 $"WARNING: native GgmlOps dequantization is unavailable ({ex.Message}); load-time " +
                 "dequantization is running on the managed C# path instead, so model loading will be " +
-                "substantially slower. Verify the GgmlOps native library is present and matches this " +
-                "build. Reported once.");
+                "substantially slower. Verify the GgmlOps native library is present. Reported once.");
         }
 
         public static void DequantizeToFloat32(int ggmlType, byte[] src, int srcOffset, float[] dst, int dstOffset, long numElements)
@@ -115,7 +114,7 @@ namespace TensorSharp.Models
 
         private static bool ShouldUseManagedFallback(Exception ex)
         {
-            if (ex is DllNotFoundException or EntryPointNotFoundException)
+            if (ex is DllNotFoundException)
                 return true;
 
             if (ex is TypeInitializationException tie && tie.InnerException != null)

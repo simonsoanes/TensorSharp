@@ -22,9 +22,10 @@
 //     the shared drafter.
 //
 // Rollback is free here: the trunk verify writes correct KV for every row it
-// processes into the linear (non-circular) cache and Muse-Glimmer has no
-// recurrent state, so partial acceptance only rewinds the position counter
-// (SpecVerifyPersistsAcceptedKv).
+// processes at that row's own slot (a full layer's row, or a sliding-window
+// ring's position % rows, which a rewind of one verify batch never wraps past -
+// see RingRewindIsExact) and Muse-Glimmer has no recurrent state, so partial
+// acceptance only rewinds the position counter (SpecVerifyPersistsAcceptedKv).
 // ---------------------------------------------------------------------------
 using System;
 using System.Diagnostics;
@@ -41,14 +42,9 @@ namespace TensorSharp.Models
     public partial class MuseGlimmerModel : ModelBase, ISpeculativeModel
     {
         /// <summary>Path of the DFlash drafter GGUF, if one was configured
-        /// (<c>--draft-model</c> / <c>TS_MUSE_GLIMMER_DFLASH</c>).</summary>
+        /// (<c>--draft-model</c>).</summary>
         internal static string ResolveDFlashPath(string explicitPath)
-        {
-            string path = !string.IsNullOrWhiteSpace(explicitPath)
-                ? explicitPath
-                : Environment.GetEnvironmentVariable("TS_MUSE_GLIMMER_DFLASH");
-            return string.IsNullOrWhiteSpace(path) ? null : path;
-        }
+            => string.IsNullOrWhiteSpace(explicitPath) ? null : explicitPath;
 
         /// <summary>The trunk's own ceiling on one speculative prefill chunk: its
         /// ForwardCore throws outright on a batch wider than the SWA ring can
@@ -95,8 +91,8 @@ namespace TensorSharp.Models
         public bool DraftSelfCatchUp => false;
 
         /// <summary>The verify batch writes correct KV for every row at its true
-        /// position into the linear cache, and Muse-Glimmer holds no recurrent
-        /// state, so a partial acceptance only needs a position rewind.</summary>
+        /// position's slot, and Muse-Glimmer holds no recurrent state, so a
+        /// partial acceptance only needs a position rewind.</summary>
         public bool SpecVerifyPersistsAcceptedKv => true;
 
         public int DraftBlock(int lastToken, float[] hPrev, int position, int[] draftOut, float[] confOut)

@@ -10,6 +10,7 @@
 // the upstream ggml checkout:
 //   * iq3s_grid      - IQ3_S 4-value codebook entries (512 x uint32)
 //   * kvalues_mxfp4  - MXFP4 nibble value table (16 x int8, ggml kvalues_fp4)
+//   * kvalues_iq4nl  - IQ4_NL / IQ4_XS non-linear nibble levels (16 x int8, ggml kvalues_iq4nl)
 #pragma once
 
 #include <stdint.h>
@@ -84,4 +85,8 @@ static const __device__ uint32_t ts_iq3s_grid[512] = {
 
 static const __device__ int8_t ts_kvalues_mxfp4[16] = {
     0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12,
+};
+
+static const __device__ int8_t ts_dsv4_kvalues_iq4nl[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
 };

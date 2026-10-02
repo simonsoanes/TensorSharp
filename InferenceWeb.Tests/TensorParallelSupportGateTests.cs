@@ -40,10 +40,10 @@ public class TensorParallelSupportGateTests
     {
         ITensorParallelGroup group = null;
         var error = Assert.Throws<NotSupportedException>(() =>
-            Resolve("qwen4exp", BackendType.GgmlCuda, 2, ref group, out _));
+            Resolve("deepseek4", BackendType.GgmlCuda, 2, ref group, out _));
         Assert.Contains("--layer-split", error.Message);
         int tp = TensorSharp.Models.ModelBase.ResolveTensorParallelSupport(
-            Arch("qwen4exp"), BackendType.GgmlCuda, 1, ref group, out int layerSplit, 2);
+            Arch("deepseek4"), BackendType.GgmlCuda, 1, ref group, out int layerSplit, 2);
 
         // No tensor-parallel group: IsTensorParallel gates weight sharding and the
         // AllReduce machinery, none of which a layer split uses.
@@ -75,6 +75,7 @@ public class TensorParallelSupportGateTests
 
     [Theory]
     [InlineData("qwen35")]
+    [InlineData("qwen4exp")]
     [InlineData("gemma4")]
     [InlineData("muse-glimmer")]
     [InlineData("glm-dsa")]

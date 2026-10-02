@@ -1595,7 +1595,17 @@ namespace TensorSharp.Cli
             _log.LogDebug(LogEventIds.ChatStarted,
                 "interactive prompt tokens={PromptTokens} thinking={Thinking}",
                 promptTokenCount, _enableThinking);
-            var sampler = new TokenSampler(_samplingConfig);
+            // The server's thinking budget: a reasoning block that reaches three quarters of the
+            // allowance is closed (with the family's hand-over text) so the turn still answers.
+            // Without it a model reasoning in circles printed no answer at all: DeepSeek V4.1 Q2_K
+            // under --think --max-tokens 20000 planned for all 20,000 tokens of two turns running.
+            bool budgetThinking = TensorSharp.Server.ChatGenerationPipeline.ReasonsWhetherAsked(arch, _enableThinking);
+            SamplingConfig sampling = TensorSharp.Server.ChatGenerationPipeline.WithThinkingBudget(_samplingConfig, _model.Tokenizer, arch,
+                budgetThinking
+                    ? TensorSharp.Server.ChatGenerationPipeline.ThinkingBudgetFor(_maxTokens, enableThinking: true)
+                    : TensorSharp.Server.ChatGenerationPipeline.UnrequestedThinkingBudgetFor(_maxTokens),
+                out _, budgetThinking, inputTokens);
+            var sampler = new TokenSampler(sampling);
             var generatedTokens = new List<int>();
             var rawBytes = new List<byte>();
             int prevCharLen = 0;
@@ -1700,7 +1710,7 @@ namespace TensorSharp.Cli
             CliInferenceSession.Result result;
             try
             {
-                result = Inference.Generate(inputTokens, _maxTokens, _samplingConfig,
+                result = Inference.Generate(inputTokens, _maxTokens, sampling,
                     EmitToken, cancellationToken, requestId,
                     _model.MultimodalInjector.GetPreparedMediaSpans(requestId),
                     enablePrefixCache: PrefixCacheEnabled,

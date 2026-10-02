@@ -22,12 +22,7 @@ public class Gemma4PrefixCloneExactnessTests
     {
         string path = TestGates.FindGguf(Environment.GetEnvironmentVariable("TS_TEST_MODEL_DIR"), "gemma-4-e4b");
         Assert.False(string.IsNullOrEmpty(path));
-        var backend = (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "cpu").ToLowerInvariant() switch
-        {
-            "cuda" => BackendType.GgmlCuda,
-            "metal" => BackendType.GgmlMetal,
-            _ => BackendType.GgmlCpu,
-        };
+        var backend = TestGates.PinnedGgmlBackend;
         // Prefixes reach ~5k tokens: pin the context instead of inheriting a lane's MAX_CONTEXT.
         using var env = new EnvScope();
         env.Set("MAX_CONTEXT", "8192");

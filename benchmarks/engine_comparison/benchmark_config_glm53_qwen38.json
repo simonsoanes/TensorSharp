@@ -1,5 +1,5 @@
 {
-  "_comment": "Qwen3.8-Flash-Next and both GLM-5.3 checkpoints on the recorded 8x A40 host (46068 MiB per card). File sizes, architecture ids and pinned Hugging Face revisions below were recorded on 2026-09-11; historical observations do not qualify the current source revision. PLACEMENT: ggml_cuda_layer explicitly sets legacy TS_GLM_NGPU=0 without pinning devices for automatic GLM whole-layer placement. ggml_cuda_split sends --layer-split N to TensorSharp and --split-mode layer to llama.cpp, and pins the same N devices; Qwen3.8 requires this explicit column. The harness --tp/min_tp fields remain GPU-count sweep selectors, not the inference server option. Inference --tp N now means tensor parallelism only. REFERENCE: the recorded llama.cpp ggml 0.23.0 build implements qwen4exp and glm-dsa but not glm5next, so defaults.engines is TensorSharp only; add a reference only after checking checkpoint support. MEDIA: stage paths.media.image or set BENCH_IMAGE before selecting image. Run new correctness and repeated performance measurements before making claims about the current revision.",
+  "_comment": "Qwen3.8-Flash-Next and both GLM-5.3 checkpoints on the recorded 8x A40 host (46068 MiB per card). File sizes, architecture ids and pinned Hugging Face revisions below were recorded on 2026-09-11; historical observations do not qualify the current source revision. PLACEMENT: ggml_cuda_split sends --layer-split N to TensorSharp and --split-mode layer to llama.cpp, and pins the same N devices. The harness --tp/min_tp fields remain GPU-count sweep selectors, not the inference server option. Inference --tp N now means tensor parallelism only. REFERENCE: the recorded llama.cpp ggml 0.23.0 build implements qwen4exp and glm-dsa but not glm5next, so defaults.engines is TensorSharp only; add a reference only after checking checkpoint support. MEDIA: stage paths.media.image or set BENCH_IMAGE before selecting image. Run new correctness and repeated performance measurements before making claims about the current revision.",
   "paths": {
     "model_root": "/workspace/models",
     "results_dir": "${here}/results_glm53_qwen38",
@@ -70,13 +70,13 @@
       "size_class": "large",
       "is_moe": true,
       "mtp_supported": false,
-      "min_tp": 1,
+      "min_tp": 3,
       "_gguf_note": "general.architecture = glm5next, general.name = 'GLM 5.3 Flash', size_label 288x10B, general.file_type = 10 (Q2_K; UD-Q2_K_XL is mixed - blk.45 alone holds Q2_K, Q3_K, Q5_K, Q6_K and Q8_0 tensors), 46 blocks (45 trunk + 1 NextN), 288 experts top-8, context_length 1048576, NoPE MLA (rope.dimension_count = 0). Local sizes match the repo's UD-Q2_K_XL/ directory exactly: 9,429,859 + 49,294,975,936 + 49,949,266,048 + 9,466,399,584 = 108,720,071,427 bytes (101.3 GiB) across four shards. The repo keeps the shards in a per-quant subdirectory and the mmproj at the root, hence the explicit `url` on the gguf entry only.",
       "_modalities_note": "text + image. mmproj-BF16.gguf (1,164,010,080 bytes) declares clip.has_vision_encoder = true with projector_type glm5next (24 blocks, 448px, patch 14) and no audio encoder, so image is the only extra modality claimed. GlmDsaModel.LoadVisionEncoder accepts an mmproj for glm5next only (it warns and ignores one on glm-dsa), which is why the sibling glm53 entry carries none.",
       "_mtp_note": "The checkpoint DOES carry a NextN block (glm5next.nextn_predict_layers = 1, and blk.45 holds nextn.eh_proj / enorm / hnorm / shared_head_norm plus a complete MLA + 288-expert layer), but TensorSharp cannot engage it: the native executor refuses glm5next speculation outright in ggml_ops_glm_dsa.cpp ('[glm] glm5next NextN/MTP speculation is not implemented; serving standard decode'). No claim is made about llama.cpp here - the build on this host has no glm5next graph at all. Registered false so `--mtp on` is gated with a reason rather than reported as a speculative run that silently decoded normally.",
       "_llamacpp_note": "This host's llama.cpp has no glm5next support at all - `glm5next` appears nowhere in its sources and src/models/ has glm-dsa.cpp but no glm5next graph - so llamacpp cells for this model would fail at load. config.py has no per-model engine restriction, so nothing gates them: run this model with `--engines tensorsharp` (the default).",
-      "_tp_note": "The automatic layer column explicitly sets TS_GLM_NGPU=0 to retain all-visible-GPU whole-layer placement. The normal runtime default with no placement configuration is now one device. Use ggml_cuda_split for explicit --layer-split N. --tp N selects native tensor parallelism only.",
-      "_vram_note": "101.3 GiB of weights against 44.99 GiB per A40: at least three GPUs before KV, and ggml_cuda_layer explicitly sets TS_GLM_NGPU=0 to use all eight. `min_tp` stays 1 because in THIS config tp=1 pins no devices (defaults.tp_devices is empty) and the native executor then takes every GPU - see the tp_devices note below."
+      "_tp_note": "This checkpoint needs explicit --layer-split N whole-layer placement; the runtime default with no placement flag is one device. min_tp is the harness GPU-count capacity gate; tp_arg maps it to --layer-split on ggml_cuda_split. --tp N would select native tensor parallelism instead, which also disables the NextN draft head.",
+      "_vram_note": "101.3 GiB of weights against 44.99 GiB per A40: at least three GPUs before KV, which is `min_tp`; the matrix runs it at eight."
     },
     "glm53": {
       "display": "GLM-5.3 (UD-Q2_K_XL, 256-expert MoE, text only)",
@@ -98,13 +98,13 @@
       "is_moe": true,
       "mtp_supported": true,
       "mtp_draft": null,
-      "min_tp": 1,
+      "min_tp": 6,
       "_download_note": "The download is complete: all seven shards are present with no .incomplete parts, the fetch logged 'exit=0 repo=unsloth/GLM-5.3-GGUF pattern=UD-Q2_K_XL/*', and every local size matches the repo's UD-Q2_K_XL/ listing byte for byte.",
       "_gguf_note": "general.architecture = glm-dsa, general.name = 'Glm-5.3', general.version = 5.3, size_label 256x22B, general.file_type = 10 (Q2_K, mixed within UD-Q2_K_XL), 79 blocks (78 trunk + 1 NextN), 256 experts top-8, MLA with 64 query heads and 1 KV head, DSA indexer 32 heads, context_length 1048576, rope base 8e6 - the same block shape GLM-5.2 has, which is why it loads on the existing glm-dsa path unchanged. Sizes: 9,428,677 + 49,172,427,136 + 49,091,626,976 + 49,091,626,976 + 49,091,626,976 + 49,994,703,552 + 7,426,966,496 = 253,878,406,789 bytes (236.4 GiB) across seven shards.",
       "_modalities_note": "Text only, and verified rather than inferred from the name: the full file listing of unsloth/GLM-5.3-GGUF at the pinned revision contains no mmproj of any kind (the Flash repo has two). There is no vision tower to point `--mmproj` at, and GlmDsaModel would refuse one on glm-dsa anyway.",
-      "_mtp_note": "The NextN block is present and complete - glm-dsa.nextn_predict_layers = 1 and blk.78 carries nextn.eh_proj/enorm/hnorm/shared_head_norm alongside a full MLA + 256-expert MoE layer - which is exactly what the native loader checks before paging it in. It requires single-device or whole-layer placement, with no active tensor parallelism. blk.78 ships no nextn.shared_head_head.weight, so the draft block borrows the trunk's LM head, and ggml_ops_glm_dsa.cpp refuses to draft from a column-parallel head under actual inference --tp N > 1 ('[glm] the NextN block has no LM head of its own and the trunk head is column-parallel under --tp N; serving standard decode'). Both layer-placement columns retain the full head: ggml_cuda_layer uses explicit legacy TS_GLM_NGPU=0, while ggml_cuda_split sends --layer-split N. The harness tp sweep value is only a GPU-count selector here. An --mtp on cell still requires evidence that the draft block loaded and speculative decoding engaged; configuration alone is not proof. VERIFY IT IN THE SERVER LOG, and verify the right line: the benchmark runs the NATIVE executor (--backend ggml_cuda), whose load banner reads '[glm] glm-dsa: 78 trunk layers +1 NextN/MTP draft block, ...' when the block is in and '... 78 trunk layers (NextN block present but not loaded; --spec loads it)' when it is not. The managed per-op path's 'NextN/MTP draft head ready (block 78, ...)' line is NOT printed on this backend.",
-      "_tp_note": "The automatic layer column explicitly sets TS_GLM_NGPU=0 to retain all-visible-GPU whole-layer placement. The normal runtime default with no placement configuration is now one device. Use ggml_cuda_split for explicit --layer-split N. --tp N selects native tensor parallelism only.",
-      "_vram_note": "236.4 GiB of weights against 44.99 GiB per A40 needs at least six GPUs before KV; ggml_cuda_layer explicitly sets TS_GLM_NGPU=0 to use all eight, which is the only configuration with headroom on this box."
+      "_mtp_note": "The NextN block is present and complete - glm-dsa.nextn_predict_layers = 1 and blk.78 carries nextn.eh_proj/enorm/hnorm/shared_head_norm alongside a full MLA + 256-expert MoE layer - which is exactly what the native loader checks before paging it in. It requires single-device or whole-layer placement, with no active tensor parallelism. blk.78 ships no nextn.shared_head_head.weight, so the draft block borrows the trunk's LM head, and ggml_ops_glm_dsa.cpp refuses to draft from a column-parallel head under actual inference --tp N > 1 ('[glm] the NextN block has no LM head of its own and the trunk head is column-parallel under --tp N; serving standard decode'). The layer-placement column retains the full head: ggml_cuda_split sends --layer-split N. The harness tp sweep value is only a GPU-count selector here. An --mtp on cell still requires evidence that the draft block loaded and speculative decoding engaged; configuration alone is not proof. VERIFY IT IN THE SERVER LOG, and verify the right line: the benchmark runs the NATIVE executor (--backend ggml_cuda), whose load banner reads '[glm] glm-dsa: 78 trunk layers +1 NextN/MTP draft block, ...' when the block is in and '... 78 trunk layers (NextN block present but not loaded; --spec loads it)' when it is not. The managed per-op path's 'NextN/MTP draft head ready (block 78, ...)' line is NOT printed on this backend.",
+      "_tp_note": "This checkpoint needs explicit --layer-split N whole-layer placement; the runtime default with no placement flag is one device. min_tp is the harness GPU-count capacity gate; tp_arg maps it to --layer-split on ggml_cuda_split. --tp N would select native tensor parallelism instead, which also disables the NextN draft head.",
+      "_vram_note": "236.4 GiB of weights against 44.99 GiB per A40 needs at least six GPUs before KV, which is `min_tp`; eight is the only configuration with headroom on this box."
     }
   },
   "scenarios": {
@@ -157,35 +157,15 @@
     }
   },
   "backends": {
-    "_comment": "Two layer-placement columns. ggml_cuda_layer preserves automatic placement for the GLM native executors with explicit legacy TS_GLM_NGPU=0, without a degree flag. ggml_cuda_split explicitly sends --layer-split N to TensorSharp and --split-mode layer to llama.cpp, pinning the same N GPUs. The harness retains its historical --tp sweep argument and min_tp fields as GPU-count selectors; they do not change the server option. Qwen3.8 requires the explicit split column. Neither column requests tensor parallelism.",
-    "ggml_cuda_layer": {
-      "display": "CUDA layer split (legacy automatic placement)",
+    "_comment": "One layer-placement column: ggml_cuda_split sends --layer-split N to TensorSharp and --split-mode layer to llama.cpp, pinning the same N GPUs. The harness retains its historical --tp sweep argument and min_tp fields as GPU-count selectors; they do not change the server option. The column never requests tensor parallelism.",
+    "ggml_cuda_split": {
+      "display": "CUDA layer split (--layer-split N)",
       "kind": "gpu",
       "aliases": [
         "gpu"
       ],
       "visible_devices_env": "CUDA_VISIBLE_DEVICES",
       "_env_note": "Every key under `tensorsharp.env` is exported verbatim to the server process, so nothing but real variables belongs in it. MAX_CONTEXT is a per-sequence hard limit for both families (the glm native loader treats its own value as a ceiling only when MAX_CONTEXT is unset). KV_CACHE_DTYPE binds on the managed KV path, i.e. qwen4exp; the glm native executor allocates its KV as GGML_TYPE_F16 unconditionally, so f16 is stated here to keep the two families on one budget, not because the variable steers the GLM runs.",
-      "tensorsharp": {
-        "backend": "ggml_cuda",
-        "tp": false,
-        "env": {
-          "MAX_CONTEXT": "65536",
-          "KV_CACHE_DTYPE": "f16",
-          "TS_SCHED_MAX_RUNNING_SEQS": "4",
-          "TS_SCHED_MAX_BATCHED_TOKENS": "4096",
-          "TS_GLM_NGPU": "0"
-        }
-      },
-      "llamacpp": {
-        "ngl": 999,
-        "tp": false
-      }
-    },
-    "ggml_cuda_split": {
-      "display": "CUDA layer split (--layer-split N)",
-      "kind": "gpu",
-      "visible_devices_env": "CUDA_VISIBLE_DEVICES",
       "tensorsharp": {
         "backend": "ggml_cuda",
         "tp": true,
@@ -231,7 +211,7 @@
       "glm53-flash",
       "glm53"
     ],
-    "_models_note": "Qwen3.8-Flash-Next needs explicit layer split. Select --models qwen38-flash-next --backends ggml_cuda_split --tp 8; the harness launches TensorSharp with --layer-split 8. Default ggml_cuda_layer serves the GLM models through automatic all-visible-device placement.",
+    "_models_note": "Every model runs on ggml_cuda_split: at each degree in tp_degrees the harness launches TensorSharp with --layer-split N.",
     "scenarios": [
       "text_short",
       "text_long",
@@ -243,7 +223,7 @@
     ],
     "_scenarios_note": "prefill_8k / prefill_32k are not declared in the `scenarios` block above on purpose: config.synth_scenario builds any `prefill_<N>` from the shared corpus, so they need no per-config declaration. `image` is declared but left out until media is staged on the host.",
     "backends": [
-      "ggml_cuda_layer"
+      "ggml_cuda_split"
     ],
     "thinking": false,
     "_thinking_note": "GLM-5.3's chat template reasons regardless of this flag (it always emits a reasoning turn), so a thinking=false row is not a no-reasoning row for the two GLM models.",
@@ -251,12 +231,11 @@
       false
     ],
     "tp_degrees": [
-      1,
       8
     ],
-    "_tp_degrees_note": "The historical tp sweep is a GPU-count axis. Degree 1 on ggml_cuda_layer passes no mode flag and retains GLM automatic placement. Degree 8 on ggml_cuda_split sends --layer-split 8 and pins eight devices; both engines use whole-layer placement. Degree 8 on ggml_cuda_layer is skipped because this automatic-placement column has no degree mapping.",
+    "_tp_degrees_note": "The historical tp sweep is a GPU-count axis. Degree 8 on ggml_cuda_split sends --layer-split 8 and pins eight devices; both engines use whole-layer placement.",
     "tp_devices": [],
-    "_tp_devices_note": "Empty so automatic placement at degree 1 sees all GPUs. Explicit split degrees still pin devices 0..N-1 using the harness fallback.",
+    "_tp_devices_note": "Empty: explicit split degrees pin devices 0..N-1 using the harness fallback.",
     "concurrency": [
       1,
       4

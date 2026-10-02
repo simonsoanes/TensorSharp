@@ -125,6 +125,64 @@ public class DonationDecisionTests
     }
 
     [Fact]
+    public void F_BindsAPrimaryOnlyWhenADeclineWouldKeepIt()
+    {
+        // No conversion (DeepSeek V4.1 without retention): the next executed step invalidates the primary
+        // whether it is donated or not, so the slack protects nothing and it is kept past it.
+        PrefixTree t = Tk.Tree(Tk.Caps(endState: EndStateSupport.None, truncation: TruncationKind.ModelDecides,
+                                       rewindCap: int.MaxValue, pages: PageSupport.None, adoptPrimary: false));
+        int s = Tk.Scope(t);
+        RadixNode p = Tk.Put(t, Tk.Key(t, Tk.Seq(1, 80)), 60, s, payload: Tk.Primary(t));
+        Assert.True(t.DonationConditionsHold(p, 23, primary: true, waiting: null));      // 37 > 16
+        Assert.Equal(MaterializeMode.KeepPrimary, t.DonationDecision(p, 23, primary: true, waiting: null));
+
+        // Conversion keeps it (DonateOnly cannot clone, so it does not): (f) binds as before.
+        PrefixTree c = Tk.Tree(Tk.Caps(endState: EndStateSupport.CopyAndDonate, truncation: TruncationKind.ModelDecides,
+                                       rewindCap: int.MaxValue, pages: PageSupport.None, adoptPrimary: true));
+        int sc = Tk.Scope(c);
+        RadixNode q = Tk.Put(c, Tk.Key(c, Tk.Seq(1, 80)), 60, sc, payload: Tk.Primary(c));
+        Assert.False(c.DonationConditionsHold(q, 23, primary: true, waiting: null));
+        Assert.Equal(MaterializeMode.ConvertPrimaryThenClone, c.DonationDecision(q, 23, primary: true, waiting: null));
+
+        // A payload that is not the primary keeps DEC-14 (f): declining it keeps it for a later request.
+        (PrefixTree d, _, RadixNode x, _) = Setup(EndStateSupport.DonateOnly);
+        Assert.False(d.DonationConditionsHold(x, 23, primary: false, waiting: null));
+        Assert.Equal(MaterializeMode.None, d.DonationDecision(x, 23, primary: false, waiting: null));
+    }
+
+    [Fact]
+    public void F_IsWaivedForADonateOnlyEndStateOfItsOwnConversation()
+    {
+        // DeepSeek V4.1 with retained slots: EndState DonateOnly, the model decides every rewind.
+        PrefixTree t = Tk.Tree(Tk.Caps(endState: EndStateSupport.DonateOnly, truncation: TruncationKind.ModelDecides,
+                                       rewindCap: int.MaxValue, pages: PageSupport.None));
+        int s = Tk.Scope(t);
+        RadixNode x = Tk.Put(t, Tk.Key(t, Tk.Seq(1, 80)), 60, s);
+        Assert.True(t.DonationConditionsHold(x, 23, primary: false, waiting: null, requestScope: s));       // own
+        Assert.Equal(MaterializeMode.DonateEndState, t.DonationDecision(x, 23, primary: false, waiting: null, requestScope: s));
+        Assert.False(t.DonationConditionsHold(x, 23, primary: false, waiting: null, requestScope: Tk.Scope(t)));   // another
+        Assert.False(t.DonationConditionsHold(x, 23, primary: false, waiting: null));                        // unknown
+
+        // GPT-OSS's holders: truncation the rules decide (Any). (f) is about keeping the payload, not about
+        // how it rewinds, so it is waived for the own conversation all the same, and only for it.
+        PrefixTree a = Tk.Tree(Tk.Caps(endState: EndStateSupport.DonateOnly, truncation: TruncationKind.Any,
+                                       rewindCap: int.MaxValue, pages: PageSupport.None));
+        int sa = Tk.Scope(a);
+        RadixNode y = Tk.Put(a, Tk.Key(a, Tk.Seq(1, 80)), 60, sa);
+        Assert.True(a.DonationConditionsHold(y, 23, primary: false, waiting: null, requestScope: sa));
+        Assert.Equal(MaterializeMode.DonateEndState, a.DonationDecision(y, 23, primary: false, waiting: null, requestScope: sa));
+        Assert.False(a.DonationConditionsHold(y, 23, primary: false, waiting: null, requestScope: Tk.Scope(a)));
+
+        // A copyable end state keeps (f): declining the donation clones it instead, and the deep payload stays.
+        PrefixTree c = Tk.Tree(Tk.Caps(endState: EndStateSupport.CopyAndDonate, truncation: TruncationKind.Any,
+                                       rewindCap: int.MaxValue, pages: PageSupport.None));
+        int sc = Tk.Scope(c);
+        RadixNode z = Tk.Put(c, Tk.Key(c, Tk.Seq(1, 80)), 60, sc);
+        Assert.False(c.DonationConditionsHold(z, 23, primary: false, waiting: null, requestScope: sc));
+        Assert.Equal(MaterializeMode.CloneEndState, c.DonationDecision(z, 23, primary: false, waiting: null, requestScope: sc));
+    }
+
+    [Fact]
     public void DonateOnly_SharedPayload_IsRejected()
     {
         (PrefixTree t, int s, RadixNode x, KeyRope key) = Setup(EndStateSupport.DonateOnly);

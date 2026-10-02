@@ -64,7 +64,7 @@ public sealed class Qwen35VerifyOwnerIsolationTests
     }
 
     [Fact]
-    public void NativeLibrary_RetainsLegacyAbiAndExportsOwnedLifecycle()
+    public void NativeLibrary_ExportsTheOwnedLifecycle()
     {
         string libraryName = OperatingSystem.IsMacOS() ? "libGgmlOps.dylib"
             : OperatingSystem.IsWindows() ? "GgmlOps.dll"
@@ -77,12 +77,6 @@ public sealed class Qwen35VerifyOwnerIsolationTests
         {
             foreach (string symbol in new[]
                      {
-                         // Existing external ABI remains unchanged.
-                         "TSGgml_Qwen35ModelVerify",
-                         "TSGgml_Qwen35CommitStateSnapshot",
-                         "TSGgml_Qwen35FetchStateSnapshot",
-                         "TSGgml_Qwen35DrainDeviceState",
-                         // Owner-aware managed path and lifecycle.
                          "TSGgml_Qwen35ModelVerifyOwned",
                          "TSGgml_Qwen35CommitStateSnapshotOwned",
                          "TSGgml_Qwen35FetchStateSnapshotOwned",

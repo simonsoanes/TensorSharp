@@ -27,7 +27,6 @@ public class WebUiSseFrameParityTests
 {
     private static object[] SampleFrames() => new[]
     {
-        WebUiSseEvents.QueueProgress(2, 5),
         WebUiSseEvents.Token("hel"),
         WebUiSseEvents.Thinking("hmm \"quoted\" <tag> & 中文"),
         WebUiSseEvents.Replace("draft answer", 3, 48, true),
@@ -78,7 +77,7 @@ public class WebUiSseFrameParityTests
     [Fact]
     public void TheDiscriminatorKey_ComesFirstInEveryFrame()
     {
-        // index.html switches on key presence (queue_position, token, thinking, replace,
+        // index.html switches on key presence (token, thinking, replace,
         // tool_calls, skill_step, tool_progress, done); pinning the first property name
         // pins the builders' shapes against a careless reorder.
         string[] firstKeys = SampleFrames()
@@ -86,7 +85,7 @@ public class WebUiSseFrameParityTests
             .ToArray();
 
         Assert.Equal(
-            new[] { "queue_position", "token", "thinking", "replace", "tool_calls", "skill_step", "skill_step", "tool_progress", "done", "done" },
+            new[] { "token", "thinking", "replace", "tool_calls", "skill_step", "skill_step", "tool_progress", "done", "done" },
             firstKeys);
     }
 

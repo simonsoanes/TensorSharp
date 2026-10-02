@@ -15,13 +15,14 @@
   var modelBtn = $('model'), hold = $('hold'), abc = $('abc');
 
   var state = {
-    model: null, arch: null, backend: null, contextTokens: 0,
+    model: null, arch: null, backend: null, video: null, contextTokens: 0,
     modelContextTokens: 0, visionReady: false,
     acceptsVisionProjector: true,
     visionChecking: false,
     session: null, conversation: null,
     history: [],            // {role, content, attachments}
     attachments: [],        // /api/upload responses
+    maskEditing: false,
     skills: [],             // selected skill names
     skillSelectionExplicit: false, // distinguishes untouched discovery from deselect-all
     catalogSkills: [],
@@ -42,6 +43,8 @@
     speech: '',            // BCP-47 for dictation; empty follows the device
     settings: null,
     native: false,         // true when the page is inside the app, not a browser
+    dictation: false,      // native pickers can exist without a speech recogniser
+    composerHint: 'Message…',
     netMsg: '',            // the host's own wording for a network refusal
     voice: false,          // the composer is the hold-to-talk button
     // Whether the model reasons before answering. It used to be a switch under the
@@ -156,10 +159,21 @@
   // ---- markdown ------------------------------------------------------------
   // Deliberately small: fenced code, inline code, bold/italic, links, headings
   // and lists. Everything is escaped first, so a model that emits HTML cannot
-  // put nodes into this page.
+  // put nodes into this page -- quotes included, because a link or an image puts
+  // the model's text inside a double-quoted attribute, and an unescaped quote there
+  // let an answer containing ![x" onerror="...](y) run script in the page that holds
+  // the launch token (found 2026-09-30; any page, file or text the model repeats
+  // could carry it).
   function esc(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
+  // Where a link the model wrote may point: the web, mail, or a path on this origin
+  // (a generated file). Anything else -- javascript:, data:, another scheme -- stays
+  // text. An image may only come from this origin: one from anywhere else would be
+  // fetched the moment the answer rendered, whatever the network setting says.
+  var LINK_OK = /^(https?:\/\/|mailto:|\/(?!\/))/i;
+  var IMAGE_OK = /^\/(?!\/)/;
   function render(md) {
     var out = '', rest = String(md == null ? '' : md), fence = /```([a-zA-Z0-9_+-]*)\n([\s\S]*?)(?:```|$)/;
     var m;
@@ -175,15 +189,51 @@
     t = t.replace(/`([^`\n]+)`/g, function (_, c) { return '<code>' + c + '</code>'; });
     t = t.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
     t = t.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
-    // Images before links: an image is a link with a bang in front of it.
-    t = t.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, '<img alt="$1" src="$2">');
-    t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // Images before links: an image is a link with a bang in front of it. Both work
+    // on the escaped text, so what lands in an attribute cannot close it.
+    t = t.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, function (all, alt, src) {
+      if (IMAGE_OK.test(src)) return '<img alt="' + alt + '" src="' + src + '">';
+      return LINK_OK.test(src) ? '<a href="' + src + '" target="_blank" rel="noopener">' + (alt || src) + '</a>' : all;
+    });
+    t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, function (all, label, href) {
+      return LINK_OK.test(href) ? '<a href="' + href + '" target="_blank" rel="noopener">' + label + '</a>' : all;
+    });
     t = t.replace(/^### (.*)$/gm, '<strong>$1</strong>');
     t = t.replace(/^## (.*)$/gm, '<strong>$1</strong>');
     t = t.replace(/^# (.*)$/gm, '<strong>$1</strong>');
-    return t.split(/\n{2,}/).map(function (p) {
-      return '<p>' + p.replace(/\n/g, '<br>') + '</p>';
-    }).join('');
+    return t.split(/\n{2,}/).map(block).join('');
+  }
+  // A GitHub-style table -- a header row, a row of dashes with the same number of
+  // cells, then body rows -- becomes a <table>; the lines around it stay a paragraph.
+  // Models answer comparisons with tables, and this page printed them as rows of
+  // pipes. It runs on text inline() has already escaped and marked up.
+  var TABLE_RULE = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+  function cells(row) {
+    var s = row.trim();
+    if (s.charAt(0) === '|') s = s.slice(1);
+    if (s.charAt(s.length - 1) === '|') s = s.slice(0, -1);
+    return s.split('|').map(function (c) { return c.trim(); });
+  }
+  function block(p) {
+    var lines = p.split('\n');
+    for (var i = 0; i + 1 < lines.length; i++) {
+      if (lines[i].indexOf('|') < 0 || lines[i + 1].indexOf('-') < 0 || !TABLE_RULE.test(lines[i + 1])) continue;
+      var head = cells(lines[i]);
+      if (cells(lines[i + 1]).length !== head.length) continue;
+      var end = i + 2;
+      while (end < lines.length && lines[end].indexOf('|') >= 0) end++;
+      var html = '<table><thead><tr>' + head.map(function (c) { return '<th>' + c + '</th>'; }).join('') + '</tr></thead><tbody>';
+      for (var r = i + 2; r < end; r++) {
+        var row = cells(lines[r]);
+        html += '<tr>' + head.map(function (_, c) { return '<td>' + (row[c] || '') + '</td>'; }).join('') + '</tr>';
+      }
+      return (i > 0 ? paragraph(lines.slice(0, i)) : '') + html + '</tbody></table>'
+        + (end < lines.length ? block(lines.slice(end).join('\n')) : '');
+    }
+    return paragraph(lines);
+  }
+  function paragraph(lines) {
+    return '<p>' + lines.join('<br>') + '</p>';
   }
 
   // ---- attachments, as the transcript holds them ---------------------------
@@ -211,6 +261,17 @@
   function previewOf(a) {
     return a.previewUrl || (a.previewFile ? uploadUrl(a.previewFile) : fileUrlOf(a));
   }
+  /** Editing coordinates must use the full-size conversion, never a HEIC thumbnail. */
+  function editImageOf(a) {
+    return a.editUrl || (a.editFile ? uploadUrl(a.editFile) : previewOf(a));
+  }
+  function imageSelectionUnavailable(a) {
+    if (a.editUnavailableReason) return a.editUnavailableReason;
+    if (/\.(heic|heif)$/i.test(a.file || '') || /\.(heic|heif)$/i.test(a.fileName || '')) {
+      if (!a.editUrl && !a.editFile) return 'Reattach this HEIC or HEIF photo to prepare a full-resolution image selection.';
+    }
+    return '';
+  }
   /** The chip, reduced to what has to survive: no page-session URLs, no file text. */
   function chipOf(a) {
     var chip = {
@@ -220,12 +281,43 @@
     };
     var preview = a.previewFile || (a.previewUrl ? uploadName(a.previewUrl) : '');
     if (preview) chip.previewFile = preview;
+    var edit = a.editFile || (a.editUrl ? uploadName(a.editUrl) : '');
+    if (edit) chip.editFile = edit;
+    if (a.editUnavailableReason) chip.editUnavailableReason = a.editUnavailableReason;
     if (a.frames && a.frames.length) chip.frames = a.frames.slice();
     if (a.fileBacked === true) chip.fileBacked = true;
     if (typeof a.pageCount === 'number') chip.pageCount = a.pageCount;
     if (typeof a.extractedPageCount === 'number') chip.extractedPageCount = a.extractedPageCount;
     if (typeof a.renderedAsImages === 'boolean') chip.renderedAsImages = a.renderedAsImages;
+    if (a.maskPath) {
+      chip.maskPath = a.maskPath; chip.maskMode = a.maskMode || 'grayscale';
+      chip.maskFeather = a.maskFeather || 0; chip.maskCrop = !!a.maskCrop;
+      if (a.maskInvert) chip.maskInvert = true;
+      if (typeof a.maskCropPadding === 'number') chip.maskCropPadding = a.maskCropPadding;
+    }
     return chip;
+  }
+
+  function clearImageSelection(attachment) {
+    delete attachment.maskPath; delete attachment.maskMode; delete attachment.maskFeather; delete attachment.maskCrop;
+    delete attachment.maskInvert; delete attachment.maskCropPadding;
+  }
+
+  function imageSource(attachments) {
+    return attachments.filter(function (a) { return a.mediaType === 'image'; })[0];
+  }
+
+  function hasActiveImageSelection(attachment) {
+    return attachment && attachment.maskPath && attachment._maskActive !== false;
+  }
+
+  function promoteImageSource(attachment) {
+    var index = state.attachments.indexOf(attachment);
+    if (index > 0) state.attachments.unshift(state.attachments.splice(index, 1)[0]);
+  }
+
+  function deactivateImageSelections() {
+    state.attachments.forEach(function (a) { if (a.mediaType === 'image') a._maskActive = false; });
   }
 
   /**
@@ -278,6 +370,29 @@
     return link;
   }
 
+  /**
+   * The clip a video model made, and its soundtrack when the host kept that as a file
+   * of its own. Built the same way for a turn as it finishes and for a reopened chat.
+   */
+  function clipNode(src) {
+    var video = document.createElement('video');
+    // Inline, or an iPhone takes it fullscreen the moment it plays. Looped, because a
+    // generated clip lasts only seconds and a single play is easy to miss.
+    // 'metadata' rather than an attachment's 'none': the header of a clip a few seconds
+    // long costs next to nothing to read, and with it read the controls can show the
+    // clip's length before it plays.
+    video.controls = true; video.playsInline = true; video.loop = true;
+    video.preload = 'metadata';
+    if (src) video.src = src;
+    return video;
+  }
+  function soundNode(src) {
+    var audio = document.createElement('audio');
+    audio.controls = true; audio.preload = 'metadata';
+    if (src) audio.src = src;
+    return audio;
+  }
+
   function addTurn(role, content, attachments, extra) {
     clearEmpty();
     var turn = el('div', 'turn ' + (role === 'user' ? 'me' : 'bot'));
@@ -296,6 +411,11 @@
       var made = document.createElement('img');
       made.src = extra.imageUrl; made.alt = 'generated image';
       b.appendChild(made);
+      imageActions(b, made, extra.imageUrl, newestImageRequest());
+    }
+    if (extra && extra.videoUrl) {
+      b.appendChild(clipNode(extra.videoUrl));
+      if (extra.audioUrl) b.appendChild(soundNode(extra.audioUrl));
     }
     turn.appendChild(b);
     chat.appendChild(turn);
@@ -575,7 +695,38 @@
     state.modelContextTokens = d && typeof d.modelContextTokens === 'number'
       ? d.modelContextTokens : state.contextTokens;
     state.maxTokens = (d && d.defaultMaxTokens) || 2048;
+    // What a video model can be given besides its description. The host reports it
+    // for a video model and null for every other one.
+    state.video = (d && d.video) || null;
+    paintComposerHint();
     paintModelButton();
+    paintChips();
+  }
+
+  function paintComposerHint() {
+    // An image model takes a description, or a photo and what to change about it.
+    text.placeholder = makesVideo() ? videoPlaceholder(state.video)
+      : makesImages()
+        ? 'Describe a picture… or attach a photo and say what to change'
+        : state.native && !state.dictation ? state.composerHint : 'Message… or hold to talk';
+  }
+
+  // Qwen-Image: the host turns a message into a picture rather than an answer
+  // (ImageTurns), on the same /api/chat route and turn machinery as a reply.
+  function makesImages() { return state.arch === 'qwen_image' || state.arch === 'qwen-image'; }
+
+  // MiniMax-H3: the host films the message instead (VideoTurns), the same way. Known by
+  // the capability the host reports, not by an architecture name: the two checkpoints
+  // share one architecture and take different things.
+  function makesVideo() { return !!state.video; }
+
+  // The keyframes checkpoint starts the clip from a photo (and ends it on a second
+  // one); the references checkpoint puts the people, things and sounds it is shown
+  // into a scene of its own. The composer says which, before anything is attached.
+  function videoPlaceholder(v) {
+    if (v.supportsReferenceConditioning) return 'Describe a video… attach photos, clips or sounds it should feature';
+    if (v.supportsImageConditioning) return 'Describe a video… or attach a photo to start it from';
+    return 'Describe a video…';
   }
 
   // Three states, not two. The app now loads the model the user last used by itself,
@@ -629,20 +780,24 @@
     });
   }
 
-  // While the startup load runs, keep asking. It is the only way the page finds out
-  // that the model it was told about has arrived: nothing pushes to this page, and a
-  // send button that stays disabled after the weights are in memory is the same bug
-  // as the one this whole path exists to fix, arriving a few seconds later.
+  // Loading may finish after the user returns from Models. The old model can still
+  // be reported while its replacement loads, so follow the host's load status and
+  // read capabilities after it, including on the last poll.
   function watchModelLoad() {
     if (state.modelWatch) return;
     var deadline = Date.now() + 5 * 60 * 1000;
+    var refreshing = false;
+    function stopWatching() {
+      clearInterval(state.modelWatch);
+      state.modelWatch = 0;
+    }
     state.modelWatch = setInterval(function () {
-      if (state.model || !loadingModel() || Date.now() > deadline) {
-        clearInterval(state.modelWatch);
-        state.modelWatch = 0;
-        return;
-      }
-      refreshModel().then(refreshEngine);
+      if (Date.now() > deadline) { stopWatching(); return; }
+      if (refreshing) return;
+      refreshing = true;
+      refreshEngine().then(refreshModel).then(function (model) {
+        if (model && !loadingModel()) stopWatching();
+      }).finally(function () { refreshing = false; });
     }, 1500);
   }
 
@@ -687,7 +842,7 @@
     (messages || []).forEach(function (m) {
       state.history.push(m);
       addTurn(m.role, displayText(m.content), m.attachments,
-        { artifacts: m.artifacts, imageUrl: m.imageUrl });
+        { artifacts: m.artifacts, imageUrl: m.imageUrl, videoUrl: m.videoUrl, audioUrl: m.audioUrl });
     });
   }
 
@@ -891,11 +1046,13 @@
         if (!body || body.ok !== true) throw new Error('TensorAgent retained the shared item.');
         var parts = appliedShareParts[id] || {};
         var sharedAttachments = Array.isArray(parts.attachments) ? parts.attachments : [];
+        var previousSource = imageSource(state.attachments);
         state.attachments = state.attachments.filter(function (current) {
           return !sharedAttachments.some(function (shared) {
             return current === shared || (current && shared && current.file === shared.file);
           });
         });
+        if (previousSource && state.attachments.indexOf(previousSource) < 0) deactivateImageSelections();
         text.value = removeTrackedSharedText(text.value, parts);
         forgetAppliedShares([id]);
         autoGrow();
@@ -1060,6 +1217,17 @@
       notice('Please wait for file uploads to finish, then send again.');
       return;
     }
+    if (state.maskEditing) { notice('Finish the image selection before sending.'); return; }
+    if (makesImages() && loraChoice !== null) {
+      notice('Wait for the LoRA plug-in choice to finish saving, then send again.'); return;
+    }
+    var source = imageSource(state.attachments);
+    if (!makesImages() && hasActiveImageSelection(source)) {
+      noticeWithAction(
+        'Load Qwen-Image 2.1 before sending this image selection.',
+        'Open Models', function () { openRoute('models'); return true; });
+      return;
+    }
     if (state.visionChecking) { note('send-refused', 'vision check in flight'); return; }
     if (shareDiscarding) {
       note('send-refused', 'share discard in flight');
@@ -1067,7 +1235,20 @@
       return;
     }
     var t = text.value.trim();
+    // A video is filmed from its description. Photos, clips and sounds are only what it
+    // starts from or features, and sent alone their file names would be the script.
+    if (makesVideo() && !t) {
+      note('send-refused', 'video without a description');
+      notice('Describe the video you want, then send.');
+      return;
+    }
     if (!t && !state.attachments.length) { note('send-refused', 'nothing to send'); return; }
+    // A photo with no words would send its file name as the edit instruction.
+    if (makesImages() && !t) {
+      note('send-refused', 'image edit without an instruction');
+      notice('Say what to change about the photo, then send.');
+      return;
+    }
     if (!state.model) {
       note('send-refused', loadingModel() ? 'model loading' : 'no model');
       // Two different answers, because they ask for two different things. A model
@@ -1084,7 +1265,10 @@
     // Capability can change while this long-lived WKWebView is hidden on the Models
     // page. Re-read it immediately before every image-bearing request, while the
     // composer is still intact. The server repeats this check authoritatively.
-    if (nextHistory.some(function (m) { return m && m.imagePaths && m.imagePaths.length; })) {
+    // Not for an image or video model: a photo is what it edits or films from, not
+    // something it has to see. The host refuses an edit itself when the vision file is
+    // missing, and checks what a video was given against what its checkpoint takes.
+    if (!makesImages() && !makesVideo() && nextHistory.some(function (m) { return m && m.imagePaths && m.imagePaths.length; })) {
       state.visionChecking = true;
       send.disabled = true;
       // Disable the shared marker in the same event turn as Send. The model-capability
@@ -1194,6 +1378,12 @@
       if (kind === 'image') {
         imagePaths.push(a.file);
         stillImagePaths.push(a.file);
+        if (stillImagePaths.length === 1 && hasActiveImageSelection(a)) {
+          msg.maskPath = a.maskPath; msg.maskMode = a.maskMode || 'grayscale';
+          msg.maskFeather = a.maskFeather || 0; msg.maskCrop = !!a.maskCrop;
+          if (a.maskInvert) msg.maskInvert = true;
+          if (typeof a.maskCropPadding === 'number') msg.maskCropPadding = a.maskCropPadding;
+        }
       } else if (kind === 'video') {
         isVideo = true;
         if (a.file) videoFilePaths.push(a.file);
@@ -1227,7 +1417,16 @@
     if (textFilePaths.length) msg.textFilePaths = textFilePaths;
     if (textFileNames.length) msg.textFileNames = textFileNames;
     if (isVideo) msg.isVideo = true;
-    if (atts.length) msg.attachments = atts.map(chipOf);
+    if (atts.length) {
+      var source = imageSource(atts);
+      msg.attachments = atts.map(function (a) {
+        var chip = chipOf(a);
+        // Other photos keep their selections in the draft, but only the source's
+        // selection belongs to this edit and its saved conversation.
+        if (a !== source || !hasActiveImageSelection(a)) clearImageSelection(chip);
+        return chip;
+      });
+    }
     return msg;
   }
   function describe(atts) {
@@ -1635,7 +1834,7 @@
     setGenerating(true);
     // Immediately, before a single byte comes back: the gap between pressing send
     // and the first frame is itself seconds long on a phone.
-    progress('Thinking…');
+    progress(makesVideo() ? 'Filming…' : makesImages() ? 'Drawing…' : 'Thinking…');
 
     var ctrl = new AbortController();
     ctrl.awaitingHeaders = true;
@@ -1740,6 +1939,30 @@
   }
 
   /**
+   * What the strip says while a video model works, by the stage the host reports. A
+   * clip takes minutes, so the denoising stage counts its steps and, once the host can
+   * tell, says about how long is left (its eta is -1 until then).
+   */
+  function filmingLabel(f) {
+    switch (f.video_phase) {
+      case 'text-encode': return 'Reading the description…';
+      case 'denoise':
+        return (f.video_steps ? 'Filming… step ' + f.video_step + ' of ' + f.video_steps : 'Filming…')
+          + timeLeft(Number(f.eta));
+      case 'vae-decode': return 'Developing the frames…';
+      case 'audio-decode': return 'Adding the sound…';
+      case 'encode': return 'Saving the video…';
+      default: return 'Filming…';
+    }
+  }
+  /** Minutes past a minute and a half, whole seconds under it, nothing when unknown. */
+  function timeLeft(s) {
+    if (!(s > 0)) return '';
+    return s > 90 ? ' · about ' + Math.round(s / 60) + ' min left'
+      : ' · about ' + Math.max(1, Math.round(s)) + ' s left';
+  }
+
+  /**
    * Read one event stream into one assistant turn.
    *
    * Shared by the request that starts a generation and by a page attaching to one that
@@ -1750,11 +1973,11 @@
   function read(res, view, ctrl) {
     var answer = '', thinking = '', thinkBox = null, thinkBody = null;
     var steps = '', offered = false, draft = '', restarts = 0, errors = 0;
-    // What this turn PRODUCED: the files its tools wrote, and a picture it made.
-    // Kept so the history entry carries them, because the history is what the next
-    // request rewrites the saved transcript from -- an entry that has forgotten the
-    // PDF erases the PDF from a chat that had one.
-    var made = [], madeSeen = {}, madeImage = null;
+    // What this turn PRODUCED: the files its tools wrote, and a picture or a clip it
+    // made. Kept so the history entry carries them, because the history is what the
+    // next request rewrites the saved transcript from -- an entry that has forgotten
+    // the PDF erases the PDF from a chat that had one.
+    var made = [], madeSeen = {}, madeImage = null, madeVideo = null, madeAudio = null;
     var reader = res.body.getReader(), dec = new TextDecoder(), buf = '';
     // Whether the host said the turn was over. A stream that ends without it did not
     // end because the answer did: the connection went away underneath it.
@@ -1912,14 +2135,63 @@
         madeSeen[file.url] = 1;
         made.push({ name: file.name || file.url, bytes: file.bytes || 0, url: file.url });
       });
+      // An image model's turn (ImageTurns on the host): steps while the picture
+      // denoises, some carrying a small preview, then the finished picture. One <img>
+      // is refreshed in place, so the preview becomes the picture instead of a new
+      // image being stacked under it for every step.
+      if (typeof f.image_step === 'number') {
+        // With LoRA plug-ins the host names them on every step (ImageTurns.Translate).
+        var drawing = f.image_loras && f.image_loras.length ? 'Drawing with ' + f.image_loras.join(' + ') + '…' : 'Drawing…';
+        progress(f.image_steps ? drawing + ' step ' + f.image_step + ' of ' + f.image_steps : drawing);
+        if (f.preview) pictureOf(view).src = f.preview;
+      }
       if (f.image || f.imageUrl) {
         madeImage = f.imageUrl || f.image;
         // The picture goes under the text, so the text has to be there first.
         if (answerDirty) { view.bubble.innerHTML = render(answer); view.answerSoFar = answer; answerDirty = false; }
-        var img = document.createElement('img');
-        img.src = madeImage;
-        view.bubble.appendChild(img);
+        pictureOf(view).src = madeImage;
       }
+      // A video model's turn (VideoTurns on the host): the description is read, the
+      // clip denoises step by step, then its frames, its sound and the MP4 are made.
+      // No preview along the way; the finished clip arrives once, at the end.
+      if (typeof f.video_step === 'number') progress(filmingLabel(f));
+      if (f.videoUrl) {
+        madeVideo = f.videoUrl;
+        // Only when the soundtrack is a file of its own. Normally it is inside the MP4,
+        // and the clip plays it.
+        madeAudio = f.audioUrl || null;
+        // The clip goes under the text, so the text has to be there first.
+        if (answerDirty) { view.bubble.innerHTML = render(answer); view.answerSoFar = answer; answerDirty = false; }
+        clipOf(view).src = madeVideo;
+        if (madeAudio) soundOf(view).src = madeAudio;
+      }
+    }
+    // The one picture a turn shows, made on first use and made again if a repaint of
+    // the bubble's text removed it.
+    function pictureOf(v) {
+      if (!v.picture || v.picture.parentNode !== v.bubble) {
+        v.picture = document.createElement('img');
+        v.picture.alt = 'generated image';
+        v.bubble.appendChild(v.picture);
+      }
+      return v.picture;
+    }
+    // The clip and its soundtrack, one of each per bubble and made the same way. A
+    // re-attach replays every frame from the first into this bubble, the url frame
+    // included, and the bubble must still end with one player, not two.
+    function clipOf(v) {
+      if (!v.clip || v.clip.parentNode !== v.bubble) {
+        v.clip = clipNode();
+        v.bubble.appendChild(v.clip);
+      }
+      return v.clip;
+    }
+    function soundOf(v) {
+      if (!v.sound || v.sound.parentNode !== v.bubble) {
+        v.sound = soundNode();
+        v.bubble.appendChild(v.sound);
+      }
+      return v.sound;
     }
     function finish() {
       if (ctrl && ctrl !== state.abort && state.abort) { note('reader-retired', 'finish'); return; }
@@ -1942,11 +2214,16 @@
       var entry = { role: 'assistant', content: answer };
       if (thinking) entry.thinking = thinking;
       if (made.length) entry.artifacts = made;
-      if (madeImage) entry.imageUrl = madeImage;
+      if (madeImage) {
+        entry.imageUrl = madeImage;
+        imageActions(view.bubble, pictureOf(view), madeImage, newestImageRequest());
+      }
+      if (madeVideo) entry.videoUrl = madeVideo;
+      if (madeAudio) entry.audioUrl = madeAudio;
       // Nothing produced is nothing to remember: the host's own record skips an empty
       // turn too, and an empty assistant entry in the history would be sent back to
       // the model as a message it never wrote.
-      if (answer || thinking || made.length || madeImage) state.history.push(entry);
+      if (answer || thinking || made.length || madeImage || madeVideo) state.history.push(entry);
       if (answer) addCopy(view.turn, function () { return answer; });
       setGenerating(false);
       state.abort = null;
@@ -1960,6 +2237,104 @@
   }
 
   // ---- attachments ---------------------------------------------------------
+  function newestImageRequest() {
+    for (var i = state.history.length - 1; i >= 0; i--)
+      if (state.history[i].role === 'user') return state.history[i];
+    return null;
+  }
+
+  function imageActions(bubble, picture, resultUrl, request) {
+    if (bubble.querySelector('.image-edit-actions')) return;
+    var actions = el('div', 'image-edit-actions');
+    var source = request && request.stillImagePaths && request.stillImagePaths[0];
+    if (source) {
+      var sourceAttachment = (request.attachments || []).filter(function (a) { return a.file === source; })[0];
+      var originalUrl = sourceAttachment ? editImageOf(sourceAttachment) : uploadUrl(source);
+      var original = false;
+      var compare = el('button', 'filechip', 'Compare original'); compare.type = 'button';
+      compare.setAttribute('aria-pressed', 'false');
+      compare.addEventListener('click', function () {
+        original = !original; picture.src = original ? originalUrl : resultUrl;
+        picture.alt = original ? 'original image' : 'generated image';
+        compare.textContent = original ? 'Show result' : 'Compare original';
+        compare.setAttribute('aria-pressed', String(original));
+      });
+      actions.appendChild(compare);
+    }
+    var again = el('button', 'filechip', source ? 'Edit again' : 'Edit image'); again.type = 'button';
+    again.addEventListener('click', function () {
+      if (state.generating || state.maskEditing || pendingUploadCount || state.attachments.length || text.value.trim()) {
+        notice('Finish or clear the current draft before editing this image.'); return;
+      }
+      if (source) {
+        var saved = request.attachments || [];
+        state.attachments = saved.map(function (a) { return Object.assign({}, a); });
+        request.stillImagePaths.forEach(function (path) {
+          if (!state.attachments.some(function (a) { return a.file === path && a.mediaType === 'image'; }))
+            state.attachments.push({ file: path, fileName: path, mediaType: 'image' });
+        });
+        var target = state.attachments.filter(function (a) { return a.file === source && a.mediaType === 'image'; })[0];
+        promoteImageSource(target);
+        // Top-level fields record what this turn actually applied. Older saved
+        // chips may also contain dormant selections that must not become active.
+        state.attachments.forEach(clearImageSelection);
+        if (request.maskPath) {
+          target._maskActive = true;
+          target.maskPath = request.maskPath;
+          target.maskMode = request.maskMode || 'grayscale';
+          target.maskFeather = request.maskFeather || 0;
+          target.maskCrop = !!request.maskCrop;
+          target.maskInvert = !!request.maskInvert;
+          if (typeof request.maskCropPadding === 'number') target.maskCropPadding = request.maskCropPadding;
+        }
+        text.value = request.content || '';
+      } else {
+        state.attachments = [{ file: uploadName(resultUrl), fileName: 'Generated image', mediaType: 'image', url: resultUrl }];
+      }
+      autoGrow(); paintChips(); text.focus();
+    });
+    actions.appendChild(again); bubble.appendChild(actions);
+  }
+
+  function selectImageArea(attachment) {
+    if (state.maskEditing || state.generating) return;
+    var unavailable = imageSelectionUnavailable(attachment);
+    if (unavailable) { notice(unavailable, 'error'); return; }
+    if (!window.TensorSharpMaskEditor) { notice('The image selection editor is unavailable. Reload the page and try again.', 'error'); return; }
+    state.maskEditing = true; paintChips();
+    var conversation = state.conversation;
+    window.TensorSharpMaskEditor.open({
+      sourceUrl: editImageOf(attachment), maskUrl: attachment.maskPath ? uploadUrl(attachment.maskPath) : null,
+      maskMode: attachment.maskMode || 'grayscale',
+      maskInvert: !!attachment.maskInvert,
+      maskFeather: attachment.maskFeather || 0, maskCrop: !!attachment.maskCrop,
+    }).then(function (selection) {
+      if (!selection || state.conversation !== conversation || state.attachments.indexOf(attachment) < 0) return;
+      if (selection.remove) {
+        clearImageSelection(attachment); return;
+      }
+      var form = new FormData(); form.append('file', selection.blob, 'selection.png');
+      return fetch('/api/upload', { method: 'POST', body: form }).then(function (response) {
+        return response.json().then(function (data) {
+          var uploaded = data && data.files ? data.files[0] : data;
+          if (!response.ok || !uploaded || !uploaded.ok || !uploaded.file)
+            throw new Error((data && data.error) || 'Selection upload failed.');
+          if (state.conversation !== conversation || state.attachments.indexOf(attachment) < 0) return;
+          attachment.maskPath = uploaded.file; attachment.maskMode = 'grayscale';
+          delete attachment.maskInvert;
+          attachment.maskFeather = selection.maskFeather; attachment.maskCrop = selection.maskCrop;
+          state.attachments.forEach(function (a) {
+            if (a.mediaType === 'image') a._maskActive = a === attachment;
+          });
+          // Commit the source change only after the new mask has uploaded. Cancel
+          // and failure leave the previous source, draft and selections untouched.
+          promoteImageSource(attachment);
+        });
+      });
+    }).catch(function (error) { notice('Image selection: ' + ((error && error.message) || error), 'error'); })
+      .finally(function () { state.maskEditing = false; paintChips(); });
+  }
+
   function paintChips() {
     var box = $('chips');
     box.innerHTML = '';
@@ -1976,20 +2351,49 @@
       shared.appendChild(remove);
       box.appendChild(shared);
     });
+    var imageIndex = 0;
     state.attachments.forEach(function (a, i) {
       var c = el('div', 'chip');
       if (a.mediaType === 'image') {
-        var img = document.createElement('img'); img.src = a.url; c.appendChild(img);
+        var img = document.createElement('img'); img.src = previewOf(a); c.appendChild(img);
+        // Preparing a selection needs no model. Keep the control discoverable while
+        // Qwen is loading or another model is selected; Send checks compatibility.
+        var active = imageIndex++ === 0;
+        c.classList.add('editable-image');
+        var select = el('button', 'filechip mask-select', a.maskPath ? 'Selection saved · Adjust' : 'Select area');
+        select.type = 'button'; select.disabled = state.generating || state.visionChecking || state.maskEditing;
+        select.setAttribute('aria-label', (a.maskPath ? 'Adjust selection for ' : 'Select area in ') + (a.fileName || a.file));
+        select.addEventListener('click', function () { selectImageArea(a); }); c.appendChild(select);
+        var details = el('span', 'image-details');
+        details.appendChild(el('span', active ? 'image-edit-source' : 'image-reference', active ? 'Editing target' : 'Reference'));
+        details.appendChild(el('span', 'nm', a.fileName || a.file));
+        c.appendChild(details);
       } else {
         c.appendChild(el('span', 'ic', a.mediaType === 'video' ? '🎬' : a.mediaType === 'audio' ? '🎧' : '📄'));
       }
-      c.appendChild(el('span', 'nm', a.fileName || a.file));
+      if (a.mediaType !== 'image') c.appendChild(el('span', 'nm', a.fileName || a.file));
       var x = el('button', 'x', '✕');
-      x.disabled = state.visionChecking || shareDiscarding;
-      x.addEventListener('click', function () { state.attachments.splice(i, 1); paintChips(); });
+      x.type = 'button'; x.setAttribute('aria-label', 'Remove ' + (a.fileName || a.file));
+      x.disabled = state.visionChecking || shareDiscarding || state.maskEditing;
+      x.addEventListener('click', function () {
+        if (a === imageSource(state.attachments)) {
+          // Saved reference selections stay available in Adjust, but removing the
+          // target must not silently turn one of them into the next requested edit.
+          deactivateImageSelections();
+        }
+        state.attachments.splice(i, 1); paintChips();
+      });
       c.appendChild(x);
       box.appendChild(c);
     });
+    var source = imageSource(state.attachments);
+    if (!makesImages() && hasActiveImageSelection(source)) {
+      var hint = el('div', 'image-selection-hint');
+      hint.appendChild(el('span', null, 'Load Qwen-Image 2.1 to apply the selected edit.'));
+      var models = el('button', 'notice-action', 'Open Models'); models.type = 'button';
+      models.addEventListener('click', function () { openRoute('models'); });
+      hint.appendChild(models); box.appendChild(hint);
+    }
   }
 
   var uploadQueue = Promise.resolve();
@@ -2033,7 +2437,7 @@
   function openSheet(id) { $('sheet-bg').classList.add('on'); $(id).classList.add('on'); }
   function closeSheets() {
     $('sheet-bg').classList.remove('on');
-    ['attach-sheet', 'skills-sheet', 'model-sheet', 'nav-sheet', 'skill-sheet', 'skill-add-sheet'].forEach(function (s) { $(s).classList.remove('on'); });
+    ['attach-sheet', 'skills-sheet', 'model-sheet', 'nav-sheet', 'skill-sheet', 'skill-add-sheet', 'lora-sheet'].forEach(function (s) { $(s).classList.remove('on'); });
   }
   $('sheet-bg').addEventListener('click', closeSheets);
 
@@ -2160,7 +2564,264 @@
     info.innerHTML = '';
     info.appendChild(el('div', 'skillrow',
       state.model ? (pretty(state.model) + ' · ' + (state.arch || '?') + ' · ' + (state.backend || '')) : 'No model loaded yet.'));
+    var loraBtn = $('open-loras');
+    loraBtn.style.display = makesImages() ? '' : 'none';
+    if (makesImages()) {
+      // Only the names, for the hint: the sheet keeps its own list, which a late answer
+      // here must not replace.
+      fetch('/api/agent/loras').then(function (r) { return r.json(); }).then(function (d) {
+        var on = ((d && d.loras) || []).filter(function (l) { return l.chosen; }).map(function (l) { return l.name; });
+        $('loras-hint').textContent = on.length ? on.join(' + ') : 'speed, style';
+      }).catch(function () { /* the button still opens the sheet, which says what failed */ });
+    }
     openSheet('model-sheet');
+  });
+
+  // ---- LoRA plug-ins (an image model) --------------------------------------
+  //
+  // The plug-ins the host offers for the image model (WebUiRoutes.MapLoras): what is
+  // downloaded, what is on, and how strongly. A change is saved, and the host applies
+  // it to the next picture, so a picture being drawn keeps the plug-ins it started with.
+  var loraPoll = null;
+  // The choice last sent, until the host answers it: a second change made before then
+  // builds on it rather than on the list painted before the first. Saves go one at a
+  // time, in the order they were made, because each one replaces the whole choice; a
+  // list read before the latest save was sent is not painted over its answer.
+  var loraChoice = null;
+  var loraQueue = Promise.resolve();
+  var loraSeq = 0;
+  var loraShape = '';
+  var loraPct = {};
+  function loraSize(bytes) {
+    var mb = (Number(bytes) || 0) / 1e6;
+    return mb >= 1000 ? (mb / 1000).toFixed(1) + ' GB' : Math.round(mb) + ' MB';
+  }
+  function chosenLoras(d) {
+    return ((d && d.chosen) || []).map(function (c) { return { id: c.id, strength: c.strength }; });
+  }
+  function currentLoras() {
+    return loraChoice ? loraChoice.slice() : chosenLoras(state.loras);
+  }
+  // The host checks every change (one speed plug-in, downloaded, a known strength) and
+  // says why it refused, which post() would reduce to a status code.
+  function loraJson(r) {
+    return r.json().then(function (d) {
+      if (!r.ok) throw new Error((d && d.error) || ('HTTP ' + r.status));
+      return d;
+    });
+  }
+  // Said in the sheet, beside the switch that flipped back: a notice would land in the
+  // chat underneath it, where nobody looks while the sheet is open.
+  function loraError(message) {
+    var line = $('lora-error');
+    var inSheet = !!message && $('lora-sheet').classList.contains('on');
+    line.textContent = inSheet ? message : '';
+    line.style.display = inSheet ? '' : 'none';
+    // The sheet scrolls, and the row the user just changed may be far below the line.
+    if (inSheet && typeof line.scrollIntoView === 'function') line.scrollIntoView({ block: 'nearest' });
+    if (message && !inSheet) notice(message, 'error');
+  }
+  function loadLoras(tick) {
+    var seq = loraSeq;
+    return fetch('/api/agent/loras').then(loraJson).then(function (d) {
+      if (seq !== loraSeq || loraChoice) return state.loras;
+      return paintLoras(d, tick);
+    });
+  }
+  // One change at a time, after those before it. `send` returns the host's answer: the
+  // sheet as it now is. Every answer is kept as the latest the host said, and only the
+  // latest change's is painted.
+  function queueLoras(send, failed, isSave) {
+    var seq = ++loraSeq;
+    loraQueue = loraQueue.then(function () {
+      return send().then(function (d) {
+        state.loras = d;
+        if (seq !== loraSeq) return;
+        loraChoice = null;
+        paintLoras(d);
+      }, function (e) {
+        var why = failed + ((e && e.message) || e);
+        if (seq !== loraSeq) {
+          // A later save resends the whole choice and answers for it, so an earlier
+          // save's failure says nothing the user can act on; a removal's does.
+          if (!isSave) loraError(why);
+          return;
+        }
+        loraError(why);
+        loraChoice = null;
+        // The switches back where the host last had them, without waiting on another
+        // request, and then a fresh list.
+        if (state.loras) paintLoras(state.loras);
+        return loadLoras();
+      }).catch(function () { /* the list stays as it was painted */ });
+    });
+    return loraQueue;
+  }
+  function saveLoras(list) {
+    loraChoice = list;
+    return queueLoras(function () {
+      return fetch('/api/agent/loras/choice', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ loras: list }),
+      }).then(loraJson);
+    }, '', true);
+  }
+  function toggleLora(l, on) {
+    loraError('');
+    var d = state.loras || {};
+    var list = currentLoras().filter(function (c) { return c.id !== l.id; });
+    if (on) {
+      // One speed plug-in at a time: two step schedules cannot both apply.
+      if (l.kind === 'Speed') {
+        var speeds = ((d.loras) || []).filter(function (x) { return x.kind === 'Speed'; }).map(function (x) { return x.id; });
+        list = list.filter(function (c) { return speeds.indexOf(c.id) < 0; });
+      }
+      list.push({ id: l.id, strength: l.defaultStrength });
+    }
+    return saveLoras(list);
+  }
+  function setLoraStrength(l, value) {
+    loraError('');
+    return saveLoras(currentLoras().map(function (c) {
+      return c.id === l.id ? { id: c.id, strength: value } : c;
+    }));
+  }
+  function downloadLora(l) {
+    loraError('');
+    return fetch('/api/agent/loras/' + encodeURIComponent(l.id) + '/download', { method: 'POST' })
+      .then(function (r) {
+        // The download belongs to the app, not to this request: the stream is only a
+        // window on it, so the page closes it and follows the job through the list.
+        if (r.body && r.body.cancel) r.body.cancel().catch(function () {});
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return loadLoras();
+      })
+      .catch(function (e) { loraError('The download could not start: ' + ((e && e.message) || e)); });
+  }
+  // Removing a plug-in also turns it off, so it is a change like any other: one made
+  // before the host answers builds on the choice without it, or it would send it back.
+  function removeLora(l) {
+    loraError('');
+    loraChoice = currentLoras().filter(function (c) { return c.id !== l.id; });
+    return queueLoras(function () {
+      return fetch('/api/agent/loras/' + encodeURIComponent(l.id), { method: 'DELETE' })
+        .then(loraJson)
+        .then(function (d) { notice(l.name + ' was removed.'); return d; });
+    }, 'Could not remove ' + l.name + ': ', false);
+  }
+  function loraSwitch(l) {
+    var sw = el('label', 'switch');
+    var box = el('input');
+    box.type = 'checkbox';
+    box.checked = !!l.chosen;
+    box.addEventListener('change', function () { toggleLora(l, box.checked); });
+    sw.appendChild(box);
+    sw.appendChild(el('span', 'track'));
+    return sw;
+  }
+  function loraPercent(l) {
+    var dl = l.download;
+    return Math.round(((dl && dl.progress && dl.progress.fraction) || 0) * 100) + '%';
+  }
+  // What a row shows apart from a running download's percentage.
+  function loraShapeOf(d) {
+    return JSON.stringify(((d && d.loras) || []).map(function (l) {
+      var dl = l.download || {};
+      return [l.id, l.state, !!l.chosen, l.strength, (l.installedBytes || 0) > 0, !!dl.running, dl.state || '', dl.error || ''];
+    }));
+  }
+  function paintLoras(d, tick) {
+    state.loras = d;
+    var list = $('lora-list');
+    var loras = (d && d.loras) || [];
+    var running = loras.some(function (l) { return l.download && l.download.running; });
+    var shape = loraShapeOf(d);
+    // A poll while a download runs moves only its percentage. The rows stay, so a
+    // strength being dragged or a button being pressed is not replaced under the finger.
+    if (tick && shape === loraShape && list.children.length) {
+      loras.forEach(function (l) { if (loraPct[l.id]) loraPct[l.id].textContent = loraPercent(l); });
+      return d;
+    }
+    loraShape = shape;
+    loraPct = {};
+    list.innerHTML = '';
+    if (!loras.length) list.appendChild(el('div', 'notice', 'No LoRA plug-ins are offered for the models on this device.'));
+    loras.forEach(function (l) {
+      var row = el('div', 'skillrow lorarow');
+      row.setAttribute('data-lora', l.id);
+      var meta = el('div', 'meta');
+      meta.appendChild(el('div', 'nm', (l.chosen ? '● ' : '') + l.name + (l.kind === 'Speed' && l.steps ? ' · ' + l.steps + ' steps' : '')));
+      meta.appendChild(el('div', 'ds', l.purpose + (l.trigger ? ' Start the request with "' + l.trigger + '".' : '')));
+      var kind = l.kind === 'Speed' ? 'Speed' : l.kind === 'Edit' ? 'Edits an attached photo' : 'Style';
+      // Its task works only on the model's own steps, so a speed plug-in sits out its edits.
+      if (l.needsModelSteps) kind += ' · keeps the model\'s own steps';
+      meta.appendChild(el('div', 'lic', kind + ' · ' + loraSize(l.totalBytes) + ' · ' + l.license));
+      row.appendChild(meta);
+      var act = el('div', 'act');
+      var dl = l.download;
+      if (dl && dl.running) {
+        var pct = el('span', 'pct', loraPercent(l));
+        loraPct[l.id] = pct;
+        act.appendChild(pct);
+        var stop = el('button', 'mini', 'Stop');
+        stop.addEventListener('click', function () {
+          post('/api/agent/loras/' + encodeURIComponent(l.id) + '/download/cancel', {}).then(function () { return loadLoras(); })
+            .catch(function (e) { loraError('Could not stop the download: ' + ((e && e.message) || e)); });
+        });
+        act.appendChild(stop);
+      } else if (l.state !== 'Installed') {
+        // Turned on, but its files are gone: the next picture is refused until it is
+        // downloaded again or turned off, so both are offered here.
+        if (l.chosen) act.appendChild(loraSwitch(l));
+        var get = el('button', 'mini', 'Download');
+        get.addEventListener('click', function () { downloadLora(l); });
+        act.appendChild(get);
+        // A stopped download's part files are the user's to reclaim without finishing it.
+        if ((l.installedBytes || 0) > 0) {
+          var drop = el('button', 'mini quiet', 'Remove');
+          drop.addEventListener('click', function () { removeLora(l); });
+          act.appendChild(drop);
+        }
+        if (l.chosen) meta.appendChild(el('div', 'err', 'It is turned on, but its files are missing: download it again, or turn it off.'));
+        if (dl && dl.state === 'Failed') meta.appendChild(el('div', 'err', 'The download stopped: ' + (dl.error || 'an error') + '. Download resumes it.'));
+      } else {
+        act.appendChild(loraSwitch(l));
+        var rm = el('button', 'mini quiet', 'Remove');
+        rm.addEventListener('click', function () { removeLora(l); });
+        act.appendChild(rm);
+        if (l.chosen && l.strengthAdjustable) {
+          var strength = el('div', 'strength');
+          var range = el('input');
+          range.type = 'range';
+          range.min = String(d.minStrength);
+          range.max = String(d.maxStrength);
+          range.step = '0.05';
+          range.value = String(l.strength);
+          var shown = el('span', 'val', Math.round(l.strength * 100) + '%');
+          range.addEventListener('input', function () { shown.textContent = Math.round(Number(range.value) * 100) + '%'; });
+          range.addEventListener('change', function () { setLoraStrength(l, Number(range.value)); });
+          strength.appendChild(el('span', 'lbl', 'Strength'));
+          strength.appendChild(range);
+          strength.appendChild(shown);
+          meta.appendChild(strength);
+        }
+      }
+      row.appendChild(act);
+      list.appendChild(row);
+    });
+    if (running && !loraPoll) {
+      loraPoll = setInterval(function () {
+        if (!$('lora-sheet').classList.contains('on')) { clearInterval(loraPoll); loraPoll = null; return; }
+        loadLoras(true).catch(function () {});
+      }, 1000);
+    }
+    if (!running && loraPoll) { clearInterval(loraPoll); loraPoll = null; }
+    return d;
+  }
+  $('open-loras').addEventListener('click', function () {
+    closeSheets();
+    loraError('');
+    loadLoras().then(function () { openSheet('lora-sheet'); })
+      .catch(function (e) { notice('The LoRA plug-ins could not be listed: ' + ((e && e.message) || e), 'error'); });
   });
   $('open-models').addEventListener('click', function () {
     closeSheets();
@@ -2379,7 +3040,7 @@
     if (pressAt && (Math.abs(x - pressAt.x) > 10 || Math.abs(y - pressAt.y) > 10)) cancelPress();
   }
   function beginPress(x, y) {
-    if (state.voice) return;
+    if (state.voice || (state.native && !state.dictation)) return;
     cancelPress();
     pressAt = { x: x, y: y };
     pressTimer = setTimeout(function () {
@@ -2431,6 +3092,7 @@
 
   function startRec() {
     if (!state.native) { notice('Voice input is only available in the app.', 'error'); return; }
+    if (!state.dictation) return;
     hold.classList.add('rec');
     $('holdlabel').textContent = 'Listening… release to stop';
     post('/api/agent/events', { type: 'dictate-start' });
@@ -2559,6 +3221,7 @@
    * the calls meant for it, and so each one can say what shape it expects.
    */
   var hostCalls = {
+    nativeReady: function (a) { window.TensorAgent.nativeReady(a); },
     addAttachment: function (a) { window.TensorAgent.addAttachment(a); },
     insertText: function (a) { window.TensorAgent.insertText(a && a.text); },
     takeShare: function () { window.TensorAgent.takeShare(); },
@@ -2641,6 +3304,8 @@
      */
     diagnostics: function () {
       return JSON.stringify({
+        native: state.native,
+        dictation: state.dictation,
         conversation: state.conversation,
         turn: state.turn,
         attached: !!state.abort,
@@ -2673,7 +3338,7 @@
     history: function () { return state.history; },
     // Synchronous on purpose: WKWebView's evaluateJavaScript does not await a
     // promise, so an async function here can never report success to native code.
-    refreshModel: function () { refreshModel(); return true; },
+    refreshModel: function () { refreshEngine().then(refreshModel); return true; },
     hasModel: function () { return !!state.model; },
     dictationEnded: dictationEnded,
     /** A refusal only the user can lift, with a button that opens iOS Settings. */
@@ -2683,8 +3348,19 @@
         return true;
       });
     },
-    /** The app calls this once at startup so the page knows native pickers exist. */
-    nativeReady: function () { state.native = true; return true; },
+    /** Native pickers and dictation are separate capabilities on Windows. */
+    nativeReady: function (capabilities) {
+      state.native = true;
+      state.dictation = !capabilities || capabilities.dictation !== false;
+      state.composerHint = (capabilities && capabilities.composerHint) || 'Message…';
+      paintComposerHint();
+      if (!state.dictation) {
+        cancelPress();
+        if (state.voice) setVoice(false);
+      }
+      return true;
+    },
+    canDictate: function () { return state.native && state.dictation; },
     /**
      * Knobs for the page's own tests and nothing else: the timings above are what
      * make recovery invisible on a phone and would make a test take a minute.
@@ -2776,7 +3452,7 @@
     setTimeout(function () {
       if (document.visibilityState !== 'visible') return;
       resumeTurn();
-      refreshModel();
+      refreshEngine().then(refreshModel);
       takePendingShare();
     }, 250);
   });

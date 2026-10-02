@@ -14,20 +14,21 @@ namespace TensorSharp.Models
         // this to HiddenSize loses information required by the trained head.
         public int SpecFeatureSize => _hcDim;
         public int SpecPreferredDraftWindow => 3;
+        // Verification includes the pending anchor. CPU/CUDA preserve decode
+        // arithmetic only through eight rows, including for explicit windows.
+        public int SpecMaxDraftTokens => ResolveSpecMaxDraftTokens(_backend);
+        internal static int ResolveSpecMaxDraftTokens(BackendType backend)
+            => backend is BackendType.GgmlCpu or BackendType.GgmlCuda ? 7 : int.MaxValue;
         public bool SpecVerifyPersistsAcceptedKv => false;
         public bool SpecPlainStepUsesForward => true;
         // SpecForward delegates to Forward's image injection and captures each
         // chunk's MRoPE positions before Forward consumes them for MTP catch-up.
         public bool SpecSupportsMultimodalPrefill => true;
         public bool SpecTrunkFollowsBoundCache => true;
-        public bool SpeculationProfitable => !_specStateFailed && IsGgmlBackend && _tokenGraphEnabled
-            && !_tokenGraphUnsupported && _spanAttnEnabled && !_fusedGateUpExperts
-            && _fusedFfnEnabled && !_fusedFfnUnsupported
-            && _fusedGdnEnabled && !_fusedGdnUnsupported
-            && _fusedAttnEnabled && !_fusedAttnUnsupported
-            && _gdnMaxLayers < 0 && !_gdnVerify
-            && (_specApiAvailable ??= GgmlBasicOps.Qwen4ExpSpecApiAvailable())
-            && (!HasQsa || (_qsaApiAvailable ??= GgmlBasicOps.Qwen4ExpQsaApiAvailable()));
+        public bool SpeculationProfitable => !_specStateFailed && IsGgmlBackend
+            && !_tokenGraphUnsupported && !_fusedGateUpExperts
+            && !_fusedFfnUnsupported && !_fusedGdnUnsupported && !_fusedAttnUnsupported
+            && !_gdnVerify;
 
         private bool _specForwardActive;
         private bool _specAllLogitsRows;
@@ -38,7 +39,6 @@ namespace TensorSharp.Models
         private object _specSnapshotAttnArgs, _specSnapshotGdnArgs, _specSnapshotPleArgs;
         private SpecMetadata _specMetadata;
         private int _specResetVersion;
-        private bool? _specApiAvailable;
         private bool _specRecurrentRestored;
         private bool _specStateFailed;
 
@@ -171,6 +171,15 @@ namespace TensorSharp.Models
                 {
                     keys.Add(Marshal.UnsafeAddrOfPinnedArrayElement(_pleConvState, 0));
                     devices.Add(DeviceForLayer(_pleLayerIndex));
+                }
+                if (IsTensorParallel)
+                {
+                    // Replicated recurrence runs on every rank. Rollback must restore
+                    // every copy before the next FFN collective joins their outputs.
+                    int singleRankCount = keys.Count;
+                    for (int rank = 1; rank < TpDegree; ++rank)
+                        for (int i = 0; i < singleRankCount; ++i)
+                        { keys.Add(keys[i]); devices.Add(rank); }
                 }
                 fixed (Qwen4ExpAttnArgs* attn = _attnArgs)
                 fixed (Qwen4ExpGdnArgs* gdn = _gdnArgs)

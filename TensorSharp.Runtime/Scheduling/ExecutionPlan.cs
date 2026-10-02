@@ -17,12 +17,6 @@ namespace TensorSharp.Runtime.Scheduling
     /// control flow.</summary>
     public enum ExecutionPathKind
     {
-        /// <summary>NextN/MTP speculative decoding with the trunk on the
-        /// batched paged path (same kernels as the non-speculative batched
-        /// baseline). Declinable: the executor's arming/continuity gate may
-        /// pass the step to the next candidate.</summary>
-        SpeculativeBatchedTrunk,
-
         /// <summary>Per-sequence route chosen so LINEAR-trunk MTP speculation
         /// can engage (or keep serving a sequence whose state lives in the
         /// linear cache). Runs plain per-sequence decode when the speculative

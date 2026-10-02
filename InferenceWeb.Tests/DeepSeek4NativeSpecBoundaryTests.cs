@@ -164,9 +164,8 @@ public sealed class DeepSeek4NativeSpecBoundaryTests(ITestOutputHelper output)
     {
         foreach (var (name, value) in new Dictionary<string, string>
         {
-            ["TS_DSV41_TP"] = "0", ["TS_DSV41_ENGRAM_THREADS"] = "2",
-            ["TS_DSV41_ENGRAM_WARM"] = "0", ["TS_DSV41_RETAINED_CACHE"] = "0",
-            ["TS_DSV41_REWIND_CHECKPOINT"] = "1",
+            ["TS_DSV41_ENGRAM_THREADS"] = "2",
+            ["TS_DSV41_ENGRAM_WARM"] = "0", ["TS_DSV41_REWIND_CHECKPOINT"] = "1",
         }) Assert.Equal(value, Environment.GetEnvironmentVariable(name));
         string target = Environment.GetEnvironmentVariable("TS_TEST_DSV41_DSPARK_TARGET")!;
         string head = Environment.GetEnvironmentVariable("TS_TEST_DSV41_DSPARK_HEAD")!;
@@ -174,7 +173,7 @@ public sealed class DeepSeek4NativeSpecBoundaryTests(ITestOutputHelper output)
         CheckHash(head, "edfdccb348e5e85c714fb8dfe38a61b2324105d1cbd5e14c738324a0940ef600");
         string directory = Path.GetDirectoryName(target)!;
         CheckHash(Path.Combine(directory, "deepseek41.config.json"), "264618b0f475c0c6c735acff6cc2a5a14a4ba2ccaddc4c00f44c4c2e6a438207");
-        var handle = GgmlDeepSeek4Native.LoadModelWithDspark(target, 1, 1024, ubatch, 2, head, backendName: backend);
+        var handle = GgmlDeepSeek4Native.LoadModel(target, 1, 1024, ubatch, 2, head, backendName: backend);
         Assert.NotEqual(IntPtr.Zero, handle);
         try
         {

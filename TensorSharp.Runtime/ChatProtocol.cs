@@ -170,6 +170,22 @@ namespace TensorSharp.Runtime
         public string? ThinkingBudgetEndToken { get; init; }
 
         /// <summary>
+        /// Text forced ahead of <see cref="ThinkingBudgetEndToken"/> when the budget closes a
+        /// REQUESTED reasoning block, or null for a bare close. Qwen's published
+        /// thinking-budget recipe: a bare <c>&lt;/think&gt;</c> leaves the model mid-thought,
+        /// and Qwen3.5-9B cut at 450 tokens went on reasoning in its answer.
+        /// </summary>
+        public string? ThinkingBudgetClosingText { get; init; }
+
+        /// <summary>
+        /// The generation prompt opens the reasoning block whatever the request's thinking
+        /// flag says (GLM-5.3-Flash has no thinking-off shape). The thinking budget then
+        /// applies with thinking off too: the model reasons either way, and a reply that
+        /// spent <c>max_tokens</c> inside the block had an empty answer.
+        /// </summary>
+        public bool PromptAlwaysOpensThinking { get; init; }
+
+        /// <summary>
         /// Trained single token with which the MODEL opens its reasoning channel
         /// mid-reply, or null when only the prompt ever opens it. With it declared the
         /// budget counts from the opener instead of from the first generated token, and

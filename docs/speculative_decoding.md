@@ -56,13 +56,9 @@ per-row logits (so a whole draft window is checked for roughly the cost of one
 decode step, optionally tapping each row's hidden state), and a way to undo the
 rejected tail.
 
-`IBatchedSpeculativeTarget` adds the same thing over the batched paged path, so
-the speculative trunk can run on the same kernels as the non-speculative batched
-baseline and compose with prefix caching.
-
-`ISpecTrunk` is the small seam that lets one loop serve both KV regimes:
-`LinearSpecTrunk` (the model's live linear cache) and `BatchedSpecTrunk` (paged
-KV + per-slot recurrent state, in `BatchExecutor`).
+`ISpecTrunk` is the small seam the loop drives: `LinearSpecTrunk` forwards on the
+model's live linear cache (a batched paged trunk was tried and removed: it ran the
+per-op batched path, about half the speed of the fused linear verify).
 
 ### Layer 2 — the algorithm (`ISpeculator`)
 
@@ -333,12 +329,12 @@ The historical `--mtp-spec`, `--no-mtp-spec`, `--mtp-draft`, `--mtp-pmin`,
 `--spec-draft-n-max` and `--spec-draft-conf-min` aliases) have been removed: each fails
 with an error naming its replacement, never a silent ignore, because the CLI's
 argument switch drops unknown flags and "speculation quietly off" is exactly the
-failure that would produce. Environment variables are published under both
-`TS_SPEC_*` and `TS_MTP_*`, and that is not merely for compatibility: the glm-dsa
-**native** loader reads `TS_MTP_SPEC` and `TS_MTP_DRAFT` from C++ while the model
-is loading — it decides whether to page a whole extra 256-expert decoder layer
-into VRAM, and sizes its graph cache — so those names are a cross-language
-contract.
+failure that would produce. Environment variables likewise have one name each:
+the older `TS_MTP_*` names fail the same way, naming their `TS_SPEC_*`
+replacement. The glm-dsa **native** loader reads `TS_SPEC_DRAFT` from C++ while
+the model is loading (it sizes its graph cache from it), and its managed half
+reads `TS_SPEC` to decide whether to page a whole extra 256-expert decoder layer
+into VRAM.
 
 `--spec-pmin` means something different per algorithm, which is why each brings
 its own default rather than sharing one: `0.15` for a per-token head (top-1
@@ -416,7 +412,7 @@ Both passes are one fused GGML graph each (`ggml_ops_dflash.cpp`,
 `TSGgml_DFlashInject` / `TSGgml_DFlashDraftBlock`) on CUDA, Vulkan and Metal,
 with a persistent graph that ggml-cuda can capture and replay; the per-op
 managed drafter is the fallback and the reference the fused path is checked
-against. `TS_DFLASH_FUSED=0` forces it.
+against.
 
 The selector's lattice comes back to the host as `k + k*k*(gamma-1)` floats
 (~7 KB) rather than the `[vocab, block]` block a naive readback would move
@@ -424,8 +420,7 @@ The selector's lattice comes back to the host as `k + k*k*(gamma-1)` floats
 
 ### Attaching one
 
-`--draft-model <path>` (or `TS_QWEN35_DFLASH` /
-`TS_MUSE_GLIMMER_DFLASH`). The file's `general.architecture` decides what it is,
+`--draft-model <path>` (or `TS_SPEC_DRAFT_MODEL`). The file's `general.architecture` decides what it is,
 not its name. A target that already carries a NextN/MTP block (Qwen 3.8 does)
 uses the DFlash drafter instead when one is attached: they consume different
 hidden rows and drive different speculators, and the operator named the file
@@ -513,7 +508,7 @@ catch-up over the accepted tokens and the first draft step into a single call.
 TensorSharp ran a catch-up and then a separate first `DraftStep`, and on a head
 whose per-call cost is mostly fixed that extra call was the largest single
 difference. It now folds too (`SupportsFusedCatchUpStep` /
-`DraftCatchUpAndStep`, `TS_MTP_FOLD_CATCHUP=0` to revert): `catchUpMs` 191 -> 0,
+`DraftCatchUpAndStep`): `catchUpMs` 191 -> 0,
 worth +4.0% at 256 tokens and +5.3% on prose, with byte-identical output and
 unchanged acceptance.
 
@@ -527,8 +522,8 @@ because each looks like an obvious suspect:
   cache evicts across draft shapes), but raising
   `TS_Q35_VERIFY_CACHE_BUDGET_MB` from 1536 to 3072 halves the resets and
   changes throughput not at all.
-- **The MTP draft graph not persisting.** `TS_Q35_MTP_DRAFT_PERSIST=1` moves
-  `draftMs` by less than the run-to-run noise.
+- **The MTP draft graph not persisting.** Persisting it (measured with a switch
+  since removed) moved `draftMs` by less than the run-to-run noise.
 - **The confidence gate.** llama.cpp does not gate at all; dropping `--spec-pmin`
   to 0.05 is a wash on both prompts, because the steps it declines genuinely
   would have drafted badly.
@@ -620,10 +615,8 @@ the host round trip went through the state's unpack-and-repack; on the factual
 prompt the device path reproduces plain decoding byte for byte while the host
 path drifted in the last few tokens.
 
-`TS_Q35_VERIFY_SNAPSHOTS=0` restores the old path entirely, and
-`TS_Q35_VERIFY_DEFER_STATE=0` keeps the snapshots but restores the download, so
-the two halves can be measured apart. Either is also what a shape the kernel
-will not persist falls back to, automatically. The cost of the snapshots is
+`TS_Q35_VERIFY_SNAPSHOTS=0` restores the old path entirely; it is also what a
+shape the kernel will not persist falls back to, automatically. The cost of the snapshots is
 VRAM: the GDN op's output grows by one state per slot, ~150 MB per slot for this
 model across all 48 recurrent layers, which is the other reason the default
 window is 3 rather than 8.
@@ -726,7 +719,7 @@ counters (`TS_GMTP_PROFILE=1`) on the real TensorAgent host path:
   passes them whenever it wants every row's logits and the output weight is
   quantized, `CanFoldLmHead`); the rows come back post-norm, which is what the
   draft head consumes, and the tail costs about 3 ms inside the graph. E4B: 58
-  to 48 ms per verify. `TS_GMTP_NO_FOLD_HEAD=1` restores the tail for an A/B.
+  to 48 ms per verify.
 - **IQ4_XS had no small-batch kernel on Metal.** ggml-metal's `mul_mv_ext`
   covers Q4_0/Q5_0/Q8_0/IQ4_NL for 2..8 rows and the K-quants for 4..8, but not
   IQ4_XS, which is what 234 of the E4B catalog model's tensors use (unsloth's
@@ -1039,8 +1032,7 @@ Three changes, none model-specific:
 
 A fourth is Qwen 3.5 specific: `ggml_cuda` now keeps the gated-delta-net
 recurrent state on the device across a speculative step instead of draining it
-to host mirrors and re-uploading it, which is what Metal already did
-(`TS_QWEN35_SPEC_DEVICE_STATE=0` restores the drain).
+to host mirrors and re-uploading it, which is what Metal already did.
 
 Measured after, same machine, same prompt: **1.13x slower** than plain
 (112.4 -> 99.3 tok/s) with the governor parking correctly. Isolating the fourth
@@ -1144,11 +1136,11 @@ managed side cannot reproduce by toggling its own arguments. The fix belongs in
 `ggml_ops_qwen35_verify.cpp`, in how the snapshot slots are captured and
 committed for a batch wider than eight rows.
 
-### Device-resident recurrent state: fast and currently wrong
+### Device-resident recurrent state: fast, wrong, removed
 
-`TS_QWEN35_VERIFY_RESIDENT=1` keeps the gated-delta-net conv and delta state on
-the device instead of moving ~60 MB per call. It is a large win on paper and it
-breaks the output, which is why it stays opt-in:
+Keeping the gated-delta-net conv and delta state on the device instead of moving
+~60 MB per call was a large win on paper and broke the output, so the
+experiment (an opt-in that was never the default) was removed:
 
 * Resident on every call: the stream diverged from plain greedy at token 53. A
   resident call updates the state IN PLACE, so

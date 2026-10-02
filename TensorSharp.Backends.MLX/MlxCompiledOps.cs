@@ -16,12 +16,6 @@ namespace TensorSharp.MLX
     // sequence length during prefill.
     internal static class MlxCompiledOps
     {
-        // Global kill switch. Set TS_MLX_DISABLE_COMPILE=1 to skip the
-        // compile path and fall back to the original eager op chains (used
-        // for A/B benchmarking and as a safety hatch).
-        internal static readonly bool Disabled =
-            string.Equals(Environment.GetEnvironmentVariable("TS_MLX_DISABLE_COMPILE"), "1", StringComparison.Ordinal);
-
         private static MlxNative.CompiledClosure siluClosure;
         private static MlxNative.CompiledClosure geluTanhClosure;
         private static MlxNative.CompiledClosure swiGluClosure;

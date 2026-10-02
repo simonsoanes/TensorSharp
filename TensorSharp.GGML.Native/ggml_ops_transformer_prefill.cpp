@@ -104,7 +104,7 @@ TSG_EXPORT int TSGgml_Gemma4LayerPrefill(
     // published its K/V via freshKOut/freshVOut.
     int isShared,
     float* donorK, float* donorV, int donorKvLen,
-    // KV cache element type. 0 = F32 (default, legacy), 1 = F16 (memory-saving).
+    // KV cache element type. 0 = F32 (default), 1 = F16 (memory-saving).
     // When F16 we still build attention in F32 (Q is F32, fresh K/V is F32),
     // but the persistent cache lives in F16 so writes go through ggml_cpy(F32->F16)
     // and the global-prev path materializes the historical cache view as F32
@@ -204,7 +204,7 @@ TSG_EXPORT int TSGgml_Gemma4LayerPrefill(
         // with the same (startPos, seqLen) and the same (isLocal,
         // slidingWindow) signature, so the RoPE position vector and the
         // F16 causal+SWA mask are bit-identical across all layers. The
-        // legacy code rebuilt them on the C++ stack for every layer and
+        // per-layer code rebuilt them on the C++ stack for every layer and
         // re-uploaded them to the backend (~`kvLen * seqLen * 2` bytes for
         // the mask and `seqLen * 4` bytes for pos). On long prefills
         // (seqLen=2048, kvLen=2048, 30 layers) that's 240 MiB of
@@ -460,8 +460,8 @@ TSG_EXPORT int TSGgml_Gemma4LayerPrefill(
         ggml_tensor* mask_t = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, kvLen, seqLen, 1, 1);
         std::vector<ggml_fp16_t>& mask_data = fetch_cached_mask(kvLen);
 
-        // Attention: ggml_flash_attn_ext when enabled (default), with the
-        // explicit mul_mat -> soft_max_ext -> mul_mat chain as fallback.
+        // Attention: ggml_flash_attn_ext, with the explicit mul_mat -> soft_max_ext
+        // -> mul_mat chain for a backend whose flash-attention op declines the shape.
         //
         // The critical detail that took two prior attempts to find: without
         // ggml_prec_set_acc(GGML_PREC_F32) the kernel uses F16
@@ -471,18 +471,11 @@ TSG_EXPORT int TSGgml_Gemma4LayerPrefill(
         // (decoded as eos spam on real prompts). Both ollama and llama.cpp
         // call set_prec(F32) immediately after every flash_attn_ext for
         // exactly this reason.
-        //
-        // The fallback path remains accessible via TSG_USE_FLASH_ATTN_PREFILL=0
-        // for A/B comparison or in case a future ggml-metal regression breaks
-        // the fast path.
         ggml_tensor* attn_flat;
-        const char* use_fa_env = std::getenv("TSG_USE_FLASH_ATTN_PREFILL");
-        const bool use_flash_attn = (use_fa_env == nullptr) || (use_fa_env[0] != '0');
         ggml_tensor* flash_attn_out = nullptr;
         ggml_tensor* flash_mask_t = mask_t;
         std::vector<ggml_fp16_t> flash_mask_data;
 
-        if (use_flash_attn)
         {
             // ggml_flash_attn_ext returns the result in [n_embd_v, n_head,
             // n_batch, ne3] layout - i.e. *already permuted* relative to the
@@ -527,7 +520,7 @@ TSG_EXPORT int TSGgml_Gemma4LayerPrefill(
             }
         }
 
-        if (use_flash_attn && backend_supports_op(flash_attn_out))
+        if (backend_supports_op(flash_attn_out))
         {
             attn_flat = ggml_reshape_2d(ctx, flash_attn_out, qDim, seqLen);
         }
@@ -1533,7 +1526,7 @@ TSG_EXPORT int TSGgml_GptOssAttentionLayerPrefill(
         // Download the freshly appended K/V slice [startPos, kvLen) per head
         // back to the host cache. This is O(seqLen), not O(context), and it is
         // what keeps the host cache a valid mirror for the readers that do not
-        // go through this kernel (the legacy per-op attention path and the
+        // go through this kernel (the per-op attention path and the
         // engine's KV snapshot/swap).
         {
             const std::size_t hostStrideBytes   = static_cast<std::size_t>(cacheSize)  * headDim * elemSize;
@@ -1965,7 +1958,7 @@ TSG_EXPORT int TSGgml_Qwen35AttentionLayerPrefill(
         // DeviceCopy path (which Apple Silicon Metal currently takes because
         // GGML's metal device props don't initialise `integrated`), the
         // GPU-side writes need to be explicitly downloaded back to host so
-        // the legacy CPU SIMD decode path (AttentionDecodePureCS, which reads
+        // the CPU SIMD decode path (AttentionDecodePureCS, which reads
         // kCache via GetFloatPtr) sees the freshly-written K/V. Without this
         // sync, decode reads stale host memory and produces degenerate or
         // repeating output. This is cheap when the path is HostPtr (single

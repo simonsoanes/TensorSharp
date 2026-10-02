@@ -73,8 +73,8 @@ using namespace tsg;
 // ggml_ops_core.cpp) and via TSGgml_GptOssResetBatchedDecodeCache.
 //
 // v1 scope: no MoE CPU offload (decline), F32/F16 KV, folded lm_head, NO-WRAP
-// (positions[s] + 1 <= cache rows). The legacy per-seq-window path remains as
-// the fallback for backends without persist support (or TS_GPTOSS_BATCHED_ARENA=0).
+// (positions[s] + 1 <= cache rows). The per-sequence-window path remains as
+// the fallback for backends without persist support.
 // ============================================================================
 namespace
 {
@@ -326,11 +326,11 @@ TSG_EXPORT void TSGgml_GptOssResetBatchedDecodeCache()
 }
 
 // ---------------------------------------------------------------------------
-// Legacy fallback: per-sequence window views + per-sequence fattn, no
-// persistent state. Used when the backend has no persist support or the
-// arena path is disabled. One-shot graph per call.
+// Fallback: per-sequence window views + per-sequence fattn, no
+// persistent state. Used when the backend has no persist support.
+// One-shot graph per call.
 // ---------------------------------------------------------------------------
-static int gob_decode_batched_legacy(
+static int gob_decode_batched_window(
     const TSGgmlGptOssLayerDesc* layers, int num_layers, int n_seqs,
     void* hidden_data,
     void** k_cache_arr, void** v_cache_arr,
@@ -824,7 +824,7 @@ static int gob_decode_batched_arena(
     const int hd = layers[0].head_dim;
     const int kvH = layers[0].num_kv_heads;
     // The arena assumes one uniform KV geometry across layers (true for
-    // GPT-OSS); anything else takes the legacy path.
+    // GPT-OSS); anything else takes the per-sequence-window path.
     for (int l = 1; l < num_layers; l++)
     {
         if (layers[l].head_dim != hd || layers[l].num_kv_heads != kvH ||
@@ -1097,7 +1097,7 @@ static int gob_decode_batched_arena(
             if (t.o_b != nullptr) o_mm = ggml_add(ctx, o_mm, t.o_b);
             ggml_tensor* ffn_inp = ggml_add(ctx, hidden, o_mm);
 
-            // ===== MoE FFN (identical to the legacy path) =====
+            // ===== MoE FFN (identical to the per-sequence-window path) =====
             ggml_tensor* moe_in = ggml_mul(ctx, ggml_rms_norm(ctx, ffn_inp, d.eps), t.post_attn_norm_w);
 
             ggml_tensor* router_logits = ggml_mul_mat(ctx, t.gate_inp_w, moe_in);
@@ -1479,8 +1479,8 @@ TSG_EXPORT int TSGgml_GptOssModelDecodeBatched(
     const void* final_norm_data,
     // Greedy fast path: when non-null receives argmax(logits) per sequence.
     // want_logits == 0 additionally skips the [vocab, n] download+scatter on
-    // the arena path (the caller must then pass sampled_data). The legacy and
-    // no-argmax fallbacks still fill both correctly.
+    // the arena path (the caller must then pass sampled_data). The
+    // per-sequence-window and no-argmax fallbacks still fill both correctly.
     std::int32_t* sampled_data, int want_logits)
 {
     try
@@ -1529,16 +1529,8 @@ TSG_EXPORT int TSGgml_GptOssModelDecodeBatched(
             }
         }
 
-        static const bool gob_arena = []{
-            const char* e = std::getenv("TS_GPTOSS_BATCHED_ARENA");
-            return e == nullptr || e[0] != '0';
-        }();
-        static const bool gob_persist = []{
-            const char* e = std::getenv("TS_GPTOSS_FD_PERSIST");
-            return e == nullptr || e[0] != '0';
-        }();
-        const bool can_persist = gob_persist && gob_arena &&
-            (g_backend_type == BACKEND_TYPE_CUDA || g_backend_type == BACKEND_TYPE_VULKAN);
+        const bool can_persist =
+            g_backend_type == BACKEND_TYPE_CUDA || g_backend_type == BACKEND_TYPE_VULKAN;
 
         if (can_persist)
         {
@@ -1553,10 +1545,10 @@ TSG_EXPORT int TSGgml_GptOssModelDecodeBatched(
 
         if (logits_data == nullptr)
         {
-            set_last_error("GPT-OSS batched decode: legacy path requires a logits buffer.");
+            set_last_error("GPT-OSS batched decode: the per-sequence-window path requires a logits buffer.");
             return 0;
         }
-        return gob_decode_batched_legacy(layers, num_layers, n_seqs, hidden_data,
+        return gob_decode_batched_window(layers, num_layers, n_seqs, hidden_data,
             k_cache_arr, v_cache_arr, cache_sizes, positions, logits_data, vocab_size,
             lm_head_data, lm_head_type, lm_head_ne0, lm_head_ne1, lm_head_bytes,
             final_norm_data, sampled_data);

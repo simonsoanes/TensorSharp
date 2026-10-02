@@ -38,7 +38,7 @@ public class GptOssLongDecodeReproTests
         if (modelPath == null) { _output.WriteLine("[gptoss-long] no model; skipping"); return; }
         _output.WriteLine($"[gptoss-long] loading {Path.GetFileName(modelPath)}");
 
-        BackendType backend = OperatingSystem.IsMacOS() ? BackendType.GgmlMetal : BackendType.GgmlCpu;
+        BackendType backend = TestGates.PinnedGgmlBackend;
         using var model = TensorSharp.Models.ModelBase.Create(modelPath, backend);
 
         int vocab = model.Config?.VocabSize ?? 0;
@@ -148,7 +148,7 @@ public class GptOssLongDecodeReproTests
         return Directory.GetFiles(dir, "*.gguf").Where(p =>
         {
             var n = Path.GetFileName(p).ToLowerInvariant();
-            return (n.Contains("gpt-oss|gpt_oss|gptoss") || n.Contains("gpt_oss") || n.Contains("gptoss"))
+            return (n.Contains("gpt-oss") || n.Contains("gpt_oss") || n.Contains("gptoss"))
                 && !n.Contains("mmproj");
         }).OrderBy(p => Path.GetFileName(p)).FirstOrDefault();
     }

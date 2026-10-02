@@ -14,7 +14,7 @@
     {"id":"nemotron35","repo":"unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF","patterns":["NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MXFP4_MOE.gguf"],"modalities":["text"]},
     {"id":"diffusiongemma","repo":"unsloth/diffusiongemma-26B-A4B-it-GGUF","patterns":["diffusiongemma-26B-A4B-it-Q4_K_M.gguf"],"modalities":["text_diffusion"]},
     {"id":"minimax-h3","repo":"unsloth/MiniMax-H3-GGUF","patterns":["minimax_h3_fl2va_pruned-Q4_K.gguf","minimax_h3_ref2va_pruned-Q4_K.gguf","qwen3vl_32b_minimax_h3-Q4_K_M.gguf","vae/minimax_h3_video_vae_fp16.safetensors","vae/minimax_h3_audio_vae_fp32.safetensors"],"modalities":["video_generation","audio_generation"]},
-    {"id":"minimax-h3-tokenizer","repo":"MiniMaxAI/MiniMax-H3","patterns":["processor/vocab.json","processor/merges.txt"],"companion":true},
+    {"id":"minimax-h3-tokenizer","repo":"MiniMaxAI/MiniMax-H3","patterns":["processor/vocab.json","processor/merges.txt","processor/tokenizer_config.json"],"companion":true},
     {"id":"wan-turbo","repo":"hum-ma/Wan2.2-TI2V-5B-Turbo-GGUF","patterns":["Wan2_2-TI2V-5B-Turbo-Q8_0.gguf"],"modalities":["video_generation"]},
     {"id":"wan-vae","repo":"QuantStack/Wan2.2-TI2V-5B-GGUF","patterns":["VAE/Wan2.2_VAE.safetensors"],"companion":true},
     {"id":"umt5-encoder","repo":"city96/umt5-xxl-encoder-gguf","patterns":["umt5-xxl-encoder-Q8_0.gguf"],"companion":true},

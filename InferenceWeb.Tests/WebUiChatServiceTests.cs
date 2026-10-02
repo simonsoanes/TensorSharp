@@ -565,7 +565,7 @@ public class WebUiChatServiceTests : IDisposable
     {
         Fixture f = Build();
         var adapter = new WebUiAdapter(
-            f.Model, new InferenceQueue(), f.Sessions, f.Options, f.Uploads, f.Skills,
+            f.Model, f.Sessions, f.Options, f.Uploads, f.Skills,
             codeRunner: null, workspaces: null, codeArtifacts: null, NullLoggerFactory.Instance);
 
         var result = adapter.GetModels();
@@ -609,13 +609,13 @@ public class WebUiChatServiceTests : IDisposable
     }
 
     [Fact]
-    public void QueueStatus_IsIdleBeforeAnyRequest_AndCarriesTheLegacyCount()
+    public void QueueStatus_IsIdleBeforeAnyRequest()
     {
         Fixture f = Build();
 
         Assert.Equal(
-            """{"busy":false,"processing":0,"pending_requests":0,"total_processed":7}""",
-            JsonSerializer.Serialize(f.Service.GetQueueStatus(7)));
+            """{"busy":false,"processing":0,"pending_requests":0,"total_processed":0}""",
+            JsonSerializer.Serialize(f.Service.GetQueueStatus()));
     }
 
     [Fact]
@@ -822,6 +822,90 @@ public class WebUiChatServiceTests : IDisposable
         Assert.Empty(Directory.GetFiles(_baseDir));
     }
 
+    [Theory]
+    [InlineData("photo.heic")]
+    [InlineData("photo.heif")]
+    public async Task UploadHeic_UsesOriginalPixelsForEditingAndAccountsForBothPngs(string name)
+    {
+        // Real HEVC-in-HEIF fixture. Decoding must work; unavailable codecs cannot
+        // silently count as a passing preview or precise-selection test.
+        byte[] bytes = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "Images", "edit-photo-1024x768.heic"));
+        var expected = TensorSharp.Models.QwenImage.ImageIO.Decode(bytes, preserveAlpha: true);
+        Assert.Equal((1024, 768), (expected.Width, expected.Height));
+        Fixture f = Build();
+        using var stream = new MemoryStream(bytes);
+        object response = await f.Service.UploadAsync(stream, name, bytes.Length, CancellationToken.None);
+        JsonElement result = JsonSerializer.SerializeToElement(response);
+        string previewPath = Path.Combine(_baseDir, Path.GetFileName(result.GetProperty("previewUrl").GetString()!));
+        string editPath = Path.Combine(_baseDir, Path.GetFileName(result.GetProperty("editUrl").GetString()!));
+        Assert.NotEqual(previewPath, editPath);
+        var preview = TensorSharp.Models.QwenImage.ImageIO.Load(previewPath);
+        var edit = TensorSharp.Models.QwenImage.ImageIO.Load(editPath, preserveAlpha: true);
+        Assert.True(preview.Width < expected.Width && preview.Height < expected.Height);
+        Assert.Equal((expected.Width, expected.Height), (edit.Width, edit.Height));
+        Assert.Equal(expected.Pixels, edit.Pixels);
+        Assert.Equal(expected.Alpha, edit.Alpha);
+        Assert.Equal(JsonValueKind.Null, result.GetProperty("editUnavailableReason").ValueKind);
+        Assert.Equal(3, Directory.GetFiles(_baseDir).Length);
+        Assert.Equal(Directory.GetFiles(_baseDir).Sum(path => new FileInfo(path).Length), f.Uploads.UsedBytes);
+        Assert.True(f.Service.DiscardUpload(response));
+        Assert.Empty(Directory.GetFiles(_baseDir));
+        Assert.Equal(0, f.Uploads.UsedBytes);
+    }
+
+    [Fact]
+    public async Task UploadBatch_HeicEditingImagesRollBackWhenALaterUploadFails()
+    {
+        byte[] bytes = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "Images", "edit-photo-1024x768.heic"));
+        Fixture f = Build();
+        await Assert.ThrowsAsync<IOException>(() => f.Service.UploadFilesAsync(
+            [new("photo.heic", bytes.Length, () => new MemoryStream(bytes)),
+             new("next.txt", 1, () => throw new IOException("read failed"))], CancellationToken.None));
+        Assert.Empty(Directory.GetFiles(_baseDir));
+        Assert.Equal(0, f.Uploads.UsedBytes);
+    }
+
+    [Fact]
+    public async Task UploadHeic_OverSelectionLimitKeepsThumbnailAndExplainsRefusal()
+    {
+        // PNG bytes make this geometry boundary independent of HEIC encoder support;
+        // the real HEIC decoder is exercised by UploadHeic_UsesOriginalPixelsForEditing.
+        byte[] bytes = TensorSharp.Models.QwenImage.ImageIO.EncodePng(
+            new TensorSharp.Models.QwenImage.RgbImage(8193, 1, new float[8193 * 3]));
+        Fixture f = Build();
+        using var stream = new MemoryStream(bytes);
+        var result = JsonSerializer.SerializeToElement(await f.Service.UploadAsync(stream, "wide.heic", bytes.Length, CancellationToken.None));
+        Assert.True(result.GetProperty("ok").GetBoolean());
+        Assert.NotEmpty(result.GetProperty("previewUrl").GetString()!);
+        Assert.Equal(JsonValueKind.Null, result.GetProperty("editUrl").ValueKind);
+        Assert.Contains("8192", result.GetProperty("editUnavailableReason").GetString());
+        Assert.Equal(2, Directory.GetFiles(_baseDir).Length);
+        Assert.Empty(Directory.GetFiles(_baseDir, "*-edit.png"));
+    }
+
+    [Theory]
+    [InlineData(4096, 4096, true)]
+    [InlineData(8192, 2048, true)]
+    [InlineData(4096, 4097, false)]
+    [InlineData(8193, 1, false)]
+    [InlineData(1, 8193, false)]
+    [InlineData(0, 64, false)]
+    public void SelectionImageBoundsMatchTheSharedEditor(int width, int height, bool expected) =>
+        Assert.Equal(expected, WebUiChatService.SupportsImageSelectionSize(width, height));
+
+    [Fact]
+    public async Task UploadPng_KeepsOriginalFileWithoutAdditionalBrowserConversions()
+    {
+        byte[] bytes = TensorSharp.Models.QwenImage.ImageIO.EncodePng(new TensorSharp.Models.QwenImage.RgbImage(2, 1, new float[6]));
+        Fixture f = Build();
+        using var stream = new MemoryStream(bytes);
+        var result = JsonSerializer.SerializeToElement(await f.Service.UploadAsync(stream, "photo.png", bytes.Length, CancellationToken.None));
+        Assert.False(result.TryGetProperty("editUrl", out _));
+        Assert.False(result.TryGetProperty("previewUrl", out _));
+        Assert.Single(Directory.GetFiles(_baseDir));
+        Assert.Equal(bytes.Length, f.Uploads.UsedBytes);
+    }
+
     [Fact]
     public async Task UploadBatch_PreservesOrderDuplicateNamesAndPerFileContracts()
     {
@@ -989,7 +1073,7 @@ public class WebUiChatServiceTests : IDisposable
     public async Task UploadAdapter_ReadsEveryMultipartFilePartInOrder()
     {
         Fixture f = Build();
-        var adapter = new WebUiAdapter(f.Model, new InferenceQueue(), f.Sessions, f.Options, f.Uploads,
+        var adapter = new WebUiAdapter(f.Model, f.Sessions, f.Options, f.Uploads,
             f.Skills, null, null, null, NullLoggerFactory.Instance);
         using var multipart = new System.Net.Http.MultipartFormDataContent();
         multipart.Add(new System.Net.Http.StringContent("alpha"), "files", "a.txt");
@@ -1009,7 +1093,7 @@ public class WebUiChatServiceTests : IDisposable
     public async Task UploadAdapter_MalformedMultipartReturns400()
     {
         Fixture f = Build();
-        var adapter = new WebUiAdapter(f.Model, new InferenceQueue(), f.Sessions, f.Options, f.Uploads,
+        var adapter = new WebUiAdapter(f.Model, f.Sessions, f.Options, f.Uploads,
             f.Skills, null, null, null, NullLoggerFactory.Instance);
         var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
         context.Request.ContentType = "multipart/form-data";
@@ -1046,6 +1130,20 @@ public class WebUiChatServiceTests : IDisposable
 
         Assert.Single(frames);
         Assert.Equal("""{"done":true,"error":"The loaded model is not a Qwen-Image-2.1 model."}""", JsonSerializer.Serialize(frames[0]));
+    }
+
+    [Fact]
+    public async Task MaskedImageEdit_UnsupportedModelRejectsBeforeReadingFiles()
+    {
+        Fixture f = Build();
+        var request = Json("""{"imagePath":"missing.png","maskPath":"missing-mask.png","prompt":"paint it red"}""");
+        var error = await Assert.ThrowsAsync<WebUiRequestRejectedException>(() => f.Service.ImageEditAsync(request, CancellationToken.None));
+        Assert.Equal(400, error.StatusCode);
+        Assert.Contains("Qwen-Image-2.1", error.Message);
+        var frames = new List<object>();
+        await foreach (var frame in f.Service.ImageEditStreamAsync(request, CancellationToken.None)) frames.Add(frame);
+        Assert.Single(frames);
+        Assert.Contains("Qwen-Image-2.1", JsonSerializer.Serialize(frames[0]));
     }
     [Fact]
     public async Task ImageGenerate_WithoutTheModel_RefusesPlainAndStreamingRequests()

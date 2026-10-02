@@ -43,6 +43,12 @@ public sealed class SpeculationBench
     public const string RunVariable = "TENSORAGENT_SPEC_BENCH_RUN";
     public const string TokensVariable = "TENSORAGENT_SPEC_BENCH_TOKENS";
     public const string ModesVariable = "TENSORAGENT_SPEC_BENCH_MODES";
+    /// <summary>
+    /// Seconds to wait after the cache is warm before the first turn. A desktop app is
+    /// still bringing its window and page up for several seconds after a warm-cache load,
+    /// and a benchmark that starts inside that window measures the launch.
+    /// </summary>
+    public const string DelayVariable = "TENSORAGENT_SPEC_BENCH_DELAY";
 
     public static bool Requested =>
         string.Equals(Environment.GetEnvironmentVariable(EnableVariable), "1", StringComparison.Ordinal);
@@ -93,6 +99,12 @@ public sealed class SpeculationBench
             for (int i = 0; i < 180 && !_app.PrefixCacheIsWarm; i++)
                 await Task.Delay(1000, token).ConfigureAwait(false);
             Say(_app.PrefixCacheIsWarm ? "specbench cache warm" : "specbench cache NOT warm (warm-up did not finish)");
+            if (double.TryParse(Environment.GetEnvironmentVariable(DelayVariable), NumberStyles.Float,
+                    CultureInfo.InvariantCulture, out double delay) && delay > 0)
+            {
+                Say($"specbench waiting {delay:0.#}s before the first turn");
+                await Task.Delay(TimeSpan.FromSeconds(delay), token).ConfigureAwait(false);
+            }
             Say($"specbench model {_app.ModelService.LoadedModelName} on {_app.ModelService.LoadedBackend}; "
                 + $"draft head {(_app.DraftHeadAttached ? "attached" : "none")}; {ProcessMemory.Describe()}");
 

@@ -11,36 +11,44 @@
 namespace TensorAgent.Core.Catalog;
 
 /// <summary>
-/// Points the Qwen-Image-2.1 pipeline at the companion networks this installation
-/// actually downloaded.
+/// Points a diffusion pipeline at the companion networks this installation actually
+/// downloaded.
 ///
 /// <para>
-/// A qwen_image GGUF is only the diffusion transformer. The 2.1 VAE, the Qwen3-VL-8B
-/// text encoder and its vision projector are separate files, and <c>QwenImageModel</c>
-/// finds them by scanning the directory the DiT sits in for
-/// <c>qwen_image_2.1_vae*.safetensors</c>, a <c>qwen3vl-8b</c> / <c>qwen3-vl-8b</c> GGUF
-/// and its <c>mmproj</c>. <see cref="ModelStore"/> puts them there, so an entry whose
-/// file names match those scans works without this; publishing the paths anyway makes
-/// the catalog's file list, not the file names, decide what is loaded.
+/// A diffusion GGUF is only the denoiser. Qwen-Image-2.1's VAE, its Qwen3-VL-8B text
+/// encoder and that encoder's vision projector are separate files, and so are
+/// MiniMax-H3's Qwen3-VL-32B text encoder, its video and audio VAEs and the tokenizer
+/// files the encoder's GGUF does not carry. Each model finds its companions by scanning
+/// for file names when it is not told where they are, and MiniMax-H3 scans the denoiser's
+/// folder AND ITS PARENT - in this app the parent is the whole model store, where a loose
+/// <c>qwen3vl</c> match is Qwen-Image's 8B encoder. So the paths are always published,
+/// and the catalog's file list, not file names, decides what is loaded.
 /// </para>
 /// <para>
-/// The desktop server does the same translation from its <c>--qwen-image-*</c> flags
-/// (<c>ServerOptionsBuilder.ApplyQwenImageCompanionCliFlags</c>). The app has no flags,
-/// so the catalog entry and what is on disk decide instead. Every variable is written
-/// on every call, and one whose file is absent is cleared rather than left pointing at
-/// the previous model's copy: a stale path is a load that fails with a file name the
-/// user has never heard of.
+/// The desktop server does the same translation from its <c>--qwen-image-*</c> and
+/// <c>--video-*</c> flags (<c>ServerOptionsBuilder.ApplyQwenImageCompanionCliFlags</c>).
+/// The app has no flags, so the catalog entry and what is on disk decide instead. Every
+/// variable is written on every call, and one the selected entry has no file for is
+/// cleared rather than left pointing at the previous model's copy: a stale path is a load
+/// that fails with a file name the user has never heard of, or one that quietly succeeds
+/// with another model's network.
 /// </para>
 /// </summary>
 public static class DiffusionCompanions
 {
-    /// <summary>The environment variable each companion role is published under, which is
-    /// the name <c>QwenImageModel</c> reads.</summary>
-    private static readonly (CatalogFileRole Role, string Variable)[] Published =
+    /// <summary>The environment variable each family's companion role is published under,
+    /// which is the name that family's model reads.</summary>
+    private static readonly (CatalogFamily Family, CatalogFileRole Role, string Variable)[] Published =
     [
-        (CatalogFileRole.Vae, "TS_QWEN_IMAGE_VAE"),
-        (CatalogFileRole.TextEncoder, "TS_QWEN_IMAGE_TE"),
-        (CatalogFileRole.VisionProjector, "TS_QWEN_IMAGE_MMPROJ"),
+        (CatalogFamily.QwenImage, CatalogFileRole.Vae, "TS_QWEN_IMAGE_VAE"),
+        (CatalogFamily.QwenImage, CatalogFileRole.TextEncoder, "TS_QWEN_IMAGE_TE"),
+        (CatalogFamily.QwenImage, CatalogFileRole.VisionProjector, "TS_QWEN_IMAGE_MMPROJ"),
+        (CatalogFamily.MiniMaxH3, CatalogFileRole.TextEncoder, "TS_VIDEO_TEXT_ENCODER"),
+        (CatalogFamily.MiniMaxH3, CatalogFileRole.Vae, "TS_VIDEO_VAE"),
+        (CatalogFamily.MiniMaxH3, CatalogFileRole.AudioVae, "TS_VIDEO_AUDIO_VAE"),
+        // A folder, not a file: MiniMaxH3TextEncoder reads vocab.json, merges.txt and
+        // tokenizer_config.json from it.
+        (CatalogFamily.MiniMaxH3, CatalogFileRole.Tokenizer, "TS_VIDEO_TOKENIZER"),
     ];
 
     /// <summary>
@@ -55,9 +63,9 @@ public static class DiffusionCompanions
         ArgumentNullException.ThrowIfNull(store);
 
         var published = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach ((CatalogFileRole role, string variable) in Published)
+        foreach ((CatalogFamily family, CatalogFileRole role, string variable) in Published)
         {
-            string? path = model is null ? null : PathOf(model, role, store);
+            string? path = model is not null && model.Family == family ? PathOf(model, role, store) : null;
             Environment.SetEnvironmentVariable(variable, path);
             if (path is not null)
                 published[variable] = path;
@@ -67,10 +75,17 @@ public static class DiffusionCompanions
 
     private static string? PathOf(CatalogModel model, CatalogFileRole role, ModelStore store)
     {
-        CatalogFile? file = model.Files.FirstOrDefault(f => f.Role == role);
-        if (file is null)
+        CatalogFile[] files = model.Files.Where(f => f.Role == role).ToArray();
+        if (files.Length == 0)
             return null;
-        string path = store.PathFor(model, file);
+        if (role == CatalogFileRole.Tokenizer)
+        {
+            // All of them or nothing: a folder missing one file would be published and
+            // then fail inside the first generation, after the encoder had been opened.
+            string[] paths = files.Select(f => store.PathFor(model, f)).ToArray();
+            return paths.All(File.Exists) ? Path.GetDirectoryName(paths[0]) : null;
+        }
+        string path = store.PathFor(model, files[0]);
         return File.Exists(path) ? path : null;
     }
 }

@@ -69,7 +69,7 @@ from the result JSONs alone.
 | `benchmark_config_prefill.json` | **prefill-only** variant — the same long-prompt sweep (2k/4k/8k/16k/32k/64k/128k tokens) but with the multimodal / diffusion scenarios and models stripped out, for a focused prefill run; select with `--config` |
 | `benchmark_config_multigpu.json` | **multi-GPU** variant — a 4-GPU Linux box (validated on 4×A40), tensor-parallel degrees 1/2/4, including a model that only fits across 4 GPUs (`min_tp`); select with `--config` |
 | `benchmark_config_ci.json` | **CI** variant used by `.github/workflows/test-matrix.yml` — TensorSharp vs llama.cpp only, `ggml_cuda` only, text + prefill scenarios |
-| `benchmark_config_glm53_qwen38.json` | **GLM-5.3 / GLM-5.3-Flash / Qwen3.8-Flash-Next** on an 8×A40 box — two whole-layer placement columns: GLM automatic placement explicitly sets `TS_GLM_NGPU=0`; the other column passes `--layer-split N` and pins N GPUs. Qwen3.8 requires the explicit column. The harness retains `--tp` / `min_tp` as GPU-count selectors; neither column requests inference tensor parallelism. TensorSharp-only by default: that host's llama.cpp has no `glm5next`. Select with `--config` |
+| `benchmark_config_glm53_qwen38.json` | **GLM-5.3 / GLM-5.3-Flash / Qwen3.8-Flash-Next** on an 8×A40 box — one whole-layer placement column that passes `--layer-split N` and pins N GPUs. The harness retains `--tp` / `min_tp` as GPU-count selectors; the column never requests inference tensor parallelism. TensorSharp-only by default: that host's llama.cpp has no `glm5next`. Select with `--config` |
 | `download_models.py` | pre-fetches the selected models from the `source` URLs in the config (optional — `run_matrix.py` already downloads what is missing) |
 
 ## Configuration
@@ -194,8 +194,8 @@ The default registry declares:
 | `cpu` | cpu | `--backend cpu` (pure C#) | `-ngl 0` | — |
 
 Select any subset with `--backends ggml_cuda,ggml_vulkan,...` (or
-`defaults.backends` in the config); the legacy alias `gpu` still resolves to
-`ggml_cuda`, and unknown ids fail fast with the list of available ones. An
+`defaults.backends` in the config); the alias `gpu` resolves to `ggml_cuda`,
+and unknown ids fail fast with the list of available ones. An
 engine with no launch mapping for a backend (e.g. llama.cpp on `mlx`) records
 its cells as `skipped`, and `cpu`-kind backends auto-skip `large` models.
 
@@ -246,10 +246,6 @@ TensorSharp request to a tool-capable model would carry five coordination tools
 (`spawn_agent`, `wait_agent`, `send_input`, `close_agent`, `list_agents`) and a
 coordination prompt that llama.cpp and vLLM never see, and prompt tokens, TTFT,
 output similarity and tool-call behaviour would not be like-for-like.
-
-Older configs using the legacy `"backends": ["gpu", "cpu"]` list + `maps`
-form still load unchanged, and result files from old runs (backend ids `gpu` /
-`cpu` in their names) still render in reports alongside new ids.
 
 ### MTP / NextN speculative decoding (`--mtp off | on | off,on`)
 
@@ -827,8 +823,8 @@ a backend mapping chooses the actual engine option. Layer-placement columns
 set `tensorsharp.tp_arg` to `--layer-split` and llama.cpp's `tp_extra_args` to
 `["--split-mode", "layer"]`. They must not be labelled as tensor parallelism.
 The DeepSeek V4.1 layer columns and `ggml_cuda_split` in the GLM/Qwen matrix
-use that mapping. The DeepSeek V4.1 routed-MoE TP column uses `--tp N` together
-with `TS_DSV41_TP=N` and remains an experimental partial TP path.
+use that mapping. The DeepSeek V4.1 routed-MoE TP column uses `--tp N` and
+remains an experimental partial TP path.
 
 ```bash
 python run_matrix.py --config benchmark_config_glm53_qwen38.json \
@@ -845,6 +841,5 @@ python run_matrix.py --config benchmark_config_deepseek4_layer.json --tp 4
 ```
 
 It was removed from `benchmark_config_multigpu.json`, whose backend columns
-select tensor parallelism. The automatic GLM layer column explicitly sets
-`TS_GLM_NGPU=0`; with no placement configuration the runtime now defaults to
-one device.
+select tensor parallelism. With no placement flag the runtime serves one
+device.
