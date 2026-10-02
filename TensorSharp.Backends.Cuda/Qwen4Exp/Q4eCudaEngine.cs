@@ -590,6 +590,14 @@ namespace TensorSharp.Cuda
             if (xq != IntPtr.Zero
                 && CudaQuantizedOps.TryResidentMatmulQ81(dev.Alloc, w.Ptr, w.Type, xq, Ptr(output), w.Ne0, w.Ne1, rows))
                 return;
+            // The q8_1 decode kernels above cover Q2_K/Q3_K/Q6_K/Q8_0. Any other layout the warp-per-row
+            // dot reads (UD-Q2_K_XL keeps much of its dense half in Q5_K) runs here rather than on the
+            // shared route, which quantizes into shared scratch and would cost the step its capture.
+            if (xq != IntPtr.Zero && Dsv4Kernels.DenseQ81RowsSupports(w.Type, w.Ne0))
+            {
+                dev.DK.DenseQ81Rows(w.Ptr, xq, Ptr(output), w.Type, w.Ne1, w.Ne0, w.RowBytes, rows, dev.Stream);
+                return;
+            }
             MatMul(w, input, output, rows);
         }
 

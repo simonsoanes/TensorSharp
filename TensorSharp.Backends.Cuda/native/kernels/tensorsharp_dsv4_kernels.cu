@@ -53,6 +53,23 @@ struct ts_dsv4_block_iq2_xxs
     uint16_t qs[32];
 };
 
+// block_iq2_xs: 74 bytes / 256 values (half d, 32 uint16 of 9-bit grid index +
+// 7-bit sign index, then one byte of two 4-bit scales per 32 values).
+struct ts_dsv4_block_iq2_xs
+{
+    half d;
+    uint16_t qs[32];
+    uint8_t scales[8];
+};
+
+// block_iq3_xxs: 98 bytes / 256 values (half d, 64 grid-index bytes, then one
+// uint32 per 32 values: four 7-bit sign indices and a 4-bit scale).
+struct ts_dsv4_block_iq3_xxs
+{
+    half d;
+    uint8_t qs[96];
+};
+
 // ---------------------------------------------------------------------------
 // small helpers
 // ---------------------------------------------------------------------------
@@ -305,6 +322,8 @@ __device__ __forceinline__ float ts_dsv4_dot_q8_0_block(
 #define TS_DSV4_WTYPE_Q4_K 12
 #define TS_DSV4_WTYPE_Q5_K 13
 #define TS_DSV4_WTYPE_IQ2XXS 16
+#define TS_DSV4_WTYPE_IQ2XS 17
+#define TS_DSV4_WTYPE_IQ3XXS 18
 #define TS_DSV4_WTYPE_IQ4NL 20
 #define TS_DSV4_WTYPE_IQ4XS 23
 #define TS_DSV4_IQ4NL_BLOCK_BYTES 18  // half d + qs[16], 32 values
@@ -314,6 +333,8 @@ __device__ __forceinline__ float ts_dsv4_dot_q8_0_block(
 #define TS_DSV4_Q4_K_BLOCK_BYTES 144  // half d, half dmin, scales[12], qs[128]
 #define TS_DSV4_Q5_K_BLOCK_BYTES 176  // half d, half dmin, scales[12], qh[32], qs[128]
 #define TS_DSV4_IQ2XXS_BLOCK_BYTES 66
+#define TS_DSV4_IQ2XS_BLOCK_BYTES 74
+#define TS_DSV4_IQ3XXS_BLOCK_BYTES 98
 #define TS_DSV4_Q6_K_BLOCK_BYTES 210
 
 // Full-row dot: one warp computes dot(weight row, activation row).
@@ -351,6 +372,88 @@ __device__ __forceinline__ float ts_dsv4_dot_iq2xxs_group(
     const int ls = aux32 >> 28;
     sumi = (ls * sumi + sumi / 2) / 4;
     return __half2float(bq2->d) * __half2float(q8[group].d) * (float)sumi;
+}
+
+// One IQ2_XS 32-value group dotted against one q8_1 activation block. Ported
+// from ggml-cuda's vec_dot_iq2_xs_q8_1: four 8-value lookups into the 512-entry
+// grid, each with its own sign byte (7 stored bits, the 8th the parity), and two
+// 4-bit scales, one per 16 values.
+__device__ __forceinline__ float ts_dsv4_dot_iq2xs_group(
+    const uint8_t* iq_block, const ts_dsv4_block_q8_1* q8, int group)
+{
+    const ts_dsv4_block_iq2_xs* bq2 = (const ts_dsv4_block_iq2_xs*)iq_block;
+    const int iqs = group * 2;
+    const int qa = ts_dsv4_get_int_b2(bq2->qs, iqs + 0);
+    const int qb = ts_dsv4_get_int_b2(bq2->qs, iqs + 1);
+    const uint32_t q2[4] = { (uint32_t)qa & 0xFFFF, (uint32_t)qa >> 16, (uint32_t)qb & 0xFFFF, (uint32_t)qb >> 16 };
+    const int ls0 = bq2->scales[group] & 0x0F;
+    const int ls1 = bq2->scales[group] >> 4;
+
+    int sumi0 = 0, sumi1 = 0;
+#pragma unroll
+    for (int l0 = 0; l0 < 8; l0 += 2)
+    {
+        const uint2 gridPos = ((const uint2*)iq2xs_grid)[q2[l0 / 2] & 0x1FF];
+        const uint32_t v = q2[l0 / 2] >> 9;
+        const uint32_t signs = (v ^ ((uint32_t)(__popc(v) & 1) << 7)) * 0x01010101u;
+
+        const int signs0 = __vcmpne4(signs & 0x08040201u, 0);
+        const int gridL = __vsub4((int)gridPos.x ^ signs0, signs0);
+        const int signs1 = __vcmpne4(signs & 0x80402010u, 0);
+        const int gridH = __vsub4((int)gridPos.y ^ signs1, signs1);
+
+        const int u0 = ts_dsv4_get_int_b4(q8[group].qs, l0 + 0);
+        const int u1 = ts_dsv4_get_int_b4(q8[group].qs, l0 + 1);
+        if (l0 < 4)
+        {
+            sumi0 = ts_dsv4_dp4a(gridL, u0, sumi0);
+            sumi0 = ts_dsv4_dp4a(gridH, u1, sumi0);
+        }
+        else
+        {
+            sumi1 = ts_dsv4_dp4a(gridL, u0, sumi1);
+            sumi1 = ts_dsv4_dp4a(gridH, u1, sumi1);
+        }
+    }
+    const int sumi = (sumi0 * ls0 + sumi1 * ls1 + (sumi0 + sumi1) / 2) / 4;
+    return __half2float(bq2->d) * __half2float(q8[group].d) * (float)sumi;
+}
+
+// One IQ3_XXS 32-value group dotted against one q8_1 activation block. Ported
+// from ggml-cuda's vec_dot_iq3_xxs_q8_1: eight 4-value lookups into the
+// 256-entry grid; the group's uint32 carries four 7-bit sign indices (one per
+// 8 values) and the 4-bit scale. Signs expand through ksigns_iq2xs exactly as in
+// the IQ2_XXS dot above.
+__device__ __forceinline__ float ts_dsv4_dot_iq3xxs_group(
+    const uint8_t* iq_block, const ts_dsv4_block_q8_1* q8, int group)
+{
+    const ts_dsv4_block_iq3_xxs* bq3 = (const ts_dsv4_block_iq3_xxs*)iq_block;
+    const int iqs = group * 2;
+    const int qa = ts_dsv4_get_int_b2(bq3->qs, iqs + 0);
+    const int qb = ts_dsv4_get_int_b2(bq3->qs, iqs + 1);
+    const uint8_t* q3a = (const uint8_t*)&qa;
+    const uint8_t* q3b = (const uint8_t*)&qb;
+    // qs[0..63] are grid indices; the group's sign/scale word follows at byte 64 + 4 * group.
+    const uint32_t aux32 = (uint32_t)ts_dsv4_get_int_b2(bq3->qs, 16 + iqs / 2);
+
+    int sumi = 0;
+#pragma unroll
+    for (int l0 = 0; l0 < 8; l0 += 2)
+    {
+        const uint8_t i0 = l0 < 4 ? q3a[l0] : q3b[l0 - 4];
+        const uint8_t i1 = l0 < 4 ? q3a[l0 + 1] : q3b[l0 - 3];
+        const int signsPacked = ksigns_iq2xs[(aux32 >> (7 * l0 / 2)) & 0x7F];
+        const int signs0 = __vcmpne4(((signsPacked & 0x03) << 7) | ((signsPacked & 0x0C) << 21), 0x00000000);
+        const int gridL = __vsub4((int)iq3xxs_grid[i0] ^ signs0, signs0);
+        const int signs1 = __vcmpne4(((signsPacked & 0x30) << 3) | ((signsPacked & 0xC0) << 17), 0x00000000);
+        const int gridH = __vsub4((int)iq3xxs_grid[i1] ^ signs1, signs1);
+
+        sumi = ts_dsv4_dp4a(gridL, ts_dsv4_get_int_b4(q8[group].qs, l0 + 0), sumi);
+        sumi = ts_dsv4_dp4a(gridH, ts_dsv4_get_int_b4(q8[group].qs, l0 + 1), sumi);
+    }
+    const int ls = aux32 >> 28;
+    sumi = (ls * sumi + sumi / 2) / 2;
+    return __half2float(bq3->d) * __half2float(q8[group].d) * (float)sumi;
 }
 
 // One Q2_K 32-value group dotted against one q8_1 activation block.
@@ -602,6 +705,20 @@ __device__ __forceinline__ float ts_dsv4_dot_row_warp(
         const int nGroups = inDim / 32;
         for (int g = lane; g < nGroups; g += 32)
             sum += ts_dsv4_dot_iq2xxs_group(wRow + (size_t)(g >> 3) * TS_DSV4_IQ2XXS_BLOCK_BYTES,
+                                            act + (size_t)(g >> 3) * 8, g & 7);
+    }
+    else if (wtype == TS_DSV4_WTYPE_IQ2XS)
+    {
+        const int nGroups = inDim / 32;
+        for (int g = lane; g < nGroups; g += 32)
+            sum += ts_dsv4_dot_iq2xs_group(wRow + (size_t)(g >> 3) * TS_DSV4_IQ2XS_BLOCK_BYTES,
+                                           act + (size_t)(g >> 3) * 8, g & 7);
+    }
+    else if (wtype == TS_DSV4_WTYPE_IQ3XXS)
+    {
+        const int nGroups = inDim / 32;
+        for (int g = lane; g < nGroups; g += 32)
+            sum += ts_dsv4_dot_iq3xxs_group(wRow + (size_t)(g >> 3) * TS_DSV4_IQ3XXS_BLOCK_BYTES,
                                             act + (size_t)(g >> 3) * 8, g & 7);
     }
     else if (wtype == TS_DSV4_WTYPE_Q2_K)
@@ -2537,6 +2654,79 @@ __device__ __forceinline__ void ts_dsv4_decode_sub(
     }
 }
 
+// The grouped expert kernels' decoder (register-staged and tensor-core prefill): every layout
+// ts_dsv4_decode_sub reads, plus IQ2_XS and IQ3_XXS, Qwen3.8-Flash-Next UD-Q2_K_XL's gate/up
+// experts. Kept out of ts_dsv4_decode_sub itself because the per-token decode kernels inline that
+// one for their Q6_K / IQ4 rows: with the two branches there, Qwen3.8-Flash-Next's decode on two
+// A40s fell from 56.9 to 55.0-55.6 tok/s (its down projection is IQ4_NL).
+__device__ __forceinline__ void ts_dsv4_decode_sub_grouped(
+    const uint8_t* __restrict__ wRow, int wtype, int sub, int* __restrict__ w8,
+    float* __restrict__ scLo, float* __restrict__ scHi,
+    float* __restrict__ mnLo, float* __restrict__ mnHi)
+{
+    if (wtype == TS_DSV4_WTYPE_IQ2XS)
+    {
+        // Four 16-bit words per 32 values, each a 9-bit index into the 512-entry grid (eight
+        // values) and 7 sign bits whose parity is the 8th; one 4-bit scale per 16 values, as
+        // ggml's dequantize_row_iq2_xs: d * (0.5 + scale) / 4.
+        const ts_dsv4_block_iq2_xs* b =
+            (const ts_dsv4_block_iq2_xs*)(wRow + (size_t)(sub >> 3) * TS_DSV4_IQ2XS_BLOCK_BYTES);
+        const int group = sub & 7;
+        const int qa = ts_dsv4_get_int_b2(b->qs, group * 2 + 0);
+        const int qb = ts_dsv4_get_int_b2(b->qs, group * 2 + 1);
+        const uint32_t q2[4] = { (uint32_t)qa & 0xFFFF, (uint32_t)qa >> 16, (uint32_t)qb & 0xFFFF, (uint32_t)qb >> 16 };
+#pragma unroll
+        for (int l = 0; l < 4; ++l)
+        {
+            const uint2 gridPos = ((const uint2*)iq2xs_grid)[q2[l] & 0x1FF];
+            const uint32_t v = q2[l] >> 9;
+            const uint32_t signs = (v ^ ((uint32_t)(__popc(v) & 1) << 7)) * 0x01010101u;
+            const int s0 = __vcmpne4(signs & 0x08040201u, 0);
+            const int s1 = __vcmpne4(signs & 0x80402010u, 0);
+            w8[2 * l + 0] = __vsub4((int)gridPos.x ^ s0, s0);
+            w8[2 * l + 1] = __vsub4((int)gridPos.y ^ s1, s1);
+        }
+        const float d = __half2float(b->d);
+        *scLo = d * (0.5f + (float)(b->scales[group] & 0x0F)) * 0.25f;
+        *scHi = d * (0.5f + (float)(b->scales[group] >> 4)) * 0.25f;
+    }
+    else if (wtype == TS_DSV4_WTYPE_IQ3XXS)
+    {
+        // Eight grid indices (four values each) per 32 values, then one word per 32 values: four
+        // 7-bit sign indices into ksigns_iq2xs (one per eight values) under a 4-bit scale, as
+        // ggml's dequantize_row_iq3_xxs: d * (0.5 + scale) / 2.
+        const ts_dsv4_block_iq3_xxs* b =
+            (const ts_dsv4_block_iq3_xxs*)(wRow + (size_t)(sub >> 3) * TS_DSV4_IQ3XXS_BLOCK_BYTES);
+        const int group = sub & 7;
+        const int qa = ts_dsv4_get_int_b2(b->qs, group * 2 + 0);
+        const int qb = ts_dsv4_get_int_b2(b->qs, group * 2 + 1);
+        const uint8_t* q3a = (const uint8_t*)&qa;
+        const uint8_t* q3b = (const uint8_t*)&qb;
+        const uint32_t aux32 = (uint32_t)ts_dsv4_get_int_b2(b->qs, 16 + group);
+#pragma unroll
+        for (int l = 0; l < 4; ++l)
+        {
+            const uint8_t i0 = l < 2 ? q3a[2 * l] : q3b[2 * l - 4];
+            const uint8_t i1 = l < 2 ? q3a[2 * l + 1] : q3b[2 * l - 3];
+            const int signsPacked = ksigns_iq2xs[(aux32 >> (7 * l)) & 0x7F];
+            const int s0 = __vcmpne4(((signsPacked & 0x03) << 7) | ((signsPacked & 0x0C) << 21), 0x00000000);
+            const int s1 = __vcmpne4(((signsPacked & 0x30) << 3) | ((signsPacked & 0xC0) << 17), 0x00000000);
+            w8[2 * l + 0] = __vsub4((int)iq3xxs_grid[i0] ^ s0, s0);
+            w8[2 * l + 1] = __vsub4((int)iq3xxs_grid[i1] ^ s1, s1);
+        }
+        const float sc = __half2float(b->d) * (0.5f + (float)(aux32 >> 28)) * 0.5f;
+        *scLo = sc;
+        *scHi = sc;
+    }
+    else
+    {
+        ts_dsv4_decode_sub(wRow, wtype, sub, w8, scLo, scHi, mnLo, mnHi);
+        return;
+    }
+    *mnLo = 0.0f;
+    *mnHi = 0.0f;
+}
+
 // One warp: decode row `wRow` into registers, then dot it against `m` member
 // tokens' dense split-q8_1 activations, writing one output per token.
 // NK = sub-blocks per lane = inDim / 1024, a compile-time constant so the
@@ -2570,7 +2760,7 @@ __device__ __forceinline__ void ts_dsv4_expert_row_tokens(
         for (int k = 0; k < NK; ++k)
         {
             if (live[rr] && lane + 32 * k < nSub)
-                ts_dsv4_decode_sub(wRow, wtype, lane + 32 * k, w[rr][k], &scLo[rr][k], &scHi[rr][k],
+                ts_dsv4_decode_sub_grouped(wRow, wtype, lane + 32 * k, w[rr][k], &scLo[rr][k], &scHi[rr][k],
                                    &mnLo[rr][k], &mnHi[rr][k]);
         }
     }
@@ -2843,7 +3033,7 @@ extern "C" __global__ void __launch_bounds__(TS_MOE_MMA_THREADS, 2) ts_dsv4_moe_
                 {
                     int w8[8];
                     float scLo, scHi, mnLo, mnHi;
-                    ts_dsv4_decode_sub(wBase + (size_t)(r0 + r) * rowBytes, wtype, sub, w8, &scLo, &scHi, &mnLo, &mnHi);
+                    ts_dsv4_decode_sub_grouped(wBase + (size_t)(r0 + r) * rowBytes, wtype, sub, w8, &scLo, &scHi, &mnLo, &mnHi);
                     uint32_t h[16];
 #pragma unroll
                     for (int k = 0; k < 8; ++k)
@@ -3103,6 +3293,36 @@ extern "C" __global__ void ts_dsv4_moe_down_decode_f32(
         const float dot = ts_dsv4_dot_row_warp(wBase + (size_t)rr * rowBytes, wtype, act + (size_t)slot * actBlocks, ff, lane);
         if (lane == 0)
             downOut[(size_t)slot * E + rr] = dot;
+    }
+}
+
+// Dense projection of decode-size inputs already quantized to q8_1: one warp per
+// output row through ts_dsv4_dot_row_warp, grid (ceil(outDim / 32), rows). It
+// reads only the caller's buffers, so a captured decode step can replay it - the
+// shared matmul route quantizes into shared scratch and cannot be captured, and
+// a checkpoint whose dense weights are K-quants the q8_1 decode kernels do not
+// cover (UD-Q2_K_XL's Q5_K) otherwise lost decode capture altogether.
+extern "C" __global__ void ts_dsv4_dense_q81_rows_f32(
+    const uint8_t* __restrict__ w,               // [outDim, inDim] rows of rowBytes
+    const ts_dsv4_block_q8_1* __restrict__ act,  // [rows, inDim / 32]
+    float* __restrict__ out,                     // [rows, outDim]
+    const int wtype,
+    const int outDim,
+    const int inDim,
+    const long long rowBytes)
+{
+    const int row = blockIdx.y;
+    const int warpId = threadIdx.x / 32;
+    const int lane = threadIdx.x % 32;
+    const int rBegin = blockIdx.x * TS_DSV4_MOE_TILE + warpId * (TS_DSV4_MOE_TILE / 8);
+    const int rEnd = blockIdx.x * TS_DSV4_MOE_TILE + (warpId + 1) * (TS_DSV4_MOE_TILE / 8);
+    const ts_dsv4_block_q8_1* a = act + (size_t)row * (inDim / TS_DSV4_QK8_1);
+
+    for (int rr = rBegin; rr < rEnd && rr < outDim; ++rr)
+    {
+        const float dot = ts_dsv4_dot_row_warp(w + (size_t)rr * rowBytes, wtype, a, inDim, lane);
+        if (lane == 0)
+            out[(size_t)row * outDim + rr] = dot;
     }
 }
 

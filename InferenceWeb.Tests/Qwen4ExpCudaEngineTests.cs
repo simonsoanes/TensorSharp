@@ -36,8 +36,9 @@ public sealed class Qwen4ExpCudaEngineTests : IDisposable
         try { Directory.Delete(_dir, recursive: true); } catch (IOException) { }
     }
 
-    private string Fixture(int indexerTopK = 16) => Qwen4ExpSyntheticModelBuilder.Write(
-        Path.Combine(_dir, $"qwen4exp-{indexerTopK}.gguf"), indexerTopK);
+    private string Fixture(int indexerTopK = 16, bool q2kxlExperts = false) => Qwen4ExpSyntheticModelBuilder.Write(
+        Path.Combine(_dir, $"qwen4exp-{indexerTopK}{(q2kxlExperts ? "-q2kxl" : "")}.gguf"), indexerTopK,
+        q2kxlExperts: q2kxlExperts);
 
     private static readonly int[] Prompt = Enumerable.Range(0, 40).Select(i => (i * 37 + 11) % 250).ToArray();
     private static readonly int[] Steps = { 17, 203, 99, 4, 150, 61 };
@@ -87,6 +88,32 @@ public sealed class Qwen4ExpCudaEngineTests : IDisposable
     public void TheDirectCudaEngine_AnswersAsTheNativeSpan()
     {
         string path = Fixture(indexerTopK: 2048);
+        float[][] native, cuda;
+        using (ModelBase model = ModelBase.Create(path, BackendType.GgmlCuda))
+            native = Run(model);
+        using (ModelBase model = ModelBase.Create(path, BackendType.Cuda))
+        {
+            Assert.IsType<Qwen4ExpCudaModel>(model);
+            cuda = Run(model);
+        }
+        double worst = 0;
+        for (int i = 0; i < native.Length; i++)
+        {
+            double err = RelativeError(cuda[i], native[i]);
+            worst = Math.Max(worst, err);
+            _output.WriteLine($"{(i == 0 ? "prefill" : $"decode {i}")}: relative error {err:E3}, argmax {ArgMax(cuda[i])} vs {ArgMax(native[i])}");
+        }
+        Assert.True(worst <= 2e-2, $"the direct-CUDA engine strayed {worst:E3} from the native token span");
+    }
+
+    /// <summary>The UD-Q2_K_XL expert mix - IQ2_XS gate/up, one IQ3_XXS layer, IQ4_NL down - on the
+    /// direct engine's per-token and grouped expert kernels, against ggml-cuda's own kernels for
+    /// those formats in the native span. Before the engine learned the two formats it refused the
+    /// shipped file at load ("unsupported expert quant type 17").</summary>
+    [GgmlFact(BackendType.GgmlCuda)]
+    public void TheDirectCudaEngine_AnswersAsTheNativeSpan_Q2KXLExperts()
+    {
+        string path = Fixture(indexerTopK: 2048, q2kxlExperts: true);
         float[][] native, cuda;
         using (ModelBase model = ModelBase.Create(path, BackendType.GgmlCuda))
             native = Run(model);
