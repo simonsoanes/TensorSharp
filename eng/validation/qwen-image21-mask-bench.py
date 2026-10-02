@@ -4,6 +4,8 @@
 Requires Pillow, numpy and requests. CLI and HTTP/SSE use the same image, seed,
 steps and grayscale mask. Crop changes the model's context/workload: timings are
 not a quality-equivalent speedup. Generated reports/images/logs stay ignored.
+Repeat --reference to add conditioning pictures after the source --image; only
+the source is edited and checked for protected pixels.
 Example:
   python eng/validation/qwen-image21-mask-bench.py --image photo.png \
       --model-dir C:/Works/models/qwen-image-2.1 --steps 40 --crop both
@@ -59,6 +61,8 @@ def measure_pixels(source, output, mask):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--image', type=Path, required=True)
+    parser.add_argument('--reference', type=Path, action='append', default=[],
+                        help='Additional conditioning image, repeatable; source --image stays first')
     parser.add_argument('--mask', type=Path)
     parser.add_argument('--model-dir', type=Path, default=ROOT.parent / 'models/qwen-image-2.1')
     parser.add_argument('--server-url')
@@ -81,6 +85,7 @@ def main():
         parser.error('width and height must be positive multiples of 32')
     args.out.mkdir(parents=True, exist_ok=True)
     source = args.image.resolve()
+    references = [path.resolve() for path in args.reference]
     mask = args.mask
     if mask is None:
         width, height = ImageOps.exif_transpose(Image.open(source)).size
@@ -90,14 +95,18 @@ def main():
         selection.save(mask)
     mask = mask.resolve()
     report = {
-        'parameters': {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
+        'parameters': {k: str(v) if isinstance(v, Path) else [str(p) for p in v] if k == 'reference' else v
+                       for k, v in vars(args).items()},
         'source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
+        'references': [{'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+                       for path in references],
         'mask_sha256': hashlib.sha256(mask.read_bytes()).hexdigest(),
         'dependencies': {'tensorsharp': revision(ROOT), 'ggml': revision(ROOT / 'ExternalProjects/ggml')},
         'limitations': [
             'Exact protected pixels and nonzero edits do not measure prompt adherence or perceptual quality.',
             'Crop changes model context, token count and quality; this is not a quality-equivalent speedup claim.',
             'CLI wall time includes model loading; HTTP wall time excludes server startup and uploads but includes SSE previews.',
+            'Additional references change conditioning work; compare timings only with the same ordered references.',
             'OS cache, thermal state and other GPU activity are not controlled; no cross-device conclusion is implied.',
         ], 'runs': []}
     report_path = args.out / 'report.json'
@@ -105,7 +114,7 @@ def main():
     upload_paths = None
     if args.server_url:
         upload_paths = []
-        for path in (source, mask):
+        for path in (source, *references, mask):
             with path.open('rb') as stream:
                 response = requests.post(args.server_url + '/api/upload', files={'file': (path.name, stream, 'image/png')}, timeout=60)
             response.raise_for_status()
@@ -118,7 +127,7 @@ def main():
             started = time.perf_counter()
             try:
                 if args.server_url:
-                    payload = dict(imagePaths=[upload_paths[0]], maskPath=upload_paths[1], maskMode='grayscale',
+                    payload = dict(imagePaths=upload_paths[:-1], maskPath=upload_paths[-1], maskMode='grayscale',
                         prompt=args.prompt, steps=args.steps, width=args.width, height=args.height, seed=args.seed,
                         cfg=1, maskCrop=crop, maskCropPadding=args.padding, maskFeather=args.feather)
                     run['request'] = payload
@@ -159,6 +168,8 @@ def main():
                         '--output', str(output)]
                     if crop:
                         command.append('--mask-crop')
+                    for reference in references:
+                        command.extend(['--image', str(reference)])
                     run['command'] = command
                     with (args.out / (name + '.log')).open('w', encoding='utf8') as log:
                         process = subprocess.run(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, timeout=args.timeout)

@@ -613,6 +613,11 @@ button.primary:hover { background: var(--accent-hover); }
 .attachments {
   display: flex;
   align-items: center;
+  align-content: flex-start;
+  max-height: 40vh;
+  max-height: 40dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   gap: 8px;
   margin-bottom: 8px;
   max-width: var(--chat-shell-max-width);
@@ -672,6 +677,10 @@ button.primary:hover { background: var(--accent-hover); }
   color:var(--text); background:var(--surface2); cursor:pointer; font:inherit;
 }
 .image-selection-button:focus-visible,.image-edit-actions button:focus-visible { outline:2px solid var(--accent); }
+.image-edit-attachment { display:flex; align-items:center; gap:8px; padding:6px; border:1px solid var(--border); border-radius:10px; }
+.image-edit-attachment.editing-target { border-color:var(--accent); }
+.image-selection-controls { display:flex; flex-direction:column; align-items:flex-start; gap:4px; }
+.image-selection-role { font-size:12px; font-weight:600; }
 .image-selection-status { font-size:12px; color:var(--text2); max-width:140px; }
 .image-edit-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
 .attachment-thumb {
@@ -1333,6 +1342,7 @@ const autoScrollThreshold = 32;
 
 let chatHistory = [];
 let pendingAttachments = [];
+let activeImageEditTarget = null;
 let isGenerating = false;
 let currentAbortController = null;
 let currentLoadedModel = null;
@@ -1499,6 +1509,7 @@ async function disposeCurrentSession() {
 async function clearChat() {
   chatHistory = [];
   pendingAttachments = [];
+  activeImageEditTarget = null;
   attachmentsDiv.innerHTML = '';
   chatContainer.innerHTML = '';
   needsCacheReset = false;
@@ -1591,22 +1602,39 @@ function renderAttachments() {
         title: `Scanned PDF: ${label}`, removeTitle: 'Remove this PDF', page: true };
     }
     const chip = () => buildAttachmentChip(icon, label, idx, name);
-    attachmentsDiv.appendChild(thumb && thumb.url && !att.thumbFailed
+    const selectableImage = att.mediaType === 'image' && isQwenImageModel();
+    const attachmentHost = selectableImage ? document.createElement('div') : attachmentsDiv;
+    if (selectableImage) {
+      attachmentHost.className = 'image-edit-attachment' + (imageNum === 1 ? ' editing-target' : '');
+      attachmentHost.dataset.file = att.file;
+      attachmentHost.setAttribute('role', 'group');
+      attachmentHost.setAttribute('aria-label', 'Picture ' + imageNum + ': ' + name);
+      attachmentsDiv.appendChild(attachmentHost);
+    }
+    attachmentHost.appendChild(thumb && thumb.url && !att.thumbFailed
       ? buildAttachmentThumb(att, idx, name, thumb, chip)
       : chip());
-    if (att.mediaType === 'image' && imageNum === 1 && isQwenImageModel()) {
+    if (selectableImage) {
+      const controls = document.createElement('div');
+      controls.className = 'image-selection-controls';
+      const role = document.createElement('span');
+      role.className = 'image-selection-role';
+      role.textContent = imageNum === 1 ? 'Editing target' : 'Reference';
+      controls.appendChild(role);
       const select = document.createElement('button');
       select.type = 'button';
       select.className = 'image-selection-button';
       select.textContent = att.maskPath ? 'Edit selection' : 'Select area';
+      select.title = 'Save a selection to make this photo the editing target';
       select.addEventListener('click', () => selectImageArea(att));
-      attachmentsDiv.appendChild(select);
+      controls.appendChild(select);
       if (att.maskPath) {
         const status = document.createElement('span');
         status.className = 'image-selection-status';
-        status.textContent = 'Outside selection protected';
-        attachmentsDiv.appendChild(status);
+        status.textContent = att === activeImageEditTarget ? 'Outside selection protected' : 'Selection saved';
+        controls.appendChild(status);
       }
+      attachmentHost.appendChild(controls);
     }
   });
   if (focusSlot >= 0) {
@@ -1670,6 +1698,7 @@ function buildAttachmentThumb(att, idx, name, thumb, chip) {
 }
 
 function removeAttachment(idx) {
+  if (pendingAttachments[idx] === activeImageEditTarget) activeImageEditTarget = null;
   pendingAttachments.splice(idx, 1);
   renderAttachments();
 }
@@ -1682,14 +1711,18 @@ async function selectImageArea(att) {
   if (isGenerating || pendingUploadCount) return;
   pendingUploadCount++;
   try {
+    if (att.editUnavailableReason) throw new Error(att.editUnavailableReason);
+    if (/\.(heic|heif)$/i.test(att.file || att.fileName || '') && !att.editUrl)
+      throw new Error('Reattach this photo to prepare a full-resolution image for area selection.');
     const selection = await TensorSharpMaskEditor.open({
-      sourceUrl: uploadUrlForAttachment(att),
+      sourceUrl: att.editUrl || uploadUrlForAttachment(att),
       maskUrl: att.maskPath ? uploadUrlForAttachment({ file: att.maskPath }) : null,
       maskFeather: att.maskFeather || 0, maskCrop: !!att.maskCrop
     });
     if (!selection || !pendingAttachments.includes(att)) return;
     if (selection.remove) {
       delete att.maskPath; delete att.maskFeather; delete att.maskCrop;
+      if (att === activeImageEditTarget) activeImageEditTarget = null;
     } else {
       const form = new FormData();
       form.append('file', selection.blob, 'selection.png');
@@ -1700,6 +1733,12 @@ async function selectImageArea(att) {
       att.maskPath = uploaded.file;
       att.maskFeather = selection.maskFeather;
       att.maskCrop = selection.maskCrop;
+      // Commit the source change only after its mask is uploaded. Other saved
+      // selections stay with their photos; only the first photo's mask is sent.
+      const targetIndex = pendingAttachments.indexOf(att);
+      pendingAttachments.splice(targetIndex, 1);
+      pendingAttachments.unshift(att);
+      activeImageEditTarget = att;
     }
     renderAttachments();
     messageInput.focus();
@@ -2690,7 +2729,7 @@ async function sendMessage() {
   if (imagePaths.length > 0) msg.imagePaths = imagePaths;
   if (stillImagePaths.length > 0) msg.stillImagePaths = stillImagePaths;
   const editSource = attachmentsCopy.find(att => att.mediaType === 'image');
-  if (editSource && editSource.maskPath && isQwenImageModel()) {
+  if (editSource && editSource === activeImageEditTarget && editSource.maskPath && isQwenImageModel()) {
     msg.maskPath = editSource.maskPath;
     msg.maskMode = 'grayscale';
     msg.maskFeather = editSource.maskFeather || 0;
@@ -2712,6 +2751,9 @@ async function sendMessage() {
       };
       if (att.frames && att.frames.length) stored.frames = [...att.frames];
       if (att.fileBacked === true) stored.fileBacked = true;
+      if (att.previewUrl) stored.previewUrl = att.previewUrl;
+      if (att.editUrl) stored.editUrl = att.editUrl;
+      if (att.editUnavailableReason) stored.editUnavailableReason = att.editUnavailableReason;
       if (att.maskPath) {
         stored.maskPath = att.maskPath;
         stored.maskFeather = att.maskFeather || 0;
@@ -2726,6 +2768,7 @@ async function sendMessage() {
   messageInput.value = '';
   messageInput.style.height = 'auto';
   pendingAttachments = [];
+  activeImageEditTarget = null;
   attachmentsDiv.innerHTML = '';
 
   const empt = chatContainer.querySelector('.empty-state');
@@ -2831,7 +2874,7 @@ function addImageEditActions(host, img, userMsg, resultUrl) {
   compare.setAttribute('aria-pressed', 'false');
   compare.addEventListener('click', () => {
     const original = compare.getAttribute('aria-pressed') !== 'true';
-    img.src = original ? uploadUrlForAttachment(source) : resultUrl;
+    img.src = original ? (source.editUrl || uploadUrlForAttachment(source)) : resultUrl;
     img.alt = original ? 'original image' : 'edited image';
     compare.textContent = original ? 'Show edited' : 'Show original';
     compare.setAttribute('aria-pressed', String(original));
@@ -2848,6 +2891,7 @@ function addImageEditActions(host, img, userMsg, resultUrl) {
       maskPath: userMsg.maskPath, maskFeather: userMsg.maskFeather, maskCrop: userMsg.maskCrop
     });
     pendingAttachments = attachments;
+    activeImageEditTarget = userMsg.maskPath ? attachments[0] : null;
     messageInput.value = userMsg.content || '';
     renderAttachments();
     messageInput.focus();

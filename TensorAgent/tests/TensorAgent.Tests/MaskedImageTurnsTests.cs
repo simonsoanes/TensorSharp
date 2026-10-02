@@ -70,4 +70,22 @@ public sealed class MaskedImageTurnsTests
         Assert.Equal("mask.png", Assert.Single(loaded.Attachments!).MaskPath);
         Assert.Contains("mask.png", loaded.ReferencedUploads);
     }
+
+    [Fact]
+    public void SavedConversationRetainsTheFullResolutionEditSourceAndUnavailableReason()
+    {
+        var message = new StoredMessage
+        {
+            StillImagePaths = ["camera.heic", "large.heic"],
+            Attachments = [
+                new StoredAttachment { File = "camera.heic", MediaType = "image", PreviewFile = "camera-preview.png", EditFile = "camera-edit.png" },
+                new StoredAttachment { File = "large.heic", MediaType = "image", PreviewFile = "large-preview.png", EditUnavailableReason = "This image exceeds the editor's size limit." },
+            ],
+        };
+        var loaded = JsonSerializer.Deserialize<StoredMessage>(JsonSerializer.Serialize(message))!;
+        Assert.Equal("camera-edit.png", loaded.Attachments![0].EditFile);
+        Assert.Equal("This image exceeds the editor's size limit.", loaded.Attachments[1].EditUnavailableReason);
+        Assert.Equal(new[] { "camera-edit.png", "camera-preview.png", "camera.heic", "large-preview.png", "large.heic" },
+            loaded.ReferencedUploads.Distinct().Order(StringComparer.Ordinal));
+    }
 }

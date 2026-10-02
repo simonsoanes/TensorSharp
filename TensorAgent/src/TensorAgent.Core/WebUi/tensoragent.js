@@ -261,6 +261,17 @@
   function previewOf(a) {
     return a.previewUrl || (a.previewFile ? uploadUrl(a.previewFile) : fileUrlOf(a));
   }
+  /** Editing coordinates must use the full-size conversion, never a HEIC thumbnail. */
+  function editImageOf(a) {
+    return a.editUrl || (a.editFile ? uploadUrl(a.editFile) : previewOf(a));
+  }
+  function imageSelectionUnavailable(a) {
+    if (a.editUnavailableReason) return a.editUnavailableReason;
+    if (/\.(heic|heif)$/i.test(a.file || '') || /\.(heic|heif)$/i.test(a.fileName || '')) {
+      if (!a.editUrl && !a.editFile) return 'Reattach this HEIC or HEIF photo to prepare a full-resolution image selection.';
+    }
+    return '';
+  }
   /** The chip, reduced to what has to survive: no page-session URLs, no file text. */
   function chipOf(a) {
     var chip = {
@@ -270,6 +281,9 @@
     };
     var preview = a.previewFile || (a.previewUrl ? uploadName(a.previewUrl) : '');
     if (preview) chip.previewFile = preview;
+    var edit = a.editFile || (a.editUrl ? uploadName(a.editUrl) : '');
+    if (edit) chip.editFile = edit;
+    if (a.editUnavailableReason) chip.editUnavailableReason = a.editUnavailableReason;
     if (a.frames && a.frames.length) chip.frames = a.frames.slice();
     if (a.fileBacked === true) chip.fileBacked = true;
     if (typeof a.pageCount === 'number') chip.pageCount = a.pageCount;
@@ -282,6 +296,28 @@
       if (typeof a.maskCropPadding === 'number') chip.maskCropPadding = a.maskCropPadding;
     }
     return chip;
+  }
+
+  function clearImageSelection(attachment) {
+    delete attachment.maskPath; delete attachment.maskMode; delete attachment.maskFeather; delete attachment.maskCrop;
+    delete attachment.maskInvert; delete attachment.maskCropPadding;
+  }
+
+  function imageSource(attachments) {
+    return attachments.filter(function (a) { return a.mediaType === 'image'; })[0];
+  }
+
+  function hasActiveImageSelection(attachment) {
+    return attachment && attachment.maskPath && attachment._maskActive !== false;
+  }
+
+  function promoteImageSource(attachment) {
+    var index = state.attachments.indexOf(attachment);
+    if (index > 0) state.attachments.unshift(state.attachments.splice(index, 1)[0]);
+  }
+
+  function deactivateImageSelections() {
+    state.attachments.forEach(function (a) { if (a.mediaType === 'image') a._maskActive = false; });
   }
 
   /**
@@ -744,20 +780,24 @@
     });
   }
 
-  // While the startup load runs, keep asking. It is the only way the page finds out
-  // that the model it was told about has arrived: nothing pushes to this page, and a
-  // send button that stays disabled after the weights are in memory is the same bug
-  // as the one this whole path exists to fix, arriving a few seconds later.
+  // Loading may finish after the user returns from Models. The old model can still
+  // be reported while its replacement loads, so follow the host's load status and
+  // read capabilities after it, including on the last poll.
   function watchModelLoad() {
     if (state.modelWatch) return;
     var deadline = Date.now() + 5 * 60 * 1000;
+    var refreshing = false;
+    function stopWatching() {
+      clearInterval(state.modelWatch);
+      state.modelWatch = 0;
+    }
     state.modelWatch = setInterval(function () {
-      if (state.model || !loadingModel() || Date.now() > deadline) {
-        clearInterval(state.modelWatch);
-        state.modelWatch = 0;
-        return;
-      }
-      refreshModel().then(refreshEngine);
+      if (Date.now() > deadline) { stopWatching(); return; }
+      if (refreshing) return;
+      refreshing = true;
+      refreshEngine().then(refreshModel).then(function (model) {
+        if (model && !loadingModel()) stopWatching();
+      }).finally(function () { refreshing = false; });
     }, 1500);
   }
 
@@ -1006,11 +1046,13 @@
         if (!body || body.ok !== true) throw new Error('TensorAgent retained the shared item.');
         var parts = appliedShareParts[id] || {};
         var sharedAttachments = Array.isArray(parts.attachments) ? parts.attachments : [];
+        var previousSource = imageSource(state.attachments);
         state.attachments = state.attachments.filter(function (current) {
           return !sharedAttachments.some(function (shared) {
             return current === shared || (current && shared && current.file === shared.file);
           });
         });
+        if (previousSource && state.attachments.indexOf(previousSource) < 0) deactivateImageSelections();
         text.value = removeTrackedSharedText(text.value, parts);
         forgetAppliedShares([id]);
         autoGrow();
@@ -1179,8 +1221,12 @@
     if (makesImages() && loraChoice !== null) {
       notice('Wait for the LoRA plug-in choice to finish saving, then send again.'); return;
     }
-    if (!makesImages() && state.attachments.some(function (a) { return !!a.maskPath; })) {
-      notice('Choose an image model before sending an image selection.'); return;
+    var source = imageSource(state.attachments);
+    if (!makesImages() && hasActiveImageSelection(source)) {
+      noticeWithAction(
+        'Load Qwen-Image 2.1 before sending this image selection.',
+        'Open Models', function () { openRoute('models'); return true; });
+      return;
     }
     if (state.visionChecking) { note('send-refused', 'vision check in flight'); return; }
     if (shareDiscarding) {
@@ -1332,7 +1378,7 @@
       if (kind === 'image') {
         imagePaths.push(a.file);
         stillImagePaths.push(a.file);
-        if (stillImagePaths.length === 1 && a.maskPath) {
+        if (stillImagePaths.length === 1 && hasActiveImageSelection(a)) {
           msg.maskPath = a.maskPath; msg.maskMode = a.maskMode || 'grayscale';
           msg.maskFeather = a.maskFeather || 0; msg.maskCrop = !!a.maskCrop;
           if (a.maskInvert) msg.maskInvert = true;
@@ -1371,7 +1417,16 @@
     if (textFilePaths.length) msg.textFilePaths = textFilePaths;
     if (textFileNames.length) msg.textFileNames = textFileNames;
     if (isVideo) msg.isVideo = true;
-    if (atts.length) msg.attachments = atts.map(chipOf);
+    if (atts.length) {
+      var source = imageSource(atts);
+      msg.attachments = atts.map(function (a) {
+        var chip = chipOf(a);
+        // Other photos keep their selections in the draft, but only the source's
+        // selection belongs to this edit and its saved conversation.
+        if (a !== source || !hasActiveImageSelection(a)) clearImageSelection(chip);
+        return chip;
+      });
+    }
     return msg;
   }
   function describe(atts) {
@@ -2193,11 +2248,13 @@
     var actions = el('div', 'image-edit-actions');
     var source = request && request.stillImagePaths && request.stillImagePaths[0];
     if (source) {
+      var sourceAttachment = (request.attachments || []).filter(function (a) { return a.file === source; })[0];
+      var originalUrl = sourceAttachment ? editImageOf(sourceAttachment) : uploadUrl(source);
       var original = false;
       var compare = el('button', 'filechip', 'Compare original'); compare.type = 'button';
       compare.setAttribute('aria-pressed', 'false');
       compare.addEventListener('click', function () {
-        original = !original; picture.src = original ? uploadUrl(source) : resultUrl;
+        original = !original; picture.src = original ? originalUrl : resultUrl;
         picture.alt = original ? 'original image' : 'generated image';
         compare.textContent = original ? 'Show result' : 'Compare original';
         compare.setAttribute('aria-pressed', String(original));
@@ -2211,17 +2268,24 @@
       }
       if (source) {
         var saved = request.attachments || [];
-        state.attachments = request.stillImagePaths.map(function (path) {
-          var found = saved.filter(function (a) { return a.file === path; })[0];
-          return Object.assign({}, found || { file: path, fileName: path, mediaType: 'image' });
+        state.attachments = saved.map(function (a) { return Object.assign({}, a); });
+        request.stillImagePaths.forEach(function (path) {
+          if (!state.attachments.some(function (a) { return a.file === path && a.mediaType === 'image'; }))
+            state.attachments.push({ file: path, fileName: path, mediaType: 'image' });
         });
+        var target = state.attachments.filter(function (a) { return a.file === source && a.mediaType === 'image'; })[0];
+        promoteImageSource(target);
+        // Top-level fields record what this turn actually applied. Older saved
+        // chips may also contain dormant selections that must not become active.
+        state.attachments.forEach(clearImageSelection);
         if (request.maskPath) {
-          state.attachments[0].maskPath = request.maskPath;
-          state.attachments[0].maskMode = request.maskMode || 'grayscale';
-          state.attachments[0].maskFeather = request.maskFeather || 0;
-          state.attachments[0].maskCrop = !!request.maskCrop;
-          state.attachments[0].maskInvert = !!request.maskInvert;
-          if (typeof request.maskCropPadding === 'number') state.attachments[0].maskCropPadding = request.maskCropPadding;
+          target._maskActive = true;
+          target.maskPath = request.maskPath;
+          target.maskMode = request.maskMode || 'grayscale';
+          target.maskFeather = request.maskFeather || 0;
+          target.maskCrop = !!request.maskCrop;
+          target.maskInvert = !!request.maskInvert;
+          if (typeof request.maskCropPadding === 'number') target.maskCropPadding = request.maskCropPadding;
         }
         text.value = request.content || '';
       } else {
@@ -2234,19 +2298,20 @@
 
   function selectImageArea(attachment) {
     if (state.maskEditing || state.generating) return;
+    var unavailable = imageSelectionUnavailable(attachment);
+    if (unavailable) { notice(unavailable, 'error'); return; }
     if (!window.TensorSharpMaskEditor) { notice('The image selection editor is unavailable. Reload the page and try again.', 'error'); return; }
     state.maskEditing = true; paintChips();
     var conversation = state.conversation;
     window.TensorSharpMaskEditor.open({
-      sourceUrl: previewOf(attachment), maskUrl: attachment.maskPath ? uploadUrl(attachment.maskPath) : null,
+      sourceUrl: editImageOf(attachment), maskUrl: attachment.maskPath ? uploadUrl(attachment.maskPath) : null,
       maskMode: attachment.maskMode || 'grayscale',
       maskInvert: !!attachment.maskInvert,
       maskFeather: attachment.maskFeather || 0, maskCrop: !!attachment.maskCrop,
     }).then(function (selection) {
       if (!selection || state.conversation !== conversation || state.attachments.indexOf(attachment) < 0) return;
       if (selection.remove) {
-        delete attachment.maskPath; delete attachment.maskMode; delete attachment.maskFeather; delete attachment.maskCrop;
-        delete attachment.maskInvert; delete attachment.maskCropPadding; return;
+        clearImageSelection(attachment); return;
       }
       var form = new FormData(); form.append('file', selection.blob, 'selection.png');
       return fetch('/api/upload', { method: 'POST', body: form }).then(function (response) {
@@ -2258,6 +2323,12 @@
           attachment.maskPath = uploaded.file; attachment.maskMode = 'grayscale';
           delete attachment.maskInvert;
           attachment.maskFeather = selection.maskFeather; attachment.maskCrop = selection.maskCrop;
+          state.attachments.forEach(function (a) {
+            if (a.mediaType === 'image') a._maskActive = a === attachment;
+          });
+          // Commit the source change only after the new mask has uploaded. Cancel
+          // and failure leave the previous source, draft and selections untouched.
+          promoteImageSource(attachment);
         });
       });
     }).catch(function (error) { notice('Image selection: ' + ((error && error.message) || error), 'error'); })
@@ -2285,21 +2356,44 @@
       var c = el('div', 'chip');
       if (a.mediaType === 'image') {
         var img = document.createElement('img'); img.src = previewOf(a); c.appendChild(img);
-        if (imageIndex++ === 0 && (makesImages() || a.maskPath)) {
-          var select = el('button', 'filechip', a.maskPath ? 'Selection saved · Adjust' : 'Select area');
-          select.type = 'button'; select.disabled = state.generating || state.visionChecking || state.maskEditing;
-          select.addEventListener('click', function () { selectImageArea(a); }); c.appendChild(select);
-        }
+        // Preparing a selection needs no model. Keep the control discoverable while
+        // Qwen is loading or another model is selected; Send checks compatibility.
+        var active = imageIndex++ === 0;
+        c.classList.add('editable-image');
+        var select = el('button', 'filechip mask-select', a.maskPath ? 'Selection saved · Adjust' : 'Select area');
+        select.type = 'button'; select.disabled = state.generating || state.visionChecking || state.maskEditing;
+        select.setAttribute('aria-label', (a.maskPath ? 'Adjust selection for ' : 'Select area in ') + (a.fileName || a.file));
+        select.addEventListener('click', function () { selectImageArea(a); }); c.appendChild(select);
+        var details = el('span', 'image-details');
+        details.appendChild(el('span', active ? 'image-edit-source' : 'image-reference', active ? 'Editing target' : 'Reference'));
+        details.appendChild(el('span', 'nm', a.fileName || a.file));
+        c.appendChild(details);
       } else {
         c.appendChild(el('span', 'ic', a.mediaType === 'video' ? '🎬' : a.mediaType === 'audio' ? '🎧' : '📄'));
       }
-      c.appendChild(el('span', 'nm', a.fileName || a.file));
+      if (a.mediaType !== 'image') c.appendChild(el('span', 'nm', a.fileName || a.file));
       var x = el('button', 'x', '✕');
+      x.type = 'button'; x.setAttribute('aria-label', 'Remove ' + (a.fileName || a.file));
       x.disabled = state.visionChecking || shareDiscarding || state.maskEditing;
-      x.addEventListener('click', function () { state.attachments.splice(i, 1); paintChips(); });
+      x.addEventListener('click', function () {
+        if (a === imageSource(state.attachments)) {
+          // Saved reference selections stay available in Adjust, but removing the
+          // target must not silently turn one of them into the next requested edit.
+          deactivateImageSelections();
+        }
+        state.attachments.splice(i, 1); paintChips();
+      });
       c.appendChild(x);
       box.appendChild(c);
     });
+    var source = imageSource(state.attachments);
+    if (!makesImages() && hasActiveImageSelection(source)) {
+      var hint = el('div', 'image-selection-hint');
+      hint.appendChild(el('span', null, 'Load Qwen-Image 2.1 to apply the selected edit.'));
+      var models = el('button', 'notice-action', 'Open Models'); models.type = 'button';
+      models.addEventListener('click', function () { openRoute('models'); });
+      hint.appendChild(models); box.appendChild(hint);
+    }
   }
 
   var uploadQueue = Promise.resolve();
@@ -3244,7 +3338,7 @@
     history: function () { return state.history; },
     // Synchronous on purpose: WKWebView's evaluateJavaScript does not await a
     // promise, so an async function here can never report success to native code.
-    refreshModel: function () { refreshModel(); return true; },
+    refreshModel: function () { refreshEngine().then(refreshModel); return true; },
     hasModel: function () { return !!state.model; },
     dictationEnded: dictationEnded,
     /** A refusal only the user can lift, with a button that opens iOS Settings. */
@@ -3358,7 +3452,7 @@
     setTimeout(function () {
       if (document.visibilityState !== 'visible') return;
       resumeTurn();
-      refreshModel();
+      refreshEngine().then(refreshModel);
       takePendingShare();
     }, 250);
   });

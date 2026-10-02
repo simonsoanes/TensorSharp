@@ -806,7 +806,7 @@ public sealed partial class WebUiPageTests : IDisposable
         const string shared = "What can you tell me about this?\n\nShared text:\n\"\"\"\nこんにちは 🌍\nsecond line\n\"\"\"";
         Assert.Equal("Keep this draft " + shared, result.GetProperty("text").GetString());
         Assert.Equal(2, result.GetProperty("attachments").GetInt32());
-        Assert.Equal(new[] { "↗Travel note✕", "旅行.png✕", "📄notes.txt✕" },
+        Assert.Equal(new[] { "↗Travel note✕", "Select areaEditing target旅行.png✕", "📄notes.txt✕" },
             result.GetProperty("chips").EnumerateArray().Select(c => c.GetString()).ToArray());
         Assert.Contains("Only part of the page text fit.", result.GetProperty("notices").GetString(), StringComparison.Ordinal);
         Assert.Contains("broken.mov was not attached.", result.GetProperty("notices").GetString(), StringComparison.Ordinal);

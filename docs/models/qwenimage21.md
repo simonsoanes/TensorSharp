@@ -270,14 +270,29 @@ multipart masks are rejected before inference. Mask options without a mask are
 also rejected. Streaming reports request errors in its terminal `{done,error}`
 frame, as for other image-edit failures.
 
-In Server Chat and TensorAgent (desktop and mobile), attach the image and choose
-**Select area** on the first photo. Paint or erase the region, zoom and pan for
-details, then choose **Use selection** and describe the change. Undo/redo and
-inversion operate on the selection. **Edit again** restores the original image,
-selection and prompt; the comparison button switches between original and result.
+In Server Chat and TensorAgent (desktop and mobile), attach one or more photos
+and choose **Select area** on any photo. Paint or erase the region, zoom and pan
+for details, then choose **Use selection** and describe the change. Saving a
+selection makes that photo the **Editing target**, moves it to the first image
+position, and keeps the other photos as references in their existing order. Each
+photo retains its saved selection, but only the editing target's selection is
+sent for the current edit. Canceling or a failed selection upload leaves the
+previous target unchanged. Each turn produces one edited image.
+Removing the editing target leaves the remaining photos' selections saved;
+reopen and save one to activate it for another local edit.
+
+Undo/redo and inversion operate on the selection. **Edit again** restores the
+original photos, their saved selections, the editing target and prompt; the
+comparison button switches between the target's original image and result.
 TensorAgent also saves the selection with the conversation. Selection masks are
 uploaded separately from reference images. Every decoded SSE preview includes
 the protected source pixels, just like the final image.
+
+HEIC/HEIF uploads retain a small thumbnail and a separate full-resolution PNG
+for painting and reopening selections. The original photo remains the model's
+source. The browser editor supports up to 16 megapixels and 8192 pixels per side;
+larger HEIC/HEIF photos show a selection-limit message instead of painting a
+mask on a reduced thumbnail.
 
 The mask is enforced by TensorSharp's sampling and compositing code; it does not
 add an annotation image or a dedicated mask channel to Qwen's conditioning.

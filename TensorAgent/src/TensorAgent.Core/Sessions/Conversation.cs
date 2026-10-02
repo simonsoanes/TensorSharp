@@ -65,6 +65,7 @@ public sealed class StoredMessage
                 {
                     if (!string.IsNullOrEmpty(a.File)) yield return Path.GetFileName(a.File);
                     if (!string.IsNullOrEmpty(a.PreviewFile)) yield return Path.GetFileName(a.PreviewFile);
+                    if (!string.IsNullOrEmpty(a.EditFile)) yield return Path.GetFileName(a.EditFile);
                     if (!string.IsNullOrEmpty(a.MaskPath)) yield return Path.GetFileName(a.MaskPath);
                     if (a.Frames is not null) foreach (string f in a.Frames) yield return Path.GetFileName(f);
                 }
@@ -85,6 +86,9 @@ public sealed class StoredAttachment
     /// file/code tools instead of being copied into every prompt.</summary>
     [JsonPropertyName("fileBacked")] public bool? FileBacked { get; set; }
     [JsonPropertyName("previewFile")] public string? PreviewFile { get; set; }
+    /// <summary>Browser-decodable original-size image for editing HEIC/HEIF uploads.</summary>
+    [JsonPropertyName("editFile")] public string? EditFile { get; set; }
+    [JsonPropertyName("editUnavailableReason")] public string? EditUnavailableReason { get; set; }
     [JsonPropertyName("maskPath")] public string? MaskPath { get; set; }
     [JsonPropertyName("maskMode")] public string? MaskMode { get; set; }
     [JsonPropertyName("maskInvert")] public bool? MaskInvert { get; set; }

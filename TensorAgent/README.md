@@ -121,17 +121,28 @@ picture stays in the saved chat. The app asks for 1024x1024 (an edit keeps the p
 shape at the same area) at the model's own 40 steps, rather than its native 2048x2048,
 which has four times the image tokens.
 
-For a local edit, attach the source photo, choose **Select area**, and paint the region
-to change. The shared desktop and mobile editor supports mouse, touch and stylus,
+For a local edit, choose **+ → Photo**, attach photos, and choose **Select area**
+beside any thumbnail above the message box, before sending. Saving a selection makes
+that photo the **Editing target** and moves it first; the other photos remain attached
+as references. Each photo remembers its own selection while you prepare the draft.
+Cancelling the editor or a failed save keeps the previous target. Removing the target
+leaves other saved selections inactive; choose **Adjust** and save to apply one. You can
+paint and save the selection before loading a model. To apply the edit, load
+**Qwen-Image 2.1**, describe what to change, and send. If another model is selected,
+the saved selection shows **Open Models** and keeps the draft until Qwen is loaded.
+The shared desktop and mobile editor supports mouse, touch and stylus,
 brush and eraser, undo/redo, invert, pan and zoom. Pink marks editable pixels; the
 exported grayscale mask uses white for edits and black for protected pixels. Edge
 softness fades inward, so it never expands the selected area. **Process selected
 region only** reduces model work for small selections, with less surrounding context.
-The result keeps the source dimensions and exact protected RGBA pixels. Additional
-photos are references; the selection belongs to the first photo. **Compare original**
-toggles the result, and **Edit again** restores the source, selection and instruction.
-Selections are saved with the conversation. The browser editor accepts images up to
+The result keeps the source dimensions and exact protected RGBA pixels. Each message
+edits one target; only its selection is sent and saved with the conversation.
+**Compare original** toggles the result, and **Edit again** restores the target,
+selection, references, other attachments and instruction. The browser editor accepts images up to
 16 megapixels and 8192 pixels per side; larger images produce an explicit error.
+HEIC/HEIF photos use a full-resolution PNG for editing and comparison while their
+small preview remains in the attachment list. Reattach older HEIC/HEIF uploads if
+the editor asks for a full-resolution source.
 
 **LoRA plug-ins.** With Qwen-Image 2.1 loaded, Model > LoRA plug-ins lists twelve LoRAs
 made for it. Each is pinned to a commit and a SHA-256 in `LoraCatalog` and downloaded on its
@@ -729,9 +740,18 @@ if the engine should have them (`TensorSharp.GGML.Native/build-windows.ps1` read
 `TENSORSHARP_GGML_NATIVE_ENABLE_CUDA` / `_VULKAN` as the desktop hosts do):
 
 ```
-dotnet build TensorAgent\src\TensorAgent.Maui\TensorAgent.Maui.csproj -f net10.0-windows10.0.19041.0 -c Release
-TensorAgent\src\TensorAgent.Maui\bin\Release\net10.0-windows10.0.19041.0\win-x64\TensorAgent.Maui.exe
+powershell -NoProfile -ExecutionPolicy Bypass -File TensorAgent\scripts\build-windows.ps1 -Configuration Release -Run
 ```
+
+The script stops if the build fails, verifies that the bundled page and embedded
+image editor match the current source, and then runs the app. Without `-Run`, it
+prints the verified executable path:
+`TensorAgent\src\TensorAgent.Maui\bin\Release\net10.0-windows10.0.19041.0\win-x64\TensorAgent.Maui.exe`.
+Close a running instance before rebuilding. Building `TensorSharp.Server.Host`
+updates the server, while TensorAgent needs its own build to update the embedded
+UI in `TensorAgent.Core.dll` beside its executable.
+For environments that use NuGet mirrors, `-PackageSource` accepts one or more
+feed URLs for restore; the default uses the repository's NuGet configuration.
 
 The app is unpackaged and carries the Windows App SDK runtime with it
 (`WindowsPackageType=None`, `WindowsAppSDKSelfContained`). The model's code runs only

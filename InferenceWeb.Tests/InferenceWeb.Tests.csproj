@@ -32,6 +32,7 @@
     <EmbeddedResource Include="Fixtures/Glm4Tokenizer/reference.json" />
     <EmbeddedResource Include="Fixtures/DesktopSurface/create_surface.c" />
     <EmbeddedResource Include="Fixtures/WindowsKnownFolders/probe.py" />
+    <None Update="Fixtures/Images/edit-photo-1024x768.heic" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\AdvUtils\AdvUtils.csproj" />

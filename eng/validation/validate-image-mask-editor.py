@@ -2,8 +2,9 @@
 """Exercise the shipped mask editor and Server Chat in isolated desktop/mobile Chromium.
 
 Uses a loopback fixture for uploads/SSE; no model inference is claimed. Checks
-native-size grayscale export, brush/erase/undo, touch coordinates, pan, selection
-reuse and request wiring. Real model tests use qwen-image21-mask-bench.py.
+native-size grayscale export, brush/erase/undo, touch coordinates, pan, per-photo
+selection reuse, transactional target changes and request wiring. Real model
+tests use qwen-image21-mask-bench.py.
 """
 import argparse
 from contextlib import contextmanager
@@ -65,11 +66,31 @@ def fixture():
             elif self.path == '/api/upload':
                 message = BytesParser(policy=default).parsebytes(
                     ('Content-Type: ' + self.headers['Content-Type'] + '\r\nMIME-Version: 1.0\r\n\r\n').encode() + data)
-                part = next(message.iter_parts())
-                filename = 'selection.png' if part.get_filename() == 'selection.png' else 'source.png'
-                uploads[filename] = part.get_payload(decode=True)
-                self.respond(json.dumps(dict(ok=True, file=filename, fileName=filename,
-                    mediaType='image', url='/uploads/' + filename)).encode())
+                files = []
+                for part in message.iter_parts():
+                    filename = Path(part.get_filename()).name
+                    if filename == 'selection.png':
+                        filename = f'selection-{len(uploads)}.png'
+                    uploads[filename] = part.get_payload(decode=True)
+                    uploaded = dict(ok=True, file=filename, fileName=filename,
+                                    mediaType='image', url='/uploads/' + filename)
+                    if filename.endswith('.heic'):
+                        # Browser-routing fixture only: real HEIC decoding is covered
+                        # by WebUiChatServiceTests and the live server validation.
+                        source = Image.open(io.BytesIO(uploads[filename])).convert('RGB')
+                        preview = io.BytesIO()
+                        source.resize((300, 200)).save(preview, format='PNG')
+                        preview_name = filename + '-preview.png'
+                        uploads[preview_name] = preview.getvalue()
+                        uploaded['previewUrl'] = '/uploads/' + preview_name
+                        if filename == 'oversize.heic':
+                            uploaded['editUnavailableReason'] = 'The selection editor supports images up to 16 megapixels and 8192 pixels per side.'
+                        else:
+                            edit_name = filename + '-edit.png'
+                            uploads[edit_name] = uploads[filename]
+                            uploaded['editUrl'] = '/uploads/' + edit_name
+                    files.append(uploaded)
+                self.respond(json.dumps(files[0] if len(files) == 1 else dict(ok=True, files=files)).encode())
             elif self.path == '/api/image-edit/stream':
                 requests.append(json.loads(data))
                 self.respond(b'data: {"done":true,"url":"/uploads/source.png","width":640,"height":360}\n\n', 'text/event-stream')
@@ -153,9 +174,10 @@ def exercise(browser, url, uploads, requests, mobile, out):
     with page.expect_response(lambda response: response.url.endswith('/api/upload')) as upload_response:
         dialog.get_by_role('button', name='Use selection').click()
     assert upload_response.value.ok
+    selection_file = upload_response.value.json()['file']
     expect(dialog).not_to_be_visible()
     expect(page.get_by_role('button', name='Edit selection', exact=True)).to_be_visible()
-    mask = np.asarray(Image.open(io.BytesIO(uploads['selection.png'])).convert('RGBA'))
+    mask = np.asarray(Image.open(io.BytesIO(uploads[selection_file])).convert('RGBA'))
     assert mask.shape == (360, 640, 4), mask.shape
     assert np.all(mask[:, :, 0] == mask[:, :, 1]) and np.all(mask[:, :, 1] == mask[:, :, 2])
     assert np.all(mask[:, :, 3] == 255)
@@ -166,7 +188,7 @@ def exercise(browser, url, uploads, requests, mobile, out):
     expect(page.get_by_role('button', name='Edit again', exact=True)).to_be_visible()
     request = requests[-1]
     assert request['imagePaths'] == ['source.png'], request
-    assert request['maskPath'] == 'selection.png' and request['maskMode'] == 'grayscale', request
+    assert request['maskPath'] == selection_file and request['maskMode'] == 'grayscale', request
     page.get_by_role('button', name='Show original', exact=True).click()
     expect(page.get_by_role('button', name='Show edited', exact=True)).to_have_attribute('aria-pressed', 'true')
     page.get_by_role('button', name='Edit again', exact=True).click()
@@ -177,8 +199,9 @@ def exercise(browser, url, uploads, requests, mobile, out):
     with page.expect_response(lambda response: response.url.endswith('/api/upload')) as upload_response:
         dialog.get_by_role('button', name='Use selection').click()
     assert upload_response.value.ok
+    selection_file = upload_response.value.json()['file']
     expect(dialog).not_to_be_visible()
-    inverted = np.asarray(Image.open(io.BytesIO(uploads['selection.png'])).convert('RGBA'))
+    inverted = np.asarray(Image.open(io.BytesIO(uploads[selection_file])).convert('RGBA'))
     assert inverted[180, 320, 0] == 0 and inverted[20, 20, 0] == 255
     page.get_by_role('button', name='Edit selection', exact=True).click()
     dialog.get_by_role('button', name='Remove selection', exact=True).click()
@@ -188,6 +211,260 @@ def exercise(browser, url, uploads, requests, mobile, out):
     return {'surface': name, 'status': 'passed', 'native_dimensions': [640, 360], 'input': 'touch' if mobile else 'mouse',
             'checks': ['empty guard', 'paint', 'erase', 'pixel-identical undo/redo', 'zoom/pan', 'opaque grayscale export', 'source coordinate alignment',
                        'mask excluded from image references', 'chat request', 'compare', 'edit again', 'reopen/invert', 'remove']}
+
+
+def exercise_multiple_photos(browser, url, uploads, requests, mobile, out):
+    name = 'mobile-multiple' if mobile else 'desktop-multiple'
+    context = browser.new_context(viewport={'width': 390 if mobile else 1280, 'height': 844 if mobile else 900},
+                                  is_mobile=mobile, has_touch=mobile, device_scale_factor=2 if mobile else 1)
+    page = context.new_page()
+    errors, alerts = [], []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.on('dialog', lambda dialog: (alerts.append(dialog.message), dialog.accept()))
+    page.goto(url)
+    files = []
+    for filename, dimensions, color in [('first.png', (640, 360), (90, 130, 180)),
+                                         ('second.png', (360, 640), (180, 90, 130)),
+                                         ('third.png', (256, 256), (130, 180, 90))]:
+        source = io.BytesIO()
+        Image.new('RGB', dimensions, color).save(source, format='PNG')
+        files.append({'name': filename, 'mimeType': 'image/png', 'buffer': source.getvalue()})
+    page.locator('#file-input').set_input_files(files)
+    expect(page.locator('.image-edit-attachment')).to_have_count(3)
+    dialog = page.get_by_role('dialog', name='Select image area to edit')
+
+    def photo(filename):
+        return page.locator(f'.image-edit-attachment[data-file="{filename}"]')
+
+    def order():
+        return page.locator('.image-edit-attachment').evaluate_all('(nodes) => nodes.map(node => node.dataset.file)')
+
+    def masks():
+        # Observe application state to verify dormant per-photo selections survive;
+        # all state changes still come from real browser controls and uploads.
+        return page.evaluate('pendingAttachments.map(a => ({file:a.file, maskPath:a.maskPath || null}))')
+
+    def open_selection(filename):
+        photo(filename).locator('.image-selection-button').click()
+        expect(dialog.get_by_role('button', name='Use selection')).to_be_enabled()
+
+    def save_selection():
+        with page.expect_response(lambda response: response.url.endswith('/api/upload')) as response:
+            dialog.get_by_role('button', name='Use selection').click()
+        assert response.value.ok
+        expect(dialog).not_to_be_visible()
+        # The page processes the upload JSON in a continuation after the response.
+        page.wait_for_function('pendingUploadCount === 0')
+        return response.value.json()['file']
+
+    def send(prompt):
+        count = len(requests)
+        page.locator('#message-input').fill(prompt)
+        page.locator('#btn-send').click()
+        expect(page.get_by_role('button', name='Edit again', exact=True)).to_have_count(count - start_requests + 1)
+        page.wait_for_function('!isGenerating')
+        assert len(requests) == count + 1
+        return requests[-1]
+
+    def edit_again():
+        page.get_by_role('button', name='Edit again', exact=True).last.click()
+
+    start_requests = len(requests)
+    assert order() == ['first.png', 'second.png', 'third.png']
+    expect(photo('first.png').locator('.image-selection-role')).to_have_text('Editing target')
+    expect(page.locator('.image-selection-button')).to_have_count(3)
+    open_selection('first.png')
+    stroke(page, dialog.locator('canvas.ts-mask-canvas'), (.25, .5), (.75, .5), mobile)
+    first_mask = save_selection()
+    initial_masks = masks()
+
+    # Cancel on a reference must preserve the current mask and target order.
+    open_selection('second.png')
+    stroke(page, dialog.locator('canvas.ts-mask-canvas'), (.5, .25), (.5, .75), mobile)
+    dialog.get_by_role('button', name='Cancel', exact=True).click()
+    expect(dialog).not_to_be_visible()
+    assert order() == ['first.png', 'second.png', 'third.png']
+    assert masks() == initial_masks
+
+    # A failed mask upload must be equally transactional.
+    open_selection('second.png')
+    stroke(page, dialog.locator('canvas.ts-mask-canvas'), (.5, .25), (.5, .75), mobile)
+    page.route('**/api/upload', lambda route: route.fulfill(status=503, content_type='application/json',
+                                                          body='{"ok":false,"error":"Simulated mask upload failure"}'))
+    dialog.get_by_role('button', name='Use selection').click()
+    page.wait_for_function('pendingUploadCount === 0')
+    page.unroute('**/api/upload')
+    assert alerts == ['Selection error: Simulated mask upload failure'], alerts
+    assert order() == ['first.png', 'second.png', 'third.png']
+    assert masks() == initial_masks
+
+    open_selection('second.png')
+    stroke(page, dialog.locator('canvas.ts-mask-canvas'), (.5, .25), (.5, .75), mobile)
+    second_mask = save_selection()
+    assert order() == ['second.png', 'first.png', 'third.png']
+    expect(photo('second.png').locator('.image-selection-role')).to_have_text('Editing target')
+    expect(photo('second.png').locator('.image-selection-status')).to_have_text('Outside selection protected')
+    expect(photo('first.png').locator('.image-selection-role')).to_have_text('Reference')
+    expect(photo('first.png').locator('.image-selection-status')).to_have_text('Selection saved')
+    second_pixels = np.asarray(Image.open(io.BytesIO(uploads[second_mask])).convert('RGBA'))
+    assert second_pixels.shape == (640, 360, 4), second_pixels.shape
+    assert second_pixels[320, 180, 0] == 255 and second_pixels[20, 20, 0] == 0
+    Image.fromarray(second_pixels).save(out / (name + '-mask.png'))
+    page.screenshot(path=str(out / (name + '-target.png')))
+    saved_masks = masks()
+    assert saved_masks == [{'file': 'second.png', 'maskPath': second_mask},
+                           {'file': 'first.png', 'maskPath': first_mask}, {'file': 'third.png', 'maskPath': None}]
+    request = send('Change only the selected region on the second photo.')
+    assert request['imagePaths'] == ['second.png', 'first.png', 'third.png'], request
+    assert request['maskPath'] == second_mask and request['maskMode'] == 'grayscale', request
+    assert 'attachments' not in request and first_mask not in json.dumps(request), request
+    page.get_by_role('button', name='Show original', exact=True).last.click()
+    expect(page.locator('img[alt="original image"]')).to_have_attribute('src', '/uploads/second.png')
+
+    # Edit again retains the promoted source AND all reference selections.
+    edit_again()
+    assert order() == ['second.png', 'first.png', 'third.png']
+    assert masks() == saved_masks
+    expect(photo('second.png').locator('.image-selection-status')).to_have_text('Outside selection protected')
+    # Reusing a saved selection on a reference promotes that photo, keeping others ordered.
+    open_selection('first.png')
+    first_mask = save_selection()
+    assert order() == ['first.png', 'second.png', 'third.png']
+    assert masks()[1]['maskPath'] == second_mask
+    open_selection('second.png')
+    second_mask = save_selection()
+    assert order() == ['second.png', 'first.png', 'third.png']
+    # Clearing the active selection must not activate a different saved selection.
+    open_selection('second.png')
+    dialog.get_by_role('button', name='Remove selection', exact=True).click()
+    expect(dialog).not_to_be_visible()
+    assert order() == ['second.png', 'first.png', 'third.png']
+    request = send('Edit the whole second photo.')
+    assert request['imagePaths'] == ['second.png', 'first.png', 'third.png']
+    assert 'maskPath' not in request, request
+    edit_again()
+    assert masks()[1]['maskPath'] == first_mask
+    # Restore a mask on B, then remove B entirely: A's saved mask stays dormant.
+    open_selection('second.png')
+    stroke(page, dialog.locator('canvas.ts-mask-canvas'), (.5, .25), (.5, .75), mobile)
+    save_selection()
+    photo('second.png').get_by_role('button', name='Remove second.png', exact=True).click()
+    assert order() == ['first.png', 'third.png']
+    expect(photo('first.png').locator('.image-selection-status')).to_have_text('Selection saved')
+    request = send('Edit the whole remaining source.')
+    assert request['imagePaths'] == ['first.png', 'third.png'] and 'maskPath' not in request, request
+    edit_again()
+    assert masks()[0]['maskPath'] == first_mask
+    expect(photo('first.png').locator('.image-selection-status')).to_have_text('Selection saved')
+    open_selection('first.png')
+    first_mask = save_selection()
+    # Removing a reference does not disturb the active selection.
+    photo('third.png').get_by_role('button', name='Remove third.png', exact=True).click()
+    request = send('Edit the saved region after explicitly choosing it again.')
+    assert request['imagePaths'] == ['first.png'] and request['maskPath'] == first_mask, request
+    assert not errors, errors
+    context.close()
+    return {'surface': name, 'status': 'passed', 'native_dimensions': [360, 640],
+            'input': 'touch' if mobile else 'mouse', 'checks': ['controls for every photo', 'cancel preserves target',
+            'failed upload preserves target', 'second photo native mask geometry', 'target promotion with stable references',
+            'active mask only on wire', 'compare target original', 'edit again preserves every selection',
+            'saved reference selection reactivation', 'clear active mask keeps references dormant',
+            'remove active photo keeps references dormant', 'remove reference preserves active mask']}
+
+
+def exercise_converted_photos(browser, url, uploads, requests, mobile, out):
+    name = 'mobile-converted' if mobile else 'desktop-converted'
+    context = browser.new_context(viewport={'width': 390 if mobile else 1280, 'height': 650 if mobile else 900},
+                                  is_mobile=mobile, has_touch=mobile)
+    page = context.new_page()
+    errors, alerts = [], []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.on('dialog', lambda dialog: (alerts.append(dialog.message), dialog.accept()))
+    page.goto(url)
+    source = io.BytesIO()
+    Image.new('RGB', (1200, 800), (100, 150, 180)).save(source, format='PNG')
+    page.locator('#file-input').set_input_files({'name': 'camera.heic', 'mimeType': 'image/heic', 'buffer': source.getvalue()})
+    camera = page.locator('.image-edit-attachment[data-file="camera.heic"]')
+    expect(camera.locator('img')).to_have_attribute('src', '/uploads/camera.heic-preview.png')
+    camera.get_by_role('button', name='Select area', exact=True).click()
+    dialog = page.get_by_role('dialog', name='Select image area to edit')
+    canvas = dialog.locator('canvas.ts-mask-canvas')
+    expect(dialog.get_by_role('button', name='Use selection')).to_be_enabled()
+    expect(canvas).to_have_attribute('width', '1200')
+    expect(canvas).to_have_attribute('height', '800')
+    stroke(page, canvas, (.3, .5), (.7, .5), mobile)
+    with page.expect_response(lambda response: response.url.endswith('/api/upload')) as response:
+        dialog.get_by_role('button', name='Use selection').click()
+    assert response.value.ok
+    mask_path = response.value.json()['file']
+    assert Image.open(io.BytesIO(uploads[mask_path])).size == (1200, 800)
+    expect(camera.get_by_role('button', name='Edit selection', exact=True)).to_be_visible()
+    page.locator('#message-input').fill('Edit the selected region of the converted photo.')
+    page.locator('#btn-send').click()
+    expect(page.get_by_role('button', name='Edit again', exact=True)).to_be_visible()
+    assert requests[-1]['imagePaths'] == ['camera.heic'] and requests[-1]['maskPath'] == mask_path
+    page.get_by_role('button', name='Show original', exact=True).click()
+    expect(page.locator('img[alt="original image"]')).to_have_attribute('src', '/uploads/camera.heic-edit.png')
+    page.get_by_role('button', name='Edit again', exact=True).click()
+    expect(camera.locator('img')).to_have_attribute('src', '/uploads/camera.heic-preview.png')
+    camera.get_by_role('button', name='Edit selection', exact=True).click()
+    expect(dialog.get_by_role('button', name='Use selection')).to_be_enabled()
+    expect(canvas).to_have_attribute('width', '1200')
+    expect(canvas).to_have_attribute('height', '800')
+    dialog.get_by_role('button', name='Cancel', exact=True).click()
+
+    # Many photos must scroll within the composer, keeping input/Send reachable.
+    files = [{'name': f'extra-{index}.png', 'mimeType': 'image/png', 'buffer': uploads['source.png']} for index in range(10)]
+    files.append({'name': 'oversize.heic', 'mimeType': 'image/heic', 'buffer': source.getvalue()})
+    page.locator('#file-input').set_input_files(files)
+    expect(page.locator('.image-edit-attachment')).to_have_count(12)
+    strip = page.locator('#attachments')
+    assert strip.bounding_box()['height'] <= page.viewport_size['height'] * .4 + 1
+    if mobile:
+        assert strip.evaluate('(element) => element.scrollHeight > element.clientHeight')
+    for control in [page.locator('#message-input'), page.locator('#btn-send')]:
+        box = control.bounding_box()
+        assert box['y'] >= 0 and box['y'] + box['height'] <= page.viewport_size['height'], box
+    page.locator('.image-edit-attachment[data-file="oversize.heic"] .image-selection-button').click()
+    assert alerts and '8192' in alerts[-1]
+    expect(dialog).not_to_be_visible()
+    assert page.locator('.image-edit-attachment').first.get_attribute('data-file') == 'camera.heic'
+    page.screenshot(path=str(out / (name + '-many-photos.png')))
+
+    # If the selected photo disappears while upload is pending, late success must
+    # not resurrect it or splice the last remaining reference out of the draft.
+    delayed = []
+    page.locator('.image-edit-attachment[data-file="extra-8.png"] .image-selection-button').click()
+    expect(dialog.get_by_role('button', name='Use selection')).to_be_enabled()
+    stroke(page, canvas, (.3, .5), (.7, .5), mobile)
+    page.route('**/api/upload', lambda route: delayed.append(route))
+    with page.expect_request('**/api/upload'):
+        dialog.get_by_role('button', name='Use selection').click()
+    page.locator('.image-edit-attachment[data-file="extra-8.png"]').get_by_role('button', name='Remove extra-8.png', exact=True).click()
+    remaining = page.locator('.image-edit-attachment').evaluate_all('(nodes) => nodes.map(node => node.dataset.file)')
+    delayed.pop().fulfill(status=200, content_type='application/json', body='{"ok":true,"file":"late-mask.png"}')
+    page.wait_for_function('pendingUploadCount === 0')
+    assert page.locator('.image-edit-attachment').evaluate_all('(nodes) => nodes.map(node => node.dataset.file)') == remaining
+    page.unroute('**/api/upload')
+    page.locator('.image-edit-attachment[data-file="extra-9.png"] .image-selection-button').click()
+    expect(dialog.get_by_role('button', name='Use selection')).to_be_enabled()
+    stroke(page, canvas, (.3, .5), (.7, .5), mobile)
+    page.route('**/api/upload', lambda route: delayed.append(route))
+    with page.expect_request('**/api/upload'):
+        dialog.get_by_role('button', name='Use selection').click()
+    page.get_by_role('button', name='New Chat').click()
+    expect(page.locator('.image-edit-attachment')).to_have_count(0)
+    delayed.pop().fulfill(status=200, content_type='application/json', body='{"ok":true,"file":"late-mask.png"}')
+    page.wait_for_function('pendingUploadCount === 0')
+    expect(page.locator('.image-edit-attachment')).to_have_count(0)
+    assert not errors, errors
+    context.close()
+    return {'surface': name, 'status': 'passed', 'native_dimensions': [1200, 800],
+            'checks': ['full-resolution edit source differs from thumbnail', 'original target path on wire',
+                       'full-resolution compare and selection reopen', 'oversize conversion refusal',
+                       '12-photo composer scrolling and reachable Send/input', 'late upload after removal',
+                       'late upload after New Chat'],
+            'limitations': 'Converted URL routing fixture; HEIC codec tested separately in managed/live validation.'}
 
 
 def main():
@@ -202,6 +479,8 @@ def main():
         try:
             for mobile in (False, True):
                 results.append(exercise(browser, url, uploads, requests, mobile, args.out))
+                results.append(exercise_multiple_photos(browser, url, uploads, requests, mobile, args.out))
+                results.append(exercise_converted_photos(browser, url, uploads, requests, mobile, args.out))
         finally:
             browser.close()
     report = {'runs': results, 'limitations': 'Loopback fixture with mocked inference; mobile is Chromium touch emulation, not MAUI/iOS/Android device validation.'}

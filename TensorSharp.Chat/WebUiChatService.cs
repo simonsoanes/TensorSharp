@@ -562,7 +562,8 @@ namespace TensorSharp.Chat
         ///
         /// <para>
         /// The reply shape depends on what the file is: an image (HEIC/HEIF gain a PNG
-        /// <c>previewUrl</c> because no browser renders them), a video (frames are
+        /// <c>previewUrl</c> and a full-resolution <c>editUrl</c> within the selection
+        /// editor's limits because browsers cannot render them), a video (frames are
         /// extracted next to it, named after its GUID, so the Web UI can reference them
         /// by bare name), a text file (full content, never truncated, except CSV tables,
         /// which stay file-backed), or a PDF (its text layer; a scanned PDF falls back
@@ -951,40 +952,74 @@ namespace TensorSharp.Chat
             // fine (Magick.NET), but no mainstream browser renders them in <img> — and the
             // default static-file content-type provider doesn't even serve the extension —
             // so the chat bubble showed a blank/broken preview. Convert a lightweight PNG
-            // preview at upload time; the Web UI displays previewUrl while path (the
-            // original file, full fidelity) is what the edit/vision pipelines consume.
+            // preview at upload time. Masks must use a separate full-resolution PNG:
+            // the preview can be smaller than the original the pipeline consumes.
             if (mediaType == "image" && ext is ".heic" or ".heif")
             {
+                string previewName = Path.GetFileNameWithoutExtension(safeFileName) + "-preview.png";
+                string previewPath = Path.Combine(_options.UploadDirectory, previewName);
+                string editName = Path.GetFileNameWithoutExtension(safeFileName) + "-edit.png";
+                string editPath = Path.Combine(_options.UploadDirectory, editName);
+                string editSourceName = null;
+                string editUnavailableReason = null;
                 try
                 {
-                    string previewName = Path.GetFileNameWithoutExtension(safeFileName) + "-preview.png";
-                    string previewPath = Path.Combine(_options.UploadDirectory, previewName);
                     await Task.Run(() =>
                     {
-                        var img = TensorSharp.Models.QwenImage.ImageIO.Load(savePath);
+                        var img = TensorSharp.Models.QwenImage.ImageIO.Load(savePath, preserveAlpha: true);
                         const long previewArea = 768L * 768;   // plenty for the ~300 px bubble preview
-                        if ((long)img.Width * img.Height > previewArea)
-                            img = TensorSharp.Models.QwenImage.ImageIO.ResizeToArea(img, previewArea, multiple: 1);
-                        TensorSharp.Models.QwenImage.ImageIO.SavePng(previewPath, img);
-                    });
-                    _uploads.RecordFile(previewPath);
-                    TrackDerivedFiles(storedFiles, new[] { previewPath });
-                    return TrackUpload(new
-                    {
-                        ok = true,
-                        file = safeFileName,
-                        url = uploadUrl,
-                        previewUrl = BuildUploadUrl(previewName),
-                        mediaType,
-                        fileName = originalFileName,
-                    }, storedFiles);
+                        bool resizePreview = (long)img.Width * img.Height > previewArea;
+                        var preview = resizePreview
+                            ? TensorSharp.Models.QwenImage.ImageIO.ResizeToArea(img, previewArea, multiple: 1)
+                            : img;
+                        TensorSharp.Models.QwenImage.ImageIO.SavePng(previewPath, preview);
+                        if (SupportsImageSelectionSize(img.Width, img.Height))
+                        {
+                            // Reuse the full decode already needed for the thumbnail.
+                            // Small photos can use that same PNG without another file.
+                            if (resizePreview) TensorSharp.Models.QwenImage.ImageIO.SavePng(editPath, img);
+                            editSourceName = resizePreview ? editName : previewName;
+                        }
+                        else editUnavailableReason = ImageSelectionSizeLimitMessage;
+                    }, cancellationToken);
+                    cancellationToken.ThrowIfCancellationRequested();
                 }
+                catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
                     uploadLogger.LogWarning(LogEventIds.UploadReceived,
-                        "HEIC preview conversion failed for {FileName}: {Error} (chat preview will be blank; the edit itself is unaffected)",
+                        "HEIC browser image conversion failed for {FileName}: {Error}",
                         originalFileName, ex.Message);
+                    // Conversion is optional for upload, but a failed/partial PNG
+                    // must never be used as a differently sized editing canvas.
+                    foreach (string derivedPath in new[] { previewPath, editPath })
+                    {
+                        try { File.Delete(derivedPath); } catch { /* best effort */ }
+                    }
+                    return TrackUpload(new
+                    {
+                        ok = true, file = safeFileName, url = uploadUrl, mediaType, fileName = originalFileName,
+                        editUnavailableReason = "A full-resolution image for area selection could not be prepared. Reattach this photo as PNG or JPEG.",
+                    }, storedFiles);
                 }
+                _uploads.RecordFile(previewPath);
+                TrackDerivedFiles(storedFiles, new[] { previewPath });
+                if (editSourceName == editName)
+                {
+                    _uploads.RecordFile(editPath);
+                    TrackDerivedFiles(storedFiles, new[] { editPath });
+                }
+                return TrackUpload(new
+                {
+                    ok = true,
+                    file = safeFileName,
+                    url = uploadUrl,
+                    previewUrl = BuildUploadUrl(previewName),
+                    editUrl = editSourceName == null ? null : BuildUploadUrl(editSourceName),
+                    editUnavailableReason,
+                    mediaType,
+                    fileName = originalFileName,
+                }, storedFiles);
             }
 
             return TrackUpload(
@@ -1596,6 +1631,14 @@ namespace TensorSharp.Chat
             catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException)
             { throw new WebUiRequestRejectedException(400, new { error = $"Cannot decode {field} image: {ex.Message}" }); }
         }
+
+        // Keep these bounds aligned with WebUi/mask-editor.js before allocating
+        // a native-resolution browser canvas or creating its HEIC companion PNG.
+        internal const string ImageSelectionSizeLimitMessage =
+            "The selection editor supports images up to 16 megapixels and 8192 pixels per side.";
+
+        internal static bool SupportsImageSelectionSize(int width, int height) =>
+            width > 0 && height > 0 && width <= 8192 && height <= 8192 && (long)width * height <= 16777216;
 
         private static void ValidateImageMaskGeometry(TensorSharp.Models.QwenImage.QwenImageParams p,
             IReadOnlyList<TensorSharp.Models.QwenImage.RgbImage> images)
