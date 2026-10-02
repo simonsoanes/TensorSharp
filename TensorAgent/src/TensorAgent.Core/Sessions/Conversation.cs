@@ -25,6 +25,12 @@ public sealed class StoredMessage
     [JsonPropertyName("thinking")] public string? Thinking { get; set; }
     [JsonPropertyName("imagePaths")] public List<string>? ImagePaths { get; set; }
     [JsonPropertyName("stillImagePaths")] public List<string>? StillImagePaths { get; set; }
+    [JsonPropertyName("maskPath")] public string? MaskPath { get; set; }
+    [JsonPropertyName("maskMode")] public string? MaskMode { get; set; }
+    [JsonPropertyName("maskInvert")] public bool? MaskInvert { get; set; }
+    [JsonPropertyName("maskFeather")] public int? MaskFeather { get; set; }
+    [JsonPropertyName("maskCrop")] public bool? MaskCrop { get; set; }
+    [JsonPropertyName("maskCropPadding")] public int? MaskCropPadding { get; set; }
     [JsonPropertyName("videoFilePaths")] public List<string>? VideoFilePaths { get; set; }
     [JsonPropertyName("audioPaths")] public List<string>? AudioPaths { get; set; }
     [JsonPropertyName("textFilePaths")] public List<string>? TextFilePaths { get; set; }
@@ -53,11 +59,13 @@ public sealed class StoredMessage
                 if (list is not null)
                     foreach (string p in list)
                         yield return Path.GetFileName(p);
+            if (!string.IsNullOrEmpty(MaskPath)) yield return Path.GetFileName(MaskPath);
             if (Attachments is not null)
                 foreach (StoredAttachment a in Attachments)
                 {
                     if (!string.IsNullOrEmpty(a.File)) yield return Path.GetFileName(a.File);
                     if (!string.IsNullOrEmpty(a.PreviewFile)) yield return Path.GetFileName(a.PreviewFile);
+                    if (!string.IsNullOrEmpty(a.MaskPath)) yield return Path.GetFileName(a.MaskPath);
                     if (a.Frames is not null) foreach (string f in a.Frames) yield return Path.GetFileName(f);
                 }
             if (!string.IsNullOrEmpty(ImageUrl)) yield return Path.GetFileName(ImageUrl);
@@ -77,6 +85,12 @@ public sealed class StoredAttachment
     /// file/code tools instead of being copied into every prompt.</summary>
     [JsonPropertyName("fileBacked")] public bool? FileBacked { get; set; }
     [JsonPropertyName("previewFile")] public string? PreviewFile { get; set; }
+    [JsonPropertyName("maskPath")] public string? MaskPath { get; set; }
+    [JsonPropertyName("maskMode")] public string? MaskMode { get; set; }
+    [JsonPropertyName("maskInvert")] public bool? MaskInvert { get; set; }
+    [JsonPropertyName("maskFeather")] public int? MaskFeather { get; set; }
+    [JsonPropertyName("maskCrop")] public bool? MaskCrop { get; set; }
+    [JsonPropertyName("maskCropPadding")] public int? MaskCropPadding { get; set; }
     [JsonPropertyName("frames")] public List<string>? Frames { get; set; }
     [JsonPropertyName("pageCount")] public int? PageCount { get; set; }
     [JsonPropertyName("extractedPageCount")] public int? ExtractedPageCount { get; set; }

@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>TensorSharp Chat</title>
+<link rel="stylesheet" href="/mask-editor.css">
+<script src="/mask-editor.js"></script>
 <style>
 :root {
   --bg: #0f0f0f;
@@ -665,6 +667,13 @@ button.primary:hover { background: var(--accent-hover); }
    chip. The name stays in the tile's tooltip and alt text. Top left, .kind marks a
    video or a PDF; bottom left, .badge is the "Picture N" order a multi-image edit
    prompt refers to, or a scanned PDF's page count. */
+.image-selection-button,.image-edit-actions button {
+  padding:8px 12px; min-height:40px; border:1px solid var(--border); border-radius:8px;
+  color:var(--text); background:var(--surface2); cursor:pointer; font:inherit;
+}
+.image-selection-button:focus-visible,.image-edit-actions button:focus-visible { outline:2px solid var(--accent); }
+.image-selection-status { font-size:12px; color:var(--text2); max-width:140px; }
+.image-edit-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
 .attachment-thumb {
   position: relative;
   flex: 0 0 auto;
@@ -1413,6 +1422,7 @@ function renderEmptyState() {
 function updateStatusBadge(data) {
   currentLoadedModel = data.loaded || null;
   currentArchitecture = data.architecture || null;
+  renderAttachments();
   currentVideoCaps = data.video || null;
 
   if (!currentLoadedModel) {
@@ -1584,6 +1594,20 @@ function renderAttachments() {
     attachmentsDiv.appendChild(thumb && thumb.url && !att.thumbFailed
       ? buildAttachmentThumb(att, idx, name, thumb, chip)
       : chip());
+    if (att.mediaType === 'image' && imageNum === 1 && isQwenImageModel()) {
+      const select = document.createElement('button');
+      select.type = 'button';
+      select.className = 'image-selection-button';
+      select.textContent = att.maskPath ? 'Edit selection' : 'Select area';
+      select.addEventListener('click', () => selectImageArea(att));
+      attachmentsDiv.appendChild(select);
+      if (att.maskPath) {
+        const status = document.createElement('span');
+        status.className = 'image-selection-status';
+        status.textContent = 'Outside selection protected';
+        attachmentsDiv.appendChild(status);
+      }
+    }
   });
   if (focusSlot >= 0) {
     const removes = attachmentsDiv.querySelectorAll('.remove');
@@ -1648,6 +1672,42 @@ function buildAttachmentThumb(att, idx, name, thumb, chip) {
 function removeAttachment(idx) {
   pendingAttachments.splice(idx, 1);
   renderAttachments();
+}
+
+function isQwenImageModel() {
+  return currentArchitecture === 'qwen_image' || currentArchitecture === 'qwen-image';
+}
+
+async function selectImageArea(att) {
+  if (isGenerating || pendingUploadCount) return;
+  pendingUploadCount++;
+  try {
+    const selection = await TensorSharpMaskEditor.open({
+      sourceUrl: uploadUrlForAttachment(att),
+      maskUrl: att.maskPath ? uploadUrlForAttachment({ file: att.maskPath }) : null,
+      maskFeather: att.maskFeather || 0, maskCrop: !!att.maskCrop
+    });
+    if (!selection || !pendingAttachments.includes(att)) return;
+    if (selection.remove) {
+      delete att.maskPath; delete att.maskFeather; delete att.maskCrop;
+    } else {
+      const form = new FormData();
+      form.append('file', selection.blob, 'selection.png');
+      const response = await fetch('/api/upload', { method: 'POST', body: form });
+      const uploaded = await response.json();
+      if (!response.ok || !uploaded.ok || !uploaded.file) throw new Error(uploaded.error || 'Selection upload failed');
+      if (!pendingAttachments.includes(att)) return;
+      att.maskPath = uploaded.file;
+      att.maskFeather = selection.maskFeather;
+      att.maskCrop = selection.maskCrop;
+    }
+    renderAttachments();
+    messageInput.focus();
+  } catch (error) {
+    alert('Selection error: ' + error.message);
+  } finally {
+    pendingUploadCount--;
+  }
 }
 
 // ---- Agent Skills --------------------------------------------------------
@@ -2629,6 +2689,13 @@ async function sendMessage() {
 
   if (imagePaths.length > 0) msg.imagePaths = imagePaths;
   if (stillImagePaths.length > 0) msg.stillImagePaths = stillImagePaths;
+  const editSource = attachmentsCopy.find(att => att.mediaType === 'image');
+  if (editSource && editSource.maskPath && isQwenImageModel()) {
+    msg.maskPath = editSource.maskPath;
+    msg.maskMode = 'grayscale';
+    msg.maskFeather = editSource.maskFeather || 0;
+    msg.maskCrop = !!editSource.maskCrop;
+  }
   if (videoFilePaths.length > 0) msg.videoFilePaths = videoFilePaths;
   if (audioPaths.length > 0) msg.audioPaths = audioPaths;
   if (textFilePaths.length > 0) msg.textFilePaths = textFilePaths;
@@ -2645,6 +2712,11 @@ async function sendMessage() {
       };
       if (att.frames && att.frames.length) stored.frames = [...att.frames];
       if (att.fileBacked === true) stored.fileBacked = true;
+      if (att.maskPath) {
+        stored.maskPath = att.maskPath;
+        stored.maskFeather = att.maskFeather || 0;
+        stored.maskCrop = !!att.maskCrop;
+      }
       return stored;
     });
   }
@@ -2663,7 +2735,8 @@ async function sendMessage() {
 }
 
 async function runImageEdit(userMsg, bubbleText, statsDiv) {
-  const editing = !!(userMsg.imagePaths && userMsg.imagePaths.length);
+  const editImages = userMsg.stillImagePaths || userMsg.imagePaths || [];
+  const editing = editImages.length > 0;
   const action = editing ? 'Image edit' : 'Image generation';
   bubbleText.textContent = editing ? 'Starting edit…' : 'Generating image…';
   statsDiv.textContent = action;
@@ -2690,7 +2763,9 @@ async function runImageEdit(userMsg, bubbleText, statsDiv) {
     const res = await fetch(editing ? '/api/image-edit/stream' : '/api/image-generate/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ imagePaths: userMsg.imagePaths, prompt: userMsg.content || '' }),
+      body: JSON.stringify({ imagePaths: editImages,
+        prompt: userMsg.content || '', maskPath: userMsg.maskPath, maskMode: userMsg.maskMode,
+        maskFeather: userMsg.maskFeather, maskCrop: userMsg.maskCrop }),
       signal: currentAbortController.signal
     });
     if (!res.ok) {
@@ -2732,6 +2807,7 @@ async function runImageEdit(userMsg, bubbleText, statsDiv) {
             dl.textContent = '⬇ Download image';
             dl.style.cssText = 'display:inline-block;margin-top:8px;color:var(--accent);';
             bubbleText.appendChild(dl);
+            if (editing) addImageEditActions(bubbleText, img, userMsg, data.url);
             statsDiv.textContent = `${editing ? "Edited" : "Generated"} ${data.width}×${data.height} · ${((performance.now() - t0) / 1000).toFixed(1)}s`;
           }
           scrollChatToBottom();
@@ -2742,6 +2818,42 @@ async function runImageEdit(userMsg, bubbleText, statsDiv) {
     if (e.name === 'AbortError') { if (!img) bubbleText.textContent = action + ' cancelled.'; statsDiv.textContent = 'Stopped by user'; }
     else { bubbleText.textContent = action + ' error: ' + e.message; statsDiv.textContent = 'Failed'; }
   }
+}
+
+function addImageEditActions(host, img, userMsg, resultUrl) {
+  const actions = document.createElement('div');
+  actions.className = 'image-edit-actions';
+  const source = (userMsg.attachments || []).find(att => att.mediaType === 'image') ||
+    { file: (userMsg.stillImagePaths || userMsg.imagePaths)[0], mediaType: 'image' };
+  const compare = document.createElement('button');
+  compare.type = 'button';
+  compare.textContent = 'Show original';
+  compare.setAttribute('aria-pressed', 'false');
+  compare.addEventListener('click', () => {
+    const original = compare.getAttribute('aria-pressed') !== 'true';
+    img.src = original ? uploadUrlForAttachment(source) : resultUrl;
+    img.alt = original ? 'original image' : 'edited image';
+    compare.textContent = original ? 'Show edited' : 'Show original';
+    compare.setAttribute('aria-pressed', String(original));
+  });
+  const again = document.createElement('button');
+  again.type = 'button';
+  again.textContent = 'Edit again';
+  again.addEventListener('click', () => {
+    if (isGenerating || pendingUploadCount) return;
+    // Keep the original canvas and its selection together for reproducible retries.
+    const attachments = (userMsg.attachments || [source]).filter(att => att.mediaType === 'image')
+      .map(att => ({ ...att }));
+    if (userMsg.maskPath && attachments.length) Object.assign(attachments[0], {
+      maskPath: userMsg.maskPath, maskFeather: userMsg.maskFeather, maskCrop: userMsg.maskCrop
+    });
+    pendingAttachments = attachments;
+    messageInput.value = userMsg.content || '';
+    renderAttachments();
+    messageInput.focus();
+  });
+  actions.append(compare, again);
+  host.appendChild(actions);
 }
 
 // "1h 04m" / "7m 12s" / "43s"; '' when the value is missing or not yet known.

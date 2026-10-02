@@ -174,8 +174,22 @@ public static class ImageTurns
         string prompt = Text(user, "content")?.Trim() ?? string.Empty;
         // Stills only: a video's sampled frames are not a photo to edit.
         string[] photos = Paths(user, "stillImagePaths");
-        if (photos.Length > 0)
-            return new ImageRequest(true, new { prompt, imagePaths = photos, targetArea = DefaultTargetArea });
+        string[] maskSettings = ["maskPath", "maskMode", "maskInvert", "maskFeather", "maskCrop", "maskCropPadding"];
+        bool hasMaskSettings = maskSettings.Any(name => user.TryGetProperty(name, out JsonElement value) && value.ValueKind != JsonValueKind.Null);
+        if (photos.Length > 0 || hasMaskSettings)
+        {
+            var payload = new Dictionary<string, object?>
+            {
+                ["prompt"] = prompt, ["imagePaths"] = photos, ["targetArea"] = DefaultTargetArea,
+            };
+            // The first photo is the source; later photos provide reference context.
+            // Forward raw JSON so the image service can reject invalid settings rather
+            // than silently applying a whole-image edit when a selection is malformed.
+            foreach (string name in maskSettings)
+                if (user.TryGetProperty(name, out JsonElement value) && value.ValueKind != JsonValueKind.Null)
+                    payload[name] = value.Clone();
+            return new ImageRequest(true, payload);
+        }
         return prompt.Length == 0 ? null : new ImageRequest(false, new { prompt, targetArea = DefaultTargetArea });
     }
 

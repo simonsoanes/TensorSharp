@@ -2106,6 +2106,15 @@ public sealed class AgentAppHost : IDisposable
     /// </summary>
     public IReadOnlyList<SelfTestResult> SelfTest()
     {
+        if (Backend.UsesHostProcesses && OperatingSystem.IsWindows())
+        {
+            // These probes run POSIX commands and require file/network confinement.
+            // Windows offers neither contract here. A refused launch must not be
+            // reported as a passing sandbox check, or as a broken interpreter.
+            return new[] { new SelfTestResult("process:sandbox", false,
+                "POSIX sandbox probes are unavailable on Windows; native tools require explicit unconfined execution.",
+                Skipped: true) };
+        }
         string root = Path.Combine(Paths.ScratchDirectory, "selftest-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(root);
         // The escape probe writes into the user's home directory, which the model's code
@@ -2805,9 +2814,9 @@ public sealed class AgentAppHost : IDisposable
 }
 
 /// <summary>One self-test check: what was tried, whether it behaved, and what it said.</summary>
-public sealed record SelfTestResult(string Name, bool Ok, string Detail)
+public sealed record SelfTestResult(string Name, bool Ok, string Detail, bool Skipped = false)
 {
-    public override string ToString() => $"{(Ok ? "ok  " : "FAIL")} {Name}: {Detail}";
+    public override string ToString() => $"{(Skipped ? "SKIP" : Ok ? "ok  " : "FAIL")} {Name}: {Detail}";
 }
 
 /// <summary>

@@ -132,8 +132,44 @@ public sealed class LoopbackWebHost : IDisposable
 
     public void Start()
     {
+        // Local validation may use a different quantization from the download
+        // catalog. Keep its real file identity and avoid copying multi-GB weights
+        // or pretending it passed the catalog's size/hash verification.
+        if (ValidationRoot() is not null
+            && Environment.GetEnvironmentVariable("TENSORAGENT_VALIDATION_WEIGHTS") is { Length: > 0 } weights)
+        {
+            weights = Path.GetFullPath(weights);
+            if (!File.Exists(weights))
+                throw new FileNotFoundException("Validation model does not exist.", weights);
+            string projector = Environment.GetEnvironmentVariable("TENSORAGENT_VALIDATION_MMPROJ") ?? string.Empty;
+            if (projector.Length > 0)
+            {
+                projector = Path.GetFullPath(projector);
+                if (!File.Exists(projector))
+                    throw new FileNotFoundException("Validation projector does not exist.", projector);
+            }
+            _host.Options.RepointHostedModel(weights, projector);
+        }
         _running = this;
         _host.Start();
+        // Windows GUI launches have no attached console. An explicitly isolated
+        // validation run still needs its loopback address to exercise the same host
+        // the WebView uses, without touching the user's ordinary application data.
+        if (ValidationRoot() is { } validationRoot)
+        {
+            Directory.CreateDirectory(validationRoot);
+            File.WriteAllText(Path.Combine(validationRoot, "connection.json"),
+                System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    baseUrl = BaseUrl,
+                    entryUrl = EntryUrl,
+                    cookie = $"{LoopbackServer.TokenCookie}={Token}",
+                    processId = Environment.ProcessId,
+                    executionBackend = _host.Backend.Name,
+                    dataRoot = _host.Paths.DataRoot,
+                    cacheRoot = _host.Paths.CacheRoot,
+                }));
+        }
 #if IOS
         _shareInbox.Start();
 #endif
@@ -213,6 +249,14 @@ public sealed class LoopbackWebHost : IDisposable
     /// </summary>
     public static string DeviceLogsDirectory() => DevicePaths().LogsDirectory;
 
+    private static string? ValidationRoot()
+    {
+        // Explicit opt-in, including Release so measured app performance uses
+        // the shipped configuration. No validation variables affect normal runs.
+        return Environment.GetEnvironmentVariable("TENSORAGENT_VALIDATION_ROOT") is { Length: > 0 } root
+            ? Path.GetFullPath(root) : null;
+    }
+
     private static AgentPaths DevicePaths()
     {
 #if IOS || MACCATALYST
@@ -231,6 +275,12 @@ public sealed class LoopbackWebHost : IDisposable
         string dataRoot = Path.Combine(local, "Data");
         string cacheRoot = Path.Combine(local, "Cache");
 #endif
+
+        if (ValidationRoot() is { } validationRoot)
+        {
+            dataRoot = Path.Combine(validationRoot, "Data");
+            cacheRoot = Path.Combine(validationRoot, "Cache");
+        }
 
         return new AgentPaths(dataRoot, cacheRoot)
         {

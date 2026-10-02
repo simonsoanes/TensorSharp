@@ -14,6 +14,8 @@
          Server's page stays unforked. Embedded rather than copied to disk because the
          script and the routes it calls have to ship as one thing. -->
     <EmbeddedResource Include="WebUi\tensoragent.js" />
+    <EmbeddedResource Include="..\..\..\TensorSharp.Chat\WebUi\mask-editor.js" LogicalName="TensorAgent.Core.WebUi.mask-editor.js" />
+    <EmbeddedResource Include="..\..\..\TensorSharp.Chat\WebUi\mask-editor.css" LogicalName="TensorAgent.Core.WebUi.mask-editor.css" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="TensorAgent.Tests" />

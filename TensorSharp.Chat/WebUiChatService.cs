@@ -1275,11 +1275,13 @@ namespace TensorSharp.Chat
 
         /// <summary>
         /// <c>POST /api/image-edit</c> with a JSON body: <c>{ imagePaths[] | imagePath,
-        /// prompt, steps?, cfg?, seed?, targetArea? }</c> where the paths are the bare
+        /// prompt, steps?, cfg?, seed?, targetArea?, maskPath?, maskMode?, maskInvert?,
+        /// maskFeather?, maskCrop?, maskCropPadding? }</c> where the paths are the bare
         /// server file names <c>/api/upload</c> returned. Runs the loaded Qwen-Image-2.1
         /// model and returns <c>{ ok, url, width, height, elapsedSeconds }</c>. With
         /// multiple images the first drives the output geometry and the prompt can
-        /// reference them as "Picture 1", "Picture 2", ... in upload order.
+        /// reference them as "Picture 1", "Picture 2", ... in upload order. A mask applies
+        /// only to the first image and retains its original canvas and unselected pixels.
         /// </summary>
         public Task<object> ImageEditAsync(JsonElement body, CancellationToken cancellationToken) =>
             ImageRequestAsync(body, generate: false, cancellationToken);
@@ -1318,6 +1320,17 @@ namespace TensorSharp.Chat
                 p.TargetArea = body.TryGetProperty("targetArea", out var area)
                     ? area.GetInt64() : p.ResolveTargetArea();
                 if (body.TryGetProperty("negativePrompt", out var negative)) p.NegativePrompt = negative.GetString() ?? " ";
+                if (body.TryGetProperty("maskMode", out var mode))
+                    p.MaskMode = mode.GetString()?.ToLowerInvariant() switch
+                    {
+                        "grayscale" => TensorSharp.Models.QwenImage.QwenImageMaskMode.Grayscale,
+                        "alpha" => TensorSharp.Models.QwenImage.QwenImageMaskMode.Alpha,
+                        _ => throw new WebUiRequestRejectedException(400, new { error = "maskMode must be grayscale (white edits) or alpha (transparent edits)." }),
+                    };
+                if (body.TryGetProperty("maskInvert", out var invert)) p.MaskInvert = invert.GetBoolean();
+                if (body.TryGetProperty("maskFeather", out var feather)) p.MaskFeather = feather.GetInt32();
+                if (body.TryGetProperty("maskCrop", out var crop)) p.MaskCrop = crop.GetBoolean();
+                if (body.TryGetProperty("maskCropPadding", out var padding)) p.MaskCropPadding = padding.GetInt32();
             }
             catch (Exception ex) when (ex is InvalidOperationException or FormatException or OverflowException)
             {
@@ -1331,6 +1344,8 @@ namespace TensorSharp.Chat
         {
             if (p.Steps < 0 || !float.IsFinite(p.CfgScale) || p.CfgScale < 0 || p.TargetArea <= 0)
                 throw new WebUiRequestRejectedException(400, new { error = "steps and cfg must be nonnegative; targetArea must be positive." });
+            if (p.MaskFeather is < 0 or > 1024 || p.MaskCropPadding is < 0 or > 16384)
+                throw new WebUiRequestRejectedException(400, new { error = "maskFeather must be between 0 and 1024; maskCropPadding must be between 0 and 16384 source pixels." });
             const int alignment = 32;
             if (p.Width < 0 || p.Height < 0 || (p.Width == 0) != (p.Height == 0)
                 || p.Width % alignment != 0 || p.Height % alignment != 0)
@@ -1339,11 +1354,15 @@ namespace TensorSharp.Chat
 
         internal static string ParseImagePrompt(JsonElement body, bool generate)
         {
+            if (body.ValueKind != JsonValueKind.Object)
+                throw new WebUiRequestRejectedException(400, new { error = "Expected a JSON object." });
             if (body.TryGetProperty("prompt", out var value) && value.ValueKind != JsonValueKind.String)
                 throw new WebUiRequestRejectedException(400, new { error = "prompt must be a string." });
             string prompt = value.ValueKind == JsonValueKind.String ? value.GetString() : "";
             if (generate && string.IsNullOrWhiteSpace(prompt))
                 throw new WebUiRequestRejectedException(400, new { error = "Text-to-image generation requires a nonempty prompt." });
+            if (generate && HasMaskFields(body))
+                throw new WebUiRequestRejectedException(400, new { error = "Masks require an input image and /api/image-edit." });
             if (generate && ((body.TryGetProperty("imagePaths", out var images)
                     && images.ValueKind != JsonValueKind.Null
                     && (images.ValueKind != JsonValueKind.Array || images.GetArrayLength() > 0))
@@ -1365,11 +1384,29 @@ namespace TensorSharp.Chat
             {
                 string error = await ReadUploadedImagesAsync(body, images, cancellationToken);
                 if (error != null) throw new WebUiRequestRejectedException(400, new { error });
+                await ReadUploadedMaskAsync(body, p, cancellationToken);
             }
             return await RunImageEditAsync(model, prompt, p, images, logger, generate, cancellationToken);
         }
 
         /// <summary>The multipart edit route uses the same validation and worker as JSON.</summary>
+        public async Task<object> ImageEditAsync(
+            JsonElement parameters, IReadOnlyList<byte[]> images, byte[] mask, CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(images);
+            if (images.Count == 0)
+                throw new WebUiRequestRejectedException(400, new { error = "No image uploaded (field 'image')." });
+            var logger = _loggerFactory.CreateLogger("TensorSharp.Server.ImageEdit");
+            var model = RequireImageEditModel();
+            EnsureImageEditHeadroom(logger, "Image edit rejected: {Reason}");
+            var p = ParseImageParameters(parameters);
+            string prompt = ParseImagePrompt(parameters, generate: false);
+            ValidateMaskPresence(parameters, mask != null);
+            if (mask != null) p.Mask = DecodeRequestImage(mask, "mask");
+            return await RunImageEditAsync(model, prompt, p, images.ToList(), logger, false, cancellationToken);
+        }
+
+        /// <summary>Compatibility overload for callers supplying decoded multipart fields.</summary>
         public async Task<object> ImageEditAsync(
             string prompt, int steps, float cfg, long seed, long targetArea, IReadOnlyList<byte[]> images, CancellationToken cancellationToken,
             int width = 0, int height = 0, string negativePrompt = null)
@@ -1409,7 +1446,7 @@ namespace TensorSharp.Chat
                     lock (_imageEditLock)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
-                        var inputs = imageBytesList.ConvertAll(bytes => TensorSharp.Models.QwenImage.ImageIO.Decode(bytes, preserveAlpha: true));
+                        var inputs = imageBytesList.ConvertAll(bytes => DecodeRequestImage(bytes, "image"));
                         p.OnStep = (_, _, _) => cancellationToken.ThrowIfCancellationRequested();
                         var output = generate ? model.GenerateImage(prompt, p) : model.EditImage(prompt, inputs, p);
                         TensorSharp.Models.QwenImage.ImageIO.SavePng(outPath, output);
@@ -1449,12 +1486,23 @@ namespace TensorSharp.Chat
         internal async Task<string> ReadUploadedImagesAsync(JsonElement root, List<byte[]> images, CancellationToken ct)
         {
             var paths = new List<string>();
-            if (root.TryGetProperty("imagePaths", out var ips) && ips.ValueKind == JsonValueKind.Array)
+            if (root.TryGetProperty("imagePaths", out var ips))
+            {
+                if (ips.ValueKind != JsonValueKind.Array)
+                    return "imagePaths must be an array of uploaded file names.";
                 foreach (var el in ips.EnumerateArray())
+                {
                     if (el.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(el.GetString()))
                         paths.Add(el.GetString());
-            if (paths.Count == 0 && root.TryGetProperty("imagePath", out var ip) && ip.ValueKind == JsonValueKind.String)
+                    else return "imagePaths must contain nonempty uploaded file names.";
+                }
+            }
+            if (paths.Count == 0 && root.TryGetProperty("imagePath", out var ip))
+            {
+                if (ip.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(ip.GetString()))
+                    return "imagePath must reference a previously uploaded file.";
                 paths.Add(ip.GetString());
+            }
             if (paths.Count == 0)
                 return "imagePath (or imagePaths) must reference a previously uploaded file.";
 
@@ -1465,6 +1513,39 @@ namespace TensorSharp.Chat
                 images.Add(await File.ReadAllBytesAsync(full, ct));
             }
             return null;
+        }
+
+        private static bool HasMaskFields(JsonElement body) =>
+            body.TryGetProperty("maskPath", out _) || body.TryGetProperty("maskMode", out _)
+            || body.TryGetProperty("maskInvert", out _) || body.TryGetProperty("maskFeather", out _)
+            || body.TryGetProperty("maskCrop", out _) || body.TryGetProperty("maskCropPadding", out _);
+
+        internal static void ValidateMaskPresence(JsonElement body, bool hasMask)
+        {
+            if (!hasMask && HasMaskFields(body))
+                throw new WebUiRequestRejectedException(400, new { error = "Mask options require maskPath (JSON) or a mask file (multipart)." });
+        }
+
+        internal async Task ReadUploadedMaskAsync(JsonElement body, TensorSharp.Models.QwenImage.QwenImageParams p, CancellationToken ct)
+        {
+            bool hasMask = body.TryGetProperty("maskPath", out var maskPath);
+            ValidateMaskPresence(body, hasMask);
+            if (!hasMask) return;
+            if (maskPath.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(maskPath.GetString())
+                || !UploadFileReference.TryResolve(_options.UploadDirectory, maskPath.GetString(), out string full)
+                || !File.Exists(full))
+                throw new WebUiRequestRejectedException(400, new { error = "maskPath must reference a previously uploaded file." });
+            var info = new FileInfo(full);
+            if (info.Length == 0 || info.Length > _uploads.MaxFileBytes)
+                throw new WebUiRequestRejectedException(400, new { error = "Mask is empty or exceeds the upload size limit." });
+            p.Mask = DecodeRequestImage(await File.ReadAllBytesAsync(full, ct), "mask");
+        }
+
+        private static TensorSharp.Models.QwenImage.RgbImage DecodeRequestImage(byte[] bytes, string field)
+        {
+            try { return TensorSharp.Models.QwenImage.ImageIO.Decode(bytes, preserveAlpha: true); }
+            catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException)
+            { throw new WebUiRequestRejectedException(400, new { error = $"Cannot decode {field} image: {ex.Message}" }); }
         }
 
         // A live denoising frame surfaced from the edit worker to the stream: a progress tick
@@ -1524,7 +1605,10 @@ namespace TensorSharp.Chat
                 p = ParseImageParameters(body);
                 prompt = ParseImagePrompt(body, generate);
                 if (!generate)
+                {
                     parseError = await ReadUploadedImagesAsync(body, imageBytesList, ct);
+                    if (parseError == null) await ReadUploadedMaskAsync(body, p, ct);
+                }
             }
             catch (WebUiRequestRejectedException ex) { parseError = ex.Message; }
             catch (Exception ex) { parseError = "Bad request: " + ex.Message; }
@@ -1558,7 +1642,7 @@ namespace TensorSharp.Chat
                     // The model is not thread-safe; serialize edit requests (shared with ImageEditAsync).
                     lock (_imageEditLock)
                     {
-                        var inputs = imageBytesList.ConvertAll(bytes => TensorSharp.Models.QwenImage.ImageIO.Decode(bytes, preserveAlpha: true));
+                        var inputs = imageBytesList.ConvertAll(bytes => DecodeRequestImage(bytes, "image"));
                         ct.ThrowIfCancellationRequested();
                         p.PreviewCount = previewCount;
                         p.OnStep = (step, total, preview) =>

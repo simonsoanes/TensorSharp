@@ -201,23 +201,34 @@ public sealed class LoopbackRangeTests : IDisposable
     }
 
     [Theory]
-    [InlineData("bytes=0-1,4-5")]
-    [InlineData("bytes=0-1, 4-5")]
-    [InlineData("items=0-1")]
-    [InlineData("bytes 0-1")]
-    [InlineData("bytes=abc")]
-    [InlineData("bytes=5-3")]
-    [InlineData("bytes=-")]
-    [InlineData("bytes=")]
-    [InlineData("bytes=1-2-3")]
-    [InlineData("bytes=+1-2")]
-    [InlineData("bytes=99999999999999999999-")]
-    public async Task AHeaderThatIsNotOneByteRangeIsIgnoredAndTheWholeFileSent(string range)
+    [InlineData("bytes=0-1,4-5", false)]
+    [InlineData("bytes=0-1, 4-5", false)]
+    [InlineData("items=0-1", false)]
+    [InlineData("bytes 0-1", true)]
+    [InlineData("bytes=abc", true)]
+    [InlineData("bytes=5-3", false)]
+    [InlineData("bytes=-", true)]
+    [InlineData("bytes=", true)]
+    [InlineData("bytes=1-2-3", true)]
+    [InlineData("bytes=+1-2", true)]
+    [InlineData("bytes=99999999999999999999-", true)]
+    public async Task AHeaderThatIsNotOneByteRangeIsRejectedOrIgnored(string range, bool rejectedByHttpSys)
     {
         // Several ranges, or something that does not parse: RFC 9110 lets a server ignore
         // the header, and ASP.NET does. A unit it does not know it MUST ignore (§14.2),
         // which is the one case here the desktop gets wrong: it serves items=0-1 as bytes.
         (HttpResponseMessage reply, byte[] body) = await FetchAsync(HttpMethod.Get, "/uploads/clip.mp4", range);
+
+        // Windows HTTP.sys validates malformed Range syntax before HttpListener can
+        // dispatch the request. This tests that transport response explicitly; it
+        // does not claim the application's ignored-header branch ran on Windows.
+        if (OperatingSystem.IsWindows() && rejectedByHttpSys)
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, reply.StatusCode);
+            Assert.Null(Header(reply, "Content-Range"));
+            Assert.NotEqual(_clip, body);
+            return;
+        }
 
         Assert.Equal(HttpStatusCode.OK, reply.StatusCode);
         Assert.Null(Header(reply, "Content-Range"));

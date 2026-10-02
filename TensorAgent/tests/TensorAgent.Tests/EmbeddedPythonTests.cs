@@ -155,18 +155,18 @@ public sealed class EmbeddedPythonTests : IDisposable
 
         // Writable is exactly the work and temp roots, as real paths: the hook
         // compares against realpath(), so the literals have to be real too.
-        Assert.Contains($"        '{Real(_work)}',", source);
-        Assert.Contains($"        '{Real(_temp)}',", source);
-        Assert.Contains($"        '{Real(_readable)}',", source);
-        Assert.Contains($"        '{Real(_packages)}',", source);
+        Assert.Contains($"        {PythonBootstrap.Literal(Real(_work))},", source);
+        Assert.Contains($"        {PythonBootstrap.Literal(Real(_temp))},", source);
+        Assert.Contains($"        {PythonBootstrap.Literal(Real(_readable))},", source);
+        Assert.Contains($"        {PythonBootstrap.Literal(Real(_packages))},", source);
 
         // The read-only roots must not appear in the writable list. Take the
         // slice between the two keywords and look there.
         string writable = Between(source, "writable=[", "]");
-        Assert.Contains(Real(_work), writable);
-        Assert.Contains(Real(_temp), writable);
-        Assert.DoesNotContain(Real(_readable), writable);
-        Assert.DoesNotContain(Real(_packages), writable);
+        Assert.Contains(PythonBootstrap.Literal(Real(_work)), writable);
+        Assert.Contains(PythonBootstrap.Literal(Real(_temp)), writable);
+        Assert.DoesNotContain(PythonBootstrap.Literal(Real(_readable)), writable);
+        Assert.DoesNotContain(PythonBootstrap.Literal(Real(_packages)), writable);
     }
 
     [Fact]
@@ -180,8 +180,8 @@ public sealed class EmbeddedPythonTests : IDisposable
     public void TheSandboxHasNoPackageRootWhenTheSessionHasNone()
     {
         string source = PythonBootstrap.CreateSandboxSource(Policy(packages: false));
-        Assert.DoesNotContain(Real(_packages), source);
-        Assert.Contains(Real(_readable), source);
+        Assert.DoesNotContain(PythonBootstrap.Literal(Real(_packages)), source);
+        Assert.Contains(PythonBootstrap.Literal(Real(_readable)), source);
     }
 
     [Fact]
@@ -253,8 +253,8 @@ public sealed class EmbeddedPythonTests : IDisposable
         string source = PythonBootstrap.CreateSandboxSource(Policy(), [stdlib]);
 
         // Without this the interpreter cannot import its own standard library.
-        Assert.Contains(Real(stdlib), Between(source, "readable=[", "]"));
-        Assert.DoesNotContain(Real(stdlib), Between(source, "writable=[", "]"));
+        Assert.Contains(PythonBootstrap.Literal(Real(stdlib)), Between(source, "readable=[", "]"));
+        Assert.DoesNotContain(PythonBootstrap.Literal(Real(stdlib)), Between(source, "writable=[", "]"));
     }
 
     [Fact]
@@ -449,24 +449,24 @@ public sealed class EmbeddedPythonTests : IDisposable
         Assert.False(PythonBootstrap.IsPathAllowed(confined, "/etc/hosts", _work, forWrite: false));
     }
 
-    [Fact]
+    [SkippableFact]
     public void ASymlinkOutOfTheSandboxIsRefused()
     {
         // The reason the check resolves before it compares: this path is
         // lexically inside the work root and physically is not.
         string target = Path.Combine(_outside, "secret.txt");
         File.WriteAllText(target, "x");
-        File.CreateSymbolicLink(Path.Combine(_work, "link.txt"), target);
+        TestPlatforms.CreateFileSymlink(Path.Combine(_work, "link.txt"), target);
 
         var confined = new ConfinedPaths(Policy());
         Assert.False(PythonBootstrap.IsPathAllowed(confined, "link.txt", _work, forWrite: false));
         Assert.False(PythonBootstrap.IsPathAllowed(confined, "link.txt", _work, forWrite: true));
     }
 
-    [Fact]
+    [SkippableFact]
     public void ADirectorySymlinkOutOfTheSandboxIsRefused()
     {
-        Directory.CreateSymbolicLink(Path.Combine(_work, "escape"), _outside);
+        TestPlatforms.CreateDirectorySymlink(Path.Combine(_work, "escape"), _outside);
         var confined = new ConfinedPaths(Policy());
         Assert.False(PythonBootstrap.IsPathAllowed(confined, "escape/new.txt", _work, forWrite: true));
     }
@@ -1215,12 +1215,12 @@ public sealed class EmbeddedPythonTests : IDisposable
         Assert.Contains("points outside", refusal!);
     }
 
-    [Fact]
+    [SkippableFact]
     public void AWheelMemberThatWouldLandThroughASymlinkIsRefused()
     {
         // The archive name is innocent; a symlink already in the target is what
         // moves it. Only re-resolving each member catches this.
-        Directory.CreateSymbolicLink(Path.Combine(_packages, "rich"), _outside);
+        TestPlatforms.CreateDirectorySymlink(Path.Combine(_packages, "rich"), _outside);
         using var archive = Archive(("rich/__init__.py", "not ok"));
 
         Assert.False(WheelInstaller.TryExtract(archive, _packages, Confined(_packages), out _, out string? refusal));

@@ -1022,6 +1022,15 @@ public sealed class LoopbackServer : IDisposable
         // the bundle so it can never drift from the code that expects it.
         if (relative == CompanionScriptName)
             return LoopbackResponse.Text(CompanionScript.Value, contentType: "text/javascript; charset=utf-8");
+        if (relative is "mask-editor.js" or "mask-editor.css")
+        {
+            using Stream stream = typeof(LoopbackServer).Assembly
+                .GetManifestResourceStream("TensorAgent.Core.WebUi." + relative)
+                ?? throw new InvalidOperationException("Missing shared selection editor asset: " + relative);
+            using var reader = new StreamReader(stream);
+            return LoopbackResponse.Text(reader.ReadToEnd(), contentType: relative.EndsWith(".css", StringComparison.Ordinal)
+                ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8");
+        }
 
         if (!File.Exists(full))
             return null;
@@ -1068,7 +1077,8 @@ public sealed class LoopbackServer : IDisposable
     private static byte[] WithCompanionScript(string indexPath)
     {
         byte[] html = File.ReadAllBytes(indexPath);
-        byte[] tag = Encoding.UTF8.GetBytes("\n<script src=\"/" + CompanionScriptName + "\"></script>\n");
+        byte[] tag = Encoding.UTF8.GetBytes("\n<link rel=\"stylesheet\" href=\"/mask-editor.css\">\n"
+            + "<script src=\"/mask-editor.js\"></script>\n<script src=\"/" + CompanionScriptName + "\"></script>\n");
         ReadOnlySpan<byte> close = "</body>"u8;
 
         int at = html.AsSpan().LastIndexOf(close);

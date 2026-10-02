@@ -215,6 +215,18 @@ public sealed class DesktopAgentHostTests : IDisposable
     }
 
     [SkippableFact]
+    public void WindowsSelfTestDoesNotCountUnavailableSandboxProbesAsPassing()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "Exercises Windows native-process diagnostics.");
+        AgentAppHost host = CreateDesktopAppHost();
+        SelfTestResult check = Assert.Single(host.SelfTest());
+        Assert.True(check.Skipped);
+        Assert.False(check.Ok);
+        Assert.StartsWith("SKIP", check.ToString());
+        Assert.Contains("unavailable on Windows", check.Detail, StringComparison.Ordinal);
+    }
+
+    [SkippableFact]
     public void TheSelfTestProbesWhatADesktopRunsAndItsEscapeProbeIsRefused()
     {
         AgentAppHost host = CreateDesktopAppHost();

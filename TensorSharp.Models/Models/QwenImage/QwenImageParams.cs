@@ -8,6 +8,15 @@ using System;
 
 namespace TensorSharp.Models.QwenImage
 {
+    /// <summary>Interpretation of the explicit local editing mask.</summary>
+    public enum QwenImageMaskMode
+    {
+        /// <summary>RGB luminance: white edits, black preserves. Alpha is ignored.</summary>
+        Grayscale,
+        /// <summary>Inverse alpha: transparent edits, opaque preserves. RGB is ignored.</summary>
+        Alpha
+    }
+
     /// <summary>
     /// Qwen-Image-2.1 sampling parameters.
     /// Zero-valued step/CFG settings select the model's defaults.
@@ -49,6 +58,32 @@ namespace TensorSharp.Models.QwenImage
         public int Height { get; set; } = 0;
 
         /// <summary>
+        /// Optional mask matching the first reference image's exact dimensions. Masked edits
+        /// return that image's original dimensions and preserve unselected pixels exactly.
+        /// Width/Height and TargetArea control sampling resolution, before restoring the canvas.
+        /// </summary>
+        public RgbImage Mask { get; set; }
+
+        /// <summary>Explicit mask interpretation; default is white edits, black preserves.</summary>
+        public QwenImageMaskMode MaskMode { get; set; } = QwenImageMaskMode.Grayscale;
+
+        /// <summary>Invert the selection after interpreting its grayscale or alpha channel.</summary>
+        public bool MaskInvert { get; set; } = false;
+
+        /// <summary>Inward box feather radius in source pixels (0..1024). Never expands the selection.</summary>
+        public int MaskFeather { get; set; } = 0;
+
+        /// <summary>
+        /// Sample only the selection bounds plus context, reducing target and first-reference tokens.
+        /// Sampling resolution scales with crop area; additional references remain available.
+        /// Final output is composited back onto the original canvas. Default false retains full context.
+        /// </summary>
+        public bool MaskCrop { get; set; } = false;
+
+        /// <summary>Context padding around a cropped selection, in source pixels (0..16384).</summary>
+        public int MaskCropPadding { get; set; } = 64;
+
+        /// <summary>
         /// Optional per-step progress callback for live UI feedback during the denoise loop.
         /// Invoked once after every step as <c>(step, totalSteps, preview)</c> where <c>step</c> is
         /// 1-based and <c>preview</c> is a decoded RGB snapshot of the current (partially denoised)
@@ -60,6 +95,7 @@ namespace TensorSharp.Models.QwenImage
         /// How many decoded image previews to emit across the denoise loop (0 = progress ticks only,
         /// no decode). Previews are spaced evenly and decoded at reduced resolution to keep the
         /// per-preview VAE cost (and VRAM) small relative to the denoise itself.
+        /// Masked previews are composited back to the original canvas with exact protected pixels.
         /// </summary>
         public int PreviewCount { get; set; } = 0;
     }

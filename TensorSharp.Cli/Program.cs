@@ -303,6 +303,7 @@ namespace TensorSharp.Cli
             string outputFile = null;
             string imagePath = null;
             var imagePathList = new List<string>();   // every --image in order (multi-image edit)
+            var imageMask = new ImageMaskCliOptions();
             string audioPath = null;
             string videoPath = null;
             string mmProjPath = null;
@@ -400,6 +401,12 @@ namespace TensorSharp.Cli
                     case "--input-jsonl": inputJsonl = args[++i]; break;
                     case "--output": outputFile = args[++i]; break;
                     case "--image": imagePath = args[++i]; imagePathList.Add(imagePath); break;
+                    case "--mask":
+                    case "--mask-mode":
+                    case "--mask-invert":
+                    case "--mask-feather":
+                    case "--mask-crop":
+                    case "--mask-crop-padding": imageMask.Read(args, ref i); break;
                     case "--prompt": editPrompt = args[++i]; break;
                     case "--cfg": cfgScale = float.Parse(args[++i]); cfgScaleSet = true; break;
                     case "--qwen-image-vae": qwenImageVaePath = args[++i]; break;
@@ -549,6 +556,7 @@ namespace TensorSharp.Cli
             var parallelism = TensorSharp.Distributed.ModelParallelismOptions.Parse(parallelismArgs.ToArray());
             parallelism.ApplyEnvironment();
             int tpDegree = parallelism.TpDegree;
+            imageMask.Validate(imagePathList.Count);
 
             // `--mmproj none` is the server's spelling for "no projector", and a config
             // file's keys ARE flags: without this the CLI handed "none" to LoadProjectors
@@ -894,6 +902,7 @@ namespace TensorSharp.Cli
                 return;
             }
             using var model = createdModel;
+            imageMask.ValidateModel(model is TensorSharp.Models.QwenImage.QwenImageModel);
 
             // Speculator weights that ship as their own file (Gemma 4's
             // gemma4-assistant draft head, named with --draft-model) attach
@@ -929,7 +938,7 @@ namespace TensorSharp.Cli
                     return;
                 }
                 string outPath = outputFile ?? (imagePathList.Count == 0 ? "generated.png" : "edited.png");
-                RunImageEdit(qwenImageModel, imagePathList, prompt, outPath, diffusionStepsSet ? diffusionSteps : 0, cfgScaleSet ? cfgScale : 0f, diffusionSeed, imageWidth, imageHeight, negativePrompt);
+                RunImageEdit(qwenImageModel, imagePathList, prompt, outPath, diffusionStepsSet ? diffusionSteps : 0, cfgScaleSet ? cfgScale : 0f, diffusionSeed, imageWidth, imageHeight, negativePrompt, imageMask);
                 return;
             }
 
@@ -2107,15 +2116,12 @@ namespace TensorSharp.Cli
 
         static void RunImageEdit(TensorSharp.Models.QwenImage.QwenImageModel model,
             IReadOnlyList<string> imagePaths, string prompt, string outputPath, int steps, float cfgScale, int seed,
-            int width = 0, int height = 0, string negativePrompt = null)
+            int width = 0, int height = 0, string negativePrompt = null, ImageMaskCliOptions imageMask = null)
         {
             foreach (var path in imagePaths)
             {
                 if (!File.Exists(path))
-                {
-                    Console.Error.WriteLine($"Input image not found: {path}");
-                    return;
-                }
+                    throw new ArgumentException($"Input image not found: {path}");
             }
             Console.WriteLine("=== Qwen-Image-2.1 ===");
             for (int i = 0; i < imagePaths.Count; i++)
@@ -2135,6 +2141,9 @@ namespace TensorSharp.Cli
                 Height = height,
                 NegativePrompt = negativePrompt ?? " ",
             };
+            imageMask?.Apply(p);
+            if (p.Mask != null)
+                Console.WriteLine($"  mask   : {imageMask.Path} ({p.MaskMode}, feather={p.MaskFeather}, crop={p.MaskCrop})");
             if (width > 0 && height > 0)
                 Console.WriteLine($"  explicit output size {width}x{height}");
             var sw = Stopwatch.StartNew();

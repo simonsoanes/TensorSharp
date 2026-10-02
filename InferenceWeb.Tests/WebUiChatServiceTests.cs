@@ -1047,6 +1047,20 @@ public class WebUiChatServiceTests : IDisposable
         Assert.Single(frames);
         Assert.Equal("""{"done":true,"error":"The loaded model is not a Qwen-Image-2.1 model."}""", JsonSerializer.Serialize(frames[0]));
     }
+
+    [Fact]
+    public async Task MaskedImageEdit_UnsupportedModelRejectsBeforeReadingFiles()
+    {
+        Fixture f = Build();
+        var request = Json("""{"imagePath":"missing.png","maskPath":"missing-mask.png","prompt":"paint it red"}""");
+        var error = await Assert.ThrowsAsync<WebUiRequestRejectedException>(() => f.Service.ImageEditAsync(request, CancellationToken.None));
+        Assert.Equal(400, error.StatusCode);
+        Assert.Contains("Qwen-Image-2.1", error.Message);
+        var frames = new List<object>();
+        await foreach (var frame in f.Service.ImageEditStreamAsync(request, CancellationToken.None)) frames.Add(frame);
+        Assert.Single(frames);
+        Assert.Contains("Qwen-Image-2.1", JsonSerializer.Serialize(frames[0]));
+    }
     [Fact]
     public async Task ImageGenerate_WithoutTheModel_RefusesPlainAndStreamingRequests()
     {

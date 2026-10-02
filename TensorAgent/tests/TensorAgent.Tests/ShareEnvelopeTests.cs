@@ -106,28 +106,32 @@ public sealed class ShareEnvelopeTests : IDisposable
     [Fact]
     public async Task ManyConcurrentReadersProduceExactlyOneIntactClaim()
     {
-        ShareEnvelopeStore store = Store();
-        ShareEnvelopeWriter writer = store.BeginWrite();
-        (string absolute, string relative) = writer.ReserveFile("race.txt");
-        File.WriteAllText(absolute, "the bytes must survive the race");
-        string id = writer.Commit(new SharePayload
+        // The Windows rename race is intermittent; exercise independent envelopes
+        // repeatedly, with independent store instances as separate importers use.
+        for (int iteration = 0; iteration < 20; iteration++)
         {
-            Items = { ShareItem.ForFile(relative, "race.txt", new FileInfo(absolute).Length) },
-        });
+            ShareEnvelopeWriter writer = Store().BeginWrite();
+            (string absolute, string relative) = writer.ReserveFile("race.txt");
+            File.WriteAllText(absolute, "the bytes must survive the race");
+            string id = writer.Commit(new SharePayload
+            {
+                Items = { ShareItem.ForFile(relative, "race.txt", new FileInfo(absolute).Length) },
+            });
 
-        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        Task<ClaimedShare?>[] readers = Enumerable.Range(0, 32).Select(readerIndex => Task.Run(async () =>
-        {
-            await start.Task;
-            return new ShareEnvelopeStore(_root).TryClaim(id, out _);
-        })).ToArray();
+            var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Task<ClaimedShare?>[] readers = Enumerable.Range(0, 32).Select(readerIndex => Task.Run(async () =>
+            {
+                await start.Task;
+                return new ShareEnvelopeStore(_root).TryClaim(id, out _);
+            })).ToArray();
 
-        start.SetResult();
-        ClaimedShare?[] results = await Task.WhenAll(readers);
-        ClaimedShare claim = Assert.Single(results.OfType<ClaimedShare>());
-        string? resolved = ShareEnvelopeStore.ResolveFile(claim.Directory, claim.Payload.Items[0]);
-        Assert.NotNull(resolved);
-        Assert.Equal("the bytes must survive the race", File.ReadAllText(resolved!));
+            start.SetResult();
+            ClaimedShare?[] results = await Task.WhenAll(readers);
+            ClaimedShare claim = Assert.Single(results.OfType<ClaimedShare>());
+            string? resolved = ShareEnvelopeStore.ResolveFile(claim.Directory, claim.Payload.Items[0]);
+            Assert.NotNull(resolved);
+            Assert.Equal("the bytes must survive the race", File.ReadAllText(resolved!));
+        }
     }
 
     [Fact]
@@ -495,7 +499,7 @@ public sealed class ShareEnvelopeHousekeepingTests : IDisposable
         try { Directory.Delete(_root, true); } catch (IOException) { }
     }
 
-    [Fact]
+    [SkippableFact]
     public void AFileInsideTheEnvelopeThatIsALinkOutOfItIsRefused()
     {
         // Path.GetFullPath resolves "..", not symlinks, while every reader afterwards
@@ -507,7 +511,7 @@ public sealed class ShareEnvelopeHousekeepingTests : IDisposable
         string envelope = Path.Combine(_root, "envelope");
         Directory.CreateDirectory(Path.Combine(envelope, "files"));
         string link = Path.Combine(envelope, "files", "photo.png");
-        File.CreateSymbolicLink(link, outside);
+        TestPlatforms.CreateFileSymlink(link, outside);
 
         var item = new ShareItem { Kind = ShareItemKinds.File, File = "files/photo.png", FileName = "photo.png" };
         Assert.Null(ShareEnvelopeStore.ResolveFile(envelope, item));

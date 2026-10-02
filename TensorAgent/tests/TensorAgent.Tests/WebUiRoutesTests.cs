@@ -472,7 +472,7 @@ public sealed class WebUiRoutesTests : IDisposable
     // ---- the page itself -------------------------------------------------------------
 
     [Fact]
-    public async Task TheServersOwnPageIsServedUnchangedApartFromOneAppendedScriptTag()
+    public async Task TheServersOwnPageIsServedUnchangedApartFromAppendedCompanionAssets()
     {
         string root = Path.Combine(_root, "webui");
         Directory.CreateDirectory(root);
@@ -487,7 +487,8 @@ public sealed class WebUiRoutesTests : IDisposable
         // and writing it back would drop a byte-order mark and normalise the
         // encoding, and the served file would no longer be the Server's — which is
         // the identity that makes a second copy of index.html unnecessary.
-        const string tag = "\n<script src=\"/tensoragent.js\"></script>\n";
+        const string tag = "\n<link rel=\"stylesheet\" href=\"/mask-editor.css\">\n"
+            + "<script src=\"/mask-editor.js\"></script>\n<script src=\"/tensoragent.js\"></script>\n";
         string text = Encoding.UTF8.GetString(served);
         Assert.Contains(tag, text, StringComparison.Ordinal);
         Assert.Equal(source, Encoding.UTF8.GetBytes(text.Replace(tag, string.Empty)));
@@ -520,7 +521,20 @@ public sealed class WebUiRoutesTests : IDisposable
         Assert.DoesNotContain("/api/tensoragent/", script, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Theory]
+    [InlineData("mask-editor.js", "text/javascript", "window.TensorSharpMaskEditor")]
+    [InlineData("mask-editor.css", "text/css", ".ts-mask-modal")]
+    public async Task TheSelectionEditorShipsThroughTheSameLoopbackHost(string asset, string contentType, string marker)
+    {
+        _server.StaticRoot = Path.Combine(_root, "webui");
+        Directory.CreateDirectory(_server.StaticRoot);
+        using HttpResponseMessage response = await _client!.GetAsync("/" + asset);
+        Assert.True(response.IsSuccessStatusCode);
+        Assert.Equal(contentType, response.Content.Headers.ContentType?.MediaType);
+        Assert.Contains(marker, await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [WebJavaScriptFact]
     public async Task TheCompanionScriptIsValidJavaScriptAndCallsOnlyRoutesThatExist()
     {
         // It is injected into a page in a WebView, where a syntax error is invisible:
@@ -531,14 +545,9 @@ public sealed class WebUiRoutesTests : IDisposable
         Directory.CreateDirectory(_server.StaticRoot);
         string script = await _client!.GetStringAsync("/tensoragent.js");
 
-        // JavaScriptCore is a system framework on macOS and iOS alike, so this runs
-        // wherever the tests do; if it ever does not, say so rather than pass.
-        var engine = new TensorAgent.Core.JavaScript.JavaScriptCoreEngine();
-        Assert.True(engine.IsAvailable, engine.UnavailableReason ?? "no JavaScript engine");
-
         string probe = Path.Combine(_root, "probe.js");
         await File.WriteAllTextAsync(probe, script);
-        TensorAgent.Core.Sandbox.SyntaxCheckResult syntax = await engine.CheckSyntaxAsync(probe, CancellationToken.None);
+        TensorAgent.Core.Sandbox.SyntaxCheckResult syntax = await WebJavaScript.CheckSyntaxAsync(probe);
         Assert.True(syntax.Ok, syntax.Message);
 
         // Every route it fetches must be one this server maps, or the feature it

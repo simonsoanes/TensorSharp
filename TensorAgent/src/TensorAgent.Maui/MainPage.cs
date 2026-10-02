@@ -1245,8 +1245,11 @@ public sealed class MainPage : ContentPage
         + "press('pointerdown');setTimeout(function(){press('pointerup');setTimeout(function(){"
         + "add('a-tap-still-types',!document.body.classList.contains('voice'),'a short press switched to voice mode');"
         + "press('pointerdown');setTimeout(function(){"
-        + "add('holding-the-box-gives-hold-to-talk',"
-        + "document.body.classList.contains('voice')&&shown(hold)&&!shown(wrap),"
+        + "var canDictate=window.TensorAgent.canDictate();"
+        + "add('native-handshake',JSON.parse(window.TensorAgent.diagnostics()).native,'the app did not announce its capabilities');"
+        + "add(canDictate?'holding-the-box-gives-hold-to-talk':'unsupported-dictation-keeps-the-box',"
+        + "canDictate?(document.body.classList.contains('voice')&&shown(hold)&&!shown(wrap))"
+        + ":(!document.body.classList.contains('voice')&&!shown(hold)&&shown(wrap)),"
         + "'voice='+document.body.classList.contains('voice')+' hold='+shown(hold)+' box='+shown(wrap));"
         + "back.click();setTimeout(function(){"
         + "add('the-keyboard-button-returns',!document.body.classList.contains('voice')&&shown(wrap),'still in voice mode');"
@@ -1317,7 +1320,7 @@ public sealed class MainPage : ContentPage
 
             // Guarded in JS as well: on the very first appearance the page may not have
             // loaded yet, and there is nothing to refresh until it has.
-            await Tell("nativeReady");
+            await AnnounceNativeReadyAsync();
             await Tell("refreshModel");
             // Settings is a native page and this one outlives it, so a choice made
             // there — "Show reasoning by default", the dictation language — has to be
@@ -1376,6 +1379,16 @@ public sealed class MainPage : ContentPage
     /// <summary>Call one method on the page's bridge, if the page has one yet.</summary>
     private Task<string?> Tell(string method) => _webView.EvaluateJavaScriptAsync(
         $"window.TensorAgent && window.TensorAgent.{method} ? window.TensorAgent.{method}() : false");
+
+    private Task<string?> AnnounceNativeReadyAsync() => CallBridgeAsync("nativeReady", new
+    {
+        dictation = Services.Dictation.IsSupported,
+#if WINDOWS
+        composerHint = "Message… or press Windows+H to dictate",
+#else
+        composerHint = "Message…",
+#endif
+    });
 
     /// <summary>
     /// The loopback server had to move to another port (see
@@ -1734,15 +1747,27 @@ public sealed class MainPage : ContentPage
     /// </summary>
     private async Task AttachAsync(MediaSource source)
     {
-        FileResult? picked = source switch
+        FileResult? picked;
+        try
         {
-            MediaSource.Library => await MediaPicker.Default.PickPhotoAsync(),
-            MediaSource.Camera when MediaPicker.Default.IsCaptureSupported => await MediaPicker.Default.CapturePhotoAsync(),
-            MediaSource.Camera => throw new NotSupportedException("This device has no camera available to the app."),
-            MediaSource.Video => await MediaPicker.Default.PickVideoAsync(),
-            MediaSource.File => await FilePicker.Default.PickAsync(),
-            _ => null,
-        };
+            picked = source switch
+            {
+                MediaSource.Library => await MediaPicker.Default.PickPhotoAsync(),
+                MediaSource.Camera when MediaPicker.Default.IsCaptureSupported => await MediaPicker.Default.CapturePhotoAsync(),
+                MediaSource.Camera => throw new NotSupportedException("This device has no camera available to the app."),
+                MediaSource.Video => await MediaPicker.Default.PickVideoAsync(),
+                MediaSource.File => await FilePicker.Default.PickAsync(),
+                _ => null,
+            };
+        }
+        catch (Exception ex)
+        {
+            // Picker availability and permission errors happen before there is a file
+            // to upload. This callback runs through an async UI event, so letting the
+            // exception escape can close the app on a desktop without a camera.
+            await Notice("Could not open the attachment picker: " + ex.Message);
+            return;
+        }
         if (picked is null)
             return;
 
@@ -2026,7 +2051,7 @@ public sealed class MainPage : ContentPage
                 {
                     try
                     {
-                        await Tell("nativeReady");
+                        await AnnounceNativeReadyAsync();
                         await Tell("takeShare");
                     }
                     catch (Exception ex) { Console.WriteLine("TensorAgent: nativeReady failed: " + ex.Message); }

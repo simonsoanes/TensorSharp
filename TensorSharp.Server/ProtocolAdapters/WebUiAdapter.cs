@@ -189,7 +189,9 @@ public sealed class WebUiAdapter
     /// <c>POST /api/image-edit</c> — multipart form with one or more <c>image</c> files and a
     /// <c>prompt</c> (plus optional <c>steps</c>, <c>cfg</c>, <c>seed</c>), or the same JSON
     /// the Web UI sends (<c>imagePaths</c> from <c>/api/upload</c>). Returns a downloadable
-    /// URL to the generated PNG.
+    /// URL to the generated PNG. An optional <c>mask</c> file (JSON: <c>maskPath</c>)
+    /// selects editable pixels on the first image; <c>maskMode</c> is grayscale (default,
+    /// white edits) or alpha (transparent edits).
     /// </summary>
     public async Task<IResult> ImageEditAsync(HttpRequest req)
     {
@@ -201,45 +203,84 @@ public sealed class WebUiAdapter
 
             if (req.HasFormContentType)
             {
-                // Multipart: image file(s) + fields (direct API use). All parts named 'image'
-                // (or every file part when none is) are taken in order.
-                var form = await req.ReadFormAsync().ConfigureAwait(false);
-                var files = form.Files.GetFiles("image");
-                var fileList = files.Count > 0 ? files : form.Files;
-                if (fileList.Count == 0)
-                    return Results.Json(new { error = "No image uploaded (field 'image')." }, statusCode: 400);
-                string prompt = form["prompt"].ToString();
-                int steps = int.TryParse(form["steps"], out int s) ? s : 0;   // 0 = auto (40 for Qwen-Image-2.1)
-                float cfg = float.TryParse(form["cfg"], out float c) ? c : 0f;  // 0 = auto (CFG 1.0 for Qwen-Image-2.1)
-                long seed = long.TryParse(form["seed"], out long sd) ? sd : 0;
-                long targetArea = long.TryParse(form["targetArea"], out long taf) && taf > 0 ? taf : 0;
-                int width = int.TryParse(form["width"], out int wi) ? wi : 0;
-                int height = int.TryParse(form["height"], out int he) ? he : 0;
-                string negativePrompt = form.ContainsKey("negativePrompt") ? form["negativePrompt"].ToString() : " ";
+                var form = await req.ReadFormAsync(req.HttpContext.RequestAborted).ConfigureAwait(false);
+                var edit = ParseImageEditForm(form, _uploads.MaxFileBytes);
                 var imageBytesList = new List<byte[]>();
-                foreach (var file in fileList)
-                {
-                    using var ms = new MemoryStream();
-                    await file.CopyToAsync(ms).ConfigureAwait(false);
-                    imageBytesList.Add(ms.ToArray());
-                }
+                foreach (var file in edit.Images)
+                    imageBytesList.Add(await ReadImagePartAsync(file, req.HttpContext.RequestAborted).ConfigureAwait(false));
+                byte[] mask = edit.Mask == null ? null
+                    : await ReadImagePartAsync(edit.Mask, req.HttpContext.RequestAborted).ConfigureAwait(false);
                 return Results.Json(await _service.ImageEditAsync(
-                    prompt, steps, cfg, seed, targetArea, imageBytesList, req.HttpContext.RequestAborted, width, height, negativePrompt).ConfigureAwait(false));
+                    edit.Parameters, imageBytesList, mask, req.HttpContext.RequestAborted).ConfigureAwait(false));
             }
 
             // JSON: { imagePaths[] or imagePath (server paths from /api/upload), prompt, steps, cfg, seed } (Web UI).
-            using var body = await JsonDocument.ParseAsync(req.Body).ConfigureAwait(false);
+            using var body = await JsonDocument.ParseAsync(req.Body, cancellationToken: req.HttpContext.RequestAborted).ConfigureAwait(false);
             return Results.Json(await _service.ImageEditAsync(body.RootElement, req.HttpContext.RequestAborted).ConfigureAwait(false));
         }
         catch (WebUiRequestRejectedException ex)
         {
             return Rejected(ex);
         }
+        catch (JsonException ex) { return Results.Json(new { error = "Bad request: " + ex.Message }, statusCode: 400); }
+        catch (InvalidDataException) { return Results.Json(new { error = "Invalid multipart form data or upload exceeds the request size limit." }, statusCode: 400); }
+        catch (BadHttpRequestException ex) { return Results.Json(new { error = "Invalid image edit request." }, statusCode: ex.StatusCode); }
+    }
+
+    internal static (JsonElement Parameters, IReadOnlyList<IFormFile> Images, IFormFile Mask) ParseImageEditForm(
+        IFormCollection form, long maxFileBytes)
+    {
+        var masks = form.Files.GetFiles("mask");
+        if (masks.Count > 1)
+            throw new WebUiRequestRejectedException(400, new { error = "Only one mask file is allowed; it applies to the first image." });
+        var images = form.Files.Where(f => f.Name is "image" or "image[]").ToArray();
+        // Retain legacy clients' arbitrary image field names, but a mask is never a reference image.
+        if (images.Length == 0) images = form.Files.Where(f => f.Name != "mask").ToArray();
+        if (images.Length == 0)
+            throw new WebUiRequestRejectedException(400, new { error = "No image uploaded (field 'image')." });
+        foreach (var file in images.Concat(masks))
+            if (file.Length == 0 || file.Length > maxFileBytes)
+                throw new WebUiRequestRejectedException(file.Length == 0 ? 400 : 413,
+                    new { error = "Image or mask is empty or exceeds the upload size limit." });
+        var fields = new Dictionary<string, object>();
+        foreach (string name in new[] { "prompt", "negativePrompt", "maskMode" })
+            if (form.TryGetValue(name, out var values))
+            {
+                if (values.Count != 1) throw new WebUiRequestRejectedException(400, new { error = $"{name} must have one value." });
+                fields[name] = values[0];
+            }
+        foreach (string name in new[] { "steps", "cfg", "seed", "targetArea", "width", "height", "maskInvert", "maskFeather", "maskCrop", "maskCropPadding" })
+            if (form.TryGetValue(name, out var values))
+            {
+                if (values.Count != 1) throw new WebUiRequestRejectedException(400, new { error = $"{name} must have one value." });
+                try
+                {
+                    using var value = JsonDocument.Parse(values[0] ?? "");
+                    fields[name] = value.RootElement.Clone();
+                }
+                catch (JsonException) { throw new WebUiRequestRejectedException(400, new { error = $"Invalid {name}. Use JSON numbers or true/false for boolean fields." }); }
+            }
+        if (form.ContainsKey("mask") || form.ContainsKey("maskPath"))
+            throw new WebUiRequestRejectedException(400, new { error = "Upload mask as a file part named 'mask'." });
+        JsonElement parameters = JsonSerializer.SerializeToElement(fields);
+        WebUiChatService.ParseImageParameters(parameters);
+        WebUiChatService.ValidateMaskPresence(parameters, masks.Count == 1);
+        return (parameters, images, masks.SingleOrDefault());
+    }
+
+    private static async Task<byte[]> ReadImagePartAsync(IFormFile file, CancellationToken ct)
+    {
+        using var stream = new MemoryStream();
+        await file.CopyToAsync(stream, ct).ConfigureAwait(false);
+        return stream.ToArray();
     }
 
     /// <summary>Test seam kept on the adapter: the upload-root confinement of image references lives in the service.</summary>
     internal Task<string> ReadUploadedImagesAsync(JsonElement root, List<byte[]> images, CancellationToken ct) =>
         _service.ReadUploadedImagesAsync(root, images, ct);
+
+    internal Task ReadUploadedMaskAsync(JsonElement root, TensorSharp.Models.QwenImage.QwenImageParams p, CancellationToken ct) =>
+        _service.ReadUploadedMaskAsync(root, p, ct);
 
     /// <summary>
     /// <c>POST /api/image-edit/stream</c> — same JSON body as <see cref="ImageEditAsync"/> but

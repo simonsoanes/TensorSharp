@@ -198,6 +198,110 @@ run this diffusion model. Existing `/api/image-edit` requests still require
 at least one reference; generation has its own endpoint.
 Previews decode the estimated clean latent from the current flow prediction.
 
+## Precise local editing with a mask
+
+Supply a mask at the first input image's exact dimensions to edit a selected
+region. **White edits; black preserves** by default. Gray values blend the edit
+with the source. Transparent masks are also supported with `maskMode: "alpha"`
+or `--mask-mode alpha`: transparent pixels edit, opaque pixels preserve. The
+source image's transparency remains separate from the selection mask.
+
+The output retains the first input's original dimensions and its decoded RGB and
+alpha values at every unselected pixel. The pipeline constrains protected latents during
+denoising and composites the generated region onto the original source at the
+end. Additional input images remain references. An empty selection returns the
+source without running diffusion. A full selection edits the entire canvas.
+
+```bash
+dotnet run --project TensorSharp.Cli -c Release --no-build -- \
+  --config config/qwen-image-2.1.json \
+  --image photo.png --mask selection.png --mask-mode grayscale \
+  --prompt 'Change the selected vase to red ceramic' \
+  --mask-feather 8 --mask-crop --mask-crop-padding 96 \
+  --width 1024 --height 1024 --diffusion-seed 42 --output edited.png
+```
+
+`--mask-feather` softens edges inward in source pixels (0–1024, default 0), so
+unselected pixels stay protected. `--mask-invert` reverses the selection.
+`--mask-crop` processes the selected region with surrounding context, then places
+it back on the original canvas. `--mask-crop-padding` sets that context in source
+pixels (0–16384, default 64). Cropping is optional; small regions can use a smaller
+internal `--width`/`--height` to reduce inference work. These set the nominal
+full-canvas sampling resolution; crop mode scales it to the selected crop's share
+of the canvas and rounds up to the 32-pixel grid. The saved image still has the
+source dimensions. The quality and speed tradeoff depends on the selection,
+context, internal resolution and sampling steps.
+
+Multipart API:
+
+```bash
+curl --fail-with-body http://127.0.0.1:5000/api/image-edit \
+  -F 'image=@photo.png' -F 'mask=@selection.png' \
+  -F 'maskMode=grayscale' -F 'maskFeather=8' \
+  -F 'maskCrop=true' -F 'maskCropPadding=96' \
+  -F 'prompt=Change the selected vase to red ceramic' \
+  -F 'width=1024' -F 'height=1024' -F 'seed=42'
+```
+
+For JSON and SSE, first upload both files through `/api/upload`, then send their
+returned server filenames:
+
+```json
+{
+  "imagePaths": ["uploaded-photo.png"],
+  "maskPath": "uploaded-selection.png",
+  "maskMode": "grayscale",
+  "maskInvert": false,
+  "maskFeather": 8,
+  "maskCrop": true,
+  "maskCropPadding": 96,
+  "prompt": "Change the selected vase to red ceramic",
+  "width": 1024,
+  "height": 1024,
+  "seed": 42
+}
+```
+
+The same fields reach `/api/image-edit` and `/api/image-edit/stream`, including
+TensorAgent's shared image-edit service. Mask references must stay within the
+upload directory. A mask requires an input image and Qwen-Image-2.1; mismatched
+dimensions, unsupported mask modes, malformed numeric fields and multiple
+multipart masks are rejected before inference. Mask options without a mask are
+also rejected. Streaming reports request errors in its terminal `{done,error}`
+frame, as for other image-edit failures.
+
+In Server Chat and TensorAgent (desktop and mobile), attach the image and choose
+**Select area** on the first photo. Paint or erase the region, zoom and pan for
+details, then choose **Use selection** and describe the change. Undo/redo and
+inversion operate on the selection. **Edit again** restores the original image,
+selection and prompt; the comparison button switches between original and result.
+TensorAgent also saves the selection with the conversation. Selection masks are
+uploaded separately from reference images. Every decoded SSE preview includes
+the protected source pixels, just like the final image.
+
+The mask is enforced by TensorSharp's sampling and compositing code; it does not
+add an annotation image or a dedicated mask channel to Qwen's conditioning.
+Precise preservation outside the selection does not guarantee that the model
+will follow every instruction inside it. Crop mode can help isolate one object,
+but also removes surrounding context. Keep it disabled when that context matters.
+
+Reusable validation tools:
+
+- `eng/validation/QwenImageMaskBench`: synthetic preparation, latent reinjection
+  and compositing timings, allocation checks and scalar parity, without weights.
+- `eng/validation/qwen-image21-mask-bench.py`: real CLI or HTTP/SSE runs with
+  pixel preservation checks, crop comparisons and explicit measurement limits.
+- `eng/validation/validate-image-mask-editor.py`: desktop and touch-emulated
+  browser interaction, exported mask geometry and exact undo/redo regression checks.
+- `eng/validation/validate-image-mask-live.py`: real Server Chat upload, selection,
+  inference, result and reuse, plus multipart/error handling checks.
+- `eng/validation/tensoragent-mask-bench.py`: real TensorAgent host chat workflow.
+
+Run each tool with `--help` (the C# benchmark documents its arguments in
+`Program.cs`). Reports, logs and screenshots belong in ignored `docs/validation/`
+or `artifacts/`. Browser touch emulation does not establish native phone behavior;
+CPU mask microbenchmarks do not measure full model inference or GPU speedups.
+
 On the GGML backends the 2.1 diffusion transformer runs a complete GGML graph with
 resident quantized weights; on `cpu` it runs a managed forward over the same
 file-mapped weights. There is no weight-streaming mode on either. Start with smaller

@@ -114,6 +114,18 @@ picture stays in the saved chat. The app asks for 1024x1024 (an edit keeps the p
 shape at the same area) at the model's own 40 steps, rather than its native 2048x2048,
 which has four times the image tokens.
 
+For a local edit, attach the source photo, choose **Select area**, and paint the region
+to change. The shared desktop and mobile editor supports mouse, touch and stylus,
+brush and eraser, undo/redo, invert, pan and zoom. Pink marks editable pixels; the
+exported grayscale mask uses white for edits and black for protected pixels. Edge
+softness fades inward, so it never expands the selected area. **Process selected
+region only** reduces model work for small selections, with less surrounding context.
+The result keeps the source dimensions and exact protected RGBA pixels. Additional
+photos are references; the selection belongs to the first photo. **Compare original**
+toggles the result, and **Edit again** restores the source, selection and instruction.
+Selections are saved with the conversation. The browser editor accepts images up to
+16 megapixels and 8192 pixels per side; larger images produce an explicit error.
+
 **Videos.** With MiniMax-H3 loaded, a message describes a short clip, and an attached
 photo is its first frame (two photos, its first and last); with MiniMax-H3 References,
 the photos, clips and recordings attached, up to nine together, are the people, things,
@@ -663,9 +675,41 @@ confines neither its files nor its network, so the switch is the same explicit c
 the server's `--code-exec-unconfined`. The app does not dictate on Windows; Windows' own
 voice typing (Windows+H) writes into the message box.
 
-**Not verified.** No Windows machine was available for this change: the Windows head has
-not been compiled, launched or measured. Its Windows-only sources are
-`Platforms/Windows/` and the `#if WINDOWS` branches.
+**Windows validation (2026-10-01).** Debug and Release built and ran on Windows x64
+with .NET SDK 10.0.204, an i7-11800H, 32 GiB RAM and an RTX 3080 Laptop GPU (16 GiB).
+The managed suite passed 895 tests, with 177 explicit skips; 21 MAUI project checks
+and 12 focused native CPU/CUDA checks passed. The upstream ggml checkout was unchanged
+at `353b63b439f27ab2cc19dac97ab1681ba6d2d084`.
+
+The actual Debug app passed 12 WebView checks, a 1.55 MB upload, navigation away from
+a streaming answer and back, and transcript recovery after a forced process restart.
+The actual Release app passed 15 HTTP/SSE turns covering chat, saved conversations,
+cancellation and recovery, PowerShell, Python-generated downloadable files, and a
+synthetic vision question. With local **Gemma 4 12B QAT UD-Q4_K_XL** and its BF16
+projector, CUDA, 8,192 context tokens and speculation disabled, three 128-token samples
+gave **37.1–38.6 tok/s** (median **38.2**); warm first-token latency was **0.27–0.49 s**,
+and the first chat took **3.78 s** to its first token. This quantization differs from
+the built-in catalog entry. Peak process working set was **18.2 GB**, with **24.7 GB**
+private bytes at the end: these measurements do not establish low-memory suitability.
+
+To repeat with local weights, build the desired configuration, then run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/validation/run-tensoragent-windows.ps1 -Configuration Release -Root C:/Works/TensorSharp/docs/validation/my-windows-run -Weights C:/models/model.gguf -Projector C:/models/mmproj.gguf -Tools
+```
+
+Use a fresh evidence directory and omit `-Projector` for text-only testing. `-Tools`
+temporarily enables unconfined execution in this isolated test installation and restores
+the setting afterwards. Debug additionally runs the WebView and navigation probes.
+`TENSORAGENT_VALIDATION_ROOT`, `TENSORAGENT_VALIDATION_WEIGHTS` and
+`TENSORAGENT_VALIDATION_MMPROJ` opt the app into isolated local
+validation; ordinary launches use their normal data and catalog. Evidence is kept in
+ignored `docs/validation/` or `artifacts/`.
+
+This is bounded validation, not full coverage: manual visual review, physical camera
+and native file dialogs, live catalog downloads, audio/video generation, other models
+and GPU backends, and a long-duration soak were not verified. The picker exception
+handler was compiled but its device/permission failure path was not exercised on hardware.
 
 ### Measured on a Mac
 

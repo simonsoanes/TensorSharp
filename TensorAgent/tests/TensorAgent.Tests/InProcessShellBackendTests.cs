@@ -183,7 +183,7 @@ public sealed class InProcessShellBackendTests : IDisposable
 
         ConfinedResult write = _backend.Run(new ShellLaunch
         {
-            Argv = new[] { "sh", "-c", $"echo written > {allowed}" },
+            Argv = new[] { "sh", "-c", $"echo written > '{allowed}'" },
             WorkingDirectory = _work,
             WriteDirectory = _work,
             WritablePaths = new[] { allowed },
@@ -195,7 +195,7 @@ public sealed class InProcessShellBackendTests : IDisposable
 
         ConfinedResult neighbour = _backend.Run(new ShellLaunch
         {
-            Argv = new[] { "sh", "-c", $"echo clobbered > {sibling}" },
+            Argv = new[] { "sh", "-c", $"echo clobbered > '{sibling}'" },
             WorkingDirectory = _work,
             WriteDirectory = _work,
             WritablePaths = new[] { allowed },

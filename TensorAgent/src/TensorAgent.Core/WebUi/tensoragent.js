@@ -22,6 +22,7 @@
     session: null, conversation: null,
     history: [],            // {role, content, attachments}
     attachments: [],        // /api/upload responses
+    maskEditing: false,
     skills: [],             // selected skill names
     skillSelectionExplicit: false, // distinguishes untouched discovery from deselect-all
     catalogSkills: [],
@@ -42,6 +43,8 @@
     speech: '',            // BCP-47 for dictation; empty follows the device
     settings: null,
     native: false,         // true when the page is inside the app, not a browser
+    dictation: false,      // native pickers can exist without a speech recogniser
+    composerHint: 'Message…',
     netMsg: '',            // the host's own wording for a network refusal
     voice: false,          // the composer is the hold-to-talk button
     // Whether the model reasons before answering. It used to be a switch under the
@@ -272,6 +275,12 @@
     if (typeof a.pageCount === 'number') chip.pageCount = a.pageCount;
     if (typeof a.extractedPageCount === 'number') chip.extractedPageCount = a.extractedPageCount;
     if (typeof a.renderedAsImages === 'boolean') chip.renderedAsImages = a.renderedAsImages;
+    if (a.maskPath) {
+      chip.maskPath = a.maskPath; chip.maskMode = a.maskMode || 'grayscale';
+      chip.maskFeather = a.maskFeather || 0; chip.maskCrop = !!a.maskCrop;
+      if (a.maskInvert) chip.maskInvert = true;
+      if (typeof a.maskCropPadding === 'number') chip.maskCropPadding = a.maskCropPadding;
+    }
     return chip;
   }
 
@@ -366,6 +375,7 @@
       var made = document.createElement('img');
       made.src = extra.imageUrl; made.alt = 'generated image';
       b.appendChild(made);
+      imageActions(b, made, extra.imageUrl, newestImageRequest());
     }
     if (extra && extra.videoUrl) {
       b.appendChild(clipNode(extra.videoUrl));
@@ -652,12 +662,17 @@
     // What a video model can be given besides its description. The host reports it
     // for a video model and null for every other one.
     state.video = (d && d.video) || null;
+    paintComposerHint();
+    paintModelButton();
+    paintChips();
+  }
+
+  function paintComposerHint() {
     // An image model takes a description, or a photo and what to change about it.
     text.placeholder = makesVideo() ? videoPlaceholder(state.video)
       : makesImages()
         ? 'Describe a picture… or attach a photo and say what to change'
-        : 'Message… or hold to talk';
-    paintModelButton();
+        : state.native && !state.dictation ? state.composerHint : 'Message… or hold to talk';
   }
 
   // Qwen-Image: the host turns a message into a picture rather than an answer
@@ -1160,6 +1175,10 @@
       notice('Please wait for file uploads to finish, then send again.');
       return;
     }
+    if (state.maskEditing) { notice('Finish the image selection before sending.'); return; }
+    if (!makesImages() && state.attachments.some(function (a) { return !!a.maskPath; })) {
+      notice('Choose an image model before sending an image selection.'); return;
+    }
     if (state.visionChecking) { note('send-refused', 'vision check in flight'); return; }
     if (shareDiscarding) {
       note('send-refused', 'share discard in flight');
@@ -1310,6 +1329,12 @@
       if (kind === 'image') {
         imagePaths.push(a.file);
         stillImagePaths.push(a.file);
+        if (stillImagePaths.length === 1 && a.maskPath) {
+          msg.maskPath = a.maskPath; msg.maskMode = a.maskMode || 'grayscale';
+          msg.maskFeather = a.maskFeather || 0; msg.maskCrop = !!a.maskCrop;
+          if (a.maskInvert) msg.maskInvert = true;
+          if (typeof a.maskCropPadding === 'number') msg.maskCropPadding = a.maskCropPadding;
+        }
       } else if (kind === 'video') {
         isVideo = true;
         if (a.file) videoFilePaths.push(a.file);
@@ -2129,7 +2154,10 @@
       var entry = { role: 'assistant', content: answer };
       if (thinking) entry.thinking = thinking;
       if (made.length) entry.artifacts = made;
-      if (madeImage) entry.imageUrl = madeImage;
+      if (madeImage) {
+        entry.imageUrl = madeImage;
+        imageActions(view.bubble, pictureOf(view), madeImage, newestImageRequest());
+      }
       if (madeVideo) entry.videoUrl = madeVideo;
       if (madeAudio) entry.audioUrl = madeAudio;
       // Nothing produced is nothing to remember: the host's own record skips an empty
@@ -2149,6 +2177,88 @@
   }
 
   // ---- attachments ---------------------------------------------------------
+  function newestImageRequest() {
+    for (var i = state.history.length - 1; i >= 0; i--)
+      if (state.history[i].role === 'user') return state.history[i];
+    return null;
+  }
+
+  function imageActions(bubble, picture, resultUrl, request) {
+    if (bubble.querySelector('.image-edit-actions')) return;
+    var actions = el('div', 'image-edit-actions');
+    var source = request && request.stillImagePaths && request.stillImagePaths[0];
+    if (source) {
+      var original = false;
+      var compare = el('button', 'filechip', 'Compare original'); compare.type = 'button';
+      compare.setAttribute('aria-pressed', 'false');
+      compare.addEventListener('click', function () {
+        original = !original; picture.src = original ? uploadUrl(source) : resultUrl;
+        picture.alt = original ? 'original image' : 'generated image';
+        compare.textContent = original ? 'Show result' : 'Compare original';
+        compare.setAttribute('aria-pressed', String(original));
+      });
+      actions.appendChild(compare);
+    }
+    var again = el('button', 'filechip', source ? 'Edit again' : 'Edit image'); again.type = 'button';
+    again.addEventListener('click', function () {
+      if (state.generating || state.maskEditing || pendingUploadCount || state.attachments.length || text.value.trim()) {
+        notice('Finish or clear the current draft before editing this image.'); return;
+      }
+      if (source) {
+        var saved = request.attachments || [];
+        state.attachments = request.stillImagePaths.map(function (path) {
+          var found = saved.filter(function (a) { return a.file === path; })[0];
+          return Object.assign({}, found || { file: path, fileName: path, mediaType: 'image' });
+        });
+        if (request.maskPath) {
+          state.attachments[0].maskPath = request.maskPath;
+          state.attachments[0].maskMode = request.maskMode || 'grayscale';
+          state.attachments[0].maskFeather = request.maskFeather || 0;
+          state.attachments[0].maskCrop = !!request.maskCrop;
+          state.attachments[0].maskInvert = !!request.maskInvert;
+          if (typeof request.maskCropPadding === 'number') state.attachments[0].maskCropPadding = request.maskCropPadding;
+        }
+        text.value = request.content || '';
+      } else {
+        state.attachments = [{ file: uploadName(resultUrl), fileName: 'Generated image', mediaType: 'image', url: resultUrl }];
+      }
+      autoGrow(); paintChips(); text.focus();
+    });
+    actions.appendChild(again); bubble.appendChild(actions);
+  }
+
+  function selectImageArea(attachment) {
+    if (state.maskEditing || state.generating) return;
+    if (!window.TensorSharpMaskEditor) { notice('The image selection editor is unavailable. Reload the page and try again.', 'error'); return; }
+    state.maskEditing = true; paintChips();
+    var conversation = state.conversation;
+    window.TensorSharpMaskEditor.open({
+      sourceUrl: previewOf(attachment), maskUrl: attachment.maskPath ? uploadUrl(attachment.maskPath) : null,
+      maskMode: attachment.maskMode || 'grayscale',
+      maskInvert: !!attachment.maskInvert,
+      maskFeather: attachment.maskFeather || 0, maskCrop: !!attachment.maskCrop,
+    }).then(function (selection) {
+      if (!selection || state.conversation !== conversation || state.attachments.indexOf(attachment) < 0) return;
+      if (selection.remove) {
+        delete attachment.maskPath; delete attachment.maskMode; delete attachment.maskFeather; delete attachment.maskCrop;
+        delete attachment.maskInvert; delete attachment.maskCropPadding; return;
+      }
+      var form = new FormData(); form.append('file', selection.blob, 'selection.png');
+      return fetch('/api/upload', { method: 'POST', body: form }).then(function (response) {
+        return response.json().then(function (data) {
+          var uploaded = data && data.files ? data.files[0] : data;
+          if (!response.ok || !uploaded || !uploaded.ok || !uploaded.file)
+            throw new Error((data && data.error) || 'Selection upload failed.');
+          if (state.conversation !== conversation || state.attachments.indexOf(attachment) < 0) return;
+          attachment.maskPath = uploaded.file; attachment.maskMode = 'grayscale';
+          delete attachment.maskInvert;
+          attachment.maskFeather = selection.maskFeather; attachment.maskCrop = selection.maskCrop;
+        });
+      });
+    }).catch(function (error) { notice('Image selection: ' + ((error && error.message) || error), 'error'); })
+      .finally(function () { state.maskEditing = false; paintChips(); });
+  }
+
   function paintChips() {
     var box = $('chips');
     box.innerHTML = '';
@@ -2165,16 +2275,22 @@
       shared.appendChild(remove);
       box.appendChild(shared);
     });
+    var imageIndex = 0;
     state.attachments.forEach(function (a, i) {
       var c = el('div', 'chip');
       if (a.mediaType === 'image') {
-        var img = document.createElement('img'); img.src = a.url; c.appendChild(img);
+        var img = document.createElement('img'); img.src = previewOf(a); c.appendChild(img);
+        if (imageIndex++ === 0 && (makesImages() || a.maskPath)) {
+          var select = el('button', 'filechip', a.maskPath ? 'Selection saved · Adjust' : 'Select area');
+          select.type = 'button'; select.disabled = state.generating || state.visionChecking || state.maskEditing;
+          select.addEventListener('click', function () { selectImageArea(a); }); c.appendChild(select);
+        }
       } else {
         c.appendChild(el('span', 'ic', a.mediaType === 'video' ? '🎬' : a.mediaType === 'audio' ? '🎧' : '📄'));
       }
       c.appendChild(el('span', 'nm', a.fileName || a.file));
       var x = el('button', 'x', '✕');
-      x.disabled = state.visionChecking || shareDiscarding;
+      x.disabled = state.visionChecking || shareDiscarding || state.maskEditing;
       x.addEventListener('click', function () { state.attachments.splice(i, 1); paintChips(); });
       c.appendChild(x);
       box.appendChild(c);
@@ -2568,7 +2684,7 @@
     if (pressAt && (Math.abs(x - pressAt.x) > 10 || Math.abs(y - pressAt.y) > 10)) cancelPress();
   }
   function beginPress(x, y) {
-    if (state.voice) return;
+    if (state.voice || (state.native && !state.dictation)) return;
     cancelPress();
     pressAt = { x: x, y: y };
     pressTimer = setTimeout(function () {
@@ -2620,6 +2736,7 @@
 
   function startRec() {
     if (!state.native) { notice('Voice input is only available in the app.', 'error'); return; }
+    if (!state.dictation) return;
     hold.classList.add('rec');
     $('holdlabel').textContent = 'Listening… release to stop';
     post('/api/agent/events', { type: 'dictate-start' });
@@ -2748,6 +2865,7 @@
    * the calls meant for it, and so each one can say what shape it expects.
    */
   var hostCalls = {
+    nativeReady: function (a) { window.TensorAgent.nativeReady(a); },
     addAttachment: function (a) { window.TensorAgent.addAttachment(a); },
     insertText: function (a) { window.TensorAgent.insertText(a && a.text); },
     takeShare: function () { window.TensorAgent.takeShare(); },
@@ -2830,6 +2948,8 @@
      */
     diagnostics: function () {
       return JSON.stringify({
+        native: state.native,
+        dictation: state.dictation,
         conversation: state.conversation,
         turn: state.turn,
         attached: !!state.abort,
@@ -2872,8 +2992,19 @@
         return true;
       });
     },
-    /** The app calls this once at startup so the page knows native pickers exist. */
-    nativeReady: function () { state.native = true; return true; },
+    /** Native pickers and dictation are separate capabilities on Windows. */
+    nativeReady: function (capabilities) {
+      state.native = true;
+      state.dictation = !capabilities || capabilities.dictation !== false;
+      state.composerHint = (capabilities && capabilities.composerHint) || 'Message…';
+      paintComposerHint();
+      if (!state.dictation) {
+        cancelPress();
+        if (state.voice) setVoice(false);
+      }
+      return true;
+    },
+    canDictate: function () { return state.native && state.dictation; },
     /**
      * Knobs for the page's own tests and nothing else: the timings above are what
      * make recovery invisible on a phone and would make a test take a minute.

@@ -38,10 +38,9 @@ namespace TensorAgent.Tests;
 /// </para>
 /// </summary>
 [Collection(LivePythonCollection.Name)]
-public sealed class WebUiPageTests : IDisposable
+public sealed partial class WebUiPageTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "tensoragent-page-" + Guid.NewGuid().ToString("N"));
-    private readonly JavaScriptCoreEngine _engine = new();
 
     public WebUiPageTests() => Directory.CreateDirectory(_root);
 
@@ -81,9 +80,7 @@ public sealed class WebUiPageTests : IDisposable
         };
         var context = new InterpreterContext(_root, new Dictionary<string, string> { ["HOME"] = _root }, policy);
 
-        ExecutionResult result = _engine
-            .RunCodeAsync(source, Array.Empty<string>(), context, CancellationToken.None)
-            .GetAwaiter().GetResult();
+        ExecutionResult result = WebJavaScript.Run(source, _root, context);
 
         Assert.True(result.ExitCode == 0,
             $"the page script failed to run.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
@@ -160,7 +157,7 @@ public sealed class WebUiPageTests : IDisposable
         throw new DirectoryNotFoundException($"no TensorAgent above {AppContext.BaseDirectory}");
     }
 
-    [Theory]
+    [WebJavaScriptTheory]
     [InlineData(131072, 8192, "128K model context", "8K active")]
     [InlineData(262144, 16384, "256K model context", "16K active")]
     [InlineData(262144, 32768, "256K model context", "32K active")]
@@ -181,7 +178,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Contains(expectedActive, detail, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void HeaderKeepsCompatibilityWhenTheHostReportsOnlyOneContext()
     {
         JsonElement result = Run("""
@@ -197,7 +194,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.DoesNotContain("active", detail, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void HeaderDoesNotPresentAnEffectiveFallbackAsModelMetadata()
     {
         JsonElement result = Run("""
@@ -231,7 +228,7 @@ public sealed class WebUiPageTests : IDisposable
     /// the other side has ever read, so every PDF and every clip was silently dropped.
     /// </para>
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void EveryKindOfAttachmentReachesTheRequestUnderTheNameTheServerReads()
     {
         JsonElement result = Run(string.Empty, """
@@ -279,7 +276,7 @@ public sealed class WebUiPageTests : IDisposable
             "filePaths is not a field any parser on the server reads; anything sent under it is dropped");
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void SelectedFilesUploadTogetherInOrderAndAllReachTheChatRequest()
     {
         JsonElement result = Run("""
@@ -323,7 +320,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.True(message.GetProperty("attachments")[2].GetProperty("fileBacked").GetBoolean());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void SendingDuringQueuedUploadsKeepsTheDraftUntilEverySelectionIsAttached()
     {
         JsonElement result = Run("""
@@ -380,7 +377,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(new[] { "one.txt", "two.txt", "three.txt" }, Strings(sent.GetProperty("messages")[0], "textFilePaths"));
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void OneSelectedFileAcceptsTheExistingUploadResponse()
     {
         JsonElement result = Run("""
@@ -402,7 +399,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Empty(Strings(result, "errors"));
     }
 
-    [Theory]
+    [WebJavaScriptTheory]
     [InlineData("{ __status: 413, body: { error: 'File too large' } }", "File too large")]
     [InlineData("{ __reject: 'Load failed' }", "Load failed")]
     [InlineData("{ ok: true, file: 'only.txt' }", "did not return every uploaded file")]
@@ -427,7 +424,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Contains(expectedError, Assert.Single(Strings(result, "errors")), StringComparison.Ordinal);
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AnImageStaysInTheComposerWhenTheLoadedModelHasNoVisionProjector()
     {
         JsonElement result = Run("""
@@ -468,7 +465,7 @@ public sealed class WebUiPageTests : IDisposable
             route.TryGetProperty("route", out JsonElement name) && name.GetString() == "models");
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void ATextOnlyModelCanHandAnImageFileToASelectedHostSkill()
     {
         JsonElement result = Run("""
@@ -492,7 +489,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(new[] { "a1.png" }, Strings(request.GetProperty("messages")[0], "imagePaths"));
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AServerVisionRefusalRestoresTheExactImageDraft()
     {
         JsonElement result = Run("""
@@ -524,7 +521,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Empty(result.GetProperty("history").EnumerateArray());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AnImageDraftIsNotSentWhenTheModelUnloadsDuringCapabilityRefresh()
     {
         JsonElement result = Run("""
@@ -560,7 +557,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Empty(result.GetProperty("history").EnumerateArray());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AFileBackedCsvKeepsItsPathAndChipWithoutPuttingRowsInThePrompt()
     {
         JsonElement result = Run(string.Empty, """
@@ -595,7 +592,7 @@ public sealed class WebUiPageTests : IDisposable
     /// this expensive to notice.
     /// </para>
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void AFollowUpQuestionStillCarriesTheEarlierTurnsPicture()
     {
         JsonElement result = Run("""
@@ -626,7 +623,7 @@ public sealed class WebUiPageTests : IDisposable
     /// A file a turn produced is a link in the transcript AND a line in the history,
     /// so the next message does not delete it from the saved chat.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void AFileATurnProducedBecomesALinkAndSurvivesInTheHistory()
     {
         JsonElement result = Run("""
@@ -656,7 +653,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal("photo.pdf", assistant.GetProperty("artifacts")[0].GetProperty("name").GetString());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AGuardedArtifactAppearsOnlyWhenItsDedicatedVerifiedFrameArrives()
     {
         JsonElement result = Run("""
@@ -727,7 +724,7 @@ public sealed class WebUiPageTests : IDisposable
     /// arrives base64'd, which is the fix.
     /// </para>
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void AMultiLineFileTheAppUploadsReachesTheComposerIntact()
     {
         string json = JsonSerializer.Serialize(new
@@ -774,7 +771,7 @@ public sealed class WebUiPageTests : IDisposable
     // content shared into the app
     // =====================================================================================
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AShareWaitsForLaunchThenPreservesTheDraftAndAppliesEveryValidPart()
     {
         JsonElement result = Run("""
@@ -828,7 +825,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.DoesNotContain(calls, c => c.GetProperty("path").GetString() == "/api/agent/share/ack");
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void RepeatedClaimsAndConcurrentNudgesDoNotDuplicateAnAppliedShare()
     {
         JsonElement result = Run("""
@@ -866,7 +863,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(0, result.GetProperty("sent").GetInt32());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AShareIsNotAppliedUntilItsRequestedNewChatOpensSuccessfully()
     {
         JsonElement result = Run("""
@@ -905,7 +902,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(1, result.GetProperty("after").GetProperty("sharedChips").GetInt32());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AShareNeverAutoSendsEvenIfALegacyPayloadRequestsIt()
     {
         JsonElement result = Run("""
@@ -926,7 +923,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(1, result.GetProperty("sharedChips").GetInt32());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void NavigationPreservesSharedTextAttachmentAndIdUntilTheyAreSent()
     {
         JsonElement result = Run("""
@@ -967,7 +964,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Contains("shared across chats", message.GetProperty("content").GetString()!, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void ExplicitDiscardRemovesOnlyTheTrackedSharedDraft()
     {
         JsonElement result = Run("""
@@ -999,7 +996,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(0, result.GetProperty("sent").GetInt32());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void IndependentQueuedSharesUseDifferentFreshChatsAndNeverMerge()
     {
         JsonElement result = Run("""
@@ -1079,7 +1076,7 @@ public sealed class WebUiPageTests : IDisposable
     /// is the thing this whole change exists to stop.
     /// </para>
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void ComingBackOpensTheChatThePageWasInAndNotTheNewestSavedOne()
     {
         JsonElement result = Run("""
@@ -1123,7 +1120,7 @@ public sealed class WebUiPageTests : IDisposable
     /// with the <c>cold: false</c> default and exercises that path.
     /// </para>
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void LaunchingTheAppOpensAnEmptyChatRatherThanTheLastOne()
     {
         JsonElement result = Run("""
@@ -1158,7 +1155,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(0, result.GetProperty("history").GetArrayLength());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AReopenedChatShowsItsPicturesSoundsClipsAndDocumentsAgain()
     {
         JsonElement result = Run("""
@@ -1239,7 +1236,7 @@ public sealed class WebUiPageTests : IDisposable
     /// the round trip, in one test.
     /// </para>
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void TheNextMessageDoesNotWipeTheAttachmentsAndFilesAlreadySaved()
     {
         JsonElement result = Run("""
@@ -1277,7 +1274,7 @@ public sealed class WebUiPageTests : IDisposable
     /// Off means off: the setting is saved, the selection is dropped, and the next
     /// message names no skill.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void TurningSkillsOffSavesTheSettingAndSendsNoSkills()
     {
         JsonElement result = Run("""
@@ -1329,7 +1326,7 @@ public sealed class WebUiPageTests : IDisposable
     /// A chat saved when skills were on does not switch them back on for itself.
     /// The setting is the wider fact; a stored selection is a memory of one chat.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void ASavedChatDoesNotReviveSkillsThatWereTurnedOff()
     {
         JsonElement result = Run("""
@@ -1354,7 +1351,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(0, result.GetProperty("chips").GetInt32());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void DeselectingEverySkillSendsAnExplicitEmptySelection()
     {
         JsonElement result = Run("""
@@ -1375,7 +1372,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.False(request.GetProperty("skills_discovery").GetBoolean());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void RoutedNetworkPreflightRestoresThePromptAndOffersTheSettingInline()
     {
         JsonElement result = Run("""
@@ -1416,7 +1413,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.True(saved.GetProperty("allowNetwork").GetBoolean());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void RoutedSetupPreflightRestoresThePromptAndAttachmentsAndOpensSettings()
     {
         JsonElement result = Run("""
@@ -1456,7 +1453,7 @@ public sealed class WebUiPageTests : IDisposable
             && route.TryGetProperty("route", out JsonElement name) && name.GetString() == "settings");
     }
 
-    [Theory]
+    [WebJavaScriptTheory]
     [InlineData(false)]
     [InlineData(true)]
     public void ReopenedChatPreservesWhetherAnEmptySkillSelectionWasExplicit(bool explicitSelection)
@@ -1515,7 +1512,7 @@ public sealed class WebUiPageTests : IDisposable
     /// (found 2026-09-30, confirmed in Chromium). The model repeats whatever a shared
     /// page or file says, so the text is not the user's.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void AnAnswerCannotPutScriptIntoThePage()
     {
         string answer = JsonSerializer.Serialize(
@@ -1552,7 +1549,7 @@ public sealed class WebUiPageTests : IDisposable
     /// tables, and the page printed them as rows of pipes -- though its stylesheet had
     /// table rules waiting for them.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void AMarkdownTableInAnAnswerIsDrawnAsATable()
     {
         string answer = JsonSerializer.Serialize(
@@ -1577,7 +1574,49 @@ public sealed class WebUiPageTests : IDisposable
         Assert.DoesNotContain("|---|", html, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [WebJavaScriptTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NativeDictationCapabilityControlsTheComposerGesture(bool supported)
+    {
+        string payload = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        {
+            dictation = supported,
+            composerHint = "Message… or press Windows+H to dictate",
+        })));
+        JsonElement result = Run("", $$"""
+            var box = __page.byId['text'];
+            var blurred = false;
+            box.blur = function () { blurred = true; };
+            box.value = 'Keep this draft';
+            var ready = window.TensorAgent.__fromHost('nativeReady', '{{payload}}');
+            box.dispatch('pointerdown', { clientX: 100, clientY: 100 });
+            return wait(550).then(function () {
+              box.dispatch('pointerup');
+              var voice = document.body.classList.contains('voice');
+              __page.byId['hold'].dispatch('pointerdown', { preventDefault: function () {} });
+              window.TensorAgent.refreshModel();
+              return settle(10).then(function () {
+                return { ready: ready, supported: window.TensorAgent.canDictate(), voice: voice,
+                  blurred: blurred, draft: box.value, placeholder: box.placeholder,
+                  starts: __page.requests('/api/agent/events').filter(function (r) {
+                    return r.body.type === 'dictate-start';
+                  }).length };
+              });
+            });
+            """);
+
+        Assert.Equal("ok", result.GetProperty("ready").GetString());
+        Assert.Equal(supported, result.GetProperty("supported").GetBoolean());
+        Assert.Equal(supported, result.GetProperty("voice").GetBoolean());
+        Assert.Equal(supported, result.GetProperty("blurred").GetBoolean());
+        Assert.Equal(supported ? 1 : 0, result.GetProperty("starts").GetInt32());
+        Assert.Equal("Keep this draft", result.GetProperty("draft").GetString());
+        Assert.Equal(supported ? "Message… or hold to talk" : "Message… or press Windows+H to dictate",
+            result.GetProperty("placeholder").GetString());
+    }
+
+    [WebJavaScriptFact]
     public void TappingAGeneratedFileAsksTheAppToOpenItRatherThanNavigating()
     {
         JsonElement result = Run("""
@@ -1609,7 +1648,7 @@ public sealed class WebUiPageTests : IDisposable
     /// The click itself, on the file card the page rendered: claimed by the page and
     /// handed to the app, with nothing navigated.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void TheClickOnAGeneratedFileIsHandedToTheApp()
     {
         JsonElement result = Run("""
@@ -1662,7 +1701,7 @@ public sealed class WebUiPageTests : IDisposable
     // A test of the page's behaviour under those conditions is only as good as the
     // model of the conditions, so the model is checked on its own first.
 
-    [Fact]
+    [WebJavaScriptFact]
     public void HarnessARouteThatRejectsMakesFetchRejectWithATypeError()
     {
         JsonElement result = Run("""
@@ -1715,7 +1754,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(2, result.GetProperty("recorded").GetInt32());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void HarnessAHangingStreamReadRejectsWithAbortErrorWhenItsSignalFires()
     {
         JsonElement result = Run("""
@@ -1764,7 +1803,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal("AbortError", result.GetProperty("third").GetProperty("name").GetString());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void HarnessAStreamCanDropAfterItsFramesAndTakeRealTimePerRead()
     {
         JsonElement result = Run("""
@@ -1819,7 +1858,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(new[] { "It broke.Retry", "Just so you know." }, Strings(result, "notices"));
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void ASendLostBeforeTheTurnIdIsNeverAnsweredWithAnEarlierTurnsAnswer()
     {
         // The host keeps a finished turn for an hour, so "what is this conversation
@@ -1871,7 +1910,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(0, result.GetProperty("attaches").GetInt32());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void StoppingDuringARecoveryDisarmsIt()
     {
         JsonElement result = Run($$"""
@@ -1907,7 +1946,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.False(result.GetProperty("generating").GetBoolean());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AResumeDuringASendsPrefillLeavesTheRequestAlone()
     {
         // The host answers a chat request's headers only with its first frame, so for
@@ -1966,7 +2005,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Contains("resume-skip", result.GetProperty("kinds").EnumerateArray().Select(k => k.GetString()));
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AStreamThatGoesSilentIsReplacedByTheWatchdogWithoutAnyEvent()
     {
         // Nothing fires when a connection dies without a FIN: no error, no visibility
@@ -1999,7 +2038,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Contains("watchdog", result.GetProperty("kinds").EnumerateArray().Select(k => k.GetString()));
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AnErrorInATurnIsSaidOnceHoweverOftenTheTurnIsReplayed()
     {
         JsonElement result = Run($$"""
@@ -2020,7 +2059,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.False(result.GetProperty("generating").GetBoolean());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AChatThatCannotBeReopenedKeepsWhatIsOnTheScreen()
     {
         JsonElement result = Run("""
@@ -2077,7 +2116,7 @@ public sealed class WebUiPageTests : IDisposable
         .Where(t => !(t.GetProperty("html").GetString() ?? string.Empty).StartsWith("<h1>TensorAgent</h1>", StringComparison.Ordinal))
         .ToList();
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AStaleStreamIsReplacedWhenThePageBecomesVisibleAgain()
     {
         JsonElement result = Run($$"""
@@ -2127,7 +2166,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.False(result.GetProperty("diag").GetProperty("attached").GetBoolean());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AStreamThatIsStillDeliveringIsLeftAloneByANudge()
     {
         JsonElement result = Run($$"""
@@ -2155,7 +2194,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.True(result.GetProperty("delivering").GetBoolean());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AStreamThatRejectsMidAnswerIsTakenUpAgainWithBackoffNotOnce()
     {
         JsonElement result = Run($$"""
@@ -2195,7 +2234,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Contains("resume-lookup-failed", kinds);
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AStreamThatEndsWithoutADoneFrameIsTakenUpAgainWhenTheTurnIsStillRunning()
     {
         JsonElement result = Run($$"""
@@ -2229,7 +2268,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Contains("eof-without-done", result.GetProperty("kinds").EnumerateArray().Select(k => k.GetString()));
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AStreamThatEndsWithoutADoneFrameIsReadAgainWhenTheTurnFinishedMeanwhile()
     {
         // The connection died as the answer was ending. The host still has the turn --
@@ -2263,7 +2302,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(1, result.GetProperty("attaches").GetInt32());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AStreamThatEndsWithoutADoneFrameFinishesWithWhatItHasWhenTheTurnIsGone()
     {
         JsonElement result = Run($$"""
@@ -2292,7 +2331,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(0, result.GetProperty("attaches").GetInt32());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void ASendThatLosesItsStreamBeforeTheTurnIdAttachesToTheTurnTheHostStarted()
     {
         JsonElement result = Run("""
@@ -2324,7 +2363,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal("", result.GetProperty("text").GetString());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void ASendThatNeverReachedTheHostGoesBackIntoTheComposer()
     {
         JsonElement result = Run("""
@@ -2353,7 +2392,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(1, result.GetProperty("attachments").GetInt32());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void WhenTheHostCannotBeReachedForLongEnoughThePageHandsTheScreenBackAndSaysSo()
     {
         JsonElement result = Run($$"""
@@ -2384,16 +2423,18 @@ public sealed class WebUiPageTests : IDisposable
         Assert.DoesNotContain(errors, e => e!.Contains("Load failed", StringComparison.Ordinal));
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AShareClaimThatFailsAtTheTransportIsRetriedOnceAndNotReported()
     {
-        JsonElement result = Run("""
+        // Install the failure after boot. On Windows, forty 1 ms timer ticks
+        // can outlast the retry delay, so boot's automatic claim may already
+        // have consumed a failure installed in the initial route table.
+        JsonElement result = Run("R['/api/agent/share/claim'] = { share: null };", """
             var claims = 0;
             R['/api/agent/share/claim'] = function () {
               claims++;
               return claims === 1 ? { __reject: 'Load failed' } : { share: null };
             };
-            """, """
             var claimsBefore = __page.requests('/api/agent/share/claim').length;
             window.TensorAgent.__fromHost('takeShare', 'e30=');
             return wait(500).then(function () {
@@ -2408,7 +2449,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Empty(result.GetProperty("errors").EnumerateArray());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AShareClaimTheHostRefusesIsReportedWithoutARetry()
     {
         JsonElement result = Run("""
@@ -2429,7 +2470,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Contains(errors, e => e!.Contains("Could not open the shared item", StringComparison.Ordinal) && e.Contains("HTTP 500", StringComparison.Ordinal));
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void ALongAnswerOfThousandsOfFramesRendersWholeAndOnce()
     {
         // A page re-attaching to a long answer is handed every frame so far at once;
@@ -2467,7 +2508,7 @@ public sealed class WebUiPageTests : IDisposable
     /// image in place and the finished picture replaces the last preview: the turn ends
     /// with exactly one image in the bubble, and the history keeps the finished one.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void AnImageModelsTurnIsOnePictureThatThePreviewsBecome()
     {
         JsonElement result = Run(ImageModel + """
@@ -2514,7 +2555,7 @@ public sealed class WebUiPageTests : IDisposable
     /// The picture is not lost to the answer being painted: a turn that also writes text
     /// repaints the bubble, and the picture is put back under it.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void APictureSurvivesTextPaintedIntoTheSameBubble()
     {
         JsonElement result = Run(ImageModel + """
@@ -2545,7 +2586,7 @@ public sealed class WebUiPageTests : IDisposable
     /// A photo is an edit, and an edit needs to be told what to change: sent alone, its
     /// file name would become the instruction. The draft stays as it was.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void APhotoWithNoWordsIsNotSentToAnImageModel()
     {
         JsonElement result = Run(ImageModel, """
@@ -2574,7 +2615,7 @@ public sealed class WebUiPageTests : IDisposable
     /// the host refuses an edit itself when the file is missing — and the photo goes
     /// out as a still, which is what the host edits.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void APhotoAndAnInstructionGoOutAsAnEdit()
     {
         JsonElement result = Run(ImageModel + """
@@ -2627,7 +2668,7 @@ public sealed class WebUiPageTests : IDisposable
     /// shown. A model that reports no video capability is a chat model, whatever its
     /// architecture is called.
     /// </summary>
-    [Theory]
+    [WebJavaScriptTheory]
     [InlineData(KeyframesVideo, "Describe a video… or attach a photo to start it from")]
     [InlineData(ReferencesVideo, "Describe a video… attach photos, clips or sounds it should feature")]
     [InlineData("""
@@ -2649,7 +2690,7 @@ public sealed class WebUiPageTests : IDisposable
     /// Sent with no words, the file's name would be the whole script, so nothing is sent,
     /// the user is told what is missing, and the photo stays where it was.
     /// </summary>
-    [Theory]
+    [WebJavaScriptTheory]
     [InlineData(true)]
     [InlineData(false)]
     public void AVideoIsNotSentWithoutADescription(bool withPhoto)
@@ -2683,7 +2724,7 @@ public sealed class WebUiPageTests : IDisposable
     /// this model reports no vision file. The photo goes out as a still, which is what
     /// the host makes a keyframe of.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void APhotoAndADescriptionGoToAVideoModelWithoutAVisionCheck()
     {
         JsonElement result = Run(VideoModel(KeyframesVideo) + """
@@ -2715,7 +2756,7 @@ public sealed class WebUiPageTests : IDisposable
     /// out under the list the host reads it from, and the clip's frames do not hold the
     /// send for a vision re-check either.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void PhotosClipsAndSoundsAllReachAReferencesVideoModel()
     {
         JsonElement result = Run(VideoModel(ReferencesVideo) + """
@@ -2749,7 +2790,7 @@ public sealed class WebUiPageTests : IDisposable
     /// else to play, whether the frame leaves audioUrl out or sends it as null. Null is
     /// what the host actually writes, because it keeps nulls in its frames.
     /// </summary>
-    [Theory]
+    [WebJavaScriptTheory]
     [InlineData("")]
     [InlineData("audioUrl: null, ")]
     public void AVideoModelsTurnIsOneClipInTheBubbleAndTheHistory(string muxedSound)
@@ -2826,7 +2867,7 @@ public sealed class WebUiPageTests : IDisposable
     /// half, seconds under it, and never "0 s". A stage this page has no name for still
     /// says it is filming, rather than leaving the last stage's words up.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void TheTimeLeftWhileFilmingReadsTheWayAPersonWouldSayIt()
     {
         JsonElement result = Run(VideoModel(KeyframesVideo) + """
@@ -2863,7 +2904,7 @@ public sealed class WebUiPageTests : IDisposable
     /// the page plays it: one player for the sound, right under the clip, and both files
     /// in the history.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void ASoundtrackKeptAsItsOwnFilePlaysUnderTheClip()
     {
         JsonElement result = Run(VideoModel(KeyframesVideo) + """
@@ -2901,7 +2942,7 @@ public sealed class WebUiPageTests : IDisposable
     /// together. The clip goes under the words, so the words are painted first: painted
     /// after, they would replace what is in the bubble and take the player with them.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void AClipGoesUnderTheWordsOfTheSameTurn()
     {
         JsonElement result = Run(VideoModel(KeyframesVideo) + """
@@ -2932,7 +2973,7 @@ public sealed class WebUiPageTests : IDisposable
     /// clip and its sound were already showing; the bubble still ends with one of each,
     /// and the history with one entry for the turn.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void ComingBackToAVideoTurnDoesNotStackASecondPlayer()
     {
         JsonElement result = Run(VideoModel(KeyframesVideo) + $$"""
@@ -2995,7 +3036,7 @@ public sealed class WebUiPageTests : IDisposable
     /// next request is built from still names both files, so that request does not
     /// delete them from the saved chat.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void AReopenedChatShowsItsClipsAgain()
     {
         JsonElement result = Run("""

@@ -150,6 +150,65 @@ public class UploadRootConfinementTests : IDisposable
 
     // ---- helpers -----------------------------------------------------------
 
+    [Fact]
+    public async Task ImageEdit_MaskInsideUploadRootIsDecodedWithAlpha()
+    {
+        var mask = new TensorSharp.Models.QwenImage.RgbImage(2, 1, new float[] { 0, 0, 0, 1, 1, 1 }, new float[] { 0, 1 });
+        TensorSharp.Models.QwenImage.ImageIO.SavePng(Path.Combine(_uploadRoot, "mask.png"), mask);
+        var p = new TensorSharp.Models.QwenImage.QwenImageParams();
+        await Adapter().ReadUploadedMaskAsync(JsonSerializer.SerializeToElement(new { maskPath = "mask.png" }), p, CancellationToken.None);
+        Assert.Equal(2, p.Mask.Width);
+        Assert.Equal(mask.Pixels, p.Mask.Pixels);
+        Assert.Equal(mask.Alpha, p.Mask.Alpha);
+    }
+
+    [Theory]
+    [InlineData("../secret.png")]
+    [InlineData("../uploads-evil/mask.png")]
+    [InlineData("missing.png")]
+    [InlineData("")]
+    public async Task ImageEdit_MaskOutsideRootOrMissingIsRejected(string path)
+    {
+        File.WriteAllBytes(Path.Combine(_baseDir, "secret.png"), new byte[] { 1, 2, 3 });
+        Directory.CreateDirectory(Path.Combine(_baseDir, "uploads-evil"));
+        File.WriteAllBytes(Path.Combine(_baseDir, "uploads-evil", "mask.png"), new byte[] { 1, 2, 3 });
+        var p = new TensorSharp.Models.QwenImage.QwenImageParams();
+        var error = await Assert.ThrowsAsync<TensorSharp.Chat.WebUiRequestRejectedException>(() => Adapter().ReadUploadedMaskAsync(
+            JsonSerializer.SerializeToElement(new { maskPath = path }), p, CancellationToken.None));
+        Assert.Equal(400, error.StatusCode);
+        Assert.Null(p.Mask);
+    }
+
+    [Fact]
+    public async Task ImageEdit_CorruptMaskIsBadRequest()
+    {
+        File.WriteAllBytes(Path.Combine(_uploadRoot, "corrupt.png"), new byte[] { 1, 2, 3 });
+        var error = await Assert.ThrowsAsync<TensorSharp.Chat.WebUiRequestRejectedException>(() => Adapter().ReadUploadedMaskAsync(
+            JsonSerializer.SerializeToElement(new { maskPath = "corrupt.png" }), new(), CancellationToken.None));
+        Assert.Equal(400, error.StatusCode);
+        Assert.Contains("Cannot decode mask", error.Message);
+    }
+
+    [Theory]
+    [InlineData("{\"maskPath\":null}")]
+    [InlineData("{\"maskPath\":123}")]
+    [InlineData("{\"maskMode\":\"grayscale\"}")]
+    public async Task ImageEdit_InvalidMaskReferenceIsRejected(string json) => Assert.Equal(400,
+        (await Assert.ThrowsAsync<TensorSharp.Chat.WebUiRequestRejectedException>(() => Adapter().ReadUploadedMaskAsync(
+            JsonSerializer.Deserialize<JsonElement>(json), new(), CancellationToken.None))).StatusCode);
+
+    [Theory]
+    [InlineData("{\"imagePaths\":[null]}")]
+    [InlineData("{\"imagePaths\":[42]}")]
+    [InlineData("{\"imagePaths\":\"image.png\"}")]
+    [InlineData("{\"imagePath\":false}")]
+    public async Task ImageEdit_InvalidReferenceEntriesAreNotSilentlyDropped(string json)
+    {
+        var images = new List<byte[]>();
+        Assert.NotNull(await Adapter().ReadUploadedImagesAsync(JsonSerializer.Deserialize<JsonElement>(json), images, CancellationToken.None));
+        Assert.Empty(images);
+    }
+
     private ServerHostingOptions Options() => new(
         startupModelPath: null,
         startupMmProjPath: null,
