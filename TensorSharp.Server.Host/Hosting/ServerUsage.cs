@@ -815,17 +815,6 @@ namespace TensorSharp.Server.Host.Hosting
                 }
             }
 
-            // Driven off the shared table the server refuses them with, so the page and
-            // the error cannot disagree. Deliberately NOT in Sections: DocumentedFlags()
-            // is what Build must accept, and these must not be accepted.
-            writer.WriteLine();
-            writer.WriteLine("Removed options (refused at startup, also as --config keys):");
-            foreach ((string flag, string advice) in TensorSharp.Runtime.RemovedCliFlags.RemovedFlags)
-            {
-                writer.WriteLine($"  {flag}");
-                WriteWrapped(writer, "Removed: " + advice, indent: "      ");
-            }
-
             writer.WriteLine();
             writer.WriteLine("Examples:");
             writer.WriteLine("  TensorSharp.Server.Host --model C:\\models\\gemma-4-E4B-it-Q8_0.gguf --backend ggml_cpu");
