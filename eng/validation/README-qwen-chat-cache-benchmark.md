@@ -14,6 +14,15 @@ identity in a JSON file, then attach it using `--provenance`. The script discove
 the served model ID from `/v1/models`; it does not verify operator provenance.
 All generated reports must stay in ignored `docs/validation/` or `artifacts/`.
 
+For TensorAgent catalog validation, install the catalog's complete file set in
+`<root>/cache/models/<id>/`, then run `eng/validation/TensorAgentHost` with
+`--catalog-model <id>` instead of `--weights`. This calls the app's `UseModel`
+path and applies its catalog memory policy. The launcher uses a 32 GB desktop
+tier and records its eligible entries and cache budget in `connection.json`.
+Pass that file to this benchmark with `--connection-file <root>/connection.json`,
+`--model-discovery webui`, and the matching `--url`; requests include the loopback cookie, which is omitted
+from benchmark reports. Keep the connection file private.
+
 Start the baseline host with its baseline binaries. For the supplied Flash Next
 checkpoint and photo, the following PowerShell commands reproduce the image
 description followed by two `请继续` turns:

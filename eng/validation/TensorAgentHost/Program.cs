@@ -3,13 +3,14 @@
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Diagnostics;
+using TensorAgent.Core.Catalog;
 using TensorAgent.Core.Hosting;
 using TensorAgent.Core.Settings;
 using TensorSharp.Server;
 
 if (args.Contains("--help"))
 {
-    Console.WriteLine("TensorAgentHost --root <evidence-dir> --skills <skills-dir> [--weights <gguf>] [--mmproj <gguf>] [--backend ggml_metal] [--port 0] [--network] [--unconfined] [--context 32768] [--max-tokens 4096] [--web-root <dir>] [--stop-file <file>]");
+    Console.WriteLine("TensorAgentHost --root <evidence-dir> --skills <skills-dir> [--catalog-model <installed-id> | --weights <gguf>] [--mmproj <gguf>] [--backend ggml_metal] [--port 0] [--network] [--unconfined] [--context 32768] [--max-tokens 4096] [--web-root <dir>] [--stop-file <file>]");
     return 0;
 }
 
@@ -28,6 +29,11 @@ string Required(string option) => values.TryGetValue(option, out string? value)
 int Number(string option, int fallback) => values.TryGetValue(option, out string? value) ? int.Parse(value) : fallback;
 
 string root = Required("--root");
+CatalogModel? catalogModel = values.TryGetValue("--catalog-model", out string? catalogId)
+    ? ModelCatalog.Find(catalogId) ?? throw new ArgumentException($"Unknown catalog model '{catalogId}'.")
+    : null;
+if (catalogModel is not null && (values.ContainsKey("--weights") || values.ContainsKey("--mmproj")))
+    throw new ArgumentException("--catalog-model uses the app's model store; it cannot be combined with --weights or --mmproj.");
 var paths = new AgentPaths(Path.Combine(root, "data"), Path.Combine(root, "cache"))
 {
     BundledSkillsDirectory = Required("--skills"),
@@ -49,9 +55,12 @@ settings.SpeculativeDecoding = false;
 settingsStore.Save(settings);
 // This launcher loads an arbitrary local GGUF through the HTTP route, without a
 // catalog entry whose UseModel path would normally apply the context budget.
-Environment.SetEnvironmentVariable(EngineMemoryPolicy.MaxContextVariable, settings.ContextLength.ToString());
-Environment.SetEnvironmentVariable(EngineMemoryPolicy.KvCacheDtypeVariable, settings.KvCacheDtype);
-TensorSharp.Models.KvCacheDtypeConfig.ConfigureFromEnvironment();
+if (catalogModel is null)
+{
+    Environment.SetEnvironmentVariable(EngineMemoryPolicy.MaxContextVariable, settings.ContextLength.ToString());
+    Environment.SetEnvironmentVariable(EngineMemoryPolicy.KvCacheDtypeVariable, settings.KvCacheDtype);
+    TensorSharp.Models.KvCacheDtypeConfig.ConfigureFromEnvironment();
+}
 // A local GGUF bypasses UseModel's catalog policy, so apply the same desktop
 // cache policy explicitly rather than inheriting a phone budget from the shell.
 foreach (string variable in new[]
@@ -89,7 +98,13 @@ if (values.TryGetValue("--weights", out string? weights))
 host.Server.Start();
 string cookie = $"{LoopbackServer.TokenCookie}={host.Server.Token}";
 var loadClock = Stopwatch.StartNew();
-if (weights is not null)
+if (catalogModel is not null)
+{
+    if (!host.Catalog.Any(model => model.Id == catalogModel.Id))
+        throw new InvalidOperationException($"{catalogModel.Id} is not offered on a {paths.DeviceMemoryGB} GB device.");
+    host.UseModel(catalogModel, warmAfterwards: false);
+}
+else if (weights is not null)
 {
     using var client = new HttpClient { BaseAddress = new Uri(host.Server.BaseUrl), Timeout = TimeSpan.FromMinutes(10) };
     client.DefaultRequestHeaders.Add("Cookie", cookie);
@@ -111,14 +126,24 @@ string connection = JsonSerializer.Serialize(new
     cookie,
     executionBackend = host.Backend.Name,
     engine = host.DescribeEngine(),
-    model = weights,
+    model = catalogModel is null ? weights : host.Models.PathFor(catalogModel, catalogModel.Weights),
+    catalogModel = catalogModel?.Id,
+    eligibleCatalog = host.Catalog.Select(model => model.Id),
     backend,
     contextLength = settings.ContextLength,
     deviceClass = paths.DeviceClass.ToString(),
     kvCacheDtype = settings.KvCacheDtype,
     speculativeDecoding = settings.SpeculativeDecoding,
     loadSeconds = loadClock.Elapsed.TotalSeconds,
-    projector = values.GetValueOrDefault("--mmproj"),
+    projector = catalogModel is null ? values.GetValueOrDefault("--mmproj")
+        : host.Models.CompanionPath(catalogModel, CatalogFileRole.Projector),
+    cacheBudget = new
+    {
+        initialTokens = Environment.GetEnvironmentVariable(EngineMemoryPolicy.KvInitialTokensVariable),
+        generationReserve = Environment.GetEnvironmentVariable(EngineMemoryPolicy.KvGenerationReserveMaxVariable),
+        retainedCaches = Environment.GetEnvironmentVariable(EngineMemoryPolicy.RetainedFusedCacheMaxVariable),
+        holderPool = Environment.GetEnvironmentVariable(EngineMemoryPolicy.KvHolderPoolMaxVariable),
+    },
 });
 await File.WriteAllTextAsync(Path.Combine(root, "connection.json"), connection);
 Console.WriteLine(connection);

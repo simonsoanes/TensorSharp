@@ -16,9 +16,11 @@ The Apple device target is iOS/iPadOS 17.0 or later, arm64; build it with
 `TensorSharpAppleTargets=true`.
 
 **Current source status.** No release workflow builds, signs or publishes TensorAgent;
-follow the [source-build instructions](#build-and-run). All eleven catalog entries need
-at least the 12 GB memory tier; six need 24 GB or more, and Qwen3.8 Flash Next needs
-48 GB plus SSD-backed weights. Catalog eligibility is based on device memory.
+follow the [source-build instructions](#build-and-run). All twelve catalog entries need
+at least the 12 GB system RAM tier; seven need 24 GB or more. Qwen3.8 Flash Next has an
+experimental UD-IQ1_M entry from 32 GB and a text-only UD-Q2_K_XL entry from 48 GB,
+both with SSD-backed weights. These eligibility tiers describe physical system RAM,
+including unified memory on Apple devices; storage size and GPU VRAM are separate.
 Image/video generation has been measured in the Mac app, with no recorded
 iOS media generation or Windows image/audio/video generation. The physical-phone run recorded
 below is on iOS 26.6.1; iOS 27 has not been device-verified.
@@ -70,9 +72,9 @@ message itself asks for a picture or a clip, through `/api/chat` (`ImageTurns`,
 at all. The app's own client is appended as one script tag at request time; the page
 file itself is never forked.
 
-**A built-in model catalog.** Eleven entries with the exact byte size and SHA-256 of every
-file: five chosen for phone/tablet memory tiers, and six requiring desktop memory tiers.
-All eleven are downloadable; those downloads
+**A built-in model catalog.** Twelve entries with the exact byte size and SHA-256 of every
+file: five chosen for phone/tablet memory tiers, and seven requiring desktop memory tiers.
+All twelve are downloadable; those downloads
 resume from a kept `.part` after an interruption, are verified before use, and
 belong to the APP rather than to the screen that started one — see "Downloads"
 below. Bonsai 2 27B is the one entry that needs the 16 GB tier (iPads and Macs)
@@ -87,12 +89,16 @@ offered at four where the memory exists; Qwen-Image 2.1 makes and edits pictures
 two MiniMax-H3 entries, one model in two checkpoints, make short videos with their own
 soundtrack, one from a description or a starting photo, the other around the photos,
 clips and recordings it is given. Qwen3.8 Flash Next, a 125B mixture of experts (about 6B
-active per token) at two bits, is offered from 48 GB of memory, less than its 78.9 GB file
-(three shards): on a 48 GB Mac the engine keeps 18.3 GB of it resident and reads the rest,
-its n-gram table and 33 layers' experts, from the SSD as tokens need them. See
-[The Mac's own models](#the-macs-own-models) for what each was measured to need.
+active per token), has two catalog quantizations. UD-Q2_K_XL remains text-only at the
+48 GB system RAM tier; in the recorded Mac run the engine kept 18.3 GB of its 78.9 GB
+package resident and read the rest from SSD as tokens needed it. UD-IQ1_M starts at an
+experimental 32 GB system RAM tier and supports image questions with an optional BF16
+projector. Its three weight shards need 74,538,755,776 bytes of storage (74.54 GB), or
+75,446,298,720 bytes (75.45 GB) with the projector. SSD paging allows these packages to
+exceed RAM; the engine plans expert placement for the available accelerator memory.
+See [The desktop's larger models](#the-desktops-larger-models) for the historical Mac measurements.
 
-| Model | Modalities | Required artifact(s) | Needs | Source |
+| Model | Modalities | Required artifact(s) | Minimum system RAM tier | Source |
 | --- | --- | --- | --- | --- |
 | Gemma 4 E2B (Q8_0) | text, image, audio, video | download: 4,967,497,152-byte main GGUF + 557,368,064-byte projector | 12 GB | `ggml-org/gemma-4-E2B-it-GGUF` |
 | Gemma 4 E4B (IQ4_XS) | text, image, audio, video | download: 4,715,416,704-byte main GGUF + 559,874,816-byte projector; 98,653,280-byte draft optional | 12 GB | `unsloth/gemma-4-E4B-it-GGUF` + `ggml-org/gemma-4-E4B-it-GGUF` (projector and draft) |
@@ -102,6 +108,7 @@ its n-gram table and 33 layers' experts, from the SSD as tokens need them. See
 | Qwen3.8 27B (UD-Q4_K_XL) | text; image and video with optional projector | download: 17,559,178,144-byte main GGUF; 927,607,488-byte projector optional | 32 GB | `unsloth/Qwen3.8-27B-GGUF` |
 | Muse-Glimmer 30B (UD-Q4_K_XL) | text; image with optional projector | download: 15,878,222,368-byte main GGUF; 2,051,685,088-byte projector optional | 32 GB | `unsloth/Muse-Glimmer-30B-GGUF` |
 | Qwen3.8 Flash Next (UD-Q2_K_XL) | text | download: three shards of 10,946,624, 49,979,779,296 and 28,878,402,944 bytes (78.9 GB) | 48 GB | `unsloth/Qwen3.8-Flash-Next-GGUF` |
+| Qwen3.8 Flash Next (UD-IQ1_M) | text; image with optional projector | download: three shards of 10,946,624, 49,988,981,792 and 24,538,827,360 bytes (74.54 GB total); 907,542,944-byte `mmproj-BF16.gguf` optional | 32 GB, experimental | `unsloth/Qwen3.8-Flash-Next-GGUF` |
 | Qwen-Image 2.1 (Q4_K_M) | text or a photo in, a picture out | download: 4,189,343,904-byte DiT + 5,027,784,800-byte Qwen3-VL-8B text encoder + 675,509,688-byte VAE + 1,159,029,824-byte vision projector | 24 GB | `Abiray/Qwen-Image-2.1-GGUF` + `Qwen/Qwen3-VL-8B-Instruct-GGUF` + `Comfy-Org/Qwen-Image-2.1` |
 | MiniMax-H3 (Q4_K) | text, or one or two photos as the first and last frames, in; a video with its soundtrack out | download: 11,420,663,904-byte denoiser + 18,218,065,024-byte Qwen3-VL-32B text encoder + 5,207,808,496-byte video VAE + 605,254,808-byte audio VAE + 2,776,833-byte `vocab.json`, 1,671,839-byte `merges.txt` and 11,003-byte `tokenizer_config.json` | 32 GB | `unsloth/MiniMax-H3-GGUF` + `MiniMaxAI/MiniMax-H3` (tokenizer files) |
 | MiniMax-H3 References (Q4_K) | text with up to nine photos, clips and recordings to feature in; a video with its soundtrack out | download: 11,381,096,544-byte denoiser, plus the same four companions as MiniMax-H3 (six files, 24.0 GB), linked from it when it is installed rather than downloaded again | 32 GB | `unsloth/MiniMax-H3-GGUF` + `MiniMaxAI/MiniMax-H3` (tokenizer files) |
@@ -113,14 +120,32 @@ sampling values (for Bonsai 2 27B, the publisher's thinking-mode recommendation:
 temperature 1.0, top-k 20, top-p 0.95, min-p 0.05; for Qwen3.8 Flash Next, the
 `general.sampling` values its GGUF carries: temperature 1.0, top-k 20, top-p 0.95,
 min-p 0). The Bonsai 2 card is marked Experimental: Bonsai2 has not been validated on
-iOS. So is Qwen3.8 Flash Next, which reads most of its weights from the SSD: how fast it
-answers depends on what the page cache holds at the time.
+iOS. Both Qwen3.8 Flash Next entries are Experimental and read most of their weights
+from SSD: how fast they answer depends on the available page cache and the SSD. Both
+support thinking, load a 32,768-token context with FP16 K/V, and use `LeanCaches` to
+limit the app's cache budget. Their license is
+[Qwen Community License 1.0](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE).
+The `qwen3.8-flash-next-iq1m` entry was validated through TensorAgent's catalog load
+path (`AgentAppHost.UseModel`) and Web UI HTTP/SSE on Windows with an RTX 3080 Laptop
+GPU (16 GB VRAM) and 32 GB system RAM. Text, image description and continuations
+completed; the 496-token image answer exactly matched the prior server answer, and
+the complete 1,115-token image follow-up reused 2,494 of 2,508 prompt tokens. This run
+used FP16 K/V, a 32,768-token context, lean caches and speculation disabled.
+The default n-gram speculation setting was also enabled through the real settings
+route for two short arithmetic turns: both returned `4` at EOS, with 69 of 89
+prompt tokens reused on the follow-up.
+The Windows Release app was built and its eight embedded catalog translations verified
+against source. These checks do not cover WinUI clicks, Mac/Metal, CPU-only devices,
+or performance comparisons between quantizations. Generated evidence is kept in
+ignored `docs/validation/tensoragent-qwen-iq1m/`.
 
 The Models page lists every entry, but only one that fits the device's memory tier
 can be loaded: an entry that needs more is shown greyed, marked "Too big" with both
 numbers, rather than hidden. Bonsai 2 27B needs the 16 GB tier, Qwen-Image 2.1 the 24 GB
-tier, Qwen3.8 27B, Muse-Glimmer 30B and both MiniMax-H3 entries the 32 GB tier, and
-Qwen3.8 Flash Next the 48 GB tier; the other four need the 12 GB tier or above. For an installed model
+tier, Qwen3.8 27B, Muse-Glimmer 30B, both MiniMax-H3 entries and Qwen3.8 Flash Next
+UD-IQ1_M the 32 GB tier, and Flash Next UD-Q2_K_XL the 48 GB tier; the other four
+need the 12 GB tier or above. Eligibility uses system RAM on both Mac and Windows;
+it does not certify every backend or device at that tier. For an installed model
 whose optional projector is missing, "Add vision" downloads just the projector (and
 the draft head, when the entry lists one that is not there yet); once it is on the
 device, "Enable vision" reloads the selected model with it.
@@ -924,7 +949,14 @@ The browser workflow also runs in the Mac app: with Qwen3.5 9B and the network s
 a local form, submit the value it read off the page, and return a screenshot of the
 result, in 66 s.
 
-### The Mac's own models
+<a id="the-macs-own-models"></a>
+
+### The desktop's larger models
+
+These entries are offered by system RAM tier on Mac and Windows. The measurements
+below are historical Mac app results; the separate IQ1_M Windows catalog-host
+validation above does not validate that variant on Mac or compare its performance
+to these runs.
 
 Measured on the same M5 Pro (48 GB) on 2026-09-30, `ggml_metal`, the Debug app, with each
 entry's files downloaded and verified by the app (Qwen3.8 27B's by `curl`, checked against
@@ -1038,7 +1070,7 @@ Fixed along the way, besides the hard links in "Downloads" below:
   does). WebKit on macOS played the short clip without ranges as well, so what this buys
   (seeking, and iOS's media loader) has not been observed in a run.
 
-Qwen3.8 Flash Next, on 2026-10-01 (ggml `353b63b`, unmodified): the Debug app, the three
+Qwen3.8 Flash Next (UD-Q2_K_XL), on 2026-10-01 (ggml `353b63b`, unmodified): the Debug app, the three
 shards downloaded, linked into its store and verified, 78.9 GB of weights on a Mac with
 51.5 GB of RAM. The engine planned the placement at load: the first 33 layers' routed
 experts (31.7 GB) run on the host straight from the file mapping, the GPU holds the other
@@ -1067,7 +1099,8 @@ ever read (see the [model card](../docs/models/qwen38-flash-next.md#larger-than-
 - **The tier.** 18.34 GB of resident weights, the 7.31 GB footprint and 5 GB for macOS make
   30.7 GB, and the 17.3 GB left must cache at least a third of the 31.7 GB of experts read
   from the SSD (`CatalogTests.EachDesktopEntryFitsItsTierBesideMacOS`). At 32 GB the
-  30.7 GB would leave too little for that cache, so the entry starts at 48 GB.
+  30.7 GB would leave too little for that cache, so the Q2 catalog entry retains its
+  48 GB minimum system RAM tier.
 
 ## Layout
 
@@ -1833,10 +1866,13 @@ checked and these were not:
   from the prompts and photos `chat-e2e.py` sends, and the two box-driven edits were also run
   on their authors' example photos. Object Remover failed on one of its two. How each fares
   on other subjects is up to the plug-in, and nothing here measures it.
-- **Qwen3.8 Flash Next on any other Mac.** It was measured on one 48 GB M5 Pro, in the
-  Debug app. A Mac with more memory gets a different plan from the engine (more layers'
-  experts on the GPU), which nothing here has measured; a Mac with less is not offered it.
-  Nor has the app's own downloader fetched its 78.9 GB: the three shards were downloaded
+- **Qwen3.8 Flash Next beyond the recorded configurations.** UD-Q2_K_XL was measured
+  in the Debug app on one 48 GB M5 Pro. A Mac with more memory gets a different expert
+  placement plan, which nothing here has measured; the Q2 entry retains its 48 GB tier.
+  UD-IQ1_M has Windows server validation at 32 GB system RAM and 16 GB CUDA VRAM,
+  but no recorded Mac/Metal or TensorAgent app end-to-end validation. Its 32 GB tier
+  remains experimental. Nor has the app's own downloader fetched the Q2 package's
+  78.9 GB: the three shards were downloaded
   with `curl` and hard-linked into the app's store. How the store counts a split's shards
   is covered by `Qwen38FlashNextCatalogTests`.
 - **Clips on a phone.** The two MiniMax-H3 entries need the 32 GB memory tier and

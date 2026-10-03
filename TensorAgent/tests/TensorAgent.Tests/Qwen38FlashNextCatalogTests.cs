@@ -18,6 +18,7 @@ namespace TensorAgent.Tests;
 /// file is larger than the memory of the tier it is offered from, because the engine reads its
 /// n-gram table and most of its experts from the SSD as tokens need them.
 /// </summary>
+[Collection(ProcessEnvironmentCollection.Name)]
 public sealed class Qwen38FlashNextCatalogTests : IDisposable
 {
     private const string Id = "qwen3.8-flash-next-q2kxl";
@@ -37,7 +38,8 @@ public sealed class Qwen38FlashNextCatalogTests : IDisposable
     [Fact]
     public void CatalogPinsTheThreeShardsOfThePublishedFile()
     {
-        CatalogModel model = Assert.Single(ModelCatalog.BuiltIn, m => m.Family == CatalogFamily.Qwen38FlashNext);
+        CatalogModel model = Assert.Single(ModelCatalog.BuiltIn, m => m.Id == Id);
+        Assert.Equal(CatalogFamily.Qwen38FlashNext, model.Family);
         Assert.Equal(Id, model.Id);
         Assert.Equal("Qwen3.8 Flash Next", model.DisplayName);
         Assert.Equal(CatalogArchitectureKind.MixtureOfExperts, model.Kind);
@@ -93,7 +95,7 @@ public sealed class Qwen38FlashNextCatalogTests : IDisposable
         Assert.True(model.SupportsThinking);
         Assert.True(model.Experimental);
         Assert.Equal(new CatalogSampling(1.0f, 20, 0.95f, 0.0f), model.Sampling);
-        Assert.Equal("Apache-2.0", model.License);
+        Assert.Equal("Qwen Community License 1.0", model.License);
     }
 
     [Fact]

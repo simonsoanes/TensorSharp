@@ -17,6 +17,7 @@ namespace TensorAgent.Tests;
 /// budget applied.
 /// </para>
 /// </summary>
+[Collection(ProcessEnvironmentCollection.Name)]
 public sealed class EngineMemoryPolicyTests : IDisposable
 {
     private readonly string? _savedContext = Environment.GetEnvironmentVariable(EngineMemoryPolicy.MaxContextVariable);
@@ -85,7 +86,7 @@ public sealed class EngineMemoryPolicyTests : IDisposable
     [Fact]
     public void AnEntryThatAsksForLeanCachesKeepsThePhonesBudgetOnTheDesktop()
     {
-        foreach (string id in new[] { "qwen3.8-27b-q4kxl", "muse-glimmer-30b-q4kxl", "qwen3.8-flash-next-q2kxl" })
+        foreach (string id in new[] { "qwen3.8-27b-q4kxl", "muse-glimmer-30b-q4kxl", "qwen3.8-flash-next-q2kxl", "qwen3.8-flash-next-iq1m" })
         {
             CatalogModel model = Entry(id);
             Assert.True(model.LeanCaches);
@@ -102,8 +103,29 @@ public sealed class EngineMemoryPolicyTests : IDisposable
         EngineMemoryPolicy.Apply(Entry("qwen3.5-9b-iq4xs"), AppSettings.DesktopDefaults(), DeviceClass.Desktop);
         Assert.Null(Environment.GetEnvironmentVariable(EngineMemoryPolicy.KvInitialTokensVariable));
         Assert.Null(Environment.GetEnvironmentVariable(EngineMemoryPolicy.RetainedFusedCacheMaxVariable));
-        Assert.Equal(new[] { "muse-glimmer-30b-q4kxl", "qwen3.8-27b-q4kxl", "qwen3.8-flash-next-q2kxl" },
+        Assert.Equal(new[] { "muse-glimmer-30b-q4kxl", "qwen3.8-27b-q4kxl", "qwen3.8-flash-next-iq1m", "qwen3.8-flash-next-q2kxl" },
             ModelCatalog.BuiltIn.Where(m => m.LeanCaches).Select(m => m.Id).OrderBy(id => id));
+    }
+
+    [Fact]
+    public void TheIq1MFlashEntryAppliesItsBoundedContextAndF16CacheOnTheDesktop()
+    {
+        CatalogModel model = Entry("qwen3.8-flash-next-iq1m");
+        // No user dtype override: exercise the entry's own precision rather than the
+        // global desktop preference. The existing override tests cover that preference.
+        AppSettings settings = AppSettings.DesktopDefaults();
+        settings.KvCacheDtype = string.Empty;
+
+        int context = EngineMemoryPolicy.Apply(model, settings, DeviceClass.Desktop);
+
+        Assert.Equal(32768, context);
+        Assert.Equal("32768", Environment.GetEnvironmentVariable(EngineMemoryPolicy.MaxContextVariable));
+        Assert.Equal("f16", Environment.GetEnvironmentVariable(EngineMemoryPolicy.KvCacheDtypeVariable));
+        var options = TensorSharp.Runtime.Scheduling.ExecutionOptions.FromEnvironment();
+        Assert.Equal(2048, options.KvInitialTokens);
+        Assert.Equal(1024, options.KvGenerationReserveMax);
+        Assert.Equal(1, options.RetainedFusedCacheBudget);
+        Assert.Equal(0, options.KvHolderPoolMax);
     }
 
     [Fact]

@@ -54,13 +54,20 @@ def output_path(value):
 
 
 class Client:
-    def __init__(self, url, timeout):
+    def __init__(self, url, timeout, cookie=None):
         self.address = urlsplit(url)
         require(self.address.scheme in ("http", "https") and self.address.hostname,
                 "--url must be an HTTP(S) server URL")
         require(not self.address.username and not self.address.query and not self.address.fragment,
                 "--url cannot contain credentials, query or fragment")
         self.timeout = timeout
+        self.cookie = cookie
+
+    def headers(self, content_type):
+        headers = {"Content-Type": content_type}
+        if self.cookie:
+            headers["Cookie"] = self.cookie
+        return headers
 
     def connection(self):
         cls = http.client.HTTPSConnection if self.address.scheme == "https" else http.client.HTTPConnection
@@ -73,7 +80,7 @@ class Client:
         connection = self.connection()
         try:
             raw = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
-            connection.request(method, self.path(route), raw, {"Content-Type": "application/json"})
+            connection.request(method, self.path(route), raw, self.headers("application/json"))
             response = connection.getresponse()
             data = response.read()
             require(response.status == 200, f"{route}: HTTP {response.status}: {data[:2048]!r}")
@@ -93,7 +100,7 @@ class Client:
         started = time.perf_counter()
         try:
             connection.request("POST", self.path("/api/upload"), data,
-                               {"Content-Type": "multipart/form-data; boundary=" + boundary})
+                               self.headers("multipart/form-data; boundary=" + boundary))
             response = connection.getresponse()
             payload = response.read()
             require(response.status == 200, f"Upload: HTTP {response.status}: {payload[:2048]!r}")
@@ -110,7 +117,7 @@ class Client:
         started = time.perf_counter()
         state = StreamState(protocol)
         try:
-            connection.request("POST", self.path(route), wire, {"Content-Type": "application/json"})
+            connection.request("POST", self.path(route), wire, self.headers("application/json"))
             response = connection.getresponse()
             evidence["http_status"] = response.status
             evidence["headers_ms"] = (time.perf_counter() - started) * 1000
@@ -411,7 +418,11 @@ def compare_reports(baseline, candidate):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--url", required=True)
-    parser.add_argument("--model", help="Served model ID; discovered from /v1/models when omitted")
+    parser.add_argument("--connection-file", type=Path,
+                        help="TensorAgentHost connection.json for loopback authentication; --url must match its baseUrl")
+    parser.add_argument("--model", help="Served model ID; discovered from the selected model endpoint when omitted")
+    parser.add_argument("--model-discovery", choices=("openai", "webui"), default="openai",
+                        help="Model metadata endpoint: /v1/models (default) or the Web UI host's /api/models")
     parser.add_argument("--protocol", choices=("webui", "openai"), default="webui")
     parser.add_argument("--cases", default="text,image")
     parser.add_argument("--image", type=Path)
@@ -440,6 +451,8 @@ def parse_args(argv=None):
     require(1 <= args.turns <= 8 and 1 <= args.repeats <= 20 and 1 <= args.max_tokens <= 4096,
             "Use 1..8 turns, 1..20 repeats, 1..4096 max tokens")
     require(math.isfinite(args.timeout) and args.timeout > 0, "--timeout must be finite and positive")
+    require(args.model_discovery != "webui" or args.protocol == "webui",
+            "--model-discovery webui requires --protocol webui")
     if "image" in args.cases:
         require(args.image and args.image.is_file(), "The image case requires an existing --image")
     return args
@@ -447,19 +460,40 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
-    client = Client(args.url, args.timeout)
     report = {"label": args.label, "started_utc": datetime.now(timezone.utc).isoformat(),
               "protocol": args.protocol, "url": args.url, "status": "failed", "failures": [], "runs": [],
-              "configuration": {name: getattr(args, name) for name in ("cases", "turns", "repeats", "max_tokens", "text_prompt", "continuation_prompt",
+              "configuration": {name: getattr(args, name) for name in ("model_discovery", "cases", "turns", "repeats", "max_tokens", "text_prompt", "continuation_prompt",
                   "thinking", "branches", "invalidation", "require_reuse", "require_full_reuse")},
               "limitations": "Serial HTTP requests only. Loading and startup prefix preparation excluded. Client TTFT begins before request upload and ends at first nonempty answer/reasoning delta. First answer latency is separate. Original photo is uploaded once; later workflows may reuse vision encodings. Repetition 1 is retained separately from later samples; first benchmark request does not imply an unused or cold host. Tool delegation and skill discovery are disabled in every request. Output is capped; inspect saved text before judging description quality. No skipped scenario counts as passed. Device/build/upstream provenance must be supplied by the operator."}
     try:
+        cookie = None
+        if args.connection_file:
+            connection = json.loads(args.connection_file.read_text(encoding="utf-8-sig"))
+            require(connection["baseUrl"].rstrip("/") == args.url.rstrip("/"),
+                    "--url must match the connection file's baseUrl")
+            cookie = connection["cookie"]
+            require(isinstance(cookie, str) and not any(c in cookie for c in "\r\n"),
+                    "Invalid connection cookie")
+        client = Client(args.url, args.timeout, cookie)
         if args.provenance:
             report["provenance"] = json.loads(args.provenance.read_text(encoding="utf-8"))
-        models = client.json("GET", "/v1/models")["data"]
-        if args.model is None:
-            require(len(models) == 1, "Specify --model when /v1/models returns more than one model")
-            args.model = models[0]["id"]
+        if args.model_discovery == "webui":
+            metadata = client.json("GET", "/api/models")
+            loaded = metadata.get("loaded")
+            require(isinstance(loaded, str) and loaded.strip(), "The Web UI host has no loaded model")
+            available = metadata.get("models")
+            require(isinstance(available, list) and loaded in available,
+                    "The loaded Web UI model is not present in /api/models")
+            require(args.model is None or args.model == loaded,
+                    "--model must match the Web UI host's loaded model")
+            args.model = loaded
+            models = [{"id": loaded}]
+            report["server_webui_models"] = metadata
+        else:
+            models = client.json("GET", "/v1/models")["data"]
+            if args.model is None:
+                require(len(models) == 1, "Specify --model when /v1/models returns more than one model")
+                args.model = models[0]["id"]
         report["model"] = args.model
         report["server_models"] = models
         image_message = None

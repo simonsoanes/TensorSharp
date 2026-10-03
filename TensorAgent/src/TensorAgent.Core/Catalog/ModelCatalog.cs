@@ -32,25 +32,26 @@ namespace TensorAgent.Core.Catalog;
 /// to 16 GB iPads.
 /// </para>
 /// <para>
-/// Qwen3.8 Flash Next's three shards were read on 2026-10-01 at unsloth/Qwen3.8-Flash-Next-GGUF
-/// main = 38bb39ee, and checked against a download of that revision.
+/// Qwen3.8 Flash Next's Q2_K_XL shards were read on 2026-10-01 and IQ1_M shards/projector
+/// on 2026-10-03 at unsloth/Qwen3.8-Flash-Next-GGUF main = 38bb39ee97821de2c9009abb7e93950eec396e66.
 /// </para>
 /// <para>
-/// The 24 and 32 GB tiers are the desktop app's (a Mac today; no iPhone or iPad has that
-/// much memory). Their entries are the models a phone can only run as one- or two-bit
+/// The 24 and 32 GB tiers are desktop tiers, including Windows and macOS. Their dense
+/// entries are the models a phone can only run as one- or two-bit
 /// quantizations that cost real quality, so they are offered at four bits where the
 /// memory exists rather than squeezed onto a phone. A Mac has no jetsam, so the tier is
 /// what the weights (which a dense model reads in full for every token) plus the app's
 /// measured footprint plus macOS need; below that every token pages the model in from
-/// disk. The two large chat models also keep the phone's cache budget
+/// disk. The large chat entries also keep the phone's cache budget
 /// (<see cref="CatalogModel.LeanCaches"/>), without which the engine's desktop defaults
 /// alone grew the app to 18.8 GB beside Qwen3.8 27B's weights.
 /// </para>
 /// <para>
-/// The 48 GB tier holds the one entry whose file is larger than that tier's memory, on purpose:
-/// Qwen3.8 Flash Next reads its n-gram table and most of its experts from the SSD on demand
-/// (<see cref="CatalogModel.WeightsPagedFromDiskBytes"/>), so what has to fit is its resident
-/// half beside the page cache the engine plans for the offloaded experts, not the 79 GB file.
+/// Qwen3.8 Flash Next's file is larger than its tier's RAM, on purpose: the Q2_K_XL entry
+/// is offered from 48 GB and the IQ1_M entry from 32 GB (validated on Windows CUDA with
+/// 16 GB VRAM). The engine reads its n-gram table and most of its experts from the SSD on demand
+/// (<see cref="CatalogModel.WeightsPagedFromDiskBytes"/>). Resident weights, active caches,
+/// compute buffers and headroom for paging determine RAM needs, separately from storage size.
 /// </para>
 /// </summary>
 public static class ModelCatalog
@@ -385,8 +386,51 @@ public static class ModelCatalog
             Sampling = new CatalogSampling(1.0f, 20, 0.95f, 0.0f),
             SupportsThinking = true,
             Experimental = true,
-            License = ApacheLicense,
+            License = "Qwen Community License 1.0",
             Notes = "catalog.model.qwen38FlashNext.notes",
+        },
+        new CatalogModel
+        {
+            // A separate artifact identity: the working 32 GB Windows/CUDA configuration
+            // uses IQ1_M, not the Q2_K_XL files of the existing 48 GB entry.
+            Id = "qwen3.8-flash-next-iq1m",
+            DisplayName = "Qwen3.8 Flash Next",
+            Family = CatalogFamily.Qwen38FlashNext,
+            Kind = CatalogArchitectureKind.MixtureOfExperts,
+            Parameters = "catalog.model.qwen38FlashNext.parameters",
+            Quantization = "UD-IQ1_M",
+            Files = new[]
+            {
+                new CatalogFile(CatalogFileRole.Weights, "Qwen3.8-Flash-Next-UD-IQ1_M-00001-of-00003.gguf",
+                    Hf("unsloth/Qwen3.8-Flash-Next-GGUF", "UD-IQ1_M/Qwen3.8-Flash-Next-UD-IQ1_M-00001-of-00003.gguf"),
+                    10_946_624, "6584f289c808a486ac33aef20906774bcf6616785535c03b842072951e5112d2"),
+                new CatalogFile(CatalogFileRole.WeightsShard, "Qwen3.8-Flash-Next-UD-IQ1_M-00002-of-00003.gguf",
+                    Hf("unsloth/Qwen3.8-Flash-Next-GGUF", "UD-IQ1_M/Qwen3.8-Flash-Next-UD-IQ1_M-00002-of-00003.gguf"),
+                    49_988_981_792, "a7cbafba2cbc1ccde484ed05e1bbeaef4d67e0924ef51cc8b8de18e62edb5586"),
+                new CatalogFile(CatalogFileRole.WeightsShard, "Qwen3.8-Flash-Next-UD-IQ1_M-00003-of-00003.gguf",
+                    Hf("unsloth/Qwen3.8-Flash-Next-GGUF", "UD-IQ1_M/Qwen3.8-Flash-Next-UD-IQ1_M-00003-of-00003.gguf"),
+                    24_538_827_360, "ae757ff9347651adacc7746f137d8c29b51f25cf6bb27cd49086ef45bd8cc203"),
+                new CatalogFile(CatalogFileRole.Projector, "mmproj-BF16.gguf",
+                    Hf("unsloth/Qwen3.8-Flash-Next-GGUF", "mmproj-BF16.gguf"),
+                    907_542_944, "2e788f8c511d8093c7b43cb87b2fd7e14228340318057f8fb20c86df2efe2355", Optional: true),
+            },
+            Modalities = CatalogModalities.Image,
+            // Validated with 32 GB system RAM and 16 GB CUDA VRAM. These are mixed
+            // quantizations; 74.5 GB is storage, not a requirement to keep every byte in RAM.
+            // On that device 40/48 expert layers (34,668,544,000 bytes, summed from GGUF
+            // tensor headers) and the 28.8 GB n-gram table are read from the mapping on demand.
+            // The automatic planner adjusts expert placement to accelerator memory;
+            // throughput and page-cache headroom vary with the device and SSD.
+            MinDeviceMemoryGB = 32,
+            WeightsPagedFromDiskBytes = 28_800_138_240 + 34_668_544_000,
+            ContextLength = 32768,
+            KvCacheDtype = "f16",
+            LeanCaches = true,
+            Sampling = new CatalogSampling(1.0f, 20, 0.95f, 0.0f),
+            SupportsThinking = true,
+            Experimental = true,
+            License = "Qwen Community License 1.0",
+            Notes = "catalog.model.qwen38FlashNextIq1m.notes",
         },
         new CatalogModel
         {
