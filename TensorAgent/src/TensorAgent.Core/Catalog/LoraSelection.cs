@@ -8,6 +8,7 @@
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
+using TensorAgent.Core.Localization;
 using TensorAgent.Core.Settings;
 using TensorSharp.Runtime;
 
@@ -65,26 +66,26 @@ public static class LoraSelection
                     seen.Remove(choice.Id);
                     continue;
                 }
-                error = $"There is no LoRA plug-in called '{choice.Id}'.";
+                error = Loc.T("host.loras.unknown", ("id", choice.Id));
                 return null;
             }
             if (!wasOn.Contains(lora.Id) && !store.IsInstalled(lora))
             {
-                error = $"{lora.DisplayName} is not downloaded yet.";
+                error = Loc.T("host.loras.notDownloaded", ("lora", lora.DisplayName));
                 return null;
             }
             if (lora.Kind == LoraKind.Speed)
             {
                 if (speed is not null)
                 {
-                    error = $"{speed.DisplayName} and {lora.DisplayName} both set the number of steps; use one of them.";
+                    error = Loc.T("host.loras.twoSpeeds", ("first", speed.DisplayName), ("second", lora.DisplayName));
                     return null;
                 }
                 speed = lora;
             }
             if (!float.IsFinite(choice.Strength) && lora.StrengthAdjustable)
             {
-                error = $"{lora.DisplayName}: the strength must be a number.";
+                error = Loc.T("host.loras.strengthNotNumber", ("lora", lora.DisplayName));
                 return null;
             }
             float strength = lora.StrengthAdjustable
@@ -129,7 +130,7 @@ public static class LoraSelection
                 continue;
             if (!store.IsInstalled(lora))
             {
-                error = $"{lora.DisplayName} is turned on but its files are missing. Download it again under LoRAs, or turn it off.";
+                error = Loc.T("host.loras.filesMissing", ("lora", lora.DisplayName));
                 return null;
             }
             chosen.Add((lora, choice.Strength));
@@ -138,7 +139,7 @@ public static class LoraSelection
         CatalogLora[] speeds = chosen.Where(c => c.Lora.Kind == LoraKind.Speed).Select(c => c.Lora).ToArray();
         if (speeds.Length > 1)
         {
-            error = $"{speeds[0].DisplayName} and {speeds[1].DisplayName} both set the number of steps; turn one of them off under LoRAs.";
+            error = Loc.T("host.loras.twoSpeedsSaved", ("first", speeds[0].DisplayName), ("second", speeds[1].DisplayName));
             return null;
         }
         // A task that works only on the model's own schedule keeps it: the speed plug-in sits

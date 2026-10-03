@@ -186,7 +186,7 @@ public static class MultipartFormReader
             int n = await stream.ReadAsync(_buf.AsMemory(_end, _buf.Length - _end), ct).ConfigureAwait(false);
             if (n == 0) { _eof = true; return false; }
             if (n > maxBodyBytes - _readBytes)
-                throw new TensorSharp.Server.Hosting.UploadLimitExceededException("Upload exceeds the request size limit.", 413);
+                throw new TensorSharp.Server.Hosting.UploadLimitExceededException(Localization.Loc.T("host.upload.tooLarge"), 413);
             _readBytes += n;
             _end += n;
             return true;

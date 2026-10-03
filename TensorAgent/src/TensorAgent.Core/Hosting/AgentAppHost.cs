@@ -15,6 +15,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using TensorAgent.Core.Catalog;
 using TensorAgent.Core.Downloads;
 using TensorAgent.Core.JavaScript;
+using TensorAgent.Core.Localization;
 using TensorAgent.Core.Python;
 using TensorAgent.Core.Sessions;
 using TensorAgent.Core.Sharing;
@@ -103,15 +104,21 @@ public sealed class AgentAppHost : IDisposable
             paths.SettingsFile,
             paths.DeviceClass == DeviceClass.Desktop ? AppSettings.DesktopDefaults : null);
         AppSettings settings = Settings.Load();
+        // First, so every string built from here on -- the host's own messages, then the
+        // native screens and the page -- is in the language the user gets.
+        Localization.Loc.Apply(settings);
 
-        Models = new ModelStore(paths.ModelsDirectory);
+        Models = new ModelStore(paths.ResolveModelsDirectory(settings));
         // Weights whose catalog entry is gone -- the previous quantization of an entry
         // that now points at a different file. Nothing else can reach them: the Models
         // list is built from the catalog, so a directory no entry claims has no row and
         // no delete button, and it is gigabytes. Swept once per launch, before anything
         // reads the store. Only RETIRED ids go (ModelCatalog.Retired): an id this build
         // merely does not know may be a newer build's, sharing this directory.
-        Models.SweepOrphanedModels();
+        // The automatic sweep also removes loose files. A custom folder may hold
+        // files the user put there themselves, so only sweep the app's default folder.
+        if (string.IsNullOrWhiteSpace(settings.ModelCacheDirectory))
+            Models.SweepOrphanedModels();
         // And the checkpoints of models the catalog has retired: a directory no entry
         // claims has no delete button either.
         PrefixCheckpointFileStore.SweepOrphans(
@@ -369,7 +376,8 @@ public sealed class AgentAppHost : IDisposable
         Server.MapAgent(
             Catalog, Models, Conversations, Settings, DescribeEngine, RaisePageEvent, Downloads,
             onSettingsChanged: ApplySettings, describeModel: DescribeModelState, shares: Shares,
-            hasShareContainer: () => ShareInbox is not null, discardShare: DiscardPendingShare);
+            hasShareContainer: () => ShareInbox is not null, discardShare: DiscardPendingShare,
+            onModelCacheDirectoryChanged: SetModelCacheDirectory);
         Server.MapLoras(this);
     }
 
@@ -670,7 +678,7 @@ public sealed class AgentAppHost : IDisposable
             throw new WebUiRequestRejectedException(409, new
             {
                 code = "multiple_shared_drafts",
-                error = "Each shared item starts its own chat. Send or remove the current shared item before opening the next one.",
+                error = Loc.T("host.share.oneAtATime"),
             });
         }
 
@@ -682,7 +690,7 @@ public sealed class AgentAppHost : IDisposable
             throw new WebUiRequestRejectedException(409, new
             {
                 code = "multiple_shared_drafts",
-                error = "Each shared item starts its own chat. Send or remove the current shared item before opening the next one.",
+                error = Loc.T("host.share.oneAtATime"),
             });
         }
 
@@ -696,7 +704,7 @@ public sealed class AgentAppHost : IDisposable
                 throw new WebUiRequestRejectedException(409, new
                 {
                     code = "shared_draft_unavailable",
-                    error = "The shared draft changed before Send was accepted. Review the composer and try again.",
+                    error = Loc.T("host.share.draftChanged"),
                 });
             }
 
@@ -1246,8 +1254,7 @@ public sealed class AgentAppHost : IDisposable
                 attemptBody = WithTheAnswerSoFar(body, soFar);
                 yield return new
                 {
-                    restart = "The GPU was interrupted while the app was in the background. "
-                              + "Picking this answer up where it stopped.",
+                    restart = Loc.T("host.turn.restart.carryOn"),
                 };
             }
             else
@@ -1257,8 +1264,7 @@ public sealed class AgentAppHost : IDisposable
                 yield return new
                 {
                     replace = string.Empty,
-                    restart = "The GPU was taken away while the app was in the background. "
-                              + "Starting this answer again.",
+                    restart = Loc.T("host.turn.restart.fromTheTop"),
                 };
             }
         }
@@ -1700,7 +1706,7 @@ public sealed class AgentAppHost : IDisposable
                 if (!ModelService.UnloadModelAndRecreateBackend())
                 {
                     TraceBackground("the GPU backend could not be rebuilt; the model is not reloaded");
-                    SetModelLoad(ModelLoadState.Failed, "The GPU backend could not be rebuilt.");
+                    SetModelLoad(ModelLoadState.Failed, Loc.T("host.models.rebuildFailed"));
                     return false;
                 }
 
@@ -2050,7 +2056,32 @@ public sealed class AgentAppHost : IDisposable
         // with it and the next message is planned with or without delegation.
         Options.RepointMultiAgent(settings.MultiAgentEnabled);
         ApplySpeculationSetting(settings);
-        _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation("settings applied: {Engine}", DescribeEngine());
+        // The interface language: Loc raises Changed when it moves, and the native screens
+        // and the page follow it from there.
+        Localization.Loc.Apply(settings);
+        _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation("settings applied: {Engine}", DescribeEngineForLog());
+    }
+
+    /// <summary>Save and switch the folder used for model downloads and subsequent
+    /// loads. Existing files and the currently loaded model stay where they are.</summary>
+    public void SetModelCacheDirectory(string? directory)
+    {
+        // Keep the root fixed while a load resolves weights and companions. Save only
+        // after validation, so a failed change leaves both the store and settings intact.
+        lock (_modelGate)
+        {
+            string root = AgentPaths.ResolveModelsDirectory(directory, Paths.ModelsDirectory);
+            Downloads.ChangeModelDirectory(root, () => Settings.Update(current =>
+            {
+                current.ModelCacheDirectory = string.IsNullOrWhiteSpace(directory) ? string.Empty : root;
+                return current;
+            }));
+            if (!ModelService.IsLoaded)
+            {
+                AppSettings saved = Settings.Load();
+                Options.RepointHostedModel(Paths.SelectedModelPath(saved), Paths.SelectedProjectorPath(saved) ?? string.Empty);
+            }
+        }
     }
 
     /// <summary>
@@ -2078,8 +2109,14 @@ public sealed class AgentAppHost : IDisposable
 
     internal string ApplySpeculationSetting(AppSettings settings)
     {
-        CatalogModel? model = settings.SelectedModelId is { Length: > 0 } id ? ModelCatalog.Find(id) : null;
-        string? draftHead = model is null ? null : Models.CompanionPath(model, CatalogFileRole.Draft);
+        CatalogModel? loadedModel = ModelService.IsLoaded ? LoadedCatalogModel() : null;
+        CatalogModel? model = loadedModel
+            ?? (settings.SelectedModelId is { Length: > 0 } id ? ModelCatalog.Find(id) : null);
+        // A folder change leaves the current engine standing. Its draft belongs beside
+        // the weights it loaded, even though the next load reads the new model folder.
+        string? draftHead = loadedModel is not null
+            ? InstalledDraftPath(loadedModel, Path.GetDirectoryName(ModelService.LoadedModelPath)!)
+            : model is null ? null : Models.CompanionPath(model, CatalogFileRole.Draft);
         string note = SpeculationPolicy.PrepareLoad(settings, draftHead);
         bool draftAttached = SpeculationPolicy.SpeculatesWithDraftHead(
             draftHead, ModelService.Model is IDraftHead { HasDraftHead: true });
@@ -2088,6 +2125,15 @@ public sealed class AgentAppHost : IDisposable
         string account = $"{note}; algorithm {algorithm}; {(live ? "applied to the running engine" : "no engine standing, applies at the next load")}";
         HostLog.LogInformation("{Speculation}", account);
         return account;
+    }
+
+    private static string? InstalledDraftPath(CatalogModel model, string directory)
+    {
+        CatalogFile? draft = model.Files.FirstOrDefault(f => f.Role == CatalogFileRole.Draft);
+        if (draft is null)
+            return null;
+        string path = Path.Combine(directory, draft.FileName);
+        return File.Exists(path) && new FileInfo(path).Length == draft.Bytes ? path : null;
     }
 
     private int _speculationBenchStarted;
@@ -2113,19 +2159,33 @@ public sealed class AgentAppHost : IDisposable
     /// </summary>
     public string DescribeEngine()
     {
-        var parts = new List<string>
-        {
-            _embeddedBackend?.Describe() ?? $"native process shell ({Backend.Shell?.Name ?? "unavailable"}); "
-                + string.Join(", ", CodeEnvironment.AvailableTools),
-        };
+        // The embedded backend describes itself (Shell/, whose words stay as they are);
+        // everything said here is in the interface language.
+        var parts = new List<string> { _embeddedBackend?.Describe() ?? DescribeProcessShell() };
         // Asked of the runner rather than of the field, because the runner is always
         // there now and it is its answer -- read live from CodeExec.Enabled -- that
         // decides whether the model is offered the tools at all.
-        parts.Add(CodeRunner is { CanRun: true } ? "code execution on" : "code execution off");
-        parts.Add(CodeExec.AllowNetwork ? "network on" : "network off");
-        parts.Add($"{Skills.Skills.Count} skills");
+        parts.Add(CodeRunner is { CanRun: true } ? Loc.T("host.engine.codeOn") : Loc.T("host.engine.codeOff"));
+        parts.Add(CodeExec.AllowNetwork ? Loc.T("host.engine.networkOn") : Loc.T("host.engine.networkOff"));
+        parts.Add(Loc.T("host.engine.skills", ("count", Skills.Skills.Count)));
         return string.Join(" · ", parts);
+
+        string DescribeProcessShell()
+        {
+            string tools = string.Join(", ", CodeEnvironment.AvailableTools);
+            return Backend.Shell is { } shell
+                ? Loc.T("host.engine.processShell", ("shell", shell.Name), ("tools", tools))
+                : Loc.T("host.engine.processShellUnavailable", ("tools", tools));
+        }
     }
+
+    /// <summary>The same line in English, whatever the interface language, for the logs.</summary>
+    public string DescribeEngineForLog() => string.Join(" · ",
+        _embeddedBackend?.Describe() ?? $"native process shell ({Backend.Shell?.Name ?? "unavailable"}); "
+            + string.Join(", ", CodeEnvironment.AvailableTools),
+        CodeRunner is { CanRun: true } ? "code execution on" : "code execution off",
+        CodeExec.AllowNetwork ? "network on" : "network off",
+        $"{Skills.Skills.Count} skills");
 
     /// <summary>
     /// Run a handful of representative commands through the real backend and report
@@ -2482,7 +2542,8 @@ public sealed class AgentAppHost : IDisposable
 
                 if (!File.Exists(weights))
                 {
-                    var missing = new FileNotFoundException($"{model.DisplayName} is not downloaded yet.", weights);
+                    var missing = new FileNotFoundException(
+                        Loc.T("host.models.notDownloaded", ("model", model.DisplayName)), weights);
                     SetModelLoad(ModelLoadState.Failed, missing.Message);
                     throw missing;
                 }
@@ -2496,7 +2557,7 @@ public sealed class AgentAppHost : IDisposable
                 {
                     string path = Models.PathFor(model, requiredProjector);
                     var missing = new FileNotFoundException(
-                        $"{model.DisplayName}'s image projector is not downloaded yet.", path);
+                        Loc.T("host.models.projectorNotDownloaded", ("model", model.DisplayName)), path);
                     SetModelLoad(ModelLoadState.Failed, missing.Message);
                     throw missing;
                 }
@@ -2512,7 +2573,7 @@ public sealed class AgentAppHost : IDisposable
                     && Models.StateOf(model) != InstallState.Installed)
                 {
                     var incomplete = new FileNotFoundException(
-                        $"{model.DisplayName} is not completely downloaded yet.", Models.DirectoryFor(model));
+                        Loc.T("host.models.incomplete", ("model", model.DisplayName)), Models.DirectoryFor(model));
                     SetModelLoad(ModelLoadState.Failed, incomplete.Message);
                     throw incomplete;
                 }
@@ -2615,9 +2676,9 @@ public sealed class AgentAppHost : IDisposable
                 if (loaded is null)
                 {
                     if (refusals.Count == 0)
-                        refusals.Add("no GPU backend in this build, and a video model is not run on the CPU");
+                        refusals.Add(Loc.T("host.models.noGpuForVideo"));
                     var refused = new InvalidOperationException(
-                        $"{model.DisplayName} could not be loaded on any backend this build offers:"
+                        Loc.T("host.models.loadRefused", ("model", model.DisplayName))
                         + Environment.NewLine + "  " + string.Join(Environment.NewLine + "  ", refusals));
                     SetModelLoad(ModelLoadState.Failed, refused.Message);
                     throw refused;
@@ -2762,8 +2823,9 @@ public sealed class AgentAppHost : IDisposable
         string? loaded = ModelService.LoadedModelPath;
         return string.IsNullOrEmpty(loaded)
             ? null
-            : ModelCatalog.BuiltIn.FirstOrDefault(m => string.Equals(
-                Path.Combine(Paths.ModelsDirectory, m.Id, m.Weights.FileName), loaded, StringComparison.Ordinal));
+            : ModelCatalog.BuiltIn.FirstOrDefault(m =>
+                string.Equals(Path.GetFileName(Path.GetDirectoryName(loaded)), m.Id, StringComparison.Ordinal)
+                && string.Equals(Path.GetFileName(loaded), m.Weights.FileName, StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -2790,7 +2852,7 @@ public sealed class AgentAppHost : IDisposable
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
             HostLog.LogWarning(ex, "preparing the LoRA plug-ins failed");
-            return ImageTurns.Preparation.Refused("The LoRA plug-ins could not be prepared: " + ex.Message);
+            return ImageTurns.Preparation.Refused(Loc.T("host.loras.prepareFailed", ("reason", ex.Message)));
         }
     }
 
@@ -3006,6 +3068,21 @@ public sealed record AgentPaths(string DataRoot, string CacheRoot)
     public DeviceClass DeviceClass { get; init; } = DeviceClass.Phone;
 
     public string ModelsDirectory => Path.Combine(CacheRoot, "models");
+
+    /// <summary>The configured model folder, or the installation's default when unset.</summary>
+    public string ResolveModelsDirectory(AppSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        return ResolveModelsDirectory(settings.ModelCacheDirectory, ModelsDirectory);
+    }
+
+    internal static string ResolveModelsDirectory(string? directory, string defaultDirectory)
+    {
+        string path = string.IsNullOrWhiteSpace(directory) ? defaultDirectory : directory.Trim();
+        if (!string.IsNullOrWhiteSpace(directory) && !Path.IsPathFullyQualified(path))
+            throw new ArgumentException(Loc.T("settings.storage.modelCache.absolutePath"), nameof(directory));
+        return Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+    }
     /// <summary>The LoRA plug-ins (<see cref="LoraStore"/>): beside the models, not inside a
     /// model's own directory, which the store's completeness check walks.</summary>
     public string LorasDirectory => Path.Combine(CacheRoot, "loras");
@@ -3062,8 +3139,8 @@ public sealed record AgentPaths(string DataRoot, string CacheRoot)
             ? ModelCatalog.Find(id)
             : null;
         return model is null
-            ? Path.Combine(ModelsDirectory, "no-model-selected.gguf")
-            : Path.Combine(ModelsDirectory, model.Id, model.Weights.FileName);
+            ? Path.Combine(ResolveModelsDirectory(settings), "no-model-selected.gguf")
+            : Path.Combine(ResolveModelsDirectory(settings), model.Id, model.Weights.FileName);
     }
 
     /// <summary>The multimodal projector beside the selected model, or null when it has none.</summary>
@@ -3073,7 +3150,7 @@ public sealed record AgentPaths(string DataRoot, string CacheRoot)
             ? ModelCatalog.Find(id)
             : null;
         return model?.Projector is { } projector
-            ? Path.Combine(ModelsDirectory, model.Id, projector.FileName)
+            ? Path.Combine(ResolveModelsDirectory(settings), model.Id, projector.FileName)
             : null;
     }
 }

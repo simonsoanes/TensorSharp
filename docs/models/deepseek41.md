@@ -1209,7 +1209,17 @@ path, not a serving one: no throughput, load time or resident footprint has been
 measured for a full checkpoint on it.
 
 `--backend cuda`, the direct-CUDA engine, also runs V4.1 with its own kernels and
-no ggml. It is not yet held to a numerical gate — the CUDA backend notes,
+no ggml. It has per-sequence slots, batched decode, retained conversation state and
+local whole-layer placement through `--layer-split N`; routed-expert `--tp N`
+remains a `ggml_cuda` mode. The source includes targeted numerical contracts:
+[`Dsv4ExpertKernelTests`](../../InferenceWeb.Tests/Dsv4ExpertKernelTests.cs)
+checks synthetic quantized expert projections against upstream dequantization,
+while [`Dsv41CudaSlotTests`](../../InferenceWeb.Tests/Dsv41CudaSlotTests.cs)
+checks slot isolation, batched decode, ring rewind and retained state against a
+fresh run of the same direct engine, at 1e-5 of the largest logit. These are
+kernel and state-consistency checks, not an independent full-model numerical
+oracle or full-checkpoint quality validation. Model/device-gated tests require
+their fixture and CUDA hardware; unavailable cases are skips. The CUDA backend notes,
 `docs/validation/deepseek41-cuda-backend/README.md` (local validation evidence, not committed),
 record what has been verified and what blocks the rest. `--backend mlx` remains refused.
 
@@ -1344,7 +1354,7 @@ original output limit retain precedence.
   [Running on the ggml CPU backend](#running-on-the-ggml-cpu-backend). `cpu`
   runs a pure-C# V4.1 executor checked against the PyTorch reference at
   2e-5, and `cuda` runs V4.1 through the direct-CUDA engine's own kernels,
-  which has no numerical gate yet; both are correctness and portability paths
+  which has targeted kernel/slot contracts but no independent full-checkpoint numerical gate; both are correctness and portability paths
   rather than serving ones. `mlx` fails before the weights are read, rather
   than loading V4.1 weights into a graph that does not implement it.
 - Execution uses one GPU by default. `--layer-split N` selects whole-layer

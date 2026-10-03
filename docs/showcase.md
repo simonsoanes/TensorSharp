@@ -4,7 +4,7 @@
 
 > Part of the [TensorSharp](../README.md) documentation. The README shows these screenshots in [See it in action](../README.md#see-it-in-action).
 
-One engine, four ways to use it. Each screenshot is an unedited capture of a real run on an Apple M5 Pro (48 GB), taken on 2026-09-30.
+One engine, four ways to use it: terminal inference, browser chat and code work, a mobile agent, and desktop image editing. The CLI, Web UI and iPhone-simulator captures were taken on an Apple M5 Pro (48 GB) on 2026-09-30. The desktop capture shows a saved Qwen-Image-2.1 edit in the current Mac app on 2026-10-02; it is not a new inference benchmark.
 
 ## TensorSharp.Cli: models in your terminal
 
@@ -32,8 +32,8 @@ TensorAgent is a native iPhone and iPad app on the same engine. It downloads a m
 
 ## TensorAgent on the desktop: macOS and Windows
 
-The same project builds a Mac app, and a Windows app that has not yet been built or run. On the Mac, the model's code runs as real `bash`, `python3` and `node` processes confined by the macOS sandbox, and the Playwright skill can drive a browser. See [TensorAgent on the desktop](../TensorAgent/README.md#on-the-desktop-macos-and-windows).
+TensorAgent brings text and photo/file chat, agentic code and browser work, image generation/editing, and video with audio into the same conversation interface. The Mac catalog includes Qwen-Image-2.1, selectable LoRA plug-ins and a local selection editor, plus MiniMax-H3. Model availability depends on memory. On the Mac, code runs as real `bash`, `python3` and `node` processes confined by the macOS sandbox, and the Playwright skill can drive a browser. The same project has a Windows head with bounded chat and tool validation; image/audio/video generation there remains unverified. See [TensorAgent on the desktop](../TensorAgent/README.md#on-the-desktop-macos-and-windows).
 
-<p align="center"><img src="../website/assets/screenshots/tensoragent-mac.png" alt="TensorAgent on a Mac: Qwen3.5 9B wrote a Python file with a Roman-numeral converter and unit tests, ran them, fixed the function when the first run failed, and reran until all five tests passed" width="880"></p>
+<p align="center"><img src="../website/assets/screenshots/tensoragent-mac.png" alt="TensorAgent on a Mac: a saved Qwen-Image-2.1 image edit changes a TensorSharp banner to a starry blue night sky, with Compare original and Edit again controls" width="880"></p>
 
-<sub>Qwen3.5 9B (IQ4_XS) on Metal. The model wrote a Python file with a Roman-numeral converter and its unit tests, and ran it with the Mac's own `python3` inside the macOS sandbox. The first run failed, so it fixed the function (one malformed patch was rejected on the way) and reran until all five tests passed.</sub>
+<sub>A saved Qwen-Image-2.1 (Q4_K_M) edit shown in the current Mac Catalyst app on an M5 Pro (48 GB), using GGML Metal: “Make the background a deep blue night sky with stars, keep the text unchanged.” The result has Compare original and Edit again controls. This capture displays a completed conversation; it does not measure a fresh edit or demonstrate a mask or LoRA.</sub>

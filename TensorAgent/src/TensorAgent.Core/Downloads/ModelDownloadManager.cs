@@ -14,6 +14,7 @@ using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using TensorAgent.Core.Catalog;
+using TensorAgent.Core.Localization;
 
 namespace TensorAgent.Core.Downloads;
 
@@ -83,6 +84,7 @@ public sealed class ModelDownloadManager : IDisposable
     private readonly ModelStore _store;
     private readonly ILogger _log;
     private readonly ConcurrentDictionary<string, Job> _jobs = new(StringComparer.Ordinal);
+    private readonly object _jobsGate = new();
     private int _running;
     private bool _disposed;
 
@@ -145,6 +147,34 @@ public sealed class ModelDownloadManager : IDisposable
         _jobs.TryGetValue(modelId ?? string.Empty, out Job? job) ? job.Status : null;
 
     /// <summary>
+    /// Change the model directory between transfers and forget jobs belonging to the
+    /// previous library. Starting a job and switching directories share this lock so a
+    /// queued transfer cannot begin against an unexpected root.
+    /// </summary>
+    internal void ChangeModelDirectory(string root, Action? beforeChange = null)
+    {
+        lock (_jobsGate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (string.Equals(_store.Root, root,
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            {
+                _store.ChangeRoot(root, beforeChange);
+                return;
+            }
+            if (IsBusy)
+                throw new InvalidOperationException(Loc.T("settings.storage.modelCache.busy"));
+
+            _store.ChangeRoot(root, beforeChange);
+            foreach (KeyValuePair<string, Job> entry in _jobs.ToArray())
+            {
+                if (_jobs.TryRemove(entry))
+                    entry.Value.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
     /// Start downloading <paramref name="model"/>, or return the running job's status if
     /// it is already being downloaded.
     ///
@@ -180,21 +210,19 @@ public sealed class ModelDownloadManager : IDisposable
         string key, IReadOnlyCollection<CatalogFileRole>? optionalRoles,
         Func<IProgress<ModelDownloadProgress>, CancellationToken, IReadOnlyCollection<CatalogFileRole>?, Task> download)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-
-        while (true)
+        lock (_jobsGate)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             if (_jobs.TryGetValue(key, out Job? existing))
             {
                 if (existing.Status.IsRunning)
                     return existing.Status;
-                if (!_jobs.TryRemove(new KeyValuePair<string, Job>(key, existing)))
-                    continue;   // somebody else replaced it; look again
+                _jobs.TryRemove(new KeyValuePair<string, Job>(key, existing));
+                existing.Dispose();
             }
 
             var job = new Job(key, optionalRoles);
-            if (!_jobs.TryAdd(key, job))
-                continue;
+            _jobs[key] = job;
 
             // The increment's own result, not a second read of the field: the pair
             // (rise on 0->1, fall on 1->0) is what the iOS side turns into a
@@ -234,25 +262,28 @@ public sealed class ModelDownloadManager : IDisposable
     public IReadOnlyList<string> ResumeInterrupted(Func<string, CatalogModel?> find)
     {
         ArgumentNullException.ThrowIfNull(find);
-        if (_disposed)
-            return Array.Empty<string>();
-
-        var resumed = new List<string>();
-        foreach (Job job in _jobs.Values.ToArray())
+        lock (_jobsGate)
         {
-            if (job.Status.State != DownloadState.Failed)
-                continue;
-            if (find(job.Status.ModelId) is not { } model)
-                continue;
-            _log.LogInformation("resuming the interrupted download of {Model}", model.Id);
-            // Preserve the transfer the user actually requested. In particular, an
-            // explicit projector-only download must not turn into a required-files-only
-            // no-op merely because the global optional-download setting is off when
-            // iOS brings the app back to the foreground.
-            Start(model, job.RequestedOptionalRoles);
-            resumed.Add(model.Id);
+            if (_disposed)
+                return Array.Empty<string>();
+
+            var resumed = new List<string>();
+            foreach (Job job in _jobs.Values.ToArray())
+            {
+                if (job.Status.State != DownloadState.Failed)
+                    continue;
+                if (find(job.Status.ModelId) is not { } model)
+                    continue;
+                _log.LogInformation("resuming the interrupted download of {Model}", model.Id);
+                // Preserve the transfer the user actually requested. In particular, an
+                // explicit projector-only download must not turn into a required-files-only
+                // no-op merely because the global optional-download setting is off when
+                // iOS brings the app back to the foreground.
+                Start(model, job.RequestedOptionalRoles);
+                resumed.Add(model.Id);
+            }
+            return resumed;
         }
-        return resumed;
     }
 
     /// <summary>
@@ -329,16 +360,21 @@ public sealed class ModelDownloadManager : IDisposable
 
     public void Dispose()
     {
-        if (_disposed)
-            return;
-        _disposed = true;
-        foreach (Job job in _jobs.Values.ToArray())
+        Job[] jobs;
+        lock (_jobsGate)
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+            jobs = _jobs.Values.ToArray();
+        }
+        foreach (Job job in jobs)
             job.Cancel();
         // Waited for, not abandoned: the store's downloads hold a semaphore and open
         // file handles on a .part, and letting the process tear those down under a
         // running write is how a resumable download stops being resumable.
-        Task.WaitAll(_jobs.Values.Select(j => j.Completion).ToArray(), TimeSpan.FromSeconds(10));
-        foreach (Job job in _jobs.Values.ToArray())
+        Task.WaitAll(jobs.Select(j => j.Completion).ToArray(), TimeSpan.FromSeconds(10));
+        foreach (Job job in jobs)
             job.Dispose();
     }
 

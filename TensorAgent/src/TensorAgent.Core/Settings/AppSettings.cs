@@ -20,6 +20,16 @@ public sealed class AppSettings
     /// <summary>Catalog id of the model the app loads at start and uses for new chats.</summary>
     [JsonPropertyName("selectedModelId")] public string? SelectedModelId { get; set; }
 
+    /// <summary>
+    /// The language of the app's own interface: a tag from
+    /// <see cref="Sharing.Localization.UiLanguages.Supported"/>, or empty to follow the
+    /// system's preferred languages, which is what a first launch does. Only the interface:
+    /// the model answers in whatever language it is written to. Written by the Settings
+    /// screen alone; the page's settings save keeps what is stored (see
+    /// <see cref="Hosting.WebUiRoutes.MapAgent"/>).
+    /// </summary>
+    [JsonPropertyName("uiLanguage")] public string UiLanguage { get; set; } = string.Empty;
+
     /// <summary>Whether the model may run programs and skill scripts (the shell tool,
     /// skills_run). Off means the tools are not even declared to the model.</summary>
     [JsonPropertyName("allowCodeExecution")] public bool AllowCodeExecution { get; set; } = true;
@@ -126,6 +136,13 @@ public sealed class AppSettings
 
     /// <summary>Whether the optional projector/draft files are downloaded with a model.</summary>
     [JsonPropertyName("downloadOptionalFiles")] public bool DownloadOptionalFiles { get; set; } = true;
+
+    /// <summary>Absolute folder containing downloaded models, one subfolder per catalog
+    /// entry. Empty uses the installation's default model folder. Changing it leaves
+    /// existing files in their previous location. Updated through
+    /// <see cref="Hosting.AgentAppHost.SetModelCacheDirectory"/> or the dedicated
+    /// settings route so validation happens before the setting is saved.</summary>
+    [JsonPropertyName("modelCacheDirectory")] public string ModelCacheDirectory { get; set; } = string.Empty;
 
     /// <summary>
     /// Speculative decoding: draft a few tokens ahead (the model's draft head when it

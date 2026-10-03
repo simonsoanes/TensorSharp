@@ -1,0 +1,4 @@
+"NSCameraUsageDescription" = "TensorAgent 使用相機拍攝你希望裝置上的模型檢視的照片。";
+"NSMicrophoneUsageDescription" = "TensorAgent 使用麥克風聽寫訊息，併為裝置上的模型附加音訊。";
+"NSPhotoLibraryUsageDescription" = "TensorAgent 讀取你選擇附加到對話的照片和影片。";
+"NSSpeechRecognitionUsageDescription" = "TensorAgent 將你的聽寫內容轉寫到訊息框中。";

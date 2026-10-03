@@ -9,6 +9,23 @@
 	<key>CFBundlePackageType</key>
 	<string>XPC!</string>
 
+	<!-- The interface languages (UiLanguages.Supported). The share sheet shows the two
+	     names above from Resources/LANG.lproj/InfoPlist.strings in the language iOS picks
+	     from this list, and UIKit draws its own buttons in that language too. -->
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>zh-Hans</string>
+		<string>zh-Hant</string>
+		<string>ja</string>
+		<string>ko</string>
+		<string>es</string>
+		<string>fr</string>
+		<string>de</string>
+	</array>
+
 	<!-- iPhone AND iPad, matching the app. Without this the SDK generates [1] and the
 	     extension is simply absent from every iPad share sheet, with nothing anywhere
 	     saying why. It is safe to write here, unlike the identifier and the two version

@@ -165,6 +165,15 @@
   </ItemGroup>
 
   <ItemGroup Condition="'$(TensorAgentPlatform)' == 'ios' Or '$(TensorAgentPlatform)' == 'maccatalyst'">
+    <!-- Keep each locale directory at the bundle root so Apple's permission dialogs
+         can find its InfoPlist.strings, independently of MAUI's platform defaults. -->
+    <BundleResource Remove="Platforms/iOS/Resources/**/InfoPlist.strings;Platforms/MacCatalyst/Resources/**/InfoPlist.strings" />
+    <BundleResource Include="Platforms/iOS/Resources/**/InfoPlist.strings"
+                    Condition="'$(TensorAgentPlatform)' == 'ios'"
+                    LogicalName="%(RecursiveDir)%(Filename)%(Extension)" />
+    <BundleResource Include="Platforms/MacCatalyst/Resources/**/InfoPlist.strings"
+                    Condition="'$(TensorAgentPlatform)' == 'maccatalyst'"
+                    LogicalName="%(RecursiveDir)%(Filename)%(Extension)" />
     <!-- The Web UI is TensorAgent's OWN page, not TensorSharp.Server's. The desktop
          page is laid out for a mouse, a wide window and an operator who started a
          server with arguments; this one is laid out for a thumb. Both talk to the

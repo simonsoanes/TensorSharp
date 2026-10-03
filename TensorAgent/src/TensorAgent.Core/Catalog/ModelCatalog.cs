@@ -55,15 +55,15 @@ namespace TensorAgent.Core.Catalog;
 /// </summary>
 public static class ModelCatalog
 {
-    private const string GemmaLicense = "Gemma Terms of Use";
+    private const string GemmaLicense = "catalog.license.gemma";
     private const string ApacheLicense = "Apache-2.0";
     // The denoisers' license. Its "Applicable Territory" excludes the EU, the UK, the
     // Republic of Korea and the US, which the entries' notes say; the Qwen3-VL text
     // encoder is Apache-2.0.
-    private const string MiniMaxH3License = "MiniMax H3 Community License";
+    private const string MiniMaxH3License = "catalog.license.minimaxH3";
     // Qwen-Image 2.1's own license (Qwen/Qwen-Image-2.1, and the GGUF and VAE repackagings
     // of it): research and evaluation only. Its Qwen3-VL text encoder is Apache-2.0.
-    private const string QwenImageLicense = "Qwen Research License (non-commercial); text encoder Apache-2.0";
+    private const string QwenImageLicense = "catalog.license.qwenImage";
 
     private static string Hf(string repo, string file) => $"https://huggingface.co/{repo}/resolve/main/{file}";
 
@@ -75,7 +75,7 @@ public static class ModelCatalog
             DisplayName = "Gemma 4 E2B",
             Family = CatalogFamily.Gemma4,
             Kind = CatalogArchitectureKind.Dense,
-            Parameters = "2B effective (5B with per-layer embeddings)",
+            Parameters = "catalog.model.gemma4E2b.parameters",
             Quantization = "Q8_0",
             Files = new[]
             {
@@ -98,7 +98,7 @@ public static class ModelCatalog
             Sampling = new CatalogSampling(1.0f, 64, 0.95f, 0.0f),
             SupportsThinking = true,
             License = GemmaLicense,
-            Notes = "Fastest option. Sees images and video frames, hears audio, thinks when asked.",
+            Notes = "catalog.model.gemma4E2b.notes",
         },
         new CatalogModel
         {
@@ -106,7 +106,7 @@ public static class ModelCatalog
             DisplayName = "Gemma 4 E4B",
             Family = CatalogFamily.Gemma4,
             Kind = CatalogArchitectureKind.Dense,
-            Parameters = "4B effective (8B with per-layer embeddings)",
+            Parameters = "catalog.model.gemma4E4b.parameters",
             Quantization = "IQ4_XS",
             Files = new[]
             {
@@ -127,7 +127,7 @@ public static class ModelCatalog
             Sampling = new CatalogSampling(1.0f, 64, 0.95f, 0.0f),
             SupportsThinking = true,
             License = GemmaLicense,
-            Notes = "The recommended default: TensorSharp's verified fast-path tier, multimodal, with an optional speculative draft head.",
+            Notes = "catalog.model.gemma4E4b.notes",
         },
         new CatalogModel
         {
@@ -179,10 +179,7 @@ public static class ModelCatalog
             Sampling = new CatalogSampling(1.0f, 64, 0.95f, 0.0f),
             SupportsThinking = true,
             License = GemmaLicense,
-            Notes = "The dense Gemma between E4B and the 26B mixture of experts, in the 2.7 bpw IQ2_M recipe. "
-                + "4.2 GB of weights, mapped from the file rather than copied, so the model itself "
-                + "costs the phone almost nothing and the 32k window is the larger part of its "
-                + "footprint. Vision and a speculative draft head are optional downloads.",
+            Notes = "catalog.model.gemma4Size12b.notes",
         },
         new CatalogModel
         {
@@ -221,9 +218,7 @@ public static class ModelCatalog
             // Bonsai2 is validated on desktop Metal/CPU, not yet on an iPad.
             Experimental = true,
             License = ApacheLicense,
-            Notes = "PrismML's ternary Qwen 3.5 hybrid with Hadamard-rotated weights. The 5.9 GB download is "
-                + "repacked losslessly to about 7.7 GB when it loads, so it is offered only on 16 GB devices. "
-                + "Vision is an optional download.",
+            Notes = "catalog.model.bonsai2Size27b.notes",
         },
         new CatalogModel
         {
@@ -265,7 +260,7 @@ public static class ModelCatalog
             Sampling = new CatalogSampling(0.7f, 20, 0.8f, 0.0f),
             SupportsThinking = true,
             License = ApacheLicense,
-            Notes = "Strong general model with vision; the projector is optional and costs ~1.8 GB of memory when loaded.",
+            Notes = "catalog.model.qwen35Size9b.notes",
         },
         new CatalogModel
         {
@@ -307,9 +302,7 @@ public static class ModelCatalog
             Sampling = new CatalogSampling(0.7f, 20, 0.8f, 0.0f),
             SupportsThinking = true,
             License = ApacheLicense,
-            Notes = "Qwen's dense 27B at four bits: stronger than the 9B at reasoning, coding and agent work, "
-                + "and slower, since all 27B parameters run for every token. Needs 32 GB of memory (a Mac). "
-                + "Vision is an optional download.",
+            Notes = "catalog.model.qwen38Size27b.notes",
         },
         new CatalogModel
         {
@@ -347,9 +340,7 @@ public static class ModelCatalog
             Sampling = new CatalogSampling(1.0f, 64, 0.95f, 0.0f),
             SupportsThinking = true,
             License = ApacheLicense,
-            Notes = "A dense 30B that reads images and calls tools. It reasons in its own channel before "
-                + "answering, even with thinking off. Needs 32 GB of memory (a Mac). Vision is an optional "
-                + "download and takes about 8 GB more memory when it is installed.",
+            Notes = "catalog.model.museGlimmer30b.notes",
         },
         new CatalogModel
         {
@@ -357,7 +348,7 @@ public static class ModelCatalog
             DisplayName = "Qwen3.8 Flash Next",
             Family = CatalogFamily.Qwen38FlashNext,
             Kind = CatalogArchitectureKind.MixtureOfExperts,
-            Parameters = "125B (6B active)",
+            Parameters = "catalog.model.qwen38FlashNext.parameters",
             Quantization = "UD-Q2_K_XL",
             // Published as three gguf-split shards in the repo's UD-Q2_K_XL folder; the engine is
             // pointed at the first and opens the others beside it by name.
@@ -395,10 +386,7 @@ public static class ModelCatalog
             SupportsThinking = true,
             Experimental = true,
             License = ApacheLicense,
-            Notes = "Qwen's 125B mixture of experts (6B active per token) at two bits. Needs a 48 GB Mac: "
-                + "the file is 79 GB, and the app reads its experts and its n-gram table from the SSD as "
-                + "tokens need them, so the first answers after loading are slower while those pages warm up. "
-                + "Text only.",
+            Notes = "catalog.model.qwen38FlashNext.notes",
         },
         new CatalogModel
         {
@@ -409,8 +397,8 @@ public static class ModelCatalog
             DisplayName = "Qwen-Image 2.1",
             Family = CatalogFamily.QwenImage,
             Kind = CatalogArchitectureKind.Diffusion,
-            Parameters = "Qwen-Image-2.1 DiT + Qwen3-VL-8B text encoder",
-            Quantization = "Q4_K_M (DiT) / Q4_K_M (text encoder)",
+            Parameters = "catalog.model.qwenImage21.parameters",
+            Quantization = "catalog.model.qwenImage21.quantization",
             Files = new[]
             {
                 new CatalogFile(CatalogFileRole.Weights, "qwen_image_2.1_Q4_K_M.gguf",
@@ -440,8 +428,7 @@ public static class ModelCatalog
             KvCacheDtype = "f16",
             Sampling = new CatalogSampling(1.0f, 0, 1.0f, 0.0f),
             License = QwenImageLicense,
-            Notes = "Makes a picture from a description, or edits an attached photo. Needs 24 GB of memory "
-                + "(a Mac).",
+            Notes = "catalog.model.qwenImage21.notes",
         },
         MiniMaxH3(
             id: "minimax-h3-fl2va-q4k",
@@ -451,8 +438,7 @@ public static class ModelCatalog
                 11_420_663_904, "dd948e08ad0ba3c71bd42f368e283dd82e790f5122a63b276e22a3e0283d0c10"),
             // Photos are keyframes here: one is the clip's first frame, two its first and last.
             modalities: CatalogModalities.Image,
-            notes: "Makes a short video with its own soundtrack from a description, brings an attached photo to "
-                + "life, or runs between two photos (the first and the last frame)."),
+            notes: "catalog.model.minimaxH3Fl2va.notes"),
         MiniMaxH3(
             id: "minimax-h3-ref2va-q4k",
             displayName: "MiniMax-H3 References",
@@ -462,9 +448,7 @@ public static class ModelCatalog
                 11_381_096_544, "2fa5840021cf6967843eaeefde9aaa277e540de02986d5ee3d5b0e6a7a8c9dec"),
             // Photos, clips and recordings are references for a new scene, up to nine.
             modalities: CatalogModalities.Image | CatalogModalities.Video | CatalogModalities.Audio,
-            notes: "Makes a short video with its own soundtrack that features the people, things, places or "
-                + "sounds in up to nine attached photos, clips and recordings. Say who or what is in the shot: "
-                + "a reference gives their look, the description puts them in the scene."),
+            notes: "catalog.model.minimaxH3Ref2va.notes"),
     };
 
     /// <summary>
@@ -480,8 +464,8 @@ public static class ModelCatalog
         DisplayName = displayName,
         Family = CatalogFamily.MiniMaxH3,
         Kind = CatalogArchitectureKind.Diffusion,
-        Parameters = "33B audio-video DiT (20B with its AdaLN branches pruned) + Qwen3-VL-32B text encoder",
-        Quantization = "Q4_K (DiT) / Q4_K_M (text encoder)",
+        Parameters = "catalog.model.minimaxH3.parameters",
+        Quantization = "catalog.model.minimaxH3.quantization",
         Files = new[]
         {
             denoiser,
@@ -519,8 +503,9 @@ public static class ModelCatalog
         KvCacheDtype = "f16",
         Sampling = new CatalogSampling(1.0f, 0, 1.0f, 0.0f),
         License = MiniMaxH3License,
-        Notes = notes + " Needs 32 GB of memory (a Mac). MiniMax's license does not cover use in the EU, the UK, "
-            + "South Korea or the US.",
+        // The entry's whole note, its memory and license sentences included: a translation
+        // is of whole notes, never of pieces joined here.
+        Notes = notes,
     };
 
     /// <summary>

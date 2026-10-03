@@ -43,6 +43,20 @@ dotnet build TensorSharp.slnx
 
 The solution build defaults to the `Any CPU` platform (`Directory.Solution.props`), so it also works from Visual Studio developer prompts, which export `Platform=x64` into the environment and would otherwise steer the build to a nonexistent `Release|x64` solution configuration. An explicit `-p:Platform=...` still takes precedence.
 
+The solution also builds TensorAgent. Its platform-neutral projects (`TensorAgent.Core`, `TensorAgent.Sharing` and `TensorAgent.Tests`) are listed in it and build on every OS. The app itself, `TensorAgent/src/TensorAgent.Maui`, needs the .NET MAUI workloads, so it is not listed: after the rest of the solution has built, `Directory.Solution.targets` builds it in a separate `dotnet build`, the way `TensorAgent/scripts/build-mac.sh`, `build-sim.sh` and `build-windows.ps1` do (`-p:TensorSharpAppleTargets=true` and `-m:1`; `win-x64` on Windows), with the solution build's configuration and a separately selected app SDK:
+
+| Host | App heads built | Needs |
+| --- | --- | --- |
+| macOS | the Mac app (`net10.0-maccatalyst`) and, on Apple silicon, the iOS simulator app (`net10.0-ios`) | `maui-maccatalyst` and `maui-ios` in the selected app SDK (the head restores both); for the simulator app also `GgmlOps.xcframework` and the staged CPython ([TensorAgent/README.md](TensorAgent/README.md#build-and-run)) |
+| Windows | the Windows app (`net10.0-windows10.0.19041.0`, `win-x64`) | `maui-windows` |
+| Linux | none | |
+
+On macOS, the app workload check and build select `DOTNET_ROOT/dotnet`, then `~/.dotnet/dotnet`, then the solution SDK. `-p:TensorAgentDotnet=/path/to/dotnet` overrides that choice; its architecture must match the solution SDK and its Apple workloads must support the installed Xcode.
+
+A missing workload skips the app, and a missing simulator prerequisite skips that head, each with a warning that names it; with `-p:TensorSharpSkipGgmlNative=true`, a desktop head whose engine library was never built is skipped the same way. Anything else that stops a head (no Xcode, an Xcode the installed workload does not accept, a compile or link error) fails the solution build and names the script that builds that head on its own. `-p:TensorSharpSkipTensorAgentApp=true`, or `TensorSharpSkipTensorAgentApp=true` in the environment, leaves the app out. A rebuild (`--no-incremental`) and `dotnet clean` of the solution include the app, which lands under `TensorAgent/src/TensorAgent.Maui/bin/<Configuration>/`.
+
+The app's build takes only the configuration and `-p:TensorSharpSkipGgmlNative` from the solution build's command line, and it rebuilds the engine projects it references wherever its own properties differ, so a switch that changes how those compile (for example `-p:Version=...`) is undone in their outputs; leave the app out of such builds. Only the command-line solution build builds the app: a `-graph` build and Visual Studio's own solution build do not. Device builds, which need signing, stay with `build-device.sh` and `deploy-device.sh`.
+
 ### Build individual applications
 
 ```bash
@@ -498,7 +512,7 @@ TensorSharp/
 │   ├── ggml_ops_embeddings.cpp            # BERT / XLM-RoBERTa sentence-encoder graph (GGUF `bert`)
 │   ├── ggml_ops_training.cpp              # Training-only kernels (unused at runtime)
 │   └── tests/                              # Native unit + smoke tests
-├── TensorSharp.Chat/            # Host-neutral chat pipeline shared by the Server, the CLI and the iOS app (no ASP.NET Core, no Distributed)
+├── TensorSharp.Chat/            # Host-neutral chat pipeline shared by the Server, the CLI and TensorAgent (no ASP.NET Core, no Distributed)
 │   ├── ModelService.cs          # Facade over model load/unload, the InferenceEngineHost and the generation pipeline (TensorParallelGroupFactory, SchedulerConfigOverride, UnloadModel)
 │   ├── ModelLifecycleService.cs # Model load/dispose and backend selection; the tensor-parallel group is handed in by the host
 │   ├── InferenceEngineHost.cs   # Per-model InferenceEngine singleton (continuous batching entry point)
@@ -539,7 +553,7 @@ TensorSharp/
 │   └── API_EXAMPLES.md          # Detailed API documentation
 ├── TensorSharp.Cli/             # CLI application (one-shot generation, interactive REPL, batch JSONL, benchmarks)
 ├── TensorSharp.TestMatrix/      # Test / benchmark matrix runner, default prompts, env-var sweeps, and per-host baselines
-├── TensorAgent/                 # iPhone / iPad app with its own phone-shaped chat page, bound to the same WebUiChatService / SkillsService API as the Server's Web UI, running entirely on the device
+├── TensorAgent/                 # Local AI app for iPhone / iPad / Mac / Windows: shared chat page, saved conversations, text/multimodal/agent and image/video turns
 │   ├── src/TensorAgent.Core/    # Platform-neutral: the model catalog and store, resumable downloads, saved conversations, settings, the loopback server and its route table, and AgentAppHost, which assembles all of it (built here rather than in the iOS head so it can be started, driven over HTTP and torn down by a test)
 │   │   ├── Catalog/ Downloads/ Sessions/ Settings/ # ModelCatalog + ModelStore, ModelDownloadManager + ResumableDownloader, ChatTurnManager + ConversationStore, AppSettings
 │   │   ├── Hosting/             # AgentAppHost, LoopbackServer + WebUiRoutes, EngineMemoryPolicy, SpeculationPolicy, TensorAgentSkillRouter, ProcessMemory
@@ -550,12 +564,12 @@ TensorSharp/
 │   │   ├── Python/              # CPython 3.13 embedded by P/Invoke, its audit-hook sandbox, and a pure-wheel installer
 │   │   ├── JavaScript/          # JavaScriptCore over its C API, with Node-shaped console/process/require/fs/timers
 │   │   └── WebUi/               # tensoragent.js, the script the loopback server appends to the app's own page
-│   ├── src/TensorAgent.Maui/    # The net10.0-ios head: the phone page (wwwroot/index.html), WebView + attachments + dictation, the models / chats / settings pages, background and share-inbox handling, and where the files live on this device
-│   ├── src/TensorAgent.Sharing/ # The share envelope contract shared by the app and its extension
+│   ├── src/TensorAgent.Maui/    # .NET MAUI heads: net10.0-ios, net10.0-maccatalyst and net10.0-windows10.0.19041.0; shared WebView/composer, native models / chats / settings screens and platform services
+│   ├── src/TensorAgent.Sharing/ # Share envelope contract and the eight UI languages shared by the app and iOS extension
 │   ├── src/TensorAgent.ShareExtension/ # The "Ask TensorAgent" iOS share extension
 │   ├── tests/TensorAgent.Tests/ # App-host tests (not part of PR CI)
 │   ├── skills/                  # The 12 skills (the desktop hosts' skill root); verdicts.json records verify-skills.py's static verdict for each (Python imports resolved against the staged interpreter, shell scripts checked for npm/npx/pnpm/yarn/parcel/vite). Ten pass and are bundled into the iOS app; playwright and web-artifacts-builder fail and TensorAgent.Maui.csproj excludes them
-│   └── scripts/                 # build / run / verify for the simulator (build-sim.sh, run-sim.sh, verify-sim.sh), physical devices (build-device.sh, deploy-device.sh, bench-spec-device.sh), verify-background.sh (simulator or device), verify-share-rule.sh, prepare-python.sh, build-lxml-ios.sh, verify-skills.py
+│   └── scripts/                 # Desktop build/run, simulator/device build/deploy/verify, background/share probes, Python staging, skill checks and chat/media validation
 ├── InferenceWeb.Tests/          # xUnit unit tests covering ops, KV cache, paged scheduler, batched-model correctness, web/server helpers
 ├── AdvUtils/                    # Utility library (logger)
 ├── docs/                        # Developer reference
@@ -589,7 +603,7 @@ What is on [NuGet.org](https://www.nuget.org/profiles/TensorSharp): all thirteen
 | `TensorSharp.Backends.Cuda` | `TensorSharp.Backends.Cuda` | `TensorSharp.Cuda` | Direct CUDA allocator, storage, cuBLAS GEMM, PTX kernels, and quantized CUDA ops |
 | `TensorSharp.Backends.MLX` | `TensorSharp.Backends.MLX` | `TensorSharp.MLX` | Apple Silicon MLX backend (mlx-c / Metal) with quantized / fused / compiled kernels and MoE expert offload |
 | `TensorSharp.Distributed` | `TensorSharp.Distributed` | `TensorSharp.Distributed` | Peer-to-peer TCP coordination for multi-node tensor parallelism |
-| `TensorSharp.Chat` | `TensorSharp.Chat` | `TensorSharp.Chat` (new types); the moved pipeline keeps its `TensorSharp.Server.*` namespaces | Host-neutral chat pipeline: `ModelService`, sessions, generation, the skills loop and the Web UI request/stream contract (`WebUiChatService`, `SkillsService`) — no ASP.NET Core, no `TensorSharp.Distributed`; shared by the Server, the CLI and the iOS app |
+| `TensorSharp.Chat` | `TensorSharp.Chat` | `TensorSharp.Chat` (new types); the moved pipeline keeps its `TensorSharp.Server.*` namespaces | Host-neutral chat pipeline: `ModelService`, sessions, generation, the skills loop and the Web UI request/stream contract (`WebUiChatService`, `SkillsService`) — no ASP.NET Core, no `TensorSharp.Distributed`; shared by the Server, the CLI and TensorAgent |
 | `TensorSharp.Server` | `TensorSharp.Server` | `TensorSharp.Server` | ASP.NET Core server, OpenAI/Ollama adapters, HTTP transport over TensorSharp.Chat, web UI |
 | `TensorSharp.Server.Host` | `TensorSharp.Server.Host` | `TensorSharp.Server.Host` | The **runnable** web application: `Program.cs`, host wiring, `wwwroot/`, and the command line. `TensorSharp.Server` is the library it builds on — building or running `TensorSharp.Server` alone produces no executable |
 | `TensorSharp.Cli` | `TensorSharp.Cli` | `TensorSharp.Cli` | Console host and debugging / batch tooling |
@@ -787,7 +801,7 @@ the fused path engages.
 dotnet test InferenceWeb.Tests/InferenceWeb.Tests.csproj
 ```
 
-The iOS app's host has its own project, `TensorAgent/tests/TensorAgent.Tests` (see [TensorAgent/README.md](TensorAgent/README.md)); PR CI does not run it, although `InferenceWeb.Tests` does check the app's project, plist, entitlement and native-export manifests (`TensorAgentMauiProjectTests`).
+TensorAgent's shared app host has its own project, `TensorAgent/tests/TensorAgent.Tests` (see [TensorAgent/README.md](TensorAgent/README.md)), which is part of `TensorSharp.slnx`; PR CI does not run it, although `InferenceWeb.Tests` does check the app's project, plist, entitlement and native-export manifests (`TensorAgentMauiProjectTests`) and how the solution build builds the app (`TensorAgentSolutionBuildTests`).
 
 #### Test lanes
 

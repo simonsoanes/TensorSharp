@@ -136,6 +136,12 @@ dotnet run --project TensorSharp.Server.Host -c Release -- --help
 
 Full command reference: **[CLI](../USAGE.md#console-application)** · **[Server](../USAGE.md#web-application)** · more models to download: **[Model Downloads](../MODEL_DOWNLOADS.md)** · prefer a config file? **[config/](../config/README.md)**.
 
+## Build TensorAgent from the same solution
+
+`dotnet build TensorSharp.slnx -c Release` builds the engine, CLI/server and TensorAgent.Core, TensorAgent.Sharing and TensorAgent.Tests. On macOS it also attempts the Mac app and, on Apple Silicon, the iOS simulator app; on Windows it attempts the `win-x64` app. App builds need the matching MAUI workloads and native prerequisites. Missing prerequisites skip a head with a warning; other build failures fail the solution build. Linux builds the shared projects without a MAUI app head. To leave the app out explicitly, use `-p:TensorSharpSkipTensorAgentApp=true`.
+
+Building the test project does not run its tests. The Windows app has bounded Debug/Release chat, synthetic vision and tool validation; media generation and broader device coverage remain unverified; consult the [TensorAgent guide](../TensorAgent/README.md) for current build/device coverage, model downloads, image editing, video generation and app-specific scripts. TensorAgent is distributed as source, not a prebuilt release archive.
+
 ## Text and code embeddings
 
 Current source supports **Snowflake Arctic Embed L v2.0** and **all-MiniLM-L6-v2** GGUF encoders, serving normalized vectors through OpenAI `/v1/embeddings` and Ollama `/api/embed`. After the source build above, start the small MiniLM service:

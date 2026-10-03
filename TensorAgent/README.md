@@ -1,27 +1,32 @@
 # TensorAgent
 
-An iPhone and iPad app with the capabilities of TensorSharp.Server's Web UI
-chat (the main gaps are named below), running entirely on the device: a .NET
-MAUI (`net10.0-ios`) head that links the TensorSharp engine statically, serves its
-own phone-shaped page to a WKWebView from an in-process loopback HTTP server, and
-answers that page's API with the same chat pipeline the desktop uses.
+A local AI app for **iPhone, iPad, Mac and Windows**. TensorAgent runs TensorSharp
+in the app process for text and reasoning, multimodal questions, agentic code and
+document work, **Qwen-Image 2.1 image generation and editing**, and MiniMax-H3 short
+video with audio. Choose a model for the task and use the same composer, saved chats
+and artifact links. Image edits support painted selections, protected pixels,
+original/result comparison and twelve optional LoRA plug-ins. The interface is
+available in [eight languages](#languages).
 
-This is the current source implementation of TensorSharp's iOS/iPadOS target, and the
-same project builds the desktop app for macOS and Windows (see
-[On the desktop](#on-the-desktop-macos-and-windows)).
-Physical devices use the GGML Metal (`ggml_metal`) backend; build it with
-`TensorSharpAppleTargets=true`. It is not a remote client or a separate inference
-engine. It targets iPhone and iPad (iOS/iPadOS 17.0 or later, arm64 only); the
-only device run recorded below is an iPhone on iOS 26.6.1, and every built-in
-catalog model needs a device in the 12 GB memory tier or above, six of them a Mac
-(see the catalog below). No release workflow builds, signs or publishes the app, so
-follow the source-build instructions below.
+The .NET MAUI project shares its chat page and loopback API across iOS/iPadOS,
+Mac Catalyst and Windows WinUI heads. Physical iPhones and iPads use GGML Metal
+(`ggml_metal`), Macs use Metal or CPU, and Windows offers CUDA/Vulkan when available,
+then CPU. See [On the desktop](#on-the-desktop-macos-and-windows) for platform differences.
+The Apple device target is iOS/iPadOS 17.0 or later, arm64; build it with
+`TensorSharpAppleTargets=true`.
 
-Nothing leaves the phone by default. The model runs locally, the sandbox has no
-network unless the user grants it, and dictation requires on-device speech
-recognition wherever the chosen language's recogniser supports it; for a language
-whose recogniser cannot run on the device, Apple's recogniser may process the audio
-off the device.
+**Current source status.** No release workflow builds, signs or publishes TensorAgent;
+follow the [source-build instructions](#build-and-run). All eleven catalog entries need
+at least the 12 GB memory tier; six need 24 GB or more, and Qwen3.8 Flash Next needs
+48 GB plus SSD-backed weights. Catalog eligibility is based on device memory.
+Image/video generation has been measured in the Mac app, with no recorded
+iOS media generation or Windows image/audio/video generation. The physical-phone run recorded
+below is on iOS 26.6.1; iOS 27 has not been device-verified.
+
+Inference runs locally. The code sandbox has no network unless the user grants it.
+Apple dictation requests on-device recognition where the selected language supports it;
+otherwise Apple's recogniser may process the audio off the device. Windows code execution
+requires the explicit **Run without a sandbox** setting.
 
 <p align="center"><img src="../website/assets/screenshots/tensoragent-iphone.png" alt="TensorAgent on an iPhone: Gemma 4 E2B scaled a recipe from 4 to 10 people by running a Python script in the app's built-in Python, and answered with a table" width="300"></p>
 
@@ -39,6 +44,13 @@ is laid out for a mouse and a wide window, and no amount of injected CSS turns i
 into a phone UI. One row of chrome, everything reachable at the bottom next to
 the keyboard, a layout that follows `visualViewport`, a single `+` sheet for
 Photo / Camera / Video / File, and reasoning collapsed behind a disclosure.
+
+Press **Enter** to send and **Shift+Enter** for a new line. Enter used to confirm an
+IME composition does not send, and pressing it during generation does not stop the turn.
+After a text turn, the answer shows its token count, elapsed time and tokens per second,
+plus prompt/KV reuse when reported and a stopped/truncated marker when applicable.
+Those statistics are saved with the conversation and return when it is reopened;
+image/video turns do not show the placeholder zero-token counters.
 
 What is shared is the API, not the document. The routes under the page —
 `/api/chat`, `/api/models`, `/api/sessions`, `/api/upload`, `/api/skills`,
@@ -59,7 +71,7 @@ at all. The app's own client is appended as one script tag at request time; the 
 file itself is never forked.
 
 **A built-in model catalog.** Eleven entries with the exact byte size and SHA-256 of every
-file: five chosen to fit a phone or tablet, and six that only a Mac has the memory for.
+file: five chosen for phone/tablet memory tiers, and six requiring desktop memory tiers.
 All eleven are downloadable; those downloads
 resume from a kept `.part` after an interruption, are verified before use, and
 belong to the APP rather than to the screen that started one — see "Downloads"
@@ -319,6 +331,21 @@ default"), Skills is a ☰ menu item beside Chats and Models, and the dictation 
 appears only in voice mode. Each was a permanent control for something decided rarely,
 on the one row a phone composer has.
 
+**In the user's language.** The interface (the chat page, the native screens, the
+messages the host sends and the share extension) is in English, Simplified Chinese,
+Traditional Chinese, Japanese, Korean, Spanish, French and German. A first launch uses
+the first of the system's preferred languages that the app has, or English if it has none
+of them. Settings > Language changes it at once, without a restart. The choice is saved
+(`uiLanguage` in `settings.json`) and used from then on, and "System" goes back to
+following the system. The model is not told: it answers in whatever language you write
+to it; system prompts, tool descriptions and tool results stay English. Share presets
+and their draft messages use the interface language. The chat retains unsent text,
+attachments and saved image selections while refreshing its language; an upload or a
+send awaiting acceptance settles before that refresh.
+iOS and macOS show their own texts for the app, such as the permission prompts and the
+share sheet's "Ask TensorAgent", in the language the system picks for the app, not the
+in-app choice. See [Languages](#languages).
+
 **The answer keeps being written while you are somewhere else in the app.** A
 generation belongs to the app, not to the HTTP request that asked for it
 (`ChatTurnManager`). This is not a refinement: iOS suspends a WKWebView's content
@@ -499,6 +526,18 @@ a new chat (none by default). The Skills master switch is in the page's Skills s
 and `imageLoras`, the LoRA plug-ins every picture is made with, is set from the page's
 LoRA sheet (see "LoRA plug-ins" above).
 
+**Model download and cache folder.** Settings > Storage shows the full folder path
+and lets you save a different absolute path or choose **Use default**. Downloads,
+imports, the model catalog and subsequent model loads use this folder, including
+after a restart. Files are kept in `<folder>/<catalog-id>/`; existing files stay in
+the previous folder, so move those model subfolders yourself if you want to reuse
+them at the new location. A loaded model keeps running until you load another one.
+Folder changes wait for model loading and are refused while a download or import
+is active. The folder must be writable. `GET /api/agent/settings` reports the
+effective `modelCacheDirectory`; change it through
+`POST /api/agent/settings/model-cache-directory` with
+`{"modelCacheDirectory":"<absolute-path>"}` (an empty string restores the default).
+
 ## Build and run
 
 The user-local SDK is the one with the MAUI workloads:
@@ -549,6 +588,24 @@ TensorAgent/scripts/verify-background.sh     # send the app away mid-answer and 
 TensorAgent/scripts/verify-share-rule.sh     # check the share extension's activation rule
 TensorAgent/scripts/bench-spec-device.sh     # plain vs speculative decoding on the phone
 ```
+
+`dotnet build TensorSharp.slnx` from the repository root builds the app as well. Once
+the rest of the solution has built, `Directory.Solution.targets` builds the Mac app and,
+on Apple silicon, the simulator app in a separate `dotnet build`, as `build-mac.sh` and
+`build-sim.sh` do (on Windows, the Windows app, as `build-windows.ps1` does). The
+simulator app is built for the simulator the SDK picks rather than `build-sim.sh`'s
+explicit RuntimeIdentifier; it and its share extension are ad-hoc signed, where
+`build-sim.sh`'s extension takes the Mac's team profile if one is installed. On a Mac,
+the app build and its workload check use `DOTNET_ROOT/dotnet` when available, then
+`~/.dotnet/dotnet`, matching the scripts. Otherwise they use the solution's SDK. This
+lets the app use Xcode-compatible workloads even when the system SDK has older ones.
+`-p:TensorAgentDotnet=/path/to/dotnet` selects another SDK explicitly; its architecture
+must match the SDK running the solution. The selected SDK needs the app workloads
+and must support the installed Xcode (for Xcode 27.0, workload set 10.0.401.1 supplies
+the matching Apple SDKs). The simulator app also needs the files above. A missing workload
+skips the app and a missing file skips that head, each with a warning; any other failure
+fails the solution build. `-p:TensorSharpSkipTensorAgentApp=true` leaves the app out.
+Running, deploying and verifying still go through the scripts.
 
 `deploy-device.sh` selects the only connected physical iPhone, an installed
 `Apple Development` identity, and a compatible provisioning profile. If more
@@ -621,6 +678,10 @@ passes it too, and besides `SKIP_SIGNING` reads, among others listed in its head
 csproj: it decides whether `TensorSharp.Models` builds its `net10.0-ios` and
 `net10.0-maccatalyst` slices at all, and restore resolves a referenced project's
 target frameworks before a `ProjectReference`'s `AdditionalProperties` are applied.
+That restore goes to `obj/<host>/apple/` (`Directory.Build.props`), apart from the
+desktop build's, so the two do not keep rewriting each other's `project.assets.json`
+and recompiling `TensorSharp.Models`. Leave the property off and the referenced projects
+fail with NETSDK1004, or quietly use the restore of an earlier build.
 
 Release device builds keep the engine. It is linked statically and reached through
 `dlsym`, and the Release build's strip step keeps only the symbols on its list, so
@@ -645,12 +706,13 @@ three serve the same page from the same loopback host, and share the catalog, th
 settings, the conversations and the skills. What differs is everything the phone does
 because it is a phone:
 
-<p align="center"><img src="../website/assets/screenshots/tensoragent-mac.png" alt="TensorAgent on a Mac: Qwen3.5 9B wrote a Python file with a Roman-numeral converter and unit tests, ran them, fixed the function when the first run failed, and reran until all five tests passed" width="880"></p>
+<p align="center"><img src="../website/assets/screenshots/tensoragent-mac.png" alt="TensorAgent on a Mac: a saved Qwen-Image 2.1 edit changes the TensorSharp banner background to a starry blue night sky, with Compare original and Edit again controls" width="880"></p>
 
-<sub>The Mac app with Qwen3.5 9B (IQ4_XS) on Metal, captured on 2026-09-30. The model wrote a
-Python file with a Roman-numeral converter and its unit tests, and ran it with the Mac's own
-`python3` inside the Seatbelt sandbox. The first run failed, so it fixed the function (one
-malformed patch was rejected on the way) and reran until all five tests passed.</sub>
+<sub>A saved Qwen-Image 2.1 (Q4_K_M) edit in the current Mac Catalyst Release app,
+captured on 2026-10-02 on an M5 Pro with GGML Metal: “Make the background a deep blue
+night sky with stars, keep the text unchanged.” The result is from an earlier run;
+Compare original and Edit again remain available. Switch models for text, multimodal
+questions, code and document work, or short video with audio.</sub>
 
 | | iPhone and iPad | Mac | Windows |
 | --- | --- | --- | --- |
@@ -669,8 +731,10 @@ included, stays on `DeviceClass.Phone` unless it asks.
 
 ### On a Mac
 
-The Mac head needs the `maui-maccatalyst` workload in the same user-local SDK
-(`dotnet workload install maui-maccatalyst`), CMake and the Xcode command-line tools.
+The Mac head needs the `maui-maccatalyst` workload in the same user-local SDK, and
+`maui-ios` beside it, because the project restores both Apple target frameworks
+(`dotnet workload install maui-maccatalyst maui-ios`), plus CMake and the Xcode
+command-line tools.
 Measured here with workload set 10.0.401.1 (MAUI 10.0.110, Mac Catalyst SDK 27.0.10722)
 and Xcode 27.0. Then:
 
@@ -752,6 +816,25 @@ updates the server, while TensorAgent needs its own build to update the embedded
 UI in `TensorAgent.Core.dll` beside its executable.
 For environments that use NuGet mirrors, `-PackageSource` accepts one or more
 feed URLs for restore; the default uses the repository's NuGet configuration.
+
+If restore reports `NU1301` with a TLS `HandshakeFailure` for `api.nuget.org`,
+the installed workload is not the problem: NuGet cannot download packages such
+as the Windows runtime packs. An optional configuration uses Microsoft's
+`dotnet-public` feed and keeps vulnerability auditing enabled through NuGet's
+separate `data.nuget.org` endpoint:
+
+```powershell
+Copy-Item eng/NuGet.dotnet-public.config NuGet.Config
+dotnet build TensorSharp.slnx -c Release
+```
+
+Run these commands from the repository root. Keep this machine-specific
+`NuGet.Config` local (add `/NuGet.Config` to `.git/info/exclude`); remove it to
+return to your usual feeds. The mirror does not carry every third-party package
+(including NLayer and NVorbis), so those packages need cached copies or another
+reachable feed. Missing packages remain build errors. For a one-off override,
+use `-p:RestoreConfigFile=<absolute-path-to-config>` on the solution build; its
+separate TensorAgent build receives the same restore settings.
 
 The app is unpackaged and carries the Windows App SDK runtime with it
 (`WindowsPackageType=None`, `WindowsAppSDKSelfContained`). The model's code runs only
@@ -1004,10 +1087,12 @@ TensorAgent/
     Sandbox/        ExecutionPolicy and ConfinedPaths, shared by all three runtimes
     Python/         embedded CPython and the wheel installer
     JavaScript/     JavaScriptCore over its C API, with Node-shaped globals
-    WebUi/          the script appended to the app's own page
+    WebUi/          the script appended to the app's own page, and its strings runtime (i18n.js)
+    Localization/   the interface's string tables, one folder per language, and Loc
     Sharing/        durable-inbox import, bounded composer handoff, ACK lifecycle
   src/TensorAgent.Sharing/
-                    dependency-free envelope format and prompt composition contract
+                    dependency-free envelope format and prompt composition contract;
+                    the languages, the string engine and the share extension's tables
   src/TensorAgent.ShareExtension/
                     iOS share sheet, NSItemProvider readers, Safari preprocessing
   src/TensorAgent.Maui/
@@ -1054,19 +1139,22 @@ one thing it genuinely cannot do — preempt a builtin already inside a long cal
 `Auto`: an `AgentAppHost` running on macOS, Linux or Windows uses `DesktopShellBackend`
 over TensorSharp's shared `ProcessShellBackend`, OS sandbox, shell sessions and package
 installer. Real Node.js, npm/npx, Python and other programs on the host can then run
-inside the session sandbox.
-The process backend requires an available sandbox; it does not fall back to unrestricted
-execution. Set `AgentExecutionMode.InProcess` when a desktop test is intended to emulate
+inside the session workspace. On macOS and Linux the process backend requires an
+available sandbox; Windows requires the explicit **Run without a sandbox** setting.
+It never silently falls back to unrestricted execution. Set `AgentExecutionMode.InProcess` when a desktop test is intended to emulate
 the iOS runtimes. Embedded runtime injection is not supported in process mode.
 
 The Playwright skill (`skills/playwright`, which drives a browser with `playwright-cli`
 from `@playwright/cli`, run through `npx`) requires actual Node.js/npm and browser child
 processes. These capabilities are available on the desktop execution path when their
 dependencies are present, but cannot be supplied to the iOS app by widening its sandbox.
-The browser workflow has been validated only on macOS arm64: on Linux each command runs
-in its own PID namespace, so a detached `playwright-cli` session cannot be assumed to
-survive between calls, and on Windows the shared process backend lacks the required
-filesystem and network confinement.
+The full model-driven browser workflow is recorded on macOS arm64. Windows supports
+the native JavaScript skill runner with explicit unconfined execution; the scripted
+`WindowsBrowserSkillProbe` checks a local synthetic login form, window state, session
+reuse and cleanup. Those checks do not establish a model-driven workflow or physical
+user visibility. On Linux each command runs in its own PID namespace, so a detached
+`playwright-cli` session cannot be assumed to survive between calls. See the
+[Windows setup and validation scope](../docs/playwright_agent.md#windows-desktop).
 The skill is left out of the iOS app bundle (see "Skills" below), because the app can
 start neither a Node package manager nor a browser; it stays in `TensorAgent/skills` for
 the desktop hosts. Its requirements
@@ -1364,11 +1452,84 @@ Providers fail individually and often; that is designed for rather than hidden. 
 challenge page is detected and refused by name rather than parsed, because the
 alternative is reporting an engine's own navigation as the user's sources.
 
+## Languages
+
+There are eight: `en`, `zh-Hans`, `zh-Hant`, `ja`, `ko`, `es`, `fr` and `de`
+(`UiLanguages.Supported` in TensorAgent.Sharing). A system language tag maps to one of
+them by its language subtag. Chinese is mapped by script and region: `zh-Hant`, `zh-TW`,
+`zh-HK`, `zh-MO` and Cantonese map to Traditional Chinese, and any other Chinese tag maps
+to Simplified.
+
+| Text | Where it is |
+| --- | --- |
+| Native screens and the host's messages | `src/TensorAgent.Core/Localization/<tag>/<area>.json`, read with `Loc.T` and `Loc.Plural` |
+| The chat page | The same tables, served as `/i18n.js?lang=<tag>`. The markup carries `data-i18n`, `data-i18n-placeholder`, `data-i18n-title` and `data-i18n-aria-label`; the script calls `t()` and `tn()` |
+| The share extension, and the drafts the app composes from what was shared | `src/TensorAgent.Sharing/Localization/<tag>/share.json`, read with `ShareStrings` |
+| Permission prompts | `src/TensorAgent.Maui/Platforms/{iOS,MacCatalyst}/Resources/<tag>.lproj/InfoPlist.strings` (the two files are identical) |
+| The share extension's name in the share sheet | `src/TensorAgent.ShareExtension/Resources/<tag>.lproj/InfoPlist.strings` |
+
+How the tables work:
+
+- A table is a flat JSON object, and a key's first segment is its file's name
+  (`settings.sandbox.runCode.title` is in `settings.json`). A key a language lacks falls
+  back to English.
+- Placeholders are named (`{model}`, `{count}`).
+- Counted text has `.one` and `.other` keys, chosen by each language's plural rule
+  (`StringCatalog.PluralCategory`, mirrored in `WebUi/i18n.js`).
+- Numbers and dates the interface formats itself use `Loc.Culture`, which is never set as
+  the thread's culture.
+
+The share extension cannot read the app's settings. So the app writes the choice to
+`ui-language.txt` at the root of the App Group container, and the extension resolves it
+against the same system languages.
+
+Some text stays English whatever the user picks:
+
+- the logs;
+- everything the model reads: system prompts, tool descriptions and results, and refusals
+  it is meant to act on;
+- text the page compares with the model's or a tool's output;
+- protocol values.
+
+**Adding a string.**
+
+1. Add the key to the English table, in the order the text appears on screen.
+2. Use it from the code as a literal: `Loc.T("area.key")`, `t('area.key')` or
+   `data-i18n="area.key"`.
+3. Add it to every other language.
+
+**Adding a language.**
+
+1. Add it to `UiLanguages.Supported`. Extend `Match` too if its tags need more than the
+   first subtag.
+2. Give it a plural rule in `StringCatalog.PluralCategory` and in `i18n.js`.
+3. Write every table and the three `InfoPlist.strings` files.
+4. Add the tag to `CFBundleLocalizations` in the three `Info.plist` files.
+
+`LocalizationTests` fails, naming each gap, until all of that agrees. It checks that:
+
+- every language has every English key, with the same placeholders;
+- every key the code asks for exists, and every key is asked for by some code;
+- text the page repaints, and a menu row and the screen it opens, read the same;
+- the system's files and the bundles' language lists match the tables;
+- the running host follows the system on first launch, keeps each explicit choice after
+  a restart, and follows the system again after choosing "System";
+- refreshing the chat keeps unsent drafts and waits for a shared send's acceptance;
+- page string responses keep their language and text consistent during concurrent switches.
+
+For simulator checks of system detection, the Settings picker and relaunch persistence,
+use `python3 ../eng/validation/verify-tensoragent-languages.py --help` from this directory.
+The tool creates an isolated simulator and keeps logs and screenshots in ignored
+`docs/validation/`; it does not run model inference or validate a physical device.
+
 ## Tests
 
 ```
 dotnet test TensorAgent/tests/TensorAgent.Tests/TensorAgent.Tests.csproj
 ```
+
+The project is part of `TensorSharp.slnx`, so `dotnet test TensorSharp.slnx` runs it
+together with `InferenceWeb.Tests`.
 
 Hermetic by default. These groups need something the machine may not have and say
 so rather than passing silently:
@@ -1663,7 +1824,7 @@ checked and these were not:
   iOS produces (a stem with no extension, no content type, HEIC and MP4 bytes behind
   the same absent name), but the picker itself has only been run by hand.
 - **Pictures on a phone.** The page makes and edits pictures through `/api/chat` with
-  Qwen-Image 2.1, which the catalog offers only on a Mac (24 GB), where it was measured;
+  Qwen-Image 2.1, which needs the 24 GB memory tier and was measured in the Mac app;
   no image has been generated on iOS. `/api/image-edit` remains bound to the same
   service the desktop uses, with the LoRA plug-ins the user chose, but nothing on the page
   calls it, and `/api/image-generate`, the desktop page's text-to-image route, is not bound
@@ -1678,8 +1839,8 @@ checked and these were not:
   Nor has the app's own downloader fetched its 78.9 GB: the three shards were downloaded
   with `curl` and hard-linked into the app's store. How the store counts a split's shards
   is covered by `Qwen38FlashNextCatalogTests`.
-- **Clips on a phone.** The two MiniMax-H3 entries are offered only on a Mac (32 GB),
-  where they were measured. No video model fits a phone, so none is offered there, and
+- **Clips on a phone.** The two MiniMax-H3 entries need the 32 GB memory tier and
+  were measured in the Mac app. No video model fits a phone, so none is offered there, and
   no clip has been played by iOS's media loader (WebKit's playback was checked in the
   Mac app). `/api/video-generate` stays bound as part of the shared surface, but nothing
   on the page calls it.

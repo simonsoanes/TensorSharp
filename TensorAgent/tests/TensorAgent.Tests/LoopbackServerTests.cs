@@ -38,10 +38,10 @@ public sealed class LoopbackServerTests : IDisposable
 
         var entry = await http.GetAsync(server.EntryUrl);
         Assert.Equal(HttpStatusCode.OK, entry.StatusCode);
-        // The page is served whole, with the app's companion script appended, so the
+        // The page is served whole, with the translation bootstrap and companion assets, so the
         // markup file itself carries no script and all behaviour stays in tensoragent.js.
         string served = await entry.Content.ReadAsStringAsync();
-        Assert.StartsWith("<html>ui</html>", served, StringComparison.Ordinal);
+        Assert.Contains("<html>ui</html>", served, StringComparison.Ordinal);
         Assert.Contains("<script src=\"/tensoragent.js\"></script>", served, StringComparison.Ordinal);
         Assert.Contains("text/html", entry.Content.Headers.ContentType!.ToString());
 

@@ -12,6 +12,7 @@ using System.Buffers;
 using System.Security.Cryptography;
 using TensorAgent.Core.Downloads;
 using TensorAgent.Core.Interop;
+using TensorAgent.Core.Localization;
 
 namespace TensorAgent.Core.Catalog;
 
@@ -66,9 +67,10 @@ public sealed class ModelStore
     private readonly ResumableDownloader _downloader;
     private readonly IReadOnlyList<CatalogModel> _catalog;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private string _root;
 
     /// <summary>Root directory holding one sub-folder per catalog entry.</summary>
-    public string Root { get; }
+    public string Root => Volatile.Read(ref _root);
 
     /// <summary>Called for every file the store creates, so a platform can mark it (e.g. as
     /// excluded from backup). Best effort; exceptions are swallowed.</summary>
@@ -92,10 +94,46 @@ public sealed class ModelStore
     public ModelStore(string root, ResumableDownloader? downloader = null, IReadOnlyList<CatalogModel>? catalog = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(root);
-        Root = Path.GetFullPath(root);
+        _root = Path.GetFullPath(root);
         Directory.CreateDirectory(Root);
         _downloader = downloader ?? new ResumableDownloader();
         _catalog = catalog ?? ModelCatalog.BuiltIn;
+    }
+
+    /// <summary>
+    /// Switch the library once downloads/imports are idle. The caller can persist the
+    /// setting after the destination is checked and before the live root changes.
+    /// Existing model files stay in their current directory.
+    /// </summary>
+    internal void ChangeRoot(string absoluteRoot, Action? beforeChange = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(absoluteRoot);
+        if (string.Equals(Root, absoluteRoot,
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+        {
+            beforeChange?.Invoke();
+            return;
+        }
+
+        if (!_gate.Wait(0))
+            throw new InvalidOperationException(Loc.T("settings.storage.modelCache.busy"));
+        try
+        {
+            Directory.CreateDirectory(absoluteRoot);
+            string probe = Path.Combine(absoluteRoot, ".tensoragent-write-test-" + Guid.NewGuid().ToString("N"));
+            using (var stream = new FileStream(probe, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                bufferSize: 1, FileOptions.DeleteOnClose))
+            {
+                stream.WriteByte(0);
+            }
+
+            beforeChange?.Invoke();
+            Volatile.Write(ref _root, absoluteRoot);
+        }
+        finally
+        {
+            _gate.Release();
+        }
     }
 
     public string DirectoryFor(CatalogModel model) => Path.Combine(Root, model.Id);
@@ -103,8 +141,12 @@ public sealed class ModelStore
     public string PathFor(CatalogModel model, CatalogFile file) => Path.Combine(DirectoryFor(model), file.FileName);
 
     /// <summary>Path of the loadable weights, or null when not installed.</summary>
-    public string? WeightsPath(CatalogModel model) =>
-        StateOf(model) == InstallState.Installed ? PathFor(model, model.Weights) : null;
+    public string? WeightsPath(CatalogModel model)
+    {
+        string directory = DirectoryFor(model);
+        return StateOf(model, directory) == InstallState.Installed
+            ? Path.Combine(directory, model.Weights.FileName) : null;
+    }
 
     /// <summary>Path of an installed optional/required companion by role, or null.</summary>
     public string? CompanionPath(CatalogModel model, CatalogFileRole role)
@@ -116,19 +158,21 @@ public sealed class ModelStore
         return IsComplete(path, file) ? path : null;
     }
 
-    public InstallState StateOf(CatalogModel model)
+    public InstallState StateOf(CatalogModel model) => StateOf(model, DirectoryFor(model));
+
+    private static InstallState StateOf(CatalogModel model, string directory)
     {
         bool any = false, all = true;
         foreach (CatalogFile file in model.Files)
         {
             if (file.Optional)
                 continue;
-            bool present = IsComplete(PathFor(model, file), file);
+            bool present = IsComplete(Path.Combine(directory, file.FileName), file);
             any |= present;
             all &= present;
         }
         if (all) return InstallState.Installed;
-        if (any || Directory.Exists(DirectoryFor(model)) && Directory.EnumerateFileSystemEntries(DirectoryFor(model)).Any())
+        if (any || Directory.Exists(directory) && Directory.EnumerateFileSystemEntries(directory).Any())
             return InstallState.Partial;
         return InstallState.NotInstalled;
     }
@@ -155,13 +199,15 @@ public sealed class ModelStore
     /// </summary>
     public long RemainingBytes(CatalogModel model, bool includeOptional = false)
     {
+        string root = Root;
+        string directory = Path.Combine(root, model.Id);
         long remaining = 0;
         foreach (CatalogFile file in model.Files)
         {
             if (file.Optional && !includeOptional)
                 continue;
-            string path = PathFor(model, file);
-            if (IsComplete(path, file) || SharedCopy(model, file) is not null)
+            string path = Path.Combine(directory, file.FileName);
+            if (IsComplete(path, file) || SharedCopy(model, file, root) is not null)
                 continue;
             string part = ResumableDownloader.PartPath(path);
             long have = File.Exists(part) ? new FileInfo(part).Length : 0;
@@ -188,8 +234,7 @@ public sealed class ModelStore
         if (model.SideloadOnly)
         {
             throw new InvalidOperationException(
-                $"{model.DisplayName} has no verified publisher download URL. Import " +
-                $"the hash-pinned {model.Weights.FileName} file from the Models page instead.");
+                Loc.T("host.models.noDownloadUrl", ("model", model.DisplayName), ("file", model.Weights.FileName)));
         }
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -267,19 +312,20 @@ public sealed class ModelStore
         ArgumentNullException.ThrowIfNull(model);
         ArgumentNullException.ThrowIfNull(source);
         if (!model.SideloadOnly)
-            throw new InvalidOperationException($"{model.DisplayName} is downloaded by the catalog, not imported.");
+            throw new InvalidOperationException(Loc.T("host.models.notImported", ("model", model.DisplayName)));
         if (!source.CanRead)
-            throw new ArgumentException("The selected model file cannot be read.", nameof(source));
+            throw new ArgumentException(Loc.T("host.import.unreadable"), nameof(source));
 
         CatalogFile weights = model.Weights;
-        string directory = DirectoryFor(model);
-        string destination = PathFor(model, weights);
-        string staging = destination + ".import-" + Guid.NewGuid().ToString("N");
 
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         byte[]? buffer = null;
+        string? staging = null;
         try
         {
+            string directory = DirectoryFor(model);
+            string destination = Path.Combine(directory, weights.FileName);
+            staging = destination + ".import-" + Guid.NewGuid().ToString("N");
             buffer = ArrayPool<byte>.Shared.Rent(1024 * 1024);
             Directory.CreateDirectory(directory);
             using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -297,9 +343,8 @@ public sealed class ModelStore
                     copied = checked(copied + read);
                     if (copied > weights.Bytes)
                     {
-                        throw new InvalidDataException(
-                            $"{Path.GetFileName(weights.FileName)} is larger than the expected " +
-                            $"{weights.Bytes:N0} bytes and is not the pinned catalog artifact.");
+                        throw new InvalidDataException(Loc.T("host.import.tooLarge",
+                            ("file", Path.GetFileName(weights.FileName)), ("bytes", weights.Bytes.ToString("N0", Loc.Culture))));
                     }
 
                     hash.AppendData(buffer, 0, read);
@@ -312,17 +357,16 @@ public sealed class ModelStore
 
             if (copied != weights.Bytes)
             {
-                throw new InvalidDataException(
-                    $"The selected file is {copied:N0} bytes; {weights.FileName} must be " +
-                    $"exactly {weights.Bytes:N0} bytes.");
+                throw new InvalidDataException(Loc.T("host.import.wrongSize",
+                    ("size", copied.ToString("N0", Loc.Culture)), ("file", weights.FileName),
+                    ("bytes", weights.Bytes.ToString("N0", Loc.Culture))));
             }
 
             string actualHash = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
             if (!string.Equals(actualHash, weights.Sha256, StringComparison.Ordinal))
             {
                 throw new InvalidDataException(
-                    $"The selected file's SHA-256 is {actualHash}, not the pinned {weights.Sha256}. " +
-                    "Choose the exact GGUF named on the card.");
+                    Loc.T("host.import.wrongHash", ("actual", actualHash), ("expected", weights.Sha256)));
             }
 
             File.Move(staging, destination, overwrite: true);
@@ -332,7 +376,7 @@ public sealed class ModelStore
         {
             if (buffer is not null)
                 ArrayPool<byte>.Shared.Return(buffer);
-            try { if (File.Exists(staging)) File.Delete(staging); }
+            try { if (staging is not null && File.Exists(staging)) File.Delete(staging); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 // An abandoned staging file is never loadable and must not mask the
@@ -393,13 +437,14 @@ public sealed class ModelStore
     /// <returns>Bytes freed.</returns>
     public long SweepOrphanedModels(IReadOnlyList<CatalogModel>? catalog = null, IReadOnlyCollection<string>? retired = null)
     {
+        string root = Root;
         var known = new HashSet<string>(
             (catalog ?? _catalog).Select(m => m.Id), StringComparer.OrdinalIgnoreCase);
         var reclaimable = new HashSet<string>(retired ?? ModelCatalog.Retired, StringComparer.OrdinalIgnoreCase);
 
         long freed = 0;
         IEnumerable<string> directories;
-        try { directories = Directory.EnumerateDirectories(Root); }
+        try { directories = Directory.EnumerateDirectories(root); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return 0; }
 
         foreach (string directory in directories.ToList())
@@ -439,7 +484,7 @@ public sealed class ModelStore
         // so a stray file has no row, no size against any model, and no delete button,
         // while being the largest kind of file this app deals in.
         IEnumerable<string> strays;
-        try { strays = Directory.EnumerateFiles(Root); }
+        try { strays = Directory.EnumerateFiles(root); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return freed; }
 
         foreach (string file in strays.ToList())
@@ -532,7 +577,9 @@ public sealed class ModelStore
     /// it, and complete means what it means everywhere here, the exact size -- so a part
     /// file, or a truncated copy left by an interrupted transfer, is never linked.
     /// </summary>
-    private string? SharedCopy(CatalogModel model, CatalogFile file)
+    private string? SharedCopy(CatalogModel model, CatalogFile file) => SharedCopy(model, file, Root);
+
+    private string? SharedCopy(CatalogModel model, CatalogFile file, string root)
     {
         foreach (CatalogModel other in _catalog)
         {
@@ -543,7 +590,7 @@ public sealed class ModelStore
                 if (candidate.Bytes != file.Bytes
                     || !string.Equals(candidate.Sha256, file.Sha256, StringComparison.OrdinalIgnoreCase))
                     continue;
-                string path = PathFor(other, candidate);
+                string path = Path.Combine(root, other.Id, candidate.FileName);
                 if (IsComplete(path, candidate))
                     return path;
             }

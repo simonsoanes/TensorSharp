@@ -78,6 +78,17 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/qw
   <p><strong>提速的关键是分辨率和步数。</strong>削减步数最多的是步数蒸馏 LoRA 插件，它把默认的 40 步换成 4–8 次 Transformer 前向：在 M5 Pro 上，1024×1024、Viggle Turbo 的 6 步整体用时 54.5 秒（见 <a href="#lora">LoRA 插件</a>）。2K 正方形的潜在图像 token 数是 1K 正方形的四倍，注意力计算也更多，因此 <code>--width 1024 --height 1024</code> 是草图设置。<code>--diffusion-steps 25 --cfg 1</code> 是官方 ComfyUI 生成与编辑工作流使用的更快配置；默认仍为 40 步，更少的步数是质量与速度之间的权衡，并不代表质量相当。CFG 1 本身就意味着每步只做一次 Transformer 前向。快速冒烟测试可用 256×256、一步，它只验证加载和端到端数据通路，不说明图像质量。图像编辑还会从默认开启的<a href="#prefix-kv-cache">前缀 KV 缓存</a>中获益。</p>
   <p>可从 <a href="cli_zh-cn.html#imagegen">CLI</a>（<code>--prompt</code>，编辑时再加 <code>--image</code>）、<a href="server_zh-cn.html#webui">Web UI</a>（不带附件的提示词会生成图像；附加一张或多张图像即可编辑，并有实时去噪预览）、<a href="http-api_zh-cn.html#image-api">HTTP API</a>（<code>/api/image-generate</code> 与 <code>/api/image-edit</code>，各有 <code>/stream</code> 变体），或在进程内从 <a href="code-api_zh-cn.html#imagegen">C# 通过 <code>QwenImageModel.GenerateImage()</code> / <code>EditImage()</code></a> 运行。由于扩散流水线共享可变的工作状态，图像操作会串行执行。完整细节见仓库的 <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/models/qwenimage21_zh-cn.md" target="_blank" rel="noopener">Qwen-Image-2.1 卡片</a>（验证记录见<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/models/qwenimage21.md" target="_blank" rel="noopener">英文版</a>）。</p>
 
+  <h3 id="mask-editing">编辑选定区域</h3>
+  <p>在 <strong>TensorAgent</strong> 或服务端 Web UI 中附加照片，选择缩略图旁的<strong>选择区域</strong>，涂选或擦除区域，再选择<strong>使用选区</strong>。该照片成为编辑目标，其余照片保留为参考图。加载 Qwen-Image 2.1，描述修改并发送。编辑器支持鼠标、触摸、触控笔、缩放/平移、撤销/重做、反选和边缘柔化。<strong>比较原图</strong>用于检查结果；<strong>再次编辑</strong>恢复照片、选区与提示词。</p>
+  <p>保存的选区保留目标的原始尺寸，以及选区外精确的解码 RGB/alpha 像素。灰度蒙版中白色编辑、黑色保护；alpha 蒙版中透明像素编辑。蒙版必须与第一张图的尺寸相同。边缘柔化向内渐变。可选裁剪模式仅处理带上下文的选区，再放回原始画布，可减少工作量，但会减少周围上下文。选区内是否按指令修改仍取决于模型。</p>
+  <pre data-lang="bash"><code>dotnet run --project TensorSharp.Cli -c Release --no-build -- \
+  --config config/qwen-image-2.1.json \
+  --image photo.png --mask selection.png --mask-mode grayscale \
+  --prompt 'Change the selected vase to red ceramic' \
+  --mask-feather 8 --mask-crop --mask-crop-padding 96 \
+  --width 1024 --height 1024 --diffusion-seed 42 --output edited.png</code></pre>
+  <p><code>--mask-invert</code> 反转选区。柔化范围为 0–1024 个源图像素；裁剪留边为 0–16384（默认 64）。编辑器支持最多 1600 万像素、每边最多 8192 像素，并使用单独的全分辨率 PNG 编辑 HEIC/HEIF 选区。同一套蒙版字段支持 <a href="http-api_zh-cn.html#image-api">JSON、multipart 与 SSE 图像编辑 API</a> 及 <a href="code-api_zh-cn.html#imagegen">C# 的 QwenImageParams</a>。详细语义与验证边界见<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/models/qwenimage21_zh-cn.md" target="_blank" rel="noopener">模型卡</a>。</p>
+
   <h3 id="cpu-backend">在 CPU 上运行（<code>--backend cpu</code>）</h3>
   <p><code>--backend cpu</code> 用托管 C# 运行整条流水线，不调用任何 GGML：Transformer（像 ggml-cpu 那样使用 8 位激活、在多行整数 GEMM 上计算；分块 flash attention；不合并的 LoRA）、位于主机内存的前缀 KV 缓存、同样基于整数 GEMM 的 Qwen3-VL 文本编码器与基于 packed F32 GEMM 的视觉编码器，以及以隐式 im2col packed 卷积实现、在每个逻辑 CPU 一个线程的线程池上运行的 VAE。在这个后端上，未指定尺寸的请求输出 1024×1024（1 百万像素）；<code>ggml_cpu</code> 与 GPU 后端保持 2048×2048。这个后端会拒绝 <code>--tp</code>。在 i7-11800H（8 核 16 线程、AVX-512、32 GB）上实测，文生图，种子 42：</p>
   <div class="table-scroll">

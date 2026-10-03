@@ -68,7 +68,10 @@ public sealed partial class WebUiPageTests : IDisposable
     /// </summary>
     private JsonElement Run(string routes, string drive)
     {
-        string source = Dom + "\n" + Boot(routes) + "\n" + PageScript + "\n" + Settle(drive);
+        // The strings go in ahead of the page, as /i18n.js does in the WebView: the very
+        // script the loopback server serves, in English (no test here changes the language).
+        string source = Dom + "\n" + Boot(routes) + "\n" + TensorAgent.Core.Localization.PageStrings.Script()
+            + "\n" + PageScript + "\n" + Settle(drive);
         var policy = new ExecutionPolicy(
             AllowScripts: true,
             AllowNetwork: false,

@@ -45,6 +45,10 @@ public static class MauiProgram
 
     public static MauiApp CreateMauiApp()
     {
+        // Before the host exists: it picks the interface language as it loads the
+        // settings, and with no choice saved that is the first of these it has strings for.
+        Core.Localization.Loc.SystemLanguages = Services.SystemLanguages.Preferred;
+
 #if IOS
         ApplyPhoneEngineSettings();
 #else

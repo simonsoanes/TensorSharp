@@ -10,6 +10,7 @@
 
 using Foundation;
 using TensorAgent.Sharing;
+using TensorAgent.Sharing.Localization;
 using UIKit;
 
 namespace TensorAgent.ShareExtension;
@@ -75,6 +76,13 @@ internal static class ShareItemReader
     private const string JavaScriptResults = "NSExtensionJavaScriptPreprocessingResultsKey";
 
     /// <summary>
+    /// What <c>ExtensionPreprocessing.js</c> puts where it cut the middle out of a long page
+    /// or selection: English, because the script runs inside the page, out of reach of the
+    /// string tables. <see cref="WithOwnMarker"/> puts the interface language's in its place.
+    /// </summary>
+    private const string ScriptMiddleShortenedMarker = "\n\n… [middle shortened by TensorAgent] …\n\n";
+
+    /// <summary>
     /// The biggest single file this will copy.
     ///
     /// <para>
@@ -137,7 +145,7 @@ internal static class ShareItemReader
             {
                 if (!itemLimitSaid)
                 {
-                    payload.Notes.Add("Additional shared items were omitted because too many were selected at once.");
+                    payload.Notes.Add(ShareStrings.T("share.note.tooManyItems"));
                     itemLimitSaid = true;
                 }
                 break;
@@ -152,9 +160,9 @@ internal static class ShareItemReader
             string title = titleLoaded.Text ?? string.Empty;
             string contentText = contentLoaded.Text ?? string.Empty;
             if (titleLoaded.Truncated)
-                payload.Notes.Add($"A very long shared item title was shortened from {titleLoaded.OriginalChars:N0} characters.");
+                payload.Notes.Add(ShareStrings.T("share.note.titleShortened", ("characters", Chars(titleLoaded.OriginalChars))));
             if (contentLoaded.Truncated)
-                payload.Notes.Add($"A very long shared text item was shortened from {contentLoaded.OriginalChars:N0} characters.");
+                payload.Notes.Add(ShareStrings.T("share.note.textShortened", ("characters", Chars(contentLoaded.OriginalChars))));
 
             NSItemProvider[] providers = item.Attachments ?? Array.Empty<NSItemProvider>();
 
@@ -164,7 +172,7 @@ internal static class ShareItemReader
                 {
                     if (!itemLimitSaid)
                     {
-                        payload.Notes.Add("Additional shared items were omitted because too many were selected at once.");
+                        payload.Notes.Add(ShareStrings.T("share.note.tooManyItems"));
                         itemLimitSaid = true;
                     }
                     break;
@@ -194,7 +202,7 @@ internal static class ShareItemReader
                 payload.Items.Add(ShareItem.ForText(contentText, title));
         }
         if (inputItems.Length > inputLimit && !itemLimitSaid)
-            payload.Notes.Add("Additional shared items were omitted because too many were selected at once.");
+            payload.Notes.Add(ShareStrings.T("share.note.tooManyItems"));
 
         // Several attachments describing ONE thing is the normal case, not the odd one:
         // Safari sends the extracted page AND a plain public.url for it, Firefox sends a
@@ -236,10 +244,10 @@ internal static class ShareItemReader
             if (loaded.Text?.Trim() is { Length: > 0 } address)
             {
                 if (loaded.Truncated)
-                    payload.Notes.Add($"A shared address longer than {SharePayload.MaxUrlChars:N0} characters was shortened safely.");
+                    payload.Notes.Add(ShareStrings.T("share.note.addressShortened", ("characters", Chars(SharePayload.MaxUrlChars))));
                 return ShareItem.ForUrl(address, title);
             }
-            payload.Notes.Add("A shared link could not be read safely from the sharing app.");
+            payload.Notes.Add(ShareStrings.T("share.note.linkUnreadable"));
             return null;
         }
 
@@ -304,7 +312,7 @@ internal static class ShareItemReader
             if (loaded.Truncated)
             {
                 payload.Notes.Add(
-                    $"A very long shared text item was shortened from {loaded.OriginalChars:N0} characters.");
+                    ShareStrings.T("share.note.textShortened", ("characters", Chars(loaded.OriginalChars))));
             }
             return ShareItem.ForText(ShareText.Shorten(text, 120_000).Text, title);
         }
@@ -325,12 +333,12 @@ internal static class ShareItemReader
     {
         if (writer is null)
         {
-            payload.Notes.Add("Files could not be shared: TensorAgent has no shared container on this build.");
+            payload.Notes.Add(ShareStrings.T("share.note.noContainer"));
             return null;
         }
         if (soFar >= totalLimit)
         {
-            payload.Notes.Add("Some shared files were left out: too much at once.");
+            payload.Notes.Add(ShareStrings.T("share.note.tooMuch"));
             return null;
         }
         // The CONCRETE type the provider registered, not the family it conforms to:
@@ -347,12 +355,12 @@ internal static class ShareItemReader
     {
         if (writer is null)
         {
-            payload.Notes.Add("Files could not be shared: TensorAgent has no shared container on this build.");
+            payload.Notes.Add(ShareStrings.T("share.note.noContainer"));
             return Task.FromResult<ShareItem?>(null);
         }
         if (soFar >= totalLimit && !string.Equals(forcedTypeIdentifier, Rtfd, StringComparison.Ordinal))
         {
-            payload.Notes.Add("Some shared files were left out: too much at once.");
+            payload.Notes.Add(ShareStrings.T("share.note.tooMuch"));
             return Task.FromResult<ShareItem?>(null);
         }
 
@@ -369,7 +377,9 @@ internal static class ShareItemReader
                 {
                     if (url is null || !url.IsFileUrl || url.Path is not { Length: > 0 } source)
                     {
-                        payload.Notes.Add(Describe(suggested) + " could not be opened from the sharing app.");
+                        payload.Notes.Add(Named(suggested) is { } name
+                            ? ShareStrings.T("share.note.fileNotOpened", ("name", name))
+                            : ShareStrings.T("share.note.unnamedFileNotOpened"));
                         done.TrySetResult(null);
                         return;
                     }
@@ -405,14 +415,14 @@ internal static class ShareItemReader
                         });
                     if (coordinationError is not null)
                     {
-                        payload.Notes.Add(Describe(suggested, source) + " could not be coordinated: "
-                            + coordinationError.LocalizedDescription);
+                        payload.Notes.Add(ShareStrings.T("share.note.fileNotCoordinated",
+                            ("name", Describe(suggested, source)), ("reason", coordinationError.LocalizedDescription)));
                     }
                     done.TrySetResult(copied);
                 }
                 catch (Exception ex)
                 {
-                    payload.Notes.Add(Describe(suggested) + " could not be shared: " + ex.Message);
+                    payload.Notes.Add(NotShared(suggested, ex.Message));
                     done.TrySetResult(null);
                 }
                 finally
@@ -427,7 +437,7 @@ internal static class ShareItemReader
         }
         catch (Exception ex)
         {
-            payload.Notes.Add(Describe(suggested) + " could not be shared: " + ex.Message);
+            payload.Notes.Add(NotShared(suggested, ex.Message));
             done.TrySetResult(null);
         }
         return done.Task;
@@ -480,11 +490,17 @@ internal static class ShareItemReader
         string selection = StringOf(results, "selection");
         string text = StringOf(results, "text");
         if (results["truncated"] is NSNumber truncated && truncated.BoolValue)
-            payload.Notes.Add("The browser page was very long, so its middle was shortened before sharing.");
+        {
+            payload.Notes.Add(ShareStrings.T("share.note.pageShortened"));
+            text = WithOwnMarker(text);
+        }
         if (results["selectionTruncated"] is NSNumber selectionTruncated && selectionTruncated.BoolValue)
-            payload.Notes.Add("The browser selection was very long, so its middle was shortened before sharing.");
+        {
+            payload.Notes.Add(ShareStrings.T("share.note.selectionShortened"));
+            selection = WithOwnMarker(selection);
+        }
         if (results["metadataTruncated"] is NSNumber metadataTruncated && metadataTruncated.BoolValue)
-            payload.Notes.Add("The browser page title or address was shortened before sharing.");
+            payload.Notes.Add(ShareStrings.T("share.note.pageMetadataShortened"));
         if (url.Length == 0 && text.Length == 0 && selection.Length == 0)
             return null;
 
@@ -522,8 +538,9 @@ internal static class ShareItemReader
                     // loadFileRepresentation also spills value-backed data to a temporary
                     // file, so if it failed there is no safe second representation to ask
                     // for here.
-                    payload.Notes.Add(
-                        Describe(suggested) + " could not be shared because the source app did not provide a file representation.");
+                    payload.Notes.Add(Named(suggested) is { } name
+                        ? ShareStrings.T("share.note.noFileRepresentation", ("name", name))
+                        : ShareStrings.T("share.note.unnamedNoFileRepresentation"));
                     done.TrySetResult(null);
                     return;
                 }
@@ -533,7 +550,7 @@ internal static class ShareItemReader
             }
             catch (Exception ex)
             {
-                payload.Notes.Add(Describe(suggested) + " could not be shared: " + ex.Message);
+                payload.Notes.Add(NotShared(suggested, ex.Message));
                 done.TrySetResult(null);
             }
         });
@@ -552,18 +569,20 @@ internal static class ShareItemReader
         try { bytes = new FileInfo(source).Length; }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            payload.Notes.Add(Describe(suggested, source) + " could not be measured: " + ex.Message);
+            payload.Notes.Add(ShareStrings.T("share.note.fileNotMeasured",
+                ("name", Describe(suggested, source)), ("reason", ex.Message)));
             return null;
         }
         if (bytes > MaxFileBytes)
         {
-            payload.Notes.Add(
-                $"{Describe(suggested, source)} is {bytes / (1024.0 * 1024):0.#} MB, which is too large to share.");
+            payload.Notes.Add(ShareStrings.T("share.note.fileTooLarge",
+                ("name", Describe(suggested, source)),
+                ("size", (bytes / (1024.0 * 1024)).ToString("0.#", ShareStrings.Culture))));
             return null;
         }
         if (bytes > totalLimit - soFar)
         {
-            payload.Notes.Add("Some shared files were left out: too much at once.");
+            payload.Notes.Add(ShareStrings.T("share.note.tooMuch"));
             return null;
         }
 
@@ -575,7 +594,9 @@ internal static class ShareItemReader
         NSFileManager.DefaultManager.Copy(source, absolute, out NSError? copyError);
         if (copyError is not null)
         {
-            payload.Notes.Add(Describe(name) + " could not be copied: " + copyError.LocalizedDescription);
+            payload.Notes.Add(Named(name) is { } shown
+                ? ShareStrings.T("share.note.fileNotCopied", ("name", shown), ("reason", copyError.LocalizedDescription))
+                : ShareStrings.T("share.note.unnamedFileNotCopied", ("reason", copyError.LocalizedDescription)));
             return null;
         }
         return ShareItem.ForFile(relative, name, bytes, typeIdentifier, MimeTypeFor(typeIdentifier));
@@ -587,7 +608,7 @@ internal static class ShareItemReader
         if (!string.Equals(typeIdentifier, Rtfd, StringComparison.Ordinal)
             && !string.Equals(Path.GetExtension(source), ".rtfd", StringComparison.OrdinalIgnoreCase))
         {
-            payload.Notes.Add(Describe(suggested, source) + " is a folder/package and could not be attached.");
+            payload.Notes.Add(ShareStrings.T("share.note.folder", ("name", Describe(suggested, source))));
             return null;
         }
 
@@ -598,21 +619,22 @@ internal static class ShareItemReader
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            payload.Notes.Add(Describe(suggested, source) + " could not be read: " + ex.Message);
+            payload.Notes.Add(ShareStrings.T("share.note.fileNotRead",
+                ("name", Describe(suggested, source)), ("reason", ex.Message)));
             return null;
         }
         string? rtf = scan.RtfPath;
         if (scan.LimitReached)
-            payload.Notes.Add("Only the first part of the shared rich-text package was inspected safely.");
+            payload.Notes.Add(ShareStrings.T("share.note.packageLimited"));
         if (rtf is null)
         {
-            payload.Notes.Add(Describe(suggested, source) + " contained no readable rich text.");
+            payload.Notes.Add(ShareStrings.T("share.note.noRichText", ("name", Describe(suggested, source))));
             return null;
         }
         var info = new FileInfo(rtf);
         if (info.Length > MaxRichTextSourceBytes)
         {
-            payload.Notes.Add(Describe(suggested, source) + " had too much rich text to read safely.");
+            payload.Notes.Add(ShareStrings.T("share.note.richTextTooLarge", ("name", Describe(suggested, source))));
             return null;
         }
         string plain;
@@ -625,7 +647,7 @@ internal static class ShareItemReader
         {
             if (rich is null)
             {
-                payload.Notes.Add(Describe(suggested, source) + " contained rich text that could not be decoded safely.");
+                payload.Notes.Add(ShareStrings.T("share.note.richTextUndecodable", ("name", Describe(suggested, source))));
                 return null;
             }
             plain = rich.Value ?? string.Empty;
@@ -633,10 +655,10 @@ internal static class ShareItemReader
         if (plain.Trim().Length == 0)
             return null;
         if (scan.FileCount > 1)
-            payload.Notes.Add("Embedded files in the shared rich-text note were not included.");
+            payload.Notes.Add(ShareStrings.T("share.note.embeddedFilesOmitted"));
         ShareText.ShortenedText bounded = ShareText.Shorten(plain, 120_000);
         if (bounded.WasShortened)
-            payload.Notes.Add($"A very long shared rich-text note was shortened from {bounded.OriginalLength:N0} characters.");
+            payload.Notes.Add(ShareStrings.T("share.note.noteShortened", ("characters", Chars(bounded.OriginalLength))));
         return ShareItem.ForText(bounded.Text, suggested);
     }
 
@@ -825,7 +847,7 @@ internal static class ShareItemReader
         if (original <= maxChars)
             return new BoundedLoadedText(AttributedSubstring(attributed, 0, attributed.Length), false, original);
 
-        const string marker = "\n\n… [middle shortened by TensorAgent] …\n\n";
+        string marker = MiddleShortenedMarker();
         int contentBudget = Math.Max(0, maxChars - marker.Length);
         int headLimit = contentBudget * 2 / 3;
         int tailLimit = contentBudget - headLimit;
@@ -875,7 +897,7 @@ internal static class ShareItemReader
                         {
                             done.TrySetResult(new BoundedLoadedText(
                                 null, false, 0,
-                                "A shared link was too large to decode safely and was not included."));
+                                ShareStrings.T("share.note.linkTooLarge")));
                             return;
                         }
 
@@ -1071,7 +1093,7 @@ internal static class ShareItemReader
                         {
                             done.TrySetResult(new BoundedLoadedText(
                                 null, false, 0,
-                                "A shared text item was too large to decode safely and was not included."));
+                                ShareStrings.T("share.note.textTooLarge")));
                             return;
                         }
 
@@ -1080,7 +1102,7 @@ internal static class ShareItemReader
                         {
                             done.TrySetResult(new BoundedLoadedText(
                                 null, false, 0,
-                                "A shared text item could not be decoded safely and was not included."));
+                                ShareStrings.T("share.note.textUndecodable")));
                             return;
                         }
 
@@ -1097,7 +1119,7 @@ internal static class ShareItemReader
                             {
                                 done.TrySetResult(new BoundedLoadedText(
                                     null, false, 0,
-                                    "A shared rich-text item could not be decoded safely and was not included."));
+                                    ShareStrings.T("share.note.richTextItemUndecodable")));
                                 return;
                             }
                             done.TrySetResult(ReadAttributedText(rich, maxChars));
@@ -1123,7 +1145,7 @@ internal static class ShareItemReader
                         {
                             done.TrySetResult(new BoundedLoadedText(
                                 null, false, 0,
-                                "A shared rich-text item was too large to decode safely and was not included."));
+                                ShareStrings.T("share.note.richTextItemTooLarge")));
                             return;
                         }
                         var attributes = new NSAttributedStringDocumentAttributes
@@ -1139,7 +1161,7 @@ internal static class ShareItemReader
                         }
                         done.TrySetResult(new BoundedLoadedText(
                             null, false, 0,
-                            "A shared rich-text item could not be decoded safely and was not included."));
+                            ShareStrings.T("share.note.richTextItemUndecodable")));
                         return;
                     }
                     if (string.Equals(typeIdentifier, Html, StringComparison.Ordinal))
@@ -1148,7 +1170,7 @@ internal static class ShareItemReader
                         {
                             done.TrySetResult(new BoundedLoadedText(
                                 null, false, 0,
-                                "A shared HTML item was too large to decode safely and was not included."));
+                                ShareStrings.T("share.note.htmlTooLarge")));
                             return;
                         }
                         using var htmlReader = new StreamReader(path, detectEncodingFromByteOrderMarks: true);
@@ -1158,7 +1180,7 @@ internal static class ShareItemReader
                             bounded.Text, bounded.WasShortened, bounded.OriginalLength));
                         return;
                     }
-                    const string marker = "\n\n… [middle shortened by TensorAgent] …\n\n";
+                    string marker = MiddleShortenedMarker();
                     int contentBudget = Math.Max(0, maxChars - marker.Length);
                     int headLimit = contentBudget * 2 / 3;
                     int tailLimit = contentBudget - headLimit;
@@ -1235,13 +1257,39 @@ internal static class ShareItemReader
     private static string StringOf(NSDictionary dictionary, string key)
         => dictionary[key] is NSString value ? value.ToString() : string.Empty;
 
-    private static string Describe(string name, string? fallbackPath = null)
+    /// <summary>The shared file's name as the user knows it: the one the sharing app gave, else the file's own.</summary>
+    private static string Describe(string name, string path) =>
+        ShareEnvelopeWriter.SafeFileName(name.Length > 0 ? name : Path.GetFileName(path));
+
+    /// <summary>
+    /// The name the sharing app gave the file, or null when it gave none: each note about a
+    /// file is a whole sentence of its own for an unnamed one.
+    /// </summary>
+    private static string? Named(string name) =>
+        name.Length > 0 ? ShareEnvelopeWriter.SafeFileName(name) : null;
+
+    private static string NotShared(string name, string reason) => Named(name) is { } shown
+        ? ShareStrings.T("share.note.fileNotShared", ("name", shown), ("reason", reason))
+        : ShareStrings.T("share.note.unnamedFileNotShared", ("reason", reason));
+
+    /// <summary>A number of characters, written the way the interface writes numbers.</summary>
+    private static string Chars(long count) => count.ToString("N0", ShareStrings.Culture);
+
+    /// <summary>What stands where the middle of a very long shared text was cut out.</summary>
+    private static string MiddleShortenedMarker() =>
+        "\n\n" + ShareStrings.T("share.text.middleShortened") + "\n\n";
+
+    /// <summary>
+    /// A page or selection the script cut, marked as the extension marks its own cuts. The
+    /// app's shorter cut usually drops the script's marker with the middle around it, but
+    /// not when a long highlighted passage taken out of the page moves it into the part kept.
+    /// </summary>
+    private static string WithOwnMarker(string text)
     {
-        if (name.Length > 0)
-            return ShareEnvelopeWriter.SafeFileName(name);
-        if (fallbackPath is { Length: > 0 })
-            return ShareEnvelopeWriter.SafeFileName(Path.GetFileName(fallbackPath));
-        return "A shared file";
+        int at = text.IndexOf(ScriptMiddleShortenedMarker, StringComparison.Ordinal);
+        return at < 0
+            ? text
+            : text[..at] + MiddleShortenedMarker() + text[(at + ScriptMiddleShortenedMarker.Length)..];
     }
 
     private static string ZipName(string suggested, string source)
