@@ -29,8 +29,8 @@
 // scattered back after, so the fused and op-by-op paths share one source of
 // truth for the recurrent state.
 //
-// Default OFF (TS_QWEN35_BATCHED_FUSED=1 to enable) until validated; when off or
-// when the kernel declines, ForwardBatch runs its existing op-by-op layer loop.
+// It serves all-decode batches on ggml_cuda; when the kernel declines,
+// ForwardBatch runs its op-by-op layer loop.
 using System;
 using System.Runtime.InteropServices;
 using TensorSharp;
@@ -57,16 +57,6 @@ namespace TensorSharp.Models
         private Qwen35LayerDecodeArgs[] _bfdLayers;
         private int[] _bfdGdnSlot;        // layer -> gdn index (or -1)
 
-        private static bool IsBatchedFusedEnabled()
-        {
-            // Default ON: the true token-batched fused decode is the vLLM-style
-            // continuous-batching decode path for ggml_cuda. Set
-            // TS_QWEN35_BATCHED_FUSED=0 to force the op-by-op batched path.
-            string raw = Environment.GetEnvironmentVariable("TS_QWEN35_BATCHED_FUSED");
-            if (string.IsNullOrEmpty(raw)) return true;
-            return raw != "0" && !string.Equals(raw, "false", StringComparison.OrdinalIgnoreCase);
-        }
-
         /// <summary>Invalidate the batched-fused KV-pool seed. Called whenever the
         /// op-by-op path runs (it writes the host paged pool the device pool is
         /// seeded from) or the KV cache is reset, so the next fused decode re-seeds.</summary>
@@ -91,10 +81,6 @@ namespace TensorSharp.Models
             }
             _bfdTotalSlots = totalSlots;
             _bfdPoolSeeded = false; // fresh pools must be (re)seeded from host
-            // The captured graph pins the pool device addresses; a realloc moves
-            // them, so drop the cached graph (rebuilds against the new pools).
-            GgmlBasicOps.Qwen35ResetBatchedDecodeCache();
-            CountDecodeGraphReset();
         }
 
         /// <summary>Run the whole hybrid transformer over the batch's decode tokens
@@ -382,12 +368,8 @@ namespace TensorSharp.Models
 
             // Mirror the freshly written token K/V slots back into the host paged
             // pool so it stays the consistent source of truth (re-seed / op-by-op
-            // fallback). Download the touched slots from the device pools. For a
-            // pure-decode run (no op-by-op interleaving) the device pool persists
-            // via in-place set_rows, so the mirror is only needed for consistency
-            // across path transitions — skip it with TS_QWEN35_BFD_NOMIRROR=1.
-            if (!string.Equals(Environment.GetEnvironmentVariable("TS_QWEN35_BFD_NOMIRROR"), "1", StringComparison.Ordinal))
-                MirrorNewSlotsToHostPool(slotMapping, numTokens, kvFlat);
+            // fallback). Download the touched slots from the device pools.
+            MirrorNewSlotsToHostPool(slotMapping, numTokens, kvFlat);
             return hiddenStates;
         }
 

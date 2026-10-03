@@ -21,7 +21,7 @@ import types
 
 import numpy as np
 
-COMPARATOR_SHA256 = '76573227edefb7e199a0d8ea1bfe33fb16f93d5cadb0e06511a000fd6bd7bed0'
+COMPARATOR_SHA256 = '335f56c018889b8e8f997ba6f224b6dc4bcd679b4c91f7bf894a781314885b24'
 SUPPORTED_SCOPE = 'primary-serialized-slot0'
 
 
@@ -229,7 +229,8 @@ class Native:
             return function
         pointer = ctypes.c_void_p
         integer = ctypes.c_int
-        self._load = bind('TSGgml_Dsv4LoadModel', [ctypes.c_char_p, integer, integer, integer, integer, integer, ctypes.c_char_p], pointer)
+        self._load = bind('TSGgml_Dsv4LoadModel', [ctypes.c_char_p, integer, integer, integer, integer, ctypes.c_char_p,
+                                                    integer, ctypes.c_char_p, integer], pointer)
         self._free = bind('TSGgml_Dsv4Free', [pointer], None)
         self._vocab = bind('TSGgml_Dsv4VocabSize', [pointer], integer)
         self._context = bind('TSGgml_Dsv4CtxSize', [pointer], integer)
@@ -237,9 +238,10 @@ class Native:
         self._forward = bind('TSGgml_Dsv4Forward', [pointer, ctypes.POINTER(ctypes.c_int32), integer, ctypes.POINTER(ctypes.c_float)], integer)
         self._reset = bind('TSGgml_Dsv4Reset' if reset_api == 'v5-void' else 'TSGgml_Dsv4ResetChecked', [pointer], None if reset_api == 'v5-void' else integer)
 
-    def load(self, path, settings):
+    def load(self, path, settings, tp_ranks):
         self.handle = self._load(str(path).encode('utf-8'), settings['n_gpu'], settings['n_ctx'], settings['n_ubatch'],
-                                 settings['n_threads'], settings['n_cpu_moe'], settings['backend'].encode('ascii'))
+                                 settings['n_threads'], None, settings['n_cpu_moe'], settings['backend'].encode('ascii'),
+                                 tp_ranks)
         require(bool(self.handle), 'Native model load returned null')
 
     def free(self):
@@ -496,7 +498,8 @@ def main():
             observer = Observer(config, schedule)
             native = Native(config['native_library'], config['reset_api'])
             report['observations']['before'] = observer.audit()
-            native.load(Path(plan['model']['directory']) / plan['model']['files'][0]['path'], variant['native_load'])
+            native.load(Path(plan['model']['directory']) / plan['model']['files'][0]['path'], variant['native_load'],
+                        variant['requested_expert_tp_ranks'])
             report['placement'] = parse_placement((args.output / 'native.log').read_text(errors='replace'), variant, config['model_layers'])
             capture_rows(native, rows, Path(config['schedule_path']).parent, args.output / 'rows', report)
     except Exception as error:

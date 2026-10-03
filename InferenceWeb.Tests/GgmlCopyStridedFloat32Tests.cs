@@ -110,12 +110,11 @@ public class GgmlCopyStridedFloat32Tests
     }
 
     [GgmlFact(BackendType.GgmlCpu)]
-    public void Copy_TransposedView_StaysOnTheElementPath_AndIsCorrect()
+    public void Copy_TransposedView_IsCorrect()
     {
         // A transpose has stride 1 on NEITHER trailing dim of the destination
-        // pairing, so the memcpy shortcut must not engage. Correctness is what
-        // the test pins; the point is that the fast path did not silently take
-        // a view it cannot handle.
+        // pairing, so the memcpy shortcut must not engage; it takes the tiled
+        // transpose instead. Correctness is what the test pins.
         var (alloc, _) = NewCpuAllocator();
         using var src = new Tensor(alloc, DType.Float32, 5, 9);
         Seed(src);
@@ -127,6 +126,52 @@ public class GgmlCopyStridedFloat32Tests
         for (int r = 0; r < 9; r++)
             for (int c = 0; c < 5; c++)
                 Assert.Equal(src.GetElementAsFloat(c, r), dst.GetElementAsFloat(r, c));
+    }
+
+    /// <summary>
+    /// The tiled transpose that a weight's Transpose() made contiguous now takes: edges
+    /// that are not a whole tile, a single element, exact tiles, a copy large enough to
+    /// split over the cores, and the transpose of a NARROWED weight, whose columns are
+    /// further apart than its rows are long.
+    /// </summary>
+    [GgmlTheory(BackendType.GgmlCpu)]
+    [InlineData(1, 1)]
+    [InlineData(33, 70)]
+    [InlineData(64, 64)]
+    [InlineData(1152, 431)]
+    public void Copy_TransposedWeight_MatchesTheElementwiseReference(int outDim, int inDim)
+    {
+        var (alloc, _) = NewCpuAllocator();
+        using var weight = new Tensor(alloc, DType.Float32, outDim, inDim);
+        float[] values = new float[outDim * inDim];
+        for (int i = 0; i < values.Length; i++) values[i] = i * 0.5f - 7f;
+        weight.SetElementsAsFloat(values);
+
+        using var view = weight.Transpose();
+        using var dst = Ops.NewContiguous(view);
+
+        Assert.Equal(new long[] { inDim, outDim }, dst.Sizes.ToArray());
+        float[] actual = dst.GetElementsAsFloat(inDim * outDim);
+        for (int r = 0; r < inDim; r++)
+            for (int c = 0; c < outDim; c++)
+                Assert.Equal(values[c * inDim + r], actual[r * outDim + c]);
+    }
+
+    [GgmlFact(BackendType.GgmlCpu)]
+    public void Copy_TransposeOfANarrowedWeight_ReadsOnlyItsOwnColumns()
+    {
+        var (alloc, _) = NewCpuAllocator();
+        using var weight = new Tensor(alloc, DType.Float32, 40, 50);
+        Seed(weight);
+
+        using var narrowed = weight.Narrow(1, 7, 20);   // [40, 20], rows 50 apart
+        using var view = narrowed.Transpose();           // [20, 40], stride [1, 50]
+        using var dst = new Tensor(alloc, DType.Float32, 20, 40);
+        Ops.Copy(dst, view);
+
+        for (int r = 0; r < 20; r++)
+            for (int c = 0; c < 40; c++)
+                Assert.Equal(weight.GetElementAsFloat(c, 7 + r), dst.GetElementAsFloat(r, c));
     }
 
     [GgmlFact(BackendType.GgmlCpu)]

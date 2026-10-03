@@ -29,11 +29,18 @@ namespace TensorSharp.Cuda
         int HeadDim { get; }
 
         /// <summary>
-        /// Extends the sequence's hash history by this ubatch, once, before any
-        /// layer asks for rows. The history is indexed by absolute position, so a
-        /// prompt split across ubatches hashes exactly as it would in one shot.
+        /// Extends one sequence's hash history by this ubatch, once, before any layer asks
+        /// for rows. The history is indexed by absolute position, so a prompt split across
+        /// ubatches hashes exactly as it would in one shot, and a rewind only has to shorten it.
         /// </summary>
-        void BeginEngramUbatch(ReadOnlySpan<int> tokens, int startPos);
+        void BeginEngramUbatch(Dsv41EngramHistory history, ReadOnlySpan<int> tokens, int startPos);
+
+        /// <summary>
+        /// The batched-decode form: row i is <paramref name="tokens"/>[i] at
+        /// <paramref name="positions"/>[i] of the sequence whose history is
+        /// <paramref name="histories"/>[i].
+        /// </summary>
+        void BeginEngramRows(Dsv41EngramHistory[] histories, ReadOnlySpan<int> tokens, ReadOnlySpan<int> positions);
 
         /// <summary>
         /// Writes this ubatch's rows for one table, laid out
@@ -42,7 +49,19 @@ namespace TensorSharp.Cuda
         /// </summary>
         void GatherEngramRows(int engramIndex, int count, float* dst);
 
-        /// <summary>Drops the hash history when the sequence does.</summary>
-        void ResetEngram();
+        /// <summary>
+        /// Writes this ubatch's selected row indices into one table, laid out [token][hash column]:
+        /// <paramref name="count"/> tokens of <see cref="HashColumns"/> ints each. The engine gathers
+        /// the rows of a device-resident table itself from these.
+        /// </summary>
+        void CopyEngramRowIndices(int engramIndex, int count, int* dst);
+    }
+
+    /// <summary>One sequence's Engram hash history: its (mapped) token ids by absolute
+    /// position. The engine keeps one per sequence slot.</summary>
+    public sealed class Dsv41EngramHistory
+    {
+        public int[] Tokens;
+        public int Length;
     }
 }

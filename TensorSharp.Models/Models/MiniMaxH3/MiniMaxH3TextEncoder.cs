@@ -250,7 +250,8 @@ namespace TensorSharp.Models.MiniMaxH3
 
         /// <summary>Load the Qwen2 byte-level BPE vocabulary. The GGUF has no
         /// tokenizer, so vocab.json + merges.txt must sit next to it (or be pointed
-        /// at by TS_VIDEO_TOKENIZER).</summary>
+        /// at by TS_VIDEO_TOKENIZER), with tokenizer_config.json beside them for a
+        /// photo or a reference: it alone defines the vision markers.</summary>
         public static BpeTokenizer LoadTokenizer(string dir)
         {
             string overrideDir = Environment.GetEnvironmentVariable("TS_VIDEO_TOKENIZER");
@@ -261,9 +262,9 @@ namespace TensorSharp.Models.MiniMaxH3
             string mergesPath = Path.Combine(dir ?? ".", "merges.txt");
             if (!File.Exists(vocabPath) || !File.Exists(mergesPath))
                 throw new FileNotFoundException(
-                    "MiniMax-H3's text-encoder GGUF carries no tokenizer. Place vocab.json and " +
-                    "merges.txt (from MiniMaxAI/MiniMax-H3/processor) next to the GGUF, or set " +
-                    $"TS_VIDEO_TOKENIZER. Looked in '{dir}'.");
+                    "MiniMax-H3's text-encoder GGUF carries no tokenizer. Place vocab.json, " +
+                    "merges.txt and tokenizer_config.json (from MiniMaxAI/MiniMax-H3/processor) next " +
+                    $"to the GGUF, or set TS_VIDEO_TOKENIZER. Looked in '{dir}'.");
 
             using var doc = JsonDocument.Parse(File.ReadAllText(vocabPath));
             var byId = new SortedDictionary<int, string>();

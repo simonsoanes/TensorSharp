@@ -10,18 +10,31 @@
 (function () {
   'use strict';
 
+  // ---- the interface's strings ---------------------------------------------
+  // /i18n.js, served ahead of this script, holds them in the language the app is
+  // showing and has already translated the markup (data-i18n). Every word this
+  // script puts on screen comes from there: t(key, { name: value }), and
+  // tn(key, count) for text that counts, with keys from page.json. Text the model
+  // reads, or that is compared with what it wrote, stays English.
+  var I18N = window.TensorAgentI18n;
+  var t = I18N && I18N.t ? I18N.t : function (key) { return key; };
+  var tn = I18N && I18N.tn ? I18N.tn : function (key) { return key; };
+  // The same language for the numbers and dates this script formats itself.
+  var LANG = (I18N && I18N.lang) || 'en';
+
   var $ = function (id) { return document.getElementById(id); };
   var chat = $('chat'), text = $('text'), send = $('send'), busy = $('busy');
   var modelBtn = $('model'), hold = $('hold'), abc = $('abc');
 
   var state = {
-    model: null, arch: null, backend: null, contextTokens: 0,
+    model: null, arch: null, backend: null, video: null, contextTokens: 0,
     modelContextTokens: 0, visionReady: false,
     acceptsVisionProjector: true,
     visionChecking: false,
     session: null, conversation: null,
     history: [],            // {role, content, attachments}
     attachments: [],        // /api/upload responses
+    maskEditing: false,
     skills: [],             // selected skill names
     skillSelectionExplicit: false, // distinguishes untouched discovery from deselect-all
     catalogSkills: [],
@@ -42,6 +55,8 @@
     speech: '',            // BCP-47 for dictation; empty follows the device
     settings: null,
     native: false,         // true when the page is inside the app, not a browser
+    dictation: false,      // native pickers can exist without a speech recogniser
+    composerHint: t('page.composer.message'),
     netMsg: '',            // the host's own wording for a network refusal
     voice: false,          // the composer is the hold-to-talk button
     // Whether the model reasons before answering. It used to be a switch under the
@@ -77,7 +92,7 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body || {}),
     }).then(function (r) {
-      if (!r.ok) throw new Error(url + ' answered HTTP ' + r.status);
+      if (!r.ok) throw new Error(t('page.error.httpStatus', { url: url, status: r.status }));
       return r;
     }, function (e) {
       throw transportError(e);
@@ -156,10 +171,21 @@
   // ---- markdown ------------------------------------------------------------
   // Deliberately small: fenced code, inline code, bold/italic, links, headings
   // and lists. Everything is escaped first, so a model that emits HTML cannot
-  // put nodes into this page.
+  // put nodes into this page -- quotes included, because a link or an image puts
+  // the model's text inside a double-quoted attribute, and an unescaped quote there
+  // let an answer containing ![x" onerror="...](y) run script in the page that holds
+  // the launch token (found 2026-09-30; any page, file or text the model repeats
+  // could carry it).
   function esc(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
+  // Where a link the model wrote may point: the web, mail, or a path on this origin
+  // (a generated file). Anything else -- javascript:, data:, another scheme -- stays
+  // text. An image may only come from this origin: one from anywhere else would be
+  // fetched the moment the answer rendered, whatever the network setting says.
+  var LINK_OK = /^(https?:\/\/|mailto:|\/(?!\/))/i;
+  var IMAGE_OK = /^\/(?!\/)/;
   function render(md) {
     var out = '', rest = String(md == null ? '' : md), fence = /```([a-zA-Z0-9_+-]*)\n([\s\S]*?)(?:```|$)/;
     var m;
@@ -175,15 +201,51 @@
     t = t.replace(/`([^`\n]+)`/g, function (_, c) { return '<code>' + c + '</code>'; });
     t = t.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
     t = t.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
-    // Images before links: an image is a link with a bang in front of it.
-    t = t.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, '<img alt="$1" src="$2">');
-    t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // Images before links: an image is a link with a bang in front of it. Both work
+    // on the escaped text, so what lands in an attribute cannot close it.
+    t = t.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, function (all, alt, src) {
+      if (IMAGE_OK.test(src)) return '<img alt="' + alt + '" src="' + src + '">';
+      return LINK_OK.test(src) ? '<a href="' + src + '" target="_blank" rel="noopener">' + (alt || src) + '</a>' : all;
+    });
+    t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, function (all, label, href) {
+      return LINK_OK.test(href) ? '<a href="' + href + '" target="_blank" rel="noopener">' + label + '</a>' : all;
+    });
     t = t.replace(/^### (.*)$/gm, '<strong>$1</strong>');
     t = t.replace(/^## (.*)$/gm, '<strong>$1</strong>');
     t = t.replace(/^# (.*)$/gm, '<strong>$1</strong>');
-    return t.split(/\n{2,}/).map(function (p) {
-      return '<p>' + p.replace(/\n/g, '<br>') + '</p>';
-    }).join('');
+    return t.split(/\n{2,}/).map(block).join('');
+  }
+  // A GitHub-style table -- a header row, a row of dashes with the same number of
+  // cells, then body rows -- becomes a <table>; the lines around it stay a paragraph.
+  // Models answer comparisons with tables, and this page printed them as rows of
+  // pipes. It runs on text inline() has already escaped and marked up.
+  var TABLE_RULE = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+  function cells(row) {
+    var s = row.trim();
+    if (s.charAt(0) === '|') s = s.slice(1);
+    if (s.charAt(s.length - 1) === '|') s = s.slice(0, -1);
+    return s.split('|').map(function (c) { return c.trim(); });
+  }
+  function block(p) {
+    var lines = p.split('\n');
+    for (var i = 0; i + 1 < lines.length; i++) {
+      if (lines[i].indexOf('|') < 0 || lines[i + 1].indexOf('-') < 0 || !TABLE_RULE.test(lines[i + 1])) continue;
+      var head = cells(lines[i]);
+      if (cells(lines[i + 1]).length !== head.length) continue;
+      var end = i + 2;
+      while (end < lines.length && lines[end].indexOf('|') >= 0) end++;
+      var html = '<table><thead><tr>' + head.map(function (c) { return '<th>' + c + '</th>'; }).join('') + '</tr></thead><tbody>';
+      for (var r = i + 2; r < end; r++) {
+        var row = cells(lines[r]);
+        html += '<tr>' + head.map(function (_, c) { return '<td>' + (row[c] || '') + '</td>'; }).join('') + '</tr>';
+      }
+      return (i > 0 ? paragraph(lines.slice(0, i)) : '') + html + '</tbody></table>'
+        + (end < lines.length ? block(lines.slice(end).join('\n')) : '');
+    }
+    return paragraph(lines);
+  }
+  function paragraph(lines) {
+    return '<p>' + lines.join('<br>') + '</p>';
   }
 
   // ---- attachments, as the transcript holds them ---------------------------
@@ -211,6 +273,25 @@
   function previewOf(a) {
     return a.previewUrl || (a.previewFile ? uploadUrl(a.previewFile) : fileUrlOf(a));
   }
+  /** Editing coordinates must use the full-size conversion, never a HEIC thumbnail. */
+  function editImageOf(a) {
+    return a.editUrl || (a.editFile ? uploadUrl(a.editFile) : previewOf(a));
+  }
+  function imageSelectionUnavailable(a) {
+    if (a.editUnavailableReason) return a.editUnavailableReason;
+    if (/\.(heic|heif)$/i.test(a.file || '') || /\.(heic|heif)$/i.test(a.fileName || '')) {
+      if (!a.editUrl && !a.editFile) return t('page.imageSelection.reattachHeic');
+    }
+    return '';
+  }
+  // The name a picture the image model made is attached under when it is picked up to be
+  // edited. English whatever the interface speaks: an attachment's name is also the name
+  // its file is given where the model's code can open it, and the transcript keeps it.
+  var GENERATED_IMAGE = 'Generated image';
+  /** The name to SHOW for an attachment: the generated picture's in the interface's language. */
+  function shownName(a) {
+    return a.fileName === GENERATED_IMAGE ? t('page.chips.generatedImage') : a.fileName;
+  }
   /** The chip, reduced to what has to survive: no page-session URLs, no file text. */
   function chipOf(a) {
     var chip = {
@@ -220,12 +301,43 @@
     };
     var preview = a.previewFile || (a.previewUrl ? uploadName(a.previewUrl) : '');
     if (preview) chip.previewFile = preview;
+    var edit = a.editFile || (a.editUrl ? uploadName(a.editUrl) : '');
+    if (edit) chip.editFile = edit;
+    if (a.editUnavailableReason) chip.editUnavailableReason = a.editUnavailableReason;
     if (a.frames && a.frames.length) chip.frames = a.frames.slice();
     if (a.fileBacked === true) chip.fileBacked = true;
     if (typeof a.pageCount === 'number') chip.pageCount = a.pageCount;
     if (typeof a.extractedPageCount === 'number') chip.extractedPageCount = a.extractedPageCount;
     if (typeof a.renderedAsImages === 'boolean') chip.renderedAsImages = a.renderedAsImages;
+    if (a.maskPath) {
+      chip.maskPath = a.maskPath; chip.maskMode = a.maskMode || 'grayscale';
+      chip.maskFeather = a.maskFeather || 0; chip.maskCrop = !!a.maskCrop;
+      if (a.maskInvert) chip.maskInvert = true;
+      if (typeof a.maskCropPadding === 'number') chip.maskCropPadding = a.maskCropPadding;
+    }
     return chip;
+  }
+
+  function clearImageSelection(attachment) {
+    delete attachment.maskPath; delete attachment.maskMode; delete attachment.maskFeather; delete attachment.maskCrop;
+    delete attachment.maskInvert; delete attachment.maskCropPadding;
+  }
+
+  function imageSource(attachments) {
+    return attachments.filter(function (a) { return a.mediaType === 'image'; })[0];
+  }
+
+  function hasActiveImageSelection(attachment) {
+    return attachment && attachment.maskPath && attachment._maskActive !== false;
+  }
+
+  function promoteImageSource(attachment) {
+    var index = state.attachments.indexOf(attachment);
+    if (index > 0) state.attachments.unshift(state.attachments.splice(index, 1)[0]);
+  }
+
+  function deactivateImageSelections() {
+    state.attachments.forEach(function (a) { if (a.mediaType === 'image') a._maskActive = false; });
   }
 
   /**
@@ -251,7 +363,7 @@
     var kind = a.mediaType || 'text';
     if (kind === 'image') {
       var img = document.createElement('img');
-      img.src = previewOf(a); img.alt = a.fileName || 'image';
+      img.src = previewOf(a); img.alt = shownName(a) || t('page.attachment.imageAlt');
       img.loading = 'lazy';
       return img;
     }
@@ -278,6 +390,29 @@
     return link;
   }
 
+  /**
+   * The clip a video model made, and its soundtrack when the host kept that as a file
+   * of its own. Built the same way for a turn as it finishes and for a reopened chat.
+   */
+  function clipNode(src) {
+    var video = document.createElement('video');
+    // Inline, or an iPhone takes it fullscreen the moment it plays. Looped, because a
+    // generated clip lasts only seconds and a single play is easy to miss.
+    // 'metadata' rather than an attachment's 'none': the header of a clip a few seconds
+    // long costs next to nothing to read, and with it read the controls can show the
+    // clip's length before it plays.
+    video.controls = true; video.playsInline = true; video.loop = true;
+    video.preload = 'metadata';
+    if (src) video.src = src;
+    return video;
+  }
+  function soundNode(src) {
+    var audio = document.createElement('audio');
+    audio.controls = true; audio.preload = 'metadata';
+    if (src) audio.src = src;
+    return audio;
+  }
+
   function addTurn(role, content, attachments, extra) {
     clearEmpty();
     var turn = el('div', 'turn ' + (role === 'user' ? 'me' : 'bot'));
@@ -294,16 +429,61 @@
     }
     if (extra && extra.imageUrl) {
       var made = document.createElement('img');
-      made.src = extra.imageUrl; made.alt = 'generated image';
+      made.src = extra.imageUrl; made.alt = t('page.image.generatedAlt');
       b.appendChild(made);
+      imageActions(b, made, extra.imageUrl, newestImageRequest());
+    }
+    if (extra && extra.videoUrl) {
+      b.appendChild(clipNode(extra.videoUrl));
+      if (extra.audioUrl) b.appendChild(soundNode(extra.audioUrl));
     }
     turn.appendChild(b);
     chat.appendChild(turn);
     // The files this turn produced, put back the way the live turn showed them.
     // They are the point of the turn far more often than the prose is.
     if (extra && extra.artifacts) extra.artifacts.forEach(function (f) { fileLine({ turn: turn, bubble: b }, f); });
+    var view = { turn: turn, bubble: b };
+    if (role === 'assistant' && extra && extra.stats) showTurnStats(view, extra.stats);
     if (stickBottom) toBottom();
-    return { turn: turn, bubble: b };
+    return view;
+  }
+
+  // These are the engine's terminal counters, including reasoning and tool-call
+  // generations. Counting the answer fragments here would under-report both tokens
+  // and decode speed. Older transcripts and synthetic error frames have no counters.
+  function statsOf(s) {
+    function number(n) { return typeof n === 'number' && isFinite(n) && n >= 0; }
+    function count(n) { return number(n) && Math.floor(n) === n && n <= 2147483647; }
+    if (!s || !count(s.tokenCount) || !number(s.elapsed) || !number(s.tokPerSec)) return null;
+    var stats = { tokenCount: s.tokenCount, elapsed: s.elapsed, tokPerSec: s.tokPerSec };
+    ['promptTokens', 'kvReusedTokens'].forEach(function (key) {
+      if (count(s[key])) stats[key] = s[key];
+    });
+    if (number(s.kvReusePercent)) stats.kvReusePercent = s.kvReusePercent;
+    if (s.aborted === true) stats.aborted = true;
+    if (s.truncated === true) stats.truncated = true;
+    return stats;
+  }
+
+  function showTurnStats(view, value) {
+    var stats = statsOf(value);
+    if (!stats) return;
+    var line = t('page.turn.stats', {
+      tokens: stats.tokenCount, seconds: stats.elapsed.toFixed(1), speed: stats.tokPerSec.toFixed(1),
+    });
+    if (stats.promptTokens > 0) {
+      var reused = stats.kvReusedTokens || 0;
+      var percent = typeof stats.kvReusePercent === 'number'
+        ? stats.kvReusePercent : 100 * reused / stats.promptTokens;
+      line += ' · ' + t('page.turn.kvStats', { reused: reused, prompt: stats.promptTokens, percent: percent.toFixed(0) });
+    }
+    if (stats.truncated) line += ' · ' + t('page.turn.truncated');
+    if (stats.aborted) line += ' · ' + t('page.turn.aborted');
+    if (!view.stats || view.stats.parentNode !== view.turn) {
+      view.stats = el('div', 'turn-stats');
+      view.turn.appendChild(view.stats);
+    }
+    view.stats.textContent = line;
   }
 
   // What the assistant is doing, and what it did.
@@ -319,26 +499,29 @@
   // declared name (an alias it accepts, such as str_replace or apply-patch, is reported
   // as the tool it runs). edit_file is no longer declared to the model, but the host
   // still runs it for a model that reaches for it anyway, so its frames still come.
+  // Each pair is two keys: the label while the call is being written, and while it runs.
   var TOOL_LABEL = {
-    shell: ['Generating code', 'Running code'],
-    apply_patch: ['Preparing patch', 'Applying patch'],
-    read_file: ['Preparing read', 'Reading file'],
-    edit_file: ['Preparing edit', 'Editing file'],
-    write_file: ['Preparing file', 'Writing file'],
-    skills_list: ['Preparing lookup', 'Checking skills'],
-    skills_read: ['Preparing read', 'Reading skill'],
-    skills_run: ['Preparing run', 'Running skill'],
-    spawn_agent: ['Preparing sub-agent', 'Starting sub-agent'],
-    wait_agent: ['Preparing wait', 'Waiting for sub-agents'],
-    send_input: ['Preparing message', 'Messaging sub-agent'],
-    close_agent: ['Preparing stop', 'Stopping sub-agent'],
-    list_agents: ['Preparing lookup', 'Checking sub-agents'],
+    shell: ['page.tool.shell.writing', 'page.tool.shell.running'],
+    apply_patch: ['page.tool.applyPatch.writing', 'page.tool.applyPatch.running'],
+    read_file: ['page.tool.readFile.writing', 'page.tool.readFile.running'],
+    edit_file: ['page.tool.editFile.writing', 'page.tool.editFile.running'],
+    write_file: ['page.tool.writeFile.writing', 'page.tool.writeFile.running'],
+    skills_list: ['page.tool.skillsList.writing', 'page.tool.skillsList.running'],
+    skills_read: ['page.tool.skillsRead.writing', 'page.tool.skillsRead.running'],
+    skills_run: ['page.tool.skillsRun.writing', 'page.tool.skillsRun.running'],
+    spawn_agent: ['page.tool.spawnAgent.writing', 'page.tool.spawnAgent.running'],
+    wait_agent: ['page.tool.waitAgent.writing', 'page.tool.waitAgent.running'],
+    send_input: ['page.tool.sendInput.writing', 'page.tool.sendInput.running'],
+    close_agent: ['page.tool.closeAgent.writing', 'page.tool.closeAgent.running'],
+    list_agents: ['page.tool.listAgents.writing', 'page.tool.listAgents.running'],
   };
   function labelFor(tool, phase) {
     var pair = TOOL_LABEL[tool];
-    if (pair) return pair[phase === 'writing' ? 0 : 1];
-    var name = tool ? String(tool).replace(/_/g, ' ') : 'operation';
-    return (phase === 'writing' ? 'Preparing ' : 'Running ') + name;
+    var writing = phase === 'writing';
+    if (pair) return t(pair[writing ? 0 : 1]);
+    if (!tool) return writing ? t('page.tool.unnamed.writing') : t('page.tool.unnamed.running');
+    var name = String(tool).replace(/_/g, ' ');
+    return writing ? t('page.tool.unlisted.writing', { tool: name }) : t('page.tool.unlisted.running', { tool: name });
   }
 
   // ---- what it is doing RIGHT NOW ------------------------------------------
@@ -429,8 +612,8 @@
     a.href = file.url;
     a.target = '_blank';
     a.rel = 'noopener';
-    a.textContent = '📄 ' + (file.name || 'file')
-      + (file.bytes ? ' · ' + Math.max(1, Math.round(file.bytes / 1024)) + ' KB' : '');
+    a.textContent = '📄 ' + (file.name || t('page.trace.unnamedFile'))
+      + (file.bytes ? ' · ' + t('page.trace.kilobytes', { size: Math.max(1, Math.round(file.bytes / 1024)) }) : '');
     line.appendChild(a);
     view.turn.insertBefore(line, view.bubble);
     if (stickBottom) toBottom();
@@ -456,7 +639,7 @@
         : (step.detail || view.detail || f.detail || '');
       var text = labelFor(tool, 'running')
         + (what ? ' · ' + shorten(what, 70) : '')
-        + (secs ? ' · ' + secs + 's' : '');
+        + (secs ? ' · ' + t('page.trace.seconds', { seconds: secs }) : '');
 
       stepLine(view, step.ok === false ? 'fail' : 'done', text);
       (step.files || []).forEach(function (file) { fileLine(view, file); });
@@ -476,7 +659,9 @@
     // The elapsed seconds tick once a second while a command runs, which is the
     // difference between "it is doing something" and "it has stopped".
     var elapsed = phase === 'running' ? Math.round(Number(f.seconds) || 0) : 0;
-    progress(labelFor(tool, phase) + '…' + (elapsed ? ' ' + elapsed + 's' : ''));
+    progress(elapsed
+      ? t('page.activity.stepElapsed', { label: labelFor(tool, phase), seconds: elapsed })
+      : t('page.activity.step', { label: labelFor(tool, phase) }));
   }
 
   // What the host did on the model's behalf, recorded as it happened: which skill it
@@ -493,11 +678,11 @@
   }
 
   function addCopy(turn, getText) {
-    var c = el('button', 'copy', 'Copy');
+    var c = el('button', 'copy', t('page.turn.copy'));
     c.addEventListener('click', function () {
-      var t = getText();
-      if (navigator.clipboard) navigator.clipboard.writeText(t);
-      c.textContent = 'Copied'; setTimeout(function () { c.textContent = 'Copy'; }, 1200);
+      var copied = getText();
+      if (navigator.clipboard) navigator.clipboard.writeText(copied);
+      c.textContent = t('page.turn.copied'); setTimeout(function () { c.textContent = t('page.turn.copy'); }, 1200);
     });
     turn.appendChild(c);
   }
@@ -521,7 +706,7 @@
     b.addEventListener('click', function () {
       b.disabled = true;
       Promise.resolve(run()).then(function (ok) {
-        b.textContent = ok === false ? 'Could not change it' : 'Done';
+        b.textContent = ok === false ? t('page.action.failed') : t('page.action.done');
       });
     });
     n.appendChild(document.createElement('br'));
@@ -535,7 +720,7 @@
       .then(function (r) { return r.json(); })
       .then(function (s) {
         state.settings = s;
-        notice('Network is on. Ask again and the assistant can reach the web.');
+        notice(t('page.network.on'));
         return true;
       })
       .catch(function () { return false; });
@@ -547,10 +732,7 @@
     if (offered || !state.netMsg) return offered;
     if (String(textSeen).indexOf(state.netMsg) < 0) return offered;
     if (state.settings && state.settings.allowNetwork) return offered;
-    noticeWithAction(
-      'That needed the internet, and network access is off. Everything else runs on '
-      + 'this device; only this step needs to go out.',
-      'Turn on Network', turnNetworkOn);
+    noticeWithAction(t('page.network.refused'), t('page.action.turnOnNetwork'), turnNetworkOn);
     return true;
   }
 
@@ -575,7 +757,38 @@
     state.modelContextTokens = d && typeof d.modelContextTokens === 'number'
       ? d.modelContextTokens : state.contextTokens;
     state.maxTokens = (d && d.defaultMaxTokens) || 2048;
+    // What a video model can be given besides its description. The host reports it
+    // for a video model and null for every other one.
+    state.video = (d && d.video) || null;
+    paintComposerHint();
     paintModelButton();
+    paintChips();
+  }
+
+  function paintComposerHint() {
+    // An image model takes a description, or a photo and what to change about it.
+    text.placeholder = makesVideo() ? videoPlaceholder(state.video)
+      : makesImages()
+        ? t('page.composer.image')
+        : state.native && !state.dictation ? state.composerHint : t('page.composer.messageOrTalk');
+  }
+
+  // Qwen-Image: the host turns a message into a picture rather than an answer
+  // (ImageTurns), on the same /api/chat route and turn machinery as a reply.
+  function makesImages() { return state.arch === 'qwen_image' || state.arch === 'qwen-image'; }
+
+  // MiniMax-H3: the host films the message instead (VideoTurns), the same way. Known by
+  // the capability the host reports, not by an architecture name: the two checkpoints
+  // share one architecture and take different things.
+  function makesVideo() { return !!state.video; }
+
+  // The keyframes checkpoint starts the clip from a photo (and ends it on a second
+  // one); the references checkpoint puts the people, things and sounds it is shown
+  // into a scene of its own. The composer says which, before anything is attached.
+  function videoPlaceholder(v) {
+    if (v.supportsReferenceConditioning) return t('page.composer.videoWithReferences');
+    if (v.supportsImageConditioning) return t('page.composer.videoFromPhoto');
+    return t('page.composer.video');
   }
 
   // Three states, not two. The app now loads the model the user last used by itself,
@@ -591,21 +804,23 @@
       else if (state.backend === 'ggml_cpu') details.push('CPU');
       if (state.modelContextTokens > 0) {
         if (state.contextTokens > 0 && state.contextTokens !== state.modelContextTokens) {
-          details.push(shortTokens(state.modelContextTokens) + ' model context');
-          details.push(shortTokens(state.contextTokens) + ' active');
+          details.push(t('page.model.contextOfModel', { tokens: shortTokens(state.modelContextTokens) }));
+          details.push(t('page.model.contextActive', { tokens: shortTokens(state.contextTokens) }));
         } else {
-          details.push(shortTokens(state.modelContextTokens) + ' context');
+          details.push(t('page.model.contextWindow', { tokens: shortTokens(state.modelContextTokens) }));
         }
       } else if (state.contextTokens > 0) {
-        details.push(shortTokens(state.contextTokens) + ' active context');
+        details.push(t('page.model.contextActiveWindow', { tokens: shortTokens(state.contextTokens) }));
       }
       if (details.length) modelBtn.appendChild(el('span', 'sub', '  ' + details.join(' · ')));
     } else if (loadingModel()) {
       modelBtn.className = 'empty';
-      modelBtn.textContent = 'Loading ' + (state.modelInfo.name || 'the model') + '…';
+      modelBtn.textContent = state.modelInfo.name
+        ? t('page.model.loading', { model: state.modelInfo.name })
+        : t('page.model.loadingUnnamed');
     } else {
       modelBtn.className = 'empty';
-      modelBtn.textContent = 'No model yet';
+      modelBtn.textContent = t('page.model.none');
     }
     send.disabled = state.visionChecking || shareDiscarding || (!state.model && !state.generating);
   }
@@ -629,20 +844,24 @@
     });
   }
 
-  // While the startup load runs, keep asking. It is the only way the page finds out
-  // that the model it was told about has arrived: nothing pushes to this page, and a
-  // send button that stays disabled after the weights are in memory is the same bug
-  // as the one this whole path exists to fix, arriving a few seconds later.
+  // Loading may finish after the user returns from Models. The old model can still
+  // be reported while its replacement loads, so follow the host's load status and
+  // read capabilities after it, including on the last poll.
   function watchModelLoad() {
     if (state.modelWatch) return;
     var deadline = Date.now() + 5 * 60 * 1000;
+    var refreshing = false;
+    function stopWatching() {
+      clearInterval(state.modelWatch);
+      state.modelWatch = 0;
+    }
     state.modelWatch = setInterval(function () {
-      if (state.model || !loadingModel() || Date.now() > deadline) {
-        clearInterval(state.modelWatch);
-        state.modelWatch = 0;
-        return;
-      }
-      refreshModel().then(refreshEngine);
+      if (Date.now() > deadline) { stopWatching(); return; }
+      if (refreshing) return;
+      refreshing = true;
+      refreshEngine().then(refreshModel).then(function (model) {
+        if (model && !loadingModel()) stopWatching();
+      }).finally(function () { refreshing = false; });
     }, 1500);
   }
 
@@ -665,7 +884,7 @@
     var e = el('div', null, '');
     e.id = 'empty';
     e.innerHTML = '<h1>TensorAgent</h1><p>' + esc(line) + '</p>';
-    var b = el('button', 'cta', state.model || loadingModel() ? 'Manage models' : 'Choose a model');
+    var b = el('button', 'cta', state.model || loadingModel() ? t('page.empty.manageModels') : t('page.empty.chooseModel'));
     b.type = 'button';
     b.addEventListener('click', function () { post('/api/agent/events', { type: 'open-models' }); });
     e.appendChild(b);
@@ -687,7 +906,7 @@
     (messages || []).forEach(function (m) {
       state.history.push(m);
       addTurn(m.role, displayText(m.content), m.attachments,
-        { artifacts: m.artifacts, imageUrl: m.imageUrl });
+        { artifacts: m.artifacts, imageUrl: m.imageUrl, videoUrl: m.videoUrl, audioUrl: m.audioUrl, stats: m.stats });
     });
   }
 
@@ -740,8 +959,8 @@
         toBottom();
       } else {
         emptyState(state.model || loadingModel()
-          ? 'New chat. Nothing you type leaves the device.'
-          : 'Private AI that runs on this iPhone.');
+          ? t('page.empty.newChat')
+          : t('page.empty.intro'));
       }
       // The answer a previous page left running here. Attached to, not restarted:
       // the tokens it produced while nobody was reading arrive first, then the rest
@@ -752,8 +971,9 @@
       // The transcript is no longer cleared before this succeeds, so the chat still
       // shows whatever it had: say what went wrong instead of replacing it. Only a
       // chat with nothing in it gets the empty state.
-      if (chat.querySelectorAll('.turn').length) notice('Could not open that chat: ' + ((e && e.message) || e), 'error');
-      else emptyState('Could not open that chat: ' + ((e && e.message) || e));
+      var why = t('page.chat.openFailed', { error: (e && e.message) || e });
+      if (chat.querySelectorAll('.turn').length) notice(why, 'error');
+      else emptyState(why);
       return null;
     }).then(function (result) {
       conversationOpening = false;
@@ -879,7 +1099,7 @@
   function discardAppliedShare(id, button) {
     if (!appliedShareIds[id] || shareDiscarding) return;
     if (state.visionChecking || state.generating) {
-      notice('This shared item is already being sent. Stop or wait for the request before removing it.');
+      notice(t('page.share.alreadySending'));
       return;
     }
     shareDiscarding = true;
@@ -888,21 +1108,23 @@
     post('/api/agent/share/discard', { id: id })
       .then(function (r) { return r.json(); })
       .then(function (body) {
-        if (!body || body.ok !== true) throw new Error('TensorAgent retained the shared item.');
+        if (!body || body.ok !== true) throw new Error(t('page.share.retained'));
         var parts = appliedShareParts[id] || {};
         var sharedAttachments = Array.isArray(parts.attachments) ? parts.attachments : [];
+        var previousSource = imageSource(state.attachments);
         state.attachments = state.attachments.filter(function (current) {
           return !sharedAttachments.some(function (shared) {
             return current === shared || (current && shared && current.file === shared.file);
           });
         });
+        if (previousSource && state.attachments.indexOf(previousSource) < 0) deactivateImageSelections();
         text.value = removeTrackedSharedText(text.value, parts);
         forgetAppliedShares([id]);
         autoGrow();
-        notice('Shared item removed.');
+        notice(t('page.share.removed'));
       })
       .catch(function (e) {
-        notice('Could not remove the shared item: ' + ((e && e.message) || e), 'error');
+        notice(t('page.share.removeFailed', { error: (e && e.message) || e }), 'error');
       })
       .then(function () {
         shareDiscarding = false;
@@ -916,18 +1138,18 @@
   /** Apply all parts of one host-prepared share as one composer update. */
   function applyPendingShare(share, mayOpenNewChat) {
     if (!share || typeof share !== 'object')
-      return Promise.reject(new Error('The shared item was empty.'));
+      return Promise.reject(new Error(t('page.share.empty')));
     var id = typeof share.id === 'string' ? share.id : '';
-    if (!id) return Promise.reject(new Error('The shared item had no id.'));
+    if (!id) return Promise.reject(new Error(t('page.share.noId')));
     if (appliedShareOrder.length && !appliedShareIds[id])
-      return Promise.reject(new Error('Finish or remove the current shared item before opening the next one.'));
+      return Promise.reject(new Error(t('page.share.oneAtATime')));
 
     var incomingText = typeof share.text === 'string' ? share.text : '';
     var attachments = Array.isArray(share.attachments) ? share.attachments : [];
     var valid = [], problems = [];
     attachments.forEach(function (a) {
       if (validSharedAttachment(a)) valid.push(a);
-      else problems.push((a && a.error) || 'One shared file could not be attached.');
+      else problems.push((a && a.error) || t('page.share.fileNotAttached'));
     });
     var notices = Array.isArray(share.notices) ? share.notices.filter(function (n) {
       return typeof n === 'string' && n.length > 0;
@@ -944,7 +1166,7 @@
           if (!opened) {
             state.attachments = heldAttachments;
             paintChips();
-            throw new Error('A new chat could not be opened for the shared item.');
+            throw new Error(t('page.share.noNewChat'));
           }
           // An unsent attachment is part of the draft just as much as text is. Starting
           // the share's new chat must not silently discard it.
@@ -984,7 +1206,7 @@
           ? body.share : null;
         if (!share) return false;
         var id = typeof share.id === 'string' ? share.id : '';
-        if (!id) throw new Error('The shared item had no id.');
+        if (!id) throw new Error(t('page.share.noId'));
 
         // The host keeps returning the head until an accepted chat request consumes
         // it. Repeated visibility/pageshow nudges in this same page must therefore be
@@ -1022,7 +1244,7 @@
     shareDrain = claimOneShare(true)
       .catch(function (e) {
         note('share-claim-failed', (e && e.message) || e);
-        notice('Could not open the shared item: ' + ((e && e.message) || e), 'error');
+        notice(t('page.share.openFailed', { error: (e && e.message) || e }), 'error');
       })
       .then(function (result) {
         shareDrain = null;
@@ -1057,34 +1279,63 @@
   function sendMessage() {
     if (state.generating) { note('send-is-stop', state.turn); stop(); return; }
     if (pendingUploadCount) {
-      notice('Please wait for file uploads to finish, then send again.');
+      notice(t('page.send.waitForUploads'));
+      return;
+    }
+    if (state.maskEditing) { notice(t('page.send.finishSelection')); return; }
+    if (makesImages() && loraChoice !== null) {
+      notice(t('page.send.waitForLoras')); return;
+    }
+    var source = imageSource(state.attachments);
+    if (!makesImages() && hasActiveImageSelection(source)) {
+      noticeWithAction(
+        t('page.send.selectionNeedsQwen'),
+        t('page.action.openModels'), function () { openRoute('models'); return true; });
       return;
     }
     if (state.visionChecking) { note('send-refused', 'vision check in flight'); return; }
     if (shareDiscarding) {
       note('send-refused', 'share discard in flight');
-      notice('Wait for the shared item to finish being removed, then send again.');
+      notice(t('page.send.waitForShareRemoval'));
       return;
     }
-    var t = text.value.trim();
-    if (!t && !state.attachments.length) { note('send-refused', 'nothing to send'); return; }
+    var typed = text.value.trim();
+    // A video is filmed from its description. Photos, clips and sounds are only what it
+    // starts from or features, and sent alone their file names would be the script.
+    if (makesVideo() && !typed) {
+      note('send-refused', 'video without a description');
+      notice(t('page.send.describeVideo'));
+      return;
+    }
+    if (!typed && !state.attachments.length) { note('send-refused', 'nothing to send'); return; }
+    // A photo with no words would send its file name as the edit instruction.
+    if (makesImages() && !typed) {
+      note('send-refused', 'image edit without an instruction');
+      notice(t('page.send.describeEdit'));
+      return;
+    }
     if (!state.model) {
       note('send-refused', loadingModel() ? 'model loading' : 'no model');
       // Two different answers, because they ask for two different things. A model
       // that is loading needs a few seconds; no model at all needs a download.
-      if (loadingModel()) notice((state.modelInfo.name || 'The model') + ' is still loading. One moment.');
+      if (loadingModel()) notice(state.modelInfo.name
+        ? t('page.send.modelLoading', { model: state.modelInfo.name })
+        : t('page.send.modelLoadingUnnamed'));
       else openSheet('model-sheet');
       return;
     }
 
     var atts = state.attachments.slice();
-    var msg = messageFor(t, atts);
+    var msg = messageFor(typed, atts);
     var nextHistory = state.history.concat([msg]);
 
     // Capability can change while this long-lived WKWebView is hidden on the Models
     // page. Re-read it immediately before every image-bearing request, while the
     // composer is still intact. The server repeats this check authoritatively.
-    if (nextHistory.some(function (m) { return m && m.imagePaths && m.imagePaths.length; })) {
+    // Not for an image or video model: a photo is what it edits or films from, not
+    // something it has to see. The host refuses an edit itself when the vision file is
+    // missing, and checks what a video was given against what its checkpoint takes.
+    if (!makesImages() && !makesVideo() && nextHistory.some(function (m) { return m && m.imagePaths && m.imagePaths.length; })) {
       state.visionChecking = true;
       send.disabled = true;
       // Disable the shared marker in the same event turn as Send. The model-capability
@@ -1102,8 +1353,8 @@
         var unreachable = modelState === null && !!state.model;
         if (!unreachable && (!modelState || !state.model)) {
           noticeWithAction(
-            'The model is no longer loaded. Choose a model, then send this image again.',
-            'Open Models',
+            t('page.send.modelGone'),
+            t('page.action.openModels'),
             function () { openRoute('models'); return true; });
           return;
         }
@@ -1111,27 +1362,27 @@
           && skillsOn() && state.skills.length > 0;
         if (!state.visionReady && !hostFileSkillCanDecide) {
           var message = state.acceptsVisionProjector
-            ? 'This model is loaded without its vision file, so it cannot see the attached image yet.'
-            : 'This model cannot see images. Choose a vision model to analyze the attachment.';
+            ? t('page.send.visionFileMissing')
+            : t('page.send.noVision');
           noticeWithAction(
             message,
-            'Open Models',
+            t('page.action.openModels'),
             function () { openRoute('models'); return true; });
           return;
         }
-        commitMessage(t, atts, msg);
+        commitMessage(typed, atts, msg);
       });
       return;
     }
 
-    commitMessage(t, atts, msg);
+    commitMessage(typed, atts, msg);
   }
 
-  function commitMessage(t, atts, msg) {
-    var userView = addTurn('user', t, atts);
+  function commitMessage(typed, atts, msg) {
+    var userView = addTurn('user', typed, atts);
     // A capability refresh is asynchronous. Preserve anything newly typed or
     // attached during that short check instead of clearing it with the sent draft.
-    if (text.value.trim() === t) text.value = '';
+    if (text.value.trim() === typed) text.value = '';
     autoGrow();
     state.attachments = state.attachments.filter(function (a) {
       return atts.indexOf(a) < 0;
@@ -1164,7 +1415,7 @@
     if (appliedShareOrder.length) body.shareIds = appliedShareOrder.slice();
 
     stream(body, {
-      text: t, attachments: atts, message: msg, turn: userView.turn,
+      text: typed, attachments: atts, message: msg, turn: userView.turn,
       // So a recovery can tell the host's acknowledgement of this draft apart from a
       // request that never arrived: see resumeTurn.
       shareIds: body.shareIds,
@@ -1194,6 +1445,12 @@
       if (kind === 'image') {
         imagePaths.push(a.file);
         stillImagePaths.push(a.file);
+        if (stillImagePaths.length === 1 && hasActiveImageSelection(a)) {
+          msg.maskPath = a.maskPath; msg.maskMode = a.maskMode || 'grayscale';
+          msg.maskFeather = a.maskFeather || 0; msg.maskCrop = !!a.maskCrop;
+          if (a.maskInvert) msg.maskInvert = true;
+          if (typeof a.maskCropPadding === 'number') msg.maskCropPadding = a.maskCropPadding;
+        }
       } else if (kind === 'video') {
         isVideo = true;
         if (a.file) videoFilePaths.push(a.file);
@@ -1227,7 +1484,16 @@
     if (textFilePaths.length) msg.textFilePaths = textFilePaths;
     if (textFileNames.length) msg.textFileNames = textFileNames;
     if (isVideo) msg.isVideo = true;
-    if (atts.length) msg.attachments = atts.map(chipOf);
+    if (atts.length) {
+      var source = imageSource(atts);
+      msg.attachments = atts.map(function (a) {
+        var chip = chipOf(a);
+        // Other photos keep their selections in the draft, but only the source's
+        // selection belongs to this edit and its saved conversation.
+        if (a !== source || !hasActiveImageSelection(a)) clearImageSelection(chip);
+        return chip;
+      });
+    }
     return msg;
   }
   function describe(atts) {
@@ -1243,7 +1509,7 @@
   function stop() {
     if (state.turn) {
       post('/api/agent/turns/' + encodeURIComponent(state.turn) + '/stop')
-        .catch(function (e) { notice('Could not stop the answer: ' + ((e && e.message) || e), 'error'); });
+        .catch(function (e) { notice(t('page.send.stopFailed', { error: (e && e.message) || e }), 'error'); });
       detach();
       return;
     }
@@ -1422,7 +1688,7 @@
     state.liveView = null;
     progressDone();
     setGenerating(false);
-    notice('Lost the connection to the app while the answer was being written. It carries on in the app; reopen this chat to see it.', 'error');
+    notice(t('page.send.connectionLost'), 'error');
   }
 
   /**
@@ -1562,11 +1828,12 @@
       withdrawSend(sentDraft);
       noticeWithAction(
         e.message || (networkRefusal
-          ? 'This workflow needs network access before it can start.'
+          ? t('page.send.needsNetwork')
           : routedSetupRefusal
-            ? 'This workflow needs additional host setup before it can start.'
-            : 'The loaded model cannot process this image.'),
-        networkRefusal ? 'Turn on Network' : routedSetupRefusal ? 'Open Settings' : 'Open Models',
+            ? t('page.send.needsSetup')
+            : t('page.send.cannotProcessImage')),
+        networkRefusal ? t('page.action.turnOnNetwork')
+          : routedSetupRefusal ? t('page.action.openSettings') : t('page.action.openModels'),
         networkRefusal
           ? turnNetworkOn
           : routedSetupRefusal
@@ -1603,7 +1870,7 @@
       state.liveView = null;
       return;
     }
-    notice((e && e.message) || 'The request failed.', 'error');
+    notice((e && e.message) || t('page.send.failed'), 'error');
     setGenerating(false);
     state.liveView = null;
   }
@@ -1620,6 +1887,7 @@
     if (live && live.turn.parentNode) {
       live.bubble.innerHTML = '';
       live.answerSoFar = '';
+      if (live.stats) { live.stats.remove(); live.stats = null; }
       Array.prototype.slice.call(live.turn.querySelectorAll('.step, .think, .copy'))
         .forEach(function (n) { n.remove(); });
       live.step = null; live.tool = ''; live.detail = '';
@@ -1633,9 +1901,10 @@
     state.liveView = null;
     var view = liveView();
     setGenerating(true);
-    // Immediately, before a single byte comes back: the gap between pressing send
-    // and the first frame is itself seconds long on a phone.
-    progress('Thinking…');
+    // "Thinking…" (or "Drawing…", "Filming…") immediately, before a single byte comes
+    // back: the gap between pressing send and the first frame is itself seconds long
+    // on a phone.
+    progress(makesVideo() ? t('page.activity.filming') : makesImages() ? t('page.activity.drawing') : t('page.activity.thinking'));
 
     var ctrl = new AbortController();
     ctrl.awaitingHeaders = true;
@@ -1687,7 +1956,7 @@
     setGenerating(true);
     state.turn = id;
     rememberTurn(id);
-    progress('Still working…');
+    progress(t('page.activity.stillWorking'));
     note('attach', id);
 
     var ctrl = new AbortController();
@@ -1740,6 +2009,32 @@
   }
 
   /**
+   * What the strip says while a video model works, by the stage the host reports. A
+   * clip takes minutes, so the denoising stage counts its steps and, once the host can
+   * tell, says about how long is left (its eta is -1 until then).
+   */
+  function filmingLabel(f) {
+    switch (f.video_phase) {
+      case 'text-encode': return t('page.activity.readingDescription');
+      case 'denoise':
+        return (f.video_steps
+          ? t('page.activity.filmingStep', { step: f.video_step, steps: f.video_steps })
+          : t('page.activity.filming'))
+          + timeLeft(Number(f.eta));
+      case 'vae-decode': return t('page.activity.developingFrames');
+      case 'audio-decode': return t('page.activity.addingSound');
+      case 'encode': return t('page.activity.savingVideo');
+      default: return t('page.activity.filming');
+    }
+  }
+  /** Minutes past a minute and a half, whole seconds under it, nothing when unknown. */
+  function timeLeft(s) {
+    if (!(s > 0)) return '';
+    return ' · ' + (s > 90 ? t('page.activity.minutesLeft', { minutes: Math.round(s / 60) })
+      : t('page.activity.secondsLeft', { seconds: Math.max(1, Math.round(s)) }));
+  }
+
+  /**
    * Read one event stream into one assistant turn.
    *
    * Shared by the request that starts a generation and by a page attaching to one that
@@ -1750,15 +2045,15 @@
   function read(res, view, ctrl) {
     var answer = '', thinking = '', thinkBox = null, thinkBody = null;
     var steps = '', offered = false, draft = '', restarts = 0, errors = 0;
-    // What this turn PRODUCED: the files its tools wrote, and a picture it made.
-    // Kept so the history entry carries them, because the history is what the next
-    // request rewrites the saved transcript from -- an entry that has forgotten the
-    // PDF erases the PDF from a chat that had one.
-    var made = [], madeSeen = {}, madeImage = null;
+    // What this turn PRODUCED: the files its tools wrote, and a picture or a clip it
+    // made. Kept so the history entry carries them, because the history is what the
+    // next request rewrites the saved transcript from -- an entry that has forgotten
+    // the PDF erases the PDF from a chat that had one.
+    var made = [], madeSeen = {}, madeImage = null, madeVideo = null, madeAudio = null;
     var reader = res.body.getReader(), dec = new TextDecoder(), buf = '';
     // Whether the host said the turn was over. A stream that ends without it did not
     // end because the answer did: the connection went away underneath it.
-    var terminal = false;
+    var terminal = false, stats = null;
     // Whether this reader has already asked for the turn again after an EOF that
     // carried no terminal frame; see ended().
     var reattached = false;
@@ -1826,12 +2121,19 @@
         });
     }
     function handle(f) {
-      if (f.done === true) terminal = true;
+      if (f.done === true) {
+        terminal = true;
+        stats = statsOf(f);
+        // Image/video generators use zero token counters as protocol placeholders.
+        // A text turn that also produces media still has its real model counters.
+        if (stats && stats.tokenCount === 0 && (madeImage || madeVideo)) stats = null;
+        if (stats) showTurnStats(view, stats);
+      }
       if (f.thinking) {
         thinking += f.thinking;
         if (!thinkBox) {
           thinkBox = el('details', 'think');
-          thinkBox.appendChild(el('summary', null, 'Reasoning'));
+          thinkBox.appendChild(el('summary', null, t('page.turn.reasoning')));
           thinkBody = el('div', 'body');
           thinkBox.appendChild(thinkBody);
           view.turn.insertBefore(thinkBox, view.bubble);
@@ -1839,13 +2141,13 @@
         thinkingDirty = true;
         // The whole of it is one tap away in the box above; the tail is what
         // says, without being asked, what the model is thinking about now.
-        progress('Thinking…');
+        progress(t('page.activity.thinking'));
         progressTail(thinking);
       }
       if (f.token || typeof f.replace === 'string') {
         // The answer is on the screen from here on, so the live tail would only
         // be a second, staler copy of it.
-        progress('Writing the answer…');
+        progress(t('page.activity.writingAnswer'));
         progressTail('');
       }
       if (f.token) { answer += f.token; answerDirty = true; }
@@ -1860,6 +2162,8 @@
       // reader can see.
       if (f.restart) {
         thinking = ''; draft = '';
+        stats = null;
+        if (view.stats) { view.stats.remove(); view.stats = null; }
         if (thinkBox) { thinkBox.remove(); thinkBox = null; thinkBody = null; }
         // Said once per restart, not once per READ of it: the host replays every frame
         // from the beginning when this page re-attaches to a running turn, and a
@@ -1867,7 +2171,7 @@
         // GPU failing again and again.
         var restartKey = (state.turn || 'live') + ':' + (++restarts);
         if (!restartsSaid[restartKey]) { restartsSaid[restartKey] = true; notice(String(f.restart)); }
-        progress(typeof f.replace === 'string' ? 'Starting again…' : 'Carrying on…');
+        progress(typeof f.replace === 'string' ? t('page.activity.startingAgain') : t('page.activity.carryingOn'));
       }
       // Before trace(): the host's record of the call arrives just ahead of the
       // tool's `finished`, and it is what makes that line name a skill instead of
@@ -1912,14 +2216,69 @@
         madeSeen[file.url] = 1;
         made.push({ name: file.name || file.url, bytes: file.bytes || 0, url: file.url });
       });
+      // An image model's turn (ImageTurns on the host): steps while the picture
+      // denoises, some carrying a small preview, then the finished picture. One <img>
+      // is refreshed in place, so the preview becomes the picture instead of a new
+      // image being stacked under it for every step.
+      if (typeof f.image_step === 'number') {
+        // With LoRA plug-ins the host names them on every step (ImageTurns.Translate).
+        var loras = f.image_loras && f.image_loras.length ? f.image_loras.join(' + ') : null;
+        if (f.image_steps) {
+          progress(loras !== null
+            ? t('page.activity.drawingWithStep', { loras: loras, step: f.image_step, steps: f.image_steps })
+            : t('page.activity.drawingStep', { step: f.image_step, steps: f.image_steps }));
+        } else {
+          progress(loras !== null ? t('page.activity.drawingWith', { loras: loras }) : t('page.activity.drawing'));
+        }
+        if (f.preview) pictureOf(view).src = f.preview;
+      }
       if (f.image || f.imageUrl) {
         madeImage = f.imageUrl || f.image;
         // The picture goes under the text, so the text has to be there first.
         if (answerDirty) { view.bubble.innerHTML = render(answer); view.answerSoFar = answer; answerDirty = false; }
-        var img = document.createElement('img');
-        img.src = madeImage;
-        view.bubble.appendChild(img);
+        pictureOf(view).src = madeImage;
       }
+      // A video model's turn (VideoTurns on the host): the description is read, the
+      // clip denoises step by step, then its frames, its sound and the MP4 are made.
+      // No preview along the way; the finished clip arrives once, at the end.
+      if (typeof f.video_step === 'number') progress(filmingLabel(f));
+      if (f.videoUrl) {
+        madeVideo = f.videoUrl;
+        // Only when the soundtrack is a file of its own. Normally it is inside the MP4,
+        // and the clip plays it.
+        madeAudio = f.audioUrl || null;
+        // The clip goes under the text, so the text has to be there first.
+        if (answerDirty) { view.bubble.innerHTML = render(answer); view.answerSoFar = answer; answerDirty = false; }
+        clipOf(view).src = madeVideo;
+        if (madeAudio) soundOf(view).src = madeAudio;
+      }
+    }
+    // The one picture a turn shows, made on first use and made again if a repaint of
+    // the bubble's text removed it.
+    function pictureOf(v) {
+      if (!v.picture || v.picture.parentNode !== v.bubble) {
+        v.picture = document.createElement('img');
+        v.picture.alt = t('page.image.generatedAlt');
+        v.bubble.appendChild(v.picture);
+      }
+      return v.picture;
+    }
+    // The clip and its soundtrack, one of each per bubble and made the same way. A
+    // re-attach replays every frame from the first into this bubble, the url frame
+    // included, and the bubble must still end with one player, not two.
+    function clipOf(v) {
+      if (!v.clip || v.clip.parentNode !== v.bubble) {
+        v.clip = clipNode();
+        v.bubble.appendChild(v.clip);
+      }
+      return v.clip;
+    }
+    function soundOf(v) {
+      if (!v.sound || v.sound.parentNode !== v.bubble) {
+        v.sound = soundNode();
+        v.bubble.appendChild(v.sound);
+      }
+      return v.sound;
     }
     function finish() {
       if (ctrl && ctrl !== state.abort && state.abort) { note('reader-retired', 'finish'); return; }
@@ -1936,17 +2295,23 @@
         view.step = null;
       }
       offered = offerNetworkIfRefused(answer + ' ' + steps, offered);
-      // Everything the turn produced, not only its prose. The host writes the same
-      // three things down when the turn ends; the page has to hold them too, because
+      // Everything the turn produced, not only its prose. The host saves it when
+      // the turn ends; the page has to hold it too, because
       // the next request sends this array and the host saves what it is sent.
       var entry = { role: 'assistant', content: answer };
+      if (stats) entry.stats = stats;
       if (thinking) entry.thinking = thinking;
       if (made.length) entry.artifacts = made;
-      if (madeImage) entry.imageUrl = madeImage;
+      if (madeImage) {
+        entry.imageUrl = madeImage;
+        imageActions(view.bubble, pictureOf(view), madeImage, newestImageRequest());
+      }
+      if (madeVideo) entry.videoUrl = madeVideo;
+      if (madeAudio) entry.audioUrl = madeAudio;
       // Nothing produced is nothing to remember: the host's own record skips an empty
       // turn too, and an empty assistant entry in the history would be sent back to
       // the model as a message it never wrote.
-      if (answer || thinking || made.length || madeImage) state.history.push(entry);
+      if (answer || thinking || made.length || madeImage || madeVideo) state.history.push(entry);
       if (answer) addCopy(view.turn, function () { return answer; });
       setGenerating(false);
       state.abort = null;
@@ -1960,6 +2325,104 @@
   }
 
   // ---- attachments ---------------------------------------------------------
+  function newestImageRequest() {
+    for (var i = state.history.length - 1; i >= 0; i--)
+      if (state.history[i].role === 'user') return state.history[i];
+    return null;
+  }
+
+  function imageActions(bubble, picture, resultUrl, request) {
+    if (bubble.querySelector('.image-edit-actions')) return;
+    var actions = el('div', 'image-edit-actions');
+    var source = request && request.stillImagePaths && request.stillImagePaths[0];
+    if (source) {
+      var sourceAttachment = (request.attachments || []).filter(function (a) { return a.file === source; })[0];
+      var originalUrl = sourceAttachment ? editImageOf(sourceAttachment) : uploadUrl(source);
+      var original = false;
+      var compare = el('button', 'filechip', t('page.image.compareOriginal')); compare.type = 'button';
+      compare.setAttribute('aria-pressed', 'false');
+      compare.addEventListener('click', function () {
+        original = !original; picture.src = original ? originalUrl : resultUrl;
+        picture.alt = original ? t('page.image.originalAlt') : t('page.image.generatedAlt');
+        compare.textContent = original ? t('page.image.showResult') : t('page.image.compareOriginal');
+        compare.setAttribute('aria-pressed', String(original));
+      });
+      actions.appendChild(compare);
+    }
+    var again = el('button', 'filechip', source ? t('page.image.editAgain') : t('page.image.edit')); again.type = 'button';
+    again.addEventListener('click', function () {
+      if (state.generating || state.maskEditing || pendingUploadCount || state.attachments.length || text.value.trim()) {
+        notice(t('page.image.draftInTheWay')); return;
+      }
+      if (source) {
+        var saved = request.attachments || [];
+        state.attachments = saved.map(function (a) { return Object.assign({}, a); });
+        request.stillImagePaths.forEach(function (path) {
+          if (!state.attachments.some(function (a) { return a.file === path && a.mediaType === 'image'; }))
+            state.attachments.push({ file: path, fileName: path, mediaType: 'image' });
+        });
+        var target = state.attachments.filter(function (a) { return a.file === source && a.mediaType === 'image'; })[0];
+        promoteImageSource(target);
+        // Top-level fields record what this turn actually applied. Older saved
+        // chips may also contain dormant selections that must not become active.
+        state.attachments.forEach(clearImageSelection);
+        if (request.maskPath) {
+          target._maskActive = true;
+          target.maskPath = request.maskPath;
+          target.maskMode = request.maskMode || 'grayscale';
+          target.maskFeather = request.maskFeather || 0;
+          target.maskCrop = !!request.maskCrop;
+          target.maskInvert = !!request.maskInvert;
+          if (typeof request.maskCropPadding === 'number') target.maskCropPadding = request.maskCropPadding;
+        }
+        text.value = request.content || '';
+      } else {
+        state.attachments = [{ file: uploadName(resultUrl), fileName: GENERATED_IMAGE, mediaType: 'image', url: resultUrl }];
+      }
+      autoGrow(); paintChips(); text.focus();
+    });
+    actions.appendChild(again); bubble.appendChild(actions);
+  }
+
+  function selectImageArea(attachment) {
+    if (state.maskEditing || state.generating) return;
+    var unavailable = imageSelectionUnavailable(attachment);
+    if (unavailable) { notice(unavailable, 'error'); return; }
+    if (!window.TensorSharpMaskEditor) { notice(t('page.imageSelection.editorUnavailable'), 'error'); return; }
+    state.maskEditing = true; paintChips();
+    var conversation = state.conversation;
+    window.TensorSharpMaskEditor.open({
+      sourceUrl: editImageOf(attachment), maskUrl: attachment.maskPath ? uploadUrl(attachment.maskPath) : null,
+      maskMode: attachment.maskMode || 'grayscale',
+      maskInvert: !!attachment.maskInvert,
+      maskFeather: attachment.maskFeather || 0, maskCrop: !!attachment.maskCrop,
+    }).then(function (selection) {
+      if (!selection || state.conversation !== conversation || state.attachments.indexOf(attachment) < 0) return;
+      if (selection.remove) {
+        clearImageSelection(attachment); return;
+      }
+      var form = new FormData(); form.append('file', selection.blob, 'selection.png');
+      return fetch('/api/upload', { method: 'POST', body: form }).then(function (response) {
+        return response.json().then(function (data) {
+          var uploaded = data && data.files ? data.files[0] : data;
+          if (!response.ok || !uploaded || !uploaded.ok || !uploaded.file)
+            throw new Error((data && data.error) || t('page.imageSelection.uploadFailed'));
+          if (state.conversation !== conversation || state.attachments.indexOf(attachment) < 0) return;
+          attachment.maskPath = uploaded.file; attachment.maskMode = 'grayscale';
+          delete attachment.maskInvert;
+          attachment.maskFeather = selection.maskFeather; attachment.maskCrop = selection.maskCrop;
+          state.attachments.forEach(function (a) {
+            if (a.mediaType === 'image') a._maskActive = a === attachment;
+          });
+          // Commit the source change only after the new mask has uploaded. Cancel
+          // and failure leave the previous source, draft and selections untouched.
+          promoteImageSource(attachment);
+        });
+      });
+    }).catch(function (error) { notice(t('page.imageSelection.failed', { error: (error && error.message) || error }), 'error'); })
+      .finally(function () { state.maskEditing = false; paintChips(); });
+  }
+
   function paintChips() {
     var box = $('chips');
     box.innerHTML = '';
@@ -1968,28 +2431,60 @@
       var parts = appliedShareParts[id] || {};
       var shared = el('div', 'chip shared');
       shared.appendChild(el('span', 'ic', '↗'));
-      shared.appendChild(el('span', 'nm', parts.title || 'Shared item'));
+      shared.appendChild(el('span', 'nm', parts.title || t('page.chips.shared')));
       var remove = el('button', 'x', '✕');
-      remove.setAttribute('aria-label', 'Remove shared item');
+      remove.setAttribute('aria-label', t('page.chips.removeShared'));
       remove.disabled = state.generating || state.visionChecking || shareDiscarding;
       remove.addEventListener('click', function () { discardAppliedShare(id, remove); });
       shared.appendChild(remove);
       box.appendChild(shared);
     });
+    var imageIndex = 0;
     state.attachments.forEach(function (a, i) {
-      var c = el('div', 'chip');
+      var c = el('div', 'chip'), name = shownName(a) || a.file;
       if (a.mediaType === 'image') {
-        var img = document.createElement('img'); img.src = a.url; c.appendChild(img);
+        var img = document.createElement('img'); img.src = previewOf(a); c.appendChild(img);
+        // Preparing a selection needs no model. Keep the control discoverable while
+        // Qwen is loading or another model is selected; Send checks compatibility.
+        var active = imageIndex++ === 0;
+        c.classList.add('editable-image');
+        var select = el('button', 'filechip mask-select', a.maskPath ? t('page.chips.selectionSaved') : t('page.chips.selectArea'));
+        select.type = 'button'; select.disabled = state.generating || state.visionChecking || state.maskEditing;
+        select.setAttribute('aria-label', a.maskPath
+          ? t('page.chips.adjustSelectionFor', { name: name })
+          : t('page.chips.selectAreaIn', { name: name }));
+        select.addEventListener('click', function () { selectImageArea(a); }); c.appendChild(select);
+        var details = el('span', 'image-details');
+        details.appendChild(el('span', active ? 'image-edit-source' : 'image-reference',
+          active ? t('page.chips.editingTarget') : t('page.chips.reference')));
+        details.appendChild(el('span', 'nm', name));
+        c.appendChild(details);
       } else {
         c.appendChild(el('span', 'ic', a.mediaType === 'video' ? '🎬' : a.mediaType === 'audio' ? '🎧' : '📄'));
       }
-      c.appendChild(el('span', 'nm', a.fileName || a.file));
+      if (a.mediaType !== 'image') c.appendChild(el('span', 'nm', name));
       var x = el('button', 'x', '✕');
-      x.disabled = state.visionChecking || shareDiscarding;
-      x.addEventListener('click', function () { state.attachments.splice(i, 1); paintChips(); });
+      x.type = 'button'; x.setAttribute('aria-label', t('page.chips.remove', { name: name }));
+      x.disabled = state.visionChecking || shareDiscarding || state.maskEditing;
+      x.addEventListener('click', function () {
+        if (a === imageSource(state.attachments)) {
+          // Saved reference selections stay available in Adjust, but removing the
+          // target must not silently turn one of them into the next requested edit.
+          deactivateImageSelections();
+        }
+        state.attachments.splice(i, 1); paintChips();
+      });
       c.appendChild(x);
       box.appendChild(c);
     });
+    var source = imageSource(state.attachments);
+    if (!makesImages() && hasActiveImageSelection(source)) {
+      var hint = el('div', 'image-selection-hint');
+      hint.appendChild(el('span', null, t('page.chips.selectionNeedsQwen')));
+      var models = el('button', 'notice-action', t('page.action.openModels')); models.type = 'button';
+      models.addEventListener('click', function () { openRoute('models'); });
+      hint.appendChild(models); box.appendChild(hint);
+    }
   }
 
   var uploadQueue = Promise.resolve();
@@ -2002,21 +2497,21 @@
     return fetch('/api/upload', { method: 'POST', body: fd })
       .then(function (r) {
         return r.json().then(function (data) {
-          if (!r.ok || !data || !data.ok) throw new Error((data && data.error) || 'Upload failed');
+          if (!r.ok || !data || !data.ok) throw new Error((data && data.error) || t('page.upload.failed'));
           return data;
         });
       })
       .then(function (data) {
         var uploaded = Array.isArray(data.files) ? data.files : [data];
         if (uploaded.length !== files.length || uploaded.some(function (a) { return !a || !a.ok || !a.file; })) {
-          throw new Error('The server did not return every uploaded file. Please try again.');
+          throw new Error(t('page.upload.incomplete'));
         }
         // The server returns multipart order, including mixed media and documents.
         Array.prototype.push.apply(state.attachments, uploaded);
         paintChips();
         uploaded.forEach(function (a) { if (a.warning) notice(a.warning); });
       })
-      .catch(function (e) { notice('Upload error: ' + ((e && e.message) || e), 'error'); });
+      .catch(function (e) { notice(t('page.upload.error', { error: (e && e.message) || e }), 'error'); });
   }
 
   $('file-input').addEventListener('change', function (e) {
@@ -2033,7 +2528,7 @@
   function openSheet(id) { $('sheet-bg').classList.add('on'); $(id).classList.add('on'); }
   function closeSheets() {
     $('sheet-bg').classList.remove('on');
-    ['attach-sheet', 'skills-sheet', 'model-sheet', 'nav-sheet', 'skill-sheet', 'skill-add-sheet'].forEach(function (s) { $(s).classList.remove('on'); });
+    ['attach-sheet', 'skills-sheet', 'model-sheet', 'nav-sheet', 'skill-sheet', 'skill-add-sheet', 'lora-sheet'].forEach(function (s) { $(s).classList.remove('on'); });
   }
   $('sheet-bg').addEventListener('click', closeSheets);
 
@@ -2084,15 +2579,14 @@
     if (!box) return;
     box.innerHTML = '';
     if (!state.conversations.length) {
-      box.appendChild(el('div', 'navempty', 'No saved chats yet.'));
+      box.appendChild(el('div', 'navempty', t('page.nav.empty')));
       return;
     }
     state.conversations.forEach(function (c) {
       var row = el('button', 'navchat' + (c.id === state.conversation ? ' on' : ''));
       row.type = 'button';
-      row.appendChild(el('span', 'nm', c.title || 'Chat'));
-      row.appendChild(el('span', 'ds', when(c.updatedAt) + ' · '
-        + (c.messageCount === 1 ? '1 message' : (c.messageCount || 0) + ' messages')));
+      row.appendChild(el('span', 'nm', c.title || t('page.nav.untitled')));
+      row.appendChild(el('span', 'ds', when(c.updatedAt) + ' · ' + tn('page.nav.messages', c.messageCount || 0)));
       row.addEventListener('click', function () {
         closeSheets();
         if (c.id === state.conversation) return;
@@ -2102,15 +2596,18 @@
     });
   }
 
+  // Dates in the interface's language. English keeps the WebView's own locale, which
+  // carries the region too (a 24-hour clock, the day before the month).
+  var DATES = LANG === 'en' ? [] : LANG;
   /** A date a person reads at a glance: a time today, a day this week, a date before that. */
   function when(iso) {
     var d = new Date(iso);
     if (isNaN(d.getTime())) return '';
     var now = new Date();
     var sameDay = d.toDateString() === now.toDateString();
-    if (sameDay) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-    if (now - d < 6 * 24 * 3600 * 1000) return d.toLocaleDateString([], { weekday: 'short' });
-    return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    if (sameDay) return d.toLocaleTimeString(DATES, { hour: 'numeric', minute: '2-digit' });
+    if (now - d < 6 * 24 * 3600 * 1000) return d.toLocaleDateString(DATES, { weekday: 'short' });
+    return d.toLocaleDateString(DATES, { month: 'short', day: 'numeric' });
   }
 
   document.querySelectorAll('#nav-sheet .opt').forEach(function (b) {
@@ -2129,7 +2626,7 @@
         openSheet(sheet);
         if (sheet === 'skills-sheet') {
           loadSkills().catch(function (e) {
-            notice('Skills could not be listed: ' + ((e && e.message) || e), 'error');
+            notice(t('page.nav.skillsFailed', { error: (e && e.message) || e }), 'error');
           });
         }
         return;
@@ -2138,6 +2635,14 @@
     });
   });
 
+  // One sentence per screen, so each can be named in the interface's language rather
+  // than by its route; a route without one is shown as it is.
+  var ROUTE_FAILED = {
+    sessions: 'page.route.openFailed.sessions',
+    models: 'page.route.openFailed.models',
+    settings: 'page.route.openFailed.settings',
+    about: 'page.route.openFailed.about',
+  };
   /**
    * Ask the app for one of its own screens.
    *
@@ -2151,7 +2656,10 @@
     if (!route) return;
     post('/api/agent/events', { type: 'open-route', route: route })
       .catch(function (e) {
-        notice('Could not open ' + route + ': ' + ((e && e.message) || e), 'error');
+        var error = (e && e.message) || e;
+        notice(Object.prototype.hasOwnProperty.call(ROUTE_FAILED, route)
+          ? t(ROUTE_FAILED[route], { error: error })
+          : t('page.route.openFailed.unlisted', { route: route, error: error }), 'error');
       });
   }
 
@@ -2159,8 +2667,282 @@
     var info = $('model-info');
     info.innerHTML = '';
     info.appendChild(el('div', 'skillrow',
-      state.model ? (pretty(state.model) + ' · ' + (state.arch || '?') + ' · ' + (state.backend || '')) : 'No model loaded yet.'));
+      state.model ? (pretty(state.model) + ' · ' + (state.arch || '?') + ' · ' + (state.backend || '')) : t('page.modelSheet.none')));
+    var loraBtn = $('open-loras');
+    loraBtn.style.display = makesImages() ? '' : 'none';
+    if (makesImages()) {
+      // Only the names, for the hint: the sheet keeps its own list, which a late answer
+      // here must not replace.
+      fetch('/api/agent/loras').then(function (r) { return r.json(); }).then(function (d) {
+        var on = ((d && d.loras) || []).filter(function (l) { return l.chosen; }).map(function (l) { return l.name; });
+        $('loras-hint').textContent = on.length ? on.join(' + ') : t('page.modelSheet.lorasHint');
+      }).catch(function () { /* the button still opens the sheet, which says what failed */ });
+    }
     openSheet('model-sheet');
+  });
+
+  // ---- LoRA plug-ins (an image model) --------------------------------------
+  //
+  // The plug-ins the host offers for the image model (WebUiRoutes.MapLoras): what is
+  // downloaded, what is on, and how strongly. A change is saved, and the host applies
+  // it to the next picture, so a picture being drawn keeps the plug-ins it started with.
+  var loraPoll = null;
+  // The choice last sent, until the host answers it: a second change made before then
+  // builds on it rather than on the list painted before the first. Saves go one at a
+  // time, in the order they were made, because each one replaces the whole choice; a
+  // list read before the latest save was sent is not painted over its answer.
+  var loraChoice = null;
+  var loraQueue = Promise.resolve();
+  var loraSeq = 0;
+  var loraShape = '';
+  var loraPct = {};
+  function loraSize(bytes) {
+    var mb = (Number(bytes) || 0) / 1e6;
+    return mb >= 1000 ? t('page.lora.gigabytes', { size: oneDecimal(mb / 1000) })
+      : t('page.lora.megabytes', { size: Math.round(mb) });
+  }
+  /** One decimal place: toFixed's digits, with the interface language's decimal mark. */
+  function oneDecimal(n) {
+    var s = n.toFixed(1), mark = '.';
+    try { mark = (1.5).toLocaleString(LANG).charAt(1); } catch (e) {}
+    return mark === '.' ? s : s.replace('.', mark);
+  }
+  function chosenLoras(d) {
+    return ((d && d.chosen) || []).map(function (c) { return { id: c.id, strength: c.strength }; });
+  }
+  function currentLoras() {
+    return loraChoice ? loraChoice.slice() : chosenLoras(state.loras);
+  }
+  // The host checks every change (one speed plug-in, downloaded, a known strength) and
+  // says why it refused, which post() would reduce to a status code.
+  function loraJson(r) {
+    return r.json().then(function (d) {
+      if (!r.ok) throw new Error((d && d.error) || ('HTTP ' + r.status));
+      return d;
+    });
+  }
+  // Said in the sheet, beside the switch that flipped back: a notice would land in the
+  // chat underneath it, where nobody looks while the sheet is open.
+  function loraError(message) {
+    var line = $('lora-error');
+    var inSheet = !!message && $('lora-sheet').classList.contains('on');
+    line.textContent = inSheet ? message : '';
+    line.style.display = inSheet ? '' : 'none';
+    // The sheet scrolls, and the row the user just changed may be far below the line.
+    if (inSheet && typeof line.scrollIntoView === 'function') line.scrollIntoView({ block: 'nearest' });
+    if (message && !inSheet) notice(message, 'error');
+  }
+  function loadLoras(tick) {
+    var seq = loraSeq;
+    return fetch('/api/agent/loras').then(loraJson).then(function (d) {
+      if (seq !== loraSeq || loraChoice) return state.loras;
+      return paintLoras(d, tick);
+    });
+  }
+  // One change at a time, after those before it. `send` returns the host's answer: the
+  // sheet as it now is. Every answer is kept as the latest the host said, and only the
+  // latest change's is painted. `failed` words a refusal, or is null to show it as is.
+  function queueLoras(send, failed, isSave) {
+    var seq = ++loraSeq;
+    loraQueue = loraQueue.then(function () {
+      return send().then(function (d) {
+        state.loras = d;
+        if (seq !== loraSeq) return;
+        loraChoice = null;
+        paintLoras(d);
+      }, function (e) {
+        var reason = (e && e.message) || e;
+        var why = failed ? failed(reason) : String(reason);
+        if (seq !== loraSeq) {
+          // A later save resends the whole choice and answers for it, so an earlier
+          // save's failure says nothing the user can act on; a removal's does.
+          if (!isSave) loraError(why);
+          return;
+        }
+        loraError(why);
+        loraChoice = null;
+        // The switches back where the host last had them, without waiting on another
+        // request, and then a fresh list.
+        if (state.loras) paintLoras(state.loras);
+        return loadLoras();
+      }).catch(function () { /* the list stays as it was painted */ });
+    });
+    return loraQueue;
+  }
+  function saveLoras(list) {
+    loraChoice = list;
+    return queueLoras(function () {
+      return fetch('/api/agent/loras/choice', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ loras: list }),
+      }).then(loraJson);
+    }, null, true);
+  }
+  function toggleLora(l, on) {
+    loraError('');
+    var d = state.loras || {};
+    var list = currentLoras().filter(function (c) { return c.id !== l.id; });
+    if (on) {
+      // One speed plug-in at a time: two step schedules cannot both apply.
+      if (l.kind === 'Speed') {
+        var speeds = ((d.loras) || []).filter(function (x) { return x.kind === 'Speed'; }).map(function (x) { return x.id; });
+        list = list.filter(function (c) { return speeds.indexOf(c.id) < 0; });
+      }
+      list.push({ id: l.id, strength: l.defaultStrength });
+    }
+    return saveLoras(list);
+  }
+  function setLoraStrength(l, value) {
+    loraError('');
+    return saveLoras(currentLoras().map(function (c) {
+      return c.id === l.id ? { id: c.id, strength: value } : c;
+    }));
+  }
+  function downloadLora(l) {
+    loraError('');
+    return fetch('/api/agent/loras/' + encodeURIComponent(l.id) + '/download', { method: 'POST' })
+      .then(function (r) {
+        // The download belongs to the app, not to this request: the stream is only a
+        // window on it, so the page closes it and follows the job through the list.
+        if (r.body && r.body.cancel) r.body.cancel().catch(function () {});
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return loadLoras();
+      })
+      .catch(function (e) { loraError(t('page.lora.downloadFailed', { error: (e && e.message) || e })); });
+  }
+  // Removing a plug-in also turns it off, so it is a change like any other: one made
+  // before the host answers builds on the choice without it, or it would send it back.
+  function removeLora(l) {
+    loraError('');
+    loraChoice = currentLoras().filter(function (c) { return c.id !== l.id; });
+    return queueLoras(function () {
+      return fetch('/api/agent/loras/' + encodeURIComponent(l.id), { method: 'DELETE' })
+        .then(loraJson)
+        .then(function (d) { notice(t('page.lora.removed', { name: l.name })); return d; });
+    }, function (reason) { return t('page.lora.removeFailed', { name: l.name, error: reason }); }, false);
+  }
+  function loraSwitch(l) {
+    var sw = el('label', 'switch');
+    var box = el('input');
+    box.type = 'checkbox';
+    box.checked = !!l.chosen;
+    box.addEventListener('change', function () { toggleLora(l, box.checked); });
+    sw.appendChild(box);
+    sw.appendChild(el('span', 'track'));
+    return sw;
+  }
+  function loraPercent(l) {
+    var dl = l.download;
+    return t('page.lora.percent', { percent: Math.round(((dl && dl.progress && dl.progress.fraction) || 0) * 100) });
+  }
+  // What a row shows apart from a running download's percentage.
+  function loraShapeOf(d) {
+    return JSON.stringify(((d && d.loras) || []).map(function (l) {
+      var dl = l.download || {};
+      return [l.id, l.state, !!l.chosen, l.strength, (l.installedBytes || 0) > 0, !!dl.running, dl.state || '', dl.error || ''];
+    }));
+  }
+  function paintLoras(d, tick) {
+    state.loras = d;
+    var list = $('lora-list');
+    var loras = (d && d.loras) || [];
+    var running = loras.some(function (l) { return l.download && l.download.running; });
+    var shape = loraShapeOf(d);
+    // A poll while a download runs moves only its percentage. The rows stay, so a
+    // strength being dragged or a button being pressed is not replaced under the finger.
+    if (tick && shape === loraShape && list.children.length) {
+      loras.forEach(function (l) { if (loraPct[l.id]) loraPct[l.id].textContent = loraPercent(l); });
+      return d;
+    }
+    loraShape = shape;
+    loraPct = {};
+    list.innerHTML = '';
+    if (!loras.length) list.appendChild(el('div', 'notice', t('page.lora.none')));
+    loras.forEach(function (l) {
+      var row = el('div', 'skillrow lorarow');
+      row.setAttribute('data-lora', l.id);
+      var meta = el('div', 'meta');
+      meta.appendChild(el('div', 'nm', (l.chosen ? '● ' : '') + l.name + (l.kind === 'Speed' && l.steps ? ' · ' + tn('page.lora.steps', l.steps) : '')));
+      meta.appendChild(el('div', 'ds', l.trigger
+        ? t('page.lora.purposeWithTrigger', { purpose: l.purpose, trigger: l.trigger })
+        : l.purpose));
+      var kind = l.kind === 'Speed' ? t('page.lora.kind.speed')
+        : l.kind === 'Edit' ? t('page.lora.kind.edit') : t('page.lora.kind.style');
+      // Its task works only on the model's own steps, so a speed plug-in sits out its edits.
+      if (l.needsModelSteps) kind += ' · ' + t('page.lora.keepsModelSteps');
+      meta.appendChild(el('div', 'lic', kind + ' · ' + loraSize(l.totalBytes) + ' · ' + l.license));
+      row.appendChild(meta);
+      var act = el('div', 'act');
+      var dl = l.download;
+      if (dl && dl.running) {
+        var pct = el('span', 'pct', loraPercent(l));
+        loraPct[l.id] = pct;
+        act.appendChild(pct);
+        var stop = el('button', 'mini', t('page.lora.stop'));
+        stop.addEventListener('click', function () {
+          post('/api/agent/loras/' + encodeURIComponent(l.id) + '/download/cancel', {}).then(function () { return loadLoras(); })
+            .catch(function (e) { loraError(t('page.lora.stopFailed', { error: (e && e.message) || e })); });
+        });
+        act.appendChild(stop);
+      } else if (l.state !== 'Installed') {
+        // Turned on, but its files are gone: the next picture is refused until it is
+        // downloaded again or turned off, so both are offered here.
+        if (l.chosen) act.appendChild(loraSwitch(l));
+        var get = el('button', 'mini', t('page.lora.download'));
+        get.addEventListener('click', function () { downloadLora(l); });
+        act.appendChild(get);
+        // A stopped download's part files are the user's to reclaim without finishing it.
+        if ((l.installedBytes || 0) > 0) {
+          var drop = el('button', 'mini quiet', t('page.lora.remove'));
+          drop.addEventListener('click', function () { removeLora(l); });
+          act.appendChild(drop);
+        }
+        if (l.chosen) meta.appendChild(el('div', 'err', t('page.lora.filesMissing')));
+        if (dl && dl.state === 'Failed') {
+          meta.appendChild(el('div', 'err', dl.error
+            ? t('page.lora.downloadStopped', { error: dl.error })
+            : t('page.lora.downloadStoppedUnknown')));
+        }
+      } else {
+        act.appendChild(loraSwitch(l));
+        var rm = el('button', 'mini quiet', t('page.lora.remove'));
+        rm.addEventListener('click', function () { removeLora(l); });
+        act.appendChild(rm);
+        if (l.chosen && l.strengthAdjustable) {
+          var strength = el('div', 'strength');
+          var range = el('input');
+          range.type = 'range';
+          range.min = String(d.minStrength);
+          range.max = String(d.maxStrength);
+          range.step = '0.05';
+          range.value = String(l.strength);
+          var shown = el('span', 'val', t('page.lora.percent', { percent: Math.round(l.strength * 100) }));
+          range.addEventListener('input', function () {
+            shown.textContent = t('page.lora.percent', { percent: Math.round(Number(range.value) * 100) });
+          });
+          range.addEventListener('change', function () { setLoraStrength(l, Number(range.value)); });
+          strength.appendChild(el('span', 'lbl', t('page.lora.strength')));
+          strength.appendChild(range);
+          strength.appendChild(shown);
+          meta.appendChild(strength);
+        }
+      }
+      row.appendChild(act);
+      list.appendChild(row);
+    });
+    if (running && !loraPoll) {
+      loraPoll = setInterval(function () {
+        if (!$('lora-sheet').classList.contains('on')) { clearInterval(loraPoll); loraPoll = null; return; }
+        loadLoras(true).catch(function () {});
+      }, 1000);
+    }
+    if (!running && loraPoll) { clearInterval(loraPoll); loraPoll = null; }
+    return d;
+  }
+  $('open-loras').addEventListener('click', function () {
+    closeSheets();
+    loraError('');
+    loadLoras().then(function () { openSheet('lora-sheet'); })
+      .catch(function (e) { notice(t('page.lora.listFailed', { error: (e && e.message) || e }), 'error'); });
   });
   $('open-models').addEventListener('click', function () {
     closeSheets();
@@ -2192,7 +2974,7 @@
     var on = skillsOn();
     box.checked = on;
     var label = $('skills-master-label');
-    if (label) label.textContent = on ? 'Use skills' : 'Skills are off';
+    if (label) label.textContent = on ? t('page.skills.on') : t('page.skills.off');
     var list = $('skills-list');
     if (list) list.className = on ? '' : 'off';
     var add = $('skill-add');
@@ -2218,7 +3000,7 @@
         }
         paintSkillsMaster();
       })
-      .catch(function (e) { notice('That setting could not be saved: ' + e, 'error'); });
+      .catch(function (e) { notice(t('page.skills.saveFailed', { error: e }), 'error'); });
   }
 
   (function () {
@@ -2237,7 +3019,7 @@
       paintSkillsMaster();
       var list = $('skills-list');
       list.innerHTML = '';
-      if (!state.catalogSkills.length) list.appendChild(el('div', 'notice', 'No skills are installed.'));
+      if (!state.catalogSkills.length) list.appendChild(el('div', 'notice', t('page.skills.none')));
       state.catalogSkills.forEach(function (s) {
         // The whole row opens the skill. A description is almost always longer
         // than the two lines a list can spare, and truncating it to a tooltip
@@ -2263,10 +3045,14 @@
     var body = $('skill-body');
     body.innerHTML = '';
     var bits = [];
-    if (s.scripts) bits.push(s.scripts + (s.scripts === 1 ? ' script' : ' scripts'));
-    if (s.origin) bits.push(String(s.origin));
+    if (s.scripts) bits.push(tn('page.skill.scripts', s.scripts));
+    // The host reports where a skill came from as a word of its protocol.
+    if (s.origin) {
+      bits.push(s.origin === 'installed' ? t('page.skill.origin.installed')
+        : s.origin === 'discovered' ? t('page.skill.origin.discovered') : String(s.origin));
+    }
     if (bits.length) body.appendChild(el('div', 'meta', bits.join(' · ')));
-    body.appendChild(document.createTextNode(s.description || 'This skill has no description.'));
+    body.appendChild(document.createTextNode(s.description || t('page.skill.noDescription')));
 
     var on = $('skill-on');
     on.checked = state.skills.indexOf(s.name) >= 0;
@@ -2289,9 +3075,9 @@
             paintSkillChips();
           }
           closeSheets();
-          notice(s.name + ' was removed.');
+          notice(t('page.skill.removed', { name: s.name }));
         })
-        .catch(function (e) { notice('Could not remove it: ' + e, 'error'); });
+        .catch(function (e) { notice(t('page.skill.removeFailed', { error: e }), 'error'); });
     };
     openSheet('skill-sheet');
   }
@@ -2311,7 +3097,7 @@
     fetch('/api/skills', { method: 'POST', body: fd })
       .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
       .then(function (res) { afterInstall(res); })
-      .catch(function (err) { notice('That skill could not be installed: ' + err, 'error'); });
+      .catch(function (err) { notice(t('page.skillAdd.zipFailed', { error: err }), 'error'); });
   });
   $('skill-fetch').addEventListener('click', function () {
     var url = ($('skill-url').value || '').trim();
@@ -2320,11 +3106,11 @@
     post('/api/skills/from-url', { url: url })
       .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
       .then(function (res) { $('skill-fetch').disabled = false; $('skill-url').value = ''; afterInstall(res); })
-      .catch(function (err) { $('skill-fetch').disabled = false; notice('That link did not work: ' + err, 'error'); });
+      .catch(function (err) { $('skill-fetch').disabled = false; notice(t('page.skillAdd.linkFailed', { error: err }), 'error'); });
   });
   function afterInstall(res) {
     if (!res.ok) {
-      var msg = (res.body && (res.body.error || res.body.message)) || 'The skill was refused.';
+      var msg = (res.body && (res.body.error || res.body.message)) || t('page.skillAdd.refused');
       notice(typeof msg === 'string' ? msg : JSON.stringify(msg), 'error');
       return;
     }
@@ -2332,10 +3118,13 @@
     // A list install reports both halves; say how many landed and how many did not.
     if (res.body && typeof res.body.count === 'number') {
       var failed = (res.body.failed || []).length;
-      notice('Installed ' + res.body.count + (res.body.count === 1 ? ' skill' : ' skills')
-        + (failed ? ', ' + failed + ' could not be installed' : '') + '.');
+      notice(failed
+        ? tn('page.skillAdd.installedSomeFailed', res.body.count, { failed: failed })
+        : tn('page.skillAdd.installed', res.body.count));
     } else {
-      notice('Installed ' + ((res.body && res.body.name) || 'the skill') + '.');
+      notice(res.body && res.body.name
+        ? t('page.skillAdd.installedNamed', { name: res.body.name })
+        : t('page.skillAdd.installedUnnamed'));
     }
     loadSkills().then(function () { openSheet('skills-sheet'); });
   }
@@ -2352,6 +3141,13 @@
     text.style.height = Math.min(text.scrollHeight, window.innerHeight * 0.26) + 'px';
   }
   text.addEventListener('input', autoGrow);
+  text.addEventListener('keydown', function (e) {
+    // Let Shift+Enter insert a newline and IME Enter finish composing text.
+    if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
+    e.preventDefault();
+    // The Send button becomes Stop during inference; Enter should never stop it.
+    if (!e.repeat && !state.generating) sendMessage();
+  });
   send.addEventListener('click', sendMessage);
   $('new').addEventListener('click', function () { openConversation(null); });
 
@@ -2379,7 +3175,7 @@
     if (pressAt && (Math.abs(x - pressAt.x) > 10 || Math.abs(y - pressAt.y) > 10)) cancelPress();
   }
   function beginPress(x, y) {
-    if (state.voice) return;
+    if (state.voice || (state.native && !state.dictation)) return;
     cancelPress();
     pressAt = { x: x, y: y };
     pressTimer = setTimeout(function () {
@@ -2388,7 +3184,7 @@
       if (!state.native) {
         // In a browser there is no recogniser to switch to, and a composer that
         // turned into a dead button would be worse than not switching.
-        notice('Voice input is only available in the app.', 'error');
+        notice(t('page.voice.appOnly'), 'error');
         return;
       }
       // Blurring first is what dismisses the selection callout iOS raises for a
@@ -2430,21 +3226,22 @@
   abc.addEventListener('click', function () { setVoice(false); });
 
   function startRec() {
-    if (!state.native) { notice('Voice input is only available in the app.', 'error'); return; }
+    if (!state.native) { notice(t('page.voice.appOnly'), 'error'); return; }
+    if (!state.dictation) return;
     hold.classList.add('rec');
-    $('holdlabel').textContent = 'Listening… release to stop';
+    $('holdlabel').textContent = t('page.voice.listening');
     post('/api/agent/events', { type: 'dictate-start' });
   }
   function stopRec() {
     if (!hold.classList.contains('rec')) return;
-    $('holdlabel').textContent = 'Transcribing…';
+    $('holdlabel').textContent = t('page.voice.transcribing');
     post('/api/agent/events', { type: 'dictate-stop' });
   }
   // The app says when the session has really ended, because the transcription
   // arrives after the finger lifts and the button must not look idle before it does.
   function dictationEnded() {
     hold.classList.remove('rec');
-    $('holdlabel').textContent = 'Hold to talk';
+    $('holdlabel').textContent = t('page.voice.hold');
     // Hand back to the text box with what was said already in it. Speaking is how
     // the message STARTS; reading it back, fixing a word and pressing send is how it
     // finishes, and staying in voice mode hides the very text the user needs to
@@ -2460,9 +3257,10 @@
 
   // iOS recognises ONE language per session and does not detect which is being
   // spoken, so a bilingual user has to say which -- and the place to say it is next
-  // to the button they are about to hold, not three screens away in Settings.
+  // to the button they are about to hold, not three screens away in Settings. Each
+  // language is named in itself, so only Auto is translated.
   var LANGS = [
-    { id: '', label: 'Auto' },
+    { id: '', label: t('page.voice.langAuto') },
     { id: 'en-US', label: 'EN' },
     { id: 'zh-CN', label: '中文' }
   ];
@@ -2559,6 +3357,7 @@
    * the calls meant for it, and so each one can say what shape it expects.
    */
   var hostCalls = {
+    nativeReady: function (a) { window.TensorAgent.nativeReady(a); },
     addAttachment: function (a) { window.TensorAgent.addAttachment(a); },
     insertText: function (a) { window.TensorAgent.insertText(a && a.text); },
     takeShare: function () { window.TensorAgent.takeShare(); },
@@ -2567,8 +3366,61 @@
     openConversation: function (a) { window.TensorAgent.openConversation(a && a.id); },
   };
 
+  // A language change reloads the translated page. Keep the unsent composer in
+  // this WebView's session storage for that one reload, including saved selections
+  // and share ownership, so switching languages cannot discard or duplicate a draft.
+  var languageDraftKey = 'tensoragent-language-draft';
+  function prepareLanguageReload() {
+    // Wait for mutations and send acceptance to settle. In particular a sent share
+    // is still owned by the composer until the chat response's headers arrive.
+    if ((state.abort && state.abort.awaitingHeaders) || state.visionChecking
+        || shareDiscarding || shareDrain || conversationOpening || pendingUploadCount || state.maskEditing)
+      return 'busy';
+    try {
+      window.sessionStorage.setItem(languageDraftKey, JSON.stringify({
+        conversation: state.conversation,
+        text: text.value,
+        attachments: state.attachments,
+        skills: state.skills,
+        skillsExplicit: state.skillSelectionExplicit,
+        think: state.think,
+        shareOrder: appliedShareOrder,
+        shareParts: appliedShareParts,
+      }));
+      return true;
+    } catch (e) {
+      note('language-draft-save-failed', (e && e.message) || e);
+      return false;
+    }
+  }
+
+  function restoreLanguageDraft() {
+    try {
+      var saved = window.sessionStorage.getItem(languageDraftKey);
+      if (!saved) return;
+      var draft = JSON.parse(saved);
+      window.sessionStorage.removeItem(languageDraftKey);
+      // A cold launch or a deleted chat must not inherit another conversation's draft.
+      if (!draft || draft.conversation !== state.conversation) return;
+      text.value = typeof draft.text === 'string' ? draft.text : '';
+      state.attachments = Array.isArray(draft.attachments) ? draft.attachments : [];
+      state.skills = skillsOn() && Array.isArray(draft.skills) ? draft.skills : [];
+      state.skillSelectionExplicit = draft.skillsExplicit === true;
+      state.think = draft.think === true;
+      (Array.isArray(draft.shareOrder) ? draft.shareOrder : []).forEach(function (id) {
+        rememberAppliedShare(id, draft.shareParts && draft.shareParts[id]);
+      });
+      autoGrow();
+      paintChips();
+      paintSkillChips();
+    } catch (e) {
+      note('language-draft-restore-failed', (e && e.message) || e);
+    }
+  }
+
   window.TensorAgent = {
     notice: notice,
+    prepareLanguageReload: prepareLanguageReload,
 
     /**
      * The one door host data comes in through.
@@ -2604,7 +3456,7 @@
     attachmentCount: function () { return state.attachments.length; },
 
     addAttachment: function (a) {
-      if (!a || !a.ok) { notice((a && a.error) || 'Upload failed', 'error'); return; }
+      if (!a || !a.ok) { notice((a && a.error) || t('page.upload.failed'), 'error'); return; }
       state.attachments.push(a); paintChips();
     },
     insertText: function (t) {
@@ -2641,6 +3493,8 @@
      */
     diagnostics: function () {
       return JSON.stringify({
+        native: state.native,
+        dictation: state.dictation,
         conversation: state.conversation,
         turn: state.turn,
         attached: !!state.abort,
@@ -2673,18 +3527,29 @@
     history: function () { return state.history; },
     // Synchronous on purpose: WKWebView's evaluateJavaScript does not await a
     // promise, so an async function here can never report success to native code.
-    refreshModel: function () { refreshModel(); return true; },
+    refreshModel: function () { refreshEngine().then(refreshModel); return true; },
     hasModel: function () { return !!state.model; },
     dictationEnded: dictationEnded,
     /** A refusal only the user can lift, with a button that opens iOS Settings. */
     noticeWithSettings: function (msg) {
-      noticeWithAction(msg, 'Open Settings', function () {
+      noticeWithAction(msg, t('page.action.openSettings'), function () {
         post('/api/agent/events', { type: 'open-settings' });
         return true;
       });
     },
-    /** The app calls this once at startup so the page knows native pickers exist. */
-    nativeReady: function () { state.native = true; return true; },
+    /** Native pickers and dictation are separate capabilities on Windows. */
+    nativeReady: function (capabilities) {
+      state.native = true;
+      state.dictation = !capabilities || capabilities.dictation !== false;
+      state.composerHint = (capabilities && capabilities.composerHint) || t('page.composer.message');
+      paintComposerHint();
+      if (!state.dictation) {
+        cancelPress();
+        if (state.voice) setVoice(false);
+      }
+      return true;
+    },
+    canDictate: function () { return state.native && state.dictation; },
     /**
      * Knobs for the page's own tests and nothing else: the timings above are what
      * make recovery invisible on a phone and would make a test take a minute.
@@ -2776,7 +3641,7 @@
     setTimeout(function () {
       if (document.visibilityState !== 'visible') return;
       resumeTurn();
-      refreshModel();
+      refreshEngine().then(refreshModel);
       takePendingShare();
     }, 250);
   });
@@ -2787,13 +3652,14 @@
     .then(function () { return applySettings(true); })
     .then(refreshModel)
     .then(openAtLaunch)
+    .then(restoreLanguageDraft)
     .then(function () {
       return post('/api/agent/events', { type: 'ready', conversation: state.conversation });
     })
     .then(function () { shareIntakeReady = true; return takePendingShare(); })
     .catch(function (e) {
       note('start-failed', (e && e.message) || e);
-      notice('Could not start: ' + ((e && e.message) || e), 'error');
+      notice(t('page.start.failed', { error: (e && e.message) || e }), 'error');
       // Whatever failed, the page is here and a share waiting on the host must still
       // reach it: leaving this false meant one lost request at startup disabled sharing
       // for the life of the page. The host is told again too -- it is what makes the

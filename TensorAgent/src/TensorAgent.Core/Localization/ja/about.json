@@ -1,0 +1,14 @@
+{
+  "about.title": "このアプリについて",
+  "about.tagline": "このデバイスだけで動作する、プライバシーを守る AI アシスタントです。",
+  "about.private.heading": "すべてがこのデバイスで完結します",
+  "about.private.body": "モデルはこの iPhone の GPU で動作します。会話、添付したファイル、アシスタントが作成したものは、すべてこのアプリ専用のストレージに保存されます。回答のためにサーバーへ送信されることはなく、ネットワークを切っても使えます。",
+  "about.abilities.heading": "できること",
+  "about.abilities.body": "会話に加え、渡された画像、音声、動画、文書を読み取れます。サンドボックスでコードを作成して実行し、Agent Skills を使って PDF、スプレッドシート、Word 文書、スライドを作成できます。許可すればウェブ検索もできます。",
+  "about.control.heading": "何を許可するかはあなたが決めます",
+  "about.control.body": "コードの実行とネットワークへのアクセスは、設定で個別に切り替えられます。どちらも初期状態ではオフです。コードは現在のチャット専用のフォルダー内で実行され、ネットワークをオフにすると、アシスタントのコードもネットワークにアクセスできません。",
+  "about.builtOn.heading": "TensorSharp を基盤にしています",
+  "about.builtOn.body": "TensorAgent は TensorSharp を基盤としています。TensorSharp は大規模言語モデルと拡散モデルを実行するためのオープンソースの .NET エンジンで、Apple GPU 向けの Metal バックエンドを備えています。デスクトップの TensorSharp.Server にも同じエンジンが使われています。",
+  "about.support.caption": "TensorSharp/TensorAgent は無料です。気に入っていただけたら、コーヒー1杯のご支援が開発を続ける力になります。",
+  "about.engine.unavailable": "エンジンの詳細を取得できません：{error}"
+}

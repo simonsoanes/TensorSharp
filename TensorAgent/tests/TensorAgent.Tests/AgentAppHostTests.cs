@@ -97,6 +97,38 @@ public sealed class AgentAppHostTests : IDisposable
         Assert.Null(new SettingsStore(paths.SettingsFile).Load().SelectedModelId);
     }
 
+    [Theory]
+    [InlineData("qwen3.8-flash-next-iq1m", true)]
+    [InlineData("qwen3.8-flash-next-q2kxl", false)]
+    public void A32GbStartupKeepsTheIq1MChoiceButStillClearsThe48GbQ2Choice(string id, bool keepChoice)
+    {
+        AgentPaths paths = Paths with { DeviceMemoryGB = 32, DeviceClass = DeviceClass.Desktop };
+        paths.EnsureCreated();
+        var settings = new SettingsStore(paths.SettingsFile);
+        AppSettings chosen = settings.Load();
+        chosen.SelectedModelId = id;
+        settings.Save(chosen);
+
+        // Only the small metadata shard is present. Startup must restore the IQ1_M
+        // choice and skip an incomplete download before any native model load occurs.
+        CatalogModel model = ModelCatalog.Find(id)!;
+        var store = new ModelStore(paths.ModelsDirectory);
+        Directory.CreateDirectory(store.DirectoryFor(model));
+        using (FileStream stream = File.Create(store.PathFor(model, model.Weights)))
+            stream.SetLength(model.Weights.Bytes);
+
+        _host = new AgentAppHost(paths);
+        _host.Start();
+
+        Assert.Contains(_host.Catalog, m => m.Id == "qwen3.8-flash-next-iq1m");
+        Assert.DoesNotContain(_host.Catalog, m => m.Id == "qwen3.8-flash-next-q2kxl");
+        Assert.Equal(AgentAppHost.ModelLoadState.None, _host.ModelLoad);
+        Assert.Equal(keepChoice ? id : null, new SettingsStore(paths.SettingsFile).Load().SelectedModelId);
+        Assert.Equal(InstallState.Partial, _host.Models.StateOf(model));
+        if (keepChoice)
+            Assert.Equal(store.PathFor(model, model.Weights), _host.Options.StartupModelPath);
+    }
+
     /// <summary>
     /// A remembered model the catalog no longer has is cleared, not merely skipped.
     ///
@@ -125,6 +157,285 @@ public sealed class AgentAppHostTests : IDisposable
 
         Assert.Equal(AgentAppHost.ModelLoadState.None, _host.ModelLoad);
         Assert.Null(new SettingsStore(paths.SettingsFile).Load().SelectedModelId);
+    }
+
+    /// <summary>
+    /// A remembered model this build does not know and never retired is kept, unloaded,
+    /// rather than cleared: it is most likely a newer build's entry, chosen in the Debug or
+    /// Release build that shares these settings, and clearing it would leave that build
+    /// starting with no model the next time it opens.
+    /// </summary>
+    [Fact]
+    public void AModelANewerBuildChoseIsKeptForIt()
+    {
+        AgentPaths paths = Paths with { DeviceMemoryGB = 12 };
+        paths.EnsureCreated();
+        var settings = new SettingsStore(paths.SettingsFile);
+        AppSettings chosen = settings.Load();
+        chosen.SelectedModelId = "a-newer-builds-entry-q4";
+        settings.Save(chosen);
+
+        _host = new AgentAppHost(paths);
+        _host.Start();
+
+        Assert.Equal(AgentAppHost.ModelLoadState.None, _host.ModelLoad);
+        Assert.Equal("a-newer-builds-entry-q4", new SettingsStore(paths.SettingsFile).Load().SelectedModelId);
+    }
+
+    /// <summary>
+    /// A launch reclaims the weights and prefix checkpoints of a RETIRED entry and keeps
+    /// those of an id it does not know, which a newer build sharing the directories may
+    /// have installed (see CatalogTests.ASweepByAnOlderBuildKeepsTheModelsANewerBuildInstalled).
+    /// </summary>
+    [Fact]
+    public void StartupReclaimsRetiredModelsAndKeepsAnUnknownIdsFiles()
+    {
+        AgentPaths paths = Paths;
+        paths.EnsureCreated();
+        string prefixCache = Path.Combine(paths.CacheRoot, "prefix-cache");
+        const string retired = "gemma-4-12b-iq3xxs";
+        const string newer = "a-newer-builds-entry-q4";
+        Assert.True(ModelCatalog.IsRetired(retired));
+        foreach (string id in new[] { retired, newer })
+        {
+            Directory.CreateDirectory(Path.Combine(paths.ModelsDirectory, id));
+            File.WriteAllBytes(Path.Combine(paths.ModelsDirectory, id, "weights.gguf"), new byte[64]);
+            Directory.CreateDirectory(Path.Combine(prefixCache, id));
+            File.WriteAllBytes(Path.Combine(prefixCache, id, "checkpoint.bin"), new byte[64]);
+        }
+
+        _host = new AgentAppHost(paths);
+
+        Assert.False(Directory.Exists(Path.Combine(paths.ModelsDirectory, retired)));
+        Assert.False(Directory.Exists(Path.Combine(prefixCache, retired)));
+        Assert.True(File.Exists(Path.Combine(paths.ModelsDirectory, newer, "weights.gguf")));
+        Assert.True(File.Exists(Path.Combine(prefixCache, newer, "checkpoint.bin")));
+    }
+
+    /// <summary>
+    /// The app chooses LoRA plug-ins per picture. A TS_LORAS exported in the shell that
+    /// launched it (run-mac.sh passes the environment through) would apply plug-ins nobody
+    /// chose to every image load, and make the engine warn on every other one.
+    /// </summary>
+    [Fact]
+    public void ALoraListInheritedFromTheEnvironmentIsNotApplied()
+    {
+        string? before = Environment.GetEnvironmentVariable("TS_LORAS");
+        try
+        {
+            Environment.SetEnvironmentVariable("TS_LORAS", "[{\"path\":\"/somewhere/else.safetensors\"}]");
+            _host = new AgentAppHost(Paths);
+            Assert.Null(Environment.GetEnvironmentVariable("TS_LORAS"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TS_LORAS", before);
+        }
+    }
+
+    /// <summary>Puts correctly sized (sparse) files in place, so the store reads the plug-in as installed.</summary>
+    private static void FakeInstall(LoraStore store, string id)
+    {
+        CatalogLora lora = LoraCatalog.Find(id)!;
+        Directory.CreateDirectory(store.DirectoryFor(lora));
+        foreach (LoraFile file in lora.Files)
+        {
+            using FileStream stream = File.Create(store.PathFor(lora, file));
+            stream.SetLength(file.Bytes);
+        }
+    }
+
+    [Fact]
+    public async Task TheLoraSheetListsThePlugInsAndSavesOnlyAChoiceThatCanBeHonoured()
+    {
+        AgentPaths paths = Paths with { DeviceMemoryGB = 48 };
+        _host = new AgentAppHost(paths);
+        _host.Start();
+        _client = new HttpClient { BaseAddress = new Uri(_host.Server.BaseUrl) };
+        _client.DefaultRequestHeaders.Add("Cookie", $"{Core.Hosting.LoopbackServer.TokenCookie}={_host.Server.Token}");
+
+        JsonElement listed = await Get("/api/agent/loras");
+        Assert.Equal(LoraCatalog.BuiltIn.Count, listed.GetProperty("loras").GetArrayLength());
+        Assert.All(listed.GetProperty("loras").EnumerateArray(), l => Assert.Equal("NotInstalled", l.GetProperty("state").GetString()));
+        Assert.Equal(0, listed.GetProperty("chosen").GetArrayLength());
+
+        const string viggle = "qwen-image-2.1-viggle-turbo", pruna = "qwen-image-2.1-pruna-8step", film = "qwen-image-2.1-film-stills";
+        async Task<HttpResponseMessage> Choose(params (string Id, float Strength)[] loras) =>
+            await _client!.PostAsJsonAsync("/api/agent/loras/choice",
+                new { loras = loras.Select(l => new { id = l.Id, strength = l.Strength }).ToArray() });
+
+        HttpResponseMessage refused = await Choose((viggle, 1f));
+        Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
+        Assert.Contains("not downloaded", (await refused.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+
+        FakeInstall(_host.Loras, viggle);
+        FakeInstall(_host.Loras, pruna);
+        FakeInstall(_host.Loras, film);
+        refused = await Choose((viggle, 1f), (pruna, 1f));
+        Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
+        Assert.Contains("both set the number of steps", (await refused.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+
+        HttpResponseMessage saved = await Choose((film, 0.55f), (viggle, 1f));
+        Assert.Equal(HttpStatusCode.OK, saved.StatusCode);
+        Assert.Equal(new[] { new ImageLoraChoice(film, 0.55f), new ImageLoraChoice(viggle, 1f) },
+            new SettingsStore(paths.SettingsFile).Load().ImageLoras);
+        JsonElement state = await Get("/api/agent/loras");
+        JsonElement filmRow = state.GetProperty("loras").EnumerateArray().Single(l => l.GetProperty("id").GetString() == film);
+        Assert.True(filmRow.GetProperty("chosen").GetBoolean());
+        Assert.Equal(0.55f, filmRow.GetProperty("strength").GetSingle());
+        Assert.Equal("Installed", filmRow.GetProperty("state").GetString());
+
+        // Removing a plug-in turns it off as well.
+        HttpResponseMessage removed = await _client!.DeleteAsync($"/api/agent/loras/{film}");
+        Assert.Equal(HttpStatusCode.OK, removed.StatusCode);
+        Assert.Equal(new[] { new ImageLoraChoice(viggle, 1f) }, new SettingsStore(paths.SettingsFile).Load().ImageLoras);
+        Assert.False(Directory.Exists(_host.Loras.DirectoryFor(LoraCatalog.Find(film)!)));
+
+        Assert.Equal(HttpStatusCode.NotFound, (await _client!.DeleteAsync("/api/agent/loras/no-such-plug-in")).StatusCode);
+    }
+
+    private void StartServing(AgentPaths paths)
+    {
+        _host = new AgentAppHost(paths);
+        _host.Start();
+        _client = new HttpClient { BaseAddress = new Uri(_host.Server.BaseUrl) };
+        _client.DefaultRequestHeaders.Add("Cookie", $"{Core.Hosting.LoopbackServer.TokenCookie}={_host.Server.Token}");
+    }
+
+    /// <summary>
+    /// The page saves its other settings by posting back the whole copy it read when it
+    /// loaded. That copy's plug-in choice is older than anything changed in the LoRA sheet
+    /// since, so the save keeps the stored choice: a plug-in turned on stays on, and one
+    /// removed with its files does not come back to refuse every later picture.
+    /// </summary>
+    [Fact]
+    public async Task ASettingsSaveFromThePageKeepsThePlugInsChosenSince()
+    {
+        AgentPaths paths = Paths with { DeviceMemoryGB = 48 };
+        StartServing(paths);
+        const string viggle = "qwen-image-2.1-viggle-turbo", film = "qwen-image-2.1-film-stills";
+        FakeInstall(_host!.Loras, viggle);
+        FakeInstall(_host.Loras, film);
+        JsonElement loaded = await Get("/api/agent/settings");
+        Assert.Equal(0, loaded.GetProperty("imageLoras").GetArrayLength());
+
+        Assert.Equal(HttpStatusCode.OK, (await _client!.PostAsJsonAsync("/api/agent/loras/choice",
+            new { loras = new[] { new { id = viggle, strength = 1f }, new { id = film, strength = 0.6f } } })).StatusCode);
+
+        // The page's copy, from before the choice, with one switch flipped.
+        var stale = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(loaded.GetRawText())!;
+        stale["skillsEnabled"] = JsonSerializer.SerializeToElement(false);
+        HttpClient client = _client!;
+        HttpResponseMessage response = await client.PostAsJsonAsync("/api/agent/settings", stale);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        AppSettings stored = new SettingsStore(paths.SettingsFile).Load();
+        Assert.False(stored.SkillsEnabled);
+        var both = new[] { new ImageLoraChoice(viggle, 1f), new ImageLoraChoice(film, 0.6f) };
+        Assert.Equal(both, stored.ImageLoras);
+        Assert.Equal(2, (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("imageLoras").GetArrayLength());
+
+        // A copy that leaves the choice out, or says null, changes nothing either.
+        stale.Remove("imageLoras");
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/api/agent/settings", stale)).StatusCode);
+        stale["imageLoras"] = JsonSerializer.SerializeToElement<object?>(null);
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/api/agent/settings", stale)).StatusCode);
+        Assert.Equal(both, new SettingsStore(paths.SettingsFile).Load().ImageLoras);
+
+        // Removed in the sheet, then a copy taken while it was on is saved: it stays removed.
+        JsonElement withBoth = await Get("/api/agent/settings");
+        Assert.Equal(HttpStatusCode.OK, (await client.DeleteAsync($"/api/agent/loras/{viggle}")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/api/agent/settings", withBoth)).StatusCode);
+        Assert.Equal(new[] { new ImageLoraChoice(film, 0.6f) }, new SettingsStore(paths.SettingsFile).Load().ImageLoras);
+    }
+
+    /// <summary>
+    /// Every change in the sheet sends the whole choice back, including what this build cannot
+    /// check: a plug-in a newer build sharing the settings chose, and one that is on but whose
+    /// files have gone. Neither blocks the change, and the one whose files are gone can be
+    /// turned off; only what the change adds has to be downloaded.
+    /// </summary>
+    [Fact]
+    public async Task TheSheetCanChangeAChoiceHoldingPlugInsItCannotCheck()
+    {
+        AgentPaths paths = Paths with { DeviceMemoryGB = 48 };
+        const string viggle = "qwen-image-2.1-viggle-turbo", film = "qwen-image-2.1-film-stills", grain = "qwen-image-2.1-grainscape";
+        const string newer = "a-plug-in-from-a-newer-build";
+        var store = new SettingsStore(paths.SettingsFile);
+        AppSettings seeded = store.Load();
+        seeded.ImageLoras = new() { new ImageLoraChoice(newer, 0.8f), new ImageLoraChoice(viggle, 1f) };
+        store.Save(seeded);
+        StartServing(paths);
+        FakeInstall(_host!.Loras, film);
+
+        JsonElement sheet = await Get("/api/agent/loras");
+        JsonElement viggleRow = sheet.GetProperty("loras").EnumerateArray().Single(l => l.GetProperty("id").GetString() == viggle);
+        Assert.True(viggleRow.GetProperty("chosen").GetBoolean());
+        Assert.Equal("NotInstalled", viggleRow.GetProperty("state").GetString());
+
+        // What the page sends to turn Film Stills on: the saved choice, then the change.
+        async Task<HttpResponseMessage> Choose(params object[] loras) =>
+            await _client!.PostAsJsonAsync("/api/agent/loras/choice", new { loras });
+        HttpResponseMessage on = await Choose(new { id = newer, strength = 0.8f }, new { id = viggle, strength = 1f }, new { id = film, strength = 0.7f });
+        Assert.Equal(HttpStatusCode.OK, on.StatusCode);
+        Assert.Equal(new[] { new ImageLoraChoice(viggle, 1f), new ImageLoraChoice(film, 0.7f), new ImageLoraChoice(newer, 0.8f) },
+            store.Load().ImageLoras);
+
+        // Turning off the one whose files are gone.
+        Assert.Equal(HttpStatusCode.OK, (await Choose(new { id = newer, strength = 0.8f }, new { id = film, strength = 0.7f })).StatusCode);
+        Assert.Equal(new[] { new ImageLoraChoice(film, 0.7f), new ImageLoraChoice(newer, 0.8f) }, store.Load().ImageLoras);
+
+        // Something newly turned on still has to be there.
+        HttpResponseMessage refused = await Choose(new { id = film, strength = 0.7f }, new { id = grain, strength = 0.7f });
+        Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
+        Assert.Contains("not downloaded", (await refused.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+
+        // A strength that is not a number is the client's mistake, said as one; none at all is the plug-in's own.
+        refused = await Choose(new { id = film, strength = "0.8" });
+        Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
+        Assert.Contains("must be a number", (await refused.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+        Assert.Equal(HttpStatusCode.OK, (await Choose(new { id = film, strength = (float?)null })).StatusCode);
+        Assert.Equal(new[] { new ImageLoraChoice(film, 0.7f), new ImageLoraChoice(newer, 0.8f) }, store.Load().ImageLoras);
+    }
+
+    [Fact]
+    public async Task ADeviceWithoutTheImageModelIsOfferedNoPlugIns()
+    {
+        _host = new AgentAppHost(Paths with { DeviceMemoryGB = 12 });
+        _host.Start();
+        _client = new HttpClient { BaseAddress = new Uri(_host.Server.BaseUrl) };
+        _client.DefaultRequestHeaders.Add("Cookie", $"{Core.Hosting.LoopbackServer.TokenCookie}={_host.Server.Token}");
+
+        Assert.Equal(0, (await Get("/api/agent/loras")).GetProperty("loras").GetArrayLength());
+    }
+
+    /// <summary>
+    /// A picture whose plug-ins cannot be honoured ends with the reason, not with a picture
+    /// made without them; and the preparation is told whether the picture is an edit.
+    /// </summary>
+    [Fact]
+    public async Task APictureItsPlugInsCannotBeHonouredForIsRefusedWithTheReason()
+    {
+        _host = new AgentAppHost(Paths);
+        var asked = new List<bool>();
+        JsonElement body = JsonDocument.Parse(
+            "{\"sessionId\":\"s-1\",\"messages\":[{\"role\":\"user\",\"content\":\"a red apple\",\"stillImagePaths\":[\"/tmp/photo.png\"]}]}")
+            .RootElement.Clone();
+
+        var frames = new List<JsonElement>();
+        await foreach (object frame in ImageTurns.StreamAsync(_host.Chat, body, CancellationToken.None, editing =>
+        {
+            asked.Add(editing);
+            return ImageTurns.Preparation.Refused("Viggle Turbo is turned on but its files are missing.");
+        }))
+        {
+            frames.Add(JsonSerializer.SerializeToElement(frame));
+        }
+
+        Assert.Equal(new[] { true }, asked);
+        JsonElement only = Assert.Single(frames);
+        Assert.True(only.GetProperty("done").GetBoolean());
+        Assert.Equal("Viggle Turbo is turned on but its files are missing.", only.GetProperty("error").GetString());
+        Assert.Equal("s-1", only.GetProperty("sessionId").GetString());
     }
 
     [Fact]
@@ -1153,6 +1464,24 @@ public sealed class AgentAppHostTests : IDisposable
         foreach (JsonElement model in body.GetProperty("models").EnumerateArray())
             Assert.True(model.GetProperty("minDeviceMemoryGB").GetInt32() <= 12,
                 $"{model.GetProperty("id").GetString()} needs more memory than the device tier allows");
+    }
+
+    [Fact]
+    public async Task The32GbCatalogApiOffersTheVisionIq1MEntryAndKeepsQ2Gated()
+    {
+        StartServing(Paths with { DeviceMemoryGB = 32, DeviceClass = DeviceClass.Desktop });
+        JsonElement body = await Get("/api/agent/catalog");
+        JsonElement[] models = body.GetProperty("models").EnumerateArray().ToArray();
+        JsonElement iq1m = Assert.Single(models, m => m.GetProperty("id").GetString() == "qwen3.8-flash-next-iq1m");
+        Assert.Equal(32, iq1m.GetProperty("minDeviceMemoryGB").GetInt32());
+        Assert.Equal("UD-IQ1_M", iq1m.GetProperty("quantization").GetString());
+        Assert.Equal("Image", iq1m.GetProperty("modalities").GetString());
+        Assert.True(iq1m.GetProperty("experimental").GetBoolean());
+        Assert.Equal(32768, iq1m.GetProperty("contextLength").GetInt32());
+        Assert.Equal(74_538_755_776, iq1m.GetProperty("totalBytes").GetInt64());
+        Assert.Equal("Qwen Community License 1.0", iq1m.GetProperty("license").GetString());
+        Assert.DoesNotContain(models, m => m.GetProperty("id").GetString() == "qwen3.8-flash-next-q2kxl");
+        Assert.Equal(AgentAppHost.ModelLoadState.None, _host!.ModelLoad);
     }
 
     [Fact]

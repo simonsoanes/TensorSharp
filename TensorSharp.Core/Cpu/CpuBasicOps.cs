@@ -21,7 +21,6 @@ using AdvUtils;
 using System;
 using System.Data;
 using System.Reflection;
-using System.Runtime.InteropServices;
 using TensorSharp.Core;
 
 namespace TensorSharp.Cpu
@@ -179,25 +178,18 @@ namespace TensorSharp.Cpu
 
 
 
-        // CpuOps.dll entry points are native; with the SIMD kernels enabled the ops that have a
-        // managed implementation stay managed, so the pure-C# backend never P/Invokes.
-        private static bool UseCpuOpsNative => RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && !CpuKernels.Enabled;
 
-        private readonly MethodInfo abs_func = NativeWrapper.GetMethod("TS_Abs");
         [RegisterOpStorageType("abs", typeof(CpuStorage))]
         public Tensor Abs(Tensor result, Tensor src)
         {
-            if (UseCpuOpsNative) return NativeWrapper.InvokeNullableResultElementwise(abs_func, result, src);
             Tensor writeTarget = TensorResultBuilder.GetWriteTarget(result, src, false, src.Sizes);
             TensorApplyCPU.Abs(writeTarget, src);
             return writeTarget;
         }
 
-        private readonly MethodInfo neg_func = NativeWrapper.GetMethod("TS_Neg");
         [RegisterOpStorageType("neg", typeof(CpuStorage))]
         public Tensor Neg(Tensor result, Tensor src)
         {
-            if (UseCpuOpsNative) return NativeWrapper.InvokeNullableResultElementwise(neg_func, result, src);
             Tensor writeTarget = TensorResultBuilder.GetWriteTarget(result, src, false, src.Sizes);
             TensorApplyCPU.Neg(writeTarget, src);
             return writeTarget;
@@ -377,7 +369,6 @@ namespace TensorSharp.Cpu
         [RegisterOpStorageType("lerp", typeof(CpuStorage))]
         public Tensor Lerp(Tensor result, Tensor srcA, Tensor srcB, float weight) { return NativeWrapper.InvokeNullableResultElementwise(lerp_func, result, srcA, srcB, weight); }
 
-        // private readonly MethodInfo clamp_func = NativeWrapper.GetMethod("TS_Clamp");
         [RegisterOpStorageType("clamp", typeof(CpuStorage))]
         public Tensor Clamp(Tensor result, Tensor src, float min, float max)
         {
@@ -385,8 +376,6 @@ namespace TensorSharp.Cpu
             TensorApplyCPU.Clamp(writeTarget, src, min, max);
 
             return writeTarget;
-
-            //return NativeWrapper.InvokeNullableResultElementwise(clamp_func, result, src, min, max);
         }
 
 
@@ -463,11 +452,9 @@ namespace TensorSharp.Cpu
             return writeTarget;
         }
 
-        private readonly MethodInfo sub_func = NativeWrapper.GetMethod("TS_Sub");
         [RegisterOpStorageType("subv", typeof(CpuStorage))]
         public Tensor Sub(Tensor result, Tensor lhs, float rhs)
         {
-            if (!CpuKernels.Enabled) return NativeWrapper.InvokeNullableResultElementwise(sub_func, result, lhs, rhs);
             // x - r and x + (-r) are the same IEEE operation.
             Tensor writeTarget = TensorResultBuilder.GetWriteTarget(result, lhs, false, lhs.Sizes);
             TensorApplyCPU.Add(writeTarget, lhs, -rhs);
@@ -494,24 +481,18 @@ namespace TensorSharp.Cpu
             return writeTarget;
         }
 
-       // private readonly MethodInfo div_func = NativeWrapper.GetMethod("TS_Div");
         [RegisterOpStorageType("divv", typeof(CpuStorage))]
         public Tensor Div(Tensor result, Tensor lhs, float rhs)
         {
-
-            //return NativeWrapper.InvokeNullableResultElementwise(div_func, result, lhs, rhs);
-
             Tensor writeTarget = TensorResultBuilder.GetWriteTarget(result, lhs, false, lhs.Sizes);
             TensorApplyCPU.Div(writeTarget, lhs, rhs);
 
             return writeTarget;
         }
 
-        private readonly MethodInfo rdiv_func = NativeWrapper.GetMethod("TS_Rdiv");
         [RegisterOpStorageType("rdivv", typeof(CpuStorage))]
         public Tensor Div(Tensor result, float lhs, Tensor rhs)
         {
-            if (!CpuKernels.Enabled) return NativeWrapper.InvokeNullableResultElementwise(rdiv_func, result, rhs, lhs);
             Tensor writeTarget = TensorResultBuilder.GetWriteTarget(result, rhs, false, rhs.Sizes);
             TensorApplyCPU.RDiv(writeTarget, lhs, rhs);
             return writeTarget;

@@ -1,0 +1,14 @@
+{
+  "about.title": "About",
+  "about.tagline": "A private AI assistant that runs entirely on this device.",
+  "about.private.heading": "Everything happens here",
+  "about.private.body": "The model runs on this iPhone's GPU. Your conversations, the files you attach and anything the assistant writes stay in this app's own storage. Nothing is sent to a server to be answered, and the app works with the network switched off.",
+  "about.abilities.heading": "What it can do",
+  "about.abilities.body": "Chat, and read what you give it — pictures, audio, video and documents. It can write and run code in a sandbox, use Agent Skills to produce real PDFs, spreadsheets, Word documents and slide decks, and search the web when you allow it.",
+  "about.control.heading": "You decide what it may do",
+  "about.control.body": "Running code and reaching the network are separate switches in Settings, both off until you turn them on. Code runs confined to the current chat's own folder, and when the network is off it is off for the assistant's code too.",
+  "about.builtOn.heading": "Built on TensorSharp",
+  "about.builtOn.body": "TensorAgent is built on TensorSharp, an open-source .NET engine for running large language and diffusion models, with a Metal backend for Apple GPUs. It is the same engine that powers TensorSharp.Server on the desktop.",
+  "about.support.caption": "TensorSharp/TensorAgent is free. If you like it, a coffee keeps the work on it going.",
+  "about.engine.unavailable": "Engine details unavailable: {error}"
+}

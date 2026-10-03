@@ -29,9 +29,9 @@ namespace TensorSharp.Models.QwenImage
 {
     internal sealed class VaeFeaturePool : IDisposable
     {
-        // TS_QWEN_VAE_POOL=0 turns recycling off (A/B, or an escape hatch): every map is then a
-        // fresh allocation that the GC reclaims on its own schedule, as before the pool existed.
-        internal static bool Enabled { get; set; } = Environment.GetEnvironmentVariable("TS_QWEN_VAE_POOL") != "0";
+        // Settable by tests and the stages bench (--no-pool): off, every map is a fresh
+        // allocation that the GC reclaims on its own schedule.
+        internal static bool Enabled { get; set; } = true;
 
         /// <summary>Test hook: fill every returned buffer with NaN, so a map read through a stale
         /// array reference after its release poisons the output instead of reading recycled data.</summary>
@@ -41,8 +41,7 @@ namespace TensorSharp.Models.QwenImage
         // freed regions committed for reuse, but the next map is usually a different size and
         // gets fresh memory next to them. Measured at 2048x2048: peak commit 12.8 instead of
         // 14.0 GB at the same decode time; after a 1024x1024 decode 1.2 GB instead of 4.0 GB
-        // stayed committed. TS_QWEN_VAE_POOL_TRIM=0 selects the plain collection (A/B).
-        private static readonly bool Aggressive = Environment.GetEnvironmentVariable("TS_QWEN_VAE_POOL_TRIM") != "0";
+        // stayed committed.
 
         // TS_QWEN_VAE_POOL_TRACE=1 prints every rent with the live/pooled bytes and the process
         // commit: where a decode's peak comes from.
@@ -204,8 +203,7 @@ namespace TensorSharp.Models.QwenImage
 
         private static void Collect()
         {
-            if (Aggressive) GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, blocking: true, compacting: true);
-            else GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: false);
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, blocking: true, compacting: true);
         }
 
         private void TraceRent(int length, bool hit)

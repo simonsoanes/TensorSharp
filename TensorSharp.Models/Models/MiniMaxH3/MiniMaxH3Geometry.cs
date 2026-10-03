@@ -128,6 +128,8 @@ namespace TensorSharp.Models.MiniMaxH3
         }
 
         /// <summary>Resolve a full request geometry from the user's pixel request.</summary>
+        /// <param name="fps">The rate the caller asked for. It decides nothing: H3 writes every
+        /// clip at <see cref="Fps"/>, and both the frames and the soundtrack follow that.</param>
         public static MiniMaxH3Shape Resolve(int width, int height, int frames, int fps = Fps)
         {
             int w = AlignSpatial(width);
@@ -136,7 +138,11 @@ namespace TensorSharp.Models.MiniMaxH3
             int latentW = w / VaeSpatialRatio;
             int latentH = h / VaeSpatialRatio;
             int latentT = VideoFramesToLatentFrames(f);
-            int audio = AudioLatentCount(f, fps);
+            // The audio timeline follows the clip as it is written, which is always 24
+            // fps. Sizing it from the REQUESTED rate (fps 16 asked 98 audio latents of a
+            // 39-frame clip instead of 65) laid the soundtrack out on a different
+            // timeline from the frames it is trimmed to.
+            int audio = AudioLatentCount(f, Fps);
             return new MiniMaxH3Shape
             {
                 Width = w,

@@ -30,9 +30,9 @@ in one folder — subfolders like `VAE/`, `HighNoise/`, `LowNoise/` included):
 | Piece | File | Source |
 |---|---|---|
 | DiT (the `--model` GGUF, `general.architecture = wan`) | e.g. `Wan2.2-TI2V-5B-Q8_0.gguf` | [QuantStack/Wan2.2-TI2V-5B-GGUF](https://huggingface.co/QuantStack/Wan2.2-TI2V-5B-GGUF), [QuantStack/Wan2.2-I2V-A14B-GGUF](https://huggingface.co/QuantStack/Wan2.2-I2V-A14B-GGUF), [city96/Wan2.1-T2V-14B-gguf](https://huggingface.co/city96/Wan2.1-T2V-14B-gguf) |
-| second A14B expert (A14B only) | the matching `…HighNoise…`/`…LowNoise…` GGUF | same repo (`TS_WAN_DIT2` overrides; auto-found by name in the same/sibling folder) |
-| UMT5-XXL text encoder | `umt5-xxl-encoder-Q8_0.gguf` | [city96/umt5-xxl-encoder-gguf](https://huggingface.co/city96/umt5-xxl-encoder-gguf) (`--video-text-encoder` / `TS_WAN_TE`) |
-| Wan 2.1 video VAE (2.1 + A14B) | `wan_2.1_vae.safetensors` | [Comfy-Org/Wan_2.1_ComfyUI_repackaged](https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/blob/main/split_files/vae/wan_2.1_vae.safetensors) (`--video-vae` / `TS_WAN_VAE`) |
+| second A14B expert (A14B only) | the matching `…HighNoise…`/`…LowNoise…` GGUF | same repo (`--video-dit2` / `TS_VIDEO_DIT2` overrides; auto-found by name in the same/sibling folder) |
+| UMT5-XXL text encoder | `umt5-xxl-encoder-Q8_0.gguf` | [city96/umt5-xxl-encoder-gguf](https://huggingface.co/city96/umt5-xxl-encoder-gguf) (`--video-text-encoder` / `TS_VIDEO_TEXT_ENCODER`) |
+| Wan 2.1 video VAE (2.1 + A14B) | `wan_2.1_vae.safetensors` | [Comfy-Org/Wan_2.1_ComfyUI_repackaged](https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/blob/main/split_files/vae/wan_2.1_vae.safetensors) (`--video-vae` / `TS_VIDEO_VAE`) |
 | Wan 2.2 video VAE (TI2V-5B) | `Wan2.2_VAE.safetensors` | bundled in [QuantStack/Wan2.2-TI2V-5B-GGUF](https://huggingface.co/QuantStack/Wan2.2-TI2V-5B-GGUF/tree/main/VAE) |
 
 The text encoder is released from VRAM before the denoise starts, the VAE
@@ -368,7 +368,7 @@ the temporal chunk count), `TS_CUDNN_DIR` (cuDNN install to use),
 `TS_WAN_METAL_TENSOR_API=1|0` (force the Metal 4 tensor API on or off; default on
 for 14B-class DiTs, off for smaller ones — see
 [below](#the-metal-4-tensor-api-and-how-not-to-test-it)),
-`TS_WAN_VAE`/`TS_WAN_TE`/`TS_WAN_DIT2` (companion paths), `TS_FFMPEG` (ffmpeg
+`TS_VIDEO_VAE`/`TS_VIDEO_TEXT_ENCODER`/`TS_VIDEO_DIT2` (companion paths), `TS_FFMPEG` (ffmpeg
 path for MP4 export), `TS_WAN_DIT_TRACE=<file>` (per-stage activation stats for
 debugging).
 

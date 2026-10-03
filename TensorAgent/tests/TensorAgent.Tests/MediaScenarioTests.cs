@@ -368,9 +368,8 @@ public sealed class MediaScenarioTests : IDisposable
     }
 
     /// <summary>
-    /// Stage explicitly supplied Qwen-Image-2.1 files under the test fixture's role-aware
-    /// names, publish its companions, and host the DiT directly. This keeps the live
-    /// route coverage without putting a diffusion model in <c>ModelCatalog.BuiltIn</c>.
+    /// Stage explicitly supplied Qwen-Image-2.1 files under the built-in entry's role-aware
+    /// names, publish its companions, and host the DiT directly.
     /// </summary>
     private CatalogModel StartQwenImage(LiveMedia.QwenImageFiles files, string backend)
     {
@@ -821,9 +820,9 @@ public sealed class MediaScenarioTests : IDisposable
         Assert.Null(LiveMedia.UnavailableVideo(out LiveMedia.VideoFiles files));
 
         // The Wan companions have no catalog entry to be published from, so they are
-        // named the way the desktop's --wan-vae / --wan-te flags name them.
-        Environment.SetEnvironmentVariable("TS_WAN_VAE", files.Vae);
-        Environment.SetEnvironmentVariable("TS_WAN_TE", files.TextEncoder);
+        // named the way the desktop's --video-vae / --video-text-encoder flags name them.
+        Environment.SetEnvironmentVariable("TS_VIDEO_VAE", files.Vae);
+        Environment.SetEnvironmentVariable("TS_VIDEO_TEXT_ENCODER", files.TextEncoder);
         try
         {
             StartDirect(files.Dit, LiveMedia.Backend("ggml_metal"));
@@ -862,8 +861,8 @@ public sealed class MediaScenarioTests : IDisposable
         }
         finally
         {
-            Environment.SetEnvironmentVariable("TS_WAN_VAE", null);
-            Environment.SetEnvironmentVariable("TS_WAN_TE", null);
+            Environment.SetEnvironmentVariable("TS_VIDEO_VAE", null);
+            Environment.SetEnvironmentVariable("TS_VIDEO_TEXT_ENCODER", null);
         }
     }
 }

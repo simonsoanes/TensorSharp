@@ -1,12 +1,28 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- TensorAgent iOS head: a .NET MAUI app that statically links TensorSharp's
-       GgmlOps.xcframework and hosts its own phone Web UI (wwwroot/, below) in a
-       WKWebView behind an in-process loopback HTTP server. Build only with the
-       user-local SDK that carries the maui-ios workload (see ../../README.md). -->
+  <!-- TensorAgent: a .NET MAUI app that hosts its own Web UI (wwwroot/, below) in a
+       WebView behind an in-process loopback HTTP server, with the TensorSharp engine in
+       the same process. One project, three heads:
+
+         net10.0-ios                   iPhone and iPad. Statically links TensorSharp's
+                                       GgmlOps.xcframework, embeds CPython and runs the
+                                       model's code inside the app.
+         net10.0-maccatalyst           The Mac desktop app. Ships the desktop
+                                       libGgmlOps.dylib and runs the model's code as real
+                                       processes confined by Seatbelt, as the desktop hosts do.
+         net10.0-windows10.0.19041.0   The Windows desktop app, built on Windows. Ships
+                                       GgmlOps.dll.
+
+       Build the Apple heads only with the user-local SDK that carries the maui-ios and
+       maui-maccatalyst workloads, and the Windows head with maui-windows (see
+       ../../README.md). -->
 
   <PropertyGroup>
-    <TargetFramework>net10.0-ios</TargetFramework>
+    <TargetFrameworks Condition="!$([MSBuild]::IsOSPlatform('windows'))">net10.0-ios;net10.0-maccatalyst</TargetFrameworks>
+    <TargetFrameworks Condition="$([MSBuild]::IsOSPlatform('windows'))">net10.0-windows10.0.19041.0</TargetFrameworks>
+    <!-- The inner build's platform (ios, maccatalyst, windows), for the conditions below.
+         The SDK sets TargetPlatformIdentifier only after the project body is evaluated. -->
+    <TensorAgentPlatform>$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)'))</TensorAgentPlatform>
     <OutputType>Exe</OutputType>
     <RootNamespace>TensorAgent.Maui</RootNamespace>
     <UseMaui>true</UseMaui>
@@ -23,7 +39,26 @@
     <!-- 17.0 matches build-ios.sh's deployment target for the xcframework; the
          static archive would refuse to link into an app that claims to run on
          an older OS than the archive was built for. -->
-    <SupportedOSPlatformVersion>17.0</SupportedOSPlatformVersion>
+    <SupportedOSPlatformVersion Condition="'$(TensorAgentPlatform)' == 'ios'">17.0</SupportedOSPlatformVersion>
+    <!-- Mac Catalyst 17.0 is macOS 14. The engine library beside the app is built by
+         build-macos.sh for the building Mac's own macOS unless MACOSX_DEPLOYMENT_TARGET
+         says otherwise, and that, not this number, is what decides the oldest Mac it
+         loads on. -->
+    <SupportedOSPlatformVersion Condition="'$(TensorAgentPlatform)' == 'maccatalyst'">17.0</SupportedOSPlatformVersion>
+    <SupportedOSPlatformVersion Condition="'$(TensorAgentPlatform)' == 'windows'">10.0.17763.0</SupportedOSPlatformVersion>
+    <TargetPlatformMinVersion Condition="'$(TensorAgentPlatform)' == 'windows'">10.0.17763.0</TargetPlatformMinVersion>
+
+    <!-- The desktop heads build for the building machine's architecture, because the
+         engine library they ship is built for that architecture only (build-macos.sh,
+         build-windows.ps1). A Mac Catalyst Release build would otherwise default to a
+         universal x64+arm64 app around a single-architecture library. -->
+    <RuntimeIdentifier Condition="'$(TensorAgentPlatform)' == 'maccatalyst' And '$(RuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier.Replace('osx-', 'maccatalyst-'))</RuntimeIdentifier>
+    <RuntimeIdentifier Condition="'$(TensorAgentPlatform)' == 'windows' And '$(RuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier)</RuntimeIdentifier>
+
+    <!-- An unpackaged Windows app that carries the Windows App SDK runtime with it, so it
+         runs from its build output with nothing to install first. -->
+    <WindowsPackageType Condition="'$(TensorAgentPlatform)' == 'windows'">None</WindowsPackageType>
+    <WindowsAppSDKSelfContained Condition="'$(TensorAgentPlatform)' == 'windows'">true</WindowsAppSDKSelfContained>
 
     <!-- Trimming is mandatory on iOS. partial (= MtouchLink SdkOnly) trims the
          BCL/framework only and copies every TensorSharp assembly whole; the
@@ -33,24 +68,36 @@
     <TrimMode>partial</TrimMode>
     <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
 
-    <!-- GgmlOps is linked statically from the xcframework (NativeReference
-         below); the desktop CMake builds in the backend projects must not run
-         for an iOS head. These properties are also forwarded to the referenced
-         projects as global properties (AdditionalProperties on each
-         ProjectReference) because a plain csproj property never flows across a
-         ProjectReference on its own. -->
+    <!-- The phone links GgmlOps statically from the xcframework (NativeReference
+         below), and the desktop heads get their engine library from
+         TensorAgentBuildDesktopEngine below, so the native builds in the referenced
+         backend projects never run for this project. These properties are also
+         forwarded to the referenced projects as global properties (AdditionalProperties
+         on each ProjectReference) because a plain csproj property never flows across a
+         ProjectReference on its own. The value is the same for every head, so two inner
+         builds of this project never ask for the same referenced project with two
+         different sets of global properties. -->
     <TensorSharpSkipGgmlNative>true</TensorSharpSkipGgmlNative>
     <TensorSharpSkipMlxNative>true</TensorSharpSkipMlxNative>
-    <!-- TensorSharp.Models builds a net10.0-ios slice only when asked, because the
-         desktop hosts must not pay for an iOS target they cannot use. That slice is
-         where the AVFoundation/ImageIO media provider lives, which is what lets the
-         app decode a HEIC photo straight off the camera. -->
-    <TensorSharpIosTargets>true</TensorSharpIosTargets>
-    <TensorSharpNativeSkipProperties>TensorSharpSkipGgmlNative=true;TensorSharpSkipMlxNative=true;TensorSharpIosTargets=true</TensorSharpNativeSkipProperties>
+    <!-- TensorSharp.Models builds its net10.0-ios and net10.0-maccatalyst slices only
+         when asked, because the desktop hosts must not pay for Apple targets they cannot
+         use. Those slices are where the AVFoundation/ImageIO media provider lives, which
+         is what lets the app decode a HEIC photo straight off the camera. The Windows
+         head uses the net10.0 slice and its desktop media provider. -->
+    <TensorSharpAppleTargets Condition="'$(TensorAgentPlatform)' != 'windows'">true</TensorSharpAppleTargets>
+    <TensorSharpNativeSkipProperties>TensorSharpSkipGgmlNative=true;TensorSharpSkipMlxNative=true</TensorSharpNativeSkipProperties>
+    <TensorSharpNativeSkipProperties Condition="!$([MSBuild]::IsOSPlatform('windows'))">$(TensorSharpNativeSkipProperties);TensorSharpAppleTargets=true</TensorSharpNativeSkipProperties>
 
     <!-- LLVM codegen for device Release builds so the AdvSimd/Vector128 paths in
-         TensorSharp.Core get real vector code; ignored for the simulator. -->
-    <MtouchUseLlvm Condition="'$(Configuration)' == 'Release'">true</MtouchUseLlvm>
+         TensorSharp.Core get real vector code; ignored for the simulator. The Mac app
+         gets it too: it runs on Mono like the phone (.NET ships no CoreCLR for Mac
+         Catalyst), and the SDK turns LLVM on by default for iOS and tvOS only.
+         MEASURED with the in-process SpeculationBench, Gemma 4 E2B on Metal, M5 Pro,
+         three rotated runs each: steady-state decode 74.7 tok/s against 72.5 without
+         it (the desktop hosts on CoreCLR: 76.8), the first token of a turn 20-30%
+         sooner, and speculative decoding on quoted text 269-302 tok/s against 237-268.
+         The price is a Release build of about three minutes instead of one. -->
+    <MtouchUseLlvm Condition="'$(Configuration)' == 'Release' And ('$(TensorAgentPlatform)' == 'ios' Or '$(TensorAgentPlatform)' == 'maccatalyst')">true</MtouchUseLlvm>
 
     <!-- NOT MtouchNoSymbolStrip. The engine is reached by dlsym through
          NativeLibrary.GetMainProgramHandle(), and Release strips the symbols back out
@@ -88,13 +135,13 @@
     <CodesignEntitlements Condition="'$(RuntimeIdentifier)' == 'ios-arm64' AND '$(TensorAgentShareExtension)' != 'true'">Platforms/iOS/Entitlements.plist</CodesignEntitlements>
   </PropertyGroup>
 
-  <ItemGroup Condition="'$(TensorAgentShareExtension)' == 'true'">
+  <ItemGroup Condition="'$(TensorAgentShareExtension)' == 'true' And '$(TensorAgentPlatform)' == 'ios'">
     <CustomEntitlements Include="com.apple.security.application-groups"
                         Type="StringArray"
                         Value="group.ai.tensorsharp.tensoragent" />
   </ItemGroup>
 
-  <ItemGroup Condition="'$(TensorAgentShareExtension)' == 'true'">
+  <ItemGroup Condition="'$(TensorAgentShareExtension)' == 'true' And '$(TensorAgentPlatform)' == 'ios'">
     <!-- IsAppExtension metadata makes the iOS SDK build and embed an .appex instead
          of treating this as a managed assembly reference. The extension needs its own
          provisioning profile on device; never pass the containing app's exact profile. -->
@@ -117,17 +164,39 @@
     <MauiImage Include="../../../imgs/banner_1.png" />
   </ItemGroup>
 
-  <ItemGroup>
+  <ItemGroup Condition="'$(TensorAgentPlatform)' == 'ios' Or '$(TensorAgentPlatform)' == 'maccatalyst'">
+    <!-- Keep each locale directory at the bundle root so Apple's permission dialogs
+         can find its InfoPlist.strings, independently of MAUI's platform defaults. -->
+    <BundleResource Remove="Platforms/iOS/Resources/**/InfoPlist.strings;Platforms/MacCatalyst/Resources/**/InfoPlist.strings" />
+    <BundleResource Include="Platforms/iOS/Resources/**/InfoPlist.strings"
+                    Condition="'$(TensorAgentPlatform)' == 'ios'"
+                    LogicalName="%(RecursiveDir)%(Filename)%(Extension)" />
+    <BundleResource Include="Platforms/MacCatalyst/Resources/**/InfoPlist.strings"
+                    Condition="'$(TensorAgentPlatform)' == 'maccatalyst'"
+                    LogicalName="%(RecursiveDir)%(Filename)%(Extension)" />
     <!-- The Web UI is TensorAgent's OWN page, not TensorSharp.Server's. The desktop
          page is laid out for a mouse, a wide window and an operator who started a
          server with arguments; this one is laid out for a thumb. Both talk to the
          same loopback API, so no capability is lost by not sharing a page. At runtime
-         LoopbackWebHost serves this bundled page from <bundle>/webui/. -->
+         LoopbackWebHost serves this bundled page from <resources>/webui/. -->
     <BundleResource Include="wwwroot/**/*"
                     Link="webui/%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
+  <!-- Services/Apple is the phone's and the Mac app's (UIKit, AVFoundation, QuickLook);
+       Platforms/Windows carries Windows' own DeviceState, FilePresenter and Dictation. -->
+  <ItemGroup Condition="'$(TensorAgentPlatform)' == 'windows'">
+    <Compile Remove="Services/Apple/**" />
+  </ItemGroup>
 
-  <ItemGroup>
+  <ItemGroup Condition="'$(TensorAgentPlatform)' == 'windows'">
+    <!-- The same page beside the Windows executable. -->
+    <Content Include="wwwroot/**/*"
+             Link="webui/%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TensorAgentPlatform)' == 'ios'">
     <!-- Static link of the whole engine: GgmlOps + ggml + ggml-cpu (+ ggml-metal
          with embedded shader source in the device slice). ForceLoad keeps every
          object file even though nothing in the app references the symbols
@@ -193,7 +262,7 @@
              Text="TensorAgent: embedding @(_TensorAgentPythonExtension->Count()) Python extension files" />
   </Target>
 
-  <ItemGroup>
+  <ItemGroup Condition="'$(TensorAgentPlatform)' == 'ios'">
     <!-- The skills that were verified to work inside this app, under
          <bundle>/skills/, which is one of the two roots the registry scans (the
          other is the writable directory the user installs into). The selection is
@@ -224,6 +293,73 @@
                     Exclude="../../skills/verdicts.json;../../skills/**/__pycache__/**/*;../../skills/playwright/**/*;../../skills/web-artifacts-builder/**/*"
                     Link="skills/%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
+
+  <!-- The desktop heads ship every skill. They run a skill's scripts the way the desktop
+       hosts do, as real python3, node, npm and browser processes, so the verdicts above
+       (which are about what the phone's in-app interpreters can run) do not apply:
+       playwright and web-artifacts-builder are exactly the skills a desktop is for.
+       Bytecode and installed node_modules are what running a skill on a development
+       machine leaves behind, never part of the skill. -->
+  <ItemGroup Condition="'$(TensorAgentPlatform)' == 'maccatalyst'">
+    <BundleResource Include="../../skills/**/*"
+                    Exclude="../../skills/verdicts.json;../../skills/**/__pycache__/**/*;../../skills/**/node_modules/**/*"
+                    Link="skills/%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TensorAgentPlatform)' == 'windows'">
+    <Content Include="../../skills/**/*"
+             Exclude="../../skills/verdicts.json;../../skills/**/__pycache__/**/*;../../skills/**/node_modules/**/*"
+             Link="skills/%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- The desktop engine: the same GgmlOps library the desktop hosts load, built by the
+       GGML backend project's own incremental native build (build-macos.sh or
+       build-windows.ps1) and shipped beside the app, where GgmlNative's resolver finds
+       it. The referenced projects skip their native builds (TensorSharpSkipGgmlNative
+       above), so this target is the one place it runs for this project. It reuses the
+       backend project's stamps, so an up-to-date library costs nothing, and a native
+       source newer than the library rebuilds it before the app is assembled: an app
+       shipped around a stale library fails at its first missing export. -->
+  <PropertyGroup>
+    <TensorAgentGgmlNativeDir>$(MSBuildThisFileDirectory)../../../TensorSharp.GGML.Native/build</TensorAgentGgmlNativeDir>
+    <TensorAgentGgmlNativeDir Condition="$([MSBuild]::IsOSPlatform('windows'))">$(MSBuildThisFileDirectory)../../../TensorSharp.GGML.Native/build-windows</TensorAgentGgmlNativeDir>
+  </PropertyGroup>
+
+  <Target Name="TensorAgentBuildDesktopEngine" BeforeTargets="BeforeBuild"
+          Condition="'$(TensorAgentPlatform)' == 'maccatalyst' Or '$(TensorAgentPlatform)' == 'windows'">
+    <MSBuild Projects="../../../TensorSharp.Backends.GGML/TensorSharp.Backends.GGML.csproj"
+             Targets="BuildGgmlNativeUnix;BuildGgmlNativeWindows"
+             Properties="TensorSharpSkipGgmlNative=false"
+             RemoveProperties="TargetFramework;RuntimeIdentifier;SelfContained;TensorSharpAppleTargets" />
+  </Target>
+
+  <ItemGroup Condition="'$(TensorAgentPlatform)' == 'maccatalyst'">
+    <!-- Binary distributions retain the engine's license and third-party notices
+         inside the app, including the ZIP/PKG variants without a readme beside it. -->
+    <BundleResource Include="../../../LICENSE" Link="licenses/TensorSharp.txt" />
+    <BundleResource Include="../../../ExternalProjects/ggml/LICENSE" Link="licenses/ggml.txt"
+                    Condition="Exists('../../../ExternalProjects/ggml/LICENSE')" />
+    <BundleResource Include="../../../TensorSharp.Chat/Jev/Apache-2.0.txt;../../../TensorSharp.Chat/Jev/NOTICE.md"
+                    Link="licenses/Jev/%(Filename)%(Extension)" />
+    <!-- A dynamic NativeReference: the SDK copies it into Contents/MonoBundle beside the
+         managed assemblies, rewrites its install name for that location and signs it
+         with the app. -->
+    <NativeReference Include="$(TensorAgentGgmlNativeDir)/libGgmlOps.dylib" Kind="Dynamic" />
+  </ItemGroup>
+
+  <Target Name="TensorAgentShipWindowsEngine" AfterTargets="TensorAgentBuildDesktopEngine"
+          Condition="'$(TensorAgentPlatform)' == 'windows'">
+    <ItemGroup>
+      <_TensorAgentWindowsEngine Include="$(TensorAgentGgmlNativeDir)/Release/GgmlOps.dll"
+                                 Condition="Exists('$(TensorAgentGgmlNativeDir)/Release/GgmlOps.dll')" />
+      <_TensorAgentWindowsEngine Include="$(TensorAgentGgmlNativeDir)/GgmlOps.dll"
+                                 Condition="'@(_TensorAgentWindowsEngine)' == '' And Exists('$(TensorAgentGgmlNativeDir)/GgmlOps.dll')" />
+      <Content Include="@(_TensorAgentWindowsEngine)" Link="GgmlOps.dll" CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+    <Error Condition="'@(_TensorAgentWindowsEngine)' == ''"
+           Text="TensorAgent: no GgmlOps.dll under $(TensorAgentGgmlNativeDir) after the native build; see TensorSharp.GGML.Native/build-windows.ps1." />
+  </Target>
 
   <ItemGroup>
     <!-- The standard library and the pure-Python packages, verbatim, under
@@ -267,6 +403,9 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.6" />
   </ItemGroup>
 
-  <Import Project="GgmlExportedSymbols.targets" />
+  <!-- The phone's Release strip list; the desktop heads load the engine as a library. -->
+  <Import Project="GgmlExportedSymbols.targets" Condition="'$(TensorAgentPlatform)' == 'ios'" />
+  <!-- The embedded CPython entry points the Mac app does not link; see the file. -->
+  <Import Project="EmbeddedPythonSymbols.targets" Condition="'$(TensorAgentPlatform)' == 'maccatalyst'" />
 
 </Project>

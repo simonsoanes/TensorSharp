@@ -1,7 +1,8 @@
 <Solution>
-  <!-- TensorAgent: the iPhone/iPad app. Only the MAUI head lives here for now;
-       TensorAgent.Core and tests/TensorAgent.Tests are added by their own
-       packages. The engine projects are pulled in through ProjectReferences
-       from the head, so they do not need to be listed. -->
+  <!-- TensorAgent: the iPhone/iPad app and its Mac and Windows heads. Only the MAUI
+       head lives here. TensorAgent.Core, TensorAgent.Sharing and tests/TensorAgent.Tests
+       are in ../TensorSharp.slnx, whose build also builds this head
+       (../Directory.Solution.targets). The engine projects are pulled in through
+       ProjectReferences from the head, so they do not need to be listed. -->
   <Project Path="src/TensorAgent.Maui/TensorAgent.Maui.csproj" />
 </Solution>

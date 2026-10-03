@@ -6,13 +6,13 @@
 |---|---|
 | Provider | OpenAI |
 | GGUF architecture keys | `gptoss`, `gpt-oss` |
-| Source class | [`GptOssModel`](../../TensorSharp.Models/Models/GptOss/GptOssModel.cs) (legacy per-seq) + [`GptOssModel.BatchedForward.cs`](../../TensorSharp.Models/Models/GptOss/GptOssModel.BatchedForward.cs) (`IBatchedPagedModel`) |
+| Source class | [`GptOssModel`](../../TensorSharp.Models/Models/GptOss/GptOssModel.cs) (single-sequence) + [`GptOssModel.BatchedForward.cs`](../../TensorSharp.Models/Models/GptOss/GptOssModel.BatchedForward.cs) (`IBatchedPagedModel`) |
 | Example models | gpt-oss-20b |
 | Modalities | Text only |
 | Thinking mode | Yes (Harmony format: `<\|channel>analysis ... <\|channel>final`) |
 | Tool calling | Yes (Harmony `commentary` channel — `to=functions.NAME`); eligible for skills, the code tools and server-side [sub-agent delegation](../multi_agent.md) |
 | Speculative decoding | No — GPT OSS has no speculative trunk, so `--spec` (the weight-free n-gram drafter included) serves standard decode |
-| Batched / paged forward | **Default ON.** On GGML backends without `--tp`, concurrent requests use per-request KV holders and a token-batched fused decode graph (`TS_PER_SEQ_FUSED=0` turns the holders off). On other backends they use the paged `ForwardBatch` path: per-layer paged K/V plus attention sinks via native `TSGgml_PagedAttentionForwardWithSinks` (or managed C# fallback via `TS_GPTOSS_PAGED_ATTN_MANAGED=1`). Under `--tp` neither route is available and concurrent requests take the legacy per-sequence KV-swap path. `TS_GPTOSS_BATCHED=0` withdraws only the paged path, for A/B comparison. See §11. |
+| Batched / paged forward | **Default ON.** On GGML backends without `--tp`, concurrent requests use per-request KV holders and a token-batched fused decode graph (`TS_PER_SEQ_FUSED=0` turns the holders off). On other backends they use the paged `ForwardBatch` path: per-layer paged K/V plus attention sinks via native `TSGgml_PagedAttentionForwardWithSinks` (a managed C# fallback on non-GGML backends). Under `--tp` neither route is available and concurrent requests take the per-sequence KV-swap path, as they do under `--no-continuous-batching`. See §11. |
 | Output parser | `HarmonyOutputParser` (always required) |
 
 ## Downloads
@@ -327,8 +327,7 @@ GPT OSS runs an **entire decode token as one GGML graph dispatch** — every
 layer, the MoE router and experts, the final norm and the LM head — in
 `GptOssModel.FusedModelDecode.cs`, which is what lets ggml-cuda capture it as
 a CUDA graph. Measured on an A40: decode 24 → 154 tok/s, and flat in context
-length (133 tok/s at 16K) where the per-layer path collapsed to 2.3. Set
-`TS_GPTOSS_MODEL_DECODE=0` to fall back to the per-op dispatch.
+length (133 tok/s at 16K) where the per-layer path collapsed to 2.3.
 
 ## 10. Memory and KV cache strategy
 
@@ -336,10 +335,18 @@ length (133 tok/s at 16K) where the per-layer path collapsed to 2.3. Set
   dtype is `f32` or `f16`. An explicit `q8_0` / `q4_0` request is downgraded to
   `f16` with a notice on stderr: neither fused graph nor the managed sinks
   fallback can read a block-quantized cache.
-- Prefix reuse across requests goes through the Radix prefix cache (the default
-  mode) as a page family: cached pages plus the resident primary cache, with
-  exact rewinds of at most 16 tokens, because the sliding window masks a linear cache
-  (`GptOssModel.PrefixCache.cs`).
+- Prefix reuse across requests goes through the Radix prefix cache: cached pages,
+  the resident primary cache, and on the GGML backends without `--tp` each
+  finished request's holder, kept as its conversation's end state and donated to
+  the next turn (`GptOssModel.PrefixCache.cs`). The holders read none of the
+  pages, so before they were kept a conversation that ran beside another reused
+  nothing on its next turn (0 of 272-519 tokens for eight parallel
+  gpt-oss-20b conversations). Harmony drops the analysis channel when it
+  re-renders a past answer, so continuing a conversation rewinds its whole
+  previous answer; the sliding window masks a linear cache, so a rewind is exact
+  at any depth (a 220-token rewind is bitwise identical to never holding the
+  answer, `GptOssHolderRewindTests`), and the donated holder is not limited to
+  16 tokens. Every later turn now reuses the whole previous prompt.
 - `ResetKVCache()` zeroes everything.
 - The expert FFN weights live in the original 3D
   `ffn_gate_exps.weight` / `ffn_up_exps.weight` / `ffn_down_exps.weight`
@@ -352,10 +359,8 @@ length (133 tok/s at 16K) where the per-layer path collapsed to 2.3. Set
 
 GPT OSS implements `IBatchedPagedModel.ForwardBatch`
 ([`GptOssModel.BatchedForward.cs`](../../TensorSharp.Models/Models/GptOss/GptOssModel.BatchedForward.cs))
-and keeps it available by default; set `TS_GPTOSS_BATCHED=0` to withdraw it
-for A/B comparison. Where the per-request holders below do not apply, that
-leaves the legacy per-sequence KV-swap fallback; the holders do not read this
-variable.
+and keeps it available by default; `--no-continuous-batching` withdraws it,
+which leaves the per-sequence KV-swap path.
 
 On the GGML backends without `--tp`, a step with two or more running requests
 does not take this paged path. Each request decodes from its own KV holder,
@@ -372,7 +377,7 @@ forward, when routed experts are offloaded to the CPU. A request whose holder ha
 to grow this step is left out of the batch and decodes on its own while the
 others still batch. The paged path below is the route on non-GGML backends and with
 `TS_PER_SEQ_FUSED=0`. Under `--tp` neither the holders nor the paged path is
-available, so concurrent requests use the legacy KV-swap path. No throughput
+available, so concurrent requests use the per-sequence KV-swap path. No throughput
 for the token-batched path is recorded in this card.
 
 The batched port has to
@@ -394,13 +399,12 @@ alternating SWA** — inside the paged scheduling stack:
   ([`ggml_ops_paged_attention.cpp`](../../TensorSharp.GGML.Native/ggml_ops_paged_attention.cpp))
   combines `ggml_flash_attn_ext` with the `add_sinks` variant so the
   sink logits participate in softmax normalization without contributing
-  to V — the same numerical behaviour as the legacy CPU sinks softmax.
+  to V — the same numerical behaviour as the per-sequence CPU sinks softmax.
   Exposed through `GgmlBasicOps.PagedAttentionForwardWithSinks`.
   - The managed C# fallback,
     [`ManagedPagedAttention.ForwardWithSinks`](../../TensorSharp.Runtime/Paged/ManagedPagedAttention.cs),
-    is selected when running on non-GGML backends or when
-    `TS_GPTOSS_PAGED_ATTN_MANAGED=1` forces the C# path. Both produce
-    bit-identical greedy output.
+    is selected on non-GGML backends. Both produce bit-identical greedy
+    output.
 - **MoE FFN** runs through the existing `MoEForward(numTokens)`
   token-parallel path; no GPT-OSS-specific batched MoE kernel.
 
@@ -495,11 +499,13 @@ alternating SWA** — inside the paged scheduling stack:
   decode on the GGML backends; the paged `ForwardBatch` route does not use it,
   and extending the same single-dispatch treatment there would remove most of
   its remaining managed overhead.
-- **Device sinks attention on the per-op GGML path (legacy)** — this matters
-  only on the per-op path (§9). The fused whole-model decode graph already
-  runs sinks attention on the device, and so do the `cuda` and `mlx` per-op
-  paths. With `TS_GPTOSS_MODEL_DECODE=0`, a GGML backend past
-  `TS_GPTOSS_FUSED_DECODE_MAX_CTX` still falls back to the CPU sinks
+- **Device sinks attention on the per-op GGML path** — this matters only on
+  the per-op path (§9), which a GGML backend takes when the whole-model decode
+  graph declines (a layer missing a weight the kernel needs, or tensor
+  parallelism without the fused tensor-parallel plan). The fused whole-model decode
+  graph already runs sinks attention on the device, and so do the `cuda` and
+  `mlx` per-op paths. On the per-op GGML path, past
+  `TS_GPTOSS_FUSED_DECODE_MAX_CTX` decode still falls back to the CPU sinks
   softmax; lifting that per-layer kernel's context cap would close the gap.
 - **Per-expert decode batching (`cpu` / `cuda`)** — the GGML backends
   already run single-token MoE as one `mul_mat_id` dispatch and `mlx` as a

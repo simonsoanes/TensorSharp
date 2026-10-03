@@ -5,6 +5,7 @@
 #include "ggml_ops_matmul_precision.h"
 #include "ggml-alloc.h"
 #include "ggml-cpu.h"
+#include "gguf.h"
 #if defined(TSG_GGML_USE_CUDA)
 #include "ggml-cuda.h"
 #include "ggml_ops_dsv4_fused.h"
@@ -25,6 +26,12 @@
 #include <random>
 #include <stdexcept>
 
+#if defined(TSG_GGML_USE_CUDA)
+// Standalone collective code reports details through its returned error text;
+// this fixture does not link the process-wide managed ABI error storage.
+namespace tsg { void set_last_error(const std::string &) {} }
+#endif
+
 namespace
 {
 void require(bool value, const char * message)
@@ -35,9 +42,54 @@ struct fixture
 {
     ggml_type type;
     int embedding, hidden, experts = 8, used = 6;
+    float clamp = .1f;
     std::filesystem::path path;
     tsg_dsv41_tp::source gate, up, down;
     std::vector<char> gate_data, up_data, down_data;
+    fixture(const std::string & directory, int layer)
+    {
+        const std::string prefix = "blk." + std::to_string(layer) + ".";
+        std::vector<std::filesystem::path> files;
+        for (const auto & entry : std::filesystem::directory_iterator(directory))
+            if (entry.path().extension() == ".gguf") files.push_back(entry.path());
+        std::sort(files.begin(), files.end());
+        clamp = 10.0f;
+        int loaded = 0;
+        for (const auto & file : files)
+        {
+            ggml_context * metadata = nullptr;
+            auto * gguf = gguf_init_from_file(file.string().c_str(), {true, &metadata});
+            require(gguf != nullptr && metadata != nullptr, "Cannot read checkpoint metadata");
+            const auto used_key = gguf_find_key(gguf, "deepseek41.expert_used_count");
+            if (used_key >= 0) used = gguf_get_val_u32(gguf, used_key);
+            const auto clamp_key = gguf_find_key(gguf, "deepseek41.swiglu_clamp_exp");
+            if (clamp_key >= 0 && gguf_get_arr_n(gguf, clamp_key) > size_t(layer))
+                clamp = ((const float *) gguf_get_arr_data(gguf, clamp_key))[layer];
+            auto load = [&](const char * suffix, tsg_dsv41_tp::source & src, std::vector<char> & bytes) {
+                const auto name = prefix + suffix;
+                const auto index = gguf_find_tensor(gguf, name.c_str());
+                if (index < 0) return;
+                require(src.path.empty(), "Duplicate checkpoint expert tensor");
+                auto * tensor = ggml_get_tensor(metadata, name.c_str());
+                require(tensor != nullptr, "Missing checkpoint tensor metadata");
+                src.path = file.string(); src.type = tensor->type;
+                src.offset = gguf_get_data_offset(gguf) + gguf_get_tensor_offset(gguf, index);
+                std::copy_n(tensor->ne, 4, src.ne.begin());
+                bytes.resize(ggml_nbytes(tensor));
+                std::ifstream input(file, std::ios::binary);
+                input.seekg(src.offset);
+                input.read(bytes.data(), bytes.size());
+                require(input.gcount() == (std::streamsize) bytes.size(), "Truncated checkpoint expert tensor");
+                ++loaded;
+            };
+            load("ffn_gate_exps.weight", gate, gate_data);
+            load("ffn_up_exps.weight", up, up_data);
+            load("ffn_down_exps.weight", down, down_data);
+            ggml_free(metadata); gguf_free(gguf);
+        }
+        require(loaded == 3, "Checkpoint does not contain all three requested expert tensors");
+        type = gate.type; embedding = gate.ne[0]; hidden = gate.ne[1]; experts = gate.ne[2];
+    }
     fixture(ggml_type format, ggml_type down_format = GGML_TYPE_COUNT, int full_embedding = 0)
         : type(format), embedding(full_embedding > 0 ? full_embedding : format == GGML_TYPE_F32 ? 16 : 256),
           hidden(format == GGML_TYPE_F32 ? 18 : 2304)
@@ -68,7 +120,7 @@ struct fixture
     // Independently materialize a column/row partition for diagnostic graphs,
     // without using executor upload_strip or writing another weight file.
     fixture(const fixture & full, tsg_dsv41_tp::strip part)
-        : type(full.type), embedding(full.embedding), hidden((int) part.count), experts(full.experts), used(full.used)
+        : type(full.type), embedding(full.embedding), hidden((int) part.count), experts(full.experts), used(full.used), clamp(full.clamp)
     {
         auto copy = [&](const tsg_dsv41_tp::source & src, const std::vector<char> & source,
                         tsg_dsv41_tp::source & dst, std::vector<char> & bytes, bool inner) {
@@ -87,7 +139,7 @@ struct fixture
         copy(full.up, full.up_data, up, up_data, false);
         copy(full.down, full.down_data, down, down_data, true);
     }
-    ~fixture() { std::error_code error; std::filesystem::remove(path, error); }
+    ~fixture() { if (!path.empty()) { std::error_code error; std::filesystem::remove(path, error); } }
 };
 
 // Every evaluation, oracle and diagnostic selects the same experts with the
@@ -144,10 +196,10 @@ struct evaluation
     ggml_tensor * x = nullptr, * ids = nullptr, * weights = nullptr, * out = nullptr;
     ggml_tensor * gate_out = nullptr, * up_out = nullptr, * hidden_out = nullptr;
     ggml_tensor * raw_gate = nullptr, * raw_up = nullptr;
-    tsg_dsv4_fused_desc strip_desc;
+    tsg_dsv4_fused_desc strip_desc, swiglu_desc, reduce_desc;
     evaluation(const fixture & data, int tokens, tsg_dsv41_tp::executor * tp, int layer,
                ggml_backend_dev_t reference_device = nullptr, bool preserve_taps = false, bool shared_once = false,
-               int full_rows = 0, int first_row = 0)
+               int full_rows = 0, int first_row = 0, bool fused = false)
         : device(tp ? nullptr : reference_device), backend(device.backend)
     {
 #if defined(TSG_GGML_USE_CUDA)
@@ -172,6 +224,7 @@ struct evaluation
         else ids = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, data.used, tokens);
         weights = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 1, data.used, tokens);
         ggml_tensor * gate = nullptr, * up = nullptr, * down = nullptr;
+        ggml_tensor * zero_shared = nullptr;
         if (tp) out = tp->build(ctx, layer, x, weights, ids);
         else
         {
@@ -195,19 +248,39 @@ struct evaluation
                 raw_gate=ggml_view_3d(ctx,pair,pair->ne[0],pair->ne[1],pair->ne[2],pair->nb[1],pair->nb[2],0);
                 raw_up=ggml_view_3d(ctx,pair,pair->ne[0],pair->ne[1],pair->ne[2],pair->nb[1],pair->nb[2],pair->nb[3]);
             } else { raw_gate = projection(gate); raw_up = projection(up); }
-            auto * g = ggml_clamp(ctx, raw_gate, -INFINITY, .1f);
-            auto * u = ggml_clamp(ctx, raw_up, -.1f, .1f);
+            auto * g = ggml_clamp(ctx, raw_gate, -INFINITY, data.clamp);
+            auto * u = ggml_clamp(ctx, raw_up, -data.clamp, data.clamp);
             auto * h = ggml_swiglu_split(ctx, g, u);
+            if (fused)
+            {
+                swiglu_desc.kind = TSG_DSV4_FUSED_SWIGLU_CLAMP;
+                swiglu_desc.f0 = data.clamp;
+                ggml_tensor * inputs[] = {raw_gate, raw_up};
+                h = ggml_custom_4d(ctx, GGML_TYPE_F32, data.hidden, data.used, tokens, 1,
+                    inputs, 2, tsg_dsv4_fused_cpu, 1, &swiglu_desc);
+            }
             gate_out = g; up_out = u; hidden_out = h;
             if (preserve_taps) {
                 ggml_set_output(raw_gate); ggml_set_output(raw_up);
                 ggml_set_output(g); ggml_set_output(u); ggml_set_output(h);
             }
-            auto * e = ggml_mul(ctx, device.mul_mat_id(ctx, down, h, ids), weights);
-            for (int expert = 0; expert < data.used; ++expert)
+            auto * down_values = device.mul_mat_id(ctx, down, h, ids);
+            if (fused)
             {
-                auto * view = ggml_view_2d(ctx, e, data.embedding, tokens, e->nb[2], expert * e->nb[1]);
-                out = out ? ggml_add(ctx, out, view) : view;
+                zero_shared = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, data.embedding, tokens);
+                reduce_desc.kind = TSG_DSV4_FUSED_EXPERT_REDUCE;
+                ggml_tensor * inputs[] = {down_values, weights, zero_shared};
+                out = ggml_custom_4d(ctx, GGML_TYPE_F32, data.embedding, tokens, 1, 1,
+                    inputs, 3, tsg_dsv4_fused_cpu, 1, &reduce_desc);
+            }
+            else
+            {
+                auto * e = ggml_mul(ctx, down_values, weights);
+                for (int expert = 0; expert < data.used; ++expert)
+                {
+                    auto * view = ggml_view_2d(ctx, e, data.embedding, tokens, e->nb[2], expert * e->nb[1]);
+                    out = out ? ggml_add(ctx, out, view) : view;
+                }
             }
         }
         // The production caller adds the unsharded shared-expert output after
@@ -238,6 +311,7 @@ struct evaluation
             ggml_backend_tensor_set(up, data.up_data.data(), 0, data.up_data.size());
             ggml_backend_tensor_set(down, data.down_data.data(), 0, data.down_data.size());
         }
+        if (zero_shared) ggml_backend_tensor_memset(zero_shared, 0, 0, ggml_nbytes(zero_shared));
         std::vector<float> input(data.embedding * tokens), routing;
         std::vector<int> selected;
         for (size_t i = 0; i < input.size(); ++i) input[i] = std::sin((float) (i + 1) * .13f);
@@ -317,7 +391,7 @@ std::vector<float> scalar_f32_reference(const fixture & data, int tokens, bool s
 
 void check_partitions()
 {
-    for (int ranks : {2, 4, 7, 8})
+    for (int ranks : {2, 3, 4, 5, 6, 7, 8})
     {
         std::vector<int64_t> aggregate(ranks);
         for (int layer = 0; layer < ranks; ++layer)
@@ -347,7 +421,7 @@ void check_partitions()
     }
     for (auto type : {GGML_TYPE_BF16, GGML_TYPE_F16})
     for (int64_t width : {int64_t(2304), int64_t(2368)})
-    for (int ranks : {2, 4, 7, 8})
+    for (int ranks : {2, 3, 4, 5, 6, 7, 8})
     {
         std::vector<int64_t> aggregate(ranks);
         for (int layer = 0; layer < ranks; ++layer)
@@ -407,6 +481,7 @@ difference measure(const std::vector<float> & reference, const std::vector<float
     double maximum = 0, error = 0, scale = 0;
     for (size_t i = 0; i < reference.size(); ++i)
     {
+        require(std::isfinite(reference[i]) && std::isfinite(actual[i]), "Compared TP outputs contain nonfinite values");
         const double d = double(actual[i]) - reference[i];
         maximum = std::max(maximum, std::abs(d)); error += d * d; scale += double(reference[i]) * reference[i];
     }
@@ -761,7 +836,7 @@ void set_fault(const char * stage)
 #endif
 }
 
-void failure_recovery(const std::vector<ggml_backend_dev_t> & devices)
+void failure_recovery(const std::vector<ggml_backend_dev_t> & devices, bool gate_fence = true)
 {
     fixture data(GGML_TYPE_F32);
     const auto expected = evaluation(data, 3, nullptr, 0).run();
@@ -778,13 +853,15 @@ void failure_recovery(const std::vector<ggml_backend_dev_t> & devices)
         check(std::sqrt(error / norm) < 1e-5, "Recovered TP graph differs from independent full reference");
     };
     for (bool single : {false, true})
-    for (const char * stage : {"tp-graph", "tp-rank", "tp-sync", "tp-rank-and-sync"})
+    for (const char * stage : {"tp-graph", "tp-rank", "tp-down-rank", "tp-sync", "tp-rank-and-sync"})
     {
         // The candidate additionally preserves a submission exception when
         // draining that same rank also reports a failure.
         if (!single && std::strcmp(stage, "tp-rank-and-sync") == 0) continue;
         tsg_dsv41_tp::executor tp(devices, data.used);
         tp.test_single_fanout(single);
+        tp.test_gate_fence(gate_fence);
+        if (!gate_fence) tp.test_device_gather(true);
         for (int layer : {0, 1}) tp.add_layer(layer, data.gate, data.up, data.down, .1f);
         tp.begin_forward();
         tp.test_set_position(0);
@@ -811,16 +888,18 @@ void failure_recovery(const std::vector<ggml_backend_dev_t> & devices)
     std::cout << "Passed " << checks << " TP failure lifecycle checks\n";
 }
 
-void paired_fanout(const std::vector<ggml_backend_dev_t> & devices, int pairs)
+void paired_fanout(const std::vector<ggml_backend_dev_t> & devices, int pairs,
+                   bool compare_staging = false)
 {
     fixture data(GGML_TYPE_Q2_K, GGML_TYPE_Q3_K, 5120);
     tsg_dsv41_tp::executor tp(devices, data.used);
     tp.add_layer(0, data.gate, data.up, data.down, .1f);
-    for (int tokens : {1, 16})
+    for (int tokens : (compare_staging ? std::vector<int>{1, 16, 256} : std::vector<int>{1, 16}))
     {
         evaluation model(data, tokens, &tp, 0);
         auto run = [&](bool single) {
-            tp.test_single_fanout(single);
+            if (compare_staging) tp.test_pinned_staging(single);
+            else tp.test_single_fanout(single);
             tp.begin_forward();
             const auto start = std::chrono::steady_clock::now();
             auto output = model.run();
@@ -837,7 +916,7 @@ void paired_fanout(const std::vector<ggml_backend_dev_t> & devices, int pairs)
             auto first = run(pair % 2 != 0), second = run(pair % 2 == 0);
             require(first.first.size() == second.first.size() &&
                 std::memcmp(first.first.data(), second.first.data(), first.first.size() * sizeof(float)) == 0,
-                "Single/two-fanout TP outputs are not bitwise identical");
+                "Paired TP execution modes are not bitwise identical");
             require(std::all_of(first.first.begin(), first.first.end(), [](float x) { return std::isfinite(x); }),
                     "Paired TP output contains nonfinite values");
             separate.push_back(pair % 2 ? second.second : first.second);
@@ -848,12 +927,155 @@ void paired_fanout(const std::vector<ggml_backend_dev_t> & devices, int pairs)
             for (size_t i = 0; i < values.size(); ++i) { if (i) std::cout << ','; std::cout << values[i]; }
             std::cout << ']';
         };
-        std::cout << std::setprecision(17) << "FANOUT_BENCH {\"ranks\":" << devices.size()
+        std::cout << std::setprecision(17) << (compare_staging ? "STAGING_BENCH {\"ranks\":" : "FANOUT_BENCH {\"ranks\":") << devices.size()
                   << ",\"tokens\":" << tokens << ",\"embedding\":5120,\"hidden\":2304,\"experts\":8,\"top_k\":6"
                   << ",\"gate_up\":\"q2_k\",\"down\":\"q3_k\",\"pairs\":" << pairs
-                  << ",\"bitwise_equal\":true,\"two_fanout_ms\":";
+                  << ",\"bitwise_equal\":true,"
+                  << (compare_staging ? "\"pageable_ms\":" : "\"two_fanout_ms\":");
         array(separate);
-        std::cout << ",\"single_fanout_ms\":"; array(combined);
+        std::cout << (compare_staging ? ",\"pinned_ms\":" : ",\"single_fanout_ms\":"); array(combined);
+        std::cout << "}" << std::endl;
+    }
+}
+
+void paired_upload(const std::vector<ggml_backend_dev_t> & devices, int pairs)
+{
+    fixture data(GGML_TYPE_Q2_K, GGML_TYPE_Q3_K, 5120);
+    // Include the first pinned allocation, then reuse it across a model-sized
+    // layer stack. Short fresh-executor trials mostly measure cudaMallocHost.
+    constexpr int layers = 40;
+    auto run = [&](bool pipeline) {
+        tsg_dsv41_tp::executor tp(devices, data.used);
+        tp.test_pipelined_upload(pipeline);
+        const auto start = std::chrono::steady_clock::now();
+        for (int layer = 0; layer < layers; ++layer)
+            tp.add_layer(layer, data.gate, data.up, data.down, .1f);
+        const double milliseconds = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start).count();
+        tp.begin_forward();
+        std::vector<float> output;
+        for (int layer = 0; layer < layers; ++layer)
+        {
+            const auto current = evaluation(data, 1, &tp, layer).run();
+            output.insert(output.end(), current.begin(), current.end());
+        }
+        require(tp.error().empty(), tp.error().c_str());
+        return std::make_pair(std::move(output), milliseconds);
+    };
+    run(false); run(true);
+    std::vector<double> original, pipeline;
+    for (int pair = 0; pair < pairs; ++pair)
+    {
+        auto first = run(pair % 2 != 0), second = run(pair % 2 == 0);
+        require(first.first.size() == second.first.size() &&
+            std::memcmp(first.first.data(), second.first.data(), first.first.size() * sizeof(float)) == 0,
+            "Original and pipelined TP uploads produced different outputs");
+        require(std::all_of(first.first.begin(), first.first.end(), [](float x) { return std::isfinite(x); }),
+                "Upload comparison output contains nonfinite values");
+        original.push_back(pair % 2 ? second.second : first.second);
+        pipeline.push_back(pair % 2 ? first.second : second.second);
+    }
+    auto array = [](const std::vector<double> & values) {
+        std::cout << '[';
+        for (size_t i = 0; i < values.size(); ++i) { if (i) std::cout << ','; std::cout << values[i]; }
+        std::cout << ']';
+    };
+    std::cout << std::setprecision(17) << "UPLOAD_BENCH {\"ranks\":" << devices.size()
+              << ",\"layers\":" << layers << ",\"embedding\":5120,\"hidden\":2304,\"experts\":8,\"top_k\":6"
+              << ",\"gate_up\":\"q2_k\",\"down\":\"q3_k\",\"pairs\":" << pairs
+              << ",\"weight_bytes\":" << layers * (data.gate_data.size() + data.up_data.size() + data.down_data.size())
+              << ",\"cache\":\"warm synthetic fixture\",\"bitwise_equal\":true,\"pageable_ms\":";
+    array(original);
+    std::cout << ",\"pipelined_ms\":"; array(pipeline);
+    std::cout << "}" << std::endl;
+}
+
+void checkpoint_diagnostic(const std::vector<ggml_backend_dev_t> & devices,
+                           const std::string & directory, int layer, int tokens, bool require_exact)
+{
+    fixture data(directory, layer);
+    std::cout << "REAL_CHECKPOINT_DIAGNOSTIC layer=" << layer << " tokens=" << tokens
+              << " embedding=" << data.embedding << " hidden=" << data.hidden
+              << " experts=" << data.experts << " used=" << data.used << " clamp=" << data.clamp
+              << " gate=" << ggml_type_name(data.gate.type) << " down=" << ggml_type_name(data.down.type) << std::endl;
+    tsg_dsv41_tp::executor tp(devices, data.used);
+    tp.add_layer(layer, data.gate, data.up, data.down, data.clamp);
+    tp.begin_forward();
+    const auto actual = evaluation(data, tokens, &tp, layer).run();
+    require(tp.error().empty(), tp.error().c_str());
+    require(std::all_of(actual.begin(), actual.end(), [](float value) { return std::isfinite(value); }),
+            "Real checkpoint TP output contains nonfinite values");
+    evaluation fused(data, tokens, nullptr, layer, devices[0], true, false, 0, 0, true);
+    const auto expected = fused.run();
+    evaluation plain(data, tokens, nullptr, layer, devices[0], true);
+    const auto unfused = plain.run();
+    report_difference("real-tp-versus-production-fused", expected, actual);
+    report_difference("real-plain-versus-production-fused", expected, unfused);
+    report_difference("real-swiglu-plain-versus-production-fused", values(fused.hidden_out), values(plain.hidden_out));
+    const auto partitioned = partitioned_reference(data, tokens, devices.size(), layer, devices[0], true);
+    report_difference("real-partitioned-versus-production-fused", expected, partitioned.output);
+    report_difference("real-tp-versus-partitioned", partitioned.output, actual);
+    report_difference("real-gate-partitioned-versus-full", values(plain.gate_out), partitioned.gate);
+    report_difference("real-up-partitioned-versus-full", values(plain.up_out), partitioned.up);
+    report_difference("real-swiglu-partitioned-versus-full", values(plain.hidden_out), partitioned.hidden);
+    if (require_exact)
+    {
+        require(actual.size() == expected.size() &&
+                std::memcmp(actual.data(), expected.data(), actual.size() * sizeof(float)) == 0,
+                "Real checkpoint TP output differs from the production fused full-weight oracle");
+        std::cout << "Passed real checkpoint bitwise production-oracle comparison\n";
+    }
+    else std::cout << "Real checkpoint diagnostic completed; differences above are measurements, not a passing quality gate.\n";
+}
+
+void paired_gather(const std::vector<ggml_backend_dev_t> & devices, const fixture & data, int layer, int pairs,
+                   bool compare_fence = false)
+{
+    // Reuse identical weights, graphs, pinned storage and an already-created
+    // communicator; this isolates transport from loading/communicator setup.
+    tsg_dsv41_tp::executor tp(devices, data.used);
+    tp.add_layer(layer, data.gate, data.up, data.down, data.clamp);
+    for (int tokens : {1, 16, 128})
+    {
+        evaluation model(data, tokens, &tp, layer);
+        auto run = [&](bool device) {
+            tp.test_device_gather(compare_fence || device);
+            tp.test_gate_fence(compare_fence && !device);
+            tp.begin_forward();
+            const auto start = std::chrono::steady_clock::now();
+            auto output = model.run();
+            const double ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start).count();
+            require(tp.error().empty(), tp.error().c_str());
+            return std::make_pair(std::move(output), ms);
+        };
+        for (int warm = 0; warm < 5; ++warm) { run(false); run(true); }
+        std::vector<double> host, device;
+        for (int pair = 0; pair < pairs; ++pair)
+        {
+            auto first = run(pair % 2 != 0), second = run(pair % 2 == 0);
+            require(first.first.size() == second.first.size() &&
+                    std::memcmp(first.first.data(), second.first.data(), first.first.size() * sizeof(float)) == 0,
+                    "Host and device TP gathers are not bitwise identical");
+            require(std::all_of(first.first.begin(), first.first.end(), [](float value) { return std::isfinite(value); }),
+                    "Gather comparison produced nonfinite output");
+            host.push_back(pair % 2 ? second.second : first.second);
+            device.push_back(pair % 2 ? first.second : second.second);
+        }
+        auto array = [](const std::vector<double> & values) {
+            std::cout << '[';
+            for (size_t i = 0; i < values.size(); ++i) { if (i) std::cout << ','; std::cout << values[i]; }
+            std::cout << ']';
+        };
+        std::cout << std::setprecision(17) << (compare_fence ? "GATE_FENCE_BENCH {\"ranks\":" : "GATHER_BENCH {\"ranks\":") << devices.size()
+                  << ",\"tokens\":" << tokens << ",\"layer\":" << layer
+                  << ",\"embedding\":" << data.embedding << ",\"hidden\":" << data.hidden
+                  << ",\"experts\":" << data.experts << ",\"top_k\":" << data.used
+                  << ",\"gate_up\":\"" << ggml_type_name(data.gate.type)
+                  << "\",\"down\":\"" << ggml_type_name(data.down.type) << "\",\"pairs\":" << pairs
+                  << ",\"bitwise_equal\":true," << (compare_fence ? "\"fenced_ms\":" : "\"host_ms\":");
+        array(host);
+        std::cout << (compare_fence ? ",\"enqueued_ms\":" : ",\"device_ms\":"); array(device);
         std::cout << "}" << std::endl;
     }
 }
@@ -864,7 +1086,11 @@ int main(int argc, char ** argv)
     try
     {
         bool cuda = false, checkpoint_shape = false, diagnostic = false, down_f32 = false, failure_only = false, strip_only = false;
-        int cuda_ranks = 0, fanout_pairs = 0;
+        int cuda_ranks = 0, fanout_pairs = 0, staging_pairs = 0, upload_pairs = 0, gather_pairs = 0, gate_fence_pairs = 0;
+        bool without_gate_fence = false;
+        std::string model_directory;
+        int model_layer = 0, model_tokens = 16;
+        bool model_exact = false;
         for (int arg = 1; arg < argc; ++arg)
         {
             const std::string option = argv[arg];
@@ -875,12 +1101,32 @@ int main(int argc, char ** argv)
             else if (option == "--failure-only") failure_only = true;
             else if (option == "--quant-strip-only") strip_only = true;
             else if (option == "--fanout-pairs" && arg + 1 < argc) fanout_pairs = std::stoi(argv[++arg]);
-            else throw std::runtime_error("Usage: GgmlOpsDsv41TpTest [--cuda 2|4|7|8] [--checkpoint-shape] [--diagnose] [--diagnostic-down-f32] [--failure-only|--fanout-pairs N] | --cuda 1 --quant-strip-only");
+            else if (option == "--staging-pairs" && arg + 1 < argc) staging_pairs = std::stoi(argv[++arg]);
+            else if (option == "--upload-pairs" && arg + 1 < argc) upload_pairs = std::stoi(argv[++arg]);
+            else if (option == "--gather-pairs" && arg + 1 < argc) gather_pairs = std::stoi(argv[++arg]);
+            else if (option == "--gate-fence-pairs" && arg + 1 < argc) gate_fence_pairs = std::stoi(argv[++arg]);
+            else if (option == "--without-gate-fence") without_gate_fence = true;
+            else if (option == "--model-dir" && arg + 1 < argc) model_directory = argv[++arg];
+            else if (option == "--model-layer" && arg + 1 < argc) model_layer = std::stoi(argv[++arg]);
+            else if (option == "--model-tokens" && arg + 1 < argc) model_tokens = std::stoi(argv[++arg]);
+            else if (option == "--model-exact") model_exact = true;
+            else throw std::runtime_error("Usage: GgmlOpsDsv41TpTest [--cuda 2..8] [--checkpoint-shape] [--diagnose] [--diagnostic-down-f32] [--failure-only [--without-gate-fence]|--fanout-pairs N|--staging-pairs N|--upload-pairs N|--gather-pairs N|--gate-fence-pairs N] | --cuda 1 --quant-strip-only | --cuda N --model-dir DIR [--model-layer L --model-tokens T|--gather-pairs N|--gate-fence-pairs N]");
         }
-        if (cuda && cuda_ranks != 2 && cuda_ranks != 4 && cuda_ranks != 7 && cuda_ranks != 8 && !(strip_only && cuda_ranks == 1)) return 1;
-        require(!strip_only || (cuda && !failure_only && !fanout_pairs), "Quantized strip test requires CUDA and an exclusive test mode");
+        if (cuda && !(cuda_ranks >= 2 && cuda_ranks <= 8) && !(strip_only && cuda_ranks == 1)) return 1;
+        require(!strip_only || (cuda && !failure_only && !fanout_pairs && !staging_pairs && !upload_pairs), "Quantized strip test requires CUDA and an exclusive test mode");
         require(!down_f32 || checkpoint_shape, "The F32-down control requires --checkpoint-shape");
         require(fanout_pairs >= 0 && fanout_pairs <= 10000 && !(fanout_pairs && failure_only), "Invalid fanout comparison count");
+        require(staging_pairs >= 0 && staging_pairs <= 10000 &&
+                !(staging_pairs && (!cuda || failure_only || fanout_pairs)), "Staging comparison requires CUDA and an exclusive test mode");
+        require(upload_pairs >= 0 && upload_pairs <= 1000 &&
+                !(upload_pairs && (!cuda || failure_only || fanout_pairs || staging_pairs)), "Upload comparison requires CUDA and an exclusive test mode");
+        require(gather_pairs >= 0 && gather_pairs <= 10000 &&
+                !(gather_pairs && (!cuda || failure_only || fanout_pairs || staging_pairs || upload_pairs || strip_only)),
+                "Gather comparison requires CUDA and an exclusive test mode");
+        require(gate_fence_pairs >= 0 && gate_fence_pairs <= 10000 &&
+                !(gate_fence_pairs && (!cuda || failure_only || fanout_pairs || staging_pairs || upload_pairs || strip_only || gather_pairs)),
+                "Gate fence comparison requires CUDA and an exclusive test mode");
+        require(!without_gate_fence || (cuda && failure_only), "Gate fence override requires CUDA failure checks");
         std::vector<ggml_backend_dev_t> devices;
 #if defined(TSG_GGML_USE_CUDA)
         if (cuda)
@@ -893,16 +1139,40 @@ int main(int argc, char ** argv)
         if (cuda) return 77;
 #endif
         const auto cpu = ggml_backend_reg_dev_get(ggml_backend_cpu_reg(), 0);
+        if (gather_pairs || gate_fence_pairs)
+        {
+            require(model_layer >= 0, "Gather comparison requires a nonnegative layer");
+            const int pairs = gather_pairs ? gather_pairs : gate_fence_pairs;
+            if (!model_directory.empty()) paired_gather(devices, fixture(model_directory, model_layer), model_layer, pairs, gate_fence_pairs != 0);
+            else paired_gather(devices, fixture(GGML_TYPE_Q2_K, GGML_TYPE_Q3_K, 5120), 0, pairs, gate_fence_pairs != 0);
+            return 0;
+        }
+        if (!model_directory.empty())
+        {
+            require(cuda && model_layer >= 0 && model_tokens > 0, "Real checkpoint diagnostics require CUDA and nonnegative layer/positive tokens");
+            checkpoint_diagnostic(devices, model_directory, model_layer, model_tokens, model_exact);
+            return 0;
+        }
         if (strip_only) { quantized_scratch_lifecycle(devices[0]); quantized_strip_projections(devices[0]); return 0; }
         if (failure_only)
         {
-            failure_recovery(cuda ? devices : std::vector<ggml_backend_dev_t>(2, cpu));
+            failure_recovery(cuda ? devices : std::vector<ggml_backend_dev_t>(2, cpu), !without_gate_fence);
             return 0;
         }
         if (fanout_pairs)
         {
             if (cuda) paired_fanout(devices, fanout_pairs);
             else for (int ranks : {2, 4, 8}) paired_fanout(std::vector<ggml_backend_dev_t>(ranks, cpu), fanout_pairs);
+            return 0;
+        }
+        if (staging_pairs)
+        {
+            paired_fanout(devices, staging_pairs, true);
+            return 0;
+        }
+        if (upload_pairs)
+        {
+            paired_upload(devices, upload_pairs);
             return 0;
         }
         // Quantized down rows have nine blocks, including seven unequal ranks.
@@ -931,7 +1201,7 @@ int main(int argc, char ** argv)
             std::map<int, std::vector<float>> expected;
             for (int tokens : {1, 5, 16})
                 expected[tokens] = evaluation(data, tokens, nullptr, 0, cuda ? devices[0] : nullptr).run();
-            for (int ranks : {2, 4, 7, 8})
+            for (int ranks : {2, 3, 4, 5, 6, 7, 8})
             {
                 if (cuda && ranks != cuda_ranks) continue;
                 auto rank_devices = cuda ? devices : std::vector<ggml_backend_dev_t>(ranks, cpu);

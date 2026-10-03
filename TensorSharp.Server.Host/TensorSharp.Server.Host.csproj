@@ -17,6 +17,8 @@
 
 	<ItemGroup>
 		<Content Update="wwwroot\**" CopyToOutputDirectory="PreserveNewest" />
+		<Content Include="..\TensorSharp.Chat\WebUi\mask-editor.js" Link="wwwroot\mask-editor.js" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+		<Content Include="..\TensorSharp.Chat\WebUi\mask-editor.css" Link="wwwroot\mask-editor.css" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
 	</ItemGroup>
 
 	<PropertyGroup>

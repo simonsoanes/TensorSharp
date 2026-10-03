@@ -770,10 +770,7 @@ class TensorSharpServer(ServerHandle):
             if self.cpu_moe.threads > 0:
                 cmd += [spec.ts_cpu_moe_threads_arg, str(self.cpu_moe.threads)]
         env = os.environ.copy()
-        # Some native architectures expose explicit tensor-shard activation
-        # separately from the GPU-count CLI argument. Keep it tied to this
-        # matrix cell instead of accidentally benchmarking a fixed rank count.
-        env.update({key: value.replace("{tp}", str(self.tp)) for key, value in spec.ts_env.items()})
+        env.update(spec.ts_env)
         env.update(config.tp_device_env(self.backend, self.tp))
         if self.model.is_diffusion:
             env["DIFFUSION_STEPS"] = str(self.model.diffusion_steps)

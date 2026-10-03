@@ -68,7 +68,7 @@ namespace TensorSharp.Models
         private readonly string _projectorType;
         // image_mean / image_std read from the mmproj. The unified embedder is
         // trained on raw [0,1] pixels (mean=0, std=1); the SigLIP path keeps the
-        // legacy [-1,1] preprocessing for backward compatibility.
+        // SigLIP [-1,1] preprocessing.
         private readonly float[] _imageMean;
         private readonly float[] _imageStd;
 
@@ -611,7 +611,7 @@ namespace TensorSharp.Models
             // back to the per-op path on any failure (e.g. flash-attn unsupported
             // for this head_dim/backend). No-op unless the encoder runs on a GGML
             // allocator (_useNativeAttention).
-            if (_useNativeAttention && _fusedBlockEnabled
+            if (_useNativeAttention
                 && TryFusedEncoderBlock(hidden, prefix, numPatches, headDim, ropeCache))
                 return hidden;
 
@@ -636,10 +636,6 @@ namespace TensorSharp.Models
 
             return result;
         }
-
-        // TS_GEMMA4V_FUSED=0 disables the fused single-graph block (for A/B testing).
-        private readonly bool _fusedBlockEnabled =
-            Environment.GetEnvironmentVariable("TS_GEMMA4V_FUSED") != "0";
 
         private static readonly string[] _clampLinearSuffixes =
             { "attn_q", "attn_k", "attn_v", "attn_out", "ffn_gate", "ffn_up", "ffn_down" };

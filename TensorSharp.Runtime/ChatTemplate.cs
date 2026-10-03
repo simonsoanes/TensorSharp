@@ -1642,7 +1642,7 @@ namespace TensorSharp.Runtime
                         ? NewRenderId() : message.ToolCalls[c].Id!;
                 callIds[i] = ids;
 
-                // Legacy local tool loops have no wire IDs and return results in
+                // Local tool loops without wire IDs return results in
                 // call order. Give their render context an explicit association:
                 // canonical Gemma compares IDs, and two missing IDs compare equal,
                 // incorrectly naming every result after the last function.
@@ -2085,7 +2085,7 @@ namespace TensorSharp.Runtime
         internal static void AppendGemma4MediaPlaceholders(ChatMessage message, StringBuilder text)
         {
             bool timed = message.ImagePaths != null && message.ImageTimestamps?.Count == message.ImagePaths.Count;
-            // Legacy UI histories may contain frames without source timestamps.
+            // A history may carry video frames without source timestamps.
             // Preserve that framing without inventing frame times.
             if (message.IsVideo && message.ImagePaths != null && !timed) text.Append("<|video>");
             if (message.ImagePaths != null)

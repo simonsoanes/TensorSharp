@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TensorAgent Desktop — Download &amp; User Guide — TensorSharp Wiki</title>
+  <meta name="description" content="Download and install TensorAgent Desktop on macOS or Windows, choose your first local model, chat with files, and set up code and browser tools.">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+  <script>try{var t=localStorage.getItem('ts-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.classList.toggle('dark',t==='dark');}catch(e){}</script>
+  <script defer src="assets/search-index.js"></script>
+  <script defer src="assets/app.js"></script>
+</head>
+<body data-page="tensoragent">
+<a class="skip" href="#content">Skip to content</a>
+<main class="content" id="content">
+  <div class="breadcrumb"><a href="index.html">Home</a> › TensorAgent Desktop</div>
+  <h1>TensorAgent Desktop</h1>
+  <p class="lede">A local AI app for your Mac or Windows PC. Install the app, download a model in <strong>Models</strong>, and start a conversation. You can chat, work with photos and files, generate images, or use skills to create files and run code. Model capabilities and your computer's memory determine what is available.</p>
+  <div class="btn-row">
+    <a class="btn" href="https://github.com/zhongkaifu/TensorSharp/releases/latest" target="_blank" rel="noopener">Download for macOS ↗</a>
+    <a class="btn secondary" href="https://github.com/zhongkaifu/TensorSharp/releases/latest" target="_blank" rel="noopener">Download for Windows ↗</a>
+    <a class="btn secondary" href="#first-run">Set up your first model ↓</a>
+  </div>
+  <p>Both download buttons open the official release's <strong>Assets</strong> list. Choose the <code>tensoragent-desktop-</code> file for your platform below. Desktop installers are produced by the updated Release Binaries workflow; older releases may contain only CLI/server archives. If the latest release has no desktop assets, check <a href="https://github.com/zhongkaifu/TensorSharp/releases" target="_blank" rel="noopener">all releases</a> or use the <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/TensorAgent/README.md" target="_blank" rel="noopener">source build instructions</a> until a desktop release is published.</p>
+
+  <h2 id="requirements">1 · Check your computer</h2>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Platform</th><th>Requirements</th><th>Choose</th></tr></thead>
+    <tbody>
+      <tr><td>macOS</td><td>Apple Silicon (M-series), macOS 14 or later. Metal acceleration is included. The release does not provide an Intel Mac build.</td><td><code>osx-arm64</code></td></tr>
+      <tr><td>Windows CPU</td><td>x64 PC, Windows 10 version 1809 (build 17763) or later / Windows 11. No NVIDIA GPU required.</td><td><code>win-x64-cpu</code></td></tr>
+      <tr><td>Windows NVIDIA</td><td>Same Windows requirements, plus a CUDA-capable NVIDIA GPU and a driver compatible with the release's CUDA runtime. See that release's notes for its CUDA version.</td><td><code>win-x64-cuda</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>The app includes its .NET runtime and native inference libraries; you do not need the .NET SDK, Visual Studio, Xcode or the CUDA Toolkit to install a distribution package. Windows also needs the <a href="https://developer.microsoft.com/microsoft-edge/webview2/" target="_blank" rel="noopener">Microsoft Edge WebView2 Evergreen Runtime</a>; install it if it is absent. The CUDA package carries its user-space CUDA libraries, while the NVIDIA driver must be installed separately.</p>
+  <p>Plan for at least the <strong>12 GB system-memory tier</strong> for the smallest catalog models, and several GB of free disk space for model files in addition to the app. The Models page shows the download size and required memory before you download. Image generation needs the 24 GB tier; larger text and video models need 32–48 GB. These are catalog eligibility checks against system RAM, including on Windows; they do not guarantee that a model fits in GPU VRAM or runs on every backend. Start with <strong>Gemma 4 E2B</strong> for a smaller first download.</p>
+
+  <h2 id="downloads">2 · Choose a package</h2>
+  <p>In the release Assets list, <code>V</code> below is the release version <strong>without the leading <code>v</code></strong>. Download one package and its matching checksum file.</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Platform</th><th>Asset name</th><th>Use it for</th></tr></thead>
+    <tbody>
+      <tr><td>Mac</td><td><code>tensoragent-desktop-V-osx-arm64.dmg</code></td><td>Drag TensorAgent into Applications; the usual Mac installation.</td></tr>
+      <tr><td>Mac</td><td><code>tensoragent-desktop-V-osx-arm64.pkg</code></td><td>Install into Applications with the macOS Installer.</td></tr>
+      <tr><td>Mac</td><td><code>tensoragent-desktop-V-osx-arm64.zip</code></td><td>Extract the app and copy it into Applications or your own Applications folder.</td></tr>
+      <tr><td>Windows</td><td><code>tensoragent-desktop-V-win-x64-cpu.msi</code><br><code>tensoragent-desktop-V-win-x64-cuda.msi</code></td><td>Install for your user account with a Start menu shortcut.</td></tr>
+      <tr><td>Windows</td><td><code>tensoragent-desktop-V-win-x64-cpu.zip</code><br><code>tensoragent-desktop-V-win-x64-cuda.zip</code></td><td>Extract the entire folder and run the app without an installer.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Checksums are named <code>SHA256SUMS-tensoragent-desktop-V-osx-arm64.txt</code>, <code>SHA256SUMS-tensoragent-desktop-V-win-x64-cpu.txt</code> or <code>SHA256SUMS-tensoragent-desktop-V-win-x64-cuda.txt</code>. To check a download, replace <code>V</code> and the filename in these examples with the version and package you downloaded, then compare the hash with that file's line in the checksum text:</p>
+  <pre data-lang="bash"><code># macOS Terminal, from your Downloads folder
+cd ~/Downloads
+shasum -a 256 tensoragent-desktop-V-osx-arm64.dmg</code></pre>
+  <pre data-lang="powershell"><code># Windows PowerShell, from your Downloads folder
+Set-Location "$env:USERPROFILE\Downloads"
+Get-FileHash .\tensoragent-desktop-V-win-x64-cpu.msi -Algorithm SHA256</code></pre>
+  <p>If the hashes differ, download the file again before installing. A checksum verifies the bytes; it does not make an unsigned package signed. Release notes identify whether the packages were signed or notarized. By default, the Mac app is ad hoc signed and not notarized, and Windows packages are unsigned.</p>
+
+  <h2 id="install-macos">3a · Install on macOS</h2>
+  <ol class="steps">
+    <li><h3>Install the app</h3><p><strong>DMG:</strong> open the disk image, drag <strong>TensorAgent.app</strong> to <strong>Applications</strong>, then eject the disk image. <strong>PKG:</strong> open the package and follow Installer; installation into <code>/Applications</code> may require an administrator password. <strong>ZIP:</strong> extract it and move <strong>TensorAgent.app</strong> to <code>/Applications</code>, or to <code>~/Applications</code> if you want a copy only for your account.</p></li>
+    <li><h3>Open TensorAgent</h3><p>Launch the installed copy from Applications. For an unnotarized release, macOS may block the first launch or package installation. After trying to open it, use <strong>System Settings → Privacy &amp; Security → Open Anyway</strong> for this verified download, and confirm the prompt. Follow <a href="https://support.apple.com/102445" target="_blank" rel="noopener">Apple's instructions for opening downloaded apps</a> if the message differs.</p></li>
+    <li><h3>Allow the features you use</h3><p>Photo, camera, microphone or speech permissions are requested when their features need them. You can review them later in <strong>System Settings → Privacy &amp; Security</strong>. Ordinary text chat does not require camera or microphone access.</p></li>
+  </ol>
+
+  <h2 id="install-windows">3b · Install on Windows</h2>
+  <ol class="steps">
+    <li><h3>Choose CPU or CUDA</h3><p>Choose <strong>CPU</strong> if you do not have a compatible NVIDIA GPU or want to avoid GPU driver setup. Choose <strong>CUDA</strong> for an NVIDIA GPU with a compatible driver. Use one installed flavor at a time; the MSI packages belong to the same upgrade family.</p></li>
+    <li><h3>Install or extract</h3><p><strong>MSI:</strong> open the package and follow the installer. It installs for the current user under <code>%LOCALAPPDATA%\Programs\TensorAgent</code> and adds a Start menu entry; administrator rights are not required. <strong>ZIP:</strong> right-click → <strong>Extract All</strong> into a writable folder, then open <strong>TensorAgent.Maui.exe</strong>. Keep its DLLs, <code>webui</code> and <code>skills</code> folders together; do not run the executable inside the ZIP.</p></li>
+    <li><h3>Launch the app</h3><p>Open <strong>TensorAgent</strong> from Start, or launch the extracted executable. Unsigned releases can show a Microsoft Defender SmartScreen prompt. Verify the source and checksum before choosing <strong>More info → Run anyway</strong>, if your policy allows it. On a managed computer, contact your administrator if that option is unavailable.</p></li>
+  </ol>
+  <p>If the app reports a missing WebView2 runtime or opens without its chat view, install the <a href="https://developer.microsoft.com/microsoft-edge/webview2/" target="_blank" rel="noopener">Evergreen Runtime</a> and reopen TensorAgent.</p>
+
+  <h2 id="first-run">4 · Download a model and send your first message</h2>
+  <ol class="steps">
+    <li><h3>Choose language and storage</h3><p>Open the app's menu → <strong>Settings</strong>. <strong>Language → App language</strong> follows the system by default and offers eight languages. Under <strong>Storage → Model download and cache folder</strong>, you can set an absolute folder path on a disk with enough room, then choose <strong>Save folder</strong>. Changing this folder does not move files already downloaded.</p></li>
+    <li><h3>Open Models</h3><p>Use <strong>Choose a model</strong> on the empty chat, or the menu → <strong>Models</strong>. Pick <strong>Gemma 4 E2B</strong> and choose <strong>Download</strong>. Read the listed model license, download size and memory requirement. A grey <strong>Too big</strong> entry cannot load on this device.</p></li>
+    <li><h3>Wait for verification and load</h3><p>The progress row shows download and verification. Transfers can resume after interruption. A download selected while you stay on Models loads when ready; otherwise return and choose <strong>Use</strong>. Wait until the model is in use before sending a message. You do not need to start a separate server or enter an API key.</p></li>
+    <li><h3>Try a simple chat</h3><p>Return to chat and send <em>“Give me three ideas for a weekend project.”</em> Press <kbd>Enter</kbd> to send and <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line. Use <strong>Stop</strong> to cancel a reply. The menu lists saved chats; create a new chat when you change topics. Conversations survive app restarts.</p></li>
+  </ol>
+  <p>Inference runs locally. The first model download needs internet access; after the necessary model files are present, ordinary chat works offline. The <strong>Allow network access</strong> setting controls model-run code and package installation; it does not prevent the app from downloading the model you requested.</p>
+
+  <h2 id="daily-use">5 · Photos, files, images and video</h2>
+  <ul>
+    <li><strong>Ask about a photo or file:</strong> choose <strong>+ → Photo</strong> or <strong>File</strong>, attach the item, and describe what you need. The loaded model must support the input. For a vision model without its optional projector, use <strong>Models → Add vision</strong>, then <strong>Enable vision</strong>. <strong>Settings → Downloads → Include optional files</strong> includes the projector and available draft head in future downloads.</li>
+    <li><strong>Generate an image:</strong> load <strong>Qwen-Image 2.1</strong> and describe the picture. To edit a photo, attach it and say what to change. <strong>Select area</strong> beside its thumbnail lets you paint the area to edit. After generation, use <strong>Compare original</strong> or <strong>Edit again</strong>. Optional <strong>Model → LoRA plug-ins</strong> adds separate downloads for styles or faster sampling. See the <a href="models-image.html#mask-editing">image editing guide</a>.</li>
+    <li><strong>Generate a video:</strong> load the appropriate <strong>MiniMax-H3</strong> catalog entry, describe a short clip, and use that entry's supported attachments. Video needs a GPU backend; the CPU package does not provide a video fallback. Windows audio/video generation is not covered by the recorded desktop app validation. See <a href="models-video.html#minimax-h3">video model requirements and limits</a>.</li>
+    <li><strong>Keep a result:</strong> open a generated file's link and save or copy it to a folder you control. Chats retain their transcript, but generated files and uploads live in the app's cache; keep another copy of anything important before clearing caches or removing the app.</li>
+  </ul>
+
+  <h2 id="tools">6 · Set up code and browser work</h2>
+  <p>Text chat needs no extra developer tools. Desktop code skills use programs installed on your computer: install <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">Python 3</a> for Python work and <a href="https://nodejs.org/en/download" target="_blank" rel="noopener">Node.js with npm</a> for JavaScript or the bundled Playwright browser skill. The browser skill requires Node.js 20 or later. Make them available on your <code>PATH</code>, then fully quit and reopen TensorAgent so it discovers them. On Windows use native Windows Node/npm, not WSL.</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Setting in Settings → Sandbox</th><th>What to choose</th></tr></thead>
+    <tbody>
+      <tr><td>Run code</td><td>Allow commands and skill scripts. On macOS they run under the OS sandbox in the chat workspace. You can turn this off for chat-only use.</td></tr>
+      <tr><td>Run without a sandbox (Windows)</td><td>Off by default. Commands run only if this and Run code are both on. Windows cannot confine their file or network access; programs can reach anything your account can. Enable it only when you accept this access.</td></tr>
+      <tr><td>Allow network access</td><td>Off by default. Enable for browser tasks and installing code dependencies. On Windows, unconfined programs are not isolated by this switch.</td></tr>
+      <tr><td>Sub-agents</td><td>On by default. Allow helpers on the same local model; disable to avoid extra helper conversations and memory use.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>With a tool-capable chat model, try <em>“Create a CSV of these expenses and check the total with Python.”</em> Attach the input instead of expecting a sandboxed Mac command to read unrelated folders. For browser work, enable the required settings and ask <em>“Use the Playwright skill to visit example.com and summarize the page.”</em> Its first use may download npm packages and a browser. The automated browser has its own session; it does not inherit your everyday browser's sign-in. See <a href="agentic.html#playwright">browser setup and skill limits</a>.</p>
+
+  <h2 id="update-uninstall">7 · Update, back up or uninstall</h2>
+  <p><strong>Update:</strong> quit TensorAgent, download the new matching platform package from <a href="https://github.com/zhongkaifu/TensorSharp/releases/latest" target="_blank" rel="noopener">the latest release</a>, verify it, and reinstall. On Mac replace the app in Applications. On Windows run the new MSI; for ZIP installs extract into a fresh folder and use the new copy. Updates are manual. Model files, settings and chats are stored separately from the installed app.</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Platform</th><th>Settings and chats — back these up</th><th>Default models, uploads and artifacts</th></tr></thead>
+    <tbody>
+      <tr><td>macOS</td><td><code>~/Library/Application Support/TensorAgent</code></td><td><code>~/Library/Caches/TensorAgent</code></td></tr>
+      <tr><td>Windows</td><td><code>%LOCALAPPDATA%\TensorAgent\Data</code></td><td><code>%LOCALAPPDATA%\TensorAgent\Cache</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Quit the app before copying these folders. If you selected a custom model folder in Settings, back up or reuse that folder separately. Mac backup tools may omit Caches. Changing the model folder leaves the old files in place; move the model subfolders yourself, with downloads finished and the app closed, if you want to reuse them.</p>
+  <p><strong>Uninstall:</strong> on Mac move TensorAgent.app to Trash; a PKG install has no separate uninstaller. On Windows use <strong>Settings → Apps → Installed apps → TensorAgent → Uninstall</strong> for MSI, or delete the extracted app folder for ZIP. App removal leaves user data and models available for reinstall. To reclaim individual models, use <strong>Models → Delete</strong>; <strong>Settings → Storage → Delete all chats</strong> removes chat history. For complete removal, after backing up and quitting, also delete the data/cache folders above and any custom model folder you no longer need.</p>
+
+  <h2 id="troubleshooting">Troubleshooting</h2>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Problem</th><th>What to do</th></tr></thead>
+    <tbody>
+      <tr><td>No desktop download in the release</td><td>Expand Assets and look for <code>tensoragent-desktop-</code>. Older CLI/server ZIPs do not install TensorAgent. Choose a release containing desktop assets or build from source.</td></tr>
+      <tr><td>Windows cannot start / chat view is blank</td><td>Install WebView2, extract all ZIP contents together, and check that the release supports your Windows version and architecture. Download again if the checksum differs.</td></tr>
+      <tr><td>CUDA load error or no compatible GPU</td><td>Check the NVIDIA driver against the release's CUDA version; use the CPU flavor if there is no compatible NVIDIA GPU. It will be slower. Do not copy DLLs between CPU and CUDA packages.</td></tr>
+      <tr><td>Model is Too big / load runs out of memory</td><td>Choose a smaller catalog model, close memory-heavy programs, and check system RAM and available GPU memory separately. A model eligible by system RAM may still exceed your GPU's capacity.</td></tr>
+      <tr><td>Download stops or verification fails</td><td>Check free disk space and internet access; return to Models and use Resume or Retry. Wait for downloads/imports to finish before changing the model folder.</td></tr>
+      <tr><td>A model cannot see an attached photo</td><td>Check its supported inputs; download Add vision and select Enable vision. Attach the photo again after loading the correct model.</td></tr>
+      <tr><td>Code or browser task is refused</td><td>Check Run code, Windows Run without a sandbox, and Allow network access when needed. Install Python or native Node/npm for the task, reopen the app, and read the reported tool error.</td></tr>
+      <tr><td>Reply is marked truncated</td><td>Increase Settings → Generation → Reply output limit, or start a fresh chat with a shorter prompt. This changes reply length, not the model's context window.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>To report a problem, open a <a href="https://github.com/zhongkaifu/TensorSharp/issues" target="_blank" rel="noopener">GitHub issue</a> with the release version, package flavor, OS, memory/GPU, model and exact error. Check logs under the cache folder's <code>logs</code> directory; review them before sharing because they may contain local paths or prompts.</p>
+  <p class="page-foot-note"><strong>Validation scope:</strong> distribution builds and package checks do not certify every model, GPU, permission dialog or installation path. The recorded Windows desktop app checks cover selected chat, files, code tools, synthetic vision, cancellation and chat recovery; catalog downloads, native pickers, audio/video generation and a long soak were excluded. Mac runs cover specific Apple Silicon models and workflows. See the <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/TensorAgent/README.md" target="_blank" rel="noopener">TensorAgent README</a> for exact device and model coverage; unavailable or skipped scenarios are not passing validation.</p>
+  <div class="content-footer">
+    <a href="getting-started.html">← CLI &amp; server getting started</a>
+    <a href="agentic.html#tensoragent">TensorAgent capabilities →</a>
+  </div>
+</main>
+</body>
+</html>

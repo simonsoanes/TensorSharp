@@ -57,6 +57,9 @@ enum tsg_dsv4_fused_kind : int32_t
     // Indexed Q2_K/Q4_K gate/up strip; i0=unsplit rows, i1=first row.
     TSG_MATMUL_ID_QUANT_STRIP   = 22,
     TSG_MATMUL_ID_QUANT_PAIR    = 23,
+    // Unmasked F32 vision attention. Inputs [D,N,H,B], output [D,H,N,B].
+    // Cooperatively stage K/V tiles across queries; softmax stays F32.
+    TSG_ATTN_VISION_F32         = 24,
 };
 
 #define TSG_DSV4_FUSED_MAGIC 0x5453445356344655ull  // "TSDSV4FU"

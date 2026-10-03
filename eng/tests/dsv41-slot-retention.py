@@ -69,7 +69,7 @@ def main():
     expected, expected_other = oracle(tokens), oracle(other)
     ptr, number = ctypes.c_void_p, ctypes.c_int
     signatures = {
-        "LoadModel": ([ctypes.c_char_p] + [number] * 5 + [ctypes.c_char_p], ptr),
+        "LoadModel": ([ctypes.c_char_p] + [number] * 4 + [ctypes.c_char_p, number, ctypes.c_char_p, number], ptr),
         "Free": ([ptr], None), "ResetChecked": ([ptr], number), "NPast": ([ptr], number),
         "Forward": ([ptr, ptr, number, ptr], number),
         "SlotAlloc": ([ptr], number), "SlotFree": ([ptr, number], number),
@@ -83,7 +83,7 @@ def main():
     api = {}
     dll_directories = []
     failure_keys = ("TS_DSV41_TEST_FAIL_STAGE", "TS_DSV41_TEST_FAIL_POSITION", "TS_DSV41_TEST_FAIL_KIND")
-    settings = {"TS_DSV41_REWIND_CHECKPOINT": "1", "TS_DSV41_TP": "0", "TS_DSV4_FA": "0",
+    settings = {"TS_DSV41_REWIND_CHECKPOINT": "1", "TS_DSV4_FA": "0",
                 "TS_DSV41_ENGRAM_THREADS": "2"}
     if args.cpu_admission_reserve_mb is not None:
         settings["TS_DSV4_GRAPH_CACHE_HEADROOM_MB"] = str(args.cpu_admission_reserve_mb)
@@ -165,7 +165,7 @@ def main():
             function = getattr(lib, "TSGgml_Dsv4" + name)
             function.argtypes, function.restype = parameters, result
             api[name] = function
-        handle = api["LoadModel"](str(weights_path).encode(), args.gpus, 512, 32, 2, 0, args.backend.encode())
+        handle = api["LoadModel"](str(weights_path).encode(), args.gpus, 512, 32, 2, None, 0, args.backend.encode(), 0)
         check("fixture_loaded", bool(handle))
         source, observer = api["SlotAlloc"](handle), api["SlotAlloc"](handle)
         check("distinct_slots_allocated", source > 0 and observer > 0 and source != observer)

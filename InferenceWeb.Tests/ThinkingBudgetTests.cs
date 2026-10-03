@@ -26,6 +26,7 @@ namespace InferenceWeb.Tests;
 /// thinking and took 936 seconds to produce a two-slide deck.
 /// </para>
 /// </summary>
+[Collection(EngineEnvironmentCollection.Name)]
 public class ThinkingBudgetTests
 {
     private static string? Saved;

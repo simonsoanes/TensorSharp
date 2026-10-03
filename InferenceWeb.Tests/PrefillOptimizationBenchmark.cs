@@ -28,6 +28,10 @@ public class PrefillOptimizationBenchmark
 
     private static float MaxAbsDiff(Tensor a, Tensor b)
     {
+        // The native kernels write these host tensors asynchronously once any GGML context has turned
+        // Metal's lazy dispatch on (GgmlContext does, process-wide); a host tensor has no read barrier of
+        // its own, and reading before the GPU finished returned NaN in the Metal lane.
+        GgmlBasicOps.HostReadBarrier();
         int n = (int)a.ElementCount();
         float[] bufA = a.GetElementsAsFloat(n);
         float[] bufB = b.GetElementsAsFloat(n);

@@ -34,24 +34,10 @@ public class CpuIsaAndWorkersTests
             Assert.Equal(CpuIsa.Avx512 ? CpuSgemm.KernelKind.Avx512 : CpuIsa.Avx2Fma ? CpuSgemm.KernelKind.Avx2 : CpuSgemm.KernelKind.Portable,
                 CpuSgemm.DefaultKernel());
         QGemmIsa q = ManagedQuantizedOps.ResolveQGemmIsa(QGemmIsa.Auto);
-        if (q != QGemmIsa.Legacy)   // Legacy: TS_CPU_QGEMM=0 or no AVX2
+        if (q != QGemmIsa.PerRow)   // PerRow: no AVX2
             Assert.Equal(CpuIsa.Avx512 ? QGemmIsa.Avx512 : QGemmIsa.Avx2, q);
         else
-            Assert.True(!CpuIsa.Avx2Fma || Environment.GetEnvironmentVariable("TS_CPU_QGEMM") == "0");
-    }
-
-    [Fact]
-    public void PerRowDotsKeepTheirPreviousInstructionSetTest()
-    {
-        // The per-row Q4_0 / Q8_0 dots (the TS_CPU_QGEMM=0 path) must choose exactly as the
-        // build before CpuIsa did - AVX-512 F/BW present - so the rollback switches reproduce
-        // its bits on a host whose runtime does not accelerate Vector512 (run this class with
-        // DOTNET_PreferredVectorBitWidth=256 to see the two decisions differ).
-        Assert.Equal(Avx512F.IsSupported && Avx512BW.IsSupported && !CpuIsa.Avx512DisabledByEnv,
-            CpuIsa.Avx512PerRowDots);
-        if (CpuIsa.Avx512) Assert.True(CpuIsa.Avx512PerRowDots);
-        if (Vector512.IsHardwareAccelerated && Avx512DQ.IsSupported)
-            Assert.Equal(CpuIsa.Avx512, CpuIsa.Avx512PerRowDots);
+            Assert.False(CpuIsa.Avx2Fma);
     }
 
     public static TheoryData<string> WorkerSets() => new() { "pool", "threadpool", "shared", "wide" };

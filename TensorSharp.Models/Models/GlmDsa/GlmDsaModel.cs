@@ -158,8 +158,18 @@ namespace TensorSharp.Models
 
         public GlmDsaModel(string ggufPath, BackendType backend, int tpDegree = 1, ITensorParallelGroup tpGroup = null,
             int layerSplitDegree = 1)
-            : base(ggufPath, ValidateParallelism(backend, tpDegree, tpGroup, layerSplitDegree),
-                NativeRequested(backend) ? 1 : tpDegree, tpGroup)
+            : this(ggufPath, backend, tpDegree, tpGroup, layerSplitDegree, directCuda: false)
+        {
+        }
+
+        /// <param name="directCuda">Load on the direct-CUDA whole-model engine (GLM-5.3-Flash on
+        /// <c>--backend cuda</c>; see <see cref="DirectCudaApplies"/>).</param>
+        internal GlmDsaModel(string ggufPath, BackendType backend, int tpDegree, ITensorParallelGroup tpGroup,
+            int layerSplitDegree, bool directCuda)
+            : base(ggufPath,
+                directCuda ? ValidateDirectCuda(tpDegree, tpGroup, layerSplitDegree)
+                    : ValidateParallelism(backend, tpDegree, tpGroup, layerSplitDegree),
+                NativeRequested(backend) || directCuda ? 1 : tpDegree, directCuda ? null : tpGroup)
         {
             string arch = _gguf.GetString("general.architecture") ?? "glm-dsa";
             Config = new ModelConfig { Architecture = arch };
@@ -179,6 +189,12 @@ namespace TensorSharp.Models
             Console.WriteLine($"RoPE base={Config.RopeBase}, scale={Config.RopeScale}, eps={Config.Eps}");
 
             int maxContextLength = ResolveConfiguredContextLength();
+
+            if (directCuda)
+            {
+                InitCudaExecutor(ggufPath, layerSplitDegree, maxContextLength);
+                return;
+            }
 
             if (NativeRequested(backend))
             {
@@ -243,7 +259,7 @@ namespace TensorSharp.Models
             $"|kvLora={_kvLoraRank}|rope={_ropeDim}|hk={_headDimK}|hv={_headDimV}" +
             $"|idx={_indexerHeads}x{_indexerHeadDim}k{_indexerTopK}:{KvStateFingerprints.Layout(_indexerFull)}" +
             $"|kda={KvStateFingerprints.Layout(_layerIsRecurrent)}:h{_kdaHeads}d{_kdaHeadDim}c{_dConv}|hc={_hcMult}" +
-            $"|exec={(UsesNativeExecutor ? "native" : "managed")}|dtype={CacheRowDtype.ToShortString()}";
+            $"|exec={_exec?.Kind ?? "managed"}|dtype={CacheRowDtype.ToShortString()}";
 
         private int CountIndexerFull()
         {
@@ -701,7 +717,7 @@ namespace TensorSharp.Models
             if (tokens == null || tokens.Length <= 1)
                 return ForwardCore(tokens);
 
-            // The native executor chunks the prompt into ubatches itself.
+            // The whole-model executors (native and direct-CUDA) chunk the prompt into ubatches themselves.
             if (UsesNativeExecutor)
                 return ForwardNative(tokens);
 

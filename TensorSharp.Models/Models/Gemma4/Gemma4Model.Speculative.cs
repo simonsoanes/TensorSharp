@@ -48,7 +48,7 @@ using TensorSharp.Runtime.Speculative;
 
 namespace TensorSharp.Models
 {
-    public partial class Gemma4Model : IBatchedSpeculativeModel
+    public partial class Gemma4Model : ISpeculativeModel
     {
         // Draft-head hyper-parameters (read from the assistant GGUF).
         private int _mtpNumLayers;
@@ -60,17 +60,12 @@ namespace TensorSharp.Models
         private int _mtpLocalDonor;      // target layer whose KV the SWA draft layers read
         private int _mtpGlobalDonor;     // target layer whose KV the global draft layer reads
 
-        // Batched-trunk speculative mode: when the verify runs through the
-        // batched paged path (IBatchedSpeculativeModel), the draft must read
-        // the sequence's PAGED donor KV (_g4PagedK) via its block table instead
-        // of the model's single linear cache. SpecForwardBatched sets these; the
-        // linear SpecForward clears the mode.
-        private bool _mtpBatchedMode;
-        private SequenceState _mtpBatchedSeq;
-        private float[] _mtpDraftScores;  // reusable softmax scratch for the paged draft attention
-
         /// <summary>True when a usable Gemma 4 assistant draft head is loaded.</summary>
         public bool HasDraftHead { get; private set; }
+
+        /// <summary>Whether a multi-row verify gathers the per-layer embeddings inside its
+        /// graph. Tests switch it off to compare against the uploaded-PLE path.</summary>
+        internal bool GatherPleInVerify { get; set; } = true;
 
         /// <summary>The gemma4-assistant head drafts one token per pass,
         /// chaining its own hidden output, so it is served by
@@ -164,7 +159,7 @@ namespace TensorSharp.Models
         /// linear cache; Forward additionally folds the LM head into the graph,
         /// which is what makes it the cheaper plain step (E2B: 12.3 ms against a
         /// 15 ms one-row SpecForward).</summary>
-        public bool SpecPlainStepUsesForward => _mtpBatchedMode == false && IsGgmlBackend;
+        public bool SpecPlainStepUsesForward => IsGgmlBackend;
 
         /// <summary>The linear-cache trunk reads whatever holder is bound (the same
         /// arrays Forward uses), so a request served from a checkpoint clone or a
@@ -389,7 +384,6 @@ namespace TensorSharp.Models
         {
             // No draft-head requirement: nothing below reads the assistant weights.
             // A weight-free speculator (n-gram) drives this trunk on any checkpoint.
-            _mtpBatchedMode = false;   // this is the linear-cache trunk
             int seqLen = tokens.Length;
             int startPos = _cacheSeqLen;
             int hidden = Config.HiddenSize;
@@ -437,8 +431,7 @@ namespace TensorSharp.Models
             // native verify declines the batch.
             bool gatherPleInVerify = seqLen > 1 && _decodeArrays != null
                 && _canUseFusedFullModelDecode && !_kvCacheDtype.IsBlockQuantized()
-                && Environment.GetEnvironmentVariable("TS_GMTP_NO_FUSED") != "1"
-                && Environment.GetEnvironmentVariable("TS_GMTP_PLE_IN_KERNEL") != "0"
+                && GatherPleInVerify
                 && CanGatherPleInKernel();
             Tensor perLayerInputs = _pleDim > 0 && !gatherPleInVerify
                 ? ComputePLE(tokens, h, seqLen) : null;
@@ -456,8 +449,7 @@ namespace TensorSharp.Models
             // on the fused (device-cache) path avoids mixing device and host cache
             // writers within one spec session.
             bool fusedCommon = _decodeArrays != null
-                && !_kvCacheDtype.IsBlockQuantized()
-                && Environment.GetEnvironmentVariable("TS_GMTP_NO_FUSED") != "1";
+                && !_kvCacheDtype.IsBlockQuantized();
             // Dense models take the dense fused trunk; all-MoE models (e.g.
             // gemma-4-26B-A4B, where _canUseFusedFullModelDecode is false) take the
             // fused MoE trunk: a single graph for the whole transformer for both the
@@ -491,8 +483,7 @@ namespace TensorSharp.Models
             // the host side afterwards (13 ms of a 58 ms E4B verify).
             bool foldHead = allLogitsRows && seqLen > 1 && logitsOut != null
                 && (long)logitsOut.Length >= (long)seqLen * Config.VocabSize
-                && CanFoldLmHead
-                && Environment.GetEnvironmentVariable("TS_GMTP_NO_FOLD_HEAD") != "1";
+                && CanFoldLmHead;
             bool foldedHead = false;
             if (profile) tProfKernel0 = System.Diagnostics.Stopwatch.GetTimestamp();
             if (fusedDenseOk)
@@ -719,29 +710,16 @@ namespace TensorSharp.Models
             if (!HasDraftHead)
                 throw new InvalidOperationException("Model has no Gemma 4 MTP draft head.");
 
-            // Trunk position; the donor KV holds [0, fixedPos). The linear trunk
-            // tracks it in _cacheSeqLen; the batched trunk in seq.NumComputedTokens
-            // (the executor advances the sequence only after the step).
-            int fixedPos;
-            if (_mtpBatchedMode && _mtpBatchedSeq != null)
-            {
-                // Paged donor KV (_g4PagedK) is a host float[] kept current by the
-                // verify's ScatterKv — no device KV sync needed.
-                fixedPos = _mtpBatchedSeq.NumComputedTokens;
-            }
-            else
-            {
-                fixedPos = _cacheSeqLen;
-                // Linear trunk: the fused draft kernel reads the donor KV on-device
-                // (no host sync), running the whole head as one graph. Falls back to
-                // the per-op draft (host attention, needs the donor sync) past the
-                // SWA window or on a non-fused shape.
-                if (_mtpDraftArrays != null && !_kvCacheDtype.IsBlockQuantized()
-                    && Environment.GetEnvironmentVariable("TS_GMTP_NO_FUSED") != "1"
-                    && NativeGemma4DraftStep(token, hPrev, fixedPos, logitsOut, hOut))
-                    return;
-                SyncDonorKvToHost();
-            }
+            // Trunk position; the donor KV holds [0, fixedPos).
+            int fixedPos = _cacheSeqLen;
+            // The fused draft kernel reads the donor KV on-device (no host sync),
+            // running the whole head as one graph. Falls back to the per-op draft
+            // (host attention, needs the donor sync) past the SWA window or on a
+            // non-fused shape.
+            if (_mtpDraftArrays != null && !_kvCacheDtype.IsBlockQuantized()
+                && NativeGemma4DraftStep(token, hPrev, fixedPos, logitsOut, hOut))
+                return;
+            SyncDonorKvToHost();
             int backbone = Config.HiddenSize;
 
             // x = target.tok_embd[token] * sqrt(backbone)
@@ -825,13 +803,7 @@ namespace TensorSharp.Models
             // Gemma 4 attention scale is 1.0 (no 1/sqrt(d)); see f_attention_scale.
             // The draft uses its OWN query-head count (_mtpDraftHeads), grouped onto
             // the donor's KV heads.
-            if (_mtpBatchedMode && _mtpBatchedSeq != null)
-            {
-                // Batched trunk: attend the sequence's PAGED donor KV.
-                MtpDraftPagedAttention(q, donor, kvHeads, hd, fixedPos, isLocal, _mtpBatchedSeq, attn);
-                InvalidateTensorDeviceCache(attn);
-            }
-            else if (TryDraftDecodeAttentionCuda(q, donor, kvHeads, hd, fixedPos, isLocal, attn))
+            if (TryDraftDecodeAttentionCuda(q, donor, kvHeads, hd, fixedPos, isLocal, attn))
             {
                 // On-device GQA decode attention (CUDA): reads the donor cache in
                 // place, so the draft head stops DtoH-ing the whole 4 MB donor cache
@@ -1125,14 +1097,8 @@ namespace TensorSharp.Models
         }
 
         /// <summary>Pre-grow the trunk KV caches. Safe at any time for Gemma 4: the
-        /// draft writes no MTP rows into the cache (it only reads the target's).
-        /// In batched-trunk mode the K/V lives in paged blocks the scheduler owns,
-        /// so growing the (unused) linear cache would just waste memory.</summary>
-        public void SpecEnsureCapacity(int requiredSeqLen)
-        {
-            if (_mtpBatchedMode) return;
-            EnsureCacheCapacity(requiredSeqLen);
-        }
+        /// draft writes no MTP rows into the cache (it only reads the target's).</summary>
+        public void SpecEnsureCapacity(int requiredSeqLen) => EnsureCacheCapacity(requiredSeqLen);
 
         /// <summary>No recurrent (GDN/SSM) state in Gemma 4 — drafting is stateless
         /// given (token, h), so verify rollback needs only an attention-KV rewind.</summary>
@@ -1155,12 +1121,6 @@ namespace TensorSharp.Models
             _cacheSeqLen = length;
         }
 
-        // Escape hatch: TS_GMTP_NO_FAST_ROLLBACK=1 restores the kept-prefix
-        // re-forward (slower, but refreshes committed-token KV through the decode
-        // kernel so spec output tracks the all-decode no-spec path more closely).
-        private static readonly bool s_noFastRollback =
-            Environment.GetEnvironmentVariable("TS_GMTP_NO_FAST_ROLLBACK") == "1";
-
         /// <summary>
         /// Gemma 4's verify (fused MoE/dense or per-op) writes attention KV for every
         /// token in the batch at its true position, and the model has no recurrent
@@ -1182,107 +1142,16 @@ namespace TensorSharp.Models
         /// Left OFF for dense models without PLE on the ggml backends. Re-forwarding
         /// the kept prefix refreshes its KV, but a multi-row replay can itself use a
         /// different kernel from sequential decode. It does not guarantee identical
-        /// output tokens. TS_GMTP_NO_FAST_ROLLBACK=1 forces replay for diagnostics.
-        /// Honoured only on the linear trunk.
+        /// output tokens.
         /// </summary>
         public bool SpecVerifyPersistsAcceptedKv =>
-            (_numExperts > 0 || _pleDim > 0 || _backend == BackendType.Cuda)
-            && !_mtpBatchedMode && !s_noFastRollback;
-
-        // ====================================================================
-        // IBatchedSpeculativeModel — speculative trunk on the batched paged
-        // path. The verify runs through ForwardBatch (one sequence, K+1 tokens):
-        // its matmuls are batched GEMMs that read the 12B weights ONCE for all
-        // K+1 rows, so a verify amortises to ~one batched decode step (unlike the
-        // single-sequence Forward path, where the fused single-token decode kernel
-        // has no multi-token equivalent and the verify can't keep up). The draft
-        // head reads the sequence's paged donor KV (host float[], no device sync).
-        // Gemma 4 has no recurrent state, so the per-slot snapshot/restore the
-        // interface requires are no-ops.
-        // ====================================================================
-
-        /// <summary>
-        /// Batched-trunk speculation is implemented (verify through ForwardBatch +
-        /// paged-KV draft) but DISABLED by default: it runs the per-op batched path
-        /// (~0.56x), while the linear trunk now drives the fused single-graph verify
-        /// (<see cref="NativeGemma4ModelVerify"/>) and draft
-        /// (<see cref="NativeGemma4DraftStep"/>) kernels for ~2x. Routing solo
-        /// speculative sequences to the linear trunk (this returning false) gives
-        /// the fast path. Opt back into the batched trunk with TS_GMTP_BATCHED_TRUNK=1
-        /// (e.g. to compose with a paged-fused verify once that lands).
-        /// </summary>
-        public bool SupportsBatchedSpecTrunk =>
-            HasDraftHead && IsGgmlBackend && CanUseBatchedSpecPath()
-            && Environment.GetEnvironmentVariable("TS_GMTP_BATCHED_TRUNK") == "1";
-
-        private bool CanUseBatchedSpecPath()
-        {
-            if (_pleDim > 0) return false;
-            if (_kvCacheDtype.IsBlockQuantized()) return false;
-            for (int l = 0; l < Config.NumLayers; l++)
-                if (HasMoE(l)) return false;
-            return true;
-        }
-
-        public unsafe void SpecForwardBatched(SequenceState seq, int[] tokens, int startPos,
-            float[] hAllOut, float[] logitsOut, bool allLogitsRows)
-        {
-            ArgumentNullException.ThrowIfNull(seq);
-            if (tokens == null || tokens.Length == 0)
-                throw new ArgumentException("Tokens must not be empty.", nameof(tokens));
-            if (startPos != seq.NumComputedTokens)
-                throw new InvalidOperationException(
-                    $"SpecForwardBatched at position {startPos} but sequence has {seq.NumComputedTokens} computed tokens.");
-
-            int n = tokens.Length;
-            var bt = seq.BlockTable;
-            if (bt.CapacityTokens < startPos + n)
-                throw new InvalidOperationException(
-                    $"Block table covers {bt.CapacityTokens} tokens but the spec pass needs {startPos + n}.");
-
-            var positions = new System.Collections.Generic.List<int>(n);
-            var slotMapping = new System.Collections.Generic.List<int>(n);
-            for (int i = 0; i < n; i++)
-            {
-                int pos = startPos + i;
-                positions.Add(pos);
-                int blockIdx = pos / bt.BlockSize;
-                slotMapping.Add(bt.Blocks[blockIdx].Id * bt.BlockSize + pos % bt.BlockSize);
-            }
-            var table = new int[bt.NumBlocks];
-            for (int b = 0; b < bt.NumBlocks; b++)
-                table[b] = bt.Blocks[b].Id;
-
-            var ctx = new BatchedForwardContext
-            {
-                Sequences = new System.Collections.Generic.List<SequenceState> { seq },
-                NumScheduledTokens = new System.Collections.Generic.List<int> { n },
-                QueryStartLoc = new System.Collections.Generic.List<int> { 0, n },
-                Positions = positions,
-                SlotMapping = slotMapping,
-                BlockTables = new[] { table },
-                MaxQueryLen = n,
-                MaxSeqLen = startPos + n,
-                OverrideFlatTokens = tokens,
-                CaptureHiddenAll = hAllOut,
-                CaptureLogitsAll = allLogitsRows ? logitsOut : null,
-            };
-
-            // Arm the paged-draft path for the subsequent draft steps.
-            _mtpBatchedMode = true;
-            _mtpBatchedSeq = seq;
-
-            var perSeq = ForwardBatch(ctx);
-            if (!allLogitsRows && logitsOut != null)
-                Array.Copy(perSeq[0], logitsOut, Config.VocabSize);
-        }
+            _numExperts > 0 || _pleDim > 0 || _backend == BackendType.Cuda;
 
         // ====================================================================
         // Fused draft-step kernel (TSGgml_Gemma4DraftStep): runs the whole draft
         // head as ONE GGML graph reading the target's donor KV on-device, so the
         // 4-layer head stops costing a full decode in device↔host ping-pong.
-        // Linear-trunk only (the donor KV is the live linear cache); the batched
-        // trunk's donor KV is paged and keeps the per-op paged draft.
+        // The donor KV is the live linear cache.
         // ====================================================================
         private sealed class MtpDraftArrays
         {
@@ -1416,85 +1285,6 @@ namespace TensorSharp.Models
                     a.Hd, a.KvHeads, a.IsLocal, a.RopeBase, a.RopeDims,
                     a.DonorK, a.DonorV, a.DonorCacheSize,
                     (IntPtr)lo, (IntPtr)ho);
-            }
-        }
-
-        /// <summary>No recurrent state in Gemma 4 — nothing to snapshot per slot.</summary>
-        public void SpecSnapshotRecurrentStateSlots(SequenceState seq) { }
-
-        /// <summary>No recurrent state in Gemma 4 — nothing to restore. Paged
-        /// attention needs no KV rewind: each pass passes its own sequence length,
-        /// and rejected slots are overwritten by the kept-prefix re-forward.</summary>
-        public void SpecRestoreRecurrentStateSlots(SequenceState seq) { }
-
-        // Single-query attention of the draft's Q against the sequence's PAGED
-        // donor K/V (_g4PagedK[donor], a host float[] indexed by slot). Mirrors the
-        // linear AttentionDecodeWithWindow semantics: attend logical positions
-        // [attendStart, fixedPos) of the sequence, windowed for SWA donors. Reads
-        // q (host, post-q-norm/RoPE) and writes result in place — same host-pointer
-        // style as the linear decode-attention kernels.
-        private unsafe void MtpDraftPagedAttention(
-            Tensor q, int donor, int kvHeads, int hd, int fixedPos, bool isLocal,
-            SequenceState seq, Tensor result)
-        {
-            int numHeads = _mtpDraftHeads;
-            int groupSize = numHeads / kvHeads;
-            int stride = kvHeads * hd;                 // per-slot K/V stride
-            int blockSize = _g4PagedBlockSize;
-            int attendStart = isLocal ? Math.Max(0, fixedPos - _slidingWindow) : 0;
-            int attendLen = fixedPos - attendStart;
-
-            float* qPtr = GetFloatPtr(q);
-            float* rPtr = GetFloatPtr(result);
-            if (attendLen <= 0)
-            {
-                VecZero(rPtr, numHeads * hd);
-                return;
-            }
-
-            if (_mtpDraftScores == null || _mtpDraftScores.Length < attendLen)
-                _mtpDraftScores = new float[attendLen];
-
-            var blocks = seq.BlockTable.Blocks;
-            float[] pagedK = _g4PagedK[donor];
-            float[] pagedV = _g4PagedV[donor];
-
-            fixed (float* kBase = pagedK, vBase = pagedV)
-            fixed (float* scores = _mtpDraftScores)
-            {
-                for (int h = 0; h < numHeads; h++)
-                {
-                    float* qHead = qPtr + h * hd;
-                    int kvHead = h / groupSize;
-
-                    float maxScore = float.NegativeInfinity;
-                    for (int t = 0; t < attendLen; t++)
-                    {
-                        int lp = attendStart + t;
-                        long slot = (long)blocks[lp / blockSize].Id * blockSize + (lp % blockSize);
-                        float s = VecDot(qHead, kBase + slot * stride + kvHead * hd, hd);
-                        scores[t] = s;
-                        if (s > maxScore) maxScore = s;
-                    }
-
-                    float sumExp = 0;
-                    for (int t = 0; t < attendLen; t++)
-                    {
-                        float e = MathF.Exp(scores[t] - maxScore);
-                        scores[t] = e;
-                        sumExp += e;
-                    }
-                    float invSum = 1f / sumExp;
-
-                    float* rHead = rPtr + h * hd;
-                    VecZero(rHead, hd);
-                    for (int t = 0; t < attendLen; t++)
-                    {
-                        int lp = attendStart + t;
-                        long slot = (long)blocks[lp / blockSize].Id * blockSize + (lp % blockSize);
-                        VecScaleAdd(rHead, vBase + slot * stride + kvHead * hd, scores[t] * invSum, hd);
-                    }
-                }
             }
         }
     }

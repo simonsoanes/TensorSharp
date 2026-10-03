@@ -10,6 +10,7 @@
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using TensorAgent.Core.Localization;
 
 namespace TensorAgent.Core.Sessions;
 
@@ -38,6 +39,8 @@ public sealed class ConversationStore
 
     private readonly object _lock = new();
     private readonly Dictionary<string, ConversationSummary> _index = new(StringComparer.Ordinal);
+    /// <summary>The indexed files that could not be read, whose rows have no title of their own.</summary>
+    private readonly HashSet<string> _unreadable = new(StringComparer.Ordinal);
     private bool _indexed;
 
     public string Root { get; }
@@ -71,8 +74,21 @@ public sealed class ConversationStore
             IEnumerable<ConversationSummary> rows = _index.Values;
             if (!includeEmpty)
                 rows = rows.Where(s => s.MessageCount > 0);
-            return rows.OrderByDescending(s => s.UpdatedAt).ToList();
+            return rows.OrderByDescending(s => s.UpdatedAt).Select(Shown).ToList();
         }
+    }
+
+    /// <summary>
+    /// A row as the lists show it. The titles the store writes itself -- a chat's date, and a
+    /// file it cannot read -- read in the interface language, and are never stored in it: a
+    /// saved chat is the same file whichever language it was saved under.
+    /// </summary>
+    private ConversationSummary Shown(ConversationSummary row)
+    {
+        string title = _unreadable.Contains(row.Id)
+            ? Loc.T("host.conversations.unreadable")
+            : Conversation.DisplayTitle(row.Title, row.CreatedAt);
+        return ReferenceEquals(title, row.Title) ? row : row with { Title = title };
     }
 
     /// <summary>
@@ -150,6 +166,7 @@ public sealed class ConversationStore
             File.Move(tmp, path, overwrite: true);
             EnsureIndex();
             _index[conversation.Id] = Summarize(conversation);
+            _unreadable.Remove(conversation.Id);
         }
     }
 
@@ -161,6 +178,7 @@ public sealed class ConversationStore
         {
             EnsureIndex();
             _index.Remove(id);
+            _unreadable.Remove(id);
             string path = PathFor(id);
             if (!File.Exists(path))
                 return false;
@@ -207,8 +225,10 @@ public sealed class ConversationStore
             Conversation? c = Load(id);
             if (c is null)
             {
+                // Titled where it is shown (Shown), in the interface language.
                 var info = new FileInfo(file);
-                _index[id] = new ConversationSummary(id, "Unreadable chat", info.CreationTimeUtc, info.LastWriteTimeUtc, null, 0);
+                _index[id] = new ConversationSummary(id, string.Empty, info.CreationTimeUtc, info.LastWriteTimeUtc, null, 0);
+                _unreadable.Add(id);
                 continue;
             }
             _index[id] = Summarize(c);

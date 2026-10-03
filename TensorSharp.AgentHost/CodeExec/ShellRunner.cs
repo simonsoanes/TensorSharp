@@ -1327,6 +1327,15 @@ namespace TensorSharp.AgentHost.CodeExec
                 ["NPM_CONFIG_FUND"] = "false",
             };
 
+            // Use the same private Windows profile as skills_run. Overriding only
+            // USERPROFILE would leave native folder lookup and LOCALAPPDATA pointing
+            // at different profiles, and shell/browser calls would lose shared state.
+            if (_backend.UsesHostProcesses)
+                CodeEnvironment.ApplyWindowsBaseline(environment, workspace.WorkDirectory);
+            environment["TMPDIR"] = workspace.RuntimeTempDirectory;
+            environment["TEMP"] = workspace.RuntimeTempDirectory;
+            environment["TMP"] = workspace.RuntimeTempDirectory;
+
             // PATH is set by ConfinedProcess from the host's own, then overwritten here —
             // the launch plan's variables are applied last, so this wins. The prefixed
             // directories are on the readable list above for the same reason.

@@ -33,10 +33,24 @@ internal sealed class AdaptedOracleModel : IHolderPrefixCacheModel, IPrefixCache
     }
 
     internal OracleModel Inner { get; }
+    internal Exception? RetainFailure { get; set; }
+    internal bool RetainFailureAfterPublication { get; set; }
+    internal Exception? ReleaseFailure { get; set; }
+    internal int MeasurementCalls { get; private set; }
+    internal int? FailMeasurementOnCall { get; set; }
 
     // ---- the family additions (DESIGN §4.8) ----
 
-    public bool RetainSequenceCacheAs(string requestId, string payloadKey) => Inner.RetainAs(requestId, payloadKey);
+    public bool RetainSequenceCacheAs(string requestId, string payloadKey)
+    {
+        if (RetainFailure is { } failure)
+        {
+            RetainFailure = null;
+            if (RetainFailureAfterPublication) Inner.RetainAs(requestId, payloadKey);
+            throw failure;
+        }
+        return Inner.RetainAs(requestId, payloadKey);
+    }
 
     public void DiscardRetainedCaches(ReadOnlySpan<string> payloadKeys, ReleaseReason reason) => Inner.ReleasePayloads(payloadKeys, reason);
 
@@ -49,7 +63,13 @@ internal sealed class AdaptedOracleModel : IHolderPrefixCacheModel, IPrefixCache
     public bool TryConvertPrimary(string payloadKey, int length, out PayloadFootprint footprint)
         => HolderPrefixCacheAdapter.TryConvertPrimary(this, payloadKey, length, out footprint);
     public bool CanMaterialize(string payloadKey, int payloadTokens, int targetTokens) => Inner.CanMaterialize(payloadKey, payloadTokens, targetTokens);
-    public PayloadFootprint MeasureEndState(string payloadKey) => Inner.MeasureEndState(payloadKey);
+    public PayloadFootprint MeasureEndState(string payloadKey)
+    {
+        MeasurementCalls++;
+        if (MeasurementCalls == FailMeasurementOnCall)
+            throw new OutOfMemoryException("duplicate measurement allocation failed");
+        return Inner.MeasureEndState(payloadKey);
+    }
     public ResourceVector EstimateCloneBytes(string payloadKey, int targetTokens) => Inner.EstimateCloneBytes(payloadKey, targetTokens);
     public long QuerySpareBytes(ResourceClass cls) => Inner.QuerySpareBytes(cls);
 
@@ -91,7 +111,15 @@ internal sealed class AdaptedOracleModel : IHolderPrefixCacheModel, IPrefixCache
     public bool BatchedForwardAvailable => Inner.BatchedForwardAvailable;
     public bool SupportsLinearKVMigration => Inner.SupportsLinearKVMigration;
     public bool TryMigrateLinearKVToPaged(SequenceState owner, int blockSize) => Inner.TryMigrateLinearKVToPaged(owner, blockSize);
-    public void OnSequenceReleased(string requestId) => Inner.OnSequenceReleased(requestId);
+    public void OnSequenceReleased(string requestId)
+    {
+        Inner.OnSequenceReleased(requestId);
+        if (ReleaseFailure is { } failure)
+        {
+            ReleaseFailure = null;
+            throw failure;
+        }
+    }
     public bool SupportsPerSequenceFusedForward => Inner.SupportsPerSequenceFusedForward;
     public bool BindSequenceCache(string requestId) => Inner.BindSequenceCache(requestId);
     public void AdoptPrimaryCacheToFused(string requestId) => Inner.AdoptPrimaryCacheToFused(requestId);

@@ -21,11 +21,14 @@ def main():
     parser.add_argument("--cuda-index", action="store_true", help="Use 128-dimensional, 32-head indexing supported by the CUDA index kernel")
     parser.add_argument("--cuda-attn", action="store_true", help="Use the 512-wide shared K(=V) head the direct-CUDA engine requires (implies --cuda-index)")
     parser.add_argument("--q8", action="store_true", help="Store every quantized weight as Q8_0 instead of Q2_K where the row divides: near-lossless, so implementations can be compared at a tight tolerance, and it is a type every backend's expert kernels accept")
+    parser.add_argument("--k-mix", action="store_true", help="Store the down projections (routed and shared) as Q3_K beside Q2_K everywhere else, the type mix of the published Q2_K checkpoint")
     parser.add_argument("--index-topk", type=int, default=2, help="Use 512 to exercise the real checkpoint's gather/bucket boundary")
     parser.add_argument("--token-count", type=int, default=16)
     args = parser.parse_args()
     if not 1 <= args.index_topk <= 1024 or not 1 <= args.token_count <= 4096:
         raise ValueError("Fixture requires index-topk1..1024 and token-count1..4096")
+    if args.k_mix and args.q8:
+        raise ValueError("--k-mix and --q8 choose different weight types")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(4109)
     config = dict(model_type="deepseek_v41", text_config=dict(
@@ -118,7 +121,22 @@ def main():
             data = np.array([.2, .3, .4], dtype=np.float32)
         else:
             data = rng.normal(0, scale, shape).astype(np.float32)
-        if mode == "quant" and shape[-1] % 256 == 0 and not args.q8:
+        if mode == "quant" and shape[-1] % 256 == 0 and args.k_mix and "_down_" in name:
+            # Q3_K, built directly like Q2_K below: hmask[32] qs[64] scales[12] d. Every 6-bit
+            # scale is +4 (stored 36: low nibbles 4, top bits 2), payloads random in -4..3.
+            blocks = int(np.prod(shape)) // 256
+            encoded = np.empty((blocks, 110), dtype=np.uint8)
+            encoded[:, :96] = rng.integers(0, 256, (blocks, 96), dtype=np.uint8)
+            encoded[:, 96:104] = 0x44
+            encoded[:, 104:108] = 0xAA
+            d = scale / (4 * 2.3)
+            encoded[:, 108:110] = np.frombuffer(np.float16(d).tobytes(), dtype=np.uint8)
+            encoded = encoded.reshape(*shape[:-1], shape[-1] // 256 * 110)
+            if args.f32:
+                writer.add_tensor(name, dequantize(encoded, GGMLQuantizationType.Q3_K))
+            else:
+                writer.add_tensor(name, encoded, raw_dtype=GGMLQuantizationType.Q3_K)
+        elif mode == "quant" and shape[-1] % 256 == 0 and not args.q8:
             # Q2_K's public Python converter only dequantizes. Construct valid
             # blocks directly: scales/mins=3, with centered two-bit payloads.
             blocks = int(np.prod(shape)) // 256

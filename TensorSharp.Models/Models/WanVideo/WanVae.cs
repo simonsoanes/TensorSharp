@@ -167,7 +167,6 @@ namespace TensorSharp.Models.WanVideo
                     return Math.Max(Anchor / 4, (long)((double)freeBytes / AnchorFreeBytes * Anchor));
             }
             catch (DllNotFoundException) { /* managed-only host */ }
-            catch (EntryPointNotFoundException) { /* older GgmlOps */ }
             return Anchor;
         }
 

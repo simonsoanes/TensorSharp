@@ -21,7 +21,7 @@ namespace InferenceWeb.Tests;
 /// the real adapter without a model: tools on a diffusion model, the
 /// <c>reasoning_effort</c> field, and <c>response_format</c> with <c>think=true</c> on
 /// GPT-OSS. A request that passes reaches the hosted-model guard (404 blocking, an SSE
-/// error chunk streaming); a rejected one never enters the queue.
+/// error chunk streaming); a rejected one never reaches it.
 /// </summary>
 public sealed class OpenAIRequestPolicyTests : IDisposable
 {
@@ -41,9 +41,8 @@ public sealed class OpenAIRequestPolicyTests : IDisposable
     [InlineData(true, "\"tool_choice\":{\"type\":\"function\",\"function\":{\"name\":\"probe\"}}")]
     public async Task DiffusionModel_RefusesToolsAndToolChoice_With400(bool stream, string extra)
     {
-        var (context, queue) = await Invoke(new DiffusionService(), stream, extra);
+        var context = await Invoke(new DiffusionService(), stream, extra);
         Assert.Equal(StatusCodes.Status400BadRequest, context.Response.StatusCode);
-        Assert.Equal(0, queue.TotalProcessed);
         using var parsed = JsonDocument.Parse(await Response(context));
         Assert.Equal("invalid_request_error", parsed.RootElement.GetProperty("error").GetProperty("type").GetString());
         Assert.Contains("block diffusion", parsed.RootElement.GetProperty("error").GetProperty("message").GetString());
@@ -57,8 +56,7 @@ public sealed class OpenAIRequestPolicyTests : IDisposable
     [InlineData(false, "\"max_tokens\":8")]
     public async Task DiffusionModel_StillAnswersPlainRequests(bool stream, string extra)
     {
-        var (context, queue) = await Invoke(new DiffusionService(), stream, extra);
-        Assert.Equal(1, queue.TotalProcessed);
+        var context = await Invoke(new DiffusionService(), stream, extra);
         Assert.Equal(StatusCodes.Status404NotFound, context.Response.StatusCode);
         Assert.Contains("not hosted by this server", await Response(context));
     }
@@ -72,9 +70,8 @@ public sealed class OpenAIRequestPolicyTests : IDisposable
     {
         string request = "{\"model\":\"not-hosted.gguf\",\"messages\":[{\"role\":\"user\",\"content\":\"Call probe now.\"}],\"stream\":"
             + (stream ? "true" : "false") + "," + ProbeTools + "}";
-        var (context, queue) = await InvokeOllama(new DiffusionService(), request);
+        var context = await InvokeOllama(new DiffusionService(), request);
         Assert.Equal(StatusCodes.Status400BadRequest, context.Response.StatusCode);
-        Assert.Equal(0, queue.TotalProcessed);
         using var parsed = JsonDocument.Parse(await Response(context));
         Assert.Contains("block diffusion", parsed.RootElement.GetProperty("error").GetString());
     }
@@ -82,9 +79,8 @@ public sealed class OpenAIRequestPolicyTests : IDisposable
     [Fact]
     public async Task DiffusionModel_OllamaChat_StillAnswersPlainRequests()
     {
-        var (context, queue) = await InvokeOllama(new DiffusionService(),
+        var context = await InvokeOllama(new DiffusionService(),
             "{\"model\":\"not-hosted.gguf\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":false}");
-        Assert.Equal(1, queue.TotalProcessed);
         Assert.Equal(StatusCodes.Status404NotFound, context.Response.StatusCode);
     }
 
@@ -96,9 +92,8 @@ public sealed class OpenAIRequestPolicyTests : IDisposable
         string request = "{\"model\":\"not-hosted.gguf\",\"input\":\"Call probe now.\",\"store\":false,\"stream\":"
             + (stream ? "true" : "false")
             + ",\"tools\":[{\"type\":\"function\",\"name\":\"probe\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}]}";
-        var (context, queue) = await InvokeResponses(new DiffusionService(), request);
+        var context = await InvokeResponses(new DiffusionService(), request);
         Assert.Equal(StatusCodes.Status400BadRequest, context.Response.StatusCode);
-        Assert.Equal(0, queue.TotalProcessed);
         using var parsed = JsonDocument.Parse(await Response(context));
         Assert.Equal("invalid_request_error", parsed.RootElement.GetProperty("error").GetProperty("type").GetString());
         Assert.Contains("block diffusion", parsed.RootElement.GetProperty("error").GetProperty("message").GetString());
@@ -107,17 +102,15 @@ public sealed class OpenAIRequestPolicyTests : IDisposable
     [Fact]
     public async Task DiffusionModel_Responses_StillAnswersPlainRequests()
     {
-        var (context, queue) = await InvokeResponses(new DiffusionService(),
+        var context = await InvokeResponses(new DiffusionService(),
             "{\"model\":\"not-hosted.gguf\",\"input\":\"hi\",\"store\":false,\"stream\":false}");
-        Assert.Equal(1, queue.TotalProcessed);
         Assert.Equal(StatusCodes.Status404NotFound, context.Response.StatusCode);
     }
 
     [Fact]
     public async Task AutoregressiveModel_KeepsItsTools()
     {
-        var (context, queue) = await Invoke(new UnloadedService("gemma4"), false, ProbeTools + ",\"tool_choice\":\"required\"");
-        Assert.Equal(1, queue.TotalProcessed);
+        var context = await Invoke(new UnloadedService("gemma4"), false, ProbeTools + ",\"tool_choice\":\"required\"");
         Assert.Equal(StatusCodes.Status404NotFound, context.Response.StatusCode);
     }
 
@@ -126,9 +119,8 @@ public sealed class OpenAIRequestPolicyTests : IDisposable
     [InlineData("\"reasoning_effort\":2")]
     public async Task UnknownReasoningEffort_Is400(string extra)
     {
-        var (context, queue) = await Invoke(new UnloadedService("gpt-oss"), false, extra);
+        var context = await Invoke(new UnloadedService("gpt-oss"), false, extra);
         Assert.Equal(StatusCodes.Status400BadRequest, context.Response.StatusCode);
-        Assert.Equal(0, queue.TotalProcessed);
         Assert.Contains("reasoning_effort", await Response(context));
     }
 
@@ -138,8 +130,7 @@ public sealed class OpenAIRequestPolicyTests : IDisposable
     [InlineData("\"think\":false")]
     public async Task KnownReasoningEffort_Passes(string extra)
     {
-        var (context, queue) = await Invoke(new UnloadedService("gpt-oss"), false, extra);
-        Assert.Equal(1, queue.TotalProcessed);
+        var context = await Invoke(new UnloadedService("gpt-oss"), false, extra);
         Assert.Equal(StatusCodes.Status404NotFound, context.Response.StatusCode);
     }
 
@@ -150,8 +141,7 @@ public sealed class OpenAIRequestPolicyTests : IDisposable
     [InlineData("gptoss")]
     public async Task Harmony_AcceptsResponseFormatWithThinking(string architecture)
     {
-        var (context, queue) = await Invoke(new UnloadedService(architecture), false, JsonObject);
-        Assert.Equal(1, queue.TotalProcessed);
+        var context = await Invoke(new UnloadedService(architecture), false, JsonObject);
         Assert.Equal(StatusCodes.Status404NotFound, context.Response.StatusCode);
     }
 
@@ -170,21 +160,19 @@ public sealed class OpenAIRequestPolicyTests : IDisposable
     public async Task ReasoningFamilies_AcceptResponseFormatWithThinking(string architecture, string trigger)
     {
         Assert.Equal(trigger, OutputParserFactory.GrammarActivationTrigger(architecture, enableThinking: true));
-        var (context, queue) = await Invoke(new UnloadedService(architecture), false, JsonObject);
-        Assert.Equal(1, queue.TotalProcessed);
+        var context = await Invoke(new UnloadedService(architecture), false, JsonObject);
         Assert.Equal(StatusCodes.Status404NotFound, context.Response.StatusCode);
     }
 
     [Fact]
     public async Task FamilyWithoutADelayedThinkingTrigger_StillRefusesResponseFormatWithThinking()
     {
-        var (context, queue) = await Invoke(new UnloadedService("unknown-test-architecture"), false, JsonObject);
+        var context = await Invoke(new UnloadedService("unknown-test-architecture"), false, JsonObject);
         Assert.Equal(StatusCodes.Status400BadRequest, context.Response.StatusCode);
-        Assert.Equal(0, queue.TotalProcessed);
         Assert.Contains("cannot be combined with think=true", await Response(context));
     }
 
-    private async Task<(DefaultHttpContext, InferenceQueue)> Invoke(ModelService service, bool stream, string extra)
+    private async Task<DefaultHttpContext> Invoke(ModelService service, bool stream, string extra)
     {
         var context = new DefaultHttpContext();
         string request = "{\"model\":\"not-hosted.gguf\",\"messages\":[{\"role\":\"user\",\"content\":\"Call probe now.\"}],\"stream\":"
@@ -192,46 +180,44 @@ public sealed class OpenAIRequestPolicyTests : IDisposable
         context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(request));
         context.Request.ContentType = "application/json";
         context.Response.Body = new MemoryStream();
-        var queue = new InferenceQueue();
         var registry = new SkillRegistry(new SkillRegistryOptions { Roots = Array.Empty<string>() });
         var options = ServerOptionsBuilder.Build(new[] { "--model", Path.Combine(_root, "hosted.gguf"), "--no-skills" }, _root);
         using (service)
         {
-            await new OpenAIChatAdapter(service, queue, options, new UploadStoragePolicy(Path.Combine(_root, "uploads")), registry,
+            await new OpenAIChatAdapter(service, options, new UploadStoragePolicy(Path.Combine(_root, "uploads")), registry,
                 null, new SessionWorkspaceManager(Path.Combine(_root, "workspaces")), NullLoggerFactory.Instance).ChatCompletionsAsync(context);
         }
-        return (context, queue);
+        return context;
     }
 
-    private Task<(DefaultHttpContext, InferenceQueue)> InvokeOllama(ModelService service, string request)
-        => InvokeAdapter(service, request, (svc, queue, options, uploads, registry, workspaces, ctx)
-            => new OllamaAdapter(svc, queue, options, uploads, registry, null, workspaces, NullLoggerFactory.Instance).ChatAsync(ctx));
+    private Task<DefaultHttpContext> InvokeOllama(ModelService service, string request)
+        => InvokeAdapter(service, request, (svc, options, uploads, registry, workspaces, ctx)
+            => new OllamaAdapter(svc, options, uploads, registry, null, workspaces, NullLoggerFactory.Instance).ChatAsync(ctx));
 
-    private Task<(DefaultHttpContext, InferenceQueue)> InvokeResponses(ModelService service, string request)
-        => InvokeAdapter(service, request, async (svc, queue, options, uploads, registry, workspaces, ctx) =>
+    private Task<DefaultHttpContext> InvokeResponses(ModelService service, string request)
+        => InvokeAdapter(service, request, async (svc, options, uploads, registry, workspaces, ctx) =>
         {
             using var store = new InMemoryResponsesStore();
-            await new OpenAIResponsesAdapter(svc, queue, options, uploads, registry, null, workspaces, NullLoggerFactory.Instance, store)
+            await new OpenAIResponsesAdapter(svc, options, uploads, registry, null, workspaces, NullLoggerFactory.Instance, store)
                 .CreateResponseAsync(ctx);
         });
 
-    private async Task<(DefaultHttpContext, InferenceQueue)> InvokeAdapter(
+    private async Task<DefaultHttpContext> InvokeAdapter(
         ModelService service, string request,
-        Func<ModelService, InferenceQueue, ServerHostingOptions, UploadStoragePolicy, SkillRegistry, SessionWorkspaceManager, DefaultHttpContext, Task> call)
+        Func<ModelService, ServerHostingOptions, UploadStoragePolicy, SkillRegistry, SessionWorkspaceManager, DefaultHttpContext, Task> call)
     {
         var context = new DefaultHttpContext();
         context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(request));
         context.Request.ContentType = "application/json";
         context.Response.Body = new MemoryStream();
-        var queue = new InferenceQueue();
         var registry = new SkillRegistry(new SkillRegistryOptions { Roots = Array.Empty<string>() });
         var options = ServerOptionsBuilder.Build(new[] { "--model", Path.Combine(_root, "hosted.gguf"), "--no-skills" }, _root);
         using (service)
         {
-            await call(service, queue, options, new UploadStoragePolicy(Path.Combine(_root, "uploads")), registry,
+            await call(service, options, new UploadStoragePolicy(Path.Combine(_root, "uploads")), registry,
                 new SessionWorkspaceManager(Path.Combine(_root, "workspaces")), context);
         }
-        return (context, queue);
+        return context;
     }
 
     private static async Task<string> Response(DefaultHttpContext context)

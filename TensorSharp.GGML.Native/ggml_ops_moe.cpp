@@ -32,6 +32,7 @@
 // cost — the C# layer simply passes the base pointer of expert 0.
 
 #include "ggml_ops_internal.h"
+#include "dsv41_engram_io.h"
 
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -562,6 +563,36 @@ namespace
             out.runs.emplace_back(run_start, num_experts - 1);
     }
 
+    // Fault mapped byte ranges in on many threads at once. The copy that streams
+    // experts to the accelerator reads its source on ONE thread (ggml-metal's
+    // set_tensor_async is a newBufferWithBytes memcpy, CUDA's a pageable copy),
+    // and against an SSD-backed mapping that thread pays every page fault in
+    // turn: 0.7 GB/s measured on an M5 Pro streaming Qwen3.8-Flash-Next's
+    // offloaded experts, 30 s of a 1818-token prefill whose GPU work took 1 s.
+    // Faulted in concurrently first, the copy reads from the page cache. Nothing
+    // is pinned or copied here; the pages stay evictable.
+    void prefetch_mapped_ranges_impl(const std::uint8_t* base,
+                                const std::vector<std::pair<std::size_t, std::size_t>>& ranges)
+    {
+        static tsg_dsv41::engram_io_pool s_pool(16);
+        constexpr std::size_t kChunk = std::size_t(4) << 20;
+        constexpr std::size_t kStride = 4096;   // at most one touch per page on any host
+        // Read by the pool's workers: an ordinary local, never thread_local.
+        std::vector<std::pair<std::size_t, std::size_t>> tasks;
+        for (const auto& r : ranges)
+            for (std::size_t o = 0; o < r.second; o += kChunk)
+                tasks.emplace_back(r.first + o, std::min(kChunk, r.second - o));
+        std::atomic<std::uint64_t> sink{0};
+        s_pool.run(tasks.size(), [&](std::size_t i) {
+            const volatile std::uint8_t* p = base + tasks[i].first;
+            const std::size_t n = tasks[i].second;
+            std::uint64_t sum = 0;
+            for (std::size_t k = 0; k < n; k += kStride) sum += p[k];
+            sum += p[n - 1];
+            sink.fetch_add(sum, std::memory_order_relaxed);
+        });
+    }
+
     // Push a stacked expert weight to the device, restricted to `runs` when the
     // stacked layout is known to be contiguous per expert. Returns the bytes
     // actually transferred.
@@ -609,11 +640,12 @@ namespace
             !runs.runs.empty() &&
             runs.used < num_experts;
 
-        std::size_t sent = 0;
+        // (offset, length) of every copy this weight needs.
+        static thread_local std::vector<std::pair<std::size_t, std::size_t>> s_ranges;
+        s_ranges.clear();
         if (!per_expert_ok)
         {
-            ggml_backend_tensor_set_async(backend, tensor, host_data, 0, total_bytes);
-            sent = total_bytes;
+            s_ranges.emplace_back(0, total_bytes);
         }
         else
         {
@@ -626,10 +658,26 @@ namespace
                     len += pad;                   // MMQ tile overrun guard
                 if (offset + len > total_bytes)
                     len = total_bytes - offset;
-                ggml_backend_tensor_set_async(backend, tensor,
-                    static_cast<const std::uint8_t*>(host_data) + offset, offset, len);
-                sent += len;
+                s_ranges.emplace_back(offset, len);
             }
+        }
+
+        // A page-locked range is resident already.
+        if (!pinned)
+            prefetch_mapped_ranges(static_cast<const std::uint8_t*>(host_data), s_ranges);
+
+        // One copy per registration piece (see host_pin_split): a source that
+        // spans two page-locked registrations is rejected by cudaMemcpyAsync.
+        static thread_local std::vector<std::pair<std::size_t, std::size_t>> s_pieces;
+        std::size_t sent = 0;
+        for (const auto& r : s_ranges)
+        {
+            const std::uint8_t* src = static_cast<const std::uint8_t*>(host_data) + r.first;
+            host_pin_split(src, r.second, s_pieces);
+            for (const auto& piece : s_pieces)
+                ggml_backend_tensor_set_async(backend, tensor, src + piece.first,
+                    r.first + piece.first, piece.second);
+            sent += r.second;
         }
 
         if (s_probe)
@@ -1384,8 +1432,7 @@ namespace
         // forward (the 40×/forward alloc churn was the dominant prefill cost).
         // The reused buffer is grown once to the largest seen graph and kept; it's
         // shared across ops but prefill is serialized under the GPU compute lock.
-        // Falls back to per-call allocation when the reuse path is unavailable
-        // (TS_GGML_REUSE_COMPUTE_BUF=0 / unsupported backend).
+        // Falls back to per-call allocation when the backend has no reuse path.
         BufferHandle backend_buffer(nullptr);
         // A streamed offload graph runs BETWEEN two slices of the outer
         // whole-model graph, whose tensors are placed in the shared reuse
@@ -1695,6 +1742,12 @@ namespace
 
 namespace tsg
 {
+    void prefetch_mapped_ranges(const std::uint8_t* base,
+        const std::vector<std::pair<std::size_t, std::size_t>>& ranges)
+    {
+        prefetch_mapped_ranges_impl(base, ranges);
+    }
+
     // Host-side routed-expert FFN, shared by the standalone MoE op (when the
     // caller passes run_on_cpu) and by the whole-model decode graphs' CPU
     // offload segments. Declared in ggml_ops_internal.h; see there for the
@@ -1780,16 +1833,24 @@ namespace tsg
         // The pool latches its thread count at creation, so rebuild it when one
         // already exists (the flag is parsed before the model loads, but a
         // reload must not keep the previous run's count either).
-        std::lock_guard<std::mutex> lock(g_moe_cpu_backend_mutex);
-        rebuild_moe_cpu_threadpool_locked();
+        {
+            std::lock_guard<std::mutex> lock(g_moe_cpu_backend_mutex);
+            rebuild_moe_cpu_threadpool_locked();
+        }
+        // The one-token decode team latches its size the same way: drop it, and
+        // the next offloaded decode builds it at the new count.
+        host_moe_decode_release();
     }
 
     void moe_ffn_host_release()
     {
+        // Cached CUDA graphs must retire before the backend and mapped weights.
+        host_moe_expert_cache_release();
         // Give the locked expert pages back first: a model reload maps a new
         // GGUF, and leaving the previous one pinned would charge its bytes to
         // the pin budget forever.
         host_pin_release_all();
+        host_moe_decode_release();
         std::lock_guard<std::mutex> lock(g_moe_cpu_backend_mutex);
         if (g_moe_cpu_backend != nullptr)
         {
@@ -1810,10 +1871,6 @@ namespace tsg
     {
         static const bool s_on = []() {
             const char* e = std::getenv("TS_HOST_MOE_VERIFY");
-            if (e == nullptr)
-                // Kept for the Qwen3.5 debugging sessions this seam was first
-                // built against; the new name covers every model.
-                e = std::getenv("TS_QWEN35_HOST_MOE_VERIFY");
             return e != nullptr && e[0] == '1';
         }();
         return s_on;
@@ -1876,8 +1933,9 @@ namespace tsg
     }
 
     bool host_moe_compute_segment(const HostMoeSegment& hm, std::vector<float>& out, const char* kernel_name,
-                                  HostMoeStagedInputs* staged, bool allow_device_stream)
+                                  HostMoeStagedInputs* staged, bool allow_device_stream, bool* output_on_device)
     {
+        if (output_on_device != nullptr) *output_on_device = false;
         if (hm.moe_in == nullptr || hm.sel_ids == nullptr ||
             hm.weights == nullptr || hm.moe_out == nullptr)
         {
@@ -1900,8 +1958,36 @@ namespace tsg
 
         // The caller synchronized the segment that produced these, so the reads
         // see its results.
-        ggml_backend_tensor_get(hm.moe_in, s_moe_in.data(), 0, act_count * sizeof(float));
         ggml_backend_tensor_get(hm.sel_ids, s_ids.data(), 0, route_count * sizeof(std::int32_t));
+
+        // CUDA compact slots can keep activations and routing probabilities on
+        // the device. The host only needs IDs for slot selection; retain staged
+        // reads when diagnostics request them and when the cache declines.
+        static const bool s_cache_device_inputs = [] {
+            const char* e = std::getenv("TS_HOST_MOE_EXPERT_CACHE_BRIDGE");
+            return e == nullptr || e[0] != '0';
+        }();
+        if (allow_device_stream && staged == nullptr && s_cache_device_inputs)
+        {
+            static const bool s_cache_device_outputs = [] {
+                const char* e = std::getenv("TS_HOST_MOE_EXPERT_CACHE_OUTPUT_BRIDGE");
+                return e == nullptr || e[0] != '0';
+            }();
+            if (output_on_device != nullptr && s_cache_device_outputs)
+            {
+                const int cached = host_moe_cached_experts(hm, nullptr, s_ids.data(),
+                    nullptr, nullptr, kernel_name);
+                if (cached != 0)
+                {
+                    *output_on_device = cached > 0;
+                    return cached > 0;
+                }
+            }
+            const int cached = host_moe_cached_experts(hm, nullptr, s_ids.data(),
+                nullptr, out.data(), kernel_name);
+            if (cached != 0) return cached > 0;
+        }
+        ggml_backend_tensor_get(hm.moe_in, s_moe_in.data(), 0, act_count * sizeof(float));
         ggml_backend_tensor_get(hm.weights, s_weights.data(), 0, route_count * sizeof(float));
 
         if (staged != nullptr)
@@ -1911,7 +1997,14 @@ namespace tsg
             staged->weights = s_weights.data();
         }
 
-        return moe_ffn_host_experts(
+        const int cached = allow_device_stream ? host_moe_cached_experts(hm, s_moe_in.data(), s_ids.data(),
+            s_weights.data(), out.data(), kernel_name) : 0;
+        if (cached != 0)
+            return cached > 0;
+        if (host_moe_decode_experts(hm, s_moe_in.data(), s_ids.data(), s_weights.data(), out.data()))
+            return true;
+
+        const bool ok = moe_ffn_host_experts(
             s_moe_in.data(), out.data(),
             hm.seq_len, hm.hidden, hm.n_ff,
             hm.num_experts, hm.n_used,
@@ -1922,6 +2015,15 @@ namespace tsg
             hm.gate_bias, hm.up_bias, hm.down_bias,
             hm.activation, hm.oai_alpha, hm.oai_limit,
             allow_device_stream);
+        // A batch that took the device stream publishes its result through
+        // finalize_compute_with_download, which on Metal with async compute only
+        // QUEUES a blit into `out`. The seam reads `out` as soon as this returns
+        // - into the next segment's moe_out - so without this drain it uploaded
+        // whatever the previous layer left there: a short prefill passed on the
+        // previous layer's expert output outright, a long one raced the blit.
+        if (ok)
+            host_read_barrier();
+        return ok;
     }
 
     void host_moe_upload_segment(const HostMoeSegment& hm, const float* data)
@@ -1943,8 +2045,11 @@ namespace tsg
         ggml_cgraph* graph,
         const std::vector<HostMoeSegment>& segments,
         const std::vector<int>& seg_end,
-        const char* kernel_name)
+        const char* kernel_name,
+        ggml_backend_t backend)
     {
+        if (backend == nullptr)
+            backend = g_backend;
         if (graph == nullptr || seg_end.empty())
         {
             set_last_error(std::string(kernel_name) + ": empty host-MoE segment plan.");
@@ -1974,18 +2079,35 @@ namespace tsg
             std::fprintf(stderr, "\n");
         }
 
+        // TS_HOST_MOE_TIMING=3: where a segmented pass goes - accelerator slices
+        // (each one a submit and a wait), the host experts, and the transfers
+        // between them - summed over 32 passes of the same width.
+        static const bool s_pass_timing = []() {
+            const char* e = std::getenv("TS_HOST_MOE_TIMING");
+            return e != nullptr && e[0] == '3';
+        }();
+        using pass_clock = std::chrono::steady_clock;
+        static thread_local double s_acc_gpu = 0, s_acc_host = 0, s_acc_up = 0, s_acc_total = 0;
+        static thread_local int s_acc_passes = 0, s_acc_seq = -1;
+        const auto t_pass = s_pass_timing ? pass_clock::now() : pass_clock::time_point{};
+        auto ms_since = [](pass_clock::time_point t) {
+            return std::chrono::duration<double, std::milli>(pass_clock::now() - t).count();
+        };
+
         int begin = 0;
         for (std::size_t seg = 0; seg < seg_end.size(); ++seg)
         {
             const int end = seg_end[seg];
             if (end > begin)
             {
+                const auto t_gpu = s_pass_timing ? pass_clock::now() : pass_clock::time_point{};
                 ggml_cgraph view = ggml_graph_view(graph, begin, end);
-                if (tsg::compute_graph(g_backend, &view) != GGML_STATUS_SUCCESS)
+                if (tsg::compute_graph(backend, &view) != GGML_STATUS_SUCCESS)
                 {
                     set_last_error(std::string(kernel_name) + ": host-MoE segment execution failed.");
                     return false;
                 }
+                if (s_pass_timing) s_acc_gpu += ms_since(t_gpu);
             }
             begin = end;
 
@@ -2002,8 +2124,13 @@ namespace tsg
             // (The verify chain wants the host result to compare against, so it
             // keeps the staged path.)
             HostMoeStagedInputs staged;
-            if (!host_moe_compute_segment(hm, s_moe_out, kernel_name, &staged))
+            bool output_on_device = false;
+            const auto t_host = s_pass_timing ? pass_clock::now() : pass_clock::time_point{};
+            if (!host_moe_compute_segment(hm, s_moe_out, kernel_name,
+                                          debug_this_call ? &staged : nullptr, true,
+                                          !debug_this_call && hm.verify_gpu == nullptr ? &output_on_device : nullptr))
                 return false;
+            if (s_pass_timing) s_acc_host += ms_since(t_host);
 
             const std::size_t act_count = static_cast<std::size_t>(hm.hidden) * static_cast<std::size_t>(hm.seq_len);
             const std::size_t route_count = static_cast<std::size_t>(hm.n_used) * static_cast<std::size_t>(hm.seq_len);
@@ -2035,7 +2162,9 @@ namespace tsg
                 }
             }
 
-            host_moe_upload_segment(hm, s_moe_out.data());
+            const auto t_up = s_pass_timing ? pass_clock::now() : pass_clock::time_point{};
+            if (!output_on_device) host_moe_upload_segment(hm, s_moe_out.data());
+            if (s_pass_timing) s_acc_up += ms_since(t_up);
 
             if (debug_this_call)
             {
@@ -2052,6 +2181,28 @@ namespace tsg
                     route_count > 2 ? staged.sel_ids[2] : -1, route_count > 3 ? staged.sel_ids[3] : -1,
                     staged.weights[0], route_count > 1 ? staged.weights[1] : 0.0f);
                 std::fflush(stderr);
+            }
+        }
+        if (s_pass_timing)
+        {
+            const int seq = segments.empty() ? 0 : segments[0].seq_len;
+            if (seq != s_acc_seq && s_acc_passes > 0)
+            {
+                s_acc_gpu = s_acc_host = s_acc_up = s_acc_total = 0;
+                s_acc_passes = 0;
+            }
+            s_acc_seq = seq;
+            s_acc_total += ms_since(t_pass);
+            if (++s_acc_passes == 32)
+            {
+                std::fprintf(stderr,
+                    "[HOSTMOE-PASS] %s seq=%d segments=%zu per pass: total %.2f ms = accelerator %.2f + host experts %.2f "
+                    "(incl. input download) + upload %.2f + other %.2f\n",
+                    kernel_name, seq, segments.size(), s_acc_total / 32, s_acc_gpu / 32, s_acc_host / 32, s_acc_up / 32,
+                    (s_acc_total - s_acc_gpu - s_acc_host - s_acc_up) / 32);
+                std::fflush(stderr);
+                s_acc_gpu = s_acc_host = s_acc_up = s_acc_total = 0;
+                s_acc_passes = 0;
             }
         }
         return true;

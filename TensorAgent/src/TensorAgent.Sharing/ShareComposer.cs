@@ -8,7 +8,9 @@
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
+using System.Globalization;
 using System.Text;
+using TensorAgent.Sharing.Localization;
 
 namespace TensorAgent.Sharing;
 
@@ -153,7 +155,7 @@ public static class ShareComposer
             prompt = DefaultPromptFor(textual, files);
         ShareText.ShortenedText promptPart = ShareText.Shorten(prompt, opts.MaxPromptChars);
         if (promptPart.WasShortened)
-            notices.Add(Shortened("your question", promptPart));
+            notices.Add(ShareStrings.T("share.notice.questionShortened", Fitted(promptPart)));
 
         var body = new StringBuilder();
         body.Append(promptPart.Text);
@@ -189,11 +191,7 @@ public static class ShareComposer
             anyContent = true;
         }
         if (skipped > 0)
-        {
-            notices.Add(skipped == 1
-                ? "One shared item did not fit and was left out."
-                : $"{skipped} shared items did not fit and were left out.");
-        }
+            notices.Add(ShareStrings.Plural("share.notice.skipped", skipped));
 
         if (files.Count > 0)
             body.Append("\n\n").Append(DescribeFiles(files));
@@ -236,11 +234,13 @@ public static class ShareComposer
                 // the message without being normalized or bounded. A newline in it broke
                 // the block it was in; a 300 kB data: URL was appended whole and only
                 // charged against the budget afterwards.
+                // A label is charged at its English length in every language, so how much
+                // of a share fits does not depend on the language it is labelled in.
                 remaining -= "Shared link: ".Length + title.Length;
                 string address = Address(item.Url, opts, ref remaining);
-                block.Append("Shared link");
-                if (title.Length > 0)
-                    block.Append(": ").Append(title);
+                block.Append(title.Length > 0
+                    ? ShareStrings.T("share.message.linkTitled", ("title", title))
+                    : ShareStrings.T("share.message.link"));
                 if (address.Length > 0)
                     block.Append('\n').Append(address);
                 return block.ToString();
@@ -251,11 +251,11 @@ public static class ShareComposer
                 string title = ShareText.FirstLine(item.Title, 160);
                 remaining -= "Shared web page\nTitle: \nLink: ".Length + title.Length;
                 string address = Address(item.Url, opts, ref remaining);
-                block.Append("Shared web page");
+                block.Append(ShareStrings.T("share.message.page"));
                 if (title.Length > 0)
-                    block.Append('\n').Append("Title: ").Append(title);
+                    block.Append('\n').Append(ShareStrings.T("share.message.pageTitle", ("title", title)));
                 if (address.Length > 0)
-                    block.Append('\n').Append("Link: ").Append(address);
+                    block.Append('\n').Append(ShareStrings.T("share.message.pageLink", ("address", address)));
 
                 string selection = ShareText.Normalize(item.Selection);
                 string page = ShareText.Normalize(item.Text);
@@ -271,9 +271,10 @@ public static class ShareComposer
                     ShareText.ShortenedText part = Take(selection, Math.Min(opts.MaxSelectionChars, remaining), ref remaining);
                     if (part.Text.Length > 0)
                     {
-                        block.Append("\n\nThe part they selected:\n").Append(Quote(part.Text));
+                        block.Append("\n\n").Append(ShareStrings.T("share.message.selection"))
+                             .Append('\n').Append(Quote(part.Text));
                         if (part.WasShortened)
-                            notices.Add(Shortened("the selected text", part));
+                            notices.Add(ShareStrings.T("share.notice.selectionShortened", Fitted(part)));
                     }
                 }
 
@@ -282,10 +283,13 @@ public static class ShareComposer
                     ShareText.ShortenedText part = Take(page, Math.Min(perItem, remaining), ref remaining);
                     if (part.Text.Length > 0)
                     {
-                        block.Append(selection.Length > 0 ? "\n\nThe rest of the page:\n" : "\n\nThe page:\n")
-                             .Append(Quote(part.Text));
+                        block.Append("\n\n")
+                             .Append(selection.Length > 0
+                                 ? ShareStrings.T("share.message.restOfPage")
+                                 : ShareStrings.T("share.message.pageText"))
+                             .Append('\n').Append(Quote(part.Text));
                         if (part.WasShortened)
-                            notices.Add(Shortened("the page text", part));
+                            notices.Add(ShareStrings.T("share.notice.pageShortened", Fitted(part)));
                     }
                 }
                 else if (page.Length == 0 && selection.Length == 0)
@@ -293,7 +297,7 @@ public static class ShareComposer
                     // A browser that offered a page but no text. Saying so is worth a
                     // line: it is the difference between "the model ignored my page"
                     // and "your browser did not hand the page over".
-                    block.Append("\n\n(The browser shared the address but no page text.)");
+                    block.Append("\n\n").Append(ShareStrings.T("share.message.noPageText"));
                 }
                 return block.ToString();
             }
@@ -308,12 +312,12 @@ public static class ShareComposer
                 ShareText.ShortenedText part = Take(text, Math.Min(perItem, remaining), ref remaining);
                 if (part.Text.Length == 0)
                     return string.Empty;
-                block.Append("Shared text");
-                if (title.Length > 0)
-                    block.Append(" \u2014 ").Append(title);
-                block.Append(":\n").Append(Quote(part.Text));
+                block.Append(title.Length > 0
+                    ? ShareStrings.T("share.message.textTitled", ("title", title))
+                    : ShareStrings.T("share.message.text"));
+                block.Append('\n').Append(Quote(part.Text));
                 if (part.WasShortened)
-                    notices.Add(Shortened("the shared text", part));
+                    notices.Add(ShareStrings.T("share.notice.textShortened", Fitted(part)));
                 return block.ToString();
             }
         }
@@ -356,7 +360,7 @@ public static class ShareComposer
             return after;
         if (after.Length == 0)
             return before;
-        return before + "\n\n[\u2026 the selected passage, quoted above \u2026]\n\n" + after;
+        return before + "\n\n" + ShareStrings.T("share.message.selectionQuotedAbove") + "\n\n" + after;
     }
 
     private static ShareText.ShortenedText Take(string text, int budget, ref int remaining)
@@ -366,8 +370,16 @@ public static class ShareComposer
         return part;
     }
 
-    private static string Shortened(string what, ShareText.ShortenedText part) =>
-        $"Only part of {what} fitted: {part.Text.Length:N0} of {part.OriginalLength:N0} characters were sent.";
+    /// <summary>The placeholders of an "only part of … fitted" notice: characters sent, of how many.</summary>
+    private static (string Name, object? Value)[] Fitted(ShareText.ShortenedText part)
+    {
+        CultureInfo culture = ShareStrings.Culture;
+        return new (string Name, object? Value)[]
+        {
+            ("sent", part.Text.Length.ToString("N0", culture)),
+            ("total", part.OriginalLength.ToString("N0", culture)),
+        };
+    }
 
     /// <summary>
     /// Fence shared content so the model can see where it starts and stops.
@@ -396,8 +408,8 @@ public static class ShareComposer
     private static string DescribeFiles(IReadOnlyList<ShareItem> files)
     {
         if (files.Count == 1)
-            return "Shared file: " + Describe(files[0]);
-        var lines = new StringBuilder("Shared files:");
+            return ShareStrings.T("share.message.file", ("file", Describe(files[0])));
+        var lines = new StringBuilder(ShareStrings.T("share.message.files"));
         foreach (ShareItem file in files)
             lines.Append("\n- ").Append(Describe(file));
         return lines.ToString();
@@ -405,17 +417,26 @@ public static class ShareComposer
         static string Describe(ShareItem file)
         {
             string name = ShareEnvelopeWriter.SafeFileName(file.FileName);
-            return file.Bytes > 0 ? $"{name} ({Bytes(file.Bytes)})" : name;
+            return file.Bytes > 0
+                ? ShareStrings.T("share.message.fileWithSize", ("name", name), ("size", Bytes(file.Bytes)))
+                : name;
         }
     }
 
-    private static string Bytes(long bytes) => bytes switch
+    private static string Bytes(long bytes)
     {
-        >= 1024L * 1024 * 1024 => $"{bytes / (1024.0 * 1024 * 1024):0.#} GB",
-        >= 1024 * 1024 => $"{bytes / (1024.0 * 1024):0.#} MB",
-        >= 1024 => $"{bytes / 1024.0:0.#} kB",
-        _ => $"{bytes} bytes",
-    };
+        CultureInfo culture = ShareStrings.Culture;
+        return bytes switch
+        {
+            >= 1024L * 1024 * 1024 => ShareStrings.T("share.message.size.gb",
+                ("size", (bytes / (1024.0 * 1024 * 1024)).ToString("0.#", culture))),
+            >= 1024 * 1024 => ShareStrings.T("share.message.size.mb",
+                ("size", (bytes / (1024.0 * 1024)).ToString("0.#", culture))),
+            >= 1024 => ShareStrings.T("share.message.size.kb",
+                ("size", (bytes / 1024.0).ToString("0.#", culture))),
+            _ => ShareStrings.T("share.message.size.bytes", ("size", bytes)),
+        };
+    }
 
     /// <summary>
     /// What to ask when the user asked nothing.
@@ -436,9 +457,9 @@ public static class ShareComposer
             || textual.Any(i => i.Kind == ShareItemKinds.Page && i.Text.Trim().Length == 0 && i.Selection.Trim().Length == 0);
 
         if (hasPageText)
-            return "Summarize this page and tell me what matters in it.";
+            return ShareStrings.T("share.message.prompt.page");
         if (hasText)
-            return "Summarize this and tell me what matters in it.";
+            return ShareStrings.T("share.message.prompt.text");
         if (hasLinkOnly && files.Count == 0)
         {
             // NOT "what can you tell me about this link". Nothing in this app fetches a
@@ -446,14 +467,13 @@ public static class ShareComposer
             // and every non-Safari browser lands here, because Chrome, Edge, Firefox and
             // Outlook vend the address and nothing else. Asking a small local model
             // about a page it cannot read is asking it to invent one.
-            return "I shared a link. You cannot open pages, so tell me what the address "
-                + "and title suggest, and ask me to paste the text if you need it.";
+            return ShareStrings.T("share.message.prompt.link");
         }
         if (files.Count > 0 && textual.Count == 0)
             return files.Count == 1
-                ? "Take a look at this file and tell me what is in it."
-                : "Take a look at these files and tell me what is in them.";
-        return "Take a look at what I shared and tell me what matters in it.";
+                ? ShareStrings.T("share.message.prompt.file")
+                : ShareStrings.T("share.message.prompt.files");
+        return ShareStrings.T("share.message.prompt.anything");
     }
 
     /// <summary>
@@ -488,6 +508,8 @@ public static class ShareComposer
         if (files.Count > 0)
             return ShareEnvelopeWriter.SafeFileName(files[0].FileName);
         string source = ShareText.FirstLine(payload.SourceApp, 40);
-        return source.Length > 0 ? "Shared from " + source : "Shared";
+        return source.Length > 0
+            ? ShareStrings.T("share.chat.sharedFrom", ("app", source))
+            : ShareStrings.T("share.chat.shared");
     }
 }

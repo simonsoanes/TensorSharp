@@ -25,7 +25,8 @@ using TensorSharp.GGML;
 using TensorSharp.MLX;
 
 namespace TensorSharp.Models
-{
+{
+
     // First-call warm-up: force lazy kernel compilation (Metal pipelines, CUDA JIT,
     // allocator pools) before the first real request, plus the integrated-GPU and
     // host-backed-weight warnings that only make sense at that moment.
@@ -99,7 +100,7 @@ namespace TensorSharp.Models
                 // that makes `--backend cpu` look hung at startup for no benefit.
                 // TS_PREFILL_WARMUP_LEN overrides (e.g. to pre-size the prefill
                 // gallocr on roomy GPUs); a larger value does NOT reliably help a
-                // near-full GPU because the legacy ForwardRefill warmup graph sizes
+                // near-full GPU because the single-sequence ForwardRefill warmup graph sizes
                 // the reused gallocr differently than the engine prefill graph.
                 // Integrated GPUs (unified-memory iGPUs: Intel UHD / AMD APU via
                 // ggml-vulkan, Tegra via ggml-cuda) are memory-bandwidth bound and
@@ -153,7 +154,7 @@ namespace TensorSharp.Models
                 bool conservativeWarmup = UsesLightweightPrefillWarmupByDefault(_backend)
                     || integratedGpu || mostlyHostBacked || moeUnderTp;
                 // 2048 matches ComputePrefillChunkSize, so the warmup runs ONE
-                // fused verify chunk at the largest legacy-chunk shape: the shared
+                // fused verify chunk at the largest single-sequence chunk shape: the shared
                 // reuse-gallocr is pre-grown (and its device memory first-touched)
                 // for every prompt up to 2048 tokens, which covers typical chat
                 // prompts. Measured on gemma4-12B/Vulkan: first ~2k-token request
@@ -223,9 +224,7 @@ namespace TensorSharp.Models
                 }
 
                 if (_backend == BackendType.Cuda &&
-                    NativeCudaPrimeShortDecodeGraphAfterPrefill &&
-                    CudaPrefillGraphCache.Enabled &&
-                    CudaPrefillGraphCache.DecodeEnabled)
+                    NativeCudaPrimeShortDecodeGraphAfterPrefill)
                 {
                     try
                     {
@@ -358,6 +357,7 @@ namespace TensorSharp.Models
         private static bool IsMlxKernelWarmupEnabled()
         {
             return string.Equals(Environment.GetEnvironmentVariable("TS_MLX_KERNEL_WARMUP"), "1", StringComparison.Ordinal);
-        }
+        }
+
     }
 }

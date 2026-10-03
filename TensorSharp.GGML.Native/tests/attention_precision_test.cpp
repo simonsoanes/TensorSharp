@@ -718,6 +718,7 @@ static void benchmark(ggml_backend_t allocator, ggml_backend_t backend,
 #ifdef TSG_GGML_USE_CUDA
 #include "attention_scheduler_stress.h"
 #endif
+#include "vision_attention_test.h"
 
 int main(int argc, char ** argv)
 {
@@ -740,7 +741,8 @@ int main(int argc, char ** argv)
             sparse_scheduler ? std::atoi(argv[6]) : 0);
     const bool sparse_bench = argc == 7 && std::strcmp(argv[1], "--benchmark-sparse") == 0;
     const bool dsv41_bench = argc == 6 && std::strcmp(argv[1], "--benchmark-dsv41-prefill") == 0;
-    const bool bench = sparse_bench || dsv41_bench || (argc == 6 && std::strcmp(argv[1], "--benchmark") == 0);
+    const bool vision_bench = argc == 6 && std::strcmp(argv[1], "--benchmark-vision") == 0;
+    const bool bench = sparse_bench || dsv41_bench || vision_bench || (argc == 6 && std::strcmp(argv[1], "--benchmark") == 0);
     require(argc == 1 || bench, "Usage: attention_precision_test [--benchmark|--benchmark-dsv41-prefill|--scheduler-stress queries keys heads repeats] or --benchmark-sparse queries keys heads repeats capacity");
     check_sparse_gate();
     for (int device = 0; device < devices; ++device)
@@ -749,9 +751,10 @@ int main(int argc, char ** argv)
         require(cuda != nullptr, "Cannot initialize visible CUDA device");
         auto * backend = tsg_dsv4_fused_backend_init(cuda);
         require(backend != nullptr, "Cannot initialize TensorSharp attention backend");
-        if (bench) benchmark(cuda, backend, std::atoi(argv[2]), std::atoi(argv[3]), std::atoi(argv[4]), std::atoi(argv[5]),
+        if (vision_bench) benchmark_vision(cuda, backend, std::atoi(argv[2]), std::atoi(argv[3]), std::atoi(argv[4]), std::atoi(argv[5]));
+        else if (bench) benchmark(cuda, backend, std::atoi(argv[2]), std::atoi(argv[3]), std::atoi(argv[4]), std::atoi(argv[5]),
             sparse_bench ? std::atoi(argv[6]) : 0, dsv41_bench);
-        else run(cuda, backend);
+        else { run(cuda, backend); run_vision(cuda, backend); }
         ggml_backend_free(backend);
         ggml_backend_free(cuda);
         if (bench) break;
@@ -763,6 +766,7 @@ int main(int argc, char ** argv)
     require(backend != nullptr, "Cannot initialize CPU attention backend");
     ggml_backend_cpu_set_n_threads(backend, 4);
     run(backend, backend);
+    run_vision(backend, backend);
     ggml_backend_free(backend);
 #endif
     return 0;

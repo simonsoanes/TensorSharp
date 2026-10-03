@@ -84,7 +84,7 @@ namespace TensorSharp.Cuda
             return hm;
         }
 
-        private HostQW StageHost(in QuantWeightDesc d)
+        private HostQW StageHost(in CudaWeightDesc d)
         {
             if (!d.IsValid)
                 throw new InvalidOperationException("[dsv4-cuda] cannot offload an expert weight that has no source");
@@ -97,7 +97,7 @@ namespace TensorSharp.Cuda
                 // no second 3 GiB of RAM per layer.
                 host = d.HostPtr;
             }
-            else if (d.Source is IDsv4MappedWeightSource ms && ms.TryMapRange(d.SourceOffset, bytes, out IntPtr mapped))
+            else if (d.Source is ICudaMappedWeightSource ms && ms.TryMapRange(d.SourceOffset, bytes, out IntPtr mapped))
             {
                 // Borrow the shard's file mapping. File-backed pages are page
                 // cache the kernel can evict and re-read on demand, so experts

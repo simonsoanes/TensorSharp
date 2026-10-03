@@ -65,13 +65,22 @@ internal sealed class FakeValidator : IPayloadValidator
 {
     internal readonly HashSet<string> Refused = new(StringComparer.Ordinal);
     internal Func<string, int, int, bool>? Rule;
+    /// <summary>The model's answer for a primary rewind past the donation slack (payload, target).</summary>
+    internal Func<int, int, bool>? PrimaryRule;
     internal int Calls;
+    internal int PrimaryCalls;
 
     public bool CanMaterialize(string payloadKey, int payloadTokens, int targetTokens)
     {
         Calls++;
         if (Refused.Contains(payloadKey)) return false;
         return Rule?.Invoke(payloadKey, payloadTokens, targetTokens) ?? true;
+    }
+
+    public bool CanRewindPrimary(int payloadTokens, int targetTokens)
+    {
+        PrimaryCalls++;
+        return PrimaryRule?.Invoke(payloadTokens, targetTokens) ?? true;
     }
 }
 
@@ -105,7 +114,6 @@ internal static class Tk
         ResourceVector subCap = default) => new()
         {
             Class = FamilyClass.P,
-            Readiness = PrefixCacheMode.Legacy,
             NamespaceFingerprint = "test-fp",
             EndState = endState,
             CanCaptureCopy = true,

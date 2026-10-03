@@ -24,7 +24,7 @@
 //   - Final logit softcap
 //
 // NotSupported (throws -> per-seq fallback handles them):
-//   - MoE layers (HasMoE(l)) - the legacy fused-MoE path is highly
+//   - MoE layers (HasMoE(l)) - the single-sequence fused-MoE path is highly
 //     optimised; replicating it for batched would itself be multi-day
 //   - KV donor layers (isShared) - K/V sharing across layers requires
 //     refcount-based block aliasing in the BlockPool, separate piece
@@ -35,7 +35,6 @@ using System;
 using System.Collections.Generic;
 using TensorSharp;
 using TensorSharp.GGML;
-using TensorSharp.Models.Paged;
 using TensorSharp.Runtime.Paged;
 using TensorSharp.Runtime.Scheduling;
 
@@ -60,20 +59,16 @@ namespace TensorSharp.Models
         /// <summary>Declared availability of the batched path (see
         /// <see cref="IBatchedPagedModel.BatchedForwardAvailable"/>). Mirrors
         /// the STATIC gates <see cref="ForwardBatch"/> enforces with
-        /// NotSupportedException - the TS_GEMMA4_BATCHED opt-out, MoE layers
-        /// (the batched kernels can't run them), and a block-quantized (Q8_0)
-        /// KV cache - so <c>ExecutionPlanner</c> routes around the batched
-        /// path up front. The per-request multimodal-pending gate stays
-        /// dynamic inside ForwardBatch.</summary>
+        /// NotSupportedException - MoE layers (the batched kernels can't run
+        /// them) and a block-quantized (Q8_0) KV cache - so
+        /// <c>ExecutionPlanner</c> routes around the batched path up front. The
+        /// per-request multimodal-pending gate stays dynamic inside
+        /// ForwardBatch.</summary>
         public bool BatchedForwardAvailable
         {
             get
             {
                 if (IsTensorParallel) return false;
-                string optOut = Environment.GetEnvironmentVariable("TS_GEMMA4_BATCHED");
-                if (string.Equals(optOut, "0", StringComparison.Ordinal) ||
-                    string.Equals(optOut, "false", StringComparison.OrdinalIgnoreCase))
-                    return false;
                 if (_kvCacheDtype.IsBlockQuantized())
                 {
                     if (!_g4BatchedKvDtypeWarned)
@@ -125,22 +120,10 @@ namespace TensorSharp.Models
                 CountDecodeGraphReset();
             }
 
-            // Disable gate. The batched path is now the DEFAULT for Gemma 4
-            // (correctness verified against legacy through 42 layers; see
-            // Gemma4BatchedForwardTests). Set TS_GEMMA4_BATCHED=0 to opt OUT
-            // and force the per-seq KV-swap fallback - useful only for
-            // bisecting performance or debugging the batched kernel itself.
-            // The fallback can't serve sequences past the SWA window (512
-            // tokens) because the per-sequence KV-swap requires snapshot,
-            // and snapshot is only well-defined inside the linear window,
-            // so the default needs to be the batched path that has no
-            // such limit.
-            string optOut = Environment.GetEnvironmentVariable("TS_GEMMA4_BATCHED");
-            if (string.Equals(optOut, "0", StringComparison.Ordinal) ||
-                string.Equals(optOut, "false", StringComparison.OrdinalIgnoreCase))
-                throw new NotSupportedException(
-                    "Gemma 4 batched: disabled via TS_GEMMA4_BATCHED=0.");
-
+            // The per-seq KV-swap path cannot serve sequences past the SWA
+            // window (512 tokens): the swap needs a snapshot, and a snapshot is
+            // only well-defined inside the linear window. This path has no such
+            // limit.
             if (_pendingVisionEmbeddingsList.Count > 0 || _pendingAudioEmbeddingsList.Count > 0)
                 throw new NotSupportedException(
                     "Gemma 4 batched: multimodal embeddings pending; per-seq fallback.");
@@ -229,7 +212,7 @@ namespace TensorSharp.Models
                 int slidingWindow = isLocal ? _slidingWindow : 0;
                 // Gemma 4 folds the 1/sqrt(head_dim) factor into the
                 // Q-norm weights, so attention compute uses scale=1.
-                // Matches the legacy FusedPrefillAttention call which
+                // Matches the single-sequence FusedPrefillAttention call which
                 // passes 1.0f as the scale.
                 float scale = 1.0f;
                 var (ropeBase, ropeDims) = RopeForLayer(layer);
@@ -289,7 +272,7 @@ namespace TensorSharp.Models
 
                 // NeoX RoPE: always on Q, on K only if this layer computed K.
                 // Global layers also apply per-dim freq_factors scaling
-                // ("rope_freqs.weight") to match the legacy Forward path.
+                // ("rope_freqs.weight") to match the single-sequence Forward path.
                 Tensor ropeFreqFactors =
                     !isLocal && _weights.TryGetValue("rope_freqs.weight", out var rff) ? rff : null;
                 using (var posTensorQ = BuildRoPEPositionsTensor(positions, numHeads))
@@ -494,7 +477,7 @@ namespace TensorSharp.Models
             // but that scaling path is currently only implemented in the
             // GGML backend's RoPEExWithFreqFactors helper. On non-GGML
             // backends (e.g. MLX) we fall through to Ops.RoPEEx (no
-            // scaling); the resulting K mismatches the legacy Forward
+            // scaling); the resulting K mismatches the single-sequence Forward
             // path's K only on global layers, and the visible quality
             // hit is small for short prompts. Plumbing freq_factors
             // through Ops.RoPEEx for other backends is a follow-up.
@@ -540,7 +523,7 @@ namespace TensorSharp.Models
 
         /// <summary>
         /// True when this model can be asked to copy a sequence's K/V history
-        /// from the legacy linear cache (where <c>Forward()</c> writes it)
+        /// from the linear cache (where <c>Forward()</c> writes it)
         /// into the paged storage (where <c>ForwardBatch</c> reads from). The
         /// batched path already rejects Q8_0 KV cache anyway, so we don't
         /// claim migration support in that case.

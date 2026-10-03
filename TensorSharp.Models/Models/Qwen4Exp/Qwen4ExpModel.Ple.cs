@@ -336,9 +336,32 @@ namespace TensorSharp.Models
             InvalidateTensorDeviceCache(dest);
         }
 
+        // The n-gram table is read from the GGUF mapping on demand and never uploaded,
+        // so a row not in the page cache is a page fault that goes to the SSD.
+        private bool _pleTableOnDisk;
+
+        /// <summary>
+        /// The table is ~29 GB of rows read at random, ple_n_heads of them a token -
+        /// llama.cpp's lazily read tensor. Advise the kernel accordingly, so a fault
+        /// reads the row's page and not a read-ahead cluster around it.
+        /// </summary>
+        private void PreparePleTableAccess()
+        {
+            if (_pleHeads <= 0
+                || !_quantWeights.TryGetValue("per_layer_token_embd.weight", out var qw)
+                || !qw.IsFileBacked)
+                return;
+            _pleTableOnDisk = true;
+            bool advised = qw.AdviseRandomAccess();
+            Console.WriteLine($"  PLE n-gram table: {qw.RawBytes / 1e9:F1} GB read on demand from the GGUF mapping, " +
+                $"{_pleHeads} rows a token" + (advised ? " (random-access advice)." : "."));
+        }
+
         /// <summary>
         /// Gather the n-gram rows into a raw [T * hidden] float buffer - the span
-        /// uploads it as a graph input.
+        /// uploads it as a graph input. A row read from disk costs a page fault, so a
+        /// table on disk is fetched in parallel even for one token: its rows are
+        /// independent faults the SSD can serve concurrently.
         /// </summary>
         private unsafe void GatherPleRowsRaw(float* dst, int[] rows, int seqLen)
         {
@@ -360,7 +383,7 @@ namespace TensorSharp.Models
                         (IntPtr)((float*)dstA + (long)i * dim),
                         dim);
                 }
-                if (rows.Length >= PleParallelThreshold * _pleHeads)
+                if (rows.Length >= PleParallelThreshold * _pleHeads || (_pleTableOnDisk && rows.Length > 1))
                     Parallel.For(0, rows.Length, DequantRow);
                 else
                     for (int i = 0; i < rows.Length; i++) DequantRow(i);

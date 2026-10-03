@@ -465,13 +465,7 @@ public class Qwen35ImageFollowUpExactnessTests
             Assert.True(mmproj != null && File.Exists(mmproj),
                 "The Qwen3.5-9B vision projector was not found: set TS_TEST_QWEN35_MMPROJ.");
 
-            BackendType backend = (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "cpu")
-                .Trim().ToLowerInvariant() switch
-            {
-                "metal" => BackendType.GgmlMetal,
-                "cuda" => BackendType.GgmlCuda,
-                _ => BackendType.GgmlCpu,
-            };
+            BackendType backend = TestGates.PinnedGgmlBackend;
 
             string temp = Path.Combine(Path.GetTempPath(), "q35-img-exact-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(temp);

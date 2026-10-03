@@ -201,7 +201,7 @@ namespace TensorSharp.AgentHost.CodeExec
         {
             yield return directory;
 
-            if (OperatingSystem.IsMacOS())
+            if (HostOS.IsMacDesktop)
             {
                 if (directory.StartsWith("/private/", StringComparison.Ordinal))
                     yield return directory.Substring("/private".Length);

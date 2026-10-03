@@ -40,7 +40,7 @@ namespace TensorSharp.Models
     /// <summary>Arithmetic of the CPU attention micro-kernels.</summary>
     internal enum DiffusionAttnKernel
     {
-        /// <summary>Bit for bit the legacy per-pair kernel (TensorComputePrimitives.Dot, scalar
+        /// <summary>Bit for bit the scalar per-pair kernel (TensorComputePrimitives.Dot, scalar
         /// MathF.Exp, in-order sum, multiply-then-add value accumulation) - only blocked and parallel.</summary>
         Exact,
         /// <summary><see cref="Vector{T}"/> FMA tiles (AVX2 / AdvSimd) and a vectorized softmax.</summary>
@@ -57,12 +57,9 @@ namespace TensorSharp.Models
     /// quantized to Q8 before every matmul (a one-ulp change can move an element across a rounding
     /// step) and each layer picks a top-8 of 128 experts. Measured on diffusiongemma-26B-A4B, a
     /// structured read's label probability moved from 0.43 to 0.30-0.74 when only the attention's
-    /// float grouping changed. So everything here reproduces the arithmetic of the Ops chain it
-    /// replaced as that chain computed before the Core CPU rewrite (TS_CPU_SIMD_ELEMENTWISE /
-    /// TS_CPU_SGEMM / TS_CPU_QGEMM, whose defaults now round differently), which is what makes the new
-    /// CPU forward bitwise-checkable against the old one - with the whole rollback recipe
-    /// (DiffusionGemmaModel.Cpu.cs), not DIFFUSION_CPU_LEGACY=1 alone. The
-    /// attention is a fraction of a percent of a forward at Jev/chat prompt lengths, so the exact
+    /// float grouping changed. So everything here keeps the arithmetic of the scalar Ops chain it
+    /// replaced (the Core CPU kernels round differently), which is what makes this CPU forward
+    /// bitwise-checkable against the reference implementations in the tests. The attention is a fraction of a percent of a forward at Jev/chat prompt lengths, so the exact
     /// kernel is the default; <c>DIFFUSION_CPU_ATTN_FAST=1</c> selects FMA tiles (Vector512 when the
     /// hardware accelerates it; <c>TS_CPU_DISABLE_AVX512=1</c> keeps them at Vector&lt;T&gt;) and a
     /// vectorized softmax for long prompts, where attention grows quadratically.
@@ -87,8 +84,8 @@ namespace TensorSharp.Models
 
         // ------------------------------------------------------------------------------------
         //  Per-head RMSNorm (+ optional NeoX RoPE), one row.
-        //  Bitwise identical to the pre-SIMD Ops.RMSNorm - the one TS_CPU_SIMD_ELEMENTWISE=0 still
-        //  runs: a single-accumulator Vector<float> sum of squares and the (x*invRms)*gamma product
+        //  Bitwise identical to the scalar Ops.RMSNorm formula: a single-accumulator Vector<float> sum
+        //  of squares and the (x*invRms)*gamma product
         //  order (the default CpuKernels.RmsNormRow sums in two wider accumulators, so its bits
         //  differ) - followed by ApplyNeoXRoPERaw's (x0*c - x1*s, x0*s + x1*c), with no FMA
         //  contraction, so one pass replaces three.
@@ -163,9 +160,8 @@ namespace TensorSharp.Models
         }
 
         // ------------------------------------------------------------------------------------
-        //  GELU(gate) * up, bit for bit what Ops.GELUMul computed on the CPU backend before the SIMD
-        //  rewrite and still computes under TS_CPU_SIMD_ELEMENTWISE=0 (TensorApplyCPU: the tanh
-        //  approximation with a double-precision Math.Tanh); the default CpuKernels.GeluMul uses a
+        //  GELU(gate) * up, bit for bit the scalar Ops.GELUMul formula (the tanh approximation with a
+        //  double-precision Math.Tanh); CpuKernels.GeluMul uses a
         //  vectorized sigmoid form and differs by a few ulp. Kept scalar on purpose: a vectorized
         //  float tanh is a few ulp off (see the class remarks). Run over the pool it costs well
         //  under 1% of a layer; the reference ran on one thread.
@@ -216,9 +212,8 @@ namespace TensorSharp.Models
 
         /// <summary>Router dot with the arithmetic of the managed F32 GEMM's 4x4 row-column kernel
         /// (TensorSharp.Cpu DotContiguousFourByFour: one Vector&lt;float&gt; accumulator of
-        /// multiply-then-add, lane sum, scalar tail), which scores every token of a 4-row block in the
-        /// legacy linear (the matmul TS_CPU_SGEMM=0 restores; the default packed SGEMM sums in another
-        /// order). Unlike that GEMM it does not switch kernels for a trailing partial block, so
+        /// multiply-then-add, lane sum, scalar tail), which scores every token of a 4-row block (the
+        /// packed SGEMM sums in another order). Unlike that GEMM it does not switch kernels for a trailing partial block, so
         /// a token's scores never depend on how many rows share the call - the prompt-KV decode needs
         /// that to route each canvas token exactly as the unified forward does.</summary>
         internal static float RouterDot(float* a, float* b, int n)
@@ -237,7 +232,7 @@ namespace TensorSharp.Models
         //  Region-aware attention (scale 1.0: the learnable Q/K norms absorb 1/sqrt(d)).
         //
         //  Work item = (group, query head, block of QueryBlock queries), spread over the persistent
-        //  CPU pool; the legacy kernel ran one ThreadPool task per head (16 tasks). Inside an item
+        //  CPU pool; the per-head kernel ran one ThreadPool task per head (16 tasks). Inside an item
         //  the queries go MicroQ=4 at a time over the UNION of their key intervals (adjacent causal
         //  queries differ by a key or two, canvas queries share one interval), so every K and V row
         //  read feeds four queries. Keys outside a query's own interval get a weight of exactly 0,
@@ -363,7 +358,7 @@ namespace TensorSharp.Models
 
         /// <summary>r[i] = dot(q_i, k) for four queries against one key, each with exactly
         /// TensorComputePrimitives.Dot's arithmetic (two interleaved Vector&lt;float&gt; accumulators of
-        /// multiply-then-add, their sum, one more vector step, lane sum, scalar tail) - the legacy
+        /// multiply-then-add, their sum, one more vector step, lane sum, scalar tail) - the scalar
         /// kernel's VecDot - while loading every K chunk once for all four.</summary>
         internal static void Dot4x1Exact(float** qp, float* k, int hd, float* r)
         {
@@ -465,7 +460,7 @@ namespace TensorSharp.Models
         }
 
         /// <summary>In place: row[j] = softmax over [a, b) and exactly 0 elsewhere. The exact kernel
-        /// keeps the legacy max, scalar MathF.Exp(s - max), in-order sum and (e * 1/sum); the FMA
+        /// keeps the reference max, scalar MathF.Exp(s - max), in-order sum and (e * 1/sum); the FMA
         /// kernels use the vectorized TensorPrimitives max/exp/sum (a few ulp and a re-associated sum),
         /// since at long prompts the ~P^2/2 scalar exps per head become the attention's largest cost.</summary>
         private static void SoftmaxInterval(float* row, int L, int a, int b, bool vectorized)
@@ -514,7 +509,7 @@ namespace TensorSharp.Models
         }
 
         /// <summary>o_i = sum_j p[i][j] * V_j for the (up to) four queries of a micro-block, keys in order.
-        /// The exact kernel accumulates v * w with a separate multiply and add, as the legacy
+        /// The exact kernel accumulates v * w with a separate multiply and add, as the reference
         /// VecScaleAdd did; the fast ones fuse it.</summary>
         private static void WeightedValues(float* p, int L, int lo, int lenA, float* vA, float* vB, long kvStride,
             int hd, float** op, int n, DiffusionAttnKernel kernel)
@@ -612,7 +607,7 @@ namespace TensorSharp.Models
                     if (n > 2) { Unsafe.WriteUnaligned(op[2] + c, o20); Unsafe.WriteUnaligned(op[2] + c + vLen, o21); }
                     if (n > 3) { Unsafe.WriteUnaligned(op[3] + c, o30); Unsafe.WriteUnaligned(op[3] + c + vLen, o31); }
                 }
-                // A single-vector step keeps the exact kernel on the legacy VecScaleAdd's vector lanes
+                // A single-vector step keeps the exact kernel on the reference VecScaleAdd's vector lanes
                 // for head dims that are an odd number of vectors.
                 for (; c <= hd - vLen; c += vLen)
                 {

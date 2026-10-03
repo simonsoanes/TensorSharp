@@ -288,11 +288,12 @@ namespace TensorSharp.Models
         /// [numKVHeads / tp, rows, headDim] on that rank's allocator, so the
         /// cache is split across GPUs exactly like the heads that fill it.
         ///
-        /// The sliding-window RING is preserved unchanged. Its row count is a
-        /// function of the MAX context and the prefill chunk only - both
-        /// rank-independent - so <see cref="KvRow"/> and <see cref="KvRows"/>
-        /// keep working as written, and a ring layer is allocated at its final
-        /// size here and never revisited by the grow path.
+        /// <see cref="ResolveSwaRows"/> keeps every layer uniform under tensor
+        /// parallelism today (the ring read is wrong with one KV head per rank), so
+        /// the ring branch below is dormant. It is written generically because the
+        /// ring's row count is a function of the MAX context and the prefill chunk
+        /// only - both rank-independent - so a ring layer would be allocated at its
+        /// final size here and never revisited by the grow path.
         ///
         /// <see cref="ZeroCacheTensor"/>, not
         /// <see cref="ModelBase.InitializeCacheTensor"/>: the fused kernel reads
@@ -384,6 +385,9 @@ namespace TensorSharp.Models
             // path wrote on-device has to come back to the host first or the
             // copy below would carry a stale mirror into the new buffers.
             SyncMuseGlimmerTpKvCacheToHost();
+            // The persistent per-rank decode graphs are bound to those device
+            // copies; drop them before any is freed below.
+            ResetFusedDecodeCache();
 
             for (int l = 0; l < Config.NumLayers; l++)
             {
@@ -409,6 +413,15 @@ namespace TensorSharp.Models
                             Ops.Copy(dstV, srcV);
                     }
 
+                    // Same bookkeeping as the single-GPU grow: the host copies are
+                    // authoritative for the new tensors (a recycled pool block can
+                    // still carry a previous tenant's device copy), and the old
+                    // device copies are freed while their host pointer is still the
+                    // key instead of leaking on every grow.
+                    InvalidateTensorDeviceCache(newK);
+                    InvalidateTensorDeviceCache(newV);
+                    InvalidateTensorDeviceCache(_tpKvCacheK[l][r]);
+                    InvalidateTensorDeviceCache(_tpKvCacheV[l][r]);
                     _tpKvCacheK[l][r].Dispose();
                     _tpKvCacheV[l][r].Dispose();
                     _tpKvCacheK[l][r] = newK;
@@ -417,6 +430,12 @@ namespace TensorSharp.Models
             }
 
             _kvCacheCapacity = newCapacity;
+            // The snapshot path's flattened views still hold the disposed tensors, and
+            // EnsureTpKvFlatViews only rebuilds when their COUNT changes - which a grow
+            // never does - so every later extract/inject would read a freed storage
+            // and refuse. Drop them; the next snapshot call rebuilds over the new ones.
+            _tpKvFlatK = null;
+            _tpKvFlatV = null;
             // Every parked per-rank graph baked the old KV addresses and the old
             // cache extent; replaying one against the reallocated buffers hangs.
             ResetMuseGlimmerTpGraphs();

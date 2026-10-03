@@ -9,7 +9,7 @@ using System;
 namespace TensorSharp.Runtime.Scheduling
 {
     /// <summary>
-    /// Operator-level execution-path overrides for the engine's step routing,
+    /// Operator-level settings for the engine's step routing and cache budgets,
     /// read from <c>TS_*</c> environment variables in ONE place instead of
     /// scattered <c>Environment.GetEnvironmentVariable</c> checks at each
     /// decision point. <see cref="BatchExecutor"/> materialises a snapshot per
@@ -17,29 +17,21 @@ namespace TensorSharp.Runtime.Scheduling
     /// so the values are deliberately NOT cached for the process lifetime) and
     /// hands it to <see cref="ExecutionPlanner"/> together with the model's
     /// <see cref="ExecutionCapabilities"/>.
-    ///
-    /// Every flag keeps the exact parse semantics of the check it replaced so
-    /// existing deployments and A/B scripts behave identically.
     /// </summary>
     public sealed record ExecutionOptions
     {
-        /// <summary>Force the per-sequence KV-swap fallback even when the model
-        /// implements <see cref="IBatchedPagedModel"/>. Used to A/B the batched
-        /// and per-sequence paths on the same workload.
-        /// Env: <c>TS_SCHED_DISABLE_BATCHED</c> (default off).</summary>
+        /// <summary>Force the per-sequence KV-swap path even when the model
+        /// implements <see cref="IBatchedPagedModel"/>. Env:
+        /// <c>TS_SCHED_DISABLE_BATCHED</c> (default off), which
+        /// <c>--no-continuous-batching</c> sets.</summary>
         public bool BatchedPathDisabled { get; init; }
-
-        /// <summary>Serve a solo scheduled sequence through the model's fused
-        /// single-graph <c>Forward</c> (linear KV cache) instead of the op-by-op
-        /// batched path — dramatically faster on models with a fused decode
-        /// kernel. Env: <c>TS_BATCHED_N1_FAST_PATH</c> (default on; set 0 to A/B
-        /// the fully-batched path).</summary>
-        public bool BatchedN1FastPathEnabled { get; init; } = true;
 
         /// <summary>Serve concurrent (N&gt;=2) sequences on fused-capable models
         /// by running each through its own fused Forward with a per-request KV
-        /// cache. Env: <c>TS_PER_SEQ_FUSED</c> (default on; set 0 to force the
-        /// op-by-op batched paged path for A/B or debugging).</summary>
+        /// cache (a holder). Env: <c>TS_PER_SEQ_FUSED</c> (default on). 0 serves
+        /// them on the op-by-op batched paged path instead, whose K/V lives in the
+        /// engine's shared host block pool: no per-request device K/V, at the
+        /// batched path's lower decode rate and without retained holders.</summary>
         public bool PerSeqFusedEnabled { get; init; } = true;
 
         /// <summary>TRUE token-batched fused decode inside the per-sequence
@@ -49,31 +41,38 @@ namespace TensorSharp.Runtime.Scheduling
         /// lifts concurrent decode from the round-robin ~1x ceiling to the
         /// vLLM-class batched rate, so it is ON by default; models that cannot
         /// batch a step decline per call and fall back per-sequence. Env:
-        /// <c>TS_BATCHED_FUSED_DECODE</c> (set 0 to disable for A/B).</summary>
+        /// <c>TS_BATCHED_FUSED_DECODE</c>: 0 decodes each sequence in its own
+        /// fused forward, whose output does not depend on which requests share
+        /// a step, at the round-robin rate.</summary>
         public bool BatchedFusedDecodeEnabled { get; init; } = true;
 
-        /// <summary>Retain finished request-owned fused holders for exact-prefix
-        /// continuation across requests. A holder may be attention K/V alone
-        /// (for example Gemma 4) or complete hybrid state (Qwen 3.5/3.6 keeps
-        /// both attention K/V and GatedDeltaNet recurrent state). Applies only
-        /// when the model advertises retained-holder support. Env:
-        /// <c>TS_RETAINED_FUSED_CACHE</c> (default on; kill-switch for A/B or
-        /// to cap VRAM use).</summary>
-        public bool RetainedFusedCacheEnabled { get; init; } = true;
+        /// <summary>How many finished conversations' end states (retained fused
+        /// holders, retained native slots) to keep alive for cross-request prefix
+        /// reuse; each pins the model's complete per-request continuation state
+        /// (attention K/V alone for Gemma 4, K/V plus GatedDeltaNet recurrent state
+        /// for the Qwen 3.5 family). Null when unset: the count then follows the
+        /// engine's concurrency (<see cref="RetainedFusedCacheBudgetFor"/>); 0 turns
+        /// retention off. Env: <c>TS_RETAINED_FUSED_CACHE_MAX</c>.</summary>
+        public int? RetainedFusedCacheBudget { get; init; }
 
-        /// <summary>How many finished fused holders to keep alive for
-        /// cross-request prefix reuse; each pins the model's complete
-        /// per-request continuation state, including recurrent state where
-        /// applicable. Env: <c>TS_RETAINED_FUSED_CACHE_MAX</c> (default 4).</summary>
-        public int RetainedFusedCacheBudget { get; init; } = 4;
+        /// <summary>The fewest end states an unset <see cref="RetainedFusedCacheBudget"/> keeps.</summary>
+        public const int MinDefaultRetainedFusedCacheBudget = 4;
 
-        /// <summary>Take a checkpoint of the model's state at the end of the prompt
-        /// prefix every conversation shares (see
-        /// <c>IBatchedPagedModel.SupportsPrefixCheckpoints</c>) and start each new
-        /// chat from a clone of it. Env: <c>TS_PREFIX_CHECKPOINTS</c> (default on).</summary>
-        public bool PrefixCheckpointsEnabled { get; init; } = true;
+        /// <summary>The end-state count in force for an engine that runs up to
+        /// <paramref name="maxRunningSequences"/> sequences at once. Unset, every
+        /// sequence that can run in parallel keeps its conversation's state for the
+        /// next turn: at a fixed 4, eight parallel conversations evicted each other's
+        /// and the four oldest re-prefilled every turn. The count is not what bounds
+        /// memory; the prefix tree evicts past the device and host headroom it
+        /// measures. An explicit value wins (TensorAgent pins 1 on the phone, and 0
+        /// turns retention off).</summary>
+        public int RetainedFusedCacheBudgetFor(int maxRunningSequences)
+            => RetainedFusedCacheBudget ?? Math.Max(MinDefaultRetainedFusedCacheBudget, maxRunningSequences);
 
-        /// <summary>How many public checkpoints to keep at once. A prompt now publishes
+        /// <summary>How many public checkpoints of the model's state at the end of the
+        /// prompt prefix every conversation shares (see
+        /// <c>IBatchedPagedModel.SupportsPrefixCheckpoints</c>) to keep; each new chat
+        /// starts from a clone of one, and 0 turns them off. A prompt publishes
         /// one per declared boundary (the end of the system instructions as well as the
         /// end of the shared prefix; see SequenceState.PublicCheckpointBoundaries), and a
         /// host that warms both thinking modes, whose prefixes differ from the first
@@ -118,12 +117,9 @@ namespace TensorSharp.Runtime.Scheduling
         public static ExecutionOptions FromEnvironment() => new()
         {
             BatchedPathDisabled = ReadFlag("TS_SCHED_DISABLE_BATCHED", false),
-            BatchedN1FastPathEnabled = ReadFlag("TS_BATCHED_N1_FAST_PATH", true),
             PerSeqFusedEnabled = ReadFlag("TS_PER_SEQ_FUSED", true),
             BatchedFusedDecodeEnabled = ReadFlag("TS_BATCHED_FUSED_DECODE", true),
-            RetainedFusedCacheEnabled = ReadFlag("TS_RETAINED_FUSED_CACHE", true),
-            RetainedFusedCacheBudget = ReadNonNegativeInt("TS_RETAINED_FUSED_CACHE_MAX", 4),
-            PrefixCheckpointsEnabled = ReadFlag("TS_PREFIX_CHECKPOINTS", true),
+            RetainedFusedCacheBudget = ReadOptionalNonNegativeInt("TS_RETAINED_FUSED_CACHE_MAX"),
             PrefixCheckpointBudget = ReadNonNegativeInt("TS_PREFIX_CHECKPOINTS_MAX", 4),
             KvInitialTokens = ReadNonNegativeInt("TS_KV_INITIAL_TOKENS", 0),
             KvGenerationReserveMax = ReadNonNegativeInt("TS_KV_GENERATION_RESERVE_MAX", 0),
@@ -136,12 +132,9 @@ namespace TensorSharp.Runtime.Scheduling
         {
             var parts = new System.Collections.Generic.List<string>();
             if (BatchedPathDisabled) parts.Add("TS_SCHED_DISABLE_BATCHED");
-            if (!BatchedN1FastPathEnabled) parts.Add("TS_BATCHED_N1_FAST_PATH=0");
             if (!PerSeqFusedEnabled) parts.Add("TS_PER_SEQ_FUSED=0");
             if (!BatchedFusedDecodeEnabled) parts.Add("TS_BATCHED_FUSED_DECODE=0");
-            if (!RetainedFusedCacheEnabled) parts.Add("TS_RETAINED_FUSED_CACHE=0");
-            if (RetainedFusedCacheBudget != 4) parts.Add($"TS_RETAINED_FUSED_CACHE_MAX={RetainedFusedCacheBudget}");
-            if (!PrefixCheckpointsEnabled) parts.Add("TS_PREFIX_CHECKPOINTS=0");
+            if (RetainedFusedCacheBudget is int retained) parts.Add($"TS_RETAINED_FUSED_CACHE_MAX={retained}");
             if (PrefixCheckpointBudget != 4) parts.Add($"TS_PREFIX_CHECKPOINTS_MAX={PrefixCheckpointBudget}");
             if (KvInitialTokens != 0) parts.Add($"TS_KV_INITIAL_TOKENS={KvInitialTokens}");
             if (KvGenerationReserveMax != 0) parts.Add($"TS_KV_GENERATION_RESERVE_MAX={KvGenerationReserveMax}");
@@ -150,7 +143,6 @@ namespace TensorSharp.Runtime.Scheduling
         }
 
         // Loose boolean: unset -> default; "0"/"false" -> false; anything else -> true.
-        // (The historical parse rule of the flags this type replaced.)
         private static bool ReadFlag(string name, bool fallback)
         {
             string? raw = Environment.GetEnvironmentVariable(name);
@@ -164,6 +156,14 @@ namespace TensorSharp.Runtime.Scheduling
             if (!string.IsNullOrEmpty(raw) && int.TryParse(raw, out int v) && v >= 0)
                 return v;
             return fallback;
+        }
+
+        private static int? ReadOptionalNonNegativeInt(string name)
+        {
+            string? raw = Environment.GetEnvironmentVariable(name);
+            if (!string.IsNullOrEmpty(raw) && int.TryParse(raw, out int v) && v >= 0)
+                return v;
+            return null;
         }
     }
 }

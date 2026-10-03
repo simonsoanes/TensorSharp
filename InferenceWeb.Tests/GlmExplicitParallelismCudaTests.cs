@@ -38,7 +38,6 @@ public sealed class GlmExplicitParallelismCudaTests(ITestOutputHelper output) : 
         env.Set("MAX_CONTEXT", "256");
         env.Set("TS_GLM_UBATCH", "16");
         env.Set("TS_GLM_THREADS", "2");
-        env.Set("TS_GLM_NGPU", "1");
 
         int[] prompt = Enumerable.Range(0, 37).Select(i => 3 + (i * 11) % 90).ToArray();
         const int steps = 8;
@@ -54,7 +53,6 @@ public sealed class GlmExplicitParallelismCudaTests(ITestOutputHelper output) : 
             }
         }
 
-        env.Set("TS_GLM_NGPU", null);
         using ModelBase parallel = ModelBase.Create(path, BackendType.GgmlCuda,
             tpDegree: tensorParallel ? 2 : 1, layerSplitDegree: tensorParallel ? 1 : 2);
         double worst = 0;

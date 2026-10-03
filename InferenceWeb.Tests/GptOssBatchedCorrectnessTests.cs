@@ -5,7 +5,7 @@
 //
 // TensorSharp is licensed under the BSD-3-Clause license found in the LICENSE file in the root directory of this source tree.
 //
-// GptOss batched vs legacy per-seq KV-swap correctness — greedy sampling on
+// GptOss batched vs per-seq KV-swap correctness — greedy sampling on
 // both paths for the same prompt; assert at least 50% prefix match across the
 // first several tokens. Some FP drift expected from batched-path numerical
 // reordering (managed paged attention with sinks vs the native fused per-seq
@@ -28,13 +28,15 @@ namespace InferenceWeb.Tests;
 public class GptOssBatchedCorrectnessTests
 {
     private const string EnvModelDir = "TS_TEST_MODEL_DIR";
-    private const string OptInVar = "TS_GPTOSS_BATCHED";
+    // --no-continuous-batching's variable: set to 1, every sequence takes the
+    // per-sequence path instead of the batched one.
+    private const string PerSequenceVar = "TS_SCHED_DISABLE_BATCHED";
 
     private readonly ITestOutputHelper _output;
     public GptOssBatchedCorrectnessTests(ITestOutputHelper output) { _output = output; }
 
     [ModelFact("TS_TEST_MODEL_DIR", "gpt-oss|gpt_oss|gptoss")]
-    public async Task GptOss_Greedy_LegacyAndBatchedAgree()
+    public async Task GptOss_Greedy_PerSequenceAndBatchedAgree()
     {
         var modelPath = FindGptOss();
         if (modelPath == null) { _output.WriteLine("[gptoss-corr] no model; skipping"); return; }
@@ -56,29 +58,29 @@ public class GptOssBatchedCorrectnessTests
         foreach (var prompt in prompts)
         {
             ctx.Model.ResetKVCache();
-            var legacyTokens = await GenerateGreedy(ctx, prompt, maxNewTokens, optIn: false);
+            var perSeqTokens = await GenerateGreedy(ctx, prompt, maxNewTokens, optIn: false);
 
             ctx.Model.ResetKVCache();
             var batchedTokens = await GenerateGreedy(ctx, prompt, maxNewTokens, optIn: true);
 
             int matchPrefix = 0;
-            int compareLen = Math.Min(legacyTokens.Count, batchedTokens.Count);
+            int compareLen = Math.Min(perSeqTokens.Count, batchedTokens.Count);
             for (int i = 0; i < compareLen; i++)
             {
-                if (legacyTokens[i] == batchedTokens[i]) matchPrefix++;
+                if (perSeqTokens[i] == batchedTokens[i]) matchPrefix++;
                 else break;
             }
             totalCompared += compareLen;
             totalMatching += matchPrefix;
 
-            string legacyText = ctx.Model.Tokenizer.Decode(legacyTokens);
+            string perSeqText = ctx.Model.Tokenizer.Decode(perSeqTokens);
             string batchedText = ctx.Model.Tokenizer.Decode(batchedTokens);
             _output.WriteLine(
                 $"[gptoss-corr] prompt=\"{Trim(prompt, 50)}\" " +
-                $"legacy=[{string.Join(",", legacyTokens)}] " +
+                $"perSeq=[{string.Join(",", perSeqTokens)}] " +
                 $"batched=[{string.Join(",", batchedTokens)}] " +
                 $"matchPrefix={matchPrefix}/{compareLen}");
-            _output.WriteLine($"  legacy:  \"{Trim(legacyText, 60)}\"");
+            _output.WriteLine($"  per-seq: \"{Trim(perSeqText, 60)}\"");
             _output.WriteLine($"  batched: \"{Trim(batchedText, 60)}\"");
         }
 
@@ -86,12 +88,12 @@ public class GptOssBatchedCorrectnessTests
         _output.WriteLine($"[gptoss-corr] overall prefix-match {totalMatching}/{totalCompared} = {matchRate:P0}");
 
         Xunit.Assert.True(matchRate >= 0.5,
-            $"Legacy/batched prefix-match rate {matchRate:P0} below 50% — structural divergence suspected.");
+            $"Per-sequence/batched prefix-match rate {matchRate:P0} below 50% — structural divergence suspected.");
     }
 
     private async Task<List<int>> GenerateGreedy(CorrCtx ctx, string prompt, int maxNewTokens, bool optIn)
     {
-        Environment.SetEnvironmentVariable(OptInVar, optIn ? "1" : "0");
+        Environment.SetEnvironmentVariable(PerSequenceVar, optIn ? "0" : "1");
 
         var history = new List<ChatMessage> { new() { Role = "user", Content = prompt } };
         var tokens = ctx.Renderer.RenderToTokens(
@@ -124,7 +126,7 @@ public class GptOssBatchedCorrectnessTests
         return Directory.GetFiles(dir, "*.gguf").Where(p =>
         {
             var n = Path.GetFileName(p).ToLowerInvariant();
-            return (n.Contains("gpt-oss|gpt_oss|gptoss") || n.Contains("gpt_oss") || n.Contains("gptoss"))
+            return (n.Contains("gpt-oss") || n.Contains("gpt_oss") || n.Contains("gptoss"))
                 && !n.Contains("mmproj");
         }).OrderBy(p => Path.GetFileName(p)).FirstOrDefault();
     }
@@ -138,8 +140,7 @@ public class GptOssBatchedCorrectnessTests
 
         public CorrCtx(string modelPath)
         {
-            BackendType backend = OperatingSystem.IsMacOS()
-                ? BackendType.GgmlMetal : BackendType.GgmlCpu;
+            BackendType backend = TestGates.PinnedGgmlBackend;
             Model = TensorSharp.Models.ModelBase.Create(modelPath, backend);
             Renderer = new KVCachePromptRenderer(new GgufPromptRenderer());
             BlockSize = 256;

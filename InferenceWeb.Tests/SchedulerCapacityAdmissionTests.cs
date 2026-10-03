@@ -85,7 +85,7 @@ public class SchedulerCapacityAdmissionTests
         // 88 slots (11 blocks): three fit, the fourth must wait for one to finish.
         var cfg = Config(numBlocks: 32);
         var pool = new BlockPool(cfg.NumBlocks, cfg.BlockSize, 0);
-        var sched = new ContinuousBatchScheduler(cfg, pool, "fp-capacity", NullLogger.Instance);
+        var sched = new ContinuousBatchScheduler(cfg, pool, NullLogger.Instance);
         var seqs = Enumerable.Range(0, 4).Select(i => Sequence($"long-{i}", 80, 8)).ToArray();
         foreach (var s in seqs) sched.Submit(s);
 
@@ -106,7 +106,7 @@ public class SchedulerCapacityAdmissionTests
     {
         var cfg = Config(numBlocks: 32);
         var pool = new BlockPool(cfg.NumBlocks, cfg.BlockSize, 0);
-        var sched = new ContinuousBatchScheduler(cfg, pool, "fp-capacity-hold", NullLogger.Instance);
+        var sched = new ContinuousBatchScheduler(cfg, pool, NullLogger.Instance);
         var seqs = Enumerable.Range(0, 4).Select(i => Sequence($"long-{i}", 80, 8)).ToArray();
         foreach (var s in seqs) sched.Submit(s);
 
@@ -130,7 +130,7 @@ public class SchedulerCapacityAdmissionTests
         // still has room in its second: "new" must wait, not evict "old".
         var cfg = Config(numBlocks: 4);
         var pool = new BlockPool(cfg.NumBlocks, cfg.BlockSize, 0);
-        var sched = new ContinuousBatchScheduler(cfg, pool, "fp-victim-order", NullLogger.Instance);
+        var sched = new ContinuousBatchScheduler(cfg, pool, NullLogger.Instance);
         var old = Sequence("old", 15, 8);
         var newer = Sequence("new", 16, 8);
         sched.Submit(old);
@@ -179,7 +179,7 @@ public class SchedulerCapacityAdmissionTests
                 StopRepetition = false,
             };
             var pool = new BlockPool(cfg.NumBlocks, cfg.BlockSize, 0);
-            var sched = new ContinuousBatchScheduler(cfg, pool, $"fp-random-{trial}", NullLogger.Instance);
+            var sched = new ContinuousBatchScheduler(cfg, pool, NullLogger.Instance);
             int count = rng.Next(2, 7);
             var pending = new List<(int Step, SequenceState Seq)>();
             for (int i = 0; i < count; i++)
@@ -238,7 +238,7 @@ public class SchedulerCapacityAdmissionTests
         // Mirror image: the OLD sequence needs the block, so the newest yields.
         var cfg = Config(numBlocks: 4);
         var pool = new BlockPool(cfg.NumBlocks, cfg.BlockSize, 0);
-        var sched = new ContinuousBatchScheduler(cfg, pool, "fp-victim-order-2", NullLogger.Instance);
+        var sched = new ContinuousBatchScheduler(cfg, pool, NullLogger.Instance);
         var old = Sequence("old", 16, 8);
         var newer = Sequence("new", 15, 8);
         sched.Submit(old);
@@ -280,7 +280,7 @@ public class SchedulerCapacityAdmissionTests
             StopRepetition = false,
         };
         var pool = new BlockPool(cfg.NumBlocks, cfg.BlockSize, 0);
-        var sched = new ContinuousBatchScheduler(cfg, pool, "fp-victim-prefill", NullLogger.Instance);
+        var sched = new ContinuousBatchScheduler(cfg, pool, NullLogger.Instance);
         var old = Sequence("old", 24, 8);
         var newer = Sequence("new", 7, 16);
         Assert.True(old.Sn < newer.Sn);
@@ -314,244 +314,5 @@ public class SchedulerCapacityAdmissionTests
         Assert.NotNull(contested);
         Assert.Equal(new[] { "new" }, contested.PreemptedRequestIds);
         Assert.Contains(contested.ScheduledWork, w => ReferenceEquals(w.Sequence, old));
-    }
-
-    [Fact]
-    public void SharedPrefixBlocksInUse_DoNotCountAgainstAdmission()
-    {
-        // 12 blocks x 8. Each prompt is a 64-token shared prefix (8 blocks) plus 8
-        // unique tokens. While "a" runs and holds the prefix, "b" adopts those 8
-        // blocks and needs only its own tail: it must be admitted next to "a", not
-        // held back as if its whole 9-block prompt had to come out of the free pool.
-        var cfg = new SchedulerConfig
-        {
-            MaxNumBatchedTokens = 128,
-            MaxNumRunningSequences = 4,
-            MaxPrefillChunkSize = 128,
-            SoloPrefillChunkSize = 128,
-            NumBlocks = 12,
-            BlockSize = BlockSize,
-            EnablePrefixCaching = true,
-            DecodeQuantumTokens = 1,
-            StopRepetition = false,
-        };
-        var pool = new BlockPool(cfg.NumBlocks, cfg.BlockSize, 0);
-        var sched = new ContinuousBatchScheduler(cfg, pool, "fp-shared-prefix", NullLogger.Instance);
-        var prefix = Enumerable.Range(1, 64).ToList();
-        SequenceState Shared(string id, int salt)
-            => new(id, prefix.Concat(Enumerable.Range(1000 + salt, 8)).ToList(), 8, BlockSize, SamplingConfig.Greedy);
-        var a = Shared("a", 0);
-        var b = Shared("b", 100);
-
-        sched.Submit(a);
-        var first = sched.Schedule();
-        foreach (var work in first.ScheduledWork)
-        {
-            int before = work.Sequence.NumComputedTokens;
-            work.Sequence.AdvanceComputedTokens(work.NumScheduledTokens);
-            sched.OnBlocksCommitted(work.Sequence, before);
-            work.Sequence.AppendOutputToken(3);
-        }
-        Assert.Equal(72, a.NumComputedTokens);
-
-        sched.Submit(b);
-        var second = sched.Schedule();
-
-        Assert.Empty(second.PreemptedRequestIds);
-        Assert.Equal(SequenceStatus.Running, b.Status);
-        Assert.Equal(64, b.PrefixCacheReusedTokens);
-        Assert.Contains(second.ScheduledWork, w => ReferenceEquals(w.Sequence, b));
-    }
-    /// <summary>
-    /// The shared-prefix discount is for pooled adoption only. Admission tries a
-    /// retained fused holder first (Gemma 4 has both), and the executor backs that
-    /// holder with ceil(lcp / BlockSize) NEW blocks for the whole prefix, not the
-    /// blocks another running request already holds. A candidate that the discount
-    /// admits but the holder serves takes blocks the running prompts still need.
-    /// </summary>
-    [Theory]
-    [InlineData(false, true)]   // pooled adoption: the discount is real, "b" runs next to "a"
-    [InlineData(true, false)]   // a retained holder serves "b": no discount, "b" waits
-    public void SharedPrefixDiscount_DoesNotApply_WhenARetainedHolderServesThePrefix(bool fusedMatch, bool admitted)
-    {
-        // 20 blocks x 8. "a" is a 144-token prompt (64-token shared prefix + 80) that
-        // prefills 8 tokens per contended step; "b" is the same prefix + 8 tokens.
-        var cfg = new SchedulerConfig
-        {
-            MaxNumBatchedTokens = 16,
-            MaxNumRunningSequences = 4,
-            MaxPrefillChunkSize = 16,
-            SoloPrefillChunkSize = 16,
-            NumBlocks = 20,
-            BlockSize = BlockSize,
-            EnablePrefixCaching = true,
-            DecodeQuantumTokens = 1,
-            StopRepetition = false,
-        };
-        var pool = new BlockPool(cfg.NumBlocks, cfg.BlockSize, 0);
-        var sched = new ContinuousBatchScheduler(cfg, pool, "fp-fused-discount", NullLogger.Instance);
-        var prefix = Enumerable.Range(1, 64).ToList();
-        var a = new SequenceState("a", prefix.Concat(Enumerable.Range(500, 80)).ToList(), 8, BlockSize, SamplingConfig.Greedy);
-        var b = new SequenceState("b", prefix.Concat(Enumerable.Range(900, 8)).ToList(), 8, BlockSize, SamplingConfig.Greedy);
-
-        int fusedAdoptions = 0;
-        // Mirrors BatchExecutor.ComputeFusedContinuationLcp / TryAdoptFusedContinuation:
-        // a holder of "b"'s conversation covers the 64-token prefix, and adopting it
-        // allocates fresh placeholder blocks for the whole prefix.
-        sched.AttachFusedCacheContinuation(
-            seq => fusedMatch && seq.RequestId == "b" ? 64 : 0,
-            (seq, lcp) =>
-            {
-                var blocks = pool.AllocateNew((lcp + BlockSize - 1) / BlockSize);
-                if (blocks == null) return false;
-                foreach (var block in blocks) seq.BlockTable.AppendBlock(block);
-                seq.SetComputedTokensForPrefixAdoption(lcp);
-                seq.PrefixCacheReusedTokens = lcp;
-                fusedAdoptions++;
-                return true;
-            });
-
-        void Apply(SchedulerOutput output)
-        {
-            foreach (var work in output.ScheduledWork)
-            {
-                int before = work.Sequence.NumComputedTokens;
-                work.Sequence.AdvanceComputedTokens(work.NumScheduledTokens);
-                sched.OnBlocksCommitted(work.Sequence, before);
-            }
-        }
-
-        sched.Submit(a);
-        while (a.NumComputedTokens < 64)
-            Apply(sched.Schedule());
-        Assert.Equal(64, a.NumComputedTokens);
-        Assert.Equal(8, a.BlockTable.NumBlocks);
-
-        // This step "a" takes its next 8 tokens (a 9th block): 11 blocks free, 9 more
-        // still owed to "a"'s prompt, so 2 are available. "b" needs 9, or 1 when its 8
-        // prefix blocks are shared with "a"; a holder instead takes 8 new ones.
-        sched.Submit(b);
-        var contested = sched.Schedule();
-
-        Assert.Empty(contested.PreemptedRequestIds);
-        if (admitted)
-        {
-            Assert.Equal(SequenceStatus.Running, b.Status);
-            Assert.Equal(64, b.PrefixCacheReusedTokens);
-            Assert.Equal(0, fusedAdoptions);
-        }
-        else
-        {
-            Assert.Equal(SequenceStatus.Waiting, b.Status);
-            Assert.Equal(0, b.BlockTable.NumBlocks);
-            Assert.Equal(0, fusedAdoptions);
-            Assert.DoesNotContain(contested.ScheduledWork, w => ReferenceEquals(w.Sequence, b));
-        }
-
-        // Both finish and every block comes back. When the holder serves "b" it runs
-        // after "a", so nothing is preempted; pooled sharing leaves no room for "a"'s
-        // decode growth, which preempts "b" as designed (growth is never reserved).
-        var all = new[] { a, b };
-        for (int step = 0; step < 400 && all.Any(s => !s.Status.IsFinished()); step++)
-        {
-            var output = sched.Schedule();
-            if (fusedMatch)
-                Assert.Empty(output.PreemptedRequestIds);
-            foreach (var work in output.ScheduledWork)
-            {
-                var seq = work.Sequence;
-                int before = seq.NumComputedTokens;
-                seq.AdvanceComputedTokens(work.NumScheduledTokens);
-                sched.OnBlocksCommitted(seq, before);
-                if (seq.NumComputedTokens < seq.NumTotalTokens) continue;
-                seq.AppendOutputToken(3);
-                if (seq.ShouldStopForLength())
-                    sched.NotifyStop(seq, SequenceStatus.FinishedLengthCapped, "length", output);
-            }
-        }
-        Assert.All(all, s => Assert.Equal(SequenceStatus.FinishedLengthCapped, s.Status));
-        Assert.Equal(cfg.NumBlocks, pool.NumFreeBlocks);
-    }
-
-    /// <summary>The shared-prefix discount counts only the blocks the candidate would
-    /// really adopt: a cache breakpoint, a different picture at the same position, a
-    /// model that cannot continue past a media span, or another conversation's scope
-    /// each stop adoption early, and every block past that point is new. Were the
-    /// discount computed from the raw token match, "b" below would be admitted into a
-    /// pool that cannot hold its prompt.</summary>
-    [Theory]
-    [InlineData("none", true)]
-    [InlineData("breakpoint", false)]
-    [InlineData("different-picture", false)]
-    [InlineData("same-picture", true)]
-    [InlineData("same-picture-no-media-reuse", false)]
-    [InlineData("same-scope", true)]
-    [InlineData("other-scope", false)]
-    public void SharedPrefixDiscount_CountsOnlyBlocksAdoptionWouldTake(string variant, bool admitted)
-    {
-        var cfg = new SchedulerConfig
-        {
-            MaxNumBatchedTokens = 128,
-            MaxNumRunningSequences = 4,
-            // A one-block chunk fits the free pool whatever was adopted, so only the
-            // capacity check (not the chunk's own allocation) can hold "b" back.
-            MaxPrefillChunkSize = BlockSize,
-            SoloPrefillChunkSize = 128,
-            NumBlocks = 12,
-            BlockSize = BlockSize,
-            EnablePrefixCaching = true,
-            DecodeQuantumTokens = 1,
-            StopRepetition = false,
-        };
-        var pool = new BlockPool(cfg.NumBlocks, cfg.BlockSize, 0);
-        var sched = new ContinuousBatchScheduler(cfg, pool, "fp-shared-prefix-limits", NullLogger.Instance,
-            supportsReuseAcrossMediaSpan: variant != "same-picture-no-media-reuse");
-        var prefix = Enumerable.Range(1, 64).ToList();
-        bool media = variant.Contains("picture");
-        bool scoped = variant.EndsWith("scope");
-        SequenceState Shared(string id, int salt, string picture, IReadOnlyList<int> breakpoints, string scope)
-            => new(id, prefix.Concat(Enumerable.Range(1000 + salt, 8)).ToList(), 8, BlockSize, SamplingConfig.Greedy,
-                mediaSpans: picture == null ? null : new[] { new PromptMediaSpan(16, 32, picture) },
-                cacheBreakpoints: breakpoints,
-                sharedPrefixTokens: scoped ? 16 : 0,
-                cacheScope: scope);
-        var a = Shared("a", 0, media ? "picture-a" : null, null, scoped ? "chat-a" : null);
-        var b = Shared("b", 100,
-            variant == "different-picture" ? "picture-b" : media ? "picture-a" : null,
-            variant == "breakpoint" ? new[] { 16 } : null,
-            variant == "other-scope" ? "chat-b" : scoped ? "chat-a" : null);
-
-        sched.Submit(a);
-        // A shared-prefix boundary splits "a"'s prefill at token 16, so drive it until
-        // its whole prompt is in the pool.
-        for (int step = 0; step < 4 && a.NumComputedTokens < 72; step++)
-        {
-            foreach (var work in sched.Schedule().ScheduledWork)
-            {
-                int before = work.Sequence.NumComputedTokens;
-                work.Sequence.AdvanceComputedTokens(work.NumScheduledTokens);
-                sched.OnBlocksCommitted(work.Sequence, before);
-                if (work.Sequence.NumComputedTokens == work.Sequence.NumTotalTokens)
-                    work.Sequence.AppendOutputToken(3);
-            }
-        }
-        Assert.Equal(72, a.NumComputedTokens);
-
-        // 3 blocks are free; "b" needs 9. Adopting all 8 prefix blocks leaves 1 new
-        // block; stopping at token 16 leaves 7, which must wait for "a".
-        sched.Submit(b);
-        var second = sched.Schedule();
-
-        Assert.Empty(second.PreemptedRequestIds);
-        if (admitted)
-        {
-            Assert.Equal(SequenceStatus.Running, b.Status);
-            Assert.Equal(64, b.PrefixCacheReusedTokens);
-        }
-        else
-        {
-            Assert.Equal(SequenceStatus.Waiting, b.Status);
-            Assert.DoesNotContain(second.ScheduledWork, w => ReferenceEquals(w.Sequence, b));
-        }
     }
 }

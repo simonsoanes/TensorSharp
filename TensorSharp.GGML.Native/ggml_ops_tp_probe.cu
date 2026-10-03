@@ -52,7 +52,12 @@
 //   TS_GGML_TP_AR_PROBE=force   re-probe, ignoring the cached verdicts
 //   TS_GGML_TP_AR_PROBE_MS=N    collective completion deadline (default 10000)
 
+// CUDA quant declarations must precede ggml_ops_internal.h's CPU declarations.
+#include "ggml-cuda/common.cuh"
 #include "ggml_ops_internal.h"
+#include "ggml_ops_tp_collective.h"
+#include "ggml-backend-impl.h"
+#include "ggml-cuda.h"
 
 #include <cuda_runtime.h>
 
@@ -65,6 +70,7 @@
 #include <cstring>
 #include <fstream>
 #include <memory>
+#include <limits>
 #include <string>
 #include <thread>
 #include <utility>
@@ -94,6 +100,7 @@ namespace
         void* handle = nullptr;
         int (*comm_init_all)(probe_nccl_comm_t*, int, const int*) = nullptr;
         int (*all_reduce)(const void*, void*, size_t, int, int, probe_nccl_comm_t, cudaStream_t) = nullptr;
+        int (*all_gather)(const void*, void*, size_t, int, probe_nccl_comm_t, cudaStream_t) = nullptr;
         int (*group_start)() = nullptr;
         int (*group_end)() = nullptr;
         int (*comm_abort)(probe_nccl_comm_t) = nullptr;
@@ -109,6 +116,7 @@ namespace
                 return false;
             comm_init_all = reinterpret_cast<int (*)(probe_nccl_comm_t*, int, const int*)>(dlsym(handle, "ncclCommInitAll"));
             all_reduce = reinterpret_cast<int (*)(const void*, void*, size_t, int, int, probe_nccl_comm_t, cudaStream_t)>(dlsym(handle, "ncclAllReduce"));
+            all_gather = reinterpret_cast<int (*)(const void*, void*, size_t, int, probe_nccl_comm_t, cudaStream_t)>(dlsym(handle, "ncclAllGather"));
             group_start = reinterpret_cast<int (*)()>(dlsym(handle, "ncclGroupStart"));
             group_end = reinterpret_cast<int (*)()>(dlsym(handle, "ncclGroupEnd"));
             comm_abort = reinterpret_cast<int (*)(probe_nccl_comm_t)>(dlsym(handle, "ncclCommAbort"));
@@ -119,6 +127,100 @@ namespace
                 && comm_abort != nullptr && comm_destroy != nullptr;
         }
     };
+
+    // The backend's default communicator narrows large F32 inputs to BF16.
+    // Precision-sensitive plans use this separate communicator on the same
+    // ordered compute streams. NCCL remains an optional runtime dependency.
+    struct ExactF32Comm
+    {
+        NcclApi api;
+        std::vector<probe_nccl_comm_t> comms;
+        std::vector<ggml_backend_t> backends;
+        bool attempted = false;
+        bool failed = false;
+
+        void clear()
+        {
+            if (failed && api.comm_abort)
+                for (auto comm : comms) if (comm) api.comm_abort(comm);
+            // Backends are still alive here: tp_comm_free precedes device teardown.
+            for (auto backend : backends) ggml_backend_synchronize(backend);
+            if (!failed && api.comm_destroy)
+                for (auto comm : comms) if (comm) api.comm_destroy(comm);
+            if (api.handle) dlclose(api.handle);
+            api = {};
+            comms.clear();
+            backends.clear();
+            attempted = failed = false;
+        }
+    };
+    ExactF32Comm g_exact_f32;
+
+    bool exact_f32_enabled(ggml_backend_t * backends, int count)
+    {
+        const char * enabled = std::getenv("TS_GGML_TP_F32_NCCL");
+        const char * transport = std::getenv("GGML_CUDA_ALLREDUCE");
+        if ((enabled && std::strcmp(enabled, "0") == 0)
+            || (transport && std::strcmp(transport, "nccl") != 0)) return false;
+        if (!backends || count < 2 || count > TSG_MAX_DEVICES) return false;
+        for (int r = 0; r < count; ++r)
+        {
+            if (!backends[r] || !ggml_backend_is_cuda(backends[r])) return false;
+            const int device = static_cast<ggml_backend_cuda_context *>(backends[r]->context)->device;
+            for (int previous = 0; previous < r; ++previous)
+                if (static_cast<ggml_backend_cuda_context *>(backends[previous]->context)->device == device)
+                    return false;
+        }
+        return true;
+    }
+
+    bool exact_f32_initialize(ExactF32Comm & state, ggml_backend_t * backends, int count)
+    {
+        state.attempted = true;
+        if (!state.api.load()) return false;
+        std::vector<int> devices;
+        for (int r = 0; r < count; ++r)
+            devices.push_back(static_cast<ggml_backend_cuda_context *>(backends[r]->context)->device);
+        state.comms.resize(count, nullptr);
+        if (state.api.comm_init_all(state.comms.data(), count, devices.data()) != k_nccl_success)
+        {
+            // Initialization has not touched model inputs, so falling back is safe.
+            state.failed = true;
+            state.clear();
+            state.attempted = true;
+            return false;
+        }
+        state.backends.assign(backends, backends + count);
+        return true;
+    }
+
+    void exact_f32_abort(ExactF32Comm & state)
+    {
+        state.failed = true;
+        for (auto & comm : state.comms)
+            if (comm) { state.api.comm_abort(comm); comm = nullptr; }
+    }
+
+    int exact_f32_submit(ExactF32Comm & state, ggml_tensor * const * tensors, size_t elements)
+    {
+        int result = state.api.group_start();
+        if (result == k_nccl_success)
+        {
+            for (size_t r = 0; r < state.backends.size(); ++r)
+            {
+                auto * context = static_cast<ggml_backend_cuda_context *>(state.backends[r]->context);
+                const auto status = cudaSetDevice(context->device);
+                if (status != cudaSuccess) { result = -static_cast<int>(status); break; }
+                const int submitted = state.api.all_reduce(tensors[r]->data, tensors[r]->data,
+                    elements, k_nccl_float32, k_nccl_sum, state.comms[r], context->stream());
+                if (submitted != k_nccl_success) { result = submitted; break; }
+            }
+            const int ended = state.api.group_end();
+            if (result == k_nccl_success) result = ended;
+        }
+        if (result != k_nccl_success) exact_f32_abort(state);
+        return result;
+    }
 
     int probe_timeout_ms()
     {
@@ -773,6 +875,295 @@ int tp_probe_cuda_collective(const int* device_indices, int count)
         probe_cache_write(cache_path, cache_key, verdict == 1);
     return verdict;
 #endif // defined(_WIN32)
+}
+
+int tp_cuda_allreduce_f32(ggml_backend_t* backends, ggml_tensor** tensors, int count)
+{
+#if defined(_WIN32)
+    (void)backends; (void)tensors; (void)count;
+    return 0;
+#else
+    if (!exact_f32_enabled(backends, count)) return 0;
+    const int64_t elements = ggml_nelements(tensors[0]);
+    if (elements == 0) return 1;
+    auto& state = g_exact_f32;
+    if (!state.attempted)
+    {
+        if (!exact_f32_initialize(state, backends, count)) return 0;
+        std::fprintf(stderr, "[TP] TensorSharp F32 NCCL transport: %d ranks, no BF16 compression.\n", count);
+    }
+    if (state.comms.empty()) return 0;
+    if (state.failed || state.backends.size() != static_cast<size_t>(count)
+        || !std::equal(state.backends.begin(), state.backends.end(), backends))
+    {
+        set_last_error("Tensor-parallel F32 communicator is failed or belongs to a different device group.");
+        return -1;
+    }
+    // Once a collective has started, an error must abort this forward, never
+    // fall back and accidentally sum an already-modified buffer a second time.
+    const int result = exact_f32_submit(state, tensors, static_cast<size_t>(elements));
+    if (result != k_nccl_success)
+    {
+        set_last_error("Tensor-parallel F32 NCCL collective failed: " + std::to_string(result));
+        return -1;
+    }
+    return 1;
+#endif
+}
+
+void tp_cuda_allreduce_f32_free()
+{
+#if !defined(_WIN32)
+    g_exact_f32.clear();
+#endif
+}
+
+struct TpF32Gather
+{
+#if !defined(_WIN32)
+    ExactF32Comm state;
+    std::vector<void *> scratch;
+    size_t scratch_bytes = 0;
+    ~TpF32Gather()
+    {
+        // Drain/abort collectives before freeing their staging allocations.
+        int devices[TSG_MAX_DEVICES] = {};
+        for (size_t r = 0; r < scratch.size(); ++r)
+            devices[r] = static_cast<ggml_backend_cuda_context *>(state.backends[r]->context)->device;
+        state.clear();
+        for (size_t r = 0; r < scratch.size(); ++r)
+            if (scratch[r])
+            {
+                cudaSetDevice(devices[r]);
+                cudaFree(scratch[r]);
+            }
+    }
+#endif
+};
+
+TpF32Gather * tp_cuda_f32_gather_create(ggml_backend_t * backends, int count)
+{
+#if defined(_WIN32)
+    (void)backends; (void)count;
+    return nullptr;
+#else
+    if (!exact_f32_enabled(backends, count)) return nullptr;
+    // This executor owns backends outside the generic TP device group, so run
+    // the same cached behavioural checks before its first communicator exists.
+    if (std::getenv("GGML_CUDA_ALLREDUCE") == nullptr)
+    {
+        std::vector<int> devices;
+        for (int r = 0; r < count; ++r)
+            devices.push_back(static_cast<ggml_backend_cuda_context *>(backends[r]->context)->device);
+        if (std::getenv("NCCL_P2P_DISABLE") == nullptr
+            && tp_probe_cuda_peer_access(devices.data(), count) == 0)
+        {
+            setenv("NCCL_P2P_DISABLE", "1", 0);
+            std::fprintf(stderr, "[TP] F32 gather: using NCCL shared-memory transport after failed peer-copy probe.\n");
+        }
+        if (tp_probe_cuda_collective(devices.data(), count) == 0) return nullptr;
+    }
+    auto handle = std::make_unique<TpF32Gather>();
+    if (!exact_f32_initialize(handle->state, backends, count)) return nullptr;
+    if (!handle->state.api.all_gather) return nullptr;
+    handle->scratch.resize(count, nullptr);
+    std::fprintf(stderr, "[TP] TensorSharp F32 NCCL row gather: %d ranks.\n", count);
+    return handle.release();
+#endif
+}
+
+bool tp_cuda_f32_gather(TpF32Gather * handle,
+    ggml_tensor * const * sources, ggml_tensor * const * destinations,
+    const int64_t * first_rows, const int64_t * row_counts,
+    int64_t full_rows, int64_t columns, std::string & error)
+{
+    error.clear();
+#if defined(_WIN32)
+    (void)handle; (void)sources; (void)destinations; (void)first_rows;
+    (void)row_counts; (void)full_rows; (void)columns;
+    error = "F32 CUDA gather is unavailable on this platform.";
+    return false;
+#else
+    if (!handle || handle->state.failed || handle->state.comms.empty())
+    {
+        error = "F32 CUDA gather has no healthy communicator.";
+        return false;
+    }
+    if (!sources || !destinations || !first_rows || !row_counts || full_rows <= 0 || columns <= 0
+        || uint64_t(full_rows) > std::numeric_limits<size_t>::max() / sizeof(float) / uint64_t(columns)
+        || full_rows > std::numeric_limits<int64_t>::max() / columns)
+    {
+        error = "F32 CUDA gather has invalid dimensions or arrays.";
+        return false;
+    }
+    auto & state = handle->state;
+    const auto count = state.backends.size();
+    int64_t covered = 0, max_rows = 0;
+    for (size_t r = 0; r < count; ++r)
+    {
+        auto * src = sources[r];
+        auto * dst = destinations[r];
+        if (first_rows[r] != covered || row_counts[r] <= 0 || row_counts[r] > full_rows - covered
+            || !src || !dst || !src->data || !dst->data
+            || src->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32
+            || !ggml_is_contiguous(src) || !ggml_is_contiguous(dst)
+            || src->ne[0] != row_counts[r] || dst->ne[0] != full_rows
+            || ggml_nelements(src) != row_counts[r] * columns
+            || ggml_nelements(dst) != full_rows * columns)
+        {
+            error = "F32 CUDA gather requires a complete ordered row tiling and contiguous F32 tensors.";
+            return false;
+        }
+        const auto source_address = reinterpret_cast<uintptr_t>(src->data);
+        const auto destination_address = reinterpret_cast<uintptr_t>(dst->data);
+        const auto source_bytes = static_cast<size_t>(row_counts[r] * columns) * sizeof(float);
+        const auto destination_bytes = static_cast<size_t>(full_rows * columns) * sizeof(float);
+        if ((source_address <= destination_address && destination_address - source_address < source_bytes)
+            || (destination_address < source_address && source_address - destination_address < destination_bytes))
+        {
+            error = "F32 CUDA gather source and destination must not overlap.";
+            return false;
+        }
+        auto * source_buffer = src->buffer ? src->buffer : (src->view_src ? src->view_src->buffer : nullptr);
+        auto * destination_buffer = dst->buffer ? dst->buffer : (dst->view_src ? dst->view_src->buffer : nullptr);
+        const auto device = ggml_backend_get_device(state.backends[r]);
+        if (!source_buffer || !destination_buffer
+            || ggml_backend_buft_get_device(ggml_backend_buffer_get_type(source_buffer)) != device
+            || ggml_backend_buft_get_device(ggml_backend_buffer_get_type(destination_buffer)) != device)
+        {
+            error = "F32 CUDA gather tensors must reside on their rank's CUDA device.";
+            return false;
+        }
+        covered += row_counts[r];
+        max_rows = std::max(max_rows, row_counts[r]);
+    }
+    if (covered != full_rows)
+    {
+        error = "F32 CUDA gather row tiling is incomplete.";
+        return false;
+    }
+    // CUDA allocation addresses are unique across the participating devices.
+    // Reject cross-rank aliases before modifying any destination.
+    for (size_t r = 0; r < count; ++r)
+        for (size_t other = 0; other < count; ++other)
+        {
+            const auto dst = reinterpret_cast<uintptr_t>(destinations[r]->data);
+            const auto src = reinterpret_cast<uintptr_t>(sources[other]->data);
+            const auto out = reinterpret_cast<uintptr_t>(destinations[other]->data);
+            const auto output_bytes = static_cast<size_t>(full_rows * columns) * sizeof(float);
+            const auto input_bytes = static_cast<size_t>(row_counts[other] * columns) * sizeof(float);
+            const bool source_overlap = (src <= dst && dst - src < input_bytes)
+                || (dst < src && src - dst < output_bytes);
+            const bool output_overlap = r != other && ((out <= dst && dst - out < output_bytes)
+                || (dst < out && out - dst < output_bytes));
+            if (source_overlap || output_overlap)
+            {
+                error = "F32 CUDA gather tensors alias another rank's buffers.";
+                return false;
+            }
+        }
+    const auto chunk_elements = static_cast<size_t>(max_rows * columns);
+    if (chunk_elements > std::numeric_limits<size_t>::max() / sizeof(float) / count)
+    {
+        error = "F32 CUDA gather staging size overflows.";
+        return false;
+    }
+    const auto chunk_bytes = chunk_elements * sizeof(float);
+    const auto staging_bytes = chunk_bytes * count;
+    if (handle->scratch_bytes < staging_bytes)
+    {
+        for (auto backend : state.backends) ggml_backend_synchronize(backend);
+        handle->scratch_bytes = 0;
+        for (size_t r = 0; r < count; ++r)
+        {
+            auto * context = static_cast<ggml_backend_cuda_context *>(state.backends[r]->context);
+            auto status = cudaSetDevice(context->device);
+            if (status == cudaSuccess && handle->scratch[r])
+            {
+                status = cudaFree(handle->scratch[r]);
+                handle->scratch[r] = nullptr;
+            }
+            if (status == cudaSuccess) status = cudaMalloc(&handle->scratch[r], staging_bytes);
+            if (status != cudaSuccess)
+            {
+                error = std::string("F32 CUDA gather staging allocation failed: ") + cudaGetErrorString(status);
+                return false;
+            }
+        }
+        handle->scratch_bytes = staging_bytes;
+    }
+    // Pack into an in-place AllGather slot. Copying bits, rather than summing
+    // zero-padded floats, also preserves signed zero and subnormal values.
+    const auto staging_pitch = static_cast<size_t>(max_rows) * sizeof(float);
+    const auto output_pitch = static_cast<size_t>(full_rows) * sizeof(float);
+    for (size_t r = 0; r < count; ++r)
+    {
+        auto * context = static_cast<ggml_backend_cuda_context *>(state.backends[r]->context);
+        auto * slot = static_cast<char *>(handle->scratch[r]) + r * chunk_bytes;
+        auto status = cudaSetDevice(context->device);
+        if (status == cudaSuccess)
+            status = cudaMemsetAsync(slot, 0, chunk_bytes, context->stream());
+        if (status == cudaSuccess)
+        {
+            const auto width = static_cast<size_t>(row_counts[r]) * sizeof(float);
+            status = cudaMemcpy2DAsync(slot, staging_pitch, sources[r]->data, width,
+                width, static_cast<size_t>(columns), cudaMemcpyDeviceToDevice, context->stream());
+        }
+        if (status != cudaSuccess)
+        {
+            exact_f32_abort(state);
+            error = std::string("F32 CUDA gather packing failed: ") + cudaGetErrorString(status);
+            return false;
+        }
+    }
+    int result = state.api.group_start();
+    if (result == k_nccl_success)
+    {
+        for (size_t r = 0; r < count; ++r)
+        {
+            auto * context = static_cast<ggml_backend_cuda_context *>(state.backends[r]->context);
+            const auto status = cudaSetDevice(context->device);
+            if (status != cudaSuccess) { result = -static_cast<int>(status); break; }
+            const auto * slot = static_cast<char *>(handle->scratch[r]) + r * chunk_bytes;
+            result = state.api.all_gather(slot, handle->scratch[r], chunk_elements,
+                k_nccl_float32, state.comms[r], context->stream());
+            if (result != k_nccl_success) break;
+        }
+        const int ended = state.api.group_end();
+        if (result == k_nccl_success) result = ended;
+    }
+    if (result != k_nccl_success)
+    {
+        exact_f32_abort(state);
+        error = "F32 CUDA gather collective failed: " + std::to_string(result);
+        return false;
+    }
+    for (size_t r = 0; r < count; ++r)
+    {
+        auto * context = static_cast<ggml_backend_cuda_context *>(state.backends[r]->context);
+        auto status = cudaSetDevice(context->device);
+        for (size_t source_rank = 0; status == cudaSuccess && source_rank < count; ++source_rank)
+        {
+            const auto * slot = static_cast<char *>(handle->scratch[r]) + source_rank * chunk_bytes;
+            auto * destination = static_cast<float *>(destinations[r]->data) + first_rows[source_rank];
+            const auto width = static_cast<size_t>(row_counts[source_rank]) * sizeof(float);
+            status = cudaMemcpy2DAsync(destination, output_pitch, slot, staging_pitch,
+                width, static_cast<size_t>(columns), cudaMemcpyDeviceToDevice, context->stream());
+        }
+        if (status != cudaSuccess)
+        {
+            exact_f32_abort(state);
+            error = std::string("F32 CUDA gather unpacking failed: ") + cudaGetErrorString(status);
+            return false;
+        }
+    }
+    return true;
+#endif
+}
+
+void tp_cuda_f32_gather_free(TpF32Gather * handle)
+{
+    delete handle;
 }
 
 } // namespace tsg

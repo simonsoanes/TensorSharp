@@ -57,13 +57,13 @@ namespace TensorSharp.Models.MiniMaxH3
             Partition = MiniMaxH3Config.PartitionFromFileName(ggufPath);
             Config = new ModelConfig { Architecture = ArchitectureId, VocabSize = 0 };
 
-            _tePath = ResolveCompanion("TS_VIDEO_TEXT_ENCODER", "TS_WAN_TE", dir,
+            _tePath = ResolveCompanion("TS_VIDEO_TEXT_ENCODER", dir,
                 new[] { "qwen3vl_32b_minimax_h3-Q4_K_M.gguf" },
                 n => n.Contains("qwen3vl") && n.EndsWith(".gguf"));
-            _vaePath = ResolveCompanion("TS_VIDEO_VAE", "TS_WAN_VAE", dir,
+            _vaePath = ResolveCompanion("TS_VIDEO_VAE", dir,
                 new[] { "minimax_h3_video_vae_fp16.safetensors" },
                 n => n.Contains("video_vae") && n.EndsWith(".safetensors"));
-            _audioVaePath = ResolveCompanion("TS_VIDEO_AUDIO_VAE", null, dir,
+            _audioVaePath = ResolveCompanion("TS_VIDEO_AUDIO_VAE", dir,
                 new[] { "minimax_h3_audio_vae_fp32.safetensors" },
                 n => n.Contains("audio_vae") && n.EndsWith(".safetensors"));
 
@@ -78,8 +78,9 @@ namespace TensorSharp.Models.MiniMaxH3
                     "MiniMax-H3 needs companion models beside the denoiser GGUF (or via " +
                     "--video-text-encoder / --video-vae): the Qwen3-VL-32B text encoder GGUF " +
                     "(unsloth/MiniMax-H3-GGUF) and minimax_h3_video_vae_fp16.safetensors " +
-                    "(Comfy-Org/MiniMax-H3). The text encoder also needs vocab.json and " +
-                    "merges.txt beside it, since its GGUF carries no tokenizer.");
+                    "(Comfy-Org/MiniMax-H3). The text encoder also needs vocab.json, merges.txt " +
+                    "and tokenizer_config.json (MiniMaxAI/MiniMax-H3, processor/) beside it, since " +
+                    "its GGUF carries no tokenizer; a photo or a reference needs the last of them.");
         }
 
         /// <summary>True when the tensor table looks like a MiniMax-H3 denoiser. Used
@@ -87,15 +88,11 @@ namespace TensorSharp.Models.MiniMaxH3
         public static bool LooksLikeMiniMaxH3(GgufFile gguf) =>
             gguf != null && MiniMaxH3Config.IsMiniMaxH3(gguf.Tensors);
 
-        private static string ResolveCompanion(string envVar, string legacyEnvVar, string dir,
+        private static string ResolveCompanion(string envVar, string dir,
                                                string[] preferred, Func<string, bool> match)
         {
-            foreach (string v in new[] { envVar, legacyEnvVar })
-            {
-                if (v == null) continue;
-                string env = Environment.GetEnvironmentVariable(v);
-                if (!string.IsNullOrWhiteSpace(env) && File.Exists(env)) return env;
-            }
+            string env = Environment.GetEnvironmentVariable(envVar);
+            if (!string.IsNullOrWhiteSpace(env) && File.Exists(env)) return env;
             string parent = Path.GetDirectoryName(dir);
             foreach (var d in new[] { dir, parent })
             {
@@ -249,5 +246,16 @@ namespace TensorSharp.Models.MiniMaxH3
         protected override void ResetKVCacheCore() { }
 
         public override void WarmUpKernels() { }
+
+        // The pipeline keeps the denoiser and both VAEs between requests, each holding
+        // pinned arrays, its own file mapping and the device wraps of its weights.
+        // Without this every unload leaked them, and the Metal wraps still registered
+        // with the device are what ggml-metal asserts on at process exit.
+        public override void Dispose()
+        {
+            _pipeline?.Dispose();
+            _pipeline = null;
+            base.Dispose();
+        }
     }
 }

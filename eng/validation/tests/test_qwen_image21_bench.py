@@ -172,7 +172,8 @@ class QwenImage21BenchmarkTests(unittest.TestCase):
             dotnet="dotnet", cli=Path("TensorSharp.Cli.dll"), backend="ggml_cuda",
             prompt="A red cube on a white table.", width=512, height=1024, steps=40,
             cfg=1, seed=42, sd_cli=Path("sd-cli.exe"), sd_backend="cuda0",
-            match_sigmas=True, negative_prompt="", image=[], ts_extra=[], sd_extra=[])
+            match_sigmas=True, sigma_nodes=None, lora=None,
+            negative_prompt="", image=[], ts_extra=[], sd_extra=[])
         models = {name: Path(filename) for name, filename in BENCH.MODEL_NAMES.items()}
         commands = BENCH.commands(args, models, Path("ts.png"), Path("sd.png"))
         sd = commands["sd_cpp"]

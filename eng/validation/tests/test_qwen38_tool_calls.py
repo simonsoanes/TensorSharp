@@ -177,6 +177,16 @@ class Qwen38ToolCallHarnessTests(unittest.TestCase):
         self.assertEqual([json.loads(call["function"]["arguments"]) for call in message["tool_calls"]],
                          [{"a": 1}, {"b": 2}])
 
+    def test_requested_token_budget_and_effort_apply_to_both_tool_turns(self):
+        args, requests = self.serve(self.roundtrip_responder(tool_message()))
+        args.max_tokens = 768
+        args.reasoning_effort = "low"
+        result = harness.run_case(args, "string_payload", False, False)
+        self.assertEqual(result["status"], "ok")
+        for request in requests:
+            self.assertEqual(request["body"]["max_tokens"], 768)
+            self.assertEqual(request["body"]["reasoning_effort"], "low")
+
     def test_missing_done_rejects_even_a_complete_call(self):
         args, requests = self.serve(lambda *_: streamed_message(tool_message(), done=False))
         result = harness.run_case(args, "string_payload", True, False)

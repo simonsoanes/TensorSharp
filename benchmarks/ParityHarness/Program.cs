@@ -33,11 +33,14 @@
 //   parity <model.gguf> <tok0,tok1,...> [n_predict] [backend]   raw greedy
 //   parity <model.gguf> --raw-step <tok0,tok1,...> [backend]
 //       raw logits with the prompt fed one token at a time (decode path)
-//   parity <model.gguf> --ppl <text-file> [backend] [n_ctx] [max_chunks]
+//   parity <model.gguf> --ppl <text-file> [backend] [n_ctx] [max_chunks] [prefill]
 //       teacher-forced perplexity over non-overlapping n_ctx windows,
 //       scoring the SECOND half of each window (llama.cpp's
 //       `llama-perplexity` protocol: first = n_ctx/2), so the numbers are
 //       directly comparable to its "Final estimate: PPL = ..." line.
+//       `prefill` runs each window's unscored first half as one batched
+//       forward, so the scored tokens attend over a cache the prefill
+//       kernels wrote.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -48,7 +51,6 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using TensorSharp;
 using TensorSharp.Models;
-using TensorSharp.Runtime;
 using TensorSharp.Runtime;
 using TensorSharp.Runtime.Scheduling;
 
@@ -143,6 +145,7 @@ public static class Program
         BackendType backend = ResolveBackend(args.Length > 3 ? args[3] : "ggmlcuda");
         int nCtx = args.Length > 4 ? int.Parse(args[4], CultureInfo.InvariantCulture) : 512;
         int maxChunks = args.Length > 5 ? int.Parse(args[5], CultureInfo.InvariantCulture) : int.MaxValue;
+        bool prefill = args.Length > 6 && args[6] == "prefill";
 
         var sw = Stopwatch.StartNew();
         using var model = ModelBase.Create(modelPath, backend, ResolveTp());
@@ -156,7 +159,8 @@ public static class Program
             return 1;
         }
         int first = nCtx / 2;
-        Console.WriteLine($"[ppl] {ids.Count} tokens, n_ctx={nCtx}, scoring tokens [{first},{nCtx}) of {chunks} chunks");
+        Console.WriteLine($"[ppl] {ids.Count} tokens, n_ctx={nCtx}, scoring tokens [{first},{nCtx}) of {chunks} chunks" +
+            (prefill ? ", context prefilled in one forward" : ""));
 
         double nllSum = 0.0;
         long scored = 0;
@@ -166,7 +170,14 @@ public static class Program
             model.ResetKVCache();
             int baseIdx = c * nCtx;
             float[] logits = null;
-            for (int i = 0; i < nCtx - 1; i++)
+            int start = 0;
+            if (prefill && first > 1)
+            {
+                // Positions [0, first-1) are context only: their logits are never read.
+                model.Forward(ids.GetRange(baseIdx, first - 1).ToArray());
+                start = first - 1;
+            }
+            for (int i = start; i < nCtx - 1; i++)
             {
                 logits = model.Forward(new[] { ids[baseIdx + i] });
                 if (i + 1 < first)
@@ -625,25 +636,21 @@ public static class Program
 
         string[] optionNames =
         {
-            "TS_RETAINED_FUSED_CACHE",
             "TS_RETAINED_FUSED_CACHE_MAX",
-            "TS_PREFIX_CHECKPOINTS",
+            "TS_PREFIX_CHECKPOINTS_MAX",
             "TS_SCHED_DISABLE_BATCHED",
             "TS_PER_SEQ_FUSED",
             "TS_BATCHED_FUSED_DECODE",
-            "TS_QWEN35_BATCHED_ARENA",
         };
         var previousOptions = optionNames.ToDictionary(
             name => name,
             Environment.GetEnvironmentVariable,
             StringComparer.Ordinal);
-        Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE", "0");
-        Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE_MAX", "4");
-        Environment.SetEnvironmentVariable("TS_PREFIX_CHECKPOINTS", "0");
+        Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE_MAX", "0");
+        Environment.SetEnvironmentVariable("TS_PREFIX_CHECKPOINTS_MAX", "0");
         Environment.SetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED", "0");
         Environment.SetEnvironmentVariable("TS_PER_SEQ_FUSED", "1");
         Environment.SetEnvironmentVariable("TS_BATCHED_FUSED_DECODE", "1");
-        Environment.SetEnvironmentVariable("TS_QWEN35_BATCHED_ARENA", "1");
 
         try
         {
@@ -716,7 +723,7 @@ public static class Program
 
             // Repeat round one with holder retention enabled. Its deterministic
             // streams must match the control before they are used as prefixes.
-            Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE", "1");
+            Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE_MAX", "4");
             var retainedRound1 = await RunEnginePair(
                 engine, config, "enabled-r1", promptA, promptB, round1Steps);
             RequireLengthCapped("retained round1 A", retainedRound1.A, round1Steps);

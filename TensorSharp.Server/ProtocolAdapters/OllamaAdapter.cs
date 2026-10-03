@@ -38,7 +38,6 @@ namespace TensorSharp.Server.ProtocolAdapters;
 public sealed class OllamaAdapter
 {
     private readonly ModelService _svc;
-    private readonly InferenceQueue _queue;
     private readonly ServerHostingOptions _options;
     private readonly UploadStoragePolicy _uploads;
     private readonly SkillRegistry _skills;
@@ -48,7 +47,6 @@ public sealed class OllamaAdapter
 
     public OllamaAdapter(
         ModelService svc,
-        InferenceQueue queue,
         ServerHostingOptions options,
         UploadStoragePolicy uploads,
         SkillRegistry skills,
@@ -57,7 +55,6 @@ public sealed class OllamaAdapter
         ILoggerFactory loggerFactory)
     {
         _svc = svc ?? throw new ArgumentNullException(nameof(svc));
-        _queue = queue ?? throw new ArgumentNullException(nameof(queue));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _uploads = uploads ?? throw new ArgumentNullException(nameof(uploads));
         _skills = skills ?? throw new ArgumentNullException(nameof(skills));
@@ -173,15 +170,13 @@ public sealed class OllamaAdapter
                 modelName, stream, maxTokens, imagePaths?.Count ?? 0, prompt?.Length ?? 0,
                 LoggingExtensions.SanitizeForLog(prompt, 512));
 
-        using var ticket = _queue.Enqueue(ctx.RequestAborted);
-
         if (stream)
         {
-            await StreamGenerateAsync(ctx, modelName, prompt!, imagePaths, maxTokens, samplingConfig, ticket).ConfigureAwait(false);
+            await StreamGenerateAsync(ctx, modelName, prompt!, imagePaths, maxTokens, samplingConfig).ConfigureAwait(false);
         }
         else
         {
-            await CompleteGenerateAsync(ctx, modelName, prompt!, imagePaths, maxTokens, samplingConfig, ticket).ConfigureAwait(false);
+            await CompleteGenerateAsync(ctx, modelName, prompt!, imagePaths, maxTokens, samplingConfig).ConfigureAwait(false);
         }
     }
 
@@ -191,18 +186,9 @@ public sealed class OllamaAdapter
         string prompt,
         List<string>? imagePaths,
         int maxTokens,
-        SamplingConfig samplingConfig,
-        QueueTicket ticket)
+        SamplingConfig samplingConfig)
     {
         NdJsonWriter.ApplyHeaders(ctx.Response);
-
-        while (!ticket.IsReady)
-        {
-            await NdJsonWriter.WriteLineAsync(ctx.Response,
-                OllamaResponseFactory.QueueGenerateChunk(modelName, ticket.Position, _queue.PendingCount),
-                ctx.RequestAborted).ConfigureAwait(false);
-            await ticket.WaitAsync(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
-        }
 
         if (!HostedModelGuard.TryEnsureHostedModelLoaded(_svc, modelName,
                 _options.StartupModelPath, _options.StartupMmProjPath, _options.DefaultBackend, out string loadError))
@@ -235,11 +221,8 @@ public sealed class OllamaAdapter
         string prompt,
         List<string>? imagePaths,
         int maxTokens,
-        SamplingConfig samplingConfig,
-        QueueTicket ticket)
+        SamplingConfig samplingConfig)
     {
-        await ticket.WaitUntilReadyAsync().ConfigureAwait(false);
-
         if (!HostedModelGuard.TryEnsureHostedModelLoaded(_svc, modelName,
                 _options.StartupModelPath, _options.StartupMmProjPath, _options.DefaultBackend, out string loadError))
         {
@@ -401,15 +384,13 @@ public sealed class OllamaAdapter
                     skillPlan.Prompt.Catalog.Count, skillPlan.ToolsOffered);
         }
 
-        using var ticket = _queue.Enqueue(ctx.RequestAborted);
-
         if (stream)
         {
-            await StreamChatAsync(ctx, modelName!, messages, maxTokens, samplingConfig, ollamaTools2, ollamaThink, ticket, skillPlan, ollamaLogger).ConfigureAwait(false);
+            await StreamChatAsync(ctx, modelName!, messages, maxTokens, samplingConfig, ollamaTools2, ollamaThink, skillPlan, ollamaLogger).ConfigureAwait(false);
         }
         else
         {
-            await CompleteChatAsync(ctx, modelName!, messages, maxTokens, samplingConfig, ollamaTools2, ollamaThink, ticket, skillPlan, ollamaLogger).ConfigureAwait(false);
+            await CompleteChatAsync(ctx, modelName!, messages, maxTokens, samplingConfig, ollamaTools2, ollamaThink, skillPlan, ollamaLogger).ConfigureAwait(false);
         }
     }
 
@@ -421,19 +402,10 @@ public sealed class OllamaAdapter
         SamplingConfig samplingConfig,
         List<ToolFunction>? tools,
         bool enableThinking,
-        QueueTicket ticket,
         SkillRequestPlan? skillPlan,
         ILogger skillLogger)
     {
         NdJsonWriter.ApplyHeaders(ctx.Response);
-
-        while (!ticket.IsReady)
-        {
-            await NdJsonWriter.WriteLineAsync(ctx.Response,
-                OllamaResponseFactory.QueueChatChunk(modelName, ticket.Position, _queue.PendingCount),
-                ctx.RequestAborted).ConfigureAwait(false);
-            await ticket.WaitAsync(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
-        }
 
         if (!HostedModelGuard.TryEnsureHostedModelLoaded(_svc, modelName,
                 _options.StartupModelPath, _options.StartupMmProjPath, _options.DefaultBackend, out string loadError))
@@ -567,12 +539,9 @@ public sealed class OllamaAdapter
         SamplingConfig samplingConfig,
         List<ToolFunction>? tools,
         bool enableThinking,
-        QueueTicket ticket,
         SkillRequestPlan? skillPlan,
         ILogger skillLogger)
     {
-        await ticket.WaitUntilReadyAsync().ConfigureAwait(false);
-
         if (!HostedModelGuard.TryEnsureHostedModelLoaded(_svc, modelName,
                 _options.StartupModelPath, _options.StartupMmProjPath, _options.DefaultBackend, out string loadError))
         {

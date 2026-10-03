@@ -27,6 +27,18 @@ public sealed class DesktopAgentHostTests : IDisposable
         return _host;
     }
 
+    /// <summary>A host built the way the desktop app builds it: no settings file yet.</summary>
+    private AgentAppHost CreateDesktopAppHost()
+    {
+        Skip.IfNot(DesktopShellBackend.IsSupported, "Native child processes are unavailable on this platform.");
+        var paths = new AgentPaths(Path.Combine(_root, "data"), Path.Combine(_root, "cache"))
+        {
+            DeviceClass = DeviceClass.Desktop,
+        };
+        _host = new AgentAppHost(paths);
+        return _host;
+    }
+
     private static ToolCall Shell(string command) => new()
     {
         Name = ShellTools.ShellToolName,
@@ -38,6 +50,7 @@ public sealed class DesktopAgentHostTests : IDisposable
     {
         AgentAppHost host = CreateHost(network: true);
         Assert.Equal("process", host.Backend.Name);
+        Assert.True(host.Backend.UsesHostProcesses);
         Assert.Same(host.Backend, host.CodeRunner!.Backend);
         Assert.False(CodeEnvironment.IsConfigured);
         Assert.Null(host.JavaScript);
@@ -46,6 +59,27 @@ public sealed class DesktopAgentHostTests : IDisposable
         Assert.Contains("npm", declaration, StringComparison.Ordinal);
         Assert.DoesNotContain("pure-Python wheels", declaration, StringComparison.Ordinal);
         Assert.DoesNotContain("JavaScriptCore", host.DescribeEngine(), StringComparison.Ordinal);
+    }
+
+    [SkippableFact]
+    public void DesktopBackendPreservesTheNativeSkillInterpreterGuard()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "Requires the Windows WSL launcher guard.");
+        var backend = new DesktopShellBackend(new ProcessShellBackend(null, SkillSandboxMode.Off), Array.Empty<string>());
+        string directory = Path.Combine(_root, "skills", "native-probe");
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "SKILL.md"), "---\nname: native-probe\ndescription: Native interpreter probe.\n---\n");
+        File.WriteAllText(Path.Combine(directory, "probe.sh"), "exit 0\n");
+        Skill skill = new SkillRegistry(new SkillRegistryOptions { Roots = new[] { Path.Combine(_root, "skills") } }).Skills.Single();
+        var runner = new SkillScriptRunner(new SkillScriptRunnerOptions
+        {
+            Sandbox = SkillSandboxMode.Off,
+            Backend = backend,
+            Interpreters = new() { [".sh"] = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "bash.exe") },
+        });
+        SkillToolResult result = runner.Run(skill, "probe.sh", Array.Empty<string>());
+        Assert.False(result.Ok);
+        Assert.Contains("WSL launcher", result.Content, StringComparison.Ordinal);
     }
 
     [SkippableFact]
@@ -140,6 +174,79 @@ public sealed class DesktopAgentHostTests : IDisposable
         });
         Assert.False(refused.Started);
         Assert.Contains("networkHosts allow-list", refused.Error, StringComparison.Ordinal);
+    }
+
+    [SkippableFact]
+    public void AFirstDesktopLaunchStartsFromTheDesktopDefaultsAndKeepsWhatTheUserSaves()
+    {
+        AgentAppHost host = CreateDesktopAppHost();
+        AppSettings first = host.Settings.Load();
+        AppSettings desktop = AppSettings.DesktopDefaults();
+        Assert.Equal(desktop.KvCacheDtype, first.KvCacheDtype);
+        Assert.Equal(desktop.MaxTokens, first.MaxTokens);
+        Assert.Equal(desktop.ToolTimeoutSeconds, first.ToolTimeoutSeconds);
+        // Not the phone's jetsam trades.
+        AppSettings phone = new();
+        Assert.NotEqual(phone.KvCacheDtype, first.KvCacheDtype);
+        Assert.True(first.MaxTokens > phone.MaxTokens);
+        // The switches keep the phone's safe defaults on a desktop too.
+        Assert.Equal(phone.AllowNetwork, first.AllowNetwork);
+        Assert.False(first.AllowUnconfinedExecution);
+
+        first.MaxTokens = 1024;
+        host.Settings.Save(first);
+        Assert.Equal(1024, host.Settings.Load().MaxTokens);
+    }
+
+    [Fact]
+    public void AStoreWithoutDesktopDefaultsReadsAsThePhone()
+    {
+        Directory.CreateDirectory(_root);
+        var store = new SettingsStore(Path.Combine(_root, "phone-settings.json"));
+        AppSettings settings = store.Load();
+        Assert.Equal(new AppSettings().KvCacheDtype, settings.KvCacheDtype);
+        Assert.Equal(new AppSettings().MaxTokens, settings.MaxTokens);
+
+        // An unreadable file reads as the store's defaults, not as the phone's.
+        string corrupt = Path.Combine(_root, "desktop-settings.json");
+        File.WriteAllText(corrupt, "{ not json");
+        Assert.Equal(AppSettings.DesktopDefaults().MaxTokens,
+            new SettingsStore(corrupt, AppSettings.DesktopDefaults).Load().MaxTokens);
+    }
+
+    [SkippableFact]
+    public void WindowsSelfTestDoesNotCountUnavailableSandboxProbesAsPassing()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "Exercises Windows native-process diagnostics.");
+        AgentAppHost host = CreateDesktopAppHost();
+        SelfTestResult check = Assert.Single(host.SelfTest());
+        Assert.True(check.Skipped);
+        Assert.False(check.Ok);
+        Assert.StartsWith("SKIP", check.ToString());
+        Assert.Contains("unavailable on Windows", check.Detail, StringComparison.Ordinal);
+    }
+
+    [SkippableFact]
+    public void TheSelfTestProbesWhatADesktopRunsAndItsEscapeProbeIsRefused()
+    {
+        AgentAppHost host = CreateDesktopAppHost();
+        Skip.IfNot(host.CodeRunner!.CanRun, "A required OS sandbox and shell are not available.");
+
+        IReadOnlyList<SelfTestResult> checks = host.SelfTest();
+
+        // The escape probe writes into the user's home, which no sandbox may let the
+        // model's code touch. It was /tmp, which the desktop profile admits on purpose, so
+        // the Mac app reported a sandbox failure while its sandbox was fine.
+        SelfTestResult write = checks.Single(c => c.Name == "sandbox:write");
+        Assert.True(write.Ok, write.Detail);
+        Assert.Empty(Directory.EnumerateFiles(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "tensoragent-selftest-escape-*"));
+        Assert.True(checks.Single(c => c.Name == "sandbox:network").Ok);
+
+        // The staged-wheel checks are about the phone's bundled CPython, not about the
+        // packages a desktop user happens to have.
+        Assert.DoesNotContain(checks, c => c.Name == "python:numpy");
+        Assert.True(checks.Single(c => c.Name == "shell").Ok);
     }
 
     public void Dispose()

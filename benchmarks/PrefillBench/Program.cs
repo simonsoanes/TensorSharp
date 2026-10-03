@@ -61,12 +61,12 @@ BackendType backend = (Environment.GetEnvironmentVariable("TS_PREFILL_BACKEND") 
 int[] lens = EnvIntList("TS_PREFILL_LENS", new[] { 512, 1024, 2048, 4096 });
 int[] concs = EnvIntList("TS_PREFILL_CONC", new[] { 1, 2, 4 });
 int iters = EnvInt("TS_PREFILL_ITERS", 3);
-// TS_PREFILL_LEGACY_ONLY=1 skips the (slow) correctness, engine and concurrent
-// sections and only times the legacy ForwardRefill path — fast iteration when
-// profiling the pure prefill compute with QWEN35_PREFILL_PROFILE=1.
-bool legacyOnly = string.Equals(Environment.GetEnvironmentVariable("TS_PREFILL_LEGACY_ONLY"), "1", StringComparison.Ordinal);
+// TS_PREFILL_FORWARD_REFILL_ONLY=1 skips the (slow) correctness, engine and concurrent
+// sections and only times the single-sequence ForwardRefill path — fast iteration when
+// profiling the pure prefill compute with TS_PREFILL_PROFILE=1.
+bool forwardRefillOnly = string.Equals(Environment.GetEnvironmentVariable("TS_PREFILL_FORWARD_REFILL_ONLY"), "1", StringComparison.Ordinal);
 // TS_PREFILL_ENGINE_ONLY=1 keeps only the engine/batched single-sequence section
-// (the server prefill path) and skips correctness, the legacy ForwardRefill
+// (the server prefill path) and skips correctness, the single-sequence ForwardRefill
 // section and concurrent — clean isolation for nsys profiling of the fused
 // verify prefill graph.
 bool engineOnly = string.Equals(Environment.GetEnvironmentVariable("TS_PREFILL_ENGINE_ONLY"), "1", StringComparison.Ordinal);
@@ -156,12 +156,12 @@ _ = await TtftMsAsync(MakePrompt(256, 0), "warm");
 _ = await TtftMsAsync(MakePrompt(256, 1), "warm2");
 
 // Correctness: the batched (fused-FFN) path's first greedy token must match the
-// legacy single-sequence ForwardRefill argmax for the same prompt. Run this on
+// single-sequence ForwardRefill argmax for the same prompt. Run this on
 // the real model + backend so the fused dense-FFN kernel is validated end-to-end.
-if (!legacyOnly && !engineOnly)
+if (!forwardRefillOnly && !engineOnly)
 {
     Console.WriteLine();
-    Console.WriteLine("==== Correctness (batched fused vs legacy ForwardRefill) ====");
+    Console.WriteLine("==== Correctness (batched fused vs single-sequence ForwardRefill) ====");
     bool allMatch = true;
     // 6000/10000 exceed the SWA window + a single prefill chunk, so chunks past
     // the first attend the previous window via the in-kernel swaPrev gather -
@@ -173,15 +173,15 @@ if (!legacyOnly && !engineOnly)
         int[] cp = MakePrompt(len, 31 + len);
         model.ResetKVCache();
         float[] lg = model.ForwardRefill(cp);
-        int legacyTop1 = Argmax(lg);
+        int singleTop1 = Argmax(lg);
         model.ResetKVCache();
         int batchedTop1 = await FirstTokenAsync(cp, $"corr-{len}");
-        bool ok = legacyTop1 == batchedTop1;
+        bool ok = singleTop1 == batchedTop1;
         allMatch &= ok;
-        Console.WriteLine($"  len={len,4}: legacy={legacyTop1,7} batched={batchedTop1,7}  {(ok ? "MATCH" : "*** MISMATCH ***")}");
+        Console.WriteLine($"  len={len,4}: single={singleTop1,7} batched={batchedTop1,7}  {(ok ? "MATCH" : "*** MISMATCH ***")}");
     }
     model.ResetKVCache();
-    Console.WriteLine($"  fusedDenseFFN={(Environment.GetEnvironmentVariable("TS_DISABLE_FUSED_DENSE_FFN") == "1" ? "DISABLED" : "enabled")}  result={(allMatch ? "ALL MATCH" : "MISMATCH!")}");
+    Console.WriteLine($"  result={(allMatch ? "ALL MATCH" : "MISMATCH!")}");
 }
 
 static int Argmax(float[] v)
@@ -191,7 +191,7 @@ static int Argmax(float[] v)
     return best;
 }
 
-if (!legacyOnly)
+if (!forwardRefillOnly)
 {
 Console.WriteLine();
 Console.WriteLine("==== Single-sequence prefill (TTFT, engine/batched path = server) ====");
@@ -206,36 +206,36 @@ foreach (int len in lens)
 }
 }
 
-// Legacy ForwardRefill path = what the CLI uses for prompt prefill (and the
+// Single-sequence ForwardRefill path = what the CLI uses for prompt prefill (and the
 // server's per-sequence fallback). Times the model call directly, bypassing the
-// engine, so the legacy-path FFN fusion is measured on its own.
+// engine, so the single-sequence FFN fusion is measured on its own.
 if (!engineOnly)
 {
 Console.WriteLine();
-Console.WriteLine("==== Single-sequence prefill (legacy ForwardRefill = CLI path) ====");
+Console.WriteLine("==== Single-sequence prefill (ForwardRefill = CLI path) ====");
 Console.WriteLine($"{"tokens",8} {"ms",10} {"tok/s",10}");
 foreach (int len in lens)
 {
     var samples = new List<double>();
-    bool profLegacy = Environment.GetEnvironmentVariable("TS_PREFILL_PROFILE") == "1";
+    bool profile = Environment.GetEnvironmentVariable("TS_PREFILL_PROFILE") == "1";
     for (int it = 0; it < iters; it++)
     {
         var p = MakePrompt(len, 2000 + it * 11 + len);
         model.ResetKVCache();
-        if (profLegacy) model.ResetForwardTiming();
+        if (profile) model.ResetForwardTiming();
         var sw = System.Diagnostics.Stopwatch.StartNew();
         _ = model.ForwardRefill(p);
         sw.Stop();
         samples.Add(sw.Elapsed.TotalMilliseconds);
-        if (profLegacy) { Console.WriteLine($"-- legacy timing breakdown @ {len} tokens --"); model.PrintTimingStats(); }
+        if (profile) { Console.WriteLine($"-- single-sequence timing breakdown @ {len} tokens --"); model.PrintTimingStats(); }
     }
     model.ResetKVCache();
     double ms = Median(samples);
     Console.WriteLine($"{len,8} {ms,10:F1} {len / (ms / 1000.0),10:F0}");
 }
-} // !engineOnly (legacy section)
+} // !engineOnly (single-sequence section)
 
-if (!legacyOnly && !engineOnly)
+if (!forwardRefillOnly && !engineOnly)
 {
 Console.WriteLine();
 Console.WriteLine("==== Concurrent prefill (1024-token prompts, wall to all-first-token) ====");

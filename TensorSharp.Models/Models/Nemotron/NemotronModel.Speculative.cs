@@ -49,16 +49,13 @@ namespace TensorSharp.Models
     {
         /// <summary>
         /// Path of a DFlash/DSpark drafter GGUF, if one was configured
-        /// (<c>--draft-model</c> / <c>TS_NEMOTRON_DFLASH</c>) AND it really is
+        /// (<c>--draft-model</c>) AND it really is
         /// one. The same flag also names an MTP-only file for other
         /// architectures, so the architecture string decides rather than the
         /// extension.
         /// </summary>
-        internal static string ResolveNemotronDFlashPath(string explicitPath)
+        internal static string ResolveNemotronDFlashPath(string path)
         {
-            string path = !string.IsNullOrWhiteSpace(explicitPath)
-                ? explicitPath
-                : Environment.GetEnvironmentVariable("TS_NEMOTRON_DFLASH");
             if (string.IsNullOrWhiteSpace(path) || !System.IO.File.Exists(path))
                 return null;
             try
@@ -79,7 +76,7 @@ namespace TensorSharp.Models
         /// Called from the constructor with the configured drafter path. Every
         /// DFlash/DSpark drafter is refused on this trunk (see
         /// <see cref="SpeculationRefusalReason"/>), so this only tells the operator
-        /// that the file named on --draft-model / TS_NEMOTRON_DFLASH is ignored and
+        /// that the file named on --draft-model is ignored and
         /// why; nothing is read from it. The capture taps below stay in place for
         /// the day a bit-exact verify exists.
         /// </summary>
@@ -405,7 +402,7 @@ namespace TensorSharp.Models
             {
                 if (_layerTypes[l] != LayerType.Mamba2)
                     continue;
-                SyncMamba2HostState(l, LegacyMamba2Slot);
+                SyncMamba2HostState(l, SoloMamba2Slot);
                 float[] c = _convState[l], s = _ssmState[l];
                 if (c == null || s == null)
                     continue;

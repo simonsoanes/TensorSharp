@@ -17,7 +17,10 @@
   <div class="breadcrumb"><a href="index_zh-cn.html">首页</a> › 快速开始</div>
   <h1>快速开始</h1>
   <p class="lede">从源码 checkout 到已验证的 CLI 回复或本地 API。快速上手在原生 GGML 后端上运行 Gemma 4 E4B；无法构建原生代码时，仍可使用托管 CPU 路径（无需 CMake 或 GPU 工具链）。</p>
+  <div class="callout tip"><div class="ic">💻</div><p><strong>想使用桌面应用？</strong>请按 <a href="tensoragent_zh-cn.html">TensorAgent 桌面版下载与使用指南</a>安装 macOS 或 Windows 发行包、设置模型、聊天与处理文件，并按需配置代码和浏览器工具。发行包包含应用运行时，无需构建仓库。</p></div>
   <div class="callout note"><div class="ic">📘</div><p><strong>正在沿着 Gemma 4 E4B 路径动手实践？</strong>《From Tensors to Tokens》把这份快速开始扩展成一条从零出发的系统讲解，带你理解每一步背后的推理引擎。<a href="book_zh-cn.html">了解 TensorSharp 配套图书 →</a></p></div>
+
+  <p class="page-foot-note"><strong>发行版本：</strong>下载文件对应各自的发布标签。桌面打包工作流更新前的发行版可能只有 CLI/Server 归档，且不包含较新功能。请选择具备所需文件的发行版，或构建当前源码。</p>
 
   <h2 id="prerequisites">1 · 环境要求</h2>
   <h3 id="install-dotnet">安装 .NET 10 SDK</h3>
@@ -63,6 +66,7 @@ cd TensorSharp</code></pre>
   <h3>完整原生 / GPU 路径</h3>
   <p>需要 GGML CPU、Metal、CUDA、Vulkan 或 MLX 时构建整个解决方案。首次构建会编译原生桥接，可能需要数分钟；后续为增量构建。</p>
   <pre data-lang="bash"><code>dotnet build TensorSharp.slnx -c Release</code></pre>
+  <p>在 macOS 与 Windows 上，若运行构建的 .NET SDK 具备 .NET MAUI 工作负载，这一步也会构建 TensorAgent 应用，否则给出警告；加上 <code>-p:TensorSharpSkipTensorAgentApp=true</code> 可将应用排除在外（<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/DEVELOPMENT_zh-cn.md#构建整个解决方案" target="_blank" rel="noopener">详情</a>）。</p>
   <p>或只构建其中一个应用：</p>
   <pre data-lang="bash"><code># 控制台应用
 dotnet build TensorSharp.Cli/TensorSharp.Cli.csproj -c Release

@@ -51,8 +51,6 @@ namespace TensorSharp.Models
         /// </summary>
         internal long ArenaBatchedDecodeSteps => _arenaBatchedDecodeSteps;
         private long _arenaBatchedDecodeSteps;
-        private static readonly bool ArenaPrefillVerifyEnabled =
-            Environment.GetEnvironmentVariable("TS_QWEN35_PREFILL_VERIFY") != "0";
 
         /// <summary>A sequence can join the arena batch when its holder exists
         /// and needs no growth — one growing/unbound sequence falls to the
@@ -103,6 +101,29 @@ namespace TensorSharp.Models
             }
         }
 
+        /// <summary>Sync a checked-in holder's device-resident recurrent state (the solo fused decode's
+        /// conv scratch and delta mirrors, and any verify-owned slices) back to its host bytes and mark it
+        /// host-authoritative, the way <see cref="SettleForCopy"/> does for the whole holder.</summary>
+        private void SettleSoloDecodeStateForArena(Qwen35KvCacheHolder holder)
+        {
+            Qwen35KvCacheHolder previous = SnapshotActiveCache();
+            LoadCacheHolder(holder);
+            try
+            {
+                EnsureFusedDecodeStateHostSynchronized();
+                DrainDeviceRecurrentState();
+                if (!_gdnStateHostDirty)
+                    _fdStateResident = false;
+                holder.GdnHostDirty = _gdnStateHostDirty;
+                holder.FdStateResident = _fdStateResident;
+                holder.ArenaStateResident = _arenaStateResident;
+            }
+            finally
+            {
+                LoadCacheHolder(previous);
+            }
+        }
+
         private bool ArenaDecline(string reason)
         {
             BatchedFusedDecodeDeclineReason = reason;
@@ -128,8 +149,6 @@ namespace TensorSharp.Models
                 return ArenaDecline("tensor parallelism uses separate decode graphs");
             if (_fusedHolders == null)
                 return ArenaDecline("per-sequence caches have not been initialized");
-            if (!_fullDecodeEnabled)
-                return ArenaDecline("TS_QWEN35_FULL_DECODE=0");
             if (_fdUnsupported)
                 return ArenaDecline("the whole-model fused decode capability check failed");
             ExitSpecSession();   // a batched decode outside the speculative session ends it
@@ -159,10 +178,8 @@ namespace TensorSharp.Models
             // same contract the fused per-block TP kernels already follow.
             if (HasSidecarWeightScales)
                 return ArenaDecline("per-tensor sidecar weight scales (NVFP4 scale2) are not applied by the arena graph");
-            if (!ArenaPrefillVerifyEnabled)
-                return ArenaDecline("TS_QWEN35_PREFILL_VERIFY=0 (unhooked prefill path)");
-            if (!NativeRopePositionAbiSupported())
-                return ArenaDecline("the native library predates the M-RoPE position argument");
+            if (!IsGgmlBackend)
+                return ArenaDecline("the arena graph runs on the GGML backends only");
             DType kvDt = _kvCacheDtype.ToDType();
             // One predicate for every fused graph, including this one. The arena used
             // to hardcode F32/F16 here while the solo whole-model graph had already
@@ -191,8 +208,6 @@ namespace TensorSharp.Models
                 {
                     if (!tokenQw.HasHostData)
                         return ArenaDecline($"token embedding type {tokenQw.GgmlType} requires host rows but no host data is available");
-                    if (!GgmlBasicOps.SupportsQwen35ArenaHiddenDecode())
-                        return ArenaDecline("the native library lacks arena host-embedding input support; rebuild GgmlOps");
                     hostEmbedding = tokenQw;
                 }
                 emb = ResolveW(tokenQw, null);
@@ -235,6 +250,16 @@ namespace TensorSharp.Models
                 if (tokens[i] < 0 || tokens[i] >= emb.ne1)
                     return ArenaDecline($"sequence {i} has an out-of-range token id");
             }
+
+            // A holder whose last step was a SOLO fused decode keeps its recurrent state in the solo
+            // path's device mirrors, and the arena's slot seeding did not pick that state up: the
+            // sequence decoded on 1.4-2.8 max |dlogit| away from decoding alone on Qwen3.5-9B (Metal)
+            // for the rest of the request - every request that was decoding alone when a second one
+            // arrived. Bring such a holder's recurrent state back to the host first; the seeding below
+            // then starts its slot from those bytes (Qwen35ArenaSoloTransitionTests).
+            for (int i = 0; i < n; i++)
+                if (holders[i].FdStateResident && !holders[i].ArenaStateResident)
+                    SettleSoloDecodeStateForArena(holders[i]);
 
             // Canonical order: ascending first-attention-layer K storage pointer.
             // With the native registry keyed on the same pointers, a stable set

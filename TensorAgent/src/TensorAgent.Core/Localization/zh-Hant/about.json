@@ -1,0 +1,14 @@
+{
+  "about.title": "關於",
+  "about.tagline": "完全在此裝置上執行的私密 AI 助手。",
+  "about.private.heading": "一切都在本機完成",
+  "about.private.body": "模型在這台 iPhone 的 GPU 上執行。你的對話、附加的檔案和助手寫下的所有內容都儲存在此應用程式的專用儲存中。不會將任何內容傳送到伺服器以獲取回答，應用程式在斷網時也能使用。",
+  "about.abilities.heading": "它能做什麼",
+  "about.abilities.body": "聊天，並讀取你提供的圖片、音訊、影片和文件。它可以在沙盒中編寫和執行程式碼，使用 Agent Skills 生成真正的 PDF、試算表、Word 文件和簡報，也可以在你允許時搜尋網頁。",
+  "about.control.heading": "由你決定它可以做什麼",
+  "about.control.body": "執行程式碼和存取網路是「設定」中的兩個獨立開關，預設均關閉，直到你主動開啟。程式碼只能在目前聊天的專用資料夾內執行；網路關閉時，助手執行的程式碼也無法聯網。",
+  "about.builtOn.heading": "基於 TensorSharp 構建",
+  "about.builtOn.body": "TensorAgent 基於 TensorSharp 構建。這是一個用於執行大語言模型和擴散模型的開源 .NET 引擎，提供用於 Apple GPU 的 Metal 後端。桌面端的 TensorSharp.Server 也使用同一引擎。",
+  "about.support.caption": "TensorSharp/TensorAgent 是免費的。如果你喜歡它，請我喝杯咖啡，支持我繼續開發。",
+  "about.engine.unavailable": "無法獲取引擎詳情：{error}"
+}

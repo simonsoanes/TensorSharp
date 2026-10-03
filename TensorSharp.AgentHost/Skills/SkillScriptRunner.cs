@@ -176,7 +176,7 @@ namespace TensorSharp.AgentHost.Skills
 
                 // iOS has no OS sandbox to look for: code runs inside the app, and what
                 // is missing is a backend presenting an in-process runtime that confines.
-                if (OperatingSystem.IsIOS())
+                if (HostOS.IsAppleMobile)
                 {
                     return "this host runs skill scripts in an in-process runtime, and no backend presenting "
                         + "one that confines writes and the network was supplied, and skill scripts are "
@@ -184,7 +184,7 @@ namespace TensorSharp.AgentHost.Skills
                 }
 
                 return "this host provides no OS sandbox (checked: "
-                    + (OperatingSystem.IsMacOS() ? "sandbox-exec"
+                    + (HostOS.IsMacDesktop ? "sandbox-exec"
                        : OperatingSystem.IsLinux() ? "bubblewrap 0.12.0 or newer (install/update bwrap to enable it)"
                        : OperatingSystem.IsWindows() ? "windows job object"
                        : "none for this platform")
@@ -1498,8 +1498,7 @@ namespace TensorSharp.AgentHost.Skills
         {
             try
             {
-                return Directory
-                    .EnumerateFiles(workDirectory, "*", SearchOption.AllDirectories)
+                return WorkspaceScan.Files(workDirectory, WorkspaceScan.SnapshotOptions)
                     .Where(f => !Path.GetFileName(f).StartsWith(".tensorsharp-", StringComparison.Ordinal))
                     .Select(f => Path.GetRelativePath(workDirectory, f).Replace(Path.DirectorySeparatorChar, '/'))
                     // Bytecode caches and HOME-redirect fallout are a runtime's mess,
@@ -1595,6 +1594,39 @@ namespace TensorSharp.AgentHost.Skills
             if (_options.Interpreters.TryGetValue(extension, out string? configured))
             {
                 interpreter = configured;
+                if (_backend.UsesHostProcesses)
+                {
+                    // Like model-written code, bundled JavaScript can use the runtime
+                    // installed in this session. CreateProcess resolves a bare name
+                    // against the parent's PATH, not the child's session PATH.
+                    if (_options.Workspace is { } workspace
+                        && (extension.Equals(".js", StringComparison.OrdinalIgnoreCase)
+                            || extension.Equals(".mjs", StringComparison.OrdinalIgnoreCase))
+                        && (configured.Equals("node", StringComparison.OrdinalIgnoreCase)
+                            || configured.Equals("node.exe", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        return CodeEnvironment.TryResolveSessionInterpreter(
+                            workspace, CodeLanguage.JavaScript, out interpreter, out error);
+                    }
+
+                    if (OperatingSystem.IsWindows())
+                    {
+                        string? resolved = Path.IsPathRooted(configured)
+                            ? Path.GetFullPath(configured)
+                            : CodeEnvironment.Which(configured);
+                        if (resolved != null && ShellProgram.IsWslLauncher(resolved))
+                        {
+                            interpreter = null;
+                            error = $"'{configured}' resolves to the Windows WSL launcher. Skill scripts must run "
+                                + "on the host OS: WSL runs them in Linux outside this host's process containment "
+                                + "and interactive Windows desktop. Use the skill's native JavaScript entry point "
+                                + "(.mjs/.js) with Windows Node.js/npm, or configure a native Git Bash/MSYS2 interpreter.";
+                            return false;
+                        }
+                        if (resolved != null)
+                            interpreter = resolved;
+                    }
+                }
                 return true;
             }
 

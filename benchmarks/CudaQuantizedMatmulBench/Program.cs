@@ -17,6 +17,8 @@ int warmup = GetArg("--warmup", 5);
 bool f16PrefillOnly = HasArg("--f16-prefill");
 bool q8PrefillOnly = HasArg("--q8-prefill");
 bool gqaDecodeGroup4Only = HasArg("--gqa-decode-group4");
+bool decodeKernelsOnly = HasArg("--decode-kernels");
+bool qwenKernelsOnly = HasArg("--decode-kernels-qwen");
 var cases = new[]
 {
     new BenchCase("decode-q8_0-4096x4096-r1", 1, 4096, 4096),
@@ -25,6 +27,18 @@ var cases = new[]
 
 using var allocator = new CudaAllocator();
 Console.WriteLine($"CUDA quantized matmul benchmark, iterations={iterations}, warmup={warmup}");
+
+if (qwenKernelsOnly)
+{
+    DecodeKernelBench.RunQwen(allocator, warmup, iterations);
+    return 0;
+}
+
+if (decodeKernelsOnly)
+{
+    DecodeKernelBench.Run(allocator, warmup, iterations);
+    return 0;
+}
 
 if (f16PrefillOnly)
 {

@@ -6,7 +6,7 @@ measured 2026-08-13 on one RTX PRO 6000 Blackwell with `Muse-Glimmer-30B-Q8_0`.
 | File | What it is |
 |---|---|
 | `bench_mg_linux.sh` | The ladder runner: one context, five variants (llama.cpp plain / TS plain / llama.cpp DFlash / TS DFlash / TS DFlash with the confidence floor removed), engines alternating, VRAM sampled |
-| `bench_mg_linux2.sh` | Same plus `TS_ENV=` (for `TS_MUSE_GLIMMER_FUSED=0` / `TS_DFLASH_FUSED=0` A/B) and a `nat16k` natural-prose context |
+| `bench_mg_linux2.sh` | Same plus `TS_ENV=` (for environment A/B runs) and a `nat16k` natural-prose context |
 | `bench_mg_driver.sh` | Drives the corrected long-context re-run and the supplementary passes in order |
 | `bench_mg_stats.sh` | llama.cpp with `-v`, purely to capture `draft acceptance = …` / `graphs reused = …` (llama-cli hides the per-slot summary otherwise). Not used for timings |
 | `bench_mg_analyze.py` | CSV -> per-point mean/range tables plus a TS/llama.cpp ratio table |

@@ -79,6 +79,8 @@ function readSelection() {
 
 function shortenMiddle(text, limit) {
   if (text.length <= limit) return { text: text, truncated: false };
+  // English, as the string tables are out of reach in here: ShareItemReader looks for this
+  // exact marker (ScriptMiddleShortenedMarker) to put the interface language's in its place.
   var marker = '\n\n… [middle shortened by TensorAgent] …\n\n';
   var room = Math.max(0, limit - marker.length);
   var head = Math.ceil(room / 2);

@@ -83,7 +83,6 @@
         "env": {
           "MAX_CONTEXT": "65536",
           "TS_DSV4_UBATCH": "256",
-          "TS_DSV41_TP": "0",
           "TS_DSV41_ENGRAM_WARM": "1",
           "TS_DSV41_SPARSE_FA": "1",
           "TS_SCHED_MAX_RUNNING_SEQS": "4",
@@ -116,7 +115,6 @@
         "env": {
           "MAX_CONTEXT": "65536",
           "TS_DSV4_UBATCH": "256",
-          "TS_DSV41_TP": "0",
           "TS_DSV41_ENGRAM_WARM": "1",
           "TS_DSV41_SPARSE_FA": "1",
           "TS_SCHED_MAX_RUNNING_SEQS": "4",
@@ -149,7 +147,6 @@
         "env": {
           "MAX_CONTEXT": "65536",
           "TS_DSV4_UBATCH": "256",
-          "TS_DSV41_TP": "{tp}",
           "TS_DSV41_ENGRAM_WARM": "1",
           "TS_DSV41_SPARSE_FA": "1",
           "TS_SCHED_MAX_RUNNING_SEQS": "4",

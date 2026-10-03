@@ -15,7 +15,6 @@ namespace TensorSharp.Models
         // travels with its holder and is truncated on speculative rollback.
         private int[] _qsaPositions;
         private int _qsaPositionCount;
-        private bool? _qsaApiAvailable;
 
         private bool HasQsa
         {
@@ -56,12 +55,10 @@ namespace TensorSharp.Models
         private void PrepareQsaHistory(int start, int count)
         {
             if (!HasQsa) return;
-            if (!(_qsaApiAvailable ??= GgmlBasicOps.Qwen4ExpQsaApiAvailable()))
-                throw new NotSupportedException("qwen4exp QSA requires native Qwen API version 2; update the matching TensorSharp native library.");
-            if (!IsGgmlBackend || !_tokenGraphEnabled || !_spanAttnEnabled || _tokenGraphUnsupported
-                || _fusedGateUpExperts || !_fusedFfnEnabled || !_fusedGdnEnabled || !_fusedAttnEnabled
-                || _gdnMaxLayers >= 0 || _gdnVerify)
-                throw new NotSupportedException("qwen4exp QSA requires the complete GGML token-span path; the configured per-layer fallback cannot preserve its indexer state.");
+            if (!IsGgmlBackend || _tokenGraphUnsupported
+                || _fusedGateUpExperts
+                || _gdnVerify)
+                throw new NotSupportedException("qwen4exp QSA requires the complete GGML token-span path; the per-layer fallback cannot preserve its indexer state.");
             if (start != _qsaPositionCount)
                 throw new InvalidOperationException("qwen4exp QSA: position history does not match the active cache head.");
             int length = checked(3 * _kvCacheCapacity);

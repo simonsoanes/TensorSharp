@@ -52,11 +52,11 @@ namespace TensorSharp
                 case DType.Int32: return 4;
                 case DType.UInt8: return 1;
                 // Q8_0 has a fractional 1.0625 bytes/elem due to its block layout.
-                // We return 1 here for legacy callers that scale offsets - actual
+                // We return 1 here for callers that scale offsets - actual
                 // buffer allocation must use Q8_0Bytes() for block-aligned sizing.
                 case DType.Q8_0: return 1;
                 // Q4_0 is ~0.5625 bytes/elem (block layout). Like Q8_0 we return a
-                // nominal 1 for legacy offset-scaling callers; real buffer sizing
+                // nominal 1 for offset-scaling callers; real buffer sizing
                 // must go through Q4_0Bytes() for block-aligned allocation.
                 case DType.Q4_0: return 1;
                 default:

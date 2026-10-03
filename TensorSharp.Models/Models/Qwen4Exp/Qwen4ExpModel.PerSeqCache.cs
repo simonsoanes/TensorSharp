@@ -68,7 +68,7 @@ namespace TensorSharp.Models
             // Retained-set bookkeeping (RetainedCache): a shared-prefix checkpoint is
             // a host-authoritative copy that is cloned, never bound; a retired holder
             // is being torn down and must not be re-keyed; RetainedBytes is what it
-            // counts against the retention budget; RetainedSerial orders eviction.
+            // counts against the retention budget.
             public bool IsCheckpoint;
             public bool Retired;
             public bool Disposed;
@@ -77,7 +77,6 @@ namespace TensorSharp.Models
             // charges both). Copies start without.
             public bool DeviceMirrored;
             public long RetainedBytes;
-            public long RetainedSerial;
             // Pinned descriptor arrays. Their addresses are the native graph
             // signature, so per-holder arrays select per-holder graphs.
             public Qwen4ExpAttnArgs[] AttnArgs;
@@ -121,11 +120,16 @@ namespace TensorSharp.Models
             => throw new NotSupportedException(
                 "qwen4exp serves concurrency through per-sequence state holders, not ForwardBatch.");
 
+        /// <summary>No token-batched decode exists for qwen4exp (TryForwardBatchedFusedDecode keeps the
+        /// interface's decline); the executor's once-per-run warning quotes this instead of "no reason".</summary>
+        public string BatchedFusedDecodeDeclineReason =>
+            "Qwen3.8-Flash-Next has no token-batched decode yet; each sequence decodes through its own captured graph";
+
         /// <summary>Per-sequence holders need the GGML fused span path: it is
         /// where the per-holder graph/state keying lives. The managed op-by-op
         /// path shares scratch that is not per-sequence.</summary>
         public bool SupportsPerSequenceFusedForward =>
-            IsGgmlBackend && _tokenGraphEnabled && !_tokenGraphUnsupported;
+            IsGgmlBackend && !_tokenGraphUnsupported;
 
         public bool HasFusedSequenceCache(string requestId)
             => requestId != null && _fusedHolders != null && _fusedHolders.ContainsKey(requestId);
@@ -310,10 +314,14 @@ namespace TensorSharp.Models
             if (_fusedHolders.ContainsKey(requestId)) return;
 
             var holder = SnapshotActiveCache();
+            // A failed replacement must leave the live primary intact instead of
+            // publishing a checked-out holder without a primary to restore.
+            _fusedHolders.EnsureCapacity(checked(_fusedHolders.Count + 1));
+            var fresh = CreateFreshHolder();
             _fusedHolders[requestId] = holder;
             _activeFusedKey = requestId;
 
-            _primaryHolder = CreateFreshHolder();
+            _primaryHolder = fresh;
             // The adopted primary keeps slot base 0; the fresh primary takes a
             // fused-range base so the two never share span graph slots.
         }

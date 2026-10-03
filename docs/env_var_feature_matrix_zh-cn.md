@@ -21,8 +21,7 @@
   `FUSED_*`、`KV_CACHE_DTYPE`、`MAX_CONTEXT`、`MAX_TOKENS`、
   `VIDEO_MAX_FRAMES`、`VIDEO_SAMPLE_FPS`，确保矩阵值是权威输入。
 - `--env-vars none` 会关闭 sweep case。如果配置文件中的 `default_env_vars`
-  为空，且 CLI 没有覆盖它，运行器会使用全部已注册的 `EnvVarMatrix.All` 项——每项仍只作用于它适用的组合，
-  因此不适用于任何组合的 `TS_KV_PAGED_QUANT_BITS` 不会增加任何 case。
+  为空，且 CLI 没有覆盖它，运行器会使用全部已注册的 `EnvVarMatrix.All` 项——每项仍只作用于它适用的组合。
 
 下表中的“运行时 baseline”表示变量未设置时的行为。“默认 sweep”表示当前默认
 配置是否会扫描该变量，而不是所有已注册变量。
@@ -36,39 +35,25 @@ DiffusionGemma 当前不属于已注册的 TestMatrix 功能目录：还没有 d
 
 | 环境变量 | 适用范围 | 功能影响 | 运行时 baseline | Sweep 值 | 默认 sweep |
 |---|---|---|---|---|---|
-| `TS_GPTOSS_BATCHED` | GPT OSS | 批处理分页前向 vs 按序列回退 | 启用 | `0`, `1` | 是 |
-| `TS_QWEN35_BATCHED` | Qwen 3.5 / 3.6 family、`qwen3next` | 批处理分页前向 vs 按序列回退 | 启用 | `0`, `1` | 是 |
-| `TS_QWEN35_BATCHED_GDN_NATIVE` | Qwen 3.5 / 3.6 family、`qwen3next` | 原生批处理 GatedDeltaNet 内核 | 关闭 | `0`, `1` | 否 |
-| `TS_NEMOTRON_BATCHED` | Nemotron-H | 批处理分页前向 vs 按序列回退 | 启用 | `0`, `1` | 是 |
-| `TS_GEMMA4_BATCHED` | Gemma 4 | 批处理分页前向 vs 按序列回退 | 启用 | `0`, `1` | 是 |
 | `TS_NEMOTRON_MAMBA2_BATCHED_NATIVE` | Nemotron-H | 原生批处理 Mamba2 step | 关闭 | `0`, `1` | 否 |
-| `TS_BATCHED_N1_FAST_PATH` | 全部 | solo 序列走融合 N=1 快速路径 decode；`0` 强制这些步骤走完全批处理路径 | 启用 | `0`, `1` | 是 |
-| `TS_PER_SEQ_FUSED` | fused 能力模型（GGML 后端上的 Gemma 4、GPT OSS 与 Qwen 3.8 Flash Next；`ggml_cuda` / `ggml_metal` 上的 Qwen 3.5/3.6/3.8；各自原生执行器上的 DeepSeek V4 / V4.1 与 GLM 5.x） | 并发（N>=2）序列走 per-request 融合 Forward；`0` 强制逐算子批处理分页路径 | 启用 | 未注册 | 否 |
+| `TS_PER_SEQ_FUSED` | fused 能力模型（GGML 后端上的 Gemma 4、GPT OSS 与 Qwen 3.8 Flash Next；`ggml_cuda` / `ggml_metal` 上的 Qwen 3.5/3.6/3.8；各自原生执行器上的 DeepSeek V4 / V4.1 与 GLM 5.x） | 并发（N>=2）序列走 per-request 融合 Forward，每个序列有自己的设备端 K/V holder；`0` 改走逐算子批处理分页路径，其 K/V 位于共享的主机块池（设备内存更少、decode 速率更低、没有保留的 holder） | 启用 | 未注册 | 否 |
 | `TS_BATCHED_FUSED_DECODE` | 具备 token 批量融合 decode 的模型（Gemma 4、Qwen 3.5/3.6/3.8、GPT OSS、GLM 5.x、DeepSeek V4 / V4.1） | per-seq fused 路径内的真正 token 批量融合 decode（一张图跑全部 N 个序列）。在 GLM 5.x 上 4 个并发请求可得合计 1.81× decode；在 DeepSeek V4.1 Flash 的 Q4_K_M 上为 2.0×（24.3 → 48.9 tok/s），上限来自路由——每个 token 各自从 384 个专家里挑 6 个。批处理会改变 GEMM 形状，2 bit MoE 可能把这点差别放大成不同的专家选择；设为 `0` 可做串行路径 A/B。 | 开启 | 未注册 | 否 |
-| `TS_GEMMA4_BATCHED_CAPS` | Gemma 4 token 批量融合 decode | 覆盖原生内核报告的能力位（1 PLE、2 KV donor、4 SWA 回绕、8 按序列的缓存容量，即 `TSGgml_Gemma4ModelDecodeBatchedEx2` 入口）。`0` 强制 v1 门控，E2B/E4B 因此改为轮询 decode；`7` 恢复统一容量的门控。仅用于诊断，启用批处理并不需要它 | 原生探测 | 未注册 | 否 |
 | `TS_BATCHED_FUSED_MOE` | Gemma 4 MoE | `1` 允许 Gemma 4 MoE 检查点走 token 批量融合 decode。默认关闭：它的可捕获计算图加上 KV holder 占满了 16 GB 显卡，在那里也不比轮询快 | 关闭 | 未注册 | 否 |
-| `TS_QWEN35_BATCHED_ARENA` | GGML CUDA / Metal 上的 Qwen 3.5/3.6/3.8 | `0` 让原生 slot-stable arena 拒绝所有 token 批量 decode，并发步骤改为每个序列各跑一次融合前向 | 启用 | 未注册 | 否 |
-| `TS_GPTOSS_BATCHED_ARENA` | `ggml_cuda` / `ggml_vulkan` 上的 GPT OSS | `0` 把批量 decode 的 slot-stable arena 换成按序列窗口的计算图（不支持持久计算图的后端总是走这条路径） | 启用 | 未注册 | 否 |
-| `TS_RETAINED_FUSED_CACHE` | 具有可保留 request-owned fused holder 的模型（Gemma 4；Qwen 3.5/3.6/3.8；Qwen 3.8 Flash Next，另有自己的 `TS_Q4E_RETAINED_CACHE`；DeepSeek V4.1 仅在 `TS_DSV41_RETAINED_CACHE=1` 时）；在 Radix 前缀缓存下还包括原生执行器上的 GLM 5.x（交出一个原生 slot） | 保留已完成请求的 holder，用于精确前缀续接；Qwen holder 同时包含 attention K/V 与匹配的 GatedDeltaNet 递归状态 | 启用 | 未注册 | 否 |
-| `TS_RETAINED_FUSED_CACHE_MAX` | 具有可保留 request-owned fused holder 的模型 | 保留 holder 的 LRU 预算（限制 VRAM；适用时包含递归状态）。在 Radix 前缀缓存下，它是保留的按会话终态（end state）的预算 | `4` | 不适用 | 否 |
-| `TS_PREFIX_CHECKPOINTS` | GGML 后端上的 Gemma 4；`ggml_cuda` / `ggml_metal` / `mlx` 上的 Qwen 3.5/3.6/3.8，即它运行按请求 holder 的后端（TP 下不支持）；GGML token-span 路径上的 Qwen 3.8 Flash Next（包括 `--layer-split N` 按层切分时）。需要开启 `TS_PER_SEQ_FUSED`，legacy 模式下还需要 `TS_RETAINED_FUSED_CACHE` | 在每个会话共享的提示前缀（系统提示、工具、技能）结束处对模型完整状态做检查点，新会话从其副本继续，只需重新预填自己的消息 | 开 | 未注册 | 否 |
-| `TS_PREFIX_CHECKPOINTS_MAX` | 同上 | 同时保留多少个不同共享前缀的检查点（每个占用一份前缀的 K/V，Qwen 还包含递归状态）。在 Radix 前缀缓存下，它是公共检查点的预算；一个提示在每个边界（系统指令、完整共享前缀）各发布一个检查点，因此 4 可覆盖同时预热两种思考模式的主机 | `4` | 不适用 | 否 |
+| `TS_RETAINED_FUSED_CACHE_MAX` | 具有可保留 request-owned fused holder 的模型（Gemma 4；Qwen 3.5/3.6/3.8；Qwen 3.8 Flash Next，其字节预算为 `TS_Q4E_RETAINED_CACHE_MB`；未加载 DSpark 草稿器时的 DeepSeek V4.1；原生执行器上的 GLM 5.x，每个会话交出一个原生 slot） | 为下一轮的精确前缀续接保留多少个已结束会话的终态（holder、原生 slot）；Qwen holder 同时包含 attention K/V 与匹配的 GatedDeltaNet 递归状态。未设置时跟随 `TS_SCHED_MAX_RUNNING_SEQS`（至少 4），使每个可以并行运行的请求都保有自己的终态；字节数由显存而不是这个数量约束。`0` 关闭保留 | 运行中请求上限（16），至少 `4` | 不适用 | 否 |
+| `TS_PREFIX_CHECKPOINTS_MAX` | GGML 后端上的 Gemma 4；`ggml_cuda` / `ggml_metal` / `mlx` 上的 Qwen 3.5/3.6/3.8，即它运行按请求 holder 的后端（TP 下不支持）；GGML token-span 路径上的 Qwen 3.8 Flash Next（包括 `--layer-split N` 按层切分时）。需要开启 `TS_PER_SEQ_FUSED` | 在每个会话共享的提示前缀（系统提示、工具、技能）结束处对模型完整状态做检查点，新会话从其副本继续，只需重新预填自己的消息。取值是同时保留多少个不同共享前缀的检查点（每个占用一份前缀的 K/V，Qwen 还包含递归状态）；`0` 关闭检查点。它是 Radix 前缀缓存保留的公共检查点预算；一个提示在每个边界（系统指令、完整共享前缀）各发布一个检查点，因此 4 可覆盖同时预热两种思考模式的主机 | `4` | 不适用 | 否 |
 | `TS_KV_INITIAL_TOKENS` | 通过 `ModelBase.ResolveInitialCacheAllocationLength` 确定缓存大小的模型家族（Qwen 3.5/3.6、Gemma 4、GPT-OSS 等 ModelBase 家族；不含自行确定大小的 DeepSeek V4 / GLM 5.x） | 缓存创建时（加载时的主缓存、每个 per-request holder）在任何请求声明预算之前分配的 K/V token 数；`0` 沿用引擎策略（显式 `MAX_CONTEXT` 时为整个窗口，否则为后端默认值）。缓存仍按需增长。内存受限设备把它设小，因为每个保留的 holder 都按此大小付费，主机副本与设备镜像各一份 | `0` | 不适用 | 否 |
 | `TS_KV_GENERATION_RESERVE_MAX` | 全部 | 请求预先保留的 K/V 中生成部分的上限（prompt + max_new_tokens）；回复上限不小于窗口时否则每个请求都会保留整个窗口。超过上限后缓存按需增长。`0` = 不限制 | `0` | 不适用 | 否 |
 | `TS_KV_HOLDER_POOL_MAX` | 具有 per-request fused holder 的模型（Qwen 3.5/3.6/3.8、Gemma 4、GPT-OSS） | 已释放的 holder 最多可停放多少个以待复用而不是释放；每个停放的 holder 都占用其完整 K/V 分配 | `64` | 不适用 | 否 |
-| `TS_SCHED_DISABLE_BATCHED` | 全部 | 全局按序列 KV-swap 回退 | 关闭 | `0`, `1` | 是 |
-| `TS_SCHED_PREFIX_CACHE` | 全部自回归模型 | `0` 在两种前缀缓存模式下都关闭准入时的全部提示复用。`--no-prefix-cache`（CLI 与服务端）会设置它，并同时跳过共享提示的启动预热，以及服务端的检查点文件 | 启用（`1`） | 未注册 | 否 |
-| `TS_PREFIX_CACHE_MODE` | 具备 Radix 前缀缓存契约的家族（Qwen 3.5/3.6/3.8 含 `qwen3next`、Gemma 4、GLM 5.x、Qwen 3.8 Flash Next、DeepSeek V4 / V4.1、GPT OSS、Mistral 3、Hunyuan Dense、Muse-Glimmer、Nemotron-H；不含 DiffusionGemma 与图像/视频模型） | `tree` 把页面、保留的终态与公共检查点放在同一棵 radix 索引中；`legacy` 选择旧的块哈希共享，live cache、保留 holder 与检查点各走各的路径，用于诊断。其他取值会被拒绝 | `tree` | 未注册 | 否 |
-| `TS_SCHED_MAX_BATCHED_TOKENS` / `TS_SCHED_MAX_RUNNING_SEQS` / `TS_SCHED_PREFILL_CHUNK` / `TS_SCHED_SOLO_PREFILL_CHUNK` / `TS_SCHED_NUM_BLOCKS` / `TS_SCHED_BLOCK_SIZE` / `TS_SCHED_DECODE_QUANTUM` | 全部 | 调度器预算：每步 token 数、同时运行的序列数、有 decode 在跑时的 prefill 分块（服务端 `--prefill-chunk-size`）、solo prefill 分块、块池块数、每块 token 数、decode 时间片。见[配置表](PAGED_ATTENTION_AND_CONTINUOUS_BATCHING_zh-cn.md#配置) | `4096` / `16` / `256` / `8192` / `256` / `256` / `256` | 未注册 | 否 |
+| `TS_SCHED_DISABLE_BATCHED` | 全部 | `1` 让所有模型都走按序列 KV-swap 路径，投机解码也一样（`--no-continuous-batching`） | 关闭 | `0`, `1` | 是 |
+| `TS_SCHED_PREFIX_CACHE` | 全部自回归模型 | `0` 关闭准入时的全部提示复用（Radix 前缀缓存：页面、保留的终态与公共检查点在同一个索引里）。`--no-prefix-cache`（CLI 与服务端）会设置它，并同时跳过共享提示的启动预热，以及服务端的检查点文件 | 启用（`1`） | 未注册 | 否 |
+| `TS_SCHED_MAX_BATCHED_TOKENS` / `TS_SCHED_MAX_RUNNING_SEQS` / `TS_SCHED_PREFILL_CHUNK` / `TS_SCHED_SOLO_PREFILL_CHUNK` / `TS_SCHED_NUM_BLOCKS` / `TS_SCHED_BLOCK_SIZE` / `TS_SCHED_DECODE_QUANTUM` | 全部 | 调度器预算：每步 token 数、同时运行的序列数、有 decode 在跑时的 prefill 分块（服务端 `--prefill-chunk-size`）、solo prefill 分块、块池块数、每块 token 数（只靠页面做跨请求复用的家族为 16，其余为 256）、decode 时间片。见[配置表](PAGED_ATTENTION_AND_CONTINUOUS_BATCHING_zh-cn.md#配置) | `4096` / `16` / `256` / `8192` / `256` / `16` 或 `256` / `256` | 未注册 | 否 |
 | `TS_SCHED_STOP_REPETITION` | 全部 | `0` 时陷入循环的生成会一直跑到 token 上限，而不是以 `repetition` 结束原因停止 | 启用（`1`） | 未注册 | 否 |
 
-本节的 executor 级开关（`TS_SCHED_DISABLE_BATCHED`、`TS_BATCHED_N1_FAST_PATH`、
-`TS_PER_SEQ_FUSED`、`TS_BATCHED_FUSED_DECODE`，以及保留 holder、检查点与 `TS_KV_*`
-预算）通过 `ExecutionOptions.FromEnvironment()` 统一读取，由 `ExecutionPlanner` 消费
+本节的 executor 级开关（`TS_SCHED_DISABLE_BATCHED`、`TS_PER_SEQ_FUSED`、
+`TS_BATCHED_FUSED_DECODE`，以及保留 holder、检查点与 `TS_KV_*` 预算）通过 `ExecutionOptions.FromEnvironment()` 统一读取，由 `ExecutionPlanner` 消费
 （见 `docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING_zh-cn.md` 的"执行规划"一节）；
-`TS_SCHED_*` 与 `TS_PREFIX_CACHE_MODE` 由 `SchedulerConfig.FromEnvironment()` 读取；
-arena、MoE 与能力位开关由模型或其原生内核读取。按模型的 `TS_*_BATCHED` opt-out 则
-体现为模型声明的 `BatchedForwardAvailable` 能力。
+`TS_SCHED_*` 由 `SchedulerConfig.FromEnvironment()` 读取；
+MoE 开关由模型或其原生内核读取。
 
 TensorAgent 在每次加载模型之前写入自己的取值（`EngineMemoryPolicy`）：
 `TS_KV_INITIAL_TOKENS=2048`、`TS_KV_GENERATION_RESERVE_MAX=1024`、
@@ -82,13 +67,14 @@ TensorAgent 在每次加载模型之前写入自己的取值（`EngineMemoryPoli
 | 环境变量 | 适用范围 | 功能影响 | 运行时 baseline | Sweep 值 | 默认 sweep |
 |---|---|---|---|---|---|
 | `KV_CACHE_DTYPE` | 除 DeepSeek V4 / V4.1 执行器之外的全部：它们的 cache 固定为 F16，由自己的注意力、gather 与压缩器内核直接读取，`q8_0` / `q4_0` 会在**加载时被拒绝**并给出原因（打开检查点之前抛 `NotSupportedException`），`f32` 会被告知并按 `f16` 报告 | KV cache 元素类型 | 自动（随模型对齐：模型权重低于 F32 时为 `f16`，否则为 `f32`） | `f32`, `f16`, `q8_0`（运行时还接受 `q4_0`，不参与 sweep） | 是 |
-| `TS_KV_PAGED_QUANT_BITS` | 仅独立的 `PagedKvCacheManager`，只有 CLI `--paged-bench` 会构造它（不含 `glm-dsa`：MLA 每个 token 只存一行 576 宽的压缩行，DSA 索引器打分的也是这段连续历史，没有可供量化的分页块布局） | TurboQuant 分页 KV 块编解码器（2 bit 使用 affine 的 min+scale 布局）。服务 CLI 生成、服务端与 TensorAgent 的引擎从不读取它，因此矩阵把它标为不适用于任何组合，不会为它生成任何 case——默认 sweep、留空的 `default_env_vars`，以及用 `--env-vars TS_KV_PAGED_QUANT_BITS` 点名时（名字仍能解析）都是如此 | 关闭（`0`） | `0`, `4`, `8`（运行时还接受 `2`，不参与 sweep） | 否 |
-| `TS_N_CPU_MOE` | MoE 模型 | 前 N 层的路由专家留在系统内存：decode 时在主机上做乘法，prefill 时流式送到加速器上跑一整张图 | 关闭（`0`） | `0`, `16`, `all` | 否（已为 GGML GPU 后端与 MoE 家族注册，但不在默认配置的列表中） |
+| `TS_N_CPU_MOE` | MoE 模型 | 前 N 层的路由专家留在系统内存：decode 时在主机上做乘法，prefill 时流式送到加速器上跑一整张图。在 `ggml_metal` 上未设置时，若专家放不下，Qwen 3.8 Flash Next（`qwen4exp`）会按 Metal 工作集与内存自行规划（48 GiB 的 Mac 上 48 层中有 15 层的专家留在 GPU 上） | 关闭（`0`） | `0`, `16`, `all` | 否（已为 GGML GPU 后端与 MoE 家族注册，但不在默认配置的列表中） |
 | `TS_CPU_MOE` | MoE 模型 | 卸载所有层的路由专家（等价于 `TS_N_CPU_MOE=all`） | 关闭 | 未注册 | 否 |
 | `TS_CPU_MOE_THREADS` | MoE 模型 | 主机端专家 matmul 的工作线程数。可用 CPU（硬件线程数按亲和性掩码与 cgroup CPU 配额收敛后）超过 8 个时，默认取其一半，上限 64：decode 侧的 matmul 只有一个 token 宽，超过几十个线程后每多一个线程只是多一个屏障参与者（在双路 Xeon 上实测 192 线程比 32 线程慢 7 倍）。较小的主机几乎用满全部 CPU。DeepSeek V4 / V4.1 则默认使用全部可用 CPU（见下文） | 可用数 ≤2 时为 1，≤8 时为可用数−1，否则 min(可用数/2, 64) | - | 否 |
 | `TS_HOST_MOE_DEVICE_MIN_BATCH` | 启用卸载的 MoE 模型 | 达到或超过该 batch 大小时，被卸载的层改为在加速器上计算、专家权重流式送入，而不是在主机上算。`0` 恢复纯主机卸载 | `128` | 未注册 | 否 |
 | `TS_HOST_MOE_PIN` | 启用卸载的 MoE 模型 | 把被卸载的专家区间页锁定（`cudaHostRegister`），使流式 prefill 走 DMA 而不是经驱动中转（PCIe 5.0 上 9.3 → 55.6 GB/s）。`0` 对所有架构关闭。DeepSeek V4 / V4.1 的默认值是例外：它们的加载器在任何批大小下都在 CPU 后端上计算被卸载的专家，没有任何流式传输，因此只有 `1` 时才锁页（七卡 A40 通道上锁定 48.2 GiB 让加载多花 20.4 s，并使这些页面无法被回收） | 启用；DeepSeek V4 / V4.1 为关闭 | 未注册 | 否 |
 | `TS_HOST_MOE_PIN_MAX_MB` | 启用卸载的 MoE 模型 | 页锁定专家区间的预算 | cgroup / 主机内存上限的 60% | - | 否 |
+| `TS_HOST_MOE_DECODE` | 启用卸载的 MoE 模型 | `0` 让单 token 的被卸载层改走 ggml CPU 计算图，而不是 TensorSharp 的 decode 内核（仍用 ggml 自己的 CPU 点积，但线程组每层只唤醒一次；在 M5 Pro 上跑 Qwen3.8-Flash-Next 时每层 0.6 → 0.32 ms）。用于 A/B 对比 | 启用 | 未注册 | 否 |
+| `TS_HOST_MOE_TIMING` | 启用卸载的 MoE 模型 | 诊断：`1` 主机侧每次调用的准备与 matmul 时间，以及流式 prefill 的字节数、传输速率与 GPU 时间；`2` 每个权重的拷贝速率（会同步，改变所测的东西）；`3` 每个 decode pass 的加速器分段、主机专家与上传时间；`4` 单 token 内核的各阶段与工作线程的唤醒 | 关闭 | 未注册 | 否 |
 | `TS_HOST_MOE_EXPERT_FILTER` | 启用卸载的 MoE 模型 | 只流式传输该 batch 实际路由到的专家，并合并成连续区间 | 启用 | 未注册 | 否 |
 | `MAX_CONTEXT` | 长文本 / 上传文本 | 硬上下文上限。设置了就是硬性要求：缓存放得下就照办，放不下就带着数字拒绝。不设置时，GGUF 宣称的长度只是上限，加载器会按设备真正装得下的量来定——GLM-5.2 宣称 1M token，那是约 93 GiB 的 KV | 模型默认值（是上限而非承诺） | `4096`, `8192`, `16384` | 是 |
 
@@ -97,16 +83,7 @@ TensorAgent 在每次加载模型之前写入自己的取值（`EngineMemoryPoli
 | 环境变量 | 适用范围 | 功能影响 | 运行时 baseline | Sweep 值 | 默认 sweep |
 |---|---|---|---|---|---|
 | `TS_PREFILL_CHUNK` | 在 GPT OSS、Qwen 3.5 / 3.6 family 长上下文功能上 sweep；运行时 Gemma 4、Nemotron-H、Mistral 3 也会读取 | 分块 prefill 大小 | 架构默认值 | `256`, `512`, `1024` | 是 |
-| `GDN_DISABLE_CHUNKED_PREFILL` | `qwen3next` | 关闭 GDN 分块 prefill | 关闭 | `0`, `1` | 否 |
 | `TS_GGML_ASYNC_COMPUTE` | GGML 后端 | 异步 compute 提交 | `ggml_metal` 上启用（`0` 关闭），其他 GGML 后端关闭 | `0`, `1` | 是 |
-| `TS_QWEN35_FD_PERSIST` | GGML GPU 后端上的 Qwen 3.5 / 3.6 family | 保留并重放整模型单 token decode 图 | 启用 | 未注册 | 否 |
-| `TS_GPTOSS_MODEL_DECODE` | GGML 后端上的 GPT OSS | 每个 decode token 用**一张图**跑完整个 transformer（所有层 + MoE + 最终 norm + LM head）；`0` 回退到逐层融合内核 | 启用 | 未注册 | 否 |
-| `TS_GPTOSS_FD_PERSIST` | `ggml_cuda` / `ggml_vulkan` 上的 GPT OSS | 保留并重放那张整模型 decode 图（padded KV 窗口 + `set_rows`），这正是 ggml-cuda 能捕获它的前提 | 启用 | 未注册 | 否 |
-| `TS_NEMOTRON_FLASH_DECODE` | GGML 后端上的 Nemotron-H | 在常驻 KV cache 上做设备端单 token 注意力；`0` 恢复主机侧的 C# decode 注意力 | 启用 | 未注册 | 否 |
-| `TS_QWEN35_METAL_GDN_INPLACE_STATE` | 单设备 `ggml_metal` 上的 Qwen 3.5 / 3.6 family | 让 K=1 GatedDeltaNet 输出与递归状态共享存储，消除逐层状态复制 | 启用 | 未注册 | 否 |
-| `TS_QWEN35_METAL_TOKEN_INPUT` | `ggml_metal` 上的 Qwen 3.5 / 3.6 family | 在 decode 图内直接从量化表读取 token embedding | 启用 | 未注册 | 否 |
-| `TS_QWEN35_METAL_KV_CPY` | `ggml_metal` 上的 Qwen 3.5 / 3.6 family | 通过可移动 `CPY` view 追加 K/V，而不是索引 scatter | 启用 | 未注册 | 否 |
-| `TS_QWEN35_METAL_ASYNC_SUBMIT` | `ggml_metal` 上的 Qwen 3.5 / 3.6 family | decode 和 logits 回读提交后只同步一次 | 启用 | 未注册 | 否 |
 
 ## 多模态
 
@@ -120,23 +97,10 @@ TensorAgent 在每次加载模型之前写入自己的取值（`EngineMemoryPoli
 
 | 环境变量 | 适用范围 | 功能影响 | 运行时 baseline | Sweep 值 | 默认 sweep |
 |---|---|---|---|---|---|
-| `TS_MLX_BATCHED_MOE_DECODE` | MLX 上的 Qwen 3.5 / 3.6 MoE | 每种 gate/up/down 一次批处理 dispatch，而不是按 expert dispatch | 启用 | `0`, `1` | 是 |
-| `TS_MLX_DEVICE_ROUTER` | MLX 上的 Qwen 3.5 / 3.6 MoE | 满足前置条件时在 device 上执行 top-K + softmax router | 启用，且会自动回退 | `0`, `1` | 是 |
-| `TS_MLX_PIPELINED_DECODE` | MLX decode 功能 | 模型支持时使用 device-side argmax 的流水化贪心 decode | 满足条件时启用 | `0`, `1` | 是 |
-| `TS_MLX_DEVICE_KV_COPY` | MLX | Device 侧 KV scatter | 启用 | `0`, `1` | 否 |
-| `TS_MLX_QWEN35_GDN_PACKED_KERNELS` | MLX 上的 Qwen 3.5 / 3.6 family | Packed GDN kernel | 启用 | `0`, `1` | 是 |
-| `TS_MLX_CACHED_ATTENTION` | MLX 上的 Qwen 3.5 / 3.6 / 3.8 family 与 gpt-oss | 注意力层把 K/V 写入模型自身的缓存，并用 MLX fused SDPA 在其上计算注意力（decode 与每个 prefill 分块）；在 gpt-oss 上同时处理 attention sinks 与滑动窗口 mask；`0` 恢复原先的逐层路径 | 启用 | `0`, `1` | 否 |
-| `TS_MLX_GDN_BLOCKED` | MLX 上的 Qwen 3.5 / 3.6 / 3.8 family | 按时间分块的 Gated DeltaNet prefill kernel（head dim 128），长度在运行时传入 | 启用 | `0`, `1` | 否 |
+| `TS_MLX_BATCHED_MOE_DECODE` | MLX 上的 Qwen 3.5 / 3.6 MoE | 在堆叠的专家权重上每种 gate/up/down 一次批处理 dispatch，而不是按 expert dispatch；`0` 走按专家顺序执行并省去堆叠副本（内存紧张的机器） | 启用 | `0`, `1` | 是 |
 | `TS_MLX_HALF_MATMUL_MIN_ROWS` | MLX affine 量化 matmul | scales 为 F16 的 matmul 从多少行起使用 F16 激活；`0` 使所有 matmul 保持 F32 | `1`（全部） | `0`, `1`, `32` | 否 |
-| `TS_MLX_KQUANT_AFFINE` | MLX 上的 Q4_K / Q5_K 权重 | 重新打包为 MLX affine（使用 MLX 量化 kernel），而不是原始 K-quant kernel；`0` 恢复原始 kernel | 启用 | `0`, `1` | 否 |
-| `TS_MLX_Q6K_AFFINE8` | MLX 上的 Q6_K 权重 | `1` 把 Q6_K 重新分组为 MLX 8-bit affine（group 32，每个权重误差不超过半个 8-bit 步长），而不是在 TensorSharp 的 Q6_K kernel 上精确运行 | 关闭 | `0`, `1` | 否 |
-| `TS_MLX_Q6K_MATVEC_MAX_ROWS` | MLX 上的精确 Q6_K matmul | 行数不超过该值时，Q6_K 以矩阵-向量乘运行（移植自 ggml-metal 的 `kernel_mul_mv_q6_K_f32`）；`0` 恢复旧 kernel | `4` | 整数 >= 0 | 否 |
-| `TS_MLX_Q6K_DEQUANT_GEMM` | MLX 上的精确 Q6_K matmul | 超过矩阵-向量行数时，把 Q6_K 反量化为 F16（每片不超过 256 MB）并用 MLX 的 GEMM 相乘；`0` 恢复旧 kernel | 启用 | `0`, `1` | 否 |
-| `TS_MLX_IQ4XS_MATVEC_MAX_ROWS` | MLX 上的 IQ4_XS matmul | 行数不超过该值时，IQ4_XS 以矩阵-向量乘运行（移植自 ggml-metal 的 `kernel_mul_mv_iq4_xs_f32`）；`0` 恢复旧 kernel | `4` | 整数 >= 0 | 否 |
-| `TS_MLX_IQ4XS_DEQUANT_GEMM` | MLX 上的 IQ4_XS matmul | 超过矩阵-向量行数时，把 IQ4_XS 反量化为 F16（每片不超过 256 MB）并用 MLX 的 GEMM 相乘；`0` 恢复旧 kernel | 启用 | `0`, `1` | 否 |
-| `TS_MLX_MIXED_GATE_UP_SPLIT` | MLX 上的 Qwen 3.5 / 3.6 / 3.8 family | 混合量化的 `ffn_gate`/`ffn_up`（UD 量化中的 IQ4_XS + Q5_K）保持为两个各自格式的权重，而不是重新量化为同一类型后融合；`0` 像其他后端一样融合 | 启用 | `0`, `1` | 否 |
-| `TS_MLX_DEVICE_MOE_ROUTING` | MLX 上的 gpt-oss MoE decode | 在 device 上执行 top-K + softmax 并直接输入 `gather_qmm`，不在 host 读取 router 分数 | 启用 | `0`, `1` | 否 |
-| `TS_MLX_STRIDED_BOX_COPY` | MLX 中写入 strided view 的 `copy` | 对行主序张量中矩形区域的 copy（KV cache 扩容）使用 device `slice_update`，而不是 host fallback | 启用 | `0`, `1` | 否 |
+| `TS_MLX_Q6K_MATVEC_MAX_ROWS` | MLX 上的精确 Q6_K matmul | 行数不超过该值时，Q6_K 以矩阵-向量乘运行（移植自 ggml-metal 的 `kernel_mul_mv_q6_K_f32`）；更多行时把 Q6_K 反量化为 F16（每片不超过 256 MB）并用 MLX 的 GEMM 相乘 | `4` | 整数 >= 0 | 否 |
+| `TS_MLX_IQ4XS_MATVEC_MAX_ROWS` | MLX 上的 IQ4_XS matmul | 行数不超过该值时，IQ4_XS 以矩阵-向量乘运行（移植自 ggml-metal 的 `kernel_mul_mv_iq4_xs_f32`）；更多行时把 IQ4_XS 反量化为 F16（每片不超过 256 MB）并用 MLX 的 GEMM 相乘 | `4` | 整数 >= 0 | 否 |
 
 ## 矩阵外的纯 C# CPU 后端变量
 
@@ -149,9 +113,7 @@ TensorAgent 在每次加载模型之前写入自己的取值（`EngineMemoryPoli
 因此同一台主机不会出现某类内核用 AVX-512、另一类用 AVX2 的情况：CPU 具备 AVX-512 F/BW/DQ 且运行时对
 `Vector512` 做了硬件加速时用 AVX-512（在某些 512 位向量更慢的处理器上，以及 `DOTNET_EnableAVX512=0` 时，
 JIT 不启用它），否则用 AVX2+FMA；没有 AVX2 时用可移植的 Vector128 / 标量代码（包括 ARM64，量化 matmul
-在那里仍走逐行路径）。唯一的例外是托管 matmul 的逐行 Q4_0 / Q8_0 点积（即 `TS_CPU_QGEMM=0` 恢复的路径），
-它们早于这些内核：仍沿用原来的判定，即具备 AVX-512 F/BW，因此在运行时没有对
-`Vector512` 做硬件加速的主机上，它们照旧运行 AVX-512 形式。`TS_CPU_DISABLE_AVX512=1` 也会切换它们。
+在那里仍走逐行路径）。
 
 **测试 AVX2 路径。** `TS_CPU_DISABLE_AVX512=1` 让手写的 AVX-512 内核在 AVX-512 主机上以其 AVX2 形式运行。
 它不会收窄 .NET 运行时本身（`TensorPrimitives`、普通拷贝、`Vector512.IsHardwareAccelerated`）。要模拟只有
@@ -159,15 +121,6 @@ AVX2 的主机，请用 `DOTNET_EnableAVX512=0` 启动进程；.NET 10 会忽略
 `DOTNET_EnableAVX2=0`（或 `DOTNET_EnableHWIntrinsic=0`）只留下可移植档；在那里，比较 GEMM 内核的单元测试
 会报告为跳过，而不是在没有可比对象的情况下算作通过。AVX2 内核只在 AVX-512 机器上以这种方式跑过，
 没有在只有 AVX2 的硬件上跑过。
-
-**回到之前的算术。** 下表每个取 `0` 的开关只恢复一个方面。要回到引入这些内核之前 `cpu` 后端的算术，
-四个都要设置：`TS_CPU_QGEMM=0 TS_CPU_FGEMM=0 TS_CPU_SGEMM=0 TS_CPU_SIMD_ELEMENTWISE=0`，DiffusionGemma
-另加 `DIFFUSION_CPU_LEGACY=1`；这样设置后，在 i7-11800H 上的回归测试逐比特复现了之前构建的输出。
-由于这些开关回退到的逐行点积沿用原来的指令集判定（见上文），在具备 AVX-512 但 `Vector512` 没有硬件加速的
-主机上这一做法同样成立；这种情况没有实际跑过。只设置某一方面的开关
-（`DIFFUSION_CPU_LEGACY=1`、`TS_QWEN_VAE_CPU=scalar` 等）并不够：共享的量化、SGEMM 与逐元素内核仍然是新代码。
-`TS_CPU_POOL` 不在其中——它只改变由哪些线程执行，不改变结果。Qwen-Image-2.1 之前不能在 `cpu` 上运行，
-因此没有可以回到的旧算术。
 
 **仍然是原生的部分。** 使用 `--backend cpu` 时，模型计算不加载任何原生库（没有 GgmlOps，也没有 CUDA）。
 模型计算之外：桌面平台上图像文件的读写经由 Magick.NET（一个原生 ImageMagick 构建）；服务端启动时会探测
@@ -179,16 +132,12 @@ GGML 与 CUDA 后端，以列出这台机器能运行什么，与 `--backend` �
 | `TS_CPU_POOL` | `cpu` 后端 | `0` 回退到 ThreadPool 的 `Parallel.For`，用于负担不起专用自旋线程的主机，也便于在同一个二进制里做 A/B。它覆盖所有经 `CpuWorkers`、量化 matmul 的 `RunParallelBlocks` 或 Core 的 `CpuParallel` 钩子（跳过其绑定）分派并行任务的托管内核：量化 GEMM 与浮点面板 GEMM、Core 的 CPU 内核、DiffusionGemma 与 Qwen-Image-2.1 的 Transformer 内核，以及 Qwen-Image 的 VAE、文本编码器与视觉塔背后的 packed GEMM（VAE 的宽线程池变为宽度上限为 `TS_CPU_GEMM_THREADS` 的 `Parallel.For`）。这些内核的结果与任务切分无关，因此两种方式输出相同。仍在线程池上的：Direct 视频网络的行循环（`DirectOps`、MiniMax-H3 自己的循环）；DeepSeek V4 的执行器有自己的线程（`TS_DSV4_THREADS`） | 启用 | 未注册 | 否 |
 | `TS_CPU_SPIN` | `cpu` 后端 | 池内线程挂起前的自旋次数。在这个宽度下挂起才是最贵的部分（唤醒 N 个线程的开销超过它们要分到的那约 60 微秒工作量），因此默认自旋次数足够多，使稳态下根本不会挂起：同一个模型在 256 时实测 0.1 tok/s，在 4096 时是 7.0 | `4096` | 未注册 | 否 |
 | `TS_CPU_TASK_BYTES` / `TS_CPU_TASKS_PER_WORKER` | `cpu` 后端 | 单次托管 matmul 的切分方式：每个工作项对应多少字节权重，以及每个线程最多分到几个工作项。是按**工作量**而不是线程数来定的——旧的按线程数缩放的规则在 122 线程时会为一次 matmul 造出 1024 个极小任务，并且超过 8 线程后就不再有加速 | `131072` / `4` | 未注册 | 否 |
-| `TS_CPU_QGEMM` | `cpu` 上的量化 matmul；以及托管 matmul 的其他调用方（CUDA 上 DeepSeek V4 的主机 MoE 卸载、CUDA/MLX 的"无设备内核"回退） | Q4_K、Q5_K、Q6_K、Q4_0、Q5_0 与 Q8_0 权重的多行 int8 GEMM：每两行权重只解码一次，放进常驻 L1 的暂存区，再用寄存器分块与所有激活行相乘（AVX-512BW 上 8 行 x 2 列，AVX2 上 4 x 1）。激活量化成与之前相同的 Q8_K / Q8_0 值，每个子块的整数和是精确的，只有浮点缩放的结合顺序变了。`0` 恢复整个 GEMM 之前的托管 matmul：逐行点积、`DequantMatMulColumns`，以及随之一起向量化的标量激活量化器、Q5_0 点积与 F16/BF16 反量化。没有 AVX2+FMA 的主机以及 ARM64 仍走逐行路径 | 启用 | 未注册 | 否 |
-| `TS_CPU_FGEMM` | `cpu` 后端，F16 / BF16 / F32 权重以及只有反量化器的量化类型（Q3_K、IQ*） | 浮点面板 GEMM：四行权重反量化成常驻 L2 的 F32 面板，再用 4x4（AVX-512）或 2x4（AVX2）寄存器分块相乘。数学上仍是同样的 F32 乘积，只是求和顺序不同。`0`（或 `TS_CPU_QGEMM=0`）恢复 `DequantMatMulColumns` | 启用 | 未注册 | 否 |
-| `TS_CPU_QGEMM_MIN_ROWS` | 同上（诊断） | 行数更少的调用与批任务改走逐行路径。不设置时任何行数都走 GEMM，这使某一行的结果与同一次调用里有多少行无关（decode、投机验证、连续批处理与 MoE 批得到相同的比特）；大于 1 的值会放弃这一点 | 未设置（1） | 未注册 | 否 |
-| `TS_CPU_QGEMM_TASK_MACS` / `TS_CPU_QGEMM_L2_BYTES` | 同上（调优） | 每个并行任务的最少乘加次数（单核约 50 微秒），以及一个行块最多容纳的激活字节数；每解码一对列就要重读一次这个行块，所以它必须留在 L2 里 | `1048576` / `524288` | 未注册 | 否 |
-| `TS_CPU_QGEMM_VERIFY` | 同上（诊断） | `1` 让每次 GEMM 再经逐行路径算一遍，并把迄今最大的相对差打印到 stderr，用真实模型的权重与激活检查内核。很慢 | 关闭 | 未注册 | 否 |
-| `TS_CPU_SGEMM` | `cpu` 上的 F32 matmul（`Ops.Addmm` / `AddmmBatch`、Direct 视频网络的 GEMM） | 打包、按缓存分块的 SGEMM（BLIS 结构），微内核为 AVX-512 8x32、AVX2+FMA 6x16 或可移植的 `Vector<T>`；瘦长乘积（M <= 4）与窄 dot 布局乘积不打包。`0` 让 `MatrixMultiplication` 与 `DirectOps` 回到旧循环。分配器选择 MKL 时不使用 | 启用 | 未注册 | 否 |
-| `TS_CPU_SGEMM_KERNEL` | 同上 | 固定微内核：`avx512`、`avx2wide`（利用 32 个 EVEX 寄存器的 8x24，仅限 AVX-512 硬件）、`avx2` 或 `portable`。不受支持的选择回落到默认值 | 支持的最宽内核 | 未注册 | 否 |
-| `TS_CPU_SGEMM_KC` / `TS_CPU_SGEMM_MC` / `TS_CPU_SGEMM_NC` | 同上（调优） | 缓存分块覆盖；MC 与 NC 向上取整到寄存器分块 | 256 / 144 / 1024（AVX-512、AVX2） | 未注册 | 否 |
-| `TS_CPU_SGEMM_DOT_MAXN` | 同上 | 走窄 dot 路径的最大 N（N 很小，且 A 的行与 B 的列沿 K 连续）；`0` 关闭该路径 | 64（AVX-512、AVX2），40（`avx2wide`） | 未注册 | 否 |
-| `TS_CPU_SIMD_ELEMENTWISE` | `cpu` 上的逐元素、norm、softmax 与 RoPE 算子（`TensorApplyCPU`、`DirectOps` 行循环） | Vector512 / Vector256 内核，按元素数量在线程池上切分。公式与运算顺序与标量循环一致，因此除向量化的 exp 与 tanh（几个 ULP）外结果逐比特相同。`0` 恢复旧循环，在 Windows 上也包括旧路径调用的 `CpuOps.dll` 入口 | 启用 | 未注册 | 否 |
+| `TS_CPU_QGEMM_MIN_ROWS` | `cpu` 上的量化 matmul（诊断） | 行数更少的调用与批任务改走逐行路径。不设置时任何行数都走 GEMM，这使某一行的结果与同一次调用里有多少行无关（decode、投机验证、连续批处理与 MoE 批得到相同的比特）；大于 1 的值会放弃这一点 | 未设置（1） | 未注册 | 否 |
+| `TS_CPU_QGEMM_TASK_MACS` / `TS_CPU_QGEMM_L2_BYTES` | `cpu` 上的量化 matmul（调优） | 每个并行任务的最少乘加次数（单核约 50 微秒），以及一个行块最多容纳的激活字节数；每解码一对列就要重读一次这个行块，所以它必须留在 L2 里 | `1048576` / `524288` | 未注册 | 否 |
+| `TS_CPU_QGEMM_VERIFY` | `cpu` 上的量化 matmul（诊断） | `1` 让每次 GEMM 再经逐行路径算一遍，并把迄今最大的相对差打印到 stderr，用真实模型的权重与激活检查内核。很慢 | 关闭 | 未注册 | 否 |
+| `TS_CPU_SGEMM_KERNEL` | `cpu` 上的 F32 matmul（`Ops.Addmm` / `AddmmBatch`、Direct 视频网络的 GEMM） | 固定微内核：`avx512`、`avx2wide`（利用 32 个 EVEX 寄存器的 8x24，仅限 AVX-512 硬件）、`avx2` 或 `portable`。不受支持的选择回落到默认值 | 支持的最宽内核 | 未注册 | 否 |
+| `TS_CPU_SGEMM_KC` / `TS_CPU_SGEMM_MC` / `TS_CPU_SGEMM_NC` | `cpu` 上的 F32 matmul（调优） | 缓存分块覆盖；MC 与 NC 向上取整到寄存器分块 | 256 / 144 / 1024（AVX-512、AVX2） | 未注册 | 否 |
+| `TS_CPU_SGEMM_DOT_MAXN` | `cpu` 上的 F32 matmul | 走窄 dot 路径的最大 N（N 很小，且 A 的行与 B 的列沿 K 连续）；`0` 关闭该路径 | 64（AVX-512、AVX2），40（`avx2wide`） | 未注册 | 否 |
 | `TS_CPU_DISABLE_AVX512` | 纯 C# CPU 路径里所有手写的 AVX-512 内核（量化 GEMM 及其量化器、逐行 Q4_0 / Q8_0 点积、SGEMM、逐元素、DiffusionGemma 注意力、Qwen-Image DiT / VAE / 文本编码器 / 视觉内核） | `1` 让它们以 AVX2 形式运行，从而能在 AVX-512 主机上测试 AVX2 路径（见上文"运行哪套指令集"与"测试 AVX2 路径"）。它们都经由同一个判定读取这个开关，不会有的保留 AVX-512 而有的放弃 | 关闭 | 未注册 | 否 |
 
 ## 矩阵外的 DiffusionGemma 变量
@@ -202,8 +151,6 @@ TestMatrix 配置中 sweep。
 | `DIFFUSION_MAX_BATCH` | DiffusionGemma Web UI | `DiffusionBatchScheduler` 的最大活跃请求数 | `2` | 未注册 | 否 |
 | `DIFFUSION_BATCHED_FORWARD` | DiffusionGemma | 真正批处理 canvas decode vs 按时间片执行融合单 canvas decode | 关闭 | 未注册 | 否 |
 | `DIFFUSION_NO_PKV` | DiffusionGemma | 关闭 prompt-KV 缓存（device-glue 后端与 `cpu`）：之后每次读取、每个去噪步都走统一的 `[prompt\|canvas]` 前向 | 关闭 | 未注册 | 否 |
-| `DIFFUSION_CPU_LEGACY` | `cpu` 上的 DiffusionGemma | `1` 用一个开关恢复 DiffusionGemma 专有的旧阶段：没有 prompt-KV 缓存，投影、注意力、路由与 MoE 都用旧实现。它们下面的 matmul 仍走新的共享内核；要回到之前的算术，还需设置 `TS_CPU_QGEMM=0 TS_CPU_FGEMM=0 TS_CPU_SGEMM=0 TS_CPU_SIMD_ELEMENTWISE=0`（见上文"回到之前的算术"） | 关闭 | 未注册 | 否 |
-| `DIFFUSION_CPU_LEGACY_MOE` / `_PROJ` / `_ATTN` / `_ROUTER` | `cpu` 上的 DiffusionGemma | 各恢复一个阶段：`_MOE` 恢复逐专家参考循环（连同其路由），`_PROJ` 恢复分开的 Q/K/V 与 gate/up 投影，`_ROUTER` 只恢复路由分数，`_ATTN` 恢复旧注意力。`_ATTN` 只作用于统一前向（prompt prefill 与 canvas decode 始终使用融合的 norm+RoPE 与分块注意力），因此注意力的 A/B 还需要 `DIFFUSION_NO_PKV=1` | 关闭 | 未注册 | 否 |
 | `DIFFUSION_CPU_ATTN_FAST` | `cpu` 上的 DiffusionGemma | `1` 选择 FMA 注意力分块（硬件加速时用 Vector512）与向量化 softmax。默认内核精确复现旧的算术，因为最后一个比特的变化就可能翻转 128 选 8 的专家路由；在 Jev 与聊天的提示长度下，注意力只占一次前向的不到百分之一 | 关闭 | 未注册 | 否 |
 | `DIFFUSION_CPU_MOE_CHUNK` | `cpu` 上的 DiffusionGemma | 每次批量 MoE 处理的 token 数；限制按路由收集的暂存区大小（否则 4k token 的 prefill 要占约 1 GB 的路由行） | `512` | 未注册 | 否 |
 | `DIFFUSION_NO_SC` / `DIFFUSION_SC_TOPK` | DiffusionGemma | self-conditioning 开关与实验 top-K 截断 | 启用 / `32` | 未注册 | 否 |
@@ -237,15 +184,12 @@ TestMatrix 配置中 sweep。
 | `TS_QWEN21_CPU_PROFILE` | 同上 | `1` 每次前向打印一行各阶段耗时 | 关闭 | 未注册 | 否 |
 | `TS_QWEN21_CPU_GATHER_V` / `TS_QWEN21_CPU_MLP_ROWS` / `TS_QWEN21_CPU_DEPTH` | 同上（调优） | 注意力从按头排列的副本读取每个头的 value（`0` 直接读取按 token 排列的 V）；MLP 每块的行数，用来限制其 `[rows, 2 * ff]` 激活的大小；dot 分块一趟的深度（16 的倍数） | 启用 / `1024` / `1024` | 未注册 | 否 |
 | `TS_QWEN21_CPU_GELU_FP16` / `TS_QWEN21_CPU_ROUND_ACTIVATIONS` | 同上（对齐用） | 为 A/B 对比复现 ggml-cpu 的舍入：它的 F16 GELU 表，以及输入 F16/BF16 `img_in` / `txt_in` 权重前按 BF16 舍入。默认是 F32 的 tanh GELU（与 CUDA、Metal 的算法相同）和 F32 输入 | 关闭 / 关闭 | 未注册 | 否 |
-| `TS_QWEN_VAE_CPU` | `cpu` 上的 Qwen-Image-2.1 VAE | 不设置时，每个卷积都是隐式 im2col 的 packed SGEMM，权重每层只打包一次（解码器的最近邻 2x 上采样折叠进卷积的输入读取），中间块注意力分块计算，norm、SiLU、加法与重采样都已向量化。`scalar` 逐比特恢复原来的标量卷积、注意力与 SiLU 循环 | packed GEMM | 未注册 | 否 |
-| `TS_QWEN_VAE_PROFILE` | 同上 | `1` 打印一次编码或解码中各类算子（conv、norm、add、attention、resample、权重打包）的耗时 | 关闭 | 未注册 | 否 |
+| `TS_QWEN_VAE_PROFILE` | `cpu` 上的 Qwen-Image-2.1 VAE | `1` 打印一次编码或解码中各类算子（conv、norm、add、attention、resample、权重打包）的耗时 | 关闭 | 未注册 | 否 |
 | `TS_QWEN_IMAGE_CPU_MEMORY_CHECK` | `cpu` 上的 Qwen-Image-2.1 | 在开始任何工作之前，估计峰值（VAE 解码：每个输出像素 2304 字节再加约 1.8 GiB；去噪：每个 token 128 KiB 再加 2.5 GiB 与映射的 Transformer）超过机器内存的尺寸会被拒绝，并给出能放下的最大方形尺寸；只超过当前空闲内存的尺寸会得到一条警告。`0` 跳过拒绝 | 启用 | 未注册 | 否 |
 | `TS_CPU_GEMM_THREADS` | `cpu` 上的 Qwen-Image-2.1 VAE | 托管 VAE 专用线程池的宽度。默认每个逻辑 CPU 一个线程：卷积受 FMA 限制，每核两个 SMT 线程能让唯一的 512 位 FMA 端口更忙（512x512 解码 7.9 -> 7.0 s）。文本编码器与视觉塔仍在共享池上，那里多出的自旋线程得不偿失。`TS_CPU_POOL=0` 时 VAE 改用宽度上限为此值的 `Parallel.For`，不再使用专用池 | 逻辑 CPU 数，最多 64（限制在 1-512） | 未注册 | 否 |
 | `TS_CPU_GEMM_KC` / `TS_CPU_GEMM_NT` | `cpu` 上的 Qwen-Image packed GEMM（VAE、文本编码器、视觉塔） | packed GEMM 的 K 分块与 N 分块，仅用于调优；结果与它们无关 | `256` / `256`（限制在 16-4096 / 32-2048） | 未注册 | 否 |
-| `TS_QWEN_TE_CPU_GEMM` / `TS_QWEN_TE_CPU_ATTN` | `cpu` 上的 Qwen-Image-2.1 文本编码器（Qwen3-VL-8B） | 不设置时，注意力是托管的因果 GQA 内核，SiLU 已向量化，投影按 `TS_QWEN_TE_CPU_MATMUL` 计算。`TS_QWEN_TE_CPU_GEMM=0` 关闭 packed GEMM 与向量化 SiLU（投影走通用的 `ManagedQuantizedOps` 路径、8 位激活，SiLU 为标量）；同时设置 `TS_QWEN_TE_CPU_ATTN=0` 则逐比特复现编码器早先的逐算子路径 | 启用 / 启用 | 未注册 | 否 |
-| `TS_QWEN_TE_CPU_MATMUL` | 同上 | 不设置时，投影像 ggml-cpu 那样把激活量化到 8 位，并在多行整数 GEMM 上计算：37 token 的默认提示用时 0.76-0.88 s，packed F32 GEMM 为 1.8-1.9 s（ggml_cpu 约 1.4 s）。`f32` 改用反量化权重分块上的 packed F32 GEMM（激活为精确的 F32：每个投影与双精度参照相差约 1e-6，8 位路径约 4e-3）。`TS_QWEN_TE_CPU_GEMM=0` 时不起作用 | 整数（Q8）激活 | 未注册 | 否 |
+| `TS_QWEN_TE_CPU_MATMUL` | `cpu` 上的 Qwen-Image-2.1 文本编码器（Qwen3-VL-8B） | 不设置时，投影像 ggml-cpu 那样把激活量化到 8 位，并在多行整数 GEMM 上计算：37 token 的默认提示用时 0.76-0.88 s，packed F32 GEMM 为 1.8-1.9 s（ggml_cpu 约 1.4 s）。`f32` 改用反量化权重分块上的 packed F32 GEMM（激活为精确的 F32：每个投影与双精度参照相差约 1e-6，8 位路径约 4e-3）。 | 整数（Q8）激活 | 未注册 | 否 |
 | `TS_QWEN_TE_PROFILE` | 同上 | `1` 每次前向打印逐算子路径的耗时拆分（linear / attention / norm） | 关闭 | 未注册 | 否 |
-| `TS_QWEN35_VENC_CPU_GEMM` / `TS_QWEN35_VENC_CPU_ATTN` | `cpu` 上的 Qwen3-VL 视觉编码器（Qwen 3.5 家族的图像输入与 Qwen-Image-2.1 编辑用的视觉塔） | packed GEMM 线性层、向量化的 erf-GELU 与托管多头注意力。`GEMM=0` 整体恢复旧路径（`Ops.Addmm` 线性层、主机 GELU 循环、基于 Ops 的注意力）；`ATTN=0` 只恢复注意力 | 启用 / 启用 | 未注册 | 否 |
 
 在 `cpu` 上，上述前缀 KV 缓存设置作用于托管缓存，它位于主机内存中："空闲内存"指未被使用的物理内存。
 只对 GGML 有效的开关（`TS_QWEN21_GRAPH_REUSE`、`TS_QWEN21_FLASH`、`TS_QWEN21_PAD_MASK`、
@@ -264,25 +208,19 @@ Qwen 3.5 家族的 DFlash / DFlash2 块级草稿器；实验性的 DeepSeek V4.1
 它们未注册在 `EnvVarMatrix.All` 中，也不在默认 TestMatrix 配置里扫描——矩阵特性目录目前
 没有投机解码特性，请用显式运行来验证这些变量。
 
-每个开关都有当前的 `TS_SPEC_*` 写法和旧的 `TS_MTP_*` 写法。应用某个参数时，两个宿主都会
-**同时**导出这两种写法，读取端也两种都认：glm-dsa 的**原生**加载器是在模型加载过程中从
-C++ 侧读取 `TS_MTP_SPEC` 与 `TS_MTP_DRAFT` 的（它据此决定要不要把多出来的一整层 256 专家
-decoder 调进显存，并据此确定图缓存大小），所以这两个名字是一份跨语言契约，不能简单改名。
-所有这些也都可以通过两个宿主上的 `--spec*` 参数与 `--draft-model` 设置。旧的 `--mtp-*` 参数（以及
-`--spec-draft-model`、`--spec-draft-n-max`、`--spec-draft-conf-min`）已被移除，现在会在启动时报错并给出替代写法；
-只有 `TS_MTP_*` 环境变量写法仍被保留。
+每个开关只有一个 `TS_SPEC_*` 名字，glm-dsa 的**原生**加载器也读取它们：在模型加载过程中
+从 C++ 侧读取 `TS_SPEC_DRAFT`（据此确定图缓存大小），并在托管侧读取 `TS_SPEC`，决定要不要把
+多出来的一整层 256 专家 decoder 调进显存。所有这些也都可以通过两个宿主上的 `--spec*` 参数与
+`--draft-model` 设置。旧的 `--mtp-*` 参数（以及 `--spec-draft-model`、`--spec-draft-n-max`、
+`--spec-draft-conf-min`）和旧的 `TS_MTP_*` 环境变量都已被移除，现在会在启动时报错并给出替代名字。
 
-| 环境变量 | 旧写法 | 适用范围 | 功能影响 | 运行时 baseline | Sweep 值 | 默认 sweep |
-|---|---|---|---|---|---|---|
-| `TS_SPEC` | `TS_MTP_SPEC` | Qwen 3.5/3.6/3.8、GLM 5.2、GLM-5.3、GLM-5.3-Flash（仅 n-gram）、Gemma 4、Qwen 3.8 Flash Next、DeepSeek V4 / V4.1、Muse-Glimmer（CLI + 服务端） | 为单序列启用投机解码 | 关闭（`0`） | 未注册 | 否 |
-| `TS_SPEC_TYPE` | — | 同上全部 | 投机算法：`auto` \| `draft-head` \| `block` \| `ngram` | `auto` | 未注册 | 否 |
-| `TS_SPEC_DRAFT` | `TS_MTP_DRAFT` | 同上全部 | 每个投机步最多起草的 token 数（1-64） | `8` | 未注册 | 否 |
-| `TS_SPEC_PMIN` | `TS_MTP_PMIN` | 同上全部 | 草稿置信度门限；含义随算法而定 | 按算法（`0.15` / `0.35` / `0`） | 未注册 | 否 |
-| `TS_SPEC_DRAFT_MODEL` | `TS_MTP_DRAFT_MODEL` | 草稿器以独立 GGUF 发布的模型（CLI + 服务端） | 独立草稿器的路径，按文件的架构识别：Gemma 4 的 `gemma4-assistant`、Qwen 3.8 Flash Next 的共享 MTP 头、DeepSeek V4 DSpark（或实验性的 V4.1 `deepseek41-dspark`）草稿器，或 DFlash / DFlash2 草稿器（Muse-Glimmer、Qwen 3.5 家族）。由 `--draft-model` 设置，且除非给出 `--no-spec`，它本身就会启用投机 | 无 | 未注册 | 否 |
-| `TS_GLM_MTP` | — | GLM 5.2 / GLM-5.3（原生执行器） | 强制开启（除 `0` 以外的任何值）或关闭（`0`）NextN 块，双向覆盖 `TS_SPEC`/`TS_MTP_SPEC`；后两者按调度器的规则读取（只有 `1`、`true`、`yes`、`on` 表示开启），因此 `TS_SPEC=false` 不会把该块调入显存 | 未设置 | 未注册 | 否 |
-| `TS_GMTP_NO_FUSED` | — | ggml 后端上的 Gemma 4 | 关闭融合多 token 验证 / 草稿步内核（逐算子回退） | 关闭 | 未注册 | 否 |
-| `TS_GMTP_NO_FAST_ROLLBACK` | — | Gemma 4 | 部分接受时恢复保留前缀回滚，而非稠密快速回滚 | 关闭 | 未注册 | 否 |
-| `TS_GMTP_BATCHED_TRUNK` | — | Gemma 4 | 验证主干走批处理分页路径，而非线性主干 | 关闭 | 未注册 | 否 |
+| 环境变量 | 适用范围 | 功能影响 | 运行时 baseline | Sweep 值 | 默认 sweep |
+|---|---|---|---|---|---|
+| `TS_SPEC` | Qwen 3.5/3.6/3.8、GLM 5.2、GLM-5.3、GLM-5.3-Flash（仅 n-gram）、Gemma 4、Qwen 3.8 Flash Next、DeepSeek V4 / V4.1、Muse-Glimmer（CLI + 服务端） | 为单序列启用投机解码 | 关闭（`0`） | 未注册 | 否 |
+| `TS_SPEC_TYPE` | 同上全部 | 投机算法：`auto` \| `draft-head` \| `block` \| `ngram` | `auto` | 未注册 | 否 |
+| `TS_SPEC_DRAFT` | 同上全部 | 每个投机步最多起草的 token 数（1-64） | `8` | 未注册 | 否 |
+| `TS_SPEC_PMIN` | 同上全部 | 草稿置信度门限；含义随算法而定 | 按算法（`0.15` / `0.35` / `0`） | 未注册 | 否 |
+| `TS_SPEC_DRAFT_MODEL` | 草稿器以独立 GGUF 发布的模型（CLI + 服务端） | 独立草稿器的路径，按文件的架构识别：Gemma 4 的 `gemma4-assistant`、Qwen 3.8 Flash Next 的共享 MTP 头、DeepSeek V4 DSpark（或实验性的 V4.1 `deepseek41-dspark`）草稿器，或 DFlash / DFlash2 草稿器（Muse-Glimmer、Qwen 3.5 家族）。由 `--draft-model` 设置，且除非给出 `--no-spec`，它本身就会启用投机 | 无 | 未注册 | 否 |
 
 这些开关背后的设计——把模型架构、投机算法与投机器权重拆成三层——记录在
 [Speculative Decoding in TensorSharp](speculative_decoding.md)（英文）。
@@ -295,29 +233,14 @@ Muse-Glimmer 的融合整模型内核与它的 DFlash 块级草稿模型各有�
 
 | 环境变量 | 适用范围 | 功能影响 | 运行时基线 | 扫描取值 | 默认是否扫描 |
 |---|---|---|---|---|---|
-| `TS_MUSE_GLIMMER_FUSED` | GGML CUDA / Vulkan 上的 Muse-Glimmer | 融合整模型图 vs 逐算子路径 | 开 | 未注册 | 否 |
-| `TS_MUSE_GLIMMER_PERSIST` | Muse-Glimmer（融合） | 持久、可被 CUDA 图捕获的计算图 vs 每次调用重建 | 开 | 未注册 | 否 |
-| `TS_MUSE_GLIMMER_INGRAPH_EMBED` | Muse-Glimmer（融合） | 在图内完成 embedding gather + 无权重输入 norm（LM head 未绑定时是负收益） | 自动（仅绑定时开启） | 未注册 | 否 |
 | `TS_MUSE_GLIMMER_PREFILL_CHUNK` | Muse-Glimmer | 每次 prefill 前向的 token 数；`0` 关闭分块 | `2048` | 未注册 | 否 |
 | `TS_MUSE_GLIMMER_SWA_RING` | Muse-Glimmer（融合） | 把 39 个滑动窗口层按 `pad(n_swa + chunk + 1, 256)` 行做环，而不是所有层都按完整上下文分配 | 开 | 未注册 | 否 |
 | `TS_MUSE_GLIMMER_SWA_ROWS` | Muse-Glimmer（融合） | 覆盖 SWA 环的行数（诊断用） | 自动 | 未注册 | 否 |
-| `TS_MUSE_GLIMMER_VENC_F32` | Muse-Glimmer 视觉塔 | 把塔反量化为 F32（约 7.4 GB），而不是把 GGUF 量化直接喂给 `AddmmQuant` | 关 | 未注册 | 否 |
-| `TS_MUSE_GLIMMER_VENC_FUSED` | CUDA 上的 Muse-Glimmer 视觉塔 | 融合视觉块 / flash-attention 路径 | 开 | 未注册 | 否 |
-| `TS_MUSE_GLIMMER_DFLASH` | Muse-Glimmer | DFlash 草稿模型 GGUF 路径（等同 CLI 的 `--draft-model`） | 无 | 未注册 | 否 |
-| `TS_QWEN35_DFLASH` | Qwen 3.5 / 3.8 | DFlash / DFlash2 草稿模型 GGUF 路径（等同 CLI 的 `--draft-model`） | 无 | 未注册 | 否 |
-| `TS_DFLASH_FUSED` | 任意 DFlash 草稿器 | 融合的 `TSGgml_DFlashInject` / `TSGgml_DFlashDraftBlock` 图 vs 逐算子草稿模型 | 开 | 未注册 | 否 |
-| `TS_DFLASH_PERSIST` | 任意 DFlash 草稿器 | 重放持久草稿图，而不是每步重建 | 开 | 未注册 | 否 |
 | `TS_DFLASH_PREFILL_CHUNK` | 任意 DFlash 草稿器 | 每次投机 prefill 前向的 token 数（驱动的是**主干**，不只是草稿器） | `1024`，并受草稿器环形缓冲与主干自身窗口的限制 | 未注册 | 否 |
 | `TS_DFLASH_SELECTOR` | DFlash2 草稿器 | `0` 改为按逐位置 argmax 起草，而不走候选格（仅用于归因分析——权重本来就是带着它训练的） | 开 | 未注册 | 否 |
 | `TS_DFLASH_CONV` | DFlash2 草稿器 | `0` 去掉分组动态卷积（同上，仅用于归因分析） | 开 | 未注册 | 否 |
 | `TS_DFLASH_SELECTOR_DEBUG` | DFlash2 草稿器（逐算子路径） | `1` 打印前几个 block 的候选格归因：一元项分布、转移项分布，以及这次游走是否离开了一元 argmax | 关 | 未注册 | 否 |
 | `TS_Q35_VERIFY_SNAPSHOTS` | Qwen 3.5 / 3.8 投机验证 | `0` 回退为先保存验证前的递归状态副本、再对已接受前缀重新前向，而不是每行保留一份快照 | 开 | 未注册 | 否 |
-| `TS_Q35_VERIFY_DEFER_STATE` | Qwen 3.5 / 3.8 投机验证 | `0` 在每次持久化调用后都把窗口末尾的递归状态下载回主机，而不是留在设备上等待 slot 提交；它与快照可以分开测，因为它同样覆盖投机会话中穿插的单行步骤 | 开 | 未注册 | 否 |
-| `TS_Q35_VERIFY_STRIDED_VIEWS` | Qwen 3.5 / 3.8 投机验证 | `0` 关闭 CUDA 与 Metal 上连续跨步的 KV view，回退为按 head 的 `set_rows` 写入 | 开 | 未注册 | 否 |
-| `TS_QWEN35_SPEC_DEVICE_STATE` | Qwen 3.5 / 3.8 投机解码，Metal 与 CUDA | `0` 让 gated-delta-net 的递归状态在每个投机步前后都排空到主机镜像再上传，而不是留在设备上。在 `ggml_cuda` 的 n-gram 场景中它本身值 1.67x，因此这是应急开关而非调优旋钮 | 开 | 未注册 | 否 |
-| `TS_QWEN35_VERIFY_RESIDENT` | Qwen 3.5 / 3.8 投机验证 | `1` 让 conv 与 delta 状态在验证期间常驻设备，省去每次调用约 60 MB 的搬运。**目前会产生错误的输出流**——常驻调用会就地更新状态，被拒绝的草稿无处回滚。仅供测量时显式开启，见[投机解码](speculative_decoding.md) | 关 | 未注册 | 否 |
-| `TS_Q35_MTP_DRAFT_PERSIST` | Qwen 3.5 / 3.8 MTP 草稿图 | `1` 允许单层 MTP 草稿图使用持久化 / 重放缓存。默认关闭：这张图曾在 CUDA graph 捕获重放时死锁，保留这个开关是为了在新版 ggml 上重新验证。收益约 1% | 关 | 未注册 | 否 |
-| `TS_MTP_FOLD_CATCHUP` | Qwen 3.5 / 3.6 NextN/MTP 投机 | `0` 把草稿头的 catch-up 与第一个草稿步拆成两次调用，而不是折叠成对 `n_accepted + 1` 行的一次前向（llama.cpp draft-mtp 的形状）。收益约 4-5% | 开 | 未注册 | 否 |
 | `TS_SPEC_ADAPTIVE` | 投机解码（所有草稿器） | `0` 关闭成本调节器，于是起草不再与普通 baseline 做对比、也永远不会被暂停。用于 A/B 测量：调节器每一轮的 baseline 步骤都是普通 decode，它们并不免费 | 开 | 未注册 | 否 |
 | `TS_GGML_LOG_DEBUG` | GGML 后端 | `1` 把 ggml 的 DEBUG 日志通道透传出来而不是丢弃。它承载 CUDA 后端的 "CUDA graph warmup complete" / "reset" 这两行，而这是唯一能看出一张图是否真的被 CUDA graph 捕获的途径 | 关 | 未注册 | 否 |
 
@@ -331,22 +254,20 @@ V4.1 的服务路径是一套原生 `ggml_cuda` 计算图，另有 `ggml_cpu` �
 
 | 变量 | 适用范围 | 作用 | 默认值 | 在矩阵中 |
 |---|---|---|---|---|
-| `TS_DSV4_NGPU` | V4 与 V4.1 | 按层切分把整层铺到几张 GPU 上——对这两个架构来说，`--layer-split N` 设置的就是它。`0` 表示使用所有可见设备 | `1`（显式 `0`：全部可见） | 否 |
 | `TS_DSV4_UBATCH` | V4 与 V4.1 | Prefill 微批宽度。不设置时，V4.1 在 ggml GPU 后端上由原生加载器在 1024、512、256 中选择：取所需路由专家 CPU 层数不多于 256（或显式 `--n-cpu-moe`）的最宽者，并记录为 `[dsv4] prefill ubatch: N (auto; ...)`。驻留 GPU 的路由专家层每个分块的耗时在各宽度下相近，因此越宽每个 prefill token 越便宜。任何显式的正整数都原样使用并关闭自动选择；`256` 恢复此前固定的 V4.1 默认值 | V4.1：ggml GPU 后端上自动，CPU 执行器与 direct CUDA 为 `256`；V4：`1024`（纯 C# 执行器为 `512`） | 否 |
 | `TS_DSV4_THREADS` | V4 与 V4.1 | 纯 GPU 加载时的原生线程池。CPU 专家卸载改用探测到的可用并行度，由 `--cpu-moe-threads N` / `TS_CPU_MOE_THREADS` 设定。在纯 C# 的 `--backend cpu` 执行器上，它设定的是该执行器自己的工作线程池，默认取 `ProcessorCount` 而不是 min(核数, 32) | min(核数, 32) | 否 |
 | `TS_DSV4_PERF` | V4 与 V4.1 | `1` 打印分阶段耗时 | 关 | 否 |
 | `TS_DSV4_VRAM_RESERVE_MB` / `TS_DSV4_GRAPH_CACHE` / `TS_DSV4_LOAD_THREADS` / `TS_DSV4_LOAD_CHUNK_MB` / `TS_DSV4_MOE_MMAP` | V4 与 V4.1 | 放置余量、计算图缓存深度、权重加载并行度，以及驻留主机的专家是否直接在 GGUF 映射上就地相乘 | 见各卡片 | 否 |
-| `TS_DSV4_DSPARK` | V4 与 V4.1 | DSpark 草稿 GGUF，未给出 `--draft-model` 时使用。V4.1 只接受 `deepseek41-dspark` 草稿器（V4 的草稿器会被拒绝），且只在 `ggml_cuda` / `ggml_cpu` 上；该路径是实验性的，训练模型已在 `ggml_cuda` 双 GPU 按层切分下通过初步文本/图像 HTTP 检查；尚不构成通用质量或吞吐验证 | 未设置 | 否 |
-| `TS_DSV41_RETAINED_CACHE` / `TS_DSV41_RETAINED_CACHE_MB` | V4.1，原生执行器 | `1` 显式启用：保留已结束会话的原生槽位，并在下一轮精确延续它时重新绑定（加载了 DSpark 草稿器时不启用）；MB 值是保留槽位的预算，`0` 或无效值会拒绝保留 | 关 / `2048` | 否 |
-| `TS_DSV41_TP` | V4.1 | `0` 关闭；`2`–`8` 打开**实验性 routed-MoE 张量并行**，且必须与 `--tp` / `TS_DSV4_NGPU` 选中的 GPU 数一致。gate/up 沿 FFN 中间维切分，down 沿输入维切分，partial 经主机中转的 F32 缓冲归约。首次完整 Q2_K 实测比按层切分更慢 | `0` | 否 |
+| `TS_DSV41_RETAINED_CACHE_MB` | V4.1，原生执行器 | 为已结束会话的下一轮保留原生槽位的预算（保留始终开启，只在加载了 DSpark 草稿器时不生效）；不是正数的值保持默认 | `2048` | 否 |
+| `TS_DSV41_TP_HOST_TOKENS` | V4.1 CUDA routed-MoE TP | `0`–`4096` 的整数：不超过此 token 数的批次使用精确 pinned 主机激活拼接，更大批次使用可用的私有 F32 NCCL。`0` 强制使用可用的设备拼接。自动阈值仅在 NCCL 选择 `NCCL_P2P_DISABLE=1` 时取 `16`，依据六张 A40 的配对实测；其他配置取 `0`。`TS_GGML_TP_F32_NCCL=0` 仍使全部批次回退到主机。 | 自动 | 否 |
 | `TS_DSV41_ENGRAM_DEVICE` | V4.1 | `1` 要求 Engram 表驻留 GPU，放不下就失败；`0` 强制主机映射，需要与 CPU oracle 逐位一致时也用它。不设置则自动且保守：只要不会因此逼出路由专家的 CPU 卸载，就放在 GPU 上 | 自动（放得下就驻留 GPU） | 否 |
 | `TS_DSV41_ENGRAM_WARM` | V4.1，仅主机映射 | 读入 Engram 表页，使查表变成一次内存读取而不是一次存储往返。未设置时在模型开始服务后于**后台**预热（默认）；`1` 与此前一致在加载期间同步预热；`0` 从不预热。八卡 A40、Q4_K_M 上 prefill 从 200–252 提升到 452–492 tok/s，decode 从 23–26 提升到 31–33 tok/s；在默认的 GPU 驻留路径上无意义。代价是表本身的主机页缓存（Q2_K 60 GiB，Q4_K_M 103 GiB）以及读表的时间：七卡 A40 通道上同步形式用旧的逐页遍历读 103 GiB 花了 311.3 s；`pread` 预热（`TS_DSV4_WARM_PREAD`）在该存储上实测 2.24–2.54 GiB/s，即约 41–46 s 的读取 | 后台预热 | 否 |
 | `TS_DSV4_GRAPH_CACHE_HEADROOM_MB` | V4 与 V4.1 | 图缓存必须为下一张图留出的设备内存，叠加在它持有的最大条目之上。会逐个释放最久未使用的条目直到满足。`0` 回到纯条目数上限，而四个并发的 10.8k token prefill 曾因此耗尽显存 | `1024` | 否 |
 | `TS_DSV41_ENGRAM_THREADS` | V4.1，仅主机映射 | 常驻查表工作线程数，`1`–`32`。单个 token 在每张表上要取 24 行互不相关的数据，串行读意味着串行缺页 | min(16, 硬件线程数) | 否 |
 | `TS_DSV41_ENGRAM_RANDOM` | V4.1，Linux 上的主机映射 | 对映射的 Engram 区间给出随机访问建议。`0` 关闭，`1` 强制 | 自动 | 否 |
 | `TS_DSV4_LOAD_CONTIGUOUS` | V4 与 V4.1 | `0` 让权重加载器退回到从共享游标分发分块任务，每个读取线程会以 `线程数 x 分块` 的步幅跨越文件，而不是读一段连续区间。保留它只是为了能对连续读取的默认行为做 A/B：在 MooseFS 挂载上实测慢 2.5 倍（八卡 A40 加载 Q4_K_M 发行版 363–382 s，对比 144–155 s） | 开 | 否 |
-| `TS_DSV4_WARM_PREAD` | V4 与 V4.1，主机映射 | 加载时如何预热映射的主机权重：主机专家预取（`--n-cpu-moe`）以及 V4.1 的 Engram 预热（同步与后台）。未设置或 `1` 用 `pread` 读取文件区间：64 MiB 为块，每个 `TS_DSV4_LOAD_THREADS` 线程一段连续区间，跳过 `mincore` 报告已驻留的块，读取错误会给出分片与偏移。`0` 原样恢复逐页触碰遍历（预取为 256 MiB 段、Engram 为 8 MiB 块，均从共享游标分发）。七卡 A40 虚拟机上已逐出的 8 GiB 区间：2.24–2.54 GiB/s，逐页遍历为 0.62–0.74 GiB/s；`MADV_WILLNEED`、`POSIX_FADV_WILLNEED` 与 `readahead(2)` 在那里只让 128 KiB 驻留，不能替代读取 | 开 | 否 |
-| `TS_DSV4_LOAD_DROP_CACHE` | V4 与 V4.1 | 每个权重分块上传到设备后是否释放它的页缓存。未设置时自动判断：当上传字节数加上主机映射的权重（专家、Engram 表）再加 8 GiB 超过主机额度（cgroup 上限）时释放，否则保留，额度未知时也保留，因此纯 GPU 驻留的检查点重新加载时仍是热的；加载时会打印这一判断及三个数值。`1` 总是释放，`0` 从不释放（此前的默认）。七卡 A40 通道（上传 263.0 GiB + 映射 151.2 GiB，对比 326.9 GiB）会释放。在 MooseFS 挂载上释放每个已驻留的 64 MiB 分块耗时 5.9–7.3 ms，也无法让上传本身变快；预期收益在其后的预取与 Engram 预热上 | 自动 | 否 |
+| `TS_DSV4_WARM_PREAD` | V4 与 V4.1 主机映射；V4.1 TP 路由权重加载 | 控制主机专家预取（`--n-cpu-moe`）、同步/后台 Engram 预热，以及 V4.1 TP 在上传 GPU 前对当前层路由 gate/up/down 源权重的预读。未设置或 `1` 使用有界并行 `pread`，线程数由 `TS_DSV4_LOAD_THREADS` 决定；跳过 `mincore` 报告已驻留的区间，读取错误包含分片与偏移。TP 在打开当前层的源映射后仅预读该层，不预读整个检查点，也不通过此路径预热 Engram 表。`0` 关闭 TP 源预读，并恢复既有主机专家/Engram 逐页触碰遍历（预取为 256 MiB 段，Engram 为 8 MiB 块）。历史七卡 A40 的 8 GiB 区间测试中，`pread` 为 2.24–2.54 GiB/s，逐页遍历为 0.62–0.74 GiB/s；这不是 TP 模型加载提速的测量，也不保证冷存储性能 | 开 | 否 |
+| `TS_DSV4_LOAD_DROP_CACHE` | V4 与 V4.1 的普通逐层上传 | 每个权重分块上传到设备后是否释放它的页缓存。V4.1 的专用 TP 路由专家上传路径不使用此设置，已上传的源数据页仍保留在可回收的文件缓存中。未设置时自动判断：当上传字节数加上主机映射的权重（专家、Engram 表）再加 8 GiB 超过主机额度（cgroup 上限）时释放，否则保留，额度未知时也保留，因此纯 GPU 驻留的检查点重新加载时仍是热的；加载时会打印这一判断及三个数值。`1` 总是释放，`0` 从不释放（此前的默认）。七卡 A40 通道（上传 263.0 GiB + 映射 151.2 GiB，对比 326.9 GiB）会释放。在 MooseFS 挂载上释放每个已驻留的 64 MiB 分块耗时 5.9–7.3 ms，也无法让上传本身变快；预期收益在其后的预取与 Engram 预热上 | 自动 | 否 |
 | `TS_DSV41_REWIND_CHECKPOINT` | V4.1，原生执行器 | `0` 去掉逐槽位的回退检查点（在每个 prompt 边界对原始滑动窗口环与压缩器状态环做的影子拷贝）。没有它，部分 KV 复用最多只能回退到活动环还覆盖的位置——发布的 checkpoint 上是 385 个位置——多轮思考对话因此会重新 prefill。每个序列槽位约占 21 MiB 显存 | 开 | 否 |
 | `TS_DSV41_SPARSE_FA` | V4.1 | 稀疏 prefill attention。在自有 F32 CUDA 路径上**默认开启**，作用于超过 8 个 query、至少 8,192 个 key 的调用：每个 query 只关注它的滑动窗口加索引器选中的行（最多 640 个 key），而不是全部 key。A40 上 512 个 query × 33,536 个 key 实测 34 ms，分块（tiled）为 1,548 ms，二者与 F32 参考的偏差都在 1.5e-7 以内；decode、DSpark verify 与更短的提示词保持稠密内核、逐位不变。`0` 恢复分块 prefill。`1` 另外让 ggml flash attention 路径（非 CUDA GPU、CPU 后端）在单个 query 或至少 16,384 个 key 时使用其掩码压缩内核，该内核有已记录的 F16 差异 | 自有 CUDA 路径默认开；ggml flash attention 默认关 | 否 |
 | `TS_DSV41_COMPACT_RAW_GATHER` | V4.1 | `1` 为原始滑动窗口选择紧凑 gather。同样需显式开启，同样有浮点差异 | 关 | 否 |
@@ -360,26 +281,19 @@ V4.1 的服务路径是一套原生 `ggml_cuda` 计算图，另有 `ggml_cpu` �
 这些变量配置 GLM 5.x（`glm-dsa`）执行器——`ggml_cuda` / `ggml_vulkan` /
 `ggml_cpu` / `ggml_metal` 使用的原生整模型 ggml 路径，以及 `cpu` 与 `cuda` 使用的
 托管逐算子路径。它们都未注册在 `EnvVarMatrix.All` 中，默认的 TestMatrix 扫描不会
-覆盖；完整清单与背景见 [GLM 卡片](models/glm_zh-cn.md#环境变量)。张量并行相关的三个
-开关（`TS_GLM_TP_SHARD`、`TS_GLM_TP_OVERSUBSCRIBE`、`TS_GLM_TP_FUSED`）列在下面的 TP 表里。
+覆盖；完整清单与背景见 [GLM 卡片](models/glm_zh-cn.md#环境变量)。张量并行相关的两个
+开关（`TS_GLM_TP_SHARD`、`TS_GLM_TP_OVERSUBSCRIBE`）列在下面的 TP 表里。
 
 | 变量 | 适用范围 | 作用 | 基线 | 扫描取值 | 在矩阵中 |
 |---|---|---|---|---|---|
 | `TS_GLM_NATIVE` | GLM 5.x | `0` 在 GGML 后端上改走托管逐算子路径而非原生整模型图——正是用来对照两条路径是否一致的 A/B | `1`（原生） | `0`, `1` | 否 |
-| `TS_GLM_NGPU` | GGML 上的 GLM 5.x | 按层切分把主干层摊到多少张 GPU 上 | `1`（显式 `0`：全部可见 GPU） | `1`, `2`, `3` | 否 |
 | `TS_GLM_UBATCH` | GLM 5.x | Prefill 微批。显存允许时 `2048` 在长提示上更快：3x RTX PRO 6000 上 pp2048 为 1145.8，对比 918.9 t/s | `1024` | `512`, `1024`, `2048` | 否 |
 | `TS_GLM_THREADS` | `ggml_cpu` 上的 GLM 5.x | CPU 后端线程数；开启 `--n-cpu-moe` / `--cpu-moe` 或没有 GPU 时改为全部可用 CPU，`--cpu-moe-threads`（其后是继承来的 `TS_CPU_MOE_THREADS`）可覆盖两者 | min(核数, 32) | — | 否 |
-| `TS_GLM_FA` | GLM 5.x | `0` 关闭 flash attention，退回显式的 `soft_max` 链路 | `1`（flash） | `0`, `1` | 否 |
-| `TS_GLM_FUSED_LID` | GLM 5.x | `0` 用基本算子拼出 DSA lightning indexer，而不是用融合的 `ggml_lightning_indexer` | `1`（融合） | `0`, `1` | 否 |
-| `TS_GLM_TOPK` | GLM 5.x | `0` 越过索引器 top-k 做稠密注意力——用于对照稀疏选择本身，不是生产设置 | `1`（稀疏） | `0`, `1` | 否 |
 | `TS_GLM_OP_OFFLOAD` | GGML 上的 GLM 5.x | 调度器的 op-offload；一旦有任何层的专家驻留主机就会自动关闭 | 自动 | `0`, `1` | 否 |
-| `TS_GLM_HC_NATIVE` | GLM 5.3-Flash | `0` 把 Sinkhorn 超连接的 pre/post 算子拆成批量 mul_mat，而不是用融合的 `ggml_dsv4_hc_*` 内核（A/B；后端没有对应内核时会自动拆解） | 探测决定 | `0`, `1` | 否 |
-| `TS_GLM_VENC_FUSED` | GLM 5.3-Flash 视觉 | `0` 用托管算子逐块跑 GLM-OCR ViT，而不是走整图原生编码器（`TSGgml_GlmVisionEncoderF32`） | `1`（融合） | `0`, `1` | 否 |
 | `TS_GLM_VRAM_RESERVE_MB` | GGML 上的 GLM 5.x | 按层切分在开始放层之前，为计算缓冲在每张卡上预留的余量 | `3072` | — | 否 |
 | `TS_GLM_GRAPH_CACHE` | GGML 上的 GLM 5.x | 缓存多少张已构建且已分配的计算图，使相同形状可以直接重放而不必重建 | `8` | — | 否 |
 | `TS_GLM_NODES_PER_LAYER` | GGML 上的 GLM 5.x | 每 rank 每层的计算图节点预算 | `256` | — | 否 |
 | `TS_GLM_MOE_MMAP` | 带 `--n-cpu-moe` 的 GLM 5.x | `0` 把驻留主机的专家拷进私有缓冲，而不是在 GGUF 映射上就地做乘法 | `1`（映射） | `0`, `1` | 否 |
-| `TS_GLM_BATCHED_DECODE` | GLM 5.x | `0` 让原生侧拒绝一切批处理解码，即便全局批处理融合 decode 已启用，也强制走按序列的槽位路径 | `1`（接受） | `0`, `1` | 否 |
 | `TS_GLM_LOAD_THREADS` / `TS_GLM_LOAD_CHUNK_MB` | GLM 5.x | 权重加载的并行度与分块大小——16 个读线程跨 6 个分片，在页缓存预热的情况下约 37 秒读入 218 GiB（5.9 GiB/s） | `16` / `64` | — | 否 |
 | `TS_GLM_TRACE` | GLM 5.x（诊断） | 指定层列表（或 `all`）按 `llama-eval-callback` 的排版打印逐层激活和，用于与 llama.cpp 对拍 | 未设置 | — | 否 |
 | `TS_GLM_BD_DEBUG` | GLM 5.x（诊断） | `1` 逐步叙述每次批处理解码：参与的是哪些槽位、计算图是复用还是重建、跑到了哪一步 | `0` | `0`, `1` | 否 |
@@ -414,30 +328,22 @@ V4.1 的服务路径是一套原生 `ggml_cuda` 计算图，另有 `ggml_cpu` �
 | `TS_GEMMA4_TP_FUSED_MOE` | GGML 上 TP 下的 Gemma 4 MoE | `0` 表示从融合的整模 MoE 主干（专家内部 Megatron 切分）回退到逐算子的整专家路径 | 开启（融合主干） | 未注册 | 否 |
 | `TS_GLM_TP_SHARD` | GGML 上 TP 下的 GLM 5.x | 切分哪一半：`1` 注意力头，`2` 路由专家，`3` 两者都切。路由专家是在每个专家内部按行切分，而不是按专家 id 分配，因为 `ggml_mul_mat_id` 要求同一 token 选中的专家 id 互不相同 | `3`（两者） | `1`, `2`, `3` | 否 |
 | `TS_GLM_TP_OVERSUBSCRIBE` | GGML 上 TP 下的 GLM 5.x | `1` 允许多个 rank 共享一张 GPU，用于在单卡机器上验证切分的正确性 | `0`（一 rank 一卡） | `0`, `1` | 否 |
-| `TS_GLM_TP_FUSED` | GGML 上 GLM-5.3-Flash 的本地 TP | `0` 强制使用组合调度器诊断回退，而不是并发提交按 rank 分段计算图。CPU MoE、张量 tracing、部分 `TS_GLM_TP_SHARD` 切分、rank 超额共享 GPU，或后端缺少原生超连接内核时也会自动回退 | 自动（满足条件时分段） | `0`, `1` | 否 |
-| `TS_Q4E_LAYER_SPLIT` | `--layer-split N` 下按层切分的 Qwen 3.8 Flash Next（`qwen4exp`） | 直接指定每张 GPU 分到的层数（逗号分隔，例如 `20,28`），取代自动的显存均衡；给出无法满足的值时会直接抛错，而不是静默忽略。这个架构上的 `--layer-split N` 是按层切分而非张量并行——`qwen4exp` 不切分任何权重 | 自动（按各设备空闲显存装箱） | 未注册 | 否 |
-| `TS_Q4E_RETAINED_CACHE` | 完整 GGML token-span 路径上的 Qwen 3.8 Flash Next（`qwen4exp`） | `0` 关闭保留会话复用与共享前缀检查点（仅精确前缀） | 开 | 未注册 | 否 |
-| `TS_Q4E_RETAINED_CACHE_MB` | Qwen 3.8 Flash Next（`qwen4exp`）保留复用 | 保留会话与共享前缀检查点共用的预算（MiB），受实测内存余量限制。在默认的 Radix 前缀缓存下由树负责淘汰，放不下的 holder 会被拒绝（只报告一次）；`TS_PREFIX_CACHE_MODE=legacy` 时先驱逐最早保留的会话。`0` 或无法解析的值拒绝所有保留 | `4096` | 未注册 | 否 |
+| `TS_Q4E_LAYER_SPLIT` | `--layer-split N` 下按层切分的 Qwen 3.8 Flash Next（`qwen4exp`） | 直接指定每张 GPU 分到的层数（逗号分隔，例如 `20,28`），取代自动的显存均衡；给出无法满足的值时会直接抛错，而不是静默忽略。这个架构上的 `--layer-split N` 是按层切分而非张量并行——`--tp N` 是独立的 FFN 通道切分模式，不使用此层分配覆盖值 | 自动（按各设备空闲显存装箱） | 未注册 | 否 |
+| `TS_Q4E_RETAINED_CACHE_MB` | Qwen 3.8 Flash Next（`qwen4exp`）保留复用 | 保留会话与共享前缀检查点共用的预算（MiB），受实测内存余量限制。未设置时预算为实测余量的一半（与 Qwen 3.5 对空闲 holder 的规则相同），只有无法测得余量时才用 4096；原先固定的 4096 默认值在 4x A40 张量切分上只能容纳四个并发 1.3 GB 会话中的三个。Radix 前缀缓存负责淘汰，放不下的 holder 会被拒绝（只报告一次）。`0` 或无法解析的值拒绝所有保留 | 实测余量的一半（无法测得时为 `4096`） | 未注册 | 否 |
 | `GGML_CUDA_ALLREDUCE` | 本地 TP，`ggml_cuda` | `nccl` / `internal` / `none` —— 直接透传给 ggml 的集合通信选择；显式设置同时会跳过启动前探测 | 自动（构建时能找到 NCCL 且通过探测就用 NCCL） | 未注册 | 否 |
 | `TS_GGML_TP_CUDA_GRAPHS` | 本地 TP，`ggml_cuda` | `0` 关闭多 GPU 运行下的 CUDA graph 捕获。TP 下默认**开启**捕获：一个张量并行 token 是几十次按 rank 的小提交，重放的代价远低于重新下发（4×A40：Qwen3.5-9B tp4 88 → 128.5 tok/s，Qwen3.5-35B-A3B tp2 71.3 → 104.1）。历史上曾因捕获污染的隐患而禁用，那个隐患已不再成立——ggml 用 `cudaStreamCaptureModeRelaxed` 捕获。这个 opt-out 会在第一次后端调用之前翻译成原生的 `GGML_CUDA_DISABLE_GRAPHS`，因为 ggml 会在首次使用时锁定该值 | 开启捕获 | 未注册 | 否 |
 | `TS_GGML_TP_AR_PROBE` | 本地 TP，`ggml_cuda` | `0` 跳过两项启动前探测；`force` 忽略缓存的判定（`~/.cache/tensorsharp/tp-collective-probe`）重新探测。模型加载前，进程组会检查两件事：所宣称的设备对之间 peer copy 是否真的把数据送到，以及一次小型 NCCL AllReduce 能否端到端完成——一些云主机声称支持 P2P 但数据永远送不到，NCCL 的第一次集合通信随后会让每块 GPU 永远空转。peer 检查失败时会保留 NCCL 但拿掉它的 peer 传输（`NCCL_P2P_DISABLE=1`），这正是超过 2 张 GPU 时仍能保住设备集合通信的原因 | 探测开启，判定按 驱动/NCCL/GPU 组合缓存 | 未注册 | 否 |
 | `TS_GGML_TP_AR_PROBE_MS` | 本地 TP，`ggml_cuda` | 每项探测（先 peer copy，后 AllReduce）的完成期限，超时即判定该传输不可用；集合通信随后在 2 张 GPU 时回退到钉页主机内存的 `internal` 管线，更多卡时回退到主机归约。`0` 关闭探测 | `10000` 毫秒 | 未注册 | 否 |
+| `TS_GGML_TP_F32_NCCL` | 对精度敏感的本地 TP，`ggml_cuda` | `0` 禁用 TensorSharp 自有的 F32 NCCL 路径，供诊断使用。对精度敏感的通用计划回退到保持 F32 的分块归约或主机归约；DeepSeek V4.1 回退到主机行收集。默认使用不压缩的 NCCL 操作，其中 DeepSeek 不等宽激活分片使用逐位保真的 AllGather，并遵守显式的 `GGML_CUDA_ALLREDUCE=internal/none`。不改变普通 TP 计划。 | NCCL 可用时开启 | 未注册 | 否 |
 | `GGML_CUDA_AR_BF16_THRESHOLD` | 本地 TP，`ggml_cuda` | ggml 在多大载荷以上把 F32 集合通信转成 BF16；TensorSharp 把 ggml 的默认值提高到 1 MB，使 decode 规模的归约保持精确 | `1 MB`（由 `TSGgml_TensorParallelInit` 设置） | 未注册 | 否 |
 | `TS_QWEN35_LAYER_TRACE` | Qwen 3.5/3.6 | `1` 打印首次前向的逐层残差流摘要，单卡与 TP 两条路径都会输出（诊断用） | 关闭 | 未注册 | 否 |
 
 ## 矩阵外的 Redis 共享状态变量
 
-这些变量配置可选的 Redis 状态，它们未注册在 `EnvVarMatrix.All` 中。
-`TS_KV_CACHE_REDIS_URL` 也可通过 `--redis-url` 或 `--paged-kv-redis-url` 设置；
-`TS_KV_CACHE_REDIS_TTL_MINUTES` 对应 `--paged-kv-redis-ttl`；
-`TS_RESPONSES_STORE_REDIS_URL` 对应 `--redis-url`。服务端上真正生效的只有 Responses API
-存储。Redis KV 层属于独立的 `PagedKvCacheManager`，只有 CLI `--paged-bench` 会构造它：服务端
-接受并记录这些 KV 设置，但其请求路径把 KV 状态放在引擎里，从不读取它们。
+这个变量配置可选的 Redis 状态，它未注册在 `EnvVarMatrix.All` 中，`--redis-url` 会设置它。Redis 不保存任何 KV 状态。
 
 | 环境变量 | 适用范围 | 功能影响 | 运行时 baseline | Sweep 值 | 默认 sweep |
 |---|---|---|---|---|---|
-| `TS_KV_CACHE_REDIS_URL` | 独立的 `PagedKvCacheManager`（CLI `--paged-bench`）；在服务端请求路径上不生效 | 该管理器共享 KV 块层的 Redis 连接串 | 未设置（关闭） | 未注册 | 否 |
-| `TS_KV_CACHE_REDIS_TTL_MINUTES` | 同上 | 该层条目的 TTL（分钟）；`0` = 不过期 | `1440`（24 小时） | 未注册 | 否 |
 | `TS_RESPONSES_STORE_REDIS_URL` | 仅服务端 | Responses API 存储的 Redis 连接串；设置后取代内存存储 | 未设置（关闭） | 未注册 | 否 |
 
 ## 矩阵外的通用运行时开关
@@ -454,22 +360,14 @@ TestMatrix 配置中 sweep。
 | `TS_JEV_MAX_BODY_MB` / `TS_JEV_MAX_CANVAS` / `TS_JEV_MAX_PENDING` | `POST /v1/systemone`（Jev，DiffusionGemma） | 请求体上限（MiB，1-64）、每个问题分块的答案 canvas 宽度（token，8-4096，同时受检查点限制），以及同时可接纳的请求数（1-1024），超出后端点返回 HTTP 529。超出范围的值会报错而不是被截断 | `8` / `64` / `32` | 未注册 | 否 |
 | `TS_NEMOTRON_AUDIO_MMPROJ` | 带 `--mmproj` 的 Nemotron-H | 改从该音频配套 GGUF（NVIDIA `sound_encoder.*` / `sound_projection.*` 张量）而不是 `--mmproj` 文件加载 Parakeet 音频塔，从而可以同时使用视觉 mmproj 与音频配套文件。除非该文件的张量校验通过，音频仍被拒绝（HTTP 400）；见 `docs/models/nemotron_zh-cn.md` §4.7 | 未设置（`--mmproj` 含这些张量时从中读取音频塔） | 未注册 | 否 |
 | `TS_PDF_MAX_PAGES` | PDF 文档输入（CLI `--pdf`、服务端 `/api/upload`） | 文本提取与页面图像渲染读取的 PDF 页数上限 | `0`（全部页面） | 未注册 | 否 |
-| `TS_GGUF_PREFAULT` / `TS_GGUF_PREFAULT_THREADS` | 模型加载，所有走 `GgufReader` 的架构 | `0` 跳过加载器读文件之前的并行页缓存预热；threads 变量设定它的并发流数。加载路径本身只用一到两条流读文件，因此冷加载被单流带宽卡住——在 MooseFS 卷上单流约 440 MB/s，8-16 流约 1.8 GB/s。该预热在 iOS 上、以及文件大于可用内存一半时会自行跳过，文件已在页缓存中时则是空操作 | 开，`min(16, 核心数)` | 未注册 | 否 |
-| `TS_DIRECT_QUANT_WEIGHTS` | `cpu` 后端上的 direct 视频网络（Wan、MiniMax-H3） | `0` 改回在加载时把每个量化权重一次性展开成 F32 再走普通 GEMM，而不是保持 GGUF 存储类型直接参与乘法。展开会占用 4 倍权重内存，每次前向也要多读 4 倍字节；保留该开关是为了在同一个二进制里 A/B 比较两者的数值漂移 | 启用（权重保持量化） | 未注册 | 否 |
+| `TS_GGUF_PREFAULT` / `TS_GGUF_PREFAULT_THREADS` / `TS_GGUF_PREFAULT_RESIDENT` | 通过 `GgufReader` 加载模型 | `PREFAULT=0` 跳过并行页缓存预热；线程数不超过处理器数量。所有分片所选张量总量共享进程内存预算一半的上限，跳过 Qwen 的稀疏 PLE 表。Linux 检查页驻留状态，避免复制已缓存的数据；`RESIDENT=0` 强制读取，供 A/B 测量。其他平台常规读取所选范围，iOS/tvOS 跳过预热。该预算不代表当前主机空闲内存。 | 开，`min(16, 核心数)`，开启驻留检查 | 未注册 | 否 |
 | `TS_DUMP_LOGITS` | 所有模型、所有后端 | 把**第一次真实前向**的 logits 以原始 float32 一次性写入该路径。它会刻意**跳过预热前向**：`WarmUpKernels` 在真实提示词之前会自己跑一次丢弃用的 decode 和 prefill，导出那几次等于在一个无意义的 token 上比较两个执行器，而不是在比较模型。这样就能用 logit 向量而不是生成文本来比较两个后端——贪心解码会把一次几乎打平的比分变成一句明显不同的话 | 未设置（不导出） | 未注册 | 否 |
 | `TS_FUSED_QKNORM_ROPE` | 直连 `cuda` 后端上的 Qwen 3.5 / 3.6 纯文本 prefill | 融合 QK-Norm + NeoX-RoPE CUDA 内核；`0` 回退到分离的 norm + RoPE 算子（多模态 MRoPE 与其他后端始终走分离路径） | 启用 | 未注册 | 否 |
-| `TS_CUDA_QMM_F16GEMM` | 直连 `cuda` 后端，激活行数 ≥ `TS_CUDA_QMM_F16GEMM_MIN_ROWS` 的量化矩阵乘 | 将权重一次性反量化为 F16 并走张量核心 cuBLAS GEMM（ggml 风格的 prefill 路线），替代分块量化内核；`0` 回退到量化内核 | 启用 | 未注册 | 否 |
-| `TS_CUDA_QMM_F16GEMM_MIN_ROWS` | 直连 `cuda` 后端 | F16 GEMM 路线的激活行数阈值 | `32` | 未注册 | 否 |
+| `TS_CUDA_QMM_F16GEMM_MIN_ROWS` | 直连 `cuda` 后端 | 激活行数达到该阈值的量化矩阵乘会把权重一次性反量化为 F16 并走张量核心 cuBLAS GEMM（ggml 风格的 prefill 路线），替代分块量化内核 | `32` | 未注册 | 否 |
 | `TS_CUDA_QMM_F16GEMM_MAX_MB` | 直连 `cuda` 后端 | F16 权重暂存区上限（MB）；超过上限的权重（如 LM head）继续使用量化内核 | `768` | 未注册 | 否 |
-| `TS_CUDA_Q80_VEC` | 直连 `cuda` 后端，Q8_0 单行（decode）矩阵乘 | 对 q8_1 量化后的激活行执行每 warp 一列的 dp4a 矩阵-向量乘（类似 ggml `mul_mat_vec_q`）；`0` 回退到精确 FP32 反量化内核 | 启用 | 未注册 | 否 |
 | `TS_CUDA_Q80_VEC_MIN_OUT` | 直连 `cuda` 后端 | Q8_0 dp4a 矩阵-向量乘的最小输出宽度（诊断开关） | `0` | 未注册 | 否 |
-| `TS_CUDA_Q80_MMQ` | 直连 `cuda` 后端，激活行数在 32..`TS_CUDA_Q80_MMQ_MAX_ROWS` 的 Q8_0 矩阵乘 | 直接在原始 Q8_0 块上执行 int8 张量核心 GEMM（mma.m16n8k32，ggml MMQ 风格），替代反量化+cuBLAS F16 路线；`0` 回退到 F16 GEMM | 启用 | 未注册 | 否 |
-| `TS_CUDA_Q80_MMQ_MAX_ROWS` | 直连 `cuda` 后端 | 行数超过该阈值后 F16 GEMM 路线更优（MMQ 的权重扫描次数随 ceil(rows/128) 增长） | `512` | 未注册 | 否 |
-| `TS_CUDA_Q80_MMQ2` | 直连 `cuda` 后端 | MMQ GEMM 的 cp.async 暂存变体（拆分的 q8_1 激活暂存 + 原始权重窗口以 cp.async 异步拷贝到共享内存；在 inDim % 256 == 0 时启用，结果逐位一致，prefill 约快 18%）；`0` 固定使用寄存器预取的 MMQ 内核 | 启用 | 未注册 | 否 |
-| `TS_CUDA_GDN_PREFILL_SPLIT` | 直连 `cuda` 后端上的 Qwen 3.5 / 3.6 GDN prefill | 三阶段无同步 GDN prefill（并行卷积/归一化 → 寄存器驻留行扫描 → 并行 RMS+门控）；`0` 固定使用旧的单内核逐 token 路径 | 启用（seqLen ≥ 8 且 headKDim = 128） | 未注册 | 否 |
-| `TS_CUDA_PREFILL_GRAPH` | 直连 `cuda` 后端上的 Qwen 3.5 / 3.6 纯文本多 token prefill | 在同一 (seqLen, startPos, 缓存标识) 形状第二次运行时把逐算子 prefill 层循环捕获为 CUDA graph，之后以单次 `cuGraphLaunch` 重放（结果逐位一致；捕获失败时自动回退普通路径）；`0` 关闭全部 CUDA graph 捕获（包括 decode graph） | 启用 | 未注册 | 否 |
-| `TS_CUDA_DECODE_GRAPH` | 直连 `cuda` 后端上的 Qwen 3.5 / 3.6 纯文本 decode | 把逐算子 decode 步骤（seqLen = 1）捕获为 CUDA graph 并逐 token 重放；位置相关的值（注意力长度、KV 写入槽位、GDN 卷积环索引、RoPE 位置）由内核从一块以锁页主机内存刷新的设备参数块中读取，因此在 KV 缓存扩容之前一个 graph 可服务所有位置（结果逐位一致；捕获失败时自动回退普通路径）；`0` 关闭 | 启用 | 未注册 | 否 |
-| `TS_CUDA_PREFILL_GRAPH_MAX` | 直连 `cuda` 后端 | 缓存的 prefill + decode graph 数量（LRU 淘汰；每个 graph 固定持有其捕获时使用的内存池块） | `4` | 未注册 | 否 |
+| `TS_CUDA_Q80_MMQ_MAX_ROWS` | 直连 `cuda` 后端 | 激活行数在 32 到该值之间的 Q8_0 矩阵乘直接在原始 Q8_0 块上执行 int8 张量核心 GEMM（mma.m16n8k32，ggml MMQ 风格）；超过该值后 F16 GEMM 路线更优（MMQ 的权重扫描次数随 ceil(rows/128) 增长） | `512` | 未注册 | 否 |
+| `TS_CUDA_PREFILL_GRAPH_MAX` | 直连 `cuda` 后端 | 缓存的 prefill + decode CUDA graph 数量（LRU 淘汰；每个 graph 固定持有其捕获时使用的内存池块）。Qwen 3.5 / 3.6 纯文本 prefill 与 decode 会把逐算子层循环捕获为 graph 并重放（结果逐位一致；捕获失败时回退普通路径） | `4` | 未注册 | 否 |
 | `TS_CUDA_PREFILL_GRAPH_LOG` | 直连 `cuda` 后端 | 打印 graph 捕获/重放/中止事件（`1`） | 关闭 | 未注册 | 否 |
 | `TENSORSHARP_CUDA_POOL_LARGE_MB` | 直连 `cuda` 后端 | 全局大块（≥ 2 MB）显存缓存预算；让 prefill 级激活保持池化，避免每层重复 cuMemAlloc/cuMemFree | `1024` | 未注册 | 否 |
 | `TS_CUDA_PROFILE` | 直连 `cuda` 后端 | 退出时打印 CPU 回退算子与主机↔设备同步计数（`1`），含调用点归因（`2`） | 关闭 | 未注册 | 否 |

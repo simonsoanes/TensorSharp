@@ -1,25 +1,101 @@
 # TensorAgent
 
-An iPhone and iPad app with the capabilities of TensorSharp.Server's Web UI
-chat (the main gaps are named below), running entirely on the device: a .NET
-MAUI (`net10.0-ios`) head that links the TensorSharp engine statically, serves its
-own phone-shaped page to a WKWebView from an in-process loopback HTTP server, and
-answers that page's API with the same chat pipeline the desktop uses.
+<p align="center"><a href="https://buymeacoffee.com/zhongkaifu"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a><br>
+<sub>TensorSharp/TensorAgent is free. If you like it, a coffee keeps the work on it going.</sub></p>
 
-This is the current source implementation of TensorSharp's iOS/iPadOS target.
-Physical devices use the GGML Metal (`ggml_metal`) backend; build it with
-`TensorSharpIosTargets=true`. It is not a remote client or a separate inference
-engine. It targets iPhone and iPad (iOS/iPadOS 17.0 or later, arm64 only); the
-only device run recorded below is an iPhone on iOS 26.6.1, and every built-in
-catalog model needs a device in the 12 GB memory tier or above (see the catalog
-below). No release workflow builds, signs or publishes the app, so
-follow the source-build instructions below.
+A local AI app for **iPhone, iPad, Mac and Windows**. TensorAgent runs TensorSharp
+in the app process for text and reasoning, multimodal questions, agentic code and
+document work, **Qwen-Image 2.1 image generation and editing**, and MiniMax-H3 short
+video with audio. Choose a model for the task and use the same composer, saved chats
+and artifact links. Image edits support painted selections, protected pixels,
+original/result comparison and twelve optional LoRA plug-ins. The interface is
+available in [eight languages](#languages).
 
-Nothing leaves the phone by default. The model runs locally, the sandbox has no
-network unless the user grants it, and dictation requires on-device speech
-recognition wherever the chosen language's recogniser supports it; for a language
-whose recogniser cannot run on the device, Apple's recogniser may process the audio
-off the device.
+The .NET MAUI project shares its chat page and loopback API across iOS/iPadOS,
+Mac Catalyst and Windows WinUI heads. Physical iPhones and iPads use GGML Metal
+(`ggml_metal`), Macs use Metal or CPU, and Windows offers CUDA/Vulkan when available,
+then CPU. See [On the desktop](#on-the-desktop-macos-and-windows) for platform differences.
+The Apple device target is iOS/iPadOS 17.0 or later, arm64; build it with
+`TensorSharpAppleTargets=true`.
+
+**Download and install:** follow the **[TensorAgent Desktop user guide](../docs/tensoragent_desktop.md)**
+([中文](../docs/tensoragent_desktop_zh-cn.md)) for macOS and Windows packages, model
+setup and your first chat. The updated Release Binaries workflow publishes Desktop
+DMG/PKG/ZIP and MSI/ZIP assets; historical releases may lack them. iPhone/iPad still
+use the [source-build instructions](#build-and-run).
+
+**Model and validation scope.** All twelve catalog entries need
+at least the 12 GB system RAM tier; seven need 24 GB or more. Qwen3.8 Flash Next has an
+experimental UD-IQ1_M entry from 32 GB and a text-only UD-Q2_K_XL entry from 48 GB,
+both with SSD-backed weights. These eligibility tiers describe physical system RAM,
+including unified memory on Apple devices; storage size and GPU VRAM are separate.
+Image/video generation has been measured in the Mac app, with no recorded
+iOS media generation or Windows image/audio/video generation. The physical-phone run recorded
+below is on iOS 26.6.1; iOS 27 has not been device-verified.
+
+Inference runs locally. The code sandbox has no network unless the user grants it.
+Apple dictation requests on-device recognition where the selected language supports it;
+otherwise Apple's recogniser may process the audio off the device. Windows code execution
+requires the explicit **Run without a sandbox** setting.
+
+<p align="center"><img src="../website/assets/screenshots/tensoragent-iphone.png" alt="TensorAgent on an iPhone: Gemma 4 E2B scaled a recipe from 4 to 10 people by running a Python script in the app's built-in Python, and answered with a table" width="300"></p>
+
+<sub>Gemma 4 E2B (Q8_0) in the iPhone 17 Pro simulator, captured on 2026-09-30. The simulator
+has no GPU, so the engine runs on `ggml_cpu` there; on an iPhone it uses Metal. The model
+wrote a short script, ran it in the app's built-in Python, and answered with the table. The
+Mac app is shown under [On the desktop](#on-the-desktop-macos-and-windows).</sub>
+
+## Install TensorAgent Desktop
+
+Open the **[latest release](https://github.com/zhongkaifu/TensorSharp/releases/latest)**
+and expand **Assets**. The desktop filenames start with `tensoragent-desktop-`,
+followed by the release version and platform:
+
+| Computer | Install package |
+|---|---|
+| Apple Silicon Mac, macOS 14+ | `tensoragent-desktop-<version>-osx-arm64.dmg`: drag TensorAgent to Applications; PKG and ZIP alternatives are available. |
+| Windows x64, CPU | `tensoragent-desktop-<version>-win-x64-cpu.msi`: install for your user and open TensorAgent from Start; ZIP is available. |
+| Windows x64, compatible NVIDIA GPU/driver | `tensoragent-desktop-<version>-win-x64-cuda.msi`: includes CUDA runtime libraries; ZIP is available. |
+
+Desktop packages carry their .NET runtime and native engine. Windows WebView2 is
+a separate prerequisite; Python/Node are optional system tools for skills, rather
+than bundled desktop interpreters. Packages currently use ad hoc Mac signing and
+an unsigned Windows installer. See the [installation guide](../docs/tensoragent_desktop.md#2-install-and-open)
+for verification and platform prompts. Old release pages may contain only CLI/server
+archives; the workflow change does not add Desktop files to past releases.
+
+After opening the app, choose **☰ → Models → Download → Use**, wait for loading,
+and type your first message. Model weights are separate downloads, and catalog
+eligibility starts at 12 GB physical RAM. Use the [full user guide](../docs/tensoragent_desktop.md)
+for storage setup, attachments, permissions, generated files, updates and troubleshooting.
+
+### Release packaging for maintainers
+
+[Release Binaries](../.github/workflows/release-binaries.yml) publishes on a `v<version>`
+tag push; a manual run accepts the version without `v` and creates a draft by
+default. Packaging accepts three-part numeric versions such as `2.8.6` or
+`2026.10.03`, with optional prerelease/build labels, validated by
+[the version resolver](../eng/resolve-release-version.py). Calendar tags map to
+Windows Installer's limits (`2026.10.03` becomes MSI version `26.10.3`); the complete
+release version remains in asset names. The workflow pins .NET SDK 10.0.302,
+workload set 10.0.303.1 and Xcode 26.6 for its hosted Mac build, installs both Apple
+MAUI workloads for restore, and builds the native macOS engine with a 14.0
+deployment floor. Local builds still need a workload/Xcode combination that matches
+their installed Xcode.
+
+The [Mac packager](../eng/package-tensoragent-macos.sh) preserves the published
+bundle's ad hoc signature and creates DMG/PKG/ZIP packages. The
+[Windows packager](../eng/package-tensoragent-windows.ps1) and
+[WiX generator](../eng/generate-tensoragent-wix.py) validate a self-contained
+publish folder and create MSI/ZIP packages, including per-user installation and a
+Start menu shortcut. Distribution signing and notarization are not configured.
+Each release includes `SHA256SUMS-tensoragent-desktop-<version>-<variant>.txt` and
+`tensoragent-desktop-<version>-<variant>-BUILD.txt`. BUILD records the unchanged
+upstream ggml revision and actual packaging checks: Mac signatures/architecture
+and archive structure, Windows ZIP/MSI payload hashes, and package checksums.
+Those checks do not establish clean-machine installation, GUI launch, model
+inference, GPU coverage or benchmark results. Keep any additional generated
+validation evidence under ignored `docs/validation/` or `artifacts/`.
 
 ## What it does
 
@@ -31,6 +107,13 @@ into a phone UI. One row of chrome, everything reachable at the bottom next to
 the keyboard, a layout that follows `visualViewport`, a single `+` sheet for
 Photo / Camera / Video / File, and reasoning collapsed behind a disclosure.
 
+Press **Enter** to send and **Shift+Enter** for a new line. Enter used to confirm an
+IME composition does not send, and pressing it during generation does not stop the turn.
+After a text turn, the answer shows its token count, elapsed time and tokens per second,
+plus prompt/KV reuse when reported and a stopped/truncated marker when applicable.
+Those statistics are saved with the conversation and return when it is reopened;
+image/video turns do not show the placeholder zero-token counters.
+
 What is shared is the API, not the document. The routes under the page —
 `/api/chat`, `/api/models`, `/api/sessions`, `/api/upload`, `/api/skills`,
 `/api/image-edit`, `/api/video-generate` — are bound to the same
@@ -40,13 +123,18 @@ identically. The main things the desktop page has that are not here: the phone
 page draws no sub-agent progress panel (it ignores the `agents` field of
 tool-progress frames, and only names the sub-agent tools in words — "Starting
 sub-agent", "Waiting for sub-agents", "Messaging sub-agent", "Stopping sub-agent",
-"Checking sub-agents", or "Preparing …" while the call is being written), it has no image-editing or video-generation UI — those two routes are
-bound, but nothing on the page calls them — and `/api/image-generate`, the route the
-desktop page uses for text-to-image, is not bound at all. The app's own client is
-appended as one script tag at request time; the page file itself is never forked.
+"Checking sub-agents", or "Preparing …" while the call is being written), and it has
+no image or video controls of its own: with Qwen-Image 2.1 or MiniMax-H3 loaded, the
+message itself asks for a picture or a clip, through `/api/chat` (`ImageTurns`,
+`VideoTurns`; see "Pictures" and "Videos" below). So `/api/image-edit` and
+`/api/video-generate` are bound, but nothing on the page calls them, and
+`/api/image-generate`, the route the desktop page uses for text-to-image, is not bound
+at all. The app's own client is appended as one script tag at request time; the page
+file itself is never forked.
 
-**A built-in model catalog.** Five dense entries chosen to fit a phone or tablet, with the
-exact byte size and SHA-256 of every file. All five are downloadable; those downloads
+**A built-in model catalog.** Twelve entries with the exact byte size and SHA-256 of every
+file: five chosen for phone/tablet memory tiers, and seven requiring desktop memory tiers.
+All twelve are downloadable; those downloads
 resume from a kept `.part` after an interruption, are verified before use, and
 belong to the APP rather than to the screen that started one — see "Downloads"
 below. Bonsai 2 27B is the one entry that needs the 16 GB tier (iPads and Macs)
@@ -56,29 +144,163 @@ GGML Q2_0 at load (about 29% more payload), so the 5.95 GB download occupies abo
 the roughly 8.5 GB a 12 GB iPhone grants. The PQ2_0 file (7.21 GB) holds the same
 ternary weights and repacks to about the same size, so the entry downloads the
 smaller PTQ1_0 file. See the [Bonsai2 card](../docs/models/bonsai2.md).
+Qwen3.8 27B and Muse-Glimmer 30B are models a phone could run only at one or two bits,
+offered at four where the memory exists; Qwen-Image 2.1 makes and edits pictures; and the
+two MiniMax-H3 entries, one model in two checkpoints, make short videos with their own
+soundtrack, one from a description or a starting photo, the other around the photos,
+clips and recordings it is given. Qwen3.8 Flash Next, a 125B mixture of experts (about 6B
+active per token), has two catalog quantizations. UD-Q2_K_XL remains text-only at the
+48 GB system RAM tier; in the recorded Mac run the engine kept 18.3 GB of its 78.9 GB
+package resident and read the rest from SSD as tokens needed it. UD-IQ1_M starts at an
+experimental 32 GB system RAM tier and supports image questions with an optional BF16
+projector. Its three weight shards need 74,538,755,776 bytes of storage (74.54 GB), or
+75,446,298,720 bytes (75.45 GB) with the projector. SSD paging allows these packages to
+exceed RAM; the engine plans expert placement for the available accelerator memory.
+See [The desktop's larger models](#the-desktops-larger-models) for the historical Mac measurements.
 
-| Model | Modalities | Required artifact(s) | Needs | Source |
+| Model | Modalities | Required artifact(s) | Minimum system RAM tier | Source |
 | --- | --- | --- | --- | --- |
 | Gemma 4 E2B (Q8_0) | text, image, audio, video | download: 4,967,497,152-byte main GGUF + 557,368,064-byte projector | 12 GB | `ggml-org/gemma-4-E2B-it-GGUF` |
 | Gemma 4 E4B (IQ4_XS) | text, image, audio, video | download: 4,715,416,704-byte main GGUF + 559,874,816-byte projector; 98,653,280-byte draft optional | 12 GB | `unsloth/gemma-4-E4B-it-GGUF` + `ggml-org/gemma-4-E4B-it-GGUF` (projector and draft) |
 | Gemma 4 12B (UD-IQ2_M) | text; image and video with optional projector | download: 4,213,353,280-byte main GGUF; 175,115,840-byte projector and 465,109,248-byte draft optional | 12 GB | `unsloth/gemma-4-12b-it-GGUF` |
 | Bonsai 2 27B (PTQ1_0) | text; image with optional projector | download: 5,946,648,928-byte main GGUF; 629,246,976-byte projector optional | 16 GB | `prism-ml/Ternary-Bonsai-2-27B-gguf` |
 | Qwen3.5 9B (IQ4_XS) | text; image and video with optional projector | download: 5,168,653,536-byte main GGUF; 918,166,080-byte projector optional | 12 GB | `unsloth/Qwen3.5-9B-GGUF` |
+| Qwen3.8 27B (UD-Q4_K_XL) | text; image and video with optional projector | download: 17,559,178,144-byte main GGUF; 927,607,488-byte projector optional | 32 GB | `unsloth/Qwen3.8-27B-GGUF` |
+| Muse-Glimmer 30B (UD-Q4_K_XL) | text; image with optional projector | download: 15,878,222,368-byte main GGUF; 2,051,685,088-byte projector optional | 32 GB | `unsloth/Muse-Glimmer-30B-GGUF` |
+| Qwen3.8 Flash Next (UD-Q2_K_XL) | text | download: three shards of 10,946,624, 49,979,779,296 and 28,878,402,944 bytes (78.9 GB) | 48 GB | `unsloth/Qwen3.8-Flash-Next-GGUF` |
+| Qwen3.8 Flash Next (UD-IQ1_M) | text; image with optional projector | download: three shards of 10,946,624, 49,988,981,792 and 24,538,827,360 bytes (74.54 GB total); 907,542,944-byte `mmproj-BF16.gguf` optional | 32 GB, experimental | `unsloth/Qwen3.8-Flash-Next-GGUF` |
+| Qwen-Image 2.1 (Q4_K_M) | text or a photo in, a picture out | download: 4,189,343,904-byte DiT + 5,027,784,800-byte Qwen3-VL-8B text encoder + 675,509,688-byte VAE + 1,159,029,824-byte vision projector | 24 GB | `Abiray/Qwen-Image-2.1-GGUF` + `Qwen/Qwen3-VL-8B-Instruct-GGUF` + `Comfy-Org/Qwen-Image-2.1` |
+| MiniMax-H3 (Q4_K) | text, or one or two photos as the first and last frames, in; a video with its soundtrack out | download: 11,420,663,904-byte denoiser + 18,218,065,024-byte Qwen3-VL-32B text encoder + 5,207,808,496-byte video VAE + 605,254,808-byte audio VAE + 2,776,833-byte `vocab.json`, 1,671,839-byte `merges.txt` and 11,003-byte `tokenizer_config.json` | 32 GB | `unsloth/MiniMax-H3-GGUF` + `MiniMaxAI/MiniMax-H3` (tokenizer files) |
+| MiniMax-H3 References (Q4_K) | text with up to nine photos, clips and recordings to feature in; a video with its soundtrack out | download: 11,381,096,544-byte denoiser, plus the same four companions as MiniMax-H3 (six files, 24.0 GB), linked from it when it is installed rather than downloaded again | 32 GB | `unsloth/MiniMax-H3-GGUF` + `MiniMaxAI/MiniMax-H3` (tokenizer files) |
 
-Each entry also carries the context window the app loads it with (8,192 tokens for
-Gemma 4 E2B and E4B, 32,768 for the other three), a K/V cache
+Each chat entry also carries the context window the app loads it with (8,192 tokens for
+Gemma 4 E2B and E4B, 32,768 for the others), a K/V cache
 precision that the "KV cache precision" setting overrides, and its model card's
 sampling values (for Bonsai 2 27B, the publisher's thinking-mode recommendation:
-temperature 1.0, top-k 20, top-p 0.95, min-p 0.05). The Bonsai 2 card is marked
-Experimental: Bonsai2 has not been validated on iOS.
+temperature 1.0, top-k 20, top-p 0.95, min-p 0.05; for Qwen3.8 Flash Next, the
+`general.sampling` values its GGUF carries: temperature 1.0, top-k 20, top-p 0.95,
+min-p 0). The Bonsai 2 card is marked Experimental: Bonsai2 has not been validated on
+iOS. Both Qwen3.8 Flash Next entries are Experimental and read most of their weights
+from SSD: how fast they answer depends on the available page cache and the SSD. Both
+support thinking, load a 32,768-token context with FP16 K/V, and use `LeanCaches` to
+limit the app's cache budget. Their license is
+[Qwen Community License 1.0](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE).
+The `qwen3.8-flash-next-iq1m` entry was validated through TensorAgent's catalog load
+path (`AgentAppHost.UseModel`) and Web UI HTTP/SSE on Windows with an RTX 3080 Laptop
+GPU (16 GB VRAM) and 32 GB system RAM. Text, image description and continuations
+completed; the 496-token image answer exactly matched the prior server answer, and
+the complete 1,115-token image follow-up reused 2,494 of 2,508 prompt tokens. This run
+used FP16 K/V, a 32,768-token context, lean caches and speculation disabled.
+The default n-gram speculation setting was also enabled through the real settings
+route for two short arithmetic turns: both returned `4` at EOS, with 69 of 89
+prompt tokens reused on the follow-up.
+The Windows Release app was built and its eight embedded catalog translations verified
+against source. These checks do not cover WinUI clicks, Mac/Metal, CPU-only devices,
+or performance comparisons between quantizations. Generated evidence is kept in
+ignored `docs/validation/tensoragent-qwen-iq1m/`.
 
 The Models page lists every entry, but only one that fits the device's memory tier
 can be loaded: an entry that needs more is shown greyed, marked "Too big" with both
-numbers, rather than hidden. Bonsai 2 27B needs the 16 GB tier; the other four need
-the 12 GB tier or above. For an installed model
+numbers, rather than hidden. Bonsai 2 27B needs the 16 GB tier, Qwen-Image 2.1 the 24 GB
+tier, Qwen3.8 27B, Muse-Glimmer 30B, both MiniMax-H3 entries and Qwen3.8 Flash Next
+UD-IQ1_M the 32 GB tier, and Flash Next UD-Q2_K_XL the 48 GB tier; the other four
+need the 12 GB tier or above. Eligibility uses system RAM on both Mac and Windows;
+it does not certify every backend or device at that tier. For an installed model
 whose optional projector is missing, "Add vision" downloads just the projector (and
 the draft head, when the entry lists one that is not there yet); once it is on the
 device, "Enable vision" reloads the selected model with it.
+
+**Pictures.** With Qwen-Image 2.1 loaded, a message is a description of a picture, or,
+with a photo attached, what to change about it. It is the same `/api/chat` turn, under
+the same turn manager and transcript, as an answer: the page shows the denoising steps,
+refreshing one picture in place from the small previews the engine sends, and the finished
+picture stays in the saved chat. The app asks for 1024x1024 (an edit keeps the photo's
+shape at the same area) at the model's own 40 steps, rather than its native 2048x2048,
+which has four times the image tokens.
+
+For a local edit, choose **+ → Photo**, attach photos, and choose **Select area**
+beside any thumbnail above the message box, before sending. Saving a selection makes
+that photo the **Editing target** and moves it first; the other photos remain attached
+as references. Each photo remembers its own selection while you prepare the draft.
+Cancelling the editor or a failed save keeps the previous target. Removing the target
+leaves other saved selections inactive; choose **Adjust** and save to apply one. You can
+paint and save the selection before loading a model. To apply the edit, load
+**Qwen-Image 2.1**, describe what to change, and send. If another model is selected,
+the saved selection shows **Open Models** and keeps the draft until Qwen is loaded.
+The shared desktop and mobile editor supports mouse, touch and stylus,
+brush and eraser, undo/redo, invert, pan and zoom. Pink marks editable pixels; the
+exported grayscale mask uses white for edits and black for protected pixels. Edge
+softness fades inward, so it never expands the selected area. **Process selected
+region only** reduces model work for small selections, with less surrounding context.
+The result keeps the source dimensions and exact protected RGBA pixels. Each message
+edits one target; only its selection is sent and saved with the conversation.
+**Compare original** toggles the result, and **Edit again** restores the target,
+selection, references, other attachments and instruction. The browser editor accepts images up to
+16 megapixels and 8192 pixels per side; larger images produce an explicit error.
+HEIC/HEIF photos use a full-resolution PNG for editing and comparison while their
+small preview remains in the attachment list. Reattach older HEIC/HEIF uploads if
+the editor asks for a full-resolution source.
+
+**LoRA plug-ins.** With Qwen-Image 2.1 loaded, Model > LoRA plug-ins lists twelve LoRAs
+made for it. Each is pinned to a commit and a SHA-256 in `LoraCatalog` and downloaded on its
+own, 80-680 MB, into `Library/Caches/TensorAgent/loras/<id>/`. A switch turns one on, a
+slider sets the strength of a style or an edit (10-150%), and Remove deletes the files and
+turns it off. Speed plug-ins (Viggle Turbo, 6 steps; Pruna 8-Step; Pruna 5-Step; Fun-Acc
+4-Step) replace the model's 40 steps with their own schedule, so only one can be on and
+turning on another turns it off. Styles (Film Stills, Grainscape, Quality Fix) apply to every
+picture. Edits (Detail Enhancer, Natural Exposure, Object Remover, Object Mover, Anime
+Consistency) apply only when a photo is attached, and the sheet shows the phrase a request
+needs for the ones trained on one. The choice is saved (`imageLoras` in the settings) and
+applies from the next picture, never to one being drawn, and the progress line names what
+the picture is drawn with ("Drawing with Viggle Turbo + Film Stills… step 3 of 6"). Object
+Remover works only at the model's own 40 steps, so a speed plug-in sits out the edits it
+applies to; on its own example photos it removed both marked cats but none of the marked
+cars, which is why its row says to check the result. A plug-in that is on but whose files
+have gone refuses the picture with the reason rather than drawing without it, and its row
+keeps the switch that turns it off. Most are under the Qwen Research License
+(non-commercial), Anime Consistency is Apache-2.0, and the authors of Quality Fix and Detail
+Enhancer state none; each row says which.
+
+Measured in the Release app on an M5 Pro, 1024x1024 (`TENSORAGENT_IMAGE_BENCH`): a picture
+from words took 321.5 s at the model's 40 steps and 58.3 s with Viggle Turbo, applying it
+included; 58.8 s with Viggle Turbo and Film Stills, and 60.4 s with Viggle Turbo, Quality Fix
+and Grainscape. Applying a new set took 0.3 s for one or two plug-ins and 1.3 s for those
+three, and a set that does not change costs nothing. In the Debug build Pruna 8-Step took
+79.0 s, Pruna 5-Step 53.6 s and Fun-Acc 4-Step 44.7 s, and an edit of a 1253x836 photo (made
+at 1248x832) 406.2 s, 86.5 s with Viggle Turbo. A plug-in makes each step 5-6% dearer,
+whatever its rank: by the engine's own step timer, a step took 7.8 s without plug-ins, 8.2-8.3 s
+with any one of them, 8.3 s with two and 8.4 s with three. (A few-step schedule's whole
+picture costs a little more a step than that, because most of its steps also decode a
+preview.) Before this was fixed, applying plug-ins took 19-31 s in the Release app and 0.6 s
+in the CLI: on Mono, TensorPrimitives' generic vector operators ran hundreds of times slower
+than on CoreCLR, so `QwenImage21LoraSet` now uses plain loops. Without plug-ins the Debug
+app's picture is bit-identical to the one it made before plug-ins existed, and with them it
+is pixel-identical to the CLI's `--lora` run on the same files. The Release build's pictures
+differ from those by at most 2 levels in 3% of pixels without plug-ins and 5 levels in 5% of
+pixels with Viggle Turbo and Film Stills: Mono's LLVM code generation rounds some arithmetic
+differently, plug-ins or not.
+
+**Videos.** With MiniMax-H3 loaded, a message describes a short clip, and an attached
+photo is its first frame (two photos, its first and last); with MiniMax-H3 References,
+the photos, clips and recordings attached, up to nine together, are the people, things,
+places and sounds the new scene features. It is the same `/api/chat` turn again
+(`VideoTurns`): the page names each stage ("Reading the description…", "Filming… step N
+of 20 · about X min left", "Developing the frames…", "Adding the sound…", "Saving the
+video…"), then plays the clip inline and looped, with its sound (an AAC track inside the
+MP4), and the clip stays in the saved chat. What a checkpoint cannot use is refused before
+the model starts, in the app's words: a clip or a recording on the keyframes entry names
+MiniMax-H3 References, and a document is refused rather than read as the script. There is
+no size, length or step setting; the app asks for 640x384 (or that area at the photo's
+shape, 608x416 for a 3:2 photo), 22 frames (0.92 s at 24 fps) and the model's own 20
+steps, as the shipped `config/minimax-h3-*.json` do. On an M5 Pro the app made a clip
+from words in 150.0-152.9 s, one from a photo in 216.5-223 s and one around a reference
+photo in 199-210 s. Longer clips cost more than in proportion, because every
+step attends over the whole clip: in the CLI 22 frames took 147.7 s, 39 frames 278.5 s
+and 56 frames 424.4 s. A reference gives a subject's look and the description puts them
+in the scene, so say who or what is in the shot: a description that said only "the
+subject of the picture" produced a garden with nobody in it. The denoisers' license, the
+MiniMax H3 Community License, excludes the EU, the UK, the Republic of Korea and the US
+from its territory, as both entries' notes say; the Qwen3-VL text encoder is Apache-2.0.
 
 **Many chats, kept, and one tap away.** The Web UI holds its history in the page and
 nowhere else, which is fine for a desktop tab and useless on a phone that is suspended
@@ -193,6 +415,21 @@ message box and Send — nothing else. Reasoning is a Settings choice ("Show rea
 default"), Skills is a ☰ menu item beside Chats and Models, and the dictation language
 appears only in voice mode. Each was a permanent control for something decided rarely,
 on the one row a phone composer has.
+
+**In the user's language.** The interface (the chat page, the native screens, the
+messages the host sends and the share extension) is in English, Simplified Chinese,
+Traditional Chinese, Japanese, Korean, Spanish, French and German. A first launch uses
+the first of the system's preferred languages that the app has, or English if it has none
+of them. Settings > Language changes it at once, without a restart. The choice is saved
+(`uiLanguage` in `settings.json`) and used from then on, and "System" goes back to
+following the system. The model is not told: it answers in whatever language you write
+to it; system prompts, tool descriptions and tool results stay English. Share presets
+and their draft messages use the interface language. The chat retains unsent text,
+attachments and saved image selections while refreshing its language; an upload or a
+send awaiting acceptance settles before that refresh.
+iOS and macOS show their own texts for the app, such as the permission prompts and the
+share sheet's "Ask TensorAgent", in the language the system picks for the app, not the
+in-app choice. See [Languages](#languages).
 
 **The answer keeps being written while you are somewhere else in the app.** A
 generation belongs to the app, not to the HTTP request that asked for it
@@ -359,7 +596,8 @@ was removed rather than left there implying it was.
 The rest of Settings, with its defaults: the reply output limit (256 to 262,144 new
 tokens, 2,048 by default); KV cache precision (FP16, Q8 or Q4, Q4 by default — it
 overrides the catalog entry's precision and applies at the next model load, and Gemma 4,
-whose attention cannot read a block-quantized cache, uses FP16 whatever it says); the
+whose attention cannot read a block-quantized cache, and Qwen3.8 Flash Next, whose engine
+reads only F16/F32 K/V, use FP16 whatever it says); the
 tool timeout (10 to 600 s in steps of 10, 120 by default); "Show reasoning by default"
 (off); "Speculative decoding" (on, applied to the running engine from the next
 reply — see "Speculative decoding" below); "Download over cellular" (off); and "Include optional files", the
@@ -369,7 +607,21 @@ or through `POST /api/agent/settings`: `networkHosts`, a host allow-list for the
 network switch (empty means any host); `contextLength`, an override of the catalog
 entry's window (0 keeps it); `keepAwakeWhileGenerating`, which holds the display awake
 while the model works (on by default); and `defaultSkills`, the skills preselected for
-a new chat (none by default). The Skills master switch is in the page's Skills sheet.
+a new chat (none by default). The Skills master switch is in the page's Skills sheet,
+and `imageLoras`, the LoRA plug-ins every picture is made with, is set from the page's
+LoRA sheet (see "LoRA plug-ins" above).
+
+**Model download and cache folder.** Settings > Storage shows the full folder path
+and lets you save a different absolute path or choose **Use default**. Downloads,
+imports, the model catalog and subsequent model loads use this folder, including
+after a restart. Files are kept in `<folder>/<catalog-id>/`; existing files stay in
+the previous folder, so move those model subfolders yourself if you want to reuse
+them at the new location. A loaded model keeps running until you load another one.
+Folder changes wait for model loading and are refused while a download or import
+is active. The folder must be writable. `GET /api/agent/settings` reports the
+effective `modelCacheDirectory`; change it through
+`POST /api/agent/settings/model-cache-directory` with
+`{"modelCacheDirectory":"<absolute-path>"}` (an empty string restores the default).
 
 ## Build and run
 
@@ -422,6 +674,24 @@ TensorAgent/scripts/verify-share-rule.sh     # check the share extension's activ
 TensorAgent/scripts/bench-spec-device.sh     # plain vs speculative decoding on the phone
 ```
 
+`dotnet build TensorSharp.slnx` from the repository root builds the app as well. Once
+the rest of the solution has built, `Directory.Solution.targets` builds the Mac app and,
+on Apple silicon, the simulator app in a separate `dotnet build`, as `build-mac.sh` and
+`build-sim.sh` do (on Windows, the Windows app, as `build-windows.ps1` does). The
+simulator app is built for the simulator the SDK picks rather than `build-sim.sh`'s
+explicit RuntimeIdentifier; it and its share extension are ad-hoc signed, where
+`build-sim.sh`'s extension takes the Mac's team profile if one is installed. On a Mac,
+the app build and its workload check use `DOTNET_ROOT/dotnet` when available, then
+`~/.dotnet/dotnet`, matching the scripts. Otherwise they use the solution's SDK. This
+lets the app use Xcode-compatible workloads even when the system SDK has older ones.
+`-p:TensorAgentDotnet=/path/to/dotnet` selects another SDK explicitly; its architecture
+must match the SDK running the solution. The selected SDK needs the app workloads
+and must support the installed Xcode (for Xcode 27.0, workload set 10.0.401.1 supplies
+the matching Apple SDKs). The simulator app also needs the files above. A missing workload
+skips the app and a missing file skips that head, each with a warning; any other failure
+fails the solution build. `-p:TensorSharpSkipTensorAgentApp=true` leaves the app out.
+Running, deploying and verifying still go through the scripts.
+
 `deploy-device.sh` selects the only connected physical iPhone, an installed
 `Apple Development` identity, and a compatible provisioning profile. If more
 than one phone or identity is available, set `DEVICE_ID` or `CODESIGN_KEY`;
@@ -459,6 +729,7 @@ These environment variables drive a Debug build from a script, because neither
 | `TENSORAGENT_BACKGROUND_CHECK=1` | ask the host's own model for a long answer (`TENSORAGENT_BACKGROUND_PROMPT`, `TENSORAGENT_BACKGROUND_TOKENS`, 4096) and trace what happens while the app is away; driven by `verify-background.sh` |
 | `TENSORAGENT_PAGE_BACKGROUND_CHECK=1` | the same, through the page and the `TENSORAGENT_DEMO_PROMPT` it sends (`verify-background.sh` with `CHECK=page`) |
 | `TENSORAGENT_SPEC_BENCH=1` | the plain-vs-speculative benchmark (`TENSORAGENT_SPEC_BENCH_MODES`, `TENSORAGENT_SPEC_BENCH_TOKENS`, 160); a Release build honours this one, and `TENSORAGENT_USE_MODEL` with it |
+| `TENSORAGENT_IMAGE_BENCH=1` | the picture benchmark: `TENSORAGENT_IMAGE_BENCH_RUNS` (2) pictures of `TENSORAGENT_IMAGE_BENCH_PROMPT` through the app's own image turn, with the LoRA plug-ins turned on, one `imagebench` line each (also in `logs/imagebench.log`); a Release build honours this one too, and `TENSORAGENT_USE_MODEL` with it |
 | `TENSORAGENT_SKIP_UPLOAD_CHECK=1` | skip the large-upload probe described below |
 
 Two of those exist because the claim they check has no other witness. `TENSORAGENT_NAV_CHECK`
@@ -479,7 +750,7 @@ A device build additionally needs a signing identity and provisioning profile:
 ```
 dotnet build TensorAgent/src/TensorAgent.Maui/TensorAgent.Maui.csproj \
     -f net10.0-ios -r ios-arm64 -c Release -m:1 \
-    -p:TensorSharpIosTargets=true -p:CodesignKey="Apple Development: ..."
+    -p:TensorSharpAppleTargets=true -p:CodesignKey="Apple Development: ..."
 ```
 
 `-m:1` keeps the build on one MSBuild node: several referenced projects share one
@@ -488,10 +759,14 @@ passes it too, and besides `SKIP_SIGNING` reads, among others listed in its head
 `CODESIGN_KEY`, `CODESIGN_PROVISION`, `CLEAN=1` (a targeted clean first),
 `NO_INCREMENTAL=1` and `TENSORAGENT_DOTNET_ARGS` (extra `dotnet build` arguments).
 
-`TensorSharpIosTargets=true` must be on the command line rather than only in the
-csproj: it decides whether `TensorSharp.Models` builds a `net10.0-ios` slice at
-all, and restore resolves a referenced project's target frameworks before a
-`ProjectReference`'s `AdditionalProperties` are applied.
+`TensorSharpAppleTargets=true` must be on the command line rather than only in the
+csproj: it decides whether `TensorSharp.Models` builds its `net10.0-ios` and
+`net10.0-maccatalyst` slices at all, and restore resolves a referenced project's
+target frameworks before a `ProjectReference`'s `AdditionalProperties` are applied.
+That restore goes to `obj/<host>/apple/` (`Directory.Build.props`), apart from the
+desktop build's, so the two do not keep rewriting each other's `project.assets.json`
+and recompiling `TensorSharp.Models`. Leave the property off and the referenced projects
+fail with NETSDK1004, or quietly use the restore of an earlier build.
 
 Release device builds keep the engine. It is linked statically and reached through
 `dlsym`, and the Release build's strip step keeps only the symbols on its list, so
@@ -507,6 +782,389 @@ lifecycle with a single window (`UIApplicationSceneManifest` in `Info.plist` and
 at launch without it. The device run recorded below is on iOS 26.6.1; no run on iOS 27
 is recorded.
 
+## On the desktop: macOS and Windows
+
+The same project builds the desktop app. On a Mac it is the Mac Catalyst head
+(`net10.0-maccatalyst`): the phone's code, running as a Mac app. On Windows it is the
+WinUI head (`net10.0-windows10.0.19041.0`), which only a Windows machine builds. All
+three serve the same page from the same loopback host, and share the catalog, the
+settings, the conversations and the skills. What differs is everything the phone does
+because it is a phone:
+
+<p align="center"><img src="../website/assets/screenshots/tensoragent-mac.png" alt="TensorAgent on a Mac: a saved Qwen-Image 2.1 edit changes the TensorSharp banner background to a starry blue night sky, with Compare original and Edit again controls" width="880"></p>
+
+<sub>A saved Qwen-Image 2.1 (Q4_K_M) edit in the current Mac Catalyst Release app,
+captured on 2026-10-02 on an M5 Pro with GGML Metal: “Make the background a deep blue
+night sky with stars, keep the text unchanged.” The result is from an earlier run;
+Compare original and Edit again remain available. Switch models for text, multimodal
+questions, code and document work, or short video with audio.</sub>
+
+| | iPhone and iPad | Mac | Windows |
+| --- | --- | --- | --- |
+| Engine | `GgmlOps.xcframework`, linked statically | `libGgmlOps.dylib` from `build-macos.sh`, in `Contents/MonoBundle` | `GgmlOps.dll` from `build-windows.ps1`, beside the executable |
+| Backends offered | Metal (CPU in the simulator) | Metal, then CPU | CUDA or Vulkan when the engine has it and the machine can run it, then CPU |
+| Code execution | in-process shell, embedded CPython 3.13, JavaScriptCore | real `bash`, `python3`, `node` and `npm` processes, each confined by Seatbelt to the chat's folder | real processes, which Windows cannot confine; offered only after **Run without a sandbox** is turned on in Settings |
+| Skills | the ten `verdicts.json` passes | all twelve | all twelve |
+| Engine budget | measured against jetsam (`EngineMemoryPolicy`) | the engine's defaults | the engine's defaults |
+| First-launch settings | K/V cache Q4, 2,048-token replies, 120 s per command | K/V cache Q8, 8,192-token replies, 300 s (`AppSettings.DesktopDefaults`) | as the Mac |
+| Leaving the screen | the GPU is handed back and the turn waits | the turn carries on; App Nap is held off while the model works | the turn carries on; sleep and power throttling are held off |
+| Files | `Library/Application Support`, `Library/Caches` | `~/Library/Application Support/TensorAgent`, `~/Library/Caches/TensorAgent` | `%LOCALAPPDATA%\TensorAgent\Data`, `...\Cache` |
+
+`DeviceClass.Desktop` on `AgentPaths` is the one switch behind the budget and the
+first-launch settings; every other host, the validation launcher and the benchmarks
+included, stays on `DeviceClass.Phone` unless it asks.
+
+### On a Mac
+
+The Mac head needs the `maui-maccatalyst` workload in the same user-local SDK, and
+`maui-ios` beside it, because the project restores both Apple target frameworks
+(`dotnet workload install maui-maccatalyst maui-ios`), plus CMake and the Xcode
+command-line tools.
+Measured here with workload set 10.0.401.1 (MAUI 10.0.110, Mac Catalyst SDK 27.0.10722)
+and Xcode 27.0. Then:
+
+```
+TensorAgent/scripts/build-mac.sh     # CONFIGURATION=Release for an LLVM build (about three minutes)
+TensorAgent/scripts/run-mac.sh       # launch from this terminal; stdout also goes to artifacts/tensoragent-mac/app.log
+TensorAgent/scripts/verify-sim.sh artifacts/tensoragent-mac/app.log   # recognises the Mac app by its engine line
+TensorAgent/scripts/chat-e2e.py artifacts/tensoragent-mac/app.log     # answers, tools, image and audio, with TTFT and decode rate;
+                                                                      # pictures and clips with --scenarios (below)
+```
+
+The Debug hooks in the table above work the same way: `run-mac.sh` passes the
+environment straight through. A model is installed as on the phone, from the Models page,
+or by placing the catalog's files under `~/Library/Caches/TensorAgent/models/<id>/`.
+
+With an image or video model loaded, `chat-e2e.py` checks what the model makes instead:
+`--scenarios draw,edit` with Qwen-Image 2.1, `film,animate` with MiniMax-H3 (from words,
+and from the attached photo as the first frame) and `reference` with MiniMax-H3
+References (the same photo as the subject of a new scene). A picture must stream its
+steps and end as one PNG of the size it reported; a clip must stream its stages in order
+and end as one MP4 the app serves with Range and HEAD, whose video track has the frame
+count, rate and size the turn reported and whose sound, inside the MP4 or in a WAV beside
+it, is 32 kHz stereo as long as the clip. Either must be in the saved chat.
+`--loras id[:strength],...` turns LoRA plug-ins on for `draw` and `edit` through the app's
+own route and puts the previous choice back afterwards; each picture must then name the
+plug-ins it was drawn with (an edit-only one is not applied to a picture made from words)
+and, with a speed plug-in, run its step count. `--draw-prompt`, `--edit-prompt` and
+`--edit-photo` replace the default request and photo, for a plug-in that needs its own
+phrase or a photo with red boxes on it. An unknown scenario name is an error rather than
+a run of nothing that reports success.
+`scripts/chat-e2e-selftest.py` runs the clip checks against files it makes itself, with
+no app and no model, and reports what this machine cannot run (no cv2, no `afconvert`) as
+skipped, never as passed.
+
+- **The engine library is built with the app.** The referenced projects skip their native
+  builds for every head, so `TensorAgentBuildDesktopEngine` runs the backend project's own
+  incremental `build-macos.sh` before the app is compiled; an up-to-date library costs
+  nothing, and a library older than the native sources beside it is never shipped.
+- **No App Sandbox.** The app runs the model's code as real processes and confines each
+  with TensorSharp's Seatbelt profile, which macOS will not apply inside the App Sandbox.
+  So there is no `Platforms/MacCatalyst/Entitlements.plist`, and the build is not a Mac
+  App Store build. Local Debug/Release builds and the default Desktop release
+  packages are signed ad hoc, rather than with a notarized Developer ID signature.
+- **Debug and Release are two apps with one set of data.** `bin/Debug/.../TensorAgent.app`
+  and `bin/Release/.../TensorAgent.app` share `~/Library/Application Support/TensorAgent`
+  and `~/Library/Caches/TensorAgent`, but each offers only the catalog it was compiled
+  with, so rebuild the one you open after pulling (`CONFIGURATION=Release build-mac.sh`
+  for the Release one). A launch reclaims the models of entries the catalog has retired
+  (`ModelCatalog.Retired`) and keeps a folder whose id it does not know, which a newer
+  build may have installed; for the same reason it keeps, without loading it, a selected
+  model it does not know.
+- **The oldest Mac a source build runs on** is decided by the engine library, which `build-macos.sh`
+  builds for the building Mac's own macOS unless `MACOSX_DEPLOYMENT_TARGET` says otherwise,
+  not by the app's `SupportedOSPlatformVersion` (Mac Catalyst 17.0, macOS 14).
+  The Desktop release workflow sets `MACOSX_DEPLOYMENT_TARGET=14.0` for its Apple
+  Silicon packages; this build target does not establish runtime testing on every
+  supported macOS version.
+- **PATH.** An app started from the Finder or the Dock gets launchd's
+  `/usr/bin:/bin:/usr/sbin:/sbin`, where Homebrew's `node`, `npm` and `python3.13` are not.
+  At startup the app asks the login shell for its PATH and puts it first
+  (`DesktopEnvironment`).
+- **Mono, not CoreCLR.** .NET ships no CoreCLR for Mac Catalyst, so the app's managed code
+  runs on Mono, as the phone's does. Release builds therefore use LLVM, which Mac Catalyst
+  does not get by default (the csproj's `MtouchUseLlvm` explains the measurement).
+
+### On Windows
+
+Build on a Windows machine with the `maui-windows` workload, and CUDA or Vulkan tooling
+if the engine should have them (`TensorSharp.GGML.Native/build-windows.ps1` reads
+`TENSORSHARP_GGML_NATIVE_ENABLE_CUDA` / `_VULKAN` as the desktop hosts do):
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File TensorAgent\scripts\build-windows.ps1 -Configuration Release -Run
+```
+
+The script stops if the build fails, verifies that the bundled page and embedded
+image editor match the current source, and then runs the app. Without `-Run`, it
+prints the verified executable path:
+`TensorAgent\src\TensorAgent.Maui\bin\Release\net10.0-windows10.0.19041.0\win-x64\TensorAgent.Maui.exe`.
+Close a running instance before rebuilding. Building `TensorSharp.Server.Host`
+updates the server, while TensorAgent needs its own build to update the embedded
+UI in `TensorAgent.Core.dll` beside its executable.
+For environments that use NuGet mirrors, `-PackageSource` accepts one or more
+feed URLs for restore; the default uses the repository's NuGet configuration.
+
+If restore reports `NU1301` with a TLS `HandshakeFailure` for `api.nuget.org`,
+the installed workload is not the problem: NuGet cannot download packages such
+as the Windows runtime packs. An optional configuration uses Microsoft's
+`dotnet-public` feed and keeps vulnerability auditing enabled through NuGet's
+separate `data.nuget.org` endpoint:
+
+```powershell
+Copy-Item eng/NuGet.dotnet-public.config NuGet.Config
+dotnet build TensorSharp.slnx -c Release
+```
+
+Run these commands from the repository root. Keep this machine-specific
+`NuGet.Config` local (add `/NuGet.Config` to `.git/info/exclude`); remove it to
+return to your usual feeds. The mirror does not carry every third-party package
+(including NLayer and NVorbis), so those packages need cached copies or another
+reachable feed. Missing packages remain build errors. For a one-off override,
+use `-p:RestoreConfigFile=<absolute-path-to-config>` on the solution build; its
+separate TensorAgent build receives the same restore settings.
+
+The app is unpackaged and carries the Windows App SDK runtime with it
+(`WindowsPackageType=None`, `WindowsAppSDKSelfContained`). The model's code runs only
+after **Run without a sandbox** is turned on: a job object bounds a process tree but
+confines neither its files nor its network, so the switch is the same explicit choice as
+the server's `--code-exec-unconfined`. The app does not dictate on Windows; Windows' own
+voice typing (Windows+H) writes into the message box.
+
+**Windows validation (2026-10-01).** Debug and Release built and ran on Windows x64
+with .NET SDK 10.0.204, an i7-11800H, 32 GiB RAM and an RTX 3080 Laptop GPU (16 GiB).
+The managed suite passed 895 tests, with 177 explicit skips; 21 MAUI project checks
+and 12 focused native CPU/CUDA checks passed. The upstream ggml checkout was unchanged
+at `353b63b439f27ab2cc19dac97ab1681ba6d2d084`.
+
+The actual Debug app passed 12 WebView checks, a 1.55 MB upload, navigation away from
+a streaming answer and back, and transcript recovery after a forced process restart.
+The actual Release app passed 15 HTTP/SSE turns covering chat, saved conversations,
+cancellation and recovery, PowerShell, Python-generated downloadable files, and a
+synthetic vision question. With local **Gemma 4 12B QAT UD-Q4_K_XL** and its BF16
+projector, CUDA, 8,192 context tokens and speculation disabled, three 128-token samples
+gave **37.1–38.6 tok/s** (median **38.2**); warm first-token latency was **0.27–0.49 s**,
+and the first chat took **3.78 s** to its first token. This quantization differs from
+the built-in catalog entry. Peak process working set was **18.2 GB**, with **24.7 GB**
+private bytes at the end: these measurements do not establish low-memory suitability.
+
+To repeat with local weights, build the desired configuration, then run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/validation/run-tensoragent-windows.ps1 -Configuration Release -Root C:/Works/TensorSharp/docs/validation/my-windows-run -Weights C:/models/model.gguf -Projector C:/models/mmproj.gguf -Tools
+```
+
+Use a fresh evidence directory and omit `-Projector` for text-only testing. `-Tools`
+temporarily enables unconfined execution in this isolated test installation and restores
+the setting afterwards. Debug additionally runs the WebView and navigation probes.
+`TENSORAGENT_VALIDATION_ROOT`, `TENSORAGENT_VALIDATION_WEIGHTS` and
+`TENSORAGENT_VALIDATION_MMPROJ` opt the app into isolated local
+validation; ordinary launches use their normal data and catalog. Evidence is kept in
+ignored `docs/validation/` or `artifacts/`.
+
+This is bounded validation, not full coverage: manual visual review, physical camera
+and native file dialogs, live catalog downloads, audio/video generation, other models
+and GPU backends, and a long-duration soak were not verified. The picker exception
+handler was compiled but its device/permission failure path was not exercised on hardware.
+
+### Measured on a Mac
+
+M5 Pro, 51.5 GB, macOS 27, Gemma 4 E2B Q8_0 on `ggml_metal`, the in-process
+`SpeculationBench` (`TENSORAGENT_SPEC_BENCH=1`), second pass, medians. The CoreCLR column
+is the same host code in `benchmarks/TensorAgentTtftBench --desktop --scenarios specbench`,
+which is what the desktop server's runtime gives it; the Mac column is the Release app.
+
+| Turn | CoreCLR first token | CoreCLR tok/s | Mac app first token | Mac app tok/s |
+| --- | --- | --- | --- | --- |
+| one word | 87 ms | | 150 ms | |
+| prose, 160 tokens | 81 ms | 77.1 | 144 ms | 74.8 |
+| quote the prompt, 219 tokens | 151 ms | 76.5 | 216 ms | 74.3 |
+| quote its own answer | 81 ms | 76.3 | 144 ms | 74.2 |
+| the same, speculative | 95 ms | 301.5 | 160 ms | 301.1 |
+
+Decode is within 3% of CoreCLR and speculative decoding reaches the same rate. What Mono
+costs is about 60 ms of managed work per turn before the first token. Without LLVM the Mac
+app's steady-state decode was 72.5 tok/s and the first token 20-30% later.
+
+**App Nap.** With the screen locked, five of eight runs of the Mac app had stretches of
+47-58 tok/s where the same code on CoreCLR, in a terminal that macOS never naps, never
+dropped below 73. The app now holds a user-initiated activity while a turn runs or the
+engine has work (`DesktopActivity`); four runs of four afterwards held 74-75 tok/s, and
+`pmset -g assertions` shows "TensorAgent is generating a reply" while it does.
+
+`chat-e2e.py` against the Mac app with the same model: a question, a follow-up at 99.7%
+cache reuse, a new chat from the shared-prefix checkpoint, a 398-token story, a thinking
+turn, a shell command whose output only a real run can know, and the title on an image
+all pass. An audio clip does not, on the phone, the Mac or the desktop server alike: with
+the agent's tools declared (the shell, or the sub-agent tools alone), Gemma 4 E2B and E4B
+answer that they cannot hear it, or reach for `whisper` and `ffmpeg` through the shell. The
+clip does reach the model: the audio embeddings the chat injects are identical to the ones
+`EngineParallelInferenceTests.Gemma4_AudioPrompt` transcribes, and the same request is
+transcribed with no tools, with a single unrelated tool, or after 1,600 tokens of other
+conversation. Telling the model in the message that the recording is attached did not
+change the answer (0 of 3 for each wording tried), so this is recorded as a model
+limitation rather than prompted around: turn off **Run code** and **Sub-agents** for a
+turn that is about an audio clip.
+
+The browser workflow also runs in the Mac app: with Qwen3.5 9B and the network switch on,
+`eng/validation/validate-browser-skill.py --connection` (a file holding the app's
+`tensoragent_token` cookie) had the Playwright skill drive a real headless Chrome through
+a local form, submit the value it read off the page, and return a screenshot of the
+result, in 66 s.
+
+<a id="the-macs-own-models"></a>
+
+### The desktop's larger models
+
+These entries are offered by system RAM tier on Mac and Windows. The measurements
+below are historical Mac app results; the separate IQ1_M Windows catalog-host
+validation above does not validate that variant on Mac or compare its performance
+to these runs.
+
+Measured on the same M5 Pro (48 GB) on 2026-09-30, `ggml_metal`, the Debug app, with each
+entry's files downloaded and verified by the app (Qwen3.8 27B's by `curl`, checked against
+the same pins):
+
+| | Qwen3.8 27B (UD-Q4_K_XL) | Muse-Glimmer 30B (UD-Q4_K_XL) |
+| --- | --- | --- |
+| `chat-e2e.py`: fact, follow-up, new chat, story, thinking, shell, image | 7 of 7 | 7 of 7 |
+| plain decode in the app, ~7k-token prompts (the CLI's greedy benchmark at 6,800) | 14.0-14.1 tok/s (14.8) | 15.9-16.0 tok/s (17.2) |
+| speculative decoding in the app | n-gram: prose 0.93x, quoting 1.76-1.90x | declined by the engine on Metal |
+| prompt reuse, follow-up / new chat | 99.7% / 99.6% | 99.8% / 66% |
+| app footprint at its highest, beside the weights | 8.8 GB beside 17.6 GB | 10.9 GB beside 15.9 GB |
+
+The 5-7% plain-decode gap to the CLI was not broken down further; the two differ in
+more than the runtime (the app samples with the card's temperature, top-k and top-p and
+streams through the chat pipeline, where the CLI benchmark takes the argmax). Three
+things were changed for these two models:
+
+- **The phone's cache budget** (`LeanCaches` on both entries). With the engine's desktop
+  defaults the app grew to 18.8 GB beside Qwen3.8 27B's weights over those seven turns,
+  and the machine fell to 0.1 GB free with 10.6 GB compressed; the phone's budget held it
+  at 8.8 GB with the same reuse. The tiers are the weights, that footprint and about 5 GB
+  for macOS, so 32 GB rather than 24.
+- **Only a catalog draft head speculates.** Qwen3.8 27B's GGUF carries its own NextN/MTP
+  layer, which the engine attaches; with it the app decoded slower in every turn shape
+  (prose 0.83x, quoting 0.89-0.93x), because a four-token verify of the dense trunk costs
+  about twice a plain token on Metal. n-gram takes its place (the table).
+- **Muse-Glimmer reasons before it answers, even with thinking off**, and sometimes long:
+  asked for a 250-word story it wrote the story to a file and counted its words with
+  `wc -w` before answering. Its q8_0 cache stayed clean through a 1,542-word answer that
+  grew the full-attention layers past 8,192 rows mid-reply. A new chat reuses only the
+  first 4,352 tokens of the shared prompt, the size of its sliding-window ring (a longer
+  saved prefix cannot be restored into the ring), so its first token takes about 7 s.
+  Its vision tower takes 16 s on a 1260x840 image in the CLI and 24 s in the app.
+
+Qwen-Image 2.1, the same day: a 1024x1024 picture at 40 steps took 324.5 s in the app
+against 318.7 s for the CLI on the same files (7.84 and 7.83 s a step; the rest is the
+eight previews the page shows), and the two pictures are pixel-identical. An edit of a
+1253x836 photo at 1248x832 took 412 s against 399 s. Two engine fixes made that so; before
+them the edit took 495 s in the app:
+
+- **The VAE encoder runs fused on Metal.** Its average-down step front-pads time, which
+  upstream ggml-metal cannot do, and that one node had refused the whole encoder graph, so
+  every Metal edit encoded its photo per convolution. The leading zeros are now a concat
+  where the pad is refused: 3.6 to 1.9 s in the CLI and 18 to 1.6 s in the app, with the
+  edited picture 63 dB from the old one.
+- **Weights are not transposed on the host.** The vision encoder's linear layers built a
+  transposed copy of every weight on first use through a one-float-at-a-time loop (and
+  the native multiply packed it back on every call). They now pass the weight as a
+  transposed view, bit-identical, and that copy is tiled for the encoders that still make
+  one: the reference photo's encode went from 7.3 to 3.7 s in the CLI and from 77 to 13 s
+  in the app, and Gemma 4 E2B's first audio turn from 57 to 9 s.
+
+MiniMax-H3, on 2026-09-30 and 2026-10-01 (ggml `353b63b4`, unmodified): the Debug app
+(Mono) against the CLI (CoreCLR), 22 frames at 20 steps.
+
+| | App | CLI |
+| --- | --- | --- |
+| from words, 640x384 | 150.0-152.9 s over three clips (6.84-6.86 s a step) | 147.7 s (~6.5 s a step) |
+| from a photo, 608x416 | 216.5-223 s (9.5 s a step) | 209.3 s |
+| around one reference photo, 640x384 | 199-210 s (9.2 s a step) | not run |
+
+The app's footprint peaked at 2.24 GB on a photo turn (1.05 GB from words alone), and the
+machine's wired memory at about 20 GB: the denoiser and the video VAE during the decode,
+on top of the ~3.5 GB the system wires anyway. The largest file a stage maps is the
+18.22 GB text encoder, so the tier is 18.22 + 2.24 + 5 GB for macOS = 25.5 GB: 32 GB
+rather than 24 (`CatalogTests.EachDesktopEntryFitsItsTierBesideMacOS`). That fits only
+because the engine now hands the denoiser and both VAEs back before the next clip's text
+encoder runs; it used to keep all three device-resident between clips. Measured on a
+quiet machine, two identical clips from words per arm: peak wired memory 19.1 GB by
+default against 33.3 GB with `TS_H3_KEEP_RESIDENT=1` (the old behaviour, reached in the
+second clip's text phase), for 1.3 s more text conditioning on the second clip (2.8 s
+against 1.5 s). The clips took 151.4 and 148.9 s against 148.4 and 147.4 s, about 1%
+apart and inside the 3 s by which the identical first clips differed between the arms.
+The soundtrack is byte-identical to the CLI's for the same seed; the H.264 frames are
+39.3 dB PSNR at the worst and 39.9 dB on average from the CLI's lossless PNG frames, and
+the AAC track correlates 0.9986 / 0.9988 (left / right) with the WAV. A `WKWebView`
+plays the clip from the app's loopback server: readyState 4, the full duration, one video
+and one audio track (`eng/validation/webview-media-check.swift`).
+
+Fixed along the way, besides the hard links in "Downloads" below:
+
+- **Quitting no longer aborts.** Every quit after any GPU work aborted on
+  `GGML_ASSERT([rsets->data count] == 0)` in ggml-metal's static destructor: Mono raises
+  ProcessExit only for a managed shutdown, and AppKit's quit ends in `exit()`. The Mac
+  app's `WillTerminate` now stops the turns, waits, releases the model and frees the
+  engine. Catalyst gives that callback about 5 s before its watchdog calls `exit()`, and
+  one step of a clip is about 7 s, so a quit mid-clip waits 3 s and then leaves with
+  `_exit`, without destructors, rather than release the model under the GPU. Switching
+  models during a picture or a clip now waits for it too, for up to 5 minutes.
+- **The soundtrack is inside the MP4,** as AAC (two channels, 32 kHz, 128 kbit/s), index
+  first, with the 32 kHz WAV still written beside it. A first version handed AVFoundation
+  a managed array that the encoder read after its wrapper was disposed, and the track
+  carried a ~5 kHz whine at a fifth of the level, different on every run; the memory is
+  now CoreMedia's. The media probe's `mp4-soundtrack` check decodes a tone back.
+- **A transparent PNG reaches the model as stored.** Core Graphics decoded it
+  premultiplied, which keeps none of a pixel's colour where alpha is 0, and a mostly
+  transparent picture reached MiniMax-H3 as black blotches (27% near-black pixels in the
+  first frame, against 0.1% from the CLI). Such a PNG, if it embeds no colour profile, is
+  now read by the managed PNG codec; media-probe check `png-transparent-colour`.
+- **Companions follow every load**, keyed by family, not just the one at startup:
+  switching between Qwen-Image and MiniMax-H3 left the other's paths, and MiniMax-H3's
+  fallback scan of the model store would have taken Qwen-Image's 8B text encoder for its
+  own. A diffusion entry loads only when it is completely downloaded, a video entry is
+  never tried on the CPU backend (a clip that takes minutes on the GPU would take hours),
+  and the prefix-cache warm-up skips video models.
+- **Files answer Range and HEAD.** The loopback server answered every request with 200
+  and the whole file, and Apple's Safari Web Content Guide requires a server that hosts
+  media for iOS to support byte-range requests. It now answers 206 or 416 with
+  Accept-Ranges, and HEAD as RFC 9110 says (a ranged HEAD as an unranged GET, as ASP.NET
+  does). WebKit on macOS played the short clip without ranges as well, so what this buys
+  (seeking, and iOS's media loader) has not been observed in a run.
+
+Qwen3.8 Flash Next (UD-Q2_K_XL), on 2026-10-01 (ggml `353b63b`, unmodified): the Debug app, the three
+shards downloaded, linked into its store and verified, 78.9 GB of weights on a Mac with
+51.5 GB of RAM. The engine planned the placement at load: the first 33 layers' routed
+experts (31.7 GB) run on the host straight from the file mapping, the GPU holds the other
+15 layers' (14.4 GB), and of the 28.8 GB n-gram table only the 16 rows a token needs are
+ever read (see the [model card](../docs/models/qwen38-flash-next.md#larger-than-memory)).
+
+| | Qwen3.8 Flash Next (UD-Q2_K_XL) |
+| --- | --- |
+| `chat-e2e.py`: fact, follow-up, new chat, story, thinking, shell | 5 of 6 (thinking: see below) |
+| plain decode in the app, a 7.2k-token prompt (the CLI, greedy, a 1.8k-token prompt) | 9.9 tok/s (12.8-12.9) |
+| prompt reuse, follow-up / new chat / story / shell | 99.7% / 99.65% / 99.5% / 98.7% |
+| first token, follow-up / new chat / shell | 3.1 s / 3.0 s / 6.9 s |
+| warm-up after a load (the 7.2k-token shared prompt) | 85.2 s |
+| app footprint at its highest, beside the weights | 7.31 GB beside 18.3 GB resident |
+
+- **The thinking scenario failed on the model's own choice.** Asked with thinking on whether
+  91 is prime, it answered "No. 91 = 7 × 13" and wrote no reasoning first. Given harder
+  questions it reasoned in 3 of 3 tries.
+- **The other thinking mode starts cold.** The warm-up follows the "Show reasoning by
+  default" setting, and this template puts its thinking instructions near the top of the
+  system turn, so the two modes share no prefix: the first message in the other mode read
+  its whole 7,243-token prompt, 108 s. That mode is cached from then on.
+- **It depends on the page cache.** In the CLI the same 1.8k-token run decoded at
+  12.8-12.9 tok/s, and at 10.3-11.3 tok/s with the machine at 174 MB free and 5 GB
+  compressed: experts the page cache has dropped come back from the SSD.
+- **The tier.** 18.34 GB of resident weights, the 7.31 GB footprint and 5 GB for macOS make
+  30.7 GB, and the 17.3 GB left must cache at least a third of the 31.7 GB of experts read
+  from the SSD (`CatalogTests.EachDesktopEntryFitsItsTierBesideMacOS`). At 32 GB the
+  30.7 GB would leave too little for that cache, so the Q2 catalog entry retains its
+  48 GB minimum system RAM tier.
+
 ## Layout
 
 ```
@@ -520,23 +1178,31 @@ TensorAgent/
     Sessions/       conversations, and the recorder that keeps them in step with the page
     Settings/       the two sandbox switches and the rest
     Hosting/        the loopback server, the route table, and AgentAppHost
-    Interop/        the one DllImport resolver CPython and JavaScriptCore share
+    Interop/        the one DllImport resolver CPython and JavaScriptCore share, and hard links
     Shell/          the in-process POSIX shell and the agent host's backends (in-process, desktop)
     Sandbox/        ExecutionPolicy and ConfinedPaths, shared by all three runtimes
     Python/         embedded CPython and the wheel installer
     JavaScript/     JavaScriptCore over its C API, with Node-shaped globals
-    WebUi/          the script appended to the app's own page
+    WebUi/          the script appended to the app's own page, and its strings runtime (i18n.js)
+    Localization/   the interface's string tables, one folder per language, and Loc
     Sharing/        durable-inbox import, bounded composer handoff, ACK lifecycle
   src/TensorAgent.Sharing/
-                    dependency-free envelope format and prompt composition contract
+                    dependency-free envelope format and prompt composition contract;
+                    the languages, the string engine and the share extension's tables
   src/TensorAgent.ShareExtension/
                     iOS share sheet, NSItemProvider readers, Safari preprocessing
   src/TensorAgent.Maui/
     MainPage        the WebView, the attachment row, dictation
     Pages/          models, chats, settings, about
     Hosting/        where the files live on this device; the engine and media probes
+    Services/Apple/ device memory, Quick Look and dictation, for iOS and the Mac app
     Platforms/iOS/  app and scene lifecycle, background downloads and generation,
-                    loopback probe, dictation, Quick Look, share inbox
+                    loopback probe, share inbox
+    Platforms/MacCatalyst/
+                    the Mac app's delegates and Info.plist (no App Sandbox; see below)
+    Platforms/Windows/
+                    the WinUI entry point, and Windows' device memory, file opening
+                    and (absent) dictation
   tests/TensorAgent.Tests/
 ```
 
@@ -569,19 +1235,22 @@ one thing it genuinely cannot do — preempt a builtin already inside a long cal
 `Auto`: an `AgentAppHost` running on macOS, Linux or Windows uses `DesktopShellBackend`
 over TensorSharp's shared `ProcessShellBackend`, OS sandbox, shell sessions and package
 installer. Real Node.js, npm/npx, Python and other programs on the host can then run
-inside the session sandbox.
-The process backend requires an available sandbox; it does not fall back to unrestricted
-execution. Set `AgentExecutionMode.InProcess` when a desktop test is intended to emulate
+inside the session workspace. On macOS and Linux the process backend requires an
+available sandbox; Windows requires the explicit **Run without a sandbox** setting.
+It never silently falls back to unrestricted execution. Set `AgentExecutionMode.InProcess` when a desktop test is intended to emulate
 the iOS runtimes. Embedded runtime injection is not supported in process mode.
 
 The Playwright skill (`skills/playwright`, which drives a browser with `playwright-cli`
 from `@playwright/cli`, run through `npx`) requires actual Node.js/npm and browser child
 processes. These capabilities are available on the desktop execution path when their
 dependencies are present, but cannot be supplied to the iOS app by widening its sandbox.
-The browser workflow has been validated only on macOS arm64: on Linux each command runs
-in its own PID namespace, so a detached `playwright-cli` session cannot be assumed to
-survive between calls, and on Windows the shared process backend lacks the required
-filesystem and network confinement.
+The full model-driven browser workflow is recorded on macOS arm64. Windows supports
+the native JavaScript skill runner with explicit unconfined execution; the scripted
+`WindowsBrowserSkillProbe` checks a local synthetic login form, window state, session
+reuse and cleanup. Those checks do not establish a model-driven workflow or physical
+user visibility. On Linux each command runs in its own PID namespace, so a detached
+`playwright-cli` session cannot be assumed to survive between calls. See the
+[Windows setup and validation scope](../docs/playwright_agent.md#windows-desktop).
 The skill is left out of the iOS app bundle (see "Skills" below), because the app can
 start neither a Node package manager nor a browser; it stays in `TensorAgent/skills` for
 the desktop hosts. Its requirements
@@ -644,6 +1313,19 @@ at a message, not long enough for five gigabytes. What makes that survivable is 
 nothing is ever lost: every file is written through its `.part`, so a transfer the
 system does eventually stop resumes from the byte it reached, and the app restarts it
 by itself when it comes back to the foreground. The user never taps twice.
+
+A file that another installed entry already holds byte for byte (the same pinned size and
+SHA-256) is hard-linked from there rather than downloaded, before the first transfer
+starts, and the Models page counts only what will be fetched: the two MiniMax-H3 entries
+share six files (24.0 GB), so whichever is installed second fetches only its 11.4 GB
+denoiser; measured, its six shared files arrived in 0.1 s with 0 MB transferred and no
+more disk used. Deleting either entry removes only its own names for those files.
+
+An entry published as several shards of one model (Qwen3.8 Flash Next's three gguf-split
+files) counts as installed only when every shard is complete. The app refuses to load one
+with a shard missing or short ("Qwen3.8 Flash Next is not completely downloaded yet.")
+rather than hand the engine a first shard whose neighbours are not there, and a launch
+does not restore such an entry as the selected model.
 
 **Leaving the APP mid-answer no longer costs the answer.** Leaving the chat is
 `ChatTurnManager`'s problem; leaving TensorAgent altogether is a different problem with a
@@ -866,11 +1548,84 @@ Providers fail individually and often; that is designed for rather than hidden. 
 challenge page is detected and refused by name rather than parsed, because the
 alternative is reporting an engine's own navigation as the user's sources.
 
+## Languages
+
+There are eight: `en`, `zh-Hans`, `zh-Hant`, `ja`, `ko`, `es`, `fr` and `de`
+(`UiLanguages.Supported` in TensorAgent.Sharing). A system language tag maps to one of
+them by its language subtag. Chinese is mapped by script and region: `zh-Hant`, `zh-TW`,
+`zh-HK`, `zh-MO` and Cantonese map to Traditional Chinese, and any other Chinese tag maps
+to Simplified.
+
+| Text | Where it is |
+| --- | --- |
+| Native screens and the host's messages | `src/TensorAgent.Core/Localization/<tag>/<area>.json`, read with `Loc.T` and `Loc.Plural` |
+| The chat page | The same tables, served as `/i18n.js?lang=<tag>`. The markup carries `data-i18n`, `data-i18n-placeholder`, `data-i18n-title` and `data-i18n-aria-label`; the script calls `t()` and `tn()` |
+| The share extension, and the drafts the app composes from what was shared | `src/TensorAgent.Sharing/Localization/<tag>/share.json`, read with `ShareStrings` |
+| Permission prompts | `src/TensorAgent.Maui/Platforms/{iOS,MacCatalyst}/Resources/<tag>.lproj/InfoPlist.strings` (the two files are identical) |
+| The share extension's name in the share sheet | `src/TensorAgent.ShareExtension/Resources/<tag>.lproj/InfoPlist.strings` |
+
+How the tables work:
+
+- A table is a flat JSON object, and a key's first segment is its file's name
+  (`settings.sandbox.runCode.title` is in `settings.json`). A key a language lacks falls
+  back to English.
+- Placeholders are named (`{model}`, `{count}`).
+- Counted text has `.one` and `.other` keys, chosen by each language's plural rule
+  (`StringCatalog.PluralCategory`, mirrored in `WebUi/i18n.js`).
+- Numbers and dates the interface formats itself use `Loc.Culture`, which is never set as
+  the thread's culture.
+
+The share extension cannot read the app's settings. So the app writes the choice to
+`ui-language.txt` at the root of the App Group container, and the extension resolves it
+against the same system languages.
+
+Some text stays English whatever the user picks:
+
+- the logs;
+- everything the model reads: system prompts, tool descriptions and results, and refusals
+  it is meant to act on;
+- text the page compares with the model's or a tool's output;
+- protocol values.
+
+**Adding a string.**
+
+1. Add the key to the English table, in the order the text appears on screen.
+2. Use it from the code as a literal: `Loc.T("area.key")`, `t('area.key')` or
+   `data-i18n="area.key"`.
+3. Add it to every other language.
+
+**Adding a language.**
+
+1. Add it to `UiLanguages.Supported`. Extend `Match` too if its tags need more than the
+   first subtag.
+2. Give it a plural rule in `StringCatalog.PluralCategory` and in `i18n.js`.
+3. Write every table and the three `InfoPlist.strings` files.
+4. Add the tag to `CFBundleLocalizations` in the three `Info.plist` files.
+
+`LocalizationTests` fails, naming each gap, until all of that agrees. It checks that:
+
+- every language has every English key, with the same placeholders;
+- every key the code asks for exists, and every key is asked for by some code;
+- text the page repaints, and a menu row and the screen it opens, read the same;
+- the system's files and the bundles' language lists match the tables;
+- the running host follows the system on first launch, keeps each explicit choice after
+  a restart, and follows the system again after choosing "System";
+- refreshing the chat keeps unsent drafts and waits for a shared send's acceptance;
+- page string responses keep their language and text consistent during concurrent switches.
+
+For simulator checks of system detection, the Settings picker and relaunch persistence,
+use `python3 ../eng/validation/verify-tensoragent-languages.py --help` from this directory.
+The tool creates an isolated simulator and keeps logs and screenshots in ignored
+`docs/validation/`; it does not run model inference or validate a physical device.
+
 ## Tests
 
 ```
 dotnet test TensorAgent/tests/TensorAgent.Tests/TensorAgent.Tests.csproj
 ```
+
+The project is part of `TensorSharp.slnx`, so `dotnet test TensorSharp.slnx` runs it
+together with `InferenceWeb.Tests`.
 
 Hermetic by default. These groups need something the machine may not have and say
 so rather than passing silently:
@@ -888,6 +1643,14 @@ so rather than passing silently:
 
 `TENSORAGENT_TEST_BACKEND` chooses the backend for the three media sets: the input
 tests default to the CPU, the image-editing and video-generation ones to Metal.
+
+The LoRA plug-in tests (`LoraCatalogTests`, and the sheet's in `AgentAppHostTests` and
+`WebUiPageTests`) are hermetic: an installed plug-in is files of its pinned sizes. Whether
+the real files load is `InferenceWeb.Tests`' `RealArticleLoras_LoadCompletelyAgainstTheCheckpoint`,
+with `TENSORSHARP_QWEN21_LORA_DIR` pointing at the app's `Library/Caches/TensorAgent/loras`
+and `TENSORSHARP_QWEN21_DIT` at its Qwen-Image transformer GGUF. Its rank-256 Viggle Turbo
+row needs a file the app does not ship, so against that folder it fails with
+FileNotFoundException and the twelve the app offers pass.
 
 None of this runs in CI. `.github/workflows/pr-unit-tests.yml` runs `InferenceWeb.Tests`,
 whose `TensorAgentMauiProjectTests` read the MAUI head's project file, `Info.plist`,
@@ -931,6 +1694,14 @@ that walks away does not take the transfer with it. `UploadNamingTests` and the 
 upload tests in `MediaRoutesTests` pin the other end of "Upload failed (400)" — a
 photo whose name has no extension is placed from its own bytes, and something nobody
 can identify is still refused with a sentence a person can read.
+
+No test here makes a MiniMax-H3 clip. `VideoTurnsTests` pin which message becomes which
+request for which checkpoint and how the video service's frames reach the page and the
+saved chat; `MiniMaxH3CatalogTests` that the two entries share every file but the
+denoiser, under the names the engine looks for; `SharedFileLinkTests` that a shared file
+is linked rather than fetched; and `LoopbackRangeTests` the ranges and HEAD, through the
+real routes. The clip itself is checked against the running Mac app by `chat-e2e.py`'s
+`film`, `animate` and `reference` scenarios (see "On a Mac").
 
 ### Measured
 
@@ -994,7 +1765,6 @@ TensorAgent uses the radix KV prefix cache by default, through the same engine a
 TensorSharp.Server and TensorSharp.Cli. Prefix lookup respects the model's cache
 capabilities, conversation scope, and media boundaries. The phone's existing
 retention limits still apply, and memory warnings release idle cache payloads.
-`TS_PREFIX_CACHE_MODE=legacy` selects the compatibility path for diagnosis;
 `TS_SCHED_PREFIX_CACHE=0` disables runtime prefix reuse.
 
 Every chat starts from a copy of the model's state at the end of the prompt they all
@@ -1149,14 +1919,30 @@ checked and these were not:
 - **The native picker's own file names.** `UploadNaming` is tested against the shapes
   iOS produces (a stem with no extension, no content type, HEIC and MP4 bytes behind
   the same absent name), but the picker itself has only been run by hand.
-- **Image editing.** `/api/image-edit` remains bound to the same service the desktop
-  uses, but the built-in catalog offers no image-generation checkpoint, the phone page
-  has no control that calls the route, and no image has been generated on iOS.
-  `/api/image-generate`, the desktop page's text-to-image route, is not bound in the
-  app.
-- **Video generation.** The routes exist because they are part of the shared
-  surface. No video model is small enough for the catalog, and the page has no control
-  for it, so nothing offers one.
+- **Pictures on a phone.** The page makes and edits pictures through `/api/chat` with
+  Qwen-Image 2.1, which needs the 24 GB memory tier and was measured in the Mac app;
+  no image has been generated on iOS. `/api/image-edit` remains bound to the same
+  service the desktop uses, with the LoRA plug-ins the user chose, but nothing on the page
+  calls it, and `/api/image-generate`, the desktop page's text-to-image route, is not bound
+  in the app.
+- **LoRA plug-ins beyond the prompts tried.** Each of the twelve made pictures in the app
+  from the prompts and photos `chat-e2e.py` sends, and the two box-driven edits were also run
+  on their authors' example photos. Object Remover failed on one of its two. How each fares
+  on other subjects is up to the plug-in, and nothing here measures it.
+- **Qwen3.8 Flash Next beyond the recorded configurations.** UD-Q2_K_XL was measured
+  in the Debug app on one 48 GB M5 Pro. A Mac with more memory gets a different expert
+  placement plan, which nothing here has measured; the Q2 entry retains its 48 GB tier.
+  UD-IQ1_M has Windows server validation at 32 GB system RAM and 16 GB CUDA VRAM,
+  but no recorded Mac/Metal or TensorAgent app end-to-end validation. Its 32 GB tier
+  remains experimental. Nor has the app's own downloader fetched the Q2 package's
+  78.9 GB: the three shards were downloaded
+  with `curl` and hard-linked into the app's store. How the store counts a split's shards
+  is covered by `Qwen38FlashNextCatalogTests`.
+- **Clips on a phone.** The two MiniMax-H3 entries need the 32 GB memory tier and
+  were measured in the Mac app. No video model fits a phone, so none is offered there, and
+  no clip has been played by iOS's media loader (WebKit's playback was checked in the
+  Mac app). `/api/video-generate` stays bound as part of the shared surface, but nothing
+  on the page calls it.
 - **Sub-agents on the phone.** Delegation is offered in every chat while the
   "Sub-agents" switch is on (see "Sub-agents, on by default, with a switch"), but no delegated turn on a phone or in the
   simulator is recorded, and nothing has measured what up to three concurrent

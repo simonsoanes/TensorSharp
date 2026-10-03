@@ -4,7 +4,7 @@
 
 TensorSharp.Server.Host provides three API styles, a Jev-compatible decision endpoint, and a few utility endpoints:
 
-- **Ollama-compatible** (`/api/generate`, `/api/chat/ollama`, `/api/tags`, `/api/show`, `/api/embed`, `/api/embeddings`)
+- **Ollama-compatible** (`/api/generate`, `/api/chat/ollama`, `/api/tags`, `/api/show`, `/api/embed`)
 - **OpenAI-compatible** (`/v1/chat/completions`, `/v1/responses`, `GET /v1/responses/{id}`, `/v1/models`, `/v1/embeddings`, `/v1/videos/generations`, `/v1/skills`)
 - **Jev-compatible** typed decisions (`/v1/systemone`, DiffusionGemma only)
 - **Web UI** (`/api/chat`, `/api/sessions`, `/api/models`, `/api/models/load`, `/api/upload`, `/api/skills`, `/api/image-edit`, `/api/image-edit/stream`, `/api/image-generate`, `/api/image-generate/stream`, `/api/video-generate`, `/api/video-generate/stream`)
@@ -21,8 +21,6 @@ curl http://127.0.0.1:5000/v1/embeddings -H 'Content-Type: application/json' \
   -d '{"model":"all-MiniLM-L6-v2-Q8_0","input":["read a file","open a document"],"encoding_format":"float"}'
 curl http://127.0.0.1:5000/api/embed -H 'Content-Type: application/json' \
   -d '{"model":"all-MiniLM-L6-v2-Q8_0","input":["read a file"],"truncate":false}'
-curl http://127.0.0.1:5000/api/embeddings -H 'Content-Type: application/json' \
-  -d '{"model":"all-MiniLM-L6-v2-Q8_0","prompt":"read a file"}'
 ```
 
 See the [embedding guide](../docs/embeddings.md) for all fields, token-ID inputs, `base64`, `dimensions`, truncation, and retrieval quality.
@@ -34,7 +32,7 @@ See the [embedding guide](../docs/embeddings.md) for all fields, token-ID inputs
 | Hosted models | One GGUF file, selected with `--model`; requests must name that hosted file or its basename |
 | Projectors | Optional single projector, selected explicitly with `--mmproj`; used for multimodal-capable models |
 | Backends | `mlx`, `cuda`, `ggml_metal`, `ggml_cuda`, `ggml_vulkan`, `ggml_cpu`, `cpu`; `/api/models` reports which are available on the host |
-| Concurrency | Autoregressive chat uses the continuous-batching engine. The legacy queue API remains for status/compatibility fields; DiffusionGemma Web UI requests use a separate block-boundary diffusion scheduler. |
+| Concurrency | Autoregressive chat uses the continuous-batching engine (`/api/queue/status` reports its live load); DiffusionGemma Web UI requests use a separate block-boundary diffusion scheduler. |
 | Generation modes | Autoregressive models stream appended token chunks. DiffusionGemma returns final text on append-only compatibility endpoints and exposes live whole-message denoising previews on Web UI `/api/chat`. |
 | Sessions | Web UI uses per-tab chat sessions. Ollama/OpenAI compatibility endpoints retain their existing default-session inference behavior, but code-execution workspaces never span HTTP requests. |
 | Uploads | `/api/upload` accepts image / video / audio / text / **PDF** files; born-digital PDFs return extracted text, scanned PDFs return page images for vision-capable models (`TS_PDF_MAX_PAGES` caps pages read) |
@@ -1007,8 +1005,8 @@ input, `TS_JEV_MAX_CANVAS` chunking and validation.
 ### Utilities
 
 ```bash
-# Legacy-compatible inference load snapshot: pending_requests is normally 0
-# because the continuous-batching engine, not InferenceQueue, owns concurrency
+# Live inference load of the loaded model's engine: requests processing,
+# waiting for a batch slot, and completed
 curl http://localhost:5000/api/queue/status
 
 # Legacy Ollama protocol version (hard-coded to 0.1.0; not the TensorSharp release version)
@@ -1077,7 +1075,6 @@ Event shapes:
 
 | Event field(s) | When | Meaning |
 |---|---|---|
-| `queue_position`, `queue_pending` | compatibility event if a request waits on the legacy queue shim | queue-position fields retained for older clients |
 | `token` | each generated token (or parsed content chunk when `think`/`tools` are active) | streaming content |
 | `replace`, `diffusionStep`, `diffusionTotal`, `preview` | each DiffusionGemma denoising preview and final replacement | replace the whole assistant message body instead of appending a token |
 | `thinking` | each parsed reasoning chunk (only when the model emits one) | streaming chain-of-thought |
@@ -1085,7 +1082,7 @@ Event shapes:
 | `tool_progress`, `tool`, `text`, `seconds`, `detail`, `agents` | while an in-process skill/code/agent call is being written or run | transient live activity: phase is `writing`, `running`, or `finished`; the bundled Web UI keeps only a bounded current tail and clears it on `finished`. While `wait_agent` is `running`, `agents` is a snapshot of every sub-agent in the request (`agent_id`, `parent_id`, `task`, `agent_type`, `status`, `tool`, `tool_status`, `detail`, `result`, `error`); otherwise it is `null` |
 | `skill_step`, `agent_id`, `skill`, `detail`, `ok`, `round`, `files` | after each in-process skill, code or agent tool call finishes | completion metadata for the tool, target and result; `agent_id` names the agent that made the call (`/root` for the main conversation); produced artifacts appear as optional `{name, bytes, url}` entries in `files` |
 | `artifact_verified`, `files` | once, when a routed deliverable workflow (such as a PowerPoint request) proves its output | the one deliverable that passed the host's structural checks, as a single `{name, bytes, url}` entry; `skill_step.files` stays empty on those requests so provisional files are never offered |
-| `done`, `tokenCount`, `elapsed`, `tokPerSec`, `aborted`, `truncated`, `error`, `sessionId`, `promptTokens`, `kvReusedTokens`, `kvReusePercent` | last frame | terminal summary; `truncated` is true when the max-tokens budget ended the answer (not the user; `aborted` covers that) |
+| `done`, `tokenCount`, `elapsed`, `tokPerSec`, `aborted`, `truncated`, `error`, `sessionId`, `promptTokens`, `kvReusedTokens`, `kvReusePercent` | last frame | terminal summary: `tokenCount` counts every token the turn generated (reasoning, tool calls and answer, across all rounds), `elapsed` is the turn's wall-clock seconds including tool runs, and `tokPerSec` is the decode speed; `truncated` is true when the max-tokens budget ended the answer (not the user; `aborted` covers that) |
 
 Sample terminal frame:
 
@@ -1783,9 +1780,9 @@ print()
 
 Notes:
 
-- `response_format` (`json_object` or `json_schema`) cannot be combined with `tools` (HTTP `400`). It combines with `"think": true` only on families whose protocol declares where reasoning ends, so the JSON grammar can arm there: GPT-OSS (`final<|message|>`), DeepSeek V4.1, Qwen 3.8 Flash Next and GLM-5.3-Flash (`</think>`), Gemma 4 (`<channel|>`), Nemotron-H (`</think>`) and Muse-Glimmer (`to=user<|message|>`). Every other family returns HTTP `400` for that combination, and so does `TS_JSON_GRAMMAR=0`, which removes the delayed grammar that combination needs.
-- `json_object` / `json_schema` requests on `/v1/chat/completions` decode under a **JSON grammar** built from the tokenizer (and, for `json_schema`, from the schema), so tokens that would break the object cannot be sampled and chatty models cannot emit prose before it. On the families above, a `think: true` request arms the grammar only after the reasoning block closes. With `TS_JSON_GRAMMAR=0`, or when no grammar can be built for a schema (on a request without `think`; a `think: true` request on the families above fails instead), the server falls back to the older constraint that restricts only the **first sampled token** to a `{`-opening candidate; `TS_JSON_FORCE_OPEN=0` disables that fallback too. `/v1/responses` `text.format` requests rely on the prompt instruction and validation only.
-- Streaming `json_object` requests stream the JSON object token-by-token (code fences and stray tags are stripped on the fly), so time-to-first-token reflects prefill latency. Streaming `json_schema` (strict) requests are still buffered and schema-normalized before the single chunk is emitted. Set `TS_STRUCTURED_STREAM_BUFFER=1` to force the legacy buffer-everything behavior for both. Non-streaming requests are always normalized.
+- `response_format` (`json_object` or `json_schema`) cannot be combined with `tools` (HTTP `400`). It combines with `"think": true` only on families whose protocol declares where reasoning ends, so the JSON grammar can arm there: GPT-OSS (`final<|message|>`), DeepSeek V4.1, Qwen 3.8 Flash Next and GLM-5.3-Flash (`</think>`), Gemma 4 (`<channel|>`), Nemotron-H (`</think>`) and Muse-Glimmer (`to=user<|message|>`). Every other family returns HTTP `400` for that combination.
+- `json_object` / `json_schema` requests on `/v1/chat/completions` decode under a **JSON grammar** built from the tokenizer (and, for `json_schema`, from the schema), so tokens that would break the object cannot be sampled and chatty models cannot emit prose before it. On the families above, a `think: true` request arms the grammar only after the reasoning block closes. When no grammar can be built for a schema (on a request without `think`; a `think: true` request on the families above fails instead), the server falls back to a constraint that restricts only the **first sampled token** to a `{`-opening candidate. `/v1/responses` `text.format` requests rely on the prompt instruction and validation only.
+- Streaming `json_object` requests stream the JSON object token-by-token (code fences and stray tags are stripped on the fly), so time-to-first-token reflects prefill latency. Streaming `json_schema` (strict) requests are still buffered and schema-normalized before the single chunk is emitted. Non-streaming requests are always normalized.
 - Invalid schemas return HTTP `400`; non-streaming / `json_schema` responses that still fail validation return HTTP `422` (a `json_object` stream that has already started cannot change its status code).
 
 ---

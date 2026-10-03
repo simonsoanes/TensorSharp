@@ -73,7 +73,6 @@ using namespace tsg;
 // split), F16 KV + flash-capable head only, folded head descriptors, no-wrap
 // positions. No MTP/DFlash gate: no speculative path exists for this family —
 // if DFlash2/MTP lands, replicate qwen35's EnterSpecSession latch managed-side.
-// Kill switch: TS_QWEN4EXP_BATCHED_ARENA=0.
 // ============================================================================
 namespace
 {
@@ -563,16 +562,6 @@ TSG_EXPORT int TSGgml_Qwen4ExpArenaDecodeBatched(
                 set_last_error("qwen4exp arena batched decode: bad token embedding type.");
                 return 0;
             }
-        }
-
-        static const bool q4ab_enabled = []{
-            const char* e = std::getenv("TS_QWEN4EXP_BATCHED_ARENA");
-            return e == nullptr || e[0] != '0';
-        }();
-        if (!q4ab_enabled)
-        {
-            set_last_error("qwen4exp arena batched decode: disabled via TS_QWEN4EXP_BATCHED_ARENA=0.");
-            return 0;
         }
 
         int attn_layers = 0, gdn_layers = 0;

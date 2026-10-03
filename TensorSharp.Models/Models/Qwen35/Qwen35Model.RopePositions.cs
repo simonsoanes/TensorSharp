@@ -106,31 +106,5 @@ namespace TensorSharp.Models
             if (startPos == 0)
                 _ropeDelta = 0;
         }
-
-        // The fused Qwen3.5 graphs take the RoPE position separately from the KV index
-        // (TSGgml_Qwen35RopePositionAbi >= 1). A library built before that has entry
-        // points with fewer arguments, and calling them would shift every argument, so
-        // such a library is refused once, loudly, and the per-op paths run instead.
-        private static int _nativeRopeAbi = -1;
-        private static bool _nativeRopeAbiWarned;
-
-        private bool NativeRopePositionAbiSupported()
-        {
-            if (!IsGgmlBackend)
-                return false;
-            if (_nativeRopeAbi < 0)
-                _nativeRopeAbi = GgmlBasicOps.Qwen35RopePositionAbi();
-            if (_nativeRopeAbi >= 1)
-                return true;
-            if (!_nativeRopeAbiWarned)
-            {
-                _nativeRopeAbiWarned = true;
-                Console.Error.WriteLine(
-                    "[qwen35] the loaded GgmlOps library predates the M-RoPE position contract " +
-                    "(TSGgml_Qwen35RopePositionAbi missing); the fused whole-model graphs are disabled " +
-                    "and every forward runs the per-op path. Rebuild TensorSharp.GGML.Native.");
-            }
-            return false;
-        }
     }
 }

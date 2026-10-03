@@ -6,14 +6,12 @@
 // TensorSharp is licensed under the BSD-3-Clause license found in the LICENSE file in the root directory of this source tree.
 //
 // Performance benchmark for Gemma 4's batched paged-attention path
-// (`TS_GEMMA4_BATCHED=1`) compared against the per-sequence KV-swap
-// fallback that BatchExecutor uses when ForwardBatch throws.
+// compared against the per-sequence KV-swap path.
 //
 // The model is loaded ONCE per benchmark method and exercised through
 // both paths back-to-back so the model-load cost (multi-second for E4B
-// Q8_0) is amortised. Toggling between paths is done via the
-// `_pagedOptIn` token below, which sets/unsets `TS_GEMMA4_BATCHED`
-// before each scenario.
+// Q8_0) is amortised. Each scenario picks its path with
+// TS_SCHED_DISABLE_BATCHED (--no-continuous-batching's variable).
 //
 // Opt-in via TS_TEST_MODEL_DIR pointing at the directory containing
 // gemma-4-E4B-it-Q8_0.gguf. The model is ~4 GB so this is a slow test
@@ -35,7 +33,9 @@ namespace InferenceWeb.Tests;
 public class Gemma4BatchedPerfBench
 {
     private const string EnvModelDir = "TS_TEST_MODEL_DIR";
-    private const string OptInVar = "TS_GEMMA4_BATCHED";
+    // --no-continuous-batching's variable: set to 1, every sequence takes the
+    // per-sequence path instead of the batched one.
+    private const string PerSequenceVar = "TS_SCHED_DISABLE_BATCHED";
 
     private readonly ITestOutputHelper _output;
     public Gemma4BatchedPerfBench(ITestOutputHelper output) { _output = output; }
@@ -44,7 +44,7 @@ public class Gemma4BatchedPerfBench
     // workload where each request is a few hundred tokens of prompt and
     // we want low p50 latency.
     [ModelFact("TS_TEST_MODEL_DIR", "gemma-4-e4b")]
-    public Task Gemma4_ShortPromptsParallel_BatchedVsLegacy() =>
+    public Task Gemma4_ShortPromptsParallel_BatchedVsPerSequence() =>
         RunComparison(
             label: "short-parallel",
             numRequests: 5,
@@ -56,18 +56,18 @@ public class Gemma4BatchedPerfBench
     // per-seq KV-swap path (gather + GPU launch overhead amortised across
     // the longer attention compute).
     [ModelFact("TS_TEST_MODEL_DIR", "gemma-4-e4b")]
-    public Task Gemma4_LongPromptsParallel_BatchedVsLegacy() =>
+    public Task Gemma4_LongPromptsParallel_BatchedVsPerSequence() =>
         RunComparison(
             label: "long-parallel",
             numRequests: 4,
             maxNewTokens: 6,
             promptFactory: i => MakeLongPrompts(i));
 
-    // Single sequence - sanity check that batched isn't WORSE than legacy
+    // Single sequence - sanity check that batched isn't WORSE than per-seq
     // on the degenerate batch=1 case. The fixed per-call overheads
     // (graph build, gather) shouldn't drown out the layer compute.
     [ModelFact("TS_TEST_MODEL_DIR", "gemma-4-e4b")]
-    public Task Gemma4_SingleSequence_BatchedVsLegacy() =>
+    public Task Gemma4_SingleSequence_BatchedVsPerSequence() =>
         RunComparison(
             label: "single-seq",
             numRequests: 1,
@@ -79,7 +79,7 @@ public class Gemma4BatchedPerfBench
     // SchedulerConfig.MaxNumRunningSequences >= 8 (already set in
     // BenchContext).
     [ModelFact("TS_TEST_MODEL_DIR", "gemma-4-e4b")]
-    public Task Gemma4_EightPromptsParallel_BatchedVsLegacy() =>
+    public Task Gemma4_EightPromptsParallel_BatchedVsPerSequence() =>
         RunComparison(
             label: "batch8-parallel",
             numRequests: 8,
@@ -94,14 +94,11 @@ public class Gemma4BatchedPerfBench
         int maxNewTokens,
         Func<int, List<string>> promptFactory)
     {
-        // Stable env state for both runs: force the legacy unfused path
-        // (no fused-layer-prefill, no fused-decode kernel) so the two
-        // forward computations are apples-to-apples on the same op
-        // graph. The only difference between the two timed runs below is
-        // whether ForwardBatch executes (batched) or throws-and-falls-back
-        // to per-seq KV swap (legacy).
-        Environment.SetEnvironmentVariable("TS_FUSED_LAYER_PREFILL", "0");
-
+        // Stable env state for both runs: force the unfused path (no
+        // fused-layer-prefill, no fused-decode kernel) so the two forward
+        // computations are apples-to-apples on the same op graph. The only
+        // difference between the two timed runs below is whether the
+        // scheduler takes ForwardBatch (batched) or the per-seq KV swap.
         var modelPath = FindGemma4();
         if (modelPath == null) { _output.WriteLine("[gemma4-perf] no model; skipping"); return; }
         _output.WriteLine($"[gemma4-perf] loading {Path.GetFileName(modelPath)}");
@@ -115,25 +112,20 @@ public class Gemma4BatchedPerfBench
         // looks much slower than reality.
         await RunPath(ctx, prompts.Take(1).ToList(), maxNewTokens: 4, optIn: false, warm: true);
 
-        // Legacy first (the BatchExecutor fallback when ForwardBatch
-        // throws). Then batched. Order matters less because the prefix
-        // cache is per-request and the prompts are diverse.
-        var legacy  = await RunPath(ctx, prompts, maxNewTokens, optIn: false, warm: false);
+        // Per-seq first (what --no-continuous-batching serves), then batched.
+        // Order matters less because the prefix cache is per-request and the
+        // prompts are diverse.
+        var perSeq  = await RunPath(ctx, prompts, maxNewTokens, optIn: false, warm: false);
         var batched = await RunPath(ctx, prompts, maxNewTokens, optIn: true,  warm: false);
 
-        Report(label, numRequests, legacy, batched);
+        Report(label, numRequests, perSeq, batched);
     }
 
     private async Task<RunStats> RunPath(
         BenchContext ctx, List<string> prompts, int maxNewTokens,
         bool optIn, bool warm)
     {
-        // The Gemma 4 batched path is now the DEFAULT, so "legacy" means
-        // explicitly opting out via TS_GEMMA4_BATCHED=0 (which forces
-        // ForwardBatch to throw NotSupportedException, triggering the
-        // per-seq KV-swap fallback in BatchExecutor).
-        if (optIn) Environment.SetEnvironmentVariable(OptInVar, "1");
-        else       Environment.SetEnvironmentVariable(OptInVar, "0");
+        Environment.SetEnvironmentVariable(PerSequenceVar, optIn ? "0" : "1");
 
         // Reset every per-engine state we can to keep the two timed runs
         // independent. The InferenceEngine itself maintains a prefix
@@ -192,18 +184,18 @@ public class Gemma4BatchedPerfBench
         return count;
     }
 
-    private void Report(string label, int n, RunStats legacy, RunStats batched)
+    private void Report(string label, int n, RunStats perSeq, RunStats batched)
     {
-        double legacySec  = legacy.Wall.TotalSeconds;
+        double perSeqSec  = perSeq.Wall.TotalSeconds;
         double batchedSec = batched.Wall.TotalSeconds;
-        double legacyTps  = legacySec  > 0 ? legacy.OutputTokens  / legacySec  : 0;
+        double perSeqTps  = perSeqSec  > 0 ? perSeq.OutputTokens  / perSeqSec  : 0;
         double batchedTps = batchedSec > 0 ? batched.OutputTokens / batchedSec : 0;
-        double speedup    = legacySec  > 0 ? legacySec / Math.Max(batchedSec, 1e-9) : 0;
-        double tpsRatio   = legacyTps  > 0 ? batchedTps / legacyTps : 0;
+        double speedup    = perSeqSec  > 0 ? perSeqSec / Math.Max(batchedSec, 1e-9) : 0;
+        double tpsRatio   = perSeqTps  > 0 ? batchedTps / perSeqTps : 0;
 
         _output.WriteLine("");
         _output.WriteLine($"========== [gemma4-perf] {label} (n={n}) ==========");
-        _output.WriteLine($"  legacy  : wall={legacySec,7:F2}s out={legacy.OutputTokens,4} prompt={legacy.PromptTokens,5} tps={legacyTps,6:F1}");
+        _output.WriteLine($"  per-seq : wall={perSeqSec,7:F2}s out={perSeq.OutputTokens,4} prompt={perSeq.PromptTokens,5} tps={perSeqTps,6:F1}");
         _output.WriteLine($"  batched : wall={batchedSec,7:F2}s out={batched.OutputTokens,4} prompt={batched.PromptTokens,5} tps={batchedTps,6:F1}");
         _output.WriteLine($"  speedup : wall {speedup,5:F2}x   tps {tpsRatio,5:F2}x");
         _output.WriteLine("");
@@ -278,9 +270,11 @@ public class Gemma4BatchedPerfBench
 
         public BenchContext(string modelPath)
         {
-            BackendType backend = OperatingSystem.IsMacOS()
-                ? BackendType.GgmlMetal : BackendType.GgmlCpu;
-            Model = TensorSharp.Models.ModelBase.Create(modelPath, backend);
+            // The GGML backend this test process pins (TS_TEST_GGML_BACKEND): a
+            // process initializes one GGML backend and cannot switch later.
+            Model = TensorSharp.Models.ModelBase.Create(modelPath, TestGates.PinnedGgmlBackend);
+            if (Model is Gemma4Model gemma)
+                gemma.ForceUnfused = true;
             Renderer = new KVCachePromptRenderer(new GgufPromptRenderer());
             BlockSize = 256;
             var cfg = new SchedulerConfig

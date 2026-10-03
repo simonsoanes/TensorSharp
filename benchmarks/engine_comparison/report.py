@@ -41,9 +41,9 @@ CSV_PATH = RESULTS_DIR / "results.csv"
 
 # Columns are (engine, backend, tp) triples discovered in the results, ordered
 # by the config registries (engine outer, backend, then tensor-parallel degree).
-# Results may contain backend ids that are not in the current config (e.g. the
-# legacy abstract gpu / cpu ids from an older run); those sort after the
-# registry ids and are labeled by their raw id.
+# Results may contain backend ids that are not in the current config (from a
+# run against another config); those sort after the registry ids and are
+# labeled by their raw id.
 def _order_key(col) -> tuple:
     eng_order = list(config.ENGINES.keys())
     b_order = list(config.BACKENDS.keys())

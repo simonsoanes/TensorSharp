@@ -55,10 +55,6 @@ namespace TensorSharp.Models
         // stale cache.
         private bool _tpKvDeviceDirty;
 
-        /// <summary>Disable with TS_GEMMA4_TP_FUSED_DECODE=0.</summary>
-        private static readonly bool _tpFusedDecodeEnabled =
-            Environment.GetEnvironmentVariable("TS_GEMMA4_TP_FUSED_DECODE") != "0";
-
         /// <summary>
         /// Build the per-rank decode arrays. Called after weight sharding and the
         /// per-rank device preload, so every shard already has a device cache key.
@@ -68,7 +64,7 @@ namespace TensorSharp.Models
             _tpFusedDecodeReady = false;
             _tpDecodeArrays = null;
 
-            if (!_tpFusedDecodeEnabled || !IsGgmlBackend || !IsTensorParallel)
+            if (!IsGgmlBackend || !IsTensorParallel)
                 return;
             // MoE models share these per-rank arrays but run through their own
             // whole-model trunk kernel; only a dense model can use the dense
@@ -279,8 +275,7 @@ namespace TensorSharp.Models
             // The fold needs a quantized LM head + the F32 final norm. Without
             // them the graph would stop at the hidden state and the caller would
             // have to run the tail itself, which is not wired up here.
-            if (!_fdFoldLmHead
-                || !_weights.TryGetValue("output_norm.weight", out var finalNormT)
+            if (!_weights.TryGetValue("output_norm.weight", out var finalNormT)
                 || !_quantWeights.TryGetValue(_hasTiedOutput ? "token_embd.weight" : "output.weight", out var lmqw))
                 return false;
 

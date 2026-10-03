@@ -1,0 +1,8 @@
+{
+  "sessions.title": "聊天",
+  "sessions.newChat": "新聊天",
+  "sessions.row.datePattern": "M月d日 HH:mm",
+  "sessions.row.messages.one": "{count} 条消息",
+  "sessions.row.messages.other": "{count} 条消息",
+  "sessions.row.delete": "删除"
+}

@@ -38,15 +38,22 @@
       if (this.children.length === 0) return this._text;
       return this.children.map(function (c) { return c.textContent; }).join('');
     },
-    set: function (v) { this._text = v == null ? '' : String(v); this.children = []; },
+    set: function (v) { this._text = v == null ? '' : String(v); detachAll(this); },
   });
   // innerHTML is kept as the raw markup the page produced. The page renders its
   // own Markdown into it, so parsing would only re-implement a browser; what a
   // test needs is what was written, and that is what is stored.
   Object.defineProperty(Element.prototype, 'innerHTML', {
     get: function () { return this._html; },
-    set: function (v) { this._html = v == null ? '' : String(v); this.children = []; this._text = ''; },
+    set: function (v) { this._html = v == null ? '' : String(v); detachAll(this); this._text = ''; },
   });
+
+  // As a browser does: an element whose markup is replaced no longer has a parent,
+  // so a page that keeps a reference to it can tell that it must put it back.
+  function detachAll(parent) {
+    parent.children.forEach(function (c) { c.parentNode = null; });
+    parent.children = [];
+  }
 
   Element.prototype.appendChild = function (child) {
     child.parentNode = this;
@@ -65,6 +72,13 @@
     if (at >= 0) this.parentNode.children.splice(at, 1);
     this.parentNode = null;
   };
+  Element.prototype.removeChild = function (child) {
+    var at = this.children.indexOf(child);
+    if (at < 0) throw new Error('Node is not a child');
+    this.children.splice(at, 1);
+    child.parentNode = null;
+    return child;
+  };
   Element.prototype.setAttribute = function (k, v) { this.attrs[k] = String(v); };
   Element.prototype.getAttribute = function (k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null; };
   Element.prototype.removeAttribute = function (k) { delete this.attrs[k]; };
@@ -79,6 +93,8 @@
 
   function matches(el, selector) {
     if (selector.charAt(0) === '.') return el.classList.contains(selector.slice(1));
+    // [name]: the attribute selectors /i18n.js translates the markup with.
+    if (selector.charAt(0) === '[') return el.getAttribute(selector.slice(1, -1)) !== null;
     return el.tagName === selector.toUpperCase();
   }
   Element.prototype.querySelectorAll = function (selector) {
@@ -138,6 +154,13 @@
   var activity = document.getElementById('activity');
   var label = element('div'); label.className = 'label'; activity.appendChild(label);
   var tail = element('div'); tail.className = 'tail'; activity.appendChild(tail);
+  // Every label the strip has shown, oldest first. The page clears the strip when a
+  // turn ends, so by the time a test can look, this record is all that is left of it.
+  var labels = [];
+  Object.defineProperty(label, 'textContent', {
+    get: function () { return this._text; },
+    set: function (v) { this._text = v == null ? '' : String(v); if (this._text) labels.push(this._text); },
+  });
 
   // ---- the network ---------------------------------------------------------
   // Answers come from a table the test fills in; every request is recorded, so a
@@ -151,7 +174,9 @@
   //                                           TypeError WebKit raises when the
   //                                           connection fails ('Load failed')
   // A function that throws rejects the fetch the same way a browser would, rather
-  // than throwing out of fetch() itself. Nothing here ever throws synchronously.
+  // than throwing out of fetch() itself. Nothing here ever throws synchronously. A
+  // function may also return a promise of any of the above: the request is answered
+  // when the test settles it.
   var routes = {};
   var calls = [];
 
@@ -217,6 +242,9 @@
    *            still waiting rejects with AbortError.
    * `__delay: ms` makes every read take that many real milliseconds, so a test can
    * abort or look at the page in the middle of one.
+   * A frame `{ __chunk: [...frames] }` is several frames in ONE read, which is how a
+   * page that re-attaches is handed everything so far, and the page paints once per
+   * read rather than once per frame.
    */
   function sseBody(spec, signal) {
     var frames = spec.__sse, then = spec.__then || 'end', delay = Number(spec.__delay) || 0;
@@ -241,7 +269,9 @@
           if (i < 0) return; // an abort or a cancel got there first
           if (at < frames.length) {
             waiting.splice(i, 1);
-            resolve({ done: false, value: 'data: ' + JSON.stringify(frames[at++]) + '\n' });
+            var next = frames[at++];
+            var chunk = next && next.__chunk ? next.__chunk : [next];
+            resolve({ done: false, value: chunk.map(function (f) { return 'data: ' + JSON.stringify(f) + '\n'; }).join('') });
           } else if (then === 'reject') {
             waiting.splice(i, 1);
             reject(networkError('Load failed'));
@@ -310,6 +340,15 @@
       if (typeof answer === 'function') answer = answer(record);
     } catch (e) {
       return Promise.reject(e);
+    }
+    // A route function may return a promise: the answer comes when the test settles it,
+    // which is how a test holds one request open while the page makes another, or answers
+    // two of them in the opposite order.
+    if (answer && typeof answer.then === 'function') {
+      return answer.then(function (later) {
+        if (later && later.__reject) throw networkError(later.__reject);
+        return reply(later === null || later === undefined ? {} : later, undefined, undefined, signal);
+      });
     }
     if (answer && answer.__reject) return Promise.reject(networkError(answer.__reject));
     return reply(answer === null || answer === undefined ? {} : answer, undefined, undefined, signal);
@@ -380,6 +419,8 @@
     errorNotices: function () { return noticeTexts(true); },
     /** Every notice, error or not, oldest first. */
     notices: function () { return noticeTexts(false); },
+    /** Every label the progress strip showed, oldest first. The page writes one only when it changes. */
+    progress: function () { return labels.slice(); },
     /** The transcript as a shape a test can assert on. */
     transcript: function () {
       return document.getElementById('chat').children.map(function (turn) {
@@ -387,7 +428,8 @@
         (function walk(node) {
           node.children.forEach(function (c) {
             if (['IMG', 'AUDIO', 'VIDEO', 'A'].indexOf(c.tagName) >= 0) {
-              media.push({ tag: c.tagName, src: c.src || c.href || '', text: c.textContent, poster: c.poster || '' });
+              media.push({ tag: c.tagName, src: c.src || c.href || '', text: c.textContent, poster: c.poster || '',
+                           controls: !!c.controls, loop: !!c.loop, playsInline: !!c.playsInline, preload: c.preload || '' });
             }
             walk(c);
           });

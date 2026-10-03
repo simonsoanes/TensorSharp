@@ -663,7 +663,8 @@ at 0.73–0.82x, against the same per-token whole-model graph submission.
 - **The kernels are the same.** Both engines link the same vendored ggml, and the
   MMQ-vs-cuBLAS decision is made inside it from the same shapes.
 - **The GPT-OSS whole-model prefill graph does not cost decode.** A/B on the same
-  cells with `TS_GPTOSS_MODEL_PREFILL=0`:
+  cells against the per-layer prefill (measured with the switch that selected it,
+  since removed):
 
   | gpt-oss `--n-cpu-moe` | prefill graph | pp512 | tg128 |
   |---|---|---:|---:|
@@ -711,4 +712,3 @@ Diagnostics worth knowing:
 | `TS_HOST_MOE_TIMING=1` | Splits an offloaded layer into setup vs host matmul; prints streamed bytes, used experts, effective bandwidth. `=2` adds a per-weight transfer rate. |
 | `TS_HOST_MOE_DEBUG=1` | Prints the segment plan and each seam's activation norms. |
 | `TS_HOST_MOE_VERIFY=1` | Runs the on-GPU expert chain alongside the host one and reports the divergence. |
-| `TS_GPTOSS_MODEL_PREFILL=0` | Falls back to GPT-OSS's per-layer prefill (for A/B). |

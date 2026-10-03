@@ -88,7 +88,7 @@ namespace TensorSharp.GGML
             // prompts where TensorSharp's per-op driving model would otherwise
             // submit hundreds of command buffers serially.
             //
-            // Set TS_GGML_ASYNC_COMPUTE=0 to disable and fall back to the legacy
+            // Set TS_GGML_ASYNC_COMPUTE=0 to disable and fall back to the
             // eager-sync behaviour for debugging.
             var disableAsync = Environment.GetEnvironmentVariable("TS_GGML_ASYNC_COMPUTE");
             bool enableAsync = backendType == GgmlBackendType.Metal &&

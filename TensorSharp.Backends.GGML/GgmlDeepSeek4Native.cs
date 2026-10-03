@@ -29,15 +29,8 @@ namespace TensorSharp.GGML
         [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf8)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial IntPtr TSGgml_Dsv4LoadModel(string ggufPath,
-            int nGpu, int nCtx, int nUbatch, int nThreads,
-            int nCpuMoe, string backendName);
-
-        [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial IntPtr TSGgml_Dsv4LoadModelDspark(string ggufPath,
-            int nGpu, int nCtx, int nUbatch,
-            int nThreads, string dsparkPath, int nCpuMoe,
-            string backendName);
+            int nGpu, int nCtx, int nUbatch, int nThreads, string dsparkPath,
+            int nCpuMoe, string backendName, int tensorParallelRanks);
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -85,10 +78,6 @@ namespace TensorSharp.GGML
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Dsv4Reset(IntPtr handle);
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial int TSGgml_Dsv4ResetChecked(IntPtr handle);
 
         [LibraryImport(DllName)]
@@ -123,6 +112,10 @@ namespace TensorSharp.GGML
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int TSGgml_Dsv4SlotCanAlloc(IntPtr handle);
+
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial int TSGgml_Dsv4SlotReleaseGraphs(IntPtr handle, int slotId);
 
         [LibraryImport(DllName)]
@@ -152,16 +145,14 @@ namespace TensorSharp.GGML
         /// </summary>
         public const int UBatchAuto = -1;
 
+        /// <summary>Load a DeepSeek V4/V4.1 checkpoint. <paramref name="dsparkPath"/> is the
+        /// DSpark drafter GGUF (see the DeepSeek V4 card), null for none;
+        /// <paramref name="tensorParallelRanks"/> is 0 for layer placement or the
+        /// routed-MoE tensor-parallel degree (V4.1, 2..8).</summary>
         public static IntPtr LoadModel(string ggufPath, int nGpu, int nCtx, int nUbatch, int nThreads,
-            int nCpuMoe = CpuMoeNone, string backendName = null)
-            => TSGgml_Dsv4LoadModel(ggufPath, nGpu, nCtx, nUbatch, nThreads, nCpuMoe, backendName ?? string.Empty);
-
-        /// <summary>Load with a DSpark drafter GGUF (see the DeepSeek V4 card).
-        /// A null/empty path is identical to <see cref="LoadModel"/>.</summary>
-        public static IntPtr LoadModelWithDspark(string ggufPath, int nGpu, int nCtx, int nUbatch, int nThreads,
-            string dsparkPath, int nCpuMoe = CpuMoeNone, string backendName = null)
-            => TSGgml_Dsv4LoadModelDspark(ggufPath, nGpu, nCtx, nUbatch, nThreads, dsparkPath ?? string.Empty, nCpuMoe,
-                backendName ?? string.Empty);
+            string dsparkPath = null, int nCpuMoe = CpuMoeNone, string backendName = null, int tensorParallelRanks = 0)
+            => TSGgml_Dsv4LoadModel(ggufPath, nGpu, nCtx, nUbatch, nThreads, dsparkPath ?? string.Empty,
+                nCpuMoe, backendName ?? string.Empty, tensorParallelRanks);
 
         /// <summary>Tokens the DSpark drafter proposes per block, or 0 when no
         /// drafter is loaded.</summary>
@@ -250,7 +241,6 @@ namespace TensorSharp.GGML
             }
         }
 
-        public static void Reset(IntPtr handle) => TSGgml_Dsv4Reset(handle);
         public static bool ResetChecked(IntPtr handle) => TSGgml_Dsv4ResetChecked(handle) != 0;
         public static void Free(IntPtr handle) => TSGgml_Dsv4Free(handle);
 
@@ -271,6 +261,10 @@ namespace TensorSharp.GGML
 
         public static bool SlotCanRetain(IntPtr handle, int slotId, int retainedCount, ulong budgetPerDevice)
             => TSGgml_Dsv4SlotCanRetain(handle, slotId, retainedCount, budgetPerDevice) != 0;
+
+        /// <summary>Whether one more slot fits on every device beside the largest compute graph
+        /// and the reserve.</summary>
+        public static bool SlotCanAlloc(IntPtr handle) => TSGgml_Dsv4SlotCanAlloc(handle) != 0;
 
         public static bool SlotReleaseGraphs(IntPtr handle, int slotId)
             => TSGgml_Dsv4SlotReleaseGraphs(handle, slotId) != 0;

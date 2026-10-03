@@ -735,7 +735,7 @@ namespace TensorSharp.Runtime
             // an old newline on alternate rounds and destroyed the live-cache prefix.
             //
             // RawPromptTrailingWhitespace is authoritative for newly tracked rounds. Null
-            // identifies legacy/client-provided history, for which the old final-character
+            // identifies client-provided history, for which the old final-character
             // heuristic remains as a compatibility fallback.
             bool rendererStrippedTrailingWhitespace =
                 text.Length > 0 && !char.IsWhiteSpace(text[text.Length - 1]);
@@ -1225,7 +1225,7 @@ namespace TensorSharp.Runtime
         private static bool IsValidBoundaryWhitespace(string? value)
         {
             // Generation-prompt tails are tiny structural runs. Treat malformed or
-            // externally supplied non-whitespace metadata as legacy/unknown rather than
+            // externally supplied non-whitespace metadata as unknown rather than
             // allowing it to inject arbitrary prompt text or a pathological allocation.
             if (value == null)
                 return false;

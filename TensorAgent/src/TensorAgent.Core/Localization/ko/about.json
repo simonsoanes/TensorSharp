@@ -1,0 +1,14 @@
+{
+  "about.title": "앱 정보",
+  "about.tagline": "이 기기에서만 실행되어 개인정보를 지키는 AI 도우미입니다.",
+  "about.private.heading": "모든 작업이 이 기기에서 이루어집니다",
+  "about.private.body": "모델은 이 iPhone의 GPU에서 실행됩니다. 대화, 첨부한 파일, 도우미가 만든 결과물은 모두 이 앱의 전용 저장 공간에 보관됩니다. 답변을 받기 위해 서버로 보내는 정보가 없으며, 네트워크를 꺼도 앱을 사용할 수 있습니다.",
+  "about.abilities.heading": "할 수 있는 일",
+  "about.abilities.body": "대화하고, 제공한 사진, 오디오, 동영상, 문서를 읽을 수 있습니다. 샌드박스에서 코드를 작성하고 실행하며, Agent Skills로 PDF, 스프레드시트, Word 문서, 슬라이드를 만들 수 있습니다. 허용하면 웹 검색도 할 수 있습니다.",
+  "about.control.heading": "무엇을 허용할지 직접 결정하세요",
+  "about.control.body": "코드 실행과 네트워크 접근은 설정에서 별도로 켤 수 있으며, 처음에는 둘 다 꺼져 있습니다. 코드는 현재 채팅의 전용 폴더 안에서만 실행됩니다. 네트워크를 끄면 도우미의 코드도 네트워크에 접근할 수 없습니다.",
+  "about.builtOn.heading": "TensorSharp 기반",
+  "about.builtOn.body": "TensorAgent는 TensorSharp를 기반으로 만들어졌습니다. TensorSharp는 대규모 언어 모델과 확산 모델을 실행하는 오픈 소스 .NET 엔진으로, Apple GPU용 Metal 백엔드를 제공합니다. 데스크톱의 TensorSharp.Server도 같은 엔진을 사용합니다.",
+  "about.support.caption": "TensorSharp/TensorAgent는 무료입니다. 마음에 드셨다면 커피 한 잔으로 개발을 이어갈 수 있도록 응원해 주세요.",
+  "about.engine.unavailable": "엔진 정보를 가져올 수 없습니다: {error}"
+}

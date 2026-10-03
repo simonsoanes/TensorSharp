@@ -117,7 +117,7 @@ namespace TensorSharp.Server
         /// Exact whitespace at the end of the prompt that preceded
         /// <see cref="RawOutputTokens"/>. The skills loop and tracked session history
         /// retain it so later renders can reproduce each raw-token boundary exactly.
-        /// Empty is a valid, known boundary; null is reserved for legacy updates.
+        /// Empty is a valid, known boundary; null means the boundary is unknown (a client-provided turn).
         /// </summary>
         public string? RawPromptTrailingWhitespace { get; init; }
 
@@ -470,7 +470,6 @@ namespace TensorSharp.Server
                 // (~50–200ms of inference progress), then re-acquires.
                 // The encoder pays a few percent overhead per yield in
                 // exchange for in-flight decodes staying responsive.
-                // Disable via TS_ENCODER_YIELD=0 for A/B testing.
                 //
                 // Other models' encoders (Qwen3.5 vision, Mistral 3
                 // vision, etc.) currently DON'T yield — they still hold
@@ -604,12 +603,14 @@ namespace TensorSharp.Server
 
             int promptTokenCount = inputTokens.Count;
             var cfg = samplingConfig ?? SamplingConfig.Default;
-            int thinkingBudget = ThinkingBudgetFor(effectiveMaxTokens, enableThinking);
+            // A family whose prompt opens the block with thinking off too is budgeted as if asked.
+            bool budgetThinking = ReasonsWhetherAsked(arch, enableThinking);
+            int thinkingBudget = ThinkingBudgetFor(effectiveMaxTokens, budgetThinking);
             // With thinking off only a family whose model opens its channel itself is
             // given a (small) cap; WithThinkingBudget ignores it for every other family.
-            int channelBudget = enableThinking ? thinkingBudget : UnrequestedThinkingBudgetFor(effectiveMaxTokens);
+            int channelBudget = budgetThinking ? thinkingBudget : UnrequestedThinkingBudgetFor(effectiveMaxTokens);
             cfg = WithThinkingBudget(cfg, model.Tokenizer, arch, channelBudget, out bool samplingEndsThinking,
-                enableThinking, inputTokens);
+                budgetThinking, inputTokens);
 
             // Where the prompt every conversation on this host shares ends, so the
             // engine can checkpoint its state there once and start the next new chat
@@ -668,6 +669,7 @@ namespace TensorSharp.Server
             bool thinkingClosed = false;
             int thinkingTokens = 0;
             bool wasCancelled = false;
+            bool selfStopped = false;   // this layer aborted the request (stop sequence, thinking budget)
             int kvCacheReusedTokens = 0;
             long timeToFirstTokenMs = 0;
             bool firstTokenSampled = false;
@@ -766,6 +768,7 @@ namespace TensorSharp.Server
                 if (stopRequested)
                 {
                     engine.Abort(seq.RequestId);
+                    selfStopped = true;
                     break;
                 }
             }
@@ -797,13 +800,17 @@ namespace TensorSharp.Server
                 throw;
             }
 
-            if (wasCancelled)
+            if (wasCancelled || selfStopped)
             {
                 // The engine may have forwarded a step or two past the last token that
                 // was streamed before the abort landed. Those tokens are in the live
                 // cache, so the transcript records them too; otherwise the next
                 // render diverges from the cache at the end of this answer. The user
                 // never saw their text and the streamed answer stays as it was.
+                // This layer's own stops abort the same way: a Qwen turn cut at its
+                // thinking budget recorded only what was streamed, and the next turn,
+                // which cannot rewind the extra tokens, reused only the previous prompt
+                // or nothing (local Qwen3.5-9B: 39 of 502 and 0 of 3052 tokens).
                 IReadOnlyList<int> forwarded = seq.OutputTokens;
                 for (int i = generatedTokens.Count; i < forwarded.Count; i++)
                     generatedTokens.Add(forwarded[i]);
@@ -815,7 +822,7 @@ namespace TensorSharp.Server
             // Record this turn for the next request of the same conversation: the raw
             // tokens the cache holds, and what the client was sent for them - the next
             // request's assistant message must match that to get the tokens back.
-            RecordGeneratedTurn(session, preparedHistory, renderHistory, cacheScope,
+            RecordGeneratedTurn(session, preparedHistory, cacheScope,
                 new ChatMessage
                 {
                     Role = "assistant",
@@ -1010,7 +1017,7 @@ namespace TensorSharp.Server
                 var (finalContent, finalThinking) =
                     SeparateDiffusionChannels(arch, finalText, enableThinking, generationSuffix);
 
-                RecordGeneratedTurn(session, preparedHistory, renderHistory, cacheScope: null,
+                RecordGeneratedTurn(session, preparedHistory, cacheScope: null,
                     new ChatMessage
                     {
                         Role = "assistant",
@@ -1153,11 +1160,11 @@ namespace TensorSharp.Server
                 && recordedSuffix.EndsWith("<|channel>thought\n", StringComparison.Ordinal);
 
         private static void RecordGeneratedTurn(
-            ChatSession session, List<ChatMessage> preparedHistory, List<ChatMessage> renderHistory,
+            ChatSession session, List<ChatMessage> preparedHistory,
             string cacheScope, ChatMessage generated, EmittedAssistantTurn emitted)
         {
             lock (session.HistoryLock)
-                session.Transcripts.Record(preparedHistory, generated, emitted, cacheScope, renderHistory);
+                session.Transcripts.Record(preparedHistory, generated, emitted, cacheScope);
         }
 
         /// <summary>
@@ -1384,7 +1391,7 @@ namespace TensorSharp.Server
         {
             // Generate uses the same engine path as chat - it just wraps the
             // prompt in a single-message history and skips multi-turn history
-            // tracking. We do NOT update session.TrackedHistory here because
+            // tracking. We do NOT record a session transcript here because
             // GenerateStreamAsync is the non-conversational endpoint used by
             // Ollama's /api/generate.
             var oneShot = new List<ChatMessage>
@@ -2000,6 +2007,11 @@ namespace TensorSharp.Server
                     : currentWindow;
         }
 
+        /// <summary>True when the thinking budget applies to this request: thinking was asked
+        /// for, or the family's prompt opens the block regardless (GLM-5.3-Flash).</summary>
+        internal static bool ReasonsWhetherAsked(string architecture, bool enableThinking)
+            => enableThinking || ChatProtocolRegistry.For(architecture)?.PromptAlwaysOpensThinking == true;
+
         /// <summary>
         /// Find the length of the longest prefix of the byte buffer that forms valid UTF-8.
         /// Strips any trailing incomplete multi-byte sequence.
@@ -2114,7 +2126,8 @@ namespace TensorSharp.Server
             Func<int, bool> boundary = enableThinking ? null : EndsLine(tokenizer);
             result.ThinkingBudget = new ThinkingTokenBudget(tokenBudget > 0 ? tokenBudget : int.MaxValue, id,
                 closeOnRepetition: true, openTokenId: openId, openAtStart: openAtStart,
-                suppressUnopenedEnd: suppressUnopenedEnd, closeAtBoundary: boundary);
+                suppressUnopenedEnd: suppressUnopenedEnd, closeAtBoundary: boundary,
+                closingTokenIds: enableThinking ? ClosingTextTokens(tokenizer, protocol.ThinkingBudgetClosingText, id) : null);
             installed = true;
             return result;
         }
@@ -2130,6 +2143,23 @@ namespace TensorSharp.Server
                 return false;
             }
         };
+
+        /// <summary>The family's hand-over text as plain tokens, or null (a bare close) when
+        /// it has none or a token would not be ordinary output.</summary>
+        private static int[] ClosingTextTokens(ITokenizer tokenizer, string text, int endId)
+        {
+            if (string.IsNullOrEmpty(text))
+                return null;
+            List<int> ids;
+            try { ids = tokenizer.Encode(text, addSpecial: false); }
+            catch (Exception) { return null; }
+            if (ids == null || ids.Count == 0)
+                return null;
+            foreach (int t in ids)
+                if (t < 0 || t >= tokenizer.VocabSize || t == endId || tokenizer.IsEos(t))
+                    return null;
+            return ids.ToArray();
+        }
 
         private static int TrainedSingleToken(ITokenizer tokenizer, string text)
         {

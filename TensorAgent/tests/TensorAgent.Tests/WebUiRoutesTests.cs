@@ -5,6 +5,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using TensorAgent.Core.Catalog;
 using TensorAgent.Core.Hosting;
+using TensorAgent.Core.Localization;
 using TensorAgent.Core.Sessions;
 using TensorAgent.Core.Settings;
 using TensorSharp.AgentHost.Skills;
@@ -241,6 +242,10 @@ public sealed class WebUiRoutesTests : IDisposable
         Assert.Equal("assistant", answer.Role);
         Assert.Equal("It is 4.", answer.Content);
         Assert.Equal("adding them", answer.Thinking);
+        StoredTurnStats stats = Assert.IsType<StoredTurnStats>(answer.Stats);
+        Assert.Equal(2, stats.TokenCount);
+        Assert.Equal(1.5, stats.Elapsed);
+        Assert.Equal(8.0, stats.TokensPerSecond);
 
         // Shaped like the frames the chat service produces: the session id arrives only
         // on the last one, and it is what tells the wrapper where to file the answer.
@@ -251,7 +256,11 @@ public sealed class WebUiRoutesTests : IDisposable
             yield return new { token = "It is " };
             await Task.Yield();
             yield return new { token = "4." };
-            yield return new { done = true, tokenCount = 2, aborted = false, error = (string?)null, sessionId };
+            yield return new
+            {
+                done = true, tokenCount = 2, elapsed = 1.5, tokPerSec = 8.0,
+                aborted = false, error = (string?)null, sessionId,
+            };
         }
     }
 
@@ -374,7 +383,7 @@ public sealed class WebUiRoutesTests : IDisposable
     }
 
     [Fact]
-    public async Task TheCatalogSerializesTheRetainedFamiliesAndDenseArchitecture()
+    public async Task TheCatalogSerializesItsFamiliesAndArchitecturesByName()
     {
         JsonElement body = await BodyOf(await _client.GetAsync("/api/agent/catalog"));
         var families = new HashSet<string>(StringComparer.Ordinal);
@@ -384,8 +393,9 @@ public sealed class WebUiRoutesTests : IDisposable
             families.Add(model.GetProperty("family").GetString()!);
             kinds.Add(model.GetProperty("kind").GetString()!);
         }
-        Assert.True(families.SetEquals(new[] { "Gemma4", "Qwen35", "Bonsai" }));
-        Assert.True(kinds.SetEquals(new[] { "Dense" }));
+        Assert.True(families.SetEquals(new[] { "Gemma4", "Qwen35", "Bonsai", "Qwen38", "MuseGlimmer", "Qwen38FlashNext", "QwenImage", "MiniMaxH3" }),
+            string.Join(", ", families));
+        Assert.True(kinds.SetEquals(new[] { "Dense", "MixtureOfExperts", "Diffusion" }), string.Join(", ", kinds));
     }
 
     [Fact]
@@ -471,7 +481,7 @@ public sealed class WebUiRoutesTests : IDisposable
     // ---- the page itself -------------------------------------------------------------
 
     [Fact]
-    public async Task TheServersOwnPageIsServedUnchangedApartFromOneAppendedScriptTag()
+    public async Task TheServersOwnPageIsServedUnchangedApartFromAppendedCompanionAssets()
     {
         string root = Path.Combine(_root, "webui");
         Directory.CreateDirectory(root);
@@ -486,14 +496,21 @@ public sealed class WebUiRoutesTests : IDisposable
         // and writing it back would drop a byte-order mark and normalise the
         // encoding, and the served file would no longer be the Server's — which is
         // the identity that makes a second copy of index.html unnecessary.
-        const string tag = "\n<script src=\"/tensoragent.js\"></script>\n";
+        string head = "\n<style id=\"tensoragent-language-loading\">body{visibility:hidden}</style>\n"
+            + TensorAgent.Core.Localization.PageStrings.Tag() + "\n";
+        const string tag = "\n<link rel=\"stylesheet\" href=\"/mask-editor.css\">\n"
+            + "<script src=\"/mask-editor.js\"></script>\n<script src=\"/tensoragent.js\"></script>\n";
         string text = Encoding.UTF8.GetString(served);
         Assert.Contains(tag, text, StringComparison.Ordinal);
-        Assert.Equal(source, Encoding.UTF8.GetBytes(text.Replace(tag, string.Empty)));
+        Assert.Contains(head, text, StringComparison.Ordinal);
+        Assert.Equal(source, Encoding.UTF8.GetBytes(text.Replace(head, string.Empty).Replace(tag, string.Empty)));
+        Assert.True(text.IndexOf("i18n.js", StringComparison.Ordinal) < text.IndexOf("<body>", StringComparison.Ordinal));
 
         // And it goes in before the closing tag, so the page's own top-level bindings
         // already exist by the time it runs.
         Assert.True(text.IndexOf("tensoragent.js", StringComparison.Ordinal) < text.IndexOf("</body>", StringComparison.Ordinal));
+        // The strings first: both scripts after them read them as they start.
+        Assert.True(text.IndexOf("i18n.js", StringComparison.Ordinal) < text.IndexOf("mask-editor.js", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -519,7 +536,20 @@ public sealed class WebUiRoutesTests : IDisposable
         Assert.DoesNotContain("/api/tensoragent/", script, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Theory]
+    [InlineData("mask-editor.js", "text/javascript", "window.TensorSharpMaskEditor")]
+    [InlineData("mask-editor.css", "text/css", ".ts-mask-modal")]
+    public async Task TheSelectionEditorShipsThroughTheSameLoopbackHost(string asset, string contentType, string marker)
+    {
+        _server.StaticRoot = Path.Combine(_root, "webui");
+        Directory.CreateDirectory(_server.StaticRoot);
+        using HttpResponseMessage response = await _client!.GetAsync("/" + asset);
+        Assert.True(response.IsSuccessStatusCode);
+        Assert.Equal(contentType, response.Content.Headers.ContentType?.MediaType);
+        Assert.Contains(marker, await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [WebJavaScriptFact]
     public async Task TheCompanionScriptIsValidJavaScriptAndCallsOnlyRoutesThatExist()
     {
         // It is injected into a page in a WebView, where a syntax error is invisible:
@@ -530,14 +560,9 @@ public sealed class WebUiRoutesTests : IDisposable
         Directory.CreateDirectory(_server.StaticRoot);
         string script = await _client!.GetStringAsync("/tensoragent.js");
 
-        // JavaScriptCore is a system framework on macOS and iOS alike, so this runs
-        // wherever the tests do; if it ever does not, say so rather than pass.
-        var engine = new TensorAgent.Core.JavaScript.JavaScriptCoreEngine();
-        Assert.True(engine.IsAvailable, engine.UnavailableReason ?? "no JavaScript engine");
-
         string probe = Path.Combine(_root, "probe.js");
         await File.WriteAllTextAsync(probe, script);
-        TensorAgent.Core.Sandbox.SyntaxCheckResult syntax = await engine.CheckSyntaxAsync(probe, CancellationToken.None);
+        TensorAgent.Core.Sandbox.SyntaxCheckResult syntax = await WebJavaScript.CheckSyntaxAsync(probe);
         Assert.True(syntax.Ok, syntax.Message);
 
         // Every route it fetches must be one this server maps, or the feature it
@@ -599,7 +624,8 @@ public sealed class WebUiRoutesTests : IDisposable
         // program has been run the top of the turn is several screens away.
         Assert.Contains("$('activity')", script, StringComparison.Ordinal);
         Assert.Contains("tailOf", script, StringComparison.Ordinal);
-        Assert.Contains("Thinking…", script, StringComparison.Ordinal);
+        Assert.Contains("progress(t('page.activity.thinking'))", script, StringComparison.Ordinal);
+        Assert.Equal("Thinking…", Loc.Tables.LoadFiles("en")["page"]["page.activity.thinking"]);
 
         // And the kept trace: the host's own record of each skill lookup and each
         // command, which is what the frame carries and the desktop page deliberately

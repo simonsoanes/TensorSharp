@@ -6,14 +6,14 @@
 |---|---|
 | Provider | Alibaba |
 | GGUF architecture keys | `qwen35`, `qwen35moe`, `qwen3next` |
-| Source class | [`Qwen35Model`](../../TensorSharp.Models/Models/Qwen35/Qwen35Model.cs) (legacy per-seq) + partial in [`Qwen35Model.GatedDeltaNet.cs`](../../TensorSharp.Models/Models/Qwen35/Qwen35Model.GatedDeltaNet.cs) + [`Qwen35Model.BatchedForward.cs`](../../TensorSharp.Models/Models/Qwen35/Qwen35Model.BatchedForward.cs) (`IBatchedPagedModel`) |
+| Source class | [`Qwen35Model`](../../TensorSharp.Models/Models/Qwen35/Qwen35Model.cs) (single-sequence) + partial in [`Qwen35Model.GatedDeltaNet.cs`](../../TensorSharp.Models/Models/Qwen35/Qwen35Model.GatedDeltaNet.cs) + [`Qwen35Model.BatchedForward.cs`](../../TensorSharp.Models/Models/Qwen35/Qwen35Model.BatchedForward.cs) (`IBatchedPagedModel`) |
 | Vision encoder | [`Qwen35VisionEncoder`](../../TensorSharp.Models/Models/Qwen35/Qwen35VisionEncoder.cs) |
 | Image processor | [`Qwen35ImageProcessor`](../../TensorSharp.Models/Models/Qwen35/ImageProcessor.cs) |
 | Example models | Qwen3.5-9B (dense hybrid), Qwen3.5-35B-A3B / Qwen3.6-35B-A3B (MoE-family), Qwen3.6-27B / Qwen3.8-27B (dense); also [Bonsai2 27B](bonsai2.md) (PRISM PQ2_0 / PTQ1_0) |
 | Modalities | Text, image |
 | Thinking mode | Yes (`<think> ... </think>`) |
 | Tool calling | Yes (`<tool_call>{...}</tool_call>`) |
-| Batched / paged forward | **Default ON** — set `TS_QWEN35_BATCHED=0` (or `--no-continuous-batching`) to force the legacy per-sequence KV-swap path for A/B comparison. Includes a per-slot GatedDeltaNet recurrent-state pool and optional native batched GDN kernel (`TS_QWEN35_BATCHED_GDN_NATIVE=1`). See §11. |
+| Batched / paged forward | **Default ON** — `--no-continuous-batching` forces the per-sequence KV-swap path. Includes a per-slot GatedDeltaNet recurrent-state pool. See §11. |
 | MTP speculative decoding | Qwen 3.6 — NextN draft block embedded in the trunk GGUF (no separate file; MTP-retaining GGUFs only, see [Downloads](#downloads)); engage with `--spec` on **either host** — `TensorSharp.Cli` and `TensorSharp.Server` share [`SpeculativeCliFlags`](../../TensorSharp.Runtime/Speculative/SpeculativeCliFlags.cs). GDN recurrent-state snapshot/rollback on partial accept. Engages for solo (non-concurrent) sequences whenever the GGUF retains the NextN block. Qwen 3.8 additionally accepts a **DFlash2** block drafter as a separate `--draft-model` GGUF (§12.4). See §12. |
 | Output parser | `Qwen35OutputParser` (inherits `ChatMlOutputParser`) |
 
@@ -323,9 +323,7 @@ The delta is per sequence (`Qwen35Model.RopePositions.cs`):
   from the injector), the per-op attention, the direct-CUDA prefill and decode
   graphs, tensor parallelism and the MTP draft head. The per-layer native attention
   kernels rotate at their KV index, so a sequence past an image does not take them.
-  `TSGgml_Qwen35RopePositionAbi` guards against a native library built before this
-  contract: such a library disables the fused graphs, loudly, instead of being
-  called with the wrong number of arguments. (A DFlash drafter keeps its own
+  (A DFlash drafter keeps its own
   positions; they only affect how many drafts are accepted, never the output.)
 - **Stored with the state it describes.** Each per-request holder carries it through
   swaps, retention, re-keying and pooling, a shared-prefix checkpoint and its clone
@@ -357,10 +355,11 @@ itself. Two things followed:
   - OpenAI, image on turn 3: `This digital artwork features an anime-style woman...`
     became `This image features an anime-style illustration of a young woman...`
   - Web UI, image on turn 1: unchanged over 96 tokens.
-- **Reuse.** A cache that went through an image turn was not the state a re-prefill of
-  the same history builds, so Phase 0 of the prefix cache stopped every reuse path at
-  the first image (`SupportsReuseAcrossMediaSpan = false`). Qwen 3.5/3.6 now declare
-  `true`: follow-up turns continue the cache past the image.
+- **Reuse.** Preserving the per-sequence rotary delta lets a follow-up continue an
+  exact cached endpoint past an identical image or video span. Radix keys check
+  media identity and span boundaries as well as tokens; changed media or another
+  conversation scope cannot claim that conversation's state. GDN state still
+  cannot rewind, so a shorter partial match must prefill.
 
 **Validation.**
 
@@ -387,11 +386,8 @@ itself. Two things followed:
   cold).
   The measurements below used a real photo (`TS_TEST_QWEN35_IMAGE`). Without one the
   test draws a synthetic picture: 448x336 for the direct comparisons and 896x672 for the
-  concurrent case, because under the legacy retained-holder path
-  (`TS_PREFIX_CACHE_MODE=legacy`) a finished request shorter than one scheduler block (256
-  tokens in this test) is never retained as a holder, so a 140-token picture left turn 2
-  too short for turn 3 to reuse anything and the concurrent case always failed (the
-  default radix tree retains from 32 tokens; see §10).
+  concurrent case (the radix tree retains a finished request from 32 tokens,
+  `MinRetainTokens`).
 
 **Logit tolerance.** Reuse and cold are not bit-identical: the reused turn's reply rows
 were written by the decode graph and the cold turn's by the prefill graph (different
@@ -573,8 +569,7 @@ Constructor:
   prefill and decode. On Metal, this is the default path for the 27B dense
   Qwen 3.6 model.
 - The fused per-layer attention decode kernel
-  (`TryFusedAttnLayerDecode`) when the cached sequence length is past the
-  `FUSED_ATTN_LAYER_MIN_SEQ_LEN` threshold (default 4096).
+  (`TryFusedAttnLayerDecode`) at every cached sequence length.
 - The fused prefill attention kernel (`FusedPrefillAttention`) for
   multi-token prefill on a GGML backend.
 - The fused output-projection + FFN kernel (`FusedOutProjFFN`) for both
@@ -589,7 +584,7 @@ Constructor:
 ### Whole-model fused prefill
 
 On supported dense GGML GPU models, prefill is dispatched through
-`TSGgml_Qwen35ModelVerify`: one graph evaluates every FullAttention and
+`TSGgml_Qwen35ModelVerifyOwned`: one graph evaluates every FullAttention and
 GatedDeltaNet layer, final RMSNorm, and the LM head. Intermediate activations
 remain device-resident, mixed-quant Q/K/V projections keep their native
 quantized representations, and logits are copied directly into the managed
@@ -615,8 +610,7 @@ cache entries from prior turns). The `inputFormat` parameter supports both
 For both FullAttention and GatedDeltaNet layers with dense FFN, one GGML
 graph performs the output projection + residual add + post-attention RMSNorm
 + ffn_gate_up matmul + SiLU + ffn_down matmul + residual. Two GPU
-round-trips collapse into one. Disable for A/B benchmarking with
-`QWEN35_DISABLE_FUSED_FFN=1`.
+round-trips collapse into one.
 
 ### Parallelized Q / gate deinterleave
 
@@ -660,6 +654,33 @@ significantly accelerates the multi-tile image path.
   projection + bias + residual into one GGML graph dispatch (7 ops → 1).
 
 Combined, each vision encoder block goes from ~15 GPU round-trips to 2.
+The whole-encoder fast path fuses all blocks into one graph. Its default CUDA
+attention writes each query tile into one output allocation, avoiding repeated
+copies of preceding tiles while preserving the existing attention arithmetic.
+
+Validation on 2026-10-03 used the Flash Next BF16 projector, the supplied photo
+(7,920 patches / 1,980 tokens), and a single RTX 3080 Laptop GPU (16 GB, WDDM,
+CUDA 12.6), against unchanged upstream ggml
+`353b63b439f27ab2cc19dac97ab1681ba6d2d084`. All 5,068,800 projected float32
+values were bit-identical to the previous encoder. The attention microbenchmark
+reduced scratch from 394.8 MB to 343.6 MB (13%). With one warmup and three
+standalone encoder samples, median time was 2,947.4 ms versus 2,982.0 ms;
+this small, noisy difference does not establish an end-to-end latency gain.
+
+Experimental `TS_QWEN_VISION_F32=1` enables TensorSharp-owned streaming F32
+CUDA attention for 72-wide heads. The same standalone encoder measured
+2,635.7 ms (11.6% faster than the previous encoder), with 36.5 MB of attention
+scratch. Its full-embedding comparison failed the conservative minimum-row
+cosine gate: 0.999856 versus a required 0.9999; aggregate relative L2 was
+0.002069. It remains opt-in and has no end-to-end model-quality qualification.
+The native suites passed 168 numerical cases (78 existing attention cases and
+six vision cases on each of CPU and CUDA) plus ten broader CPU regression
+targets, without failures or skips. These measurements cover one projector,
+photo and GPU; other projectors, videos and devices were not benchmarked.
+Reusable checks are `GgmlOpsCudaAttentionPrecisionTest --benchmark-vision
+7920 7920 16 3` and
+[`compare-vision-embeddings.py`](../../eng/validation/compare-vision-embeddings.py).
+Generated evidence stays in ignored `artifacts/qwen-ttft/`.
 
 ### Cross-layer caches and parallelism
 
@@ -708,10 +729,7 @@ Tunable env vars:
   multi-token batch — the per-token loop's per-layer host/device sync dwarfs
   the 64-padding waste; measured on Qwen3.6-27B IQ2_XXS it cut MTP
   speculative-verify decode from 217 to 174 ms/token. Single-token decode
-  steps still use the per-token loop. Set to `64` for the old
-  long-prefill-only behavior; set very high to disable.
-- `GDN_DISABLE_CHUNKED_PREFILL=1` forces the per-token CPU loop on every
-  prefill call; useful for A/B comparison.
+  steps still use the per-token loop.
 - `GDN_VERIFY_CHUNKED=1` runs the chunked path on a snapshot of the
   recurrent state, restores the snapshot, runs the per-token loop on the
   same starting state, and reports the maximum absolute / relative drift
@@ -754,9 +772,7 @@ GatedDeltaNet K=1 output is laid out as
 state view and native result share that backing buffer, so the 48 recurrent
 layers update state in place instead of issuing a 3 MiB copy apiece. The
 native side validates backend, pointer offset, alignment, and exact tensor
-geometry before omitting any copy. Set
-`TS_QWEN35_METAL_GDN_INPLACE_STATE=0` for an A/B run with separate state
-buffers, or `TS_QWEN35_FD_PERSIST=0` to rebuild the decode graph per token.
+geometry before omitting any copy.
 
 ### Fused per-layer attention decode (`Qwen35AttentionLayerDecode`)
 
@@ -776,12 +792,13 @@ A single GGML graph that performs the entire FullAttention block:
    the host pointer.
 
 Replaces 1 standalone `FusedRmsNormMatMulQuant` + ~6 small CPU-side ops + 1
-standalone `FusedMatMulQuantAdd` with one fused dispatch. The kernel only
-engages once `position + 1 >= FusedAttnLayerDecodeMinSeqLen` (default 4096;
-override via `FUSED_ATTN_LAYER_MIN_SEQ_LEN=N`) because the GPU flash-attn
-path has a fixed setup cost that only amortizes for long contexts. Below
-the threshold the existing `FusedRmsNormMatMulQuant` + CPU-SIMD attention +
-`FusedMatMulQuantAdd` path is retained.
+standalone `FusedMatMulQuantAdd` with one fused dispatch, at every context
+length: once the rest of the model runs on the device, the GPU flash-attn
+setup cost is amortized even for short contexts (omlx and vLLM likewise run
+`mx.fast.scaled_dot_product_attention` unconditionally). The
+`FusedRmsNormMatMulQuant` + CPU-SIMD attention + `FusedMatMulQuantAdd` path
+remains for the cases the fused kernel declines (e.g. a sequence past an
+image, whose M-RoPE delta the kernel does not apply).
 
 ### Fused output-projection + norm + router (MoE recurrent decode)
 
@@ -854,48 +871,67 @@ Allocated once in `InitGDNBuffers()`:
   decode on the primary cache. The arena batched decode treats a holder without a
   scratch the same way. `Qwen35ConvScratchTests` (model-gated) covers it.
 
-### Retained holders: the one-block minimum
+### Radix prefix reuse
 
-Under the default radix prefix cache (`TS_PREFIX_CACHE_MODE=tree`) the tree
-decides what a finished request leaves behind, and its minimum is 32 tokens
-(`MinRetainTokens`), not one block. The rule and the validation below belong to
-the legacy retained-holder path (`TS_PREFIX_CACHE_MODE=legacy`), where they
-still apply.
+The `Qwen35Model` family, including Qwen3.8 dense models, declares
+`DeferPrimaryConversion`: an eligible finished primary stays live for an exact
+next turn. The next turn claims that state without allocating another cache.
+Only a request that displaces the primary attempts to move it into a retained
+holder and allocate an empty replacement. Concurrent per-request holders and
+shared-prefix checkpoint copies keep their existing retention paths. Every path
+preserves attention KV, native GDN state and the per-sequence rotary delta;
+reuse remains exact because the recurrent state cannot rewind.
 
-A finished request's per-request holder is kept for its conversation's next turn
-(`BatchExecutor.TryRetainReleasedFusedCache`, and `DonateFinishedLiveCacheToRetained` for a
-conversation that finished on the primary cache) only when it holds at least one scheduler
-block (256 tokens by default). A shorter conversation - a short image conversation, since a
-448x336 picture is 140 tokens - therefore re-prefills its whole prompt, re-encoding the
-picture, on every turn that runs beside another request. A conversation that runs alone is
-not affected: it continues from the live cache, which has no minimum.
+Retained holders and checkpoint copies are extra payloads governed by the radix
+tree's count and byte caps. Default device/state caps are resolved from half the
+spare memory when the engine is created, then bounded by current spare memory
+minus running-request reserves. The live-primary marker adds no extra retained
+bytes, so an exact continuation does not depend on enough headroom to allocate a
+second primary. Disabling extra holder retention still permits that live cache
+to continue while prefix caching is enabled. If displacement cannot retain the
+old state, the new request prefills normally. Before allocating, the tree measures
+the live primary's eventual holder footprint and declines conversion when an
+absolute option or family cap cannot admit it.
 
-The minimum is not something holders need. A holder is matched token by token
-(`FindRetainedFusedMatch`) and adopting one reserves ceil(lcp / BlockSize) placeholder blocks
-(`TryAdoptFusedContinuation`), so nothing on that path depends on a block boundary. It stays
-because lowering it failed validation on Metal (2026-09-17, Qwen3.5-9B-Q8_0 + mmproj BF16):
+Adoption allocates the replacement before publishing the moved primary.
+`PrefixCheckpointOwnershipTests.QwenPrimaryAdoptionFailure_…` injects failures at
+each of six allocations, checks unchanged live state and allocation ownership,
+and verifies a later checkpoint remains independent. The Qwen4Exp native
+continuation regression exercises the same ordering. Primary-measurement tests
+require estimate/adopted-footprint parity, unchanged state and no tensor allocation,
+with invalid lengths and checked-out holders refused. Runtime
+`DeferredPrimaryCacheTests` verifies exact continuation, displacement, a zero
+extra-retention budget and recovery from a conversion failure with cold-output
+parity. These are synthetic state/ownership checks, separate from trained-model
+quality and performance validation.
 
-- **What was tried.** Retain a shorter holder when it evicts no retained holder and its bytes
-  fit the model's idle-holder budget (half the measured cache headroom less the parked
-  holders, the rule `CanPoolIdleCache` applies to a released holder), in both retention paths.
-- **Engine.** An image conversation and a text conversation side by side, their first turns
-  under one block (the 448x336 picture; the one-line system prompt), then reused every turn,
-  but image turn 2 - the picture prefilled on top of a retained 41-token holder - diverged
-  from a cold run at step 20, where the cold top-2 margin is 0.255, above the 0.1 Metal
-  tolerance. Replaying just that pair (turn 1 beside a longer text request, turn 2 alone)
-  diverged the same way in 4 of 10 runs, 3 of them the first conversation on a freshly loaded
-  model; in 0 of 3 with the arena batched decode off (`TS_BATCHED_FUSED_DECODE=0`); and a turn 1
-  longer than one block on the unchanged code gave 0 divergences in 6 runs.
-- **Model level.** The same sequence driven straight through the model (turn 1 prefilled on
-  the primary cache and adopted, its reply decoded in the arena beside a longer holder, the
-  holder retained and re-keyed, the picture prefilled, 24 decode steps) stays within 0.023 of
-  an all-solo run, and an arena decode step is within 0.0008 of a solo one. The error comes
-  from something in how the engine schedules that path, not yet identified.
-- The same runs hit the null conv-scratch `NullReferenceException` above twice. It is fixed;
-  the divergence persists without it.
+On 2026-10-03, HTTP validation used the supplied
+`Qwen3.8-27B-UD-IQ4_XS.gguf`, GGML CUDA, an i7-11800H, 32 GB RAM and one
+RTX 3080 Laptop GPU with 16 GB VRAM. Five two-turn conversations used the same
+short Chinese prompt, greedy sampling, repetition penalty 1 and a 256-token
+limit. All ten replies completed at EOS and matched the original build exactly.
 
-Until that divergence is explained the one-block minimum stays, on Gemma 4 too (the same
-executor rule; shorter Gemma 4 holders were not validated).
+| Web UI request | Original median TTFT | Updated median TTFT | Updated reuse |
+|---|---:|---:|---:|
+| Initial question | 581.6 ms | 524.8 ms | 0/28 tokens |
+| `请继续` | 664.8 ms | 435.5 ms | 55/70 tokens |
+
+The OpenAI-compatible endpoint also completed both turns at EOS with 55/70
+tokens reused. A separate three-turn, 128-token dialogue reused 171/187 and
+315/331 tokens; an earlier-history branch and a changed independent question
+reused zero, and the independent arithmetic answer remained `579`. Longer
+cached replies differed from cold-prefill replies, so later differing histories
+are not qualified timing or greedy-parity comparisons. The initial long-prompt
+sample took 792 ms versus 573 ms in the original run; the repeated short-prompt
+results do not establish a latency guarantee for every independent request.
+
+Loading and startup warmup are excluded; GPU clocks, WDDM paging and the OS file
+cache were uncontrolled. Upstream ggml was unchanged at
+`353b63b439f27ab2cc19dac97ab1681ba6d2d084`. Commands, strict reuse checks and
+comparison rules are in [the HTTP benchmark guide](../../eng/validation/README-qwen-chat-cache-benchmark.md).
+Generated answers, timings and test results remain in ignored
+`docs/validation/qwen-ttft/`; missing external models and the two-GPU case are
+excluded from passing coverage.
 
 ### File-mapped quantized weights
 
@@ -915,9 +951,7 @@ Qwen 3.5 / 3.6 implements `IBatchedPagedModel.ForwardBatch`
 and runs it by default — the batched paged path supports every Qwen3.5
 layer type (attention, GDN recurrent, MoE) and is what continuous-batching
 multi-request workloads need to serve concurrent sequences in parallel.
-Set `TS_QWEN35_BATCHED=0` (or pass `--no-continuous-batching` to the
-server) to force the legacy per-sequence KV-swap fallback for A/B
-comparison or regression isolation.
+`--no-continuous-batching` forces the per-sequence KV-swap path instead.
 
 Qwen 3.5/3.6 is hybrid (FullAttention + GatedDeltaNet recurrent layers),
 so the batched port has to manage **two orthogonal kinds of cache** —
@@ -951,25 +985,17 @@ Phase 5c introduced a per-slot state pool keyed on each sequence's
 - `_q35GdnSlotInit[layer][slot]` — initialization flag.
 
 Slots are allocated lazily on first touch and freed when the engine
-retires the sequence. Compared to the Phase-2 approach that copied state
-in / out of the per-model scratch buffer twice per layer, this avoids
-roughly **2 MB of SSM-tensor memcpy plus tens-of-KB conv memcpy per GDN
-layer per sequence** on every decode step.
-
-A **native batched GatedDeltaNet kernel** —
-`TSGgml_GatedDeltaNetBatchedStepF32`
-([`ggml_ops_gated_delta_net.cpp`](../../TensorSharp.GGML.Native/ggml_ops_gated_delta_net.cpp))
-— is gated behind `TS_QWEN35_BATCHED_GDN_NATIVE=1`. When enabled,
-`GgmlBasicOps.GatedDeltaNetBatchedStep` replaces the managed per-token
-GDN step with one native dispatch that updates all in-flight sequences'
-conv + SSM state in parallel; when disabled (default), the batched
-forward calls the managed reference path through
-[`Qwen35Model.GatedDeltaNet.cs`](../../TensorSharp.Models/Models/Qwen35/Qwen35Model.GatedDeltaNet.cs).
+retires the sequence. Swapping references instead of copying each slot's
+state in and out of the per-model scratch buffer avoids roughly **2 MB of
+SSM-tensor memcpy plus tens-of-KB conv memcpy per GDN layer per sequence**
+on every decode step. Each sequence's slice then runs through the model's
+GatedDeltaNet step
+([`Qwen35Model.GatedDeltaNet.cs`](../../TensorSharp.Models/Models/Qwen35/Qwen35Model.GatedDeltaNet.cs))
+against its own slot.
 
 ### Multimodal in the batched path
 
-`SupportsBatchedMultimodal` returns true while the batched path is
-active (i.e. unless `TS_QWEN35_BATCHED=0` is set). `ForwardBatch` builds
+`SupportsBatchedMultimodal` is true: `ForwardBatch` builds
 a global MRoPE position table per batch:
 each sequence's MRoPE positions are fetched from the multimodal
 injector, globally offset into the batched hidden tensor, and threaded
@@ -1082,8 +1108,7 @@ On the CUDA backend the snapshot is taken device-side to avoid host round-trips.
 
 ### 12.3 Profitability and tuning
 
-Speculation is off by default; enable with `--spec` (env `TS_SPEC`, or the legacy
-`TS_MTP_SPEC=1` the native loader reads) on **either** `TensorSharp.Cli` or
+Speculation is off by default; enable with `--spec` (env `TS_SPEC=1`) on **either** `TensorSharp.Cli` or
 `TensorSharp.Server` — [`SpeculativeCliFlags`](../../TensorSharp.Runtime/Speculative/SpeculativeCliFlags.cs)
 is shared by both hosts. It engages on solo
 (non-concurrent) sequences whenever the loaded GGUF retains the NextN block; on
@@ -1174,7 +1199,7 @@ Three changes in the fused verify kernel and its caller removed all of it:
    `conv_input` tensor the graph already builds. The verify now keeps one
    snapshot per row, so the state a rollback wants is never recomputed - it is
    slot `N-1-accepted`.
-2. `TSGgml_Qwen35CommitStateSnapshot` writes that slot into the LIVE state
+2. `TSGgml_Qwen35CommitStateSnapshotOwned` writes that slot into the LIVE state
    entirely on the device. Every cached verify graph binds `*_state_in` from one
    shared device buffer (`g_q35v_state_buf`), so the write is visible to the next
    verify whatever shape it runs at - and that verify then skips its state
@@ -1201,10 +1226,10 @@ path drifted in the last few tokens.
 
 The cost is VRAM - the GDN op's output grows by one ~150 MB state per slot across
 the 48 recurrent layers - which is why the default window is 3 and not 8.
-`TS_Q35_VERIFY_SNAPSHOTS=0` restores the old restore-and-re-forward path and
-`TS_Q35_VERIFY_DEFER_STATE=0` keeps the snapshots but restores the download, so
-the two halves can be measured apart; either is also the automatic fallback for
-any shape the kernel will not persist.
+`TS_Q35_VERIFY_SNAPSHOTS=0` restores the restore-and-re-forward path (the
+workaround for the open wide-verify divergence on `ggml_cuda`, see
+[speculative_decoding.md](../speculative_decoding.md)); it is also the automatic
+fallback for any shape the kernel will not persist.
 
 ### 12.6 Folding the MTP catch-up into the first draft step
 
@@ -1226,8 +1251,7 @@ byte-identical with acceptance unchanged.
 `DraftHeadSpeculator` stashes the commit and folds it into the next `Propose`,
 flushing it as an ordinary catch-up whenever the stashed rows do not run right up
 to the next step's position. Measured on Qwen3.8-27B-UD-IQ3_XXS: `catchUpMs`
-191 -> 0, +4.0% at 256 tokens and +5.3% on prose. `TS_MTP_FOLD_CATCHUP=0`
-restores the two-call shape.
+191 -> 0, +4.0% at 256 tokens and +5.3% on prose.
 
 The remaining per-step difference is `MtpProjectInput`, the C# front end that
 builds the block's input (embedding, `enorm`, `hnorm`, concat, `eh_proj`). Over a
@@ -1247,6 +1271,17 @@ Folding it into the fused MTP graph is the next step.
   expands each `<|image_pad|>` placeholder into the right number of placeholder
   tokens for the corresponding image, and the multimodal injector then writes
   the encoded embeddings into those positions before `Forward()`.
+- **Thinking budget.** With thinking on, a reasoning block that reaches
+  `TS_THINKING_BUDGET` (default 75% of `max_tokens` from 512 up) is closed and
+  the answer follows inside `max_tokens`, in the server and in the interactive
+  CLI. `</think>` is one trained token (248069), and ahead of it the host writes
+  Qwen's published hand-over sentence ("Considering the limited time by the
+  user, I have to give the solution based on the thinking directly now."), which
+  shows at the end of the reasoning. Before 2026-09-29 the family had no closing
+  token: such a turn was stopped with an EMPTY answer (`finish_reason`
+  `thinking_budget`), and a bare `</think>` left Qwen3.5-9B reasoning on inside
+  its answer. Qwen3.5-9B IQ4_XS on Metal, `max_tokens` 600, two concurrent
+  three-turn conversations: 0/2 passed before (empty answers), 2/2 after.
 
 ## 13a. Tensor parallelism
 
@@ -1283,7 +1318,7 @@ Q8_0 (which fits one card) `--tp 2` is byte-identical to the single-GPU run over
 ## 14. Optimization opportunities
 
 - **Native GDN decode (fallback path)** — the fused whole-model path is
-  native, but the legacy per-operation fallback still runs GDN decode in
+  native, but the per-operation fallback still runs GDN decode in
   managed C# (with pre-allocated buffers and `Ops.AddmmBatch`). Moving that
   fallback update into native C / CUDA would remove its remaining managed
   overhead.
@@ -1292,7 +1327,3 @@ Q8_0 (which fits one card) `--tp 2` is byte-identical to the single-GPU run over
 - **MoE prefill batching** — MoE prefill currently iterates per token. A
   batched expert prefill kernel (analogous to the decode path) would
   speed up long prompts on MoE variants.
-- **Promote native batched GDN out of opt-in.** The
-  `TS_QWEN35_BATCHED_GDN_NATIVE=1` kernel exists today but is gated on
-  perf verification. Once the n=1 regression is closed it becomes the
-  default GDN dispatch in the batched path.

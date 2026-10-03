@@ -88,7 +88,7 @@ namespace TensorSharp.Models
         /// <summary>
         /// Extracts text from a PDF on disk without first copying the complete file into
         /// a managed byte array. A positive <paramref name="maxTextCharacters"/> bounds
-        /// the aggregate string built while pages are visited; zero preserves the legacy
+        /// the aggregate string built while pages are visited; zero keeps the
         /// unlimited-text contract.
         /// </summary>
         public static PdfTextResult ExtractFromFile(

@@ -33,14 +33,7 @@ namespace InferenceWeb.Tests;
 /// </summary>
 public class GgmlBackendFailureReportingTests
 {
-    private static GgmlBackendType ConfiguredBackend() =>
-        (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "cpu").Trim().ToLowerInvariant() switch
-        {
-            "cuda" => GgmlBackendType.Cuda,
-            "metal" => GgmlBackendType.Metal,
-            "vulkan" => GgmlBackendType.Vulkan,
-            _ => GgmlBackendType.Cpu,
-        };
+    private static GgmlBackendType ConfiguredBackend() => TestGates.PinnedGgmlBackendType;
 
     private static GgmlAllocator NewAllocator()
     {

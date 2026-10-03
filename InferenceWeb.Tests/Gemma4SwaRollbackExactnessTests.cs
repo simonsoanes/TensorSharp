@@ -51,13 +51,7 @@ public class Gemma4SwaRollbackExactnessTests
         string dir = Environment.GetEnvironmentVariable(EnvModelDir);
         string modelPath = dir == null ? null : TestGates.FindGguf(dir, "gemma-4-e2b");
         if (modelPath == null) { _output.WriteLine("no gemma-4-e2b model; skipping"); return; }
-        BackendType backend = (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "cpu")
-            .Trim().ToLowerInvariant() switch
-        {
-            "metal" => BackendType.GgmlMetal,
-            "cuda" => BackendType.GgmlCuda,
-            _ => BackendType.GgmlCpu,
-        };
+        BackendType backend = TestGates.PinnedGgmlBackend;
 
         using var model = ModelBase.Create(modelPath, backend);
         var spec = (ISpeculativeTarget)model;
@@ -171,13 +165,7 @@ public class Gemma4SwaRollbackExactnessTests
         string dir = Environment.GetEnvironmentVariable(EnvModelDir);
         string modelPath = dir == null ? null : TestGates.FindGguf(dir, "gemma-4-12b");
         if (modelPath == null) { _output.WriteLine("no gemma-4-12b model; skipping"); return; }
-        BackendType backend = (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "cpu")
-            .Trim().ToLowerInvariant() switch
-        {
-            "metal" => BackendType.GgmlMetal,
-            "cuda" => BackendType.GgmlCuda,
-            _ => BackendType.GgmlCpu,
-        };
+        BackendType backend = TestGates.PinnedGgmlBackend;
 
         using var model = ModelBase.Create(modelPath, backend);
         var spec = (ISpeculativeTarget)model;

@@ -69,7 +69,7 @@ def prepare(plan_path, plan_sha, engine_path, profile_path, output):
     if len(rows) != 113 or plan['request_count'] != 113 or len(set(ids)) != 113:
         raise ValueError('Expected all 113 distinct original request IDs')
     args = profile['extra_args']
-    if '--no-skills' not in args or '--max-tokens' in args or any(k in profile['env'] for k in ('MAX_TOKENS', 'TS_JSON_GRAMMAR')):
+    if '--no-skills' not in args or '--max-tokens' in args or 'MAX_TOKENS' in profile['env']:
         raise ValueError('Review changed server preprocessing defaults before export')
     if profile['env']['MAX_CONTEXT'] != '65536':
         raise ValueError('Original runtime context changed')

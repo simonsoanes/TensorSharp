@@ -49,8 +49,8 @@ namespace TensorSharp.Models
             }
             if (_layerDevice != null && (_cacheSeqLen != 0 || LayerSplitDegree > 1))
                 throw new InvalidOperationException("Attach the qwen4exp MTP head at model construction, before multi-device placement or conversation state exists.");
-            if (!IsGgmlBackend || !GgmlBasicOps.Qwen4ExpSpecApiAvailable())
-                throw new NotSupportedException("qwen4exp MTP requires a GGML native library with the owned speculative APIs. Rebuild TensorSharp's native library.");
+            if (!IsGgmlBackend)
+                throw new NotSupportedException("qwen4exp MTP runs on the GGML backends only.");
 
             var file = new GgufFile(path);
             try

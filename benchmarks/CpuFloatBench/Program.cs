@@ -24,8 +24,6 @@
 //
 // The implementation is picked by environment variables at process start, so an A/B is two
 // runs of the same binary:
-//   TS_CPU_SGEMM=0              previous GEMM loops (MatrixMultiplication / DirectOps)
-//   TS_CPU_SIMD_ELEMENTWISE=0   previous elementwise / norm / softmax / copy loops
 //   TS_CPU_POOL=0               Core kernels fork on Parallel.For instead of CpuWorkerPool
 //   TS_CPU_DISABLE_AVX512=1     AVX2 microkernels / 256-bit vectors on an AVX-512 host
 // GEMM rows report GFLOPS and the max scale-relative error of 256 sampled outputs against
@@ -94,9 +92,9 @@ internal static unsafe class Program
         if (sections.Contains("none") && sections.Count == sections.FindAll(s => s == "none").Count) return 0;
 
         Console.WriteLine($"CpuFloatBench  cores={Environment.ProcessorCount}  parallel={(CpuParallel.HasCustomRunner ? "CpuWorkerPool" : "Parallel.For")}x{CpuParallel.DegreeOfParallelism}");
-        Console.WriteLine($"  sgemm={(CpuSgemm.Enabled ? CpuSgemm.ActiveKernelName : "legacy")}  simd-elementwise={(CpuKernels.Enabled ? (CpuKernels.Use512 ? "on(512)" : "on(256)") : "legacy")}  " +
+        Console.WriteLine($"  sgemm={CpuSgemm.ActiveKernelName}  simd-elementwise={(CpuKernels.Use512 ? "on(512)" : "on(256)")}  " +
                           $"avx512f={Avx512F.IsSupported} v512={Vector512.IsHardwareAccelerated} fma={Fma.IsSupported}");
-        Console.WriteLine($"  env: TS_CPU_SGEMM={Env("TS_CPU_SGEMM")} TS_CPU_SIMD_ELEMENTWISE={Env("TS_CPU_SIMD_ELEMENTWISE")} TS_CPU_POOL={Env("TS_CPU_POOL")} TS_CPU_DISABLE_AVX512={Env("TS_CPU_DISABLE_AVX512")}");
+        Console.WriteLine($"  env: TS_CPU_POOL={Env("TS_CPU_POOL")} TS_CPU_DISABLE_AVX512={Env("TS_CPU_DISABLE_AVX512")}");
 
         if (all || sections.Contains("peak")) Peak();
         if (sections.Contains("kernel")) KernelSection();
@@ -607,7 +605,7 @@ internal static unsafe class Program
 
     private static void QwenTextEncoder(string gguf, string dump, string compare)
     {
-        Console.WriteLine($"qwen-te: {gguf}  env TS_CPU_SGEMM={Env("TS_CPU_SGEMM")} TS_CPU_SIMD_ELEMENTWISE={Env("TS_CPU_SIMD_ELEMENTWISE")} TS_CPU_POOL={Env("TS_CPU_POOL")}");
+        Console.WriteLine($"qwen-te: {gguf}  env TS_CPU_POOL={Env("TS_CPU_POOL")}");
         var load = Stopwatch.StartNew();
         // TE_BACKEND=ggml_cpu produces the native reference dump (needs GgmlOps next to the exe).
         var backend = Env("TE_BACKEND") == "ggml_cpu" ? TensorSharp.Runtime.BackendType.GgmlCpu : TensorSharp.Runtime.BackendType.Cpu;
@@ -675,7 +673,7 @@ internal static unsafe class Program
 
     private static void Gemma4Vision(string mmproj, string image, string dump, string compare)
     {
-        Console.WriteLine($"gemma4-vision: {mmproj}  env TS_CPU_SGEMM={Env("TS_CPU_SGEMM")} TS_CPU_SIMD_ELEMENTWISE={Env("TS_CPU_SIMD_ELEMENTWISE")} TS_CPU_POOL={Env("TS_CPU_POOL")} TS_CPU_DISABLE_AVX512={Env("TS_CPU_DISABLE_AVX512")}");
+        Console.WriteLine($"gemma4-vision: {mmproj}  env TS_CPU_POOL={Env("TS_CPU_POOL")} TS_CPU_DISABLE_AVX512={Env("TS_CPU_DISABLE_AVX512")}");
         var load = Stopwatch.StartNew();
         using var enc = new TensorSharp.Models.Gemma4VisionEncoder(mmproj, new CpuAllocator(BlasEnum.DotNet));
         var proc = enc.IsUnified

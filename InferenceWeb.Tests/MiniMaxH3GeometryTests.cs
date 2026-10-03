@@ -217,6 +217,10 @@ namespace InferenceWeb.Tests
             Assert.Equal(320, s.Height);
             Assert.Equal(39, s.Frames);   // 30 -> next 17k+5 rung
             Assert.Equal(24, s.Fps);      // H3 is a 24 fps model
+            // ...and the soundtrack is laid out on that 24 fps timeline too, not on the
+            // rate that was asked for: 39 frames are 1.625 s, 65 audio latents at 40/s.
+            Assert.Equal(MiniMaxH3Geometry.AudioLatentCount(39), s.AudioLatentFrames);
+            Assert.Equal(65, s.AudioLatentFrames);
         }
 
         // ---- flow-matching schedule ------------------------------------------

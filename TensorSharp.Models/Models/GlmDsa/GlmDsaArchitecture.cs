@@ -22,6 +22,8 @@ namespace TensorSharp.Models
             Aliases = new[] { "glm-dsa", "glm_dsa", "glm5next" },
             Factory = Create,
             SupportsLayerSplit = true,
+            // GLM-5.3-Flash also places whole layers on --backend cuda (the direct-CUDA engine).
+            LayerSplitBackends = new[] { BackendType.GgmlCuda, BackendType.GgmlVulkan, BackendType.Cuda },
             SupportsDistributedTensorParallel = false,
             // Explicit CPU loopback fixture mode exercises native sharding; it is
             // never evidence of multi-GPU execution or performance.
@@ -44,8 +46,8 @@ namespace TensorSharp.Models
                     "--tp-node-id/--tp-peers. Use --tp N without the node options.");
             }
 
-            return new GlmDsaModel(context.GgufPath, context.Backend, context.TpDegree,
-                layerSplitDegree: context.LayerSplitDegree);
+            return new GlmDsaModel(context.GgufPath, context.Backend, context.TpDegree, null,
+                context.LayerSplitDegree, GlmDsaModel.DirectCudaApplies(context.Backend, context.Probe));
         }
     }
 }

@@ -77,13 +77,7 @@ namespace InferenceWeb.Tests
                 .Trim().Split(',').Select(s => int.Parse(s.Trim(), CultureInfo.InvariantCulture)).ToArray();
 
         private static GgmlBackendType Backend =>
-            (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "cpu")
-                .ToLowerInvariant() switch
-            {
-                "metal" => GgmlBackendType.Metal,
-                "cuda" => GgmlBackendType.Cuda,
-                _ => GgmlBackendType.Cpu,
-            };
+            TestGates.PinnedGgmlBackendType;
 
         /// <summary>
         /// Relative L2 tolerance. The CPU kernels reproduce the numpy reference to float-rounding

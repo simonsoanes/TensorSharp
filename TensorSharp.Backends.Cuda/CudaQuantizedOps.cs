@@ -119,37 +119,20 @@ namespace TensorSharp.Cuda
         private static IntPtr EnsureQ81Scratch(CudaAllocator allocator, long bytes)
             => EnsureScratch(Q81Scratch, allocator, bytes);
 
-        // Row-batched quantized matmul (weight-reuse across small row counts).
-        // On by default; set TS_CUDA_QMM_BATCHED=0 to force the legacy per-row
-        // kernels (A/B benchmarking).
-        internal static readonly bool BatchedMatmulEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_QMM_BATCHED"), "0", StringComparison.Ordinal);
-
-        // Single-row (decode) quantized matmul for generic quant types (K-quants,
-        // IQ3_XXS/IQ3_S/IQ2_S/IQ4_XS -- anything without its own dedicated decode
-        // kernel). One block per output column (full blockDim threads), not one
-        // warp: see the TS_CUDA_QMM_VEC=0 A/B note at its call site for why the
-        // row-batched kernel's warp-per-column design loses here. On by default.
-        internal static readonly bool VecMatmulEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_QMM_VEC"), "0", StringComparison.Ordinal);
-
         // Large-row (prefill-sized) matmuls: dequantize the weight ONCE to f16 and
         // run a tensor-core cuBLAS GEMM (mirrors ggml_cuda's dequant+cuBLAS route).
         // The block-tile quant kernels re-read the whole weight every rows/tile-rows
         // output tile, so a 2048-token prefill costs hundreds of full weight sweeps;
         // this path costs ~3 sweeps (int8 read + f16 write + GEMM read) regardless
-        // of row count. TS_CUDA_QMM_F16GEMM=0 disables; MIN_ROWS/MAX_MB tune the
-        // activation-row threshold and the f16 scratch cap (the LM head exceeds it).
-        internal static readonly bool F16GemmEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_QMM_F16GEMM"), "0", StringComparison.Ordinal);
+        // of row count. MIN_ROWS/MAX_MB tune the activation-row threshold and the
+        // f16 scratch cap (the LM head exceeds it).
         internal static readonly int F16GemmMinRows = EnvInt("TS_CUDA_QMM_F16GEMM_MIN_ROWS", 32);
         internal static readonly long F16GemmMaxWeightBytes = EnvInt("TS_CUDA_QMM_F16GEMM_MAX_MB", 768) * 1024L * 1024L;
 
         // ggml-style warp-cooperative Q8_0 -> F16 whole-weight conversion for
-        // RunF16Gemm. Set TS_CUDA_Q80_F16_DEQUANT=0 to retain the generic
-        // one-thread-per-scalar dequantizer for controlled A/B comparisons.
-        public static bool Q80F16DequantEnabled { get; set; } =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_Q80_F16_DEQUANT"), "0", StringComparison.Ordinal);
+        // RunF16Gemm. Settable so tests and the matmul benchmark can compare it
+        // with the generic one-thread-per-scalar dequantizer.
+        public static bool Q80F16DequantEnabled { get; set; } = true;
 
         private static int EnvInt(string name, int fallback)
         {
@@ -226,16 +209,6 @@ namespace TensorSharp.Cuda
         }
 
         /// <summary>
-        /// TS_CUDA_BF16_MATVEC=0 sends single-row BF16 projections through cuBLAS
-        /// instead of the dedicated matvec (A/B switch; the matvec measured ~9%
-        /// faster on a bandwidth-bound BF16 decode). TS_DSV4_BF16_MATVEC is
-        /// accepted as well: this routing used to live in the DeepSeek V4 engine.
-        /// </summary>
-        public static bool Bf16MatvecEnabled { get; set; } =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_BF16_MATVEC"), "0", StringComparison.Ordinal) &&
-            !string.Equals(Environment.GetEnvironmentVariable("TS_DSV4_BF16_MATVEC"), "0", StringComparison.Ordinal);
-
-        /// <summary>
         /// C[rows, outDim] (row-major) = A[rows, inDim] x W[outDim, inDim]^T via
         /// cuBLAS, for operands already in <paramref name="wType"/>/<paramref name="aType"/>
         /// device layout. F32 accumulate, F32 output.
@@ -294,63 +267,52 @@ namespace TensorSharp.Cuda
         }
 
         // Q4_0 (the dominant dense quant) uses the int8 dp4a matmul for decode AND
-        // verify by default (~memory-bound, matches ggml's mul_mat_vec_q); set
-        // TS_CUDA_Q40_DP4A=0 to revert to the FP32 dequant kernels. Settable so the
-        // exact-reference tests can pin the FP32 path while a separate test checks
-        // the dp4a path against the (looser) int8 tolerance.
-        public static bool Q40Dp4aEnabled { get; set; } =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_Q40_DP4A"), "0", StringComparison.Ordinal);
+        // verify (~memory-bound, matches ggml's mul_mat_vec_q). Settable so the
+        // exact-reference tests can pin the FP32 dequant kernels while a separate
+        // test checks the dp4a path against the (looser) int8 tolerance.
+        public static bool Q40Dp4aEnabled { get; set; } = true;
 
-        // Q8_0 single-row decode uses the warp-per-column dp4a matvec by default
-        // (quantizes the activation row to q8_1, like ggml's mul_mat_vec_q; measured
-        // 26 -> 33 tok/s on Qwen3.5-9B-Q8_0 decode vs the scalar per-byte kernel).
-        // TS_CUDA_Q80_VEC=0 reverts to the exact FP32 dequant kernel. Settable for
-        // the same exact-vs-int8-tolerance test split as Q40Dp4aEnabled.
-        public static bool Q80VecDp4aEnabled { get; set; } =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_Q80_VEC"), "0", StringComparison.Ordinal);
+        // Q8_0 single-row decode uses the warp-per-column dp4a matvec (quantizes the
+        // activation row to q8_1, like ggml's mul_mat_vec_q; measured 26 -> 33 tok/s
+        // on Qwen3.5-9B-Q8_0 decode vs the scalar per-byte kernel). Settable for the
+        // same exact-vs-int8-tolerance test split as Q40Dp4aEnabled.
+        public static bool Q80VecDp4aEnabled { get; set; } = true;
 
         // Q4_K single-token decode via q8_1-quantized activation + dp4a (ggml
         // mul_mat_vec_q4_K). The generic scalar vec kernel re-parses the Q4_K
         // super-block header per nibble; on a Q4_K-heavy model (every projection
-        // in the 26B-A4B is Q4_K) that leaves decode ~2x behind ggml. On by
-        // default; TS_CUDA_Q4K_DP4A=0 reverts to the exact scalar kernel (the
-        // exact-reference tests pin it off, then a separate test checks the dp4a
-        // path against the looser int8 tolerance). Settable for that test split.
-        public static bool Q4KDp4aEnabled { get; set; } =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_Q4K_DP4A"), "0", StringComparison.Ordinal);
+        // in the 26B-A4B is Q4_K) that leaves decode ~2x behind ggml. Settable so
+        // the exact-reference tests can pin the exact scalar kernel, while a
+        // separate test checks the dp4a path against the looser int8 tolerance.
+        public static bool Q4KDp4aEnabled { get; set; } = true;
 
         // Q5_K / Q6_K single-token decode via ggml-style q8_1 activation dots.
         // The scalar fallback calls qvalue_at for every weight, repeatedly parsing
         // K-quant headers and bitfields. These paths quantize the activation once
         // and use packed dp4a dots. Each flag is independently settable for parity
         // tests and A/B profiling.
-        public static bool Q5KDp4aEnabled { get; set; } =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_Q5K_DP4A"), "0", StringComparison.Ordinal);
+        public static bool Q5KDp4aEnabled { get; set; } = true;
 
-        public static bool Q6KDp4aEnabled { get; set; } =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_Q6K_DP4A"), "0", StringComparison.Ordinal);
+        public static bool Q6KDp4aEnabled { get; set; } = true;
 
         // IQ2_XXS on-device MoE experts via q8_1-quantized activation + the existing
         // dot_iq2_xxs_q8_1 dp4a dot (ggml vec_dot_iq2_xxs_q8_1), replacing the
         // per-element scalar grid-lookup path for the gate/up expert projections of
-        // UD-IQ2_XXS MoE models (Qwen3.6-35B-A3B). On by default; TS_CUDA_IQ2XXS_DP4A=0
-        // reverts to the scalar MoE kernels for A/B testing.
-        public static bool Iq2xxsDp4aEnabled { get; set; } =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_IQ2XXS_DP4A"), "0", StringComparison.Ordinal);
+        // UD-IQ2_XXS MoE models (Qwen3.6-35B-A3B). Settable so tests can compare it
+        // with the scalar MoE kernels.
+        public static bool Iq2xxsDp4aEnabled { get; set; } = true;
 
         // IQ2_S on-device MoE experts via q8_1 + the ggml-compatible
         // vec_dot_iq2_s_q8_1 dp4a dot. The Qwen3.6-35B-A3B UD-IQ2_XXS file uses
         // IQ2_XXS for expert gate/up but IQ2_S for expert down, so both formats
         // need a device vec-dot to keep the full MoE decode on the fast path.
-        // TS_CUDA_IQ2S_DP4A=0 keeps the scalar expert kernel for A/B testing.
-        public static bool Iq2sDp4aEnabled { get; set; } =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_IQ2S_DP4A"), "0", StringComparison.Ordinal);
+        // Settable so tests can compare it with the scalar expert kernel.
+        public static bool Iq2sDp4aEnabled { get; set; } = true;
 
         // Single-row IQ2_XXS/IQ2_S matvec using one global q8_1 scratch row.
         // This quantizes the activation once per projection instead of once per
-        // output CTA. TS_CUDA_IQ2_VEC=0 restores the previous decode paths.
-        public static bool Iq2VecDp4aEnabled { get; set; } =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_IQ2_VEC"), "0", StringComparison.Ordinal);
+        // output CTA. Settable so tests can compare it with the per-CTA paths.
+        public static bool Iq2VecDp4aEnabled { get; set; } = true;
 
         /// <summary>
         /// Returns whether the q8_1 + dp4a MoE projection is enabled for the
@@ -370,12 +332,10 @@ namespace TensorSharp.Cuda
         }
 
         // Quantize each 32-value activation block cooperatively with one warp.
-        // This mirrors ggml_cuda's q8_1 quantizer and replaces the legacy
-        // one-thread-per-block implementation, whose 32 serial loads/stores are
-        // poorly coalesced for decode-sized rows. Set TS_CUDA_Q81_WARP=0 to keep
-        // the legacy kernel for A/B testing.
-        public static bool Q81WarpQuantizeEnabled { get; set; } =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_Q81_WARP"), "0", StringComparison.Ordinal);
+        // This mirrors ggml_cuda's q8_1 quantizer; the one-thread-per-block
+        // kernel, whose 32 serial loads/stores are poorly coalesced for
+        // decode-sized rows, stays as the tests' reference.
+        public static bool Q81WarpQuantizeEnabled { get; set; } = true;
 
         // Diagnostic/tuning gate: only use the q8_1 vec matvec when the output is at
         // least this wide (0 = always). Lets A/B runs isolate which decode
@@ -383,19 +343,17 @@ namespace TensorSharp.Cuda
         internal static readonly int Q80VecMinOutDim = EnvInt("TS_CUDA_Q80_VEC_MIN_OUT", 0);
 
         // Direct int8 tensor-core GEMM over raw Q8_0 blocks for prefill-sized rows
-        // (mma.m16n8k32, ggml MMQ-style). TS_CUDA_Q80_MMQ=0 falls back to the
-        // dequant+cuBLAS F16 route; MAX_ROWS is the crossover where cuBLAS wins
-        // (weight sweeps grow as ceil(rows/128) on the MMQ side).
-        public static bool Q80MmqEnabled { get; set; } =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_Q80_MMQ"), "0", StringComparison.Ordinal);
+        // (mma.m16n8k32, ggml MMQ-style). MAX_ROWS is the crossover where the
+        // dequant+cuBLAS F16 route wins (weight sweeps grow as ceil(rows/128) on
+        // the MMQ side). Settable so tests and the benchmark can pin either route.
+        public static bool Q80MmqEnabled { get; set; } = true;
         internal static readonly int Q80MmqMaxRows = EnvInt("TS_CUDA_Q80_MMQ_MAX_ROWS", 512);
 
         // cp.async staging variant of the MMQ kernel (split q8_1 scratch, raw
         // weight windows async-copied to shared). Requires inDim % 256 == 0
         // (true for every real model dim); bit-identical results to the base
-        // MMQ kernel. TS_CUDA_Q80_MMQ2=0 pins the register-prefetch variant.
-        public static bool Q80Mmq2Enabled { get; set; } =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_Q80_MMQ2"), "0", StringComparison.Ordinal);
+        // register-prefetch MMQ kernel, which serves the other shapes.
+        public static bool Q80Mmq2Enabled { get; set; } = true;
 
         public static bool AreKernelsAvailable(CudaAllocator allocator)
         {
@@ -591,8 +549,8 @@ namespace TensorSharp.Cuda
             CudaDriverApi.cuMemFree(ptr);
         }
 
-        // q8Kernel override for the multi-row Q8_0 path (lets a test drive MMA and dp4a
-        // in one process): 0 = auto (env flags), 1 = dp4a, 2 = tensor-core MMA, 3 = scalar.
+        // q8Kernel override for the Q8_0 path (lets a test drive each kernel in one
+        // process): 0 = auto, 1 = dp4a, 3 = the exact scalar FP32 kernel.
         public static bool TryAddmmQuantizedToFloat32(
             Tensor result,
             Tensor input,
@@ -662,7 +620,8 @@ namespace TensorSharp.Cuda
             int ggmlType,
             long ne0,
             long ne1,
-            int q8Kernel = 0)
+            int q8Kernel = 0,
+            bool rowInvariant = false)
         {
             if (deviceWeight == IntPtr.Zero)
                 throw new ArgumentException("Resident weight pointer cannot be null.", nameof(deviceWeight));
@@ -692,8 +651,52 @@ namespace TensorSharp.Cuda
             RunResidentMatmul(
                 allocator, kernels, deviceWeight, ggmlType,
                 inputPtr, resultPtr, checked((int)ne0), checked((int)ne1),
-                checked((int)input.Sizes[0]), q8Kernel);
+                checked((int)input.Sizes[0]), q8Kernel, rowInvariant);
             resultStorage.MarkDeviceModified();
+        }
+
+        /// <summary>Quantize <paramref name="rows"/> activation rows to q8_1 into the caller's buffer, as
+        /// the decode kernels read them, for several projections of one input
+        /// (<see cref="TryResidentMatmulQ81"/>).</summary>
+        internal static void QuantizeRowsQ81(CudaAllocator allocator, IntPtr input, IntPtr xq, int inDim, int rows)
+            => allocator.Kernels.LaunchQuantizeQ81Rows(input, xq, inDim, rows, allocator.Stream.Handle, Q81WarpQuantizeEnabled);
+
+        /// <summary>
+        /// A decode-size resident matmul (1..16 rows) over activations already quantized by
+        /// <see cref="QuantizeRowsQ81"/>: exactly the kernel <see cref="RunResidentMatmul"/> picks for
+        /// these rows with <c>rowInvariant</c>, minus the per-call quantization, so an engine that
+        /// projects one input several ways quantizes it once. False, with nothing launched, for a
+        /// type or shape that route would not send to a q8_1 kernel; the caller then takes
+        /// <see cref="AddmmResidentToFloat32"/>.
+        /// </summary>
+        internal static bool TryResidentMatmulQ81(CudaAllocator allocator, IntPtr weightPtr, int ggmlType, IntPtr xq,
+            IntPtr resultPtr, int inDim, int outDim, int rows)
+        {
+            if (!ResidentMatmulTakesQ81(ggmlType, inDim, outDim, rows))
+                return false;
+            CudaKernels kernels = allocator.Kernels;
+            IntPtr stream = allocator.Stream.Handle;
+            if (ggmlType == 10 || ggmlType == 11)
+                kernels.LaunchQuantMatmulLowKDp4a(ggmlType, weightPtr, xq, resultPtr, inDim, outDim, rows, stream);
+            else if (ggmlType == 14)
+                kernels.LaunchQuantMatmulQ6KDp4aRows(weightPtr, xq, resultPtr, inDim, outDim, rows, stream);
+            else
+                kernels.LaunchQuantMatmulQ80VecRows(weightPtr, xq, resultPtr, inDim, outDim, rows, stream);
+            return true;
+        }
+
+        /// <summary>Whether <see cref="TryResidentMatmulQ81"/> takes this weight type and shape: the
+        /// q8_1 decode kernels <see cref="RunResidentMatmul"/> would pick for these rows.</summary>
+        internal static bool ResidentMatmulTakesQ81(int ggmlType, int inDim, int outDim, int rows)
+        {
+            if (rows < 1 || rows > CudaKernels.Q80VecMaxRows)
+                return false;
+            if (ggmlType == 10 || ggmlType == 11)
+                return rows <= CudaKernels.LowKMaxRows && (inDim & 255) == 0;
+            if (ggmlType == 14)
+                return Q6KDp4aEnabled && (inDim & 255) == 0;
+            return ggmlType == 8 && Q80VecDp4aEnabled && (inDim & 31) == 0
+                && (rows >= 2 || outDim >= Q80VecMinOutDim);
         }
 
         /// <summary>
@@ -707,6 +710,11 @@ namespace TensorSharp.Cuda
         /// This is the ONE place kernel routing lives: everything below dispatches
         /// on quant type and row count only, so any executor calling it picks up
         /// the same MMQ / dp4a / dequant+cuBLAS decisions.
+        ///
+        /// <paramref name="rowInvariant"/>: up to 16 rows, compute every row exactly as a
+        /// one-row call would (an executor batching several sequences' decode steps
+        /// wants a sequence's result not to depend on its batchmates). Q2_K/Q3_K
+        /// always do; Q8_0 then takes its matvec rather than the int8 MMA GEMM.
         /// </summary>
         internal static void RunResidentMatmul(
             CudaAllocator allocator,
@@ -718,7 +726,8 @@ namespace TensorSharp.Cuda
             int inDim,
             int outDim,
             int rows,
-            int q8Kernel = 0)
+            int q8Kernel = 0,
+            bool rowInvariant = false)
         {
             allocator.Context.MakeCurrent();
 
@@ -737,7 +746,7 @@ namespace TensorSharp.Cuda
             // n = 1; multi-row goes to the Ampere BF16 tensor cores.
             if (ggmlType == 30)
             {
-                if (rows == 1 && Bf16MatvecEnabled && (inDim & 7) == 0)
+                if (rows == 1 && (inDim & 7) == 0)
                 {
                     kernels.LaunchMatvecBf16(weightPtr, inputPtr, resultPtr, inDim, outDim, allocator.Stream.Handle);
                 }
@@ -757,6 +766,50 @@ namespace TensorSharp.Cuda
             {
                 RunGemm(allocator, weightPtr, CublasApi.CUDA_R_32F, inputPtr, CublasApi.CUDA_R_32F,
                     resultPtr, inDim, outDim, rows);
+                return;
+            }
+
+            // Q2_K/Q3_K decode and batched decode (up to 16 rows): q8_1 activations and dp4a
+            // vec-dots with each sub-block's weights decoded once for every row, one kernel for
+            // every row count so a sequence's rows compute alike alone and batched. The scalar path
+            // dequantized every element through a generic per-value decoder and read these at a
+            // fraction of bandwidth (DeepSeek V4.1's Q2_K checkpoint keeps every dense projection at
+            // Q2_K/Q3_K).
+            if (rows <= CudaKernels.LowKMaxRows && (inDim & 255) == 0 && (ggmlType == 10 || ggmlType == 11))
+            {
+                long scratchBytes = (long)rows * (inDim / 32) * CudaKernels.Q81BlockBytes;
+                IntPtr xqScratch = EnsureQ81Scratch(allocator, scratchBytes);
+                kernels.LaunchQuantizeQ81Rows(
+                    inputPtr, xqScratch, inDim, rows, allocator.Stream.Handle, Q81WarpQuantizeEnabled);
+                kernels.LaunchQuantMatmulLowKDp4a(ggmlType, weightPtr, xqScratch, resultPtr,
+                    inDim, outDim, rows, allocator.Stream.Handle);
+                return;
+            }
+
+            // Q6_K decode, batched decode and verify windows for an executor that wants every row computed
+            // as a one-row call computes it: the one-row dp4a kernel's arithmetic for up to 16 rows (the
+            // generic multi-row kernel below reads F32 activations instead of q8_1).
+            if (rowInvariant && ggmlType == 14 && Q6KDp4aEnabled
+                && rows >= 2 && rows <= CudaKernels.Q80VecMaxRows && (inDim & 255) == 0)
+            {
+                long scratchBytes = (long)rows * (inDim / 32) * CudaKernels.Q81BlockBytes;
+                IntPtr xqScratch = EnsureQ81Scratch(allocator, scratchBytes);
+                kernels.LaunchQuantizeQ81Rows(
+                    inputPtr, xqScratch, inDim, rows, allocator.Stream.Handle, Q81WarpQuantizeEnabled);
+                kernels.LaunchQuantMatmulQ6KDp4aRows(
+                    weightPtr, xqScratch, resultPtr, inDim, outDim, rows, allocator.Stream.Handle);
+                return;
+            }
+
+            if (rowInvariant && ggmlType == 8 && q8Kernel == 0 && Q80VecDp4aEnabled
+                && rows >= 2 && rows <= CudaKernels.Q80VecMaxRows && (inDim & 31) == 0)
+            {
+                long scratchBytes = (long)rows * (inDim / 32) * CudaKernels.Q81BlockBytes;
+                IntPtr xqScratch = EnsureQ81Scratch(allocator, scratchBytes);
+                kernels.LaunchQuantizeQ81Rows(
+                    inputPtr, xqScratch, inDim, rows, allocator.Stream.Handle, Q81WarpQuantizeEnabled);
+                kernels.LaunchQuantMatmulQ80VecRows(
+                    weightPtr, xqScratch, resultPtr, inDim, outDim, rows, allocator.Stream.Handle);
                 return;
             }
 
@@ -791,9 +844,9 @@ namespace TensorSharp.Cuda
             }
 
             // Prefill-sized batches: dequant-once + tensor-core cuBLAS GEMM (see
-            // F16GemmEnabled). Applies to every supported quant type; q8Kernel != 0
+            // F16GemmMinRows). Applies to every supported quant type; q8Kernel != 0
             // means a test pinned a specific Q8_0 kernel, so honor that instead.
-            if (F16GemmEnabled && q8Kernel == 0 && rows >= F16GemmMinRows
+            if (q8Kernel == 0 && rows >= F16GemmMinRows
                 && 2L * inDim * outDim <= F16GemmMaxWeightBytes)
             {
                 RunF16Gemm(allocator, kernels, weightPtr, ggmlType, inputPtr, resultPtr, inDim, outDim, rows);
@@ -841,7 +894,7 @@ namespace TensorSharp.Cuda
             // (not one warp) per output column, matching the scalar path's
             // per-column thread budget without its 4-columns-per-block
             // serialization.
-            if (BatchedMatmulEnabled && rows >= 2
+            if (rows >= 2
                 && ggmlType != 2 && ggmlType != 8 && ggmlType != 16)
             {
                 kernels.LaunchQuantMatmulBatchedF32(
@@ -855,8 +908,7 @@ namespace TensorSharp.Cuda
             // rows==1 there is no cross-row weight reuse to amortize, so the
             // batched kernel's only advantage disappears and its 8x-narrower
             // per-column thread count directly costs latency on wide tensors
-            // (e.g. a K-quant lm_head/large-in_dim projection) -- TS_CUDA_QMM_VEC=0
-            // falls back to the scalar per-4-columns kernel for A/B comparison.
+            // (e.g. a K-quant lm_head/large-in_dim projection).
             // Q4_K single-token decode: q8_1 activation + dp4a (see the kernel).
             // inDim % 256 == 0 holds for every real model dim (Q4_K is a 256-block
             // quant); the fallbacks below cover any exotic shape.
@@ -914,7 +966,7 @@ namespace TensorSharp.Cuda
                     ggmlType, inDim, outDim, allocator.Stream.Handle);
                 return;
             }
-            if (VecMatmulEnabled && rows == 1
+            if (rows == 1
                 && ggmlType != 2 && ggmlType != 8 && ggmlType != 16)
             {
                 kernels.LaunchQuantMatmulVecF32(
@@ -944,7 +996,7 @@ namespace TensorSharp.Cuda
                 // FP32 fallback: row-tiled batched kernel for the verify window
                 // (decode each weight nibble ONCE and reuse it across the tile's rows)
                 // and the per-row kernel for single-row decode.
-                if (BatchedMatmulEnabled && rows >= 2 && rows <= CudaKernels.QuantMatmulBatchMaxRows)
+                if (rows >= 2 && rows <= CudaKernels.QuantMatmulBatchMaxRows)
                 {
                     kernels.LaunchQuantMatmulQ40BatchedF32(
                         weightPtr, inputPtr, resultPtr,
@@ -961,27 +1013,21 @@ namespace TensorSharp.Cuda
                     allocator.Stream.Handle);
             }
             else if (ggmlType == 8 && (inDim & 31) == 0
-                     && q8Kernel != 3
-                     && (rows >= 2 || (Q80VecDp4aEnabled && outDim >= Q80VecMinOutDim))
-                     && (q8Kernel == 1 || q8Kernel == 2
-                         || (q8Kernel == 0 && (CudaKernels.Q8MmaEnabled || CudaKernels.Q8Dp4aEnabled))))
+                     && (q8Kernel == 0 || q8Kernel == 1)
+                     && (rows >= 2 || (Q80VecDp4aEnabled && outDim >= Q80VecMinOutDim)))
             {
                 // Q8_0 int8 fast path (rows >= 1): quantize the activation rows to q8_1
                 // ONCE into a reused scratch (single-stream per allocator makes reuse
-                // safe), then either the tensor-core MMA GEMM or the block-tile dp4a
-                // GEMM. dp4a covers single-token decode too (4 int8 MACs/instruction,
-                // ~memory-bound like ggml's mul_mat_vec_q) - the scalar per-byte
-                // dequant kernel it replaces left ~25% of weight bandwidth unused,
-                // and decode reads every weight once per token.
-                bool useMma = q8Kernel == 2 || (q8Kernel == 0 && CudaKernels.Q8MmaEnabled && rows >= 2);
+                // safe), then the block-tile dp4a GEMM. dp4a covers single-token
+                // decode too (4 int8 MACs/instruction, ~memory-bound like ggml's
+                // mul_mat_vec_q) - the scalar per-byte dequant kernel it replaces left
+                // ~25% of weight bandwidth unused, and decode reads every weight once
+                // per token.
                 long scratchBytes = (long)rows * (inDim / 32) * CudaKernels.Q81BlockBytes;
                 IntPtr xqScratch = EnsureQ81Scratch(allocator, scratchBytes);
                 kernels.LaunchQuantizeQ81Rows(
                     inputPtr, xqScratch, inDim, rows, allocator.Stream.Handle, Q81WarpQuantizeEnabled);
-                if (useMma)
-                    kernels.LaunchQuantMatmulQ80Mma(
-                        weightPtr, xqScratch, resultPtr, inDim, outDim, rows, allocator.Stream.Handle);
-                else if (rows == 1)
+                if (rows == 1)
                     kernels.LaunchQuantMatmulQ80Vec(
                         weightPtr, xqScratch, resultPtr, inDim, outDim, allocator.Stream.Handle);
                 else

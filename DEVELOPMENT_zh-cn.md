@@ -43,6 +43,20 @@ dotnet build TensorSharp.slnx
 
 解决方案构建默认使用 `Any CPU` 平台（见 `Directory.Solution.props`），因此在 Visual Studio 开发者命令提示符中也能正常工作——这类提示符会向环境导出 `Platform=x64`，否则会把构建引导到不存在的 `Release|x64` 解决方案配置。显式传入的 `-p:Platform=...` 仍然优先。
 
+解决方案也会构建 TensorAgent。其与平台无关的项目（`TensorAgent.Core`、`TensorAgent.Sharing`、`TensorAgent.Tests`）列在解决方案中，在任何操作系统上都会构建。应用本身 `TensorAgent/src/TensorAgent.Maui` 需要 .NET MAUI 工作负载，因此没有列入：解决方案其余部分构建完成后，`Directory.Solution.targets` 另起一个 `dotnet build`，按 `TensorAgent/scripts/build-mac.sh`、`build-sim.sh`、`build-windows.ps1` 的方式构建它（`-p:TensorSharpAppleTargets=true` 与 `-m:1`；Windows 上为 `win-x64`），配置沿用解决方案构建，应用 SDK 则单独选择：
+
+| 主机 | 构建的应用头 | 需要 |
+| --- | --- | --- |
+| macOS | Mac 应用（`net10.0-maccatalyst`），在 Apple 芯片上另有 iOS 模拟器应用（`net10.0-ios`） | 选定的应用 SDK 中同时有 `maui-maccatalyst` 与 `maui-ios`（该应用头会 restore 两者）；模拟器应用另需 `GgmlOps.xcframework` 与已暂存的 CPython（[TensorAgent/README.md](TensorAgent/README.md#build-and-run)） |
+| Windows | Windows 应用（`net10.0-windows10.0.19041.0`，`win-x64`） | `maui-windows` |
+| Linux | 无 | |
+
+macOS 上的应用工作负载检查与构建依次选择 `DOTNET_ROOT/dotnet`、`~/.dotnet/dotnet`、解决方案 SDK。`-p:TensorAgentDotnet=/path/to/dotnet` 可覆盖此选择；其架构须与解决方案 SDK 一致，Apple 工作负载须支持当前 Xcode。
+
+缺少工作负载时跳过整个应用，缺少模拟器前置文件时只跳过该应用头，并各自给出指明缺少什么的警告；使用 `-p:TensorSharpSkipGgmlNative=true` 且从未构建过引擎库时，桌面应用头同样被跳过。其他导致应用头无法构建的情况（没有 Xcode、已安装工作负载不接受当前 Xcode、编译或链接错误）会使解决方案构建失败，并给出单独构建该应用头的脚本。`-p:TensorSharpSkipTensorAgentApp=true`（或环境变量 `TensorSharpSkipTensorAgentApp=true`）可将应用排除在外。解决方案的重新构建（`--no-incremental`）与 `dotnet clean` 也涵盖该应用，产物位于 `TensorAgent/src/TensorAgent.Maui/bin/<Configuration>/`。
+
+应用的构建只从解决方案构建的命令行继承配置与 `-p:TensorSharpSkipGgmlNative`，并会在自身属性不同时重新构建其引用的引擎项目，因此改变这些项目编译方式的开关（例如 `-p:Version=...`）会在其输出中被覆盖；此类构建请排除应用。只有命令行的解决方案构建会构建该应用：`-graph` 构建与 Visual Studio 自身的解决方案构建都不会。需要签名的真机构建仍使用 `build-device.sh` 与 `deploy-device.sh`。
+
 ### 构建单独应用
 
 ```bash
@@ -310,15 +324,10 @@ docker run --rm --gpus all --network none \
 TensorSharp/
 ├── TensorSharp.Core/            # 核心张量库（Tensor、Ops、内存、设备抽象，含 CPU SIMD/托管量化内核）
 ├── TensorSharp.Runtime/         # GGUF、分词器、模板、采样、协议解析
-│   ├── Paged/                   # 分页 KV 缓存原语（BlockPool、BlockTable、KvBlock、BlockHashIndex、PagedKvStorage、PagedKvBatchOps、ManagedPagedAttention）
+│   ├── Paged/                   # 分页 KV 缓存原语（BlockPool、BlockTable、KvBlock、PagedKvStorage、PagedKvBatchOps、ManagedPagedAttention）
 │   ├── Scheduling/              # 连续批处理引擎（InferenceEngine、BatchExecutor、ContinuousBatchScheduler、SequenceState、SchedulerConfig/Output、InferenceRequestHandle）；PrefixCache/ 是默认启用的基数树前缀缓存（PrefixTree、PrefixCacheCoordinator、IPrefixCacheModel 契约），PrefixCheckpointFileStore 负责持久化前缀检查点
 │   ├── Speculative/             # 投机解码：起草/验证/回滚核心（SpeculativeExecution）、ISpeculator 各算法（DraftHeadSpeculator、BlockDraftSpeculator、NGramSpeculator）与 SpeculatorRegistry、模型侧契约（ISpecTrunk、SpeculativeModelContracts）、共用的参数解析（SpeculativeCliFlags、SpeculationOptions）以及运行期成本裁判
-│   ├── PagedKvCacheManager.cs   # 独立的单会话分页 KV 管理器（块分配、前缀复用、RAM / SSD / Redis 分层）；只有 CLI 的 --paged-bench 会用到它
-│   ├── PagedKvBlockStore.cs     # 带可选 SSD 溢出的 RAM/磁盘分级分页块存储
-│   ├── SsdKvBlockTier.cs        # 分页块的 SSD 冷层
-│   ├── TurboQuantKvCodec.cs     # 实现 IKvBlockCodec 的量化 KV 块编解码器（2-bit / Q4 / Q8）
 │   ├── PrefillChunking.cs       # SWA / 超长 prompt 使用的分块 prefill 辅助
-│   ├── KvBlockHash.cs           # 内容寻址的块哈希，用于跨请求前缀复用
 │   └── Logging/                 # JSON-line 文件日志器 + 每轮遥测
 ├── TensorSharp.AgentHost/       # 构建在运行时之上的智能体层：Agent Skills、代码执行与子智能体委派
 │   ├── Agents/                  # 子智能体：请求级限额（MultiAgentOptions）、spawn_agent / wait_agent / send_input / close_agent / list_agents 五个工具声明（MultiAgentTools）、请求自有的智能体树及其角色、只读工具门控与串行化的宿主工具（MultiAgentSession）、协调提示词（MultiAgentPrompt）、宿主在 prefill 之前据以设置检查点的子智能体提示词画像（MultiAgentPromptProfile），以及 Web UI 展示的进度快照（MultiAgentProgress）；详见 docs/multi_agent.md
@@ -340,7 +349,6 @@ TensorSharp/
 │   ├── Models/MiniMaxH3/        # MiniMax-H3 视频 + 联合 32 kHz 立体声音频：打包序列 DiT、Qwen3-VL 文本编码器与视觉塔、视频与音频 VAE、flow-match 调度器、pipeline
 │   ├── Models/WanVideo/         # Wan 2.1/2.2，仅视频：DiT、UMT5-XXL 文本编码器、因果 3D VAE、UniPC 调度器，以及不依赖 ggml 的 WanDirect* `cuda`/`cpu` 路径
 │   ├── Models/Video/            # 两个视频家族共同实现的接缝：IVideoGenerationModel、VideoGenerationParams/Progress、GeneratedVideoAudio、WAV 写出
-│   ├── Paged/                   # 张量侧的分页注意力辅助（TensorPagedAttention）
 │   ├── KvBlockTransfer.cs       # 跨序列的 KV 块 extract/inject 辅助
 │   ├── SpeculativeDecoder.cs    # 独立的单序列投机生成循环（CLI、测试与离线调用方），包裹共享的 SpeculativeExecution 核心；与算法无关（NextN/MTP 头、DSpark/DFlash 块级草稿器、n-gram）
 │   ├── SpeculativeDraftHeadLoader.cs # 把独立的 --draft-model GGUF（Gemma 4 gemma4-assistant、DFlash/DFlash2、Qwen 3.8 Flash Next 共享 MTP 头）挂到主干上；在模型构造期间加载的块级草稿器（DSpark）视为已挂载
@@ -393,7 +401,7 @@ TensorSharp/
 │   ├── ggml_ops_embeddings.cpp            # BERT / XLM-RoBERTa 句向量编码器计算图（GGUF `bert`）
 │   ├── ggml_ops_training.cpp              # 仅训练用内核（运行时不使用）
 │   └── tests/                              # 原生单元 + 烟雾测试
-├── TensorSharp.Chat/            # 与宿主无关的聊天流水线，由 Server、CLI 与 iOS 应用共用（不依赖 ASP.NET Core 与 Distributed）
+├── TensorSharp.Chat/            # 与宿主无关的聊天流水线，由 Server、CLI 与 TensorAgent 共用（不依赖 ASP.NET Core 与 Distributed）
 │   ├── ModelService.cs          # 模型加载/释放、InferenceEngineHost 与生成流水线之上的门面（TensorParallelGroupFactory、SchedulerConfigOverride、UnloadModel）
 │   ├── ModelLifecycleService.cs # 模型加载/释放与后端选择；张量并行组由宿主传入
 │   ├── InferenceEngineHost.cs   # 单模型 InferenceEngine 单例（连续批处理入口）
@@ -403,7 +411,6 @@ TensorSharp/
 │   ├── ChatHistoryPreparer.cs   # 历史归一化、raw token 拼接、多模态顺序辅助
 │   ├── ChatSession.cs / SessionManager.cs # 单会话历史跟踪与线程安全的会话注册
 │   ├── ConversationTranscriptStore.cs # 本服务生成的 assistant 轮次的原始输出 token，使同一对话的下一个请求渲染出 KV 缓存中实际保存的内容
-│   ├── InferenceQueue.cs        # 已弃用的空操作队列垫片，仍回答队列状态（并发由引擎本身处理）
 │   ├── ModelService.Agents.cs   # 流水线之上的子智能体委派：每个子智能体一个全新的 ChatSession，父智能体渲染好的子智能体画像作为公共前缀检查点提供
 │   ├── WebUiChatService.cs      # 去掉传输层的 Web UI 请求/流式契约（会话、模型、上传、图像生成与编辑、视频、聊天帧）
 │   ├── WebUiChatPolicy.cs       # Web UI 聊天请求合法性校验（模型经 /api/models/load 选择，不能按消息切换）
@@ -419,7 +426,7 @@ TensorSharp/
 ├── TensorSharp.Server/          # Web 聊天 + API 服务库（ASP.NET Core）；可运行的应用是 TensorSharp.Server.Host
 │   ├── BackendCatalogProbes.cs  # TensorSharp.Chat 的 BackendCatalog 背后的 CUDA / MLX / GGML 可用性探测
 │   ├── OpenAIResponseFormatParser.cs  # OpenAI response_format（json_object / json_schema）解析
-│   ├── Hosting/                 # 启动期相关：选项装配（ServerOptionsBuilder，也负责解析子智能体限额）、wwwroot 解析、/uploads 静态文件与清理、embedding 托管、多节点张量并行工厂、paged-KV / 连续批处理 CLI 翻译
+│   ├── Hosting/                 # 启动期相关：选项装配（ServerOptionsBuilder，也负责解析子智能体限额）、wwwroot 解析、/uploads 静态文件与清理、embedding 托管、多节点张量并行工厂、连续批处理 CLI 翻译
 │   ├── ResponseSerializers/     # 各协议响应形状构造（Ollama / OpenAI）
 │   ├── Responses/               # 存储的 /v1/responses 记录（内存，或经 --redis-url 存到 Redis）
 │   ├── StreamingWriters/        # SSE 与 NDJSON 线协议辅助
@@ -427,7 +434,7 @@ TensorSharp/
 │   ├── Endpoints/               # ASP.NET Core 路由映射（每协议一个扩展方法）
 │   └── Logging/                 # 请求日志中间件 + 低噪声路径支持
 ├── TensorSharp.Server.Host/     # 可运行的 Web 应用
-│   ├── Program.cs               # 精简启动：配置文件展开、DI 注册、中间件、端点映射、paged-KV + 连续批处理 CLI 翻译
+│   ├── Program.cs               # 精简启动：配置文件展开、DI 注册、中间件、端点映射、连续批处理 CLI 翻译
 │   ├── Hosting/                 # --help 文本（ServerUsage）、启动横幅、日志设置
 │   ├── wwwroot/index.html       # 聊天界面
 │   ├── testdata/                # 集成测试套件（bash + Python）
@@ -435,7 +442,7 @@ TensorSharp/
 │   └── API_EXAMPLES.md          # 详细 API 文档
 ├── TensorSharp.Cli/             # CLI 应用（单次生成、交互式 REPL、JSONL 批处理、基准）
 ├── TensorSharp.TestMatrix/      # 测试 / 基准矩阵运行器、默认提示、环境变量扫描与主机基线
-├── TensorAgent/                 # iPhone / iPad 应用：自带适合手机的聊天页面，与 Server 的 Web UI 绑定同一套 WebUiChatService / SkillsService API，完全在设备上运行
+├── TensorAgent/                 # iPhone / iPad / Mac / Windows 本地 AI 应用：共用聊天页面、已保存对话、文本/多模态/智能体及图像/视频回合
 │   ├── src/TensorAgent.Core/    # 与平台无关：模型目录与存储、可续传下载、已保存的对话、设置、回环服务器及其路由表，以及把这些组装起来的 AgentAppHost（放在这里而不是 iOS 头工程中，以便测试能启动它、通过 HTTP 驱动它并将其拆除）
 │   │   ├── Catalog/ Downloads/ Sessions/ Settings/ # ModelCatalog + ModelStore、ModelDownloadManager + ResumableDownloader、ChatTurnManager + ConversationStore、AppSettings
 │   │   ├── Hosting/             # AgentAppHost、LoopbackServer + WebUiRoutes、EngineMemoryPolicy、SpeculationPolicy、TensorAgentSkillRouter、ProcessMemory
@@ -446,12 +453,12 @@ TensorSharp/
 │   │   ├── Python/              # 通过 P/Invoke 嵌入的 CPython 3.13、其 audit-hook 沙箱，以及纯 wheel 安装器
 │   │   ├── JavaScript/          # 基于 C API 的 JavaScriptCore，提供 Node 风格的 console/process/require/fs/timers
 │   │   └── WebUi/               # tensoragent.js：回环服务器追加到应用自有页面上的脚本
-│   ├── src/TensorAgent.Maui/    # net10.0-ios 头工程：手机页面（wwwroot/index.html）、WebView + 附件 + 听写、模型 / 对话 / 设置页面、后台与分享收件箱处理，以及本设备上各类文件的存放位置
-│   ├── src/TensorAgent.Sharing/ # 应用与其扩展共用的分享信封契约
+│   ├── src/TensorAgent.Maui/    # .NET MAUI 应用头：net10.0-ios、net10.0-maccatalyst、net10.0-windows10.0.19041.0；共用 WebView/输入框、原生模型/对话/设置页面与平台服务
+│   ├── src/TensorAgent.Sharing/ # 应用与 iOS 扩展共用的分享信封契约及八种界面语言
 │   ├── src/TensorAgent.ShareExtension/ # iOS 分享扩展“Ask TensorAgent”
 │   ├── tests/TensorAgent.Tests/ # 应用宿主测试（不在 PR CI 中运行）
 │   ├── skills/                  # 12 个技能（也是桌面宿主的技能根目录）；verdicts.json 记录 verify-skills.py 对每个技能的静态检查结论（对照打包的解释器解析 Python import，检查 shell 脚本是否调用 npm/npx/pnpm/yarn/parcel/vite）。10 个通过并打包进 iOS 应用；playwright 与 web-artifacts-builder 未通过，由 TensorAgent.Maui.csproj 排除
-│   └── scripts/                 # 模拟器的构建 / 运行 / 验证（build-sim.sh、run-sim.sh、verify-sim.sh）、真机（build-device.sh、deploy-device.sh、bench-spec-device.sh）、verify-background.sh（模拟器或真机）、verify-share-rule.sh、prepare-python.sh、build-lxml-ios.sh、verify-skills.py
+│   └── scripts/                 # 桌面构建/启动、模拟器/真机构建/部署/验证、后台/分享探针、Python 暂存、技能检查与聊天/媒体验证
 ├── InferenceWeb.Tests/          # xUnit 单元测试，覆盖算子、KV 缓存、分页调度器、批处理模型正确性以及 Web/服务辅助逻辑
 ├── AdvUtils/                    # 工具库（日志）
 ├── docs/                        # 开发者参考文档
@@ -485,7 +492,7 @@ TensorSharp/
 | `TensorSharp.Backends.Cuda` | `TensorSharp.Backends.Cuda` | `TensorSharp.Cuda` | Direct CUDA 分配器、存储、cuBLAS GEMM、PTX 内核和量化 CUDA 算子 |
 | `TensorSharp.Backends.MLX` | `TensorSharp.Backends.MLX` | `TensorSharp.MLX` | Apple Silicon MLX 后端（mlx-c / Metal），含量化 / 融合 / 编译内核与 MoE 专家 offload |
 | `TensorSharp.Distributed` | `TensorSharp.Distributed` | `TensorSharp.Distributed` | 用于多节点张量并行的点对点 TCP 协调层 |
-| `TensorSharp.Chat` | `TensorSharp.Chat` | `TensorSharp.Chat`（新类型）；迁入的流水线保留 `TensorSharp.Server.*` 命名空间 | 与宿主无关的聊天流水线：`ModelService`、会话、生成、技能循环与 Web UI 请求/流式契约（`WebUiChatService`、`SkillsService`）——不依赖 ASP.NET Core 与 `TensorSharp.Distributed`；由 Server、CLI 与 iOS 应用共用 |
+| `TensorSharp.Chat` | `TensorSharp.Chat` | `TensorSharp.Chat`（新类型）；迁入的流水线保留 `TensorSharp.Server.*` 命名空间 | 与宿主无关的聊天流水线：`ModelService`、会话、生成、技能循环与 Web UI 请求/流式契约（`WebUiChatService`、`SkillsService`）——不依赖 ASP.NET Core 与 `TensorSharp.Distributed`；由 Server、CLI 与 TensorAgent 共用 |
 | `TensorSharp.Server` | `TensorSharp.Server` | `TensorSharp.Server` | ASP.NET Core 服务、OpenAI/Ollama 适配层、TensorSharp.Chat 之上的 HTTP 传输层与 Web UI |
 | `TensorSharp.Server.Host` | `TensorSharp.Server.Host` | `TensorSharp.Server.Host` | **可运行**的 Web 应用：`Program.cs`、宿主装配、`wwwroot/` 与命令行。`TensorSharp.Server` 是它依赖的库——单独构建或运行 `TensorSharp.Server` 不会产生任何可执行文件 |
 | `TensorSharp.Cli` | `TensorSharp.Cli` | `TensorSharp.Cli` | 控制台宿主、调试工具与 JSONL 批处理 |
@@ -548,7 +555,7 @@ TensorSharp 采用分层系统结构：
 
 1. **TensorSharp.Core** 提供核心 `Tensor` 类型、存储抽象和可扩展的操作注册表（`Ops`）。CPU 实现使用 `System.Numerics.Vectors` 进行 SIMD 加速。
 
-2. **TensorSharp.Runtime** 负责运行时契约与通用服务：GGUF 解析、分词（SentencePiece / BPE）、聊天模板渲染、可配置 token 采样、输出解析、分页 KV 缓存（`Runtime/Paged/*`）、连续批处理调度器 / 引擎（`Runtime/Scheduling/*`）、`IKvBlockCodec` 接口及其 `TurboQuantKvCodec` 2-bit / Q4 / Q8 实现，以及 `IModelArchitecture`、`IBatchedPagedModel`、`IPromptRenderer`、`IOutputProtocolParser`、`IMultimodalInjector`、`IBackendExecutionPlan` 等抽象。它刻意不包含智能体层：技能、代码执行与子智能体委派位于 **TensorSharp.AgentHost**，该项目引用运行时、且运行时绝不反向引用，因此只需提供 OpenAI / Ollama 聊天补全的宿主可以只依赖运行时，不携带技能注册表、沙箱与代码执行器。（若该方向被反转，`AgentHostLayeringTests` 会失败。）
+2. **TensorSharp.Runtime** 负责运行时契约与通用服务：GGUF 解析、分词（SentencePiece / BPE）、聊天模板渲染、可配置 token 采样、输出解析、分页 KV 缓存（`Runtime/Paged/*`）、连续批处理调度器 / 引擎（`Runtime/Scheduling/*`），以及 `IModelArchitecture`、`IBatchedPagedModel`、`IPromptRenderer`、`IOutputProtocolParser`、`IMultimodalInjector`、`IBackendExecutionPlan` 等抽象。它刻意不包含智能体层：技能、代码执行与子智能体委派位于 **TensorSharp.AgentHost**，该项目引用运行时、且运行时绝不反向引用，因此只需提供 OpenAI / Ollama 聊天补全的宿主可以只依赖运行时，不携带技能注册表、沙箱与代码执行器。（若该方向被反转，`AgentHostLayeringTests` 会失败。）
 
 3. **TensorSharp.Models** 实现 `ModelBase` 以及已登记的全部 15 个架构描述符（`Architecture/BuiltInArchitectures.cs`）和多模态辅助组件——12 个文本家族（DeepSeek V4 Flash、DeepSeek V4.1 Flash、GLM 5.x、Gemma 4、DiffusionGemma、Qwen 3.5/3.6 系列、Qwen 3.8 Flash Next、GPT OSS、Nemotron-H、Mistral 3、Hunyuan Dense、Muse-Glimmer）与 3 个媒体输出家族（Qwen-Image-2.1、MiniMax-H3、Wan 2.1/2.2）。自回归架构提供旧的单序列前向，多数架构还提供面向连续批处理的 `IBatchedPagedModel.ForwardBatch` 实现（`<Family>Model.BatchedForward.cs`）。DiffusionGemma 刻意不同：它不支持 `Forward()`，生成必须通过 `DiffusionGemmaSampler` 在固定长度 canvas 上迭代去噪。Qwen-Image-2.1（`QwenImageModel`）同样非自回归：`Forward()` 抛异常，图像生成与编辑通过 `GenerateImage()` / `EditImage()` 进行，由它们编排扩散 Transformer、专用 2.1 VAE 与 Qwen3-VL-8B 文本编码器。LoRA 插件（`--lora` / `--lora-scale` / `--lora-config`，由 `TensorSharp.Runtime/LoraSpec.cs` 为两个宿主统一解析）以不合并的方式作用于扩散 Transformer（`QwenImage21LoraSet`）；`config/lora/` 提供十二个预设。视频家族更进一步：`MiniMaxH3Model` 与 `WanVideoModel` 的 `ForwardCore()` 都直接抛异常，生成统一走 `GenerateVideo(prompt, VideoGenerationParams)`，其背后是 `Models/Video/` 里共享的 `IVideoGenerationModel` 接缝——CLI 与服务端因此只用一条路径驱动两者（以及日后新增的模型），而不必逐个判断具体模型类型。MiniMax-H3 在同一个打包 latent 里**同时**去噪视频与 32 kHz 立体声音频，共有七张原生整网络计算图（DiT、Qwen3-VL 文本编码器、视觉塔、视频与音频 VAE 的编码与解码）；Wan 2.1/2.2 则是仅视频的家族，其 DiT、UMT5-XXL 编码器与因果 3D VAE 同样以整图方式运行。模型通过 `ModelBase.Create()` 加载，并依据 GGUF 元数据自动识别架构——不带架构元数据的文件例外，它们依据张量识别：MiniMax-H3 公开发布的 GGUF 完全不带元数据（`LooksLikeMiniMaxH3`，经由 `MiniMaxH3Architecture.DetectFromTensors` 接入），不带元数据的 Qwen-Image-2.1 GGUF（例如 Unsloth 的 Q8_0）也是如此（`QwenImageArchitecture.DetectFromTensors`）。以通用 `llama` 标签发布的文件则由描述符的 `RecognizeRelabelledFile` 逐个文件认领，目前只有 Mistral 3 实现了它（例如标为 `llama` 的 Mistral Small 3.1）。
 
@@ -619,10 +626,10 @@ span 记账、前缀裁剪、截断、切片——并且不再出现任何模型
 - **融合 GPU decode**（Gemma 4）：在 Metal 上将所有 Transformer 层合并为单次 GGML 计算图调度，将每个 token 的 CPU-GPU 往返从数百次降低到一次。相较逐算子调度约提升 2.6 倍。
 - **融合 GPU prefill**（Gemma 4）：对于密集（非 MoE、非 KV 共享、无 PLE/多模态）层，`Gemma4LayerPrefill` 将整个 Transformer 块（RMSNorm + QKV + QK-norm + RoPE + 注意力 + 输出投影 + post-attn norm + GeGLU FFN + post-FFN norm + 残差 + 层缩放因子）合并为 prefill 期间每层一次的 GGML 计算图调度，将融合方法从单 token decode 扩展到多 token prefill。
 - **分块 prefill**（Gemma 4）：长提示被拆分为有界的分块（2 倍滑动窗口，最大 2048 tokens），以避免 SWA 层上 O(n²) 的注意力分数张量。分块在纯文本（无多模态嵌入）时自动应用，确保每个分块在 SWA 窗口预算内。
-- **融合 Qwen 3.5/3.6-family attention 层 decode**：单次 GGML 计算图为每个 FullAttention 层完成 RMSNorm + 融合 QKV + Q/gate 反交错 + 每头 QK norm + RoPE + KV 缓存追加 + flash attention + sigmoid 门控混合 + 输出投影 + 残差加法。替换了原本每层 ~2 次独立 GGML 调用与 ~6 个小型 CPU/GPU 同步点。当缓存序列长度超过 4096 token 时启用（可通过 `FUSED_ATTN_LAYER_MIN_SEQ_LEN=N` 覆盖）。
+- **融合 Qwen 3.5/3.6-family attention 层 decode**：单次 GGML 计算图为每个 FullAttention 层完成 RMSNorm + 融合 QKV + Q/gate 反交错 + 每头 QK norm + RoPE + KV 缓存追加 + flash attention + sigmoid 门控混合 + 输出投影 + 残差加法。替换了原本每层 ~2 次独立 GGML 调用与 ~6 个小型 CPU/GPU 同步点，在任意缓存序列长度下启用。
 - **融合 prefill 注意力**（Qwen 3.5/3.6-family）：`FusedPrefillAttention` 将 Q*K^T、因果掩码、softmax 和 *V 合并为 prefill 期间每个注意力层一次的 GGML 计算图调度，消除了每个注意力层约 5 次独立的 C# 到 GGML 往返。同时支持初始 prefill 和带有已有 KV 缓存条目的续接。
 - **整模型 Metal prefill 与 decode**（Qwen 3.5/3.6-family）：受支持的 dense 单设备模型会在一张 GGML 计算图内执行全部 attention 与 GatedDeltaNet 层、最终 RMSNorm 与 LM head。prefill 使用融合的多 token verify 图；decode 保留按序列的计算图，直接读取量化的 token embedding，把 Metal KV 拷贝视图限制在 64 token 的注意力桶内，并让计算图提交与 logits 回读重叠。
-- **原地 Metal GatedDeltaNet 状态**（Qwen 3.5/3.6-family）：单 token decode 让每个递归层融合 GDN 的输出与其状态输入共用同一块内存，在 64 层的 Qwen 3.6-27B 上每 token 省去 48 次状态拷贝调度与约 302 MB 的状态读写流量。设置 `TS_QWEN35_METAL_GDN_INPLACE_STATE=0` 可保留独立拷贝路径用于诊断。
+- **原地 Metal GatedDeltaNet 状态**（Qwen 3.5/3.6-family）：单 token decode 让每个递归层融合 GDN 的输出与其状态输入共用同一块内存，在 64 层的 Qwen 3.6-27B 上每 token 省去 48 次状态拷贝调度与约 302 MB 的状态读写流量。
 - **融合输出投影 + FFN**（Qwen 3.5/3.6-family）：对于 FullAttention 和 GatedDeltaNet 中的 dense FFN 层，`FusedOutProjFFN` 将输出投影、残差加法、post-attention RMSNorm 以及完整的 SwiGLU FFN（gate_up matmul + SiLU + down matmul + 残差加法）合并为单次 GGML 计算图调度，将每层 2 次 GPU 往返减少为 1 次。
 - **融合输出投影 + 归一化 + 路由器**（Qwen 3.5/3.6-family MoE）：`FusedOutProjNormRouter` 将 GatedDeltaNet 输出投影、残差加法、post-attention RMSNorm 和 MoE 路由器投影合并为一次调度。预计算的路由器 logits 随后由批量 MoE 内核直接消费，消除了每个 MoE 层的独立路由器调度。
 - **融合视觉编码器**（Qwen 3.5/3.6-family）：`FusedVisionAttention` 将 LayerNorm + QKV + 偏置 + 2D RoPE + 缩放点积注意力 + 输出投影 + 偏置 + 残差合并为一次 GGML 计算图调度（~8 个算子 → 1）。`FusedVisionMLP` 将 LayerNorm + up + 偏置 + GELU + down + 偏置 + 残差合并为一次调度（7 个算子 → 1）。两者结合将每个编码器块的 GPU 往返从约 15 次减少到 2 次。
@@ -630,16 +637,16 @@ span 记账、前缀裁剪、截断、切片——并且不再出现任何模型
 - **原生量化计算**：量化权重（Q4_K_M、Q6_K、Q8_0、IQ2_XXS、MXFP4、NVFP4 等）直接参与 matmul，无需展开为 FP32，节省内存与带宽。批量 `AddmmQuantBatch` 内核可在一次调度内完成对同一量化权重块的多个子矩阵 matmul。
 - **Direct CUDA 内核**：`cuda` 后端加速 fill/copy、unary ops、融合激活、RMSNorm、softmax、index select、因果掩码、RoPE/RoPEEx、cuBLAS GEMM，以及受支持的量化 matmul/get-rows；未覆盖算子会安全回退。
 - **批量 GPU MoE**：`MoEExpertsSwiGLUResidual`（Qwen 3.5/3.6-family）和 `MoEExpertsForward`（Nemotron-H）将每个 MoE 层中所有被选中的专家——以及 Qwen 3.5/3.6-family 中可选的 shared expert 与残差加法——合并为一次 GGML 计算图调度。
-- **整模型融合 decode 计算图**（Gemma 4 dense + MoE、Qwen 3.5/3.6、GPT OSS）：一个 decode token 的全部计算——每一层、MoE 路由与专家、最终 norm 与 LM head——作为**一次** GGML 计算图提交，而不是每层一次。在 CUDA/Vulkan 上该图只构建一次、张量地址保持稳定后反复重放（KV 写入用 `ggml_set_rows`、行号作为 I64 输入；注意力窗口按 stride 补齐、掩码作为 F16 输入），这正是 ggml-cuda 能把它捕获成 CUDA 图的前提。GPT OSS decode 在 A40 上从 24 → 154 tok/s，且随上下文长度基本持平（16K 时 133 tok/s，而逐层路径已跌到 2.3）。补齐的注意力窗口必须清零而不能留作未初始化——残留显存按 F16 解读会产生能穿过 `-inf` 掩码的 NaN。按模型的关闭开关：`TS_GPTOSS_MODEL_DECODE=0`、`TS_GEMMA4_FD_PERSIST=0`、`TS_QWEN35_FD_PERSIST=0`。
+- **整模型融合 decode 计算图**（Gemma 4 dense + MoE、Qwen 3.5/3.6、GPT OSS）：一个 decode token 的全部计算——每一层、MoE 路由与专家、最终 norm 与 LM head——作为**一次** GGML 计算图提交，而不是每层一次。在 CUDA/Vulkan 上该图只构建一次、张量地址保持稳定后反复重放（KV 写入用 `ggml_set_rows`、行号作为 I64 输入；注意力窗口按 stride 补齐、掩码作为 F16 输入），这正是 ggml-cuda 能把它捕获成 CUDA 图的前提。GPT OSS decode 在 A40 上从 24 → 154 tok/s，且随上下文长度基本持平（16K 时 133 tok/s，而逐层路径已跌到 2.3）。补齐的注意力窗口必须清零而不能留作未初始化——残留显存按 F16 解读会产生能穿过 `-inf` 掩码的 NaN。
 - **GLM 5.x 整模型执行器**：`glm-dsa` 是同样的形态。原生 ggml 执行器（`ggml_ops_glm_dsa.cpp`）自行加载分片 GGUF（GLM-5.2 为六个分片，GLM-5.3 的 UD-Q2_K_XL 为七个），并持有 MLA 缓存（每层每 token 一行 576 宽，逐 head 的 K/V 解压被折进 query 和输出）以及 DSA lightning indexer 缓存——78 层里只有 21 层会刷新它。它既可以按层切分到各张可见 GPU，也可以在 `--tp N` 下让每一层跑在每个 rank 上：注意力 head 按列/行并行，路由专家则在**每个专家内部**按行切开，因为 `ggml_mul_mat_id` 要求同一个 token 选中的专家 id 互不相同。并发靠原生序列 slot 而不是分页 KV，在其之上默认启用批量融合 decode（`TS_BATCHED_FUSED_DECODE=0` 可关闭）。`TensorSharp.Models/Models/GlmDsa/` 里是原生路径用来对照的托管逐算子参考实现。末尾的 NextN 块（`blk.78`）在 `--spec` 下驱动 [MTP 投机解码](docs/models/glm_zh-cn.md#nextn--mtp-投机解码)：主干图多输出一个 `h_nextn`，第二张图运行草稿块；该块只在请求了投机时才加载，因为它是一整层额外的解码层，会与 KV 缓存争用显存。
-- **DeepSeek V4 整模型执行器**：`deepseek4` 完全绕开通用的逐算子前向。原生 ggml 执行器（`ggml_ops_deepseek4.cpp`）自行加载分片 GGUF，把权重按层切分到所有可见 GPU，在设备上持有全部 DSV4 KV 状态（原始 SWA 环、CSA/HCA 压缩 K 缓存、lightning indexer 缓存、压缩器状态环），并把每个 prefill/decode ubatch 作为一张 `ggml_backend_sched` 计算图执行，配合按形状签名的图缓存，使稳态 decode 直接重放已捕获的 CUDA 图。decode 注意力通过融合的 index-gather 算子取出紧凑的 `[ring | top-512]` K，而不是扫描整个上下文。Direct CUDA 引擎（`TensorSharp.Backends.Cuda/Dsv4/`）在不依赖 ggml 的前提下实现同一模型，把量化权重从分片直接流式写入按设备的显存竞技场。二者都构建在共享的 `Tensor` / `IAllocator` / `Ops` 之上；只有真正 DSV4 特有的计算才留在 DeepSeek V4 的文件里。
+- **DeepSeek V4 整模型执行器**：`deepseek4` 完全绕开通用的逐算子前向。原生 ggml 执行器（`ggml_ops_deepseek4.cpp`）自行加载分片 GGUF，把权重按层切分到 `--layer-split N` 指定的 GPU 上（默认单设备），在设备上持有全部 DSV4 KV 状态（原始 SWA 环、CSA/HCA 压缩 K 缓存、lightning indexer 缓存、压缩器状态环），并把每个 prefill/decode ubatch 作为一张 `ggml_backend_sched` 计算图执行，配合按形状签名的图缓存，使稳态 decode 直接重放已捕获的 CUDA 图。decode 注意力通过融合的 index-gather 算子取出紧凑的 `[ring | top-512]` K，而不是扫描整个上下文。Direct CUDA 引擎（`TensorSharp.Backends.Cuda/Dsv4/`）在不依赖 ggml 的前提下实现同一模型，把量化权重从分片直接流式写入按设备的显存竞技场。二者都构建在共享的 `Tensor` / `IAllocator` / `Ops` 之上；只有真正 DSV4 特有的计算才留在 DeepSeek V4 的文件里。
 - **DSpark 块级投机解码**（DeepSeek V4）：独立的草稿 GGUF（`--draft-model`）每步提议一整块 token，主干用一次批量前向验证整块。在 ggml 上草稿器就是计算图里额外的三层，其 key ring 由主干图自己提交，因此投机不产生任何主机往返。4×A40 实测 decode 提速 1.3–1.4×（多轮对话最高 2.0×），贪心输出与非投机基线逐字节一致。
 - **基于 GEMM 的视觉 patch embedding**（Qwen 3.5/3.6-family）：将 patch embedding 重构为并行 im2col + 矩阵乘法，把单线程标量五重嵌套循环替换为可在 GPU 上加速的 matmul。
 - **并行化 Q/gate 反交错**（Qwen 3.5/3.6-family）：FullAttention prefill 中的 Q + sigmoid-gate 反交错按 token 并行化，长 prompt 时可随 CPU 核心数线性扩展。
 - **优化后的纯 C# CPU 路径**：托管 GEMM 快速路径和连续 Float32 内核加速了 decode、softmax、RMSNorm、RoPE、融合激活等热点路径，同时在 CPU 加载时保持量化 GGUF 权重压缩状态。
 - **环形 KV 缓存**：滑动窗口注意力层使用固定大小环形缓冲区，使内存占用不随序列长度增长。
 - **KV 缓存前缀复用**：多轮对话会复用各轮之间最长的匹配 token 前缀。对 SWA 模型，截断会自动按滑动窗口大小回退，使后缀部分可以重建 SWA 上下文。
-- **分页 KV 缓存 & 基数树前缀缓存**：连续批处理引擎把 KV 切分成固定大小的块，并默认通过基数树在并发 / 历史请求间复用 prompt 前缀（`TS_PREFIX_CACHE_MODE=tree`）；`TS_PREFIX_CACHE_MODE=legacy` 选择旧的“对写满的块做内容哈希后共享”方式，`--no-prefix-cache` / `TS_SCHED_PREFIX_CACHE=0` 在两种模式下都关闭复用。DiffusionGemma 与媒体模型不参与。尚未实现 `IBatchedPagedModel` 的模型仍会走同一引擎内隔离的按序列 KV-swap 回退路径。
+- **分页 KV 缓存 & 基数树前缀缓存**：连续批处理引擎把 KV 切分成固定大小的块，并通过基数树在并发 / 历史请求间复用 prompt 前缀；`--no-prefix-cache` / `TS_SCHED_PREFIX_CACHE=0` 关闭复用。DiffusionGemma 与媒体模型不参与。尚未实现 `IBatchedPagedModel` 的模型仍会走同一引擎内隔离的按序列 KV-swap 回退路径。
 - **原生分页注意力内核**：`TSGgml_PagedAttentionForward`（及面向 GPT OSS 的 `WithSinks` 变体）在 C++ 中按序列从分页缓冲区聚合 K/V，按序列构建小型 GGML 图，并派发 `ggml_flash_attn_ext`——也就是旧的单序列路径所使用的同一融合 GPU flash 注意力内核（Metal/CUDA/Vulkan）。在 Ministral-3-14B 长上下文（4×~800 tokens）上比旧的按序列 GGML 路径**快 ~21%**。
 - **批处理 / 分页前向**：Mistral 3、Gemma 4、GPT OSS、Hunyuan Dense、Qwen 3.5/3.6（含 GatedDeltaNet 递归状态池）、Nemotron-H（含 Mamba2 递归状态池 + 原生批处理 Mamba2 内核）把 N 个序列打包到一次 `ForwardBatch` 调用中，每层执行一次批处理线性投影 matmul，通过 `slotMapping` 写入分页 K/V，并通过原生内核做按序列注意力。Gemma 4 批处理路径在 batch=8 短 prompt 下达到 **1.5×** 旧吞吐，在 4×800-token prompt 下达到 **1.6×**；Nemotron-H Mamba2 批处理在 Apple M4 Pro 上 batch=3 时达到 **3.95×**。详见 [docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING_zh-cn.md](docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING_zh-cn.md)。
 - **MTP / NextN 投机解码**：单序列可运行多 token 预测草稿头（Qwen 3.6 与 Qwen 3.8-27B 内嵌 NextN 块；GLM 5.2 与 GLM-5.3 内嵌 NextN 块——只在不传 `--tp` 时可用，因为二者都不带自己的 head，draft 块借用按列切分的主干 LM head；Gemma 4 独立 `gemma4-assistant` 草稿 GGUF；Qwen 3.8 Flash Next 通过 `--draft-model` 加载共享 MTP 头 GGUF，仅限 GGML 后端）。草稿头最多提议 `--spec-draft` 个 token，主干用一次批量前向验证，二者均由该请求自己的采样器驱动，因此在不改变输出的前提下加速 decode。在 ggml 后端上，融合的单图多 token 验证与草稿步内核（`NativeGemma4ModelVerify` / `TryFusedMoEModelVerify` / `NativeGemma4DraftStep`，以及 Qwen 3.6 的 NextN 图）摊销了验证开销；Gemma 4 路径还增加了 gallocr 验证 scratch 以及部分接受时避免重跑已保留前缀的稠密快速回滚。纯 C# `cuda` 后端运行完全驻留 GPU 的逐算子验证 / 草稿（donor 缓存注意力、GQA decode 内核、GPU RoPE），使验证层循环零宿主端同步停顿。默认关闭；用 `--spec` 启用，或用 `--draft-model` 指定独立的草稿器 GGUF（Gemma 4 assistant、Qwen 3.8 Flash Next 的 MTP 头）——给出文件本身即可启用投机。
@@ -654,21 +661,20 @@ span 记账、前缀裁剪、截断、切片——并且不再出现任何模型
 - **最佳匹配内存池**：GGML 主机分配器使用 best-fit 而非 first-fit 在已池化块中检索可重用空间，避免把大块草稿内存交给小型中间张量请求，从而把工作集严格控制在合理范围内。
 - **有界池保留量**：集成 GPU / CPU 内存池现在将单个保留块上限设为 64 MB，整池上限设为 32 块。结合 mmap 后的权重，可在快速复用短生命中间张量的同时限制峰值常驻内存。
 - **高内存效率模型加载**：大张量直接流式加载到原生内存，避免中间托管分配。F32 权重与 norm 仍按需加载；量化权重在受支持的后端上通过 mmap 方式绑定。
-- **分页 KV 块池；RAM / SSD 分层仅在独立管理器中**：服务端请求路径的活跃块由每个引擎的 `BlockPool` 统一管理，按 LRU 淘汰缓存的前缀块。分层的 `PagedKvBlockStore`（`TS_KV_CACHE_MAX_RAM_MB`、`TS_KV_CACHE_SSD_DIR`、`TS_KV_CACHE_MAX_SSD_MB`）属于独立的 `PagedKvCacheManager`，只有 CLI 的 `--paged-bench` 会用到它。服务端接受并记录 `--paged-kv*` 参数（以及 `--redis-url` 中 KV 的那一半），但它们不改变请求的服务方式。
-- **KV 块编解码器**：在上述独立管理器中，`TurboQuantKvCodec`（2-bit 仿射、Q4 或 Q8）可通过 `--paged-kv-quant-bits` / `TS_KV_PAGED_QUANT_BITS` 压缩分页块，以精度换取更小的每块带宽与内存占用——大致减半（Q8）、减为四分之一（Q4）或约十分之一（2-bit，fp32 块）。2-bit 档位使用每组仿射 min+scale（即 llama.cpp Q2_K 背后的 block-min 思路），让四个码值覆盖该组的实际取值范围；它面向超长上下文的远端前缀复用，此时注意力权重远大于量化噪声。带递归状态的模型会自动回退到 passthrough。
+- **分页 KV 块池**：服务端请求路径的分页 KV 块由每个引擎的 `BlockPool` 统一管理；radix 前缀缓存在其字节预算内淘汰缓存的前缀块。
 
 
 ## 测试
 
 ### 单元测试（xUnit）
 
-`InferenceWeb.Tests` 覆盖无需启动服务的进程内行为：托管量化算子、可用 CUDA 设备上的 Direct CUDA 后端内核、可用 MLX 时的 MLX 后端内核、分页 KV 缓存调度（`ContinuousBatchSchedulerTests`、`PagedKvCacheTests`、`PagedKvCacheCodecTests`）、批处理执行器正确性（`BatchedExecutorTests`）、按模型批处理前向与旧路径的一致性（`Qwen35BatchedCorrectnessTests`、`Mistral3BatchedForwardTests`、`Gemma4BatchedForwardTests`、`GptOssBatchedCorrectnessTests`、`NemotronBatchedCorrectnessTests`）、MTP / NextN 投机解码正确性与可选端到端探针（`SpeculativeExecutionTests`、`Qwen36SpeculativeTests`、`Gemma4SpeculativeTests`）、DiffusionGemma 去噪 / prompt-KV / 批处理生成探针（`DiffusionGemmaTests`）、按模型批处理性能微基准（`*BatchedPerfBench.cs`）、`TurboQuantKvCodec` 编解码往返、prefill 分块、KV 缓存策略、KV 缓存 Prompt 渲染与多轮集成、聊天会话与 SessionManager 隔离、ModelService 历史跟踪、请求日志中间件与文件日志 Provider、图像预处理、媒体辅助逻辑、结构化输出校验、文本上传辅助、ModelService 上传日志、Web UI 聊天策略、模型上下文长度解析、可用后端发现，服务器 CLI 选项构造（`ServerOptionsBuilderTests`），Agent Skills —— `SKILL.md` frontmatter 解析及其各类告警情形（`SkillManifestParserTests`），与技能注册表的发现、优先级、ZIP 安装防护和路径边界约束（`SkillRegistryTests`），以及子智能体委派 —— 工具 schema、限额、宿主接线与进度快照（`MultiAgentTests`、`MultiAgentHostTests`、`MultiAgentToolSchemaTests`、`MultiAgentProgressTests`、`MultiAgentClientTests`）。
+`InferenceWeb.Tests` 覆盖无需启动服务的进程内行为：托管量化算子、可用 CUDA 设备上的 Direct CUDA 后端内核、可用 MLX 时的 MLX 后端内核、分页 KV 缓存调度（`ContinuousBatchSchedulerTests`）、批处理执行器正确性（`BatchedExecutorTests`）、按模型批处理前向与旧路径的一致性（`Qwen35BatchedCorrectnessTests`、`Mistral3BatchedForwardTests`、`Gemma4BatchedForwardTests`、`GptOssBatchedCorrectnessTests`、`NemotronBatchedCorrectnessTests`）、MTP / NextN 投机解码正确性与可选端到端探针（`SpeculativeExecutionTests`、`Qwen36SpeculativeTests`、`Gemma4SpeculativeTests`）、DiffusionGemma 去噪 / prompt-KV / 批处理生成探针（`DiffusionGemmaTests`）、按模型批处理性能微基准（`*BatchedPerfBench.cs`）、prefill 分块、KV 缓存策略、KV 缓存 Prompt 渲染与多轮集成、聊天会话与 SessionManager 隔离、ModelService 历史跟踪、请求日志中间件与文件日志 Provider、图像预处理、媒体辅助逻辑、结构化输出校验、文本上传辅助、ModelService 上传日志、Web UI 聊天策略、模型上下文长度解析、可用后端发现，服务器 CLI 选项构造（`ServerOptionsBuilderTests`），Agent Skills —— `SKILL.md` frontmatter 解析及其各类告警情形（`SkillManifestParserTests`），与技能注册表的发现、优先级、ZIP 安装防护和路径边界约束（`SkillRegistryTests`），以及子智能体委派 —— 工具 schema、限额、宿主接线与进度快照（`MultiAgentTests`、`MultiAgentHostTests`、`MultiAgentToolSchemaTests`、`MultiAgentProgressTests`、`MultiAgentClientTests`）。
 
 ```bash
 dotnet test InferenceWeb.Tests/InferenceWeb.Tests.csproj
 ```
 
-iOS 应用的宿主有自己的测试项目 `TensorAgent/tests/TensorAgent.Tests`（见 [TensorAgent/README.md](TensorAgent/README.md)）；PR CI 不运行它，不过 `InferenceWeb.Tests` 会检查该应用的项目文件、plist、entitlement 与原生导出清单（`TensorAgentMauiProjectTests`）。
+TensorAgent 共用的应用宿主有自己的测试项目 `TensorAgent/tests/TensorAgent.Tests`（见 [TensorAgent/README.md](TensorAgent/README.md)），它属于 `TensorSharp.slnx`；PR CI 不运行它，不过 `InferenceWeb.Tests` 会检查该应用的项目文件、plist、entitlement 与原生导出清单（`TensorAgentMauiProjectTests`），以及解决方案构建如何构建该应用（`TensorAgentSolutionBuildTests`）。
 
 #### 测试分组（Test lanes）
 
@@ -709,7 +715,7 @@ bash TensorSharp.Server.Host/testdata/test_multiturn.sh
 
 `TensorSharp.GGML.Native/tests/` 下的 C++ 测试只有在 `TENSORSHARP_GGML_NATIVE_BUILD_TESTS=ON`（默认 `OFF`）时才会构建：向 `build-linux.sh` 或 `build-windows.ps1` 传入 `--tests`（两者也都读取该环境变量）。`build-macos.sh` 只构建库本身，因此在 macOS 上请自行用 `-DTENSORSHARP_GGML_NATIVE_BUILD_TESTS=ON` 配置 CMake。用 `ctest --test-dir <构建目录> -R <名称> --output-on-failure` 运行。登记了跳过返回码的测试（包括 Qwen-Image-2.1 这一组）在设备不可用时报告为已跳过，而不是通过。
 
-示例：`flash-attn-unsupported-shape-fallback`（见上文），以及 Qwen-Image-2.1 这一组——`qwen-image21-whole-graph-cpu` 写出一个合成的显式注意力参考，`qwen-image21-whole-graph-{metal,vulkan,cuda}` 与之对比（包括前缀 KV 缓存与两个 rank 的张量并行切分：CPU 与 Metal 上用回环组；CUDA 与 Vulkan 需要两块 GPU，单 GPU 机器会在通过的测试中打印 `SKIP tensor parallel`，这部分不计为覆盖），另有 `qwen-image21-vae-shortcuts-{cpu,cuda}` 与 `qwen-image21-vae-f32-convolution-metal[-no-mps]`。每个 GPU 变体只有在构建启用了对应后端时才会登记。详见 [TensorSharp.GGML.Native/tests/qwen_image21_tests.md](TensorSharp.GGML.Native/tests/qwen_image21_tests.md)；这些是数值回归测试，不检查图像质量或速度。
+示例：`flash-attn-unsupported-shape-fallback`（见上文），以及 Qwen-Image-2.1 这一组——`qwen-image21-whole-graph-cpu` 写出一个合成的显式注意力参考，`qwen-image21-whole-graph-{metal,vulkan,cuda}` 与之对比（包括前缀 KV 缓存与两个 rank 的张量并行切分：CPU 与 Metal 上用回环组；CUDA 与 Vulkan 需要两块 GPU，单 GPU 机器会在通过的测试中打印 `SKIP tensor parallel`，这部分不计为覆盖），另有 `qwen-image21-vae-shortcuts-{cpu,cuda}` 与 `qwen-image21-vae-f32-convolution-metal[-no-mps]`（后者在 Metal 上同样运行这些捷径用例）。每个 GPU 变体只有在构建启用了对应后端时才会登记。详见 [TensorSharp.GGML.Native/tests/qwen_image21_tests.md](TensorSharp.GGML.Native/tests/qwen_image21_tests.md)；这些是数值回归测试，不检查图像质量或速度。
 
 ### 推理矩阵运行器
 

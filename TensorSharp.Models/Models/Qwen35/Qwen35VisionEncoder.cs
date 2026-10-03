@@ -235,7 +235,7 @@ namespace TensorSharp.Models
             // round-tripping dispatches per block. Falls back to the per-block
             // loop on any failure. CPU-allocator path keeps the per-block loop.
             bool wholeEncoderDone = false;
-            if (deepStack == null && _useNativeAttention && s_wholeEncoderFusedEnabled)
+            if (deepStack == null && _useNativeAttention)
             {
                 wholeEncoderDone = TryWholeEncoderFused(blockOrdered, numPatches, headDim, halfDim,
                     ropeCache.CosTable, ropeCache.SinTable);
@@ -250,7 +250,7 @@ namespace TensorSharp.Models
                     // a host round trip for every transformer block. Fuse each
                     // range through its tap and project before starting the next.
                     bool rangeDone = false;
-                    if (UseFusedVision21 && s_wholeEncoderFusedEnabled && !s_traceEnabled)
+                    if (UseFusedVision21 && !s_traceEnabled)
                     {
                         int end = i;
                         while (end + 1 < _blockCount &&
@@ -596,18 +596,6 @@ namespace TensorSharp.Models
             return order;
         }
 
-        // TS_QWEN35_VENC_FUSED=0 forces the per-block path (A/B + safety kill-switch).
-        private static readonly bool s_wholeEncoderFusedEnabled =
-            Environment.GetEnvironmentVariable("TS_QWEN35_VENC_FUSED") != "0";
-
-        // TS_QWEN35_VENC_FUSED_ATTN=0 bypasses the fused native attention
-        // subgraph in the per-block path (keeping the fused MLP), forcing the
-        // managed split + RoPE + Ops.ScaledDotProductAttention chain. A/B
-        // switch for isolating native attention-kernel issues; this is how
-        // the head_dim-72 CUDA flash-attn precision bug was pinned down.
-        private static readonly bool s_fusedAttnEnabled =
-            Environment.GetEnvironmentVariable("TS_QWEN35_VENC_FUSED_ATTN") != "0";
-
         // TS_QWEN35_VENC_TRACE=1 prints a checksum of the residual stream at every
         // encoder stage. Used to localize a numeric divergence between backends
         // (run the same image through two allocators and diff the first stage whose
@@ -680,18 +668,13 @@ namespace TensorSharp.Models
                     return false;
             }
 
-            // No VRAM-fit guard any more. It existed for the pre-flash graph that
-            // materialized an O(numPatches^2) score tensor (~4 GB at 7920 patches,
-            // 95 s WDDM-thrash next to a resident 12 GB model). Attention now runs
-            // through ggml flash_attn_ext (the vendored ggml-cuda has a head_dim=72
-            // kernel), so the per-encode budget is just a handful of
-            // [3*hidden, numPatches] activations (~0.3 GB at 7920 patches). The
-            // per-block fallback can never win post-flash: it caches the SAME
-            // ~1.6 GB of block weights resident (bind_w cacheable buffers), peaks
-            // on the same per-tensor activations, and is 5-15x slower (measured
-            // 2.7 s fused vs 47 s per-block at 7920 patches with 0.4 GB free —
-            // WDDM absorbs the scratch fine). TS_QWEN35_VENC_FUSED=0 remains the
-            // kill-switch that forces the per-block path.
+            // Fuse all blocks while gallocr reuses their activation storage. On
+            // CUDA the default native attention uses bounded F32 score tiles
+            // and ordered writes into one output; CPU/Metal use upstream flash.
+            // TS_QWEN_VISION_F32=1 selects the owned streaming F32 CUDA kernel
+            // for 72-wide heads. Both CUDA paths avoid a full quadratic score
+            // allocation, but the ~1.6 GB of resident encoder weights and the
+            // language model's resident buffers can still cause WDDM paging.
 
             float attnScale = 1f / MathF.Sqrt(headDim);
             try
@@ -725,7 +708,7 @@ namespace TensorSharp.Models
 
             // Fully fused attention path: LN + QKV + RoPE + SDPA + out + residual in one dispatch.
             bool fusedAttn = false;
-            if (_useNativeAttention && s_fusedAttnEnabled
+            if (_useNativeAttention
                 && _weights.TryGetValue($"{prefix}.ln1.weight", out var ln1W)
                 && _weights.TryGetValue($"{prefix}.ln1.bias", out var ln1B)
                 && _weights.TryGetValue($"{prefix}.attn_qkv.weight", out var qkvW)
@@ -1163,10 +1146,18 @@ namespace TensorSharp.Models
                 _weights.TryGetValue(biasName, out var cpuBias);
                 return CpuLinear(input, weightName, null, cpuBias);
             }
-            // Derived from the transposed copy, not _weights[weightName]: on the
-            // direct-CUDA path the untransposed original is released once the
-            // transpose exists (see GetOrCreateTransposedWeight).
-            Tensor weightT = GetOrCreateTransposedWeight(weightName);
+            // On a GGML allocator the weight is passed as a transposed VIEW of its own
+            // [out, in] rows, which is the layout ggml_mul_mat consumes: the native addmm
+            // binds it in place (can_map_m2_direct). A contiguous transposed copy made the
+            // host walk every element of every weight on first use -- the GGML copy of a
+            // bare transpose is a single-threaded element loop -- and the native side then
+            // packed that copy back into [out, in] on every call. For a Qwen-Image-2.1
+            // edit that was 62 transposes and most of the reference-image encode: 4 s
+            // under CoreCLR, 69 s in the Mac app, whose managed code runs on Mono.
+            // Elsewhere the transposed copy stays: direct CUDA releases the original
+            // once its transpose exists (see GetOrCreateTransposedWeight).
+            using Tensor weightView = _useNativeAttention ? _weights[weightName].Transpose() : null;
+            Tensor weightT = weightView ?? GetOrCreateTransposedWeight(weightName);
             int seqLen = (int)input.Sizes[0];
             int outDim = (int)weightT.Sizes[1];
 
@@ -1185,15 +1176,10 @@ namespace TensorSharp.Models
             return result;
         }
 
-        // A/B knobs of the pure-C# backend. TS_QWEN35_VENC_CPU_GEMM=0 restores the previous
-        // path as a whole (Ops.Addmm linears, the host GELU loop, the Ops-based attention);
-        // TS_QWEN35_VENC_CPU_ATTN=0 restores only the attention.
-        private static readonly bool s_cpuGemmEnabled =
-            Environment.GetEnvironmentVariable("TS_QWEN35_VENC_CPU_GEMM") != "0";
-        private static readonly bool s_cpuAttentionEnabled =
-            Environment.GetEnvironmentVariable("TS_QWEN35_VENC_CPU_ATTN") != "0";
-        private bool UseCpuLinear => _cpuManaged && s_cpuGemmEnabled;
-        private bool UseCpuAttention => UseCpuLinear && s_cpuAttentionEnabled;
+        // The pure-C# backend runs the packed linears, the vectorized GELU and the managed
+        // attention; the other backends keep Ops.Addmm and the Ops-based attention.
+        private bool UseCpuLinear => _cpuManaged;
+        private bool UseCpuAttention => _cpuManaged;
         private readonly Dictionary<string, QwenImage.PackedPanels> _cpuPackedWeights = new();
         private readonly QwenImage.CpuAttentionWorkspace _cpuAttentionWorkspace = new();
 

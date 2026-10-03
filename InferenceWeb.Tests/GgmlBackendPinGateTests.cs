@@ -55,7 +55,7 @@ public sealed class GgmlBackendPinGateTests
         (string Type, string Method, BackendType Backend)[] declared =
         {
             (nameof(DeepSeekNativeRetentionFixtureTests), nameof(DeepSeekNativeRetentionFixtureTests.FailingPostCommitDiagnosticCannotUndoNativeOwnership), BackendType.GgmlCpu),
-            (nameof(DeepSeekNativeRetentionFixtureTests), nameof(DeepSeekNativeRetentionFixtureTests.RetainedNativeHolderPreservesContinuationAndCanBeReclaimedWithoutASparePrimary), BackendType.GgmlCpu),
+            (nameof(DeepSeekNativeRetentionFixtureTests), nameof(DeepSeekNativeRetentionFixtureTests.RetainedNativeHolderPreservesContinuation_AndOutlivesANewPrimaryWhileMemoryAllows), BackendType.GgmlCpu),
             (nameof(DeepSeek41DsparkIntegrationTests), nameof(DeepSeek41DsparkIntegrationTests.CpuAttachedBlockHead_EngagesAndPreservesSixteenGreedyTokens), BackendType.GgmlCpu),
             (nameof(DeepSeek41DsparkIntegrationTests), nameof(DeepSeek41DsparkIntegrationTests.VerifyRewindAndTwoSlots_PreserveAcceptedPrefixAndUnrelatedContinuation), BackendType.GgmlCpu),
             (nameof(Gemma4CacheResidencyTests), nameof(Gemma4CacheResidencyTests.InitializeResidentCache_DoesNotRestorePreviousDeviceContents), BackendType.GgmlCuda),
@@ -65,7 +65,9 @@ public sealed class GgmlBackendPinGateTests
             (nameof(GgmlCopyDtypeTests), nameof(GgmlCopyDtypeTests.Copy_CrossDtype_Throws), BackendType.GgmlCpu),
             (nameof(GgmlCopyStridedFloat32Tests), nameof(GgmlCopyStridedFloat32Tests.Copy_NarrowOnInnerDim_MatchesElementwiseReference), BackendType.GgmlCpu),
             (nameof(GgmlCopyStridedFloat32Tests), nameof(GgmlCopyStridedFloat32Tests.Copy_NarrowOnMiddleDim_KvCacheResizeLayout_MatchesReference), BackendType.GgmlCpu),
-            (nameof(GgmlCopyStridedFloat32Tests), nameof(GgmlCopyStridedFloat32Tests.Copy_TransposedView_StaysOnTheElementPath_AndIsCorrect), BackendType.GgmlCpu),
+            (nameof(GgmlCopyStridedFloat32Tests), nameof(GgmlCopyStridedFloat32Tests.Copy_TransposedView_IsCorrect), BackendType.GgmlCpu),
+            (nameof(GgmlCopyStridedFloat32Tests), nameof(GgmlCopyStridedFloat32Tests.Copy_TransposedWeight_MatchesTheElementwiseReference), BackendType.GgmlCpu),
+            (nameof(GgmlCopyStridedFloat32Tests), nameof(GgmlCopyStridedFloat32Tests.Copy_TransposeOfANarrowedWeight_ReadsOnlyItsOwnColumns), BackendType.GgmlCpu),
             (nameof(GgmlCopyStridedFloat32Tests), nameof(GgmlCopyStridedFloat32Tests.Copy_NarrowedOuterDim_ContiguousInner_MatchesReference), BackendType.GgmlCpu),
             (nameof(GgmlCopyStridedFloat32Tests), nameof(GgmlCopyStridedFloat32Tests.Copy_ContiguousToContiguous_IsUnchanged), BackendType.GgmlCpu),
             (nameof(Glm5NextNativeTensorParallelTests), nameof(Glm5NextNativeTensorParallelTests.NativeLoader_AcceptsGlm5NextWithTwoAlignedTpRanks), BackendType.GgmlCpu),

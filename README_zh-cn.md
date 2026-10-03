@@ -6,69 +6,27 @@
 
 [English](README.md) | [中文](README_zh-cn.md)
 
-**面向 GGUF 模型的原生 .NET LLM 推理引擎** —— 覆盖自回归 LLM *与* DiffusionGemma 风格的文本扩散模型，以及 [Qwen-Image-2.1 图像生成与编辑](docs/models/qwenimage21_zh-cn.md)、MiniMax-H3 视频 + 原生 32 kHz 立体声音频联合生成（Wan 2.1/2.2 则只生成视频）。提供控制台应用、浏览器聊天界面，以及兼容 Ollama/OpenAI 的 HTTP API。.NET 运行时提供纯托管 CPU 与原生加速后端；已发布的对比使用相同 GGUF 文件和硬件。可选的 `TensorSharp.AgentHost` 层还提供 Agent Skills、用于沙箱化文件和 shell 操作的有界进程内“模型→工具”循环，以及有界的自动子智能体委派。
+**TensorSharp 是在本地运行 GGUF 模型的 .NET 10 推理引擎。** 在 Windows、macOS 或 Linux 上，通过 CLI、浏览器聊天或兼容 Ollama/OpenAI 的 API 使用，也可直接集成到自己的 .NET 应用中。可选择纯托管 C# CPU 内核或原生 CUDA、Metal、Vulkan 后端，具体支持取决于模型。
 
-## 支持的模型家族一览
-
-- **文本、推理与多模态 LLM：** [DeepSeek V4 Flash](docs/models/deepseek4_zh-cn.md) / [V4.1 Flash](docs/models/deepseek41_zh-cn.md)、[GLM 5.x](docs/models/glm_zh-cn.md)、[Gemma 4](docs/models/gemma4_zh-cn.md)、[Qwen 3.5 / 3.6 / 3.8 27B](docs/models/qwen35_zh-cn.md)、[Qwen 3.8 Flash Next](docs/models/qwen38-flash-next_zh-cn.md)、[Bonsai2](docs/models/bonsai2_zh-cn.md)（Qwen 家族）、[GPT OSS](docs/models/gptoss_zh-cn.md)、[Nemotron-H](docs/models/nemotron_zh-cn.md)、[Mistral 3](docs/models/mistral3_zh-cn.md)、[Hunyuan Dense](docs/models/hunyuan-dense_zh-cn.md) 与 [Muse-Glimmer](docs/models/muse-glimmer_zh-cn.md)。
-- **文本扩散：** [DiffusionGemma](docs/models/diffusiongemma_zh-cn.md)，包含 `/v1/systemone` 上的 [Jev 类型化判定](docs/models/jev_zh-cn.md)（支持文本、图像、上传文档、抽样视频帧，以及通过已配置 ASR 配套服务得到的语音转录）。
-- **图像生成/编辑与视频生成：** [Qwen-Image-2.1](docs/models/qwenimage21_zh-cn.md)、[MiniMax-H3（视频 + 立体声音频）](docs/models/minimax-h3_zh-cn.md) 与 [Wan 2.1 / 2.2](docs/models/wan_zh-cn.md)。
-- **文本与代码嵌入：** BERT / XLM-R 编码器——[Snowflake Arctic Embed L v2.0 与 all-MiniLM-L6-v2](docs/embeddings_zh-cn.md)。
-
-各模型的后端、模态、功能支持与验证覆盖范围不同，详见[模型卡片](docs/models/README_zh-cn.md)、[嵌入指南](docs/embeddings_zh-cn.md)及[完整架构矩阵](#支持的模型架构)。
-
-## 配合书籍学习
-
-| Qwen 推理与智能体运行时 | Gemma 4 与多模态推理 |
-|---|---|
-| <a href="https://www.amazon.com/dp/B0HJQ4VQ31"><img src="website/assets/building-llm-inference-engines-cover.jpg" alt="Building LLM Inference Engines and Agentic Runtimes from Scratch: Qwen Dense and MoE Models with TensorSharp and TensorAgent" width="190"></a> | <a href="https://www.amazon.com/dp/B0H9P44QZZ"><img src="website/assets/from-tensors-to-tokens-cover.jpg" alt="From Tensors to Tokens: Building a Multimodal LLM Inference Engine from Scratch with TensorSharp and Gemma 4 E4B" width="190"></a> |
-| **[Building LLM Inference Engines and Agentic Runtimes from Scratch: Qwen Dense and MoE Models with TensorSharp and TensorAgent](https://www.amazon.com/dp/B0HJQ4VQ31)** | **[From Tensors to Tokens: Building a Multimodal LLM Inference Engine from Scratch with TensorSharp and Gemma 4 E4B](https://www.amazon.com/dp/B0H9P44QZZ)** |
-| 使用 C# 构建 Qwen 稠密/MoE 推理与受控智能体工作流。从张量、分词、注意力、专家路由、量化和缓存，逐步走向 GPU 加速、多模态执行、工具、技能、沙箱代码执行，以及 TensorSharp 和 TensorAgent 的桌面与移动端部署。 | 以 Gemma 4 E4B 为例，用 C#/.NET 构建多模态推理引擎。从张量、GGUF 模型加载、量化与分词，走向文本、图像、视频和音频执行，并结合 TensorSharp 源码理解正确性检查与服务优化。 |
-| **[在 Amazon 购买](https://www.amazon.com/dp/B0HJQ4VQ31)** | **[在 Amazon 购买](https://www.amazon.com/dp/B0H9P44QZZ)** |
-
-**[查看两本书的介绍与仓库伴读路线](docs/BOOK_zh-cn.md)**
+当前源码涵盖文本与推理、多模态输入、嵌入、图像生成与编辑、带音频的视频，以及带代码工具的 Agent Skills。TensorSharp 也为 iPhone、iPad、Mac 和 Windows 上的本地应用 [TensorAgent](TensorAgent/README.md) 提供引擎。可直接从下文开始，或查看[项目状态](docs/PROJECT_STATUS_zh-cn.md)中的能力与验证限制；源码改动可能领先于已发布的包。
 
 ## 亮点功能
 
-- **文本与代码嵌入。** GGUF BERT/XLM-R 编码器，兼容 OpenAI/Ollama 的批量嵌入 API，支持 Snowflake Arctic Embed 与 MiniLM；见[嵌入指南](docs/embeddings_zh-cn.md)。
-- **本地原生 .NET 推理。** 可通过 CLI、浏览器 Web UI，以及兼容 Ollama/OpenAI 的 API 运行 GGUF 文本与多模态模型。
-- **模型与媒体覆盖广。** 当前源码支持现代文本模型、视觉/音频输入、PDF、图像生成/编辑和视频生成；详见[模型卡片](docs/models/README_zh-cn.md)。
-- **性能经过实测。** TensorSharp 在相同模型与硬件上对比 `llama.cpp`；结果对应所测的模型、后端与工作负载。详见[性能报告](docs/engine_comparison_report.md)。
-- **智能体能力覆盖 iOS。** `TensorSharp.AgentHost` 提供有界的 Agent Skills、代码工具与[自动子智能体委派](docs/multi_agent.md)（英文），子智能体拥有独立上下文并默认只读；[TensorAgent](TensorAgent/README.md) 使用 iOS 的 `ggml_metal` 后端，把同一套本地聊天与智能体体验带到 iPhone 和 iPad。
-- **可扩展的工程能力。** 连续批处理与分页、Radix 前缀共享 KV 缓存默认开启；投机解码、张量并行和可配置的安全边界按需启用。详见[功能说明](FEATURES_zh-cn.md)、[使用指南](USAGE_zh-cn.md)与[当前状态](docs/PROJECT_STATUS_zh-cn.md)。
-
-详细实现说明和历史性能数据已移到链接文档，让本页保持清晰、适合作为入口。
+- **本地模型，多种入口。** 同一引擎用于 CLI、浏览器聊天及兼容 Ollama/OpenAI 的 API，支持纯托管 CPU 与原生加速后端。
+- **文本与多模态模型。** 支持稠密与 MoE GGUF 模型、推理、图像 / 音频输入和文档问答。各模型家族的能力见[支持的模型](docs/supported_models_zh-cn.md)。
+- **嵌入与媒体生成。** [文本 / 代码嵌入](docs/embeddings_zh-cn.md)、[Qwen-Image-2.1](docs/models/qwenimage21_zh-cn.md) 图像生成与蒙版编辑，以及包括 [MiniMax-H3 音视频](docs/models/minimax-h3_zh-cn.md)在内的视频模型。
+- **高效服务。** 连续批处理与分页、Radix 前缀共享 KV 缓存默认开启；支持的模型还可使用投机解码与多 GPU 放置。详见[功能说明](FEATURES_zh-cn.md)。
+- **Agent Skills 与代码工具。** `TensorSharp.AgentHost` 提供文件、shell 和文档工作流。服务端与 TensorAgent 聊天还支持[有界子智能体委派](docs/multi_agent.md)（英文），子智能体拥有私有工作区并默认只读。
+- **有记录的性能对比。** 与 `llama.cpp` 的测试使用相同 GGUF 文件和硬件，结果对应所测的模型、后端及工作负载。详见[性能数据](docs/benchmarks_zh-cn.md)。
+- **TensorAgent 应用。** 在手机和桌面进行本地聊天、使用附件与技能并保存工作。详见 [Mac / Windows 安装指南](docs/tensoragent_desktop_zh-cn.md)与[应用验证范围](TensorAgent/README.md)。
 
 ## 快速开始
 
-更愿意使用预构建应用？[Releases 页面](https://github.com/zhongkaifu/TensorSharp/releases)提供自包含的 Windows x64（CPU/CUDA）、Linux x64（CPU/CUDA）与 macOS arm64 CLI / Server 归档。
+### TensorSharp CLI 与服务端
 
-**NVIDIA DGX Spark / GB10：** 请使用独立的实验性 **CUDA 13、Linux ARM64**
-[Docker 构建与归档说明](DEVELOPMENT_zh-cn.md#gb10--dgx-spark-构建容器实验性)。
-归档后缀为 `linux-arm64-cuda13-GB10`，仅面向单个 GB10，而非通用 ARM64 GPU。
-打标签的正式发布也会附带这些归档，它们在托管的无 GPU ARM64 runner 上通过 Docker 构建。
-CLI 与服务端文本推理曾在真实硬件上做过一次历史性检查，但早于上游重新集成，不能证明当前代码；
-托管 CI 只重新检查 CPU 与归档路径。现有 x64 CUDA 归档不适用于 Spark。
+[Releases 页面](https://github.com/zhongkaifu/TensorSharp/releases)提供自包含的 Windows x64（CPU/CUDA）、Linux x64（CPU/CUDA）与 macOS arm64 CLI / Server 归档。
 
-源码构建面向 .NET 10。全新开发机器需要安装完整的 **.NET 10 SDK**；只安装 .NET Runtime 无法构建 TensorSharp：
-
-| 平台 | 安装 SDK |
-|---|---|
-| **Windows** | 在 PowerShell 中运行 `winget install Microsoft.DotNet.SDK.10`，或参阅 Microsoft 的 [Windows 安装说明](https://learn.microsoft.com/zh-cn/dotnet/core/install/windows)。 |
-| **macOS** | 使用 [.NET 10 SDK 安装程序](https://dotnet.microsoft.com/zh-cn/download/dotnet/10.0)：Apple 芯片选择 **Arm64**，Intel Mac 选择 **x64**。另见 Microsoft 的 [macOS 安装说明](https://learn.microsoft.com/zh-cn/dotnet/core/install/macos)。 |
-| **Linux** | 按照 Microsoft 的 [Linux 发行版指南](https://learn.microsoft.com/zh-cn/dotnet/core/install/linux)为当前发行版配置正确的软件源，并安装其 .NET 10 SDK 包（通常名为 `dotnet-sdk-10.0`）。 |
-
-安装后打开新终端，确认列表中包含 `10.0.x` SDK：
-
-```bash
-dotnet --list-sdks
-```
-
-更多细节见 [.NET 跨平台安装概览](https://learn.microsoft.com/zh-cn/dotnet/core/install/)或[开发 → 前置要求](DEVELOPMENT_zh-cn.md#前置要求)。
-
-然后即可在已验证的原生 GGML 快速路径（Gemma 4 E4B）上约 30 秒跑起来。其他前置包括 `git`、`curl`、[CMake](https://cmake.org/download/) 3.20+（原生 GGML 库由它来配置和构建；Windows 上 Visual Studio 的“C++ CMake tools for Windows”组件自带一份，构建脚本会自动找到），以及所选 GPU 后端的工具链（见 [开发 → 前置要求](DEVELOPMENT_zh-cn.md#前置要求)）。推荐的公开文件是 [`gemma-4-E4B-it-Q8_0.gguf`](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/gemma-4-E4B-it-Q8_0.gguf)（7.48 GiB）；纯文本推理无需投影器。
-
-**Windows + NVIDIA（PowerShell）**
+从源码构建需要完整的 **.NET 10 SDK**（[各平台安装方法](docs/getting_started_zh-cn.md#安装与首次运行)）、`git`、`curl`、[CMake](https://cmake.org/download/) 3.20+，以及所选 GPU 的工具链。然后运行已验证的 [Gemma 4 E4B](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/gemma-4-E4B-it-Q8_0.gguf) 模型（7.48 GiB）。在 Windows + NVIDIA GPU 上（PowerShell）：
 
 ```powershell
 git clone https://github.com/zhongkaifu/TensorSharp.git; Set-Location TensorSharp
@@ -79,180 +37,75 @@ $env:TENSORSHARP_GGML_NATIVE_ENABLE_CUDA = 'ON'
 dotnet run --project TensorSharp.Cli -c Release -p:TensorSharpSkipMlxNative=true -- --model models\gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 128 --backend ggml_cuda
 ```
 
-**macOS（Apple Silicon）** —— 去掉 CUDA 环境变量，使用 `--backend ggml_metal`。
+在其他机器上换用对应后端（见[选择后端](#选择后端)）：
 
-**Linux + NVIDIA** —— 在 `dotnet run` 前加 `TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON`，使用 `--backend ggml_cuda`。
+- **macOS（Apple Silicon）：** 去掉 CUDA 环境变量，使用 `--backend ggml_metal`。
+- **Linux + NVIDIA：** 在 `dotnet run` 前加 `TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON`，使用 `--backend ggml_cuda`。
+- **AMD / Intel / NVIDIA Vulkan：** 设置 `TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON`，使用 `--backend ggml_vulkan`。
 
-**AMD / Intel / NVIDIA Vulkan** —— 设置 `TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON`，使用 `--backend ggml_vulkan`。
-
-**Linux（Ubuntu）+ 多张 NVIDIA GPU —— 张量并行**
-
-张量并行把一个模型切分到 N 张 GPU 上，可运行在 Direct `cuda` 后端以及 GGML CUDA /
-Vulkan 后端（`--backend ggml_cuda`、`ggml_vulkan`）。Qwen 3.8 Flash Next 与
-DeepSeek V4 / V4.1 的按层切分改用独立的 `--layer-split N` 参数：每张 GPU 拿一段连续的完整层。
-`--tp N` 仅表示张量并行，两种模式互斥；不支持的请求会在启动时失败。
-按层切分仅支持单节点，不能与 `--tp-node-id` / `--tp-peers` 组合。
-现有按层切分命令需将 `--tp N` 改为 `--layer-split N`，或设置
-`TENSORSHARP_LAYER_SPLIT_DEGREE=N`。未配置两种模式时默认使用单设备。GLM 5.x 的 `--layer-split N` 选择整层放置，
-GGML GPU 后端上的 `--tp N` 则选择原生本地张量并行路径。
-对 Qwen-Image-2.1，`--tp N` 只切分扩散 Transformer（DiT），文本 / 视觉编码器与 VAE 留在第一张 GPU 上。请先安装 CUDA 工具包，然后：
-
-```bash
-# 在 RunPod 的 Ubuntu 24.04 镜像上，需要先让动态链接器找到 CUDA 兼容库：
-export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH
-# 较旧的 Ubuntu 版本需要从 backports PPA 安装 .NET 10 SDK：
-add-apt-repository ppa:dotnet/backports
-
-apt update && apt install dotnet-sdk-10.0
-git clone https://github.com/zhongkaifu/TensorSharp.git
-cd TensorSharp
-mkdir models
-wget "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" -O models/gemma-4-E4B-it-Q8_0.gguf
-bash TensorSharp.GGML.Native/build-linux.sh
-dotnet build -c Release
-
-# 单进程内使用 2 张 GPU
-TensorSharp.Cli/bin/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf \
-    --backend cuda --interactive --max-tokens 20000 --tp 2
-
-# 同样的用法也适用于 GGML CUDA 后端（可加 TENSORSHARP_TP_DEVICES=0,2 指定 GPU）
-TensorSharp.Cli/bin/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf \
-    --backend ggml_cuda --interactive --max-tokens 20000 --tp 2
-```
-
-只需再加上节点 ID 与共享的 peer 列表，同一个模型就能跨机器扩展 —— 2 节点 × 2 GPU 即全局 TP 度为 4：
-
-```bash
-# 节点 0
-TensorSharp.Cli/bin/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf --backend cuda --tp 2 \
-    --tp-node-id 0 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
-# 节点 1（peer 列表相同，节点 ID 不同）
-TensorSharp.Cli/bin/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf --backend cuda --tp 2 \
-    --tp-node-id 1 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
-```
-
-`TensorSharp.Server.Host` 支持同样的 `--tp`、`--tp-node-id`、`--tp-peers` 参数（也可用
-`TENSORSHARP_TP_*` 环境变量）；在多节点集群中，服务端必须是节点 `0`（对外提供 HTTP
-的 driver），其余节点各运行一个 `TensorSharp.Cli` worker。完整参考：**[张量并行与分布式推理](USAGE_zh-cn.md#张量并行与分布式推理)**。
-
-将同一模型作为服务托管（浏览器 UI 在 <http://localhost:5000>，另有 Ollama/OpenAI API）：
+将同一模型作为服务托管：浏览器聊天在 <http://localhost:5000>，另有兼容 Ollama 与 OpenAI 的 API。
 
 ```bash
 dotnet run --project TensorSharp.Server.Host -c Release -p:TensorSharpSkipMlxNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --max-tokens 512
 ```
 
-> 服务端默认绑定 `0.0.0.0:5000`（可用 `--port` / `--host` 或 `PORT` / `HOST` 环境变量修改；macOS 上 5000 端口已被 AirPlay 接收器占用），无内置鉴权或 TLS——请置于防火墙之后，或使用带鉴权的 HTTPS 反向代理。图像/视频/音频需追加伴随文件 [`mmproj-gemma-4-E4B-it-Q8_0.gguf`](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/mmproj-gemma-4-E4B-it-Q8_0.gguf)，用 `--mmproj` 指定。
+> 服务端监听 `0.0.0.0:5000`，没有内置鉴权或 TLS——请置于防火墙之后，或使用带鉴权的 HTTPS 反向代理。
 
-TensorSharp.Server.Host、TensorSharp.Cli 与 TensorAgent 默认对下方各表中的所有自回归家族使用共享引擎的 Radix
-KV 前缀缓存（DiffusionGemma 与图像 / 视频模型除外）。它复用公共提示前缀和每个会话的私有状态，并遵守模型与媒体边界；
-投机解码（`--spec`）不会关闭它。设置 `TS_SCHED_PREFIX_CACHE=0` 可关闭运行时前缀复用，
-`TS_PREFIX_CACHE_MODE=legacy` 则选择用于诊断的兼容路径。服务端与 CLI 的 `--no-prefix-cache`
-同样会关闭前缀复用和启动预热；在服务端还会关闭磁盘上的前缀检查点持久化。
+### 选择后端
 
-两个可执行程序在不带参数或使用 `--help` 启动时，都会打印完整的参数参考——逐项列出说明、默认值、取值范围与示例：
+| 你的硬件 | 后端 |
+|---|---|
+| Apple Silicon（Mac） | `--backend ggml_metal` |
+| Windows / Linux + NVIDIA GPU | `--backend ggml_cuda` |
+| Windows / Linux + AMD / Intel / NVIDIA GPU | `--backend ggml_vulkan` |
+| 无 GPU | `--backend ggml_cpu`（原生算子），或 `--backend cpu`（纯 C#，无原生依赖） |
 
-```bash
-dotnet run --project TensorSharp.Cli -c Release -- --help
-dotnet run --project TensorSharp.Server.Host -c Release -- --help
-```
+其余内容见[快速上手指南](docs/getting_started_zh-cn.md)：各平台的 SDK 安装、多 GPU 与多节点运行、NVIDIA DGX Spark、多模态输入、嵌入服务，以及如何跑得更快。所有参数见 [CLI](USAGE_zh-cn.md#控制台应用) 与 [Server](USAGE_zh-cn.md#web-应用) 参考，两个程序也都可以用 `--help` 打印。
 
-完整命令参考：**[CLI](USAGE_zh-cn.md#控制台应用)** · **[Server](USAGE_zh-cn.md#web-应用)** · 更多可下载模型：**[模型下载](MODEL_DOWNLOADS_zh-cn.md)** · 想用配置文件？**[config/](config/README.md)**。
+`dotnet build TensorSharp.slnx` 还会构建当前平台可用的 TensorAgent 桌面目标，以及 Apple Silicon 上的 iOS 模拟器目标；所选 SDK 须具备相应 MAUI 工作负载，且原生引擎与 Python 文件已准备好。缺少前置条件时，对应应用目标会被跳过并显示警告；见 [TensorAgent 构建说明](TensorAgent/README.md#build-and-run)。
 
-## 文本与代码嵌入
+### TensorAgent 桌面版：下载、安装、聊天
 
-当前源码支持 **Snowflake Arctic Embed L v2.0** 与 **all-MiniLM-L6-v2** 的 GGUF 编码器，通过 OpenAI `/v1/embeddings`、Ollama `/api/embed` 和旧版 `/api/embeddings` 提供归一化向量。以下命令在完成上面的源码构建后启动小型 MiniLM 服务：
+**[下载最新发布](https://github.com/zhongkaifu/TensorSharp/releases/latest)**，展开 **Assets**，选择以 `tensoragent-desktop-` 开头的文件：
 
-```bash
-curl --create-dirs -fL -o models/embeddings/all-MiniLM-L6-v2-Q8_0.gguf \
-  https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/544f204f2eaa2d71361ffc74d6df7170285b286a/all-MiniLM-L6-v2-Q8_0.gguf
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
-  --model models/embeddings/all-MiniLM-L6-v2-Q8_0.gguf \
-  --embeddings --backend cpu --host 127.0.0.1 --port 5001 --no-webui
-```
+| 平台 | 下载与安装 |
+|---|---|
+| **macOS 14+，Apple Silicon** | `tensoragent-desktop-<version>-osx-arm64.dmg`：打开并把 TensorAgent 拖到“应用程序”。也提供 PKG 安装程序和 ZIP。 |
+| **Windows x64** | `tensoragent-desktop-<version>-win-x64-cpu.msi`，兼容 NVIDIA GPU / 驱动时选择 `win-x64-cuda.msi`：安装后从“开始”打开 TensorAgent。也提供 ZIP。 |
 
-```bash
-curl http://127.0.0.1:5001/v1/embeddings -H 'Content-Type: application/json' \
-  -d '{"model":"all-MiniLM-L6-v2-Q8_0","input":["read a file","open a document"]}'
-```
+应用包含 .NET 运行库与原生引擎；Windows 如缺少 [WebView2 Evergreen Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)，需另外安装。Python / Node 是技能所需的可选工具。当前内置模型至少需要 **12 GB 系统内存**，权重在应用内另外下载。打开 **☰ → 模型 → 下载 → 使用**，即可输入消息。[桌面版用户指南](docs/tensoragent_desktop_zh-cn.md)包含安装包校验、未签名应用提示、首次配置、附件、技能、更新与故障排查。历史发布可能没有桌面资源，需等待更新后的工作流运行发布；iPhone / iPad 仍使用[源码构建](TensorAgent/README.md#build-and-run)。
 
-使用 `cpu` 运行 100% 纯 C# 推理，无需原生推理库；或选择原生 GGML 的 `ggml_cpu`、`ggml_metal`、`ggml_cuda`。聊天与嵌入服务分别运行。完整的 Snowflake 下载、批处理、维数缩减、C# API、分词与性能验证见[嵌入指南](docs/embeddings_zh-cn.md)。
+## 支持的模型家族一览
 
-## 选择后端
+- **文本、推理与多模态 LLM：** [DeepSeek V4 Flash](docs/models/deepseek4_zh-cn.md) / [V4.1 Flash](docs/models/deepseek41_zh-cn.md)、[GLM 5.x](docs/models/glm_zh-cn.md)、[Gemma 4](docs/models/gemma4_zh-cn.md)、[Qwen 3.5 / 3.6 / 3.8 27B](docs/models/qwen35_zh-cn.md)、[Qwen 3.8 Flash Next](docs/models/qwen38-flash-next_zh-cn.md)、[Bonsai2](docs/models/bonsai2_zh-cn.md)（Qwen 家族）、[GPT OSS](docs/models/gptoss_zh-cn.md)、[Nemotron-H](docs/models/nemotron_zh-cn.md)、[Mistral 3](docs/models/mistral3_zh-cn.md)、[Hunyuan Dense](docs/models/hunyuan-dense_zh-cn.md) 与 [Muse-Glimmer](docs/models/muse-glimmer_zh-cn.md)。
+- **文本扩散：** [DiffusionGemma](docs/models/diffusiongemma_zh-cn.md)，包含 `/v1/systemone` 上的 [Jev 类型化判定](docs/models/jev_zh-cn.md)（支持文本、图像、上传文档、抽样视频帧，以及通过已配置 ASR 配套服务得到的语音转录）。
+- **图像生成/编辑与视频生成：** [Qwen-Image-2.1](docs/models/qwenimage21_zh-cn.md)、[MiniMax-H3（视频 + 立体声音频）](docs/models/minimax-h3_zh-cn.md) 与 [Wan 2.1 / 2.2](docs/models/wan_zh-cn.md)。
+- **文本与代码嵌入：** BERT / XLM-R 编码器——[Snowflake Arctic Embed L v2.0 与 all-MiniLM-L6-v2](docs/embeddings_zh-cn.md)。
 
-后端支持取决于模型架构。嵌入模型支持纯 C# `cpu` 与原生 `ggml_cpu`、`ggml_metal`、`ggml_cuda`；其他模型的限制见[状态矩阵](docs/PROJECT_STATUS_zh-cn.md#状态矩阵)。
+各模型的后端、模态、功能支持与验证覆盖范围不同，详见[支持的模型](docs/supported_models_zh-cn.md)各表、[模型卡片](docs/models/README_zh-cn.md)及[嵌入指南](docs/embeddings_zh-cn.md)。
 
-| 你的硬件 | 推荐后端 | 标志 | 说明 |
-|---|---|---|---|
-| **Apple Silicon（Mac）** | GGML Metal | `--backend ggml_metal` | 服务端在 macOS 上的默认后端；CLI 在所有系统上默认 `ggml_cpu`，使用 CLI 时需显式传入该参数。`--backend mlx` 是另一条 Apple Silicon GPU 路径。 |
-| **Windows / Linux + NVIDIA GPU** | GGML CUDA | `--backend ggml_cuda` | 测试最充分的 NVIDIA 路径。`--backend cuda` 是用于实验的 Direct PTX/cuBLAS 后端。 |
-| **Windows / Linux + AMD / Intel / NVIDIA GPU** | GGML Vulkan | `--backend ggml_vulkan` | 与厂商无关的 GPU 路径（ggml-vulkan）。机器有 Vulkan 运行时即自动构建；用 `--no-vulkan` 退出。 |
-| **无 GPU / 可移植 / 调试** | 纯 C# CPU | `--backend cpu` | 无原生依赖；matmul 跑在多核工作线程池上。连 DeepSeek V4.1 Flash 在这里也有一整套整模型执行器——它跑在纯 C# 执行器 `DeepSeek4CpuExecutor` 上，不用 ggml、不用 GPU，并在五层 F32 fixture 上以 `atol=rtol=2e-5` 对齐 PyTorch 参照实现 `eng/dsv41-reference.py`（这是与参照实现的架构级一致，而非真实 Q2_K 权重上的对齐）；它是正确性与可移植性路径，而非服务路径。需要更快的 CPU 推理可用 `--backend ggml_cpu`（原生算子）。 |
+近期源码增加了 Qwen-Image-2.1 蒙版编辑：保留保护区域的精确像素，并可仅处理选中区域；TensorAgent 提供十二款加速、风格与编辑 LoRA 插件；Qwen3.8 Flash Next 可在 48 GB Mac 上使用 SSD 支持的权重路径运行。多 GPU 的 `--layer-split` 与 `--tp` 是独立选项，支持范围和性能取决于架构与量化格式。这些源码功能可能领先于已发布的包；更新后的 Release Binaries 工作流会在新发布中提供桌面安装包，历史发布可能不包含这些资源。
 
-每个后端的完整说明见 [使用方法 → 计算后端](USAGE_zh-cn.md#计算后端)。
+## 实际运行效果
 
-## 已验证模型
+同一个引擎，四种用法，每张都是真实运行的原样截图。
 
-以下架构均已实现，并由测试 / 基准矩阵覆盖。请选择适配你硬件的量化（低内存用 Q4_K_M、更高质量用 Q8_0）。更多尺寸与投影器文件见 [模型下载](MODEL_DOWNLOADS_zh-cn.md)。
+<table>
+  <tr>
+    <td align="center" width="50%"><img src="website/assets/screenshots/tensorsharp-cli.png" alt="终端中的 TensorSharp.Cli：Gemma 4 E4B 的交互式聊天，读取本 README 并回答相关问题" width="250"><br><b>TensorSharp.Cli</b><br>在终端里运行模型</td>
+    <td align="center" width="50%"><img src="website/assets/screenshots/tensorsharp-webui.png" alt="TensorSharp Web UI：Qwen3.8 27B 编写并运行 Python 脚本比较两种房贷" width="400"><br><b>TensorSharp.Server.Host</b><br>Web UI 聊天与兼容 Ollama/OpenAI 的 API</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="website/assets/screenshots/tensoragent-iphone.png" alt="iPhone 17 Pro 模拟器中的 TensorAgent：Gemma 4 E2B 使用 ggml_cpu，并在应用内运行 Python 脚本换算食谱" width="140"><br><b>TensorAgent · iPhone 模拟器</b><br>CPU 推理与应用内 Python；此处为模拟器截图</td>
+    <td align="center"><img src="website/assets/screenshots/tensoragent-mac.png" alt="Mac 上的 TensorAgent：Qwen-Image 2.1 按文字指令将 TensorSharp 横幅背景改为蓝色星空，可比较原图并再次编辑" width="400"><br><b>Mac 上的 TensorAgent</b><br>Mac 应用中保存的 Qwen-Image 2.1 编辑结果</td>
+  </tr>
+</table>
 
-| 家族 | 示例模型（GGUF） | 图像 / 视频 / 音频 | 思维链 | 工具 | 卡片 |
-|---|---|---|---|---|---|
-| DeepSeek V4.1 Flash | [DeepSeek-V4.1-Flash](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/tree/58d8ac86298fdf85a2440defee08b1abcad32e45)（内嵌 Engram 的 Q2_K 或 Q4_K_M 分片，服务路径为 `ggml_cuda`；`ggml_cpu` 是仍能加载视觉伴随文件的正确性与可移植性路径，`cuda` 与纯 C# `cpu` 执行器则是仅文本的） | ✅（视觉伴随文件） / ✅（视觉伴随文件） / — | ✅ | ✅ | [deepseek41](docs/models/deepseek41_zh-cn.md) |
-| DeepSeek V4 Flash | [DeepSeek-V4-Flash-0731](https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF)（284B MoE，分片 GGUF） | — / — / — | ✅ | ✅ | [deepseek4](docs/models/deepseek4_zh-cn.md) |
-| GLM 5.x | [GLM-5.2](https://huggingface.co/unsloth/GLM-5.2-GGUF)（744B-A40B MoE，分片 GGUF）、[GLM-5.3](https://huggingface.co/unsloth/GLM-5.3-GGUF)（256 个路由专家，仅文本；每个量化档一个子目录，UD-Q2_K_XL 为 7 个分片、236.4 GiB——`--model` 指向 `-00001-of-00007` 那一片）、[GLM-5.3-Flash](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF)（320B MoE，分片 GGUF，+ mmproj） | ✅（仅 5.3-Flash；5.2 与 5.3 均仅文本） / — / — | ✅ | ✅ | [glm](docs/models/glm_zh-cn.md) |
-| Qwen 3.8 Flash Next | [Qwen3.8-Flash-Next](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF)（GDN + 注意力混合 MoE，512 专家，分片 GGUF，+ mmproj） | ✅ / ✅（`video_url`） / — | ✅ | ✅ | [qwen38-flash-next](docs/models/qwen38-flash-next_zh-cn.md) |
-| Gemma 4 | [gemma-4-E4B-it](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF)（另有 12B、31B、26B-A4B MoE） | ✅ / ✅ / ✅ | ✅ | ✅ | [gemma4](docs/models/gemma4_zh-cn.md) |
-| Qwen 3.5 / 3.6 | [Qwen3.5-9B](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF)（另有 35B-A3B MoE、Qwen3.8-27B） | ✅ / — / — | ✅ | ✅ | [qwen35](docs/models/qwen35_zh-cn.md) |
-| Bonsai2 | 本地哈希钉住的 `Ternary-Bonsai-2-27B-PQ2_0.gguf` / `-PTQ1_0.gguf`（采用 PRISM 带符号 Hadamard 变换的稠密 Qwen 3.5 混合，+ mmproj）；仅支持单设备 GGML 后端，已在 Metal 上验证 | ✅ / — / — | ✅ | ✅ | [bonsai2](docs/models/bonsai2_zh-cn.md) |
-| GPT OSS | [gpt-oss-20b](https://huggingface.co/ggml-org/gpt-oss-20b-GGUF)（MoE） | — / — / — | ✅ | ✅ | [gptoss](docs/models/gptoss_zh-cn.md) |
-| Nemotron-H | [Nemotron-H-8B](https://huggingface.co/bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF)（另有 47B、Omni） | ✅（Omni） / — / — | ✅ | ✅ | [nemotron](docs/models/nemotron_zh-cn.md) |
-| Mistral 3 | [Mistral-Small-3.1-24B](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF) | ✅ / — / — | — | — | [mistral3](docs/models/mistral3_zh-cn.md) |
-| Hunyuan Dense | 腾讯稠密 Hunyuan GGUF（`hunyuan-dense`），例如 Hy-MT2 系列 | — / — / — | — | — | [hunyuan-dense](docs/models/hunyuan-dense_zh-cn.md) |
-| DiffusionGemma | [diffusiongemma-26B-A4B-it](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF)（视觉塔取自上游 safetensors 分片） | ✅ / — / — | —（提示中不启用） | — | [diffusiongemma](docs/models/diffusiongemma_zh-cn.md) |
-| Muse-Glimmer | [Muse-Glimmer-30B](https://huggingface.co/unsloth/Muse-Glimmer-30B-GGUF)（+ mmproj） | ✅ / — / — | ✅ | ✅ | [muse-glimmer](docs/models/muse-glimmer_zh-cn.md) |
-| Qwen-Image-2.1 | [Qwen-Image-2.1 GGUF](https://huggingface.co/Abiray/Qwen-Image-2.1-GGUF)（DiT + 专用 2.1 VAE + Qwen3-VL-8B）；Unsloth 不带元数据的 Q8_0 DiT 也可加载，靠张量表识别（图像编辑需用 `--qwen-image-mmproj` 指定其 `mmproj-BF16.gguf`） | 🖼️ 文本→图像、图像编辑；RGBA；LoRA 插件（`--lora`，含 4–8 步蒸馏） | — | — | [qwenimage21](docs/models/qwenimage21_zh-cn.md) |
-| MiniMax-H3 音视频 | [unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF)（去噪器 + Qwen3-VL-32B 文本编码器）+ [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)（视频 VAE + 音频 VAE） | 🎬🔊 文本→视频、图像→视频、首尾帧、参考（图像/片段/音轨）→视频，**带立体声音频** | — | — | [minimax-h3](docs/models/minimax-h3_zh-cn.md) |
-| Wan 2.1 / 2.2 视频 | [Wan2.2-TI2V-5B](https://huggingface.co/QuantStack/Wan2.2-TI2V-5B-GGUF)（另有 [T2V-A14B](https://huggingface.co/QuantStack/Wan2.2-T2V-A14B-GGUF)、[I2V-A14B](https://huggingface.co/QuantStack/Wan2.2-I2V-A14B-GGUF)、[Wan2.1-T2V-14B](https://huggingface.co/city96/Wan2.1-T2V-14B-gguf)）+ UMT5-XXL + 视频 VAE · 快速路径：[TI2V-5B-Turbo](https://huggingface.co/hum-ma/Wan2.2-TI2V-5B-Turbo-GGUF)（4 步，DiT 前向次数减少 25×） | 🎬 文本→视频、图像→视频 | — | — | [wan](docs/models/wan_zh-cn.md) |
-
-## 让它跑得更快
-
-按这个顺序选择：
-
-1. **先选对 checkpoint。** Wan 视频优先使用 Turbo/Lightning/4-step 蒸馏 GGUF。Qwen-Image-2.1 可加上 `config/lora/` 中的步数蒸馏 [LoRA 插件](docs/models/qwenimage21_zh-cn.md#lora-插件)（4–8 步，取代默认的 40 步）。
-2. **使用匹配的后端。** NVIDIA：`ggml_cuda`；Apple Silicon 和 iOS：`ggml_metal`；CPU：`ggml_cpu`（需要可移植性时使用纯托管 `cpu`）。
-3. **先减少工作量，再调参数。** H3 使用 `--cfg 1.0` 和 4–8 步；媒体任务优先降低分辨率、帧数或步数。
-4. **最后再扩展或投机。** 根据模型和负载尝试 `--draft-model` / `--spec`、`--n-cpu-moe` 或 `--tp N`。
-
-详见[性能指南与快速路径](docs/PROJECT_STATUS_zh-cn.md#让它跑得更快)、[模型卡片](docs/models/README_zh-cn.md)和[环境变量功能矩阵](docs/env_var_feature_matrix_zh-cn.md)。
-
-## 支持的模型架构
-
-| 架构 | GGUF 架构标识 | 示例模型 | 多模态 | 思维链 | 工具调用 | MTP 投机 | 卡片 |
-|---|---|---|---|---|---|---|---|
-| BERT / XLM-R 嵌入 | `bert` | Snowflake Arctic Embed L v2.0、all-MiniLM-L6-v2 | 文本 → 向量 | — | — | — | [嵌入指南](docs/embeddings_zh-cn.md) |
-| DeepSeek V4.1 Flash | `deepseek41` | DeepSeek-V4.1-Flash（40 层，384 个路由专家 top-6 加一个共享专家，四条残差流与延迟 hyper-connection 混合，Engram n-gram 特征，声明 1M 上下文） | 文本；配合准备好的视觉伴随文件（`--mmproj`）支持图像与视频，音频请求被拒绝 | 支持 | 支持（带空格的 DSML，受语法约束） | 实验性：可在 `ggml_cuda`/`ggml_cpu` 上通过 `--draft-model` 加载 `deepseek41-dspark` 草稿模型；训练模型已在 `ggml_cuda` 双 GPU 按层切分下通过初步文本/图像 HTTP 检查；尚不构成通用质量或吞吐验证（V4 的草稿模型会被拒绝） | [deepseek41](docs/models/deepseek41_zh-cn.md) |
-| DeepSeek V4 Flash | `deepseek4` | DeepSeek-V4-Flash（284B MoE，256 专家，压缩稀疏注意力，1M 上下文） | 仅文本 | 支持 | 支持（DSML） | 支持（DSpark 块级草稿，独立 GGUF） | [deepseek4](docs/models/deepseek4_zh-cn.md) |
-| GLM 5.x | `glm-dsa`、`glm_dsa`、`glm5next` | GLM-5.2（744B-A40B MoE，256 专家，MLA + DeepSeek 稀疏注意力，1M 上下文）、[GLM-5.3](docs/models/glm_zh-cn.md#glm-53glm-dsa)（与 5.2 完全相同的 79 层 `glm-dsa` 形态——78 层主干加 1 个 NextN，256 个路由专家 top-8 外加 1 个共享专家，带 lightning indexer 的 MLA，rope base 8e6——因此直接走 GLM-5.2 的加载路径，既不需要新代码也不需要新开关；仅文本）、GLM-5.3-Flash（320B MoE，288 专家，KDA 线性注意力 + NoPE MLA 与池化索引器） | 仅文本（5.2 与 5.3）、图像（5.3-Flash） | 支持 | 支持（XML 工具调用） | GLM-5.2 与 GLM-5.3 支持（内嵌 NextN 块；5.3 上投机在单设备或显式 `--layer-split N` 模式下生效，不启用张量并行） | [glm](docs/models/glm_zh-cn.md) |
-| Qwen 3.8 Flash Next | `qwen4exp` | Qwen3.8-Flash-Next（混合 MoE，512 专家 / 激活 10 个，48 层中 36 层为 GatedDeltaNet 并与 QSA 索引的全注意力层交错，PLE n-gram 块，×4 超连接） | 图像、视频（`video_url`） | 支持 | 支持（Qwen XML / JSON 工具调用） | 支持（共享 MTP 头，独立 GGUF，经 `--draft-model` 加载；需 GGML 后端） | [qwen38-flash-next](docs/models/qwen38-flash-next_zh-cn.md) |
-| Gemma 4 | `gemma4` | gemma-4-E4B、gemma-4-12B、gemma-4-31B、gemma-4-26B-A4B（MoE） | 图像、视频、音频 | 支持 | 支持 | 支持（独立草稿 GGUF） | [gemma4](docs/models/gemma4_zh-cn.md) |
-| Qwen 3.5 / 3.6 family | `qwen35`, `qwen35moe`, `qwen3next` | Qwen3.5-9B（混合 Attn+递归）、Qwen3.5/3.6-35B-A3B（MoE）、Qwen3.8-27B（稠密混合） | 图像 | 支持 | 支持 | 支持：Qwen 3.6 与 Qwen 3.8 27B 内嵌 NextN（`--spec`）；Qwen 3.8 27B 另可经 `--draft-model` 加载 DFlash2 块级草稿（独立 GGUF） | [qwen35](docs/models/qwen35_zh-cn.md) |
-| Bonsai2（Qwen 家族） | 带 `prism.hadamard.*` 元数据与 PQ2_0 / PTQ1_0 张量的 `qwen35` | Ternary-Bonsai-2-27B PQ2_0 / PTQ1_0（64 层稠密 Qwen 3.5 混合；加载时无损重打包为 GGML Q2_0；仅支持单设备 GGML 后端） | 图像（伴随 mmproj） | 支持 | 支持 | — | [bonsai2](docs/models/bonsai2_zh-cn.md) |
-| GPT OSS | `gptoss`, `gpt-oss` | gpt-oss-20b（MoE） | 仅文本 | 支持（始终） | 支持 | — | [gptoss](docs/models/gptoss_zh-cn.md) |
-| Nemotron-H | `nemotron_h`, `nemotron_h_moe`, `nemotron_h_omni` | Nemotron-H-8B/47B（混合 SSM-Transformer，MoE）、Nemotron 3 Nano Omni、Nemotron 3.5 Lightning 30B-A3B（23 Mamba-2 + 23 MoE + 6 注意力） | 图像（Omni）；音频仅在加载自行转换的 Parakeet 音频伴随 GGUF（`--mmproj` 或 `TS_NEMOTRON_AUDIO_MMPROJ`）时可用，否则拒绝 | 支持 | 支持 | 不支持（拒绝：verify 与 decode 内核不同，投机会改变输出） | [nemotron](docs/models/nemotron_zh-cn.md) |
-| Mistral 3 | `mistral3`；以及[标记为 `llama` 的 Mistral Small 3.x 文件](docs/models/mistral3_zh-cn.md#标记为-llama-的文件)（Tekken 分词器，含 `[INST]`/`[SYSTEM_PROMPT]` 控制 token） | Mistral-Small-3.1-24B-Instruct | 图像 | 不支持 | 不支持 | — | [mistral3](docs/models/mistral3_zh-cn.md) |
-| Hunyuan Dense | `hunyuan-dense` | 腾讯稠密 Hunyuan 解码器，例如 Hy-MT2（GQA，per-head QK-norm 在 NeoX RoPE **之后**，SwiGLU） | 仅文本 | 不支持 | 不支持 | — | [hunyuan-dense](docs/models/hunyuan-dense_zh-cn.md) |
-| Muse-Glimmer | `muse-glimmer`、`muse_glimmer` | Muse-Glimmer-30B（交错滑动窗口 + NoPE 全注意力层，注意力输出门控） | 图像 | 支持 | 支持（ATEM） | 支持（DFlash 块级草稿，独立 GGUF） | [muse-glimmer](docs/models/muse-glimmer_zh-cn.md) |
-| DiffusionGemma | `diffusion-gemma`、`diffusion_gemma` | diffusion-gemma 文本扩散 GGUF | 聊天支持图像；[Jev](docs/models/jev_zh-cn.md) 还支持文档、抽样视频帧和已配置 ASR 配套服务的语音转录 | 不支持（提示中不启用） | 不支持（会被拒绝） | — | [diffusiongemma](docs/models/diffusiongemma_zh-cn.md) |
-| Qwen-Image-2.1 | `qwen_image`、`qwen-image`（通过张量键识别 2.1；更早的 Qwen-Image / Edit-2511 checkpoint 会在加载时被拒绝） | Qwen-Image-2.1 DiT GGUF（+ 专用 2.1 VAE 与 Qwen3-VL-8B） | 文本→图像与图像编辑，RGBA 输出；LoRA 插件；前缀 KV 缓存默认开启；DiT 张量并行（`--tp`，GGML CUDA/Vulkan；Vulkan 上实测双卡比单卡更慢） | 不支持 | 不支持 | — | [qwenimage21](docs/models/qwenimage21_zh-cn.md) |
-| MiniMax-H3 | `minimax-h3`、`minimax_h3`（官方发布的 GGUF 完全没有元数据，因此靠张量表识别） | MiniMax-H3 FL2VA / Ref2VA（193 亿参数的打包音视频 DiT + Qwen3-VL-32B 文本编码器、视频 VAE、音频 VAE） | 视频输出 **+ 32 kHz 立体声音频**（文本→视频、图像→视频、首尾帧、参考→视频） | 不支持 | 不支持 | — | [minimax-h3](docs/models/minimax-h3_zh-cn.md) |
-| Wan 视频 | `wan`、`wan2.1`、`wan2.2` | Wan 2.1 T2V 1.3B/14B、Wan 2.2 TI2V-5B、Wan 2.2 A14B T2V/I2V（双专家） | 视频输出（文本→视频、图像→视频） | 不支持 | 不支持 | — | [wan](docs/models/wan_zh-cn.md) |
-
-各架构的端到端文档（前向图、组件、参数、prefill/decode 优化）见[按模型架构卡片](docs/models/README_zh-cn.md)。
+每次运行具体做了什么，见[实际运行截图](docs/showcase_zh-cn.md)。
 
 ## 性能数据
 
-### 对比 llama.cpp 的同台评测（引擎对比）
-
-TensorSharp 的 .NET 运行时与原生 GGML 执行路径对比 `llama.cpp`：**相同的 GGUF 文件、相同的 NVIDIA RTX 3080 Laptop GPU（16 GB）、统一的 OpenAI `/v1/chat/completions` 接口**，**两个引擎均分别在 GGML CUDA 与 Vulkan 构建上测量**。下表为 **在相同后端上，TensorSharp 相对 llama.cpp 的几何平均加速比**（单流、贪心采样、关闭 MTP）；**> 1.0× 表示 TensorSharp 更快 / 延迟更低**。完整表格见 [`docs/engine_comparison_report.md`](docs/engine_comparison_report.md)。
+TensorSharp 与 `llama.cpp` 在同一块 NVIDIA RTX 3080 Laptop GPU（16 GB）上运行相同的 GGUF 文件，两个引擎均分别在 GGML CUDA 与 Vulkan 构建上测量。下表为在相同后端上 TensorSharp 相对 llama.cpp 的加速比（几何平均、单流、贪心采样、关闭 MTP）；大于 1.0× 表示 TensorSharp 更快。
 
 | 模型 | 后端 | decode | prefill | TTFT |
 |---|---|---:|---:|---:|
@@ -265,9 +118,7 @@ TensorSharp 的 .NET 运行时与原生 GGML 执行路径对比 `llama.cpp`：**
 | Qwen 3.6 27B（UD-IQ2_XXS，dense） | CUDA | **1.07×** | 0.96× | 0.95× |
 | Qwen 3.6 27B（UD-IQ2_XXS，dense） | Vulkan | 1.02× | 0.85× | 0.84× |
 
-TensorSharp 在 CUDA 的 prefill / 首 token 延迟上明显领先（多轮 prefill **每个模型**都获胜，最高 **1.49×**），CUDA decode 保持持平或更快，Vulkan 上 dense 12B 的 decode 明显胜出（长上下文最高 **1.32×**）——即便在 2-bit IQ2_XXS 量化下亦然。剩余低于 1.0× 的项仍是正在优化的目标。该框架还提供工具调用、结构化输出、MTP 开/关与并发场景，可通过 [`benchmarks/engine_comparison`](benchmarks/engine_comparison) 在你自己的硬件上运行。完整报告见 [此处](docs/engine_comparison_report.md)。
-
-放不进这台 16 GB 机器的模型，会在各自的卡片里给出同样方式测得的正面对比（两个引擎、同一份 GGUF、同一台机器、背靠背）：[GLM-5.2 744B-A40B，3× RTX PRO 6000](docs/models/glm_zh-cn.md#性能) —— 从约 1k prompt token 起 TensorSharp 的 prefill 领先（pp2048 **1.20×**、pp4096 **1.21×**），decode 领先 1.04×，短 prefill 上则是 llama.cpp 快几个百分点。非 Flash 的 [GLM-5.3](docs/models/glm_zh-cn.md#glm-53glm-dsa) 另有一份自己的对比，测于 8 张 A40 46 GB（无 NVLink，UD-Q2_K_XL，10,531 token 提示，300 个 decode token，3 次取中位数，整层放置）：decode 打平，**20.48** tok/s 对 llama.cpp 的 20.28；TensorSharp 的 prefill 为 251.6 tok/s，加载这份 236.4 GiB 的 checkpoint **快 2.9×**（264 秒对 753 秒）；真正的差距在首 token 延迟——41.9 秒对 29.0 秒，约**慢 1.4×**。该组数据没有记录 llama.cpp 的 prefill tok/s。完整方法与逐次数据见 `docs/validation/cross-engine-2026-09/README.md`（本地验证记录，未提交到 Git）。llama.cpp 可以作为 `glm-dsa` 的参照引擎，但不能作为 `glm5next`（GLM-5.3-Flash）的参照引擎。
+这些数字的含义、如何复现，以及放不进这块 GPU 的大模型的正面对比，见[性能数据](docs/benchmarks_zh-cn.md)。
 
 ## 文档
 
@@ -275,7 +126,12 @@ TensorSharp 在 CUDA 的 prefill / 首 token 延迟上明显领先（多轮 pref
 
 | 文档 | 内容 |
 |---|---|
+| [TensorAgent 桌面版用户指南](docs/tensoragent_desktop_zh-cn.md) | Mac / Windows 下载、DMG / PKG / MSI / ZIP 安装、模型配置、首次聊天、附件、技能、更新与故障排查 |
 | [TensorSharp 与 TensorAgent 书籍指南](docs/BOOK_zh-cn.md) | 《Building LLM Inference Engines and Agentic Runtimes from Scratch》与《From Tensors to Tokens》：书籍介绍、Amazon 链接与仓库伴读路线 |
+| [快速上手指南](docs/getting_started_zh-cn.md) | 完整的首次运行指南：各平台的 .NET SDK、所有后端、多 GPU 与多节点运行、NVIDIA DGX Spark、嵌入服务、后端选择与提速 |
+| [支持的模型](docs/supported_models_zh-cn.md) | 已实现的模型家族与实际验证范围：示例 GGUF、模态、思维链、工具与投机解码 |
+| [性能数据](docs/benchmarks_zh-cn.md) | 在相同 GPU 与相同文件上对比 llama.cpp，以及更大模型的正面对比 |
+| [实际运行截图](docs/showcase_zh-cn.md) | CLI、Web UI，以及 iPhone 与 Mac 上的 TensorAgent 的实际运行截图，及每次运行做了什么 |
 | [模型下载](MODEL_DOWNLOADS_zh-cn.md) | 各模型 `huggingface-cli` 下载 + 运行速查（量化档位、投影器、伴随文件） |
 | [使用方法](USAGE_zh-cn.md) | 完整 CLI 参考（选项、交互式 REPL、JSONL 批处理）、服务端托管、日志、HTTP API 示例、后端与环境变量矩阵 |
 | [功能特性](FEATURES_zh-cn.md) | 连续批处理、投机解码、工具调用、思维链、多模态、MoE、KV 编解码等深入说明 |
@@ -295,17 +151,18 @@ TensorSharp 在 CUDA 的 prefill / 首 token 延迟上明显领先（多轮 pref
 
 ## 当前状态
 
-仍在活跃开发中，源码树领先于已发布的包。简版如下：
+仍在活跃开发中，源码树领先于已发布的包。
 
 | 范围 | 当前情况 |
 |---|---|
-| 模型 | 十余个自回归家族，另有文本扩散、图像生成/编辑，以及带音频的视频生成——见[支持的模型架构](#支持的模型架构)。 |
-| 推理宿主 | CLI、交互式 REPL、ASP.NET Core Web UI、Ollama 风格 API、OpenAI Chat Completions 与 Responses 风格 API，以及 TensorAgent iOS/iPadOS 应用。 |
+| 模型 | 十余个自回归家族，另有文本扩散、图像生成与编辑，以及带音频的视频生成。见[支持的模型](docs/supported_models_zh-cn.md)。 |
+| 推理宿主 | CLI、Web UI、兼容 Ollama 与 OpenAI 的 API，以及 iPhone、iPad、Mac 和 Windows 上的 TensorAgent 应用。发布工作流打包 Mac / Windows 桌面版，历史发布可能没有对应资源；iPhone / iPad 使用源码构建。 |
 | 后端 | 纯 C# CPU、Direct CUDA/cuBLAS、MLX Metal，以及 GGML CPU/Metal/CUDA/Vulkan，各架构另有例外。 |
-| 服务能力 | 基于分页、前缀共享 KV 缓存的连续批处理（Radix 前缀缓存默认开启）；投机解码；单机与多节点张量并行；结构化输出；工具调用。 |
-| 智能体能力 | Agent Skills（默认开启，`--no-skills` 关闭）与可选的沙箱化文件 / shell 工具（`--code-exec`，默认关闭）；另有有界的自动子智能体，对支持工具调用的家族在服务端聊天路径与 TensorAgent 中默认开启（服务端用 `--no-multi-agent` 关闭委派，TensorAgent 用应用内的“Sub-agents”设置；CLI 没有子智能体）。子智能体默认只读。 |
+| 服务能力 | 带共享前缀缓存的连续批处理、投机解码、张量并行、结构化输出与工具调用。 |
+| 智能体能力 | Agent Skills、沙箱化的文件与 shell 工具，以及有界的子智能体。见 [Agent Skills](docs/agent_skills.md)（英文）与[多智能体](docs/multi_agent.md)（英文）。 |
+| TensorAgent | 十二项内置模型、保存聊天与产物、蒙版图像编辑和 LoRA 选择、八种界面语言，以及持久保存的文本轮次统计。媒体生成已在 Mac 上实测；iOS 媒体生成及 Windows 图像 / 音频 / 视频生成仍未验证。 |
 
-逐项细节——哪个架构跑在哪个后端上、各家族分别支持哪些特性，以及已知限制——见[状态矩阵](docs/PROJECT_STATUS_zh-cn.md#状态矩阵)。
+逐项细节（哪个架构跑在哪个后端上、各家族分别支持哪些特性，以及已知限制）见[状态矩阵](docs/PROJECT_STATUS_zh-cn.md#状态矩阵)。
 
 ## 作者
 
@@ -314,3 +171,17 @@ Zhongkai Fu
 ## 许可证
 
 详见 [LICENSE](LICENSE)。
+
+## 配合书籍学习
+
+| Qwen 推理与智能体运行时 | Gemma 4 与多模态推理 |
+|---|---|
+| <a href="https://www.amazon.com/dp/B0HJQ4VQ31"><img src="website/assets/building-llm-inference-engines-cover.jpg" alt="Building LLM Inference Engines and Agentic Runtimes from Scratch: Qwen Dense and MoE Models with TensorSharp and TensorAgent" width="190"></a> | <a href="https://www.amazon.com/dp/B0H9P44QZZ"><img src="website/assets/from-tensors-to-tokens-cover.jpg" alt="From Tensors to Tokens: Building a Multimodal LLM Inference Engine from Scratch with TensorSharp and Gemma 4 E4B" width="190"></a> |
+| **[Building LLM Inference Engines and Agentic Runtimes from Scratch: Qwen Dense and MoE Models with TensorSharp and TensorAgent](https://www.amazon.com/dp/B0HJQ4VQ31)** | **[From Tensors to Tokens: Building a Multimodal LLM Inference Engine from Scratch with TensorSharp and Gemma 4 E4B](https://www.amazon.com/dp/B0H9P44QZZ)** |
+| 使用 C# 构建 Qwen 稠密/MoE 推理与受控智能体工作流。从张量、分词、注意力、专家路由、量化和缓存，逐步走向 GPU 加速、多模态执行、工具、技能、沙箱代码执行，以及 TensorSharp 和 TensorAgent 的桌面与移动端部署。 | 以 Gemma 4 E4B 为例，用 C#/.NET 构建多模态推理引擎。从张量、GGUF 模型加载、量化与分词，走向文本、图像、视频和音频执行，并结合 TensorSharp 源码理解正确性检查与服务优化。 |
+| **[在 Amazon 购买](https://www.amazon.com/dp/B0HJQ4VQ31)** | **[在 Amazon 购买](https://www.amazon.com/dp/B0H9P44QZZ)** |
+
+**[查看两本书的介绍与仓库伴读路线](docs/BOOK_zh-cn.md)**
+
+<p align="center"><a href="https://buymeacoffee.com/zhongkaifu"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a><br>
+<sub>TensorSharp/TensorAgent is free. If you like it, a coffee keeps the work on it going.</sub></p>

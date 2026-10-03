@@ -156,7 +156,7 @@ def main():
         report["native_sha256"] = sha(args.library)
         lib = ct.CDLL(str(args.library.resolve()))
         signatures = {
-            "LoadModelDspark": ([ct.c_char_p] + [ct.c_int]*4 + [ct.c_char_p, ct.c_int, ct.c_char_p], ct.c_void_p),
+            "LoadModel": ([ct.c_char_p] + [ct.c_int]*4 + [ct.c_char_p, ct.c_int, ct.c_char_p, ct.c_int], ct.c_void_p),
             "Forward": ([ct.c_void_p, ct.c_void_p, ct.c_int, ct.c_void_p], ct.c_int),
             "ForwardSpec": ([ct.c_void_p, ct.c_void_p, ct.c_int, ct.c_void_p], ct.c_int),
             "DsparkDraft": ([ct.c_void_p, ct.c_int, ct.c_void_p, ct.c_void_p], ct.c_int),
@@ -174,8 +174,8 @@ def main():
             read_ring = lib.TSGgml_Dsv4TestDsparkReadRing
             read_ring.argtypes, read_ring.restype = [ct.c_void_p, ct.c_int, ct.c_int, ct.c_void_p], ct.c_int
         for _ in range(2):
-            handle = api["LoadModelDspark"](str(args.fixture_dir / "deepseek41-fixture.gguf").encode(),
-                args.gpus, 1024, 32, 2, str(draft_path).encode(), 0, args.backend.encode())
+            handle = api["LoadModel"](str(args.fixture_dir / "deepseek41-fixture.gguf").encode(),
+                args.gpus, 1024, 32, 2, str(draft_path).encode(), 0, args.backend.encode(), 0)
             check("load_draft_model", bool(handle))
             handles.append(handle)
         live, cold = handles

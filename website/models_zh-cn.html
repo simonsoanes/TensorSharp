@@ -79,7 +79,7 @@
   </table>
   </div>
   <p class="page-foot-note">工具支持同时要求会声明工具的提示词渲染器与匹配的结构化输出解析器。Qwen 3.8 Flash Next（<code>qwen4exp</code>）通过 Qwen 3.5 解析器返回结构化调用，因此调用者定义的工具、Agent Skills 工具、代码执行工具，以及服务端的<a href="agentic_zh-cn.html#sub-agents">子智能体委派</a>都会提供给它。Mistral 3 与 Hunyuan Dense 既不渲染工具声明也不渲染工具结果，DiffusionGemma 不渲染工具声明且会拒绝带工具的请求，因此这三个家族既不会获得上述任何工具，也不参与子智能体委派。</p>
-  <p class="page-foot-note">MiniMax-H3、Wan、DiffusionGemma 与 Hunyuan Dense 拒绝多 GPU 模式。Qwen 3.8 Flash Next 与 DeepSeek V4 使用 <code>--layer-split N</code> 做本地整层放置。GLM 支持两种显式本地模式；Qwen-Image 仅支持扩散 Transformer 的本地张量并行。DeepSeek V4.1 的 routed-MoE TP 还需设置匹配的 <code>TS_DSV41_TP=N</code>。</p>
+  <p class="page-foot-note">MiniMax-H3、Wan、DiffusionGemma 与 Hunyuan Dense 拒绝多 GPU 模式。Qwen 3.8 Flash Next 支持符合量化条件的本地 GGML CUDA TP 与 <code>--layer-split N</code>；DeepSeek V4 使用整层放置。GLM 支持两种显式本地模式；Qwen-Image 仅支持扩散 Transformer 的本地张量并行。DeepSeek V4.1 支持 <code>--layer-split N</code> 与实验性 routed-MoE <code>--tp N</code>。</p>
 
   <div class="content-footer">
     <a href="backends_zh-cn.html">← 计算后端</a>

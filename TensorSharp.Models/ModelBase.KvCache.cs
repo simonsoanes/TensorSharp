@@ -25,7 +25,8 @@ using TensorSharp.GGML;
 using TensorSharp.MLX;
 
 namespace TensorSharp.Models
-{
+{
+
     // Writing K/V into a linear cache and reading it back: the F32, F16 and
     // block-quantized layouts, the MLX head-first fast paths, and GQA head expansion.
     public abstract partial class ModelBase
@@ -271,9 +272,6 @@ namespace TensorSharp.Models
 
         protected bool TryCopyHeadFirstToCacheMlx(Tensor cache, Tensor src, int startPos, int seqLen, bool circular = false)
         {
-            if (string.Equals(Environment.GetEnvironmentVariable("TS_MLX_DEVICE_KV_COPY"), "0", StringComparison.Ordinal))
-                return false;
-
             if (circular)
                 return TryCopyHeadFirstToCacheCircularMlx(cache, src, startPos, seqLen);
 
@@ -298,10 +296,7 @@ namespace TensorSharp.Models
             // per layer × 42 layers) that's ~600 MLX op dispatches/token
             // collapsed into ~80. Falls back to the per-head loop if the
             // fused path declines (e.g. dtype mismatch, sub-view storage).
-            // Disable via TS_MLX_FUSED_KV_WRITE=0 to A/B against the per-head
-            // path (helpful when investigating slice_update perf regressions).
-            if (!string.Equals(Environment.GetEnvironmentVariable("TS_MLX_FUSED_KV_WRITE"), "0", StringComparison.Ordinal)
-                && MlxFusedOps.TryWriteKvCacheBlock(cache, src, startPos, seqLen))
+            if (MlxFusedOps.TryWriteKvCacheBlock(cache, src, startPos, seqLen))
                 return true;
 
             int heads = (int)cache.Sizes[0];
@@ -440,6 +435,7 @@ namespace TensorSharp.Models
 
             InvalidateTensorDeviceCache(kCache);
             InvalidateTensorDeviceCache(vCache);
-        }
+        }
+
     }
 }

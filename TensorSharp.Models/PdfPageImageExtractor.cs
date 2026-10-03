@@ -82,7 +82,7 @@ namespace TensorSharp.Models
             => ExtractPageImagesFromBytes(pdfBytes, outputDirectory, maxPages, namePrefix, password, 0, default);
 
         /// <summary>Byte-array extraction with a raster budget checked before decoding and
-        /// cancellation between pages/images. The legacy overload retains its unlimited budget.</summary>
+        /// cancellation between pages/images. The shorter overload applies no raster budget.</summary>
         public static PdfImageResult ExtractPageImagesFromBytes(
             byte[] pdfBytes, string outputDirectory, int maxPages, string namePrefix, string password,
             long maxImagePixels, CancellationToken cancellationToken)

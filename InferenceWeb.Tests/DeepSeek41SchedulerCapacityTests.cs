@@ -6,6 +6,8 @@ using TensorSharp.Runtime.Scheduling;
 
 namespace InferenceWeb.Tests;
 
+[Collection(EngineEnvironmentCollection.Name)]
+
 public sealed class DeepSeek41SchedulerCapacityTests : IDisposable
 {
     private readonly EnvScope _env = new();
@@ -98,7 +100,7 @@ public sealed class DeepSeek41SchedulerCapacityTests : IDisposable
     {
         var cfg = ProfileConfig(batchTokens, 256);
         var pool = new BlockPool(4096, cfg.BlockSize, 0);
-        var scheduler = new ContinuousBatchScheduler(cfg, pool, "v41-profile");
+        var scheduler = new ContinuousBatchScheduler(cfg, pool);
         for (int i = 0; i < 4; ++i) scheduler.Submit(Sequence($"prefill-{i}", 8192, 4));
         var step = scheduler.Schedule();
         Assert.Equal(4, step.ScheduledWork.Count);
@@ -112,7 +114,7 @@ public sealed class DeepSeek41SchedulerCapacityTests : IDisposable
     {
         var cfg = ProfileConfig(4096, mixedChunk);
         var pool = new BlockPool(4096, cfg.BlockSize, 0);
-        var scheduler = new ContinuousBatchScheduler(cfg, pool, "v41-profile");
+        var scheduler = new ContinuousBatchScheduler(cfg, pool);
         var decoder = Sequence("decoder", 4, 16);
         scheduler.Submit(decoder);
         var first = Assert.Single(scheduler.Schedule().ScheduledWork);

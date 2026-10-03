@@ -724,7 +724,7 @@ public class ShellToolDeclarationTests : IDisposable
             _adapter.DeclareTools().Select(t => t.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray());
 
         // Prompt guidance and parameter descriptions must not direct a model to the
-        // legacy editor or expose whole-file overwrite as an alternative to patching.
+        // unadvertised editor or expose whole-file overwrite as an alternative to patching.
         foreach (ToolFunction tool in _adapter.DeclareTools())
         {
             Assert.DoesNotContain(SkillToolNames.EditFile, tool.Description, StringComparison.Ordinal);
@@ -774,9 +774,9 @@ public class ShellToolDeclarationTests : IDisposable
     }
 
     [Fact]
-    public void TheDeclaredToolNames_AreTheDispatchTablesNonLegacyCodeTools()
+    public void TheDeclaredToolNames_AreTheDispatchTablesAdvertisedCodeTools()
     {
-        // Legacy edit_file calls still dispatch for compatibility, but new prompts must
+        // edit_file calls a model makes by reflex still dispatch, but the declarations
         // advertise apply_patch as the sole editor.
         Assert.Equal(
             SkillToolNames.CodeTools.Where(n => n != SkillToolNames.EditFile)

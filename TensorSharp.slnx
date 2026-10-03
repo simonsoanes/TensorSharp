@@ -1,4 +1,13 @@
 <Solution>
+  <!-- TensorAgent's app, TensorAgent/src/TensorAgent.Maui, and the iOS share extension it
+       embeds are not listed: they need the .NET MAUI workloads. Directory.Solution.targets
+       builds the app after this solution wherever the SDK running the build has them, and
+       warns when it does not. -->
+  <Folder Name="/TensorAgent/">
+    <Project Path="TensorAgent/src/TensorAgent.Core/TensorAgent.Core.csproj" />
+    <Project Path="TensorAgent/src/TensorAgent.Sharing/TensorAgent.Sharing.csproj" />
+    <Project Path="TensorAgent/tests/TensorAgent.Tests/TensorAgent.Tests.csproj" />
+  </Folder>
   <Project Path="AdvUtils/AdvUtils.csproj" />
   <Project Path="InferenceWeb.Tests/InferenceWeb.Tests.csproj" />
   <Project Path="TensorSharp.AgentHost/TensorSharp.AgentHost.csproj" />

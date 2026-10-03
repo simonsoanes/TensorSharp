@@ -8,6 +8,8 @@ using TensorSharp.Runtime;
 
 namespace InferenceWeb.Tests;
 
+[Collection(EngineEnvironmentCollection.Name)]
+
 public class Qwen35CacheMemoryPolicyTests
 {
     [Theory]

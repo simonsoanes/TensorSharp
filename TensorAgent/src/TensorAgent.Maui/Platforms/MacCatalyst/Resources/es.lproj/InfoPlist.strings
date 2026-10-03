@@ -1,0 +1,4 @@
+"NSCameraUsageDescription" = "TensorAgent usa la cámara para hacer fotos que quieras mostrar al modelo que se ejecuta en el dispositivo.";
+"NSMicrophoneUsageDescription" = "TensorAgent usa el micrófono para dictar mensajes y adjuntar audio para el modelo que se ejecuta en el dispositivo.";
+"NSPhotoLibraryUsageDescription" = "TensorAgent lee las fotos y los vídeos que eliges adjuntar a una conversación.";
+"NSSpeechRecognitionUsageDescription" = "TensorAgent transcribe tu dictado en el cuadro de mensaje.";

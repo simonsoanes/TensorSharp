@@ -79,6 +79,32 @@ namespace TensorSharp.Cuda.Interop
             int computeType,
             int algo);
 
+        [LibraryImport(LibName)]
+        public static partial int cublasGemmStridedBatchedEx(
+            IntPtr handle,
+            int transa,
+            int transb,
+            int m,
+            int n,
+            int k,
+            ref float alpha,
+            IntPtr a,
+            int aType,
+            int lda,
+            long strideA,
+            IntPtr b,
+            int bType,
+            int ldb,
+            long strideB,
+            ref float beta,
+            IntPtr c,
+            int cType,
+            int ldc,
+            long strideC,
+            int batchCount,
+            int computeType,
+            int algo);
+
         public const int CUBLAS_OP_N = 0;
         public const int CUBLAS_OP_T = 1;
         public const int CUBLAS_TENSOR_OP_MATH = 1;

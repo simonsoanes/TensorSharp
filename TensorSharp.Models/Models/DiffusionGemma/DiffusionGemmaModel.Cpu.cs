@@ -23,27 +23,8 @@ namespace TensorSharp.Models
 {
     public sealed partial class DiffusionGemmaModel
     {
-        // ---- A/B escape hatches (read once) ------------------------------------------------------
         // DIFFUSION_NO_PKV=1 (shared with the GPU backends) turns prompt-KV caching off, so every read
         // and every denoising step runs the unified [prompt|canvas] forward again.
-        // DIFFUSION_CPU_LEGACY=1 restores this model's side of the pre-existing CPU path in one switch:
-        // no prompt-KV cache (the old path had none) and the old implementation of every stage below.
-        // The Core ops that path calls (Ops.RMSNorm/GELUMul/Add/Mul/Copy, the F32 GEMM, the quantized
-        // matmul) were rewritten as well and round differently by default, so reproducing the old CPU
-        // forward bit for bit takes the whole recipe: DIFFUSION_CPU_LEGACY=1 TS_CPU_SIMD_ELEMENTWISE=0
-        // TS_CPU_SGEMM=0 TS_CPU_QGEMM=0 (the last also turns TS_CPU_FGEMM off).
-        // The per-stage switches restore one stage each. _MOE, _ROUTER and _PROJ apply on every path.
-        // _ATTN applies to the unified forward only: the prompt-KV prefill and canvas decode (the
-        // default) always run the fused norm+RoPE and the blocked attention kernel, whose default
-        // arithmetic is the old kernel's, so an attention A/B also needs DIFFUSION_NO_PKV=1.
-        private static readonly bool CpuLegacyAll = Environment.GetEnvironmentVariable("DIFFUSION_CPU_LEGACY") == "1";
-        private static readonly bool CpuLegacyMoe = CpuLegacyAll || Environment.GetEnvironmentVariable("DIFFUSION_CPU_LEGACY_MOE") == "1";
-        private static readonly bool CpuLegacyProj = CpuLegacyAll || Environment.GetEnvironmentVariable("DIFFUSION_CPU_LEGACY_PROJ") == "1";
-        private static readonly bool CpuLegacyAttn = CpuLegacyAll || Environment.GetEnvironmentVariable("DIFFUSION_CPU_LEGACY_ATTN") == "1";
-        // The router is separate from the expert FFN so the batched FFN can be checked bitwise against
-        // the reference loop under identical routing (the dot kernels round differently than the GEMM).
-        // That check also needs TS_CPU_SIMD_ELEMENTWISE=0: the loop's Ops.GELUMul is the SIMD one now.
-        private static readonly bool CpuLegacyRouter = CpuLegacyMoe || Environment.GetEnvironmentVariable("DIFFUSION_CPU_LEGACY_ROUTER") == "1";
         private static readonly bool CpuPoolDisabled = Environment.GetEnvironmentVariable("TS_CPU_POOL") == "0";
 
         // Tokens per batched-MoE pass. Bounds the gathered per-route scratch (a 4k-token prefill would
@@ -52,10 +33,8 @@ namespace TensorSharp.Models
             int.TryParse(Environment.GetEnvironmentVariable("DIFFUSION_CPU_MOE_CHUNK"), out int moeChunk) && moeChunk > 0 ? moeChunk : 512;
 
         /// <summary>True on the pure-C# CPU backend: prompt-KV caching runs on the host glue below
-        /// (the device-glue backends keep their own implementation in DiffusionGemmaModel.cs).
-        /// Off under DIFFUSION_CPU_LEGACY=1, which restores this model's old CPU path (the old Core ops
-        /// need their own switches too; see the recipe above).</summary>
-        private bool UsesHostPromptKv => _backend == BackendType.Cpu && !CpuLegacyAll;
+        /// (the device-glue backends keep their own implementation in DiffusionGemmaModel.cs).</summary>
+        private bool UsesHostPromptKv => _backend == BackendType.Cpu;
 
         private bool CpuFastPaths => _backend == BackendType.Cpu;
 
@@ -131,10 +110,9 @@ namespace TensorSharp.Models
         private void CpuLinearMulti(Tensor input, string[] names, Tensor[] outputs)
         {
             var weights = new QuantizedWeight[names.Length];
-            if (!CpuLegacyProj)
-                for (int i = 0; i < names.Length; i++)
-                    if (names[i] != null && _quantWeights.TryGetValue(names[i], out QuantizedWeight qw))
-                        weights[i] = qw;
+            for (int i = 0; i < names.Length; i++)
+                if (names[i] != null && _quantWeights.TryGetValue(names[i], out QuantizedWeight qw))
+                    weights[i] = qw;
             LinearMultiQuantized(input, weights, outputs, i => LinearInto(input, names[i], outputs[i]));
         }
 
@@ -206,8 +184,8 @@ namespace TensorSharp.Models
         /// <summary>Q/K/V projection + per-head Q/K RMSNorm (weighted) + unweighted V RMSNorm + NeoX RoPE
         /// at absolute positions <paramref name="rowPos"/>, as flat token-major [rows, heads*hd] tensors.
         /// Global layers have no V projection (V = unweighted norm of the RAW K). The norm+RoPE pass is
-        /// fused per row and bitwise identical to the Ops.RMSNorm + ApplyNeoXRoPERaw chain as it computed
-        /// before the Core SIMD rewrite (TS_CPU_SIMD_ELEMENTWISE=0; see HeadNormRopeRow).
+        /// fused per row and bitwise identical to the scalar Ops.RMSNorm + ApplyNeoXRoPERaw formulas
+        /// (see HeadNormRopeRow).
         /// <paramref name="needQ"/> = false skips the Q projection (the last prefill layer only needs K/V).</summary>
         private unsafe void CpuProjectQkv(Tensor normed, int layer, string prefix, int[] rowPos, bool needQ,
             out Tensor q, out Tensor k, out Tensor v)
@@ -779,7 +757,7 @@ namespace TensorSharp.Models
         /// <summary>
         /// The 128-expert top-8 MoE FFN on the pure-C# backend, batched across experts.
         ///
-        /// The reference loop (still behind DIFFUSION_CPU_LEGACY_MOE=1) ran each active expert on its
+        /// The per-expert loop (what the other backends run) takes each active expert on its
         /// own: two Tensor allocations, a row gather, two linear dispatches (each a separate pool
         /// fork/join and activation quantization), a GELU and a scalar scatter - ~2x128 matmul
         /// dispatches per layer, most of them one or two rows wide, and 59% of a Jev read. Here:
@@ -787,9 +765,8 @@ namespace TensorSharp.Models
         ///  2. ALL experts' gate_up projections under ONE <see cref="ManagedQuantizedOps.TryAddmmQuantizedBatch"/>
         ///     over the stacked expert tensor, cut into cost-balanced column slices so a hot expert
         ///     does not become the straggler of the fork/join;
-        ///  3. GELU(gate)*up, parallel (exactly Ops.GELUMul's arithmetic before the Core SIMD rewrite,
-        ///     i.e. what the reference loop computes under TS_CPU_SIMD_ELEMENTWISE=0; the default
-        ///     Ops.GELUMul now differs by a few ulp, see GeluMulRow);
+        ///  3. GELU(gate)*up, parallel (exactly the scalar Ops.GELUMul formula; the SIMD Ops.GELUMul
+        ///     differs by a few ulp, see GeluMulRow);
         ///  4. all down projections under one more batch;
         ///  5. per token, the routing-weighted sum of its experts' rows (scale folded exactly as the
         ///     reference: w * (s_e * y), ascending expert order, from zero), parallel over tokens.
@@ -994,7 +971,7 @@ namespace TensorSharp.Models
         /// single-threaded Embedding walked one row at a time.</summary>
         private unsafe Tensor CpuEmbeddingRows(int[] tokens)
         {
-            if (!CpuFastPaths || CpuLegacyAll || !_quantWeights.TryGetValue("token_embd.weight", out QuantizedWeight qw) || !qw.HasHostData
+            if (!CpuFastPaths || !_quantWeights.TryGetValue("token_embd.weight", out QuantizedWeight qw) || !qw.HasHostData
                 || !ManagedQuantizedOps.SupportsDequantization((GgmlTensorType)qw.GgmlType) || tokens.Length < 64)
                 return Embedding(tokens);
             int dim = (int)qw.Ne0;

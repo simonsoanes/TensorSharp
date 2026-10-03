@@ -182,6 +182,118 @@ public sealed class DeepSeekSlotRetentionTests
         Assert.Empty(native.Mutations);
     }
 
+    // ---------------------------------------------------------------- a slot for a new request
+
+    /// <summary>A request that needs a slot takes a new one while the devices have room, and every
+    /// retained conversation stays for its next turn. Evicting one here was what cost staggered
+    /// conversations their reuse: each arrival emptied the latest finished conversation's slot.</summary>
+    [Fact]
+    public void ANewRequest_TakesANewSlotWhileMemoryAllows_AndEveryRetainedConversationStays()
+    {
+        var native = new Slots(2, (1, 300), (2, 450)) { Capacity = 8 };
+        var retained = new OrderedDictionary<string, int> { ["older"] = 1, ["newer"] = 2 };
+        string active = null, selected = "newer";
+        int primary = -1;
+        var released = new List<string>();
+        int slot = DeepSeek4Model.SlotForRequest(retained, ref primary, ref active, ref selected, true,
+            released, native, out bool tookPrimary);
+        Assert.Equal(3, slot);
+        Assert.False(tookPrimary);
+        Assert.Equal(new[] { "older", "newer" }, retained.Keys);
+        Assert.Empty(released);
+        Assert.Equal(new[] { "alloc:3" }, native.Mutations);
+    }
+
+    /// <summary>With no room, the conversation retained longest goes (not the one that just
+    /// finished), emptied into the primary the request then takes; the rest stay.</summary>
+    [Fact]
+    public void ANewRequest_ReleasesTheOldestRetainedConversation_OnlyWhenMemoryIsShort()
+    {
+        var native = new Slots(2, (1, 300), (2, 450), (5, 80)) { Capacity = 3 };
+        var retained = new OrderedDictionary<string, int> { ["oldest"] = 1, ["newer"] = 2, ["newest"] = 5 };
+        string active = null, selected = "newest";
+        int primary = -1;
+        var released = new List<string>();
+        int slot = DeepSeek4Model.SlotForRequest(retained, ref primary, ref active, ref selected, true,
+            released, native, out bool tookPrimary);
+        Assert.Equal(1, slot);
+        Assert.True(tookPrimary);
+        Assert.Equal(1, primary);
+        Assert.Equal(0, native.Heads[1]);
+        Assert.Equal(new[] { "oldest" }, released);
+        Assert.Equal(new[] { "newer", "newest" }, retained.Keys);
+        Assert.Equal(new[] { "select:1", "graphs:1", "reset:1" }, native.Mutations);
+    }
+
+    /// <summary>A primary that holds the single-stream conversation is not taken; room is made by
+    /// freeing the oldest retained slot, and a new one is allocated.</summary>
+    [Fact]
+    public void ANewRequest_FreesTheOldestRetainedSlot_WhenTheBusyPrimaryStays()
+    {
+        var native = new Slots(0, (0, 120), (1, 300), (2, 450)) { Capacity = 3 };
+        var retained = new OrderedDictionary<string, int> { ["older"] = 1, ["newer"] = 2 };
+        string active = null, selected = null;
+        int primary = 0;
+        var released = new List<string>();
+        int slot = DeepSeek4Model.SlotForRequest(retained, ref primary, ref active, ref selected, true,
+            released, native, out bool tookPrimary);
+        Assert.False(tookPrimary);
+        Assert.Equal(0, primary);
+        Assert.Equal(120, native.Heads[0]);
+        Assert.Equal(new[] { "older" }, released);
+        Assert.Equal(new[] { "newer" }, retained.Keys);
+        Assert.Equal(new[] { "free:1", $"alloc:{slot}" }, native.Mutations);
+    }
+
+    /// <summary>An empty primary is taken before anything is allocated or released.</summary>
+    [Fact]
+    public void ANewRequest_TakesTheEmptyPrimaryFirst()
+    {
+        var native = new Slots(0, (0, 0), (1, 300)) { Capacity = 2 };
+        var retained = new OrderedDictionary<string, int> { ["older"] = 1 };
+        string active = null, selected = null;
+        int primary = 0;
+        var released = new List<string>();
+        int slot = DeepSeek4Model.SlotForRequest(retained, ref primary, ref active, ref selected, true,
+            released, native, out bool tookPrimary);
+        Assert.Equal(0, slot);
+        Assert.True(tookPrimary);
+        Assert.Empty(released);
+        Assert.Empty(native.Mutations);
+    }
+
+    /// <summary>The room estimate can be optimistic: a refused allocation releases the oldest
+    /// retained conversation and tries again.</summary>
+    [Fact]
+    public void ARefusedAllocation_ReleasesTheOldestRetainedConversation_AndRetries()
+    {
+        var native = new Slots(2, (1, 300), (2, 450)) { Capacity = 2, Optimistic = true };
+        var retained = new OrderedDictionary<string, int> { ["older"] = 1, ["newer"] = 2 };
+        string active = null, selected = "newer";
+        int primary = -1;
+        var released = new List<string>();
+        int slot = DeepSeek4Model.SlotForRequest(retained, ref primary, ref active, ref selected, true,
+            released, native, out bool tookPrimary);
+        Assert.Equal(1, slot);
+        Assert.True(tookPrimary);
+        Assert.Equal(new[] { "older" }, released);
+        Assert.Equal(new[] { "newer" }, retained.Keys);
+    }
+
+    /// <summary>With nothing to release and no room, the request is told there is no slot.</summary>
+    [Fact]
+    public void NoRoomAndNothingRetained_IsNoSlot()
+    {
+        var native = new Slots(0, (0, 120)) { Capacity = 1 };
+        var retained = new OrderedDictionary<string, int>();
+        string active = null, selected = null;
+        int primary = 0;
+        var released = new List<string>();
+        Assert.Equal(-1, DeepSeek4Model.SlotForRequest(retained, ref primary, ref active, ref selected, true,
+            released, native, out _));
+        Assert.Empty(released);
+    }
+
     private static bool Retain(Dictionary<string, int> requests, Dictionary<string, int> retained,
         string key, ref string active, ref string selected, Slots native)
         => DeepSeek4Model.RetainNativeSequence(requests, retained, key, ref active, ref selected, 1UL << 30, native);
@@ -192,7 +304,7 @@ public sealed class DeepSeekSlotRetentionTests
         ref string active, ref string selected, Slots native)
         => DeepSeek4Model.DiscardRetainedNativeSequence(retained, key, ref primary, ref active, ref selected, native);
 
-    private sealed class Slots : DeepSeek4Model.INativeSlotRetention
+    private sealed class Slots : DeepSeek4Model.INativeSlotStore
     {
         public readonly Dictionary<int, int> Heads;
         public readonly HashSet<int> Failed = new();
@@ -200,6 +312,18 @@ public sealed class DeepSeekSlotRetentionTests
         public int Active;
         public bool Fits = true;
         public string Failure;
+        // How many slots the devices hold, and whether CanAlloc claims room that Alloc then refuses.
+        public int Capacity = int.MaxValue;
+        public bool Optimistic;
+        public bool CanAlloc() => Optimistic || Heads.Count < Capacity;
+        public int Alloc()
+        {
+            if (Heads.Count >= Capacity) return -1;
+            int slot = Heads.Count == 0 ? 0 : Heads.Keys.Max() + 1;
+            Heads[slot] = 0;
+            Mutations.Add($"alloc:{slot}");
+            return slot;
+        }
         public Slots(int active, params (int Slot, int Head)[] slots)
         { Active = active; Heads = slots.ToDictionary(s => s.Slot, s => s.Head); }
         public bool Status(int slot, out int head, out bool healthy)

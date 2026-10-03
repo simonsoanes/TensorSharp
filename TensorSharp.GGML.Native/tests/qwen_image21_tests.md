@@ -53,9 +53,14 @@ The wide-range cases run again after explicit scratch release and after backend
 shutdown/recreation. Those operations retire the MPS graph/staging cache; the
 TensorSharp MPS bridge uses ARC so replacing buffers or clearing cache entries
 releases their Objective-C ownership.
-The Metal tests do not run the temporal shortcut fixtures, whose graph contains
-operations unsupported by unchanged upstream Metal. CPU/CUDA keep those tests;
-the default managed Metal VAE does not use the fused temporal shortcut graph.
+The Metal tests also run the temporal shortcut fixtures (literal, synthetic and
+invalid cases). Unchanged upstream ggml-metal pads only at the end of a dimension,
+so the average-down shortcut builds its leading zero time slices as `ggml_fill`
+plus `ggml_concat` on a backend that refuses the leading pad; CPU and CUDA keep
+`ggml_pad_ext`. Until 2026-09-30 that one PAD node refused the whole fused encoder
+graph on Metal, so every edit encoded its reference image on the per-convolution
+path (the decoder's duplicate-up shortcut needs no pad and already ran fused). The
+narrow-normalization fixture still runs on CPU/CUDA only and is not Metal coverage.
 
 On a cuDNN-enabled Windows build, `qwen-image21-vae-missing-cudnn-cuda` runs in a
 fresh process with an isolated stub `cudnn64_9.dll` that exports no cuDNN

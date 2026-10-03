@@ -17,7 +17,10 @@
   <div class="breadcrumb"><a href="index.html">Home</a> › Getting Started</div>
   <h1>Getting Started</h1>
   <p class="lede">From a source checkout to a verified CLI reply or local API. The quick start runs Gemma 4 E4B on a native GGML backend; a managed CPU path (no CMake or GPU toolchain) remains available when you cannot build native code.</p>
+  <div class="callout tip"><div class="ic">💻</div><p><strong>Want the desktop app?</strong> Follow the <a href="tensoragent.html">TensorAgent Desktop download and user guide</a> for macOS and Windows installers, model setup, chat, files and optional code/browser tools. Distribution packages include the app runtime, so you can install without building this repository.</p></div>
   <div class="callout note"><div class="ic">📘</div><p><strong>Following the Gemma 4 E4B path?</strong> <em>From Tensors to Tokens</em> turns this quick start into a guided, from-scratch explanation of the engine behind every step. <a href="book.html">Explore the TensorSharp book →</a></p></div>
+
+  <p class="page-foot-note"><strong>Release versions:</strong> downloaded packages reflect their release tag. Releases before the updated desktop packaging workflow may contain only CLI/server archives and lack newer features. Choose a release with the required assets, or build this checkout.</p>
 
   <h2 id="prerequisites">1 · Prerequisites</h2>
   <h3 id="install-dotnet">Install the .NET 10 SDK</h3>
@@ -63,6 +66,7 @@ cd TensorSharp</code></pre>
   <h3>Full native / GPU path</h3>
   <p>Build the whole solution when you want GGML CPU, Metal, CUDA, Vulkan, or MLX. The first build compiles the native bridge and can take several minutes; subsequent builds are incremental.</p>
   <pre data-lang="bash"><code>dotnet build TensorSharp.slnx -c Release</code></pre>
+  <p>On macOS and Windows this also builds the TensorAgent app when the .NET SDK running the build has the .NET MAUI workloads, and warns when it does not; add <code>-p:TensorSharpSkipTensorAgentApp=true</code> to leave the app out (<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/DEVELOPMENT.md#build-the-entire-solution" target="_blank" rel="noopener">details</a>).</p>
   <p>Or build just one application:</p>
   <pre data-lang="bash"><code># Console application
 dotnet build TensorSharp.Cli/TensorSharp.Cli.csproj -c Release

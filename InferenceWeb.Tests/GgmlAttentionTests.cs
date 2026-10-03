@@ -35,15 +35,7 @@ public class GgmlAttentionTests
         float[,,,] outputSeed = new float[batch, queryLength + 2, heads, headDim];
         Fill(outputSeed, -777f);
 
-        string configuredBackend = (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "cpu")
-            .Trim().ToLowerInvariant();
-        GgmlBackendType backend = configuredBackend switch
-        {
-            "cuda" => GgmlBackendType.Cuda,
-            "metal" => GgmlBackendType.Metal,
-            "vulkan" => GgmlBackendType.Vulkan,
-            _ => GgmlBackendType.Cpu,
-        };
+        GgmlBackendType backend = TestGates.PinnedGgmlBackendType;
 
         var context = new GgmlContext(new[] { 0 }, backend);
         var allocator = new GgmlAllocator(context, 0);

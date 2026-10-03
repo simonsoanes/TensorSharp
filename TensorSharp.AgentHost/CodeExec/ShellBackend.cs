@@ -205,6 +205,9 @@ namespace TensorSharp.AgentHost.CodeExec
     /// </summary>
     public interface IShellBackend
     {
+        /// <summary>Whether interpreters are native host executables rather than embedded runtime names.</summary>
+        bool UsesHostProcesses => false;
+
         /// <summary>Short name for logs: <c>process</c>, <c>in-process</c>.</summary>
         string Name { get; }
 
@@ -251,6 +254,8 @@ namespace TensorSharp.AgentHost.CodeExec
     /// </summary>
     public sealed class ProcessShellBackend : IShellBackend
     {
+        public bool UsesHostProcesses => true;
+
         private readonly ISkillSandbox? _sandbox;
         private readonly SkillSandboxMode _mode;
         private readonly ShellProgram? _shell;

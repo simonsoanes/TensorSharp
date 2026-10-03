@@ -1,20 +1,28 @@
 # Playwright CLI Reference
 
-Use the wrapper script unless the CLI is already installed globally:
+Use `skills_run` with `skill="playwright"`,
+`path="scripts/playwright_cli.mjs"`, and separate `args` on every operating
+system. When using the shell directly, set the wrapper path from `--skills-dir`.
+For a standard user-scoped install on macOS/Linux:
 
 ```bash
-export CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
-export PWCLI="$CODEX_HOME/skills/playwright/scripts/playwright_cli.sh"
-"$PWCLI" --help
+export PWCLI="${CODEX_HOME:-$HOME/.codex}/skills/playwright/scripts/playwright_cli.mjs"
+pwcli() { node "$PWCLI" "$@"; }
+pwcli --help
 ```
 
-User-scoped skills install under `$CODEX_HOME/skills` (default: `~/.codex/skills`).
+Windows PowerShell (replace the example with the configured skill path):
 
-Optional convenience alias:
-
-```bash
-alias pwcli="$PWCLI"
+```powershell
+$pwcli = 'C:\path\to\skills\playwright\scripts\playwright_cli.mjs'
+function pwcli { node $pwcli @args }
+pwcli --help
 ```
+
+Use native Windows Node.js/npm, not Bash or WSL, for a desktop browser.
+The commands below work with either shell function. Environment variable
+examples using `export` are Bash; in PowerShell use
+`$env:PLAYWRIGHT_CLI_SESSION = 'todo'`.
 
 ## Core
 

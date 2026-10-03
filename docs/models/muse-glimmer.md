@@ -5,7 +5,7 @@
 | Property | Value |
 |---|---|
 | GGUF architecture key | `muse-glimmer` (also `muse_glimmer`) |
-| Source class | [`MuseGlimmerModel`](../../TensorSharp.Models/Models/MuseGlimmer/MuseGlimmerModel.cs) (legacy per-seq) |
+| Source class | [`MuseGlimmerModel`](../../TensorSharp.Models/Models/MuseGlimmer/MuseGlimmerModel.cs) (single-sequence) |
 | Speculative drafter | [`MuseGlimmerModel.DFlash.cs`](../../TensorSharp.Models/Models/MuseGlimmer/MuseGlimmerModel.DFlash.cs) + [`DFlashConfig`](../../TensorSharp.Models/Speculative/DFlashConfig.cs) |
 | Vision encoder | [`MuseGlimmerVisionEncoder`](../../TensorSharp.Models/Models/MuseGlimmer/MuseGlimmerVisionEncoder.cs) |
 | Image processor | [`MuseGlimmerImageProcessor`](../../TensorSharp.Models/Models/MuseGlimmer/MuseGlimmerImageProcessor.cs) |
@@ -13,7 +13,7 @@
 | Modalities | Text, image |
 | Thinking mode | Yes (the chat template emits an `assistant to=self` reasoning channel) |
 | Tool calling | Yes (ATEM XML markup in the chat template); eligible for skills, the code tools and server-side [sub-agent delegation](../multi_agent.md) |
-| Batched / paged forward | No (legacy per-seq) |
+| Batched / paged forward | No (single-sequence) |
 | Fused whole-model kernel | GGML CUDA / Vulkan / Metal / CPU (persistent decode graph on all four) |
 | Tensor parallelism | Yes — GGML CUDA / Vulkan, `--tp 2` max (the 30B has 2 KV heads) |
 
@@ -38,7 +38,7 @@ dotnet run --project TensorSharp.Cli -c Release -- \
   --spec-draft 15 --input prompt.txt --backend ggml_cuda
 ```
 
-`--draft-model` can also be supplied as `TS_MUSE_GLIMMER_DFLASH`. Speculation
+`--draft-model` can also be supplied as `TS_SPEC_DRAFT_MODEL`. Speculation
 on this model needs that drafter: without it, `--spec` (the weight-free n-gram
 drafter included) serves standard decode.
 
@@ -124,8 +124,7 @@ approximation), learned 32x32 position embedding.
 
 The tower's 2D matmul weights are kept in their GGUF quantization on GGML
 backends and fed straight to `AddmmQuant`. Dequantizing this tower to F32 would
-cost ~7.4 GB and evict the language model's device-resident weights;
-`TS_MUSE_GLIMMER_VENC_F32=1` restores the F32 path for A/B testing.
+cost ~7.4 GB and evict the language model's device-resident weights.
 
 ### Prompt plumbing
 
@@ -312,8 +311,8 @@ excludes sampling entirely); the model-only figure is ~0.5% higher. Where the
 optimization pass started, decode ratios were 0.94x/0.94x/0.94x with a shape
 that worsened with context (the per-token graph rebuild grows with nothing, but
 the O(context) mask refill does); the persist/replay port is the single biggest
-contributor — same binary, same session: decode at 2K context is 19.5 tok/s
-with `TS_MUSE_GLIMMER_PERSIST=0` and 21.3 with the replay path (+9%).
+contributor — same binary, same session: decode at 2K context was 19.5 tok/s
+rebuilding the graph every call and 21.3 with the replay path (+9%).
 
 ### ggml_cpu vs llama.cpp CPU
 
@@ -543,7 +542,6 @@ continuations across the A/B envs on the same binary) before it was kept.
    it). One graph per token instead of ~940 synchronous per-op submissions.
    The historical "1024-row fused graph faulted the CPU backend during warmup"
    did not reproduce — the 2048-row warmup and the whole parity suite pass.
-   `TS_MUSE_GLIMMER_FUSED_CPU=0` restores the per-op CPU path.
 7. **GgmlCpu keeps uniform KV caches (no SWA ring).** A ring is read whole
    (slots are not in position order), and ggml-cpu's flash-attention evaluates
    every KV column, masked or not — so 39 of 52 layers would pay the full
@@ -570,13 +568,53 @@ continuations across the A/B envs on the same binary) before it was kept.
    encoder features; (b) silently verifies stale drafts — output stays correct,
    acceptance collapses. Both paths now synchronize before the read.
 
+### What the 2026-09-29 fix changed
+
+A server chat on `ggml_metal` fell into an endless one-token loop (`（（（（`,
+`respond respond`, a column of empty code fences) as soon as prompt plus output
+crossed 2048 tokens, and a radix prefix reuse could hand the model a half-empty
+cache. Three defects, each reproduced deterministically with
+`eng/validation/MuseGlimmerKvGrowProbe` (teacher-forced logits against a cache
+presized to 8192):
+
+1. **The kernel addressed the ring by the full layers' capacity.** It treated
+   the sliding-window layers as a ring only while the ring was smaller than the
+   full layers' cache. On Metal those start at 2048 rows, so the 4352-row ring
+   buffers were written as `[2048]`-row flat caches: KV head 1 landed inside
+   head 0's rows, moved at every grow, and was not where truncation and KV
+   snapshots looked for it. The bound-size mismatch also made every
+   device-to-host sync of those layers a silent no-op, so captured prefix blocks
+   held zeros for all 39 sliding-window layers. A 1536-token snapshot restore or
+   rewind changed 37 of the next 300 greedy tokens.
+2. **The grow copied a stale host mirror.** `EnsureCacheCapacity` copied the
+   full layers' rows on the host without first pulling back the rows the fused
+   kernel had written on the device, and never freed the old device copies. At
+   position 2049 argmax agreement with the presized cache fell to 32% (cosine
+   0.71): the loop.
+3. **A long sequence swapped back in on the per-sequence executor killed its
+   step.** With concurrent requests (a multi-agent parent beside its children)
+   the executor rotates the model between sequences. One swapped back in past
+   the 4352-token pooled-reuse cap was reset and its blocks freed while the
+   step still forwarded its planned chunk: `AdvanceTokens(256) wants 1 blocks
+   but only 0 are allocated`. An owner past the cap now keeps the model while it
+   has work, and a swap-in rebuilds in place whatever the pool cannot restore.
+
+After the fix, greedy and teacher-forced runs are bit-identical to the presized
+cache across the 2048 and 4096 grows, the 4352 ring wrap, chunked and split
+prefills, and 1536/2560-token restores and rewinds. Metal throughput is
+unchanged (tg128 20.6-21.0 tok/s and pp 352-370 tok/s from depth 256 to 6144,
+before and after). Regression tests: `MuseGlimmerKvGrowTests` (a synthetic
+Muse-Glimmer that runs the fused kernel and the ring on any GPU lane),
+`MuseGlimmerKvSnapshotTests` (real weights at the default capacity),
+`PerSequenceSwapPastReuseCapTests` and `PrefixCache/PerSequenceWindowSwapReproTests`.
+
 ### Engineering notes that still govern the design
 
 * **Why fused:** the per-op forward submits ~600–940 GGML ops per token, each
   with host-visible overhead; every model in this repo that reaches
   llama.cpp-class decode does it as ONE whole-model graph per forward
   (`TSGgml_MuseGlimmerModelForward` — all 52 layers, final norm, LM head,
-  logit scale and softcap). `TS_MUSE_GLIMMER_FUSED=0` forces the per-op path.
+  logit scale and softcap).
 * **Persistent, capturable graphs.** A decode graph is built once with stable
   tensor addresses (raw `ggml_init` + `ggml_backend_alloc_ctx_tensors`, not a
   gallocr, whose lifetime packing moves addresses). Topology is held
@@ -601,11 +639,19 @@ continuations across the A/B envs on the same binary) before it was kept.
   so they get a `pad(n_swa + chunk + 1, 256)` = 4352-row ring indexed by
   `position % rows` instead of full-context caches — 29% of a uniform cache at
   64K. The `+1` is load-bearing (sized without it, a 4651-token prompt diverged
-  from llama.cpp on the first decode step). The kernel reads the whole ring
-  (slots are not in position order); the mask carries liveness. The ring only
-  arms when the fused kernel is available; if the fused forward declines while
-  the ring is armed, the per-op path throws rather than returning quietly wrong
-  logits. `TS_MUSE_GLIMMER_SWA_RING=0` restores uniform sizing.
+  from llama.cpp on the first decode step). The ring's layout follows the
+  allocation, never the full layers' current capacity: those start smaller
+  (2048 rows on Metal) and grow on demand, while the ring is 4352 rows from the
+  first token. How it is READ is a per-backend performance choice and both ways
+  are exact: CUDA and Vulkan read the whole ring (fixed shape for the
+  persistent graph and CUDA capture; the mask carries liveness), Metal reads the
+  same moving span a flat cache would until the ring wraps and the whole ring
+  after (its vec flash-attention kernel does not skip masked blocks). Neither
+  choice depends on the cache capacity, so a cache that grew is bit-identical
+  to one that was large from the start. The ring only arms when the fused
+  kernel is available; if the fused forward declines while the ring is armed,
+  the per-op path throws rather than returning quietly wrong logits.
+  `TS_MUSE_GLIMMER_SWA_RING=0` restores uniform sizing.
 * **A rewind on a wrapped ring is bounded by its slack.** Truncating the cache
   only moves the head; rows the wrap overwrote do not come back, and the next
   query still attends a whole window behind the new head. So once a sequence
@@ -689,33 +735,21 @@ DFlash speculative decoding follows the single-GPU path only: a configured
 drafter is declined under `--tp N` > 1. The CLI warns and serves standard
 decoding; the server refuses to start (exit code 2), because an explicit
 `--draft-model` that cannot activate is fatal there — drop the flag or run without
-`--tp`. Pooled KV block snapshots work under `--tp`
-too (the snapshot walks each layer's per-rank caches), so multi-turn reuse
-there is not limited to live-cache continuation.
+`--tp`. KV block pages work under `--tp` too (the snapshot walks each
+layer's per-rank caches), so multi-turn reuse there works as it does on one GPU.
 
 ## 7. Environment variables
 
 | Variable | Effect |
 |---|---|
-| `TS_MUSE_GLIMMER_FUSED` | `0` = disable the fused whole-model kernel everywhere (per-op A/B) |
-| `TS_MUSE_GLIMMER_FUSED_CPU` | `0` = per-op path on GgmlCpu only (the pre-2026-08-14 default) |
-| `TS_MUSE_GLIMMER_PERSIST` | `0` = disable the persistent/replayed decode graph, rebuild every call |
-| `TS_MUSE_GLIMMER_INGRAPH_EMBED` | `1` = force the in-graph embedding stage on any backend, `0` = force it off (default: on for tied LM head, Metal and CPU) |
-| `TS_MUSE_GLIMMER_DFLASH` | DFlash drafter GGUF path (same as `--draft-model`) |
-| `TS_MUSE_GLIMMER_VENC_F32` | `1` = dequantize the vision tower to F32 (A/B; ~7.4 GB) |
-| `TS_MUSE_GLIMMER_VENC_FUSED` | `0` = disable the CUDA fused vision-block/flash-attention path |
-| `TS_MUSE_GLIMMER_GELU_TANH` | `1` = tanh GELU approximation in the tower instead of exact erf |
 | `TS_MUSE_GLIMMER_VENC_TRACE` | `1` = per-stage checksums of the vision residual stream |
 | `TS_MUSE_GLIMMER_LAYER_TRACE` | `1` = residual checksum entering every layer (fused and per-op emit the same format, so diffing localizes a divergence to a layer) |
 | `TS_MUSE_GLIMMER_LAYER_TRACE_POS` / `_N` / `_DIR` | first traced position / how many forwards / raw F32 dump dir |
-| `TS_MLX_MUSE_GLIMMER_EVAL_EVERY_N_LAYERS` | MLX per-op lazy-graph flush interval (default 4, `0` disables) |
-| `TS_MLX_PIPELINED_DECODE` | `0` = disable the MLX pipelined greedy decode fast path |
+| `TS_MLX_EVAL_EVERY_N_LAYERS` | MLX per-op lazy-graph flush interval (Muse-Glimmer default 4, `0` disables) |
 | `TS_PREFILL_CHUNK` | Prompt chunk size for `ForwardRefill` (default 2048) |
 | `TS_MUSE_GLIMMER_PREFILL_CHUNK` | Tokens per prefill forward (default 2048, `0` disables chunking) |
 | `TS_MUSE_GLIMMER_SWA_RING` | `0` = size every layer for the full context instead of ringing the SWA layers (GPU backends; GgmlCpu is always uniform) |
 | `TS_MUSE_GLIMMER_SWA_ROWS` | Override the SWA ring size in rows (diagnostics) |
-| `TS_DFLASH_FUSED` | `0` = disable the fused DFlash drafter (per-op A/B) |
-| `TS_DFLASH_PERSIST` | `0` = rebuild the DFlash graphs every step instead of replaying |
 | `TS_DFLASH_PREFILL_CHUNK` | Tokens per **trunk** forward while a DFlash prefill catches the drafter up (default 1024) |
 | `TS_KV_FATTN_COPY` | `0` = never materialize a padded KV window (reproduces the ggml-cuda flash-attention **vec** fault); `force` = always materialize it |
 | `TS_GGML_CPU_THREADS` | Thread count for the shared ggml CPU backend (default: all physical cores) |

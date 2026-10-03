@@ -57,6 +57,66 @@ public class PrefixCheckpointOwnershipTests
     }
 
     [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    public void QwenPrimaryAdoptionFailure_PreservesLiveStateAndPublishesNoHolder(int allocation)
+    {
+        using var f = new Fixture(qwen: true);
+        var model = (Qwen35Model)f.Model;
+        byte[] before = f.State(f.Source);
+        var live = f.Allocator.LiveSet();
+        f.Allocator.FailAllocation = f.Allocator.Allocations + allocation;
+
+        Assert.Throws<OutOfMemoryException>(() => model.AdoptPrimaryCacheToFused("failed-adoption"));
+        Assert.False(model.HasFusedSequenceCache("failed-adoption"));
+        Assert.Null(Get(model, "_activeFusedKey"));
+        Assert.Null(Get(model, "_primaryHolder"));
+        Assert.Equal(9, model.PrimaryCacheLength);
+        Assert.Equal(before, f.State(Invoke(model, "SnapshotActiveCache")!));
+        f.Allocator.AssertLiveSet(live);
+
+        Assert.True(f.Checkpoint("after-failed-adoption"));
+        f.AssertIndependent(f.Source, f.Retained["after-failed-adoption"]!);
+    }
+
+    [Fact]
+    public void QwenPrimaryMeasurement_MatchesAdoptedFootprintWithoutAllocatingOrChangingState()
+    {
+        using var f = new Fixture(qwen: true);
+        var model = (Qwen35Model)f.Model;
+        byte[] before = f.State(f.Source);
+        var live = f.Allocator.LiveSet();
+        int allocations = f.Allocator.Allocations;
+
+        foreach (int length in new[] { -1, 0, 8, 10, 17 })
+        {
+            Assert.False(model.TryMeasurePrimaryEndState(length, out var refused));
+            Assert.Equal(default, refused);
+        }
+        Assert.True(model.TryMeasurePrimaryEndState(9, out var measured));
+        Assert.Equal(9, measured.Tokens);
+        Assert.True(measured.Bytes.HostKv > 0);
+        Assert.True(measured.Bytes.StateSnapshot > 0);
+        Assert.Equal(allocations, f.Allocator.Allocations);
+        f.Allocator.AssertLiveSet(live);
+        Assert.Equal(before, f.State(Invoke(model, "SnapshotActiveCache")!));
+
+        model.AdoptPrimaryCacheToFused("adopted");
+        // The donated snapshot now owns Source's storage and unmanaged scratch.
+        f.ForgetOwner(f.Source);
+        f.TrackOwner(Get(model, "_primaryHolder")!);
+        Assert.False(model.TryMeasurePrimaryEndState(9, out var checkedOut));
+        Assert.Equal(default, checkedOut);
+        Assert.True(model.RetainSequenceCacheAs("adopted", "retained"));
+        Assert.Equal(measured, model.MeasureEndState("retained"));
+        Assert.Equal(before, f.State(f.Retained["retained"]!));
+    }
+
+    [Theory]
     [InlineData(false, 0)]
     [InlineData(false, 3)]
     [InlineData(false, 5)]
@@ -310,6 +370,8 @@ public class PrefixCheckpointOwnershipTests
             return output.ToArray();
         }
         internal void Load(object holder) => Invoke(Model, "LoadCacheHolder", holder);
+        internal void TrackOwner(object holder) => owners.Add(holder);
+        internal void ForgetOwner(object holder) => owners.Remove(holder);
         internal Tensor[] Tensors(object holder)
         {
             var result = new List<Tensor>();

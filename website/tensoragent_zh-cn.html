@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-cn">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TensorAgent 桌面版 — 下载与使用指南 — TensorSharp 维基</title>
+  <meta name="description" content="在 macOS 或 Windows 下载、安装 TensorAgent 桌面版，设置本地模型，开始聊天、处理文件，以及启用代码和浏览器工具。">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+  <script>try{var t=localStorage.getItem('ts-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.classList.toggle('dark',t==='dark');}catch(e){}</script>
+  <script defer src="assets/search-index-zh.js"></script>
+  <script defer src="assets/app.js"></script>
+</head>
+<body data-page="tensoragent">
+<a class="skip" href="#content">跳到正文</a>
+<main class="content" id="content">
+  <div class="breadcrumb"><a href="index_zh-cn.html">首页</a> › TensorAgent 桌面版</div>
+  <h1>TensorAgent 桌面版</h1>
+  <p class="lede">运行在 Mac 或 Windows 电脑上的本地 AI 应用。安装应用，在<strong>模型</strong>页面下载一个模型，即可开始对话。你还可以处理照片与文件、生成图片，或使用技能创建文件和运行代码。可用功能取决于模型能力与电脑内存。</p>
+  <div class="btn-row">
+    <a class="btn" href="https://github.com/zhongkaifu/TensorSharp/releases/latest" target="_blank" rel="noopener">下载 macOS 版 ↗</a>
+    <a class="btn secondary" href="https://github.com/zhongkaifu/TensorSharp/releases/latest" target="_blank" rel="noopener">下载 Windows 版 ↗</a>
+    <a class="btn secondary" href="#first-run">设置第一个模型 ↓</a>
+  </div>
+  <p>两个下载按钮均打开官方 Release 的 <strong>Assets（发行文件）</strong>列表。按下文选择适合平台的 <code>tensoragent-desktop-</code> 文件。桌面安装包由更新后的 Release Binaries 工作流生成；旧发行版可能只有 CLI/Server 归档。若最新发行版尚无桌面文件，请查看<a href="https://github.com/zhongkaifu/TensorSharp/releases" target="_blank" rel="noopener">全部发行版</a>，或在桌面发行版发布前按 <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/TensorAgent/README.md" target="_blank" rel="noopener">源码构建说明</a>运行。</p>
+
+  <h2 id="requirements">1 · 检查电脑配置</h2>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>平台</th><th>要求</th><th>选择的版本</th></tr></thead>
+    <tbody>
+      <tr><td>macOS</td><td>Apple Silicon（M 系列），macOS 14 或更新版本；包含 Metal 加速。发行包不提供 Intel Mac 版。</td><td><code>osx-arm64</code></td></tr>
+      <tr><td>Windows CPU</td><td>x64 电脑，Windows 10 1809（内部版本 17763）或更新版本 / Windows 11；无需 NVIDIA 显卡。</td><td><code>win-x64-cpu</code></td></tr>
+      <tr><td>Windows NVIDIA</td><td>相同的 Windows 要求，另需支持 CUDA 的 NVIDIA 显卡，以及兼容发行包 CUDA 运行时的驱动；具体 CUDA 版本见该发行版说明。</td><td><code>win-x64-cuda</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>发行包包含 .NET 运行时和原生推理库；安装时无需 .NET SDK、Visual Studio、Xcode 或 CUDA Toolkit。Windows 还需要 <a href="https://developer.microsoft.com/microsoft-edge/webview2/" target="_blank" rel="noopener">Microsoft Edge WebView2 Evergreen Runtime</a>，若系统没有则需安装。CUDA 发行包包含用户态 CUDA 库，但 NVIDIA 驱动需要单独安装。</p>
+  <p>最小的目录模型要求至少 <strong>12 GB 系统内存档位</strong>；除应用外，还应为模型文件预留数 GB 磁盘空间。模型页面会在下载前显示下载大小与内存要求。图片生成需要 24 GB 档位，大型文本和视频模型需要 32–48 GB。这是按系统内存判断的目录资格检查，Windows 也是如此；并不保证模型适配显卡显存或在每种后端都能运行。第一次可以选择下载量较小的 <strong>Gemma 4 E2B</strong>。</p>
+
+  <h2 id="downloads">2 · 选择发行包</h2>
+  <p>在 Release 的 Assets 中，下表的 <code>V</code> 代表<strong>去掉开头 <code>v</code> 的版本号</strong>。下载一个安装包和对应的校验和文件。</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>平台</th><th>文件名</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td>Mac</td><td><code>tensoragent-desktop-V-osx-arm64.dmg</code></td><td>将应用拖入 Applications（应用程序）；通常选择此方式。</td></tr>
+      <tr><td>Mac</td><td><code>tensoragent-desktop-V-osx-arm64.pkg</code></td><td>使用 macOS 安装器安装到 Applications。</td></tr>
+      <tr><td>Mac</td><td><code>tensoragent-desktop-V-osx-arm64.zip</code></td><td>解压应用，复制到 Applications 或个人 Applications 文件夹。</td></tr>
+      <tr><td>Windows</td><td><code>tensoragent-desktop-V-win-x64-cpu.msi</code><br><code>tensoragent-desktop-V-win-x64-cuda.msi</code></td><td>为当前用户安装，并添加开始菜单快捷方式。</td></tr>
+      <tr><td>Windows</td><td><code>tensoragent-desktop-V-win-x64-cpu.zip</code><br><code>tensoragent-desktop-V-win-x64-cuda.zip</code></td><td>完整解压文件夹，无需安装器即可启动。</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>校验文件分别是 <code>SHA256SUMS-tensoragent-desktop-V-osx-arm64.txt</code>、<code>SHA256SUMS-tensoragent-desktop-V-win-x64-cpu.txt</code> 或 <code>SHA256SUMS-tensoragent-desktop-V-win-x64-cuda.txt</code>。把下面的 <code>V</code> 和文件名换成下载的版本与格式，再将输出的哈希与校验文件中该文件对应的一行比较：</p>
+  <pre data-lang="bash"><code># macOS 终端，在下载文件夹中
+cd ~/Downloads
+shasum -a 256 tensoragent-desktop-V-osx-arm64.dmg</code></pre>
+  <pre data-lang="powershell"><code># Windows PowerShell，在下载文件夹中
+Set-Location "$env:USERPROFILE\Downloads"
+Get-FileHash .\tensoragent-desktop-V-win-x64-cpu.msi -Algorithm SHA256</code></pre>
+  <p>若哈希不同，请重新下载后再安装。校验和验证文件内容，不会给未签名的文件添加签名。发行版说明会注明是否签名或公证。默认情况下，Mac 应用仅作 ad hoc 签名、未经公证，Windows 发行包未签名。</p>
+
+  <h2 id="install-macos">3a · 在 macOS 安装</h2>
+  <ol class="steps">
+    <li><h3>安装应用</h3><p><strong>DMG：</strong>打开磁盘映像，将 <strong>TensorAgent.app</strong> 拖入 <strong>Applications（应用程序）</strong>，然后推出磁盘映像。<strong>PKG：</strong>打开安装包并按安装器步骤操作；安装到 <code>/Applications</code> 可能需要管理员密码。<strong>ZIP：</strong>解压后，将应用移至 <code>/Applications</code>，或放入 <code>~/Applications</code>，仅供当前账户使用。</p></li>
+    <li><h3>打开 TensorAgent</h3><p>从应用程序文件夹启动已安装的副本。对于未经公证的发行包，macOS 可能阻止第一次启动或安装。尝试打开后，在<strong>系统设置 → 隐私与安全性 → 仍要打开</strong>中为已经确认来源与校验和的文件作例外，并确认提示。若提示不同，参考 <a href="https://support.apple.com/zh-cn/102445" target="_blank" rel="noopener">Apple 关于打开下载应用的说明</a>。</p></li>
+    <li><h3>允许需要的权限</h3><p>照片、相机、麦克风或语音权限会在使用对应功能时请求。之后可在<strong>系统设置 → 隐私与安全性</strong>中检查。普通文字聊天不需要相机或麦克风权限。</p></li>
+  </ol>
+
+  <h2 id="install-windows">3b · 在 Windows 安装</h2>
+  <ol class="steps">
+    <li><h3>选择 CPU 或 CUDA</h3><p>没有兼容的 NVIDIA 显卡，或希望避免配置 GPU 驱动时，选择 <strong>CPU</strong>。有 NVIDIA 显卡和兼容驱动时，选择 <strong>CUDA</strong>。同一时间只安装一种版本；两种 MSI 属于同一个升级系列。</p></li>
+    <li><h3>安装或解压</h3><p><strong>MSI：</strong>打开并按安装器步骤操作。默认安装到当前用户的 <code>%LOCALAPPDATA%\Programs\TensorAgent</code>，添加开始菜单入口，无需管理员权限。<strong>ZIP：</strong>右键 → <strong>全部解压缩</strong>，解压到可写的文件夹，再打开 <strong>TensorAgent.Maui.exe</strong>。DLL、<code>webui</code> 与 <code>skills</code> 文件夹必须与程序保持在一起；不要在 ZIP 内直接运行。</p></li>
+    <li><h3>启动应用</h3><p>从开始菜单打开 <strong>TensorAgent</strong>，或启动解压后的程序。未签名的发行包可能触发 Microsoft Defender SmartScreen；先核对来源和校验和，再在系统策略允许时选择<strong>更多信息 → 仍要运行</strong>。受管理电脑没有该选项时，请联系管理员。</p></li>
+  </ol>
+  <p>若提示缺少 WebView2，或聊天区域未显示，请安装 <a href="https://developer.microsoft.com/microsoft-edge/webview2/" target="_blank" rel="noopener">Evergreen Runtime</a>，再重新打开 TensorAgent。</p>
+
+  <h2 id="first-run">4 · 下载模型并发送第一条消息</h2>
+  <ol class="steps">
+    <li><h3>选择语言与存储位置</h3><p>打开应用菜单 → <strong>设置</strong>。<strong>语言 → 应用语言</strong>默认跟随系统，可选八种语言。在<strong>存储 → 模型下载和缓存文件夹</strong>中输入空间足够的磁盘上的绝对路径，选择<strong>保存文件夹</strong>。更改此设置不会移动已经下载的文件。</p></li>
+    <li><h3>打开模型页面</h3><p>在空白聊天中选择<strong>选择模型</strong>，或菜单 → <strong>模型</strong>。选择 <strong>Gemma 4 E2B</strong> 并点击<strong>下载</strong>。先阅读显示的模型许可证、下载量和内存要求。灰色的<strong>过大</strong>条目无法在当前设备加载。</p></li>
+    <li><h3>等待校验与加载</h3><p>进度行显示下载和验证，传输中断后可以继续。在模型页面保持选中的下载会在完成后加载；若离开了该页面，请返回并选择<strong>使用</strong>。等模型显示正在使用后再发消息。无需另起服务器或输入 API 密钥。</p></li>
+    <li><h3>试一次简单对话</h3><p>回到聊天，发送<em>“给我三个周末项目的点子。”</em>按 <kbd>Enter</kbd> 发送，按 <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行。点击<strong>停止</strong>取消回答。菜单中列出已保存的聊天，换话题时可以新建聊天；应用重启后会话仍然保留。</p></li>
+  </ol>
+  <p>推理在本机运行。首次下载模型需要联网；必要文件齐全后，普通聊天可以离线使用。<strong>允许访问网络</strong>控制模型运行的代码与软件包安装，不会阻止应用下载你主动请求的模型。</p>
+
+  <h2 id="daily-use">5 · 使用照片、文件、图片和视频</h2>
+  <ul>
+    <li><strong>询问照片或文件：</strong>选择 <strong>+ → 照片</strong>或<strong>文件</strong>，附上内容，并说明需求。加载的模型必须支持该输入。视觉模型缺少可选投影器时，选择<strong>模型 → 添加视觉</strong>，完成后点击<strong>启用视觉</strong>。<strong>设置 → 下载 → 包含可选文件</strong>会在后续下载中包含投影器及可用的草稿头。</li>
+    <li><strong>生成图片：</strong>加载 <strong>Qwen-Image 2.1</strong> 后描述图片。编辑照片时附上照片并说明修改；缩略图旁的<strong>选择区域</strong>可涂选要改的部分。完成后可<strong>比较原图</strong>或<strong>再次编辑</strong>。<strong>模型 → LoRA 插件</strong>可另行下载风格或加速插件。见<a href="models-image_zh-cn.html#mask-editing">图片编辑指南</a>。</li>
+    <li><strong>生成视频：</strong>加载适用的 <strong>MiniMax-H3</strong> 目录条目，描述短视频，并使用该条目支持的附件。视频需要 GPU 后端，CPU 发行包没有视频回退路径。已记录的 Windows 桌面应用验证不包含音视频生成。见<a href="models-video_zh-cn.html#minimax-h3">视频模型要求与限制</a>。</li>
+    <li><strong>保留结果：</strong>打开生成文件的链接，保存或复制到自己的文件夹。聊天保留文字记录，但生成文件和上传附件位于应用缓存；清理缓存或移除应用前，请另存重要文件。</li>
+  </ul>
+
+  <h2 id="tools">6 · 配置代码和浏览器工作</h2>
+  <p>文字聊天无需额外开发工具。桌面代码技能使用电脑上安装的程序：Python 任务需要 <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">Python 3</a>，JavaScript 或内置 Playwright 浏览器技能需要 <a href="https://nodejs.org/en/download" target="_blank" rel="noopener">Node.js 与 npm</a>。浏览器技能要求 Node.js 20 或更新版本。使程序可通过 <code>PATH</code> 找到，然后完全退出并重新打开 TensorAgent。Windows 应使用原生 Windows Node/npm，而非 WSL 中的版本。</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>设置 → 沙盒</th><th>如何选择</th></tr></thead>
+    <tbody>
+      <tr><td>运行代码</td><td>允许执行命令和技能脚本；在 macOS 上，进程在系统沙盒约束下使用聊天工作区。仅聊天时可以关闭。</td></tr>
+      <tr><td>不使用沙盒运行（Windows）</td><td>默认关闭。它和运行代码都开启时，才允许运行命令。Windows 无法隔离进程的文件或网络访问，程序可访问账户有权访问的内容；接受这一权限范围后才开启。</td></tr>
+      <tr><td>允许访问网络</td><td>默认关闭；浏览器任务与安装代码依赖需要开启。Windows 中未受隔离的程序并不会被此开关隔离。</td></tr>
+      <tr><td>子代理</td><td>默认开启；允许同一本地模型运行辅助代理。关闭可避免额外辅助会话及其内存开销。</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>使用支持工具的聊天模型，尝试<em>“把这些开销整理成 CSV，用 Python 检查合计。”</em>应直接附上输入文件，而不是期待 Mac 沙盒命令读取无关文件夹。浏览器任务需要启用相应设置，然后可以说<em>“使用 Playwright 技能访问 example.com 并总结页面。”</em>首次使用可能下载 npm 软件包与浏览器。自动化浏览器使用独立会话，不会继承日常浏览器的登录状态。见<a href="agentic_zh-cn.html#playwright">浏览器配置与技能限制</a>。</p>
+
+  <h2 id="update-uninstall">7 · 更新、备份或卸载</h2>
+  <p><strong>更新：</strong>退出 TensorAgent，从<a href="https://github.com/zhongkaifu/TensorSharp/releases/latest" target="_blank" rel="noopener">最新发行版</a>下载匹配平台的新版，校验后重新安装。Mac 替换应用程序文件夹中的应用；Windows 运行新的 MSI；ZIP 版请解压到新文件夹并使用新副本。更新由用户手动执行。模型、设置和聊天存储在安装目录之外。</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>平台</th><th>设置与聊天：请备份这里</th><th>默认模型、上传与生成文件</th></tr></thead>
+    <tbody>
+      <tr><td>macOS</td><td><code>~/Library/Application Support/TensorAgent</code></td><td><code>~/Library/Caches/TensorAgent</code></td></tr>
+      <tr><td>Windows</td><td><code>%LOCALAPPDATA%\TensorAgent\Data</code></td><td><code>%LOCALAPPDATA%\TensorAgent\Cache</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>复制文件夹前请退出应用。若设置了自定义模型文件夹，请另外备份或复用该目录；Mac 备份工具可能不包含 Caches。更改模型文件夹不会移动旧文件；若希望复用，等下载完成并关闭应用后，手动移动对应的模型子文件夹。</p>
+  <p><strong>卸载：</strong>Mac 将 TensorAgent.app 移到废纸篓，PKG 安装没有单独卸载器。Windows 的 MSI 安装使用<strong>设置 → 应用 → 已安装的应用 → TensorAgent → 卸载</strong>；ZIP 版删除解压后的程序文件夹。移除应用会保留用户数据与模型以便重新安装。清理单个模型用<strong>模型 → 删除</strong>，清理历史用<strong>设置 → 存储 → 删除所有聊天</strong>。若要完全移除，请先备份并退出，再删除上表的数据与缓存文件夹，以及不再需要的自定义模型文件夹。</p>
+
+  <h2 id="troubleshooting">故障排查</h2>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>问题</th><th>处理方式</th></tr></thead>
+    <tbody>
+      <tr><td>发行版没有桌面下载</td><td>展开 Assets，查找 <code>tensoragent-desktop-</code>。旧 CLI/Server ZIP 不会安装 TensorAgent；选择有桌面文件的发行版或从源码构建。</td></tr>
+      <tr><td>Windows 无法启动或聊天区域空白</td><td>安装 WebView2，确保 ZIP 全部文件完整解压在一起，检查该发行包支持的 Windows 版本与架构；校验和不符则重新下载。</td></tr>
+      <tr><td>CUDA 加载报错或 GPU 不兼容</td><td>按发行包 CUDA 版本检查 NVIDIA 驱动；没有兼容 NVIDIA GPU 时使用 CPU 版，速度会较慢。不要在 CPU/CUDA 包之间复制 DLL。</td></tr>
+      <tr><td>模型显示过大或加载时内存不足</td><td>选择较小的目录模型，关闭占内存的程序，分别检查系统内存与空闲显存。满足系统内存资格的模型仍可能超过 GPU 容量。</td></tr>
+      <tr><td>下载中断或验证失败</td><td>检查磁盘空间与网络，回到模型页面选择继续或重试。更改模型文件夹前等待下载或导入完成。</td></tr>
+      <tr><td>模型看不到照片</td><td>检查支持的输入，下载添加视觉并点击启用视觉；加载正确模型后重新附上照片。</td></tr>
+      <tr><td>代码或浏览器任务被拒绝</td><td>检查运行代码、Windows 不使用沙盒运行，以及需要时的允许访问网络；为任务安装 Python 或原生 Node/npm，重开应用并查看工具报告的错误。</td></tr>
+      <tr><td>回复显示被截断</td><td>增加设置 → 生成 → 回复输出上限，或新建聊天并缩短提示词；这调整回复长度，不改变模型上下文窗口。</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>报告问题时，请在 <a href="https://github.com/zhongkaifu/TensorSharp/issues" target="_blank" rel="noopener">GitHub issue</a> 中提供发行版本、包类型、系统、内存/GPU、模型与准确错误。日志位于缓存下的 <code>logs</code> 文件夹；分享前请检查，其中可能含本地路径或提示词。</p>
+  <p class="page-foot-note"><strong>验证范围：</strong>发行构建与包检查并不证明所有模型、GPU、权限提示或安装路径都通过验证。已记录的 Windows 桌面检查覆盖特定聊天、文件、代码工具、合成视觉、取消与会话恢复；目录下载、原生选择器、音视频生成及长时间运行被排除。Mac 运行覆盖特定 Apple Silicon 模型与工作流。确切设备和模型覆盖见 <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/TensorAgent/README.md" target="_blank" rel="noopener">TensorAgent README</a>；不可用或跳过的场景不算验证通过。</p>
+  <div class="content-footer">
+    <a href="getting-started_zh-cn.html">← CLI 与服务器快速开始</a>
+    <a href="agentic_zh-cn.html#tensoragent">TensorAgent 能力 →</a>
+  </div>
+</main>
+</body>
+</html>

@@ -1826,8 +1826,8 @@ namespace TensorSharp.Models
 
                 if (!ok)
                     throw new InvalidOperationException(
-                        $"CUDA-native GDN kernel failed under TP (layer {layer}, rank {r}). " +
-                        "TP requires the CUDA-native GDN path (TS_CUDA_QWEN35_GDN_NATIVE must not be 0).");
+                        $"CUDA-native GDN kernel failed under TP (layer {layer}, rank {r}); " +
+                        "TP has no other GDN path.");
 
                 results[r] = gated;
             }

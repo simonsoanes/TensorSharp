@@ -44,7 +44,6 @@ def main():
     torch.set_num_threads(2)
     os.environ["TS_DSV4_FA"] = "0"
     os.environ["TS_DSV4_GATHER"] = "0"
-    os.environ["TS_DSV41_TP"] = str(args.tp)
     weights = reference.GgufWeights(args.fixture_dir / "deepseek41-fixture.gguf")
     visual_weights = reference.GgufWeights(args.vision_fixture / "deepseek41.vision.gguf")
     layout = reference.load_engram(weights)
@@ -65,9 +64,12 @@ def main():
     lib = ctypes.CDLL(str(args.library.resolve()))
     ptr, number = ctypes.c_void_p, ctypes.c_int
     bind = lambda name, args, result=number: helper.bind(lib, name, args, result)
-    load = bind("Dsv4LoadModel", [ctypes.c_char_p] + [number] * 5 + [ctypes.c_char_p], ptr)
+    load = bind("Dsv4LoadModel", [ctypes.c_char_p] + [number] * 4 + [ctypes.c_char_p, number, ctypes.c_char_p, number], ptr)
     free = bind("Dsv4Free", [ptr], None)
-    reset = bind("Dsv4Reset", [ptr], None)
+    reset_checked = bind("Dsv4ResetChecked", [ptr])
+    def reset(handle):
+        if reset_checked(handle) != 1:
+            raise RuntimeError("native reset was refused")
     past = bind("Dsv4NPast", [ptr])
     rewind = bind("Dsv4Rewind", [ptr, number])
     slot_alloc = bind("Dsv4SlotAlloc", [ptr])
@@ -79,7 +81,8 @@ def main():
     vision_load = bind("Dsv41VisionLoad", [ctypes.c_char_p, ctypes.c_char_p, number, number], ptr)
     vision_free = bind("Dsv41VisionFree", [ptr], None)
     attach = bind("Dsv41AttachVision", [ptr, ptr])
-    handle = load(str(args.fixture_dir / "deepseek41-fixture.gguf").encode(), args.gpus, 256, 3, 2, 0, args.backend.encode())
+    handle = load(str(args.fixture_dir / "deepseek41-fixture.gguf").encode(), args.gpus, 256, 3, 2, None, 0,
+                  args.backend.encode(), args.tp)
     if not handle:
         raise RuntimeError("Text fixture load failed")
     encoder = vision_load(str(args.vision_fixture / "deepseek41.vision.gguf").encode(), args.backend.encode(), 0, 2)

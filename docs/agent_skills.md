@@ -426,23 +426,22 @@ skill body:
 the skill file the model just asked for, which has never been in the cache. The
 whole of round 1 — prompt and generated tokens alike — carries over.
 
-Getting there needed an engine fix.
-`BatchExecutor.ComputeLiveContinuationLcp` required the live KV cache to be an
-**exact** prefix of the new prompt. A turn that ends on a control token the chat
-template never re-renders fails that test by a single token: Gemma 4 answers a
-tool call by emitting `<|tool_response>`, the engine forwards it into the cache,
-and the template then renders the boundary as `<turn|>\n<|turn>tool` instead. The
-whole conversation re-prefilled from token 0. It now rewinds a bounded number of
-trailing tokens (`MaxLiveContinuationRewindTokens`, 16) through the same
+A turn that ends on a control token the chat template never re-renders differs
+from the new prompt by a single token: Gemma 4 answers a tool call by emitting
+`<|tool_response>`, the engine forwards it into the cache, and the template then
+renders the boundary as `<turn|>\n<|turn>tool` instead. Requiring an exact prefix
+would re-prefill the whole conversation from token 0. The prefix cache instead
+rewinds a bounded number of trailing tokens
+(`PrefixCacheCapabilities.RewindCapTokens`, 16) through the same
 `TruncateKVCache` path speculative decoding uses for a rejected draft, and
 declines anything longer — on a sliding-window model the cache is circular, and a
 long rewind means the prompt genuinely diverges, where a clean re-prefill is the
 correct answer rather than a cheaper wrong one.
 
-The same fix repaired an ordinary multi-turn case that had nothing to do with
-skills: a turn ending on EOS used to report 0% reuse on the next turn while a
-`max_tokens`-terminated turn of the same conversation reported ~95%. It now
-reports 99.5%.
+The same rewind serves an ordinary multi-turn case that has nothing to do with
+skills. Without it, a turn ending on EOS reported 0% reuse on the next turn while
+a `max_tokens`-terminated turn of the same conversation reported ~95%; with it,
+99.5%.
 
 ### When the model gets it wrong, the host recovers instead of reporting
 
@@ -529,9 +528,8 @@ the one injection point every chat template in the repository handles.
 
 **Every byte of the block is a pure function of the sorted selection and the
 options.** The prefix cache reuses a prompt only up to its first difference from
-what is cached. The default radix tree matches token by token, and the legacy
-mode (`TS_PREFIX_CACHE_MODE=legacy`) chains a SHA-256 over 256-token blocks
-starting at block 0. Either way it stops adopting at the first mismatch, and this block sits at the very
+what is cached. The radix tree matches token by token and stops adopting at the
+first mismatch, and this block sits at the very
 front of the prompt. A timestamp, an absolute path, a "3 skills registered"
 counter, or a selection rendered in whatever order the caller's JSON happened to
 list it would change the start of the prompt on *every* turn and drop prefix reuse to zero for

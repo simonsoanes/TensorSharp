@@ -318,12 +318,12 @@ public sealed class InProcessShellTests : IDisposable
         Assert.Contains("denied", hosts.Stderr, StringComparison.OrdinalIgnoreCase);
     }
 
-    [Fact]
+    [SkippableFact]
     public void ASymlinkOutOfTheWorkspaceIsNotAWayThrough()
     {
         string secret = Path.Combine(_root, "secret.txt");
         File.WriteAllText(secret, "classified");
-        File.CreateSymbolicLink(Path.Combine(_work, "link.txt"), secret);
+        TestPlatforms.CreateFileSymlink(Path.Combine(_work, "link.txt"), secret);
         ExecutionResult read = Run("cat link.txt");
         Assert.NotEqual(0, read.ExitCode);
         Assert.DoesNotContain("classified", read.Stdout, StringComparison.Ordinal);
@@ -338,8 +338,8 @@ public sealed class InProcessShellTests : IDisposable
     {
         File.WriteAllText(Path.Combine(_readable, "SKILL.md"), "# skill");
         ShellContext context = Context();
-        Assert.Equal("# skill\n", Out($"cat {Path.Combine(_readable, "SKILL.md")}", context).Replace("# skill", "# skill").TrimEnd() + "\n");
-        Assert.NotEqual(0, Run($"echo x > {Path.Combine(_readable, "new.txt")}", context).ExitCode);
+        Assert.Equal("# skill\n", Out($"cat '{Path.Combine(_readable, "SKILL.md")}'", context).Replace("# skill", "# skill").TrimEnd() + "\n");
+        Assert.NotEqual(0, Run($"echo x > '{Path.Combine(_readable, "new.txt")}'", context).ExitCode);
         Assert.False(File.Exists(Path.Combine(_readable, "new.txt")));
     }
 

@@ -45,14 +45,14 @@ def main():
         function.argtypes, function.restype = parameters, result
         return function
     ptr, integer = ctypes.c_void_p, ctypes.c_int
-    load = bind("Dsv4LoadModel", [ctypes.c_char_p] + [integer] * 5 + [ctypes.c_char_p], ptr)
+    load = bind("Dsv4LoadModel", [ctypes.c_char_p] + [integer] * 4 + [ctypes.c_char_p, integer, ctypes.c_char_p, integer], ptr)
     free = bind("Dsv4Free", [ptr], None)
     forward = bind("Dsv4Forward", [ptr, ptr, integer, ptr])
     past = bind("Dsv4NPast", [ptr])
     placement = bind("Dsv4TestSharedPlacement", [ptr, integer, integer, ptr, integer])
     settings = {"TS_DSV4_FA": "0", "TS_DSV4_GATHER": "0", "TS_CPU_MOE_THREADS": "2",
                 "TS_DSV41_ENGRAM_THREADS": "1", "TS_DSV41_ENGRAM_WARM": "0",
-                "TS_DSV41_TP": "0", "TS_DSV41_TEST_LEGACY_SHARED_PLACEMENT": "0"}
+                "TS_DSV41_TEST_LEGACY_SHARED_PLACEMENT": "0"}
     original = {key: os.environ.get(key) for key in settings}
     runs, checks = [], []
     def check(name, valid, **details):
@@ -64,11 +64,10 @@ def main():
         os.environ.update(settings)
         for tp, offload in configurations:
             for legacy in (True, False):
-                os.environ["TS_DSV41_TP"] = str(tp)
                 os.environ["TS_DSV41_TEST_LEGACY_SHARED_PLACEMENT"] = str(int(legacy))
                 label = f"tp{tp}_cpumoe{offload}_{'legacy' if legacy else 'pinned'}"
                 handle = load(str(args.fixture_dir / "deepseek41-fixture.gguf").encode(),
-                              args.gpus, 64, 4, 2, offload, args.backend.encode())
+                              args.gpus, 64, 4, 2, None, offload, args.backend.encode(), tp)
                 if not handle:
                     raise RuntimeError(label + " load failed")
                 run = dict(name=label, tp=tp, cpu_moe=offload, legacy=legacy, placement=[], logits=[])

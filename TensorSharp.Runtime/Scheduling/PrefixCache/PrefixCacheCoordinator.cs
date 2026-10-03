@@ -38,14 +38,18 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
         _cacheModel = (IPrefixCacheModel)model;
         _logger = logger;
         var options = ExecutionOptions.FromEnvironment();
-        // A materialized holder is only readable through the fused per-request
-        // route. Primary-only overrides must not adopt placeholder blocks for it.
-        if (options.BatchedPathDisabled || !options.PerSeqFusedEnabled
-            || model is not IBatchedPagedModel { SupportsPerSequenceFusedForward: true })
+        // A materialized holder is only readable through the fused per-request route, a paged end state only
+        // through the batched route. Without that route (--no-continuous-batching, TS_PER_SEQ_FUSED=0, or a model
+        // that lacks it) no placeholder blocks may be adopted for it.
+        bool endStateRoute = capabilities.PagedEndStates
+            ? !options.BatchedPathDisabled && model is IBatchedPagedModel { BatchedForwardAvailable: true }
+            : !options.BatchedPathDisabled && options.PerSeqFusedEnabled
+              && model is IBatchedPagedModel { SupportsPerSequenceFusedForward: true };
+        if (!endStateRoute)
             capabilities = capabilities with
             {
                 EndState = EndStateSupport.None, CanCaptureCopy = false,
-                AdoptPrimaryOnDisplacement = false,
+                AdoptPrimaryOnDisplacement = false, DeferPrimaryConversion = false, PagedEndStates = false,
             };
         _tree = new PrefixTree(new PrefixTreeOptions
         {
@@ -54,7 +58,7 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
             BlockSize = pool.BlockSize,
             ContextLength = model.MaxContextLength > 0 ? model.MaxContextLength : int.MaxValue,
             PublicMax = options.PrefixCheckpointBudget,
-            ScopedEndStateLeavesMax = options.RetainedFusedCacheBudget,
+            ScopedEndStateLeavesMax = options.RetainedFusedCacheBudgetFor(scheduler.Config.MaxNumRunningSequences),
             PageHost = new PageHost(pool),
             PageHostBytes = InferenceEngine.ComputeBlockByteSize(model, pool.BlockSize),
             PoolPagesCap = pool.NumBlocks,
@@ -71,13 +75,19 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
     internal bool PrimaryAvailable { get; set; }
     internal bool RequiresSoleAdmission { get; private set; }
     private static bool RetentionEnabled
-        => ExecutionOptions.FromEnvironment() is { RetainedFusedCacheEnabled: true, RetainedFusedCacheBudget: > 0 };
+        => ExecutionOptions.FromEnvironment() is { RetainedFusedCacheBudget: null or > 0 };
     private static bool PublicCheckpointsEnabled
-        => ExecutionOptions.FromEnvironment() is { PrefixCheckpointsEnabled: true, PrefixCheckpointBudget: > 0 };
+        => ExecutionOptions.FromEnvironment() is { PrefixCheckpointBudget: > 0 };
     internal bool CheckpointsSupported => _tree.Caps.CanCaptureCopy && (PublicCheckpointsEnabled || RetentionEnabled);
     internal bool PublicCheckpointsSupported => PublicCheckpointsEnabled && CheckpointsSupported;
     internal string? LastSource { get; private set; }
+
+    /// <summary>The last admission plan, for the TS_CB_DEBUG trace.</summary>
+    internal string LastPlanDescription => _plan.ToString();
     internal int LastBlockedByScope { get; private set; }
+    /// <summary>Why the last <see cref="ComputeReusablePrefix"/> reused nothing, in words, or null when it
+    /// reused something or nothing cached matched at all.</summary>
+    internal string? LastDeclineReason { get; private set; }
     internal IPrefixCheckpointStore? CheckpointStore
     {
         get => Volatile.Read(ref _checkpointStore);
@@ -122,7 +132,10 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
     internal MatchRequest BuildRequest(SequenceState sequence, ExpectedRoute route)
     {
         KeyRope key = GetKey(sequence);
-        int limit = sequence.PromptTokens.Count - 1;
+        // At least one prompt token is always forwarded, for the logits (K6). A family may need more: DeepSeek
+        // V4.1 records the rewind checkpoint its next thinking turn depends on only at the end of a
+        // MULTI-token forward, so a regenerate that forwarded a single token left none behind.
+        int limit = sequence.PromptTokens.Count - Math.Max(1, _tree.Caps.MinTailPrefillTokens);
         if (sequence.CacheBreakpoints is not null) limit = Math.Min(limit, sequence.CacheBreakpointLimit);
         // Some vision encoders require the original prefill boundary to preserve positions.
         if (!_model.CanPrefillMediaAfterReusedPrefix(sequence.PromptTokens.Count) && sequence.MediaSpans.Count > 0)
@@ -160,12 +173,51 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
             request = BuildRequest(sequence, ExpectedRoute.BatchedPaged);
             _tree.Plan(request, _plan);
         }
+        // A holder is read by the per-request route only; a paged end state by the batched route only.
         if (PredictRoute() != ExpectedRoute.PerSequenceFused
             && _plan.Mode is MaterializeMode.CloneEndState or MaterializeMode.DonateEndState
-                or MaterializeMode.ConvertPrimaryThenClone)
+                or MaterializeMode.ConvertPrimaryThenClone
+            && !(request.Route == ExpectedRoute.BatchedPaged && IsPagedEndState(_plan)))
             _plan.Reset();
         LastBlockedByScope = _plan.BlockedByScope;
+        LastDeclineReason = _plan.HasReuse ? null : DescribeDecline(_plan);
+        // The executor never continues the live cache for a request with explicit cache breakpoints
+        // (BatchExecutor.EnsureOwnership), so do not promise it one: admission announced the reuse and
+        // execution took it back.
+        if (_plan.Mode == MaterializeMode.KeepPrimary && sequence.CacheBreakpoints is not null)
+        {
+            _plan.Reset();
+            LastDeclineReason = "the live cache is not continued for a request with explicit cache breakpoints";
+        }
         return _plan.Length;
+    }
+
+    /// <summary>The first specific reason a plan reused nothing: a rewind of the cached conversation, then
+    /// the live cache, a retained state, pages. Sources that were simply absent or lost to a longer one say
+    /// nothing. Before it existed the log said only "0/N tokens", which is all a user saw when every
+    /// DeepSeek V4.1 thinking turn re-prefilled its whole prompt.</summary>
+    private static string? DescribeDecline(MatchPlan plan)
+        => Describe("rewinding the cached conversation", plan.TruncationDecline)
+           ?? Describe("the live cache", plan.PrimaryDecline)
+           ?? Describe("the retained state", plan.EndStateDecline)
+           ?? Describe("the cached pages", plan.PageDecline);
+
+    private static string? Describe(string source, SourceDecline decline)
+    {
+        string? why = decline switch
+        {
+            SourceDecline.NotPermitted => "belongs to another conversation",
+            SourceDecline.Clamped => "is cut short by a media span, a breakpoint or the rewind cap",
+            SourceDecline.PrimaryBusy => "is busy with other requests",
+            SourceDecline.PrimaryClaimed => "is already claimed this step",
+            SourceDecline.ModelRefused => "is declined by the model",
+            SourceDecline.DonateOnlyShared => "would give up a state kept for later requests",
+            SourceDecline.RouteUnreadable => "is unreadable on this request's route",
+            SourceDecline.CloneCost => "is too short to clone",
+            SourceDecline.MmThreshold => "is below the media reuse threshold",
+            _ => null,
+        };
+        return why == null ? null : $"{source} {why}";
     }
 
     /// <summary>A new request can wait for a longer exact public checkpoint that this step's
@@ -230,6 +282,7 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
             }
             RadixNode node = _plan.PayloadNode!;
             EndStatePayload payload = node.EndState!;
+            if (_pagedEndStates.ContainsKey(payload.Key)) return TryAdoptPagedEndState(sequence, node, payload, length);
             int count = (int)(((long)length + _pool.BlockSize - 1) / _pool.BlockSize);
             sequence.BlockTable.EnsureBlockCapacity(count);
             EnsureFreePages(count);
@@ -334,6 +387,11 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
             NodeFlags.None, GetSpans(sequence));
         if (node.EndState is not null) return false;
         string payloadKey = _tree.MintKey();
+        if (primary && _tree.Caps.DeferPrimaryConversion)
+        {
+            RegisterPrimary(node, payloadKey, length);
+            return false; // The live primary still belongs to the executor, not a retained holder.
+        }
         bool captured = RetentionEnabled && _tree.Caps.EndState != EndStateSupport.None
             && _cacheModel.TryCaptureDonate(sequence.RequestId, payloadKey, length, out _);
         if (!captured && RetentionEnabled && _tree.Caps.EndState != EndStateSupport.None
@@ -341,12 +399,14 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
             && ReleaseOldestScopedPayload())
             captured = _cacheModel.TryCaptureDonate(sequence.RequestId, payloadKey, length, out _);
         PayloadOrigin origin = PayloadOrigin.Donation;
+        bool conversionFailed = false;
         if (!captured && RetentionEnabled && primary && _tree.Caps.AdoptPrimaryOnDisplacement)
         {
             captured = _cacheModel.TryConvertPrimary(payloadKey, length, out _);
             if (!captured && ReleaseOldestScopedPayload())
                 captured = _cacheModel.TryConvertPrimary(payloadKey, length, out _);
             origin = PayloadOrigin.PrimaryConversion;
+            conversionFailed = !captured;
         }
         if (captured)
         {
@@ -354,18 +414,33 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
             Trim();
             return published;
         }
-        if (primary && _tree.Caps.PrimaryResident)
+        // A conversion can fail AFTER adopting the primary: the holder adapter then releases what it
+        // adopted, and DeepSeek V4.1 resets a released slot to position 0. Advertising that primary let an
+        // exact continuation keep it (no rewind, so nothing asks the model) and decode from an empty cache.
+        // Keep it only while the model still reports this sequence's length.
+        if (conversionFailed && _cacheModel is IPrefixCacheModelDiagnostics diagnostics
+            && diagnostics.PrimaryCacheLength != length)
         {
             InvalidatePrimary();
-            _tree.AttachEndState(node, new EndStatePayload
-            {
-                Key = payloadKey, Kind = EndStateKind.PrimaryResident,
-                Footprint = new PayloadFootprint(length, length, default, 0),
-            });
-            _primaryKey = payloadKey;
+            _tree.CollectIfEmpty(node);
+            return false;
         }
+        if (primary && _tree.Caps.PrimaryResident)
+            RegisterPrimary(node, payloadKey, length);
         else _tree.CollectIfEmpty(node);
         return false;
+    }
+
+    private void RegisterPrimary(RadixNode node, string payloadKey, int length)
+    {
+        InvalidatePrimary();
+        var attached = _tree.AttachEndState(node, new EndStatePayload
+        {
+            Key = payloadKey, Kind = EndStateKind.PrimaryResident,
+            Footprint = new PayloadFootprint(length, length, default, 0),
+        });
+        if (attached is AttachResult.Attached or AttachResult.Revived) _primaryKey = payloadKey;
+        else _tree.CollectIfEmpty(node);
     }
 
     private bool Publish(RadixNode node, string key, PayloadFootprint footprint, int length, PayloadOrigin origin)
@@ -414,6 +489,61 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
         RetireEmptyScopes();
     }
 
+    /// <summary>Before execution overwrites an idle live primary, preserve it as a retained holder if
+    /// the family opted into deferred conversion. An exact continuation already claimed the primary
+    /// during admission and removed its marker, so this operation leaves that live state untouched.</summary>
+    internal bool DisplacePrimary()
+    {
+        Drain();
+        if (_primaryKey is null) return false;
+        string key = _primaryKey;
+        if (!_tree.Caps.DeferPrimaryConversion || !RetentionEnabled
+            || !_tree.Caps.AdoptPrimaryOnDisplacement || _tree.Caps.EndState == EndStateSupport.None
+            || !_tree.TryGetNodeByKey(key, out var node) || node.EndState?.Kind != EndStateKind.PrimaryResident)
+        {
+            InvalidatePrimary();
+            return false;
+        }
+        int length = node.EndState.Footprint.Tokens;
+        bool converted;
+        PayloadFootprint convertedFootprint;
+        try
+        {
+            if (_cacheModel.TryMeasurePrimaryEndState(length, out var footprint))
+                for (int i = 0; i < ResourceVector.ClassCount; i++)
+                {
+                    var cls = (ResourceClass)i;
+                    if (footprint.Bytes[cls] <= _tree.AbsoluteCap(cls)) continue;
+                    // Moving this holder would allocate a replacement, only for Trim to immediately
+                    // discard it. The live primary remains intact for the ordinary owner reset.
+                    InvalidatePrimary();
+                    return false;
+                }
+            converted = _cacheModel.TryConvertPrimary(key, length, out convertedFootprint);
+        }
+        catch (Exception ex)
+        {
+            // Retention is optional. Allocating a replacement primary must not turn a new request
+            // into a failed batch, and a conversion that threw may already have moved or freed state.
+            InvalidatePrimary();
+            _cacheModel.ReleasePayloads(new[] { key }, ReleaseReason.Invalidated);
+            _logger.LogWarning(ex, "Could not preserve the displaced primary cache; this request prefills normally.");
+            return true;
+        }
+        if (!converted)
+        {
+            // A refusal may have released the adopted primary. Its marker must disappear regardless
+            // of whether the family left the old state intact; this step is about to overwrite it.
+            InvalidatePrimary();
+            return _cacheModel is IPrefixCacheModelDiagnostics diagnostics && diagnostics.PrimaryCacheLength != length;
+        }
+        _tree.DetachEndState(node, ReleaseReason.Rollback, enqueue: false);
+        _primaryKey = null;
+        Publish(node, key, convertedFootprint, length, PayloadOrigin.PrimaryConversion);
+        Trim();
+        return true;
+    }
+
     internal void ReleaseRequest(SequenceState sequence)
     {
         if (!_requests.Remove(sequence, out var request)) return;
@@ -435,13 +565,15 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
     public void OnPayloadInvalidated(string payloadKey, InvalidationReason reason) => _invalidated.Enqueue(payloadKey);
     public bool CanMaterialize(string payloadKey, int payloadTokens, int targetTokens)
         => _cacheModel.CanMaterialize(payloadKey, payloadTokens, targetTokens);
+    public bool CanRewindPrimary(int payloadTokens, int targetTokens)
+        => _cacheModel.CanRewindPrimary(payloadTokens, targetTokens);
 
     internal void Drain()
     {
         bool hadInvalidations = _invalidated.Count > 0;
         while (_invalidated.TryDequeue(out var key)) _tree.InvalidatePayload(key);
         int refused = _tree.FlushQueuedInvalidations();
-        int released = _tree.Reclaim.Drain(_cacheModel.ReleasePayloads);
+        int released = _tree.Reclaim.Drain(ReleasePayloads);
         if (hadInvalidations || refused > 0 || released > 0) RetireEmptyScopes();
     }
 

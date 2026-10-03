@@ -331,6 +331,128 @@ public sealed class ChatTurnTests
         }
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task BackgroundCompletionPersistsTerminalStatsAcrossReload(bool aborted, bool truncated)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "turn-stats-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var store = new ConversationStore(root);
+            Conversation conversation = store.Create();
+            var recorder = new ConversationRecorder(store);
+            recorder.Bind("session-stats", conversation.Id);
+            using var turns = new ChatTurnManager(recorder);
+
+            // No reader attaches: counters must survive the same background completion
+            // and fresh-store load as the answer, without counting displayed pieces.
+            string id = turns.Start(conversation.Id, _ => StatsFrames(new
+            {
+                done = true, sessionId = "session-stats", tokenCount = 1200,
+                elapsed = 42.25, tokPerSec = 100.5,
+                promptTokens = 2000, kvReusedTokens = 1500, kvReusePercent = 75.0,
+                aborted, truncated,
+            }));
+            await WaitFor(() => !turns.StatusOfId(id)!.IsRunning);
+
+            Conversation reloaded = Assert.IsType<Conversation>(new ConversationStore(root).Load(conversation.Id));
+            StoredMessage assistant = Assert.Single(reloaded.Messages);
+            Assert.Equal("The answer.", assistant.Content);
+            StoredTurnStats stats = Assert.IsType<StoredTurnStats>(assistant.Stats);
+            Assert.Equal(1200, stats.TokenCount);
+            Assert.Equal(42.25, stats.Elapsed);
+            Assert.Equal(100.5, stats.TokensPerSecond);
+            Assert.Equal(2000, stats.PromptTokens);
+            Assert.Equal(1500, stats.KvReusedTokens);
+            Assert.Equal(75.0, stats.KvReusePercent);
+            Assert.Equal(aborted, stats.Aborted);
+            Assert.Equal(truncated, stats.Truncated);
+        }
+        finally { try { Directory.Delete(root, true); } catch (IOException) { } }
+    }
+
+    [Theory]
+    [InlineData(false, 0)]
+    [InlineData(true, 0)]
+    [InlineData(false, 1200)]
+    [InlineData(true, 1200)]
+    public async Task MediaCompletionStoresOnlyActualLlmCounters(bool video, int tokenCount)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "turn-media-stats-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var store = new ConversationStore(root);
+            Conversation conversation = store.Create();
+            var recorder = new ConversationRecorder(store);
+            recorder.Bind("session-media", conversation.Id);
+            using var turns = new ChatTurnManager(recorder);
+            string id = turns.Start(conversation.Id, _ => Frames());
+            await WaitFor(() => !turns.StatusOfId(id)!.IsRunning);
+
+            StoredMessage answer = Assert.Single(new ConversationStore(root).Load(conversation.Id)!.Messages);
+            Assert.Equal(video ? "/uploads/result.mp4" : null, answer.VideoUrl);
+            Assert.Equal(video ? null : "/uploads/result.png", answer.ImageUrl);
+            if (tokenCount == 0)
+                Assert.Null(answer.Stats);
+            else
+                Assert.Equal(tokenCount, Assert.IsType<StoredTurnStats>(answer.Stats).TokenCount);
+        }
+        finally { try { Directory.Delete(root, true); } catch (IOException) { } }
+
+        async IAsyncEnumerable<object> Frames()
+        {
+            await Task.Yield();
+            if (tokenCount > 0)
+                yield return new { token = "The result." };
+            // Media services emit the URL before their numeric terminal frame, and
+            // successful image/video generations do not emit an assistant text token.
+            if (video)
+                yield return new { videoUrl = "/uploads/result.mp4", width = 640, height = 480, frames = 24, fps = 24 };
+            else
+                yield return new { imageUrl = "/uploads/result.png", width = 640, height = 480 };
+            yield return new
+            {
+                done = true, sessionId = "session-media", tokenCount,
+                elapsed = 42.25, tokPerSec = tokenCount > 0 ? 100.5 : 0.0, truncated = false,
+            };
+        }
+    }
+
+    [Theory]
+    [InlineData("""{"done":true,"error":"failed"}""")]
+    [InlineData("""{"done":true,"imageUrl":"/uploads/image.png"}""")]
+    [InlineData("""{"done":true,"tokenCount":3,"elapsed":1}""")]
+    [InlineData("""{"done":true,"tokenCount":"3","elapsed":1,"tokPerSec":3}""")]
+    [InlineData("""{"done":true,"tokenCount":-3,"elapsed":1,"tokPerSec":3}""")]
+    [InlineData("""{"done":true,"tokenCount":3,"elapsed":1e999,"tokPerSec":3}""")]
+    [InlineData("""{"tokenCount":3,"elapsed":1,"tokPerSec":3}""")]
+    public async Task FramesWithoutValidTerminalCountersDoNotInventStoredStats(string frameJson)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "turn-no-stats-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var store = new ConversationStore(root);
+            Conversation conversation = store.Create();
+            var recorder = new ConversationRecorder(store);
+            recorder.Bind("session-stats", conversation.Id);
+            using var turns = new ChatTurnManager(recorder);
+            JsonElement frame = JsonSerializer.Deserialize<JsonElement>(frameJson);
+            string id = turns.Start(conversation.Id, _ => StatsFrames(frame));
+            await WaitFor(() => !turns.StatusOfId(id)!.IsRunning);
+            Assert.Null(Assert.Single(new ConversationStore(root).Load(conversation.Id)!.Messages).Stats);
+        }
+        finally { try { Directory.Delete(root, true); } catch (IOException) { } }
+    }
+
+    private static async IAsyncEnumerable<object> StatsFrames(object terminal)
+    {
+        await Task.Yield();
+        yield return new { token = "The answer.", sessionId = "session-stats" };
+        yield return terminal;
+    }
+
     [Fact]
     public async Task BusyFollowsTheTurnAndNotTheReader()
     {

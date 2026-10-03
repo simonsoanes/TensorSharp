@@ -42,7 +42,6 @@ namespace TensorSharp.Server.Host.Hosting
             "GET  /health                    - Health check",
             "POST /v1/embeddings             - Embeddings (OpenAI; float or base64)",
             "POST /api/embed                 - Embeddings (Ollama; string or batch)",
-            "POST /api/embeddings            - Embeddings (legacy Ollama)",
             "GET  /v1/models                 - List embedding model (OpenAI)",
             "GET  /api/tags                  - List embedding model (Ollama)",
             "POST /api/show                  - Embedding model details (Ollama)",

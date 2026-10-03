@@ -157,14 +157,14 @@ splits), not fewer bytes.
 
 ## Tensor parallelism
 
-`TS_DSV41_TP=8` shards the routed-expert gate/up/down matrices along the FFN
+`--tp 8` shards the routed-expert gate/up/down matrices along the FFN
 intermediate dimension. At Q4_K_M it removes the capacity cliff completely —
 38.3 GiB of shards a rank and zero CPU-offloaded layers — and is still slower:
 
 | eight A40s, Q4_K_M | Prefill tok/s | Decode tok/s | CPU-MoE layers |
 |---|---:|---:|---:|
 | Layer split (default) | 451.8-492.1 | 31.0-32.5 | 1 |
-| `TS_DSV41_TP=8` | 391.9-410.4 | 21.4-22.0 | 0 |
+| `--tp 8` | 391.9-410.4 | 21.4-22.0 | 0 |
 
 Attention, the shared expert and the caches keep their layer placement, and the
 partial sums reduce through host-staged F32 buffers. Decode splits rise from 62

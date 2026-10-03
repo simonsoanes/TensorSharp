@@ -132,7 +132,7 @@ namespace TensorSharp.AgentHost.CodeExec
         /// letting it match everything.
         /// </summary>
         private static readonly Lazy<string> SelfImage = new(
-            () => OperatingSystem.IsMacOS() ? PathOf(Environment.ProcessId) : string.Empty,
+            () => HostOS.IsMacDesktop ? PathOf(Environment.ProcessId) : string.Empty,
             LazyThreadSafetyMode.ExecutionAndPublication);
 
         /// <summary>
@@ -220,7 +220,7 @@ namespace TensorSharp.AgentHost.CodeExec
             wedged = false;
             error = string.Empty;
 
-            if (!OperatingSystem.IsMacOS())
+            if (!HostOS.IsMacDesktop)
                 return StartDirect(process, out error);
 
             HashSet<int> before = ChildPids();
@@ -427,7 +427,7 @@ namespace TensorSharp.AgentHost.CodeExec
         internal static HashSet<int> ChildPids()
         {
             var result = new HashSet<int>();
-            if (!OperatingSystem.IsMacOS())
+            if (!HostOS.IsMacDesktop)
                 return result;
 
             int capacity = 256;

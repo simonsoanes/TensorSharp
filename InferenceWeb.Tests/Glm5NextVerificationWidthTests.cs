@@ -1,6 +1,5 @@
 // Copyright (c) Zhongkai Fu. All rights reserved.
 // Licensed under the BSD-3-Clause license in the repository root.
-using System.Runtime.InteropServices;
 using TensorSharp;
 using TensorSharp.Models;
 using TensorSharp.Runtime.Speculative;
@@ -56,19 +55,19 @@ public sealed class Glm5NextVerificationWidthTests(ITestOutputHelper output) : I
             Path.Combine(_directory, "mixed.gguf"), numHeads: 4, quantizeAttentionOutput: quantized,
             numLayers: 2, mixedAttention: true, routedExperts: true, quantizeExperts: quantized,
             contextLength: 512, indexerTopK: sparse ? 4 : 1024);
-        using var env = new NativeEnvironment();
+        // Keep libc getenv and managed readers consistent when the CUDA test runner
+        // was launched with tuning variables for a production benchmark.
+        using var env = new NativeEnvScope();
         foreach (string name in new[]
         {
-            "TS_GLM_NATIVE", "TS_GLM_NGPU", "TS_GLM_TP_SHARD", "TS_GLM_TP_OVERSUBSCRIBE",
+            "TS_GLM_NATIVE", "TS_GLM_TP_SHARD", "TS_GLM_TP_OVERSUBSCRIBE",
             "TS_GLM_NODES_PER_LAYER", "TS_GLM_MOE_MMAP", "TS_N_CPU_MOE", "TS_CPU_MOE",
-            "TS_GLM_FA", "TS_GLM_HC_NATIVE", "TS_GLM_TP_FUSED", "GGML_CUDA_DISABLE_FUSION",
+            "GGML_CUDA_DISABLE_FUSION",
             "TENSORSHARP_TP_DEGREE", "TENSORSHARP_LAYER_SPLIT_DEGREE",
-            "TS_SPEC", "TS_MTP", "TS_SPEC_DRAFT_MODEL", "TS_MTP_DRAFT_MODEL",
+            "TS_SPEC", "TS_SPEC_DRAFT_MODEL",
         }) env.Set(name, null);
         env.Set("MAX_CONTEXT", "512");
         env.Set("TS_GLM_UBATCH", "64");
-        env.Set("TS_GLM_TOPK", "1");
-        env.Set("TS_GLM_MTP", "0");
         env.Set("TS_GLM_THREADS", "2");
         env.Set("TS_CPU_MOE_THREADS", "2");
 
@@ -141,28 +140,5 @@ public sealed class Glm5NextVerificationWidthTests(ITestOutputHelper output) : I
             if (actual[i] > actual[actualTop]) actualTop = i;
         }
         Assert.Equal(expectedTop, actualTop);
-    }
-
-    // Keep libc getenv and managed readers consistent when the CUDA test runner
-    // was launched with tuning variables for a production benchmark.
-    private sealed class NativeEnvironment : IDisposable
-    {
-        private readonly Dictionary<string, string?> _original = new();
-        [DllImport("libc", EntryPoint = "setenv")] private static extern int SetUnix(string name, string value, int overwrite);
-        [DllImport("libc", EntryPoint = "unsetenv")] private static extern int ClearUnix(string name);
-        [DllImport("ucrtbase", EntryPoint = "_putenv_s")] private static extern int SetWindows(string name, string value);
-        public void Set(string name, string? value)
-        {
-            _original.TryAdd(name, Environment.GetEnvironmentVariable(name));
-            Apply(name, value);
-        }
-        private static void Apply(string name, string? value)
-        {
-            Environment.SetEnvironmentVariable(name, value);
-            int result = OperatingSystem.IsWindows() ? SetWindows(name, value ?? "")
-                : value == null ? ClearUnix(name) : SetUnix(name, value, 1);
-            Assert.Equal(0, result);
-        }
-        public void Dispose() { foreach (var pair in _original) Apply(pair.Key, pair.Value); }
     }
 }

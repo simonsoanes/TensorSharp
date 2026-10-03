@@ -11,8 +11,13 @@ static void require(bool result, const char * name)
 int main()
 {
     require(dsv41_retention_fits(10, 20, 15, 2, 50, true, 30, 5), "exact inclusive bounds");
-    require(!dsv41_retention_fits(10, 20, 15, 2, 49, true, 30, 5), "retained cache budget");
-    require(!dsv41_retention_fits(10, 21, 15, 2, 50, true, 30, 5), "graph arena budget");
+    // Three slots (two retained plus this one) of 10 bytes need a budget of 30.
+    require(dsv41_retention_fits(10, 20, 15, 2, 30, true, 30, 5), "exact retained cache budget");
+    require(!dsv41_retention_fits(10, 20, 15, 2, 29, true, 30, 5), "retained cache budget");
+    // Graph arenas count against the budget only where free memory cannot be measured.
+    require(dsv41_retention_fits(10, 21, 15, 2, 50, true, 30, 5), "accelerator graphs are the free check's, not the budget's");
+    require(dsv41_retention_fits(10, 2000, 15, 2, 50, true, 30, 5), "a large graph cache leaves the retention budget whole");
+    require(!dsv41_retention_fits(10, 21, 15, 2, 50, false, 0, 0), "CPU graph arena budget");
     require(!dsv41_retention_fits(10, 20, 15, 2, 50, true, 29, 5), "next allocation headroom");
     require(!dsv41_retention_fits(10, 0, 0, 0, 100, true, 9, 0), "next cache exceeds free");
     require(!dsv41_retention_fits(10, 0, 11, 0, 100, true, 20, 0), "graph exceeds remainder");
@@ -23,5 +28,5 @@ int main()
     require(!dsv41_retention_fits(1, UINT64_MAX, 0, 0, UINT64_MAX, false, 0, 0), "sum overflow");
     require(!dsv41_retention_fits(1, 0, UINT64_MAX, 0, UINT64_MAX, true, UINT64_MAX, 0), "headroom overflow");
     require(dsv41_retention_fits(UINT64_MAX, 0, 0, 0, UINT64_MAX, true, UINT64_MAX, 0), "maximum exact fit");
-    std::puts("13 retention budget/overflow checks passed");
+    std::puts("16 retention budget/overflow checks passed");
 }

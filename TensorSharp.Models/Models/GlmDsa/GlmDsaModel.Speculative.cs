@@ -159,11 +159,8 @@ namespace TensorSharp.Models
         /// so what arms there is the weight-free n-gram speculator; its verify is
         /// the same one-graph trunk pass, and a rejected window is undone through
         /// the KDA recurrent-state snapshot (GlmDsaModel.Glm5NextSpeculative.cs).
-        /// The one thing that can make that unavailable is a native library that
-        /// predates the snapshot API, and that is declined here rather than
-        /// discovered mid-verify.
         /// </summary>
-        public bool SpeculationProfitable => !IsGlm5NextArch || Glm5NextRollbackAvailable;
+        public bool SpeculationProfitable => true;
 
         /// <summary>
         /// The verify batch writes MLA rows (and, on the trunk, indexer keys) for

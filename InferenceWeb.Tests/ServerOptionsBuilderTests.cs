@@ -198,17 +198,6 @@ public class ServerOptionsBuilderTests : IDisposable
     }
 
     [Fact]
-    public void ApplyPagedKvCacheCliFlags_PagedKvFlag_SetsEnabledEnvVar()
-    {
-        _env.Set("TS_KV_PAGED_CACHE", null);
-        bool applied = ServerOptionsBuilder.ApplyPagedKvCacheCliFlags(new[] { "--paged-kv" });
-        Assert.True(applied);
-        Assert.Equal("1", Environment.GetEnvironmentVariable("TS_KV_PAGED_CACHE"));
-        var cfg = PagedKvCacheConfig.FromEnvironment();
-        Assert.True(cfg.Enabled);
-    }
-
-    [Fact]
     public void NoPrefixCache_DisablesRuntimeReuseAndStartupPersistence()
     {
         _env.Set("TS_SCHED_PREFIX_CACHE", "1");
@@ -244,108 +233,35 @@ public class ServerOptionsBuilderTests : IDisposable
 
         var config = SchedulerConfig.FromEnvironment();
         Assert.True(config.Speculation.Enabled);
-        Assert.Equal(PrefixCacheMode.Tree, config.PrefixCacheMode);
         Assert.Equal(!disablePrefixCache, config.EnablePrefixCaching);
         Assert.Equal(!disablePrefixCache, ServerOptionsBuilder.Build(args, _baseDir).PrefixCacheEnabled);
     }
 
     [Fact]
-    public void ApplyPagedKvCacheCliFlags_NoPagedKvFlag_DisablesEnabledEnvVar()
-    {
-        _env.Set("TS_KV_PAGED_CACHE", "1");
-        bool applied = ServerOptionsBuilder.ApplyPagedKvCacheCliFlags(new[] { "--no-paged-kv" });
-        Assert.True(applied);
-        Assert.Equal("0", Environment.GetEnvironmentVariable("TS_KV_PAGED_CACHE"));
-        Assert.False(PagedKvCacheConfig.FromEnvironment().Enabled);
-    }
-
-    [Fact]
-    public void ApplyPagedKvCacheCliFlags_AppliesBlockSizeAndCaps()
-    {
-        _env.Set("TS_KV_PAGED_CACHE", null);
-        _env.Set("TS_KV_BLOCK_SIZE", null);
-        _env.Set("TS_KV_CACHE_MAX_RAM_MB", null);
-        _env.Set("TS_KV_CACHE_SSD_DIR", null);
-        _env.Set("TS_KV_CACHE_MAX_SSD_MB", null);
-        bool applied = ServerOptionsBuilder.ApplyPagedKvCacheCliFlags(new[]
-        {
-            "--paged-kv",
-            "--paged-kv-block-size", "128",
-            "--paged-kv-ram-mb", "2048",
-            "--paged-kv-ssd-dir", "/tmp/ts-paged-ssd",
-            "--paged-kv-ssd-mb", "32768",
-        });
-        Assert.True(applied);
-        var cfg = PagedKvCacheConfig.FromEnvironment();
-        Assert.True(cfg.Enabled);
-        Assert.Equal(128, cfg.BlockSize);
-        Assert.Equal(2048L * 1024 * 1024, cfg.MaxRamBytes);
-        Assert.Equal("/tmp/ts-paged-ssd", cfg.SsdDirectory);
-        Assert.Equal(32768L * 1024 * 1024, cfg.MaxSsdBytes);
-    }
-
-    [Fact]
-    public void ApplyPagedKvCacheCliFlags_NoFlags_LeavesEnvUnchanged()
-    {
-        _env.Set("TS_KV_PAGED_CACHE", "1");
-        _env.Set("TS_KV_BLOCK_SIZE", "256");
-        bool applied = ServerOptionsBuilder.ApplyPagedKvCacheCliFlags(new[] { "--unrelated", "--value" });
-        Assert.False(applied);
-        Assert.Equal("1", Environment.GetEnvironmentVariable("TS_KV_PAGED_CACHE"));
-        Assert.Equal("256", Environment.GetEnvironmentVariable("TS_KV_BLOCK_SIZE"));
-    }
-
-    [Fact]
-    public void ApplyPagedKvCacheCliFlags_RejectsBadInteger()
-    {
-        Assert.Throws<ArgumentException>(() =>
-            ServerOptionsBuilder.ApplyPagedKvCacheCliFlags(new[] { "--paged-kv-block-size", "abc" }));
-    }
-
-    [Fact]
-    public void ApplyContinuousBatchingCliFlag_OnFlag_EnablesBothEnvVars()
+    public void ApplyContinuousBatchingCliFlag_OnFlag_EnablesTheBatchedPath()
     {
         _env.Set("TS_SCHED_DISABLE_BATCHED", null);
-        _env.Set("TS_QWEN35_BATCHED", null);
         bool applied = ServerOptionsBuilder.ApplyContinuousBatchingCliFlag(new[] { "--continuous-batching" });
         Assert.True(applied);
         Assert.Equal("0", Environment.GetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED"));
-        Assert.Equal("1", Environment.GetEnvironmentVariable("TS_QWEN35_BATCHED"));
     }
 
     [Fact]
-    public void ApplyContinuousBatchingCliFlag_OffFlag_DisablesBatchedAtBothLayers()
+    public void ApplyContinuousBatchingCliFlag_OffFlag_DisablesTheBatchedPath()
     {
         _env.Set("TS_SCHED_DISABLE_BATCHED", null);
-        _env.Set("TS_QWEN35_BATCHED", "1");
         bool applied = ServerOptionsBuilder.ApplyContinuousBatchingCliFlag(new[] { "--no-continuous-batching" });
         Assert.True(applied);
         Assert.Equal("1", Environment.GetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED"));
-        Assert.Equal("0", Environment.GetEnvironmentVariable("TS_QWEN35_BATCHED"));
-    }
-
-    [Fact]
-    public void ApplyContinuousBatchingCliFlag_PagedBatchingAlias_BehavesSameAsCanonical()
-    {
-        _env.Set("TS_SCHED_DISABLE_BATCHED", null);
-        _env.Set("TS_QWEN35_BATCHED", null);
-        Assert.True(ServerOptionsBuilder.ApplyContinuousBatchingCliFlag(new[] { "--paged-batching" }));
-        Assert.Equal("0", Environment.GetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED"));
-        Assert.Equal("1", Environment.GetEnvironmentVariable("TS_QWEN35_BATCHED"));
-        Assert.True(ServerOptionsBuilder.ApplyContinuousBatchingCliFlag(new[] { "--no-paged-batching" }));
-        Assert.Equal("1", Environment.GetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED"));
-        Assert.Equal("0", Environment.GetEnvironmentVariable("TS_QWEN35_BATCHED"));
     }
 
     [Fact]
     public void ApplyContinuousBatchingCliFlag_NoFlag_LeavesEnvUnchanged()
     {
         _env.Set("TS_SCHED_DISABLE_BATCHED", "0");
-        _env.Set("TS_QWEN35_BATCHED", "1");
         bool applied = ServerOptionsBuilder.ApplyContinuousBatchingCliFlag(new[] { "--unrelated", "value" });
         Assert.False(applied);
         Assert.Equal("0", Environment.GetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED"));
-        Assert.Equal("1", Environment.GetEnvironmentVariable("TS_QWEN35_BATCHED"));
     }
 
     [Fact]
@@ -355,64 +271,8 @@ public class ServerOptionsBuilderTests : IDisposable
         // continuous-batching flag is recognised in the skip list inside
         // ParseArgs so the server boots cleanly when it's set.
         _env.Set("TS_SCHED_DISABLE_BATCHED", null);
-        _env.Set("TS_QWEN35_BATCHED", null);
         var options = ServerOptionsBuilder.Build(new[] { "--continuous-batching" }, _baseDir);
         Assert.NotNull(options);
-    }
-
-    [Fact]
-    public void ApplyPagedKvCacheCliFlags_QuantBits4_SetsEnvVarAndCodecPicksItUp()
-    {
-        _env.Set("TS_KV_PAGED_QUANT_BITS", null);
-        bool applied = ServerOptionsBuilder.ApplyPagedKvCacheCliFlags(new[]
-        {
-            "--paged-kv",
-            "--paged-kv-quant-bits", "4",
-        });
-        Assert.True(applied);
-        Assert.Equal("4", Environment.GetEnvironmentVariable("TS_KV_PAGED_QUANT_BITS"));
-
-        // End-to-end: the codec factory must materialize an int4 codec from
-        // the env var the flag just wrote.
-        var codec = TurboQuantKvCodec.FromEnvironment(KvCodecElementType.Float16);
-        Assert.NotNull(codec);
-        Assert.Equal(4, codec.BitsPerElement);
-        Assert.Equal("turboquant-int4", codec.Name);
-    }
-
-    [Fact]
-    public void ApplyPagedKvCacheCliFlags_QuantBits8_SetsEnvVar()
-    {
-        _env.Set("TS_KV_PAGED_QUANT_BITS", null);
-        bool applied = ServerOptionsBuilder.ApplyPagedKvCacheCliFlags(new[]
-        {
-            "--paged-kv-quant-bits", "8",
-        });
-        Assert.True(applied);
-        Assert.Equal("8", Environment.GetEnvironmentVariable("TS_KV_PAGED_QUANT_BITS"));
-    }
-
-    [Fact]
-    public void ApplyPagedKvCacheCliFlags_QuantBits0_DisablesCodec()
-    {
-        _env.Set("TS_KV_PAGED_QUANT_BITS", "4");
-        bool applied = ServerOptionsBuilder.ApplyPagedKvCacheCliFlags(new[]
-        {
-            "--paged-kv-quant-bits", "0",
-        });
-        Assert.True(applied);
-        Assert.Equal("0", Environment.GetEnvironmentVariable("TS_KV_PAGED_QUANT_BITS"));
-        // 0 -> codec factory returns null (no quantization).
-        Assert.Null(TurboQuantKvCodec.FromEnvironment(KvCodecElementType.Float16));
-    }
-
-    [Fact]
-    public void ApplyPagedKvCacheCliFlags_QuantBits_RejectsUnsupportedBitWidth()
-    {
-        // Anything other than 0 / 4 / 8 is rejected with a clear error so
-        // operators don't silently get passthrough when they typed --quant-bits 6.
-        Assert.Throws<ArgumentException>(() =>
-            ServerOptionsBuilder.ApplyPagedKvCacheCliFlags(new[] { "--paged-kv-quant-bits", "6" }));
     }
 
     [Fact]
@@ -426,31 +286,6 @@ public class ServerOptionsBuilderTests : IDisposable
             ServerOptionsBuilder.Build(new[] { "--mproj", "/tmp/foo.gguf" }, _baseDir));
         Assert.Contains("--mproj", ex.Message);
         Assert.Contains("--mmproj", ex.Message);
-    }
-
-    [Fact]
-    public void Build_PagedKvFlagsAlongsideMainFlags_DoNotTripUnknownArgCheck()
-    {
-        // The paged-kv flags are consumed by a separate pass before ParseArgs;
-        // ParseArgs's unknown-arg guard must recognise them so the two passes
-        // don't collide.
-        var options = ServerOptionsBuilder.Build(
-            new[]
-            {
-                "--paged-kv",
-                "--paged-kv-block-size", "128",
-                "--temperature", "0.42",
-                "--no-paged-kv",
-            },
-            _baseDir);
-        Assert.Equal(0.42f, options.DefaultSamplingConfig.Temperature);
-    }
-
-    [Fact]
-    public void ApplyPagedKvCacheCliFlags_QuantBits_RejectsNonInteger()
-    {
-        Assert.Throws<ArgumentException>(() =>
-            ServerOptionsBuilder.ApplyPagedKvCacheCliFlags(new[] { "--paged-kv-quant-bits", "int4" }));
     }
 
     // ----- Vulkan GPU device selection -----
@@ -528,12 +363,10 @@ public class ServerOptionsBuilderTests : IDisposable
             "--video-frames", "--fps",
             "--repeat-penalty", "--presence-penalty", "--frequency-penalty",
             "--seed", "--stop", "--kv-cache-dtype",
-            "--paged-kv", "--paged-kv-block-size", "--paged-kv-ram-mb",
-            "--paged-kv-ssd-dir", "--paged-kv-ssd-mb", "--paged-kv-quant-bits",
             "--continuous-batching", "--prefill-chunk-size",
             "--spec", "--spec-type", "--spec-draft", "--spec-pmin", "--draft-model",
             "--qwen-image-vae", "--qwen-image-vl", "--qwen-image-mmproj",
-            "--wan-vae", "--wan-te", "--wan-dit2",
+            "--video-vae", "--video-text-encoder", "--video-dit2", "--audio-vae",
             "--n-cpu-moe", "--cpu-moe", "--cpu-moe-threads",
             "--skill", "--list-skills",
             "--code-exec", "--code-exec-allow-install", "--code-exec-install-domains",
@@ -591,9 +424,6 @@ public class ServerOptionsBuilderTests : IDisposable
         // explicit opt-in the CLI does — and therefore has to document it.
         accepted.AddRange(CodeExecOptions.SwitchFlags);
         accepted.AddRange(CodeExecOptions.ValueFlags);
-        // The paged-KV family, from the tables the parser and the inert-flag warning share.
-        accepted.AddRange(ServerOptionsBuilder.PagedKvSwitchFlags);
-        accepted.AddRange(ServerOptionsBuilder.PagedKvValueFlags);
 
         var missing = accepted.Where(f => !usage.Contains(f, StringComparison.Ordinal)).ToList();
         Assert.True(missing.Count == 0,
@@ -601,81 +431,33 @@ public class ServerOptionsBuilderTests : IDisposable
             + string.Join("\n  ", missing));
     }
 
-    // ---- Wan video companion flags ----
-    // These are applied by an earlier pass that READS but does not REMOVE them, so
-    // the later validation pass has to recognise them too. It did not: --wan-vae and
-    // --wan-te were both documented on the usage page and both made the server refuse
-    // to start with "Unknown option '--wan-vae'". A --config file naming those keys
-    // was therefore unusable, which is exactly what the Wan video configs need.
+    // ---- video companion flags ----
+    // These are applied by an earlier pass that READS but does not REMOVE them, so the
+    // later validation pass has to recognise them too, or a --config file naming them
+    // makes the server refuse to start with "Unknown option".
 
     [Theory]
-    [InlineData("--wan-vae")]
-    [InlineData("--wan-te")]
-    [InlineData("--wan-dit2")]
-    public void Build_WanCompanionFlags_AreAccepted(string flag)
+    [InlineData("--video-vae", "TS_VIDEO_VAE")]
+    [InlineData("--video-text-encoder", "TS_VIDEO_TEXT_ENCODER")]
+    [InlineData("--video-dit2", "TS_VIDEO_DIT2")]
+    public void Build_VideoCompanionFlags_SetTheirEnv(string flag, string env)
     {
         string path = Path.Combine(_baseDir, "companion.bin");
         File.WriteAllBytes(path, new byte[] { 1, 2, 3, 4 });
-        string env = flag switch
-        {
-            "--wan-vae" => "TS_WAN_VAE",
-            "--wan-te" => "TS_WAN_TE",
-            _ => "TS_WAN_DIT2",
-        };
         string? saved = Environment.GetEnvironmentVariable(env);
         try
         {
             string[] args = { flag, path };
 
-            // Pass 1 (what Program.cs runs first): the flag's whole job is to reach
-            // the model loader as an env override.
             Assert.True(ServerOptionsBuilder.ApplyQwenImageCompanionCliFlags(args));
             Assert.Equal(path, Environment.GetEnvironmentVariable(env));
-
-            // Pass 2: that pass READS the flag but leaves it in argv, so the option
-            // parser has to tolerate it. This is the half that was broken.
-            Assert.NotNull(ServerOptionsBuilder.Build(args, _baseDir));
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(env, saved);
-        }
-    }
-
-    // ---- generic video companion flags, and the --wan-* aliases they replaced ----
-    // The companion flags were renamed model-agnostic when a second video model arrived.
-    // Both spellings must survive all THREE passes that know about them (env pass,
-    // validation pass, typo-suggestion list), and both must land on the same env vars —
-    // WanVideoModel still reads TS_WAN_*, so dropping that would silently break Wan.
-
-    [Theory]
-    [InlineData("--video-vae", "TS_VIDEO_VAE", "TS_WAN_VAE")]
-    [InlineData("--video-text-encoder", "TS_VIDEO_TEXT_ENCODER", "TS_WAN_TE")]
-    [InlineData("--video-te", "TS_VIDEO_TEXT_ENCODER", "TS_WAN_TE")]
-    [InlineData("--video-dit2", "TS_VIDEO_DIT2", "TS_WAN_DIT2")]
-    public void Build_VideoCompanionFlags_SetBothGenericAndLegacyEnv(
-        string flag, string genericEnv, string legacyEnv)
-    {
-        string path = Path.Combine(_baseDir, "companion.bin");
-        File.WriteAllBytes(path, new byte[] { 1, 2, 3, 4 });
-        string? savedGeneric = Environment.GetEnvironmentVariable(genericEnv);
-        string? savedLegacy = Environment.GetEnvironmentVariable(legacyEnv);
-        try
-        {
-            string[] args = { flag, path };
-
-            Assert.True(ServerOptionsBuilder.ApplyQwenImageCompanionCliFlags(args));
-            Assert.Equal(path, Environment.GetEnvironmentVariable(genericEnv));
-            // The legacy name keeps being published so Wan keeps loading its companions.
-            Assert.Equal(path, Environment.GetEnvironmentVariable(legacyEnv));
 
             // ...and the later validation pass must not reject the flag it left in argv.
             Assert.NotNull(ServerOptionsBuilder.Build(args, _baseDir));
         }
         finally
         {
-            Environment.SetEnvironmentVariable(genericEnv, savedGeneric);
-            Environment.SetEnvironmentVariable(legacyEnv, savedLegacy);
+            Environment.SetEnvironmentVariable(env, saved);
         }
     }
 
@@ -693,33 +475,6 @@ public class ServerOptionsBuilderTests : IDisposable
             Assert.NotNull(ServerOptionsBuilder.Build(args, _baseDir));
         }
         finally { Environment.SetEnvironmentVariable("TS_VIDEO_AUDIO_VAE", saved); }
-    }
-
-    [Theory]
-    // old spelling            new spelling                 env var they must agree on
-    [InlineData("--wan-vae", "--video-vae", "TS_WAN_VAE")]
-    [InlineData("--wan-te", "--video-text-encoder", "TS_WAN_TE")]
-    [InlineData("--wan-dit2", "--video-dit2", "TS_WAN_DIT2")]
-    public void Build_OldAndNewCompanionSpellings_AreEquivalent(
-        string oldFlag, string newFlag, string env)
-    {
-        string path = Path.Combine(_baseDir, "companion.bin");
-        File.WriteAllBytes(path, new byte[] { 1, 2, 3, 4 });
-        string? saved = Environment.GetEnvironmentVariable(env);
-        try
-        {
-            Environment.SetEnvironmentVariable(env, null);
-            Assert.True(ServerOptionsBuilder.ApplyQwenImageCompanionCliFlags(new[] { oldFlag, path }));
-            string? viaOld = Environment.GetEnvironmentVariable(env);
-
-            Environment.SetEnvironmentVariable(env, null);
-            Assert.True(ServerOptionsBuilder.ApplyQwenImageCompanionCliFlags(new[] { newFlag, path }));
-            string? viaNew = Environment.GetEnvironmentVariable(env);
-
-            Assert.Equal(path, viaOld);
-            Assert.Equal(viaOld, viaNew);
-        }
-        finally { Environment.SetEnvironmentVariable(env, saved); }
     }
 
     // ---- MoE CPU offload (--n-cpu-moe / --cpu-moe) ----
@@ -878,9 +633,13 @@ public class ServerOptionsBuilderTests : IDisposable
         string survivor = flag switch
         {
             "--penalty-last-n" => "--repeat-last-n",
-            "--paged-kv-cache" => "Use --paged-kv instead",
-            "--no-paged-kv-cache" => "Use --no-paged-kv instead",
-            _ => "Qwen-Image-2.1",
+            "--paged-batching" => "Use --continuous-batching instead",
+            "--no-paged-batching" => "Use --no-continuous-batching instead",
+            "--wan-vae" => "Use --video-vae instead",
+            "--wan-te" or "--video-te" => "Use --video-text-encoder instead",
+            "--wan-dit2" => "Use --video-dit2 instead",
+            "--offload-cpu" or "--qwen-image-lora" => "Qwen-Image-2.1",
+            _ => "radix prefix cache",
         };
         Assert.Contains(survivor, ex.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("Unknown option", ex.Message, StringComparison.Ordinal);
@@ -918,21 +677,20 @@ public class ServerOptionsBuilderTests : IDisposable
     }
 
     [Fact]
-    public void ServerUsage_ListsRemovedQwenImageFlagsOnlyAsRemoved()
+    public void ServerUsage_DoesNotListRemovedFlags()
     {
-        // Documented as live options they would be advertised and then refused; the
-        // page names them once, in the removed-options note, with the same advice.
         var documented = new HashSet<string>(ServerUsage.DocumentedFlags(), StringComparer.OrdinalIgnoreCase);
         var sw = new StringWriter();
         ServerUsage.PrintUsage(sw);
-        string flattened = System.Text.RegularExpressions.Regex.Replace(sw.ToString(), @"\s+", " ");
+        string usage = sw.ToString();
 
-        Assert.Contains("Removed options", flattened, StringComparison.Ordinal);
+        Assert.DoesNotContain("Removed options", usage, StringComparison.Ordinal);
         Assert.NotEmpty(RemovedCliFlags.RemovedFlags);
-        foreach ((string flag, string advice) in RemovedCliFlags.RemovedFlags)
+        foreach ((string flag, _) in RemovedCliFlags.RemovedFlags)
         {
             Assert.DoesNotContain(flag, documented);
-            Assert.Contains(flag + " Removed: " + advice, flattened, StringComparison.Ordinal);
+            // Match whole flag names: --video-te is a prefix of --video-text-encoder.
+            Assert.DoesNotMatch(System.Text.RegularExpressions.Regex.Escape(flag) + @"(?![\w-])", usage);
         }
     }
 
@@ -1115,7 +873,7 @@ public class ServerOptionsBuilderTests : IDisposable
         _env.ClearSpeculationVars();
         bool applied = ServerOptionsBuilder.ApplySpeculativeCliFlags(new[] { "--spec" });
         Assert.True(applied);
-        Assert.Equal("1", Environment.GetEnvironmentVariable("TS_MTP_SPEC"));
+        Assert.Equal("1", Environment.GetEnvironmentVariable("TS_SPEC"));
         Assert.True(SchedulerConfig.FromEnvironment().Speculation.Enabled);
     }
 
@@ -1123,10 +881,10 @@ public class ServerOptionsBuilderTests : IDisposable
     public void ApplySpeculativeCliFlags_NoSpecFlag_DisablesSpeculation()
     {
         _env.ClearSpeculationVars();
-        _env.Set("TS_MTP_SPEC", "1");
+        _env.Set("TS_SPEC", "1");
         bool applied = ServerOptionsBuilder.ApplySpeculativeCliFlags(new[] { "--no-spec" });
         Assert.True(applied);
-        Assert.Equal("0", Environment.GetEnvironmentVariable("TS_MTP_SPEC"));
+        Assert.Equal("0", Environment.GetEnvironmentVariable("TS_SPEC"));
         Assert.False(SchedulerConfig.FromEnvironment().Speculation.Enabled);
     }
 
@@ -1147,13 +905,11 @@ public class ServerOptionsBuilderTests : IDisposable
         // --spec-draft-model fed the attach-after-load path (a per-token head).
         // The operator cannot be expected to know which their file needs, and the
         // loaders already probe the GGUF's own declared architecture - so the ONE
-        // surviving flag publishes to both channels, the loaders route by what
-        // the file says it is, and TryAttachConfiguredDraftHead skips a drafter
+        // surviving flag publishes TS_SPEC_DRAFT_MODEL, which the host hands to the
+        // model factory and to the attach-after-load path alike; the loaders route by
+        // what the file says it is, and TryAttachConfiguredDraftHead skips a drafter
         // the factory already attached. Naming the file also IS the request:
         // speculation turns on without a separate --spec.
-        _env.Set("TS_DSV4_DSPARK", null);
-        _env.Set("TS_QWEN35_DFLASH", null);
-        _env.Set("TS_MUSE_GLIMMER_DFLASH", null);
         _env.ClearSpeculationVars();
         string draftFile = Path.Combine(_baseDir, "drafter.gguf");
         File.WriteAllText(draftFile, "stub");   // the parser validates File.Exists
@@ -1166,13 +922,8 @@ public class ServerOptionsBuilderTests : IDisposable
 
         Assert.True(applied);
         // The window routed exactly, never by prefix.
-        Assert.Equal("5", Environment.GetEnvironmentVariable("TS_MTP_DRAFT"));
-        // The factory channel, all three architectures.
-        Assert.Equal(draftFile, Environment.GetEnvironmentVariable("TS_DSV4_DSPARK"));
-        Assert.Equal(draftFile, Environment.GetEnvironmentVariable("TS_QWEN35_DFLASH"));
-        Assert.Equal(draftFile, Environment.GetEnvironmentVariable("TS_MUSE_GLIMMER_DFLASH"));
-        // The attach-after-load channel.
-        Assert.Equal(draftFile, Environment.GetEnvironmentVariable("TS_MTP_DRAFT_MODEL"));
+        Assert.Equal("5", Environment.GetEnvironmentVariable("TS_SPEC_DRAFT"));
+        Assert.Equal(draftFile, Environment.GetEnvironmentVariable("TS_SPEC_DRAFT_MODEL"));
         // Naming the file is the request.
         Assert.True(SchedulerConfig.FromEnvironment().Speculation.Enabled);
     }
@@ -1195,7 +946,7 @@ public class ServerOptionsBuilderTests : IDisposable
         _env.ClearSpeculationVars();
         Assert.Null(SchedulerConfig.FromEnvironment().Speculation.MinDraftProb);
 
-        _env.Set("TS_MTP_PMIN", "0.5");
+        _env.Set("TS_SPEC_PMIN", "0.5");
         Assert.Equal(0.5f, SchedulerConfig.FromEnvironment().Speculation.MinDraftProb);
     }
 
@@ -1542,8 +1293,8 @@ public class ServerOptionsBuilderTests : IDisposable
     // ServerOptionsBuilder.Build and that READ argv without removing anything.
     // Build then walks the same argv and throws "Unknown option" for whatever it
     // does not explicitly recognise. Every such family therefore needs an entry in
-    // Build's skip list, and twice one was missed: --wan-vae/--wan-te (fixed with a
-    // one-off test below), then EVERY --spec* spelling, which made
+    // Build's skip list, and twice one was missed: two video-companion spellings,
+    // then EVERY --spec* spelling, which made
     //   TensorSharp.Server --model m.gguf --draft-model d.gguf --mtp-spec --spec-draft 3
     // die with `Unknown option '--spec-draft'` even though --help documents it.
     //

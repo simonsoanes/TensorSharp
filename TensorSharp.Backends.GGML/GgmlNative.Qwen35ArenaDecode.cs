@@ -15,16 +15,6 @@ namespace TensorSharp.GGML
     {
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Qwen35ArenaHiddenDecodeAbi();
-
-        internal static bool SupportsQwen35ArenaHiddenDecode()
-        {
-            try { return TSGgml_Qwen35ArenaHiddenDecodeAbi() >= 1; }
-            catch (EntryPointNotFoundException) { return false; }
-        }
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial int TSGgml_Qwen35ArenaDecodeBatchedHidden(
             [In] Qwen35LayerDecodeArgs[] layers, int numLayers, int nSeqs,
             [In] int[] tokenIds, [In] int[] positions, [In] int[] ropePositions,

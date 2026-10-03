@@ -53,7 +53,9 @@ public sealed class AppShell : Shell
         FlyoutBehavior = FlyoutBehavior.Disabled;
         BackgroundColor = Pages.Theme.Background;
 
-        Items.Add(new ShellContent { Title = "Chat", Route = "main", Content = chat });
+        var main = new ShellContent { Title = Core.Localization.Loc.T("shell.chat.title"), Route = "main", Content = chat };
+        Items.Add(main);
+        Core.Localization.Loc.Changed += () => Dispatcher.Dispatch(() => main.Title = Core.Localization.Loc.T("shell.chat.title"));
         _pages = new Dictionary<string, Page>(StringComparer.Ordinal)
         {
             ["sessions"] = sessions,
@@ -63,11 +65,11 @@ public sealed class AppShell : Shell
         };
 
         // TENSORAGENT_USE_MODEL=<catalog id>: in a Debug build always (the simulator
-        // harness cannot tap); in a Release build only when the on-device speculation
-        // benchmark asked for it (TENSORAGENT_SPEC_BENCH=1), which is how
-        // scripts/bench-spec-device.sh chooses the model to measure - a Release build
-        // used to ignore the variable and measure whatever model was remembered.
-        bool honourUseModel = Core.Hosting.SpeculationBench.Requested;
+        // harness cannot tap); in a Release build only when an on-device benchmark asked
+        // for it (TENSORAGENT_SPEC_BENCH=1, or TENSORAGENT_IMAGE_BENCH=1 for pictures),
+        // which is how scripts/bench-spec-device.sh chooses the model to measure - a
+        // Release build used to ignore the variable and measure whatever model was remembered.
+        bool honourUseModel = Core.Hosting.SpeculationBench.Requested || Core.Hosting.ImageBench.Requested;
 #if DEBUG
         honourUseModel = true;
 #endif

@@ -127,20 +127,8 @@ namespace TensorSharp.Models
         private static long s_nextNativeMamba2DecodeModelId;
         private readonly ulong _nativeMamba2DecodeModelId =
             (ulong)Interlocked.Increment(ref s_nextNativeMamba2DecodeModelId);
-        private static readonly bool DisableBatchedMoEPrefill =
-            string.Equals(Environment.GetEnvironmentVariable("TS_NEMOTRON_MOE_PREFILL_BATCHED"), "0", StringComparison.Ordinal);
-        private static readonly bool EnableFusedMoEPrefill =
-            string.Equals(Environment.GetEnvironmentVariable("TS_NEMOTRON_MOE_PREFILL_FUSED"), "1", StringComparison.Ordinal);
         private static readonly int BatchedMoEPrefillMinTokens =
             ParsePositiveIntEnv("TS_NEMOTRON_MOE_PREFILL_BATCHED_MIN_TOKENS", DefaultBatchedMoEPrefillMinTokens);
-        private static readonly bool DisableFusedLinearResidual =
-            string.Equals(Environment.GetEnvironmentVariable("TS_NEMOTRON_LINEAR_RESIDUAL_FUSED"), "0", StringComparison.Ordinal);
-        private static readonly bool EnableFusedLinearResidualPrefill =
-            string.Equals(Environment.GetEnvironmentVariable("TS_NEMOTRON_LINEAR_RESIDUAL_FUSED_PREFILL"), "1", StringComparison.Ordinal);
-        private static readonly bool DisableNativeMamba2Prefill =
-            string.Equals(Environment.GetEnvironmentVariable("TS_NEMOTRON_MAMBA2_NATIVE_PREFILL"), "0", StringComparison.Ordinal);
-        private static readonly bool DisableNativeMamba2Decode =
-            string.Equals(Environment.GetEnvironmentVariable("TS_NEMOTRON_MAMBA2_NATIVE_DECODE"), "0", StringComparison.Ordinal);
         private static readonly bool DisableMultimodalWarmup =
             string.Equals(Environment.GetEnvironmentVariable("TS_NEMOTRON_MULTIMODAL_WARMUP"), "0", StringComparison.Ordinal);
         private static readonly int NativeMamba2PrefillMinTokens =
@@ -615,10 +603,6 @@ namespace TensorSharp.Models
         // cache from host memory calls EnsureKvCacheHostSynchronized first.
         private bool _kvCacheHostDirty;
 
-        // TS_NEMOTRON_FLASH_DECODE=0 forces the host decode attention back on.
-        private static readonly bool FlashDecodeAttnEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_NEMOTRON_FLASH_DECODE"), "0", StringComparison.Ordinal);
-
         /// <summary>
         /// Single-token attention through the GGML flash-attention decode kernel:
         /// appends K/V to the device-resident cache and attends against it without
@@ -631,8 +615,6 @@ namespace TensorSharp.Models
             int numHeads, int numKVHeads, int headDim,
             int maxSeqLen, int position, float scale)
         {
-            if (!FlashDecodeAttnEnabled)
-                return false;
             if (q == null || k == null || v == null || kCache == null || vCache == null || output == null)
                 return false;
             if (q.ElementType != DType.Float32 || k.ElementType != DType.Float32 ||
@@ -779,7 +761,6 @@ namespace TensorSharp.Models
             _expertDownQW = new QuantizedWeight[Config.NumLayers][];
             _layerStackedUp = new StackedExpertWeights[Config.NumLayers];
             _layerStackedDown = new StackedExpertWeights[Config.NumLayers];
-            int stackedCapable = 0;
             for (int l = 0; l < Config.NumLayers; l++)
             {
                 if (_layerTypes[l] != LayerType.FFN) continue;
@@ -803,17 +784,11 @@ namespace TensorSharp.Models
                 string prefix = _layerPrefixes[l].TrimEnd('.');
                 _stackedExpertWeights.TryGetValue(prefix + ".ffn_up_exps.weight", out _layerStackedUp[l]);
                 _stackedExpertWeights.TryGetValue(prefix + ".ffn_down_exps.weight", out _layerStackedDown[l]);
-                if (_layerStackedUp[l] != null && _layerStackedDown[l] != null)
-                    stackedCapable++;
             }
 
-            // Report the path that will ACTUALLY serve MoE prefill. The old line
-            // counted stacked-expert tensors and announced a "batched MoE prefill
-            // kernel", which was misleading three ways: the kernel that consumes
-            // stacked weights (TryMoEPrefillFusedReluSquared) is opt-in and off by
-            // default; the one that does run by default drives per-expert views and
-            // needs no stacked weights at all; and under tensor parallelism neither is
-            // reachable, because ForwardTP routes the FFN to NemotronMoEBlockTP.
+            // Report the path that will ACTUALLY serve MoE prefill: the batched-by-expert
+            // kernel drives per-expert views (the stacked weights serve MLX only), and
+            // under tensor parallelism ForwardTP routes the FFN to NemotronMoEBlockTP.
             int moeLayerCount = 0;
             for (int l = 0; l < Config.NumLayers; l++)
                 if (_layerTypes[l] == LayerType.FFN) moeLayerCount++;
@@ -827,18 +802,9 @@ namespace TensorSharp.Models
                         ? $"expert-parallel batched kernel on {moeLayerCount} layer(s)"
                         : $"per-expert tensor-parallel loop on {moeLayerCount} layer(s)";
                 }
-                else if (EnableFusedMoEPrefill && stackedCapable > 0)
-                {
-                    moePrefillPath = $"fused ReLU^2 stacked-expert kernel on {stackedCapable}/{moeLayerCount} layer(s)";
-                }
-                else if (!DisableBatchedMoEPrefill)
-                {
-                    moePrefillPath = $"batched-by-expert on {moeLayerCount} layer(s) (min tokens: {BatchedMoEPrefillMinTokens})"
-                        + (stackedCapable > 0 ? "; TS_NEMOTRON_MOE_PREFILL_FUSED=1 selects the fused stacked-expert kernel" : string.Empty);
-                }
                 else
                 {
-                    moePrefillPath = $"per-token fallback on {moeLayerCount} layer(s)";
+                    moePrefillPath = $"batched-by-expert on {moeLayerCount} layer(s) (min tokens: {BatchedMoEPrefillMinTokens})";
                 }
                 Console.WriteLine($"  Nemotron MoE prefill: {moePrefillPath}.");
             }
@@ -1103,7 +1069,7 @@ namespace TensorSharp.Models
                         break;
                 }
             }
-            // Clearing the flags is what re-seeds the legacy slot's device state from the
+            // Clearing the flags is what re-seeds the solo slot's device state from the
             // host arrays on the next decode step. The native decode cache is deliberately
             // NOT cleared here: it also holds the device state of every live batched
             // sequence, which is authoritative (their host arrays are stale), and a
@@ -1242,7 +1208,7 @@ namespace TensorSharp.Models
 
             // The native Mamba2 decode shadow state mirrors _convState / _ssmState
             // lazily. Clearing the flags forces the next decode step to re-seed the
-            // legacy slot's device state from the host arrays we just rewrote. The
+            // solo slot's device state from the host arrays we just rewrote. The
             // native decode cache itself is NOT cleared: it also holds the device state
             // of every live batched sequence, which is authoritative (their host arrays
             // are stale), and an ownership swap for another request lands here while
@@ -1328,7 +1294,7 @@ namespace TensorSharp.Models
         private bool CopyMamba2StateOut(int layer, Span<byte> destination, out int written)
         {
             written = 0;
-            SyncMamba2HostState(layer, LegacyMamba2Slot);
+            SyncMamba2HostState(layer, SoloMamba2Slot);
             float[] conv = _convState[layer];
             float[] ssm = _ssmState[layer];
             int convBytes = conv.Length * sizeof(float);
@@ -1499,13 +1465,12 @@ namespace TensorSharp.Models
         private bool CanLinearAddInto(Tensor residual, Tensor input, string weightName)
         {
             return IsGgmlBackend
-                && !DisableFusedLinearResidual
                 && residual != null
                 && input != null
                 && residual.DimensionCount == 2
                 && input.DimensionCount == 2
                 && residual.Sizes[0] == input.Sizes[0]
-                && (input.Sizes[0] == 1 || EnableFusedLinearResidualPrefill)
+                && input.Sizes[0] == 1
                 && _quantWeights.TryGetValue(weightName, out var qw)
                 && input.Sizes[1] == qw.Ne0
                 && residual.Sizes[1] == qw.Ne1;
@@ -2128,11 +2093,7 @@ namespace TensorSharp.Models
                 int fusedDim = moeInfo.HasLatentIn ? latentDim : hiddenSize;
 
                 bool usedBatchedPrefill = false;
-                if (EnableFusedMoEPrefill && fusedInput != null && fusedOutput != null)
-                    usedBatchedPrefill = TryMoEPrefillFusedReluSquared(
-                        fusedInput, fusedOutput, routerPtr, biasPtr, layer, seqLen, fusedDim);
-
-                if (!usedBatchedPrefill && fusedInput != null && fusedOutput != null)
+                if (fusedInput != null && fusedOutput != null)
                     usedBatchedPrefill =
                         TryMoEPrefillBatchedByExpert(fusedInput, fusedOutput, routerPtr, biasPtr, layer, seqLen, fusedDim);
 
@@ -2439,7 +2400,6 @@ namespace TensorSharp.Models
         {
             if (!isDecode
                 || !IsGgmlBackend
-                || DisableFusedLinearResidual
                 || input == null
                 || residual == null
                 || input.DimensionCount != 2
@@ -2487,8 +2447,7 @@ namespace TensorSharp.Models
             int seqLen,
             int routedDim)
         {
-            if (DisableBatchedMoEPrefill
-                || seqLen <= 1
+            if (seqLen <= 1
                 || seqLen < BatchedMoEPrefillMinTokens
                 || routedInput == null
                 || moeOut == null
@@ -2746,114 +2705,6 @@ namespace TensorSharp.Models
             }
         }
 
-        private unsafe bool TryMoEPrefillFusedReluSquared(
-            Tensor routedInput,
-            Tensor moeOut,
-            float* routerPtr,
-            float* biasPtr,
-            int layer,
-            int seqLen,
-            int routedDim)
-        {
-            if (!IsGgmlBackend
-                || !EnableFusedMoEPrefill
-                || seqLen <= 1
-                || routedInput == null
-                || moeOut == null
-                || _layerStackedUp == null
-                || _layerStackedDown == null
-                || layer < 0
-                || layer >= _layerStackedUp.Length)
-            {
-                return false;
-            }
-
-            var upW = _layerStackedUp[layer];
-            var downW = _layerStackedDown[layer];
-            if (upW == null
-                || downW == null
-                || upW.NumExperts != _numExperts
-                || downW.NumExperts != _numExperts
-                || upW.PerExpertNe0 != routedDim
-                || downW.PerExpertNe1 != routedDim
-                || upW.PerExpertNe1 != downW.PerExpertNe0
-                || routedInput.DimensionCount != 2
-                || moeOut.DimensionCount != 2
-                || routedInput.Sizes[0] != seqLen
-                || routedInput.Sizes[1] != routedDim
-                || moeOut.Sizes[0] != seqLen
-                || moeOut.Sizes[1] != routedDim)
-            {
-                return false;
-            }
-
-            int nUsed = _numExpertsUsed;
-            int nFf = checked((int)upW.PerExpertNe1);
-            int totalRoutes = checked(seqLen * nUsed);
-            EnsureMoEPrefillRouteBuffers(totalRoutes);
-            int[] selectedExperts = _moePrefillSelectedExperts;
-            float[] routingWeights = _moePrefillRoutingWeights;
-            RouteMoEPrefillTokens(
-                routerPtr, biasPtr, seqLen, _numExperts, nUsed, _expertWeightsNorm, _expertWeightsScale, layer,
-                _moeProbs, _moeSelectionProbs, _moeTopExperts, selectedExperts, routingWeights);
-
-            try
-            {
-                long t0exp = Stopwatch.GetTimestamp();
-                GgmlBasicOps.MoEFFNPrefill(
-                    routedInput,
-                    moeOut,
-                    seqLen,
-                    routedDim,
-                    nFf,
-                    _numExperts,
-                    nUsed,
-                    selectedExperts,
-                    routingWeights,
-                    upW.Data,
-                    upW.GgmlType,
-                    upW.PerExpertNe0,
-                    upW.PerExpertNe1,
-                    upW.TotalRawBytes,
-                    IntPtr.Zero,
-                    0,
-                    0,
-                    0,
-                    0,
-                    downW.Data,
-                    downW.GgmlType,
-                    downW.PerExpertNe0,
-                    downW.PerExpertNe1,
-                    downW.TotalRawBytes,
-                    gateBias: null,
-                    upBias: null,
-                    downBias: null,
-                    activation: GgmlBasicOps.MoEActivation.ReluSquared,
-                    runOnCpu: MoeCpuOffloadConfig.IsLayerOnCpu(layer));
-                _linearTicks += Stopwatch.GetTimestamp() - t0exp;
-                InvalidateTensorDeviceCache(moeOut);
-                return true;
-            }
-            catch (ArgumentException)
-            {
-                if (_mamba2NativeDecodeStateInitialized[layer])
-                    throw;
-                return false;
-            }
-            catch (InvalidOperationException)
-            {
-                if (_mamba2NativeDecodeStateInitialized[layer])
-                    throw;
-                return false;
-            }
-            catch (NotSupportedException)
-            {
-                if (_mamba2NativeDecodeStateInitialized[layer])
-                    throw;
-                return false;
-            }
-        }
-
         private static void SelectTopKInPlace(float[] values, int n, int k, int[] indices) =>
             TensorComputePrimitives.SelectTopKInPlace(values, n, k, indices);
 
@@ -2864,7 +2715,7 @@ namespace TensorSharp.Models
 
         #region Mamba2 Block
 
-        private Tensor Mamba2Block(Tensor hidden, int layer, int seqLen, bool isDecode, int slot = LegacyMamba2Slot)
+        private Tensor Mamba2Block(Tensor hidden, int layer, int seqLen, bool isDecode, int slot = SoloMamba2Slot)
         {
             string prefix = _layerPrefixes[layer];
 
@@ -2886,8 +2737,8 @@ namespace TensorSharp.Models
         /// <param name="slot">Per-active-sequence Mamba2 slot index used to key
         /// the persistent GPU decode-state cache so concurrent sequences in
         /// the batched path don't share GPU state via cache-key collision.
-        /// The legacy single-sequence Forward path uses <see cref="LegacyMamba2Slot"/>.</param>
-        private unsafe Tensor Mamba2Forward(Tensor input, int layer, string prefix, int seqLen, Tensor residual = null, int slot = LegacyMamba2Slot)
+        /// The single-sequence Forward path uses <see cref="SoloMamba2Slot"/>.</param>
+        private unsafe Tensor Mamba2Forward(Tensor input, int layer, string prefix, int seqLen, Tensor residual = null, int slot = SoloMamba2Slot)
         {
             long t0 = Stopwatch.GetTimestamp();
 
@@ -3060,7 +2911,7 @@ namespace TensorSharp.Models
             int nGroup,
             int dConv)
         {
-            if (DisableNativeMamba2Prefill || !IsGgmlBackend || seqLen < NativeMamba2PrefillMinTokens)
+            if (!IsGgmlBackend || seqLen < NativeMamba2PrefillMinTokens)
                 return false;
             if (projected.DimensionCount != 2 || result.DimensionCount != 2)
                 return false;
@@ -3138,8 +2989,7 @@ namespace TensorSharp.Models
             // backend-agnostic (its only Metal-specific branches are zero-copy
             // host-pointer bindings that simply stay false elsewhere), so it was
             // gated to Metal by development history, not by a constraint.
-            if (DisableNativeMamba2Decode
-                || (_backend != BackendType.GgmlMetal && _backend != BackendType.GgmlCuda)
+            if ((_backend != BackendType.GgmlMetal && _backend != BackendType.GgmlCuda)
                 // Speculation and this kernel disagree about where the recurrent
                 // state lives. The kernel keeps conv/SSM state ON THE DEVICE
                 // (downloadState: false) across decode steps, but a verify batch is
@@ -3182,10 +3032,6 @@ namespace TensorSharp.Models
             {
                 LinearForwardInto(projected, input, prefix + "ssm_in.weight");
 
-                // A native library that predates TSGgml_NemotronMamba2DecodeReadState
-                // cannot drain the device state later, so it must download every step.
-                bool drainLater = NativeMamba2StateReadAvailable;
-
                 GgmlBasicOps.NemotronMamba2Decode(
                     NativeMamba2DecodeStateKey(layer, slot),
                     projected,
@@ -3201,7 +3047,7 @@ namespace TensorSharp.Models
                     // the flag reset on the multi-token paths keeps the two directions
                     // from silently disagreeing. SyncMamba2HostState drains it for
                     // every host reader.
-                    downloadState: !drainLater,
+                    downloadState: false,
                     TensorComputePrimitives.GetStoragePointer(convW),
                     convBias == null ? IntPtr.Zero : TensorComputePrimitives.GetStoragePointer(convBias),
                     TensorComputePrimitives.GetStoragePointer(dtBias),
@@ -3218,7 +3064,7 @@ namespace TensorSharp.Models
 
                 _mamba2NativeDecodeStateInitialized[layer] = true;
                 if (_mamba2HostStateStale != null)
-                    _mamba2HostStateStale[layer] = drainLater;
+                    _mamba2HostStateStale[layer] = true;
                 if (TryLinearAddInto(residual, result, prefix + "ssm_out.weight"))
                 {
                     output = null;
@@ -3259,42 +3105,11 @@ namespace TensorSharp.Models
         // every concurrent batched sequence would collapse to the same cache
         // entry and trample each other's GPU-side conv/SSM state across
         // decode steps, producing garbled output for all participants.
-        /// <summary>Decode-cache slot of the legacy single-sequence path. Distinct from
+        /// <summary>Decode-cache slot of the single-sequence path. Distinct from
         /// every batched slot (those count up from 0), so the two paths never share a
         /// device state entry: a batched sequence on slot 0 used to overwrite the
-        /// legacy owner's device state under the same key.</summary>
-        internal const int LegacyMamba2Slot = 0xFFFF;
-
-        private static int s_nativeMamba2StateRead; // 0 unknown, 1 available, -1 missing
-
-        /// <summary>Whether the loaded native library can copy decode state back to the
-        /// host. Probed once per process.</summary>
-        private bool NativeMamba2StateReadAvailable
-        {
-            get
-            {
-                int known = Volatile.Read(ref s_nativeMamba2StateRead);
-                if (known != 0)
-                    return known > 0;
-                bool available;
-                try
-                {
-                    // A key with no entry: an up-to-date library answers "nothing to read".
-                    GgmlBasicOps.NemotronMamba2DecodeReadState(ulong.MaxValue, new float[1], new float[1]);
-                    available = true;
-                }
-                catch (EntryPointNotFoundException)
-                {
-                    available = false;
-                    Console.Error.WriteLine(
-                        "[Nemotron] The loaded GgmlOps native library has no TSGgml_NemotronMamba2DecodeReadState; " +
-                        "native Mamba2 decode downloads its state every token instead (correct, slower). Rebuild the " +
-                        "native library to restore full decode speed.");
-                }
-                Volatile.Write(ref s_nativeMamba2StateRead, available ? 1 : -1);
-                return available;
-            }
-        }
+        /// solo owner's device state under the same key.</summary>
+        internal const int SoloMamba2Slot = 0xFFFF;
 
         /// <summary>Bring _convState/_ssmState[<paramref name="layer"/>] (whichever arrays
         /// are currently swapped in) up to date with the device state the native decode

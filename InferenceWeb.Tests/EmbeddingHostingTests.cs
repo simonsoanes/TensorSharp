@@ -29,7 +29,6 @@ public class EmbeddingHostingTests : IDisposable
         Assert.Equal(4096, options.EmbeddingContextSize);
         Assert.EndsWith("encoder.gguf", options.StartupModelPath);
         Assert.Equal("ggml_cpu", ServerOptionsBuilder.ReadConfiguredBackendInput(args));
-        Assert.False(ServerOptionsBuilder.ApplyPagedKvCacheCliFlags(args));
     }
 
     [Fact]
@@ -200,7 +199,6 @@ public class EmbeddingHostingTests : IDisposable
     [InlineData("/v1/completions")]   // never mapped: guarding it only implied it exists
     [InlineData("/v1/embeddings")]
     [InlineData("/api/embed")]
-    [InlineData("/api/embeddings")]
     [InlineData("/api/upload")]
     [InlineData("/api/show")]
     public void GenerationGuard_LeavesOtherRoutesAlone(string path)
@@ -251,7 +249,7 @@ public class EmbeddingHostingTests : IDisposable
         string endpoints = string.Join('\n', StartupBanner.DescribeEndpoints(options));
         Assert.Contains("/v1/embeddings", endpoints);
         Assert.Contains("/api/embed", endpoints);
-        Assert.Contains("/api/embeddings", endpoints);
+        Assert.DoesNotContain("/api/embeddings", endpoints);
         Assert.DoesNotContain("Chat", endpoints);
         Assert.DoesNotContain("Generate", endpoints);
         Assert.DoesNotContain("index.html", endpoints);

@@ -280,7 +280,7 @@ public sealed class CliFlagSpellingTests : IDisposable
         string[] args =
         {
             "--Model=m.gguf", "--system", "--model is not a flag here", "--port=5000",
-            "--wan-vae=vae.safetensors", "-i", "--THINK", "prompt",
+            "--Video-Vae=vae.safetensors", "-i", "--THINK", "prompt",
         };
 
         Assert.Equal(

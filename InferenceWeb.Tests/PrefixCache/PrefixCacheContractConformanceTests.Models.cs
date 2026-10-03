@@ -38,14 +38,15 @@ public sealed partial class PrefixCacheContractConformanceTests
     // A40: the whole Qwen 3.8 Flash Next GGUF directory, loaded as a layer split over the GPUs in
     // CUDA_VISIBLE_DEVICES with TENSORSHARP_LAYER_SPLIT_DEGREE set to their count.
     private const string EnvQwen38Dir = "TS_TEST_QWEN38_DIR";
-    // The first shard of a split GGUF (the loader follows the rest).
-    private const string Qwen38FlashNext = "qwen3.8-flash-next-ud-q2_k_xl-00001";
+    // The first shard of a split GGUF (the loader follows the rest), in either quant the validation boxes carry.
+    private const string Qwen38FlashNext = "qwen3.8-flash-next-ud-q2_k_xl-00001|qwen3.8-flash-next-ud-iq4_xs-00001";
     // The small generated DeepSeek V4.1 GGUF (eng/validation/prepare-dsv41-managed-fixture.py), on CPU.
     private const string EnvDsv41FixtureDir = "TS_TEST_DSV41_FIXTURE_DIR";
     private const string Dsv41Fixture = "deepseek41-fixture";
-    // The full DeepSeek V4.1 Flash checkpoint. Not run while V4.1 GPU runs are on hold.
+    // The full DeepSeek V4.1 Flash checkpoint's first shard. Its directory also holds the other shards and the
+    // DSpark drafter, and the bare family name loaded the drafter.
     private const string EnvDsv41ModelDir = "TS_TEST_DSV41_MODEL_DIR";
-    private const string Dsv41Flash = "deepseek-v4.1-flash";
+    private const string Dsv41Flash = "deepseek-v4.1-flash-q2_k-00001|deepseek-v4.1-flash-q4_k_m-00001";
 
     [Trait("Category", "PrefixCacheModel")]
     [ModelFact(EnvModelDir, Gemma4E4B)]
@@ -112,16 +113,20 @@ public sealed partial class PrefixCacheContractConformanceTests
 
     [Trait("Category", "PrefixCacheModel")]
     [ModelFact(EnvModelDir, GptOss20B)]
-    public void GptOss20B_PassesTheConformanceScript_WithParityCapabilities()
+    public void GptOss20B_PassesTheConformanceScript_WithDonatedHolders()
     {
         using var model = (GptOssModel)Load(GptOss20B);
+        model.AttachPrefixCache(new RecordingPayloadSink());
         ConformanceReport report = PrefixCacheConformanceScript.Run(TextSubject(model, "gpt-oss-20b"));
 
-        // Class P parity (M2): no end states until M7a, the primary rewinds any distance.
-        Assert.Contains("end-state refusals", report.Ran);
-        Assert.Contains(report.Ran, r => r.StartsWith("truncate in range on the primary", StringComparison.Ordinal));
+        // Class P with donated holders: a finished request's holder continues its conversation's next turn,
+        // the primary converts into one, and a donated holder rewinds any distance.
+        Assert.Contains("donate/return/donate", report.Ran);
+        Assert.Contains("primary conversion", report.Ran);
+        Assert.Contains(report.Ran, r => r.StartsWith("truncate in range (", StringComparison.Ordinal) && r.EndsWith("Donate)", StringComparison.Ordinal));
         PrefixCacheCapabilities caps = model.GetPrefixCacheCapabilities();
         Assert.Equal(FamilyClass.P, caps.Class);
+        Assert.Equal(EndStateSupport.DonateOnly, caps.EndState);
         Assert.True(caps.PrimaryResident);
         Assert.NotEqual(PageSupport.None, caps.Pages);
     }
@@ -149,10 +154,10 @@ public sealed partial class PrefixCacheContractConformanceTests
     {
         using var env = new ScopedEnvironment(new Dictionary<string, string>
         {
-            // The managed fixture's environment (DeepSeekNativeRetentionFixtureTests), retention on.
-            ["TS_DSV41_RETAINED_CACHE"] = "1", ["TS_DSV41_RETAINED_CACHE_MB"] = "2048", ["MAX_CONTEXT"] = "512",
+            // The managed fixture's environment (DeepSeekNativeRetentionFixtureTests); retention is always on.
+            ["TS_DSV41_RETAINED_CACHE_MB"] = "2048", ["MAX_CONTEXT"] = "512",
             ["TS_DSV4_UBATCH"] = "3", ["TS_DSV4_THREADS"] = "2", ["TS_DSV41_ENGRAM_THREADS"] = "2",
-            ["TS_DSV4_FA"] = "0", ["TS_DSV41_TP"] = "0",
+            ["TS_DSV4_FA"] = "0",
         });
         string path = TestGates.FindGguf(Environment.GetEnvironmentVariable(EnvDsv41FixtureDir), Dsv41Fixture);
         Assert.True(path != null, "the gate admitted the fixture but the loader found none");
@@ -168,7 +173,6 @@ public sealed partial class PrefixCacheContractConformanceTests
             DecodeTokens = 8,
             DonateAfter = 3,
             RewindTokens = 4,
-            ExpectedReadiness = PrefixCacheMode.Tree,
             // Native slots: the managed side does not measure their bytes (M5e).
             PayloadBytesKnown = false,
             Log = _output.WriteLine,
@@ -187,7 +191,6 @@ public sealed partial class PrefixCacheContractConformanceTests
     [ModelFact(EnvDsv41ModelDir, Dsv41Flash)]
     public void DeepSeek41_Flash_PassesTheConformanceScript()
     {
-        using var env = new ScopedEnvironment(new Dictionary<string, string> { ["TS_DSV41_RETAINED_CACHE"] = "1" });
         using var model = (DeepSeek4Model)LoadFrom(EnvDsv41ModelDir, Dsv41Flash);
         model.AttachPrefixCache(new RecordingPayloadSink());
         ConformanceReport report = PrefixCacheConformanceScript.Run(
@@ -221,7 +224,6 @@ public sealed partial class PrefixCacheContractConformanceTests
         DecodeTokens = decodeTokens,
         DonateAfter = 3,
         RewindTokens = 4,
-        ExpectedReadiness = PrefixCacheMode.Tree,
         Log = _output.WriteLine,
     };
 

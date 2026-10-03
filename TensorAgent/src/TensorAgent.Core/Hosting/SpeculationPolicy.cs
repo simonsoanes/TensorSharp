@@ -103,6 +103,26 @@ public static class SpeculationPolicy
     }
 
     /// <summary>
+    /// Whether the load speculates with a draft head: only one the catalog ships, and
+    /// only when it really attached.
+    ///
+    /// <para>
+    /// A head the CATALOG lists was measured before it was listed (Gemma 4 E4B 46 → 92
+    /// tok/s). A head that merely sits inside the weights file was not, and the engine
+    /// attaches one whenever it finds it: Qwen3.8 27B's GGUF carries a NextN/MTP layer,
+    /// and with it the app decoded SLOWER in every turn shape. MEASURED in the Mac app
+    /// (ggml_metal, M5 Pro, plain → speculative, ~7k-token prompts): with that head
+    /// prose 0.83x, quoting the prompt 0.93x, quoting its own answer 0.89x; with n-gram
+    /// 0.93x, 1.76x and 1.90x. A 4-token verify of the dense trunk costs about twice a
+    /// plain token there, more than 64% acceptance buys back.
+    /// </para>
+    /// </summary>
+    /// <param name="catalogDraftHeadPath">The entry's downloaded draft head, or null.</param>
+    /// <param name="headAttached">Whether the loaded model reports a usable draft head.</param>
+    public static bool SpeculatesWithDraftHead(string? catalogDraftHeadPath, bool headAttached)
+        => !string.IsNullOrWhiteSpace(catalogDraftHeadPath) && headAttached;
+
+    /// <summary>
     /// After the load, before the engine is built: <c>auto</c> when a draft head is
     /// attached, n-gram otherwise. Returns the algorithm name that will apply.
     /// </summary>

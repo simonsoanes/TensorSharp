@@ -6,12 +6,14 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
+using InferenceWeb.Tests.PrefixCache.Fakes;
 using Microsoft.Extensions.Logging.Abstractions;
 using TensorSharp;
 using TensorSharp.GGML;
 using TensorSharp.Models;
 using TensorSharp.Runtime;
 using TensorSharp.Runtime.Scheduling;
+using TensorSharp.Runtime.Scheduling.PrefixCache;
 using TensorSharp.Runtime.Speculative;
 using Xunit.Abstractions;
 
@@ -70,7 +72,6 @@ public sealed class Qwen4ExpRetainedCacheTests(ITestOutputHelper output)
             byte[] sourceKeys = RawQsa(model).Bytes;
             Assert.True(model.TryCheckpointActiveCache("checkpoint"));
             Assert.True(model.IsRetainedCheckpoint("checkpoint"));
-            Assert.False(model.TryRebindRetainedCache("checkpoint", "moved"));
             Assert.True(model.TryCloneRetainedCache("checkpoint", "a2"));
             var expectedDraft = Draft(model, 149, Hidden(model.SpecFeatureSize, 7), 1);
             float[][] originalContinuation = Continue(model, Suffix, 3);
@@ -160,6 +161,111 @@ public sealed class Qwen4ExpRetainedCacheTests(ITestOutputHelper output)
         Assert.Equal(0, model.RetainedCacheCount);
         Assert.False(model.TryCloneRetainedCache("invalid", "clone"));
         Assert.True(model.HasFusedSequenceCache("source"));
+    }
+
+    [Qwen4ExpMtpTinyFact]
+    public void PrimaryAdoptionAllocationFailure_PreservesNativeContinuationAndPublishesNoHolder()
+    {
+        using var fixture = new Fixture(output);
+        using var model = fixture.Load();
+        using var cold = fixture.Load();
+        IAllocator allocator = (IAllocator)typeof(ModelBase)
+            .GetField("_allocator", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(model)!;
+        for (int failure = 1; failure <= 5; failure++)
+        {
+            model.ResetKVCache();
+            model.ForwardRefill(Prompt);
+            Tensor[] originalKv = Field<Tensor[]>(model, "_kCache");
+            Qwen4ExpMtpMathTests.Set(typeof(ModelBase), model, "_allocator", new FailingAllocator(allocator, failure));
+            try
+            {
+                Assert.Throws<OutOfMemoryException>(() => model.AdoptPrimaryCacheToFused("failed-adoption"));
+            }
+            finally { Qwen4ExpMtpMathTests.Set(typeof(ModelBase), model, "_allocator", allocator); }
+            Assert.False(model.HasFusedSequenceCache("failed-adoption"));
+            Assert.Null(Field<object>(model, "_activeFusedKey"));
+            Assert.Null(Field<object>(model, "_primaryHolder"));
+            Assert.Same(originalKv, Field<Tensor[]>(model, "_kCache"));
+            Assert.Equal(Prompt.Length, model.PrimaryCacheLength);
+            float[] actual = (float[])model.Forward(Suffix).Clone();
+            cold.ResetKVCache();
+            cold.ForwardRefill(Prompt);
+            Assert.Equal(cold.Forward(Suffix), actual);
+        }
+        output.WriteLine("Replacement allocation failures 1..5 left the live Qwen4Exp primary intact and continued with cold full-logit parity.");
+    }
+
+    [Qwen4ExpMtpTinyFact]
+    public void PrimaryMeasurement_MatchesConvertedFootprintAndDoesNotChangeNativeContinuation()
+    {
+        using var fixture = new Fixture(output);
+        using var model = fixture.Load();
+        using var cold = fixture.Load();
+        RunConversation(model);
+        Draft(model, 139, Hidden(model.SpecFeatureSize, 5), 0);
+        int length = model.CacheSeqLen;
+        IAllocator allocator = (IAllocator)typeof(ModelBase)
+            .GetField("_allocator", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(model)!;
+        var originalKv = Field<Tensor[]>(model, "_kCache");
+        Qwen4ExpMtpMathTests.Set(typeof(ModelBase), model, "_allocator", new FailingAllocator(allocator, 1));
+        PayloadFootprint measured;
+        try
+        {
+            foreach (int invalid in new[] { -1, 0, length - 1, length + 1 })
+            {
+                Assert.False(model.TryMeasurePrimaryEndState(invalid, out var refused));
+                Assert.Equal(default, refused);
+            }
+            Assert.True(model.TryMeasurePrimaryEndState(length, out measured));
+        }
+        finally { Qwen4ExpMtpMathTests.Set(typeof(ModelBase), model, "_allocator", allocator); }
+        Assert.Same(originalKv, Field<Tensor[]>(model, "_kCache"));
+        Assert.Equal(length, model.CacheSeqLen);
+        Assert.Null(Field<object>(model, "_activeFusedKey"));
+        Assert.True(model.TryConvertPrimary("retained-primary", length, out var converted));
+        Assert.Equal(measured, converted);
+        Assert.Equal(measured, model.MeasureEndState("retained-primary"));
+        Assert.True(model.TryRebindRetainedCache("retained-primary", "continuation"));
+        Assert.False(model.BindSequenceCache("continuation"));
+        Assert.False(model.TryMeasurePrimaryEndState(length, out var checkedOut));
+        Assert.Equal(default, checkedOut);
+        RunConversation(cold);
+        Assert.Equal(cold.Forward(Suffix), model.Forward(Suffix));
+        output.WriteLine("Live primary measurement allocates no tensors, equals converted QSA/GDN/PLE/MTP footprint, and preserves cold full-logit continuation.");
+    }
+
+    [Qwen4ExpMtpTinyFact]
+    public void PrimaryConversion_ZeroRetentionBudgetRefusesBeforeReplacementAllocation()
+    {
+        using var fixture = new Fixture(output);
+        string previous = Environment.GetEnvironmentVariable("TS_Q4E_RETAINED_CACHE_MB");
+        Environment.SetEnvironmentVariable("TS_Q4E_RETAINED_CACHE_MB", "0");
+        try
+        {
+            using var model = fixture.Load();
+            using var cold = fixture.Load();
+            RunConversation(model);
+            int length = model.CacheSeqLen;
+            IAllocator allocator = (IAllocator)typeof(ModelBase)
+                .GetField("_allocator", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(model)!;
+            var originalKv = Field<Tensor[]>(model, "_kCache");
+            Qwen4ExpMtpMathTests.Set(typeof(ModelBase), model, "_allocator", new FailingAllocator(allocator, 1));
+            try
+            {
+                Assert.False(model.TryConvertPrimary("cannot-retain", length, out var refused));
+                Assert.Equal(default, refused);
+            }
+            finally { Qwen4ExpMtpMathTests.Set(typeof(ModelBase), model, "_allocator", allocator); }
+            Assert.Same(originalKv, Field<Tensor[]>(model, "_kCache"));
+            Assert.Null(Field<object>(model, "_activeFusedKey"));
+            Assert.Null(Field<object>(model, "_primaryHolder"));
+            Assert.False(model.HasFusedSequenceCache("cannot-retain"));
+            Assert.Equal(length, model.PrimaryCacheLength);
+            Assert.Equal(0, model.RetainedCacheCount);
+            RunConversation(cold);
+            Assert.Equal(cold.Forward(Suffix), model.Forward(Suffix));
+        }
+        finally { Environment.SetEnvironmentVariable("TS_Q4E_RETAINED_CACHE_MB", previous); }
     }
 
     [Qwen4ExpMtpTinyFact]
@@ -272,7 +378,8 @@ public sealed class Qwen4ExpRetainedCacheTests(ITestOutputHelper output)
         Assert.False(model.TryCheckpointActiveCache("ckpt"));
         Assert.Equal(1, model.RetainedCacheCount);
         Assert.True(model.IsRetainedCheckpoint("ckpt"));
-        Assert.False(model.TryRebindRetainedCache("ckpt", "moved")); // cloned, never moved
+        // Public/scoped donation decisions belong to the radix owner. This
+        // direct-holder test keeps its checkpoint and exercises cloning only.
 
         // Chat 1 carries on past the boundary: the checkpoint must own its bytes.
         float[][] firstContinuation = Continue(model, first, 2);
@@ -384,7 +491,7 @@ public sealed class Qwen4ExpRetainedCacheTests(ITestOutputHelper output)
     }
 
     [Qwen4ExpMtpTinyFact]
-    public void RetentionBudget_EvictsTheOldestConversation_AndZeroDeclines()
+    public void RetentionBudget_RefusesUntilTheOwnerReleasesAConversation_AndZeroDeclines()
     {
         using var fixture = new Fixture(output);
         long holderBytes;
@@ -413,7 +520,7 @@ public sealed class Qwen4ExpRetainedCacheTests(ITestOutputHelper output)
             Environment.SetEnvironmentVariable("TS_Q4E_RETAINED_CACHE_MB", budgetMb.ToString());
             using (var model = fixture.Load())
             {
-                for (int i = 0; i <= capacity; ++i)
+                for (int i = 0; i < capacity; ++i)
                 {
                     string id = $"conv-{i}";
                     Assert.True(model.BindSequenceCache(id));
@@ -421,8 +528,19 @@ public sealed class Qwen4ExpRetainedCacheTests(ITestOutputHelper output)
                     model.ForwardRefill(Prompt.Select(t => t + i).ToArray());
                     Assert.True(model.RetainSequenceCache(id), $"{id} was not retained");
                 }
-                // One more than fit: the oldest conversation was evicted for it, the
-                // rest stayed, and the scheduler's later query for the victim declines.
+                // The model must refuse at the budget rather than silently evict
+                // a payload owned by the tree. The request stays private until
+                // the owner explicitly releases its oldest retained payload.
+                string extra = $"conv-{capacity}";
+                Assert.True(model.BindSequenceCache(extra));
+                model.SpecEnsureCapacity(256);
+                model.ForwardRefill(Prompt.Select(t => t + capacity).ToArray());
+                Assert.False(model.RetainSequenceCache(extra));
+                Assert.True(model.HasFusedSequenceCache(extra));
+                Assert.Equal(capacity, model.RetainedCacheCount);
+                Assert.True(model.CanReuseRetainedPrefix("conv-0", Prompt.Length, Prompt.Length));
+                model.DiscardRetainedCaches(["conv-0"], TensorSharp.Runtime.Scheduling.PrefixCache.ReleaseReason.Evicted);
+                Assert.True(model.RetainSequenceCache(extra));
                 Assert.Equal(capacity, model.RetainedCacheCount);
                 Assert.False(model.CanReuseRetainedPrefix("conv-0", Prompt.Length, Prompt.Length));
                 Assert.False(model.TryRebindRetainedCache("conv-0", "conv-0-again"));
@@ -613,7 +731,7 @@ public sealed class Qwen4ExpRetainedCacheTests(ITestOutputHelper output)
     // 0.3155. So on CUDA the bound is 1e-2 - 23x the measured maximum and 32x below
     // that defect - and greedy may differ only at a near-tie no wider than twice
     // the measured difference. Every other backend stays bit-exact above.
-    // Evidence: eng/validation/qwen38_mtp_followup/verify-row-kernels-20260917.
+    // Measured on an A40, 2026-09-17.
     private const double PrefillShapeNoiseBound = 1e-2;
 
     private void AssertWithinPrefillShapeNoise(float[] expected, float[] actual, string what)
@@ -687,8 +805,8 @@ public sealed class Qwen4ExpRetainedCacheTests(ITestOutputHelper output)
     [Qwen4ExpMtpTinyFact]
     public async Task Engine_FollowUpReusesRetainedHolder_AndNewChatsCloneTheCheckpoint()
     {
-        string[] keys = { "TS_RETAINED_FUSED_CACHE", "TS_PER_SEQ_FUSED", "TS_PREFIX_CHECKPOINTS", "TS_PREFIX_CHECKPOINTS_MAX" };
-        string[] values = { "1", "1", "1", "2" };
+        string[] keys = { "TS_RETAINED_FUSED_CACHE_MAX", "TS_PER_SEQ_FUSED", "TS_PREFIX_CHECKPOINTS_MAX" };
+        string[] values = { null, "1", "2" };
         var old = keys.Select(Environment.GetEnvironmentVariable).ToArray();
         try
         {
@@ -774,6 +892,80 @@ public sealed class Qwen4ExpRetainedCacheTests(ITestOutputHelper output)
         {
             for (int i = 0; i < keys.Length; ++i) Environment.SetEnvironmentVariable(keys[i], old[i]);
         }
+    }
+
+    [Qwen4ExpMtpTinyFact]
+    public async Task Engine_ImageFollowUpReusesExactState_AndChangedMediaCannotReuseIt()
+    {
+        using var fixture = new Fixture(output);
+        using var model = fixture.Load();
+        using var cold = fixture.Load();
+        const int blockSize = 8, newTokens = 6;
+        var config = new SchedulerConfig
+        {
+            MaxNumBatchedTokens = 128, MaxNumRunningSequences = 4,
+            MaxPrefillChunkSize = 7, SoloPrefillChunkSize = 7,
+            NumBlocks = 256, BlockSize = blockSize, EnablePrefixCaching = true,
+            DecodeQuantumTokens = 1,
+        };
+        using var engine = new InferenceEngine(model, config, NullLogger.Instance);
+        var prompt = Prompt.Concat(Prompt).Concat(Prompt).Concat(Prompt).Concat(Media).Concat(Prompt).ToList();
+        const int imageStart = 32, imageEnd = 38, gap = 3;
+        var spans = new[] { new PromptMediaSpan(imageStart, imageEnd, new string('a', 64)) };
+        var positions = new List<int>();
+        for (int i = 0; i < imageStart; i++) positions.AddRange([i, i, i]);
+        // A 2x3 merged grid at position 32 consumes six KV rows and three
+        // rotary positions. The following text starts at position 35.
+        for (int h = 0; h < 2; h++)
+            for (int w = 0; w < 3; w++) positions.AddRange([32, 32 + h, 32 + w]);
+        for (int i = imageEnd; i < prompt.Count; i++) positions.AddRange([i - gap, i - gap, i - gap]);
+        var injector = (ModelMultimodalInjector)model.MultimodalInjector;
+        injector.SetMRoPEPositions("image-1", positions.ToArray());
+        var (first, firstOutput) = await DrainAsync(engine.SubmitRequest(new SequenceState(
+            "image-1", prompt, newTokens, blockSize, SamplingConfig.Greedy,
+            mediaSpans: spans, cacheScope: "image-conversation")));
+        Assert.Equal(0, first.PrefixCacheReusedTokens);
+        Assert.Equal(newTokens, firstOutput.Count);
+
+        var follow = prompt.Concat(firstOutput).Concat(Suffix).ToList();
+        for (int i = prompt.Count; i < follow.Count; i++) positions.AddRange([i - gap, i - gap, i - gap]);
+        injector.SetMRoPEPositions("image-2", positions.ToArray());
+        var (second, secondOutput) = await DrainAsync(engine.SubmitRequest(new SequenceState(
+            "image-2", follow, newTokens, blockSize, SamplingConfig.Greedy,
+            mediaSpans: spans, cacheScope: "image-conversation")));
+        Assert.InRange(second.PrefixCacheReusedTokens,
+            prompt.Count + firstOutput.Count - 1, prompt.Count + firstOutput.Count);
+        Assert.Equal(newTokens, secondOutput.Count);
+
+        List<int> Cold()
+        {
+            cold.ResetKVCache();
+            cold.SetMRoPEPositions(positions.ToArray());
+            return Greedy(cold, cold.Forward(follow.ToArray()), newTokens);
+        }
+        lock (model.GpuComputeLock) Assert.Equal(Cold(), secondOutput);
+
+        // Same placeholder IDs and coordinates with a different image identity
+        // must not continue either the prompt checkpoint or its generated tail.
+        injector.SetMRoPEPositions("image-changed", positions.ToArray());
+        var changedSpans = new[] { spans[0] with { ContentId = new string('b', 64) } };
+        var (changed, changedOutput) = await DrainAsync(engine.SubmitRequest(new SequenceState(
+            "image-changed", follow, newTokens, blockSize, SamplingConfig.Greedy,
+            mediaSpans: changedSpans, cacheScope: "image-conversation")));
+        Assert.Equal(0, changed.PrefixCacheReusedTokens);
+        lock (model.GpuComputeLock) Assert.Equal(Cold(), changedOutput);
+
+        // The media identity is deliberately the same as the original, but
+        // another conversation cannot read its private recurrent state.
+        injector.SetMRoPEPositions("image-other-scope", positions.ToArray());
+        var (other, _) = await DrainAsync(engine.SubmitRequest(new SequenceState(
+            "image-other-scope", follow, newTokens, blockSize, SamplingConfig.Greedy,
+            mediaSpans: spans, cacheScope: "another-image-conversation")));
+        Assert.Equal(0, other.PrefixCacheReusedTokens);
+        foreach (string id in new[] { "image-1", "image-2", "image-changed", "image-other-scope" })
+            injector.ClearPreparedPromptState(id);
+        output.WriteLine($"Image follow-up reused {second.PrefixCacheReusedTokens}/{follow.Count} tokens; " +
+            "cold greedy parity, changed-media rejection and private-scope isolation passed on synthetic weights.");
     }
 
     // ---- helpers ----
@@ -862,6 +1054,18 @@ public sealed class Qwen4ExpRetainedCacheTests(ITestOutputHelper output)
         return best;
     }
 
+    private sealed class FailingAllocator(IAllocator inner, int failure) : IAllocator
+    {
+        private int _allocations;
+        public BlasEnum BlasEnum => inner.BlasEnum;
+        public int DeviceId => inner.DeviceId;
+        public float GetAllocatedMemoryRatio() => inner.GetAllocatedMemoryRatio();
+        public Storage Allocate(DType type, long count)
+            => ++_allocations == failure
+                ? throw new OutOfMemoryException("Injected replacement-primary allocation failure.")
+                : inner.Allocate(type, count);
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly string _path;
@@ -896,6 +1100,9 @@ public sealed class Qwen4ExpRetainedCacheTests(ITestOutputHelper output)
                 _output.WriteLine($"native {native} sha256={hash}; backend={backend}");
                 Assert.Equal(260, model.Config.VocabSize);
                 Assert.True(model.HasDraftHead);
+                // Production retention is owned by the radix tree. Direct
+                // holder tests supply an owner and explicitly manage payloads.
+                model.AttachPrefixCache(new RecordingPayloadSink());
                 return model;
             }
             catch { model.Dispose(); throw; }

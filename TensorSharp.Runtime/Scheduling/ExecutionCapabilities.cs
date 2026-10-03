@@ -22,10 +22,10 @@ namespace TensorSharp.Runtime.Scheduling
     /// GGML-CUDA/Metal, Gemma 4 reports <c>SpeculationProfitable</c> only
     /// where its fused verify kernels exist), so this record is the merged
     /// "backend capabilities + model requirements" view: each field is the
-    /// answer to "can THIS model on THIS backend run that path?". Model-level
-    /// environment opt-outs (e.g. <c>TS_QWEN35_BATCHED=0</c>) surface through
-    /// <see cref="BatchedForwardAvailable"/> rather than through
-    /// exception-driven fallback, so routing decisions are declared up front.
+    /// answer to "can THIS model on THIS backend run that path?". A model's
+    /// static limitations surface through <see cref="BatchedForwardAvailable"/>
+    /// rather than through exception-driven fallback, so routing decisions are
+    /// declared up front.
     ///
     /// Built per step via <see cref="FromModel"/> — the getters are cheap flag
     /// reads, and several are env-var backed so they must not be cached for
@@ -40,9 +40,8 @@ namespace TensorSharp.Runtime.Scheduling
 
         /// <summary>Model-declared master switch for its batched path
         /// (<see cref="IBatchedPagedModel.BatchedForwardAvailable"/>): false when
-        /// a per-model opt-out (e.g. <c>TS_QWEN35_BATCHED=0</c>) or a static
-        /// limitation (e.g. Gemma 4 with MoE layers or block-quantized KV)
-        /// makes ForwardBatch unusable, so the planner routes around it
+        /// a static limitation (e.g. Gemma 4 with MoE layers or block-quantized
+        /// KV, or tensor parallelism) makes ForwardBatch unusable, so the planner routes around it
         /// instead of relying on a NotSupportedException fallback.</summary>
         public bool BatchedForwardAvailable { get; init; }
 
@@ -110,11 +109,6 @@ namespace TensorSharp.Runtime.Scheduling
         /// plain decoding and reports this reason.</summary>
         public string? SpeculationRefusal { get; init; }
 
-        /// <summary>The speculative trunk can run through the batched paged
-        /// path (<see cref="IBatchedSpeculativeTarget"/>), composing with
-        /// prefix caching and concurrency transitions.</summary>
-        public bool SupportsBatchedSpecTrunk { get; init; }
-
         /// <summary>Snapshot the capability surface of <paramref name="model"/>.
         /// Cheap (flag/property reads); called once per engine step.</summary>
         public static ExecutionCapabilities FromModel(IModelArchitecture model)
@@ -140,9 +134,6 @@ namespace TensorSharp.Runtime.Scheduling
                 HasDraftHead = draftHead,
                 SpeculationProfitable = spec != null && spec.SpeculationRefusal == null && spec.SpeculationProfitable,
                 SpeculationRefusal = spec?.SpeculationRefusal,
-                SupportsBatchedSpecTrunk = specTrunk
-                    && spec is IBatchedSpeculativeTarget batchedSpec
-                    && batchedSpec.SupportsBatchedSpecTrunk,
             };
         }
 
@@ -167,7 +158,6 @@ namespace TensorSharp.Runtime.Scheduling
             {
                 sb.Append(", draftHead=").Append(Flag(HasDraftHead));
                 sb.Append(", specProfitable=").Append(Flag(SpeculationProfitable));
-                sb.Append(", specBatchedTrunk=").Append(Flag(SupportsBatchedSpecTrunk));
                 sb.Append(", specMultimodalPrefill=").Append(Flag(SupportsSpeculativeMultimodalPrefill));
             }
             return sb.ToString();

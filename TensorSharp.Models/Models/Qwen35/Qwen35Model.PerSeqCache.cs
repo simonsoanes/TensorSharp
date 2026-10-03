@@ -10,7 +10,7 @@
 //
 // Problem this solves: with N>=2 concurrent requests the engine routed every
 // decode step through the batched paged forward (ForwardBatch / the true
-// token-batched fused decode g_q35bdc). Measured on ggml_cuda that path
+// token-batched fused decode). Measured on ggml_cuda that path
 // produced WRONG output (the per-slot GDN state + migration corrupt the
 // resumed sequence) AND collapsed aggregate throughput to ~24 tok/s (from a
 // single-stream ~80). The op-by-op batched fallback was even slower (~10) and
@@ -250,7 +250,7 @@ namespace TensorSharp.Models
         // checkpoint instead of prefilling the system prompt again.
         public bool SupportsPerSequenceFusedForward =>
             !IsTensorParallel
-            && ((_backend == BackendType.GgmlCuda && _fullDecodeEnabled && !_fdUnsupported)
+            && ((_backend == BackendType.GgmlCuda && !_fdUnsupported)
                 || _backend == BackendType.GgmlMetal
                 || _backend == BackendType.Mlx);
 
@@ -437,12 +437,15 @@ namespace TensorSharp.Models
             // The active fields hold the primary cache with the owner's live state.
             // Move those into the owner's holder (zero copy).
             var holder = SnapshotActiveCache();
+            // Allocate the replacement before publishing the move. If allocation
+            // fails, the live primary still owns its unchanged KV/recurrent state.
+            _fusedHolders.EnsureCapacity(checked(_fusedHolders.Count + 1));
+            var fresh = CreateFreshHolder();
             _fusedHolders[requestId] = holder;
             _activeFusedKey = requestId;
 
             // Give the primary a fresh empty allocation so a future N==1 step for a
             // never-fused request doesn't reset the adopted holder's tensors.
-            var fresh = CreateFreshHolder();
             _primaryHolder = fresh;
         }
 

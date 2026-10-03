@@ -9,6 +9,13 @@
     <TensorSharpHostObjFolder Condition="'$(TensorSharpHostObjFolder)' == ''">obj/other/</TensorSharpHostObjFolder>
     <BaseIntermediateOutputPath Condition="'$(BaseIntermediateOutputPath)' == '' Or '$(BaseIntermediateOutputPath)' == 'obj\' Or '$(BaseIntermediateOutputPath)' == 'obj/'">$(TensorSharpHostObjFolder)</BaseIntermediateOutputPath>
     <MSBuildProjectExtensionsPath Condition="'$(MSBuildProjectExtensionsPath)' == '' Or '$(MSBuildProjectExtensionsPath)' == 'obj\' Or '$(MSBuildProjectExtensionsPath)' == 'obj/'">$(BaseIntermediateOutputPath)</MSBuildProjectExtensionsPath>
+    <!-- A build with -p:TensorSharpAppleTargets=true (TensorAgent's Apple heads, from
+         TensorAgent/scripts or Directory.Solution.targets) restores a different graph:
+         TensorSharp.Models gains net10.0-ios and net10.0-maccatalyst. In one restore
+         directory with the desktop build, each rewrote the other's project.assets.json, so
+         alternating them recompiled TensorSharp.Models every time. That restore gets its
+         own directory; compile outputs stay shared. -->
+    <MSBuildProjectExtensionsPath Condition="'$(TensorSharpAppleTargets)' == 'true'">$(MSBuildProjectExtensionsPath)apple/</MSBuildProjectExtensionsPath>
     <DefaultItemExcludes>$(DefaultItemExcludes);obj/**;obj\**</DefaultItemExcludes>
 
     <LangVersion>latest</LangVersion>

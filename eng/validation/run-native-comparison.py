@@ -392,8 +392,8 @@ def main():
             for key in ('TENSORSHARP_TP_DEGREE', 'TENSORSHARP_LAYER_SPLIT_DEGREE',
                         'TENSORSHARP_TP_NODE_ID', 'TENSORSHARP_TP_PEERS',
                         'TENSORSHARP_TP_DEVICES', 'TENSORSHARP_LAYER_SPLIT_DEVICES',
-                        'TS_GLM_NGPU', 'TS_DSV4_NGPU', 'TS_N_CPU_MOE', 'TS_CPU_MOE',
-                        'TS_SPEC', 'TS_SPEC_DRAFT_MODEL', 'TS_MTP_DRAFT_MODEL'):
+                        'TS_N_CPU_MOE', 'TS_CPU_MOE',
+                        'TS_SPEC', 'TS_SPEC_DRAFT_MODEL'):
                 run_env.pop(key, None)
             run_env.update({'CUDA_VISIBLE_DEVICES': ','.join(gpu_ids[:profile['gpus']]),
                             'TS_CPU_MOE_THREADS': '16', 'OMP_NUM_THREADS': '16'})

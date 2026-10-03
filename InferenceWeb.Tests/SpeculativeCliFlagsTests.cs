@@ -30,8 +30,8 @@ namespace InferenceWeb.Tests;
 /// The env var is the contract rather than a parsed value object because the
 /// request has to reach the model LOADER — glm-dsa decides from the enabled
 /// variable whether to page a whole extra 256-expert decoder layer into VRAM,
-/// and sizes its graph cache from <c>TS_MTP_DRAFT</c> (still read from C++),
-/// both while the model is loading.
+/// and sizes its graph cache from <c>TS_SPEC_DRAFT</c> (read from C++), both
+/// while the model is loading.
 /// </summary>
 public sealed class SpeculativeCliFlagsTests : IDisposable
 {
@@ -51,57 +51,29 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
         bool applied = SpeculativeCliFlags.Apply(new[] { "--spec" });
 
         Assert.True(applied);
-        Assert.Equal("1", Environment.GetEnvironmentVariable("TS_MTP_SPEC"));
+        Assert.Equal("1", Environment.GetEnvironmentVariable("TS_SPEC"));
         Assert.True(SchedulerConfig.FromEnvironment().Speculation.Enabled);
     }
 
     [Fact]
     public void Apply_NoSpec_TurnsSpeculationOffOverAnExportedEnvVar()
     {
-        _env.Set("TS_MTP_SPEC", "1");
+        _env.Set("TS_SPEC", "1");
 
         Assert.True(SpeculativeCliFlags.Apply(new[] { "--no-spec" }));
 
-        Assert.Equal("0", Environment.GetEnvironmentVariable("TS_MTP_SPEC"));
+        Assert.Equal("0", Environment.GetEnvironmentVariable("TS_SPEC"));
         Assert.False(SchedulerConfig.FromEnvironment().Speculation.Enabled);
     }
 
     [Fact]
     public void Apply_NoFlags_LeavesTheEnvironmentAlone()
     {
-        _env.Set("TS_MTP_SPEC", "1");
+        _env.Set("TS_SPEC", "1");
 
         Assert.False(SpeculativeCliFlags.Apply(new[] { "--model", "x.gguf", "--backend", "ggml_cuda" }));
 
-        Assert.Equal("1", Environment.GetEnvironmentVariable("TS_MTP_SPEC"));
-    }
-
-    [Fact]
-    public void DraftModelTestScope_RestoresArchitectureLoaderFallbacks()
-    {
-        string[] names = { "TS_DSV4_DSPARK", "TS_QWEN35_DFLASH", "TS_MUSE_GLIMMER_DFLASH", "TS_NEMOTRON_DFLASH" };
-        foreach (string name in names)
-            _env.Set(name, "/original/drafter.gguf");
-
-        string gguf = Path.Combine(Path.GetTempPath(), $"drafter-{Guid.NewGuid():N}.gguf");
-        File.WriteAllBytes(gguf, new byte[] { 1, 2, 3 });
-        try
-        {
-            using (var inner = new EnvScope())
-            {
-                inner.ClearSpeculationVars();
-                Assert.True(TensorSharp.Server.Hosting.ServerOptionsBuilder.ApplySpeculativeCliFlags(
-                    new[] { "--draft-model", gguf }));
-                foreach (string name in names)
-                    Assert.Equal(gguf, Environment.GetEnvironmentVariable(name));
-            }
-            foreach (string name in names)
-                Assert.Equal("/original/drafter.gguf", Environment.GetEnvironmentVariable(name));
-        }
-        finally
-        {
-            File.Delete(gguf);
-        }
+        Assert.Equal("1", Environment.GetEnvironmentVariable("TS_SPEC"));
     }
 
     [Theory]
@@ -113,7 +85,7 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
 
         Assert.True(SpeculativeCliFlags.Apply(args));
 
-        Assert.Equal("4", Environment.GetEnvironmentVariable("TS_MTP_DRAFT"));
+        Assert.Equal("4", Environment.GetEnvironmentVariable("TS_SPEC_DRAFT"));
         Assert.Equal(4, SchedulerConfig.FromEnvironment().Speculation.MaxDraftTokens);
     }
 
@@ -165,7 +137,7 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
             SpeculativeCliFlags.Apply(new[] { "--spec-draft", value }));
 
         Assert.Contains("--spec-draft", ex.Message);
-        Assert.Null(Environment.GetEnvironmentVariable("TS_MTP_DRAFT"));
+        Assert.Null(Environment.GetEnvironmentVariable("TS_SPEC_DRAFT"));
     }
 
     [Theory]
@@ -184,7 +156,7 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
             SpeculativeCliFlags.Apply(new[] { "--spec-pmin", value }));
 
         Assert.Contains("--spec-pmin", ex.Message);
-        Assert.Null(Environment.GetEnvironmentVariable("TS_MTP_PMIN"));
+        Assert.Null(Environment.GetEnvironmentVariable("TS_SPEC_PMIN"));
     }
 
     [Fact]
@@ -193,7 +165,7 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
         // 0 is a meaningful setting, not an out-of-range one: never decline to
         // draft. It is llama.cpp's own default for the same knob (p_min = 0.0).
         SpeculativeCliFlags.Apply(new[] { "--spec-pmin", "0" });
-        Assert.Equal("0", Environment.GetEnvironmentVariable(SpeculativeCliFlags.PMinEnvVar));
+        Assert.Equal("0", Environment.GetEnvironmentVariable(SpeculationEnvVars.PMin));
     }
 
     [Fact]
@@ -255,7 +227,6 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
 
             Assert.True(SchedulerConfig.FromEnvironment().Speculation.Enabled);
             Assert.Equal(gguf, Environment.GetEnvironmentVariable(SpeculationEnvVars.DraftModel));
-            Assert.Equal(gguf, Environment.GetEnvironmentVariable(SpeculationEnvVars.LegacyDraftModel));
         }
         finally
         {
@@ -322,60 +293,60 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
         }
     }
 
-    [Theory]
-    [InlineData(SpeculationEnvVars.DraftModel)]
-    [InlineData(SpeculationEnvVars.LegacyDraftModel)]
-    public void CliHost_EnvironmentDraftModel_ReachesTheModelFactoryPath(string variable)
+    [Fact]
+    public void CliHost_EnvironmentDraftModel_ReachesTheModelFactoryPath()
     {
         const string gguf = "/configured/drafter.gguf";
-        _env.Set(variable, gguf);
+        _env.Set(SpeculationEnvVars.DraftModel, gguf);
 
         Assert.Equal(gguf, TensorSharp.Cli.Program.ResolveConfiguredDraftModelPath());
     }
 
-    // ----- the dual TS_SPEC_* / TS_MTP_* env spelling -----
+    // ----- one environment name per setting -----
 
     [Fact]
-    public void Apply_PublishesBothEnvSpellings_SoTheNativeLoaderStillSeesTheRequest()
+    public void Apply_PublishesTheOneEnvNameTheLoadersRead()
     {
-        // The glm-dsa NATIVE loader reads TS_MTP_DRAFT from C++ while the model is
+        // The glm-dsa NATIVE loader reads TS_SPEC_DRAFT from C++ while the model is
         // loading (it sizes its graph cache from it), and the managed half of the
-        // same loader reads the enabled variable to decide whether to page a whole
-        // extra 256-expert decoder layer into VRAM. Publishing only the current
-        // spelling would leave that loader blind, and speculation would go quiet
-        // with nothing in the log to explain it. Only the ENV spelling is dual;
-        // the FLAG spelling is one name per option.
+        // same loader reads TS_SPEC to decide whether to page a whole extra
+        // 256-expert decoder layer into VRAM.
         Assert.True(SpeculativeCliFlags.Apply(new[] { "--spec", "--spec-draft", "5", "--spec-pmin", "0.6" }));
 
         Assert.Equal("1", Environment.GetEnvironmentVariable(SpeculationEnvVars.Enabled));
-        Assert.Equal("1", Environment.GetEnvironmentVariable(SpeculationEnvVars.LegacyEnabled));
         Assert.Equal("5", Environment.GetEnvironmentVariable(SpeculationEnvVars.Draft));
-        Assert.Equal("5", Environment.GetEnvironmentVariable(SpeculationEnvVars.LegacyDraft));
         Assert.Equal("0.6", Environment.GetEnvironmentVariable(SpeculationEnvVars.PMin));
-        Assert.Equal("0.6", Environment.GetEnvironmentVariable(SpeculationEnvVars.LegacyPMin));
+        foreach ((string removed, _) in SpeculationEnvVars.RemovedNames)
+            Assert.Null(Environment.GetEnvironmentVariable(removed));
     }
 
     [Fact]
-    public void FromEnvironment_ReadsLegacyWhenOnlyLegacyIsSet()
+    public void EveryRemovedEnvName_ErrorsNamingItsSurvivor()
     {
-        // A deployment that exports TS_MTP_* directly (no CLI flag) must keep
-        // working unchanged.
-        _env.Set(SpeculationEnvVars.LegacyEnabled, "1");
-        _env.Set(SpeculationEnvVars.LegacyDraft, "12");
+        // A deployment still exporting a removed name must hear about it: read
+        // quietly or ignored quietly, it would run with speculation silently off.
+        Assert.NotEmpty(SpeculationEnvVars.RemovedNames);
+        foreach ((string removed, string survivor) in SpeculationEnvVars.RemovedNames)
+        {
+            using var scope = new EnvScope();
+            scope.Set(removed, "1");
 
-        var cfg = SpeculationOptions.FromEnvironment();
-        Assert.True(cfg.Enabled);
-        Assert.Equal(12, cfg.MaxDraftTokens);
+            var fromEnv = Assert.Throws<ArgumentException>(() => SpeculationOptions.FromEnvironment());
+            Assert.Contains(removed, fromEnv.Message);
+            Assert.Contains(survivor, fromEnv.Message);
+
+            var apply = Assert.Throws<ArgumentException>(() => SpeculativeCliFlags.Apply(new[] { "--spec" }));
+            Assert.Contains(survivor, apply.Message);
+            Assert.Null(Environment.GetEnvironmentVariable(SpeculationEnvVars.Enabled));
+        }
     }
 
     [Theory]
-    [InlineData(SpeculationEnvVars.Draft, "65")]
-    [InlineData(SpeculationEnvVars.Draft, "1000")]
-    [InlineData(SpeculationEnvVars.LegacyDraft, "65")]
-    [InlineData(SpeculationEnvVars.LegacyDraft, "1000")]
-    public void FromEnvironment_DraftWindowAboveTheBound_IsIgnored(string variable, string value)
+    [InlineData("65")]
+    [InlineData("1000")]
+    public void FromEnvironment_DraftWindowAboveTheBound_IsIgnored(string value)
     {
-        _env.Set(variable, value);
+        _env.Set(SpeculationEnvVars.Draft, value);
 
         SpeculationOptions options = SpeculationOptions.FromEnvironment();
 
@@ -418,7 +389,6 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
 
         // And nothing leaked into the environment before the throw.
         Assert.Null(Environment.GetEnvironmentVariable(SpeculationEnvVars.Enabled));
-        Assert.Null(Environment.GetEnvironmentVariable(SpeculationEnvVars.LegacyEnabled));
     }
 
     [Fact]
@@ -545,7 +515,6 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
 
             Assert.Equal("6", Environment.GetEnvironmentVariable(SpeculationEnvVars.Draft));
             Assert.Equal(gguf, Environment.GetEnvironmentVariable(SpeculationEnvVars.DraftModel));
-            Assert.Equal(gguf, Environment.GetEnvironmentVariable(SpeculationEnvVars.LegacyDraftModel));
         }
         finally
         {

@@ -82,11 +82,9 @@ def verify(url, expected_backend, model):
         assert token_error < 1e-7, token_error
     ollama_client = ollama.Client(host=url)
     modern = ollama_client.embed(model=model, input=TEXTS, truncate=False)
-    legacy = [ollama_client.embeddings(model=model, prompt=text).embedding for text in TEXTS]
     bench.assert_vectors(modern.embeddings, dimensions)
-    bench.assert_vectors(legacy, dimensions)
-    modern_error, legacy_error = maximum_error(float_rows, modern.embeddings), maximum_error(float_rows, legacy)
-    assert modern_error < 1e-6 and legacy_error < 1e-6, (modern_error, legacy_error)
+    modern_error = maximum_error(float_rows, modern.embeddings)
+    assert modern_error < 1e-6, modern_error
     assert automatic.usage.prompt_tokens == explicit.usage.prompt_tokens == modern.prompt_eval_count
     assert automatic.usage.total_tokens == automatic.usage.prompt_tokens
     concurrent = asyncio.run(concurrent_sdk_requests(url, model, float_rows))
@@ -95,7 +93,7 @@ def verify(url, expected_backend, model):
                 prompt_tokens=automatic.usage.prompt_tokens, ollama_prompt_eval_count=modern.prompt_eval_count,
                 default_openai_encoding_sdk_decoded=True, explicit_float_max_error=maximum_error(automatic_rows, float_rows),
                 reduced_dimensions=256, vector_norms=[bench.norm(vector) for vector in float_rows],
-                ollama_max_error=modern_error, legacy_ollama_max_error=legacy_error,
+                ollama_max_error=modern_error,
                 raw_token_fixture=dict(tokens=[0, 10, 2], text="a", prompt_tokens=3, max_error=token_error),
                 concurrent=concurrent, health=health)
 

@@ -107,7 +107,9 @@ def main():
               ("--video-vae", ("minimax-h3", "minimax_h3_video_vae_fp16.safetensors")),
               ("--audio-vae", ("minimax-h3", "minimax_h3_audio_vae_fp32.safetensors")),
               ("env:TS_VIDEO_TOKENIZER", ("minimax-h3-tokenizer", "vocab.json")),
-              ("", ("minimax-h3-tokenizer", "merges.txt"))), plan="h3-" + variant)
+              ("", ("minimax-h3-tokenizer", "merges.txt")),
+              # The vision markers live only here: without it a keyframe or reference is refused.
+              ("", ("minimax-h3-tokenizer", "tokenizer_config.json"))), plan="h3-" + variant)
     for model in ("wan-turbo", "wan-base", "wan-a14b", "wan21-13b", "wan21-14b", "wan22-t2v-a14b", "wan22-i2v-a14b-base"):
         ti2v = model in ("wan-turbo", "wan-base")
         dual = model in ("wan-a14b", "wan22-t2v-a14b", "wan22-i2v-a14b-base")

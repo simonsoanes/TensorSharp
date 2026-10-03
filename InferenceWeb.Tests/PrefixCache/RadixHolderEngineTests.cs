@@ -39,7 +39,7 @@ public class RadixHolderEngineTests
     {
         var model = recurrent ? OracleFakes.R(8) : OracleFakes.S(8);
         using var engine = new InferenceEngine(model, Configuration());
-        Assert.Equal(PrefixCacheMode.Tree, engine.PrefixCacheMode);
+        Assert.True(engine.PrefixCacheActive);
         var first = Request("repeat", Tokens(32));
         await Run(engine, first);
         var prompt = first.PromptTokens.Concat(first.OutputTokens)
@@ -295,11 +295,11 @@ public class RadixHolderEngineTests
     [InlineData(true)]
     public void DisabledPublicCheckpoints_DoNotSplitPrefill_ButPreservePrivateBreakpoints(bool privateBreakpoint)
     {
-        const string publicSetting = "TS_PREFIX_CHECKPOINTS", retainedSetting = "TS_RETAINED_FUSED_CACHE";
+        const string publicSetting = "TS_PREFIX_CHECKPOINTS_MAX", retainedSetting = "TS_RETAINED_FUSED_CACHE_MAX";
         string? previousPublic = Environment.GetEnvironmentVariable(publicSetting);
         string? previousRetained = Environment.GetEnvironmentVariable(retainedSetting);
         Environment.SetEnvironmentVariable(publicSetting, "0");
-        Environment.SetEnvironmentVariable(retainedSetting, "1");
+        Environment.SetEnvironmentVariable(retainedSetting, null);
         try
         {
             using var model = OracleFakes.R(8);
@@ -452,7 +452,7 @@ public class RadixHolderEngineTests
     {
         SchedulerConfig cfg = Configuration(enabled);
         var pool = new BlockPool(cfg.NumBlocks, cfg.BlockSize, 64);
-        var scheduler = new ContinuousBatchScheduler(cfg, pool, model.KVStateFingerprint);
+        var scheduler = new ContinuousBatchScheduler(cfg, pool);
         var executor = new BatchExecutor(model, pool, scheduler);
         executor.InitializeRadixCache(cfg);
         if (executor.PrefixCheckpointsSupported) scheduler.EnablePrefixCheckpoints();
@@ -587,18 +587,16 @@ public class RadixHolderEngineTests
         Assert.Empty(model.RetainedPayloadKeys);
     }
 
-    [Theory]
-    [InlineData("TS_RETAINED_FUSED_CACHE", "0", "TS_PREFIX_CHECKPOINTS", "0")]
-    [InlineData("TS_RETAINED_FUSED_CACHE_MAX", "0", "TS_PREFIX_CHECKPOINTS_MAX", "0")]
-    public async Task CacheOverrides_DisableOwnedPayloadCopies(string privateSetting, string privateValue,
-        string publicSetting, string publicValue)
+    [Fact]
+    public async Task CacheOverrides_DisableOwnedPayloadCopies()
     {
+        const string privateSetting = "TS_RETAINED_FUSED_CACHE_MAX", publicSetting = "TS_PREFIX_CHECKPOINTS_MAX";
         string? previousPrivate = Environment.GetEnvironmentVariable(privateSetting);
         string? previousPublic = Environment.GetEnvironmentVariable(publicSetting);
         try
         {
-            Environment.SetEnvironmentVariable(privateSetting, privateValue);
-            Environment.SetEnvironmentVariable(publicSetting, publicValue);
+            Environment.SetEnvironmentVariable(privateSetting, "0");
+            Environment.SetEnvironmentVariable(publicSetting, "0");
             var model = OracleFakes.R(8);
             using var engine = new InferenceEngine(model, Configuration());
             await Run(engine, Request("seed", Tokens(32), shared: 16));
@@ -638,7 +636,7 @@ public class RadixHolderEngineTests
         using var model = OracleFakes.R(8);
         model.SpareBytes = 1; // The recurrent state alone needs 1,024 bytes.
         var pool = new BlockPool(32, 8, 64);
-        var scheduler = new ContinuousBatchScheduler(Configuration(), pool, model.KVStateFingerprint);
+        var scheduler = new ContinuousBatchScheduler(Configuration(), pool);
         var cache = new PrefixCacheCoordinator(model, pool, scheduler,
             model.GetPrefixCacheCapabilities(), NullLogger.Instance);
         var sequence = Request("prefix", Tokens(16), shared: 16);
@@ -658,7 +656,7 @@ public class RadixHolderEngineTests
     {
         using var model = OracleFakes.R(8);
         var pool = new BlockPool(32, 8, 64);
-        var scheduler = new ContinuousBatchScheduler(Configuration(), pool, model.KVStateFingerprint);
+        var scheduler = new ContinuousBatchScheduler(Configuration(), pool);
         var cache = new PrefixCacheCoordinator(model, pool, scheduler,
             model.GetPrefixCacheCapabilities(), NullLogger.Instance);
         for (int i = 0; i < 500; i++)

@@ -6,7 +6,7 @@
 |---|---|
 | Provider | NVIDIA |
 | GGUF architecture keys | `nemotron_h`, `nemotron_h_moe`, `nemotron_h_omni` |
-| Source class | [`NemotronModel`](../../TensorSharp.Models/Models/Nemotron/NemotronModel.cs) (legacy per-seq) + [`NemotronModel.BatchedForward.cs`](../../TensorSharp.Models/Models/Nemotron/NemotronModel.BatchedForward.cs) (`IBatchedPagedModel`) |
+| Source class | [`NemotronModel`](../../TensorSharp.Models/Models/Nemotron/NemotronModel.cs) (single-sequence) + [`NemotronModel.BatchedForward.cs`](../../TensorSharp.Models/Models/Nemotron/NemotronModel.BatchedForward.cs) (`IBatchedPagedModel`) |
 | Vision encoder | [`NemotronVisionEncoder`](../../TensorSharp.Models/Models/Nemotron/NemotronVisionEncoder.cs) (RADIO / v2_vl ViT) |
 | Image processor | [`NemotronImageProcessor`](../../TensorSharp.Models/Models/Nemotron/NemotronImageProcessor.cs) |
 | Audio frontend | [`NemotronAudioPreprocessor`](../../TensorSharp.Models/Models/Nemotron/NemotronAudioPreprocessor.cs) (Parakeet-style log-mel) |
@@ -15,7 +15,7 @@
 | Modalities | Text, image (Omni-class with `mmproj` loaded). Audio only when an audio companion GGUF carrying the Parakeet tower is loaded (§4.7); otherwise audio is **refused** (HTTP 400 / CLI error with `NemotronModel.AudioInputUnsupportedMessage`): the public Omni GGUFs ship no audio tower, only the RADIO vision tower in the `mmproj` (see §4.6). |
 | Thinking mode | Yes (`<think> ... </think>`) |
 | Tool calling | Yes (`<tool_call>{...}</tool_call>`); eligible for skills, the code tools and server-side [sub-agent delegation](../multi_agent.md) |
-| Batched / paged forward | **Default ON** — set `TS_NEMOTRON_BATCHED=0` to force the legacy per-sequence KV-swap path for A/B comparison. Per-slot Mamba2 conv + SSM state pool, paged K/V for attention layers. Optional native batched Mamba2 step kernel (`TS_NEMOTRON_MAMBA2_BATCHED_NATIVE=1`). See §11. |
+| Batched / paged forward | **Default ON** — `--no-continuous-batching` forces the per-sequence KV-swap path. Per-slot Mamba2 conv + SSM state pool, paged K/V for attention layers. Optional native batched Mamba2 step kernel (`TS_NEMOTRON_MAMBA2_BATCHED_NATIVE=1`). See §11. |
 | Output parser | `ChatMlOutputParser` |
 
 ## Downloads
@@ -590,9 +590,16 @@ near-peak vector throughput.
   boundaries rather than by rewinding: each captured KV block bundles the
   attention layers' K/V rows with every Mamba2 layer's conv and SSM state at
   the end of that block (`RequiresPerBlockCapture`), and the Radix prefix
-  cache (the default mode) restores the whole blocks a new prompt shares or
-  continues the resident cache when the prompt extends it exactly
-  (`NemotronModel.PrefixCache.cs`).
+  cache restores the whole blocks a new prompt shares or continues the resident
+  cache when the prompt extends it exactly (`NemotronModel.PrefixCache.cs`).
+- Concurrent requests run on the batched route, whose pages hold attention K/V
+  only: the recurrent state lives in a per-request Mamba2 slot. A finished
+  batched sequence's slot is kept beside its pool blocks as its conversation's
+  end state (`PrefixCacheCapabilities.PagedEndStates`) and donated at exact
+  length to the next turn. Before, both were freed, and every conversation that
+  ran beside another re-prefilled its whole history each turn: eight parallel
+  Nemotron 3.5 Lightning conversations reused 0 tokens; now each reuses its
+  whole previous turn, and the run finishes 12% sooner (176 s against 201 s).
 
 ## 11. Batched / paged forward (continuous batching)
 
@@ -601,8 +608,8 @@ Nemotron-H implements `IBatchedPagedModel.ForwardBatch`
 that runs through the shared `InferenceEngine` continuous-batching stack
 ([`docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md`](../PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md))
 by default — concurrent requests can only be served truly in parallel
-through the batched path. Set `TS_NEMOTRON_BATCHED=0` to force the
-legacy per-sequence KV-swap fallback for A/B comparison.
+through the batched path. `--no-continuous-batching` forces the
+per-sequence KV-swap path.
 
 Nemotron-H is the most demanding of the batched ports because it
 combines **three different layer types** — Mamba2 SSM, attention-only,
@@ -654,11 +661,9 @@ read the state from before the first decoded token, so concurrent requests
 (which hand sequences between the per-sequence and batched paths) produced
 different greedy output from the same requests served alone - on the 8B at
 concurrency 4 answers such as `101`, `1000000...` and repetition loops. The
-legacy single-sequence path uses its own decode-cache slot
-(`LegacyMamba2Slot`), so a batched sequence on slot 0 can no longer overwrite
-its device state. A native library that predates the export makes the
-decode kernel download its state every token instead (correct, slower) and
-says so once on stderr.
+single-sequence path uses its own decode-cache slot
+(`SoloMamba2Slot`), so a batched sequence on slot 0 can no longer overwrite
+its device state.
 
 **Concurrency hand-offs.** Three more defects made requests of a concurrent
 wave answer differently from the same request served alone (on the 8B,
@@ -678,7 +683,7 @@ content), and none had anything to do with kernel numerics:
   and the outgoing owner sampled its next token from the newcomer's logits.
   `BatchExecutor.EnsureOwnership` now gives the outgoing owner its own copy.
   This one is model-independent and was also what broke
-  `TS_NEMOTRON_BATCHED=0` at concurrency.
+  the per-sequence path at concurrency.
 - *Uncleared paged-attention sessions.* `TSGgml_PagedAttentionForward`
   caches one graph per query count and power-of-two K/V bucket and uploads
   only the leading `seq_len` rows; the rest of the bucket is masked. The
@@ -712,9 +717,8 @@ dispatch plus batched `ssm_in` / `ssm_out` projections. Exposed through
 
 Vision and audio embeddings inject directly into the batched
 `[numTokens, hidden]` tensor via the same row-wise
-`InjectMultimodalEmbeddings` path the legacy forward uses.
-`SupportsBatchedMultimodal` returns true while the batched path is
-active (i.e. unless `TS_NEMOTRON_BATCHED=0` is set).
+`InjectMultimodalEmbeddings` path the per-sequence forward uses, so
+`SupportsBatchedMultimodal` is true.
 
 ### Verified correctness and throughput
 
@@ -722,7 +726,7 @@ active (i.e. unless `TS_NEMOTRON_BATCHED=0` is set).
   ([`NemotronBatchedCorrectnessTests`](../../InferenceWeb.Tests/NemotronBatchedCorrectnessTests.cs)).
 - Concurrent requests (all at once, joining while the first one is already
   decoding, and a four-client worker pool) on the per-sequence path
-  (`TS_NEMOTRON_BATCHED=0`) produce exactly the greedy tokens of each request
+  (`--no-continuous-batching`) produce exactly the greedy tokens of each request
   served alone: that path runs the same kernels and swaps state in and out.
   On the batched path every token chosen is a near-top token when the same
   history is replayed through the single-sequence forward. Exact token
@@ -753,11 +757,6 @@ for single-sequence decode. From `n=2` onward the batched path wins
 across the board. `TS_NEMOTRON_MAMBA2_BATCHED_NATIVE=1` extends the
 win to multi-batch decode by replacing the C# Mamba2 inner loop with the
 native NEON kernel.
-
-A latent bug was also fixed during the port: `s_nemoBatchedOptIn` used to
-be `static readonly`, which captured the env var at class-load time —
-tests setting `TS_NEMOTRON_BATCHED=1` at runtime never actually toggled
-the path. Now exposed as a method getter (same pattern as Qwen 3.5).
 
 ### Speculative decoding is refused
 

@@ -122,11 +122,56 @@ public class HostLoadRefusalProcessTests : IDisposable
         }
     }
 
+    // ---- malformed values and removed variables ---------------------------------------
+    // The server applies most option families after Build, and those appliers ran outside
+    // its configuration-error handler: a malformed --kv-cache-dtype, --spec-draft,
+    // --n-cpu-moe, --gpu-device or --prefill-chunk-size, a missing --draft-model file, and a
+    // removed speculation variable (TS_DSV4_DSPARK, TS_MTP_SPEC ...) each aborted it with a
+    // stack trace, exit code 134. The CLI reported every one of them already.
+
+    public static IEnumerable<object[]> MalformedOptionLines() => new[]
+    {
+        new object[] { new[] { "--kv-cache-dtype", "bogus" }, "--kv-cache-dtype", true },
+        new object[] { new[] { "--spec-draft", "abc" }, "--spec-draft", true },
+        new object[] { new[] { "--n-cpu-moe", "abc" }, "--n-cpu-moe", true },
+        new object[] { new[] { "--gpu-device", "abc" }, "--gpu-device", true },
+        new object[] { new[] { "--draft-model", "missing-drafter.gguf" }, "--draft-model", true },
+        new object[] { new[] { "--prefill-chunk-size", "abc" }, "--prefill-chunk-size", false },   // server only
+    };
+
+    [Theory]
+    [MemberData(nameof(MalformedOptionLines))]
+    public void Hosts_MalformedOptionValue_IsAConfigurationError(string[] args, string option, bool cliToo)
+    {
+        string missing = Path.Combine(_dir, "must-not-be-loaded.gguf");
+        AssertOneConfigurationErrorLine(RunServerWith(missing, args), option);
+        if (cliToo)
+            AssertOneConfigurationErrorLine(RunCliWith(missing, args), option);
+    }
+
+    [Theory]
+    [InlineData("TS_ENCODER_YIELD", "0", "was removed:")]                                   // RemovedCliFlags
+    [InlineData("TS_DSV4_DSPARK", "drafter.gguf", "was removed; set TS_SPEC_DRAFT_MODEL instead")] // SpeculationEnvVars
+    [InlineData("TS_MTP_SPEC", "1", "was removed; set TS_SPEC instead")]
+    public void BothHosts_RemovedEnvironmentVariable_IsAConfigurationError(string name, string value, string advice)
+    {
+        string missing = Path.Combine(_dir, "must-not-be-loaded.gguf");
+        var environment = new Dictionary<string, string> { [name] = value };
+        foreach (HostRun run in new[] { RunServerWith(missing, Array.Empty<string>(), environment: environment),
+                                         RunCliWith(missing, Array.Empty<string>(), environment) })
+        {
+            string line = AssertOneConfigurationErrorLine(run, name);
+            Assert.Contains(advice, line, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void BothHosts_RefuseLocalOnlyArchitectureWithoutWaitingForPeers()
     {
+        // The architecture is refused before the backend is judged, so a backend every machine has keeps the
+        // hosts' own backend selection (which rejects ggml_cuda where there is no CUDA) out of the way.
         string model = GlmDsaSyntheticModelBuilder.Write(Path.Combine(_dir, "local-glm.gguf"));
-        string[] args = { "--backend", "ggml_cuda", "--tp", "2", "--tp-node-id", "0",
+        string[] args = { "--backend", "ggml_cpu", "--tp", "2", "--tp-node-id", "0",
             "--tp-peers", "127.0.0.1:49500,127.0.0.1:49501" };
         foreach (HostRun run in new[] { RunCliWith(model, args), RunServerWith(model, args) })
         {
@@ -218,6 +263,14 @@ public class HostLoadRefusalProcessTests : IDisposable
 
     private static void AssertConfigurationError(HostRun run, string messageFragment)
     {
+        string line = AssertOneConfigurationErrorLine(run, messageFragment);
+        Assert.Contains("Qwen-Image-2.1", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>Exit code 1 and exactly one stderr line, "Configuration error: ..." naming
+    /// <paramref name="messageFragment"/>: never a stack trace, never "Unknown option".</summary>
+    private static string AssertOneConfigurationErrorLine(HostRun run, string messageFragment)
+    {
         string[] lines = run.Stderr
             .Split('\n')
             .Select(l => l.TrimEnd('\r'))
@@ -229,9 +282,9 @@ public class HostLoadRefusalProcessTests : IDisposable
         Assert.True(lines.Length == 1, context);
         Assert.StartsWith("Configuration error: ", lines[0], StringComparison.Ordinal);
         Assert.Contains(messageFragment, lines[0], StringComparison.Ordinal);
-        Assert.Contains("Qwen-Image-2.1", lines[0], StringComparison.Ordinal);
         Assert.DoesNotContain("Unknown option", lines[0], StringComparison.Ordinal);
         Assert.DoesNotContain("Unhandled exception", run.Stdout + run.Stderr, StringComparison.Ordinal);
+        return lines[0];
     }
 
     /// <summary>
@@ -306,27 +359,28 @@ public class HostLoadRefusalProcessTests : IDisposable
     private HostRun RunServer(string modelPath, string logLevel = "Information") =>
         RunServerWith(modelPath, Array.Empty<string>(), logLevel);
 
-    private HostRun RunServerWith(string modelPath, string[] extra, string logLevel = "Information")
+    private HostRun RunServerWith(string modelPath, string[] extra, string logLevel = "Information",
+        IReadOnlyDictionary<string, string>? environment = null)
     {
         string dll = HostAssembly("TensorSharp.Server.Host", "TensorSharp.Server.Host.dll");
-        return Run(dll, logLevel,
+        return Run(dll, logLevel, environment,
             new[] { "--model", modelPath, "--backend", "cpu", "--no-webui", "--no-skills", "--no-prefix-cache" }
                 .Concat(extra).ToArray());
     }
 
     private HostRun RunCli(string modelPath) => RunCliWith(modelPath, Array.Empty<string>());
 
-    private HostRun RunCliWith(string modelPath, string[] extra)
+    private HostRun RunCliWith(string modelPath, string[] extra, IReadOnlyDictionary<string, string>? environment = null)
     {
         string dll = HostAssembly("TensorSharp.Cli", "TensorSharp.Cli.dll");
         string input = Path.Combine(_dir, "prompt.txt");
         File.WriteAllText(input, "hello");
-        return Run(dll, "Information",
+        return Run(dll, "Information", environment,
             new[] { "--model", modelPath, "--backend", "cpu", "--input", input, "--log-dir", Path.Combine(_dir, "cli-logs") }
                 .Concat(extra).ToArray());
     }
 
-    private HostRun Run(string dll, string logLevel, params string[] args)
+    private HostRun Run(string dll, string logLevel, IReadOnlyDictionary<string, string>? environment, params string[] args)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -345,8 +399,10 @@ public class HostLoadRefusalProcessTests : IDisposable
         // Nothing inherited from the test run may change what the host loads.
         foreach (string name in new[] { "KV_CACHE_DTYPE", "MAX_CONTEXT", "TENSORSHARP_TP_DEGREE",
                      "TENSORSHARP_LAYER_SPLIT_DEGREE", "TENSORSHARP_TP_NODE_ID", "TENSORSHARP_TP_PEERS",
-                     "TS_SPEC_DRAFT_MODEL", "TS_MTP_DRAFT_MODEL" })
+                     "TS_SPEC_DRAFT_MODEL" })
             startInfo.Environment.Remove(name);
+        foreach ((string name, string value) in environment ?? new Dictionary<string, string>())
+            startInfo.Environment[name] = value;
 
         using var process = new Process { StartInfo = startInfo };
         var stdout = new StringBuilder();

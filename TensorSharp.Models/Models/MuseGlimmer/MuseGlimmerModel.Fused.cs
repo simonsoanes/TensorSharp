@@ -26,7 +26,7 @@
 // The graph is numerically the same chain as TransformerBlock: identical op
 // order, identical epsilons (pre-norms at Config.Eps, post-norms at 1e-8), the
 // same NORM-flavour RoPE on sliding-window layers only, the same attention
-// output gate. TS_MUSE_GLIMMER_FUSED=0 forces the per-op path for A/B.
+// output gate.
 // ---------------------------------------------------------------------------
 using System;
 using System.Diagnostics;
@@ -88,9 +88,6 @@ namespace TensorSharp.Models
                 return a != null && a.TokEmbd != IntPtr.Zero;
             }
         }
-
-        private static readonly bool FusedForwardEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_MUSE_GLIMMER_FUSED"), "0", StringComparison.Ordinal);
 
         // ====================================================================
         // Layer trace (TS_MUSE_GLIMMER_LAYER_TRACE=1) - diagnostics only.
@@ -202,17 +199,12 @@ namespace TensorSharp.Models
         /// GgmlCpu is included the same way GPT-OSS and Gemma 4 include it for
         /// their whole-model kernels: the per-op path is ~940 synchronous ggml
         /// graph submissions per decoded token, each of which used to spawn a
-        /// disposable 4-thread pool. TS_MUSE_GLIMMER_FUSED_CPU=0 restores the
-        /// per-op CPU path (the historical default) if a regression appears.
+        /// disposable 4-thread pool.
         /// </summary>
-        private static readonly bool FusedCpuEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_MUSE_GLIMMER_FUSED_CPU"), "0", StringComparison.Ordinal);
-
         private bool CanUseFusedForward =>
-            FusedForwardEnabled && !IsTensorParallel &&
+            !IsTensorParallel &&
             (_backend == BackendType.GgmlCuda || _backend == BackendType.GgmlVulkan ||
-             _backend == BackendType.GgmlMetal ||
-             (_backend == BackendType.GgmlCpu && FusedCpuEnabled));
+             _backend == BackendType.GgmlMetal || _backend == BackendType.GgmlCpu);
 
         /// <summary>
         /// Build (or rebuild) the fused kernel's pointer tables. Every 2D projection
@@ -305,12 +297,7 @@ namespace TensorSharp.Models
             // mmap - binding token_embd pins no second copy on unified memory. On a
             // discrete card with a separate output.weight it would pin ~1.1 GB and
             // evict layer weights (measured 18.5 -> 16.1 tok/s on a 16 GB card).
-            // TS_MUSE_GLIMMER_INGRAPH_EMBED=1 forces it on, =0 forces it off (A/B).
-            string ingraphEnv = Environment.GetEnvironmentVariable("TS_MUSE_GLIMMER_INGRAPH_EMBED");
-            bool wantInGraphEmbed = string.Equals(ingraphEnv, "0", StringComparison.Ordinal)
-                ? false
-                : _hasTiedOutput || _backend == BackendType.GgmlMetal || _backend == BackendType.GgmlCpu ||
-                  string.Equals(ingraphEnv, "1", StringComparison.Ordinal);
+            bool wantInGraphEmbed = _hasTiedOutput || _backend == BackendType.GgmlMetal || _backend == BackendType.GgmlCpu;
             if (wantInGraphEmbed && _quantWeights.TryGetValue("token_embd.weight", out var tokEmbd))
             {
                 a.TokEmbd = tokEmbd.CacheKey;

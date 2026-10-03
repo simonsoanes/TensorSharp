@@ -114,6 +114,11 @@ public sealed class KvStateFingerprintNonEmptyTests
         string nativeDsa = GlmFingerprint("glm-dsa", trunkLayers: 4, native: true);
         Assert.Contains("dtype=f16", nativeDsa);
         Assert.NotEqual(dsa, nativeDsa);
+
+        // The direct-CUDA engine holds F16 rows too, but its own layout: the executor is named.
+        string cudaNext = GlmFingerprint("glm5next", trunkLayers: 4, native: true, executorKind: "cuda");
+        Assert.Contains("exec=cuda", cudaNext);
+        Assert.NotEqual(GlmFingerprint("glm5next", trunkLayers: 4, native: true), cudaNext);
     }
 
     [GgmlFact(BackendType.GgmlCpu)]
@@ -168,7 +173,7 @@ public sealed class KvStateFingerprintNonEmptyTests
         return model.KVStateFingerprint;
     }
 
-    private static string GlmFingerprint(string arch, int trunkLayers, bool native)
+    private static string GlmFingerprint(string arch, int trunkLayers, bool native, string executorKind = "native")
     {
         var model = (GlmDsaModel)RuntimeHelpers.GetUninitializedObject(typeof(GlmDsaModel));
         SetField(typeof(ModelBase), model, "<Config>k__BackingField", new ModelConfig
@@ -180,17 +185,44 @@ public sealed class KvStateFingerprintNonEmptyTests
         SetField(typeof(GlmDsaModel), model, "_numTrunkLayers", trunkLayers);
         SetField(typeof(GlmDsaModel), model, "_numNextnLayers", 1);
         SetField(typeof(GlmDsaModel), model, "_mtpLayer", -1);
-        // Only the fingerprint reads this, and the instance is never disposed, so a
-        // non-zero sentinel never reaches the native side.
-        SetField(typeof(GlmDsaModel), model, "_native", native ? new IntPtr(1) : IntPtr.Zero);
+        // Only the fingerprint reads the executor (its kind), and the instance is never disposed.
+        SetField(typeof(GlmDsaModel), model, "_exec", native ? new KindOnlyExecutor(executorKind) : null);
         try
         {
             return model.KVStateFingerprint;
         }
         finally
         {
-            SetField(typeof(GlmDsaModel), model, "_native", IntPtr.Zero);
+            SetField(typeof(GlmDsaModel), model, "_exec", null);
         }
+    }
+
+    /// <summary>An executor that answers only its kind: the fingerprint reads nothing else.</summary>
+    private sealed class KindOnlyExecutor : IGlmExecutor
+    {
+        public KindOnlyExecutor(string kind) => Kind = kind;
+        public string Kind { get; }
+        public int VocabSize => throw new NotSupportedException();
+        public int ContextSize => throw new NotSupportedException();
+        public int NPast => throw new NotSupportedException();
+        public bool HasDraftHead => false;
+        public bool Forward(int[] tokens, float[] logitsOut) => throw new NotSupportedException();
+        public bool ResetChecked() => throw new NotSupportedException();
+        public bool Rewind(int nPast) => throw new NotSupportedException();
+        public int SlotAlloc() => throw new NotSupportedException();
+        public bool SetActiveSlot(int slot) => throw new NotSupportedException();
+        public bool SlotFree(int slot) => throw new NotSupportedException();
+        public bool SetReclaimableSlots(int[] slots) => throw new NotSupportedException();
+        public int TakeReclaimedSlots(int[] buffer) => throw new NotSupportedException();
+        public bool ForwardBatchedDecode(int[] slots, int[] tokens, int[] positions, float[] logits) => throw new NotSupportedException();
+        public bool QueueVisionRows(float[] rows, int nRows, int index) => throw new NotSupportedException();
+        public void ClearVisionRows() => throw new NotSupportedException();
+        public bool SpecForward(int[] tokens, float[] hOut, float[] logitsOut, bool allLogitsRows) => throw new NotSupportedException();
+        public bool DraftStep(int token, float[] hPrev, int pos, float[] logitsOut, float[] hOut) => throw new NotSupportedException();
+        public bool DraftCatchUp(int[] tokens, float[] hRows, int startPos) => throw new NotSupportedException();
+        public bool KdaStateCapture() => throw new NotSupportedException();
+        public int KdaStateRestore() => throw new NotSupportedException();
+        public void Dispose() { }
     }
 
     private static void SetField(Type owner, object target, string name, object value)

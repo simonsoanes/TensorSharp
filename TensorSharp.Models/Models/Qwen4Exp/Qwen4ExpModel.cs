@@ -99,11 +99,12 @@ namespace TensorSharp.Models
             : base(ggufPath, backend, tpDegree, tpGroup, layerSplitDegree)
         {
             Config = new ModelConfig { Architecture = ArchitectureId };
-            ParseBaseConfig();
-            ParseQwen4ExpConfig();
-            ParseTokenizer();
             try
             {
+                ParseBaseConfig();
+                ParseQwen4ExpConfig();
+                ValidateQwen4ExpTensorParallelMetadata();
+                ParseTokenizer();
                 if (!string.IsNullOrWhiteSpace(draftGgufPath))
                     LoadMtpDraftWeights(draftGgufPath);
 
@@ -119,20 +120,26 @@ namespace TensorSharp.Models
 
                 LoadWeights();
                 VerifyQwen4ExpTensors();
+                PreparePleTableAccess();
                 // The layer -> GPU map has to exist BEFORE the preload: that is what
                 // decides which device each weight is uploaded to, and the preload frees
                 // the host copy immediately afterwards so there is no second chance.
                 BuildLayerDeviceMap();
-                PrepareCudaQuantizedWeightsForInference();
+                PrepareQwen4ExpTensorParallel();
+                if (IsTensorParallel) PrepareCudaQuantizedWeightsForInferenceTP();
+                else PrepareCudaQuantizedWeightsForInference();
 
                 int maxContextLength = ResolveConfiguredContextLength();
                 int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
                 InitCaches(initialCacheLength, maxContextLength);
+                PlanExpertPlacement();
                 FinalizeMtpHead();
             }
             catch
             {
-                DisposeMtpHead();
+                // A constructor that throws has no caller to release its GGUF
+                // mapping, partial shards, device buffers or TP worker group.
+                Dispose();
                 throw;
             }
         }
@@ -630,6 +637,15 @@ namespace TensorSharp.Models
 
             return base.ShouldPreloadCudaQuantWeightToDevice(weightName);
         }
+
+        /// <summary>
+        /// The token span reads its K/V cache as F16 or F32 only (FusedGraphKvTypeId), the QSA
+        /// key-cache copies assume 2 or 4 bytes an element, and with QSA layers the span is the
+        /// only path - a q8_0 / q4_0 cache left the model unable to run its first forward.
+        /// TensorAgent's desktop default is q8_0, so this is not hypothetical. Declining it here
+        /// loads f16 with a line on stderr (ModelBase.RefuseUnsupportedBlockQuantizedKvCache).
+        /// </summary>
+        protected override bool SupportsBlockQuantizedKvCache => false;
 
         /// <summary>A full-attention layer runs QSA when it has both an indexer and a
         /// block size; either missing means plain dense attention.</summary>

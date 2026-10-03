@@ -15,6 +15,13 @@ public sealed class CatalogTests
             "gemma-4-12b-iq2m",
             "bonsai-2-27b-ptq1-0",
             "qwen3.5-9b-iq4xs",
+            "qwen3.8-27b-q4kxl",
+            "muse-glimmer-30b-q4kxl",
+            "qwen3.8-flash-next-q2kxl",
+            "qwen3.8-flash-next-iq1m",
+            "qwen-image-2.1-q4km",
+            "minimax-h3-fl2va-q4k",
+            "minimax-h3-ref2va-q4k",
         };
 
         Assert.Equal(expected, ModelCatalog.BuiltIn.Select(m => m.Id).ToArray());
@@ -43,14 +50,33 @@ public sealed class CatalogTests
                     Assert.StartsWith("https://huggingface.co/", f.Url);
                     Assert.EndsWith("/resolve/main/" + f.Url.Split("/resolve/main/")[1], f.Url);
                 }
-                Assert.True(f.Bytes > 1_000_000, $"{m.Id}/{f.FileName}: size {f.Bytes}");
+                // A size read from a pointer file (~130 bytes) instead of the object is the
+                // mistake this catches. Loose tokenizer files are genuinely small - MiniMax-H3's
+                // tokenizer_config.json is 11 kB - so they are held to a kilobyte instead.
+                Assert.True(f.Bytes > (f.Role == CatalogFileRole.Tokenizer ? 1_000 : 1_000_000),
+                    $"{m.Id}/{f.FileName}: size {f.Bytes}");
                 Assert.Matches("^[0-9a-f]{64}$", f.Sha256);
                 Assert.False(f.FileName.Contains('/'), $"{m.Id}: file names are bare ({f.FileName})");
             }
             // Keep the recognized tiers narrow so a typo cannot silently expose an
-            // entry on an unintended device class. A future 24 GB entry would remain
-            // hidden from current phones while still using the same gating mechanism.
-            Assert.Contains(m.MinDeviceMemoryGB, new[] { 6, 8, 12, 16, 24 });
+            // entry on an unintended device class. 24, 32 and 48 are the desktop's: no
+            // phone or tablet reaches them, so those entries stay off every one.
+            Assert.Contains(m.MinDeviceMemoryGB, new[] { 6, 8, 12, 16, 24, 32, 48 });
+            // A later shard of a split GGUF is required and carries shard 1's gguf-split
+            // name with its own number: the engine finds it beside shard 1 by that name.
+            var shards = m.Files.Where(f => f.Role == CatalogFileRole.WeightsShard).ToList();
+            if (shards.Count > 0)
+            {
+                Match first = Regex.Match(m.Weights.FileName, @"^(?<prefix>.+)-00001-of-(?<count>\d{5})\.gguf$");
+                Assert.True(first.Success, $"{m.Id}: shards need a -00001-of-NNNNN.gguf first file");
+                Assert.Equal(int.Parse(first.Groups["count"].Value), shards.Count + 1);
+                for (int i = 0; i < shards.Count; i++)
+                {
+                    Assert.False(shards[i].Optional, $"{m.Id}: shard {i + 2} is optional");
+                    Assert.Equal($"{first.Groups["prefix"].Value}-{i + 2:D5}-of-{first.Groups["count"].Value}.gguf",
+                        shards[i].FileName);
+                }
+            }
             Assert.NotEmpty(m.License);
         }
     }
@@ -155,10 +181,12 @@ public sealed class CatalogTests
                 $"{m.Id} is offered at {m.MinDeviceMemoryGB} GB, which grants about "
                 + $"{budget / 1e9:F1} GB, but charges about {anonymous / 1e9:F1} GB of anonymous memory");
 
+            // Every shard counts (the first file alone is a split GGUF's metadata), less only
+            // what the entry declares the engine pages from disk on demand.
             double ceiling = WeightsResidencyCeiling(m.MinDeviceMemoryGB);
-            Assert.True(m.Weights.Bytes < ceiling,
-                $"{m.Id} is offered at {m.MinDeviceMemoryGB} GB but its weights are "
-                + $"{m.Weights.Bytes / 1e9:F1} GB, past the {ceiling / 1e9:F1} GB that device can "
+            Assert.True(m.ResidentWeightsBytes < ceiling,
+                $"{m.Id} is offered at {m.MinDeviceMemoryGB} GB but its resident weights are "
+                + $"{m.ResidentWeightsBytes / 1e9:F1} GB, past the {ceiling / 1e9:F1} GB that device can "
                 + "hold; it would fault every token from flash");
         }
     }
@@ -175,12 +203,23 @@ public sealed class CatalogTests
                 Assert.True(EstimatedAnonymous(m) < JetsamBudget(deviceGB),
                     $"a {deviceGB} GB device is offered {m.Id}, which charges about "
                     + $"{EstimatedAnonymous(m) / 1e9:F1} GB against a {JetsamBudget(deviceGB) / 1e9:F1} GB budget");
-                Assert.True(m.Weights.Bytes < WeightsResidencyCeiling(deviceGB),
-                    $"a {deviceGB} GB device is offered {m.Id}, whose {m.Weights.Bytes / 1e9:F1} GB of "
+                Assert.True(m.ResidentWeightsBytes < WeightsResidencyCeiling(deviceGB),
+                    $"a {deviceGB} GB device is offered {m.Id}, whose {m.ResidentWeightsBytes / 1e9:F1} GB of "
                     + $"weights exceed the {WeightsResidencyCeiling(deviceGB) / 1e9:F1} GB it can hold");
             }
         }
     }
+
+    private static readonly string[] DesktopOnly =
+    {
+        "qwen3.8-27b-q4kxl",
+        "muse-glimmer-30b-q4kxl",
+        "qwen3.8-flash-next-q2kxl",
+        "qwen3.8-flash-next-iq1m",
+        "qwen-image-2.1-q4km",
+        "minimax-h3-fl2va-q4k",
+        "minimax-h3-ref2va-q4k",
+    };
 
     [Fact]
     public void DeviceTiersHideTheCatalogBelowTwelveGbAndHoldBonsai2ForSixteenGb()
@@ -188,11 +227,178 @@ public sealed class CatalogTests
         Assert.Empty(ModelCatalog.ForDevice(8));
         // Bonsai 2 27B is the one 16 GB entry: its repacked weights do not fit a 12 GB phone.
         Assert.Equal(
-            ModelCatalog.BuiltIn.Where(m => m.Id != "bonsai-2-27b-ptq1-0").Select(m => m.Id),
+            ModelCatalog.BuiltIn.Where(m => m.Id != "bonsai-2-27b-ptq1-0" && !DesktopOnly.Contains(m.Id)).Select(m => m.Id),
             ModelCatalog.ForDevice(12).Select(m => m.Id));
         Assert.Equal(
-            ModelCatalog.BuiltIn.Select(m => m.Id),
+            ModelCatalog.BuiltIn.Where(m => !DesktopOnly.Contains(m.Id)).Select(m => m.Id),
             ModelCatalog.ForDevice(16).Select(m => m.Id));
+    }
+
+    /// <summary>
+    /// Qwen3.8 27B, Muse-Glimmer 30B and Qwen-Image 2.1 are offered only where a Mac's
+    /// memory exists (no iPhone or iPad reaches 24 GB): the two chat models from 32 GB,
+    /// the image model from 24. See <see cref="EachDesktopEntryFitsItsTierBesideMacOS"/>
+    /// for the measurements behind each number.
+    /// </summary>
+    [Theory]
+    [InlineData("qwen3.8-27b-q4kxl", 32)]
+    [InlineData("muse-glimmer-30b-q4kxl", 32)]
+    [InlineData("qwen-image-2.1-q4km", 24)]
+    [InlineData("minimax-h3-fl2va-q4k", 32)]
+    [InlineData("minimax-h3-ref2va-q4k", 32)]
+    [InlineData("qwen3.8-flash-next-q2kxl", 48)]
+    [InlineData("qwen3.8-flash-next-iq1m", 32)]
+    public void TheDesktopTiersHoldTheModelsNoPhoneCanRunWell(string id, int tier)
+    {
+        CatalogModel model = Assert.IsType<CatalogModel>(ModelCatalog.Find(id));
+        Assert.Equal(tier, model.MinDeviceMemoryGB);
+        Assert.Contains(id, DesktopOnly);
+        Assert.DoesNotContain(ModelCatalog.ForDevice(16), m => m.Id == id);
+        Assert.Contains(ModelCatalog.ForDevice(tier), m => m.Id == id);
+        Assert.Contains(ModelCatalog.ForDevice(48), m => m.Id == id);
+        if (tier > 24)
+            Assert.DoesNotContain(ModelCatalog.ForDevice(24), m => m.Id == id);
+        if (tier > 32)
+            Assert.DoesNotContain(ModelCatalog.ForDevice(32), m => m.Id == id);
+    }
+
+    /// <summary>
+    /// Paging weights from disk is a property of one architecture's engine, not a way to
+    /// fit any big file: only a mixture of experts on a desktop tier may declare it, and
+    /// never for the whole file.
+    /// </summary>
+    [Fact]
+    public void OnlyADesktopMixtureOfExpertsDeclaresWeightsPagedFromDisk()
+    {
+        var approved = new Dictionary<string, int>
+        {
+            ["qwen3.8-flash-next-q2kxl"] = 48,
+            ["qwen3.8-flash-next-iq1m"] = 32,
+        };
+        foreach (CatalogModel m in ModelCatalog.BuiltIn.Where(m => m.WeightsPagedFromDiskBytes != 0))
+        {
+            Assert.Equal(CatalogArchitectureKind.MixtureOfExperts, m.Kind);
+            Assert.True(approved.TryGetValue(m.Id, out int tier), $"{m.Id} has no approved paging tier");
+            Assert.Equal(tier, m.MinDeviceMemoryGB);
+            Assert.InRange(m.WeightsPagedFromDiskBytes, 1, m.WeightsBytes - 1);
+        }
+        Assert.Equal(approved.Keys.OrderBy(id => id),
+            ModelCatalog.BuiltIn.Where(m => m.WeightsPagedFromDiskBytes != 0).Select(m => m.Id).OrderBy(id => id));
+    }
+
+    /// <summary>The residency checks read every shard: a split file that declares nothing paged
+    /// is held to its whole size, not to its 11 MB first file.</summary>
+    [Fact]
+    public void ASplitEntryIsHeldToAllItsShards()
+    {
+        CatalogModel paged = ModelCatalog.Find("qwen3.8-flash-next-q2kxl")!;
+        CatalogModel undeclared = paged with { WeightsPagedFromDiskBytes = 0 };
+        Assert.Equal(78_869_128_864, undeclared.ResidentWeightsBytes);
+        Assert.True(undeclared.ResidentWeightsBytes > WeightsResidencyCeiling(undeclared.MinDeviceMemoryGB));
+        Assert.True(paged.ResidentWeightsBytes < WeightsResidencyCeiling(paged.MinDeviceMemoryGB));
+    }
+
+    [Fact]
+    public void ADesktopIsOfferedEverythingASmallerDeviceIs()
+    {
+        Assert.Equal(ModelCatalog.BuiltIn.Select(m => m.Id), ModelCatalog.ForDevice(48).Select(m => m.Id));
+    }
+
+    /// <summary>
+    /// What each desktop entry needs, MEASURED in the Mac app on 2026-09-30 (Apple M5 Pro,
+    /// 48 GB, ggml_metal): the mapped files the model reads while it works, and the app's
+    /// footprint at its highest. A Mac has no jetsam to kill the app, so nothing else in
+    /// this file checks a desktop entry; but a dense model reads every weight for every
+    /// token, and once the weights cannot stay resident beside the app and macOS, every
+    /// token pages them back in from disk.
+    /// </summary>
+    private static readonly Dictionary<string, (double ResidentFilesGB, double FootprintGB, string How)> MeasuredOnAMac = new()
+    {
+        ["qwen3.8-27b-q4kxl"] = (17.56, 8.8, "chat-e2e.py's seven scenarios with the projector, LeanCaches"),
+        ["muse-glimmer-30b-q4kxl"] = (15.88, 10.9, "chat-e2e.py's seven scenarios with the projector, LeanCaches"),
+        // The DiT stays mapped through the denoise; the text encoder is released first.
+        ["qwen-image-2.1-q4km"] = (4.19, 14.3, "an edit at 1248x832, 40 steps (the CLI's peak footprint)"),
+        // The largest stage is the 18.2 GB text encoder: the denoiser and the VAEs kept from the
+        // previous clip are taken off the device before it runs (MiniMaxH3Pipeline), and wired
+        // memory peaked at 20 GB with the decode (denoiser + video VAE) on top of the system's.
+        // A photo (keyframe or reference) is what takes the footprint to its highest: the
+        // video VAE's encoder converts its kernels to F32 in managed memory.
+        ["minimax-h3-fl2va-q4k"] = (18.22, 2.24, "chat-e2e.py's film and animate in the Mac app, 22 frames, 20 steps"),
+        ["minimax-h3-ref2va-q4k"] = (18.22, 2.23, "chat-e2e.py's reference in the Mac app, 22 frames, 20 steps"),
+        // Measured 2026-10-01 in the Debug Mac app: the files are what stays resident (the dense
+        // half and the 15 layers' experts the engine keeps on the GPU); the rest is read from the
+        // SSD (CatalogModel.WeightsPagedFromDiskBytes). The footprint is phys_footprint_peak over
+        // the warm-up of the 7.2k-token agent prompt and chat-e2e.py's six text scenarios.
+        ["qwen3.8-flash-next-q2kxl"] = (18.34, 7.31, "chat-e2e.py's text scenarios in the Mac app, phys_footprint_peak"),
+    };
+
+    // IQ1_M's 32 GB tier was validated on Windows with 16 GB CUDA VRAM and SSD paging.
+    // It has no measured Mac footprint; do not present the Windows evidence as Mac data.
+    private static readonly string[] ValidatedOnWindowsOnly = { "qwen3.8-flash-next-iq1m" };
+
+    [Fact]
+    public void DesktopValidationScopesCoverEachEntryWithoutInventingMacMeasurements()
+    {
+        Assert.Empty(MeasuredOnAMac.Keys.Intersect(ValidatedOnWindowsOnly));
+        Assert.Equal(DesktopOnly.OrderBy(id => id),
+            MeasuredOnAMac.Keys.Concat(ValidatedOnWindowsOnly).OrderBy(id => id));
+        Assert.All(ValidatedOnWindowsOnly, id => Assert.True(ModelCatalog.Find(id)!.Experimental));
+    }
+
+    /// <summary>What macOS and the rest of a desktop keep for themselves.</summary>
+    private const double MacOsGB = 5.0;
+
+    [Fact]
+    public void EachDesktopEntryFitsItsTierBesideMacOS()
+    {
+        Assert.Equal(DesktopOnly.Except(ValidatedOnWindowsOnly).OrderBy(id => id), MeasuredOnAMac.Keys.OrderBy(id => id));
+        int[] tiers = { 6, 8, 12, 16, 24, 32, 48 };
+        foreach ((string id, (double files, double footprint, string how)) in MeasuredOnAMac)
+        {
+            CatalogModel model = ModelCatalog.Find(id)!;
+            double need = files + footprint + MacOsGB;
+            if (model.WeightsPagedFromDiskBytes > 0)
+            {
+                // An entry that pages weights from disk is held to its resident part, and what is
+                // left must still cache a third of the experts it pages (a token reads few rows
+                // of the n-gram table, so that part is left out). The next tier down is not
+                // checked the usual way: a smaller Mac would have to page nearly everything.
+                Assert.Equal(model.ResidentWeightsBytes / 1e9, files, 2);
+                Assert.True(need <= model.MinDeviceMemoryGB,
+                    $"{id} needs about {need:F1} GB resident ({how}) but is offered from {model.MinDeviceMemoryGB} GB");
+                double pagedExperts = (model.WeightsPagedFromDiskBytes - 28_800_138_240) / 1e9;
+                Assert.True(model.MinDeviceMemoryGB - need >= pagedExperts / 3,
+                    $"{id} leaves {model.MinDeviceMemoryGB - need:F1} GB of page cache for {pagedExperts:F1} GB of paged experts");
+                Assert.Equal(tiers.Max(), model.MinDeviceMemoryGB);
+                continue;
+            }
+            Assert.True(need <= model.MinDeviceMemoryGB,
+                $"{id} needs about {need:F1} GB ({how}) but is offered from {model.MinDeviceMemoryGB} GB");
+            // And not offered higher than it needs: the next tier down must really be too small.
+            int below = tiers.Where(t => t < model.MinDeviceMemoryGB).DefaultIfEmpty(0).Max();
+            Assert.True(need > below,
+                $"{id} needs about {need:F1} GB ({how}), which the {below} GB tier already holds");
+        }
+    }
+
+    [Fact]
+    public void TheNewDesktopEntriesUseThePinnedFourBitArtifacts()
+    {
+        CatalogModel qwen = ModelCatalog.Find("qwen3.8-27b-q4kxl")!;
+        Assert.Equal(CatalogFamily.Qwen38, qwen.Family);
+        Assert.Equal("Qwen3.8-27B-UD-Q4_K_XL.gguf", qwen.Weights.FileName);
+        Assert.Equal(17_559_178_144, qwen.Weights.Bytes);
+        Assert.Equal("3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e", qwen.Weights.Sha256);
+        Assert.True(qwen.Projector is { Optional: true });
+
+        CatalogModel muse = ModelCatalog.Find("muse-glimmer-30b-q4kxl")!;
+        Assert.Equal(CatalogFamily.MuseGlimmer, muse.Family);
+        Assert.Equal("Muse-Glimmer-30B-UD-Q4_K_XL.gguf", muse.Weights.FileName);
+        Assert.Equal(15_878_222_368, muse.Weights.Bytes);
+        Assert.Equal("82bece304887a313ece08400bc030f6066c7bff5b906b0cd40308ec8a409fd38", muse.Weights.Sha256);
+        Assert.True(muse.Projector is { Optional: true });
+        // The DFlash drafter verifies greedily and the app samples, so it is not offered.
+        Assert.DoesNotContain(muse.Files, f => f.Role == CatalogFileRole.Draft);
     }
 
     [Theory]
@@ -295,6 +501,108 @@ public sealed class CatalogTests
         {
             try { Directory.Delete(root, true); } catch { }
         }
+    }
+
+    /// <summary>
+    /// What a build OLDER than the catalog that installed a model finds: a folder its own
+    /// catalog has never listed.
+    ///
+    /// <para>
+    /// On a Mac the Debug and Release builds share one models directory. A Release build
+    /// from 2026-09-30, launched after the Debug build had installed the five desktop
+    /// entries added later that day, treated every id it did not know as retired and
+    /// deleted all five. An unknown id is kept now; only a retired one is reclaimed.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void ASweepByAnOlderBuildKeepsTheModelsANewerBuildInstalled()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "ta-skew-" + Guid.NewGuid().ToString("n"));
+        try
+        {
+            // The catalog as it was before the desktop entries existed.
+            CatalogModel[] older = ModelCatalog.BuiltIn.Where(m => !DesktopOnly.Contains(m.Id)).ToArray();
+            var store = new ModelStore(root, catalog: older);
+            foreach (string id in DesktopOnly.Append("gemma-4-12b-iq3xxs"))
+            {
+                Directory.CreateDirectory(Path.Combine(root, id));
+                File.WriteAllBytes(Path.Combine(root, id, "weights.gguf"), new byte[1024]);
+            }
+
+            long freed = store.SweepOrphanedModels();
+
+            Assert.Equal(1024, freed);
+            foreach (string id in DesktopOnly)
+                Assert.True(Directory.Exists(Path.Combine(root, id)), $"a build older than {id} deleted its weights");
+            Assert.False(Directory.Exists(Path.Combine(root, "gemma-4-12b-iq3xxs")));
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// Every id the catalog has ever shipped, built-in or retired. It only grows: a new
+    /// entry's id is added here, and an id that leaves <see cref="ModelCatalog.BuiltIn"/>
+    /// stays here and must move to <see cref="ModelCatalog.Retired"/>.
+    /// </summary>
+    private static readonly string[] Shipped =
+    {
+        "gemma-4-e2b-q8",
+        "gemma-4-e4b-q8",
+        "gemma-4-e4b-q4kxl",
+        "gemma-4-e4b-iq4xs",
+        "gemma-4-12b-q4kxl",
+        "gemma-4-12b-iq3xxs",
+        "gemma-4-12b-iq2m",
+        "gemma-4-26b-a4b-iq2xxs",
+        "gpt-oss-20b-q8",
+        "bonsai-8b-q1-0",
+        "bonsai-27b-q1-0",
+        "bonsai-2-27b-ptq1-0",
+        "qwen3.5-9b-q4kxl",
+        "qwen3.5-9b-iq4xs",
+        "qwen3.6-35b-a3b-iq1m",
+        "qwen3.8-27b-iq2xxs",
+        "qwen3.8-27b-iq1s",
+        "qwen3.8-27b-q4kxl",
+        "muse-glimmer-30b-q4kxl",
+        "qwen-image-edit-2511-q2k",
+        "qwen-image-2.1-q4km",
+        "minimax-h3-fl2va-q4k",
+        "minimax-h3-ref2va-q4k",
+        "qwen3.8-flash-next-q2kxl",
+        "qwen3.8-flash-next-iq1m",
+    };
+
+    /// <summary>
+    /// The launch sweep reclaims only <see cref="ModelCatalog.Retired"/> ids
+    /// (<see cref="ASweepByAnOlderBuildKeepsTheModelsANewerBuildInstalled"/>), so an entry
+    /// that simply vanished from the catalog would leave its gigabytes on every device
+    /// that installed it, with no row in the Models list to delete them from. Both
+    /// directions are checked: an id that left without being retired, and an entry added
+    /// without being recorded here.
+    /// </summary>
+    [Fact]
+    public void EveryIdTheCatalogHasShippedIsBuiltInOrRetired()
+    {
+        string[] current = ModelCatalog.BuiltIn.Select(m => m.Id).ToArray();
+        Assert.Empty(current.Intersect(ModelCatalog.Retired, StringComparer.OrdinalIgnoreCase));
+        Assert.Equal(ModelCatalog.Retired.Count, ModelCatalog.Retired.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        foreach (string id in ModelCatalog.Retired)
+            Assert.Matches("^[a-z0-9.-]+$", id);
+
+        var listed = new HashSet<string>(current.Concat(ModelCatalog.Retired), StringComparer.OrdinalIgnoreCase);
+        string[] vanished = Shipped.Where(id => !listed.Contains(id)).ToArray();
+        Assert.True(vanished.Length == 0,
+            $"{string.Join(", ", vanished)} left ModelCatalog.BuiltIn without moving to ModelCatalog.Retired; "
+            + "no launch would ever reclaim the weights installed under that name");
+        string[] unrecorded = listed.Where(id => !Shipped.Contains(id, StringComparer.OrdinalIgnoreCase)).ToArray();
+        Assert.True(unrecorded.Length == 0,
+            $"{string.Join(", ", unrecorded)} is not in CatalogTests.Shipped; add every new entry's id there");
+        Assert.True(ModelCatalog.IsRetired("GEMMA-4-12B-IQ3XXS"));
+        Assert.False(ModelCatalog.IsRetired("gemma-4-12b-iq2m"));
     }
 
     [Fact]

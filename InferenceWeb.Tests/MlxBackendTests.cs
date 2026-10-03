@@ -329,7 +329,7 @@ public class MlxBackendTests
     }
 
     [MlxFact]
-    public void MlxFusedPrefillAttention_HeadDim256UsesChunkedVectorPath()
+    public void MlxFusedPrefillAttention_HeadDim256MatchesReference()
     {
         const int heads = 24;
         const int kvHeads = 4;
@@ -341,36 +341,27 @@ public class MlxBackendTests
         float[,,] k = BuildHeadFirstInput(kvHeads, seq, dim, 0.0029f, useCos: true);
         float[,,] v = BuildHeadFirstInput(kvHeads, seq, dim, 0.0021f, useCos: false);
 
-        string previous = Environment.GetEnvironmentVariable("TS_MLX_CHUNKED_VECTOR_PREFILL");
-        Environment.SetEnvironmentVariable("TS_MLX_CHUNKED_VECTOR_PREFILL", "1");
-        try
-        {
-            using var allocator = new MlxAllocator();
-            using var qTensor = Tensor.FromArray(allocator, q);
-            using var kTensor = Tensor.FromArray(allocator, k);
-            using var vTensor = Tensor.FromArray(allocator, v);
-            using var actualTensor = new Tensor(allocator, DType.Float32, seq, heads * dim);
+        using var allocator = new MlxAllocator();
+        using var qTensor = Tensor.FromArray(allocator, q);
+        using var kTensor = Tensor.FromArray(allocator, k);
+        using var vTensor = Tensor.FromArray(allocator, v);
+        using var actualTensor = new Tensor(allocator, DType.Float32, seq, heads * dim);
 
-            Assert.True(MlxFusedOps.TryPrefillAttention(
-                actualTensor,
-                qTensor,
-                kTensor,
-                vTensor,
-                heads,
-                kvHeads,
-                dim,
-                seq,
-                seq,
-                0,
-                0,
-                scale));
+        Assert.True(MlxFusedOps.TryPrefillAttention(
+            actualTensor,
+            qTensor,
+            kTensor,
+            vTensor,
+            heads,
+            kvHeads,
+            dim,
+            seq,
+            seq,
+            0,
+            0,
+            scale));
 
-            AssertClose(HeadFirstAttentionReference(q, k, v, scale, causal: true), actualTensor.GetElementsAsFloat((int)actualTensor.ElementCount()), 2e-3f);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable("TS_MLX_CHUNKED_VECTOR_PREFILL", previous);
-        }
+        AssertClose(HeadFirstAttentionReference(q, k, v, scale, causal: true), actualTensor.GetElementsAsFloat((int)actualTensor.ElementCount()), 2e-3f);
     }
 
     [MlxFact]
@@ -686,84 +677,75 @@ public class MlxBackendTests
     [MlxFact]
     public void MlxQwen35PackedGdnDecode_MatchesSeparateProjectionPath()
     {
-        string previousNative = Environment.GetEnvironmentVariable("TS_MLX_GDN_NATIVE");
-        Environment.SetEnvironmentVariable("TS_MLX_GDN_NATIVE", null);
-        try
+        const int seqLen = 1;
+        const int numKeyHeads = 1;
+        const int numValueHeads = 1;
+        const int headKeyDim = 32;
+        const int headValueDim = 32;
+        const int keyDim = numKeyHeads * headKeyDim;
+        const int valueDim = numValueHeads * headValueDim;
+        const int qkvDim = keyDim * 2 + valueDim;
+        const int packedDim = qkvDim + valueDim + numValueHeads * 2;
+        const int convKernel = 2;
+
+        float[,] qkv = new float[seqLen, qkvDim];
+        float[,] z = new float[seqLen, valueDim];
+        float[,] beta = new float[seqLen, numValueHeads];
+        float[,] alpha = new float[seqLen, numValueHeads];
+        float[,] packed = new float[seqLen, packedDim];
+        for (int i = 0; i < qkvDim; i++)
         {
-            const int seqLen = 1;
-            const int numKeyHeads = 1;
-            const int numValueHeads = 1;
-            const int headKeyDim = 32;
-            const int headValueDim = 32;
-            const int keyDim = numKeyHeads * headKeyDim;
-            const int valueDim = numValueHeads * headValueDim;
-            const int qkvDim = keyDim * 2 + valueDim;
-            const int packedDim = qkvDim + valueDim + numValueHeads * 2;
-            const int convKernel = 2;
-
-            float[,] qkv = new float[seqLen, qkvDim];
-            float[,] z = new float[seqLen, valueDim];
-            float[,] beta = new float[seqLen, numValueHeads];
-            float[,] alpha = new float[seqLen, numValueHeads];
-            float[,] packed = new float[seqLen, packedDim];
-            for (int i = 0; i < qkvDim; i++)
-            {
-                float v = MathF.Sin((i + 1) * 0.07f) * 0.25f;
-                qkv[0, i] = v;
-                packed[0, i] = v;
-            }
-            for (int i = 0; i < valueDim; i++)
-            {
-                float v = MathF.Cos((i + 1) * 0.05f) * 0.2f;
-                z[0, i] = v;
-                packed[0, qkvDim + i] = v;
-            }
-            beta[0, 0] = 0.35f;
-            alpha[0, 0] = -0.15f;
-            packed[0, qkvDim + valueDim] = beta[0, 0];
-            packed[0, qkvDim + valueDim + numValueHeads] = alpha[0, 0];
-
-            float[,] convWeight = new float[qkvDim, convKernel];
-            for (int i = 0; i < qkvDim; i++)
-            {
-                convWeight[i, 0] = 0.05f;
-                convWeight[i, 1] = 0.75f + (i % 7) * 0.01f;
-            }
-
-            float[] normWeight = new float[headValueDim];
-            Array.Fill(normWeight, 1.0f);
-
-            using var allocator = new MlxAllocator();
-            using var packedTensor = Tensor.FromArray(allocator, packed);
-            using var qkvTensor = Tensor.FromArray(allocator, qkv);
-            using var zTensor = Tensor.FromArray(allocator, z);
-            using var betaTensor = Tensor.FromArray(allocator, beta);
-            using var alphaTensor = Tensor.FromArray(allocator, alpha);
-            using var convTensor = Tensor.FromArray(allocator, convWeight);
-            using var dtBiasTensor = Tensor.FromArray(allocator, new[] { 0.1f });
-            using var aLogTensor = Tensor.FromArray(allocator, new[] { -0.5f });
-            using var normTensor = Tensor.FromArray(allocator, normWeight);
-            using var packedResult = new Tensor(allocator, DType.Float32, seqLen, valueDim);
-            using var separateResult = new Tensor(allocator, DType.Float32, seqLen, valueDim);
-            using var packedCache = new MlxFusedOps.GatedDeltaNetCache();
-            using var separateCache = new MlxFusedOps.GatedDeltaNetCache();
-
-            Assert.True(packedCache.TryRunQwen35Packed(
-                packedResult, packedTensor, convTensor, dtBiasTensor, aLogTensor, normTensor,
-                seqLen, packedDim, qkvDim, keyDim, valueDim,
-                numKeyHeads, numValueHeads, headKeyDim, headValueDim, convKernel, 1e-6f));
-            Assert.True(separateCache.TryRunQwen35(
-                separateResult, qkvTensor, zTensor, betaTensor, alphaTensor,
-                convTensor, dtBiasTensor, aLogTensor, normTensor,
-                seqLen, qkvDim, keyDim, valueDim,
-                numKeyHeads, numValueHeads, headKeyDim, headValueDim, convKernel, 1e-6f));
-
-            AssertClose(separateResult.GetElementsAsFloat(valueDim), packedResult.GetElementsAsFloat(valueDim), 2e-3f);
+            float v = MathF.Sin((i + 1) * 0.07f) * 0.25f;
+            qkv[0, i] = v;
+            packed[0, i] = v;
         }
-        finally
+        for (int i = 0; i < valueDim; i++)
         {
-            Environment.SetEnvironmentVariable("TS_MLX_GDN_NATIVE", previousNative);
+            float v = MathF.Cos((i + 1) * 0.05f) * 0.2f;
+            z[0, i] = v;
+            packed[0, qkvDim + i] = v;
         }
+        beta[0, 0] = 0.35f;
+        alpha[0, 0] = -0.15f;
+        packed[0, qkvDim + valueDim] = beta[0, 0];
+        packed[0, qkvDim + valueDim + numValueHeads] = alpha[0, 0];
+
+        float[,] convWeight = new float[qkvDim, convKernel];
+        for (int i = 0; i < qkvDim; i++)
+        {
+            convWeight[i, 0] = 0.05f;
+            convWeight[i, 1] = 0.75f + (i % 7) * 0.01f;
+        }
+
+        float[] normWeight = new float[headValueDim];
+        Array.Fill(normWeight, 1.0f);
+
+        using var allocator = new MlxAllocator();
+        using var packedTensor = Tensor.FromArray(allocator, packed);
+        using var qkvTensor = Tensor.FromArray(allocator, qkv);
+        using var zTensor = Tensor.FromArray(allocator, z);
+        using var betaTensor = Tensor.FromArray(allocator, beta);
+        using var alphaTensor = Tensor.FromArray(allocator, alpha);
+        using var convTensor = Tensor.FromArray(allocator, convWeight);
+        using var dtBiasTensor = Tensor.FromArray(allocator, new[] { 0.1f });
+        using var aLogTensor = Tensor.FromArray(allocator, new[] { -0.5f });
+        using var normTensor = Tensor.FromArray(allocator, normWeight);
+        using var packedResult = new Tensor(allocator, DType.Float32, seqLen, valueDim);
+        using var separateResult = new Tensor(allocator, DType.Float32, seqLen, valueDim);
+        using var packedCache = new MlxFusedOps.GatedDeltaNetCache();
+        using var separateCache = new MlxFusedOps.GatedDeltaNetCache();
+
+        Assert.True(packedCache.TryRunQwen35Packed(
+            packedResult, packedTensor, convTensor, dtBiasTensor, aLogTensor, normTensor,
+            seqLen, packedDim, qkvDim, keyDim, valueDim,
+            numKeyHeads, numValueHeads, headKeyDim, headValueDim, convKernel, 1e-6f));
+        Assert.True(separateCache.TryRunQwen35(
+            separateResult, qkvTensor, zTensor, betaTensor, alphaTensor,
+            convTensor, dtBiasTensor, aLogTensor, normTensor,
+            seqLen, qkvDim, keyDim, valueDim,
+            numKeyHeads, numValueHeads, headKeyDim, headValueDim, convKernel, 1e-6f));
+
+        AssertClose(separateResult.GetElementsAsFloat(valueDim), packedResult.GetElementsAsFloat(valueDim), 2e-3f);
     }
 
     [MlxFact]
@@ -1091,13 +1073,12 @@ public class MlxBackendTests
 
         float[] expected = DequantizedMatmulK(weights, outDim, inDim, input, DequantizeQ6KRow);
         IntPtr host = Marshal.AllocHGlobal(weights.Length);
-        string previousOptIn = Environment.GetEnvironmentVariable("TS_MLX_Q6K_MATMUL4");
         int previousMatvecRows = MlxNative.Q6KMatvecMaxRows;
         try
         {
-            // The 4-column kernel, not the matrix-vector port that now takes one row.
+            // One row through the F16 dequantize + GEMM path, not the matrix-vector port
+            // that takes small row counts by default.
             MlxNative.Q6KMatvecMaxRows = 0;
-            Environment.SetEnvironmentVariable("TS_MLX_Q6K_MATMUL4", "1");
             Marshal.Copy(weights, 0, host, weights.Length);
             using var allocator = new MlxAllocator();
             using var inputTensor = Tensor.FromArray(allocator, input);
@@ -1118,7 +1099,6 @@ public class MlxBackendTests
         finally
         {
             MlxNative.Q6KMatvecMaxRows = previousMatvecRows;
-            Environment.SetEnvironmentVariable("TS_MLX_Q6K_MATMUL4", previousOptIn);
             Marshal.FreeHGlobal(host);
         }
     }
@@ -1284,10 +1264,8 @@ public class MlxBackendTests
 
         float[] expected = DequantizedMatmulK(weights, outDim, inDim, input, DequantizeQ5KRow);
         IntPtr host = Marshal.AllocHGlobal(weights.Length);
-        string previousOptIn = Environment.GetEnvironmentVariable("TS_MLX_Q5K_MATMUL4");
         try
         {
-            Environment.SetEnvironmentVariable("TS_MLX_Q5K_MATMUL4", "1");
             Marshal.Copy(weights, 0, host, weights.Length);
             using var allocator = new MlxAllocator();
             using var inputTensor = Tensor.FromArray(allocator, input);
@@ -1307,7 +1285,6 @@ public class MlxBackendTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("TS_MLX_Q5K_MATMUL4", previousOptIn);
             Marshal.FreeHGlobal(host);
         }
     }
@@ -1477,10 +1454,8 @@ public class MlxBackendTests
         float[] expected = DequantizedMatmulIq4Xs(weights, outDim, inDim, input);
         IntPtr host = Marshal.AllocHGlobal(weights.Length);
         IntPtr cacheKey = new(0x223456);
-        string previousBatchedCols = Environment.GetEnvironmentVariable("TS_MLX_IQ4XS_BATCHED_COLS");
         try
         {
-            Environment.SetEnvironmentVariable("TS_MLX_IQ4XS_BATCHED_COLS", "1");
             Marshal.Copy(weights, 0, host, weights.Length);
             using var allocator = new MlxAllocator();
             MlxQuantizedOps.PreloadQuantizedWeight(allocator, cacheKey, host, (int)GgmlTensorType.IQ4_XS, inDim, outDim, weights.Length);
@@ -1501,7 +1476,6 @@ public class MlxBackendTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("TS_MLX_IQ4XS_BATCHED_COLS", previousBatchedCols);
             Marshal.FreeHGlobal(host);
         }
     }
@@ -1692,7 +1666,7 @@ public class MlxBackendTests
     }
 
     [MlxFact]
-    public void MlxQuantizedMatmul_IQ4XSDecode4ColumnMatchesDequantizedReferenceAfterHostRelease()
+    public void MlxQuantizedMatmul_IQ4XSDecodeMatchesDequantizedReferenceAfterHostRelease()
     {
         const int rows = 1;
         const int inDim = 512;
@@ -1705,10 +1679,8 @@ public class MlxBackendTests
         float[] expected = DequantizedMatmulIq4Xs(weights, outDim, inDim, input);
         IntPtr host = Marshal.AllocHGlobal(weights.Length);
         IntPtr cacheKey = new(0x223457);
-        string previousOptIn = Environment.GetEnvironmentVariable("TS_MLX_IQ4XS_MATMUL4");
         try
         {
-            Environment.SetEnvironmentVariable("TS_MLX_IQ4XS_MATMUL4", "1");
             Marshal.Copy(weights, 0, host, weights.Length);
             using var allocator = new MlxAllocator();
             MlxQuantizedOps.PreloadQuantizedWeight(allocator, cacheKey, host, (int)GgmlTensorType.IQ4_XS, inDim, outDim, weights.Length);
@@ -1730,7 +1702,6 @@ public class MlxBackendTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("TS_MLX_IQ4XS_MATMUL4", previousOptIn);
             Marshal.FreeHGlobal(host);
         }
     }
@@ -2311,58 +2282,49 @@ public class MlxBackendTests
         // the tiled head mapping (value head hv reads key head hv % Hk). The reference
         // is the same layer fed one token at a time, which runs the T = 1 kernel, and
         // then one more token through each cache to compare the carried state.
-        string previousNative = Environment.GetEnvironmentVariable("TS_MLX_GDN_NATIVE");
-        Environment.SetEnvironmentVariable("TS_MLX_GDN_NATIVE", null);
-        try
+        const int seqLen = 37, numKeyHeads = 2, numValueHeads = 4, headDim = 128, convKernel = 4;
+        const int keyDim = numKeyHeads * headDim, valueDim = numValueHeads * headDim;
+        const int qkvDim = keyDim * 2 + valueDim, packedDim = qkvDim + valueDim + numValueHeads * 2;
+        float[,] packed = new float[seqLen + 1, packedDim];
+        for (int t = 0; t <= seqLen; t++)
+            for (int i = 0; i < packedDim; i++)
+                packed[t, i] = MathF.Sin((t + 1) * 0.31f + (i + 1) * 0.013f) * (i < qkvDim ? 0.6f : 0.4f);
+        float[,] convWeight = new float[qkvDim, convKernel];
+        for (int i = 0; i < qkvDim; i++)
+            for (int k = 0; k < convKernel; k++)
+                convWeight[i, k] = 0.15f + 0.1f * k + (i % 5) * 0.01f;
+        float[] dtBias = new float[numValueHeads], aLog = new float[numValueHeads], norm = new float[headDim];
+        for (int h = 0; h < numValueHeads; h++) { dtBias[h] = 0.05f * h; aLog[h] = -0.3f - 0.1f * h; }
+        Array.Fill(norm, 1.0f);
+
+        using var allocator = new MlxAllocator();
+        using var conv = Tensor.FromArray(allocator, convWeight);
+        using var dt = Tensor.FromArray(allocator, dtBias);
+        using var a = Tensor.FromArray(allocator, aLog);
+        using var n = Tensor.FromArray(allocator, norm);
+        using var prefillCache = new MlxFusedOps.GatedDeltaNetCache();
+        using var stepCache = new MlxFusedOps.GatedDeltaNetCache();
+
+        float[] RunRows(MlxFusedOps.GatedDeltaNetCache cache, int first, int count)
         {
-            const int seqLen = 37, numKeyHeads = 2, numValueHeads = 4, headDim = 128, convKernel = 4;
-            const int keyDim = numKeyHeads * headDim, valueDim = numValueHeads * headDim;
-            const int qkvDim = keyDim * 2 + valueDim, packedDim = qkvDim + valueDim + numValueHeads * 2;
-            float[,] packed = new float[seqLen + 1, packedDim];
-            for (int t = 0; t <= seqLen; t++)
+            float[,] rows = new float[count, packedDim];
+            for (int t = 0; t < count; t++)
                 for (int i = 0; i < packedDim; i++)
-                    packed[t, i] = MathF.Sin((t + 1) * 0.31f + (i + 1) * 0.013f) * (i < qkvDim ? 0.6f : 0.4f);
-            float[,] convWeight = new float[qkvDim, convKernel];
-            for (int i = 0; i < qkvDim; i++)
-                for (int k = 0; k < convKernel; k++)
-                    convWeight[i, k] = 0.15f + 0.1f * k + (i % 5) * 0.01f;
-            float[] dtBias = new float[numValueHeads], aLog = new float[numValueHeads], norm = new float[headDim];
-            for (int h = 0; h < numValueHeads; h++) { dtBias[h] = 0.05f * h; aLog[h] = -0.3f - 0.1f * h; }
-            Array.Fill(norm, 1.0f);
-
-            using var allocator = new MlxAllocator();
-            using var conv = Tensor.FromArray(allocator, convWeight);
-            using var dt = Tensor.FromArray(allocator, dtBias);
-            using var a = Tensor.FromArray(allocator, aLog);
-            using var n = Tensor.FromArray(allocator, norm);
-            using var prefillCache = new MlxFusedOps.GatedDeltaNetCache();
-            using var stepCache = new MlxFusedOps.GatedDeltaNetCache();
-
-            float[] RunRows(MlxFusedOps.GatedDeltaNetCache cache, int first, int count)
-            {
-                float[,] rows = new float[count, packedDim];
-                for (int t = 0; t < count; t++)
-                    for (int i = 0; i < packedDim; i++)
-                        rows[t, i] = packed[first + t, i];
-                using var input = Tensor.FromArray(allocator, rows);
-                using var output = new Tensor(allocator, DType.Float32, count, valueDim);
-                Assert.True(cache.TryRunQwen35Packed(output, input, conv, dt, a, n,
-                    count, packedDim, qkvDim, keyDim, valueDim, numKeyHeads, numValueHeads, headDim, headDim, convKernel, 1e-6f));
-                return output.GetElementsAsFloat(count * valueDim);
-            }
-
-            float[] prefill = RunRows(prefillCache, 0, seqLen);
-            float[] stepped = new float[seqLen * valueDim];
-            for (int t = 0; t < seqLen; t++)
-                Array.Copy(RunRows(stepCache, t, 1), 0, stepped, t * valueDim, valueDim);
-            AssertClose(stepped, prefill, 2e-4f);
-
-            AssertClose(RunRows(stepCache, seqLen, 1), RunRows(prefillCache, seqLen, 1), 2e-4f);
+                    rows[t, i] = packed[first + t, i];
+            using var input = Tensor.FromArray(allocator, rows);
+            using var output = new Tensor(allocator, DType.Float32, count, valueDim);
+            Assert.True(cache.TryRunQwen35Packed(output, input, conv, dt, a, n,
+                count, packedDim, qkvDim, keyDim, valueDim, numKeyHeads, numValueHeads, headDim, headDim, convKernel, 1e-6f));
+            return output.GetElementsAsFloat(count * valueDim);
         }
-        finally
-        {
-            Environment.SetEnvironmentVariable("TS_MLX_GDN_NATIVE", previousNative);
-        }
+
+        float[] prefill = RunRows(prefillCache, 0, seqLen);
+        float[] stepped = new float[seqLen * valueDim];
+        for (int t = 0; t < seqLen; t++)
+            Array.Copy(RunRows(stepCache, t, 1), 0, stepped, t * valueDim, valueDim);
+        AssertClose(stepped, prefill, 2e-4f);
+
+        AssertClose(RunRows(stepCache, seqLen, 1), RunRows(prefillCache, seqLen, 1), 2e-4f);
     }
 
     [MlxFact]

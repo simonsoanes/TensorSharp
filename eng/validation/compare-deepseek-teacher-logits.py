@@ -49,9 +49,7 @@ def validate_schedule(plan, plan_hash, schedule):
     off, on = plan['variants']['non-tp'], plan['variants']['expert-tp7']
     require(off['requested_expert_tp_ranks'] == 0 and on['requested_expert_tp_ranks'] == 7, 'Wrong planned TP degrees')
     require(off['native_load'] == on['native_load'], 'Planned native load settings differ')
-    off_env, on_env = dict(off['environment']), dict(on['environment'])
-    require(off_env.pop('TS_DSV41_TP') == '0' and on_env.pop('TS_DSV41_TP') == '7' and off_env == on_env,
-            'Planned computation environments differ beyond TP')
+    require(off['environment'] == on['environment'], 'Planned computation environments differ')
     require(identity['model_manifest_sha256'] == plan['model']['manifest_sha256'], 'Wrong checkpoint manifest')
     for name in ('native_source_sha256', 'exporter_source_sha256', 'exporter_assemblies_sha256'):
         require(identity.get(name), 'Missing identity set: ' + name)

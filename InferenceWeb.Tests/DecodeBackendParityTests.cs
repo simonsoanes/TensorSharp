@@ -17,8 +17,9 @@
 // (gemma-4-12B and -26B-A4B are fine on the same backend), where the interesting
 // question is whether PREFILL or DECODE breaks and whether the logits collapse.
 //
-// Opt in with TS_PARITY_MODEL=<model.gguf> [TS_PARITY_BACKEND=mlx|ggml_metal|ggml_cpu]
-//             [TS_PARITY_STEPS=8]
+// Opt in with TS_PARITY_MODEL=<model.gguf> [TS_PARITY_BACKEND=mlx|ggml_metal|ggml_cuda|ggml_cpu]
+//             [TS_PARITY_STEPS=8]. Without TS_PARITY_BACKEND the test runs on the process's
+//             pinned GGML backend (TS_TEST_GGML_BACKEND).
 
 using System;
 using System.IO;
@@ -45,12 +46,13 @@ public class DecodeBackendParityTests
             return;
         }
 
-        var backend = (Environment.GetEnvironmentVariable("TS_PARITY_BACKEND") ?? "ggml_cpu").ToLowerInvariant() switch
+        var backend = Environment.GetEnvironmentVariable("TS_PARITY_BACKEND")?.ToLowerInvariant() switch
         {
             "mlx" => BackendType.Mlx,
             "ggml_metal" or "metal" => BackendType.GgmlMetal,
             "ggml_cuda" or "cuda" => BackendType.GgmlCuda,
-            _ => BackendType.GgmlCpu,
+            "ggml_cpu" or "cpu" => BackendType.GgmlCpu,
+            _ => TestGates.PinnedGgmlBackend,
         };
         int steps = int.TryParse(Environment.GetEnvironmentVariable("TS_PARITY_STEPS"), out int s) && s > 0 ? s : 8;
 
@@ -59,9 +61,8 @@ public class DecodeBackendParityTests
 
         // A fixed, tokenizer-rendered prompt so both backends see identical ids.
         // TS_PARITY_PROMPT_FILE overrides the prompt: prompt LENGTH selects which
-        // kernels run (e.g. the MLX packed GatedDeltaNet kernel only engages at
-        // seqLen >= TS_MLX_QWEN35_GDN_PACKED_MIN_SEQ_LEN, default 64), so a short
-        // prompt can pass while a realistic one is wrong.
+        // kernels run (chunked and single-token paths differ), so a short prompt can
+        // pass while a realistic one is wrong.
         string promptFile = Environment.GetEnvironmentVariable("TS_PARITY_PROMPT_FILE");
         string promptText = !string.IsNullOrEmpty(promptFile) && File.Exists(promptFile)
             ? File.ReadAllText(promptFile)

@@ -11,7 +11,7 @@
 //   * the state at the end of the prompt every chat shares is CHECKPOINTED as a
 //     host-authoritative deep copy and CLONED into each new chat;
 //   * both count against one byte budget (TS_Q4E_RETAINED_CACHE_MB, clamped by
-//     the measured memory headroom), with the oldest retained conversation
+//     the measured memory headroom; unset, the headroom alone), with the oldest retained conversation
 //     evicted first and a decline when nothing more can go.
 //
 // Reuse is exact-prefix ONLY. The GatedDeltaNet recurrence and the PLE conv
@@ -35,37 +35,55 @@ namespace TensorSharp.Models
         // Retained conversations and shared-prefix checkpoints, by key. Never
         // contains the active holder.
         private Dictionary<string, Qwen4ExpKvCacheHolder> _retainedFusedHolders;
-        private long _retainedSerial;
-        private readonly bool _retainedCacheEnabled =
-            !string.Equals(Environment.GetEnvironmentVariable("TS_Q4E_RETAINED_CACHE"), "0", StringComparison.Ordinal);
         private readonly long _retainedCacheBudgetBytes = RetainedCacheBudgetFromEnvironment();
         private bool _retainedBudgetWarned;
         private bool _retainedLayoutWarned;
 
+        /// <summary>The budget where <c>TS_Q4E_RETAINED_CACHE_MB</c> is unset and no memory headroom can be
+        /// measured.</summary>
+        internal const long UnmeasuredRetainedCacheBudgetBytes = 4096L * 1024 * 1024;
+
         /// <summary><c>TS_Q4E_RETAINED_CACHE_MB</c>: how many megabytes of retained
         /// state (finished conversations plus shared-prefix checkpoints, attention
         /// K/V + QSA keys + GDN/PLE state + the draft head's private K/V) this model
-        /// keeps resident. Default 4096. An unparsable or zero value declines every
-        /// retention, which the scheduler reports as a re-prefill.</summary>
+        /// keeps resident. Unset (-1): half the measured memory headroom, the rule
+        /// Qwen 3.5 applies to its idle holders (see <see cref="RetainedBudgetBytes"/>).
+        /// An unparsable or zero value declines every retention, which the scheduler
+        /// reports as a re-prefill.</summary>
         private static long RetainedCacheBudgetFromEnvironment()
         {
             string text = Environment.GetEnvironmentVariable("TS_Q4E_RETAINED_CACHE_MB");
-            if (string.IsNullOrEmpty(text)) return 4096L * 1024 * 1024;
+            if (string.IsNullOrEmpty(text)) return -1;
             return long.TryParse(text, out long mb) && mb >= 0 && mb <= long.MaxValue / (1024 * 1024)
                 ? mb * 1024 * 1024 : 0;
         }
+
+        /// <summary>
+        /// The byte budget retention runs under: the configured one, or where none is configured, no fixed
+        /// cap beyond the half-headroom clamp <see cref="CanRetainWithinBudget"/> applies. The old fixed
+        /// 4096 MB default held three 1.3 GB holders of Qwen3.8-Flash-Next at 1.6k tokens (a 4x A40 tensor
+        /// split, 15 GB of headroom), so one of four concurrent conversations lost its reuse on every turn.
+        /// <see cref="UnmeasuredRetainedCacheBudgetBytes"/> still applies where nothing can be measured.
+        /// </summary>
+        internal static long RetainedBudgetBytes(long configuredBytes, bool headroomMeasured)
+            => configuredBytes >= 0 ? configuredBytes
+                : headroomMeasured ? long.MaxValue : UnmeasuredRetainedCacheBudgetBytes;
+
+        private string DescribeRetentionBudget(long? spare)
+            => _retainedCacheBudgetBytes >= 0
+                ? $"TS_Q4E_RETAINED_CACHE_MB={_retainedCacheBudgetBytes / 1048576} MB"
+                : spare.HasValue ? "half the measured headroom (TS_Q4E_RETAINED_CACHE_MB unset)"
+                    : $"{UnmeasuredRetainedCacheBudgetBytes / 1048576} MB (no headroom measured)";
 
         /// <summary>The complete GGML token-span path, where every piece of per-sequence
         /// state (GDN conv+ssm, PLE conv, QSA raw keys, attention K/V) is device
         /// resident and keyed by the holder. The per-layer and op-by-op fallbacks
         /// keep parts of that state in shared scratch that no holder owns.</summary>
         private bool CompleteSpanPathAvailable =>
-            IsGgmlBackend && _tokenGraphEnabled && !_tokenGraphUnsupported
-            && _spanAttnEnabled && !_fusedGateUpExperts
-            && _fusedFfnEnabled && !_fusedFfnUnsupported
-            && _fusedGdnEnabled && !_fusedGdnUnsupported
-            && _fusedAttnEnabled && !_fusedAttnUnsupported
-            && _gdnMaxLayers < 0 && !_gdnVerify;
+            IsGgmlBackend && !_tokenGraphUnsupported
+            && !_fusedGateUpExperts
+            && !_fusedFfnUnsupported && !_fusedGdnUnsupported && !_fusedAttnUnsupported
+            && !_gdnVerify;
 
         /// <summary>The native GDN state entry stores the delta state as
         /// <c>head_v_dim * head_v_dim * n_v_heads</c> floats; the host seed tensor
@@ -89,7 +107,7 @@ namespace TensorSharp.Models
         /// <summary>Retention and rebinding move nothing, so they work wherever the
         /// complete span path does, including a layer split.</summary>
         public bool SupportsRetainedFusedCache =>
-            _retainedCacheEnabled && _kCache != null && CompleteSpanPathAvailable && GdnStateLayoutMatchesNative;
+            _kCache != null && CompleteSpanPathAvailable && GdnStateLayoutMatchesNative;
 
         public bool SupportsExactFusedCacheReuse => SupportsRetainedFusedCache;
 
@@ -166,7 +184,6 @@ namespace TensorSharp.Models
                 }
             }
             holder.RetainedBytes = bytes;
-            holder.RetainedSerial = ++_retainedSerial;
             _retainedFusedHolders.Add(key, holder);
             _fusedHolders.Remove(requestId);
             return true;
@@ -243,7 +260,6 @@ namespace TensorSharp.Models
             {
                 copy.IsCheckpoint = true;
                 copy.RetainedBytes = RetainedHolderBytes(copy);
-                copy.RetainedSerial = ++_retainedSerial;
                 _retainedFusedHolders.Add(key, copy);
                 published = true;
             }
@@ -308,66 +324,26 @@ namespace TensorSharp.Models
             return holderBytes <= limit && retainedBytes <= limit - holderBytes;
         }
 
-        /// <summary>Make room for <paramref name="bytes"/> by evicting the oldest
-        /// retained conversations (never a checkpoint: those are bounded by the
-        /// scheduler's own budget and each serves every new chat). False when the
-        /// budget still cannot take it, reported once.</summary>
+        /// <summary>Whether <paramref name="bytes"/> more can be retained beside what is: the prefix cache
+        /// owns eviction, so a holder that does not fit is refused, never made room for (DEC-23).
+        /// Nothing is retained without the prefix cache attached. False is reported once.</summary>
         private bool EnsureRetentionBudget(long bytes, string what)
         {
-            long? spare = GetCacheMemorySpareBytes();
-            if (_prefixCacheSink != null)
-            {
-                // Refuse-and-report (DEC-23): the prefix cache owns eviction, so a holder that does
-                // not fit beside what is retained is refused; nothing retained is evicted to fit it.
-                if (CanRetainWithinBudget(bytes, RetainedBytesTotal(), _retainedCacheBudgetBytes, spare))
-                    return true;
-                if (!_retainedBudgetWarned)
-                {
-                    _retainedBudgetWarned = true;
-                    Console.Error.WriteLine(
-                        $"[q4e retained] refused {what}: {bytes / 1048576.0:F1} MB does not fit the retention budget " +
-                        $"(TS_Q4E_RETAINED_CACHE_MB={_retainedCacheBudgetBytes / 1048576} MB, retained {RetainedBytesTotal() / 1048576.0:F1} MB" +
-                        (spare.HasValue ? $", headroom {spare.Value / 1048576.0:F0} MB" : "") + ") and the prefix cache owns eviction. Reported once.");
-                }
+            if (_prefixCacheSink == null)
                 return false;
-            }
-            // Evict nothing for a holder that could not fit beside the checkpoints
-            // even with every conversation gone (a zero budget, a holder larger
-            // than the budget): a decline must not cost the conversations kept.
-            bool feasible = CanRetainWithinBudget(bytes, RetainedBytesTotal(checkpointsOnly: true), _retainedCacheBudgetBytes, spare);
-            while (!feasible || !CanRetainWithinBudget(bytes, RetainedBytesTotal(), _retainedCacheBudgetBytes, spare))
+            long? spare = GetCacheMemorySpareBytes();
+            long budget = RetainedBudgetBytes(_retainedCacheBudgetBytes, spare.HasValue);
+            if (CanRetainWithinBudget(bytes, RetainedBytesTotal(), budget, spare))
+                return true;
+            if (!_retainedBudgetWarned)
             {
-                string victim = feasible ? OldestRetainedConversation() : null;
-                if (victim == null)
-                {
-                    if (!_retainedBudgetWarned)
-                    {
-                        _retainedBudgetWarned = true;
-                        Console.Error.WriteLine(
-                            $"[q4e retained] declined {what}: {bytes / 1048576.0:F1} MB does not fit the retention budget " +
-                            $"(TS_Q4E_RETAINED_CACHE_MB={_retainedCacheBudgetBytes / 1048576} MB, retained {RetainedBytesTotal() / 1048576.0:F1} MB" +
-                            (spare.HasValue ? $", headroom {spare.Value / 1048576.0:F0} MB" : "") + "); that request re-prefills. Reported once.");
-                    }
-                    return false;
-                }
-                Console.Error.WriteLine($"[q4e retained] evicting {victim} ({_retainedFusedHolders[victim].RetainedBytes / 1048576.0:F1} MB) for {what}");
-                DiscardRetainedCache(victim);
+                _retainedBudgetWarned = true;
+                Console.Error.WriteLine(
+                    $"[q4e retained] refused {what}: {bytes / 1048576.0:F1} MB does not fit the retention budget " +
+                    $"({DescribeRetentionBudget(spare)}, retained {RetainedBytesTotal() / 1048576.0:F1} MB" +
+                    (spare.HasValue ? $", headroom {spare.Value / 1048576.0:F0} MB" : "") + ") and the prefix cache owns eviction. Reported once.");
             }
-            return true;
-        }
-
-        private string OldestRetainedConversation()
-        {
-            string oldest = null;
-            long serial = long.MaxValue;
-            if (_retainedFusedHolders == null) return null;
-            foreach (var kv in _retainedFusedHolders)
-            {
-                if (kv.Value.IsCheckpoint || kv.Value.RetainedSerial >= serial) continue;
-                oldest = kv.Key;
-                serial = kv.Value.RetainedSerial;
-            }
-            return oldest;
+            return false;
         }
 
         private long RetainedBytesTotal(bool checkpointsOnly = false)
@@ -392,10 +368,13 @@ namespace TensorSharp.Models
                     foreach (Tensor t in set)
                         if (t != null && storages.Add(t.Storage))
                             bytes = checked(bytes + t.Storage.ByteLength);
+            // TP replicates the recurrent/attention caches on every rank; account
+            // for those replicas before adding host-only metadata and private MTP.
+            if (IsTensorParallel) bytes = checked(bytes * TpDegree);
             if (holder.GdnConvState != null)
                 foreach (float[] ring in holder.GdnConvState)
                     if (ring != null) bytes = checked(bytes + (long)ring.Length * sizeof(float));
-            if (holder.PleConvState != null) bytes = checked(bytes + (long)holder.PleConvState.Length * sizeof(float));
+            if (holder.PleConvState != null) bytes = checked(bytes + (long)holder.PleConvState.Length * sizeof(float) * (IsTensorParallel ? TpDegree : 1));
             if (holder.QsaPositions != null) bytes = checked(bytes + (long)holder.QsaPositions.Length * sizeof(int));
             bytes = checked(bytes + MtpStateBytes((object)holder.GdnConvStateT ?? holder.K));
             return bytes;

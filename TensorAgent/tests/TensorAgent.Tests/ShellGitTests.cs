@@ -562,12 +562,12 @@ public sealed class ShellGitTests : IDisposable
         Assert.Contains("sub/public.txt", untracked, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [SkippableFact]
     public void ASymlinkIsRecordedAsItsTargetTextRatherThanFollowed()
     {
         Out("git init");
         Write("real.txt", "the real content\n");
-        File.CreateSymbolicLink(Path.Combine(_work, "link.txt"), "real.txt");
+        TestPlatforms.CreateFileSymlink(Path.Combine(_work, "link.txt"), "real.txt");
         Out("git add . && git commit -m 'with a link'");
 
         // Mode 120000 and a blob whose content is the target path, not the target's bytes.
@@ -672,7 +672,7 @@ public sealed class ShellGitTests : IDisposable
     // cross-checks against the real git binary
     // =====================================================================================
 
-    private const string SystemGit = "/usr/bin/git";
+    private static readonly string? SystemGit = TestPlatforms.FindExecutable("git");
 
     private static bool SystemGitAvailable => File.Exists(SystemGit);
 
@@ -682,7 +682,7 @@ public sealed class ShellGitTests : IDisposable
     /// </summary>
     private static (int ExitCode, string Stdout, string Stderr) RealGit(string directory, params string[] args)
     {
-        var info = new ProcessStartInfo(SystemGit)
+        var info = new ProcessStartInfo(SystemGit!)
         {
             WorkingDirectory = directory,
             RedirectStandardOutput = true,
@@ -694,8 +694,9 @@ public sealed class ShellGitTests : IDisposable
 
         // A deterministic identity and no user config, so the assertions do not depend on
         // whoever is running the suite.
-        info.Environment["GIT_CONFIG_GLOBAL"] = "/dev/null";
-        info.Environment["GIT_CONFIG_SYSTEM"] = "/dev/null";
+        string nullDevice = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
+        info.Environment["GIT_CONFIG_GLOBAL"] = nullDevice;
+        info.Environment["GIT_CONFIG_SYSTEM"] = nullDevice;
         info.Environment["GIT_AUTHOR_NAME"] = "Real Git";
         info.Environment["GIT_AUTHOR_EMAIL"] = "real@example.com";
         info.Environment["GIT_COMMITTER_NAME"] = "Real Git";
@@ -713,6 +714,7 @@ public sealed class ShellGitTests : IDisposable
     public void RealGitValidatesARepositoryThisImplementationWrote()
     {
         Skip.IfNot(SystemGitAvailable, "the system git is not installed at " + SystemGit + "; cross-check skipped");
+        Skip.If(OperatingSystem.IsWindows(), "This cross-check requires Unix executable modes and symbolic links.");
 
         // Build a repository entirely with the builtin: two commits, a subdirectory, an
         // executable file, and a deletion, so the trees exercise the sort order and modes.
@@ -724,7 +726,7 @@ public sealed class ShellGitTests : IDisposable
         File.SetUnixFileMode(
             Path.Combine(_work, "scripts", "run.sh"),
             UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
-        File.CreateSymbolicLink(Path.Combine(_work, "latest.md"), "README.md");
+        TestPlatforms.CreateFileSymlink(Path.Combine(_work, "latest.md"), "README.md");
         Out("git add .");
         Out("git commit -m 'initial import'");
 

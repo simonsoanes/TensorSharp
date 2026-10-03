@@ -612,16 +612,6 @@ static int qab_decode_batched(
             maxTotal = std::max<std::int64_t>(maxTotal, static_cast<std::int64_t>(positions[s]) + 1);
         }
 
-        static const bool qab_enabled = []{
-            const char* e = std::getenv("TS_QWEN35_BATCHED_ARENA");
-            return e == nullptr || e[0] != '0';
-        }();
-        if (!qab_enabled)
-        {
-            set_last_error("Qwen3.5 arena batched decode: disabled via TS_QWEN35_BATCHED_ARENA=0.");
-            return 0;
-        }
-
         const int H = static_cast<int>(token_embd_ne0);
         const ggml_type kvType = static_cast<ggml_type>(kv_cache_type);
         const int hd = head_dim;
@@ -664,19 +654,12 @@ static int qab_decode_batched(
         bool windows_changed = false;
         if (cuda_windows)
         {
-            // Match the actual whole-model solo decode policy, including its
-            // diagnostic nonpersistent mode. Captured decode normally rounds
+            // Match the whole-model solo decode policy: captured decode rounds
             // to 256 rows, capped by the holder's physical allocation.
-            static const bool solo_persist = [] {
-                const char* value = std::getenv("TS_QWEN35_FD_PERSIST");
-                return value == nullptr || value[0] != '0';
-            }();
             windows_by_seq.resize(n_seqs);
             for (int i = 0; i < n_seqs; i++)
-                windows_by_seq[i] = solo_persist
-                    ? static_cast<int>(std::min<std::int64_t>(cache_sizes[i],
-                        qab_cap_round(static_cast<std::int64_t>(positions[i]) + 1)))
-                    : flash_attn_kv_length(positions[i] + 1, cache_sizes[i], hd);
+                windows_by_seq[i] = static_cast<int>(std::min<std::int64_t>(cache_sizes[i],
+                    qab_cap_round(static_cast<std::int64_t>(positions[i]) + 1)));
 
             // Predict the assignment below without retiring or seeding state:
             // keep resident callers, then place newcomers in the first free
@@ -1751,8 +1734,6 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
         final_norm_data, token_embd_data, token_embd_type, token_embd_ne0, token_embd_ne1, token_embd_bytes,
         sampled_data, want_logits, nullptr);
 }
-
-TSG_EXPORT int TSGgml_Qwen35ArenaHiddenDecodeAbi() { return 1; }
 
 // embedding_rows is F32 [n_seqs, hidden_size] in CALLER sequence order, not
 // arena-slot order. The stable staging buffer owns the asynchronous upload.

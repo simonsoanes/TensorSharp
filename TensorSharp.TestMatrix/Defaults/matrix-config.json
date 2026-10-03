@@ -27,11 +27,6 @@
         "video"
     ],
     "default_env_vars": [
-        "TS_GPTOSS_BATCHED",
-        "TS_QWEN35_BATCHED",
-        "TS_NEMOTRON_BATCHED",
-        "TS_GEMMA4_BATCHED",
-        "TS_BATCHED_N1_FAST_PATH",
         "TS_SCHED_DISABLE_BATCHED",
         "KV_CACHE_DTYPE",
         "MAX_CONTEXT",
@@ -40,10 +35,7 @@
         "VIDEO_SAMPLE_FPS",
         "VIDEO_MAX_FRAMES",
         "TS_NEMOTRON_IMAGE_MAX_TILES",
-        "TS_MLX_BATCHED_MOE_DECODE",
-        "TS_MLX_DEVICE_ROUTER",
-        "TS_MLX_PIPELINED_DECODE",
-        "TS_MLX_QWEN35_GDN_PACKED_KERNELS"
+        "TS_MLX_BATCHED_MOE_DECODE"
     ],
     "timeout_seconds": 900,
     "warmup_runs": 1,

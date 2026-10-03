@@ -10,15 +10,16 @@
 // Greedy speculative decoding is verification-gated: every emitted token is
 // the trunk's argmax given the same prefix, so the output stream must match
 // plain greedy decoding except where batched-vs-sequential kernel ordering
-// flips a near-tie argmax (the same FP-drift tolerance the legacy-vs-batched
+// flips a near-tie argmax (the same FP-drift tolerance the batched
 // Qwen3.5 correctness test uses).
 //
-// Opt-in via TS_MTP_E2E=1 (loads a ~10-12 GB GGUF). Model resolution order:
-//   1. TS_MTP_MODEL       — explicit .gguf path
-//   2. TS_MTP_MODEL_DIR   — directory scanned for Qwen3.6 GGUFs
+// Opt-in via TS_TEST_QWEN36_SPEC=1 (loads a ~10-12 GB GGUF). Model resolution order:
+//   1. TS_TEST_QWEN36_SPEC_MODEL     — explicit .gguf path
+//   2. TS_TEST_QWEN36_SPEC_MODEL_DIR — directory scanned for Qwen3.6 GGUFs
 //   3. C:\Works\models\mtp (default test location)
-// Backend via TS_MTP_BACKEND: ggml_cpu (default) | ggml_cuda | cpu.
-// TS_MTP_NEW_TOKENS / TS_MTP_DRAFT override generation length / draft window.
+// Backend via TS_TEST_QWEN36_SPEC_BACKEND: ggml_cpu (default) | ggml_cuda | cpu.
+// TS_TEST_QWEN36_SPEC_NEW_TOKENS / TS_SPEC_DRAFT / TS_SPEC_PMIN override the generation length,
+// the draft window and the confidence gate.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -44,8 +45,8 @@ public class Qwen36SpeculativeTests
         string modelPath = ResolveModel();
         if (modelPath == null) { _output.WriteLine("[mtp] opt-in not set or model missing; skipping"); return; }
 
-        int maxNew = EnvInt("TS_MTP_NEW_TOKENS", 32);
-        int maxDraft = EnvInt("TS_MTP_DRAFT", 8);
+        int maxNew = EnvInt("TS_TEST_QWEN36_SPEC_NEW_TOKENS", 32);
+        int maxDraft = EnvInt("TS_SPEC_DRAFT", 8);
 
         _output.WriteLine($"[mtp] loading {Path.GetFileName(modelPath)} backend={ResolveBackend()}");
         using var model = (Qwen35Model)ModelBase.Create(modelPath, ResolveBackend());
@@ -107,11 +108,11 @@ public class Qwen36SpeculativeTests
     public void Mtp_PerfBench_SpecVsBaseline()
     {
         string modelPath = ResolveModel();
-        if (modelPath == null || Environment.GetEnvironmentVariable("TS_MTP_BENCH") != "1")
+        if (modelPath == null || Environment.GetEnvironmentVariable("TS_TEST_QWEN36_SPEC_BENCH") != "1")
         { _output.WriteLine("[mtp-bench] opt-in not set; skipping"); return; }
 
-        int maxNew = EnvInt("TS_MTP_NEW_TOKENS", 64);
-        int maxDraft = EnvInt("TS_MTP_DRAFT", 8);
+        int maxNew = EnvInt("TS_TEST_QWEN36_SPEC_NEW_TOKENS", 64);
+        int maxDraft = EnvInt("TS_SPEC_DRAFT", 8);
 
         _output.WriteLine($"[mtp-bench] loading {Path.GetFileName(modelPath)} backend={ResolveBackend()}");
         using var model = (Qwen35Model)ModelBase.Create(modelPath, ResolveBackend());
@@ -146,7 +147,7 @@ public class Qwen36SpeculativeTests
 
         // Speculative greedy.
         var spec = new SpeculativeDecoder(model, maxDraft);
-        string pminEnv = Environment.GetEnvironmentVariable("TS_MTP_PMIN");
+        string pminEnv = Environment.GetEnvironmentVariable("TS_SPEC_PMIN");
         if (!string.IsNullOrEmpty(pminEnv) && float.TryParse(pminEnv, out float pmin))
             spec.MinDraftProb = pmin;
         List<int> specTokens = spec.GenerateGreedy(tokens, maxNew);
@@ -170,15 +171,15 @@ public class Qwen36SpeculativeTests
     [Fact]
     public void Mtp_Profile_LayerTypeSplit()
     {
-        // Opt-in profiling (TS_MTP_PROFILE=1): where does a speculative step's
+        // Opt-in profiling (TS_TEST_QWEN36_SPEC_PROFILE=1): where does a speculative step's
         // trunk time go — attention layers, recurrent (GDN) layers, or the LM
         // head? Drives optimization of the speculative path's per-pass cost.
         string modelPath = ResolveModel();
-        if (modelPath == null || Environment.GetEnvironmentVariable("TS_MTP_PROFILE") != "1")
+        if (modelPath == null || Environment.GetEnvironmentVariable("TS_TEST_QWEN36_SPEC_PROFILE") != "1")
         { _output.WriteLine("[mtp-profile] opt-in not set; skipping"); return; }
 
-        int maxNew = EnvInt("TS_MTP_NEW_TOKENS", 48);
-        int maxDraft = EnvInt("TS_MTP_DRAFT", 8);
+        int maxNew = EnvInt("TS_TEST_QWEN36_SPEC_NEW_TOKENS", 48);
+        int maxDraft = EnvInt("TS_SPEC_DRAFT", 8);
 
         _output.WriteLine($"[mtp-profile] loading {Path.GetFileName(modelPath)} backend={ResolveBackend()}");
         using var model = (Qwen35Model)ModelBase.Create(modelPath, ResolveBackend());
@@ -225,7 +226,7 @@ public class Qwen36SpeculativeTests
     }
 
     private static BackendType ResolveBackend() =>
-        (Environment.GetEnvironmentVariable("TS_MTP_BACKEND") ?? "ggml_cpu").ToLowerInvariant() switch
+        (Environment.GetEnvironmentVariable("TS_TEST_QWEN36_SPEC_BACKEND") ?? "ggml_cpu").ToLowerInvariant() switch
         {
             "ggml_cuda" => BackendType.GgmlCuda,
             "ggml_metal" => BackendType.GgmlMetal,
@@ -236,14 +237,14 @@ public class Qwen36SpeculativeTests
 
     private static string ResolveModel()
     {
-        if (Environment.GetEnvironmentVariable("TS_MTP_E2E") != "1")
+        if (Environment.GetEnvironmentVariable("TS_TEST_QWEN36_SPEC") != "1")
             return null;
 
-        string explicitPath = Environment.GetEnvironmentVariable("TS_MTP_MODEL");
+        string explicitPath = Environment.GetEnvironmentVariable("TS_TEST_QWEN36_SPEC_MODEL");
         if (!string.IsNullOrEmpty(explicitPath) && File.Exists(explicitPath))
             return explicitPath;
 
-        string dir = Environment.GetEnvironmentVariable("TS_MTP_MODEL_DIR");
+        string dir = Environment.GetEnvironmentVariable("TS_TEST_QWEN36_SPEC_MODEL_DIR");
         if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
             dir = DefaultModelDir;
         if (!Directory.Exists(dir))

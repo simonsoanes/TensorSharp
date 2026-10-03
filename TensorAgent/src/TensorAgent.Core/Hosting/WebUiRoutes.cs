@@ -8,10 +8,12 @@
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using TensorAgent.Core.Catalog;
 using TensorAgent.Core.Downloads;
+using TensorAgent.Core.Localization;
 using TensorAgent.Core.Sessions;
 using TensorAgent.Core.Sharing;
 using TensorAgent.Core.Settings;
@@ -42,7 +44,7 @@ namespace TensorAgent.Core.Hosting;
 /// colliding with something the desktop adds later.
 /// </para>
 /// </summary>
-public static class WebUiRoutes
+public static partial class WebUiRoutes
 {
     /// <summary>
     /// Bind the shared Web UI API. <paramref name="chat"/> and
@@ -82,6 +84,12 @@ public static class WebUiRoutes
     /// this exercise.
     /// </para>
     /// </param>
+    /// <param name="prepareImage">
+    /// The LoRA plug-ins a picture is made with (<see cref="AgentAppHost.PrepareImageTurn"/>),
+    /// or null when the host does not choose them per picture. The edit routes apply it as a
+    /// chat picture does, so the saved choice holds for every picture the app makes: without
+    /// it they would use whatever set the last chat picture left on the model.
+    /// </param>
     public static void MapWebUi(
         this LoopbackServer server,
         WebUiChatService chat,
@@ -89,12 +97,16 @@ public static class WebUiRoutes
         SkillsService? skills = null,
         ConversationRecorder? recorder = null,
         Func<JsonElement, CancellationToken, IAsyncEnumerable<object>>? chatFrames = null,
-        ChatTurnManager? turns = null)
+        ChatTurnManager? turns = null,
+        Func<bool, ImageTurns.Preparation>? prepareImage = null)
     {
         ArgumentNullException.ThrowIfNull(server);
         ArgumentNullException.ThrowIfNull(chat);
         ArgumentException.ThrowIfNullOrWhiteSpace(uploadDirectory);
-        chatFrames ??= chat.ChatStreamAsync;
+        // An image model answers the same route, under the same turn manager and
+        // recorder, so a picture survives the page being hidden exactly as an answer
+        // does (see ImageTurns).
+        chatFrames ??= (body, ct) => ImageTurns.FramesFor(chat, body, ct, prepareImage);
 
         // ---- chat ---------------------------------------------------------------
         server.MapGet("/api/queue/status", (_, _) => Ok(chat.GetQueueStatus()));
@@ -139,7 +151,7 @@ public static class WebUiRoutes
             {
                 string id = request.RouteValues["id"];
                 if (turns.StatusOfId(id) is null)
-                    return Task.FromResult<LoopbackResponse?>(LoopbackResponse.Json(new { error = "no such turn" }, 404));
+                    return Task.FromResult<LoopbackResponse?>(LoopbackResponse.Json(new { error = Loc.T("host.turn.notFound") }, 404));
                 int from = int.TryParse(request.Query("from"), out int parsed) ? parsed : 0;
                 return Task.FromResult<LoopbackResponse?>(LoopbackResponse.Sse(
                     turns.WatchAsync(id, from, CancellationToken.None),
@@ -215,11 +227,11 @@ public static class WebUiRoutes
         server.MapPost("/api/upload", async (request, ct) =>
         {
             if (!request.HasFormContentType)
-                return LoopbackResponse.Json(new { error = "Expected multipart form data" }, 400);
+                return LoopbackResponse.Json(new { error = Loc.T("host.upload.notMultipart") }, 400);
             try
             {
                 if (request.Raw.ContentLength64 > chat.MaxUploadBatchBytes)
-                    return LoopbackResponse.Json(new { error = "Upload exceeds the request size limit." }, 413);
+                    return LoopbackResponse.Json(new { error = Loc.T("host.upload.tooLarge") }, 413);
                 using MultipartForm form = await MultipartFormReader.ReadAsync(request.Raw.InputStream,
                     request.Raw.ContentType ?? string.Empty, ct, chat.MaxUploadBatchBytes, WebUiChatService.MaxUploadFiles);
                 // iOS photo pickers may omit extensions; retain MIME-based naming
@@ -230,7 +242,7 @@ public static class WebUiRoutes
             }
             catch (InvalidDataException)
             {
-                return LoopbackResponse.Json(new { error = "Invalid multipart form data or too many files." }, 400);
+                return LoopbackResponse.Json(new { error = Loc.T("host.upload.invalid") }, 400);
             }
             catch (UploadLimitExceededException ex)
             {
@@ -241,16 +253,22 @@ public static class WebUiRoutes
         // route, and it has to exist for the same reason: the page renders an
         // attachment, a frame, an edited image and a generated clip from the URL the
         // API handed back, so a missing mount is not a missing feature but a chat full
-        // of broken images with a 200 behind each one.
-        server.MapGet("/uploads/{*path}", (request, _) => Task.FromResult(ServeUpload(uploadDirectory, request.RouteValues["path"])));
+        // of broken images with a 200 behind each one. Mapped as files, so it takes HEAD
+        // as static files do; the byte ranges a clip plays and seeks with are the file
+        // reply's own.
+        server.MapFiles("/uploads/{*path}", (request, _) => Task.FromResult(ServeUpload(uploadDirectory, request.RouteValues["path"])));
 
         server.MapPost("/api/image-edit", async (request, ct) =>
         {
             JsonElement body = await request.ReadJsonAsync(ct);
-            return Json(await Guarded(() => chat.ImageEditAsync(body, ct)));
+            if (prepareImage?.Invoke(true) is not { } plan)
+                return Json(await Guarded(() => chat.ImageEditAsync(body, ct)));
+            if (plan.Error is { } refused)
+                return LoopbackResponse.Json(new { error = refused }, 409);
+            return Json(await Guarded(() => chat.ImageEditAsync(body, plan.Specs, ct)));
         });
         server.MapPost("/api/image-edit/stream", async (request, ct) =>
-            LoopbackResponse.Sse(Guarded(chat.ImageEditStreamAsync(await request.ReadJsonAsync(ct), ct)), request.Cancellation));
+            LoopbackResponse.Sse(Guarded(ImageEditFrames(chat, prepareImage, await request.ReadJsonAsync(ct), ct)), request.Cancellation));
         server.MapPost("/api/video-generate", async (request, ct) =>
         {
             JsonElement body = await request.ReadJsonAsync(ct);
@@ -280,7 +298,7 @@ public static class WebUiRoutes
             using MultipartForm form = await request.ReadFormAsync(ct);
             MultipartFile? file = form.Files.FirstOrDefault();
             if (file is null)
-                return LoopbackResponse.Json(new { error = "no skill archive was uploaded" }, 400);
+                return LoopbackResponse.Json(new { error = Loc.T("host.skills.noArchive") }, 400);
             await using FileStream zip = File.OpenRead(file.TempPath);
             bool overwrite = string.Equals(form["overwrite"], "true", StringComparison.OrdinalIgnoreCase);
             return Json(GuardedValue(() => skills.Install(zip, file.FileName, file.Length, overwrite)));
@@ -296,7 +314,7 @@ public static class WebUiRoutes
             JsonElement body = await request.ReadJsonAsync(ct);
             string url = body.TryGetProperty("url", out JsonElement u) ? (u.GetString() ?? string.Empty).Trim() : string.Empty;
             if (url.Length == 0)
-                return LoopbackResponse.Json(new { error = "a url is required" }, 400);
+                return LoopbackResponse.Json(new { error = Loc.T("host.skills.urlRequired") }, 400);
             bool overwrite = body.TryGetProperty("overwrite", out JsonElement o) && o.ValueKind == JsonValueKind.True;
             return Json(await GuardedValueAsync(() => skills.InstallFromUrlAsync(url, overwrite, ct)));
         });
@@ -348,7 +366,7 @@ public static class WebUiRoutes
             IReadOnlyList<CodeArtifact> files = artifacts.List(
                 runId, (id, rel, _) => CodeArtifactStore.UrlFor(prefix, id, rel));
             return Task.FromResult<LoopbackResponse?>(files.Count == 0
-                ? LoopbackResponse.Json(new { error = "no files are held for that run" }, 404)
+                ? LoopbackResponse.Json(new { error = Loc.T("host.artifacts.noFiles") }, 404)
                 : LoopbackResponse.Json(new
                 {
                     runId,
@@ -383,7 +401,8 @@ public static class WebUiRoutes
         Func<object>? describeModel = null,
         ShareIntake? shares = null,
         Func<bool>? hasShareContainer = null,
-        Func<string, bool>? discardShare = null)
+        Func<string, bool>? discardShare = null,
+        Action<string?>? onModelCacheDirectoryChanged = null)
     {
         ArgumentNullException.ThrowIfNull(server);
         ArgumentNullException.ThrowIfNull(catalog);
@@ -391,6 +410,14 @@ public static class WebUiRoutes
         CatalogModel? Find(string id) => catalog.FirstOrDefault(m => string.Equals(m.Id, id, StringComparison.Ordinal));
         ArgumentNullException.ThrowIfNull(conversations);
         ArgumentNullException.ThrowIfNull(settings);
+        string defaultModelDirectory = models.Root;
+
+        AppSettings CurrentSettings()
+        {
+            AppSettings current = settings.Load();
+            current.ModelCacheDirectory = models.Root;
+            return current;
+        }
 
         server.MapGet("/api/agent/catalog", (_, _) => Ok(new
         {
@@ -401,7 +428,7 @@ public static class WebUiRoutes
         {
             CatalogModel? model = Find(request.RouteValues["id"]);
             return model is null
-                ? Task.FromResult<LoopbackResponse?>(LoopbackResponse.Json(new { error = "no such model" }, 404))
+                ? Task.FromResult<LoopbackResponse?>(LoopbackResponse.Json(new { error = Loc.T("host.models.notFound") }, 404))
                 : Ok(Describe(model, models, downloads));
         });
 
@@ -427,12 +454,12 @@ public static class WebUiRoutes
         {
             CatalogModel? model = Find(request.RouteValues["id"]);
             if (model is null)
-                return Task.FromResult<LoopbackResponse?>(LoopbackResponse.Json(new { error = "no such model" }, 404));
+                return Task.FromResult<LoopbackResponse?>(LoopbackResponse.Json(new { error = Loc.T("host.models.notFound") }, 404));
             if (model.SideloadOnly)
             {
                 return Task.FromResult<LoopbackResponse?>(LoopbackResponse.Json(new
                 {
-                    error = $"{model.DisplayName} has no verified publisher URL; import {model.Weights.FileName} from the native Models page.",
+                    error = Loc.T("host.models.sideloadOnly", ("model", model.DisplayName), ("file", model.Weights.FileName)),
                 }, 409));
             }
 
@@ -462,7 +489,7 @@ public static class WebUiRoutes
         {
             CatalogModel? model = Find(request.RouteValues["id"]);
             if (model is null)
-                return Task.FromResult<LoopbackResponse?>(LoopbackResponse.Json(new { error = "no such model" }, 404));
+                return Task.FromResult<LoopbackResponse?>(LoopbackResponse.Json(new { error = Loc.T("host.models.notFound") }, 404));
             // Stopped first: deleting the directory under a running transfer leaves the
             // downloader writing into a path that no longer has a parent, and the error
             // it raises describes the symptom rather than the delete that caused it.
@@ -477,14 +504,14 @@ public static class WebUiRoutes
         {
             Conversation? conversation = conversations.Load(request.RouteValues["id"]);
             return conversation is null
-                ? Task.FromResult<LoopbackResponse?>(LoopbackResponse.Json(new { error = "no such conversation" }, 404))
+                ? Task.FromResult<LoopbackResponse?>(LoopbackResponse.Json(new { error = Loc.T("host.conversations.notFound") }, 404))
                 : Ok(conversation);
         });
         server.MapPost("/api/agent/conversations/{id}", async (request, ct) =>
         {
             Conversation? conversation = conversations.Load(request.RouteValues["id"]);
             if (conversation is null)
-                return LoopbackResponse.Json(new { error = "no such conversation" }, 404);
+                return LoopbackResponse.Json(new { error = Loc.T("host.conversations.notFound") }, 404);
             JsonElement body = await request.ReadJsonAsync(ct);
             if (body.TryGetProperty("title", out JsonElement title) && title.GetString() is { Length: > 0 } text)
                 conversations.Rename(conversation.Id, text);
@@ -493,17 +520,66 @@ public static class WebUiRoutes
         server.MapDelete("/api/agent/conversations/{id}", (request, _) =>
             Ok(new { deleted = conversations.Delete(request.RouteValues["id"]) }));
 
-        server.MapGet("/api/agent/settings", (_, _) => Ok(settings.Load()));
+        server.MapGet("/api/agent/settings", (_, _) => Ok(CurrentSettings()));
+        server.MapPost("/api/agent/settings/model-cache-directory", async (request, ct) =>
+        {
+            try
+            {
+                JsonElement body = await request.ReadJsonAsync(ct);
+                if (body.ValueKind != JsonValueKind.Object
+                    || !body.TryGetProperty("modelCacheDirectory", out JsonElement value)
+                    || value.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))
+                    return LoopbackResponse.Json(new { error = Loc.T("settings.storage.modelCache.absolutePath") }, 400);
+                string? directory = value.GetString();
+                if (onModelCacheDirectoryChanged is not null)
+                    onModelCacheDirectoryChanged(directory);
+                else
+                {
+                    string root = AgentPaths.ResolveModelsDirectory(directory, defaultModelDirectory);
+                    void Save() => settings.Update(current =>
+                    {
+                        current.ModelCacheDirectory = string.IsNullOrWhiteSpace(directory) ? string.Empty : root;
+                        return current;
+                    });
+                    if (downloads is not null)
+                        downloads.ChangeModelDirectory(root, Save);
+                    else
+                        models.ChangeRoot(root, Save);
+                }
+                return LoopbackResponse.Json(CurrentSettings());
+            }
+            catch (InvalidOperationException ex)
+            {
+                return LoopbackResponse.Json(new { error = ex.Message }, 409);
+            }
+            catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException or JsonException)
+            {
+                return LoopbackResponse.Json(new { error = ex.Message }, 400);
+            }
+        });
         server.MapPost("/api/agent/settings", async (request, ct) =>
         {
             AppSettings updated = JsonSerializer.Deserialize<AppSettings>(
                 (await request.ReadJsonAsync(ct)).GetRawText(), SseFraming.JsonOptions) ?? new AppSettings();
-            settings.Save(updated);
-            AppSettings saved = settings.Load();
+            // The LoRA sheet's routes own the plug-in choice (MapLoras), which they check as
+            // they save it. The page posts the copy of the settings it read when it loaded, so
+            // taking that copy's choice would undo a plug-in turned on since, or bring back one
+            // removed with its files.
+            // The interface language is the Settings screen's in the same way: a copy read
+            // before the user switched would switch them back.
+            // The model folder has its own validated route; an old page copy must not
+            // undo a location changed on the native Settings screen.
+            AppSettings saved = settings.Update(current =>
+            {
+                updated.ImageLoras = current.ImageLoras;
+                updated.UiLanguage = current.UiLanguage;
+                updated.ModelCacheDirectory = current.ModelCacheDirectory;
+                return updated;
+            });
             // Applied, not merely stored. Saving alone is what made "Allow network
             // access" a switch that did nothing until the app was force-quit.
             onSettingsChanged?.Invoke(saved);
-            return LoopbackResponse.Json(saved);
+            return LoopbackResponse.Json(CurrentSettings());
         });
 
         // The page tells the app what it just did — which conversation it bound, when
@@ -562,7 +638,7 @@ public static class WebUiRoutes
 
         server.MapGet("/api/agent/engine", (_, _) => Ok(new
         {
-            engine = describeEngine?.Invoke() ?? "unknown",
+            engine = describeEngine?.Invoke() ?? Loc.T("host.engine.unknown"),
             // The page needs to RECOGNISE a network refusal to offer the switch that
             // fixes it, and the one thing it must not do is keep its own copy of the
             // wording: two spellings of the same message drift, and the day they do
@@ -639,7 +715,7 @@ public static class WebUiRoutes
             {
                 DownloadState.Completed => new { done = true, id = modelId },
                 DownloadState.Cancelled => (object)new { cancelled = true, id = modelId },
-                _ => new { error = status.Error ?? "the download failed", id = modelId },
+                _ => new { error = status.Error ?? Loc.T("host.download.failed"), id = modelId },
             };
         }
     }
@@ -760,6 +836,8 @@ public static class WebUiRoutes
         var artifacts = new List<StoredArtifact>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         string? sessionId = null;
+        string? imageUrl = null, videoUrl = null, audioUrl = null;
+        StoredTurnStats? stats = null;
 
         await foreach (object frame in frames.ConfigureAwait(false))
         {
@@ -770,6 +848,8 @@ public static class WebUiRoutes
             // only way to stay honest about what was actually sent.
             using JsonDocument document = JsonDocument.Parse(JsonSerializer.Serialize(frame, SseFraming.JsonOptions));
             JsonElement root = document.RootElement;
+            if (root.TryGetProperty("done", out JsonElement done) && done.ValueKind == JsonValueKind.True)
+                stats = StoredTurnStats.FromDoneFrame(root);
             if (root.TryGetProperty("token", out JsonElement token) && token.GetString() is { } piece)
                 content.Append(piece);
             else if (root.TryGetProperty("replace", out JsonElement replace) && replace.GetString() is { } whole)
@@ -778,11 +858,27 @@ public static class WebUiRoutes
                 thinking.Append(reasoning);
             if (root.TryGetProperty("sessionId", out JsonElement id) && id.GetString() is { Length: > 0 } value)
                 sessionId = value;
+            // An image or video model's turn may produce nothing else (ImageTurns, VideoTurns).
+            if (root.TryGetProperty("imageUrl", out JsonElement picture)
+                && picture.ValueKind == JsonValueKind.String
+                && picture.GetString() is { Length: > 0 } url)
+                imageUrl = url;
+            if (root.TryGetProperty("videoUrl", out JsonElement clip)
+                && clip.ValueKind == JsonValueKind.String
+                && clip.GetString() is { Length: > 0 } filmed)
+            {
+                videoUrl = filmed;
+                audioUrl = root.TryGetProperty("audioUrl", out JsonElement sound)
+                    && sound.ValueKind == JsonValueKind.String
+                    && sound.GetString() is { Length: > 0 } heard
+                        ? heard
+                        : null;
+            }
             CollectArtifacts(root, artifacts, seen);
         }
 
         if (sessionId is not null)
-            recorder.Complete(sessionId, content.ToString(), thinking.ToString(), artifacts);
+            recorder.Complete(sessionId, content.ToString(), thinking.ToString(), artifacts, imageUrl, videoUrl, audioUrl, stats);
     }
 
     /// <summary>
@@ -862,6 +958,25 @@ public static class WebUiRoutes
     /// translation, never a reinterpretation: the status and the payload are passed
     /// through untouched so the page sees what the desktop's page sees.
     /// </summary>
+    /// <summary>An edit's frames, made with the plug-ins <paramref name="prepare"/> chooses;
+    /// a choice it refuses ends the stream with the reason, as a chat picture's does.</summary>
+    private static async IAsyncEnumerable<object> ImageEditFrames(
+        WebUiChatService chat, Func<bool, ImageTurns.Preparation>? prepare, JsonElement body,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        ImageTurns.Preparation? plan = prepare?.Invoke(true);
+        if (plan?.Error is { } refused)
+        {
+            yield return new { done = true, error = refused };
+            yield break;
+        }
+        IAsyncEnumerable<object> frames = plan is null
+            ? chat.ImageEditStreamAsync(body, cancellationToken)
+            : chat.ImageEditStreamAsync(body, plan.Specs, cancellationToken);
+        await foreach (object frame in frames.WithCancellation(cancellationToken).ConfigureAwait(false))
+            yield return frame;
+    }
+
     private static async Task<object> Guarded(Func<Task<object>> call)
     {
         try { return await call().ConfigureAwait(false); }

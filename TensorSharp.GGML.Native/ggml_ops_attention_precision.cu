@@ -36,6 +36,87 @@ __device__ __forceinline__ float read(view t, int64_t x, int64_t y = 0, int64_t 
     return __uint_as_float(uint32_t(*reinterpret_cast<const uint16_t *>(p)) << 16);
 }
 
+// One thread owns one query vector, while the block shares each K/V tile.
+// All operands, dot products, online-softmax state and weighted sums stay F32.
+// Unlike upstream's generic 72-wide flash kernel, this never rounds Q/K/V or
+// accumulators to half; unlike decomposed attention, scratch is O(N * D).
+template <int WIDTH>
+__global__ __launch_bounds__(128) void vision_kernel(view q, view k, view v, float scale, float * output) {
+    constexpr int QUERIES = 128, KEYS = 16;
+    __shared__ float keys[KEYS * WIDTH], values[KEYS * WIDTH];
+    // Query-major register arrays for all scores add register pressure and make
+    // the compiler emit an enormous unrolled instruction stream. Keep this
+    // small score tile key-major in shared memory: adjacent query threads use
+    // adjacent banks, and the two vector loops below keep their independent
+    // per-component accumulators in registers.
+    __shared__ float probabilities[KEYS * QUERIES];
+    const int head = blockIdx.y, batch = blockIdx.z;
+    const int64_t query = int64_t(blockIdx.x) * QUERIES + threadIdx.x;
+    const bool active = query < q.ne[1];
+    float query_values[WIDTH], accumulators[WIDTH];
+#pragma unroll
+    for (int x = 0; x < WIDTH; ++x) {
+        query_values[x] = active ? read(q, x, query, head, batch) : 0;
+        accumulators[x] = 0;
+    }
+    float maximum = -CUDART_INF_F, denominator = 0;
+    for (int64_t first = 0; first < k.ne[1]; first += KEYS) {
+        const int count = int(min(int64_t(KEYS), k.ne[1] - first));
+        for (int i = threadIdx.x; i < count * WIDTH; i += QUERIES) {
+            keys[i] = read(k, i % WIDTH, first + i / WIDTH, head, batch);
+            values[i] = read(v, i % WIDTH, first + i / WIDTH, head, batch);
+        }
+        __syncthreads();
+        if (active) {
+            float next = maximum;
+#pragma unroll 1
+            for (int j = 0; j < KEYS; ++j) {
+                float dot0 = 0, dot1 = 0, dot2 = 0, dot3 = 0;
+                if (j < count) {
+#pragma unroll
+                    for (int x = 0; x < WIDTH; x += 4) {
+                        dot0 = fmaf(query_values[x], keys[j * WIDTH + x], dot0);
+                        dot1 = fmaf(query_values[x + 1], keys[j * WIDTH + x + 1], dot1);
+                        dot2 = fmaf(query_values[x + 2], keys[j * WIDTH + x + 2], dot2);
+                        dot3 = fmaf(query_values[x + 3], keys[j * WIDTH + x + 3], dot3);
+                    }
+                }
+                const float dot = (dot0 + dot1) + (dot2 + dot3);
+                const float score = j < count ? __fmul_rn(dot, scale) : -CUDART_INF_F;
+                probabilities[j * QUERIES + threadIdx.x] = score;
+                next = fmaxf(next, score);
+            }
+            const float correction = expf(maximum - next);
+            denominator *= correction;
+#pragma unroll 1
+            for (int j = 0; j < KEYS; ++j) {
+                const float probability = j < count ? expf(probabilities[j * QUERIES + threadIdx.x] - next) : 0;
+                probabilities[j * QUERIES + threadIdx.x] = probability;
+                denominator += probability;
+            }
+#pragma unroll
+            for (int x = 0; x < WIDTH; ++x) accumulators[x] *= correction;
+#pragma unroll 1
+            for (int j = 0; j < count; ++j) {
+                const float probability = probabilities[j * QUERIES + threadIdx.x];
+#pragma unroll
+                for (int x = 0; x < WIDTH; ++x)
+                    accumulators[x] = fmaf(probability, values[j * WIDTH + x], accumulators[x]);
+            }
+            maximum = next;
+        }
+        // An inactive tail query participates in both barriers; no tile can be
+        // overwritten until all active queries have consumed it.
+        __syncthreads();
+    }
+    if (active) {
+        const int64_t row = head + q.ne[2] * (query + q.ne[1] * batch);
+#pragma unroll
+        for (int x = 0; x < WIDTH; ++x)
+            output[row * WIDTH + x] = accumulators[x] / denominator;
+    }
+}
+
 // A block owns one query/head and one key partition. Sixteen scores at a
 // time share the cached F32 query. Both online softmax and the V weighting
 // remain F32; no score matrix or host synchronization is needed.
@@ -244,7 +325,12 @@ void tsg_attention_cuda_compute(ggml_tensor * dst, ggml_backend_t backend) {
     std::memcpy(&params, dst->op_params, sizeof(params));
     const auto & desc = *static_cast<const tsg_dsv4_fused_desc *>(params.userdata);
     CUDA_CHECK(cudaSetDevice(context->device));
-    if (desc.kind == TSG_ATTN_MASK_COMPACT) {
+    if (desc.kind == TSG_ATTN_VISION_F32) {
+        const auto q = tensor_view(dst->src[0]), k = tensor_view(dst->src[1]), v = tensor_view(dst->src[2]);
+        GGML_ASSERT(q.ne[0] == 72 && (q.ne[1] + 127) / 128 <= INT_MAX && q.ne[2] <= 65535 && q.ne[3] <= 65535);
+        const dim3 blocks(unsigned((q.ne[1] + 127) / 128), unsigned(q.ne[2]), unsigned(q.ne[3]));
+        vision_kernel<72><<<blocks, 128, 0, stream>>>(q, k, v, desc.f0, static_cast<float *>(dst->data));
+    } else if (desc.kind == TSG_ATTN_MASK_COMPACT) {
         const int64_t rows = ggml_nelements(dst) / dst->ne[0];
         GGML_ASSERT(rows <= INT_MAX);
         compact_kernel<<<unsigned(rows), 256, 0, stream>>>(tensor_view(dst->src[0]), desc.i0,

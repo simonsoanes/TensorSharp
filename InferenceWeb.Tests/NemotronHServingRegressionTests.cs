@@ -57,12 +57,7 @@ public sealed class NemotronHModelFixture : IDisposable
             Assert.False(string.IsNullOrEmpty(path), $"no *{GgufPattern}* GGUF under {EnvDir}");
             if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("MAX_CONTEXT")))
                 Environment.SetEnvironmentVariable("MAX_CONTEXT", "65536");
-            var backend = (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "cpu").ToLowerInvariant() switch
-            {
-                "cuda" => BackendType.GgmlCuda,
-                "metal" => BackendType.GgmlMetal,
-                _ => BackendType.GgmlCpu,
-            };
+            var backend = TestGates.PinnedGgmlBackend;
             _model = ModelBase.Create(path, backend);
             return _model;
         }
@@ -136,7 +131,7 @@ public class NemotronHServingRegressionTests : IClassFixture<NemotronHModelFixtu
         Assert.True(maxDiff < 1.0, $"continued-vs-fresh logits differ by {maxDiff:F3}: the continuation read stale recurrent state.");
     }
 
-    /// <summary>The per-sequence path (<c>TS_NEMOTRON_BATCHED=0</c>) serves concurrent
+    /// <summary>The per-sequence path (<c>--no-continuous-batching</c>) serves concurrent
     /// requests one sequence per step through the same kernels as a request served
     /// alone, swapping each sequence's K/V and recurrent state in and out. Its greedy
     /// output must therefore equal the serial output token for token.</summary>
@@ -160,8 +155,8 @@ public class NemotronHServingRegressionTests : IClassFixture<NemotronHModelFixtu
     private async Task RunConcurrentGreedy(bool batchedPath)
     {
         var model = _fixture.Model;
-        string previous = Environment.GetEnvironmentVariable("TS_NEMOTRON_BATCHED");
-        Environment.SetEnvironmentVariable("TS_NEMOTRON_BATCHED", batchedPath ? "1" : "0");
+        string previous = Environment.GetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED");
+        Environment.SetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED", batchedPath ? "0" : "1");
         var renderer = new KVCachePromptRenderer(new GgufPromptRenderer());
         int[][] promptTokens = Prompts.Select(p => Render(model, renderer, p)).ToArray();
         const int maxNew = 32;
@@ -220,7 +215,7 @@ public class NemotronHServingRegressionTests : IClassFixture<NemotronHModelFixtu
         }
         finally
         {
-            Environment.SetEnvironmentVariable("TS_NEMOTRON_BATCHED", previous);
+            Environment.SetEnvironmentVariable("TS_SCHED_DISABLE_BATCHED", previous);
         }
 
         var failures = new List<string>();

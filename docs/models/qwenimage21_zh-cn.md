@@ -178,6 +178,105 @@ Qwen-Image 服务端在这两种情况下都会在启动时警告，但不会拒
 运行这个扩散模型。现有的 `/api/image-edit` 请求仍至少需要一张参考图；生成有自己的
 端点。预览由当前流预测估计出的干净潜变量解码而来。
 
+## 用遮罩精确编辑局部区域
+
+提供与第一张输入图尺寸完全相同的遮罩即可编辑选定区域。默认**白色编辑、黑色保留**，灰色在
+编辑结果与原图之间混合。透明遮罩可用 `maskMode: "alpha"` 或 `--mask-mode alpha`：透明像素编辑，
+不透明像素保留。原图自身的透明度与选区遮罩分开处理。
+
+输出保留第一张输入图的原始尺寸，并在每个未选中像素处保留其解码后的 RGB 与 alpha 值。
+去噪期间会约束受保护的潜变量，最后把生成区域合成到原图上。其他输入图仍作为参考图。
+空选区直接返回原图，不运行扩散；全选则编辑整个画布。
+
+```bash
+dotnet run --project TensorSharp.Cli -c Release --no-build -- \
+  --config config/qwen-image-2.1.json \
+  --image photo.png --mask selection.png --mask-mode grayscale \
+  --prompt 'Change the selected vase to red ceramic' \
+  --mask-feather 8 --mask-crop --mask-crop-padding 96 \
+  --width 1024 --height 1024 --diffusion-seed 42 --output edited.png
+```
+
+`--mask-feather` 以原图像素为单位向内柔化边缘（0–1024，默认 0），让未选中的像素保持受保护。
+`--mask-invert` 反转选区。`--mask-crop` 只处理选区及周围上下文，再把它放回原始画布；
+`--mask-crop-padding` 设置上下文的原图像素范围（0–16384，默认 64）。裁切是可选的，小选区可以
+使用较小的内部 `--width` / `--height` 来减少推理工作。这两个参数设置名义上的整幅采样分辨率；
+裁切模式会按裁切区域占原图的比例缩放，并向上取整到 32 像素网格。保存的图像仍使用原图尺寸。
+质量与速度的取舍取决于选区、上下文、内部尺寸和采样步数。
+
+Multipart API：
+
+```bash
+curl --fail-with-body http://127.0.0.1:5000/api/image-edit \
+  -F 'image=@photo.png' -F 'mask=@selection.png' \
+  -F 'maskMode=grayscale' -F 'maskFeather=8' \
+  -F 'maskCrop=true' -F 'maskCropPadding=96' \
+  -F 'prompt=Change the selected vase to red ceramic' \
+  -F 'width=1024' -F 'height=1024' -F 'seed=42'
+```
+
+JSON 与 SSE 请求先通过 `/api/upload` 上传两份文件，再发送服务端返回的文件名：
+
+```json
+{
+  "imagePaths": ["uploaded-photo.png"],
+  "maskPath": "uploaded-selection.png",
+  "maskMode": "grayscale",
+  "maskInvert": false,
+  "maskFeather": 8,
+  "maskCrop": true,
+  "maskCropPadding": 96,
+  "prompt": "Change the selected vase to red ceramic",
+  "width": 1024,
+  "height": 1024,
+  "seed": 42
+}
+```
+
+这些字段适用于 `/api/image-edit` 与 `/api/image-edit/stream`，包括 TensorAgent 的共享图像编辑
+服务。遮罩引用必须位于上传目录内。遮罩需要输入图和 Qwen-Image-2.1；尺寸不一致、不支持的模式、
+无效数字字段或多个 multipart 遮罩都会在推理前被拒绝。只传遮罩选项而不传遮罩也会被拒绝。
+与其他编辑错误一样，流式请求在终止的 `{done,error}` 帧中报告请求错误。
+
+在 Server Chat 与 TensorAgent（桌面和移动端）中，附加一张或多张照片，在任意照片上选择
+**Select area**（选择区域）。涂抹或擦除选区，缩放和平移查看细节，然后选择 **Use selection**
+（使用选区）并描述修改。保存选区会把该照片设为 **Editing target**（编辑目标），移到输入图的
+第一位，其他照片仍按原顺序作为参考图。每张照片都保留自己的选区，但当前编辑只发送编辑目标的
+遮罩。取消操作或选区上传失败不会改变原有目标。每轮生成一张编辑结果。
+移除编辑目标时，其余照片的选区仍保留；重新打开并保存其中一张即可激活下一次局部编辑。
+
+撤销/重做与反转作用于选区。**Edit again**（再次编辑）恢复原始照片、已保存选区、编辑目标及
+提示词；对比按钮在编辑目标的原图和结果之间切换。TensorAgent 也会随会话保存选区。
+遮罩与参考图分开上传。每张解码后的 SSE 预览与最终图一样，包含受保护的原图像素。
+
+HEIC/HEIF 上传保留小缩略图，以及用于涂抹和重新打开选区的独立全分辨率 PNG；模型仍使用原始照片。
+浏览器编辑器最多支持 1600 万像素及单边 8192 像素。更大的 HEIC/HEIF 照片会显示选区尺寸限制，
+不会在缩小后的缩略图上涂抹遮罩。
+
+遮罩由 TensorSharp 自有的采样和合成代码执行，不会给 Qwen 的条件输入增加标注图或专用遮罩通道。
+精确保留选区外的像素不保证模型在选区内遵循每条指令。裁切有助于隔离物体，但也会移除周围上下文；
+需要该上下文时请关闭裁切。
+
+可复用验证工具：
+
+- `eng/validation/QwenImageMaskBench`：不加载权重，测量合成输入准备、潜变量重注入、合成耗时、
+  分配以及标量一致性。
+- `eng/validation/qwen-image21-mask-bench.py`：真实 CLI 或 HTTP/SSE 运行，检查像素保留、对比裁切，
+  并明确记录测量限制。
+- `eng/validation/validate-image-mask-editor.py`：桌面与触摸模拟的浏览器交互、导出遮罩几何形状，
+  以及撤销/重做的精确回归检查。
+- `eng/validation/validate-image-mask-live.py`：真实 Server Chat 上传、选区、推理、结果与复用，
+  以及 multipart/错误处理检查。
+- `eng/validation/tensoragent-mask-bench.py`：真实 TensorAgent 宿主聊天流程。
+
+各工具用 `--help` 查看参数（C# 基准的参数说明位于 `Program.cs`）。报告、日志和截图保存在被忽略的
+`docs/validation/` 或 `artifacts/` 中。浏览器触摸模拟不能证明原生手机上的行为；CPU 遮罩微基准
+不测量完整模型推理或 GPU 提速。
+
+GGML 后端上的 2.1 扩散 Transformer 运行完整 GGML 图并常驻量化权重；`cpu` 则对同样的文件映射
+权重执行托管前向。两者都没有权重流式模式。可用内存不足时先减小尺寸。CUDA 与 Vulkan 曾在
+NVIDIA A40 上运行；下文记录各项测量的具体范围。
+
 ## 纯 C# CPU 后端（`--backend cpu`）
 
 `--backend cpu` 用托管 C# 运行整条流水线：扩散 Transformer、Qwen3-VL 文本编码器、编辑用的视觉编码器、
@@ -423,10 +522,17 @@ sd.cpp 忽略 `lora_adapter_metadata` 中的 alpha，因此给它的 Pruna 倍�
 
 ### 服务端与 C# API
 
-服务端在启动时加载 `--lora` 插件组，并把它应用到每个生成与编辑请求；尚未实现按请求选择
-LoRA。请求中的 `steps` 与 `cfg` 仍会覆盖插件的配方。在进程内，
+服务端在启动时加载 `--lora` 插件组，并把它应用到每个生成与编辑请求；其 HTTP 请求不能选择
+插件。请求中的 `steps` 与 `cfg` 仍会覆盖插件的配方。在进程内，
 `QwenImageModel.SetLoras(IReadOnlyList<LoraSpec>)` 为之后的请求替换插件组（空列表表示
 移除）。新插件组会立即针对 Transformer 校验，失败时保留原来的插件组。
+
+按图片选择插件的宿主把插件组传给 `WebUiChatService` 的 `ImageGenerateStreamAsync`、
+`ImageEditStreamAsync` 或 `ImageEditAsync(body, loras, ct)`：插件组在与生成相同的锁内替换，
+所以排队等候的图片使用它请求时的插件组；插件组未变时没有开销（请传绝对路径，模型按此记录
+插件组）。TensorAgent 的 Mac 应用即如此：它从自己的固定目录提供
+[USAGE_zh-cn.md 表中](../../USAGE_zh-cn.md#qwen-image-21-lora-插件)的十二个插件，并把用户的选择
+应用到每张图片，包括它的编辑路由（见 [TensorAgent 的 README](../../TensorAgent/README.md)）。
 
 ### 限制
 

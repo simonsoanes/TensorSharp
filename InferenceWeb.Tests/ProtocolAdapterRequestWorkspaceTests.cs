@@ -128,15 +128,12 @@ public sealed class ProtocolAdapterRequestWorkspaceTests : IDisposable
     };
 
     [Theory]
-    [InlineData("deepseek41", "json_object", 404, false)]
-    [InlineData("deepseek41", "json_schema", 404, false)]
-    [InlineData("deepseek41", "json_object", 400, true)]
-    [InlineData("deepseek4", "json_object", 400, false)]
-    [InlineData("qwen35", "json_schema", 400, false)]
-    public async Task ThinkingJson_RequiresProtocolWithDelayedGrammar(string architecture, string format, int status, bool grammarDisabled)
+    [InlineData("deepseek41", "json_object", 404)]
+    [InlineData("deepseek41", "json_schema", 404)]
+    [InlineData("deepseek4", "json_object", 400)]
+    [InlineData("qwen35", "json_schema", 400)]
+    public async Task ThinkingJson_RequiresProtocolWithDelayedGrammar(string architecture, string format, int status)
     {
-        using var env = new EnvScope();
-        env.Set("TS_JSON_GRAMMAR", grammarDisabled ? "0" : null);
         string responseFormat = format == "json_object" ? "{\"type\":\"json_object\"}"
             : "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"result\",\"strict\":true,\"schema\":{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"integer\"}},\"required\":[\"answer\"],\"additionalProperties\":false}}}";
         var context = ContextFor("{\"model\":\"not-hosted.gguf\",\"messages\":[{\"role\":\"user\",\"content\":\"Return the answer as JSON.\"}],\"think\":true,\"response_format\":" + responseFormat + "}");
@@ -427,24 +424,23 @@ public sealed class ProtocolAdapterRequestWorkspaceTests : IDisposable
         SessionWorkspaceManager workspaces,
         IResponsesStore store)
     {
-        var queue = new InferenceQueue();
         var uploads = new UploadStoragePolicy(uploadRoot);
 
         switch (protocol)
         {
             case "openai-chat":
                 await new OpenAIChatAdapter(
-                    service, queue, options, uploads, registry, runner, workspaces,
+                    service, options, uploads, registry, runner, workspaces,
                     NullLoggerFactory.Instance).ChatCompletionsAsync(context);
                 break;
             case "openai-responses":
                 await new OpenAIResponsesAdapter(
-                    service, queue, options, uploads, registry, runner, workspaces,
+                    service, options, uploads, registry, runner, workspaces,
                     NullLoggerFactory.Instance, store).CreateResponseAsync(context);
                 break;
             case "ollama-chat":
                 await new OllamaAdapter(
-                    service, queue, options, uploads, registry, runner, workspaces,
+                    service, options, uploads, registry, runner, workspaces,
                     NullLoggerFactory.Instance).ChatAsync(context);
                 break;
             default:

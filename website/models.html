@@ -79,7 +79,7 @@
   </table>
   </div>
   <p class="page-foot-note">Tool support requires both a prompt renderer that declares the tools and a matching structured-output parser. Qwen 3.8 Flash Next (<code>qwen4exp</code>) returns structured calls through the Qwen 3.5 parser, so caller-defined tools, Agent Skills tools, code-execution tools and, on the server, <a href="agentic.html#sub-agents">sub-agent delegation</a> are all offered to it. Mistral 3 and Hunyuan Dense render neither tool declarations nor tool results, and DiffusionGemma renders no declarations and refuses requests that carry tools, so none of those tools, and no sub-agent delegation, is offered to these three families.</p>
-  <p class="page-foot-note">MiniMax-H3, Wan, DiffusionGemma and Hunyuan Dense reject multi-GPU modes. Qwen 3.8 Flash Next and DeepSeek V4 use <code>--layer-split N</code> for local whole-layer placement. GLM supports both explicit local modes; Qwen-Image supports local tensor parallelism of its diffusion transformer only. DeepSeek V4.1 routed-MoE TP additionally requires the matching <code>TS_DSV41_TP=N</code> setting.</p>
+  <p class="page-foot-note">MiniMax-H3, Wan, DiffusionGemma and Hunyuan Dense reject multi-GPU modes. Qwen 3.8 Flash Next supports local eligible-quantization GGML CUDA TP as well as <code>--layer-split N</code>; DeepSeek V4 uses whole-layer placement. GLM supports both explicit local modes; Qwen-Image supports local tensor parallelism of its diffusion transformer only. DeepSeek V4.1 supports <code>--layer-split N</code> and experimental routed-MoE <code>--tp N</code>.</p>
 
   <div class="content-footer">
     <a href="backends.html">← Compute Backends</a>

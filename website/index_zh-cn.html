@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TensorSharp 维基 — 面向 .NET 的本地 GGUF 推理与智能体工作流</title>
-  <meta name="description" content="TensorSharp 是原生 .NET GGUF 推理引擎，提供 CLI、Web UI、兼容 API、Agent Skills，以及可选的模型生成代码沙箱。">
+  <title>TensorSharp — 面向 .NET 的本地 AI 推理引擎</title>
+  <meta name="description" content="使用 TensorSharp 在本地运行 GGUF 模型：C#/.NET 推理、文本与多模态聊天、图像与视频生成、嵌入、智能体、CLI、Web UI 和兼容 API。">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
   <script>try{var t=localStorage.getItem('ts-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.classList.toggle('dark',t==='dark');}catch(e){}</script>
@@ -15,18 +15,122 @@
 <a class="skip" href="#content">跳到正文</a>
 <main class="content" id="content">
 
-  <section class="hero hero-home">
+  <section class="hero hero-home home-hero" aria-labelledby="home-title">
     <div>
-      <span class="pill">⚡ C# · .NET 10 · GGUF · AgentHost · GPU 加速</span>
-      <h1>TensorSharp</h1>
-      <p class="lede">一个<strong>面向 GGUF 模型的原生 .NET 推理引擎</strong> —— 提供 CLI、浏览器聊天、<strong>兼容 Ollama 与 OpenAI 的 API</strong>，以及可选的 AgentHost，用于渐进式技能加载与模型生成代码沙箱。</p>
+      <span class="pill">C# · .NET 10 · GGUF · 本地推理</span>
+      <h1 id="home-title">TensorSharp</h1>
+      <p class="home-tagline">本地 AI，原生 .NET。</p>
+      <p class="lede">用同一个 <strong>C# 推理引擎</strong>运行文本与多模态模型、生成图像和视频，并构建智能体工作流。通过 CLI、浏览器聊天、兼容 Ollama 与 OpenAI 的 API，或你自己的 .NET 应用使用它。</p>
       <div class="btn-row">
-        <a class="btn" href="getting-started_zh-cn.html">开始使用 →</a>
-        <a class="btn secondary" href="overview_zh-cn.html">TensorSharp 是什么？</a>
-        <a class="btn secondary" href="agentic_zh-cn.html">智能体工作流</a>
-        <a class="btn secondary" href="#books">阅读配套图书 ↓</a>
-        <a class="btn secondary" href="https://github.com/zhongkaifu/TensorSharp" target="_blank" rel="noopener">GitHub ↗</a>
+        <a class="btn" href="getting-started_zh-cn.html">开始使用 TensorSharp →</a>
+        <a class="btn secondary" href="tensoragent_zh-cn.html">下载 TensorAgent 桌面版 →</a>
       </div>
+      <p class="home-hero-links"><a href="overview_zh-cn.html">了解引擎架构</a><a href="https://github.com/zhongkaifu/TensorSharp" target="_blank" rel="noopener">在 GitHub 查看源码 ↗</a></p>
+      <p class="home-local-note">你自己的模型与硬件，本地推理无需按量计费的 API。</p>
+    </div>
+  </section>
+
+  <section class="home-section" aria-labelledby="why">
+    <h2 id="why">TensorSharp 能做什么</h2>
+    <p class="home-section-intro">从第一次本地聊天，到提供模型服务、调用工具的应用。</p>
+    <div class="home-feature-grid">
+      <a class="home-feature" href="models-text_zh-cn.html">
+        <h3>文本与多模态推理</h3>
+        <p>使用 Gemma、Qwen、DeepSeek、GLM 等模型聊天、推理，处理图像、音频和文档。可用的输入类型取决于模型。</p>
+        <span class="home-card-link">浏览文本模型 →</span>
+      </a>
+      <a class="home-feature" href="models-image_zh-cn.html">
+        <h3>图像与视频生成</h3>
+        <p>用 Qwen-Image 2.1 生成和编辑图像，支持蒙版编辑与 LoRA 插件。用 MiniMax-H3 或 Wan 生成视频；MiniMax-H3 还可生成立体声音频。</p>
+        <span class="home-card-link">浏览媒体模型 →</span>
+      </a>
+      <a class="home-feature" href="embeddings_zh-cn.html">
+        <h3>用于搜索与检索的嵌入</h3>
+        <p>运行 GGUF BERT/XLM-R 句子编码器，包括 Arctic Embed 与 MiniLM，并通过兼容 OpenAI、Ollama 的嵌入 API 批量调用。</p>
+        <span class="home-card-link">使用嵌入模型 →</span>
+      </a>
+      <a class="home-feature" href="agentic_zh-cn.html">
+        <h3>工具、技能与多智能体</h3>
+        <p>通过 AgentHost 添加 Agent Skills、文件与代码工具，以及有界子智能体委派。按任务配置允许使用的工具权限。</p>
+        <span class="home-card-link">构建智能体工作流 →</span>
+      </a>
+      <a class="home-feature" href="backends_zh-cn.html">
+        <h3>CPU 与 GPU 加速</h3>
+        <p>选择纯 C# CPU，或原生 CPU、CUDA、Vulkan、Metal、MLX 后端。各路径的模型、量化与硬件支持范围均有文档说明。</p>
+        <span class="home-card-link">选择计算后端 →</span>
+      </a>
+      <a class="home-feature" href="code-api_zh-cn.html">
+        <h3>可直接集成的 .NET 引擎</h3>
+        <p>在 C# 中嵌入推理、运行 CLI，或托管浏览器聊天及兼容 Ollama、OpenAI 的 API。TensorAgent 将同一引擎带到本地应用中。</p>
+        <span class="home-card-link">通过 C# 集成 →</span>
+      </a>
+    </div>
+  </section>
+
+  <section class="home-section" aria-labelledby="quickstart">
+    <h2 id="quickstart">选择你的使用方式</h2>
+    <p class="home-section-intro">从适合当前任务的界面开始，三种方式都使用 TensorSharp。</p>
+    <div class="home-path-grid">
+      <article class="home-path">
+        <p class="home-kicker">终端</p>
+        <h3>在本地运行模型</h3>
+        <p>通过 CLI 聊天、处理多模态输入、批量任务与基准测试。首次运行指南涵盖 SDK 安装、模型下载与后端配置。</p>
+        <a class="home-card-link" href="getting-started_zh-cn.html">CLI 快速开始 →</a>
+      </article>
+      <article class="home-path">
+        <p class="home-kicker">浏览器与 API</p>
+        <h3>为应用提供模型服务</h3>
+        <p>启动服务器与 Web UI，再通过聊天、Responses 和嵌入端点连接客户端。</p>
+        <a class="home-card-link" href="server_zh-cn.html">服务器与 Web UI 指南 →</a>
+      </article>
+      <article class="home-path" id="tensoragent">
+        <p class="home-kicker">桌面应用</p>
+        <h3>使用 TensorAgent</h3>
+        <p>在 Apple Silicon Mac 或 Windows x64 上安装，在应用内下载模型，开始聊天或使用工具完成任务。</p>
+        <a class="home-card-link" href="tensoragent_zh-cn.html">下载与安装 →</a>
+      </article>
+    </div>
+    <h3 id="quickstart-e4b">选择模型与计算后端</h3>
+    <p>第一次从源码运行？可从 <a href="getting-started_zh-cn.html#e4b-fast-lane">Gemma 4 E4B 教程</a>开始。Apple Silicon、NVIDIA、Vulkan 与 CPU 的配置见<a href="backends_zh-cn.html">计算后端指南</a>。模型权重需要单独下载。</p>
+    <p class="page-foot-note">发行包对应各自的发布标签，当前源码可能包含较新功能。可用下载文件与平台要求见<a href="tensoragent_zh-cn.html#downloads">桌面版指南</a>。iPhone 与 iPad 通过<a href="agentic_zh-cn.html#ios">源码构建</a>。</p>
+  </section>
+
+  <section aria-labelledby="showcase">
+    <h2 id="showcase">实际运行效果</h2>
+    <p>同一个引擎，四种用法，每张都是真实运行的原样截图。点击可查看原图。</p>
+    <div class="shots-grid">
+      <figure class="shot">
+        <a class="shot-media" href="assets/screenshots/tensorsharp-cli.png"><img src="assets/screenshots/tensorsharp-cli.png" alt="终端中的 TensorSharp.Cli：Gemma 4 E4B 在 Metal 上的交互式聊天，读取项目 README 并回答两个问题" width="1400" height="1645" loading="lazy"></a>
+        <figcaption>
+          <h3>TensorSharp.Cli</h3>
+          <p>在终端里运行模型、聊天与基准测试。</p>
+          <a href="cli_zh-cn.html">命令行 →</a>
+        </figcaption>
+      </figure>
+      <figure class="shot">
+        <a class="shot-media" href="assets/screenshots/tensorsharp-webui.png"><img src="assets/screenshots/tensorsharp-webui.png" alt="TensorSharp Web UI：Qwen3.8 27B 编写并运行 Python 脚本比较两种房贷，用表格和一句建议作答，并提供脚本与 CSV 下载" width="1760" height="1129" loading="lazy"></a>
+        <figcaption>
+          <h3>Web UI 聊天 · TensorSharp.Server.Host</h3>
+          <p>浏览器聊天，外加兼容 Ollama 与 OpenAI 的 API。</p>
+          <a href="server_zh-cn.html">服务器与 Web UI →</a>
+        </figcaption>
+      </figure>
+      <figure class="shot">
+        <a class="shot-media" href="assets/screenshots/tensoragent-iphone.png"><img src="assets/screenshots/tensoragent-iphone.png" alt="iPhone 模拟器中的 TensorAgent：Gemma 4 E2B 在应用内置的 Python 中运行脚本，把食谱从 4 人份换算为 10 人份，并以表格作答" width="603" height="1311" loading="lazy"></a>
+        <figcaption>
+          <h3>面向 iPhone 的 TensorAgent</h3>
+          <p>本地聊天与代码工具，此处展示 iPhone 模拟器。</p>
+          <a href="agentic_zh-cn.html#ios">iOS 版 TensorAgent →</a>
+        </figcaption>
+      </figure>
+      <figure class="shot">
+        <a class="shot-media" href="assets/screenshots/tensoragent-mac.png"><img src="assets/screenshots/tensoragent-mac.png" alt="Mac 上的 TensorAgent：Qwen-Image 2.1 将 TensorSharp 横幅背景改为深蓝色星空并保留文字，结果下方提供比较原图和再次编辑按钮" width="3018" height="1900" loading="lazy"></a>
+        <figcaption>
+          <h3>桌面版 TensorAgent</h3>
+          <p>Qwen-Image 2.1 按指令编辑附加的图像；同一应用还支持文本聊天、文件、代码、浏览器技能与视频。</p>
+          <a href="agentic_zh-cn.html#desktop">Mac 与 Windows 上的 TensorAgent →</a>
+        </figcaption>
+      </figure>
     </div>
   </section>
 
@@ -36,7 +140,7 @@
       <h3>文本与多模态 LLM</h3>
       <ul class="model-links">
         <li><a href="models-text_zh-cn.html#gemma4-fast-lane">Gemma 4</a></li>
-        <li><a href="models-text_zh-cn.html#qwen35">Qwen 3.5 / 3.6</a></li>
+        <li><a href="models-text_zh-cn.html#qwen35">Qwen 3.5 / 3.6 / 3.8 27B</a></li>
         <li><a href="models-text_zh-cn.html#qwen4exp">Qwen 3.8 Flash Next</a></li>
         <li><a href="models-text_zh-cn.html#deepseek4">DeepSeek V4 Flash</a></li>
         <li><a href="models-text_zh-cn.html#deepseek41">DeepSeek V4.1 Flash</a></li>
@@ -74,10 +178,40 @@
     <p class="model-note">各家族的后端、多模态输入、工具调用与验证范围不同。<a href="models_zh-cn.html">查看完整能力矩阵 →</a></p>
   </section>
 
+  <section class="home-section" aria-labelledby="runtime">
+    <h2 id="runtime">面向多轮对话与并发任务</h2>
+    <div class="home-runtime-grid">
+      <article class="home-runtime-card">
+        <h3>复用上下文，批量处理请求</h3><p>默认启用连续批处理、分页 KV 缓存和 Radix 前缀共享。支持的模型还可选择推测解码，以进一步降低延迟。</p>
+        <a class="home-card-link" href="advanced_zh-cn.html">了解服务端优化 →</a>
+      </article>
+      <article class="home-runtime-card">
+        <h3>发挥更多硬件的作用</h3><p>部分架构支持多 GPU 层分布、张量并行和多节点执行。基于 SSD 的专家卸载可让部分大型 MoE 模型在权重超过内存容量时运行。</p>
+        <a class="home-card-link" href="distributed_zh-cn.html">查看扩展支持范围 →</a>
+      </article>
+    </div>
+    <aside class="home-benchmarks" aria-labelledby="benchmarks">
+      <h3 id="benchmarks">可核查的性能数据</h3>
+      <p>与 llama.cpp 的对比使用相同 GGUF 文件和相同硬件，分别测量预填充、解码与首 token 延迟，同时记录领先结果和仍有差距的场景。</p>
+      <a class="home-card-link" href="benchmarks_zh-cn.html#head-to-head">查看测量结果与方法 →</a>
+    </aside>
+  </section>
 
-  <p>一切都运行在<strong>你自己的硬件</strong>上：你的笔记本、工作站或服务器。推理与智能体工作默认留在本机，没有按 token 计费，同一套引擎既能完成快速的命令行测试，也能支撑团队内部共享的聊天机器人和生产环境的 REST 接口。运维方明确授予任一执行面的网络权限，或接受 Windows 的非受限代码执行模式后，数据才可能离开本机。本维基是完整指南 —— 从下方选择一个起点，或按 <kbd>/</kbd> 进行搜索。</p>
+  <section class="home-section" aria-labelledby="explore">
+    <h2 id="explore">继续深入了解</h2>
+    <p id="audience">面向开发者、研究者，以及希望理解本地推理原理的读者：从架构、API、模型卡与实测结果继续探索。</p>
+    <div class="home-doc-grid">
+      <a class="home-doc" href="overview_zh-cn.html"><strong>架构概览</strong><span>引擎与各软件包如何协作</span><span aria-hidden="true">→</span></a>
+      <a class="home-doc" href="http-api_zh-cn.html"><strong>HTTP API</strong><span>聊天、Responses、工具与嵌入</span><span aria-hidden="true">→</span></a>
+      <a class="home-doc" href="models_zh-cn.html"><strong>模型能力</strong><span>下载、输入类型与验证范围</span><span aria-hidden="true">→</span></a>
+      <a class="home-doc" href="api-reference_zh-cn.html"><strong>API 参考</strong><span>参数、端点与配置</span><span aria-hidden="true">→</span></a>
+    </div>
+  </section>
 
-  <p><strong>新增句向量编码器：</strong> Snowflake Arctic Embed L v2.0 / all-MiniLM-L6-v2，支持纯 C# CPU 与原生 GGML CPU/Metal/CUDA，通过 <code>--embeddings</code> 提供兼容 OpenAI/Ollama 的 API。 <a href="embeddings_zh-cn.html">嵌入模型、支持的后端与验证 →</a></p>
+  <div class="content-footer">
+    <span>TensorSharp 文档</span>
+    <a href="overview_zh-cn.html">下一篇：概览与架构 →</a>
+  </div>
 
   <section aria-labelledby="books">
     <h2 id="books">配套图书</h2>
@@ -116,81 +250,11 @@
     </div>
   </section>
 
-  <h2 id="explore">浏览维基</h2>
-  <div class="card-grid">
-    <a class="card" href="getting-started_zh-cn.html"><div class="ic">🚀</div><h3>快速开始</h3><p>环境要求、构建、下载模型，并流式输出你的第一个回复。</p></a>
-    <a class="card" href="cli_zh-cn.html"><div class="ic">⌨️</div><h3>命令行</h3><p>从 CLI 运行提示词、图像、音频、批处理与基准测试。</p></a>
-    <a class="card" href="server_zh-cn.html"><div class="ic">🌐</div><h3>服务器与 Web UI</h3><p>在本机托管浏览器聊天机器人和 HTTP 接口。</p></a>
-    <a class="card" href="agentic_zh-cn.html"><div class="ic">🛠️</div><h3>智能体工作流</h3><p>按需加载技能、运行沙箱代码工具、在服务端委派有界子智能体、修复输出并下载生成产物。</p></a>
-    <a class="card" href="agentic_zh-cn.html#ios"><div class="ic">📱</div><h3>TensorAgent for iOS</h3><p>使用 <code>ggml_metal</code> 在 iPhone 和 iPad 上运行本地聊天与有界智能体工作。</p></a>
-    <a class="card" href="http-api_zh-cn.html"><div class="ic">🔌</div><h3>HTTP API</h3><p>用 curl、Python 或任意 Ollama / OpenAI 客户端调用它。</p></a>
-    <a class="card" href="code-api_zh-cn.html"><div class="ic">🧩</div><h3>C# 库</h3><p>将引擎直接嵌入你的 .NET 应用。</p></a>
-    <a class="card" href="api-reference_zh-cn.html"><div class="ic">📚</div><h3>API 参考</h3><p>可搜索的参数、环境变量、端点与类型表。</p></a>
-    <a class="card" href="models_zh-cn.html"><div class="ic">🧠</div><h3>模型</h3><p>支持的模型家族、下载方式、多模态与推理能力 —— 以及想要更快时该选哪个权重。</p></a>
-    <a class="card" href="distributed_zh-cn.html"><div class="ic">🔗</div><h3>不止一张 GPU</h3><p><code>--tp N</code> 选择层内权重张量并行；<code>--layer-split N</code> 选择本地整层放置。两种模式互斥，未配置时默认单设备；支持分布式的张量并行架构可通过 TCP 跨节点运行。按层切分仅支持单节点。</p></a>
-    <a class="card" href="glossary_zh-cn.html"><div class="ic">📖</div><h3>术语表与 FAQ</h3><p>初识大模型？这里有通俗的定义和常见问题。</p></a>
-  </div>
-
-  <h2 id="quickstart">约 30 秒快速上手</h2>
-  <p>按平台安装 <a href="getting-started_zh-cn.html#install-dotnet">.NET 10 SDK</a>、<code>git</code> 与 <code>curl</code> 后，这条路径在原生 GGML 后端上运行经基准验证的 <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener">Gemma 4 E4B Q8_0</a> 模型。复制命令约需 30 秒；7.48 GiB 的模型下载与首次 restore/构建耗时更久，取决于网络与机器。下面的代码块面向 Linux + NVIDIA —— 其他后端见<a href="#quickstart-e4b">下文</a>。Windows PowerShell 请用 <code>curl.exe</code>。</p>
-  <ol class="steps">
-    <li>
-      <h3>克隆</h3>
-      <p>下方第一次 <code>dotnet run</code> 会 restore 项目并编译原生 GGML CUDA 后端；首次构建可能需要数分钟。</p>
-      <pre data-lang="bash"><code>git clone https://github.com/zhongkaifu/TensorSharp.git
-cd TensorSharp</code></pre>
-    </li>
-    <li>
-      <h3>下载模型</h3>
-      <p>推荐文件是 <code>gemma-4-E4B-it-Q8_0.gguf</code>（7.48 GiB）；同一仓库还提供更省内存的 <code>gemma-4-E4B-it-Q4_K_M.gguf</code>。</p>
-      <pre data-lang="bash"><code>curl --create-dirs --fail -L "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" -o models/gemma-4-E4B-it-Q8_0.gguf</code></pre>
-    </li>
-    <li>
-      <h3>运行它</h3>
-      <p>环境变量赋值用于启用 CUDA 原生构建。E4B 还支持思考（<code>--think</code>）与工具调用（<code>--tools</code>）。</p>
-      <pre data-lang="bash"><code>echo "简短回答：TensorSharp 是什么？" &gt; prompt.txt
-TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Cli -c Release -p:TensorSharpSkipMlxNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 128 --backend ggml_cuda</code></pre>
-    </li>
-    <li>
-      <h3>想要 UI + API？</h3>
-      <p>用同一模型启动服务端。浏览器聊天位于 <code>/</code>；纯文本存活检查位于 <code>/health</code>。</p>
-      <pre data-lang="bash"><code>TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Server.Host -c Release -p:TensorSharpSkipMlxNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --max-tokens 128
-# 打开 http://localhost:5000/</code></pre>
-    </li>
-  </ol>
-
-  <h3 id="quickstart-e4b">其他后端与多模态</h3>
-  <p>Apple Silicon 请省略 CUDA 环境变量并使用 <code>ggml_metal</code>；受支持的 Windows/Linux Vulkan GPU 请改为请求 <code>TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON</code> 并使用 <code>ggml_vulkan</code>；没有 GPU 时使用 <code>ggml_cpu</code>（原生 CPU 内核，无需 GPU 工具链）。纯文本推理只需要模型 GGUF；图像、视频或音频输入还需下载匹配的 <code>mmproj-gemma-4-E4B-it-Q8_0.gguf</code>，并通过 <code>--mmproj</code> 传入。Windows PowerShell 与完整平台语法见 <a href="getting-started_zh-cn.html#e4b-fast-lane">E4B 快路径说明</a>。</p>
-
-  <h2 id="why">为什么选择 TensorSharp？</h2>
-  <div class="card-grid">
-    <div class="card"><div class="ic">🔒</div><h3>默认私有</h3><p>推理留在你的硬件上。命令与技能脚本默认不可联网；Windows 非受限代码执行是明确的例外。</p></div>
-    <a class="card" href="agentic_zh-cn.html"><div class="ic">🛠️</div><h3>能完成工作的技能</h3><p>AgentHost 预先只公布技能元数据，通过 <code>skills_read</code> 加载说明，并可选择开启四个受工作区约束的文件 / 代码工具，其中 shell 在沙箱内运行。在服务端，支持工具的模型还可以把独立的工作委派给默认只读的子智能体。</p></a>
-    <div class="card"><div class="ic">💸</div><h3>没有按 token 账单</h3><p>硬件允许多少就跑多少 —— 成本可预测，没有计量 API。</p></div>
-    <div class="card"><div class="ic">🔁</div><h3>即插即用兼容</h3><p>支持 Ollama 与 OpenAI 协议，现有工具与 SDK 直接可用。</p></div>
-    <a class="card" href="backends_zh-cn.html#cpu"><div class="ic">🖥️</div><h3>随处可运行</h3><p>NVIDIA (CUDA)、AMD / Intel / NVIDIA (Vulkan)、Apple Silicon (Metal/MLX)、iOS (Metal) 或纯 CPU —— 均带自动回退。</p></a>
-    <a class="card" href="models_zh-cn.html#table"><div class="ic">🧠</div><h3>现代模型支持</h3><p>十二个文本家族 —— DeepSeek V4 Flash、DeepSeek V4.1 Flash、GLM 5.2、GLM-5.3 与 GLM-5.3-Flash、Gemma 4、DiffusionGemma、Qwen 3.5 / 3.6（含 Bonsai2）、Qwen 3.8 Flash Next、GPT-OSS、Nemotron-H、Mistral 3、Hunyuan Dense、Muse-Glimmer —— 外加视觉、音频、PDF 文档、推理与工具调用。另有三个家族产出媒体而非文本：图像（Qwen-Image-2.1）、带原生立体声音轨的视频（MiniMax-H3），以及只有画面的视频（Wan 2.1 / 2.2）。</p></a>
-    <a class="card" href="models-video_zh-cn.html#minimax-h3"><div class="ic">🎬</div><h3>还能产出图像与视频</h3><p>MiniMax-H3 在<strong>一份打包潜变量里同时生成视频与原生 32 kHz 立体声音频</strong>；Qwen-Image-2.1 按提示词生成与编辑图像，默认在去噪步之间缓存文本与参考图的 K/V，可在 GGML CUDA / Vulkan 上用 <code>--tp</code> 切分其扩散 Transformer，并支持 LoRA 插件（其中的步数蒸馏预设把默认的 40 步降到 4–8 步）；Wan 2.1 / 2.2 只生成 H.264 画面——同一个引擎、同一套 GGUF 管线。H3 出厂即经 CFG 蒸馏，工作点是 <code>--cfg 1.0</code> 下的 4–8 步；改用<strong>步数蒸馏（step-distilled）的 Wan 权重</strong>，同一段 5 秒 720p 视频只需 17 分钟，而不是 3 个半小时。</p></a>
-    <div class="card"><div class="ic">⚙️</div><h3>用 .NET 构建</h3><p>原生 C# 引擎，可嵌入你的应用，而不只是一个黑盒二进制。</p></div>
-    <a class="card" href="distributed_zh-cn.html"><div class="ic">🔗</div><h3>不止一张 GPU</h3><p><code>--tp N</code> 选择层内权重张量并行；<code>--layer-split N</code> 选择本地整层放置。两种模式互斥，未配置时默认单设备；支持分布式的张量并行架构可通过 TCP 跨节点运行。按层切分仅支持单节点。</p></a>
-    <a class="card" href="benchmarks_zh-cn.html#head-to-head"><div class="ic">🏁</div><h3>对比 llama.cpp 的基准</h3><p>GLM-5.3-Flash 的 decode 达到 <strong>llama.cpp 的 2.0×</strong> —— 在 2× RTX PRO 6000 Blackwell 上以 UD-Q2_K_XL 分层切分背靠背实测，tg64 为 73.5 vs 36.6 tok/s，prefill 两边相差均在几个百分点以内。<strong>GLM-5.3</strong>（非 Flash）则是 decode 打平：在 8× A40 46 GB 上以 UD-Q2_K_XL、10,531 token 提示实测 20.48 vs 20.28 tok/s，而它 236.4 GiB 的检查点加载快 <strong>2.9×</strong>（264 s vs 753 s），首 token 则晚约 1.4×（TTFT 41.9 s vs 29.0 s）。在相同 GGUF 文件与相同 GPU 上与 C++ 引擎互有胜负 —— 在当前的 CUDA + Vulkan 对比运行中（可通过 <code>benchmarks/engine_comparison</code> 复现）：Gemma 4 E4B 与 2-bit 量化的 Qwen 3.6 35B-A3B MoE 在 CUDA 上 prefill 快 1.28×、首 token 早 1.27×，多轮提示的 prefill 在每个模型上都更快（最高 1.49×），Gemma 4 12B 在 Vulkan 上 decode 快 1.21×。</p></a>
-  </div>
-
-  <h2 id="audience">这是为谁准备的？</h2>
-  <p>TensorSharp 面向各类访客。下面是每类人最快的上手路径。</p>
-  <div class="audience">
-    <div class="a"><h4>初学者与学生</h4><p>从<a href="book_zh-cn.html">配套图书</a>或<a href="glossary_zh-cn.html">术语表与 FAQ</a>开始，再动手完成<a href="getting-started_zh-cn.html">快速开始</a>。</p></div>
-    <div class="a"><h4>开发者</h4><p>直达<a href="agentic_zh-cn.html">智能体工作流</a>、<a href="http-api_zh-cn.html">HTTP API</a>、<a href="code-api_zh-cn.html">C# 库</a>与<a href="api-reference_zh-cn.html">API 参考</a>。</p></div>
-    <div class="a"><h4>资深 / 首席工程师</h4><p>阅读<a href="advanced_zh-cn.html">高级功能</a> —— 分页 KV、连续批处理、推测解码。</p></div>
-    <div class="a"><h4>管理者、CTO 与 CEO</h4><p>查看<a href="overview_zh-cn.html#business">商业价值</a>与<a href="overview_zh-cn.html#status">能力矩阵</a>。</p></div>
-    <div class="a"><h4>销售与市场</h4><p>使用<a href="features_zh-cn.html">功能目录</a>与<a href="benchmarks_zh-cn.html">基准测试</a>做定位。</p></div>
-    <div class="a"><h4>研究者与教授</h4><p>探索<a href="models_zh-cn.html">模型架构</a>与<a href="benchmarks_zh-cn.html#head-to-head">基准对比</a>。</p></div>
-  </div>
-
-  <div class="content-footer">
-    <span>欢迎来到 TensorSharp 维基。</span>
-    <a href="overview_zh-cn.html">下一篇：概览与架构 →</a>
-  </div>
+  <section class="home-support" aria-labelledby="support">
+    <h2 id="support">支持项目</h2>
+    <p>TensorSharp 与 TensorAgent 免费提供。如果它们对你有帮助，一杯咖啡可以支持后续开发。</p>
+    <a href="https://buymeacoffee.com/zhongkaifu" target="_blank" rel="noopener"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" width="180" height="50" loading="lazy"></a>
+  </section>
 
 </main>
 </body>

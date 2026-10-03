@@ -1,0 +1,3 @@
+/* The extension name matches share.sheet.title. */
+"CFBundleDisplayName" = "TensorAgent に質問";
+"CFBundleName" = "TensorAgent に質問";

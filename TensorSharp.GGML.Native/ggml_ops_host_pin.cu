@@ -41,6 +41,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <map>
 #include <mutex>
 
@@ -257,6 +258,28 @@ namespace tsg
             }
         }
         return all;
+    }
+
+    void host_pin_split(const void* ptr, std::size_t bytes,
+                        std::vector<std::pair<std::size_t, std::size_t>>& pieces)
+    {
+        pieces.clear();
+        const std::uintptr_t start = reinterpret_cast<std::uintptr_t>(ptr), end = start + bytes;
+        std::lock_guard<std::mutex> lock(g_pin_mutex);
+        std::uintptr_t cursor = start;
+        while (cursor < end)
+        {
+            // Inside a registration: the piece ends where it does. In a gap: the
+            // piece ends where the next registration begins.
+            std::uintptr_t piece_end = end;
+            auto it = g_pinned.upper_bound(cursor);
+            if (it != g_pinned.begin() && std::prev(it)->second > cursor)
+                piece_end = std::min(end, std::prev(it)->second);
+            else if (it != g_pinned.end() && it->first < end)
+                piece_end = it->first;
+            pieces.emplace_back(static_cast<std::size_t>(cursor - start), static_cast<std::size_t>(piece_end - cursor));
+            cursor = piece_end;
+        }
     }
 
     std::size_t host_pinned_bytes()

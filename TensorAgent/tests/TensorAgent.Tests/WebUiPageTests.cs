@@ -38,10 +38,9 @@ namespace TensorAgent.Tests;
 /// </para>
 /// </summary>
 [Collection(LivePythonCollection.Name)]
-public sealed class WebUiPageTests : IDisposable
+public sealed partial class WebUiPageTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "tensoragent-page-" + Guid.NewGuid().ToString("N"));
-    private readonly JavaScriptCoreEngine _engine = new();
 
     public WebUiPageTests() => Directory.CreateDirectory(_root);
 
@@ -69,7 +68,10 @@ public sealed class WebUiPageTests : IDisposable
     /// </summary>
     private JsonElement Run(string routes, string drive)
     {
-        string source = Dom + "\n" + Boot(routes) + "\n" + PageScript + "\n" + Settle(drive);
+        // The strings go in ahead of the page, as /i18n.js does in the WebView: the very
+        // script the loopback server serves, in English (no test here changes the language).
+        string source = Dom + "\n" + Boot(routes) + "\n" + TensorAgent.Core.Localization.PageStrings.Script()
+            + "\n" + PageScript + "\n" + Settle(drive);
         var policy = new ExecutionPolicy(
             AllowScripts: true,
             AllowNetwork: false,
@@ -81,9 +83,7 @@ public sealed class WebUiPageTests : IDisposable
         };
         var context = new InterpreterContext(_root, new Dictionary<string, string> { ["HOME"] = _root }, policy);
 
-        ExecutionResult result = _engine
-            .RunCodeAsync(source, Array.Empty<string>(), context, CancellationToken.None)
-            .GetAwaiter().GetResult();
+        ExecutionResult result = WebJavaScript.Run(source, _root, context);
 
         Assert.True(result.ExitCode == 0,
             $"the page script failed to run.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
@@ -160,7 +160,7 @@ public sealed class WebUiPageTests : IDisposable
         throw new DirectoryNotFoundException($"no TensorAgent above {AppContext.BaseDirectory}");
     }
 
-    [Theory]
+    [WebJavaScriptTheory]
     [InlineData(131072, 8192, "128K model context", "8K active")]
     [InlineData(262144, 16384, "256K model context", "16K active")]
     [InlineData(262144, 32768, "256K model context", "32K active")]
@@ -181,7 +181,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Contains(expectedActive, detail, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void HeaderKeepsCompatibilityWhenTheHostReportsOnlyOneContext()
     {
         JsonElement result = Run("""
@@ -197,7 +197,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.DoesNotContain("active", detail, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void HeaderDoesNotPresentAnEffectiveFallbackAsModelMetadata()
     {
         JsonElement result = Run("""
@@ -231,7 +231,7 @@ public sealed class WebUiPageTests : IDisposable
     /// the other side has ever read, so every PDF and every clip was silently dropped.
     /// </para>
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void EveryKindOfAttachmentReachesTheRequestUnderTheNameTheServerReads()
     {
         JsonElement result = Run(string.Empty, """
@@ -279,7 +279,7 @@ public sealed class WebUiPageTests : IDisposable
             "filePaths is not a field any parser on the server reads; anything sent under it is dropped");
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void SelectedFilesUploadTogetherInOrderAndAllReachTheChatRequest()
     {
         JsonElement result = Run("""
@@ -323,7 +323,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.True(message.GetProperty("attachments")[2].GetProperty("fileBacked").GetBoolean());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void SendingDuringQueuedUploadsKeepsTheDraftUntilEverySelectionIsAttached()
     {
         JsonElement result = Run("""
@@ -380,7 +380,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(new[] { "one.txt", "two.txt", "three.txt" }, Strings(sent.GetProperty("messages")[0], "textFilePaths"));
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void OneSelectedFileAcceptsTheExistingUploadResponse()
     {
         JsonElement result = Run("""
@@ -402,7 +402,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Empty(Strings(result, "errors"));
     }
 
-    [Theory]
+    [WebJavaScriptTheory]
     [InlineData("{ __status: 413, body: { error: 'File too large' } }", "File too large")]
     [InlineData("{ __reject: 'Load failed' }", "Load failed")]
     [InlineData("{ ok: true, file: 'only.txt' }", "did not return every uploaded file")]
@@ -427,7 +427,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Contains(expectedError, Assert.Single(Strings(result, "errors")), StringComparison.Ordinal);
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AnImageStaysInTheComposerWhenTheLoadedModelHasNoVisionProjector()
     {
         JsonElement result = Run("""
@@ -468,7 +468,7 @@ public sealed class WebUiPageTests : IDisposable
             route.TryGetProperty("route", out JsonElement name) && name.GetString() == "models");
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void ATextOnlyModelCanHandAnImageFileToASelectedHostSkill()
     {
         JsonElement result = Run("""
@@ -492,7 +492,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(new[] { "a1.png" }, Strings(request.GetProperty("messages")[0], "imagePaths"));
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AServerVisionRefusalRestoresTheExactImageDraft()
     {
         JsonElement result = Run("""
@@ -524,7 +524,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Empty(result.GetProperty("history").EnumerateArray());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AnImageDraftIsNotSentWhenTheModelUnloadsDuringCapabilityRefresh()
     {
         JsonElement result = Run("""
@@ -560,7 +560,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Empty(result.GetProperty("history").EnumerateArray());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AFileBackedCsvKeepsItsPathAndChipWithoutPuttingRowsInThePrompt()
     {
         JsonElement result = Run(string.Empty, """
@@ -595,7 +595,7 @@ public sealed class WebUiPageTests : IDisposable
     /// this expensive to notice.
     /// </para>
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void AFollowUpQuestionStillCarriesTheEarlierTurnsPicture()
     {
         JsonElement result = Run("""
@@ -626,7 +626,7 @@ public sealed class WebUiPageTests : IDisposable
     /// A file a turn produced is a link in the transcript AND a line in the history,
     /// so the next message does not delete it from the saved chat.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void AFileATurnProducedBecomesALinkAndSurvivesInTheHistory()
     {
         JsonElement result = Run("""
@@ -656,7 +656,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal("photo.pdf", assistant.GetProperty("artifacts")[0].GetProperty("name").GetString());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AGuardedArtifactAppearsOnlyWhenItsDedicatedVerifiedFrameArrives()
     {
         JsonElement result = Run("""
@@ -727,7 +727,7 @@ public sealed class WebUiPageTests : IDisposable
     /// arrives base64'd, which is the fix.
     /// </para>
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void AMultiLineFileTheAppUploadsReachesTheComposerIntact()
     {
         string json = JsonSerializer.Serialize(new
@@ -774,7 +774,7 @@ public sealed class WebUiPageTests : IDisposable
     // content shared into the app
     // =====================================================================================
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AShareWaitsForLaunchThenPreservesTheDraftAndAppliesEveryValidPart()
     {
         JsonElement result = Run("""
@@ -809,7 +809,7 @@ public sealed class WebUiPageTests : IDisposable
         const string shared = "What can you tell me about this?\n\nShared text:\n\"\"\"\nこんにちは 🌍\nsecond line\n\"\"\"";
         Assert.Equal("Keep this draft " + shared, result.GetProperty("text").GetString());
         Assert.Equal(2, result.GetProperty("attachments").GetInt32());
-        Assert.Equal(new[] { "↗Travel note✕", "旅行.png✕", "📄notes.txt✕" },
+        Assert.Equal(new[] { "↗Travel note✕", "Select areaEditing target旅行.png✕", "📄notes.txt✕" },
             result.GetProperty("chips").EnumerateArray().Select(c => c.GetString()).ToArray());
         Assert.Contains("Only part of the page text fit.", result.GetProperty("notices").GetString(), StringComparison.Ordinal);
         Assert.Contains("broken.mov was not attached.", result.GetProperty("notices").GetString(), StringComparison.Ordinal);
@@ -828,7 +828,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.DoesNotContain(calls, c => c.GetProperty("path").GetString() == "/api/agent/share/ack");
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void RepeatedClaimsAndConcurrentNudgesDoNotDuplicateAnAppliedShare()
     {
         JsonElement result = Run("""
@@ -866,7 +866,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(0, result.GetProperty("sent").GetInt32());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AShareIsNotAppliedUntilItsRequestedNewChatOpensSuccessfully()
     {
         JsonElement result = Run("""
@@ -905,7 +905,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(1, result.GetProperty("after").GetProperty("sharedChips").GetInt32());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AShareNeverAutoSendsEvenIfALegacyPayloadRequestsIt()
     {
         JsonElement result = Run("""
@@ -926,7 +926,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(1, result.GetProperty("sharedChips").GetInt32());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void NavigationPreservesSharedTextAttachmentAndIdUntilTheyAreSent()
     {
         JsonElement result = Run("""
@@ -967,7 +967,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Contains("shared across chats", message.GetProperty("content").GetString()!, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void ExplicitDiscardRemovesOnlyTheTrackedSharedDraft()
     {
         JsonElement result = Run("""
@@ -999,7 +999,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(0, result.GetProperty("sent").GetInt32());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void IndependentQueuedSharesUseDifferentFreshChatsAndNeverMerge()
     {
         JsonElement result = Run("""
@@ -1079,7 +1079,7 @@ public sealed class WebUiPageTests : IDisposable
     /// is the thing this whole change exists to stop.
     /// </para>
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void ComingBackOpensTheChatThePageWasInAndNotTheNewestSavedOne()
     {
         JsonElement result = Run("""
@@ -1123,7 +1123,7 @@ public sealed class WebUiPageTests : IDisposable
     /// with the <c>cold: false</c> default and exercises that path.
     /// </para>
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void LaunchingTheAppOpensAnEmptyChatRatherThanTheLastOne()
     {
         JsonElement result = Run("""
@@ -1158,7 +1158,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(0, result.GetProperty("history").GetArrayLength());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AReopenedChatShowsItsPicturesSoundsClipsAndDocumentsAgain()
     {
         JsonElement result = Run("""
@@ -1239,7 +1239,7 @@ public sealed class WebUiPageTests : IDisposable
     /// the round trip, in one test.
     /// </para>
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void TheNextMessageDoesNotWipeTheAttachmentsAndFilesAlreadySaved()
     {
         JsonElement result = Run("""
@@ -1277,7 +1277,7 @@ public sealed class WebUiPageTests : IDisposable
     /// Off means off: the setting is saved, the selection is dropped, and the next
     /// message names no skill.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void TurningSkillsOffSavesTheSettingAndSendsNoSkills()
     {
         JsonElement result = Run("""
@@ -1329,7 +1329,7 @@ public sealed class WebUiPageTests : IDisposable
     /// A chat saved when skills were on does not switch them back on for itself.
     /// The setting is the wider fact; a stored selection is a memory of one chat.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void ASavedChatDoesNotReviveSkillsThatWereTurnedOff()
     {
         JsonElement result = Run("""
@@ -1354,7 +1354,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(0, result.GetProperty("chips").GetInt32());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void DeselectingEverySkillSendsAnExplicitEmptySelection()
     {
         JsonElement result = Run("""
@@ -1375,7 +1375,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.False(request.GetProperty("skills_discovery").GetBoolean());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void RoutedNetworkPreflightRestoresThePromptAndOffersTheSettingInline()
     {
         JsonElement result = Run("""
@@ -1416,7 +1416,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.True(saved.GetProperty("allowNetwork").GetBoolean());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void RoutedSetupPreflightRestoresThePromptAndAttachmentsAndOpensSettings()
     {
         JsonElement result = Run("""
@@ -1456,7 +1456,7 @@ public sealed class WebUiPageTests : IDisposable
             && route.TryGetProperty("route", out JsonElement name) && name.GetString() == "settings");
     }
 
-    [Theory]
+    [WebJavaScriptTheory]
     [InlineData(false)]
     [InlineData(true)]
     public void ReopenedChatPreservesWhetherAnEmptySkillSelectionWasExplicit(bool explicitSelection)
@@ -1507,7 +1507,119 @@ public sealed class WebUiPageTests : IDisposable
     /// the model copies into its answer.
     /// </para>
     /// </summary>
-    [Fact]
+    /// <summary>
+    /// An answer cannot put script into the page. render() writes the model's text into
+    /// innerHTML, and a link or an image puts part of it inside a double-quoted
+    /// attribute; the escape used to leave quotes alone, so an answer containing
+    /// <c>![x" onerror="...](y)</c> ran script in the page that holds the launch token
+    /// (found 2026-09-30, confirmed in Chromium). The model repeats whatever a shared
+    /// page or file says, so the text is not the user's.
+    /// </summary>
+    [WebJavaScriptFact]
+    public void AnAnswerCannotPutScriptIntoThePage()
+    {
+        string answer = JsonSerializer.Serialize(
+            "![x\" onerror=\"alert(1)](nope.png) [click](x\"onmouseover=\"alert(2)) [js](javascript:alert(3)) "
+            + "![pixel](https://tracker.example/p.png) [docs](https://example.com/a?b=1&c=2) "
+            + "![chart](/api/code/artifacts/run1/chart.png) [report](/api/code/artifacts/run1/report.pdf)");
+        JsonElement result = Run($$"""
+            R['/api/sessions?conversation=new'] = { sessionId: 's1', conversationId: 'c1', messages: [], think: false, skills: [] };
+            R['/api/chat'] = { __sse: [{ token: {{answer}} }, { done: true, truncated: false }] };
+            """, """
+            __page.byId['text'].value = 'summarise this page';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () {
+              return { html: __page.transcript().map(function (t) { return t.html; }).join('\n') };
+            });
+            """);
+
+        string html = result.GetProperty("html").GetString()!;
+        // Nothing the model wrote closed an attribute or chose a script URL...
+        Assert.DoesNotContain("onerror=\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("onmouseover=\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("href=\"javascript:", html, StringComparison.OrdinalIgnoreCase);
+        // ...and nothing from another origin is fetched as an image: it is a link instead.
+        Assert.DoesNotContain("src=\"https://tracker.example", html, StringComparison.Ordinal);
+        Assert.Contains("<a href=\"https://tracker.example/p.png\"", html, StringComparison.Ordinal);
+        // What an answer legitimately links to still works.
+        Assert.Contains("<a href=\"https://example.com/a?b=1&amp;c=2\"", html, StringComparison.Ordinal);
+        Assert.Contains("<img alt=\"chart\" src=\"/api/code/artifacts/run1/chart.png\">", html, StringComparison.Ordinal);
+        Assert.Contains("<a href=\"/api/code/artifacts/run1/report.pdf\"", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A table in an answer is drawn as one. Models answer comparisons with Markdown
+    /// tables, and the page printed them as rows of pipes -- though its stylesheet had
+    /// table rules waiting for them.
+    /// </summary>
+    [WebJavaScriptFact]
+    public void AMarkdownTableInAnAnswerIsDrawnAsATable()
+    {
+        string answer = JsonSerializer.Serialize(
+            "Each person pays:\n| Person | Pays |\n|---|---:|\n| Had drinks | **$70.39** |\n| No drinks | $42.07 |\nThat covers $224.91.");
+        JsonElement result = Run($$"""
+            R['/api/sessions?conversation=new'] = { sessionId: 's1', conversationId: 'c1', messages: [], think: false, skills: [] };
+            R['/api/chat'] = { __sse: [{ token: {{answer}} }, { done: true, truncated: false }] };
+            """, """
+            __page.byId['text'].value = 'split the bill';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () {
+              return { html: __page.transcript().map(function (t) { return t.html; }).join('\n') };
+            });
+            """);
+
+        string html = result.GetProperty("html").GetString()!;
+        Assert.Contains(
+            "<p>Each person pays:</p><table><thead><tr><th>Person</th><th>Pays</th></tr></thead><tbody>"
+            + "<tr><td>Had drinks</td><td><strong>$70.39</strong></td></tr>"
+            + "<tr><td>No drinks</td><td>$42.07</td></tr></tbody></table><p>That covers $224.91.</p>",
+            html, StringComparison.Ordinal);
+        Assert.DoesNotContain("|---|", html, StringComparison.Ordinal);
+    }
+
+    [WebJavaScriptTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NativeDictationCapabilityControlsTheComposerGesture(bool supported)
+    {
+        string payload = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        {
+            dictation = supported,
+            composerHint = "Message… or press Windows+H to dictate",
+        })));
+        JsonElement result = Run("", $$"""
+            var box = __page.byId['text'];
+            var blurred = false;
+            box.blur = function () { blurred = true; };
+            box.value = 'Keep this draft';
+            var ready = window.TensorAgent.__fromHost('nativeReady', '{{payload}}');
+            box.dispatch('pointerdown', { clientX: 100, clientY: 100 });
+            return wait(550).then(function () {
+              box.dispatch('pointerup');
+              var voice = document.body.classList.contains('voice');
+              __page.byId['hold'].dispatch('pointerdown', { preventDefault: function () {} });
+              window.TensorAgent.refreshModel();
+              return settle(10).then(function () {
+                return { ready: ready, supported: window.TensorAgent.canDictate(), voice: voice,
+                  blurred: blurred, draft: box.value, placeholder: box.placeholder,
+                  starts: __page.requests('/api/agent/events').filter(function (r) {
+                    return r.body.type === 'dictate-start';
+                  }).length };
+              });
+            });
+            """);
+
+        Assert.Equal("ok", result.GetProperty("ready").GetString());
+        Assert.Equal(supported, result.GetProperty("supported").GetBoolean());
+        Assert.Equal(supported, result.GetProperty("voice").GetBoolean());
+        Assert.Equal(supported, result.GetProperty("blurred").GetBoolean());
+        Assert.Equal(supported ? 1 : 0, result.GetProperty("starts").GetInt32());
+        Assert.Equal("Keep this draft", result.GetProperty("draft").GetString());
+        Assert.Equal(supported ? "Message… or hold to talk" : "Message… or press Windows+H to dictate",
+            result.GetProperty("placeholder").GetString());
+    }
+
+    [WebJavaScriptFact]
     public void TappingAGeneratedFileAsksTheAppToOpenItRatherThanNavigating()
     {
         JsonElement result = Run("""
@@ -1539,7 +1651,7 @@ public sealed class WebUiPageTests : IDisposable
     /// The click itself, on the file card the page rendered: claimed by the page and
     /// handed to the app, with nothing navigated.
     /// </summary>
-    [Fact]
+    [WebJavaScriptFact]
     public void TheClickOnAGeneratedFileIsHandedToTheApp()
     {
         JsonElement result = Run("""
@@ -1592,7 +1704,7 @@ public sealed class WebUiPageTests : IDisposable
     // A test of the page's behaviour under those conditions is only as good as the
     // model of the conditions, so the model is checked on its own first.
 
-    [Fact]
+    [WebJavaScriptFact]
     public void HarnessARouteThatRejectsMakesFetchRejectWithATypeError()
     {
         JsonElement result = Run("""
@@ -1645,7 +1757,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(2, result.GetProperty("recorded").GetInt32());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void HarnessAHangingStreamReadRejectsWithAbortErrorWhenItsSignalFires()
     {
         JsonElement result = Run("""
@@ -1694,7 +1806,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal("AbortError", result.GetProperty("third").GetProperty("name").GetString());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void HarnessAStreamCanDropAfterItsFramesAndTakeRealTimePerRead()
     {
         JsonElement result = Run("""
@@ -1749,7 +1861,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(new[] { "It broke.Retry", "Just so you know." }, Strings(result, "notices"));
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void ASendLostBeforeTheTurnIdIsNeverAnsweredWithAnEarlierTurnsAnswer()
     {
         // The host keeps a finished turn for an hour, so "what is this conversation
@@ -1801,7 +1913,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(0, result.GetProperty("attaches").GetInt32());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void StoppingDuringARecoveryDisarmsIt()
     {
         JsonElement result = Run($$"""
@@ -1837,7 +1949,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.False(result.GetProperty("generating").GetBoolean());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AResumeDuringASendsPrefillLeavesTheRequestAlone()
     {
         // The host answers a chat request's headers only with its first frame, so for
@@ -1896,7 +2008,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Contains("resume-skip", result.GetProperty("kinds").EnumerateArray().Select(k => k.GetString()));
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AStreamThatGoesSilentIsReplacedByTheWatchdogWithoutAnyEvent()
     {
         // Nothing fires when a connection dies without a FIN: no error, no visibility
@@ -1929,7 +2041,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Contains("watchdog", result.GetProperty("kinds").EnumerateArray().Select(k => k.GetString()));
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AnErrorInATurnIsSaidOnceHoweverOftenTheTurnIsReplayed()
     {
         JsonElement result = Run($$"""
@@ -1950,7 +2062,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.False(result.GetProperty("generating").GetBoolean());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AChatThatCannotBeReopenedKeepsWhatIsOnTheScreen()
     {
         JsonElement result = Run("""
@@ -2007,7 +2119,7 @@ public sealed class WebUiPageTests : IDisposable
         .Where(t => !(t.GetProperty("html").GetString() ?? string.Empty).StartsWith("<h1>TensorAgent</h1>", StringComparison.Ordinal))
         .ToList();
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AStaleStreamIsReplacedWhenThePageBecomesVisibleAgain()
     {
         JsonElement result = Run($$"""
@@ -2057,7 +2169,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.False(result.GetProperty("diag").GetProperty("attached").GetBoolean());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AStreamThatIsStillDeliveringIsLeftAloneByANudge()
     {
         JsonElement result = Run($$"""
@@ -2085,7 +2197,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.True(result.GetProperty("delivering").GetBoolean());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AStreamThatRejectsMidAnswerIsTakenUpAgainWithBackoffNotOnce()
     {
         JsonElement result = Run($$"""
@@ -2125,7 +2237,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Contains("resume-lookup-failed", kinds);
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AStreamThatEndsWithoutADoneFrameIsTakenUpAgainWhenTheTurnIsStillRunning()
     {
         JsonElement result = Run($$"""
@@ -2159,7 +2271,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Contains("eof-without-done", result.GetProperty("kinds").EnumerateArray().Select(k => k.GetString()));
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AStreamThatEndsWithoutADoneFrameIsReadAgainWhenTheTurnFinishedMeanwhile()
     {
         // The connection died as the answer was ending. The host still has the turn --
@@ -2193,7 +2305,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(1, result.GetProperty("attaches").GetInt32());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AStreamThatEndsWithoutADoneFrameFinishesWithWhatItHasWhenTheTurnIsGone()
     {
         JsonElement result = Run($$"""
@@ -2222,7 +2334,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(0, result.GetProperty("attaches").GetInt32());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void ASendThatLosesItsStreamBeforeTheTurnIdAttachesToTheTurnTheHostStarted()
     {
         JsonElement result = Run("""
@@ -2254,7 +2366,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal("", result.GetProperty("text").GetString());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void ASendThatNeverReachedTheHostGoesBackIntoTheComposer()
     {
         JsonElement result = Run("""
@@ -2283,7 +2395,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Equal(1, result.GetProperty("attachments").GetInt32());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void WhenTheHostCannotBeReachedForLongEnoughThePageHandsTheScreenBackAndSaysSo()
     {
         JsonElement result = Run($$"""
@@ -2314,16 +2426,18 @@ public sealed class WebUiPageTests : IDisposable
         Assert.DoesNotContain(errors, e => e!.Contains("Load failed", StringComparison.Ordinal));
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AShareClaimThatFailsAtTheTransportIsRetriedOnceAndNotReported()
     {
-        JsonElement result = Run("""
+        // Install the failure after boot. On Windows, forty 1 ms timer ticks
+        // can outlast the retry delay, so boot's automatic claim may already
+        // have consumed a failure installed in the initial route table.
+        JsonElement result = Run("R['/api/agent/share/claim'] = { share: null };", """
             var claims = 0;
             R['/api/agent/share/claim'] = function () {
               claims++;
               return claims === 1 ? { __reject: 'Load failed' } : { share: null };
             };
-            """, """
             var claimsBefore = __page.requests('/api/agent/share/claim').length;
             window.TensorAgent.__fromHost('takeShare', 'e30=');
             return wait(500).then(function () {
@@ -2338,7 +2452,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Empty(result.GetProperty("errors").EnumerateArray());
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void AShareClaimTheHostRefusesIsReportedWithoutARetry()
     {
         JsonElement result = Run("""
@@ -2359,7 +2473,7 @@ public sealed class WebUiPageTests : IDisposable
         Assert.Contains(errors, e => e!.Contains("Could not open the shared item", StringComparison.Ordinal) && e.Contains("HTTP 500", StringComparison.Ordinal));
     }
 
-    [Fact]
+    [WebJavaScriptFact]
     public void ALongAnswerOfThousandsOfFramesRendersWholeAndOnce()
     {
         // A page re-attaching to a long answer is handed every frame so far at once;
@@ -2384,4 +2498,1063 @@ public sealed class WebUiPageTests : IDisposable
         Assert.False(result.GetProperty("generating").GetBoolean());
     }
 
+    // ---- an image model (ImageTurns on the host) ----------------------------------------
+
+    private const string ImageModel = """
+        R['/api/models'] = { loaded: 'qwen_image_2.1_Q4_K_M.gguf', architecture: 'qwen_image',
+                             loadedBackend: 'ggml_metal', visionReady: false };
+        """;
+
+    /// <summary>
+    /// A picture denoises over tens of steps, and the host sends a small preview with
+    /// some of them. They are one picture getting sharper, so the page refreshes one
+    /// image in place and the finished picture replaces the last preview: the turn ends
+    /// with exactly one image in the bubble, and the history keeps the finished one.
+    /// </summary>
+    [WebJavaScriptFact]
+    public void AnImageModelsTurnIsOnePictureThatThePreviewsBecome()
+    {
+        JsonElement result = Run(ImageModel + """
+            R['/api/chat'] = { __sse: [
+              { image_step: 1, image_steps: 3, preview: null },
+              { image_step: 2, image_steps: 3, preview: 'data:image/png;base64,AAAA' },
+              { image_step: 3, image_steps: 3, preview: 'data:image/png;base64,BBBB' },
+              { imageUrl: '/uploads/lighthouse.png', width: 1024, height: 1024 },
+              { done: true, sessionId: 's1', tokenCount: 0, elapsed: 3, tokPerSec: 0, truncated: false }
+            ] };
+            """, """
+            var placeholder = __page.byId['text'].placeholder;
+            __page.byId['text'].value = 'a lighthouse at dusk';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () {
+              var turns = __page.transcript();
+              var answer = turns[turns.length - 1];
+              return {
+                placeholder: placeholder,
+                sent: __page.requests('/api/chat').map(function (c) { return c.body; }),
+                role: answer.role,
+                images: answer.media.filter(function (m) { return m.tag === 'IMG'; }).map(function (m) { return m.src; }),
+                history: window.TensorAgent.history(),
+                generating: window.TensorAgent.isGenerating(),
+                errors: __page.errorNotices()
+              };
+            });
+            """);
+
+        Assert.StartsWith("Describe a picture", result.GetProperty("placeholder").GetString(), StringComparison.Ordinal);
+        JsonElement sent = Assert.Single(result.GetProperty("sent").EnumerateArray());
+        Assert.Equal("a lighthouse at dusk", sent.GetProperty("messages")[0].GetProperty("content").GetString());
+        Assert.Equal("assistant", result.GetProperty("role").GetString());
+        Assert.Equal(new[] { "/uploads/lighthouse.png" }, Strings(result, "images"));
+        JsonElement history = result.GetProperty("history");
+        JsonElement made = history[history.GetArrayLength() - 1];
+        Assert.Equal("assistant", made.GetProperty("role").GetString());
+        Assert.Equal("/uploads/lighthouse.png", made.GetProperty("imageUrl").GetString());
+        Assert.False(result.GetProperty("generating").GetBoolean());
+        Assert.Empty(Strings(result, "errors"));
+    }
+
+    /// <summary>
+    /// With LoRA plug-ins on, the host names them on every step, and the progress says
+    /// what the picture is drawn with; without them it reads as it always did.
+    /// </summary>
+    [Fact]
+    public void AnImageModelsProgressNamesTheLoraPlugInsItDrawsWith()
+    {
+        JsonElement result = Run(ImageModel + """
+            R['/api/chat'] = { __sse: [
+              { image_step: 1, image_steps: 6, preview: null, image_loras: ['Viggle Turbo', 'Film Stills'] },
+              { image_step: 6, image_steps: 6, preview: null, image_loras: ['Viggle Turbo', 'Film Stills'] },
+              { imageUrl: '/uploads/cafe.png', width: 1024, height: 1024 },
+              { done: true, sessionId: 's1', truncated: false }
+            ] };
+            """, """
+            __page.byId['text'].value = 'a cafe at night';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () { return { progress: __page.progress() }; });
+            """);
+
+        Assert.Contains("Drawing with Viggle Turbo + Film Stills… step 1 of 6", Strings(result, "progress"));
+    }
+
+    /// <summary>
+    /// The LoRA sheet of an image model: every plug-in with what can be done to it, and a
+    /// speed plug-in turned on replacing the one that was on, because two step schedules
+    /// cannot both apply. What the page sends is the whole choice, in order.
+    /// </summary>
+    [Fact]
+    public void TheLoraSheetTurnsOnOneSpeedPlugInAtATime()
+    {
+        JsonElement result = Run(ImageModel + """
+            var lorasState = { loadedModel: 'qwen-image-2.1-q4km', minStrength: 0.1, maxStrength: 1.5,
+              chosen: [{ id: 'pruna', strength: 1 }, { id: 'film', strength: 0.6 }], loras: [
+              { id: 'viggle', name: 'Viggle Turbo', kind: 'Speed', steps: 6, purpose: 'Fast.', license: 'QRL', totalBytes: 679604800,
+                state: 'Installed', defaultStrength: 1, strengthAdjustable: false, chosen: false, strength: 1, download: null },
+              { id: 'pruna', name: 'Pruna 8-Step', kind: 'Speed', steps: 8, purpose: 'Fast.', license: 'QRL', totalBytes: 335606104,
+                state: 'Installed', defaultStrength: 1, strengthAdjustable: false, chosen: true, strength: 1, download: null },
+              { id: 'film', name: 'Film Stills', kind: 'Style', purpose: 'Film.', license: 'QRL', totalBytes: 79743888,
+                state: 'Installed', defaultStrength: 0.7, strengthAdjustable: true, chosen: true, strength: 0.6, download: null },
+              { id: 'grain', name: 'Grainscape', kind: 'Style', purpose: 'Grain.', license: 'QRL', totalBytes: 79743888,
+                state: 'NotInstalled', defaultStrength: 0.7, strengthAdjustable: true, chosen: false, strength: 0.7, download: null } ] };
+            R['/api/agent/loras'] = lorasState;
+            R['/api/agent/loras/choice'] = function () { return { __status: 400, body: { error: 'Viggle Turbo is not downloaded yet.' } }; };
+            """, """
+            __page.byId['model'].dispatch('click');
+            return settle(20).then(function () {
+              var shown = __page.byId['open-loras'].style.display !== 'none';
+              __page.byId['open-loras'].dispatch('click');
+              return settle(20).then(function () {
+                var rows = __page.byId['lora-list'].querySelectorAll('.lorarow');
+                function row(id) { return rows.filter(function (r) { return r.getAttribute('data-lora') === id; })[0]; }
+                function actions(r) { return r.querySelectorAll('BUTTON').map(function (b) { return b.textContent; }); }
+                var box = row('viggle').querySelectorAll('INPUT')[0];
+                box.checked = true;
+                box.dispatch('change');
+                return settle(20).then(function () {
+                  return {
+                    shown: shown,
+                    hint: __page.byId['loras-hint'].textContent,
+                    rows: rows.length,
+                    installedActions: actions(row('viggle')),
+                    missingActions: actions(row('grain')),
+                    sliders: row('film').querySelectorAll('INPUT').length,
+                    sent: __page.requests('/api/agent/loras/choice').map(function (c) { return c.body; }),
+                    sheetError: __page.byId['lora-error'].textContent,
+                    sheetErrorShown: __page.byId['lora-error'].style.display !== 'none',
+                    errors: __page.errorNotices()
+                  };
+                });
+              });
+            });
+            """);
+
+        Assert.True(result.GetProperty("shown").GetBoolean());
+        Assert.Equal("Pruna 8-Step + Film Stills", result.GetProperty("hint").GetString());
+        Assert.Equal(4, result.GetProperty("rows").GetInt32());
+        Assert.Equal(new[] { "Remove" }, Strings(result, "installedActions"));
+        Assert.Equal(new[] { "Download" }, Strings(result, "missingActions"));
+        // The switch and the strength slider of a style that is on.
+        Assert.Equal(2, result.GetProperty("sliders").GetInt32());
+
+        JsonElement sent = Assert.Single(result.GetProperty("sent").EnumerateArray());
+        JsonElement[] loras = sent.GetProperty("loras").EnumerateArray().ToArray();
+        Assert.Equal(new[] { "film", "viggle" }, loras.Select(l => l.GetProperty("id").GetString()));
+        Assert.Equal(0.6, loras[0].GetProperty("strength").GetDouble(), 3);
+        // A refusal is the host's own words, not a status code, said in the sheet beside the
+        // switch that flipped back rather than in the chat underneath it.
+        Assert.Equal("Viggle Turbo is not downloaded yet.", result.GetProperty("sheetError").GetString());
+        Assert.True(result.GetProperty("sheetErrorShown").GetBoolean());
+        Assert.DoesNotContain("Viggle Turbo is not downloaded yet.", Strings(result, "errors"));
+    }
+
+    /// <summary>A sheet of two installed styles, neither on, whose choice route answers with what it was sent.</summary>
+    private const string TwoStyles = """
+        function loraRows(chosen, extra) {
+          function on(id) { return chosen.some(function (c) { return c.id === id; }); }
+          return { loadedModel: 'qwen-image-2.1-q4km', minStrength: 0.1, maxStrength: 1.5, chosen: chosen, loras: [
+            { id: 'film', name: 'Film Stills', kind: 'Style', purpose: 'Film.', license: 'QRL', totalBytes: 79743888,
+              state: 'Installed', installedBytes: 79743888, defaultStrength: 0.7, strengthAdjustable: true, chosen: on('film'), strength: 0.7, download: null },
+            { id: 'grain', name: 'Grainscape', kind: 'Style', purpose: 'Grain.', license: 'QRL', totalBytes: 79743888,
+              state: 'Installed', installedBytes: 79743888, defaultStrength: 0.7, strengthAdjustable: true, chosen: on('grain'), strength: 0.7, download: null }
+          ].concat(extra || []) };
+        }
+        R['/api/agent/loras'] = loraRows([]);
+        R['/api/agent/loras/choice'] = function (call) { return loraRows(call.body.loras); };
+        function openLoras() {
+          __page.byId['model'].dispatch('click');
+          return settle(20).then(function () {
+            __page.byId['open-loras'].dispatch('click');
+            return settle(20);
+          });
+        }
+        function loraRow(id) {
+          return __page.byId['lora-list'].querySelectorAll('.lorarow').filter(function (r) { return r.getAttribute('data-lora') === id; })[0];
+        }
+        """;
+
+    /// <summary>
+    /// Two switches flipped faster than the host answers: the second change builds on the
+    /// first rather than on the list painted before it, so both plug-ins end up on. Each
+    /// save replaces the whole choice, so a second built on the old list would undo the first.
+    /// </summary>
+    [Fact]
+    public void TwoQuickChangesInTheLoraSheetBuildOnEachOther()
+    {
+        JsonElement result = Run(ImageModel + TwoStyles, """
+            return openLoras().then(function () {
+              var film = loraRow('film').querySelectorAll('INPUT')[0];
+              var grain = loraRow('grain').querySelectorAll('INPUT')[0];
+              film.checked = true;
+              film.dispatch('change');
+              grain.checked = true;
+              grain.dispatch('change');
+              return settle(30).then(function () {
+                return {
+                  sent: __page.requests('/api/agent/loras/choice').map(function (c) { return c.body.loras.map(function (l) { return l.id; }).join('+'); }),
+                  names: __page.byId['lora-list'].querySelectorAll('.nm').map(function (n) { return n.textContent; })
+                };
+              });
+            });
+            """);
+
+        Assert.Equal(new[] { "film", "film+grain" }, Strings(result, "sent"));
+        Assert.Equal(new[] { "● Film Stills", "● Grainscape" }, Strings(result, "names"));
+    }
+
+    /// <summary>
+    /// A plug-in that is on but whose files have gone keeps a switch, so it can be turned off
+    /// as the refused picture tells the user to; a stopped download's part files can be
+    /// removed without finishing it; and a removal the host fails is said in the sheet,
+    /// not painted as an empty list and announced as done.
+    /// </summary>
+    [Fact]
+    public void APlugInWhoseFilesAreGoneCanStillBeTurnedOffOrRemoved()
+    {
+        JsonElement result = Run(ImageModel + TwoStyles + """
+            var gone = { id: 'viggle', name: 'Viggle Turbo', kind: 'Speed', steps: 6, purpose: 'Fast.', license: 'QRL', totalBytes: 679604800,
+              state: 'NotInstalled', installedBytes: 0, defaultStrength: 1, strengthAdjustable: false, chosen: true, strength: 1, download: null };
+            var stopped = { id: 'pruna', name: 'Pruna 8-Step', kind: 'Speed', steps: 8, purpose: 'Fast.', license: 'QRL', totalBytes: 335606104,
+              state: 'Partial', installedBytes: 120000000, defaultStrength: 1, strengthAdjustable: false, chosen: false, strength: 1,
+              download: { running: false, state: 'Cancelled' } };
+            R['/api/agent/loras'] = loraRows([{ id: 'newer-build', strength: 0.8 }, { id: 'viggle', strength: 1 }], [gone, stopped]);
+            R['/api/agent/loras/choice'] = function (call) {
+              return loraRows(call.body.loras, [Object.assign({}, gone, { chosen: false }), stopped]);
+            };
+            R['/api/agent/loras/pruna'] = { __status: 500, body: { error: 'The server failed to handle the request.' } };
+            """, """
+            return openLoras().then(function () {
+              function actions(r) { return r.querySelectorAll('BUTTON').map(function (b) { return b.textContent; }); }
+              var viggle = loraRow('viggle');
+              var box = viggle.querySelectorAll('INPUT')[0];
+              var before = {
+                viggleSwitchOn: !!(box && box.checked),
+                viggleActions: actions(viggle),
+                viggleNote: viggle.querySelectorAll('.err').map(function (e) { return e.textContent; }),
+                prunaActions: actions(loraRow('pruna'))
+              };
+              box.checked = false;
+              box.dispatch('change');
+              return settle(20).then(function () {
+                var remove = loraRow('pruna').querySelectorAll('BUTTON').filter(function (b) { return b.textContent === 'Remove'; })[0];
+                remove.dispatch('click');
+                return settle(30).then(function () {
+                  before.sent = __page.requests('/api/agent/loras/choice').map(function (c) { return c.body.loras.map(function (l) { return l.id; }).join('+'); });
+                  before.rowsAfterFailedRemove = __page.byId['lora-list'].querySelectorAll('.lorarow').length;
+                  before.sheetError = __page.byId['lora-error'].textContent;
+                  before.notices = __page.notices();
+                  return before;
+                });
+              });
+            });
+            """);
+
+        Assert.True(result.GetProperty("viggleSwitchOn").GetBoolean());
+        Assert.Equal(new[] { "Download" }, Strings(result, "viggleActions"));
+        Assert.Contains(Strings(result, "viggleNote"), n => n.Contains("files are missing", StringComparison.Ordinal));
+        Assert.Equal(new[] { "Download", "Remove" }, Strings(result, "prunaActions"));
+        // Turned off: the rest of the choice goes back, a newer build's plug-in included.
+        Assert.Equal(new[] { "newer-build" }, Strings(result, "sent"));
+        Assert.Equal(4, result.GetProperty("rowsAfterFailedRemove").GetInt32());
+        Assert.Equal("Could not remove Pruna 8-Step: The server failed to handle the request.", result.GetProperty("sheetError").GetString());
+        Assert.DoesNotContain(Strings(result, "notices"), n => n.Contains("was removed", StringComparison.Ordinal));
+    }
+
+    /// <summary>Requests a test answers itself, in any order: <c>hold(path)</c> makes that route wait.</summary>
+    private const string Held = """
+        var held = [];
+        function hold(path) {
+          R[path] = function (call) {
+            return new Promise(function (answer) { held.push({ path: path, call: call, answer: answer }); });
+          };
+        }
+        function heldFor(path) { return held.filter(function (h) { return h.path === path; }); }
+        function ids(call) { return call.body.loras.map(function (l) { return l.id; }).join('+'); }
+        """;
+
+    /// <summary>
+    /// Each save replaces the whole choice, so they go one at a time, in the order they were
+    /// made: two in flight together could reach the host in the other order and leave the
+    /// first change as the last word.
+    /// </summary>
+    [Fact]
+    public void LoraSavesGoOneAtATimeInTheOrderTheyWereMade()
+    {
+        JsonElement result = Run(ImageModel + TwoStyles + Held, """
+            return openLoras().then(function () {
+              hold('/api/agent/loras/choice');
+              var film = loraRow('film').querySelectorAll('INPUT')[0];
+              var grain = loraRow('grain').querySelectorAll('INPUT')[0];
+              film.checked = true;
+              film.dispatch('change');
+              grain.checked = true;
+              grain.dispatch('change');
+              return settle(20).then(function () {
+                var out = { inFlight: heldFor('/api/agent/loras/choice').length };
+                var first = heldFor('/api/agent/loras/choice')[0];
+                out.first = ids(first.call);
+                first.answer(loraRows(first.call.body.loras));
+                return settle(20).then(function () {
+                  var all = heldFor('/api/agent/loras/choice');
+                  out.afterFirst = all.length;
+                  out.second = all.length > 1 ? ids(all[1].call) : '';
+                  if (all.length > 1) all[1].answer(loraRows(all[1].call.body.loras));
+                  return settle(20).then(function () {
+                    out.names = __page.byId['lora-list'].querySelectorAll('.nm').map(function (n) { return n.textContent; });
+                    return out;
+                  });
+                });
+              });
+            });
+            """);
+
+        Assert.Equal(1, result.GetProperty("inFlight").GetInt32());
+        Assert.Equal("film", result.GetProperty("first").GetString());
+        Assert.Equal(2, result.GetProperty("afterFirst").GetInt32());
+        Assert.Equal("film+grain", result.GetProperty("second").GetString());
+        Assert.Equal(new[] { "● Film Stills", "● Grainscape" }, Strings(result, "names"));
+    }
+
+    /// <summary>
+    /// A list the page asked for before a change was saved, and that arrives after it, is not
+    /// painted: it would put the switch the user just turned on back off.
+    /// </summary>
+    [Fact]
+    public void AListReadBeforeALoraChangeIsNotPaintedOverIt()
+    {
+        JsonElement result = Run(ImageModel + TwoStyles + Held + """
+            var notYet = { id: 'pruna', name: 'Pruna 8-Step', kind: 'Speed', steps: 8, purpose: 'Fast.', license: 'QRL', totalBytes: 335606104,
+              state: 'NotInstalled', installedBytes: 0, defaultStrength: 1, strengthAdjustable: false, chosen: false, strength: 1, download: null };
+            R['/api/agent/loras'] = loraRows([], [notYet]);
+            R['/api/agent/loras/choice'] = function (call) { return loraRows(call.body.loras, [notYet]); };
+            """, """
+            return openLoras().then(function () {
+              hold('/api/agent/loras');
+              // Starting a download reads the list again; that read is held.
+              loraRow('pruna').querySelectorAll('BUTTON').filter(function (b) { return b.textContent === 'Download'; })[0].dispatch('click');
+              return settle(20).then(function () {
+                var film = loraRow('film').querySelectorAll('INPUT')[0];
+                film.checked = true;
+                film.dispatch('change');
+                return settle(20).then(function () {
+                  var stale = heldFor('/api/agent/loras');
+                  stale.forEach(function (h) { h.answer(loraRows([], [notYet])); });
+                  return settle(20).then(function () {
+                    return {
+                      staleReads: stale.length,
+                      names: __page.byId['lora-list'].querySelectorAll('.nm').map(function (n) { return n.textContent; }),
+                      filmOn: loraRow('film').querySelectorAll('INPUT').filter(function (i) { return i.type === 'checkbox'; })[0].checked
+                    };
+                  });
+                });
+              });
+            });
+            """);
+
+        Assert.True(result.GetProperty("staleReads").GetInt32() >= 1);
+        Assert.Contains("● Film Stills", Strings(result, "names"));
+        Assert.True(result.GetProperty("filmOn").GetBoolean());
+    }
+
+    /// <summary>
+    /// A change made while a removal is on its way builds on the choice without the removed
+    /// plug-in. Built on the list painted before, it sent the plug-in back, and the host,
+    /// which had just deleted its files, refused the whole change.
+    /// </summary>
+    [Fact]
+    public void AChangeMadeWhileALoraIsBeingRemovedLeavesItOut()
+    {
+        JsonElement result = Run(ImageModel + TwoStyles + Held + """
+            R['/api/agent/loras'] = loraRows([{ id: 'film', strength: 0.7 }, { id: 'grain', strength: 0.7 }]);
+            """, """
+            return openLoras().then(function () {
+              hold('/api/agent/loras/film');
+              loraRow('film').querySelectorAll('BUTTON').filter(function (b) { return b.textContent === 'Remove'; })[0].dispatch('click');
+              return settle(20).then(function () {
+                var slider = loraRow('grain').querySelectorAll('INPUT').filter(function (i) { return i.type === 'range'; })[0];
+                slider.value = '0.5';
+                slider.dispatch('change');
+                return settle(20).then(function () {
+                  var sentBeforeRemoval = __page.requests('/api/agent/loras/choice').length;
+                  heldFor('/api/agent/loras/film')[0].answer(loraRows([{ id: 'grain', strength: 0.7 }]));
+                  return settle(30).then(function () {
+                    var sent = __page.requests('/api/agent/loras/choice');
+                    return {
+                      sentBeforeRemoval: sentBeforeRemoval,
+                      sent: sent.map(function (c) { return c.body.loras.map(function (l) { return l.id + '@' + l.strength; }).join('+'); })
+                    };
+                  });
+                });
+              });
+            });
+            """);
+
+        Assert.Equal(0, result.GetProperty("sentBeforeRemoval").GetInt32());
+        Assert.Equal(new[] { "grain@0.5" }, Strings(result, "sent"));
+    }
+
+    /// <summary>
+    /// An earlier save that fails, followed by a later one that saves the whole choice,
+    /// leaves no error behind: the later save answered for everything the earlier one sent.
+    /// </summary>
+    [Fact]
+    public void AnEarlierLoraSavesFailureIsNotLeftOnceALaterOneSucceeds()
+    {
+        JsonElement result = Run(ImageModel + TwoStyles + Held, """
+            return openLoras().then(function () {
+              hold('/api/agent/loras/choice');
+              var film = loraRow('film').querySelectorAll('INPUT')[0];
+              var grain = loraRow('grain').querySelectorAll('INPUT')[0];
+              film.checked = true;
+              film.dispatch('change');
+              grain.checked = true;
+              grain.dispatch('change');
+              return settle(20).then(function () {
+                heldFor('/api/agent/loras/choice')[0].answer({ __reject: 'Load failed' });
+                return settle(20).then(function () {
+                  var second = heldFor('/api/agent/loras/choice')[1];
+                  second.answer(loraRows(second.call.body.loras));
+                  return settle(20).then(function () {
+                    return {
+                      sheetError: __page.byId['lora-error'].textContent,
+                      names: __page.byId['lora-list'].querySelectorAll('.nm').map(function (n) { return n.textContent; })
+                    };
+                  });
+                });
+              });
+            });
+            """);
+
+        Assert.Equal("", result.GetProperty("sheetError").GetString());
+        Assert.Equal(new[] { "● Film Stills", "● Grainscape" }, Strings(result, "names"));
+    }
+
+    /// <summary>
+    /// A refused save puts the switches back where the host last had them at once, with the
+    /// host's own words, even when the list cannot be read again: the switch the user flipped
+    /// does not stay on, and the next change does not build on it.
+    /// </summary>
+    [Fact]
+    public void ARefusedLoraSaveRepaintsTheHostsLastAnswerWhenTheReloadFails()
+    {
+        JsonElement result = Run(ImageModel + TwoStyles + Held, """
+            return openLoras().then(function () {
+              hold('/api/agent/loras/choice');
+              var film = loraRow('film').querySelectorAll('INPUT')[0];
+              var grain = loraRow('grain').querySelectorAll('INPUT')[0];
+              film.checked = true;
+              film.dispatch('change');
+              grain.checked = true;
+              grain.dispatch('change');
+              return settle(20).then(function () {
+                // Film Stills is saved, but its answer is not painted: a later change is on its way.
+                heldFor('/api/agent/loras/choice')[0].answer(loraRows([{ id: 'film', strength: 0.7 }]));
+                return settle(20).then(function () {
+                  R['/api/agent/loras'] = { __reject: 'Load failed' };
+                  heldFor('/api/agent/loras/choice')[1].answer({ __status: 400, body: { error: 'Grainscape is not downloaded yet.' } });
+                  return settle(30).then(function () {
+                    function box(id) { return loraRow(id).querySelectorAll('INPUT').filter(function (i) { return i.type === 'checkbox'; })[0]; }
+                    return {
+                      filmOn: box('film').checked,
+                      grainOn: box('grain').checked,
+                      names: __page.byId['lora-list'].querySelectorAll('.nm').map(function (n) { return n.textContent; }),
+                      sheetError: __page.byId['lora-error'].textContent
+                    };
+                  });
+                });
+              });
+            });
+            """);
+
+        Assert.True(result.GetProperty("filmOn").GetBoolean());
+        Assert.False(result.GetProperty("grainOn").GetBoolean());
+        Assert.Equal(new[] { "● Film Stills", "Grainscape" }, Strings(result, "names"));
+        Assert.Equal("Grainscape is not downloaded yet.", result.GetProperty("sheetError").GetString());
+    }
+
+    /// <summary>
+    /// While a plug-in downloads, the sheet polls every second. A tick that moves only the
+    /// percentage leaves every row in place, so a strength slider being dragged on another
+    /// row is not replaced under the finger; the finished download repaints the rows and
+    /// the polling stops.
+    /// </summary>
+    [Fact]
+    public void ADownloadsProgressLeavesTheRowsUnderTheFingerInPlace()
+    {
+        JsonElement result = Run(ImageModel + TwoStyles + """
+            function downloading(fraction) {
+              var running = { id: 'pruna', name: 'Pruna 8-Step', kind: 'Speed', steps: 8, purpose: 'Fast.', license: 'QRL', totalBytes: 335606104,
+                state: 'Partial', installedBytes: 1000, defaultStrength: 1, strengthAdjustable: false, chosen: false, strength: 1,
+                download: fraction === null ? null : { running: true, state: 'Running', progress: { fraction: fraction } } };
+              if (fraction === null) { running.state = 'Installed'; running.installedBytes = 335606104; }
+              return loraRows([{ id: 'film', strength: 0.6 }], [running]);
+            }
+            R['/api/agent/loras'] = downloading(0.25);
+            """, """
+            return openLoras().then(function () {
+              var list = __page.byId['lora-list'];
+              var film = loraRow('film');
+              var slider = film.querySelectorAll('INPUT').filter(function (i) { return i.type === 'range'; })[0];
+              var first = loraRow('pruna').querySelectorAll('.pct')[0].textContent;
+              R['/api/agent/loras'] = downloading(0.5);
+              return wait(1300).then(function () {
+                var during = {
+                  first: first,
+                  second: loraRow('pruna').querySelectorAll('.pct')[0].textContent,
+                  filmRowKept: film.parentNode === list,
+                  sliderKept: slider.parentNode !== null && loraRow('film') === film
+                };
+                R['/api/agent/loras'] = downloading(null);
+                return wait(1300).then(function () {
+                  during.repaintedWhenDone = film.parentNode === null && loraRow('pruna').querySelectorAll('.pct').length === 0;
+                  var polls = __page.requests('/api/agent/loras').length;
+                  return wait(1300).then(function () {
+                    during.pollsAfterDone = __page.requests('/api/agent/loras').length - polls;
+                    return during;
+                  });
+                });
+              });
+            });
+            """);
+
+        Assert.Equal("25%", result.GetProperty("first").GetString());
+        Assert.Equal("50%", result.GetProperty("second").GetString());
+        Assert.True(result.GetProperty("filmRowKept").GetBoolean());
+        Assert.True(result.GetProperty("sliderKept").GetBoolean());
+        Assert.True(result.GetProperty("repaintedWhenDone").GetBoolean());
+        Assert.Equal(0, result.GetProperty("pollsAfterDone").GetInt32());
+    }
+
+    /// <summary>
+    /// The picture is not lost to the answer being painted: a turn that also writes text
+    /// repaints the bubble, and the picture is put back under it.
+    /// </summary>
+    [WebJavaScriptFact]
+    public void APictureSurvivesTextPaintedIntoTheSameBubble()
+    {
+        JsonElement result = Run(ImageModel + """
+            R['/api/chat'] = { __sse: [
+              { image_step: 1, image_steps: 1, preview: 'data:image/png;base64,AAAA' },
+              { token: 'Here it is.' },
+              { imageUrl: '/uploads/boat.png', width: 1024, height: 1024 },
+              { done: true, sessionId: 's1', truncated: false }
+            ] };
+            """, """
+            __page.byId['text'].value = 'a blue boat';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () {
+              var turns = __page.transcript();
+              var answer = turns[turns.length - 1];
+              return {
+                images: answer.media.filter(function (m) { return m.tag === 'IMG'; }).map(function (m) { return m.src; }),
+                html: answer.html
+              };
+            });
+            """);
+
+        Assert.Equal(new[] { "/uploads/boat.png" }, Strings(result, "images"));
+        Assert.Contains("Here it is.", result.GetProperty("html").GetString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A photo is an edit, and an edit needs to be told what to change: sent alone, its
+    /// file name would become the instruction. The draft stays as it was.
+    /// </summary>
+    [WebJavaScriptFact]
+    public void APhotoWithNoWordsIsNotSentToAnImageModel()
+    {
+        JsonElement result = Run(ImageModel, """
+            window.TensorAgent.addAttachment({ ok: true, file: 'a1.png', fileName: 'street.png',
+                                               mediaType: 'image', url: '/uploads/a1.png' });
+            __page.byId['text'].value = '';
+            __page.byId['send'].dispatch('click');
+            return settle(10).then(function () {
+              return {
+                sent: __page.requests('/api/chat').length,
+                attachments: window.TensorAgent.attachmentCount(),
+                notices: __page.notices()
+              };
+            });
+            """);
+
+        Assert.False(result.TryGetProperty("error", out JsonElement failure), failure.ToString());
+        Assert.Equal(0, result.GetProperty("sent").GetInt32());
+        Assert.Equal(1, result.GetProperty("attachments").GetInt32());
+        Assert.Contains(Strings(result, "notices"), n => n.Contains("Say what to change", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// An image model edits the photo rather than looking at it, so the page does not
+    /// stop the send to re-check for a vision file the way it does for a chat model —
+    /// the host refuses an edit itself when the file is missing — and the photo goes
+    /// out as a still, which is what the host edits.
+    /// </summary>
+    [WebJavaScriptFact]
+    public void APhotoAndAnInstructionGoOutAsAnEdit()
+    {
+        JsonElement result = Run(ImageModel + """
+            R['/api/chat'] = { __sse: [
+              { imageUrl: '/uploads/edited.png', width: 1024, height: 768 },
+              { done: true, sessionId: 's1', truncated: false }
+            ] };
+            """, """
+            window.TensorAgent.addAttachment({ ok: true, file: 'a1.png', fileName: 'street.png',
+                                               mediaType: 'image', url: '/uploads/a1.png' });
+            __page.byId['text'].value = 'make it night';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () {
+              return { sent: __page.requests('/api/chat').map(function (c) { return c.body; }) };
+            });
+            """);
+
+        JsonElement message = Assert.Single(result.GetProperty("sent").EnumerateArray()).GetProperty("messages")[0];
+        Assert.Equal("make it night", message.GetProperty("content").GetString());
+        Assert.Equal(new[] { "a1.png" }, Strings(message, "stillImagePaths"));
+    }
+
+    // ---- a video model (VideoTurns on the host) -----------------------------------------
+
+    // What /api/models reports for MiniMax-H3's two checkpoints. The keyframes one (FL2VA)
+    // starts a clip from a photo and can end it on a second; the references one (Ref2VA)
+    // puts what it is shown into a scene of its own. They share one architecture, so the
+    // page decides everything from `video`.
+    private const string KeyframesVideo = """
+        { family: 'minimax-h3', supportsAudio: true, supportsImageConditioning: true,
+          supportsEndImageConditioning: true, supportsReferenceConditioning: false, maxReferenceImages: 0 }
+        """;
+
+    private const string ReferencesVideo = """
+        { family: 'minimax-h3', supportsAudio: true, supportsImageConditioning: true,
+          supportsEndImageConditioning: false, supportsReferenceConditioning: true, maxReferenceImages: 9 }
+        """;
+
+    private static string VideoModel(string video) => $$"""
+        R['/api/models'] = { loaded: 'minimax-h3-q4k.gguf', architecture: 'minimax-h3',
+                             loadedBackend: 'ggml_metal', visionReady: false, video: {{video}} };
+        """;
+
+    private static string[] Tags(JsonElement turn) =>
+        turn.GetProperty("media").EnumerateArray().Select(m => m.GetProperty("tag").GetString()!).ToArray();
+
+    /// <summary>
+    /// The composer says what the loaded checkpoint can be given, and the two differ: one
+    /// starts a clip from a photo, the other features the photos, clips and sounds it is
+    /// shown. A model that reports no video capability is a chat model, whatever its
+    /// architecture is called.
+    /// </summary>
+    [WebJavaScriptTheory]
+    [InlineData(KeyframesVideo, "Describe a video… or attach a photo to start it from")]
+    [InlineData(ReferencesVideo, "Describe a video… attach photos, clips or sounds it should feature")]
+    [InlineData("""
+        { family: 'minimax-h3', supportsAudio: true, supportsImageConditioning: false,
+          supportsEndImageConditioning: false, supportsReferenceConditioning: false, maxReferenceImages: 0 }
+        """, "Describe a video…")]
+    [InlineData("null", "Message… or hold to talk")]
+    public void AVideoModelsComposerSaysWhatItsCheckpointCanBeGiven(string video, string expected)
+    {
+        JsonElement result = Run(VideoModel(video), """
+            return { placeholder: __page.byId['text'].placeholder };
+            """);
+
+        Assert.Equal(expected, result.GetProperty("placeholder").GetString());
+    }
+
+    /// <summary>
+    /// A video is filmed from its description; a photo beside it is only where it starts.
+    /// Sent with no words, the file's name would be the whole script, so nothing is sent,
+    /// the user is told what is missing, and the photo stays where it was.
+    /// </summary>
+    [WebJavaScriptTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AVideoIsNotSentWithoutADescription(bool withPhoto)
+    {
+        string attach = withPhoto
+            ? "window.TensorAgent.addAttachment({ ok: true, file: 'a1.png', fileName: 'beach.png', mediaType: 'image', url: '/uploads/a1.png' });\n"
+            : string.Empty;
+        JsonElement result = Run(VideoModel(KeyframesVideo), attach + """
+            __page.byId['text'].value = '';
+            __page.byId['send'].dispatch('click');
+            return settle(10).then(function () {
+              return {
+                sent: __page.requests('/api/chat').length,
+                attachments: window.TensorAgent.attachmentCount(),
+                notices: __page.notices(),
+                generating: window.TensorAgent.isGenerating()
+              };
+            });
+            """);
+
+        Assert.False(result.TryGetProperty("error", out JsonElement failure), failure.ToString());
+        Assert.Equal(0, result.GetProperty("sent").GetInt32());
+        Assert.Equal(withPhoto ? 1 : 0, result.GetProperty("attachments").GetInt32());
+        Assert.Equal(new[] { "Describe the video you want, then send." }, Strings(result, "notices"));
+        Assert.False(result.GetProperty("generating").GetBoolean());
+    }
+
+    /// <summary>
+    /// A photo is the clip's first frame, not something the model has to see, so the send
+    /// is not held for the vision re-check a chat model gets. That check would refuse it:
+    /// this model reports no vision file. The photo goes out as a still, which is what
+    /// the host makes a keyframe of.
+    /// </summary>
+    [WebJavaScriptFact]
+    public void APhotoAndADescriptionGoToAVideoModelWithoutAVisionCheck()
+    {
+        JsonElement result = Run(VideoModel(KeyframesVideo) + """
+            R['/api/chat'] = { __sse: [{ done: true, sessionId: 's1', truncated: false }] };
+            """, """
+            window.TensorAgent.addAttachment({ ok: true, file: 'a1.png', fileName: 'beach.png',
+                                               mediaType: 'image', url: '/uploads/a1.png' });
+            var modelReads = __page.requests('/api/models').length;
+            __page.byId['text'].value = 'the tide comes in over the sand';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () {
+              return {
+                sent: __page.requests('/api/chat').map(function (c) { return c.body; }),
+                rereads: __page.requests('/api/models').length - modelReads,
+                notices: __page.notices()
+              };
+            });
+            """);
+
+        JsonElement message = Assert.Single(result.GetProperty("sent").EnumerateArray()).GetProperty("messages")[0];
+        Assert.Equal("the tide comes in over the sand", message.GetProperty("content").GetString());
+        Assert.Equal(new[] { "a1.png" }, Strings(message, "stillImagePaths"));
+        Assert.Equal(0, result.GetProperty("rereads").GetInt32());
+        Assert.Empty(Strings(result, "notices"));
+    }
+
+    /// <summary>
+    /// The references checkpoint can be shown all three kinds of thing at once. Each goes
+    /// out under the list the host reads it from, and the clip's frames do not hold the
+    /// send for a vision re-check either.
+    /// </summary>
+    [WebJavaScriptFact]
+    public void PhotosClipsAndSoundsAllReachAReferencesVideoModel()
+    {
+        JsonElement result = Run(VideoModel(ReferencesVideo) + """
+            R['/api/chat'] = { __sse: [{ done: true, sessionId: 's1', truncated: false }] };
+            """, """
+            window.TensorAgent.addAttachment({ ok: true, file: 'a1.png', fileName: 'dog.png', mediaType: 'image', url: '/uploads/a1.png' });
+            window.TensorAgent.addAttachment({ ok: true, file: 'a2.mp4', fileName: 'walk.mp4', mediaType: 'video', url: '/uploads/a2.mp4',
+                                               frames: ['a2_0001.png'] });
+            window.TensorAgent.addAttachment({ ok: true, file: 'a3.wav', fileName: 'bark.wav', mediaType: 'audio', url: '/uploads/a3.wav' });
+            __page.byId['text'].value = 'the dog runs along the beach, barking';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () {
+              return { sent: __page.requests('/api/chat').map(function (c) { return c.body; }), notices: __page.notices() };
+            });
+            """);
+
+        JsonElement message = Assert.Single(result.GetProperty("sent").EnumerateArray()).GetProperty("messages")[0];
+        Assert.Equal("the dog runs along the beach, barking", message.GetProperty("content").GetString());
+        Assert.Equal(new[] { "a1.png" }, Strings(message, "stillImagePaths"));
+        Assert.Equal(new[] { "a2.mp4" }, Strings(message, "videoFilePaths"));
+        Assert.Equal(new[] { "a3.wav" }, Strings(message, "audioPaths"));
+        Assert.Empty(Strings(result, "notices"));
+    }
+
+    /// <summary>
+    /// A clip takes minutes, in stages the host names: the description is read, the clip
+    /// denoises step by step, then its frames, its sound and the MP4 are made. The strip
+    /// says each in turn, with about how long is left while it films. The turn ends with
+    /// one player in the bubble and the clip in the history, so the next request does not
+    /// drop it from the saved chat. The sound is inside the MP4 here, so there is nothing
+    /// else to play, whether the frame leaves audioUrl out or sends it as null. Null is
+    /// what the host actually writes, because it keeps nulls in its frames.
+    /// </summary>
+    [WebJavaScriptTheory]
+    [InlineData("")]
+    [InlineData("audioUrl: null, ")]
+    public void AVideoModelsTurnIsOneClipInTheBubbleAndTheHistory(string muxedSound)
+    {
+        JsonElement result = Run(VideoModel(KeyframesVideo) + $$"""
+            R['/api/chat'] = { __sse: [
+              { video_step: 0, video_steps: 3, video_phase: 'text-encode', elapsed: 2.1, eta: -1 },
+              { video_step: 1, video_steps: 3, video_phase: 'denoise', elapsed: 41.2, eta: 210.5 },
+              { video_step: 2, video_steps: 3, video_phase: 'denoise', elapsed: 80.3, eta: 42.4 },
+              { video_step: 3, video_steps: 3, video_phase: 'denoise', elapsed: 119.0, eta: 0 },
+              { video_step: 3, video_steps: 3, video_phase: 'vae-decode', elapsed: 125.6, eta: -1 },
+              { video_step: 3, video_steps: 3, video_phase: 'audio-decode', elapsed: 131.0, eta: -1 },
+              { video_step: 3, video_steps: 3, video_phase: 'encode', elapsed: 133.2, eta: -1 },
+              { videoUrl: '/uploads/video-9b1e4c7d2a6f8e3b5c0d1a2f4e6b8c9d.mp4', {{muxedSound}}
+                width: 640, height: 384, frames: 22, fps: 24, seed: 12345, hasAudio: true },
+              { done: true, sessionId: 's1', tokenCount: 0, elapsed: 133.9, tokPerSec: 0.0, truncated: false }
+            ] };
+            """, """
+            var shownBefore = __page.progress().length;
+            __page.byId['text'].value = 'a lighthouse at dusk, waves breaking below';
+            __page.byId['send'].dispatch('click');
+            return settle(40).then(function () {
+              var turns = __page.transcript();
+              var answer = turns[turns.length - 1];
+              return {
+                sent: __page.requests('/api/chat').map(function (c) { return c.body; }),
+                role: answer.role,
+                media: answer.media,
+                shown: __page.progress().slice(shownBefore),
+                history: window.TensorAgent.history(),
+                generating: window.TensorAgent.isGenerating(),
+                errors: __page.errorNotices()
+              };
+            });
+            """);
+
+        JsonElement sent = Assert.Single(result.GetProperty("sent").EnumerateArray());
+        Assert.Equal("a lighthouse at dusk, waves breaking below", sent.GetProperty("messages")[0].GetProperty("content").GetString());
+
+        Assert.Equal("assistant", result.GetProperty("role").GetString());
+        JsonElement clip = Assert.Single(result.GetProperty("media").EnumerateArray());
+        Assert.Equal("VIDEO", clip.GetProperty("tag").GetString());
+        Assert.Equal("/uploads/video-9b1e4c7d2a6f8e3b5c0d1a2f4e6b8c9d.mp4", clip.GetProperty("src").GetString());
+        Assert.True(clip.GetProperty("controls").GetBoolean());
+        Assert.True(clip.GetProperty("playsInline").GetBoolean());
+        Assert.True(clip.GetProperty("loop").GetBoolean());
+        Assert.Equal("metadata", clip.GetProperty("preload").GetString());
+
+        Assert.Equal(new[]
+        {
+            "Filming…",
+            "Reading the description…",
+            "Filming… step 1 of 3 · about 4 min left",
+            "Filming… step 2 of 3 · about 42 s left",
+            "Filming… step 3 of 3",
+            "Developing the frames…",
+            "Adding the sound…",
+            "Saving the video…",
+        }, Strings(result, "shown"));
+
+        JsonElement history = result.GetProperty("history");
+        Assert.Equal(2, history.GetArrayLength());
+        JsonElement made = history[1];
+        Assert.Equal("assistant", made.GetProperty("role").GetString());
+        Assert.Equal("", made.GetProperty("content").GetString());
+        Assert.Equal("/uploads/video-9b1e4c7d2a6f8e3b5c0d1a2f4e6b8c9d.mp4", made.GetProperty("videoUrl").GetString());
+        Assert.False(made.TryGetProperty("audioUrl", out _), "the sound is inside the MP4, so there is no second file to keep");
+        Assert.False(result.GetProperty("generating").GetBoolean());
+        Assert.Empty(Strings(result, "errors"));
+    }
+
+    /// <summary>
+    /// The time left is said the way a person would say it: minutes past a minute and a
+    /// half, seconds under it, and never "0 s". A stage this page has no name for still
+    /// says it is filming, rather than leaving the last stage's words up.
+    /// </summary>
+    [WebJavaScriptFact]
+    public void TheTimeLeftWhileFilmingReadsTheWayAPersonWouldSayIt()
+    {
+        JsonElement result = Run(VideoModel(KeyframesVideo) + """
+            R['/api/chat'] = { __sse: [
+              { video_step: 1, video_steps: 4, video_phase: 'denoise', elapsed: 30, eta: 91 },
+              { video_step: 2, video_steps: 4, video_phase: 'denoise', elapsed: 60, eta: 90 },
+              { video_step: 3, video_steps: 4, video_phase: 'denoise', elapsed: 90, eta: 0.3 },
+              { video_step: 4, video_steps: 4, video_phase: 'interpolate', elapsed: 95, eta: -1 },
+              { videoUrl: '/uploads/video-5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e.mp4', hasAudio: true },
+              { done: true, sessionId: 's1', tokenCount: 0, elapsed: 96, tokPerSec: 0.0, truncated: false }
+            ] };
+            """, """
+            var shownBefore = __page.progress().length;
+            __page.byId['text'].value = 'snow falling on a quiet street';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () {
+              return { shown: __page.progress().slice(shownBefore), generating: window.TensorAgent.isGenerating() };
+            });
+            """);
+
+        Assert.Equal(new[]
+        {
+            "Filming…",
+            "Filming… step 1 of 4 · about 2 min left",
+            "Filming… step 2 of 4 · about 90 s left",
+            "Filming… step 3 of 4 · about 1 s left",
+            "Filming…",
+        }, Strings(result, "shown"));
+        Assert.False(result.GetProperty("generating").GetBoolean());
+    }
+
+    /// <summary>
+    /// When the host keeps the soundtrack as a file of its own instead of inside the MP4,
+    /// the page plays it: one player for the sound, right under the clip, and both files
+    /// in the history.
+    /// </summary>
+    [WebJavaScriptFact]
+    public void ASoundtrackKeptAsItsOwnFilePlaysUnderTheClip()
+    {
+        JsonElement result = Run(VideoModel(KeyframesVideo) + """
+            R['/api/chat'] = { __sse: [
+              { video_step: 1, video_steps: 1, video_phase: 'denoise', elapsed: 40, eta: -1 },
+              { videoUrl: '/uploads/video-0a1b2c3d4e5f60718293a4b5c6d7e8f9.mp4',
+                audioUrl: '/uploads/video-0a1b2c3d4e5f60718293a4b5c6d7e8f9.wav',
+                width: 640, height: 384, frames: 22, fps: 24, seed: 7, hasAudio: true },
+              { done: true, sessionId: 's1', tokenCount: 0, elapsed: 61.5, tokPerSec: 0.0, truncated: false }
+            ] };
+            """, """
+            __page.byId['text'].value = 'rain on a tin roof';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () {
+              var turns = __page.transcript();
+              return { answer: turns[turns.length - 1], history: window.TensorAgent.history() };
+            });
+            """);
+
+        JsonElement answer = result.GetProperty("answer");
+        Assert.Equal(new[] { "VIDEO", "AUDIO" }, Tags(answer));
+        JsonElement media = answer.GetProperty("media");
+        Assert.Equal("/uploads/video-0a1b2c3d4e5f60718293a4b5c6d7e8f9.mp4", media[0].GetProperty("src").GetString());
+        Assert.Equal("/uploads/video-0a1b2c3d4e5f60718293a4b5c6d7e8f9.wav", media[1].GetProperty("src").GetString());
+        Assert.True(media[1].GetProperty("controls").GetBoolean());
+        Assert.Equal("metadata", media[1].GetProperty("preload").GetString());
+
+        JsonElement made = result.GetProperty("history")[1];
+        Assert.Equal("/uploads/video-0a1b2c3d4e5f60718293a4b5c6d7e8f9.mp4", made.GetProperty("videoUrl").GetString());
+        Assert.Equal("/uploads/video-0a1b2c3d4e5f60718293a4b5c6d7e8f9.wav", made.GetProperty("audioUrl").GetString());
+    }
+
+    /// <summary>
+    /// The page paints once per read, and a read can carry the words and the clip
+    /// together. The clip goes under the words, so the words are painted first: painted
+    /// after, they would replace what is in the bubble and take the player with them.
+    /// </summary>
+    [WebJavaScriptFact]
+    public void AClipGoesUnderTheWordsOfTheSameTurn()
+    {
+        JsonElement result = Run(VideoModel(KeyframesVideo) + """
+            R['/api/chat'] = { __sse: [{ __chunk: [
+              { token: 'Here it is.' },
+              { videoUrl: '/uploads/video-1f2e3d4c5b6a79881f2e3d4c5b6a7988.mp4', hasAudio: true },
+              { done: true, sessionId: 's1', truncated: false }
+            ] }] };
+            """, """
+            __page.byId['text'].value = 'a red kite over a field';
+            __page.byId['send'].dispatch('click');
+            return settle(30).then(function () {
+              var turns = __page.transcript();
+              var answer = turns[turns.length - 1];
+              return { media: answer.media, html: answer.html };
+            });
+            """);
+
+        JsonElement clip = Assert.Single(result.GetProperty("media").EnumerateArray());
+        Assert.Equal("VIDEO", clip.GetProperty("tag").GetString());
+        Assert.Equal("/uploads/video-1f2e3d4c5b6a79881f2e3d4c5b6a7988.mp4", clip.GetProperty("src").GetString());
+        Assert.Contains("Here it is.", result.GetProperty("html").GetString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Leaving the app while a clip is made and coming back re-attaches to the turn, and
+    /// the host replays it from its first frame, all at once, into the same bubble. The
+    /// clip and its sound were already showing; the bubble still ends with one of each,
+    /// and the history with one entry for the turn.
+    /// </summary>
+    [WebJavaScriptFact]
+    public void ComingBackToAVideoTurnDoesNotStackASecondPlayer()
+    {
+        JsonElement result = Run(VideoModel(KeyframesVideo) + $$"""
+            var frames = [
+              { video_step: 0, video_steps: 2, video_phase: 'text-encode', elapsed: 2, eta: -1 },
+              { video_step: 1, video_steps: 2, video_phase: 'denoise', elapsed: 40, eta: 38 },
+              { video_step: 2, video_steps: 2, video_phase: 'encode', elapsed: 80, eta: -1 },
+              { videoUrl: '/uploads/video-aa55aa55aa55aa55aa55aa55aa55aa55.mp4',
+                audioUrl: '/uploads/video-aa55aa55aa55aa55aa55aa55aa55aa55.wav',
+                width: 640, height: 384, frames: 22, fps: 24, seed: 9, hasAudio: true }
+            ];
+            R['/api/chat'] = { __status: 200, headers: { {{TurnHeader}} }, body: { __sse: frames, __then: 'hang' } };
+            R['/api/agent/turns'] = { turn: { id: 't1', running: true } };
+            R['/api/agent/turns/t1'] = { __sse: [{ __chunk: frames.concat([
+              { done: true, sessionId: 's1', tokenCount: 0, elapsed: 81, tokPerSec: 0.0, truncated: false }
+            ]) }] };
+            """, """
+            window.TensorAgent.__testing.streamTrustMs(0);
+            __page.byId['text'].value = 'a paper boat in a gutter stream';
+            __page.byId['send'].dispatch('click');
+            return settle(20).then(function () {
+              var before = __page.transcript();
+              document.visibilityState = 'hidden';
+              document.dispatch('visibilitychange', {});
+              document.visibilityState = 'visible';
+              document.dispatch('visibilitychange', {});
+              return wait(500).then(function () {
+                return {
+                  before: before,
+                  after: __page.transcript(),
+                  history: window.TensorAgent.history(),
+                  generating: window.TensorAgent.isGenerating(),
+                  attaches: __page.requests('/api/agent/turns/t1').length
+                };
+              });
+            });
+            """);
+
+        JsonElement before = Assert.Single(Bubbles(result.GetProperty("before")), t => t.GetProperty("role").GetString() == "assistant");
+        Assert.Equal(new[] { "VIDEO", "AUDIO" }, Tags(before));
+        Assert.Equal(1, result.GetProperty("attaches").GetInt32());
+
+        JsonElement after = Assert.Single(Bubbles(result.GetProperty("after")), t => t.GetProperty("role").GetString() == "assistant");
+        Assert.Equal(new[] { "VIDEO", "AUDIO" }, Tags(after));
+        Assert.Equal("/uploads/video-aa55aa55aa55aa55aa55aa55aa55aa55.mp4", after.GetProperty("media")[0].GetProperty("src").GetString());
+        Assert.Equal("/uploads/video-aa55aa55aa55aa55aa55aa55aa55aa55.wav", after.GetProperty("media")[1].GetProperty("src").GetString());
+
+        var history = result.GetProperty("history").EnumerateArray().ToList();
+        Assert.Equal(2, history.Count);
+        Assert.Equal("/uploads/video-aa55aa55aa55aa55aa55aa55aa55aa55.mp4", history[1].GetProperty("videoUrl").GetString());
+        Assert.Equal("/uploads/video-aa55aa55aa55aa55aa55aa55aa55aa55.wav", history[1].GetProperty("audioUrl").GetString());
+        Assert.False(result.GetProperty("generating").GetBoolean());
+    }
+
+    /// <summary>
+    /// A clip comes back with the chat it was made in: the player again, and a player
+    /// for the sound only where the sound was a file of its own. The host sends a saved
+    /// message with every field, null where there is nothing, so the first clip's
+    /// soundtrack arrives as a null and must not become an empty player. The history the
+    /// next request is built from still names both files, so that request does not
+    /// delete them from the saved chat.
+    /// </summary>
+    [WebJavaScriptFact]
+    public void AReopenedChatShowsItsClipsAgain()
+    {
+        JsonElement result = Run("""
+            R['/api/agent/conversations'] = { conversations: [{ id: 'saved', title: 'Lighthouse', updatedAt: '2026-09-30T10:00:00Z', messageCount: 4 }] };
+            R['/api/sessions?conversation=saved'] = {
+              sessionId: 's9', conversationId: 'saved', think: false, skills: [],
+              messages: [
+                { role: 'user', content: 'a lighthouse at dusk' },
+                { role: 'assistant', content: '', videoUrl: '/uploads/video-c0ffeec0ffeec0ffeec0ffeec0ffee00.mp4', audioUrl: null },
+                { role: 'user', content: 'the same, with gulls calling' },
+                { role: 'assistant', content: '', videoUrl: '/uploads/video-d00dd00dd00dd00dd00dd00dd00dd00d.mp4',
+                  audioUrl: '/uploads/video-d00dd00dd00dd00dd00dd00dd00dd00d.wav' }
+              ]
+            };
+            R['/api/chat'] = { __sse: [{ token: 'The second one.' }, { done: true, truncated: false }] };
+            """, """
+            var shown = __page.transcript();
+            __page.byId['text'].value = 'Which one has the gulls?';
+            __page.byId['send'].dispatch('click');
+            return settle(20).then(function () {
+              return { shown: shown, sent: __page.requests('/api/chat').map(function (c) { return c.body; }) };
+            });
+            """);
+
+        var turns = Bubbles(result.GetProperty("shown"));
+        Assert.Equal(4, turns.Count);
+        Assert.Equal(new[] { "VIDEO" }, Tags(turns[1]));
+        JsonElement first = turns[1].GetProperty("media")[0];
+        Assert.Equal("/uploads/video-c0ffeec0ffeec0ffeec0ffeec0ffee00.mp4", first.GetProperty("src").GetString());
+        Assert.True(first.GetProperty("controls").GetBoolean());
+        Assert.True(first.GetProperty("playsInline").GetBoolean());
+        Assert.True(first.GetProperty("loop").GetBoolean());
+        Assert.Equal("metadata", first.GetProperty("preload").GetString());
+        Assert.Equal(new[] { "VIDEO", "AUDIO" }, Tags(turns[3]));
+        JsonElement sound = turns[3].GetProperty("media")[1];
+        Assert.Equal("/uploads/video-d00dd00dd00dd00dd00dd00dd00dd00d.wav", sound.GetProperty("src").GetString());
+        Assert.True(sound.GetProperty("controls").GetBoolean());
+        Assert.Equal("metadata", sound.GetProperty("preload").GetString());
+
+        JsonElement messages = Assert.Single(result.GetProperty("sent").EnumerateArray()).GetProperty("messages");
+        Assert.Equal(5, messages.GetArrayLength());
+        Assert.Equal("/uploads/video-c0ffeec0ffeec0ffeec0ffeec0ffee00.mp4", messages[1].GetProperty("videoUrl").GetString());
+        Assert.True(!messages[1].TryGetProperty("audioUrl", out JsonElement noSound) || noSound.ValueKind == JsonValueKind.Null,
+            "the first clip's sound is inside its MP4, so the next request names no soundtrack for it");
+        Assert.Equal("/uploads/video-d00dd00dd00dd00dd00dd00dd00dd00d.mp4", messages[3].GetProperty("videoUrl").GetString());
+        Assert.Equal("/uploads/video-d00dd00dd00dd00dd00dd00dd00dd00d.wav", messages[3].GetProperty("audioUrl").GetString());
+    }
 }

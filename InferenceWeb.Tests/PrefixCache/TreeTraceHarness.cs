@@ -36,6 +36,7 @@ internal sealed class TreeTraceHarness
         public bool BatchedPaged;
         public bool NativeSlots;
         public Func<string, int, int, bool>? ModelRule;
+        public Func<int, int, bool>? PrimaryRule;
     }
 
     private sealed class Session
@@ -163,6 +164,7 @@ internal sealed class TreeTraceHarness
             TruncationSearchNodes = 64,
         });
         _validator.Rule = _profile.ModelRule;
+        _validator.PrimaryRule = _profile.PrimaryRule;
     }
 
     private static Profile[] Profiles() => new[]
@@ -179,13 +181,28 @@ internal sealed class TreeTraceHarness
             Caps = Caps(EndStateSupport.DonateOnly, TruncationKind.ModelDecides, 0, 2, PageSupport.None, nativeSlots: 3),
             ModelRule = (key, payload, target) => payload - target <= 8,
         },
+        // DeepSeek V4.1 without retained slots (a DSpark drafter loaded): the primary is its only state, the model
+        // decides every rewind and caps none, so a primary is kept past the donation slack when the
+        // model vouches for the depth (its prompt-boundary checkpoint); here every fourth target.
+        new Profile
+        {
+            Name = "OracleNRetained", NativeSlots = true,
+            Caps = Caps(EndStateSupport.DonateOnly, TruncationKind.ModelDecides, 0, 2, PageSupport.None, nativeSlots: 3, rewindCap: int.MaxValue),
+            ModelRule = (key, payload, target) => payload - target <= 8 || target % 4 == 0,
+        },
+        new Profile
+        {
+            Name = "OracleNLive",
+            Caps = Caps(EndStateSupport.None, TruncationKind.ModelDecides, 0, 2, PageSupport.None, rewindCap: int.MaxValue),
+            PrimaryRule = (payload, target) => payload - target <= 8 || target % 4 == 0,
+        },
     };
 
     private static PrefixCacheCapabilities Caps(EndStateSupport endState, TruncationKind truncation, int parameter, int granularity, PageSupport pages,
-                                                bool copy = false, int mmMin = 0, int window = 0, bool acrossMedia = true, bool stateAtEnd = false, int nativeSlots = 0) => new()
+                                                bool copy = false, int mmMin = 0, int window = 0, bool acrossMedia = true, bool stateAtEnd = false, int nativeSlots = 0,
+                                                int rewindCap = 16) => new()
     {
         Class = FamilyClass.P,
-        Readiness = PrefixCacheMode.Legacy,
         NamespaceFingerprint = "harness",
         EndState = endState,
         CanCaptureCopy = endState == EndStateSupport.CopyAndDonate,
@@ -195,7 +212,7 @@ internal sealed class TreeTraceHarness
         Truncation = truncation,
         TruncationParameter = parameter,
         TruncationGranularity = granularity,
-        RewindCapTokens = 16,
+        RewindCapTokens = rewindCap,
         Pages = pages,
         PagesNeedStateAtEnd = stateAtEnd,
         PageWindowTokens = window,
@@ -249,7 +266,12 @@ internal sealed class TreeTraceHarness
         if (roll < 10) { _op = "new-chat"; Admit(NewChatRequest(), fault: MaybeFault()); }
         else if (roll < 35) { _op = "follow-up"; Admit(FollowUpRequest(image: false, resend: false, breakpoint: false), fault: MaybeFault()); }
         else if (roll < 40) { _op = "regenerate"; Admit(RegenerateRequest(), fault: MaybeFault()); }
-        else if (roll < 45) { _op = "fork-edit"; Admit(ForkRequest(), fault: MaybeFault()); }
+        else if (roll < 45)
+        {
+            // A family whose model decides rewinds past the donation slack also gets the CLI's thinking turn.
+            if (_profile.Caps.RewindCapTokens > _tree.Options.DonateTruncateSlackTokens && _rng.Next(2) == 0) { _op = "solo-thinking-turn"; SoloThinkingTurn(); }
+            else { _op = "fork-edit"; Admit(ForkRequest(), fault: MaybeFault()); }
+        }
         else if (roll < 50) { _op = "replay-new-scope"; Admit(ReplayRequest(lineage: false), fault: MaybeFault()); }
         else if (roll < 52) { _op = "replay-lineage"; Admit(ReplayRequest(lineage: true), fault: MaybeFault()); }
         else if (roll < 57) { _op = "image-new"; Admit(FollowUpRequest(image: true, resend: false, breakpoint: false), fault: MaybeFault()); }
@@ -598,19 +620,21 @@ internal sealed class TreeTraceHarness
 
     // ------------------------------------------------------------------ finish, preemption, publication
 
-    private void Finish(Request r, bool abort, NodeFlags extra = NodeFlags.None)
+    /// <param name="answer">Output length, or -1 for a short random one.</param>
+    /// <param name="primary">Finish on the primary: whole output computed, the end state kept as the primary.</param>
+    private void Finish(Request r, bool abort, NodeFlags extra = NodeFlags.None, int answer = -1, bool primary = false)
     {
         _running.Remove(r);
         Finishes++;
         if (!abort)
         {
-            int[] output = UserText(0, 10);
+            int[] output = answer >= 0 ? Enumerable.Range(0, answer).Select(_ => _rng.Next(20)).ToArray() : UserText(0, 10);
             RadixKeyBuilder.AppendOutput(r.Key, r.Tokens.Length, output, _tree.KeyPool);
             int total = r.Tokens.Length + output.Length;
-            int computed = _rng.Next(4) == 0 ? Math.Max(1, r.Reused + _rng.Next(Math.Max(1, total - r.Reused))) : total;
+            int computed = !primary && _rng.Next(4) == 0 ? Math.Max(1, r.Reused + _rng.Next(Math.Max(1, total - r.Reused))) : total;
             computed = Math.Clamp(computed, 1, total);
             if (r.BreakpointLimit > 0) computed = Math.Min(computed, r.BreakpointLimit);
-            InsertComputed(r, computed, extra);
+            InsertComputed(r, computed, extra, primary);
             if (!_tiny || _rng.Next(2) == 0)
             {
                 r.Session.Transcript.Clear();
@@ -628,10 +652,48 @@ internal sealed class TreeTraceHarness
 
     private void Preempt(Request r) => Finish(r, abort: false, extra: NodeFlags.PreemptHold);
 
+    /// <summary>
+    /// The CLI's thinking turn on a family whose model decides every rewind (DeepSeek V4.1). The engine
+    /// idles between turns, so the primary is available; a turn finishes with a long answer and stays
+    /// resident as the primary; the next turn re-renders it without its reasoning, so it diverges at the
+    /// think marker that ended the previous prompt and keeps that prompt only by rewinding the primary
+    /// past the whole answer - further than the donation slack.
+    /// </summary>
+    private void SoloThinkingTurn()
+    {
+        while (_running.Count > 0) Finish(_running[_rng.Next(_running.Count)], abort: false);
+        // What ExecuteStep does before it runs a step: the resident primary is gone.
+        foreach (string key in _tree.PayloadKeys.ToList())
+        {
+            if (_tree.TryGetNodeByKey(key, out RadixNode n) && n.EndState!.Kind == EndStateKind.PrimaryResident
+                && n.StateLockRef == 0 && !n.IsDonationPending)
+            {
+                _tree.InvalidatePayload(key);
+                _liveKeys.Remove(key);
+            }
+        }
+        Request turn = FollowUpRequest(image: false, resend: false, breakpoint: false);
+        Admit(turn, fault: 0);
+        if (!_running.Contains(turn)) return;
+        // A family without end states keeps the turn as its primary; one with retained slots (DeepSeek V4.1,
+        // always) keeps the finished slot.
+        Finish(turn, abort: false, answer: _tree.Options.DonateTruncateSlackTokens + 1 + _rng.Next(40),
+               primary: _profile.Caps.EndState == EndStateSupport.None);
+        // The next prompt: the previous one up to its think marker, the </think> the cache never held,
+        // the answer without its reasoning, the new question.
+        int keep = turn.Tokens.Length - 1 - turn.P;
+        if (keep <= 0) return;
+        var transcript = turn.Tokens.Skip(turn.P).Take(keep).ToList();
+        transcript.Add(Placeholder - 1);
+        transcript.AddRange(UserText(1, 8));
+        var spans = turn.Spans.Where(x => x.End <= turn.P + keep).ToList();
+        Admit(Build(turn.Session, transcript, spans), fault: 0);
+    }
+
     private bool ScopeUsable(Request r) => _tree.Scopes.IsLive(r.ScopeIx) && !_tree.Scopes[r.ScopeIx].Retired
                                            && _tree.Scopes[r.ScopeIx].Id == r.ScopeId;
 
-    private void InsertComputed(Request r, int computed, NodeFlags flags)
+    private void InsertComputed(Request r, int computed, NodeFlags flags, bool forcePrimary = false)
     {
         if (computed < MinRetain || !ScopeUsable(r)) return;
         PrefixCacheCapabilities caps = _profile.Caps;
@@ -660,7 +722,7 @@ internal sealed class TreeTraceHarness
             _tree.CollectIfEmpty(n);
         }
         // End state: the primary resident or a donated holder / native slot.
-        bool primary = caps.PrimaryResident && _tree.PrimaryResidentCount == 0 && _rng.Next(4) == 0;
+        bool primary = caps.PrimaryResident && _tree.PrimaryResidentCount == 0 && (forcePrimary || _rng.Next(4) == 0);
         if (caps.EndState != EndStateSupport.None || primary)
         {
             RadixNode n = _tree.Insert(r.Key, computed, r.ScopeIx, r.P, flags, r.Spans);
@@ -1062,7 +1124,10 @@ internal sealed class TreeTraceHarness
                     bool primary = d.EndState.Kind == EndStateKind.PrimaryResident;
                     if (primary && (!r.PrimaryAvailable || d.StateLockRef > 0)) continue;
                     if (!primary && validator is not null && !validator.CanMaterialize(d.EndState.Key, d.Depth, target)) continue;
-                    MaterializeMode mode = RefDonation(t, d, target, primary, waiting);
+                    // A primary kept past the slack (see RefDonation) needs the model's word on the depth.
+                    if (primary && d.Depth - target > t.Options.DonateTruncateSlackTokens && !RefPrimarySurvivesDecline(caps)
+                        && validator is not null && !validator.CanRewindPrimary(d.Depth, target)) continue;
+                    MaterializeMode mode = RefDonation(t, d, target, primary, waiting, r.ScopeIx);
                     if (mode == MaterializeMode.None) continue;
                     var cand = new Cand { Kind = CandidateKind.TruncatedEndState, Mode = mode, Length = target, Payload = d, Tie = d.Id };
                     if (!c.Valid || cand.Length > c.Length
@@ -1102,21 +1167,29 @@ internal sealed class TreeTraceHarness
         return y.Tie < x.Tie ? y : x;
     }
 
-    /// <summary>§5.3.4, re-derived: (a) leaf, (b) unlocked, (c) scoped, (d) no other waiter, (e) support, (f) slack.</summary>
-    private static MaterializeMode RefDonation(PrefixTree t, RadixNode x, int length, bool primary, IWaitingPlanView? waiting)
+    /// <summary>§5.3.4, re-derived: (a) leaf, (b) unlocked, (c) scoped, (d) no other waiter, (e) support,
+    /// (f) slack - which binds a primary only when a decline would keep it (it converts, then clones).</summary>
+    private static MaterializeMode RefDonation(PrefixTree t, RadixNode x, int length, bool primary, IWaitingPlanView? waiting, int requestScope = -1)
     {
         PrefixCacheCapabilities caps = t.Caps;
         ScopeRecord rec = t.Scopes[x.ScopeIx];
+        bool survives = RefPrimarySurvivesDecline(caps);
+        // (f) is waived for a primary a decline cannot keep, and for a donate-only slot the model rewinds
+        // for its own conversation.
+        bool waived = primary ? !survives
+            : caps.EndState == EndStateSupport.DonateOnly && caps.Truncation == TruncationKind.ModelDecides && requestScope == x.ScopeIx;
         bool ok = x.Children.Count == 0
                   && x.LockRef == 0 && x.StateLockRef == 0 && x.PinRef == 0
                   && x.ScopeIx != 0
                   && (primary ? caps.PrimaryResident : caps.EndState is EndStateSupport.DonateOnly or EndStateSupport.CopyAndDonate)
-                  && x.Depth - length <= t.Options.DonateTruncateSlackTokens
+                  && (x.Depth - length <= t.Options.DonateTruncateSlackTokens || waived)
                   && (rec.WaitingRequests <= 1 || (waiting is not null && rec.WaitingRequests - 1 <= 128 && waiting.NoOtherWaiterTargets(x.ScopeIx, x, t.Version)));
         if (primary)
-            return ok ? MaterializeMode.KeepPrimary
-                 : caps.AdoptPrimaryOnDisplacement && caps.EndState == EndStateSupport.CopyAndDonate ? MaterializeMode.ConvertPrimaryThenClone : MaterializeMode.None;
+            return ok ? MaterializeMode.KeepPrimary : survives ? MaterializeMode.ConvertPrimaryThenClone : MaterializeMode.None;
         return ok ? MaterializeMode.DonateEndState
              : caps.EndState == EndStateSupport.CopyAndDonate ? MaterializeMode.CloneEndState : MaterializeMode.None;
     }
+
+    private static bool RefPrimarySurvivesDecline(PrefixCacheCapabilities caps)
+        => caps.AdoptPrimaryOnDisplacement && caps.EndState == EndStateSupport.CopyAndDonate;
 }

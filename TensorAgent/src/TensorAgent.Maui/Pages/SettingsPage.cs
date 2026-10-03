@@ -9,8 +9,10 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
 using TensorAgent.Core.Hosting;
+using TensorAgent.Core.Localization;
 using TensorAgent.Core.Settings;
 using TensorAgent.Maui.Hosting;
+using TensorAgent.Sharing.Localization;
 
 namespace TensorAgent.Maui.Pages;
 
@@ -43,15 +45,32 @@ public sealed class SettingsPage : ContentPage
     private readonly AgentAppHost _app;
     private readonly VerticalStackLayout _body;
     private Label? _engine;
+#if DEBUG
+    private static int s_languagePicked;
+#endif
 
     public SettingsPage(LoopbackWebHost host)
     {
         _app = host.App;
-        Title = "Settings";
+        Title = Loc.T("settings.title");
         BackgroundColor = Theme.Background;
 
         _body = new VerticalStackLayout { Spacing = 4, Padding = new Thickness(0, 8, 0, 24) };
         Content = new ScrollView { Content = _body, BackgroundColor = Theme.Background };
+
+        // A new language repaints this screen at once: it is the one the user switched on.
+        // Dispatched, so the picker that raised the change is not torn down inside its own event.
+        Loc.Changed += () => Dispatcher.Dispatch(() =>
+        {
+            try
+            {
+                Build();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("TensorAgent: the settings screen failed to repaint in the new language: " + ex);
+            }
+        });
     }
 
     protected override void OnAppearing()
@@ -85,32 +104,45 @@ public sealed class SettingsPage : ContentPage
     /// </summary>
     private void Apply(Action<AppSettings> change)
     {
-        AppSettings settings = _app.Settings.Load();
-        change(settings);
-        _app.Settings.Save(settings);
+        AppSettings settings = _app.Settings.Update(s =>
+        {
+            change(s);
+            return s;
+        });
         _app.ApplySettings(settings);
         if (_engine is not null)
-            _engine.Text = "Now: " + _app.DescribeEngine();
+            _engine.Text = Loc.T("settings.sandbox.now", ("engine", _app.DescribeEngine()));
     }
 
 
     private void Build()
     {
         AppSettings settings = _app.Settings.Load();
+        Title = Loc.T("settings.title");
         _body.Clear();
 
-        _body.Add(Section("Sandbox"));
-        _body.Add(Switch(
-            "Run code",
-            "Let the model run shell commands and scripts. Everything runs inside the app, "
-            + "confined to this chat's own folder; it can never write elsewhere on the device.",
+        _body.Add(Section(Loc.T("settings.language.section")));
+        _body.Add(LanguagePicker(settings));
+
+        _body.Add(Section(Loc.T("settings.sandbox.section")));
+        _body.Add(Switch(Loc.T("settings.sandbox.runCode.title"), RunCodeDetail,
             settings.AllowCodeExecution,
             on => Apply(s => s.AllowCodeExecution = on)));
+#if WINDOWS
+        // Windows only, and off unless the user turns it on: the job object this platform
+        // offers bounds a process tree but confines neither its files nor its network, so
+        // without this the model is never offered the shell at all. The same explicit
+        // choice as the server's --code-exec-unconfined.
+        _body.Add(Switch(
+            Loc.T("settings.sandbox.unconfined.title"),
+            Loc.T("settings.sandbox.unconfined.detail"),
+            settings.AllowUnconfinedExecution,
+            on => Apply(s => s.AllowUnconfinedExecution = on)));
+#endif
 
         _body.Add(Switch(
-            "Allow network access",
-            "Let code the model runs reach the internet, and let it install packages. "
-            + "Off by default: with it off, every attempt is refused and the model is told why.",
+            Loc.T("settings.sandbox.network.title"),
+            Loc.T("settings.sandbox.network.detail"),
             settings.AllowNetwork,
             on => Apply(s => s.AllowNetwork = on)));
 
@@ -118,101 +150,89 @@ public sealed class SettingsPage : ContentPage
         // like the two above. There was no switch at all: delegation was simply on, on
         // a phone where every sub-agent is another conversation held in memory.
         _body.Add(Switch(
-            "Sub-agents",
-            "Let the model hand self-contained parts of a request to helper agents that run "
-            + "on the same model and report back. Each helper is a separate conversation held "
-            + "in memory, and while this is on every prompt also declares the tools for it.",
+            Loc.T("settings.sandbox.subAgents.title"),
+            Loc.T("settings.sandbox.subAgents.detail"),
             settings.MultiAgentEnabled,
             on => Apply(s => s.MultiAgentEnabled = on)));
 
         // It used to say "the next time TensorAgent starts", which on a phone is not an
         // instruction anybody follows -- leaving an app does not restart it -- so the
         // switch read as one that did nothing. All three now take effect at once.
-        _body.Add(Note("Changes here take effect straight away: the sandbox on the next command "
-            + "the model runs, sub-agents on the next message."));
+        _body.Add(Note(Loc.T("settings.sandbox.note")));
         _engine = new Label
         {
-            Text = "Now: " + DescribeEngineSafely(),
+            Text = Loc.T("settings.sandbox.now", ("engine", DescribeEngineSafely())),
             FontSize = 12,
             TextColor = Theme.Muted,
             Padding = new Thickness(16, 2),
         };
         _body.Add(_engine);
 
-        _body.Add(Section("Generation"));
+        _body.Add(Section(Loc.T("settings.generation.section")));
         int loadedContext = _app.ModelService.ContextTokens;
         int modelContext = _app.ModelService.ModelContextTokens;
         string contextNote = modelContext > loadedContext && loadedContext > 0
-            ? "The model supports " + Describe(modelContext) + " input + output tokens; "
-                + "TensorAgent currently keeps " + Describe(loadedContext) + " active to fit this device."
+            ? Loc.T("settings.generation.context.reduced",
+                ("modelTokens", Describe(modelContext)), ("activeTokens", Describe(loadedContext)))
             : modelContext > 0 && loadedContext > modelContext
-                ? "The model declares " + Describe(modelContext) + " input + output tokens; "
-                    + "the configured active window is " + Describe(loadedContext) + " tokens."
+                ? Loc.T("settings.generation.context.configured",
+                    ("modelTokens", Describe(modelContext)), ("activeTokens", Describe(loadedContext)))
                 : modelContext > 0
-                    ? "The loaded model's input + output context window is " + Describe(modelContext) + " tokens."
+                    ? Loc.T("settings.generation.context.model", ("modelTokens", Describe(modelContext)))
                     : loadedContext > 0
-                        ? "The active input + output context window is " + Describe(loadedContext) + " tokens."
-                        : "The loaded model determines the input + output context window.";
-        _body.Add(Ladder("Reply output limit",
-            "Maximum NEW tokens requested for one reply — this is not the context-window setting. "
-            + contextNote + " A reply uses only what remains after the prompt.",
+                        ? Loc.T("settings.generation.context.active", ("activeTokens", Describe(loadedContext)))
+                        : Loc.T("settings.generation.context.unknown");
+        _body.Add(Ladder(Loc.T("settings.generation.replyLimit.title"),
+            Loc.T("settings.generation.replyLimit.detail", ("context", contextNote)),
             settings.MaxTokens, ReplyLengthRungs,
             v => Apply(s => s.MaxTokens = v)));
-        _body.Add(Choice("KV cache precision",
-            "How the conversation's key/value cache is stored. On a phone this is often "
-            + "the larger half of what a loaded model costs, so Q4 buys back more memory "
-            + "than any other choice here.",
+        _body.Add(Choice(Loc.T("settings.generation.kvCache.title"),
+            Loc.T("settings.generation.kvCache.detail"),
             settings.KvCacheDtype, KvCacheRungs,
             v => Apply(s => s.KvCacheDtype = v)));
-        _body.Add(Note(
-            "KV cache precision applies the next time a model is loaded — the cache is "
-            + "allocated when the model is. Some models ignore it and always use FP16, "
-            + "because their attention cannot read a quantized cache; the engine "
-            + "substitutes rather than failing."));
-        _body.Add(Stepper("Tool timeout", "Seconds before a command is stopped.",
+        _body.Add(Note(Loc.T("settings.generation.kvCache.note")));
+        _body.Add(Stepper(Loc.T("settings.generation.toolTimeout.title"), Loc.T("settings.generation.toolTimeout.detail"),
             settings.ToolTimeoutSeconds, 10, 600, 10,
             v => Apply(s => s.ToolTimeoutSeconds = v)));
-        _body.Add(Switch("Show reasoning by default",
-            "Start each chat with the model's thinking visible.",
+        _body.Add(Switch(Loc.T("settings.generation.reasoning.title"),
+            Loc.T("settings.generation.reasoning.detail"),
             settings.ThinkByDefault,
-            on => { AppSettings s = _app.Settings.Load(); s.ThinkByDefault = on; _app.Settings.Save(s); }));
+            on => _app.Settings.Update(s => { s.ThinkByDefault = on; return s; })));
         // Through Apply like the sandbox switches. It used to save the file and nothing
         // else, so the engine that was standing kept the old policy until the next model
         // load, while AgentAppHost.ApplySpeculationSetting -- written to move the running
         // engine -- was only ever reached when some OTHER switch was flipped.
-        _body.Add(Switch("Speculative decoding",
-            "Guess a few tokens ahead and check them in one pass: the same answer, faster on "
-            + "code and on replies that quote a file. The engine switches it off by itself "
-            + "while it is not paying, and some models cannot do it at all. Applies from the "
-            + "next reply.",
+        _body.Add(Switch(Loc.T("settings.generation.speculative.title"),
+            Loc.T("settings.generation.speculative.detail"),
             settings.SpeculativeDecoding,
             on => Apply(s => s.SpeculativeDecoding = on)));
 
-        _body.Add(Section("Downloads"));
-        _body.Add(Switch("Download over cellular",
-            "Model files are several gigabytes. Off by default so a download waits for Wi-Fi.",
+        _body.Add(Section(Loc.T("settings.downloads.section")));
+#if IOS
+        _body.Add(Switch(Loc.T("settings.downloads.cellular.title"),
+            Loc.T("settings.downloads.cellular.detail"),
             settings.AllowCellularDownloads,
-            on => { AppSettings s = _app.Settings.Load(); s.AllowCellularDownloads = on; _app.Settings.Save(s); }));
-        _body.Add(Switch("Include optional files",
-            "The image projector and the speculative-decoding draft head. Larger downloads, but "
-            + "without the projector a model cannot see pictures.",
+            on => _app.Settings.Update(s => { s.AllowCellularDownloads = on; return s; })));
+#endif
+        _body.Add(Switch(Loc.T("settings.downloads.optional.title"),
+            Loc.T("settings.downloads.optional.detail"),
             settings.DownloadOptionalFiles,
-            on => { AppSettings s = _app.Settings.Load(); s.DownloadOptionalFiles = on; _app.Settings.Save(s); }));
+            on => _app.Settings.Update(s => { s.DownloadOptionalFiles = on; return s; })));
         // Said here because it is the thing people worry about while a download runs,
         // and the model list can only say it while they are looking at the model list.
-        _body.Add(Note(
-            "A download keeps going while you use the rest of the app, and for a while "
-            + "after you leave it. If the system stops it, it resumes from where it got to "
-            + "the next time TensorAgent is open — nothing is fetched twice."));
+        _body.Add(Note(Loc.T("settings.downloads.note")));
 
-        _body.Add(Section("Storage"));
-        _body.Add(Note($"Models: {Gb(DirectorySize(_app.Paths.ModelsDirectory))} GB"));
-        _body.Add(Note($"Chats: {_app.Conversations.List().Count}"));
-        _body.Add(Note($"Skills: {_app.Skills.Skills.Count}"));
+        _body.Add(Section(Loc.T("settings.storage.section")));
+        _body.Add(ModelCacheDirectoryEditor(settings));
+        Label modelSize = Note(Loc.T("settings.storage.models", ("size", "…")));
+        _body.Add(modelSize);
+        _ = UpdateModelDirectorySize(modelSize, _app.Models.Root);
+        _body.Add(Note(Loc.T("settings.storage.chats", ("count", _app.Conversations.List().Count))));
+        _body.Add(Note(Loc.T("settings.storage.skills", ("count", _app.Skills.Skills.Count))));
 
         var clear = new Button
         {
-            Text = "Delete all chats",
+            Text = Loc.T("settings.storage.deleteAll"),
             BackgroundColor = Theme.Surface,
             TextColor = Theme.Danger,
             CornerRadius = 10,
@@ -220,7 +240,8 @@ public sealed class SettingsPage : ContentPage
         };
         clear.Clicked += async (_, _) =>
         {
-            if (!await DisplayAlert("Delete all chats", "This cannot be undone.", "Delete", "Cancel"))
+            if (!await DisplayAlert(Loc.T("settings.alert.deleteAll.title"), Loc.T("settings.alert.deleteAll.message"),
+                    Loc.T("settings.alert.deleteAll.confirm"), Loc.T("common.cancel")))
                 return;
             // includeEmpty: "delete all chats" has to mean all of them, including the
             // untouched one the current session is sitting in.
@@ -229,6 +250,95 @@ public sealed class SettingsPage : ContentPage
             Build();
         };
         _body.Add(clear);
+    }
+
+    private View ModelCacheDirectoryEditor(AppSettings settings)
+    {
+        StringComparer pathComparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        var folder = new Entry
+        {
+            Text = _app.Models.Root,
+            Placeholder = Loc.T("settings.storage.modelCache.placeholder"),
+            TextColor = Theme.Text,
+            PlaceholderColor = Theme.Muted,
+            BackgroundColor = Theme.Surface,
+            FontSize = 14,
+            IsTextPredictionEnabled = false,
+            IsSpellCheckEnabled = false,
+            ReturnType = ReturnType.Done,
+        };
+        SemanticProperties.SetDescription(folder, Loc.T("settings.storage.modelCache.title"));
+        var save = new Button
+        {
+            Text = Loc.T("settings.storage.modelCache.save"),
+            BackgroundColor = Theme.Accent,
+            TextColor = Colors.White,
+            CornerRadius = 10,
+            IsEnabled = false,
+        };
+        var restore = new Button
+        {
+            Text = Loc.T("settings.storage.modelCache.default"),
+            BackgroundColor = Theme.Surface,
+            TextColor = Theme.Text,
+            CornerRadius = 10,
+            IsEnabled = !string.IsNullOrWhiteSpace(settings.ModelCacheDirectory),
+        };
+
+        folder.TextChanged += (_, _) => save.IsEnabled =
+            !pathComparer.Equals(folder.Text?.Trim(), _app.Models.Root);
+
+        async Task SaveDirectory(string? directory)
+        {
+            folder.IsEnabled = save.IsEnabled = restore.IsEnabled = false;
+            try
+            {
+                // The host validates the folder before persisting it. Saving
+                // through Apply would keep an invalid path when the change is refused.
+                await Task.Run(() => _app.SetModelCacheDirectory(directory));
+            }
+            catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException or InvalidOperationException)
+            {
+                await DisplayAlert(Loc.T("settings.storage.modelCache.error.title"),
+                    Loc.T("settings.storage.modelCache.error.message", ("error", ex.Message)), Loc.T("common.ok"));
+                folder.IsEnabled = true;
+                save.IsEnabled = !pathComparer.Equals(folder.Text?.Trim(), _app.Models.Root);
+                restore.IsEnabled = !string.IsNullOrWhiteSpace(_app.Settings.Load().ModelCacheDirectory);
+                return;
+            }
+            Build();
+        }
+
+        save.Clicked += async (_, _) => await SaveDirectory(folder.Text);
+        restore.Clicked += async (_, _) => await SaveDirectory(string.Empty);
+        folder.Completed += async (_, _) =>
+        {
+            if (save.IsEnabled)
+                await SaveDirectory(folder.Text);
+        };
+
+        return new VerticalStackLayout
+        {
+            Spacing = 8,
+            Padding = new Thickness(16, 10),
+            Children =
+            {
+                new Label { Text = Loc.T("settings.storage.modelCache.title"), FontSize = 16, TextColor = Theme.Text },
+                new Label { Text = Loc.T("settings.storage.modelCache.detail"), FontSize = 12, TextColor = Theme.Muted },
+                folder,
+                save,
+                restore,
+            },
+        };
+    }
+
+    private async Task UpdateModelDirectorySize(Label label, string directory)
+    {
+        long bytes = await Task.Run(() => DirectorySize(directory));
+        // A folder or language change rebuilds the page while the scan is running.
+        if (_body.Children.Contains(label))
+            label.Text = Loc.T("settings.storage.models", ("size", Gb(bytes)));
     }
 
     /// <summary>
@@ -244,7 +354,94 @@ public sealed class SettingsPage : ContentPage
     private string DescribeEngineSafely()
     {
         try { return _app.DescribeEngine(); }
-        catch (Exception ex) { return "unavailable (" + ex.GetType().Name + ")"; }
+        catch (Exception ex) { return Loc.T("settings.sandbox.engineUnavailable", ("error", ex.GetType().Name)); }
+    }
+
+    /// <summary>What "Run code" lets the model do here, which is not the same on every platform.</summary>
+    private static string RunCodeDetail =>
+#if IOS
+        Loc.T("settings.sandbox.runCode.detail.ios");
+#elif MACCATALYST
+        Loc.T("settings.sandbox.runCode.detail.mac");
+#else
+        Loc.T("settings.sandbox.runCode.detail.windows", ("setting", Loc.T("settings.sandbox.unconfined.title")));
+#endif
+
+    /// <summary>
+    /// The interface language. "System" says which language it means right now, and every
+    /// other entry is written in its own language, so someone who cannot read the screen in
+    /// front of them can still find theirs. A change is saved and applied at once: this
+    /// screen repaints, and so do the page and every other screen (see <see cref="Loc.Changed"/>).
+    /// </summary>
+    private View LanguagePicker(AppSettings settings)
+    {
+        UiLanguage system = UiLanguages.Resolve(null, Loc.SystemLanguages());
+        var options = new List<(string Tag, string Label)>
+        {
+            (string.Empty, Loc.T("settings.language.system", ("language", system.NativeName))),
+        };
+        options.AddRange(UiLanguages.Supported.Select(language => (language.Tag, language.NativeName)));
+
+        // A tag this build does not know (a newer build may have saved it) shows as System,
+        // which is also what it resolves to.
+        string current = UiLanguages.Match(settings.UiLanguage)?.Tag ?? string.Empty;
+        var picker = new Picker
+        {
+            ItemsSource = options.Select(o => o.Label).ToList(),
+            SelectedIndex = Math.Max(0, options.FindIndex(o => o.Tag == current)),
+            TextColor = Theme.Accent,
+            FontSize = 15,
+            HorizontalOptions = LayoutOptions.End,
+            VerticalOptions = LayoutOptions.Center,
+        };
+        picker.SelectedIndexChanged += (_, _) =>
+        {
+            if (picker.SelectedIndex < 0 || picker.SelectedIndex >= options.Count)
+                return;
+            string tag = options[picker.SelectedIndex].Tag;
+            if (string.Equals(tag, current, StringComparison.Ordinal))
+                return;
+            current = tag;
+            Apply(s => s.UiLanguage = tag);
+#if IOS
+            // The share extension shows itself in the same language; it reads the choice
+            // from the App Group, since it cannot read these settings.
+            Platforms.iOS.SharedContainer.WriteLanguageChoice(tag);
+#endif
+        };
+
+#if DEBUG
+        // simctl cannot tap. TENSORAGENT_PICK_LANGUAGE=<tag> (or "system") picks that row once
+        // per launch, through the handler above, so the simulator harness can switch the
+        // language and relaunch to see it kept. Pair it with TENSORAGENT_START_PAGE=settings.
+        string? pick = Environment.GetEnvironmentVariable("TENSORAGENT_PICK_LANGUAGE")?.Trim();
+        if (!string.IsNullOrEmpty(pick) && Interlocked.Exchange(ref s_languagePicked, 1) == 0)
+        {
+            string wanted = pick.Equals("system", StringComparison.OrdinalIgnoreCase) ? string.Empty : pick;
+            int index = options.FindIndex(o => string.Equals(o.Tag, wanted, StringComparison.OrdinalIgnoreCase));
+            Console.WriteLine($"TensorAgent: languagecheck pick {pick} -> row {index}");
+            if (index >= 0)
+                Dispatcher.Dispatch(() => picker.SelectedIndex = index);
+        }
+#endif
+
+        var grid = new Grid
+        {
+            ColumnDefinitions = { new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto) },
+            Padding = new Thickness(16, 10),
+            ColumnSpacing = 10,
+        };
+        grid.Add(new VerticalStackLayout
+        {
+            Spacing = 2,
+            Children =
+            {
+                new Label { Text = Loc.T("settings.language.title"), FontSize = 16, TextColor = Theme.Text },
+                new Label { Text = Loc.T("settings.language.detail"), FontSize = 12, TextColor = Theme.Muted },
+            },
+        }, 0, 0);
+        grid.Add(picker, 1, 0);
+        return grid;
     }
 
     private static View Section(string text) => new Label
@@ -256,7 +453,7 @@ public sealed class SettingsPage : ContentPage
         Padding = new Thickness(16, 20, 16, 6),
     };
 
-    private static View Note(string text) => new Label
+    private static Label Note(string text) => new Label
     {
         Text = text,
         FontSize = 12,
@@ -486,5 +683,5 @@ public sealed class SettingsPage : ContentPage
         }
     }
 
-    private static string Gb(long bytes) => (bytes / 1e9).ToString("0.00");
+    private static string Gb(long bytes) => (bytes / 1e9).ToString("0.00", Loc.Culture);
 }

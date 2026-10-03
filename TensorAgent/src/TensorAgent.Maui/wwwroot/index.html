@@ -156,6 +156,12 @@ body { display: flex; flex-direction: column; }
 .bubble table { border-collapse: collapse; width: 100%; font-size: 13px; display: block; overflow-x: auto; }
 .bubble th, .bubble td { border: 1px solid var(--border); padding: 5px 7px; text-align: left; }
 
+.turn-stats {
+  max-width: 100%; margin-top: 4px; padding: 0 2px;
+  font-size: 12px; line-height: 1.5; color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 .copy {
   align-self: flex-start; margin-top: 4px;
   font-size: 11px; color: var(--muted); background: none; border: 0; padding: 4px 2px;
@@ -291,7 +297,11 @@ body { display: flex; flex-direction: column; }
   padding: 8px 10px calc(8px + var(--safe-bottom));
 }
 
-#chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+#chips {
+  display: flex; flex-wrap: wrap; align-content: flex-start; gap: 6px; margin-bottom: 6px;
+  max-height: min(320px, calc(var(--vh) * .4)); overflow-y: auto;
+  overscroll-behavior: contain;
+}
 #chips:empty { display: none; }
 .chip {
   display: flex; align-items: center; gap: 6px;
@@ -304,6 +314,28 @@ body { display: flex; flex-direction: column; }
 .chip .ic { width: 34px; height: 34px; display: grid; place-items: center; font-size: 17px; }
 .chip .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip .x { background: none; border: 0; color: var(--muted); font-size: 15px; padding: 0 2px; }
+.chip.editable-image { display: grid; grid-template-columns: 34px minmax(0, 1fr) 32px; width: 280px; max-width: 100%; }
+.chip.editable-image img { grid-column: 1; grid-row: 1; }
+.chip.editable-image .mask-select { grid-column: 1 / -1; grid-row: 2; }
+.chip.editable-image .image-details { grid-column: 2; grid-row: 1; }
+.chip.editable-image .x { grid-column: 3; grid-row: 1; }
+.chip.editable-image img, .chip.editable-image .mask-select, .chip.editable-image .x { flex-shrink: 0; }
+.chip.editable-image .nm { min-width: 0; }
+.chip.editable-image .image-details { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.chip .image-edit-source, .chip .image-reference { font-size: 10px; line-height: 14px; white-space: nowrap; }
+.chip .image-edit-source { color: var(--accent); font-weight: 600; }
+.chip .image-reference { color: var(--muted); }
+.chip .mask-select {
+  min-height: 44px; padding: 0 10px; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--accent-soft); color: var(--text); font: inherit; cursor: pointer;
+}
+.chip .mask-select:disabled { opacity: .5; cursor: default; }
+.chip.editable-image .x { min-width: 32px; min-height: 44px; }
+.image-selection-hint {
+  width: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px;
+  font-size: 12px; color: var(--muted);
+}
+.image-selection-hint .notice-action { margin: 0; min-height: 44px; }
 
 #skillchips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 #skillchips:empty { display: none; }
@@ -505,23 +537,40 @@ body.voice #toggles { display: flex; }
   border-radius: 10px; background: var(--accent); color: #fff; border: 0;
 }
 .hint-block { font-size: 12px; color: var(--muted); margin: 0; }
+/* LoRA plug-ins: a decision per row, so the actions sit on the row itself. */
+.lorarow { cursor: default; }
+.lorarow .ds { display: block; -webkit-line-clamp: unset; }
+.lorarow .lic { font-size: 11px; color: var(--muted); margin-top: 3px; }
+.lorarow .err { font-size: 12px; color: #fca5a5; margin-top: 4px; }
+.lorarow .act { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; flex: 0 0 auto; }
+.lorarow .pct { font-size: 12px; color: var(--muted); }
+.lorarow .strength { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+.lorarow .strength input { flex: 1 1 auto; min-width: 0; accent-color: var(--accent); }
+.lorarow .strength .val { width: 38px; text-align: right; }
+button.mini {
+  font-size: 12px; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--accent-soft); color: var(--text);
+}
+button.mini.quiet { background: transparent; color: var(--muted); }
+#lora-hint { margin-bottom: 6px; }
+#lora-error { font-size: 13px; color: #fca5a5; margin: 0 0 8px; }
 </style>
 </head>
 <body>
 
 <!-- Requirement 1: busy indicator, model name and New Chat on ONE line. -->
 <div id="bar">
-  <button id="menu" type="button" title="Menu">☰</button>
-  <span id="busy" title="Generation activity"></span>
-  <button id="model" class="empty" type="button">No model yet<span class="sub"></span></button>
-  <button id="new" type="button">New</button>
+  <button id="menu" type="button" data-i18n-title="markup.bar.menu" title="Menu">☰</button>
+  <span id="busy" data-i18n-title="markup.bar.activity" title="Generation activity"></span>
+  <button id="model" class="empty" type="button"><span data-i18n="markup.bar.noModel">No model yet</span><span class="sub"></span></button>
+  <button id="new" type="button" data-i18n="markup.bar.new">New</button>
 </div>
 
 <div id="chat">
   <div id="empty">
     <h1>TensorAgent</h1>
-    <p>Private AI that runs on this iPhone.<br>Nothing you type leaves the device.</p>
-    <button class="cta" id="empty-cta" type="button">Choose a model</button>
+    <p><span data-i18n="markup.empty.onDevice">Private AI that runs on this iPhone.</span><br><span data-i18n="markup.empty.private">Nothing you type leaves the device.</span></p>
+    <button class="cta" id="empty-cta" type="button" data-i18n="markup.empty.chooseModel">Choose a model</button>
   </div>
 </div>
 
@@ -535,11 +584,11 @@ body.voice #toggles { display: flex; }
     <div class="tail"></div>
   </div>
   <div id="row">
-    <button class="round" id="plus" type="button" title="Attach">＋</button>
-    <button class="round" id="abc" type="button" title="Back to typing">⌨</button>
-    <div id="textwrap"><textarea id="text" rows="1" placeholder="Message… or hold to talk"></textarea></div>
-    <button class="round" id="hold" type="button"><span class="lvl"></span><span id="holdlabel">Hold to talk</span></button>
-    <button class="round send" id="send" type="button" title="Send">➤</button>
+    <button class="round" id="plus" type="button" data-i18n-title="markup.composer.attach" title="Attach">＋</button>
+    <button class="round" id="abc" type="button" data-i18n-title="markup.composer.backToTyping" title="Back to typing">⌨</button>
+    <div id="textwrap"><textarea id="text" rows="1" data-i18n-placeholder="markup.composer.placeholder" placeholder="Message… or hold to talk"></textarea></div>
+    <button class="round" id="hold" type="button"><span class="lvl"></span><span id="holdlabel" data-i18n="markup.composer.holdToTalk">Hold to talk</span></button>
+    <button class="round send" id="send" type="button" data-i18n-title="markup.composer.send" title="Send">➤</button>
   </div>
   <div id="toggles">
     <span id="lang"></span>
@@ -550,23 +599,23 @@ body.voice #toggles { display: flex; }
 
 <div class="sheet" id="attach-sheet">
   <div class="grab"></div>
-  <h2>Add to this message</h2>
-  <button class="opt" data-pick="photo"><span class="em">🖼️</span> Photo</button>
-  <button class="opt" data-pick="camera"><span class="em">📷</span> Camera</button>
-  <button class="opt" data-pick="video"><span class="em">🎬</span> Video</button>
-  <button class="opt" data-pick="file"><span class="em">📄</span> File</button>
+  <h2 data-i18n="markup.attach.title">Add to this message</h2>
+  <button class="opt" data-pick="photo"><span class="em">🖼️</span> <span data-i18n="markup.attach.photo">Photo</span></button>
+  <button class="opt" data-pick="camera"><span class="em">📷</span> <span data-i18n="markup.attach.camera">Camera</span></button>
+  <button class="opt" data-pick="video"><span class="em">🎬</span> <span data-i18n="markup.attach.video">Video</span></button>
+  <button class="opt" data-pick="file"><span class="em">📄</span> <span data-i18n="markup.attach.file">File</span></button>
 </div>
 
 <div class="sheet" id="skills-sheet">
   <div class="grab"></div>
-  <h2>Skills</h2>
+  <h2 data-i18n="markup.skills.title">Skills</h2>
   <!-- The master switch, above the list rather than inside it: it is not a
        thirteenth skill, it decides whether there are any. Off means no skill is
        declared to the model at all, which is thousands of prompt tokens a chat
        that does not want them should not be paying on every turn. -->
-  <label class="switch skills-master"><input type="checkbox" id="skills-master" checked><span class="track"></span><span id="skills-master-label">Use skills</span></label>
+  <label class="switch skills-master"><input type="checkbox" id="skills-master" checked><span class="track"></span><span id="skills-master-label" data-i18n="markup.skills.useSkills">Use skills</span></label>
   <div id="skills-list"></div>
-  <button class="opt" id="skill-add"><span class="em">＋</span> Add a skill<span class="hint">.zip or a link</span></button>
+  <button class="opt" id="skill-add"><span class="em">＋</span> <span data-i18n="markup.skills.add">Add a skill</span><span class="hint" data-i18n="markup.skills.addHint">.zip or a link</span></button>
 </div>
 
 <!-- One skill, in full. The list can only ever show a couple of lines of a
@@ -574,22 +623,22 @@ body.voice #toggles { display: flex; }
      lives, together with the switch and the way to remove it. -->
 <div class="sheet" id="skill-sheet">
   <div class="grab"></div>
-  <h2 id="skill-name">Skill</h2>
+  <h2 id="skill-name" data-i18n="markup.skill.title">Skill</h2>
   <div id="skill-body"></div>
-  <label class="switch skill-toggle"><input type="checkbox" id="skill-on"><span class="track"></span><span>Use in this chat</span></label>
-  <button class="opt danger" id="skill-remove"><span class="em">🗑</span> Remove this skill</button>
+  <label class="switch skill-toggle"><input type="checkbox" id="skill-on"><span class="track"></span><span data-i18n="markup.skill.useInChat">Use in this chat</span></label>
+  <button class="opt danger" id="skill-remove"><span class="em">🗑</span> <span data-i18n="markup.skill.remove">Remove this skill</span></button>
 </div>
 
 <div class="sheet" id="skill-add-sheet">
   <div class="grab"></div>
-  <h2>Add a skill</h2>
-  <button class="opt" id="skill-zip"><span class="em">🗂</span> Choose a .zip<span class="hint">from Files</span></button>
+  <h2 data-i18n="markup.skillAdd.title">Add a skill</h2>
+  <button class="opt" id="skill-zip"><span class="em">🗂</span> <span data-i18n="markup.skillAdd.chooseZip">Choose a .zip</span><span class="hint" data-i18n="markup.skillAdd.chooseZipHint">from Files</span></button>
   <div class="urlrow">
     <input id="skill-url" type="url" inputmode="url" autocapitalize="off" autocorrect="off"
-           placeholder="https://…/skill.zip  or a list of links">
-    <button id="skill-fetch" type="button">Add</button>
+           data-i18n-placeholder="markup.skillAdd.urlPlaceholder" placeholder="https://…/skill.zip  or a list of links">
+    <button id="skill-fetch" type="button" data-i18n="markup.skillAdd.add">Add</button>
   </div>
-  <p class="hint-block">A link may point at one <code>.zip</code>, or at a plain-text list of
+  <p class="hint-block" data-i18n="markup.skillAdd.linkHelp">A link may point at one .zip, or at a plain-text list of
   links — one per line — to install several at once.</p>
 </div>
 
@@ -600,25 +649,37 @@ body.voice #toggles { display: flex; }
 <div class="sheet drawer" id="nav-sheet">
   <div class="drawerhead">
     <h2>TensorAgent</h2>
-    <button id="nav-new" type="button">＋ New</button>
+    <button id="nav-new" type="button">＋ <span data-i18n="markup.nav.new">New</span></button>
   </div>
   <div class="navchats" id="nav-chats"></div>
   <div class="drawerfoot">
-    <button class="opt" data-route="sessions"><span class="em">💬</span> All chats<span class="hint">rename, delete</span></button>
-    <button class="opt" data-route="models"><span class="em">📚</span> Models<span class="hint">download, switch</span></button>
+    <button class="opt" data-route="sessions"><span class="em">💬</span> <span data-i18n="markup.nav.allChats">All chats</span><span class="hint" data-i18n="markup.nav.allChatsHint">rename, delete</span></button>
+    <button class="opt" data-route="models"><span class="em">📚</span> <span data-i18n="markup.nav.models">Models</span><span class="hint" data-i18n="markup.nav.modelsHint">download, switch</span></button>
     <!-- Skills is the app's own sheet rather than a native route, so it is marked by
          the sheet it opens instead of by a route the shell would have to register. -->
-    <button class="opt" data-sheet="skills-sheet"><span class="em">🧩</span> Skills<span class="hint">add, choose</span></button>
-    <button class="opt" data-route="settings"><span class="em">⚙️</span> Settings</button>
-    <button class="opt" data-route="about"><span class="em">ℹ️</span> About</button>
+    <button class="opt" data-sheet="skills-sheet"><span class="em">🧩</span> <span data-i18n="markup.nav.skills">Skills</span><span class="hint" data-i18n="markup.nav.skillsHint">add, choose</span></button>
+    <button class="opt" data-route="settings"><span class="em">⚙️</span> <span data-i18n="markup.nav.settings">Settings</span></button>
+    <button class="opt" data-route="about"><span class="em">ℹ️</span> <span data-i18n="markup.nav.about">About</span></button>
   </div>
 </div>
 
 <div class="sheet" id="model-sheet">
   <div class="grab"></div>
-  <h2>Model</h2>
+  <h2 data-i18n="markup.model.title">Model</h2>
   <div id="model-info"></div>
-  <button class="opt" id="open-models"><span class="em">📚</span> Manage models<span class="hint">download, switch</span></button>
+  <!-- Shown while an image model is loaded: its LoRA plug-ins (WebUiRoutes.MapLoras). -->
+  <button class="opt" id="open-loras" style="display:none"><span class="em">🎨</span> <span data-i18n="markup.model.loras">LoRA plug-ins</span><span class="hint" id="loras-hint" data-i18n="markup.model.lorasHint">speed, style</span></button>
+  <button class="opt" id="open-models"><span class="em">📚</span> <span data-i18n="markup.model.manage">Manage models</span><span class="hint" data-i18n="markup.model.manageHint">download, switch</span></button>
+</div>
+
+<!-- The image model's LoRA plug-ins: what is downloaded, what is on, and how strongly.
+     A change applies from the next picture; a picture being drawn keeps its own. -->
+<div class="sheet" id="lora-sheet">
+  <div class="grab"></div>
+  <h2 data-i18n="markup.loras.title">LoRA plug-ins</h2>
+  <p class="hint-block" id="lora-hint" data-i18n="markup.loras.hint">They apply from the next picture. One speed plug-in at a time; styles and edits combine with it.</p>
+  <p id="lora-error" role="alert" style="display:none"></p>
+  <div id="lora-list"></div>
 </div>
 
 <input type="file" id="skill-zip-input" style="display:none" accept=".zip">

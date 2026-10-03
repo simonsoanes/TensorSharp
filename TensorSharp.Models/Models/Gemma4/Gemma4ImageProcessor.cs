@@ -22,7 +22,7 @@ namespace TensorSharp.Models
         private readonly int _maxSoftTokens;
         private readonly bool _referenceSizing;
         // When set (e.g. the gemma4uv unified embedder declares mean=0, std=1),
-        // pixels are normalized as (pixel/255 - mean) / std instead of the legacy
+        // pixels are normalized as (pixel/255 - mean) / std instead of the SigLIP
         // SigLIP [-1, 1] mapping used by the gemma4v path.
         private readonly float[] _imageMean;
         private readonly float[] _imageStd;
@@ -107,7 +107,7 @@ namespace TensorSharp.Models
         ///      resample=3), stretching to fill. No letterboxing: see the note on
         ///      <see cref="CalcAspectRatioPreservingSize"/> for what black bars cost.
         /// Normalization is (pixel/255 - mean) / std when the mmproj declares mean/std
-        /// (mean 0 / std 1 for this family, i.e. plain [0,1]), otherwise the legacy SigLIP
+        /// (mean 0 / std 1 for this family, i.e. plain [0,1]), otherwise the SigLIP
         /// [-1,1] map. Returns pixel data and the actual canvas dimensions.
         /// </summary>
         public (float[] pixels, int width, int height) ProcessImage(string imagePath)
@@ -126,7 +126,7 @@ namespace TensorSharp.Models
                 // The reference declares resample=3 (BICUBIC), do_rescale=1/255 and
                 // do_normalize=false (mean 0 / std 1). The tower itself does the 2*(x-0.5)
                 // recentring, so feed [0,1] when the mmproj declares identity statistics and fall
-                // back to the legacy [-1,1] map only when it does not.
+                // back to the SigLIP [-1,1] map only when it does not.
                 float[] refMean = _imageMean ?? new[] { 0.5f, 0.5f, 0.5f };
                 float[] refStd = _imageStd ?? new[] { 0.5f, 0.5f, 0.5f };
                 float[] refPixels = ImageProcessorUtils.ResizeRgbaToChannelFirstBicubic(

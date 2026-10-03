@@ -22,6 +22,11 @@ namespace TensorSharp.Runtime
     /// </summary>
     public static class ChatProtocolRegistry
     {
+        // Qwen's published thinking-budget recipe: the sentence hands the reasoning over to
+        // the answer before </think>. Also used for GLM, whose <think> block works the same way.
+        private const string HandOverToAnswer =
+            "\n\nConsidering the limited time by the user, I have to give the solution based on the thinking directly now.\n";
+
         private static readonly object Gate = new();
         private static readonly Dictionary<string, ChatProtocol> ByArchitecture =
             new(StringComparer.OrdinalIgnoreCase);
@@ -158,6 +163,12 @@ namespace TensorSharp.Runtime
                 // generated reasoning + call tokens so an agent round extends the live
                 // cache instead of re-prefilling the conversation.
                 ToolCallRawSplicing = ToolCallRawSplicing.Always,
+                // `</think>` is one trained token (248069 in the 3.5/3.6/3.8 vocabularies)
+                // and the thinking-on prompt opens the block, so the budget closes it and
+                // the answer follows inside max_tokens. Without it the host's hard stop
+                // ended a turn whose reasoning reached the budget with an EMPTY answer.
+                ThinkingBudgetEndToken = "</think>",
+                ThinkingBudgetClosingText = HandOverToAnswer,
             });
 
             // Qwen3.8 Flash Next uses ChatML reasoning and the Qwen XML-style
@@ -175,6 +186,9 @@ namespace TensorSharp.Runtime
                 // role=tool renders independently of the assistant tool_calls field.
                 ToolCallRawSplicing = ToolCallRawSplicing.Always,
                 ThinkingGrammarActivationTrigger = "</think>",
+                // As for qwen35: the budget closes the block instead of ending the turn empty.
+                ThinkingBudgetEndToken = "</think>",
+                ThinkingBudgetClosingText = HandOverToAnswer,
                 AppendMediaPlaceholders = AppendQwenVisionPads,
                 // A `video_url` part is sampled into timed frames (fps / max_frames
                 // in the part, VIDEO_SAMPLE_FPS / VIDEO_MAX_FRAMES defaults), each a
@@ -344,6 +358,11 @@ namespace TensorSharp.Runtime
                 PreferOwnRenderer = _ => true,
                 CreateOutputParser = () => new GlmDsaOutputParser(),
                 OutputParserAlwaysRequired = true,
+                // The thinking-on prompt ends `<|assistant|><think>` and `</think>` is one
+                // trained token, so the budget closes the block and the answer follows;
+                // without it a turn that reached the budget ended with an empty answer.
+                ThinkingBudgetEndToken = "</think>",
+                ThinkingBudgetClosingText = HandOverToAnswer,
             });
 
             Register(new ChatProtocol
@@ -374,6 +393,14 @@ namespace TensorSharp.Runtime
                 // response_format under think:true arms the grammar after the reasoning
                 // block closes, as for the other always-reasoning families.
                 ThinkingGrammarActivationTrigger = "</think>",
+                // `</think>` is token 154842 in GLM-5.3-Flash: the budget closes the block
+                // and the answer follows, where the hard stop ended the turn empty. The
+                // family declares no open token, so an ordinary family with thinking off
+                // would get no budget for a channel the request did not ask for...
+                ThinkingBudgetEndToken = "</think>",
+                ThinkingBudgetClosingText = HandOverToAnswer,
+                // ...except that this template opens the block with thinking off as well.
+                PromptAlwaysOpensThinking = true,
             });
 
             Register(new ChatProtocol

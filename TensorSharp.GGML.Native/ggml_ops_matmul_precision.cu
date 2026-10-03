@@ -147,6 +147,12 @@ void reserve_scratch(tsg_matmul_cuda_state * state, size_t needed) {
     state->capacity = needed;
 }
 
+bool quant_strip_type(ggml_type type) {
+    return type == GGML_TYPE_Q2_K || type == GGML_TYPE_Q3_K || type == GGML_TYPE_Q4_K ||
+           type == GGML_TYPE_Q6_K || type == GGML_TYPE_IQ3_S || type == GGML_TYPE_IQ4_XS ||
+           type == GGML_TYPE_IQ4_NL || type == GGML_TYPE_Q8_0;
+}
+
 void compute_quant_strip(tsg_matmul_cuda_state * state, ggml_tensor * dst) {
     ggml_custom_op_params params;
     std::memcpy(&params, dst->op_params, sizeof(params));
@@ -178,9 +184,9 @@ void compute_quant_strip(tsg_matmul_cuda_state * state, ggml_tensor * dst) {
     auto * input_ids = reinterpret_cast<int32_t *>(scratch + input_offset);
     auto * output_ids = reinterpret_cast<int32_t *>(scratch + output_offset);
     auto * bounds = reinterpret_cast<int32_t *>(scratch + bounds_offset);
-    const bool dedup = used > 1;
+    const bool dedup = x->ne[1] == 1 && used > 1;
     ggml_cuda_launch_mm_ids_helper(static_cast<const int32_t *>(ids->data), input_ids, output_ids, bounds,
-        w->ne[2], tokens, used, 1, ids->nb[1] / sizeof(int32_t), x->nb[2] / x->nb[1], dedup, state->stream);
+        w->ne[2], tokens, used, x->ne[1], ids->nb[1] / sizeof(int32_t), x->nb[2] / x->nb[1], dedup, state->stream);
     CUDA_CHECK(cudaGetLastError());
     if (dedup)
         quantize_scatter_mmq_q8_1_cuda(static_cast<const float *>(x->data), input_ids, scratch + quant_offset,
@@ -199,14 +205,25 @@ void compute_quant_strip(tsg_matmul_cuda_state * state, ggml_tensor * dst) {
         a.out2 = reinterpret_cast<float *>(static_cast<char *>(dst->data)+dst->nb[3]);
         a.partial2 = reinterpret_cast<float *>(scratch + partial_offset + partial_bytes);
     }
-    if (w->type == GGML_TYPE_Q2_K) dispatch_quant_strip<GGML_TYPE_Q2_K>(state->device, state->stream, width, a);
-    else dispatch_quant_strip<GGML_TYPE_Q4_K>(state->device, state->stream, width, a);
+    switch (w->type) {
+#define TSG_STRIP_TYPE(TYPE) case TYPE: dispatch_quant_strip<TYPE>(state->device, state->stream, width, a); break;
+        TSG_STRIP_TYPE(GGML_TYPE_Q2_K)
+        TSG_STRIP_TYPE(GGML_TYPE_Q3_K)
+        TSG_STRIP_TYPE(GGML_TYPE_Q4_K)
+        TSG_STRIP_TYPE(GGML_TYPE_Q6_K)
+        TSG_STRIP_TYPE(GGML_TYPE_IQ3_S)
+        TSG_STRIP_TYPE(GGML_TYPE_IQ4_XS)
+        TSG_STRIP_TYPE(GGML_TYPE_IQ4_NL)
+        TSG_STRIP_TYPE(GGML_TYPE_Q8_0)
+#undef TSG_STRIP_TYPE
+        default: GGML_ABORT("Unsupported TensorSharp quantized output strip type");
+    }
 }
 } // namespace
 
 bool tsg_matmul_id_quant_strip_supported(ggml_backend_t backend, const ggml_tensor * w,
         int64_t tokens, int64_t full_rows, int64_t first_row) {
-    if (!ggml_backend_is_cuda(backend) || (w->type != GGML_TYPE_Q2_K && w->type != GGML_TYPE_Q4_K) ||
+    if (!ggml_backend_is_cuda(backend) || !quant_strip_type(w->type) ||
         !ggml_is_contiguous(w) || tokens <= 0 || tokens > INT_MAX || w->ne[0] > INT_MAX ||
         full_rows <= 0 || full_rows > INT_MAX || first_row < 0 || first_row + w->ne[1] > full_rows ||
         w->ne[2] > INT_MAX / tokens || w->ne[0] > INT_MAX - MATRIX_ROW_PADDING ||
@@ -255,7 +272,7 @@ void tsg_matmul_cuda_compute(tsg_matmul_cuda_state * state, ggml_tensor * dst) {
     const auto * b = dst->src[1];
     GGML_ASSERT(ggml_is_contiguous(dst));
     CUDA_CHECK(cudaSetDevice(state->device));
-    if (a->type == GGML_TYPE_Q2_K || a->type == GGML_TYPE_Q4_K) {
+    if (quant_strip_type(a->type)) {
         compute_quant_strip(state, dst);
         return;
     }

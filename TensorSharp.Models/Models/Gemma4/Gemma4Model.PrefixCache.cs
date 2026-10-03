@@ -34,7 +34,6 @@ namespace TensorSharp.Models
             return new PrefixCacheCapabilities
             {
                 Class = FamilyClass.S,
-                Readiness = PrefixCacheMode.Tree,
                 NamespaceFingerprint = KVStateFingerprint,
                 EndState = holders ? EndStateSupport.CopyAndDonate : EndStateSupport.None,
                 CanCaptureCopy = holders && SupportsPrefixCheckpoints,

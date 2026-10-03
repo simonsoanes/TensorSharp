@@ -8,16 +8,18 @@
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
-using Foundation;
 using Microsoft.Extensions.Logging;
 using TensorAgent.Maui.Hosting;
 using TensorSharp.Models.Media;
+#if IOS || MACCATALYST
 using TensorSharp.Models.Media.Apple;
+#endif
 
 namespace TensorAgent.Maui;
 
 public static class MauiProgram
 {
+#if IOS
     /// <summary>
     /// The scheduler's own name for the solo-prefill chunk size. Left overridable so a
     /// device experiment can try another value without a rebuild, which is how 1024
@@ -39,8 +41,78 @@ public static class MauiProgram
 
     [System.Runtime.InteropServices.DllImport("libSystem.dylib")]
     private static extern int unsetenv(string name);
+#endif
 
     public static MauiApp CreateMauiApp()
+    {
+        // Before the host exists: it picks the interface language as it loads the
+        // settings, and with no choice saved that is the first of these it has strings for.
+        Core.Localization.Loc.SystemLanguages = Services.SystemLanguages.Preferred;
+
+#if IOS
+        ApplyPhoneEngineSettings();
+#else
+        // A desktop app started from the Finder or the Dock inherits launchd's PATH,
+        // not the one a terminal has, so node, npm and a Homebrew python3 are simply
+        // not found and the skills that need them fail on their first step. The login
+        // shell is asked once, here, before anything starts a process. See
+        // DesktopEnvironment; a no-op on Windows, where PATH comes from the registry.
+        if (Core.Hosting.DesktopEnvironment.ImportLoginShellPath() is { } path)
+            Console.WriteLine($"TensorAgent: PATH from the login shell ({path.Split(Path.PathSeparator).Length} entries)");
+#endif
+
+#if IOS || MACCATALYST
+        // Media before anything else can decode: a photo from Photos is HEIC, a clip from
+        // the camera roll is H.264 and a Voice Memo is .m4a, and MediaCodecs starts on
+        // managed defaults that read none of those — they throw a "register a platform
+        // provider" NotSupportedException instead. TensorSharp.Models has a module
+        // initializer that does this when its assembly loads, but that is a side effect of
+        // something else happening first; calling it here makes the app's dependency on
+        // ImageIO/AVFoundation visible where the app is assembled, and it is idempotent.
+        AppleMediaProvider.Register();
+#endif
+        Console.WriteLine($"TensorAgent: media providers {MediaCodecs.Describe()}");
+#if DEBUG && (IOS || MACCATALYST)
+        // Debug only, and the only place the Apple media provider is ever executed: the repo's
+        // xunit suite is a net10.0 host that cannot load an iOS assembly, so ImageIO and
+        // AVFoundation are exercised here against files this device encodes itself, and
+        // scripts/verify-sim.sh fails the simulator run if any check reports false. Costs a
+        // fraction of a second at launch and nothing at all in a Release build.
+        Console.WriteLine("TensorAgent: media probe " + System.Text.Json.JsonSerializer.Serialize(
+            MediaProbe.Run(), new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)));
+#endif
+
+        MauiAppBuilder builder = MauiApp.CreateBuilder();
+        builder.UseMauiApp<App>();
+
+        // The Web UI is the app's own page, TensorAgent.Maui/wwwroot, linked into the
+        // bundle as webui/ (see the BundleResource items in the csproj).
+        string webRoot = Path.Combine(AppBundle.ResourceDirectory, "webui");
+        // Console logging is what `simctl launch --console` shows and what a device log
+        // capture picks up -- while something is attached to it. A device console
+        // detaches the moment the app is backgrounded, which is when the failures worth
+        // reading about happen, so warnings and errors are ALSO written to a file that
+        // comes back off the phone afterwards. See DurableErrorLog.
+        builder.Logging.AddConsole();
+        builder.Logging.AddProvider(new Core.Hosting.DurableErrorLog(
+            Hosting.LoopbackWebHost.DeviceLogsDirectory()));
+        builder.Services.AddSingleton(sp => new LoopbackWebHost(
+            webRoot, sp.GetService<ILoggerFactory>()));
+        builder.Services.AddSingleton<MainPage>();
+        builder.Services.AddSingleton<Pages.SessionsPage>();
+        builder.Services.AddSingleton<Pages.ModelsPage>();
+        builder.Services.AddSingleton<Pages.SettingsPage>();
+        builder.Services.AddSingleton<Pages.AboutPage>();
+        builder.Services.AddSingleton<AppShell>();
+
+        return builder.Build();
+    }
+
+#if IOS
+    /// <summary>
+    /// The engine settings measured on an iPhone: a desktop keeps the engine's defaults.
+    /// </summary>
+    private static void ApplyPhoneEngineSettings()
     {
         // No Metal residency set on the phone. The set keeps every buffer -- the
         // 4.9 GB of Qwen 9B weights included -- wired for the life of the model, so
@@ -83,16 +155,6 @@ public static class MauiProgram
         }
         Console.WriteLine($"TensorAgent: Metal residency sets {(residencySetsOn ? "on" : "off")} (ggml-metal reads {MetalNoResidencyVariable} at device init)");
 
-        // Media before anything else can decode: a photo from Photos is HEIC, a clip from
-        // the camera roll is H.264 and a Voice Memo is .m4a, and MediaCodecs starts on
-        // managed defaults that read none of those — they throw a "register a platform
-        // provider" NotSupportedException instead. TensorSharp.Models has a module
-        // initializer that does this when its assembly loads, but that is a side effect of
-        // something else happening first; calling it here makes the app's dependency on
-        // ImageIO/AVFoundation visible where the app is assembled, and it is idempotent.
-        AppleMediaProvider.Register();
-        Console.WriteLine($"TensorAgent: media providers {MediaCodecs.Describe()}");
-
         // Prefill in chunks a phone can actually hold.
         //
         // A solo request prefills up to min(SoloPrefillChunkSize, MaxNumBatchedTokens)
@@ -131,39 +193,6 @@ public static class MauiProgram
         if (Environment.GetEnvironmentVariable(PrefixCheckpointBudgetVariable) is not { Length: > 0 })
             Environment.SetEnvironmentVariable(PrefixCheckpointBudgetVariable, "1");
         Console.WriteLine($"TensorAgent: shared-prefix checkpoints kept {Environment.GetEnvironmentVariable(PrefixCheckpointBudgetVariable)}");
-#if DEBUG
-        // Debug only, and the only place the iOS media provider is ever executed: the repo's
-        // xunit suite is a net10.0 host that cannot load an iOS assembly, so ImageIO and
-        // AVFoundation are exercised here against files this device encodes itself, and
-        // scripts/verify-sim.sh fails the simulator run if any check reports false. Costs a
-        // fraction of a second at launch and nothing at all in a Release build.
-        Console.WriteLine("TensorAgent: media probe " + System.Text.Json.JsonSerializer.Serialize(
-            MediaProbe.Run(), new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)));
-#endif
-
-        MauiAppBuilder builder = MauiApp.CreateBuilder();
-        builder.UseMauiApp<App>();
-
-        // The Web UI is the app's own phone page, TensorAgent.Maui/wwwroot, linked
-        // into the bundle as webui/ (see the BundleResource item in the csproj).
-        string webRoot = Path.Combine(NSBundle.MainBundle.BundlePath, "webui");
-        // Console logging is what `simctl launch --console` shows and what a device log
-        // capture picks up -- while something is attached to it. A device console
-        // detaches the moment the app is backgrounded, which is when the failures worth
-        // reading about happen, so warnings and errors are ALSO written to a file that
-        // comes back off the phone afterwards. See DurableErrorLog.
-        builder.Logging.AddConsole();
-        builder.Logging.AddProvider(new Core.Hosting.DurableErrorLog(
-            Hosting.LoopbackWebHost.DeviceLogsDirectory()));
-        builder.Services.AddSingleton(sp => new LoopbackWebHost(
-            webRoot, sp.GetService<ILoggerFactory>()));
-        builder.Services.AddSingleton<MainPage>();
-        builder.Services.AddSingleton<Pages.SessionsPage>();
-        builder.Services.AddSingleton<Pages.ModelsPage>();
-        builder.Services.AddSingleton<Pages.SettingsPage>();
-        builder.Services.AddSingleton<Pages.AboutPage>();
-        builder.Services.AddSingleton<AppShell>();
-
-        return builder.Build();
     }
+#endif
 }

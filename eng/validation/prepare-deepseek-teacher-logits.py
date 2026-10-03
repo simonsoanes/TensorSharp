@@ -82,8 +82,9 @@ def build_plan(native_sha):
     source_profile = json.loads(source_profile_path.read_text(encoding='utf-8'))
     variants = {}
     for name, tp in [('non-tp', 0), ('expert-tp7', 7)]:
+        # The archived profile predates --tp; the degree now reaches the loader explicitly.
         env = copy.deepcopy(source_profile['env'])
-        env['TS_DSV41_TP'] = str(tp)
+        env.pop('TS_DSV41_TP', None)
         variants[name] = {'status': 'prepared-not-executed', 'expected_native_sha256': native_sha,
                           'native_load': {'backend': 'CUDA', 'n_gpu': 7, 'n_ctx': 65536,
                                           'n_ubatch': 512, 'n_threads': 32, 'n_cpu_moe': 12},

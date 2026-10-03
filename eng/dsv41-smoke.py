@@ -107,6 +107,7 @@ def main():
     parser.add_argument("--expected-text")
     parser.add_argument("--backend", default="CUDA", choices=("CUDA", "CPU"))
     parser.add_argument("--gpus", type=int, default=8, help="Number of selected GPUs")
+    parser.add_argument("--tp", type=int, default=0, help="Routed-MoE tensor-parallel ranks: 0 for layer placement, otherwise equal to --gpus")
     parser.add_argument("--context", type=int, default=4096)
     parser.add_argument("--ubatch", type=int, default=128)
     parser.add_argument("--threads", type=int, default=24)
@@ -139,22 +140,22 @@ def main():
         for block in iter(lambda: source.read(1024 * 1024), b""):
             native_hash.update(block)
     environment = {name: os.environ.get(name) for name in (
-        "CUDA_VISIBLE_DEVICES", "TS_DSV41_TP", "TS_DSV4_FA", "TS_DSV4_GATHER",
+        "CUDA_VISIBLE_DEVICES", "TS_DSV4_FA", "TS_DSV4_GATHER",
         "TS_DSV4_FUSED", "TS_CPU_MOE_THREADS", "NVIDIA_TF32_OVERRIDE",
         "TS_DSV41_SPARSE_FA", "TS_DSV41_COMPACT_RAW_GATHER",
         "TS_DSV41_ENGRAM_THREADS", "TS_DSV41_ENGRAM_WARM")}
-    tp_ranks = int(environment["TS_DSV41_TP"] or "0")
+    tp_ranks = args.tp
     report = {"model": str(args.model.resolve()), "library": str(args.library.resolve()),
               "library_sha256": native_hash.hexdigest(),
               "backend": args.backend, "placement": "routed_moe_tensor_parallel" if tp_ranks else "layer",
-              "gpus": args.gpus, "environment": environment,
+              "gpus": args.gpus, "tensor_parallel_ranks": tp_ranks, "environment": environment,
               "context": args.context, "ubatch": args.ubatch, "threads": args.threads,
               "cpu_moe_layers": args.cpu_moe, "prompt_tokens": prompt, "steps": [],
               "generated_tokens": [], "first_forward_traced": args.trace_dir is not None}
     def save():
         args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
     lib = C.CDLL(str(args.library.resolve()))
-    lib.TSGgml_Dsv4LoadModel.argtypes = [C.c_char_p] + [C.c_int] * 5 + [C.c_char_p]
+    lib.TSGgml_Dsv4LoadModel.argtypes = [C.c_char_p] + [C.c_int] * 4 + [C.c_char_p, C.c_int, C.c_char_p, C.c_int]
     lib.TSGgml_Dsv4LoadModel.restype = C.c_void_p
     lib.TSGgml_Dsv4Forward.argtypes = [C.c_void_p, C.c_void_p, C.c_int, C.c_void_p]
     lib.TSGgml_Dsv4Forward.restype = C.c_int
@@ -171,8 +172,8 @@ def main():
             function.argtypes, function.restype = [C.c_void_p, C.c_int], C.c_int
     started = time.monotonic()
     handle = lib.TSGgml_Dsv4LoadModel(str(args.model.resolve()).encode(), args.gpus,
-                                     args.context, args.ubatch, args.threads, args.cpu_moe,
-                                     args.backend.encode())
+                                     args.context, args.ubatch, args.threads, None, args.cpu_moe,
+                                     args.backend.encode(), tp_ranks)
     report["load_seconds"] = time.monotonic() - started
     if not handle:
         report["error"] = "Native load failed; see stderr"

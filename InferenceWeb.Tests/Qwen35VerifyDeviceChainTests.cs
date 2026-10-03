@@ -24,22 +24,14 @@ public sealed class Qwen35VerifyDeviceChainTests
         // input from the graph. Before the upload guard, Metal packing aborted
         // on the first upload to the unallocated position tensor.
         const int hidden = 32, head = 32, conv = 3 * head, rows = 4, vocab = 17;
-        using var packing = new NativeEnvironmentScope("TS_Q35_VERIFY_PACK");
-        using var commit = new NativeEnvironmentScope("TS_Q35_GPU_STATE_COMMIT");
-        GgmlBackendType backend = (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "cpu")
-            .Trim().ToLowerInvariant() switch
-            {
-                "metal" => GgmlBackendType.Metal,
-                "cuda" => GgmlBackendType.Cuda,
-                "vulkan" => GgmlBackendType.Vulkan,
-                _ => GgmlBackendType.Cpu,
-            };
+        using var env = new NativeEnvScope();
+        GgmlBackendType backend = TestGates.PinnedGgmlBackendType;
         bool metal = backend == GgmlBackendType.Metal;
-        packing.Set("0");
-        commit.Set("0");
+        env.Set("TS_Q35_VERIFY_PACK", "0");
+        env.Set("TS_Q35_GPU_STATE_COMMIT", "0");
         var reference = Run(backend, rebuild: true);
-        packing.Set("1");
-        commit.Set(metal ? "2" : "0"); // Metal must execute its snapshot-copy graph.
+        env.Set("TS_Q35_VERIFY_PACK", "1");
+        env.Set("TS_Q35_GPU_STATE_COMMIT", metal ? "2" : "0"); // Metal must execute its snapshot-copy graph.
         var actual = Run(backend, rebuild: false);
         Assert.Equal(reference.Count, actual.Count);
         for (int step = 0; step < reference.Count; step++)
@@ -154,13 +146,13 @@ public sealed class Qwen35VerifyDeviceChainTests
     }
 
     // Set to a real Qwen3.5 checkpoint (for example Qwen3.5-9B-IQ4_XS.gguf),
-    // together with TS_TEST_GGML_BACKEND=metal. Missing opt-in is a visible skip.
-    [ModelFact("TS_Q35_STATE_MODEL")]
+    // together with TS_TEST_GGML_BACKEND=metal. Missing opt-in, or another pinned
+    // backend, is a visible skip.
+    [ModelFact("TS_Q35_STATE_MODEL", GgmlBackend = BackendType.GgmlMetal)]
     public void DeviceStateChain_MatchesHostDrainsAcrossCommitsRollbacksAndSingleRows()
     {
         string path = Environment.GetEnvironmentVariable("TS_Q35_STATE_MODEL");
         Assert.True(File.Exists(path), "TS_Q35_STATE_MODEL must name a Qwen3.5 GGUF file.");
-        Assert.Equal("metal", Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND")?.ToLowerInvariant());
         using ModelBase loaded = ModelBase.Create(path, BackendType.GgmlMetal);
         Qwen35Model model = Assert.IsType<Qwen35Model>(loaded);
         var target = (ISpeculativeTarget)model;
@@ -173,15 +165,14 @@ public sealed class Qwen35VerifyDeviceChainTests
         // select full/partial prefixes with single-row commits between them.
         (int rows, int accepted)[] steps =
             { (4, 3), (1, 0), (13, 12), (1, 0), (13, 10), (13, 3), (2, 0), (1, 0), (4, 3) };
-        using var commitMode = new NativeEnvironmentScope("TS_Q35_GPU_STATE_COMMIT");
-        using var packing = new NativeEnvironmentScope("TS_Q35_VERIFY_PACK");
-        commitMode.Set("0");
-        packing.Set("0");
+        using var env = new NativeEnvScope();
+        env.Set("TS_Q35_GPU_STATE_COMMIT", "0");
+        env.Set("TS_Q35_VERIFY_PACK", "0");
         var host = Run(forceDrain: true);
         // Strict mode rejects a native CPU fallback. The device-state assertion
         // below also rejects the managed snapshot-fetch fallback.
-        commitMode.Set("2");
-        packing.Set("1");
+        env.Set("TS_Q35_GPU_STATE_COMMIT", "2");
+        env.Set("TS_Q35_VERIFY_PACK", "1");
         var device = Run(forceDrain: false);
         Assert.Equal(host.Count, device.Count);
         for (int step = 0; step < host.Count; step++)
@@ -245,32 +236,6 @@ public sealed class Qwen35VerifyDeviceChainTests
             model.DrainDeviceRecurrentState();
             return results;
         }
-    }
-
-    private sealed class NativeEnvironmentScope(string name) : IDisposable
-    {
-        private readonly string _original = Environment.GetEnvironmentVariable(name);
-
-        [DllImport("libc", EntryPoint = "setenv", CharSet = CharSet.Ansi)]
-        private static extern int SetEnvUnix(string name, string value, int overwrite);
-
-        [DllImport("libc", EntryPoint = "unsetenv", CharSet = CharSet.Ansi)]
-        private static extern int UnsetEnvUnix(string name);
-
-        [DllImport("ucrtbase", EntryPoint = "_putenv_s", CharSet = CharSet.Ansi)]
-        private static extern int PutEnvWindows(string name, string value);
-
-        public void Set(string value)
-        {
-            // Native getenv uses libc's table, which .NET may keep separately.
-            Environment.SetEnvironmentVariable(name, value);
-            int result = OperatingSystem.IsWindows()
-                ? PutEnvWindows(name, value ?? string.Empty)
-                : value == null ? UnsetEnvUnix(name) : SetEnvUnix(name, value, 1);
-            Assert.Equal(0, result);
-        }
-
-        public void Dispose() => Set(_original);
     }
 
     private void AssertClose(float[] reference, float[] actual, string label)
