@@ -526,6 +526,18 @@ a new chat (none by default). The Skills master switch is in the page's Skills s
 and `imageLoras`, the LoRA plug-ins every picture is made with, is set from the page's
 LoRA sheet (see "LoRA plug-ins" above).
 
+**Model download and cache folder.** Settings > Storage shows the full folder path
+and lets you save a different absolute path or choose **Use default**. Downloads,
+imports, the model catalog and subsequent model loads use this folder, including
+after a restart. Files are kept in `<folder>/<catalog-id>/`; existing files stay in
+the previous folder, so move those model subfolders yourself if you want to reuse
+them at the new location. A loaded model keeps running until you load another one.
+Folder changes wait for model loading and are refused while a download or import
+is active. The folder must be writable. `GET /api/agent/settings` reports the
+effective `modelCacheDirectory`; change it through
+`POST /api/agent/settings/model-cache-directory` with
+`{"modelCacheDirectory":"<absolute-path>"}` (an empty string restores the default).
+
 ## Build and run
 
 The user-local SDK is the one with the MAUI workloads:

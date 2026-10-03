@@ -105,8 +105,9 @@ public static partial class WebUiRoutes
     {
         IReadOnlyList<ImageLoraChoice> chosen = host.Settings.Load().ImageLoras;
         string? loaded = host.ModelService.LoadedModelPath;
-        CatalogModel? loadedModel = host.Catalog.FirstOrDefault(m => string.Equals(
-            Path.Combine(host.Paths.ModelsDirectory, m.Id, m.Weights.FileName), loaded, StringComparison.Ordinal));
+        CatalogModel? loadedModel = host.Catalog.FirstOrDefault(m =>
+            string.Equals(Path.GetFileName(Path.GetDirectoryName(loaded)), m.Id, StringComparison.Ordinal)
+            && string.Equals(Path.GetFileName(loaded), m.Weights.FileName, StringComparison.Ordinal));
         return new
         {
             loadedModel = loadedModel?.Id,

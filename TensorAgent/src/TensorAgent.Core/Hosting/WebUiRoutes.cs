@@ -401,7 +401,8 @@ public static partial class WebUiRoutes
         Func<object>? describeModel = null,
         ShareIntake? shares = null,
         Func<bool>? hasShareContainer = null,
-        Func<string, bool>? discardShare = null)
+        Func<string, bool>? discardShare = null,
+        Action<string?>? onModelCacheDirectoryChanged = null)
     {
         ArgumentNullException.ThrowIfNull(server);
         ArgumentNullException.ThrowIfNull(catalog);
@@ -409,6 +410,14 @@ public static partial class WebUiRoutes
         CatalogModel? Find(string id) => catalog.FirstOrDefault(m => string.Equals(m.Id, id, StringComparison.Ordinal));
         ArgumentNullException.ThrowIfNull(conversations);
         ArgumentNullException.ThrowIfNull(settings);
+        string defaultModelDirectory = models.Root;
+
+        AppSettings CurrentSettings()
+        {
+            AppSettings current = settings.Load();
+            current.ModelCacheDirectory = models.Root;
+            return current;
+        }
 
         server.MapGet("/api/agent/catalog", (_, _) => Ok(new
         {
@@ -511,7 +520,43 @@ public static partial class WebUiRoutes
         server.MapDelete("/api/agent/conversations/{id}", (request, _) =>
             Ok(new { deleted = conversations.Delete(request.RouteValues["id"]) }));
 
-        server.MapGet("/api/agent/settings", (_, _) => Ok(settings.Load()));
+        server.MapGet("/api/agent/settings", (_, _) => Ok(CurrentSettings()));
+        server.MapPost("/api/agent/settings/model-cache-directory", async (request, ct) =>
+        {
+            try
+            {
+                JsonElement body = await request.ReadJsonAsync(ct);
+                if (body.ValueKind != JsonValueKind.Object
+                    || !body.TryGetProperty("modelCacheDirectory", out JsonElement value)
+                    || value.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))
+                    return LoopbackResponse.Json(new { error = Loc.T("settings.storage.modelCache.absolutePath") }, 400);
+                string? directory = value.GetString();
+                if (onModelCacheDirectoryChanged is not null)
+                    onModelCacheDirectoryChanged(directory);
+                else
+                {
+                    string root = AgentPaths.ResolveModelsDirectory(directory, defaultModelDirectory);
+                    void Save() => settings.Update(current =>
+                    {
+                        current.ModelCacheDirectory = string.IsNullOrWhiteSpace(directory) ? string.Empty : root;
+                        return current;
+                    });
+                    if (downloads is not null)
+                        downloads.ChangeModelDirectory(root, Save);
+                    else
+                        models.ChangeRoot(root, Save);
+                }
+                return LoopbackResponse.Json(CurrentSettings());
+            }
+            catch (InvalidOperationException ex)
+            {
+                return LoopbackResponse.Json(new { error = ex.Message }, 409);
+            }
+            catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException or JsonException)
+            {
+                return LoopbackResponse.Json(new { error = ex.Message }, 400);
+            }
+        });
         server.MapPost("/api/agent/settings", async (request, ct) =>
         {
             AppSettings updated = JsonSerializer.Deserialize<AppSettings>(
@@ -522,16 +567,19 @@ public static partial class WebUiRoutes
             // removed with its files.
             // The interface language is the Settings screen's in the same way: a copy read
             // before the user switched would switch them back.
+            // The model folder has its own validated route; an old page copy must not
+            // undo a location changed on the native Settings screen.
             AppSettings saved = settings.Update(current =>
             {
                 updated.ImageLoras = current.ImageLoras;
                 updated.UiLanguage = current.UiLanguage;
+                updated.ModelCacheDirectory = current.ModelCacheDirectory;
                 return updated;
             });
             // Applied, not merely stored. Saving alone is what made "Allow network
             // access" a switch that did nothing until the app was force-quit.
             onSettingsChanged?.Invoke(saved);
-            return LoopbackResponse.Json(saved);
+            return LoopbackResponse.Json(CurrentSettings());
         });
 
         // The page tells the app what it just did — which conversation it bound, when

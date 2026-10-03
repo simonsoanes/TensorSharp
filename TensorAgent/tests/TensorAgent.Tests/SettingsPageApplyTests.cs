@@ -44,7 +44,7 @@ public sealed class SettingsPageApplyTests
 
         var applied = Regex.Matches(page, @"Apply\(s => s\.(\w+) = ")
             .Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
-        var savedOnly = Regex.Matches(page, @"s\.(\w+) = \w+; _app\.Settings\.Save\(s\);")
+        var savedOnly = Regex.Matches(page, @"_app\.Settings\.Update\(s => \{ s\.(\w+) = \w+; return s; \}\)")
             .Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
 
         Assert.True(applied.Count > 0, "the page no longer routes its switches through Apply");
@@ -61,9 +61,12 @@ public sealed class SettingsPageApplyTests
         Assert.True(controls > 0, "the page no longer builds its controls through Switch/Ladder/Choice/Stepper");
         Assert.Contains(nameof(AppSettings.UiLanguage), applied);
         Assert.Equal(controls, applied.Count + savedOnly.Count);
-        // And nothing saves the settings except Apply itself and the read-when-used handlers.
-        int saves = Regex.Matches(page, @"_app\.Settings\.Save\(").Count;
-        Assert.Equal(savedOnly.Count + 1, saves);
+        // A folder change runs in the background. Load followed by Save could write a
+        // stale folder back after the host switched it, so every change must be atomic.
+        Assert.DoesNotMatch(@"_app\.Settings\.Save\(", page);
+        Assert.Matches(@"_app\.Settings\.Update\(s =>\s*\{\s*change\(s\);\s*return s;\s*\}\)", page);
+        int updates = Regex.Matches(page, @"_app\.Settings\.Update\(").Count;
+        Assert.Equal(savedOnly.Count + 1, updates);
     }
 
     /// <summary>The repository root, found by walking up for a known marker.</summary>
