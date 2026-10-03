@@ -38,8 +38,7 @@ namespace TensorSharp.Runtime
     public static class RemovedCliFlags
     {
         /// <summary>
-        /// The removed flags, each with what the operator should know instead. Both
-        /// usage pages list these under "Removed options" and never as live options.
+        /// The removed flags, each with advice for operators who still pass them.
         /// </summary>
         public static readonly IReadOnlyList<(string Flag, string Advice)> RemovedFlags = new[]
         {

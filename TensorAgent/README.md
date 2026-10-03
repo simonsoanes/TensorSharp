@@ -526,6 +526,18 @@ a new chat (none by default). The Skills master switch is in the page's Skills s
 and `imageLoras`, the LoRA plug-ins every picture is made with, is set from the page's
 LoRA sheet (see "LoRA plug-ins" above).
 
+**Model download and cache folder.** Settings > Storage shows the full folder path
+and lets you save a different absolute path or choose **Use default**. Downloads,
+imports, the model catalog and subsequent model loads use this folder, including
+after a restart. Files are kept in `<folder>/<catalog-id>/`; existing files stay in
+the previous folder, so move those model subfolders yourself if you want to reuse
+them at the new location. A loaded model keeps running until you load another one.
+Folder changes wait for model loading and are refused while a download or import
+is active. The folder must be writable. `GET /api/agent/settings` reports the
+effective `modelCacheDirectory`; change it through
+`POST /api/agent/settings/model-cache-directory` with
+`{"modelCacheDirectory":"<absolute-path>"}` (an empty string restores the default).
+
 ## Build and run
 
 The user-local SDK is the one with the MAUI workloads:
@@ -804,6 +816,25 @@ updates the server, while TensorAgent needs its own build to update the embedded
 UI in `TensorAgent.Core.dll` beside its executable.
 For environments that use NuGet mirrors, `-PackageSource` accepts one or more
 feed URLs for restore; the default uses the repository's NuGet configuration.
+
+If restore reports `NU1301` with a TLS `HandshakeFailure` for `api.nuget.org`,
+the installed workload is not the problem: NuGet cannot download packages such
+as the Windows runtime packs. An optional configuration uses Microsoft's
+`dotnet-public` feed and keeps vulnerability auditing enabled through NuGet's
+separate `data.nuget.org` endpoint:
+
+```powershell
+Copy-Item eng/NuGet.dotnet-public.config NuGet.Config
+dotnet build TensorSharp.slnx -c Release
+```
+
+Run these commands from the repository root. Keep this machine-specific
+`NuGet.Config` local (add `/NuGet.Config` to `.git/info/exclude`); remove it to
+return to your usual feeds. The mirror does not carry every third-party package
+(including NLayer and NVorbis), so those packages need cached copies or another
+reachable feed. Missing packages remain build errors. For a one-off override,
+use `-p:RestoreConfigFile=<absolute-path-to-config>` on the solution build; its
+separate TensorAgent build receives the same restore settings.
 
 The app is unpackaged and carries the Windows App SDK runtime with it
 (`WindowsPackageType=None`, `WindowsAppSDKSelfContained`). The model's code runs only

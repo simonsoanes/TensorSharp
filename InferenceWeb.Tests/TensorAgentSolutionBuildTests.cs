@@ -10,9 +10,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Xml.Linq;
 using Xunit;
 
@@ -452,5 +456,87 @@ public class TensorAgentSolutionBuildTests
         Assert.Equal("$(BaseIntermediateOutputPath)", paths[0].Value.Trim());
         Assert.Equal("'$(TensorSharpAppleTargets)' == 'true'", paths[1].Attribute("Condition")?.Value);
         Assert.Equal("$(MSBuildProjectExtensionsPath)apple/", paths[1].Value.Trim());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SolutionBuild_ChildReceivesRestoreOverridesWithoutShellInterpretation(bool supplyOverrides)
+    {
+        // Exercise the actual import and Exec environment conversion without restoring
+        // packages or requiring MAUI. In particular a sources list must remain one value,
+        // and a config/cache path must never be interpreted by the command shell.
+        string directory = Path.Combine(RepoRoot, "artifacts", "tests", "TensorAgentRestore", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        string childPath = Path.Combine(directory, "child.proj");
+        string parentPath = Path.Combine(directory, "parent.proj");
+        string outputPath = Path.Combine(directory, "child-properties.json");
+        var expected = new Dictionary<string, string>
+        {
+            ["RestoreSources"] = supplyOverrides
+                ? "https://first.invalid/v3/index.json;https://second.invalid/encoded%3Bpath/index.json?x=1&y=2"
+                : string.Empty,
+            ["RestoreConfigFile"] = supplyOverrides ? Path.Combine(directory, "config with spaces & Bob's", "NuGet %20.Config") : string.Empty,
+            ["RestorePackagesPath"] = supplyOverrides ? Path.Combine(directory, "package cache & Bob's %20") : string.Empty,
+            ["RestoreIgnoreFailedSources"] = supplyOverrides ? "true" : string.Empty,
+            ["NuGetAudit"] = supplyOverrides ? "false" : string.Empty,
+        };
+        var properties = new XElement("PropertyGroup", new XElement("SolutionFileName", "TensorSharp.slnx"));
+        if (supplyOverrides)
+        {
+            foreach ((string name, string value) in expected)
+                // Preserve literal percent sequences when MSBuild reads the project.
+                properties.Add(new XElement(name, value.Replace("%", "%25", StringComparison.Ordinal)));
+        }
+        new XDocument(new XElement("Project",
+            new XElement("ItemGroup", new XElement("ForwardedSource", new XAttribute("Include", "$(RestoreSources)")))))
+            .Save(childPath);
+        new XDocument(new XElement("Project",
+            properties,
+            new XElement("Import", new XAttribute("Project", Path.Combine(RepoRoot, "Directory.Solution.targets"))),
+            new XElement("Target", new XAttribute("Name", "Probe"),
+                new XElement("Exec",
+                    new XAttribute("Command", $"$(_TensorAgentAppCommandPrefix)\"$(_TensorAgentDotnet)\" msbuild \"{childPath}\" -nologo -getProperty:{string.Join(',', expected.Keys)} -getItem:ForwardedSource > \"{outputPath}\""),
+                    new XAttribute("EnvironmentVariables", "$(_TensorAgentAppEnvironment)")))))
+            .Save(parentPath);
+
+        string? dotnet = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH");
+        var start = new ProcessStartInfo(string.IsNullOrEmpty(dotnet) ? "dotnet" : dotnet)
+        {
+            WorkingDirectory = RepoRoot,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        foreach (string name in expected.Keys)
+            start.Environment.Remove(name);
+        foreach (string argument in new[] { "msbuild", parentPath, "-nologo", "-t:Probe", "-v:quiet" })
+            start.ArgumentList.Add(argument);
+        using var process = new Process { StartInfo = start };
+        process.Start();
+        Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+        Task<string> stderr = process.StandardError.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            process.Kill(entireProcessTree: true);
+            Assert.Fail($"The restore forwarding probe did not finish within 30 seconds: {parentPath}");
+        }
+        string output = await stdout;
+        string errors = await stderr;
+        Assert.True(process.ExitCode == 0, $"Restore forwarding probe failed.\n{output}\n{errors}");
+        using JsonDocument result = JsonDocument.Parse(File.ReadAllText(outputPath));
+        JsonElement actual = result.RootElement.GetProperty("Properties");
+        foreach ((string name, string value) in expected)
+            Assert.Equal(value, actual.GetProperty(name).GetString());
+        // Check list splitting separately from property text: escaping all semicolons
+        // twice would preserve the displayed property but collapse its feeds into one item.
+        Assert.Equal(expected["RestoreSources"].Split(';', StringSplitOptions.RemoveEmptyEntries).Length,
+            result.RootElement.GetProperty("Items").GetProperty("ForwardedSource").GetArrayLength());
     }
 }

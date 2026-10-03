@@ -137,6 +137,13 @@ public sealed class AppSettings
     /// <summary>Whether the optional projector/draft files are downloaded with a model.</summary>
     [JsonPropertyName("downloadOptionalFiles")] public bool DownloadOptionalFiles { get; set; } = true;
 
+    /// <summary>Absolute folder containing downloaded models, one subfolder per catalog
+    /// entry. Empty uses the installation's default model folder. Changing it leaves
+    /// existing files in their previous location. Updated through
+    /// <see cref="Hosting.AgentAppHost.SetModelCacheDirectory"/> or the dedicated
+    /// settings route so validation happens before the setting is saved.</summary>
+    [JsonPropertyName("modelCacheDirectory")] public string ModelCacheDirectory { get; set; } = string.Empty;
+
     /// <summary>
     /// Speculative decoding: draft a few tokens ahead (the model's draft head when it
     /// is downloaded, otherwise a lookup over the conversation's own tokens) and

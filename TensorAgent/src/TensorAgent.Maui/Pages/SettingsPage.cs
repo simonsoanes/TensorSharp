@@ -104,9 +104,11 @@ public sealed class SettingsPage : ContentPage
     /// </summary>
     private void Apply(Action<AppSettings> change)
     {
-        AppSettings settings = _app.Settings.Load();
-        change(settings);
-        _app.Settings.Save(settings);
+        AppSettings settings = _app.Settings.Update(s =>
+        {
+            change(s);
+            return s;
+        });
         _app.ApplySettings(settings);
         if (_engine is not null)
             _engine.Text = Loc.T("settings.sandbox.now", ("engine", _app.DescribeEngine()));
@@ -195,7 +197,7 @@ public sealed class SettingsPage : ContentPage
         _body.Add(Switch(Loc.T("settings.generation.reasoning.title"),
             Loc.T("settings.generation.reasoning.detail"),
             settings.ThinkByDefault,
-            on => { AppSettings s = _app.Settings.Load(); s.ThinkByDefault = on; _app.Settings.Save(s); }));
+            on => _app.Settings.Update(s => { s.ThinkByDefault = on; return s; })));
         // Through Apply like the sandbox switches. It used to save the file and nothing
         // else, so the engine that was standing kept the old policy until the next model
         // load, while AgentAppHost.ApplySpeculationSetting -- written to move the running
@@ -210,18 +212,21 @@ public sealed class SettingsPage : ContentPage
         _body.Add(Switch(Loc.T("settings.downloads.cellular.title"),
             Loc.T("settings.downloads.cellular.detail"),
             settings.AllowCellularDownloads,
-            on => { AppSettings s = _app.Settings.Load(); s.AllowCellularDownloads = on; _app.Settings.Save(s); }));
+            on => _app.Settings.Update(s => { s.AllowCellularDownloads = on; return s; })));
 #endif
         _body.Add(Switch(Loc.T("settings.downloads.optional.title"),
             Loc.T("settings.downloads.optional.detail"),
             settings.DownloadOptionalFiles,
-            on => { AppSettings s = _app.Settings.Load(); s.DownloadOptionalFiles = on; _app.Settings.Save(s); }));
+            on => _app.Settings.Update(s => { s.DownloadOptionalFiles = on; return s; })));
         // Said here because it is the thing people worry about while a download runs,
         // and the model list can only say it while they are looking at the model list.
         _body.Add(Note(Loc.T("settings.downloads.note")));
 
         _body.Add(Section(Loc.T("settings.storage.section")));
-        _body.Add(Note(Loc.T("settings.storage.models", ("size", Gb(DirectorySize(_app.Paths.ModelsDirectory))))));
+        _body.Add(ModelCacheDirectoryEditor(settings));
+        Label modelSize = Note(Loc.T("settings.storage.models", ("size", "…")));
+        _body.Add(modelSize);
+        _ = UpdateModelDirectorySize(modelSize, _app.Models.Root);
         _body.Add(Note(Loc.T("settings.storage.chats", ("count", _app.Conversations.List().Count))));
         _body.Add(Note(Loc.T("settings.storage.skills", ("count", _app.Skills.Skills.Count))));
 
@@ -245,6 +250,95 @@ public sealed class SettingsPage : ContentPage
             Build();
         };
         _body.Add(clear);
+    }
+
+    private View ModelCacheDirectoryEditor(AppSettings settings)
+    {
+        StringComparer pathComparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        var folder = new Entry
+        {
+            Text = _app.Models.Root,
+            Placeholder = Loc.T("settings.storage.modelCache.placeholder"),
+            TextColor = Theme.Text,
+            PlaceholderColor = Theme.Muted,
+            BackgroundColor = Theme.Surface,
+            FontSize = 14,
+            IsTextPredictionEnabled = false,
+            IsSpellCheckEnabled = false,
+            ReturnType = ReturnType.Done,
+        };
+        SemanticProperties.SetDescription(folder, Loc.T("settings.storage.modelCache.title"));
+        var save = new Button
+        {
+            Text = Loc.T("settings.storage.modelCache.save"),
+            BackgroundColor = Theme.Accent,
+            TextColor = Colors.White,
+            CornerRadius = 10,
+            IsEnabled = false,
+        };
+        var restore = new Button
+        {
+            Text = Loc.T("settings.storage.modelCache.default"),
+            BackgroundColor = Theme.Surface,
+            TextColor = Theme.Text,
+            CornerRadius = 10,
+            IsEnabled = !string.IsNullOrWhiteSpace(settings.ModelCacheDirectory),
+        };
+
+        folder.TextChanged += (_, _) => save.IsEnabled =
+            !pathComparer.Equals(folder.Text?.Trim(), _app.Models.Root);
+
+        async Task SaveDirectory(string? directory)
+        {
+            folder.IsEnabled = save.IsEnabled = restore.IsEnabled = false;
+            try
+            {
+                // The host validates the folder before persisting it. Saving
+                // through Apply would keep an invalid path when the change is refused.
+                await Task.Run(() => _app.SetModelCacheDirectory(directory));
+            }
+            catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException or InvalidOperationException)
+            {
+                await DisplayAlert(Loc.T("settings.storage.modelCache.error.title"),
+                    Loc.T("settings.storage.modelCache.error.message", ("error", ex.Message)), Loc.T("common.ok"));
+                folder.IsEnabled = true;
+                save.IsEnabled = !pathComparer.Equals(folder.Text?.Trim(), _app.Models.Root);
+                restore.IsEnabled = !string.IsNullOrWhiteSpace(_app.Settings.Load().ModelCacheDirectory);
+                return;
+            }
+            Build();
+        }
+
+        save.Clicked += async (_, _) => await SaveDirectory(folder.Text);
+        restore.Clicked += async (_, _) => await SaveDirectory(string.Empty);
+        folder.Completed += async (_, _) =>
+        {
+            if (save.IsEnabled)
+                await SaveDirectory(folder.Text);
+        };
+
+        return new VerticalStackLayout
+        {
+            Spacing = 8,
+            Padding = new Thickness(16, 10),
+            Children =
+            {
+                new Label { Text = Loc.T("settings.storage.modelCache.title"), FontSize = 16, TextColor = Theme.Text },
+                new Label { Text = Loc.T("settings.storage.modelCache.detail"), FontSize = 12, TextColor = Theme.Muted },
+                folder,
+                save,
+                restore,
+            },
+        };
+    }
+
+    private async Task UpdateModelDirectorySize(Label label, string directory)
+    {
+        long bytes = await Task.Run(() => DirectorySize(directory));
+        // A folder or language change rebuilds the page while the scan is running.
+        if (_body.Children.Contains(label))
+            label.Text = Loc.T("settings.storage.models", ("size", Gb(bytes)));
     }
 
     /// <summary>
@@ -359,7 +453,7 @@ public sealed class SettingsPage : ContentPage
         Padding = new Thickness(16, 20, 16, 6),
     };
 
-    private static View Note(string text) => new Label
+    private static Label Note(string text) => new Label
     {
         Text = text,
         FontSize = 12,

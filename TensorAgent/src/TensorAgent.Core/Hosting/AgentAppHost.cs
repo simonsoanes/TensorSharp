@@ -108,14 +108,17 @@ public sealed class AgentAppHost : IDisposable
         // native screens and the page -- is in the language the user gets.
         Localization.Loc.Apply(settings);
 
-        Models = new ModelStore(paths.ModelsDirectory);
+        Models = new ModelStore(paths.ResolveModelsDirectory(settings));
         // Weights whose catalog entry is gone -- the previous quantization of an entry
         // that now points at a different file. Nothing else can reach them: the Models
         // list is built from the catalog, so a directory no entry claims has no row and
         // no delete button, and it is gigabytes. Swept once per launch, before anything
         // reads the store. Only RETIRED ids go (ModelCatalog.Retired): an id this build
         // merely does not know may be a newer build's, sharing this directory.
-        Models.SweepOrphanedModels();
+        // The automatic sweep also removes loose files. A custom folder may hold
+        // files the user put there themselves, so only sweep the app's default folder.
+        if (string.IsNullOrWhiteSpace(settings.ModelCacheDirectory))
+            Models.SweepOrphanedModels();
         // And the checkpoints of models the catalog has retired: a directory no entry
         // claims has no delete button either.
         PrefixCheckpointFileStore.SweepOrphans(
@@ -373,7 +376,8 @@ public sealed class AgentAppHost : IDisposable
         Server.MapAgent(
             Catalog, Models, Conversations, Settings, DescribeEngine, RaisePageEvent, Downloads,
             onSettingsChanged: ApplySettings, describeModel: DescribeModelState, shares: Shares,
-            hasShareContainer: () => ShareInbox is not null, discardShare: DiscardPendingShare);
+            hasShareContainer: () => ShareInbox is not null, discardShare: DiscardPendingShare,
+            onModelCacheDirectoryChanged: SetModelCacheDirectory);
         Server.MapLoras(this);
     }
 
@@ -2058,6 +2062,28 @@ public sealed class AgentAppHost : IDisposable
         _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation("settings applied: {Engine}", DescribeEngineForLog());
     }
 
+    /// <summary>Save and switch the folder used for model downloads and subsequent
+    /// loads. Existing files and the currently loaded model stay where they are.</summary>
+    public void SetModelCacheDirectory(string? directory)
+    {
+        // Keep the root fixed while a load resolves weights and companions. Save only
+        // after validation, so a failed change leaves both the store and settings intact.
+        lock (_modelGate)
+        {
+            string root = AgentPaths.ResolveModelsDirectory(directory, Paths.ModelsDirectory);
+            Downloads.ChangeModelDirectory(root, () => Settings.Update(current =>
+            {
+                current.ModelCacheDirectory = string.IsNullOrWhiteSpace(directory) ? string.Empty : root;
+                return current;
+            }));
+            if (!ModelService.IsLoaded)
+            {
+                AppSettings saved = Settings.Load();
+                Options.RepointHostedModel(Paths.SelectedModelPath(saved), Paths.SelectedProjectorPath(saved) ?? string.Empty);
+            }
+        }
+    }
+
     /// <summary>
     /// The speculative-decoding switch, applied to the engine that is standing: the
     /// policy goes into the environment (where the next engine reads it) AND to the
@@ -2083,8 +2109,14 @@ public sealed class AgentAppHost : IDisposable
 
     internal string ApplySpeculationSetting(AppSettings settings)
     {
-        CatalogModel? model = settings.SelectedModelId is { Length: > 0 } id ? ModelCatalog.Find(id) : null;
-        string? draftHead = model is null ? null : Models.CompanionPath(model, CatalogFileRole.Draft);
+        CatalogModel? loadedModel = ModelService.IsLoaded ? LoadedCatalogModel() : null;
+        CatalogModel? model = loadedModel
+            ?? (settings.SelectedModelId is { Length: > 0 } id ? ModelCatalog.Find(id) : null);
+        // A folder change leaves the current engine standing. Its draft belongs beside
+        // the weights it loaded, even though the next load reads the new model folder.
+        string? draftHead = loadedModel is not null
+            ? InstalledDraftPath(loadedModel, Path.GetDirectoryName(ModelService.LoadedModelPath)!)
+            : model is null ? null : Models.CompanionPath(model, CatalogFileRole.Draft);
         string note = SpeculationPolicy.PrepareLoad(settings, draftHead);
         bool draftAttached = SpeculationPolicy.SpeculatesWithDraftHead(
             draftHead, ModelService.Model is IDraftHead { HasDraftHead: true });
@@ -2093,6 +2125,15 @@ public sealed class AgentAppHost : IDisposable
         string account = $"{note}; algorithm {algorithm}; {(live ? "applied to the running engine" : "no engine standing, applies at the next load")}";
         HostLog.LogInformation("{Speculation}", account);
         return account;
+    }
+
+    private static string? InstalledDraftPath(CatalogModel model, string directory)
+    {
+        CatalogFile? draft = model.Files.FirstOrDefault(f => f.Role == CatalogFileRole.Draft);
+        if (draft is null)
+            return null;
+        string path = Path.Combine(directory, draft.FileName);
+        return File.Exists(path) && new FileInfo(path).Length == draft.Bytes ? path : null;
     }
 
     private int _speculationBenchStarted;
@@ -2782,8 +2823,9 @@ public sealed class AgentAppHost : IDisposable
         string? loaded = ModelService.LoadedModelPath;
         return string.IsNullOrEmpty(loaded)
             ? null
-            : ModelCatalog.BuiltIn.FirstOrDefault(m => string.Equals(
-                Path.Combine(Paths.ModelsDirectory, m.Id, m.Weights.FileName), loaded, StringComparison.Ordinal));
+            : ModelCatalog.BuiltIn.FirstOrDefault(m =>
+                string.Equals(Path.GetFileName(Path.GetDirectoryName(loaded)), m.Id, StringComparison.Ordinal)
+                && string.Equals(Path.GetFileName(loaded), m.Weights.FileName, StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -3026,6 +3068,21 @@ public sealed record AgentPaths(string DataRoot, string CacheRoot)
     public DeviceClass DeviceClass { get; init; } = DeviceClass.Phone;
 
     public string ModelsDirectory => Path.Combine(CacheRoot, "models");
+
+    /// <summary>The configured model folder, or the installation's default when unset.</summary>
+    public string ResolveModelsDirectory(AppSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        return ResolveModelsDirectory(settings.ModelCacheDirectory, ModelsDirectory);
+    }
+
+    internal static string ResolveModelsDirectory(string? directory, string defaultDirectory)
+    {
+        string path = string.IsNullOrWhiteSpace(directory) ? defaultDirectory : directory.Trim();
+        if (!string.IsNullOrWhiteSpace(directory) && !Path.IsPathFullyQualified(path))
+            throw new ArgumentException(Loc.T("settings.storage.modelCache.absolutePath"), nameof(directory));
+        return Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+    }
     /// <summary>The LoRA plug-ins (<see cref="LoraStore"/>): beside the models, not inside a
     /// model's own directory, which the store's completeness check walks.</summary>
     public string LorasDirectory => Path.Combine(CacheRoot, "loras");
@@ -3082,8 +3139,8 @@ public sealed record AgentPaths(string DataRoot, string CacheRoot)
             ? ModelCatalog.Find(id)
             : null;
         return model is null
-            ? Path.Combine(ModelsDirectory, "no-model-selected.gguf")
-            : Path.Combine(ModelsDirectory, model.Id, model.Weights.FileName);
+            ? Path.Combine(ResolveModelsDirectory(settings), "no-model-selected.gguf")
+            : Path.Combine(ResolveModelsDirectory(settings), model.Id, model.Weights.FileName);
     }
 
     /// <summary>The multimodal projector beside the selected model, or null when it has none.</summary>
@@ -3093,7 +3150,7 @@ public sealed record AgentPaths(string DataRoot, string CacheRoot)
             ? ModelCatalog.Find(id)
             : null;
         return model?.Projector is { } projector
-            ? Path.Combine(ModelsDirectory, model.Id, projector.FileName)
+            ? Path.Combine(ResolveModelsDirectory(settings), model.Id, projector.FileName)
             : null;
     }
 }

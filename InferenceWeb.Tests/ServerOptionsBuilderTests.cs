@@ -677,21 +677,20 @@ public class ServerOptionsBuilderTests : IDisposable
     }
 
     [Fact]
-    public void ServerUsage_ListsRemovedQwenImageFlagsOnlyAsRemoved()
+    public void ServerUsage_DoesNotListRemovedFlags()
     {
-        // Documented as live options they would be advertised and then refused; the
-        // page names them once, in the removed-options note, with the same advice.
         var documented = new HashSet<string>(ServerUsage.DocumentedFlags(), StringComparer.OrdinalIgnoreCase);
         var sw = new StringWriter();
         ServerUsage.PrintUsage(sw);
-        string flattened = System.Text.RegularExpressions.Regex.Replace(sw.ToString(), @"\s+", " ");
+        string usage = sw.ToString();
 
-        Assert.Contains("Removed options", flattened, StringComparison.Ordinal);
+        Assert.DoesNotContain("Removed options", usage, StringComparison.Ordinal);
         Assert.NotEmpty(RemovedCliFlags.RemovedFlags);
-        foreach ((string flag, string advice) in RemovedCliFlags.RemovedFlags)
+        foreach ((string flag, _) in RemovedCliFlags.RemovedFlags)
         {
             Assert.DoesNotContain(flag, documented);
-            Assert.Contains(flag + " Removed: " + advice, flattened, StringComparison.Ordinal);
+            // Match whole flag names: --video-te is a prefix of --video-text-encoder.
+            Assert.DoesNotMatch(System.Text.RegularExpressions.Regex.Escape(flag) + @"(?![\w-])", usage);
         }
     }
 
