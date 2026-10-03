@@ -4,7 +4,7 @@
 
 ## 当前方向
 
-TensorSharp 是面向 GGUF 模型的原生 .NET 10 推理引擎。当前源码包含 CLI、服务端/Web UI、兼容 HTTP API、AgentHost，以及 TensorAgent 应用（iOS/iPadOS，同一个项目还能构建 Mac 与 Windows 桌面版）。AgentHost 随 CLI 与服务端归档一同发布，也作为 `TensorSharp.AgentHost` NuGet 包发布；TensorAgent 只能从源码构建，因为没有任何发布工作流会构建这个应用。`v2026.09.01` 标签之后合入的改动（其中包括 Qwen-Image-2.1、Bonsai2、DiffusionGemma 图像输入与 Jev API、子智能体、Playwright 浏览器技能以及 GB10 发布归档）在下一个标签之前只存在于源码构建中；其中会改变现有配置行为的改动列在[发布说明](#发布说明自上个标签以来的行为变化)中。
+TensorSharp 是面向 GGUF 模型的原生 .NET 10 推理引擎。当前源码包含 CLI、服务端/Web UI、兼容 HTTP API、AgentHost，以及 TensorAgent 应用（iOS/iPadOS，同一个项目还能构建 Mac 与 Windows 桌面版）。AgentHost 随 CLI 与服务端归档一同发布，也作为 `TensorSharp.AgentHost` NuGet 包发布。更新后的 Release Binaries 工作流还会打包 Apple Silicon Mac（DMG / PKG / ZIP）与 Windows x64 CPU / CUDA（MSI / ZIP）的 TensorAgent 桌面版；历史发布可能没有桌面资源，iPhone / iPad 仍需源码构建。请看[桌面版下载、安装与首次聊天指南](tensoragent_desktop_zh-cn.md)。`v2026.09.01` 标签之后合入的改动（其中包括 Qwen-Image-2.1、Bonsai2、DiffusionGemma 图像输入与 Jev API、子智能体、Playwright 浏览器技能以及 GB10 发布归档）在下一个标签之前只存在于源码构建中；其中会改变现有配置行为的改动列在[发布说明](#发布说明自上个标签以来的行为变化)中。
 
 ### TensorAgent：在同一应用中聊天、执行任务与生成媒体
 

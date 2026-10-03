@@ -6,7 +6,9 @@
 
 ## 安装与首次运行
 
-更愿意使用预构建应用？[Releases 页面](https://github.com/zhongkaifu/TensorSharp/releases)提供自包含的 Windows x64（CPU/CUDA）、Linux x64（CPU/CUDA）与 macOS arm64 CLI / Server 归档。
+**使用 TensorAgent 桌面应用：** 打开[最新发布](https://github.com/zhongkaifu/TensorSharp/releases/latest)，展开 **Assets**，选择 `tensoragent-desktop-<version>-osx-arm64.dmg`（Apple Silicon，macOS 14+），或 `tensoragent-desktop-<version>-win-x64-cpu.msi` / `win-x64-cuda.msi`（Windows x64）。也提供 PKG 与 ZIP。桌面包包含 .NET 运行库；Windows 缺少 WebView2 时需另外安装。权重通过 **☰ → 模型 → 下载 → 使用** 下载，内置模型最低需要 12 GB 系统内存。安装、校验、首次聊天、工具与故障排查详见[桌面版用户指南](tensoragent_desktop_zh-cn.md)。历史发布可能没有桌面资源，需等待使用更新后 Release Binaries 工作流的发布。
+
+**使用 TensorSharp CLI / 服务端：** [Releases 页面](https://github.com/zhongkaifu/TensorSharp/releases)提供自包含的 Windows x64（CPU/CUDA）、Linux x64（CPU/CUDA）与 macOS arm64 归档。下文的 SDK 与构建步骤用于源码构建。
 
 **NVIDIA DGX Spark / GB10：** 请使用独立的实验性 **CUDA 13、Linux ARM64**
 [Docker 构建与归档说明](../DEVELOPMENT_zh-cn.md#gb10--dgx-spark-构建容器实验性)。
@@ -126,7 +128,7 @@ dotnet run --project TensorSharp.Server.Host -c Release -- --help
 
 `dotnet build TensorSharp.slnx -c Release` 构建引擎、CLI/服务端以及 TensorAgent.Core、TensorAgent.Sharing 和 TensorAgent.Tests。在 macOS 上还会尝试构建 Mac 应用，并在 Apple Silicon 上构建 iOS 模拟器应用；在 Windows 上会尝试构建 `win-x64` 应用。应用构建需要对应的 MAUI 工作负载与原生依赖；缺失时会警告并跳过对应应用头，其他构建错误会使解决方案构建失败。Linux 仅构建共享项目，不构建 MAUI 应用头。可用 `-p:TensorSharpSkipTensorAgentApp=true` 显式排除应用。
 
-构建测试项目不会执行测试。Windows 应用已有有限的 Debug/Release 聊天、合成图像与工具验证；媒体生成和更广的设备覆盖尚未验证；当前构建/设备覆盖、模型下载、图像编辑、视频生成与应用专用脚本见 [TensorAgent 指南](../TensorAgent/README.md)。TensorAgent 以源码提供，不包含在预构建发布归档中。
+构建测试项目不会执行测试。Windows 应用已有有限的 Debug/Release 聊天、合成图像与工具验证；媒体生成和更广的设备覆盖尚未验证。当前覆盖范围与应用专用脚本见 [TensorAgent 源码 / 验证指南](../TensorAgent/README.md)；安装 Mac / Windows 发布包请看[桌面版用户指南](tensoragent_desktop_zh-cn.md)。iPhone / iPad 仍需源码构建流程。
 
 ## 文本与代码嵌入
 

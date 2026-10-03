@@ -38,7 +38,7 @@
     <div class="card"><div class="ic">🔌</div><h3>Ollama 与 OpenAI API</h3><p>面向现有工具的即插即用端点，外加浏览器聊天 UI。</p></div>
   </div>
 
-  <p><strong>TensorAgent：</strong>在一个面向 iPhone、iPad、macOS 与 Windows 的应用中运行本地文本、图像、视频、文件、代码、技能与桌面浏览器工作流。界面支持八种语言；具体工作流取决于设备内存与平台策略。<a href="agentic_zh-cn.html#tensoragent">能力与验证边界 →</a></p>
+  <p><strong>TensorAgent：</strong>在一个面向 iPhone、iPad、macOS 与 Windows 的应用中运行本地文本、图像、视频、文件、代码、技能与桌面浏览器工作流。界面支持八种语言；具体工作流取决于设备内存与平台策略。<a href="tensoragent_zh-cn.html">桌面下载与使用指南 →</a> · <a href="agentic_zh-cn.html#tensoragent">能力与验证边界 →</a></p>
 
   <h2 id="models-features">模型与模态</h2>
   <ul>
@@ -80,7 +80,7 @@
     <li><strong>边界约束</strong> —— 模型给出的每一个路径都要经过 <code>SkillPathGuard</code>，它同时封堵词法层（<code>..</code>、绝对路径、<code>~</code>、UNC、盘符限定）、规范化层与<strong>符号链接</strong>三类逃逸，并把每个技能限制在它自己的目录内。ZIP 安装同样让每个条目走这道关卡（zip-slip），按解压后的字节流校验大小，并设置单文件（64 MB）、整包（256 MB）、条目数（4096）与压缩比（200×）上限。</li>
     <li><strong>模型家族差异</strong> —— 只有聊天渲染器与输出解析器都支持时才提供工具。Mistral 3、Hunyuan Dense 与 DiffusionGemma 不承载工具声明，因此会内联选中技能正文，并隐藏技能 / 代码工具，而不是发出无人能处理的调用。<code>qwen4exp</code>（Qwen 3.8 Flash Next）已能完成工具往返。</li>
     <li><strong>智能体代码执行</strong> —— <code>--code-exec</code> 增加 <code>read_file</code>、<code>write_file</code>（仅新建文件）、<code>shell</code> 与 <code>apply_patch</code>。TensorSharp 在同一个有界循环中执行这些内置工具；调用方自己的工具从不代跑，仍回传调用方。普通技能循环默认 8 轮；提供代码执行时自动提高到 24 轮，除非运维显式设过上限。→ <a href="agentic_zh-cn.html">架构、权限与平台限制</a></li>
-    <li><strong>子智能体</strong> —— 在服务端聊天路径上（OpenAI Chat 与 Responses、Ollama chat、Web UI），支持工具的模型可以用 <code>spawn_agent</code>、<code>wait_agent</code>、<code>send_input</code>、<code>close_agent</code> 与 <code>list_agents</code> 委派相互独立的工作。它默认开启，既不依赖技能也不依赖 <code>--code-exec</code>；子智能体运行在同一个已加载模型上，默认只读（只有 <code>worker</code> 子智能体能使用父智能体的可写工具，且仅在设置了 <code>--agents-allow-worker-tools</code> 时），并受 <code>--agents-*</code> 各项上限约束。<code>--no-multi-agent</code> 或请求中的 <code>"multi_agent": false</code> 可关闭它；TensorAgent 默认委派且没有关闭选项，CLI 不做委派。项目没有发布延迟或质量数据。→ <a href="agentic_zh-cn.html#sub-agents">子智能体</a></li>
+    <li><strong>子智能体</strong> —— 在服务端聊天路径上（OpenAI Chat 与 Responses、Ollama chat、Web UI），支持工具的模型可以用 <code>spawn_agent</code>、<code>wait_agent</code>、<code>send_input</code>、<code>close_agent</code> 与 <code>list_agents</code> 委派相互独立的工作。它默认开启，既不依赖技能也不依赖 <code>--code-exec</code>；子智能体运行在同一个已加载模型上，默认只读（只有 <code>worker</code> 子智能体能使用父智能体的可写工具，且仅在设置了 <code>--agents-allow-worker-tools</code> 时），并受 <code>--agents-*</code> 各项上限约束。<code>--no-multi-agent</code> 或请求中的 <code>"multi_agent": false</code> 可关闭它；TensorAgent 默认委派，可在设置 → 沙盒 → 子代理中关闭，CLI 不做委派。项目没有发布延迟或质量数据。→ <a href="agentic_zh-cn.html#sub-agents">子智能体</a></li>
     <li><strong>浏览器自动化</strong> —— <code>TensorAgent/skills</code> 中的 <code>playwright</code> 技能通过 <code>skills_run</code> 与固定版本的 <code>@playwright/cli</code> 驱动真实浏览器；没有屏幕或鼠标工具。它需要脚本执行权限、网络与宿主上的 Node.js，已记录 macOS arm64 模型工作流，另有 Windows 的有界合成技能运行器/会话探针。→ <a href="agentic_zh-cn.html#playwright">Playwright 技能</a></li>
     <li><strong>工作区与结果</strong> —— Web/CLI 聊天跨轮保留一个工作区；每个 OpenAI/Ollama 请求在其内部轮次间拥有独立工作区，结束后删除。技能脚本与代码工具共用它。Web UI 用临时 <code>tool_progress</code> 显示实时活动，并保留生成文件链接；服务端产物可从 <code>/api/code/artifacts/</code> 下载。</li>
     <li><strong>安全边界</strong> —— 生成命令默认离线。macOS Seatbelt 与 Linux bubblewrap 0.12+ 会约束写入与主目录读取；macOS 无法保证清理故意脱离的子进程。Windows job object 只能约束进程树，无法限制文件或网络，因此 required 模式会拒绝代码；运维必须显式选择 <code>--code-exec-unconfined</code>（技能脚本则是 <code>--skills-sandbox preferred</code>）。TensorSharp 没有逐命令审批 UI：启动参数就是运维的决定。</li>

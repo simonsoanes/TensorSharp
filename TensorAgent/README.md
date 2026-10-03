@@ -18,8 +18,13 @@ then CPU. See [On the desktop](#on-the-desktop-macos-and-windows) for platform d
 The Apple device target is iOS/iPadOS 17.0 or later, arm64; build it with
 `TensorSharpAppleTargets=true`.
 
-**Current source status.** No release workflow builds, signs or publishes TensorAgent;
-follow the [source-build instructions](#build-and-run). All twelve catalog entries need
+**Download and install:** follow the **[TensorAgent Desktop user guide](../docs/tensoragent_desktop.md)**
+([中文](../docs/tensoragent_desktop_zh-cn.md)) for macOS and Windows packages, model
+setup and your first chat. The updated Release Binaries workflow publishes Desktop
+DMG/PKG/ZIP and MSI/ZIP assets; historical releases may lack them. iPhone/iPad still
+use the [source-build instructions](#build-and-run).
+
+**Model and validation scope.** All twelve catalog entries need
 at least the 12 GB system RAM tier; seven need 24 GB or more. Qwen3.8 Flash Next has an
 experimental UD-IQ1_M entry from 32 GB and a text-only UD-Q2_K_XL entry from 48 GB,
 both with SSD-backed weights. These eligibility tiers describe physical system RAM,
@@ -39,6 +44,58 @@ requires the explicit **Run without a sandbox** setting.
 has no GPU, so the engine runs on `ggml_cpu` there; on an iPhone it uses Metal. The model
 wrote a short script, ran it in the app's built-in Python, and answered with the table. The
 Mac app is shown under [On the desktop](#on-the-desktop-macos-and-windows).</sub>
+
+## Install TensorAgent Desktop
+
+Open the **[latest release](https://github.com/zhongkaifu/TensorSharp/releases/latest)**
+and expand **Assets**. The desktop filenames start with `tensoragent-desktop-`,
+followed by the release version and platform:
+
+| Computer | Install package |
+|---|---|
+| Apple Silicon Mac, macOS 14+ | `tensoragent-desktop-<version>-osx-arm64.dmg`: drag TensorAgent to Applications; PKG and ZIP alternatives are available. |
+| Windows x64, CPU | `tensoragent-desktop-<version>-win-x64-cpu.msi`: install for your user and open TensorAgent from Start; ZIP is available. |
+| Windows x64, compatible NVIDIA GPU/driver | `tensoragent-desktop-<version>-win-x64-cuda.msi`: includes CUDA runtime libraries; ZIP is available. |
+
+Desktop packages carry their .NET runtime and native engine. Windows WebView2 is
+a separate prerequisite; Python/Node are optional system tools for skills, rather
+than bundled desktop interpreters. Packages currently use ad hoc Mac signing and
+an unsigned Windows installer. See the [installation guide](../docs/tensoragent_desktop.md#2-install-and-open)
+for verification and platform prompts. Old release pages may contain only CLI/server
+archives; the workflow change does not add Desktop files to past releases.
+
+After opening the app, choose **☰ → Models → Download → Use**, wait for loading,
+and type your first message. Model weights are separate downloads, and catalog
+eligibility starts at 12 GB physical RAM. Use the [full user guide](../docs/tensoragent_desktop.md)
+for storage setup, attachments, permissions, generated files, updates and troubleshooting.
+
+### Release packaging for maintainers
+
+[Release Binaries](../.github/workflows/release-binaries.yml) publishes on a `v<version>`
+tag push; a manual run accepts the version without `v` and creates a draft by
+default. Packaging accepts three-part numeric versions such as `2.8.6` or
+`2026.10.03`, with optional prerelease/build labels, validated by
+[the version resolver](../eng/resolve-release-version.py). Calendar tags map to
+Windows Installer's limits (`2026.10.03` becomes MSI version `26.10.3`); the complete
+release version remains in asset names. The workflow pins .NET SDK 10.0.302,
+workload set 10.0.303.1 and Xcode 26.6 for its hosted Mac build, installs both Apple
+MAUI workloads for restore, and builds the native macOS engine with a 14.0
+deployment floor. Local builds still need a workload/Xcode combination that matches
+their installed Xcode.
+
+The [Mac packager](../eng/package-tensoragent-macos.sh) preserves the published
+bundle's ad hoc signature and creates DMG/PKG/ZIP packages. The
+[Windows packager](../eng/package-tensoragent-windows.ps1) and
+[WiX generator](../eng/generate-tensoragent-wix.py) validate a self-contained
+publish folder and create MSI/ZIP packages, including per-user installation and a
+Start menu shortcut. Distribution signing and notarization are not configured.
+Each release includes `SHA256SUMS-tensoragent-desktop-<version>-<variant>.txt` and
+`tensoragent-desktop-<version>-<variant>-BUILD.txt`. BUILD records the unchanged
+upstream ggml revision and actual packaging checks: Mac signatures/architecture
+and archive structure, Windows ZIP/MSI payload hashes, and package checksums.
+Those checks do not establish clean-machine installation, GUI launch, model
+inference, GPU coverage or benchmark results. Keep any additional generated
+validation evidence under ignored `docs/validation/` or `artifacts/`.
 
 ## What it does
 
@@ -804,8 +861,8 @@ skipped, never as passed.
 - **No App Sandbox.** The app runs the model's code as real processes and confines each
   with TensorSharp's Seatbelt profile, which macOS will not apply inside the App Sandbox.
   So there is no `Platforms/MacCatalyst/Entitlements.plist`, and the build is not a Mac
-  App Store build. Nothing here signs it for distribution either; a Debug or Release build
-  is signed ad hoc for this Mac.
+  App Store build. Local Debug/Release builds and the default Desktop release
+  packages are signed ad hoc, rather than with a notarized Developer ID signature.
 - **Debug and Release are two apps with one set of data.** `bin/Debug/.../TensorAgent.app`
   and `bin/Release/.../TensorAgent.app` share `~/Library/Application Support/TensorAgent`
   and `~/Library/Caches/TensorAgent`, but each offers only the catalog it was compiled
@@ -814,9 +871,12 @@ skipped, never as passed.
   (`ModelCatalog.Retired`) and keeps a folder whose id it does not know, which a newer
   build may have installed; for the same reason it keeps, without loading it, a selected
   model it does not know.
-- **The oldest Mac it runs on** is decided by the engine library, which `build-macos.sh`
+- **The oldest Mac a source build runs on** is decided by the engine library, which `build-macos.sh`
   builds for the building Mac's own macOS unless `MACOSX_DEPLOYMENT_TARGET` says otherwise,
   not by the app's `SupportedOSPlatformVersion` (Mac Catalyst 17.0, macOS 14).
+  The Desktop release workflow sets `MACOSX_DEPLOYMENT_TARGET=14.0` for its Apple
+  Silicon packages; this build target does not establish runtime testing on every
+  supported macOS version.
 - **PATH.** An app started from the Finder or the Dock gets launchd's
   `/usr/bin:/bin:/usr/sbin:/sbin`, where Homebrew's `node`, `npm` and `python3.13` are not.
   At startup the app asks the login shell for its PATH and puts it first

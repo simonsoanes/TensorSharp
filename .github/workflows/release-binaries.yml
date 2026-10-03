@@ -2,7 +2,7 @@ name: Release Binaries
 
 # New forks must enable Actions before dispatching a branch-based validation run.
 # Builds self-contained, ready-to-run release archives of the TensorSharp apps
-# (TensorSharp.Server.Host and TensorSharp.Cli) for each supported platform and
+# (TensorSharp.Server.Host, TensorSharp.Cli and TensorAgent Desktop) and
 # attaches them to a GitHub Release.
 #
 # Unlike `publish-nuget.yml` (which packs managed-only NuGet packages and skips
@@ -15,6 +15,11 @@ name: Release Binaries
 #   - linux-x64-cpu    libGgmlOps.so (CPU)                     -> .tar.gz
 #   - linux-x64-cuda   libGgmlOps.so (+CUDA) + PTX + CUDA redist -> .tar.gz
 #   - osx-arm64        libGgmlOps.dylib (Metal) + MLX dylibs   -> .tar.gz
+#   - TensorAgent Desktop osx-arm64 (Metal/CPU)               -> .dmg/.pkg/.zip
+#   - TensorAgent Desktop win-x64-cpu / win-x64-cuda          -> .msi/.zip
+# Desktop packages are ad-hoc signed on macOS and unsigned on Windows. They
+# bundle .NET/native runtimes, but models and optional Python/Node are separate.
+# Windows requires Evergreen WebView2. See docs/tensoragent_desktop.md.
 #   - linux-arm64-cuda13-GB10  SM121a GGML + PTX + CUDA 13 redist -> .tar.gz
 #
 # The x64 CUDA archives bundle the CUDA 12.x runtime libraries (cudart / cublas /
@@ -95,10 +100,15 @@ jobs:
             rid: linux-x64
             cuda: true
           - name: osx-arm64
-            os: macos-latest
+            os: macos-26
             rid: osx-arm64
             cuda: false
     runs-on: ${{ matrix.os }}
+    env:
+      # Resolve upstream once per runner, then reuse that unchanged checkout.
+      TENSORSHARP_GGML_NO_UPDATE: "1"
+      # Pin the native macOS deployment floor, rather than the runner's OS.
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
     # The CUDA ggml build (multiple SASS targets + PTX) and the macOS MLX build
     # (builds mlx-c from source) are minutes-long; give them headroom.
     timeout-minutes: 120
@@ -110,7 +120,8 @@ jobs:
 
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "10.0.x"
+          # Pin the desktop SDK/workload/Xcode combination together.
+          dotnet-version: "10.0.302"
 
       - name: Install CUDA toolkit
         if: ${{ matrix.cuda }}
@@ -139,21 +150,47 @@ jobs:
           # PTX compile uses to point nvcc at the right cl.exe.
           toolset: "14.44"
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Resolve version
         id: ver
         shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: python eng/resolve-release-version.py
+
+      - name: Validate desktop packaging contracts
+        shell: bash
+        run: python -m unittest discover -s eng/tests -p 'test_tensoragent_*packaging.py'
+
+      - name: Install desktop MAUI workload
+        if: ${{ runner.os == 'Windows' || runner.os == 'macOS' }}
+        shell: bash
         run: |
           set -euo pipefail
-          V="${{ github.event.inputs.version }}"
-          if [ -z "$V" ] && [ "${{ github.ref_type }}" = "tag" ]; then
-            V="${GITHUB_REF_NAME#v}"
+          if [ "$RUNNER_OS" = Windows ]; then
+            dotnet workload install maui-windows --version 10.0.303.1
+          else
+            export DEVELOPER_DIR=/Applications/Xcode_26.6.app/Contents/Developer
+            echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
+            # Restore evaluates both Apple TFMs even for a Catalyst-only publish.
+            dotnet workload install maui-maccatalyst maui-ios --version 10.0.303.1
+            xcodebuild -version
           fi
-          if [ -z "$V" ]; then
-            echo "::error::No version resolved. Push a tag like v2.8.6 or supply the 'version' input." >&2
-            exit 1
+
+      - name: Fetch unchanged upstream ggml
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Windows ]; then
+            powershell -NoProfile -ExecutionPolicy Bypass -File eng/fetch-ggml.ps1
+          else
+            bash eng/fetch-ggml.sh
           fi
-          echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: $V"
+          git -C ExternalProjects/ggml rev-parse HEAD
+          test -z "$(git -C ExternalProjects/ggml status --porcelain)"
 
       - name: Publish apps
         shell: bash
@@ -171,6 +208,7 @@ jobs:
           # don't have — the whole native library would then fail to load. The
           # archives are documented as CPU / CPU+CUDA builds.
           TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN: "OFF"
+          V: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
           if [ "$RUNNER_OS" = "Windows" ]; then
@@ -182,7 +220,6 @@ jobs:
             # cl.exe/nvcc directly and needs neither.
             export CMAKE_GENERATOR=Ninja
           fi
-          V="${{ steps.ver.outputs.version }}"
           # "<archive dir>:<project>". The server's entry point lives in
           # TensorSharp.Server.Host (TensorSharp.Server itself is the library it
           # builds on and has no Main), but the archive keeps the `server` name
@@ -197,6 +234,34 @@ jobs:
               -p:Version="$V" \
               -o "publish/$lc"
           done
+
+      - name: Publish TensorAgent Desktop
+        if: ${{ runner.os == 'Windows' || runner.os == 'macOS' }}
+        shell: bash
+        env:
+          V: ${{ steps.ver.outputs.version }}
+          APP_VERSION: ${{ steps.ver.outputs.app_version }}
+          APP_BUILD: ${{ github.run_number }}
+          TENSORSHARP_GGML_NATIVE_ENABLE_CUDA: ${{ matrix.cuda && 'ON' || 'OFF' }}
+          TENSORSHARP_GGML_NATIVE_CUDA_ARCHITECTURES: ${{ matrix.cuda && (inputs.cuda_arch || '75-real;86-real;89-real;90-real;90-virtual') || '' }}
+          TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN: "OFF"
+          TENSORSHARP_MLX_NATIVE_SKIP: "true"
+        run: |
+          set -euo pipefail
+          project="TensorAgent/src/TensorAgent.Maui/TensorAgent.Maui.csproj"
+          if [ "$RUNNER_OS" = Windows ]; then
+            export CMAKE_GENERATOR=Ninja
+            dotnet publish "$project" -c Release -f net10.0-windows10.0.19041.0 \
+              -r win-x64 --self-contained true -m:1 -p:Version="$V" \
+              -p:ApplicationDisplayVersion="$APP_VERSION" -p:ApplicationVersion="$APP_BUILD" \
+              -p:WindowsPackageType=None -p:WindowsAppSDKSelfContained=true \
+              -p:PublishSingleFile=false -o publish/desktop
+          else
+            dotnet publish "$project" -c Release -f net10.0-maccatalyst \
+              -r maccatalyst-arm64 --self-contained true -m:1 -p:Version="$V" \
+              -p:ApplicationDisplayVersion="$APP_VERSION" -p:ApplicationVersion="$APP_BUILD" \
+              -p:TensorSharpAppleTargets=true -p:CreatePackage=false -p:CodesignKey=-
+          fi
 
       - name: Stage GGML native library
         shell: bash
@@ -220,6 +285,9 @@ jobs:
           echo "Bundling GGML native library: $lib"
           cp "$lib" publish/server/
           cp "$lib" publish/cli/
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp "$lib" publish/desktop/
+          fi
 
       - name: Stage MLX native libraries
         if: ${{ runner.os == 'macOS' }}
@@ -266,6 +334,10 @@ jobs:
             mkdir -p "publish/$app/cuda_kernels"
             cp "$ptxdir"/*.ptx "publish/$app/cuda_kernels/"
           done
+          if [ "$RUNNER_OS" = Windows ]; then
+            mkdir -p publish/desktop/cuda_kernels
+            cp "$ptxdir"/*.ptx publish/desktop/cuda_kernels/
+          fi
 
       - name: Stage CUDA runtime (Linux)
         if: ${{ matrix.cuda && runner.os == 'Linux' }}
@@ -292,10 +364,92 @@ jobs:
             if (Test-Path $src) {
               Copy-Item $src publish/server/
               Copy-Item $src publish/cli/
+              Copy-Item $src publish/desktop/
             } else {
               Write-Host "::warning::CUDA runtime library $dll not found at $src; archive will require a system CUDA install."
             }
           }
+
+      - name: Stage Windows desktop resources and Visual C++ runtime
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force publish/desktop/webui | Out-Null
+          Copy-Item TensorAgent/src/TensorAgent.Maui/wwwroot/* publish/desktop/webui/ -Recurse -Force
+          # Build output content must also survive dotnet publish.
+          $skills = "TensorAgent/src/TensorAgent.Maui/bin/Release/net10.0-windows10.0.19041.0/win-x64/skills"
+          if (-not (Test-Path $skills)) { throw "Bundled skills not found: $skills" }
+          New-Item -ItemType Directory -Force publish/desktop/skills | Out-Null
+          Copy-Item "$skills/*" publish/desktop/skills/ -Recurse -Force
+          # vcvars may select a newer v14 redist alongside the pinned compiler.
+          # Bundle a complete release CRT family; never mix folders.
+          $crtRoot = Join-Path $env:VCToolsRedistDir "x64"
+          $candidates = @(Get-ChildItem $crtRoot -Directory -Filter "Microsoft.VC*.CRT" | Sort-Object Name -Descending)
+          $preferred = @($candidates | Where-Object Name -eq "Microsoft.VC143.CRT")
+          $crt = $null
+          foreach ($candidate in @($preferred + $candidates)) {
+            $complete = $true
+            foreach ($dll in @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")) {
+              if (-not (Test-Path (Join-Path $candidate.FullName $dll))) { $complete = $false }
+            }
+            if (-not $complete) { continue }
+            $info = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $candidate.FullName "vcruntime140.dll"))
+            if ($info.FileMajorPart -eq 14 -and $info.FileMinorPart -ge 44) {
+              $crt = $candidate.FullName
+              Write-Host "Bundling Visual C++ runtime $($info.FileVersion) from $crt"
+              break
+            }
+          }
+          if (-not $crt) { throw "Complete Visual C++ v14 x64 redistributable >= 14.44 not found: $crtRoot" }
+          Copy-Item "$crt/*.dll" publish/desktop/
+          Copy-Item LICENSE publish/desktop/LICENSE.txt
+          Copy-Item ExternalProjects/ggml/LICENSE publish/desktop/GGML-LICENSE.txt
+
+      - name: Package TensorAgent Desktop (macOS)
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        env:
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          bash eng/package-tensoragent-macos.sh \
+            TensorAgent/src/TensorAgent.Maui/bin/Release/net10.0-maccatalyst/maccatalyst-arm64/TensorAgent.app \
+            "$V" artifacts
+
+      - name: Package TensorAgent Desktop (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        env:
+          V: ${{ steps.ver.outputs.version }}
+          VARIANT: ${{ matrix.name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          dotnet tool install wix --version 6.0.2 --tool-path artifacts/tools/wix
+          if ($LASTEXITCODE -ne 0) { throw "WiX tool installation failed." }
+          ./eng/package-tensoragent-windows.ps1 -PublishDirectory publish/desktop -Version $env:V -Variant $env:VARIANT -OutputDirectory artifacts -WixPath artifacts/tools/wix/wix.exe
+
+      - name: Record desktop build coverage
+        if: ${{ runner.os == 'Windows' || runner.os == 'macOS' }}
+        shell: bash
+        env:
+          V: ${{ steps.ver.outputs.version }}
+          VARIANT: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          test -z "$(git -C ExternalProjects/ggml status --porcelain)"
+          {
+            echo "TensorAgent Desktop $V ($VARIANT)"
+            echo "TensorSharp revision: $GITHUB_SHA"
+            echo "Unmodified upstream ggml: $(git -C ExternalProjects/ggml rev-parse HEAD)"
+            echo "Coverage: packaging contract tests, publish, required payload checks, archive/checksum verification."
+            if [ "$RUNNER_OS" = macOS ]; then
+              echo "Verified code signatures, ARM64 architecture, macOS 14 deployment floor, DMG and PKG structure."
+            else
+              echo "Verified every ZIP/MSI payload hash after administrative extraction."
+            fi
+            echo "Not covered: clean-machine installation, UI launch, model inference, GPU devices or benchmarks."
+            echo "Signing: macOS ad-hoc (not notarized); Windows unsigned."
+          } > "artifacts/tensoragent-desktop-$V-$VARIANT-BUILD.txt"
 
       - name: Archive (Unix)
         if: ${{ runner.os != 'Windows' }}
@@ -323,7 +477,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.name }}
-          path: artifacts/*
+          path: |
+            artifacts/tensorsharp-*
+            artifacts/tensoragent-desktop-*
+            artifacts/SHA256SUMS-tensoragent-desktop-*.txt
+          if-no-files-found: error
+          compression-level: 0
           retention-days: 14
 
   build-gb10:
@@ -444,21 +603,16 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Resolve version
         id: ver
         shell: bash
-        run: |
-          set -euo pipefail
-          V="${{ github.event.inputs.version }}"
-          if [ -z "$V" ] && [ "${{ github.ref_type }}" = "tag" ]; then
-            V="${GITHUB_REF_NAME#v}"
-          fi
-          if [ -z "$V" ]; then
-            echo "::error::No version resolved." >&2
-            exit 1
-          fi
-          echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "tag=v$V" >> "$GITHUB_OUTPUT"
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: python eng/resolve-release-version.py
 
       - uses: actions/download-artifact@v4
         with:
@@ -475,14 +629,42 @@ jobs:
           set -euo pipefail
           sha256sum --check --strict "tensorsharp-$V-linux-arm64-cuda13-GB10-SHA256SUMS"
 
+      - name: Verify all TensorAgent Desktop release assets
+        shell: bash
+        working-directory: dist
+        env:
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          for variant in osx-arm64 win-x64-cpu win-x64-cuda; do
+            stem="tensoragent-desktop-$V-$variant"
+            test -s "$stem.zip"
+            test -s "$stem-BUILD.txt"
+            if [ "$variant" = osx-arm64 ]; then
+              test -s "$stem.dmg"
+              test -s "$stem.pkg"
+            else
+              test -s "$stem.msi"
+            fi
+            sha256sum --check --strict "SHA256SUMS-$stem.txt"
+          done
+
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: TensorSharp ${{ steps.ver.outputs.version }}
           # Tag pushes publish immediately; manual runs default to a draft.
           draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft }}
           prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease }}
           generate_release_notes: true
+          body: |
+            ## TensorAgent Desktop
+            Download `tensoragent-desktop-${{ steps.ver.outputs.version }}-osx-arm64.dmg` (Apple Silicon Mac, macOS 14+) or the `win-x64-cpu.msi` / `win-x64-cuda.msi` variant below (Windows x64). Mac PKG/ZIP and Windows ZIP alternatives are also included.
+
+            [Download, installation, setup and first-chat guide](https://tensorsharp.ai/tensoragent.html) · [Guide at this release tag](https://github.com/${{ github.repository }}/blob/${{ steps.ver.outputs.tag }}/docs/tensoragent_desktop.md)
+
+            Models are downloaded in the app. Windows requires WebView2; CUDA also requires an NVIDIA driver. Packages include .NET/native runtimes; Python/Node.js for skills are optional separate installs. macOS packages are ad-hoc signed and not notarized; Windows packages are unsigned. See the guide for platform prompts and SHA-256 verification. BUILD files record dependency revision and actual validation coverage.
           fail_on_unmatched_files: true
           files: dist/**/*

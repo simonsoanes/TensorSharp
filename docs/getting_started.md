@@ -6,7 +6,9 @@
 
 ## Install and first run
 
-Prefer a prebuilt application? The [Releases page](https://github.com/zhongkaifu/TensorSharp/releases) provides self-contained CLI and Server archives for Windows x64 (CPU/CUDA), Linux x64 (CPU/CUDA), and macOS arm64.
+**For the TensorAgent Desktop app:** open the [latest release](https://github.com/zhongkaifu/TensorSharp/releases/latest), expand **Assets**, and choose `tensoragent-desktop-<version>-osx-arm64.dmg` (Apple Silicon, macOS 14+) or `tensoragent-desktop-<version>-win-x64-cpu.msi` / `win-x64-cuda.msi` (Windows x64). PKG and ZIP alternatives are available. Desktop packages include the .NET runtime; Windows also needs WebView2 if absent. Model weights download in **☰ → Models → Download → Use**, and the built-in catalog starts at 12 GB system RAM. Follow the [Desktop user guide](tensoragent_desktop.md) for installation, package verification, first chat, tools and troubleshooting. Older releases may lack Desktop assets until a release uses the updated Release Binaries workflow.
+
+**For the TensorSharp CLI/server:** the [Releases page](https://github.com/zhongkaifu/TensorSharp/releases) provides self-contained archives for Windows x64 (CPU/CUDA), Linux x64 (CPU/CUDA), and macOS arm64. The SDK and build steps below are for source builds.
 
 **NVIDIA DGX Spark / GB10:** use the separate experimental **CUDA 13, Linux ARM64**
 [Docker build and archive instructions](../DEVELOPMENT.md#gb10--dgx-spark-build-container-experimental).
@@ -140,7 +142,7 @@ Full command reference: **[CLI](../USAGE.md#console-application)** · **[Server]
 
 `dotnet build TensorSharp.slnx -c Release` builds the engine, CLI/server and TensorAgent.Core, TensorAgent.Sharing and TensorAgent.Tests. On macOS it also attempts the Mac app and, on Apple Silicon, the iOS simulator app; on Windows it attempts the `win-x64` app. App builds need the matching MAUI workloads and native prerequisites. Missing prerequisites skip a head with a warning; other build failures fail the solution build. Linux builds the shared projects without a MAUI app head. To leave the app out explicitly, use `-p:TensorSharpSkipTensorAgentApp=true`.
 
-Building the test project does not run its tests. The Windows app has bounded Debug/Release chat, synthetic vision and tool validation; media generation and broader device coverage remain unverified; consult the [TensorAgent guide](../TensorAgent/README.md) for current build/device coverage, model downloads, image editing, video generation and app-specific scripts. TensorAgent is distributed as source, not a prebuilt release archive.
+Building the test project does not run its tests. The Windows app has bounded Debug/Release chat, synthetic vision and tool validation; media generation and broader device coverage remain unverified. Consult the [TensorAgent source/validation guide](../TensorAgent/README.md) for current coverage and app-specific scripts, or the [Desktop user guide](tensoragent_desktop.md) to install a Mac/Windows release package. iPhone/iPad builds still require the source-build workflow.
 
 ## Text and code embeddings
 
