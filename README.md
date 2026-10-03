@@ -6,15 +6,16 @@
 
 [English](README.md) | [中文](README_zh-cn.md)
 
-**Native .NET LLM inference engine for GGUF models** — autoregressive LLMs *and* DiffusionGemma-style text-diffusion, plus [Qwen-Image-2.1 generation and editing](docs/models/qwenimage21.md) and MiniMax-H3 video with native 32 kHz stereo audio (and Wan 2.1/2.2 for video alone). Ships a console app, a browser chat UI, and Ollama/OpenAI-compatible HTTP APIs. The .NET runtime offers managed CPU and native accelerator backends; published comparisons use identical GGUF files and hardware. The optional `TensorSharp.AgentHost` layer adds Agent Skills, a bounded, in-process model-to-tool loop for sandboxed file and shell work, and bounded automatic subagent delegation.
+**Native .NET AI inference engine for GGUF models** — text, reasoning, multimodal input, embeddings, image generation and editing, and video with audio. Run it from the CLI, browser chat, Ollama/OpenAI-compatible APIs, or [TensorAgent](TensorAgent/README.md), the local app for iPhone, iPad, Mac and Windows. The .NET runtime offers managed CPU and native accelerator backends; published comparisons use identical GGUF files and hardware. The optional `TensorSharp.AgentHost` layer adds Agent Skills, a bounded, in-process model-to-tool loop for file and shell work, and bounded automatic subagent delegation.
 
 ## Highlights
 
 - **Local, native .NET inference.** Run GGUF text and multimodal models from the CLI, browser UI, or Ollama/OpenAI-compatible APIs.
-- **Broad model and media support.** Current source covers modern text models, vision/audio input, PDF, image generation/editing, and video generation; see the [model cards](docs/models/README.md).
+- **Broad model and media support.** Current source covers modern text models, DiffusionGemma text diffusion, vision/audio input, PDF, [Qwen-Image-2.1 image generation and editing](docs/models/qwenimage21.md) with masks and LoRA plug-ins, MiniMax-H3 video with native 32 kHz stereo audio, and Wan 2.1/2.2 video. See the [model cards](docs/models/README.md).
 - **Text and code embeddings.** GGUF BERT/XLM-R encoders with OpenAI/Ollama batch embedding APIs for Snowflake Arctic Embed and MiniLM; see the [embedding guide](docs/embeddings.md).
 - **Measured performance.** TensorSharp is benchmarked against `llama.cpp` on identical models and hardware. Results are specific to the measured model, backend, and workload. See [Benchmarks](docs/benchmarks.md).
-- **Agentic work, including iOS.** `TensorSharp.AgentHost` adds bounded Agent Skills, code tools, and [automatic subagent delegation](docs/multi_agent.md) with independent contexts, private workspaces, dependency scheduling, and read-only defaults. [TensorAgent](TensorAgent/README.md) brings the same local chat and agent experience to iPhone and iPad using the iOS `ggml_metal` backend.
+- **Agentic work.** `TensorSharp.AgentHost` adds bounded Agent Skills, code tools, and [automatic subagent delegation](docs/multi_agent.md) with independent contexts, private workspaces, dependency scheduling, and read-only defaults.
+- **TensorAgent for phones and desktops.** One app for local chat, multimodal input, code and document work, image generation/editing, and short video with audio. Its eleven-model catalog is gated by device memory; image/video models need desktop memory tiers. The interface supports English, Simplified and Traditional Chinese, Japanese, Korean, Spanish, French and German. See [TensorAgent](TensorAgent/README.md) for source builds, platform differences and measured coverage.
 - **Production-friendly building blocks.** Continuous batching and the paged, Radix prefix-shared KV cache are on by default; speculative decoding, tensor parallelism, and configurable security boundaries are available when you need them. See [Features](FEATURES.md), [Usage](USAGE.md), and the [current project status](docs/PROJECT_STATUS.md).
 
 ## Supported model families at a glance
@@ -25,6 +26,8 @@
 - **Text and code embeddings:** BERT / XLM-R encoders — [Snowflake Arctic Embed L v2.0 and all-MiniLM-L6-v2](docs/embeddings.md).
 
 Backend, modality, feature support, and validation coverage vary by model. See the [supported models](docs/supported_models.md) tables, the [model cards](docs/models/README.md), and the [embedding guide](docs/embeddings.md) for details.
+
+Recent source additions include Qwen-Image-2.1 masked edits with exact protected pixels and optional processing of the selected region, twelve TensorAgent LoRA plug-ins for speed, style and editing, and Qwen3.8 Flash Next on a 48 GB Mac using SSD-backed weights. Multi-GPU `--layer-split` and `--tp` are separate controls; support and performance depend on the architecture and quantization. These source features may be ahead of the published CLI/server packages; TensorAgent currently requires a source build.
 
 ## Learn with the books
 
@@ -77,6 +80,8 @@ dotnet run --project TensorSharp.Server.Host -c Release -p:TensorSharpSkipMlxNat
 
 The [Getting started guide](docs/getting_started.md) has the rest: installing the SDK on each platform, multi-GPU and multi-node runs, NVIDIA DGX Spark, multimodal input, embeddings, and making it fast. Every option is in the [CLI](USAGE.md#console-application) and [Server](USAGE.md#web-application) references, and both programs print them with `--help`.
 
+`dotnet build TensorSharp.slnx` also builds TensorAgent's available desktop heads and the iOS simulator head on Apple Silicon when the selected SDK has the required MAUI workloads and staged native/Python files. Missing prerequisites skip the affected app head with a warning; see [TensorAgent build instructions](TensorAgent/README.md#build-and-run).
+
 ## See it in action
 
 One engine, four ways to use it, each an unedited capture of a real run.
@@ -88,7 +93,7 @@ One engine, four ways to use it, each an unedited capture of a real run.
   </tr>
   <tr>
     <td align="center"><img src="website/assets/screenshots/tensoragent-iphone.png" alt="TensorAgent on an iPhone: Gemma 4 E2B scaled a recipe by running a Python script on the phone" width="140"><br><b>TensorAgent on iPhone</b><br>A private agent that runs the model on the phone</td>
-    <td align="center"><img src="website/assets/screenshots/tensoragent-mac.png" alt="TensorAgent on a Mac: Qwen3.5 9B wrote a Python module with unit tests and fixed it until they passed" width="400"><br><b>TensorAgent on the desktop</b><br>The same app on the Mac, running code in a sandbox</td>
+    <td align="center"><img src="website/assets/screenshots/tensoragent-mac.png" alt="TensorAgent on a Mac: a saved Qwen-Image 2.1 edit changes the TensorSharp banner background to a starry blue night sky" width="400"><br><b>TensorAgent on the desktop</b><br>Edit images with Qwen-Image 2.1, alongside text and agentic work</td>
   </tr>
 </table>
 
@@ -119,7 +124,7 @@ New here? The sections above are all you need to get running. Everything else is
 |---|---|
 | [TensorSharp and TensorAgent book guide](docs/BOOK.md) | Building LLM Inference Engines and Agentic Runtimes from Scratch, plus From Tensors to Tokens: introductions, Amazon links, and repository reading paths |
 | [Getting started](docs/getting_started.md) | The full first-run guide: the .NET SDK on each platform, every backend, multi-GPU and multi-node runs, NVIDIA DGX Spark, embeddings, choosing a backend, and making it fast |
-| [Supported models](docs/supported_models.md) | Verified models and every supported architecture: example GGUFs, modalities, thinking, tools, and speculative decoding |
+| [Supported models](docs/supported_models.md) | Implemented model families and their validation scope: example GGUFs, modalities, thinking, tools, and speculative decoding |
 | [Benchmarks](docs/benchmarks.md) | TensorSharp against llama.cpp on the same GPU and files, and the head-to-heads of larger models |
 | [Screenshots](docs/showcase.md) | The CLI, the Web UI, and TensorAgent on iPhone and Mac at work, with what each run did |
 | [Model Downloads](MODEL_DOWNLOADS.md) | Per-model `huggingface-cli` download + run quick reference (quant tiers, projectors, companions) |
@@ -146,10 +151,11 @@ Actively developed, and the source tree runs ahead of the published packages.
 | Area | Where it stands |
 |---|---|
 | Models | A dozen autoregressive families plus text diffusion, image generation and editing, and video with audio. See [Supported models](docs/supported_models.md). |
-| Inference hosts | CLI, Web UI, Ollama- and OpenAI-compatible APIs, and the TensorAgent app for iPhone, iPad and Mac. |
+| Inference hosts | CLI, Web UI, Ollama- and OpenAI-compatible APIs, and the TensorAgent app for iPhone, iPad, Mac and Windows. TensorAgent is source-only. |
 | Backends | Pure C# CPU, direct CUDA/cuBLAS, MLX Metal, and GGML CPU/Metal/CUDA/Vulkan, with per-architecture exceptions. |
 | Serving features | Continuous batching with a shared prefix cache, speculative decoding, tensor parallelism, structured output, and tool calling. |
 | Agentic work | Agent Skills, sandboxed file and shell tools, and bounded sub-agents. See [Agent Skills](docs/agent_skills.md) and [Multiple agents](docs/multi_agent.md). |
+| TensorAgent | Eleven catalog entries, saved chats and artifacts, masked image edits and LoRA choices, eight interface languages, and persisted text-turn statistics. Media generation has been measured on a Mac; iOS media generation and Windows image/audio/video generation remain unverified. |
 
 Per-area detail (which architecture runs on which backend, which features each family supports, and the known limits) is in the [status matrix](docs/PROJECT_STATUS.md#status-matrix).
 

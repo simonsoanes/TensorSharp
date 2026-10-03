@@ -928,8 +928,15 @@ fixture 规模的——一个五层、hidden 256、16 token 的 F32 合成模型
 `--backend ggml_cpu` 一样，它是正确性与可移植性通道，而不是服务通道：完整检查点在它
 上面的吞吐、加载时间与常驻内存占用都没有测过。
 
-Direct CUDA 引擎 `--backend cuda` 也用自己的内核、不经 ggml 运行 V4.1。它还没有数值
-门禁——已经验证了什么、还有什么挡着，见 CUDA 后端说明
+Direct CUDA 引擎 `--backend cuda` 也用自己的内核、不经 ggml 运行 V4.1。它具有逐序列槽位、
+批量解码、会话状态保留，并通过 `--layer-split N` 在本地按整层放置；路由专家 `--tp N` 仍是
+`ggml_cuda` 模式。源码包含针对性的数值约束：
+[`Dsv4ExpertKernelTests`](../../InferenceWeb.Tests/Dsv4ExpertKernelTests.cs)
+把合成量化专家投影与上游反量化结果对比；
+[`Dsv41CudaSlotTests`](../../InferenceWeb.Tests/Dsv41CudaSlotTests.cs)
+把槽位隔离、批量解码、环形缓存回退与保留状态，和同一 Direct 引擎的全新运行对比，容差为最大
+logit 的 1e-5。这些是内核与状态一致性检查，不是独立的完整模型数值参考或完整检查点质量验证。
+模型/设备门控测试需要对应夹具与 CUDA 硬件，不可用的场景会跳过。已经验证了什么、还有什么挡着，见 CUDA 后端说明
 `docs/validation/deepseek41-cuda-backend/README.md`（本地验证记录，未提交到 Git）。`--backend mlx`
 仍然被拒绝。
 
@@ -1029,7 +1036,7 @@ V4.1 没有发布任何委派相关的实测结果。
   作为正确性与可移植性通道，没有实测吞吐；见
   [在 ggml CPU 后端上运行](#在-ggml-cpu-后端上运行)。`cpu` 运行纯 C# 的 V4.1 执行器，
   已按 2e-5 对齐 PyTorch 参考实现；`cuda` 用 Direct CUDA 引擎自己的内核运行 V4.1，
-  但尚无数值门禁——两者都是正确性与可移植性通道，而不是服务通道。`mlx` 会在读取权重
+  它具有针对内核/槽位的约束，但没有独立的完整检查点数值门禁——两者都是正确性与可移植性通道，而不是服务通道。`mlx` 会在读取权重
   之前失败，而不会把 V4.1 的权重塞进并未实现它的计算图。
 - 默认只使用一张 GPU。`--layer-split N` 选择整层放置；`--tp N` 启用 routed-MoE 张量并行，
   使用 F32 激活与输出拼接。注意力张量并行与分布式组尚未实现。
