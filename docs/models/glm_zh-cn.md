@@ -626,6 +626,18 @@ GLM-5.3-Flash 在默认的完整切分（head 与路由专家隐藏行都切）�
 启用 CPU MoE、张量 tracing、部分 `TS_GLM_TP_SHARD` 切分、rank 超额共享 GPU，或后端缺少
 原生超连接内核时，则自动使用组合调度器回退路径；该路径只在 rank 0 计算并加入一次共享专家。
 
+### Direct CUDA 上的 GLM-5.3-Flash
+
+`--backend cuda` 通过 TensorSharp 自有的 `GlmCudaEngine` 运行 `glm5next`，不使用 ggml 推理，
+支持本地整层放置、序列槽位、批量解码、CUDA 图捕获与会话状态保留。这与上文 GGML 本地张量并行
+路径分开。
+
+[`Glm5NextCudaEngineTests`](../../InferenceWeb.Tests/Glm5NextCudaEngineTests.cs)
+定义了数值范围：四层合成夹具使用生产内核宽度，包含 KDA/MLA 注意力与稠密/MoE FFN；40 token
+预填充与六行强制解码结果和 `ggml_cuda` 对比，要求 argmax 一致且相对 L2 误差不超过 2e-2。
+独立检查覆盖双设备按层切分、稀疏索引规则、重置、交错槽位、图捕获解码、批量解码与验证回退。
+这些针对性约束不构成完整检查点数值一致性、模型质量或提速的验证；缺少硬件时 CUDA 场景会跳过。
+
 ### 目前能跑什么
 
 - **跨 N 张本地 GPU 的层切分**：传入 `--layer-split N`。历史测量中，约 99 GiB

@@ -1,27 +1,32 @@
 # TensorAgent
 
-An iPhone and iPad app with the capabilities of TensorSharp.Server's Web UI
-chat (the main gaps are named below), running entirely on the device: a .NET
-MAUI (`net10.0-ios`) head that links the TensorSharp engine statically, serves its
-own phone-shaped page to a WKWebView from an in-process loopback HTTP server, and
-answers that page's API with the same chat pipeline the desktop uses.
+A local AI app for **iPhone, iPad, Mac and Windows**. TensorAgent runs TensorSharp
+in the app process for text and reasoning, multimodal questions, agentic code and
+document work, **Qwen-Image 2.1 image generation and editing**, and MiniMax-H3 short
+video with audio. Choose a model for the task and use the same composer, saved chats
+and artifact links. Image edits support painted selections, protected pixels,
+original/result comparison and twelve optional LoRA plug-ins. The interface is
+available in [eight languages](#languages).
 
-This is the current source implementation of TensorSharp's iOS/iPadOS target, and the
-same project builds the desktop app for macOS and Windows (see
-[On the desktop](#on-the-desktop-macos-and-windows)).
-Physical devices use the GGML Metal (`ggml_metal`) backend; build it with
-`TensorSharpAppleTargets=true`. It is not a remote client or a separate inference
-engine. It targets iPhone and iPad (iOS/iPadOS 17.0 or later, arm64 only); the
-only device run recorded below is an iPhone on iOS 26.6.1, and every built-in
-catalog model needs a device in the 12 GB memory tier or above, six of them a Mac
-(see the catalog below). No release workflow builds, signs or publishes the app, so
-follow the source-build instructions below.
+The .NET MAUI project shares its chat page and loopback API across iOS/iPadOS,
+Mac Catalyst and Windows WinUI heads. Physical iPhones and iPads use GGML Metal
+(`ggml_metal`), Macs use Metal or CPU, and Windows offers CUDA/Vulkan when available,
+then CPU. See [On the desktop](#on-the-desktop-macos-and-windows) for platform differences.
+The Apple device target is iOS/iPadOS 17.0 or later, arm64; build it with
+`TensorSharpAppleTargets=true`.
 
-Nothing leaves the phone by default. The model runs locally, the sandbox has no
-network unless the user grants it, and dictation requires on-device speech
-recognition wherever the chosen language's recogniser supports it; for a language
-whose recogniser cannot run on the device, Apple's recogniser may process the audio
-off the device.
+**Current source status.** No release workflow builds, signs or publishes TensorAgent;
+follow the [source-build instructions](#build-and-run). All eleven catalog entries need
+at least the 12 GB memory tier; six need 24 GB or more, and Qwen3.8 Flash Next needs
+48 GB plus SSD-backed weights. Catalog eligibility is based on device memory.
+Image/video generation has been measured in the Mac app, with no recorded
+iOS media generation or Windows image/audio/video generation. The physical-phone run recorded
+below is on iOS 26.6.1; iOS 27 has not been device-verified.
+
+Inference runs locally. The code sandbox has no network unless the user grants it.
+Apple dictation requests on-device recognition where the selected language supports it;
+otherwise Apple's recogniser may process the audio off the device. Windows code execution
+requires the explicit **Run without a sandbox** setting.
 
 <p align="center"><img src="../website/assets/screenshots/tensoragent-iphone.png" alt="TensorAgent on an iPhone: Gemma 4 E2B scaled a recipe from 4 to 10 people by running a Python script in the app's built-in Python, and answered with a table" width="300"></p>
 
@@ -39,6 +44,13 @@ is laid out for a mouse and a wide window, and no amount of injected CSS turns i
 into a phone UI. One row of chrome, everything reachable at the bottom next to
 the keyboard, a layout that follows `visualViewport`, a single `+` sheet for
 Photo / Camera / Video / File, and reasoning collapsed behind a disclosure.
+
+Press **Enter** to send and **Shift+Enter** for a new line. Enter used to confirm an
+IME composition does not send, and pressing it during generation does not stop the turn.
+After a text turn, the answer shows its token count, elapsed time and tokens per second,
+plus prompt/KV reuse when reported and a stopped/truncated marker when applicable.
+Those statistics are saved with the conversation and return when it is reopened;
+image/video turns do not show the placeholder zero-token counters.
 
 What is shared is the API, not the document. The routes under the page —
 `/api/chat`, `/api/models`, `/api/sessions`, `/api/upload`, `/api/skills`,
@@ -59,7 +71,7 @@ at all. The app's own client is appended as one script tag at request time; the 
 file itself is never forked.
 
 **A built-in model catalog.** Eleven entries with the exact byte size and SHA-256 of every
-file: five chosen to fit a phone or tablet, and six that only a Mac has the memory for.
+file: five chosen for phone/tablet memory tiers, and six requiring desktop memory tiers.
 All eleven are downloadable; those downloads
 resume from a kept `.part` after an interruption, are verified before use, and
 belong to the APP rather than to the screen that started one — see "Downloads"
@@ -682,12 +694,13 @@ three serve the same page from the same loopback host, and share the catalog, th
 settings, the conversations and the skills. What differs is everything the phone does
 because it is a phone:
 
-<p align="center"><img src="../website/assets/screenshots/tensoragent-mac.png" alt="TensorAgent on a Mac: Qwen3.5 9B wrote a Python file with a Roman-numeral converter and unit tests, ran them, fixed the function when the first run failed, and reran until all five tests passed" width="880"></p>
+<p align="center"><img src="../website/assets/screenshots/tensoragent-mac.png" alt="TensorAgent on a Mac: a saved Qwen-Image 2.1 edit changes the TensorSharp banner background to a starry blue night sky, with Compare original and Edit again controls" width="880"></p>
 
-<sub>The Mac app with Qwen3.5 9B (IQ4_XS) on Metal, captured on 2026-09-30. The model wrote a
-Python file with a Roman-numeral converter and its unit tests, and ran it with the Mac's own
-`python3` inside the Seatbelt sandbox. The first run failed, so it fixed the function (one
-malformed patch was rejected on the way) and reran until all five tests passed.</sub>
+<sub>A saved Qwen-Image 2.1 (Q4_K_M) edit in the current Mac Catalyst Release app,
+captured on 2026-10-02 on an M5 Pro with GGML Metal: “Make the background a deep blue
+night sky with stars, keep the text unchanged.” The result is from an earlier run;
+Compare original and Edit again remain available. Switch models for text, multimodal
+questions, code and document work, or short video with audio.</sub>
 
 | | iPhone and iPad | Mac | Windows |
 | --- | --- | --- | --- |
@@ -1095,19 +1108,22 @@ one thing it genuinely cannot do — preempt a builtin already inside a long cal
 `Auto`: an `AgentAppHost` running on macOS, Linux or Windows uses `DesktopShellBackend`
 over TensorSharp's shared `ProcessShellBackend`, OS sandbox, shell sessions and package
 installer. Real Node.js, npm/npx, Python and other programs on the host can then run
-inside the session sandbox.
-The process backend requires an available sandbox; it does not fall back to unrestricted
-execution. Set `AgentExecutionMode.InProcess` when a desktop test is intended to emulate
+inside the session workspace. On macOS and Linux the process backend requires an
+available sandbox; Windows requires the explicit **Run without a sandbox** setting.
+It never silently falls back to unrestricted execution. Set `AgentExecutionMode.InProcess` when a desktop test is intended to emulate
 the iOS runtimes. Embedded runtime injection is not supported in process mode.
 
 The Playwright skill (`skills/playwright`, which drives a browser with `playwright-cli`
 from `@playwright/cli`, run through `npx`) requires actual Node.js/npm and browser child
 processes. These capabilities are available on the desktop execution path when their
 dependencies are present, but cannot be supplied to the iOS app by widening its sandbox.
-The browser workflow has been validated only on macOS arm64: on Linux each command runs
-in its own PID namespace, so a detached `playwright-cli` session cannot be assumed to
-survive between calls, and on Windows the shared process backend lacks the required
-filesystem and network confinement.
+The full model-driven browser workflow is recorded on macOS arm64. Windows supports
+the native JavaScript skill runner with explicit unconfined execution; the scripted
+`WindowsBrowserSkillProbe` checks a local synthetic login form, window state, session
+reuse and cleanup. Those checks do not establish a model-driven workflow or physical
+user visibility. On Linux each command runs in its own PID namespace, so a detached
+`playwright-cli` session cannot be assumed to survive between calls. See the
+[Windows setup and validation scope](../docs/playwright_agent.md#windows-desktop).
 The skill is left out of the iOS app bundle (see "Skills" below), because the app can
 start neither a Node package manager nor a browser; it stays in `TensorAgent/skills` for
 the desktop hosts. Its requirements
@@ -1777,7 +1793,7 @@ checked and these were not:
   iOS produces (a stem with no extension, no content type, HEIC and MP4 bytes behind
   the same absent name), but the picker itself has only been run by hand.
 - **Pictures on a phone.** The page makes and edits pictures through `/api/chat` with
-  Qwen-Image 2.1, which the catalog offers only on a Mac (24 GB), where it was measured;
+  Qwen-Image 2.1, which needs the 24 GB memory tier and was measured in the Mac app;
   no image has been generated on iOS. `/api/image-edit` remains bound to the same
   service the desktop uses, with the LoRA plug-ins the user chose, but nothing on the page
   calls it, and `/api/image-generate`, the desktop page's text-to-image route, is not bound
@@ -1792,8 +1808,8 @@ checked and these were not:
   Nor has the app's own downloader fetched its 78.9 GB: the three shards were downloaded
   with `curl` and hard-linked into the app's store. How the store counts a split's shards
   is covered by `Qwen38FlashNextCatalogTests`.
-- **Clips on a phone.** The two MiniMax-H3 entries are offered only on a Mac (32 GB),
-  where they were measured. No video model fits a phone, so none is offered there, and
+- **Clips on a phone.** The two MiniMax-H3 entries need the 32 GB memory tier and
+  were measured in the Mac app. No video model fits a phone, so none is offered there, and
   no clip has been played by iOS's media loader (WebKit's playback was checked in the
   Mac app). `/api/video-generate` stays bound as part of the shared surface, but nothing
   on the page calls it.

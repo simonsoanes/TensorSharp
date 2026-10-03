@@ -4,13 +4,15 @@
 
 > [TensorSharp](../README_zh-cn.md) 文档的一部分。每个家族都有端到端的[模型卡片](models/README_zh-cn.md)，下载命令见[模型下载](../MODEL_DOWNLOADS_zh-cn.md)。
 
-## 已验证模型
+<a id="已验证模型"></a>
 
-以下架构均已实现，并由测试 / 基准矩阵覆盖。请选择适配你硬件的量化（低内存用 Q4_K_M、更高质量用 Q8_0）。更多尺寸与投影器文件见 [模型下载](../MODEL_DOWNLOADS_zh-cn.md)。
+## 已实现模型与验证范围
+
+以下家族均已实现。各模型卡片列出实际测试的检查点、后端与设备路径，以及尚存的限制；支持某个家族不表示已验证每种量化或设备。请选择该家族推荐的、适配硬件容量的检查点和量化。更多尺寸与投影器文件见 [模型下载](../MODEL_DOWNLOADS_zh-cn.md)。
 
 | 家族 | 示例模型（GGUF） | 图像 / 视频 / 音频 | 思维链 | 工具 | 卡片 |
 |---|---|---|---|---|---|
-| DeepSeek V4.1 Flash | [DeepSeek-V4.1-Flash](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/tree/58d8ac86298fdf85a2440defee08b1abcad32e45)（内嵌 Engram 的 Q2_K 或 Q4_K_M 分片，服务路径为 `ggml_cuda`；`ggml_cpu` 是仍能加载视觉伴随文件的正确性与可移植性路径，`cuda` 与纯 C# `cpu` 执行器则是仅文本的） | ✅（视觉伴随文件） / ✅（视觉伴随文件） / — | ✅ | ✅ | [deepseek41](models/deepseek41_zh-cn.md) |
+| DeepSeek V4.1 Flash | [修复版 DeepSeek-V4.1-Flash Q2_K/Q5_K](https://huggingface.co/smalinin/DeepSeek-V4.1-Flash-GGUF/tree/d1de55c19f95172c882906cc83c0e55932d26a63/Q2_K-Q5)（十个分片，312.349 GiB，内嵌 Engram；有限检查与历史 Q2_K/Q4_K_M 结果分开记录，服务路径为 `ggml_cuda`；`ggml_cpu` 是仍能加载视觉伴随文件的正确性与可移植性路径，`cuda` 与纯 C# `cpu` 执行器则是仅文本的） | ✅（视觉伴随文件） / ✅（视觉伴随文件） / — | ✅ | ✅ | [deepseek41](models/deepseek41_zh-cn.md) |
 | DeepSeek V4 Flash | [DeepSeek-V4-Flash-0731](https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF)（284B MoE，分片 GGUF） | — / — / — | ✅ | ✅ | [deepseek4](models/deepseek4_zh-cn.md) |
 | GLM 5.x | [GLM-5.2](https://huggingface.co/unsloth/GLM-5.2-GGUF)（744B-A40B MoE，分片 GGUF）、[GLM-5.3](https://huggingface.co/unsloth/GLM-5.3-GGUF)（256 个路由专家，仅文本；每个量化档一个子目录，UD-Q2_K_XL 为 7 个分片、236.4 GiB——`--model` 指向 `-00001-of-00007` 那一片）、[GLM-5.3-Flash](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF)（320B MoE，分片 GGUF，+ mmproj） | ✅（仅 5.3-Flash；5.2 与 5.3 均仅文本） / — / — | ✅ | ✅ | [glm](models/glm_zh-cn.md) |
 | Qwen 3.8 Flash Next | [Qwen3.8-Flash-Next](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF)（GDN + 注意力混合 MoE，512 专家，分片 GGUF，+ mmproj） | ✅ / ✅（`video_url`） / — | ✅ | ✅ | [qwen38-flash-next](models/qwen38-flash-next_zh-cn.md) |
@@ -23,7 +25,7 @@
 | Hunyuan Dense | 腾讯稠密 Hunyuan GGUF（`hunyuan-dense`），例如 Hy-MT2 系列 | — / — / — | — | — | [hunyuan-dense](models/hunyuan-dense_zh-cn.md) |
 | DiffusionGemma | [diffusiongemma-26B-A4B-it](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF)（视觉塔取自上游 safetensors 分片） | ✅ / — / — | —（提示中不启用） | — | [diffusiongemma](models/diffusiongemma_zh-cn.md) |
 | Muse-Glimmer | [Muse-Glimmer-30B](https://huggingface.co/unsloth/Muse-Glimmer-30B-GGUF)（+ mmproj） | ✅ / — / — | ✅ | ✅ | [muse-glimmer](models/muse-glimmer_zh-cn.md) |
-| Qwen-Image-2.1 | [Qwen-Image-2.1 GGUF](https://huggingface.co/Abiray/Qwen-Image-2.1-GGUF)（DiT + 专用 2.1 VAE + Qwen3-VL-8B）；Unsloth 不带元数据的 Q8_0 DiT 也可加载，靠张量表识别（图像编辑需用 `--qwen-image-mmproj` 指定其 `mmproj-BF16.gguf`） | 🖼️ 文本→图像、图像编辑；RGBA；LoRA 插件（`--lora`，含 4–8 步蒸馏） | — | — | [qwenimage21](models/qwenimage21_zh-cn.md) |
+| Qwen-Image-2.1 | [Qwen-Image-2.1 GGUF](https://huggingface.co/Abiray/Qwen-Image-2.1-GGUF)（DiT + 专用 2.1 VAE + Qwen3-VL-8B）；Unsloth 不带元数据的 Q8_0 DiT 也可加载，靠张量表识别（图像编辑需用 `--qwen-image-mmproj` 指定其 `mmproj-BF16.gguf`） | 🖼️ 文本→图像、参考图编辑与遮罩局部编辑；RGBA；LoRA 插件（`--lora`，含 4–8 步蒸馏） | — | — | [qwenimage21](models/qwenimage21_zh-cn.md) |
 | MiniMax-H3 音视频 | [unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF)（去噪器 + Qwen3-VL-32B 文本编码器）+ [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)（视频 VAE + 音频 VAE） | 🎬🔊 文本→视频、图像→视频、首尾帧、参考（图像/片段/音轨）→视频，**带立体声音频** | — | — | [minimax-h3](models/minimax-h3_zh-cn.md) |
 | Wan 2.1 / 2.2 视频 | [Wan2.2-TI2V-5B](https://huggingface.co/QuantStack/Wan2.2-TI2V-5B-GGUF)（另有 [T2V-A14B](https://huggingface.co/QuantStack/Wan2.2-T2V-A14B-GGUF)、[I2V-A14B](https://huggingface.co/QuantStack/Wan2.2-I2V-A14B-GGUF)、[Wan2.1-T2V-14B](https://huggingface.co/city96/Wan2.1-T2V-14B-gguf)）+ UMT5-XXL + 视频 VAE · 快速路径：[TI2V-5B-Turbo](https://huggingface.co/hum-ma/Wan2.2-TI2V-5B-Turbo-GGUF)（4 步，DiT 前向次数减少 25×） | 🎬 文本→视频、图像→视频 | — | — | [wan](models/wan_zh-cn.md) |
 
@@ -45,7 +47,7 @@
 | Hunyuan Dense | `hunyuan-dense` | 腾讯稠密 Hunyuan 解码器，例如 Hy-MT2（GQA，per-head QK-norm 在 NeoX RoPE **之后**，SwiGLU） | 仅文本 | 不支持 | 不支持 | — | [hunyuan-dense](models/hunyuan-dense_zh-cn.md) |
 | Muse-Glimmer | `muse-glimmer`、`muse_glimmer` | Muse-Glimmer-30B（交错滑动窗口 + NoPE 全注意力层，注意力输出门控） | 图像 | 支持 | 支持（ATEM） | 支持（DFlash 块级草稿，独立 GGUF） | [muse-glimmer](models/muse-glimmer_zh-cn.md) |
 | DiffusionGemma | `diffusion-gemma`、`diffusion_gemma` | diffusion-gemma 文本扩散 GGUF | 聊天支持图像；[Jev](models/jev_zh-cn.md) 还支持文档、抽样视频帧和已配置 ASR 配套服务的语音转录 | 不支持（提示中不启用） | 不支持（会被拒绝） | — | [diffusiongemma](models/diffusiongemma_zh-cn.md) |
-| Qwen-Image-2.1 | `qwen_image`、`qwen-image`（通过张量键识别 2.1；更早的 Qwen-Image / Edit-2511 checkpoint 会在加载时被拒绝） | Qwen-Image-2.1 DiT GGUF（+ 专用 2.1 VAE 与 Qwen3-VL-8B） | 文本→图像与图像编辑，RGBA 输出；LoRA 插件；前缀 KV 缓存默认开启；DiT 张量并行（`--tp`，GGML CUDA/Vulkan；Vulkan 上实测双卡比单卡更慢） | 不支持 | 不支持 | — | [qwenimage21](models/qwenimage21_zh-cn.md) |
+| Qwen-Image-2.1 | `qwen_image`、`qwen-image`（通过张量键识别 2.1；更早的 Qwen-Image / Edit-2511 checkpoint 会在加载时被拒绝） | Qwen-Image-2.1 DiT GGUF（+ 专用 2.1 VAE 与 Qwen3-VL-8B） | 文本→图像、参考图编辑与遮罩局部编辑，RGBA 输出；GGML 与纯 C# `cpu` 路径；LoRA 插件；前缀 KV 缓存默认开启；DiT 张量并行（`--tp`，GGML CUDA/Vulkan；Vulkan 上实测双卡比单卡更慢） | 不支持 | 不支持 | — | [qwenimage21](models/qwenimage21_zh-cn.md) |
 | MiniMax-H3 | `minimax-h3`、`minimax_h3`（官方发布的 GGUF 完全没有元数据，因此靠张量表识别） | MiniMax-H3 FL2VA / Ref2VA（193 亿参数的打包音视频 DiT + Qwen3-VL-32B 文本编码器、视频 VAE、音频 VAE） | 视频输出 **+ 32 kHz 立体声音频**（文本→视频、图像→视频、首尾帧、参考→视频） | 不支持 | 不支持 | — | [minimax-h3](models/minimax-h3_zh-cn.md) |
 | Wan 视频 | `wan`、`wan2.1`、`wan2.2` | Wan 2.1 T2V 1.3B/14B、Wan 2.2 TI2V-5B、Wan 2.2 A14B T2V/I2V（双专家） | 视频输出（文本→视频、图像→视频） | 不支持 | 不支持 | — | [wan](models/wan_zh-cn.md) |
 

@@ -255,6 +255,12 @@ Notes:
   the draft file is still fetched.
 - **Qwen-Image-2.1** ([`qwen-image-2.1.json`](qwen-image-2.1.json)): `--prompt "…"
   --output out.png` generates an image, and adding `--image in.png` edits it instead.
+  Add `--mask selection.png` to edit the selected region of the first image while
+  preserving its dimensions and unselected decoded RGBA pixels; `--mask-feather`
+  softens edges inward and `--mask-crop` reduces work for a small selection.
+  Server JSON requests use `maskPath`, `maskMode`, `maskInvert`, `maskFeather`,
+  `maskCrop` and `maskCropPadding`; Server Chat and TensorAgent provide a painted
+  selection editor. See [the mask guide](../docs/models/qwenimage21.md#precise-local-editing-with-a-mask).
   `--diffusion-steps` (default 40, or the recipe of a step-distillation plug-in),
   `--cfg` (default 1), `--diffusion-seed` and `--width` / `--height` (multiples of
   32) are CLI flags. On the server a request carries its own `steps`, `cfg`,

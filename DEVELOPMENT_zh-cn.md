@@ -43,13 +43,15 @@ dotnet build TensorSharp.slnx
 
 解决方案构建默认使用 `Any CPU` 平台（见 `Directory.Solution.props`），因此在 Visual Studio 开发者命令提示符中也能正常工作——这类提示符会向环境导出 `Platform=x64`，否则会把构建引导到不存在的 `Release|x64` 解决方案配置。显式传入的 `-p:Platform=...` 仍然优先。
 
-解决方案也会构建 TensorAgent。其与平台无关的项目（`TensorAgent.Core`、`TensorAgent.Sharing`、`TensorAgent.Tests`）列在解决方案中，在任何操作系统上都会构建。应用本身 `TensorAgent/src/TensorAgent.Maui` 需要 .NET MAUI 工作负载，因此没有列入：解决方案其余部分构建完成后，`Directory.Solution.targets` 另起一个 `dotnet build`，按 `TensorAgent/scripts/build-mac.sh`、`build-sim.sh`、`build-windows.ps1` 的方式构建它（`-p:TensorSharpAppleTargets=true` 与 `-m:1`；Windows 上为 `win-x64`），配置与 SDK 沿用解决方案构建：
+解决方案也会构建 TensorAgent。其与平台无关的项目（`TensorAgent.Core`、`TensorAgent.Sharing`、`TensorAgent.Tests`）列在解决方案中，在任何操作系统上都会构建。应用本身 `TensorAgent/src/TensorAgent.Maui` 需要 .NET MAUI 工作负载，因此没有列入：解决方案其余部分构建完成后，`Directory.Solution.targets` 另起一个 `dotnet build`，按 `TensorAgent/scripts/build-mac.sh`、`build-sim.sh`、`build-windows.ps1` 的方式构建它（`-p:TensorSharpAppleTargets=true` 与 `-m:1`；Windows 上为 `win-x64`），配置沿用解决方案构建，应用 SDK 则单独选择：
 
 | 主机 | 构建的应用头 | 需要 |
 | --- | --- | --- |
-| macOS | Mac 应用（`net10.0-maccatalyst`），在 Apple 芯片上另有 iOS 模拟器应用（`net10.0-ios`） | 运行构建的 SDK 中同时有 `maui-maccatalyst` 与 `maui-ios`（该应用头会 restore 两者）；模拟器应用另需 `GgmlOps.xcframework` 与已暂存的 CPython（[TensorAgent/README.md](TensorAgent/README.md#build-and-run)） |
+| macOS | Mac 应用（`net10.0-maccatalyst`），在 Apple 芯片上另有 iOS 模拟器应用（`net10.0-ios`） | 选定的应用 SDK 中同时有 `maui-maccatalyst` 与 `maui-ios`（该应用头会 restore 两者）；模拟器应用另需 `GgmlOps.xcframework` 与已暂存的 CPython（[TensorAgent/README.md](TensorAgent/README.md#build-and-run)） |
 | Windows | Windows 应用（`net10.0-windows10.0.19041.0`，`win-x64`） | `maui-windows` |
 | Linux | 无 | |
+
+macOS 上的应用工作负载检查与构建依次选择 `DOTNET_ROOT/dotnet`、`~/.dotnet/dotnet`、解决方案 SDK。`-p:TensorAgentDotnet=/path/to/dotnet` 可覆盖此选择；其架构须与解决方案 SDK 一致，Apple 工作负载须支持当前 Xcode。
 
 缺少工作负载时跳过整个应用，缺少模拟器前置文件时只跳过该应用头，并各自给出指明缺少什么的警告；使用 `-p:TensorSharpSkipGgmlNative=true` 且从未构建过引擎库时，桌面应用头同样被跳过。其他导致应用头无法构建的情况（没有 Xcode、已安装工作负载不接受当前 Xcode、编译或链接错误）会使解决方案构建失败，并给出单独构建该应用头的脚本。`-p:TensorSharpSkipTensorAgentApp=true`（或环境变量 `TensorSharpSkipTensorAgentApp=true`）可将应用排除在外。解决方案的重新构建（`--no-incremental`）与 `dotnet clean` 也涵盖该应用，产物位于 `TensorAgent/src/TensorAgent.Maui/bin/<Configuration>/`。
 
@@ -399,7 +401,7 @@ TensorSharp/
 │   ├── ggml_ops_embeddings.cpp            # BERT / XLM-RoBERTa 句向量编码器计算图（GGUF `bert`）
 │   ├── ggml_ops_training.cpp              # 仅训练用内核（运行时不使用）
 │   └── tests/                              # 原生单元 + 烟雾测试
-├── TensorSharp.Chat/            # 与宿主无关的聊天流水线，由 Server、CLI 与 iOS 应用共用（不依赖 ASP.NET Core 与 Distributed）
+├── TensorSharp.Chat/            # 与宿主无关的聊天流水线，由 Server、CLI 与 TensorAgent 共用（不依赖 ASP.NET Core 与 Distributed）
 │   ├── ModelService.cs          # 模型加载/释放、InferenceEngineHost 与生成流水线之上的门面（TensorParallelGroupFactory、SchedulerConfigOverride、UnloadModel）
 │   ├── ModelLifecycleService.cs # 模型加载/释放与后端选择；张量并行组由宿主传入
 │   ├── InferenceEngineHost.cs   # 单模型 InferenceEngine 单例（连续批处理入口）
@@ -440,7 +442,7 @@ TensorSharp/
 │   └── API_EXAMPLES.md          # 详细 API 文档
 ├── TensorSharp.Cli/             # CLI 应用（单次生成、交互式 REPL、JSONL 批处理、基准）
 ├── TensorSharp.TestMatrix/      # 测试 / 基准矩阵运行器、默认提示、环境变量扫描与主机基线
-├── TensorAgent/                 # iPhone / iPad 应用：自带适合手机的聊天页面，与 Server 的 Web UI 绑定同一套 WebUiChatService / SkillsService API，完全在设备上运行
+├── TensorAgent/                 # iPhone / iPad / Mac / Windows 本地 AI 应用：共用聊天页面、已保存对话、文本/多模态/智能体及图像/视频回合
 │   ├── src/TensorAgent.Core/    # 与平台无关：模型目录与存储、可续传下载、已保存的对话、设置、回环服务器及其路由表，以及把这些组装起来的 AgentAppHost（放在这里而不是 iOS 头工程中，以便测试能启动它、通过 HTTP 驱动它并将其拆除）
 │   │   ├── Catalog/ Downloads/ Sessions/ Settings/ # ModelCatalog + ModelStore、ModelDownloadManager + ResumableDownloader、ChatTurnManager + ConversationStore、AppSettings
 │   │   ├── Hosting/             # AgentAppHost、LoopbackServer + WebUiRoutes、EngineMemoryPolicy、SpeculationPolicy、TensorAgentSkillRouter、ProcessMemory
@@ -451,12 +453,12 @@ TensorSharp/
 │   │   ├── Python/              # 通过 P/Invoke 嵌入的 CPython 3.13、其 audit-hook 沙箱，以及纯 wheel 安装器
 │   │   ├── JavaScript/          # 基于 C API 的 JavaScriptCore，提供 Node 风格的 console/process/require/fs/timers
 │   │   └── WebUi/               # tensoragent.js：回环服务器追加到应用自有页面上的脚本
-│   ├── src/TensorAgent.Maui/    # net10.0-ios 头工程：手机页面（wwwroot/index.html）、WebView + 附件 + 听写、模型 / 对话 / 设置页面、后台与分享收件箱处理，以及本设备上各类文件的存放位置
-│   ├── src/TensorAgent.Sharing/ # 应用与其扩展共用的分享信封契约
+│   ├── src/TensorAgent.Maui/    # .NET MAUI 应用头：net10.0-ios、net10.0-maccatalyst、net10.0-windows10.0.19041.0；共用 WebView/输入框、原生模型/对话/设置页面与平台服务
+│   ├── src/TensorAgent.Sharing/ # 应用与 iOS 扩展共用的分享信封契约及八种界面语言
 │   ├── src/TensorAgent.ShareExtension/ # iOS 分享扩展“Ask TensorAgent”
 │   ├── tests/TensorAgent.Tests/ # 应用宿主测试（不在 PR CI 中运行）
 │   ├── skills/                  # 12 个技能（也是桌面宿主的技能根目录）；verdicts.json 记录 verify-skills.py 对每个技能的静态检查结论（对照打包的解释器解析 Python import，检查 shell 脚本是否调用 npm/npx/pnpm/yarn/parcel/vite）。10 个通过并打包进 iOS 应用；playwright 与 web-artifacts-builder 未通过，由 TensorAgent.Maui.csproj 排除
-│   └── scripts/                 # 模拟器的构建 / 运行 / 验证（build-sim.sh、run-sim.sh、verify-sim.sh）、真机（build-device.sh、deploy-device.sh、bench-spec-device.sh）、verify-background.sh（模拟器或真机）、verify-share-rule.sh、prepare-python.sh、build-lxml-ios.sh、verify-skills.py
+│   └── scripts/                 # 桌面构建/启动、模拟器/真机构建/部署/验证、后台/分享探针、Python 暂存、技能检查与聊天/媒体验证
 ├── InferenceWeb.Tests/          # xUnit 单元测试，覆盖算子、KV 缓存、分页调度器、批处理模型正确性以及 Web/服务辅助逻辑
 ├── AdvUtils/                    # 工具库（日志）
 ├── docs/                        # 开发者参考文档
@@ -490,7 +492,7 @@ TensorSharp/
 | `TensorSharp.Backends.Cuda` | `TensorSharp.Backends.Cuda` | `TensorSharp.Cuda` | Direct CUDA 分配器、存储、cuBLAS GEMM、PTX 内核和量化 CUDA 算子 |
 | `TensorSharp.Backends.MLX` | `TensorSharp.Backends.MLX` | `TensorSharp.MLX` | Apple Silicon MLX 后端（mlx-c / Metal），含量化 / 融合 / 编译内核与 MoE 专家 offload |
 | `TensorSharp.Distributed` | `TensorSharp.Distributed` | `TensorSharp.Distributed` | 用于多节点张量并行的点对点 TCP 协调层 |
-| `TensorSharp.Chat` | `TensorSharp.Chat` | `TensorSharp.Chat`（新类型）；迁入的流水线保留 `TensorSharp.Server.*` 命名空间 | 与宿主无关的聊天流水线：`ModelService`、会话、生成、技能循环与 Web UI 请求/流式契约（`WebUiChatService`、`SkillsService`）——不依赖 ASP.NET Core 与 `TensorSharp.Distributed`；由 Server、CLI 与 iOS 应用共用 |
+| `TensorSharp.Chat` | `TensorSharp.Chat` | `TensorSharp.Chat`（新类型）；迁入的流水线保留 `TensorSharp.Server.*` 命名空间 | 与宿主无关的聊天流水线：`ModelService`、会话、生成、技能循环与 Web UI 请求/流式契约（`WebUiChatService`、`SkillsService`）——不依赖 ASP.NET Core 与 `TensorSharp.Distributed`；由 Server、CLI 与 TensorAgent 共用 |
 | `TensorSharp.Server` | `TensorSharp.Server` | `TensorSharp.Server` | ASP.NET Core 服务、OpenAI/Ollama 适配层、TensorSharp.Chat 之上的 HTTP 传输层与 Web UI |
 | `TensorSharp.Server.Host` | `TensorSharp.Server.Host` | `TensorSharp.Server.Host` | **可运行**的 Web 应用：`Program.cs`、宿主装配、`wwwroot/` 与命令行。`TensorSharp.Server` 是它依赖的库——单独构建或运行 `TensorSharp.Server` 不会产生任何可执行文件 |
 | `TensorSharp.Cli` | `TensorSharp.Cli` | `TensorSharp.Cli` | 控制台宿主、调试工具与 JSONL 批处理 |
@@ -672,7 +674,7 @@ span 记账、前缀裁剪、截断、切片——并且不再出现任何模型
 dotnet test InferenceWeb.Tests/InferenceWeb.Tests.csproj
 ```
 
-iOS 应用的宿主有自己的测试项目 `TensorAgent/tests/TensorAgent.Tests`（见 [TensorAgent/README.md](TensorAgent/README.md)），它属于 `TensorSharp.slnx`；PR CI 不运行它，不过 `InferenceWeb.Tests` 会检查该应用的项目文件、plist、entitlement 与原生导出清单（`TensorAgentMauiProjectTests`），以及解决方案构建如何构建该应用（`TensorAgentSolutionBuildTests`）。
+TensorAgent 共用的应用宿主有自己的测试项目 `TensorAgent/tests/TensorAgent.Tests`（见 [TensorAgent/README.md](TensorAgent/README.md)），它属于 `TensorSharp.slnx`；PR CI 不运行它，不过 `InferenceWeb.Tests` 会检查该应用的项目文件、plist、entitlement 与原生导出清单（`TensorAgentMauiProjectTests`），以及解决方案构建如何构建该应用（`TensorAgentSolutionBuildTests`）。
 
 #### 测试分组（Test lanes）
 

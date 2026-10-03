@@ -38,30 +38,31 @@ dotnet run --project TensorSharp.Server.Host -c Release --no-build -- --model mo
 
   <h3 id="deepseek41">DeepSeek V4.1 Flash（384 个路由专家，文本 + 图像/视频、思考、工具）</h3>
   <p>V4.1 并不是换了权重的 V4——它在每一次前向上都不同，把 GGUF 的架构名改成 <code>deepseek4</code> 是无效的。TensorSharp 为它准备了独立的原生计算图：四条残差流与延迟 hyper-connection 混合，每个注意力块带 128 token 的原始滑动窗口（前两层没有压缩注意力，接下来的 18 层压缩比为 2，最后 20 层为 1），带候选块过滤的 lightning indexer，以及在第 1 层与第 14 层注入的 Engram n-gram 特征。<strong>服务后端是 <code>ggml_cuda</code>。</strong><code>ggml_cpu</code> 用标量回退实现跑同一套图，使得没有 GPU 也能验证该架构；<code>ggml_vulkan</code> 与 <code>ggml_metal</code> 需要 <code>TS_DSV41_ALLOW_NON_CUDA_GPU=1</code>，且每遇到一个架构专属算子就要一次主机往返；<code>cpu</code> 运行纯 C# 执行器——不用 ggml、不依赖原生库、也不需要 GPU——在一个小型合成夹具上按 2e-5 对齐 PyTorch 参考实现（这是架构层面的一致，而不是在真实 Q2_K 权重上的对齐），而且在这条路径上只能跑纯文本，因为视觉伴生模型是原生 ggml 组件；<code>cuda</code> 则用 Direct CUDA 引擎自己的内核运行 V4.1；两者都是正确性与可移植性路径，而非服务路径；<code>mlx</code> 会直接拒绝该检查点，而不是把 V4.1 的权重塞进并未实现它的图。</p>
+  <p><strong>新下载：</strong>使用下方修复后的 <code>smalinin/DeepSeek-V4.1-Flash-GGUF</code> 的 <code>Q2_K-Q5/</code>，共十个分片、312.349 GiB，含 F32 mHC 矩阵、BF16 Engram 门和 Q5_K Engram 表。原七分片 Q2_K 把敏感矩阵量化，不再推荐用于质量验证。历史七分片吞吐与修复后检查点的验证分开记录。<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/models/deepseek41_zh-cn.md">模型卡与文件校验和 →</a></p>
   <p>当前发布的 GGUF <strong>已包含 Engram 权重与哈希常量</strong>。TensorSharp 直接读取，文本推理无需生成或提供单独的 Engram 文件。图像与视频仍需要可选的视觉伴随文件，因为转换过程未包含视觉塔、aligner 与视觉路由偏置。</p>
   <pre data-lang="bash"><code># 七个 Q2_K 分片，246.35 GiB，张量类型混合 Q2_K/Q3_K —— 需放在同一目录
 python3 -m venv /tmp/dsv41-tools
 /tmp/dsv41-tools/bin/python -m pip install huggingface_hub
-/tmp/dsv41-tools/bin/hf download vcruz305/DeepSeek-V4.1-Flash-GGUF \
-    --revision 58d8ac86298fdf85a2440defee08b1abcad32e45 \
-    --include "DeepSeek-V4.1-Flash-Q2_K-*.gguf" --local-dir models/deepseek41-q2
+/tmp/dsv41-tools/bin/hf download smalinin/DeepSeek-V4.1-Flash-GGUF \
+    --revision d1de55c19f95172c882906cc83c0e55932d26a63 \
+    --include "Q2_K-Q5/DeepSeek-V4.1-Flash-EngramQ5-Q2_K-*.gguf" --local-dir models/deepseek41-q2-q5
 
 # 可选：--mmproj 需要的约 970 MB 视觉伴随文件
 /tmp/dsv41-tools/bin/python -m pip install numpy==2.0.2 gguf
-/tmp/dsv41-tools/bin/python eng/dsv41-prepare-vision.py models/deepseek41-q2 \
-    --parent-model models/deepseek41-q2/DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf \
+/tmp/dsv41-tools/bin/python eng/dsv41-prepare-vision.py models/deepseek41-q2-q5/Q2_K-Q5 \
+    --parent-model models/deepseek41-q2-q5/Q2_K-Q5/DeepSeek-V4.1-Flash-EngramQ5-Q2_K-00001-of-00010.gguf \
     --repository deepseek-ai/DeepSeek-V4.1-Flash \
     --revision dba1be0a40aa45a94ad051997016db3960a90277
 
 # 八卡服务 —— 这里的 --layer-split 是按层切分，不是张量并行
 dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
-    --model models/deepseek41-q2/DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf \
-    --mmproj models/deepseek41-q2/deepseek41.vision.gguf \
+    --model models/deepseek41-q2-q5/Q2_K-Q5/DeepSeek-V4.1-Flash-EngramQ5-Q2_K-00001-of-00010.gguf \
+    --mmproj models/deepseek41-q2-q5/Q2_K-Q5/deepseek41.vision.gguf \
     --backend ggml_cuda --layer-split 8 --port 5000</code></pre>
   <p>仅提供文本服务时，省略视觉准备命令与 <code>--mmproj</code>。下方吞吐数据对应早期二进制与检查点；每次测量的 revision 与覆盖范围见<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/deepseek41_validation.md">验证报告</a>。</p>
-  <p>同一仓库的十一个 Q4_K_M 分片（415 GiB）同样内嵌 Engram 常量。在那里两张 Engram 表各自涨到 51.5 GiB；在八张 46 GB 卡上，这些表留在主机内存映射中，路由专家也需要卸载到 CPU——加载器会打印它需要的 <code>--n-cpu-moe N</code> 并直接拒绝启动，而不是在推理途中耗尽显存。</p>
-  <p>Q2_K 的两张 Engram 表在显存足够时<strong>默认驻留 GPU</strong>，在图内用 <code>get_rows</code> 直接对量化行做 gather——因为 TensorSharp 保持检查点自身的量化格式：一行 256 个值的 Q2_K 只有 84 字节，两张 3.84 亿行的表合计 60.1 GiB。历史上的八卡 A40 实测（每次使用冷提示词）：驻留 GPU 为 prefill 532–541 / decode 35.6–35.9 tok/s；主机映射并用 <code>TS_DSV41_ENGRAM_WARM=1</code> 预热为 506–528 / 34.5–35.2；不预热则只有 207–221 / 28.0–29.2。驻留 GPU 还省掉了启动时 130 秒的整表预热，以及预热路径依赖的 60 GiB 主机页缓存。放置策略是保守的：如果把表放上 GPU 会逼出路由专家的 CPU 卸载，它们就留在主机映射上，并在启动时说明。</p>
-  <p><code>--layer-split N</code> 选择本地整层放置。<code>--tp N</code> 可在同一批 GPU 上打开实验性的 routed-MoE 张量并行——gate/up 沿 FFN 中间维切分，down 沿输入维切分，partial 经主机中转的 F32 缓冲归约——而历史七分片 Q2_K 实测比按层切分<em>更慢</em>；该结果不代表修复版十分片检查点的性能。并发请求各有独立的序列槽位，但会回退到逐槽前向，因此这里的并发并不等于批处理的 GPU 吞吐。V4.1 的 DSpark 属于实验性支持：加载器在 <code>ggml_cuda</code> 或 <code>ggml_cpu</code> 上可通过 <code>--draft-model</code> 接受 <code>deepseek41-dspark</code> 草稿模型，训练模型已在 <code>ggml_cuda</code> 双 GPU 按层切分下通过初步文本/图像 HTTP 检查；尚不构成通用质量或吞吐验证；V4 的草稿模型仍会被拒绝，而不是半加载。带音频的请求以 HTTP 400 拒绝，而不是被悄悄丢掉。哪些已实测、哪些明确未验证，见<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/deepseek41_validation.md">验证报告</a>。</p>
+  <p>历史 vcruz305 的十一个 Q4_K_M 分片（415 GiB）同样内嵌 Engram 常量。在那里两张 Engram 表各自涨到 51.5 GiB；在八张 46 GB 卡上，这些表留在主机内存映射中，路由专家也需要卸载到 CPU——加载器会打印它需要的 <code>--n-cpu-moe N</code> 并直接拒绝启动，而不是在推理途中耗尽显存。</p>
+  <p>历史七分片 Q2_K 的两张 Engram 表在显存足够时<strong>默认驻留 GPU</strong>，在图内用 <code>get_rows</code> 直接对量化行做 gather——因为 TensorSharp 保持检查点自身的量化格式：一行 256 个值的 Q2_K 只有 84 字节，两张 3.84 亿行的表合计 60.1 GiB。历史上的八卡 A40 实测（每次使用冷提示词）：驻留 GPU 为 prefill 532–541 / decode 35.6–35.9 tok/s；主机映射并用 <code>TS_DSV41_ENGRAM_WARM=1</code> 预热为 506–528 / 34.5–35.2；不预热则只有 207–221 / 28.0–29.2。驻留 GPU 还省掉了启动时 130 秒的整表预热，以及预热路径依赖的 60 GiB 主机页缓存。放置策略是保守的：如果把表放上 GPU 会逼出路由专家的 CPU 卸载，它们就留在主机映射上，并在启动时说明。</p>
+  <p><code>--layer-split N</code> 选择本地整层放置。<code>--tp N</code> 可在同一批 GPU 上打开实验性的 routed-MoE 张量并行——gate/up 沿 FFN 中间维切分，down 沿输入维切分，partial 经主机中转的 F32 缓冲归约——而历史七分片 Q2_K 实测比按层切分<em>更慢</em>；该结果不代表修复版十分片检查点的性能。并发请求各有独立序列槽位；原生 <code>ggml_cuda</code> 可在一张图中解码其 token，其他原生后端采用逐槽前向。批处理 GEMM 形状可能改变接近打平时的贪心结果；<code>TS_BATCHED_FUSED_DECODE=0</code> 选择串行解码。DSpark 会关闭批处理解码与保留缓存复用。V4.1 的 DSpark 属于实验性支持：加载器在 <code>ggml_cuda</code> 或 <code>ggml_cpu</code> 上可通过 <code>--draft-model</code> 接受 <code>deepseek41-dspark</code> 草稿模型，训练模型已在 <code>ggml_cuda</code> 双 GPU 按层切分下通过初步文本/图像 HTTP 检查；尚不构成通用质量或吞吐验证；V4 的草稿模型仍会被拒绝，而不是半加载。带音频的请求以 HTTP 400 拒绝，而不是被悄悄丢掉。哪些已实测、哪些明确未验证，见<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/deepseek41_validation.md">验证报告</a>。</p>
 
   <h3 id="deepseek4">DeepSeek V4 Flash（284B MoE，文本、思考、工具、DSpark）</h3>
   <p>一个 284B 的专家混合模型，配备 128 token 的原始滑动窗口加块压缩注意力（官方宣称 1M 上下文）。它<em>不</em>走通用的逐算子前向：TensorSharp 通过三套专属的整模型执行器之一运行它 —— <code>--backend cuda</code>（Direct CUDA，不依赖 ggml）、<code>--backend ggml_cuda</code> / <code>ggml_vulkan</code>（原生 ggml），以及 <code>--backend cpu</code>（100% 纯 C#，零原生依赖）。GPU 执行器通过 <code>--layer-split N</code> 将整层放到 N 张本地 GPU，让大于单卡显存的模型也能运行。未配置放置方式时默认单设备；CPU 执行器从映射分片流式读取权重。</p>
@@ -194,7 +195,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
 dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
     --model models/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-0000N.gguf \
     --mmproj models/mmproj-BF16.gguf --backend ggml_cuda --layer-split 2</code></pre>
-  <p><code>qwen4exp</code> 上的 <code>--layer-split N</code> 是<strong>按层切分</strong>：每张 GPU 持有一段连续的完整层。它不切分任何权重，所以并不是张量并行——而且这也是 llama.cpp 为该架构提供的同一种（且唯一的）多卡模式，它的 <code>-sm row</code> 会直接拒绝加载这个模型。请把它当作容量特性而非速度特性。在 2× A100-80GB、Qwen3.8-Flash-Next-UD-Q2_K_XL（73.4 GiB）上：单卡与双卡的贪心输出<strong>逐字节相同</strong>（SHA-256 一致）；显存是 24.2 GB + 26.2 GB，而不是整个模型压在一张卡上；吞吐没有变化——两种跑法都是 prefill 约 1520–1550 t/s、decode 约 56 t/s。作为对照，llama.cpp 在同一台机器上单卡 pp1536 1094 / tg128 61.2，双卡 <code>-sm layer</code> 1200 / 61.5，同样是 prefill 涨约 10%、decode 不涨。启动时会打印实际走的是哪种模式，以及每张卡分到的层数与字节数；<code>TS_Q4E_LAYER_SPLIT=20,28</code> 可以用显式的每卡层数覆盖自动均衡（相当于 llama.cpp 的 <code>--tensor-split</code>），遇到无法满足的值会直接抛错而不是悄悄忽略——这很有用，因为自动均衡只按权重定价，看不到稍后才加载、并且会落在 GPU 0 上的视觉塔。</p>
+  <p><strong>现在支持本地 CUDA 张量并行。</strong><code>ggml_cuda</code> 上的 <code>--tp N</code> 切分路由/共享 FFN 的中间通道和输出行，使用 FP32 gather 保持 down projection 的归约顺序；注意力、GDN、QSA 与 PLE 的权重/状态保持复制。大批量加载之前检查并行度、量化和精确条带内核布局。真机覆盖为 NVIDIA A40 上 UD-IQ4_XS 的 TP2/TP4；UD-Q2_K_XL 的 IQ2_XS/IQ3_XXS FFN 与浮点 FFN 会被 TP 拒绝。此模式仍禁用前缀检查点。<code>--layer-split N</code> 仍是独立的 GGML CUDA/Vulkan 选项，包括 UD-Q2_K_XL；Direct <code>cuda</code> 引擎使用按层切分。两种模式不可组合，且不支持多节点组。旧的 2× A100、UD-Q2_K_XL 实测属于按层切分：贪心输出相同，显存 24.2 + 26.2 GB，约 1520–1550 prefill / 56 decode tok/s，不是新 TP 路径的测量。<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/models/qwen38-flash-next_zh-cn.md">量化限制、数值对齐与计时范围 →</a></p>
   <p><strong>投机解码</strong>使用独立的共享 MTP 头，而不是主干里的张量（已发布的 Q8_0 分片完全不含 <code>nextn</code>/<code>mtp</code> 张量）：在 GGML 后端上用 <code>--draft-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf</code>（2,786,568,256 字节；取自 <code>unsloth/Qwen3.8-Flash-Next-GGUF</code> 的修订版本 <code>38bb39ee</code>）挂上它。它只为从位置 0 开始 prefill 的单独请求起草；延续保留持有者或共享前缀克隆的轮次按普通方式解码。在 UD-Q2_K_XL、三张 A40 按层切分、<code>--spec-draft 3</code> 下实测：192 token 的代码复制流与普通贪心逐字相同，在当前的验证行内核下（每个验证行都与其 decode 步逐位相同）为普通 decode 的 1.69×（83.2 对 49.1 tok/s；2026-09-17 改为逐位一致之前为 1.75–1.96×）；但散文并不划算——512 token 的回答解码为 44–46 tok/s，普通解码为 52。详见<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/models/qwen38-flash-next_zh-cn.md#共享-mtp-头的投机解码" target="_blank" rel="noopener">模型卡</a>。</p>
   <p><strong>超出内存运行。</strong>UD-Q2_K_XL 有 78.9 GB（73.4 GiB），但每个 token 只读取其中 28.8 GB n-gram 表的 16 行，以及每层 512 个专家中的 10 个，因此 TensorSharp 能在装不下它的机器上运行它。在 <code>ggml_metal</code> 上，n-gram 表留在 GGUF 内存映射中，每个 token 的行按需读取；未指定 <code>--n-cpu-moe N</code> 或 <code>--cpu-moe</code> 时，引擎还会自行规划专家卸载：在放得下的前提下把整层专家留在 GPU 上，最前面若干层的专家则在主机上直接从同一映射计算——热的专家留在页缓存中，其余在 token 需要时从 SSD 读取。在 48 GB 的 M5 Pro 上（48 层中有 33 层的专家在主机上），1,818 token 的提示、贪心生成 256 个 token 实测 prefill 109.4–115.5 / decode 12.8–12.9 tok/s；同一台 Mac 上 llama.cpp 用 <code>-ngl 0 -t 12</code> 为 20.4–22.4 / 13.00–13.24（加 <code>--no-op-offload</code> 为 28.8–31.6 / 11.94–12.48），它的完整 GPU 卸载在这台机器上内存不足。<code>--backend mlx</code> 会被直接拒绝：MLX 没有稀疏注意力索引器、超连接、n-gram 表以及 IQ2_XS/IQ3_XXS 专家的内核。Direct CUDA 引擎（<code>cuda</code>）能运行这些专家：在 2× A40、<code>--layer-split 2</code>、预热后，同一提示实测 1,612–1,613 / 56.85–56.93 tok/s（<code>ggml_cuda</code> 为 1,174–1,217 / 52.9–53.1），llama.cpp 为 752–963 / 59.04–59.86。<a href="agentic_zh-cn.html#desktop">TensorAgent</a> 在 48 GB 的 Mac 上提供这个文件；详见<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/models/qwen38-flash-next_zh-cn.md#超出内存运行" target="_blank" rel="noopener">模型卡</a>。</p>
 

@@ -4,7 +4,7 @@
 
 > [TensorSharp](../README_zh-cn.md) 文档的一部分。README 在[实际运行效果](../README_zh-cn.md#实际运行效果)中展示了这几张截图。
 
-同一个引擎，四种用法。每张截图都是真实运行的原样截取，机器为 Apple M5 Pro（48 GB），拍摄于 2026-09-30。
+同一个引擎，四种用法：终端推理、浏览器聊天与代码任务、移动智能体和桌面图像编辑。CLI、Web UI 与 iPhone 模拟器截图于 2026-09-30 在 Apple M5 Pro（48 GB）上拍摄。桌面截图于 2026-10-02 展示当前 Mac 应用中已保存的 Qwen-Image-2.1 编辑结果，不是一次新的推理基准。
 
 ## TensorSharp.Cli：在终端里运行模型
 
@@ -32,8 +32,8 @@ TensorAgent 是基于同一引擎的原生 iPhone / iPad 应用。模型只需�
 
 ## 桌面版 TensorAgent：macOS 与 Windows
 
-同一个工程还能构建 Mac 应用，以及一个尚未构建或运行过的 Windows 应用。在 Mac 上，模型编写的代码以真实的 `bash`、`python3`、`node` 进程运行，并受 macOS 沙箱约束；Playwright 技能还可以驱动浏览器。详见[桌面版 TensorAgent](../TensorAgent/README.md#on-the-desktop-macos-and-windows)。
+TensorAgent 在同一会话界面中提供文本和照片/文件聊天、智能体代码与浏览器任务、图像生成/编辑，以及带音频的视频生成。Mac 模型目录包含 Qwen-Image-2.1、可选 LoRA 插件和局部区域编辑器，以及 MiniMax-H3；可用模型取决于内存容量。在 Mac 上，代码以真实的 `bash`、`python3`、`node` 进程运行，并受 macOS 沙箱约束；Playwright 技能还可以驱动浏览器。同一工程的 Windows 应用头已有有限的聊天与工具验证，图像/音频/视频生成尚未验证。详见[桌面版 TensorAgent](../TensorAgent/README.md#on-the-desktop-macos-and-windows)。
 
-<p align="center"><img src="../website/assets/screenshots/tensoragent-mac.png" alt="Mac 上的 TensorAgent：Qwen3.5 9B 编写含罗马数字转换函数与单元测试的 Python 文件并运行，第一次失败后修正函数并重跑，直到五个测试全部通过" width="880"></p>
+<p align="center"><img src="../website/assets/screenshots/tensoragent-mac.png" alt="Mac 上的 TensorAgent：已保存的 Qwen-Image-2.1 图像编辑把 TensorSharp 横幅背景改为繁星蓝色夜空，提供原图对比与再次编辑操作" width="880"></p>
 
-<sub>Qwen3.5 9B（IQ4_XS）运行于 Metal。模型编写了一个含罗马数字转换函数及其单元测试的 Python 文件，并在 macOS 沙箱中用 Mac 自带的 `python3` 运行。第一次运行失败后，它修正了函数（途中有一个格式错误的补丁被拒绝），重新运行，直到五个测试全部通过。</sub>
+<sub>当前 Mac Catalyst 应用展示已保存的 Qwen-Image-2.1（Q4_K_M）编辑结果，设备为 M5 Pro（48 GB），后端为 GGML Metal。提示词为“把背景改成带星星的深蓝色夜空，保持文字不变”。结果提供 Compare original（原图对比）与 Edit again（再次编辑）操作。本次截图展示已完成的会话，不测量新的编辑耗时，也不演示遮罩或 LoRA。</sub>

@@ -759,6 +759,23 @@ oversubscribed ranks, or a backend without native hyper-connection kernels use
 the combined scheduler fallback instead; that path computes and adds the shared
 expert once on rank 0.
 
+### Direct-CUDA GLM-5.3-Flash
+
+`--backend cuda` runs `glm5next` through TensorSharp's own `GlmCudaEngine`, without
+ggml inference, with local whole-layer placement, sequence slots, batched decode,
+CUDA graph capture and retained conversation state. This is separate from the
+GGML local tensor-parallel path above.
+
+[`Glm5NextCudaEngineTests`](../../InferenceWeb.Tests/Glm5NextCudaEngineTests.cs)
+defines the numerical scope: a four-layer synthetic fixture with production
+kernel widths, KDA/MLA attention and dense/MoE FFNs, a 40-token prefill and six
+forced decode rows compared with `ggml_cuda`. It requires matching argmax and
+relative L2 error no greater than 2e-2. Separate checks cover two-device layer
+split, sparse-indexer rules, reset, interleaved slots, captured decode, batched
+decode and verify rollback. These targeted contracts do not establish full
+checkpoint numerical parity, model quality or a speedup; CUDA-dependent cases
+skip when their hardware is unavailable.
+
 ### What runs today
 
 - **Layer split across N local GPUs**: pass `--layer-split N`. The historical
