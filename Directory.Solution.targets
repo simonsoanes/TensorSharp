@@ -35,8 +35,9 @@
            environment the child inherits (Directory.Solution.props covers only this build),
            which would move every output under bin/x64/.
          - TENSORSHARP_MLX_NATIVE_SKIP=true, as the scripts export it: the app never uses MLX.
-         - From this build's command line, the configuration and -p:TensorSharpSkipGgmlNative
-           only.
+         - From this build's command line, the configuration, -p:TensorSharpSkipGgmlNative
+           and NuGet restore overrides. The child inherits the latter through its
+           environment, so alternate feeds and config paths never become shell syntax.
 
        A head is skipped with a warning naming what is missing and what provides it when the
        SDK selected for the app lacks one of its workloads (GetSuggestedWorkloads is the
@@ -77,6 +78,16 @@
     <_TensorAgentAppNativeSkipped Condition="'$(TensorSharpSkipGgmlNative)' == 'true' Or '$(TENSORSHARP_GGML_NATIVE_SKIP)' == 'true'">true</_TensorAgentAppNativeSkipped>
     <_TensorAgentAppEnvironment>TENSORSHARP_MLX_NATIVE_SKIP=true</_TensorAgentAppEnvironment>
     <_TensorAgentAppEnvironment Condition="'$(TensorSharpSkipGgmlNative)' == 'true'">$(_TensorAgentAppEnvironment);TENSORSHARP_GGML_NATIVE_SKIP=true</_TensorAgentAppEnvironment>
+    <!-- A child dotnet process does not inherit the solution's global properties.
+         Escape values before Exec converts its semicolon-separated environment list
+         to an array, so multiple package sources stay in one environment variable.
+         Escape percent signs again because the child's MSBuild also unescapes its
+         environment properties; URL encodings and paths containing % must survive. -->
+    <_TensorAgentAppEnvironment Condition="'$(RestoreSources)' != ''">$(_TensorAgentAppEnvironment);RestoreSources=$([MSBuild]::Escape('$(RestoreSources)').Replace('%25', '%2525'))</_TensorAgentAppEnvironment>
+    <_TensorAgentAppEnvironment Condition="'$(RestoreConfigFile)' != ''">$(_TensorAgentAppEnvironment);RestoreConfigFile=$([MSBuild]::Escape('$(RestoreConfigFile)').Replace('%25', '%2525'))</_TensorAgentAppEnvironment>
+    <_TensorAgentAppEnvironment Condition="'$(RestorePackagesPath)' != ''">$(_TensorAgentAppEnvironment);RestorePackagesPath=$([MSBuild]::Escape('$(RestorePackagesPath)').Replace('%25', '%2525'))</_TensorAgentAppEnvironment>
+    <_TensorAgentAppEnvironment Condition="'$(RestoreIgnoreFailedSources)' != ''">$(_TensorAgentAppEnvironment);RestoreIgnoreFailedSources=$([MSBuild]::Escape('$(RestoreIgnoreFailedSources)').Replace('%25', '%2525'))</_TensorAgentAppEnvironment>
+    <_TensorAgentAppEnvironment Condition="'$(NuGetAudit)' != ''">$(_TensorAgentAppEnvironment);NuGetAudit=$([MSBuild]::Escape('$(NuGetAudit)').Replace('%25', '%2525'))</_TensorAgentAppEnvironment>
     <!-- Exec logs each warning and error the child prints, so the child prints each once:
          `dotnet build` appends -consoleloggerparameters:Summary after its arguments, and the
          summary repeats them, so its console logger is replaced by one without a summary. -->

@@ -792,6 +792,25 @@ UI in `TensorAgent.Core.dll` beside its executable.
 For environments that use NuGet mirrors, `-PackageSource` accepts one or more
 feed URLs for restore; the default uses the repository's NuGet configuration.
 
+If restore reports `NU1301` with a TLS `HandshakeFailure` for `api.nuget.org`,
+the installed workload is not the problem: NuGet cannot download packages such
+as the Windows runtime packs. An optional configuration uses Microsoft's
+`dotnet-public` feed and keeps vulnerability auditing enabled through NuGet's
+separate `data.nuget.org` endpoint:
+
+```powershell
+Copy-Item eng/NuGet.dotnet-public.config NuGet.Config
+dotnet build TensorSharp.slnx -c Release
+```
+
+Run these commands from the repository root. Keep this machine-specific
+`NuGet.Config` local (add `/NuGet.Config` to `.git/info/exclude`); remove it to
+return to your usual feeds. The mirror does not carry every third-party package
+(including NLayer and NVorbis), so those packages need cached copies or another
+reachable feed. Missing packages remain build errors. For a one-off override,
+use `-p:RestoreConfigFile=<absolute-path-to-config>` on the solution build; its
+separate TensorAgent build receives the same restore settings.
+
 The app is unpackaged and carries the Windows App SDK runtime with it
 (`WindowsPackageType=None`, `WindowsAppSDKSelfContained`). The model's code runs only
 after **Run without a sandbox** is turned on: a job object bounds a process tree but
