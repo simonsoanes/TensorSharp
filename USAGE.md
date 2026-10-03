@@ -464,6 +464,10 @@ script gets that error instead of watching a setting be ignored.
 | `--diffusion-seed <N>` | Noise seed for the diffusion paths: DiffusionGemma's deterministic sampler and Qwen-Image-2.1 (default: 0), and video generation (Wan, MiniMax-H3), where leaving it out draws a fresh random seed each run. This is the seed that decides what a clip looks like — `--seed` is the text sampling seed and does not affect it. |
 | `--diffusion-blocks <N>` | DiffusionGemma block-autoregressive canvas count. `0` derives the count from `--max-tokens` and the model canvas length. |
 | `--image <path>` | Input image for Qwen-Image-2.1 editing (also the image input for multimodal chat); repeat it for multiple references. Every `--image` is a reference, tagged `<image1>`, `<image2>`, … in command-line order ahead of the prompt, so the prompt can name a picture by its tag. Without `--image`, a Qwen-Image-2.1 DiT generates an image from the prompt instead. |
+| `--mask <path>` | Qwen-Image-2.1 mask at the first input image's exact dimensions. Requires `--image`; additional images remain references. Preserves source dimensions and unselected decoded RGBA pixels. See [Masked image editing](#masked-image-editing). |
+| `--mask-mode <mode>` / `--mask-invert` | `grayscale` (default): white edits, black protects and gray blends. `alpha`: transparent edits, opaque protects. `--mask-invert` reverses the selection. |
+| `--mask-feather <pixels>` | Soften the mask inward in source pixels; range 0–1024, default 0. |
+| `--mask-crop` / `--mask-crop-padding <pixels>` | Process the selection with surrounding context, then composite onto the original canvas. Padding is in source pixels; range 0–16384, default 64. Mask settings without `--mask` are rejected. |
 | `--prompt <text>` | Qwen-Image-2.1 generation prompt or edit instruction (falls back to `--input` file contents if omitted). |
 | `--output <path>` | Qwen-Image-2.1 output PNG path (default: `generated.png` for generation, `edited.png` for editing). |
 | `--cfg <F>` | Qwen-Image-2.1 true-CFG guidance scale (`<= 1` disables the negative pass). Omit for auto: 1.0 for Qwen-Image-2.1 (one transformer prediction per step), or the CFG of a `--lora` plug-in's sampling recipe; a value above 1 adds the negative pass. Shares `--diffusion-steps` / `--diffusion-seed` for step count and seed. On MiniMax-H3 the only accepted value is `1.0` (its default): the checkpoint ships CFG-distilled and anything higher is refused up front rather than run and degraded. `TensorSharp.Server.Host` has no `--cfg` at all — a request body can still carry `cfg`. |
@@ -655,6 +659,8 @@ Open `http://localhost:5000` in your browser — the root URL serves the chat UI
 - A stats line under each answer: the tokens the turn generated (reasoning and tool calls included), its wall-clock seconds, the decode speed, and how much of the prompt the KV cache served
 - DiffusionGemma denoising previews when a `diffusion-gemma` GGUF is hosted (the UI replaces the whole assistant message on each denoising step, then emits the final answer)
 - Qwen-Image-2.1 image generation and editing when a `qwen_image` GGUF is hosted: a prompt alone generates an image, a prompt with attached images edits them, and the picture refreshes in place while it denoises. With a MiniMax-H3 or Wan model hosted, a prompt (plus an optional attached image) generates a video instead of chat text
+- For a local Qwen-Image-2.1 edit, attach photos and choose **Select area** on the target thumbnail. Paint and save the selection, then describe the change; other photos remain references. **Compare original** switches the result and **Edit again** restores the draft. **Process selected region only** reduces model work with less surrounding context
+- Enter sends a message; Shift+Enter inserts a new line, and IME composition Enter does not submit
 - Backward-compatible queue-status events (the engine itself handles concurrency)
 - Message editing and deletion with regeneration from any point in the conversation
 - Free scrolling: scroll up to read earlier replies while new tokens stream in; the chat auto-scrolls again as soon as the user scrolls back to the bottom
@@ -957,6 +963,26 @@ the rest. Either way `--stop` sequences pinned on the server stay in force under
 `config` (merged with the request's) and are replaced by the request under
 `request`.
 
+## Masked image editing
+
+Qwen-Image-2.1 edits a selected region while preserving the source dimensions and
+all unselected decoded RGBA pixels. The first image is the target; other images
+remain references. For example:
+
+```bash
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/qwen-image-2.1.json \
+    --image photo.png --mask selection.png --mask-feather 8 --mask-crop \
+    --prompt "Change the selected vase to red ceramic" --output edited.png
+```
+
+The server's `/api/image-edit` and `/api/image-edit/stream` accept `maskPath`,
+`maskMode`, `maskInvert`, `maskFeather`, `maskCrop` and `maskCropPadding` in JSON.
+The non-streaming `/api/image-edit` also accepts a `mask` file and the same settings
+in multipart form data. Upload files used
+by JSON requests through `/api/upload` first. A mask requires Qwen-Image-2.1,
+an input image and matching source dimensions. See the [mask guide](docs/models/qwenimage21.md#precise-local-editing-with-a-mask)
+for selection semantics, sampling geometry, API examples and validation coverage.
+
 ## Qwen-Image-2.1 LoRA plug-ins
 
 `--lora` adds a LoRA to the Qwen-Image-2.1 diffusion transformer: a style, an
@@ -981,8 +1007,9 @@ to the model as the environment variable `TS_LORAS`, a JSON array of
 
 The plug-ins apply to Qwen-Image-2.1 only. The CLI refuses `--lora` with any other
 model; the server logs them at startup (`LoRA plug-ins (applied to Qwen-Image-2.1
-models only): ...`) and applies them to every image request. Per-request LoRA
-selection is not implemented. The retired `--qwen-image-lora` is still a removed
+models only): ...`) and applies them to every image request. TensorSharp.Server.Host
+does not expose per-request LoRA selection; TensorAgent has its own saved LoRA choices,
+which apply from the next picture. The retired `--qwen-image-lora` is still a removed
 flag, and its error names `--lora`; `TS_QWEN_IMAGE_LORA` is refused at load with
 the same advice.
 
@@ -1793,8 +1820,11 @@ combination fails at startup instead of changing modes or silently using one
 GPU. Commands that previously used `--tp N` to place whole layers must migrate
 to `--layer-split N`. CPU backends cannot run a multi-GPU mode.
 
-Qwen 3.8 Flash Next (`qwen4exp`) supports layer split on GGML CUDA / Vulkan and
-stays single-device unless it is requested. DeepSeek V4 / V4.1 and GLM 5.x also require `--layer-split N` to select the
+Qwen 3.8 Flash Next (`qwen4exp`) supports whole-layer placement on `ggml_cuda`,
+`ggml_vulkan` and direct `cuda`, plus local FFN tensor parallelism on qualified
+`ggml_cuda` devices and quantizations. Its UD-Q2_K_XL checkpoint is layer-split-only;
+see [Supported architectures](#supported-architectures) for the TP qualification.
+DeepSeek V4 / V4.1 and GLM 5.x also require `--layer-split N` to select the
 local layer-split device count. With neither mode configured, the default is
 one device. GLM 5.x also supports `--tp N` on GGML GPU
 backends through its native local tensor-parallel path; it does not support
@@ -1886,7 +1916,7 @@ must be reachable between all nodes.
 | Mistral 3 | ✅ | Fused/separate QKV, YaRN RoPE |
 | Gemma 4 | ✅ | Dense TP + MoE. On GGML the fused whole-model MoE trunk splits *inside* each expert (gate/up column-parallel, down row-parallel) so global expert ids keep working; `TS_GEMMA4_TP_FUSED_MOE=0` falls back to the whole-expert per-op path. Per-expert slicing on direct CUDA |
 | Qwen 3.5 / 3.6 family | ✅ | GatedDeltaNet SSM with per-rank V-head ownership; expert-parallel MoE on GGML (whole experts per rank, Megatron-split shared expert) with a column-parallel (vocabulary-sharded) LM head unless the head is tied to the embedding or its vocabulary rows do not divide by the local TP degree (it then stays replicated on rank 0), expert slicing and a replicated LM head on direct CUDA. Runs on both `cuda` and `ggml_cuda` / `ggml_vulkan` — the GGML path uses the packed per-rank GDN kernel (`TSGgml_Qwen35GdnLayerTP`) with device-resident recurrent state. [Bonsai2](docs/models/bonsai2.md) (`qwen35` files with PRISM PQ2_0 / PTQ1_0 tensors) is the exception: single-device GGML backends only, so `--tp` is refused |
-| Qwen 3.8 Flash Next | layer split | Not tensor parallelism: `--layer-split N` gives each GPU a contiguous run of whole layers, which is also the only multi-GPU mode llama.cpp offers `qwen4exp` (`-sm row` refuses to load it). Capacity, not speed — 2× A100-80GB on Qwen3.8-Flash-Next-UD-Q2_K_XL (73.4 GiB): greedy output byte-identical to the 1-GPU run (same SHA-256), VRAM 24.2 + 26.2 GB instead of one card holding everything, prefill ~1520-1550 t/s and decode ~56 t/s either way. `TS_Q4E_LAYER_SPLIT=20,28` sets the per-GPU layer counts by hand |
+| Qwen 3.8 Flash Next | ✅ (local FFN TP) + layer split | `ggml_cuda --tp N` partitions routed/shared FFNs while attention/QSA/GDN/PLE remain replicated. Requires qualified CUDA MMQ devices and supported FFN types; UD-IQ4_XS was checked on A40 TP2/TP4, but UD-Q2_K_XL is refused for TP. CPU expert offload, prefix checkpoints and distributed TP are unsupported in this mode. `--layer-split N` remains available on GGML CUDA/Vulkan and direct `cuda`. Measured A40 TP2 was slower than layer split; see [qualification, numerical gates and benchmarks](docs/models/qwen38-flash-next.md#multi-gpu). |
 | GPT OSS | ✅ | Attention sinks, YaRN. Runs on `cuda` and the GGML backends; the GGML path is expert-parallel (whole experts per rank, one batched `ggml_mul_mat_id` dispatch per projection per layer) and falls back to per-expert slicing only when the expert count does not divide the TP degree |
 | Nemotron-H | ✅ | Mamba2 replicated on rank 0, MoE expert slicing. Still walks experts per token per rank on GGML (no expert parallelism yet) |
 | Muse-Glimmer | ✅ (`--tp 2` at most) | Its 2 KV heads cap the degree at 2; GGML CUDA / Vulkan only, and a DFlash drafter is declined under TP — the CLI warns and decodes plainly, the server refuses to start (see [Constraints](#constraints)) |
@@ -1955,10 +1985,10 @@ so against the recorded llama.cpp goldens a 2-bit MoE reproduces 3 of 6 prompts
 under `--tp 3` where the layer split reproduces 5 of 6.
 Reach for it there on an NVLink host, or when a model fits no other way.
 
-TP composes with MoE CPU offload: `--tp N --n-cpu-moe M` keeps the fused
+On architectures that support the combination, TP composes with MoE CPU offload: `--tp N --n-cpu-moe M` keeps the fused
 multi-rank graph and drops the offloaded layers' expert bytes from every rank's
 VRAM. See [Mixture-of-Experts CPU offload](#mixture-of-experts-cpu-offload---n-cpu-moe)
-for the combined numbers.
+for the combined numbers. Qwen 3.8 Flash Next refuses expert offload under TP.
 
 | Variable | Effect |
 |---|---|
@@ -1975,7 +2005,7 @@ for the combined numbers.
 
 ### Constraints
 
-- `numHeads`, `numKVHeads`, and `intermediateSize` must be divisible by the TP degree.
+- Head-sharded architectures require `numHeads`, `numKVHeads`, and `intermediateSize` to divide by the TP degree. Qwen 3.8 Flash Next instead replicates attention and validates FFN/output widths and exact CUDA strip-kernel layouts.
 - Quantized row-parallel splits require `ne0` divisible by `tp × blockSize`.
 - Batched/continuous-batching forward under TP is implemented for Mistral 3; MoE models (Gemma 4, Qwen 3.5/3.6, GPT OSS, Nemotron-H) fall back to per-sequence forward under TP.
 - **Muse-Glimmer** caps at `--tp 2`: it has 2 KV heads, and no model here replicates KV heads when `numKVHeads < tp`. A DFlash drafter is declined under TP (the CLI warns and decodes plainly; the server refuses to start, exit code 2), its KV-block pages work under TP too (the snapshot walks each layer's per-rank caches), and it requires the GGML CUDA/Vulkan backends — the fused per-rank plan needs a device collective that ggml-metal does not provide.
@@ -2476,7 +2506,7 @@ inline (e.g. `187 tokens · 2.1s · 87.2 tok/s · KV 420/512 (82%)`).
 
 `TensorSharp.Server.Host` exposes three API styles — Ollama-compatible, OpenAI-compatible, and the Web UI's own SSE routes — plus the Jev typed-decision endpoint `POST /v1/systemone` for DiffusionGemma. See [API_EXAMPLES.md](TensorSharp.Server.Host/API_EXAMPLES.md) for full documentation with curl and Python examples.
 
-Image and video models are served on routes of their own, not on the chat endpoints. Qwen-Image-2.1 answers `POST /api/image-generate` (text to image) and `POST /api/image-edit` (prompt plus reference images), each with a `/stream` SSE variant that reports denoising progress; there is no `/v1/images/*` route. Video models use the routes described in [Video generation with audio (MiniMax-H3)](#video-generation-with-audio-minimax-h3).
+On TensorSharp.Server.Host, image and video models use dedicated media routes. Qwen-Image-2.1 answers `POST /api/image-generate` (text to image) and `POST /api/image-edit` (prompt, reference images and an optional mask), each with a `/stream` SSE variant that reports denoising progress; there is no `/v1/images/*` route. Video models use the routes described in [Video generation with audio (MiniMax-H3)](#video-generation-with-audio-minimax-h3). TensorAgent's own host routes media requests through its `/api/chat` turn manager to share the composer and saved conversations with text turns.
 
 **Ollama-compatible API:**
 

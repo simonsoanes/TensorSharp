@@ -33,6 +33,14 @@
   <p>Everything runs on <strong>your own hardware</strong>: your laptop, workstation, or server. Inference and agent work stay local by default, there are no per-token fees, and the same engine powers a quick command-line test, a shared internal chatbot, and a production REST endpoint. This wiki is the complete guide: pick a starting point below or use <kbd>/</kbd> to search.</p>
 
 
+  <section aria-labelledby="tensoragent">
+    <h2 id="tensoragent">TensorAgent: text, images, video and agentic work</h2>
+    <p>One local app for different kinds of work: chat and reason with text models, read photos and files, generate and edit images with <strong>Qwen-Image 2.1</strong>, make video with sound using <strong>MiniMax-H3</strong>, and use skills and tools to create files, run code or work in a browser. Choose a model for the task; the available models depend on the device's memory.</p>
+    <p>Source builds target <strong>iPhone, iPad, macOS and Windows</strong>. The interface supports English, Simplified and Traditional Chinese, Japanese, Korean, Spanish, French and German. <a href="agentic.html#tensoragent">Explore TensorAgent's capabilities and platform limits →</a></p>
+  </section>
+
+  <p class="page-foot-note"><strong>Current source:</strong> Qwen-Image 2.1 and mask editing, TensorAgent desktop builds and translations, browser skills and sub-agents, and the newest native parallelism changes are newer than <code>v2026.09.01</code>. Build from this checkout to use them; downloaded release assets reflect their own tag.</p>
+
   <section class="model-overview" aria-labelledby="supported-models">
     <h2 id="supported-models">Supported model families</h2>
     <div class="model-group">
@@ -123,7 +131,7 @@
     <a class="card" href="cli.html"><div class="ic">⌨️</div><h3>Command Line</h3><p>Run prompts, images, audio, batches, and benchmarks from the CLI.</p></a>
     <a class="card" href="server.html"><div class="ic">🌐</div><h3>Server &amp; Web UI</h3><p>Host a browser chatbot and HTTP endpoints on localhost.</p></a>
     <a class="card" href="agentic.html"><div class="ic">🛠️</div><h3>Agentic Work</h3><p>Load skills on demand, run sandboxed code tools, delegate to bounded sub-agents on the server, repair outputs, and download generated artifacts.</p></a>
-    <a class="card" href="agentic.html#ios"><div class="ic">📱</div><h3>TensorAgent for iOS</h3><p>Run local chat and bounded agent work on iPhone and iPad with the <code>ggml_metal</code> backend.</p></a>
+    <a class="card" href="agentic.html#tensoragent"><div class="ic">📱</div><h3>TensorAgent</h3><p>Local text, image editing, video, skills and tools on iPhone, iPad, Mac and Windows, within each device’s limits.</p></a>
     <a class="card" href="http-api.html"><div class="ic">🔌</div><h3>HTTP API</h3><p>Call it from curl, Python, or any Ollama/OpenAI client.</p></a>
     <a class="card" href="code-api.html"><div class="ic">🧩</div><h3>C# Library</h3><p>Embed the engine directly in your .NET application.</p></a>
     <a class="card" href="api-reference.html"><div class="ic">📚</div><h3>API Reference</h3><p>Searchable tables of flags, env vars, endpoints, and types.</p></a>
@@ -192,10 +200,10 @@ TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Cli -c R
         </figcaption>
       </figure>
       <figure class="shot">
-        <a class="shot-media" href="assets/screenshots/tensoragent-mac.png"><img src="assets/screenshots/tensoragent-mac.png" alt="TensorAgent on a Mac: Qwen3.5 9B wrote a Python file with a Roman-numeral converter and unit tests, ran them, fixed the function when the first run failed, and reran until all five tests passed" width="1760" height="1320" loading="lazy"></a>
+        <a class="shot-media" href="assets/screenshots/tensoragent-mac.png"><img src="assets/screenshots/tensoragent-mac.png" alt="TensorAgent on a Mac: Qwen-Image 2.1 edits a TensorSharp banner to a deep blue night sky with stars while preserving the text, with Compare original and Edit again controls below the result" width="3018" height="1900" loading="lazy"></a>
         <figcaption>
           <h3>TensorAgent on the desktop</h3>
-          <p>The same app on the Mac, running the model's code in a sandbox.</p>
+          <p>Qwen-Image 2.1 edits an attached image from an instruction. Text chat, files, code, browser skills and video share the same app.</p>
           <a href="agentic.html#desktop">TensorAgent on the Mac and Windows →</a>
         </figcaption>
       </figure>
@@ -210,7 +218,7 @@ TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON dotnet run --project TensorSharp.Cli -c R
     <div class="card"><div class="ic">🔁</div><h3>Drop-in compatible</h3><p>Speaks the Ollama and OpenAI wire formats, so existing tools and SDKs just work.</p></div>
     <a class="card" href="backends.html#cpu"><div class="ic">🖥️</div><h3>Runs anywhere</h3><p>NVIDIA (CUDA), AMD / Intel / NVIDIA (Vulkan), Apple Silicon (Metal/MLX) and iOS (Metal), or pure CPU — with automatic fallbacks.</p></a>
     <a class="card" href="models.html#table"><div class="ic">🧠</div><h3>Modern model support</h3><p>Twelve text families with vision, audio, PDF documents, reasoning and tools, plus three that generate images and video instead of text.</p></a>
-    <a class="card" href="models-video.html#minimax-h3"><div class="ic">🎬</div><h3>Images and video out, too</h3><p>Qwen-Image-2.1 generates and edits images, MiniMax-H3 makes video with a native stereo soundtrack, and Wan 2.1 / 2.2 make video alone, all on the same engine.</p></a>
+    <a class="card" href="models-video.html#minimax-h3"><div class="ic">🎬</div><h3>Images and video out, too</h3><p>Qwen-Image-2.1 generates, edits and makes precise changes inside a painted selection, MiniMax-H3 makes video with a native stereo soundtrack, and Wan 2.1 / 2.2 make video alone, all on the same engine.</p></a>
     <div class="card"><div class="ic">⚙️</div><h3>Built in .NET</h3><p>A native C# engine you can embed in your apps, not just a black-box binary.</p></div>
     <a class="card" href="distributed.html"><div class="ic">🔗</div><h3>Scales past one GPU</h3><p>Spread one model over several GPUs with tensor parallelism (<code>--tp N</code>) or whole-layer placement (<code>--layer-split N</code>), where the model and backend support it.</p></a>
     <a class="card" href="benchmarks.html#head-to-head"><div class="ic">🏁</div><h3>Benchmarked vs llama.cpp</h3><p>On identical GGUF files and the same GPU it trades wins with llama.cpp: up to 1.28× faster CUDA prefill and 1.21× faster Vulkan decode in the current comparison.</p></a>

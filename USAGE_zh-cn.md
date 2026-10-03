@@ -423,6 +423,10 @@ Linux 仍隐藏常见的 `/run` 端点，但本地 Unix IPC 并非完整隔离�
 | `--diffusion-seed <N>` | 扩散路径的噪声种子：DiffusionGemma 的确定性采样器与 Qwen-Image-2.1（默认：0），以及视频生成（Wan、MiniMax-H3）——视频不传时每次运行都会取一个新的随机种子。决定一段视频长什么样的是这个种子，`--seed` 是文本采样种子，对它没有影响。 |
 | `--diffusion-blocks <N>` | DiffusionGemma block-autoregressive canvas 数量。`0` 表示根据 `--max-tokens` 与模型 canvas 长度推导。 |
 | `--image <path>` | Qwen-Image-2.1 编辑用的输入图像（也是多模态聊天的图像输入）；重复该参数可传入多张参考图。每个 `--image` 都是一张参考图，按命令行顺序在提示词之前标记为 `<image1>`、`<image2>`……，提示词可以用这些标记指代图片。不带 `--image` 时，Qwen-Image-2.1 DiT 改为根据提示词生成图像。 |
+| `--mask <path>` | Qwen-Image-2.1 掩码，尺寸须与第一张输入图完全一致。需要 `--image`；其他图片仍作为参考。保留源图尺寸及未选中的已解码 RGBA 像素。见[掩码图像编辑](#掩码图像编辑)。 |
+| `--mask-mode <mode>` / `--mask-invert` | `grayscale`（默认）：白色编辑、黑色保护、灰色混合。`alpha`：透明编辑、不透明保护。`--mask-invert` 反转选区。 |
+| `--mask-feather <pixels>` | 按源图像素向内柔化边缘；范围 0–1024，默认 0。 |
+| `--mask-crop` / `--mask-crop-padding <pixels>` | 处理选区及周围上下文，再合成回原始画布。padding 按源图像素计，范围 0–16384，默认 64。未给 `--mask` 时掩码设置会被拒绝。 |
 | `--prompt <text>` | Qwen-Image-2.1 的生成提示词或编辑指令（省略时回退到 `--input` 文件内容）。 |
 | `--output <path>` | Qwen-Image-2.1 输出 PNG 路径（默认：生成为 `generated.png`，编辑为 `edited.png`）。 |
 | `--cfg <F>` | Qwen-Image-2.1 true-CFG 引导尺度（`<= 1` 关闭负向分支）。省略时自动选择：Qwen-Image-2.1 为 1.0（每步只做一次 Transformer 预测），或 `--lora` 插件采样配方中的 CFG；大于 1 的值会增加负向分支。步数与种子复用 `--diffusion-steps` / `--diffusion-seed`。在 MiniMax-H3 上唯一可接受的取值是 `1.0`（也是它的默认值）：该检查点是 CFG 蒸馏的，更高的值会被直接拒绝，而不是照跑然后出劣化结果。`TensorSharp.Server.Host` 根本没有 `--cfg` 参数——但请求体里仍然可以带 `cfg`。 |
@@ -606,6 +610,8 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/s
 - 每条回答下方的统计行：本轮生成的 token 数（包括推理与工具调用）、墙钟秒数、解码速度，以及提示词中由 KV cache 提供的部分
 - 承载 `diffusion-gemma` GGUF 时展示 DiffusionGemma 去噪预览（每一步替换整条 assistant 消息，最终再发出定稿）
 - 承载 `qwen_image` GGUF 时支持 Qwen-Image-2.1 图像生成与编辑：只给提示词时生成图像，附带图像时编辑这些图像，去噪过程中画面原地刷新。承载 MiniMax-H3 或 Wan 模型时，提示词（可附带一张图像）会生成视频而不是聊天文本
+- Qwen-Image-2.1 局部编辑：附加图片后，在目标缩略图上选择 **Select area**，绘制并保存选区，再描述修改；其他图片仍作参考。**Compare original** 切换原图/结果，**Edit again** 恢复草稿。**Process selected region only** 以较少的上下文减少模型工作量
+- Enter 发送消息，Shift+Enter 换行；IME 输入法确认候选词的 Enter 不会发送
 - 向后兼容的队列状态事件（实际并发由推理引擎处理）
 - 消息编辑和删除，支持从对话中任意位置重新生成
 - 自由滚动：在生成过程中可向上滚动查看历史消息；只要重新滚回底部，新内容会继续自动跟随
@@ -887,6 +893,24 @@ Agent Skills。凡是会渲染工具声明且有工具解析器的模型族都�
 于服务端参数与环境变量，其余参数仍由服务端填充。无论哪种模式，服务端 `--stop`
 在 `config` 下始终生效（与请求的列表合并），在 `request` 下则被请求替换。
 
+## 掩码图像编辑
+
+Qwen-Image-2.1 可以编辑选区，同时保留源图尺寸及所有未选中的已解码 RGBA 像素。
+第一张图片是编辑目标，其他图片仍作为参考。例如：
+
+```bash
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/qwen-image-2.1.json \
+    --image photo.png --mask selection.png --mask-feather 8 --mask-crop \
+    --prompt "Change the selected vase to red ceramic" --output edited.png
+```
+
+服务端 `/api/image-edit` 与 `/api/image-edit/stream` 在 JSON 中接受 `maskPath`、
+`maskMode`、`maskInvert`、`maskFeather`、`maskCrop`、`maskCropPadding`。
+非流式 `/api/image-edit` 还支持 multipart 上传 `mask` 文件及同名设置。
+JSON 引用的文件请先通过 `/api/upload` 上传。
+掩码需要 Qwen-Image-2.1、输入图以及与源图一致的尺寸。
+选区语义、采样几何、API 示例与验证范围见[掩码指南](docs/models/qwenimage21_zh-cn.md#用遮罩精确编辑局部区域)。
+
 ## Qwen-Image-2.1 LoRA 插件
 
 `--lora` 把一个 LoRA 加到 Qwen-Image-2.1 扩散 Transformer 上：可以是一种风格、一项编辑
@@ -908,7 +932,7 @@ Agent Skills。凡是会渲染工具声明且有工具解析器的模型族都�
 
 这些插件只作用于 Qwen-Image-2.1。CLI 遇到其他模型时拒绝 `--lora`；服务端在启动时记录它们
 （`LoRA plug-ins (applied to Qwen-Image-2.1 models only): ...`），并把它们应用到每个
-图像请求上。尚未实现按请求选择 LoRA。已退役的 `--qwen-image-lora` 仍是已移除的参数，其报错
+图像请求上。TensorSharp.Server.Host 不提供按请求选择 LoRA；TensorAgent 有自己的已保存插件选择，从下一张图片起生效。已退役的 `--qwen-image-lora` 仍是已移除的参数，其报错
 会指明 `--lora`；`TS_QWEN_IMAGE_LORA` 在加载时被拒绝，并给出同样的建议。
 
 ```bash
@@ -1590,7 +1614,9 @@ CLI 与服务端使用不同参数明确选择运行模式：
 两种模式互斥。不支持的模型、后端或模式组合会在启动时失败，不会改为另一种模式或静默回到单卡。
 旧命令如果用 `--tp N` 表示按层切分，需改成 `--layer-split N`。CPU 后端不能运行多 GPU 模式。
 
-Qwen 3.8 Flash Next（`qwen4exp`）在 GGML CUDA / Vulkan 上支持按层切分，未指定时仍使用单卡。
+Qwen 3.8 Flash Next（`qwen4exp`）在 `ggml_cuda`、`ggml_vulkan` 与 direct `cuda` 上
+支持整层放置，并在合格的 `ggml_cuda` 设备和量化上支持本地 FFN 张量并行。
+UD-Q2_K_XL 只能按层切分；TP 的验证范围见[支持的架构](#支持的架构)。
 DeepSeek V4 / V4.1 与 GLM 5.x 同样通过 `--layer-split N` 指定本地卡数。未配置两种模式时
 默认单设备。GLM 5.x 还支持 GGML GPU 后端上的
 `--tp N` 原生本地张量并行，但不支持跨节点 TP。
@@ -1676,7 +1702,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cu
 | Mistral 3 | ✅ | 融合 / 分离 QKV，YaRN RoPE |
 | Gemma 4 | ✅ | 稠密 TP + MoE。GGML 上融合的整模 MoE 主干在**每个专家内部**切分（gate/up 列并行、down 行并行），从而保留全局专家 id；`TS_GEMMA4_TP_FUSED_MOE=0` 可回退到逐算子的整专家路径。Direct CUDA 上为逐专家切分 |
 | Qwen 3.5 / 3.6 family | ✅ | GatedDeltaNet SSM 按 rank 划分 V-head 归属；GGML 上为专家并行 MoE（每个 rank 持有整个专家，shared expert 仍按 Megatron 切分）与列并行（按词表切分的）LM head（LM head 与 embedding 共享权重、或其词表行数不能被本机 TP 度整除时除外，此时它留在 rank 0 上复制），Direct CUDA 上为专家切分且 LM head 保持复制。`cuda` 与 `ggml_cuda` / `ggml_vulkan` 均可运行——GGML 路径使用打包的按 rank GDN 内核（`TSGgml_Qwen35GdnLayerTP`）并把循环状态常驻设备。[Bonsai2](docs/models/bonsai2_zh-cn.md)（带 PRISM PQ2_0 / PTQ1_0 张量的 `qwen35` 文件）例外：只支持单设备 GGML 后端，`--tp` 会被拒绝 |
-| Qwen 3.8 Flash Next | 按层切分 | 不是张量并行：`--layer-split N` 让每张 GPU 拿到一段连续的整层，这也是 llama.cpp 对 `qwen4exp` 唯一提供的多卡模式（它的 `-sm row` 会直接拒绝加载）。买的是容量而不是速度——2× A100-80GB、Qwen3.8-Flash-Next-UD-Q2_K_XL（73.4 GiB）实测：贪心输出与单卡逐字节一致（SHA-256 相同），显存从一张卡扛下全部变成 24.2 + 26.2 GB，prefill 约 1520-1550 t/s、decode 约 56 t/s 两种跑法一致。`TS_Q4E_LAYER_SPLIT=20,28` 可手动指定每卡层数 |
+| Qwen 3.8 Flash Next | ✅（本地 FFN TP）+ 按层切分 | `ggml_cuda --tp N` 切分路由/共享 FFN，注意力/QSA/GDN/PLE 保持复制。要求合格的 CUDA MMQ 设备与受支持的 FFN 类型；UD-IQ4_XS 已在 A40 TP2/TP4 上检查，UD-Q2_K_XL 则拒绝 TP。此模式不支持 CPU 专家卸载、前缀 checkpoint 与跨节点 TP。独立的 `--layer-split N` 仍支持 GGML CUDA/Vulkan 与 direct `cuda`。实测 A40 TP2 比按层切分慢；见[验证范围、数值门限与基准](docs/models/qwen38-flash-next_zh-cn.md#多-gpu)。 |
 | GPT OSS | ✅ | attention sink，YaRN。`cuda` 与 GGML 后端均可运行；GGML 路径是专家并行（每个 rank 持有整个专家，每层每个投影一次批量 `ggml_mul_mat_id` 派发），只有专家数不能被 TP 度整除时才回退到逐专家切分 |
 | Nemotron-H | ✅ | Mamba2 在 rank 0 上复制计算，MoE 专家切分。GGML 上仍按 token、按 rank 逐个遍历专家（尚未使用专家并行） |
 | Muse-Glimmer | ✅（最多 `--tp 2`） | 只有 2 个 KV head，因此 TP 度最多为 2；仅限 GGML CUDA / Vulkan；TP 下 DFlash 草稿器会被拒绝挂载——CLI 打印警告并按普通解码运行，服务端拒绝启动（见[约束](#约束)） |
@@ -1737,8 +1763,8 @@ tg64 17.6，而按层切分是 915.9 / 43.9——78 层里每一层都要对 `[6
 提示，而 `--tp 3` 只复现 3/6。
 只在带 NVLink 的机器上、或者模型没有别的办法装下时才用它。
 
-TP 可以与 MoE CPU 卸载组合：`--tp N --n-cpu-moe M` 保留多 rank 融合图，并把被卸载层的专家字节
-从每个 rank 的显存中去掉。组合后的实测数据见[混合专家 CPU 卸载](#混合专家-cpu-卸载--n-cpu-moe)。
+在支持此组合的架构上，TP 可以与 MoE CPU 卸载组合：`--tp N --n-cpu-moe M` 保留多 rank 融合图，并把被卸载层的专家字节
+从每个 rank 的显存中去掉。组合后的实测数据见[混合专家 CPU 卸载](#混合专家-cpu-卸载--n-cpu-moe)。Qwen 3.8 Flash Next 在 TP 下拒绝专家卸载。
 
 | 变量 | 作用 |
 |---|---|
@@ -1755,7 +1781,7 @@ TP 可以与 MoE CPU 卸载组合：`--tp N --n-cpu-moe M` 保留多 rank 融合
 
 ### 约束
 
-- `numHeads`、`numKVHeads` 与 `intermediateSize` 必须能被 TP 度整除。
+- 按注意力头切分的架构要求 `numHeads`、`numKVHeads` 与 `intermediateSize` 能被 TP 度整除。Qwen 3.8 Flash Next 复制注意力，改为验证 FFN/输出宽度与精确 CUDA strip-kernel 布局。
 - 量化权重的行并行切分要求 `ne0` 能被 `tp × blockSize` 整除。
 - TP 下的批处理 / 连续批处理前向目前实现于 Mistral 3；MoE 模型（Gemma 4、Qwen 3.5/3.6、GPT OSS、Nemotron-H）在 TP 下回退到按序列前向。
 - **Muse-Glimmer** 最多 `--tp 2`：它只有 2 个 KV head，而这里没有任何模型会在 `numKVHeads < tp` 时复制 KV head。TP 下 DFlash 草稿器会被拒绝挂载（CLI 打印警告并按普通解码运行；服务端拒绝启动，退出码 2），KV 块页面在 TP 下同样可用（快照会遍历每层的按 rank 缓存），并且需要 GGML CUDA/Vulkan 后端——融合的按 rank 计划需要一个 ggml-metal 不提供的设备集合通信。
@@ -2203,7 +2229,7 @@ Web UI 中每条助手消息下方的统计行也会展示命中率（例如 `18
 
 `TensorSharp.Server.Host` 暴露三种 API 风格——兼容 Ollama、兼容 OpenAI，以及 Web UI 自己的 SSE 路由——另有供 DiffusionGemma 使用的 Jev 类型化决策端点 `POST /v1/systemone`。完整文档及 curl/Python 示例见 [API_EXAMPLES_zh-cn.md](TensorSharp.Server.Host/API_EXAMPLES_zh-cn.md)。
 
-图像与视频模型使用各自的路由，而不是聊天端点。Qwen-Image-2.1 响应 `POST /api/image-generate`（文生图）与 `POST /api/image-edit`（提示词加参考图），两者都有一个用 SSE 报告去噪进度的 `/stream` 变体；没有 `/v1/images/*` 路由。视频模型使用 [音视频生成（MiniMax-H3）](#音视频生成minimax-h3) 中介绍的路由。
+在 TensorSharp.Server.Host 中，图像与视频模型使用专门的媒体路由。Qwen-Image-2.1 响应 `POST /api/image-generate`（文生图）与 `POST /api/image-edit`（提示词、参考图及可选掩码），两者都有一个用 SSE 报告去噪进度的 `/stream` 变体；没有 `/v1/images/*` 路由。视频模型使用[音视频生成（MiniMax-H3）](#音视频生成minimax-h3) 中介绍的路由。TensorAgent 自身的宿主则通过 `/api/chat` 回合管理器处理媒体请求，与文本回合共用输入框和已保存对话。
 
 **兼容 Ollama 的 API：**
 

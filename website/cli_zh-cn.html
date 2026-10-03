@@ -152,6 +152,8 @@ dotnet run --project TensorSharp.Cli -c Release --no-build -- \
   --lora config/lora/qwen-image-2.1-viggle-turbo.json \
   --prompt 'A small orange cat beside a blue ceramic vase, soft daylight, detailed photograph' \
   --width 1024 --height 1024 --diffusion-seed 42 --output turbo.png</code></pre>
+  <p><strong>局部编辑：</strong>在 <code>--image photo.png</code> 上增加 <code>--mask selection.png</code>。同尺寸的灰度蒙版用白色表示编辑、黑色表示保护；<code>--mask-mode alpha</code>、<code>--mask-invert</code>、<code>--mask-feather</code>、<code>--mask-crop</code> 与 <code>--mask-crop-padding</code> 控制选区。结果保持源图尺寸。<a href="models-image_zh-cn.html#mask-editing">完整示例与蒙版语义 →</a></p>
+
   <p><code>config/lora/</code> 中的步数蒸馏插件 —— <code>qwen-image-2.1-viggle-turbo.json</code>、<code>-pruna-8step.json</code>、<code>-pruna-5step.json</code> 与 <code>-fun-acc-4step.json</code> —— 会用它们训练时的 4–8 步配方取代默认的 40 步，因此是图像生成最主要的提速杠杆。显式的 <code>--diffusion-steps</code> / <code>--cfg</code> 仍然优先，但配方没有对应调度的步数会被拒绝。伴随文件、尺寸、草图设置与 <a href="models-image_zh-cn.html#lora">LoRA 插件</a>见<a href="models-image_zh-cn.html#imagegen">图像生成</a>。</p>
 
   <h3 id="video">视频生成</h3>
@@ -353,6 +355,7 @@ dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
       <tr><td><code>--diffusion-seed &lt;N&gt;</code></td><td>DiffusionGemma 确定性采样器种子（默认：0）。</td></tr>
       <tr><td><code>--diffusion-blocks &lt;N&gt;</code></td><td>块自回归画布数量（<code>0</code> 由 <code>--max-tokens</code> 推导）。</td></tr>
       <tr><td><code>--image &lt;path&gt;</code> / <code>--prompt &lt;text&gt;</code> / <code>--output &lt;path&gt;</code></td><td>Qwen-Image-2.1：编辑用的参考图（可重复，按命令行顺序在提示词之前标记为 <code>&lt;image1&gt;</code>、<code>&lt;image2&gt;</code>……，提示词可以用标记指代它；省略 <code>--image</code> 即为生成）、提示词与输出 PNG（默认 <code>generated.png</code>，编辑时为 <code>edited.png</code>）。复用 <code>--diffusion-steps</code>（默认 40，步数蒸馏插件则为 4–8）/ <code>--diffusion-seed</code>。</td></tr>
+      <tr><td><code>--mask &lt;path&gt;</code> · <code>--mask-mode grayscale|alpha</code> · <code>--mask-invert</code> · <code>--mask-feather &lt;px&gt;</code> · <code>--mask-crop</code> · <code>--mask-crop-padding &lt;px&gt;</code></td><td>Qwen-Image-2.1 局部编辑：与第一张参考图同尺寸的蒙版选择可编辑像素，支持反选、向内柔化与可选区域裁剪。输出保留源图尺寸与保护像素。这些是 CLI 参数；服务端接收对应的每请求字段。<a href="models-image_zh-cn.html#mask-editing">语义与范围 →</a></td></tr>
       <tr><td><code>--cfg &lt;F&gt;</code></td><td>Qwen-Image-2.1 true-CFG 引导尺度（省略则自动取 1.0，即每步一次 Transformer 预测，或取 <code>--lora</code> 插件的配方；<code>&lt;= 1</code> 关闭负向分支）。</td></tr>
       <tr><td><code>--negative-prompt &lt;text&gt;</code></td><td>Qwen-Image-2.1 负向提示词（默认为空，即无条件分支）。只有 <code>--cfg</code> 大于 1 时才会用到，否则不跑负向分支。</td></tr>
       <tr><td><code>--qwen-image-vae / --qwen-image-vl / --qwen-image-mmproj &lt;path&gt;</code></td><td>覆盖解析到的 Qwen-Image-2.1 伴随文件（专用 2.1 VAE / Qwen3-VL-8B 文本编码器 / Qwen3-VL-8B mmproj）。</td></tr>

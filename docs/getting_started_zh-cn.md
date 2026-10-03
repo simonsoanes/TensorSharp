@@ -122,6 +122,12 @@ dotnet run --project TensorSharp.Server.Host -c Release -- --help
 
 完整命令参考：**[CLI](../USAGE_zh-cn.md#控制台应用)** · **[Server](../USAGE_zh-cn.md#web-应用)** · 更多可下载模型：**[模型下载](../MODEL_DOWNLOADS_zh-cn.md)** · 想用配置文件？**[config/](../config/README.md)**。
 
+## 从同一解决方案构建 TensorAgent
+
+`dotnet build TensorSharp.slnx -c Release` 构建引擎、CLI/服务端以及 TensorAgent.Core、TensorAgent.Sharing 和 TensorAgent.Tests。在 macOS 上还会尝试构建 Mac 应用，并在 Apple Silicon 上构建 iOS 模拟器应用；在 Windows 上会尝试构建 `win-x64` 应用。应用构建需要对应的 MAUI 工作负载与原生依赖；缺失时会警告并跳过对应应用头，其他构建错误会使解决方案构建失败。Linux 仅构建共享项目，不构建 MAUI 应用头。可用 `-p:TensorSharpSkipTensorAgentApp=true` 显式排除应用。
+
+构建测试项目不会执行测试。Windows 应用已有有限的 Debug/Release 聊天、合成图像与工具验证；媒体生成和更广的设备覆盖尚未验证；当前构建/设备覆盖、模型下载、图像编辑、视频生成与应用专用脚本见 [TensorAgent 指南](../TensorAgent/README.md)。TensorAgent 以源码提供，不包含在预构建发布归档中。
+
 ## 文本与代码嵌入
 
 当前源码支持 **Snowflake Arctic Embed L v2.0** 与 **all-MiniLM-L6-v2** 的 GGUF 编码器，通过 OpenAI `/v1/embeddings` 和 Ollama `/api/embed` 提供归一化向量。以下命令在完成上面的源码构建后启动小型 MiniLM 服务：
